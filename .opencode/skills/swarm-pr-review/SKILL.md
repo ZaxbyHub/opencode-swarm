@@ -689,7 +689,7 @@ the review head SHA recorded at the top.
 Each persisted finding record must include at least:
 
 ```json
-{"finding_id":"F-001","status":"PENDING","file_line":"src/file.ts:123","evidence":"quote, command output, lane id, or reviewer rationale","next_action":"route_to_reviewer"}
+{"finding_id":"F-001","status":"PENDING","file_line":"src/file.ts:123","evidence":"quote, command output, lane id, or reviewer rationale","next_action":"route_to_reviewer","severity":"HIGH"}
 ```
 
 Minimum field contract:
@@ -697,10 +697,9 @@ Minimum field contract:
 - `finding_id`: stable ID from the candidate/reviewer/critic ledger.
 - `status`: one of `PENDING`, `CONFIRMED`, `DISPROVED`, or `PRE_EXISTING`.
 - `file_line`: exact `file:line`, or `N/A` with reason when cross-file.
-- `evidence`: compact source-backed proof (lane/reviewer/critic IDs or command
-  output references when available).
-- `next_action`: `route_to_reviewer`, `route_to_critic`, `report`,
-  `suppress_with_reason`, or `handoff_to_feedback`.
+- `evidence`: compact source-backed proof (lane/reviewer/critic IDs or command output references when available).
+- `next_action`: `route_to_reviewer`, `route_to_critic`, `report`, `suppress_with_reason`, or `handoff_to_feedback`.
+- `severity`: REQUIRED at every boundary — omitting it is a violation, not a shortcut. Vocabulary is the VERDICT dialect `INFO|LOW|MEDIUM|HIGH|CRITICAL|NONE`. At `post_explorer` it must equal the severity of the `[CANDIDATE]` row the record projects (so never `NONE`, which no candidate row can declare) — except the mechanically derived `CLEAN-REVIEW` sentinel emitted when discovery found nothing, whose severity is `NONE`; at `post_reviewer` the reviewer `final_severity`; at `post_critic` the **critic** `final_severity` for critic-routed records, otherwise the reviewer's (issue #2279).
 
 Persist after every major validation boundary (Profile A via the controller
 calls below; Profiles B/C by appending the same boundary-tagged records to the
@@ -714,8 +713,8 @@ ledger file):
    record to `CONFIRMED`, `DISPROVED`, `PRE_EXISTING`, or keep `PENDING` with a
    concrete `next_action` if more evidence is required.
 3. **Post-critic:** after Phase 8 critic challenge, call the controller with
-   `boundary: "post_critic"` and update final status,
-   severity/action notes in `evidence`, and final reporting or handoff action.
+   `boundary: "post_critic"` and update final status, the authoritative
+   `severity`, and final reporting or handoff action.
 
 **Enforced order, dispositions, and error reporting (Profile A).** Checkpoints
 are admitted only after the trigger evaluation completes, then strictly
@@ -723,7 +722,7 @@ are admitted only after the trigger evaluation completes, then strictly
 checkpoint persisted; records must match the authoritative reviewer/critic
 verdict rows, and an invalid payload is rejected in ONE call listing every
 violation as `finding_id: field expected <value>, got <value>`. Full contract
-(write order, disposition matrix, severity-omission, handoff schema):
+(write order, dispositions, severity authority table, handoff schema):
 references/findings-persistence-contract.md.
 
 Resume/reload procedure: read the latest `findings.jsonl` and reconstruct the
@@ -983,7 +982,7 @@ build a minimal correct single-lane reproduction using the same workflow mode,
 lane identity, exact head, and canonical row. Before retrying, distinguish the
 three independent input layers: the header schema, data-row values, and tool
 argument shape. A correct header does not repair an invalid severity or lane
-value, and correct row data does not repair malformed dispatch JSON. Benign shape defects (evidence pipes, marker rows, verdict-row pipes) are auto-repaired and recorded as salvage — never a retry reason alone (contract and fidelity boundaries: `references/lane-output-recoverability.md`).
+value, and correct row data does not repair malformed dispatch JSON. Benign shape defects (evidence pipes, marker rows, verdict-row pipes, a header re-emitted as a data row) are auto-repaired and recorded as salvage — never a retry reason alone; the `parse_lane_candidates` receipt discloses them as `repair_kinds`, and a `[CLEAN]` attestation discredited beside a same-lane `[CANDIDATE]` row as `clean_attestation_salvaged` + `clean_attestation_salvage_reason` (the parse SUCCEEDS and the attestation still supplies no coverage) (contract and fidelity boundaries: `references/lane-output-recoverability.md`).
 
 Classify the incident from actual user-visible harm and the first failed
 predicate, not from the number of retries or the eventual result. A successful

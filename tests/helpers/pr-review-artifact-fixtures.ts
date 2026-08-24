@@ -42,6 +42,20 @@ export async function persistPrReviewBatch(
 		transcriptIncomplete?: boolean;
 		artifactRole?: string;
 		subagentSessionId?: string;
+		/** Severity the generated `[CANDIDATE]` rows declare. Default HIGH. */
+		candidateSeverity?: 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+		/**
+		 * Emit a per-lane `[CLEAN]` attestation instead of a `[CANDIDATE]` row, so
+		 * the lane settles with zero findings.
+		 */
+		cleanPerLane?: boolean;
+		/**
+		 * Override the generated candidate_id of lane 0's row. `candidate_id` is
+		 * unconstrained free text, so a lane can name a real finding after the
+		 * synthetic `CLEAN-REVIEW` sentinel; this lets a test prove the gate still
+		 * compares such a record against ITS OWN row (issue #2320).
+		 */
+		firstCandidateId?: string;
 	} = {},
 ): Promise<void> {
 	for (const [index, lane] of lanes.entries()) {
@@ -71,6 +85,9 @@ export async function persistPrReviewBatch(
 		});
 		const text =
 			options.textOverride ??
+			(options.cleanPerLane
+				? `[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence\n[CLEAN] | ${lane.workflowLane} | exact reviewed diff | no actionable finding survived triage`
+				: undefined) ??
 			(options.empty
 				? ''
 				: mode === 'swarm-pr-review:reviewer'
@@ -79,7 +96,7 @@ export async function persistPrReviewBatch(
 						? '[CRITIC] | C-001 | UPHELD | HIGH | reason | no change'
 						: mode === 'swarm-pr-feedback:verification'
 							? `[FEEDBACK-VERIFIED] | ${lane.workflowLane} | CONFIRMED | evidence`
-							: `${mode === 'swarm-pr-review:micro' ? MICRO_CANDIDATE_HEADER : '[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence'}\nC-${index} | ${lane.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH`);
+							: `${mode === 'swarm-pr-review:micro' ? MICRO_CANDIDATE_HEADER : '[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence'}\n${index === 0 && options.firstCandidateId ? options.firstCandidateId : `C-${index}`} | ${lane.workflowLane} | ${options.candidateSeverity ?? 'HIGH'} | correctness | file.ts:1 | claim | evidence | impact | HIGH`);
 		const stored = storeLaneOutput(directory, {
 			batchId,
 			laneId: lane.laneId,
@@ -120,7 +137,19 @@ export async function establishPrReviewPrerequisites(
 	runId: string = 'test-run',
 	sessionID: string = PR_ARTIFACT_SESSION_ID,
 	headSha: string = PR_ARTIFACT_HEAD_SHA,
-	options: { skipTriggerEvaluation?: boolean } = {},
+	options: {
+		skipTriggerEvaluation?: boolean;
+		/** Severity the base lanes' `[CANDIDATE]` rows declare. Default HIGH. */
+		candidateSeverity?: 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+		/** Override lane 0's generated candidate_id (sentinel-spoofing tests). */
+		firstCandidateId?: string;
+		/**
+		 * Base lanes emit a per-lane `[CLEAN]` attestation instead of a candidate
+		 * row, so discovery finds NOTHING and the inventory collapses to the
+		 * mechanically derived `CLEAN-REVIEW` sentinel.
+		 */
+		zeroCandidates?: boolean;
+	} = {},
 ): Promise<void> {
 	await activatePrWorkflow(directory, sessionID, 'PR_REVIEW', {
 		prHeadSha: headSha,
@@ -139,6 +168,11 @@ export async function establishPrReviewPrerequisites(
 		'base-all',
 		'swarm-pr-review:base',
 		baseLanes,
+		{
+			candidateSeverity: options.candidateSeverity,
+			cleanPerLane: options.zeroCandidates,
+			firstCandidateId: options.firstCandidateId,
+		},
 	);
 	for (const [
 		index,
@@ -268,7 +302,7 @@ export function artifactRecord(
 	id: string,
 	status: ArtifactRecord['status'],
 	nextAction: ArtifactRecord['next_action'],
-	severity?: ArtifactRecord['severity'],
+	severity: NonNullable<ArtifactRecord['severity']>,
 ): ArtifactRecord {
 	return {
 		finding_id: id,
@@ -276,7 +310,21 @@ export function artifactRecord(
 		file_line: 'src/index.ts:1',
 		evidence: 'validator-errors fixture evidence',
 		next_action: nextAction,
-		...(severity ? { severity } : {}),
+		severity,
+	};
+}
+
+export function artifactRecordWithoutSeverity(
+	id: string,
+	status: ArtifactRecord['status'],
+	nextAction: ArtifactRecord['next_action'],
+): ArtifactRecord {
+	return {
+		finding_id: id,
+		status,
+		file_line: 'src/index.ts:1',
+		evidence: 'validator-errors fixture evidence',
+		next_action: nextAction,
 	};
 }
 
