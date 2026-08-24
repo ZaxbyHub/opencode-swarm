@@ -569,6 +569,28 @@ function stripLeadingAnnotations(text: string): string {
 	for (;;) {
 		while (i < text.length && /\s/.test(text[i])) i++;
 		const ch = text[i];
+		// Leading COMMENTS are skipped alongside annotations. A doc block sitting
+		// between an annotation and the modifier is ordinary source, and because
+		// the header window is bounded, a comment longer than that bound would
+		// otherwise consume the whole budget and hide the modifier — reporting a
+		// `private class` as exported public API. Closeout review found this one
+		// construct over from the annotation-only skip, which had already been
+		// fixed once for exactly the same reason.
+		if (ch === '/' && text[i + 1] === '*') {
+			const end = text.indexOf('*/', i + 2);
+			// Unterminated: the comment swallows the remainder, so no live
+			// declaration follows. Fail closed instead of returning the comment
+			// body, which the bounded window would then mistake for a header.
+			if (end === -1) return '';
+			i = end + 2;
+			continue;
+		}
+		if (ch === '/' && text[i + 1] === '/') {
+			const end = text.indexOf('\n', i + 2);
+			if (end === -1) return '';
+			i = end + 1;
+			continue;
+		}
 		if (ch === '@') {
 			let j = i + 1;
 			// Name, allowing dots and a Kotlin use-site target (`@field:Inject`).

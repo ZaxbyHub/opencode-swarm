@@ -296,3 +296,70 @@ describe('Stage B findings: annotation bound and unwired invariant', () => {
 		);
 	});
 });
+
+describe('F-06c: the edge-target invariant holds on the incremental path too', () => {
+	// `reconcileEdgeTargetKinds` originally ran only on full builds. An
+	// incremental update rescans a file and re-adds its edges via
+	// `scanFileAsync`, which resolves imports without the walker's skip rules —
+	// so it silently re-introduced the dangling `'node'` edges a full build had
+	// just reconciled away. Dies if the call is removed from `finalizeAndSave`.
+	test('an incremental update does not re-introduce a dangling node edge', async () => {
+		await withWorkspace(
+			{
+				'src/node_modules/com/example/Foo.java':
+					'package node_modules.com.example;\n\npublic class Foo {}\n',
+				'src/app/File0.java':
+					'package app;\n\nimport node_modules.com.example.Foo;\n\npublic class File0 {}\n',
+			},
+			async (root) => {
+				const { updateGraphForFiles } = await import(
+					'../../../src/tools/repo-graph/incremental'
+				);
+				await buildWorkspaceGraphAsync(root);
+				const changed = path.join(root, 'src', 'app', 'File0.java');
+				fs.writeFileSync(
+					changed,
+					'package app;\n\nimport node_modules.com.example.Foo;\n\npublic class File0 { void added() {} }\n',
+				);
+				const graph = await updateGraphForFiles(root, [changed]);
+				const indexed = new Set(
+					Object.values(graph.nodes).map((n) =>
+						n.filePath.replace(/\\/g, '/').toLowerCase(),
+					),
+				);
+				for (const edge of graph.edges) {
+					if (edge.targetKind !== 'node') continue;
+					expect(
+						indexed.has(edge.target.replace(/\\/g, '/').toLowerCase()),
+					).toBe(true);
+				}
+			},
+		);
+	});
+});
+
+describe('closeout: a long doc comment cannot hide a modifier either', () => {
+	// The annotation-only version of the leading skip was already fixed once.
+	// Closeout review found the same hole one construct over: a block comment
+	// between the annotation and the modifier is not an annotation, so it stayed
+	// in the bounded window and consumed the whole budget — reporting a
+	// `private class` as exported public API again.
+	test('a 5000-char block comment before the modifier keeps it private', async () => {
+		const facts = await extractFileSymbols(
+			'java',
+			`@Ann\n/* ${'x'.repeat(5000)} */\nprivate class Hidden { void m() {} }\n`,
+		);
+		const def = facts?.defs.find((d) => d.name === 'Hidden');
+		expect(def?.exported).toBe(false);
+		expect(def?.visibilityInfo?.visibility).toBe('private');
+	});
+
+	test('a 5000-char line comment before the modifier keeps it private', async () => {
+		const facts = await extractFileSymbols(
+			'java',
+			`@Ann\n// ${'x'.repeat(5000)}\nprivate class Hidden { void m() {} }\n`,
+		);
+		const def = facts?.defs.find((d) => d.name === 'Hidden');
+		expect(def?.exported).toBe(false);
+	});
+});
