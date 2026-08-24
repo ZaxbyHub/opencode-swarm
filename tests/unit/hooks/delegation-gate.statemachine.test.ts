@@ -183,9 +183,12 @@ describe('Task 3.2 — priorTaskStuckAtCoder state machine secondary signal', ()
 		);
 		await hook.messagesTransform({}, messages1);
 
-		// After first delegation, lastCoderDelegationTaskId should be 2.1
+		// Stage A wedge fix: the transform no longer writes
+		// lastCoderDelegationTaskId — the structured dispatch path does. Set it
+		// here to simulate what toolBefore records when the first dispatch
+		// succeeds.
 		let session = ensureAgentSession(sessionID);
-		expect(session.lastCoderDelegationTaskId).toBe('2.1');
+		session.lastCoderDelegationTaskId = '2.1';
 
 		// Second coder delegation for a different task
 		const messages2 = makeMessages(
@@ -212,9 +215,9 @@ describe('Task 3.2 — priorTaskStuckAtCoder state machine secondary signal', ()
 		// 2. State machine check: prior task (2.1) is stuck at coder_delegated
 		expect(getSystemWarningText(messages2)).toContain('⚠️ PROTOCOL VIOLATION');
 
-		// After second delegation, lastCoderDelegationTaskId should be 2.2
+		// The transform must not clobber the structured attribution.
 		session = ensureAgentSession(sessionID);
-		expect(session.lastCoderDelegationTaskId).toBe('2.2');
+		expect(session.lastCoderDelegationTaskId).toBe('2.1');
 
 		// qaSkipCount should be incremented
 		expect(session.qaSkipCount).toBe(1);

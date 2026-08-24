@@ -4,11 +4,26 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { handleRecoverCommand } from '../../../src/commands/recover';
 import type { PluginConfig } from '../../../src/config';
+import { saveEvidence } from '../../../src/evidence/manager';
+import {
+	getTaskWorkflowSnapshot,
+	readTaskEvidence,
+	transitionTaskWorkflowEvidence,
+} from '../../../src/gate-evidence';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
-import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import {
+	ensureAgentSession,
+	resetSwarmState,
+	swarmState,
+} from '../../../src/state';
 import { _internals as settlementInternals } from '../../../src/workflow/coder-settlement';
 import { writeApprovedPlan } from '../../helpers/approved-plan';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+import { withFrozenClockAsync } from '../../helpers/test-clock';
+
+// Deterministic fixture instant (explicit-arg Date constructor, not a raw
+// clock read — see docs/testing/test-stability.md, issue #1782).
+const FIXED_NOW_ISO = new Date('2026-01-01T00:00:00.000Z').toISOString();
 
 const config = {
 	max_iterations: 5,
@@ -214,5 +229,109 @@ describe('issue #2268 — /swarm recover command', () => {
 		const out = await handleRecoverCommand(directory, ['1.1', '--force']);
 		expect(out).toContain('Task 1.1: settlement recovered');
 		expect(out).not.toContain('Task 2.2');
+	});
+
+	test('a real coder dispatch through toolBefore sets lastCoderDelegationTaskId via the structured writer (bot review F06)', async () => {
+		// Confirms the actual mechanism the whole Stage A attribution fix
+		// depends on: prepareCoderScope's success path in toolBefore is the
+		// sole writer of lastCoderDelegationTaskId. Prior tests only proved
+		// the OLD prompt-regex writer was removed (hand-setting the field or
+		// asserting it stays null); none drove a real dispatch and asserted
+		// the NEW writer actually fires.
+		const session = swarmState.agentSessions.get('parent');
+		expect(session?.lastCoderDelegationTaskId ?? null).toBeNull();
+
+		await beginRealDispatch('cmd-structured-writer');
+
+		const updated = swarmState.agentSessions.get('parent');
+		expect(updated?.lastCoderDelegationTaskId).toBe('1.1');
+	});
+
+	describe('Stage A wedge repair runs even with no listable settlement WAL (F-003)', () => {
+		async function writeBothGreenPreCheck(): Promise<void> {
+			await saveEvidence(directory, 'secretscan', {
+				task_id: 'secretscan',
+				type: 'secretscan',
+				timestamp: FIXED_NOW_ISO,
+				agent: 'pre_check_batch',
+				verdict: 'pass',
+				summary: 'no secrets found',
+				findings_count: 0,
+				files_scanned: 10,
+				skipped_files: 0,
+				incomplete_files: 0,
+				incomplete_paths: [],
+			});
+			await saveEvidence(directory, 'sast_scan', {
+				task_id: 'sast_scan',
+				type: 'sast',
+				timestamp: FIXED_NOW_ISO,
+				agent: 'pre_check_batch',
+				verdict: 'pass',
+				summary: 'no findings',
+				findings: [],
+				engine: 'tier_a',
+				files_scanned: 5,
+				findings_count: 0,
+				findings_by_severity: { critical: 0, high: 0, medium: 0, low: 0 },
+			});
+		}
+
+		test('a task with no settlement WAL at all is still repaired (previously reported "no settlement WALs found" and never attempted repair)', async () => {
+			// Frozen so the transition's real-clock updatedAt stamp and the
+			// evidence timestamps above land on the same instant (recency
+			// requires evidence >= the task's last-transition time).
+			await withFrozenClockAsync(
+				async () => {
+					await transitionTaskWorkflowEvidence(directory, '9.9', {
+						type: 'accepted_mutation',
+						agentType: 'coder',
+						expectedGeneration: 0,
+						transitionId: 'coder:setup-9.9',
+					});
+					await writeBothGreenPreCheck();
+				},
+				{ isoNow: FIXED_NOW_ISO },
+			);
+
+			const out = await handleRecoverCommand(directory, ['9.9']);
+
+			expect(out).toContain(
+				'No settlement WAL for task 9.9 (no settlement WALs found',
+			);
+			expect(out).toContain('## Wedged Stage A Repair');
+			expect(out).toContain('Task 9.9: Stage A repaired');
+			expect(out).toContain('Repaired 1 wedged task(s)');
+			const workflow = getTaskWorkflowSnapshot(
+				await readTaskEvidence(directory, '9.9'),
+			);
+			expect(workflow.state).toBe('pre_check_passed');
+		});
+
+		test('a task with a foreign-only settlement WAL (none matching its id) is still repaired', async () => {
+			await beginRealDispatch('cmd-foreign-only');
+			await withFrozenClockAsync(
+				async () => {
+					await transitionTaskWorkflowEvidence(directory, '9.8', {
+						type: 'accepted_mutation',
+						agentType: 'coder',
+						expectedGeneration: 0,
+						transitionId: 'coder:setup-9.8',
+					});
+					await writeBothGreenPreCheck();
+				},
+				{ isoNow: FIXED_NOW_ISO },
+			);
+
+			const out = await handleRecoverCommand(directory, ['9.8']);
+
+			expect(out).toContain('No settlement WAL for task 9.8');
+			expect(out).toContain('## Wedged Stage A Repair');
+			expect(out).toContain('Task 9.8: Stage A repaired');
+			const workflow = getTaskWorkflowSnapshot(
+				await readTaskEvidence(directory, '9.8'),
+			);
+			expect(workflow.state).toBe('pre_check_passed');
+		});
 	});
 });

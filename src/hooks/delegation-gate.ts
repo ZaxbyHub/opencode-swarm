@@ -3844,7 +3844,9 @@ export function createDelegationGateHook(
 				}
 				if (taskId === resolvedTaskId) {
 					throw new Error(
-						`TASK_WORKFLOW_STAGE_A_REQUIRED: cannot dispatch ${targetAgent} for task ${taskId} from ${workflow.state}`,
+						`TASK_WORKFLOW_STAGE_A_REQUIRED: cannot dispatch ${targetAgent} for task ${taskId} from ${workflow.state}. ` +
+							`Stage B (${targetAgent}) requires the task to be at pre_check_passed (or later) — a state written only by the stage_a_passed transition, which is emitted when pre_check_batch completes with the task correctly attributed. ` +
+							`Remediation: run pre_check_batch on the task's changed files first. If pre_check_batch passes but the task remains coder_delegated (typical after /swarm reset-session), run /swarm recover ${taskId} to repair Stage A attribution, then re-dispatch.`,
 					);
 				}
 			}
@@ -3942,6 +3944,17 @@ export function createDelegationGateHook(
 			throw error;
 		}
 		const { plan, taskId: incomingCoderTaskId } = preparedScope;
+		if (incomingCoderTaskId) {
+			// Structured dispatch-context attribution (Stage A wedge fix): the
+			// resolved task id comes from args.task_id / the plan-validated scope
+			// resolution, not prompt-text regex, so it survives odd whitespace,
+			// agent prefixes, and missing TASK: lines. This is what
+			// toolAfter's coder-completion tracking (guardrails/index.ts) reads to
+			// set currentTaskId, which gates every Stage A evidence write. The
+			// messages-transform regex writer for this field was removed — this is
+			// now the sole writer.
+			session.lastCoderDelegationTaskId = incomingCoderTaskId;
+		}
 		const coderEvidence = incomingCoderTaskId
 			? await readTaskEvidence(directory, incomingCoderTaskId)
 			: null;
@@ -5742,16 +5755,24 @@ export function createDelegationGateHook(
 			const coderDelegationPattern = /(?:^|\n)\s*(?:\w+_)?coder\s*\n\s*TASK:/i;
 			const isCoderDelegation = coderDelegationPattern.test(text);
 
-			// Capture the prior coder task ID BEFORE Step 3 updates lastCoderDelegationTaskId
+			// Capture the prior coder task ID BEFORE the violation check below.
+			// lastCoderDelegationTaskId is written ONLY by the structured
+			// dispatch path (prepareCoderScope success in toolBefore) — the old
+			// prompt-regex writer here was removed (Stage A wedge fix): regex
+			// extraction of `N.M` from free text could disagree with the
+			// plan-validated scope binding and clobber the structured value on
+			// the next transcript transform.
 			const priorCoderTaskId = sessionID
 				? (swarmState.agentSessions.get(sessionID)?.lastCoderDelegationTaskId ??
 					null)
 				: null;
 
-			// Step 3: If this is a coder delegation with a task ID, track it
+			// Step 3: If this is a coder delegation with a task ID, extract FILE:
+			// directive values → declaredCoderScope. The task id itself is NOT
+			// tracked here anymore — see the structured writer in the coder
+			// dispatch path.
 			if (sessionID && isCoderDelegation && currentTaskId) {
 				const session = ensureAgentSession(sessionID);
-				session.lastCoderDelegationTaskId = currentTaskId;
 
 				// v6.21 Task 5.3: Extract FILE: directive values → declaredCoderScope
 				const directives = extractTaskFileDirectives(

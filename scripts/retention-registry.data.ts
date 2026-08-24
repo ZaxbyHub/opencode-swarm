@@ -178,12 +178,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/config/lane-permissions.ts',
 			'src/workflow/coder-settlement.ts',
 			'src/workflow/task-repair.ts',
+			'src/workflow/stage-a-repair.ts',
 			'src/tools/checkpoint.ts',
 			'src/services/spec-drift-recovery.ts',
 			'src/tools/prepare-pr-workflow-checkout.ts',
 		],
 		writerCitations: [
-			'~26 writer symbols — see docs appendix; representative: curator.ts:1767, full-auto-intercept.ts:304, delegation-gate.ts:1924/2365/4326, phase-complete.ts:1728, role-filter.ts:150, scope-persistence.ts:2079, rollback.ts:103/364, coder-settlement.ts:138, task-repair.ts:238, checkpoint.ts:206, lane-permissions.ts:901',
+			'~26 writer symbols — see docs appendix; representative: curator.ts:1767, full-auto-intercept.ts:304, delegation-gate.ts:1924/2365/4326, phase-complete.ts:1728, role-filter.ts:150, scope-persistence.ts:2079, rollback.ts:103/364, coder-settlement.ts:138, task-repair.ts:238, checkpoint.ts:206, lane-permissions.ts:901, stage-a-repair.ts:44 appendStageARepairEvent — best-effort, one EBUSY/EPERM retry, same appendSettlementEvent contract as coder-settlement.ts',
 		],
 		readerCitations: [
 			'src/hooks/curator.ts:1534 — FULL-FILE async (readSwarmFileAsync)',

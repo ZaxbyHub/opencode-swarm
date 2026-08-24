@@ -341,7 +341,7 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 	});
 
 	describe('interaction with existing functionality', () => {
-		it('should still track lastCoderDelegationTaskId when extracting declaredCoderScope', async () => {
+		it('should still extract declaredCoderScope without writing lastCoderDelegationTaskId', async () => {
 			const config = makeConfig();
 			const hook = createDelegationGateHook(config, process.cwd());
 
@@ -352,7 +352,9 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 			await hook.messagesTransform({}, messages);
 
 			const session = ensureAgentSession('test-session');
-			expect(session.lastCoderDelegationTaskId).toBe('Task Alpha');
+			// Stage A wedge fix: scope extraction stays, task-id attribution
+			// moves exclusively to the structured dispatch path.
+			expect(session.lastCoderDelegationTaskId).toBeNull();
 			expect(session.declaredCoderScope).toEqual(['src/alpha.ts']);
 		});
 
@@ -445,7 +447,9 @@ describe('delegation-gate: declaredCoderScope extraction (Task 5.3)', () => {
 
 			const session = ensureAgentSession('test-session');
 			expect(session.declaredCoderScope).toEqual(['src/nested.ts']);
-			expect(session.lastCoderDelegationTaskId).toBe('1.2.3');
+			// Stage A wedge fix: the transform no longer writes
+			// lastCoderDelegationTaskId — attribution is structured-only.
+			expect(session.lastCoderDelegationTaskId).toBeNull();
 		});
 	});
 });
