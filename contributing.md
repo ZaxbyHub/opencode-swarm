@@ -235,6 +235,7 @@ All of these must be green. They run automatically on every PR.
 | `smoke` (Ubuntu, macOS, Windows) | Package builds successfully and smoke tests pass on all platforms |
 | `pr-standards` | PR title is a valid conventional commit |
 | `check-duplicates` | PR title does not match an already-open PR |
+| `quality` → pending release fragment | Every user-visible PR (`src/`, `package.json`, workflows, shipped skills) adds a `docs/releases/pending/<slug>.md` fragment — release-please aggregates fragments into the release notes, so a missing fragment means the PR ships with no notes. Escape hatch: `FRAGMENT_CHECK_ENFORCE=0` (soft-warn). Release-please branches are exempt |
 
 **Do not ask for a merge if any check is red.** Fix the issue first.
 
