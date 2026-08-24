@@ -16,6 +16,8 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { Plan } from '../../../src/config/plan-schema';
+import { savePlan } from '../../../src/plan/manager';
 
 // ── Import under test ────────────────────────────────────────────────
 const { handleCloseCommand, _internals: closeInternals } = await import(
@@ -43,22 +45,33 @@ function swarmDir(): string {
 	return path.join(testDir, '.swarm');
 }
 
-function writePlan(overrides: Record<string, unknown> = {}): void {
-	const plan = {
+async function writePlan(overrides: Partial<Plan> = {}): Promise<void> {
+	const plan: Plan = {
 		title: 'Post-Mortem Integration Test',
 		schema_version: '1.0.0',
+		swarm: 'test-swarm',
 		current_phase: 1,
 		phases: [
 			{
 				id: 1,
 				name: 'Phase 1',
 				status: 'complete',
-				tasks: [{ id: '1.1', status: 'complete', description: 'Task A' }],
+				tasks: [
+					{
+						id: '1.1',
+						phase: 1,
+						status: 'completed',
+						size: 'small',
+						description: 'Task A',
+						depends: [],
+						files_touched: ['src/task-a.ts'],
+					},
+				],
 			},
 		],
 		...overrides,
 	};
-	writeFileSync(path.join(swarmDir(), 'plan.json'), JSON.stringify(plan));
+	await savePlan(testDir, plan);
 }
 
 function makeConfig(
@@ -120,12 +133,13 @@ function makeConfig(
 // ── Test suites ──────────────────────────────────────────────────────
 
 describe('handleCloseCommand — post-mortem integration (FR-001)', () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		testDir = mkdtempSync(
 			path.join(os.tmpdir(), 'close-postmortem-integ-test-'),
 		);
+		mkdirSync(path.join(testDir, '.git'));
 		mkdirSync(swarmDir(), { recursive: true });
-		writePlan();
+		await writePlan();
 
 		closeInternals.getGitRepositoryStatus = () => ({
 			isRepo: false,

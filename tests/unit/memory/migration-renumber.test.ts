@@ -69,11 +69,11 @@ function dbPathFor(root: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Test A — all renumbered migrations (v1, v3-v6, v9, v10) apply correctly;
+// Test A — all migrations through v11 apply correctly;
 // v2 is skipped (LEGACY_JSONL_MIGRATION_VERSION — see jsonl-migration.ts)
 // ---------------------------------------------------------------------------
 describe('FB-001 — migration renumber coverage', () => {
-	test('migrations v1-v10 are sequential with no version skipping except v2', async () => {
+	test('migrations v1-v13 are sequential with no version skipping except v2', async () => {
 		const root = await providerRoot('v1-v10-sequential');
 		const provider = track(
 			new SQLiteMemoryProvider(root, { enabled: true, provider: 'sqlite' }),
@@ -88,7 +88,7 @@ describe('FB-001 — migration renumber coverage', () => {
 				'SELECT MAX(version) as max_version FROM schema_migrations',
 			)
 			.get();
-		expect(row?.max_version).toBe(10);
+		expect(row?.max_version).toBe(13);
 
 		// Verify each expected version is recorded.
 		// v2 is inserted by LEGACY_JSONL_MIGRATION_VERSION (jsonl-migration.ts:9)
@@ -99,7 +99,29 @@ describe('FB-001 — migration renumber coverage', () => {
 			)
 			.all();
 		expect(applied.map((r) => r.version)).toEqual([
-			1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+			1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+		]);
+	});
+
+	test('v11 creates the canonical generation-bound memory_outcomes table', async () => {
+		const root = await providerRoot('v11-outcome-table');
+		const provider = track(
+			new SQLiteMemoryProvider(root, { enabled: true, provider: 'sqlite' }),
+		);
+		await provider.initialize();
+		provider.close();
+
+		const db = trackHandle(new Database(dbPathFor(root), { readonly: true }));
+		const columns = db
+			.query<{ name: string }, []>('PRAGMA table_info(memory_outcomes)')
+			.all()
+			.map((column) => column.name);
+		expect(columns).toEqual([
+			'id',
+			'memory_id',
+			'generation',
+			'at',
+			'event_json',
 		]);
 	});
 
@@ -246,12 +268,12 @@ describe('FB-001 — migration renumber coverage', () => {
 			expect(row.cnt).toBe(1);
 		}
 
-		// Max version is still 10
+		// Max version is still 11
 		const maxRow = db
 			.query<{ max_version: number | null }, []>(
 				'SELECT MAX(version) as max_version FROM schema_migrations',
 			)
 			.get();
-		expect(maxRow?.max_version).toBe(10);
+		expect(maxRow?.max_version).toBe(13);
 	});
 });

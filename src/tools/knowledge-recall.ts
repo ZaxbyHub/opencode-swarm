@@ -1,10 +1,14 @@
 import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
-import { KnowledgeConfigSchema } from '../config/schema.js';
+import {
+	KnowledgeConfigSchema,
+	stripKnownSwarmPrefix,
+} from '../config/schema.js';
 import { recordKnowledgeEvent } from '../hooks/knowledge-events.js';
 import {
 	commitDisplayedMembership,
 	commitEmptyRetrieval,
+	type ReceiptRepairReevaluationProof,
 } from '../hooks/knowledge-receipt-ledger.js';
 import { isActiveStatus } from '../hooks/knowledge-types.js';
 import { searchKnowledge } from '../hooks/search-knowledge.js';
@@ -30,6 +34,7 @@ interface KnowledgeRecallResult {
 
 export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
+		allowWorkingDirectoryOverride: true,
 		description:
 			'Performs semantic natural-language search across the knowledge base for relevant past decisions, patterns, and lessons learned. Returns ranked results via the unified hybrid retrieval service and a trace_id for knowledge_receipt. This is the tool to use when the user has a QUESTION about what the knowledge base contains. For structured filter-based retrieval (by category, status, or score), use `knowledge_query` instead.',
 		args: {
@@ -49,6 +54,17 @@ export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 				.boolean()
 				.optional()
 				.describe('Include path/version/health debug metadata in the response'),
+			repair_re_evaluation: z
+				.object({
+					repair_id: z.string().uuid(),
+					phase: z.string().min(1).max(256),
+					task_id: z.string().min(1).max(256).optional(),
+					scope_complete: z.literal(true),
+				})
+				.optional()
+				.describe(
+					'Architect-only explicit completion of a repaired receipt scope. The query must comprehensively re-evaluate the exact affected phase/session scope.',
+				),
 		},
 		execute: async (args: unknown, directory, ctx): Promise<string> => {
 			// Safe args extraction
@@ -56,6 +72,7 @@ export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 			let topNInput: unknown;
 			let tierInput: unknown;
 			let debugInput: unknown;
+			let repairInput: unknown;
 
 			try {
 				if (args && typeof args === 'object') {
@@ -64,11 +81,61 @@ export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 					topNInput = obj.top_n;
 					tierInput = obj.tier;
 					debugInput = obj.debug;
+					repairInput = obj.repair_re_evaluation;
 				}
 			} catch {
 				// Malicious getter threw
 			}
 			const wantDebug = debugInput === true;
+			let repairReevaluation:
+				| (ReceiptRepairReevaluationProof & {
+						phase: string;
+						task_id?: string;
+				  })
+				| undefined;
+			if (repairInput !== undefined) {
+				if (
+					stripKnownSwarmPrefix(ctx?.agent ?? '') !== 'architect' ||
+					typeof repairInput !== 'object' ||
+					repairInput === null
+				) {
+					return JSON.stringify({
+						results: [],
+						total: 0,
+						unverifiable: true,
+						code: 'RECEIPT_REEVALUATION_ARCHITECT_ONLY',
+						error:
+							'Only the architect may complete an explicit receipt repair re-evaluation.',
+					});
+				}
+				const candidate = repairInput as Record<string, unknown>;
+				if (
+					typeof candidate.repair_id !== 'string' ||
+					!candidate.repair_id ||
+					typeof candidate.phase !== 'string' ||
+					!candidate.phase ||
+					candidate.scope_complete !== true ||
+					(candidate.task_id !== undefined &&
+						typeof candidate.task_id !== 'string')
+				) {
+					return JSON.stringify({
+						results: [],
+						total: 0,
+						unverifiable: true,
+						code: 'RECEIPT_REEVALUATION_PROOF_INVALID',
+						error:
+							'Explicit re-evaluation requires repair_id, exact phase, and scope_complete=true.',
+					});
+				}
+				repairReevaluation = {
+					repair_id: candidate.repair_id,
+					phase: candidate.phase,
+					scope_complete: true,
+					...(typeof candidate.task_id === 'string'
+						? { task_id: candidate.task_id }
+						: {}),
+				};
+			}
 
 			// Validate query
 			if (typeof queryInput !== 'string' || queryInput.length < 3) {
@@ -129,6 +196,9 @@ export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 					exposure_kind: 'manual_recall',
 					agent: ctx?.agent ?? 'unknown',
 					grace_days: knowledgeConfig.receipt_close_grace_days,
+					phase: repairReevaluation?.phase,
+					task_id: repairReevaluation?.task_id,
+					repair_re_evaluation: repairReevaluation,
 					entries: results.map((entry, index) => ({
 						entry_id: entry.id,
 						critical:
@@ -158,6 +228,9 @@ export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 					session_id: sessionId,
 					agent: ctx?.agent ?? 'unknown',
 					grace_days: knowledgeConfig.receipt_close_grace_days,
+					phase: repairReevaluation?.phase,
+					task_id: repairReevaluation?.task_id,
+					repair_re_evaluation: repairReevaluation,
 				});
 				if (!empty.ok) {
 					return JSON.stringify({

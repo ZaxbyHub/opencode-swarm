@@ -1224,6 +1224,14 @@ export async function savePlan(
 			expectedSeq: number;
 			expectedLedgerHash: string;
 		};
+		/**
+		 * Optional synchronous CAS guard for a caller whose authoritative write is
+		 * conditioned on external evidence. It is invoked immediately before every
+		 * ledger/projection mutation and must throw when the captured identity is
+		 * stale. Keep it synchronous so no writer can interleave in this process
+		 * between the final check and the atomic filesystem operation.
+		 */
+		preCommitCheck?: () => void;
 	},
 ): Promise<void> {
 	// Fail-fast: reject blank or whitespace-only directory inputs before any I/O
@@ -1332,6 +1340,7 @@ export async function savePlan(
 	const planHashForInit = computePlanHash(validated);
 	if (!(await ledgerExists(directory))) {
 		try {
+			options?.preCommitCheck?.();
 			await initLedger(directory, planId, planHashForInit, validated);
 		} catch (initErr) {
 			// Concurrent savePlan race: three parallel callers can pass the
@@ -1375,6 +1384,7 @@ export async function savePlan(
 			// This ensures initLedger sees no existing ledger and can create a fresh one.
 			if (existsSync(oldLedgerPath)) {
 				try {
+					options?.preCommitCheck?.();
 					renameSync(oldLedgerPath, oldLedgerBackupPath);
 					backupExists = true;
 				} catch (renameErr) {
@@ -1391,6 +1401,7 @@ export async function savePlan(
 
 			if (backupExists) {
 				try {
+					options?.preCommitCheck?.();
 					await initLedger(directory, planId, planHashForInit, validated);
 					initSucceeded = true;
 				} catch (initErr) {
@@ -1626,6 +1637,7 @@ export async function savePlan(
 			// crash consistency. (#853 post-merge review.)
 			try {
 				for (const missing of missingTasks) {
+					options?.preCommitCheck?.();
 					const eventInput: LedgerEventInput = {
 						plan_id: derivePlanId(validated),
 						event_type: 'task_removed',
@@ -1673,6 +1685,7 @@ export async function savePlan(
 				for (const task of phase.tasks) {
 					const oldTask = oldTaskMap.get(task.id);
 					if (oldTask && oldTask.status !== task.status) {
+						options?.preCommitCheck?.();
 						const eventInput: LedgerEventInput = {
 							plan_id: derivePlanId(validated),
 							event_type: 'task_status_changed',
@@ -1732,6 +1745,7 @@ export async function savePlan(
 		computePlanHash(replayedBeforeProjection) !==
 			computePlanHash(projectionCandidate)
 	) {
+		options?.preCommitCheck?.();
 		await takeSnapshotEvent(directory, projectionCandidate, {
 			planHashAfter: computePlanHash(projectionCandidate),
 			source: 'savePlan_structural_projection',
@@ -1761,7 +1775,11 @@ export async function savePlan(
 	// After the ledger event loop, check if we should take a snapshot
 	const SNAPSHOT_INTERVAL = 50;
 	const latestSeq = await getLatestLedgerSeq(directory);
-	if (latestSeq > 0 && latestSeq % SNAPSHOT_INTERVAL === 0) {
+	if (
+		!options?.preCommitCheck &&
+		latestSeq > 0 &&
+		latestSeq % SNAPSHOT_INTERVAL === 0
+	) {
 		await takeSnapshotWithRetry(directory, projectedPlan, {
 			planHashAfter: computePlanHash(projectedPlan),
 			source: 'savePlan_manager',
@@ -1778,6 +1796,7 @@ export async function savePlan(
 	// Write to temp and atomically rename
 	try {
 		await bunWrite(tempPath, JSON.stringify(projectedPlan, null, 2));
+		options?.preCommitCheck?.();
 		renameSync(tempPath, planPath);
 	} finally {
 		try {
@@ -2253,7 +2272,11 @@ export async function updateTaskStatus(
 	directory: string,
 	taskId: string,
 	status: TaskStatus,
-	options?: { force?: boolean; planLockAlreadyHeld?: boolean },
+	options?: {
+		force?: boolean;
+		planLockAlreadyHeld?: boolean;
+		terminalReconciliation?: boolean;
+	},
 ): Promise<Plan> {
 	assertProjectRoot(directory);
 	const derivePhaseStatusFromTasks = (tasks: Task[]): Phase['status'] => {
@@ -2295,7 +2318,12 @@ export async function updateTaskStatus(
 				currentTask.status !== 'pending' &&
 				currentTask.status !== 'in_progress';
 			const auditedRepair = status === 'in_progress' && options?.force === true;
-			if (settled && status !== currentTask.status && !auditedRepair) {
+			if (
+				settled &&
+				status !== currentTask.status &&
+				!auditedRepair &&
+				options?.terminalReconciliation !== true
+			) {
 				warn(
 					`[updateTaskStatus] refusing backward transition of settled task ${taskId} (${currentTask.status}) to ${status} without audited repair`,
 				);

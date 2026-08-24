@@ -303,9 +303,16 @@ export interface BunCompatSubprocess {
 	exitCode: number | null;
 	readonly signalCode?: NodeJS.Signals | null;
 	/**
-	 * Asynchronous process-creation failure reported by Node's ChildProcess
-	 * `error` event (for example ENOENT). Bun reports equivalent failures by
-	 * throwing from `Bun.spawn`, so this is populated only by the Node fallback.
+	 * Process-creation failure (for example ENOENT), reported as a **value**
+	 * on every runtime.
+	 *
+	 * The Node fallback populates it from ChildProcess's `error` event. Bun
+	 * reports the same failures by throwing synchronously from `Bun.spawn`;
+	 * issue #2236 showed that throw escaping uncaught to a tool boundary and
+	 * surfacing a raw `ENOENT ... posix_spawn 'git'` to the user. The Bun path
+	 * is now normalised *down* to this contract — the throw is caught and
+	 * exposed here — so process-creation failures have no exit code, are
+	 * described by `spawnError`, and `bunSpawn` never throws.
 	 */
 	readonly spawnError?: Error | null;
 	kill(signal?: NodeJS.Signals | number): void;
@@ -389,7 +396,208 @@ export const _internals = {
 	spawnTaskkill: (args: string[], options: Parameters<typeof nodeSpawn>[2]) =>
 		nodeSpawn('taskkill', args, options),
 	createProcessTreeKiller,
+	/**
+	 * Test seam for the spawn-`cwd` probe. Lets a test drive the `EACCES`
+	 * branch on hosts (Windows) where an unreadable directory cannot be created
+	 * without elevation, instead of skipping the case.
+	 */
+	statSync: (target: string): fsSync.Stats => fsSync.statSync(target),
 };
+
+// ---------------------------------------------------------------------------
+// Spawn `cwd` validation (issue #2236)
+//
+// These primitives live HERE rather than in the classification module because
+// `bun-compat.ts` must stay loadable by bare Node (AGENTS.md invariant 2, and
+// `src/utils/__tests__/bun-compat-node-stream.test.ts`, which imports this
+// file directly under `node --experimental-strip-types`). Any local import
+// with a `.js` specifier fails that loader, since only the `.ts` file exists
+// on disk. `src/utils/git-binary-missing-error.ts` re-exports them so callers
+// still have one classification surface.
+// ---------------------------------------------------------------------------
+
+/** Why a spawn `cwd` was rejected before the child was ever created. */
+export type SpawnCwdFailureReason = 'missing' | 'not-directory';
+
+/**
+ * Raised as a **value**, never thrown: `bunSpawn`/`bunSpawnSync` surface it
+ * through the runtime's existing failure contract (`spawnError` plus a
+ * non-zero `exited`), and `runGit` converts it into its typed failure result.
+ * Throwing it would escalate previously-safe call sites into unhandled
+ * synchronous throws — the exact leak class this change removes.
+ */
+export class SpawnCwdMissingError extends Error {
+	override readonly name = 'SpawnCwdMissingError';
+	/** Kept ENOENT so existing `code`-sniffing call sites keep working. */
+	readonly code = 'ENOENT';
+	readonly cwd: string;
+	readonly reason: SpawnCwdFailureReason;
+	readonly executable: string;
+
+	constructor(
+		cwd: string,
+		reason: SpawnCwdFailureReason,
+		executable: string,
+		options?: { cause?: unknown },
+	) {
+		super(
+			reason === 'missing'
+				? `cannot start "${executable}": working directory no longer exists: ${cwd}`
+				: `cannot start "${executable}": working directory is not a directory: ${cwd}`,
+			options,
+		);
+		this.cwd = cwd;
+		this.reason = reason;
+		this.executable = executable;
+	}
+}
+
+/** Observable state of a spawn `cwd`. */
+export type SpawnCwdState =
+	/** Present and a directory — a spawn ENOENT here really is the binary. */
+	| 'directory'
+	/** Definitely absent. */
+	| 'missing'
+	/** Present but not a directory (a file, for example). */
+	| 'not-directory'
+	/** `stat` refused (`EACCES`/`EPERM`) — we cannot tell. */
+	| 'unreadable'
+	/** `stat` failed for some other reason — we cannot tell. */
+	| 'unknown';
+
+/**
+ * Inspects a spawn `cwd` with `statSync(...).isDirectory()`.
+ *
+ * `existsSync` is deliberately NOT used: it returns `true` for a `cwd` that is
+ * a regular *file* (the spawn then fails `ENOTDIR` on POSIX / `ENOENT` on
+ * Windows) and `false` when `stat` fails with `EACCES` (the directory is in
+ * fact present). Both would be misclassified.
+ *
+ * Verified rather than assumed: a **relative** `cwd` is safe (the stat and the
+ * child resolve against the same parent cwd), and a **symlinked** `cwd` is
+ * safe (`statSync` follows the link, as does the child).
+ */
+export function inspectSpawnCwd(cwd: string): SpawnCwdState {
+	try {
+		return _internals.statSync(cwd).isDirectory()
+			? 'directory'
+			: 'not-directory';
+	} catch (err) {
+		const code =
+			typeof err === 'object' && err !== null && 'code' in err
+				? (err as { code?: unknown }).code
+				: undefined;
+		if (code === 'ENOENT' || code === 'ENOTDIR') return 'missing';
+		if (code === 'EACCES' || code === 'EPERM') return 'unreadable';
+		return 'unknown';
+	}
+}
+
+/**
+ * Returns a typed error when `cwd` is *definitely* unusable as a spawn working
+ * directory, `null` otherwise.
+ *
+ * An `unreadable`/`unknown` `cwd` deliberately returns `null`: refusing to
+ * spawn on "I cannot tell" would convert a stat permission quirk into a hard
+ * failure. The spawn proceeds and the OS decides; the classifiers in
+ * `git-binary-missing-error.ts` then report the honest third state.
+ */
+export function describeSpawnCwdFailure(
+	cwd: string,
+	executable: string,
+	cause?: unknown,
+): SpawnCwdMissingError | null {
+	const state = inspectSpawnCwd(cwd);
+	if (state === 'missing') {
+		return new SpawnCwdMissingError(cwd, 'missing', executable, { cause });
+	}
+	if (state === 'not-directory') {
+		return new SpawnCwdMissingError(cwd, 'not-directory', executable, {
+			cause,
+		});
+	}
+	return null;
+}
+
+/** Mutually exclusive classification of a spawn failure. */
+export type SpawnFailureClass =
+	| 'binary-missing'
+	| 'cwd-missing'
+	| 'cwd-unreadable'
+	| 'other';
+
+/**
+ * Spawn-failure codes whose cause is genuinely ambiguous between "the
+ * executable is not there" and "the working directory is not usable".
+ */
+const AMBIGUOUS_SPAWN_CODES = new Set(['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM']);
+
+function spawnErrorCode(err: unknown): string | undefined {
+	if (typeof err !== 'object' || err === null || !('code' in err)) {
+		return undefined;
+	}
+	const code = (err as { code?: unknown }).code;
+	return typeof code === 'string' ? code : undefined;
+}
+
+/**
+ * Single source of truth for the three-way split (issue #2236).
+ * `git-binary-missing-error.ts` re-exports this and its predicates delegate
+ * here, so the wrap below and every caller-side check can never disagree.
+ */
+export function classifySpawnFailure(
+	err: unknown,
+	cwd?: string,
+): SpawnFailureClass {
+	if (err instanceof SpawnCwdMissingError) return 'cwd-missing';
+	const code = spawnErrorCode(err);
+	if (code === undefined || !AMBIGUOUS_SPAWN_CODES.has(code)) return 'other';
+	// No cwd to discriminate with: preserve the historical ENOENT semantics.
+	if (cwd === undefined || cwd === '') {
+		return code === 'ENOENT' ? 'binary-missing' : 'other';
+	}
+	switch (inspectSpawnCwd(cwd)) {
+		case 'missing':
+		case 'not-directory':
+			return 'cwd-missing';
+		case 'unreadable':
+		case 'unknown':
+			// "Cannot tell" is not "it is missing" — and it is not "the binary is
+			// gone" either. It gets its own state so callers can fail closed.
+			return 'cwd-unreadable';
+		default:
+			return code === 'ENOENT' ? 'binary-missing' : 'other';
+	}
+}
+
+/**
+ * Retypes a process-creation failure whose real cause was the `cwd`.
+ *
+ * Classification happens **on failure**, not as a pre-flight `statSync`. Both
+ * orders satisfy the #2236 contract — a typed `SpawnCwdMissingError` surfaced
+ * as the `spawnError` value, `exited` non-zero, nothing thrown — but a
+ * pre-flight check also *prevents* the spawn, which changes observable
+ * behaviour for any caller that hands over a directory that does not exist.
+ * Classifying afterwards keeps the spawn attempt exactly where it was, costs
+ * zero `statSync` calls on the success path (a strictly better position under
+ * AGENTS.md invariant 1), and still converts the failure into the same typed,
+ * actionable value.
+ *
+ * Anything that is not positively identifiable as a `cwd` problem is returned
+ * unchanged — an `EACCES` stat, or a genuine missing binary, must not be
+ * relabelled.
+ */
+function wrapSpawnFailure(
+	error: unknown,
+	cwd: string | undefined,
+	executable: string,
+): Error {
+	const err = asError(error);
+	if (err instanceof SpawnCwdMissingError) return err;
+	if (cwd === undefined || cwd === '') return err;
+	if (classifySpawnFailure(err, cwd) !== 'cwd-missing') return err;
+	return describeSpawnCwdFailure(cwd, executable, err) ?? err;
+}
 
 function streamFromNode(
 	pipe: NodeJS.ReadableStream | null | undefined,
@@ -615,10 +823,77 @@ export function mergeEnvForChild(
 	return merged;
 }
 
+/**
+ * Exit code reported for a process that was never created. Matches the Node
+ * fallback's existing `error`-event resolution (`resolve(1)`) so the two
+ * runtimes stay indistinguishable to callers; `spawnError` is the field that
+ * says "this never started".
+ */
+const SPAWN_CREATION_FAILURE_EXIT_CODE = 1;
+
+function asError(value: unknown): Error {
+	return value instanceof Error ? value : new Error(String(value));
+}
+
+/** A `BunCompatStream` that replays a fixed string. */
+function staticStream(text: string): BunCompatStream {
+	const bytes = new TextEncoder().encode(text);
+	return {
+		async text() {
+			return text;
+		},
+		async bytes() {
+			return bytes;
+		},
+		getReader() {
+			return new ReadableStream<Uint8Array>({
+				start(controller) {
+					if (bytes.byteLength > 0) controller.enqueue(bytes);
+					controller.close();
+				},
+			}).getReader();
+		},
+	};
+}
+
+/**
+ * A subprocess-shaped value for a process that never started (issue #2236).
+ *
+ * Mirrors the Node fallback's failure shape: `exitCode` is `null` (a
+ * process-creation failure has no exit status), `exited` resolves non-zero,
+ * and `spawnError` carries the cause. Nothing here throws, so no `bunSpawn`
+ * call site gains a new synchronous throw.
+ *
+ * `stderr` replays the reason rather than staying empty. Normalising a throw
+ * *down* to a value has a mirror risk: a caller that reads only `stderr` for
+ * its failure explanation would report nothing at all, turning a loud failure
+ * into a silent wrong answer. `stdout` stays empty so no caller parsing
+ * command output ever sees the diagnostic.
+ */
+function spawnCreationFailure(error: Error): BunCompatSubprocess {
+	return {
+		stdout: streamFromBun(undefined),
+		stderr: staticStream(error.message),
+		exited: Promise.resolve(SPAWN_CREATION_FAILURE_EXIT_CODE),
+		exitCode: null,
+		signalCode: null,
+		spawnError: error,
+		kill() {
+			// No child exists.
+		},
+		killTree: () => Promise.resolve(),
+	};
+}
+
 export function bunSpawn(
 	cmd: string[],
 	options?: BunCompatSpawnOptions,
 ): BunCompatSubprocess {
+	// #2236 chokepoint: a `cwd` taken from durable or reconstructed state can
+	// point at a directory that has since been torn down. The spawn is still
+	// attempted; every failure path below runs the caught error through
+	// `wrapSpawnFailure`, so the whole repo gets one typed, actionable value
+	// instead of an ENOENT that reads like "git is missing".
 	const bun = getBun() as
 		| { spawn?: (args: string[], opts?: unknown) => unknown }
 		| undefined;
@@ -651,7 +926,21 @@ export function bunSpawn(
 			delete spawnOpts.killSignal;
 			spawnOpts.detached = true;
 		}
-		const proc = bun.spawn(cmd, spawnOpts) as {
+		// #2236 F0-CORE: `Bun.spawn` reports process-creation failures by
+		// throwing SYNCHRONOUSLY, while the Node fallback below resolves
+		// `exited` and populates `spawnError`. That divergence — not PATH, not
+		// `env` — is how a raw `ENOENT ... posix_spawn 'git'` escaped to the
+		// user. Normalise the Bun path DOWN to the Node contract; never
+		// escalate the Node path up to a throw.
+		let spawned: unknown;
+		try {
+			spawned = bun.spawn(cmd, spawnOpts);
+		} catch (error) {
+			return spawnCreationFailure(
+				wrapSpawnFailure(error, options?.cwd, cmd[0] ?? ''),
+			);
+		}
+		const proc = spawned as {
 			stdout?: unknown;
 			stderr?: unknown;
 			exited: Promise<number>;
@@ -706,18 +995,26 @@ export function bunSpawn(
 	const [file, ...args] = cmd;
 	const detached = options?.killProcessTree === true;
 	const mergedEnv = mergeEnvForChild(options?.env, options?.envOverrides);
-	const proc = nodeSpawn(file, args, {
-		cwd: options?.cwd,
-		env: mergedEnv,
-		detached,
-		windowsHide: true,
-		windowsVerbatimArguments: options?.windowsVerbatimArguments,
-		stdio: [
-			mapStdio(options?.stdin),
-			mapStdio(options?.stdout),
-			mapStdio(options?.stderr),
-		],
-	});
+	// `child_process.spawn` normally reports failures asynchronously, but it
+	// still throws synchronously for invalid options. Same contract as the Bun
+	// branch above: never let a throw escape this wrapper.
+	let proc: ReturnType<typeof nodeSpawn>;
+	try {
+		proc = nodeSpawn(file, args, {
+			cwd: options?.cwd,
+			env: mergedEnv,
+			detached,
+			windowsHide: true,
+			windowsVerbatimArguments: options?.windowsVerbatimArguments,
+			stdio: [
+				mapStdio(options?.stdin),
+				mapStdio(options?.stdout),
+				mapStdio(options?.stderr),
+			],
+		});
+	} catch (error) {
+		return spawnCreationFailure(wrapSpawnFailure(error, options?.cwd, file));
+	}
 
 	const killChildTree = createProcessTreeKiller(
 		proc.pid,
@@ -739,7 +1036,10 @@ export function bunSpawn(
 			resolve(code ?? -1);
 		});
 		proc.on('error', (error) => {
-			observedSpawnError = error;
+			// #2236: the Node path's own creation-failure channel gets the same
+			// retyping as the Bun path, so `spawnError` means the same thing on
+			// both runtimes.
+			observedSpawnError = wrapSpawnFailure(error, options?.cwd, file);
 			resolve(1);
 		});
 		if (options?.timeout && options.timeout > 0) {
@@ -791,6 +1091,21 @@ export interface BunCompatSyncResult {
 	success: boolean;
 }
 
+/**
+ * Sync counterpart of `spawnCreationFailure`. The Node fallback already
+ * returns `{ exitCode: 1, success: false }` for a `spawnSync` that never
+ * started; this keeps that shape and fills `stderr` with the reason so the
+ * failure cannot read as "the command ran and printed nothing".
+ */
+function syncSpawnCreationFailure(error: Error): BunCompatSyncResult {
+	return {
+		stdout: new Uint8Array(0),
+		stderr: new TextEncoder().encode(error.message),
+		exitCode: SPAWN_CREATION_FAILURE_EXIT_CODE,
+		success: false,
+	};
+}
+
 export function bunSpawnSync(
 	cmd:
 		| string[]
@@ -803,6 +1118,14 @@ export function bunSpawnSync(
 		  },
 	options?: BunCompatSpawnOptions,
 ): BunCompatSyncResult {
+	// Same #2236 chokepoint as `bunSpawn`. `BunCompatSyncResult` has no
+	// `spawnError` channel, so the reason is reported through `stderr` — the
+	// only field sync consumers read for a failure explanation — rather than
+	// through a field nothing would consume.
+	const requestedCwd = Array.isArray(cmd)
+		? options?.cwd
+		: (options?.cwd ?? cmd.cwd);
+	const executable = (Array.isArray(cmd) ? cmd[0] : cmd.cmd[0]) ?? '';
 	const bun = getBun() as
 		| {
 				spawnSync?: (
@@ -820,8 +1143,13 @@ export function bunSpawnSync(
 		const mergedEnv = mergeEnvForChild(options?.env, options?.envOverrides);
 		const spawnOpts =
 			mergedEnv !== undefined ? { ...options, env: mergedEnv } : options;
-		const result = bun.spawnSync(cmd, spawnOpts);
-		return result;
+		try {
+			return bun.spawnSync(cmd, spawnOpts);
+		} catch (error) {
+			return syncSpawnCreationFailure(
+				wrapSpawnFailure(error, requestedCwd, executable),
+			);
+		}
 	}
 	let argv: string[];
 	let mergedOptions: BunCompatSpawnOptions & { stdin?: string | Uint8Array };
@@ -843,21 +1171,39 @@ export function bunSpawnSync(
 	}
 	const [file, ...args] = argv;
 	const mergedEnv = mergeEnvForChild(mergedOptions.env, options?.envOverrides);
-	const result = nodeSpawnSync(file, args, {
-		cwd: mergedOptions.cwd,
-		env: mergedEnv,
-		input:
-			(mergedOptions as { stdin?: string | Uint8Array }).stdin instanceof
-				Uint8Array ||
-			typeof (mergedOptions as { stdin?: string | Uint8Array }).stdin ===
-				'string'
-				? ((mergedOptions as { stdin?: string | Uint8Array }).stdin as
-						| string
-						| Uint8Array)
-				: undefined,
-		timeout: mergedOptions.timeout,
-		windowsHide: true,
-	});
+	let result: ReturnType<typeof nodeSpawnSync>;
+	try {
+		result = nodeSpawnSync(file, args, {
+			cwd: mergedOptions.cwd,
+			env: mergedEnv,
+			input:
+				(mergedOptions as { stdin?: string | Uint8Array }).stdin instanceof
+					Uint8Array ||
+				typeof (mergedOptions as { stdin?: string | Uint8Array }).stdin ===
+					'string'
+					? ((mergedOptions as { stdin?: string | Uint8Array }).stdin as
+							| string
+							| Uint8Array)
+					: undefined,
+			timeout: mergedOptions.timeout,
+			windowsHide: true,
+		});
+	} catch (error) {
+		return syncSpawnCreationFailure(
+			wrapSpawnFailure(error, mergedOptions.cwd, file),
+		);
+	}
+	// #2236: a creation failure we can positively attribute to the `cwd` gets
+	// the typed shape, so `stderr` carries a reason instead of being empty.
+	// Every other `result.error` (notably ETIMEDOUT, which can carry partial
+	// output) keeps its existing shape — losing that output would be a
+	// regression.
+	if (result.error) {
+		const wrapped = wrapSpawnFailure(result.error, mergedOptions.cwd, file);
+		if (wrapped instanceof SpawnCwdMissingError) {
+			return syncSpawnCreationFailure(wrapped);
+		}
+	}
 	const stdout =
 		result.stdout instanceof Buffer
 			? new Uint8Array(

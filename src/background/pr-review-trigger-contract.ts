@@ -402,6 +402,14 @@ const ReceiptEnvelopeSchema = z.object({
 	dispatched_micro_lane_count: z.number().int().min(1),
 });
 
+/**
+ * `base_verification` is declared on the V2 receipt ONLY, never on
+ * {@link ReceiptEnvelopeSchema}: the envelope is also extended by the strict
+ * {@link V1ReceiptSchema}, and widening it would change how historical v1
+ * receipts parse — the exact class of permanent completion block this field was
+ * added to remove (issue #2242 / RC-B). Optional so pre-existing v2 receipts
+ * written before this field existed keep parsing unchanged.
+ */
 const V2ReceiptSchema = ReceiptEnvelopeSchema.extend({
 	schema_version: z.literal(2),
 	trigger_count: z.number().int().min(0),
@@ -410,6 +418,7 @@ const V2ReceiptSchema = ReceiptEnvelopeSchema.extend({
 	no_match_count: z.number().int().min(0),
 	rows: z.array(V2RowSchema),
 	coverage_degradations: z.array(TriggerCoverageDegradationSchema).default([]),
+	base_verification: z.enum(['live', 'bound_fallback']).optional(),
 }).strict();
 
 function assertCanonicalDefinitionFields(
@@ -451,6 +460,16 @@ export interface BuildPrReviewTriggerReceiptV2Args {
 	rows: unknown;
 	/** Receipt-level degradation disclosure; ledger rows stay untouched so the frozen-ledger digest is unaffected. */
 	coverage_degradations?: TriggerCoverageDegradation[];
+	/**
+	 * How `base_sha` was verified for this receipt. `live` means the writer
+	 * re-derived the merge base with git at write time; `bound_fallback` means
+	 * that re-derivation was UNAVAILABLE and the writer accepted the caller's
+	 * scope solely because it exactly equalled the durably bound, bind-time
+	 * verified review scope. Optional for the same reason
+	 * `coverage_degradations` is: the field is receipt-level disclosure, and
+	 * making it required would break every existing builder call site.
+	 */
+	base_verification?: 'live' | 'bound_fallback';
 }
 
 function dispatchedMicroLaneCount(
@@ -495,6 +514,9 @@ export function buildPrReviewTriggerReceiptV2(
 				: {}),
 		};
 	});
+	// `...envelope` is the STRIPPED output of the ReceiptEnvelopeSchema parse
+	// above, so it cannot carry `base_verification`; the value must be passed
+	// explicitly here or it is silently dropped from the durable receipt.
 	return V2ReceiptSchema.parse({
 		...envelope,
 		schema_version: 2,
@@ -504,6 +526,9 @@ export function buildPrReviewTriggerReceiptV2(
 		no_match_count: 0,
 		rows,
 		coverage_degradations: input.coverage_degradations ?? [],
+		...(input.base_verification
+			? { base_verification: input.base_verification }
+			: {}),
 	});
 }
 
@@ -550,6 +575,12 @@ export interface ParsedPrReviewTriggerReceipt {
 	>[];
 	/** Empty for pre-v2.2 receipts. Present entries mean the family's cited lane is provenance-valid but coverage-degraded. */
 	coverageDegradations: TriggerCoverageDegradation[];
+	/**
+	 * Undefined for legacy receipts and for v2 receipts written before the field
+	 * existed. `bound_fallback` means the writer could not re-derive the merge
+	 * base live and accepted the bound scope instead; synthesis must disclose it.
+	 */
+	baseVerification?: 'live' | 'bound_fallback';
 }
 
 /**
@@ -576,6 +607,7 @@ function parsedReceipt(
 	schemaVersion: 0 | 1 | 2,
 	rows: PrReviewPersistedInputRow[],
 	coverageDegradations: TriggerCoverageDegradation[] = [],
+	baseVerification?: 'live' | 'bound_fallback',
 ): ParsedPrReviewTriggerReceipt {
 	return {
 		schemaVersion,
@@ -593,6 +625,7 @@ function parsedReceipt(
 			> => row.result === 'NOT_TRIGGERED',
 		),
 		coverageDegradations,
+		...(baseVerification ? { baseVerification } : {}),
 	};
 }
 
@@ -632,7 +665,12 @@ export function parsePrReviewTriggerReceipt(
 				);
 			}
 		}
-		return parsedReceipt(2, validated.rows, receipt.coverage_degradations);
+		return parsedReceipt(
+			2,
+			validated.rows,
+			receipt.coverage_degradations,
+			receipt.base_verification,
+		);
 	}
 
 	if (schemaVersion !== undefined && schemaVersion !== 1) {

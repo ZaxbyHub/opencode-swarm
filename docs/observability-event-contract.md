@@ -3,7 +3,7 @@
 Companion to `docs/evidence-and-telemetry.md` (evidence bundles + the legacy
 telemetry stream from a user's point of view) and `docs/engineering-invariants.md`
 (the invariant this PR establishes). This document is the contract definition for
-`src/observability/`: the canonical event envelope, the 41-entry event catalog,
+`src/observability/`: the canonical event envelope, the 46-entry event catalog,
 the legacy adapter, sampling/cardinality rules, the OTel mapping pin, and the
 exhaustive producer/consumer matrix across all seventeen known observability
 stores in the repository.
@@ -16,7 +16,7 @@ Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
 
 **What this PR defines.** A single canonical `ObservabilityEvent` envelope
 (`src/observability/envelope.ts`), a discriminated catalog of every event kind
-the codebase emits today (`src/observability/catalog.ts`, 41 entries), a
+the codebase emits today (`src/observability/catalog.ts`, 46 entries), a
 relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. It wires the envelope into the one live production
@@ -75,7 +75,7 @@ in production stops anything or is visible anywhere today — it is not.
 
 Defined in `src/observability/envelope.ts` as a zod schema (`z.infer`d for the
 `ObservabilityEvent` type). The schema is safe-parsed by the tests
-(`tests/unit/observability/envelope-roundtrip.test.ts`, all 41 kinds). It is **not** parsed by the
+(`tests/unit/observability/envelope-roundtrip.test.ts`, all 46 kinds). It is **not** parsed by the
 CI contract check, and **not** parsed on the `emit()` hot path; `createObservation` builds a plain
 object and never calls `.parse()`, because parsing would reallocate on every
 emit and would clone or reject `legacy.raw` (see §4).
@@ -182,14 +182,21 @@ those inputs before this change.
 
 ---
 
-## 5. The 41-entry catalog
+## 5. The 46-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 41 entries = the 38 pre-existing members of
-`TelemetryEvent` (`src/telemetry.ts:15-91`) plus `agent_conflict_detected`
+Source: `src/observability/catalog.ts`. Exactly 46 entries = the 38 pre-existing members of
+`TelemetryEvent` (`src/telemetry.ts:15-109`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
 result event) plus `knowledge_receipt_transition` (issue #2031, the bounded
-diagnostic projection of authoritative receipt transitions).
+diagnostic projection of authoritative receipt transitions) plus
+`knowledge_maintenance` (issue #2033 — the metadata-only human-only hive-store
+quarantine audit) plus `context_pruned` (the bounded aggregate transcript
+mutation audit emitted when context-budget masking and/or pruning changes a
+session transcript) plus `residue_health` (issue #2035 — the counts-only
+atomic-write residue quarantine health aggregate) plus `context_telemetry_health`
+(issue #2037 — the counts-only bounded storage health aggregate for the
+`.swarm/context-telemetry.jsonl` store).
 
 Legend: **Owner** is `futureOwnerIssue` when `consumers` is empty (permitted
 only together with an owner — an empty consumer list with no owner is a CI
@@ -252,20 +259,42 @@ fact, not a unit of work.
 
 #### delegation_begin
 Category `delegation`, severity `info`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:411`. Consumers: none — owner **#2047**. Retention: **#2045**.
+`src/telemetry.ts:479`. Consumers: none — owner **#2047**. Retention: **#2045**.
 Required workflow IDs: `hostSessionId`, `taskId`. OTel mapping: `genai`.
+Lifecycle pair with `delegation_end`: the Task boundary emits the begin in
+`tool.execute.before` and the Task handoff emits the matching end (identical
+`sessionId`/`agentName`, paired by `callID`); the review engine emits an
+adjacent begin/end per dispatch attempt. `taskId` is `''` when no task is
+current at dispatch — the paired end may then carry the taskId resolved at
+completion (deliberate: triple equality holds only for the review-engine
+paths). Known gap: background (deferred) delegations emit a begin whose end has
+no producer yet — the trusted terminal completion event that would emit it does
+not exist, so background flows appear as begin-without-end.
 
 #### delegation_end
 Category `delegation`, severity `info`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:421`. Consumer: `src/services/cost-accounting.ts:127`
+`src/telemetry.ts:489`. Consumer: `src/services/cost-accounting.ts:127`
 (`readTelemetryEvents` → `summarizeTelemetryCosts` → `/swarm costs`). Retention:
 **#2043**. Required workflow IDs: `hostSessionId`, `taskId`. OTel mapping:
-`genai`.
+`genai`. `agentName` is the delegated agent's `subagent_type` as dispatched
+(resolved from the begin-side pairing entry), not the parent session's
+`activeAgent`.
 
 #### model_fallback
 Category `delegation`, severity `notice`, privacy `pseudonymous`. Producer
 `src/telemetry.ts:506`. Consumers: none — owner **#2047**. Retention: **#2045**.
 Required workflow IDs: `hostSessionId`. OTel mapping: `genai`.
+
+#### model_unresolved
+Category `delegation`, severity `warning`, privacy `pseudonymous`. Producer
+`src/telemetry.ts:614` (issue #2271 bug 4: preflight confirmed a configured
+agent model id does not resolve against the provider catalog — fires before
+any dispatch attempt, unlike a runtime `model_fallback`). Consumers: none —
+owner **#2047**. Retention: **#2045**. Required workflow IDs: `hostSessionId`.
+OTel mapping: `genai`. The event carries the sentinel session id `preflight`
+(there is no live session at preflight time); OTel consumers will see a
+`gen_ai.conversation.id` of `preflight` for this kind — a known, documented
+phantom-conversation artifact, not a real session.
 
 ### Gate category
 
@@ -304,6 +333,18 @@ Category `cost`, severity `info`, privacy `pseudonymous`. Producer
 Required workflow IDs: `hostSessionId`.
 
 ### Guardrail category
+
+#### context_pruned
+Category `guardrail`, severity `notice`, privacy `pseudonymous`. Producer
+`src/telemetry.ts:584`. Consumers: none — owner **#2047**. Retention: **#2047**.
+Required workflow IDs: `hostSessionId`.
+
+Bounded aggregate emitted once per enforcement pass when transcript mutation
+actually happens. Payload fields are counts and token totals only:
+`trigger`, `usageSource`, `beforeTokens`, `afterTokens`, `modelLimit`,
+`maskedMessages`, `maskedToolParts`, `maskedTokensFreed`, `prunedMessages`,
+`prunedTextParts`, `prunedToolParts`, and `prunedTokensFreed`. No prompt
+content, tool output, path, or fabricated session identifier is written.
 
 #### hard_limit_hit
 Category `guardrail`, severity `error`, privacy `pseudonymous`. Producer
@@ -474,20 +515,90 @@ No workflow ID is always required: empty retrievals and uncertain legacy
 transitions may truthfully hold no trace, entry, session, task, or phase ID.
 When held, those IDs are copied without synthesis. The payload contains only a
 closed transition kind (including distinct application-marker commits), closed
-`reasonCode`, positive `schemaVersion`, optional
-IDs, and bounded `receiptOutcome`/`receiptSource` domain codes. Those receipt
+`reasonCode`, positive `schemaVersion`, positive `receiptSemantics` (issue
+#2032: the outcome/source meaning-contract version, currently `2` — distinct
+from the journal `schemaVersion` format gate, so health/reports consumers can
+distinguish producer behavior and migration uncertainty). An ABSENT
+`receiptSemantics` means the transition was emitted before this contract
+existed (pre-#2032): consumers MUST treat such events' outcome/source
+semantics as unknown, never default them to the current version. Optional
+IDs, and bounded `receiptOutcome`/`receiptSource` domain codes drawn from the
+canonical outcome/source taxonomy of `src/hooks/knowledge-receipt-ledger.ts`
+(`receiptSource: 'delegate'` marks every new delegate terminal; legacy missing
+source projects as `unknown`, never coerced). Those receipt
 domain values deliberately do not populate the canonical generic `outcome`.
 Arbitrary reason text and `nonTransientCircuit` are never accepted. This event
 is diagnostic FIFO data only; the canonical-root V2 receipt journal remains the
 sole authority. No live reader exists yet, so #2047 owns the future sink.
 
+#### knowledge_maintenance
+Category `knowledge`, severity `notice`, privacy `pseudonymous`. Producer
+`src/knowledge/hive-quarantine.ts` (single emit site) for each phase of the
+human-only exact-ID hive-store quarantine flow (issue #2033): `preview`,
+`commit_aborted`, `committed`, `verify_failed`, `rollback_aborted`,
+`rolled_back`. Consumers: none; owner **#2047**. Retention: **#2045**. No
+workflow ID is required: the maintenance command runs outside any
+session/workflow context. The payload is strictly metadata: a bounded `phase`
+enum, a bounded `abortReason` code drawn from the module's abort taxonomy,
+`selectedCount`, `storeEntriesBefore`/`storeEntriesAfter`, `backupBytes`, a
+12-hex `storeSha256Prefix`, and a 12-char `token12` confirmation-token prefix.
+Entry IDs are never embedded; lesson text, reasons, and filesystem paths are
+never emitted (path redaction by omission — no path ever enters the payload).
+The authoritative record of what was quarantined is the backup manifest plus
+the hive events log under the platform data dir; this event only audits that
+the operator flow ran and why it aborted, if it did.
+
+#### residue_health
+Category `lifecycle`, severity `notice`, privacy `operational`. Producer
+`src/telemetry.ts:908` (`residueHealth`, called by
+`quarantineSwarmResidue` in `src/services/swarm-residue.ts` after a
+residue quarantine run — the close clean stage or `/swarm config doctor
+--quarantine-residue`; issue #2035). Consumers: none — owner **#2047**.
+Retention: **#2047**. No workflow ID is required: residue handling runs
+outside any session/task correlation. The payload is strictly bounded counts:
+`trigger`, `scanned`, `matched`, `eligible`, `ambiguous`, `quarantined`,
+`preserved`, `total_bytes`, `oldest_age_ms`, and `grammar_counts` keyed by the
+frozen registry ids in `src/utils/atomic-write.ts` (bounded by the registry
+size). File names, filesystem paths, and file content are never emitted
+(path redaction by omission). The authoritative record of what was moved is
+the per-batch quarantine manifest under `.swarm/quarantine/`; this event only
+reports the health aggregate so later reporting (PR 16/19) can surface residue
+pressure without leaking workspace layout.
+
+#### context_telemetry_health
+Category `lifecycle`, severity `notice`, privacy `operational`. Producer
+`src/telemetry.ts:932` (`contextTelemetryHealth`, called by the bounded
+`.swarm/context-telemetry.jsonl` store in `src/context-map/telemetry.ts` after a
+compaction or close cut; issue #2037). Consumers: none — owner **#2047**.
+Retention: **#2047**. No workflow ID is required: context-map telemetry is
+per-delegation and aggregate-only. The payload is strictly bounded counts:
+`trigger` (`compaction`/`close`), `accepted_count`, `compacted_count`,
+`retained_count`, `dropped_count`, `corrupt_count`, `oldest_timestamp`,
+`newest_timestamp`, `bytes`, and `limit_bytes`. Capsule/query content and
+filesystem paths are never emitted (path redaction by omission). This is the
+health signal for the issue-#2037 bounded context-map telemetry store; the
+store itself (`.swarm/context-telemetry.jsonl` manifest + retained window) is
+the authoritative record, and this event only reports the aggregate so later
+reporting (PR 16/19) can surface retention pressure without leaking capsule
+contents or workspace layout.
+
 ---
 
 ## 6. The exhaustive producer/consumer matrix (17 rows)
 
+> **Retention columns are owned by the retention registry** —
+> `docs/observability-retention-registry.md` + the machine-readable
+> `scripts/retention-registry.data.ts` (issue #2036). This matrix stays at
+> correlation granularity; byte/age/count limits, read amplification,
+> close/archive/reset policy, and final dispositions for every durable stream
+> live there. (Row 12's reader citation was corrected for #2036: the
+> `startsWith('swarm-')` scan is finalize-idempotency, not retention pruning —
+> archive bundles have no prune; see the registry's `close-archive-bundles`
+> row.)
+
 **Every row carries a `file:line` citation, but those citations are
 UNGATED and go stale on any rebase that shifts a cited file.**
-`scripts/check-event-contract.ts` mechanically validates the 41-entry
+`scripts/check-event-contract.ts` mechanically validates the 46-entry
 *catalog* in §5 (catalog ↔ `TelemetryEvent` union parity, per-entry
 completeness) — it does not and cannot check this prose matrix. Treat a
 citation here as "verified as of `origin/main` `0060f48d`", not as a standing
@@ -516,17 +627,17 @@ row 17 records the authoritative knowledge-receipt partition added by #2031.
 | # | Store | Writer (file:line) | Reader(s) (file:line) | Discriminator | Clock | Schema ver. | Correlation carried | Correlation MISSING | Close/archive | State class | Owner |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | 1 | `.swarm/telemetry.jsonl` (+`.1`) | `src/telemetry.ts:299` (the `stream.write(line, …)` call) | `src/services/cost-accounting.ts:133` (`readTelemetryEvents`) → `summarizeTelemetryCosts:124` → `/swarm costs`; `src/evaluation/gate-stats.ts:99`; in-process `addTelemetryListener` heartbeat (`src/telemetry.ts:146-163`) → `/swarm status` | `event` | ISO string | none | `sessionId`, `taskId`, `agentName`, `gate` | no trace/span id, no delegation id linking begin↔end; `gate_parse_error` has no `sessionId` (`gateParseError` emit payload, `src/telemetry.ts:457-461`) | yes — `close.ts:270-297` | operational | #2045 (lifecycle/terminals), #2043 (cost provenance) |
-| 2 | `.swarm/context-telemetry.jsonl` | `src/context-map/telemetry.ts:154` | `src/context-map/telemetry.ts:181,225` → `src/commands/context-map-stats.ts:6,11` (sole non-test consumer, verified) | none (uniform shape) | ISO string | none | `task_id` only | `session_id`, agent identity beyond a free-text `agent_role` | **no** | operational | **#2037** |
+| 2 | `.swarm/context-telemetry.jsonl` | `src/context-map/telemetry.ts:704` `recordTelemetry` (writes the store under the exclusive lock; compaction/atomic-rewrite at `compactStore:918` / `atomicReplace:492`) | `src/context-map/telemetry.ts:793` `getTelemetrySummary` → `src/commands/context-map-stats.ts:16` (sole non-test consumer, verified) | none (uniform shape) | ISO string | **2** (manifest header, issue #2037) | `task_id` only | `session_id`, agent identity beyond a free-text `agent_role` | **no** | operational | **#2037** |
 | 3 | `.swarm/skill-usage.jsonl` | `src/hooks/skill-usage-log.ts:233` | `readSkillUsageEntries:321`, `readSkillUsageEntriesTail:389`, `applySkillUsageFeedback:760` → `bumpKnowledgeConfidenceBatch` | `type` (marker variant only) | ISO string | none (`skillVersion` versions the *skill*, not the record) | `sessionID`, `agentName`, `taskID`, `skillPath` | no trace/span | **no** | derived | **#2038** |
 | 4 | `.swarm/events.jsonl` | ~30 call sites | `src/services/context-budget-service.ts:195` (line-count proxy for turn count — does NOT parse JSON); `src/hooks/curator.ts:1524` | **`event` OR `type`** (split across writers: `src/context/role-filter.ts:147`/`src/tools/phase-complete.ts:1571` use `event:`; `src/hooks/curator.ts:1759`/`src/hooks/full-auto-intercept.ts:269` use `type:`) | ISO string | none | inconsistent per writer | `sessionID` absent on `phase_complete`, `auto_oversight`, `context_filtered` | yes — `close.ts:275` | operational | **#2039** |
 | 5 | `<knowledgeStore>/knowledge-events.jsonl` | `src/hooks/knowledge-events.ts` | `curator-postmortem.ts`, `knowledge-escalator.ts` (display-only escalation history), `knowledge-diagnostics.ts`, `learning-metrics.ts`; **no correctness reader** | `type` | ISO string | `schema_version` = 1 | `event_id`, `trace_id`, `session_id`, `task_id`, `phase`, `agent` | not authoritative; rows may be evicted and source values remain #2032-owned | follows the linked knowledge store; bounded FIFO | operational | #2032 (outcome/source normalization) |
 | 6 | `<knowledgeStore>/knowledge-application.jsonl` (legacy v2) | `src/hooks/knowledge-application.ts` | compatibility/diagnostic consumers only; gates consume row 17 | none | ISO string | none | `sessionId?`, `taskId?`, `phase?`, `knowledgeId` | `event_id`, `trace_id`; lossy — `n_a` is stored as `acknowledged` | via knowledge store | derived | #2032 |
 | 7 | `.swarm/evidence/{taskId}/trajectory.jsonl` | `src/hooks/trajectory-logger.ts:385` | `src/hooks/micro-reflector.ts:262`, `src/services/trajectory-cluster.ts:99` | none | ISO string | none | `agent`, `step` | `task_id`/`session_id`/`trace_id` **only in the path**, never the record body | yes — `evidence/` dir | derived | **#2036** (retention registry; #2041 owns *PRM session* trajectories, not this task-scoped store) |
 | 8 | `.swarm/trajectories/{sessionId}.jsonl` | `src/prm/trajectory-store.ts:80` | `src/prm/index.ts:275,279`, `src/consensus/corpus.ts:641` | none | ISO string | none | `agent`, `step` | `session_id` **only in the filename** | **no** | derived | **#2041** |
-| 9 | `.swarm/background-delegations.jsonl` | `src/background/pending-delegations.ts:716` | `pr-workflow-session-resolver.ts`, `pr-workflow-gate.ts`, `init-orphan-recovery.ts`, `delegation-gate/worktree-collision-ownership.ts` | `status` | **epoch-ms number** | `schemaVersion` 1\|2\|3 | `correlationId`, `parentSessionId`, `callID`, `jobId`, `planTaskId`, `evidenceTaskId`, `batchId`, `laneId`, `workflowLane`, `worktreeId` | no swarm-run id distinct from `parentSessionId` | **no — neither archived nor cleaned** | authoritative | **#2034** |
+| 9 | `.swarm/background-delegations.jsonl` | `src/background/pending-delegations.ts` (checkpoint layer, #2034) | `pr-workflow-session-resolver.ts`, `pr-workflow-gate.ts`, `init-orphan-recovery.ts`, `delegation-gate/worktree-collision-ownership.ts` | `status` | **epoch-ms number** | `schemaVersion` 1\|2\|3 | `correlationId`, `parentSessionId`, `callID`, `jobId`, `planTaskId`, `evidenceTaskId`, `batchId`, `laneId`, `workflowLane`, `worktreeId` | no swarm-run id distinct from `parentSessionId` | bounded — compacted to checkpoint + tail above 1 MiB (#2034) | authoritative | **#2034** |
 | 10 | `.swarm/session/shell-audit.jsonl` | `src/hooks/guardrails/audit-log.ts:332` | `src/services/guardrail-log-service.ts:63` (the only module that resolves the store path); `src/hooks/guardrails/index.ts:568` names the same path when wiring the writer. **Correction:** an earlier draft of this row cited `src/commands/archive.ts` as a reader with invented line numbers and behaviour — that file contains no reference to `shell-audit` at all, and the claim was removed (issue #2029 final-critic B-4). | `type` (**stripped for `shell`**, `:344-351`) | ISO string (caller-supplied) | none | `sessionID`, `agent`, `tool` | **no `callID`** → cannot join to row 9 (`background-delegations.jsonl`) | via `session/` dir — `close.ts:421-426` | operational | **#2040** |
 | 11 | council evidence + `.swarm/council/{taskId}.rounds.jsonl` | `src/council/council-evidence-writer.ts:91` (evidence rewrite at `.swarm/evidence/{taskId}.json`; rounds append) | (council-consuming code paths; not itemized separately from evidence consumers) | none | `synthesis.timestamp` | none (implicit: `quorumSize` defaulted to 1 when absent, `:156-158`) | `sessionId` (= `swarmId`), `roundNumber` | `taskId` only in filename on the rounds log; no `callID` | evidence: yes; `council/`: **no** | authoritative | **#2046** |
-| 12 | `.swarm/archive/swarm-{ts}-{suffix}/` | `src/commands/close.ts:1051-1054` | `src/commands/close.ts:1870-1875` (`fs.readdir(archiveDir)`, filters `startsWith('swarm-')` — retention pruning only; nothing re-reads bundle *contents*) | n/a | ISO in path | preserves bytes verbatim | n/a | n/a | is the archive | governed content | **#2030** |
+| 12 | `.swarm/archive/swarm-{ts}-{suffix}/` | `src/commands/close.ts:1051-1054` | `src/commands/close.ts:2233-2235` (`readdir` + `startsWith('swarm-')` — finalize-idempotency + reflection filename scans only; nothing re-reads bundle *contents*) | n/a | ISO in path | preserves bytes verbatim | n/a | n/a | is the archive | governed content | **#2030** |
 | 13 | SQLite `memory_events` | `src/memory/sqlite-provider.ts:200-207` | memory-provider internal readers (not itemized here — index design is #2048's scope) | `operation` column | `timestamp` column, ISO string | table has no explicit version column (SQLite `_meta` table tracks migration version 4+, not per-row) | `target_id` | no `session_id`/`task_id` column | **no** | authoritative | **#2036** (retention), #2048 (index) |
 | 14 | SQLite `memory_recall_usage` | `src/memory/sqlite-provider.ts:209-214` | memory-provider internal readers | `bundle_id` column | `timestamp` column, ISO string | none (migration-versioned schema, not row-versioned) | `bundle_id`, `run_id` (added migration v9) | no `session_id`/`task_id` column | **no** | derived | **#2036**, #2048 |
 | 15 | SQLite `memory_reward_events` | `src/memory/sqlite-provider.ts:286` | memory-provider internal readers | `verdict` column | `timestamp` column, ISO string | none | `memory_id`, `run_id`, `unit_id` | no `session_id`/`task_id` column | **no** | derived | **#2036**, #2048 |

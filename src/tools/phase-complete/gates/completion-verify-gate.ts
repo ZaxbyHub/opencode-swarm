@@ -9,10 +9,13 @@ import type { GateContext, GateResult } from './types';
 export async function runCompletionVerifyGate(
 	ctx: GateContext,
 ): Promise<GateResult> {
-	const { phase, dir, agentsDispatched, safeWarn } = ctx;
+	const { phase, dir, agentsDispatched } = ctx;
 
 	try {
-		const completionResultRaw = await executeCompletionVerify({ phase }, dir);
+		const completionResultRaw = await executeCompletionVerify(
+			{ phase, writeEvidence: false },
+			dir,
+		);
 		const completionResult = JSON.parse(completionResultRaw);
 
 		if (completionResult.status === 'blocked') {
@@ -37,16 +40,14 @@ export async function runCompletionVerifyGate(
 			warnings: [],
 		};
 	} catch (completionError) {
-		// Non-blocking — treat as warning and continue
-		safeWarn(
-			`[phase_complete] Completion verify error (non-blocking):`,
-			completionError,
-		);
+		// Fail-closed: completion verify errors block phase completion (issue #2099 recurrence)
 		return {
-			blocked: false,
+			blocked: true,
+			reason: 'COMPLETION_VERIFY_ERROR',
+			message: `Phase ${phase} cannot be completed: completion verify gate encountered an error. Error: ${String(completionError)}`,
 			agentsDispatched,
 			agentsMissing: [],
-			warnings: [],
+			warnings: [`COMPLETION_VERIFY_ERROR: ${String(completionError)}`],
 		};
 	}
 }

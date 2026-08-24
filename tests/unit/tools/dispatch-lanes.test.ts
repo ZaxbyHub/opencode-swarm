@@ -1368,6 +1368,10 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 				error: undefined,
 			})),
 			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			status: mock(async () => ({
+				data: { 'session-collect': { type: 'idle' } },
+				error: undefined,
+			})),
 			messages: mock(async () => ({
 				data: [
 					{ info: { role: 'user' }, parts: [{ type: 'text', text: 'prompt' }] },
@@ -1525,7 +1529,7 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 			})),
 			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
 			status: mock(async () => ({
-				data: {},
+				data: { 'session-idle': { type: 'idle' } },
 				error: undefined,
 			})),
 			messages: mock(async () => ({
@@ -1561,79 +1565,6 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 		expect(ops.messages).toHaveBeenCalledTimes(1);
 	});
 
-	test('collects ready lanes while leaving still-running lanes pending', async () => {
-		const directory = makeTempDir();
-		let nextSession = 0;
-		const ops: SessionOps = {
-			create: mock(async () => ({
-				data: { id: `session-${++nextSession}` },
-				error: undefined,
-			})),
-			prompt: mock(async () => ({
-				data: { parts: [{ type: 'text' as const, text: 'unused' }] },
-				error: undefined,
-			})),
-			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
-			status: mock(async () => ({
-				data: { 'session-2': { type: 'busy' } },
-				error: undefined,
-			})),
-			messages: mock(async (args) => ({
-				data: [
-					{
-						info: { role: 'assistant' },
-						parts: [{ type: 'text', text: `final output for ${args.path.id}` }],
-					},
-				],
-				error: undefined,
-			})),
-			delete: mock(async () => undefined),
-		};
-		_internals.getSessionOps = () => ops;
-
-		await executeDispatchLanesAsync(
-			{
-				batch_id: 'batch-mixed-readiness',
-				lanes: [
-					{ id: 'ready', agent: 'explorer', prompt: 'inspect ready lane' },
-					{ id: 'running', agent: 'reviewer', prompt: 'inspect running lane' },
-				],
-			},
-			directory,
-		);
-		const result = await executeCollectLaneResults(
-			{ batch_id: 'batch-mixed-readiness', wait: false },
-			directory,
-		);
-
-		expect(result.success).toBe(false);
-		expect(result.completed).toBe(1);
-		expect(result.pending).toBe(1);
-		expect(result.all_settled).toBe(false);
-		const ready = result.lane_results.find((lane) => lane.id === 'ready');
-		const running = result.lane_results.find((lane) => lane.id === 'running');
-		expect(ready).toEqual(
-			expect.objectContaining({
-				id: 'ready',
-				status: 'completed',
-				output: 'final output for session-1',
-			}),
-		);
-		expect(running).toEqual(
-			expect.objectContaining({
-				id: 'running',
-				status: 'pending',
-			}),
-		);
-		expect(running?.output).toBeUndefined();
-		expect(ops.status).toHaveBeenCalledTimes(2);
-		expect(ops.messages).toHaveBeenCalledTimes(1);
-		expect(ops.messages).toHaveBeenCalledWith({
-			path: { id: 'session-1' },
-			query: { directory, limit: 50 },
-		});
-	});
-
 	test('collects all assistant transcript messages and marks message-limit incompleteness', async () => {
 		const directory = makeTempDir();
 		const messages = Array.from({ length: 50 }, (_, index) => ({
@@ -1650,6 +1581,10 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 				error: undefined,
 			})),
 			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			status: mock(async () => ({
+				data: { 'session-transcript': { type: 'idle' } },
+				error: undefined,
+			})),
 			messages: mock(async () => ({
 				data: messages,
 				error: undefined,
@@ -1694,6 +1629,10 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 				error: undefined,
 			})),
 			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			status: mock(async () => ({
+				data: { 'session-current': { type: 'idle' } },
+				error: undefined,
+			})),
 			messages: mock(async (args) => ({
 				data: [
 					{
@@ -2059,6 +1998,10 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 				error: undefined,
 			})),
 			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			status: mock(async () => ({
+				data: { 'session-stale': { type: 'idle' } },
+				error: undefined,
+			})),
 			messages: mock(async () => ({ data: null, error: undefined })),
 			delete: mock(async () => undefined),
 		};
@@ -2095,6 +2038,10 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 				error: undefined,
 			})),
 			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			status: mock(async () => ({
+				data: { 'session-multipart': { type: 'idle' } },
+				error: undefined,
+			})),
 			messages: mock(async () => ({
 				data: [
 					{

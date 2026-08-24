@@ -7,36 +7,26 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { EvidenceBundle } from '../../../config/evidence-schema';
+import {
+	evaluateCouncilFreshness,
+	latestRetroTimestampMsFromBundle,
+	parseTimestampMs,
+	resolveCouncilFreshnessMaxAgeMs,
+} from '../../../council/council-freshness';
+import {
+	COUNCIL_REVIEW_IDENTITY_VERSION,
+	computeCouncilReviewIdentity,
+	isIdentityDigest,
+	resolveCouncilMemberRole,
+	resolveFinalCompletionPolicy,
+} from '../../../council/council-review-identity';
+import { COUNCIL_MEMBER_ROLES } from '../../../council/types';
 import { hasAnyProfileWithEnabledGate } from '../../../db/qa-gate-profile';
 import { derivePlanIdentityHash } from '../../../plan/utils';
 import { formatLegacyQaBindingRecovery } from '../../../qa-gate/recovery.js';
 import { swarmState } from '../../../state';
 import { resolveGatePreamble } from './gate-helpers';
 import type { GateContext, GateResult } from './types';
-
-function parseTimestampMs(value: unknown): number | null {
-	if (typeof value !== 'string') return null;
-	const parsed = new Date(value).getTime();
-	return Number.isNaN(parsed) ? null : parsed;
-}
-
-function latestRetroTimestampMsFromBundle(
-	bundle: EvidenceBundle | null | undefined,
-	phase: number,
-): number | null {
-	if (!bundle) return null;
-	const timestamps = [
-		parseTimestampMs(bundle.created_at),
-		parseTimestampMs(bundle.updated_at),
-		...(bundle.entries ?? [])
-			.filter(
-				(entry) =>
-					entry.type === 'retrospective' && entry.phase_number === phase,
-			)
-			.map((entry) => parseTimestampMs(entry.timestamp)),
-	].filter((timestamp): timestamp is number => timestamp !== null);
-	return timestamps.length > 0 ? Math.max(...timestamps) : null;
-}
 
 function readLatestRetroTimestampMs(dir: string, phase: number): number | null {
 	const baseDir = path.normalize(path.resolve(dir, '.swarm'));
@@ -135,6 +125,22 @@ export async function runFinalCouncilGate(
 					let fcVerdictFound = false;
 					let _fcVerdict: string | undefined;
 
+					// The gate recomputes the canonical review identity from the
+					// SAME shared implementation the writer used, so the digests
+					// match byte-for-byte by construction (issue #2102 contracts A/H).
+					const identity = computeCouncilReviewIdentity({
+						level: 'final',
+						scope: { kind: 'final', final: true },
+						plan: preamble.plan,
+						config: ctx.pluginConfig.council,
+					});
+					const completionPolicy = resolveFinalCompletionPolicy(
+						ctx.pluginConfig.council,
+					);
+					const maxAgeMs = resolveCouncilFreshnessMaxAgeMs(
+						ctx.pluginConfig.council,
+					);
+
 					try {
 						const fcContent = fs.readFileSync(fcPath, 'utf-8');
 						const fcBundle = JSON.parse(fcContent);
@@ -147,53 +153,36 @@ export async function runFinalCouncilGate(
 								fcVerdictFound = true;
 								_fcVerdict = entry.verdict;
 
-								// Timestamp freshness: block if timestamp is in the future, warn if older than 24h.
-								const now = new Date();
+								// Centralized freshness (issue #2102 contract D): one shared
+								// evaluator, one captured preflight clock, one config bound.
+								// Evidence must postdate the phase retrospective.
 								const fcTimeMs = parseTimestampMs(entry.timestamp);
-								if (fcTimeMs === null) {
-									return {
-										blocked: true,
-										reason: 'FINAL_COUNCIL_TIMESTAMP_REQUIRED',
-										message: `Phase ${phase} cannot be completed: final council evidence is missing a valid timestamp. Re-run the final council to generate fresh evidence.`,
-										agentsDispatched,
-										agentsMissing: [],
-										warnings: [],
-									};
-								}
-								if (fcTimeMs > now.getTime()) {
-									return {
-										blocked: true,
-										reason: 'FINAL_COUNCIL_FUTURE_TIMESTAMP',
-										message: `Phase ${phase} cannot be completed: final council evidence timestamp is in the future.`,
-										agentsDispatched,
-										agentsMissing: [],
-										warnings: [],
-									};
-								}
-								if (now.getTime() - fcTimeMs > 24 * 60 * 60 * 1000) {
-									return {
-										blocked: true,
-										reason: 'FINAL_COUNCIL_STALE_EVIDENCE',
-										message: `Phase ${phase} cannot be completed: final council evidence is older than 24 hours. Re-run the final council for fresh review.`,
-										agentsDispatched,
-										agentsMissing: [],
-										warnings: [],
-									};
-								}
-
 								const latestRetroTimestampMs =
 									latestRetroTimestampMsFromBundle(
 										ctx.loadedRetroBundle,
 										phase,
 									) ?? readLatestRetroTimestampMs(dir, phase);
-								if (
-									latestRetroTimestampMs !== null &&
-									fcTimeMs < latestRetroTimestampMs
-								) {
+								const freshness = evaluateCouncilFreshness({
+									nowMs: ctx.preflightNowMs,
+									timestampMs: fcTimeMs,
+									maxAgeMs,
+									mustPostdateMs: latestRetroTimestampMs,
+								});
+								if (!freshness.ok) {
+									const reasonByFailure: Record<string, string> = {
+										invalid_timestamp: 'FINAL_COUNCIL_TIMESTAMP_REQUIRED',
+										future_timestamp: 'FINAL_COUNCIL_FUTURE_TIMESTAMP',
+										stale_evidence: 'FINAL_COUNCIL_STALE_EVIDENCE',
+										predates_required_input: 'FINAL_COUNCIL_STALE_EVIDENCE',
+										invalid_required_input:
+											'FINAL_COUNCIL_INVALID_REQUIRED_INPUT',
+									};
 									return {
 										blocked: true,
-										reason: 'FINAL_COUNCIL_STALE_EVIDENCE',
-										message: `Phase ${phase} cannot be completed: final council evidence predates the current phase retrospective. Re-run the final council after the latest project evidence is available.`,
+										reason:
+											reasonByFailure[freshness.reason ?? ''] ??
+											'FINAL_COUNCIL_STALE_EVIDENCE',
+										message: `Phase ${phase} cannot be completed: final council ${freshness.message}. ${freshness.recovery}`,
 										agentsDispatched,
 										agentsMissing: [],
 										warnings: [],
@@ -223,20 +212,6 @@ export async function runFinalCouncilGate(
 											warnings: [],
 										};
 									}
-									if (entry.plan_hash !== preamble.planHash) {
-										return {
-											blocked: true,
-											reason: entry.plan_hash
-												? 'FINAL_COUNCIL_STALE_PLAN'
-												: 'FINAL_COUNCIL_PLAN_HASH_REQUIRED',
-											message: entry.plan_hash
-												? `Phase ${phase} cannot be completed: final council evidence was produced for an older plan hash. Re-run the final council for the current plan.`
-												: `Phase ${phase} cannot be completed: final council evidence is missing plan_hash binding. Re-run the final council to generate evidence tied to the current plan content.`,
-											agentsDispatched,
-											agentsMissing: [],
-											warnings: [],
-										};
-									}
 									const currentIdentityHash = derivePlanIdentityHash(
 										preamble.plan,
 									);
@@ -254,55 +229,109 @@ export async function runFinalCouncilGate(
 											warnings: [],
 										};
 									}
+									// Canonical review identity binding (issue #2102): the
+									// status-stable review hash + council policy digest. Unlike
+									// the legacy plan_hash comparison, ordinary task-status
+									// progress cannot invalidate the review; only a
+									// review-relevant plan or policy change can. Legacy evidence
+									// without identity proof fails closed (fresh council run).
+									if (
+										entry.identity_version !== COUNCIL_REVIEW_IDENTITY_VERSION
+									) {
+										return {
+											blocked: true,
+											reason: entry.identity_version
+												? 'FINAL_COUNCIL_IDENTITY_MISMATCH'
+												: 'FINAL_COUNCIL_IDENTITY_REQUIRED',
+											message: entry.identity_version
+												? `Phase ${phase} cannot be completed: final council evidence was produced under a different council identity schema version (${entry.identity_version}, expected ${COUNCIL_REVIEW_IDENTITY_VERSION}). Re-run the final council.`
+												: `Phase ${phase} cannot be completed: final council evidence predates the council review identity cutover and carries no identity proof. Re-run the final council to generate identity-bound evidence.`,
+											agentsDispatched,
+											agentsMissing: [],
+											warnings: [],
+										};
+									}
+									if (
+										entry.review_hash !== identity.reviewHash ||
+										!isIdentityDigest(entry.identity_digest) ||
+										entry.identity_digest !== identity.identityDigest
+									) {
+										return {
+											blocked: true,
+											reason: entry.review_hash
+												? 'FINAL_COUNCIL_STALE_REVIEW_IDENTITY'
+												: 'FINAL_COUNCIL_IDENTITY_REQUIRED',
+											message: `Phase ${phase} cannot be completed: final council evidence does not match the current council review identity (review-relevant plan content or council policy changed since the review). Re-run the final council for the current plan and policy.`,
+											agentsDispatched,
+											agentsMissing: [],
+											warnings: [],
+										};
+									}
+									if (entry.policy_digest !== identity.policyDigest) {
+										return {
+											blocked: true,
+											reason: entry.policy_digest
+												? 'FINAL_COUNCIL_POLICY_MISMATCH'
+												: 'FINAL_COUNCIL_IDENTITY_REQUIRED',
+											message: `Phase ${phase} cannot be completed: final council evidence was produced under a different council policy. Re-run the final council under the current policy.`,
+											agentsDispatched,
+											agentsMissing: [],
+											warnings: [],
+										};
+									}
 								}
 
-								if (
-									typeof entry.quorumSize !== 'number' ||
-									!Number.isFinite(entry.quorumSize) ||
-									entry.quorumSize < 5
-								) {
-									return {
-										blocked: true,
-										reason: 'FINAL_COUNCIL_MISSING_QUORUM',
-										message: `Phase ${phase} (last phase) cannot be completed: final council evidence is missing valid quorum metadata. Re-run the project-scoped five-member final council and call write_final_council_evidence to generate quorumed evidence.`,
-										agentsDispatched,
-										agentsMissing: [],
-										warnings: [],
-									};
-								}
-
-								const requiredFinalCouncilMembers = [
-									'critic',
-									'reviewer',
-									'sme',
-									'test_engineer',
-									'explorer',
-								];
-								const membersVoted = Array.isArray(entry.membersVoted)
+								// Quorum per the explicit final completion policy
+								// (issue #2102 contract C). Default all_required preserves
+								// the exact legacy requirement; quorum is an explicit,
+								// bounded weakening. Only distinct canonical roles of the
+								// five-role set count; unknown names never count.
+								const requiredMembers =
+									completionPolicy.mode === 'quorum'
+										? completionPolicy.minimumMembers
+										: COUNCIL_MEMBER_ROLES.length;
+								const rawMembersVoted = Array.isArray(entry.membersVoted)
 									? entry.membersVoted.filter(
 											(member: unknown): member is string =>
 												typeof member === 'string',
 										)
 									: [];
-								const membersAbsent = Array.isArray(entry.membersAbsent)
-									? entry.membersAbsent.filter(
-											(member: unknown): member is string =>
-												typeof member === 'string',
-										)
-									: [];
-								const distinctMembersVoted = new Set(membersVoted);
-								const hasAllRequiredMembers =
-									requiredFinalCouncilMembers.every((member) =>
-										distinctMembersVoted.has(member),
-									) &&
-									distinctMembersVoted.size ===
-										requiredFinalCouncilMembers.length &&
-									membersAbsent.length === 0;
-								if (!hasAllRequiredMembers) {
+								const distinctCanonicalVoted = new Set(
+									rawMembersVoted
+										.map((member: string) => resolveCouncilMemberRole(member))
+										.filter((role: string | null): role is string =>
+											Boolean(role),
+										),
+								);
+								// Recompute absentees from canonical roles; do not trust the
+								// persisted membersAbsent array.
+								const membersAbsent = COUNCIL_MEMBER_ROLES.filter(
+									(role) => !distinctCanonicalVoted.has(role),
+								);
+								const strictAllMembersPresent =
+									distinctCanonicalVoted.size === COUNCIL_MEMBER_ROLES.length;
+								const quorumSatisfied =
+									completionPolicy.mode === 'quorum'
+										? distinctCanonicalVoted.size >= requiredMembers
+										: strictAllMembersPresent && membersAbsent.length === 0;
+								if (
+									typeof entry.quorumSize !== 'number' ||
+									!Number.isFinite(entry.quorumSize) ||
+									entry.quorumSize < requiredMembers ||
+									!quorumSatisfied
+								) {
 									return {
 										blocked: true,
 										reason: 'FINAL_COUNCIL_MISSING_QUORUM',
-										message: `Phase ${phase} (last phase) cannot be completed: final council evidence does not prove all five required members voted. Re-run the project-scoped five-member final council and call write_final_council_evidence to generate complete evidence.`,
+										message: `Phase ${phase} (last phase) cannot be completed: final council evidence does not prove the required quorum (policy ${completionPolicy.mode}${
+											completionPolicy.mode === 'quorum'
+												? `, minimumMembers: ${completionPolicy.minimumMembers}`
+												: ''
+										}; recorded quorumSize: ${
+											typeof entry.quorumSize === 'number'
+												? entry.quorumSize
+												: 'missing'
+										}; distinct canonical members: ${distinctCanonicalVoted.size} of ${requiredMembers} required; absent: [${membersAbsent.join(', ')}]). Re-run the project-scoped final council and call write_final_council_evidence to generate quorumed evidence.`,
 										agentsDispatched,
 										agentsMissing: [],
 										warnings: [],
@@ -377,7 +406,7 @@ export async function runFinalCouncilGate(
 							agentsDispatched,
 							agentsMissing: [],
 							warnings: [
-								`Final council required - dispatch the five project-scoped council members, then call write_final_council_evidence to persist quorumed evidence.`,
+								`Final council required - dispatch the project-scoped council members, then call write_final_council_evidence to persist quorumed evidence.`,
 							],
 						};
 					}

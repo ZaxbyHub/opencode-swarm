@@ -184,7 +184,7 @@ describe('pr-workflow-gate item-keyed reviewer/critic coherence', () => {
 			[
 				{
 					laneId: 'rv-new-a',
-					rows: reviewed([BASE_IDS[0]], 'DISPROVED', 'LOW'),
+					rows: reviewed([BASE_IDS[0]], 'DISPROVED', 'NONE'),
 				},
 			],
 		);
@@ -202,7 +202,7 @@ describe('pr-workflow-gate item-keyed reviewer/critic coherence', () => {
 			laneId: 'rv-new-a',
 			workflowLane: 'rv-new-a',
 			classification: 'DISPROVED',
-			severity: 'LOW',
+			severity: 'NONE',
 		});
 		expect(composed.claims.get(BASE_IDS[1])).toMatchObject({
 			batchId: 'rv-old',
@@ -210,7 +210,7 @@ describe('pr-workflow-gate item-keyed reviewer/critic coherence', () => {
 			workflowLane: 'rv-old-a',
 			classification: 'CONFIRMED',
 		});
-		// Derivation must pick the same winner: C-0 is DISPROVED/LOW, so it is
+		// Derivation must pick the same winner: C-0 is DISPROVED/NONE, so it is
 		// out of the critic inventory while its five siblings stay in.
 		await expect(
 			recordPrReviewValidationBatch(
@@ -279,7 +279,7 @@ describe('pr-workflow-gate item-keyed reviewer/critic coherence', () => {
 		const challenged = BASE_IDS.slice(0, 3);
 		const suppressed = BASE_IDS.slice(3);
 		const rows = (rationale: string) =>
-			`${reviewed(challenged, 'CONFIRMED', 'HIGH', rationale)}\n${reviewed(suppressed, 'DISPROVED', 'LOW')}`;
+			`${reviewed(challenged, 'CONFIRMED', 'HIGH', rationale)}\n${reviewed(suppressed, 'DISPROVED', 'NONE')}`;
 		await reviewerBatch(
 			'rv-1',
 			[{ laneId: 'rv-1-a', reviewItemIds: BASE_IDS }],
@@ -317,7 +317,7 @@ describe('pr-workflow-gate item-keyed reviewer/critic coherence', () => {
 			[
 				{
 					laneId: 'rv-2-a',
-					rows: `${reviewed([challenged[0]], 'CONFIRMED', 'HIGH', 'revised root cause')}\n${reviewed(challenged.slice(1))}\n${reviewed(suppressed, 'DISPROVED', 'LOW')}`,
+					rows: `${reviewed([challenged[0]], 'CONFIRMED', 'HIGH', 'revised root cause')}\n${reviewed(challenged.slice(1))}\n${reviewed(suppressed, 'DISPROVED', 'NONE')}`,
 				},
 			],
 		);
@@ -395,7 +395,7 @@ describe('pr-workflow-gate item-keyed reviewer/critic coherence', () => {
 				],
 			),
 		).rejects.toThrow(
-			`record ${BASE_IDS[0]} has no authoritative reviewer verdict`,
+			`${BASE_IDS[0]}: no authoritative reviewer verdict (absent from the settled reviewer map)`,
 		);
 	});
 
@@ -416,7 +416,7 @@ describe('pr-workflow-gate item-keyed reviewer/critic coherence', () => {
 			[
 				{
 					laneId: 'rv-modern-a',
-					rows: reviewed(halves[0], 'DISPROVED', 'LOW'),
+					rows: reviewed(halves[0], 'DISPROVED', 'NONE'),
 				},
 			],
 		);

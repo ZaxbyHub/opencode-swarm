@@ -16,6 +16,9 @@ import {
 	PR_REVIEW_BASE_DIMENSION_IDS,
 	PR_REVIEW_REQUIRED_MICRO_LANE_IDS,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import { LEGACY_PR_REVIEW_RESILIENCE_POLICY } from '../pr-review-test-policy.js';
+
+export { LEGACY_PR_REVIEW_RESILIENCE_POLICY } from '../pr-review-test-policy.js';
 
 export const SESSION_ID = 'session-123';
 export const HEAD_SHA = 'abc123';
@@ -132,6 +135,7 @@ export async function persistBatch(
 		empty?: boolean;
 		textOverride?: string;
 		transcriptIncomplete?: boolean;
+		truncated?: boolean;
 		artifactRole?: string;
 		subagentSessionId?: string;
 		scope?: string;
@@ -213,7 +217,7 @@ export async function persistBatch(
 			result: {
 				text,
 				chars: stored.chars,
-				truncated: false,
+				truncated: options.truncated ?? false,
 				digest: stored.digest,
 				...(stored.ref ? { outputRef: stored.ref } : {}),
 				...(options.transcriptIncomplete ? { transcriptIncomplete: true } : {}),
@@ -246,6 +250,7 @@ export async function establishReviewPrerequisitesWithConsolidatedMicroLane(
 	await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, baseLanes, {
 		batchId: 'base-all',
 		prHeadSha: HEAD_SHA,
+		prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	});
 	await persistBatch('base-all', 'swarm-pr-review:base', baseLanes);
 	const baseCandidateIds = baseLanes.map((_lane, index) => `C-${index}`);
@@ -378,6 +383,7 @@ export async function establishReviewPrerequisites(): Promise<void> {
 	await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, lanes, {
 		batchId: 'base-all',
 		prHeadSha: HEAD_SHA,
+		prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	});
 	await persistBatch('base-all', 'swarm-pr-review:base', lanes);
 	const triggerRows: Array<Record<string, string>> = [];
@@ -475,6 +481,7 @@ export async function establishReviewPrerequisitesWithOverlappingBaseRetry(): Pr
 	await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, [consolidatedLane], {
 		batchId: 'base-consolidated-ab',
 		prHeadSha: HEAD_SHA,
+		prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	});
 	await persistBatch(
 		'base-consolidated-ab',
@@ -494,6 +501,7 @@ export async function establishReviewPrerequisitesWithOverlappingBaseRetry(): Pr
 	await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, [retryLane], {
 		batchId: 'base-retry-dimb',
 		prHeadSha: HEAD_SHA,
+		prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	});
 	await persistBatch('base-retry-dimb', 'swarm-pr-review:base', [retryLane], {
 		textOverride: [
@@ -510,6 +518,7 @@ export async function establishReviewPrerequisitesWithOverlappingBaseRetry(): Pr
 	await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, remainingLanes, {
 		batchId: 'base-remaining',
 		prHeadSha: HEAD_SHA,
+		prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	});
 	await persistBatch('base-remaining', 'swarm-pr-review:base', remainingLanes, {
 		scope: PR_REVIEW_SCOPE,
@@ -591,6 +600,7 @@ export async function establishReviewPrerequisitesWithMislabeledSingletonLane():
 	await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, baseLanes, {
 		batchId: 'base-all',
 		prHeadSha: HEAD_SHA,
+		prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	});
 	const [mislabeledLane, ...normalLanes] = baseLanes;
 	await persistBatch('base-all', 'swarm-pr-review:base', normalLanes);

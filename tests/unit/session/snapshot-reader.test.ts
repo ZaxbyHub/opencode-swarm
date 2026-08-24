@@ -697,7 +697,10 @@ describe('rehydrateState', () => {
 		});
 	});
 
-	it('populates activeAgent from snapshot', async () => {
+	it('filters activeAgent entries whose session is not restored (ghosts)', async () => {
+		// Positive restore coverage (entries kept when the session IS restored)
+		// lives in snapshot-ghost-entry-eviction.test.ts. With no restored
+		// sessions, every satellite entry is a ghost and must be dropped.
 		const snapshot: SnapshotData = {
 			version: 1,
 			writtenAt: Date.now(),
@@ -713,13 +716,10 @@ describe('rehydrateState', () => {
 
 		await rehydrateState(snapshot);
 
-		expect(swarmState.activeAgent.size).toBe(3);
-		expect(swarmState.activeAgent.get('session-1')).toBe('architect');
-		expect(swarmState.activeAgent.get('session-2')).toBe('coder');
-		expect(swarmState.activeAgent.get('session-3')).toBe('reviewer');
+		expect(swarmState.activeAgent.size).toBe(0);
 	});
 
-	it('populates delegationChains from snapshot', async () => {
+	it('filters delegationChains whose session is not restored (ghosts)', async () => {
 		const snapshot: SnapshotData = {
 			version: 1,
 			writtenAt: Date.now(),
@@ -739,14 +739,7 @@ describe('rehydrateState', () => {
 
 		await rehydrateState(snapshot);
 
-		expect(swarmState.delegationChains.size).toBe(2);
-		expect(swarmState.delegationChains.get('session-1')).toEqual([
-			{ from: 'architect', to: 'coder', timestamp: 123456 },
-			{ from: 'coder', to: 'reviewer', timestamp: 123457 },
-		]);
-		expect(swarmState.delegationChains.get('session-2')).toEqual([
-			{ from: 'architect', to: 'test_engineer', timestamp: 123458 },
-		]);
+		expect(swarmState.delegationChains.size).toBe(0);
 	});
 
 	it('populates agentSessions using deserializeAgentSession', async () => {
@@ -1084,7 +1077,11 @@ describe('loadSnapshot', () => {
 			failureCount: 2,
 			totalDuration: 5000,
 		});
-		expect(swarmState.activeAgent.get('session-1')).toBe('architect');
+		// session-1 has no agentSessions entry in the fixture, so its
+		// activeAgent entry is a ghost and is filtered on rehydration. The
+		// restored-session positive case is covered end-to-end in
+		// snapshot-ghost-entry-eviction.test.ts.
+		expect(swarmState.activeAgent.get('session-1')).toBeUndefined();
 	});
 
 	it('with missing file: leaves swarmState at defaults (no-op)', async () => {
@@ -1217,26 +1214,26 @@ describe('deserializeAgentSession - taskWorkflowStates', () => {
 		expect(result.taskWorkflowStates.get('task-2')).toBe('idle');
 	});
 
-	it('all 6 valid states are accepted', () => {
+	it('all 7 valid states are accepted', () => {
 		const serialized = createBaseSession();
-		(serialized as any).taskWorkflowStates = {
-			'task-1': 'idle',
-			'task-2': 'coder_delegated',
-			'task-3': 'pre_check_passed',
-			'task-4': 'reviewer_run',
-			'task-5': 'tests_run',
-			'task-6': 'complete',
-		};
-
+		const states = [
+			'idle',
+			'coder_delegated',
+			'pre_check_passed',
+			'reviewer_run',
+			'tests_run',
+			'complete',
+			'closed',
+		];
+		(serialized as any).taskWorkflowStates = Object.fromEntries(
+			states.map((state, index) => [`task-${index + 1}`, state]),
+		);
 		const result = deserializeAgentSession(serialized);
 
-		expect(result.taskWorkflowStates.size).toBe(6);
-		expect(result.taskWorkflowStates.get('task-1')).toBe('idle');
-		expect(result.taskWorkflowStates.get('task-2')).toBe('coder_delegated');
-		expect(result.taskWorkflowStates.get('task-3')).toBe('pre_check_passed');
-		expect(result.taskWorkflowStates.get('task-4')).toBe('reviewer_run');
-		expect(result.taskWorkflowStates.get('task-5')).toBe('tests_run');
-		expect(result.taskWorkflowStates.get('task-6')).toBe('complete');
+		expect(result.taskWorkflowStates.size).toBe(7);
+		for (const [index, state] of states.entries()) {
+			expect(result.taskWorkflowStates.get(`task-${index + 1}`)).toBe(state);
+		}
 	});
 
 	it('empty taskWorkflowStates object → empty Map', () => {

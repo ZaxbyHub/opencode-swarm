@@ -37,11 +37,13 @@ const CI_COMMAND_TO_SKILL_STRING: Record<string, string> = {
 		'bun run scripts/check-tool-registration.ts',
 	'bun run check:runtime-src-refs': 'bun run check:runtime-src-refs',
 	'bun run check:events': 'bun run check:events',
+	'bun run check:retention': 'bun run check:retention',
 	'bash scripts/check-cross-contamination.sh':
 		'bash scripts/check-cross-contamination.sh',
 	'bash scripts/check-test-clock.sh': 'bash scripts/check-test-clock.sh',
 	'bun run check:test-file-cap': 'bun run check:test-file-cap',
 	'bun run check:gate-portability': 'bun run check:gate-portability',
+	'bun run check:bare-spawn': 'bun run check:bare-spawn',
 	'bash scripts/check-test-tmpdir.sh': 'bash scripts/check-test-tmpdir.sh',
 	'bash scripts/check-bash-portability.sh':
 		'bash scripts/check-bash-portability.sh',

@@ -327,6 +327,19 @@ Default resolution is presence-sensitive:
 
 When `auto_review.enabled` is `true`, every returning reviewer Task delegation has its legacy verdict and structured findings parsed and persisted when unambiguous, independently of which automatic trigger is selected. Version-7 installations with auto-review disabled keep their legacy reviewer prompts and do not parse or persist structured Stage-B receipts.
 
+#### Reviewer-scope evidence contract (v2 manifest)
+
+Reviewer evidence is bound to an exact, versioned manifest — `reviewer-task-files-v2` — built from the coder generation's guardrail-observed writes:
+
+- **Exact manifest identity.** Every file contributes its complete byte count and SHA-256, computed by a bounded-memory streaming capture (fixed 256 KiB chunks, `fstat` identity checks before and after, descriptor-first open with no-follow on POSIX). There are no per-file or aggregate byte caps on file identity: a file of any size is either fingerprinted exactly or the capture fails typed. A partial, sampled, or capped digest can never compare equal.
+- **Automatic vs manual delivery.** `max_diff_kb` is a *delivery* budget only. Files whose bytes fit the budget are marked `inline` in the reviewer prompt manifest block; the rest are marked `manual` and the reviewer is instructed to inspect them through read-only tools against the recorded SHA-256. The budget never changes which files enter the manifest and never changes the manifest digest. The reviewer Task prompt receives a bounded `<reviewer_scope_manifest>` block carrying the manifest hash, HEAD, workspace identity, and per-file state; receipts persist that exact hash.
+- **Root correctness.** The coder generation persists the canonical workspace identity (lane root for worktree-isolated coders, primary root otherwise) at dispatch time, and every capture/equality site reads from that root. Lane generations become reviewable from the primary checkout only after merge-back verification confirms the primary bytes match the lane manifest (`REVIEWER_SCOPE_MERGEBACK_VERIFIED` advisory). A merge conflict or deferred merge retains the generation in a typed `mergeback_pending` state — it is never relabeled as a generic reviewer-stale error.
+- **Retry behavior.** Transient capture classes — HEAD timeout, HEAD movement during capture, file mutation during streaming, capture deadline — get a bounded inline retry (3 attempts / 10 s). Exhausted retries throw a typed `REVIEWER_CAPTURE_RETRY_EXHAUSTED` and RETAIN the generation for an architect retry or explicit manual review; infrastructure failure never discards evidence. A genuine byte change after the coder's post-write capture is `REVIEWER_SCOPE_STALE` and discards the generation — retry can never turn a real change into equality. Permanent classes (symlink/reparse, non-regular, unreadable, outside-workspace, workspace mismatch) are typed `REVIEWER_CAPTURE_FAILED:<code>` with an `ACTION[architect]` recovery step.
+- **No-change semantics.** A successful coder with zero guardrail-observed writes AND a verified clean `git status` completes the generation as `no_change` (`coder_no_change` transition): no reviewer pass is owed, no review debt is created, and reviewer/test/task gates do not advance from it. The architect may re-dispatch the coder if changes were intended. Zero observed writes with a dirty tree stays `collecting` with an actionable `REVIEWER_SCOPE_UNATTRIBUTED_CHANGE` advisory (changes escaped guardrail observation).
+- **Legacy v1 receipts.** Receipts recorded before the v2 manifest (description `reviewer-task-files-v1`) can never satisfy a v2 rebuild: every scope this build constructs carries the v2 description, and the receipt's content-hash comparison fails closed on any v1-shaped scope. No v1 evidence is reinterpreted or backfilled and no v1 scope object is ever constructed.
+- **Retention bounds.** Unclaimed reviewer-scope generations sweep at the 2-hour idle TTL, EXCEPT the actionable merge-back states (`mergeback_pending` / `mergeback_mismatch`), which are retained until merge-back settles, same-task supersession replaces them, or the 256-generation capacity evicts them.
+- **Capture latency bound.** Capture is synchronous on the tool-after hook: worst-case stall is the 10 s batch deadline plus one 256 KiB chunk read per attempt (self-terminating via the typed `capture_deadline`); a 100 MiB file hashes in ~0.1 s on a warm cache. A lane left with stale untracked files from a prior run can surface `REVIEWER_SCOPE_UNATTRIBUTED_CHANGE` for a coder that wrote nothing — inspect the lane before re-dispatching.
+
 ```json
 {
   "auto_review": {
@@ -431,13 +444,51 @@ Disabled by default. When enabled, the `docs_design` agent writes
 target repo; the drift check writes `.swarm/doc-drift-phase-N.json`. See
 [Commands → `/swarm design-docs`](commands.md).
 
+### Git (`git`)
+
+Hardening for git-executable resolution (issue #2236). Optional override for
+the git binary the plugin invokes, ahead of the built-in platform/PATH
+candidate list (`src/utils/git-executable.ts`).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `binary` | string | _(unset)_ | Absolute path to the git executable to try first. **User-level config only** — see below. Non-empty-string-validated at load; usability (absolute path, exists, output matches `git version <n>.<n>`) is checked by the resolver itself — an unusable value is skipped with a warning, never fatal |
+
+> **`git.binary` is ignored in a project config.** This key is honored **only**
+> from the user-level config (`<config dir>/opencode/opencode-swarm.json`) and
+> the `OPENCODE_SWARM_GIT_BINARY` environment variable. A value set in a
+> repository's `.opencode/opencode-swarm.json` is **dropped with a warning**
+> and never used.
+>
+> The reason is that `git.binary` selects the executable the plugin spawns for
+> every git command it runs, while the project config file lives *inside the
+> repository* — so a repository could ship both a config naming a shim and the
+> shim itself, and the shim would then run with your privileges the moment you
+> opened the repo (CWE-427). If you need a per-machine git, set it in your user
+> config or the environment variable; there is no per-repository form of this
+> option.
+
+The environment variable `OPENCODE_SWARM_GIT_BINARY` always takes precedence
+over `git.binary` when set — it is the escape hatch a blocked user can set
+without editing a config file. When neither is set, or the configured value
+is unusable, the resolver falls through its built-in candidate list
+(platform-specific absolute paths, then every `git` match on `PATH`, then the
+bare `git` name as a last resort) — see `describeGitResolution()` for a
+diagnostic of the most recent probe cycle.
+
+A candidate is accepted only if `<candidate> --version` exits 0 **and** prints
+git's own `git version <major>.<minor>…` line. A program that exits 0 while
+printing anything else is rejected, so an arbitrary executable cannot be
+mistaken for git — this applies to the environment variable and every
+automatically discovered candidate too, not just the config value.
+
 ### Memory
 
 Optional scoped memory substrate for recall and proposal-only memory writes.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | boolean | `false` | Enable agent access to `swarm_memory_recall` and `swarm_memory_propose` |
+| `enabled` | boolean | `false` | Enable agent access to `swarm_memory_recall`, `swarm_memory_propose`, and `swarm_memory_outcome` |
 | `provider` | string | `"sqlite"` | Memory provider. Supports default `"sqlite"` and legacy/debug `"local-jsonl"` |
 | `storageDir` | string | `".swarm/memory"` | Local storage directory under the project root |
 | `sqlite.path` | string | `".swarm/memory/memory.db"` | SQLite database path. Must remain inside `.swarm/` |
@@ -450,12 +501,18 @@ Optional scoped memory substrate for recall and proposal-only memory writes.
 | `recall.injection.requireQuerySignal` | boolean | `true` | Require text, tag, file, symbol, or explicit kind query signal before automatic injection |
 | `recall.injection.maxItems` | number | `6` | Maximum memories automatically injected into agent context |
 | `recall.injection.tokenBudget` | number | `1000` | Token budget for automatic memory injection |
+| `reflection.enabled` | boolean | `false` | When `memory.enabled=true`, regenerate `.swarm/reflections/lessons.{md,json}` and allow bounded system-prompt reflection injection |
+| `reflection.halfLifeDays` | number | `30` | Half-life used for signed outcome decay |
 | `writes.mode` | string | `"propose"` | Normal agents can only create proposals |
 | `redaction.rejectDurableSecrets` | boolean | `true` | Reject durable memories that contain likely secrets |
+| `redaction.detectPii` | boolean | `false` | Run the PII detector over durable memory text at the write boundary and attach a types/score summary to proposals (issue #1466) |
+| `redaction.piiDetector` | `"regex" \| "ner"` | `"regex"` | PII detector implementation: `regex` (dependency-free) or `ner` (requires the optional `@xenova/transformers` peer dependency; typed error when absent) |
+| `redaction.rejectDurablePii` | boolean | `false` | Reject durable memory proposals whose PII score exceeds `piiThreshold`; rejections are logged to the memory audit log (SQLite provider) as `pii_rejected` (types/score only, never matched text) |
+| `redaction.piiThreshold` | number | `0.7` | PII score threshold (max finding confidence) above which durable memories are rejected. Exclusive: a finding rejects only when its score is strictly GREATER; must be < 1 (scores never reach 1, so 1 would silently disable rejection and is rejected at parse) |
 | `maintenance.lowUtilityMaxConfidence` | number | `0.45` | Confidence threshold used by `/swarm memory stale` low-utility reporting |
 | `maintenance.lowUtilityMinAgeDays` | number | `30` | Age threshold used by `/swarm memory stale` low-utility reporting |
 
-Memory stores durable state in `.swarm/memory/memory.db` by default. Legacy JSONL files under `.swarm/memory/` are migrated once into SQLite, backed up, and remain available through `memory.provider="local-jsonl"` for legacy/debug mode. Recall is scope-filtered and labels retrieved memory as untrusted background. Proposals do not become durable memory without curator or trusted gateway review. See [Swarm Memory](memory.md).
+Memory stores durable state in `.swarm/memory/memory.db` by default. Legacy JSONL files under `.swarm/memory/` are migrated once into SQLite, backed up, and remain available through `memory.provider="local-jsonl"` for legacy/debug mode. Recall is scope-filtered and labels retrieved memory as untrusted background. Proposals do not become durable memory without curator or trusted gateway review. Reflection remains off unless both `memory.enabled` and `memory.reflection.enabled` are true. See [Swarm Memory](memory.md).
 
 ### PR Monitor
 
@@ -543,6 +600,42 @@ The worker is **lazily started** on first subscription (gated by `pr_monitor.ena
 - **Advisory delivery** (`event_delivery: "advisory"`, legacy): events queue as session-scoped advisories with dedup tokens and surface on the session's next model turn.
 
 After a successful delivery the subscription's `hasUnaddressedEvents` flag is cleared, so delivered events no longer exempt the subscription from the TTL sweep indefinitely.
+
+### pr_review_resilience
+
+Controls staged canary/fanout resilience for Profile A `PR_REVIEW` base waves.
+When enabled, depth tiers M and L must run each base attempt as a singleton
+canary batch followed by a fanout batch for the remaining unresolved
+obligations. Attempt 0 plus at most two retry attempts are allowed. Tier S, or
+an explicit `enabled: false`, keeps the legacy single-wave base dispatch.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `true` | Enable staged canary/fanout base-wave resilience for Profile A PR review. `false` preserves the legacy one-wave base dispatch. |
+| `canary_probe_ms` | number | `300000` | Milliseconds to wait before probing whether an unresolved canary lane is still live (1–3600000). |
+| `status_probe_timeout_ms` | number | `2000` | Deadline for the bounded status probe that decides whether a canary is still live before admitting a later retry (1–60000). |
+| `correlated_failure_threshold` | number | `2` | Number of normalized matching terminal failures that opens the shared base-wave circuit and blocks further staged attempts (2–8). |
+| `max_retry_attempts_after_initial` | number | `2` | Maximum retry attempts after attempt 0. The controller therefore allows attempts 0, 1, and 2 by default (0–2). |
+
+**Example** — keep staged resilience enabled with defaults:
+
+```json
+{
+  "pr_review_resilience": {
+    "enabled": true
+  }
+}
+```
+
+**Example** — disable staged canary/fanout and keep the legacy one-wave base dispatch:
+
+```json
+{
+  "pr_review_resilience": {
+    "enabled": false
+  }
+}
+```
 
 ### todo_gate
 
@@ -705,6 +798,58 @@ An episode disarms — resetting every counter — on **either** of two conditio
     "gate_denial_stop_threshold": 3,
     "execution_stall_warn_calls": 50,
     "execution_stall_stop_calls": 100
+  }
+}
+```
+
+### macOS sandbox activation (`guardrails.sandbox_macos_enabled`)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `sandbox_macos_enabled` | boolean | `false` | Enables `sandbox-exec` containment for bash/shell tool calls on macOS. |
+
+Issue #2236 (RC2) found that the macOS sandbox availability probe invoked
+`sandbox-exec --version` — a flag that does not exist in `sandbox-exec(8)`'s
+BSD-getopt argument grammar. The invalid flag made the probe fail on **every**
+macOS host, so `MacOSSandboxExecutor` has never actually activated in
+production; bash/shell commands ran unsandboxed with only tool-layer
+enforcement, silently. The probe is now corrected (gates on exit code 0 only,
+never on stdout/stderr content) and shares its SBPL profile shape with the
+production profile, so probe success reliably implies the production
+profile's primitives parse.
+
+That correction alone is not sufficient to turn the sandbox on by default.
+The production profile's last-match-wins primitive ordering
+(`src/sandbox/macos/sandbox-exec-executor.ts`, see the `buildSandboxProfile`
+doc comment) is reasoned from documented SBPL semantics but has not been
+empirically re-verified against a real macOS host's `sandbox-exec` from this
+project's Windows/Linux development environments. If that ordering is wrong,
+every declared scope write would be denied and bash would break for macOS
+users — strictly worse than today's fail-open (unsandboxed) behavior.
+
+`sandbox_macos_enabled` therefore defaults to `false`. When `false`,
+`getExecutor()` behaves exactly as it did before the probe fix: it resolves
+to `null`, and every consumer (`applySandboxExecution`, `/swarm diagnose`)
+reports the same "executor not available, running unsandboxed" state as
+before. Set it to `true` only after verifying the production SBPL profile on
+a real macOS host — for example, confirming that a command targeting an
+in-scope path succeeds and a command targeting an out-of-scope path is denied
+under a real `sandbox-exec -f <profile>` invocation.
+
+When enabled on macOS, `applySandboxExecution` also applies the DYLD
+injection-variable hardening declared by
+`MacOSSandboxExecutor.getEnvOverrides()` — unsetting `DYLD_INSERT_LIBRARIES`,
+`DYLD_LIBRARY_PATH`, `DYLD_FRAMEWORK_PATH`, and `DYLD_ROOT_PATH`, and pinning
+`PATH` to the base-OS bin directories — baked into the wrapped command via
+SBPL `(setenv)`/`(unsetenv)` primitives. This wiring is macOS-only: Windows
+and Linux `getEnvOverrides()` implementations remain unwired in this release
+(Windows strong mode's `PATH: null` would be a separate, riskier behavior
+change applied to real commands for the first time).
+
+```json
+{
+  "guardrails": {
+    "sandbox_macos_enabled": true
   }
 }
 ```
@@ -929,11 +1074,13 @@ Opt-in verification gate that runs five specialized reviewers in parallel before
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Master switch for the council gate |
 | `maxRounds` | number | `3` | Maximum REJECT-retry rounds before architect must escalate to user (1–10) |
-| `parallelTimeoutMs` | number | `30000` | Per-member dispatch timeout in milliseconds (5000–120000) |
+| `parallelTimeoutMs` | number | `30000` | **DEPRECATED — inert.** No runtime consumer exists and no timeout is enforced; accepted only for parse compatibility. Config doctor warns when it is explicitly set. Remove the key — dispatch timeouts are governed by the agent host. Scheduled for removal. |
 | `vetoPriority` | boolean | `true` | When `true`, any single REJECT blocks advancement |
-| `requireAllMembers` | boolean | `false` | When `true`, reject synthesis if fewer than 5 verdicts provided. Equivalent to `minimumMembers: 5`. |
-| `minimumMembers` | number | `3` | Minimum distinct council members required for quorum (1–5). Set to 1 to disable quorum enforcement. `requireAllMembers: true` overrides this to 5 (stricter constraint wins). |
-| `escalateOnMaxRounds` | string? | undefined | Reserved for future use — no runtime behavior today |
+| `requireAllMembers` | boolean | `false` | When `true`, reject synthesis if fewer than 5 verdicts provided. Equivalent to `minimumMembers: 5`. (Task/phase councils only.) |
+| `minimumMembers` | number | `3` | Minimum distinct council members required for quorum (1–5) at the **task/phase** level. Set to 1 to disable quorum enforcement. `requireAllMembers: true` overrides this to 5 (stricter constraint wins). The **final** council is governed separately by `finalCompletionPolicy`. |
+| `escalateOnMaxRounds` | string? | undefined | **Inert.** Declared for escalation, but no handler/webhook execution exists or runs (#1650). Config doctor warns when it is set. Max-rounds exhaustion instead emits a durable structured event (`.swarm/council/events/max-rounds-exhaustion.jsonl`) and a user escalation message; the run stays fail-closed. Wiring real outbound escalation requires a separate security review. |
+| `finalCompletionPolicy` | object | `{ "mode": "all_required" }` | Final-council completion policy. `all_required` (default) preserves the exact legacy requirement: all five canonical roles, five distinct members, zero absentees. `quorum` is an explicit, bounded weakening requiring `minimumMembers` (3–5) distinct canonical members — unknown, duplicate, and cross-swarm identities never count, and config doctor visibly flags quorum mode as weaker. Member names may be exact canonical roles or multi-swarm prefixed names (e.g. `local_critic`). The normalized policy participates in the council policy digest, so any change invalidates previously accepted final-council evidence. |
+| `freshnessMaxAgeHours` | number | `24` | Maximum age in hours (1–720) for phase-council, architecture-supervisor, and final-council evidence. One shared evaluator and one captured preflight clock govern all three gates; future/invalid timestamps and evidence predating the phase retrospective fail closed. Part of the council policy digest. |
 
 When `enabled: false`, the council gate is completely inert. When enabled, `submit_council_verdicts` must be called before a task can transition to `completed`. See the [Council guide](council/README.md) for the full workflow.
 

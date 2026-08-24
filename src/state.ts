@@ -17,8 +17,10 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { OpencodeClient } from '@opencode-ai/sdk';
 import { ORCHESTRATOR_NAME } from './config/constants';
+import { loadPluginConfig } from './config/loader';
 import { type Plan, PlanSchema, type TaskStatus } from './config/plan-schema';
 import { stripKnownSwarmPrefix } from './config/schema';
+import { computeCouncilReviewIdentity } from './council/council-review-identity';
 import type { CouncilAgent } from './council/types';
 import {
 	getEffectiveGates,
@@ -70,6 +72,11 @@ export { AgentRunContext } from './state/agent-run-context.js';
 interface RehydrationCache {
 	planTaskStates: Map<string, TaskWorkflowState>;
 	evidenceMap: Map<string, TaskEvidence>;
+	/** Inputs for validating rehydrated task-council review identity (#2102). */
+	taskIdentityContext: {
+		plan: Plan | null;
+		councilConfig: import('./council/types').CouncilConfig | undefined;
+	};
 }
 let _rehydrationCache: RehydrationCache | null = null;
 
@@ -147,7 +154,8 @@ export type TaskWorkflowState =
 	| 'tests_run'
 	| 'rework_required'
 	| 'complete'
-	| 'blocked';
+	| 'blocked'
+	| 'closed';
 
 export interface TaskWorkflowCacheEntry {
 	generation: number;
@@ -198,6 +206,25 @@ function compareWorkflowStatePrecedence(
 	return compareTaskWorkflowStateRank(left, right);
 }
 
+/** Typed per-file capture failure retained on a generation (issue #2100). */
+export interface ReviewerScopeCaptureFailure {
+	file: string;
+	code: string;
+	retryable: boolean;
+	attempts: number;
+	at: number;
+}
+
+/**
+ * Merge-back provenance for lane-captured generations. `verified` records the
+ * primary-checkout match that makes the generation reviewable from the primary
+ * root; the failure arm retains an actionable typed reason instead of
+ * relabeling the generation as generic reviewer-stale.
+ */
+export type ReviewerScopeMergebackState =
+	| { verifiedAt: number; primaryWorkspaceIdentity: string }
+	| { failedAt: number; reason: string };
+
 /** Exact lifecycle state for one coder generation and its paired reviewer. */
 export interface ReviewerScopeGeneration {
 	taskId: string;
@@ -205,14 +232,27 @@ export interface ReviewerScopeGeneration {
 	generation: number;
 	sessionIncarnation: string;
 	background: boolean;
+	/** Canonical root every capture/equality site must use (lane or primary). */
+	captureDirectory: string;
+	/** Canonical workspace identity of `captureDirectory` (issue #2100 root correctness). */
+	workspaceIdentity: string;
 	declaredFiles: string[];
 	modifiedFiles: string[];
 	modifiedFileFingerprints: import('./hooks/reviewer-scope-file-fingerprint.js').ReviewerScopeFileFingerprint[];
-	status: 'collecting' | 'ready' | 'claimed';
+	/** Last typed capture failure per file; cleared when that file later captures. */
+	captureFailures: ReviewerScopeCaptureFailure[];
+	status:
+		| 'collecting'
+		| 'ready'
+		| 'claimed'
+		| 'no_change'
+		| 'mergeback_pending'
+		| 'mergeback_mismatch';
 	createdAt: number;
 	readyAt?: number;
 	reviewerCallID?: string;
 	reviewerDispatchScope?: ReviewerScopeDispatchSnapshot;
+	mergeback?: ReviewerScopeMergebackState;
 }
 
 export interface ReviewerScopeDispatchSnapshot {
@@ -238,6 +278,7 @@ function cloneReviewerScopeGeneration(
 				...entry,
 			}),
 		),
+		captureFailures: generation.captureFailures.map((entry) => ({ ...entry })),
 		reviewerDispatchScope: generation.reviewerDispatchScope
 			? {
 					...generation.reviewerDispatchScope,
@@ -264,6 +305,8 @@ export interface ReviewerScopeOwnershipTombstone
 	parentSessionID: string;
 	taskId: string;
 	background: true;
+	captureDirectory: string;
+	workspaceIdentity: string;
 	declaredFiles: string[];
 	modifiedFiles: string[];
 	modifiedFileFingerprints: import('./hooks/reviewer-scope-file-fingerprint.js').ReviewerScopeFileFingerprint[];
@@ -1125,7 +1168,16 @@ function sweepReviewerScopeGenerations(
 		// Claimed state is correlated to a durable reviewer delegation. Its
 		// terminal/error/stale lifecycle owns cleanup; an unrelated in-memory
 		// clock sweep must never invalidate a reviewer that is still running.
-		if (entry.status === 'claimed') continue;
+		// Merge-back states are actionable recovery state (issue #2100
+		// contract D: conflicts RETAIN the generation) — capacity eviction and
+		// same-task supersession remain their bounds, not the idle TTL.
+		if (
+			entry.status === 'claimed' ||
+			entry.status === 'mergeback_pending' ||
+			entry.status === 'mergeback_mismatch'
+		) {
+			continue;
+		}
 		if (
 			!Number.isFinite(entry.createdAt) ||
 			now < entry.createdAt ||
@@ -1143,13 +1195,19 @@ export function startReviewerScopeGeneration(input: {
 	coderCallID: string;
 	background?: boolean;
 	declaredFiles?: string[];
+	/** Canonical root post-write capture must read from (lane or primary). */
+	captureDirectory: string;
+	/** Canonical workspace identity of `captureDirectory` (scope-binding identity). */
+	workspaceIdentity: string;
 	createdAt?: number;
 }): ReviewerScopeGeneration | null {
 	const session = swarmState.agentSessions.get(input.parentSessionID);
 	if (
 		!session ||
 		!isBoundedGenerationValue(input.taskId, 512) ||
-		!isBoundedGenerationValue(input.coderCallID, 512)
+		!isBoundedGenerationValue(input.coderCallID, 512) ||
+		!input.captureDirectory.trim() ||
+		!input.workspaceIdentity.trim()
 	) {
 		return null;
 	}
@@ -1180,9 +1238,12 @@ export function startReviewerScopeGeneration(input: {
 		generation: session.reviewerScopeGenerationCounter,
 		sessionIncarnation: incarnation,
 		background: input.background === true,
+		captureDirectory: input.captureDirectory,
+		workspaceIdentity: input.workspaceIdentity,
 		declaredFiles: [...new Set(input.declaredFiles ?? [])],
 		modifiedFiles: [],
 		modifiedFileFingerprints: [],
+		captureFailures: [],
 		status: 'collecting',
 		createdAt: now,
 	};
@@ -1252,6 +1313,7 @@ export function recordReviewerScopeGenerationFile(input: {
 /**
  * Record the bounded post-write state only after a guarded child write returns
  * successfully. Pre-write routing in modifiedFiles remains authorization metadata.
+ * A successful capture clears any retained typed failure for that file.
  */
 export function recordReviewerScopeGenerationFileFingerprint(input: {
 	parentSessionID: string;
@@ -1271,6 +1333,9 @@ export function recordReviewerScopeGenerationFileFingerprint(input: {
 	if (matches.length !== 1) return false;
 	const generation = matches[0];
 	if (!generation.modifiedFiles.includes(input.fingerprint.file)) return false;
+	generation.captureFailures = generation.captureFailures.filter(
+		(entry) => entry.file !== input.fingerprint.file,
+	);
 	const existingIndex = generation.modifiedFileFingerprints.findIndex(
 		(entry) => entry.file === input.fingerprint.file,
 	);
@@ -1290,12 +1355,81 @@ export function recordReviewerScopeGenerationFileFingerprint(input: {
 	return true;
 }
 
-/** Mark the exact coder call terminal; background running placeholders do not call this. */
+/**
+ * Retain the LAST typed capture failure per file (upsert by file, bounded at
+ * the generation file cap). Failures are diagnostic recovery metadata — they
+ * never invalidate a generation by themselves.
+ */
+export function recordReviewerScopeGenerationCaptureFailure(input: {
+	parentSessionID: string;
+	taskId: string;
+	coderCallID: string;
+	file: string;
+	code: string;
+	retryable: boolean;
+	at?: number;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session || !isBoundedGenerationValue(input.file, 4_096)) return false;
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) =>
+			entry.taskId === input.taskId &&
+			entry.coderCallID === input.coderCallID &&
+			entry.status === 'collecting',
+	);
+	if (matches.length !== 1) return false;
+	const generation = matches[0];
+	const now = input.at ?? Date.now();
+	// Latest observation wins: a failure recorded after a success retires the
+	// stale fingerprint (its bytes are no longer the last-seen state) so the
+	// completeness gate fails closed instead of publishing stale evidence.
+	generation.modifiedFileFingerprints =
+		generation.modifiedFileFingerprints.filter(
+			(entry) => entry.file !== input.file,
+		);
+	const existingIndex = generation.captureFailures.findIndex(
+		(entry) => entry.file === input.file,
+	);
+	if (existingIndex >= 0) {
+		const existing = generation.captureFailures[existingIndex];
+		generation.captureFailures[existingIndex] = {
+			...existing,
+			code: input.code,
+			retryable: input.retryable,
+			attempts: existing.attempts + 1,
+			at: now,
+		};
+		return true;
+	}
+	if (
+		generation.captureFailures.length >= MAX_REVIEWER_SCOPE_GENERATION_FILES
+	) {
+		generation.captureFailures.shift();
+	}
+	generation.captureFailures.push({
+		file: input.file,
+		code: input.code,
+		retryable: input.retryable,
+		attempts: 1,
+		at: now,
+	});
+	return true;
+}
+
+/**
+ * Mark the exact coder call terminal. Transactional publication (issue #2100
+ * contract E): `ready` is published only when every observed file has exactly
+ * one exact fingerprint — a half-populated fingerprint array is never exposed
+ * as reviewable. Incomplete generations stay `collecting` (recoverable).
+ */
 export function markReviewerScopeGenerationReady(input: {
 	parentSessionID: string;
 	taskId: string;
 	coderCallID: string;
 	readyAt?: number;
+	/** Canonical identity of the primary checkout; a lane-rooted generation is not reviewable from it until merge-back verification repoints the root. */
+	primaryWorkspaceIdentity?: string;
 }): boolean {
 	const session = swarmState.agentSessions.get(input.parentSessionID);
 	if (!session) return false;
@@ -1309,9 +1443,127 @@ export function markReviewerScopeGenerationReady(input: {
 			(entry.status === 'collecting' || entry.status === 'ready'),
 	);
 	if (matches.length !== 1) return false;
-	if (matches[0].status === 'ready') return true;
-	matches[0].status = 'ready';
-	matches[0].readyAt = now;
+	const generation = matches[0];
+	if (generation.status === 'ready') return true;
+	if (
+		input.primaryWorkspaceIdentity &&
+		generation.workspaceIdentity !== input.primaryWorkspaceIdentity
+	) {
+		// Lane-captured bytes were never merge-back verified against this
+		// primary: publishing ready would strand every later capture on a
+		// lane directory that merge-back cleanup deletes.
+		return false;
+	}
+	const complete =
+		generation.modifiedFiles.length ===
+			generation.modifiedFileFingerprints.length &&
+		generation.modifiedFiles.every((file) =>
+			generation.modifiedFileFingerprints.some((entry) => entry.file === file),
+		);
+	if (!complete) return false;
+	generation.status = 'ready';
+	generation.readyAt = now;
+	return true;
+}
+
+/** Truthful no-change terminal: zero observed writes, verified zero diff (issue #2100 contract F). */
+export function markReviewerScopeGenerationNoChange(input: {
+	parentSessionID: string;
+	taskId: string;
+	coderCallID: string;
+	at?: number;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const now = input.at ?? Date.now();
+	sweepReviewerScopeGenerations(session, now);
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) =>
+			entry.taskId === input.taskId &&
+			entry.coderCallID === input.coderCallID &&
+			entry.status === 'collecting',
+	);
+	if (matches.length !== 1) return false;
+	const generation = matches[0];
+	if (generation.modifiedFiles.length !== 0) return false;
+	generation.status = 'no_change';
+	generation.readyAt = now;
+	return true;
+}
+
+/**
+ * A lane-captured generation awaits merge-back verification before it is
+ * reviewable from the primary root. Conflicts/deferred merges retain the
+ * generation here — they are never relabeled as generic reviewer-stale.
+ */
+export function markReviewerScopeGenerationMergebackPending(input: {
+	parentSessionID: string;
+	taskId?: string;
+	coderCallID: string;
+	at?: number;
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) =>
+			(input.taskId === undefined || entry.taskId === input.taskId) &&
+			entry.coderCallID === input.coderCallID &&
+			(entry.status === 'collecting' || entry.status === 'ready'),
+	);
+	if (matches.length !== 1) return false;
+	if (matches[0].status === 'mergeback_pending') return true;
+	matches[0].status = 'mergeback_pending';
+	return true;
+}
+
+/**
+ * Pure state transition for merge-back settlement: a verified primary match
+ * publishes `ready`; a typed reason retains the generation as
+ * `mergeback_mismatch` for an actionable architect retry.
+ */
+export function settleReviewerScopeMergeback(input: {
+	parentSessionID: string;
+	taskId?: string;
+	coderCallID: string;
+	outcome:
+		| {
+				verified: true;
+				primaryWorkspaceIdentity: string;
+				primaryDirectory: string;
+				at?: number;
+		  }
+		| { verified: false; reason: string; at?: number };
+}): boolean {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return false;
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) =>
+			(input.taskId === undefined || entry.taskId === input.taskId) &&
+			entry.coderCallID === input.coderCallID &&
+			entry.status === 'mergeback_pending',
+	);
+	if (matches.length !== 1) return false;
+	const generation = matches[0];
+	const now = input.outcome.at ?? Date.now();
+	if (input.outcome.verified) {
+		generation.status = 'ready';
+		if (generation.readyAt === undefined) generation.readyAt = now;
+		generation.mergeback = {
+			verifiedAt: now,
+			primaryWorkspaceIdentity: input.outcome.primaryWorkspaceIdentity,
+		};
+		// The lane directory is torn down right after a verified merge-back;
+		// every later capture/equality site must read the primary checkout the
+		// manifest was verified against (issue #2100 F-001).
+		generation.captureDirectory = input.outcome.primaryDirectory;
+		generation.workspaceIdentity = input.outcome.primaryWorkspaceIdentity;
+		return true;
+	}
+	generation.status = 'mergeback_mismatch';
+	generation.mergeback = { failedAt: now, reason: input.outcome.reason };
 	return true;
 }
 
@@ -1346,6 +1598,27 @@ export function peekReadyReviewerScopeGeneration(input: {
 	const { generations } = ensureReviewerScopeGenerationState(session);
 	const matches = [...generations.values()].filter(
 		(entry) => entry.taskId === input.taskId && entry.status === 'ready',
+	);
+	return matches.length === 1 ? cloneReviewerScopeGeneration(matches[0]) : null;
+}
+
+/**
+ * Inspect the single generation for a task in a NON-reviewable status
+ * (`no_change` | `mergeback_pending` | `mergeback_mismatch`) so lifecycle
+ * denials can name the exact typed recovery action instead of generic stale.
+ */
+export function peekReviewerScopeGenerationByStatus(input: {
+	parentSessionID: string;
+	taskId: string;
+	status: 'no_change' | 'mergeback_pending' | 'mergeback_mismatch';
+	now?: number;
+}): ReviewerScopeGeneration | null {
+	const session = swarmState.agentSessions.get(input.parentSessionID);
+	if (!session) return null;
+	sweepReviewerScopeGenerations(session, input.now ?? Date.now());
+	const { generations } = ensureReviewerScopeGenerationState(session);
+	const matches = [...generations.values()].filter(
+		(entry) => entry.taskId === input.taskId && entry.status === input.status,
 	);
 	return matches.length === 1 ? cloneReviewerScopeGeneration(matches[0]) : null;
 }
@@ -1446,13 +1719,15 @@ export function takeReviewerScopeGeneration(input: {
 			generation: generation.generation,
 			sessionIncarnation: generation.sessionIncarnation,
 			background: true,
+			captureDirectory: generation.captureDirectory,
+			workspaceIdentity: generation.workspaceIdentity,
 			declaredFiles: [...generation.declaredFiles],
 			modifiedFiles: [...generation.modifiedFiles],
 			modifiedFileFingerprints: generation.modifiedFileFingerprints.map(
 				(fingerprint) => ({ ...fingerprint }),
 			),
 			createdAt: generation.createdAt,
-			readyAt: generation.readyAt,
+			readyAt: generation.readyAt ?? input.now ?? Date.now(),
 			consumedAt: input.now ?? Date.now(),
 		};
 		ownershipHistory.set(
@@ -1604,9 +1879,10 @@ let _lastIdleSweepAtMs = 0;
 
 /**
  * Evict every agent session whose last tool activity is older than
- * staleDurationMs, and drop the delegation chain keyed by that same sessionID
- * (delegationChains is keyed by sessionID — see delegation-tracker.ts, which
- * does `delegationChains.set(input.sessionID, ...)`). This is the single
+ * staleDurationMs, and drop the delegation chain and activeAgent entry keyed
+ * by that same sessionID (both maps are keyed by sessionID — see
+ * delegation-tracker.ts, which does `delegationChains.set(input.sessionID,
+ * ...)` and `activeAgent.set(input.sessionID, ...)`). This is the single
  * eviction loop reused by BOTH startAgentSession (eager, on new session start)
  * and maybeSweepStaleSessions (opportunistic, on the hot path) so the logic is
  * never duplicated.
@@ -1632,6 +1908,25 @@ export function sweepStaleSessions(
 		// delegationChains is keyed by sessionID; the evicted session's chain is
 		// now unreachable, so drop it in the same pass to reclaim its memory.
 		swarmState.delegationChains.delete(id);
+		// activeAgent is keyed by sessionID too. Without this, evicted sessions
+		// leave permanent ghost entries that the snapshot writer re-serializes
+		// on every tool.execute.after, growing state.json without bound and
+		// polluting whole-map consumers (curator-llm-factory's heuristic scan).
+		// A session active on the tool path is never its own victim —
+		// ensureAgentSession refreshes lastToolCallTime before it sweeps.
+		// Known bounded edge: a subagent turn that goes >staleDurationMs
+		// between two tool calls loses this entry along with its session state
+		// (the session eviction itself is pre-existing); the next tool call
+		// re-bootstraps the entry to ORCHESTRATOR_NAME (src/index.ts
+		// tool.execute.before) until the next chat.message re-establishes the
+		// real agent. The recreated session's delegationActive=false already
+		// forces that same identity convergence, so the ghost entry this
+		// replaces only masked the edge briefly, at unbounded-growth cost.
+		// Do not "fix" the edge by skipping sessions with pending
+		// pendingToolExecutions: those entries are shell-only and carry no
+		// timestamp, so an interrupted turn would make its session permanently
+		// unevictable — a worse leak than the one this pass closes.
+		swarmState.activeAgent.delete(id);
 	}
 	return staleIds;
 }
@@ -1870,6 +2165,12 @@ export function endAgentSession(sessionId: string): void {
 		});
 	}
 	swarmState.agentSessions.delete(sessionId);
+	// Drop the session-keyed satellite maps in the same pass. Leaving them
+	// behind orphans entries that no sweep can ever reclaim (sweepStaleSessions
+	// iterates agentSessions, which no longer contains this id), so they would
+	// persist in memory and in every state.json snapshot until process exit.
+	swarmState.activeAgent.delete(sessionId);
+	swarmState.delegationChains.delete(sessionId);
 	clearRealtimeLearningNudgeSession(sessionId);
 	// #1821: the same-session learning loop keeps per-session module state (the
 	// candidate queue and the PRM pattern-support/cooldown ledger). Both are
@@ -2336,11 +2637,14 @@ export function beginInvocation(
 	// Prune old windows to prevent memory leak
 	pruneOldWindows(sessionId, 24 * 60 * 60 * 1000, 50); // 24h max age, 50 max windows
 
-	telemetry.delegationBegin(
-		sessionId,
-		stripped,
-		session.currentTaskId ?? 'unknown',
-	);
+	// NOTE: `delegation_begin` telemetry is NOT emitted here. This function is
+	// guardrails bookkeeping — every reachable call site is gated on guardrails
+	// being enabled, so an emission here is unreachable with
+	// `guardrails.enabled: false` while its `delegation_end` counterpart (the
+	// Task handoff in src/index.ts tool.execute.after) still fires. The paired
+	// emission lives at the Task-delegation boundary in src/index.ts
+	// (tool.execute.before), keyed by callID so begin/end carry identical
+	// sessionId/agentName/taskId.
 	return window;
 }
 
@@ -2634,7 +2938,7 @@ export function advanceTaskState(
 		newState as (typeof LINEAR_STATE_ORDER)[number],
 	);
 
-	if (newIndex === -1 || newIndex <= currentIndex) {
+	if (currentIndex === -1 || newIndex === -1 || newIndex <= currentIndex) {
 		throw new Error(
 			`INVALID_TASK_STATE_TRANSITION: ${taskId} ${current} → ${newState}`,
 		);
@@ -2720,7 +3024,8 @@ export function canAdvanceTaskState(
 		newState as (typeof LINEAR_STATE_ORDER)[number],
 	);
 
-	if (newIndex === -1 || newIndex <= currentIndex) return false;
+	if (currentIndex === -1 || newIndex === -1 || newIndex <= currentIndex)
+		return false;
 
 	if (newState === 'complete' && current !== 'tests_run') {
 		const councilEntry = session.taskCouncilApproved?.get(taskId);
@@ -2930,6 +3235,8 @@ function planStatusToWorkflowState(status: TaskStatus): TaskWorkflowState {
 			return 'complete';
 		case 'blocked':
 			return 'blocked';
+		case 'closed':
+			return 'closed';
 		default:
 			return 'idle';
 	}
@@ -3057,7 +3364,21 @@ export async function buildRehydrationCache(directory: string): Promise<void> {
 	}
 
 	const evidenceMap = await readGateEvidenceFromDisk(directory);
-	_rehydrationCache = { planTaskStates, evidenceMap };
+	// Council review identity context (issue #2102): rehydrated task-council
+	// approvals must be bound to the CURRENT review-relevant plan content and
+	// council policy. The plan is already loaded above; the config read is a
+	// small bounded JSON load.
+	let councilConfig: import('./council/types').CouncilConfig | undefined;
+	try {
+		councilConfig = loadPluginConfig(directory).council;
+	} catch {
+		councilConfig = undefined;
+	}
+	_rehydrationCache = {
+		planTaskStates,
+		evidenceMap,
+		taskIdentityContext: { plan, councilConfig },
+	};
 }
 
 /**
@@ -3082,7 +3403,8 @@ export function applyRehydrationCache(session: AgentSessionState): void {
 		session.taskCouncilApproved = new Map();
 	}
 
-	const { planTaskStates, evidenceMap } = _rehydrationCache;
+	const { planTaskStates, evidenceMap, taskIdentityContext } =
+		_rehydrationCache;
 
 	for (const [taskId, planState] of planTaskStates) {
 		const existingState = session.taskWorkflowStates.get(taskId);
@@ -3135,9 +3457,34 @@ export function applyRehydrationCache(session: AgentSessionState): void {
 					roundNumber?: number;
 					quorumSize?: number;
 					workflowGeneration?: number;
+					identity_digest?: unknown;
 			  }
 			| undefined;
 		if (!council) {
+			session.taskCouncilApproved.delete(taskId);
+			continue;
+		}
+		// Council review identity cutover (issue #2102): evidence must carry the
+		// identity digest of the review-relevant plan + council policy it was
+		// approved under, and that digest must still match the CURRENT identity.
+		// Legacy evidence without identity proof fails closed (fresh council run),
+		// mirroring the pre-quorum cutover precedent above. A status-only plan
+		// change keeps the identity stable, so ordinary progress never trips this.
+		const rawIdentityDigest = council.identity_digest;
+		if (
+			typeof rawIdentityDigest !== 'string' ||
+			!/^[a-f0-9]{64}$/.test(rawIdentityDigest)
+		) {
+			session.taskCouncilApproved.delete(taskId);
+			continue;
+		}
+		const expectedIdentity = computeCouncilReviewIdentity({
+			level: 'task',
+			scope: { kind: 'task', taskId },
+			plan: taskIdentityContext.plan,
+			config: taskIdentityContext.councilConfig,
+		});
+		if (rawIdentityDigest !== expectedIdentity.identityDigest) {
 			session.taskCouncilApproved.delete(taskId);
 			continue;
 		}

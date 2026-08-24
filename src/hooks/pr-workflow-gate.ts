@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { type BigIntStats, readFileSync } from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
+import type { SessionStatus } from '@opencode-ai/sdk';
 import { z } from 'zod';
 import {
 	analyzeCandidateFields,
@@ -10,6 +11,8 @@ import {
 	type CandidateSeverity,
 	CLEAN_TEMPLATES,
 	candidateHeaderFamily,
+	type FindingsSeverity,
+	isCandidateSeverity,
 	normalizeCandidateArtifact,
 	type RowFormatFamily,
 	selectCandidateHeader,
@@ -23,9 +26,14 @@ import {
 import {
 	type BackgroundDelegationRecord,
 	type BackgroundDelegationResult,
+	type BackgroundDelegationWorkflowLaneRecovery,
+	DEFAULT_STALE_DELEGATION_TIMEOUT_MS,
 	findByBatchId,
 	readDelegations,
+	type SweepableDelegationStatus,
+	sweepStaleDelegations,
 } from '../background/pending-delegations.js';
+import { MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS } from '../background/pr-review-collection-receipt.js';
 import {
 	PR_REVIEW_REQUIRED_TRIGGER_IDS,
 	type PrReviewInlineTriggerRow,
@@ -60,13 +68,18 @@ import {
 	switchPrFeedbackTrackingCandidateAsync,
 } from '../background/workspace-snapshot.js';
 import { WRITE_TOOL_NAMES } from '../config/constants.js';
-import { resolveGeneratedAgentRole } from '../config/schema.js';
+import {
+	type PrReviewResilienceConfig,
+	resolveGeneratedAgentRole,
+} from '../config/schema.js';
 import {
 	classifyPrWorkflowGitState,
 	type PrWorkflowGitState,
 } from '../git/pr-workflow-state.js';
+import { swarmState } from '../state.js';
 import { getPrWorkflowToolCapability } from '../tools/tool-metadata.js';
 import { warn } from '../utils/logger.js';
+import { withTimeout } from '../utils/timeout.js';
 import { validateSwarmPath } from './utils.js';
 
 export const PR_REVIEW_BASE_DIMENSION_IDS = [
@@ -101,7 +114,6 @@ export type PrReviewLaneValidationPredicate =
 	| 'record.status'
 	| 'result.output_degraded'
 	| 'result.transcript_incomplete'
-	| 'result.truncated'
 	| 'result.chars'
 	| 'result.digest'
 	| 'result.output_ref'
@@ -127,7 +139,9 @@ export type PrReviewLaneValidationPredicate =
 	| 'discovery.header'
 	| 'discovery.row'
 	| 'discovery.coverage'
-	| 'discovery.duplicate_evidence';
+	| 'discovery.duplicate_evidence'
+	| 'reviewer.verdict_rows'
+	| 'critic.verdict_rows';
 
 export interface PrReviewLaneValidationFailure {
 	predicate: PrReviewLaneValidationPredicate;
@@ -145,6 +159,8 @@ export type PrReviewLaneValidationResult =
 			 * distinguishable from a well-formed one.
 			 */
 			salvaged?: readonly string[];
+			/** Typed recovery disclosures persisted to the durable delegation ledger. */
+			recoveries?: readonly BackgroundDelegationWorkflowLaneRecovery[];
 	  }
 	| { ok: false; failure: PrReviewLaneValidationFailure };
 
@@ -166,6 +182,33 @@ export interface PrReviewDiscoveryLaneValidationInput {
 		checkWorkflowLane?: boolean;
 	};
 }
+
+export interface PrWorkflowTransportRecoveryValidationInput {
+	directory: string;
+	record: BackgroundDelegationRecord;
+	result: BackgroundDelegationResult;
+	artifact: LaneOutputArtifact | null;
+	revisionDigest: string;
+}
+
+export interface PrReviewVerdictCollectionReceipt {
+	assignedReviewItemIds: string[];
+	acceptedReviewItemIds: string[];
+	rejectedReviewItemIds: string[];
+}
+
+export type PrWorkflowTransportRecoveryValidationResult =
+	| {
+			ok: true;
+			recoveries?: readonly BackgroundDelegationWorkflowLaneRecovery[];
+			receipt?: PrReviewVerdictCollectionReceipt;
+	  }
+	| {
+			ok: false;
+			reason: string;
+			failure?: PrReviewLaneValidationFailure;
+			receipt?: PrReviewVerdictCollectionReceipt;
+	  };
 
 export interface PrWorkflowCheckoutRecoveryRecord {
 	code:
@@ -316,6 +359,37 @@ interface PrReviewBaseDispatchRecord {
 	validatedAt: string;
 }
 
+interface PrReviewResiliencePolicyRecord {
+	enabled: boolean;
+	canaryProbeMs: number;
+	statusProbeTimeoutMs: number;
+	correlatedFailureThreshold: number;
+	maxRetryAttemptsAfterInitial: number;
+}
+
+interface PrReviewResilienceAttemptRecord {
+	attempt: 0 | 1 | 2;
+	targetDimensions: PrReviewBaseDimensionId[];
+	canaryBatchId: string;
+	canaryLaneId: string;
+	canaryWorkflowLane: PrReviewBaseDimensionId;
+	admittedAt: string;
+	fanoutBatchId?: string;
+}
+
+interface PrReviewResilienceCircuitRecord {
+	signature: string;
+	count: number;
+	contributors: Array<{ batchId: string; laneId: string }>;
+	openedAt: string;
+}
+
+interface PrReviewResilienceStateRecord {
+	policy: PrReviewResiliencePolicyRecord;
+	attempts: PrReviewResilienceAttemptRecord[];
+	circuit?: PrReviewResilienceCircuitRecord;
+}
+
 interface PrFeedbackVerificationRecord {
 	batchId: string;
 	ownership: PrFeedbackLaneOwnership[];
@@ -405,7 +479,14 @@ type PrReviewArtifactRecord = {
 		| 'report'
 		| 'suppress_with_reason'
 		| 'handoff_to_feedback';
-	severity?: CandidateSeverity;
+	/**
+	 * Optional in the TYPE only so a legacy findings row persisted before
+	 * required-severity landed still loads (`readFindings` JSON-parses without
+	 * re-validating). Presence is REQUIRED by
+	 * `assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts`, which treats an
+	 * omitted severity as a mismatch rather than skipping the check (issue #2279).
+	 */
+	severity?: FindingsSeverity;
 };
 
 interface PrFeedbackScopeDeclarationRecord {
@@ -442,8 +523,9 @@ interface PrReviewValidationBatchRecord {
 interface PrReviewBatchCoherenceRecord {
 	/**
 	 * The exact candidate/critic inventory this batch's ownership was validated
-	 * against at record time (the same set `assertExactStringSet` compared the
-	 * declared lane items to).
+	 * against at record time. A batch may own a subset of this inventory; retaining
+	 * the full set here prevents stale partial batches from contributing after the
+	 * mechanically derived inventory changes.
 	 */
 	validatedInventory: string[];
 	/**
@@ -455,6 +537,8 @@ interface PrReviewBatchCoherenceRecord {
 	 * claims it invalidated and leaves its siblings intact.
 	 */
 	reviewerItemBindings?: Record<string, string>;
+	/** Key encoding for reviewerItemBindings; absent means legacy raw item IDs. */
+	reviewerItemBindingKeyEncoding?: 'prefixed-v1';
 }
 
 export interface PrWorkflowGateState {
@@ -481,6 +565,7 @@ export interface PrWorkflowGateState {
 	prReviewBaseDispatches?: PrReviewBaseDispatchRecord[];
 	/** @deprecated Compatibility projection of the most recent base dispatch. */
 	prReviewBaseDispatch?: PrReviewBaseDispatchRecord;
+	prReviewResilience?: PrReviewResilienceStateRecord;
 	/** Canonical ordered semantic ledger frozen by the first micro dispatch. */
 	prReviewTriggerLedger?: PrReviewInlineTriggerRow[];
 	prReviewTriggerEvalPath?: string;
@@ -525,6 +610,12 @@ export interface PrWorkflowGateState {
 	prFeedbackTargetUrl?: string;
 	prFeedbackReviewHandoff?: PrFeedbackReviewHandoffRecord;
 	prFeedbackInventory?: string[];
+	/**
+	 * Append-only audit ledger of entries added to `prFeedbackInventory` after
+	 * its first declaration (issue #2242 R3). Bounded by
+	 * {@link MAX_PR_FEEDBACK_INVENTORY_AMENDMENTS}; never pruned.
+	 */
+	prFeedbackInventoryAmendments?: PrFeedbackInventoryAmendmentRecord[];
 	prFeedbackVerifications?: PrFeedbackVerificationRecord[];
 	/**
 	 * Item -> lane bindings of verification batches the capacity GC dropped
@@ -562,6 +653,19 @@ const GATE_SCHEMA_VERSION = 1 as const;
 const MAX_TRACKED_SESSIONS = 200;
 const MAX_WORKFLOW_BATCHES = 128;
 /**
+ * Every valid PR_REVIEW base batch partitions the fixed six-dimension base
+ * universe exactly once, so a batch can contribute at most one failed-dimension
+ * proof per dimension and therefore no more than six contributor entries. A
+ * consolidated retry lane may own multiple failed dimensions, so the same
+ * `(batchId, laneId)` pair can legitimately appear more than once in the proof
+ * set when one lane represents multiple dimensions.
+ * The resilience circuit's contributor proof set is bounded by the batch cap
+ * times that per-batch maximum.
+ */
+const MAX_PR_REVIEW_BASE_LANES_PER_BATCH = PR_REVIEW_BASE_DIMENSION_IDS.length;
+const MAX_PR_REVIEW_RESILIENCE_CIRCUIT_CONTRIBUTORS =
+	MAX_WORKFLOW_BATCHES * MAX_PR_REVIEW_BASE_LANES_PER_BATCH;
+/**
  * Ceiling on the retired-reviewer-session ledger the capacity GC maintains,
  * sized at eight child sessions per pruned batch across a full cap. If a prune
  * would exceed it, the GC keeps every batch instead of dropping a forbidden
@@ -597,6 +701,18 @@ const MAX_RETIRED_CONSOLIDATED_LANES = 64;
  * reasoning as the reviewer-session ledger.
  */
 const MAX_RETIRED_FEEDBACK_ITEM_OWNERS = 4096;
+
+/**
+ * Bound on the PR_FEEDBACK inventory-amendment audit ledger (issue #2242 R3).
+ *
+ * `declarePrFeedbackInventory` is agent-callable and each call can append, so
+ * this array would otherwise grow without limit on durable state. It is an
+ * integrity ledger, not a reclaimable cache: unlike `prFeedbackVerifications`
+ * (which `prunePrFeedbackVerificationsForCapacity` compacts), pruning it would
+ * destroy the audit trail, so the cap fails closed on further amendments
+ * instead.
+ */
+export const MAX_PR_FEEDBACK_INVENTORY_AMENDMENTS = 128;
 const WINDOWS_RENAME_MAX_RETRIES = 3;
 const RENAME_RETRY_DELAY_MS = 10;
 const STATE_MUTATION_LOCK_MAX_ATTEMPTS = 50;
@@ -643,8 +759,65 @@ const PrReviewBaseDispatchRecordSchema = z
 					})
 					.strict(),
 			)
-			.min(1),
+			.min(1)
+			.max(MAX_PR_REVIEW_BASE_LANES_PER_BATCH),
 		validatedAt: z.string().min(1),
+	})
+	.strict();
+
+const PrReviewResiliencePolicyRecordSchema = z
+	.object({
+		enabled: z.boolean(),
+		canaryProbeMs: z.number().int().positive(),
+		statusProbeTimeoutMs: z.number().int().positive(),
+		correlatedFailureThreshold: z.number().int().min(2).max(8),
+		maxRetryAttemptsAfterInitial: z.number().int().min(0).max(2),
+	})
+	.strict();
+
+const PrReviewResilienceAttemptRecordSchema = z
+	.object({
+		attempt: z.union([z.literal(0), z.literal(1), z.literal(2)]),
+		targetDimensions: z
+			.array(PrReviewBaseDimensionIdSchema)
+			.min(1)
+			.max(PR_REVIEW_BASE_DIMENSION_IDS.length),
+		canaryBatchId: z.string().min(1),
+		canaryLaneId: z.string().min(1),
+		canaryWorkflowLane: PrReviewBaseDimensionIdSchema,
+		admittedAt: z.string().min(1),
+		fanoutBatchId: z.string().min(1).optional(),
+	})
+	.strict();
+
+const PrReviewResilienceCircuitRecordSchema = z
+	.object({
+		signature: z.string().min(1).max(512),
+		count: z
+			.number()
+			.int()
+			.min(2)
+			.max(MAX_PR_REVIEW_RESILIENCE_CIRCUIT_CONTRIBUTORS),
+		contributors: z
+			.array(
+				z
+					.object({
+						batchId: z.string().min(1),
+						laneId: z.string().min(1),
+					})
+					.strict(),
+			)
+			.min(2)
+			.max(MAX_PR_REVIEW_RESILIENCE_CIRCUIT_CONTRIBUTORS),
+		openedAt: z.string().min(1),
+	})
+	.strict();
+
+const PrReviewResilienceStateRecordSchema = z
+	.object({
+		policy: PrReviewResiliencePolicyRecordSchema,
+		attempts: z.array(PrReviewResilienceAttemptRecordSchema).max(3),
+		circuit: PrReviewResilienceCircuitRecordSchema.optional(),
 	})
 	.strict();
 
@@ -763,6 +936,23 @@ const PrFeedbackReadyToPublishRecordSchema = z
 	})
 	.strict();
 
+/**
+ * One appended PR_FEEDBACK inventory entry (issue #2242 R3). `batch` groups the
+ * entries appended by a single `declarePrFeedbackInventory` call so an auditor
+ * can tell "two items found in one pass" from "two separate late discoveries".
+ */
+const PrFeedbackInventoryAmendmentRecordSchema = z
+	.object({
+		entry: z.string().min(1),
+		amendedAt: z.string().min(1),
+		batch: z.number().int().positive(),
+	})
+	.strict();
+
+export type PrFeedbackInventoryAmendmentRecord = z.infer<
+	typeof PrFeedbackInventoryAmendmentRecordSchema
+>;
+
 const PrReviewValidationBatchRecordSchema = z
 	.object({
 		batchId: z.string().min(1),
@@ -773,7 +963,11 @@ const PrReviewValidationBatchRecordSchema = z
 					.object({
 						laneId: z.string().min(1),
 						workflowLane: z.string().min(1),
-						reviewItemIds: z.array(z.string().min(1)).min(1).optional(),
+						reviewItemIds: z
+							.array(z.string().min(1))
+							.min(1)
+							.max(MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS)
+							.optional(),
 					})
 					.strict(),
 			)
@@ -791,6 +985,7 @@ const PrReviewBatchCoherenceRecordSchema = z
 		reviewerItemBindings: z
 			.record(z.string().min(1), z.string().regex(/^[0-9a-f]{64}$/))
 			.optional(),
+		reviewerItemBindingKeyEncoding: z.literal('prefixed-v1').optional(),
 	})
 	.passthrough();
 
@@ -876,6 +1071,7 @@ const PrWorkflowGateStateSchema = z
 			.max(MAX_WORKFLOW_BATCHES)
 			.optional(),
 		prReviewBaseDispatch: PrReviewBaseDispatchRecordSchema.optional(),
+		prReviewResilience: PrReviewResilienceStateRecordSchema.optional(),
 		prReviewTriggerLedger: z
 			.array(PrReviewInlineTriggerRowSchema)
 			.length(PR_REVIEW_REQUIRED_TRIGGER_IDS.length)
@@ -913,6 +1109,13 @@ const PrWorkflowGateStateSchema = z
 		prFeedbackTargetUrl: z.string().url().max(2000).optional(),
 		prFeedbackReviewHandoff: PrFeedbackReviewHandoffRecordSchema.optional(),
 		prFeedbackInventory: z.array(z.string().min(1)).min(1).optional(),
+		// Append-only audit ledger for inventory amendments (issue #2242 R3).
+		// Optional in both directions: older persisted state omits it, and older
+		// code ignores it through the root `.passthrough()` below.
+		prFeedbackInventoryAmendments: z
+			.array(PrFeedbackInventoryAmendmentRecordSchema)
+			.max(MAX_PR_FEEDBACK_INVENTORY_AMENDMENTS)
+			.optional(),
 		prFeedbackVerifications: z
 			.array(PrFeedbackVerificationRecordSchema)
 			.max(MAX_WORKFLOW_BATCHES)
@@ -1299,6 +1502,7 @@ export async function clearPrWorkflowGateState(
 	directory: string,
 	sessionID: string,
 	expectedRevision?: number,
+	options: { allowSalvagedRead?: boolean } = {},
 ): Promise<void> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
 	await withSessionStateMutation(directory, normalizedSessionID, async () => {
@@ -1308,10 +1512,20 @@ export async function clearPrWorkflowGateState(
 		// (the sole purpose of this escape hatch) instead of the read itself
 		// re-throwing the same failure it exists to recover from.
 		if (expectedRevision !== undefined) {
-			const current = await readPrWorkflowGateStateFromDisk(
-				directory,
-				normalizedSessionID,
-			);
+			// Issue #2242 R4: the recovery abort path salvaged a revision from a
+			// schema-invalid state and still wants real concurrency protection.
+			// Reading it back through the GENERAL reader would re-throw the very
+			// `is invalid` failure the salvage exists to route around, forcing an
+			// unnecessary CAS drop. Only the abort path sets this flag; every
+			// other caller keeps the strict read byte-for-byte.
+			const current = options.allowSalvagedRead
+				? ((
+						await readPrWorkflowGateStateForRecovery(
+							directory,
+							normalizedSessionID,
+						)
+					)?.state ?? null)
+				: await readPrWorkflowGateStateFromDisk(directory, normalizedSessionID);
 			if (!current || current.revision !== expectedRevision) {
 				throw new Error(
 					'BLOCKED: PR workflow gate state changed during terminal completion; revalidate the current session state before retrying',
@@ -1331,6 +1545,665 @@ export async function clearPrWorkflowGateState(
 			stateCacheKey(directory, normalizedSessionID),
 		);
 	});
+}
+
+/**
+ * Presumed-stale settlement horizon for PR-workflow lanes.
+ *
+ * Reuses the background-delegation subsystem's canonical default rather than
+ * `hooks.background_pending_timeout_minutes`: the three gate predicates that
+ * consume it receive only `directory`/`sessionID` and never a resolved plugin
+ * config, and this sweep is a **reachability floor** (abort and completion must
+ * not be permanently blocked by a lane whose backing process died), not a
+ * tunable policy knob.
+ */
+const PR_WORKFLOW_STALE_LANE_TIMEOUT_MS = DEFAULT_STALE_DELEGATION_TIMEOUT_MS;
+
+/** Upper bound on lane ids named in one operator-facing disclosure string. */
+const MAX_DISCLOSED_LANE_IDS = 10;
+
+/**
+ * The only status classes this gate's durability sweep may finalize.
+ *
+ * The sweep must never exceed what `isOpenPrWorkflowLane` counts as open —
+ * settlement here is a decision about lanes this session observed as `pending`
+ * or `running`, and the sweep is directory-wide with no session or mode filter,
+ * so any wider set finalizes records the decision never reasoned about and
+ * never discloses.
+ *
+ * `ingestion_error` is specifically excluded: it is a **retryable** state
+ * (`terminalDisposition` maps it to `retry_ingestion`; `isTerminal` excludes
+ * it), and the flip to `stale` is **irreversible** — the ingestion claim gate
+ * admits only `completed` and `ingestion_error`, so a swept record answers
+ * `not_ready` forever and the sole `ingestion_error` producer requires an
+ * active claim lease it can no longer obtain.
+ */
+const PR_WORKFLOW_SWEEPABLE_LANE_STATUSES: ReadonlySet<SweepableDelegationStatus> =
+	new Set<SweepableDelegationStatus>(['pending', 'running']);
+
+/**
+ * Exact disclosure emitted when the abort path takes `clearPrWorkflowGateState`'s
+ * documented `expectedRevision === undefined` escape hatch because the durable
+ * state's `revision` could not be salvaged (issue #2242 R4).
+ */
+const CAS_ESCAPE_DISCLOSURE =
+	'state revision unsalvageable; cleared without compare-and-swap';
+
+/**
+ * Deadline for one PR-workflow lane liveness probe (issue #2251).
+ *
+ * The probe is a best-effort contradiction check on a decision that is already
+ * safe without it, so it must never become the slow path of an escape hatch.
+ * Exposed through `_test_exports.laneLivenessProbeTimeoutMs` because
+ * `withTimeout` uses a REAL `setTimeout` and the test clock only patches
+ * `Date.now()` — without the seam the timeout branch is a five-second
+ * wall-clock test or theater.
+ */
+const PR_WORKFLOW_LANE_LIVENESS_PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * The session-status types that count as "provably still running".
+ *
+ * Deliberately an ALLOWLIST, not `type !== 'idle'`. The SDK's `SessionStatus`
+ * union is closed at three members today, so the two formulations coincide —
+ * but a future fourth member (`'error'`, `'cancelled'`, `'paused'`, …) would
+ * silently start CONTRADICTING staleness under the negative formulation and
+ * re-wedge abort and completion, which is exactly this issue returning. The
+ * compile-time assert below fails the build instead.
+ *
+ * The element type is the SDK union, and the literals go through `satisfies`, so
+ * a TYPO is a compile error too: `['busy', 'retyr']` no longer type-checks. The
+ * exhaustiveness assert below constrains the SDK union, not this set's members,
+ * so without the `satisfies` a misspelt member would compile clean and silently
+ * retire the probe — every lookup would miss and every live lane would settle.
+ */
+const LIVE_SESSION_STATUS_TYPES: ReadonlySet<SessionStatus['type']> = new Set([
+	'busy',
+	'retry',
+] satisfies SessionStatus['type'][]);
+
+/**
+ * Membership test for a status string that came off the wire.
+ *
+ * The single widening cast is deliberate and confined here: the probe's input is
+ * an untrusted `string` from the host response, and `ReadonlySet<T>.has` accepts
+ * only `T`, so the alternative is either widening the set (which loses the typo
+ * check above) or scattering casts at the call site.
+ */
+function isLiveSessionStatusType(type: string): boolean {
+	return (LIVE_SESSION_STATUS_TYPES as ReadonlySet<string>).has(type);
+}
+
+type _UnhandledSessionStatus = Exclude<
+	SessionStatus['type'],
+	'idle' | 'busy' | 'retry'
+>;
+/**
+ * Compile-time exhaustiveness guard for {@link LIVE_SESSION_STATUS_TYPES}.
+ * If the SDK adds a status member, `_UnhandledSessionStatus` stops being
+ * `never`, this initializer stops type-checking, and whoever bumps the SDK has
+ * to decide explicitly whether the new member is alive or settles.
+ */
+const _sessionStatusAllowlistIsExhaustive: _UnhandledSessionStatus extends never
+	? true
+	: never = true;
+
+/**
+ * The single session operation the liveness probe needs.
+ *
+ * Deliberately a narrow LOCAL structural type rather than a type-only import of
+ * `SessionOps` from `src/tools/dispatch-lanes.ts`: that module's
+ * `isLaneReadyForCollection` is the fail-CLOSED counterpart of this probe, and
+ * keeping the two textually independent removes any invitation to "share" the
+ * predicate. A type-only import would be erased either way; this is about
+ * preventing the wrong reuse, not about module graph cost.
+ */
+interface PrWorkflowLaneLivenessSessionOps {
+	status?: (args: { query?: { directory?: string } }) => Promise<{
+		data?: Record<string, { type?: string }> | null;
+		error?: unknown;
+	}>;
+}
+
+const defaultGetSessionOps = (): PrWorkflowLaneLivenessSessionOps | null =>
+	(swarmState.opencodeClient?.session as unknown as
+		| PrWorkflowLaneLivenessSessionOps
+		| undefined) ?? null;
+
+/** Why a probe produced no evidence of life. Absent means the probe ran. */
+export type PrWorkflowLaneProbeDegradedReason =
+	| 'probe-unavailable'
+	| 'probe-error'
+	| 'probe-timeout'
+	| 'probe-no-data';
+
+/**
+ * Probe which of `records` have a session the host affirmatively reports as
+ * still running (issue #2251).
+ *
+ * **FAIL-OPEN, by design.** For its ERROR and NO-DATA cases this is the exact
+ * inverse of `isLaneReadyForCollection` (`src/tools/dispatch-lanes.ts`), which
+ * returns `false` on a truthy `error`, on missing `data`, and on a throw —
+ * because a lane it cannot verify must not be collected. The two agree, rather
+ * than invert, on ONE case: a host that exposes no `status` function at all.
+ * There the collector returns `true` (`dispatch-lanes.ts`, the `typeof
+ * session.status !== 'function'` guard) and this probe reports
+ * `probe-unavailable`, so both fall through to proceeding — an unprobeable host
+ * must not wedge either side.
+ *
+ * Here the default outcome must be "settle": an unavailable, erroring,
+ * timing-out or empty probe returns the empty set, so age alone decides and the
+ * reachability floor this whole subsystem exists to preserve is untouched. Only
+ * a probe that RAN and affirmatively named a live session may contradict
+ * staleness.
+ *
+ * The returned set is built only from a fully-read response — a mid-iteration
+ * throw yields the empty set rather than a partial spare list, so a malformed
+ * response can never spare an arbitrary subset of lanes.
+ *
+ * Keys are `subagentSessionId`s. A record without one is unprobeable and is
+ * simply never added (it settles), which is the fail-open direction.
+ */
+async function probeAlivePrWorkflowLaneSessions(
+	directory: string,
+	records: BackgroundDelegationRecord[],
+): Promise<{
+	alive: Set<string>;
+	degradedReason?: PrWorkflowLaneProbeDegradedReason;
+}> {
+	const session = _test_exports.getSessionOps();
+	const statusOp = session?.status;
+	if (!session || typeof statusOp !== 'function') {
+		return { alive: new Set<string>(), degradedReason: 'probe-unavailable' };
+	}
+	// Identity-compared sentinel: the ONLY way to tell "the host took too long"
+	// apart from "the host threw", since withTimeout rejects with this exact
+	// object.
+	const timeoutError = new Error(
+		'PR workflow lane liveness probe exceeded its deadline',
+	);
+	let response: Awaited<ReturnType<NonNullable<typeof statusOp>>> | undefined;
+	try {
+		response = await withTimeout(
+			(async () => statusOp.call(session, { query: { directory } }))(),
+			_test_exports.laneLivenessProbeTimeoutMs,
+			timeoutError,
+		);
+	} catch (error) {
+		return {
+			alive: new Set<string>(),
+			degradedReason: error === timeoutError ? 'probe-timeout' : 'probe-error',
+		};
+	}
+	try {
+		if (response?.error) {
+			return { alive: new Set<string>(), degradedReason: 'probe-error' };
+		}
+		const data = response?.data;
+		if (data === null || data === undefined) {
+			return { alive: new Set<string>(), degradedReason: 'probe-no-data' };
+		}
+		const accumulated = new Set<string>();
+		for (const record of records) {
+			const subagentSessionId = record.subagentSessionId;
+			if (!subagentSessionId) continue;
+			const type = data[subagentSessionId]?.type;
+			if (typeof type === 'string' && isLiveSessionStatusType(type)) {
+				accumulated.add(subagentSessionId);
+			}
+		}
+		return { alive: accumulated };
+	} catch {
+		return { alive: new Set<string>(), degradedReason: 'probe-error' };
+	}
+}
+
+export interface PrWorkflowStaleLaneSettlement {
+	/**
+	 * Every lane that still blocks: lanes with a fresh `updatedAt` PLUS lanes
+	 * past the horizon whose session the liveness probe reported still running.
+	 */
+	openLaneIds: string[];
+	openLanes: number;
+	/**
+	 * Open lanes that block on FRESHNESS alone (age below the horizon).
+	 *
+	 * Separated from `openLanes` because the human-only `force` abort override
+	 * (issue #2251 S3) must distinguish "blocked only by probe retention", which
+	 * an operator may override, from "blocked by a lane that is genuinely young",
+	 * which stays fail-closed. Deriving it by subtraction or by comparing lane
+	 * LABELS would be wrong: `prWorkflowLaneLabel` falls back to `'unknown'`, so
+	 * labels are not unique.
+	 */
+	freshOpenLanes: number;
+	/** Lanes stale past the horizon, treated as settled with disclosure. */
+	presumedStaleLaneIds: string[];
+	/**
+	 * Lanes past the horizon that the probe spared. Present only when non-empty.
+	 */
+	probedAliveLaneIds?: string[];
+	/**
+	 * The SAME records as {@link probedAliveLaneIds}, in the same order, keyed by
+	 * `correlationId` instead of by display label.
+	 *
+	 * Both are needed and neither substitutes for the other: `prWorkflowLaneLabel`
+	 * falls back to `'unknown'` and is not unique, so it cannot address a durable
+	 * record — while `correlationId` is the ledger's primary key and is what the
+	 * human-only `force` override must name to finalize exactly these records and
+	 * nothing else. Present only when non-empty.
+	 */
+	probeRetainedCorrelationIds?: string[];
+	/** Set when the probe could not produce evidence; absent when it ran. */
+	probeDegradedReason?: PrWorkflowLaneProbeDegradedReason;
+	/** Operator-facing disclosure; `undefined` when nothing was settled or retained. */
+	disclosure?: string;
+}
+
+/**
+ * Probe outcome rendered as a suffix for an operator-facing BLOCKED message.
+ *
+ * Wired into all three open-lane refusals so a blocked caller can tell "a lane
+ * is genuinely young" from "a lane past the horizon was spared because its
+ * session answered" — otherwise the two are indistinguishable and the probe's
+ * effect on the block is invisible.
+ */
+function describePrWorkflowLaneProbe(
+	settlement: PrWorkflowStaleLaneSettlement,
+): string {
+	const parts: string[] = [];
+	if (settlement.probedAliveLaneIds?.length) {
+		parts.push(
+			`liveness probe reports still running: ${settlement.probedAliveLaneIds
+				.slice(0, MAX_DISCLOSED_LANE_IDS)
+				.join(', ')}`,
+		);
+	}
+	if (settlement.probeDegradedReason) {
+		parts.push(`liveness probe degraded (${settlement.probeDegradedReason})`);
+	}
+	return parts.length > 0 ? ` (${parts.join('; ')})` : '';
+}
+
+function prWorkflowLaneLabel(record: BackgroundDelegationRecord): string {
+	return record.laneId ?? record.subagentSessionId ?? 'unknown';
+}
+
+function isOpenPrWorkflowLane(
+	record: BackgroundDelegationRecord,
+	sessionID: string,
+): boolean {
+	return (
+		record.parentSessionId === sessionID &&
+		record.mode?.startsWith('swarm-pr-') === true &&
+		(record.status === 'pending' || record.status === 'running')
+	);
+}
+
+/**
+ * Resolve the open-lane predicate shared by `abortPrWorkflow`, the
+ * PR_REVIEW→PR_FEEDBACK transition, and `completePrWorkflow` (issue #2242 R2,
+ * wedge W-4).
+ *
+ * A lane whose delegation record has not advanced its `updatedAt` within
+ * `PR_WORKFLOW_STALE_LANE_TIMEOUT_MS` is **presumed stale** and settles with
+ * disclosure instead of blocking forever. The background process backing a lane
+ * can die without ever writing a terminal snapshot, and these three predicates
+ * are exactly the exits an operator reaches for when nothing else can proceed —
+ * previously the abort escape hatch was refused by the same check it exists to
+ * resolve, leaving the workflow with no exit through any tool.
+ *
+ * Deliberate ordering — this is the reachability invariant, do not "simplify"
+ * it: staleness is decided by the **in-memory filter below**, and
+ * `sweepStaleDelegations` runs only afterwards as a best-effort durability
+ * complement. That sweep swallows lock timeouts and returns 0
+ * (`pending-delegations.ts`), so making reachability depend on it would let a
+ * contended store lock re-create the exact wedge this removes.
+ *
+ * A lane with a RECENT `updatedAt` still blocks: a re-verification that CAN run
+ * and reports "still progressing" contradicts settlement and fails closed.
+ *
+ * Issue #2251 adds the second, stronger contradiction: a lane PAST the horizon
+ * whose session the host affirmatively reports as `busy`/`retry` is genuinely
+ * running (nothing heartbeats `updatedAt`, so age alone cannot see this) and is
+ * retained instead of discarded. The probe is fail-open — see
+ * {@link probeAlivePrWorkflowLaneSessions} — so an unavailable, erroring or
+ * empty probe leaves the age-only behaviour exactly as it was.
+ */
+export async function settlePresumedStalePrWorkflowLanes(
+	directory: string,
+	sessionID: string,
+): Promise<PrWorkflowStaleLaneSettlement> {
+	const now = Date.now();
+	const open: BackgroundDelegationRecord[] = [];
+	const presumedStale: BackgroundDelegationRecord[] = [];
+	for (const record of readDelegations(directory)) {
+		if (!isOpenPrWorkflowLane(record, sessionID)) continue;
+		if (now - record.updatedAt > PR_WORKFLOW_STALE_LANE_TIMEOUT_MS) {
+			presumedStale.push(record);
+		} else {
+			open.push(record);
+		}
+	}
+	if (presumedStale.length === 0) {
+		// Nothing is below the horizon to re-verify, so the probe is not consulted
+		// at all: no host round-trip on the overwhelmingly common path.
+		const freshOnlyLaneIds = open.map(prWorkflowLaneLabel);
+		return {
+			openLaneIds: freshOnlyLaneIds,
+			openLanes: open.length,
+			freshOpenLanes: open.length,
+			presumedStaleLaneIds: [],
+		};
+	}
+	// R5: the seam is mutable and this function has call sites with no try/catch
+	// of their own, so a throwing probe must degrade here rather than convert a
+	// settleable workflow into an unhandled rejection.
+	let probe: {
+		alive: Set<string>;
+		degradedReason?: PrWorkflowLaneProbeDegradedReason;
+	};
+	try {
+		probe = await _test_exports.probeLaneLivenessAsync(
+			directory,
+			presumedStale,
+		);
+	} catch {
+		probe = { alive: new Set<string>(), degradedReason: 'probe-error' };
+	}
+	const probeRetained: BackgroundDelegationRecord[] = [];
+	const settled: BackgroundDelegationRecord[] = [];
+	for (const record of presumedStale) {
+		if (record.subagentSessionId && probe.alive.has(record.subagentSessionId)) {
+			probeRetained.push(record);
+		} else {
+			settled.push(record);
+		}
+	}
+	// Every returned count is derived AFTER the probe. Reporting the pre-probe
+	// partition would let a spared lane be reported as settled, which is the
+	// inverse wedge: abort and completion would sail past a live lane.
+	const probedAliveLaneIds = probeRetained.map(prWorkflowLaneLabel);
+	const openLaneIds = [...open.map(prWorkflowLaneLabel), ...probedAliveLaneIds];
+	const retentionDisclosure =
+		probeRetained.length > 0
+			? `${probeRetained.length} lane(s) past the horizon retained: ` +
+				`liveness probe reports still running: ${probedAliveLaneIds
+					.slice(0, MAX_DISCLOSED_LANE_IDS)
+					.join(', ')}`
+			: undefined;
+	const retentionFields = {
+		...(probedAliveLaneIds.length > 0
+			? {
+					probedAliveLaneIds,
+					probeRetainedCorrelationIds: probeRetained.map(
+						(record) => record.correlationId,
+					),
+				}
+			: {}),
+		...(probe.degradedReason
+			? { probeDegradedReason: probe.degradedReason }
+			: {}),
+	};
+	if (settled.length === 0) {
+		// Nothing was settled, so nothing may be swept and no
+		// `pr_workflow_lanes_presumed_stale` record may be written — an audit trail
+		// asserting a settlement that did not happen is worse than none.
+		return {
+			openLaneIds,
+			openLanes: openLaneIds.length,
+			freshOpenLanes: open.length,
+			presumedStaleLaneIds: [],
+			...retentionFields,
+			disclosure: retentionDisclosure,
+		};
+	}
+	const presumedStaleLaneIds = settled.map(prWorkflowLaneLabel);
+	// The leading clause is a STABLE PREFIX: existing operator tooling and tests
+	// pin `N lane(s) stale >30min` / `treated as settled: …`. The probe verdict is
+	// APPENDED so the three outcomes (probe ran and found nothing / probe could
+	// not run / some lanes retained) are distinguishable without breaking it.
+	const disclosure =
+		`${presumedStaleLaneIds.length} lane(s) stale >` +
+		`${Math.round(PR_WORKFLOW_STALE_LANE_TIMEOUT_MS / 60_000)}min, ` +
+		`treated as settled: ${presumedStaleLaneIds
+			.slice(0, MAX_DISCLOSED_LANE_IDS)
+			.join(', ')}` +
+		(probe.degradedReason
+			? `; settled despite liveness probe failure (${probe.degradedReason})`
+			: '; liveness probe found no live session') +
+		(retentionDisclosure ? `; ${retentionDisclosure}` : '');
+	// Best-effort ONLY. Makes the terminal `stale` transition durable so later
+	// readers and the delegation ledger agree with the decision already made
+	// above; reachability never depends on either write succeeding.
+	//
+	// Restricted to `pending`/`running` so the durable sweep cannot exceed what
+	// `isOpenPrWorkflowLane` counted as open. The sweep is directory-wide with no
+	// session filter, and its default scope also finalizes `ingestion_error` —
+	// which is retryable, is never counted open here, and whose flip to `stale`
+	// is irreversible at the ingestion claim gate.
+	//
+	// Issue #2251 R1: the sweep filters on status and age ONLY. A probe-retained
+	// lane is `pending`/`running` and past the horizon by construction, so in a
+	// mixed batch this directory-wide sweep would durably flip the very lane the
+	// probe just spared — the spare would last exactly one call. Excluding them by
+	// `correlationId` extends the existing "cannot exceed what
+	// `isOpenPrWorkflowLane` counted as open" restriction to "cannot exceed what
+	// this settlement DECIDED". The seam + try/catch keep a sweep failure from
+	// affecting the decision already made above.
+	try {
+		await _test_exports.sweepStaleDelegationsAsync(
+			directory,
+			PR_WORKFLOW_STALE_LANE_TIMEOUT_MS,
+			{
+				statuses: PR_WORKFLOW_SWEEPABLE_LANE_STATUSES,
+				excludeCorrelationIds: new Set(
+					probeRetained.map((record) => record.correlationId),
+				),
+			},
+		);
+	} catch {
+		// Durability is best-effort; the in-memory decision above already stands.
+	}
+	try {
+		await fsp.appendFile(
+			validateSwarmPath(directory, 'events.jsonl'),
+			`${JSON.stringify({
+				type: 'pr_workflow_lanes_presumed_stale',
+				timestamp: isoNow(),
+				sessionID,
+				presumedStaleLanes: presumedStaleLaneIds.slice(
+					0,
+					MAX_DISCLOSED_LANE_IDS,
+				),
+				staleTimeoutMs: PR_WORKFLOW_STALE_LANE_TIMEOUT_MS,
+				probeStatus: probe.degradedReason ?? 'ok',
+				probedAliveLanes: probedAliveLaneIds.slice(0, MAX_DISCLOSED_LANE_IDS),
+				disclosure,
+			})}\n`,
+			'utf-8',
+		);
+	} catch {
+		// The audit trail is best-effort; settlement must not depend on it.
+	}
+	return {
+		openLaneIds,
+		openLanes: openLaneIds.length,
+		freshOpenLanes: open.length,
+		presumedStaleLaneIds,
+		...retentionFields,
+		disclosure,
+	};
+}
+
+/**
+ * What {@link finalizeOverriddenProbeRetainedLanes} POSITIVELY OBSERVED on disk
+ * after it ran — never what it inferred from an id's absence.
+ */
+interface OverriddenProbeRetainedLaneOutcome {
+	/**
+	 * Every still-open `swarm-pr-*` record of THIS session, targeted or not. This
+	 * is the restartability answer, because `countOpenPrWorkflowLanes` is what
+	 * refuses the next checkout preparation and it ignores which lanes an
+	 * override reasoned about.
+	 */
+	sessionOpenLaneIds: string[];
+	/**
+	 * Targeted ids observed terminal `stale`: the override really did abandon
+	 * these, and only these may be described as no longer collectable.
+	 */
+	finalizedLaneIds: string[];
+	/**
+	 * Targeted lanes the sweep did NOT finalize because they had already moved to
+	 * some other status, rendered as `correlationId (status)`.
+	 *
+	 * The OBSERVED status is carried rather than dropped, and the disclosure
+	 * asserts only that the record was left intact. Claiming "its output is
+	 * collectable" would be the mirror of the bug this fixes: `error` and
+	 * `ingestion_error` records surface through `collect_lane_results` as
+	 * `failed` with no result text (`recordToLaneResult`,
+	 * `src/tools/dispatch-lanes.ts`), and `ingesting` is filtered out of
+	 * `lane_results` entirely until it settles. Naming the status lets the
+	 * operator judge; asserting collectability would overclaim for three of the
+	 * statuses that can land here.
+	 */
+	sparedLaneDescriptions: string[];
+}
+
+/**
+ * Finalize the delegation records of the probe-retained lanes a human `force`
+ * abort is overriding, so clearing the gate actually restarts the workflow.
+ *
+ * Without this, the override traded an unexitable gate for an UN-RESTARTABLE
+ * session. The gate cleared, but each retained record stayed `pending` on disk
+ * forever (the retained lane never terminates — that is the hypothesis the
+ * override exists for), and `countOpenPrWorkflowLanes`
+ * (`src/tools/prepare-pr-workflow-checkout.ts`) is age-blind and horizon-blind:
+ * it counts every `pending`/`running` `swarm-pr-*` record of the session. So the
+ * next `prepare_pr_workflow_checkout` was refused permanently, recoverable only
+ * by hand-editing the ledger — the exact class of wedge this whole subsystem
+ * exists to remove.
+ *
+ * Three constraints shape this, and none of them is optional:
+ *
+ * 1. **Override path ONLY.** The ordinary retention path must leave a retained
+ *    record `pending`: that lane is alive and its output is still collectable,
+ *    which is the entire point of issue #2251. Only an explicit human override
+ *    abandons it.
+ * 2. **Exactly these `correlationId`s.** `includeCorrelationIds` narrows the
+ *    otherwise directory-wide sweep to the records this session's settlement
+ *    reasoned about. A directory-wide pass would finalize other sessions'
+ *    records and retryable `ingestion_error` records — the over-reach hazard
+ *    already documented at the settlement sweep above.
+ * 3. **It must not force a terminal record.** The sweep's own status and age
+ *    filters still apply on top of the id narrowing, so a lane that raced to
+ *    `completed` between the settlement read and this call keeps its result.
+ *    `appendDelegationTransition` would NOT be safe here: it explicitly permits
+ *    `completed` → `stale`, which would discard collected output — this issue's
+ *    own bug, re-introduced on the force path.
+ *
+ * Runs only AFTER `clearPrWorkflowGateState` has succeeded (issue #2251
+ * closeout F1). The finalization is irreversible — a `stale` record is never
+ * collected again — while the clear is a CAS-guarded write that can legitimately
+ * lose the compare-and-swap and throw. Ordering the irreversible half after the
+ * reversible one means a lost CAS destroys no RETAINED lane, so the retry is a
+ * real override rather than a no-op over lanes a failed attempt already
+ * abandoned. It does NOT mean nothing was finalized: settlement sweeps the
+ * batch's probe-dead lanes before the clear is attempted.
+ *
+ * The single read-back answers two INDEPENDENT questions over two different id
+ * sets, which is why it returns three lists rather than one (issue #2251
+ * closeout F2, then N1):
+ *
+ * - **"Can this session start a new PR workflow?"** — `sessionOpenLaneIds`,
+ *   over every `swarm-pr-*` record of THIS SESSION, deliberately NOT just the
+ *   targeted ids. `countOpenPrWorkflowLanes`
+ *   (`src/tools/prepare-pr-workflow-checkout.ts`) is what actually refuses the
+ *   restart, and it counts every `pending`/`running` `swarm-pr-*` record of the
+ *   session, not the retained ones. The ordinary settlement sweep is best-effort
+ *   and `sweepStaleDelegations` swallows a lock timeout and returns 0, so a lane
+ *   the settlement DECIDED was stale can still be `pending` on disk here — and
+ *   it refuses the next checkout preparation exactly like an unfinalized
+ *   retained lane does. Reporting only the targeted ids let that case claim
+ *   restartability it had not verified.
+ * - **"Whose output did this override actually abandon?"** — answered by the
+ *   OBSERVED terminal status of each targeted id, never by absence from the open
+ *   set. Constraint 3 above means a targeted lane that raced to `completed` is
+ *   spared by the sweep's own status filter, so it is absent from
+ *   `sessionOpenLaneIds` for the opposite reason a finalized lane is. Inferring
+ *   abandonment from that absence told the operator to stop looking for output
+ *   that was in fact still collectable — the exact class of silent discard this
+ *   whole issue exists to remove. Only a positively observed `stale` lands in
+ *   `finalizedLaneIds`; a targeted lane observed in any other non-open status
+ *   lands in `sparedLaneDescriptions`, disclosed WITH that observed status and
+ *   described only as left intact — never as "collectable", which would
+ *   overclaim for `error`, `ingestion_error` and `ingesting`.
+ *
+ * The read-back reuses {@link isOpenPrWorkflowLane}, the same predicate the
+ * settlement counts with, so a hand-rolled second copy of its clauses cannot
+ * drift from it.
+ *
+ * The predicates agree; their INPUTS can still diverge, and the doc comment
+ * should not pretend otherwise. Everything here reads through `readDelegations`,
+ * which SKIPS any ledger line that fails schema validation, while
+ * `countOpenPrWorkflowLanes` — the check that actually refuses the restart —
+ * fails CLOSED and throws on one. So a session whose ledger holds a malformed
+ * row can be reported restartable here and still be refused there, and a
+ * targeted lane sitting on such a row falls into none of the three lists: it is
+ * silently omitted rather than falsely described as uncollectable. That
+ * divergence is a pre-existing property of the shared reader, not of this
+ * override, and both of its directions are conservative — so this path does not
+ * grow a second parser to close it.
+ *
+ * The result is disclosed rather than retried: reachability must never depend on
+ * a durability write, so the abort has already succeeded either way and the
+ * operator is told precisely which records still need attention.
+ */
+async function finalizeOverriddenProbeRetainedLanes(
+	directory: string,
+	sessionID: string,
+	correlationIds: readonly string[],
+): Promise<OverriddenProbeRetainedLaneOutcome> {
+	try {
+		await _test_exports.sweepStaleDelegationsAsync(
+			directory,
+			PR_WORKFLOW_STALE_LANE_TIMEOUT_MS,
+			{
+				statuses: PR_WORKFLOW_SWEEPABLE_LANE_STATUSES,
+				includeCorrelationIds: new Set(correlationIds),
+			},
+		);
+	} catch {
+		// Best-effort, exactly like the settlement sweep. The re-read below is what
+		// reports the truth, so a swallowed failure still reaches the operator.
+	}
+	// Read back rather than trusting the swept COUNT: the count cannot say which
+	// ids went terminal, only how many rows it touched. Only the durable status
+	// answers either question the disclosure makes.
+	const targeted = new Set(correlationIds);
+	const outcome: OverriddenProbeRetainedLaneOutcome = {
+		sessionOpenLaneIds: [],
+		finalizedLaneIds: [],
+		sparedLaneDescriptions: [],
+	};
+	for (const record of readDelegations(directory)) {
+		if (isOpenPrWorkflowLane(record, sessionID)) {
+			outcome.sessionOpenLaneIds.push(record.correlationId);
+		}
+		if (!targeted.has(record.correlationId)) continue;
+		if (record.status === 'stale') {
+			outcome.finalizedLaneIds.push(record.correlationId);
+		} else if (record.status !== 'pending' && record.status !== 'running') {
+			// A targeted lane still `pending`/`running` is deliberately in NEITHER
+			// list: the sweep did not finalize it, and it is already named by the
+			// restartability warning. Naming it twice — "left intact" beside "will
+			// keep refusing checkout preparation" — reads to an operator as two
+			// contradictory instructions about the same lane.
+			outcome.sparedLaneDescriptions.push(
+				`${record.correlationId} (${record.status})`,
+			);
+		}
+	}
+	return outcome;
 }
 
 /**
@@ -1374,30 +2247,79 @@ export async function abortPrWorkflow(
 	mode: PrWorkflowMode;
 	prHeadSha?: string;
 	openLanes: number;
+	presumedStaleLanes?: string[];
+	presumedStaleDisclosure?: string;
+	/** Lanes past the horizon the liveness probe reported as still running. */
+	probeRetainedLanes?: string[];
+	/**
+	 * Present ONLY when a human `force` abort cleared the gate while those
+	 * probe-retained lanes were the sole remaining reason it was blocked
+	 * (issue #2251 S3).
+	 */
+	probeRetentionOverrideDisclosure?: string;
+	/** Why the liveness probe produced no evidence, when it could not run. */
+	probeDegradedReason?: PrWorkflowLaneProbeDegradedReason;
+	stateSalvaged?: boolean;
+	stateSalvageDisclosure?: string;
+	casEscapeDisclosure?: string;
 }> {
-	const state = await requireAnyActiveState(directory, sessionID);
+	// W-5 (issue #2242 R4): abort reads through the DEDICATED recovery reader so
+	// a schema-invalid-but-parseable gate state cannot defeat the one escape
+	// hatch that exists to clear it. Unparseable bytes still fail here.
+	const recovery = await readPrWorkflowGateStateForRecovery(
+		directory,
+		sessionID,
+	);
+	if (!recovery) throw noActiveGateError(sessionID);
+	const state = recovery.state;
 	if (options.expectedMode && state.mode !== options.expectedMode) {
 		throw wrongModeError(state, options.expectedMode);
 	}
-	if (state.prFeedbackReadyToPublish) {
+	// An armed marker that is PRESENT but unreadable is treated as armed. Any
+	// other reading would make "corrupt this one record" a bypass of the
+	// armed-abort refusal.
+	if (state.prFeedbackReadyToPublish || recovery.armedShapeUnreadable) {
 		throw new Error(
-			`BLOCKED: ${state.mode} is armed for publication; abort is blocked. Complete the workflow with complete_pr_workflow (or push the bound commit first) before aborting.`,
+			`BLOCKED: ${state.mode} is armed for publication; abort is blocked. Complete the workflow with complete_pr_workflow (or push the bound commit first) before aborting.` +
+				(recovery.armedShapeUnreadable
+					? ' The publication-arming record is itself unreadable, so it is treated as armed (fail-closed).'
+					: ''),
 		);
 	}
-	const openLanes = readDelegations(directory).filter(
-		(record) =>
-			record.parentSessionId === state.sessionID &&
-			record.mode?.startsWith('swarm-pr-') &&
-			(record.status === 'pending' || record.status === 'running'),
+	// W-4 (issue #2242 R2): lanes stale past the settlement horizon no longer
+	// refuse the escape hatch that exists to resolve their own wedge. Lanes with
+	// a fresh `updatedAt` still block.
+	const laneSettlement = await settlePresumedStalePrWorkflowLanes(
+		directory,
+		state.sessionID,
 	);
-	if (openLanes.length > 0) {
-		const laneIds = openLanes
-			.map((record) => record.laneId ?? record.subagentSessionId ?? 'unknown')
+	// S3 (issue #2251 R2): the liveness probe can now retain a lane past the age
+	// horizon indefinitely, so age alone no longer guarantees an eventual exit. A
+	// lane whose session never goes idle would make the workflow permanently
+	// unexitable through every tool, with no recourse short of hand-editing
+	// `.swarm/delegations.jsonl`.
+	//
+	// The human-only `force` path therefore overrides probe RETENTION — and only
+	// probe retention. `freshOpenLanes === 0` is the whole safety argument: a lane
+	// with a fresh `updatedAt` still blocks even under force, so the contradiction
+	// rule is untouched. An explicit human override is not an age-based
+	// presumption. The retained sessions are NOT aborted and their output is NOT
+	// collected — but their RECORDS are finalized below, once the clear has
+	// actually succeeded, because a cleared gate over `pending` records is an
+	// un-restartable session, not an exit.
+	const probeRetainedLanes = laneSettlement.probedAliveLaneIds ?? [];
+	const overridesProbeRetention =
+		options.kind === 'force' &&
+		laneSettlement.freshOpenLanes === 0 &&
+		probeRetainedLanes.length > 0;
+	if (laneSettlement.openLanes > 0 && !overridesProbeRetention) {
+		const laneIds = laneSettlement.openLaneIds
 			.filter(Boolean)
-			.slice(0, 10)
+			.slice(0, MAX_DISCLOSED_LANE_IDS)
 			.join(', ');
 		throw new Error(
-			`BLOCKED: ${state.mode} abort refused while ${openLanes.length} PR workflow lane(s) are still in flight (lane ids: ${laneIds}). Collect their results or let them settle before aborting.`,
+			`BLOCKED: ${state.mode} abort refused while ${laneSettlement.openLanes} PR workflow lane(s) are still in flight (lane ids: ${laneIds}). Collect their results or let them settle before aborting.` +
+				describePrWorkflowLaneProbe(laneSettlement),
 		);
 	}
 	const sanitizedReason =
@@ -1409,6 +2331,30 @@ export async function abortPrWorkflow(
 			`BLOCKED: ${state.mode} abort requires a non-empty reason (recorded to the audit trail).`,
 		);
 	}
+	// The lanes this override abandons, addressed by `correlationId` — the
+	// ledger's primary key, not the non-unique display label. DECIDED here (after
+	// every refusal, before anything is written) but FINALIZED only once the
+	// CAS-guarded clear has succeeded, far below (issue #2251 closeout F1).
+	//
+	// Gated on the override rather than derived from the retained ids alone.
+	// Reaching here with retained lanes DOES imply an override today (a retained
+	// lane keeps `openLanes > 0`, which the refusal above rejects otherwise), but
+	// making the audit field depend on that inference would let a future change to
+	// the refusal silently start naming lanes no override ever targeted.
+	const overrideTargetedLaneIds = overridesProbeRetention
+		? (laneSettlement.probeRetainedCorrelationIds ?? [])
+		: [];
+	// Everything about the override that is TRUE BEFORE the clear runs. The
+	// durable `pr_workflow_aborted` record below is appended pre-clear (FB-008,
+	// issue #2242) and therefore may not claim a finalization outcome that has not
+	// happened yet; the returned disclosure appends that outcome once it has.
+	const probeRetentionOverrideDecision = overridesProbeRetention
+		? `force abort overrode ${probeRetainedLanes.length} lane(s) past the staleness horizon that the liveness probe reported as still running: ${probeRetainedLanes
+				.slice(0, MAX_DISCLOSED_LANE_IDS)
+				.join(
+					', ',
+				)}. Their sessions were NOT stopped and their output was NOT collected.`
+		: undefined;
 	const abortEvent = {
 		type: 'pr_workflow_aborted',
 		timestamp: isoNow(),
@@ -1417,7 +2363,57 @@ export async function abortPrWorkflow(
 		kind: options.kind,
 		...(state.prHeadSha ? { prHeadSha: state.prHeadSha } : {}),
 		...(state.checkoutRecovery ? { hadTerminalRecovery: true } : {}),
-		openLanes: openLanes.length,
+		openLanes: laneSettlement.openLanes,
+		...(laneSettlement.presumedStaleLaneIds.length > 0
+			? {
+					presumedStaleLanes: laneSettlement.presumedStaleLaneIds.slice(
+						0,
+						MAX_DISCLOSED_LANE_IDS,
+					),
+					presumedStaleDisclosure: laneSettlement.disclosure,
+				}
+			: {}),
+		// Issue #2251 R4: the probe verdict belongs in the abort record, not only in
+		// the return value — an operator auditing why a gate cleared has to see that
+		// lanes were spared (or that the probe could not run at all).
+		...(probeRetainedLanes.length > 0
+			? {
+					probeRetainedLanes: probeRetainedLanes.slice(
+						0,
+						MAX_DISCLOSED_LANE_IDS,
+					),
+				}
+			: {}),
+		...(probeRetentionOverrideDecision
+			? { probeRetentionOverrideDisclosure: probeRetentionOverrideDecision }
+			: {}),
+		// Which records this override TARGETS, by `correlationId`. A decision, not
+		// an outcome: this record is appended before the clear, and the finalization
+		// it authorizes runs only if that clear succeeds. An auditor reconciles the
+		// two halves against the ledger itself — `.swarm/delegations.jsonl` is the
+		// authority on whether each named row went terminal, and a row that is still
+		// `pending` there is one that still refuses checkout preparation for this
+		// session.
+		...(overridesProbeRetention
+			? {
+					probeRetentionOverrideLanes: overrideTargetedLaneIds.slice(
+						0,
+						MAX_DISCLOSED_LANE_IDS,
+					),
+				}
+			: {}),
+		...(laneSettlement.probeDegradedReason
+			? { probeStatus: laneSettlement.probeDegradedReason }
+			: {}),
+		...(recovery.salvaged
+			? {
+					stateSalvaged: true,
+					stateSalvageDisclosure: recovery.disclosure,
+					...(recovery.revisionSalvageable
+						? {}
+						: { casEscapeDisclosure: CAS_ESCAPE_DISCLOSURE }),
+				}
+			: {}),
 		reason: sanitizedReason,
 	};
 	try {
@@ -1436,11 +2432,193 @@ export async function abortPrWorkflow(
 	// this clear, the clear is rejected and the caller revalidates. Self-heals
 	// on retry and prevents a late concurrent mutation from being silently
 	// dropped by our clear.
-	await clearPrWorkflowGateState(directory, sessionID, state.revision);
+	//
+	// W-5 (issue #2242 R4): when the revision itself could not be salvaged there
+	// is no value to compare against, so this deliberately takes the documented
+	// `expectedRevision === undefined` escape hatch in `clearPrWorkflowGateState`
+	// (see its comment above) — a disclosed, intentional CAS drop, not an
+	// accidental one. When the revision WAS salvageable, normal CAS still
+	// applies, reading back through the same salvage-tolerant view.
+	const casEscape = recovery.salvaged && !recovery.revisionSalvageable;
+	await _test_exports.beforeAbortClear?.();
+	try {
+		await clearPrWorkflowGateState(
+			directory,
+			sessionID,
+			casEscape ? undefined : state.revision,
+			{ allowSalvagedRead: recovery.salvaged },
+		);
+	} catch (error) {
+		// The `pr_workflow_aborted` record above is already durable, and the
+		// append deliberately precedes the clear so a write failure can never
+		// block the gate from clearing. But `clearPrWorkflowGateState` THROWS on
+		// a CAS mismatch, so a concurrent mutation would otherwise leave the
+		// audit trail asserting an abort that never executed, with no field
+		// distinguishing it. Append a best-effort correction — same non-fatal
+		// discipline as the abort event — carrying sessionID/mode/prHeadSha so it
+		// correlates with the record it retracts, then re-throw unchanged.
+		try {
+			await fsp.appendFile(
+				validateSwarmPath(directory, 'events.jsonl'),
+				`${JSON.stringify({
+					type: 'pr_workflow_abort_not_completed',
+					timestamp: isoNow(),
+					sessionID: state.sessionID,
+					mode: state.mode,
+					...(state.prHeadSha ? { prHeadSha: state.prHeadSha } : {}),
+					reason: sanitizedReason,
+					// Issue #2251 closeout F1: the override's irreversible finalization is
+					// ordered AFTER the clear, so reaching here means the OVERRIDE never
+					// ran and touched no retained lane. Scoped to the override on purpose
+					// — two broader readings are false and were shipped and retracted
+					// once each. "This abort touched nothing" is false because settlement
+					// durably sweeps the batch's probe-dead lanes before the clear; "the
+					// retained lanes are untouched" is false because a concurrent force
+					// abort can clear and finalize them, which is itself one of the ways
+					// this CAS loses. The disclosure below is hedged to match.
+					...(overridesProbeRetention
+						? {
+								probeRetentionOverrideLanes: overrideTargetedLaneIds.slice(
+									0,
+									MAX_DISCLOSED_LANE_IDS,
+								),
+								probeRetentionOverrideFinalized: false,
+							}
+						: {}),
+					// Reuses the generic diagnostic char cap rather than declaring a
+					// third one-off bound; the value is a plain length ceiling on an
+					// operator-facing string, not a coverage-specific quantity.
+					failure: (error instanceof Error
+						? error.message
+						: String(error)
+					).slice(0, MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS),
+					// Claims only what this catch can actually observe. Every throw
+					// reachable from `clearPrWorkflowGateState` today precedes the
+					// unlink (CAS mismatch, lock acquisition, non-ENOENT rm), so the
+					// gate is in fact still active — but asserting that here would
+					// depend on a swallow in `releaseSessionStateMutationLock` ~8,500
+					// lines away. Making a DURABLE audit record depend on that is the
+					// same defect class this record exists to retract, so it stays
+					// hedged and the operator revalidates.
+					disclosure:
+						'RETRACTION: the pr_workflow_aborted record for this session did NOT complete — ' +
+						'the clear failed and the gate state may still be active. Revalidate the current ' +
+						'session state before retrying the abort.' +
+						(overridesProbeRetention
+							? ' The probe-retention override finalized no record: it runs only after the ' +
+								'clear succeeds, and this clear failed. Other lanes in the same settlement ' +
+								'batch may already have been finalized as presumed-stale, and a concurrent abort for this session may have finalized more — revalidate the lane records rather than assuming they are untouched.'
+							: ''),
+				})}\n`,
+				'utf-8',
+			);
+		} catch {
+			// Non-fatal, exactly like the abort event: a failed correction append
+			// must not mask the clear failure the caller has to see.
+		}
+		throw error;
+	}
+	// THE IRREVERSIBLE HALF, deliberately last (issue #2251 closeout F1). A
+	// finalized record is terminal, the collector skips terminal records, and that
+	// lane's transcript is gone for good — so it may only run once the reversible,
+	// CAS-guarded half has actually succeeded. Ordering it before the clear meant a
+	// lost compare-and-swap left a provably-live lane already abandoned while the
+	// thrown error named neither the lane nor the override, and the operator's
+	// retry then read as an ordinary force abort over nothing.
+	//
+	// The residual exposure is a process crash in the window between the two
+	// writes: the records stay `pending`, which keeps the session un-restartable
+	// until they settle. That is strictly the lesser failure — recoverable, and
+	// the lane's output is still collectable — and it is why the finalization is
+	// best-effort-with-disclosure rather than a precondition of the abort.
+	const overrideOutcome: OverriddenProbeRetainedLaneOutcome =
+		overridesProbeRetention
+			? await finalizeOverriddenProbeRetainedLanes(
+					directory,
+					state.sessionID,
+					overrideTargetedLaneIds,
+				)
+			: {
+					sessionOpenLaneIds: [],
+					finalizedLaneIds: [],
+					sparedLaneDescriptions: [],
+				};
+	// THREE independent facts on three independent conditions (issue #2251
+	// closeout F2, then N1). Every one of them is a POSITIVE observation:
+	//
+	//   1. Which overridden records went terminal `stale`? — that, and only that,
+	//      makes a lane's output permanently uncollectable.
+	//   2. Which overridden records did the sweep leave INTACT because they had
+	//      already moved on? — the operator must not be told to stop looking for
+	//      work this abort never abandoned. Reported with the observed status
+	//      rather than as "collectable": that would overclaim for the `error`,
+	//      `ingestion_error` and `ingesting` statuses that can also land here.
+	//   3. Can this session start a new PR workflow? — answered only by every
+	//      still-open `swarm-pr-*` record of the session, because
+	//      `countOpenPrWorkflowLanes` is what refuses the restart and it does not
+	//      care which lanes an override reasoned about.
+	//
+	// (1) and (3) come apart in a mixed batch: the ordinary settlement sweep
+	// swallows a store-lock timeout and returns 0, so a lane this abort reported
+	// as SETTLED can still be `pending` on disk and refuse the next checkout
+	// preparation even though every overridden lane WAS finalized. Conflating them
+	// either claims restartability that was never verified (the original defect)
+	// or suppresses the abandonment notice for a lane whose transcript is
+	// genuinely gone.
+	//
+	// (1) and (2) came apart because the abandonment clause used to be decided by
+	// ABSENCE from the open set. A raced-to-`completed` lane is absent for the
+	// opposite reason a finalized one is, so the clause fired over a lane whose
+	// result was sitting on disk, collectable — telling the operator to stop
+	// looking for recoverable work is precisely the harm this issue removes.
+	const probeRetentionOverrideDisclosure = probeRetentionOverrideDecision
+		? probeRetentionOverrideDecision +
+			(overrideOutcome.finalizedLaneIds.length === 0
+				? ''
+				: ` Their delegation records were finalized (correlationId: ${overrideOutcome.finalizedLaneIds
+						.slice(0, MAX_DISCLOSED_LANE_IDS)
+						.join(
+							', ',
+						)}); whatever those lanes still produce is no longer collectable.`) +
+			(overrideOutcome.sparedLaneDescriptions.length === 0
+				? ''
+				: ` ${overrideOutcome.sparedLaneDescriptions.length} of the overridden lane(s) were NOT finalized: the sweep left those records intact at the status they had already reached (${overrideOutcome.sparedLaneDescriptions
+						.slice(0, MAX_DISCLOSED_LANE_IDS)
+						.join(
+							', ',
+						)}). This abort did not discard them — check collect_lane_results before assuming that work is gone.`) +
+			(overrideOutcome.sessionOpenLaneIds.length === 0
+				? ' A new PR workflow can now be started for this session.'
+				: ` WARNING: ${overrideOutcome.sessionOpenLaneIds.length} PR workflow delegation record(s) for this session are still open (correlationId: ${overrideOutcome.sessionOpenLaneIds
+						.slice(0, MAX_DISCLOSED_LANE_IDS)
+						.join(
+							', ',
+						)}) and will keep refusing PR workflow checkout preparation for this session until they settle.`)
+		: undefined;
 	return {
 		mode: state.mode,
 		...(state.prHeadSha ? { prHeadSha: state.prHeadSha } : {}),
-		openLanes: openLanes.length,
+		openLanes: laneSettlement.openLanes,
+		...(laneSettlement.presumedStaleLaneIds.length > 0
+			? {
+					presumedStaleLanes: laneSettlement.presumedStaleLaneIds,
+					presumedStaleDisclosure: laneSettlement.disclosure,
+				}
+			: {}),
+		...(probeRetainedLanes.length > 0 ? { probeRetainedLanes } : {}),
+		...(probeRetentionOverrideDisclosure
+			? { probeRetentionOverrideDisclosure }
+			: {}),
+		...(laneSettlement.probeDegradedReason
+			? { probeDegradedReason: laneSettlement.probeDegradedReason }
+			: {}),
+		...(recovery.salvaged
+			? {
+					stateSalvaged: true,
+					stateSalvageDisclosure: recovery.disclosure,
+				}
+			: {}),
+		...(casEscape ? { casEscapeDisclosure: CAS_ESCAPE_DISCLOSURE } : {}),
 	};
 }
 
@@ -1836,20 +3014,461 @@ export async function enforcePrWorkflowDispatchLanesAsync(
 	return state;
 }
 
+export class PrReviewResilienceCircuitOpenError extends Error {
+	readonly code = 'PR_REVIEW_RESILIENCE_CIRCUIT_OPEN' as const;
+
+	constructor(message: string) {
+		super(message);
+		this.name = 'PrReviewResilienceCircuitOpenError';
+	}
+}
+
+export class PrReviewResilienceRetryExhaustedError extends Error {
+	readonly code = 'PR_REVIEW_RESILIENCE_RETRY_EXHAUSTED' as const;
+
+	constructor(message: string) {
+		super(message);
+		this.name = 'PrReviewResilienceRetryExhaustedError';
+	}
+}
+
+function snapshotPrReviewResiliencePolicy(
+	policy?: PrReviewResilienceConfig,
+): PrReviewResiliencePolicyRecord {
+	return {
+		enabled: policy?.enabled ?? true,
+		canaryProbeMs: policy?.canary_probe_ms ?? 300_000,
+		statusProbeTimeoutMs: policy?.status_probe_timeout_ms ?? 2_000,
+		correlatedFailureThreshold: policy?.correlated_failure_threshold ?? 2,
+		maxRetryAttemptsAfterInitial: policy?.max_retry_attempts_after_initial ?? 2,
+	};
+}
+
+function declaredBaseDimensions(
+	lanes: readonly PrWorkflowLaneSpec[],
+): PrReviewBaseDimensionId[] {
+	return lanes.flatMap(
+		(lane) =>
+			(lane.ownedWorkflowLanes?.length
+				? lane.ownedWorkflowLanes
+				: [lane.workflowLane]) as PrReviewBaseDimensionId[],
+	);
+}
+
+function exactDimensionPartition(
+	actual: readonly PrReviewBaseDimensionId[],
+	expected: readonly PrReviewBaseDimensionId[],
+): boolean {
+	return (
+		actual.length === expected.length &&
+		new Set(actual).size === expected.length &&
+		expected.every((dimension) => actual.includes(dimension))
+	);
+}
+
+function latestDelegationRecord(
+	records: readonly BackgroundDelegationRecord[],
+): BackgroundDelegationRecord | null {
+	const sorted = [...records].sort((left, right) => {
+		const leftKey = left.completedAt ?? left.updatedAt ?? left.createdAt;
+		const rightKey = right.completedAt ?? right.updatedAt ?? right.createdAt;
+		return rightKey - leftKey;
+	});
+	return sorted[0] ?? null;
+}
+
+function batchLaneRecords(
+	directory: string,
+	state: PrWorkflowGateState,
+	batchId: string,
+	laneId: string,
+): BackgroundDelegationRecord[] {
+	return findByBatchId(directory, batchId, {
+		parentSessionId: state.sessionID,
+	}).filter((record) => record.laneId === laneId);
+}
+
+function baseLaneDimensions(lane: {
+	workflowLane: PrReviewBaseDimensionId;
+	ownedWorkflowLanes?: readonly PrReviewBaseDimensionId[];
+}): readonly PrReviewBaseDimensionId[] {
+	return lane.ownedWorkflowLanes?.length
+		? lane.ownedWorkflowLanes
+		: [lane.workflowLane];
+}
+
+function batchIsTerminal(
+	directory: string,
+	state: PrWorkflowGateState,
+	batchId: string,
+): boolean {
+	const records = findByBatchId(directory, batchId, {
+		parentSessionId: state.sessionID,
+	});
+	return (
+		records.length > 0 &&
+		records.every(
+			(record) =>
+				TERMINAL_FAILED_DELEGATION_STATUSES.has(record.status) ||
+				record.status === 'consumed',
+		)
+	);
+}
+
+function effectivePrReviewResiliencePolicy(
+	state: PrWorkflowGateState,
+	requestedPolicy?: PrReviewResilienceConfig,
+): PrReviewResiliencePolicyRecord {
+	return (
+		state.prReviewResilience?.policy ??
+		snapshotPrReviewResiliencePolicy(requestedPolicy)
+	);
+}
+
+function normalizeFailureSignatureText(value: string): string {
+	return value
+		.toLowerCase()
+		.replace(
+			/\b\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:z|[+-]\d{2}:\d{2})\b/g,
+			'<iso-timestamp>',
+		)
+		.replace(/\b\d{10,16}\b/g, '<epoch>')
+		.replace(
+			/\b((?:session|request|trace|correlation|run)(?:[_-]?id)?)\s*[:=]\s*([a-z0-9._:-]*[0-9_-][a-z0-9._:-]*)\b/g,
+			'$1=<id>',
+		)
+		.replace(
+			/\b((?:session|sess|request|req|trace|correlation|corr|run)(?:[_-]?id)?)\s+((?:(?:sess?|req|trace|corr|run)[_-][a-z0-9._:-]+|[a-z][a-z0-9._:-]*\d[a-z0-9._:-]*))\b/g,
+			'$1 <id>',
+		)
+		.replace(
+			/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/g,
+			'<uuid>',
+		)
+		.replace(/\b[0-9a-f]{16,64}\b/g, '<hex>')
+		.replace(/[a-z]:\\[^\s)]+/gi, '<path>')
+		.replace(/(?:\/[\w.@:-]+)+/g, '<path>')
+		.replace(/\s+/g, ' ')
+		.trim()
+		.slice(0, 160);
+}
+
+function classifyTerminalFailureSignature(
+	record: BackgroundDelegationRecord,
+): string | null {
+	if (!TERMINAL_FAILED_DELEGATION_STATUSES.has(record.status)) return null;
+	const result = record.terminalResult?.result ?? record.result;
+	if (!result) return `terminal-zero-output:${record.status}`;
+	const outputRef = result.outputRef?.trim();
+	const text = result.text?.trim() ?? '';
+	if (!outputRef && text.length === 0 && (result.chars ?? 0) === 0) {
+		return `terminal-zero-output:${record.status}`;
+	}
+	const errorText = result.error?.trim();
+	if (errorText) {
+		return `terminal-error-output:${record.status}:${normalizeFailureSignatureText(errorText)}`;
+	}
+	// `completed` means the child produced a result that has not necessarily been
+	// ingested yet. Non-empty, error-free output is therefore not authoritative
+	// evidence of failure; counting it would let two healthy, pending-ingestion
+	// lanes open the circuit. Empty/error completion remains classifiable above.
+	if (record.status === 'completed') return null;
+	return `terminal-nonzero-output:${record.status}`;
+}
+
+function computePrReviewResilienceCircuit(
+	directory: string,
+	state: PrWorkflowGateState,
+	policy: PrReviewResiliencePolicyRecord,
+): PrReviewResilienceCircuitRecord | null {
+	const signatures = new Map<
+		string,
+		{
+			dimensions: Set<PrReviewBaseDimensionId>;
+			contributors: Array<{ batchId: string; laneId: string }>;
+		}
+	>();
+	for (const batch of state.prReviewBaseDispatches ?? []) {
+		for (const lane of batch.lanes) {
+			const latest = latestDelegationRecord(
+				batchLaneRecords(directory, state, batch.batchId, lane.laneId),
+			);
+			if (!latest) continue;
+			const signature = classifyTerminalFailureSignature(latest);
+			if (!signature) continue;
+			const current = signatures.get(signature) ?? {
+				dimensions: new Set<PrReviewBaseDimensionId>(),
+				contributors: [],
+			};
+			for (const dimension of baseLaneDimensions(lane)) {
+				if (current.dimensions.has(dimension)) continue;
+				current.dimensions.add(dimension);
+				current.contributors.push({
+					batchId: batch.batchId,
+					laneId: lane.laneId,
+				});
+			}
+			signatures.set(signature, current);
+		}
+	}
+	const opened = [...signatures.entries()]
+		.filter(
+			([, entry]) => entry.dimensions.size >= policy.correlatedFailureThreshold,
+		)
+		.sort(
+			(left, right) =>
+				right[1].dimensions.size - left[1].dimensions.size ||
+				left[0].localeCompare(right[0]),
+		)[0];
+	if (!opened) return null;
+	return {
+		signature: opened[0],
+		count: opened[1].dimensions.size,
+		contributors: opened[1].contributors,
+		openedAt: state.prReviewResilience?.circuit?.openedAt ?? isoNow(),
+	};
+}
+
+function formatPrReviewResilienceCircuitOpenMessage(
+	circuit: PrReviewResilienceCircuitRecord,
+): string {
+	return `BLOCKED: PR_REVIEW base dispatch circuit is open after ${circuit.count} correlated terminal failures (${circuit.signature}); collect every launched lane, abort_pr_workflow, and stop without partial findings`;
+}
+
+async function preflightPrReviewResilienceCircuitBeforePrune(
+	directory: string,
+	state: PrWorkflowGateState,
+	previous: PrReviewBaseDispatchRecord[],
+	policy: PrReviewResiliencePolicyRecord,
+): Promise<{
+	state: PrWorkflowGateState;
+	previous: PrReviewBaseDispatchRecord[];
+}> {
+	let nextState = state;
+	let nextPrevious = previous;
+	let snapshot = nextState.prReviewResilience;
+	if (!snapshot) {
+		snapshot = { policy, attempts: [] };
+		if (nextPrevious.length > 0) {
+			nextState = await writeStateWhileLocked(directory, {
+				...nextState,
+				updatedAt: isoNow(),
+				prReviewResilience: snapshot,
+			});
+			nextPrevious = nextState.prReviewBaseDispatches ?? [];
+			snapshot = nextState.prReviewResilience ?? snapshot;
+		}
+	}
+	if (snapshot.circuit) {
+		throw new PrReviewResilienceCircuitOpenError(
+			formatPrReviewResilienceCircuitOpenMessage(snapshot.circuit),
+		);
+	}
+	const circuit = computePrReviewResilienceCircuit(
+		directory,
+		nextState,
+		policy,
+	);
+	if (!circuit) {
+		return { state: nextState, previous: nextPrevious };
+	}
+	const nextResilience = { ...snapshot, circuit };
+	if (
+		!nextState.prReviewResilience ||
+		nextState.prReviewResilience.circuit?.signature !== circuit.signature ||
+		nextState.prReviewResilience.circuit?.count !== circuit.count
+	) {
+		nextState = await writeStateWhileLocked(directory, {
+			...nextState,
+			updatedAt: isoNow(),
+			prReviewResilience: nextResilience,
+		});
+		nextPrevious = nextState.prReviewBaseDispatches ?? [];
+	}
+	throw new PrReviewResilienceCircuitOpenError(
+		formatPrReviewResilienceCircuitOpenMessage(circuit),
+	);
+}
+
+async function probeResilienceCanaryLiveness(
+	directory: string,
+	records: readonly BackgroundDelegationRecord[],
+	timeoutMs: number,
+): Promise<{ live: boolean; reason?: string }> {
+	const session = _test_exports.getSessionOps();
+	const status = session?.status;
+	if (!session || typeof status !== 'function') {
+		return { live: false, reason: 'status probe unavailable' };
+	}
+	const timeoutError = new Error(
+		'PR workflow resilience canary probe exceeded its deadline',
+	);
+	let response: Awaited<ReturnType<NonNullable<typeof status>>> | undefined;
+	try {
+		response = await withTimeout(
+			(async () => status.call(session, { query: { directory } }))(),
+			timeoutMs,
+			timeoutError,
+		);
+	} catch (error) {
+		return {
+			live: false,
+			reason:
+				error === timeoutError
+					? 'status probe timed out'
+					: 'status probe failed',
+		};
+	}
+	if (response?.error) return { live: false, reason: 'status probe errored' };
+	if (!response?.data)
+		return { live: false, reason: 'status probe returned no data' };
+	for (const record of records) {
+		const type = response.data[record.subagentSessionId]?.type;
+		if (type === 'busy' || type === 'retry') return { live: true };
+	}
+	return { live: false, reason: 'status probe did not report busy/retry' };
+}
+
+async function evaluatePrReviewResilienceAttempt(
+	directory: string,
+	state: PrWorkflowGateState,
+	attempt: PrReviewResilienceAttemptRecord,
+	revisionDigest: string,
+	policy: PrReviewResiliencePolicyRecord,
+): Promise<{
+	remaining: PrReviewBaseDimensionId[];
+	inFlight: PrReviewBaseDimensionId[];
+	canaryState: 'success' | 'failed' | 'live' | 'waiting';
+	reason?: string;
+	fanoutSettled: boolean;
+}> {
+	const attempts = summarizePrReviewBaseDimensionAttempts(
+		directory,
+		state,
+		revisionDigest,
+	);
+	const remaining = attempt.targetDimensions.filter(
+		(dimension) =>
+			!attempts.successful.has(dimension) && !attempts.inFlight.has(dimension),
+	);
+	const inFlight = attempt.targetDimensions.filter((dimension) =>
+		attempts.inFlight.has(dimension),
+	);
+	if (remaining.length === 0 && inFlight.length === 0) {
+		return {
+			remaining: [],
+			inFlight: [],
+			canaryState: 'success',
+			fanoutSettled: Boolean(attempt.fanoutBatchId),
+		};
+	}
+	if (attempts.successful.has(attempt.canaryWorkflowLane)) {
+		return {
+			remaining,
+			inFlight,
+			canaryState: 'success',
+			fanoutSettled: attempt.fanoutBatchId
+				? batchIsTerminal(directory, state, attempt.fanoutBatchId)
+				: false,
+		};
+	}
+	const canaryRecords = batchLaneRecords(
+		directory,
+		state,
+		attempt.canaryBatchId,
+		attempt.canaryLaneId,
+	);
+	if (
+		canaryRecords.length > 0 &&
+		canaryRecords.every((record) =>
+			TERMINAL_FAILED_DELEGATION_STATUSES.has(record.status),
+		)
+	) {
+		return { remaining, inFlight, canaryState: 'failed', fanoutSettled: false };
+	}
+	const admittedAtMs = Date.parse(attempt.admittedAt);
+	if (
+		Number.isFinite(admittedAtMs) &&
+		_test_exports.nowMs() - admittedAtMs < policy.canaryProbeMs
+	) {
+		return {
+			remaining,
+			inFlight,
+			canaryState: 'waiting',
+			reason: 'canary probe horizon has not elapsed yet',
+			fanoutSettled: false,
+		};
+	}
+	const probe = await probeResilienceCanaryLiveness(
+		directory,
+		canaryRecords,
+		policy.statusProbeTimeoutMs,
+	);
+	if (probe.live) {
+		return { remaining, inFlight, canaryState: 'live', fanoutSettled: false };
+	}
+	return {
+		remaining,
+		inFlight,
+		canaryState: 'waiting',
+		reason: probe.reason,
+		fanoutSettled: false,
+	};
+}
+
+function unresolvedPrReviewBaseDimensions(
+	attempts: Pick<PrReviewBaseDimensionAttempts, 'successful' | 'inFlight'>,
+): PrReviewBaseDimensionId[] {
+	return PR_REVIEW_BASE_DIMENSION_IDS.filter(
+		(dimension) =>
+			!attempts.successful.has(dimension) && !attempts.inFlight.has(dimension),
+	) as PrReviewBaseDimensionId[];
+}
+
+interface EnforcePrReviewBaseDimensionsOptions {
+	batchId: string;
+	prHeadSha: string;
+	revisionDigest?: string;
+	prReviewWaveStage?: 'canary' | 'fanout';
+	prReviewWaveAttempt?: 0 | 1 | 2;
+	prReviewResiliencePolicy?: PrReviewResilienceConfig;
+}
+
 export async function enforcePrReviewBaseDimensions(
 	directory: string,
 	sessionID: string,
 	lanes: readonly PrWorkflowLaneSpec[],
-	options: { batchId: string; prHeadSha: string; revisionDigest?: string },
+	options: EnforcePrReviewBaseDimensionsOptions,
 ): Promise<PrWorkflowGateState> {
-	let state = await bindPrWorkflowHead(directory, sessionID, options.prHeadSha);
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	return withPrWorkflowCheckoutMutationLock(directory, async () =>
+		withSessionStateMutation(directory, normalizedSessionID, async () =>
+			enforcePrReviewBaseDimensionsWhileLocked(
+				directory,
+				normalizedSessionID,
+				lanes,
+				options,
+			),
+		),
+	);
+}
+
+async function enforcePrReviewBaseDimensionsWhileLocked(
+	directory: string,
+	normalizedSessionID: string,
+	lanes: readonly PrWorkflowLaneSpec[],
+	options: EnforcePrReviewBaseDimensionsOptions,
+): Promise<PrWorkflowGateState> {
+	let state = await bindPrWorkflowHeadWhileLocked(
+		directory,
+		normalizedSessionID,
+		options.prHeadSha,
+	);
 	if (state.mode !== 'PR_REVIEW') {
 		throw wrongModeError(state, 'PR_REVIEW');
 	}
 	const normalizedLanes = normalizeWorkflowLanes(lanes);
-	const claimedDimensionIds = normalizedLanes.flatMap(
-		(lane) => lane.ownedWorkflowLanes ?? [lane.workflowLane],
-	);
+	const claimedDimensionIds = declaredBaseDimensions(normalizedLanes);
 	const extras = claimedDimensionIds.filter(
 		(laneId) =>
 			!PR_REVIEW_BASE_DIMENSION_IDS.includes(laneId as PrReviewBaseDimensionId),
@@ -1861,11 +3480,6 @@ export async function enforcePrReviewBaseDimensions(
 			`BLOCKED: PR_REVIEW base dispatch lane ids must be drawn from: ${expected}. Received: ${received}`,
 		);
 	}
-	// Tier L requires one dedicated lane per dimension on every base batch, not
-	// only the initial wave — a later retry/supplementary batch may not use a
-	// consolidated lane to settle multiple dimensions from a single artifact
-	// that never went through the initial-wave tier check. The one exception is
-	// narrow, and every clause of it is load-bearing (issue #1968 P3.1).
 	if (
 		(state.prReviewDepthTier ?? 'L') === 'L' &&
 		normalizedLanes.some((lane) => (lane.ownedWorkflowLanes?.length ?? 1) !== 1)
@@ -1903,12 +3517,36 @@ export async function enforcePrReviewBaseDimensions(
 			`BLOCKED: PR_REVIEW base batch id "${batchId}" is already recorded`,
 		);
 	}
+	const depthTier = state.prReviewDepthTier ?? 'L';
+	const requestedWaveStage = options.prReviewWaveStage;
+	const requestedWaveAttempt = options.prReviewWaveAttempt;
+	if (
+		(requestedWaveStage === undefined) !==
+		(requestedWaveAttempt === undefined)
+	) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW staged base dispatch requires both pr_review_wave_stage and pr_review_wave_attempt together',
+		);
+	}
+	const resiliencePolicy = effectivePrReviewResiliencePolicy(
+		state,
+		options.prReviewResiliencePolicy,
+	);
+	if (
+		previous.length >= MAX_WORKFLOW_BATCHES &&
+		requestedWaveStage !== undefined &&
+		requestedWaveAttempt !== undefined &&
+		depthTier !== 'S' &&
+		resiliencePolicy.enabled
+	) {
+		({ state, previous } = await preflightPrReviewResilienceCircuitBeforePrune(
+			directory,
+			state,
+			previous,
+			resiliencePolicy,
+		));
+	}
 	if (previous.length >= MAX_WORKFLOW_BATCHES) {
-		// The cap used to be a permanent dead end with no recovery path. Prune
-		// provably-inert batches from the in-memory state FIRST, then re-read
-		// `previous` from the pruned object, so the append below and the single
-		// persistState downstream both operate on the same state — a separate GC
-		// write would be undone by `[...previous, record]` and would trip the CAS.
 		state = await prunePrWorkflowBatchesForCapacity(
 			directory,
 			state,
@@ -1917,6 +3555,279 @@ export async function enforcePrReviewBaseDimensions(
 		previous = state.prReviewBaseDispatches ?? [];
 		if (previous.length >= MAX_WORKFLOW_BATCHES) {
 			throw new Error('BLOCKED: PR_REVIEW base batch limit reached');
+		}
+	}
+	let nextResilience = state.prReviewResilience;
+	if (!nextResilience) {
+		nextResilience = { policy: resiliencePolicy, attempts: [] };
+		if (previous.length > 0) {
+			state = await writeStateWhileLocked(directory, {
+				...state,
+				updatedAt: isoNow(),
+				prReviewResilience: nextResilience,
+			});
+			previous = state.prReviewBaseDispatches ?? [];
+		}
+	}
+	if (
+		resiliencePolicy.enabled &&
+		depthTier !== 'S' &&
+		requestedWaveStage === undefined
+	) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW base dispatch at depth tier M or L requires canary-first staged admission while pr_review_resilience is enabled',
+		);
+	}
+	if (requestedWaveStage !== undefined && requestedWaveAttempt !== undefined) {
+		if (depthTier === 'S' || !resiliencePolicy.enabled) {
+			throw new Error(
+				'BLOCKED: staged PR_REVIEW base dispatch is valid only when pr_review_resilience is enabled at depth tier M or L',
+			);
+		}
+		let revisionDigest = options.revisionDigest;
+		if (!revisionDigest) {
+			revisionDigest = (await createPrReviewGateContext(directory, state))
+				.revisionDigest;
+		}
+		const snapshot = nextResilience ?? {
+			policy: resiliencePolicy,
+			attempts: [],
+		};
+		if (snapshot.circuit) {
+			throw new PrReviewResilienceCircuitOpenError(
+				formatPrReviewResilienceCircuitOpenMessage(snapshot.circuit),
+			);
+		}
+		const circuit = computePrReviewResilienceCircuit(
+			directory,
+			state,
+			snapshot.policy,
+		);
+		if (circuit) {
+			nextResilience = { ...snapshot, circuit };
+			if (
+				!state.prReviewResilience ||
+				state.prReviewResilience.circuit?.signature !== circuit.signature ||
+				state.prReviewResilience.circuit?.count !== circuit.count
+			) {
+				await writeStateWhileLocked(directory, {
+					...state,
+					updatedAt: isoNow(),
+					prReviewResilience: nextResilience,
+				});
+			}
+			throw new PrReviewResilienceCircuitOpenError(
+				formatPrReviewResilienceCircuitOpenMessage(circuit),
+			);
+		}
+		const lastAttempt = snapshot.attempts.at(-1);
+		if (requestedWaveStage === 'canary') {
+			let target = [
+				...PR_REVIEW_BASE_DIMENSION_IDS,
+			] as PrReviewBaseDimensionId[];
+			let expectedAttempt: 0 | 1 | 2 = 0;
+			let globalInFlight: PrReviewBaseDimensionId[] = [];
+			if (lastAttempt) {
+				const globalAttempts = summarizePrReviewBaseDimensionAttempts(
+					directory,
+					state,
+					revisionDigest,
+				);
+				globalInFlight = PR_REVIEW_BASE_DIMENSION_IDS.filter((dimension) =>
+					globalAttempts.inFlight.has(dimension),
+				) as PrReviewBaseDimensionId[];
+				const globalTarget = unresolvedPrReviewBaseDimensions(globalAttempts);
+				const evaluated = await evaluatePrReviewResilienceAttempt(
+					directory,
+					state,
+					lastAttempt,
+					revisionDigest,
+					snapshot.policy,
+				);
+				if (!lastAttempt.fanoutBatchId) {
+					if (evaluated.canaryState === 'success') {
+						if (evaluated.remaining.length > 0) {
+							throw new Error(
+								`BLOCKED: PR_REVIEW base attempt ${lastAttempt.attempt} requires its fanout batch before a later retry attempt`,
+							);
+						}
+						if (globalTarget.length === 0) {
+							throw new PrReviewResilienceRetryExhaustedError(
+								'BLOCKED: PR_REVIEW base dispatch has no unresolved obligations remaining',
+							);
+						}
+						target = [...globalTarget];
+					} else {
+						if (evaluated.canaryState === 'live') {
+							throw new Error(
+								`BLOCKED: PR_REVIEW base attempt ${lastAttempt.attempt} canary is still live; fanout is the next admissible stage`,
+							);
+						}
+						if (evaluated.canaryState === 'waiting') {
+							throw new Error(
+								`BLOCKED: PR_REVIEW base attempt ${lastAttempt.attempt} canary is not yet proven successful or live: ${evaluated.reason ?? 'probe failed closed'}`,
+							);
+						}
+						target = [...globalTarget];
+					}
+				} else {
+					if (!batchIsTerminal(directory, state, lastAttempt.fanoutBatchId)) {
+						throw new Error(
+							`BLOCKED: PR_REVIEW base attempt ${lastAttempt.attempt} fanout is still in flight`,
+						);
+					}
+					target = [...globalTarget];
+				}
+				expectedAttempt = (lastAttempt.attempt + 1) as 0 | 1 | 2;
+			} else if (previous.length > 0) {
+				const globalAttempts = summarizePrReviewBaseDimensionAttempts(
+					directory,
+					state,
+					revisionDigest,
+				);
+				globalInFlight = PR_REVIEW_BASE_DIMENSION_IDS.filter((dimension) =>
+					globalAttempts.inFlight.has(dimension),
+				) as PrReviewBaseDimensionId[];
+				target = unresolvedPrReviewBaseDimensions(globalAttempts);
+			}
+			if (target.length === 0) {
+				if (globalInFlight.length > 0) {
+					throw new Error(
+						lastAttempt
+							? `BLOCKED: PR_REVIEW base attempt ${lastAttempt.attempt} still has in-flight obligations that cannot be retried yet: ${globalInFlight.join(', ')}`
+							: `BLOCKED: PR_REVIEW base still has in-flight obligations that cannot be retried yet: ${globalInFlight.join(', ')}`,
+					);
+				}
+				throw new PrReviewResilienceRetryExhaustedError(
+					'BLOCKED: PR_REVIEW base dispatch has no unresolved obligations remaining',
+				);
+			}
+			if (
+				requestedWaveAttempt !== expectedAttempt ||
+				requestedWaveAttempt > snapshot.policy.maxRetryAttemptsAfterInitial
+			) {
+				throw new PrReviewResilienceRetryExhaustedError(
+					`BLOCKED: PR_REVIEW base allows attempt 0 plus at most ${snapshot.policy.maxRetryAttemptsAfterInitial} retry attempts`,
+				);
+			}
+			if (
+				normalizedLanes.length !== 1 ||
+				(normalizedLanes[0]?.ownedWorkflowLanes?.length ?? 1) !== 1
+			) {
+				throw new Error(
+					'BLOCKED: PR_REVIEW staged canary dispatch requires exactly one singleton base lane',
+				);
+			}
+			const canaryDimension = normalizedLanes[0]!
+				.workflowLane as PrReviewBaseDimensionId;
+			if (!target.includes(canaryDimension)) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW canary lane must target one unresolved base obligation from: ${target.join(', ')}`,
+				);
+			}
+			nextResilience = {
+				policy: snapshot.policy,
+				attempts: [
+					...snapshot.attempts,
+					{
+						attempt: requestedWaveAttempt,
+						targetDimensions: target,
+						canaryBatchId: batchId,
+						canaryLaneId: normalizedLanes[0]!.laneId,
+						canaryWorkflowLane: canaryDimension,
+						admittedAt: isoNow(),
+					},
+				],
+			};
+		} else {
+			if (
+				!lastAttempt ||
+				lastAttempt.attempt !== requestedWaveAttempt ||
+				lastAttempt.fanoutBatchId
+			) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW base fanout must follow the recorded canary for attempt ${requestedWaveAttempt}`,
+				);
+			}
+			const evaluated = await evaluatePrReviewResilienceAttempt(
+				directory,
+				state,
+				lastAttempt,
+				revisionDigest,
+				snapshot.policy,
+			);
+			if (evaluated.canaryState === 'failed') {
+				throw new Error(
+					`BLOCKED: PR_REVIEW base attempt ${requestedWaveAttempt} canary failed; close the attempt and carry the unresolved target into the next retry`,
+				);
+			}
+			if (evaluated.canaryState === 'waiting') {
+				throw new Error(
+					`BLOCKED: PR_REVIEW base attempt ${requestedWaveAttempt} canary is not yet proven successful or live: ${evaluated.reason ?? 'probe failed closed'}`,
+				);
+			}
+			const remainingTarget = lastAttempt.targetDimensions.filter(
+				(dimension) =>
+					dimension !== lastAttempt.canaryWorkflowLane &&
+					evaluated.remaining.includes(dimension),
+			);
+			if (remainingTarget.length === 0) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW base attempt ${requestedWaveAttempt} has no remaining unresolved obligations for fanout`,
+				);
+			}
+			if (
+				!exactDimensionPartition(
+					declaredBaseDimensions(normalizedLanes),
+					remainingTarget,
+				)
+			) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW base fanout must partition the remaining unresolved obligations exactly once: ${remainingTarget.join(', ')}`,
+				);
+			}
+			if (requestedWaveAttempt === 0) {
+				const combinedDimensions = [
+					lastAttempt.canaryWorkflowLane,
+					...declaredBaseDimensions(normalizedLanes),
+				];
+				if (
+					!exactDimensionPartition(
+						combinedDimensions,
+						lastAttempt.targetDimensions,
+					)
+				) {
+					throw new Error(
+						'BLOCKED: PR_REVIEW base attempt 0 canary plus fanout must partition all six base dimensions exactly once',
+					);
+				}
+				if (
+					depthTier === 'M' &&
+					normalizedLanes.length + 1 < PR_REVIEW_BASE_LANE_FLOORS.M
+				) {
+					throw new Error(
+						`BLOCKED: PR_REVIEW base attempt 0 at depth tier M requires at least ${PR_REVIEW_BASE_LANE_FLOORS.M} combined canary+fanout lanes`,
+					);
+				}
+				if (
+					depthTier === 'L' &&
+					(normalizedLanes.length + 1 !== PR_REVIEW_BASE_DIMENSION_IDS.length ||
+						normalizedLanes.some(
+							(lane) => (lane.ownedWorkflowLanes?.length ?? 1) !== 1,
+						))
+				) {
+					throw new Error(
+						'BLOCKED: PR_REVIEW base attempt 0 at depth tier L requires six singleton combined canary+fanout lanes',
+					);
+				}
+			}
+			nextResilience = {
+				...snapshot,
+				attempts: [
+					...snapshot.attempts.slice(0, -1),
+					{ ...lastAttempt, fanoutBatchId: batchId },
+				],
+			};
 		}
 	}
 	const record: PrReviewBaseDispatchRecord = {
@@ -1933,15 +3844,77 @@ export async function enforcePrReviewBaseDimensions(
 		})),
 		validatedAt: isoNow(),
 	};
-
 	const nextState: PrWorkflowGateState = {
 		...state,
 		updatedAt: isoNow(),
 		prReviewBaseDispatches: [...previous, record],
 		prReviewBaseDispatch: record,
+		...(nextResilience ? { prReviewResilience: nextResilience } : {}),
 	};
-	await persistState(directory, nextState);
-	return nextState;
+	return writeStateWhileLocked(directory, nextState);
+}
+
+export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
+	directory: string,
+	sessionID: string,
+	batchId: string,
+): Promise<boolean> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	const normalizedBatchId = normalizeBatchId(batchId);
+	return withPrWorkflowCheckoutMutationLock(directory, async () =>
+		withSessionStateMutation(directory, normalizedSessionID, async () => {
+			const state = await readPrWorkflowGateState(
+				directory,
+				normalizedSessionID,
+			);
+			if (!state || state.mode !== 'PR_REVIEW') return false;
+			const currentBaseDispatches = state.prReviewBaseDispatches ?? [];
+			if (currentBaseDispatches.at(-1)?.batchId !== normalizedBatchId) {
+				return false;
+			}
+			const batchRecords = findByBatchId(directory, normalizedBatchId, {
+				parentSessionId: normalizedSessionID,
+			});
+			if (batchRecords.length > 0) return false;
+			const nextBaseDispatches = currentBaseDispatches.slice(0, -1);
+			const lastAttempt = state.prReviewResilience?.attempts.at(-1);
+			let nextResilience = state.prReviewResilience;
+			if (lastAttempt?.canaryBatchId === normalizedBatchId) {
+				nextResilience = nextResilience
+					? {
+							...nextResilience,
+							attempts: nextResilience.attempts.slice(0, -1),
+						}
+					: nextResilience;
+			} else if (lastAttempt?.fanoutBatchId === normalizedBatchId) {
+				nextResilience = nextResilience
+					? {
+							...nextResilience,
+							attempts: [
+								...nextResilience.attempts.slice(0, -1),
+								{ ...lastAttempt, fanoutBatchId: undefined },
+							],
+						}
+					: nextResilience;
+			}
+			const shouldKeepResilience =
+				(nextBaseDispatches.length > 0 && Boolean(nextResilience?.policy)) ||
+				Boolean(nextResilience?.circuit) ||
+				(nextResilience?.attempts.length ?? 0) > 0;
+			await writeStateWhileLocked(directory, {
+				...state,
+				updatedAt: isoNow(),
+				prReviewBaseDispatches: nextBaseDispatches,
+				...(nextBaseDispatches.length > 0
+					? { prReviewBaseDispatch: nextBaseDispatches.at(-1) }
+					: { prReviewBaseDispatch: undefined }),
+				...(shouldKeepResilience
+					? { prReviewResilience: nextResilience }
+					: { prReviewResilience: undefined }),
+			});
+			return true;
+		}),
+	);
 }
 
 /**
@@ -1956,10 +3929,11 @@ export async function enforcePrReviewBaseDimensions(
  * is treated as "not proven failed" and denies consolidation — default-deny.
  *
  * `completed` is included because completion alone is not success: a completed
- * record whose artifact is degraded, truncated, empty or identity-mismatched
- * fails `recordsPassingBatchIntegrity` and is exactly the ran-and-failed case
- * the tier-L retry exception exists for. This set is therefore only ever
- * consulted for lanes that already failed that integrity chain.
+ * record whose durable artifact is degraded, empty, identity-mismatched, or
+ * semantically invalid is exactly the ran-and-failed case the tier-L retry
+ * exception exists for. Preview truncation alone is recoverable when the durable
+ * artifact validates. This set is therefore only consulted after both identity
+ * and revision-independent semantic validation.
  */
 const TERMINAL_FAILED_DELEGATION_STATUSES: ReadonlySet<string> = new Set([
 	'completed',
@@ -1971,6 +3945,8 @@ const TERMINAL_FAILED_DELEGATION_STATUSES: ReadonlySet<string> = new Set([
 interface PrReviewBaseDimensionAttempts {
 	/** Dimensions with a currently authoritative successful artifact. */
 	successful: Set<string>;
+	/** Dimensions with a currently in-flight or retryable recorded lane. */
+	inFlight: Set<string>;
 	/**
 	 * The subset of `successful` supplied by a lane that owns that dimension
 	 * alone. Used by the cumulative tier-L lane floor to decide when an earlier
@@ -1990,8 +3966,9 @@ interface PrReviewBaseDimensionAttempts {
  *   compares each artifact's `revisionDigest` against the current worktree), so
  *   a stale artifact is correctly not a current source.
  * - **terminallyFailed** is revision-INdependent on purpose.
- *   `recordsPassingBatchIntegrity` takes no digest and checks only
- *   session-immutable identity plus the delegation outcome. If failure were
+ *   `recordsPassingBatchIntegrity` plus
+ *   `hasRevisionIndependentDiscoverySemantics` use the artifact's recorded
+ *   revision rather than the current worktree digest. If failure were
  *   derived from the revision-aware set instead, any working-tree edit would
  *   make all six dimensions read as "failed" at once and a caller could then
  *   consolidate the whole base wave into two lanes — re-opening the tier-L lane
@@ -2003,6 +3980,7 @@ function summarizePrReviewBaseDimensionAttempts(
 	revisionDigest: string,
 ): PrReviewBaseDimensionAttempts {
 	const successful = new Set<string>();
+	const inFlight = new Set<string>();
 	const dedicatedSuccessful = new Set<string>();
 	const terminallyFailed = new Set<string>();
 	for (const batch of state.prReviewBaseDispatches ?? []) {
@@ -2025,7 +4003,7 @@ function summarizePrReviewBaseDimensionAttempts(
 			const dimension = lane.ownedWorkflowLanes?.[0] ?? lane.workflowLane;
 			if (batchSuccessful.has(dimension)) dedicatedSuccessful.add(dimension);
 		}
-		const integrityPassingLaneIds = new Set(
+		const semanticallyValidLaneIds = new Set(
 			recordsPassingBatchIntegrity(
 				directory,
 				state,
@@ -2033,24 +4011,36 @@ function summarizePrReviewBaseDimensionAttempts(
 				batch.lanes,
 				'swarm-pr-review:base',
 				batch.validatedAt,
-			).map((qualified) => qualified.record.laneId),
+			)
+				.filter((qualified) =>
+					hasRevisionIndependentDiscoverySemantics(directory, qualified),
+				)
+				.map((qualified) => qualified.record.laneId),
 		);
 		const records = findByBatchId(directory, batch.batchId, {
 			parentSessionId: state.sessionID,
 		});
 		for (const lane of batch.lanes) {
-			if (integrityPassingLaneIds.has(lane.laneId)) continue;
+			if (semanticallyValidLaneIds.has(lane.laneId)) continue;
 			const laneRecords = records.filter(
 				(record) => record.laneId === lane.laneId,
 			);
-			// No record at all: never dispatched. Any record not in the terminal
-			// failure set: still in flight or retryable. Both deny consolidation.
+			// No record at all: never dispatched. Any recorded lane not wholly in
+			// the terminal failure set is still in flight or retryable; it is not a
+			// failed obligation yet, but it must stay out of retry targets.
+			if (laneRecords.length === 0) {
+				continue;
+			}
 			if (
-				laneRecords.length === 0 ||
 				!laneRecords.every((record) =>
 					TERMINAL_FAILED_DELEGATION_STATUSES.has(record.status),
 				)
 			) {
+				for (const dimension of lane.ownedWorkflowLanes?.length
+					? lane.ownedWorkflowLanes
+					: [lane.workflowLane]) {
+					inFlight.add(dimension);
+				}
 				continue;
 			}
 			for (const dimension of lane.ownedWorkflowLanes?.length
@@ -2060,7 +4050,31 @@ function summarizePrReviewBaseDimensionAttempts(
 			}
 		}
 	}
-	return { successful, dedicatedSuccessful, terminallyFailed };
+	return { successful, inFlight, dedicatedSuccessful, terminallyFailed };
+}
+
+function hasRevisionIndependentDiscoverySemantics(
+	directory: string,
+	qualified: QualifiedBatchRecord,
+): boolean {
+	const ref = qualified.record.result?.outputRef?.trim();
+	if (!ref) return false;
+	const artifact = readLaneOutput(directory, ref)?.artifact ?? null;
+	if (!artifact?.revisionDigest?.trim()) return false;
+	return validatePrReviewDiscoveryLaneCompletion({
+		record: qualified.record,
+		result: qualified.record.result!,
+		artifact,
+		expected: {
+			mode: 'swarm-pr-review:base',
+			workflowLane: qualified.expectedWorkflowLane,
+			ownedWorkflowLanes: qualified.expectedOwnedLanes,
+			prHeadSha: qualified.record.workspace?.prHeadSha ?? '',
+			gitHead: qualified.record.workspace?.gitHead ?? '',
+			revisionDigest: artifact.revisionDigest,
+			reviewScope: qualified.record.workspace?.scope ?? undefined,
+		},
+	}).ok;
 }
 
 /**
@@ -2708,7 +4722,7 @@ export async function recordPrReviewValidationBatch(
 			phase === 'reviewer'
 				? derivePrReviewCandidateInventory(directory, state, ctx)
 				: derivePrReviewCriticInventory(directory, state, ctx);
-		assertExactStringSet(
+		assertStringSetSubset(
 			assigned,
 			validatedInventory,
 			`PR_REVIEW ${phase} ownership`,
@@ -2774,7 +4788,12 @@ export async function recordPrReviewValidationBatch(
 	if (validatedInventory) {
 		coherence[batchId] = {
 			validatedInventory,
-			...(reviewerItemBindings ? { reviewerItemBindings } : {}),
+			...(reviewerItemBindings
+				? {
+						reviewerItemBindings,
+						reviewerItemBindingKeyEncoding: 'prefixed-v1' as const,
+					}
+				: {}),
 		};
 	}
 	const nextState: PrWorkflowGateState = {
@@ -2930,12 +4949,75 @@ export async function declarePrFeedbackInventory(
 		);
 	}
 	if (state.prFeedbackInventory) {
-		if (!sameStringArray(state.prFeedbackInventory, normalizedInventory)) {
+		const existing = state.prFeedbackInventory;
+		if (sameStringArray(existing, normalizedInventory)) return state;
+		// Issue #2242 R3 (wedge W-2): hard immutability made a late-discovered
+		// finding unrecoverable — the only exit was abort + full restart, which
+		// also discarded every completed verification for correctly-declared
+		// items. Growth is now accepted; mutation, removal and reorder are not.
+		//
+		// Note on the comparison primitive: `normalizeInventoryIds` canonicalises
+		// by SORTING and rejects duplicates, so an appended id lands in sort
+		// position rather than at the end. An array-PREFIX rule would therefore
+		// reject legitimate appends. The equivalent (and, on a canonical form,
+		// stronger) rule is set-superset: every previously-declared entry must
+		// still be present. Because both sides are sorted and duplicate-free,
+		// "same set" implies "same array", so a reorder is not expressible and a
+		// missing entry is the single signal for mutation-or-removal.
+		const nextIds = new Set(normalizedInventory);
+		const droppedIds = existing.filter((itemId) => !nextIds.has(itemId));
+		if (droppedIds.length > 0) {
 			throw new Error(
-				'BLOCKED: PR_FEEDBACK inventory is immutable after declaration',
+				`BLOCKED: PR_FEEDBACK inventory is append-only after declaration; declared item(s) may not be removed or renamed: ${droppedIds.join(', ')}`,
 			);
 		}
-		return state;
+		const existingIds = new Set(existing);
+		const appendedIds = normalizedInventory.filter(
+			(itemId) => !existingIds.has(itemId),
+		);
+		/* c8 ignore next 6 -- unreachable: both sides are sorted and
+		   duplicate-free, so "no drops and nothing appended" is exactly the
+		   sameStringArray case already returned above. Kept as a fail-closed
+		   assertion so a future change to normalizeInventoryIds cannot silently
+		   turn this into a no-op amendment. */
+		if (appendedIds.length === 0) {
+			throw new Error(
+				'BLOCKED: PR_FEEDBACK inventory amendment declared no new items',
+			);
+		}
+		const previousAmendments = state.prFeedbackInventoryAmendments ?? [];
+		if (
+			previousAmendments.length + appendedIds.length >
+			MAX_PR_FEEDBACK_INVENTORY_AMENDMENTS
+		) {
+			throw new Error(
+				`BLOCKED: PR_FEEDBACK inventory amendment limit reached (${MAX_PR_FEEDBACK_INVENTORY_AMENDMENTS}); the amendment ledger is an audit trail and is never pruned`,
+			);
+		}
+		const amendedAt = isoNow();
+		const batch =
+			previousAmendments.reduce(
+				(highest, amendment) => Math.max(highest, amendment.batch),
+				0,
+			) + 1;
+		const amendedState: PrWorkflowGateState = {
+			...state,
+			updatedAt: amendedAt,
+			prFeedbackInventory: normalizedInventory,
+			prFeedbackInventoryAmendments: [
+				...previousAmendments,
+				...appendedIds.map((entry) => ({ entry, amendedAt, batch })),
+			],
+			// The armed record attests coverage of the PRE-amendment inventory,
+			// so adding an item invalidates exactly what it attested. Disarming on
+			// a coverage-affecting change is the existing convention here — see
+			// `recordPrFeedbackStageA`, which disarms unconditionally for the same
+			// reason. Re-arming is one `complete_pr_workflow` call that re-verifies
+			// every phase against the amended inventory.
+			prFeedbackReadyToPublish: undefined,
+		};
+		await persistState(directory, amendedState);
+		return amendedState;
 	}
 	const nextState: PrWorkflowGateState = {
 		...state,
@@ -3628,6 +5710,20 @@ export async function assertPrFeedbackGatePhaseSettled(
 			`BLOCKED: PR_FEEDBACK ${phase} has no validation batch on the current revision`,
 		);
 	}
+	// Issue #2242 R3: this is the control that makes an append-only inventory
+	// amendment safe. `recordPrFeedbackGateBatch` proves exact ownership at
+	// RECORD time, but `stageARetainsGateBatches` compares only the revision
+	// digest, categories and obligations — never the item list — so an
+	// amendment followed by a same-revision Stage A re-record RETAINS batches
+	// whose `itemIds` predate the growth. `successfulObligationsFromExactBatch`
+	// below is then fed the stale, shorter list and the appended item reaches
+	// publication with no verdict at all. Re-check ownership against the CURRENT
+	// inventory at settle time so every path (retention included) is covered.
+	if (!sameStringArray(batch.itemIds, state.prFeedbackInventory ?? [])) {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK ${phase} evidence covers a stale inventory; the feedback inventory was amended after this batch was recorded. Re-run ${phase} against every current inventory item.`,
+		);
+	}
 	const successful = successfulObligationsFromExactBatch(
 		directory,
 		state,
@@ -3872,7 +5968,7 @@ export async function assertPrReviewArtifactBoundary(
 	let state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
 	if (!state.prReviewTriggerEvalPath) {
 		throw new Error(
-			'BLOCKED: PR_REVIEW findings persistence requires the trigger evaluation artifact',
+			'BLOCKED: PR_REVIEW findings persistence requires the trigger evaluation artifact (write_pr_review_trigger_eval must complete first)',
 		);
 	}
 	const persistedBoundaries = state.prReviewArtifactBoundaries ?? [];
@@ -3963,8 +6059,17 @@ export async function assertPrReviewArtifactBoundary(
 		JSON.stringify(normalizedFindingIds) !==
 			JSON.stringify([...expectedFindingIds].sort())
 	) {
+		const actualSet = new Set(normalizedFindingIds);
+		const expectedSet = new Set(expectedFindingIds);
+		const missing = [...expectedSet].filter((id) => !actualSet.has(id));
+		const extra = [...actualSet].filter((id) => !expectedSet.has(id));
+		const duplicates = [
+			...new Set(
+				findingIds.filter((id, index) => findingIds.indexOf(id) !== index),
+			),
+		].sort();
 		throw new Error(
-			`BLOCKED: PR_REVIEW ${boundary} findings must exactly cover the discovered candidate inventory`,
+			`BLOCKED: PR_REVIEW ${boundary} findings must exactly cover the discovered candidate inventory; missing: ${missing.join(', ') || '(none)'}; extra: ${extra.join(', ') || '(none)'}; duplicates: ${duplicates.join(', ') || '(none)'}`,
 		);
 	}
 	return state;
@@ -3973,7 +6078,10 @@ export async function assertPrReviewArtifactBoundary(
 /**
  * Artifact records are a projection of lane receipts, never a caller-controlled
  * replacement for them. Keep their workflow status/action aligned with the
- * reviewer and critic rows that the gate already authenticated.
+ * reviewer and critic rows that the gate already authenticated. Every violation
+ * across every record is reported in a single rejection, one line per violation
+ * with the expected and actual value, so a caller repairs a payload in one
+ * round trip instead of one rejected write per defect (issue #2277).
  */
 export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 	directory: string,
@@ -3982,131 +6090,272 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 	records: readonly PrReviewArtifactRecord[],
 ): Promise<void> {
 	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
+	const violations: Array<{ findingId: string; detail: string }> = [];
+	const report = (
+		findingId: string,
+		field: string,
+		expected: string,
+		actual: string,
+	): void => {
+		violations.push({
+			findingId,
+			detail: `${field} expected ${expected}, got ${actual}`,
+		});
+	};
+	/**
+	 * The severity comparison, unconditional by design. An OMITTED severity is a
+	 * mismatch, never a skip: presence-guarding this check (`if (record.severity
+	 * && …)`) is what let a caller bypass verification against BOTH the reviewer
+	 * and the critic simply by leaving the field out (issue #2279). The message
+	 * names the required value, so a caller repairs the payload in one round trip.
+	 */
+	const reportSeverity = (
+		record: PrReviewArtifactRecord,
+		expected: string,
+	): void => {
+		if (record.severity === expected) return;
+		// A corrupted artifact must not be misdiagnosed as merely missing the
+		// field: an absent key, `null`, and `""` are distinct defects and all
+		// previously rendered as `(omitted)` (PRR-008). Widened deliberately —
+		// the field is typed to the enum, but the schema leaves it optional and
+		// `readFindings` reloads legacy rows without re-validating, so `null` and
+		// `""` are reachable at runtime.
+		const raw = record.severity as string | null | undefined;
+		const actual =
+			raw === undefined
+				? '(omitted)'
+				: raw === null
+					? '(null)'
+					: raw === ''
+						? '(empty)'
+						: `"${raw}"`;
+		report(record.finding_id, 'severity', `"${expected}"`, actual);
+	};
 	if (boundary === 'post_explorer') {
+		// The candidate rows the inventory was derived from ARE the authority for
+		// this boundary: a post_explorer record is a projection of one
+		// `[CANDIDATE]` row, so its severity must equal that row's (issue #2320).
+		const candidateSeverities = derivePrReviewCandidateSeverities(
+			directory,
+			state,
+			await createPrReviewGateContext(directory, state),
+		);
 		for (const record of records) {
-			if (
-				record.status !== 'PENDING' ||
-				record.next_action !== 'route_to_reviewer'
-			) {
-				throw new Error(
-					`BLOCKED: PR_REVIEW post_explorer record ${record.finding_id} must remain PENDING and route_to_reviewer`,
+			if (record.status !== 'PENDING') {
+				report(record.finding_id, 'status', '"PENDING"', `"${record.status}"`);
+			}
+			if (record.next_action !== 'route_to_reviewer') {
+				report(
+					record.finding_id,
+					'next_action',
+					'"route_to_reviewer"',
+					`"${record.next_action}"`,
 				);
 			}
+			// A DERIVED AUTHORITY ALWAYS WINS. This ordering is load-bearing:
+			// `candidate_id` is unconstrained free text (`analyzeCandidateFields`
+			// requires only non-empty), so a lane can legitimately — or
+			// maliciously — name a real finding `CLEAN-REVIEW`. Testing the id
+			// first let such a record be compared against `NONE` instead of the row
+			// it projects, which both accepted a fabricated `NONE` for a CRITICAL
+			// row and rejected the truthful value. Consulting the map first makes
+			// the sentinel branch reachable only when there is genuinely no row.
+			const candidateSeverity = candidateSeverities.get(record.finding_id);
+			if (candidateSeverity) {
+				// Exact-value comparison against the row that produced this record.
+				reportSeverity(record, candidateSeverity);
+				continue;
+			}
+			if (record.finding_id === PR_REVIEW_CLEAN_SENTINEL_ID) {
+				// The zero-candidate sentinel, reached only with no row of its own.
+				// Its mandated reviewer row carries `NONE` and `post_reviewer`
+				// compares against exactly that, so `NONE` is correct here too —
+				// requiring anything else would force a clean review to invent a
+				// value and then flip it one boundary later.
+				reportSeverity(record, 'NONE');
+				continue;
+			}
+			// Unreachable by construction: `assertPrReviewArtifactBoundary` has
+			// already forced every id to be in the inventory, and every
+			// non-sentinel inventory id is appended from the same row that
+			// contributed its severity (a row only enters the inventory once
+			// `analyzeCandidateFields` validated its severity). Reported as a
+			// violation rather than silently tolerated, so an invariant break
+			// fails closed instead of quietly disabling the comparison.
+			violations.push({
+				findingId: record.finding_id,
+				detail:
+					'no authoritative candidate severity (absent from the derived candidate inventory)',
+			});
 		}
-		return;
+	} else {
+		const ctx = await createPrReviewGateContext(directory, state);
+		// B1: this is the gate that used to emit the misleading "no authoritative
+		// reviewer verdict" per record. When the real cause is a settled-but-empty
+		// verdict map, the guarded accessors name that cause instead.
+		const reviewerVerdicts = authoritativeReviewerVerdictsForGate(
+			directory,
+			state,
+			ctx,
+			`assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(${boundary})`,
+		);
+		const criticVerdicts =
+			boundary === 'post_critic'
+				? authoritativeCriticVerdictsForGate(
+						directory,
+						state,
+						ctx,
+						`assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(${boundary})`,
+					)
+				: undefined;
+		for (const record of records) {
+			const reviewer = reviewerVerdicts.get(record.finding_id);
+			if (!reviewer) {
+				violations.push({
+					findingId: record.finding_id,
+					detail:
+						'no authoritative reviewer verdict (absent from the settled reviewer map)',
+				});
+				continue;
+			}
+			const requiresCritic =
+				reviewer.classification === 'CONFIRMED' &&
+				['CRITICAL', 'HIGH', 'MEDIUM'].includes(reviewer.severity);
+			const expectedStatus =
+				reviewer.classification === 'UNVERIFIED'
+					? 'PENDING'
+					: reviewer.classification;
+			if (boundary === 'post_reviewer') {
+				if (record.status !== expectedStatus) {
+					report(
+						record.finding_id,
+						'status',
+						`"${expectedStatus}"`,
+						`"${record.status}"`,
+					);
+				}
+				const expectedAction = requiresCritic
+					? 'route_to_critic'
+					: reviewer.classification === 'CONFIRMED' ||
+							reviewer.classification === 'PRE_EXISTING'
+						? 'report'
+						: reviewer.classification === 'DISPROVED'
+							? 'suppress_with_reason'
+							: 'route_to_reviewer';
+				if (record.next_action !== expectedAction) {
+					report(
+						record.finding_id,
+						'next_action',
+						`"${expectedAction}"`,
+						`"${record.next_action}"`,
+					);
+				}
+				reportSeverity(record, reviewer.severity);
+				continue;
+			}
+
+			// post_critic, non-critic-routed: the reviewer disposition is final.
+			if (!requiresCritic) {
+				const expectedAction =
+					reviewer.classification === 'CONFIRMED' ||
+					reviewer.classification === 'PRE_EXISTING'
+						? 'report'
+						: reviewer.classification === 'DISPROVED'
+							? 'suppress_with_reason'
+							: 'route_to_reviewer';
+				if (record.status !== expectedStatus) {
+					report(
+						record.finding_id,
+						'status',
+						`"${expectedStatus}"`,
+						`"${record.status}"`,
+					);
+				}
+				if (record.next_action !== expectedAction) {
+					report(
+						record.finding_id,
+						'next_action',
+						`"${expectedAction}"`,
+						`"${record.next_action}"`,
+					);
+				}
+				reportSeverity(record, reviewer.severity);
+				continue;
+			}
+
+			// post_critic, critic-routed: the critic verdict is authoritative.
+			const critic = criticVerdicts?.get(record.finding_id);
+			if (!critic) {
+				// No critic verdict settled: the reviewer severity is the best
+				// available authority, and the missing-critic violation below is
+				// reported alongside it.
+				reportSeverity(record, reviewer.severity);
+				violations.push({
+					findingId: record.finding_id,
+					detail:
+						'no authoritative critic verdict (absent from the settled critic map)',
+				});
+				continue;
+			}
+			if (critic.status === 'DISPROVED') {
+				if (record.status !== 'DISPROVED') {
+					report(
+						record.finding_id,
+						'status',
+						'"DISPROVED"',
+						`"${record.status}"`,
+					);
+				}
+				if (record.next_action !== 'suppress_with_reason') {
+					report(
+						record.finding_id,
+						'next_action',
+						'"suppress_with_reason"',
+						`"${record.next_action}"`,
+					);
+				}
+			} else {
+				if (record.status !== 'CONFIRMED') {
+					report(
+						record.finding_id,
+						'status',
+						'"CONFIRMED"',
+						`"${record.status}"`,
+					);
+				}
+				if (!['report', 'handoff_to_feedback'].includes(record.next_action)) {
+					report(
+						record.finding_id,
+						'next_action',
+						'"report" or "handoff_to_feedback"',
+						`"${record.next_action}"`,
+					);
+				}
+			}
+			// The critic is the FINAL word for a critic-routed item, so its severity
+			// is the single authority here — including when it downgrades the
+			// reviewer (reviewer MEDIUM -> critic LOW), which is now encodable
+			// verbatim as `severity: "LOW"`. The previous code compared against the
+			// reviewer when the two agreed and, when they disagreed, instructed the
+			// caller to omit the field — which disabled the check entirely
+			// (issue #2279).
+			reportSeverity(record, critic.severity);
+		}
 	}
-
-	const ctx = await createPrReviewGateContext(directory, state);
-	// B1: this is the gate that emits the misleading "no authoritative reviewer
-	// verdict" per record. When the real cause is a settled-but-empty verdict
-	// map, the guarded accessors name that cause instead.
-	const reviewerVerdicts = authoritativeReviewerVerdictsForGate(
-		directory,
-		state,
-		ctx,
-		`assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(${boundary})`,
-	);
-	const criticVerdicts =
-		boundary === 'post_critic'
-			? authoritativeCriticVerdictsForGate(
-					directory,
-					state,
-					ctx,
-					`assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(${boundary})`,
-				)
-			: undefined;
-	for (const record of records) {
-		const reviewer = reviewerVerdicts.get(record.finding_id);
-		if (!reviewer) {
-			throw new Error(
-				`BLOCKED: PR_REVIEW ${boundary} record ${record.finding_id} has no authoritative reviewer verdict`,
-			);
-		}
-		if (record.severity && record.severity !== reviewer.severity) {
-			throw new Error(
-				`BLOCKED: PR_REVIEW ${boundary} record ${record.finding_id} severity differs from its reviewer verdict`,
-			);
-		}
-		const requiresCritic =
-			reviewer.classification === 'CONFIRMED' &&
-			['CRITICAL', 'HIGH', 'MEDIUM'].includes(reviewer.severity);
-		if (boundary === 'post_reviewer') {
-			const expectedStatus =
-				reviewer.classification === 'UNVERIFIED'
-					? 'PENDING'
-					: reviewer.classification;
-			if (record.status !== expectedStatus) {
-				throw new Error(
-					`BLOCKED: PR_REVIEW post_reviewer record ${record.finding_id} status differs from its reviewer verdict`,
-				);
-			}
-			const expectedAction = requiresCritic
-				? 'route_to_critic'
-				: reviewer.classification === 'CONFIRMED' ||
-						reviewer.classification === 'PRE_EXISTING'
-					? 'report'
-					: reviewer.classification === 'DISPROVED'
-						? 'suppress_with_reason'
-						: 'route_to_reviewer';
-			if (record.next_action !== expectedAction) {
-				throw new Error(
-					`BLOCKED: PR_REVIEW post_reviewer record ${record.finding_id} action does not match reviewer disposition`,
-				);
-			}
-			continue;
-		}
-
-		if (!requiresCritic) {
-			const expectedStatus =
-				reviewer.classification === 'UNVERIFIED'
-					? 'PENDING'
-					: reviewer.classification;
-			const expectedAction =
-				reviewer.classification === 'CONFIRMED' ||
-				reviewer.classification === 'PRE_EXISTING'
-					? 'report'
-					: reviewer.classification === 'DISPROVED'
-						? 'suppress_with_reason'
-						: 'route_to_reviewer';
-			if (
-				record.status !== expectedStatus ||
-				record.next_action !== expectedAction
-			) {
-				throw new Error(
-					`BLOCKED: PR_REVIEW post_critic record ${record.finding_id} cannot override its non-critic reviewer disposition`,
-				);
-			}
-			continue;
-		}
-
-		const critic = criticVerdicts?.get(record.finding_id);
-		if (!critic) {
-			throw new Error(
-				`BLOCKED: PR_REVIEW post_critic record ${record.finding_id} has no authoritative critic verdict`,
-			);
-		}
-		if (record.severity && record.severity !== critic.severity) {
-			throw new Error(
-				`BLOCKED: PR_REVIEW post_critic record ${record.finding_id} severity differs from its critic verdict`,
-			);
-		}
-		if (critic.status === 'DISPROVED') {
-			if (
-				record.status !== 'DISPROVED' ||
-				record.next_action !== 'suppress_with_reason'
-			) {
-				throw new Error(
-					`BLOCKED: PR_REVIEW post_critic record ${record.finding_id} must preserve the critic DISPROVED disposition`,
-				);
-			}
-		} else if (
-			record.status !== 'CONFIRMED' ||
-			!['report', 'handoff_to_feedback'].includes(record.next_action)
-		) {
-			throw new Error(
-				`BLOCKED: PR_REVIEW post_critic record ${record.finding_id} action does not match its critic verdict`,
-			);
-		}
+	if (violations.length > 0) {
+		violations.sort((left, right) =>
+			left.findingId < right.findingId
+				? -1
+				: left.findingId > right.findingId
+					? 1
+					: 0,
+		);
+		const lines = violations.map(
+			(violation) => `  ${violation.findingId}: ${violation.detail}`,
+		);
+		throw new Error(
+			`BLOCKED: PR_REVIEW ${boundary} artifact invalid — ${violations.length} violation(s):\n${lines.join('\n')}`,
+		);
 	}
 }
 
@@ -4481,15 +6730,15 @@ async function assertPrReviewTerminalReady(
 ): Promise<PrWorkflowGateState> {
 	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
 	await assertPrReviewCleanCheckout(directory, 'PR_REVIEW');
-	const open = readDelegations(directory).filter(
-		(record) =>
-			record.parentSessionId === state.sessionID &&
-			record.mode?.startsWith('swarm-pr-') &&
-			(record.status === 'pending' || record.status === 'running'),
+	// W-4 (issue #2242 R2): stale lanes settle with disclosure; fresh ones block.
+	const laneSettlement = await settlePresumedStalePrWorkflowLanes(
+		directory,
+		state.sessionID,
 	);
-	if (open.length > 0) {
+	if (laneSettlement.openLanes > 0) {
 		throw new Error(
-			`BLOCKED: PR_REVIEW transition has ${open.length} unsettled PR workflow lane(s)`,
+			`BLOCKED: PR_REVIEW transition has ${laneSettlement.openLanes} unsettled PR workflow lane(s)` +
+				describePrWorkflowLaneProbe(laneSettlement),
 		);
 	}
 	// One digest + one composed verdict map for the entire terminal check.
@@ -4914,17 +7163,21 @@ export async function enforcePrWorkflowToolBefore(
 	const isTrustedWorkflowTool =
 		trustedCapability !== null &&
 		isTrustedPrWorkflowToolInvocationSafe(normalizedTool, args ?? {});
+	const isAllowlistedReadOnlyTool =
+		normalizedTool !== 'build_check' &&
+		isAllowedPrReviewReadOnlyToolName(normalizedTool);
+	const readOnlyArgumentClassification = isAllowlistedReadOnlyTool
+		? classifyReadOnlyToolArguments(normalizedTool, args ?? {})
+		: null;
 	const isNamedReadOnlyTool =
 		isTrustedWorkflowTool ||
-		(normalizedTool !== 'build_check' &&
-			isAllowedPrReviewReadOnlyToolName(normalizedTool) &&
-			readOnlyToolArgumentsAreSafe(args ?? {}));
+		(isAllowlistedReadOnlyTool &&
+			readOnlyArgumentClassification?.safe === true);
 	const isRecoverySafeEvidenceTool =
 		(trustedCapability === 'observe' &&
 			isTrustedPrWorkflowToolInvocationSafe(normalizedTool, args ?? {})) ||
-		(normalizedTool !== 'build_check' &&
-			isAllowedPrReviewReadOnlyToolName(normalizedTool) &&
-			readOnlyToolArgumentsAreSafe(args ?? {}));
+		(isAllowlistedReadOnlyTool &&
+			readOnlyArgumentClassification?.safe === true);
 	if (state.checkoutRecovery) {
 		if (
 			isRecoverySafeEvidenceTool ||
@@ -4938,6 +7191,15 @@ export async function enforcePrWorkflowToolBefore(
 		throw new Error(
 			`BLOCKED: ${state.mode} requires manual Git recovery before controller work can continue. ` +
 				`code=${state.checkoutRecovery.code} retryable=false required_action=${state.checkoutRecovery.requiredAction}`,
+		);
+	}
+	if (
+		state.mode === 'PR_REVIEW' &&
+		isAllowlistedReadOnlyTool &&
+		readOnlyArgumentClassification?.safe === false
+	) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW is read-only; tool "${normalizedTool}" rejected argument "${readOnlyArgumentClassification.path}": ${readOnlyArgumentClassification.constraint}`,
 		);
 	}
 	if (
@@ -5184,15 +7446,15 @@ export async function completePrWorkflow(
 			`BLOCKED: cannot complete ${expectedMode} at PR head "${normalizedHead}"; workflow is bound to "${state.prHeadSha}"`,
 		);
 	}
-	const open = readDelegations(directory).filter(
-		(record) =>
-			record.parentSessionId === state.sessionID &&
-			record.mode?.startsWith('swarm-pr-') &&
-			(record.status === 'pending' || record.status === 'running'),
+	// W-4 (issue #2242 R2): stale lanes settle with disclosure; fresh ones block.
+	const laneSettlement = await settlePresumedStalePrWorkflowLanes(
+		directory,
+		state.sessionID,
 	);
-	if (open.length > 0) {
+	if (laneSettlement.openLanes > 0) {
 		throw new Error(
-			`BLOCKED: ${expectedMode} completion has ${open.length} unsettled PR workflow lane(s)`,
+			`BLOCKED: ${expectedMode} completion has ${laneSettlement.openLanes} unsettled PR workflow lane(s)` +
+				describePrWorkflowLaneProbe(laneSettlement),
 		);
 	}
 	if (expectedMode === 'PR_REVIEW') {
@@ -5396,6 +7658,7 @@ export const _test_exports = {
 		pendingCheckoutMutationsByProject.clear();
 		completedCheckoutLockOwners.clear();
 		_test_exports.beforeTerminalClear = undefined;
+		_test_exports.beforeAbortClear = undefined;
 		_test_exports.beforePrFeedbackTransitionLock = undefined;
 		_test_exports.beforePrFeedbackTrackingSwitch = undefined;
 		_test_exports.afterPrFeedbackTrackingSwitch = undefined;
@@ -5411,8 +7674,22 @@ export const _test_exports = {
 		_test_exports.checkoutMutationActionTimeoutMs =
 			CHECKOUT_MUTATION_ACTION_TIMEOUT_MS;
 		_test_exports.classifyPrWorkflowGitStateAsync = classifyPrWorkflowGitState;
+		// Every one of these resets to the NAMED original binding, never to a
+		// hand-rewritten literal: a re-written arrow is permanent pollution in
+		// bun's shared test process, not a restore.
+		_test_exports.sweepStaleDelegationsAsync = sweepStaleDelegations;
+		_test_exports.probeLaneLivenessAsync = probeAlivePrWorkflowLaneSessions;
+		_test_exports.getSessionOps = defaultGetSessionOps;
+		_test_exports.laneLivenessProbeTimeoutMs =
+			PR_WORKFLOW_LANE_LIVENESS_PROBE_TIMEOUT_MS;
 	},
 	beforeTerminalClear: undefined as (() => Promise<void>) | undefined,
+	/**
+	 * Interleave point between the durable `pr_workflow_aborted` append and the
+	 * CAS-guarded clear, so a test can simulate the concurrent mutation that
+	 * makes the clear throw after the audit record is already on disk (FB-008).
+	 */
+	beforeAbortClear: undefined as (() => Promise<void>) | undefined,
 	beforePrFeedbackTransitionLock: undefined as
 		| (() => Promise<void>)
 		| undefined,
@@ -5435,6 +7712,32 @@ export const _test_exports = {
 	removeCheckoutLock: removeCheckoutLockFile,
 	checkoutMutationActionTimeoutMs: CHECKOUT_MUTATION_ACTION_TIMEOUT_MS,
 	classifyPrWorkflowGitStateAsync: classifyPrWorkflowGitState,
+	/**
+	 * The durability sweep, reached through a seam so a test can prove that a
+	 * failing sweep cannot un-settle the decision `settlePresumedStalePrWorkflow-
+	 * Lanes` already made in memory. It cannot throw today (it catches internally
+	 * and returns 0) — the seam is what makes that guarantee testable rather than
+	 * merely asserted.
+	 */
+	sweepStaleDelegationsAsync: sweepStaleDelegations,
+	/** The fail-open liveness probe (issue #2251). */
+	probeLaneLivenessAsync: probeAlivePrWorkflowLaneSessions,
+	/**
+	 * Session handle for the liveness probe.
+	 *
+	 * A seam rather than a direct `swarmState.opencodeClient` read at the call
+	 * site because 20+ test files mutate that field; without this, this suite and
+	 * the stale-lane suite would be order-dependent in bun's shared process.
+	 * Mirrors `_internals.getSessionOps` in `src/tools/dispatch-lanes.ts`.
+	 */
+	getSessionOps: defaultGetSessionOps,
+	/**
+	 * Probe deadline, read through the seam at CALL time. `freezeClock` patches
+	 * `Date.now()`, not `setTimeout`, so a test that must reach the timeout branch
+	 * has to shorten the real deadline. Same precedent as
+	 * `checkoutMutationActionTimeoutMs` above.
+	 */
+	laneLivenessProbeTimeoutMs: PR_WORKFLOW_LANE_LIVENESS_PROBE_TIMEOUT_MS,
 	resolveCurrentGitHead,
 	resolveCurrentGitHeadAsync,
 	resolveCurrentUpstreamPushTarget,
@@ -5457,6 +7760,7 @@ export const _test_exports = {
 	 * that would silently drift if the cap ever moved.
 	 */
 	MAX_WORKFLOW_BATCHES,
+	MAX_PR_REVIEW_RESILIENCE_CIRCUIT_CONTRIBUTORS,
 	/**
 	 * The three ledger ceilings whose overflow makes the capacity GC abandon a
 	 * prune and keep every batch. Exposed on the same reasoning as
@@ -5477,6 +7781,12 @@ export const _test_exports = {
 	resolveRemoteRefsContainingHead,
 	resolveRemoteRefsContainingHeadAsync,
 	parseCriticVerdict,
+	/**
+	 * Exact production verdict-row analysis and item composition parsers. Exposed
+	 * so the assignment-boundary regression can prove both paths remain linear.
+	 */
+	analyzePrReviewVerdictRowContract,
+	parseLaneItemVerdicts,
 	/**
 	 * Read-only view of the item-keyed composition for one session, including
 	 * the diagnostics that settlement only logs (abandoned declared lanes,
@@ -5548,21 +7858,26 @@ export const _test_exports = {
 	nowMs: () => Date.now(),
 };
 
+/**
+ * Issue #1931: surface the activation path so callers don't go hunting for a
+ * fictional gate file. See withPrWorkflowCheckoutPreparationLock for the same
+ * diagnostic on the prepare_pr_workflow_checkout path. Shared with
+ * `abortPrWorkflow`, which reads through the recovery reader instead.
+ */
+function noActiveGateError(sessionID: string): Error {
+	return new Error(
+		`BLOCKED: no active PR workflow gate for session "${normalizeSessionID(sessionID)}". ` +
+			`The gate is activated by running \`/swarm pr-review <pr-ref>\` (PR_REVIEW) or \`/swarm pr-feedback <pr-ref>\` (PR_FEEDBACK), ` +
+			`or by the first dispatch_lanes_async call with mode "swarm-pr-review:*" / "swarm-pr-feedback:*".`,
+	);
+}
+
 async function requireAnyActiveState(
 	directory: string,
 	sessionID: string,
 ): Promise<PrWorkflowGateState> {
 	const state = await readPrWorkflowGateState(directory, sessionID);
-	if (!state) {
-		// Issue #1931: surface the activation path so callers don't go
-		// hunting for a fictional gate file. See withPrWorkflowCheckoutPreparationLock
-		// for the same diagnostic on the prepare_pr_workflow_checkout path.
-		throw new Error(
-			`BLOCKED: no active PR workflow gate for session "${normalizeSessionID(sessionID)}". ` +
-				`The gate is activated by running \`/swarm pr-review <pr-ref>\` (PR_REVIEW) or \`/swarm pr-feedback <pr-ref>\` (PR_FEEDBACK), ` +
-				`or by the first dispatch_lanes_async call with mode "swarm-pr-review:*" / "swarm-pr-feedback:*".`,
-		);
-	}
+	if (!state) throw noActiveGateError(sessionID);
 	return state;
 }
 
@@ -5624,6 +7939,11 @@ function normalizeWorkflowLanes(lanes: readonly PrWorkflowLaneSpec[]): Array<{
 			);
 		}
 		if (reviewItemIds) {
+			if (reviewItemIds.length > MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS) {
+				throw new Error(
+					`BLOCKED: PR workflow review_item_ids may not exceed ${MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS} entries`,
+				);
+			}
 			assertNoDuplicates(reviewItemIds, 'review item ids within one lane');
 		}
 		const ownedWorkflowLanes = lane.ownedWorkflowLanes?.map((owned: string) =>
@@ -5836,12 +8156,41 @@ function isAllowedPrReviewReadOnlyToolName(toolName: string): boolean {
 	);
 }
 
-function readOnlyToolArgumentsAreSafe(
+type ReadOnlyArgumentClassification =
+	| { safe: true }
+	| {
+			safe: false;
+			path: string;
+			constraint: string;
+			value: unknown;
+	  };
+
+function unsafeReadOnlyArgument(
+	path: string,
+	constraint: string,
+	value: unknown,
+): ReadOnlyArgumentClassification {
+	return { safe: false, path: path || '(root)', constraint, value };
+}
+
+function readOnlyArgumentPath(parent: string, key: string): string {
+	return parent ? `${parent}.${key}` : key;
+}
+
+function classifyReadOnlyToolArguments(
+	toolName: string,
 	value: unknown,
 	key = '',
+	path = '',
 	depth = 0,
-): boolean {
-	if (depth > 8) return false;
+): ReadOnlyArgumentClassification {
+	if (depth > 8) {
+		return unsafeReadOnlyArgument(
+			path,
+			'argument nesting exceeds the read-only depth limit of 8',
+			value,
+		);
+	}
 	const keyTokens = key
 		.replace(/([a-z0-9])([A-Z])/g, '$1_$2')
 		.split(/[._:/-]+/)
@@ -5853,24 +8202,50 @@ function readOnlyToolArgumentsAreSafe(
 			),
 		)
 	) {
-		return false;
+		return unsafeReadOnlyArgument(
+			path,
+			'argument name is mutation-bearing and is not allowed for read-only tools',
+			value,
+		);
 	}
 	if (keyTokens.some((token) => /^(?:method|verb)$/i.test(token))) {
-		return typeof value === 'string' && /^(?:GET|HEAD)$/i.test(value.trim());
+		return typeof value === 'string' && /^(?:GET|HEAD)$/i.test(value.trim())
+			? { safe: true }
+			: unsafeReadOnlyArgument(
+					path,
+					'HTTP method/verb must be GET or HEAD for a read-only tool',
+					value,
+				);
 	}
 	if (
 		keyTokens.length === 1 &&
 		keyTokens.some((token) => /^(?:action|operation)$/i.test(token))
 	) {
-		return (
-			typeof value === 'string' &&
+		return typeof value === 'string' &&
 			/^(?:check|diff|fetch|find|get|inspect|list|lookup|open|read|scan|search|show|status|view)$/i.test(
 				value.trim(),
 			)
-		);
+			? { safe: true }
+			: unsafeReadOnlyArgument(
+					path,
+					'action/operation must name a recognized observation operation',
+					value,
+				);
 	}
 	if (/^mode$/i.test(key) && typeof value === 'string') {
-		return /^(?:r|rb|read)$/i.test(value.trim());
+		const allowed =
+			toolName === 'search'
+				? /^(?:r|rb|read|literal|regex)$/i
+				: /^(?:r|rb|read)$/i;
+		return allowed.test(value.trim())
+			? { safe: true }
+			: unsafeReadOnlyArgument(
+					path,
+					toolName === 'search'
+						? 'search mode must be one of r, rb, read, literal, or regex'
+						: 'mode must be one of r, rb, or read for a read-only tool',
+					value,
+				);
 	}
 	if (typeof value === 'string') {
 		if (
@@ -5881,11 +8256,21 @@ function readOnlyToolArgumentsAreSafe(
 				value,
 			)
 		) {
-			return false;
+			return unsafeReadOnlyArgument(
+				path,
+				'query/request text contains a mutating operation',
+				value,
+			);
 		}
-		return !/(?:^(?:POST|PUT|PATCH|DELETE|CONNECT|TRACE|write|edit|patch|create|delete|destroy|remove|replace|truncate|update|upload)$|(?:^|[\r\n])\s*(?:POST|PUT|PATCH|DELETE|CONNECT|TRACE)\s+\S+(?:\s+HTTP\/\d(?:\.\d)?)?|\bmutation\b|\b(?:create|drop|alter|truncate)\s+(?:or\s+replace\s+)?(?:table|database|schema|index|view|function|procedure|trigger|sequence)\b|\b(?:delete\s+from|insert\s+into|merge\s+into|replace\s+into|upsert\s+into)\b|\bupdate\s+[A-Za-z0-9_."'`-]+(?:\s+(?:AS\s+)?[A-Za-z0-9_"'`-]+)?\s+set\b|\b(?:grant|revoke)\s+\S+\s+(?:on|from|to)\b|\b(?:call|exec(?:ute)?)\s+[A-Za-z0-9_."'`-]+|\b(?:rm|rmdir|del|remove-item|move-item|set-content|add-content)\b)/i.test(
+		return /(?:^(?:POST|PUT|PATCH|DELETE|CONNECT|TRACE|write|edit|patch|create|delete|destroy|remove|replace|truncate|update|upload)$|(?:^|[\r\n])\s*(?:POST|PUT|PATCH|DELETE|CONNECT|TRACE)\s+\S+(?:\s+HTTP\/\d(?:\.\d)?)?|\bmutation\b|\b(?:create|drop|alter|truncate)\s+(?:or\s+replace\s+)?(?:table|database|schema|index|view|function|procedure|trigger|sequence)\b|\b(?:delete\s+from|insert\s+into|merge\s+into|replace\s+into|upsert\s+into)\b|\bupdate\s+[A-Za-z0-9_."'`-]+(?:\s+(?:AS\s+)?[A-Za-z0-9_"'`-]+)?\s+set\b|\b(?:grant|revoke)\s+\S+\s+(?:on|from|to)\b|\b(?:call|exec(?:ute)?)\s+[A-Za-z0-9_."'`-]+|\b(?:rm|rmdir|del|remove-item|move-item|set-content|add-content)\b)/i.test(
 			value,
-		);
+		)
+			? unsafeReadOnlyArgument(
+					path,
+					'string value contains a mutating command or request',
+					value,
+				)
+			: { safe: true };
 	}
 	if (
 		value === null ||
@@ -5893,19 +8278,39 @@ function readOnlyToolArgumentsAreSafe(
 		typeof value === 'number' ||
 		typeof value === 'boolean'
 	) {
-		return true;
+		return { safe: true };
 	}
 	if (Array.isArray(value)) {
-		return value.every((entry) =>
-			readOnlyToolArgumentsAreSafe(entry, key, depth + 1),
-		);
+		for (let index = 0; index < value.length; index++) {
+			const result = classifyReadOnlyToolArguments(
+				toolName,
+				value[index],
+				key,
+				`${path}[${index}]`,
+				depth + 1,
+			);
+			if (!result.safe) return result;
+		}
+		return { safe: true };
 	}
 	if (typeof value === 'object') {
-		return Object.entries(value).every(([childKey, childValue]) =>
-			readOnlyToolArgumentsAreSafe(childValue, childKey, depth + 1),
-		);
+		for (const [childKey, childValue] of Object.entries(value)) {
+			const result = classifyReadOnlyToolArguments(
+				toolName,
+				childValue,
+				childKey,
+				readOnlyArgumentPath(path, childKey),
+				depth + 1,
+			);
+			if (!result.safe) return result;
+		}
+		return { safe: true };
 	}
-	return false;
+	return unsafeReadOnlyArgument(
+		path,
+		'argument type is not supported by the read-only classifier',
+		value,
+	);
 }
 
 /**
@@ -6743,6 +9148,12 @@ interface PrReviewGateContext {
 	reviewer?: PrReviewPhaseComposition;
 	critic?: PrReviewPhaseComposition;
 	candidateInventory?: string[];
+	/**
+	 * candidate_id -> the severity its `[CANDIDATE]` row declared. Populated
+	 * as a by-product of deriving the inventory, so it is exactly as
+	 * authoritative and as scoped as the inventory itself (issue #2320).
+	 */
+	candidateSeverities?: Map<string, CandidateSeverity>;
 }
 
 /**
@@ -6805,26 +9216,34 @@ function sameStringSet(
 	);
 }
 
-function assertExactStringSet(
+/** Require a duplicate-free, non-empty subset of the mechanically derived IDs. */
+function assertStringSetSubset(
 	actual: readonly string[],
 	expected: readonly string[],
 	label: string,
 ): void {
 	const actualSet = new Set(actual);
 	const expectedSet = new Set(expected);
-	const missing = [...expectedSet].filter((value) => !actualSet.has(value));
 	const extra = [...actualSet].filter((value) => !expectedSet.has(value));
 	if (
+		actual.length === 0 ||
 		actual.length !== actualSet.size ||
-		actualSet.size !== expectedSet.size ||
-		missing.length > 0 ||
 		extra.length > 0
 	) {
 		throw new Error(
-			`BLOCKED: ${label} must exactly cover the mechanically derived inventory; missing: ${missing.join(', ') || '(none)'}; extra: ${extra.join(', ') || '(none)'}`,
+			`BLOCKED: ${label} must be a non-empty subset of the mechanically derived inventory; extra: ${extra.join(', ') || '(none)'}`,
 		);
 	}
 }
+
+/**
+ * The single synthetic inventory id used when discovery found no candidates at
+ * all. Its reviewer row is mandated to carry `final_severity: NONE`
+ * (swarm-pr-review SKILL.md), so `NONE` is the CORRECT severity for it at every
+ * boundary — including `post_explorer`, which has no `[CANDIDATE]` row to
+ * compare against because there are none.
+ */
+const PR_REVIEW_CLEAN_SENTINEL_ID = 'CLEAN-REVIEW';
 
 function derivePrReviewCandidateInventory(
 	directory: string,
@@ -7025,6 +9444,7 @@ function derivePrReviewCandidateInventory(
 		}
 	}
 	const candidateIds: string[] = [];
+	const candidateSeverities = new Map<string, CandidateSeverity>();
 	// A consolidated lane can be the provenance source for several sources
 	// (one base lane owning several dimensions collapses to one source
 	// already, but micro trigger rows are per-family: several rows may cite
@@ -7089,13 +9509,20 @@ function derivePrReviewCandidateInventory(
 			const laneKey = `${source.batchId}\0${source.laneId}`;
 			if (!extractedLaneKeys.has(laneKey)) {
 				extractedLaneKeys.add(laneKey);
-				candidateIds.push(
-					...extractCandidateIds(
-						artifact.text,
-						resolvePrReviewRowFamily(source.workflowLane, source.mode),
-						source.creditedLanes,
-					),
+				const extracted = extractCandidateRows(
+					artifact.text,
+					resolvePrReviewRowFamily(source.workflowLane, source.mode),
+					source.creditedLanes,
 				);
+				for (const row of extracted) {
+					candidateIds.push(row.candidateId);
+					// Duplicate ids are rejected by assertNoDuplicates below, so a
+					// first-write here is also the only write; recording it
+					// unconditionally would mask that check rather than defer to it.
+					if (row.severity && !candidateSeverities.has(row.candidateId)) {
+						candidateSeverities.set(row.candidateId, row.severity);
+					}
+				}
 			}
 		}
 		if (source.mode === 'swarm-pr-review:micro' && !resolvedArtifact) {
@@ -7111,8 +9538,11 @@ function derivePrReviewCandidateInventory(
 		}
 	}
 	assertNoDuplicates(candidateIds, 'PR_REVIEW discovery candidate ids');
+	ctx.candidateSeverities = candidateSeverities;
 	ctx.candidateInventory =
-		candidateIds.length > 0 ? candidateIds.sort() : ['CLEAN-REVIEW'];
+		candidateIds.length > 0
+			? candidateIds.sort()
+			: [PR_REVIEW_CLEAN_SENTINEL_ID];
 	return ctx.candidateInventory;
 }
 
@@ -7127,6 +9557,13 @@ function derivePrReviewCandidateInventory(
 interface CanonicalCandidateArtifactRow {
 	candidateId: string;
 	workflowLane: string;
+	/**
+	 * The row's declared severity, already validated against
+	 * `CANDIDATE_SEVERITIES` by `analyzeCandidateFields` (so never `NONE`).
+	 * Carried so the `post_explorer` findings boundary can compare a record's
+	 * severity against the candidate row that produced it (issue #2320).
+	 */
+	severity: CandidateSeverity | null;
 	evidence: string;
 	lineNumber: number;
 }
@@ -7222,6 +9659,9 @@ function parseCanonicalCandidateRows(
 		rows.push({
 			candidateId: analysis.candidateId,
 			workflowLane: analysis.workflowLane,
+			severity: isCandidateSeverity(analysis.values.severity)
+				? analysis.values.severity
+				: null,
 			evidence: candidateFields.slice(2).join('\0'),
 			lineNumber: index + 1,
 		});
@@ -7229,16 +9669,59 @@ function parseCanonicalCandidateRows(
 	return { rows, issues };
 }
 
+function extractCandidateRows(
+	text: string,
+	fallbackFamily: RowFormatFamily,
+	scopeToLanes?: readonly string[],
+): CanonicalCandidateArtifactRow[] {
+	const inScope = (lane: string | undefined) =>
+		!scopeToLanes || (lane !== undefined && scopeToLanes.includes(lane));
+	return parseCanonicalCandidateRows(text, fallbackFamily).rows.filter((row) =>
+		inScope(row.workflowLane),
+	);
+}
+
 function extractCandidateIds(
 	text: string,
 	fallbackFamily: RowFormatFamily,
 	scopeToLanes?: readonly string[],
 ): string[] {
-	const inScope = (lane: string | undefined) =>
-		!scopeToLanes || (lane !== undefined && scopeToLanes.includes(lane));
-	return parseCanonicalCandidateRows(text, fallbackFamily)
-		.rows.filter((row) => inScope(row.workflowLane))
-		.map((row) => row.candidateId);
+	return extractCandidateRows(text, fallbackFamily, scopeToLanes).map(
+		(row) => row.candidateId,
+	);
+}
+
+/**
+ * candidate_id -> declared severity, for the SAME authoritative rows the
+ * candidate inventory is derived from. Deriving the inventory populates this as
+ * a by-product, so the two can never disagree about which rows are credited.
+ *
+ * Every non-sentinel inventory id is guaranteed present: an id and its severity
+ * are appended from the same validated row, and a lane that cannot contribute a
+ * row contributes no id either. The `CLEAN-REVIEW` sentinel is the one id with
+ * no `[CANDIDATE]` row, and the gate handles it explicitly rather than through a
+ * lenient fallback (issue #2320).
+ */
+function derivePrReviewCandidateSeverities(
+	directory: string,
+	state: PrWorkflowGateState,
+	ctx: PrReviewGateContext,
+): Map<string, CandidateSeverity> {
+	if (!ctx.candidateSeverities) {
+		derivePrReviewCandidateInventory(directory, state, ctx);
+	}
+	if (!ctx.candidateSeverities) {
+		// Fail closed. `derivePrReviewCandidateInventory` early-returns on a
+		// memoized `ctx.candidateInventory` WITHOUT populating the severity map, so
+		// a caller threading in a context that already derived the inventory would
+		// otherwise silently receive an empty map — every record would fall through
+		// to the no-authority branch and exact comparison would disappear with no
+		// test failing. An empty map is never a legitimate result here.
+		throw new Error(
+			'BLOCKED: PR_REVIEW candidate severity authority is unavailable for this gate context',
+		);
+	}
+	return ctx.candidateSeverities;
 }
 
 type PrReviewComposablePhase = 'reviewer' | 'critic';
@@ -7494,12 +9977,19 @@ function composePrReviewPhaseVerdicts(
 			);
 			if (!artifact) continue;
 			const declaredItems = qualified.expectedLane.reviewItemIds ?? [];
-			const parsed = parseLaneItemVerdicts(
+			const { markerRows, parsed } = parsePrReviewVerdictRows(
 				artifact.text,
 				declaredItems,
 				phase,
 				reviewerClaims,
 			);
+			if (!verdictRowsContainOnlyAssignedIds(markerRows, declaredItems)) {
+				appendCompositionDiagnostic(
+					diagnostics,
+					`${phase} lane "${qualified.expectedLane.laneId}" contains an unassigned verdict row; it contributes no claims`,
+				);
+				continue;
+			}
 			if (declaredItems.length > 0 && parsed.size === declaredItems.length) {
 				satisfiedObligations.add(qualified.expectedWorkflowLane);
 			}
@@ -7610,9 +10100,28 @@ function criticClaimIsBoundToCurrentReviewerRow(
 ): boolean {
 	// A coherent critic batch always carries bindings; absent bindings on a
 	// coherent entry means out-of-band mutation, so fail closed.
-	const bound = coherence.reviewerItemBindings?.[itemId];
+	const bindings = coherence.reviewerItemBindings;
+	const bindingKey =
+		coherence.reviewerItemBindingKeyEncoding === 'prefixed-v1'
+			? reviewerItemBindingKey(itemId)
+			: itemId;
+	const bound =
+		bindings && Object.hasOwn(bindings, bindingKey)
+			? bindings[bindingKey]
+			: undefined;
 	const current = reviewerClaims?.get(itemId)?.rowDigest;
 	return Boolean(bound && current && bound === current);
+}
+
+const REVIEWER_ITEM_BINDING_KEY_PREFIX = 'item:';
+
+/**
+ * Prefix item IDs before using them as persisted object keys. In particular,
+ * assigning a raw `__proto__` key to an ordinary object invokes JavaScript's
+ * prototype setter instead of creating an own property.
+ */
+function reviewerItemBindingKey(itemId: string): string {
+	return `${REVIEWER_ITEM_BINDING_KEY_PREFIX}${itemId}`;
 }
 
 /**
@@ -7668,7 +10177,7 @@ function criticReviewerItemBindings(
 				`BLOCKED: PR_REVIEW critic dispatch cannot bind item "${itemId}" to an authoritative reviewer verdict row`,
 			);
 		}
-		bindings[itemId] = rowDigest;
+		bindings[reviewerItemBindingKey(itemId)] = rowDigest;
 	}
 	return bindings;
 }
@@ -7968,6 +10477,7 @@ function analyzeLaneRecordResultIntegrity(args: {
 	result: BackgroundDelegationResult | undefined;
 	expected: LaneRecordResultExpected;
 	requireCompleted: boolean;
+	allowTranscriptIncompleteRecovery: boolean;
 }): PrReviewLaneValidationResult {
 	const { record, result, expected } = args;
 	if (
@@ -8018,15 +10528,15 @@ function analyzeLaneRecordResultIntegrity(args: {
 	if (result?.outputDegraded === true) {
 		return failedLaneValidation('result.output_degraded', 'not true', true);
 	}
-	if (result?.transcriptIncomplete === true) {
+	if (
+		result?.transcriptIncomplete === true &&
+		!args.allowTranscriptIncompleteRecovery
+	) {
 		return failedLaneValidation(
 			'result.transcript_incomplete',
-			'not true',
+			'false outside discovery candidate recovery',
 			true,
 		);
-	}
-	if (result?.truncated === true) {
-		return failedLaneValidation('result.truncated', 'not true', true);
 	}
 	if ((result?.chars ?? 0) <= 0) {
 		return failedLaneValidation(
@@ -8177,6 +10687,9 @@ function analyzePrReviewBatchRecordIntegrity(args: {
 				checkWorkflowLane: args.checkWorkflowLane,
 			},
 			requireCompleted: true,
+			allowTranscriptIncompleteRecovery:
+				args.expectedMode === 'swarm-pr-review:base' ||
+				args.expectedMode === 'swarm-pr-review:micro',
 		});
 		if (!recordIntegrity.ok) return failed(recordIntegrity.failure);
 		return {
@@ -8193,11 +10706,14 @@ function analyzePrReviewBatchRecordIntegrity(args: {
  * Every record of a batch that passes the record-level integrity chain: exactly
  * one record per declared lane, exactly one record per child session, no reuse
  * of a forbidden child session, recorded after the batch was declared, exact
- * lane/ownership/mode/head match, and a complete non-degraded result.
+ * lane/ownership/mode/head match, and a non-degraded result with retrievable
+ * output. Discovery modes may pass this identity chain with a partial transcript
+ * only so the later semantic validator can distinguish positive candidate
+ * recovery from invalid negative evidence.
  *
  * Extracted so the per-item composition can reuse the identical chain instead of
  * re-deriving it. `successfulObligationsFromExactBatch` composes this with the
- * contract-marker check and keeps its exact prior semantics.
+ * contract-marker check.
  */
 function recordsPassingBatchIntegrity(
 	directory: string,
@@ -8575,16 +11091,12 @@ function workflowArtifactHasContractMarker(
 	) {
 		const phase: PrReviewComposablePhase =
 			expectedMode === 'swarm-pr-review:reviewer' ? 'reviewer' : 'critic';
-		const parsed = parseLaneItemVerdicts(
+		return analyzePrReviewVerdictRowContract(
 			artifact.text,
 			reviewItemIds ?? [],
 			phase,
 			reviewerClaims,
-		);
-		return Boolean(
-			reviewItemIds?.length &&
-				reviewItemIds.every((itemId) => parsed.has(itemId)),
-		);
+		).ok;
 	}
 	if (expectedMode === 'swarm-pr-feedback:verification') {
 		return /^\[FEEDBACK-VERIFIED\]\s*\|/m.test(artifact.text);
@@ -8698,6 +11210,7 @@ interface PrReviewDiscoveryCoverageAnalysis {
 	covered: boolean;
 	evidence: string | null;
 	issues: string[];
+	coverageKind: 'candidate' | 'clean' | null;
 	/**
 	 * True when coverage required any explicit normalization repair. Surfaced so
 	 * a repaired artifact is auditable rather than silently indistinguishable
@@ -8705,6 +11218,12 @@ interface PrReviewDiscoveryCoverageAnalysis {
 	 */
 	salvaged: boolean;
 	repairKinds: readonly CandidateArtifactRepairKind[];
+	/**
+	 * The parse retained this lane's candidate rows but discredited a conflicting
+	 * `[CLEAN]` attestation. Tracked separately from `repairKinds` because nothing
+	 * was repaired — an assertion was dropped (issue #2279).
+	 */
+	cleanAttestationSalvaged: boolean;
 	failurePredicate?: Extract<
 		PrReviewLaneValidationPredicate,
 		'discovery.header' | 'discovery.row' | 'discovery.coverage'
@@ -8727,7 +11246,8 @@ function analyzePrReviewDiscoveryArtifact(
 	const normalized = normalizeCandidateArtifact(text, fallbackFamily);
 	const canonicalText = normalized.text;
 	const repairKinds = normalized.repairKinds;
-	const salvaged = repairKinds.length > 0;
+	let salvaged = repairKinds.length > 0;
+	let cleanAttestationSalvaged = false;
 	const header = selectCandidateHeader(canonicalText.split(/\r?\n/));
 	if (
 		header === null ||
@@ -8742,8 +11262,10 @@ function analyzePrReviewDiscoveryArtifact(
 			covered: false,
 			evidence: null,
 			issues,
+			coverageKind: null,
 			salvaged,
 			repairKinds,
+			cleanAttestationSalvaged,
 			failurePredicate: 'discovery.header',
 		};
 	}
@@ -8780,6 +11302,20 @@ function analyzePrReviewDiscoveryArtifact(
 		},
 	);
 	if (parsed.error) appendBoundedCandidateIssue(issues, parsed.error);
+	// A discredited-but-salvaged CLEAN no longer arrives as `parsed.error`, so it
+	// is re-entered here as BOTH an issue and a salvage signal. The two are
+	// redundant on purpose — `salvaged = true` alone already keeps the lane in
+	// the durable salvagedLanes/recoveries ledger — but the issue entry is what
+	// carries the human-readable reason into the post-mortem diagnostics.
+	if (parsed.clean_attestation_salvaged) {
+		cleanAttestationSalvaged = true;
+		salvaged = true;
+		appendBoundedCandidateIssue(
+			issues,
+			parsed.clean_attestation_salvage_reason ??
+				'CLEAN attestation discredited; candidate rows retained',
+		);
+	}
 	for (const detail of parsed.diagnostics.parse_error_details) {
 		appendBoundedCandidateIssue(
 			issues,
@@ -8787,7 +11323,12 @@ function analyzePrReviewDiscoveryArtifact(
 		);
 	}
 	const hasParseFailure =
-		Boolean(parsed.error) || parsed.diagnostics.parse_error_details.length > 0;
+		Boolean(parsed.error) ||
+		// Keeps the predicate identical to pre-#2279 behaviour: this shape used to
+		// surface as `parsed.error`, so a lane that ends up uncovered must still
+		// report `discovery.row` rather than silently becoming `discovery.coverage`.
+		Boolean(parsed.clean_attestation_salvaged) ||
+		parsed.diagnostics.parse_error_details.length > 0;
 	// Duplicate candidate ids are the one row defect that is never salvaged: the
 	// inventory they feed is asserted globally unique, so admitting them would
 	// convert a recoverable lane defect into a late workflow-wide failure.
@@ -8810,8 +11351,10 @@ function analyzePrReviewDiscoveryArtifact(
 			covered: false,
 			evidence: null,
 			issues,
+			coverageKind: null,
 			salvaged,
 			repairKinds,
+			cleanAttestationSalvaged,
 			failurePredicate: 'discovery.row',
 		};
 	}
@@ -8835,8 +11378,10 @@ function analyzePrReviewDiscoveryArtifact(
 				matchingCandidate.confidence,
 			].join('\0'),
 			issues,
+			coverageKind: 'candidate',
 			salvaged,
 			repairKinds,
+			cleanAttestationSalvaged,
 		};
 	}
 	const clean = parsed.clean_attestation;
@@ -8850,16 +11395,20 @@ function analyzePrReviewDiscoveryArtifact(
 			covered: true,
 			evidence: `${clean.coverage_scope}\0${clean.evidence}`,
 			issues,
+			coverageKind: 'clean',
 			salvaged,
 			repairKinds,
+			cleanAttestationSalvaged,
 		};
 	}
 	return {
 		covered: false,
 		evidence: null,
 		issues,
+		coverageKind: null,
 		salvaged,
 		repairKinds,
+		cleanAttestationSalvaged,
 		// Preserve today's predicate: a row-level defect is still reported as
 		// such once it turns out no valid row could establish coverage.
 		failurePredicate: hasParseFailure ? 'discovery.row' : 'discovery.coverage',
@@ -8890,6 +11439,9 @@ export function validatePrReviewDiscoveryLaneCompletion(
 			checkWorkflowLane: input.expected.checkWorkflowLane ?? true,
 		},
 		requireCompleted: false,
+		allowTranscriptIncompleteRecovery:
+			input.expected.mode === 'swarm-pr-review:base' ||
+			input.expected.mode === 'swarm-pr-review:micro',
 	});
 	if (!recordIntegrity.ok) return recordIntegrity;
 	const artifactIntegrity = analyzeLaneArtifactIntegrity({
@@ -8931,14 +11483,69 @@ export function validatePrReviewDiscoveryLaneCompletion(
 	// convenience only. Do not treat it as the observability guarantee, and do not
 	// weaken the ledger write on the assumption the log covers it.
 	const salvagedLanes: string[] = [];
+	const recoveries: BackgroundDelegationWorkflowLaneRecovery[] = [];
+	const previewTruncated = input.result.truncated === true;
+	const transcriptIncomplete = input.result.transcriptIncomplete === true;
 	for (const { workflowLane, analysis } of analyses) {
 		if (!analysis.covered) continue;
-		if (!analysis.salvaged && analysis.issues.length === 0) continue;
+		const laneRecoveries: BackgroundDelegationWorkflowLaneRecovery[] = [];
+		if (previewTruncated) {
+			laneRecoveries.push({
+				workflowLane,
+				kind: 'truncated-preview-durable-artifact',
+				reason:
+					'inline preview truncated; durable artifact retained exact coverage',
+			});
+		}
+		if (transcriptIncomplete) {
+			if (analysis.coverageKind === 'candidate') {
+				laneRecoveries.push({
+					workflowLane,
+					kind: 'transcript-incomplete-terminal-candidate',
+					reason:
+						'partial transcript accepted only because a durable [CANDIDATE] row proved this lane',
+				});
+			} else if (analysis.coverageKind === 'clean') {
+				return failedLaneValidation(
+					'result.transcript_incomplete',
+					'complete transcript for every [CLEAN] attestation',
+					`workflow lane ${workflowLane} was covered only by [CLEAN] after a partial transcript fetch`,
+				);
+			}
+		}
+		if (
+			laneRecoveries.length === 0 &&
+			!analysis.salvaged &&
+			analysis.issues.length === 0
+		) {
+			continue;
+		}
 		salvagedLanes.push(workflowLane);
-		const reason =
-			analysis.repairKinds.length > 0
-				? `structural repairs applied: ${analysis.repairKinds.join(', ')}`
-				: 'one or more rows were dropped as malformed or out-of-ownership';
+		if (analysis.repairKinds.length > 0) {
+			laneRecoveries.push({
+				workflowLane,
+				kind: 'parser-normalization',
+				reason: `structural repairs applied: ${analysis.repairKinds.join(', ')}`,
+			});
+		}
+		if (analysis.cleanAttestationSalvaged) {
+			laneRecoveries.push({
+				workflowLane,
+				kind: 'clean-attestation-salvaged',
+				reason:
+					'a conflicting [CLEAN] attestation was discredited while the independently validated candidate rows were retained',
+			});
+		}
+		if (analysis.issues.length > 0) {
+			laneRecoveries.push({
+				workflowLane,
+				kind: 'parser-row-recovery',
+				reason:
+					'one or more malformed or out-of-ownership rows were dropped while retaining valid coverage',
+			});
+		}
+		recoveries.push(...laneRecoveries);
+		const reason = laneRecoveries.map((recovery) => recovery.reason).join('; ');
 		warn(
 			`[pr-workflow-gate] discovery artifact salvaged: batch=${input.record.batchId ?? '(missing)'} lane=${input.record.laneId ?? '(missing)'} workflow_lane=${workflowLane} — ${reason}; retained coverage from the valid rows. Dropped-row diagnostics: ${analysis.issues.join('; ') || '(none)'}`,
 		);
@@ -8967,7 +11574,319 @@ export function validatePrReviewDiscoveryLaneCompletion(
 		}
 	}
 	return salvagedLanes.length > 0
-		? { ok: true, salvaged: salvagedLanes }
+		? { ok: true, salvaged: salvagedLanes, recoveries }
+		: { ok: true };
+}
+
+/**
+ * Collection-time proof for transport-recovered structured workflow lanes.
+ *
+ * Reviewer/critic/PR-feedback lanes normally settle later through the workflow
+ * gate, not in `collect_lane_results`, so a truncated inline preview used to
+ * pass through collection with no durable typed provenance. This helper proves
+ * the durable artifact still carries the exact rows the already-declared batch
+ * owns, allowing collection to persist the transport recovery immediately. Any
+ * unsupported or unprovable structured mode fails closed.
+ */
+export async function validatePrWorkflowTransportRecovery(
+	input: PrWorkflowTransportRecoveryValidationInput,
+): Promise<PrWorkflowTransportRecoveryValidationResult> {
+	const mode = input.record.mode?.trim();
+	const isPrReviewVerdictMode =
+		mode === 'swarm-pr-review:reviewer' || mode === 'swarm-pr-review:critic';
+	if (
+		!isPrReviewVerdictMode &&
+		input.result.truncated !== true &&
+		input.result.transcriptIncomplete !== true
+	) {
+		return { ok: true };
+	}
+	const workflowLane = input.record.workflowLane?.trim();
+	if (!mode || !workflowLane) {
+		return {
+			ok: false,
+			reason:
+				'structured workflow transport recovery requires non-empty mode and workflow_lane provenance',
+		};
+	}
+	const state = await requireAnyActiveState(
+		input.directory,
+		input.record.parentSessionId,
+	);
+	const batchId = input.record.batchId?.trim();
+	const laneId = input.record.laneId?.trim();
+	const verdictPhase: PrReviewComposablePhase | null =
+		mode === 'swarm-pr-review:reviewer'
+			? 'reviewer'
+			: mode === 'swarm-pr-review:critic'
+				? 'critic'
+				: null;
+	const declaredVerdictLane = verdictPhase
+		? (state.prReviewValidationBatches ?? [])
+				.find(
+					(candidate) =>
+						candidate.batchId === batchId && candidate.phase === verdictPhase,
+				)
+				?.lanes.find((candidate) => candidate.laneId === laneId)
+		: undefined;
+	const declaredItemIds = declaredVerdictLane?.reviewItemIds ?? [];
+	const rejectedReceipt: PrReviewVerdictCollectionReceipt | undefined =
+		declaredItemIds.length > 0
+			? {
+					assignedReviewItemIds: [...declaredItemIds],
+					acceptedReviewItemIds: [],
+					rejectedReviewItemIds: [...declaredItemIds],
+				}
+			: undefined;
+	const recordIntegrity = analyzeLaneRecordResultIntegrity({
+		record: input.record,
+		result: input.result,
+		expected: {
+			mode,
+			workflowLane,
+			ownedWorkflowLanes: [workflowLane],
+			prHeadSha: input.record.workspace?.prHeadSha ?? '',
+			gitHead: input.record.workspace?.gitHead ?? '',
+			checkWorkflowLane: true,
+		},
+		requireCompleted: false,
+		allowTranscriptIncompleteRecovery: false,
+	});
+	if (!recordIntegrity.ok) {
+		return {
+			ok: false,
+			reason: formatPrReviewLaneValidationFailure(recordIntegrity.failure),
+			failure: recordIntegrity.failure,
+			...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
+		};
+	}
+	const artifactIntegrity = analyzeLaneArtifactIntegrity({
+		record: input.record,
+		result: input.result,
+		artifact: input.artifact,
+		expected: {
+			mode,
+			workflowLane,
+			prHeadSha: input.record.workspace?.prHeadSha ?? '',
+			gitHead: input.record.workspace?.gitHead ?? '',
+			revisionDigest: input.revisionDigest,
+			reviewScope: input.record.workspace?.scope ?? undefined,
+		},
+	});
+	if (!artifactIntegrity.ok) {
+		return {
+			ok: false,
+			reason: formatPrReviewLaneValidationFailure(artifactIntegrity.failure),
+			failure: artifactIntegrity.failure,
+			...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
+		};
+	}
+	const expectedMode = mode.startsWith('swarm-pr-review:')
+		? 'PR_REVIEW'
+		: mode.startsWith('swarm-pr-feedback:')
+			? 'PR_FEEDBACK'
+			: null;
+	if (!expectedMode) {
+		return {
+			ok: false,
+			reason: `structured workflow transport recovery does not support mode "${mode}"`,
+			...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
+		};
+	}
+	if (state.mode !== expectedMode) {
+		return {
+			ok: false,
+			reason: `active workflow mode mismatch; expected ${expectedMode}, got ${state.mode}`,
+			...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
+		};
+	}
+	const artifactText = input.artifact?.text ?? '';
+	const prReviewGateContext: PrReviewGateContext | undefined =
+		state.mode === 'PR_REVIEW'
+			? { revisionDigest: input.revisionDigest }
+			: undefined;
+	if (!batchId || !laneId) {
+		return {
+			ok: false,
+			reason:
+				'structured workflow transport recovery requires non-empty batch_id and lane_id provenance',
+			...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
+		};
+	}
+	if (
+		mode === 'swarm-pr-review:reviewer' ||
+		mode === 'swarm-pr-review:critic'
+	) {
+		const phase = verdictPhase ?? 'reviewer';
+		const batch = (state.prReviewValidationBatches ?? []).find(
+			(candidate) => candidate.batchId === batchId && candidate.phase === phase,
+		);
+		const lane = batch?.lanes.find((candidate) => candidate.laneId === laneId);
+		if (!lane || lane.workflowLane !== workflowLane) {
+			return {
+				ok: false,
+				reason:
+					'no matching declared reviewer/critic lane ownership was found for this transport recovery',
+				...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
+			};
+		}
+		const itemIds = lane.reviewItemIds ?? [];
+		const reviewerClaims =
+			phase === 'critic'
+				? authoritativeReviewerClaims(
+						input.directory,
+						state,
+						prReviewGateContext ?? { revisionDigest: input.revisionDigest },
+					)
+				: undefined;
+		if (phase === 'critic' && (!reviewerClaims || reviewerClaims.size === 0)) {
+			return {
+				ok: false,
+				reason:
+					'critic transport recovery requires authoritative settled reviewer claims for every assigned item',
+				...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
+			};
+		}
+		const analysis = analyzePrReviewVerdictRowContract(
+			artifactText,
+			itemIds,
+			phase,
+			reviewerClaims,
+		);
+		if (!analysis.ok) {
+			const failure = failedLaneValidation(
+				phase === 'reviewer' ? 'reviewer.verdict_rows' : 'critic.verdict_rows',
+				analysis.expected,
+				analysis.actual,
+			).failure;
+			return {
+				ok: false,
+				reason: formatPrReviewLaneValidationFailure(failure),
+				failure,
+				receipt: {
+					assignedReviewItemIds: [...itemIds],
+					acceptedReviewItemIds: [],
+					rejectedReviewItemIds: [...itemIds],
+				},
+			};
+		}
+		const receipt: PrReviewVerdictCollectionReceipt = {
+			assignedReviewItemIds: [...itemIds],
+			acceptedReviewItemIds: [...itemIds],
+			rejectedReviewItemIds: [],
+		};
+		return input.result.truncated === true
+			? {
+					ok: true,
+					receipt,
+					recoveries: [
+						{
+							workflowLane,
+							kind: 'truncated-preview-durable-artifact',
+							reason:
+								'inline preview truncated; durable artifact retained exact coverage',
+						},
+					],
+				}
+			: { ok: true, receipt };
+	} else if (mode === 'swarm-pr-feedback:verification') {
+		const batch = (state.prFeedbackVerifications ?? []).find(
+			(candidate) => candidate.batchId === batchId,
+		);
+		const lane = batch?.ownership.find(
+			(candidate) => candidate.laneId === laneId,
+		);
+		if (!lane || workflowLane !== lane.laneId) {
+			return {
+				ok: false,
+				reason:
+					'no matching declared PR_FEEDBACK verification ownership was found for this transport recovery',
+			};
+		}
+		const itemIds = lane?.ownedItemIds ?? [];
+		if (
+			itemIds.length === 0 ||
+			!feedbackArtifactTextCoversItems(artifactText, itemIds)
+		) {
+			return {
+				ok: false,
+				reason:
+					'every assigned PR_FEEDBACK verification item requires one exact [FEEDBACK-VERIFIED] row in the durable artifact',
+			};
+		}
+	} else {
+		const feedbackPhase = {
+			'swarm-pr-feedback:stage-b-reviewer': {
+				phase: 'stage-b-reviewer',
+				marker: '[STAGE-B-REVIEW]',
+				verdict: 'APPROVE',
+			},
+			'swarm-pr-feedback:stage-b-test': {
+				phase: 'stage-b-test',
+				marker: '[STAGE-B-TEST]',
+				verdict: 'PASS',
+			},
+			'swarm-pr-feedback:closeout-reviewer': {
+				phase: 'closeout-reviewer',
+				marker: '[CLOSEOUT-REVIEW]',
+				verdict: 'APPROVE',
+			},
+			'swarm-pr-feedback:closeout-critic': {
+				phase: 'closeout-critic',
+				marker: '[CLOSEOUT-CRITIC]',
+				verdict: 'APPROVE',
+			},
+		}[mode];
+		if (!feedbackPhase) {
+			return {
+				ok: false,
+				reason: `structured workflow transport recovery does not support mode "${mode}"`,
+			};
+		}
+		const batch = (state.prFeedbackGateBatches ?? []).find(
+			(candidate) =>
+				candidate.batchId === batchId &&
+				candidate.phase === feedbackPhase.phase &&
+				candidate.laneId === laneId,
+		);
+		if (!batch || workflowLane !== feedbackPhase.phase) {
+			return {
+				ok: false,
+				reason:
+					'no matching declared ordered PR_FEEDBACK lane provenance was found for this transport recovery',
+			};
+		}
+		const itemIds = batch?.itemIds ?? [];
+		if (
+			itemIds.length === 0 ||
+			!itemIds.every((itemId) =>
+				artifactHasExactPositiveVerdictRow(
+					artifactText,
+					feedbackPhase.marker,
+					itemId,
+					feedbackPhase.verdict,
+				),
+			)
+		) {
+			return {
+				ok: false,
+				reason:
+					'every assigned ordered PR_FEEDBACK item requires one exact positive verdict row in the durable artifact',
+			};
+		}
+	}
+	return input.result.truncated === true
+		? {
+				ok: true,
+				recoveries: [
+					{
+						workflowLane,
+						kind: 'truncated-preview-durable-artifact',
+						reason:
+							'inline preview truncated; durable artifact retained exact coverage',
+					},
+				],
+			}
 		: { ok: true };
 }
 
@@ -9020,6 +11939,14 @@ const REVIEW_SEVERITIES = new Set([
 	'INFO',
 	'NONE',
 ]);
+const REVIEW_SEVERITY_RANK = new Map([
+	['NONE', 0],
+	['INFO', 1],
+	['LOW', 2],
+	['MEDIUM', 3],
+	['HIGH', 4],
+	['CRITICAL', 5],
+]);
 const CRITIC_STATUSES = new Set([
 	'UPHELD',
 	'DOWNGRADED',
@@ -9052,17 +11979,31 @@ interface ReviewerVerdict {
 	severity: string;
 }
 
-/** The validated 10 canonical fields of the single `[REVIEWED]` row for an item. */
-function parseReviewerVerdictFields(
+interface IndexedVerdictRows {
+	markerRows: string[][];
+	rowsByItemId: Map<string, string[][]>;
+}
+
+function indexVerdictRows(
 	text: string,
-	itemId: string,
-): string[] | null {
-	const rows = text
-		.split(/\r?\n/)
-		.map((line) => pipeFieldsCapped(line, 10))
-		.filter((fields) => fields[0] === '[REVIEWED]' && fields[1] === itemId);
-	if (rows.length !== 1) return null;
-	const fields = rows[0];
+	marker: '[REVIEWED]' | '[CRITIC]',
+	fieldCount: number,
+): IndexedVerdictRows {
+	const markerRows: string[][] = [];
+	const rowsByItemId = new Map<string, string[][]>();
+	for (const line of text.split(/\r?\n/)) {
+		const fields = pipeFieldsCapped(line, fieldCount);
+		if (fields[0] !== marker) continue;
+		markerRows.push(fields);
+		const itemId = fields[1] ?? '';
+		const rows = rowsByItemId.get(itemId);
+		if (rows) rows.push(fields);
+		else rowsByItemId.set(itemId, [fields]);
+	}
+	return { markerRows, rowsByItemId };
+}
+
+function validateReviewerVerdictFields(fields: string[]): string[] | null {
 	if (fields.length !== 10 || !fields.slice(1).every(Boolean)) return null;
 	const introduced = fields[5]
 		.replace(/^introduced_by_pr\s*:\s*/i, '')
@@ -9074,6 +12015,7 @@ function parseReviewerVerdictFields(
 		!['YES', 'NO', 'UNKNOWN'].includes(introduced)
 	)
 		return null;
+	if (fields[2] === 'DISPROVED' && fields[4] !== 'NONE') return null;
 	if (fields[7].length < 8 || fields[8].length < 5 || fields[9].length < 3)
 		return null;
 	return fields;
@@ -9104,13 +12046,36 @@ function parseLaneItemVerdicts(
 	string,
 	{ classification: string; severity: string; rowDigest?: string }
 > {
+	return parsePrReviewVerdictRows(text, itemIds, phase, reviewerClaims).parsed;
+}
+
+function parsePrReviewVerdictRows(
+	text: string,
+	itemIds: readonly string[],
+	phase: PrReviewComposablePhase,
+	reviewerClaims?: ReadonlyMap<string, PrReviewItemClaim>,
+): {
+	markerRows: string[][];
+	parsed: Map<
+		string,
+		{ classification: string; severity: string; rowDigest?: string }
+	>;
+} {
 	const parsed = new Map<
 		string,
 		{ classification: string; severity: string; rowDigest?: string }
 	>();
+	const marker = phase === 'reviewer' ? '[REVIEWED]' : '[CRITIC]';
+	const { markerRows, rowsByItemId } = indexVerdictRows(
+		text,
+		marker,
+		phase === 'reviewer' ? 10 : 6,
+	);
 	for (const itemId of itemIds) {
 		if (phase === 'reviewer') {
-			const fields = parseReviewerVerdictFields(text, itemId);
+			const rows = rowsByItemId.get(itemId);
+			const fields =
+				rows?.length === 1 ? validateReviewerVerdictFields(rows[0]) : null;
 			if (!fields) continue;
 			parsed.set(itemId, {
 				classification: fields[2],
@@ -9119,18 +12084,87 @@ function parseLaneItemVerdicts(
 			});
 			continue;
 		}
-		const verdict = parseCriticVerdict(
-			text,
-			itemId,
-			reviewerClaims?.get(itemId)?.severity,
-		);
+		const rows = rowsByItemId.get(itemId);
+		const verdict =
+			rows?.length === 1
+				? validateCriticVerdictFields(
+						rows[0],
+						reviewerClaims?.get(itemId)?.severity,
+					)
+				: null;
 		if (!verdict) continue;
 		parsed.set(itemId, {
 			classification: verdict.status,
 			severity: verdict.severity,
 		});
 	}
-	return parsed;
+	return { markerRows, parsed };
+}
+
+/** Exact assigned-row contract used by both normal and recovered collection. */
+function analyzePrReviewVerdictRowContract(
+	text: string,
+	itemIds: readonly string[],
+	phase: PrReviewComposablePhase,
+	reviewerClaims?: ReadonlyMap<string, PrReviewItemClaim>,
+): { ok: boolean; expected: string; actual: string } {
+	const marker = phase === 'reviewer' ? '[REVIEWED]' : '[CRITIC]';
+	const assigned = new Set(itemIds);
+	const { markerRows, parsed } = parsePrReviewVerdictRows(
+		text,
+		itemIds,
+		phase,
+		reviewerClaims,
+	);
+	const observedIds = markerRows.map((fields) => fields[1] || '(missing)');
+	const unexpectedIds = [
+		...new Set(observedIds.filter((itemId) => !assigned.has(itemId))),
+	];
+	const invalidOrMissingIds = itemIds.filter((itemId) => !parsed.has(itemId));
+	return {
+		ok:
+			verdictRowIdsMatchExactly(markerRows, itemIds) &&
+			invalidOrMissingIds.length === 0,
+		expected: `exactly one parseable ${marker} row for assigned IDs ${JSON.stringify(itemIds)} and no other ${marker} IDs`,
+		actual: JSON.stringify({
+			rowCount: markerRows.length,
+			observedIds,
+			invalidOrMissingIds,
+			unexpectedIds,
+		}),
+	};
+}
+
+/** Exact one-row-per-assigned-ID identity check, independent of row semantics. */
+function verdictRowIdsMatchExactly(
+	markerRows: readonly string[][],
+	itemIds: readonly string[],
+): boolean {
+	if (itemIds.length === 0 || markerRows.length !== itemIds.length)
+		return false;
+	const assigned = new Set(itemIds);
+	if (assigned.size !== itemIds.length) return false;
+	const observed = new Set<string>();
+	for (const fields of markerRows) {
+		const itemId = fields[1] ?? '';
+		if (!assigned.has(itemId) || observed.has(itemId)) return false;
+		observed.add(itemId);
+	}
+	return observed.size === assigned.size;
+}
+
+/**
+ * Settlement composes valid assigned siblings item-by-item, but an invented ID
+ * invalidates the entire artifact because no declared ownership can authorize
+ * that row. Missing or duplicate assigned rows remain per-item parse failures.
+ */
+function verdictRowsContainOnlyAssignedIds(
+	markerRows: readonly string[][],
+	itemIds: readonly string[],
+): boolean {
+	if (itemIds.length === 0) return false;
+	const assigned = new Set(itemIds);
+	return markerRows.every((fields) => assigned.has(fields[1] ?? ''));
 }
 
 function parseCriticVerdict(
@@ -9138,12 +12172,15 @@ function parseCriticVerdict(
 	itemId: string,
 	reviewerSeverity?: string,
 ): { status: string; severity: string } | null {
-	const rows = text
-		.split(/\r?\n/)
-		.map((line) => pipeFieldsCapped(line, 6))
-		.filter((fields) => fields[0] === '[CRITIC]' && fields[1] === itemId);
-	if (rows.length !== 1) return null;
-	const fields = rows[0];
+	const rows = indexVerdictRows(text, '[CRITIC]', 6).rowsByItemId.get(itemId);
+	if (!rows || rows.length !== 1) return null;
+	return validateCriticVerdictFields(rows[0], reviewerSeverity);
+}
+
+function validateCriticVerdictFields(
+	fields: string[],
+	reviewerSeverity?: string,
+): { status: string; severity: string } | null {
 	if (
 		fields.length !== 6 ||
 		!fields.slice(1).every(Boolean) ||
@@ -9160,16 +12197,8 @@ function parseCriticVerdict(
 		return null;
 	if (fields[2] === 'DOWNGRADED' && fields[3] === 'CRITICAL') return null;
 	if (reviewerSeverity) {
-		const severityRank = new Map([
-			['NONE', 0],
-			['INFO', 1],
-			['LOW', 2],
-			['MEDIUM', 3],
-			['HIGH', 4],
-			['CRITICAL', 5],
-		]);
-		const reviewerRank = severityRank.get(reviewerSeverity);
-		const criticRank = severityRank.get(fields[3]);
+		const reviewerRank = REVIEW_SEVERITY_RANK.get(reviewerSeverity);
+		const criticRank = REVIEW_SEVERITY_RANK.get(fields[3]);
 		if (reviewerRank === undefined || criticRank === undefined) return null;
 		if (fields[2] === 'UPHELD' && criticRank !== reviewerRank) return null;
 		if (fields[2] === 'DOWNGRADED' && criticRank >= reviewerRank) return null;
@@ -9244,6 +12273,26 @@ function feedbackArtifactCoversItems(
 	const loaded = ref ? readLaneOutput(directory, ref) : null;
 	if (!loaded) return false;
 	const rows = loaded.artifact.text
+		.split(/\r?\n/)
+		.map((line) => pipeFieldsCapped(line, 4))
+		.filter((fields) => fields[0] === '[FEEDBACK-VERIFIED]');
+	if (rows.length !== itemIds.length) return false;
+	return itemIds.every((itemId) => {
+		const matches = rows.filter((fields) => fields[1] === itemId);
+		return (
+			matches.length === 1 &&
+			matches[0].length === 4 &&
+			matches[0].slice(1, 4).every(Boolean) &&
+			FEEDBACK_CLASSIFICATIONS.has(matches[0][2])
+		);
+	});
+}
+
+function feedbackArtifactTextCoversItems(
+	text: string,
+	itemIds: readonly string[],
+): boolean {
+	const rows = text
 		.split(/\r?\n/)
 		.map((line) => pipeFieldsCapped(line, 4))
 		.filter((fields) => fields[0] === '[FEEDBACK-VERIFIED]');
@@ -9922,6 +12971,188 @@ async function readPrWorkflowGateStateFileFromDisk(
 		);
 	}
 	return parsed.data;
+}
+
+/** Upper bound on schema issues quoted in one salvage disclosure. */
+const MAX_SALVAGED_SCHEMA_ERRORS = 10;
+
+/**
+ * Upper bound on the length of ONE quoted schema issue.
+ *
+ * The issue-COUNT cap alone is not a bound on disclosure size: zod folds every
+ * unrecognized key of a single strict object into ONE `unrecognized_keys` issue
+ * whose message inlines all of them, so one oversized key in a nested strict
+ * child (e.g. `checkoutRecovery`) yields a single 80,000-char message that the
+ * count cap does nothing about. The disclosure is written durably to
+ * `.swarm/events.jsonl` and surfaced verbatim in `pr_workflow_status`, so an
+ * attacker-influenced or partially-written state file could otherwise flood the
+ * audit sink and the operator's console. Matches the ellipsis-marker style of
+ * `MAX_LANE_VALIDATION_VALUE_CHARS` — this is operator prose, so the truncation
+ * must be visible rather than silent.
+ */
+export const MAX_SALVAGED_SCHEMA_ERROR_CHARS = 240;
+
+/** Bound one quoted schema issue, marking any truncation for the operator. */
+function boundSalvagedSchemaError(message: string): string {
+	return message.length <= MAX_SALVAGED_SCHEMA_ERROR_CHARS
+		? message
+		: `${message.slice(0, MAX_SALVAGED_SCHEMA_ERROR_CHARS - 1)}…`;
+}
+
+/** Result of one recovery-only gate-state read. */
+export interface PrWorkflowGateRecoveryRead {
+	/** Schema-valid state, or the salvaged projection when `salvaged`. */
+	state: PrWorkflowGateState;
+	/** true when the durable bytes failed schema validation and were salvaged. */
+	salvaged: boolean;
+	/** `path: message` per schema issue; empty unless `salvaged`. */
+	schemaErrors: string[];
+	/** Loud operator-facing disclosure; present only when `salvaged`. */
+	disclosure?: string;
+	/** false when `revision` could not be salvaged — the CAS escape is required. */
+	revisionSalvageable: boolean;
+	/**
+	 * true when a `prFeedbackReadyToPublish` key is present in the raw bytes but
+	 * is itself unreadable. Callers MUST treat this as armed: silently dropping
+	 * an unreadable armed marker would turn "corrupt that one record" into a way
+	 * to bypass the armed-abort refusal — a forgery-class relaxation, not an
+	 * availability one.
+	 */
+	armedShapeUnreadable: boolean;
+}
+
+/**
+ * Recovery-only gate-state reader (issue #2242 R4, wedge W-5).
+ *
+ * Used by `abortPrWorkflow` and `pr_workflow_status` ONLY. The general reader
+ * (`readPrWorkflowGateStateFromDisk`) is deliberately unchanged, so no write,
+ * completion, or verification path can ever act on a salvaged projection.
+ *
+ * Policy, mirroring the file-wide "unavailability degrades with disclosure;
+ * contradiction fails closed" invariant:
+ *   - **Unparseable bytes fail everywhere**, recovery included. There is nothing
+ *     to salvage and guessing would be fabrication.
+ *   - **Schema-validation failure on parseable JSON** salvages the fields abort
+ *     actually reads — `{sessionID, mode, prHeadSha}` plus `revision`,
+ *     `prFeedbackReadyToPublish` and `checkoutRecovery` when each is
+ *     individually well-formed — with a loud disclosure naming the schema
+ *     errors. Everything else is dropped rather than guessed.
+ *   - **Identity is not salvageable ⇒ nothing is.** Without a readable
+ *     `sessionID` and `mode` there is no provable subject to act on, so the
+ *     original `is invalid` failure stands.
+ *
+ * A salvaged view is never written to the tracked-state cache.
+ */
+export async function readPrWorkflowGateStateForRecovery(
+	directory: string,
+	sessionID: string,
+): Promise<PrWorkflowGateRecoveryRead | null> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	const filePath = workflowGateStatePath(directory, normalizedSessionID);
+	let raw: string;
+	try {
+		raw = await fsp.readFile(filePath, 'utf-8');
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+		throw error;
+	}
+	let parsedJson: unknown;
+	try {
+		parsedJson = JSON.parse(raw);
+	} catch {
+		throw new Error(
+			`BLOCKED: PR workflow gate state for session "${normalizedSessionID}" is not valid JSON`,
+		);
+	}
+	const parsed = PrWorkflowGateStateSchema.safeParse(parsedJson);
+	if (parsed.success) {
+		return {
+			state: parsed.data,
+			salvaged: false,
+			schemaErrors: [],
+			revisionSalvageable: true,
+			armedShapeUnreadable: false,
+		};
+	}
+	const invalidError = new Error(
+		`BLOCKED: PR workflow gate state for session "${normalizedSessionID}" is invalid`,
+	);
+	if (
+		typeof parsedJson !== 'object' ||
+		parsedJson === null ||
+		Array.isArray(parsedJson)
+	) {
+		throw invalidError;
+	}
+	const rawRecord = parsedJson as Record<string, unknown>;
+	const salvagedSessionID = z.string().min(1).safeParse(rawRecord.sessionID);
+	const salvagedMode = z
+		.enum(['PR_REVIEW', 'PR_FEEDBACK'])
+		.safeParse(rawRecord.mode);
+	if (!salvagedSessionID.success || !salvagedMode.success) throw invalidError;
+	const salvagedRevision = z
+		.number()
+		.int()
+		.nonnegative()
+		.safeParse(rawRecord.revision);
+	const salvagedHead = z.string().min(1).safeParse(rawRecord.prHeadSha);
+	const salvagedActivatedAt = z
+		.string()
+		.min(1)
+		.safeParse(rawRecord.activatedAt);
+	const salvagedUpdatedAt = z.string().min(1).safeParse(rawRecord.updatedAt);
+	// `undefined` is the only unarmed shape: the schema is `.optional()`, never
+	// `.nullable()`, so a `null` here can only come from corruption — treating
+	// it as absent would let the single most likely nested-record corruption
+	// bypass the armed-abort refusal (4.5-review finding, 2026-08-19).
+	const armedKeyPresent = rawRecord.prFeedbackReadyToPublish !== undefined;
+	const salvagedArmed = PrFeedbackReadyToPublishRecordSchema.safeParse(
+		rawRecord.prFeedbackReadyToPublish,
+	);
+	const salvagedCheckoutRecovery =
+		PrWorkflowCheckoutRecoveryRecordSchema.safeParse(
+			rawRecord.checkoutRecovery,
+		);
+	const armedShapeUnreadable = armedKeyPresent && !salvagedArmed.success;
+	const schemaErrors = parsed.error.issues
+		.slice(0, MAX_SALVAGED_SCHEMA_ERRORS)
+		.map((issue) =>
+			boundSalvagedSchemaError(
+				`${issue.path.join('.') || '(root)'}: ${issue.message}`,
+			),
+		);
+	const disclosure =
+		`DEGRADED: PR workflow gate state for session "${normalizedSessionID}" failed schema validation ` +
+		`and was SALVAGED for recovery only (abort/status; write and completion paths still refuse it). ` +
+		`Schema errors: ${schemaErrors.join('; ')}.` +
+		(salvagedRevision.success ? '' : ' state revision unsalvageable.') +
+		(armedShapeUnreadable
+			? ' prFeedbackReadyToPublish is present but unreadable; treated as ARMED (fail-closed).'
+			: '');
+	return {
+		state: {
+			schemaVersion: GATE_SCHEMA_VERSION,
+			revision: salvagedRevision.success ? salvagedRevision.data : 0,
+			sessionID: salvagedSessionID.data,
+			mode: salvagedMode.data,
+			activatedAt: salvagedActivatedAt.success
+				? salvagedActivatedAt.data
+				: isoNow(),
+			updatedAt: salvagedUpdatedAt.success ? salvagedUpdatedAt.data : isoNow(),
+			...(salvagedHead.success ? { prHeadSha: salvagedHead.data } : {}),
+			...(salvagedArmed.success
+				? { prFeedbackReadyToPublish: salvagedArmed.data }
+				: {}),
+			...(salvagedCheckoutRecovery.success
+				? { checkoutRecovery: salvagedCheckoutRecovery.data }
+				: {}),
+		},
+		salvaged: true,
+		schemaErrors,
+		disclosure,
+		revisionSalvageable: salvagedRevision.success,
+		armedShapeUnreadable,
+	};
 }
 
 function rememberState(directory: string, state: PrWorkflowGateState): void {

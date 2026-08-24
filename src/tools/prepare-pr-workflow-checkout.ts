@@ -12,6 +12,7 @@ import {
 } from '../hooks/pr-workflow-gate.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { bunSpawn } from '../utils/bun-compat.js';
+import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 import { containsControlChars } from '../utils/path-security.js';
 import { createSwarmTool } from './create-tool.js';
 
@@ -821,7 +822,12 @@ async function captureCheckoutIdentity(
 		['symbolic-ref', '--quiet', '--short', 'HEAD'],
 		{ captureStdout: true },
 	);
-	if (branch.exitCode !== 0 && branch.exitCode !== 1) {
+	// Exit code 1 is `git symbolic-ref`'s documented detached-HEAD signal, but a
+	// spawn failure (missing git binary, a cwd that no longer exists) also
+	// resolves to a non-zero exit — and could coincidentally be 1 — with no
+	// process ever having run. Check `spawnError` explicitly so a spawn failure
+	// is never misread as detached-HEAD (#2236 Sweep A, FIX 3).
+	if (branch.spawnError || (branch.exitCode !== 0 && branch.exitCode !== 1)) {
 		throw new Error(
 			'BLOCKED: unable to capture the original checkout branch; no stash was created',
 		);
@@ -839,7 +845,7 @@ async function runGit(
 	directory: string,
 	args: string[],
 	options: { captureStdout?: boolean; literalPathspecs?: boolean } = {},
-): Promise<{ exitCode: number; stdout: string }> {
+): Promise<{ exitCode: number; stdout: string; spawnError?: Error | null }> {
 	// `--literal-pathspecs` is on by default so every user-supplied pathspec (explicit
 	// mode's `-- <paths>`) is treated as a literal, defeating glob/magic-pathspec
 	// injection. Discovery's `stash push --include-untracked` carries NO pathspec, and
@@ -849,8 +855,26 @@ async function runGit(
 	// plain `git stash push -u` would have cleaned. That call opts out via
 	// `literalPathspecs: false`; it is safe because its argv is entirely fixed literals.
 	const literalPathspecs = options.literalPathspecs ?? true;
+	// Resolution failure (every candidate rejected) is reported through this
+	// function's existing `spawnError`-as-value contract — matching exactly
+	// what a genuine spawn-creation failure already reports below — rather
+	// than introducing a new throw at this call site.
+	let gitExecutable: string;
+	try {
+		gitExecutable = await resolveGitExecutableAsync();
+	} catch (error) {
+		return {
+			exitCode: 1,
+			stdout: '',
+			spawnError: error instanceof Error ? error : new Error(String(error)),
+		};
+	}
 	const proc = bunSpawn(
-		['git', ...(literalPathspecs ? ['--literal-pathspecs'] : []), ...args],
+		[
+			gitExecutable,
+			...(literalPathspecs ? ['--literal-pathspecs'] : []),
+			...args,
+		],
 		{
 			cwd: directory,
 			stdin: 'ignore',
@@ -872,7 +896,7 @@ async function runGit(
 					})
 				: Promise.resolve(''),
 		]);
-		return { exitCode, stdout };
+		return { exitCode, stdout, spawnError: proc.spawnError ?? null };
 	} finally {
 		try {
 			proc.kill();

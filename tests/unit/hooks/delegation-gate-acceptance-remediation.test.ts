@@ -20,6 +20,13 @@
  *    a line-initial `-`/`*` marker is stripped) — a bulleted body reproduced
  *    WITH line breaks passes, but the same content flattened onto one line
  *    strands an un-stripped marker mid-body and fails.
+ *
+ * The sibling case — a body that IS present in the prompt but shifted off
+ * character 0 (#2215) — lives in
+ * `delegation-gate-acceptance-shifted-body.test.ts`, which asserts the rendered
+ * message through the same `checkAcceptanceCoversFrRefs` →
+ * `buildAcceptanceCoverageMismatchError` pair this file uses (post-#2205 the
+ * `toolBefore` throw is unreachable, so the builder is the assertion surface).
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
@@ -30,6 +37,7 @@ import type { PluginConfig } from '../../../src/config';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
 	ACCEPTANCE_EXPECTED_BODY_CAP,
+	buildAcceptanceCoverageMismatchError,
 	checkAcceptanceCoversFrRefs,
 	createDelegationGateHook,
 } from '../../../src/hooks/delegation-gate';
@@ -136,34 +144,33 @@ describe('A1: gate errors are runtime-valid (no src/agents/ misdirection)', () =
 		);
 	});
 
-	it('ACCEPTANCE_FIELD_COVERAGE_MISMATCH does not reference src/agents/ and carries the anti-spelunking directive', async () => {
+	it('ACCEPTANCE_FIELD_COVERAGE_MISMATCH does not reference src/agents/ and carries the anti-spelunking directive', () => {
+		// The mismatch throw is defense-in-depth after #2205's gate-side
+		// injection (a lorem-ipsum ACCEPTANCE now dispatches WITH the verbatim
+		// body injected), so the message contract is asserted through the
+		// exported builder — the same function the throw site calls.
 		const body = 'The widget SHALL render the configured label exactly once.';
 		const specMd = `- **FR-001 — Widget renders.** ${body}\n`;
-		await writeSingleTaskPlan(tempDir, specMd, ['FR-001']);
-		const hooks = createDelegationGateHook(makeConfig(), tempDir);
-		ensureAgentSession('sess-a1-mismatch', 'architect');
-		let caught: Error | undefined;
-		try {
-			await hooks.toolBefore(toolBeforeInput('sess-a1-mismatch'), {
-				args: {
-					subagent_type: 'coder',
-					task_id: '1.1',
-					prompt: 'TASK: 1.1 implement it\nACCEPTANCE: lorem ipsum',
-				},
-			});
-		} catch (err) {
-			caught = err as Error;
-		}
-		expect(caught).toBeDefined();
-		expect(caught?.message).toContain('ACCEPTANCE_FIELD_COVERAGE_MISMATCH');
-		expect(caught?.message).not.toContain('src/agents/');
-		expect(caught?.message).toContain(
+		const res = checkAcceptanceCoversFrRefs({
+			specText: specMd,
+			acceptanceText: 'ACCEPTANCE: lorem ipsum',
+			frRefs: ['FR-001'],
+		});
+		expect(res.covered).toBe(false);
+		const err = buildAcceptanceCoverageMismatchError({
+			targetAgent: 'coder',
+			coverageTaskId: '1.1',
+			coverageResult: res,
+		});
+		expect(err.message).toContain('ACCEPTANCE_FIELD_COVERAGE_MISMATCH');
+		expect(err.message).not.toContain('src/agents/');
+		expect(err.message).toContain(
 			'ACCEPTANCE FIELD RESOLUTION section of your system prompt',
 		);
-		expect(caught?.message).toContain(
+		expect(err.message).toContain(
 			'Do NOT investigate the installed swarm plugin package (node_modules/opencode-swarm, ~/.cache/opencode)',
 		);
-		expect(caught?.message).toContain(
+		expect(err.message).toContain(
 			'If this same error repeats after 2 fix attempts, STOP and present the blocker to the user.',
 		);
 	});
@@ -217,84 +224,72 @@ describe('A2: ACCEPTANCE_FIELD_COVERAGE_MISMATCH embeds the requirement body', (
 		}
 	});
 
-	it('embeds the exact raw body for the missing id, fenced, with a line-break-preserving instruction', async () => {
+	it('embeds the exact raw body for the missing id, fenced, with a line-break-preserving instruction', () => {
+		// Post-#2205 the toolBefore throw is defense-in-depth (the gate injects
+		// verbatim bodies instead of blocking), so the embedding contract is
+		// asserted through the exported builder the throw site calls.
 		const body =
 			'The widget SHALL render the configured label exactly once on mount.';
 		const specMd = `- **FR-020 — Widget renders.** ${body}\n`;
-		await writeSingleTaskPlan(tempDir, specMd, ['FR-020']);
-		const hooks = createDelegationGateHook(makeConfig(), tempDir);
-		ensureAgentSession('sess-a2-embed', 'architect');
-		let caught: Error | undefined;
-		try {
-			await hooks.toolBefore(toolBeforeInput('sess-a2-embed'), {
-				args: {
-					subagent_type: 'coder',
-					task_id: '1.1',
-					prompt: 'TASK: 1.1 implement it\nACCEPTANCE: lorem ipsum',
-				},
-			});
-		} catch (err) {
-			caught = err as Error;
-		}
-		expect(caught).toBeDefined();
-		expect(caught?.message).toContain(body);
-		expect(caught?.message).toContain('```');
-		expect(caught?.message).toContain('PRESERVING ITS LINE BREAKS');
-		expect(caught?.message).toContain('FR-020');
-		expect(caught?.message).toContain(String(ACCEPTANCE_EXPECTED_BODY_CAP));
+		const res = checkAcceptanceCoversFrRefs({
+			specText: specMd,
+			acceptanceText: 'ACCEPTANCE: lorem ipsum',
+			frRefs: ['FR-020'],
+		});
+		expect(res.covered).toBe(false);
+		const err = buildAcceptanceCoverageMismatchError({
+			targetAgent: 'coder',
+			coverageTaskId: '1.1',
+			coverageResult: res,
+		});
+		expect(err.message).toContain(body);
+		expect(err.message).toContain('```');
+		expect(err.message).toContain('PRESERVING ITS LINE BREAKS');
+		expect(err.message).toContain('FR-020');
+		expect(err.message).toContain(String(ACCEPTANCE_EXPECTED_BODY_CAP));
 	});
 
-	it('truncates a body over ACCEPTANCE_EXPECTED_BODY_CAP chars, stating the cap and a spec.md pointer', async () => {
+	it('truncates a body over ACCEPTANCE_EXPECTED_BODY_CAP chars, stating the cap and a spec.md pointer', () => {
 		expect(ACCEPTANCE_EXPECTED_BODY_CAP).toBe(2000);
 		const longBody = `The widget SHALL ${'x'.repeat(ACCEPTANCE_EXPECTED_BODY_CAP + 500)} verbatim.`;
 		const specMd = `- **FR-030 — Long body.** ${longBody}\n`;
-		await writeSingleTaskPlan(tempDir, specMd, ['FR-030']);
-		const hooks = createDelegationGateHook(makeConfig(), tempDir);
-		ensureAgentSession('sess-a2-truncate', 'architect');
-		let caught: Error | undefined;
-		try {
-			await hooks.toolBefore(toolBeforeInput('sess-a2-truncate'), {
-				args: {
-					subagent_type: 'coder',
-					task_id: '1.1',
-					prompt: 'TASK: 1.1 implement it\nACCEPTANCE: lorem ipsum',
-				},
-			});
-		} catch (err) {
-			caught = err as Error;
-		}
-		expect(caught).toBeDefined();
-		expect(caught?.message).toContain(
+		const res = checkAcceptanceCoversFrRefs({
+			specText: specMd,
+			acceptanceText: 'ACCEPTANCE: lorem ipsum',
+			frRefs: ['FR-030'],
+		});
+		expect(res.covered).toBe(false);
+		const err = buildAcceptanceCoverageMismatchError({
+			targetAgent: 'coder',
+			coverageTaskId: '1.1',
+			coverageResult: res,
+		});
+		expect(err.message).toContain(
 			`…[truncated — read the remainder from .swarm/spec.md under FR-030]`,
 		);
-		expect(caught?.message).toContain(String(ACCEPTANCE_EXPECTED_BODY_CAP));
+		expect(err.message).toContain(String(ACCEPTANCE_EXPECTED_BODY_CAP));
 		// The full (untruncated) body must NOT appear verbatim in the message.
-		expect(caught?.message).not.toContain(longBody);
+		expect(err.message).not.toContain(longBody);
 		// The first ACCEPTANCE_EXPECTED_BODY_CAP chars of the body must be present.
-		expect(caught?.message).toContain(longBody.slice(0, 200));
+		expect(err.message).toContain(longBody.slice(0, 200));
 	});
 
-	it('does not truncate a body under the cap (no truncation marker)', async () => {
+	it('does not truncate a body under the cap (no truncation marker)', () => {
 		const body = 'The widget SHALL render the configured label once.';
 		const specMd = `- **FR-031 — Short body.** ${body}\n`;
-		await writeSingleTaskPlan(tempDir, specMd, ['FR-031']);
-		const hooks = createDelegationGateHook(makeConfig(), tempDir);
-		ensureAgentSession('sess-a2-notruncate', 'architect');
-		let caught: Error | undefined;
-		try {
-			await hooks.toolBefore(toolBeforeInput('sess-a2-notruncate'), {
-				args: {
-					subagent_type: 'coder',
-					task_id: '1.1',
-					prompt: 'TASK: 1.1 implement it\nACCEPTANCE: lorem ipsum',
-				},
-			});
-		} catch (err) {
-			caught = err as Error;
-		}
-		expect(caught).toBeDefined();
-		expect(caught?.message).not.toContain('truncated');
-		expect(caught?.message).toContain(body);
+		const res = checkAcceptanceCoversFrRefs({
+			specText: specMd,
+			acceptanceText: 'ACCEPTANCE: lorem ipsum',
+			frRefs: ['FR-031'],
+		});
+		expect(res.covered).toBe(false);
+		const err = buildAcceptanceCoverageMismatchError({
+			targetAgent: 'coder',
+			coverageTaskId: '1.1',
+			coverageResult: res,
+		});
+		expect(err.message).not.toContain('truncated');
+		expect(err.message).toContain(body);
 	});
 });
 
@@ -369,21 +364,22 @@ describe('A2: bulleted multi-line requirement body — line-break preservation',
 		).resolves.toBeUndefined();
 	});
 
-	it('integration: the same body FLATTENED onto one line is rejected with the coverage diagnostic', async () => {
+	it('integration: the same body FLATTENED onto one line dispatches with the correctly line-broken body injected (#2205)', async () => {
 		const hooks = createDelegationGateHook(makeConfig(), tempDir);
 		ensureAgentSession('sess-a2-bullet-bad', 'architect');
-		const prompt = `TASK: 1.1 implement it\nACCEPTANCE: - ${LINE_1} - ${LINE_2}`;
-		let caught: Error | undefined;
-		try {
-			await hooks.toolBefore(toolBeforeInput('sess-a2-bullet-bad'), {
-				args: { subagent_type: 'coder', task_id: '1.1', prompt },
-			});
-		} catch (err) {
-			caught = err as Error;
-		}
-		expect(caught).toBeDefined();
-		expect(caught?.message).toContain('ACCEPTANCE_FIELD_COVERAGE_MISMATCH');
-		expect(caught?.message).toContain('first divergence at normalized offset');
-		expect(caught?.message).toContain('FR-040');
+		const output = {
+			args: {
+				subagent_type: 'coder',
+				task_id: '1.1',
+				prompt: `TASK: 1.1 implement it\nACCEPTANCE: - ${LINE_1} - ${LINE_2}`,
+			} as Record<string, unknown>,
+		};
+		// Pre-#2205 the flattened (interior "- " stranded) copy was rejected;
+		// the gate now appends the verbatim spec body — with its original
+		// single-line form — so the downstream coder sees the exact text.
+		await expect(
+			hooks.toolBefore(toolBeforeInput('sess-a2-bullet-bad'), output),
+		).resolves.toBeUndefined();
+		expect(String(output.args.prompt)).toContain(`FR-040: ${FULL_BODY}`);
 	});
 });

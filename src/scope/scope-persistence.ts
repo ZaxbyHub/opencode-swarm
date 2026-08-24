@@ -53,15 +53,21 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { type Plan, PlanSchema } from '../config/plan-schema';
+import { validateSwarmPath } from '../hooks/utils';
 import { computePlanStructureHash } from '../plan/ledger';
 import { derivePlanId } from '../plan/utils';
-import { bunWrite } from '../utils/bun-compat';
+import {
+	atomicWriteSwarmFile,
+	atomicWriteSwarmFileSync,
+} from '../utils/atomic-write';
 import { assertProjectRoot } from '../utils/project-boundary';
 import {
 	canonicalWorkspaceIdentity,
 	clearExactScopeBinding,
+	clearSweepTombstoneForRevival,
 	createClaimedScopeBinding,
 	DEFAULT_SCOPE_BINDING_TTL_MS,
+	hasDeliberateScopeBindingDenyOverlay,
 	hasScopeBindingDenyOverlay,
 	installFailedRevocationOverlay,
 	installScopeBindingRetirementIntent,
@@ -630,11 +636,11 @@ function migrateLegacyBindingsSync(
 			if (valid && binding) {
 				const exactPath = getBindingFilePath(directory, binding);
 				if (!fs.existsSync(exactPath)) {
-					const temp = `${exactPath}.migration-${process.pid}`;
-					fs.writeFileSync(temp, JSON.stringify(binding, null, 2), {
-						flag: 'wx',
-					});
-					fs.renameSync(temp, exactPath);
+					// Canonical contained write (issue #2035) — supersedes the
+					// bespoke `.migration-<pid>` temp which had no failure
+					// cleanup; that grammar stays registered for residue
+					// discovery.
+					atomicWriteSwarmFileSync(exactPath, JSON.stringify(binding, null, 2));
 				} else {
 					const existingRaw = readBoundedFile(exactPath);
 					const existing = existingRaw
@@ -2049,6 +2055,155 @@ function readCurrentPlan(directory: string): Plan | null {
 	}
 }
 
+/**
+ * Issue #2271 bug 5: how long an expired-but-never-consumed live generation
+ * may sit idle and still be auto-revived at the authorization gate. Matches
+ * the legacy v1 scope TTL (24 h). Bindings idle longer than this, and any
+ * binding that was deliberately tombstoned, revoked, superseded, or covered
+ * by a deny overlay, keep the fail-closed SCOPE_BINDING_EXPIRED behavior.
+ */
+const SCOPE_BINDING_AUTO_REVIVE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Issue #2271 bug 5: record an idle-binding revival in the session ledger so
+ * a re-extended write authorization is auditable. Best-effort — a ledger
+ * write failure must never fail the revival itself.
+ */
+function appendScopeBindingRevivalEvent(
+	workspace: string,
+	revived: ScopeBinding,
+): void {
+	try {
+		const eventsPath = validateSwarmPath(workspace, 'events.jsonl');
+		fs.mkdirSync(path.dirname(eventsPath), { recursive: true });
+		fs.appendFileSync(
+			eventsPath,
+			`${JSON.stringify({
+				type: 'scope_binding_auto_recovered',
+				timestamp: new Date().toISOString(),
+				taskId: revived.taskId,
+				sessionId: revived.ownerSessionId,
+				generationId: revived.generationId,
+				revision: revived.revision,
+				expiresAt: new Date(revived.expiresAt).toISOString(),
+			})}\n`,
+			'utf-8',
+		);
+	} catch {
+		/* best-effort audit trail */
+	}
+}
+
+/**
+ * Issue #2271 bug 5: transparently revive a scope binding that expired while
+ * the owning session was idle (user interaction, config edits, commits) so a
+ * dispatch does not waste an attempt on SCOPE_BINDING_EXPIRED.
+ *
+ * Revival is a serialized CAS on the durable generation file: only the single
+ * unambiguous candidate, still `live` in its durable payload (a tombstoned or
+ * revoked file is a deliberate denial, never revived), inside the bounded
+ * idle window, with no deny overlay, and only when the on-disk generation has
+ * not changed since the read. Sweep-signature in-memory tombstones
+ * ('expired' lifecycle at revision+1, which would otherwise outrank the
+ * revived revision) are explicitly cleared after the verified write via
+ * clearSweepTombstoneForRevival; deliberate revocation-class overlays
+ * ('revoked'/'superseded') are neither ignored nor cleared, and the durable
+ * CAS re-read refuses any on-disk tombstone, so a deliberate later
+ * revocation always wins.
+ *
+ * Returns the revived binding, or null when revival is not permitted (the
+ * caller then keeps the original expired resolution — fail closed).
+ */
+function attemptIdleScopeBindingRevival(
+	directory: string,
+	resolution: DurableScopeBindingResolution,
+): ScopeBinding | null {
+	if (resolution.status !== 'expired') return null;
+	// Multiple expired candidates are ambiguous — never guess which to revive.
+	if (resolution.totalCandidates !== 1 || resolution.candidates.length !== 1)
+		return null;
+	const candidate = resolution.candidates[0];
+	if (!candidate) return null;
+	const now = Date.now();
+	if (candidate.lifecycleState !== 'live') return null;
+	if (candidate.expiresAt > now) return null;
+	if (now - candidate.expiresAt > SCOPE_BINDING_AUTO_REVIVE_WINDOW_MS)
+		return null;
+	// Sweep-signature tombstones ('expired' lifecycle from in-memory
+	// sweepExpired on any scope read) do not block revival — the durable CAS
+	// below re-verifies the on-disk generation. Deliberate revocation classes
+	// still fail closed here.
+	if (hasDeliberateScopeBindingDenyOverlay(candidate)) return null;
+
+	let release: (() => void) | undefined;
+	try {
+		const resolvedWorkspace = fs.realpathSync(directory);
+		assertProjectRoot(resolvedWorkspace);
+		const scopePath = getBindingFilePath(resolvedWorkspace, candidate);
+		if (!isScopesDirSafe(resolvedWorkspace, getScopesDir(resolvedWorkspace)))
+			return null;
+		const lockPath = getGenerationLockPath(scopePath);
+		if (!ensureLockTargetSync(lockPath)) return null;
+		release = lockSyncWithBoundedRetry(lockPath);
+		const raw = readBoundedFile(scopePath);
+		if (!raw) return null;
+		const current = validateScopeBindingPayload(
+			resolvedWorkspace,
+			JSON.parse(raw) as Partial<ScopeBinding>,
+		);
+		// CAS: the durable generation must be exactly the one we resolved, still
+		// live, and still expired-but-revivable. Anything else fails closed.
+		if (
+			!current ||
+			current.bindingId !== candidate.bindingId ||
+			current.generationId !== candidate.generationId ||
+			current.revision !== candidate.revision ||
+			current.lifecycleState !== 'live' ||
+			current.expiresAt > Date.now() ||
+			Date.now() - current.expiresAt > SCOPE_BINDING_AUTO_REVIVE_WINDOW_MS
+		)
+			return null;
+		const revivedAt = Date.now();
+		const revived: ScopeBinding = {
+			...current,
+			revision: current.revision + 1,
+			updatedAt: revivedAt,
+			leaseStartedAt: revivedAt,
+			expiresAt: revivedAt + DEFAULT_SCOPE_BINDING_TTL_MS,
+		};
+		atomicWriteSync(scopePath, JSON.stringify(revived, null, 2));
+		const verifiedRaw = readBoundedFile(scopePath);
+		const verified = verifiedRaw
+			? validateScopeBindingPayload(
+					resolvedWorkspace,
+					JSON.parse(verifiedRaw) as Partial<ScopeBinding>,
+				)
+			: null;
+		if (
+			!verified ||
+			verified.revision !== revived.revision ||
+			verified.lifecycleState !== 'live' ||
+			verified.expiresAt !== revived.expiresAt
+		)
+			return null;
+		// A sweep-signature in-memory tombstone (revision+1, 'expired') would
+		// otherwise deny the revived generation at the next resolution — its
+		// revision equals this revival's. Deliberate overlays are untouched.
+		clearSweepTombstoneForRevival(revived);
+		appendScopeBindingRevivalEvent(resolvedWorkspace, revived);
+		return revived;
+	} catch {
+		return null;
+	} finally {
+		if (release)
+			try {
+				release();
+			} catch {
+				/* stale/released */
+			}
+	}
+}
+
 function resolveAuthorizedScopeBindingForPlan(input: {
 	directory: string;
 	plan: Plan;
@@ -2082,6 +2237,17 @@ function resolveAuthorizedScopeBindingForPlanDetailed(input: {
 			};
 		const admission = registerScopeBinding(durable.binding);
 		return admission.ok ? durable : { status: 'overloaded' };
+	}
+	// Issue #2271 bug 5: a single binding that merely expired while the owning
+	// session was idle is auto-revived here (serialized CAS, bounded window,
+	// deny overlays and deliberate tombstones still fail closed) instead of
+	// burning the dispatch attempt on SCOPE_BINDING_EXPIRED.
+	if (durable.status === 'expired') {
+		const revived = attemptIdleScopeBindingRevival(input.directory, durable);
+		if (revived) {
+			const admission = registerScopeBinding(revived);
+			if (admission.ok) return { status: 'found', binding: revived };
+		}
 	}
 	if (durable.status !== 'not_declared') return durable;
 	return { status: 'not_declared' };
@@ -2297,35 +2463,19 @@ export function resolveAuthorizedPrFeedbackScopeBindingFromDisk(input: {
 }
 
 /**
- * Atomic write via temp + rename. Same pattern as src/gate-evidence.ts:105
- * but scoped to this module so it can live without a cross-dir dependency.
+ * Atomic write via temp + rename, delegated to the canonical helper
+ * (`src/utils/atomic-write.ts`, issue #2035): `.swarm` containment, the
+ * registered `canonical-v1` temp grammar, fsync, bounded rename retry, and
+ * exact own-temp cleanup. The temp-file grammar this module produced before
+ * (`target.tmp.<ts>.<rand>`) stays registered in `SWARM_TEMP_GRAMMARS` so
+ * historical residue remains discoverable.
  */
 async function atomicWrite(targetPath: string, content: string): Promise<void> {
-	const tempPath = `${targetPath}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
-	try {
-		await bunWrite(tempPath, content);
-		fs.renameSync(tempPath, targetPath);
-	} finally {
-		try {
-			fs.unlinkSync(tempPath);
-		} catch {
-			/* renamed or never created */
-		}
-	}
+	await atomicWriteSwarmFile(targetPath, content);
 }
 
 function atomicWriteSync(targetPath: string, content: string): void {
-	const tempPath = `${targetPath}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
-	try {
-		fs.writeFileSync(tempPath, content, { flag: 'wx' });
-		fs.renameSync(tempPath, targetPath);
-	} finally {
-		try {
-			fs.unlinkSync(tempPath);
-		} catch {
-			/* renamed or never created */
-		}
-	}
+	atomicWriteSwarmFileSync(targetPath, content);
 }
 
 export const _scopePersistenceInternals = {

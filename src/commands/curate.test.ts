@@ -28,15 +28,35 @@ describe('/swarm curate', () => {
 	const realReadSwarmFileAsync = _internals.readSwarmFileAsync;
 	const realCheckHivePromotions = _internals.checkHivePromotions;
 
+	let prevHome: string | undefined;
+	let prevXdg: string | undefined;
+	let prevLocalAppData: string | undefined;
+
 	beforeEach(() => {
 		tempDir = createTempDir();
 		createSwarmDir(tempDir);
+		// Redirect ALL platform roots (issue #2033 tripwire): the curator reads
+		// the machine-global hive store via readMergedKnowledge, which without
+		// redirection reads the REAL store (fail-closed under the tripwire and
+		// machine-dependent before it).
+		prevHome = process.env.HOME;
+		prevXdg = process.env.XDG_DATA_HOME;
+		prevLocalAppData = process.env.LOCALAPPDATA;
+		process.env.HOME = tempDir;
+		process.env.XDG_DATA_HOME = tempDir;
+		process.env.LOCALAPPDATA = tempDir;
 	});
 
 	afterEach(() => {
 		_internals.loadCuratorDeps = realLoadCuratorDeps;
 		_internals.readSwarmFileAsync = realReadSwarmFileAsync;
 		_internals.checkHivePromotions = realCheckHivePromotions;
+		if (prevHome === undefined) delete process.env.HOME;
+		else process.env.HOME = prevHome;
+		if (prevXdg === undefined) delete process.env.XDG_DATA_HOME;
+		else process.env.XDG_DATA_HOME = prevXdg;
+		if (prevLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+		else process.env.LOCALAPPDATA = prevLocalAppData;
 		cleanupDir(tempDir);
 	});
 

@@ -15,6 +15,7 @@ import {
 	runReviewEngine,
 } from '../../../src/review/engine';
 import { canonicalizeValidationCandidates } from '../../../src/review/finding-validator';
+import { createReviewManifest } from '../../helpers/review-manifest';
 
 let tmpDir: string;
 const originalCollect = _internals.collectReviewDiff;
@@ -78,6 +79,7 @@ function diffResult(
 			includesWorkingTree: true,
 			scopeHash: 'a'.repeat(64),
 		},
+		manifest: createReviewManifest(),
 		...overrides,
 	};
 }
@@ -188,7 +190,6 @@ describe('shared review engine', () => {
 			'The JSON object is strict: no additional keys are allowed',
 		);
 	});
-
 	test('gate blocks only an anchored threshold finding independently CONFIRMED', async () => {
 		const reviewer = structured([finding()]);
 		const first = queuedDispatcher([reviewer]);
@@ -201,7 +202,6 @@ describe('shared review engine', () => {
 			}),
 		);
 		const findingId = candidateProbe.findings[0].finding_id;
-
 		const { dispatcher } = queuedDispatcher([
 			reviewer,
 			JSON.stringify({
@@ -225,7 +225,6 @@ describe('shared review engine', () => {
 		expect(result.blockingFindings).toHaveLength(1);
 		expect(result.evidencePath).toContain('auto-review.json');
 	});
-
 	test.each([
 		['unchanged line', { line_start: 4, line_end: 4 }],
 		['absolute path', { file: 'C:\\outside\\state.ts' }],
@@ -246,7 +245,6 @@ describe('shared review engine', () => {
 		expect(calls).toHaveLength(1);
 		expect(result.evidencePath).toBeDefined();
 	});
-
 	test('low-confidence HIGH finding is persisted as effective info and not validated', async () => {
 		const { dispatcher, calls } = queuedDispatcher([
 			structured([finding({ confidence: 0.2 })]),

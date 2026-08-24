@@ -165,6 +165,7 @@ export const _internals = {
  * Tool definition for write_hallucination_evidence
  */
 export const write_hallucination_evidence: ToolDefinition = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
 		'Write hallucination verification evidence for a completed phase. ' +
 		'Normalizes verdict (APPROVED->approved, NEEDS_REVISION->rejected) and writes ' +

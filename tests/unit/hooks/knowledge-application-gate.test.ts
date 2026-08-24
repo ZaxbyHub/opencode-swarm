@@ -1,11 +1,18 @@
 /** V2-authoritative knowledge application gate integration tests. */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import * as path from 'node:path';
 import {
 	buildAckDedupKey,
 	DEFAULT_KNOWLEDGE_APPLICATION_CONFIG,
+	parseAcknowledgments,
 	resolveApplicationLogPath,
 } from '../../../src/hooks/knowledge-application.js';
 import {
@@ -18,6 +25,7 @@ import {
 	queryLiveMemberships,
 	validateAndCommitTerminalBatch,
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
+import { resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store.js';
 import type { MessageWithParts } from '../../../src/hooks/knowledge-types.js';
 import { swarmState } from '../../../src/state.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
@@ -106,7 +114,126 @@ describe('knowledgeApplicationGateBefore V2 authority', () => {
 				{ tool: 'save_plan', agent: 'architect', sessionID: 'session-a' },
 				enforce,
 			),
-		).rejects.toThrow(new RegExp(`trace-pending/${ENTRY}`));
+		).rejects.toThrow(new RegExp(`trace-pending:${ENTRY}`));
+	});
+
+	it('denial message lists every accepted marker form including KNOWLEDGE_N_A (#2032 PRR-015)', async () => {
+		await display('trace-deny-text');
+		const denial = await knowledgeApplicationGateBefore(
+			directory,
+			{ tool: 'save_plan', agent: 'architect', sessionID: 'session-a' },
+			enforce,
+		).catch((err: unknown): string =>
+			err instanceof Error ? err.message : String(err),
+		);
+		expect(denial).toContain('KNOWLEDGE_ENFORCE_GATE_DENY');
+		// O-5's visible surface: the architect under denial is told the neutral
+		// N_A form exists (with its reason requirement) alongside the others.
+		expect(denial).toContain('KNOWLEDGE_APPLIED:<trace_id>:<entry_id>');
+		expect(denial).toContain('KNOWLEDGE_N_A:<trace_id>:<entry_id>');
+		expect(denial).toContain('(does not apply; neutral)');
+		expect(denial).toContain('KNOWLEDGE_IGNORED:<trace_id>:<entry_id>');
+		expect(denial).toContain('KNOWLEDGE_VIOLATED:<trace_id>:<entry_id>');
+	});
+
+	it('renders canonical colon pairs, an instantiated example, and directive content echo (#2299)', async () => {
+		const lesson = 'Always confirm exact-pair ack tokens before delegating.';
+		const swarmPath = resolveSwarmKnowledgePath(directory);
+		mkdirSync(path.dirname(swarmPath), { recursive: true });
+		writeFileSync(
+			swarmPath,
+			`${JSON.stringify({ id: ENTRY, tier: 'swarm', lesson })}\n`,
+		);
+		await display('trace-discover');
+		const denial = await knowledgeApplicationGateBefore(
+			directory,
+			{ tool: 'save_plan', agent: 'architect', sessionID: 'session-a' },
+			enforce,
+		).catch((err: unknown): string =>
+			err instanceof Error ? err.message : String(err),
+		);
+		expect(denial).toContain(`trace-discover:${ENTRY}`);
+		expect(denial).toContain(
+			`KNOWLEDGE_N_A:trace-discover:${ENTRY} reason=<reason>`,
+		);
+		expect(denial).toContain(lesson);
+	});
+
+	it('keeps the copy-paste example reason free of the neutral hint (#2299)', async () => {
+		await display('trace-hint');
+		const denial = await knowledgeApplicationGateBefore(
+			directory,
+			{ tool: 'save_plan', agent: 'architect', sessionID: 'session-a' },
+			enforce,
+		).catch((err: unknown): string =>
+			err instanceof Error ? err.message : String(err),
+		);
+		const example = denial
+			.split('\n')
+			.map((line) => line.trim())
+			.find(
+				(line) =>
+					line.includes(`KNOWLEDGE_N_A:trace-hint:${ENTRY}`) &&
+					line.includes('reason='),
+			);
+		expect(example).toBeDefined();
+		const [ack] = parseAcknowledgments(example!);
+		expect(ack.trace_id).toBe('trace-hint');
+		expect(ack.id).toBe(ENTRY);
+		expect(ack.result).toBe('n_a');
+		expect(ack.reason).not.toContain('neutral');
+		expect(ack.reason).not.toContain('(does not apply');
+	});
+
+	it('lets a consumer who copies the example line verbatim (plus a reason) satisfy the gate on first retry (#2299)', async () => {
+		await display('trace-retry');
+		const denial = await knowledgeApplicationGateBefore(
+			directory,
+			{ tool: 'save_plan', agent: 'architect', sessionID: 'session-a' },
+			enforce,
+		).catch((err: unknown): string =>
+			err instanceof Error ? err.message : String(err),
+		);
+		// No knowledge.jsonl is present: the content-echo falls back to a
+		// retrievable guidance note rather than a bare token.
+		expect(denial).toContain('content not found in knowledge store');
+		const example = denial
+			.split('\n')
+			.map((line) => line.trim())
+			.find(
+				(line) =>
+					line.includes(`KNOWLEDGE_N_A:trace-retry:${ENTRY}`) &&
+					line.includes('reason='),
+			);
+		expect(example).toBeDefined();
+		const ackLine = example!.replace(
+			'<reason>',
+			'not applicable to the current step',
+		);
+
+		await knowledgeApplicationTransformScan(
+			directory,
+			{ messages: [architectMessage(ackLine)] },
+			'session-a',
+		);
+
+		const state = await queryLiveMemberships(directory, {
+			session_id: 'session-a',
+			include_terminal: true,
+		});
+		if (!state.ok) throw new Error(state.detail);
+		const membership = state.memberships.find(
+			(item) => item.trace_id === 'trace-retry',
+		);
+		expect(membership?.application_marker?.outcome).toBe('n_a');
+
+		// The exact-pair ack satisfies the gate: a subsequent deny-path call
+		// no longer throws.
+		await knowledgeApplicationGateBefore(
+			directory,
+			{ tool: 'save_plan', agent: 'architect', sessionID: 'session-a' },
+			enforce,
+		);
 	});
 
 	it('does not let one trace terminal hide the same entry on another trace', async () => {
@@ -120,7 +247,7 @@ describe('knowledgeApplicationGateBefore V2 authority', () => {
 				{ tool: 'Task', agent: 'paid_architect', sessionID: 'session-a' },
 				enforce,
 			),
-		).rejects.toThrow(new RegExp(`trace-open/${ENTRY}`));
+		).rejects.toThrow(new RegExp(`trace-open:${ENTRY}`));
 	});
 
 	it('does not let a knowledge_receipt terminal satisfy the architect marker gate', async () => {

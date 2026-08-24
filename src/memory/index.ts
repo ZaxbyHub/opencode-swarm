@@ -1,6 +1,10 @@
 export type { MemoryConfig } from './config';
 export { DEFAULT_MEMORY_CONFIG, resolveMemoryConfig } from './config';
-export { MemoryDisabledError, MemoryValidationError } from './errors';
+export {
+	MemoryDisabledError,
+	MemoryPiiDetectorError,
+	MemoryValidationError,
+} from './errors';
 export {
 	evaluateMemoryRecallFixtures,
 	loadRecallEvaluationFixtures,
@@ -15,6 +19,7 @@ export type {
 	MemoryGatewayOptions,
 	ProposeMemoryInput,
 	RecallMemoryInput,
+	RecordMemoryOutcomeInput,
 } from './gateway';
 export {
 	createConfiguredMemoryProvider,
@@ -30,12 +35,14 @@ export {
 export {
 	backupLegacyJsonl,
 	getLegacyJsonlFileStatus,
+	getLegacyOutcomeJsonlSignature,
 	type JsonlBackupResult,
 	type JsonlImportPayload,
 	type JsonlInvalidRow,
 	type JsonlMigrationReport,
 	LEGACY_JSONL_MIGRATION_NAME,
 	LEGACY_JSONL_MIGRATION_VERSION,
+	LEGACY_JSONL_OUTCOME_META_KEY,
 	readLegacyJsonl,
 	readMigrationReport,
 	resolveMemoryStorageDir,
@@ -64,6 +71,16 @@ export {
 	resolveMemoryStoreDir,
 	writeMemoryLinkPointer,
 } from './memory-link';
+export type { MemoryOutcomeEvent } from './outcome-events';
+export {
+	computePiiScore,
+	createPiiDetector,
+	type PiiDetector,
+	type PiiFinding,
+	type PiiType,
+	RegexPiiDetector,
+	summarizePiiFindings,
+} from './pii';
 export { buildRecallPromptBlock } from './prompt-block';
 export type {
 	MemoryCompactOptions,
@@ -87,6 +104,12 @@ export {
 	redactSecrets,
 } from './redaction';
 export {
+	readDeadAnchorMemoryIds,
+	readReflectionDigest,
+	recordOutcomeWithReflection,
+	regenerateMemoryReflection,
+} from './reflection-service';
+export {
 	MEMORY_RECALL_PROFILES,
 	type MemoryRecallProfile,
 	normalizeMemoryAgentRole,
@@ -99,12 +122,22 @@ export {
 	createMemoryId,
 	createProposalId,
 	isExpired,
+	MemoryAnchorSchema,
+	normalizeMemoryAnchorFile,
 	normalizeMemoryText,
 	validateCuratorMemoryDecision,
 	validateMemoryProposal,
 	validateMemoryRecordRules,
 } from './schema';
-export { SQLiteMemoryProvider } from './sqlite-provider';
+export {
+	EVENT_CHAIN_GENESIS,
+	MEMORY_EVENTS_CHAIN_HEAD_KEY,
+	type MemoryAuditVerificationReport,
+	type MemoryEventRow,
+	memoryEventRowHash,
+	SQLiteMemoryProvider,
+	verifyMemoryEventChainRows,
+} from './sqlite-provider';
 export {
 	isCohortRoot,
 	isLocalRoot,
@@ -116,9 +149,11 @@ export {
 export type {
 	AppliedMemoryChange,
 	CuratorMemoryDecision,
+	MemoryAnchor,
 	MemoryContext,
 	MemoryKind,
 	MemoryListFilter,
+	MemoryOutcome,
 	MemoryPatch,
 	MemoryProposal,
 	MemoryRecord,

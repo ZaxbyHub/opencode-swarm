@@ -1,22 +1,16 @@
 /**
- * FR-002 (issue #660 / F-08): the last-resort "direct write" emergency fallback
- * in phase_complete must (a) append a traceability event to .swarm/events.jsonl
- * after a successful write, and (b) refuse to persist a schema-invalid candidate.
- *
- * This is NOT a new plan.json writer — it is the EXISTING emergency fallback
- * (src/tools/phase-complete.ts "Last resort: direct write") made validated +
- * traceable. The durable PlanSchema is unchanged; the real PlanSchema is used
- * here (NOT mocked) so the validation gate is meaningful.
+ * Issue #2101 supersedes FR-002's emergency direct writer: phase_complete must
+ * fail closed when neither loadPlan nor authoritative ledger replay can supply
+ * a plan. An on-disk plan.json projection, whether schema-valid or corrupt,
+ * must not be mutated and no legacy fallback-write event may be emitted.
  *
  * phase-complete.ts exposes NO `_internals` seam, so — mirroring the sanctioned
  * sibling scaffold in phase-complete-lock-before-saveplan.regression.test.ts —
  * this drives the full executePhaseComplete via vi.mock against the public
  * surface (the same pattern that regression guard explicitly permits).
  *
- * Path driven: loadPlan -> null AND ledgerExists -> false forces the
- * `if (plan === null)` branch straight to the last-resort direct write, which
- * reads the on-disk plan.json (real fs), mutates the phase status, validates,
- * and (only if valid) writes + records the trace event.
+ * Path driven: loadPlan -> null AND ledgerExists -> false reaches the typed
+ * PHASE_PLAN_UNREADABLE refusal after the guarded commit lock is acquired.
  */
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
@@ -232,7 +226,7 @@ function readFallbackEvents(tempDir: string) {
 		.filter((e) => e.event === 'phase_complete_fallback_write');
 }
 
-describe('phase_complete — FR-002: last-resort fallback write is traceable + validated', () => {
+describe('phase_complete — issue #2101: deprecated direct fallback stays disabled', () => {
 	let tempDir: string;
 	let originalCwd: string;
 
@@ -271,7 +265,7 @@ describe('phase_complete — FR-002: last-resort fallback write is traceable + v
 		}
 	});
 
-	test('valid candidate: writes plan.json AND appends a phase_complete_fallback_write trace event', async () => {
+	test('valid on-disk candidate is not used as a direct-write fallback when authoritative loading fails', async () => {
 		const planPath = path.join(tempDir, '.swarm', 'plan.json');
 		// Schema-valid on-disk plan (real PlanSchema must accept it).
 		fs.writeFileSync(
@@ -290,20 +284,19 @@ describe('phase_complete — FR-002: last-resort fallback write is traceable + v
 			tempDir,
 		);
 		const parsed = JSON.parse(result);
-		expect(parsed.success).toBe(true);
+		expect(parsed.success).toBe(false);
+		expect(parsed.status).toBe('incomplete');
+		expect(parsed.reason).toBe('PHASE_PLAN_UNREADABLE');
 
-		// (a) plan.json on disk was mutated to complete by the fallback writer.
+		// The on-disk projection is not authoritative and remains unchanged.
 		const persisted = JSON.parse(fs.readFileSync(planPath, 'utf-8'));
-		expect(persisted.phases[0].status).toBe('complete');
+		expect(persisted.phases[0].status).toBe('in_progress');
 
-		// (b) exactly one traceability event for the fallback write, for phase 1.
-		const fallbackEvents = readFallbackEvents(tempDir);
-		expect(fallbackEvents.length).toBe(1);
-		expect(fallbackEvents[0].phase).toBe(1);
-		expect(typeof fallbackEvents[0].timestamp).toBe('string');
+		// No deprecated fallback event is emitted because no write occurred.
+		expect(readFallbackEvents(tempDir)).toEqual([]);
 	});
 
-	test('schema-invalid candidate: NOT persisted, no trace event, surfaces a validation warning', async () => {
+	test('schema-invalid candidate is not persisted and returns the same typed authoritative-plan failure', async () => {
 		const planPath = path.join(tempDir, '.swarm', 'plan.json');
 		// JSON-valid but schema-INVALID: missing schema_version/title/swarm and the
 		// phase is missing the required `name`. phaseObj (id===1) is still found and
@@ -321,6 +314,9 @@ describe('phase_complete — FR-002: last-resort fallback write is traceable + v
 			tempDir,
 		);
 		const parsed = JSON.parse(result);
+		expect(parsed.success).toBe(false);
+		expect(parsed.status).toBe('incomplete');
+		expect(parsed.reason).toBe('PHASE_PLAN_UNREADABLE');
 
 		// Corrupt candidate must NOT be persisted — on-disk plan is unchanged.
 		const persisted = JSON.parse(fs.readFileSync(planPath, 'utf-8'));
@@ -329,11 +325,8 @@ describe('phase_complete — FR-002: last-resort fallback write is traceable + v
 		// No traceability event written for a refused write.
 		expect(readFallbackEvents(tempDir).length).toBe(0);
 
-		// The refusal is surfaced as an actionable warning, not silently swallowed.
-		expect(
-			parsed.warnings.some((w: string) =>
-				w.includes('failed schema validation'),
-			),
-		).toBe(true);
+		expect(parsed.message).toContain(
+			'Plan exists but could not be read or rebuilt from the ledger',
+		);
 	});
 });

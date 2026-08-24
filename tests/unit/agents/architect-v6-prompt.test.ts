@@ -238,7 +238,7 @@ describe('Architect Agent - Agent Delegation Patterns', () => {
 		const idx = p.indexOf('Read-only advisory-lane exception');
 		const section = p.slice(idx, idx + 2500);
 		expect(section).toContain('dispatch_lanes_async');
-		expect(section).toContain('all lane specs in one call');
+		expect(section).toContain('complete lane specs');
 		expect(section).toContain(
 			'IMMEDIATELY continue non-dependent architect work',
 		);
@@ -262,9 +262,7 @@ describe('Architect Agent - Agent Delegation Patterns', () => {
 		const section = p.slice(idx, next);
 
 		expect(section).toContain('RUN ALL BASE LANES');
-		expect(section).toContain(
-			'exactly six repository-agnostic base check-type lanes',
-		);
+		expect(section).toContain('all six repository-agnostic base dimensions');
 		expect(section).toContain(
 			'there is no speed, efficiency, or time exception',
 		);

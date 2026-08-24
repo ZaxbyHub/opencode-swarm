@@ -12,10 +12,13 @@ import type { GateContext, GateResult } from './types';
 export async function runMutationGate(ctx: GateContext): Promise<GateResult> {
 	const { phase, dir, sessionID, agentsDispatched, safeWarn } = ctx;
 
+	let mutationGateEnabled = false;
+
 	try {
 		const preamble = await resolveGatePreamble(dir, sessionID);
 
 		if (preamble.resolved && preamble.effectiveGates?.mutation_test === true) {
+			mutationGateEnabled = true;
 			if (preamble.identityBound === false) {
 				return {
 					blocked: true,
@@ -100,8 +103,20 @@ export async function runMutationGate(ctx: GateContext): Promise<GateResult> {
 			}
 		}
 	} catch (mgError) {
-		// Non-blocking — treat as warning and continue
-		safeWarn(`[phase_complete] Mutation gate error (non-blocking):`, mgError);
+		if (mutationGateEnabled) {
+			// Fail-closed: mutation gate errors block phase completion (issue #2099 recurrence)
+			return {
+				blocked: true,
+				reason: 'MUTATION_GATE_ERROR',
+				message: `Phase ${phase} cannot be completed: mutation gate encountered an error when mutation_test was enabled. Error: ${String(mgError)}`,
+				agentsDispatched,
+				agentsMissing: [],
+				warnings: [`MUTATION_GATE_ERROR: ${String(mgError)}`],
+			};
+		} else {
+			// Non-blocking when mutation_test is off
+			safeWarn(`[phase_complete] Mutation gate error (non-blocking):`, mgError);
+		}
 	}
 
 	return { blocked: false, agentsDispatched, agentsMissing: [], warnings: [] };

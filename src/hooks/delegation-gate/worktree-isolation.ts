@@ -15,14 +15,16 @@ import * as path from 'node:path';
 import type { PluginConfig, WorktreeIsolationConfig } from '../../config';
 import { DEFAULT_WORKTREE_ISOLATION_CONFIG } from '../../config/constants';
 import { tryAcquireLock } from '../../parallel/file-locks';
-import { isValidEnvKey } from '../../sandbox/executor';
+import { isUntrustedEnvKey, isValidEnvKey } from '../../sandbox/executor';
 import {
 	ensureAgentSession,
+	markReviewerScopeGenerationMergebackPending,
 	recordSessionWorkspaceRoot,
 	swarmState,
 } from '../../state';
 import { pushAdvisory } from '../../utils/advisory-queue';
 import { bunSpawn } from '../../utils/bun-compat';
+import { resolveGitExecutable } from '../../utils/git-executable.js';
 import * as logger from '../../utils/logger.js';
 import type { WorktreeHandle } from '../../worktree';
 import {
@@ -40,6 +42,11 @@ import type {
 	DirtyMergeOptions,
 	MergeOperationProvenance,
 } from '../../worktree/merge';
+import {
+	SOURCE_WORKTREE_GONE_STAGE,
+	SOURCE_WORKTREE_UNCERTAIN_STAGE,
+} from '../../worktree/merge';
+import { verifyReviewerScopeGenerationMergeBack } from '../reviewer-scope-mergeback';
 import {
 	clearWorktreeMergeStatus,
 	recordWorktreeMergeFailure,
@@ -350,6 +357,10 @@ function serializeStandardWorktreeDispatches(
 		);
 		return;
 	}
+	standardWorktreeDegradationReasonBySession.set(sessionID, {
+		reason: message,
+		at: Date.now(),
+	});
 	const session = ensureAgentSession(sessionID);
 	session.maxConcurrencyOverride = 1;
 	pushAdvisory(
@@ -358,10 +369,28 @@ function serializeStandardWorktreeDispatches(
 	);
 }
 
+/**
+ * Issue #2271 bug 1: the latest reason a session's standard worktree
+ * isolation degraded to serialized project-root execution, so dispatch sites
+ * can record a durable event when a coder runs un-isolated. Cleared when the
+ * session regains parallel eligibility.
+ */
+const standardWorktreeDegradationReasonBySession = new Map<
+	string,
+	{ reason: string; at: number }
+>();
+
+export function getStandardWorktreeDegradationReason(
+	sessionID: string,
+): { reason: string; at: number } | undefined {
+	return standardWorktreeDegradationReasonBySession.get(sessionID);
+}
+
 export function resetStandardWorktreeIsolationState(): void {
 	standardWorktreeByCallID.clear();
 	standardWorktreeSerializationSessions.clear();
 	serializationStateBySessionID.clear();
+	standardWorktreeDegradationReasonBySession.clear();
 	awaitingMergeByCallID.clear();
 	standardWorktreeMergeQueue = Promise.resolve();
 	standardWorktreeLaneIndexBySession.clear();
@@ -375,6 +404,7 @@ function releaseStandardWorktreeSerialization(sessionID: string): boolean {
 	if (!standardWorktreeSerializationSessions.has(sessionID)) return false;
 	standardWorktreeSerializationSessions.delete(sessionID);
 	serializationStateBySessionID.delete(sessionID);
+	standardWorktreeDegradationReasonBySession.delete(sessionID);
 	const session = ensureAgentSession(sessionID);
 	session.maxConcurrencyOverride = undefined;
 	pushAdvisory(
@@ -426,6 +456,7 @@ function rememberStandardWorktreeSerializationSession(
 			if (!hasInFlightStandardWorktreeDispatch(key)) {
 				standardWorktreeSerializationSessions.delete(key);
 				serializationStateBySessionID.delete(key);
+				standardWorktreeDegradationReasonBySession.delete(key);
 				evicted = true;
 				break;
 			}
@@ -491,15 +522,53 @@ export async function preProvisionCollisionCheck(
 	worktreePath?: string;
 	uncertainty?: string;
 }> {
-	const proc = _internals.bunSpawn(
-		['git', '-C', directory, 'worktree', 'list', '--porcelain'],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: WORKTREE_LIST_TIMEOUT_MS,
-		},
-	);
+	// Issue #2236 (BL-1b): `_internals.resolveGitExecutable()` must not be able
+	// to escape this function. The real resolver no longer throws — BL-1 made it
+	// total, returning the unprobed bare name instead of a "git is missing"
+	// error — but `_internals.resolveGitExecutable` is a replaceable DI seam, and
+	// a typed contract must not rest on a reachability argument about today's
+	// implementation. Calling it OUTSIDE the guard let a throw
+	// escape this function entirely instead of becoming the typed result
+	// the signature promises — structurally the same leak fixed in `runGit`
+	// (`src/worktree/core.ts`), `src/worktree/merge.ts`, and
+	// `./worktree-ownership-tag.ts`. Resolution and spawn are contained
+	// together and mapped onto the SAME fail-closed result this function
+	// already returns when `git worktree list` itself fails:
+	// `{ collision: false, uncertainty }`.
+	//
+	// `uncertainty` is the load-bearing half. This is a destructive-cleanup
+	// gate: `precreateStandardWorktreeSession` hard-stops the dispatch on any
+	// `uncertainty`, so an enumeration that never ran can never be read as
+	// "no lane exists". This is deliberately a dedicated catch rather than a
+	// fall-through into the exit-code handling below — that path has a
+	// `not a git repository` branch returning a bare `{ collision: false }`
+	// with NO `uncertainty`, and a resolution failure must never reach it.
+	let proc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		proc = _internals.bunSpawn(
+			[
+				_internals.resolveGitExecutable(),
+				'-C',
+				directory,
+				'worktree',
+				'list',
+				'--porcelain',
+			],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: WORKTREE_LIST_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		const detail = `git worktree list could not start in ${directory}: ${
+			error instanceof Error ? error.message : String(error)
+		}`;
+		// Destructive callers must not infer absence when enumeration never ran.
+		logger.log(`[swarm] preProvisionCollisionCheck: ${detail}`);
+		return { collision: false, uncertainty: detail };
+	}
 	let stdout = '';
 	let stderr = '';
 	try {
@@ -538,16 +607,37 @@ export async function preProvisionCollisionCheck(
 	interface ParsedEntry {
 		path: string;
 		branch: string | undefined;
+		/**
+		 * #2208: git marks a registration `prunable` when the worktree's
+		 * directory is gone (crash/kill mid-task, interrupted remove). A
+		 * prunable registration is stale metadata, not an active lane —
+		 * excluding it below lets a restart recover the task instead of
+		 * stalling on STANDARD_WORKTREE_OWNER_PROTECTED for the full
+		 * provisioning-lease window. `git worktree add` is atomic
+		 * (registration exists iff the worktree exists), so a provisioning
+		 * lane that is mid-creation can never appear as prunable.
+		 */
+		prunable: boolean;
 	}
 	const entries: ParsedEntry[] = [];
-	let current: ParsedEntry = { path: '', branch: undefined };
+	let current: ParsedEntry = {
+		path: '',
+		branch: undefined,
+		prunable: false,
+	};
 	for (const rawLine of stdout.split('\n')) {
 		const line = rawLine.trim();
 		if (line.startsWith('worktree ')) {
 			if (current.path) entries.push(current);
-			current = { path: line.slice('worktree '.length), branch: undefined };
+			current = {
+				path: line.slice('worktree '.length),
+				branch: undefined,
+				prunable: false,
+			};
 		} else if (line.startsWith('branch ')) {
 			current.branch = line.slice('branch '.length);
+		} else if (line === 'prunable' || line.startsWith('prunable ')) {
+			current.prunable = true;
 		}
 	}
 	if (current.path) entries.push(current);
@@ -555,9 +645,12 @@ export async function preProvisionCollisionCheck(
 	// SC-004: Scan ALL worktrees to find ANY lane for this taskId
 	// (regardless of which session owns it). A lane is identified by a branch
 	// whose last path segment equals taskId and whose prefix matches the
-	// swarm lane naming convention.
+	// swarm lane naming convention. #2208: prunable (stale) registrations are
+	// skipped — the recovery path in provisionWorktree prunes the stale
+	// registration and reconciles the leftover branch.
 	for (const entry of entries) {
 		if (!entry.branch) continue;
+		if (entry.prunable) continue;
 		// Strip "refs/heads/" prefix
 		const branchName = entry.branch.startsWith('refs/heads/')
 			? entry.branch.slice('refs/heads/'.length)
@@ -980,12 +1073,22 @@ export async function precreateStandardWorktreeSession(args: {
 		query: { directory: provisionResult.worktreePath },
 	});
 	if (!createResult.data?.id) {
+		// Issue #2271 bug 1: an abandoned lane here feeds future collision
+		// churn — surface the failed cleanup instead of swallowing it silently.
 		await _internals
 			.removeWorktree(provisionResult.worktreePath, args.directory, {
 				force: true,
 				worktreeDir: worktreeConfig.worktree_dir,
 			})
-			.catch(() => {});
+			.catch((cleanupError: unknown) => {
+				logger.log(
+					`[worktree-isolation] session-create failure cleanup could not remove lane ${provisionResult.worktreePath}: ${
+						cleanupError instanceof Error
+							? cleanupError.message
+							: String(cleanupError)
+					}`,
+				);
+			});
 		_internals.removeWorktreeProvisioningOwner(args.directory, args.callID);
 		const createError = (createResult as { error?: unknown }).error;
 		const detail =
@@ -1069,15 +1172,38 @@ export async function preserveBackgroundWorktreeOwnershipForCallId(
 	const dispatch = standardWorktreeByCallID.get(callID);
 	if (!dispatch) return { outcome: 'not-found' };
 
-	const refProc = _internals.bunSpawn(
-		['git', '-C', dispatch.handle.worktreePath, 'rev-parse', 'HEAD'],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	// Issue #2236 (BL-1b): `_internals.resolveGitExecutable()` is called INSIDE
+	// the guard, mirroring `runGit` in `src/worktree/core.ts`. Outside it, a
+	// `GitBinaryMissingError` escaped this function instead of becoming the
+	// typed `outcome` the signature promises. Preserving the worktree is the
+	// protective action, so a resolution failure maps onto the SAME
+	// `'preserve-failed'` contract a non-zero git exit already produces —
+	// never onto a success path.
+	let refProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		refProc = _internals.bunSpawn(
+			[
+				_internals.resolveGitExecutable(),
+				'-C',
+				dispatch.handle.worktreePath,
+				'rev-parse',
+				'HEAD',
+			],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			error: `git rev-parse could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	let ref = '';
 	try {
 		const exitCode = await refProc.exited;
@@ -1112,15 +1238,36 @@ export async function preserveBackgroundWorktreeOwnershipForCallId(
 		.digest('hex')
 		.slice(0, 12);
 	const tag = `swarm-preserved-owner/${session}/${lane}/${callDigest}`;
-	const tagProc = _internals.bunSpawn(
-		['git', '-C', dispatch.handle.worktreePath, 'tag', tag, ref],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	// Issue #2236 (BL-1b): same containment as the `rev-parse` spawn above. A
+	// warm resolver cache does NOT make this site safe — negative cache entries
+	// expire on a TTL, so resolution can begin failing between two spawns in
+	// one call.
+	let tagProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		tagProc = _internals.bunSpawn(
+			[
+				_internals.resolveGitExecutable(),
+				'-C',
+				dispatch.handle.worktreePath,
+				'tag',
+				tag,
+				ref,
+			],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			error: `git tag could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	try {
 		const exitCode = await tagProc.exited;
 		if (exitCode !== 0) {
@@ -1181,15 +1328,41 @@ export async function preserveDirtyWorktreeForCallId(
 	}
 
 	// Detect dirty state: git status --porcelain
-	const statusProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'status', '--porcelain'],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	// Issue #2236 (BL-1b): `_internals.resolveGitExecutable()` is called INSIDE
+	// the guard, mirroring `runGit` in `src/worktree/core.ts`. Outside it, a
+	// `GitBinaryMissingError` escaped this function instead of becoming the
+	// typed `outcome` the signature promises. Preserving a worktree is the
+	// protective action, so every resolution failure below maps onto the SAME
+	// `'preserve-failed'` contract a non-zero git exit already produces — never
+	// onto `clean` or `preserved`. Every spawn in this function is guarded, not
+	// only the first: negative resolver cache entries expire on a TTL, so
+	// resolution can begin failing between two spawns in one call.
+	let statusProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		statusProc = _internals.bunSpawn(
+			[
+				_internals.resolveGitExecutable(),
+				'-C',
+				worktreePath,
+				'status',
+				'--porcelain',
+			],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: `git status could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	let statusStdout = '';
 	let statusStderr = '';
 	try {
@@ -1220,15 +1393,26 @@ export async function preserveDirtyWorktreeForCallId(
 	}
 
 	// Dirty — stage all changes
-	const addProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'add', '-A'],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	let addProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		addProc = _internals.bunSpawn(
+			[_internals.resolveGitExecutable(), '-C', worktreePath, 'add', '-A'],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: `git add could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	try {
 		const addExit = await addProc.exited;
 		if (addExit !== 0) {
@@ -1255,15 +1439,33 @@ export async function preserveDirtyWorktreeForCallId(
 	const sanitizedCallID = callID.replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 64);
 	const commitMessage = `swarm-preserved: ${reason} for callID ${sanitizedCallID} at ${isoDate}`;
 
-	const commitProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'commit', '-m', commitMessage],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	let commitProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		commitProc = _internals.bunSpawn(
+			[
+				_internals.resolveGitExecutable(),
+				'-C',
+				worktreePath,
+				'commit',
+				'-m',
+				commitMessage,
+			],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: `git commit could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	let commitHash = '';
 	try {
 		const commitExit = await commitProc.exited;
@@ -1287,15 +1489,32 @@ export async function preserveDirtyWorktreeForCallId(
 	}
 
 	// Get commit hash: git rev-parse HEAD
-	const hashProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'rev-parse', 'HEAD'],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	let hashProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		hashProc = _internals.bunSpawn(
+			[
+				_internals.resolveGitExecutable(),
+				'-C',
+				worktreePath,
+				'rev-parse',
+				'HEAD',
+			],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: `git rev-parse could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	try {
 		const hashExit = await hashProc.exited;
 		if (hashExit !== 0) {
@@ -1330,15 +1549,26 @@ export async function preserveDirtyWorktreeForCallId(
 	const shortHash = commitHash.slice(0, 8);
 	const tagName = `swarm-preserved-${sanitizedCallID}-${shortHash}`;
 
-	const tagProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'tag', tagName],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	let tagProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		tagProc = _internals.bunSpawn(
+			[_internals.resolveGitExecutable(), '-C', worktreePath, 'tag', tagName],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: `git tag could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	try {
 		const tagExit = await tagProc.exited;
 		if (tagExit !== 0) {
@@ -1398,15 +1628,41 @@ export async function preserveDirtyWorktreeAtPath(
 	error?: string;
 }> {
 	// Detect dirty state: git status --porcelain
-	const statusProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'status', '--porcelain'],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	// Issue #2236 (BL-1b): `_internals.resolveGitExecutable()` is called INSIDE
+	// the guard, mirroring `runGit` in `src/worktree/core.ts`. Outside it, a
+	// `GitBinaryMissingError` escaped this function instead of becoming the
+	// typed `outcome` the signature promises. Preserving a worktree is the
+	// protective action, so every resolution failure below maps onto the SAME
+	// `'preserve-failed'` contract a non-zero git exit already produces — never
+	// onto `clean` or `preserved`. Every spawn in this function is guarded, not
+	// only the first: negative resolver cache entries expire on a TTL, so
+	// resolution can begin failing between two spawns in one call.
+	let statusProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		statusProc = _internals.bunSpawn(
+			[
+				_internals.resolveGitExecutable(),
+				'-C',
+				worktreePath,
+				'status',
+				'--porcelain',
+			],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: `git status could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	let statusStdout = '';
 	let statusStderr = '';
 	try {
@@ -1437,15 +1693,26 @@ export async function preserveDirtyWorktreeAtPath(
 	}
 
 	// Dirty — stage all changes
-	const addProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'add', '-A'],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	let addProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		addProc = _internals.bunSpawn(
+			[_internals.resolveGitExecutable(), '-C', worktreePath, 'add', '-A'],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: `git add could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	try {
 		const addExit = await addProc.exited;
 		if (addExit !== 0) {
@@ -1477,15 +1744,33 @@ export async function preserveDirtyWorktreeAtPath(
 		.slice(0, 64);
 	const commitMessage = `swarm-preserved: ${reason} for worktree ${sanitizedPath} at ${isoDate}`;
 
-	const commitProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'commit', '-m', commitMessage],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	let commitProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		commitProc = _internals.bunSpawn(
+			[
+				_internals.resolveGitExecutable(),
+				'-C',
+				worktreePath,
+				'commit',
+				'-m',
+				commitMessage,
+			],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: `git commit could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	let commitHash = '';
 	try {
 		const commitExit = await commitProc.exited;
@@ -1509,15 +1794,32 @@ export async function preserveDirtyWorktreeAtPath(
 	}
 
 	// Get commit hash: git rev-parse HEAD
-	const hashProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'rev-parse', 'HEAD'],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	let hashProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		hashProc = _internals.bunSpawn(
+			[
+				_internals.resolveGitExecutable(),
+				'-C',
+				worktreePath,
+				'rev-parse',
+				'HEAD',
+			],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: `git rev-parse could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	try {
 		const hashExit = await hashProc.exited;
 		if (hashExit !== 0) {
@@ -1552,15 +1854,26 @@ export async function preserveDirtyWorktreeAtPath(
 	const shortHash = commitHash.slice(0, 8);
 	const tagName = `swarm-preserved-worktree-${sanitizedBranch}-${shortHash}`;
 
-	const tagProc = _internals.bunSpawn(
-		['git', '-C', worktreePath, 'tag', tagName],
-		{
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'pipe',
-			timeout: PRESERVE_COMMIT_TIMEOUT_MS,
-		},
-	);
+	let tagProc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		tagProc = _internals.bunSpawn(
+			[_internals.resolveGitExecutable(), '-C', worktreePath, 'tag', tagName],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: PRESERVE_COMMIT_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		return {
+			outcome: 'preserve-failed',
+			preserved: false,
+			error: `git tag could not start: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	try {
 		const tagExit = await tagProc.exited;
 		if (tagExit !== 0) {
@@ -1869,6 +2182,21 @@ export async function finishStandardWorktreeDispatch(
 				);
 			}
 
+			// Issue #2100: verify the primary checkout now matches the lane's
+			// reviewer manifest before lane teardown — this is what publishes the
+			// generation as reviewable from the primary root. Reads from the
+			// primary directory only; best-effort and never breaks settlement.
+			try {
+				verifyReviewerScopeGenerationMergeBack({
+					parentSessionID: dispatch.parentSessionID,
+					taskId: statusKey,
+					coderCallID: resolvedCallID,
+					primaryDirectory: directory,
+				});
+			} catch {
+				// Best-effort; a verification failure retains the generation.
+			}
+
 			// Cleanup unconditionally — runs on success, partial, AND failed.
 			await cleanupStandardWorktreeForCallId(
 				resolvedCallID,
@@ -1897,6 +2225,17 @@ export async function finishStandardWorktreeDispatch(
 			// F-C004: merge conflicts retain the lane worktree and branch for
 			// recovery. The conflict can leave uncommitted state that must not be
 			// force-removed under the successful-cleanup path.
+			// Issue #2100: the reviewer generation stays mergeback_pending — a
+			// conflict is a typed recoverable state, never reviewer-stale.
+			try {
+				markReviewerScopeGenerationMergebackPending({
+					parentSessionID: dispatch.parentSessionID,
+					taskId: statusKey,
+					coderCallID: resolvedCallID,
+				});
+			} catch {
+				// Best-effort; generation retention is advisory here.
+			}
 
 			return {
 				outcome: 'partial',
@@ -1919,14 +2258,35 @@ export async function finishStandardWorktreeDispatch(
 				completedAt: Date.now(),
 			});
 			const session = ensureAgentSession(dispatch.parentSessionID);
+			// #2236: for the two "source worktree is gone" stages there is nothing
+			// preserved at that path — the directory is exactly what disappeared.
+			// Saying "preserved at <gone path>" would send the reader looking for
+			// a worktree that does not exist, which is the same class of
+			// misleading message this change removes.
+			const location =
+				mergeResult.stage === SOURCE_WORKTREE_GONE_STAGE ||
+				mergeResult.stage === SOURCE_WORKTREE_UNCERTAIN_STAGE
+					? `lane worktree ${dispatch.handle.worktreePath} no longer exists`
+					: `preserved at ${dispatch.handle.worktreePath}`;
 			pushAdvisory(
 				session,
-				`STANDARD_WORKTREE_MERGE_FAILED: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; stage: ${mergeResult.stage}; ${mergeResult.message}.`,
+				`STANDARD_WORKTREE_MERGE_FAILED: task ${dispatch.taskId} ${location}; stage: ${mergeResult.stage}; ${mergeResult.message}.`,
 			);
 
 			// F-C004: retain failed merge lanes for recovery. In particular, a
 			// cleanup-stage failure can leave dirty or untracked work that has not
 			// been safely committed yet.
+			// Issue #2100: the reviewer generation stays mergeback_pending — a
+			// failed merge is a typed recoverable state, never reviewer-stale.
+			try {
+				markReviewerScopeGenerationMergebackPending({
+					parentSessionID: dispatch.parentSessionID,
+					taskId: statusKey,
+					coderCallID: resolvedCallID,
+				});
+			} catch {
+				// Best-effort; generation retention is advisory here.
+			}
 			return {
 				outcome: 'failed',
 				stage: mergeResult.stage,
@@ -1964,6 +2324,11 @@ export async function finishStandardWorktreeDispatch(
  * - Skips blank lines and lines starting with `#` (comments).
  * - Skips malformed lines (no `=` separator).
  * - Validates each key with `isValidEnvKey`; rejects and skips invalid keys.
+ * - Drops `GIT_*` / `LD_*` / `DYLD_*` keys via `isUntrustedEnvKey` (#2263):
+ *   the file is repo-resident, so its contents are attacker-controlled. The
+ *   `GIT_*` family is git's control plane (`GIT_SSH_COMMAND`,
+ *   `GIT_CONFIG_*`, …) and `LD_*`/`DYLD_*` are loader-hijack vectors — none
+ *   belong in a lane profile (PORT / TMPDIR / cache redirects).
  * - Returns an empty record when the file does not exist.
  *
  * Exposed via _internals for testability (no mock.module leakage).
@@ -2002,6 +2367,7 @@ export async function readLaneEnvFileFromDisk(
 		const k = line.slice(0, eqIdx);
 		const v = line.slice(eqIdx + 1);
 		if (!isValidEnvKey(k)) continue; // reject shell-injection vectors
+		if (isUntrustedEnvKey(k)) continue; // #2263: reject GIT_*/LD_*/DYLD_* control-plane keys
 		result[k] = v;
 	}
 	return result;
@@ -2054,4 +2420,10 @@ export const _internals = {
 	isLaneOwnedByCurrentSession,
 	/** FR-001b: bunSpawn — exposed for test injection so collision check can be mocked. */
 	bunSpawn,
+	/**
+	 * Issue #2236 hardening (F1/F4/F5) — resolves the absolute git executable
+	 * path instead of spawning the bare `'git'` name. Exposed for test
+	 * injection following the `src/worktree/core.ts` convention.
+	 */
+	resolveGitExecutable,
 };

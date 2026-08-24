@@ -141,7 +141,7 @@ jobs:
           # platform-path PRs to the ubuntu-only matrix). grep without -q
           # or -m reads its input to EOF before exiting, so git diff always
           # finishes writing normally and no SIGPIPE is possible.
-          if git diff --name-only "$BASE_SHA" "$HEAD_SHA" 2>/dev/null | grep -E '^(src/worktree/|src/turbo/|src/sandbox/|src/plan/|src/parallel/|src/knowledge/|src/tools/|scripts/|\.github/workflows/)' >/dev/null; then
+          if git diff --name-only "$BASE_SHA" "$HEAD_SHA" 2>/dev/null | grep -E '^(src/worktree/|src/turbo/|src/sandbox/|src/plan/|src/parallel/|src/knowledge/|src/memory/|src/tools/|scripts/|\.github/workflows/)' >/dev/null; then
             echo "touches-platform-paths=true" >> "$GITHUB_OUTPUT"
           else
             echo "touches-platform-paths=false" >> "$GITHUB_OUTPUT"
@@ -199,6 +199,9 @@ jobs:
       - name: Event contract check (issue #2029 AC6)
         if: needs.detect-release.outputs.is-release != 'true'
         run: bun run check:events
+      - name: Retention registry check (issue #2036 gate)
+        if: needs.detect-release.outputs.is-release != 'true'
+        run: bun run check:retention
       - name: Cross-contamination check (mock.module / vi.mock leaks)
         if: needs.detect-release.outputs.is-release != 'true'
         shell: bash
@@ -229,6 +232,15 @@ jobs:
       - name: CI gate portability ratchet (issue #2078)
         if: needs.detect-release.outputs.is-release != 'true'
         run: bun run check:gate-portability
+      # Issue #2236 (F8b) recurrence guardrail: a call to the spawn family
+      # (spawnSync/spawn/execFile/execFileSync/exec/bunSpawn/runExternalTool)
+      # must not spawn a bare 'git'/'gh'/'sandbox-exec'/'bwrap' literal —
+      # every such executable must be resolved to an absolute path first
+      # (src/utils/git-executable.ts is the sole allowlisted resolver
+      # module). Hard-fail, zero exemptions outside the resolver.
+      - name: Bare-executable-spawn ratchet (issue #2236)
+        if: needs.detect-release.outputs.is-release != 'true'
+        run: bun run check:bare-spawn
       # Line-scoped (not file-scoped): fails only on NEW/changed lines that add
       # a raw tmpdir() call not wrapped in realpathSync. Pre-existing raw calls
       # elsewhere in a touched file are not flagged (issue #1737 FR-011 scope
@@ -255,6 +267,39 @@ jobs:
         if: needs.detect-release.outputs.is-release != 'true'
         shell: bash
         run: cd scripts/swarm-model && node --test
+
+  # Issue #1466 (Phase 6, item 9): embedding-drift regression gate. Runs the
+  # golden memory-recall evaluation against the pinned baseline
+  # (tests/fixtures/memory-recall-baseline.json) and fails when precision@k
+  # drops more than 0.05. The script also runs the harness twice and fails on
+  # nondeterministic metrics, so a flaky fixture cannot silently pass. Runs on
+  # bun directly from source (no build needed). Making this a REQUIRED check
+  # is a branch-protection setting owned by the maintainers — the job itself
+  # is blocking within this workflow (pull_request + merge_group triggers).
+  memory-recall-regression:
+    needs: [detect-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        if: needs.detect-release.outputs.is-release != 'true'
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        if: needs.detect-release.outputs.is-release != 'true'
+        with:
+          bun-version: "1.3.13"
+      - name: Cache bun dependencies
+        if: needs.detect-release.outputs.is-release != 'true'
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('**/bun.lock') }}
+          restore-keys: ${{ runner.os }}-bun-
+      - name: Install dependencies
+        if: needs.detect-release.outputs.is-release != 'true'
+        run: bun install --frozen-lockfile
+      - name: Memory recall regression gate
+        if: needs.detect-release.outputs.is-release != 'true'
+        run: bun run check:memory-recall
 
   # Two-tier CI: on pull_request, run ubuntu-only with 4 shards for fast feedback
   # UNLESS the diff touches a platform-sensitive path (issue #1737 FR-013,
@@ -463,25 +508,21 @@ jobs:
   # doing work (same pattern as integration/smoke). Skipped for release-please
   # branches (version bumps don't change coverage).
   coverage:
-    needs: [detect-release, quality, unit]
+    needs: [detect-release, quality]
     runs-on: ubuntu-latest
-    # Standalone cost: ~2-3 min setup/build + ~26-31 min full-suite coverage
-    # (the measurement alone has been observed at 30.6 min, PR #1566) = ~29-34 min
-    # worst case. This job does NOT run the sharded suite, so it sheds the ~3.5 min
-    # that helped push the old in-`unit` cell to its 40m cap. The cap balances two
-    # ceilings: it must clear the ~34 min worst-observed run (60m leaves ~26 min
-    # for slow-runner / cache-miss variance) AND stay under the merge_queue
-    # ruleset's check_response_timeout_minutes: 60 end-to-end, since coverage runs
-    # after `quality` (~1 min) via `needs` — total ~35 min < 60. This
-    # makes a timeout very unlikely for a normal run by removing the structural
-    # double-run; it is not an absolute guarantee against a pathologically slow runner.
+    # Coverage is the merge-group long pole: clean runs for PR #2290 took about
+    # 45 minutes. It must start after `quality`, in parallel with the unit matrix,
+    # so the required result arrives within ruleset 17809658's 60-minute
+    # check_response_timeout_minutes. Serializing it behind `unit` produced
+    # 63-minute merge-group runs; GitHub evicted them 26-43 seconds before the
+    # successful coverage result arrived (CI-004).
     #
-    # `needs: [..., unit]` mirrors the integration/smoke jobs: when a unit shard
-    # fails on merge_group, coverage is skipped immediately instead of running
-    # for ~30-60 min uselessly (the failed unit check already blocks the queue,
-    # so the coverage result is redundant). On pull_request, coverage's steps
-    # are gated on `merge_group` and report success without doing work, so the
-    # unit `needs` (which runs on pull_request) does not change PR feedback.
+    # A failing unit shard no longer cancels this independent job early, which
+    # may spend extra runner time on an already-blocked merge group. Correctness
+    # is unchanged: both unit checks and coverage remain required, while the
+    # parallel graph keeps successful groups inside the queue deadline. On
+    # pull_request, coverage's steps remain gated on `merge_group` and report
+    # success without doing work.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1

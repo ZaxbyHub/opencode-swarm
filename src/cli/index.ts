@@ -2,17 +2,42 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import packageJson from '../../package.json' with { type: 'json' };
-import { resolveCommand, VALID_COMMANDS } from '../commands/registry.js';
 import {
+	COMMAND_REGISTRY,
+	resolveCommand,
+	VALID_COMMANDS,
+} from '../commands/registry.js';
+import {
+	discoverVersionPinnedCachePaths,
 	getPluginCachePaths,
 	getPluginConfigDir,
 	getPluginLockFilePaths,
+	readCachePackageVersion,
+	VERSION_PINNED_LEAF,
 } from '../config/cache-paths.js';
 import { DEFAULT_AGENT_CONFIGS } from '../config/constants.js';
 import { safeRealpathSync } from '../tools/repo-graph/safe-realpath.js';
 
 const { version } = packageJson;
+
+// Two levels up, NOT one. This module lives one directory deeper than the main
+// plugin entry: the CLI builds to `<root>/dist/cli/index.js` (`bun build
+// src/cli/index.ts --outdir dist/cli`) and runs from `<root>/src/cli/index.ts`
+// in dev, whereas `src/index.ts` builds to `<root>/dist/index.js`. Copying that
+// module's single `'..'` here would resolve to `<root>/dist` (or `<root>/src`),
+// which silently breaks every consumer: the bundled-skill sync would look for a
+// nonexistent `<root>/dist/.opencode/skills` and no-op, and `gate-audit` would
+// override its correct DEFAULT_PACKAGE_ROOT with a path that hard-throws ENOENT.
+// Matches resolvePackageRoot (src/commands/gate-audit.ts) and
+// resolvePackageRootFromModule (src/commands/memory.ts), which both special-case
+// a `cli`/`commands` leaf with two `'..'`.
+const PACKAGE_ROOT = path.resolve(
+	path.dirname(fileURLToPath(import.meta.url)),
+	'..',
+	'..',
+);
 
 const CONFIG_DIR = getPluginConfigDir();
 
@@ -33,7 +58,8 @@ const OPENCODE_PLUGIN_LOCK_FILE_PATHS = getPluginLockFilePaths();
 //      XDG_CACHE_HOME='/' which produces '/opencode/node_modules/opencode-swarm'
 //      (3 segments) while accepting XDG_CACHE_HOME='/var/cache' (5+ segments)
 //      AND tmpdir-based test paths on every CI platform.
-//   3. Require a recognized leaf name ('opencode-swarm' or 'opencode-swarm@latest').
+//   3. Require a recognized leaf name ('opencode-swarm', 'opencode-swarm@latest',
+//      or an anchored version-pinned shape 'opencode-swarm@<semver>' — issue #2236 RC3).
 //   4. Require the canonical OpenCode plugin structure as the parent chain:
 //      .../opencode/{packages|node_modules}/<leaf>. This prevents any pattern
 //      that happens to have a recognized leaf but isn't the actual cache.
@@ -74,9 +100,22 @@ export function isSafeCachePath(p: string): boolean {
 	if (segmentDepthBelowRoot(resolved) < 4) {
 		return false;
 	}
-	// 3. Must end in a known cache leaf.
+	// 3. Must end in a known cache leaf: the two static literals, or an
+	// anchored version-pinned shape `opencode-swarm@<semver>` (issue #2236
+	// RC3 — a version-pinned cache dir like `opencode-swarm@7.143.1` was
+	// previously refused even if it had been discovered). `resolved` here is
+	// already `path.resolve()`d and, at every delete call site, already
+	// `safeRealpathSync()`d, so `path.basename` structurally forecloses `..`
+	// and path separators before this pattern ever sees the string. This is
+	// deliberately NOT a `startsWith('opencode-swarm@')` prefix test — that
+	// would admit `opencode-swarm@../../..`. Every other containment check
+	// below (segment depth, parent, grandparent) is unchanged.
 	const leaf = path.basename(resolved);
-	if (leaf !== 'opencode-swarm@latest' && leaf !== 'opencode-swarm') {
+	if (
+		leaf !== 'opencode-swarm@latest' &&
+		leaf !== 'opencode-swarm' &&
+		!VERSION_PINNED_LEAF.test(leaf)
+	) {
 		return false;
 	}
 	// 4. Must match the canonical .../opencode/{packages|node_modules}/<leaf> shape.
@@ -424,11 +463,25 @@ async function install(): Promise<number> {
  */
 async function update(): Promise<number> {
 	console.log('🐝 Refreshing OpenCode Swarm plugin cache...\n');
-	const result = evictPluginCaches();
+	// Issue #2236 RC3 item 3: the running plugin version was never reported
+	// by `update`, making it impossible to tell which version issued the
+	// refresh (or, together with the "was vX.Y.Z" lines below, whether the
+	// refresh actually moved the user off a stale version).
+	console.log(`opencode-swarm ${version}`);
+	// Issue #2236 RC3 item 1: getPluginCachePaths() only ever returns the
+	// fixed opencode-swarm@latest / opencode-swarm literals, so a
+	// version-pinned OpenCode host cache (e.g. opencode-swarm@7.143.1, the
+	// reporter's actual stale directory) is invisible unless discovered here
+	// explicitly and merged in.
+	const discoveredCachePaths = discoverVersionPinnedCachePaths();
+	const result = evictPluginCaches(discoveredCachePaths);
 	const lockResult = evictLockFiles();
 	if (result.cleared.length > 0) {
 		for (const cleared of result.cleared) {
-			console.log(`✓ Cleared: ${cleared}`);
+			const beforeVersion = result.clearedVersions[cleared];
+			const versionSuffix =
+				beforeVersion != null ? ` (was v${beforeVersion})` : '';
+			console.log(`✓ Cleared: ${cleared}${versionSuffix}`);
 		}
 		console.log('\nRestart OpenCode to fetch the latest version from npm.');
 	}
@@ -452,7 +505,7 @@ async function update(): Promise<number> {
 			'No cached plugin found. Restart OpenCode to fetch the latest version from npm.',
 		);
 		console.log('Checked locations:');
-		for (const p of OPENCODE_PLUGIN_CACHE_PATHS) {
+		for (const p of [...OPENCODE_PLUGIN_CACHE_PATHS, ...discoveredCachePaths]) {
 			console.log(`  - ${p}`);
 		}
 		console.log('Lock files checked:');
@@ -475,11 +528,28 @@ async function update(): Promise<number> {
  * Recursively delete every known opencode plugin cache location for
  * opencode-swarm. Returns paths actually cleared and paths that errored.
  * Skips paths that don't exist or fail the safety guard.
+ *
+ * `additionalPaths` lets a caller merge in dynamically-discovered cache
+ * locations — e.g. `discoverVersionPinnedCachePaths()` for version-pinned
+ * `opencode-swarm@<semver>` dirs (issue #2236 RC3) — without changing the
+ * fixed, pure `OPENCODE_PLUGIN_CACHE_PATHS` list every caller shares.
+ * Defaults to `[]` so existing callers (`install()`) are unaffected.
  */
-export function evictPluginCaches(): { cleared: string[]; failed: string[] } {
+export function evictPluginCaches(additionalPaths: readonly string[] = []): {
+	cleared: string[];
+	failed: string[];
+	/** Version read from each cleared path's package.json BEFORE deletion,
+	 * keyed by the canonical path that appears in `cleared`. `null` when the
+	 * version could not be determined (missing/unreadable package.json). */
+	clearedVersions: Record<string, string | null>;
+} {
 	const cleared: string[] = [];
 	const failed: string[] = [];
-	for (const cachePath of OPENCODE_PLUGIN_CACHE_PATHS) {
+	const clearedVersions: Record<string, string | null> = {};
+	for (const cachePath of [
+		...OPENCODE_PLUGIN_CACHE_PATHS,
+		...additionalPaths,
+	]) {
 		if (!fs.existsSync(cachePath)) continue;
 		// M6: canonicalize first, then validate AND delete the SAME canonical
 		// string so there is no re-resolution gap on the final component
@@ -494,16 +564,32 @@ export function evictPluginCaches(): { cleared: string[]; failed: string[] } {
 			failed.push(`${canonical} (refused: failed safety check)`);
 			continue;
 		}
+		// Capture the installed version BEFORE deletion so callers (update())
+		// can report what was actually cleared (issue #2236 RC3 item 3).
+		const versionBeforeDelete = readCachePackageVersion(canonical);
 		try {
 			fs.rmSync(canonical, { recursive: true, force: true });
+			// rmSync with `force: true` does not throw when the delete fails to
+			// fully take (e.g. a file locked by another process on Windows, or a
+			// permission-denied leaf inside the tree) — it silently no-ops
+			// instead of throwing. Verify the postcondition rather than trusting
+			// "no thrown error" (issue #2236 RC3 item 2: deletion was reported,
+			// never verified).
+			if (fs.existsSync(canonical)) {
+				failed.push(
+					`${canonical} (rmSync returned without error, but the path still exists)`,
+				);
+				continue;
+			}
 			cleared.push(canonical);
+			clearedVersions[canonical] = versionBeforeDelete;
 		} catch (err) {
 			failed.push(
 				`${canonical} (${err instanceof Error ? err.message : String(err)})`,
 			);
 		}
 	}
-	return { cleared, failed };
+	return { cleared, failed, clearedVersions };
 }
 
 /**
@@ -535,6 +621,14 @@ export function evictLockFiles(): { cleared: string[]; failed: string[] } {
 		}
 		try {
 			fs.unlinkSync(canonical);
+			// Verify the postcondition rather than trusting "unlinkSync didn't
+			// throw" (issue #2236 RC3 item 2, same rationale as evictPluginCaches).
+			if (fs.existsSync(canonical)) {
+				failed.push(
+					`${canonical} (unlinkSync returned without error, but the path still exists)`,
+				);
+				continue;
+			}
 			cleared.push(canonical);
 		} catch (err: unknown) {
 			const code = (err as NodeJS.ErrnoException)?.code;
@@ -784,12 +878,44 @@ export async function run(args: string[]): Promise<number> {
 		return 1;
 	}
 
+	// Human-only / restricted commands are operator actions. The CLI is the
+	// sanctioned human-terminal path, but agent Bash sessions are NOT TTYs —
+	// refuse non-interactive invocation of mutating operator commands so a
+	// shell-guardrail bypass (e.g. variable indirection) still meets a second
+	// gate at the entry point (issue #2033 PR review, CC-2). Scripts that
+	// genuinely need this path opt in with SWARM_ALLOW_HUMAN_ONLY_CLI=1.
+	let policy = (resolved.entry as { toolPolicy?: string }).toolPolicy;
+	if (!policy) {
+		// Aliases carry no toolPolicy of their own — resolve the canonical
+		// target's policy exactly as tool-policy.ts does (review finding: the
+		// dash form `run memory-import` bypassed the gate otherwise).
+		const aliasOf = (resolved.entry as { aliasOf?: string }).aliasOf;
+		if (aliasOf) {
+			const target = COMMAND_REGISTRY[
+				aliasOf as keyof typeof COMMAND_REGISTRY
+			] as { toolPolicy?: string } | undefined;
+			policy = target?.toolPolicy;
+		}
+	}
+	if (
+		(policy === 'human-only' || policy === 'restricted') &&
+		!process.stdout.isTTY &&
+		process.env.SWARM_ALLOW_HUMAN_ONLY_CLI !== '1'
+	) {
+		console.error(
+			`Refusing to run human-only command '${resolved.key}' from a non-interactive shell. ` +
+				'Run it yourself in a terminal, or set SWARM_ALLOW_HUMAN_ONLY_CLI=1 if this is an explicitly approved automation.',
+		);
+		return 1;
+	}
+
 	const result = await resolved.entry.handler({
 		directory: cwd,
 		args: resolved.remainingArgs,
 		sessionID: '',
 		agents: {},
 		source: 'cli',
+		packageRoot: PACKAGE_ROOT,
 	});
 
 	console.log(result);

@@ -65,6 +65,7 @@ Use this template when dispatching a base explorer:
 ```text
 You are a base explorer. Optimize for recall, not final judgment.
 Return candidates only. Do not use CONFIRMED, DISPROVED, or PRE_EXISTING.
+Do not narrate progress or repeat the prompt. Keep the complete final response at or below 12,000 characters; spend that budget on evidence-bearing rows and the minimum prose needed to make them auditable. When the controller-appended contract declares a per-lane final_response_char_budget, that number is authoritative over this template default.
 
 Lane:
 Scope:
@@ -105,6 +106,7 @@ Use this template when dispatching a micro-lane or council explorer:
 ```text
 You are a micro-lane or council explorer. Optimize for recall, not final judgment.
 Return candidates only. Do not use CONFIRMED, DISPROVED, or PRE_EXISTING.
+Do not narrate progress or repeat the prompt. Keep the complete final response at or below 12,000 characters; spend that budget on evidence-bearing rows and the minimum prose needed to make them auditable. When the controller-appended contract declares a per-lane final_response_char_budget, that number is authoritative over this template default.
 
 Micro/council lane:
 Scope:

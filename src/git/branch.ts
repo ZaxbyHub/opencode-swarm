@@ -1,12 +1,20 @@
 import * as child_process from 'node:child_process';
 import * as fsSync from 'node:fs';
 import path from 'node:path';
-import { isValidEnvKey } from '../sandbox/executor';
+import { isUntrustedEnvKey, isValidEnvKey } from '../sandbox/executor';
 import { mergeEnvForChild } from '../utils/bun-compat';
 import {
 	GitBinaryMissingError,
+	GitSpawnCwdError,
 	isGitBinaryMissing,
+	isSpawnCwdMissing,
+	isSpawnCwdUnreadable,
 } from '../utils/git-binary-missing-error.js';
+import {
+	describeGitResolution,
+	GIT_BINARY_ENV_VAR,
+	resolveGitExecutable,
+} from '../utils/git-executable.js';
 import { warn } from '../utils/logger.js';
 import {
 	isTransientSpawnError,
@@ -17,6 +25,17 @@ import {
 const GIT_TIMEOUT_MS = 30_000;
 const GIT_MAX_BUFFER_BYTES = 5 * 1024 * 1024;
 
+/**
+ * Issue #2236 NB-1: cap on candidate lines rendered by
+ * {@link gitBinaryMissingMessage}. The resolver probes one candidate per PATH
+ * entry (times three filename extensions on Windows), so an uncapped list is
+ * unbounded in the host's PATH length — measured at 209 lines on a real host.
+ * `src/tools/update-task-status.ts` surfaces `error.message` verbatim, so that
+ * is a 210-line error at the exact tool #2236 blocked. Same "... and N more"
+ * bounding as `boundZodIssues` in `src/tools/dispatch-lanes.ts`.
+ */
+const MAX_RENDERED_GIT_CANDIDATES = 10;
+
 export type GitRepositoryStatus =
 	| { isRepo: true }
 	| {
@@ -24,27 +43,6 @@ export type GitRepositoryStatus =
 			reason: 'not_git_repo' | 'git_unavailable' | 'git_error';
 			message: string;
 	  };
-
-function unique(values: string[]): string[] {
-	return [...new Set(values.filter(Boolean))];
-}
-
-function windowsGitCandidates(): string[] {
-	if (process.platform !== 'win32') return ['git'];
-
-	const roots = unique([
-		process.env.ProgramFiles ?? '',
-		process.env['ProgramFiles(x86)'] ?? '',
-		process.env.LOCALAPPDATA
-			? path.join(process.env.LOCALAPPDATA, 'Programs')
-			: '',
-	]);
-	const installed = roots.flatMap((root) => [
-		path.join(root, 'Git', 'cmd', 'git.exe'),
-		path.join(root, 'Git', 'bin', 'git.exe'),
-	]);
-	return unique(['git', ...installed]);
-}
 
 function errorMessage(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
@@ -138,6 +136,15 @@ const __spawnSyncSeam = {
  * Synchronously read and parse a lane runtime profile from disk.
  * Mirrors the logic of `readLaneEnvFileFromDisk` but uses sync fs.
  * Returns an empty record when the file does not exist or cannot be read.
+ *
+ * UNTRUSTED INPUT (issue #2263): this file lives at
+ * `<worktree>/.swarm/lanes/<N>.env` — a path INSIDE the repository — so a
+ * hostile repository can simply commit it. Every key/value parsed here is
+ * attacker-controlled and must pass BOTH the `isValidEnvKey` shape check and
+ * the `isUntrustedEnvKey` denylist (drops the `GIT_*` control plane and the
+ * `LD_*`/`DYLD_*` loader-hijack families, which are code-execution
+ * primitives in a git child-process environment). The shape-only validation
+ * looks sufficient but is not — that gap is exactly what #2263 reported.
  */
 export function readLaneEnvFileFromDiskSync(
 	worktreePath: string,
@@ -166,9 +173,59 @@ export function readLaneEnvFileFromDiskSync(
 		const k = line.slice(0, eqIdx);
 		const v = line.slice(eqIdx + 1);
 		if (!isValidEnvKey(k)) continue; // reject shell-injection vectors
+		if (isUntrustedEnvKey(k)) continue; // #2263: reject GIT_*/LD_*/DYLD_* control-plane keys
 		result[k] = v;
 	}
 	return result;
+}
+
+/**
+ * Issue #2236 F5: builds the *actionable* "git is not available" message.
+ *
+ * `describeGitResolution()` (src/utils/git-executable.ts) is the production
+ * source of truth for what the resolver actually tried — every candidate path,
+ * its source (`override`/`platform`/`path`), and why each was rejected. A bare
+ * "git executable is not available on PATH" is what sent the original report
+ * down a four-day PATH investigation while git was present the whole time, so
+ * the thrown message names the candidates and the override escape hatch.
+ *
+ * `cwd` is named too: reaching this function means the cwd was positively
+ * classified as present-and-a-directory, which is the fact that rules the
+ * #2236 misdiagnosis out rather than leaving it implied.
+ */
+function gitBinaryMissingMessage(cwd: string): string {
+	const resolution = describeGitResolution();
+	const lines = [
+		`git executable is not available: spawning "${
+			resolution.resolvedPath ?? 'git'
+		}" failed, and the working directory ${cwd} exists and is a directory.`,
+	];
+	if (resolution.attempts.length > 0) {
+		lines.push('Candidates tried:');
+		// Bounded (NB-1). The override is always candidate #1
+		// (`buildCandidates` in src/utils/git-executable.ts), so a configured
+		// override's own rejection reason is never the thing that gets truncated.
+		const shown = resolution.attempts.slice(0, MAX_RENDERED_GIT_CANDIDATES);
+		for (const attempt of shown) {
+			lines.push(
+				`  - [${attempt.source}] ${attempt.candidate}: ${
+					attempt.accepted ? 'accepted' : (attempt.reason ?? 'rejected')
+				}`,
+			);
+		}
+		const omitted = resolution.attempts.length - shown.length;
+		if (omitted > 0) lines.push(`  ... and ${omitted} more`);
+	} else {
+		lines.push(
+			'No candidate probe results are recorded for this process (the resolver was pre-seeded or has not probed yet).',
+		);
+	}
+	lines.push(
+		resolution.overrideValue
+			? `The configured override (${resolution.overrideSource ?? 'unknown'}) "${resolution.overrideValue}" did not work — point the ${GIT_BINARY_ENV_VAR} environment variable, or the "git.binary" value in your USER config (a project .opencode config is ignored for this key), at a working git executable.`
+			: `No override is configured. Set the ${GIT_BINARY_ENV_VAR} environment variable, or the "git.binary" value in your USER config (a project .opencode config is ignored for this key), to point at a working git executable.`,
+	);
+	return lines.join('\n');
 }
 
 function gitExec(
@@ -184,8 +241,6 @@ function gitExec(
 			? readLaneEnvFileFromDiskSync(cwd, laneIndex)
 			: undefined);
 
-	let missingGitError: unknown;
-
 	// Scope the `gpgsign=false` overrides to the only subcommands they
 	// affect — `commit` and `tag`. Applying them to `branch`/`reset`/`log`
 	// would be a harmless no-op but would perturb callers (and tests) that
@@ -198,55 +253,80 @@ function gitExec(
 			? ['-c', 'commit.gpgsign=false', '-c', 'tag.gpgsign=false', ...args]
 			: args;
 
-	for (const command of windowsGitCandidates()) {
-		for (let attempt = 0; attempt < MAX_TRANSIENT_RETRIES; attempt++) {
-			const result = _internals.spawnSync(command, hardenedArgs, {
-				cwd,
-				encoding: 'utf-8',
-				timeout: GIT_TIMEOUT_MS,
-				windowsHide: true,
-				maxBuffer: GIT_MAX_BUFFER_BYTES,
-				stdio: ['ignore', 'pipe', 'pipe'],
-				env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-				envOverrides: resolvedLaneEnv,
-			});
+	// Issue #2236 hardening (F2): the git binary is resolved ONCE via
+	// `git-executable.ts`'s bounded, memoized, platform-aware resolver
+	// (which already covers the Windows install-location candidates
+	// previously enumerated by the deleted local `windowsGitCandidates()`).
+	// Only the transient-retry loop over spawn ATTEMPTS remains here.
+	const command = _internals.resolveGitExecutable();
 
-			if (!result.error && result.status === 0) {
-				return result.stdout as string;
+	for (let attempt = 0; attempt < MAX_TRANSIENT_RETRIES; attempt++) {
+		const result = _internals.spawnSync(command, hardenedArgs, {
+			cwd,
+			encoding: 'utf-8',
+			timeout: GIT_TIMEOUT_MS,
+			windowsHide: true,
+			maxBuffer: GIT_MAX_BUFFER_BYTES,
+			stdio: ['ignore', 'pipe', 'pipe'],
+			env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+			envOverrides: resolvedLaneEnv,
+		});
+
+		if (!result.error && result.status === 0) {
+			return result.stdout as string;
+		}
+
+		if (result.error) {
+			// Issue #2236: an ENOENT here is ambiguous — libuv reports the same
+			// code when the *binary* cannot be found and when the *cwd* is gone
+			// (or is a file). Classifying without the `cwd` we already hold is
+			// exactly the misdiagnosis this change exists to eliminate, so the
+			// split is three-way and a cwd fault names the offending directory
+			// instead of blaming PATH. Mirrors src/tools/checkpoint.ts.
+			if (isSpawnCwdMissing(result.error, cwd)) {
+				throw new GitSpawnCwdError(cwd, 'missing', { cause: result.error });
 			}
 
-			if (result.error) {
-				if (isGitBinaryMissing(result.error)) {
-					missingGitError ??= result.error;
-					break;
-				}
-
-				if (
-					isTransientSpawnError(result.error) &&
-					attempt < MAX_TRANSIENT_RETRIES - 1
-				) {
-					transientBackoff(attempt);
-					continue;
-				}
-
-				throw new Error(errorMessage(result.error));
+			if (isSpawnCwdUnreadable(result.error, cwd)) {
+				throw new GitSpawnCwdError(cwd, 'unreadable', {
+					cause: result.error,
+				});
 			}
 
-			if (result.status !== 0) {
-				throw new Error(
-					(result.stderr as string) ||
-						(result.stdout as string) ||
-						`git exited with ${result.status}`,
-				);
+			if (isGitBinaryMissing(result.error, cwd)) {
+				throw new GitBinaryMissingError(gitBinaryMissingMessage(cwd), {
+					cause: result.error,
+				});
 			}
+
+			if (
+				isTransientSpawnError(result.error) &&
+				attempt < MAX_TRANSIENT_RETRIES - 1
+			) {
+				transientBackoff(attempt);
+				continue;
+			}
+
+			throw new Error(errorMessage(result.error));
+		}
+
+		if (result.status !== 0) {
+			throw new Error(
+				(result.stderr as string) ||
+					(result.stdout as string) ||
+					`git exited with ${result.status}`,
+			);
 		}
 	}
 
+	// Unreachable in practice — every loop iteration above either returns or
+	// throws. Kept only so TypeScript's control-flow analysis (which cannot
+	// prove `MAX_TRANSIENT_RETRIES > 0`) accepts `gitExec`'s `string` return
+	// type.
 	throw new GitBinaryMissingError(
 		process.platform === 'win32'
 			? 'git executable is not available on PATH or common Windows install locations'
 			: 'git executable is not available on PATH',
-		{ cause: missingGitError },
 	);
 }
 
@@ -1075,6 +1155,7 @@ export const _internals: {
 	resetToMainAfterMerge: typeof resetToMainAfterMerge;
 	spawnSync: typeof __spawnSyncSeam.spawnSync;
 	readLaneEnvFileFromDiskSync: typeof readLaneEnvFileFromDiskSync;
+	resolveGitExecutable: typeof resolveGitExecutable;
 } = {
 	gitExec,
 	detectDefaultRemoteBranch,
@@ -1084,4 +1165,5 @@ export const _internals: {
 	resetToMainAfterMerge,
 	spawnSync: __spawnSyncSeam.spawnSync,
 	readLaneEnvFileFromDiskSync,
+	resolveGitExecutable,
 } as const;

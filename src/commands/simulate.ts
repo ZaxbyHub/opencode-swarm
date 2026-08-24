@@ -1,6 +1,6 @@
-import { renameSync, unlinkSync } from 'node:fs';
 import { _internals as coChangeAnalyzer } from '../tools/co-change-analyzer';
 import { warn } from '../utils';
+import { atomicWriteSwarmFile } from '../utils/atomic-write';
 
 /**
  * Handle /swarm simulate command
@@ -69,27 +69,12 @@ export async function handleSimulateCommand(
 
 	const report = reportLines.filter(Boolean).join('\n');
 
-	// Write report to .swarm/simulate-report.md
+	// Write report to .swarm/simulate-report.md via the canonical atomic
+	// helper (issue #2035): registered temp grammar, exact own-temp cleanup.
 	try {
-		const fs = await import('node:fs/promises');
 		const path = await import('node:path');
 		const reportPath = path.join(directory, '.swarm', 'simulate-report.md');
-		await fs.mkdir(path.dirname(reportPath), { recursive: true });
-		const reportTempPath = path.join(
-			path.dirname(reportPath),
-			`${path.basename(reportPath)}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
-		);
-		try {
-			await fs.writeFile(reportTempPath, report, 'utf-8');
-			renameSync(reportTempPath, reportPath);
-		} catch (err) {
-			try {
-				unlinkSync(reportTempPath);
-			} catch {
-				// best-effort cleanup
-			}
-			throw err;
-		}
+		await atomicWriteSwarmFile(reportPath, report);
 	} catch (err) {
 		const writeErr = err instanceof Error ? err.message : String(err);
 		warn(

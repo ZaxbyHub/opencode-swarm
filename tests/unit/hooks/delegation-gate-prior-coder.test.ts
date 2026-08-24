@@ -197,7 +197,7 @@ describe('delegation-gate: priorCoderTaskId side-effect fix', () => {
 		 * created/updated with the current task ID as lastCoderDelegationTaskId.
 		 * This verifies the intended functionality still works.
 		 */
-		it('coder delegation updates lastCoderDelegationTaskId', async () => {
+		it('coder delegation no longer writes lastCoderDelegationTaskId from prompt text', async () => {
 			const config = makeConfig();
 			const hook = createDelegationGateHook(config, process.cwd());
 
@@ -217,10 +217,14 @@ FILE: src/feature.ts
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 			await hook.messagesTransform({}, { messages } as any);
 
-			// Session SHOULD have been created by the coder delegation path
+			// Stage A wedge fix: the transform regex writer was removed. Task
+			// attribution now comes exclusively from the structured dispatch
+			// path (prepareCoderScope success in toolBefore), so the transform
+			// must not invent an id from prompt text.
 			const session = swarmState.agentSessions.get('session-coder');
-			expect(session).toBeDefined();
-			expect(session!.lastCoderDelegationTaskId).toBe('2.1');
+			if (session) {
+				expect(session.lastCoderDelegationTaskId).toBeNull();
+			}
 		});
 
 		/**

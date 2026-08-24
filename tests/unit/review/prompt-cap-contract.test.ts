@@ -12,6 +12,7 @@ import {
 	REVIEW_SYSTEM_PROMPT,
 	runReviewEngine,
 } from '../../../src/review/engine';
+import { createReviewManifest } from '../../helpers/review-manifest';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 const realCollectReviewDiff = engineInternals.collectReviewDiff;
@@ -79,6 +80,7 @@ function reviewDiff(
 			includesWorkingTree: true,
 			scopeHash: scopeHashCharacter.repeat(64),
 		},
+		manifest: createReviewManifest(scopeHashCharacter.repeat(64)),
 	};
 }
 

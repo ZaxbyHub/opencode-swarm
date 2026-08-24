@@ -256,6 +256,7 @@ function validateArgs(args: unknown): args is SbomGenerateInput {
 // ============ Tool Implementation ============
 
 export const sbom_generate: ReturnType<typeof tool> = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
 		'Generate Software Bill of Materials (SBOM) by scanning project for dependency manifests. Uses CycloneDX format. Supports scanning entire project or only changed files.',
 	args: {

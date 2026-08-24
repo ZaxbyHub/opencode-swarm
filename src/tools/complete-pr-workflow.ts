@@ -1,7 +1,10 @@
 import { z } from 'zod';
 import {
 	completePrWorkflow,
+	type PrFeedbackInventoryAmendmentRecord,
 	type PrWorkflowMode,
+	readPrWorkflowGateState,
+	settlePresumedStalePrWorkflowLanes,
 } from '../hooks/pr-workflow-gate.js';
 import { createSwarmTool } from './create-tool.js';
 import { listPendingPrWorkflowCheckoutRestores } from './prepare-pr-workflow-checkout.js';
@@ -32,6 +35,64 @@ export async function executeCompletePrWorkflow(
 			success: false,
 			message: 'PR workflow completion requires an active sessionID',
 		});
+	}
+	// Issue #2242 R2 (W-4): resolve the presumed-stale lane settlement BEFORE
+	// completion so the disclosure is available on both the success and the
+	// failure response — completion legitimately fails on real coverage after a
+	// lane died, and the operator still needs to see which lanes were settled
+	// without an observed terminal snapshot. `completePrWorkflow` applies the
+	// same settlement internally (defence in depth for non-tool callers); the
+	// sweep is idempotent, so calling it here costs nothing on the second pass.
+	let staleDisclosure: {
+		presumed_stale_lanes?: string[];
+		presumed_stale_disclosure?: string;
+		probe_retained_lanes?: string[];
+		probe_status?: string;
+	} = {};
+	try {
+		const settlement = await _internals.settlePresumedStalePrWorkflowLanes(
+			directory,
+			context.sessionID,
+		);
+		if (settlement.presumedStaleLaneIds.length > 0) {
+			staleDisclosure = {
+				presumed_stale_lanes: settlement.presumedStaleLaneIds,
+				presumed_stale_disclosure: settlement.disclosure,
+			};
+		}
+		// Issue #2251: independent of whether anything settled. A lane the liveness
+		// probe reported as still running is exactly why completion is refused, and
+		// a degraded probe is why a lane was settled WITHOUT re-verification — both
+		// have to be visible on the failure response, which is the one an operator
+		// reads in this situation.
+		if (settlement.probedAliveLaneIds?.length) {
+			staleDisclosure.probe_retained_lanes = settlement.probedAliveLaneIds;
+		}
+		if (settlement.probeDegradedReason) {
+			staleDisclosure.probe_status = settlement.probeDegradedReason;
+		}
+	} catch {
+		// Observation only. A settlement-read failure must never convert a
+		// completable workflow into a refusal; the gate re-derives it anyway.
+	}
+	// Issue #2242 R3 (W-2): the completion disclosure lists every entry appended
+	// to the inventory after its first declaration. Read BEFORE completing —
+	// a successful completion clears the durable state that carries the ledger.
+	let amendmentDisclosure: {
+		inventory_amendments?: PrFeedbackInventoryAmendmentRecord[];
+	} = {};
+	try {
+		const gateState = await _internals.readPrWorkflowGateState(
+			directory,
+			context.sessionID,
+		);
+		if (gateState?.prFeedbackInventoryAmendments?.length) {
+			amendmentDisclosure = {
+				inventory_amendments: gateState.prFeedbackInventoryAmendments,
+			};
+		}
+	} catch {
+		// Observation only; the gate re-validates everything that matters.
 	}
 	try {
 		const status = await _internals.completePrWorkflow(
@@ -70,11 +131,15 @@ export async function executeCompletePrWorkflow(
 			gate_cleared: status === 'completed' || status === 'verified-no-change',
 			checkout_restore_required: checkoutRestoreRequired,
 			checkout_restore_receipts: checkoutRestoreReceipts,
+			...staleDisclosure,
+			...amendmentDisclosure,
 		});
 	} catch (error) {
 		return JSON.stringify({
 			success: false,
 			message: error instanceof Error ? error.message : String(error),
+			...staleDisclosure,
+			...amendmentDisclosure,
 		});
 	}
 }
@@ -93,7 +158,11 @@ export const complete_pr_workflow: ReturnType<typeof createSwarmTool> =
 export const _internals: {
 	completePrWorkflow: typeof completePrWorkflow;
 	listPendingPrWorkflowCheckoutRestores: typeof listPendingPrWorkflowCheckoutRestores;
+	readPrWorkflowGateState: typeof readPrWorkflowGateState;
+	settlePresumedStalePrWorkflowLanes: typeof settlePresumedStalePrWorkflowLanes;
 } = {
 	completePrWorkflow,
 	listPendingPrWorkflowCheckoutRestores,
+	readPrWorkflowGateState,
+	settlePresumedStalePrWorkflowLanes,
 };

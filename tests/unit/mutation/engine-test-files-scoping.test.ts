@@ -41,6 +41,7 @@ function makePatch(id = 'mut-001'): MutationPatch {
 describe('executeMutation — testFiles scoping (bug fix)', () => {
 	let tempDir: string;
 	let savedSpawnSync: typeof _internals.spawnSync;
+	let savedResolveGitExecutable: typeof _internals.resolveGitExecutable;
 
 	beforeEach(() => {
 		tempDir = fs.realpathSync(
@@ -60,10 +61,17 @@ describe('executeMutation — testFiles scoping (bug fix)', () => {
 		});
 		_internals.spawnSync =
 			mockSpawnSync as unknown as typeof _internals.spawnSync;
+		// Issue #2236 hardening (lane C1b): stub the resolver seam so the
+		// `cmd === 'git'` / `cmd !== 'git'` filters above and below stay
+		// deterministic (they distinguish the git apply/revert calls from
+		// the actual test-runner call).
+		savedResolveGitExecutable = _internals.resolveGitExecutable;
+		_internals.resolveGitExecutable = () => 'git';
 	});
 
 	afterEach(() => {
 		_internals.spawnSync = savedSpawnSync;
+		_internals.resolveGitExecutable = savedResolveGitExecutable;
 		try {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		} catch {
@@ -142,6 +150,7 @@ describe('executeMutation — testFiles scoping (bug fix)', () => {
 describe('executeMutationSuite — testFiles scoping integration', () => {
 	let tempDir: string;
 	let savedSpawnSync: typeof _internals.spawnSync;
+	let savedResolveGitExecutable: typeof _internals.resolveGitExecutable;
 
 	beforeEach(() => {
 		tempDir = fs.realpathSync(
@@ -161,10 +170,15 @@ describe('executeMutationSuite — testFiles scoping integration', () => {
 		});
 		_internals.spawnSync =
 			mockSpawnSync as unknown as typeof _internals.spawnSync;
+		// Issue #2236 hardening (lane C1b): stub the resolver seam so the
+		// `cmd === 'git'` filter above stays deterministic.
+		savedResolveGitExecutable = _internals.resolveGitExecutable;
+		_internals.resolveGitExecutable = () => 'git';
 	});
 
 	afterEach(() => {
 		_internals.spawnSync = savedSpawnSync;
+		_internals.resolveGitExecutable = savedResolveGitExecutable;
 		try {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		} catch {

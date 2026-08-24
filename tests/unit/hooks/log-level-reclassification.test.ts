@@ -88,6 +88,81 @@ describe('log-level-reclassification', () => {
 			);
 			expect(resolvedLimitWarnCall).toBeUndefined();
 		});
+
+		it('warns once when an authored user_default is smaller than a larger live window', () => {
+			const {
+				resolveModelLimit,
+			} = require('../../../src/hooks/model-limits.js');
+
+			resolveModelLimit(
+				'context-default-live-warning-1',
+				'openai',
+				{ default: 64000 },
+				200000,
+			);
+			resolveModelLimit(
+				'context-default-live-warning-1',
+				'openai',
+				{ default: 64000 },
+				200000,
+			);
+
+			const warningCalls = mockWarn.mock.calls.filter((call: any[]) =>
+				call.some(
+					(arg: any) =>
+						typeof arg === 'string' &&
+						arg.includes('context_budget.model_limits.default=64000'),
+				),
+			);
+			expect(warningCalls).toHaveLength(1);
+		});
+
+		it('does not warn for model-specific overrides even when the live window is larger', () => {
+			const {
+				resolveModelLimit,
+			} = require('../../../src/hooks/model-limits.js');
+
+			resolveModelLimit(
+				'context-model-override-no-warning',
+				'openai',
+				{ 'context-model-override-no-warning': 64000 },
+				200000,
+			);
+
+			const warningCalls = mockWarn.mock.calls.filter((call: any[]) =>
+				call.some(
+					(arg: any) =>
+						typeof arg === 'string' &&
+						arg.includes('context_budget.model_limits.default'),
+				),
+			);
+			expect(warningCalls).toHaveLength(0);
+		});
+
+		it('evicts old warning identities instead of growing session-global state without bound', () => {
+			const {
+				resolveModelLimit,
+			} = require('../../../src/hooks/model-limits.js');
+			const firstModel = 'context-default-bounded-warning-0';
+
+			for (let index = 0; index <= 256; index++) {
+				resolveModelLimit(
+					`context-default-bounded-warning-${index}`,
+					'openai',
+					{ default: 64000 },
+					200000,
+				);
+			}
+			resolveModelLimit(firstModel, 'openai', { default: 64000 }, 200000);
+
+			const firstIdentityWarnings = mockWarn.mock.calls.filter((call: any[]) =>
+				call.some(
+					(arg: any) =>
+						typeof arg === 'string' && arg.includes(`${firstModel}@openai`),
+				),
+			);
+			expect(firstIdentityWarnings).toHaveLength(2);
+		});
 	});
 
 	describe('context-budget', () => {

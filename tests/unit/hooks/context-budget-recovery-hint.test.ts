@@ -101,7 +101,7 @@ describe('recoveryHint via tool-output masking', () => {
 			},
 			toolMessage(
 				'bash',
-				`lane result ref ${ref} plus padding ${'y'.repeat(100)}`,
+				`lane result ref ${ref} plus padding ${'y'.repeat(5_000)}`,
 			),
 			{
 				info: { role: 'user', agent: 'architect' },

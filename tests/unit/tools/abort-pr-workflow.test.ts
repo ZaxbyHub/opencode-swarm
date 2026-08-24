@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { AGENT_TOOL_MAP } from '../../../src/config/constants.js';
 import {
+	abortPrWorkflow,
 	activatePrWorkflow,
 	_test_exports as gateInternals,
 } from '../../../src/hooks/pr-workflow-gate.js';
@@ -23,6 +24,10 @@ beforeEach(() => {
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHead = () => 'abc123';
 	gateInternals.resolveIsWorkingTreeClean = () => true;
+	// Issue #2251: settlement probes host session liveness. Pin "no host" so a
+	// `swarmState.opencodeClient` leaked by another file cannot make this suite
+	// order-dependent (or make it wait out the probe's real 5s deadline).
+	gateInternals.getSessionOps = () => null;
 });
 
 afterEach(async () => {
@@ -31,6 +36,20 @@ afterEach(async () => {
 	gateInternals.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
 	await fs.rm(directory, { recursive: true, force: true });
 });
+
+/** Write arbitrary bytes to the durable gate-state path for `sessionID`. */
+async function writeGateStateBytes(
+	sessionID: string,
+	bytes: string,
+): Promise<void> {
+	const absolute = path.join(
+		directory,
+		'.swarm',
+		gateInternals.workflowGateStateRelativePath(sessionID),
+	);
+	await fs.mkdir(path.dirname(absolute), { recursive: true });
+	await fs.writeFile(absolute, bytes, 'utf-8');
+}
 
 describe('abort_pr_workflow tool', () => {
 	test('is registered as an architect-only controller tool', () => {
@@ -120,5 +139,92 @@ describe('abort_pr_workflow tool', () => {
 		});
 		// pr_head_sha is omitted on the deadlock path (no binding).
 		expect(result.pr_head_sha).toBeUndefined();
+	});
+
+	test('FB-004: the tool response carries the salvage and CAS disclosures', async () => {
+		// A schema-invalid state with an UNSALVAGEABLE revision exercises both
+		// disclosures at once: the gate salvages the state to clear it at all, and
+		// takes the documented CAS escape because there is no revision to compare.
+		// The operator reads THIS response first, so the disclosures have to be
+		// here, not only in events.jsonl and pr_workflow_status.
+		await writeGateStateBytes(
+			'salvage-tool',
+			JSON.stringify({
+				schemaVersion: 1,
+				revision: 'not-a-number',
+				sessionID: 'salvage-tool',
+				mode: 'PR_REVIEW',
+				activatedAt: '2026-07-19T00:00:00.000Z',
+				updatedAt: '2026-07-19T00:00:00.000Z',
+				prReviewValidationBatches: 'not-an-array',
+			}),
+		);
+
+		const result = JSON.parse(
+			await executeAbortPrWorkflow(
+				{ mode: 'PR_REVIEW', kind: 'recovery', reason: 'state corrupted' },
+				directory,
+				{ sessionID: 'salvage-tool' },
+			),
+		);
+
+		expect(result).toMatchObject({
+			success: true,
+			gate_cleared: true,
+			state_salvaged: true,
+			cas_escape_disclosure:
+				'state revision unsalvageable; cleared without compare-and-swap',
+		});
+		expect(result.state_salvage_disclosure).toContain(
+			'failed schema validation',
+		);
+	});
+
+	test('FB-008: a failed CAS-guarded clear records a retraction and still throws', async () => {
+		await activatePrWorkflow(directory, 'cas-race', 'PR_REVIEW');
+		const statePath = path.join(
+			directory,
+			'.swarm',
+			gateInternals.workflowGateStateRelativePath('cas-race'),
+		);
+		// Simulate the concurrent mutation between the durable audit append and
+		// the clear: bump the on-disk revision so the clear's CAS read mismatches.
+		gateInternals.beforeAbortClear = async () => {
+			const current = JSON.parse(await fs.readFile(statePath, 'utf-8'));
+			await fs.writeFile(
+				statePath,
+				JSON.stringify({ ...current, revision: current.revision + 1 }),
+				'utf-8',
+			);
+		};
+
+		await expect(
+			abortPrWorkflow(directory, 'cas-race', {
+				kind: 'recovery',
+				reason: 'raced with a concurrent mutation',
+			}),
+		).rejects.toThrow(/changed during terminal completion/i);
+
+		const events = (
+			await fs.readFile(path.join(directory, '.swarm', 'events.jsonl'), 'utf-8')
+		)
+			.split('\n')
+			.filter(Boolean)
+			.map((line) => JSON.parse(line));
+		// The abort event is durable and deliberately precedes the clear, so the
+		// trail would otherwise assert an abort that never executed.
+		expect(events.some((e) => e.type === 'pr_workflow_aborted')).toBe(true);
+		const retraction = events.find(
+			(e) => e.type === 'pr_workflow_abort_not_completed',
+		);
+		expect(retraction).toBeDefined();
+		// Correlation fields so the retraction can be matched to what it retracts.
+		expect(retraction.sessionID).toBe('cas-race');
+		expect(retraction.mode).toBe('PR_REVIEW');
+		expect(retraction.reason).toBe('raced with a concurrent mutation');
+		expect(retraction.failure).toMatch(/changed during terminal completion/i);
+		expect(retraction.disclosure).toContain('did NOT complete');
+		// The gate must NOT have been cleared — the retraction says so truthfully.
+		expect(await fs.stat(statePath)).toBeDefined();
 	});
 });

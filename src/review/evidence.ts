@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
@@ -6,6 +7,8 @@ import {
 	type ReviewFinding,
 	ReviewFindingSchema,
 } from '../agents/agent-output-schema.js';
+import type { Plan } from '../config/plan-schema.js';
+import type { AutoReviewConfig } from '../config/schema.js';
 import {
 	isScopeStale,
 	type ReviewFindingSeverity,
@@ -14,10 +17,13 @@ import {
 	readReviewReceiptText,
 } from '../hooks/review-receipt.js';
 import { validateSwarmPath } from '../hooks/utils.js';
+import { ledgerExists, replayFromLedgerWithStatus } from '../plan/ledger.js';
+import { loadPlanJsonOnly } from '../plan/manager.js';
 import { bunWrite } from '../utils/bun-compat.js';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import type {
 	ReviewDiffCompleteness,
+	ReviewDiffManifest,
 	ReviewDiffSelector,
 } from './diff-source.js';
 import { canonicalizeValidationCandidates } from './finding-validator.js';
@@ -31,8 +37,14 @@ export interface AutoReviewEvidenceFinding extends ReviewFinding {
 	validation?: FindingValidation;
 }
 
+export interface AutoReviewScopeManifest extends ReviewDiffManifest {
+	plan_requirements_hash: string;
+	review_policy_digest: string;
+	hash: string;
+}
+
 export interface AutoReviewEvidence {
-	schema_version: 1;
+	schema_version: 1 | 2;
 	timestamp: string;
 	trigger:
 		| 'task_completion'
@@ -51,12 +63,14 @@ export interface AutoReviewEvidence {
 		range_to_sha?: string;
 		review_text_bytes: number;
 		completeness: ReviewDiffCompleteness;
+		manifest?: AutoReviewScopeManifest;
 	};
 	policy: {
 		mode: 'advisory' | 'gate';
 		min_confidence: number;
 		structured_findings: boolean;
 		validate_findings: boolean;
+		digest?: string;
 	};
 	review: {
 		status: 'completed' | 'clean' | 'error';
@@ -82,6 +96,27 @@ export interface AutoReviewEvidence {
 		cost_usd: number | null;
 		cost_source: 'reported' | 'estimated' | 'unavailable';
 	};
+}
+
+export function computeAutoReviewManifestHash(
+	manifest: Omit<AutoReviewScopeManifest, 'hash'>,
+): string {
+	return createHash('sha256')
+		.update(
+			JSON.stringify({
+				schema_version: manifest.schema_version,
+				content_hash: manifest.content_hash,
+				plan_requirements_hash: manifest.plan_requirements_hash,
+				review_policy_digest: manifest.review_policy_digest,
+				selector: manifest.selector,
+				selector_key: manifest.selector_key,
+				review_target_kind: manifest.review_target_kind,
+				completeness: manifest.completeness,
+				path_records: manifest.path_records,
+			}),
+			'utf8',
+		)
+		.digest('hex');
 }
 
 export function autoReviewEvidenceRelativePath(
@@ -188,7 +223,7 @@ export function isAutoReviewEvidence(
 	const candidate = value as Partial<AutoReviewEvidence>;
 	if (
 		!(
-			candidate.schema_version === 1 &&
+			(candidate.schema_version === 1 || candidate.schema_version === 2) &&
 			typeof candidate.timestamp === 'string' &&
 			[
 				'task_completion',
@@ -217,7 +252,136 @@ export function isAutoReviewEvidence(
 	) {
 		return false;
 	}
+	if (candidate.schema_version === 2) {
+		if (
+			!candidate.scope?.manifest ||
+			candidate.scope.manifest.schema_version !== 2 ||
+			typeof candidate.scope.manifest.content_hash !== 'string' ||
+			typeof candidate.scope.manifest.plan_requirements_hash !== 'string' ||
+			typeof candidate.scope.manifest.review_policy_digest !== 'string' ||
+			typeof candidate.scope.manifest.hash !== 'string' ||
+			typeof candidate.policy?.digest !== 'string'
+		) {
+			return false;
+		}
+		const { hash, ...manifestPayload } = candidate.scope.manifest;
+		if (
+			hash !==
+			computeAutoReviewManifestHash(
+				manifestPayload as Omit<AutoReviewScopeManifest, 'hash'>,
+			)
+		) {
+			return false;
+		}
+	}
 	return candidate.findings.every(isAutoReviewEvidenceFinding);
+}
+
+export async function computePlanRequirementsHash(
+	directory: string,
+): Promise<string> {
+	const plan = await loadReviewRequirementsPlan(directory);
+	return plan ? computeReviewPlanRequirementsHash(plan) : 'plan:none';
+}
+
+export function computeAutoReviewPolicyDigest(
+	config: AutoReviewConfig,
+): string {
+	return createHash('sha256')
+		.update(
+			JSON.stringify({
+				mode: config.final_review.mode,
+				min_confidence: config.min_confidence,
+				structured_findings: config.structured_findings,
+				validate_findings: config.validate_findings,
+				final_review: {
+					on_phase_complete: config.final_review.on_phase_complete,
+					on_plan_complete: config.final_review.on_plan_complete,
+					max_diff_bytes: config.final_review.max_diff_bytes,
+					timeout_ms: config.final_review.timeout_ms,
+					model: config.final_review.model,
+				},
+				validation_timeout_ms: config.validation_timeout_ms,
+				validation_model: config.validation_model,
+			}),
+			'utf8',
+		)
+		.digest('hex');
+}
+
+export async function materializeAutoReviewManifest(
+	directory: string,
+	manifest: ReviewDiffManifest,
+	config: AutoReviewConfig,
+): Promise<AutoReviewScopeManifest> {
+	const planRequirementsHash = await computePlanRequirementsHash(directory);
+	const policyDigest = computeAutoReviewPolicyDigest(config);
+	const payload = {
+		...manifest,
+		plan_requirements_hash: planRequirementsHash,
+		review_policy_digest: policyDigest,
+	};
+	const hash = computeAutoReviewManifestHash(payload);
+	return { ...payload, hash };
+}
+
+async function loadReviewRequirementsPlan(
+	directory: string,
+): Promise<Plan | null> {
+	if (!(await ledgerExists(directory))) {
+		return loadPlanJsonOnly(directory);
+	}
+	let replayed: Awaited<ReturnType<typeof replayFromLedgerWithStatus>>;
+	try {
+		replayed = await replayFromLedgerWithStatus(directory);
+	} catch (error) {
+		throw new Error(
+			`authoritative plan ledger replay failed for final-review requirements: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	if (replayed.truncated) {
+		throw new Error(
+			'authoritative plan ledger replay is truncated; final-review requirements are unavailable',
+		);
+	}
+	if (!replayed.plan) {
+		throw new Error(
+			'authoritative plan ledger replay returned no plan; final-review requirements are unavailable',
+		);
+	}
+	return replayed.plan;
+}
+
+export function computeReviewPlanRequirementsHash(plan: Plan): string {
+	return createHash('sha256')
+		.update(
+			JSON.stringify({
+				schema_version: plan.schema_version,
+				title: plan.title,
+				swarm: plan.swarm,
+				migration_status: plan.migration_status,
+				phases: plan.phases.map((phase) => ({
+					id: phase.id,
+					name: phase.name,
+					type: phase.type,
+					required_agents: phase.required_agents
+						? [...phase.required_agents].sort()
+						: undefined,
+					tasks: phase.tasks.map((task) => ({
+						id: task.id,
+						phase: task.phase,
+						size: task.size,
+						description: task.description,
+						depends: [...task.depends].sort(),
+						acceptance: task.acceptance,
+						files_touched: [...task.files_touched].sort(),
+						fr_refs: task.fr_refs ? [...task.fr_refs].sort() : undefined,
+					})),
+				})),
+			}),
+			'utf8',
+		)
+		.digest('hex');
 }
 
 function baseFinding(finding: AutoReviewEvidenceFinding): ReviewFinding {

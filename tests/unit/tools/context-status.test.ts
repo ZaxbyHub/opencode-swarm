@@ -14,6 +14,7 @@ import {
 	computeContextHeadroom,
 	context_status,
 } from '../../../src/tools/context-status';
+import { TOOL_METADATA } from '../../../src/tools/tool-metadata';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -50,14 +51,25 @@ describe('context_status tool surface', () => {
 	it('should have description and execute', () => {
 		expect(context_status.description).toBeDefined();
 		expect(typeof context_status.description).toBe('string');
+		expect(context_status.description).toContain('usageSource');
+		expect(context_status.description).toContain('provider|estimated');
 		expect(context_status.execute).toBeDefined();
 		expect(typeof context_status.execute).toBe('function');
 	});
 
+	it('should expose matching metadata that mentions usageSource', () => {
+		expect(TOOL_METADATA.context_status.description).toContain('usageSource');
+		expect(TOOL_METADATA.context_status.description).toContain(
+			'provider|estimated',
+		);
+	});
+
 	it('should have an args schema with no required fields', () => {
 		expect(context_status.args).toBeDefined();
-		// After fix: args schema is empty (no messages required)
-		expect(Object.keys(context_status.args)).toHaveLength(0);
+		expect(Object.keys(context_status.args)).toEqual(['working_directory']);
+		expect(
+			context_status.args.working_directory.safeParse(undefined).success,
+		).toBe(true);
 	});
 });
 
@@ -69,6 +81,7 @@ describe('computeContextHeadroom', () => {
 	it('returns zero tokens for empty messages', () => {
 		const result = computeContextHeadroom([]);
 		expect(result.tokensUsed).toBe(0);
+		expect(result.usageSource).toBe('estimated');
 		expect(result.modelLimit).toBeGreaterThan(0);
 		expect(result.usagePercent).toBe(0);
 		expect(result.thresholdCrossed).toBe('none');
@@ -83,6 +96,7 @@ describe('computeContextHeadroom', () => {
 
 		const result = computeContextHeadroom(messages);
 		expect(result.tokensUsed).toBe(4);
+		expect(result.usageSource).toBe('estimated');
 	});
 
 	it('skips non-text parts', () => {
@@ -309,5 +323,30 @@ describe('computeContextHeadroom', () => {
 			'custom-provider/custom-model': 50000,
 		});
 		expect(result.modelLimit).toBe(50000);
+	});
+
+	it('uses latest valid assistant provider prompt accounting when available', () => {
+		const messages = [
+			makeMessage({ role: 'user', text: 'before' }),
+			{
+				info: {
+					role: 'assistant',
+					modelID: 'gpt-5',
+					providerID: 'openai',
+					tokens: {
+						input: 120,
+						cache: { read: 30, write: 10 },
+					},
+				},
+				parts: [{ type: 'text', text: 'reply' }],
+			},
+			makeMessage({ role: 'user', text: 'follow up' }),
+		];
+
+		const result = computeContextHeadroom(messages as any);
+		expect(result.usageSource).toBe('provider');
+		expect(result.tokensUsed).toBeGreaterThan(160);
+		expect(result.modelId).toBe('gpt-5');
+		expect(result.provider).toBe('openai');
 	});
 });

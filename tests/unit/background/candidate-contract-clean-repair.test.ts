@@ -288,7 +288,7 @@ describe('captured consolidated micro artifact (PR #2177 run)', () => {
 		expect(result.clean_attestation).toBeUndefined();
 	});
 
-	test('CLEAN alongside a CANDIDATE for the same lane still conflicts', () => {
+	test('CLEAN alongside a CANDIDATE for the same lane is salvaged, not fatal', () => {
 		const artifact = [
 			microHeader,
 			'[CANDIDATE] | c-1 | some-lane | MEDIUM | coverage-gap | src/a.ts:1 | claim text here | invariant text | evidence text here | HIGH',
@@ -298,14 +298,15 @@ describe('captured consolidated micro artifact (PR #2177 run)', () => {
 			input(normalizeCandidateArtifact(artifact, 'micro_lane').text),
 			microFlags('some-lane'),
 		);
-		expect(result.clean_attestation).toBeUndefined();
-		expect(result.diagnostics.parse_error_details).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({
-					field: 'clean_attestation',
-					message: expect.stringContaining('same lane'),
-				}),
-			]),
+		expect(result.error).toBeUndefined();
+		expect(result.error_code).toBeUndefined();
+		expect(result.clean_attestation_salvaged).toBe(true);
+		expect(result.clean_attestation_salvage_reason).toEqual(
+			expect.stringContaining('same lane'),
 		);
+		// COVERAGE SAFETY: a salvaged attestation must never masquerade as a
+		// valid zero-findings attestation.
+		expect(result.clean_attestation).toBeUndefined();
+		expect(result.candidates.length).toBe(1);
 	});
 });

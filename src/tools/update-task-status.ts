@@ -17,7 +17,9 @@ import {
 	readTaskEvidenceRaw,
 } from '../gate-evidence.js';
 import { validateDiffScope } from '../hooks/diff-scope';
+import { validateSwarmPath } from '../hooks/utils.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
+import { matchesTier3 } from '../parallel/tier3-classifier.js';
 import { loadPlan, updateTaskStatus } from '../plan/manager';
 import { formatLegacyQaBindingRecovery } from '../qa-gate/recovery.js';
 import {
@@ -52,12 +54,15 @@ import { validateTaskIdFormat as _validateTaskIdFormat } from '../validation/tas
 import { recoverCoderSettlement } from '../workflow/coder-settlement.js';
 import {
 	recoverPreparedTaskRepair,
+	recoverPreparedTaskRepairUnderPlanLock,
 	repairTaskWorkflowUnderPlanLock,
 } from '../workflow/task-repair.js';
 import {
 	commitTaskTerminalUnderPlanLock,
 	recoverPreparedTaskTerminal,
+	recoverPreparedTaskTerminalUnderPlanLock,
 } from '../workflow/task-terminal.js';
+import { readWorkflowWalFile } from '../workflow/workflow-wal-file.js';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
 
@@ -100,6 +105,44 @@ async function recordRunMemoryOutcome(
 	} catch (_error) {
 		// Advisory-only — run-memory bookkeeping never alters the tool result.
 	}
+}
+
+function syncCallerWorkflowFromEvidence(
+	sessionId: string | undefined,
+	taskId: string,
+	evidence: ReturnType<typeof readTaskEvidenceRaw>,
+): void {
+	if (!sessionId) return;
+	const callerSession = ensureAgentSession(sessionId);
+	const workflow = getTaskWorkflowSnapshot(evidence);
+	callerSession.taskWorkflowStates.set(taskId, workflow.state);
+	callerSession.stageBCompletion?.delete(taskId);
+	callerSession.taskCouncilApproved?.delete(taskId);
+	callerSession.taskCouncilWorkflowGeneration?.delete(taskId);
+	updateTaskWorkflowCache(callerSession, taskId, workflow);
+}
+
+async function hasPreparedWorkflowWal(
+	directory: string,
+	taskId: string,
+	kind: 'task-repair' | 'task-terminal',
+): Promise<boolean> {
+	return (await readPreparedWorkflowWal(directory, taskId, kind)) !== null;
+}
+
+async function readPreparedWorkflowWal(
+	directory: string,
+	taskId: string,
+	kind: 'task-repair' | 'task-terminal',
+) {
+	const walPath = validateSwarmPath(
+		directory,
+		kind === 'task-repair'
+			? `task-repairs/${taskId}.json`
+			: `task-terminals/${taskId}.json`,
+	);
+	const wal = await readWorkflowWalFile(kind, walPath, taskId);
+	return wal?.state === 'PREPARED' ? wal : null;
 }
 
 /**
@@ -184,6 +227,38 @@ export function validateTaskId(taskId: string): string | undefined {
 	return undefined;
 }
 
+function getSettledTransitionRejection(
+	taskId: string,
+	currentStatus: TaskStatus,
+	nextStatus: string,
+	force: boolean | undefined,
+): UpdateTaskStatusResult | null {
+	if (
+		currentStatus !== 'pending' &&
+		currentStatus !== 'in_progress' &&
+		nextStatus !== currentStatus
+	) {
+		if (nextStatus !== 'in_progress' || force !== true) {
+			return {
+				success: false,
+				message: `Task ${taskId} is settled (${currentStatus}); backward transitions require the audited in_progress repair path.`,
+				errors: [
+					`Task ${taskId} is settled (${currentStatus}); use force:true with exact CAS and audit fields to repair it to in_progress.`,
+				],
+			};
+		}
+	}
+	return null;
+}
+
+function isRepairRetryShape(args: UpdateTaskStatusArgs): boolean {
+	return (
+		args.status === 'in_progress' &&
+		args.force === true &&
+		typeof args.transition_id === 'string'
+	);
+}
+
 /**
  * Result from checking reviewer gate presence
  */
@@ -223,40 +298,6 @@ function reviewerGateDecision(
 		// Reviewer-gate telemetry is observational and must remain fail-open.
 	}
 	return result;
-}
-
-/**
- * Tier 3 patterns that require full gate review even in Turbo Mode.
- * These are critical security-sensitive files that must always pass Stage B.
- */
-const TIER_3_PATTERNS = [
-	/^architect.*\.ts$/i,
-	/^delegation.*\.ts$/i,
-	/^guardrails.*\.ts$/i,
-	/^adversarial.*\.ts$/i,
-	/^sanitiz.*\.ts$/i,
-	/^auth.*$/i,
-	/^permission.*$/i,
-	/^crypto.*$/i,
-	/^secret.*$/i,
-	/^security.*\.ts$/i,
-];
-
-/**
- * Check if any file in the list matches a Tier 3 pattern.
- * @param files - Array of file paths/names to check
- * @returns true if any file matches a Tier 3 pattern
- */
-function matchesTier3Pattern(files: string[]): boolean {
-	for (const file of files) {
-		const fileName = path.basename(file);
-		for (const pattern of TIER_3_PATTERNS) {
-			if (pattern.test(fileName)) {
-				return true;
-			}
-		}
-	}
-	return false;
 }
 
 function hasPassedDurableGateEvidence(
@@ -358,7 +399,7 @@ export function checkReviewerGate(
 					for (const task of planPhase.tasks ?? []) {
 						if (task.id === taskId && task.files_touched) {
 							// If no Tier 3 patterns matched, bypass Stage B
-							if (!matchesTier3Pattern(task.files_touched)) {
+							if (!matchesTier3(task.files_touched)) {
 								return reviewerGateDecision(
 									taskId,
 									sessionID,
@@ -527,13 +568,15 @@ export function checkReviewerGate(
 						sessionID,
 						{
 							blocked: true,
-							reason: `Evidence file for task ${taskId} is corrupt or unreadable: ${error instanceof Error ? error.message : String(error)}`,
+							reason:
+								`Evidence file for task ${taskId} is corrupt or unreadable: ${error instanceof Error ? error.message : String(error)}. ` +
+								`Call repair_gate_evidence for task ${taskId}; corrupt evidence fails closed until the repair completes.`,
 							requiredGates: [],
 							satisfiedGates: [],
 							missingGates: ['reviewer', 'test_engineer'],
 							source: 'durable_exact_task',
 							corrupt: true,
-							nextAction: `Repair .swarm/evidence/${taskId}.json; corrupt evidence fails closed.`,
+							nextAction: `Call repair_gate_evidence for task ${taskId}; corrupt evidence fails closed until the repair completes.`,
 						},
 						'corrupt_evidence',
 						'data_quality',
@@ -630,7 +673,7 @@ export function checkReviewerGate(
 					blocked: true,
 					reason:
 						`Evidence file for task ${taskId} is corrupt or unreadable. ` +
-						`Fix the file at .swarm/evidence/${taskId}.json or delete it to fall through to session state.`,
+						`Call repair_gate_evidence for task ${taskId}; corrupt evidence fails closed until the repair completes.`,
 				},
 				'corrupt_evidence',
 				'data_quality',
@@ -1366,10 +1409,26 @@ export async function executeUpdateTaskStatus(
 		}
 	}
 
-	const exactRepairRetry =
-		args.status === 'in_progress' &&
-		args.force === true &&
-		typeof args.transition_id === 'string';
+	let exactRepairRetry = false;
+	if (isRepairRetryShape(args)) {
+		try {
+			const repairWal = await readWorkflowWalFile(
+				'task-repair',
+				validateSwarmPath(directory, `task-repairs/${args.task_id}.json`),
+				args.task_id,
+			);
+			exactRepairRetry =
+				repairWal?.state === 'PREPARED' &&
+				repairWal.transitionId === args.transition_id;
+		} catch (error) {
+			return {
+				success: false,
+				message:
+					'Task operation paused while recovering an interrupted task repair',
+				errors: [error instanceof Error ? error.message : String(error)],
+			};
+		}
+	}
 	try {
 		const recoveredCoder = await recoverCoderSettlement(
 			directory,
@@ -1396,14 +1455,12 @@ export async function executeUpdateTaskStatus(
 			args.task_id,
 			ctx?.sessionID ?? 'update-task-status',
 		);
-		if (recoveredTerminal && ctx?.sessionID) {
-			const callerSession = ensureAgentSession(ctx.sessionID);
-			const workflow = getTaskWorkflowSnapshot(recoveredTerminal.evidence);
-			callerSession.taskWorkflowStates.set(args.task_id, workflow.state);
-			callerSession.stageBCompletion?.delete(args.task_id);
-			callerSession.taskCouncilApproved?.delete(args.task_id);
-			callerSession.taskCouncilWorkflowGeneration?.delete(args.task_id);
-			updateTaskWorkflowCache(callerSession, args.task_id, workflow);
+		if (recoveredTerminal) {
+			syncCallerWorkflowFromEvidence(
+				ctx?.sessionID,
+				args.task_id,
+				recoveredTerminal.evidence,
+			);
 		}
 	} catch (error) {
 		return {
@@ -1420,16 +1477,12 @@ export async function executeUpdateTaskStatus(
 				args.task_id,
 				ctx?.sessionID ?? 'update-task-status',
 			);
-			if (recoveredRepair && ctx?.sessionID) {
-				const callerSession = ensureAgentSession(ctx.sessionID);
-				const workflow = getTaskWorkflowSnapshot(
+			if (recoveredRepair) {
+				syncCallerWorkflowFromEvidence(
+					ctx?.sessionID,
+					args.task_id,
 					readTaskEvidenceRaw(directory, args.task_id),
 				);
-				callerSession.taskWorkflowStates.set(args.task_id, workflow.state);
-				callerSession.stageBCompletion?.delete(args.task_id);
-				callerSession.taskCouncilApproved?.delete(args.task_id);
-				callerSession.taskCouncilWorkflowGeneration?.delete(args.task_id);
-				updateTaskWorkflowCache(callerSession, args.task_id, workflow);
 			}
 		} catch (error) {
 			// A COMMITTED-but-unaudited repair WAL (the WAL is never deleted) makes
@@ -1510,19 +1563,15 @@ export async function executeUpdateTaskStatus(
 	// Settled tasks may only move backward through the audited exact-CAS repair.
 	// A task is "settled" iff its status is neither 'pending' nor 'in_progress'.
 	// Reuse the already-loaded plan; do not add a second plan load.
-	if (
-		currentTask.status !== 'pending' &&
-		currentTask.status !== 'in_progress' &&
-		args.status !== currentTask.status
-	) {
-		if (args.status !== 'in_progress' || args.force !== true) {
-			return {
-				success: false,
-				message: `Task ${args.task_id} is settled (${currentTask.status}); backward transitions require the audited in_progress repair path.`,
-				errors: [
-					`Task ${args.task_id} is settled (${currentTask.status}); use force:true with exact CAS and audit fields to repair it to in_progress.`,
-				],
-			};
+	{
+		const settledRejection = getSettledTransitionRejection(
+			args.task_id,
+			currentTask.status,
+			args.status,
+			args.force,
+		);
+		if (settledRejection) {
+			return settledRejection;
 		}
 	}
 
@@ -1699,7 +1748,78 @@ export async function executeUpdateTaskStatus(
 				errors: ['No approved plan is available under the plan lock'],
 			};
 		}
-		const lockedTask = lockedPlan?.phases
+		let authoritativePlan = lockedPlan;
+		const lockedPreparedRepairWal = await readPreparedWorkflowWal(
+			directory,
+			args.task_id,
+			'task-repair',
+		);
+		const lockedExactRepairRetry =
+			isRepairRetryShape(args) &&
+			lockedPreparedRepairWal?.transitionId === args.transition_id;
+		if (lockedPreparedRepairWal && !lockedExactRepairRetry) {
+			try {
+				const recoveredRepair = await recoverPreparedTaskRepairUnderPlanLock(
+					directory,
+					args.task_id,
+					ctx?.sessionID ?? 'update-task-status',
+					authoritativePlan,
+				);
+				if (recoveredRepair) {
+					authoritativePlan = recoveredRepair.plan;
+					syncCallerWorkflowFromEvidence(
+						ctx?.sessionID,
+						args.task_id,
+						readTaskEvidenceRaw(directory, args.task_id),
+					);
+				}
+			} catch (error) {
+				if (
+					error instanceof Error &&
+					error.message.startsWith('TASK_REPAIR_AUDIT_LOCKED')
+				) {
+					logger.criticalWarn(
+						`[update-task-status] task-repair audit recovery deferred for ${args.task_id}: ${error.message}`,
+					);
+				} else {
+					return {
+						success: false,
+						message:
+							'Task operation paused while recovering an interrupted task repair',
+						errors: [error instanceof Error ? error.message : String(error)],
+					};
+				}
+			}
+		}
+		if (
+			await hasPreparedWorkflowWal(directory, args.task_id, 'task-terminal')
+		) {
+			try {
+				const recoveredTerminal =
+					await recoverPreparedTaskTerminalUnderPlanLock(
+						directory,
+						args.task_id,
+						ctx?.sessionID ?? 'update-task-status',
+						authoritativePlan,
+					);
+				if (recoveredTerminal) {
+					authoritativePlan = recoveredTerminal.plan;
+					syncCallerWorkflowFromEvidence(
+						ctx?.sessionID,
+						args.task_id,
+						recoveredTerminal.evidence,
+					);
+				}
+			} catch (error) {
+				return {
+					success: false,
+					message:
+						'Task operation paused while recovering an interrupted terminal status transition',
+					errors: [error instanceof Error ? error.message : String(error)],
+				};
+			}
+		}
+		const lockedTask = authoritativePlan.phases
 			.flatMap((phase) => phase.tasks)
 			.find((task) => task.id === args.task_id);
 		if (!lockedTask) {
@@ -1708,6 +1828,15 @@ export async function executeUpdateTaskStatus(
 				message: 'Failed to update task status',
 				errors: [`Task not found: ${args.task_id}`],
 			};
+		}
+		const lockedSettledRejection = getSettledTransitionRejection(
+			args.task_id,
+			lockedTask.status,
+			args.status,
+			args.force,
+		);
+		if (lockedSettledRejection) {
+			return lockedSettledRejection;
 		}
 		const forceRepair = args.status === 'in_progress' && args.force === true;
 		const repairResult = forceRepair
@@ -1720,7 +1849,7 @@ export async function executeUpdateTaskStatus(
 					expectedState: args.expected_state as string,
 					expectedGeneration: args.expected_generation as number,
 					currentPlanStatus: lockedTask.status,
-					currentPlan: lockedPlan,
+					currentPlan: authoritativePlan,
 					updatePlan: () =>
 						_internals.updateTaskStatus(
 							directory,
@@ -1735,7 +1864,7 @@ export async function executeUpdateTaskStatus(
 			ReturnType<typeof transitionTaskWorkflowEvidence>
 		> | null = null;
 		if (args.status === 'completed') {
-			const lockedTaskPhase = lockedPlan.phases.find((phase) =>
+			const lockedTaskPhase = authoritativePlan.phases.find((phase) =>
 				phase.tasks.some((task) => task.id === args.task_id),
 			);
 			const lockedPhaseRequiresReviewer =
@@ -1749,7 +1878,7 @@ export async function executeUpdateTaskStatus(
 				currentPlanStatus: lockedTask.status,
 				targetStatus: 'completed',
 				qaExempt: !lockedPhaseRequiresReviewer,
-				currentPlan: lockedPlan,
+				currentPlan: authoritativePlan,
 				validateEvidence: async () => {
 					const lockedGate = checkReviewerGate(
 						args.task_id,
@@ -1797,7 +1926,7 @@ export async function executeUpdateTaskStatus(
 				currentPlanStatus: lockedTask.status,
 				targetStatus: 'blocked',
 				qaExempt: false,
-				currentPlan: lockedPlan,
+				currentPlan: authoritativePlan,
 				updatePlan: async () => {
 					const next = await _internals.updateTaskStatus(
 						directory,

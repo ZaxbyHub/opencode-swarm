@@ -6,9 +6,10 @@
  * src/cli/index.ts) and the diagnostics service (getDiagnoseData in
  * src/services/diagnose-service.ts) read from this list so they stay in sync.
  *
- * OpenCode caches plugins in three layouts depending on host and version:
- * 1. XDG packages cache (some macOS + Windows OpenCode installs ≤ v20):
+ * OpenCode caches plugins in four layouts depending on host and version:
+ * 1. XDG packages caches (some macOS + Windows OpenCode installs ≤ v20):
  *    `<XDG_CACHE_HOME or ~/.cache>/opencode/packages/opencode-swarm@latest/`
+ *    `<XDG_CACHE_HOME or ~/.cache>/opencode/packages/opencode-swarm/`
  * 2. Legacy XDG config node_modules (older OpenCode installs ≤ v19):
  *    `<XDG_CONFIG_HOME or ~/.config>/opencode/node_modules/opencode-swarm/`
  * 3. CANONICAL XDG cache node_modules (current OpenCode v20+, all platforms,
@@ -19,6 +20,7 @@
  * cache and pin which plugin version is installed. They are exposed via
  * getPluginLockFilePaths() and cleared during update/install.
  */
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -131,6 +133,7 @@ export function getPluginCachePaths(): readonly string[] {
 	const paths: string[] = [
 		path.join(cacheBase, 'opencode', 'node_modules', 'opencode-swarm'),
 		path.join(cacheBase, 'opencode', 'packages', 'opencode-swarm@latest'),
+		path.join(cacheBase, 'opencode', 'packages', 'opencode-swarm'),
 		path.join(configDir, 'node_modules', 'opencode-swarm'),
 	];
 	if (process.platform === 'darwin') {
@@ -138,6 +141,7 @@ export function getPluginCachePaths(): readonly string[] {
 		paths.push(
 			path.join(libCaches, 'opencode', 'node_modules', 'opencode-swarm'),
 			path.join(libCaches, 'opencode', 'packages', 'opencode-swarm@latest'),
+			path.join(libCaches, 'opencode', 'packages', 'opencode-swarm'),
 		);
 	}
 	if (process.platform === 'win32') {
@@ -148,6 +152,7 @@ export function getPluginCachePaths(): readonly string[] {
 		paths.push(
 			path.join(localAppData, 'opencode', 'node_modules', 'opencode-swarm'),
 			path.join(localAppData, 'opencode', 'packages', 'opencode-swarm@latest'),
+			path.join(localAppData, 'opencode', 'packages', 'opencode-swarm'),
 			path.join(appData, 'opencode', 'node_modules', 'opencode-swarm'),
 		);
 	}
@@ -184,4 +189,119 @@ export function getPluginLockFilePaths(): readonly string[] {
 		);
 	}
 	return paths;
+}
+
+/**
+ * Anchored version-pinned cache leaf shape: `opencode-swarm@<semver>`, e.g.
+ * `opencode-swarm@7.143.1`, `opencode-swarm@1.2.3-rc.1`,
+ * `opencode-swarm@1.2.3+build.5`. Matches full `major.minor.patch` with
+ * optional pre-release and build-metadata segments (semver 2.0.0 grammar).
+ *
+ * Deliberately NOT a `startsWith('opencode-swarm@')` prefix test — that would
+ * admit a traversal payload like `opencode-swarm@../../..` as a "valid" leaf.
+ * The anchored `^...$` with only `[0-9A-Za-z.-]` permitted in the
+ * pre-release/build segments admits no path separator, NUL byte, whitespace,
+ * or non-ASCII character. Shared by the delete-time safety check
+ * (`isSafeCachePath` in `src/cli/index.ts`, applied AFTER canonicalization)
+ * and this module's own discovery function below, so both agree on exactly
+ * which leaves are "version-pinned opencode-swarm" without duplicating the
+ * pattern (issue #2236 RC3).
+ */
+export const VERSION_PINNED_LEAF =
+	/^opencode-swarm@\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+/**
+ * Enumerate `packages/` parent directories for version-pinned opencode-swarm
+ * cache leaves (e.g. `opencode-swarm@7.143.1`) that {@link getPluginCachePaths}
+ * cannot discover — that list is fixed to the literal `opencode-swarm@latest`
+ * / `opencode-swarm` leaves, so a version-pinned OpenCode host install (issue
+ * #2236's reporter had `opencode-swarm@7.143.1`) is invisible to it.
+ *
+ * PERFORMS FILESYSTEM I/O (`readdirSync`). Callers MUST invoke this at
+ * COMMAND TIME only — never at module scope — to preserve AGENTS.md
+ * invariant 1 (plugin init must stay side-effect-minimal).
+ * {@link getPluginCachePaths} stays pure specifically so it can keep being
+ * called at module scope (`src/cli/index.ts:45`); this is the separate,
+ * impure counterpart invoked explicitly by `update()` (`src/cli/index.ts`)
+ * and the `/swarm diagnose` cache check (`src/services/diagnose-service.ts`).
+ *
+ * Returns full paths to matched entries. Does NOT apply the delete-time
+ * safety allowlist (`isSafeCachePath` in `src/cli/index.ts`) — callers that
+ * intend to delete a returned path MUST still run it through that check, and
+ * the check MUST run on the realpath-canonicalized string, exactly like every
+ * other cache-deletion call site.
+ */
+export function discoverVersionPinnedCachePaths(): string[] {
+	const cacheBase =
+		process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
+	const packagesParents: string[] = [
+		path.join(cacheBase, 'opencode', 'packages'),
+	];
+	if (process.platform === 'darwin') {
+		const libCaches = path.join(os.homedir(), 'Library', 'Caches');
+		packagesParents.push(path.join(libCaches, 'opencode', 'packages'));
+	}
+	if (process.platform === 'win32') {
+		const localAppData =
+			process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+		packagesParents.push(path.join(localAppData, 'opencode', 'packages'));
+	}
+
+	const found: string[] = [];
+	for (const parent of packagesParents) {
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(parent, { withFileTypes: true });
+		} catch {
+			// Parent doesn't exist, isn't readable, or isn't a directory —
+			// nothing to discover here. Not an error condition: most hosts
+			// will never have created a `packages/` dir at all.
+			continue;
+		}
+		for (const entry of entries) {
+			if (!VERSION_PINNED_LEAF.test(entry.name)) continue;
+			if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+			found.push(path.join(parent, entry.name));
+		}
+	}
+	return found;
+}
+
+/**
+ * Resolve a cache path to its actual package root. Some OpenCode cache
+ * layouts nest the package under `<cachePath>/node_modules/opencode-swarm`;
+ * others ARE the package root directly. Shared by `evictPluginCaches`
+ * (`src/cli/index.ts`, to read the pre-deletion version) and the
+ * `/swarm diagnose` cache check (`src/services/diagnose-service.ts`) so both
+ * agree on where `package.json` lives for a given cache path, per issue
+ * #2236 RC3 ("don't duplicate the version-reading logic").
+ */
+export function resolveCachePackageRoot(cachePath: string): string {
+	const nestedPackageRoot = path.join(
+		cachePath,
+		'node_modules',
+		'opencode-swarm',
+	);
+	return fs.existsSync(nestedPackageRoot) ? nestedPackageRoot : cachePath;
+}
+
+/**
+ * Best-effort read of the installed opencode-swarm version at a cache path.
+ * Returns `null` (never throws) if `package.json` is missing, unreadable, or
+ * unparsable — this feeds human-readable console/diagnostic reporting, not a
+ * safety decision, so a version that can't be determined must degrade
+ * gracefully rather than abort the caller's eviction/diagnosis loop.
+ */
+export function readCachePackageVersion(cachePath: string): string | null {
+	try {
+		const packageRoot = resolveCachePackageRoot(cachePath);
+		const raw = fs.readFileSync(
+			path.join(packageRoot, 'package.json'),
+			'utf-8',
+		);
+		const parsed = JSON.parse(raw) as { version?: unknown };
+		return typeof parsed.version === 'string' ? parsed.version : null;
+	} catch {
+		return null;
+	}
 }

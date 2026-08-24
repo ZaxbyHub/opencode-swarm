@@ -464,19 +464,64 @@ export async function readUtf8IfPresent(
 	filePath: string,
 	maxBytes = 32 * 1024 * 1024,
 ): Promise<string | null> {
+	const bytes = await readBytesIfPresent(filePath, maxBytes);
+	return bytes === null ? null : bytes.toString('utf8');
+}
+
+/** Read an authoritative receipt artifact without lossy text decoding. */
+export async function readBytesIfPresent(
+	filePath: string,
+	maxBytes = 32 * 1024 * 1024,
+): Promise<Buffer | null> {
+	let handle: Awaited<ReturnType<typeof open>> | undefined;
 	try {
 		validateExistingRegularFile(filePath);
-		const info = await stat(filePath);
-		if (info.size > maxBytes) {
+		const before = await stat(filePath);
+		if (before.size > maxBytes) {
 			throw new ReceiptStoreError(
 				'store_corrupt',
 				`receipt artifact exceeds ${maxBytes} bytes: ${path.basename(filePath)}`,
 			);
 		}
-		return await readFile(filePath, 'utf8');
+		handle = await open(filePath, 'r');
+		const opened = await handle.stat();
+		if (
+			!opened.isFile() ||
+			opened.dev !== before.dev ||
+			opened.ino !== before.ino ||
+			opened.size !== before.size
+		) {
+			throw new ReceiptStoreError(
+				'store_unavailable',
+				`receipt artifact changed while opening: ${path.basename(filePath)}`,
+			);
+		}
+		const bytes = await handle.readFile();
+		const after = await handle.stat();
+		if (
+			after.dev !== opened.dev ||
+			after.ino !== opened.ino ||
+			after.size !== opened.size ||
+			after.mtimeMs !== opened.mtimeMs ||
+			after.ctimeMs !== opened.ctimeMs
+		) {
+			throw new ReceiptStoreError(
+				'store_unavailable',
+				`receipt artifact changed while reading: ${path.basename(filePath)}`,
+			);
+		}
+		if (bytes.byteLength > maxBytes) {
+			throw new ReceiptStoreError(
+				'store_corrupt',
+				`receipt artifact exceeds ${maxBytes} bytes: ${path.basename(filePath)}`,
+			);
+		}
+		return bytes;
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
 		throw error;
+	} finally {
+		await handle?.close().catch(() => undefined);
 	}
 }
 

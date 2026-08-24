@@ -2,17 +2,26 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { DURABLE_MEMORY_KINDS, EVIDENCE_REQUIRED_KINDS } from './config';
 import { MemoryValidationError } from './errors';
+import { computePiiScore, type PiiFinding, summarizePiiFindings } from './pii';
 import { containsSecret } from './redaction';
 import { MEMORY_RECALL_SENTINEL } from './sentinel';
 import type {
 	CuratorMemoryDecision,
+	MemoryAnchor,
 	MemoryKind,
+	MemoryOutcome,
 	MemoryPatch,
 	MemoryProposal,
 	MemoryRecord,
 	MemoryScopeRef,
 	NewMemoryRecord,
 } from './types';
+
+export const MAX_MEMORY_TEXT_LENGTH = 2000;
+export const MAX_MEMORY_ANCHORS = 20;
+export const MEMORY_OUTCOME_QUESTION_PREFIX = 'Outcome evidence for question: ';
+export const MAX_OUTCOME_QUESTION_LENGTH =
+	MAX_MEMORY_TEXT_LENGTH - MEMORY_OUTCOME_QUESTION_PREFIX.length;
 
 export const MemoryScopeTypeSchema = z.enum([
 	'global_user',
@@ -77,12 +86,99 @@ export const MemorySourceSchema = z
 	})
 	.strict();
 
+const MemoryAnchorFileSchema = z
+	.string()
+	.trim()
+	.min(1)
+	.max(512)
+	.transform((value, context) => {
+		try {
+			return normalizeMemoryAnchorFile(value);
+		} catch (error) {
+			context.addIssue({
+				code: 'custom',
+				message:
+					error instanceof Error ? error.message : 'invalid memory anchor path',
+			});
+			return z.NEVER;
+		}
+	});
+
+export const MemoryAnchorSchema: z.ZodType<MemoryAnchor> = z
+	.object({
+		file: MemoryAnchorFileSchema,
+		symbol: z.string().trim().min(1).max(256).optional(),
+	})
+	.strict();
+
+/** Normalize a repository-relative memory anchor to a portable identity. */
+export function normalizeMemoryAnchorFile(value: string): string {
+	const trimmed = value.trim();
+	if (
+		[...trimmed].some((character) => {
+			const code = character.charCodeAt(0);
+			return code <= 31 || code === 127;
+		})
+	) {
+		throw new MemoryValidationError(
+			'memory anchor file must not contain control characters',
+		);
+	}
+	if (
+		trimmed.startsWith('/') ||
+		trimmed.startsWith('\\') ||
+		/^[a-zA-Z]:[\\/]/.test(trimmed)
+	) {
+		throw new MemoryValidationError(
+			'memory anchor file must be repository-relative',
+		);
+	}
+	const segments = trimmed.replaceAll('\\', '/').split('/');
+	if (segments.some((segment) => segment === '..')) {
+		throw new MemoryValidationError(
+			'memory anchor file must not traverse outside the repository',
+		);
+	}
+	const normalized = segments
+		.filter((segment) => segment.length > 0 && segment !== '.')
+		.join('/');
+	if (!normalized) {
+		throw new MemoryValidationError('memory anchor file must not be empty');
+	}
+	return normalized;
+}
+
+export const MemoryOutcomeSchema: z.ZodType<MemoryOutcome> = z
+	.object({
+		outcome: z.enum(['useful', 'dead_end', 'corrected']),
+		at: z.string().datetime(),
+		taskId: z.string().trim().min(1).max(256).optional(),
+		correction: z.string().trim().min(1).max(4000).optional(),
+	})
+	.strict()
+	.superRefine((value, context) => {
+		if (value.outcome === 'corrected' && !value.correction) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ['correction'],
+				message: 'corrected outcomes require correction text',
+			});
+		}
+		if (value.outcome !== 'corrected' && value.correction !== undefined) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ['correction'],
+				message: 'correction text is only valid for corrected outcomes',
+			});
+		}
+	});
+
 export const MemoryRecordSchema = z
 	.object({
 		id: z.string().regex(/^mem_[a-f0-9]{16}$/),
 		scope: MemoryScopeRefSchema,
 		kind: MemoryKindSchema,
-		text: z.string().min(1).max(2000),
+		text: z.string().min(1).max(MAX_MEMORY_TEXT_LENGTH),
 		tags: z.array(z.string().min(1).max(64)).max(32),
 		confidence: z.number().min(0).max(1),
 		stability: z.enum(['ephemeral', 'session', 'durable']),
@@ -96,6 +192,8 @@ export const MemoryRecordSchema = z
 		supersededBy: z.string().optional(),
 		contentHash: z.string().regex(/^[a-f0-9]{64}$/),
 		metadata: z.record(z.string(), z.unknown()),
+		anchors: z.array(MemoryAnchorSchema).max(MAX_MEMORY_ANCHORS).optional(),
+		outcomes: z.array(MemoryOutcomeSchema).max(1000).optional(),
 		// #1850 cohort-sharing provenance (all optional for back-compat).
 		cohortId: z.string().optional(),
 		producerSessionId: z.string().optional(),
@@ -104,6 +202,12 @@ export const MemoryRecordSchema = z
 		schemaVersion: z.number().int().min(0).optional(),
 		providerVersion: z.string().optional(),
 		sourceRevision: z.string().optional(),
+		// #1466 Phase 6 provenance (all optional for back-compat; contentHash
+		// derives from {scope,kind,text} only, so these never affect id/hash).
+		sourceTaskId: z.string().optional(),
+		embeddingModelVersion: z.string().optional(),
+		validFrom: z.string().datetime().optional(),
+		supersedesReason: z.string().optional(),
 	})
 	.strict();
 
@@ -151,13 +255,15 @@ export const NewMemoryRecordSchema: z.ZodType<NewMemoryRecord> = z
 	.object({
 		scope: MemoryScopeRefSchema.optional(),
 		kind: MemoryKindSchema,
-		text: z.string().min(1).max(2000),
+		text: z.string().min(1).max(MAX_MEMORY_TEXT_LENGTH),
 		tags: z.array(z.string().min(1).max(64)).max(32).optional(),
 		confidence: z.number().min(0).max(1).optional(),
 		stability: z.enum(['ephemeral', 'session', 'durable']).optional(),
 		source: MemorySourceSchema.optional(),
 		expiresAt: z.string().datetime().optional(),
 		metadata: z.record(z.string(), z.unknown()).optional(),
+		anchors: z.array(MemoryAnchorSchema).max(MAX_MEMORY_ANCHORS).optional(),
+		outcomes: z.array(MemoryOutcomeSchema).max(1000).optional(),
 	})
 	.strict();
 
@@ -165,13 +271,15 @@ export const MemoryPatchSchema: z.ZodType<MemoryPatch> = z
 	.object({
 		scope: MemoryScopeRefSchema.optional(),
 		kind: MemoryKindSchema.optional(),
-		text: z.string().min(1).max(2000).optional(),
+		text: z.string().min(1).max(MAX_MEMORY_TEXT_LENGTH).optional(),
 		tags: z.array(z.string().min(1).max(64)).max(32).optional(),
 		confidence: z.number().min(0).max(1).optional(),
 		stability: z.enum(['ephemeral', 'session', 'durable']).optional(),
 		source: MemorySourceSchema.optional(),
 		expiresAt: z.string().datetime().optional(),
 		metadata: z.record(z.string(), z.unknown()).optional(),
+		anchors: z.array(MemoryAnchorSchema).max(MAX_MEMORY_ANCHORS).optional(),
+		outcomes: z.array(MemoryOutcomeSchema).max(1000).optional(),
 	})
 	.strict()
 	.refine((patch) => Object.keys(patch).length > 0, {
@@ -315,7 +423,18 @@ export function hasEvidenceSource(record: MemoryRecord): boolean {
 
 export function validateMemoryRecordRules(
 	record: MemoryRecord,
-	options: { rejectDurableSecrets: boolean },
+	options: {
+		rejectDurableSecrets: boolean;
+		/**
+		 * #1466: precomputed PII findings for the record text. The DETECTOR is
+		 * async (NER), so callers run it and pass results in; this function
+		 * owns the threshold decision so it stays the single enforcement point.
+		 * Absent findings = no enforcement (JSONL import, maintenance paths).
+		 */
+		piiFindings?: PiiFinding[];
+		rejectDurablePii?: boolean;
+		piiThreshold?: number;
+	},
 ): MemoryRecord {
 	const parsed = MemoryRecordSchema.parse(record);
 	// DD-14: stored memory text must never contain the recall-injection sentinel
@@ -327,6 +446,18 @@ export function validateMemoryRecordRules(
 	if (parsed.text.includes(MEMORY_RECALL_SENTINEL)) {
 		throw new MemoryValidationError(
 			'memory text cannot contain the recall sentinel header',
+		);
+	}
+	// #1466 DD-14 (bundle anchor): detection also trusts the `bundle_` marker
+	// emitted by `createBundleId`, so memory text must never contain the
+	// literal prefix — otherwise a stored memory could forge "recall already
+	// injected" and suppress its own recall. The bare-prefix substring match
+	// is deliberate: prose legitimately mentioning `bundle_` is rare and the
+	// error names the exact prefix so the author can reword; a shape-only
+	// match would let `bundle_<valid-looking>` text through.
+	if (parsed.text.includes('bundle_')) {
+		throw new MemoryValidationError(
+			'memory text cannot contain the recall bundle marker prefix',
 		);
 	}
 	const expectedHash = computeMemoryContentHash(parsed);
@@ -376,9 +507,59 @@ export function validateMemoryRecordRules(
 	if (
 		options.rejectDurableSecrets &&
 		parsed.stability === 'durable' &&
-		containsSecret(parsed.text)
+		(containsSecret(parsed.text) ||
+			(parsed.outcomes ?? []).some(
+				(outcome) =>
+					typeof outcome.correction === 'string' &&
+					containsSecret(outcome.correction),
+			))
 	) {
 		throw new MemoryValidationError('durable memory contains a likely secret');
+	}
+	// #1466: PII rejection at the single write funnel. Score = max finding
+	// confidence; rejection fires when the score EXCEEDS the threshold.
+	if (
+		options.rejectDurablePii &&
+		parsed.stability === 'durable' &&
+		options.piiFindings !== undefined
+	) {
+		const score = computePiiScore(options.piiFindings);
+		if (score > (options.piiThreshold ?? 0.7)) {
+			const summary = summarizePiiFindings(options.piiFindings);
+			throw new MemoryValidationError(
+				`durable memory exceeds the PII threshold: score ${score.toFixed(2)} (types: ${
+					Object.entries(summary.countsByType)
+						.map(([t, n]) => `${t}x${n}`)
+						.join(', ') || 'none'
+				}) exceeded threshold ${(options.piiThreshold ?? 0.7).toFixed(2)}`,
+				'memory_pii_rejected',
+			);
+		}
+	}
+	const eventIds = parsed.metadata.outcomeEventIds;
+	if (eventIds !== undefined) {
+		if (
+			!Array.isArray(eventIds) ||
+			eventIds.length !== (parsed.outcomes?.length ?? 0) ||
+			eventIds.some(
+				(id) => typeof id !== 'string' || id.length < 1 || id.length > 256,
+			)
+		) {
+			throw new MemoryValidationError(
+				'metadata.outcomeEventIds must align with outcomes',
+			);
+		}
+	}
+	const generation = parsed.metadata.outcomeGeneration;
+	if (
+		generation !== undefined &&
+		(typeof generation !== 'string' ||
+			generation.length < 1 ||
+			generation.length > 256)
+	) {
+		throw new MemoryValidationError(
+			'metadata.outcomeGeneration must be a bounded string',
+		);
 	}
 	return parsed;
 }

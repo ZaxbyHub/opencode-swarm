@@ -96,6 +96,21 @@ describe('handleResetSessionCommand', () => {
 		expect(result).toContain('Cleared 2 in-memory agent session(s)');
 	});
 
+	it('clears activeAgent alongside agentSessions — regression: reset orphaned activeAgent entries', async () => {
+		// startAgentSession populates activeAgent too. Previous code cleared
+		// agentSessions + delegationChains here but left activeAgent populated;
+		// with the sessions gone, no sweep could ever reclaim those entries, so
+		// they leaked into every subsequent state.json snapshot.
+		startAgentSession('session-1', 'coder');
+		startAgentSession('session-2', 'reviewer');
+		expect(swarmState.activeAgent.size).toBe(2);
+
+		const result = await handleResetSessionCommand(testDir, []);
+
+		expect(swarmState.activeAgent.size).toBe(0);
+		expect(result).toContain('Cleared 2 active-agent mapping(s)');
+	});
+
 	it('clears in-memory sessions even when state.json does not exist', async () => {
 		startAgentSession('session-1', 'coder');
 		startAgentSession('session-2', 'architect');

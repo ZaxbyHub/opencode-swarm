@@ -2,6 +2,7 @@ import * as child_process from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
+import { resolveGhBinary } from '../tools/gh-evidence.js';
 import { mergeEnvForChild } from '../utils/bun-compat';
 import { warn } from '../utils/logger.js';
 import {
@@ -70,8 +71,16 @@ export function sanitizeInput(input: string): string {
  * - Bounded transient retry for ETIMEDOUT per AGENTS.md invariant 9
  */
 export function ghExec(args: string[], cwd: string): string {
+	// Issue #2236 hardening (lane C1b): resolve the `gh` binary ONCE per call
+	// via the shared resolver in `src/tools/gh-evidence.ts` (do not invent a
+	// second one). `resolveGhBinary()` returns `null` when no candidate is
+	// found; fall back to the bare `'gh'` literal so a host that resolves
+	// `gh` via plain PATH lookup at spawn time never regresses (same
+	// "never regress a working host" philosophy as
+	// `resolveGitExecutable()`'s bare-`'git'` last-resort fallback).
+	const ghBinary = _internals.resolveGhBinary() ?? 'gh';
 	for (let attempt = 0; attempt < MAX_TRANSIENT_RETRIES; attempt++) {
-		const result = child_process.spawnSync('gh', args, {
+		const result = child_process.spawnSync(ghBinary, args, {
 			cwd,
 			encoding: 'utf-8',
 			timeout: GIT_TIMEOUT_MS,
@@ -214,7 +223,10 @@ export async function ghExecAsync(
 	cwd: string,
 ): Promise<string> {
 	return new Promise<string>((resolve, reject) => {
-		const proc = child_process.spawn('gh', args, {
+		// See ghExec() above for the resolver rationale (issue #2236 hardening,
+		// lane C1b) — same shared resolver, same bare-`'gh'` fallback.
+		const ghBinary = _internals.resolveGhBinary() ?? 'gh';
+		const proc = child_process.spawn(ghBinary, args, {
 			cwd,
 			// stdin must be 'ignore' to prevent pipe blocking on Windows (AGENTS.md v7.3.3)
 			stdio: ['ignore', 'pipe', 'pipe'],
@@ -310,6 +322,7 @@ export const _internals: {
 	spawnSync: typeof __spawnSyncSeam.spawnSync;
 	readLaneEnvFileFromDiskSync: typeof readLaneEnvFileFromDiskSync;
 	getMergeGroupRun: typeof getMergeGroupRun;
+	resolveGhBinary: typeof resolveGhBinary;
 } = {
 	ghExec,
 	ghExecAsync,
@@ -317,6 +330,7 @@ export const _internals: {
 	spawnSync: __spawnSyncSeam.spawnSync,
 	readLaneEnvFileFromDiskSync,
 	getMergeGroupRun,
+	resolveGhBinary,
 };
 
 /**

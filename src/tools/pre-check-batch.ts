@@ -13,7 +13,9 @@ import type { SecretscanEvidence } from '../config/evidence-schema.js';
 import { saveEvidence } from '../evidence/manager.js';
 import { warn } from '../utils';
 import { runExternalTool } from '../utils/external-tool-runner';
+import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 import {
+	assertProjectRoot,
 	hasExplicitProjectBoundary,
 	isStrictPathDescendant,
 } from '../utils/project-boundary';
@@ -24,6 +26,7 @@ import type {
 	ResolvedLinterCommand,
 } from './lint';
 import { detectResolvedLinter, _internals as lintInternals } from './lint';
+import { resolveGatePreamble } from './phase-complete/gates/gate-helpers';
 import type { QualityBudgetResult } from './quality-budget';
 import { qualityBudget } from './quality-budget';
 import type { SastScanFinding, SastScanResult } from './sast-scan';
@@ -57,6 +60,8 @@ export const _internals: {
 	runLintOnFiles: typeof runLintOnFiles;
 	platform: () => NodeJS.Platform;
 	serializePreCheckResult: typeof serializePreCheckResult;
+	resolveGatePreamble: typeof resolveGatePreamble;
+	runPreCheckBatch: typeof runPreCheckBatch;
 	MAX_COMBINED_BYTES: number;
 } = {
 	qualityBudget,
@@ -72,6 +77,8 @@ export const _internals: {
 	runLintOnFiles,
 	platform: () => process.platform,
 	serializePreCheckResult,
+	resolveGatePreamble,
+	runPreCheckBatch,
 	MAX_COMBINED_BYTES,
 };
 
@@ -93,6 +100,8 @@ export interface PreCheckBatchInput {
 	 * with capture_baseline:true.
 	 */
 	phase?: number;
+	/** Effective QA-profile value derived internally by the public tool boundary. */
+	sast_enabled?: boolean;
 }
 
 export interface ToolResult<T> {
@@ -218,6 +227,10 @@ export interface PreCheckBatchResult {
 	total_duration_ms: number;
 	/** Pre-existing SAST findings on unchanged lines, requiring reviewer triage */
 	sast_preexisting_findings?: SastScanFinding[];
+	/** Optional Semgrep exited nonzero with no findings; SAST coverage is incomplete. */
+	sast_degraded?: boolean;
+	/** SAST was intentionally disabled by the effective QA profile. */
+	sast_skipped?: boolean;
 }
 
 function truncateUtf8(value: string, maxBytes: number): string {
@@ -261,6 +274,12 @@ function serializePreCheckResult(result: PreCheckBatchResult): string {
 	const compact = {
 		batch_status: result.batch_status,
 		gates_passed: result.gates_passed,
+		...(result.sast_degraded !== undefined && {
+			sast_degraded: result.sast_degraded,
+		}),
+		...(result.sast_skipped !== undefined && {
+			sast_skipped: result.sast_skipped,
+		}),
 		lint: compactToolResult(result.lint),
 		secretscan: compactToolResult(result.secretscan),
 		sast_scan: compactToolResult(result.sast_scan),
@@ -815,8 +834,17 @@ async function runGit(
 	directory: string,
 	abortSignal?: AbortSignal,
 ): Promise<string | null> {
+	// Resolution failure (every candidate rejected) maps onto this function's
+	// existing "any failure -> null" contract, same as a failed runExternalTool
+	// call would — no new throw introduced at this call site.
+	let gitExecutable: string;
+	try {
+		gitExecutable = await resolveGitExecutableAsync();
+	} catch {
+		return null;
+	}
 	const result = await _internals.runExternalTool({
-		executable: 'git',
+		executable: gitExecutable,
 		args,
 		cwd: directory,
 		timeoutMs: GIT_TIMEOUT_MS,
@@ -1242,7 +1270,14 @@ export async function runPreCheckBatch(
 	const effectiveWorkspaceDir = (workspaceDir ||
 		input.directory ||
 		contextDir) as string;
-	const { files, directory, sast_threshold = 'medium', config, phase } = input;
+	const {
+		files,
+		directory,
+		sast_threshold = 'medium',
+		config,
+		phase,
+		sast_enabled = true,
+	} = input;
 
 	// Validate directory
 	const dirError = validateDirectory(directory, effectiveWorkspaceDir);
@@ -1319,6 +1354,35 @@ export async function runPreCheckBatch(
 		};
 	}
 
+	// #2209: fail fast when the directory is not a valid project root for
+	// evidence writes. isAcceptedProjectRootForPlatform's equality branch
+	// (directory === workspaceDir — the CLI-invoked-from-a-subdirectory case)
+	// bypasses the explicit-boundary check, so a boundary-less subdirectory of
+	// an existing Swarm project used to pass validation above and surface the
+	// violation only at evidence-write time — inconsistently (secretscan
+	// swallowed it; sast_scan/quality_budget failed). assertProjectRoot is the
+	// same invariant the evidence writers enforce (reused, unmodified): a
+	// directory with its own boundary marker passes, a standalone directory
+	// with no `.swarm`-bearing ancestor passes, and a subdirectory nested
+	// under a `.swarm/`-owning project root throws — still BEFORE any tool
+	// executes (this runs after the no-files fail-closed checks so their
+	// distinct 'No files provided' contract is preserved).
+	try {
+		assertProjectRoot(directory);
+	} catch (error) {
+		const rootError = error instanceof Error ? error.message : String(error);
+		warn(`pre_check_batch: Project-root validation failed: ${rootError}`);
+		return {
+			batch_status: 'invalid',
+			gates_passed: false,
+			lint: { ran: false, error: rootError, duration_ms: 0 },
+			secretscan: { ran: false, error: rootError, duration_ms: 0 },
+			sast_scan: { ran: false, error: rootError, duration_ms: 0 },
+			quality_budget: { ran: false, error: rootError, duration_ms: 0 },
+			total_duration_ms: 0,
+		};
+	}
+
 	// Limit files to prevent abuse
 	if (changedFiles.length > MAX_FILES) {
 		throw new Error(
@@ -1342,16 +1406,21 @@ export async function runPreCheckBatch(
 					abortSignal,
 				),
 			),
-			limit(() =>
-				_internals.runSastScanWrapped(
-					changedFiles,
-					directory,
-					sast_threshold,
-					config,
-					phase,
-					abortSignal,
-				),
-			),
+			sast_enabled
+				? limit(() =>
+						_internals.runSastScanWrapped(
+							changedFiles,
+							directory,
+							sast_threshold,
+							config,
+							phase,
+							abortSignal,
+						),
+					)
+				: Promise.resolve<ToolResult<SastScanResult>>({
+						ran: false,
+						duration_ms: 0,
+					}),
 			limit(() =>
 				_internals.runQualityBudgetWrapped(
 					changedFiles,
@@ -1423,22 +1492,42 @@ export async function runPreCheckBatch(
 				abortSignal,
 			);
 		} catch (e) {
-			warn(
-				`Failed to persist secretscan evidence: ${e instanceof Error ? e.message : String(e)}`,
-			);
+			// #2209: an evidence persistence failure is a runtime-state failure
+			// and must fail the scan identically to sast_scan/quality_budget
+			// (whose saveEvidence errors propagate into their ToolResult.error
+			// and hard-fail the gate). The gate evaluation above already ran on
+			// the clean scan result, so fail the gate directly here and surface
+			// the error on the payload.
+			const persistError = `Failed to persist secretscan evidence: ${
+				e instanceof Error ? e.message : String(e)
+			}`;
+			secretscanResult.error = persistError;
+			gatesPassed = false;
+			warn(`pre_check_batch: ${persistError} - GATE FAILED`);
 		}
 	}
 
 	// Check SAST scan (hard gate with pre-existing finding classification)
 	let sastPreexistingFindings: SastScanFinding[] | undefined;
+	let sastDegraded = false;
 	if (sastScanResult.ran && sastScanResult.result) {
 		const sastResult = sastScanResult.result;
 
 		if (sastResult.error) {
-			gatesPassed = false;
-			warn(
-				`pre_check_batch: SAST scan error (${sastResult.error}) - GATE FAILED`,
-			);
+			if (
+				sastResult.failure_kind === 'semgrep_process_exit' &&
+				sastResult.findings.length === 0
+			) {
+				sastDegraded = true;
+				warn(
+					`pre_check_batch: SAST coverage degraded (${sastResult.error}) - continuing without a gate failure`,
+				);
+			} else {
+				gatesPassed = false;
+				warn(
+					`pre_check_batch: SAST scan error (${sastResult.error}) - GATE FAILED`,
+				);
+			}
 		} else if (sastResult.baseline_used) {
 			// Baseline diff mode: verdict is driven ONLY by new_findings in sastScan.
 			// Populate reviewer triage with pre_existing_findings (if any), regardless of verdict.
@@ -1458,10 +1547,13 @@ export async function runPreCheckBatch(
 				}
 			}
 			// Verdict is already correctly set by sastScan — do not override.
+			// (#2210 note: a result carrying `error` was already consumed by the
+			// `if (sastResult.error)` branch above, so this branch is by
+			// construction the findings-driven case.)
 			if (sastResult.verdict === 'fail') {
 				gatesPassed = false;
 				warn(
-					`pre_check_batch: SAST scan found new findings above threshold - GATE FAILED`,
+					'pre_check_batch: SAST scan found new findings above threshold - GATE FAILED',
 				);
 			}
 		} else if (sastResult.verdict === 'fail') {
@@ -1498,7 +1590,9 @@ export async function runPreCheckBatch(
 				}
 			} else {
 				// SAST failed but no HIGH/CRITICAL findings (lower severity only)
-				// Original behavior: fail the gate
+				// Original behavior: fail the gate. (#2210 note: a result carrying
+				// `error` was already consumed by the `if (sastResult.error)`
+				// branch above.)
 				gatesPassed = false;
 				warn('pre_check_batch: SAST scan found vulnerabilities - GATE FAILED');
 			}
@@ -1538,6 +1632,8 @@ export async function runPreCheckBatch(
 		sast_scan: sastScanResult,
 		quality_budget: qualityBudgetResult,
 		total_duration_ms: Math.round(totalDuration),
+		...(sastDegraded && { sast_degraded: true }),
+		...(!sast_enabled && { sast_skipped: true }),
 		...(sastPreexistingFindings &&
 			sastPreexistingFindings.length > 0 && {
 				sast_preexisting_findings: sastPreexistingFindings,
@@ -1554,8 +1650,9 @@ export async function runPreCheckBatch(
  * Returns unified result with gates_passed status
  */
 export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
-		'Run multiple verification tools in parallel: lint, secretscan, SAST scan, and quality budget. Returns unified result with gates_passed status. Security tools (secretscan, sast_scan) are HARD GATES - failures block merging.',
+		'Run multiple verification tools in parallel: lint, secretscan, SAST scan, and quality budget. Returns unified result with gates_passed status. Security findings and incomplete SAST runs are hard failures; a Semgrep nonzero process exit with zero findings is returned as explicit sast_degraded coverage and does not block.',
 	args: {
 		files: z
 			.array(z.string())
@@ -1705,6 +1802,20 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 
 		// Run pre-check batch
 		try {
+			let sastEnabled = true;
+			try {
+				const preamble = await _internals.resolveGatePreamble(
+					resolvedDirectory,
+					ctx?.sessionID,
+				);
+				if (preamble.resolved && preamble.effectiveGates) {
+					sastEnabled = preamble.effectiveGates.sast_enabled;
+				}
+			} catch {
+				warn(
+					'pre_check_batch: QA-gate profile resolution failed; keeping SAST enabled',
+				);
+			}
 			const rawPhase = (typedArgs as unknown as Record<string, unknown>).phase;
 			const safePhase =
 				typeof rawPhase === 'number' &&
@@ -1713,13 +1824,14 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 					? rawPhase
 					: undefined;
 
-			const result = await runPreCheckBatch(
+			const result = await _internals.runPreCheckBatch(
 				{
 					files: typedArgs.files,
 					directory: resolvedDirectory,
 					sast_threshold: typedArgs.sast_threshold,
 					config: typedArgs.config,
 					phase: safePhase,
+					sast_enabled: sastEnabled,
 				},
 				workspaceAnchor,
 				directory,

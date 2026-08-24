@@ -27,6 +27,8 @@ import { createSwarmTool } from './create-tool';
 export interface WriteRetroArgs {
 	/** The phase number being completed (maps to phase_number in schema) */
 	phase: number;
+	/** Explicit phase verdict recorded by the retrospective gate */
+	verdict?: 'pass' | 'fail';
 	/** Human-readable phase summary (maps to summary in BaseEvidenceSchema) */
 	summary: string;
 	/** Count of tasks completed */
@@ -462,13 +464,27 @@ export async function executeWriteRetro(
 	// Build the taskId
 	const taskId = args.task_id ?? `retro-${phase}`;
 
-	// Build the RetrospectiveEvidence entry with auto-generated fields
+	if (args.verdict !== 'pass' && args.verdict !== 'fail') {
+		return JSON.stringify(
+			{
+				success: false,
+				phase,
+				reason: 'RETRO_VERDICT_REQUIRED',
+				message:
+					'Invalid verdict: write_retro requires an explicit verdict of "pass" or "fail".',
+			},
+			null,
+			2,
+		);
+	}
+
+	// Build the RetrospectiveEvidence entry with the caller's explicit outcome.
 	const retroEntry: RetrospectiveEvidence = {
 		task_id: taskId,
 		type: 'retrospective',
 		timestamp: new Date().toISOString(),
 		agent: 'architect',
-		verdict: 'pass',
+		verdict: args.verdict,
 		summary: summary,
 		metadata: args.metadata,
 		phase_number: phase,
@@ -608,6 +624,7 @@ export async function executeWriteRetro(
  * Tool definition for write_retro
  */
 export const write_retro: ToolDefinition = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
 		'Write a retrospective evidence bundle for a completed phase. ' +
 		'Accepts flat retro fields and writes a correctly-wrapped EvidenceBundle to ' +
@@ -620,6 +637,9 @@ export const write_retro: ToolDefinition = createSwarmTool({
 			.min(1)
 			.max(99)
 			.describe('The phase number being completed (e.g., 1, 2, 3)'),
+		verdict: z
+			.enum(['pass', 'fail'])
+			.describe('Explicit retrospective verdict for the phase'),
 		summary: z.string().describe('Human-readable summary of the phase'),
 		task_count: z
 			.number()
@@ -703,6 +723,7 @@ export const write_retro: ToolDefinition = createSwarmTool({
 		try {
 			const writeRetroArgs: WriteRetroArgs = {
 				phase: Number(args.phase),
+				verdict: args.verdict as unknown as 'pass' | 'fail' | undefined,
 				summary: String(args.summary ?? ''),
 				task_count: Number(args.task_count),
 				task_complexity: args.task_complexity as unknown as

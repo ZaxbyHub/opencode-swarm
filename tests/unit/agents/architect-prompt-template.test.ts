@@ -222,11 +222,13 @@ describe('architect-prompt-template: task 11.1 verification tests', () => {
 		expect(prompt).toContain('fr_refs');
 	});
 
-	it('33. ACCEPTANCE FIELD RESOLUTION requires verbatim/byte-for-byte FR text, all mapped FRs concatenated', () => {
-		expect(prompt).toContain('byte-for-byte');
-		expect(prompt).toContain('no summarizing or paraphrasing');
+	it('33. ACCEPTANCE FIELD RESOLUTION maps ids to gate-injected verbatim FR text (#2205)', () => {
+		expect(prompt).toContain('delegation gate automatically injects');
 		expect(prompt).toContain(
-			'concatenate all of them when a task maps to more than one',
+			'full verbatim requirement text from the current `.swarm/spec.md`',
+		);
+		expect(prompt).toContain(
+			'Never replace an id with a summary or paraphrase',
 		);
 	});
 

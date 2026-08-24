@@ -59,6 +59,20 @@ export interface MemorySource {
 	createdBy?: string;
 }
 
+/** Repository-relative structural location associated with a memory result. */
+export interface MemoryAnchor {
+	file: string;
+	symbol?: string;
+}
+
+/** A task-observed result for a recalled memory or graph answer. */
+export interface MemoryOutcome {
+	outcome: 'useful' | 'dead_end' | 'corrected';
+	at: string;
+	taskId?: string;
+	correction?: string;
+}
+
 export interface MemoryRecord {
 	id: string;
 	scope: MemoryScopeRef;
@@ -76,6 +90,10 @@ export interface MemoryRecord {
 	supersededBy?: string;
 	contentHash: string;
 	metadata: Record<string, unknown>;
+	/** Optional code-structure anchors; additive for pre-#1989 stores. */
+	anchors?: MemoryAnchor[];
+	/** Append-only materialized outcome view; provider events remain canonical. */
+	outcomes?: MemoryOutcome[];
 	// Linked Knowledge 5/5 (#1850): cohort-sharing provenance. All optional so
 	// pre-#1850 records continue to load without migration. Populated by the
 	// gateway on cohort-linked writes; validated by `validateMemoryRecordRules`
@@ -96,6 +114,18 @@ export interface MemoryRecord {
 	providerVersion?: string;
 	/** Source git revision of the producer, when available. */
 	sourceRevision?: string;
+	// #1466 Phase 6 provenance — denormalized to memory_items columns by the
+	// SQLite provider. All optional so pre-#1466 records (and the JSONL
+	// provider) stay valid; contentHash/id derive from {scope,kind,text} only.
+	/** Unit-of-work (plan task) identity that produced the record. Never
+	 * defaulted to sessionID — see MemoryContext.unitId. */
+	sourceTaskId?: string;
+	/** Embedding model version at write time (Phase 4 swaps join on this). */
+	embeddingModelVersion?: string;
+	/** When this memory became authoritative (supersede chains). */
+	validFrom?: string;
+	/** Why this record superseded its predecessor. */
+	supersedesReason?: string;
 }
 
 export interface MemoryProposal {
@@ -129,6 +159,8 @@ export interface NewMemoryRecord {
 	source?: MemorySource;
 	expiresAt?: string;
 	metadata?: Record<string, unknown>;
+	anchors?: MemoryAnchor[];
+	outcomes?: MemoryOutcome[];
 }
 
 export type MemoryPatch = Partial<
@@ -143,6 +175,8 @@ export type MemoryPatch = Partial<
 		| 'source'
 		| 'expiresAt'
 		| 'metadata'
+		| 'anchors'
+		| 'outcomes'
 	>
 >;
 

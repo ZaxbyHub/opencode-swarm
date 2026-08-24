@@ -21,6 +21,7 @@ import {
 import { advisoryWarn } from '../services/warning-buffer';
 import { log } from '../utils';
 import { bunSpawn } from '../utils/bun-compat';
+import { resolveGitExecutable } from '../utils/git-executable.js';
 // Note: writeScopeToDisk is accessed via _internals.writeScopeToDisk at call time
 // to allow DI for tests without mock.module leakage. The top-level import is intentionally
 // omitted; the seam default performs a dynamic import on first use.
@@ -92,8 +93,16 @@ export const _internals: {
 	) => Promise<void>;
 	/** Test seam for removeWorktree — allows tests to intercept worktree removal calls. */
 	removeWorktree: typeof removeWorktree;
+	/**
+	 * Test seam for the git binary resolution (issue #2236 hardening, lane
+	 * C1b) — see `src/utils/git-executable.ts`. Allows tests to stub a
+	 * deterministic value instead of exercising the real filesystem-probing
+	 * resolver against a mocked `bunSpawn`.
+	 */
+	resolveGitExecutable: typeof resolveGitExecutable;
 } = {
 	bunSpawn,
+	resolveGitExecutable,
 	platform: process.platform,
 	sleep: (ms: number) =>
 		new Promise<void>((resolve) => setTimeout(resolve, ms)),
@@ -237,12 +246,26 @@ interface GitResult {
 
 /** Default timeout for git worktree operations (30 seconds). */
 const WORKTREE_TIMEOUT_MS = 30_000;
+/**
+ * Issue #2271 bug 1: budget for the two post-provision verification probes
+ * (`.git` stat + `git rev-parse --git-dir` inside the fresh lane). These run
+ * on an already-created lane, so a tight bound suffices — a lane whose git
+ * link cannot be probed in 5 s is broken, not slow.
+ */
+const WORKTREE_VERIFICATION_TIMEOUT_MS = 5_000;
 
 /**
  * Windows MAX_PATH safety margin. The OS limit is 260 characters; we use
  * 250 to leave room for UNC prefix overhead or other edge cases.
  */
 const WIN_PATH_BUDGET = 250;
+
+/**
+ * Exit code reported when git never started at all (resolution or spawn
+ * failure). Mirrors `GIT_SPAWN_FAILURE_EXIT_CODE` in `./merge.ts`; kept local
+ * rather than shared so `core.ts` gains no import edge on `merge.ts`.
+ */
+const GIT_SPAWN_FAILURE_EXIT_CODE = 1;
 
 /**
  * Runs a git command via `_internals.bunSpawn` and returns the exit code,
@@ -254,20 +277,46 @@ const WIN_PATH_BUDGET = 250;
  * - `stdin: 'ignore'` (prevents Bun/Windows pipe hangs)
  * - Bounded `timeout`
  * - Best-effort `proc.kill()` in `finally`
+ *
+ * Never throws on a start failure. Resolution and spawn are contained
+ * TOGETHER, inside one guard, and mapped onto the non-zero `GitResult` this
+ * function already returns for a git that did not succeed (the containment
+ * shape used by `src/review/diff-source.ts`).
+ *
+ * `resolveGitExecutable()` no longer throws on its own account — every
+ * non-accepting outcome returns the bare `'git'` name (issue #2236 BL-1, see
+ * `src/utils/git-executable.ts`) — so the containment is no longer there to
+ * catch a `GitBinaryMissingError`. It stays because the guarded region is
+ * still genuinely throw-capable: the spawn it wraps throws, and
+ * `_internals.resolveGitExecutable` is a DI seam a caller (or a test) can
+ * replace with something that does. Resolving OUTSIDE the guard would let any
+ * such throw escape `runGit` entirely — structurally the same leak as the
+ * original `merge.ts` defect issue #2236 fixes.
  */
 async function runGit(
 	args: string[],
 	cwd: string,
 	timeoutMs = WORKTREE_TIMEOUT_MS,
 ): Promise<GitResult> {
-	const proc = _internals.bunSpawn(['git', ...args], {
-		cwd,
-		timeout: timeoutMs,
-		stdin: 'ignore' as const,
-		stdout: 'pipe' as const,
-		stderr: 'pipe' as const,
-		env: { ...process.env, LC_ALL: 'C' },
-	});
+	let proc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		proc = _internals.bunSpawn([_internals.resolveGitExecutable(), ...args], {
+			cwd,
+			timeout: timeoutMs,
+			stdin: 'ignore' as const,
+			stdout: 'pipe' as const,
+			stderr: 'pipe' as const,
+			env: { ...process.env, LC_ALL: 'C' },
+		});
+	} catch (error) {
+		return {
+			exitCode: GIT_SPAWN_FAILURE_EXIT_CODE,
+			stdout: '',
+			stderr: `git ${args[0] ?? 'command'} could not start in ${cwd}: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
 	try {
 		const exitCode = await proc.exited;
 		const stdout = await proc.stdout.text();
@@ -338,14 +387,32 @@ export async function checkPathBudget(
 		return { ok: true };
 	}
 
-	const proc = _internals.bunSpawn(['git', 'ls-files'], {
-		cwd: directory,
-		timeout: WORKTREE_TIMEOUT_MS,
-		stdin: 'ignore' as const,
-		stdout: 'pipe' as const,
-		stderr: 'ignore' as const,
-		env: { ...process.env, LC_ALL: 'C' },
-	});
+	// Issue #2236: resolving outside this guard let a throw from the
+	// resolve-then-spawn sequence escape an otherwise fail-open advisory
+	// check. (`resolveGitExecutable()` itself no longer throws — BL-1 made
+	// every non-accepting outcome return the bare `'git'` name — but the spawn
+	// does, and `_internals.resolveGitExecutable` is a replaceable DI seam.)
+	// Resolution and spawn are contained together and mapped onto this
+	// function's documented fail-open contract — every other failure below
+	// (non-zero exit, empty output, longpaths query throw) already returns
+	// `{ ok: true }`, and a git that cannot start must not be the one failure
+	// mode that blocks worktree creation.
+	let proc: ReturnType<typeof _internals.bunSpawn>;
+	try {
+		proc = _internals.bunSpawn(
+			[_internals.resolveGitExecutable(), 'ls-files'],
+			{
+				cwd: directory,
+				timeout: WORKTREE_TIMEOUT_MS,
+				stdin: 'ignore' as const,
+				stdout: 'pipe' as const,
+				stderr: 'ignore' as const,
+				env: { ...process.env, LC_ALL: 'C' },
+			},
+		);
+	} catch {
+		return { ok: true };
+	}
 
 	try {
 		const exitCode = await proc.exited;
@@ -677,9 +744,10 @@ export async function provisionWorktree(
 		interface ParsedWorktree {
 			path: string;
 			branch: string | undefined;
+			/** #2208: git marks a registration `prunable` when its directory is gone. */
+			prunable: boolean;
 		}
-		const entries: ParsedWorktree[] = [];
-		let current: ParsedWorktree = { path: '', branch: undefined };
+		let entries: ParsedWorktree[] = [];
 
 		if (listResult.exitCode !== 0) {
 			const raw = listResult.stderr.trim() || listResult.stdout.trim();
@@ -690,19 +758,69 @@ export async function provisionWorktree(
 			};
 		}
 
-		for (const rawLine of listResult.stdout.split('\n')) {
-			const line = rawLine.trim();
-			if (line.startsWith('worktree ')) {
-				if (current.path) entries.push(current);
-				current = {
-					path: normalizeGitPath(line.slice('worktree '.length)),
-					branch: undefined,
-				};
-			} else if (line.startsWith('branch ')) {
-				current.branch = line.slice('branch '.length);
+		const parsePorcelain = (stdout: string): ParsedWorktree[] => {
+			const parsed: ParsedWorktree[] = [];
+			let cur: ParsedWorktree = {
+				path: '',
+				branch: undefined,
+				prunable: false,
+			};
+			for (const rawLine of stdout.split('\n')) {
+				const line = rawLine.trim();
+				if (line.startsWith('worktree ')) {
+					if (cur.path) parsed.push(cur);
+					cur = {
+						path: normalizeGitPath(line.slice('worktree '.length)),
+						branch: undefined,
+						prunable: false,
+					};
+				} else if (line.startsWith('branch ')) {
+					cur.branch = line.slice('branch '.length);
+				} else if (line === 'prunable' || line.startsWith('prunable ')) {
+					cur.prunable = true;
+				}
 			}
+			if (cur.path) parsed.push(cur);
+			return parsed;
+		};
+		entries = parsePorcelain(listResult.stdout);
+
+		// #2208: a registration git itself marks `prunable` (worktree directory
+		// deleted by a crash/kill mid-task while the branch survived) is stale
+		// metadata, not an active lane. Without this, the classification below
+		// treats the deleted path as an active collision and isCleanWorktree
+		// fails on the missing directory — surfacing "expected worktree is
+		// dirty" and stalling recovery. Prune the stale registration and
+		// re-enumerate; the leftover branch then reconciles through the normal
+		// stale-branch path below (ahead-count check + branch -d + re-add).
+		const hasPrunableCollision = entries.some(
+			(e) =>
+				e.prunable &&
+				(e.path === expectedPath || e.branch === `refs/heads/${branchName}`),
+		);
+		if (hasPrunableCollision) {
+			const pruneResult = await runGit(['worktree', 'prune'], directory);
+			if (pruneResult.exitCode !== 0) {
+				return {
+					error: `Failed to prune stale worktree registration: ${
+						pruneResult.stderr.trim() || pruneResult.stdout.trim()
+					}`,
+				};
+			}
+			const relistResult = await runGit(
+				['worktree', 'list', '--porcelain'],
+				directory,
+			);
+			if (relistResult.exitCode !== 0) {
+				const raw = relistResult.stderr.trim() || relistResult.stdout.trim();
+				const bounded =
+					raw.length > 500 ? `${raw.slice(0, 500)}... (truncated)` : raw;
+				return {
+					error: `worktree enumeration failed after prune: ${bounded}`,
+				};
+			}
+			entries = parsePorcelain(relistResult.stdout);
 		}
-		if (current.path) entries.push(current);
 
 		// Case (b) active collision: branch is checked out in ANY registered
 		// worktree, OR the expected path is itself registered (regardless of
@@ -775,6 +893,49 @@ export async function provisionWorktree(
 	if (addResult.exitCode !== 0) {
 		return {
 			error: `Failed to create worktree: ${addResult.stderr.trim() || addResult.stdout.trim()}`,
+		};
+	}
+
+	// Issue #2271 bug 1: `git worktree add` exiting 0 does not by itself prove
+	// the lane is a registered, usable worktree — a concurrent prune, a partial
+	// removal from a sibling dispatch's collision cleanup, or a half-consumed
+	// `worktree remove` can leave a plain directory with no `.git` link. A coder
+	// session created in such a directory writes files git can never attribute,
+	// and settlement records dispatch_no_mutation even though the coder worked.
+	// Probe git's own view of the lane before any session is created inside it.
+	// (Deliberately a git probe, not a filesystem `.git` probe: lanes live
+	// outside the project root by default, where rev-parse only succeeds inside
+	// a genuinely registered worktree; and a filesystem probe breaks the
+	// spawn-mocked provisioning tests whose lanes never exist on disk. A lane
+	// rooted inside another repository via a custom worktree_dir would still
+	// resolve — accepted residual, strictly narrower than the reported defect.)
+	const revParseResult = await runGit(
+		['rev-parse', '--git-dir'],
+		worktreePath,
+		WORKTREE_VERIFICATION_TIMEOUT_MS,
+	);
+	if (revParseResult.exitCode !== 0) {
+		// The lane is unusable; remove the partial registration so the next
+		// attempt provisions cleanly instead of colliding with this carcass.
+		// removeWorktree never REJECTS — it resolves with { error } on failure
+		// (Windows EBUSY/EPERM retries exhausted, non-force-refusable path) —
+		// so a bare .catch() cannot observe that failure. Report the removal
+		// outcome honestly instead of claiming the lane was removed.
+		const removeResult = await removeWorktree(worktreePath, directory, {
+			force: true,
+			worktreeDir: options.worktreeDir,
+		}).catch((removalError: unknown): { error: string } => ({
+			error:
+				removalError instanceof Error
+					? removalError.message
+					: String(removalError),
+		}));
+		const removalNote =
+			'error' in removeResult
+				? `The lane could NOT be removed (${removeResult.error}) — it may collide with the next provisioning attempt; clear ${worktreePath} manually if retries fail.`
+				: 'The lane was removed; retry the dispatch.';
+		return {
+			error: `WORKTREE_VERIFICATION_FAILED: lane ${worktreePath} did not register as a usable git worktree (git rev-parse --git-dir failed in the lane: ${revParseResult.stderr.trim() || revParseResult.stdout.trim() || `exit ${revParseResult.exitCode}`}). ${removalNote}`,
 		};
 	}
 

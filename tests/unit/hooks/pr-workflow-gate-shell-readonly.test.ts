@@ -256,6 +256,76 @@ describe('PR feedback shell mutation gate - read-only classifications', () => {
 		}
 	});
 
+	test('accepts protocol-prescribed regex and literal search modes under .swarm', async () => {
+		await activatePrWorkflow(directory, 'review-search-selectors', 'PR_REVIEW');
+		for (const mode of ['regex', 'literal'] as const) {
+			await expect(
+				enforcePrWorkflowToolBefore(
+					directory,
+					'review-search-selectors',
+					'search',
+					{
+						include: '.swarm/bundled-skills/swarm-pr-review/SKILL.md',
+						mode,
+						query: mode === 'regex' ? 'dispatch_.*' : 'dispatch_lanes_async',
+					},
+				),
+			).resolves.toBeUndefined();
+		}
+	});
+
+	test('names the unsafe search argument before protected-path attribution', async () => {
+		await activatePrWorkflow(
+			directory,
+			'review-search-diagnostic',
+			'PR_REVIEW',
+		);
+		const outcome = await enforcePrWorkflowToolBefore(
+			directory,
+			'review-search-diagnostic',
+			'search',
+			{
+				include: '.swarm/pr-review/run/findings.json',
+				mode: 'write',
+				query: 'finding',
+			},
+		).then(
+			() => 'ALLOWED',
+			(error) => String(error),
+		);
+		expect(outcome).toContain('mode');
+		expect(outcome).toContain('search mode must be one of');
+		expect(outcome).toContain('read-only');
+		expect(outcome).not.toContain('controller-owned');
+	});
+
+	test('reports nested unsafe argument paths for allowlisted read-only tools', async () => {
+		await activatePrWorkflow(directory, 'review-read-diagnostic', 'PR_REVIEW');
+		const outcome = await enforcePrWorkflowToolBefore(
+			directory,
+			'review-read-diagnostic',
+			'read',
+			{ requests: [{ path: 'src/index.ts' }, { operation: 'write' }] },
+		).then(
+			() => 'ALLOWED',
+			(error) => String(error),
+		);
+		expect(outcome).toContain('requests[1].operation');
+		expect(outcome).toContain('recognized observation operation');
+	});
+
+	test('retains protected-evidence attribution for genuinely mutating tools', async () => {
+		await activatePrWorkflow(directory, 'review-protected-write', 'PR_REVIEW');
+		await expect(
+			enforcePrWorkflowToolBefore(
+				directory,
+				'review-protected-write',
+				'apply_patch',
+				{ patch: '*** Update File: .swarm/pr-review/run/findings.json' },
+			),
+		).rejects.toThrow('controller-owned');
+	});
+
 	test('protects durable gate, delegation, lane-output, and trigger evidence paths', async () => {
 		await activatePrWorkflow(directory, 'protected-evidence', 'PR_FEEDBACK');
 		for (const [toolName, args] of [

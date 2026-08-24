@@ -28,6 +28,7 @@ describe('#1850 memory family manifest (acceptance #7)', () => {
 		expect(filenames).toContain('proposals.jsonl');
 		expect(filenames).toContain('audit.jsonl');
 		expect(filenames).toContain('reward-events.jsonl');
+		expect(filenames).toContain('outcome-events.jsonl');
 		expect(filenames).toContain('consolidation-log.jsonl');
 		// Derived/skip members.
 		expect(filenames).toContain('backups/');

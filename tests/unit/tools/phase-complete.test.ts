@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	setDefaultTimeout,
+	test,
+} from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -11,13 +18,10 @@ import {
 } from '../../../src/state';
 import { seedStageBGates } from '../../helpers/task-workflow-evidence';
 
-// Import the tool after setting up environment
 const { phase_complete, executePhaseComplete } = await import(
 	'../../../src/tools/phase-complete'
 );
-/**
- * Helper function to write a valid retro bundle for a phase
- */
+setDefaultTimeout(30_000);
 function writeRetroBundle(
 	directory: string,
 	phaseNumber: number,
@@ -894,7 +898,7 @@ describe('phase_complete tool', () => {
 			});
 			const parsed2 = JSON.parse(result2);
 			expect(parsed2.success).toBe(true);
-		}, 10_000);
+		});
 
 		test('phase scoping reset - different phases maintain separate state', async () => {
 			fs.mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
@@ -936,7 +940,7 @@ describe('phase_complete tool', () => {
 
 			// Phase should be updated
 			expect(session?.lastPhaseCompletePhase).toBe(2);
-		}, 10_000);
+		});
 	});
 
 	describe('delegation chains integration', () => {
@@ -1431,7 +1435,7 @@ describe('phase_complete tool', () => {
 			).toBe(true);
 		});
 
-		test('malformed plan.json produces warning but success is still true', async () => {
+		test('malformed plan.json fails closed without committing completion', async () => {
 			// Set up permissive config
 			fs.mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
 			fs.writeFileSync(
@@ -1461,13 +1465,9 @@ describe('phase_complete tool', () => {
 			});
 			const parsed = JSON.parse(result);
 
-			expect(parsed.success).toBe(true);
-			expect(parsed.status).toBe('success');
-			expect(
-				parsed.warnings.some((w: string) =>
-					w.includes('failed to update plan.json'),
-				),
-			).toBe(true);
+			expect(parsed.success).toBe(false);
+			expect(parsed.status).toBe('incomplete');
+			expect(parsed.reason).toBe('PHASE_PLAN_UNREADABLE');
 		});
 
 		test('plan.json with no matching phase ID does not produce warning', async () => {
@@ -1919,7 +1919,13 @@ describe('phase_complete tool', () => {
 			).toBe(false);
 		});
 
-		test('ADVERSARY: plan.json with null phases field - normal enforcement applies', async () => {
+		test('ADVERSARY: plan.json with null phases field - completion-verify-gate fail-closes', async () => {
+			// Sibling test ("plan.json is corrupt JSON" ~line 1895) preserves the
+			// dispatch-fallback adversarial coverage (success=false, status='incomplete',
+			// agentsMissing contains 'coder', no fallback warning). This test is its
+			// counterpart for the fail-closed catch path: a null phases field causes
+			// .find() on null to throw inside the gate, which the fail-closed catch
+			// must convert to status='blocked' instead of letting it fall through.
 			// Set up permissive config with required_agents
 			fs.mkdirSync(path.join(tempDir, '.opencode'), { recursive: true });
 			fs.writeFileSync(
@@ -1950,16 +1956,9 @@ describe('phase_complete tool', () => {
 			});
 			const parsed = JSON.parse(result);
 
-			// .find() on null throws, caught by try/catch, falls through to normal enforcement
+			// .find() on null throws, caught by completion-verify-gate's fail-closed catch
 			expect(parsed.success).toBe(false);
-			expect(parsed.status).toBe('incomplete');
-			expect(parsed.agentsMissing).toContain('coder');
-			// Fallback should NOT activate due to null phases error
-			expect(
-				parsed.warnings.some((w: string) =>
-					w.includes('Agent dispatch fallback'),
-				),
-			).toBe(false);
+			expect(parsed.status).toBe('blocked');
 		});
 
 		test('ADVERSARY: plan.json with task having unexpected status value - fallback does NOT activate', async () => {

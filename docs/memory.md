@@ -2,12 +2,13 @@
 
 Swarm memory stores scoped, source-backed facts that can be recalled by agents without giving agents direct write access to durable memory.
 
-Swarm memory is an optional, project-scoped recall system. The current default provider is SQLite under `.swarm/memory/memory.db`; the legacy local JSONL provider remains available for migration and debug workflows. Enabling memory exposes two agent tools:
+Swarm memory is an optional, project-scoped recall system. The current default provider is SQLite under `.swarm/memory/memory.db`; the legacy local JSONL provider remains available for migration and debug workflows. Enabling memory exposes three agent tools:
 
 - `swarm_memory_recall`: read-only scoped recall.
 - `swarm_memory_propose`: proposal-only writes. It creates pending proposals and never writes durable memory directly.
+- `swarm_memory_outcome`: records whether recalled memory or a graph answer was useful, a dead end, or corrected. It can target a memory ID or create a lightweight question result.
 
-Memory is disabled by default. When disabled, default agents are not given the memory tools, direct tool calls return a clear disabled result, and existing Swarm behavior is unchanged.
+Memory is disabled by default. When disabled, default agents are not given the memory tools, direct tool calls return a clear disabled result, reflection artifacts are not regenerated or injected, and existing Swarm behavior is unchanged.
 
 ## Configuration
 
@@ -28,11 +29,19 @@ Enable local memory in `.opencode/opencode-swarm.json`:
       "defaultTokenBudget": 1200,
       "minScore": 0.05
     },
+    "reflection": {
+      "enabled": false,
+      "halfLifeDays": 30
+    },
     "writes": {
       "mode": "propose"
     },
     "redaction": {
-      "rejectDurableSecrets": true
+      "rejectDurableSecrets": true,
+      "detectPii": false,
+      "piiDetector": "regex",
+      "rejectDurablePii": false,
+      "piiThreshold": 0.7
     },
     "embeddings": {
       "enabled": false,
@@ -69,6 +78,8 @@ Enable local memory in `.opencode/opencode-swarm.json`:
 ```
 
 All `learning.*` fields shown above are the defaults — override only the ones you want to tune; see [Recall Learning](#recall-learning) for what each controls.
+
+Outcome feedback is append-only and may include file/symbol anchors. When both `memory.enabled` and `reflection.enabled` are true, Swarm regenerates signed, time-decayed lessons to `.swarm/reflections/lessons.{md,json}` in a deferred startup task and after every `swarm_memory_outcome` write, then the system enhancer may inject a bounded `[SWARM MEMORY REFLECTION — UNTRUSTED BACKGROUND]` block from `lessons.json` when prompt budget allows. The compact session context promotes a source only after two distinct useful outcomes, preserves contested and corrected evidence, and excludes memories whose anchors no longer exist. Reflection is opt-in in this release.
 
 `sqlite` is the default provider. `local-jsonl` remains available for legacy/debug mode:
 
@@ -416,6 +427,37 @@ Curator agents may return an optional JSON `curatorMemoryDecisions` array in Tas
 
 In SQLite, decision application is transactional: Swarm loads the pending proposal, validates the decision and resulting memory record, applies the memory change, updates proposal status, and appends a `curator_decision` event in one transaction. Superseded memories are marked with `supersededBy` and stop appearing in recall.
 
+## Outcome Feedback
+
+`swarm_memory_outcome` records task-observed results for recalled memory or a graph answer. Supply exactly one of `memory_id` or `question`:
+
+```json
+{
+  "memory_id": "mem_aaaaaaaaaaaaaaaa",
+  "outcome": "corrected",
+  "correction": "The parser is async; await loadParser() before calling parse().",
+  "anchors": [
+    { "file": "src/parser.ts", "symbol": "loadParser" },
+    { "file": "src/parser.ts", "symbol": "parse" }
+  ]
+}
+```
+
+```json
+{
+  "question": "Which parser entrypoint is current?",
+  "outcome": "dead_end",
+  "anchors": [{ "file": "docs/parser.md" }]
+}
+```
+
+- `memory_id` must be an existing `mem_<16 hex>` id. `question` is for a lightweight result record when no memory id is known yet.
+- `outcome` is one of `useful`, `dead_end`, or `corrected`.
+- `correction` is required for `corrected` and invalid for other outcomes.
+- Each anchor is repository-relative: `file` is required and `symbol` is optional. Up to 20 anchors are accepted.
+
+Outcome events are durable, append-only history. Avoid putting secrets or personal data into `correction` text unless you are willing to retain it in project-local memory state; durable records reject likely secrets when `memory.redaction.rejectDurableSecrets=true`, and reflection artifacts additionally redact secret-like text before injection or persistence.
+
 ## Maintenance and Observability
 
 Memory cleanup is explicit. Swarm does not automatically remove deleted, superseded, or expired scratch records. The command surface is safe by default:
@@ -439,8 +481,91 @@ The detector is intentionally conservative and covers obvious cases:
 - private key blocks
 - `Authorization: Bearer ...`
 - `.env` style `*_KEY=`, `*_TOKEN=`, `*_SECRET=`, and `*_PASSWORD=` entries
+- GitLab `glpat-`/`glptt-` tokens, Slack `xox[abprs]-` tokens, JWTs, Stripe
+  `sk_live_`/`rk_live_` keys, Google `AIza...` keys, OpenSSH private key
+  blocks, and AWS secret access keys (label-anchored, plus the
+  same-line-after-`AKIA` context heuristic) — issue #1466 (DD-05)
+- bare `?key=...` URL query parameters are NOT redacted (the env-secret
+  pattern requires at least one uppercase `PREFIX_` segment) — issue #1466
+  (DD-06)
 
 Durable memories with likely secrets are rejected. Recall output is redacted.
+
+## Privacy, Provenance, and Audit Integrity (issue #1466)
+
+**PII detection (opt-in).** `memory.redaction.detectPii: true` runs a PII
+detector over durable memory text at the write boundary and attaches a
+summary (types, counts, score — never matched text) to the proposal.
+`memory.redaction.rejectDurablePii: true` additionally rejects proposals
+whose PII score exceeds `memory.redaction.piiThreshold` (default `0.7`,
+strictly greater-than; the schema rejects `1`, which could never fire and
+would silently disable rejection). The same checks run over outcome
+`correction` free text. Rejections are recorded in the audit log
+(SQLite provider only) as a `pii_rejected` event with types/score only.
+Two implementations: `regex` (default; dependency-free email / phone /
+Luhn-validated credit card / SSN / IP detection, normalized for detection
+against fullwidth-digit and zero-width-character evasion) and `ner`
+(person/organization/location via the OPTIONAL `@xenova/transformers`
+peer dependency — install it yourself or keep `piiDetector: "regex"`; a
+missing install fails closed with a typed error carrying install
+instructions, and concurrent first calls share one model load). Microsoft
+Presidio remains a documented alternative for Python-side deployments;
+Phase 6 (#1466) ships the transformers.js NER option and the regex
+default. All detection defaults are OFF — the default install performs no
+PII detection. The GATEWAY is the enforcement boundary: provider-level
+writes (dev tooling, evaluation fixtures, the legacy-JSONL migration)
+intentionally bypass PII enforcement — route user-facing memory writes
+through the gateway.
+
+**Provenance columns (migration v12).** Every `memory_items` row carries
+`source_task_id` (the unit-of-work identity that produced it, from the
+gateway context), `agent_role`, `embedding_model_version` (populated when
+embeddings are active — the join key for future embedding-model swaps),
+`valid_from` (when this memory became authoritative), and
+`supersedes_reason` (why a supersede chain replaced the predecessor).
+Legacy rows backfill with safe defaults (`''` / `'unknown'` /
+`valid_from = createdAt`).
+
+**Audit-log hash chain (migration v13).** Every `memory_events` row stores
+`prev_hash` — the SHA-256 of the full previous row — forming a
+tamper-evident chain anchored at `GENESIS`, with the head hash mirrored
+into `_meta`. The chain tail is read from `_meta` inside the same
+transaction as each insert, so concurrent providers on one database
+(cohort siblings) always chain off the true tail. `/swarm memory
+audit-verify [--json]` lazily walks the chain and reports the first
+divergence, deleted-row breaks, and last-row tampering (via the chain
+head). Scope: the chain is unkeyed SHA-256 — it detects corruption and
+tampering by anything WITHOUT database write access; an attacker who can
+write the database file can recompute the chain (PKI-bound signing is
+deliberately out of scope for v1 per #1466). Rows written by an older
+binary after this migration (no `prev_hash`) are reported as a persistent
+divergence until the database is rewritten under the new version only.
+`memory_events` rows — including `pii_rejected` metadata — are currently
+retained indefinitely (they never contain matched PII text); bounded
+retention is owned by the observability retention work (issue #2036).
+The audit log is a SQLite-provider feature; the local-jsonl provider
+reports the gap explicitly. Chain verification runs only on demand — the
+write path adds one hash and one indexed point-read per event.
+
+**Sentinel hardening (DD-14).** Recall-injection blocks embed an
+unforgeable `bundle_<timestamp>_<hash>` marker; stored memory text
+containing the `bundle_` prefix is rejected at write time, so a stored
+memory can no longer forge "recall already injected" and silently suppress
+its own recall.
+
+**`--fixtures` traversal defense (DD-24).** `/swarm memory evaluate
+--fixtures <dir>` resolves the path against the filesystem (realpath) and
+rejects symlinks or non-canonical paths that escape the project directory
+or the bundled fixtures directory.
+
+**Recall-quality regression gate.** `bun run check:memory-recall` runs the
+golden recall evaluation twice (a determinism gate), compares
+`precision@k` against the pinned baseline
+(`tests/fixtures/memory-recall-baseline.json`), and fails on a drop
+greater than the baseline tolerance (0.05). CI runs it as the
+`memory-recall-regression` job. Regenerate the baseline with
+`bun run scripts/memory-recall-regression.ts --update` when an intentional
+metric change lands, and justify it in the PR.
 
 ## Inspecting Or Resetting Local Memory
 

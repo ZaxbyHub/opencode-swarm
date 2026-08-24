@@ -28,6 +28,11 @@ interface EvidenceData {
 	required_gates: string[];
 	gates: Record<string, GateInfo>;
 	todo_scan?: { priority: string; count: number; details?: string[] };
+	workflow?: {
+		state?: string;
+		generation?: number;
+		schema?: string;
+	};
 }
 
 interface GateStatusResult {
@@ -40,6 +45,14 @@ interface GateStatusResult {
 	message: string;
 	todo_scan: { priority: string; count: number; details?: string[] } | null;
 	secretscan_verdict?: 'pass' | 'fail' | 'not_run';
+	/** Durable workflow lifecycle snapshot (gate-evidence exact-task-v1). */
+	workflow?: { state: string; generation: number } | null;
+	/**
+	 * Present only when the durable store looks wedged at coder_delegated with
+	 * no pre_check gate — the TASK_WORKFLOW_STAGE_A_REQUIRED signature (e.g.
+	 * after /swarm reset-session destroyed the in-memory attribution chain).
+	 */
+	workflow_attribution_hint?: string;
 }
 
 // Task ID validation delegated to shared module (#452 item 2)
@@ -325,6 +338,36 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 			| { priority: string; count: number; details?: string[] }
 			| undefined;
 
+		// Durable workflow lifecycle diagnostics. A task whose workflow store
+		// sits at coder_delegated with no pre_check gate proof is wedged: every
+		// Stage B dispatch will be denied with TASK_WORKFLOW_STAGE_A_REQUIRED.
+		// Surfacing it here makes the wedge visible from the read-only tool
+		// instead of only via the (previously swallowed) write-path error.
+		const workflowMeta =
+			evidenceData.workflow &&
+			typeof evidenceData.workflow === 'object' &&
+			typeof evidenceData.workflow.state === 'string'
+				? {
+						state: evidenceData.workflow.state,
+						generation:
+							typeof evidenceData.workflow.generation === 'number'
+								? evidenceData.workflow.generation
+								: 0,
+					}
+				: null;
+		let workflowAttributionHint: string | undefined;
+		if (
+			status === 'incomplete' &&
+			workflowMeta?.state === 'coder_delegated' &&
+			!gatesMap.pre_check
+		) {
+			workflowAttributionHint =
+				`Task is settled at coder_delegated but Stage A (pre_check_batch) was never attributed — ` +
+				`reviewer/test_engineer dispatches will be denied with TASK_WORKFLOW_STAGE_A_REQUIRED. ` +
+				`Run pre_check_batch on the task's changed files; if it passes without advancing this task, run /swarm recover ${taskIdInput}.`;
+			message += ` ${workflowAttributionHint}`;
+		}
+
 		const result: GateStatusResult = {
 			taskId: taskIdInput,
 			status,
@@ -335,6 +378,10 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 			message,
 			todo_scan: todoScan ?? null,
 			secretscan_verdict: secretscanVerdict,
+			workflow: workflowMeta,
+			...(workflowAttributionHint
+				? { workflow_attribution_hint: workflowAttributionHint }
+				: {}),
 		};
 
 		return JSON.stringify(result, null, 2);

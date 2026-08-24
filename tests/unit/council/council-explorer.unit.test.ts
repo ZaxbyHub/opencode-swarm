@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { synthesizeCouncilVerdicts } from '../../../src/council/council-service';
 import type {
@@ -10,6 +9,7 @@ import type {
 } from '../../../src/council/types';
 import { ArgsSchema } from '../../../src/tools/convene-council';
 import { seedCouncilLaunch } from '../../helpers/task-workflow-evidence';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const makeVerdict = (
 	agent: CouncilMemberVerdict['agent'],
@@ -210,7 +210,7 @@ describe('submit_council_verdicts — requireAllMembers config enforcement', () 
 	});
 
 	test('requireAllMembers=true + 4 verdicts → tool returns failure and no evidence is written', async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), 'council-require-all-4-'));
+		const tempDir = canonicalMkdtemp('council-require-all-4-');
 		try {
 			writeConfig(tempDir, { enabled: true, requireAllMembers: true });
 
@@ -250,7 +250,7 @@ describe('submit_council_verdicts — requireAllMembers config enforcement', () 
 	});
 
 	test('requireAllMembers=true + 5 verdicts (all roles) → tool succeeds and writes evidence', async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), 'council-require-all-5-'));
+		const tempDir = canonicalMkdtemp('council-require-all-5-');
 		try {
 			writeConfig(tempDir, { enabled: true, requireAllMembers: true });
 			const sessionID = 'council-require-all-5';

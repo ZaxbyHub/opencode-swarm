@@ -408,13 +408,15 @@ describe('postMergeCleanup', () => {
 		expect(callCount).toBe(2);
 	});
 
+	// Args-aware, not call-count: issue #2236 BR-2 reordered postMergeCleanup so
+	// `worktree prune` runs BEFORE `branch -D` (git refuses to delete a branch a
+	// registered worktree still claims). Keying on call index would silently
+	// re-target these assertions at the other command on any future reordering.
 	test('branch delete fails but prune succeeds → { error, partial: true }', async () => {
-		let callCount = 0;
-		_internals.bunSpawn = () => {
-			callCount++;
-			if (callCount === 1) return mockProc(1, '', 'fatal: branch not found');
-			return mockProc(0, '', '');
-		};
+		_internals.bunSpawn = (args: string[]) =>
+			args.includes('branch')
+				? mockProc(1, '', 'fatal: branch not found')
+				: mockProc(0, '', '');
 
 		const result = await postMergeCleanup(fakeDir, fakeBranch);
 
@@ -436,12 +438,10 @@ describe('postMergeCleanup', () => {
 	});
 
 	test('prune fails but branch delete succeeds → { error } (no partial)', async () => {
-		let callCount = 0;
-		_internals.bunSpawn = () => {
-			callCount++;
-			if (callCount === 1) return mockProc(0, '', ''); // branch delete succeeds
-			return mockProc(1, '', 'fatal: prune failed'); // prune fails
-		};
+		_internals.bunSpawn = (args: string[]) =>
+			args.includes('prune')
+				? mockProc(1, '', 'fatal: prune failed')
+				: mockProc(0, '', '');
 
 		const result = await postMergeCleanup(fakeDir, fakeBranch);
 

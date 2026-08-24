@@ -84,6 +84,12 @@ export const MEMORY_FAMILY: readonly MemoryFamilyMember[] = [
 		note: 'JSONL provider reward events.',
 	},
 	{
+		filename: 'outcome-events.jsonl',
+		scope: 'canonical',
+		mergeStrategy: 'append-union',
+		note: 'Generation-bound memory outcome events keyed by invocation id.',
+	},
+	{
 		filename: 'consolidation-log.jsonl',
 		scope: 'canonical',
 		mergeStrategy: 'append-union',

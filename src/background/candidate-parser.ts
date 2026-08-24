@@ -5,6 +5,7 @@ import {
 	analyzeCleanFields,
 	CANDIDATE_FIELD_COUNT,
 	CANDIDATE_FIELDS,
+	type CandidateArtifactRepairKind,
 	type CandidateConfidence,
 	type CandidateSeverity,
 	candidateDiagnosticPreview,
@@ -192,6 +193,26 @@ export interface ParseResult {
 	error_code?: string;
 	candidates: CandidateRecord[];
 	clean_attestation?: CleanAttestationRecord;
+	/**
+	 * The artifact carried a `[CLEAN]` attestation that had to be discredited,
+	 * but the artifact itself is still valid and its candidate rows were retained.
+	 * The parse SUCCEEDS: `error`/`error_code` are absent. Mutually exclusive with
+	 * `error_code` by construction (issue #2279).
+	 *
+	 * Callers must not read this as coverage: `clean_attestation` is `undefined`
+	 * whenever this is set, so a lane with zero candidate rows still fails
+	 * coverage exactly as before.
+	 */
+	clean_attestation_salvaged?: boolean;
+	/** Human-readable reason a salvaged attestation was discredited. */
+	clean_attestation_salvage_reason?: string;
+	/**
+	 * Structural repairs applied by `normalizeCandidateArtifact` before the strict
+	 * parse. Present only on the `parseAndPersist` path, which is the one that
+	 * normalizes; disclosed so the tool receipt reports a repaired artifact
+	 * instead of silently presenting it as pristine.
+	 */
+	repair_kinds?: CandidateArtifactRepairKind[];
 	invocation_envelope: InvocationEnvelope;
 	diagnostics: DiagnosticsSummary;
 }
@@ -561,6 +582,13 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 	let pendingClean: SharedCleanAttestationRecord | undefined;
 	let cleanErrorCode: string | undefined;
 	let cleanErrorMessage: string | undefined;
+	/**
+	 * Set when the CLEAN attestation is discredited but the artifact as a whole
+	 * is still valid — the attestation is dropped, the independently-validated
+	 * candidate rows are kept, and NO top-level error is emitted (issue #2279).
+	 * Distinct from `cleanErrorCode`, which additionally fails the parse.
+	 */
+	let cleanSalvageReason: string | undefined;
 
 	for (let i = headerIndex + 1; i < lines.length; i++) {
 		const rawLine = lines[i];
@@ -930,24 +958,31 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 			? pendingClean.lane
 			: pendingClean.micro_lane
 		: null;
-	if (pendingClean && pendingCleanLane !== null) {
+	// Guarded on `!cleanErrorCode`: a CLEAN that already hard-failed (degraded or
+	// partial source, duplicate attestation, lane mismatch) must NOT be
+	// re-labelled as a benign salvage. Without this guard a degraded artifact
+	// carrying a same-lane candidate would report a hard error and a salvage
+	// disclosure at once, and the gate would write a durable salvage record for a
+	// parse that failed (issue #2279 plan-critic BL1).
+	if (pendingClean && pendingCleanLane !== null && !cleanErrorCode) {
 		const conflictingCandidate = candidates.find(
 			(candidate) =>
 				(candidate.lane ?? candidate.micro_lane) === pendingCleanLane,
 		);
 		if (conflictingCandidate) {
-			cleanErrorCode = 'conflicting-clean-attestation';
-			cleanErrorMessage = `CLEAN attestation cannot appear with candidate rows for the same lane (${pendingCleanLane})`;
-			parseErrorDetails.push({
-				row_index: headerIndex,
-				field: 'clean_attestation',
-				message: cleanErrorMessage,
-			});
+			// Salvage, not error: the candidate rows beside this attestation were
+			// each independently validated, so the artifact still carries real
+			// findings. Only the attestation is discredited. Deliberately NOT
+			// pushed to `parseErrorDetails` — doing so would re-trip the
+			// zero-parse-errors rule immediately below and restore the hard error
+			// through the back door.
+			cleanSalvageReason = `CLEAN attestation discredited: it cannot appear with candidate rows for the same lane (${pendingCleanLane}); the candidate rows were retained`;
 		}
 	}
 	if (
 		pendingClean &&
 		!cleanErrorCode &&
+		!cleanSalvageReason &&
 		(malformedRows > 0 || parseErrorDetails.length > 0)
 	) {
 		cleanErrorCode = 'untrusted-clean-attestation';
@@ -963,8 +998,13 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 	// `!cleanErrorCode` already encodes "no same-lane candidate conflict" (set
 	// above), so candidates for OTHER lanes of a consolidated artifact no longer
 	// suppress this lane's zero-findings attestation.
+	// COVERAGE SAFETY: a salvaged attestation is discredited exactly as hard as an
+	// errored one. Downgrading the top-level error must never let a discredited
+	// CLEAN count as a lane's zero-findings coverage, so both flags gate this.
 	const cleanAttestation: CleanAttestationRecord | undefined =
-		pendingClean && !cleanErrorCode ? pendingClean : undefined;
+		pendingClean && !cleanErrorCode && !cleanSalvageReason
+			? pendingClean
+			: undefined;
 	if (cleanAttestation) {
 		formatFamiliesDetected.add(cleanAttestation.row_format_family);
 	}
@@ -1013,6 +1053,15 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 					error_code: cleanErrorCode,
 				}
 			: {}),
+		// Only ever set when the parse did NOT hard-fail: `cleanSalvageReason` is
+		// assigned under a `!cleanErrorCode` guard, so the two are mutually
+		// exclusive and a receipt can never advertise both.
+		...(cleanSalvageReason
+			? {
+					clean_attestation_salvaged: true,
+					clean_attestation_salvage_reason: cleanSalvageReason,
+				}
+			: {}),
 		candidates: acceptedCandidates,
 		...(cleanAttestation ? { clean_attestation: cleanAttestation } : {}),
 		invocation_envelope: envelope,
@@ -1056,14 +1105,21 @@ export function parseAndPersist(
 	// parser does not silently rewrite input. Candidate acceptance is a separate
 	// question and DID change for every consumer: a defective [CLEAN] no longer
 	// discards independently validated candidate rows (see acceptedCandidates).
-	const normalizedInput = flags.expected_family
-		? {
-				...input,
-				text: normalizeCandidateArtifact(input.text, flags.expected_family)
-					.text,
-			}
+	const normalized = flags.expected_family
+		? normalizeCandidateArtifact(input.text, flags.expected_family)
+		: undefined;
+	const normalizedInput = normalized
+		? { ...input, text: normalized.text }
 		: input;
-	const result = parseCandidates(normalizedInput, flags);
+	// Disclose the repairs rather than discarding them. This receipt is the only
+	// anomaly signal the `parse_lane_candidates` caller sees, so an artifact that
+	// had to be structurally repaired must not read as pristine (issue #2279).
+	const repairKinds: CandidateArtifactRepairKind[] = normalized
+		? normalized.repairKinds
+		: [];
+	const parsed = parseCandidates(normalizedInput, flags);
+	const result: ParseResult =
+		repairKinds.length > 0 ? { ...parsed, repair_kinds: repairKinds } : parsed;
 
 	try {
 		appendToSidecar(

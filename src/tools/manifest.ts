@@ -98,14 +98,18 @@ import { prepare_pr_feedback_scope } from './prepare-pr-feedback-scope';
 import { prepare_pr_workflow_checkout } from './prepare-pr-workflow-checkout';
 import { quality_budget } from './quality-budget';
 import { rebind_pr_feedback_head } from './rebind-pr-feedback-head';
+import { record_directive_override } from './record-directive-override';
 import { record_implementation_review } from './record-implementation-review';
 import { record_issue_publication } from './record-issue-publication';
 import { record_issue_reproduction } from './record-issue-reproduction';
 import { record_recurrence_sweep } from './record-recurrence-sweep';
+import { repair_gate_evidence } from './repair-gate-evidence';
+import { repair_knowledge_receipt_ledger } from './repair-knowledge-receipt-ledger';
 import { repo_map } from './repo-map';
 import { req_coverage } from './req-coverage';
 import { retrieve_lane_output } from './retrieve-lane-output';
 import { retrieve_summary } from './retrieve-summary';
+import { run_phase_review } from './run-phase-review';
 import { run_pr_feedback_stage_a } from './run-pr-feedback-stage-a';
 import { sast_scan } from './sast-scan';
 import { save_plan } from './save-plan';
@@ -127,6 +131,7 @@ import { submit_phase_council_verdicts } from './submit-phase-council-verdicts';
 import { suggestPatch } from './suggest-patch';
 import { summarize_work } from './summarize-work';
 import { swarm_command } from './swarm-command';
+import { swarm_memory_outcome } from './swarm-memory-outcome';
 import { swarm_memory_propose } from './swarm-memory-propose';
 import { swarm_memory_recall } from './swarm-memory-recall';
 import { symbols } from './symbols';
@@ -212,6 +217,10 @@ export const TOOL_MANIFEST = defineHandlers({
 	retrieve_lane_output: () => retrieve_lane_output,
 	extract_code_blocks: () => extract_code_blocks,
 	phase_complete: () => phase_complete,
+	run_phase_review: () => run_phase_review,
+	repair_gate_evidence: () => repair_gate_evidence,
+	repair_knowledge_receipt_ledger: () => repair_knowledge_receipt_ledger,
+	record_directive_override: () => record_directive_override,
 	save_plan: () => save_plan,
 	update_task_status: () => update_task_status,
 	lint_spec: () => lint_spec,
@@ -260,6 +269,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	knowledge_archive: () => knowledge_archive,
 	swarm_memory_recall: () => swarm_memory_recall,
 	swarm_memory_propose: () => swarm_memory_propose,
+	swarm_memory_outcome: () => swarm_memory_outcome,
 	swarm_command: () => swarm_command,
 	dispatch_lanes: () => dispatch_lanes,
 	dispatch_lanes_async: () => dispatch_lanes_async,

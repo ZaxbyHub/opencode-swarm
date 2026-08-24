@@ -6,9 +6,10 @@
  */
 
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { EnrichmentQuotaOptions } from '../hooks/knowledge-curator.js';
+import { atomicWriteSwarmFile } from '../utils/atomic-write';
 import { withTimeout } from '../utils/timeout.js';
 import type {
 	SkillImproveResult,
@@ -69,11 +70,14 @@ async function readState(directory: string): Promise<SkillConsolidationState> {
 	}
 }
 
+/**
+ * Canonical atomic write (issue #2035). Previously leaked its
+ * `target.tmp-<pid>-<ts>` temp on failure; the canonical helper cleans its
+ * own temp in `finally` and the old grammar stays registered for discovery.
+ */
 async function atomicWrite(filePath: string, content: string): Promise<void> {
 	await mkdir(path.dirname(filePath), { recursive: true });
-	const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
-	await writeFile(tmp, content, 'utf-8');
-	await rename(tmp, filePath);
+	await atomicWriteSwarmFile(filePath, content);
 }
 
 async function writeState(

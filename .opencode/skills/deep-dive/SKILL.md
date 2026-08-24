@@ -35,12 +35,13 @@ If the header is malformed or missing required fields, report the error and stop
 ## Step 2 — Scope Resolution
 
 Use the following tools to map the audit scope:
-1. `repo_map` with action "build" to establish the code graph
-2. `repo_map` with action "localization" for the scope target
-3. `symbols` and `batch_symbols` on key files identified by localization
-4. `imports` to trace dependency boundaries
-5. `doc_scan` if documentation coverage is relevant
-6. `knowledge_recall` with query matching the scope domain
+1. `repo_map` with action "graph_health" — only if the graph is missing or incomplete (stale beyond the refresh cap, extraction failures) run `repo_map` with action "build"; plugin init and the session-start probe keep the graph fresh otherwise
+2. `repo_map` with action "ask" (the audit scope as the question) and action "key_files" to rank scope-relevant files and repo hubs before any manual symbol walk
+3. `repo_map` with action "localization" for the scope target
+4. `symbols` and `batch_symbols` on key files identified by ask or localization
+5. `imports` to trace dependency boundaries
+6. `doc_scan` if documentation coverage is relevant
+7. `knowledge_recall` with query matching the scope domain
 
 Produce a SCOPE MAP: list of files, modules, and interfaces within the audit boundary. Cap at 50 files total.
 

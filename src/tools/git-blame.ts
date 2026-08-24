@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
+import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 import {
 	containsControlChars,
 	containsPathTraversal,
@@ -424,8 +425,24 @@ export const git_blame: ReturnType<typeof tool> = createSwarmTool({
 		}
 		gitArgs.push('--', file);
 
+		// Resolve the git executable before spawning. A resolution failure
+		// (every candidate rejected — git genuinely unavailable) maps onto the
+		// same "git is not available" response a bare-name spawn ENOENT would
+		// have produced, so this stays a returned value, never a new throw.
+		let gitExecutable: string;
+		try {
+			gitExecutable = await resolveGitExecutableAsync();
+		} catch {
+			return JSON.stringify({
+				error: 'git is not available or not in PATH',
+				file,
+				lineCount: 0,
+				lines: [],
+			} satisfies GitBlameError);
+		}
+
 		// Execute git blame with array-form spawnSync (Invariant 3)
-		const result = child_process.spawnSync('git', gitArgs, {
+		const result = child_process.spawnSync(gitExecutable, gitArgs, {
 			cwd: directory,
 			encoding: 'utf-8',
 			timeout: BLAME_TIMEOUT_MS,

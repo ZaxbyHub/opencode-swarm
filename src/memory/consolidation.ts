@@ -54,6 +54,8 @@ export interface ConsolidationDeps {
 	logEvent: (event: MemoryRunLogEvent) => Promise<void>;
 	readLog: () => Promise<ConsolidationLogRecord[]>;
 	appendLog: (record: ConsolidationLogRecord) => Promise<void>;
+	/** Worktree-local structural staleness. Optional for legacy/test callers. */
+	readDeadAnchorMemoryIds?: () => ReadonlySet<string>;
 	signal?: AbortSignal;
 }
 
@@ -166,6 +168,16 @@ export function deriveDecision(
 ): DecisionPlan {
 	if (fact.text.includes(MEMORY_RECALL_SENTINEL)) {
 		return { type: 'skip', fact, reason: 'contains recall sentinel' };
+	}
+	// #1466 (DD-14 lockstep): memory text must never contain the bundle
+	// marker prefix — validateMemoryRecordRules would reject it at write time,
+	// so skip here with the same rationale instead of failing the pass.
+	if (fact.text.includes('bundle_')) {
+		return {
+			type: 'skip',
+			fact,
+			reason: 'contains recall bundle marker prefix',
+		};
 	}
 	if (fact.kind === 'scratch') {
 		return {
@@ -354,7 +366,11 @@ export async function runConsolidationPass(
 		// deterministic regardless of the order listProposals returns from
 		// storage (clusterByJaccard is order-sensitive by construction).
 		.sort((a, b) => a.id.localeCompare(b.id));
-	const existingMemories = await deps.gateway.listMemories({});
+	const deadAnchorMemoryIds =
+		deps.readDeadAnchorMemoryIds?.() ?? new Set<string>();
+	const existingMemories = (await deps.gateway.listMemories({})).filter(
+		(memory) => !deadAnchorMemoryIds.has(memory.id),
+	);
 
 	const clusters = clusterByJaccard(
 		pendingProposals,

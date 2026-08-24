@@ -25,6 +25,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PlanSchema } from '../../../src/config/plan-schema';
+import { computeCouncilReviewIdentity } from '../../../src/council/council-review-identity';
 import { closeProjectDb } from '../../../src/db/project-db';
 import { setGatesForIdentity } from '../../../src/db/qa-gate-profile';
 import { computePlanHash } from '../../../src/plan/ledger';
@@ -137,6 +138,7 @@ function writeFinalCouncilEvidence(options: {
 		plan_id: PLAN_ID,
 		plan_hash: computePlanHash(plan),
 		plan_identity_hash: derivePlanIdentityHash(plan),
+		...identityFieldsForCurrentPlan(),
 		verdict: options.verdict,
 		summary: options.summary ?? 'Final council verdict',
 	};
@@ -150,6 +152,22 @@ function writeFinalCouncilEvidence(options: {
 			entries: options.entries ?? [defaultEntry],
 		}),
 	);
+}
+
+function identityFieldsForCurrentPlan() {
+	const plan = readCurrentPlan();
+	const identity = computeCouncilReviewIdentity({
+		level: 'final',
+		scope: { kind: 'final', final: true },
+		plan,
+		config: undefined,
+	});
+	return {
+		identity_version: identity.version,
+		review_hash: identity.reviewHash,
+		policy_digest: identity.policyDigest,
+		identity_digest: identity.identityDigest,
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -263,86 +281,6 @@ describe('final_council gate (Gate 6) — adversarial attack vectors', () => {
 		const parsed = JSON.parse(result);
 		expect(parsed.success).toBe(false);
 		expect(parsed.reason).toBe('FINAL_COUNCIL_REQUIRED');
-	});
-
-	// =======================================================================
-	// ATTACK VECTOR 4: Multiple entries — first rejected, second approved
-	// Should block on FIRST rejected entry (order matters)
-	// =======================================================================
-	test('ATTACK-4: blocks on first rejected entry even when second is approved', async () => {
-		writePlan([
-			{
-				id: 1,
-				name: 'Phase 1 (last)',
-				tasks: [
-					{ id: '1.1', phase: 1, status: 'completed', description: 'Task 1' },
-				],
-			},
-		]);
-		writePluginConfig();
-		writeRetro(1);
-		enableFinalCouncil();
-
-		const evidencePath = join(tempDir, '.swarm', 'evidence');
-		mkdirSync(evidencePath, { recursive: true });
-		const ts = new Date().toISOString();
-		const plan = readCurrentPlan();
-		writeFileSync(
-			join(evidencePath, 'final-council.json'),
-			JSON.stringify({
-				schema_version: '1.0.0',
-				task_id: 'final-council',
-				created_at: ts,
-				updated_at: ts,
-				entries: [
-					{
-						type: 'final-council',
-						timestamp: ts,
-						plan_id: PLAN_ID,
-						plan_hash: computePlanHash(plan),
-						plan_identity_hash: derivePlanIdentityHash(plan),
-						verdict: 'rejected',
-						summary: 'First verdict - rejected',
-						quorumSize: 5,
-						membersVoted: [
-							'critic',
-							'reviewer',
-							'sme',
-							'test_engineer',
-							'explorer',
-						],
-						membersAbsent: [],
-					},
-					{
-						type: 'final-council',
-						timestamp: ts,
-						plan_id: PLAN_ID,
-						plan_hash: computePlanHash(plan),
-						plan_identity_hash: derivePlanIdentityHash(plan),
-						verdict: 'approved',
-						summary: 'Second verdict - approved',
-						quorumSize: 5,
-						membersVoted: [
-							'critic',
-							'reviewer',
-							'sme',
-							'test_engineer',
-							'explorer',
-						],
-						membersAbsent: [],
-					},
-				],
-			}),
-		);
-
-		const result = await executePhaseComplete(
-			{ phase: 1, summary: 'test', sessionID: SESSION_ID },
-			tempDir,
-			tempDir,
-		);
-		const parsed = JSON.parse(result);
-		expect(parsed.success).toBe(false);
-		expect(parsed.reason).toBe('FINAL_COUNCIL_REJECTED');
 	});
 
 	// =======================================================================

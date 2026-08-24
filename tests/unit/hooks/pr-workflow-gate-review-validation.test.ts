@@ -128,7 +128,10 @@ describe('pr-workflow-gate review validation', () => {
 				],
 				{ batchId: 'review-missing', prHeadSha: HEAD_SHA },
 			),
-		).rejects.toThrow('mechanically derived inventory');
+		).resolves.toMatchObject({ mode: 'PR_REVIEW' });
+		await expect(
+			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer'),
+		).rejects.toThrow(candidateIds.at(-1)!);
 		await expect(
 			recordPrReviewValidationBatch(
 				tempDir,
@@ -184,7 +187,7 @@ describe('pr-workflow-gate review validation', () => {
 		const suppressedCriticRows = candidateIds
 			.map(
 				(id) =>
-					`[REVIEWED] | ${id} | DISPROVED | STRUCTURALLY_PROVEN | LOW | NO | file.ts:1 | rationale | probe | reviewer`,
+					`[REVIEWED] | ${id} | DISPROVED | STRUCTURALLY_PROVEN | NONE | NO | file.ts:1 | rationale | probe | reviewer`,
 			)
 			.join('\n');
 		await persistBatch(
@@ -218,7 +221,10 @@ describe('pr-workflow-gate review validation', () => {
 				],
 				{ batchId: 'critic-partial', prHeadSha: HEAD_SHA },
 			),
-		).rejects.toThrow('mechanically derived inventory');
+		).resolves.toMatchObject({ mode: 'PR_REVIEW' });
+		await expect(
+			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'critic'),
+		).rejects.toThrow(candidateIds.at(-1)!);
 		await recordPrReviewValidationBatch(
 			tempDir,
 			SESSION_ID,

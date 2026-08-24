@@ -20,21 +20,6 @@ const mockRunLint = mock(async () => ({
 	output: '',
 	message: 'No issues found',
 }));
-const mockSastScan = mock(async () => ({
-	verdict: 'pass' as const,
-	findings: [],
-	summary: {
-		engine: 'tier_a' as const,
-		files_scanned: 0,
-		findings_count: 0,
-		findings_by_severity: {
-			critical: 0,
-			high: 0,
-			medium: 0,
-			low: 0,
-		},
-	},
-}));
 const mockQualityBudget = mock(async () => ({
 	verdict: 'pass' as const,
 	metrics: {
@@ -71,10 +56,6 @@ mock.module('../../../src/tools/secretscan', () => ({
 		files_scanned: 0,
 		skipped_files: 0,
 	})),
-}));
-
-mock.module('../../../src/tools/sast-scan', () => ({
-	sastScan: mockSastScan,
 }));
 
 mock.module('../../../src/tools/quality-budget', () => ({
@@ -141,7 +122,6 @@ describe('secretscan evidence persistence', () => {
 		// Reset mock call counts
 		mockDetectAvailableLinter.mockClear();
 		mockRunLint.mockClear();
-		mockSastScan.mockClear();
 		mockQualityBudget.mockClear();
 		mockSaveEvidence.mockClear();
 		_internals.saveEvidence = mockSaveEvidence;
@@ -275,26 +255,57 @@ describe('secretscan evidence persistence', () => {
 		expect(evidence.skipped_files).toBeGreaterThanOrEqual(0);
 	});
 
-	// ============ Non-fatal: Evidence persistence failure doesn't crash pipeline ============
+	// ============ Evidence persistence failure: gate fails, no crash (#2209) ============
 
-	test('evidence persistence failure does not crash the pipeline', async () => {
+	test('secretscan evidence persistence failure fails the gate and surfaces on the payload (#2209)', async () => {
 		// Create a clean file
 		fs.writeFileSync(path.join(tempDir, 'clean.ts'), 'export const x = 1;\n');
 
-		// Make saveEvidence throw an error
-		mockSaveEvidence.mockRejectedValueOnce(new Error('Filesystem error'));
-
-		const input: PreCheckBatchInput = {
-			files: ['clean.ts'],
-			directory: tempDir,
+		// Make ONLY the secretscan evidence write reject. A bare
+		// mockRejectedValueOnce historically missed this path entirely: the
+		// quality_budget evidence write runs first and consumed the single
+		// rejection, so this test never actually exercised the secretscan
+		// catch (surfaced by the #2209 final critic).
+		const defaultImpl = async (
+			directory: string,
+			taskId: string,
+			evidence: SecretscanEvidence,
+		): Promise<unknown> => {
+			savedEvidence.push({ directory, taskId, evidence });
+			return {};
 		};
+		mockSaveEvidence.mockImplementation(
+			async (
+				directory: string,
+				taskId: string,
+				evidence: SecretscanEvidence,
+			): Promise<unknown> => {
+				if (taskId === 'secretscan') {
+					throw new Error('Filesystem error');
+				}
+				return defaultImpl(directory, taskId, evidence);
+			},
+		);
+		try {
+			const input: PreCheckBatchInput = {
+				files: ['clean.ts'],
+				directory: tempDir,
+			};
 
-		// Should not throw - errors are caught and logged
-		const result = await runPreCheckBatch(input);
+			// Should not throw — but per #2209 the persistence failure now
+			// fails the gate identically to sast_scan instead of being
+			// swallowed as a warn().
+			const result = await runPreCheckBatch(input);
 
-		// Pipeline should complete successfully despite evidence save failure
-		expect(result.gates_passed).toBe(true);
-		expect(result.secretscan.ran).toBe(true);
+			expect(result.secretscan.ran).toBe(true);
+			expect(result.secretscan.error).toContain(
+				'Failed to persist secretscan evidence',
+			);
+			expect(result.secretscan.error).toContain('Filesystem error');
+			expect(result.gates_passed).toBe(false);
+		} finally {
+			mockSaveEvidence.mockImplementation(defaultImpl);
+		}
 	});
 
 	// ============ Verdict Logic: findings_count > 0 → 'fail' ============

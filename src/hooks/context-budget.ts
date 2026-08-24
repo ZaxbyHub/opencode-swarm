@@ -14,10 +14,15 @@ import {
 import { SUMMARIZER_EXEMPT_TOOL_NAMES } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import { getLiveContextModelIdentity, getLiveContextWindow } from '../state';
+import { telemetry } from '../telemetry';
 import { log, warn } from '../utils';
 import {
+	computeContextUsage,
+	estimateVisibleToolPartTokens,
+	getVisibleToolPartText,
+} from './context-usage';
+import {
 	classifyMessages,
-	getCompletedToolOutputs,
 	getToolNames,
 	getToolParts,
 	MessagePriority,
@@ -60,6 +65,14 @@ interface MessageWithParts {
 	info: MessageInfo;
 	parts: MessagePart[];
 }
+
+type ContextPrunedTrigger = 'agent_switch' | 'critical_threshold';
+
+export const _internals: {
+	telemetryContextPruned: typeof telemetry.contextPruned;
+} = {
+	telemetryContextPruned: telemetry.contextPruned,
+};
 
 /**
  * Creates the experimental.chat.messages.transform hook for context budget tracking.
@@ -114,6 +127,11 @@ export function createContextBudgetHandler(
 			}
 		}
 
+		const trackedAgents = config.context_budget?.tracked_agents ?? [
+			'architect',
+		];
+		if (baseAgent && !trackedAgents.includes(baseAgent)) return;
+
 		const configuredTargetModel = agentName
 			? resolveAgentModel(agentName)
 			: undefined;
@@ -155,32 +173,14 @@ export function createContextBudgetHandler(
 			);
 		}
 
-		// Calculate total token usage across all text parts AND completed tool
-		// outputs. Tool results are `ToolPart` objects (`part.type === 'tool'`)
-		// whose heavy payload lives in `part.state.output` — the previous loop
-		// only counted `type === 'text'` parts, so it systematically undercounted
-		// real prompt size (issue #2068).
-		let totalTokens = 0;
-		for (const message of messages) {
-			if (!message?.parts) continue;
-
-			for (const part of message.parts) {
-				if (part?.type === 'text' && part.text) {
-					totalTokens += estimateTokens(part.text);
-				}
-			}
-			// Completed tool outputs are the heavy payloads the provider
-			// serializes. Error-state outputs are diagnostic and not counted
-			// here (they are routed via stale-error → DISPOSABLE).
-			for (const { output } of getCompletedToolOutputs(message)) {
-				totalTokens += estimateTokens(output);
-			}
-		}
+		const usage = computeContextUsage(messages);
+		let totalTokens = usage.tokensUsed;
 
 		const usagePercent = totalTokens / modelLimit;
 
 		// Agent-switch detection (Task 4.1)
 		let ratio = usagePercent; // Declare early for agent-switch override
+		let pruneTrigger: ContextPrunedTrigger = 'critical_threshold';
 		const lastSeenAgent = sessionID
 			? lastSeenAgentBySession.get(sessionID)
 			: undefined;
@@ -206,6 +206,9 @@ export function createContextBudgetHandler(
 				);
 				// Set ratio to critical to trigger enforcement
 				ratio = 1.0; // Force > criticalThreshold
+				if (usagePercent <= criticalThreshold) {
+					pruneTrigger = 'agent_switch';
+				}
 			}
 		}
 
@@ -250,6 +253,7 @@ export function createContextBudgetHandler(
 					output.messages || [],
 					preserveLastNTurns,
 				);
+				const beforeMutationTokens = totalTokens;
 
 				// Tool output masking (Task 4.2): Replace old tool results with placeholders
 				// This runs BEFORE priority-based pruning to reduce token load early.
@@ -257,6 +261,7 @@ export function createContextBudgetHandler(
 				const toolMaskThreshold =
 					config.context_budget?.tool_output_mask_threshold ?? 2000;
 				let toolMaskFreedTokens = 0;
+				let maskedToolParts = 0;
 				const maskedIndices = new Set<number>();
 
 				for (let i = 0; i < (output.messages || []).length; i++) {
@@ -271,12 +276,22 @@ export function createContextBudgetHandler(
 							toolMaskThreshold,
 						)
 					) {
-						toolMaskFreedTokens += maskToolOutput(msg, toolMaskThreshold);
-						maskedIndices.add(i);
+						const maskResult = maskToolOutput(msg, toolMaskThreshold);
+						toolMaskFreedTokens += maskResult.freedTokens;
+						maskedToolParts += maskResult.maskedParts;
+						if (maskResult.maskedParts > 0) {
+							maskedIndices.add(i);
+						}
 					}
 				}
 
 				if (toolMaskFreedTokens > 0) {
+					toolMaskFreedTokens = creditTokenReduction(
+						toolMaskFreedTokens,
+						totalTokens,
+						targetTokens,
+						usage.source,
+					);
 					totalTokens -= toolMaskFreedTokens;
 					warn(
 						`[swarm] Tool output masking: masked ${maskedIndices.size} tool results, freed ~${toolMaskFreedTokens} tokens`,
@@ -295,26 +310,29 @@ export function createContextBudgetHandler(
 				);
 
 				// Step 3: Remove messages until targetTokens reached.
-				// NOTE: extractMessageText reads the POST-MASKING parts (masking
-				// already ran above and subtracted toolMaskFreedTokens from
-				// totalTokens). So for a message that was masked, this measures
-				// only the residual placeholder text — which is the correct
-				// amount pruning can still free (masking already credited the
-				// heavy tool output). Do NOT add toolMaskFreedTokens here: that
-				// would double-count the masking credit.
+				// Estimate the reduction the masking pass can actually perform on
+				// each post-masking message. Non-mutable parts contribute zero, so
+				// they cannot exhaust the target and starve later candidates.
 				let freedTokens = 0;
 				const toRemove = new Set<number>();
 
 				for (const idx of removableMessages) {
 					if (totalTokens - freedTokens <= targetTokens) break;
-					toRemove.add(idx);
-					freedTokens += estimateTokens(
-						extractMessageText(output.messages![idx]),
+					const achievableReduction = estimateObservationMaskingReduction(
+						output.messages![idx],
+						idx,
 					);
+					if (achievableReduction <= 0) continue;
+					toRemove.add(idx);
+					freedTokens += achievableReduction;
 				}
 
 				// Step 4: Apply observation masking to removed messages
-				const beforeTokens = totalTokens;
+				const beforeTokens = beforeMutationTokens;
+				let prunedMessages = 0;
+				let prunedTextParts = 0;
+				let prunedToolParts = 0;
+				let prunedTokensFreed = 0;
 				if (toRemove.size > 0) {
 					// applyObservationMasking clamps each part's contribution to >= 0
 					// (R7 fix), so actualFreedTokens can never be negative here —
@@ -322,23 +340,35 @@ export function createContextBudgetHandler(
 					// was previously unconditional and would have silently INCREASED
 					// totalTokens had a placeholder ever come out longer than the
 					// text it replaced.
-					const actualFreedTokens = applyObservationMasking(
+					const pruneResult = applyObservationMasking(
 						output.messages || [],
 						toRemove,
 					);
-					totalTokens -= actualFreedTokens;
-
-					// Step 5: Log enforcement action
-					warn(
-						`[swarm] Context enforcement: pruned ${toRemove.size} messages, freed ${actualFreedTokens} tokens (${beforeTokens}→${totalTokens} of ${modelLimit})`,
-						{
-							pruned: toRemove.size,
-							freedTokens: actualFreedTokens,
-							before: beforeTokens,
-							after: totalTokens,
-							limit: modelLimit,
-						},
+					prunedMessages = pruneResult.prunedMessages;
+					prunedTextParts = pruneResult.prunedTextParts;
+					prunedToolParts = pruneResult.prunedToolParts;
+					prunedTokensFreed = creditTokenReduction(
+						pruneResult.freedTokens,
+						totalTokens,
+						targetTokens,
+						usage.source,
 					);
+					totalTokens -= prunedTokensFreed;
+
+					// Step 5: Log only a real enforcement mutation. Selection can
+					// legitimately yield no mutable parts (for example error-state tools).
+					if (prunedMessages > 0) {
+						warn(
+							`[swarm] Context enforcement: pruned ${prunedMessages} messages, freed ${prunedTokensFreed} tokens (${beforeTokens}→${totalTokens} of ${modelLimit})`,
+							{
+								pruned: prunedMessages,
+								freedTokens: prunedTokensFreed,
+								before: beforeTokens,
+								after: totalTokens,
+								limit: modelLimit,
+							},
+						);
+					}
 				} else if (
 					removableMessages.length === 0 &&
 					totalTokens > targetTokens
@@ -352,6 +382,29 @@ export function createContextBudgetHandler(
 							limit: modelLimit,
 						},
 					);
+				}
+
+				if (sessionID && (maskedIndices.size > 0 || prunedMessages > 0)) {
+					try {
+						_internals.telemetryContextPruned({
+							sessionId: sessionID,
+							agentName: agentName ?? baseAgent ?? 'unknown',
+							trigger: pruneTrigger,
+							usageSource: usage.source,
+							beforeTokens,
+							afterTokens: totalTokens,
+							modelLimit,
+							maskedMessages: maskedIndices.size,
+							maskedToolParts,
+							maskedTokensFreed: toolMaskFreedTokens,
+							prunedMessages,
+							prunedTextParts,
+							prunedToolParts,
+							prunedTokensFreed,
+						});
+					} catch {
+						// Telemetry must stay fail-open relative to prompt mutation.
+					}
 				}
 			}
 			// WARN-ONLY MODE: existing behavior (backward compatible)
@@ -371,11 +424,6 @@ export function createContextBudgetHandler(
 
 		const lastUserMessage = messages[lastUserMessageIndex];
 		if (!lastUserMessage?.parts) return;
-
-		const trackedAgents = config.context_budget?.tracked_agents ?? [
-			'architect',
-		];
-		if (baseAgent && !trackedAgents.includes(baseAgent)) return;
 
 		// Find the first text part
 		const textPartIndex = lastUserMessage.parts.findIndex(
@@ -402,6 +450,26 @@ export function createContextBudgetHandler(
 	};
 
 	return handler;
+}
+
+/**
+ * Provider prompt totals and local character estimates are different units.
+ * A local mutation estimate may therefore exceed the provider-measured gap.
+ * Credit provider-mode reductions only up to the configured target, while
+ * estimated mode is bounded by the remaining estimated total. This keeps
+ * enforcement arithmetic and telemetry conservative and non-negative.
+ */
+function creditTokenReduction(
+	estimatedReduction: number,
+	currentTokens: number,
+	targetTokens: number,
+	usageSource: 'provider' | 'estimated',
+): number {
+	const availableCredit =
+		usageSource === 'provider'
+			? Math.max(0, currentTokens - targetTokens)
+			: Math.max(0, currentTokens);
+	return Math.min(Math.max(0, estimatedReduction), availableCredit);
 }
 
 /**
@@ -493,17 +561,26 @@ function identifyRemovableMessages(
  * Replace message content with an observation-masking placeholder. Text parts
  * are rewritten in place; completed `ToolPart`s are REPLACED with a synthetic
  * text part (never mutating `state` — see `maskToolOutput`). Returns the
- * actual number of tokens freed (clamped to ≥ 0 per part — see R7 note).
+ * actual number of tokens freed. Non-reducing replacements are skipped.
  */
 function applyObservationMasking(
 	messages: MessageWithParts[],
 	toRemove: Set<number>,
-): number {
+): {
+	freedTokens: number;
+	prunedMessages: number;
+	prunedTextParts: number;
+	prunedToolParts: number;
+} {
 	let actualFreedTokens = 0;
+	let prunedMessages = 0;
+	let prunedTextParts = 0;
+	let prunedToolParts = 0;
 
 	for (const idx of toRemove) {
 		const msg = messages[idx];
 		if (!msg?.parts || !Array.isArray(msg.parts)) continue;
+		let mutatedThisMessage = false;
 
 		for (let i = 0; i < msg.parts.length; i++) {
 			const part = msg.parts[i];
@@ -514,12 +591,16 @@ function applyObservationMasking(
 				) {
 					continue;
 				}
-				const originalTokens = estimateTokens(part.text);
-				const placeholder = `[Context pruned — message from turn ${idx}, ~${originalTokens} tokens freed. ${recoveryHint(part.text)}]`;
-				const maskedTokens = estimateTokens(placeholder);
-				part.text = placeholder;
-				// Clamp to 0 (R7): see matching comment below in maskToolOutput.
-				actualFreedTokens += Math.max(0, originalTokens - maskedTokens);
+				const replacement = buildPrunedReplacement(
+					part.text,
+					estimateTokens(part.text),
+					idx,
+				);
+				if (!replacement) continue;
+				part.text = replacement.placeholder;
+				actualFreedTokens += replacement.freedTokens;
+				prunedTextParts++;
+				mutatedThisMessage = true;
 			} else if (
 				part.type === 'tool' &&
 				part.state?.status === 'completed' &&
@@ -544,22 +625,109 @@ function applyObservationMasking(
 				) {
 					continue;
 				}
-				const originalTokens = estimateTokens(output);
-				const placeholder = `[Context pruned — message from turn ${idx}, ~${originalTokens} tokens freed. ${recoveryHint(output)}]`;
-				const maskedTokens = estimateTokens(placeholder);
+				const replacement = buildPrunedReplacement(
+					output,
+					estimateVisibleToolPartTokens(part),
+					idx,
+				);
+				if (!replacement) continue;
 				// Replace the ToolPart with a synthetic text part (do NOT mutate
 				// `state` — preserves the SDK discriminated-union shape).
-				msg.parts[i] = { type: 'text', text: placeholder };
-				actualFreedTokens += Math.max(0, originalTokens - maskedTokens);
+				msg.parts[i] = { type: 'text', text: replacement.placeholder };
+				actualFreedTokens += replacement.freedTokens;
+				prunedToolParts++;
+				mutatedThisMessage = true;
 			}
+		}
+
+		if (mutatedThisMessage) {
+			prunedMessages++;
 		}
 	}
 
-	return actualFreedTokens;
+	return {
+		freedTokens: actualFreedTokens,
+		prunedMessages,
+		prunedTextParts,
+		prunedToolParts,
+	};
 }
 
-/** Matches lane-output store refs, e.g. `L1:<sha256>:<sha256>:<sha256>`. */
-const LANE_OUTPUT_REF_PATTERN = /L1:[a-f0-9]{64}:[a-f0-9]{64}:[a-f0-9]{64}/g;
+function buildPrunedReplacement(
+	recoveryText: string,
+	originalTokens: number,
+	turnIndex: number,
+): { placeholder: string; freedTokens: number } | undefined {
+	const placeholder = `[Context pruned — message from turn ${turnIndex}, original payload ~${originalTokens} tokens. ${recoveryHint(recoveryText)}]`;
+	const maskedTokens = estimateTokens(placeholder);
+	if (maskedTokens >= originalTokens) return undefined;
+	return { placeholder, freedTokens: originalTokens - maskedTokens };
+}
+
+/**
+ * Estimate only the reduction applyObservationMasking can actually perform.
+ * Error/pending tools, exempt tools, existing placeholders, and replacements
+ * that would grow context contribute zero and cannot stop later candidates.
+ */
+function estimateObservationMaskingReduction(
+	message: MessageWithParts | undefined,
+	turnIndex: number,
+): number {
+	if (!message?.parts || !Array.isArray(message.parts)) return 0;
+	let reduction = 0;
+
+	for (const part of message.parts) {
+		if (part.type === 'text' && part.text) {
+			if (
+				part.text.includes('[Context pruned') ||
+				part.text.includes('[Tool output masked')
+			) {
+				continue;
+			}
+			const replacement = buildPrunedReplacement(
+				part.text,
+				estimateTokens(part.text),
+				turnIndex,
+			);
+			if (replacement) reduction += replacement.freedTokens;
+			continue;
+		}
+
+		if (
+			part.type !== 'tool' ||
+			part.state?.status !== 'completed' ||
+			typeof part.state.output !== 'string'
+		) {
+			continue;
+		}
+		const partToolName =
+			typeof part.tool === 'string' ? part.tool.toLowerCase() : '';
+		if (
+			partToolName &&
+			(SUMMARIZER_EXEMPT_TOOL_NAMES as readonly string[]).includes(partToolName)
+		) {
+			continue;
+		}
+		const output = part.state.output;
+		if (
+			output.includes('[Context pruned') ||
+			output.includes('[Tool output masked')
+		) {
+			continue;
+		}
+		const replacement = buildPrunedReplacement(
+			output,
+			estimateVisibleToolPartTokens(part),
+			turnIndex,
+		);
+		if (replacement) reduction += replacement.freedTokens;
+	}
+
+	return reduction;
+}
+
+/** Matches the first lane-output store ref, e.g. `L1:<sha256>:<sha256>:<sha256>`. */
+const LANE_OUTPUT_REF_PATTERN = /L1:[a-f0-9]{64}:[a-f0-9]{64}:[a-f0-9]{64}/;
 
 /** Generic fallback hint used when no lane ref is present in the text. */
 const GENERIC_RECOVERY_HINT = 'Use retrieve_summary if needed.';
@@ -589,23 +757,21 @@ const GENERIC_RECOVERY_HINT = 'Use retrieve_summary if needed.';
  * chars" excerpt overhead can already exceed a very short original on its
  * own — a separate, pre-existing class of bloat this fix does not attempt to
  * solve), but it removes the ref list as an *additional* multiplier on top
- * of that. `freedTokens` is separately clamped to non-negative at both call
- * sites (`applyObservationMasking`, `maskToolOutput`) so a placeholder that
- * still comes out longer than the original can never corrupt the summed
- * budget accounting.
+ * of that. Both mutation sites also skip any placeholder that would not be
+ * smaller than the original, so the transform cannot grow the context.
  */
 function recoveryHint(originalText: string): string {
-	const matches = originalText.match(LANE_OUTPUT_REF_PATTERN);
-	if (matches && matches.length > 0) {
-		return `Use retrieve_lane_output with ref ${matches[0]} if needed.`;
+	const match = LANE_OUTPUT_REF_PATTERN.exec(originalText);
+	if (match) {
+		return `Use retrieve_lane_output with ref ${match[0]} if needed.`;
 	}
 	return GENERIC_RECOVERY_HINT;
 }
 
 /**
- * Extract plain text from message parts, including completed tool outputs
- * (`ToolPart.state.output`). Used for size checks and freed-token estimates so
- * the heavy tool-result payloads are accounted for (issue #2068).
+ * Extract plain text from message parts, including visible tool inputs,
+ * completed outputs, and error text. Used for size checks and freed-token
+ * estimates so the provider-visible tool payloads are accounted for.
  *
  * NOTE: a sibling `extractMessageText` lives in `message-priority.ts` for
  * classification. They intentionally differ slightly (see the comment there).
@@ -616,12 +782,11 @@ function extractMessageText(msg: MessageWithParts): string {
 	for (const part of msg.parts) {
 		if (part.type === 'text' && part.text) {
 			chunks.push(part.text);
-		} else if (
-			part.type === 'tool' &&
-			part.state?.status === 'completed' &&
-			typeof part.state.output === 'string'
-		) {
-			chunks.push(part.state.output);
+		} else if (part.type === 'tool') {
+			const visibleToolText = getVisibleToolPartText(part);
+			if (visibleToolText) {
+				chunks.push(visibleToolText);
+			}
 		}
 	}
 	return chunks.join('\n');
@@ -684,13 +849,19 @@ function shouldMaskToolOutput(
  * Replacing the whole part is the contract-valid way to reduce provider tokens
  * (the host serializes the mutated `parts[]` after the transform hook runs —
  * v6.85.1, v7.4.0). Per-part exempt tools are skipped. Returns the number of
- * tokens freed (clamped to ≥ 0 per part — R7).
+ * tokens freed. Non-reducing replacements are skipped.
  */
-function maskToolOutput(msg: MessageWithParts, _threshold: number): number {
-	if (!msg?.parts || !Array.isArray(msg.parts)) return 0;
+function maskToolOutput(
+	msg: MessageWithParts,
+	_threshold: number,
+): { freedTokens: number; maskedParts: number } {
+	if (!msg?.parts || !Array.isArray(msg.parts)) {
+		return { freedTokens: 0, maskedParts: 0 };
+	}
 
 	const exemptList = SUMMARIZER_EXEMPT_TOOL_NAMES as readonly string[];
 	let freedTokens = 0;
+	let maskedParts = 0;
 
 	for (let i = 0; i < msg.parts.length; i++) {
 		const part = msg.parts[i];
@@ -720,21 +891,22 @@ function maskToolOutput(msg: MessageWithParts, _threshold: number): number {
 			continue;
 		}
 
-		const originalTokens = estimateTokens(output);
+		const originalTokens = estimateVisibleToolPartTokens(part);
 		const toolName = part.tool || 'unknown';
 		const excerpt = output.substring(0, 200).replace(/\n/g, ' ');
-		const placeholder = `[Tool output masked — ${toolName} returned ~${originalTokens} tokens. First 200 chars: "${excerpt}..." ${recoveryHint(output)}]`;
+		const placeholder = `[Tool output masked — ${toolName} original payload ~${originalTokens} tokens. First 200 chars: "${excerpt}..." ${recoveryHint(output)}]`;
 		const maskedTokens = estimateTokens(placeholder);
+		if (maskedTokens >= originalTokens) {
+			continue;
+		}
 
 		// Replace the ToolPart with a synthetic text part. This preserves the
 		// `parts[]` array contract (no phantom fields on `state`) and reduces
 		// the provider-serialized payload.
 		msg.parts[i] = { type: 'text', text: placeholder };
-		// Clamp to 0 (R7): a placeholder can come out longer than a very short
-		// original; never let that show as negative freed tokens (which would
-		// silently INCREASE totalTokens in the summed budget accounting).
-		freedTokens += Math.max(0, originalTokens - maskedTokens);
+		freedTokens += originalTokens - maskedTokens;
+		maskedParts++;
 	}
 
-	return freedTokens;
+	return { freedTokens, maskedParts };
 }

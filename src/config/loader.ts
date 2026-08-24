@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { z } from 'zod';
 import { advisoryWarn } from '../services/warning-buffer.js';
+import { GIT_BINARY_ENV_VAR } from '../utils/git-executable.js';
 import { sanitizeMalformedValues } from './sanitize-malformed-values';
 import {
 	ExternalSkillsConfigSchema,
@@ -411,6 +412,115 @@ function rawFullAutoLocked(raw: Record<string, unknown> | null): boolean {
 }
 
 /**
+ * The `git.binary` value a config object EXPOSES, read exactly the way Zod
+ * will read it — an ordinary property lookup that follows the prototype
+ * chain, with no `hasOwnProperty` filter.
+ *
+ * Following the chain is deliberate and load-bearing. `deepMerge`
+ * (src/utils/merge.ts) walks `Object.keys(override)`, and `JSON.parse` makes
+ * `"__proto__"` an own ENUMERABLE data property, so a config of the form
+ * `{"__proto__": {"git": {"binary": "…"}}}` reaches `result['__proto__'] = …`
+ * on a fresh object with no own `__proto__` — which invokes the setter and
+ * REPARENTS the merged object. `mergedRaw.git` then resolves through the new
+ * prototype. Measured: before this read followed the chain, exactly that
+ * payload smuggled a project-supplied `git.binary` past the provenance gate
+ * (which was checking `rawProjectConfig.git`, an own-property read that sees
+ * `undefined` for this shape).
+ */
+function exposedGitBinary(raw: Record<string, unknown> | null): unknown {
+	if (!raw || typeof raw !== 'object') return undefined;
+	const git = raw.git;
+	if (!git || typeof git !== 'object' || Array.isArray(git)) return undefined;
+	return (git as Record<string, unknown>).binary;
+}
+
+/**
+ * `git.binary` is an ADMINISTRATIVE, USER-LEVEL-ONLY key — a project config
+ * may never supply it.
+ *
+ * SECURITY (CWE-427/CWE-77, arbitrary code execution). `git.binary` names the
+ * executable this plugin spawns for every host-side git call (commit, push,
+ * merge, checkout, status) — it is registered as the FIRST resolver candidate
+ * by `setGitBinaryOverride` (`src/index.ts`, `src/utils/git-executable.ts`).
+ * The project config is read from `<repo>/.opencode/opencode-swarm.json`,
+ * which is a file INSIDE the repository, so its contents are attacker
+ * controlled for any repo the user merely opens. Without this gate a hostile
+ * repo needs no second write primitive: it commits the config AND a shim at
+ * the path the config names, and the shim — already on disk — runs with the
+ * user's privileges on the next git operation.
+ *
+ * So the value is honored only from sources that live OUTSIDE any repository:
+ * the user config (`~/.config/opencode/opencode-swarm.json`) and the
+ * `OPENCODE_SWARM_GIT_BINARY` environment variable. A project-supplied value
+ * is dropped here, before Zod, with a warning — never fatal, because the
+ * documented contract for an unusable override is "skip and keep resolving"
+ * (`src/utils/git-executable.ts`); a hostile or mistaken repo config must not
+ * be able to make git unreachable either.
+ *
+ * Runs immediately after the deep-merge, like the `full_auto.locked` hard-off
+ * below: every `buildConfigWithMeta` return path derives either from the value
+ * returned here or from `rawUserConfig` alone (step 7), so no recovery branch
+ * can resurrect the project value. A malicious repo can force any recovery
+ * branch at will by adding one bogus key, which is why the gate must sit ahead
+ * of all of them rather than on the happy path.
+ *
+ * The comparison is between what the MERGED object exposes and what the USER
+ * config exposes — never "did the project raw config own this key". That
+ * distinction is not cosmetic: an own-property check on the project raw config
+ * was measurably bypassable with a `{"__proto__": {"git": {...}}}` payload.
+ * See `exposedGitBinary`.
+ */
+function enforceGitBinaryProvenance(
+	mergedRaw: Record<string, unknown>,
+	rawUserConfig: Record<string, unknown> | null,
+): Record<string, unknown> {
+	const userBinary = exposedGitBinary(rawUserConfig);
+	const exposedBinary = exposedGitBinary(mergedRaw);
+
+	// The decision is made on what the MERGED object exposes, not on what the
+	// project raw config owns. Any route by which a non-user value becomes
+	// readable at `git.binary` — plain deep-merge precedence, a `__proto__`
+	// payload that reparents the merged object, a `git` object whose own
+	// prototype carries `binary` — lands here identically, because this is the
+	// same lookup Zod performs. If what is exposed already IS the user's value
+	// (including "both absent"), there is nothing to refuse.
+	if (Object.is(exposedBinary, userBinary)) return mergedRaw;
+
+	advisoryWarn(
+		`[opencode-swarm] ⚠️ SECURITY: Ignoring "git.binary" supplied by the project config (.opencode/${CONFIG_FILENAME}). ` +
+			'That file lives inside the repository, so it is untrusted content, and "git.binary" selects the executable this plugin spawns for every git command. ' +
+			`Set it in your user config (<config dir>/opencode/${CONFIG_FILENAME}) or the ${GIT_BINARY_ENV_VAR} environment variable instead.`,
+	);
+
+	// Rebuild rather than mutate, for two reasons. (1) `deepMerge` assigns a
+	// non-object override BY REFERENCE, so `mergedRaw.git` may literally BE
+	// `rawProjectConfig.git`. (2) Object spread copies OWN ENUMERABLE
+	// properties onto a fresh object with a clean `Object.prototype` — so a
+	// merged object that was reparented by a `__proto__` payload loses both
+	// the hostile prototype and everything reachable only through it. That is
+	// what makes the neutralization total instead of key-by-key.
+	const exposedGit = mergedRaw.git;
+	const nextGit: Record<string, unknown> =
+		exposedGit && typeof exposedGit === 'object' && !Array.isArray(exposedGit)
+			? { ...(exposedGit as Record<string, unknown>) }
+			: {};
+	const rebuilt: Record<string, unknown> = { ...mergedRaw };
+	if (userBinary === undefined) {
+		delete nextGit.binary;
+		// Do not leave a `"git": {}` husk behind that only the refused config
+		// introduced — `/swarm config` renders the resolved object verbatim.
+		if (Object.keys(nextGit).length === 0) {
+			delete rebuilt.git;
+			return rebuilt;
+		}
+	} else {
+		nextGit.binary = userBinary;
+	}
+	rebuilt.git = nextGit;
+	return rebuilt;
+}
+
+/**
  * Single shared core: merges, migrates, sanitizes, and parses raw user +
  * project configs, applying `full_auto.locked` OR-semantics and fail-secure
  * defaults.  All entry points (sync and async) call this function; only the
@@ -445,6 +555,13 @@ function buildConfigWithMeta(
 			unknown
 		>;
 	}
+
+	// 1b. `git.binary` is an administrative, user-level-only key: a project
+	//     config may never select the executable we spawn as git. Runs
+	//     immediately after the merge so every downstream step (including
+	//     each recovery branch) sees the already-neutralized object.
+	//     SECURITY (CWE-427) — see `enforceGitBinaryProvenance`.
+	mergedRaw = enforceGitBinaryProvenance(mergedRaw, rawUserConfig);
 
 	// 2. `full_auto.locked` is an administrative hard-off: a project-level
 	//    `locked: false` must NOT override a user-level `locked: true`.

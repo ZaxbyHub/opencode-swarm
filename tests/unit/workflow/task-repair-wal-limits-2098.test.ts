@@ -49,8 +49,21 @@ describe('issue #2098 corrupt task-repair WAL error message (FB-002)', () => {
 		expect(result.success).toBe(false);
 		const message = [result.message, ...(result.errors ?? [])].join(' ');
 		expect(message).toContain(walPath);
-		expect(message.toLowerCase()).toContain('delete this file');
+		expect(message).toContain(
+			'Preserve this file, reconcile the repair transition, and only then move it aside.',
+		);
 	});
+});
+
+test('lazy repair recovery does not require a plan when no repair WAL exists', async () => {
+	const { dir, cleanup } = createSafeTestDir('task-repair-no-wal-2098-');
+	try {
+		expect(
+			await recoverPreparedTaskRepair(dir, TASK_ID, 'repair-no-wal-caller'),
+		).toBeNull();
+	} finally {
+		cleanup();
+	}
 });
 
 describe('issue #2098 force-repair field length limits (FB-004)', () => {

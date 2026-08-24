@@ -39,6 +39,21 @@ const USAGE = [
 	'',
 	'Refuses while the workflow is armed for publication (call complete_pr_workflow',
 	'instead) or while PR workflow lanes are still in flight (collect their results first).',
+	'',
+	'Lane liveness (issue #2251): a lane past the 30-minute staleness horizon whose',
+	'session the host still reports as busy or retrying is RETAINED rather than settled,',
+	'and keeps blocking every exit. Because nothing ever makes such a lane go idle on a',
+	'schedule, this human-only force path is the override: when probe-retained lanes are',
+	'the ONLY thing left blocking, it clears the gate anyway and discloses exactly which',
+	'lanes it overrode. Those sessions are NOT stopped and their output is NOT collected.',
+	'Their delegation records ARE finalized once the gate has actually cleared, so a new',
+	'PR workflow can be started for the session — without that, checkout preparation would',
+	'refuse forever. The warning names only the records it OBSERVED go terminal; a lane that',
+	'had already moved on is named with its actual status and left intact, so check',
+	'collect_lane_results before assuming that work is gone. If any delegation record for this',
+	'session is still open afterwards, the warning names it too, instead of claiming the',
+	'session is restartable.',
+	'A lane with a fresh updatedAt is never overridden — force does not weaken that.',
 ].join('\n');
 
 const KNOWN_MODES = new Set<string>(['PR_REVIEW', 'PR_FEEDBACK']);
@@ -84,7 +99,12 @@ export async function handleAbortPrWorkflowCommand(
 		const headLine = summary.prHeadSha
 			? ` (was bound to PR head ${summary.prHeadSha})`
 			: ' (was not bound to a PR head)';
-		return `Aborted active ${summary.mode} mechanical gate for session ${sessionID}${headLine} (force). The durable gate state has been cleared and the auto-resume loop will stop. An audit event was appended to .swarm/events.jsonl. If checkout preparation preserved changes, continue with prepare_pr_workflow_checkout operation=restore (or follow the preserved receipt manually).`;
+		// The override disclosure is the whole point of the S3 escape hatch: the
+		// human is being told that live lanes were abandoned, not settled.
+		const overrideLine = summary.probeRetentionOverrideDisclosure
+			? ` WARNING: ${summary.probeRetentionOverrideDisclosure}`
+			: '';
+		return `Aborted active ${summary.mode} mechanical gate for session ${sessionID}${headLine} (force). The durable gate state has been cleared and the auto-resume loop will stop. An audit event was appended to .swarm/events.jsonl. If checkout preparation preserved changes, continue with prepare_pr_workflow_checkout operation=restore (or follow the preserved receipt manually).${overrideLine}`;
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		return `Error: ${message}\n\n${USAGE}`;

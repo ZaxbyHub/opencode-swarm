@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
@@ -273,6 +273,133 @@ describe('gate-evidence workflow transitions', () => {
 			}),
 		).rejects.toThrow(/TASK_WORKFLOW_TERMINAL/);
 		expect(readTaskEvidenceRaw(tempDir, '1.8')).toEqual(before);
+	});
+
+	it('rejects a foreign task_closed against an already-closed task', async () => {
+		// Locks in fail-closed behavior. The terminal guard deliberately has no
+		// `(closed && task_closed)` idempotency branch, unlike the complete/blocked
+		// branches: `task_closed` rewrites lastTransitionId, so allowing a re-entry
+		// would let a foreign transition silently overwrite terminal provenance. An
+		// exact replay of the SAME transitionId is already short-circuited earlier by
+		// isDuplicateTransition, so no legitimate caller needs such a branch.
+		await transitionTaskWorkflowEvidence(tempDir, '1.9', {
+			type: 'task_closed',
+			expectedGeneration: 0,
+			transitionId: 'close-original',
+		});
+		const before = readTaskEvidenceRaw(tempDir, '1.9');
+		expect(before?.workflow).toMatchObject({
+			state: 'closed',
+			lastTransitionId: 'close-original',
+		});
+
+		await expect(
+			transitionTaskWorkflowEvidence(tempDir, '1.9', {
+				type: 'task_closed',
+				expectedGeneration: 0,
+				transitionId: 'close-foreign',
+			}),
+		).rejects.toThrow(/TASK_WORKFLOW_TERMINAL/);
+		expect(readTaskEvidenceRaw(tempDir, '1.9')).toEqual(before);
+	});
+
+	it('records forcedCompletion in durable evidence for a QA-exempt completion', async () => {
+		await transitionTaskWorkflowEvidence(tempDir, '1.10', {
+			type: 'task_completed',
+			qaExempt: true,
+			expectedGeneration: 0,
+			transitionId: 'forced-complete',
+		});
+		const forced = readTaskEvidenceRaw(tempDir, '1.10');
+		expect(forced?.workflow).toMatchObject({
+			state: 'complete',
+			forcedCompletion: true,
+		});
+
+		// A repair reopens the task, so the forced-completion fact must not survive
+		// into the new generation.
+		await transitionTaskWorkflowEvidence(tempDir, '1.10', {
+			type: 'repair_idle',
+			expectedGeneration: 0,
+			transitionId: 'repair-after-forced',
+		});
+		const repaired = readTaskEvidenceRaw(tempDir, '1.10');
+		expect(repaired?.workflow.state).toBe('idle');
+		expect(repaired?.workflow.forcedCompletion).toBeUndefined();
+	});
+
+	it('keeps forcedCompletion across a later non-exempt task_completed', async () => {
+		// The terminal guard permits task_completed from `complete`. Without the
+		// carry-forward in `base`, a second, non-exempt task_completed would drop the
+		// flag and launder a forced completion into one that looks gate-passed.
+		await transitionTaskWorkflowEvidence(tempDir, '1.11', {
+			type: 'task_completed',
+			qaExempt: true,
+			expectedGeneration: 0,
+			transitionId: 'forced-first',
+		});
+		expect(
+			readTaskEvidenceRaw(tempDir, '1.11')?.workflow.forcedCompletion,
+		).toBe(true);
+
+		await transitionTaskWorkflowEvidence(tempDir, '1.11', {
+			type: 'task_completed',
+			expectedGeneration: 0,
+			transitionId: 'relaunder-attempt',
+		});
+
+		const after = readTaskEvidenceRaw(tempDir, '1.11')?.workflow;
+		expect(after?.state).toBe('complete');
+		expect(after?.forcedCompletion).toBe(true);
+	});
+
+	it('reads pre-forcedCompletion evidence written before this change as not-forced', async () => {
+		// Legacy fixture: an evidence.json exactly as the pre-PR writer emitted it,
+		// with NO forcedCompletion key at all. Written raw (never through
+		// transitionTaskWorkflowEvidence) so a forward-compat regression in the
+		// reader cannot hide behind the new writer — same technique as
+		// createLegacyLedger in tests/unit/plan/ledger-plan-epoch-adoption.test.ts.
+		mkdirSync(path.join(tempDir, '.swarm', 'evidence'), { recursive: true });
+		writeFileSync(
+			path.join(tempDir, '.swarm', 'evidence', '1.12.json'),
+			JSON.stringify({
+				taskId: '1.12',
+				required_gates: ['reviewer', 'test_engineer'],
+				gates: {
+					reviewer: {
+						sessionId: 'ses_legacy',
+						timestamp: '2026-01-01T00:00:00.000Z',
+						agent: 'reviewer',
+					},
+				},
+				workflow: {
+					schema: 'exact-task-v1',
+					generation: 3,
+					state: 'complete',
+					retryCount: 0,
+					retryHistory: [],
+					retryEpoch: 0,
+					lastOutcome: 'task_completed',
+					lastTransitionId: 'legacy-transition',
+					updatedAt: '2026-01-01T00:00:00.000Z',
+				},
+			}),
+			'utf8',
+		);
+
+		const legacy = readTaskEvidenceRaw(tempDir, '1.12');
+		expect(legacy?.workflow.state).toBe('complete');
+		expect(legacy?.workflow.forcedCompletion).toBeUndefined();
+
+		// And a later non-exempt completion must not invent the flag.
+		await transitionTaskWorkflowEvidence(tempDir, '1.12', {
+			type: 'task_completed',
+			expectedGeneration: 3,
+			transitionId: 'post-legacy',
+		});
+		expect(
+			readTaskEvidenceRaw(tempDir, '1.12')?.workflow.forcedCompletion,
+		).toBeUndefined();
 	});
 
 	it('keeps a single evidence lock across a caller-managed transaction callback', async () => {

@@ -27,11 +27,13 @@ describe('removeWorktree opt-in force fallback (#1708)', () => {
 	const realBunSpawn = _internals.bunSpawn;
 	const realPlatform = _internals.platform;
 	const realSleep = _internals.sleep;
+	const realResolveGitExecutable = _internals.resolveGitExecutable;
 
 	afterEach(() => {
 		_internals.bunSpawn = realBunSpawn;
 		_internals.platform = realPlatform;
 		_internals.sleep = realSleep;
+		_internals.resolveGitExecutable = realResolveGitExecutable;
 	});
 
 	function mockProc(
@@ -61,6 +63,12 @@ describe('removeWorktree opt-in force fallback (#1708)', () => {
 		nonForce: () => BunCompatSubprocess;
 		force: () => BunCompatSubprocess;
 	}): string[][] {
+		// Issue #2236 hardening (lane C1b): `runGit` resolves the git binary
+		// via `resolveGitExecutable()` instead of a bare `'git'` literal. Stub
+		// it (re-applied per test, since `afterEach` above restores the real
+		// implementation) so the captured argv below stays deterministic — no
+		// real filesystem probing against the stubbed `bunSpawn`.
+		_internals.resolveGitExecutable = () => 'git';
 		const calls: string[][] = [];
 		_internals.bunSpawn = ((cmd: string[]) => {
 			calls.push(cmd);

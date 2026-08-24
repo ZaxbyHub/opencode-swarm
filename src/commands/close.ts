@@ -34,6 +34,7 @@ export const closeReceiptLifecycleInternals = {
 	reconcilePhaseClose,
 };
 
+import { finalizeContextTelemetry as finalizeContextTelemetryImpl } from '../context-map/telemetry.js';
 import {
 	readKnowledge,
 	resolveSwarmKnowledgePath,
@@ -42,7 +43,6 @@ import type { SwarmKnowledgeEntry } from '../hooks/knowledge-types';
 import { validateSwarmPath } from '../hooks/utils';
 import { runFinalizeRewardSweep } from '../memory/finalize-reward-sweep';
 import { tryAcquireLock } from '../parallel/file-locks.js';
-import { closePlanTerminalState } from '../plan/manager';
 import { clearAllScopes } from '../scope/scope-persistence';
 import {
 	buildActionMenu,
@@ -55,6 +55,11 @@ import {
 	type SkillImproveRequest,
 	type SkillImproveResult,
 } from '../services/skill-improver';
+import {
+	formatResidueInventoryLines,
+	inventorySwarmResidue,
+	quarantineSwarmResidue,
+} from '../services/swarm-residue';
 import { readEarliestSessionStart } from '../session/session-start-store.js';
 import {
 	endAgentSession,
@@ -64,8 +69,12 @@ import {
 } from '../state';
 import { telemetry as telemetryEmit } from '../telemetry';
 import { executeWriteRetro } from '../tools/write-retro';
+import { atomicWriteSwarmFile } from '../utils/atomic-write';
 import { log } from '../utils/logger';
-import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
+import {
+	type CloseTerminalResult,
+	reconcileCloseTerminalState,
+} from '../workflow/close-terminal.js';
 import { archiveSqliteSnapshot, type SqliteRowCounts } from './archive-sqlite';
 
 interface PlanPhase {
@@ -82,6 +91,40 @@ interface PlanPhase {
 interface PlanData {
 	title: string;
 	phases: PlanPhase[];
+}
+
+const NO_RECEIPT_PHASE_CLOSE_SCOPE_DETAIL =
+	'no exact receipt lifecycle scope exists for phase closure';
+
+/**
+ * Close-command wrapper around the exact-task terminal reconciliation service.
+ *
+ * Deliberately NOT named `closePlanTerminalState`: `src/plan/manager.ts` exports a
+ * distinct function by that name (ledger-first phase/projection persistence), which
+ * `reconcileCloseTerminalState` itself calls downstream. Keeping the two identifiers
+ * distinct avoids a same-name collision across close.ts / close-terminal.ts /
+ * plan/manager.ts. The `_internals` key below stays `closePlanTerminalState` so the
+ * existing test seam is unchanged.
+ */
+async function reconcileCloseTerminalStateForPlan(
+	directory: string,
+	targetPlan: Plan,
+	options: {
+		actor: string;
+		requestedClosedTaskIds: string[];
+		closedPhaseIds: number[];
+		originalStatuses?: Map<string, string>;
+	},
+): Promise<CloseTerminalResult | undefined> {
+	return reconcileCloseTerminalState(directory, targetPlan, options);
+}
+
+function hardStopTerminalization(
+	ctx: CloseStageContext,
+	message: string,
+): void {
+	ctx.warnings.push(message);
+	ctx.terminalizationError = message;
 }
 
 interface CloseCommandOptions {
@@ -174,6 +217,7 @@ export interface CloseStageContext {
 	fullAuto: boolean;
 	originalStatuses: Map<string, string>;
 	guaranteeResult: { closedPhaseIds: number[]; closedTaskIds: string[] };
+	terminalizationError?: string;
 	archiveResult: string;
 	archivedFileCount: number;
 	archivedActiveStateFiles: Set<string>;
@@ -366,6 +410,23 @@ const ARCHIVE_ARTIFACTS = [
 	'spec.md',
 	'spec-staleness.json',
 	'spec-snapshot.md',
+	// Background-delegation durable store (issue #2034): archived as a set
+	// (ledger + checkpoint + manifest + health) so the forensic bundle holds
+	// the complete recoverable state and terminal audit summaries. Deliberately
+	// omitted from ACTIVE_STATE_TO_CLEAN — the store is cross-session state;
+	// compaction (not close) is its bounded-retention mechanism.
+	'background-delegations.jsonl',
+	'background-delegations.checkpoint.json',
+	'background-delegations.manifest.json',
+	'background-delegations-health.json',
+	// Context-map telemetry store (issue #2037): the bounded single-file store
+	// (manifest header + retained window) is archived as a defined, validated
+	// cut for forensics. The tail is folded/finalized before archiving via
+	// finalizeContextTelemetry, parallel to flushAndDrainTelemetry. Deliberately
+	// omitted from ACTIVE_STATE_TO_CLEAN — the store is cross-session state and
+	// its bounded-retention mechanism is compaction (not close), so active state
+	// stays usable after close.
+	'context-telemetry.jsonl',
 ];
 
 /**
@@ -511,11 +572,14 @@ const REQUIRED_ARTIFACTS = new Set(['plan.json', 'plan-ledger.jsonl']);
  * swarms start clean. Each entry is a relative path under .swarm/.
  */
 const ACTIVE_STATE_DIRS_TO_CLEAN = [
+	'coder-settlements',
 	'council',
 	'evidence',
 	'session',
 	'scopes',
 	'spec-archive',
+	'task-repairs',
+	'task-terminals',
 ];
 
 /**
@@ -565,7 +629,14 @@ export interface CleanStageResult {
 	cleanedFiles: string[];
 	configBackupsRemoved: number;
 	swarmPlanFilesRemoved: number;
-	tmpFilesRemoved: number;
+	/**
+	 * Stale atomic-write temp files MOVED into `.swarm/quarantine/<batch>/`
+	 * (issue #2035). Quarantine is a recoverable move with a manifest — the
+	 * pre-#2035 blind `.tmp.*` unlink sweep is gone; preserved candidates
+	 * (recent/active/tracked/ambiguous) are counted in `residuePreserved`.
+	 */
+	residueQuarantined: number;
+	residuePreserved: number;
 }
 
 /**
@@ -657,6 +728,7 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 				retroResult = await executeWriteRetro(
 					{
 						phase: phase.id,
+						verdict: ctx.isForced ? 'fail' : 'pass',
 						summary: ctx.isForced
 							? `Phase force-closed via /swarm close --force`
 							: `Phase closed via /swarm close`,
@@ -735,6 +807,7 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 			const sessionRetroResult = await executeWriteRetro(
 				{
 					phase: 1,
+					verdict: ctx.isForced ? 'fail' : 'pass',
 					task_id: 'retro-session',
 					summary: ctx.isForced
 						? 'Plan-free session force-closed via /swarm close --force'
@@ -1038,6 +1111,7 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 		const closedTasksLenBefore = ctx.closedTasks.length;
 
 		const receiptPhaseLabels = new Map<number, string>();
+		const receiptLifecycleSkippedPhaseIds = new Set<number>();
 		for (const phase of ctx.planData.phases ?? []) {
 			const label =
 				extractCurrentPhaseFromPlan({
@@ -1056,13 +1130,12 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 				// phase has no receipt membership at all, there is no receipt lifecycle
 				// to close and terminal plan persistence must continue. Ambiguous or
 				// unreadable receipt state still fails closed below.
-				if (
-					intent.detail ===
-					'no exact receipt lifecycle scope exists for phase closure'
-				) {
+				if (intent.detail === NO_RECEIPT_PHASE_CLOSE_SCOPE_DETAIL) {
+					receiptLifecycleSkippedPhaseIds.add(phase.id);
 					continue;
 				}
-				ctx.warnings.push(
+				hardStopTerminalization(
+					ctx,
 					`Receipt phase-close intent failed for phase ${phase.id}: ${intent.detail}. Plan terminalization was not attempted.`,
 				);
 				return;
@@ -1082,40 +1155,57 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 			}
 		}
 
-		// Persist the terminal plan state
-		let terminalPlanPersisted = ctx.planAlreadyDone;
-		if (
-			!ctx.planAlreadyDone ||
-			ctx.guaranteeResult.closedPhaseIds.length > 0 ||
-			ctx.guaranteeResult.closedTaskIds.length > 0
-		) {
+		// Reconcile terminal plan state with exact-task evidence even when the
+		// caller projection already appears terminal.
+		let terminalPlanPersisted = !ctx.planExists;
+		if (ctx.planExists) {
 			try {
-				await _internals.closePlanTerminalState(
+				const reconciled = await _internals.closePlanTerminalState(
 					ctx.directory,
 					ctx.planData as Plan,
 					{
+						actor: ctx.options.sessionID ?? 'close-command',
 						closedPhaseIds: ctx.guaranteeResult.closedPhaseIds,
-						closedTaskIds: ctx.guaranteeResult.closedTaskIds,
+						requestedClosedTaskIds: ctx.guaranteeResult.closedTaskIds,
 						originalStatuses: ctx.originalStatuses,
 					},
 				);
+				if (reconciled) {
+					ctx.planData = reconciled.plan as PlanData;
+					ctx.guaranteeResult = {
+						closedPhaseIds: [...reconciled.closedPhaseIds],
+						closedTaskIds: [...reconciled.closedTaskIds],
+					};
+					ctx.closedPhases = [...reconciled.closedPhaseIds];
+					ctx.closedTasks = [...reconciled.closedTaskIds];
+					// Surface QA-exempt forced completions. These tasks were recorded
+					// complete without passing the normal Stage B gates, so the close
+					// summary must not present them as reviewed-and-tested work.
+					if (reconciled.forcedCompletionTaskIds.length > 0) {
+						ctx.warnings.push(
+							`Completed without QA evidence (forced completion): ${reconciled.forcedCompletionTaskIds.join(', ')}. These tasks had no authoritative workflow evidence and did not pass reviewer/test gates.`,
+						);
+					}
+				}
 				terminalPlanPersisted = true;
 			} catch (error) {
 				const msg = error instanceof Error ? error.message : String(error);
 				ctx.warnings.push(`Failed to persist terminal plan state: ${msg}`);
+				ctx.terminalizationError = msg;
 				log('[close-command] Failed to write terminal plan state:', error);
-				// SC-013 rollback: restore in-memory state to match on-disk when
-				// terminal write fails so the summary does not falsely claim
-				// phases/tasks were closed
 				ctx.planData = planDataSnapshot;
 				ctx.closedPhases.length = closedPhasesLenBefore;
 				ctx.closedTasks.length = closedTasksLenBefore;
+				return;
 			}
 		}
 
 		for (const phase of terminalPlanPersisted
 			? (ctx.planData.phases ?? [])
 			: []) {
+			if (receiptLifecycleSkippedPhaseIds.has(phase.id)) {
+				continue;
+			}
 			const reconciled =
 				await closeReceiptLifecycleInternals.reconcilePhaseClose(
 					ctx.directory,
@@ -1124,9 +1214,11 @@ export async function runFinalizeStage(ctx: CloseStageContext): Promise<void> {
 					ctx.options.sessionID,
 				);
 			if (!reconciled.ok) {
-				ctx.warnings.push(
-					`Receipt phase-close reconciliation remains pending for phase ${phase.id}: ${reconciled.detail}`,
+				hardStopTerminalization(
+					ctx,
+					`Receipt phase-close reconciliation failed for phase ${phase.id}: ${reconciled.detail}`,
 				);
+				return;
 			}
 		}
 	}
@@ -1195,6 +1287,24 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 			const msg =
 				flushErr instanceof Error ? flushErr.message : String(flushErr);
 			ctx.warnings.push(`Telemetry flush before archive failed: ${msg}`);
+		}
+
+		// Finalize the context-map telemetry store (issue #2037) BEFORE archiving
+		// so the archived `context-telemetry.jsonl` is a defined, validated cut
+		// (tail folded into the durable aggregate, atomic single-file rewrite).
+		// Unlike the core telemetry stream this store is synchronous (no buffered
+		// writer), so no flush is needed — finalization is a fold + atomic rewrite.
+		// Fail-open: a finalize failure only warns; the close pipeline continues.
+		try {
+			_internals.finalizeContextTelemetry(ctx.directory);
+		} catch (finalizeErr) {
+			const msg =
+				finalizeErr instanceof Error
+					? finalizeErr.message
+					: String(finalizeErr);
+			ctx.warnings.push(
+				`Context-map telemetry finalize before archive failed: ${msg}`,
+			);
 		}
 
 		// Copy swarm artifacts to archive.
@@ -1751,43 +1861,47 @@ export async function runCleanStage(
 		}
 	}
 
-	// Remove stale .tmp.* files that were left behind by interrupted handoff
-	// writes or other transient operations. These are safe to delete because
-	// they are recreated on next session init and must be removed to avoid
-	// stale-state pollution in the archive bundle.
-	let tmpFilesRemoved = 0;
+	// Atomic-write residue (issue #2035): discover candidates by REGISTERED
+	// temp grammars (never substring heuristics), QUARANTINE verified stale
+	// residue — a recoverable, manifest-backed move; automatic destructive
+	// deletion is out of scope — and preserve + report everything else
+	// (recent, active, tracked, symlink, constant-name, ambiguous). This
+	// replaces the pre-#2035 blind `.tmp.`-prefix unlink sweep, which missed
+	// every grammar current writers produce and removed files without gates.
+	let residueQuarantined = 0;
+	let residuePreserved = 0;
 	try {
-		const swarmFiles = await fs.readdir(ctx.swarmDir);
-		const tmpFiles = swarmFiles.filter((f) => f.startsWith('.tmp.'));
-		for (const tmp of tmpFiles) {
-			try {
-				await fs.unlink(path.join(ctx.swarmDir, tmp));
-				tmpFilesRemoved++;
-			} catch (err) {
-				const errno = (err as NodeJS.ErrnoException)?.code;
-				if (errno === 'ENOENT') {
-					// Stale tmp file already absent — silent skip.
-				} else {
-					const reason = err instanceof Error ? err.message : String(err);
-					ctx.warnings.push(
-						`Failed to clean tmp file ${tmp} [${errno ?? 'unknown'}]: ${reason}`,
-					);
-				}
-			}
-		}
-	} catch (err) {
-		const errno = (err as NodeJS.ErrnoException)?.code;
-		if (errno === 'ENOENT') {
-			// swarmDir absent — nothing to clean; silent skip.
-		} else {
-			const reason = err instanceof Error ? err.message : String(err);
+		const residue = await quarantineSwarmResidue(ctx.directory, {
+			trigger: 'close',
+		});
+		residueQuarantined = residue.quarantined;
+		residuePreserved = residue.preserved.length;
+		if (residue.quarantined > 0 && residue.batchRelDir) {
+			cleanedFiles.push(
+				`${residue.quarantined} stale temp file(s) → ${residue.batchRelDir}/`,
+			);
 			ctx.warnings.push(
-				`Failed to read ${ctx.swarmDir} for tmp-file cleanup [${errno ?? 'unknown'}]: ${reason}`,
+				`Quarantined ${residue.quarantined} stale atomic-write temp file(s) to .swarm/${residue.batchRelDir}/ (recoverable; rollback: /swarm config doctor --rollback-residue-quarantine).`,
 			);
 		}
-	}
-	if (tmpFilesRemoved > 0) {
-		cleanedFiles.push(`${tmpFilesRemoved} .tmp.* file(s)`);
+		if (residue.preserved.length > 0) {
+			const sample = residue.preserved
+				.slice(0, 5)
+				.map((p) => `\`${p.relPath}\``)
+				.join(', ');
+			ctx.warnings.push(
+				`Preserved ${residue.preserved.length} residue candidate(s) in place (recent/active/tracked/ambiguous): ${sample}${residue.preserved.length > 5 ? ' …' : ''}.`,
+			);
+		}
+	} catch (err) {
+		const reason = err instanceof Error ? err.message : String(err);
+		// Honest about partial outcomes (PR review PRR-005): an abort here can
+		// occur after some entries already moved, so do not claim all were
+		// preserved. Quarantine itself now guards each entry's move, so this
+		// path only triggers on inventory/telemetry-level failures.
+		ctx.warnings.push(
+			`Atomic-write residue quarantine failed (status of individual candidates unknown — inspect .swarm/quarantine/): ${reason}`,
+		);
 	}
 
 	// Terminal-state removal (finalize knowledge-preservation fix): unconditionally
@@ -1842,20 +1956,12 @@ export async function runCleanStage(
 		'No active plan. Next session starts fresh.',
 		'',
 	].join('\n');
-	const contextTempPath = path.join(
-		path.dirname(contextPath),
-		`${path.basename(contextPath)}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
-	);
+	// Reset context.md so new sessions start fresh. Written through the
+	// canonical atomic helper (issue #2035): contained target, registered
+	// temp grammar, exact own-temp cleanup, cache invalidation.
 	try {
-		await fs.writeFile(contextTempPath, contextContent, 'utf-8');
-		fsSync.renameSync(contextTempPath, contextPath);
-		invalidateCachedArtifact(contextPath);
+		await atomicWriteSwarmFile(contextPath, contextContent);
 	} catch (error) {
-		try {
-			fsSync.unlinkSync(contextTempPath);
-		} catch {
-			// best-effort cleanup
-		}
 		const msg = error instanceof Error ? error.message : String(error);
 		ctx.warnings.push(`Failed to reset context.md: ${msg}`);
 		log('[close-command] Failed to write context.md:', error);
@@ -1865,7 +1971,8 @@ export async function runCleanStage(
 		cleanedFiles,
 		configBackupsRemoved,
 		swarmPlanFilesRemoved,
-		tmpFilesRemoved,
+		residueQuarantined,
+		residuePreserved,
 	};
 }
 
@@ -1992,6 +2099,25 @@ export async function runFinalizeDryRun(
 		? 'would align the working tree to main/remote (git reset), pruning merged branches only with --prune-branches'
 		: 'would skip git alignment (not a git repository / git unavailable)';
 
+	// Read-only residue inventory (issue #2035): the SAME shared inventory the
+	// real close run and `/swarm config doctor` render from — a dry-run
+	// preview must never mutate, so this uses inventorySwarmResidue directly.
+	let residueSection: string[] = [];
+	try {
+		const residueInventory = await inventorySwarmResidue(directory);
+		if (residueInventory.summary.matched > 0) {
+			residueSection = [
+				'',
+				'### Atomic-write residue (read-only inventory)',
+				...formatResidueInventoryLines(residueInventory),
+				'- A real close run QUARANTINES eligible items into `.swarm/quarantine/` (recoverable, manifest-backed — never deleted); every other candidate is preserved in place.',
+			];
+		}
+	} catch {
+		// inventory is best-effort inside dry-run — its failure must not mask
+		// the rest of the report
+	}
+
 	const lines: string[] = [
 		'## /swarm finalize — DRY RUN (no changes made)',
 		'',
@@ -2031,6 +2157,7 @@ export async function runFinalizeDryRun(
 					...wouldRemoveTerminal.map((f) => `- ${f}`),
 				]
 			: []),
+		...residueSection,
 		'',
 		'### Git',
 		`- ${gitNote}`,
@@ -2234,6 +2361,9 @@ export async function handleCloseCommand(
 			: false;
 
 		await runFinalizeStage(ctx);
+		if (ctx.terminalizationError) {
+			return `❌ Close paused before reward, archive, cleanup, teardown, and Git alignment because terminal plan/evidence reconciliation failed: ${ctx.terminalizationError}\n\nNo active state was archived or removed. Fix the reported durable-state problem, then retry /swarm close.`;
+		}
 
 		// ─── B.6: NEGATIVE-TERMINAL REWARD SWEEP (design decision C-6) ───
 		// Tasks left non-complete were just stamped close_reason='session_terminated'
@@ -2332,7 +2462,7 @@ export async function handleCloseCommand(
 			'',
 			'## Context',
 			'- Reset context.md for next session',
-			'- Cleared agent sessions and delegation chains',
+			'- Cleared agent sessions, delegation chains, and active-agent mappings',
 			...(cleanResult.configBackupsRemoved > 0
 				? [
 						`- Removed ${cleanResult.configBackupsRemoved} stale config backup file(s)`,
@@ -2358,25 +2488,11 @@ export async function handleCloseCommand(
 				: []),
 		].join('\n');
 
-		const closeSummaryTempPath = path.join(
-			path.dirname(closeSummaryPath),
-			`${path.basename(closeSummaryPath)}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`,
-		);
+		// Canonical atomic helper (issue #2035): registered temp grammar,
+		// exact own-temp cleanup, and cache invalidation in one place.
 		try {
-			await fs.writeFile(closeSummaryTempPath, summaryContent, 'utf-8');
-			fsSync.renameSync(closeSummaryTempPath, closeSummaryPath);
-			// Defensive, not currently load-bearing: no cached reader consumes
-			// close-summary.md today, so this is a no-op. It is kept so the file
-			// cannot become a stale-read hazard the moment someone routes a read
-			// through `readSwarmFileAsync`, matching every other temp+rename
-			// writer in this file.
-			invalidateCachedArtifact(closeSummaryPath);
+			await atomicWriteSwarmFile(closeSummaryPath, summaryContent);
 		} catch (error) {
-			try {
-				fsSync.unlinkSync(closeSummaryTempPath);
-			} catch {
-				// best-effort cleanup
-			}
 			const msg = error instanceof Error ? error.message : String(error);
 			ctx.warnings.push(`Failed to write close-summary.md: ${msg}`);
 			log('[close-command] Failed to write close-summary.md:', error);
@@ -2571,7 +2687,10 @@ export const _internals = {
 	runAlignStage,
 	runFinalizeDryRun,
 	archiveEvidence,
-	closePlanTerminalState,
+	// Seam name intentionally retained for test compatibility; see the
+	// reconcileCloseTerminalStateForPlan doc comment for why the function itself
+	// no longer shares plan/manager.ts's `closePlanTerminalState` name.
+	closePlanTerminalState: reconcileCloseTerminalStateForPlan,
 	endAgentSession,
 	// Flushes the telemetry write stream before its files are archived. Delegates
 	// to the telemetry module's _internals so tests can substitute a no-op.
@@ -2581,5 +2700,12 @@ export const _internals = {
 	flushAndDrainTelemetry: async (): Promise<void> => {
 		const { flushAndDrainTelemetry } = await import('../telemetry.js');
 		return flushAndDrainTelemetry();
+	},
+	// Finalizes the bounded context-map telemetry store before archiving it
+	// (issue #2037): folds the retained tail into the durable aggregate via an
+	// atomic single-file rewrite. Synchronous, fail-open. Seam so close tests
+	// can substitute a no-op / throwing stub.
+	finalizeContextTelemetry: (directory: string): void => {
+		finalizeContextTelemetryImpl(directory);
 	},
 };

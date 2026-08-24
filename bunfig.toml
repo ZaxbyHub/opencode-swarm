@@ -7,3 +7,17 @@ coverageReporter = ["lcov", "text"]
 # Generate lcov.info for CI artifacts + text for human readability
 coverageDir = "./coverage"
 # Coverage output directory
+
+# Fail-closed production-store tripwire (issue #2033): captures the REAL platform
+# knowledge-store paths with pristine env before any test file loads, then blocks
+# read/mutate attempts against them (spread-real node:fs guards + Bun.write wrap).
+# Hermetic suites that redirect platform roots are unaffected.
+#
+# Executable-resolver pin (issue #2236 FR-006 ratchet fix): pre-seeds the
+# resolveGitExecutable()/resolveGhBinary() resolvers with their literal
+# 'git'/'gh' values so pre-existing tests don't need a per-file stub. See
+# the file for full rationale.
+preload = [
+	"./tests/preload/prod-store-tripwire.ts",
+	"./tests/preload/executable-resolver-pin.ts",
+]

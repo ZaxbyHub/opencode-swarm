@@ -12,6 +12,8 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { initLedger } from '../../../src/plan/ledger.js';
+import { derivePlanId } from '../../../src/plan/utils.js';
 
 // ── Import under test ─────────────────────────────────────────────────────
 const { handleCloseCommand, _internals: closeInternals } = await import(
@@ -38,9 +40,12 @@ function swarmDir(): string {
 	return path.join(testDir, '.swarm');
 }
 
-function writePlan(overrides: Record<string, unknown> = {}): void {
+async function writePlan(
+	overrides: Record<string, unknown> = {},
+): Promise<void> {
 	const plan = {
 		title: 'Archive Config Test Project',
+		swarm: 'archive-config-test',
 		schema_version: '1.0.0',
 		current_phase: 1,
 		phases: [
@@ -48,12 +53,23 @@ function writePlan(overrides: Record<string, unknown> = {}): void {
 				id: 1,
 				name: 'Phase 1',
 				status: 'in_progress',
-				tasks: [{ id: '1.1', status: 'in_progress', description: 'Task A' }],
+				tasks: [
+					{
+						id: '1.1',
+						phase: 1,
+						status: 'in_progress',
+						size: 'small',
+						description: 'Task A',
+						depends: [],
+						files_touched: [],
+					},
+				],
 			},
 		],
 		...overrides,
 	};
 	writeFileSync(path.join(swarmDir(), 'plan.json'), JSON.stringify(plan));
+	await initLedger(testDir, derivePlanId(plan), undefined, plan);
 }
 
 function makeConfig(
@@ -175,7 +191,7 @@ afterEach(() => {
 
 describe('handleCloseCommand — archive retention config (FR-016)', () => {
 	it('reads max_age_days and max_bundles from config.evidence (override)', async () => {
-		writePlan();
+		await writePlan();
 		let captured: [number, number] | undefined;
 		closeInternals.loadPluginConfigWithMeta = () =>
 			makeConfig({
@@ -197,7 +213,7 @@ describe('handleCloseCommand — archive retention config (FR-016)', () => {
 	});
 
 	it('defaults to 30 days / 10 bundles when config.evidence is absent', async () => {
-		writePlan();
+		await writePlan();
 		let captured: [number, number] | undefined;
 		closeInternals.loadPluginConfigWithMeta = () => makeConfig();
 		closeInternals.archiveEvidence = mock(
@@ -215,7 +231,7 @@ describe('handleCloseCommand — archive retention config (FR-016)', () => {
 	});
 
 	it('defaults to 30 days / 10 bundles when config.evidence is empty object', async () => {
-		writePlan();
+		await writePlan();
 		let captured: [number, number] | undefined;
 		closeInternals.loadPluginConfigWithMeta = () =>
 			makeConfig({ evidence: {} });
@@ -234,7 +250,7 @@ describe('handleCloseCommand — archive retention config (FR-016)', () => {
 	});
 
 	it('passes the test directory as the first argument to archiveEvidence', async () => {
-		writePlan();
+		await writePlan();
 		let capturedDir: string | undefined;
 		closeInternals.loadPluginConfigWithMeta = () =>
 			makeConfig({
@@ -251,7 +267,7 @@ describe('handleCloseCommand — archive retention config (FR-016)', () => {
 	});
 
 	it('forwards evidence.cache_max_bytes / cache_max_records to archiveEvidence (issue #1184)', async () => {
-		writePlan();
+		await writePlan();
 		let capturedArgs: unknown[] = [];
 		closeInternals.loadPluginConfigWithMeta = () =>
 			makeConfig({
@@ -282,7 +298,7 @@ describe('handleCloseCommand — archive retention config (FR-016)', () => {
 	});
 
 	it('omits cache caps from archiveEvidence options when config does not set them', async () => {
-		writePlan();
+		await writePlan();
 		let capturedArgs: unknown[] = [];
 		closeInternals.loadPluginConfigWithMeta = () =>
 			makeConfig({

@@ -8,6 +8,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { bunSpawn } from '../utils/bun-compat';
+import { resolveGitExecutable } from '../utils/git-executable.js';
 import { ENSURE_SWARM_GIT_EXCLUDED_PER_CALL_TIMEOUT_MS } from '../utils/gitignore-warning';
 
 /**
@@ -16,7 +17,15 @@ import { ENSURE_SWARM_GIT_EXCLUDED_PER_CALL_TIMEOUT_MS } from '../utils/gitignor
  * Bun's shared test-runner process). Mutating this local object is
  * file-scoped and trivially restorable via `afterEach`.
  */
-export const _internals: { bunSpawn: typeof bunSpawn } = { bunSpawn };
+export const _internals: {
+	bunSpawn: typeof bunSpawn;
+	/**
+	 * Test seam for git binary resolution (issue #2236 hardening, lane C1b).
+	 * This hook is not on the plugin init path, so the synchronous resolver
+	 * is used (unlike `gitignore-warning.ts`, which must use the async one).
+	 */
+	resolveGitExecutable: typeof resolveGitExecutable;
+} = { bunSpawn, resolveGitExecutable };
 
 /**
  * Read the declared file scope for a task from .swarm/plan.json.
@@ -79,11 +88,18 @@ const GIT_DIFF_SPAWN_OPTIONS = {
 
 async function getChangedFiles(directory: string): Promise<string[] | null> {
 	try {
+		// Issue #2236 hardening (lane C1b): resolve the git binary ONCE for
+		// both spawn calls below.
+		const gitExecutable = _internals.resolveGitExecutable();
+
 		// Try HEAD~1 first (normal case with commits)
-		const proc = _internals.bunSpawn(['git', 'diff', '--name-only', 'HEAD~1'], {
-			cwd: directory,
-			...GIT_DIFF_SPAWN_OPTIONS,
-		});
+		const proc = _internals.bunSpawn(
+			[gitExecutable, 'diff', '--name-only', 'HEAD~1'],
+			{
+				cwd: directory,
+				...GIT_DIFF_SPAWN_OPTIONS,
+			},
+		);
 
 		let exitCode: number;
 		let stdout: string;
@@ -106,10 +122,13 @@ async function getChangedFiles(directory: string): Promise<string[] | null> {
 		}
 
 		// Fallback: uncommitted changes vs HEAD
-		const proc2 = _internals.bunSpawn(['git', 'diff', '--name-only', 'HEAD'], {
-			cwd: directory,
-			...GIT_DIFF_SPAWN_OPTIONS,
-		});
+		const proc2 = _internals.bunSpawn(
+			[gitExecutable, 'diff', '--name-only', 'HEAD'],
+			{
+				cwd: directory,
+				...GIT_DIFF_SPAWN_OPTIONS,
+			},
+		);
 
 		let exitCode2: number;
 		let stdout2: string;

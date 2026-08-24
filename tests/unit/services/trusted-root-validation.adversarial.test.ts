@@ -202,7 +202,7 @@ describe('invariant 4 — activated write paths stay inside .swarm/', () => {
 			projectRoot,
 			getDefaultConfig(),
 		);
-		expect(warning).toContain('[CONTEXT BUDGET:');
+		expect(warning).toContain('[SWARM INJECTION FOOTPRINT:');
 		expect(await fs.readdir(projectRoot)).toEqual(['.swarm']);
 		expect(
 			await fs.readdir(path.join(projectRoot, '.swarm', 'session')),

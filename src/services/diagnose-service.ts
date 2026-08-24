@@ -3,7 +3,11 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import packageJson from '../../package.json' with { type: 'json' };
-import { getPluginCachePaths } from '../config/cache-paths.js';
+import {
+	discoverVersionPinnedCachePaths,
+	getPluginCachePaths,
+	resolveCachePackageRoot,
+} from '../config/cache-paths.js';
 import { loadPluginConfig } from '../config/loader';
 import type { Plan } from '../config/plan-schema';
 import { getDurableGateEvidenceStatusForTask } from '../evidence/gate-bridge.js';
@@ -13,7 +17,10 @@ import { loadPlanJsonOnly } from '../plan/manager';
 import { SandboxCapabilityProbe } from '../sandbox/capability-probe.js';
 import { getExecutor } from '../sandbox/executor.js';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
+import { resolveGitExecutableAsync } from '../utils/git-executable.js';
+import { listCoderSettlementWalStates } from '../workflow/coder-settlement.js';
 import { checkKnowledgeHealth } from './knowledge-diagnostics.js';
+import { inventorySwarmResidue } from './swarm-residue.js';
 import { compareVersions, readVersionCache } from './version-check.js';
 import { getDeferredWarnings } from './warning-buffer.js';
 
@@ -24,15 +31,6 @@ const REQUIRED_CACHE_GRAMMAR_ASSETS = [
 	'tree-sitter-javascript.wasm',
 	'tree-sitter-typescript.wasm',
 ] as const;
-
-function resolveCachePackageRoot(cachePath: string): string {
-	const nestedPackageRoot = path.join(
-		cachePath,
-		'node_modules',
-		'opencode-swarm',
-	);
-	return existsSync(nestedPackageRoot) ? nestedPackageRoot : cachePath;
-}
 
 export const _internals = {
 	detectSandboxCapability: () => sandboxCapabilityProbe.detect(),
@@ -389,7 +387,8 @@ async function checkGitRepository(directory: string): Promise<HealthCheck> {
 				detail: 'Invalid directory — cannot check git status',
 			};
 		}
-		child_process.execSync('git rev-parse --git-dir', {
+		const gitExecutable = await resolveGitExecutableAsync();
+		child_process.execFileSync(gitExecutable, ['rev-parse', '--git-dir'], {
 			cwd: directory,
 			stdio: 'pipe',
 		});
@@ -888,6 +887,44 @@ async function getSandboxStatus(): Promise<HealthCheck> {
 }
 
 /**
+ * Bounded atomic-write residue summary (issue #2035). Rendered from the same
+ * shared inventory as the close clean stage and `/swarm config doctor`, so
+ * all three surfaces cannot disagree. Paths never enter the detail line —
+ * counts and ages only.
+ */
+async function checkResidueInventory(directory: string): Promise<HealthCheck> {
+	try {
+		const inventory = await inventorySwarmResidue(directory);
+		const s = inventory.summary;
+		if (s.matched === 0) {
+			return {
+				name: 'Atomic-write residue',
+				status: '✅',
+				detail: 'No registered temp-grammar residue under .swarm/',
+			};
+		}
+		const oldestMin = Math.round(s.oldestAgeMs / 60_000);
+		return {
+			name: 'Atomic-write residue',
+			status: '⚠️',
+			detail:
+				`${s.matched} stale temp file(s) (${s.totalBytes} bytes, oldest ${oldestMin}m old): ` +
+				`${s.eligible} quarantine-eligible, ${s.ambiguous} preserved as recent/active/tracked/ambiguous` +
+				(inventory.gitState === 'unknown'
+					? ' (git tracked-state unknown — nothing auto-quarantined)'
+					: '') +
+				'. Run /swarm config doctor for the full inventory, /swarm config doctor --quarantine-residue to act.',
+		};
+	} catch (err) {
+		return {
+			name: 'Atomic-write residue',
+			status: '⬜',
+			detail: `Inventory unavailable: ${err instanceof Error ? err.message : String(err)}`,
+		};
+	}
+}
+
+/**
  * Get diagnose data from the swarm directory.
  * Returns structured health checks for GUI, background flows, or commands.
  */
@@ -993,6 +1030,73 @@ export async function getDiagnoseData(
 		}
 	}
 
+	// Check: Coder settlements (issue #2268) — surface the
+	// CODER_DISPATCH_IN_PROGRESS wedge class that used to be invisible to
+	// diagnose: a non-terminal settlement WAL whose dispatch completion never
+	// arrived. Warn-level by design: a genuinely in-flight dispatch also shows
+	// up as non-terminal here and must not fail the health check. Fail-open:
+	// an inspection failure downgrades to a warning, never breaks diagnose.
+	try {
+		const { states: settlementStates, truncated } =
+			await listCoderSettlementWalStates(directory);
+		const truncationNote = truncated
+			? ' MORE settlement WALs exist than the scan cap (200) — older ones are not shown.'
+			: '';
+		if (settlementStates.length === 0) {
+			checks.push({
+				name: 'Coder Settlements',
+				status: truncated ? '⚠️' : '✅',
+				detail: truncated
+					? `Settlement WAL scan truncated at 200 — additional settlements exist but are not shown.${truncationNote}`
+					: 'No coder settlement WALs',
+			});
+		} else {
+			const nonTerminal = settlementStates.filter(
+				(entry) =>
+					entry.state === 'DISPATCHED' ||
+					entry.state === 'PREPARED' ||
+					entry.state === 'unreadable',
+			);
+			if (nonTerminal.length === 0 && !truncated) {
+				checks.push({
+					name: 'Coder Settlements',
+					status: '✅',
+					detail: `${settlementStates.length} settlement(s) all in terminal state`,
+				});
+			} else {
+				const details = nonTerminal.map((entry) => {
+					if (entry.state === 'unreadable') {
+						return `task ${entry.taskId}: WAL unreadable`;
+					}
+					const owner =
+						entry.ownedInProcess || entry.ownedByLiveForeignPid
+							? `owner pid ${entry.processId ?? '?'} still alive — in flight or wedged`
+							: 'owner process is gone — stale';
+					return `task ${entry.taskId} (${entry.state}, ${owner})`;
+				});
+				checks.push({
+					name: 'Coder Settlements',
+					status: '⚠️',
+					detail: `${
+						nonTerminal.length > 0
+							? `${nonTerminal.length} non-terminal settlement(s): ${details.join(
+									'; ',
+								)}.`
+							: 'All shown settlements are terminal, but the scan was truncated.'
+					} Stale settlements block dispatches with CODER_DISPATCH_IN_PROGRESS — run /swarm recover [task_id] (--force if no dispatch is genuinely running) or /swarm reset-session.${truncationNote}`,
+				});
+			}
+		}
+	} catch (error) {
+		checks.push({
+			name: 'Coder Settlements',
+			status: '⚠️',
+			detail: `could not inspect coder settlements: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		});
+	}
+
 	// Check: context.md exists
 	const contextContent = await readSwarmFileAsync(directory, 'context.md');
 	if (contextContent) {
@@ -1071,6 +1175,10 @@ export async function getDiagnoseData(
 	// drift, stale-cache warning).
 	checks.push(await checkKnowledgeHealth(directory));
 
+	// Check: Atomic-write residue (issue #2035) — bounded summary derived from
+	// the SAME shared inventory as the close clean stage and config doctor.
+	checks.push(await checkResidueInventory(directory));
+
 	// Check: Agent Tool Snapshots
 	try {
 		const evidenceDir = path.join(directory, '.swarm', 'evidence');
@@ -1113,7 +1221,17 @@ export async function getDiagnoseData(
 	// Check: Plugin Caches — inventory of known OpenCode plugin cache locations.
 	// Shows which caches are present, what version is installed there, and which
 	// are absent. Helps users diagnose stale-cache issues (issue #675).
-	const cachePaths = getPluginCachePaths();
+	// Issue #2236 RC3 item 1 / non-blocking 5: getPluginCachePaths() is a
+	// fixed, pure list (opencode-swarm@latest / opencode-swarm literals only)
+	// so it cannot see a version-pinned OpenCode host cache like
+	// opencode-swarm@7.143.1. discoverVersionPinnedCachePaths() performs the
+	// filesystem enumeration to find those and is called explicitly here —
+	// getPluginCachePaths() intentionally stays pure so it can still be
+	// called from module scope elsewhere (AGENTS.md invariant 1).
+	const cachePaths = [
+		...getPluginCachePaths(),
+		...discoverVersionPinnedCachePaths(),
+	];
 	const cacheRows: string[] = [];
 	for (const cachePath of cachePaths) {
 		try {

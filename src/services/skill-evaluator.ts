@@ -17,11 +17,10 @@ import {
 	readdir,
 	readFile,
 	realpath,
-	rename,
 	stat,
-	writeFile,
 } from 'node:fs/promises';
 import * as path from 'node:path';
+import { atomicWriteSwarmFile } from '../utils/atomic-write';
 
 const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const MAX_EVAL_FILES = 50;
@@ -489,11 +488,15 @@ export async function evaluateSkillChange(
 	};
 }
 
+/**
+ * Canonical atomic write (issue #2035). Previously this helper leaked its
+ * `target.tmp-<pid>-<ts>` temp on ANY write/rename failure (no cleanup); the
+ * canonical helper cleans its own temp in `finally` and the old grammar stays
+ * registered for residue discovery.
+ */
 async function atomicWrite(filePath: string, content: string): Promise<void> {
 	await mkdir(path.dirname(filePath), { recursive: true });
-	const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
-	await writeFile(tmp, content, 'utf-8');
-	await rename(tmp, filePath);
+	await atomicWriteSwarmFile(filePath, content);
 }
 
 export async function appendRejectedSkillEdit(

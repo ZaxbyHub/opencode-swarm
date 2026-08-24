@@ -127,7 +127,7 @@ describe('SAST Scan - Profile-Driven Behavior', () => {
 		expect(mockExecuteRulesSyncCalls.length).toBe(0); // Tier A NOT called
 		expect(mockRunSemgrepCalls.length).toBe(1);
 		expect(mockRunSemgrepCalls[0].useAutoConfig).toBe(true);
-		expect(mockRunSemgrepCalls[0].lang).toBe('kotlin');
+		expect(mockRunSemgrepCalls[0].lang).toBeUndefined();
 		expect(mockRunSemgrepCalls[0].files).toContain(testFile);
 	});
 

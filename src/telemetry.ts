@@ -25,7 +25,14 @@ export type TelemetryEvent =
 	| 'reviewer_gate_decision'
 	| 'phase_changed'
 	| 'budget_updated'
+	| 'context_pruned'
 	| 'model_fallback'
+	/**
+	 * Issue #2271 bug 4 — a configured agent model id was POSITIVELY confirmed
+	 * unresolvable against the live provider catalog (distinct from a runtime
+	 * model_fallback: this fires at preflight, before any dispatch attempt).
+	 */
+	| 'model_unresolved'
 	| 'hard_limit_hit'
 	| 'revision_limit_hit'
 	| 'loop_detected'
@@ -88,7 +95,22 @@ export type TelemetryEvent =
 	// requiredness/attempt/validation/source_disposition plus aggregate
 	// archive_valid/archive_empty health facts (counts only, no row content).
 	| 'close_archive_result'
-	| 'knowledge_receipt_transition'; // Diagnostic projection only; the V2 journal is authoritative.
+	| 'knowledge_receipt_transition' // Diagnostic projection only; the V2 journal is authoritative.
+	// Human-only hive-store maintenance audit (issue #2033): one metadata-only event per
+	// preview/commit/rollback phase with bounded abort codes, counts, hash prefixes, and
+	// token prefixes. No lesson text and no filesystem paths ever enter the payload.
+	| 'knowledge_maintenance'
+	// Atomic-write residue health (issue #2035): bounded counts emitted when a
+	// quarantine run moves verified stale temp files (close clean stage or
+	// `/swarm config doctor --quarantine-residue`). Counts and registered
+	// grammar ids only — no file names, no paths, no content.
+	| 'residue_health'
+	// Context-map telemetry storage health (issue #2037): bounded counts emitted
+	// on compaction and close for the bounded `.swarm/context-telemetry.jsonl`
+	// store — accepted/compacted/retained/dropped/corrupt counts, oldest/newest
+	// timestamps, and byte figures. Counts only; no capsule/query content, no
+	// paths.
+	| 'context_telemetry_health';
 
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =
@@ -560,6 +582,25 @@ export const telemetry = {
 		_internals.emit('budget_updated', { sessionId, budgetPct, agentName });
 	},
 
+	contextPruned(data: {
+		sessionId: string;
+		agentName: string;
+		trigger: 'agent_switch' | 'critical_threshold';
+		usageSource: 'provider' | 'estimated';
+		beforeTokens: number;
+		afterTokens: number;
+		modelLimit: number;
+		maskedMessages: number;
+		maskedToolParts: number;
+		maskedTokensFreed: number;
+		prunedMessages: number;
+		prunedTextParts: number;
+		prunedToolParts: number;
+		prunedTokensFreed: number;
+	}): void {
+		_internals.emit('context_pruned', data);
+	},
+
 	modelFallback(
 		sessionId: string,
 		agentName: string,
@@ -573,6 +614,19 @@ export const telemetry = {
 			fromModel,
 			toModel,
 			reason,
+		});
+	},
+
+	/**
+	 * Issue #2271 bug 4 — preflight confirmed a configured model id does not
+	 * resolve against the provider catalog. Emitted once per detected model.
+	 */
+	modelUnresolved(agentName: string, model: string, detail: string): void {
+		_internals.emit('model_unresolved', {
+			sessionId: 'preflight',
+			agentName,
+			model,
+			detail,
 		});
 	},
 
@@ -830,6 +884,52 @@ export const telemetry = {
 		}>;
 	}): void {
 		_internals.emit('close_archive_result', data);
+	},
+
+	/**
+	 * Atomic-write residue health (issue #2035). Emitted after a residue
+	 * quarantine run (close clean stage / doctor flag). Bounded payload:
+	 * counts, one bounded age figure, total bytes, and per-grammar counts
+	 * keyed by the frozen registry ids — never file names, paths, or content,
+	 * enabling later reporting (PR 16/19) without leaking workspace layout.
+	 */
+	residueHealth(data: {
+		trigger: string;
+		scanned: number;
+		matched: number;
+		eligible: number;
+		ambiguous: number;
+		quarantined: number;
+		preserved: number;
+		total_bytes: number;
+		oldest_age_ms: number;
+		grammar_counts: Record<string, number>;
+	}): void {
+		_internals.emit('residue_health', data);
+	},
+
+	/**
+	 * Context-map telemetry storage health (issue #2037). Emitted after a
+	 * compaction or close cut for the bounded `.swarm/context-telemetry.jsonl`
+	 * store. Bounded payload: accepted/compacted/retained/dropped/corrupt
+	 * counts, oldest/newest timestamps, and byte figures. Counts ONLY — no
+	 * capsule/query content and no filesystem paths, matching the observability
+	 * contract's no-content-in-metrics rule. Enables PR 16 to alarm and PR 20 to
+	 * report without leaking workspace layout or capsule contents.
+	 */
+	contextTelemetryHealth(data: {
+		trigger: 'compaction' | 'close';
+		accepted_count: number;
+		compacted_count: number;
+		retained_count: number;
+		dropped_count: number;
+		corrupt_count: number;
+		oldest_timestamp: string | null;
+		newest_timestamp: string | null;
+		bytes: number;
+		limit_bytes: number;
+	}): void {
+		_internals.emit('context_telemetry_health', data);
 	},
 
 	/**

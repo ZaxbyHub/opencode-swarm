@@ -812,6 +812,32 @@ export const DesignDocsConfigSchema = z.object({
 
 export type DesignDocsConfig = z.infer<typeof DesignDocsConfigSchema>;
 
+// Git executable resolution override (issue #2236 hardening — F4).
+// A single optional field naming the git binary to try FIRST, before the
+// built-in platform/PATH candidate list (src/utils/git-executable.ts).
+// Deliberately shape-validated only (non-empty string) — usability
+// (absolute, exists, passes `git --version`) is decided by the same probe
+// every other candidate faces. A `.refine()` here that rejected a relative
+// or nonexistent path would fail the WHOLE config parse on an unrelated
+// typo (config/loader.ts's targeted recovery only strips unrecognized
+// keys, not refine failures on a recognized key's value) — exactly the
+// "config value must never make git unreachable" failure this field must
+// avoid. The env var `OPENCODE_SWARM_GIT_BINARY` always wins over this
+// value when set.
+//
+// SECURITY (CWE-427): because validation here is shape-only, the SOURCE of
+// the value carries the whole trust decision. This key is honored ONLY from
+// the user-level config and the env var. A value in a repository's
+// `.opencode/opencode-swarm.json` is untrusted — the repo can commit both the
+// config and the shim it points at — and is stripped before the merged config
+// is built (`enforceGitBinaryProvenance`, src/config/loader.ts). Zod cannot
+// make that call: it never sees which file a key came from.
+export const GitConfigSchema = z.object({
+	binary: z.string().optional(),
+});
+
+export type GitConfig = z.infer<typeof GitConfigSchema>;
+
 // UI/UX review configuration (designer agent — opt-in)
 export const UIReviewConfigSchema = z.object({
 	enabled: z.boolean().default(false),
@@ -1099,6 +1125,41 @@ export const GuardrailsConfigSchema = z.object({
 	 * not configurable. Consumed by `src/hooks/guardrails/execution-stall.ts`.
 	 */
 	execution_stall_episode_minutes: z.number().int().min(1).default(30),
+
+	// ── macOS sandbox activation gate (issue #2236 F6/F6a) ──────────────────
+	/**
+	 * Enables macOS `sandbox-exec` containment for bash/shell tool calls.
+	 *
+	 * Defaults to `false`. F6 (issue #2236 RC2) corrects the sandbox-exec
+	 * availability probe, which previously invoked the nonexistent
+	 * `sandbox-exec --version` flag and therefore reported "unavailable" on
+	 * EVERY macOS host — meaning `MacOSSandboxExecutor` has never actually
+	 * activated in production. The corrected probe makes activation possible
+	 * for the first time, but the production SBPL profile's last-match-wins
+	 * ordering (`src/sandbox/macos/sandbox-exec-executor.ts`, see the
+	 * `buildSandboxProfile` doc comment) is reasoned from documented SBPL
+	 * semantics and has NOT been empirically re-verified against a real
+	 * macOS host's sandbox-exec from this repository's Windows/Linux
+	 * development environments. If that ordering is wrong, every declared
+	 * scope write would be denied and bash would break for macOS users —
+	 * strictly worse than today's fail-open (unsandboxed) behavior.
+	 *
+	 * Flip to `true` only after verifying the production profile on a real
+	 * macOS host (see docs/configuration.md's macOS sandbox activation
+	 * section). When `false`, `getExecutor()` behaves exactly as it does
+	 * today: it resolves to `null` and every consumer (guardrails'
+	 * `applySandboxExecution`, `/swarm diagnose`) observes the same
+	 * fail-open "executor not available" state as before F6 shipped.
+	 *
+	 * Deliberately `.optional()` and NOT `.default(false)`: a Zod default makes
+	 * `GuardrailsConfigSchema.parse()` emit a key the user never wrote, which
+	 * breaks the exhaustive round-trip fixtures in
+	 * `tests/unit/config/guardrails-profile-loop-containment.test.ts` (parsing
+	 * must not invent config). Default-off semantics are preserved at the sole
+	 * consumer — `src/hooks/guardrails/tool-before.ts` reads
+	 * `cfg.sandbox_macos_enabled ?? false` — so an absent key is still disabled.
+	 */
+	sandbox_macos_enabled: z.boolean().optional(),
 });
 
 export type GuardrailsConfig = z.infer<typeof GuardrailsConfigSchema>;
@@ -1731,6 +1792,13 @@ export const MemoryConfigSchema = z.object({
 				tokenBudget: 1000,
 			},
 		}),
+	/** Deterministic outcome-reflection artifact and prompt injection (#1989). */
+	reflection: z
+		.object({
+			enabled: z.boolean().default(false),
+			halfLifeDays: z.number().finite().positive().max(3650).default(30),
+		})
+		.default({ enabled: false, halfLifeDays: 30 }),
 	learning: z
 		.object({
 			learningRate: z.number().min(0).max(1).default(0.1),
@@ -1767,8 +1835,35 @@ export const MemoryConfigSchema = z.object({
 	redaction: z
 		.object({
 			rejectDurableSecrets: z.boolean().default(true),
+			/** #1466: run the PII detector at the write boundary (opt-in). */
+			detectPii: z.boolean().default(false),
+			/** #1466: 'regex' (dependency-free default) or 'ner' (optional peer dep). */
+			piiDetector: z.enum(['regex', 'ner']).default('regex'),
+			/** #1466: reject durable memories whose PII score exceeds the threshold. */
+			rejectDurablePii: z.boolean().default(false),
+			/**
+			 * #1466 / PR-feedback PRR-012: the threshold is EXCLUSIVE (a finding
+			 * rejects when its score is strictly GREATER) and detector confidences
+			 * never exceed 0.95 — a value of 1 would therefore silently disable
+			 * rejection. Reject it at the schema so the footgun is loud.
+			 */
+			piiThreshold: z
+				.number()
+				.min(0)
+				.max(1)
+				.refine(
+					(v) => v < 1,
+					'piiThreshold must be strictly less than 1 (rejection is score > threshold and scores never reach 1, so 1 would silently disable PII rejection)',
+				)
+				.default(0.7),
 		})
-		.default({ rejectDurableSecrets: true }),
+		.default({
+			rejectDurableSecrets: true,
+			detectPii: false,
+			piiDetector: 'regex',
+			rejectDurablePii: false,
+			piiThreshold: 0.7,
+		}),
 	maintenance: z
 		.object({
 			/** @deprecated superseded by maintenance.importance (issue #1464). */
@@ -2451,7 +2546,15 @@ export const CouncilConfigSchema = z
 	.object({
 		enabled: z.boolean().default(false),
 		maxRounds: z.number().int().min(1).max(10).default(3),
-		parallelTimeoutMs: z.number().int().min(5_000).max(120_000).default(30_000),
+		parallelTimeoutMs: z
+			.number()
+			.int()
+			.min(5_000)
+			.max(120_000)
+			.default(30_000)
+			.describe(
+				'DEPRECATED — inert. Accepted for parse compatibility only; no runtime consumer exists and no timeout is enforced. Config doctor warns when this is explicitly set. Remove the key; dispatch timeouts are governed by the agent host. Scheduled for removal in a future release.',
+			),
 		vetoPriority: z.boolean().default(true),
 		requireAllMembers: z
 			.boolean()
@@ -2466,19 +2569,60 @@ export const CouncilConfigSchema = z
 			.max(5)
 			.default(3)
 			.describe(
-				'Minimum distinct council member verdicts required for synthesis. Default 3. Set to 1 to disable quorum enforcement. requireAllMembers: true overrides this to 5 (stricter constraint wins).',
+				'Minimum distinct council member verdicts required for synthesis (task/phase councils only — the final council uses finalCompletionPolicy). Default 3. Set to 1 to disable quorum enforcement. requireAllMembers: true overrides this to 5 (stricter constraint wins).',
 			),
 		escalateOnMaxRounds: z
 			.string()
 			.optional()
 			.describe(
-				'Optional webhook URL or handler name invoked when maxRounds is reached without APPROVE. Declared for forward compatibility; no behavior is implemented yet.',
+				'Optional webhook URL or handler name declared for escalation when maxRounds is reached without APPROVE. REMAINS INERT — no handler or webhook execution exists or is added; config doctor warns when it is set (issue #1650). Max-rounds exhaustion emits a durable structured event and a user escalation message; wiring real outbound escalation requires a separate security review.',
 			),
 		phaseConcernsAllowComplete: z
 			.boolean()
 			.default(true)
 			.describe(
 				'When true, a phase-level council CONCERNS verdict with only MEDIUM/LOW findings does NOT block phase completion — the advisory notes are logged as warnings and the phase proceeds. When false, CONCERNS blocks like REJECT. Note: HIGH/CRITICAL findings from CONCERNS members are always promoted to requiredFixes and block at the tool level regardless of this setting. Default: true.',
+			),
+		finalCompletionPolicy: z
+			.object({
+				mode: z
+					.enum(['all_required', 'quorum'])
+					.default('all_required')
+					.describe(
+						"'all_required' (default) preserves the exact legacy final council: all five canonical roles, five distinct members, zero absentees. 'quorum' is an explicit weakening that accepts a bounded minimum of distinct canonical members instead of all five.",
+					),
+				minimumMembers: z
+					.number()
+					.int()
+					.min(3)
+					.max(5)
+					.optional()
+					.describe(
+						'Required when mode is "quorum": minimum distinct canonical council members (3–5) that must vote. Unknown, duplicate, and cross-swarm identities never count.',
+					),
+			})
+			.default({ mode: 'all_required' })
+			.superRefine((policy, ctx) => {
+				if (policy.mode === 'quorum' && policy.minimumMembers === undefined) {
+					ctx.addIssue({
+						code: 'custom',
+						path: ['minimumMembers'],
+						message:
+							'finalCompletionPolicy.mode "quorum" requires an explicit minimumMembers between 3 and 5.',
+					});
+				}
+			})
+			.describe(
+				'Final-council completion policy. Missing/default is all_required (strict five-member requirement). The normalized policy participates in the council policy digest, so any change invalidates previously accepted final-council evidence.',
+			),
+		freshnessMaxAgeHours: z
+			.number()
+			.int()
+			.min(1)
+			.max(720)
+			.default(24)
+			.describe(
+				'Maximum age (hours, 1–720) of phase-council, architecture-supervisor, and final-council evidence. Default 24 preserves prior behavior. Part of the council policy digest, so changing it invalidates prior council evidence.',
 			),
 		// General Council Mode (advisory). Optional — undefined means feature is
 		// not configured. When present and enabled: true, the architect can run
@@ -3064,6 +3208,32 @@ export function resolveExternalSkillsConfig(
 	return merged;
 }
 
+export interface PrReviewResilienceConfig {
+	enabled: boolean;
+	canary_probe_ms: number;
+	status_probe_timeout_ms: number;
+	correlated_failure_threshold: number;
+	max_retry_attempts_after_initial: number;
+}
+
+export const DEFAULT_PR_REVIEW_RESILIENCE_CONFIG: PrReviewResilienceConfig = {
+	enabled: true,
+	canary_probe_ms: 300_000,
+	status_probe_timeout_ms: 2_000,
+	correlated_failure_threshold: 2,
+	max_retry_attempts_after_initial: 2,
+};
+
+export const PrReviewResilienceConfigSchema = z
+	.object({
+		enabled: z.boolean().default(true),
+		canary_probe_ms: z.number().int().min(1).max(3_600_000).default(300_000),
+		status_probe_timeout_ms: z.number().int().min(1).max(60_000).default(2_000),
+		correlated_failure_threshold: z.number().int().min(2).max(8).default(2),
+		max_retry_attempts_after_initial: z.number().int().min(0).max(2).default(2),
+	})
+	.strict();
+
 // Main plugin configuration
 export const PluginConfigSchema = z.object({
 	/** Config format version for migration table. Increment when deprecating fields. Distinct from knowledge.schema_version. */
@@ -3157,6 +3327,9 @@ export const PluginConfigSchema = z.object({
 	// Hook configuration
 	hooks: HooksConfigSchema.optional(),
 
+	// PR_REVIEW base-wave staged canary/fanout resilience.
+	pr_review_resilience: PrReviewResilienceConfigSchema.optional(),
+
 	// Quality gate configuration (v6.9 anti-slop features)
 	gates: GateConfigSchema.optional(),
 
@@ -3220,6 +3393,9 @@ export const PluginConfigSchema = z.object({
 
 	// Structured design-doc generation (issue #1080 — docs_design agent, opt-in)
 	design_docs: DesignDocsConfigSchema.optional(),
+
+	// Git executable resolution override (issue #2236 hardening)
+	git: GitConfigSchema.optional(),
 
 	// UI/UX review configuration (designer agent)
 	ui_review: UIReviewConfigSchema.optional(),

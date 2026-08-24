@@ -2,7 +2,10 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
-import { CANDIDATE_SEVERITIES } from '../background/candidate-contract.js';
+import {
+	FINDINGS_SEVERITIES,
+	type FindingsSeverity,
+} from '../background/candidate-contract.js';
 import {
 	assertPrReviewArtifactBoundary,
 	assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts,
@@ -33,7 +36,25 @@ const FindingSchema = z
 			'suppress_with_reason',
 			'handoff_to_feedback',
 		]),
-		severity: z.enum(CANDIDATE_SEVERITIES).optional(),
+		/**
+		 * Speaks the VERDICT dialect (includes `NONE`), because a findings record
+		 * is a projection of an authenticated reviewer/critic row.
+		 *
+		 * Kept `.optional()` at the SCHEMA layer on purpose: presence is required,
+		 * but it is `assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts` that
+		 * enforces it, so an omitted field is reported as
+		 * `severity expected "MEDIUM", got (omitted)` — naming the required value —
+		 * alongside every other violation in one batched rejection (the #2277
+		 * one-round-trip repair contract). A schema-level required enum would
+		 * instead abort with a generic domain message and discard that batch.
+		 */
+		// Deliberately NOT `.trim()`ed, unlike the free-text `category` below
+		// (PRR-003): this value is compared for exact equality against an
+		// authoritative verdict/candidate severity, so silently normalizing
+		// `" HIGH "` into `HIGH` would let a malformed payload pass an
+		// integrity gate. Whitespace/case/empty variants are rejected, and that
+		// strictness is pinned by tests rather than left implicit.
+		severity: z.enum(FINDINGS_SEVERITIES).optional(),
 		category: z.string().trim().min(1).max(128).optional(),
 	})
 	.strict();
@@ -73,7 +94,14 @@ const WritePrReviewArtifactArgsSchema = z.discriminatedUnion('kind', [
 		.strict(),
 ]);
 
-type PersistedFinding = z.infer<typeof FindingSchema> & {
+/**
+ * READ shape. Deliberately tolerant of a missing `severity`: `readFindings`
+ * JSON-parses persisted lines without re-validating them, so rows written before
+ * severity became mandatory must still load (issue #2279 durable readability).
+ * The WRITE boundary is what enforces presence.
+ */
+type PersistedFinding = Omit<z.infer<typeof FindingSchema>, 'severity'> & {
+	severity?: FindingsSeverity;
 	boundary: 'post_explorer' | 'post_reviewer' | 'post_critic';
 	pr_head_sha: string;
 	recorded_at: string;
@@ -285,6 +313,7 @@ export async function executeWritePrReviewArtifact(
 
 export const write_pr_review_artifact: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
+		allowWorkingDirectoryOverride: true,
 		description:
 			'Persist schema-validated PR-review findings checkpoints and exact actionable feedback handoffs under the active run.',
 		args: {

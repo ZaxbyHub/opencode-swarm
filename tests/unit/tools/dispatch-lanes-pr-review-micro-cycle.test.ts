@@ -27,6 +27,7 @@ import {
 } from '../../../src/tools/write-pr-review-trigger-eval.js';
 import {
 	HEAD_SHA,
+	LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	PR_REVIEW_BASE_SHA,
 	PR_REVIEW_SCOPE,
 	persistBatch,
@@ -83,6 +84,7 @@ async function establishBaseCoverage(): Promise<void> {
 	await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, baseLanes, {
 		batchId: 'micro-cycle-base',
 		prHeadSha: HEAD_SHA,
+		prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 	});
 	await persistBatch('micro-cycle-base', 'swarm-pr-review:base', baseLanes, {
 		scope: PR_REVIEW_SCOPE,

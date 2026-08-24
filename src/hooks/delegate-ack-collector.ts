@@ -225,6 +225,9 @@ export async function collectDelegateAcks(params: {
 				session_id: sessionId,
 				task_id: taskId,
 				agent: params.agent,
+				// (#2032) Delegate self-acks are delegate-sourced terminals; the
+				// agent identity stays in `agent`. Never derive source from agent.
+				source: 'delegate',
 				cohort_id: cohortId,
 				source_link_id: linkId,
 				items: ackItems,
@@ -243,6 +246,7 @@ export async function collectDelegateAcks(params: {
 						session_id: sessionId,
 						task_id: taskId,
 						agent: params.agent,
+						source: 'delegate',
 						reason: ack.reason,
 					});
 					const authoritativeEventId =
@@ -307,6 +311,9 @@ export async function collectDelegateAcks(params: {
 					entry_id: kid,
 					retrieval_trace_id: traceId,
 					receipt_outcome: outcome,
+					// (#2032 F-003) Delegate-ack evidence is a self-report; the
+					// promotion gate treats source 'delegate' as non-independent.
+					receipt_source: 'delegate',
 					receipt_event_id: eid,
 					phase: undefined,
 					timestamp: now,
@@ -353,6 +360,7 @@ export async function collectDelegateAcks(params: {
 				session_id: sessionId,
 				task_id: taskId,
 				agent: params.agent,
+				source: 'delegate',
 				reason: 'unacknowledged',
 			});
 			violatedIds.add(id);

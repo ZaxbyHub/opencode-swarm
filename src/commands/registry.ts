@@ -53,6 +53,7 @@ import { handleGateAuditCommand } from './gate-audit.js';
 import { handleGateStatsCommand } from './gate-stats.js';
 import { handleHandoffCommand } from './handoff.js';
 import { handleHistoryCommand } from './history.js';
+import { handleKnowledgeHiveQuarantineCommand } from './hive-quarantine.js';
 import { handleIssueCommand } from './issue.js';
 import {
 	handleKnowledgeListCommand,
@@ -67,6 +68,7 @@ import { handleLearningCommand } from './learning.js';
 import { handleLinkCommand } from './link.js';
 import { handleLoopCommand } from './loop.js';
 import {
+	handleMemoryAuditVerifyCommand,
 	handleMemoryCommand,
 	handleMemoryCompactCommand,
 	handleMemoryConsolidationLogCommand,
@@ -97,6 +99,7 @@ import { handlePrUnsubscribeCommand } from './pr-unsubscribe.js';
 import { handlePreflightCommand } from './preflight.js';
 import { handlePromoteCommand } from './promote.js';
 import { handleQaGatesCommand } from './qa-gates.js';
+import { handleRecoverCommand } from './recover.js';
 import { handleResetCommand } from './reset.js';
 import { handleResetSessionCommand } from './reset-session.js';
 import { handleRetrieveCommand } from './retrieve.js';
@@ -926,7 +929,7 @@ export const COMMAND_REGISTRY = {
 		description:
 			'Use /swarm finalize to finalize the swarm project and archive evidence',
 		details:
-			'Idempotent 4-stage terminal finalization: (1) finalize writes retrospectives for in-progress phases, (2) archive creates timestamped bundle of swarm artifacts and evidence, (3) clean removes active-state files for a clean slate, (4) align performs aggressive git reset --hard to the default remote branch, discarding uncommitted changes and gitignored build artifacts (user-created untracked files are preserved); falls back to a cautious reset that preserves uncommitted changes when the aggressive path cannot proceed. WARNING: alignment discards local changes and gitignored files. Resets agent sessions and delegation chains. Reads .swarm/close-lessons.md for explicit lessons and runs curation. Use --skill-review to run the quota-bounded skill_improver in proposal mode. Use --dry-run to preview what finalize would archive, clean, and align without taking the lock or changing anything.',
+			'Idempotent 4-stage terminal finalization: (1) finalize writes retrospectives for in-progress phases, (2) archive creates timestamped bundle of swarm artifacts and evidence, (3) clean removes active-state files for a clean slate, (4) align performs aggressive git reset --hard to the default remote branch, discarding uncommitted changes and gitignored build artifacts (user-created untracked files are preserved); falls back to a cautious reset that preserves uncommitted changes when the aggressive path cannot proceed. WARNING: alignment discards local changes and gitignored files. Resets agent sessions, delegation chains, and active-agent mappings. Reads .swarm/close-lessons.md for explicit lessons and runs curation. Use --skill-review to run the quota-bounded skill_improver in proposal mode. Use --dry-run to preview what finalize would archive, clean, and align without taking the lock or changing anything.',
 		args: '--prune-branches, --skill-review, --dry-run',
 		category: 'core',
 		toolPolicy: 'none',
@@ -1091,7 +1094,7 @@ export const COMMAND_REGISTRY = {
 		description:
 			'Enter architect MODE: LOOP — compound-engineering loop: brainstorm → plan → build → review → improve, iterating until done [objective]',
 		args: '<objective> [--max-cycles 1..5] [--autonomy checkpoint|auto] [--depth standard|exhaustive] [--resume]',
-		details: `Triggers the architect to run the compound-engineering loop defined in ${BUNDLED_PROJECT_SKILL_ROOT}/loop/SKILL.md: BRAINSTORM (requirements) → PLAN (+ critic gate) → BUILD (execute) → REVIEW (independent reviewer + critic on the diff, report-only) → IMPROVE (phase-wrap retrospective + compounding learning capture), then evaluate stop conditions and loop for another improvement cycle if the objective is unmet and budget remains. Generator and reviewer/critic run in separate contexts; failing assertions must be fixed at the root cause, never weakened, mocked, or skipped. Defense-in-depth stop conditions: objective met, --max-cycles budget (default 3), no-progress/plateau, oscillation, unrecoverable error, or explicit user stop. --autonomy auto (default) runs unattended with hard stops still enforced; --autonomy checkpoint pauses at phase gates for user approval. --depth exhaustive widens exploration. --resume continues an existing loop run from durable .swarm/loop/ state. Distinct from full-auto (autonomous cross-phase oversight) and turbo (parallel lanes within a phase): loop is a user-initiated, gated, compounding workflow.`,
+		details: `Triggers the architect to run the compound-engineering loop defined in ${BUNDLED_PROJECT_SKILL_ROOT}/loop/SKILL.md: BRAINSTORM (requirements) → PLAN (+ critic gate) → BUILD (execute) → REVIEW (independent reviewer + critic on the diff, report-only) → IMPROVE (phase-wrap retrospective + compounding learning capture), then evaluate stop conditions and loop for another improvement cycle if the objective is unmet and budget remains. Generator and reviewer/critic run in separate contexts; failing assertions must be fixed at the root cause, never weakened, mocked, or skipped. Defense-in-depth stop conditions: objective met, --max-cycles budget (default 3), no-progress/plateau, oscillation, unrecoverable error, or explicit user stop. --autonomy auto (default) runs unattended with hard stops still enforced; --autonomy checkpoint pauses at phase gates for user approval. --depth exhaustive widens exploration. --resume continues an existing loop run from durable .swarm/loop/ state. Distinct from full-auto (a critic gate that intercepts phase completions and high-risk actions for review — it never plans, delegates, or executes; the architect retains all delegation duty) and turbo (parallel lanes within a phase): loop is a user-initiated, gated, compounding workflow.`,
 		category: 'agent',
 		toolPolicy: 'none',
 	},
@@ -1121,7 +1124,7 @@ export const COMMAND_REGISTRY = {
 			'Clear a stuck PR_REVIEW/PR_FEEDBACK mechanical gate and stop the auto-resume loop [mode] [reason]',
 		args: '[PR_REVIEW|PR_FEEDBACK] [reason...]',
 		details:
-			'Human-only escape hatch for an unrecoverable PR_REVIEW or PR_FEEDBACK mechanical gate. When the architect cannot reach complete_pr_workflow — for example a compound `git fetch && git checkout` was rejected as read-only shell syntax, the PR head cannot be fetched, or the working tree is on the wrong branch — running this clears the durable gate state for the current session and stops the auto-resume loop without depending on the trapped model. The agent itself cannot run this command; it must call the abort_pr_workflow tool (or ask you to run this command). Both paths funnel into the same fail-closed abortPrWorkflow hook, which refuses while the workflow is armed for publication or while PR workflow lanes are still in flight. When checkout preparation preserved a stash, the result instructs the caller to run prepare_pr_workflow_checkout operation=restore after the clear. An audit event is appended to .swarm/events.jsonl.',
+			'Human-only escape hatch for an unrecoverable PR_REVIEW or PR_FEEDBACK mechanical gate. When the architect cannot reach complete_pr_workflow — for example a compound `git fetch && git checkout` was rejected as read-only shell syntax, the PR head cannot be fetched, or the working tree is on the wrong branch — running this clears the durable gate state for the current session and stops the auto-resume loop without depending on the trapped model. The agent itself cannot run this command; it must call the abort_pr_workflow tool (or ask you to run this command). Both paths funnel into the same fail-closed abortPrWorkflow hook, which refuses while the workflow is armed for publication or while PR workflow lanes are still in flight. This human-only force path has exactly one exception to that second refusal (issue #2251): when the ONLY lanes still blocking are ones past the 30-minute staleness horizon that the liveness probe reports as still running — a lane nothing will ever settle on a schedule — it clears the gate anyway, names exactly which lanes it overrode, and finalizes their delegation records so the session can start a new PR workflow. Those sessions are NOT stopped and their output is NOT collected. A lane with a fresh updatedAt still blocks even under force, and any delegation record that still keeps the session blocked is named in the warning. When checkout preparation preserved a stash, the result instructs the caller to run prepare_pr_workflow_checkout operation=restore after the clear. An audit event is appended to .swarm/events.jsonl.',
 		category: 'utility',
 		toolPolicy: 'restricted',
 	},
@@ -1408,10 +1411,19 @@ export const COMMAND_REGISTRY = {
 		description:
 			'Clear session state while preserving plan, evidence, and knowledge',
 		details:
-			'Deletes only .swarm/session/state.json and any other session files. Clears in-memory agent sessions and delegation chains. Preserves plan, evidence, and knowledge for cross-session continuity. Before deleting, auto-backs up the session files it removes to .swarm/reset-backups/<timestamp>/ (newest 5 kept).',
+			'Deletes only .swarm/session/state.json and any other session files. Clears in-memory agent sessions, delegation chains, and active-agent mappings. Preserves plan, evidence, and knowledge for cross-session continuity. Also recovers stale coder settlements, releasing in-flight ownership held by this process, so dispatches cannot stay wedged on CODER_DISPATCH_IN_PROGRESS (issue #2268). Before deleting, auto-backs up the session files it removes to .swarm/reset-backups/<timestamp>/ (newest 5 kept).',
 		args: '',
 		category: 'utility',
 		toolPolicy: 'restricted',
+	},
+	recover: {
+		handler: (ctx) => handleRecoverCommand(ctx.directory, ctx.args),
+		description: 'Recover wedged coder settlements [task_id] [--force]',
+		details:
+			"Settles stale coder-settlement WALs in .swarm/coder-settlements/ — the CODER_DISPATCH_IN_PROGRESS wedge where a dispatch's completion never fired (issue #2268). Safe mode recovers settlements whose owner process is gone. --force also releases ownership keys held by this process: use only when no dispatch is genuinely running (a late completion then reports CODER_SETTLEMENT_IDEMPOTENCY_CONFLICT, safe to ignore). Never interrupts another live OpenCode process. Also repairs tasks wedged at coder_delegated with unattributed green pre_check evidence — the post-reset TASK_WORKFLOW_STAGE_A_REQUIRED wedge — by writing the missing stage_a_passed transition directly (audit events land in .swarm/events.jsonl); pass [task_id] to scope both phases to one task. Human-only.",
+		args: '[task_id] [--force]',
+		category: 'utility',
+		toolPolicy: 'human-only',
 	},
 	rollback: {
 		handler: (ctx) => handleRollbackCommand(ctx.directory, ctx.args),
@@ -1478,7 +1490,7 @@ export const COMMAND_REGISTRY = {
 			'Toggle Full-Auto Mode for the active session [on [mode]|off|status]',
 		args: 'on [assisted|supervised|strict], off, status',
 		details:
-			'First-class toggle for Full-Auto Mode — autonomous execution with the critic reviewing escalations on your behalf. No config-level enablement is required: "on" activates immediately (unless full_auto.locked is true in config), "off" disarms the run and returns the session to normal interactive operation, "status" reports the durable run state. ' +
+			'First-class toggle for Full-Auto Mode — a critic gate reviewing escalations on your behalf (the architect still plans and delegates; full-auto never executes tasks itself). No config-level enablement is required: "on" activates immediately (unless full_auto.locked is true in config), "off" disarms the run and returns the session to normal interactive operation, "status" reports the durable run state. ' +
 			'An optional mode after "on" overrides full_auto.mode for this run: assisted (critic consulted only on policy escalations), supervised (default — risky/high-impact actions reviewed by the critic), strict (ALL plan mutations reviewed by the critic). ' +
 			'While active, the critic answers architect questions and reviews phase boundaries, delegations, and risky actions on your behalf; only ESCALATE_TO_HUMAN verdicts halt the run for your input. ' +
 			'The run state is durable (.swarm/full-auto-state.json) and survives restarts; toggle with no argument flips the current state.',
@@ -1531,6 +1543,23 @@ export const COMMAND_REGISTRY = {
 			"Restores a quarantined or archived knowledge entry back to the active knowledge store by ID. Dispatches by current status: an 'archived' entry is restored to its pre-archive status; a 'quarantined' entry is restored from the quarantine sidecar. Validates entry ID format (1-64 alphanumeric/hyphen/underscore).",
 		args: '<entry-id>',
 		category: 'utility',
+	},
+	'knowledge hive-quarantine': {
+		handler: (ctx) =>
+			handleKnowledgeHiveQuarantineCommand(ctx.directory, ctx.args),
+		description:
+			'Human-only exact-ID quarantine of hive-store entries with backup and rollback',
+		subcommandOf: 'knowledge',
+		details:
+			'Issue #2033 operator maintenance for the machine-global hive knowledge store. ' +
+			'`preview <id>[,<id>...]` shows exact candidate IDs with per-line hashes, provenance, status, and a store fingerprint, and issues a short-lived confirmation token. ' +
+			'`commit --token <t> [--reason <text>]` writes and hash-verifies a complete backup plus manifest BEFORE any mutation (outside the hive lock), then re-verifies the live store against that backup inside one fast transaction (any drift — concurrent append, entry change, version bump, or duplicate-id ambiguity — aborts with no mutation and cleans up the orphaned backup), moving EXACTLY the selected entries to shared-learnings-quarantined.jsonl, with counts verified afterwards and an honestly-reported automatic restore on failure. ' +
+			'`rollback --token <token12> | --latest` restores the exact original bytes idempotently. ' +
+			'Selection is exact-ID only — never by text, substring, cohort, age, or blacklist, and never in bulk. ' +
+			'Human-only: refused for agents via swarm_command, chat fallback, and the shell guardrail.',
+		args: '<preview|commit|rollback|status> ...',
+		category: 'utility',
+		toolPolicy: 'human-only',
 	},
 	'knowledge unactionable': {
 		handler: (ctx) =>
@@ -1627,6 +1656,14 @@ export const COMMAND_REGISTRY = {
 		description: 'Run golden Swarm memory recall evaluation fixtures',
 		subcommandOf: 'memory',
 		args: '--json, --fixtures <directory>',
+		category: 'diagnostics',
+		toolPolicy: 'agent',
+	},
+	'memory audit-verify': {
+		handler: (ctx) => handleMemoryAuditVerifyCommand(ctx.directory, ctx.args),
+		description: 'Verify the memory audit-log hash chain (tamper detection)',
+		subcommandOf: 'memory',
+		args: '--json',
 		category: 'diagnostics',
 		toolPolicy: 'agent',
 	},

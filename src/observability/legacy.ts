@@ -100,12 +100,34 @@ export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 		]),
 		phase_changed: Object.freeze(['sessionId', 'oldPhase', 'newPhase']),
 		budget_updated: Object.freeze(['sessionId', 'budgetPct', 'agentName']),
+		context_pruned: Object.freeze([
+			'sessionId',
+			'agentName',
+			'trigger',
+			'usageSource',
+			'beforeTokens',
+			'afterTokens',
+			'modelLimit',
+			'maskedMessages',
+			'maskedToolParts',
+			'maskedTokensFreed',
+			'prunedMessages',
+			'prunedTextParts',
+			'prunedToolParts',
+			'prunedTokensFreed',
+		]),
 		model_fallback: Object.freeze([
 			'sessionId',
 			'agentName',
 			'fromModel',
 			'toModel',
 			'reason',
+		]),
+		model_unresolved: Object.freeze([
+			'sessionId',
+			'agentName',
+			'model',
+			'detail',
 		]),
 		hard_limit_hit: Object.freeze([
 			'sessionId',
@@ -236,10 +258,12 @@ export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 
 		// Best-effort projection only. receiptOutcome/receiptSource are domain
 		// values and do not populate the generic observability outcome.
+		// receiptSemantics versions the outcome/source meaning contract (#2032).
 		knowledge_receipt_transition: Object.freeze([
 			'transition',
 			'reasonCode',
 			'schemaVersion',
+			'receiptSemantics',
 			'knowledgeTraceId',
 			'knowledgeEntryId',
 			'sessionId',
@@ -247,6 +271,46 @@ export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 			'phase',
 			'receiptOutcome',
 			'receiptSource',
+		]),
+		// Issue #2033 human-only hive-store maintenance audit: metadata only — bounded
+		// phase/abort codes, counts, and hash/token prefixes.
+		knowledge_maintenance: Object.freeze([
+			'phase',
+			'abortReason',
+			'selectedCount',
+			'storeEntriesBefore',
+			'storeEntriesAfter',
+			'backupBytes',
+			'storeSha256Prefix',
+			'token12',
+		]),
+		// Issue #2035 atomic-write residue health: counts and frozen-registry
+		// grammar ids only — no file names, paths, or content.
+		residue_health: Object.freeze([
+			'trigger',
+			'scanned',
+			'matched',
+			'eligible',
+			'ambiguous',
+			'quarantined',
+			'preserved',
+			'total_bytes',
+			'oldest_age_ms',
+			'grammar_counts',
+		]),
+		// Issue #2037 context-map telemetry storage health: bounded counts and
+		// timestamps only — no capsule/query content, no paths.
+		context_telemetry_health: Object.freeze([
+			'trigger',
+			'accepted_count',
+			'compacted_count',
+			'retained_count',
+			'dropped_count',
+			'corrupt_count',
+			'oldest_timestamp',
+			'newest_timestamp',
+			'bytes',
+			'limit_bytes',
 		]),
 	});
 

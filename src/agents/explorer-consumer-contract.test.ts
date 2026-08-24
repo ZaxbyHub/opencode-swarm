@@ -9,10 +9,10 @@ const EXPLORER_SOURCE = readFileSync(
 	'utf-8',
 );
 
-// Extract a prompt block from the source by name
+// Extract a prompt block from the source by name (closing backtick-semicolon anchor).
 function extractPromptBlock(source: string, promptName: string): string {
 	const regex = new RegExp(
-		`export\\s+const\\s+${promptName}\\s*=\\s*\x60([\\s\\S]*?)\x60`,
+		`export\\s+const\\s+${promptName}\\s*=\\s*\x60([\\s\\S]*?)\x60;`,
 		'm',
 	);
 	const match = source.match(regex);

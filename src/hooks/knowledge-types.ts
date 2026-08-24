@@ -407,6 +407,15 @@ export interface PromotionEvidenceRecord {
 	retrieval_trace_id: string;
 	/** Terminal receipt outcome. */
 	receipt_outcome: 'applied' | 'violated' | 'contradicted';
+	/**
+	 * Provenance class of the terminal this evidence was derived from
+	 * (#2032 review F-003). `'delegate'` evidence is a self-report and stays
+	 * non-independent: the promotion gate only counts evidence whose source is
+	 * present and not `'delegate'` toward `promotion_min_terminal_applications`.
+	 * Absent on records written before #2032 — such records fail closed (they
+	 * do not count as independent).
+	 */
+	receipt_source?: string;
 	/** Id of the ReceiptEvent this evidence was derived from. */
 	receipt_event_id: string;
 	phase?: string;

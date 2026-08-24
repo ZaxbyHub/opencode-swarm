@@ -1,7 +1,10 @@
+import type { MemoryOutcomeEvent } from './outcome-events';
 import type { RecallScoringDiagnostics } from './scoring';
 import type {
 	AppliedMemoryChange,
+	MemoryAnchor,
 	MemoryListFilter,
+	MemoryOutcome,
 	MemoryProposal,
 	MemoryRecord,
 	RecallRequest,
@@ -89,7 +92,21 @@ export interface MemoryProvider {
 	readonly name: string;
 	initialize?(): Promise<void>;
 	close?(): Promise<void> | void;
+	/**
+	 * Persist a record. #1466 NOTE: the GATEWAY is the PII write boundary —
+	 * `MemoryGateway`'s validation funnel runs the configured PII detector
+	 * and the full rule set before records reach this method. Direct
+	 * provider-level `upsert` calls (dev tooling, evaluation fixtures,
+	 * legacy-jsonl migration) intentionally bypass PII enforcement; route
+	 * user-facing writes through the gateway when the privacy policy matters.
+	 */
 	upsert(record: MemoryRecord): Promise<MemoryRecord>;
+	appendOutcome?(
+		memoryId: string,
+		event: { id: string; outcome: MemoryOutcome },
+		anchors?: MemoryAnchor[],
+	): Promise<MemoryRecord>;
+	listOutcomeEvents?(): Promise<MemoryOutcomeEvent[]>;
 	get(id: string): Promise<MemoryRecord | null>;
 	delete(id: string, reason?: string): Promise<void>;
 	recall(request: RecallRequest): Promise<RecallResultItem[]>;
@@ -102,6 +119,17 @@ export interface MemoryProvider {
 	listRewardEvents?(
 		filter?: MemoryRewardEventFilter,
 	): Promise<MemoryRewardEvent[]>;
+	/**
+	 * #1466: append a gateway-emitted audit event to the provider's event log
+	 * (`memory_events`, hash-chained on the SQLite provider). Narrowly typed to
+	 * the PII-rejection operation — provider-internal operations stay internal.
+	 * Optional: the local-jsonl provider has no event log and simply omits it.
+	 */
+	recordEvent?(
+		operation: 'pii_rejected',
+		targetId: string,
+		reason?: string,
+	): Promise<void>;
 	compactMaintenance?(
 		options?: MemoryCompactOptions,
 	): Promise<MemoryCompactResult>;

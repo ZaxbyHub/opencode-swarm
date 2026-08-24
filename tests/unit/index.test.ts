@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	test,
+} from 'bun:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -9,6 +17,28 @@ import OpenCodeSwarm, {
 	schedulePostResolutionTasksForTest,
 } from '../../src/index';
 import { swarmState } from '../../src/state';
+import { createIndexCommandsModuleGuards } from '../helpers/index-commands-shared.js';
+import { createIsolatedTestEnv } from '../helpers/isolated-test-env.js';
+
+// File-scoped DEFAULT stub for the post-resolution queue (PR #2173 F-006).
+//
+// Tests 2/3/4 boot `OpenCodeSwarm.server()` with no override of their own. That
+// boot queues background work on an unref'd `setTimeout(0)` which fires AFTER
+// the synchronous `afterEach` removed `tempDir` — and then RECREATES it,
+// leaving permanent `swarm-test-*` orphans in the system temp directory (2-5
+// per run).
+//
+// This is a DEFAULT, not a blanket override: `overrideIndexInternalsForTest`
+// saves the current value and its restore function puts that value back, so the
+// per-test overrides in tests 5 / 5b / 5c / 5d / 5e still win for their own
+// duration and their `afterEach` restore lands back on this no-op. Tests 6 and 7
+// call `schedulePostResolutionTasksForTest`, which invokes the REAL
+// `schedulePostResolutionTasks` directly rather than the injectable alias, so
+// they are unaffected — the scheduling seam stays fully exercised.
+const moduleGuards = createIndexCommandsModuleGuards();
+
+beforeAll(moduleGuards.setUpAll);
+afterAll(moduleGuards.tearDownAll);
 
 type IndexInternalsOverrides = Parameters<
 	typeof overrideIndexInternalsForTest
@@ -20,6 +50,7 @@ type RepoGraphBuilderFactory = NonNullable<
 describe('OpenCodeSwarm Plugin Registration', () => {
 	let tempDir: string;
 	let restoreIndexInternals = () => {};
+	let cleanupIsolatedEnv: () => void = () => {};
 
 	const mockPluginInput = {
 		client: {} as any,
@@ -31,6 +62,14 @@ describe('OpenCodeSwarm Plugin Registration', () => {
 	};
 
 	beforeEach(async () => {
+		// Redirect XDG_CONFIG_HOME/XDG_CACHE_HOME into a temp root BEFORE any
+		// unstubbed `OpenCodeSwarm.server()` boot below. The boot's post-resolution
+		// queue runs config-doctor, whose getUserConfigDir() ignores `directory`
+		// entirely (src/services/config-doctor.ts:582-584); with no
+		// `.opencode/opencode-swarm.json` under the temp `directory`, its
+		// project-absent fallback reads AND REWRITES the developer's real global
+		// ~/.config/opencode/opencode-swarm.json (config-doctor.ts:1884-1896).
+		cleanupIsolatedEnv = createIsolatedTestEnv().cleanup;
 		// Create a temp directory for the mock context
 		tempDir = await mkdtemp(path.join(tmpdir(), 'swarm-test-'));
 		mockPluginInput.directory = tempDir;
@@ -46,6 +85,8 @@ describe('OpenCodeSwarm Plugin Registration', () => {
 		} catch {
 			// ignore
 		}
+		cleanupIsolatedEnv();
+		cleanupIsolatedEnv = () => {};
 	});
 
 	test('1. default export uses OpenCode v1 plugin object shape', () => {
@@ -105,6 +146,46 @@ describe('OpenCodeSwarm Plugin Registration', () => {
 		scheduledTasks[0]?.();
 		await scanStarted;
 		expect(order).toEqual(['server-resolved', 'repo-graph-started']);
+	});
+
+	test('5a. memory reflection startup is opt-in and deferred until after server resolution', async () => {
+		let scheduledTasks: ReadonlyArray<() => void | Promise<void>> = [];
+		let regenerationCalls = 0;
+		const safe = getSafeDefaultConfigLoadResult();
+		restoreIndexInternals = overrideIndexInternalsForTest({
+			loadPluginConfigWithMetaAsync: (async () => ({
+				...safe,
+				config: {
+					...safe.config,
+					memory: {
+						enabled: true,
+						reflection: { enabled: true, halfLifeDays: 30 },
+					},
+				},
+			})) as any,
+			loadSnapshot: (async () => {}) as any,
+			ensureSwarmGitExcluded: (async () => {}) as any,
+			createRepoGraphBuilderHook: (() => ({
+				init: async () => {},
+				toolAfter: async () => {},
+			})) as RepoGraphBuilderFactory,
+			regenerateMemoryReflection: async () => {
+				regenerationCalls++;
+			},
+			schedulePostResolutionTasks: (tasks) => {
+				scheduledTasks = [...tasks];
+			},
+		});
+
+		await OpenCodeSwarm.server(mockPluginInput);
+		expect(regenerationCalls).toBe(0);
+
+		const reflectionTask = scheduledTasks.find(
+			(task) => task.name === 'regenerateMemoryReflectionTask',
+		);
+		expect(reflectionTask).toBeDefined();
+		await reflectionTask?.();
+		expect(regenerationCalls).toBe(1);
 	});
 
 	test('5b. issue #1782: config-load timeout falls back to safe defaults and init still completes', async () => {

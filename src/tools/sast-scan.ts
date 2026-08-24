@@ -18,6 +18,7 @@ import {
 	checkSemgrepAvailable,
 	isSemgrepAvailable,
 	runSemgrep,
+	type SemgrepFailureKind,
 } from '../sast/semgrep';
 import { warn } from '../utils';
 import { createSwarmTool } from './create-tool';
@@ -66,6 +67,8 @@ export interface SastScanResult {
 	verdict: EvidenceVerdict;
 	/** Validation error when the requested scan cannot safely run */
 	error?: string;
+	/** Machine-readable failure category for gate consumers. */
+	failure_kind?: SastFailureKind;
 	/** Array of security findings */
 	findings: SastScanFinding[];
 	/** Summary information */
@@ -83,6 +86,12 @@ export interface SastScanResult {
 			medium: number;
 			low: number;
 		};
+		/**
+		 * Issue #2271 bug 3: present when every input was skipped for having no
+		 * SAST language profile (non-code diff) — the scan passed because there
+		 * was nothing to scan, and this counts the skipped non-code inputs.
+		 */
+		files_skipped_non_code?: number;
 	};
 	// Baseline-diffing fields — present when capture_baseline is true or a baseline was loaded
 	/** 'baseline_captured' when capture_baseline:true succeeded */
@@ -98,6 +107,20 @@ export interface SastScanResult {
 	/** True when pre_existing_findings were truncated to fit result limits */
 	truncated_pre_existing?: boolean;
 }
+
+export type SastFailureKind =
+	| 'semgrep_process_exit'
+	| 'semgrep_timeout'
+	| 'semgrep_cancelled'
+	| 'semgrep_output_limit'
+	| 'semgrep_spawn_error'
+	| 'semgrep_invalid_output'
+	| 'semgrep_scan_error'
+	| 'semgrep_unexpected'
+	| 'semgrep_unclassified'
+	| 'coverage'
+	| 'cancelled'
+	| 'invalid_input';
 
 export interface SastScanFinding {
 	rule_id: string;
@@ -223,6 +246,20 @@ function safeSemgrepDiagnostic(message: string): string {
 	if (/^Semgrep exited with code -?\d+$/.test(diagnostic)) {
 		return diagnostic;
 	}
+	if (
+		/^Semgrep exited with code -?\d+; run Semgrep directly in the project to diagnose$/.test(
+			diagnostic,
+		)
+	) {
+		return diagnostic;
+	}
+	if (
+		/^Semgrep exited with code -?\d+: incompatible --lang option in config mode$/.test(
+			diagnostic,
+		)
+	) {
+		return diagnostic;
+	}
 	if (/^Semgrep reported \d+ scan errors?$/.test(diagnostic)) {
 		return diagnostic;
 	}
@@ -240,6 +277,7 @@ function cancelledScanResult(
 	return {
 		verdict: 'fail',
 		error: 'SAST scan cancelled',
+		failure_kind: 'cancelled',
 		findings: finalFindings,
 		summary: {
 			engine: 'tier_a',
@@ -248,6 +286,12 @@ function cancelledScanResult(
 			findings_by_severity: countBySeverity(finalFindings),
 		},
 	};
+}
+
+function mapSemgrepFailureKind(
+	failureKind: SemgrepFailureKind | undefined,
+): SastFailureKind {
+	return failureKind ? `semgrep_${failureKind}` : 'semgrep_unclassified';
 }
 
 /**
@@ -322,6 +366,14 @@ export async function sastScan(
 	const allFindings: SastScanFinding[] = [];
 	let filesScanned = 0;
 	let _filesSkipped = 0;
+	/**
+	 * Issue #2271 bug 3: inputs skipped because no language profile/registry
+	 * entry knows their type (markdown, JSON, plain text, …). A diff consisting
+	 * ONLY of such files is a legitimate nothing-to-scan pass, not a coverage
+	 * failure — distinguishing this from size/binary/missing skips keeps the
+	 * zero-coverage hard fail for real coverage gaps.
+	 */
+	let nonCodeSkipped = 0;
 	/** Paths of files that were successfully scanned (for baseline capture). */
 	const scannedFilePaths: string[] = [];
 	if (abort_signal?.aborted) {
@@ -342,6 +394,7 @@ export async function sastScan(
 	let semgrepError: string | undefined = abort_signal?.aborted
 		? 'SAST scan cancelled'
 		: undefined;
+	let semgrepFailureKind: SastFailureKind | undefined;
 
 	// Process each file
 	for (const filePath of changed_files) {
@@ -390,6 +443,7 @@ export async function sastScan(
 		// Skip if neither registry knows about this file type
 		if (!profile && !langDef) {
 			_filesSkipped++;
+			nonCodeSkipped++;
 			continue;
 		}
 
@@ -460,11 +514,9 @@ export async function sastScan(
 				let semgrepResult: Awaited<ReturnType<typeof runSemgrep>>;
 
 				if (bucketKey.startsWith('auto:')) {
-					// Profile-driven auto mode: --config auto --lang <lang>
-					const lang = bucketKey.slice('auto:'.length);
+					// Profile-driven auto mode: Semgrep infers language from the files.
 					semgrepResult = await _internals.runSemgrep({
 						files: bucketFiles,
-						lang,
 						useAutoConfig: true,
 						cwd: directory,
 						abortSignal: abort_signal,
@@ -479,6 +531,9 @@ export async function sastScan(
 				}
 				if (semgrepResult.error) {
 					semgrepError = safeSemgrepDiagnostic(semgrepResult.error);
+					semgrepFailureKind = mapSemgrepFailureKind(
+						semgrepResult.failure_kind,
+					);
 					break;
 				}
 
@@ -515,6 +570,7 @@ export async function sastScan(
 			}
 		} catch {
 			semgrepError = 'Semgrep execution failed';
+			semgrepFailureKind = 'semgrep_unexpected';
 		}
 	}
 	if (abort_signal?.aborted) {
@@ -552,6 +608,7 @@ export async function sastScan(
 		return {
 			verdict: 'fail',
 			error: `Semgrep execution failed: ${semgrepError}`,
+			failure_kind: semgrepFailureKind ?? 'semgrep_unclassified',
 			findings: finalFindings,
 			summary,
 		};
@@ -584,6 +641,7 @@ export async function sastScan(
 				verdict: 'fail',
 				error:
 					'capture_baseline requires changed_files to produce a non-empty baseline',
+				failure_kind: 'invalid_input',
 				findings: finalFindings,
 				summary: {
 					engine,
@@ -742,8 +800,28 @@ export async function sastScan(
 	}
 
 	// Zero-coverage fail: preserved in both modes (only skip for capture mode, handled above)
+	// #2210: attach the reason so the payload carries WHY it failed — without
+	// it, pre_check_batch assumed findings above threshold and logged a
+	// misleading "found new findings" message for a zero-file scan.
+	// Issue #2271 bug 3: a normal-mode scan whose EVERY input file was skipped
+	// for having no language profile (markdown-only / JSON-only diffs) passes
+	// instead of failing — there is no code to scan and no coverage was lost.
+	// The hard fail stays for capture mode (handled above), for empty input,
+	// and for scannable files that could not be scanned (size/binary/missing).
+	let zeroCoverageError: string | undefined;
+	let nonCodeOnly = false;
 	if (filesScanned === 0) {
-		verdict = 'fail';
+		if (
+			!baselineUsed &&
+			nonCodeSkipped > 0 &&
+			nonCodeSkipped === changed_files.length
+		) {
+			nonCodeOnly = true;
+		} else {
+			verdict = 'fail';
+			zeroCoverageError =
+				'SAST requires at least one file to scan; zero files were scanned';
+		}
 	}
 
 	// Build summary
@@ -752,6 +830,7 @@ export async function sastScan(
 		files_scanned: filesScanned,
 		findings_count: finalFindings.length,
 		findings_by_severity: findingsBySeverity,
+		...(nonCodeOnly ? { files_skipped_non_code: nonCodeSkipped } : {}),
 	};
 
 	// Save evidence
@@ -767,7 +846,9 @@ export async function sastScan(
 			timestamp: new Date().toISOString(),
 			agent: 'sast_scan',
 			verdict,
-			summary: `Scanned ${filesScanned} files, found ${finalFindings.length} finding(s) using ${engine}`,
+			summary: nonCodeOnly
+				? `No scannable code files in input (${nonCodeSkipped} non-code file(s) skipped); nothing to scan`
+				: `Scanned ${filesScanned} files, found ${finalFindings.length} finding(s) using ${engine}`,
 			...summary,
 			findings: finalFindings,
 			...(baselineUsed && {
@@ -783,6 +864,10 @@ export async function sastScan(
 		verdict,
 		findings: finalFindings,
 		summary,
+		// #2210: surface the zero-coverage reason (mirrors the capture_baseline
+		// path's explicit error contract).
+		...(zeroCoverageError ? { error: zeroCoverageError } : {}),
+		...(zeroCoverageError ? { failure_kind: 'coverage' as const } : {}),
 	};
 
 	if (baselineUsed) {
@@ -804,6 +889,7 @@ export async function sastScan(
  * - Tier B: Semgrep (optional, if available on PATH)
  */
 export const sast_scan: ToolDefinition = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
 		'Static Application Security Testing (SAST) scan. Scans files for security vulnerabilities using built-in rules (Tier A) and optional Semgrep (Tier B). Supports phase-scoped baseline diffing: set capture_baseline:true before first coder delegation to snapshot pre-existing findings; subsequent scans with the same phase only fail on NEW findings.',
 	args: {

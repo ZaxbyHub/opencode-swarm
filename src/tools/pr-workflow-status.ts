@@ -10,12 +10,14 @@ import {
 	type PrWorkflowGitState,
 } from '../git/pr-workflow-state';
 import {
+	type PrFeedbackInventoryAmendmentRecord,
 	type PrWorkflowGateState,
 	prWorkflowSessionFileStem,
-	readPrWorkflowGateState,
+	readPrWorkflowGateStateForRecovery,
 } from '../hooks/pr-workflow-gate';
 import { validateSwarmPath } from '../hooks/utils';
 import { bunSpawn } from '../utils/bun-compat';
+import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 import { createSwarmTool } from './create-tool';
 
 const GIT_TIMEOUT_MS = 5_000;
@@ -77,6 +79,18 @@ interface PrWorkflowStatusGateSummary {
 	activatedAt?: string;
 	updatedAt?: string;
 	revision?: number;
+	/**
+	 * Issue #2242 R4 (W-5): the durable bytes failed schema validation and this
+	 * summary is a best-effort salvage. Present only when it is true, so an
+	 * ordinary healthy gate response is byte-identical to before.
+	 */
+	stateSalvaged?: boolean;
+	stateSalvageDisclosure?: string;
+	/**
+	 * Issue #2242 R3 (W-2): entries appended to the PR_FEEDBACK inventory after
+	 * its first declaration. Present only when at least one amendment exists.
+	 */
+	inventoryAmendments?: PrFeedbackInventoryAmendmentRecord[];
 }
 
 interface PrWorkflowStatusResult {
@@ -114,7 +128,16 @@ async function runGitCapture(
 	directory: string,
 	args: string[],
 ): Promise<string | null> {
-	const proc = bunSpawn(['git', ...args], {
+	// Resolution failure (every candidate rejected) maps onto this function's
+	// existing "any failure -> null" contract, same as a spawn failure would —
+	// no new throw introduced at this call site.
+	let gitExecutable: string;
+	try {
+		gitExecutable = await resolveGitExecutableAsync();
+	} catch {
+		return null;
+	}
+	const proc = bunSpawn([gitExecutable, ...args], {
 		cwd: directory,
 		stdin: 'ignore',
 		stdout: 'pipe',
@@ -271,12 +294,19 @@ function describeNextStep(
 function summarizeGate(
 	state: PrWorkflowGateState | null,
 	receiptFiles: number | null,
+	salvage?: { salvaged: boolean; disclosure?: string },
 ): PrWorkflowStatusGateSummary {
 	if (!state) {
 		return { active: false, reason: 'no-active-gate' };
 	}
 	return {
 		active: true,
+		...(salvage?.salvaged
+			? {
+					stateSalvaged: true,
+					stateSalvageDisclosure: salvage.disclosure,
+				}
+			: {}),
 		mode: state.mode,
 		prHeadBound: Boolean(state.prHeadSha),
 		prHeadSha: state.prHeadSha ?? null,
@@ -291,6 +321,9 @@ function summarizeGate(
 		baseDispatchBatches: state.prReviewBaseDispatches?.length ?? 0,
 		validationBatches: state.prReviewValidationBatches?.length ?? 0,
 		feedbackVerificationBatches: state.prFeedbackVerifications?.length ?? 0,
+		...(state.prFeedbackInventoryAmendments?.length
+			? { inventoryAmendments: state.prFeedbackInventoryAmendments }
+			: {}),
 		checkoutReceiptFiles: receiptFiles,
 		activatedAt: state.activatedAt,
 		updatedAt: state.updatedAt,
@@ -340,14 +373,26 @@ async function executePrWorkflowStatus(
 	if (!sessionID) {
 		gate = { active: false, reason: 'no-session-context' };
 	} else {
-		activeState = await _internals.readPrWorkflowGateState(
+		// Issue #2242 R4 (W-5): observation must survive gate-state corruption —
+		// a schema-invalid state previously made this read-only tool throw, so an
+		// operator could not even SEE the state they were stuck on. Unparseable
+		// bytes still fail. This tool and abort_pr_workflow are the only two
+		// callers of the recovery reader.
+		const recovery = await _internals.readPrWorkflowGateStateForRecovery(
 			directory,
 			sessionID,
 		);
+		activeState = recovery?.state ?? null;
 		const receiptFiles = activeState
 			? await countCheckoutReceiptFiles(directory, sessionID)
 			: null;
-		gate = summarizeGate(activeState, receiptFiles);
+		gate = summarizeGate(
+			activeState,
+			receiptFiles,
+			recovery
+				? { salvaged: recovery.salvaged, disclosure: recovery.disclosure }
+				: undefined,
+		);
 	}
 	const recovery = activeState?.checkoutRecovery;
 	const checkout: PrWorkflowGitState = recovery
@@ -385,14 +430,14 @@ export const pr_workflow_status: ReturnType<typeof createSwarmTool> =
 
 /** Test seam mirroring gh-evidence's `_internals` (issue #507 DI convention). */
 export const _internals: {
-	readPrWorkflowGateState: typeof readPrWorkflowGateState;
+	readPrWorkflowGateStateForRecovery: typeof readPrWorkflowGateStateForRecovery;
 	resolveCurrentGitHeadAsync: typeof resolveCurrentGitHeadAsync;
 	resolveIsWorkingTreeCleanAsync: typeof resolveIsWorkingTreeCleanAsync;
 	runGitCapture: typeof runGitCapture;
 	classifyGitState: typeof classifyPrWorkflowGitState;
 	truncateToByteBudget: typeof truncateToByteBudget;
 } = {
-	readPrWorkflowGateState,
+	readPrWorkflowGateStateForRecovery,
 	resolveCurrentGitHeadAsync,
 	resolveIsWorkingTreeCleanAsync,
 	runGitCapture,

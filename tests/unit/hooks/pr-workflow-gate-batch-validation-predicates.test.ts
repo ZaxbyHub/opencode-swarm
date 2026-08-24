@@ -44,6 +44,7 @@ function record(
 
 function analyze(args: {
 	expectedLanes?: Array<{ laneId: string; workflowLane: string }>;
+	expectedMode?: string;
 	records?: BackgroundDelegationRecord[];
 	validatedAt?: string;
 	forbidden?: ReadonlySet<string>;
@@ -53,7 +54,7 @@ function analyze(args: {
 		expectedLanes: args.expectedLanes ?? [
 			{ laneId: 'lane-1', workflowLane: LANE },
 		],
-		expectedMode: 'swarm-pr-review:base',
+		expectedMode: args.expectedMode ?? 'swarm-pr-review:base',
 		validatedAt: args.validatedAt ?? new Date(1_000).toISOString(),
 		checkWorkflowLane: true,
 		forbiddenSubagentSessionIds: args.forbidden ?? new Set(),
@@ -139,6 +140,32 @@ describe('PR review batch record validation predicates', () => {
 		expect(results[0]?.ok).toBe(false);
 		if (!results[0]?.ok) {
 			expect(results[0]?.failure.predicate).toBe('record.duplicate_lane');
+		}
+	});
+
+	test.each([
+		'swarm-pr-feedback:stage-b-reviewer',
+		'swarm-pr-feedback:stage-b-test',
+		'swarm-pr-feedback:closeout-reviewer',
+		'swarm-pr-feedback:closeout-critic',
+		'swarm-pr-review:council',
+	])('rejects incomplete transcripts outside discovery recovery for %s', (mode) => {
+		const base = record();
+		const results = analyze({
+			expectedMode: mode,
+			records: [
+				record({
+					mode,
+					result: { ...base.result!, transcriptIncomplete: true },
+				}),
+			],
+		});
+
+		expect(results[0]?.ok).toBe(false);
+		if (!results[0]?.ok) {
+			expect(results[0]?.failure.predicate).toBe(
+				'result.transcript_incomplete',
+			);
 		}
 	});
 });

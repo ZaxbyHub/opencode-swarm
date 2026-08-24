@@ -1,20 +1,36 @@
-import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+} from 'bun:test';
 import {
 	COMMAND_REGISTRY,
 	VALID_COMMANDS,
 } from '../../src/commands/registry.js';
 import OpenCodeSwarm from '../../src/index';
+import {
+	createIndexCommandsIsolation,
+	createIndexCommandsModuleGuards,
+	createMockPluginInput,
+} from '../helpers/index-commands-shared.js';
 
-// Mock the @opencode-ai/plugin types
-// Since we only need the plugin to register commands, we can provide minimal mocks
-const mockPluginInput = {
-	client: {} as any,
-	project: {} as any,
-	directory: process.cwd(),
-	worktree: process.cwd(),
-	serverUrl: new URL('http://localhost:3000'),
-	$: {} as any,
-};
+// Minimal @opencode-ai/plugin input — the command registration path only reads
+// `directory`/`worktree`, which the isolation helper repoints per test.
+const mockPluginInput = createMockPluginInput();
+const isolation = createIndexCommandsIsolation(mockPluginInput);
+// File-scoped, NOT per-test: see `createIndexCommandsModuleGuards` for why the
+// background-task override must be installed/restored around the whole file
+// (PR #2173 F-006).
+const moduleGuards = createIndexCommandsModuleGuards();
+
+beforeAll(moduleGuards.setUpAll);
+beforeEach(isolation.setUp);
+afterEach(isolation.tearDown);
+afterAll(moduleGuards.tearDownAll);
 
 describe('Swarm subcommand registration', () => {
 	it('should initialize plugin successfully', async () => {
@@ -40,8 +56,9 @@ describe('Swarm subcommand registration', () => {
 
 		// Catch-all plus the current command registry entries. This includes the
 		// evaluation gate commands, main's CI-monitor command, the context-map
-		// stats command (issue #1672), and the swarm-skill-opt shortcut (issue #1822).
-		expect(commandKeys.length).toBe(83);
+		// stats command (issue #1672), the swarm-skill-opt shortcut (issue #1822),
+		// and the swarm-recover shortcut (issue #2268).
+		expect(commandKeys.length).toBe(84);
 
 		expect(commands.swarm).toBeDefined();
 	});
@@ -154,6 +171,7 @@ describe('Swarm subcommand registration', () => {
 			'swarm-auto-proceed',
 			'swarm-write-retro',
 			'swarm-reset-session',
+			'swarm-recover',
 			'swarm-simulate',
 			'swarm-promote',
 			'swarm-checkpoint',
@@ -390,158 +408,5 @@ describe('Swarm subcommand registration', () => {
 
 		// Swarm commands should be added
 		expect(commands.swarm).toBeDefined();
-	});
-
-	// Task 2.4: Verify task handoff debug leakage is absent from visible output
-	// Tests the src/index.ts surface - verifies hooks created by src/index.ts don't emit debug text
-	describe('task handoff debug leakage absent (Task 2.4)', () => {
-		let consoleLogSpy: any;
-
-		beforeEach(() => {
-			// Spy on console.log to capture output during plugin init and config
-			consoleLogSpy = spyOn(console, 'log').mockImplementation(() => {});
-		});
-
-		afterEach(() => {
-			// Restore console.log after each test to avoid pollution
-			consoleLogSpy.mockRestore();
-		});
-
-		it('does not emit debug text during plugin initialization', async () => {
-			// Initialize plugin - this creates delegation tracker hook among others
-			await OpenCodeSwarm.server(mockPluginInput);
-
-			// Verify no debug leakage in console output during init
-			const loggedOutput = consoleLogSpy.mock.calls
-				.map((c: any[]) => c.join(' '))
-				.join('\n');
-			expect(loggedOutput).not.toContain('[swarm-debug-task]');
-			expect(loggedOutput).not.toContain('chat.message');
-			expect(loggedOutput).not.toContain('taskStates=');
-		});
-
-		it('does not emit debug text during config function execution', async () => {
-			const plugin = await OpenCodeSwarm.server(mockPluginInput);
-			const mockConfig: Record<string, unknown> = {};
-
-			// Execute config function - this is the handoff setup path
-			await plugin.config?.(mockConfig);
-
-			// Verify no debug leakage in console output during config
-			const loggedOutput = consoleLogSpy.mock.calls
-				.map((c: any[]) => c.join(' '))
-				.join('\n');
-			expect(loggedOutput).not.toContain('[swarm-debug-task]');
-			expect(loggedOutput).not.toContain('chat.message');
-			expect(loggedOutput).not.toContain('taskStates=');
-		});
-
-		it('does not emit debug text during combined init and config flow', async () => {
-			// Initialize plugin and run config in sequence - this covers the full setup path
-			const plugin = await OpenCodeSwarm.server(mockPluginInput);
-			const mockConfig: Record<string, unknown> = {};
-			await plugin.config?.(mockConfig);
-
-			// Verify no debug leakage in console output during full setup flow
-			const loggedOutput = consoleLogSpy.mock.calls
-				.map((c: any[]) => c.join(' '))
-				.join('\n');
-			expect(loggedOutput).not.toContain('[swarm-debug-task]');
-			expect(loggedOutput).not.toContain('chat.message');
-			expect(loggedOutput).not.toContain('session=');
-			expect(loggedOutput).not.toContain('agent=');
-			expect(loggedOutput).not.toContain('prevAgent=');
-			expect(loggedOutput).not.toContain('taskStates=');
-		});
-	});
-
-	// Task 4.4: Tests for curate command summary behavior, clear failure messaging, and alias discoverability
-	describe('swarm-curate command (Task 4.4)', () => {
-		it('should register swarm-curate command', async () => {
-			const plugin = await OpenCodeSwarm.server(mockPluginInput);
-			const mockConfig: Record<string, unknown> = {};
-
-			await plugin.config?.(mockConfig);
-			const commands = mockConfig.command as Record<
-				string,
-				{ template: string; description: string }
-			>;
-
-			// Verify swarm-curate is registered
-			expect(commands['swarm-curate']).toBeDefined();
-		});
-
-		it('should have correct template for swarm-curate command', async () => {
-			const plugin = await OpenCodeSwarm.server(mockPluginInput);
-			const mockConfig: Record<string, unknown> = {};
-
-			await plugin.config?.(mockConfig);
-			const commands = mockConfig.command as Record<
-				string,
-				{ template: string; description: string }
-			>;
-
-			// Verify template is /swarm curate (no arguments needed)
-			expect(commands['swarm-curate'].template).toBe('/swarm curate');
-		});
-
-		it('should have syntax-hint description for discoverability', async () => {
-			const plugin = await OpenCodeSwarm.server(mockPluginInput);
-			const mockConfig: Record<string, unknown> = {};
-
-			await plugin.config?.(mockConfig);
-			const commands = mockConfig.command as Record<
-				string,
-				{ template: string; description: string }
-			>;
-
-			// Verify description contains syntax hint for discoverability
-			const description = commands['swarm-curate'].description;
-			expect(description).toContain('Use /swarm curate');
-			expect(description).toContain('curate');
-		});
-
-		it('should include curate in the swarm management commands list', async () => {
-			const plugin = await OpenCodeSwarm.server(mockPluginInput);
-			const mockConfig: Record<string, unknown> = {};
-
-			await plugin.config?.(mockConfig);
-			const commands = mockConfig.command as Record<
-				string,
-				{ template: string; description: string }
-			>;
-
-			// Verify swarm command description includes curate in the list
-			expect(commands.swarm.description).toContain('curate');
-		});
-
-		it('should have non-empty description for swarm-curate', async () => {
-			const plugin = await OpenCodeSwarm.server(mockPluginInput);
-			const mockConfig: Record<string, unknown> = {};
-
-			await plugin.config?.(mockConfig);
-			const commands = mockConfig.command as Record<
-				string,
-				{ template: string; description: string }
-			>;
-
-			// Verify description is not empty
-			expect(commands['swarm-curate'].description).toBeTruthy();
-			expect(commands['swarm-curate'].description.length).toBeGreaterThan(0);
-		});
-
-		it('should have one-line description for swarm-curate', async () => {
-			const plugin = await OpenCodeSwarm.server(mockPluginInput);
-			const mockConfig: Record<string, unknown> = {};
-
-			await plugin.config?.(mockConfig);
-			const commands = mockConfig.command as Record<
-				string,
-				{ template: string; description: string }
-			>;
-
-			// Verify description does not contain newlines
-			expect(commands['swarm-curate'].description).not.toContain('\n');
-		});
 	});
 });

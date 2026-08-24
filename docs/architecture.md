@@ -462,7 +462,7 @@ All tasks in phase done
 │         - .swarm/evidence/{phase}/mutation-gate.json (if mutation_test enabled; written by write_mutation_evidence after generate_mutants + mutation_test)
 │         - .swarm/evidence/{phase}/phase-council.json (if phase_council enabled; written by submit_phase_council_verdicts)
 │         - .swarm/evidence/{phase}/architecture-supervisor.json (if architectural_supervision enabled; written by write_architecture_supervisor_evidence)
-│         - .swarm/evidence/{phase}/auto-review.json (written by phase_complete when auto_review phase/plan review is enabled)
+│         - .swarm/evidence/{phase}/auto-review.json (written by run_phase_review when auto_review phase/plan review is enabled)
 │         - .swarm/evidence/final-council.json (if final_council enabled; written by write_final_council_evidence, last phase only)
 │         If either missing: run the missing gate first
 │         Note: Gates 1–5 bypassed in turbo mode; architecture-supervisor, explicit auto-review gate mode, and final-council are never bypassed
@@ -473,7 +473,7 @@ All tasks in phase done
 │         - Gate 4: mutation gate — reads mutation-gate.json for pass/warn/fail verdict (if enabled)
 │         - Gate 5: phase council — reads phase-council.json for approved verdict (if phase_council enabled)
 │         - Gate 5b: architecture supervisor — reads architecture-supervisor.json (if enabled, never turbo-bypassed)
-│         - Final review: dispatches the bounded whole-diff engine, then verifies current auto-review evidence (gate mode only, never turbo-bypassed)
+│         - Final review: verifies complete content-addressed auto-review evidence (gate mode only, never turbo-bypassed)
 │         - Gate 6: final council — reads final-council.json for approved verdict (if final_council enabled, last phase only, never turbo-bypassed)
 │         - Gates 1–5 bypassed when turbo mode is active; Gate 5b, final-review gate mode, and Gate 6 are never bypassed
 └── 7. Ask user: "Ready for Phase [N+1]?"
@@ -482,6 +482,8 @@ All tasks in phase done
 ### Phase Completion Gates
 
 The `phase_complete` tool enforces up to eight gates before marking a phase complete. Gates 1–5 and phase council are turbo-bypassed; architecture supervisor, explicit auto-review gate mode, and final council are never turbo-bypassed.
+
+Every invocation first returns a versioned structured gate report containing every applicable pass, block, error, and not-applicable result in deterministic order. Gate checks are read-only and individually bounded. A phase transition is committed only after the complete report passes, the evidence/config/plan snapshot remains byte-identical under the plan lock, and the same preflight report is reproduced. A blocker never dispatches a model or performs a partial phase transition. Recovery actions are typed and name registered tools such as `run_phase_review`, `repair_gate_evidence`, and `repair_knowledge_receipt_ledger`.
 
 | Gate | Purpose | Blocking Reason | Turbo Bypass |
 |------|---------|-----------------|--------------|
@@ -536,7 +538,14 @@ The automatic task, phase, plan, Lean, and `/swarm review` paths share one set o
 1. `src/evaluation/ephemeral-agent-dispatcher.ts` owns the bounded session lifecycle: instance-local client injection, fresh parent-bound session, replacement system prompt, false-only read-only tool map, prompt/response byte caps, timeout/abort handling, cost extraction, and awaited best-effort cleanup.
 2. `src/review/diff-source.ts` owns canonical scope construction. Default/base scopes compute the merge base and include current tracked plus safe untracked text; exact ranges are committed-only; working-tree scope compares `HEAD` with tracked plus safe untracked text. Every Git child is non-interactive, bounded, killable, and rooted explicitly.
 3. `src/review/engine.ts` owns the shared policy pipeline: reviewer fallback dispatch, tolerant structured parsing, stable finding IDs and deduplication, current-side hunk anchoring, confidence demotion, batched independent validation, receipts/evidence, telemetry/cost accounting, and advisory/gate disposition.
-4. `src/tools/phase-complete.ts` owns phase/plan model dispatch and persists `.swarm/evidence/<phase>/auto-review.json`. `final-review-gate.ts` never invokes a model; it only checks that the in-memory scope hash and configured policy match durable evidence and that scope, structured output, validation, required receipt, and confirmed-finding policy are satisfied. Clean-scope evidence is valid without a finding receipt.
+4. `run_phase_review` owns phase/plan model dispatch and persists `.swarm/evidence/<phase>/auto-review.json`. `phase_complete` and `final-review-gate.ts` never invoke a review model; they only verify a complete version-2 manifest, exact selector, policy, plan requirements, file identities, canonical content hashes, structured output, validation, required receipt, and confirmed-finding policy. Unrelated `HEAD` movement does not invalidate byte-identical scope, while any reviewed-byte, file-set, selector, policy, or plan-requirement change does. Clean-scope evidence is valid without a finding receipt.
+
+### Evidence repair and re-evaluation
+
+- `repair_gate_evidence` is architect-only. It operates on an exact task, preserves readable corrupt/legacy bytes in bounded immutable quarantine metadata, and installs a fresh fail-closed generation. Requirements are rebuilt only from the durable task-requirements receipt; otherwise the reconstruction sentinel requires all gates to run again. Unreadable and oversized originals are never overwritten.
+- `repair_knowledge_receipt_ledger` is architect-only and exact phase/session scoped. A readable journal only rebuilds its derived snapshot. A corrupt journal is captured in an append-only bounded quarantine, only the hash-validated prefix is salvaged, and an authoritative uncertainty record blocks that phase/session until a fresh displayed-membership or empty-retrieval commit proves re-evaluation.
+- `record_directive_override` records explicit architect authorization separately from `phase_complete`; it cannot make missing, corrupt, or uncertain authority pass.
+- `write_retro` requires the caller to state `verdict: pass | fail`. A syntactically valid retrospective with `fail` remains a phase blocker; the runtime never pre-fills a passing verdict.
 
 Advisory mode injects ranked findings and continues. Gate mode fails closed on missing, stale, truncated, malformed, or unpersisted evidence and blocks only on independently `CONFIRMED`, diff-anchored, effective HIGH/CRITICAL findings. `DISPROVED`, `UNVERIFIED`, unanchored, out-of-scope, and below-threshold findings remain visible evidence but are non-blocking.
 
@@ -603,7 +612,7 @@ Added as the default structured search path for workspace pattern lookup. Replac
 |----------|------|---------|-------------|
 | `query` | `string` | required | Search query (literal or regex depending on `mode`) |
 | `mode` | `"literal" \| "regex"` | `"literal"` | Match mode |
-| `include` | `string` | unset | Comma-separated include globs (e.g. `"src/**/*.ts"`) |
+| `include` | `string` | unset | Comma-separated include globs (e.g. `"src/**/*.ts"`). An exact repo-relative path under a dot-directory (e.g. `".swarm/bundled-skills/<slug>/SKILL.md"`) is searched directly, bypassing hidden-directory and ignore filtering; `.git` content is never searchable |
 | `exclude` | `string` | unset | Comma-separated exclude globs |
 | `max_results` | `number` | `100` | Hard cap on returned matches |
 | `max_lines` | `number` | `200` | Max characters per matched line |
@@ -612,7 +621,7 @@ Returns structured JSON with normalized match metadata. **Not a structural AST s
 
 **Registered for**: architect, coder, reviewer, explorer, test_engineer.
 
-Current output includes `matches[].file`, `matches[].lineNumber`, `matches[].lineText`, `truncated`, `total`, `query`, `mode`, `maxResults`, and `engine`. The ripgrep path uses a bounded subprocess runner with explicit `cwd`, ignored stdin, timeout, capped stdout/stderr, and cleanup. Its argv places options and globs before `--`, then the query and `.` path operand, so dash-prefixed queries cannot become flags. If ripgrep is unavailable, the fallback engine performs bounded filesystem traversal, skips heavy runtime directories such as `.git`, `.swarm`, `node_modules`, build outputs, and coverage directories, and discloses that it does not fully emulate ripgrep gitignore semantics.
+Current output includes `matches[].file`, `matches[].lineNumber`, `matches[].lineText`, `truncated`, `total`, `query`, `mode`, `maxResults`, and `engine`. The ripgrep path uses a bounded subprocess runner with explicit `cwd`, ignored stdin, timeout, capped stdout/stderr, and cleanup. Its argv places options and globs before `--`, then the query and the path operand — `.` for glob searches, or the exact promoted paths when every include is an exact path under a dot-directory (resolved-path checked so nothing resolving into `.git/` is ever promoted; glob searches that target a dot-directory add `--hidden --no-ignore` with a `!.git` guard) — so dash-prefixed queries cannot become flags. If ripgrep is unavailable, the fallback engine performs bounded filesystem traversal, skips heavy runtime directories such as `.git` (case-insensitively, at any depth), `.swarm`, `node_modules`, build outputs, and coverage directories — except when an include pattern explicitly names a skipped directory — and discloses that it does not fully emulate ripgrep gitignore semantics.
 
 ### Structural AST Search Tool - `ast_grep`
 
@@ -972,6 +981,33 @@ If the lock holder crashes, the OS or lock library will eventually clean up the 
 
 ---
 
+## Exact-Task Terminal Reconciliation
+
+Task workflow evidence is the authority for completion, blockage, and session
+closure. The plan projection can lag or be stale; exact-task evidence cannot be
+silently "filled in" from a terminal plan status alone.
+
+`/swarm close` therefore reconciles tasks in two stages:
+
+- `src/workflow/close-terminal.ts` settles each target task under the
+  established plan-lock then task-evidence-lock order.
+- `src/plan/manager.ts:closePlanTerminalState()` persists the final phase and
+  projection snapshot only after exact-task evidence has converged.
+
+The truthful non-success terminal is workflow state `closed` with outcome
+`task_closed`. It records that a session ended with unfinished work, but it is
+not success and must never overwrite authoritative `complete`. When exact
+evidence already proves `complete`, close preserves that evidence and
+reconciles the task projection back to plan status `completed`.
+
+Close recovery is bound to plan identity. New ledgers persist a random
+`plan_epoch` in the `plan_created` root payload; legacy ledgers adopt exactly
+one backward-readable snapshot with `source: "plan_epoch_adopted"`. Version-2
+close WALs store both `planIdentityHash` and `planEpoch`, so a stale close WAL
+cannot replay into a later plan that reused the same task ID.
+
+---
+
 ## Failure Handling
 
 ### Task Rejection
@@ -1203,7 +1239,7 @@ Read-only tool to query the gate status of a specific task. Reads `.swarm/eviden
 **Usage**: Any phase to check task completion status without mutating evidence
 
 **Input**: `task_id` (task identifier in N.M, N.M.P, retro-N format, or internal tool ID like "sast_scan", "quality_budget", etc.)  
-**Output**: JSON with `taskId`, `status` (all_passed|incomplete|no_evidence), `required_gates`, `passed_gates`, `missing_gates`, `gates` map, `message`, `todo_scan` (advisory TODO count if available), and `secretscan_verdict` (v6.33)
+**Output**: JSON with `taskId`, `status` (all_passed|incomplete|no_evidence), `required_gates`, `passed_gates`, `missing_gates`, `gates` map, `message`, `todo_scan` (advisory TODO count if available), `secretscan_verdict` (v6.33), and the durable workflow lifecycle snapshot `workflow` (`{state, generation}` or `null`) plus an optional `workflow_attribution_hint` string present only when the task is wedged at `coder_delegated` with no attributed pre-check gate — the read-side diagnostic for the post-`/swarm reset-session` `TASK_WORKFLOW_STAGE_A_REQUIRED` wedge (issue #2315)
 
 **Secretscan verdict (v6.33)**: The tool now scans EvidenceBundle entries for `secretscan` type evidence using the `isSecretscanEvidence` type guard. When secretscan entries are found, it reports:
 - `pass` — No secrets found, no incomplete coverage, and no zero-coverage or count mismatch
@@ -1746,10 +1782,10 @@ Agent awareness tracks what each agent is doing and shares relevant context acro
 ### Shared State
 
 `src/state.ts` exports a module-scoped singleton (`swarmState`) with:
-- `activeAgent: Map<sessionId, agentName>` — Which agent is active in each session (updated by chat.message hook)
+- `activeAgent: Map<sessionId, agentName>` — Which agent is active in each session (updated by chat.message hook; evicted in lockstep with its `agentSessions` entry — stale-session sweep, `endAgentSession`, `/swarm reset-session`, and rehydration ghost-filtering — so entries never outlive their sessions)
 - `agentSessions: Map<sessionId, AgentSessionState>` — Per-session guardrail tracking. Key fields:
   - `toolCallCount`, `startTime`, `delegationActive` — Guardrail counters
-  - `taskWorkflowStates: Map<string, TaskWorkflowState>` — Per-task state machine. States: `'idle' | 'coder_delegated' | 'pre_check_passed' | 'reviewer_run' | 'tests_run' | 'complete'`. Transitions are forward-only; `complete` can only be reached from `tests_run`.
+  - `taskWorkflowStates: Map<string, TaskWorkflowState>` — Bounded diagnostic projection of the authoritative exact-task state machine. States: `'idle' | 'coder_delegated' | 'pre_check_passed' | 'reviewer_run' | 'tests_run' | 'rework_required' | 'complete' | 'blocked' | 'closed'`. Normal verification transitions are generation-bound; `complete`, `blocked`, and `closed` are terminal, and only the audited exact-CAS repair path returns a settled non-success task to `idle`.
   - `lastGateOutcome: { gate, taskId, passed, timestamp } | null` — Most recent gate result, populated by `guardrails/index.ts` toolAfter. Used for deliberation preamble injection in Phase 4 context engineering.
   - `declaredCoderScope: string[] | null` — Compatibility projection of the current identity-bound scope for this session. It is not independently authoritative.
   - `lastScopeViolation: string | null` — Last scope containment violation message (Phase 5). Set when coder modifies >2 files outside declared scope; cleared after warning is injected.

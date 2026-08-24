@@ -20,12 +20,38 @@ export interface MemoryConfig {
 			tokenBudget: number;
 		};
 	};
+	reflection: {
+		/** Generate/inject deterministic outcome lessons automatically. */
+		enabled: boolean;
+		/** Exponential decay half-life for signed outcomes. */
+		halfLifeDays: number;
+	};
 	learning: MemoryLearningConfig;
 	writes: {
 		mode: 'propose';
 	};
 	redaction: {
 		rejectDurableSecrets: boolean;
+		/**
+		 * #1466: run a PII detector over durable memory text at the write
+		 * boundary. Default false — the default install performs no PII
+		 * detection (pre-#1466 behavior). When true, a summary (types/counts/
+		 * score, never matched text) is attached to proposals.
+		 */
+		detectPii: boolean;
+		/**
+		 * #1466: which PiiDetector implementation to use. 'regex' (default) is
+		 * dependency-free; 'ner' requires the optional
+		 * `@xenova/transformers` peer dependency (typed error when absent).
+		 */
+		piiDetector: 'regex' | 'ner';
+		/**
+		 * #1466: reject durable memory proposals whose PII score EXCEEDS
+		 * `piiThreshold` (default 0.7). Rejection is logged to `memory_events`
+		 * as `pii_rejected` with types/score only — never matched text.
+		 */
+		rejectDurablePii: boolean;
+		piiThreshold: number;
 	};
 	maintenance: {
 		/** @deprecated superseded by `maintenance.importance` (issue #1464); retained for back-compat. */
@@ -272,12 +298,20 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
 			tokenBudget: 1000,
 		},
 	},
+	reflection: {
+		enabled: false,
+		halfLifeDays: 30,
+	},
 	learning: { ...DEFAULT_MEMORY_LEARNING_CONFIG },
 	writes: {
 		mode: 'propose',
 	},
 	redaction: {
 		rejectDurableSecrets: true,
+		detectPii: false,
+		piiDetector: 'regex',
+		rejectDurablePii: false,
+		piiThreshold: 0.7,
 	},
 	maintenance: {
 		lowUtilityMaxConfidence: 0.45,
@@ -331,6 +365,10 @@ export function resolveMemoryConfig(
 				...DEFAULT_MEMORY_CONFIG.recall.injection,
 				...(input?.recall?.injection ?? {}),
 			},
+		},
+		reflection: {
+			...DEFAULT_MEMORY_CONFIG.reflection,
+			...(input?.reflection ?? {}),
 		},
 		learning: {
 			...DEFAULT_MEMORY_CONFIG.learning,

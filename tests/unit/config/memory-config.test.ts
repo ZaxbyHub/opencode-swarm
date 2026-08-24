@@ -49,6 +49,10 @@ describe('MemoryConfigSchema', () => {
 					tokenBudget: 1000,
 				},
 			},
+			reflection: {
+				enabled: false,
+				halfLifeDays: 30,
+			},
 			learning: {
 				learningRate: 0.1,
 				propagationFactor: 0.3,
@@ -61,7 +65,13 @@ describe('MemoryConfigSchema', () => {
 				propagationLookbackDays: 30,
 			},
 			writes: { mode: 'propose' },
-			redaction: { rejectDurableSecrets: true },
+			redaction: {
+				rejectDurableSecrets: true,
+				detectPii: false,
+				piiDetector: 'regex',
+				rejectDurablePii: false,
+				piiThreshold: 0.7,
+			},
 			maintenance: {
 				lowUtilityMaxConfidence: 0.45,
 				lowUtilityMinAgeDays: 30,
@@ -130,6 +140,17 @@ describe('MemoryConfigSchema', () => {
 		expect(parsed.recall.defaultMaxItems).toBe(3);
 		expect(parsed.recall.defaultTokenBudget).toBe(500);
 		expect(parsed.recall.minScore).toBe(0.2);
+	});
+
+	test('reflection is default-off and deep-merges bounded overrides', () => {
+		const parsed = MemoryConfigSchema.parse({
+			reflection: { enabled: true },
+		});
+
+		expect(parsed.reflection).toEqual({ enabled: true, halfLifeDays: 30 });
+		expect(() =>
+			MemoryConfigSchema.parse({ reflection: { halfLifeDays: 0 } }),
+		).toThrow();
 	});
 
 	test('accepts bounded learning overrides', () => {
@@ -346,5 +367,22 @@ describe('MemoryConfigSchema', () => {
 
 		expect(config.provider).toBe('sqlite');
 		expect(config.sqlite.path).toBe('.swarm/memory/memory.db');
+	});
+
+	// PR #2310 feedback PRR-012: threshold 1 would silently disable PII
+	// rejection (scores never reach 1 and the comparison is strict >).
+	test('rejects piiThreshold = 1 (silent-disable footgun, loud at parse)', () => {
+		expect(() =>
+			MemoryConfigSchema.parse({
+				enabled: true,
+				redaction: { rejectDurablePii: true, piiThreshold: 1 },
+			}),
+		).toThrow(/strictly less than 1/);
+		expect(() =>
+			MemoryConfigSchema.parse({
+				enabled: true,
+				redaction: { piiThreshold: 0.99 },
+			}),
+		).not.toThrow();
 	});
 });

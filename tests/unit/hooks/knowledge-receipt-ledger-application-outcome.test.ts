@@ -4,6 +4,7 @@ import path from 'node:path';
 import {
 	commitApplicationOutcomeBatch,
 	commitDisplayedMembership,
+	commitGateReleaseBatch,
 	_internals as ledgerInternals,
 	queryLiveMemberships,
 	validateAndCommitTerminalBatch,
@@ -189,4 +190,34 @@ test('authorized remediation compares both the prior event and prior outcome', a
 		previous_event_id: priorEventId,
 		previous_outcome: 'violated',
 	});
+});
+
+test('gate releases are non-terminal and do not create application markers', async () => {
+	const directory = project();
+	await display(directory);
+
+	const released = await commitGateReleaseBatch(directory, {
+		trace_id: 'trace-app',
+		session_id: 'session-app',
+		items: [
+			{
+				entry_id: 'entry-app',
+				source: 'application_gate_denial_limit_release',
+				reason: 'escape hatch fired',
+			},
+		],
+	});
+	if (!released.ok) throw new Error(released.detail);
+	expect(released.committed).toHaveLength(1);
+
+	const state = await queryLiveMemberships(directory, {
+		include_terminal: true,
+	});
+	if (!state.ok) throw new Error(state.detail);
+	expect(state.memberships[0]?.gate_release).toMatchObject({
+		source: 'application_gate_denial_limit_release',
+		reason: 'escape hatch fired',
+	});
+	expect(state.memberships[0]?.application_marker).toBeUndefined();
+	expect(state.memberships[0]?.terminal).toBeUndefined();
 });

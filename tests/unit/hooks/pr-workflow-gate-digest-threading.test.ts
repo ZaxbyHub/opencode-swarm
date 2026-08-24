@@ -44,7 +44,7 @@ function countDigestResolutions(result: string | null = REVISION_DIGEST): {
 
 async function settleReviewer(
 	classification = 'DISPROVED',
-	severity = 'LOW',
+	severity = 'NONE',
 ): Promise<void> {
 	await recordPrReviewValidationBatch(
 		tempDir,

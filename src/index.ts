@@ -164,6 +164,7 @@ import {
 } from './hooks/trajectory-logger';
 import { realtimeAdmissionAfter } from './learning/admission.js';
 import { createMemoryLifecycleHooks } from './memory';
+import type { MemoryConfig as RuntimeMemoryConfig } from './memory/config.js';
 import { initObservability } from './observability/index.js';
 import { loadPlan } from './plan/manager.js';
 import { createPrmHook, resolvePrmPatternPersistenceOptions } from './prm';
@@ -173,6 +174,7 @@ import { captureReviewAgentModelRegistry } from './review/runtime.js';
 import { createCompactionService } from './services/compaction-service';
 import { shouldRunOnStartup } from './services/config-doctor';
 import { buildDelegationCostFields } from './services/cost-accounting.js';
+import { runModelPreflight } from './services/model-preflight';
 import { scheduleVersionCheck } from './services/version-check.js';
 import { loadSnapshot } from './session/snapshot-reader.js';
 import { createSnapshotWriterHook } from './session/snapshot-writer.js';
@@ -186,6 +188,7 @@ import { initTelemetry, startHeartbeatTracking, telemetry } from './telemetry';
 import { buildPluginToolObject } from './tools/plugin-registration';
 import { error, log, warn } from './utils';
 import { pushAdvisory } from './utils/advisory-queue';
+import { setGitBinaryOverride } from './utils/git-executable';
 import {
 	ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS,
 	ensureSwarmGitExcluded,
@@ -213,7 +216,8 @@ const MAX_TRACKED_HEARTBEAT_SESSIONS = 500;
  * FIFO-cap a session-keyed Map to at most `max` entries, evicting oldest first.
  * Values tracked by these maps are plain data (timestamps/usage snapshots), never
  * timer handles, so eviction requires no clearInterval/clearTimeout. Exported for
- * unit testing of the cap invariant; used by the heartbeat throttle path below.
+ * unit testing of the cap invariant; used by the heartbeat throttle and
+ * delegation-telemetry pairing paths below.
  */
 export function capSessionMap<K, V>(map: Map<K, V>, max: number): void {
 	while (map.size > max) {
@@ -221,6 +225,32 @@ export function capSessionMap<K, V>(map: Map<K, V>, max: number): void {
 		if (oldest === undefined) break;
 		map.delete(oldest);
 	}
+}
+
+/**
+ * Delegation-telemetry pairing state: callID → identity recorded when
+ * `delegation_begin` was emitted for an admitted Task call. The Task handoff in
+ * `tool.execute.after` consumes (get + delete) the entry so its
+ * `delegation_end` carries the IDENTICAL sessionId/agentName/taskId as the
+ * begin event. Deliberately self-owned: the `getStoredInputArgs` snapshot is
+ * populated by guardrails/knowledge hooks, so relying on it would recreate the
+ * feature-gating defect this map exists to fix (delegation_begin was
+ * unreachable with `guardrails.enabled: false`). An entry is deleted when its
+ * delegation_end is emitted; entries whose end never fires (background
+ * "running" placeholders, sessions torn down mid-delegation) are bounded by
+ * the `capSessionMap` FIFO cap.
+ */
+const _delegationTelemetryByCallID = new Map<
+	string,
+	{ agentName: string; taskId: string }
+>();
+const MAX_TRACKED_DELEGATION_TELEMETRY = 500;
+
+/** @internal — test-only: clears delegation-telemetry pairing state so one
+ * test's unconsumed entries (e.g. a before with no matching after) cannot
+ * leak into the next. Mirrors resetTelemetryForTesting / resetSwarmState. */
+export function _resetDelegationTelemetryPairingForTesting(): void {
+	_delegationTelemetryByCallID.clear();
 }
 
 import { applyLanePermissions } from './config/lane-permissions.js';
@@ -334,6 +364,17 @@ let loadPluginConfigWithMetaAsyncForInit = loadPluginConfigWithMetaAsync;
 let loadSnapshotForInit = loadSnapshot;
 let ensureSwarmGitExcludedForInit = ensureSwarmGitExcluded;
 let resolveAutoReviewConfigForInit = resolveAutoReviewConfig;
+type RegenerateMemoryReflectionForInit = (
+	directory: string,
+	config: Partial<RuntimeMemoryConfig>,
+) => Promise<unknown>;
+let regenerateMemoryReflectionForInit: RegenerateMemoryReflectionForInit =
+	async (directory, config) => {
+		const { regenerateMemoryReflection } = await import(
+			'./memory/reflection-service.js'
+		);
+		return regenerateMemoryReflection(directory, config);
+	};
 
 export function overrideIndexInternalsForTest(overrides: {
 	createRepoGraphBuilderHook?: typeof createRepoGraphBuilderHook;
@@ -342,6 +383,7 @@ export function overrideIndexInternalsForTest(overrides: {
 	loadSnapshot?: typeof loadSnapshot;
 	ensureSwarmGitExcluded?: typeof ensureSwarmGitExcluded;
 	resolveAutoReviewConfig?: typeof resolveAutoReviewConfig;
+	regenerateMemoryReflection?: RegenerateMemoryReflectionForInit;
 }): () => void {
 	const previousCreateRepoGraphBuilderHook = createRepoGraphBuilderHookForInit;
 	const previousSchedulePostResolutionTasks =
@@ -351,6 +393,7 @@ export function overrideIndexInternalsForTest(overrides: {
 	const previousLoadSnapshot = loadSnapshotForInit;
 	const previousEnsureSwarmGitExcluded = ensureSwarmGitExcludedForInit;
 	const previousResolveAutoReviewConfig = resolveAutoReviewConfigForInit;
+	const previousRegenerateMemoryReflection = regenerateMemoryReflectionForInit;
 	if (overrides.createRepoGraphBuilderHook) {
 		createRepoGraphBuilderHookForInit = overrides.createRepoGraphBuilderHook;
 	}
@@ -370,6 +413,9 @@ export function overrideIndexInternalsForTest(overrides: {
 	if (overrides.resolveAutoReviewConfig) {
 		resolveAutoReviewConfigForInit = overrides.resolveAutoReviewConfig;
 	}
+	if (overrides.regenerateMemoryReflection) {
+		regenerateMemoryReflectionForInit = overrides.regenerateMemoryReflection;
+	}
 	return () => {
 		createRepoGraphBuilderHookForInit = previousCreateRepoGraphBuilderHook;
 		schedulePostResolutionTasksForInit = previousSchedulePostResolutionTasks;
@@ -378,6 +424,7 @@ export function overrideIndexInternalsForTest(overrides: {
 		loadSnapshotForInit = previousLoadSnapshot;
 		ensureSwarmGitExcludedForInit = previousEnsureSwarmGitExcluded;
 		resolveAutoReviewConfigForInit = previousResolveAutoReviewConfig;
+		regenerateMemoryReflectionForInit = previousRegenerateMemoryReflection;
 	};
 }
 
@@ -530,6 +577,24 @@ async function initializeOpenCodeSwarm(
 	ctx: Parameters<Plugin>[0],
 	postResolutionTasks: PostResolutionTask[],
 ) {
+	// Issue #2236 RC3 item 3: the running plugin version was never logged at
+	// startup, so a user hitting a stale-cache/behavior-mismatch issue had no
+	// way to confirm which version was actually loaded (packageJson.version
+	// previously only reached observability provenance and the throttled
+	// staleness warning, never a plain startup line). `packageJson.version`
+	// is already imported at module scope, so this is zero extra I/O and does
+	// not touch AGENTS.md invariant 1.
+	// STDERR, not stdout. This is the only unconditional line the plugin runtime
+	// emits, and the host may use stdout for structured protocol traffic — a
+	// startup banner there risks corrupting it. Every other always-emitted
+	// operator signal in this repo goes to stderr (`criticalWarn`,
+	// src/utils/logger.ts); `console.warn` is used directly rather than
+	// `criticalWarn` because this is not a warning and should not carry that
+	// label. #2236 needs it because the reporter could not identify which
+	// plugin version was actually loaded.
+	// biome-ignore lint/suspicious/noConsole: Startup version line — user must be able to identify the running plugin version to diagnose stale-cache issues (issue #2236)
+	console.warn(`[opencode-swarm] running v${packageJson.version}`);
+
 	// Clear deferred warnings at the very start of the session, BEFORE any
 	// init-path work that buffers advisories via advisoryWarn (config load,
 	// ensureSwarmGitExcluded, writeProjectConfigIfNew). The clear isolates the
@@ -615,6 +680,19 @@ async function initializeOpenCodeSwarm(
 	log(
 		`init-path I/O completed in ${(performance.now() - __initIoStart).toFixed(1)}ms (parallel: config+snapshot+git-exclude)`,
 	);
+
+	// Register the git-executable resolver override once per init (issue
+	// #2236 hardening, F4). `setGitBinaryOverride` is a plain sync object
+	// assignment — no I/O, no probe — so this cannot regress the init
+	// budget. The env var `OPENCODE_SWARM_GIT_BINARY` always wins over this
+	// config value at resolution time (src/utils/git-executable.ts).
+	//
+	// SECURITY (CWE-427): `config.git?.binary` is safe to pass straight
+	// through because the loader has already stripped any PROJECT-supplied
+	// value — `git.binary` is honored only from the user-level config and the
+	// env var, since a repo can commit both a config naming a shim and the
+	// shim itself (`enforceGitBinaryProvenance`, src/config/loader.ts).
+	setGitBinaryOverride(config.git?.binary);
 
 	// Full-auto mode validation: critic model must differ from architect model
 	if (config.full_auto?.enabled === true) {
@@ -748,6 +826,7 @@ async function initializeOpenCodeSwarm(
 				excludeDirs: repoGraphConfig.exclude_dirs,
 			})
 		: null;
+	let repoGraphInitPromise: Promise<void> | undefined;
 	if (repoGraphHook) {
 		postResolutionTasks.push(() => {
 			const watchdog = setTimeout(() => {
@@ -758,7 +837,7 @@ async function initializeOpenCodeSwarm(
 			if (typeof (watchdog as { unref?: () => void }).unref === 'function') {
 				(watchdog as { unref: () => void }).unref();
 			}
-			repoGraphHook
+			repoGraphInitPromise = repoGraphHook
 				.init()
 				.catch(() => {
 					/* logged inside init */
@@ -766,6 +845,49 @@ async function initializeOpenCodeSwarm(
 				.finally(() => clearTimeout(watchdog));
 		});
 	}
+
+	// Issue #2271 bug 4: model-resolution preflight runs OFF the resolution
+	// path (it makes an HTTP call to the host's provider catalog — exactly the
+	// class of work invariant 1 keeps out of `server()` awaits). Pushed AFTER
+	// the repo-graph task: tests and tooling index the post-resolution queue,
+	// and the #704 ordering contract invokes scheduledTasks[0] as the
+	// repo-graph scan. Fail-open by construction: catalog errors surface
+	// nothing, and only a POSITIVE unresolved detection warns.
+	postResolutionTasks.push(() => {
+		void runModelPreflight(config, swarmState.opencodeClient)
+			.then((result) => {
+				if (!result.catalogAvailable) return;
+				const unresolved = result.resolutions.filter(
+					(resolution) => resolution.status === 'unresolved',
+				);
+				if (unresolved.length === 0) return;
+				const lines = unresolved.map(
+					(resolution) =>
+						`  ${resolution.agent}: ${resolution.model} (${resolution.detail ?? 'does not resolve'})`,
+				);
+				const msg =
+					`[opencode-swarm] WARNING: ${unresolved.length} configured agent model(s) do not resolve against the provider catalog:\n` +
+					`${lines.join('\n')}\n` +
+					'Dispatching these agents will fail permanently ("Model not found"/"Forbidden"). ' +
+					'Fix agents.<role>.model in opencode-swarm.json (or remove the override to fall back to the default).';
+				if (!config.quiet) {
+					// biome-ignore lint/suspicious/noConsole: user-facing operational warning — must be visible even outside debug mode
+					console.warn(msg);
+				} else {
+					addDeferredWarning(msg);
+				}
+				for (const resolution of unresolved) {
+					telemetry.modelUnresolved(
+						resolution.agent,
+						resolution.model,
+						resolution.detail ?? 'does not resolve',
+					);
+				}
+			})
+			.catch(() => {
+				/* fail-open: preflight must never surface as an error */
+			});
+	});
 
 	// `ensureSwarmGitExcluded` was awaited in the parallel block above. Its
 	// comment (preserved here for context): protects .swarm/ from Git before
@@ -905,6 +1027,24 @@ async function initializeOpenCodeSwarm(
 		undefined,
 		projectContext ?? undefined,
 	);
+	// PRR-004 (issue #1649 observability): emit the rendered architect prompt
+	// size at session init so operators and support traces can see the budget
+	// without re-running tests. Debug-gated — visible only when
+	// OPENCODE_SWARM_DEBUG=1, never to chat-visible streams. Find the largest
+	// architect prompt across all swarms so multi-swarm configs (where
+	// `agents.architect` is undefined and only `cloud_architect`/
+	// `mega_architect` are present) still produce a meaningful value.
+	const largestArchitectChars = Object.entries(agents).reduce(
+		(max, [name, cfg]) => {
+			if (!name.endsWith('_architect') && name !== 'architect') return max;
+			const len = (cfg as { prompt?: string }).prompt?.length ?? 0;
+			return len > max ? len : max;
+		},
+		0,
+	);
+	log('architect prompt size', {
+		chars: largestArchitectChars,
+	});
 	const agentDefinitions = createAgents(
 		configWithResolvedAutoReview,
 		projectContext ?? undefined,
@@ -1057,6 +1197,38 @@ async function initializeOpenCodeSwarm(
 				? (swarmState.agentSessions.get(sessionID)?.currentTaskId ?? undefined)
 				: undefined,
 	});
+	// Issue #1989: reflection regeneration performs provider, graph, and artifact
+	// I/O, so it belongs in the wrapper-owned post-resolution queue. Keeping the
+	// service behind a dynamic import prevents this optional startup feature from
+	// expanding the manifest-resolution path. The timeout and catch are both
+	// fail-open: a corrupt/oversized store never prevents plugin registration.
+	if (
+		config.memory?.enabled === true &&
+		config.memory.reflection?.enabled === true
+	) {
+		const reflectionConfig = config.memory as Partial<RuntimeMemoryConfig>;
+		const regenerateMemoryReflectionTask = () =>
+			withTimeout(
+				repoGraphInitPromise ?? Promise.resolve(),
+				5_000,
+				new Error('repo graph refresh exceeded reflection wait budget'),
+			)
+				.catch(() => undefined)
+				.then(() =>
+					withTimeout(
+						regenerateMemoryReflectionForInit(ctx.directory, reflectionConfig),
+						15_000,
+						new Error('memory reflection startup regeneration exceeded 15s'),
+					),
+				)
+				.catch((err: unknown) => {
+					log('memory reflection startup regeneration failed (non-fatal)', {
+						error: err instanceof Error ? err.message : String(err),
+					});
+				})
+				.then(() => undefined);
+		postResolutionTasks.push(regenerateMemoryReflectionTask);
+	}
 	// Fail-secure: honor explicit guardrails.enabled === false (preserving the full
 	// guardrails block), otherwise let Zod schema defaults fill in enabled: true.
 	const guardrailsFallback =
@@ -2435,6 +2607,11 @@ async function initializeOpenCodeSwarm(
 					description:
 						'Use /swarm reset-session to clear session state and delegation chains',
 				},
+				'swarm-recover': {
+					template: '/swarm recover $ARGUMENTS',
+					description:
+						'Use /swarm recover to settle wedged coder settlements [task_id] [--force]',
+				},
 				'swarm-simulate': {
 					template: '/swarm simulate $ARGUMENTS',
 					description: 'Use /swarm simulate to run a simulated agent session',
@@ -2926,14 +3103,18 @@ async function initializeOpenCodeSwarm(
 						},
 						knowledgeConfig,
 					);
-					// (#1849) Re-snapshot output.args AFTER directive injection so the
-					// tool.execute.after ack collector recovers the FINAL prompt (with
-					// the <delegate_knowledge_directives> block + trace_id). The guardrails
-					// snapshot at step 1 captured the PRE-injection args; without this
-					// re-snapshot the after path could not find the directive block and the
-					// entire delegate-ack reconciliation would be dark in production.
-					setStoredInputArgs(input.callID, output.args);
 				}
+				// (#1849) Re-snapshot output.args after (optional) directive injection
+				// so tool.execute.after consumers recover the FINAL args. This store is
+				// UNCONDITIONAL (issue #2214): the SDK toolAfter input carries no args,
+				// guardrails' snapshot sits below its `if (!resolved) return` early-out
+				// and therefore never runs for the architect session, and this line is
+				// the only production store site for architect Task dispatches. Gating
+				// it on knowledgeConfig.enabled left subagent_type unresolvable in
+				// toolAfter when knowledge is disabled, silently skipping coder
+				// settlement finalization, Stage B advancement, and gate-evidence
+				// recording for every architect delegation.
+				setStoredInputArgs(input.callID, output.args);
 
 				// v6.29: One-time 50% context pressure warning
 				const pressurePct = getSessionBudgetPct(input.sessionID);
@@ -2992,6 +3173,48 @@ async function initializeOpenCodeSwarm(
 				// erase an in-progress `Task` → `coder` one. `toolBeforeArgs` is the
 				// resolved args of the call that just succeeded.
 				resetGateDenialStreaks(input.sessionID, input.tool, toolBeforeArgs);
+
+				// Delegation lifecycle telemetry — the paired counterpart of the
+				// `delegation_end` emitted by the Task handoff in tool.execute.after.
+				// Emitted here (last statement of the handler) so a Task call denied
+				// or rejected by ANY gate above never records a begin, and NEVER gated
+				// on guardrails: the previous emission lived inside `beginInvocation`
+				// (guardrails invocation-window bookkeeping) whose every call site is
+				// guardrails-gated, so `guardrails.enabled: false` produced
+				// delegation_end events with no delegation_begin ever.
+				// `subagent_type` is the delegated agent as dispatched (raw, matching
+				// the raw activeAgent names delegation_end historically carried);
+				// activeAgent is only a fallback for malformed Task args.
+				{
+					const beforeToolNormalized =
+						normalizeToolName(input.tool) ?? input.tool;
+					if (
+						beforeToolNormalized === 'Task' ||
+						beforeToolNormalized === 'task'
+					) {
+						const delegatedAgent =
+							typeof toolBeforeArgs.subagent_type === 'string' &&
+							toolBeforeArgs.subagent_type.length > 0
+								? toolBeforeArgs.subagent_type
+								: (swarmState.activeAgent.get(input.sessionID) ?? 'unknown');
+						const delegationTaskId =
+							swarmState.agentSessions.get(input.sessionID)?.currentTaskId ??
+							'';
+						_delegationTelemetryByCallID.set(input.callID, {
+							agentName: delegatedAgent,
+							taskId: delegationTaskId,
+						});
+						capSessionMap(
+							_delegationTelemetryByCallID,
+							MAX_TRACKED_DELEGATION_TELEMETRY,
+						);
+						telemetry.delegationBegin(
+							input.sessionID,
+							delegatedAgent,
+							delegationTaskId,
+						);
+					}
+				}
 			} catch (err) {
 				// A fail-closed gate denied this call. Count the denial, record it as
 				// a trajectory failure, and APPEND escalating guidance to the message
@@ -3057,6 +3280,36 @@ async function initializeOpenCodeSwarm(
 						},
 						deniedArgs,
 					);
+				}
+				// Issue #2214: a denied Task call never fires toolAfter. If the
+				// delegation gate (step 4) already durably began a coder
+				// settlement for this callID before ANY later step in this
+				// handler rejected it — fail-closed gates 5-8 OR the advisory
+				// tail above the flag (issue #2268) — roll the DISPATCHED WAL
+				// back to ABORTED so the task is not wedged until a process
+				// restart. Never throws — the original denial propagates
+				// unchanged.
+				//
+				// INVARIANT (issue #2268): rollback eligibility deliberately does
+				// NOT consult `failClosedRegionCompleted`. This catch only runs
+				// when toolBefore THREW, so the Task tool never executes and any
+				// begun settlement is orphaned regardless of which region threw.
+				// abortDeniedSettlementForCall is a callID-keyed no-op when no
+				// settlement was begun for this call, so firing it
+				// unconditionally is safe for non-settlement throws (reviewer/
+				// docs/other tools). The gate-denial-wiring static guard pins
+				// this contract.
+				if (
+					normalizeToolName(input.tool) === 'Task' ||
+					normalizeToolName(input.tool) === 'task'
+				) {
+					try {
+						await delegationGateHooks.abortDeniedSettlementForCall(
+							input.callID,
+						);
+					} catch {
+						/* rollback is best-effort; the denial still propagates */
+					}
 				}
 				throw err;
 			}
@@ -3463,7 +3716,35 @@ async function initializeOpenCodeSwarm(
 				const backgroundResultIsRunning =
 					outputLooksLikeBackgroundRunning(output);
 				const sessionId = input.sessionID;
-				const agentName = swarmState.activeAgent.get(sessionId) || 'unknown';
+				// Delegated-agent identity for this whole handoff (model resolution for
+				// cost fields, pipeline advisories, and the delegation_end emit).
+				// activeAgent is NOT a reliable source: subagents run in child sessions,
+				// so the parent's activeAgent stays the architect, which mislabelled
+				// every production delegation_end and kept the reviewer/critic pipeline
+				// advisories below permanently dark.
+				//
+				// Two independent sources now resolve it, kept in this order:
+				//  1. The pairing entry recorded when tool.execute.before emitted
+				//     delegation_begin for this exact callID. Preferred, because using
+				//     the begin-side value is what makes the begin/end pair symmetric.
+				//     Deleted only when its delegation_end is emitted; background
+				//     "running" placeholders retain theirs defensively (the host is not
+				//     known to deliver a second tool.execute.after for the same callID
+				//     today, so retained entries are simply bounded by the FIFO cap).
+				//  2. The stored args snapshot's subagent_type. Equivalent in practice
+				//     (the begin derives from the same field) and retained so this path
+				//     still resolves if no begin was recorded for the callID — e.g. a
+				//     plugin restart between before and after.
+				const beganDelegation = _delegationTelemetryByCallID.get(input.callID);
+				const storedSubagentType =
+					typeof afterCtx.args?.subagent_type === 'string'
+						? afterCtx.args.subagent_type
+						: undefined;
+				const agentName =
+					beganDelegation?.agentName ||
+					storedSubagentType ||
+					swarmState.activeAgent.get(sessionId) ||
+					'unknown';
 				const baseAgentName = stripKnownSwarmPrefix(agentName);
 				const preHandoffSession = swarmState.agentSessions.get(sessionId);
 				const activeWindow = getActiveWindow(sessionId);
@@ -3489,10 +3770,17 @@ async function initializeOpenCodeSwarm(
 					// not terminal completion. Restore architect continuation now, but
 					// defer completion telemetry/advisories to the trusted terminal event.
 					if (!backgroundResultIsRunning) {
+						// Consume the pairing entry only now that its delegation_end is
+						// actually emitted. agentName already prefers the begin-side
+						// identity above. taskId uses `||` (not `??`) so a begin-side
+						// EMPTY taskId — no task was current at dispatch — falls
+						// through to currentTaskId, which guardrails toolAfter may
+						// have populated during this very call.
+						_delegationTelemetryByCallID.delete(input.callID);
 						telemetry.delegationEnd(
 							sessionId,
 							agentName,
-							taskSession.currentTaskId || '',
+							beganDelegation?.taskId || taskSession.currentTaskId || '',
 							'completed',
 							costFields,
 						);

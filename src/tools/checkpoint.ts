@@ -14,6 +14,14 @@ import { readLedgerEvents } from '../plan/ledger.js';
 import { loadPlan } from '../plan/manager.js';
 import { derivePlanId, derivePlanIdentityHash } from '../plan/utils.js';
 import {
+	GitBinaryMissingError,
+	GitSpawnCwdError,
+	isGitBinaryMissing,
+	isSpawnCwdMissing,
+	isSpawnCwdUnreadable,
+} from '../utils/git-binary-missing-error.js';
+import { resolveGitExecutable } from '../utils/git-executable.js';
+import {
 	isTransientSpawnError,
 	MAX_TRANSIENT_RETRIES,
 	transientBackoff,
@@ -78,6 +86,16 @@ export const _internals: {
 		directory: string,
 		taskId: string,
 	) => Promise<void>;
+	/**
+	 * Issue #2236 hardening (F1/F4/F5) — resolves the absolute git executable
+	 * path instead of spawning the bare `'git'` name. Exposed for test
+	 * injection (mirrors `src/git/branch.ts`'s `_internals.resolveGitExecutable`
+	 * convention) so a test that mocks `node:child_process` wholesale to drive
+	 * `gitExec`'s retry/classification logic can stub a fixed value instead of
+	 * having the real candidate-probing loop consume the same mocked
+	 * `spawnSync` call slots the test is asserting on.
+	 */
+	resolveGitExecutable: typeof resolveGitExecutable;
 } = {
 	tryAcquireLock,
 	loadPlan,
@@ -85,6 +103,7 @@ export const _internals: {
 	sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
 	findCommitByExactSubject,
 	stageAllExcludingSwarm,
+	resolveGitExecutable,
 };
 
 function serializeResult(
@@ -281,14 +300,18 @@ function stageAllExcludingSwarm(directory: string): void {
 
 function gitExec(args: string[], cwd: string): string {
 	for (let attempt = 0; attempt < MAX_TRANSIENT_RETRIES; attempt++) {
-		const result = child_process.spawnSync('git', args, {
-			cwd,
-			encoding: 'utf-8',
-			timeout: GIT_TIMEOUT_MS,
-			stdio: ['ignore', 'pipe', 'pipe'],
-			windowsHide: true,
-			maxBuffer: GIT_MAX_BUFFER_BYTES,
-		});
+		const result = child_process.spawnSync(
+			_internals.resolveGitExecutable(),
+			args,
+			{
+				cwd,
+				encoding: 'utf-8',
+				timeout: GIT_TIMEOUT_MS,
+				stdio: ['ignore', 'pipe', 'pipe'],
+				windowsHide: true,
+				maxBuffer: GIT_MAX_BUFFER_BYTES,
+			},
+		);
 
 		if (result.error) {
 			const code = (result.error as NodeJS.ErrnoException).code;
@@ -298,6 +321,24 @@ function gitExec(args: string[], cwd: string): string {
 				/ETIMEDOUT|timed out/i.test(message);
 
 			if (!isTransient || attempt >= MAX_TRANSIENT_RETRIES - 1) {
+				// #2236 F0d: this is the other site that formatted a raw spawn
+				// message into user-visible text. An ENOENT here does NOT mean git
+				// is missing — it means that just as often when `cwd` has been torn
+				// down. Classify with the cwd we already hold rather than leaking
+				// the raw errno. Classification lives inside the throw branch so
+				// the transient-retry set above is untouched.
+				if (isSpawnCwdMissing(result.error, cwd)) {
+					throw new GitSpawnCwdError(cwd, 'missing');
+				}
+				if (isSpawnCwdUnreadable(result.error, cwd)) {
+					throw new GitSpawnCwdError(cwd, 'unreadable');
+				}
+				if (isGitBinaryMissing(result.error, cwd)) {
+					throw new GitBinaryMissingError(
+						`git executable is not available on PATH (working directory ${cwd} exists)`,
+						{ cause: result.error },
+					);
+				}
 				throw new Error(
 					`git failed to start: ${code ?? 'unknown'} - ${message}`,
 				);
@@ -984,6 +1025,7 @@ async function handleSaveTaskCompletion(
 }
 
 export const checkpoint: ToolDefinition = createSwarmTool({
+	allowWorkingDirectoryOverride: true,
 	description:
 		'Save, restore, list, and delete git checkpoints. ' +
 		'Use save to create a named snapshot, restore to return tracked files to a checkpoint, ' +

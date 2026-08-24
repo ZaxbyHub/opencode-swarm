@@ -48,6 +48,7 @@ function makeSpawnSuccess(stdout = 'Tests passed') {
 describe('executeMutationSuite — equivalence detection wiring', () => {
 	let tempDir: string;
 	let savedSpawnSync: typeof _internals.spawnSync;
+	const savedResolveGitExecutable = _internals.resolveGitExecutable;
 
 	beforeEach(() => {
 		tempDir = fs.realpathSync(
@@ -56,6 +57,9 @@ describe('executeMutationSuite — equivalence detection wiring', () => {
 		savedSpawnSync = _internals.spawnSync;
 		mockSpawnSync.mockClear();
 		mockBatchCheckEquivalence.mockClear();
+		// Issue #2236 hardening (lane C1b): stub the resolver seam so the
+		// `command === 'git'` routing below stays deterministic.
+		_internals.resolveGitExecutable = () => 'git';
 
 		// Default: successful git apply and revert, test passes
 		mockSpawnSync.mockImplementation(
@@ -75,6 +79,7 @@ describe('executeMutationSuite — equivalence detection wiring', () => {
 
 	afterEach(() => {
 		_internals.spawnSync = savedSpawnSync;
+		_internals.resolveGitExecutable = savedResolveGitExecutable;
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 

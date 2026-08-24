@@ -88,6 +88,12 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		toModel: 'b',
 		reason: 'rate_limited',
 	},
+	model_unresolved: {
+		sessionId: 'sess-1',
+		agentName: 'critic',
+		model: 'opencode/nope',
+		detail: 'provider "opencode" does not list model "nope"',
+	},
 	gate_passed: { sessionId: 'sess-1', gate: 'qa_gate', taskId: '1.1' },
 	gate_failed: {
 		sessionId: 'sess-1',
@@ -109,6 +115,22 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		sessionId: 'sess-1',
 		budgetPct: 42.5,
 		agentName: 'architect',
+	},
+	context_pruned: {
+		sessionId: 'sess-1',
+		agentName: 'architect',
+		trigger: 'critical_threshold',
+		usageSource: 'estimated',
+		beforeTokens: 900,
+		afterTokens: 450,
+		modelLimit: 1000,
+		maskedMessages: 1,
+		maskedToolParts: 2,
+		maskedTokensFreed: 200,
+		prunedMessages: 3,
+		prunedTextParts: 2,
+		prunedToolParts: 1,
+		prunedTokensFreed: 250,
 	},
 	hard_limit_hit: {
 		sessionId: 'sess-1',
@@ -243,6 +265,49 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		phase: 'review',
 		receiptOutcome: 'applied',
 		receiptSource: 'delegate_ack',
+	},
+	knowledge_maintenance: {
+		phase: 'committed',
+		selectedCount: 2,
+		storeEntriesBefore: 30,
+		storeEntriesAfter: 28,
+		backupBytes: 27877,
+		storeSha256Prefix: 'a1b2c3d4e5f6',
+		token12: '0f6c3e29fc00',
+	},
+	// Issue #2035 atomic-write residue health. Payload mirrors the real
+	// producer in src/services/swarm-residue.ts (quarantineSwarmResidue):
+	// counts + frozen-registry grammar ids only — no paths or content.
+	residue_health: {
+		trigger: 'close',
+		scanned: 148,
+		matched: 3,
+		eligible: 2,
+		ambiguous: 1,
+		quarantined: 2,
+		preserved: 1,
+		total_bytes: 4096,
+		oldest_age_ms: 5_400_000,
+		grammar_counts: {
+			'target-suffix-tmp-num-alnum': 2,
+			'dot-tmp-prefix-legacy': 1,
+		},
+	},
+
+	// Issue #2037 context-map telemetry storage health. Payload mirrors the
+	// real producer in src/context-map/telemetry.ts (compactStore/finalize):
+	// bounded counts + timestamps only — no capsule/query content, no paths.
+	context_telemetry_health: {
+		trigger: 'compaction',
+		accepted_count: 1250,
+		compacted_count: 1000,
+		retained_count: 250,
+		dropped_count: 0,
+		corrupt_count: 1,
+		oldest_timestamp: '2026-07-01T00:00:00.000Z',
+		newest_timestamp: '2026-08-22T00:00:00.000Z',
+		bytes: 131072,
+		limit_bytes: 262144,
 	},
 };
 

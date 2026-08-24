@@ -33,6 +33,7 @@ import {
 	type CoChangeEntry,
 	_internals as coChangeAnalyzer,
 } from '../../tools/co-change-analyzer.js';
+import { resolveGitExecutableAsync } from '../../utils/git-executable.js';
 
 const execFileAsync = promisify(child_process.execFile);
 
@@ -78,10 +79,18 @@ async function readGitHead(directory: string): Promise<string | null> {
 		// also does not accept a `stdio` option (that's `spawn`'s API); `git
 		// rev-parse HEAD` does not read stdin so the inherited pipe does not
 		// block the child. Matches the precedent in `src/tools/co-change-analyzer.ts`.
-		const { stdout } = await _internals.execFile('git', ['rev-parse', 'HEAD'], {
-			cwd: directory,
-			timeout: GIT_HEAD_TIMEOUT_MS,
-		});
+		//
+		// A resolver failure (every candidate rejected) is caught by this same
+		// try, matching the existing "any failure -> null" contract below.
+		const gitExecutable = await resolveGitExecutableAsync();
+		const { stdout } = await _internals.execFile(
+			gitExecutable,
+			['rev-parse', 'HEAD'],
+			{
+				cwd: directory,
+				timeout: GIT_HEAD_TIMEOUT_MS,
+			},
+		);
 		const head = String(stdout).trim();
 		// Defensive: a healthy `git rev-parse HEAD` prints exactly one short
 		// line — a SHA or symbolic ref. Reject anything with whitespace

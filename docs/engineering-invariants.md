@@ -92,7 +92,7 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
 ### v6.86.9 — OpenCode v1 plugin export shape + cache layouts
 
 - **Symptom:** v6.86.8 still didn't load. Second root cause: `readV1Plugin` requires `mod.default` to be an **object** with at least one of `{ id, server, tui }`. The bundle's default export was a bare async function; `readV1Plugin` returned `undefined`, OpenCode fell through to `getLegacyPlugins`, which iterated `Object.values(mod)` and threw `TypeError` on the `deferredWarnings` array re-export — silently dropping the plugin again. Also: the `update` command only cleared two of three known cache layouts.
-- **Invariants established:** default export is `{ id: 'opencode-swarm', server: OpenCodeSwarm }`. CI guard: `bundle-plugin-shape.test.ts` simulates both loader paths. Cache-eviction covers all three known layouts (`~/.cache/opencode/packages/opencode-swarm@latest`, `~/.config/opencode/node_modules/opencode-swarm`, `~/.cache/opencode/node_modules/opencode-swarm`). Cache-path safety uses four checks: catastrophic-floor exclusion, depth ≥ 4, recognized leaf, canonical structure.
+- **Invariants established:** default export is `{ id: 'opencode-swarm', server: OpenCodeSwarm }`. CI guard: `bundle-plugin-shape.test.ts` simulates both loader paths. Cache eviction covers the known package-cache layouts (`~/.cache/opencode/packages/opencode-swarm@latest` and the older bare `~/.cache/opencode/packages/opencode-swarm`) plus config/cache `node_modules` layouts. Cache-path safety uses four checks: catastrophic-floor exclusion, depth ≥ 4, recognized leaf, canonical structure.
 - **Maps to AGENTS.md:** invariants 2 (runtime portability) and 12 (release/cache hygiene).
 
 ### v6.86.14 — Transient errors tripping the circuit breaker
@@ -235,6 +235,39 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
   catalog-contract test), and 11 (tool/registration coherence — the same
   registry-completeness discipline `check-tool-registration.ts` enforces for
   tools now applies to event kinds via `check-event-contract.ts`).
+
+### Issue #2036 — Retention registry: every durable writer must be registered
+
+- **Symptom class prevented:** retention policy was defined piecemeal across
+  ~190 write call sites in ~103 modules; a new durable stream could be added
+  with no review surface forcing a retention/owner decision, and full-file
+  readers could scale with history with nobody accountable for the bound.
+- **Fix applied (PR 08 of the observability sequence):** the complete
+  retention and read-amplification registry lives as DATA in
+  `scripts/retention-registry.data.ts` (every stream under `.swarm/`
+  and the platform-data roots, with writers, readers, limits + scope, read
+  bounds, lock/crash/close/reset policy, owner, and a completed disposition).
+  `bun run check:retention` (`scripts/check-retention-registry.ts`, a
+  hard-fail CI quality step after `check:events`) enumerates every durable
+  writing module under `src/` (write APIs, atomic-write helper calls, SQLite
+  open/acquire seams) and fails when a writer has no registry row, when an
+  exemption goes stale, when a disposition is a placeholder, or when a
+  cited repo FILE no longer exists (bare-filename and line-level citation
+  accuracy stay ungated, "verified-as-of" pointers — see the registry doc's
+  Appendix A). The ratified document is
+  `docs/observability-retention-registry.md`; dispositions may only be
+  fix-in-issue (sequence window #2029–#2051 or a registered amendment
+  issue),
+  retain-by-design (citation), or not-a-defect (source proof).
+- **Placement invariant:** the registry data deliberately lives under
+  `scripts/`, never `src/` — it must never enter the plugin bundle or the
+  initialization path (invariants 1 and 2 stay untouched by construction).
+  Known limitation: a module mutating a SQLite handle acquired elsewhere is
+  invisible; the DB open/acquire seam is the enforced boundary.
+- **Maps to AGENTS.md:** invariants 4 (registry covers only `.swarm/` +
+  platform roots), 7 (tests use exported collectors with fixture trees, no
+  mock.module), 11 (registration-completeness discipline extended from
+  tools/events to durable storage), and 12 (release fragment).
 
 ### Issue #2031 — Diagnostic FIFO eviction changed receipt and gate correctness
 
@@ -601,6 +634,9 @@ mock.module('node:fs', () => ({
 | `src/services/recommendation-ledger.ts` | `now`, `transactFile`, `readLedgerStrict`, `resolveRecommendationLedgerPath` | #1821 AC21 dedup-ledger clock + fail-open path tests |
 | `src/services/trajectory-cluster.ts` | `now`, `checkRecommendations`, `recordEmittedRecommendations` | #1821 AC21 motif-emission dedup tests |
 | `src/memory/redaction.ts` | `currentAlgorithmVersion` | #2062 F-012 cohort-fingerprint version gate: simulates a FUTURE bump of `FINGERPRINT_ALGORITHM_VERSION` so the legacy-file gate is testable before a real bump exists. Production code never mutates it. |
+| `src/background/pending-delegations.ts` | `_checkpointInternals` (`renameWithRetry`, `renameOnce`, `syncSleep`) | #2034 checkpoint crash-window + Windows rename-retry tests (inject EPERM at the atomic rename boundary) |
+| `src/background/delegation-health.ts` | `_healthInternals` (`renameOnce`) | #2034 health-artifact Windows rename-retry tests |
+| `src/hooks/init-orphan-recovery.ts` | `recordDelegationRecoveryObservation` | #2034/#1659 durable recovery-observation tests |
 
 **Delegation-gate split pattern (FR-006 SC-006.1):**
 
@@ -625,6 +661,20 @@ Split criteria: one behavioral aspect per file, shared test utilities extracted 
 - New test files must be under 500 lines — `delegation-gate.test.ts` split is the exemplar pattern.
 - FR-009 Lean Turbo tests cover: acquire-locks, plan-lanes, review, runner-status, generate-mutants, set-qa-gates, get-qa-gate-profile.
 - FR-010/011/012 hook tests (Phase 4): 11 new files covering conflict-resolution, curator-types, delegate-ack-collector, delegate-directive-injection, knowledge-reinforcement, normalize-tool-name, phase-complete-directive-gate, phase-directives, semantic-diff-injection; shared fixtures consolidated in `curator-test-fixtures.ts`.
+
+### Atomic writes and residue quarantine (issue #2035)
+
+**Anti-pattern:** inventing a new temp-file naming grammar per writer; cleanup sweeps that match by substring (`startsWith('.tmp.')`) or delete without eligibility gates.
+
+**Required pattern:**
+
+- Production atomic writes under `.swarm/` go through the canonical helper in `src/utils/atomic-write.ts` (`atomicWriteSwarmFile`/`Sync`): containment, registered `<target>.<hex32>.tmp` grammar, bounded payload, fsync, bounded rename retry, exact own-temp `finally` cleanup, artifact-cache invalidation.
+- Every temp grammar — current, canonical, and legacy — is registered in `SWARM_TEMP_GRAMMARS` with producer citations; a bespoke writer may exist only with a documented invariant reason (registry `note` + `WRITER_CLASSIFICATION` entry). The ratchet test in `tests/unit/utils/atomic-write.test.ts` fails the build for any unclassified `.tmp`-constructing source file.
+- Residue discovery classifies candidates by exact registered grammars only (case-sensitive); constant-name temps (`X.tmp`, no instance token) are reported but never auto-mutated.
+- Mutation of residue is a recoverable MOVE into `.swarm/quarantine/<batch>/` with a manifest (original path, sha256, bytes, mtime, grammar, reason), eligible only when: stale (≥30 min), git-untracked (unknown tracked-state fails closed), non-symlink, no active lock, parsed target present, and unchanged since scan. Automatic destructive deletion is prohibited. Rollback is manifest-verified, idempotent, and collision-safe.
+- Close (clean stage + dry-run), `/swarm config doctor`, and diagnose all render from the ONE shared implementation in `src/services/swarm-residue.ts`; the `residue_health` telemetry event carries counts and grammar ids only — never file names, paths, or content.
+
+**Verification:** `bun test tests/unit/utils/atomic-write.test.ts tests/unit/services/swarm-residue.test.ts tests/unit/commands/doctor-residue.test.ts tests/unit/services/diagnose-residue-check.test.ts` plus the issue-named suites (`tests/unit/commands/atomic-writes.test.ts`, `tests/unit/hooks/curator-atomic-write.test.ts`, `tests/unit/commands/close-cleanup.test.ts`, `tests/integration/finalize-clean-preserves-swarm.test.ts`).
 
 ## PR checklist (pasteable into PR descriptions)
 
@@ -665,7 +715,7 @@ The repo maintains several "canonical source + mirror" and "source + registry" s
 
 - **Skills:** `.opencode/skills/<name>/SKILL.md` (operative, loaded by the OpenCode plugin / architect MODE stubs) and `.claude/skills/<name>/SKILL.md` (Claude-side), plus `.agents/` adapter shims.
 - **Bundled skills:** `BUNDLED_PROJECT_SKILLS` (`src/config/bundled-skills.ts`), `package.json#files`, and the `package-smoke` allowlist must all match each other **and** the actual `.opencode/skills/` directory.
-- **Docs claims:** public numeric QA-gate claims must match `QA_GATE_PIPELINE_STEPS` (`src/config/qa-gate-pipeline.ts`) and the runtime execute protocol.
+- **Docs claims:** public numeric QA-gate claims must match `QA_GATE_PIPELINE_STEPS` (`src/config/qa-gate-pipeline.ts`) and the runtime execute protocol; hand-copied prose citations of the dispatch lane batch cap must match `MAX_LANES` (`src/tools/dispatch-lanes.ts`, issue #1645) — including spelled-out forms ("eight lanes") and every pending release fragment under `docs/releases/pending/`.
 - **Tools / commands / agents:** implementation, registries, and per-agent maps (invariant 11).
 
 Two failures motivated the automated check:
@@ -685,7 +735,7 @@ Two failures motivated the automated check:
 | `tool` | metadata / handler / plugin-object / `TOOL_NAMES` / `AGENT_TOOL_MAP` coherence | reuses `scripts/check-tool-registration.ts` |
 | `command` | `COMMAND_NAME_SET` parity; `subcommandOf` parents exist | `src/commands/registry.ts` |
 | `agent` | `ALL_AGENT_NAMES` ↔ `AGENT_TOOL_MAP`; opt-in maps only reference real agents | `src/config/agent-names.ts`, `src/config/constants.ts` |
-| `docs-claim` | public numeric QA-gate claims match the docs-visible pipeline registry | `src/config/qa-gate-pipeline.ts` |
+| `docs-claim` | public numeric QA-gate claims match the docs-visible pipeline registry; hand-copied dispatch lane-cap prose (digits plus the in-tree spelled form ("eight")) matches the exported `MAX_LANES`; pending release fragments are scanned for lane-cap citations | `src/config/qa-gate-pipeline.ts`, `src/tools/dispatch-lanes.ts` |
 
 ### Rules
 

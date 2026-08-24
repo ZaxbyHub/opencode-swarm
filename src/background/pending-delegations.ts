@@ -1,5 +1,6 @@
 /**
- * Durable pending background-delegation store (issue #1151, PR 2 Stage A).
+ * Durable pending background-delegation store (issue #1151, PR 2 Stage A;
+ * bounded recovery via checkpoint/tail compaction — issue #2034).
  *
  * Append-only JSONL event log under project-root `.swarm/background-delegations.jsonl`.
  * Each line is a full record snapshot; readers fold to the latest snapshot per
@@ -7,20 +8,32 @@
  * async advisory lanes so trusted completions can be correlated to a real dispatch.
  * The stale sweep bounds the number of permanently-running entries by transitioning
  * them to `stale`, so the folded in-memory view stays bounded by distinct correlationIds.
- * The on-disk log itself is append-only and is NOT compacted; each dispatch leaves a
- * small, fixed number of lines.
+ *
+ * Bounded recovery (issue #2034): the raw log alone is no longer the recovery
+ * source once history grows. Compaction — run lazily under the store lock when the
+ * ledger passes `DELEGATION_COMPACTION_HIGH_WATER_BYTES` — checkpoints the folded
+ * authoritative state (active ownership, terminal results, coder settlement, pending
+ * advisory inbox) plus compact closed-record summaries into
+ * `.swarm/background-delegations.checkpoint.json`, publishes it via
+ * `.swarm/background-delegations.manifest.json`, and rolls the ledger to the
+ * post-cut transition tail. Recovery folds checkpoint + bounded tail with hard
+ * byte/count bounds and preserves fail-closed uncertainty; the 4 MiB
+ * `MAX_RECOVERY_LEDGER_BYTES` guard is unchanged and still applies to legacy
+ * uncheckpointed ledgers.
  *
  * Scope: dispatch records `pending`/`running` snapshots, collection or trusted synthetic
  * completions record terminal snapshots, and the stale sweep records `stale` snapshots.
  * This store itself has no gate-advancement side effect. Stage B gate ingestion is a
- * separate consumer of trusted terminal snapshots.
+ * separate consumer of trusted terminal snapshots. Circuit-breaker and transient-retry
+ * counters are invocation-owned and are NEVER serialized here (issue #2034 req 9).
  *
- * Concurrency: all writes (append, sweep) run under a single project-scoped lock via
- * `withEvidenceLock`, so concurrent dispatches/sweeps cannot interleave appends. Reads are
- * lock-free (line-oriented; partial trailing lines are skipped defensively).
+ * Concurrency: all writes (append, sweep, compaction) run under a single
+ * project-scoped lock via `withEvidenceLock`, so concurrent dispatches/sweeps cannot
+ * interleave appends. Reads are lock-free (line-oriented; partial trailing lines are
+ * skipped defensively by the lenient reader; the strict recovery reader fails closed).
  *
- * Containment: the path is validated with `validateSwarmPath`, so it can never escape
- * `.swarm/` (Invariant 4).
+ * Containment: every path is validated with `validateSwarmPath`, so it can never
+ * escape `.swarm/` (Invariant 4).
  */
 
 import { createHash } from 'node:crypto';
@@ -32,23 +45,86 @@ import { withEvidenceLock } from '../evidence/lock.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { bunWrite } from '../utils/bun-compat.js';
 import * as logger from '../utils/logger.js';
+import {
+	DelegationCheckpointAuditSchema,
+	type DelegationCheckpointAuditSummary,
+	readDelegationHealthArtifact,
+	writeDelegationHealthArtifact,
+} from './delegation-health.js';
+import {
+	encodePrReviewCollectionReceiptShedMarker,
+	PR_REVIEW_COLLECTION_RECEIPT_PREFIX,
+	PR_REVIEW_COLLECTION_RECEIPT_SHED_PREFIX,
+	parsePrReviewCollectionReceiptFooter,
+	parsePrReviewCollectionReceiptShedMarker,
+} from './pr-review-collection-receipt.js';
 
 export const BACKGROUND_DELEGATIONS_FILE = 'background-delegations.jsonl';
 export const BACKGROUND_DELEGATION_FALLBACK_DIR =
 	'background-delegation-fallback';
 export const BACKGROUND_CODER_RESERVATIONS_FILE =
 	'background-coder-reservations.json';
+export const BACKGROUND_DELEGATIONS_CHECKPOINT_FILE =
+	'background-delegations.checkpoint.json';
+export const BACKGROUND_DELEGATIONS_MANIFEST_FILE =
+	'background-delegations.manifest.json';
 export const MAX_LIVE_BACKGROUND_FALLBACKS = 256;
 export const MAX_LIVE_BACKGROUND_CODER_RESERVATIONS = 256;
 export const MAX_BACKGROUND_OBSERVED_FILES = 5_000;
 export const MAX_BACKGROUND_ADVISORY_CHARS = 4_000;
 const MAX_BACKGROUND_DELEGATION_GENERATION = 1_000_000;
-const MAX_RECOVERY_LEDGER_BYTES = 4 * 1024 * 1024;
+
+/** Strict recovery bound for the ledger/tail (issue #2034: unchanged guard). */
+export { MAX_RECOVERY_LEDGER_BYTES } from './delegation-health.js';
+
+import { MAX_RECOVERY_LEDGER_BYTES } from './delegation-health.js';
+
 const MAX_RECOVERY_FALLBACK_BYTES = 1024 * 1024;
 
+/**
+ * Compaction watermarks (issue #2034). Auto-compaction fires above the high
+ * water mark so the post-roll tail plus one in-flight append (~250 KiB worst
+ * case) stays far below the 4 MiB strict recovery bound in normal operation.
+ */
+export const DELEGATION_COMPACTION_LOW_WATER_BYTES = 256 * 1024;
+export const DELEGATION_COMPACTION_HIGH_WATER_BYTES = 1024 * 1024;
+/** Hard validation bound for the checkpoint file on every read. */
+export const MAX_CHECKPOINT_BYTES = 2 * 1024 * 1024;
+/** Leave room for final audit/checksum growth beyond the selection estimate. */
+const CHECKPOINT_SELECTION_RESERVE_BYTES = 64 * 1024;
+/** Hard validation bound for live (non-summary) records in a checkpoint. */
+export const MAX_CHECKPOINT_RECORDS = 2_048;
+/**
+ * Closed-record summaries younger than this are never evicted to meet the
+ * checkpoint byte budget — evicting them would let a replayed dispatch of a
+ * recently closed session be recorded as fresh (double delivery). Over-budget
+ * young state skips compaction and surfaces pressure instead.
+ */
+export const TOMBSTONE_MIN_AGE_MS = 72 * 60 * 60 * 1000;
+
 export type RecoveryOwnershipScanResult<T> =
-	| { status: 'ok'; owners: T[] }
-	| { status: 'uncertain'; reason: string };
+	| {
+			status: 'ok';
+			owners: T[];
+			/** How the primary store was reconstructed (issue #2034); absent for pre-checkpoint scans. */
+			source?: 'checkpoint+tail' | 'checkpoint+ledger-suffix' | 'legacy-ledger';
+	  }
+	| {
+			status: 'uncertain';
+			reason: string;
+			/**
+			 * Best-known interpretation mode at failure time; `'unknown'` when the
+			 * manifest/checkpoint state itself was unreadable (issue #2034 — the
+			 * durable recovery observation must not claim a wrong source).
+			 */
+			source?:
+				| 'checkpoint+tail'
+				| 'checkpoint+ledger-suffix'
+				| 'legacy-ledger'
+				| 'unknown';
+			/** Operator remediation guidance, when the failure mode has one. */
+			repairHint?: string;
+	  };
 
 /** Lock + diagnostics identity for the project-scoped store lock. */
 const STORE_LOCK_AGENT = 'background';
@@ -61,6 +137,21 @@ const INGESTION_CLAIM_LEASE_MS = 30_000;
 /** An abandoned ingestion lease may be reclaimed after this bounded interval. */
 export const BACKGROUND_INGESTION_LEASE_MS = 30_000;
 
+/**
+ * Canonical default staleness horizon for a tracked background delegation: a
+ * record whose `updatedAt` has not advanced in this long is treated as
+ * abandoned (its backing process died without ever writing a terminal
+ * snapshot) and may be swept to `stale`.
+ *
+ * 30 minutes is the value this subsystem already shipped — it was duplicated as
+ * a module-local literal in `src/tools/dispatch-lanes.ts` and as the
+ * `hooks.background_pending_timeout_minutes` schema default. It lives here so
+ * every consumer agrees on one number: this module imports nothing from
+ * `dispatch-lanes.ts` or `pr-workflow-gate.ts`, so both can reference it
+ * without an import cycle.
+ */
+export const DEFAULT_STALE_DELEGATION_TIMEOUT_MS = 30 * 60_000;
+
 export type BackgroundDelegationStatus =
 	| 'pending'
 	| 'running'
@@ -71,6 +162,31 @@ export type BackgroundDelegationStatus =
 	| 'cancelled'
 	| 'stale'
 	| 'consumed';
+
+/**
+ * The status classes the stale sweep is allowed to finalize to `stale`.
+ *
+ * Deliberately a subset of {@link BackgroundDelegationStatus}: a caller may
+ * *narrow* the sweep but can never widen it to a status the sweep was never
+ * meant to touch (`completed`, `consumed`, `ingesting`, ...).
+ */
+export type SweepableDelegationStatus =
+	| 'pending'
+	| 'running'
+	| 'ingestion_error';
+
+/**
+ * Default sweep scope — the exact set the sweep has always finalized.
+ *
+ * `ingestion_error` is included here because the pre-existing lazy-maintenance
+ * caller (`recordPendingDelegation`) relies on it: an ingestion that never
+ * retried within the horizon is genuinely abandoned from that caller's point of
+ * view. Callers for whom `ingestion_error` is still *retryable* — the ingestion
+ * claim gate admits `completed` and `ingestion_error` only, so the `stale` flip
+ * is irreversible — must pass a narrowed set instead.
+ */
+export const DEFAULT_SWEEPABLE_DELEGATION_STATUSES: ReadonlySet<SweepableDelegationStatus> =
+	new Set<SweepableDelegationStatus>(['pending', 'running', 'ingestion_error']);
 
 export interface BackgroundDelegationRecord {
 	schemaVersion: 1 | 2 | 3;
@@ -171,6 +287,25 @@ export interface BackgroundPromptSnapshot {
 	digest: string;
 }
 
+export type BackgroundDelegationRecoveryKind =
+	| 'parser-normalization'
+	| 'parser-row-recovery'
+	| 'truncated-preview-durable-artifact'
+	| 'transcript-incomplete-terminal-candidate'
+	/**
+	 * A `[CLEAN]` attestation was discredited while the artifact's candidate rows
+	 * were retained. Distinct from `parser-normalization` (a text-shape repair by
+	 * `normalizeCandidateArtifact`) because nothing was repaired — an assertion
+	 * was dropped (issue #2279).
+	 */
+	| 'clean-attestation-salvaged';
+
+export interface BackgroundDelegationWorkflowLaneRecovery {
+	workflowLane: string;
+	kind: BackgroundDelegationRecoveryKind;
+	reason: string;
+}
+
 export interface BackgroundDelegationResult {
 	text?: string;
 	error?: string;
@@ -190,6 +325,13 @@ export interface BackgroundDelegationResult {
 	 * a well-formed one after the fact, which is where post-mortems actually look.
 	 */
 	salvagedWorkflowLanes?: string[];
+	/**
+	 * Per-workflow-lane recovery disclosures retained on the durable ledger.
+	 * Unlike `salvagedWorkflowLanes`, which is the compatibility list surface,
+	 * this captures the exact recovery class and human-readable reason so
+	 * transport recovery is not collapsed into the same bucket as parser repair.
+	 */
+	salvagedWorkflowLaneRecoveries?: BackgroundDelegationWorkflowLaneRecovery[];
 }
 
 export interface BackgroundTerminalResult {
@@ -270,6 +412,20 @@ export interface BackgroundCoderReservation {
 	updatedAt: number;
 }
 
+const WorkflowLaneRecoverySchema = z
+	.object({
+		workflowLane: z.string(),
+		kind: z.enum([
+			'parser-normalization',
+			'parser-row-recovery',
+			'truncated-preview-durable-artifact',
+			'transcript-incomplete-terminal-candidate',
+			'clean-attestation-salvaged',
+		]),
+		reason: z.string(),
+	})
+	.strict();
+
 const ResultSchema = z
 	.object({
 		text: z.string().optional(),
@@ -288,6 +444,9 @@ const ResultSchema = z
 		// the entire terminal transition invisible to every reader — turning a
 		// successfully salvaged lane into one that appears never to have completed.
 		salvagedWorkflowLanes: z.array(z.string()).optional(),
+		salvagedWorkflowLaneRecoveries: z
+			.array(WorkflowLaneRecoverySchema)
+			.optional(),
 	})
 	.strict();
 
@@ -640,59 +799,579 @@ function storePath(directory: string): string {
 	return validateSwarmPath(directory, BACKGROUND_DELEGATIONS_FILE);
 }
 
-function ensureSwarmDir(directory: string): void {
-	fs.mkdirSync(path.resolve(directory, '.swarm'), { recursive: true });
+function checkpointPath(directory: string): string {
+	return validateSwarmPath(directory, BACKGROUND_DELEGATIONS_CHECKPOINT_FILE);
+}
+
+function manifestPath(directory: string): string {
+	return validateSwarmPath(directory, BACKGROUND_DELEGATIONS_MANIFEST_FILE);
+}
+
+// ---------------------------------------------------------------------------
+// Checkpoint / compaction layer (issue #2034)
+// ---------------------------------------------------------------------------
+
+export interface BackgroundDelegationCheckpoint {
+	schemaVersion: 1;
+	/** Monotonic checkpoint sequence for this store. */
+	sequence: number;
+	/** Diagnostics-only identity of the writing process (never validated). */
+	writerId: string;
+	/** Resolved project root this checkpoint is bound to. */
+	rootPath: string;
+	createdAt: number;
+	/** Byte length of the ledger at the cut. */
+	cutLedgerBytes: number;
+	/** sha256 of the ledger bytes [0..cutLedgerBytes) at the cut. */
+	cutLedgerDigest: string;
+	/** Live full records (bounded by MAX_CHECKPOINT_RECORDS). */
+	records: BackgroundDelegationRecord[];
+	/** Compact closed-record summaries, byte-budget governed. */
+	closed: BackgroundDelegationRecord[];
+	audit: DelegationCheckpointAuditSummary;
+	payloadChecksum: string;
+}
+
+export interface BackgroundDelegationManifest {
+	schemaVersion: 1;
+	sequence: number;
+	checkpointChecksum: string;
+	writerId: string;
+	rootPath: string;
+	updatedAt: number;
+}
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+const CheckpointSchema = z
+	.object({
+		schemaVersion: z.literal(1),
+		sequence: z.number().int().positive(),
+		writerId: z.string().min(1).max(128),
+		rootPath: z.string().min(1).max(4_096),
+		createdAt: z.number().int().nonnegative(),
+		cutLedgerBytes: z.number().int().nonnegative(),
+		cutLedgerDigest: z.string().regex(SHA256_HEX),
+		records: z.array(RecordSchema).max(MAX_CHECKPOINT_RECORDS),
+		closed: z.array(RecordSchema),
+		audit: DelegationCheckpointAuditSchema,
+		payloadChecksum: z.string().regex(SHA256_HEX),
+	})
+	.strict();
+
+const ManifestSchema = z
+	.object({
+		schemaVersion: z.literal(1),
+		sequence: z.number().int().positive(),
+		checkpointChecksum: z.string().regex(SHA256_HEX),
+		writerId: z.string().min(1).max(128),
+		rootPath: z.string().min(1).max(4_096),
+		updatedAt: z.number().int().nonnegative(),
+	})
+	.strict();
+
+/** Per-process diagnostic writer identity (issue #2034 requirement 2). */
+const WRITER_ID = `w-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
+
+export const _checkpointInternals: {
+	renameWithRetry: (from: string, to: string) => void;
+	renameOnce: (from: string, to: string) => void;
+	syncSleep: (ms: number) => void;
+} = {
+	renameWithRetry: (from, to) => {
+		let lastError: unknown;
+		for (let attempt = 0; attempt < 5; attempt++) {
+			try {
+				_checkpointInternals.renameOnce(from, to);
+				return;
+			} catch (err) {
+				lastError = err;
+				const code = (err as NodeJS.ErrnoException).code;
+				// Windows can briefly hold a handle (AV/indexer) on the target.
+				if (code !== 'EEXIST' && code !== 'EBUSY' && code !== 'EPERM') {
+					throw err;
+				}
+				_checkpointInternals.syncSleep(15);
+			}
+		}
+		throw lastError;
+	},
+	renameOnce: (from, to) => {
+		fs.renameSync(from, to);
+	},
+	syncSleep: (ms) => {
+		// Portable sleep (transient-retry.ts precedent): Atomics.wait throws
+		// on some platforms/threads; fall back to a bounded busy-wait.
+		try {
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+		} catch {
+			const start = Date.now();
+			while (Date.now() - start < ms) {
+				/* bounded busy-wait */
+			}
+		}
+	},
+};
+
+/**
+ * Durable JSON write: temp file → fsync → rename (with Windows lock retries) →
+ * best-effort directory fsync. Crash safety comes from the publication ordering
+ * in `compactDelegationsLocked`, not from any single fsync.
+ */
+function writeDurableFileSync(target: string, contents: string | Buffer): void {
+	const tmp = `${target}.tmp-${process.pid}-${Math.random()
+		.toString(36)
+		.slice(2, 10)}`;
+	try {
+		const fd = fs.openSync(tmp, 'w');
+		try {
+			// Descriptor write (an excluded write head for the evidence-cache
+			// scanner): the path is named at this openSync, not at the write.
+			if (typeof contents === 'string') {
+				fs.writeSync(fd, contents);
+			} else {
+				fs.writeSync(fd, contents, 0, contents.length);
+			}
+			fs.fsyncSync(fd);
+		} finally {
+			fs.closeSync(fd);
+		}
+		_checkpointInternals.renameWithRetry(tmp, target);
+	} catch (err) {
+		try {
+			fs.rmSync(tmp, { force: true });
+		} catch {
+			// best-effort cleanup of the abandoned temp file
+		}
+		throw err;
+	}
+	try {
+		const dfd = fs.openSync(path.dirname(target), 'r');
+		try {
+			fs.fsyncSync(dfd);
+		} finally {
+			fs.closeSync(dfd);
+		}
+	} catch {
+		// Directory fsync is unsupported on Windows; ordering covers durability.
+	}
+}
+
+type JsonFileRead =
+	| { status: 'absent' }
+	| { status: 'ok'; value: unknown }
+	| { status: 'invalid'; reason: string };
+
+/**
+ * Single-attempt JSON read. A missing file is a legitimate steady state (most
+ * repos never compact), so ENOENT must not sleep-retry — that would tax every
+ * read on every repo. Transient read errors surface as `invalid` (strict
+ * readers fail closed); parse failures are `invalid` regardless.
+ */
+function readJsonFileWithRetry(target: string): JsonFileRead {
+	let raw: string;
+	try {
+		raw = fs.readFileSync(target, 'utf-8');
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		if (code === 'ENOENT') return { status: 'absent' };
+		return {
+			status: 'invalid',
+			reason: `unreadable (${code ?? 'unknown error'})`,
+		};
+	}
+	try {
+		return { status: 'ok', value: JSON.parse(raw) };
+	} catch (err) {
+		return {
+			status: 'invalid',
+			reason: `malformed JSON (${err instanceof Error ? err.message : String(err)})`,
+		};
+	}
+}
+
+function readDelegationManifest(
+	directory: string,
+):
+	| { kind: 'absent' }
+	| { kind: 'ok'; manifest: BackgroundDelegationManifest }
+	| { kind: 'invalid'; reason: string } {
+	const read = readJsonFileWithRetry(manifestPath(directory));
+	if (read.status === 'absent') return { kind: 'absent' };
+	if (read.status === 'invalid')
+		return { kind: 'invalid', reason: read.reason };
+	const parsed = ManifestSchema.safeParse(read.value);
+	if (!parsed.success) {
+		return { kind: 'invalid', reason: 'manifest fails schema validation' };
+	}
+	return { kind: 'ok', manifest: parsed.data };
+}
+
+function readDelegationCheckpoint(
+	directory: string,
+):
+	| { kind: 'absent' }
+	| { kind: 'ok'; checkpoint: BackgroundDelegationCheckpoint; bytes: number }
+	| { kind: 'invalid'; reason: string } {
+	let bytes = 0;
+	try {
+		bytes = fs.statSync(checkpointPath(directory)).size;
+	} catch {
+		// fall through to the read below; ENOENT surfaces there
+	}
+	// Reject over-budget files BEFORE reading/parsing them into memory.
+	if (bytes > MAX_CHECKPOINT_BYTES) {
+		return {
+			kind: 'invalid',
+			reason: `checkpoint exceeds the ${MAX_CHECKPOINT_BYTES}-byte bound`,
+		};
+	}
+	const read = readJsonFileWithRetry(checkpointPath(directory));
+	if (read.status === 'absent') return { kind: 'absent' };
+	if (read.status === 'invalid')
+		return { kind: 'invalid', reason: read.reason };
+	const parsed = CheckpointSchema.safeParse(read.value);
+	if (!parsed.success) {
+		return { kind: 'invalid', reason: 'checkpoint fails schema validation' };
+	}
+	return { kind: 'ok', checkpoint: parsed.data, bytes };
+}
+
+function sha256Hex(data: Buffer | string): string {
+	return createHash('sha256').update(data).digest('hex');
+}
+
+function checkpointPayloadChecksum(
+	checkpoint: Omit<BackgroundDelegationCheckpoint, 'payloadChecksum'>,
+): string {
+	return sha256Hex(
+		JSON.stringify([
+			checkpoint.schemaVersion,
+			checkpoint.sequence,
+			checkpoint.writerId,
+			checkpoint.rootPath,
+			checkpoint.createdAt,
+			checkpoint.cutLedgerBytes,
+			checkpoint.cutLedgerDigest,
+			checkpoint.records,
+			checkpoint.closed,
+			checkpoint.audit,
+		]),
+	);
+}
+
+const CHECKPOINT_REBIND_HINT =
+	'remove .swarm/background-delegations.manifest.json (manifest only) after verifying no in-flight background delegations; recovery then falls back to the full-ledger read. Only if you also want to discard pre-cut closed summaries and audit history — which for a compacted (rolled) ledger exist ONLY in .swarm/background-delegations.checkpoint.json — remove the checkpoint too or use the full reset below';
+const CHECKPOINT_RESET_HINT =
+	'the rolled tail no longer carries pre-checkpoint state: stop swarm processes, verify no in-flight background delegations, and remove .swarm/background-delegations.manifest.json, .swarm/background-delegations.checkpoint.json, and .swarm/background-delegations.jsonl to reset the store (or restore them from backup)';
+
+type LedgerLoadMode = 'legacy' | 'checkpoint+tail' | 'checkpoint+ledger-suffix';
+
+type LedgerLoad =
+	| {
+			status: 'ok';
+			mode: LedgerLoadMode;
+			records: Map<string, BackgroundDelegationRecord>;
+			manifest: BackgroundDelegationManifest | null;
+			checkpoint: BackgroundDelegationCheckpoint | null;
+	  }
+	| { status: 'uncertain'; reason: string; repairHint?: string };
+
+/**
+ * Read and fold the applicable ledger region. Shared by every reader; `strict`
+ * fails closed on any malformed data in the applicable region (recovery
+ * contract), `lenient` skips malformed lines (advisory reader contract).
+ *
+ * Publication model (issue #2034): a compaction writes checkpoint → manifest →
+ * rolled tail, in that order, each an atomic durable rename. The manifest is the
+ * publication point — a checkpoint without a manifest is an aborted compaction
+ * that readers ignore (the ledger was not rolled yet). Recovery with a valid
+ * manifest + checkpoint folds the checkpoint state and then applies only the
+ * post-cut tail: when the ledger still holds the pre-cut history (crash between
+ * manifest and roll), the verified cut prefix is skipped; when the prefix does
+ * not verify (rolled tail that grew past the old cut, or rewritten bytes), a
+ * bounded recent window folds under an update-time merge in which pre-cut
+ * snapshots lose to the checkpoint entries derived from them. Both crash
+ * interpretations converge on the same reconstructed state — recovery can only
+ * fail closed on actual corruption (malformed data, checksum/sequence
+ * mismatch), never on a legitimate crash window or tail growth.
+ */
+function loadFoldedState(
+	directory: string,
+	options: { strict: boolean },
+): LedgerLoad {
+	const manifestRead = readDelegationManifest(directory);
+	if (manifestRead.kind === 'invalid') {
+		return {
+			status: 'uncertain',
+			reason: `background delegation manifest is invalid: ${manifestRead.reason}`,
+			// A manifest that existed but cannot be parsed means the publication
+			// state is unknown: the ledger may be a rolled tail. Never fall back
+			// to the legacy fold here.
+			repairHint: CHECKPOINT_RESET_HINT,
+		};
+	}
+	if (manifestRead.kind === 'absent') {
+		return loadLegacyLedger(directory, options.strict);
+	}
+	const manifest = manifestRead.manifest;
+
+	if (manifest.rootPath !== path.resolve(directory)) {
+		// Bound to a different project root: whether the ledger is rolled is
+		// unknowable from here, so fail closed with the rebind hint. (A copied
+		// trio with an unrolled ledger still recovers only if the operator
+		// removes the manifest — the conservative direction.)
+		return {
+			status: 'uncertain',
+			reason:
+				'background delegation checkpoint is bound to a different project root',
+			repairHint: CHECKPOINT_REBIND_HINT,
+		};
+	}
+
+	const checkpointRead = readDelegationCheckpoint(directory);
+	if (checkpointRead.kind === 'invalid' || checkpointRead.kind === 'absent') {
+		const detail =
+			checkpointRead.kind === 'invalid'
+				? `: ${checkpointRead.reason}`
+				: ' (file missing)';
+		return {
+			status: 'uncertain',
+			reason: `background delegation checkpoint is invalid${detail} while a manifest is published`,
+			repairHint: CHECKPOINT_RESET_HINT,
+		};
+	}
+	const checkpoint = checkpointRead.checkpoint;
+
+	if (
+		checkpoint.sequence !== manifest.sequence &&
+		checkpoint.sequence !== manifest.sequence + 1
+	) {
+		return {
+			status: 'uncertain',
+			reason: `background delegation checkpoint/manifest sequence mismatch (checkpoint ${checkpoint.sequence}, manifest ${manifest.sequence})`,
+			repairHint: CHECKPOINT_RESET_HINT,
+		};
+	}
+	if (
+		checkpoint.sequence === manifest.sequence &&
+		manifest.checkpointChecksum !== checkpoint.payloadChecksum
+	) {
+		return {
+			status: 'uncertain',
+			reason:
+				'background delegation manifest checksum does not match its checkpoint',
+			repairHint: CHECKPOINT_RESET_HINT,
+		};
+	}
+	if (checkpointPayloadChecksum(checkpoint) !== checkpoint.payloadChecksum) {
+		return {
+			status: 'uncertain',
+			reason: 'background delegation checkpoint payload checksum mismatch',
+			repairHint: CHECKPOINT_RESET_HINT,
+		};
+	}
+
+	// Determine the post-cut tail region. The verified-cut prefix is a fast
+	// path: when the ledger still holds the pre-cut history (crash between
+	// manifest and roll), only the suffix beyond the cut is post-cut state.
+	// When the prefix does not match (a rolled tail that grew past the old cut
+	// size — normal for force-compacted small ledgers — or rewritten bytes),
+	// fold a bounded recent window instead: older lines lose the update-time
+	// merge against the checkpoint anyway, so both interpretations converge and
+	// no legitimate state fails closed.
+	let stat: fs.Stats;
+	try {
+		stat = fs.statSync(storePath(directory));
+	} catch (error) {
+		return {
+			status: 'uncertain',
+			reason: `background delegation ledger metadata is unreadable: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
+	let tail: Buffer;
+	let mode: 'checkpoint+tail' | 'checkpoint+ledger-suffix';
+	if (stat.size >= checkpoint.cutLedgerBytes && checkpoint.cutLedgerBytes > 0) {
+		const prefix = readLedgerRegion(directory, 0, checkpoint.cutLedgerBytes);
+		if (sha256Hex(prefix) === checkpoint.cutLedgerDigest) {
+			const suffixBytes = stat.size - checkpoint.cutLedgerBytes;
+			if (suffixBytes > MAX_RECOVERY_LEDGER_BYTES) {
+				return {
+					status: 'uncertain',
+					reason: `background delegation ledger changed beyond the ${MAX_RECOVERY_LEDGER_BYTES}-byte recovery bound`,
+				};
+			}
+			tail =
+				suffixBytes === 0
+					? Buffer.alloc(0)
+					: readLedgerRegion(directory, checkpoint.cutLedgerBytes, suffixBytes);
+			mode = 'checkpoint+ledger-suffix';
+		} else {
+			tail = readBoundedRecentLedgerWindow(directory, stat.size);
+			mode = 'checkpoint+tail';
+		}
+	} else {
+		tail = readBoundedRecentLedgerWindow(directory, stat.size);
+		mode = 'checkpoint+tail';
+	}
+
+	const records = new Map<string, BackgroundDelegationRecord>();
+	for (const record of checkpoint.records) {
+		records.set(record.correlationId, record);
+	}
+	for (const summary of checkpoint.closed) {
+		records.set(summary.correlationId, summary);
+	}
+	const foldError = foldLedgerTail(records, tail, options.strict, checkpoint);
+	if (foldError) return { status: 'uncertain', reason: foldError };
+	return {
+		status: 'ok',
+		mode,
+		records,
+		manifest,
+		checkpoint,
+	};
+}
+
+function readLedgerRegion(
+	directory: string,
+	offset: number,
+	length: number,
+): Buffer {
+	const fd = fs.openSync(storePath(directory), 'r');
+	try {
+		const buffer = Buffer.alloc(length);
+		let read = 0;
+		while (read < length) {
+			const n = fs.readSync(fd, buffer, read, length - read, offset + read);
+			if (n <= 0) break;
+			read += n;
+		}
+		return read === length ? buffer : buffer.subarray(0, read);
+	} finally {
+		fs.closeSync(fd);
+	}
 }
 
 /**
- * Read and fold the store to the latest snapshot per correlationId. Lock-free and
- * defensive: a missing file yields an empty list, and malformed/partial lines are skipped
- * (never throws). Records are returned in first-seen correlationId order.
- *
- * Cost: O(lines on disk) per call — a full read + parse + fold with no in-memory cache.
- * This is intentionally simple and acceptable at advisory-lane volumes (a swarm has few
- * concurrent background delegations, and the on-disk log is small).
+ * Read at most the last MAX_RECOVERY_LEDGER_BYTES of the ledger, aligned to
+ * the first complete line in that window (a truncated leading line belongs to
+ * older state that loses the checkpoint merge anyway). Hard read bound for
+ * checkpoint-based recovery (issue #2034 requirement 4).
  */
-export function readDelegations(
+function readBoundedRecentLedgerWindow(
 	directory: string,
-): BackgroundDelegationRecord[] {
-	let raw: string;
-	try {
-		raw = fs.readFileSync(storePath(directory), 'utf-8');
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
-		// Unexpected read error — treat as empty but record under debug.
-		logger.warn(
-			`[background] readDelegations failed: ${err instanceof Error ? err.message : String(err)}`,
-		);
-		return [];
+	size: number,
+): Buffer {
+	if (size === 0) return Buffer.alloc(0);
+	if (size <= MAX_RECOVERY_LEDGER_BYTES) {
+		return readLedgerRegion(directory, 0, size);
 	}
+	const window = readLedgerRegion(
+		directory,
+		size - MAX_RECOVERY_LEDGER_BYTES,
+		MAX_RECOVERY_LEDGER_BYTES,
+	);
+	const firstNewline = window.indexOf(0x0a);
+	return firstNewline === -1
+		? Buffer.alloc(0)
+		: window.subarray(firstNewline + 1);
+}
 
-	const folded = new Map<string, BackgroundDelegationRecord>();
-	for (const line of raw.split('\n')) {
+/**
+ * Fold tail lines into the map; returns a strict failure reason or null.
+ *
+ * With a checkpoint baseline, a tail line replaces the baseline entry only when
+ * it is genuinely newer: strictly newer `updatedAt`, or an equal timestamp that
+ * post-dates the checkpoint cut. This makes both crash interpretations of the
+ * publication sequence converge: pre-cut lines (visible when the ledger was not
+ * yet rolled) lose to the checkpoint snapshots derived from them, while
+ * post-cut appends always win.
+ */
+function foldLedgerTail(
+	records: Map<string, BackgroundDelegationRecord>,
+	tail: Buffer,
+	strict: boolean,
+	checkpoint?: BackgroundDelegationCheckpoint,
+): string | null {
+	let lineNumber = 0;
+	for (const line of tail.toString('utf-8').split('\n')) {
+		lineNumber += 1;
 		const trimmed = line.trim();
-		if (trimmed.length === 0) continue;
+		if (!trimmed) continue;
 		let parsedJson: unknown;
 		try {
 			parsedJson = JSON.parse(trimmed);
 		} catch {
-			continue; // skip malformed/partial line
+			if (strict) {
+				return `background delegation ledger has malformed JSON at line ${lineNumber}`;
+			}
+			continue;
 		}
-		const result = RecordSchema.safeParse(parsedJson);
-		if (!result.success) continue;
-		folded.set(result.data.correlationId, result.data);
+		const parsed = RecordSchema.safeParse(parsedJson);
+		if (!parsed.success) {
+			if (strict) {
+				return `background delegation ledger has an invalid record at line ${lineNumber}`;
+			}
+			continue;
+		}
+		const existing = checkpoint
+			? records.get(parsed.data.correlationId)
+			: undefined;
+		if (
+			checkpoint &&
+			existing &&
+			!(parsed.data.updatedAt > existing.updatedAt) &&
+			!(
+				parsed.data.updatedAt === existing.updatedAt &&
+				parsed.data.updatedAt > checkpoint.createdAt
+			)
+		) {
+			continue;
+		}
+		records.set(parsed.data.correlationId, parsed.data);
 	}
-	return [...folded.values()];
+	return null;
 }
 
 /**
- * Strict startup-recovery view of the primary ledger. Unlike the ordinary
- * advisory reader, this never treats unreadable, oversized, or malformed owner
- * data as absence: destructive orphan cleanup must fail closed on uncertainty.
+ * Legacy (pre-checkpoint) fold: exactly the historical behavior of
+ * readDelegations (lenient) / scanDelegationsForRecovery (strict), including
+ * the reason strings and the stat-before-read / recheck-after-read shape.
  */
-export function scanDelegationsForRecovery(
-	directory: string,
-): RecoveryOwnershipScanResult<BackgroundDelegationRecord> {
+function loadLegacyLedger(directory: string, strict: boolean): LedgerLoad {
+	if (!strict) {
+		let raw: string;
+		try {
+			raw = fs.readFileSync(storePath(directory), 'utf-8');
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+				logger.warn(
+					`[background] readDelegations failed: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
+			return {
+				status: 'ok',
+				mode: 'legacy',
+				records: new Map(),
+				manifest: null,
+				checkpoint: null,
+			};
+		}
+		const records = new Map<string, BackgroundDelegationRecord>();
+		const foldError = foldLedgerTail(records, Buffer.from(raw, 'utf-8'), false);
+		void foldError; // lenient never fails
+		return {
+			status: 'ok',
+			mode: 'legacy',
+			records,
+			manifest: null,
+			checkpoint: null,
+		};
+	}
+
 	let absolutePath: string;
 	try {
 		absolutePath = storePath(directory);
@@ -705,7 +1384,13 @@ export function scanDelegationsForRecovery(
 		}
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-			return { status: 'ok', owners: [] };
+			return {
+				status: 'ok',
+				mode: 'legacy',
+				records: new Map(),
+				manifest: null,
+				checkpoint: null,
+			};
 		}
 		return {
 			status: 'uncertain',
@@ -732,32 +1417,743 @@ export function scanDelegationsForRecovery(
 			reason: `background delegation ledger changed beyond the ${MAX_RECOVERY_LEDGER_BYTES}-byte recovery bound`,
 		};
 	}
+	const records = new Map<string, BackgroundDelegationRecord>();
+	const foldError = foldLedgerTail(records, Buffer.from(raw, 'utf-8'), true);
+	if (foldError) return { status: 'uncertain', reason: foldError };
+	return {
+		status: 'ok',
+		mode: 'legacy',
+		records,
+		manifest: null,
+		checkpoint: null,
+	};
+}
 
-	const folded = new Map<string, BackgroundDelegationRecord>();
-	let lineNumber = 0;
-	for (const line of raw.split('\n')) {
-		lineNumber += 1;
-		const trimmed = line.trim();
-		if (!trimmed) continue;
-		let parsedJson: unknown;
-		try {
-			parsedJson = JSON.parse(trimmed);
-		} catch {
-			return {
-				status: 'uncertain',
-				reason: `background delegation ledger has malformed JSON at line ${lineNumber}`,
-			};
-		}
-		const parsed = RecordSchema.safeParse(parsedJson);
-		if (!parsed.success) {
-			return {
-				status: 'uncertain',
-				reason: `background delegation ledger has an invalid record at line ${lineNumber}`,
-			};
-		}
-		folded.set(parsed.data.correlationId, parsed.data);
+/**
+ * Authoritative load for mutation paths (callers hold the store lock).
+ * Returns null when the authoritative state is uncertain — the caller must
+ * refuse the mutation (fail closed) rather than append state derived from
+ * partial truth.
+ */
+function loadRecordsForWrite(
+	directory: string,
+): BackgroundDelegationRecord[] | null {
+	const load = loadFoldedState(directory, { strict: false });
+	if (load.status === 'uncertain') {
+		recordLedgerUncertainty(
+			directory,
+			load.reason,
+			'mutation',
+			load.repairHint,
+		);
+		return null;
 	}
-	return { status: 'ok', owners: [...folded.values()] };
+	return [...load.records.values()];
+}
+
+function findRecordForWrite(
+	records: BackgroundDelegationRecord[] | null,
+	correlationId: string,
+): BackgroundDelegationRecord | null {
+	if (!records) return null;
+	for (const record of records) {
+		if (record.correlationId === correlationId) return record;
+	}
+	return null;
+}
+
+function recordLedgerUncertainty(
+	directory: string,
+	reason: string,
+	source: string,
+	repairHint?: string,
+): void {
+	try {
+		writeDelegationHealthArtifact(directory, {
+			uncertainty: {
+				reason,
+				at: Date.now(),
+				source,
+				...(repairHint ? { repairHint } : {}),
+			},
+		});
+	} catch {
+		// The observation sink must never break the store.
+	}
+}
+
+/**
+ * True when a record still owns an unsettled worktree (mirrors
+ * init-orphan-recovery's protection predicate — exported so both sites share
+ * ONE definition; drift here changes which worktrees orphan cleanup protects).
+ */
+export function isUnsettledWorktreeOwner(
+	record: BackgroundDelegationRecord,
+): boolean {
+	return (
+		Boolean(record.worktree) &&
+		!(
+			record.coderSettlement?.state === 'settled' &&
+			record.coderSettlement.outcome?.kind === 'standard-worktree' &&
+			(record.coderSettlement.outcome.result === 'merged' ||
+				record.coderSettlement.outcome.result === 'unchanged')
+		)
+	);
+}
+
+/**
+ * A record stays FULL in the checkpoint while any consumer still derives
+ * behavior from its bodies: non-terminal, pending advisory, unfinished coder
+ * settlement, unsettled worktree ownership, or admission-active coder owner
+ * (mirrors isActiveCoderOwner + init-orphan-recovery's unsettled-worktree
+ * predicate so compaction never changes a consumer's view of live state).
+ */
+function isCheckpointLiveRecord(record: BackgroundDelegationRecord): boolean {
+	if (!isTerminal(record.status)) return true;
+	if (record.advisoryInbox?.state === 'pending') return true;
+	const settlement = record.coderSettlement;
+	if (settlement && settlement.state !== 'settled') return true;
+	if (settlement?.state === 'settled' && isUnsettledWorktreeOwner(record)) {
+		return true;
+	}
+	if (isActiveCoderOwner(record)) return true;
+	return false;
+}
+
+/**
+ * Build a closed-record summary: keep every small field consumers gate on
+ * (identity, lane coordinates, workspace, worktree, result scalars) and drop
+ * only the large bodies — prompt text, taskChangeContext, and the text/error
+ * result bodies (their sha256 `digest` is retained and covers the dropped
+ * content). An authenticated, bounded final-line PR-review collection receipt is retained
+ * because collection projects accepted/rejected retry IDs from that durable
+ * metadata after compaction. `coderSettlement.observedFiles` is retained: only SETTLED
+ * settlements reach summaries (see isCheckpointLiveRecord), and the settled
+ * observed-file list is the executed-contract audit artifact — final and never
+ * recomputed. Returns null when the summary would not validate; the caller
+ * then keeps the full record instead (safety over size).
+ */
+function buildClosedSummary(
+	record: BackgroundDelegationRecord,
+): BackgroundDelegationRecord | null {
+	const summary: BackgroundDelegationRecord = { ...record };
+	delete summary.prompt;
+	delete summary.taskChangeContext;
+	if (summary.result) {
+		summary.result = stripResultBody(record, summary.result);
+	}
+	if (summary.terminalResult) {
+		summary.terminalResult = {
+			...summary.terminalResult,
+			// `record.result` is the collection projection source. Retaining the same
+			// authenticated footer in terminalResult would double checkpoint cost.
+			result: dropResultBody(summary.terminalResult.result),
+		};
+	}
+	const parsed = RecordSchema.safeParse(summary);
+	return parsed.success ? (parsed.data as BackgroundDelegationRecord) : null;
+}
+
+function stripResultBody(
+	record: BackgroundDelegationRecord,
+	result: BackgroundDelegationResult,
+): BackgroundDelegationResult {
+	const { text: _text, error: _error, ...rest } = result;
+	const receipt = parsePrReviewCollectionReceiptFooter(record, result);
+	const shedMarker = receipt
+		? null
+		: parsePrReviewCollectionReceiptShedMarker(record, result);
+	const receiptText = receipt
+		? `${PR_REVIEW_COLLECTION_RECEIPT_PREFIX}${JSON.stringify(receipt)}`
+		: shedMarker
+			? `${PR_REVIEW_COLLECTION_RECEIPT_SHED_PREFIX}${JSON.stringify(shedMarker)}`
+			: undefined;
+	return receiptText
+		? { ...rest, text: receiptText, outputPreviewChars: receiptText.length }
+		: rest;
+}
+
+function dropResultBody(
+	result: BackgroundDelegationResult,
+): BackgroundDelegationResult {
+	const {
+		text: _text,
+		error: _error,
+		outputPreviewChars: _preview,
+		...rest
+	} = result;
+	return rest;
+}
+
+function dropRetainedPrReviewReceipt(
+	record: BackgroundDelegationRecord,
+): BackgroundDelegationRecord {
+	const compact = (
+		result: BackgroundDelegationResult,
+	): BackgroundDelegationResult => {
+		const payload = parsePrReviewCollectionReceiptFooter(record, result);
+		if (!payload) {
+			const marker = parsePrReviewCollectionReceiptShedMarker(record, result);
+			if (!marker) return dropResultBody(result);
+			const markerText = `${PR_REVIEW_COLLECTION_RECEIPT_SHED_PREFIX}${JSON.stringify(marker)}`;
+			const { text: _text, error: _error, ...rest } = result;
+			return {
+				...rest,
+				text: markerText,
+				outputPreviewChars: markerText.length,
+			};
+		}
+		const marker = encodePrReviewCollectionReceiptShedMarker(payload);
+		const { text: _text, error: _error, ...rest } = result;
+		return { ...rest, text: marker, outputPreviewChars: marker.length };
+	};
+	return {
+		...record,
+		...(record.result ? { result: compact(record.result) } : {}),
+		...(record.terminalResult
+			? {
+					terminalResult: {
+						...record.terminalResult,
+						result: dropResultBody(record.terminalResult.result),
+					},
+				}
+			: {}),
+	};
+}
+
+function emptyAudit(): DelegationCheckpointAuditSummary {
+	return {
+		dispatchCount: 0,
+		terminalsByStatus: { completed: 0, error: 0, cancelled: 0, stale: 0 },
+		settledCount: 0,
+		preservedCount: 0,
+		lateTerminalCount: 0,
+		compactedTransitionCount: 0,
+		compactedRecordCount: 0,
+		firstDispatchAt: null,
+		lastTerminalAt: null,
+		lastCompactionAt: 0,
+	};
+}
+
+function terminalEventStatusOf(
+	record: BackgroundDelegationRecord,
+): 'completed' | 'error' | 'cancelled' | 'stale' | null {
+	if (record.terminalResult) {
+		return record.terminalResult.status;
+	}
+	if (
+		record.status === 'completed' ||
+		record.status === 'error' ||
+		record.status === 'cancelled' ||
+		record.status === 'stale'
+	) {
+		return record.status;
+	}
+	// `consumed` is a post-terminal ingestion transition; the originating
+	// terminal was counted when it was first observed.
+	return null;
+}
+
+function mergeCheckpointAudit(
+	previous: DelegationCheckpointAuditSummary | null,
+	previousCheckpoint: BackgroundDelegationCheckpoint | null,
+	folded: BackgroundDelegationRecord[],
+	healthLateTerminals: number,
+	retiredLineCount: number,
+	newlySummarizedCount: number,
+	now: number,
+): DelegationCheckpointAuditSummary {
+	const prev = previous ?? emptyAudit();
+	const prevById = new Map<string, BackgroundDelegationRecord>();
+	if (previousCheckpoint) {
+		for (const record of previousCheckpoint.records) {
+			prevById.set(record.correlationId, record);
+		}
+		for (const summary of previousCheckpoint.closed) {
+			prevById.set(summary.correlationId, summary);
+		}
+	}
+	const audit: DelegationCheckpointAuditSummary = {
+		dispatchCount: prev.dispatchCount,
+		terminalsByStatus: { ...prev.terminalsByStatus },
+		settledCount: prev.settledCount,
+		preservedCount: prev.preservedCount,
+		lateTerminalCount: Math.max(prev.lateTerminalCount, healthLateTerminals),
+		compactedTransitionCount: capCounter(
+			prev.compactedTransitionCount,
+			retiredLineCount,
+		),
+		compactedRecordCount: capCounter(
+			prev.compactedRecordCount,
+			newlySummarizedCount,
+		),
+		firstDispatchAt: prev.firstDispatchAt,
+		lastTerminalAt: prev.lastTerminalAt,
+		lastCompactionAt: now,
+	};
+	let minCreated = Number.POSITIVE_INFINITY;
+	let maxTerminal = 0;
+	for (const record of folded) {
+		const prevRecord = prevById.get(record.correlationId);
+		if (!prevRecord) {
+			audit.dispatchCount += 1;
+		}
+		// Lifetime counters: a terminal/settled/preserved observation counts
+		// exactly once — when this correlation's status first differs from its
+		// previous epoch snapshot. Completed→consumed transitions keep the
+		// originating terminal status via terminalResult, so they never
+		// double-count.
+		const terminalStatus = terminalEventStatusOf(record);
+		if (terminalStatus) {
+			const prevStatus = prevRecord ? terminalEventStatusOf(prevRecord) : null;
+			if (prevStatus !== terminalStatus) {
+				audit.terminalsByStatus[terminalStatus] += 1;
+			}
+			maxTerminal = Math.max(
+				maxTerminal,
+				record.terminalResult?.recordedAt ?? record.completedAt ?? 0,
+			);
+		}
+		if (
+			record.coderSettlement?.state === 'settled' &&
+			prevRecord?.coderSettlement?.state !== 'settled'
+		) {
+			audit.settledCount += 1;
+		}
+		if (
+			record.coderSettlement?.state === 'preserved' &&
+			prevRecord?.coderSettlement?.state !== 'preserved'
+		) {
+			audit.preservedCount += 1;
+		}
+		minCreated = Math.min(minCreated, record.createdAt);
+	}
+	audit.firstDispatchAt = Number.isFinite(minCreated)
+		? Math.min(prev.firstDispatchAt ?? Number.POSITIVE_INFINITY, minCreated)
+		: prev.firstDispatchAt;
+	audit.lastTerminalAt =
+		Math.max(prev.lastTerminalAt ?? 0, maxTerminal) || null;
+	return audit;
+}
+
+/** Clamp a monotonic counter at MAX_SAFE_INTEGER (operator-facing saturation). */
+function capCounter(previous: number, delta: number): number {
+	return Number.isSafeInteger(previous + delta)
+		? previous + delta
+		: Number.MAX_SAFE_INTEGER;
+}
+
+export interface CompactBackgroundDelegationsResult {
+	status: 'compacted' | 'skipped' | 'uncertain';
+	reason?: string;
+	sequence?: number;
+	tailBytes?: number;
+	checkpointBytes?: number;
+}
+
+/**
+ * Compact the delegation ledger: checkpoint the folded authoritative state,
+ * publish it via the manifest, and roll the ledger to the post-cut tail.
+ * Runs under the store lock (issue #2034 requirement 1).
+ */
+export async function compactBackgroundDelegations(
+	directory: string,
+	options: { force?: boolean } = {},
+): Promise<CompactBackgroundDelegationsResult> {
+	try {
+		let outcome: CompactBackgroundDelegationsResult = {
+			status: 'skipped',
+			reason: 'not attempted',
+		};
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				outcome = compactDelegationsLocked(directory, options);
+			},
+		);
+		return outcome;
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		logger.warn(`[background] compactBackgroundDelegations failed: ${message}`);
+		return { status: 'uncertain', reason: message };
+	}
+}
+
+function compactDelegationsLocked(
+	directory: string,
+	options: { force?: boolean },
+): CompactBackgroundDelegationsResult {
+	const load = loadFoldedState(directory, { strict: false });
+	if (load.status === 'uncertain') {
+		recordLedgerUncertainty(
+			directory,
+			load.reason,
+			'compaction',
+			load.repairHint,
+		);
+		return { status: 'uncertain', reason: load.reason };
+	}
+
+	let ledgerBytes: Buffer;
+	try {
+		ledgerBytes = fs.readFileSync(storePath(directory));
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+			return { status: 'skipped', reason: 'no ledger to compact' };
+		}
+		return {
+			status: 'uncertain',
+			reason: err instanceof Error ? err.message : String(err),
+		};
+	}
+	if (
+		ledgerBytes.length <= DELEGATION_COMPACTION_HIGH_WATER_BYTES &&
+		!options.force
+	) {
+		return {
+			status: 'skipped',
+			reason: 'ledger below the compaction high-water mark',
+		};
+	}
+	const cutLedgerBytes = ledgerBytes.length;
+	const retiredLineCount = countCompleteLines(ledgerBytes);
+
+	const now = Date.now();
+	const folded = [...load.records.values()];
+	const live: BackgroundDelegationRecord[] = [];
+	const closedCandidates: BackgroundDelegationRecord[] = [];
+	for (const record of folded) {
+		if (isCheckpointLiveRecord(record)) {
+			live.push(record);
+		} else {
+			closedCandidates.push(buildClosedSummary(record) ?? record);
+		}
+	}
+	if (live.length > MAX_CHECKPOINT_RECORDS) {
+		recordLedgerUncertainty(
+			directory,
+			`checkpoint live-record budget exceeded (${live.length} > ${MAX_CHECKPOINT_RECORDS}); compaction skipped`,
+			'compaction',
+		);
+		return {
+			status: 'skipped',
+			reason: `live record count ${live.length} exceeds the checkpoint budget ${MAX_CHECKPOINT_RECORDS}`,
+		};
+	}
+
+	// Byte-budget retention, newest-first; young closed summaries are never evicted.
+	closedCandidates.sort((a, b) => b.updatedAt - a.updatedAt);
+	const baseOverhead = Buffer.byteLength(
+		JSON.stringify({
+			schemaVersion: 1,
+			sequence: 1,
+			writerId: WRITER_ID,
+			rootPath: path.resolve(directory),
+			createdAt: now,
+			cutLedgerBytes,
+			cutLedgerDigest: sha256Hex(ledgerBytes),
+			records: live,
+			closed: [],
+			audit: emptyAudit(),
+			payloadChecksum: '0'.repeat(64),
+		}),
+		'utf-8',
+	);
+	let used = baseOverhead;
+	const selectionBudget =
+		MAX_CHECKPOINT_BYTES - CHECKPOINT_SELECTION_RESERVE_BYTES;
+	const keptClosed: BackgroundDelegationRecord[] = [];
+	let evicted = 0;
+	for (const entry of closedCandidates) {
+		let retainedEntry = entry;
+		let cost = Buffer.byteLength(JSON.stringify(retainedEntry), 'utf-8') + 1;
+		if (used + cost > selectionBudget) {
+			if (now - entry.updatedAt < TOMBSTONE_MIN_AGE_MS) {
+				retainedEntry = dropRetainedPrReviewReceipt(entry);
+				cost = Buffer.byteLength(JSON.stringify(retainedEntry), 'utf-8') + 1;
+				if (used + cost <= selectionBudget) {
+					used += cost;
+					keptClosed.push(retainedEntry);
+					continue;
+				}
+				recordLedgerUncertainty(
+					directory,
+					'checkpoint byte budget would evict a young closed summary; compaction skipped',
+					'compaction',
+				);
+				return {
+					status: 'skipped',
+					reason: 'checkpoint byte budget would evict a young closed summary',
+				};
+			}
+			evicted += 1;
+			continue;
+		}
+		used += cost;
+		keptClosed.push(retainedEntry);
+	}
+
+	const sequence =
+		Math.max(load.manifest?.sequence ?? 0, load.checkpoint?.sequence ?? 0, 0) +
+		1;
+	let healthLateTerminals = 0;
+	try {
+		const artifact = readDelegationHealthArtifact(directory);
+		healthLateTerminals = artifact?.counts.lateTerminals ?? 0;
+	} catch {
+		healthLateTerminals = 0;
+	}
+	const previousClosedIds = new Set(
+		(load.checkpoint?.closed ?? []).map((entry) => entry.correlationId),
+	);
+	const newlySummarized = keptClosed.filter(
+		(entry) => !previousClosedIds.has(entry.correlationId),
+	).length;
+	const audit = mergeCheckpointAudit(
+		load.checkpoint?.audit ?? null,
+		load.checkpoint,
+		folded,
+		healthLateTerminals,
+		retiredLineCount,
+		newlySummarized + evicted,
+		now,
+	);
+
+	const checkpointCandidate: BackgroundDelegationCheckpoint = {
+		schemaVersion: 1,
+		sequence,
+		writerId: WRITER_ID,
+		rootPath: path.resolve(directory),
+		createdAt: now,
+		cutLedgerBytes,
+		cutLedgerDigest: sha256Hex(ledgerBytes),
+		records: live,
+		closed: keptClosed,
+		audit,
+		payloadChecksum: '0'.repeat(64),
+	};
+	// Normalize through the same strict schema recovery uses before hashing.
+	// Otherwise an optional `undefined` or future schema projection difference
+	// can serialize successfully but hash differently after reload.
+	const normalizedCheckpoint = CheckpointSchema.safeParse(checkpointCandidate);
+	if (!normalizedCheckpoint.success) {
+		recordLedgerUncertainty(
+			directory,
+			'generated checkpoint failed schema normalization; compaction skipped',
+			'compaction',
+		);
+		return {
+			status: 'skipped',
+			reason: 'generated checkpoint failed schema normalization',
+		};
+	}
+	const checkpoint =
+		normalizedCheckpoint.data as BackgroundDelegationCheckpoint;
+	checkpoint.payloadChecksum = checkpointPayloadChecksum(checkpoint);
+	const checkpointJson = `${JSON.stringify(checkpoint)}\n`;
+	if (Buffer.byteLength(checkpointJson, 'utf-8') > MAX_CHECKPOINT_BYTES) {
+		recordLedgerUncertainty(
+			directory,
+			'serialized checkpoint exceeds the byte budget; compaction skipped',
+			'compaction',
+		);
+		return {
+			status: 'skipped',
+			reason: 'serialized checkpoint exceeds the byte budget',
+		};
+	}
+
+	// Publication order: checkpoint → manifest → rolled tail, each an atomic
+	// durable rename. The manifest is the publication point. Every crash window
+	// is covered: before the manifest, readers ignore the checkpoint and fold
+	// the intact (unrolled) ledger; after the manifest, recovery folds the
+	// checkpoint plus the verified post-cut suffix (unrolled crash window) or
+	// the rolled tail — both interpretations converge on the same state.
+	writeDurableFileSync(checkpointPath(directory), checkpointJson);
+	writeDurableFileSync(
+		manifestPath(directory),
+		`${JSON.stringify({
+			schemaVersion: 1,
+			sequence,
+			checkpointChecksum: checkpoint.payloadChecksum,
+			writerId: WRITER_ID,
+			rootPath: checkpoint.rootPath,
+			updatedAt: now,
+		})}\n`,
+	);
+
+	let currentSize: number;
+	try {
+		currentSize = fs.statSync(storePath(directory)).size;
+	} catch (err) {
+		return {
+			status: 'uncertain',
+			reason: `ledger vanished during compaction: ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		};
+	}
+	if (currentSize < cutLedgerBytes) {
+		// Foreign interference or another roller finished first. The published
+		// checkpoint + manifest remain valid: recovery folds the whole (now
+		// smaller) ledger as the tail with the update-time merge.
+		return {
+			status: 'skipped',
+			reason: 'ledger shrank during compaction; checkpoint published unrolled',
+		};
+	}
+	const tailContent =
+		currentSize > cutLedgerBytes
+			? readLedgerRegion(
+					directory,
+					cutLedgerBytes,
+					currentSize - cutLedgerBytes,
+				)
+			: Buffer.alloc(0);
+	writeDurableFileSync(storePath(directory), tailContent);
+
+	try {
+		const pressurePct = Math.min(
+			100,
+			Math.round((tailContent.length / MAX_RECOVERY_LEDGER_BYTES) * 1000) / 10,
+		);
+		writeDelegationHealthArtifact(directory, {
+			ledger: {
+				bytes: tailContent.length,
+				limitBytes: MAX_RECOVERY_LEDGER_BYTES,
+				pressurePct,
+				band:
+					tailContent.length > DELEGATION_COMPACTION_HIGH_WATER_BYTES
+						? 'compact-overdue'
+						: tailContent.length > DELEGATION_COMPACTION_LOW_WATER_BYTES
+							? 'nominal'
+							: 'ok',
+			},
+			checkpoint: {
+				sequence,
+				createdAt: now,
+				liveRecords: live.length,
+				closedSummaries: keptClosed.length,
+				bytes: Buffer.byteLength(checkpointJson, 'utf-8'),
+				audit,
+			},
+			counts: {
+				activeOwners: folded.filter((record) => isActiveCoderOwner(record))
+					.length,
+				pendingAdvisories: folded.filter(
+					(record) => record.advisoryInbox?.state === 'pending',
+				).length,
+				lateTerminals: audit.lateTerminalCount,
+				orphanWorktreeOwners: folded.filter(isUnsettledWorktreeOwner).length,
+			},
+		});
+	} catch {
+		// observation sink must never fail the compaction
+	}
+
+	return {
+		status: 'compacted',
+		sequence,
+		tailBytes: tailContent.length,
+		checkpointBytes: Buffer.byteLength(checkpointJson, 'utf-8'),
+	};
+}
+
+function countCompleteLines(buffer: Buffer): number {
+	let count = 0;
+	for (const byte of buffer) {
+		if (byte === 0x0a) count += 1;
+	}
+	return count;
+}
+
+/**
+ * Lazy post-append maintenance (callers hold the store lock). Fails open: the
+ * append has already landed, so a compaction failure must not fail the write.
+ */
+function maybeCompactDelegationsLocked(directory: string): void {
+	try {
+		const stat = fs.statSync(storePath(directory));
+		if (stat.size <= DELEGATION_COMPACTION_HIGH_WATER_BYTES) return;
+		const outcome = compactDelegationsLocked(directory, {});
+		if (outcome.status === 'uncertain') {
+			logger.warn(
+				`[background] post-append compaction skipped: ${outcome.reason}`,
+			);
+		}
+	} catch (err) {
+		logger.warn(
+			`[background] post-append compaction check failed: ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+	}
+}
+
+function ensureSwarmDir(directory: string): void {
+	fs.mkdirSync(path.resolve(directory, '.swarm'), { recursive: true });
+}
+
+/**
+ * Read and fold the store to the latest snapshot per correlationId. Lock-free and
+ * defensive: a missing file yields an empty list, and malformed/partial lines are
+ * skipped (never throws). Records are returned in first-seen correlationId order.
+ *
+ * Checkpoint-aware (issue #2034): when a published checkpoint exists, the fold is
+ * checkpoint summaries + the bounded transition tail. When the authoritative
+ * state is uncertain (invalid checkpoint/manifest with a rolled tail), this
+ * returns [] — the strict recovery scan is the fail-closed authority.
+ *
+ * Cost: O(checkpoint + tail lines) per call. The tail is bounded by the
+ * compaction high-water mark in normal operation.
+ */
+export function readDelegations(
+	directory: string,
+): BackgroundDelegationRecord[] {
+	const load = loadFoldedState(directory, { strict: false });
+	if (load.status === 'uncertain') {
+		logger.warn(
+			`[background] readDelegations: authoritative state uncertain (${load.reason}); returning empty`,
+		);
+		return [];
+	}
+	return [...load.records.values()];
+}
+
+/**
+ * Strict startup-recovery view of the primary store. Unlike the ordinary
+ * advisory reader, this never treats unreadable, oversized, or malformed owner
+ * data as absence: destructive orphan cleanup must fail closed on uncertainty.
+ * Checkpoint-aware: folds checkpoint + the applicable bounded tail region and
+ * rejects corrupt or ambiguous cuts (issue #2034). Remains synchronous —
+ * callers depend on it.
+ */
+export function scanDelegationsForRecovery(
+	directory: string,
+): RecoveryOwnershipScanResult<BackgroundDelegationRecord> {
+	const load = loadFoldedState(directory, { strict: true });
+	if (load.status === 'uncertain') {
+		// Honest failure source (#2034 final-critic #4): a manifest-less store
+		// failed in the legacy interpretation; anything else is unknown rather
+		// than a wrongly-claimed recovery mode. The repair hint rides along so
+		// the durable recovery observation stays actionable.
+		const manifestKind = readDelegationManifest(directory).kind;
+		return {
+			status: 'uncertain',
+			reason: load.reason,
+			source: manifestKind === 'absent' ? 'legacy-ledger' : 'unknown',
+			...(load.repairHint ? { repairHint: load.repairHint } : {}),
+		};
+	}
+	const source =
+		load.mode === 'legacy'
+			? ('legacy-ledger' as const)
+			: (load.mode as 'checkpoint+tail' | 'checkpoint+ledger-suffix');
+	return { status: 'ok', owners: [...load.records.values()], source };
 }
 
 /** Returns the folded record for a correlationId, or null. Lock-free read. */
@@ -864,7 +2260,10 @@ export type RecordPendingDelegationOutcome =
 	| { status: 'conflict'; record: BackgroundDelegationRecord }
 	| { status: 'failed'; record: null };
 
-function pendingLaunchIdentity(record: BackgroundDelegationRecord): object {
+function pendingLaunchIdentity(
+	record: BackgroundDelegationRecord,
+	summaryAware: boolean,
+): object {
 	return {
 		correlationId: record.correlationId,
 		jobId: record.jobId,
@@ -882,12 +2281,21 @@ function pendingLaunchIdentity(record: BackgroundDelegationRecord): object {
 		ownedWorkflowLanes: record.ownedWorkflowLanes,
 		promptHash: record.promptHash,
 		workspace: record.workspace,
-		taskChangeContext: record.taskChangeContext,
-		workflowGeneration: record.workflowGeneration,
-		worktree: record.worktree,
-		coderReservationId: record.coderReservationId,
-		prompt: record.prompt,
-		generation: record.generation ?? 1,
+		// Closed-record summaries drop these bodies (issue #2034); comparing
+		// them against a replaying dispatch would turn a genuine host replay
+		// of a closed session into a `conflict`. When the existing record is a
+		// summary (see samePendingLaunchIdentity), project both sides without
+		// the strippable bodies.
+		...(summaryAware
+			? {}
+			: {
+					taskChangeContext: record.taskChangeContext,
+					workflowGeneration: record.workflowGeneration,
+					worktree: record.worktree,
+					coderReservationId: record.coderReservationId,
+					prompt: record.prompt,
+					generation: record.generation ?? 1,
+				}),
 	};
 }
 
@@ -895,9 +2303,20 @@ function samePendingLaunchIdentity(
 	left: BackgroundDelegationRecord,
 	right: BackgroundDelegationRecord,
 ): boolean {
+	// `left` is the authoritative existing record. When it is a closed-record
+	// summary (terminal, and its strippable bodies were dropped by
+	// compaction), comparing the bodies against a replaying dispatch would
+	// turn a genuine host replay into a `conflict` — the exact churn the
+	// fallback store must not see on every post-restart replay. Live records
+	// keep the full projection, so a re-dispatch with a different prompt
+	// still conflicts.
+	const summaryAware =
+		isTerminal(left.status) &&
+		left.prompt === undefined &&
+		left.taskChangeContext === undefined;
 	return isDeepStrictEqual(
-		pendingLaunchIdentity(left),
-		pendingLaunchIdentity(right),
+		pendingLaunchIdentity(left, summaryAware),
+		pendingLaunchIdentity(right, summaryAware),
 	);
 }
 
@@ -930,9 +2349,13 @@ export async function recordPendingDelegationDetailed(
 				}
 				// A correlation identifies one durable launch. Check while holding the
 				// ledger lock so concurrent pending writers cannot append a fresh
-				// snapshot over an already-running or terminal delegation.
-				const existing = findByCorrelationId(
-					directory,
+				// snapshot over an already-running or terminal delegation. The
+				// for-write load refuses to proceed when the authoritative state
+				// (checkpoint + tail) is uncertain (issue #2034).
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const existing = findRecordForWrite(
+					records,
 					parsedRecord.data.correlationId,
 				);
 				if (existing) {
@@ -945,6 +2368,7 @@ export async function recordPendingDelegationDetailed(
 					return;
 				}
 				appendRecord(directory, parsedRecord.data);
+				maybeCompactDelegationsLocked(directory);
 				outcome = { status: 'recorded', record: parsedRecord.data };
 			},
 		);
@@ -998,6 +2422,7 @@ export async function appendDelegationTransition(
 		status: BackgroundDelegationStatus;
 		result?: BackgroundDelegationResult;
 		completedAt?: number;
+		expectedCurrentStatuses?: readonly BackgroundDelegationStatus[];
 	},
 ): Promise<BackgroundDelegationRecord | null> {
 	const now = Date.now();
@@ -1009,8 +2434,17 @@ export async function appendDelegationTransition(
 			STORE_LOCK_AGENT,
 			STORE_LOCK_TASK,
 			async () => {
-				const current = findByCorrelationId(directory, correlationId);
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const current = findRecordForWrite(records, correlationId);
 				if (!current) return;
+				if (
+					transition.expectedCurrentStatuses &&
+					!transition.expectedCurrentStatuses.includes(current.status)
+				) {
+					next = current;
+					return;
+				}
 				if (
 					isTerminal(current.status) &&
 					transition.status !== 'consumed' &&
@@ -1034,6 +2468,7 @@ export async function appendDelegationTransition(
 					...(transition.result ? { result: transition.result } : {}),
 				};
 				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
 			},
 		);
 		return next;
@@ -1069,6 +2504,12 @@ function sameJson(left: unknown, right: unknown): boolean {
 	return JSON.stringify(left) === JSON.stringify(right);
 }
 
+/**
+ * Terminal-event identity. `result.digest` is sha256 over the full text/error
+ * body (see completion-observer's digest(text)), so comparing the digest plus
+ * every non-body scalar is equivalent to the historical full-JSON compare —
+ * closed-record summaries may drop the bodies but never the digest (issue #2034).
+ */
 function sameTerminalEvent(
 	left: BackgroundTerminalResult,
 	right: BackgroundTerminalResult,
@@ -1076,7 +2517,29 @@ function sameTerminalEvent(
 	return (
 		left.eventId === right.eventId &&
 		left.status === right.status &&
-		sameJson(left.result, right.result)
+		sameRetainedResult(left.result, right.result)
+	);
+}
+
+function sameRetainedResult(
+	left: BackgroundDelegationResult,
+	right: BackgroundDelegationResult,
+): boolean {
+	return (
+		left.chars === right.chars &&
+		left.truncated === right.truncated &&
+		left.digest === right.digest &&
+		left.outputRef === right.outputRef &&
+		left.outputPreviewChars === right.outputPreviewChars &&
+		left.outputDegraded === right.outputDegraded &&
+		left.outputArtifactError === right.outputArtifactError &&
+		left.transcriptIncomplete === right.transcriptIncomplete &&
+		left.messageCount === right.messageCount &&
+		sameJson(left.salvagedWorkflowLanes, right.salvagedWorkflowLanes) &&
+		sameJson(
+			left.salvagedWorkflowLaneRecoveries,
+			right.salvagedWorkflowLaneRecoveries,
+		)
 	);
 }
 
@@ -1139,7 +2602,9 @@ export async function claimTerminalResult(
 			STORE_LOCK_AGENT,
 			STORE_LOCK_TASK,
 			async () => {
-				const current = findByCorrelationId(directory, correlationId);
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const current = findRecordForWrite(records, correlationId);
 				if (!current) return;
 				if (current.terminalResult) {
 					if (!sameTerminalEvent(current.terminalResult, parsedTerminal.data)) {
@@ -1150,6 +2615,7 @@ export async function claimTerminalResult(
 								`incoming={status: ${parsedTerminal.data.status}, eventId: ${parsedTerminal.data.eventId}}; ` +
 								`rejected`,
 						);
+						incrementLateTerminalCount(directory);
 						return;
 					}
 					claim = {
@@ -1174,6 +2640,14 @@ export async function claimTerminalResult(
 						};
 					}
 				}
+				// Monotonic fold baseline (#2034 review PRR-012): recordedAt is
+				// caller-supplied and may be backdated; the fold's update-time
+				// merge would then drop this terminal against a later checkpoint
+				// entry. Clamp updatedAt to at least the current snapshot's.
+				const foldUpdatedAt = Math.max(
+					parsedTerminal.data.recordedAt,
+					current.updatedAt,
+				);
 				const next: BackgroundDelegationRecord = {
 					...current,
 					schemaVersion: 3,
@@ -1181,11 +2655,12 @@ export async function claimTerminalResult(
 					terminalResult: parsedTerminal.data,
 					result: parsedTerminal.data.result,
 					completedAt: parsedTerminal.data.recordedAt,
-					updatedAt: parsedTerminal.data.recordedAt,
+					updatedAt: foldUpdatedAt,
 					...(coderSettlement ? { coderSettlement } : {}),
 				};
 				if (!RecordSchema.safeParse(next).success) return;
 				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
 				claim = { disposition: 'claimed', record: next };
 			},
 		);
@@ -1209,6 +2684,27 @@ export interface CoderSettlementClaim {
 }
 
 /**
+ * Record a late/duplicate terminal observation in the durable health artifact.
+ * Best-effort: the observation sink must never break the claim path.
+ */
+function incrementLateTerminalCount(directory: string): void {
+	try {
+		const artifact = readDelegationHealthArtifact(directory);
+		const current = artifact?.counts.lateTerminals ?? 0;
+		writeDelegationHealthArtifact(directory, {
+			counts: {
+				activeOwners: artifact?.counts.activeOwners ?? 0,
+				pendingAdvisories: artifact?.counts.pendingAdvisories ?? 0,
+				lateTerminals: current + 1,
+				orphanWorktreeOwners: artifact?.counts.orphanWorktreeOwners ?? 0,
+			},
+		});
+	} catch {
+		// ignore — observation only
+	}
+}
+
+/**
  * Claim coder settlement under the ledger lock. A `settling` operation may resume only
  * with its original operationId; completed or preserved outcomes are returned unchanged.
  */
@@ -1227,7 +2723,9 @@ export async function claimCoderSettlement(
 			STORE_LOCK_AGENT,
 			STORE_LOCK_TASK,
 			async () => {
-				const current = findByCorrelationId(directory, correlationId);
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const current = findRecordForWrite(records, correlationId);
 				if (
 					!current ||
 					current.normalizedAgent !== 'coder' ||
@@ -1291,6 +2789,7 @@ export async function claimCoderSettlement(
 				};
 				if (!RecordSchema.safeParse(next).success) return;
 				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
 				claim = {
 					disposition: existing.state === 'settling' ? 'resume' : 'claimed',
 					record: next,
@@ -1372,7 +2871,9 @@ export async function updateCoderSettlement(
 			STORE_LOCK_AGENT,
 			STORE_LOCK_TASK,
 			async () => {
-				const current = findByCorrelationId(directory, correlationId);
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const current = findRecordForWrite(records, correlationId);
 				const existing = current?.coderSettlement;
 				if (!current || !existing) return;
 				if (existing.state === 'settled' || existing.state === 'preserved') {
@@ -1466,6 +2967,7 @@ export async function updateCoderSettlement(
 				};
 				if (!RecordSchema.safeParse(next).success) return;
 				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
 				result = next;
 			},
 		);
@@ -1523,7 +3025,9 @@ export async function claimDelegationIngestion(
 			STORE_LOCK_AGENT,
 			STORE_LOCK_TASK,
 			async () => {
-				const current = findByCorrelationId(directory, correlationId);
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const current = findRecordForWrite(records, correlationId);
 				if (!current?.terminalResult) return;
 				if (current.status === 'consumed') {
 					claim = { disposition: 'consumed', record: current };
@@ -1579,6 +3083,7 @@ export async function claimDelegationIngestion(
 					updatedAt: now,
 				};
 				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
 				claim = { disposition, record: next };
 			},
 		);
@@ -1608,7 +3113,9 @@ export async function recordDelegationIngestionResult(
 			STORE_LOCK_AGENT,
 			STORE_LOCK_TASK,
 			async () => {
-				const current = findByCorrelationId(directory, correlationId);
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const current = findRecordForWrite(records, correlationId);
 				if (!current) return;
 				if (
 					(success &&
@@ -1643,6 +3150,7 @@ export async function recordDelegationIngestionResult(
 					updatedAt,
 				};
 				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
 				result = next;
 			},
 		);
@@ -1685,7 +3193,9 @@ export async function putPendingBackgroundAdvisory(
 			STORE_LOCK_AGENT,
 			STORE_LOCK_TASK,
 			async () => {
-				const current = findByCorrelationId(directory, correlationId);
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const current = findRecordForWrite(records, correlationId);
 				if (
 					!current?.terminalResult ||
 					current.terminalResult.eventId !== parsed.data.eventId ||
@@ -1711,6 +3221,7 @@ export async function putPendingBackgroundAdvisory(
 					updatedAt: createdAt,
 				};
 				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
 				result = parsed.data;
 			},
 		);
@@ -1753,7 +3264,9 @@ export async function preparePendingBackgroundAdvisories(
 			STORE_LOCK_AGENT,
 			STORE_LOCK_TASK,
 			async () => {
-				for (const current of readDelegations(directory)) {
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				for (const current of records) {
 					// One entry per transaction keeps acknowledgement atomic in the
 					// append-only ledger; subsequent turns drain subsequent entries.
 					if (prepared.length >= 1) break;
@@ -1787,6 +3300,7 @@ export async function preparePendingBackgroundAdvisories(
 						updatedAt: now,
 					};
 					appendRecord(directory, next);
+					maybeCompactDelegationsLocked(directory);
 					prepared.push(nextAdvisory);
 				}
 			},
@@ -1817,8 +3331,10 @@ async function releaseBackgroundAdvisoryPreparation(
 			STORE_LOCK_AGENT,
 			STORE_LOCK_TASK,
 			async () => {
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return false;
 				const byEvent = new Map<string, BackgroundDelegationRecord>();
-				for (const current of readDelegations(directory)) {
+				for (const current of records) {
 					const advisory = current.advisoryInbox;
 					if (
 						advisory?.parentSessionId === parentSessionId &&
@@ -1852,6 +3368,7 @@ async function releaseBackgroundAdvisoryPreparation(
 					};
 					appendRecord(directory, next);
 				}
+				maybeCompactDelegationsLocked(directory);
 				return true;
 			},
 		);
@@ -1882,8 +3399,10 @@ export async function acknowledgeObservedBackgroundAdvisories(
 			STORE_LOCK_AGENT,
 			STORE_LOCK_TASK,
 			async () => {
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
 				const now = Date.now();
-				for (const current of readDelegations(directory)) {
+				for (const current of records) {
 					const advisory = current.advisoryInbox;
 					if (
 						!advisory ||
@@ -1923,6 +3442,7 @@ export async function acknowledgeObservedBackgroundAdvisories(
 					appendRecord(directory, next);
 					acknowledged += 1;
 				}
+				if (acknowledged > 0) maybeCompactDelegationsLocked(directory);
 			},
 		);
 		return acknowledged;
@@ -1983,22 +3503,49 @@ function isTerminal(status: BackgroundDelegationStatus): boolean {
 }
 
 /**
- * Mark all `pending` records older than `timeoutMs` as `stale` (status-only; no gate
+ * Mark all overdue records in `statuses` as `stale` (status-only; no gate
  * effect). Called within an already-held store lock.
+ *
+ * `statuses` defaults to {@link DEFAULT_SWEEPABLE_DELEGATION_STATUSES}, which is
+ * exactly the set this sweep has always finalized — the trailing default keeps
+ * the pre-existing positional call in `recordPendingDelegation` unchanged.
+ *
+ * `filters.excludeCorrelationIds` (issue #2251) removes specific records from an
+ * otherwise directory-wide sweep. A caller that has already DECIDED a record is
+ * not stale — e.g. the PR-workflow gate's liveness probe reported its session
+ * still running — must be able to keep this age-only sweep from durably
+ * contradicting that decision one line later. Omitting it is the historical
+ * behaviour.
+ *
+ * `filters.includeCorrelationIds` (issue #2251) is its opposite: it narrows the
+ * sweep to exactly the named records, so a caller that reasoned about a specific
+ * handful of lanes can finalize those and NOTHING else. Both filters compose;
+ * the status and age filters still apply on top of either, which is the point —
+ * an included record that has since gone `completed` is still spared.
  */
 function sweepStaleLocked(
 	directory: string,
 	timeoutMs: number,
 	now: number,
+	statuses: ReadonlySet<BackgroundDelegationStatus> = DEFAULT_SWEEPABLE_DELEGATION_STATUSES,
+	filters: {
+		excludeCorrelationIds?: ReadonlySet<string>;
+		includeCorrelationIds?: ReadonlySet<string>;
+	} = {},
 ): number {
 	let swept = 0;
-	for (const record of readDelegations(directory)) {
+	const { excludeCorrelationIds, includeCorrelationIds } = filters;
+	const records = loadRecordsForWrite(directory);
+	if (records === null) return 0;
+	for (const record of records) {
 		if (
-			record.status !== 'pending' &&
-			record.status !== 'running' &&
-			record.status !== 'ingestion_error'
-		)
+			includeCorrelationIds !== undefined &&
+			!includeCorrelationIds.has(record.correlationId)
+		) {
 			continue;
+		}
+		if (excludeCorrelationIds?.has(record.correlationId)) continue;
+		if (!statuses.has(record.status)) continue;
 		if (now - record.updatedAt <= timeoutMs) continue;
 		appendRecord(directory, {
 			...record,
@@ -2007,25 +3554,61 @@ function sweepStaleLocked(
 		});
 		swept += 1;
 	}
+	if (swept > 0) maybeCompactDelegationsLocked(directory);
 	return swept;
 }
 
 /**
  * Public stale sweep: acquires the store lock and marks overdue pendings as `stale`.
  * Best-effort; returns the number swept (0 on lock timeout / error).
+ *
+ * `options.statuses` narrows which status classes may be finalized; omitting it
+ * preserves the historical scope ({@link DEFAULT_SWEEPABLE_DELEGATION_STATUSES}).
+ * The sweep is directory-wide with no session or mode filter, so a caller whose
+ * own decision covers only some status classes must narrow accordingly rather
+ * than finalizing records it never reasoned about.
+ *
+ * `options.excludeCorrelationIds` (issue #2251) is the per-record counterpart:
+ * status narrowing cannot express "this specific overdue record was verified
+ * alive". Both filters are AND-ed — an excluded record is spared regardless of
+ * status or age.
+ *
+ * `options.includeCorrelationIds` (issue #2251) inverts that: the sweep visits
+ * ONLY the named records. It exists so a caller that decided something about a
+ * specific, already-identified handful of lanes can finalize exactly those
+ * without a directory-wide pass that would also finalize other sessions' records
+ * and retryable `ingestion_error` records it never reasoned about. Passing an
+ * empty set sweeps nothing.
+ *
+ * Narrowing to a record does NOT force it terminal: the status and age filters
+ * still apply, so a named record that has since reached a terminal status (a
+ * lane that completed between the caller's decision and this call) is spared and
+ * its collected output survives. That is deliberate — an unconditional write
+ * here would re-introduce the very discard this subsystem exists to prevent.
  */
 export async function sweepStaleDelegations(
 	directory: string,
 	timeoutMs: number,
+	options: {
+		statuses?: ReadonlySet<SweepableDelegationStatus>;
+		excludeCorrelationIds?: ReadonlySet<string>;
+		includeCorrelationIds?: ReadonlySet<string>;
+	} = {},
 ): Promise<number> {
 	if (!timeoutMs || timeoutMs <= 0) return 0;
+	const statuses = options.statuses ?? DEFAULT_SWEEPABLE_DELEGATION_STATUSES;
+	const filters = {
+		excludeCorrelationIds: options.excludeCorrelationIds,
+		includeCorrelationIds: options.includeCorrelationIds,
+	};
 	try {
 		return await withEvidenceLock(
 			directory,
 			BACKGROUND_DELEGATIONS_FILE,
 			STORE_LOCK_AGENT,
 			STORE_LOCK_TASK,
-			async () => sweepStaleLocked(directory, timeoutMs, Date.now()),
+			async () =>
+				sweepStaleLocked(directory, timeoutMs, Date.now(), statuses, filters),
 		);
 	} catch (err) {
 		logger.warn(
@@ -2399,7 +3982,9 @@ export async function promoteDelegationFallback(
 					STORE_LOCK_AGENT,
 					STORE_LOCK_TASK,
 					async () => {
-						const current = findByCorrelationId(directory, correlationId);
+						const records = loadRecordsForWrite(directory);
+						if (records === null) return;
+						const current = findRecordForWrite(records, correlationId);
 						if (current) {
 							if (samePromotionIdentity(current, fallback.record)) {
 								promoted = current;
@@ -2407,6 +3992,7 @@ export async function promoteDelegationFallback(
 							return;
 						}
 						appendRecord(directory, fallback.record);
+						maybeCompactDelegationsLocked(directory);
 						promoted = fallback.record;
 					},
 				);

@@ -4,7 +4,9 @@ import { SWARM_WORKTREE_DIR_NAME } from '../config/constants';
 import { clearTrajectoryStep } from '../hooks/trajectory-logger';
 import { validateSwarmPath } from '../hooks/utils';
 import { resetPrmSessionState } from '../prm';
+import { sanitizeDiagnosticText } from '../scope/path-identity.js';
 import { swarmState } from '../state';
+import { recoverStaleCoderSettlements } from '../workflow/coder-settlement.js';
 import {
 	cleanupOrphanedBranches,
 	type OrphanCleanupResult,
@@ -30,9 +32,11 @@ export const _internals: {
 		kind: 'reset' | 'reset-session',
 		relEntries: string[],
 	) => ResetBackupResult;
+	recoverStaleCoderSettlements: typeof recoverStaleCoderSettlements;
 } = {
 	cleanupOrphanedBranches,
 	backupSwarmStateBeforeReset,
+	recoverStaleCoderSettlements,
 };
 
 function errorMessage(err: unknown): string {
@@ -142,6 +146,122 @@ export async function handleResetSessionCommand(
 	swarmState.delegationChains.clear();
 	results.push(`✅ Cleared ${chainCount} delegation chain(s)`);
 
+	// Clear activeAgent alongside the sessions it is keyed by. With
+	// agentSessions cleared above, any surviving entry is an orphan no sweep
+	// can ever reclaim, and the snapshot writer would persist it forever.
+	const activeAgentCount = swarmState.activeAgent.size;
+	swarmState.activeAgent.clear();
+	results.push(`✅ Cleared ${activeAgentCount} active-agent mapping(s)`);
+
+	// Issue #2268: recover stale coder settlements. reset-session already
+	// clears every session's in-process state process-wide, so it is the
+	// operator's quiescence assertion: a DISPATCHED settlement WAL whose
+	// completion never arrived (host killed mid-dispatch, cancelled Task,
+	// gate denial on the reporter's pre-#2214 build) is settled here instead
+	// of wedging every future dispatch with CODER_DISPATCH_IN_PROGRESS.
+	// Runs BEFORE the .swarm-worktrees removal below so worktree-carrying
+	// settlements can still reconcile their merges. Fail-open per task.
+	let preserveWorktrees = false;
+	try {
+		const { results: settlementResults, truncated } =
+			await _internals.recoverStaleCoderSettlements(directory, {
+				force: true,
+			});
+		if (settlementResults.length === 0) {
+			results.push('⏭️ No coder settlements to recover');
+		}
+		for (const outcome of settlementResults) {
+			switch (outcome.outcome) {
+				case 'recovered':
+					results.push(
+						`✅ Recovered coder settlement ${outcome.taskId} (${
+							outcome.accepted
+								? 'changes attributed'
+								: 'no workspace change to attribute'
+						})`,
+					);
+					break;
+				case 'already_terminal':
+					results.push(
+						`⏭️ Coder settlement ${outcome.taskId} already ${outcome.state}`,
+					);
+					break;
+				case 'owned_in_process':
+					results.push(
+						`ℹ️ Coder settlement ${outcome.taskId} still registered in flight (${sanitizeDiagnosticText(
+							outcome.transitionId,
+						)}) — its dispatch may be genuinely running; not force-recovered`,
+					);
+					break;
+				case 'owned_by_live_foreign_pid':
+					results.push(
+						`ℹ️ Coder settlement ${outcome.taskId} owned by live process pid ${outcome.processId} (another OpenCode instance) — not touched; run /swarm recover there after closing it`,
+					);
+					break;
+				case 'unreadable_wal':
+					results.push(
+						`⚠️ Coder settlement WAL ${outcome.taskId} is unreadable — inspect .swarm/coder-settlements/${outcome.taskId}.json`,
+					);
+					break;
+				case 'error':
+					results.push(
+						`⚠️ Coder settlement ${outcome.taskId} recovery failed: ${sanitizeDiagnosticText(
+							outcome.message,
+							512,
+						)}`,
+					);
+					break;
+				default:
+					results.push(
+						`⚠️ Coder settlement ${(outcome as { taskId: string }).taskId}: unknown outcome`,
+					);
+					break;
+			}
+		}
+		if (truncated) {
+			results.push(
+				'⚠️ More settlement WALs exist than the recovery scan cap (200) — older settlements were NOT recovered. Re-run /swarm reset-session after the tasks above are settled.',
+			);
+		}
+		// reset-session always recovers with force, so mirror /swarm recover
+		// --force's heads-up when any in-process ownership key had to be
+		// released: a genuinely still-running dispatch's late completion will
+		// fail settlement with CODER_SETTLEMENT_IDEMPOTENCY_CONFLICT.
+		const forcedRecovered = settlementResults.filter(
+			(outcome) => outcome.outcome === 'recovered' && outcome.forced,
+		).length;
+		if (forcedRecovered > 0) {
+			results.push(
+				`⚠️ Released in-process ownership for ${forcedRecovered} dispatch(es) before recovery — if any was genuinely still running, its completion will report CODER_SETTLEMENT_IDEMPOTENCY_CONFLICT (safe to ignore; the settlement is already recovered).`,
+			);
+		}
+		// PR review PRR-012: a worktree-carrying settlement whose recovery
+		// errored still references its worktree — deleting .swarm-worktrees/
+		// now would strand the WAL (scopedObservedFiles would read null from
+		// the deleted worktree and every later recovery throws
+		// CODER_SETTLEMENT_RECOVERY_UNCERTAIN). 'unreadable_wal' also
+		// triggers preservation: an unparseable WAL may reference a worktree,
+		// which cannot be known without parsing it. Preserve the worktrees
+		// and tell the operator; branch cleanup below still runs.
+		preserveWorktrees = settlementResults.some(
+			(outcome) =>
+				outcome.outcome === 'error' || outcome.outcome === 'unreadable_wal',
+		);
+		if (preserveWorktrees) {
+			results.push(
+				'⚠️ Preserved .swarm-worktrees/ because at least one settlement recovery failed — a worktree referenced by an unsettled WAL would become unrecoverable if deleted. Resolve the failures above (re-run /swarm reset-session or /swarm recover) before clearing worktrees.',
+			);
+		}
+	} catch (err) {
+		// Reviewer round: the whole recovery call throwing leaves the
+		// settlement state unknown — same stranding risk as a per-task error,
+		// so preserve the worktrees here too.
+		preserveWorktrees = true;
+		results.push(
+			`⚠️ Coder settlement recovery failed (continuing with reset): ${errorMessage(err)}`,
+		);
+	}
+
 	// Best-effort: clean stale worktree directories and orphan branches
 	const worktreesDir = path.resolve(
 		path.dirname(directory),
@@ -149,8 +269,12 @@ export async function handleResetSessionCommand(
 	);
 	try {
 		if (fs.existsSync(worktreesDir)) {
-			fs.rmSync(worktreesDir, { recursive: true, force: true });
-			results.push('✅ Removed .swarm-worktrees/ directory');
+			if (preserveWorktrees) {
+				results.push('⏭️ Skipped .swarm-worktrees/ removal (see above)');
+			} else {
+				fs.rmSync(worktreesDir, { recursive: true, force: true });
+				results.push('✅ Removed .swarm-worktrees/ directory');
+			}
 		}
 	} catch (err) {
 		results.push(`⚠️ Failed to remove .swarm-worktrees/: ${errorMessage(err)}`);

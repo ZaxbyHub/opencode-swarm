@@ -28,6 +28,7 @@ import { join } from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { _flushForTesting } from '../../../src/hooks/agent-activity';
 import { resetSwarmState, swarmState } from '../../../src/state';
+import { _internals as atomicWriteInternals } from '../../../src/utils/atomic-write';
 
 const defaultConfig: PluginConfig = {
 	max_iterations: 5,
@@ -166,58 +167,52 @@ describe('Agent Activity — Adversarial Security & Edge Cases', () => {
 			const contextPath = join(tempDir, '.swarm', 'context.md');
 			await writeFile(contextPath, '# Initial\n');
 
-			// Create a promise we can control
-			let resolveWrite: () => void;
-			const writeBlocker = new Promise<void>((resolve) => {
-				resolveWrite = resolve!;
-			});
+			// The canonical writer is synchronous, so the real interleaving
+			// point for a concurrent state mutation is inside the payload
+			// write itself — mutate state on the first writeSync call, then
+			// delegate to the real writer. (The old Bun.write blocker could
+			// never reach this path after the issue #2035 migration.)
+			const real = atomicWriteInternals.writeSync;
+			let writeCalls = 0;
+			atomicWriteInternals.writeSync = (
+				fd: number,
+				buffer: Uint8Array,
+				offset: number,
+				length: number,
+			) => {
+				if (++writeCalls === 1) {
+					swarmState.pendingEvents = 10;
+					swarmState.toolAggregates.set('tool3', {
+						tool: 'tool3',
+						count: 2,
+						successCount: 1,
+						failureCount: 1,
+						totalDuration: 200,
+					});
+				}
+				return real(fd, buffer, offset, length);
+			};
 
-			// Mock Bun.write to block on first call, then release
-			const originalWrite = Bun.write;
-			let writeCount = 0;
-			const writeSpy = spyOn(Bun, 'write').mockImplementation(
-				async (path: string, data: string | BunFile) => {
-					writeCount++;
-					if (writeCount === 1) {
-						// Block first write to create race condition
-						await writeBlocker;
-					}
-					return originalWrite(path, data);
-				},
-			);
+			try {
+				const flush1 = _flushForTesting(tempDir);
+				const flush2 = _flushForTesting(tempDir);
+				await Promise.all([flush1, flush2]);
 
-			// Start first flush (will block)
-			const flush1 = _flushForTesting(tempDir);
+				// Final file is valid and reflects the concurrently-added state
+				const content = await Bun.file(contextPath).text();
+				expect(content).toContain('## Agent Activity');
+				expect(content).toContain('test-tool');
+				expect(content).toContain('tool3');
 
-			// While first flush is blocked, modify state and trigger second flush
-			swarmState.pendingEvents = 10;
-			swarmState.toolAggregates.set('tool3', {
-				tool: 'tool3',
-				count: 2,
-				successCount: 1,
-				failureCount: 1,
-				totalDuration: 200,
-			});
-
-			const flush2 = _flushForTesting(tempDir);
-
-			// Release the block
-			resolveWrite!();
-
-			// Wait for both to complete
-			await Promise.all([flush1, flush2]);
-
-			// Final file should be valid
-			const content = await Bun.file(contextPath).text();
-			expect(content).toContain('## Agent Activity');
-
-			// Verify .tmp file was cleaned up
-			const tempExists = await stat(`${contextPath}.tmp`)
-				.then(() => true)
-				.catch(() => false);
-			expect(tempExists).toBe(false);
-
-			writeSpy.mockRestore();
+				// No atomic-write temp residue of any grammar remains
+				const swarmFiles = await readdir(join(tempDir, '.swarm'));
+				const residue = swarmFiles.filter(
+					(f) => f.startsWith('context.md') && f.endsWith('.tmp'),
+				);
+				expect(residue).toEqual([]);
+			} finally {
+				atomicWriteInternals.writeSync = real;
+			}
 		});
 	});
 
@@ -402,28 +397,35 @@ describe('Agent Activity — Adversarial Security & Edge Cases', () => {
 			// Create initial context.md
 			await writeFile(contextPath, '# Initial\n');
 
-			// Mock Bun.write to simulate write error
-			const writeSpy = spyOn(Bun, 'write').mockImplementation(async () => {
+			const realWriteSync = atomicWriteInternals.writeSync;
+
+			// Force the canonical writer's payload write to fail (the seam the
+			// migrated writer actually uses — Bun.write is no longer on this path).
+			atomicWriteInternals.writeSync = () => {
 				throw new Error('ENOSPC: no space left on device');
-			});
+			};
 
-			// Flush should fail gracefully
-			await _flushForTesting(tempDir);
+			try {
+				// Flush should fail gracefully
+				await _flushForTesting(tempDir);
 
-			// Verify original context.md was not corrupted
-			const content = await Bun.file(contextPath).text();
-			expect(content).toBe('# Initial\n');
+				// Verify original context.md was not corrupted
+				const content = await Bun.file(contextPath).text();
+				expect(content).toBe('# Initial\n');
 
-			// Verify the CURRENT write's own unique temp file was cleaned up
-			// by atomicWriteFile's finally-unlink, regardless of the unrelated
-			// stale fixed-name file.
-			const swarmFiles = await readdir(join(tempDir, '.swarm'));
-			const ownTempFiles = swarmFiles.filter((f) =>
-				/^context\.md\.tmp\.\d+\.\d+$/.test(f),
-			);
-			expect(ownTempFiles).toEqual([]);
-
-			writeSpy.mockRestore();
+				// Verify the CURRENT write's own unique temp file was cleaned up
+				// by atomicWriteFile's finally-unlink, regardless of the unrelated
+				// stale fixed-name file.
+				const swarmFiles = await readdir(join(tempDir, '.swarm'));
+				const ownTempFiles = swarmFiles.filter(
+					(f) =>
+						/^context\.md\.[0-9a-f]{32}\.tmp$/.test(f) ||
+						/^context\.md\.tmp\.\d+\.\d+$/.test(f),
+				);
+				expect(ownTempFiles).toEqual([]);
+			} finally {
+				atomicWriteInternals.writeSync = realWriteSync;
+			}
 		});
 	});
 });

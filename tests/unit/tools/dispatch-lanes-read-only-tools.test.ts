@@ -57,6 +57,12 @@ describe('dispatch_lanes read-only tool permissions', () => {
 			'mandatory_lane_checklist: re-read every assigned candidate',
 		);
 		expect(prompt).toContain('Do not waive or abbreviate work for speed');
+		// #2276: the flat 12k cap became a derived per-lane budget — a reviewer
+		// lane owning 2 items gets floor 6_000 + 2 × 1_500.
+		expect(prompt).toContain(
+			'no more than 9000 characters of substantive output',
+		);
+		expect(prompt).toContain('final_response_char_budget: 9000');
 	});
 
 	test('passes the exact read-only tool map with shell and bash removed (#1691)', async () => {

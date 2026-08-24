@@ -5,7 +5,7 @@
  *
  *   1. `experimental.chat.messages.transform` — scans the latest
  *      architect-authored message for
- *      `KNOWLEDGE_APPLIED|IGNORED|CONTRADICTED|VIOLATED`
+ *      `KNOWLEDGE_APPLIED|IGNORED|N_A|CONTRADICTED|VIOLATED`
  *      markers and records them via `recordAcknowledgmentDeduped`. This
  *      runs BEFORE the architect's next tool call so the toolBefore gate
  *      sees the ack.
@@ -34,6 +34,7 @@
  * Non-architect agents are never gated.
  */
 
+import { existsSync } from 'node:fs';
 import { appendFile, mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
@@ -55,10 +56,19 @@ import {
 } from './knowledge-application.js';
 import {
 	commitApplicationOutcomeBatch,
+	commitGateReleaseBatch,
 	queryLiveMemberships,
 	type ReceiptMembership,
 } from './knowledge-receipt-ledger.js';
-import type { MessageWithParts } from './knowledge-types.js';
+import {
+	readKnowledge,
+	resolveHiveKnowledgePath,
+	resolveSwarmKnowledgePath,
+} from './knowledge-store.js';
+import type {
+	MessageWithParts,
+	SwarmKnowledgeEntry,
+} from './knowledge-types.js';
 
 /** Tools that require knowledge-directive acknowledgment before execution. */
 export const HIGH_RISK_TOOLS = new Set([
@@ -116,10 +126,18 @@ function selectStaleUnmarkedMemberships(
 	stalenessMs: number,
 ): ReceiptMembership[] {
 	return memberships.filter((membership) => {
-		if (membership.application_marker) return false;
+		if (membership.application_marker || hasEffectiveGateRelease(membership))
+			return false;
 		const committedAt = Date.parse(membership.committed_at);
 		return Number.isFinite(committedAt) && now - committedAt > stalenessMs;
 	});
+}
+
+function hasEffectiveGateRelease(membership: ReceiptMembership): boolean {
+	return (
+		membership.gate_release?.membership_event_id ===
+		membership.membership_event_id
+	);
 }
 
 function groupMembershipsByTrace(
@@ -132,6 +150,93 @@ function groupMembershipsByTrace(
 		byTrace.set(membership.trace_id, group);
 	}
 	return byTrace;
+}
+
+/**
+ * Best-effort lookup of directive lesson text by knowledge entry id, for
+ * surfacing the acknowledged content inside a gate denial (issue #2299).
+ *
+ * Reads the project-local swarm store always (cached by `readKnowledge` and
+ * bounded in size by the store's own knowledge cap) and the cross-project hive
+ * store only when the hive file exists. A hive entry can only be an
+ * unacknowledged architect-directive membership if it was displayed, which
+ * requires hive to have been enabled at display time, so reading it back here
+ * is not a fresh disclosure. Fail-open: any read error simply omits the
+ * content echo and never alters the denial outcome.
+ */
+export async function loadDirectiveContents(
+	directory: string,
+	entryIds: string[],
+): Promise<Map<string, string>> {
+	const contents = new Map<string, string>();
+	if (entryIds.length === 0) return contents;
+	const want = new Set(entryIds);
+	const sources: string[] = [resolveSwarmKnowledgePath(directory)];
+	try {
+		const hivePath = resolveHiveKnowledgePath();
+		if (existsSync(hivePath)) sources.push(hivePath);
+	} catch {
+		/* hive resolution unavailable — content echo is best-effort */
+	}
+	for (const filePath of sources) {
+		try {
+			const entries = await readKnowledge<SwarmKnowledgeEntry>(filePath);
+			for (const entry of entries) {
+				if (
+					want.has(entry.id) &&
+					!contents.has(entry.id) &&
+					typeof entry.lesson === 'string'
+				) {
+					contents.set(entry.id, entry.lesson);
+				}
+			}
+		} catch {
+			/* fail-open: never let content echo break the denial */
+		}
+	}
+	return contents;
+}
+
+/**
+ * Build the KNOWLEDGE_ENFORCE_GATE_DENY message (issue #2299). Renders
+ * unacknowledged memberships in the single canonical colon pair form
+ * `<trace_id>:<entry_id>`, lists every valid verb with its token grammar,
+ * and emits one fully-instantiated, copy-pasteable `KNOWLEDGE_N_A` example per
+ * membership plus the directive content being acknowledged.
+ */
+export function buildGateDenialMessage(
+	toolName: string,
+	memberships: ReceiptMembership[],
+	contents: Map<string, string>,
+): string {
+	const pairs = memberships.map((m) => `${m.trace_id}:${m.entry_id}`);
+	const examples = memberships.map(
+		(m) => `  KNOWLEDGE_N_A:${m.trace_id}:${m.entry_id} reason=<reason>`,
+	);
+	const contentLines = memberships.map((m) => {
+		const lesson = contents.get(m.entry_id);
+		return `  [${m.trace_id}:${m.entry_id}] ${
+			lesson ??
+			'content not found in knowledge store — see the most recent <swarm_knowledge_directives> block or run knowledge_recall'
+		}`;
+	});
+	return [
+		`KNOWLEDGE_ENFORCE_GATE_DENY: ${toolName} blocked — unacknowledged critical knowledge directive(s): ${pairs.join(', ')}.`,
+		'',
+		'Acknowledge each directive using its exact, colon-separated tokens (<trace_id>:<entry_id>) with one of these verb markers:',
+		'  KNOWLEDGE_APPLIED:<trace_id>:<entry_id>',
+		'  KNOWLEDGE_IGNORED:<trace_id>:<entry_id> reason=<short reason>',
+		'  KNOWLEDGE_CONTRADICTED:<trace_id>:<entry_id> reason=<observable conflict>',
+		'  KNOWLEDGE_N_A:<trace_id>:<entry_id> reason=<short reason>',
+		'  KNOWLEDGE_VIOLATED:<trace_id>:<entry_id> reason=<short reason>',
+		'KNOWLEDGE_N_A (does not apply; neutral) is a valid, penalty-free acknowledgment when the directive does not pertain to the current step.',
+		'',
+		'Copy-paste to acknowledge each directive now (replace <reason> with a short reason):',
+		...examples,
+		'',
+		'Directive content being acknowledged:',
+		...contentLines,
+	].join('\n');
 }
 
 /**
@@ -221,7 +326,8 @@ export async function knowledgeApplicationGateBefore(
 		return;
 	}
 	let unackedMemberships = criticalMemberships.filter(
-		(membership) => !membership.application_marker,
+		(membership) =>
+			!membership.application_marker && !hasEffectiveGateRelease(membership),
 	);
 	if (unackedMemberships.length === 0) {
 		clearGateDenialCount(sessionID);
@@ -246,19 +352,18 @@ export async function knowledgeApplicationGateBefore(
 			for (const [traceId, memberships] of groupMembershipsByTrace(
 				staleMemberships,
 			)) {
-				const committed = await commitApplicationOutcomeBatch(directory, {
+				const committed = await commitGateReleaseBatch(directory, {
 					trace_id: traceId,
 					session_id: sessionID,
 					items: memberships.map((membership) => ({
 						entry_id: membership.entry_id,
-						outcome: 'applied' as const,
-						source: 'application_gate_staleness_clear',
+						source: 'application_gate_staleness_release',
 						reason: 'configured staleness escape hatch',
 					})),
 				});
 				if (!committed.ok || committed.rejected.length > 0) {
 					throw new Error(
-						'KNOWLEDGE_ENFORCE_GATE_DENY: could not durably record staleness clear',
+						'KNOWLEDGE_ENFORCE_GATE_DENY: could not durably record staleness release',
 					);
 				}
 			}
@@ -274,13 +379,6 @@ export async function knowledgeApplicationGateBefore(
 			const staleIds = [
 				...new Set(staleMemberships.map((membership) => membership.entry_id)),
 			];
-			for (const id of staleIds) {
-				if (
-					!unackedMemberships.some((membership) => membership.entry_id === id)
-				) {
-					addKnowledgeAckDedup(buildAckDedupKey(sessionID, id, 'applied'));
-				}
-			}
 			clearGateDenialCount(sessionID);
 			// Awaited (not fire-and-forget): the bypass state above is already
 			// committed, so the audit write is the only remaining evidence of
@@ -333,24 +431,20 @@ export async function knowledgeApplicationGateBefore(
 			for (const [traceId, memberships] of groupMembershipsByTrace(
 				unackedMemberships,
 			)) {
-				const committed = await commitApplicationOutcomeBatch(directory, {
+				const committed = await commitGateReleaseBatch(directory, {
 					trace_id: traceId,
 					session_id: sessionID,
 					items: memberships.map((membership) => ({
 						entry_id: membership.entry_id,
-						outcome: 'applied' as const,
-						source: 'application_gate_denial_limit_clear',
+						source: 'application_gate_denial_limit_release',
 						reason: 'configured denial-count escape hatch',
 					})),
 				});
 				if (!committed.ok || committed.rejected.length > 0) {
 					throw new Error(
-						'KNOWLEDGE_ENFORCE_GATE_DENY: could not durably record denial-limit clear',
+						'KNOWLEDGE_ENFORCE_GATE_DENY: could not durably record denial-limit release',
 					);
 				}
-			}
-			for (const id of unacked) {
-				addKnowledgeAckDedup(buildAckDedupKey(sessionID, id, 'applied'));
 			}
 			clearCriticalShownIds(sessionID);
 			clearGateDenialCount(sessionID);
@@ -373,9 +467,9 @@ export async function knowledgeApplicationGateBefore(
 			return;
 		}
 
-		const ids = unackedPairs.join(', ');
+		const contents = await loadDirectiveContents(directory, unacked);
 		throw new Error(
-			`KNOWLEDGE_ENFORCE_GATE_DENY: ${toolName} blocked — critical knowledge membership(s) ${ids} require exact-pair KNOWLEDGE_APPLIED:<trace_id>:<entry_id>, KNOWLEDGE_IGNORED:<trace_id>:<entry_id> reason=..., KNOWLEDGE_CONTRADICTED:<trace_id>:<entry_id> reason=..., or KNOWLEDGE_VIOLATED:<trace_id>:<entry_id> reason=... before this action.`,
+			buildGateDenialMessage(toolName, unackedMemberships, contents),
 		);
 	}
 	const unacked = [
@@ -472,7 +566,8 @@ export async function knowledgeApplicationTransformScan(
 			(membership) =>
 				membership.trace_id === ack.trace_id &&
 				membership.entry_id === ack.id &&
-				!membership.application_marker,
+				!membership.application_marker &&
+				!hasEffectiveGateRelease(membership),
 		);
 		if (memberships.length === 0) continue;
 		const byTrace = new Map<string, typeof memberships>();
@@ -522,4 +617,6 @@ export const _internals = {
 	writeWarnEvent,
 	selectCurrentArchitectDirectiveMemberships,
 	selectStaleUnmarkedMemberships,
+	loadDirectiveContents,
+	buildGateDenialMessage,
 };

@@ -39,6 +39,7 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm rollback` — restore swarm state or project files to a checkpoint
 - `/swarm reset` — clear swarm state files `[--confirm]`
 - `/swarm reset-session` — clear session state, preserve plan/evidence/knowledge
+- `/swarm recover` — settle wedged coder settlements `[task_id] [--force]` (human-only)
 - `/swarm checkpoint` — manage project checkpoints `[save|restore|delete|list] <label>`
 - `/swarm finalize` — finalize the swarm project and archive evidence
 - `/swarm close` — deprecated alias for `/swarm finalize`
@@ -78,6 +79,7 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm knowledge restore` — restore a quarantined or archived knowledge entry
 - `/swarm knowledge unactionable` — list unactionable knowledge entries pending hardening
 - `/swarm knowledge retry-hardening` — reset retire candidates for re-hardening
+- `/swarm knowledge hive-quarantine` — human-only exact-ID quarantine of hive-store entries with backup and rollback (issue #2033)
 - `/swarm memory` — show Swarm memory commands
 - `/swarm memory status` — show Swarm memory provider, JSONL, and migration status
 - `/swarm memory pending` — show pending Swarm memory proposals
@@ -87,6 +89,7 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm memory stale` — list stale and low-utility Swarm memories
 - `/swarm memory export` — export current Swarm memory to JSONL files
 - `/swarm memory evaluate` — run golden Swarm memory recall evaluation fixtures
+- `/swarm memory audit-verify` — verify the memory audit-log hash chain (tamper detection)
 - `/swarm memory import` — import legacy JSONL memory into SQLite
 - `/swarm memory migrate` — run the one-time legacy JSONL to SQLite migration
 - `/swarm memory consolidation-log` — summarize recent memory consolidation passes

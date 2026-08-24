@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from 'bun:test';
+import { afterAll, afterEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -15,6 +15,12 @@ const roots: string[] = [];
 const realLegacySpawn = _internals.spawnSync;
 const realRunExternalTool = _internals.runExternalTool;
 const realResolveExecutable = _internals.resolveExecutableFromPath;
+const realResolveGitExecutable = _internals.resolveGitExecutable;
+
+// Issue #2236 hardening (lane C1b): executeMutation's git apply/revert sites
+// resolve the git binary via resolveGitExecutable() instead of a bare 'git'
+// literal. Stub it so `call.executable` assertions below stay deterministic.
+_internals.resolveGitExecutable = () => 'git';
 
 function root(): string {
 	const value = fs.realpathSync(
@@ -263,4 +269,8 @@ describe('bounded mutation command runner', () => {
 		expect(report.cancelled).toBe(2);
 		expect(runner).not.toHaveBeenCalled();
 	});
+});
+
+afterAll(() => {
+	_internals.resolveGitExecutable = realResolveGitExecutable;
 });

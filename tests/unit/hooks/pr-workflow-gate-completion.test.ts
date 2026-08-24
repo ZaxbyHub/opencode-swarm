@@ -59,6 +59,11 @@ beforeEach(() => {
 		mkdtempSync(path.join(os.tmpdir(), 'pr-gate-completion-')),
 	);
 	_test_exports.resetTrackedStateCache();
+	// Issue #2251: completion settles lanes, and settlement now probes host
+	// session liveness. Pin "no host" so a `swarmState.opencodeClient` leaked by
+	// another file cannot make this suite order-dependent (or make it wait out
+	// the probe's real 5s deadline against bun's 5s per-test timeout).
+	_test_exports.getSessionOps = () => null;
 	_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
 	_test_exports.resolveCurrentUpstreamRemoteRef = () =>
 		'refs/remotes/origin/pr-head';

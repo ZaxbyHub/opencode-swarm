@@ -37,6 +37,11 @@ import {
 } from '../knowledge/family-migration-shared.js';
 import { warn } from '../utils/logger.js';
 import { MEMORY_FAMILY } from './memory-family-manifest.js';
+import {
+	assertEventIdentityCompatible,
+	type MemoryOutcomeEvent,
+	validateOutcomeEvent,
+} from './outcome-events.js';
 import type { VettedMemoryRoot } from './storage-root.js';
 import { isCohortRoot, rootStoragePath } from './storage-root.js';
 
@@ -98,6 +103,34 @@ function appendUnionById<T>(
 		}
 		result.push(src);
 		seen.add(id);
+		added++;
+	}
+	return { merged: result, added, skipped };
+}
+
+/**
+ * Outcome event ids are retry identities, not generic append-only row ids.
+ * Apply the provider's shared semantic collision rules while retaining the
+ * destination's first committed representation (including its timestamp).
+ */
+function appendUnionOutcomeEvents(
+	destination: unknown[],
+	source: unknown[],
+): { merged: MemoryOutcomeEvent[]; added: number; skipped: number } {
+	const result = destination.map(validateOutcomeEvent);
+	const byId = new Map(result.map((event) => [event.id, event]));
+	let added = 0;
+	let skipped = 0;
+	for (const value of source) {
+		const event = validateOutcomeEvent(value);
+		const existing = byId.get(event.id);
+		assertEventIdentityCompatible(existing, event);
+		if (existing) {
+			skipped++;
+			continue;
+		}
+		result.push(event);
+		byId.set(event.id, event);
 		added++;
 	}
 	return { merged: result, added, skipped };
@@ -198,13 +231,30 @@ async function mergeStagedSqlite(
 		const { loadDatabaseCtor } = await import('../db/sqlite-loader.js');
 		const Db = loadDatabaseCtor();
 		const db = new Db(destDbPath);
+		let attached = false;
+		let transactionActive = false;
 		try {
-			// ATTACH the staged DB read-only. #1850 (M-001 fix): escape single
-			// quotes in the path by doubling them (SQL-standard string escape)
-			// so paths containing `'` don't break the ATTACH. We avoid
-			// pathToFileURL because node:sqlite on Windows rejects file:// URLs.
+			// ATTACH is connection state rather than transaction state. Attach first,
+			// then make schema preparation, collision validation, and every table
+			// insert one atomic destination transaction.
 			const safePath = stagedPath.replace(/'/g, "''");
 			db.run(`ATTACH DATABASE '${safePath}' AS staged;`);
+			attached = true;
+			db.run('BEGIN IMMEDIATE');
+			transactionActive = true;
+			// A destination last opened by a pre-#1989 build does not yet have the
+			// canonical outcome table. Create the additive shape transactionally so a
+			// non-empty cohort merge cannot silently skip outcome history. The normal
+			// provider migration remains responsible for stamping schema version 11.
+			db.run(`CREATE TABLE IF NOT EXISTS memory_outcomes (
+				id TEXT PRIMARY KEY,
+				memory_id TEXT NOT NULL,
+				generation TEXT NOT NULL,
+				at TEXT NOT NULL,
+				event_json TEXT NOT NULL
+			);`);
+			db.run(`CREATE INDEX IF NOT EXISTS idx_memory_outcomes_memory_generation
+				ON memory_outcomes(memory_id, generation, at, id);`);
 			// Merge each id-keyed table. INSERT OR IGNORE skips rows whose id
 			// already exists in the destination (idempotent on retry).
 			const tables = [
@@ -213,6 +263,7 @@ async function mergeStagedSqlite(
 				'memory_events',
 				'memory_recall_usage',
 				'memory_reward_events',
+				'memory_outcomes',
 			];
 			let merged = 0;
 			let skippedDueToError = 0;
@@ -227,11 +278,52 @@ async function mergeStagedSqlite(
 						)
 						.get();
 					if (!stashed || stashed.n === 0) continue;
+					if (table === 'memory_outcomes') {
+						const overlaps = db
+							.query<
+								{
+									id: string;
+									destination_json: string;
+									source_json: string;
+								},
+								[]
+							>(
+								`SELECT destination.id,
+								        destination.event_json AS destination_json,
+								        source.event_json AS source_json
+								 FROM memory_outcomes AS destination
+								 JOIN staged.memory_outcomes AS source ON source.id = destination.id
+								 ORDER BY destination.id`,
+							)
+							.all();
+						for (const overlap of overlaps) {
+							const destinationEvent = validateOutcomeEvent(
+								JSON.parse(overlap.destination_json),
+							);
+							const sourceEvent = validateOutcomeEvent(
+								JSON.parse(overlap.source_json),
+							);
+							if (
+								destinationEvent.id !== overlap.id ||
+								sourceEvent.id !== overlap.id
+							) {
+								throw new Error(
+									`outcome event ${overlap.id} has invalid row identity`,
+								);
+							}
+							assertEventIdentityCompatible(destinationEvent, sourceEvent);
+						}
+					}
 					const result = db.run(
 						`INSERT OR IGNORE INTO ${table} SELECT * FROM staged.${table};`,
 					);
 					merged += result.changes ?? 0;
 				} catch (err) {
+					// Outcome event ids are retry identities. Ignoring a same-id,
+					// different-payload collision would silently rewrite history, so this
+					// canonical table fails closed while legacy auxiliary tables retain
+					// their best-effort behavior.
+					if (table === 'memory_outcomes') throw err;
 					// #1850 (M-002 fix): track tables that failed schema-mismatch or
 					// other errors, so the migration report surfaces them instead of
 					// silently claiming skipped:0.
@@ -241,14 +333,32 @@ async function mergeStagedSqlite(
 					);
 				}
 			}
-			db.run('DETACH DATABASE staged;');
+			db.run('COMMIT');
+			transactionActive = false;
 			if (failedTables.length > 0) {
 				warn(
 					`[memory-family-migration] ${failedTables.length} table(s) skipped during SQLite ATTACH merge: ${failedTables.join(', ')}`,
 				);
 			}
 			return { merged, skipped: skippedDueToError };
+		} catch (error) {
+			if (transactionActive) {
+				try {
+					db.run('ROLLBACK');
+				} catch {
+					// Preserve the merge failure if rollback also fails.
+				}
+				transactionActive = false;
+			}
+			throw error;
 		} finally {
+			if (attached) {
+				try {
+					db.run('DETACH DATABASE staged;');
+				} catch {
+					// Closing the connection releases an attachment that cannot detach.
+				}
+			}
 			db.close();
 			// #1850 (final-critic cleanup): remove the staged DB file (+ sidecars)
 			// after the ATTACH merge so it does not litter the destination dir.
@@ -369,7 +479,10 @@ export async function migrateMemoryFamily(
 				}
 				const srcData = readJsonl<unknown>(srcPath);
 				const destData = readJsonl<unknown>(destPath);
-				const { merged, added, skipped } = appendUnionById(destData, srcData);
+				const { merged, added, skipped } =
+					member.filename === 'outcome-events.jsonl'
+						? appendUnionOutcomeEvents(destData, srcData)
+						: appendUnionById(destData, srcData);
 				const serialized = serializeJsonl(merged);
 				if (!validateSerializedJsonl(serialized)) {
 					throw new Error(
@@ -431,6 +544,7 @@ export async function migrateMemoryFamily(
 
 export const _internals = {
 	appendUnionById,
+	appendUnionOutcomeEvents,
 	serializeJsonl,
 	validateSerializedJsonl,
 	stageSqliteDb,

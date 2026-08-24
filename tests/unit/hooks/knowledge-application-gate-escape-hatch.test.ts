@@ -67,11 +67,14 @@ describe('knowledge application V2 escape hatches', () => {
 		const state = await queryLiveMemberships(directory, {
 			include_terminal: true,
 		});
-		expect(
-			state.ok &&
-				state.memberships[0]?.application_marker?.source ===
-					'application_gate_denial_limit_clear',
-		).toBe(true);
+		expect(state.ok).toBe(true);
+		if (!state.ok) return;
+		expect(state.memberships[0]?.gate_release).toMatchObject({
+			source: 'application_gate_denial_limit_release',
+			membership_event_id: state.memberships[0]?.membership_event_id,
+		});
+		expect(state.memberships[0]?.application_marker).toBeUndefined();
+		expect(state.memberships[0]?.terminal).toBeUndefined();
 		expect(
 			readFileSync(path.join(directory, '.swarm', 'events.jsonl'), 'utf8'),
 		).toContain('knowledge_application_gate_denial_limit_clear');
@@ -94,17 +97,21 @@ describe('knowledge application V2 escape hatches', () => {
 		const state = await queryLiveMemberships(directory, {
 			include_terminal: true,
 		});
+		expect(state.ok).toBe(true);
+		if (!state.ok) return;
 		expect(
-			state.ok &&
-				state.memberships.every(
-					(item) => item.application_marker?.outcome === 'applied',
-				),
+			state.memberships.every(
+				(item) =>
+					item.gate_release?.source === 'application_gate_staleness_release' &&
+					item.application_marker === undefined &&
+					item.terminal === undefined,
+			),
 		).toBe(true);
 		expect(
 			swarmState.knowledgeAckDedup.has(
 				buildAckDedupKey('session-a', ENTRY, 'applied'),
 			),
-		).toBe(true);
+		).toBe(false);
 		expect(swarmState.currentCriticalShownIds.has('session-a')).toBe(false);
 		expect(
 			readFileSync(path.join(directory, '.swarm', 'events.jsonl'), 'utf8'),

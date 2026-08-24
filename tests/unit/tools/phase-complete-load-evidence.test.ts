@@ -37,6 +37,26 @@ vi.mock('../../../src/evidence/manager', () => ({
 // Import the tool after mocking
 const { phase_complete } = await import('../../../src/tools/phase-complete');
 
+function retrospectiveGate(result: {
+	gate_report?: {
+		entries?: Array<{
+			id: string;
+			recovery?: {
+				kind?: string;
+				action?: string;
+				args?: Record<string, unknown>;
+			};
+			requiredRecoveryKind?: string;
+		}>;
+	};
+}) {
+	const entry = result.gate_report?.entries?.find(
+		(candidate) => candidate.id === 'retrospective',
+	);
+	expect(entry).toBeDefined();
+	return entry!;
+}
+
 /**
  * Helper function to write gate evidence files for Phase 4 mandatory gates
  * (completion-verify and drift-verifier)
@@ -200,7 +220,9 @@ describe('phase_complete - loadEvidence discriminated union fixes (A+B+C)', () =
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
 			expect(parsed.reason).toBe('RETROSPECTIVE_MISSING');
-			expect(parsed.message).toContain('no valid retrospective evidence found');
+			expect(parsed.message).toContain(
+				'cannot be completed without an explicit retrospective verdict',
+			);
 		});
 
 		test('3. Fix A: Uses status === "found" check (discriminated union) for retroResult', async () => {
@@ -363,146 +385,31 @@ describe('phase_complete - loadEvidence discriminated union fixes (A+B+C)', () =
 		});
 	});
 
-	describe('Fix C: Valid JSON template in warnings[1]', () => {
-		test('8. Template in warnings[1] is valid parseable JSON', async () => {
-			// Arrange
+	describe('Fix C: structured retrospective recovery', () => {
+		test('8-13. Missing evidence advertises the wired write_retro recovery', async () => {
 			const phase = 1;
 			ensureAgentSession('sess1');
-
 			mockLoadEvidence.mockResolvedValue({ status: 'not_found' });
 			mockListEvidenceTaskIds.mockResolvedValue([]);
 
-			// Act
-			const result = await phase_complete.execute({
-				phase,
-				sessionID: 'sess1',
+			const parsed = JSON.parse(
+				await phase_complete.execute({ phase, sessionID: 'sess1' }),
+			);
+			const entry = retrospectiveGate(parsed);
+
+			expect(entry.recovery).toEqual({
+				kind: 'tool',
+				action: 'write_retro',
+				args: { phase },
 			});
-			const parsed = JSON.parse(result);
-
-			// Assert - warnings[1] should be valid JSON string
-			expect(parsed.warnings).toBeDefined();
-			expect(parsed.warnings.length).toBeGreaterThanOrEqual(2);
-			expect(typeof parsed.warnings[1]).toBe('string');
-
-			// Parse the template and verify it's valid
-			const template = JSON.parse(parsed.warnings[1] as string);
-			expect(template).toBeDefined();
-			expect(typeof template).toBe('object');
-		});
-
-		test('9. Template has schema_version: "1.0.0"', async () => {
-			// Arrange
-			const phase = 1;
-			ensureAgentSession('sess1');
-
-			mockLoadEvidence.mockResolvedValue({ status: 'not_found' });
-			mockListEvidenceTaskIds.mockResolvedValue([]);
-
-			// Act
-			const result = await phase_complete.execute({
-				phase,
-				sessionID: 'sess1',
-			});
-			const parsed = JSON.parse(result);
-
-			// Assert
-			const template = JSON.parse(parsed.warnings[1] as string);
-			expect(template.schema_version).toBe('1.0.0');
-		});
-
-		test('10. Template has task_count: 1 (not 0)', async () => {
-			// Arrange
-			const phase = 1;
-			ensureAgentSession('sess1');
-
-			mockLoadEvidence.mockResolvedValue({ status: 'not_found' });
-			mockListEvidenceTaskIds.mockResolvedValue([]);
-
-			// Act
-			const result = await phase_complete.execute({
-				phase,
-				sessionID: 'sess1',
-			});
-			const parsed = JSON.parse(result);
-
-			// Assert
-			const template = JSON.parse(parsed.warnings[1] as string);
-			expect(template.entries).toBeDefined();
-			expect(template.entries.length).toBeGreaterThan(0);
-			expect(template.entries[0].task_count).toBe(1);
-		});
-
-		test('11. Template has task_complexity: "simple" (not "medium")', async () => {
-			// Arrange
-			const phase = 1;
-			ensureAgentSession('sess1');
-
-			mockLoadEvidence.mockResolvedValue({ status: 'not_found' });
-			mockListEvidenceTaskIds.mockResolvedValue([]);
-
-			// Act
-			const result = await phase_complete.execute({
-				phase,
-				sessionID: 'sess1',
-			});
-			const parsed = JSON.parse(result);
-
-			// Assert
-			const template = JSON.parse(parsed.warnings[1] as string);
-			expect(template.entries[0].task_complexity).toBe('simple');
-		});
-
-		test('12. Template has verdict: "pass"', async () => {
-			// Arrange
-			const phase = 1;
-			ensureAgentSession('sess1');
-
-			mockLoadEvidence.mockResolvedValue({ status: 'not_found' });
-			mockListEvidenceTaskIds.mockResolvedValue([]);
-
-			// Act
-			const result = await phase_complete.execute({
-				phase,
-				sessionID: 'sess1',
-			});
-			const parsed = JSON.parse(result);
-
-			// Assert
-			const template = JSON.parse(parsed.warnings[1] as string);
-			expect(template.entries[0].verdict).toBe('pass');
-		});
-
-		test('13. Template uses snake_case field names', async () => {
-			// Arrange
-			const phase = 1;
-			ensureAgentSession('sess1');
-
-			mockLoadEvidence.mockResolvedValue({ status: 'not_found' });
-			mockListEvidenceTaskIds.mockResolvedValue([]);
-
-			// Act
-			const result = await phase_complete.execute({
-				phase,
-				sessionID: 'sess1',
-			});
-			const parsed = JSON.parse(result);
-
-			// Assert
-			const template = JSON.parse(parsed.warnings[1] as string);
-			// Check for snake_case fields
-			expect(template.schema_version).toBeDefined(); // snake_case
-			expect(template.task_id).toBeDefined(); // snake_case
-			expect(template.created_at).toBeDefined(); // snake_case
-			expect(template.updated_at).toBeDefined(); // snake_case
-			expect(template.entries[0].phase_number).toBeDefined(); // snake_case
-			expect(template.entries[0].task_count).toBeDefined(); // snake_case
-			expect(template.entries[0].task_complexity).toBeDefined(); // snake_case
-			expect(template.entries[0].top_rejection_reasons).toBeDefined(); // snake_case
-			expect(template.entries[0].lessons_learned).toBeDefined(); // snake_case
+			expect(entry.requiredRecoveryKind).toBe('tool');
+			expect(parsed.warnings).not.toContainEqual(
+				expect.stringContaining('"schema_version"'),
+			);
 		});
 	});
 
-	describe('Combined scenarios: Discriminated union + schema errors + template', () => {
+	describe('Combined scenarios: discriminated union + schema errors + recovery', () => {
 		test('14. Fallback scan: when primary is not_found but fallback finds valid retro -> proceeds', async () => {
 			// Arrange
 			const phase = 1;
@@ -557,7 +464,7 @@ describe('phase_complete - loadEvidence discriminated union fixes (A+B+C)', () =
 			expect(parsed.status).toBe('success');
 		});
 
-		test('15. Full flow: not_found -> fallback not_found -> blocked with template and schema errors', async () => {
+		test('15. Full flow: not_found -> invalid fallback -> typed block with wired recovery', async () => {
 			// Arrange
 			const phase = 1;
 			ensureAgentSession('sess1');
@@ -584,15 +491,15 @@ describe('phase_complete - loadEvidence discriminated union fixes (A+B+C)', () =
 			// Assert
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
-			expect(parsed.reason).toBe('RETROSPECTIVE_MISSING');
+			expect(parsed.reason).toBe('RETROSPECTIVE_SCHEMA_INVALID');
 			expect(parsed.message).toContain('Schema validation failed');
 			expect(parsed.message).toContain(schemaErrors[0]);
 
-			// Verify template is valid JSON
-			const template = JSON.parse(parsed.warnings[1] as string);
-			expect(template.schema_version).toBe('1.0.0');
-			expect(template.entries[0].task_count).toBe(1);
-			expect(template.entries[0].task_complexity).toBe('simple');
+			expect(retrospectiveGate(parsed).recovery).toEqual({
+				kind: 'tool',
+				action: 'write_retro',
+				args: { phase },
+			});
 		});
 	});
 

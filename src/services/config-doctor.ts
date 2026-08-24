@@ -144,6 +144,78 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Council policy visibility findings (issue #2102 contracts C/E/F), driven by
+ * the RAW config files so they fire ONLY when the user explicitly wrote the
+ * key — schema defaults never produce noise.
+ */
+function collectRawCouncilPolicyFindings(directory: string): ConfigFinding[] {
+	const findings: ConfigFinding[] = [];
+	const { userConfigPath, projectConfigPath } = getConfigPaths(directory);
+
+	for (const configPath of [userConfigPath, projectConfigPath]) {
+		if (!fs.existsSync(configPath)) continue;
+		try {
+			const stats = fs.statSync(configPath);
+			if (stats.size > CONFIG_DOCTOR_MAX_CONFIG_FILE_BYTES) continue;
+			const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as unknown;
+			if (!isPlainObject(raw) || raw.council === undefined) continue;
+			if (!isPlainObject(raw.council)) continue;
+			const council = raw.council;
+
+			if ('parallelTimeoutMs' in council) {
+				findings.push({
+					id: 'council-parallel-timeout-deprecated',
+					title: 'Deprecated and inert: council.parallelTimeoutMs',
+					description:
+						'Config field "council.parallelTimeoutMs" (in ' +
+						configPath +
+						') is deprecated and inert: no runtime consumer exists and no timeout is enforced. It is accepted only for parse compatibility. Remove the key — dispatch timeouts are governed by the agent host. The field is scheduled for removal in a future release.',
+					severity: 'warn',
+					path: 'council.parallelTimeoutMs',
+					currentValue: council.parallelTimeoutMs,
+					autoFixable: false,
+				});
+			}
+			if ('escalateOnMaxRounds' in council) {
+				findings.push({
+					id: 'council-escalate-inert',
+					title: 'Inert: council.escalateOnMaxRounds',
+					description:
+						'Config field "council.escalateOnMaxRounds" (in ' +
+						configPath +
+						') is set, but the handler/webhook remains INERT in this release: no handler, webhook, or outbound execution exists or was added (issue #1650). Max-rounds exhaustion emits a durable structured event (.swarm/council/events/max-rounds-exhaustion.jsonl) and a user escalation message instead; the run stays fail-closed. Wiring real outbound escalation requires a separate security review.',
+					severity: 'warn',
+					path: 'council.escalateOnMaxRounds',
+					currentValue: '[redacted: handler/webhook strings are never echoed]',
+					autoFixable: false,
+				});
+			}
+			if (
+				isPlainObject(council.finalCompletionPolicy) &&
+				council.finalCompletionPolicy.mode === 'quorum'
+			) {
+				findings.push({
+					id: 'council-final-quorum-weaker',
+					title:
+						'council.finalCompletionPolicy.mode "quorum" weakens the strict final council',
+					description:
+						'Final-council completion is configured in quorum mode (in ' +
+						configPath +
+						'): a bounded minimum of distinct canonical members can accept the project instead of the strict default (all five canonical roles, zero absentees). This is weaker than the strict default. Any change to this policy invalidates previously accepted final-council evidence.',
+					severity: 'warn',
+					path: 'council.finalCompletionPolicy',
+					currentValue: council.finalCompletionPolicy,
+					autoFixable: false,
+				});
+			}
+		} catch {
+			// Malformed raw config is reported by the strict-section collector.
+		}
+	}
+	return findings;
+}
+
 function collectRawGatesConfigFindings(directory: string): ConfigFinding[] {
 	const findings: ConfigFinding[] = [];
 	const { userConfigPath, projectConfigPath } = getConfigPaths(directory);
@@ -1425,6 +1497,51 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 			break;
 		}
 
+		case 'git': {
+			emitObjectTypeMismatch('git', value, findings);
+			break;
+		}
+
+		// `git.binary` overrides which git executable the plugin spawns.
+		// `GitConfigSchema` deliberately does NOT `.refine()` this field: a refine
+		// failure fails the WHOLE config parse, and a config that cannot load is
+		// precisely the "config value makes git unreachable" outcome the field is
+		// meant to avoid (see the comment above GitConfigSchema in
+		// src/config/schema.ts). Validation is therefore owed here, where a
+		// finding is advisory and non-fatal — without it a typo'd or blank
+		// override is accepted silently and only surfaces as a spawn failure.
+		//
+		// These findings are SOURCE-AGNOSTIC by construction: this validator
+		// receives a key/value pair, not the file it came from. The trust
+		// decision that a project-level `git.binary` is refused outright
+		// (CWE-427) therefore lives in the loader, which does see provenance —
+		// `enforceGitBinaryProvenance` in src/config/loader.ts.
+		case 'git.binary': {
+			if (value !== undefined && typeof value !== 'string') {
+				findings.push({
+					id: 'invalid-git-binary-type',
+					title: 'Invalid git.binary type',
+					description: `"git.binary" must be a string, got ${typeof value}`,
+					severity: 'error',
+					path: 'git.binary',
+					currentValue: value,
+					autoFixable: false,
+				});
+			} else if (typeof value === 'string' && value.trim() === '') {
+				findings.push({
+					id: 'empty-git-binary',
+					title: 'Empty git.binary',
+					description:
+						'"git.binary" is blank, so no git executable is named. Remove the key to fall back to the default `git` lookup, or set it to a real git executable path.',
+					severity: 'error',
+					path: 'git.binary',
+					currentValue: value,
+					autoFixable: false,
+				});
+			}
+			break;
+		}
+
 		case 'ui_review': {
 			emitObjectTypeMismatch('ui_review', value, findings);
 			break;
@@ -1547,6 +1664,11 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 
 		case 'council': {
 			emitObjectTypeMismatch('council', value, findings);
+			// Council policy visibility findings (issue #2102 contracts C/E/F)
+			// live in collectRawCouncilPolicyFindings: they must fire only when
+			// the user EXPLICITLY wrote the key, and the parsed config always
+			// carries schema defaults (e.g. parallelTimeoutMs), so raw config is
+			// the only correct source.
 			break;
 		}
 
@@ -1617,6 +1739,11 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 
 		case 'pr_monitor': {
 			emitObjectTypeMismatch('pr_monitor', value, findings);
+			break;
+		}
+
+		case 'pr_review_resilience': {
+			emitObjectTypeMismatch('pr_review_resilience', value, findings);
 			break;
 		}
 
@@ -1756,6 +1883,7 @@ export function runConfigDoctor(
 	// Walk the config and validate
 	walkConfigAndValidate(config, '', findings);
 	findings.push(...collectRawGatesConfigFindings(directory));
+	findings.push(...collectRawCouncilPolicyFindings(directory));
 	findings.push(...collectRawStrictSectionFindings(directory));
 	findings.push(...collectRawValueConstraintFindings(directory));
 	findings.push(...collectRawAutoReviewCompatibilityFindings(directory));

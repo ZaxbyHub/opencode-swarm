@@ -294,6 +294,10 @@ const STAGE_B_VALIDATION_TASK_ID = 'reviewer-task-validation';
 
 /** Test seam for the otherwise process-global telemetry sink. */
 export const _internals = {
+	// Both halves of the delegation lifecycle go through the seam so a test that
+	// stubs one necessarily controls the other; an asymmetric seam would let a
+	// stubbed-throwing sink emit half a pair.
+	delegationBegin: telemetry.delegationBegin,
 	delegationEnd: telemetry.delegationEnd,
 	resolveReviewerTaskScope,
 	buildReviewerTaskScope,
@@ -345,6 +349,15 @@ function emitStageBValidationTelemetry(
 	costFields: Parameters<typeof telemetry.delegationEnd>[4],
 ): void {
 	try {
+		// Inside the SAME try as its end, so a throwing sink skips both halves
+		// rather than emitting an orphan. Like the engine's validation replay, this
+		// runs after the attempt already completed; the payload carries no duration
+		// or start timestamp, so pairing here is structural, not temporal.
+		_internals.delegationBegin(
+			sessionID,
+			validatorAgent,
+			STAGE_B_VALIDATION_TASK_ID,
+		);
 		_internals.delegationEnd(
 			sessionID,
 			validatorAgent,
@@ -440,8 +453,18 @@ async function reviewerScopeRemainsCurrent(input: {
 			sessionIncarnation: input.scope.sessionIncarnation,
 		},
 	);
+	if (currentScope === null) return false;
+	if (!currentScope.ok) {
+		// A scope the v2 builder cannot reconstruct can never satisfy the
+		// receipt — fail closed. (The v1-only advisory branch was removed:
+		// every production scope constructor hardcodes the v2 description, so
+		// no comparison could ever match it — dead code, unwired by
+		// construction. The v1-never-satisfies-v2 guarantee holds via the
+		// description + content-hash equality above.)
+		return false;
+	}
+	const scope = currentScope.scope;
 	return (
-		currentScope !== null &&
 		isReviewerScopeGenerationCurrent({
 			parentSessionID: input.sessionID,
 			taskId: input.scope.taskId,
@@ -449,10 +472,10 @@ async function reviewerScopeRemainsCurrent(input: {
 			generation: input.scope.generation,
 			sessionIncarnation: input.scope.sessionIncarnation,
 		}) &&
-		currentScope.headSha === input.scope.headSha &&
-		currentScope.content === input.scope.content &&
-		currentScope.description === input.scope.description &&
-		JSON.stringify(currentScope.files) === JSON.stringify(input.scope.files)
+		scope.headSha === input.scope.headSha &&
+		scope.content === input.scope.content &&
+		scope.description === input.scope.description &&
+		JSON.stringify(scope.files) === JSON.stringify(input.scope.files)
 	);
 }
 

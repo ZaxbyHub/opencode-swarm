@@ -460,7 +460,28 @@ export const TOOL_METADATA = {
 		],
 	},
 	phase_complete: {
-		description: 'mark a phase as complete and track dispatched agents',
+		description:
+			'preflight every applicable phase gate, report all blockers, and atomically commit a current passing snapshot',
+		agents: ['architect'],
+	},
+	run_phase_review: {
+		description:
+			'run the bounded phase-final review engine and persist complete content-addressed review evidence',
+		agents: ['architect'],
+	},
+	repair_gate_evidence: {
+		description:
+			'quarantine corrupt exact-task gate evidence and install a fresh blocked generation that requires every gate to rerun',
+		agents: ['architect'],
+	},
+	repair_knowledge_receipt_ledger: {
+		description:
+			'validate or repair authoritative knowledge receipts, preserve corrupt authority in bounded quarantine, and require scoped re-evaluation',
+		agents: ['architect'],
+	},
+	record_directive_override: {
+		description:
+			'record an audited architect override for identified critical-directive violations without bypassing unreadable authority',
 		agents: ['architect'],
 	},
 	save_plan: {
@@ -577,7 +598,7 @@ export const TOOL_METADATA = {
 	},
 	context_status: {
 		description:
-			'report current context-window headroom for the active session — returns tokens-used, model-limit, usage-percent, threshold-state (none/warn/critical), model name, and provider. Pure read-only: no state mutation, no warning injection. Works whether context_budget.enabled is true or false.',
+			'report current context-window headroom for the active session — returns tokens-used, usageSource (provider|estimated), model-limit, usage-percent, threshold-state (none/warn/critical), model name, and provider. Pure read-only: no state mutation, no warning injection. Works whether context_budget.enabled is true or false.',
 		agents: ['architect'],
 	},
 	search: {
@@ -821,6 +842,11 @@ export const TOOL_METADATA = {
 	swarm_memory_propose: {
 		description:
 			'create a pending Swarm memory proposal; does not write durable memory directly',
+		agents: [],
+	},
+	swarm_memory_outcome: {
+		description:
+			'record useful, dead-end, or corrected outcomes and, when enabled, synchronously refresh deterministic memory lessons',
 		agents: [],
 	},
 	swarm_command: {

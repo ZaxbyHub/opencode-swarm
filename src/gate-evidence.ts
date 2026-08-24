@@ -24,10 +24,12 @@ import {
 	taskEvidencePath,
 	withTaskEvidenceLock,
 } from './evidence/task-file.js';
+import { appendTaskGateRequirementsReceiptIfNeeded } from './evidence/task-gate-requirements.js';
 import { validateSwarmPath } from './hooks/utils.js';
 import type { TaskWorkflowState } from './state';
 import { telemetry } from './telemetry.js';
 import { assertStrictTaskId, isStrictTaskId } from './validation/task-id';
+import { readWorkflowWalFileSync } from './workflow/workflow-wal-file.js';
 
 export interface GateEvidence {
 	sessionId: string;
@@ -46,6 +48,7 @@ const TASK_WORKFLOW_STATES = [
 	'rework_required',
 	'complete',
 	'blocked',
+	'closed',
 ] as const satisfies ReadonlyArray<TaskWorkflowState>;
 
 const TASK_WORKFLOW_OUTCOMES = [
@@ -61,6 +64,7 @@ const TASK_WORKFLOW_OUTCOMES = [
 	'gate_recorded',
 	'task_completed',
 	'task_blocked',
+	'task_closed',
 	'repair_idle',
 ] as const;
 
@@ -78,6 +82,18 @@ export interface TaskWorkflowMetadata {
 	lastOutcome: TaskWorkflowTransitionOutcome;
 	lastTransitionId: string | null;
 	updatedAt: string;
+	/**
+	 * True when this task reached `complete` via a QA-exempt forced completion
+	 * (`/swarm close` reconciling a task that plan.json already marked completed but
+	 * for which no authoritative workflow evidence existed) rather than by passing
+	 * the normal Stage B gates.
+	 *
+	 * Without this the durable evidence file is byte-identical for a genuinely
+	 * QA'd completion and a forced one, so no consumer can tell them apart. Absent
+	 * on evidence written before this field existed, which reads as "not forced" —
+	 * the same answer those files would have given anyway.
+	 */
+	forcedCompletion?: boolean;
 }
 
 export interface TaskWorkflowSnapshot extends TaskWorkflowMetadata {
@@ -89,10 +105,17 @@ export interface TaskEvidence {
 	required_gates: string[];
 	gates: Record<string, GateEvidence>;
 	turbo?: boolean;
+	requirements_state?: 'known' | 'unknown';
 	/** Durable proof that the coder dispatch was classified as exact Markdown-only. */
 	test_engineer_exempt?: boolean;
 	/** Exact-task workflow metadata. Missing on legacy evidence written before #2098. */
 	workflow?: TaskWorkflowMetadata;
+	/** Immutable source identity for an idempotent fail-closed evidence repair. */
+	repair_provenance?: {
+		source_sha256: string | null;
+		source_generation: number | null;
+		requirements_receipt_hash: string | null;
+	};
 }
 
 /**
@@ -105,30 +128,15 @@ export function assertTaskEvidenceWriteAllowed(
 	event?: TaskWorkflowTransitionEvent,
 ): void {
 	assertValidTaskId(taskId);
-	const readWal = (
-		kind: 'coder-settlements' | 'task-repairs' | 'task-terminals',
-		corruptCode: string,
-	): Record<string, unknown> | null => {
-		const walPath = validateSwarmPath(directory, `${kind}/${taskId}.json`);
-		let raw: string;
-		try {
-			raw = readFileSync(walPath, 'utf-8');
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-			throw error;
-		}
-		try {
-			return JSON.parse(raw) as Record<string, unknown>;
-		} catch (error) {
-			throw new Error(
-				`${corruptCode}: ${walPath} is not valid JSON (${
-					error instanceof Error ? error.message : String(error)
-				}). Delete this file to allow the task to be repaired again.`,
-			);
-		}
-	};
-
-	const coderWal = readWal('coder-settlements', 'CODER_SETTLEMENT_WAL_CORRUPT');
+	const coderWalPath = validateSwarmPath(
+		directory,
+		`coder-settlements/${taskId}.json`,
+	);
+	const coderWal = readWorkflowWalFileSync(
+		'coder-settlement',
+		coderWalPath,
+		taskId,
+	);
 	if (
 		(coderWal?.state === 'DISPATCHED' || coderWal?.state === 'PREPARED') &&
 		!(
@@ -140,11 +148,19 @@ export function assertTaskEvidenceWriteAllowed(
 		)
 	) {
 		throw new Error(
-			`CODER_SETTLEMENT_IN_PROGRESS: transition ${String(coderWal.transitionId)} owns evidence for task ${taskId}`,
+			`CODER_SETTLEMENT_IN_PROGRESS: transition ${String(coderWal.transitionId)} owns evidence for task ${taskId}. Wait for the owning transition to settle or run /swarm recover ${taskId} (or /swarm reset-session), then retry; do not remove the WAL by hand.`,
 		);
 	}
 
-	const terminalWal = readWal('task-terminals', 'TASK_TERMINAL_WAL_CORRUPT');
+	const terminalWalPath = validateSwarmPath(
+		directory,
+		`task-terminals/${taskId}.json`,
+	);
+	const terminalWal = readWorkflowWalFileSync(
+		'task-terminal',
+		terminalWalPath,
+		taskId,
+	);
 	if (terminalWal?.state === 'PREPARED') {
 		const matchingTerminalEvent =
 			event != null &&
@@ -152,7 +168,9 @@ export function assertTaskEvidenceWriteAllowed(
 			((event.type === 'task_completed' &&
 				terminalWal.newPlanStatus === 'completed') ||
 				(event.type === 'task_blocked' &&
-					terminalWal.newPlanStatus === 'blocked'));
+					terminalWal.newPlanStatus === 'blocked') ||
+				(event.type === 'task_closed' &&
+					terminalWal.newPlanStatus === 'closed'));
 		if (!matchingTerminalEvent) {
 			throw new Error(
 				`TASK_TERMINAL_PREPARED: transition ${String(terminalWal.transitionId)} owns evidence for task ${taskId}`,
@@ -160,7 +178,15 @@ export function assertTaskEvidenceWriteAllowed(
 		}
 	}
 
-	const repairWal = readWal('task-repairs', 'TASK_REPAIR_WAL_CORRUPT');
+	const repairWalPath = validateSwarmPath(
+		directory,
+		`task-repairs/${taskId}.json`,
+	);
+	const repairWal = readWorkflowWalFileSync(
+		'task-repair',
+		repairWalPath,
+		taskId,
+	);
 	if (
 		repairWal?.state === 'PREPARED' &&
 		!(
@@ -245,6 +271,11 @@ export type TaskWorkflowTransitionEvent =
 			transitionId?: string;
 	  }
 	| {
+			type: 'task_closed';
+			expectedGeneration: number;
+			transitionId?: string;
+	  }
+	| {
 			type: 'repair_idle';
 			expectedGeneration: number;
 			transitionId?: string;
@@ -274,6 +305,7 @@ const TaskWorkflowMetadataSchema = z.object({
 	lastOutcome: z.enum(TASK_WORKFLOW_OUTCOMES).default('none'),
 	lastTransitionId: z.string().min(1).nullable().optional().default(null),
 	updatedAt: z.string(),
+	forcedCompletion: z.boolean().optional(),
 });
 
 const TaskEvidenceSchema = z.object({
@@ -281,8 +313,22 @@ const TaskEvidenceSchema = z.object({
 	required_gates: z.array(z.string()).default([]),
 	gates: z.record(z.string(), GateEvidenceSchema),
 	turbo: z.boolean().optional(),
+	requirements_state: z.enum(['known', 'unknown']).optional(),
 	test_engineer_exempt: z.boolean().optional(),
 	workflow: TaskWorkflowMetadataSchema.optional(),
+	repair_provenance: z
+		.object({
+			source_sha256: z
+				.string()
+				.regex(/^[a-f0-9]{64}$/)
+				.nullable(),
+			source_generation: z.number().int().min(0).nullable(),
+			requirements_receipt_hash: z
+				.string()
+				.regex(/^[a-f0-9]{64}$/)
+				.nullable(),
+		})
+		.optional(),
 });
 
 export function parseTaskEvidence(
@@ -316,7 +362,8 @@ const WORKFLOW_STATE_RANK: Record<TaskWorkflowState, number> = {
 	tests_run: 4,
 	rework_required: 5,
 	blocked: 6,
-	complete: 7,
+	closed: 7,
+	complete: 8,
 };
 
 /**
@@ -372,6 +419,8 @@ function getEventOutcome(
 			return 'task_completed';
 		case 'task_blocked':
 			return 'task_blocked';
+		case 'task_closed':
+			return 'task_closed';
 		case 'repair_idle':
 			return 'repair_idle';
 	}
@@ -493,11 +542,14 @@ export function reduceTaskWorkflowSnapshot(
 	},
 ): TaskWorkflowMetadata {
 	if (
-		(current.state === 'complete' || current.state === 'blocked') &&
+		(current.state === 'complete' ||
+			current.state === 'blocked' ||
+			current.state === 'closed') &&
 		event.type !== 'repair_idle' &&
 		!(
 			(current.state === 'complete' && event.type === 'task_completed') ||
-			(current.state === 'blocked' && event.type === 'task_blocked')
+			(current.state === 'blocked' && event.type === 'task_blocked') ||
+			(current.state === 'blocked' && event.type === 'task_closed')
 		)
 	) {
 		throw new Error(
@@ -515,6 +567,10 @@ export function reduceTaskWorkflowSnapshot(
 		lastOutcome: outcome,
 		lastTransitionId: event.transitionId ?? current.lastTransitionId,
 		updatedAt: context.nowIso,
+		// Preserved across transitions that re-enter the terminal record so a forced
+		// completion stays visible downstream. Cleared by repair_idle, which opens a new
+		// generation for genuinely new work.
+		...(current.forcedCompletion === true ? { forcedCompletion: true } : {}),
 	};
 
 	switch (event.type) {
@@ -629,21 +685,34 @@ export function reduceTaskWorkflowSnapshot(
 			return {
 				...base,
 				state: 'complete',
+				// Record the QA-exempt path in durable evidence so downstream readers can
+				// distinguish a forced completion from one that passed the gates. Only set
+				// on the exempt path; a genuine completion leaves the field absent.
+				...(event.qaExempt === true ? { forcedCompletion: true } : {}),
 			};
 		case 'task_blocked':
 			return {
 				...base,
 				state: 'blocked',
 			};
-		case 'repair_idle':
+		case 'task_closed':
 			return {
 				...base,
+				state: 'closed',
+			};
+		case 'repair_idle': {
+			// A repair reopens the task for new work, so a prior forced completion no
+			// longer describes this generation. Drop the field rather than carrying it.
+			const { forcedCompletion: _cleared, ...withoutForced } = base;
+			return {
+				...withoutForced,
 				generation: current.generation + 1,
 				state: 'idle',
 				retryCount: 0,
 				retryHistory: [],
 				retryEpoch: 0,
 			};
+		}
 	}
 }
 
@@ -877,12 +946,22 @@ export async function withTaskEvidenceTransaction<T>(
 
 		const persist = async (
 			nextEvidence: TaskEvidence,
+			event?: TaskWorkflowTransitionEvent,
 		): Promise<TaskEvidence> => {
 			const validated = TaskEvidenceSchema.parse({
 				...nextEvidence,
 				taskId,
 			});
 			await atomicWriteFile(evidencePath, JSON.stringify(validated, null, 2));
+			if (event) {
+				await appendTaskGateRequirementsReceiptIfNeeded(
+					directory,
+					taskId,
+					current,
+					validated,
+					event,
+				);
+			}
 			current = validated;
 			return validated;
 		};
@@ -894,7 +973,7 @@ export async function withTaskEvidenceTransaction<T>(
 				assertTaskEvidenceWriteAllowed(directory, taskId, event);
 				const nextEvidence = updateEvidenceForTransition(current, event);
 				nextEvidence.taskId = taskId;
-				return persist(nextEvidence);
+				return persist(nextEvidence, event);
 			},
 		});
 	});
@@ -996,6 +1075,13 @@ export async function recordAgentDispatch(
 /**
  * Returns the TaskEvidence for a task, or null if file missing or parse error.
  * Never throws.
+ *
+ * Note this collapses "no evidence file" and "evidence file is unreadable" into the
+ * same `null`, which degrades two delegation-gate checks when an older build reads
+ * evidence carrying a `workflow.state` it does not recognise. Tracked in #2199 — do
+ * not "fix" this by rethrowing here: two call sites iterate every task in the plan,
+ * so one corrupt file would block dispatch for all of them. The fix is a separate
+ * discriminated reader used at the two affected sites.
  */
 export async function readTaskEvidence(
 	directory: string,

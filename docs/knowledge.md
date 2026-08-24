@@ -12,8 +12,9 @@ When an architect receives a new message, entries from both stores are merged an
 > `applies_to_agents`, `directive_priority`, `generated_skill_path`). The
 > Architect receives these as a structured `<swarm_knowledge_directives>`
 > block and must acknowledge each applicable directive (`KNOWLEDGE_APPLIED`)
-> or explicitly close it as skipped or violated (`KNOWLEDGE_IGNORED reason=...`
-> / `KNOWLEDGE_VIOLATED reason=...`). See [Actionable directives](#actionable-directives-v2) and
+> or explicitly close it as not-applicable, skipped, or violated
+> (`KNOWLEDGE_N_A reason=...` / `KNOWLEDGE_IGNORED reason=...` /
+> `KNOWLEDGE_VIOLATED reason=...`). See [Actionable directives](#actionable-directives-v2) and
 > [Knowledge application contract](#knowledge-application-contract-v2) below.
 
 ---
@@ -130,11 +131,11 @@ Every entry is a JSON line with these fields (see `src/hooks/knowledge-types.ts`
   "id": "lesson-abc123",
   "tier": "swarm",
   "lesson": "Prefer stream.Readable.from(generator) over async iterators for backpressure.",
-  "category": "pattern",
+  "category": "architecture",
   "tags": ["node", "streams"],
   "scope": "global",
   "confidence": 0.9,
-  "status": "active",
+  "status": "established",
   "confirmed_by": ["..."],
   "retrieval_outcomes": [],
   "phases_alive": 0,
@@ -284,12 +285,13 @@ from counters or inferred from cohort data. V2 is read first throughout cutover,
 and legacy access is restricted to the explicit imported pre-cutover trace set
 until that set drains to zero.
 
-Legacy sections mapped into the new schema:
+Legacy sections imported (each bullet's category is inferred from its text into a current
+`KnowledgeCategory` — see `inferCategoryFromText` in `src/hooks/knowledge-migrator.ts`):
 
-- `lessons-learned` → category `lesson`
-- `patterns` → category `pattern`
-- `sme-cache` → category `domain`
-- `decisions` → category `decision`
+- `lessons-learned`
+- `patterns`
+- `sme-cache`
+- `decisions`
 
 Entries that fail schema validation are dropped. Near-duplicates are collapsed via the dedup threshold.
 
@@ -377,7 +379,10 @@ Retrieval-outcome counters now distinguish:
 - `shown_count` — included in an injection block.
 - `acknowledged_count` — any explicit ack received.
 - `applied_explicit_count` — explicit `KNOWLEDGE_APPLIED`.
-- `ignored_count` — explicit `KNOWLEDGE_IGNORED`.
+- `ignored_count` — explicit `KNOWLEDGE_IGNORED` (relevant but deliberately not followed).
+- `n_a_count` — explicit `KNOWLEDGE_N_A` (not applicable; neutral, event-log
+  only — intentionally stripped before per-entry `retrieval_outcomes`, so it
+  is never persisted on entries and never reaches the outcome signal).
 - `violated_count` — explicit `KNOWLEDGE_VIOLATED` (or runtime-inferred).
 - `succeeded_after_shown_count` — phase succeeded after this entry was shown.
 - `failed_after_shown_count` — phase failed after this entry was shown.
@@ -457,17 +462,60 @@ The Architect prompt requires inspecting this block before:
 4. Calling `phase_complete`.
 5. Escalating or invoking `skill_improve`.
 
-For each applicable directive, the Architect emits:
+For each applicable directive, the Architect emits the exact colon-separated token pair
+carried by the block above (the `(trace_id, entry_id)` pair, not a bare entry id):
 
-- `KNOWLEDGE_APPLIED: <id>` — directive observed in the next compliant action.
-- `KNOWLEDGE_IGNORED: <id> reason=<short>` — does not apply this turn.
-- `KNOWLEDGE_VIOLATED: <id> reason=<short>` — runtime evidence shows it was breached.
+- `KNOWLEDGE_APPLIED:<trace_id>:<entry_id>` — directive observed in the next compliant action.
+- `KNOWLEDGE_N_A:<trace_id>:<entry_id> reason=<short>` — does not apply this turn (neutral).
+- `KNOWLEDGE_IGNORED:<trace_id>:<entry_id> reason=<short>` — judged relevant but deliberately not followed (counts against the directive).
+- `KNOWLEDGE_CONTRADICTED:<trace_id>:<entry_id> reason=<short>` — current authority or repository evidence disproves it.
+- `KNOWLEDGE_VIOLATED:<trace_id>:<entry_id> reason=<short>` — runtime evidence shows it was breached.
 
-Chat-text markers (KNOWLEDGE_APPLIED/IGNORED/VIOLATED) are the sole mechanism that
+Chat-text markers (KNOWLEDGE_APPLIED/N_A/IGNORED/CONTRADICTED/VIOLATED) are the sole mechanism that
 satisfies the knowledge-application enforcement gate. The `knowledge_receipt` tool
 (which replaced the former `knowledge_ack`) records knowledge-usage receipts for
-audit — including applied/ignored/contradicted outcomes and new-lesson persistence
+audit — including applied/ignored/n_a/contradicted outcomes and new-lesson persistence
 — but does NOT satisfy the enforcement gate.
+
+### Outcome and source semantics (issue #2032)
+
+Every producer and consumer of knowledge terminals shares one typed contract
+(`ReceiptOutcome` + `ReceiptSourceCode`, declared once in
+`src/hooks/knowledge-receipt-ledger.ts`):
+
+| Outcome | Meaning | Outcome signal | Gate obligation |
+| --- | --- | --- | --- |
+| `applied` | the directive was followed | positive | clears |
+| `ignored` | judged relevant but deliberately not followed | negative | clears only with a reason |
+| `n_a` | not applicable to the current action | neutral | clears only with a reason |
+| `contradicted` | current authority or evidence disproves it | negative | blocks phase until remediated |
+| `violated` | runtime evidence shows a breach | negative | blocks phase until remediated |
+
+`n_a` clears ONLY the acknowledgement/applicability obligation. It never
+proves application, never produces promotion evidence, and never satisfies
+high-risk acceptance on its own; delegate self-report remains non-independent,
+with reviewer adjudication and deterministic test/evidence as the independent
+verification roles. `unacknowledged` (silent non-critical exposure) and
+`no_relevant` (empty-trace tombstone) are audit-only event types, never
+terminal outcomes.
+
+`source` records WHO produced a terminal as a provenance class, distinct from
+the `agent` identity field: `delegate` (the exposed agent's own self-report —
+stamped on every delegate terminal in both the V2 ledger and the diagnostic
+event log), `reviewer` (independent verdict), `architect` /
+`architect_marker`, `test_engineer`, `phase_override`,
+`application_gate_staleness_release` / `application_gate_denial_limit_release`
+(nonterminal, audited gate releases), `manual`, `migration`, and `unknown`. Legacy records
+with an absent or ambiguous source stay `unknown` — never coerced to
+`delegate`, `ignored`, or zero. The `knowledge_receipt_transition`
+observability payload carries `receiptSemantics` (currently `2`) versioning
+this meaning contract.
+
+One documented asymmetry is preserved by design: the V2 ledger and the
+diagnostic event log store `n_a` verbatim, while the legacy
+`knowledge-application.jsonl` audit log has no `n_a` result value and
+down-converts it to `acknowledged` (knowledge-application.ts). Historical
+records are never rewritten.
 
 ### Receipt authority and diagnostic log
 
@@ -495,18 +543,26 @@ rebuildable snapshot do not share the diagnostic event budget.
 
 #### Receipt-ledger recovery
 
-An unterminated final journal line is treated as a crash tail: the plugin first
-preserves it in a quarantine file, then rewrites the last valid hash-chained
-prefix. Interior corruption, a hash mismatch, an unsupported schema, an
-unwritable quarantine, or a full disk intentionally fails receipt gates closed;
-the plugin does not guess which later authority is safe to discard.
+Receipt reads never repair authority as a side effect. An unterminated final
+line, interior corruption, hash mismatch, unsupported schema, permission error,
+or unavailable store fails receipt gates closed with a typed recovery action.
+The architect may then call `repair_knowledge_receipt_ledger` for the exact
+phase and session with a substantive reason. Readable authority only rebuilds
+the derived snapshot. Corrupt authority is captured byte-for-byte in a bounded
+append-only quarantine, and only its validated hash-chain prefix is installed.
+The repaired phase/session remains explicitly uncertain and blocked until the
+architect performs a comprehensive `knowledge_recall` for the affected scope
+and supplies the exact `repair_id`, phase, optional task, and
+`scope_complete: true` in `repair_re_evaluation`. Ordinary recall, automatic
+injection, partial searches, wrong repair IDs, and unrelated empty retrievals
+remain untagged and cannot clear the uncertainty.
 
-Before recovery, back up all project-local
-`.swarm/knowledge-receipts-v2*.jsonl` files. Do not hand-edit or truncate the
-authoritative journal. Free disk space when writes fail, then retry. For interior
-corruption, restore the journal and archive from a trusted project-local backup
-or reopen them with a plugin version that supports their schema. The snapshot is
-explicitly rebuildable and is never a substitute for the journal or archive.
+Do not hand-edit or truncate the authoritative journal or its quarantine.
+Free disk space or correct permissions when writes fail, then retry the typed
+recovery action. When immutable quarantine capacity is exhausted, archive it
+out of band before retrying; the repair tool never discards an older record to
+make room. The snapshot is explicitly rebuildable and is never a substitute for
+the journal or archive.
 
 Operational knowledge observations continue to be appended to:
 
@@ -519,9 +575,11 @@ validation, application/phase gates, promotion evidence, escalation, or
 curation decisions. Linked stores may still redirect this diagnostic stream,
 but can never redirect or satisfy project-local V2 receipt authority.
 
-Issue #2032 owns normalization of outcome and source meanings. V2 preserves
-the producer's current typed value and records `unknown` when the producer has
-no stronger source; it does not reinterpret those semantics.
+Issue #2032 normalized outcome and source meanings into one typed contract
+(see [Outcome and source semantics](#outcome-and-source-semantics-issue-2032)
+above). V2 preserves the producer's typed value and records `unknown` when
+the producer has no stronger source; it never reinterprets or coerces legacy
+semantics — historical records keep the meanings they were written with.
 
 ### Enforcement modes
 
@@ -541,16 +599,17 @@ no stronger source; it does not reinterpret those semantics.
 In `enforce` mode the gate (`knowledgeApplicationGateBefore` in
 `src/hooks/knowledge-application-gate.ts`) blocks high-risk actions when a
 critical directive was shown but received no terminal acknowledgment
-(`KNOWLEDGE_APPLIED`, `KNOWLEDGE_IGNORED`, or `KNOWLEDGE_VIOLATED`) — bounded by
+(`KNOWLEDGE_APPLIED`, `KNOWLEDGE_N_A`, `KNOWLEDGE_IGNORED`, or
+`KNOWLEDGE_VIOLATED`) — bounded by
 two escape hatches so the gate cannot deadlock a session forever:
 
 - **`max_gate_denials`** (default `5`) — after this many consecutive denials
   against the same unacknowledged critical-directive set, the gate
-  auto-acknowledges the pending directives, clears them for that session, and
-  lets the action through.
+  records a nonterminal gate release for the pending directives and lets the
+  action through without claiming they were applied.
 - **`gate_staleness_ms`** (default `600000`, 10 minutes) — a critical
-  directive shown longer ago than this is treated as stale and auto-cleared
-  the same way, regardless of denial count.
+  directive shown longer ago than this receives the same nonterminal release,
+  regardless of denial count.
 
 Both auto-clears write an audit event to `.swarm/events.jsonl`
 (`knowledge_application_gate_denial_limit_clear` or
@@ -558,7 +617,9 @@ Both auto-clears write an audit event to `.swarm/events.jsonl`
 bypass is never silent. These are safety nets against a broken acknowledgment
 pipeline (e.g. an ack marker that failed to parse), not a routine escape path:
 enforcement still applies for the first `max_gate_denials` attempts or the
-full `gate_staleness_ms` window.
+full `gate_staleness_ms` window. A release is not a terminal outcome, does not
+count as application or promotion evidence, and does not erase the original
+directive membership.
 
 **`high_risk_tools`** — optionally override the set of tools that trigger the
 acknowledgment gate. When absent, defaults to `["save_plan",
@@ -847,3 +908,74 @@ For new v2 agents:
 The deprecated top-level `model` fields remain in the schema only so that
 config-doctor can warn when they are present without an `agents.<name>.model`
 counterpart. They will be removed in a future major release.
+
+## Hive-store quarantine (human-only maintenance, issue #2033)
+
+The machine-global hive store (`shared-learnings.jsonl` under the platform data dir —
+`%LOCALAPPDATA%\opencode-swarm\Data` on Windows, XDG data roots on macOS/Linux) can be
+polluted by leaked test fixtures or bad promotions. `/swarm knowledge hive-quarantine` is
+the sanctioned operator remediation. It is **human-only** in depth: agents are refused at
+`swarm_command` classification, the chat-fallback policy blocks agent-typed usage, the
+shell guardrail blocks direct/quoted/path-qualified/shell-variable-indirected CLI
+invocations from agent shells, and the CLI entry refuses human-only commands from
+non-interactive shells. The confirmation token is HMAC-bound to a per-install secret.
+No `--yes`/`--force` flag exists; the layers are defense-in-depth plus honest audit —
+not a tamper-proof boundary against the machine's own user.
+
+### Flow
+
+1. **Preview** — `/swarm knowledge hive-quarantine preview <id>[,<id>…]` prints each
+   exact candidate with status, confidence, source project, lineage actor, per-line
+   sha256, the whole-store fingerprint (entry count + file sha256), the plugin version,
+   and a short-lived confirmation **token** bound to all of them (15-minute TTL).
+2. **Commit** — `/swarm knowledge hive-quarantine commit --token <token> [--reason …]`
+   writes and hash-verifies a complete backup plus `manifest.json` BEFORE any mutation
+   (outside the hive lock), then runs ONE fast `transactHiveStore` transaction that
+   re-verifies the live store against that backup under lock — any concurrent append,
+   curation, per-entry change, version bump, or duplicate-id ambiguity aborts with no
+   mutation and cleans up the orphaned backup. EXACTLY the selected entries move to the
+   `shared-learnings-quarantined.jsonl` sidecar (mirroring the swarm-tier
+   `knowledge-quarantined.jsonl` convention), audit records land in
+   `shared-knowledge-events.jsonl`, and counts/hashes are verified afterwards — a
+   verification failure attempts an automatic restore whose outcome is reported
+   honestly (a failed restore is never claimed as success).
+3. **Rollback** — `/swarm knowledge hive-quarantine rollback --token <token12> |
+   --latest` restores the EXACT original line bytes from the manifest's backup,
+   idempotently: ids already present with identical bytes are skipped; an id present with
+   different content (re-promoted after quarantine) aborts with a collision report and
+   no mutation.
+4. **Status** — `/swarm knowledge hive-quarantine status` lists backups (read-only).
+
+### Invariants
+
+- **Exact-ID selection only.** No text, substring, "test-looking phrase", cohort, age, or
+  blacklist matching exists in the module; there is no bulk operation. A store that
+  legitimately contains test-like text keeps it unless its exact id is selected.
+- **Recoverable by construction.** Backups live beside the store under
+  `<dataDir>/quarantine-backups/<timestamp>-<token12>-<random8>/` (machine-global, discoverable
+  from any project — deliberately NOT under a project's `.swarm/`). Quarantined entries
+  are removed from recall and query by construction (the sidecar is not a retrieval
+  source; `isActiveStatus` semantics are untouched).
+- **Audit trail.** Every phase emits a metadata-only `knowledge_maintenance` telemetry
+  event (bounded phase/abort codes, counts, hash/token prefixes — never lesson text or
+  paths) plus `quarantined`/`rollback` records in `shared-knowledge-events.jsonl`.
+- **Byte-fidelity scope.** Restored ids come back byte-exact and hash-verified. Two
+  standing-transaction behaviors apply to everything EXCEPT the selected ids: unselected
+  entries may be re-serialized by the store's normalize-on-write pipeline, and unparseable
+  (corrupt) lines are DROPPED by BOTH a commit rewrite and a rollback rewrite (both rebuild
+  from parsed entries) — they survive only in the hash-verified backup copy, from which
+  they can be recovered manually.
+
+### Test isolation boundary (also issue #2033)
+
+Tests must never touch the real platform stores. The suite installs a fail-closed
+production-store tripwire (`tests/preload/prod-store-tripwire.ts`, loaded via
+`bunfig.toml [test] preload`) that captures the real hive/link paths at process start and
+throws on content reads and all mutation attempts against them (node:fs guards plus a
+`Bun.write` wrap; metadata reads — `readdir`/`stat`/`existsSync` — and `mkdir` are
+intentionally unguarded). The preload registers a global `afterEach` that re-arms the
+  guards after any `mock.restore()` and a global `afterAll` that verifies the real stores
+  are unchanged after every suite. To
+isolate, redirect `LOCALAPPDATA` **and** `XDG_DATA_HOME` **and** `HOME` to a temp dir
+(`createIsolatedTestEnv()` or explicit env redirection) — a POSIX-only redirect is a
+no-op on Windows, where the resolvers read `LOCALAPPDATA` first.

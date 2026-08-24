@@ -1,5 +1,5 @@
 import type { Database, SQLQueryBindings } from 'bun:sqlite';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
 	existsSync,
 	mkdirSync,
@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import { loadDatabaseCtor } from '../db/sqlite-loader.js';
 import { validateSwarmPath } from '../hooks/utils';
 import { warn } from '../utils';
+import { stableCanonicalStringify } from '../utils/stable-stringify';
 import {
 	DEFAULT_MEMORY_CONFIG,
 	DURABLE_MEMORY_KINDS,
@@ -41,14 +42,26 @@ import {
 import { MemoryValidationError } from './errors';
 import {
 	backupLegacyJsonl,
+	getLegacyOutcomeJsonlSignature,
 	type JsonlMigrationReport,
 	LEGACY_JSONL_MIGRATION_NAME,
 	LEGACY_JSONL_MIGRATION_VERSION,
+	LEGACY_JSONL_OUTCOME_META_KEY,
 	readLegacyJsonl,
 	writeJsonlExport,
 	writeMigrationReport,
 } from './jsonl-migration';
 import { shouldCompactMemory } from './maintenance';
+import {
+	assertEventIdentityCompatible,
+	ensureOutcomeGeneration,
+	importMaterializedOutcomeEvents,
+	type MemoryOutcomeEvent,
+	materializeOutcomeRecord,
+	stripMaterializedOutcomes,
+	validateOutcomeEvent,
+	validateOutcomeEventForMemory,
+} from './outcome-events';
 import type {
 	MemoryCompactOptions,
 	MemoryCompactResult,
@@ -78,7 +91,9 @@ import {
 } from './scoring';
 import type {
 	AppliedMemoryChange,
+	MemoryAnchor,
 	MemoryListFilter,
+	MemoryOutcome,
 	MemoryProposal,
 	MemoryRecord,
 	MemoryScopeRef,
@@ -102,7 +117,143 @@ type EventOperation =
 	| 'compact'
 	| 'compact_triggered'
 	| 'curator_decision'
-	| 'invalid_load';
+	| 'invalid_load'
+	| 'pii_rejected';
+
+/** #1466: genesis anchor for the memory_events hash chain (mirrors the
+ * knowledge-receipt ledger's GENESIS convention). */
+export const EVENT_CHAIN_GENESIS = 'GENESIS';
+export const MEMORY_EVENTS_CHAIN_HEAD_KEY = 'memory_events_chain_head';
+
+export interface MemoryEventRow {
+	id: string;
+	operation: string;
+	target_id: string;
+	reason: string | null;
+	timestamp: string;
+	event_json: string | null;
+	prev_hash: string | null;
+}
+
+/**
+ * #1466: SHA-256 over the canonical serialization of a FULL event row
+ * (including its own prev_hash — the chain link is "hash of the entire
+ * previous row", so tampering any field of row n breaks row n+1's link).
+ * Mirrors `receiptRecordHash` in knowledge-receipt-ledger-storage.ts.
+ */
+export function memoryEventRowHash(row: MemoryEventRow): string {
+	return createHash('sha256')
+		.update(
+			stableCanonicalStringify({
+				id: row.id,
+				operation: row.operation,
+				target_id: row.target_id,
+				reason: row.reason,
+				timestamp: row.timestamp,
+				event_json: row.event_json,
+				prev_hash: row.prev_hash,
+			}),
+		)
+		.digest('hex');
+}
+
+export interface MemoryAuditVerificationReport {
+	supported: boolean;
+	totalRows: number;
+	/** Rows inside the verified hash chain. */
+	chainedRows: number;
+	/** Rows predating migration v13 (NULL prev_hash prefix) — reported, not verified. */
+	legacyRows: number;
+	verified: boolean;
+	/** First divergence, when the chain is broken. */
+	divergence?: {
+		rowId: string;
+		detail: string;
+	};
+	/** Chain-head check against _meta — catches last-row tampering. */
+	headMatch: boolean | null;
+	headExpected?: string;
+	headStored?: string | null;
+}
+
+/**
+ * #1466: lazily verify the memory_events hash chain over ordered rows. Pure —
+ * takes the already-read rows plus the stored head, returns a report. Used by
+ * `/swarm memory audit-verify` and tests. The chain link is "hash of the full
+ * previous row (including its prev_hash)", so tampering any field of row n
+ * breaks row n+1; the _meta head catches tampering of the LAST row.
+ */
+export function verifyMemoryEventChainRows(
+	rows: MemoryEventRow[],
+	storedHead: string | null,
+): MemoryAuditVerificationReport {
+	let prevHash: string | null = null;
+	let chainedRows = 0;
+	let legacyRows = 0;
+	for (const row of rows) {
+		if (prevHash === null && row.prev_hash === null) {
+			// Pre-v13 row: legitimately unchained prefix (chain starts later).
+			legacyRows++;
+			continue;
+		}
+		if (prevHash === null) {
+			if (row.prev_hash !== EVENT_CHAIN_GENESIS) {
+				return {
+					supported: true,
+					totalRows: rows.length,
+					chainedRows,
+					legacyRows,
+					verified: false,
+					divergence: {
+						rowId: row.id,
+						detail: `chain anchor mismatch: first chained row has prev_hash ${row.prev_hash}, expected ${EVENT_CHAIN_GENESIS}`,
+					},
+					headMatch: null,
+				};
+			}
+			prevHash = memoryEventRowHash(row);
+			chainedRows++;
+			continue;
+		}
+		if (row.prev_hash !== prevHash) {
+			return {
+				supported: true,
+				totalRows: rows.length,
+				chainedRows,
+				legacyRows,
+				verified: false,
+				divergence: {
+					rowId: row.id,
+					detail: `prev_hash mismatch: expected ${prevHash}, found ${row.prev_hash ?? 'NULL'}`,
+				},
+				headMatch: null,
+			};
+		}
+		prevHash = memoryEventRowHash(row);
+		chainedRows++;
+	}
+	// Head check. NOTE the conservative boundary: a table with ONLY legacy
+	// (pre-v13, NULL prev_hash) rows has no computed chain head — if _meta
+	// nevertheless carries a head, that means rows were chained at some point
+	// and then REPLACED by unchained ones (or the head was tampered), so the
+	// comparison fails CLOSED (verified: false). Pinned by
+	// tests/unit/memory/audit-chain.test.ts.
+	const headExpected = prevHash;
+	const headMatch =
+		headExpected === null
+			? storedHead === null || storedHead === undefined
+			: storedHead === headExpected;
+	return {
+		supported: true,
+		totalRows: rows.length,
+		chainedRows,
+		legacyRows,
+		verified: headMatch === true,
+		headMatch,
+		headExpected: headExpected ?? undefined,
+		headStored: storedHead ?? null,
+	};
+}
 
 interface Migration {
 	version: number;
@@ -317,11 +468,124 @@ export const MIGRATIONS: Migration[] = [
 				ON memory_recall_usage(unit_id);
 		`,
 	},
+	{
+		version: 11,
+		name: 'create_memory_outcomes',
+		sql: `
+			CREATE TABLE IF NOT EXISTS memory_outcomes (
+				id TEXT PRIMARY KEY,
+				memory_id TEXT NOT NULL,
+				generation TEXT NOT NULL,
+				at TEXT NOT NULL,
+				event_json TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS idx_memory_outcomes_memory_generation
+				ON memory_outcomes(memory_id, generation, at, id);
+		`,
+	},
+	// #1466 Phase 6 (issue text said "migration version 6", but v6 is occupied
+	// by create_embedding_config_table — v12 is the next free slot). Provenance
+	// columns denormalize record fields for queryable attribution; safe
+	// defaults keep legacy rows valid (source_task_id='', agent_role='unknown',
+	// valid_from backfilled from record createdAt by backfillProvenanceColumns).
+	{
+		version: 12,
+		name: 'add_memory_provenance_columns',
+		sql: `
+			ALTER TABLE memory_items ADD COLUMN source_task_id TEXT NOT NULL DEFAULT '';
+			ALTER TABLE memory_items ADD COLUMN agent_role TEXT NOT NULL DEFAULT 'unknown';
+			ALTER TABLE memory_items ADD COLUMN embedding_model_version TEXT NOT NULL DEFAULT '';
+			ALTER TABLE memory_items ADD COLUMN valid_from TEXT;
+			ALTER TABLE memory_items ADD COLUMN supersedes_reason TEXT;
+		`,
+	},
+	// #1466 Phase 6: tamper-evidence for the memory_events audit log. Each row
+	// chains to the SHA-256 of the full previous row (including its prev_hash);
+	// the head hash is mirrored into _meta so last-row tampering is also
+	// detectable. Backfilled deterministically by backfillEventHashChain.
+	{
+		version: 13,
+		name: 'add_memory_events_prev_hash',
+		sql: `
+			ALTER TABLE memory_events ADD COLUMN prev_hash TEXT;
+		`,
+	},
 ];
+
+/** #1466: name of the migration that introduces memory_events.prev_hash. */
+const EVENT_CHAIN_SCHEMA_MIGRATION_NAME = 'add_memory_events_prev_hash';
+
+/**
+ * The single chain-scan SELECT shared by backfillEventHashChain and
+ * verifyAuditChain. Extracted to a constant so the two call sites are
+ * byte-identical BY CONSTRUCTION — they share one bun query-cache slot
+ * (bounded query-cache budget, see backfillProvenanceColumns; PR #2310
+ * feedback FB-L1: the prior inline copies differed in embedded indentation
+ * and silently occupied two slots).
+ */
+const EVENT_CHAIN_SCAN_SQL = `SELECT rowid, id, operation, target_id, reason, timestamp, event_json, prev_hash
+FROM memory_events ORDER BY rowid ASC`;
 
 interface MemoryItemRow {
 	id: string;
 	record_json: string;
+	// #1466 provenance columns (selected on read-back; see
+	// mergeProvenanceColumns — record_json deliberately omits these fields
+	// for old-binary compatibility, so the columns are authoritative).
+	source_task_id?: string;
+	agent_role?: string;
+	embedding_model_version?: string;
+	valid_from?: string | null;
+	supersedes_reason?: string | null;
+}
+
+/**
+ * Shared read for a single memory item INCLUDING the provenance columns.
+ * One constant = one bun query-cache slot (see backfillProvenanceColumns for
+ * the bounded-cache constraint); PR #2310 final-critic fix — every read path
+ * that parses a stored record must also read the columns so a
+ * parse→rewrite cycle (appendOutcome, curator update/supersede) cannot
+ * clobber provenance back to the ALTER TABLE defaults.
+ */
+const MEMORY_ITEM_BY_ID_SQL = `SELECT id, record_json, source_task_id, agent_role, embedding_model_version, valid_from, supersedes_reason FROM memory_items WHERE id = ? LIMIT 1`;
+
+/**
+ * Merge the provenance columns onto a record parsed from the (stripped)
+ * record_json. Columns win only where the parsed record lacks the field —
+ * in-memory records freshly stamped by the gateway keep their values.
+ */
+function mergeProvenanceColumns(
+	base: MemoryRecord,
+	row: Partial<
+		Pick<
+			MemoryItemRow,
+			| 'source_task_id'
+			| 'agent_role'
+			| 'embedding_model_version'
+			| 'valid_from'
+			| 'supersedes_reason'
+		>
+	>,
+): MemoryRecord {
+	return {
+		...base,
+		...(base.sourceTaskId === undefined && row.source_task_id !== undefined
+			? { sourceTaskId: row.source_task_id }
+			: {}),
+		...(base.producerAgentRole === undefined && row.agent_role !== undefined
+			? { producerAgentRole: row.agent_role }
+			: {}),
+		...(base.embeddingModelVersion === undefined &&
+		row.embedding_model_version !== undefined
+			? { embeddingModelVersion: row.embedding_model_version }
+			: {}),
+		...(base.validFrom === undefined && row.valid_from != null
+			? { validFrom: row.valid_from }
+			: {}),
+		...(base.supersedesReason === undefined && row.supersedes_reason != null
+			? { supersedesReason: row.supersedes_reason }
+			: {}),
+	};
 }
 
 interface FtsCandidateRow {
@@ -351,6 +615,11 @@ interface RewardEventRow {
 	timestamp: string;
 }
 
+interface OutcomeEventRow {
+	id: string;
+	event_json: string;
+}
+
 interface DecisionTransactionResult {
 	change: AppliedMemoryChange;
 	proposal: MemoryProposal;
@@ -366,6 +635,7 @@ interface MigrationRow {
 export interface SQLiteJsonlImportResult {
 	importedMemories: number;
 	importedProposals: number;
+	importedOutcomes: number;
 	invalidRows: JsonlMigrationReport['invalidRows'];
 	totalRows: number;
 }
@@ -489,17 +759,27 @@ export class SQLiteMemoryProvider
 		// leaking the first one. A narrow wrap around only runMigrations() would
 		// miss the later throw sites, so the entire post-open body is guarded.
 		try {
-			this.db.run('PRAGMA journal_mode = WAL;');
-			this.db.run('PRAGMA synchronous = NORMAL;');
+			// PR #2310 feedback PRR-017: busy_timeout FIRST. Every statement
+			// between the raw open and this PRAGMA runs with NO busy handling,
+			// so a second connection touching the same WAL database (e.g. the
+			// audit-verify command's diagnostic provider alongside a pooled
+			// provider) could hit a raw SQLITE_BUSY during journal-mode setup.
 			const busyTimeoutMs = Math.min(
 				60000,
 				Math.max(0, Math.trunc(this.config.sqlite.busyTimeoutMs)),
 			);
 			this.db.run(`PRAGMA busy_timeout = ${busyTimeoutMs};`);
+			this.db.run('PRAGMA journal_mode = WAL;');
+			this.db.run('PRAGMA synchronous = NORMAL;');
 			this.db.run('PRAGMA foreign_keys = ON;');
 			this.runMigrations();
 			this.backfillScopeKeys();
 			this.backfillRecallRunIds();
+			// #1466 Phase 6: provenance columns (v12) + event hash chain (v13)
+			// backfills. Must run before any new event insert so the chain tail
+			// is anchored (see backfillEventHashChain).
+			this.backfillProvenanceColumns();
+			this.backfillEventHashChain();
 			this.ftsAvailable = this.initializeFtsIndex();
 			this.initializeVecExtension();
 			if (this.config.embeddings.enabled && !this.embeddingProvider) {
@@ -579,29 +859,166 @@ export class SQLiteMemoryProvider
 
 	async upsert(record: MemoryRecord): Promise<MemoryRecord> {
 		await this.initialize();
-		const existing = this.memories.get(record.id);
-		if (existing?.metadata.deleted === true) {
-			throw new MemoryValidationError(
-				'memory is tombstoned and cannot be upserted',
+		const db = this.requireDb();
+		let next: MemoryRecord;
+		const ownsTransaction = !db.inTransaction;
+		if (ownsTransaction) db.run('BEGIN IMMEDIATE');
+		try {
+			const existingRow = this.readMemoryItemRowById(record.id);
+			const existing = existingRow ? this.parseMemoryRow(existingRow) : null;
+			if (existing?.metadata.deleted === true) {
+				throw new MemoryValidationError(
+					'memory is tombstoned and cannot be upserted',
+				);
+			}
+			// Final-critic (PR #2310, delta 2): the choke-point merge.
+			// Callers routinely round-trip get()→upsert() (reward-capture
+			// Q-updates, evaluation, future callers); get() returns the stored
+			// (stripped) record_json shape, so without merging the existing
+			// ROW's provenance columns back in, every such rewrite would reset
+			// source_task_id/agent_role to the ALTER TABLE defaults.
+			// mergeProvenanceColumns only fills fields the record LACKS, so a
+			// caller-provided (gateway-stamped) value still wins.
+			const merged = existingRow
+				? mergeProvenanceColumns(record, existingRow)
+				: record;
+			next = validateMemoryRecordRules(
+				{
+					...merged,
+					createdAt: existing?.createdAt ?? merged.createdAt,
+					metadata: {
+						...merged.metadata,
+						outcomeGeneration:
+							existing?.metadata.outcomeGeneration ??
+							merged.metadata.outcomeGeneration,
+					},
+				},
+				{ rejectDurableSecrets: this.config.redaction.rejectDurableSecrets },
 			);
+			if (
+				(next.outcomes?.length ?? 0) > 0 ||
+				typeof next.metadata.outcomeGeneration === 'string'
+			) {
+				next = ensureOutcomeGeneration(next);
+			}
+			const existingEvents = this.readOutcomeEvents(next.id);
+			const base = stripMaterializedOutcomes(next);
+			this.writeMemory(base);
+			if (typeof next.metadata.outcomeGeneration === 'string') {
+				const importedEvents = importMaterializedOutcomeEvents(
+					next,
+					existingEvents,
+				);
+				const combinedIds = new Set(
+					existingEvents
+						.filter(
+							(event) => event.generation === next.metadata.outcomeGeneration,
+						)
+						.map((event) => event.id),
+				);
+				for (const event of importedEvents) combinedIds.add(event.id);
+				if (combinedIds.size > 1000) {
+					throw new MemoryValidationError('memory outcome limit exceeded');
+				}
+				for (const event of importedEvents) {
+					this.insertOutcomeEvent(event);
+				}
+			}
+			next = materializeOutcomeRecord(base, this.readOutcomeEvents(next.id));
+			this.insertEvent('upsert', next.id);
+			if (ownsTransaction) db.run('COMMIT');
+		} catch (error) {
+			if (ownsTransaction) {
+				try {
+					db.run('ROLLBACK');
+				} catch {
+					// Preserve the upsert error when rollback also fails.
+				}
+			}
+			throw error;
 		}
-		const next = validateMemoryRecordRules(
-			{
-				...record,
-				createdAt: existing?.createdAt ?? record.createdAt,
-			},
-			{ rejectDurableSecrets: this.config.redaction.rejectDurableSecrets },
-		);
 		this.memories.set(next.id, next);
-		this.writeMemory(next);
 		await this.writeMemoryVec(next);
-		await this.event('upsert', next.id);
+		this.bumpCohortGeneration();
 		return next;
 	}
 
 	async get(id: string): Promise<MemoryRecord | null> {
 		await this.initialize();
-		return this.memories.get(id) ?? null;
+		const record = this.readMemoryById(id);
+		if (record) this.memories.set(id, record);
+		return record;
+	}
+
+	async appendOutcome(
+		memoryId: string,
+		event: { id: string; outcome: MemoryOutcome },
+		anchors: MemoryAnchor[] = [],
+	): Promise<MemoryRecord> {
+		await this.initialize();
+		let materialized: MemoryRecord | null = null;
+		const db = this.requireDb();
+		db.run('BEGIN IMMEDIATE');
+		try {
+			const row = this.requireDb()
+				.query<MemoryItemRow, [string]>(MEMORY_ITEM_BY_ID_SQL)
+				.get(memoryId);
+			if (!row) throw new MemoryValidationError('target memory was not found');
+			let base = ensureOutcomeGeneration(
+				validateMemoryRecordRules(
+					mergeProvenanceColumns(JSON.parse(row.record_json), row),
+					{
+						rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
+					},
+				),
+			);
+			if (base.metadata.deleted === true) {
+				throw new MemoryValidationError('target memory is deleted');
+			}
+			base = stripMaterializedOutcomes(base);
+			this.writeMemory(base);
+			const nextEvent = validateOutcomeEvent({
+				...event,
+				memoryId,
+				generation: base.metadata.outcomeGeneration,
+				anchors,
+			});
+			const events = this.readOutcomeEvents(memoryId);
+			assertEventIdentityCompatible(
+				events.find((candidate) => candidate.id === nextEvent.id),
+				nextEvent,
+			);
+			if (
+				events.filter(
+					(candidate) => candidate.generation === nextEvent.generation,
+				).length >= 1000 &&
+				!events.some((candidate) => candidate.id === nextEvent.id)
+			) {
+				throw new MemoryValidationError('memory outcome limit exceeded');
+			}
+			this.insertOutcomeEvent(nextEvent);
+			materialized = materializeOutcomeRecord(
+				base,
+				this.readOutcomeEvents(memoryId),
+			);
+			db.run('COMMIT');
+		} catch (error) {
+			try {
+				db.run('ROLLBACK');
+			} catch {
+				// Preserve the append error when rollback also fails.
+			}
+			throw error;
+		}
+		if (!materialized) throw new Error('outcome append did not complete');
+		this.memories.set(memoryId, materialized);
+		this.bumpCohortGeneration();
+		return materialized;
+	}
+
+	async listOutcomeEvents(): Promise<MemoryOutcomeEvent[]> {
+		await this.initialize();
+		return this.readOutcomeEvents();
 	}
 
 	async withTransaction<T>(
@@ -637,13 +1054,29 @@ export class SQLiteMemoryProvider
 
 	async delete(id: string, reason?: string): Promise<void> {
 		await this.initialize();
-		const existing = this.memories.get(id);
+		const existing = this.readMemoryById(id);
 		if (!existing) return;
 		if (this.config.hardDelete) {
+			const db = this.requireDb();
+			db.run('BEGIN IMMEDIATE');
+			try {
+				db.run('DELETE FROM memory_outcomes WHERE memory_id = ?', [id]);
+				db.run('DELETE FROM memory_items WHERE id = ?', [id]);
+				this.deleteMemoryFts(id);
+				this.deleteMemoryVec(id);
+				this.insertEvent('delete', id, reason);
+				db.run('COMMIT');
+			} catch (error) {
+				try {
+					db.run('ROLLBACK');
+				} catch {
+					// Preserve the deletion error when rollback also fails.
+				}
+				throw error;
+			}
 			this.memories.delete(id);
-			this.requireDb().run('DELETE FROM memory_items WHERE id = ?', [id]);
-			this.deleteMemoryFts(id);
-			this.deleteMemoryVec(id);
+			this.bumpCohortGeneration();
+			return;
 		} else {
 			const tombstone: MemoryRecord = {
 				...existing,
@@ -1160,7 +1593,7 @@ export class SQLiteMemoryProvider
 		const whereClause =
 			conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-		let sql = `SELECT id, record_json FROM memory_items ${whereClause} ORDER BY updated_at DESC`;
+		let sql = `SELECT id, record_json, source_task_id, agent_role, embedding_model_version, valid_from, supersedes_reason FROM memory_items ${whereClause} ORDER BY updated_at DESC, id ASC`;
 
 		if (typeof filter.limit === 'number') {
 			sql += ' LIMIT ?';
@@ -1170,11 +1603,17 @@ export class SQLiteMemoryProvider
 		const rows = db
 			.query<MemoryItemRow, SQLQueryBindings[]>(sql)
 			.all(...params);
+		const outcomeEvents = this.readOutcomeEventsForMemoryIds(
+			rows.map((row) => row.id),
+		);
 
 		let records: MemoryRecord[] = [];
 		for (const row of rows) {
-			const parsed = this.parseMemoryRow(row);
-			if (parsed) records.push(parsed);
+			const parsed = this.parseMemoryRow(row, outcomeEvents);
+			if (parsed) {
+				records.push(parsed);
+				this.memories.set(parsed.id, parsed);
+			}
 		}
 
 		// Post-filter: preserve the original includeExpired semantics for
@@ -1270,6 +1709,11 @@ export class SQLiteMemoryProvider
 		this.initialized = false;
 		this.initPromise = null;
 		this.lastAutomaticJsonlMigration = null;
+		// Migration-phase state belongs to the closed connection's init run.
+		this.eventChainReadyCache = false;
+		this.databaseStartedFresh = false;
+		this.migrationsComplete = false;
+		this.freshInitMigrationEvents = [];
 	}
 
 	/**
@@ -1414,22 +1858,57 @@ export class SQLiteMemoryProvider
 		directory: string;
 		memoriesPath: string;
 		proposalsPath: string;
+		outcomesPath: string;
 		memories: number;
 		proposals: number;
+		outcomes: number;
 	}> {
 		await this.initialize();
-		const memories = await this.list({ includeExpired: true });
+		const memories = await this.list({
+			includeExpired: true,
+			includeInactive: true,
+		});
+		// Final-critic fix (PR #2310): record_json omits the #1466 provenance
+		// fields, so an export of list() results would silently drop them and
+		// a sqlite→jsonl→import round-trip would lose attribution. Merge the
+		// authoritative columns back onto the exported records.
+		const provenanceById = new Map(
+			this.requireDb()
+				.query<
+					Pick<
+						MemoryItemRow,
+						| 'id'
+						| 'source_task_id'
+						| 'agent_role'
+						| 'embedding_model_version'
+						| 'valid_from'
+						| 'supersedes_reason'
+					>,
+					[]
+				>(
+					'SELECT id, source_task_id, agent_role, embedding_model_version, valid_from, supersedes_reason FROM memory_items',
+				)
+				.all()
+				.map((row) => [row.id, row] as const),
+		);
+		const enriched = memories.map((memory) => {
+			const row = provenanceById.get(memory.id);
+			return row ? mergeProvenanceColumns(memory, row) : memory;
+		});
 		const proposals = await this.listProposals();
+		const outcomeEvents = this.readOutcomeEvents();
 		const output = await writeJsonlExport(
 			this.rootDirectory,
 			this.config,
-			memories,
+			enriched,
 			proposals,
+			outcomeEvents,
 		);
 		return {
 			...output,
 			memories: memories.length,
 			proposals: proposals.length,
+			outcomes: outcomeEvents.length,
 		};
 	}
 
@@ -1472,6 +1951,7 @@ export class SQLiteMemoryProvider
 		const db = this.requireDb();
 		const compact = db.transaction(() => {
 			for (const id of removeIds) {
+				db.run('DELETE FROM memory_outcomes WHERE memory_id = ?', [id]);
 				db.run('DELETE FROM memory_items WHERE id = ?', [id]);
 				this.deleteMemoryFts(id);
 				this.deleteMemoryVec(id);
@@ -1637,6 +2117,11 @@ export class SQLiteMemoryProvider
 			)
 			.get();
 		const currentVersion = row?.version ?? 0;
+		// #1466: a database whose migrations start from version 0 is freshly
+		// created — its ONLY event rows are the migration events inserted
+		// below, which the hash-chain backfill can chain from the in-memory
+		// log without an extra table scan (see backfillEventHashChain).
+		this.databaseStartedFresh = currentVersion === 0;
 		for (const migration of MIGRATIONS) {
 			if (migration.version <= currentVersion) continue;
 			const apply = db.transaction(() => {
@@ -1655,6 +2140,11 @@ export class SQLiteMemoryProvider
 			});
 			apply();
 		}
+		// #1466: every migration-phase event (including v13's own, whose
+		// marker row is inserted before its event fires) inserts UNCHAINED
+		// and is chained deterministically by backfillEventHashChain —
+		// otherwise v13's event would anchor at GENESIS above unchained rows.
+		this.migrationsComplete = true;
 	}
 
 	private backfillScopeKeys(): void {
@@ -1754,6 +2244,202 @@ export class SQLiteMemoryProvider
 		);
 	}
 
+	/**
+	 * #1466 (migration v12 follow-up): backfill `valid_from` for pre-v12 rows
+	 * from the record's createdAt (fallback: updated_at). source_task_id /
+	 * agent_role / embedding_model_version keep their ALTER TABLE defaults per
+	 * the issue's backfill note — migration must not fail on missing data.
+	 *
+	 * Implemented as a single JSON1 statement (no per-row loop) and executed
+	 * via run(): bun's per-Database QUERY cache is strictly bounded (~20
+	 * statements, bun 1.3.x) and EVICTED entries are never finalized on close
+	 * — on Windows that keeps memory.db locked after close() until GC. run()
+	 * does not use that cache; keep new db.query() SQL strings to a minimum.
+	 */
+	private backfillProvenanceColumns(): void {
+		const db = this.requireDb();
+		const metaRow = db
+			.query<{ value: string }, [string]>(
+				'SELECT value FROM _meta WHERE key = ?',
+			)
+			.get('provenance_columns_backfilled');
+		if (metaRow?.value === '1') return;
+		let backfillCount = 0;
+		try {
+			const result = db.run(`
+				UPDATE memory_items
+				SET valid_from = COALESCE(
+					json_extract(record_json, '$.createdAt'),
+					json_extract(record_json, '$.updatedAt')
+				)
+				WHERE valid_from IS NULL
+			`);
+			backfillCount = Number(result?.changes ?? 0);
+		} catch {
+			// JSON1 unavailable (non-standard build) — fall back to a bounded
+			// TS loop via run() (still no query-cache pressure).
+			const rows = db
+				.query<{ id: string; record_json: string }, []>(
+					'SELECT id, record_json FROM memory_items WHERE valid_from IS NULL',
+				)
+				.all();
+			for (const row of rows) {
+				try {
+					const record = JSON.parse(row.record_json) as {
+						createdAt?: string;
+						updatedAt?: string;
+					};
+					const validFrom = record.createdAt ?? record.updatedAt ?? null;
+					if (validFrom) {
+						db.run('UPDATE memory_items SET valid_from = ? WHERE id = ?', [
+							validFrom,
+							row.id,
+						]);
+						backfillCount++;
+					}
+				} catch {
+					// Skip unparseable rows — they keep valid_from NULL
+				}
+			}
+		}
+		if (backfillCount > 0) {
+			this.insertEvent(
+				'migration',
+				'backfill_provenance_columns',
+				`${backfillCount} memory item(s) valid_from backfilled from record createdAt`,
+			);
+		}
+		db.run(
+			"INSERT OR REPLACE INTO _meta (key, value) VALUES ('provenance_columns_backfilled', '1')",
+		);
+	}
+
+	/**
+	 * #1466 (migration v13 follow-up): deterministically chain all existing
+	 * event rows (first row anchored to GENESIS, row n prev_hash = hash of the
+	 * full row n-1). Recomputes from row content only — existing prev_hash
+	 * values are ignored — so a crash mid-backfill heals identically on the
+	 * next init. The _meta head mirrors the last row's hash so last-row
+	 * tampering is detectable.
+	 */
+	private backfillEventHashChain(): void {
+		const db = this.requireDb();
+		const metaRow = db
+			.query<{ value: string }, [string]>(
+				'SELECT value FROM _meta WHERE key = ?',
+			)
+			.get('event_hash_chain_backfilled');
+		if (metaRow?.value === '1') return;
+		let rows: (MemoryEventRow & { rowid: number })[];
+		if (this.databaseStartedFresh) {
+			// Fresh database: the only event rows are the migration events
+			// logged in memory (rowids 1..n by construction). Chaining from
+			// the log avoids loading the events SELECT into the bounded
+			// query cache on every fresh provider lifecycle (tests create one
+			// per case; see backfillProvenanceColumns for the cache cap).
+			rows = this.freshInitMigrationEvents.map((row, i) => ({
+				...row,
+				rowid: i + 1,
+			}));
+		} else {
+			rows = db
+				.query<MemoryEventRow & { rowid: number }, []>(EVENT_CHAIN_SCAN_SQL)
+				.all();
+		}
+		let prevHash: string | null = null;
+		for (const row of rows) {
+			const next = prevHash ?? EVENT_CHAIN_GENESIS;
+			db.run('UPDATE memory_events SET prev_hash = ? WHERE rowid = ?', [
+				next,
+				row.rowid,
+			]);
+			// The stored row now carries its new prev_hash; hash THAT form.
+			prevHash = memoryEventRowHash({ ...row, prev_hash: next });
+		}
+		if (prevHash !== null) {
+			db.run(`INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)`, [
+				MEMORY_EVENTS_CHAIN_HEAD_KEY,
+				prevHash,
+			]);
+		}
+		if (rows.length > 0) {
+			this.insertEvent(
+				'migration',
+				'backfill_event_hash_chain',
+				`${rows.length} memory_events row(s) chained deterministically`,
+			);
+		}
+		db.run(
+			"INSERT OR REPLACE INTO _meta (key, value) VALUES ('event_hash_chain_backfilled', '1')",
+		);
+	}
+
+	/**
+	 * #1466: `/swarm memory audit-verify` backend. Lazily recomputes the
+	 * memory_events hash chain and the _meta head. Read-only.
+	 */
+	async verifyAuditChain(): Promise<MemoryAuditVerificationReport> {
+		await this.initialize();
+		const db = this.requireDb();
+		// Shared scan constant — one query-cache slot with the backfill
+		// (see EVENT_CHAIN_SCAN_SQL).
+		const rows = db
+			.query<MemoryEventRow & { rowid: number }, []>(EVENT_CHAIN_SCAN_SQL)
+			.all();
+		const headRow = db
+			.query<{ value: string }, [string]>(
+				'SELECT value FROM _meta WHERE key = ?',
+			)
+			.get(MEMORY_EVENTS_CHAIN_HEAD_KEY);
+		return verifyMemoryEventChainRows(rows, headRow?.value ?? null);
+	}
+
+	/**
+	 * #1466: true once the memory_events.prev_hash column exists (migration
+	 * v13 applied). Memoized positive — the column never disappears — so the
+	 * schema probe runs only until the first success.
+	 */
+	private eventChainReadyCache = false;
+	private eventChainColumnReady(): boolean {
+		if (this.eventChainReadyCache) return true;
+		// Ordinary schema_migrations read (via hasMigration) — deliberately NOT
+		// a pragma_table_info probe: its prepared statement survives
+		// db.close() until GC on Windows (bun 1.3.14) and keeps the database
+		// file locked, breaking temp-dir cleanup in tests and any caller that
+		// closes and immediately moves/deletes the store.
+		this.eventChainReadyCache = this.hasMigration(
+			EVENT_CHAIN_SCHEMA_MIGRATION_NAME,
+		);
+		return this.eventChainReadyCache;
+	}
+
+	/** #1466: gateway-emitted audit events (PII rejection). */
+	async recordEvent(
+		operation: 'pii_rejected',
+		targetId: string,
+		reason?: string,
+	): Promise<void> {
+		await this.initialize();
+		// insertEvent is synchronous today; the await keeps the throw-path
+		// contract obvious if it ever becomes async (gateway callers wrap
+		// this in try/catch around the await).
+		await this.insertEvent(operation, targetId, reason);
+	}
+
+	/**
+	 * #1466: embedding model version for provenance stamping. Empty when
+	 * embeddings are not active for this database.
+	 */
+	private embeddingModelVersionStamp(): string {
+		if (!this.config.embeddings.enabled) return '';
+		if (this.embeddingProvider) return this.embeddingProvider.modelVersion;
+		try {
+			return this.getStoredModelVersion() ?? '';
+		} catch {
+			return '';
+		}
+	}
+
 	private initializeFtsIndex(): boolean {
 		const db = this.requireDb();
 		try {
@@ -1836,10 +2522,11 @@ export class SQLiteMemoryProvider
 
 	private rebuildFtsIndex(): void {
 		const db = this.requireDb();
+		const outcomeEvents = this.readOutcomeEvents();
 		const rebuild = db.transaction(() => {
 			db.run(`DELETE FROM ${FTS_TABLE_NAME}`);
 			for (const row of this.iterateMemoryRows()) {
-				const record = this.parseMemoryRow(row);
+				const record = this.parseMemoryRow(row, outcomeEvents);
 				if (record) {
 					this.writeMemoryFts(record);
 				}
@@ -1850,23 +2537,44 @@ export class SQLiteMemoryProvider
 
 	private countValidMemoryRows(): number {
 		let count = 0;
+		const outcomeEvents = this.readOutcomeEvents();
 		for (const row of this.iterateMemoryRows()) {
-			if (this.parseMemoryRow(row)) count++;
+			if (this.parseMemoryRow(row, outcomeEvents)) count++;
 		}
 		return count;
 	}
 
 	private *iterateMemoryRows(): IterableIterator<MemoryItemRow> {
 		yield* this.requireDb()
-			.query<MemoryItemRow, []>('SELECT id, record_json FROM memory_items')
+			.query<MemoryItemRow, []>(
+				'SELECT id, record_json, source_task_id, agent_role, embedding_model_version, valid_from, supersedes_reason FROM memory_items',
+			)
 			.iterate();
 	}
 
-	private parseMemoryRow(row: MemoryItemRow): MemoryRecord | null {
+	private parseMemoryRow(
+		row: MemoryItemRow,
+		outcomeEvents?: readonly MemoryOutcomeEvent[],
+	): MemoryRecord | null {
 		try {
-			return validateMemoryRecordRules(JSON.parse(row.record_json), {
+			// Deliberately NO provenance merge here: get()/list() return the
+			// stored record_json shape (stripped for old-binary compat), which
+			// keeps sqlite/local-jsonl provider parity. Provenance columns are
+			// merged only on the internal REWRITE paths (appendOutcome,
+			// insertOutcomeEvent, readActiveMemory) and on export, where losing
+			// them would clobber the columns back to defaults.
+			const base = validateMemoryRecordRules(JSON.parse(row.record_json), {
 				rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
 			});
+			return validateMemoryRecordRules(
+				materializeOutcomeRecord(
+					base,
+					outcomeEvents ?? this.readOutcomeEvents(base.id),
+				),
+				{
+					rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
+				},
+			);
 		} catch {
 			return null;
 		}
@@ -1875,13 +2583,14 @@ export class SQLiteMemoryProvider
 	private loadMemories(): { records: MemoryRecord[]; invalidCount: number } {
 		const rows = this.requireDb()
 			.query<MemoryItemRow, []>(
-				'SELECT id, record_json FROM memory_items ORDER BY updated_at ASC',
+				'SELECT id, record_json, source_task_id, agent_role, embedding_model_version, valid_from, supersedes_reason FROM memory_items ORDER BY updated_at ASC',
 			)
 			.all();
 		const records: MemoryRecord[] = [];
+		const outcomeEvents = this.readOutcomeEvents();
 		let invalidCount = 0;
 		for (const row of rows) {
-			const record = this.parseMemoryRow(row);
+			const record = this.parseMemoryRow(row, outcomeEvents);
 			if (record) {
 				records.push(record);
 			} else {
@@ -1919,8 +2628,9 @@ export class SQLiteMemoryProvider
 	}
 
 	private writeMemory(record: MemoryRecord): void {
+		const stored = stripMaterializedOutcomes(record);
 		this.requireDb().run(
-			`INSERT OR REPLACE INTO memory_items (
+			`INSERT INTO memory_items (
 				id,
 				scope_key,
 				kind,
@@ -1928,26 +2638,165 @@ export class SQLiteMemoryProvider
 				expires_at,
 				superseded_by,
 				deleted,
-				record_json
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				record_json,
+				source_task_id,
+				agent_role,
+				embedding_model_version,
+				valid_from,
+				supersedes_reason
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(id) DO UPDATE SET
+				scope_key = excluded.scope_key,
+				kind = excluded.kind,
+				updated_at = excluded.updated_at,
+				expires_at = excluded.expires_at,
+				superseded_by = excluded.superseded_by,
+				deleted = excluded.deleted,
+				record_json = excluded.record_json,
+				source_task_id = excluded.source_task_id,
+				agent_role = excluded.agent_role,
+				embedding_model_version = excluded.embedding_model_version,
+				-- #1466: valid_from records when this memory became
+				-- authoritative; a re-write of the same id must not reset it.
+				valid_from = memory_items.valid_from,
+				supersedes_reason = COALESCE(excluded.supersedes_reason, memory_items.supersedes_reason)`,
 			[
-				record.id,
-				stableScopeKey(record.scope),
-				record.kind,
-				record.updatedAt,
-				record.expiresAt ?? null,
-				record.supersededBy ?? null,
-				record.metadata.deleted === true ? 1 : 0,
-				JSON.stringify(record),
+				stored.id,
+				stableScopeKey(stored.scope),
+				stored.kind,
+				stored.updatedAt,
+				stored.expiresAt ?? null,
+				stored.supersededBy ?? null,
+				stored.metadata.deleted === true ? 1 : 0,
+				// PR #2310 feedback PRR-006: record_json deliberately OMITS the
+				// #1466 provenance fields — they live in the dedicated columns.
+				// The pre-PR MemoryRecordSchema is .strict(); persisting unknown
+				// keys would make every post-upgrade record invisible to an
+				// older binary (rollback / stale-cache installs) on load.
+				// Columns stay populated from the in-memory record below.
+				JSON.stringify(toLegacyCompatibleRecordJson(stored)),
+				// #1466 provenance denormalization.
+				stored.sourceTaskId ?? '',
+				stored.producerAgentRole ?? 'unknown',
+				this.embeddingModelVersionStamp(),
+				stored.validFrom ?? null,
+				stored.supersedesReason ?? null,
 			],
 		);
-		this.writeMemoryFts(record);
+		this.writeMemoryFts(stored);
 		// #1850 (critic CONCERN-1): bump the cohort generation marker so sibling
 		// worktrees observe this write on their next revalidation. Bumped at the
 		// provider layer so ALL write paths (propose, curator, finalize-reward,
 		// direct upsert) invalidate peers. Local writes are no-ops. Best-effort:
 		// a bump failure must never block the write.
 		this.bumpCohortGeneration();
+	}
+
+	/** Raw row (WITH provenance columns) for a single memory item. */
+	private readMemoryItemRowById(id: string): MemoryItemRow | null {
+		return (
+			this.requireDb()
+				.query<MemoryItemRow, [string]>(MEMORY_ITEM_BY_ID_SQL)
+				.get(id) ?? null
+		);
+	}
+
+	private readMemoryById(id: string): MemoryRecord | null {
+		const row = this.readMemoryItemRowById(id);
+		return row ? this.parseMemoryRow(row) : null;
+	}
+
+	private readOutcomeEvents(memoryId?: string): MemoryOutcomeEvent[] {
+		const rows = memoryId
+			? this.requireDb()
+					.query<OutcomeEventRow, [string]>(
+						'SELECT id, event_json FROM memory_outcomes WHERE memory_id = ? ORDER BY at ASC, id ASC',
+					)
+					.all(memoryId)
+			: this.requireDb()
+					.query<OutcomeEventRow, []>(
+						'SELECT id, event_json FROM memory_outcomes ORDER BY at ASC, id ASC',
+					)
+					.all();
+		const events: MemoryOutcomeEvent[] = [];
+		for (const row of rows) {
+			try {
+				const event = validateOutcomeEvent(JSON.parse(row.event_json));
+				if (event.id !== row.id) continue;
+				events.push(event);
+			} catch {
+				// Invalid outcome rows are ignored like invalid legacy memory rows.
+			}
+		}
+		return events;
+	}
+
+	private readOutcomeEventsForMemoryIds(
+		memoryIds: readonly string[],
+	): MemoryOutcomeEvent[] {
+		if (memoryIds.length === 0) return [];
+		const events: MemoryOutcomeEvent[] = [];
+		for (let offset = 0; offset < memoryIds.length; offset += 500) {
+			const chunk = memoryIds.slice(offset, offset + 500);
+			const placeholders = chunk.map(() => '?').join(', ');
+			const rows = this.requireDb()
+				.query<OutcomeEventRow, SQLQueryBindings[]>(
+					`SELECT id, event_json FROM memory_outcomes WHERE memory_id IN (${placeholders}) ORDER BY at ASC, id ASC`,
+				)
+				.all(...chunk);
+			for (const row of rows) {
+				try {
+					const event = validateOutcomeEvent(JSON.parse(row.event_json));
+					if (event.id !== row.id) continue;
+					events.push(event);
+				} catch {
+					// Invalid outcome rows are ignored like invalid legacy memory rows.
+				}
+			}
+		}
+		return events;
+	}
+
+	private insertOutcomeEvent(event: MemoryOutcomeEvent): void {
+		const memoryRow = this.requireDb()
+			.query<MemoryItemRow, [string]>(MEMORY_ITEM_BY_ID_SQL)
+			.get(event.memoryId);
+		if (!memoryRow) {
+			throw new MemoryValidationError('target memory was not found');
+		}
+		const memory = validateMemoryRecordRules(
+			mergeProvenanceColumns(JSON.parse(memoryRow.record_json), memoryRow),
+			{
+				rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
+			},
+		);
+		const validatedEvent = validateOutcomeEventForMemory(
+			event,
+			memory,
+			this.config.redaction.rejectDurableSecrets,
+		);
+		const existing = this.requireDb()
+			.query<OutcomeEventRow, [string]>(
+				'SELECT id, event_json FROM memory_outcomes WHERE id = ? LIMIT 1',
+			)
+			.get(validatedEvent.id);
+		if (existing) {
+			assertEventIdentityCompatible(
+				validateOutcomeEvent(JSON.parse(existing.event_json)),
+				validatedEvent,
+			);
+			return;
+		}
+		this.requireDb().run(
+			'INSERT INTO memory_outcomes (id, memory_id, generation, at, event_json) VALUES (?, ?, ?, ?, ?)',
+			[
+				validatedEvent.id,
+				validatedEvent.memoryId,
+				validatedEvent.generation,
+				validatedEvent.outcome.at,
+				JSON.stringify(validatedEvent),
+			],
+		);
 	}
 
 	/**
@@ -2209,12 +3058,16 @@ export class SQLiteMemoryProvider
 				supersedes: Array.from(
 					new Set([...(decision.replacement.supersedes ?? []), oldMemory.id]),
 				),
+				// #1466: audit clarity for supersede chains — the reason is
+				// denormalized onto BOTH records (and the memory_items columns).
+				supersedesReason: decision.reason || undefined,
 			});
 			validateCuratorPromotableMemory(replacement);
 			const superseded = this.validateDecisionMemory({
 				...oldMemory,
 				updatedAt: appliedAt,
 				supersededBy: replacement.id,
+				supersedesReason: decision.reason || undefined,
 				metadata: {
 					...oldMemory.metadata,
 					supersedeReason: decision.reason,
@@ -2284,14 +3137,14 @@ export class SQLiteMemoryProvider
 
 	private readActiveMemory(memoryId: string): MemoryRecord {
 		const row = this.requireDb()
-			.query<MemoryItemRow, [string]>(
-				'SELECT id, record_json FROM memory_items WHERE id = ? LIMIT 1',
-			)
+			.query<MemoryItemRow, [string]>(MEMORY_ITEM_BY_ID_SQL)
 			.get(memoryId);
 		if (!row) {
 			throw new MemoryValidationError('target memory was not found');
 		}
-		const memory = this.validateDecisionMemory(JSON.parse(row.record_json));
+		const memory = this.validateDecisionMemory(
+			mergeProvenanceColumns(JSON.parse(row.record_json), row),
+		);
 		if (memory.metadata.deleted === true) {
 			throw new MemoryValidationError('target memory is deleted');
 		}
@@ -2308,13 +3161,33 @@ export class SQLiteMemoryProvider
 	}
 
 	private async migrateLegacyJsonlIfNeeded(): Promise<void> {
-		if (this.hasMigration(LEGACY_JSONL_MIGRATION_NAME)) return;
+		const baseImportComplete = this.hasMigration(LEGACY_JSONL_MIGRATION_NAME);
+		const storedOutcomeSignature = this.requireDb()
+			.query<{ value: string }, [string]>(
+				'SELECT value FROM _meta WHERE key = ? LIMIT 1',
+			)
+			.get(LEGACY_JSONL_OUTCOME_META_KEY)?.value;
+		const currentOutcomeSignature = await getLegacyOutcomeJsonlSignature(
+			this.rootDirectory,
+			this.config,
+		);
+		const outcomeImportComplete =
+			storedOutcomeSignature === currentOutcomeSignature;
+		if (baseImportComplete && outcomeImportComplete) return;
 		const backups = await backupLegacyJsonl(this.rootDirectory, this.config);
-		const result = await this.importLegacyJsonlRows();
+		const result = baseImportComplete
+			? await this.importLegacyOutcomeRows()
+			: await this.importLegacyJsonlRows();
 		this.lastAutomaticJsonlMigration = result;
-		this.markMigration(
-			LEGACY_JSONL_MIGRATION_VERSION,
-			LEGACY_JSONL_MIGRATION_NAME,
+		if (!baseImportComplete) {
+			this.markMigration(
+				LEGACY_JSONL_MIGRATION_VERSION,
+				LEGACY_JSONL_MIGRATION_NAME,
+			);
+		}
+		this.requireDb().run(
+			'INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)',
+			[LEGACY_JSONL_OUTCOME_META_KEY, currentOutcomeSignature],
 		);
 		const report: JsonlMigrationReport = {
 			migration: LEGACY_JSONL_MIGRATION_NAME,
@@ -2322,6 +3195,7 @@ export class SQLiteMemoryProvider
 			skipped: false,
 			importedMemories: result.importedMemories,
 			importedProposals: result.importedProposals,
+			importedOutcomes: result.importedOutcomes,
 			invalidRows: result.invalidRows,
 			backups,
 		};
@@ -2332,6 +3206,7 @@ export class SQLiteMemoryProvider
 			JSON.stringify({
 				importedMemories: result.importedMemories,
 				importedProposals: result.importedProposals,
+				importedOutcomes: result.importedOutcomes,
 				invalidRows: result.invalidRows.length,
 			}),
 		);
@@ -2339,18 +3214,139 @@ export class SQLiteMemoryProvider
 
 	private async importLegacyJsonlRows(): Promise<SQLiteJsonlImportResult> {
 		const payload = await readLegacyJsonl(this.rootDirectory, this.config);
-		for (const record of payload.memories) {
-			this.writeMemory(record);
+		const invalidRows = [...payload.invalidRows];
+		const materializedRows: Array<{
+			line: number;
+			events: MemoryOutcomeEvent[];
+		}> = [];
+		for (const sourceRow of payload.memoryRows) {
+			const rawRecord = sourceRow.record;
+			const record =
+				(rawRecord.outcomes?.length ?? 0) > 0
+					? ensureOutcomeGeneration(rawRecord)
+					: rawRecord;
+			this.writeMemory(stripMaterializedOutcomes(record));
+			if (typeof record.metadata.outcomeGeneration === 'string') {
+				try {
+					materializedRows.push({
+						line: sourceRow.line,
+						events: importMaterializedOutcomeEvents(
+							record,
+							payload.outcomeEvents,
+						),
+					});
+				} catch (error) {
+					invalidRows.push({
+						file: 'memories.jsonl',
+						line: sourceRow.line,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
 		}
 		for (const proposal of payload.proposals) {
 			this.writeProposal(proposal);
 		}
+		// Canonical rows are authoritative. Import them before projections from
+		// legacy materialized snapshots so a same-id conflict is attributed to the
+		// source memory row instead of rejecting the canonical event.
+		let importedOutcomes = this.importLegacyOutcomeEventRows(
+			payload.outcomeEventRows,
+			invalidRows,
+		);
+		for (const row of materializedRows) {
+			importedOutcomes += this.importLegacyMaterializedOutcomeRow(
+				row,
+				invalidRows,
+			);
+		}
 		return {
 			importedMemories: payload.memories.length,
 			importedProposals: payload.proposals.length,
-			invalidRows: payload.invalidRows,
+			importedOutcomes,
+			invalidRows,
 			totalRows: payload.totalRows,
 		};
+	}
+
+	private importLegacyMaterializedOutcomeRow(
+		row: { line: number; events: readonly MemoryOutcomeEvent[] },
+		invalidRows: JsonlMigrationReport['invalidRows'],
+	): number {
+		if (row.events.length === 0) return 0;
+		const db = this.requireDb();
+		db.run('SAVEPOINT legacy_materialized_outcome_row');
+		try {
+			let imported = 0;
+			for (const event of row.events) {
+				const alreadyImported = this.hasOutcomeEvent(event.id);
+				this.insertOutcomeEvent(event);
+				if (!alreadyImported) imported++;
+			}
+			db.run('RELEASE SAVEPOINT legacy_materialized_outcome_row');
+			return imported;
+		} catch (error) {
+			db.run('ROLLBACK TO SAVEPOINT legacy_materialized_outcome_row');
+			db.run('RELEASE SAVEPOINT legacy_materialized_outcome_row');
+			invalidRows.push({
+				file: 'memories.jsonl',
+				line: row.line,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return 0;
+		}
+	}
+
+	private async importLegacyOutcomeRows(): Promise<SQLiteJsonlImportResult> {
+		const payload = await readLegacyJsonl(this.rootDirectory, this.config);
+		const invalidRows = payload.invalidRows.filter(
+			(row) => row.file === 'outcome-events.jsonl',
+		);
+		const importedOutcomes = this.importLegacyOutcomeEventRows(
+			payload.outcomeEventRows,
+			invalidRows,
+		);
+		return {
+			importedMemories: 0,
+			importedProposals: 0,
+			importedOutcomes,
+			invalidRows,
+			totalRows:
+				payload.outcomeEventRows.length +
+				payload.invalidRows.filter((row) => row.file === 'outcome-events.jsonl')
+					.length,
+		};
+	}
+
+	private importLegacyOutcomeEventRows(
+		rows: readonly { line: number; event: MemoryOutcomeEvent }[],
+		invalidRows: JsonlMigrationReport['invalidRows'],
+	): number {
+		let imported = 0;
+		for (const row of rows) {
+			try {
+				const alreadyImported = this.hasOutcomeEvent(row.event.id);
+				this.insertOutcomeEvent(row.event);
+				if (!alreadyImported) imported++;
+			} catch (error) {
+				invalidRows.push({
+					file: 'outcome-events.jsonl',
+					line: row.line,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		return imported;
+	}
+
+	private hasOutcomeEvent(id: string): boolean {
+		return Boolean(
+			this.requireDb()
+				.query<{ id: string }, [string]>(
+					'SELECT id FROM memory_outcomes WHERE id = ? LIMIT 1',
+				)
+				.get(id),
+		);
 	}
 
 	private async event(
@@ -2368,25 +3364,123 @@ export class SQLiteMemoryProvider
 		eventJson?: string,
 		id = randomUUID(),
 	): void {
-		this.requireDb().run(
-			`INSERT INTO memory_events (
+		const db = this.requireDb();
+		const timestamp = new Date().toISOString();
+		const eventJsonValue =
+			eventJson ?? (reason ? JSON.stringify({ reason }) : null);
+		// Readiness is derived from schema_migrations via hasMigration AND
+		// migration completion: during v13's own transaction the marker exists,
+		// but that event (like every migration-phase event) must insert
+		// unchained so backfillEventHashChain chains the whole phase
+		// deterministically. Deliberately NOT a pragma_table_info probe — see
+		// backfillProvenanceColumns for the bounded query-cache constraint on
+		// db.query() strings.
+		if (!this.migrationsComplete || !this.eventChainColumnReady()) {
+			db.run(
+				`INSERT INTO memory_events (
+					id,
+					operation,
+					target_id,
+					reason,
+					timestamp,
+					event_json
+				) VALUES (?, ?, ?, ?, ?, ?)`,
+				[id, operation, targetId, reason ?? null, timestamp, eventJsonValue],
+			);
+			// #1466: on a freshly created database these migration-phase rows
+			// are the FIRST rows of an empty table, so their rowids are
+			// deterministic (insertion order, 1-based). Record them so the
+			// backfill can chain without a table scan (query-cache budget —
+			// see backfillProvenanceColumns). On upgrades the backfill scans.
+			if (this.databaseStartedFresh) {
+				this.freshInitMigrationEvents.push({
+					id,
+					operation,
+					target_id: targetId,
+					reason: reason ?? null,
+					timestamp,
+					event_json: eventJsonValue,
+					prev_hash: null,
+				});
+			}
+			return;
+		}
+		// #1466: the read-tail + insert + head update must be atomic per event.
+		// bun:sqlite on a single connection is synchronous (no in-process
+		// interleaving); BEGIN IMMEDIATE additionally holds the write lock
+		// across the sequence so a second PROCESS cannot chain off the same
+		// tail between our read and INSERT. Follows the upsert() nesting
+		// pattern: when called inside an outer transaction (e.g. migrations),
+		// that transaction already provides the atomicity.
+		//
+		// PR-feedback FB-2 (PR #2310): the tail is read from `_meta` INSIDE
+		// the transaction on EVERY insert — an earlier version cached it
+		// in-process, which let two live providers on one database (cohort
+		// siblings) each chain off a stale tail and permanently fork the
+		// chain. Reading `_meta` reuses the existing `SELECT value FROM _meta
+		// WHERE key = ?` statement (no new db.query() string — bounded
+		// query-cache budget, see backfillProvenanceColumns) and costs one
+		// indexed point-read inside a write transaction we already hold.
+		const ownsTransaction = !db.inTransaction;
+		if (ownsTransaction) db.run('BEGIN IMMEDIATE');
+		try {
+			const headRow = db
+				.query<{ value: string }, [string]>(
+					'SELECT value FROM _meta WHERE key = ?',
+				)
+				.get(MEMORY_EVENTS_CHAIN_HEAD_KEY);
+			// Absent head (no chained rows yet) anchors the insert at GENESIS.
+			const prevHash = headRow?.value ?? EVENT_CHAIN_GENESIS;
+			db.run(
+				`INSERT INTO memory_events (
+					id,
+					operation,
+					target_id,
+					reason,
+					timestamp,
+					event_json,
+					prev_hash
+				) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				[
+					id,
+					operation,
+					targetId,
+					reason ?? null,
+					timestamp,
+					eventJsonValue,
+					prevHash,
+				],
+			);
+			const headHash = memoryEventRowHash({
 				id,
 				operation,
-				target_id,
-				reason,
+				target_id: targetId,
+				reason: reason ?? null,
 				timestamp,
-				event_json
-			) VALUES (?, ?, ?, ?, ?, ?)`,
-			[
-				id,
-				operation,
-				targetId,
-				reason ?? null,
-				new Date().toISOString(),
-				eventJson ?? (reason ? JSON.stringify({ reason }) : null),
-			],
-		);
+				event_json: eventJsonValue,
+				prev_hash: prevHash,
+			});
+			db.run(`INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)`, [
+				MEMORY_EVENTS_CHAIN_HEAD_KEY,
+				headHash,
+			]);
+			if (ownsTransaction) db.run('COMMIT');
+		} catch (error) {
+			if (ownsTransaction) {
+				try {
+					db.run('ROLLBACK');
+				} catch {
+					// Preserve the insert error when rollback also fails.
+				}
+			}
+			throw error;
+		}
 	}
+
+	/** #1466: see runMigrations / backfillEventHashChain (fresh-DB fast path). */
+	private databaseStartedFresh = false;
+	private migrationsComplete = false;
+	private freshInitMigrationEvents: MemoryEventRow[] = [];
 
 	private requireDb(): Database {
 		if (!this.db)
@@ -2402,6 +3496,28 @@ export class SQLiteMemoryProvider
 // string literals and `--` line comments. Double-quoted SQLite identifiers are NOT in
 // scope for Phase 1 (current migrations use only single-quoted strings); document as
 // future work.
+/**
+ * PR #2310 feedback PRR-006: serialize a record for the sqlite
+ * `record_json` column WITHOUT the #1466 provenance fields. Those fields are
+ * persisted exclusively in the dedicated v12 columns; keeping them out of
+ * record_json preserves load compatibility with older binaries whose strict
+ * record schema does not know the keys (a rolled-back install would
+ * otherwise silently drop every post-upgrade record on load). The
+ * local-jsonl provider intentionally keeps the full record shape (it has no
+ * columns); loading such files with an older binary remains a documented
+ * limitation of the legacy/debug provider.
+ */
+function toLegacyCompatibleRecordJson(record: MemoryRecord): MemoryRecord {
+	const {
+		sourceTaskId: _sourceTaskId,
+		embeddingModelVersion: _embeddingModelVersion,
+		validFrom: _validFrom,
+		supersedesReason: _supersedesReason,
+		...legacy
+	} = record;
+	return legacy as MemoryRecord;
+}
+
 function splitSql(sql: string): string[] {
 	const statements: string[] = [];
 	let current = '';

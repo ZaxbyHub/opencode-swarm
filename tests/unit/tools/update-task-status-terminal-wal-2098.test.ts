@@ -3,7 +3,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin/tool';
-import { transitionTaskWorkflowEvidence } from '../../../src/gate-evidence';
+import {
+	assertTaskEvidenceWriteAllowed,
+	transitionTaskWorkflowEvidence,
+} from '../../../src/gate-evidence';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import {
 	executeUpdateTaskStatus,
@@ -308,5 +311,57 @@ describe('issue #2098 terminal status WAL', () => {
 				fs.readFileSync(path.join(terminalDirectory, '1.1.json'), 'utf-8'),
 			).state,
 		).toBe('COMMITTED');
+	});
+
+	test('evidence fence uses the shared terminal WAL validator diagnostics', () => {
+		const terminalDirectory = path.join(directory, '.swarm', 'task-terminals');
+		const walPath = path.join(terminalDirectory, '1.1.json');
+		fs.mkdirSync(terminalDirectory, { recursive: true });
+		fs.writeFileSync(walPath, '{');
+
+		expect(() => assertTaskEvidenceWriteAllowed(directory, '1.1')).toThrow(
+			`TASK_TERMINAL_WAL_UNREADABLE: ${walPath}`,
+		);
+		expect(() => assertTaskEvidenceWriteAllowed(directory, '1.1')).toThrow(
+			'Preserve this file and reconcile the task terminal transition before moving it aside.',
+		);
+	});
+
+	test('terminal update path surfaces the same shared malformed WAL error', async () => {
+		const planBefore = fs.readFileSync(
+			path.join(directory, '.swarm', 'plan.json'),
+			'utf-8',
+		);
+		const evidenceBefore = fs.readFileSync(
+			path.join(directory, '.swarm', 'evidence', '1.1.json'),
+			'utf-8',
+		);
+		const terminalDirectory = path.join(directory, '.swarm', 'task-terminals');
+		const walPath = path.join(terminalDirectory, '1.1.json');
+		fs.mkdirSync(terminalDirectory, { recursive: true });
+		fs.writeFileSync(walPath, '{');
+
+		const result = await executeUpdateTaskStatus(
+			{ task_id: '1.1', status: 'completed' },
+			directory,
+			{ sessionID: 'caller' } as ToolContext,
+		);
+
+		expect(result.success).toBe(false);
+		expect(result.errors?.[0]).toContain(
+			`TASK_TERMINAL_WAL_UNREADABLE: ${walPath}`,
+		);
+		expect(result.errors?.[0]).toContain(
+			'Preserve this file and reconcile the task terminal transition before moving it aside.',
+		);
+		expect(
+			fs.readFileSync(path.join(directory, '.swarm', 'plan.json'), 'utf-8'),
+		).toBe(planBefore);
+		expect(
+			fs.readFileSync(
+				path.join(directory, '.swarm', 'evidence', '1.1.json'),
+				'utf-8',
+			),
+		).toBe(evidenceBefore);
 	});
 });

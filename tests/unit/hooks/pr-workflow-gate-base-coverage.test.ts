@@ -24,6 +24,14 @@ import {
 beforeEach(setupPrWorkflowGateFixtures);
 afterEach(teardownPrWorkflowGateFixtures);
 
+function legacyBaseOptions(batchId: string) {
+	return {
+		batchId,
+		prHeadSha: HEAD_SHA,
+		prReviewResiliencePolicy: { enabled: false },
+	} as const;
+}
+
 describe('pr-workflow-gate base coverage', () => {
 	test('enforcePrReviewBaseDimensions accepts the exact six required base lane ids', async () => {
 		await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW');
@@ -34,7 +42,7 @@ describe('pr-workflow-gate base coverage', () => {
 			[...PR_REVIEW_BASE_DIMENSION_IDS]
 				.reverse()
 				.map((workflowLane) => ({ laneId: workflowLane, workflowLane })),
-			{ batchId: 'batch-1', prHeadSha: HEAD_SHA },
+			legacyBaseOptions('batch-1'),
 		);
 
 		expect(state.prReviewBaseDispatch).toEqual({
@@ -59,7 +67,7 @@ describe('pr-workflow-gate base coverage', () => {
 				laneId: workflowLane,
 				workflowLane,
 			})),
-			{ batchId: 'retry-subset', prHeadSha: HEAD_SHA },
+			legacyBaseOptions('retry-subset'),
 		);
 
 		await expect(
@@ -72,7 +80,7 @@ describe('pr-workflow-gate base coverage', () => {
 					})),
 					{ workflowLane: 'not-a-base-dimension' },
 				],
-				{ batchId: 'bad', prHeadSha: HEAD_SHA },
+				legacyBaseOptions('bad'),
 			),
 		).rejects.toThrow('must be drawn from');
 	});
@@ -89,16 +97,13 @@ describe('pr-workflow-gate base coverage', () => {
 			(workflowLane) => ({ laneId: `ok-${workflowLane}`, workflowLane }),
 		);
 		await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, firstHalf, {
-			batchId: 'base-failed',
-			prHeadSha: HEAD_SHA,
+			...legacyBaseOptions('base-failed'),
 		});
 		await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, retryFirstHalf, {
-			batchId: 'base-retry',
-			prHeadSha: HEAD_SHA,
+			...legacyBaseOptions('base-retry'),
 		});
 		await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, secondHalf, {
-			batchId: 'base-second',
-			prHeadSha: HEAD_SHA,
+			...legacyBaseOptions('base-second'),
 		});
 		await persistBatch(
 			'base-failed',
@@ -118,8 +123,7 @@ describe('pr-workflow-gate base coverage', () => {
 			laneId: `retry-${lane.workflowLane}`,
 		}));
 		await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, retrySecondHalf, {
-			batchId: 'base-second-retry',
-			prHeadSha: HEAD_SHA,
+			...legacyBaseOptions('base-second-retry'),
 		});
 		await persistBatch(
 			'base-second-retry',
@@ -138,8 +142,7 @@ describe('pr-workflow-gate base coverage', () => {
 			workflowLane,
 		}));
 		await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, lanes, {
-			batchId: 'base-shared-session',
-			prHeadSha: HEAD_SHA,
+			...legacyBaseOptions('base-shared-session'),
 		});
 		await persistBatch('base-shared-session', 'swarm-pr-review:base', lanes, {
 			subagentSessionId: 'one-child-for-all-six',
@@ -159,8 +162,7 @@ describe('pr-workflow-gate base coverage', () => {
 			workflowLane,
 		}));
 		await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, singletonLanes, {
-			batchId: 'base-initial',
-			prHeadSha: HEAD_SHA,
+			...legacyBaseOptions('base-initial'),
 		});
 		// The initial six lanes never complete — the retry batch below must not
 		// be able to settle all six dimensions on its own via consolidation.
@@ -177,8 +179,7 @@ describe('pr-workflow-gate base coverage', () => {
 				SESSION_ID,
 				consolidatedRetryLane,
 				{
-					batchId: 'base-retry-consolidated',
-					prHeadSha: HEAD_SHA,
+					...legacyBaseOptions('base-retry-consolidated'),
 				},
 			),
 		).rejects.toThrow('depth tier L requires one dedicated lane per dimension');
@@ -195,8 +196,7 @@ describe('pr-workflow-gate base coverage', () => {
 			workflowLane,
 		}));
 		await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, singletonLanes, {
-			batchId: 'base-initial',
-			prHeadSha: HEAD_SHA,
+			...legacyBaseOptions('base-initial'),
 		});
 		const failedLanes = singletonLanes.slice(0, 2);
 		await persistBatch('base-initial', 'swarm-pr-review:base', failedLanes, {
@@ -213,7 +213,7 @@ describe('pr-workflow-gate base coverage', () => {
 					ownedWorkflowLanes: failedLanes.map((lane) => lane.workflowLane),
 				},
 			],
-			{ batchId: 'base-retry-consolidated', prHeadSha: HEAD_SHA },
+			legacyBaseOptions('base-retry-consolidated'),
 		);
 		expect(state.prReviewBaseDispatch?.batchId).toBe('base-retry-consolidated');
 	});

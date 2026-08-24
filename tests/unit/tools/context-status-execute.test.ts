@@ -87,12 +87,14 @@ describe('context_status.execute', () => {
 
 		expect(typeof raw).toBe('string');
 		expect(parsed).toHaveProperty('tokensUsed');
+		expect(parsed).toHaveProperty('usageSource');
 		expect(parsed).toHaveProperty('modelLimit');
 		expect(parsed).toHaveProperty('usagePercent');
 		expect(parsed).toHaveProperty('thresholdCrossed');
 		expect(parsed).toHaveProperty('modelId');
 		expect(parsed).toHaveProperty('provider');
 		expect(typeof parsed.tokensUsed).toBe('number');
+		expect(['provider', 'estimated']).toContain(parsed.usageSource);
 		expect(typeof parsed.modelLimit).toBe('number');
 		expect(typeof parsed.usagePercent).toBe('number');
 		expect(['none', 'warn', 'critical']).toContain(parsed.thresholdCrossed);
@@ -108,6 +110,7 @@ describe('context_status.execute', () => {
 			await context_status.execute({}, makeCtx()),
 		) as Record<string, unknown>;
 		expect(parsed.tokensUsed).toBe(0);
+		expect(parsed.usageSource).toBe('estimated');
 		expect(parsed.usagePercent).toBe(0);
 		expect(parsed.thresholdCrossed).toBe('none');
 	});
@@ -128,6 +131,7 @@ describe('context_status.execute', () => {
 			await context_status.execute({}, makeCtx()),
 		) as Record<string, unknown>;
 		expect(parsed.tokensUsed).toBe(0);
+		expect(parsed.usageSource).toBe('estimated');
 		expect(parsed.usagePercent).toBe(0);
 		expect(parsed.thresholdCrossed).toBe('none');
 	});
@@ -162,6 +166,7 @@ describe('context_status.execute', () => {
 		expect(parsed.modelId).toBe('gpt-5');
 		expect(parsed.provider).toBe('openai');
 		expect(parsed.tokensUsed).toBeGreaterThan(0);
+		expect(parsed.usageSource).toBe('estimated');
 	});
 
 	it('reports the current live identity across a first-turn handoff', async () => {
@@ -258,5 +263,60 @@ describe('context_status.execute', () => {
 		expect(parsed.tokensUsed).toBeGreaterThan(0);
 		expect(sessionMessages[0].parts[0].text).toBe('original user text');
 		expect(sessionMessages[1].parts[0].text).toBe('reply');
+	});
+
+	it('reports provider usage when assistant token accounting is available', async () => {
+		_internals.fetchSessionMessages = (async () => [
+			makeMessage({ role: 'user', text: 'before' }),
+			{
+				info: {
+					role: 'assistant',
+					modelID: 'gpt-5',
+					providerID: 'openai',
+					tokens: {
+						input: 150,
+						cache: { read: 20, write: 10 },
+					},
+				},
+				parts: [{ type: 'text', text: 'reply' }],
+			},
+			makeMessage({ role: 'user', text: 'after' }),
+		]) as typeof _internals.fetchSessionMessages;
+
+		const parsed = JSON.parse(
+			await context_status.execute({}, makeCtx()),
+		) as Record<string, unknown>;
+		expect(parsed.usageSource).toBe('provider');
+		expect(Number(parsed.tokensUsed)).toBeGreaterThan(180);
+	});
+
+	it('counts visible tool error text in provider usage', async () => {
+		_internals.fetchSessionMessages = (async () => [
+			{
+				info: {
+					role: 'assistant',
+					modelID: 'gpt-5',
+					providerID: 'openai',
+					tokens: {
+						input: 100,
+						cache: { read: 20, write: 10 },
+					},
+				},
+				parts: [
+					{ type: 'text', text: 'reply' },
+					{
+						type: 'tool',
+						tool: 'bash',
+						state: { status: 'error', error: 'tool failed loudly' },
+					},
+				],
+			},
+		]) as typeof _internals.fetchSessionMessages;
+
+		const parsed = JSON.parse(
+			await context_status.execute({}, makeCtx()),
+		) as Record<string, unknown>;
+		expect(parsed.usageSource).toBe('provider');
+		expect(Number(parsed.tokensUsed)).toBeGreaterThan(130);
 	});
 });

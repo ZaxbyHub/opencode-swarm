@@ -501,7 +501,7 @@ Run a compound-engineering loop: brainstorm â†’ plan â†’ build â†�
 
 ### `/swarm full-auto [on|off]`
 
-Toggle Full-Auto Mode. Enables autonomous execution without confirmation prompts. Session-scoped.
+Toggle Full-Auto Mode. A critic gate: the `critic_oversight` agent reviews phase completions, escalations, and high-risk actions in your place; the architect still plans and delegates every task itself. Session-scoped.
 
 ### `/swarm auto-proceed [on|off]`
 
@@ -528,7 +528,7 @@ The effective value is shown to the architect via an injected `AUTO PROCEED STAT
 
 Show the current resolved plugin configuration (merged global + project + CLI overrides).
 
-### `/swarm config doctor [--fix] [--restore <id>]`
+### `/swarm config doctor [--fix] [--restore <id>] [--quarantine-residue] [--rollback-residue-quarantine[=<batch>]]`
 
 Run config validation and integrity checks. Alias: `/swarm config-doctor` (hyphenated form for TUI shortcut compatibility).
 
@@ -536,6 +536,10 @@ The doctor validates all 62+ top-level schema keys with type checks (string, boo
 
 - `--fix`: auto-repair issues where safe. Creates encrypted backup first. When auto-fixable issues are found, the doctor applies fixes and re-runs to confirm resolution.
 - `--restore <id>`: revert to a previous backup.
+- `--quarantine-residue`: MOVE verified stale atomic-write temp files (registered grammars only; ≥30 min old, git-untracked, unlocked, non-symlink) into a manifest-backed `.swarm/quarantine/<batch>/` directory with sha256 checksums. Nothing is ever deleted; `/swarm finalize --dry-run` previews the same inventory.
+- `--rollback-residue-quarantine[=<batch>]`: restore a quarantine batch (default: latest). Idempotent and collision-safe — differing originals are never overwritten.
+
+**Atomic-write residue (issue #2035):** without any flag, the doctor appends a read-only `## Atomic-write Residue` section when residue is found: per-grammar counts, bytes, ages, tracked/lock/symlink signals, and the proposed action per file — all derived from the same shared inventory the close clean stage and close dry-run use.
 
 **Last-run summary:** When run without `--fix`, the command displays a summary of the previous run (if available) showing the timestamp, total findings count, and auto-fixable count before the current findings.
 
@@ -859,7 +863,11 @@ DELETE active swarm state from `.swarm/`, including `plan.md`, `plan.json`, `SWA
 
 ### `/swarm reset-session`
 
-Clear only session state (`.swarm/session/state.json` and related files). Preserves plan, evidence, and knowledge. Use when starting a new model/session but continuing the same project. Before deleting, the session state is auto-backed up to `.swarm/reset-backups/<timestamp>/` (newest 5 kept).
+Clear only session state (`.swarm/session/state.json` and related files). Preserves plan, evidence, and knowledge. Use when starting a new model/session but continuing the same project. Also recovers stale coder settlements (issue #2268): a `DISPATCHED` settlement WAL left behind by a dispatch whose completion never arrived is settled here, so future coder dispatches cannot stay wedged with `CODER_DISPATCH_IN_PROGRESS`. Before deleting, the session state is auto-backed up to `.swarm/reset-backups/<timestamp>/` (newest 5 kept).
+
+### `/swarm recover [task_id] [--force]`
+
+Settle stale coder-settlement WALs in `.swarm/coder-settlements/` — the `CODER_DISPATCH_IN_PROGRESS` / `CODER_SETTLEMENT_IN_PROGRESS` wedge class where a dispatch completed but its settlement never fired (host killed mid-dispatch, cancelled Task, gate denial; issue #2268). Safe mode recovers settlements whose owning process is gone. `--force` additionally releases ownership keys still held by this process — only use it when no coder dispatch is genuinely still running; a still-running dispatch's late completion will then report `CODER_SETTLEMENT_IDEMPOTENCY_CONFLICT` (safe to ignore, the settlement is already durably recovered). Never interrupts a dispatch owned by another live OpenCode process. Human-only: agents self-heal dead-owner settlements via `update_task_status`. `/swarm diagnose` reports non-terminal settlements with the exact remediation.
 
 ### `/swarm checkpoint <save|restore|delete|list> <label>`
 

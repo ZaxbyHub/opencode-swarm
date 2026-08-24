@@ -3154,6 +3154,37 @@ export function checkExplicitInvalidation(
 
 export const EVIDENCE_WRITE_BLIND_SPOTS: readonly EvidenceWriteBlindSpot[] = [
 	{
+		file: 'src/utils/atomic-write.ts',
+		rule: 'R',
+		target: 'to',
+		status: 'not-an-evidence-artifact',
+		reason:
+			'Issue #2035: renameWithRetry(tempPath, resolvedTarget) inside the ' +
+			'canonical atomic-write core is parameter-passed BY CONTRACT (every ' +
+			'.swarm writer delegates here with its own already-validated target — ' +
+			'the former task-file.ts CANONICAL_HELPER exemption moved its body ' +
+			'here). The core unconditionally calls ' +
+			'invalidateCachedArtifact(resolvedTarget) after the successful rename ' +
+			'(same function, machine-checkable by RULE-checker), so the cache ' +
+			'invalidation requirement the scan enforces is met at the single ' +
+			'point every migrated writer funnels through.',
+	},
+	{
+		file: 'src/background/pending-delegations.ts',
+		rule: 'R',
+		target: 'to',
+		status: 'not-an-evidence-artifact',
+		reason:
+			'renameOnce(from, to) sits on the _checkpointInternals OBJECT ' +
+			'LITERAL, so RULE H cannot move the requirement into the callee. ' +
+			'Every production caller reaches it through writeDurableFileSync ' +
+			'with a target from storePath() / checkpointPath() / manifestPath() ' +
+			'-> .swarm/background-delegations{,.checkpoint.json,.manifest.json}, ' +
+			'none of which are cached evidence artifacts. The temp-file writes ' +
+			'beside each rename go through fsynced descriptors opened at a named ' +
+			'tmp const in the same function (issue #2034).',
+	},
+	{
 		file: 'src/background/pending-delegations.ts',
 		rule: 'W',
 		target: 'absPath',
@@ -3272,6 +3303,17 @@ export const EVIDENCE_WRITE_BLIND_SPOTS: readonly EvidenceWriteBlindSpot[] = [
 			'parsed by collectFunctions (a stated limitation), so `p` folds to null. ' +
 			'The shim names no artifact of its own; its one caller opens ' +
 			'`${filePath}.tmp.<time>.<pid>` and renames it onto that filePath.',
+	},
+	{
+		file: 'src/evidence/task-gate-repair.ts',
+		rule: 'W',
+		target: 'serialized',
+		status: 'not-an-evidence-artifact',
+		reason:
+			'`fileHandle.writeFile(serialized)` writes bytes to the FileHandle that ' +
+			'was opened on the quarantined temporary path; `serialized` is payload, ' +
+			'not a pathname. The temp path is invalidated before the link and the ' +
+			'published quarantine target is invalidated immediately after the link.',
 	},
 	// --- Round 7: surfaced by the widened mentionsEvidencePath candidate filter
 	{

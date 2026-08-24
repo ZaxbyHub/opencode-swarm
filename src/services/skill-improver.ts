@@ -18,7 +18,7 @@
  */
 
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { EnrichmentQuotaOptions } from '../hooks/knowledge-curator.js';
 import {
@@ -36,6 +36,7 @@ import {
 	type SkillImproverLLMDelegate,
 } from '../hooks/skill-improver-llm-factory.js';
 import { hasActiveFullAuto } from '../state.js';
+import { atomicWriteSwarmFile } from '../utils/atomic-write';
 import { warn } from '../utils/logger.js';
 import {
 	type AutoApplyResult,
@@ -151,11 +152,14 @@ function timestampSlug(d: Date): string {
 	return d.toISOString().replace(/[:.]/g, '-');
 }
 
+/**
+ * Canonical atomic write (issue #2035). Previously leaked its
+ * `target.tmp-<pid>-<ts>` temp on failure; the canonical helper cleans its
+ * own temp in `finally` and the old grammar stays registered for discovery.
+ */
 async function atomicWrite(p: string, content: string): Promise<void> {
 	await mkdir(path.dirname(p), { recursive: true });
-	const tmp = `${p}.tmp-${process.pid}-${Date.now()}`;
-	await writeFile(tmp, content, 'utf-8');
-	await rename(tmp, p);
+	await atomicWriteSwarmFile(p, content);
 }
 
 interface InventorySnapshot {

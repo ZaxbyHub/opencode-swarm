@@ -173,8 +173,10 @@ bash scripts/check-cross-contamination.sh
 bash scripts/check-test-clock.sh
 bun run check:runtime-src-refs
 bun run check:events
+bun run check:retention
 bun run check:test-file-cap
 bun run check:gate-portability
+bun run check:bare-spawn
 bash scripts/check-test-tmpdir.sh
 bash scripts/check-bash-portability.sh
 (cd scripts/swarm-model && node --test)

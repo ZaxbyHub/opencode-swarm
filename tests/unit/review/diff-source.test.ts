@@ -17,7 +17,6 @@ import { createSafeTestDir } from '../../helpers/safe-test-dir';
 const HEAD = 'a'.repeat(40);
 const BASE = 'b'.repeat(40);
 const MERGE_BASE = 'c'.repeat(40);
-
 function stream(text: string) {
 	const bytes = new TextEncoder().encode(text);
 	return {
@@ -37,7 +36,6 @@ function stream(text: string) {
 		},
 	};
 }
-
 function proc(
 	stdout: string,
 	exitCode = 0,
@@ -51,11 +49,10 @@ function proc(
 		kill: onKill,
 	};
 }
-
 const realSpawn = _internals.bunSpawn;
 const realLstatBigInt = _internals.lstatBigIntSync;
 const realOpen = _internals.openSync;
-
+const realResolveGitExecutable = _internals.resolveGitExecutable;
 function fixtureGit(directory: string, args: string[]): string {
 	const result = spawnSync('git', args, {
 		cwd: directory,
@@ -70,13 +67,12 @@ function fixtureGit(directory: string, args: string[]): string {
 	}
 	return result.stdout;
 }
-
 afterEach(() => {
 	_internals.bunSpawn = realSpawn;
 	_internals.lstatBigIntSync = realLstatBigInt;
 	_internals.openSync = realOpen;
+	_internals.resolveGitExecutable = realResolveGitExecutable;
 });
-
 describe('parseReviewDiffSelector', () => {
 	test('accepts the documented selectors and composable --json flag', () => {
 		expect(parseReviewDiffSelector([])).toEqual({
@@ -117,7 +113,6 @@ describe('parseReviewDiffSelector', () => {
 			json: false,
 		});
 	});
-
 	test.each([
 		['--base'],
 		['--base', '-danger'],
@@ -134,7 +129,6 @@ describe('parseReviewDiffSelector', () => {
 		if (!parsed.ok) expect(parsed.code).toBeString();
 	});
 });
-
 const MULTI_FILE_DIFF = [
 	'diff --git a/src/a.ts b/src/a.ts',
 	'--- a/src/a.ts',
@@ -169,7 +163,6 @@ const MULTI_FILE_DIFF = [
 	'+after',
 	'',
 ].join('\n');
-
 describe('parseUnifiedDiffScope', () => {
 	test('maps only exact sent current-side lines and retains deletion evidence', () => {
 		const parsed = parseUnifiedDiffScope(MULTI_FILE_DIFF);
@@ -189,7 +182,6 @@ describe('parseUnifiedDiffScope', () => {
 		expect(parsed.files.get('src/new-name.ts')?.kind).toBe('renamed');
 		expect(parsed.files.get('src/gone.ts')?.kind).toBe('deleted');
 	});
-
 	test('does not claim unsent hunk lines after line-boundary truncation', () => {
 		const partial = [
 			'--- a/a.ts',
@@ -203,7 +195,6 @@ describe('parseUnifiedDiffScope', () => {
 		expect(parsed.changedLines.get('a.ts')).toEqual([{ start: 10, end: 10 }]);
 		expect(parsed.deletedLines.get('a.ts')).toEqual([{ start: 10, end: 10 }]);
 	});
-
 	test('normalizes Windows separators in valid relative diff paths', () => {
 		const parsed = parseUnifiedDiffScope(
 			'--- a/src\\win.ts\n+++ b/src\\win.ts\n@@ -1 +1 @@\n-old\n+new\n',
@@ -213,7 +204,6 @@ describe('parseUnifiedDiffScope', () => {
 		]);
 	});
 });
-
 function installGitStub(options: {
 	root: string;
 	diff?: string;
@@ -222,6 +212,10 @@ function installGitStub(options: {
 	onCall?: (cmd: string[], opts?: BunCompatSpawnOptions) => void;
 	onKill?: () => void;
 }): void {
+	// Deterministic, host-independent resolution — asserted against below
+	// (`call.cmd[0]`) instead of letting the real resolver's PATH probing
+	// decide the value on whatever host runs the suite.
+	_internals.resolveGitExecutable = async () => 'git';
 	_internals.bunSpawn = ((cmd, spawnOptions) => {
 		options.onCall?.(cmd, spawnOptions);
 		const joined = cmd.join(' ');
@@ -241,6 +235,16 @@ function installGitStub(options: {
 			return proc(`${BASE}\n`, 0, options.onKill);
 		if (joined.includes('merge-base'))
 			return proc(`${MERGE_BASE}\n`, 0, options.onKill);
+		if (joined.includes('rev-parse --show-object-format'))
+			return proc('sha1\n', 0, options.onKill);
+		if (joined.includes('ls-tree')) {
+			const relativePath = cmd.at(-1) ?? '';
+			return proc(
+				`100644 blob ${'d'.repeat(40)}\t${relativePath}\0`,
+				0,
+				options.onKill,
+			);
+		}
 		if (joined.includes('ls-files'))
 			return proc(options.untracked ?? '', 0, options.onKill);
 		if (joined.includes(' diff '))
@@ -248,7 +252,6 @@ function installGitStub(options: {
 		return proc('', 1, options.onKill);
 	}) as typeof realSpawn;
 }
-
 describe('collectReviewDiff', () => {
 	test('works against a real repository with branch and working-tree changes', async () => {
 		const fixture = createSafeTestDir('review-real-git-');
@@ -266,7 +269,6 @@ describe('collectReviewDiff', () => {
 			fixtureGit(fixture.dir, ['checkout', '-b', 'feature']);
 			fs.writeFileSync(path.join(fixture.dir, 'tracked.txt'), 'after\n');
 			fs.writeFileSync(path.join(fixture.dir, 'untracked.txt'), 'new\n');
-
 			const result = await collectReviewDiff({ directory: fixture.dir });
 			expect(result.status).toBe('ok');
 			if (result.status !== 'ok') throw new Error('expected ok');
@@ -284,10 +286,16 @@ describe('collectReviewDiff', () => {
 			fixture.cleanup();
 		}
 	});
-
 	test('collects merge-base through tracked working tree plus safe untracked text', async () => {
 		const fixture = createSafeTestDir('review-diff-');
 		try {
+			fs.mkdirSync(path.join(fixture.dir, 'src'));
+			fs.writeFileSync(
+				path.join(fixture.dir, 'src', 'a.ts'),
+				'same\nnew\ntail\n',
+			);
+			fs.writeFileSync(path.join(fixture.dir, 'src', 'new.ts'), 'one\ntwo\n');
+			fs.writeFileSync(path.join(fixture.dir, 'src', 'new-name.ts'), 'after\n');
 			fs.writeFileSync(path.join(fixture.dir, 'note.txt'), 'alpha\nbeta\n');
 			const calls: Array<{ cmd: string[]; opts?: BunCompatSpawnOptions }> = [];
 			let kills = 0;
@@ -300,7 +308,6 @@ describe('collectReviewDiff', () => {
 					kills++;
 				},
 			});
-
 			const result = await collectReviewDiff({ directory: fixture.dir });
 			expect(result.status).toBe('ok');
 			if (result.status !== 'ok') throw new Error('expected ok');
@@ -331,7 +338,6 @@ describe('collectReviewDiff', () => {
 			fixture.cleanup();
 		}
 	});
-
 	test('keeps exact ranges committed-only and distinguishes clean/error', async () => {
 		const fixture = createSafeTestDir('review-range-');
 		try {
