@@ -54,4 +54,11 @@ export interface GateContext {
 	autoReviewBlocked?: boolean;
 	/** Machine-readable reason from the current review run, when blocked. */
 	autoReviewBlockReason?: import('../../../review/engine').ReviewEngineResult['blockReason'];
+	/**
+	 * Single clock captured once for the whole aggregate phase preflight
+	 * (issue #2102 contract D). All freshness-sensitive gates must evaluate
+	 * against this timestamp instead of calling Date.now()/new Date() so
+	 * their verdicts stay mutually consistent across an age boundary.
+	 */
+	preflightNowMs: number;
 }

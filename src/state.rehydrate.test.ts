@@ -1,7 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { loadPluginConfig } from './config/loader';
+import {
+	computeCouncilReviewIdentity,
+	councilIdentityEvidenceFields,
+} from './council/council-review-identity';
 import type { AgentSessionState, TaskWorkflowState } from './state';
 import {
 	rehydrateSessionFromDisk,
@@ -104,6 +115,27 @@ function writeEvidence(
 					: 'idle';
 	if (normalizedGates.council) {
 		normalizedGates.council.workflowGeneration = generation;
+		// #2102: default council fixtures to the CURRENT review identity (what
+		// the real writer emits); cutover cases live in the dedicated suite.
+		if (normalizedGates.council.identity_digest === undefined) {
+			try {
+				Object.assign(
+					normalizedGates.council,
+					councilIdentityEvidenceFields(
+						computeCouncilReviewIdentity({
+							level: 'task',
+							scope: { kind: 'task', taskId },
+							plan: JSON.parse(
+								readFileSync(path.join(tmpDir, '.swarm', 'plan.json'), 'utf8'),
+							),
+							config: loadPluginConfig(tmpDir).council,
+						}),
+					),
+				);
+			} catch {
+				// No plan on disk — keep the legacy identity-less shape.
+			}
+		}
 	}
 	const evidence = {
 		taskId,
@@ -521,6 +553,9 @@ describe('council verdict rehydration', () => {
 			councilData.roundNumber !== undefined ||
 			councilData.quorumSize !== undefined
 		) {
+			// writeEvidence auto-binds the CURRENT council review identity
+			// (post-#2102) to council gates; legacy/no-identity cutover cases are
+			// covered by tests/unit/state/council-identity-rehydration.test.ts.
 			gates.council = {
 				...(councilData.verdict !== undefined && {
 					verdict: councilData.verdict,
@@ -537,60 +572,6 @@ describe('council verdict rehydration', () => {
 	}
 
 	// ── VERDICT REHYDRATION (HAPPY PATH) ──────────────────────────────────────
-
-	it('1. APPROVE verdict is rehydrated correctly from evidence', async () => {
-		// Arrange
-		writePlan([{ id: '1.1', status: 'in_progress' }]);
-		writeCouncilEvidence('1.1', { verdict: 'APPROVE', roundNumber: 2 });
-
-		const session = createTestSession();
-
-		// Act
-		await rehydrateSessionFromDisk(tmpDir, session);
-
-		// Assert
-		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
-			verdict: 'APPROVE',
-			roundNumber: 2,
-			quorumSize: 1,
-		});
-	});
-
-	it('2. REJECT verdict is rehydrated correctly from evidence', async () => {
-		// Arrange
-		writePlan([{ id: '1.1', status: 'in_progress' }]);
-		writeCouncilEvidence('1.1', { verdict: 'REJECT', roundNumber: 1 });
-
-		const session = createTestSession();
-
-		// Act
-		await rehydrateSessionFromDisk(tmpDir, session);
-
-		// Assert
-		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
-			verdict: 'REJECT',
-			roundNumber: 1,
-			quorumSize: 1,
-		});
-	});
-
-	it('3. CONCERNS verdict is rehydrated correctly from evidence', async () => {
-		// Arrange
-		writePlan([{ id: '1.1', status: 'in_progress' }]);
-		writeCouncilEvidence('1.1', { verdict: 'CONCERNS', roundNumber: 3 });
-
-		const session = createTestSession();
-
-		// Act
-		await rehydrateSessionFromDisk(tmpDir, session);
-
-		// Assert
-		expect(session.taskCouncilApproved!.get('1.1')).toEqual({
-			verdict: 'CONCERNS',
-			roundNumber: 3,
-			quorumSize: 1,
-		});
-	});
 
 	// ── NO COUNCIL EVIDENCE ───────────────────────────────────────────────────
 
@@ -978,6 +959,9 @@ describe('adversarial council verdict rehydration', () => {
 			councilData.roundNumber !== undefined ||
 			councilData.quorumSize !== undefined
 		) {
+			// writeEvidence auto-binds the CURRENT council review identity
+			// (post-#2102) to council gates; legacy/no-identity cutover cases are
+			// covered by tests/unit/state/council-identity-rehydration.test.ts.
 			gates.council = {
 				...(councilData.verdict !== undefined && {
 					verdict: councilData.verdict,

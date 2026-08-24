@@ -26,6 +26,32 @@ export interface WebSearchResult {
 	query: string;
 }
 
+/**
+ * Bounded structured claim on a council question (issue #2102 contract G).
+ * Claims are OPTIONAL: smaller models may omit them entirely and the
+ * disagreement detector falls back to its phrase/heuristic passes. A claim
+ * by itself is never proof of consensus or correctness — claims only make
+ * positions comparable so a phrase-free contrary stance is detectable.
+ */
+export interface GeneralCouncilClaim {
+	/** Bounded subject/topic the claim is about (≤120 chars). */
+	subject: string;
+	/** Bounded statement of the member's position (≤600 chars). */
+	statement: string;
+	/** Typed stance; 'oppose'/'alternative' mark contrary positions. */
+	stance: 'support' | 'oppose' | 'neutral' | 'concern' | 'alternative';
+	/** Self-reported confidence, same validated range as the response. */
+	confidence: number;
+	/**
+	 * Optional bounded evidence/source references (≤4 items, each ≤240 chars).
+	 * The bound is enforced at the Zod tool boundary (`MemberClaimsSchema` in
+	 * src/tools/convene-general-council.ts) and independently re-checked by
+	 * `isWellFormedClaim` in the disagreement detector — the TypeScript type
+	 * alone cannot express it.
+	 */
+	evidence?: string[];
+}
+
 export interface GeneralCouncilMemberConfig {
 	memberId: string;
 	model: string;
@@ -44,6 +70,13 @@ export interface GeneralCouncilMemberResponse {
 	confidence: number;
 	areasOfUncertainty: string[];
 	durationMs: number;
+	/**
+	 * Optional bounded structured claims (issue #2102 contract G). Absent,
+	 * malformed, or oversized claims degrade to the phrase/Jaccard fallback —
+	 * they never reject the submission and never suppress explicit
+	 * disagreement evidence.
+	 */
+	claims?: GeneralCouncilClaim[];
 }
 
 export interface GeneralCouncilDisagreementPosition {

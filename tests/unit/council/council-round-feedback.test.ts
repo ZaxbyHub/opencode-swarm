@@ -30,13 +30,19 @@ function evaluation(
 	};
 }
 
+const TASK_SCOPE = {
+	kind: 'task' as const,
+	taskId: '1.1',
+	identityDigest: 'c'.repeat(64),
+};
+
 function attempt(
 	evaluate: (round: number) => Promise<CouncilAttemptEvaluation>,
 	overrides: Partial<Parameters<typeof runCouncilAttempt>[0]> = {},
 ): Promise<string> {
 	return runCouncilAttempt({
 		directory,
-		scope: { kind: 'task', taskId: '1.1' },
+		scope: TASK_SCOPE,
 		maxRounds: 3,
 		request: { taskId: '1.1', verdicts: [{ member: 'critic' }] },
 		verdictCount: 1,
@@ -47,10 +53,7 @@ function attempt(
 }
 
 function auditRecords(): Array<Record<string, unknown>> {
-	const path = councilRoundStatePaths(directory, {
-		kind: 'task',
-		taskId: '1.1',
-	}).audit;
+	const path = councilRoundStatePaths(directory, TASK_SCOPE).audit;
 	return readFileSync(path, 'utf8')
 		.trim()
 		.split('\n')
@@ -194,10 +197,7 @@ describe('council round review feedback', () => {
 	});
 
 	test('PRR-004: valid JSON with an invalid state shape fails closed distinctly', async () => {
-		const paths = councilRoundStatePaths(directory, {
-			kind: 'task',
-			taskId: '1.1',
-		});
+		const paths = councilRoundStatePaths(directory, TASK_SCOPE);
 		mkdirSync(dirname(paths.state), { recursive: true });
 		writeFileSync(paths.state, JSON.stringify({ version: 1 }), 'utf8');
 		let evaluated = false;
@@ -218,10 +218,7 @@ describe('council round review feedback', () => {
 	});
 
 	test('PRR-005: valid JSON with an invalid audit shape fails closed', async () => {
-		const paths = councilRoundStatePaths(directory, {
-			kind: 'task',
-			taskId: '1.1',
-		});
+		const paths = councilRoundStatePaths(directory, TASK_SCOPE);
 		mkdirSync(dirname(paths.audit), { recursive: true });
 		writeFileSync(
 			paths.audit,

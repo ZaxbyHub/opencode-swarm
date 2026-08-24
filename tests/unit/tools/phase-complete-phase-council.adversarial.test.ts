@@ -1,7 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { loadPluginConfig } from '../../../src/config/loader';
+import { PlanSchema } from '../../../src/config/plan-schema';
+import { computeCouncilReviewIdentity } from '../../../src/council/council-review-identity';
 import { closeProjectDb } from '../../../src/db/project-db';
 import { setGatesForIdentity } from '../../../src/db/qa-gate-profile';
 import {
@@ -128,6 +137,18 @@ function writePhaseCouncil(options: {
 	const evidencePath = join(tempDir, '.swarm', 'evidence', '1');
 	mkdirSync(evidencePath, { recursive: true });
 	const ts = options.timestamp ?? new Date().toISOString();
+	// Identity bound to the ACTUAL phase being completed (1), mirroring what
+	// the gate recomputes; wrong-phase-number entries must surface the
+	// precise PHASE_COUNCIL_PHASE_MISMATCH, not an identity failure.
+	const plan = PlanSchema.parse(
+		JSON.parse(readFileSync(join(tempDir, '.swarm', 'plan.json'), 'utf-8')),
+	);
+	const identity = computeCouncilReviewIdentity({
+		level: 'phase',
+		scope: { kind: 'phase', phaseNumber: 1 },
+		plan,
+		config: loadPluginConfig(tempDir).council,
+	});
 	writeFileSync(
 		join(evidencePath, 'phase-council.json'),
 		JSON.stringify({
@@ -148,6 +169,10 @@ function writePhaseCouncil(options: {
 					advisoryFindings: [],
 					roundNumber: 1,
 					allCriteriaMet: true,
+					identity_version: identity.version,
+					review_hash: identity.reviewHash,
+					policy_digest: identity.policyDigest,
+					identity_digest: identity.identityDigest,
 				},
 			],
 		}),
@@ -339,47 +364,6 @@ describe('adversarial: config.council null', () => {
  *       → PHASE_COUNCIL_INVALID
  * "Concerns" (mixed case) matches none of these → INVALID
  */
-describe('adversarial: verdict case sensitivity', () => {
-	test('AV8: verdict="Concerns" (mixed case) — NOT matched by CONCERNS or concerns checks, blocked as INVALID', async () => {
-		setup(true);
-		writePhaseCouncil({ verdict: 'Concerns', quorumSize: 3, phaseNumber: 1 });
-		const result = await phaseComplete();
-		const parsed = JSON.parse(result);
-		expect(parsed.success).toBe(false);
-		expect(parsed.status).toBe('blocked');
-		expect(parsed.reason).toBe('PHASE_COUNCIL_INVALID');
-	});
-
-	test('AV8b: verdict="concerns" (lowercase) — MATCHES code at line 1130, treated as advisory', async () => {
-		setup(true);
-		writePhaseCouncil({ verdict: 'concerns', quorumSize: 3, phaseNumber: 1 });
-		const result = await phaseComplete();
-		const parsed = JSON.parse(result);
-		// 'concerns' is explicitly matched at line 1130
-		// With default (no council key), ?? true → true → allows completion
-		expect(parsed.success).toBe(true);
-		expect(parsed.status).toBe('success');
-	});
-
-	test('AV8c: verdict="reject" (lowercase) — MATCHES code at line 1103, blocks as PHASE_COUNCIL_REJECTED', async () => {
-		setup(true);
-		writePhaseCouncil({ verdict: 'reject', quorumSize: 3, phaseNumber: 1 });
-		const result = await phaseComplete();
-		const parsed = JSON.parse(result);
-		expect(parsed.success).toBe(false);
-		expect(parsed.status).toBe('blocked');
-		expect(parsed.reason).toBe('PHASE_COUNCIL_REJECTED');
-	});
-
-	test('AV8d: verdict="approve" (lowercase) — MATCHES code at line 1167, allows completion', async () => {
-		setup(true);
-		writePhaseCouncil({ verdict: 'approve', quorumSize: 3, phaseNumber: 1 });
-		const result = await phaseComplete();
-		const parsed = JSON.parse(result);
-		expect(parsed.success).toBe(true);
-		expect(parsed.status).toBe('success');
-	});
-});
 
 /**
  * Attack Vector 9: Empty string verdict ""

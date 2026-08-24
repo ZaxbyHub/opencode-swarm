@@ -68,6 +68,15 @@ Reply with a single fenced JSON block. No prose outside the block.
   "areasOfUncertainty": [
     "What I'm not sure about, in plain language."
   ],
+  "claims": [
+    {
+      "subject": "The specific question or decision this claim is about",
+      "statement": "Your position on that subject, in one or two sentences",
+      "stance": "support",
+      "confidence": 0.8,
+      "evidence": ["URL or source reference, if any"]
+    }
+  ],
   "disagreementTopics": []
 }
 \`\`\`
@@ -75,6 +84,7 @@ Reply with a single fenced JSON block. No prose outside the block.
 Notes:
 - \`searchQueries\` is optional — list queries you would have run if you had web access (the architect uses these for audit), or omit / leave empty if none.
 - \`sources\` MUST come from the RESEARCH CONTEXT only. Copy title/url/snippet/query verbatim. Never invent sources.
+- \`claims\` is optional but strongly encouraged (max 8): list your key positions as bounded structured claims. Use one of these \`stance\` values exactly: "support" (the position holds), "oppose" (the position is wrong — a contrary position), "alternative" (a different option is better — a contrary position), "concern" (risk flagged without taking a side), "neutral" (no position). Claims make contrary positions detectable even without explicit disagreement phrasing.
 - For Round 1: leave \`disagreementTopics\` as []. For Round 2: list the specific disagreement topics this response addresses.`;
 
 const HARD_RULES = `================================================================
