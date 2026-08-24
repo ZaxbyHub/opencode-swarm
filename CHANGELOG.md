@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.146.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.145.2...v7.146.0) (2026-08-24)
+
+
+### Features
+
+* **memory:** Phase 6 privacy hardening + observability (closes [#1466](https://github.com/ZaxbyHub/opencode-swarm/issues/1466)) ([24b2c21](https://github.com/ZaxbyHub/opencode-swarm/commit/24b2c218560c4d2964d7035edcc0bf87b0dc3dc9))
+* **retention:** ratify complete retention and read-amplification registry ([ef8479c](https://github.com/ZaxbyHub/opencode-swarm/commit/ef8479cc0395d3779d214091d9788d4556b53838))
+
+
+### Bug Fixes
+
+* **memory:** close swarm-pr-review + automated-review findings (PR [#2310](https://github.com/ZaxbyHub/opencode-swarm/issues/2310) feedback) ([139a862](https://github.com/ZaxbyHub/opencode-swarm/commit/139a8620cbfe94f8e7f9140b7f829f41aa033ee6))
+* **memory:** provenance column read-back (final-critic) + PRR-035 render test ([c9f01d8](https://github.com/ZaxbyHub/opencode-swarm/commit/c9f01d8d3c73eede6a18a83c86831932dc72e2de))
+* **memory:** upsert() merges existing provenance columns (final-critic delta 2) ([a8ad171](https://github.com/ZaxbyHub/opencode-swarm/commit/a8ad17123545f9fb0394c2885ebe0488b896c926))
+* **retention:** register task-gate evidence writers merged from main ([f664398](https://github.com/ZaxbyHub/opencode-swarm/commit/f664398613a5abd90cef6c5044bbdde6e6c8cd5d))
+
 ## [7.145.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.145.1...v7.145.2) (2026-08-23)
 
 
