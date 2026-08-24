@@ -916,6 +916,7 @@ export const _test_exports = {
 	parsePrReviewCollectionReceipt,
 	resolvePrReviewReceiptFallbacks,
 	resolvePrReviewReceiptFallbacksFromState,
+	consumePrReviewReceiptAppendFailureLog,
 	// #2276: pure per-lane-kind budget derivation, exported beside the prompt
 	// contract builder so budget scaling can be asserted without prompt-text
 	// parsing (file precedent: prompt-construction internals live here).
@@ -1773,6 +1774,10 @@ export async function executeCollectLaneResults(
 	const timeoutMs = parsed.data.timeout_ms ?? DEFAULT_COLLECT_TIMEOUT_MS;
 	const deadline = _internals.now() + timeoutMs;
 	const hostTimeouts = new Set<string>();
+	// This call processes at most MAX_LANES records, so this per-invocation set
+	// is bounded and prevents a persistently unencodable terminal receipt from
+	// logging once per wait-loop poll.
+	const receiptAppendFailureLogs = new Set<string>();
 	const batchFilter =
 		context.sessionID !== undefined
 			? { parentSessionId: context.sessionID }
@@ -1796,6 +1801,7 @@ export async function executeCollectLaneResults(
 			parsed.data.cancel_pending === true,
 			deadline,
 			hostTimeouts,
+			receiptAppendFailureLogs,
 		);
 		await sweepStaleAsyncLaneRecords(
 			session,
@@ -2253,6 +2259,7 @@ async function collectOnce(
 	cancelPending: boolean,
 	deadline: number,
 	hostTimeouts: Set<string>,
+	receiptAppendFailureLogs: Set<string>,
 ): Promise<void> {
 	const activeRecords = records.filter(
 		(record) => record.status === 'pending' || record.status === 'running',
@@ -2332,6 +2339,7 @@ async function collectOnce(
 				deadline,
 				hostTimeouts,
 				revisionDigestBudgetMs: laneBudgets.revisionDigestBudgetMs,
+				receiptAppendFailureLogs,
 			}),
 		);
 	}
@@ -2345,8 +2353,16 @@ async function settleCollectedLane(args: {
 	deadline: number;
 	hostTimeouts: Set<string>;
 	revisionDigestBudgetMs: number;
+	receiptAppendFailureLogs: Set<string>;
 }): Promise<void> {
-	const { directory, record, transcript, deadline, hostTimeouts } = args;
+	const {
+		directory,
+		record,
+		transcript,
+		deadline,
+		hostTimeouts,
+		receiptAppendFailureLogs,
+	} = args;
 	let collectedRevisionDigest: string | undefined;
 	const prHeadSha = record.workspace?.prHeadSha;
 	if (prHeadSha) {
@@ -2516,7 +2532,20 @@ async function settleCollectedLane(args: {
 			);
 			// Never publish a reviewer/critic terminal status without its exact retry
 			// receipt. A later poll can repeat this deterministic in-memory step.
-			if (!resultWithReceipt) return;
+			if (!resultWithReceipt) {
+				if (
+					consumePrReviewReceiptAppendFailureLog(
+						receiptAppendFailureLogs,
+						record.parentSessionId,
+						record.correlationId,
+					)
+				) {
+					logger.log(
+						`[dispatch-lanes] withheld PR-review terminal result without receipt: correlation=${record.correlationId} batch=${record.batchId ?? '(missing)'} lane=${record.laneId ?? '(missing)'}`,
+					);
+				}
+				return;
+			}
 			prospectiveResult = resultWithReceipt;
 		}
 		if (!validation.ok) {
@@ -2545,6 +2574,17 @@ async function settleCollectedLane(args: {
 		status: terminalStatus,
 		result: prospectiveResult,
 	});
+}
+
+function consumePrReviewReceiptAppendFailureLog(
+	loggedFailures: Set<string>,
+	parentSessionId: string,
+	correlationId: string,
+): boolean {
+	const key = `${parentSessionId}\u0000${correlationId}`;
+	if (loggedFailures.has(key)) return false;
+	loggedFailures.add(key);
+	return true;
 }
 
 function scheduleAsyncLanePrompt(args: {

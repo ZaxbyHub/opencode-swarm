@@ -210,7 +210,8 @@ export function parsePrReviewCollectionReceiptShedMarker(
 	const finalLine = lines.at(-1);
 	if (
 		markerLines.length !== 1 ||
-		!finalLine?.startsWith(PR_REVIEW_COLLECTION_RECEIPT_SHED_PREFIX)
+		!finalLine?.startsWith(PR_REVIEW_COLLECTION_RECEIPT_SHED_PREFIX) ||
+		finalLine.length > MAX_PR_REVIEW_COLLECTION_RECEIPT_CHARS
 	) {
 		return null;
 	}

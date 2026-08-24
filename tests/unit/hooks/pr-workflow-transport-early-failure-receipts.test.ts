@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import {
 	readLaneOutput,
 	storeLaneOutput,
@@ -6,7 +6,10 @@ import {
 import { recordPendingDelegation } from '../../../src/background/pending-delegations.js';
 import {
 	encodePrReviewCollectionReceiptShedMarker,
+	MAX_PR_REVIEW_COLLECTION_RECEIPT_CHARS,
+	PR_REVIEW_COLLECTION_RECEIPT_SHED_PREFIX,
 	parsePrReviewCollectionReceiptFooter,
+	parsePrReviewCollectionReceiptShedMarker,
 } from '../../../src/background/pr-review-collection-receipt.js';
 import {
 	recordPrReviewValidationBatch,
@@ -177,6 +180,58 @@ describe('PR-review transport early-failure retry receipts', () => {
 			acceptedReviewItemIds: [],
 			rejectedReviewItemIds: [...REVIEW_ITEM_IDS],
 		});
+	});
+
+	test('rejects oversized shed markers before parsing JSON (FB-001)', () => {
+		// Before the fix, the shed-marker parser would still call JSON.parse on an
+		// oversized final line even though the footer parser already rejected it.
+		const parseSpy = spyOn(JSON, 'parse');
+		const oversizedLine = `${PR_REVIEW_COLLECTION_RECEIPT_SHED_PREFIX}${']'.repeat(MAX_PR_REVIEW_COLLECTION_RECEIPT_CHARS + 1)}`;
+
+		try {
+			expect(
+				parsePrReviewCollectionReceiptShedMarker(
+					{
+						parentSessionId: SESSION_ID,
+						batchId: BATCH_ID,
+						callID: BATCH_ID,
+						laneId: LANE_ID,
+						correlationId: CORRELATION_ID,
+						mode: 'swarm-pr-review:reviewer',
+						workflowLane: LANE_ID,
+					},
+					{ digest: REVISION_DIGEST, text: oversizedLine },
+				),
+			).toBeNull();
+			expect(parseSpy).not.toHaveBeenCalled();
+		} finally {
+			parseSpy.mockRestore();
+		}
+	});
+
+	test('dedupes receipt-append diagnostics within one collection invocation (FB-002)', () => {
+		const loggedFailures = new Set<string>();
+		expect(
+			dispatchInternals.consumePrReviewReceiptAppendFailureLog(
+				loggedFailures,
+				SESSION_ID,
+				CORRELATION_ID,
+			),
+		).toBe(true);
+		expect(
+			dispatchInternals.consumePrReviewReceiptAppendFailureLog(
+				loggedFailures,
+				SESSION_ID,
+				CORRELATION_ID,
+			),
+		).toBe(false);
+		expect(
+			dispatchInternals.consumePrReviewReceiptAppendFailureLog(
+				loggedFailures,
+				SESSION_ID,
+				'another-correlation',
+			),
+		).toBe(true);
 	});
 
 	test('does not trust a legacy completed record without an authenticated marker', async () => {
