@@ -58,6 +58,16 @@ describe('classifyInvocationFailure — shell family', () => {
 		expect(result?.category).not.toBe('shell_missing_command');
 	});
 
+	test('classifying the IDENTICAL missing-command signal repeatedly is stable (no g-flag lastIndex drift)', () => {
+		const signal = 'bash: line 2: missing-tool: command not found';
+		const first = classifyInvocationFailure(shell({ errorSignal: signal }));
+		const second = classifyInvocationFailure(shell({ errorSignal: signal }));
+		const third = classifyInvocationFailure(shell({ errorSignal: signal }));
+		expect(first?.category).toBe('shell_missing_command');
+		expect(second?.category).toBe('shell_missing_command');
+		expect(third?.category).toBe('shell_missing_command');
+	});
+
 	test('a line-anchored shell diagnostic DOES classify missing-command', () => {
 		const result = classifyInvocationFailure(
 			shell({ errorSignal: 'bash: line 2: missing-tool: command not found' }),
@@ -246,16 +256,6 @@ describe('classifyInvocationFailure — abort family', () => {
 		});
 		expect(result?.category).toBe('abort_or_deadline');
 		expect(result?.family).toBe('abort');
-	});
-});
-
-describe('policy denials', () => {
-	test('policyDenialFailure is do_not_retry and never feeds provider retry counters', () => {
-		const result = policyDenialFailure('SCOPE_NOT_DECLARED', 'action-1');
-		expect(result.family).toBe('policy');
-		expect(result.retryClass).toBe('do_not_retry');
-		expect(result.source).toBe('gate');
-		expect(result.actionId).toBe('action-1');
 	});
 });
 

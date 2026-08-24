@@ -1544,6 +1544,14 @@ export function createGuardrailsHooks(
 					input.sessionID,
 					outcome.category,
 					outcome.signal,
+					input.tool,
+				);
+				recordActionFailure(
+					input.sessionID,
+					input.tool,
+					deriveActionIdentity(input.tool, input.args),
+					outcome.category,
+					outcome.signal,
 				);
 			} else if (outcome.kind === 'success' || outcome.kind === 'neutral') {
 				// Issue #2103 workstream C: a corrected success of the same

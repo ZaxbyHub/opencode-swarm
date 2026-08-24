@@ -268,7 +268,7 @@ export const SHELL_MISSING_COMMAND_DIAGNOSTIC = new RegExp(
 		'(?:^|\\n)(?:\\/bin\\/)?(?:ba|da|z|k)?sh(?:\\.exe)?:\\s+(?:(?:line\\s+)?\\d+:\\s+)?[^:\\r\\n]+:\\s+not found\\b|' +
 		'(?:^|\\n)[^\\r\\n]{0,160}:\\s+command not found\\b|' +
 		'\\b(?:spawn|execFile)\\s+\\S+\\s+ENOENT\\b',
-	'igm',
+	'im',
 );
 
 const SHELL_PARSE_ERROR =
@@ -505,22 +505,6 @@ export function classifyInvocationFailure(
 		classifyAbort(input) ??
 		classifyProvider(input)
 	);
-}
-
-/** Build a policy-denial failure (gate denials are always do_not_retry). */
-export function policyDenialFailure(
-	gateCode: string,
-	actionId?: string,
-): InvocationFailure {
-	return failure({
-		family: 'policy',
-		category: 'policy_denial',
-		retryClass: 'do_not_retry',
-		source: 'gate',
-		actionId,
-		risk: 'high',
-		evidence: { signalSnippet: snippet(gateCode) },
-	});
 }
 
 /** Test seam (AGENTS.md invariant 7 — DI over `mock.module`). */

@@ -339,13 +339,10 @@ export function recordNonTransientFailure(
 				scope,
 		);
 	}
-	recordActionFailure(
-		sessionID,
-		tool ?? 'unknown',
-		'invocation',
-		category,
-		signal,
-	);
+	// NOTE (#2103 final-critic): the action-local map entry is recorded by the
+	// CALLER with the derived semantic action identity — recording a synthetic
+	// `${tool}::invocation` key here would accumulate a cross-action junk entry
+	// in the bounded map.
 	return circuit;
 }
 

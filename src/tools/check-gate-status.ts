@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { isSecretscanEvidence, loadEvidence } from '../evidence/manager.js';
+import { getAgentSession } from '../state';
 import { isStrictTaskId } from '../validation/task-id';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
@@ -53,6 +54,11 @@ interface GateStatusResult {
 	 * after /swarm reset-session destroyed the in-memory attribution chain).
 	 */
 	workflow_attribution_hint?: string;
+	/**
+	 * Issue #2103 workstream C: structured non-transient circuit status.
+	 * Present only when the caller supplies session_id.
+	 */
+	non_transient_circuit?: Record<string, unknown>;
 }
 
 // Task ID validation delegated to shared module (#452 item 2)
@@ -107,6 +113,37 @@ function readEvidenceFile(evidencePath: string): EvidenceData | null {
 }
 
 // ============ Tool Definition ============
+
+function buildCircuitStatus(
+	sessionId: string | undefined,
+): Record<string, unknown> | undefined {
+	if (!sessionId) return undefined;
+	try {
+		const circuit = getAgentSession(sessionId)?.nonTransientCircuit;
+		if (!circuit) return undefined;
+		return {
+			owner_agent: circuit.ownerAgent,
+			owner_invocation_id: circuit.ownerInvocationId,
+			category: circuit.category,
+			count: circuit.sameCategoryCount,
+			hard_stop: circuit.hardStop,
+			tool: circuit.tool ?? null,
+			last_signal: circuit.lastSignal,
+			actions: circuit.actions
+				? [...circuit.actions.entries()].map(([key, entry]) => ({
+						key,
+						tool: entry.tool,
+						category: entry.category,
+						count: entry.count,
+						hard_stop: entry.hardStop,
+					}))
+				: [],
+		};
+	} catch {
+		return undefined;
+	}
+}
+
 export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 	description:
 		'Read-only tool to check the gate status of a specific task. Reads .swarm/evidence/{taskId}.json and returns structured JSON describing required, passed, and missing gates.',
@@ -125,11 +162,18 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 			.describe(
 				'Explicit project root directory. When provided, .swarm/evidence/ is resolved relative to this path instead of the plugin context directory. Use this when CWD differs from the actual project root.',
 			),
+		session_id: z
+			.string()
+			.optional()
+			.describe(
+				"Optional agent session ID. When provided, the response also includes the session's structured non-transient circuit status (issue #2103 action-local circuits): invocation-wide category/count/hardStop plus any action-local circuits.",
+			),
 	},
 	async execute(args: unknown, directory: string): Promise<string> {
 		// Safe args extraction
 		let taskIdInput: string | undefined;
 		let workingDirInput: string | undefined;
+		let sessionIdInput: string | undefined;
 
 		try {
 			if (args && typeof args === 'object') {
@@ -139,10 +183,22 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 					typeof obj.working_directory === 'string'
 						? obj.working_directory
 						: undefined;
+				sessionIdInput =
+					typeof obj.session_id === 'string' ? obj.session_id : undefined;
 			}
 		} catch {
 			// Malicious getter threw
 		}
+
+		// Issue #2103 workstream C: structured non-transient circuit status
+		// surface. Only attached when the caller provides session_id (the
+		// circuit is session-scoped in-memory state). Diagnostic only — never
+		// changes gate verdicts and never breaks the tool.
+		const circuitStatus = buildCircuitStatus(sessionIdInput);
+		const withCircuit = <T extends object>(result: T): T =>
+			circuitStatus
+				? ({ ...result, non_transient_circuit: circuitStatus } as T)
+				: result;
 
 		// Resolve effective directory: explicit working_directory > injected directory
 		const dirResult = resolveWorkingDirectory(workingDirInput, directory);
@@ -157,7 +213,7 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 				message: dirResult.message,
 				todo_scan: null,
 			};
-			return JSON.stringify(errorResult, null, 2);
+			return JSON.stringify(withCircuit(errorResult), null, 2);
 		}
 		directory = dirResult.directory;
 
@@ -173,7 +229,7 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 				message: 'Invalid task_id: task_id is required',
 				todo_scan: null,
 			};
-			return JSON.stringify(errorResult, null, 2);
+			return JSON.stringify(withCircuit(errorResult), null, 2);
 		}
 
 		// Validate task_id format (canonical N.M or N.M.P or N.M.P.Q pattern with security checks)
@@ -188,7 +244,7 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 				message: `Invalid task_id format: "${taskIdInput}". Must match N.M or N.M.P (e.g. "1.1", "1.2.3", "1.2.3.4")`,
 				todo_scan: null,
 			};
-			return JSON.stringify(errorResult, null, 2);
+			return JSON.stringify(withCircuit(errorResult), null, 2);
 		}
 
 		// Resolve evidence path from effective directory (may be caller-provided via working_directory)
@@ -210,7 +266,7 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 				message: 'Invalid path: evidence path validation failed',
 				todo_scan: null,
 			};
-			return JSON.stringify(errorResult, null, 2);
+			return JSON.stringify(withCircuit(errorResult), null, 2);
 		}
 
 		// Read evidence file
@@ -228,7 +284,7 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 				message: `No evidence file found for task "${taskIdInput}" at ${evidencePath}. Evidence file may be missing or invalid.`,
 				todo_scan: null,
 			};
-			return JSON.stringify(errorResult, null, 2);
+			return JSON.stringify(withCircuit(errorResult), null, 2);
 		}
 
 		// Calculate passed and missing gates
@@ -384,6 +440,6 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 				: {}),
 		};
 
-		return JSON.stringify(result, null, 2);
+		return JSON.stringify(withCircuit(result), null, 2);
 	},
 });
