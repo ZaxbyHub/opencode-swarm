@@ -81,7 +81,7 @@ async function materializeTerminalReview(runId = RUN_ID): Promise<{
 			index === 0
 				? ('suppress_with_reason' as const)
 				: ('route_to_critic' as const),
-		severity: index === 0 ? ('LOW' as const) : ('HIGH' as const),
+		severity: index === 0 ? ('NONE' as const) : ('HIGH' as const),
 	}));
 	const criticRecords = candidateIds.map((id, index) => ({
 		finding_id: id,
@@ -94,7 +94,7 @@ async function materializeTerminalReview(runId = RUN_ID): Promise<{
 				: handoffIds.includes(id)
 					? ('handoff_to_feedback' as const)
 					: ('report' as const),
-		severity: index === 0 ? ('LOW' as const) : ('HIGH' as const),
+		severity: index === 0 ? ('NONE' as const) : ('HIGH' as const),
 	}));
 	const reviewerRows = candidateIds
 		.map((id, index) =>
