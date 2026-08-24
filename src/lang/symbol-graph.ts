@@ -848,6 +848,36 @@ function buildFacts(
 		});
 	}
 
+	// An ANONYMOUS default export (`export default class { ... }`) has no name
+	// capture, so the loop above produced no def for the declaration itself.
+	// Before default-export scoping was fixed, a member inside it was renamed to
+	// `default` and stood in for the module default; scoping that correctly to
+	// the owning declaration removed the stand-in and left the file with NO
+	// `default` entry at all, so `import X from './m'` could no longer match.
+	// Emit the real thing: one `default` def spanning the declaration.
+	if (isEsMGrammar(grammarId)) {
+		for (const en of exportNodes) {
+			if (!isDefaultExportStatement(en)) continue;
+			const owner =
+				en.childForFieldName?.('declaration') ??
+				en.childForFieldName?.('value');
+			if (!owner) continue;
+			const alreadyNamed = defs.some(
+				(d) =>
+					d.startLine === owner.startPosition.row + 1 && d.name === 'default',
+			);
+			if (alreadyNamed) continue;
+			const kind = owner.type.includes('class') ? 'class' : 'function';
+			defs.push({
+				name: 'default',
+				kind,
+				exported: true,
+				startLine: owner.startPosition.row + 1,
+				endLine: owner.endPosition.row + 1,
+			});
+		}
+	}
+
 	return { defs, imports, refs };
 }
 

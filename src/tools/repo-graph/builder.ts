@@ -2797,6 +2797,20 @@ export function reconcileEdgeTargetKinds(graph: RepoGraph): number {
 		edge.targetKind = 'asset';
 		reclassified++;
 	}
+	// `symbolEdges` need the same treatment and have no `targetKind` to demote:
+	// a symbol edge is symbol-to-symbol, so an endpoint with no node is simply
+	// unusable. Closeout review found that fixing only `graph.edges` left the
+	// very invariant this function exists to restore violated one field over —
+	// the same file that produced a reconciled `'asset'` edge also produced a
+	// dangling symbol edge. Drop those, matching what `validateFileUpdates`
+	// already does on the incremental path so full and incremental builds agree.
+	if (graph.symbolEdges) {
+		graph.symbolEdges = graph.symbolEdges.filter(
+			(se) =>
+				known.has(toComparablePath(se.fromFile)) &&
+				known.has(toComparablePath(se.toFile)),
+		);
+	}
 	return reclassified;
 }
 
@@ -3243,8 +3257,6 @@ export async function buildWorkspaceGraphAsync(
 		}
 	}
 
-	reconcileEdgeTargetKinds(graph);
-
 	graph.metadata = {
 		generatedAt: new Date().toISOString(),
 		generator: 'repo-graph',
@@ -3256,6 +3268,9 @@ export async function buildWorkspaceGraphAsync(
 	if (allSymbolEdges.length > 0) {
 		graph.symbolEdges = allSymbolEdges;
 	}
+	// AFTER symbolEdges are attached: the reconciler prunes symbol edges whose
+	// endpoints have no node, so it has to run once both edge collections exist.
+	reconcileEdgeTargetKinds(graph);
 	// Surface walk-truncation diagnostics (defect A7) — walk-level fields are
 	// set once after the walk, NOT merged per-file (extraction diagnostics are).
 	diagnostics.walkTruncated = stats.truncated;

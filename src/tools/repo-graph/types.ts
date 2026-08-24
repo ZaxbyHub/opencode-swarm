@@ -286,7 +286,22 @@ export interface GraphEdge {
 	/**
 	 * Whether the resolved target is a graph node or an asset. `'node'` targets
 	 * are scannable source files that become graph nodes; `'asset'` targets are
-	 * real files (JSON/CSS/etc.) that never become nodes (schema >= 1.3.0).
+	 * real files that never become nodes (schema >= 1.3.0).
+	 *
+	 * `'asset'` covers TWO cases, and the second is easy to miss:
+	 * 1. a non-source file (JSON/CSS/etc.), which was never scannable; and
+	 * 2. a file that IS scannable but the walker never indexed — it sits under a
+	 *    `SKIP_DIRECTORIES` entry (`node_modules`, `dist`, `vendor`, …) or behind
+	 *    an unfollowed symlink. Import resolution does not consult those rules,
+	 *    so it can resolve a real `.ts`/`.java` file the graph has no node for.
+	 *    Such edges are demoted to `'asset'` at graph assembly (see
+	 *    `reconcileEdgeTargetKinds`) so that `'node'` always means "a node exists
+	 *    for this target". The demotion is language-agnostic: it applies to any
+	 *    source file the walker skipped, not only to JVM/.NET ones.
+	 *
+	 * Consequence for consumers: `targetKind: 'asset'` no longer implies "not
+	 * source code". Use `isScannableSourcePath(edge.target)` if that is what you
+	 * actually need to know.
 	 * Absent on older graphs — callers fall back to `isScannableSourcePath` on
 	 * the target path. Asset edges only require their source node to exist
 	 * during incremental validation, and are excluded from in-degree ranking /

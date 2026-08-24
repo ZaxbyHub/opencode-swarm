@@ -369,3 +369,53 @@ describe('closeout: a long doc comment cannot hide a modifier either', () => {
 		expect(def?.exported).toBe(false);
 	});
 });
+
+describe('closeout critic: symbolEdges and the anonymous default export', () => {
+	// Fixing only `graph.edges` left the invariant violated one field over: the
+	// same file that produced a reconciled 'asset' edge also produced a symbol
+	// edge whose `toFile` had no node. symbolEdges carry no `targetKind`, so an
+	// endpoint without a node is simply unusable — they are pruned instead.
+	test('a symbol edge is not emitted for an unindexed endpoint', async () => {
+		await withWorkspace(
+			{
+				'src/node_modules/com/x/Thing.java':
+					'package node_modules.com.x;\n\npublic class Thing { public static void go() {} }\n',
+				'src/app/Main.java':
+					'package app;\n\nimport node_modules.com.x.Thing;\n\npublic class Main { void run() { Thing.go(); } }\n',
+			},
+			async (root) => {
+				const graph = await buildWorkspaceGraphAsync(root);
+				const indexed = new Set(
+					Object.values(graph.nodes).map((n) =>
+						n.filePath.replace(/\\/g, '/').toLowerCase(),
+					),
+				);
+				for (const se of graph.symbolEdges ?? []) {
+					expect(indexed.has(se.toFile.replace(/\\/g, '/').toLowerCase())).toBe(
+						true,
+					);
+					expect(
+						indexed.has(se.fromFile.replace(/\\/g, '/').toLowerCase()),
+					).toBe(true);
+				}
+			},
+		);
+	});
+
+	// Scoping the default name to the owning declaration removed the member
+	// stand-in that had been representing an ANONYMOUS default export, leaving
+	// the file with no `default` entry at all — so `import X from './m'` could
+	// not match. The declaration itself now carries it.
+	test('an anonymous export default class still yields a default entry', async () => {
+		for (const src of [
+			'export default class {}\n',
+			'export default class { bar() {} }\n',
+		]) {
+			const facts = await extractFileSymbols('javascript', src);
+			const def = facts?.defs.find((d) => d.name === 'default');
+			expect(def).toBeDefined();
+			expect(def?.kind).toBe('class');
+			expect(def?.exported).toBe(true);
+		}
+	});
+});
