@@ -51,6 +51,13 @@ import {
 	readDelegationHealthArtifact,
 	writeDelegationHealthArtifact,
 } from './delegation-health.js';
+import {
+	encodePrReviewCollectionReceiptShedMarker,
+	PR_REVIEW_COLLECTION_RECEIPT_PREFIX,
+	PR_REVIEW_COLLECTION_RECEIPT_SHED_PREFIX,
+	parsePrReviewCollectionReceiptFooter,
+	parsePrReviewCollectionReceiptShedMarker,
+} from './pr-review-collection-receipt.js';
 
 export const BACKGROUND_DELEGATIONS_FILE = 'background-delegations.jsonl';
 export const BACKGROUND_DELEGATION_FALLBACK_DIR =
@@ -83,6 +90,8 @@ export const DELEGATION_COMPACTION_LOW_WATER_BYTES = 256 * 1024;
 export const DELEGATION_COMPACTION_HIGH_WATER_BYTES = 1024 * 1024;
 /** Hard validation bound for the checkpoint file on every read. */
 export const MAX_CHECKPOINT_BYTES = 2 * 1024 * 1024;
+/** Leave room for final audit/checksum growth beyond the selection estimate. */
+const CHECKPOINT_SELECTION_RESERVE_BYTES = 64 * 1024;
 /** Hard validation bound for live (non-summary) records in a checkpoint. */
 export const MAX_CHECKPOINT_RECORDS = 2_048;
 /**
@@ -1516,7 +1525,9 @@ function isCheckpointLiveRecord(record: BackgroundDelegationRecord): boolean {
  * (identity, lane coordinates, workspace, worktree, result scalars) and drop
  * only the large bodies — prompt text, taskChangeContext, and the text/error
  * result bodies (their sha256 `digest` is retained and covers the dropped
- * content). `coderSettlement.observedFiles` is retained: only SETTLED
+ * content). An authenticated, bounded final-line PR-review collection receipt is retained
+ * because collection projects accepted/rejected retry IDs from that durable
+ * metadata after compaction. `coderSettlement.observedFiles` is retained: only SETTLED
  * settlements reach summaries (see isCheckpointLiveRecord), and the settled
  * observed-file list is the executed-contract audit artifact — final and never
  * recomputed. Returns null when the summary would not validate; the caller
@@ -1529,12 +1540,14 @@ function buildClosedSummary(
 	delete summary.prompt;
 	delete summary.taskChangeContext;
 	if (summary.result) {
-		summary.result = stripResultBody(summary.result);
+		summary.result = stripResultBody(record, summary.result);
 	}
 	if (summary.terminalResult) {
 		summary.terminalResult = {
 			...summary.terminalResult,
-			result: stripResultBody(summary.terminalResult.result),
+			// `record.result` is the collection projection source. Retaining the same
+			// authenticated footer in terminalResult would double checkpoint cost.
+			result: dropResultBody(summary.terminalResult.result),
 		};
 	}
 	const parsed = RecordSchema.safeParse(summary);
@@ -1542,10 +1555,70 @@ function buildClosedSummary(
 }
 
 function stripResultBody(
+	record: BackgroundDelegationRecord,
 	result: BackgroundDelegationResult,
 ): BackgroundDelegationResult {
 	const { text: _text, error: _error, ...rest } = result;
+	const receipt = parsePrReviewCollectionReceiptFooter(record, result);
+	const shedMarker = receipt
+		? null
+		: parsePrReviewCollectionReceiptShedMarker(record, result);
+	const receiptText = receipt
+		? `${PR_REVIEW_COLLECTION_RECEIPT_PREFIX}${JSON.stringify(receipt)}`
+		: shedMarker
+			? `${PR_REVIEW_COLLECTION_RECEIPT_SHED_PREFIX}${JSON.stringify(shedMarker)}`
+			: undefined;
+	return receiptText
+		? { ...rest, text: receiptText, outputPreviewChars: receiptText.length }
+		: rest;
+}
+
+function dropResultBody(
+	result: BackgroundDelegationResult,
+): BackgroundDelegationResult {
+	const {
+		text: _text,
+		error: _error,
+		outputPreviewChars: _preview,
+		...rest
+	} = result;
 	return rest;
+}
+
+function dropRetainedPrReviewReceipt(
+	record: BackgroundDelegationRecord,
+): BackgroundDelegationRecord {
+	const compact = (
+		result: BackgroundDelegationResult,
+	): BackgroundDelegationResult => {
+		const payload = parsePrReviewCollectionReceiptFooter(record, result);
+		if (!payload) {
+			const marker = parsePrReviewCollectionReceiptShedMarker(record, result);
+			if (!marker) return dropResultBody(result);
+			const markerText = `${PR_REVIEW_COLLECTION_RECEIPT_SHED_PREFIX}${JSON.stringify(marker)}`;
+			const { text: _text, error: _error, ...rest } = result;
+			return {
+				...rest,
+				text: markerText,
+				outputPreviewChars: markerText.length,
+			};
+		}
+		const marker = encodePrReviewCollectionReceiptShedMarker(payload);
+		const { text: _text, error: _error, ...rest } = result;
+		return { ...rest, text: marker, outputPreviewChars: marker.length };
+	};
+	return {
+		...record,
+		...(record.result ? { result: compact(record.result) } : {}),
+		...(record.terminalResult
+			? {
+					terminalResult: {
+						...record.terminalResult,
+						result: dropResultBody(record.terminalResult.result),
+					},
+				}
+			: {}),
+	};
 }
 
 function emptyAudit(): DelegationCheckpointAuditSummary {
@@ -1791,12 +1864,22 @@ function compactDelegationsLocked(
 		'utf-8',
 	);
 	let used = baseOverhead;
+	const selectionBudget =
+		MAX_CHECKPOINT_BYTES - CHECKPOINT_SELECTION_RESERVE_BYTES;
 	const keptClosed: BackgroundDelegationRecord[] = [];
 	let evicted = 0;
 	for (const entry of closedCandidates) {
-		const cost = Buffer.byteLength(JSON.stringify(entry), 'utf-8') + 1;
-		if (used + cost > MAX_CHECKPOINT_BYTES) {
+		let retainedEntry = entry;
+		let cost = Buffer.byteLength(JSON.stringify(retainedEntry), 'utf-8') + 1;
+		if (used + cost > selectionBudget) {
 			if (now - entry.updatedAt < TOMBSTONE_MIN_AGE_MS) {
+				retainedEntry = dropRetainedPrReviewReceipt(entry);
+				cost = Buffer.byteLength(JSON.stringify(retainedEntry), 'utf-8') + 1;
+				if (used + cost <= selectionBudget) {
+					used += cost;
+					keptClosed.push(retainedEntry);
+					continue;
+				}
 				recordLedgerUncertainty(
 					directory,
 					'checkpoint byte budget would evict a young closed summary; compaction skipped',
@@ -1811,7 +1894,7 @@ function compactDelegationsLocked(
 			continue;
 		}
 		used += cost;
-		keptClosed.push(entry);
+		keptClosed.push(retainedEntry);
 	}
 
 	const sequence =
@@ -1840,7 +1923,7 @@ function compactDelegationsLocked(
 		now,
 	);
 
-	const checkpoint: BackgroundDelegationCheckpoint = {
+	const checkpointCandidate: BackgroundDelegationCheckpoint = {
 		schemaVersion: 1,
 		sequence,
 		writerId: WRITER_ID,
@@ -1851,8 +1934,25 @@ function compactDelegationsLocked(
 		records: live,
 		closed: keptClosed,
 		audit,
-		payloadChecksum: '',
+		payloadChecksum: '0'.repeat(64),
 	};
+	// Normalize through the same strict schema recovery uses before hashing.
+	// Otherwise an optional `undefined` or future schema projection difference
+	// can serialize successfully but hash differently after reload.
+	const normalizedCheckpoint = CheckpointSchema.safeParse(checkpointCandidate);
+	if (!normalizedCheckpoint.success) {
+		recordLedgerUncertainty(
+			directory,
+			'generated checkpoint failed schema normalization; compaction skipped',
+			'compaction',
+		);
+		return {
+			status: 'skipped',
+			reason: 'generated checkpoint failed schema normalization',
+		};
+	}
+	const checkpoint =
+		normalizedCheckpoint.data as BackgroundDelegationCheckpoint;
 	checkpoint.payloadChecksum = checkpointPayloadChecksum(checkpoint);
 	const checkpointJson = `${JSON.stringify(checkpoint)}\n`;
 	if (Buffer.byteLength(checkpointJson, 'utf-8') > MAX_CHECKPOINT_BYTES) {

@@ -28,6 +28,17 @@ import {
 	recordPendingDelegationDetailed,
 } from '../background/pending-delegations.js';
 import {
+	encodePrReviewCollectionReceiptFooter,
+	encodePrReviewCollectionReceiptShedMarkerFromReceipt,
+	MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS,
+	PR_REVIEW_COLLECTION_RECEIPT_PREFIX,
+	PR_REVIEW_COLLECTION_RECEIPT_SHED_PREFIX,
+	parsePrReviewCollectionReceiptFooter,
+	parsePrReviewCollectionReceiptShedMarker,
+	projectPrReviewCollectionReceipt,
+	projectPrReviewCollectionReceiptShedMarker,
+} from '../background/pr-review-collection-receipt.js';
+import {
 	PrReviewInlineTriggerRowSchema,
 	validatePrReviewInlineTriggerLedger,
 } from '../background/pr-review-trigger-contract.js';
@@ -62,6 +73,8 @@ import {
 	type PrReviewDepthTier,
 	PrReviewResilienceCircuitOpenError,
 	PrReviewResilienceRetryExhaustedError,
+	type PrReviewVerdictCollectionReceipt,
+	readPrWorkflowGateState,
 	recordPrFeedbackGateBatch,
 	recordPrReviewValidationBatch,
 	rollbackPrReviewBaseAdmissionIfUnlaunched,
@@ -444,6 +457,7 @@ const LaneSchema = z.object({
 	review_item_ids: z
 		.array(z.string().trim().min(1).max(160))
 		.min(1)
+		.max(MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS)
 		.optional()
 		.describe(
 			'Candidate/finding IDs owned by a PR-review reviewer or critic lane; every ID requires a parseable verdict row',
@@ -723,6 +737,8 @@ export interface DispatchLaneResult {
 		kind: BackgroundDelegationWorkflowLaneRecovery['kind'];
 		reason: string;
 	}>;
+	accepted_review_item_ids?: string[];
+	rejected_review_item_ids?: string[];
 	/**
 	 * Set to true when this lane's `output` preview was withheld because an
 	 * identical preview (same batch, lane, and result digest) was already
@@ -896,6 +912,11 @@ export const _test_exports = {
 	// without round-tripping through the durable delegation store or a
 	// SessionOps mock.
 	recordToLaneResult,
+	appendPrReviewCollectionReceipt,
+	parsePrReviewCollectionReceipt,
+	resolvePrReviewReceiptFallbacks,
+	resolvePrReviewReceiptFallbacksFromState,
+	consumePrReviewReceiptAppendFailureLog,
 	// #2276: pure per-lane-kind budget derivation, exported beside the prompt
 	// contract builder so budget scaling can be asserted without prompt-text
 	// parsing (file precedent: prompt-construction internals live here).
@@ -1753,6 +1774,10 @@ export async function executeCollectLaneResults(
 	const timeoutMs = parsed.data.timeout_ms ?? DEFAULT_COLLECT_TIMEOUT_MS;
 	const deadline = _internals.now() + timeoutMs;
 	const hostTimeouts = new Set<string>();
+	// This call processes at most MAX_LANES records, so this per-invocation set
+	// is bounded and prevents a persistently unencodable terminal receipt from
+	// logging once per wait-loop poll.
+	const receiptAppendFailureLogs = new Set<string>();
 	const batchFilter =
 		context.sessionID !== undefined
 			? { parentSessionId: context.sessionID }
@@ -1776,6 +1801,7 @@ export async function executeCollectLaneResults(
 			parsed.data.cancel_pending === true,
 			deadline,
 			hostTimeouts,
+			receiptAppendFailureLogs,
 		);
 		await sweepStaleAsyncLaneRecords(
 			session,
@@ -1800,11 +1826,20 @@ export async function executeCollectLaneResults(
 		pollIntervalMs = nextCollectPollInterval(pollIntervalMs);
 	}
 
+	const reviewReceiptFallbacks = await resolvePrReviewReceiptFallbacks(
+		directory,
+		context.sessionID,
+		records,
+	);
 	const result = buildCollectResult(
 		parsed.data.batch_id,
 		records,
 		parsed.data.include_pending ?? parsed.data.wait !== true,
-		{ directory, sessionID: context.sessionID },
+		{
+			directory,
+			sessionID: context.sessionID,
+			reviewReceipts: reviewReceiptFallbacks,
+		},
 	);
 	if (hostTimeouts.size > 0) {
 		result.message =
@@ -2224,6 +2259,7 @@ async function collectOnce(
 	cancelPending: boolean,
 	deadline: number,
 	hostTimeouts: Set<string>,
+	receiptAppendFailureLogs: Set<string>,
 ): Promise<void> {
 	const activeRecords = records.filter(
 		(record) => record.status === 'pending' || record.status === 'running',
@@ -2299,11 +2335,11 @@ async function collectOnce(
 			settleCollectedLane({
 				directory,
 				record,
-				readiness,
 				transcript,
 				deadline,
 				hostTimeouts,
 				revisionDigestBudgetMs: laneBudgets.revisionDigestBudgetMs,
+				receiptAppendFailureLogs,
 			}),
 		);
 	}
@@ -2313,14 +2349,20 @@ async function collectOnce(
 async function settleCollectedLane(args: {
 	directory: string;
 	record: BackgroundDelegationRecord;
-	readiness: LaneCollectionReadiness;
 	transcript: ReturnType<typeof extractAssistantTranscript>;
 	deadline: number;
 	hostTimeouts: Set<string>;
 	revisionDigestBudgetMs: number;
+	receiptAppendFailureLogs: Set<string>;
 }): Promise<void> {
-	const { directory, record, readiness, transcript, deadline, hostTimeouts } =
-		args;
+	const {
+		directory,
+		record,
+		transcript,
+		deadline,
+		hostTimeouts,
+		receiptAppendFailureLogs,
+	} = args;
 	let collectedRevisionDigest: string | undefined;
 	const prHeadSha = record.workspace?.prHeadSha;
 	if (prHeadSha) {
@@ -2362,7 +2404,7 @@ async function settleCollectedLane(args: {
 		messageCount: transcript.messageCount,
 		transcriptIncomplete: transcript.transcriptIncomplete,
 	});
-	const prospectiveResult: BackgroundDelegationResult = {
+	let prospectiveResult: BackgroundDelegationResult = {
 		text: output.output,
 		chars: output.output_chars,
 		truncated: output.output_truncated,
@@ -2415,7 +2457,9 @@ async function settleCollectedLane(args: {
 			}
 		}
 		if (!validation.ok) {
-			if (readiness === 'unknown') return;
+			// Unknown status reaches settlement only when the transcript itself has
+			// terminal assistant proof. That proof is sufficient to persist a
+			// deterministic contract failure instead of leaving the lane pending.
 			terminalStatus = 'error';
 			const family =
 				record.mode === 'swarm-pr-review:base' ? 'base_explorer' : 'micro_lane';
@@ -2425,15 +2469,18 @@ async function settleCollectedLane(args: {
 			prospectiveResult.error = prospectiveResult.error.slice(0, 1_024);
 		}
 	}
+	const isPrReviewVerdictLane =
+		record.mode === 'swarm-pr-review:reviewer' ||
+		record.mode === 'swarm-pr-review:critic';
 	if (
-		(record.mode === 'swarm-pr-review:reviewer' ||
-			record.mode === 'swarm-pr-review:critic' ||
+		(isPrReviewVerdictLane ||
 			record.mode === 'swarm-pr-feedback:verification' ||
 			record.mode === 'swarm-pr-feedback:stage-b-reviewer' ||
 			record.mode === 'swarm-pr-feedback:stage-b-test' ||
 			record.mode === 'swarm-pr-feedback:closeout-reviewer' ||
 			record.mode === 'swarm-pr-feedback:closeout-critic') &&
-		(prospectiveResult.truncated === true ||
+		(isPrReviewVerdictLane ||
+			prospectiveResult.truncated === true ||
 			prospectiveResult.transcriptIncomplete === true)
 	) {
 		const artifact = output.output_ref
@@ -2477,10 +2524,40 @@ async function settleCollectedLane(args: {
 			});
 			return;
 		}
+		if (validation.receipt) {
+			const resultWithReceipt = appendPrReviewCollectionReceipt(
+				record,
+				prospectiveResult,
+				validation.receipt,
+			);
+			// Never publish a reviewer/critic terminal status without its exact retry
+			// receipt. A later poll can repeat this deterministic in-memory step.
+			if (!resultWithReceipt) {
+				if (
+					consumePrReviewReceiptAppendFailureLog(
+						receiptAppendFailureLogs,
+						record.parentSessionId,
+						record.correlationId,
+					)
+				) {
+					logger.log(
+						`[dispatch-lanes] withheld PR-review terminal result without receipt: correlation=${record.correlationId} batch=${record.batchId ?? '(missing)'} lane=${record.laneId ?? '(missing)'}`,
+					);
+				}
+				return;
+			}
+			prospectiveResult = resultWithReceipt;
+		}
 		if (!validation.ok) {
-			if (readiness === 'unknown') return;
+			// See the terminal-proof gate in collectOnce: status unavailability must
+			// not suppress a conclusive, lane-atomic rejected receipt.
 			terminalStatus = 'error';
-			prospectiveResult.error = `PR_WORKFLOW_CONTRACT_INVALID: batch=${record.batchId ?? '(missing)'} lane=${record.laneId ?? '(missing)'} workflow_lane=${record.workflowLane ?? '(missing)'} ${validation.reason}`;
+			const errorCode =
+				validation.failure?.predicate === 'reviewer.verdict_rows' ||
+				validation.failure?.predicate === 'critic.verdict_rows'
+					? 'PR_REVIEW_VERDICT_CONTRACT_INVALID'
+					: 'PR_WORKFLOW_CONTRACT_INVALID';
+			prospectiveResult.error = `${errorCode}: batch=${record.batchId ?? '(missing)'} lane=${record.laneId ?? '(missing)'} workflow_lane=${record.workflowLane ?? '(missing)'} ${validation.reason}`;
 			prospectiveResult.error = prospectiveResult.error.slice(0, 1_024);
 		} else if (validation.recoveries?.length) {
 			const workflowLane = record.workflowLane?.trim();
@@ -2497,6 +2574,17 @@ async function settleCollectedLane(args: {
 		status: terminalStatus,
 		result: prospectiveResult,
 	});
+}
+
+function consumePrReviewReceiptAppendFailureLog(
+	loggedFailures: Set<string>,
+	parentSessionId: string,
+	correlationId: string,
+): boolean {
+	const key = `${parentSessionId}\u0000${correlationId}`;
+	if (loggedFailures.has(key)) return false;
+	loggedFailures.add(key);
+	return true;
 }
 
 function scheduleAsyncLanePrompt(args: {
@@ -2930,7 +3018,7 @@ function buildCollectResult(
 	batchId: string,
 	records: BackgroundDelegationRecord[],
 	includePending: boolean,
-	deliveryContext?: { directory?: string; sessionID?: string },
+	deliveryContext?: LaneResultDeliveryContext,
 ): CollectLaneResultsResult {
 	const laneResults = records
 		.filter(
@@ -2974,10 +3062,134 @@ function buildCollectResult(
 	};
 }
 
+interface LaneResultDeliveryContext {
+	directory?: string;
+	sessionID?: string;
+	reviewReceipts?: ReadonlyMap<string, PrReviewVerdictCollectionReceipt>;
+}
+
+async function resolvePrReviewReceiptFallbacks(
+	directory: string,
+	sessionID: string | undefined,
+	records: readonly BackgroundDelegationRecord[],
+): Promise<ReadonlyMap<string, PrReviewVerdictCollectionReceipt>> {
+	const receipts = new Map<string, PrReviewVerdictCollectionReceipt>();
+	if (!sessionID) return receipts;
+	const unresolved = records.filter(
+		(record) =>
+			(record.mode === 'swarm-pr-review:reviewer' ||
+				record.mode === 'swarm-pr-review:critic') &&
+			!parsePrReviewCollectionReceipt(record) &&
+			record.result !== undefined &&
+			parsePrReviewCollectionReceiptShedMarker(record, record.result) !== null,
+	);
+	if (unresolved.length === 0) return receipts;
+	let state: Awaited<ReturnType<typeof readPrWorkflowGateState>>;
+	try {
+		state = await readPrWorkflowGateState(directory, sessionID);
+	} catch (error) {
+		logger.log(
+			`[dispatch-lanes] unable to reconstruct compacted PR-review receipts: ${formatError(error)}`,
+		);
+		return receipts;
+	}
+	if (!state || state.mode !== 'PR_REVIEW') return receipts;
+	return resolvePrReviewReceiptFallbacksFromState(unresolved, state);
+}
+
+interface PrReviewReceiptFallbackState {
+	prReviewValidationBatches?: Array<{
+		batchId: string;
+		phase: string;
+		lanes: Array<{
+			laneId: string;
+			workflowLane: string;
+			reviewItemIds?: string[];
+		}>;
+	}>;
+}
+
+function resolvePrReviewReceiptFallbacksFromState(
+	records: readonly BackgroundDelegationRecord[],
+	state: PrReviewReceiptFallbackState,
+): ReadonlyMap<string, PrReviewVerdictCollectionReceipt> {
+	const receipts = new Map<string, PrReviewVerdictCollectionReceipt>();
+	for (const record of records) {
+		const phase =
+			record.mode === 'swarm-pr-review:reviewer'
+				? 'reviewer'
+				: record.mode === 'swarm-pr-review:critic'
+					? 'critic'
+					: null;
+		if (!phase || !record.batchId || !record.laneId) continue;
+		if (
+			record.status !== 'completed' &&
+			record.status !== 'error' &&
+			record.status !== 'ingestion_error' &&
+			record.status !== 'cancelled' &&
+			record.status !== 'stale'
+		) {
+			continue;
+		}
+		const lane = (state.prReviewValidationBatches ?? [])
+			.find(
+				(batch) => batch.batchId === record.batchId && batch.phase === phase,
+			)
+			?.lanes.find(
+				(candidate) =>
+					candidate.laneId === record.laneId &&
+					candidate.workflowLane === record.workflowLane,
+			);
+		const itemIds = lane?.reviewItemIds ?? [];
+		if (itemIds.length === 0) continue;
+		const marker = record.result
+			? parsePrReviewCollectionReceiptShedMarker(record, record.result)
+			: null;
+		const projected = marker
+			? projectPrReviewCollectionReceiptShedMarker(marker, itemIds)
+			: null;
+		if (projected) receipts.set(record.correlationId, projected);
+	}
+	return receipts;
+}
+
+function appendPrReviewCollectionReceipt(
+	record: BackgroundDelegationRecord,
+	result: BackgroundDelegationResult,
+	receipt: PrReviewVerdictCollectionReceipt,
+): BackgroundDelegationResult | null {
+	const sanitizedPreview = (result.text ?? '')
+		.split(/\r?\n/)
+		.filter(
+			(line) =>
+				!line.startsWith(PR_REVIEW_COLLECTION_RECEIPT_PREFIX) &&
+				!line.startsWith(PR_REVIEW_COLLECTION_RECEIPT_SHED_PREFIX),
+		)
+		.join('\n');
+	const footer =
+		encodePrReviewCollectionReceiptFooter(record, result, receipt) ??
+		encodePrReviewCollectionReceiptShedMarkerFromReceipt(
+			record,
+			result,
+			receipt,
+		);
+	if (!footer) return null;
+	const text = sanitizedPreview ? `${sanitizedPreview}\n${footer}` : footer;
+	return { ...result, text, outputPreviewChars: text.length };
+}
+
+function parsePrReviewCollectionReceipt(
+	record: BackgroundDelegationRecord,
+): PrReviewVerdictCollectionReceipt | null {
+	if (!record.result) return null;
+	const payload = parsePrReviewCollectionReceiptFooter(record, record.result);
+	return payload ? projectPrReviewCollectionReceipt(payload) : null;
+}
+
 function recordToLaneResult(
 	record: BackgroundDelegationRecord,
 	batchId: string,
-	deliveryContext?: { directory?: string; sessionID?: string },
+	deliveryContext?: LaneResultDeliveryContext,
 ): DispatchLaneResult {
 	const status =
 		record.status === 'error'
@@ -2994,6 +3206,9 @@ function recordToLaneResult(
 	const digest = record.result?.digest;
 	const outputRef = record.result?.outputRef?.trim();
 	let alreadyDelivered = false;
+	const reviewReceipt =
+		parsePrReviewCollectionReceipt(record) ??
+		deliveryContext?.reviewReceipts?.get(record.correlationId);
 	if (
 		record.result?.text !== undefined &&
 		status !== 'pending' &&
@@ -3074,6 +3289,12 @@ function recordToLaneResult(
 			: {}),
 		...(record.result?.error !== undefined
 			? { error: record.result.error }
+			: {}),
+		...(reviewReceipt
+			? {
+					accepted_review_item_ids: [...reviewReceipt.acceptedReviewItemIds],
+					rejected_review_item_ids: [...reviewReceipt.rejectedReviewItemIds],
+				}
 			: {}),
 	};
 }

@@ -33,6 +33,7 @@ import {
 	type SweepableDelegationStatus,
 	sweepStaleDelegations,
 } from '../background/pending-delegations.js';
+import { MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS } from '../background/pr-review-collection-receipt.js';
 import {
 	PR_REVIEW_REQUIRED_TRIGGER_IDS,
 	type PrReviewInlineTriggerRow,
@@ -138,7 +139,9 @@ export type PrReviewLaneValidationPredicate =
 	| 'discovery.header'
 	| 'discovery.row'
 	| 'discovery.coverage'
-	| 'discovery.duplicate_evidence';
+	| 'discovery.duplicate_evidence'
+	| 'reviewer.verdict_rows'
+	| 'critic.verdict_rows';
 
 export interface PrReviewLaneValidationFailure {
 	predicate: PrReviewLaneValidationPredicate;
@@ -188,12 +191,24 @@ export interface PrWorkflowTransportRecoveryValidationInput {
 	revisionDigest: string;
 }
 
+export interface PrReviewVerdictCollectionReceipt {
+	assignedReviewItemIds: string[];
+	acceptedReviewItemIds: string[];
+	rejectedReviewItemIds: string[];
+}
+
 export type PrWorkflowTransportRecoveryValidationResult =
 	| {
 			ok: true;
 			recoveries?: readonly BackgroundDelegationWorkflowLaneRecovery[];
+			receipt?: PrReviewVerdictCollectionReceipt;
 	  }
-	| { ok: false; reason: string };
+	| {
+			ok: false;
+			reason: string;
+			failure?: PrReviewLaneValidationFailure;
+			receipt?: PrReviewVerdictCollectionReceipt;
+	  };
 
 export interface PrWorkflowCheckoutRecoveryRecord {
 	code:
@@ -508,8 +523,9 @@ interface PrReviewValidationBatchRecord {
 interface PrReviewBatchCoherenceRecord {
 	/**
 	 * The exact candidate/critic inventory this batch's ownership was validated
-	 * against at record time (the same set `assertExactStringSet` compared the
-	 * declared lane items to).
+	 * against at record time. A batch may own a subset of this inventory; retaining
+	 * the full set here prevents stale partial batches from contributing after the
+	 * mechanically derived inventory changes.
 	 */
 	validatedInventory: string[];
 	/**
@@ -521,6 +537,8 @@ interface PrReviewBatchCoherenceRecord {
 	 * claims it invalidated and leaves its siblings intact.
 	 */
 	reviewerItemBindings?: Record<string, string>;
+	/** Key encoding for reviewerItemBindings; absent means legacy raw item IDs. */
+	reviewerItemBindingKeyEncoding?: 'prefixed-v1';
 }
 
 export interface PrWorkflowGateState {
@@ -945,7 +963,11 @@ const PrReviewValidationBatchRecordSchema = z
 					.object({
 						laneId: z.string().min(1),
 						workflowLane: z.string().min(1),
-						reviewItemIds: z.array(z.string().min(1)).min(1).optional(),
+						reviewItemIds: z
+							.array(z.string().min(1))
+							.min(1)
+							.max(MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS)
+							.optional(),
 					})
 					.strict(),
 			)
@@ -963,6 +985,7 @@ const PrReviewBatchCoherenceRecordSchema = z
 		reviewerItemBindings: z
 			.record(z.string().min(1), z.string().regex(/^[0-9a-f]{64}$/))
 			.optional(),
+		reviewerItemBindingKeyEncoding: z.literal('prefixed-v1').optional(),
 	})
 	.passthrough();
 
@@ -4699,7 +4722,7 @@ export async function recordPrReviewValidationBatch(
 			phase === 'reviewer'
 				? derivePrReviewCandidateInventory(directory, state, ctx)
 				: derivePrReviewCriticInventory(directory, state, ctx);
-		assertExactStringSet(
+		assertStringSetSubset(
 			assigned,
 			validatedInventory,
 			`PR_REVIEW ${phase} ownership`,
@@ -4765,7 +4788,12 @@ export async function recordPrReviewValidationBatch(
 	if (validatedInventory) {
 		coherence[batchId] = {
 			validatedInventory,
-			...(reviewerItemBindings ? { reviewerItemBindings } : {}),
+			...(reviewerItemBindings
+				? {
+						reviewerItemBindings,
+						reviewerItemBindingKeyEncoding: 'prefixed-v1' as const,
+					}
+				: {}),
 		};
 	}
 	const nextState: PrWorkflowGateState = {
@@ -7754,6 +7782,12 @@ export const _test_exports = {
 	resolveRemoteRefsContainingHeadAsync,
 	parseCriticVerdict,
 	/**
+	 * Exact production verdict-row analysis and item composition parsers. Exposed
+	 * so the assignment-boundary regression can prove both paths remain linear.
+	 */
+	analyzePrReviewVerdictRowContract,
+	parseLaneItemVerdicts,
+	/**
 	 * Read-only view of the item-keyed composition for one session, including
 	 * the diagnostics that settlement only logs (abandoned declared lanes,
 	 * batches skipped for inventory incoherence). Production callers reach the
@@ -7905,6 +7939,11 @@ function normalizeWorkflowLanes(lanes: readonly PrWorkflowLaneSpec[]): Array<{
 			);
 		}
 		if (reviewItemIds) {
+			if (reviewItemIds.length > MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS) {
+				throw new Error(
+					`BLOCKED: PR workflow review_item_ids may not exceed ${MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS} entries`,
+				);
+			}
 			assertNoDuplicates(reviewItemIds, 'review item ids within one lane');
 		}
 		const ownedWorkflowLanes = lane.ownedWorkflowLanes?.map((owned: string) =>
@@ -9177,23 +9216,22 @@ function sameStringSet(
 	);
 }
 
-function assertExactStringSet(
+/** Require a duplicate-free, non-empty subset of the mechanically derived IDs. */
+function assertStringSetSubset(
 	actual: readonly string[],
 	expected: readonly string[],
 	label: string,
 ): void {
 	const actualSet = new Set(actual);
 	const expectedSet = new Set(expected);
-	const missing = [...expectedSet].filter((value) => !actualSet.has(value));
 	const extra = [...actualSet].filter((value) => !expectedSet.has(value));
 	if (
+		actual.length === 0 ||
 		actual.length !== actualSet.size ||
-		actualSet.size !== expectedSet.size ||
-		missing.length > 0 ||
 		extra.length > 0
 	) {
 		throw new Error(
-			`BLOCKED: ${label} must exactly cover the mechanically derived inventory; missing: ${missing.join(', ') || '(none)'}; extra: ${extra.join(', ') || '(none)'}`,
+			`BLOCKED: ${label} must be a non-empty subset of the mechanically derived inventory; extra: ${extra.join(', ') || '(none)'}`,
 		);
 	}
 }
@@ -9939,12 +9977,19 @@ function composePrReviewPhaseVerdicts(
 			);
 			if (!artifact) continue;
 			const declaredItems = qualified.expectedLane.reviewItemIds ?? [];
-			const parsed = parseLaneItemVerdicts(
+			const { markerRows, parsed } = parsePrReviewVerdictRows(
 				artifact.text,
 				declaredItems,
 				phase,
 				reviewerClaims,
 			);
+			if (!verdictRowsContainOnlyAssignedIds(markerRows, declaredItems)) {
+				appendCompositionDiagnostic(
+					diagnostics,
+					`${phase} lane "${qualified.expectedLane.laneId}" contains an unassigned verdict row; it contributes no claims`,
+				);
+				continue;
+			}
 			if (declaredItems.length > 0 && parsed.size === declaredItems.length) {
 				satisfiedObligations.add(qualified.expectedWorkflowLane);
 			}
@@ -10055,9 +10100,28 @@ function criticClaimIsBoundToCurrentReviewerRow(
 ): boolean {
 	// A coherent critic batch always carries bindings; absent bindings on a
 	// coherent entry means out-of-band mutation, so fail closed.
-	const bound = coherence.reviewerItemBindings?.[itemId];
+	const bindings = coherence.reviewerItemBindings;
+	const bindingKey =
+		coherence.reviewerItemBindingKeyEncoding === 'prefixed-v1'
+			? reviewerItemBindingKey(itemId)
+			: itemId;
+	const bound =
+		bindings && Object.hasOwn(bindings, bindingKey)
+			? bindings[bindingKey]
+			: undefined;
 	const current = reviewerClaims?.get(itemId)?.rowDigest;
 	return Boolean(bound && current && bound === current);
+}
+
+const REVIEWER_ITEM_BINDING_KEY_PREFIX = 'item:';
+
+/**
+ * Prefix item IDs before using them as persisted object keys. In particular,
+ * assigning a raw `__proto__` key to an ordinary object invokes JavaScript's
+ * prototype setter instead of creating an own property.
+ */
+function reviewerItemBindingKey(itemId: string): string {
+	return `${REVIEWER_ITEM_BINDING_KEY_PREFIX}${itemId}`;
 }
 
 /**
@@ -10113,7 +10177,7 @@ function criticReviewerItemBindings(
 				`BLOCKED: PR_REVIEW critic dispatch cannot bind item "${itemId}" to an authoritative reviewer verdict row`,
 			);
 		}
-		bindings[itemId] = rowDigest;
+		bindings[reviewerItemBindingKey(itemId)] = rowDigest;
 	}
 	return bindings;
 }
@@ -11027,16 +11091,12 @@ function workflowArtifactHasContractMarker(
 	) {
 		const phase: PrReviewComposablePhase =
 			expectedMode === 'swarm-pr-review:reviewer' ? 'reviewer' : 'critic';
-		const parsed = parseLaneItemVerdicts(
+		return analyzePrReviewVerdictRowContract(
 			artifact.text,
 			reviewItemIds ?? [],
 			phase,
 			reviewerClaims,
-		);
-		return Boolean(
-			reviewItemIds?.length &&
-				reviewItemIds.every((itemId) => parsed.has(itemId)),
-		);
+		).ok;
 	}
 	if (expectedMode === 'swarm-pr-feedback:verification') {
 		return /^\[FEEDBACK-VERIFIED\]\s*\|/m.test(artifact.text);
@@ -11531,13 +11591,16 @@ export function validatePrReviewDiscoveryLaneCompletion(
 export async function validatePrWorkflowTransportRecovery(
 	input: PrWorkflowTransportRecoveryValidationInput,
 ): Promise<PrWorkflowTransportRecoveryValidationResult> {
+	const mode = input.record.mode?.trim();
+	const isPrReviewVerdictMode =
+		mode === 'swarm-pr-review:reviewer' || mode === 'swarm-pr-review:critic';
 	if (
+		!isPrReviewVerdictMode &&
 		input.result.truncated !== true &&
 		input.result.transcriptIncomplete !== true
 	) {
 		return { ok: true };
 	}
-	const mode = input.record.mode?.trim();
 	const workflowLane = input.record.workflowLane?.trim();
 	if (!mode || !workflowLane) {
 		return {
@@ -11546,6 +11609,35 @@ export async function validatePrWorkflowTransportRecovery(
 				'structured workflow transport recovery requires non-empty mode and workflow_lane provenance',
 		};
 	}
+	const state = await requireAnyActiveState(
+		input.directory,
+		input.record.parentSessionId,
+	);
+	const batchId = input.record.batchId?.trim();
+	const laneId = input.record.laneId?.trim();
+	const verdictPhase: PrReviewComposablePhase | null =
+		mode === 'swarm-pr-review:reviewer'
+			? 'reviewer'
+			: mode === 'swarm-pr-review:critic'
+				? 'critic'
+				: null;
+	const declaredVerdictLane = verdictPhase
+		? (state.prReviewValidationBatches ?? [])
+				.find(
+					(candidate) =>
+						candidate.batchId === batchId && candidate.phase === verdictPhase,
+				)
+				?.lanes.find((candidate) => candidate.laneId === laneId)
+		: undefined;
+	const declaredItemIds = declaredVerdictLane?.reviewItemIds ?? [];
+	const rejectedReceipt: PrReviewVerdictCollectionReceipt | undefined =
+		declaredItemIds.length > 0
+			? {
+					assignedReviewItemIds: [...declaredItemIds],
+					acceptedReviewItemIds: [],
+					rejectedReviewItemIds: [...declaredItemIds],
+				}
+			: undefined;
 	const recordIntegrity = analyzeLaneRecordResultIntegrity({
 		record: input.record,
 		result: input.result,
@@ -11564,6 +11656,8 @@ export async function validatePrWorkflowTransportRecovery(
 		return {
 			ok: false,
 			reason: formatPrReviewLaneValidationFailure(recordIntegrity.failure),
+			failure: recordIntegrity.failure,
+			...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
 		};
 	}
 	const artifactIntegrity = analyzeLaneArtifactIntegrity({
@@ -11583,12 +11677,10 @@ export async function validatePrWorkflowTransportRecovery(
 		return {
 			ok: false,
 			reason: formatPrReviewLaneValidationFailure(artifactIntegrity.failure),
+			failure: artifactIntegrity.failure,
+			...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
 		};
 	}
-	const state = await requireAnyActiveState(
-		input.directory,
-		input.record.parentSessionId,
-	);
 	const expectedMode = mode.startsWith('swarm-pr-review:')
 		? 'PR_REVIEW'
 		: mode.startsWith('swarm-pr-feedback:')
@@ -11598,17 +11690,17 @@ export async function validatePrWorkflowTransportRecovery(
 		return {
 			ok: false,
 			reason: `structured workflow transport recovery does not support mode "${mode}"`,
+			...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
 		};
 	}
 	if (state.mode !== expectedMode) {
 		return {
 			ok: false,
 			reason: `active workflow mode mismatch; expected ${expectedMode}, got ${state.mode}`,
+			...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
 		};
 	}
 	const artifactText = input.artifact?.text ?? '';
-	const batchId = input.record.batchId?.trim();
-	const laneId = input.record.laneId?.trim();
 	const prReviewGateContext: PrReviewGateContext | undefined =
 		state.mode === 'PR_REVIEW'
 			? { revisionDigest: input.revisionDigest }
@@ -11618,14 +11710,14 @@ export async function validatePrWorkflowTransportRecovery(
 			ok: false,
 			reason:
 				'structured workflow transport recovery requires non-empty batch_id and lane_id provenance',
+			...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
 		};
 	}
 	if (
 		mode === 'swarm-pr-review:reviewer' ||
 		mode === 'swarm-pr-review:critic'
 	) {
-		const phase: PrReviewComposablePhase =
-			mode === 'swarm-pr-review:reviewer' ? 'reviewer' : 'critic';
+		const phase = verdictPhase ?? 'reviewer';
 		const batch = (state.prReviewValidationBatches ?? []).find(
 			(candidate) => candidate.batchId === batchId && candidate.phase === phase,
 		);
@@ -11635,6 +11727,7 @@ export async function validatePrWorkflowTransportRecovery(
 				ok: false,
 				reason:
 					'no matching declared reviewer/critic lane ownership was found for this transport recovery',
+				...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
 			};
 		}
 		const itemIds = lane.reviewItemIds ?? [];
@@ -11651,24 +11744,51 @@ export async function validatePrWorkflowTransportRecovery(
 				ok: false,
 				reason:
 					'critic transport recovery requires authoritative settled reviewer claims for every assigned item',
+				...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
 			};
 		}
-		const parsed = parseLaneItemVerdicts(
+		const analysis = analyzePrReviewVerdictRowContract(
 			artifactText,
 			itemIds,
 			phase,
 			reviewerClaims,
 		);
-		if (
-			itemIds.length === 0 ||
-			!itemIds.every((itemId) => parsed.has(itemId))
-		) {
+		if (!analysis.ok) {
+			const failure = failedLaneValidation(
+				phase === 'reviewer' ? 'reviewer.verdict_rows' : 'critic.verdict_rows',
+				analysis.expected,
+				analysis.actual,
+			).failure;
 			return {
 				ok: false,
-				reason:
-					'every assigned reviewer/critic item requires one parseable verdict row in the durable artifact',
+				reason: formatPrReviewLaneValidationFailure(failure),
+				failure,
+				receipt: {
+					assignedReviewItemIds: [...itemIds],
+					acceptedReviewItemIds: [],
+					rejectedReviewItemIds: [...itemIds],
+				},
 			};
 		}
+		const receipt: PrReviewVerdictCollectionReceipt = {
+			assignedReviewItemIds: [...itemIds],
+			acceptedReviewItemIds: [...itemIds],
+			rejectedReviewItemIds: [],
+		};
+		return input.result.truncated === true
+			? {
+					ok: true,
+					receipt,
+					recoveries: [
+						{
+							workflowLane,
+							kind: 'truncated-preview-durable-artifact',
+							reason:
+								'inline preview truncated; durable artifact retained exact coverage',
+						},
+					],
+				}
+			: { ok: true, receipt };
 	} else if (mode === 'swarm-pr-feedback:verification') {
 		const batch = (state.prFeedbackVerifications ?? []).find(
 			(candidate) => candidate.batchId === batchId,
@@ -11819,6 +11939,14 @@ const REVIEW_SEVERITIES = new Set([
 	'INFO',
 	'NONE',
 ]);
+const REVIEW_SEVERITY_RANK = new Map([
+	['NONE', 0],
+	['INFO', 1],
+	['LOW', 2],
+	['MEDIUM', 3],
+	['HIGH', 4],
+	['CRITICAL', 5],
+]);
 const CRITIC_STATUSES = new Set([
 	'UPHELD',
 	'DOWNGRADED',
@@ -11851,17 +11979,31 @@ interface ReviewerVerdict {
 	severity: string;
 }
 
-/** The validated 10 canonical fields of the single `[REVIEWED]` row for an item. */
-function parseReviewerVerdictFields(
+interface IndexedVerdictRows {
+	markerRows: string[][];
+	rowsByItemId: Map<string, string[][]>;
+}
+
+function indexVerdictRows(
 	text: string,
-	itemId: string,
-): string[] | null {
-	const rows = text
-		.split(/\r?\n/)
-		.map((line) => pipeFieldsCapped(line, 10))
-		.filter((fields) => fields[0] === '[REVIEWED]' && fields[1] === itemId);
-	if (rows.length !== 1) return null;
-	const fields = rows[0];
+	marker: '[REVIEWED]' | '[CRITIC]',
+	fieldCount: number,
+): IndexedVerdictRows {
+	const markerRows: string[][] = [];
+	const rowsByItemId = new Map<string, string[][]>();
+	for (const line of text.split(/\r?\n/)) {
+		const fields = pipeFieldsCapped(line, fieldCount);
+		if (fields[0] !== marker) continue;
+		markerRows.push(fields);
+		const itemId = fields[1] ?? '';
+		const rows = rowsByItemId.get(itemId);
+		if (rows) rows.push(fields);
+		else rowsByItemId.set(itemId, [fields]);
+	}
+	return { markerRows, rowsByItemId };
+}
+
+function validateReviewerVerdictFields(fields: string[]): string[] | null {
 	if (fields.length !== 10 || !fields.slice(1).every(Boolean)) return null;
 	const introduced = fields[5]
 		.replace(/^introduced_by_pr\s*:\s*/i, '')
@@ -11873,6 +12015,7 @@ function parseReviewerVerdictFields(
 		!['YES', 'NO', 'UNKNOWN'].includes(introduced)
 	)
 		return null;
+	if (fields[2] === 'DISPROVED' && fields[4] !== 'NONE') return null;
 	if (fields[7].length < 8 || fields[8].length < 5 || fields[9].length < 3)
 		return null;
 	return fields;
@@ -11903,13 +12046,36 @@ function parseLaneItemVerdicts(
 	string,
 	{ classification: string; severity: string; rowDigest?: string }
 > {
+	return parsePrReviewVerdictRows(text, itemIds, phase, reviewerClaims).parsed;
+}
+
+function parsePrReviewVerdictRows(
+	text: string,
+	itemIds: readonly string[],
+	phase: PrReviewComposablePhase,
+	reviewerClaims?: ReadonlyMap<string, PrReviewItemClaim>,
+): {
+	markerRows: string[][];
+	parsed: Map<
+		string,
+		{ classification: string; severity: string; rowDigest?: string }
+	>;
+} {
 	const parsed = new Map<
 		string,
 		{ classification: string; severity: string; rowDigest?: string }
 	>();
+	const marker = phase === 'reviewer' ? '[REVIEWED]' : '[CRITIC]';
+	const { markerRows, rowsByItemId } = indexVerdictRows(
+		text,
+		marker,
+		phase === 'reviewer' ? 10 : 6,
+	);
 	for (const itemId of itemIds) {
 		if (phase === 'reviewer') {
-			const fields = parseReviewerVerdictFields(text, itemId);
+			const rows = rowsByItemId.get(itemId);
+			const fields =
+				rows?.length === 1 ? validateReviewerVerdictFields(rows[0]) : null;
 			if (!fields) continue;
 			parsed.set(itemId, {
 				classification: fields[2],
@@ -11918,18 +12084,87 @@ function parseLaneItemVerdicts(
 			});
 			continue;
 		}
-		const verdict = parseCriticVerdict(
-			text,
-			itemId,
-			reviewerClaims?.get(itemId)?.severity,
-		);
+		const rows = rowsByItemId.get(itemId);
+		const verdict =
+			rows?.length === 1
+				? validateCriticVerdictFields(
+						rows[0],
+						reviewerClaims?.get(itemId)?.severity,
+					)
+				: null;
 		if (!verdict) continue;
 		parsed.set(itemId, {
 			classification: verdict.status,
 			severity: verdict.severity,
 		});
 	}
-	return parsed;
+	return { markerRows, parsed };
+}
+
+/** Exact assigned-row contract used by both normal and recovered collection. */
+function analyzePrReviewVerdictRowContract(
+	text: string,
+	itemIds: readonly string[],
+	phase: PrReviewComposablePhase,
+	reviewerClaims?: ReadonlyMap<string, PrReviewItemClaim>,
+): { ok: boolean; expected: string; actual: string } {
+	const marker = phase === 'reviewer' ? '[REVIEWED]' : '[CRITIC]';
+	const assigned = new Set(itemIds);
+	const { markerRows, parsed } = parsePrReviewVerdictRows(
+		text,
+		itemIds,
+		phase,
+		reviewerClaims,
+	);
+	const observedIds = markerRows.map((fields) => fields[1] || '(missing)');
+	const unexpectedIds = [
+		...new Set(observedIds.filter((itemId) => !assigned.has(itemId))),
+	];
+	const invalidOrMissingIds = itemIds.filter((itemId) => !parsed.has(itemId));
+	return {
+		ok:
+			verdictRowIdsMatchExactly(markerRows, itemIds) &&
+			invalidOrMissingIds.length === 0,
+		expected: `exactly one parseable ${marker} row for assigned IDs ${JSON.stringify(itemIds)} and no other ${marker} IDs`,
+		actual: JSON.stringify({
+			rowCount: markerRows.length,
+			observedIds,
+			invalidOrMissingIds,
+			unexpectedIds,
+		}),
+	};
+}
+
+/** Exact one-row-per-assigned-ID identity check, independent of row semantics. */
+function verdictRowIdsMatchExactly(
+	markerRows: readonly string[][],
+	itemIds: readonly string[],
+): boolean {
+	if (itemIds.length === 0 || markerRows.length !== itemIds.length)
+		return false;
+	const assigned = new Set(itemIds);
+	if (assigned.size !== itemIds.length) return false;
+	const observed = new Set<string>();
+	for (const fields of markerRows) {
+		const itemId = fields[1] ?? '';
+		if (!assigned.has(itemId) || observed.has(itemId)) return false;
+		observed.add(itemId);
+	}
+	return observed.size === assigned.size;
+}
+
+/**
+ * Settlement composes valid assigned siblings item-by-item, but an invented ID
+ * invalidates the entire artifact because no declared ownership can authorize
+ * that row. Missing or duplicate assigned rows remain per-item parse failures.
+ */
+function verdictRowsContainOnlyAssignedIds(
+	markerRows: readonly string[][],
+	itemIds: readonly string[],
+): boolean {
+	if (itemIds.length === 0) return false;
+	const assigned = new Set(itemIds);
+	return markerRows.every((fields) => assigned.has(fields[1] ?? ''));
 }
 
 function parseCriticVerdict(
@@ -11937,12 +12172,15 @@ function parseCriticVerdict(
 	itemId: string,
 	reviewerSeverity?: string,
 ): { status: string; severity: string } | null {
-	const rows = text
-		.split(/\r?\n/)
-		.map((line) => pipeFieldsCapped(line, 6))
-		.filter((fields) => fields[0] === '[CRITIC]' && fields[1] === itemId);
-	if (rows.length !== 1) return null;
-	const fields = rows[0];
+	const rows = indexVerdictRows(text, '[CRITIC]', 6).rowsByItemId.get(itemId);
+	if (!rows || rows.length !== 1) return null;
+	return validateCriticVerdictFields(rows[0], reviewerSeverity);
+}
+
+function validateCriticVerdictFields(
+	fields: string[],
+	reviewerSeverity?: string,
+): { status: string; severity: string } | null {
 	if (
 		fields.length !== 6 ||
 		!fields.slice(1).every(Boolean) ||
@@ -11959,16 +12197,8 @@ function parseCriticVerdict(
 		return null;
 	if (fields[2] === 'DOWNGRADED' && fields[3] === 'CRITICAL') return null;
 	if (reviewerSeverity) {
-		const severityRank = new Map([
-			['NONE', 0],
-			['INFO', 1],
-			['LOW', 2],
-			['MEDIUM', 3],
-			['HIGH', 4],
-			['CRITICAL', 5],
-		]);
-		const reviewerRank = severityRank.get(reviewerSeverity);
-		const criticRank = severityRank.get(fields[3]);
+		const reviewerRank = REVIEW_SEVERITY_RANK.get(reviewerSeverity);
+		const criticRank = REVIEW_SEVERITY_RANK.get(fields[3]);
 		if (reviewerRank === undefined || criticRank === undefined) return null;
 		if (fields[2] === 'UPHELD' && criticRank !== reviewerRank) return null;
 		if (fields[2] === 'DOWNGRADED' && criticRank >= reviewerRank) return null;

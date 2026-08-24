@@ -172,7 +172,7 @@ describe('write_pr_review_artifact', () => {
 				index === 0
 					? ('suppress_with_reason' as const)
 					: ('route_to_critic' as const),
-			severity: index === 0 ? ('LOW' as const) : ('HIGH' as const),
+			severity: index === 0 ? ('NONE' as const) : ('HIGH' as const),
 		}));
 		const criticRecords = candidateIds.map((id, index) => ({
 			finding_id: id,
@@ -185,12 +185,12 @@ describe('write_pr_review_artifact', () => {
 					: index === 1
 						? ('handoff_to_feedback' as const)
 						: ('report' as const),
-			severity: index === 0 ? ('LOW' as const) : ('HIGH' as const),
+			severity: index === 0 ? ('NONE' as const) : ('HIGH' as const),
 		}));
 		const reviewerRows = candidateIds
 			.map((id, index) =>
 				index === 0
-					? `[REVIEWED] | ${id} | DISPROVED | STRUCTURALLY_PROVEN | LOW | YES | file.ts:1 | rationale | probe | reviewer`
+					? `[REVIEWED] | ${id} | DISPROVED | STRUCTURALLY_PROVEN | NONE | YES | file.ts:1 | rationale | probe | reviewer`
 					: `[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer`,
 			)
 			.join('\n');
@@ -215,6 +215,7 @@ describe('write_pr_review_artifact', () => {
 			{ textOverride: reviewerRows },
 		);
 		const criticRows = candidateIds
+			.slice(1)
 			.map((id) => `[CRITIC] | ${id} | UPHELD | HIGH | reason | no change`)
 			.join('\n');
 		await recordPrReviewValidationBatch(

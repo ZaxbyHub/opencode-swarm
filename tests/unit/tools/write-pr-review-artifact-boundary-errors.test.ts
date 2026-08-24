@@ -66,7 +66,7 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 			directory,
 			'order-run',
 			[
-				reviewedRow('C-0', 'DISPROVED', 'LOW'),
+				reviewedRow('C-0', 'DISPROVED', 'NONE'),
 				...candidateIds
 					.slice(1)
 					.map((id) => reviewedRow(id, 'CONFIRMED', 'LOW')),
@@ -188,7 +188,7 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 			directory,
 			'clean-run',
 			[
-				reviewedRow('C-0', 'DISPROVED', 'LOW'),
+				reviewedRow('C-0', 'DISPROVED', 'NONE'),
 				reviewedRow('C-1', 'CONFIRMED', 'MEDIUM'),
 				reviewedRow('C-2', 'CONFIRMED', 'LOW'),
 				reviewedRow('C-3', 'CONFIRMED', 'LOW'),
@@ -215,7 +215,7 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 		).resolves.toContain('"success": true');
 		await expect(
 			writePrReviewFindings(directory, 'clean-run', 'post_reviewer', [
-				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason', 'LOW'),
+				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason', 'NONE'),
 				artifactRecord('C-1', 'CONFIRMED', 'route_to_critic', 'MEDIUM'),
 				artifactRecord('C-2', 'CONFIRMED', 'report', 'LOW'),
 				artifactRecord('C-3', 'CONFIRMED', 'report', 'LOW'),
@@ -225,7 +225,7 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 		).resolves.toContain('"success": true');
 		await expect(
 			writePrReviewFindings(directory, 'clean-run', 'post_critic', [
-				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason', 'LOW'),
+				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason', 'NONE'),
 				artifactRecord('C-1', 'CONFIRMED', 'report', 'LOW'),
 				artifactRecord('C-2', 'CONFIRMED', 'report', 'LOW'),
 				artifactRecord('C-3', 'CONFIRMED', 'report', 'LOW'),
