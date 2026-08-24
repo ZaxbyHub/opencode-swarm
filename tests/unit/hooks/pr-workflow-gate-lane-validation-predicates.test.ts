@@ -368,6 +368,37 @@ describe('PR review lane-local validation predicates', () => {
 		]);
 	});
 
+	test('records a discredited same-lane CLEAN as clean-attestation-salvaged', () => {
+		// PRR-004: the durable ledger is where a post-mortem actually reads that a
+		// lane was salvaged, and this recovery kind shipped without a pin even
+		// though its wiring chain broke once during development. Pins the whole
+		// chain: parser sets clean_attestation_salvaged -> the gate re-enters it as
+		// an issue and a salvage -> the lane lands in the ledger with this kind.
+		const input = validInput();
+		const conflicting = `[CLEAN] | ${LANE} | exact reviewed diff scope | no finding after focused invariant review`;
+		input.result.text = `${TEXT}\n${conflicting}`;
+		input.result.chars = input.result.text.length;
+		input.artifact!.text = input.result.text;
+		input.artifact!.chars = input.result.text.length;
+		input.artifact!.bytes = input.result.text.length;
+
+		const result = validatePrReviewDiscoveryLaneCompletion(input);
+		// The lane still PASSES — the candidate row supplies coverage. The
+		// attestation is discredited, never counted.
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.salvaged).toEqual([LANE]);
+		expect(result.recoveries.map((recovery) => recovery.kind)).toContain(
+			'clean-attestation-salvaged',
+		);
+		expect(result.recoveries).toContainEqual({
+			workflowLane: LANE,
+			kind: 'clean-attestation-salvaged',
+			reason:
+				'a conflicting [CLEAN] attestation was discredited while the independently validated candidate rows were retained',
+		});
+	});
+
 	test('rejects duplicate evidence across a consolidated lane', () => {
 		const input = validInput();
 		const otherA = 'intent-architecture';

@@ -48,6 +48,12 @@ const FindingSchema = z
 		 * one-round-trip repair contract). A schema-level required enum would
 		 * instead abort with a generic domain message and discard that batch.
 		 */
+		// Deliberately NOT `.trim()`ed, unlike the free-text `category` below
+		// (PRR-003): this value is compared for exact equality against an
+		// authoritative verdict/candidate severity, so silently normalizing
+		// `" HIGH "` into `HIGH` would let a malformed payload pass an
+		// integrity gate. Whitespace/case/empty variants are rejected, and that
+		// strictness is pinned by tests rather than left implicit.
 		severity: z.enum(FINDINGS_SEVERITIES).optional(),
 		category: z.string().trim().min(1).max(128).optional(),
 	})

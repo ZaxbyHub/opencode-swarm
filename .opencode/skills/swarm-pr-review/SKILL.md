@@ -982,7 +982,7 @@ build a minimal correct single-lane reproduction using the same workflow mode,
 lane identity, exact head, and canonical row. Before retrying, distinguish the
 three independent input layers: the header schema, data-row values, and tool
 argument shape. A correct header does not repair an invalid severity or lane
-value, and correct row data does not repair malformed dispatch JSON. Benign shape defects (evidence pipes, marker rows, verdict-row pipes) are auto-repaired and recorded as salvage — never a retry reason alone (contract and fidelity boundaries: `references/lane-output-recoverability.md`).
+value, and correct row data does not repair malformed dispatch JSON. Benign shape defects (evidence pipes, marker rows, verdict-row pipes, a header re-emitted as a data row) are auto-repaired and recorded as salvage — never a retry reason alone; the `parse_lane_candidates` receipt discloses them as `repair_kinds`, and a `[CLEAN]` attestation discredited beside a same-lane `[CANDIDATE]` row as `clean_attestation_salvaged` + `clean_attestation_salvage_reason` (the parse SUCCEEDS and the attestation still supplies no coverage) (contract and fidelity boundaries: `references/lane-output-recoverability.md`).
 
 Classify the incident from actual user-visible harm and the first failed
 predicate, not from the number of retries or the eventual result. A successful

@@ -6086,12 +6086,22 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 		expected: string,
 	): void => {
 		if (record.severity === expected) return;
-		report(
-			record.finding_id,
-			'severity',
-			`"${expected}"`,
-			record.severity ? `"${record.severity}"` : '(omitted)',
-		);
+		// A corrupted artifact must not be misdiagnosed as merely missing the
+		// field: an absent key, `null`, and `""` are distinct defects and all
+		// previously rendered as `(omitted)` (PRR-008). Widened deliberately —
+		// the field is typed to the enum, but the schema leaves it optional and
+		// `readFindings` reloads legacy rows without re-validating, so `null` and
+		// `""` are reachable at runtime.
+		const raw = record.severity as string | null | undefined;
+		const actual =
+			raw === undefined
+				? '(omitted)'
+				: raw === null
+					? '(null)'
+					: raw === ''
+						? '(empty)'
+						: `"${raw}"`;
+		report(record.finding_id, 'severity', `"${expected}"`, actual);
 	};
 	if (boundary === 'post_explorer') {
 		// The candidate rows the inventory was derived from ARE the authority for
@@ -11233,10 +11243,10 @@ function analyzePrReviewDiscoveryArtifact(
 	);
 	if (parsed.error) appendBoundedCandidateIssue(issues, parsed.error);
 	// A discredited-but-salvaged CLEAN no longer arrives as `parsed.error`, so it
-	// must be re-entered here as an issue AND as a salvage signal. Without this
-	// the lane's only `issues` entry would vanish and the `continue` in
-	// `validatePrReviewDiscoveryLaneCompletion` would drop it out of the durable
-	// salvagedLanes/recoveries ledger it reaches today (issue #2279 BL4).
+	// is re-entered here as BOTH an issue and a salvage signal. The two are
+	// redundant on purpose — `salvaged = true` alone already keeps the lane in
+	// the durable salvagedLanes/recoveries ledger — but the issue entry is what
+	// carries the human-readable reason into the post-mortem diagnostics.
 	if (parsed.clean_attestation_salvaged) {
 		cleanAttestationSalvaged = true;
 		salvaged = true;

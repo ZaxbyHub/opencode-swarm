@@ -42,6 +42,30 @@ const CONTRACT_PATH = path.join(
 	'findings-persistence-contract.md',
 );
 
+const DRY_RUN_PATH = path.join(
+	import.meta.dir,
+	'..',
+	'..',
+	'..',
+	'.opencode',
+	'skills',
+	'swarm-pr-review',
+	'references',
+	'parser-dry-run.md',
+);
+
+const RECOVERABILITY_PATH = path.join(
+	import.meta.dir,
+	'..',
+	'..',
+	'..',
+	'.opencode',
+	'skills',
+	'swarm-pr-review',
+	'references',
+	'lane-output-recoverability.md',
+);
+
 const readSkill = (): string => fs.readFileSync(SKILL_PATH, 'utf8');
 
 /** The copyable findings-record example under "must include at least". */
@@ -52,6 +76,60 @@ function exampleRecord(source: string): Record<string, unknown> {
 	if (!match) throw new Error('no copyable findings-record example found');
 	return JSON.parse(match[0]) as Record<string, unknown>;
 }
+
+describe('parser receipt docs match the code that emits them (PRR-005/PRR-006)', () => {
+	// These two references were edited by this change but had no doc-to-code pin,
+	// so they could silently drift from the fields the parser actually emits.
+	test('the entry skill names the receipt fields, not only the reference', () => {
+		// SKILL.md is the declared producer-facing contract — an agent that only
+		// reads the entry file must still learn these exist.
+		const skill = readSkill();
+		expect(skill).toContain('repair_kinds');
+		expect(skill).toContain('clean_attestation_salvaged');
+	});
+
+	test('parser-dry-run documents every receipt field the parser can emit', () => {
+		const dryRun = fs.readFileSync(DRY_RUN_PATH, 'utf8');
+		for (const field of [
+			'repair_kinds',
+			'clean_attestation_salvaged',
+			'clean_attestation_salvage_reason',
+		]) {
+			expect(dryRun).toContain(field);
+		}
+	});
+
+	test('lane-output-recoverability enumerates every live recovery kind', () => {
+		const doc = fs.readFileSync(RECOVERABILITY_PATH, 'utf8');
+		// Derived from the closed union in pending-delegations.ts rather than
+		// hand-listed, so a new kind cannot be added without updating the doc.
+		const unionSource = fs.readFileSync(
+			path.join(
+				import.meta.dir,
+				'..',
+				'..',
+				'..',
+				'src',
+				'background',
+				'pending-delegations.ts',
+			),
+			'utf8',
+		);
+		const union = unionSource.match(
+			/export type BackgroundDelegationRecoveryKind =([\s\S]*?);/,
+		);
+		if (!union) {
+			throw new Error(
+				'BackgroundDelegationRecoveryKind union not found — update this pin rather than deleting it',
+			);
+		}
+		const kinds = [...union[1].matchAll(/'([a-z-]+)'/g)].map((m) => m[1]);
+		expect(kinds.length).toBeGreaterThanOrEqual(5);
+		for (const kind of kinds) {
+			expect(doc).toContain(kind);
+		}
+	});
+});
 
 describe('swarm-pr-review producer contract matches enforcement (#2279)', () => {
 	test('the copyable example carries a severity', () => {

@@ -20,6 +20,7 @@ import {
 	PR_REVIEW_BASE_DIMENSION_IDS,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
+	type ArtifactRecord,
 	artifactRecord,
 	artifactRecordWithoutSeverity,
 	establishPrReviewPrerequisites,
@@ -273,126 +274,43 @@ describe('#2279 severity acceptance criteria', () => {
 		expect(legacy?.severity).toBeUndefined();
 	});
 
-	test('the CLEAN-REVIEW sentinel carries NONE at post_explorer, matching post_reviewer', async () => {
-		// A zero-finding review is a NORMAL outcome, and it had no test at all.
-		// The sentinel exists precisely because there is no `[CANDIDATE]` row to
-		// compare against, and its mandated reviewer row carries `NONE` — so
-		// requiring a non-NONE severity here would force a clean review to invent
-		// a value at post_explorer and flip it one boundary later (issue #2320).
-		const runId = 'clean-review-run';
-		await establishPrReviewPrerequisites(
-			directory,
-			runId,
-			undefined,
-			undefined,
-			{
-				zeroCandidates: true,
-			},
-		);
+	test('malformed severity strings are rejected, not normalized (PRR-003)', async () => {
+		// `severity` is deliberately NOT `.trim()`ed, unlike the adjacent free-text
+		// `category`. It is compared for exact equality against an authoritative
+		// value, so silently normalizing `" HIGH "` into `HIGH` would let a
+		// malformed payload through an integrity gate. That strictness was
+		// unpinned; these cases pin it.
+		const runId = 'malformed-severity-run';
+		await establishPrReviewPrerequisites(directory, runId);
 
-		await expect(
-			writePrReviewFindings(directory, runId, 'post_explorer', [
-				artifactRecord('CLEAN-REVIEW', 'PENDING', 'route_to_reviewer', 'NONE'),
-			]),
-		).resolves.toContain('"success": true');
-
-		// A fabricated non-NONE severity is rejected against the same authority.
-		const fabricated = await rejectionMessage(
-			writePrReviewFindings(directory, runId, 'post_explorer', [
-				artifactRecord('CLEAN-REVIEW', 'PENDING', 'route_to_reviewer', 'HIGH'),
-			]),
-		);
-		expect(fabricated).toContain(
-			'CLEAN-REVIEW: severity expected "NONE", got "HIGH"',
-		);
-
-		// Omission is still a violation naming the value owed.
-		const omitted = await rejectionMessage(
-			writePrReviewFindings(directory, runId, 'post_explorer', [
-				artifactRecordWithoutSeverity(
-					'CLEAN-REVIEW',
-					'PENDING',
-					'route_to_reviewer',
-				),
-			]),
-		);
-		expect(omitted).toContain(
-			'CLEAN-REVIEW: severity expected "NONE", got (omitted)',
-		);
-
-		// And the SAME value carries through the next boundary — the round trip
-		// that the pre-fix contradiction would have made impossible.
-		await settleReviewerPhase(
-			directory,
-			runId,
-			[reviewedRow('CLEAN-REVIEW', 'DISPROVED', 'NONE')],
-			['CLEAN-REVIEW'],
-		);
-		await expect(
-			writePrReviewFindings(directory, runId, 'post_reviewer', [
-				artifactRecord(
-					'CLEAN-REVIEW',
-					'DISPROVED',
-					'suppress_with_reason',
-					'NONE',
-				),
-			]),
-		).resolves.toContain('"success": true');
-	});
-
-	test('a real candidate named CLEAN-REVIEW is still compared against its own row', async () => {
-		// SENTINEL SPOOFING. `candidate_id` is unconstrained free text, so a lane
-		// can name a real finding after the synthetic zero-candidate sentinel. When
-		// the sentinel branch was tested BEFORE the severity map, such a record was
-		// compared against `NONE` instead of its row — which accepted a fabricated
-		// `NONE` for a CRITICAL finding and rejected the truthful value. A derived
-		// authority must always win over the sentinel branch (issue #2320).
-		const runId = 'sentinel-spoof-run';
-		await establishPrReviewPrerequisites(
-			directory,
-			runId,
-			undefined,
-			undefined,
-			{ firstCandidateId: 'CLEAN-REVIEW', candidateSeverity: 'CRITICAL' },
-		);
-
-		const spoofed = await rejectionMessage(
-			writePrReviewFindings(
+		for (const bad of [' HIGH ', 'High', 'high', 'HIGH\n', '']) {
+			// Schema rejections RESOLVE with `{"success": false, message}`; only
+			// gate violations throw. Asserting the resolved payload keeps the two
+			// failure modes distinguishable.
+			const raw = await writePrReviewFindings(
 				directory,
 				runId,
 				'post_explorer',
 				candidateIds.map((id, index) =>
-					artifactRecord(
-						index === 0 ? 'CLEAN-REVIEW' : id,
-						'PENDING',
-						'route_to_reviewer',
-						index === 0 ? 'NONE' : 'CRITICAL',
-					),
+					index === 0
+						? ({
+								finding_id: id,
+								status: 'PENDING',
+								file_line: 'src/index.ts:1',
+								evidence: 'malformed severity fixture',
+								next_action: 'route_to_reviewer',
+								severity: bad,
+							} as unknown as ArtifactRecord)
+						: artifactRecord(id, 'PENDING', 'route_to_reviewer', 'HIGH'),
 				),
-			),
-		);
-		// The fabricated NONE must be rejected against the row's real severity.
-		expect(spoofed).toContain(
-			'CLEAN-REVIEW: severity expected "CRITICAL", got "NONE"',
-		);
-
-		// ...and the truthful value must be ACCEPTED, which the id-first ordering
-		// made impossible.
-		await expect(
-			writePrReviewFindings(
-				directory,
-				runId,
-				'post_explorer',
-				candidateIds.map((id, index) =>
-					artifactRecord(
-						index === 0 ? 'CLEAN-REVIEW' : id,
-						'PENDING',
-						'route_to_reviewer',
-						'CRITICAL',
-					),
-				),
-			),
-		).resolves.toContain('"success": true');
+			);
+			const parsed = JSON.parse(raw) as {
+				success: boolean;
+				message?: string;
+			};
+			expect(parsed.success).toBe(false);
+			expect(parsed.message).toContain('severity');
+		}
 	});
 
 	test('post_explorer severity must equal the candidate row that produced it', async () => {

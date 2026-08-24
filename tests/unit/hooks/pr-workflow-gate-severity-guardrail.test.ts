@@ -73,7 +73,11 @@ function stripComments(source: string): string {
 
 describe('severity-omission bypass cannot return (#2279 recurrence guardrail)', () => {
 	test('no presence guard wraps a severity comparison in the validator', () => {
-		const body = extractValidator(readGateSource());
+		// Comments stripped: the `reportSeverity` JSDoc deliberately quotes the
+		// removed `if (record.severity && …)` shape, and only its leading `*`
+		// keeps the pattern below from matching it. A reflow that joined that
+		// line would turn this guardrail into a false CI failure.
+		const body = stripComments(extractValidator(readGateSource()));
 
 		// `if (record.severity && …)` — the exact shape of the bypass. Also catches
 		// the optional-chained and explicit-undefined variants a refactor might
@@ -104,7 +108,7 @@ describe('severity-omission bypass cannot return (#2279 recurrence guardrail)', 
 	});
 
 	test('severity is compared through the single unconditional helper', () => {
-		const body = extractValidator(readGateSource());
+		const body = stripComments(extractValidator(readGateSource()));
 
 		// Every severity verdict comparison must route through reportSeverity,
 		// which compares unconditionally and reports `(omitted)` for an absent
