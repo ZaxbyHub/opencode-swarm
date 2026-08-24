@@ -138,9 +138,11 @@ const blankKeepingNewlines = (m: string): string => m.replace(/[^\n]/g, ' ');
  * because `String.match` takes the first hit. That is legal, compilable source
  * (a `@"…"` block holding SQL or config is ordinary C#), not a crafted spoof.
  *
- * Single-line string literals cannot cause this: a `\n` cannot appear inside
- * one, so no interior line can be line-initial. Only the multi-line forms are
- * masked here, which keeps the change narrow.
+ * Single-line string literals are not masked: their literal TEXT cannot contain
+ * a raw newline, so no interior line can be line-initial. The one exception is a
+ * C# interpolated string, which may span lines inside an interpolation hole —
+ * but a hole contains code, not literal text, so leaving it unmasked is correct.
+ * Only the multi-line forms are masked, which keeps the change narrow.
  */
 
 /**
@@ -163,11 +165,17 @@ export function maskMultilineStringLiterals(
 	// Both were WORSE than the bug being fixed: the declaration was lost
 	// entirely rather than merely mis-chosen. The root cause is that a regex has
 	// no notion of already being inside a literal. Scanning once — and CONSUMING
-	// ordinary strings and char literals rather than ignoring them — removes that
-	// family (a quote or `@` inside an ordinary literal can no longer open a
-	// multi-line one) instead of adding a third special case. It is not a proof
-	// of total correctness: see the line-bound note below, and the unterminated
-	// -literal trade documented in docs/repo-graph-symbol-graph.md.
+	// ordinary strings and char literals rather than ignoring them — closes those
+	// two specific holes: a quote or `@` inside an ordinary literal can no longer
+	// open a multi-line one.
+	//
+	// It is NOT a proof of total correctness, and this comment has twice been
+	// written as if it were. Known surviving gaps, all documented in
+	// docs/repo-graph-symbol-graph.md: an unterminated multi-line literal leaves
+	// the file remainder unmasked; Kotlin's nesting block comments defeat
+	// `stripComments`; and a C# verbatim path literal (`@"C:\dir\"`) makes
+	// `stripComments` swallow its own terminator, leaving a later block comment
+	// live. This scanner runs downstream of `stripComments` and cannot fix that.
 	const csharp = language === 'csharp';
 	let out = '';
 	let i = 0;
@@ -176,8 +184,8 @@ export function maskMultilineStringLiterals(
 
 		// Raw/text-block literal: Java text block, Kotlin raw string, C# 11 raw
 		// string. The delimiter is NOT always three quotes. A C# raw string opens
-		// with a run of N >= 3 and closes on a run of exactly N, which is the
-		// whole point of the form: `""""…""""` is how you embed a literal `"""`.
+		// with a run of N >= 3, which is the whole point of the form:
+		// `""""…""""` is how you embed a literal `"""`.
 		// Matching a hard-coded `"""` closed such a literal on its own CONTENT,
 		// resuming the scan inside the string and deleting a real declaration
 		// below it. Java and Kotlin only ever open with three.
@@ -203,6 +211,13 @@ export function maskMultilineStringLiterals(
 		}
 
 		// C# verbatim, in all three legal prefix orderings: @"…", $@"…", @$"…".
+		//
+		// The `csharp` gate is DEFENSIVE and deliberately has no test: widening it
+		// to every language is an equivalent mutation on valid source, because in
+		// Java and Kotlin `@` must be followed by an identifier, so `@"` adjacency
+		// in a code position is not parseable input at all. It is kept because the
+		// masker runs over arbitrary workspace files, including truncated and
+		// generated ones, where that guarantee does not hold.
 		const prefixLen = csharp ? matchVerbatimPrefix(text, i) : 0;
 		if (prefixLen > 0) {
 			const bodyStart = i + prefixLen;
@@ -236,7 +251,9 @@ export function maskMultilineStringLiterals(
 		// being read as the start of a multi-line literal.
 		//
 		// The consume is bounded to the current LINE. None of java/kotlin/csharp
-		// permits a raw newline inside an ordinary string or char literal, so a
+		// permits a raw newline in the literal TEXT of an ordinary string or char
+		// literal (a C# interpolation hole may span lines, but it holds code, not
+		// literal text, so leaving it unmasked is correct), so a
 		// quote with no partner on its own line is not a delimiter at all — it is
 		// an odd quote in text this scanner does not tokenize, most commonly a C#
 		// preprocessor directive (`#warning check "`, `#region Customer's data`),
@@ -338,7 +355,9 @@ function matchVerbatimPrefix(text: string, i: number): number {
  * the package the compiler actually sees (issue #1529, RC-8). The declaration
  * in the source is the authoritative answer, so it wins when present.
  *
- * Grammar forms covered (verified against the real WASM grammars):
+ * Declaration forms covered. Node names are given for orientation only: this
+ * function is an anchored regex over comment-stripped, string-masked text, NOT a
+ * parse. It never loads a grammar.
  * - Java `package_declaration` — `package a.b.c;` (trailing `;` required).
  * - Kotlin `package_header` — `package a.b.c` (no `;`).
  * - C# `namespace_declaration` — `namespace N { … }` (brace may be on the

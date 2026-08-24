@@ -121,8 +121,11 @@ directly against current `main`.
   never disagree with the exported-only `exportLines`: an exported def outranks
   a non-exported one; two exported defs (a C# partial class) take the last,
   matching `exportLines`; two non-exported defs (a constructor and its class,
-  or overloads) take the first, so a type's span is never displaced by a
-  member's.
+  or overloads) take the first **in document order**. That last rule is
+  positional, not type-preferring: where a member and a same-named nested type
+  collide, whichever is declared first holds the span. In
+  `class X { private void Y() {} private class Y {} }` the key `Y` resolves to
+  the method, and the nested type has no entry.
 
 ## Migration
 

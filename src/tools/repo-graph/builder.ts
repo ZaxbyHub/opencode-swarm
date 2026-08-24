@@ -1284,10 +1284,12 @@ function parseKotlinFileImports(rawContent: string): ParsedImport[] {
  * - `using X = A.B.C;`      -> named, imported `C`, local `X`
  * - `global using A.B;`     -> same as `using A.B;`
  *
- * The trailing `;` is REQUIRED by the pattern: without it, the C# 8 using
- * *declaration* (`using var stream = File.OpenRead(p);`) and the using
- * *statement* (`using (var x = …)`) both match and fabricate an import of a
- * module literally named `var`. A generic alias
+ * What actually excludes the non-import forms is the LINE ANCHOR plus the
+ * dotted-name shape, not the `;` alone: the C# 8 using *declaration*
+ * (`using var stream = File.OpenRead(p);`) ends in `);`, which fails the dotted
+ * -name shape, and the using *statement* (`using (var x = …)`) has no
+ * line-terminal `;` at all. The `;` is still required by the pattern; it is just
+ * not the token doing the work. A generic alias
  * (`using L = System.Collections.Generic.List<int>;`) is intentionally not
  * matched rather than mis-parsed.
  */
@@ -2455,10 +2457,12 @@ export async function scanFileAsync(
 				// what made `exportRanges` point at the first partial while
 				// `exportLines` pointed at the second.
 			} else {
-				// Two non-exported defs: keep the first in document order, so a
-				// constructor or a later overload cannot displace its type. These
-				// never appear in `exportLines`, so there is nothing to stay in sync
-				// with.
+				// Two non-exported defs: keep the first in document order. This is
+				// purely positional and does NOT prefer the type — in
+				// `class X { private void Y() {} private class Y {} }` the key `Y`
+				// holds the METHOD's span and the nested type gets no entry, because
+				// the method is declared first. Measured, not assumed. These never
+				// appear in `exportLines`, so there is nothing to stay in sync with.
 				continue;
 			}
 		}

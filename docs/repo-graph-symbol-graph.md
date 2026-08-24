@@ -285,12 +285,24 @@ change.
 
 | grammars | contents |
 |---|---|
-| java, kotlin, csharp | every extracted def, including non-exported members |
-| all others | exported defs only (unchanged) |
+| java, kotlin, csharp | extracted defs including non-exported members, subject to the collision rules and the malformed-range guard below |
+| all others | exported defs only (scope unchanged) |
+
+"Including non-exported members" is not "every def": a name collision keeps one
+entry (so a member and a same-named nested type do not both appear), and a
+malformed range is skipped.
 
 The widening exists so `context_pack` can return a real span for a Java method
 instead of the `internal symbol — span unavailable` placeholder. It is gated on
-the grammar id, so no other language's payload changes.
+the grammar id, so **the widening** changes no other grammar's `exportRanges`
+scope.
+
+That is not the same as "no other payload changes". A separate fix in this same
+change added the missing `method_definition` capture to the `javascript` defs
+query (it was present for `typescript`/`tsx` only), so `.js` payloads DO change:
+class members now appear in `exports`, `exportLines` and `exportRanges`, and an
+`exportLines[name]` that previously pointed at a top-level function can now point
+at a same-named member. See the release fragment for the consumer-facing note.
 
 Duplicate names inside the widened grammars resolve in three cases, chosen so
 `exportRanges` can never disagree with the exported-only `exportLines`:
@@ -401,8 +413,10 @@ wrong in the opposite direction.
 The masker is a single left-to-right scan that consumes ordinary strings and
 char literals rather than ignoring them, because a regex has no notion of
 already being inside a literal. Its consume is bounded to one line, since none
-of the three languages permits a raw newline inside an ordinary string or char
-literal; an unpaired quote — a C# preprocessor message such as
+of the three languages permits a raw newline in the literal **text** of an
+ordinary string or char literal. (A C# interpolated string may span lines inside
+an interpolation hole — verified against .NET 10 — but a hole holds code, not
+literal text, so leaving it unmasked is the correct outcome.) An unpaired quote — a C# preprocessor message such as
 `#warning check "` or `#region Customer's data` is arbitrary
 input-characters and is never string-tokenized — is emitted as an ordinary
 character rather than consumed to EOF.
@@ -417,8 +431,9 @@ for those languages the current behavior is correct — the first `*/` really do
 close the comment. **Kotlin block comments do nest**, so a declaration inside a
 nested comment can still be read as live code.
 
-A second, separate `stripComments` defect compounds this, in **all three**
-languages: its string state treats a backslash as an escape, but a C# verbatim
+A second, separate `stripComments` defect compounds this, in **C# only**
+(measured: the Java and Kotlin analogues resolve correctly, because the trigger
+syntax is C#-specific): its string state treats a backslash as an escape, but a C# verbatim
 literal has no backslash escapes. A Windows path such as `@"C:\dir\"` therefore
 swallows its own terminator, the scanner never leaves the string state, and a
 block comment below it is never stripped — so a declaration inside that comment
