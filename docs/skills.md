@@ -39,7 +39,7 @@ Knowledge enters the system through four routes:
 
 Each entry carries:
 - **`lesson`** — the knowledge claim (15–280 chars, validated for safety)
-- **`category`** — `pattern`, `lesson`, `decision`, `domain`, `todo`
+- **`category`** — `process`, `architecture`, `tooling`, `security`, `testing`, `debugging`, `performance`, `integration`, `todo`, `other` (see [Entry Schema](knowledge.md#entry-schema))
 - **`confidence`** — 0.0–1.0, reflecting certainty
 - **`tier`** — `swarm` (project) or `hive` (cross-project)
 - **Optional v2 directives** — `triggers`, `required_actions`, `forbidden_actions`, `applies_to_agents`, `applies_to_tools`, `directive_priority`, source references
