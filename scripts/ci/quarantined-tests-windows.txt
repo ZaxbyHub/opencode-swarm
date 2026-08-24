@@ -51,6 +51,12 @@
 # Windows (the #1782 EBUSY class). The ci.yml retry loop discards
 # attempt-1 output when a retry passes, so no assertion text exists to
 # drive a root-cause fix. Pre-existing, unrelated to any specific PR.
+# ROOT-FIX NOTE (PR #2190, 2026-08-24): both cited mechanisms were fixed at
+# the root in the test file — the wall clock is frozen per-test via the
+# shared freezeClock helper (tests/helpers/test-clock.ts), and the rmSync
+# teardown retries EBUSY/EPERM with bounded backoff. The entry is
+# retained until the fix proves out across merge-group windows-latest runs;
+# retire it under #1737 once green streak confirms (see also #1782).
 # Quarantined per issue #1982; tracked under #1737 (test quarantine debt)
 # pending a dedicated test-stability sprint (#1782).
 tests/unit/commands/pr-monitor-status.test.ts

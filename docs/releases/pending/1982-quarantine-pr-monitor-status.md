@@ -2,7 +2,8 @@
 
 ## What changed
 
-- `tests/unit/commands/pr-monitor-status.test.ts` added to `scripts/ci/quarantined-tests-windows.txt` (windows-latest merge-group shards only; ubuntu/macos keep running it).
+- `tests/unit/commands/pr-monitor-status.test.ts` added to `scripts/ci/quarantined-tests-windows.txt` (windows-latest merge-group shards only; ubuntu/macos keep running it), alongside the pre-existing `win32-wrapper-runtime.test.ts` entry (#2185) — the ledger STATUS now reads 2 active entries.
+- Root-fixed both cited flake mechanisms in the test file: the clock is frozen per-test via the shared `freezeClock` helper (`tests/helpers/test-clock.ts`, applied in `beforeEach`/`afterEach` for the whole file — the now-redundant per-test `withFixedNow` wrappers were removed, keeping the file under the FR-006 ratchet), and the `rmSync` teardown now retries `EBUSY`/`EPERM` with bounded backoff.
 
 ## Why
 
@@ -14,4 +15,4 @@ None. The file is skipped on windows-latest unit shards by design after this cha
 
 ## Known caveats
 
-- Quarantine removes the file from windows CI coverage until the test-stability sprint (#1782) lands a root-cause fix (fake-clock fixtures); the entry will be retired then.
+- Quarantine removes the file from windows CI coverage even though the flake mechanisms are now root-fixed on this branch; the entry is retained until a green streak on merge-group windows-latest runs confirms the fix, then retires under #1737 (see the ROOT-FIX NOTE in the ledger entry).
