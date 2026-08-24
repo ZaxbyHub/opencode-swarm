@@ -1481,43 +1481,14 @@ machine enforcement cannot safely infer every repository-specific trust
 boundary from prose. Completion is blocked until that exact derived inventory
 has valid critic rows.
 
-Reviewer and critic settlement compose across batches, item by item: a phase
-settles once every review item in the current mechanically assigned inventory
-holds a successful verdict, whether that coverage comes from one batch or from
-several complementary partial retries. A later degraded, truncated, stale,
-wrong-identity, or malformed batch never supplies a verdict for the items it
-touches, but it does not discard verdicts other batches already supplied for
-different items.
-
-When more than one successful batch covers the same item, the most recent
-successful batch wins that item. This conflict rule is one shared computation,
-so settlement and every downstream verdict use (candidate inventory, critic
-routing, final synthesis) never disagree about which claim is authoritative
-for an item. A batch contributes only the items it was validated for against
-the exact candidate inventory current at validation time; partial batches are
-first-class inputs, not an error state.
-
-Collection validates every dispatched reviewer or critic lane against the exact
-assigned verdict rows and records lane-atomic accepted and rejected IDs before
-settlement. A malformed or surplus row never silently upgrades the lane: the
-lane accepts every assigned ID only when the complete assigned row set is
-valid; otherwise it rejects every assigned ID for precise re-dispatch. The lane
-report must disclose both sets.
-
-A critic claim is bound per item to the exact reviewer row it was validated
-against, not to the reviewer batch as a whole. A reviewer retry that
-reproduces a byte-identical row for an item retains that item's critic work;
-a reviewer row that changed at all — even one field — invalidates only that
-item's critic claim, not the whole critic wave. Critic batches recorded
-before per-item binding existed keep the old behavior: any newer reviewer
-batch invalidates them wholesale. Dispatch a fresh critic wave to cover
-whatever items composition leaves unclaimed; critic evidence can never
-predate the reviewer evidence it purports to challenge.
-
-Settlement is item completeness, not lane completeness: a declared lane that
-never completes produces a diagnostic naming the abandoned lane, not an
-automatic block, as long as every item in the inventory already holds a
-successful verdict from some lane.
+Reviewer and critic settlement MUST compose successful verdicts item by item
+across complementary partial batches. The newest successful claim wins each
+item; malformed or stale batches contribute nothing without erasing healthy
+sibling claims. Collection MUST validate exact lane ownership atomically, and
+critic claims MUST bind to the exact reviewer row for their item. Settlement is
+item completeness, not lane completeness. Follow the full retry, legacy,
+binding, and diagnostic contract in
+[`references/verdict-settlement-contract.md`](references/verdict-settlement-contract.md).
 
 Under Profile A, dispatch critic chunks with `dispatch_lanes_async`,
 `mode: "swarm-pr-review:critic"`, a unique non-empty `workflow_lane` per

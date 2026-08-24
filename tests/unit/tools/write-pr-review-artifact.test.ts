@@ -202,6 +202,7 @@ describe('write_pr_review_artifact', () => {
 			{ textOverride: reviewerRows },
 		);
 		const criticRows = candidateIds
+			.slice(1)
 			.map((id) => `[CRITIC] | ${id} | UPHELD | HIGH | reason | no change`)
 			.join('\n');
 		await recordPrReviewValidationBatch(
