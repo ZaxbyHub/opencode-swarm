@@ -17,6 +17,7 @@ import {
 	ModelDispatchTimeoutError,
 	parseModelString,
 } from '../../../src/utils/model-dispatch-fallback';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 const noWait = async () => {};
 
@@ -191,99 +192,111 @@ describe('dispatchWithModelFallback', () => {
 		expect(second.fallbackIndex).toBe(0);
 	});
 
-	it('throws a recognizable timeout error when dispatch ignores the deadline', async () => {
-		const originalSetTimeout = _internals.setTimeout;
-		const originalClearTimeout = _internals.clearTimeout;
-		try {
-			_internals.setTimeout = ((callback: () => void, _ms: number) => {
-				const token = { unref() {} };
-				queueMicrotask(callback);
-				return token;
-			}) as typeof setTimeout;
-			_internals.clearTimeout = (() => undefined) as typeof clearTimeout;
-			await expect(
-				dispatchWithModelFallback<string>({
-					dispatch: async () => await new Promise<never>(() => {}),
-					classify: alwaysTransient,
-					deadlineAtMs: Date.now() + 20,
-					maxTransientRetriesPerModel: 0,
-				}),
-			).rejects.toBeInstanceOf(ModelDispatchTimeoutError);
-			await expect(
-				dispatchWithModelFallback<string>({
-					dispatch: async () => await new Promise<never>(() => {}),
-					classify: alwaysTransient,
-					deadlineAtMs: Date.now() + 20,
-					maxTransientRetriesPerModel: 0,
-				}),
-			).rejects.toHaveProperty('name', 'TimeoutError');
-		} finally {
-			_internals.setTimeout = originalSetTimeout;
-			_internals.clearTimeout = originalClearTimeout;
-		}
-	});
-
-	it('clamps retry backoff to the remaining total deadline', async () => {
-		let nowMs = 0;
-		const slept: number[] = [];
-		await expect(
-			dispatchWithModelFallback<string>({
-				dispatch: async () => {
-					nowMs += 3;
-					throw new Error('503 unavailable');
-				},
-				classify: alwaysTransient,
-				maxTransientRetriesPerModel: 2,
-				backoffMs: () => 50,
-				deadlineAtMs: 10,
-				now: () => nowMs,
-				sleep: async (ms) => {
-					slept.push(ms);
-					nowMs += ms;
-				},
-			}),
-		).rejects.toBeInstanceOf(ModelDispatchTimeoutError);
-		expect(slept).toEqual([7]);
-	});
-
-	it('clears outer timeout timers on success and timeout', async () => {
-		const originalSetTimeout = _internals.setTimeout;
-		const originalClearTimeout = _internals.clearTimeout;
-		const cleared: unknown[] = [];
-		let nextTimer = 0;
-		try {
-			_internals.setTimeout = ((callback: () => void, ms: number) => {
-				const token = { id: ++nextTimer, unref() {} };
-				if (ms <= 1) {
-					queueMicrotask(callback);
+	it('throws a recognizable timeout error when dispatch ignores the deadline', async () =>
+		withFrozenClock(
+			async () => {
+				const originalSetTimeout = _internals.setTimeout;
+				const originalClearTimeout = _internals.clearTimeout;
+				try {
+					_internals.setTimeout = ((callback: () => void, _ms: number) => {
+						const token = { unref() {} };
+						queueMicrotask(callback);
+						return token;
+					}) as typeof setTimeout;
+					_internals.clearTimeout = (() => undefined) as typeof clearTimeout;
+					await expect(
+						dispatchWithModelFallback<string>({
+							dispatch: async () => await new Promise<never>(() => {}),
+							classify: alwaysTransient,
+							deadlineAtMs: Date.now() + 20,
+							maxTransientRetriesPerModel: 0,
+						}),
+					).rejects.toBeInstanceOf(ModelDispatchTimeoutError);
+					await expect(
+						dispatchWithModelFallback<string>({
+							dispatch: async () => await new Promise<never>(() => {}),
+							classify: alwaysTransient,
+							deadlineAtMs: Date.now() + 20,
+							maxTransientRetriesPerModel: 0,
+						}),
+					).rejects.toHaveProperty('name', 'TimeoutError');
+				} finally {
+					_internals.setTimeout = originalSetTimeout;
+					_internals.clearTimeout = originalClearTimeout;
 				}
-				return token;
-			}) as typeof setTimeout;
-			_internals.clearTimeout = ((timer: unknown) => {
-				cleared.push(timer);
-			}) as typeof clearTimeout;
+			},
+			{ tickMs: 5 },
+		));
 
-			await expect(
-				dispatchWithModelFallback<string>({
-					dispatch: async () => 'ok',
-					classify: alwaysTransient,
-					deadlineAtMs: Date.now() + 50,
-				}),
-			).resolves.toMatchObject({ result: 'ok' });
+	it('clamps retry backoff to the remaining total deadline', async () =>
+		withFrozenClock(
+			async () => {
+				let nowMs = 0;
+				const slept: number[] = [];
+				await expect(
+					dispatchWithModelFallback<string>({
+						dispatch: async () => {
+							nowMs += 3;
+							throw new Error('503 unavailable');
+						},
+						classify: alwaysTransient,
+						maxTransientRetriesPerModel: 2,
+						backoffMs: () => 50,
+						deadlineAtMs: 10,
+						now: () => nowMs,
+						sleep: async (ms) => {
+							slept.push(ms);
+							nowMs += ms;
+						},
+					}),
+				).rejects.toBeInstanceOf(ModelDispatchTimeoutError);
+				expect(slept).toEqual([7]);
+			},
+			{ tickMs: 1 },
+		));
 
-			await expect(
-				dispatchWithModelFallback<string>({
-					dispatch: async () => await new Promise<never>(() => {}),
-					classify: alwaysTransient,
-					deadlineAtMs: Date.now() + 1,
-					maxTransientRetriesPerModel: 0,
-				}),
-			).rejects.toBeInstanceOf(ModelDispatchTimeoutError);
+	it('clears outer timeout timers on success and timeout', async () =>
+		withFrozenClock(
+			async () => {
+				const originalSetTimeout = _internals.setTimeout;
+				const originalClearTimeout = _internals.clearTimeout;
+				const cleared: unknown[] = [];
+				let nextTimer = 0;
+				try {
+					_internals.setTimeout = ((callback: () => void, ms: number) => {
+						const token = { id: ++nextTimer, unref() {} };
+						if (ms <= 1) {
+							queueMicrotask(callback);
+						}
+						return token;
+					}) as typeof setTimeout;
+					_internals.clearTimeout = ((timer: unknown) => {
+						cleared.push(timer);
+					}) as typeof clearTimeout;
 
-			expect(cleared.length).toBeGreaterThanOrEqual(2);
-		} finally {
-			_internals.setTimeout = originalSetTimeout;
-			_internals.clearTimeout = originalClearTimeout;
-		}
-	});
+					await expect(
+						dispatchWithModelFallback<string>({
+							dispatch: async () => 'ok',
+							classify: alwaysTransient,
+							deadlineAtMs: Date.now() + 50,
+						}),
+					).resolves.toMatchObject({ result: 'ok' });
+
+					await expect(
+						dispatchWithModelFallback<string>({
+							dispatch: async () => await new Promise<never>(() => {}),
+							classify: alwaysTransient,
+							deadlineAtMs: Date.now() + 1,
+							maxTransientRetriesPerModel: 0,
+						}),
+					).rejects.toBeInstanceOf(ModelDispatchTimeoutError);
+
+					expect(cleared.length).toBeGreaterThanOrEqual(2);
+				} finally {
+					_internals.setTimeout = originalSetTimeout;
+					_internals.clearTimeout = originalClearTimeout;
+				}
+			},
+			{ tickMs: 1 },
+		));
 });
