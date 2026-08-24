@@ -116,7 +116,7 @@ decision is *missing today* (they are untouched, never deleted-and-needed).
 |---|---|---|---|---|---|---|
 | `telemetry-jsonl` | .swarm/telemetry.jsonl (+ single rotated .1) | operational | ROTATION_CHECK_INTERVAL=50 emits; rotate at 10 MiB (rotateTelemetryIfNeeded maxBytes, src… (global) | full-file: ≤ 2×10 MiB — both readers full-read but the rotation i… | archived+cleaned — flush (close.ts:1274), ARCHIVE_ARTI… | retain by design — #2051 (legacy-path retirement/migration owner); this gate (ratification) |
 | `events-jsonl` | .swarm/events.jsonl | operational | NONE — no rotation, no byte/age/count cap (none) | full-file: unbounded — several readers scale with total history | archived+cleaned — ARCHIVE_ARTIFACTS (close.ts:375), A… | **fix in #2039** — #2039 |
-| `context-telemetry` | .swarm/context-telemetry.jsonl | operational | NONE (none) | full-file: unbounded | untouched — in neither ARCHIVE_ARTIFACTS nor ACTIVE_ST… | **fix in #2037** — #2037 |
+| `context-telemetry` | .swarm/context-telemetry.jsonl | operational | ACTIVE_MAX_BYTES=256KiB / ACTIVE_MAX_ENTRIES=10k / AGE_MAX_MS=30d on the retained raw window; lifetime folded aggregate in the manifest header (global) | manifest+retained-window: bounded — READ_MAX_BYTES=280KiB, independent of total history | archived as a validated cut — finalizeContextTelemetry before copy, ARCHIVE_ARTIFACTS (close.ts); NOT cleaned (persists; compaction is retention) | retain by design — #2037 (shipped PR) |
 | `skill-usage` | .swarm/skill-usage.jsonl | derived-rebuildable | prune trigger 1 MiB (SKILL_USAGE_LOG_ROTATE_BYTES :375) with PER-SKILL 500-entry FIFO (:3… (per-key) | mixed full-file + tail: full-file readers unbounded in file size; tail reader … | untouched — persists across sessions | **fix in #2038** — #2038 |
 
 ### Category 2 — Background delegation, PR monitor/feedback, lane sidecars (10 rows)
@@ -280,7 +280,7 @@ rg -n "CREATE TABLE" src --type ts -g '!**/__tests__/**' -g '!*.test.ts'
 
 # The gate's own enumeration (single source of truth going forward)
 bun run scripts/check-retention-registry.ts
-# Result: "Retention registry check passed: 98 rows … every enumerated writer
+# Result: "Retention registry check passed: 99 rows … every enumerated writer
 # module is registered or exempt."
 ```
 

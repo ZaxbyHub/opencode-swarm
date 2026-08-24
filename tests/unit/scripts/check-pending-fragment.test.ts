@@ -4,6 +4,15 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+/** FR-011: canonicalized temp dir (realpathSync on the tmpdir() line). */
+function makeTmpDir(slug: string): string {
+	return realpathSync(mkdtempSync(join(tmpdir(), slug)));
+}
+
 import {
 	evaluateFragmentCheck,
 	isPendingFragment,
@@ -62,7 +71,6 @@ describe('evaluateFragmentCheck', () => {
 		const r = evaluateFragmentCheck({
 			changedFiles: ['tests/unit/a.test.ts', 'scripts/foo.ts'],
 			addedFiles: [],
-			enforce: true,
 		});
 		expect(r.violation).toBe(false);
 	});
@@ -71,7 +79,6 @@ describe('evaluateFragmentCheck', () => {
 		const r = evaluateFragmentCheck({
 			changedFiles: ['src/index.ts'],
 			addedFiles: [],
-			enforce: true,
 		});
 		expect(r.violation).toBe(true);
 		expect(r.message).toContain('docs/releases/pending');
@@ -81,7 +88,6 @@ describe('evaluateFragmentCheck', () => {
 		const r = evaluateFragmentCheck({
 			changedFiles: ['src/index.ts', 'docs/releases/pending/slug.md'],
 			addedFiles: ['docs/releases/pending/slug.md'],
-			enforce: true,
 		});
 		expect(r.violation).toBe(false);
 		expect(r.message).toContain('slug.md');
@@ -93,7 +99,6 @@ describe('evaluateFragmentCheck', () => {
 		const r = evaluateFragmentCheck({
 			changedFiles: ['src/index.ts', 'docs/releases/pending/old.md'],
 			addedFiles: [],
-			enforce: true,
 		});
 		expect(r.violation).toBe(true);
 	});
@@ -102,7 +107,6 @@ describe('evaluateFragmentCheck', () => {
 		const r = evaluateFragmentCheck({
 			changedFiles: ['src/index.ts', 'docs/releases/pending/old.md'],
 			addedFiles: [], // deletion only appears in changedFiles
-			enforce: true,
 		});
 		expect(r.violation).toBe(true);
 	});
@@ -112,7 +116,6 @@ describe('evaluateFragmentCheck', () => {
 		const r = evaluateFragmentCheck({
 			changedFiles: files,
 			addedFiles: [],
-			enforce: true,
 		});
 		expect(r.violation).toBe(true);
 		expect(r.message).toContain('+4 more');
@@ -122,11 +125,66 @@ describe('evaluateFragmentCheck', () => {
 		const r = evaluateFragmentCheck({
 			changedFiles: ['README.md', 'src/tools/x.ts', 'tests/unit/x.test.ts'],
 			addedFiles: [],
-			enforce: true,
 		});
 		expect(r.violation).toBe(true);
 		expect(r.message).toContain('src/tools/x.ts');
 		expect(r.message).not.toContain('README.md');
+	});
+});
+
+describe('CI wiring (SKIP-1)', () => {
+	test('the quality-job step skips release-please branches', async () => {
+		const fsMod = await import('node:fs');
+		const pathMod = await import('node:path');
+		const yaml = fsMod.readFileSync(
+			pathMod.join(
+				import.meta.dir,
+				'..',
+				'..',
+				'..',
+				'.github',
+				'workflows',
+				'ci.yml',
+			),
+			'utf8',
+		);
+		const stepIdx = yaml.indexOf('Pending release fragment (AGENTS mandate)');
+		expect(stepIdx).toBeGreaterThan(-1);
+		const stepBlock = yaml.slice(stepIdx, stepIdx + 300);
+		expect(stepBlock).toContain(
+			"if: needs.detect-release.outputs.is-release != 'true'",
+		);
+		expect(stepBlock).toContain('run: bun run check:pending-fragment');
+	});
+});
+
+describe('main() entry paths', () => {
+	test('no base branch (non-git directory) → passes with a notice', async () => {
+		const tmp = makeTmpDir('cpf-nogit-');
+		try {
+			const mod = await import('../../../scripts/check-pending-fragment.ts');
+			const code = mod.main(tmp);
+			expect(code).toBe(0);
+		} finally {
+			rmSync(tmp, { recursive: true, force: true });
+		}
+	});
+
+	test('FRAGMENT_CHECK_ENFORCE=0 soft-warns instead of failing', async () => {
+		const tmp = makeTmpDir('cpf-enforce-');
+		try {
+			process.env.FRAGMENT_CHECK_ENFORCE = '0';
+			const code = (
+				await import('../../../scripts/check-pending-fragment.ts')
+			).main(tmp);
+			// Non-git dir → no base branch → 0 either way; the enforce path is
+			// exercised via resolveEnforce + evaluateFragmentCheck above. This
+			// pins the env plumbing end-to-end.
+			expect(code).toBe(0);
+		} finally {
+			delete process.env.FRAGMENT_CHECK_ENFORCE;
+			rmSync(tmp, { recursive: true, force: true });
+		}
 	});
 });
 

@@ -381,6 +381,9 @@ export const WRITER_CLASSIFICATION: Readonly<
 	'src/commands/archive-sqlite.ts': 'registered-bespoke',
 	'src/context-map/capsule-persistence.ts': 'registered-bespoke',
 	'src/context-map/persistence.ts': 'registered-bespoke',
+	// bespoke atomic single-file rewrite (write tmp + rename) for the bounded
+	// context-map telemetry store; PID-scoped `.context-telemetry.jsonl.<pid>.tmp`
+	'src/context-map/telemetry.ts': 'registered-bespoke',
 	'src/evidence/documents-retention.ts': 'registered-bespoke',
 	'src/evidence/manager.ts': 'registered-bespoke',
 	'src/full-auto/state.ts': 'registered-bespoke',

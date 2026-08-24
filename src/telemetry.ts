@@ -104,7 +104,13 @@ export type TelemetryEvent =
 	// quarantine run moves verified stale temp files (close clean stage or
 	// `/swarm config doctor --quarantine-residue`). Counts and registered
 	// grammar ids only — no file names, no paths, no content.
-	| 'residue_health';
+	| 'residue_health'
+	// Context-map telemetry storage health (issue #2037): bounded counts emitted
+	// on compaction and close for the bounded `.swarm/context-telemetry.jsonl`
+	// store — accepted/compacted/retained/dropped/corrupt counts, oldest/newest
+	// timestamps, and byte figures. Counts only; no capsule/query content, no
+	// paths.
+	| 'context_telemetry_health';
 
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =
@@ -900,6 +906,30 @@ export const telemetry = {
 		grammar_counts: Record<string, number>;
 	}): void {
 		_internals.emit('residue_health', data);
+	},
+
+	/**
+	 * Context-map telemetry storage health (issue #2037). Emitted after a
+	 * compaction or close cut for the bounded `.swarm/context-telemetry.jsonl`
+	 * store. Bounded payload: accepted/compacted/retained/dropped/corrupt
+	 * counts, oldest/newest timestamps, and byte figures. Counts ONLY — no
+	 * capsule/query content and no filesystem paths, matching the observability
+	 * contract's no-content-in-metrics rule. Enables PR 16 to alarm and PR 20 to
+	 * report without leaking workspace layout or capsule contents.
+	 */
+	contextTelemetryHealth(data: {
+		trigger: 'compaction' | 'close';
+		accepted_count: number;
+		compacted_count: number;
+		retained_count: number;
+		dropped_count: number;
+		corrupt_count: number;
+		oldest_timestamp: string | null;
+		newest_timestamp: string | null;
+		bytes: number;
+		limit_bytes: number;
+	}): void {
+		_internals.emit('context_telemetry_health', data);
 	},
 
 	/**

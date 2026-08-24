@@ -16,4 +16,4 @@ Releases cut after some merges shipped with completely empty release-notes bodie
 
 ## Migration
 
-No action required. `FRAGMENT_SETTLE_DELAY_MS=45000` is the only new knob and defaults sensibly. Follow-up (out of scope here): consumed-fragment cleanup — `docs/releases/pending/` accumulates fragments (534 files today) because nothing removes them after a release consumes them.
+No action required. Note that every merge to `main` now pays the 45s settle window once in the `update-pr-notes` job (bounded, off the critical path); `FRAGMENT_SETTLE_DELAY_MS=45000` tunes it. Fragment-less runs skip it. Follow-up (out of scope here): consumed-fragment cleanup — `docs/releases/pending/` accumulates fragments (535 files today) because nothing removes them after a release consumes them.

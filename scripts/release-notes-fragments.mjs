@@ -25,7 +25,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -469,6 +469,9 @@ function resolveCommitShasToPrNumbers(shas, log) {
  * @param {(msg: string) => void} log — logger function
  * @returns {number[]} — merged array of PR numbers
  */
+const MAX_CHANGELOG_FALLBACK_BYTES = 2 * 1024 * 1024;
+const MAX_FALLBACK_CANDIDATES = 50;
+
 export function resolveAllCandidates(strippedBody, log) {
 	const directCandidates = extractCandidatePrNumbers(strippedBody);
 	log(`found ${directCandidates.length} direct PR ref(s) in body`);
@@ -633,6 +636,60 @@ function collectFragmentsForPrs(candidates, repoRoot, log) {
 	return entries;
 }
 
+/**
+ * Decide the CHANGELOG-fallback outcome for a release whose body yielded no
+ * PR candidates. I/O is injected (readChangelog / statChangelog /
+ * resolveCandidates) so unit tests cover every exit branch:
+ *   - section missing or CHANGELOG unreadable/oversized -> exit 0 (degenerate
+ *     release; warn), candidates []
+ *   - section present but zero candidates               -> exit 1 (advisory
+ *     loud failure; warn), candidates []
+ *   - candidates found                                   -> exit 0, candidates
+ *     clamped to MAX_FALLBACK_CANDIDATES
+ */
+export async function decideChangelogFallback(opts) {
+	const {
+		tagName,
+		repoRoot,
+		readChangelog,
+		statChangelog,
+		resolveCandidates,
+		log,
+	} = opts;
+	log('Release body has no PR references — falling back to the CHANGELOG section for this version');
+	const version = tagName.startsWith('v') ? tagName.slice(1) : tagName;
+	const changelogPath = path.join(repoRoot, 'CHANGELOG.md');
+	let section = null;
+	try {
+		const stat = statChangelog(changelogPath);
+		if (stat.size > MAX_CHANGELOG_FALLBACK_BYTES) {
+			log(`CHANGELOG.md exceeds the ${MAX_CHANGELOG_FALLBACK_BYTES}-byte fallback cap (${stat.size} bytes) — refusing the unbounded read`);
+		} else {
+			section = extractChangelogSection(readChangelog(changelogPath), version);
+		}
+	} catch {
+		log(`CHANGELOG.md not found in workspace (${changelogPath}) — no fallback available`);
+	}
+	if (section === null) {
+		log(`::warning::no PR refs in release body and no CHANGELOG section for ${version} — release stays bare`);
+		// Degenerate release (no changelog entry at all): legitimate.
+		return { exitCode: 0, candidates: [] };
+	}
+	const resolved = resolveCandidates(section, log);
+	if (resolved.length > MAX_FALLBACK_CANDIDATES) {
+		log(`clamping CHANGELOG-fallback candidates from ${resolved.length} to ${MAX_FALLBACK_CANDIDATES}`);
+	}
+	const candidates = resolved.slice(0, MAX_FALLBACK_CANDIDATES);
+	if (candidates.length === 0) {
+		log(`::warning::CHANGELOG section for ${version} exists but yielded no PR candidates — refusing to fail silently`);
+		// Advisory loud failure. Deliberately does NOT gate publish-npm
+		// (that job needs only release-please); this reddens the workflow
+		// run so a bare release is visible instead of silently green.
+		return { exitCode: 1, candidates: [] };
+	}
+	return { exitCode: 0, candidates };
+}
+
 // -----------------------------------------------------------------------------
 // Mode: update-pr — keep the open release-please PR body in sync.
 // -----------------------------------------------------------------------------
@@ -747,29 +804,21 @@ async function modeUpdateRelease(log) {
 	// the GitHub Release body has no regenerator — without this fallback the
 	// release would stay bare forever.
 	if (allCandidates.length === 0) {
-		log('Release body has no PR references — falling back to the CHANGELOG section for this version');
-		const version = tagName.startsWith('v') ? tagName.slice(1) : tagName;
-		const changelogPath = path.join(repoRoot, 'CHANGELOG.md');
-		let section = null;
-		try {
-			section = extractChangelogSection(readFileSync(changelogPath, 'utf8'), version);
-		} catch {
-			log(`CHANGELOG.md not found in workspace (${changelogPath}) — no fallback available`);
+		const decision = await decideChangelogFallback({
+			tagName,
+			repoRoot,
+			readChangelog: (p) => readFileSync(p, 'utf8'),
+			statChangelog: (p) => statSync(p),
+			resolveCandidates: (section, log2) => resolveAllCandidates(section, log2),
+			log,
+		});
+		if (decision.exitCode !== 0) {
+			return decision.exitCode;
 		}
-		if (section === null) {
-			log(`::warning::no PR refs in release body and no CHANGELOG section for ${version} — release stays bare`);
-			// Degenerate release (no changelog entry at all): legitimate.
-			return 0;
+		allCandidates = decision.candidates;
+		if (allCandidates.length > 0) {
+			log(`resolved ${allCandidates.length} candidate PR(s) from the CHANGELOG fallback`);
 		}
-		allCandidates = resolveAllCandidates(section, log);
-		if (allCandidates.length === 0) {
-			log(`::warning::CHANGELOG section for ${version} exists but yielded no PR candidates — refusing to fail silently`);
-			// Advisory loud failure. Deliberately does NOT gate publish-npm
-			// (that job needs only release-please); this reddens the workflow
-			// run so a bare release is visible instead of silently green.
-			return 1;
-		}
-		log(`resolved ${allCandidates.length} candidate PR(s) from the CHANGELOG fallback`);
 	}
 	log(`collecting fragments for ${allCandidates.length} candidate PR(s): ${allCandidates.map((n) => `#${n}`).join(', ')}`);
 	const entries = collectFragmentsForPrs(allCandidates, repoRoot, log);

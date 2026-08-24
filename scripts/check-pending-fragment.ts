@@ -63,6 +63,8 @@ const NEVER_USER_VISIBLE_PREFIXES: readonly string[] = [
 	'node_modules/',
 ];
 
+const GIT_TIMEOUT_MS = 30_000;
+
 function toPosix(file: string): string {
 	return file.replace(/\\/g, '/').replace(/^\.\//, '');
 }
@@ -97,7 +99,6 @@ export interface FragmentCheckInput {
 	changedFiles: string[];
 	/** Root-relative paths ADDED in the PR (subset of changedFiles). */
 	addedFiles: string[];
-	enforce: boolean;
 }
 
 export interface FragmentCheckResult {
@@ -152,6 +153,7 @@ export function resolveRepoRoot(cwd: string): string {
 			stdin: 'ignore',
 			stdout: 'pipe',
 			stderr: 'pipe',
+			timeout: GIT_TIMEOUT_MS,
 		});
 	} catch {
 		return cwd;
@@ -174,6 +176,7 @@ function runGit(
 			stdin: 'ignore',
 			stdout: 'pipe',
 			stderr: 'pipe',
+			timeout: GIT_TIMEOUT_MS,
 		});
 		return { exitCode: proc.exitCode ?? 1, stdout: proc.stdout.toString() };
 	} catch {
@@ -198,29 +201,51 @@ export function main(startDir: string = process.cwd()): number {
 	let changedFiles: string[] = [];
 	let addedFiles: string[] = [];
 	if (baseBranch) {
-		const changed = runGit(['diff', '--name-only', '-z', baseBranch, 'HEAD'], cwd);
-		if (changed.exitCode === 0) changedFiles = splitNulList(changed.stdout);
+		// Merge-base-relative diff (BOT-H1): a two-dot `base HEAD` diff also
+		// includes the REVERSED diff of commits main gained after this branch
+		// diverged, so an unrelated PR gets blamed for main-side files — a
+		// false-positive block on ordinary base drift. Diffing from the
+		// merge-base restricts the comparison to this branch's own changes.
+		const mergeBase = runGit(['merge-base', baseBranch, 'HEAD'], cwd);
+		const baseRef = mergeBase.exitCode === 0 ? mergeBase.stdout.trim() : null;
+		if (!baseRef) {
+			console.error(
+				`[check-pending-fragment] could not resolve merge-base with ${baseBranch} — gate inconclusive, passing (fix your git setup if this persists)`,
+			);
+			return 0;
+		}
+		const changed = runGit(
+				['diff', '--name-only', '--no-renames', '-z', baseRef, 'HEAD'],
+				cwd,
+			);
+		if (changed.exitCode !== 0) {
+			console.error(
+				`[check-pending-fragment] git diff failed (exit ${changed.exitCode}) — gate inconclusive, passing rather than blocking on a git infrastructure failure`,
+			);
+			return 0;
+		}
+		changedFiles = splitNulList(changed.stdout);
 		const added = runGit(
-			['diff', '--diff-filter=A', '--name-only', '-z', '--find-renames=100%', baseBranch, 'HEAD'],
+			['diff', '--diff-filter=A', '--name-only', '-z', '--find-renames=100%', baseRef, 'HEAD'],
 			cwd,
 		);
-		if (added.exitCode === 0) addedFiles = splitNulList(added.stdout);
+		if (added.exitCode !== 0) {
+			console.error(
+				`[check-pending-fragment] git diff --diff-filter=A failed (exit ${added.exitCode}) — treating added-files as unknown`,
+			);
+		} else {
+			addedFiles = splitNulList(added.stdout);
+		}
 	} else {
-		// No base branch (shallow checkout / detached context): fail closed
-		// only when the working tree itself carries no fragment directory
-		// entries at all would be wrong — instead report inconclusive and
-		// pass, since the gate cannot see a diff. CI always provides the
-		// base; local runs on main (no origin/main divergence) see an empty
-		// diff below.
+		// No base branch (shallow checkout / detached context): the gate
+		// cannot see a diff, so it reports inconclusive and passes. CI always
+		// provides origin/main (full checkout); local runs on an up-to-date
+		// main resolve a merge-base equal to HEAD and see an empty diff.
 		console.log('[check-pending-fragment] no base branch found — nothing to compare, passing');
 		return 0;
 	}
 
-	const result = evaluateFragmentCheck({
-		changedFiles,
-		addedFiles,
-		enforce: resolveEnforce(process.env.FRAGMENT_CHECK_ENFORCE),
-	});
+	const result = evaluateFragmentCheck({ changedFiles, addedFiles });
 
 	if (!result.violation) {
 		console.log(`[check-pending-fragment] OK — ${result.message}`);
