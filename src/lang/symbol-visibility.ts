@@ -657,11 +657,32 @@ function maskStringLiterals(text: string): string {
 const HEADER_SCAN_LIMIT = 4096;
 
 function declarationPrefix(grammarId: string, text: string): string {
+	// The bound is applied AFTER annotation stripping, never before.
+	//
+	// Applying it to the raw text was a correctness regression, not a perf
+	// tuning knob: an annotation prefix longer than the limit consumed the whole
+	// window, so the modifier keyword never entered the scan and a
+	// `private class` was reported as exported public API. Measured — a Java
+	// `@SuppressWarnings({"<4100 chars>"}) private class` flipped from
+	// `exported:false, private` to `exported:true, package` at exactly the
+	// limit, and that reaches `exports`/`exportLines`/`dead_exports`.
+	// 4 KiB annotation payloads are real: a JPA `@Query` holding SQL, or a
+	// generated `@ApiModelProperty`.
+	//
+	// `stripLeadingAnnotations` scans only the leading annotation region, so
+	// running it unbounded costs the length of the annotations themselves — not
+	// the container body. The expensive part is `maskStringLiterals`, and that
+	// is what the bound now protects.
+	if (!ANNOTATED_DECLARATION_GRAMMARS.has(grammarId)) {
+		const bodyStart = text.search(/[{\n]/);
+		return bodyStart === -1 ? text : text.slice(0, bodyStart);
+	}
+	const stripped = stripLeadingAnnotations(text);
 	const window =
-		text.length > HEADER_SCAN_LIMIT ? text.slice(0, HEADER_SCAN_LIMIT) : text;
-	const scanned = ANNOTATED_DECLARATION_GRAMMARS.has(grammarId)
-		? maskStringLiterals(stripLeadingAnnotations(window))
-		: window;
+		stripped.length > HEADER_SCAN_LIMIT
+			? stripped.slice(0, HEADER_SCAN_LIMIT)
+			: stripped;
+	const scanned = maskStringLiterals(window);
 	const bodyStart = scanned.search(/[{\n]/);
 	return bodyStart === -1 ? scanned : scanned.slice(0, bodyStart);
 }

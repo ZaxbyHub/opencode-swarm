@@ -246,3 +246,53 @@ describe('F-06b: reconcileEdgeTargetKinds normalizes case, not just separators',
 		);
 	});
 });
+
+describe('Stage B findings: annotation bound and unwired invariant', () => {
+	// The header-scan bound was originally applied to the RAW text, so an
+	// annotation prefix longer than the limit consumed the whole window and the
+	// modifier never entered the scan — turning a `private class` into exported
+	// public API that reaches `exports`/`exportLines`/`dead_exports`. 4 KiB
+	// annotation payloads are real (a JPA `@Query` holding SQL, a generated
+	// `@ApiModelProperty`). Dies if the bound moves back before the strip.
+	for (const [grammar, source] of [
+		[
+			'java',
+			(f: string) =>
+				`@SuppressWarnings({"${f}"})\nprivate class Hidden { void m() {} }\n`,
+		],
+		[
+			'kotlin',
+			(f: string) =>
+				`@Deprecated("${f}")\nprivate class Hidden { fun m() {} }\n`,
+		],
+	] as Array<[string, (f: string) => string]>) {
+		test(`${grammar}: a long annotation prefix does not expose a private declaration`, async () => {
+			const facts = await extractFileSymbols(grammar, source('x'.repeat(5000)));
+			const def = facts?.defs.find((d) => d.name === 'Hidden');
+			expect(def?.exported).toBe(false);
+			expect(def?.visibilityInfo?.visibility).toBe('private');
+		});
+	}
+
+	// The sync export collector had the same Object.prototype read as the async
+	// one, 750 lines away and unfixed: `exportLines['toString']` returned the
+	// inherited function, so the first-wins guard dropped the real line.
+	test('sync builder keeps lines for exports named after Object.prototype keys', async () => {
+		await withWorkspace(
+			{
+				'a.ts':
+					'export function toString() {}\nexport function valueOf() {}\nexport function ok() {}\n',
+			},
+			async (root) => {
+				const { buildWorkspaceGraph } = await import(
+					'../../../src/tools/repo-graph/builder'
+				);
+				const graph = buildWorkspaceGraph(root);
+				const node = Object.values(graph.nodes)[0];
+				for (const name of ['toString', 'valueOf', 'ok']) {
+					expect(Object.hasOwn(node.exportLines ?? {}, name)).toBe(true);
+				}
+			},
+		);
+	});
+});

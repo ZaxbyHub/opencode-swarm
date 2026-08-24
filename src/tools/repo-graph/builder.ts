@@ -1652,7 +1652,13 @@ function collectExports(symbols: ReturnType<typeof extractTSSymbols>): {
 	const exports = exported.map((s) =>
 		s.signature === `default ${s.name}` ? 'default' : s.name,
 	);
-	const exportLines: Record<string, number> = {};
+	// Null-prototype for the same reason as the async path: on a plain object,
+	// `exportLines['toString']` reads the INHERITED Object.prototype.toString,
+	// which is not `undefined`, so the first-wins guard below thought the name
+	// was already recorded and dropped the line entirely. Measured on the sync
+	// builder: `export function toString/valueOf/ok` yielded
+	// `exportLines {"ok":3}` — both prototype-named exports lost their lines.
+	const exportLines: Record<string, number> = Object.create(null);
 	for (let i = 0; i < exported.length; i++) {
 		const s = exported[i];
 		const name = exports[i];
@@ -2773,7 +2779,7 @@ export async function scanFileAsync(
  * and dependent queries, and node-existence checks during incremental
  * validation. Returns the number of edges reclassified.
  */
-function reconcileEdgeTargetKinds(graph: RepoGraph): number {
+export function reconcileEdgeTargetKinds(graph: RepoGraph): number {
 	// `graph.nodes` is KEYED with forward slashes while `edge.target` and
 	// `node.filePath` carry the platform separator, so on Windows a direct
 	// `Object.hasOwn(graph.nodes, edge.target)` is false for EVERY edge and
@@ -2794,10 +2800,24 @@ function reconcileEdgeTargetKinds(graph: RepoGraph): number {
 	return reclassified;
 }
 
-/** Separator- and case-normalised path key for cross-map comparison. */
+/**
+ * Path key for cross-map comparison.
+ *
+ * Delegates to `normalizeGraphPath` — the SAME normalizer the incremental
+ * validator uses to look an edge target up in `graph.nodes` — so any edge this
+ * leaves at `'node'` is one that lookup can also resolve. A bespoke normalizer
+ * here would let the two disagree on a `./` segment or a doubled separator, and
+ * that disagreement surfaces as a spurious `missing-target-node` and a full
+ * rebuild.
+ *
+ * Case folding on win32 is additional, and necessary: `resolveModuleSpecifier`
+ * builds the target from the literal specifier text and confirms it with
+ * `existsSync`, which is case-insensitive there, while the walker records the
+ * file's real on-disk casing.
+ */
 function toComparablePath(p: string): string {
-	const slashed = p.replace(/\\/g, '/');
-	return process.platform === 'win32' ? slashed.toLowerCase() : slashed;
+	const normalized = normalizeGraphPath(p);
+	return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
 }
 
 export function buildWorkspaceGraph(

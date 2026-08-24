@@ -316,9 +316,14 @@ describe('repo-graph: C# file-scoped and block namespace resolution (issue #1529
 					e.source === controllerNode.filePath && e.target === apiNode.filePath,
 			),
 		).toBe(true);
+		// Narrow: no symbol edge FROM the controller TO this api file. Asserting
+		// "no symbol edge at all from this file" would break on any unrelated
+		// future edge and would be pinning more than the claim.
 		expect(
 			(graph.symbolEdges ?? []).some(
-				(e) => e.fromFile === controllerNode.filePath,
+				(e) =>
+					e.fromFile === controllerNode.filePath &&
+					e.toFile === apiNode.filePath,
 			),
 		).toBe(false);
 	});
