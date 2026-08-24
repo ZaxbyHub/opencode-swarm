@@ -199,6 +199,15 @@ describe('F-06b: reconcileEdgeTargetKinds normalizes case, not just separators',
 	// unless the comparison also folds case — exactly what `toComparablePath`
 	// does on win32. Without it, every such edge is wrongly reclassified 'asset',
 	// silently disabling importer/dead-export queries for it.
+	// The scenario REQUIRES a case-insensitive filesystem, so the assertion is
+	// gated on one. On ext4 (Linux CI) `existsSync('./foo')` does not find
+	// `Foo.ts` at all, so no edge is produced and there is nothing to reconcile
+	// — asserting `toBeDefined()` there fails on a correct implementation. This
+	// is the same platform trap that broke the Linux shard once already in this
+	// PR: a fixture that encodes one filesystem's semantics as if universal.
+	// Probed at runtime rather than switched on `process.platform`, because the
+	// property that matters is the filesystem's, not the OS's (a case-sensitive
+	// volume on Windows, or a case-insensitive one on Linux, both exist).
 	test('an import whose case differs from the file on disk still reconciles to node', async () => {
 		await withWorkspace(
 			{
@@ -206,10 +215,18 @@ describe('F-06b: reconcileEdgeTargetKinds normalizes case, not just separators',
 				'app.ts': "import { used } from './foo';\nexport const y = used();\n",
 			},
 			async (root) => {
+				const caseInsensitiveFs = fs.existsSync(path.join(root, 'foo.ts'));
 				const graph = await buildWorkspaceGraphAsync(root);
 				const edge = graph.edges.find((e) =>
 					e.target.toLowerCase().endsWith('foo.ts'),
 				);
+				if (!caseInsensitiveFs) {
+					// Case-sensitive volume: the specifier cannot resolve, so the
+					// reconciler is never reached. Pin that, rather than skipping
+					// silently and leaving the run with no assertion at all.
+					expect(edge).toBeUndefined();
+					return;
+				}
 				expect(edge).toBeDefined();
 				expect(edge?.targetKind).toBe('node');
 			},
