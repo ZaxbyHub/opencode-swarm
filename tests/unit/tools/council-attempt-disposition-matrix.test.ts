@@ -87,6 +87,7 @@ function finalizedDispositions(
 	const audit = councilRoundStatePaths(directory, {
 		kind: 'phase',
 		phaseNumber,
+		identityDigest: IDENTITY,
 	}).audit;
 	return readFileSync(audit, 'utf8')
 		.trim()
@@ -95,6 +96,8 @@ function finalizedDispositions(
 		.filter((record) => record.event === 'finalized')
 		.map((record) => record.disposition);
 }
+
+const IDENTITY = 'c'.repeat(64);
 
 describe('council attempt disposition finalization matrix', () => {
 	test('durably finalizes every task, phase, and final tool disposition', async () => {
@@ -107,7 +110,7 @@ describe('council attempt disposition finalization matrix', () => {
 				const phaseNumber = index + 1;
 				await runCouncilAttempt({
 					directory,
-					scope: { kind: 'phase', phaseNumber },
+					scope: { kind: 'phase', phaseNumber, identityDigest: IDENTITY },
 					maxRounds: 3,
 					request: { disposition },
 					verdictCount: 0,

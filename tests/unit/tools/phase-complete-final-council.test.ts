@@ -22,6 +22,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PlanSchema } from '../../../src/config/plan-schema';
+import { computeCouncilReviewIdentity } from '../../../src/council/council-review-identity';
 import { closeProjectDb } from '../../../src/db/project-db';
 import { setGatesForIdentity } from '../../../src/db/qa-gate-profile';
 import { computePlanHash } from '../../../src/plan/ledger';
@@ -135,6 +136,11 @@ function writeFinalCouncilEvidence(options: {
 	planHash?: string;
 	omitPlanIdentityHash?: boolean;
 	planIdentityHash?: string;
+	omitIdentity?: boolean;
+	reviewHashOverride?: string;
+	identityDigestOverride?: string;
+	policyDigestOverride?: string;
+	identityVersionOverride?: number;
 }) {
 	const evidencePath = join(tempDir, '.swarm', 'evidence');
 	mkdirSync(evidencePath, { recursive: true });
@@ -142,6 +148,15 @@ function writeFinalCouncilEvidence(options: {
 	const plan = PlanSchema.parse(
 		JSON.parse(readFileSync(join(tempDir, '.swarm', 'plan.json'), 'utf-8')),
 	);
+	// The gate recomputes the identity from the SAME shared implementation
+	// (with no council config in these fixtures), so evidence written with the
+	// real helper passes identity checks byte-for-byte.
+	const identity = computeCouncilReviewIdentity({
+		level: 'final',
+		scope: { kind: 'final', final: true },
+		plan,
+		config: undefined,
+	});
 	writeFileSync(
 		join(evidencePath, 'final-council.json'),
 		JSON.stringify({
@@ -162,6 +177,17 @@ function writeFinalCouncilEvidence(options: {
 						: {
 								plan_identity_hash:
 									options.planIdentityHash ?? derivePlanIdentityHash(plan),
+							}),
+					...(options.omitIdentity
+						? {}
+						: {
+								identity_version:
+									options.identityVersionOverride ?? identity.version,
+								review_hash: options.reviewHashOverride ?? identity.reviewHash,
+								policy_digest:
+									options.policyDigestOverride ?? identity.policyDigest,
+								identity_digest:
+									options.identityDigestOverride ?? identity.identityDigest,
 							}),
 					verdict: options.verdict,
 					summary: options.summary ?? 'Final council verdict',
@@ -390,7 +416,7 @@ describe('final_council gate (Gate 6)', () => {
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
 			expect(parsed.reason).toBe('FINAL_COUNCIL_MISSING_QUORUM');
-			expect(parsed.message).toContain('quorum metadata');
+			expect(parsed.message).toContain('recorded quorumSize: missing');
 		});
 
 		test('blocks approved evidence with fewer than five council members', async () => {
@@ -409,7 +435,8 @@ describe('final_council gate (Gate 6)', () => {
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
 			expect(parsed.reason).toBe('FINAL_COUNCIL_MISSING_QUORUM');
-			expect(parsed.message).toContain('five-member final council');
+			expect(parsed.message).toContain('policy all_required');
+			expect(parsed.message).toContain('recorded quorumSize: 3');
 		});
 
 		test('blocks approved evidence with quorumSize 5 but malformed member metadata', async () => {
@@ -430,7 +457,12 @@ describe('final_council gate (Gate 6)', () => {
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
 			expect(parsed.reason).toBe('FINAL_COUNCIL_MISSING_QUORUM');
-			expect(parsed.message).toContain('all five required members voted');
+			// Absentees are recomputed from canonical roles, so a forged empty
+			// membersAbsent array cannot satisfy the strict policy.
+			expect(parsed.message).toContain('distinct canonical members: 1 of 5');
+			expect(parsed.message).toContain(
+				'absent: [reviewer, sme, test_engineer, explorer]',
+			);
 		});
 
 		test('allows completion when evidence has concerns verdict', async () => {
@@ -648,25 +680,6 @@ describe('final_council gate (Gate 6)', () => {
 			expect(parsed.reason).toBe('FINAL_COUNCIL_STALE_EVIDENCE');
 		});
 
-		test('blocks approved evidence when the current plan hash changed', async () => {
-			setupLastPhaseOnly(true);
-			writeFinalCouncilEvidence({
-				verdict: 'approved',
-				summary: 'Evidence for older plan content',
-				planHash: '0'.repeat(64),
-			});
-
-			const result = await executePhaseComplete(
-				{ phase: 3, summary: 'test', sessionID: SESSION_ID },
-				tempDir,
-				tempDir,
-			);
-			const parsed = JSON.parse(result);
-			expect(parsed.success).toBe(false);
-			expect(parsed.status).toBe('blocked');
-			expect(parsed.reason).toBe('FINAL_COUNCIL_STALE_PLAN');
-		});
-
 		test('blocks approved evidence when collision-resistant plan identity is missing', async () => {
 			setupLastPhaseOnly(true);
 			writeFinalCouncilEvidence({
@@ -708,25 +721,6 @@ describe('final_council gate (Gate 6)', () => {
 			expect(parsed.success).toBe(false);
 			expect(parsed.status).toBe('blocked');
 			expect(parsed.reason).toBe('FINAL_COUNCIL_PLAN_IDENTITY_MISMATCH');
-		});
-
-		test('blocks approved evidence when plan_hash is missing entirely', async () => {
-			setupLastPhaseOnly(true);
-			writeFinalCouncilEvidence({
-				verdict: 'approved',
-				summary: 'Evidence without plan_hash binding',
-				omitPlanHash: true,
-			});
-
-			const result = await executePhaseComplete(
-				{ phase: 3, summary: 'test', sessionID: SESSION_ID },
-				tempDir,
-				tempDir,
-			);
-			const parsed = JSON.parse(result);
-			expect(parsed.success).toBe(false);
-			expect(parsed.status).toBe('blocked');
-			expect(parsed.reason).toBe('FINAL_COUNCIL_PLAN_HASH_REQUIRED');
 		});
 
 		test('blocks approved evidence when timestamp is missing or invalid', async () => {

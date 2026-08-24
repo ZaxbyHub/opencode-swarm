@@ -15,7 +15,12 @@ import {
 } from '../../../src/council/council-round-state.js';
 import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
-const scope = { kind: 'task' as const, taskId: '1.1' };
+const IDENTITY = 'c'.repeat(64);
+const scope = {
+	kind: 'task' as const,
+	taskId: '1.1',
+	identityDigest: IDENTITY,
+};
 const originalInternals = { ..._internals };
 
 beforeEach(() => Object.assign(_internals, originalInternals));
@@ -24,13 +29,14 @@ afterEach(() => Object.assign(_internals, originalInternals));
 function validRecord() {
 	const attemptId = randomUUID();
 	return {
-		version: 1,
+		version: 2,
 		event: 'finalized',
 		attemptId,
 		timestamp: '2026-08-09T00:00:00.000Z',
 		scope: {
 			kind: 'task',
 			scopeHash: createHash('sha256').update(scope.taskId).digest('hex'),
+			identityDigest: IDENTITY,
 		},
 		authoritativeRound: 1,
 		digest: 'a'.repeat(64),
@@ -42,7 +48,8 @@ function validRecord() {
 		verdict: 'CONCERNS',
 		quorumSize: 3,
 		nextState: {
-			version: 1,
+			version: 2,
+			identityDigest: IDENTITY,
 			currentRound: 2,
 			status: 'open',
 			maxRoundsExhausted: false,
@@ -367,7 +374,7 @@ describe('council audit recovery validation', () => {
 				transition: 'close',
 				gateEffect: 'allowed',
 				nextState: {
-					version: 1,
+					version: 2,
 					currentRound: 1,
 					status: 'closed',
 					maxRoundsExhausted: false,
