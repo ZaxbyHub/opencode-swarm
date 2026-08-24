@@ -430,6 +430,30 @@ describe('context-map telemetry bounded store (issue #2037)', () => {
 		test('finalize on a fresh/empty project is a safe no-op', () => {
 			expect(() => finalizeContextTelemetry(dir)).not.toThrow();
 		});
+
+		test('finalize drains a legacy backlog to convergence (review F-6)', () => {
+			_internals.limits = {
+				...tinyLimits(),
+				compactMaxBytes: 256, // force many bounded passes
+			} as typeof _internals.limits;
+			const filePath = path.join(dir, '.swarm', 'context-telemetry.jsonl');
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			const legacy: string[] = [];
+			for (let i = 0; i < 60; i += 1) {
+				legacy.push(JSON.stringify(makeEntry({ task_id: `${i}.1` })));
+			}
+			fs.writeFileSync(filePath, `${legacy.join('\n')}\n`, 'utf-8');
+
+			finalizeContextTelemetry(dir);
+			// Every legacy record is accounted in the archived cut — no
+			// half-drained tail (the close fold ran after full convergence).
+			const summary = getTelemetrySummary(dir);
+			expect(summary.total_delegations).toBe(60);
+			expect(summary.coverage).toBe('complete');
+			// The store is header'd (converged), and the raw window is within
+			// the tiny active budget.
+			expect(summary.retained_entries).toBeLessThanOrEqual(8);
+		});
 	});
 
 	describe('readTelemetry header-aware window', () => {

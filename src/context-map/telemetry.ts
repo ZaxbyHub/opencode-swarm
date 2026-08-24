@@ -248,6 +248,10 @@ export const _internals = {
 	readSync: fs.readSync,
 	limits: CONTEXT_TELEMETRY_LIMITS,
 	emitHealth: emitContextTelemetryHealth,
+	// Exposed for the withStoreLock regression tests (held / stale-break /
+	// release paths, issue #2037 review F-5) — production callers use the
+	// module-local binding, so this alias is test-observability only.
+	withStoreLock,
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -671,6 +675,32 @@ function readStore(directory: string, bounded: boolean): StoreView {
  * @param entry - The telemetry record to append
  * @param directory - Project root directory (must contain `.swarm/`)
  */
+/**
+ * True when the store file's final byte is a newline (or the file is empty /
+ * unreadable — fail-open "true" so a transient read error never inserts a
+ * spurious blank line; the parser skips blank lines anyway). Guards the append
+ * path against appending onto a crash-torn final line (issue #2037 review F-4):
+ * without it, a mid-append crash leaves an unterminated line and the NEXT
+ * append silently merges into it, losing one record despite a `true` return.
+ */
+function fileEndsWithNewline(filePath: string): boolean {
+	try {
+		if (!_internals.existsSync(filePath)) return true;
+		const size = _internals.statSync(filePath).size;
+		if (size === 0) return true;
+		const fd = _internals.openSync(filePath, 'r');
+		try {
+			const buf = Buffer.alloc(1);
+			const n = _internals.readSync(fd, buf, 0, 1, size - 1);
+			return n <= 0 || buf[0] === 0x0a;
+		} finally {
+			_internals.closeSync(fd);
+		}
+	} catch {
+		return true;
+	}
+}
+
 export function recordTelemetry(
 	entry: TelemetryEntry,
 	directory: string,
@@ -680,20 +710,38 @@ export function recordTelemetry(
 
 	try {
 		_internals.mkdirSync(swarmDir, { recursive: true });
-		if (!_internals.existsSync(filePath)) {
-			// First write is atomic (header + one record) so a crash can never
-			// leave a torn header at line 1.
-			const manifest = emptyManifest();
-			atomicReplace(
-				directory,
-				`${JSON.stringify(manifest)}\n${JSON.stringify(entry)}\n`,
-			);
-		} else {
-			_internals.appendFileSync(
-				filePath,
-				`${JSON.stringify(entry)}\n`,
-				'utf-8',
-			);
+		// All writes hold the store lock (issue #2037 review F-2): an append
+		// racing a concurrent compaction rewrite in another process could be
+		// silently discarded while recordTelemetry still returned true. The
+		// lock is NOT reentrant, so throttled maintenance runs only after it
+		// releases below.
+		const wrote = withStoreLock(directory, () => {
+			if (!_internals.existsSync(filePath)) {
+				// First write is atomic (header + one record) so a crash can never
+				// leave a torn header at line 1.
+				const manifest = emptyManifest();
+				atomicReplace(
+					directory,
+					`${JSON.stringify(manifest)}\n${JSON.stringify(entry)}\n`,
+				);
+			} else {
+				// Re-establish line framing if a prior crash tore the tail (F-4).
+				const prefix = fileEndsWithNewline(filePath) ? '' : '\n';
+				_internals.appendFileSync(
+					filePath,
+					`${prefix}${JSON.stringify(entry)}\n`,
+					'utf-8',
+				);
+			}
+			return true;
+		});
+		if (wrote === null) {
+			// Lock held by a concurrent maintenance/close pass in another
+			// process: the write did NOT happen — report honestly instead of
+			// a false success. Contention is rare and bounded (maintenance
+			// passes are fast); the next write succeeds.
+			warnThrottled('store lock busy — telemetry write skipped');
+			return false;
 		}
 		if (shouldRunMaintenance()) {
 			runMaintenance(directory);
@@ -870,11 +918,12 @@ function periodMs(oldest: string | null, newest: string | null): number | null {
 function compactStore(
 	directory: string,
 	trigger: 'compaction' | 'close' = 'compaction',
+	alreadyLocked = false,
 ): void {
 	const filePath = telemetryFilePath(directory);
 	if (!_internals.existsSync(filePath)) return;
 
-	withStoreLock(directory, () => {
+	const run = () => {
 		const view = readStore(directory, false);
 		if (view.manifest === null) return; // legacy handled by cutover
 		const folded = cloneFolded(view.manifest.folded);
@@ -952,7 +1001,12 @@ function compactStore(
 			bytes: fileSizeOrZero(filePath),
 			limitBytes: _internals.limits.activeMaxBytes,
 		});
-	});
+	};
+	if (alreadyLocked) {
+		run();
+		return;
+	}
+	withStoreLock(directory, run);
 }
 
 /**
@@ -984,11 +1038,12 @@ function compactStore(
 function migrateCutover(
 	directory: string,
 	trigger: 'compaction' | 'close' = 'compaction',
+	alreadyLocked = false,
 ): void {
 	const filePath = telemetryFilePath(directory);
 	if (!_internals.existsSync(filePath)) return;
 
-	withStoreLock(directory, () => {
+	const run = () => {
 		// Re-check under the lock in case a sibling already handled it.
 		if (!_internals.existsSync(filePath)) return;
 		const view = readStore(directory, false);
@@ -1091,7 +1146,12 @@ function migrateCutover(
 			bytes: fileSizeOrZero(filePath),
 			limitBytes: _internals.limits.activeMaxBytes,
 		});
-	});
+	};
+	if (alreadyLocked) {
+		run();
+		return;
+	}
+	withStoreLock(directory, run);
 }
 
 /**
@@ -1137,12 +1197,27 @@ export function finalizeContextTelemetry(directory: string): void {
 	try {
 		const filePath = telemetryFilePath(directory);
 		if (!_internals.existsSync(filePath)) return;
-		// One bounded cutover pass (folds any legacy header-less file into a
-		// header), then a full close-fold of the remaining window into a
-		// defined, validated cut. close is not a hot path, so the full fold is
-		// the correct final definition of the archived cut.
-		migrateCutover(directory, 'close');
-		compactStore(directory, 'close');
+		withStoreLock(directory, () => {
+			// Drain a legacy header-less file to CONVERGENCE before the close
+			// fold (review F-6): each pass folds at most compactMaxBytes, and
+			// the loop repeats until the header exists — all under ONE lock
+			// acquisition (review F-2), so close never archives a half-drained
+			// legacy tail. The no-progress and pass-cap guards are defensive
+			// bail-outs so a pathological file can never spin forever.
+			let prev = Number.POSITIVE_INFINITY;
+			for (let pass = 0; pass < 10_000; pass += 1) {
+				const view = readStore(directory, false);
+				if (view.manifest !== null) break;
+				if (view.records.length === 0) break;
+				if (view.records.length >= prev) break; // no progress — bail
+				prev = view.records.length;
+				migrateCutover(directory, 'close', true);
+			}
+			// Full close-fold of the remaining window into a defined,
+			// validated cut. close is not a hot path, so the full fold is the
+			// correct final definition of the archived cut.
+			compactStore(directory, 'close', true);
+		});
 	} catch {
 		warnThrottled('finalize failed');
 	}

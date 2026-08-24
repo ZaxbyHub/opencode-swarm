@@ -40,13 +40,25 @@ programme's retention and read-amplification contract (PR 08 registry #2036,
 parent #1823). The lifetime aggregate keeps totals exact while on-disk bytes and
 read work stay within documented bounds under sustained writes.
 
+**Downgrade caveat (review F-7):** the store's on-disk format intentionally
+breaks with the pre-#2037 layout (manifest header at line 1). Downgrading to a
+pre-#2037 build on a project whose store has already migrated causes the old
+reader to silently UNDER-count (it reports only the retained window, discarding
+the folded aggregate — no error is thrown). Re-upgrading restores exact totals;
+no data is lost. Avoid downgrading a migrated project if exact counts matter.
+
 ## Tests
 
 `tests/unit/context-map/telemetry-bounded.test.ts` (new: on-disk ceilings,
 bounded-read proof, no double count, corrupt/partial tails, oversized record,
 age pruning, multi-project isolation, disk-pressure fail-open, close finalize,
-health payload), updated `telemetry.test.ts` / `context-map-stats.test.ts`, the
-observability event-contract gates, and a close archive-guard test.
+health payload), `telemetry-bounded-corruption.test.ts` (corrupt tolerance incl.
+non-finite rejection and corrupt-persists-across-compaction),
+`telemetry-bounded-lock.test.ts` (store lock held/stale-break/release paths;
+append-under-lock honest failure; torn-tail newline guard), and
+`telemetry-bounded-health.test.ts`, plus updated `telemetry.test.ts` /
+`context-map-stats.test.ts`, the observability event-contract gates, and a close
+archive-guard test.
 
 ## Closes
 
