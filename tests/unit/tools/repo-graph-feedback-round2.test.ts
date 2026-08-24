@@ -188,3 +188,61 @@ describe('round-2 import-parsing fixes', () => {
 		]);
 	});
 });
+
+describe('F-06b: reconcileEdgeTargetKinds normalizes case, not just separators', () => {
+	// `resolveModuleSpecifier` builds `target` by joining the workspace root
+	// with the LITERAL specifier text and confirming existence with `existsSync`,
+	// which is case-INSENSITIVE on Windows/macOS default filesystems. The walker,
+	// meanwhile, records `node.filePath` and the `graph.nodes` key with the file's
+	// ACTUAL on-disk casing. A specifier that differs only in case from the real
+	// file therefore resolves successfully but does not string-match either map
+	// unless the comparison also folds case — exactly what `toComparablePath`
+	// does on win32. Without it, every such edge is wrongly reclassified 'asset',
+	// silently disabling importer/dead-export queries for it.
+	test('an import whose case differs from the file on disk still reconciles to node', async () => {
+		await withWorkspace(
+			{
+				'Foo.ts': 'export function used() { return 1; }\n',
+				'app.ts': "import { used } from './foo';\nexport const y = used();\n",
+			},
+			async (root) => {
+				const graph = await buildWorkspaceGraphAsync(root);
+				const edge = graph.edges.find((e) =>
+					e.target.toLowerCase().endsWith('foo.ts'),
+				);
+				expect(edge).toBeDefined();
+				expect(edge?.targetKind).toBe('node');
+			},
+		);
+	});
+
+	// Guards against a cheap but wrong fix: folding case must not fold DISTINCT
+	// paths together. Two files sharing a basename in different directories must
+	// stay distinguishable, or the reconciler could mark an edge 'node' by
+	// matching the wrong file's node entry.
+	test('same basename in two different directories is not confused', async () => {
+		await withWorkspace(
+			{
+				'a/lib.ts': 'export const A = 1;\n',
+				'b/lib.ts': 'export const B = 2;\n',
+				'a/app.ts': "import { A } from './lib';\nexport const y = A;\n",
+			},
+			async (root) => {
+				const graph = await buildWorkspaceGraphAsync(root);
+				const aLib = Object.values(graph.nodes).find((n) =>
+					n.filePath.replace(/\\/g, '/').endsWith('a/lib.ts'),
+				);
+				const bLib = Object.values(graph.nodes).find((n) =>
+					n.filePath.replace(/\\/g, '/').endsWith('b/lib.ts'),
+				);
+				expect(aLib).toBeDefined();
+				expect(bLib).toBeDefined();
+				const edge = graph.edges.find((e) => e.target === aLib?.filePath);
+				expect(edge).toBeDefined();
+				expect(edge?.targetKind).toBe('node');
+				// The edge must resolve to a/lib.ts specifically, not b/lib.ts.
+				expect(edge?.target).not.toBe(bLib?.filePath);
+			},
+		);
+	});
+});
