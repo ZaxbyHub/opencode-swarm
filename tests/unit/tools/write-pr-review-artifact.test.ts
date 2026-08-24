@@ -177,7 +177,7 @@ describe('write_pr_review_artifact', () => {
 		const reviewerRows = candidateIds
 			.map((id, index) =>
 				index === 0
-					? `[REVIEWED] | ${id} | DISPROVED | STRUCTURALLY_PROVEN | LOW | YES | file.ts:1 | rationale | probe | reviewer`
+					? `[REVIEWED] | ${id} | DISPROVED | STRUCTURALLY_PROVEN | NONE | YES | file.ts:1 | rationale | probe | reviewer`
 					: `[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer`,
 			)
 			.join('\n');

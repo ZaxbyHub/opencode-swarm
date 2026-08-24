@@ -79,7 +79,7 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 			directory,
 			'golden-run',
 			[
-				reviewedRow('C-0', 'DISPROVED', 'LOW'),
+				reviewedRow('C-0', 'DISPROVED', 'NONE'),
 				...candidateIds
 					.slice(1)
 					.map((id) => reviewedRow(id, 'CONFIRMED', 'HIGH')),
@@ -144,7 +144,7 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 				reviewedRow('C-2', 'CONFIRMED', 'MEDIUM'),
 				reviewedRow('C-3', 'CONFIRMED', 'LOW'),
 				reviewedRow('C-4', 'PRE_EXISTING', 'MEDIUM'),
-				reviewedRow('C-5', 'DISPROVED', 'HIGH'),
+				reviewedRow('C-5', 'DISPROVED', 'NONE'),
 			],
 			candidateIds,
 		);
@@ -208,7 +208,7 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 			directory,
 			'downgrade-run',
 			[
-				reviewedRow('C-0', 'DISPROVED', 'LOW'),
+				reviewedRow('C-0', 'DISPROVED', 'NONE'),
 				reviewedRow('C-1', 'CONFIRMED', 'MEDIUM'),
 				reviewedRow('C-2', 'CONFIRMED', 'LOW'),
 				reviewedRow('C-3', 'CONFIRMED', 'LOW'),
@@ -274,7 +274,7 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 			directory,
 			'critic-matrix',
 			[
-				reviewedRow('C-0', 'DISPROVED', 'LOW'),
+				reviewedRow('C-0', 'DISPROVED', 'NONE'),
 				reviewedRow('C-1', 'CONFIRMED', 'HIGH'),
 				reviewedRow('C-2', 'CONFIRMED', 'HIGH'),
 				...candidateIds

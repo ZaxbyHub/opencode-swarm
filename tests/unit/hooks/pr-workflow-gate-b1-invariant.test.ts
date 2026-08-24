@@ -358,11 +358,11 @@ describe('pr-workflow-gate B1 invariant: no false positives on the settled path'
 describe('pr-workflow-gate B1 invariant: a legitimately empty critic inventory', () => {
 	test('no CONFIRMED CRITICAL/HIGH/MEDIUM verdict means critic coverage is genuinely not required', async () => {
 		await establishReviewPrerequisites();
-		// Every item is DISPROVED/LOW: the reviewer map is fully populated, and
+		// Every item is DISPROVED/NONE: the reviewer map is fully populated, and
 		// the critic inventory is empty because the *filter* excluded everything.
 		await settleReviewerPhase(
 			'rv-clean',
-			reviewed(BASE_IDS, 'DISPROVED', 'LOW'),
+			reviewed(BASE_IDS, 'DISPROVED', 'NONE'),
 		);
 		await expect(
 			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer'),
@@ -387,7 +387,7 @@ describe('pr-workflow-gate B1 invariant: a legitimately empty critic inventory',
 					finding_id: findingId,
 					status: 'DISPROVED',
 					next_action: 'suppress_with_reason',
-					severity: 'LOW',
+					severity: 'NONE',
 				})),
 			),
 		).resolves.toBeUndefined();
@@ -399,7 +399,7 @@ describe('pr-workflow-gate B1 invariant: a legitimately empty critic inventory',
 		const suppressed = BASE_IDS.slice(2);
 		await settleReviewerPhase(
 			'rv-mixed',
-			`${reviewed(challenged)}\n${reviewed(suppressed, 'DISPROVED', 'LOW')}`,
+			`${reviewed(challenged)}\n${reviewed(suppressed, 'DISPROVED', 'NONE')}`,
 		);
 		const error = await errorFrom(
 			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA),

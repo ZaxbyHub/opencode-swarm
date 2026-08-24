@@ -66,7 +66,7 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 			directory,
 			'order-run',
 			[
-				reviewedRow('C-0', 'DISPROVED', 'LOW'),
+				reviewedRow('C-0', 'DISPROVED', 'NONE'),
 				...candidateIds
 					.slice(1)
 					.map((id) => reviewedRow(id, 'CONFIRMED', 'LOW')),
@@ -188,7 +188,7 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 			directory,
 			'clean-run',
 			[
-				reviewedRow('C-0', 'DISPROVED', 'LOW'),
+				reviewedRow('C-0', 'DISPROVED', 'NONE'),
 				reviewedRow('C-1', 'CONFIRMED', 'MEDIUM'),
 				reviewedRow('C-2', 'CONFIRMED', 'LOW'),
 				reviewedRow('C-3', 'CONFIRMED', 'LOW'),
