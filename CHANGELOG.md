@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.146.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.146.0...v7.146.1) (2026-08-24)
+
+
+### Bug Fixes
+
+* **pr-review:** harden workflow resilience and wake handling ([5c7bb9d](https://github.com/ZaxbyHub/opencode-swarm/commit/5c7bb9d9d0e21ad8da4ce79839a8f70991d4cbe3))
+* **workflow:** durable stage-a attribution across session resets ([5715242](https://github.com/ZaxbyHub/opencode-swarm/commit/5715242d62bc32af4242f4d714e3e364f235b01b))
+
 ## [7.146.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.145.2...v7.146.0) (2026-08-24)
 
 
