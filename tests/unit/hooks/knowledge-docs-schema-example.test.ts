@@ -62,10 +62,18 @@ function fencedBlocks(markdown: string): FencedBlock[] {
 	return blocks;
 }
 
-/** Walk current docs, skipping immutable release notes and archived docs. */
+/**
+ * Walk current docs, skipping immutable release notes and archived docs.
+ * Sorted for deterministic iteration order across platforms — `readdirSync`
+ * order is filesystem-dependent (NTFS / ext4 / APFS sort differently), and a
+ * non-deterministic order would leak into any future assertion that inspects
+ * non-empty offender contents.
+ */
 function currentDocsFiles(dir: string): string[] {
 	const out: string[] = [];
-	for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+	for (const entry of fs
+		.readdirSync(dir, { withFileTypes: true })
+		.sort((a, b) => a.name.localeCompare(b.name))) {
 		const full = path.join(dir, entry.name);
 		if (entry.isDirectory()) {
 			if (entry.name === 'releases' || entry.name === 'archive') continue;
@@ -91,9 +99,9 @@ describe('knowledge docs schema example — drift guard (#1611)', () => {
 		expect(statuses).toContain('established');
 	});
 
-	test('docs/knowledge.md Entry Schema example uses only valid category/status values', () => {
+	test('every docs/knowledge.md Entry Schema example uses only valid category/status values', () => {
 		const knowledge = readRepoFile('docs', 'knowledge.md');
-		const example = fencedBlocks(knowledge)
+		const examples = fencedBlocks(knowledge)
 			.filter((b) => b.language === 'json')
 			.map((b) => {
 				try {
@@ -102,20 +110,27 @@ describe('knowledge docs schema example — drift guard (#1611)', () => {
 					return null;
 				}
 			})
-			.find(
-				(parsed) =>
+			.filter(
+				(parsed): parsed is Record<string, unknown> =>
 					parsed !== null &&
 					'lesson' in parsed &&
 					'category' in parsed &&
 					'status' in parsed,
 			);
 
-		expect(example).toBeDefined();
-		expect(categories).toContain(example?.category);
-		expect(statuses).toContain(example?.status);
+		expect(examples.length).toBeGreaterThanOrEqual(1);
+		for (const example of examples) {
+			expect(categories).toContain(example.category);
+			expect(statuses).toContain(example.status);
+		}
 	});
 
-	test('no stale knowledge category literal appears in current docs', () => {
+	test('no stale knowledge category or status literal appears in current docs', () => {
+		// "status" is a generic JSON field reused by many subsystems (plan
+		// task status, full-auto lock status, etc.). Sweep it only when it
+		// sits in the same JSON object as a knowledge-shaped field — `lesson`
+		// is the unique marker of a knowledge entry — so we don't false-
+		// positive on unrelated domain statuses.
 		const offenders: string[] = [];
 		for (const file of currentDocsFiles(path.join(repoRoot, 'docs'))) {
 			const markdown = fs.readFileSync(file, 'utf-8');
@@ -125,21 +140,83 @@ describe('knowledge docs schema example — drift guard (#1611)', () => {
 					offenders.push(`${relative}: "category": "${match[1]}"`);
 				}
 			}
+			// Walk fenced JSON blocks; in each block that looks like a
+			// knowledge entry (has `lesson`), assert `status` is a union
+			// member.
+			for (const block of fencedBlocks(markdown)) {
+				if (block.language !== 'json') continue;
+				let parsed: unknown;
+				try {
+					parsed = JSON.parse(block.body);
+				} catch {
+					continue;
+				}
+				if (
+					parsed === null ||
+					typeof parsed !== 'object' ||
+					!('lesson' in parsed) ||
+					!('status' in parsed)
+				) {
+					continue;
+				}
+				const statusValue = (parsed as Record<string, unknown>).status;
+				if (typeof statusValue !== 'string') continue;
+				if (!statuses.includes(statusValue)) {
+					offenders.push(`${relative}: "status": "${statusValue}"`);
+				}
+			}
 		}
 		expect(offenders).toEqual([]);
 	});
 
-	test('docs/skills.md knowledge category enumeration matches the current union', () => {
+	test('docs/skills.md knowledge enumerations match the current unions', () => {
 		const skills = readRepoFile('docs', 'skills.md');
-		const bullet = skills
+		// Validate every enumeration-style bullet labelled with a backticked
+		// field name (`**\`fieldName\`**`) whose parsed value list must match
+		// a current union. Today only `**`category`**` exists; if a future
+		// contributor adds `**`status`**` (or any other knowledge union), the
+		// same set-equality check applies. The dispatcher is keyed on the
+		// field name so an unknown bullet is a passing no-op.
+		// `category` is the load-bearing bullet this drift guard was created
+		// to protect (#1611); its presence is asserted explicitly so that
+		// removing it fails the test loudly instead of vacuously matching.
+		// `status` is a forward hook — only required when a bullet exists.
+		const requiredBullets = ['category'] as const;
+		const expectedUnions: Record<string, string[]> = {
+			category: categories,
+			status: statuses,
+		};
+		const bullets = skills
 			.split(/\r?\n/)
-			.find((line) => line.includes('**`category`**'));
-		expect(bullet).toBeDefined();
-		// Only the value list after the label's em dash — the label itself
-		// (`category`) is backticked too and must not count as a value.
-		const listed = [
-			...(bullet?.split('—')[1]?.match(/`([a-z_]+)`/g) ?? []),
-		].map((m) => m.slice(1, -1));
-		expect(new Set(listed)).toEqual(new Set(categories));
+			.filter((line) => /\*\*`([a-z_]+)`\*\*/.test(line));
+
+		for (const required of requiredBullets) {
+			expect(bullets.some((l) => l.includes(`**\`${required}\`**`))).toBe(true);
+		}
+
+		const mismatches: string[] = [];
+		for (const bullet of bullets) {
+			const labelMatch = bullet.match(/\*\*`([a-z_]+)`\*\*/);
+			const field = labelMatch?.[1];
+			if (!field || !(field in expectedUnions)) continue;
+			const expected = expectedUnions[field];
+			// Only the value list after the label's em dash — the label
+			// itself (`category`) is backticked too and must not count as
+			// a value.
+			const listed = [
+				...(bullet.split('—')[1]?.match(/`([a-z_]+)`/g) ?? []),
+			].map((m) => m.slice(1, -1));
+			const listedSet = new Set(listed);
+			const expectedSet = new Set(expected);
+			if (
+				listedSet.size !== expectedSet.size ||
+				![...listedSet].every((v) => expectedSet.has(v))
+			) {
+				mismatches.push(
+					`**\`${field}\`** listed=[${[...listedSet].join(',')}] expected=[${[...expectedSet].join(',')}]`,
+				);
+			}
+		}
+		expect(mismatches).toEqual([]);
 	});
 });

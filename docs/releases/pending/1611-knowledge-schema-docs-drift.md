@@ -8,7 +8,7 @@
 
 ## Why
 
-Generated agents copying the documented example would write entries with invalid category/status values (issue #1662's sibling docs drift, filed as #1611). The docs and the type unions had silently diverged.
+Generated agents copying the documented example would write entries with invalid category/status values. The docs and the type unions had silently diverged; agents that copy the example produce entries with values that the schema rejects.
 
 ## Migration steps
 
@@ -16,4 +16,4 @@ None. Docs and test files only; no runtime code touched.
 
 ## Known caveats
 
-- Doc-wide `status` scanning is limited to knowledge.md's Entry Schema example — the sole knowledge-status example in current docs. Release notes and `docs/archive/` are immutable history and intentionally excluded.
+- Release notes and `docs/archive/` are immutable history and intentionally excluded from the doc-wide category/status literal sweep.
