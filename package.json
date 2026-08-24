@@ -110,6 +110,7 @@
 		"check:events": "bun run scripts/check-event-contract.ts",
 		"check:retention": "bun run scripts/check-retention-registry.ts",
 		"check:test-file-cap": "bun run scripts/check-test-file-cap.ts",
+		"check:pending-fragment": "bun run scripts/check-pending-fragment.ts",
 		"check:gate-portability": "bun run scripts/check-gate-portability.ts",
 		"check:bare-spawn": "bun run scripts/check-bare-executable-spawn.ts",
 		"check:memory-recall": "bun run scripts/memory-recall-regression.ts"

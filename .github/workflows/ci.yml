@@ -224,6 +224,14 @@ jobs:
       - name: Test file line-cap ratchet (FR-006)
         if: needs.detect-release.outputs.is-release != 'true'
         run: bun run check:test-file-cap
+      # AGENTS.md mandate: every user-visible PR ships a
+      # docs/releases/pending/<slug>.md fragment — release-please aggregates
+      # fragments into the GitHub Release body, so a missing fragment means
+      # the PR ships with no release notes. Enforced at CI time so the
+      # omission is caught in the PR, not discovered after the release.
+      - name: Pending release fragment (AGENTS mandate)
+        if: needs.detect-release.outputs.is-release != 'true'
+        run: bun run check:pending-fragment
       # Issue #2078 recurrence guardrail: a NEW Bash-only gate wired into any
       # workflow is blocked, because Windows contributors cannot run it
       # locally. Existing Bash gates are baselined in

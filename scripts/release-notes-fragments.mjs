@@ -510,6 +510,98 @@ function resolveRepoRoot() {
 }
 
 /**
+ * Extract the CHANGELOG.md section for a specific version.
+ *
+ * Section headings look like:
+ *   ## [7.146.1](https://github.com/owner/repo/compare/v7.146.0...v7.146.1) (2026-08-24)
+ *
+ * The match is a prefix scan for `## [<version>]` with the closing bracket
+ * immediately after the version, so 7.146.1 never matches a 7.146.10 heading.
+ * Returns the heading line plus every line up to (excluding) the next
+ * `## [` heading, or null when the version has no section (e.g. a degenerate
+ * meta-only release that never added a changelog entry).
+ *
+ * Pure — no I/O. Exported for unit tests. Used by modeUpdateRelease as the
+ * fallback candidate source when the release body itself has no PR/commit
+ * references (observed on releases cut with an empty body, e.g. v7.146.1).
+ */
+export function extractChangelogSection(changelog, version) {
+	if (typeof changelog !== 'string' || typeof version !== 'string' || version.length === 0) {
+		return null;
+	}
+	const prefix = `## [${version}]`;
+	const lines = changelog.split('\n');
+	const startIdx = lines.findIndex((line) => line.startsWith(prefix));
+	if (startIdx === -1) return null;
+	const out = [lines[startIdx]];
+	for (let i = startIdx + 1; i < lines.length; i++) {
+		if (lines[i].startsWith('## [')) break;
+		out.push(lines[i]);
+	}
+	return out.join('\n');
+}
+
+/**
+ * Edit a PR body, then settle-verify that the custom-release-notes block
+ * survived an external rewrite race.
+ *
+ * Third-party bots (observed: the cubic PR-description bot on release PR
+ * #2331 — injected body wiped 7s after our edit) can rewrite the PR body
+ * right after this script edits it. After EVERY attempt — including a
+ * no-op attempt where the body already carried the block — we wait
+ * `delayMs`, re-fetch the body, and if the marker block is gone, run a
+ * FULL fresh attempt (re-reading the body and re-extracting candidates
+ * from it, never reusing the prior attempt's stale combined notes).
+ *
+ * All I/O is injected (`fetchBody`, `applyEdit`, `sleep`) so unit tests
+ * exercise the race without mocking the `gh` subprocess. `runAttempt`
+ * performs one read-extract-upsert-edit pass and returns
+ * `{ body, blockExpected }`. When an attempt legitimately produces no
+ * block (zero candidates or zero pending fragments — nothing to inject),
+ * `blockExpected` is false and the loop exits immediately without
+ * settle-verifying: an absent block is the intended outcome, not an
+ * external rewrite, so no false warning is emitted and no settle delay
+ * is paid.
+ *
+ * Returns true when the final observed body contains the marker block (or
+ * no block was expected).
+ */
+export async function verifyBlockSurvived(opts) {
+	const {
+		runAttempt,
+		fetchBody,
+		applyEdit,
+		sleep,
+		delayMs,
+		maxAttempts = 2,
+		log = () => {},
+	} = opts;
+	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+		const result = await runAttempt({ attempt, fetchBody, applyEdit, log });
+		const blockExpected =
+			typeof result === 'string' ? true : result?.blockExpected !== false;
+		if (!blockExpected) {
+			log('no fragments to inject — skipping settle-verify (absent block is expected)');
+			return true;
+		}
+		if (delayMs > 0) await sleep(delayMs);
+		const settled = await fetchBody();
+		if (settled.includes(MARKER_START) && settled.includes(MARKER_END)) {
+			if (attempt > 1) log(`marker block survived after attempt ${attempt}`);
+			return true;
+		}
+		log(`marker block vanished after attempt ${attempt} (external rewrite suspected)`);
+		if (attempt < maxAttempts) {
+			log('re-running a full attempt against the freshly-fetched body');
+		}
+	}
+	log(
+		`::warning::custom-release-notes block did not survive ${maxAttempts} attempt(s) — external body rewriter may have clobbered it`,
+	);
+	return false;
+}
+
+/**
  * Collect fragments for the given candidate PR numbers.
  * Each PR is verified (skips issues / 404s), its file list is fetched,
  * pending fragments are filtered, and contents are read from the
@@ -553,7 +645,7 @@ async function modeUpdatePr(log) {
 		'--label',
 		'autorelease: pending',
 		'--json',
-		'number,body',
+		'number',
 		'--limit',
 		'5',
 	]);
@@ -562,38 +654,65 @@ async function modeUpdatePr(log) {
 		return 0;
 	}
 	const releasePr = prList.value[0];
-	// Strip any previously-injected block before scanning, so PR/commit
-	// references inside the injected fragments are not re-treated as new
-	// source PRs on the next run.
-	const strippedBody = stripCustomReleaseNotesBlock(releasePr.body || '');
-
-	// Extract direct PR refs and resolve commit-SHA links, then merge.
-	const allCandidates = resolveAllCandidates(strippedBody, log);
-
-	if (allCandidates.length === 0) {
-		log('Release PR body has no PR references (direct or via commit SHAs) — exiting 0');
-		return 0;
-	}
-	log(`collecting fragments for ${allCandidates.length} candidate PR(s): ${allCandidates.map((n) => `#${n}`).join(', ')}`);
-	const entries = collectFragmentsForPrs(allCandidates, repoRoot, log);
-	if (entries.length === 0) {
-		log('No pending fragments found across referenced PRs — exiting 0');
-		return 0;
-	}
-	const combined = combineFragments(entries);
-	const newBody = upsertReleaseNotesBlock(releasePr.body || '', combined);
-	if (newBody === releasePr.body) {
-		log('Release PR body already up to date — exiting 0');
-		return 0;
-	}
-	execFileSync(
-		'gh',
-		['pr', 'edit', String(releasePr.number), '--body-file', '-'],
-		{ input: newBody, encoding: 'utf8', timeout: GH_TIMEOUT_MS },
+	const settleDelayMs = Number.parseInt(
+		process.env.FRAGMENT_SETTLE_DELAY_MS ?? '45000',
+		10,
 	);
-	log(
-		`Updated release PR #${releasePr.number} with ${entries.length} fragment(s)`,
-	);
+
+	// One read-extract-upsert-edit pass over the CURRENT body. Always
+	// re-fetches so a retry after an external rewrite re-extracts candidates
+	// from the fresh body instead of reusing stale combined notes.
+	const runAttempt = async ({ fetchBody, applyEdit, log: attemptLog }) => {
+		const body = (await fetchBody()) ?? '';
+		const strippedBody = stripCustomReleaseNotesBlock(body);
+		const allCandidates = resolveAllCandidates(strippedBody, attemptLog);
+		if (allCandidates.length === 0) {
+			attemptLog('Release PR body has no PR references (direct or via commit SHAs) — nothing to inject');
+			return { body, blockExpected: false };
+		}
+		attemptLog(`collecting fragments for ${allCandidates.length} candidate PR(s): ${allCandidates.map((n) => `#${n}`).join(', ')}`);
+		const entries = collectFragmentsForPrs(allCandidates, repoRoot, attemptLog);
+		if (entries.length === 0) {
+			attemptLog('No pending fragments found across referenced PRs');
+			return { body, blockExpected: false };
+		}
+		const combined = combineFragments(entries);
+		const newBody = upsertReleaseNotesBlock(body, combined);
+		if (newBody !== body) {
+			await applyEdit(newBody);
+			attemptLog(`Updated release PR #${releasePr.number} with ${entries.length} fragment(s)`);
+			return { body: newBody, blockExpected: true };
+		}
+		attemptLog('Release PR body already up to date');
+		return { body, blockExpected: true };
+	};
+
+	const fetchBody = async () => {
+		const res = tryGhJson([
+			'pr',
+			'view',
+			String(releasePr.number),
+			'--json',
+			'body',
+		]);
+		return res.ok ? (res.value?.body ?? '') : '';
+	};
+	const applyEdit = async (newBody) => {
+		execFileSync(
+			'gh',
+			['pr', 'edit', String(releasePr.number), '--body-file', '-'],
+			{ input: newBody, encoding: 'utf8', timeout: GH_TIMEOUT_MS },
+		);
+	};
+
+	await verifyBlockSurvived({
+		runAttempt,
+		fetchBody,
+		applyEdit,
+		sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+		delayMs: Number.isFinite(settleDelayMs) && settleDelayMs >= 0 ? settleDelayMs : 45_000,
+		log,
+	});
 	return 0;
 }
 
@@ -619,11 +738,38 @@ async function modeUpdateRelease(log) {
 	const strippedBody = stripCustomReleaseNotesBlock(releaseBody);
 
 	// Extract direct PR refs and resolve commit-SHA links, then merge.
-	const allCandidates = resolveAllCandidates(strippedBody, log);
+	let allCandidates = resolveAllCandidates(strippedBody, log);
 
+	// Fallback: release-please has been observed to create releases with an
+	// EMPTY body (e.g. v7.146.1, v7.145.1). The tag workspace's CHANGELOG.md
+	// always carries the version section with /commit/<40-hex> links, so it
+	// is a reliable secondary candidate source. Unlike the release PR body,
+	// the GitHub Release body has no regenerator — without this fallback the
+	// release would stay bare forever.
 	if (allCandidates.length === 0) {
-		log('Release body has no PR references (direct or via commit SHAs) — exiting 0');
-		return 0;
+		log('Release body has no PR references — falling back to the CHANGELOG section for this version');
+		const version = tagName.startsWith('v') ? tagName.slice(1) : tagName;
+		const changelogPath = path.join(repoRoot, 'CHANGELOG.md');
+		let section = null;
+		try {
+			section = extractChangelogSection(readFileSync(changelogPath, 'utf8'), version);
+		} catch {
+			log(`CHANGELOG.md not found in workspace (${changelogPath}) — no fallback available`);
+		}
+		if (section === null) {
+			log(`::warning::no PR refs in release body and no CHANGELOG section for ${version} — release stays bare`);
+			// Degenerate release (no changelog entry at all): legitimate.
+			return 0;
+		}
+		allCandidates = resolveAllCandidates(section, log);
+		if (allCandidates.length === 0) {
+			log(`::warning::CHANGELOG section for ${version} exists but yielded no PR candidates — refusing to fail silently`);
+			// Advisory loud failure. Deliberately does NOT gate publish-npm
+			// (that job needs only release-please); this reddens the workflow
+			// run so a bare release is visible instead of silently green.
+			return 1;
+		}
+		log(`resolved ${allCandidates.length} candidate PR(s) from the CHANGELOG fallback`);
 	}
 	log(`collecting fragments for ${allCandidates.length} candidate PR(s): ${allCandidates.map((n) => `#${n}`).join(', ')}`);
 	const entries = collectFragmentsForPrs(allCandidates, repoRoot, log);
