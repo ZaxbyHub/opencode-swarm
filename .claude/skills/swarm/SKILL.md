@@ -89,6 +89,7 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm memory stale` — list stale and low-utility Swarm memories
 - `/swarm memory export` — export current Swarm memory to JSONL files
 - `/swarm memory evaluate` — run golden Swarm memory recall evaluation fixtures
+- `/swarm memory audit-verify` — verify the memory audit-log hash chain (tamper detection)
 - `/swarm memory import` — import legacy JSONL memory into SQLite
 - `/swarm memory migrate` — run the one-time legacy JSONL to SQLite migration
 - `/swarm memory consolidation-log` — summarize recent memory consolidation passes

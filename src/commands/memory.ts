@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadPluginConfig } from '../config/loader';
@@ -54,6 +54,7 @@ export async function handleMemoryCommand(
 		'- `/swarm memory import` - import `.swarm/memory/{memories,proposals}.jsonl` into SQLite',
 		'- `/swarm memory migrate` - run the one-time legacy JSONL to SQLite migration',
 		'- `/swarm memory evaluate --json` - run the golden recall evaluation fixtures and emit a JSON report',
+		'- `/swarm memory audit-verify [--json]` - verify the memory_events audit-log hash chain and report tampering',
 		'- `/swarm memory consolidation-log [--limit <n>]` - summarize recent episodic→semantic consolidation passes (max 50 per query)',
 		// #1850: cohort memory sharing commands.
 		'- `/swarm memory link [name]` - share memory across linked worktrees (requires `memory.link.enabled: true`)',
@@ -539,9 +540,83 @@ export async function handleMemoryEvaluateCommand(
 	].join('\n');
 }
 
+/**
+ * #1466: `/swarm memory audit-verify` — lazily verify the memory_events
+ * hash chain (migration v13) and the _meta chain head. Tampering with any
+ * chained row, deleting a middle row, or editing the last row breaks the
+ * verification. Non-SQLite providers report the gap explicitly instead of
+ * pretending to verify.
+ */
+export async function handleMemoryAuditVerifyCommand(
+	directory: string,
+	args: string[],
+): Promise<string> {
+	const json = args.includes('--json');
+	const unknown = args.find((arg) => arg !== '--json');
+	if (unknown) {
+		return `Usage: /swarm memory audit-verify [--json] (unrecognized argument: ${unknown})`;
+	}
+	const config = resolveCommandMemoryConfig(directory);
+	if (!(config.provider === 'sqlite')) {
+		const message = `## Swarm Memory Audit Verification\n\n- Provider: \`${config.provider}\` — the audit hash chain is a SQLite-provider feature; this provider has no memory_events log to verify.\n- Switch \`memory.provider: 'sqlite'\` to enable tamper-evident audit logging.`;
+		return json
+			? `${JSON.stringify({ supported: false, verified: null, provider: config.provider }, null, 2)}\n`
+			: message;
+	}
+	const provider = new SQLiteMemoryProvider(directory, config);
+	try {
+		const report = await provider.verifyAuditChain();
+		if (json) return `${JSON.stringify(report, null, 2)}\n`;
+		const lines = [
+			'## Swarm Memory Audit Verification',
+			'',
+			`- Verified: \`${report.verified}\``,
+			`- Event rows: \`${report.totalRows}\` (chained: \`${report.chainedRows}\`, pre-chain legacy: \`${report.legacyRows}\`)`,
+			`- Chain head: \`${report.headMatch === null ? 'n/a' : report.headMatch}\``,
+		];
+		if (report.divergence) {
+			lines.push(
+				`- First divergence: row \`${report.divergence.rowId}\` — ${report.divergence.detail}`,
+				'',
+				'The audit log failed verification — a row was tampered with, deleted, or inserted outside the provider. Inspect the memory_events table directly before trusting audit history.',
+			);
+		} else if (!report.verified) {
+			lines.push(
+				'',
+				'The chain links verified but the recorded chain head does not match the last row — the most recent event row or the _meta head was modified outside the provider.',
+			);
+		} else {
+			lines.push('', 'The audit log hash chain is intact.');
+		}
+		return lines.join('\n');
+	} finally {
+		provider.close?.();
+	}
+}
+
 function resolveCommandMemoryConfig(directory: string): MemoryConfig {
 	const loaded = loadPluginConfig(directory).memory;
 	return resolveMemoryConfig(loaded ?? DEFAULT_MEMORY_CONFIG);
+}
+
+/**
+ * #1466 (DD-24): containment check used by `--fixtures`. Strips Windows
+ * extended-length prefixes (`\\?\`) so realpath output compares cleanly, and
+ * compares case-insensitively on win32 (NTFS case-insensitivity — a
+ * drive-letter case variant of a legitimate path must pass).
+ */
+function isPathWithinAnyOf(target: string, roots: string[]): boolean {
+	const strip = (p: string): string => {
+		const stripped = p.startsWith('\\\\?\\UNC\\')
+			? `\\\\${p.slice(8)}`
+			: p.startsWith('\\\\?\\')
+				? p.slice(4)
+				: p;
+		const normalized = path.normalize(stripped) + path.sep;
+		return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+	};
+	const child = strip(target);
+	return roots.some((root) => child.startsWith(strip(root)));
 }
 
 function parseEvaluateArgs(
@@ -570,22 +645,55 @@ function parseEvaluateArgs(
 				};
 			}
 			const resolvedFixtures = path.resolve(directory, next);
-			const canonical = path.normalize(resolvedFixtures) + path.sep;
-			const allowedRootA = path.normalize(directory) + path.sep;
-			const allowedRootB =
-				path.normalize(
-					path.join(PACKAGE_ROOT, 'tests', 'fixtures', 'memory-recall'),
-				) + path.sep;
-			if (
-				!canonical.startsWith(allowedRootA) &&
-				!canonical.startsWith(allowedRootB)
-			) {
+			const projectRoot = path.resolve(directory);
+			// #1466 (DD-24): lexical prefix check first (cheap), then a
+			// filesystem-truth containment check — realpathSync resolves symlinks
+			// (a symlink inside the project pointing outside must not pass) and
+			// canonicalizes drive-letter case on Windows. An unresolvable path
+			// (missing directory, no permission) is rejected here rather than
+			// surfacing as a raw ENOENT from the fixture loader. Roots are
+			// RESOLVED forms so a relative `directory` (e.g. ".") compares
+			// correctly against the resolved fixtures path.
+			const lexicalOk = isPathWithinAnyOf(resolvedFixtures, [
+				projectRoot,
+				path.join(PACKAGE_ROOT, 'tests', 'fixtures', 'memory-recall'),
+			]);
+			if (!lexicalOk) {
 				return {
 					error:
 						'--fixtures <directory> must resolve under the project directory or the bundled tests/fixtures/memory-recall directory',
 				};
 			}
-			fixtureDirectory = resolvedFixtures;
+			let realFixtures: string;
+			try {
+				realFixtures = realpathSync(resolvedFixtures);
+			} catch {
+				return {
+					error:
+						'--fixtures <directory> must be an existing directory inside the project or the bundled fixtures directory (path could not be resolved)',
+				};
+			}
+			const realRoots = [
+				projectRoot,
+				path.join(PACKAGE_ROOT, 'tests', 'fixtures', 'memory-recall'),
+			]
+				.map((root) => {
+					try {
+						return realpathSync(root);
+					} catch {
+						return null;
+					}
+				})
+				.filter((r): r is string => r !== null);
+			if (!isPathWithinAnyOf(realFixtures, realRoots)) {
+				return {
+					error:
+						'--fixtures <directory> escaped the allowed roots via a symlink or non-canonical path; it must stay under the project directory or the bundled tests/fixtures/memory-recall directory',
+				};
+			}
+			// PR #2310 feedback FB-L2: use the VERIFIED canonical path, not the
+			// pre-realpath form — evaluate the directory that was checked.
+			fixtureDirectory = realFixtures;
 			i++;
 			continue;
 		}
@@ -694,8 +802,24 @@ function appendProposalLines(
 			proposal.status === 'rejected'
 				? ` - ${proposal.rejectionReason ?? 'no reason recorded'}`
 				: '';
+		// #1466 (PR-feedback PRR-035): surface the detect-only PII summary
+		// (types/counts/score — never matched text) so the stored metadata
+		// has an operator-visible consumer.
+		const piiSummary = proposal.metadata?.pii as
+			| { score?: number; countsByType?: Record<string, number> }
+			| undefined;
+		const piiNote =
+			piiSummary && typeof piiSummary.score === 'number'
+				? ` pii-score=${piiSummary.score.toFixed(2)}${
+						piiSummary.countsByType
+							? ` (${Object.entries(piiSummary.countsByType)
+									.map(([t, n]) => `${t}x${n}`)
+									.join(', ')})`
+							: ''
+					}`
+				: '';
 		lines.push(
-			`- \`${proposal.id}\` ${proposal.operation} ${proposal.targetMemoryId ?? proposal.proposedRecord?.id ?? 'new'} (${proposal.status})${reason}`,
+			`- \`${proposal.id}\` ${proposal.operation} ${proposal.targetMemoryId ?? proposal.proposedRecord?.id ?? 'new'} (${proposal.status})${reason}${piiNote}`,
 		);
 	}
 }

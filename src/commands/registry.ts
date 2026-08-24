@@ -68,6 +68,7 @@ import { handleLearningCommand } from './learning.js';
 import { handleLinkCommand } from './link.js';
 import { handleLoopCommand } from './loop.js';
 import {
+	handleMemoryAuditVerifyCommand,
 	handleMemoryCommand,
 	handleMemoryCompactCommand,
 	handleMemoryConsolidationLogCommand,
@@ -1655,6 +1656,14 @@ export const COMMAND_REGISTRY = {
 		description: 'Run golden Swarm memory recall evaluation fixtures',
 		subcommandOf: 'memory',
 		args: '--json, --fixtures <directory>',
+		category: 'diagnostics',
+		toolPolicy: 'agent',
+	},
+	'memory audit-verify': {
+		handler: (ctx) => handleMemoryAuditVerifyCommand(ctx.directory, ctx.args),
+		description: 'Verify the memory audit-log hash chain (tamper detection)',
+		subcommandOf: 'memory',
+		args: '--json',
 		category: 'diagnostics',
 		toolPolicy: 'agent',
 	},

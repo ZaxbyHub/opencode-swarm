@@ -1,14 +1,23 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
+import { warn } from '../utils/logger';
 import {
 	DEFAULT_MEMORY_CONFIG,
 	type MemoryConfig,
 	resolveMemoryConfig,
 } from './config';
+import { applyPatchToMemory } from './curator-decision-helpers';
 import { MemoryDisabledError, MemoryValidationError } from './errors';
 import { LocalJsonlMemoryProvider } from './local-jsonl-provider';
 import { canonicalOutcomePayload } from './outcome-events';
+import {
+	computePiiScore,
+	createPiiDetector,
+	type PiiDetector,
+	type PiiFinding,
+	summarizePiiFindings,
+} from './pii';
 import { toRecallBundle } from './prompt-block';
 import type {
 	MemoryProposalStore,
@@ -30,6 +39,7 @@ import {
 	validateMemoryRecordRules,
 } from './schema';
 import type { RecallScoringDiagnostics } from './scoring';
+import { MEMORY_RECALL_SENTINEL } from './sentinel';
 import {
 	isCohortRoot,
 	resolveVettedMemoryRoot,
@@ -93,6 +103,14 @@ export interface RecallMemoryInput {
 	includeExpired?: boolean;
 }
 
+/**
+ * PR #2310 feedback FB-L3: audit target for pii_rejected events. Deliberately
+ * NOT the record id (a content hash of the rejected raw text — writing a
+ * derivative of rejected content into the permanent audit chain defeats the
+ * minimization goal; nothing consumes this field).
+ */
+const PII_REJECTION_EVENT_TARGET = 'pii_rejection';
+
 export class MemoryGateway {
 	private readonly config: MemoryConfig;
 	private readonly provider: MemoryProvider & Partial<MemoryProposalStore>;
@@ -104,6 +122,8 @@ export class MemoryGateway {
 	private readonly vettedRoot: VettedMemoryRoot;
 	private readonly now: () => Date;
 	private disposed = false;
+	/** #1466: cached PII detector instance (NER keeps its loaded pipeline here). */
+	private piiDetector: PiiDetector | undefined;
 
 	constructor(
 		private readonly context: MemoryContext,
@@ -292,6 +312,11 @@ export class MemoryGateway {
 			redactProposalField('relatedMemoryIds', normalizeMemoryText(id)),
 		);
 		let proposalText = `${input.operation}:${targetMemoryId ?? ''}`;
+		// #1466: detect-only PII summary attached to proposal metadata (never
+		// matched text) when memory.redaction.detectPii is enabled.
+		let piiSummary:
+			| { score: number; countsByType: Record<string, number> }
+			| undefined;
 
 		if (needsRecord) {
 			if (!input.kind) {
@@ -319,9 +344,10 @@ export class MemoryGateway {
 				source: sourceFromEvidence(evidenceRefs, this.context),
 				metadata: recordMetadata,
 			});
-			validateMemoryRecordRules(proposedRecord, {
-				rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
-			});
+			// #1466: single funnel call — the helper runs the FULL rule set
+			// (evidence/secret/sentinel + PII threshold when findings are
+			// supplied) exactly once per record.
+			({ piiSummary } = await this.validateRecordWithPiiPolicy(proposedRecord));
 		}
 
 		if (redactedFields.size > 0) {
@@ -371,7 +397,7 @@ export class MemoryGateway {
 			reviewedAt,
 			rejectionReason,
 			createdAt,
-			metadata: {},
+			metadata: piiSummary ? { pii: piiSummary } : {},
 		};
 		return this.provider.createProposal(proposal);
 	}
@@ -410,9 +436,9 @@ export class MemoryGateway {
 
 	async upsertCurated(record: MemoryRecord): Promise<MemoryRecord> {
 		this.assertEnabled();
-		const parsed = validateMemoryRecordRules(record, {
-			rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
-		});
+		// #1466: single validation funnel — full rule set plus PII policy
+		// when enabled (see validateRecordWithPiiPolicy).
+		const { parsed } = await this.validateRecordWithPiiPolicy(record);
 		return this.provider.upsert(parsed);
 	}
 
@@ -441,6 +467,13 @@ export class MemoryGateway {
 				'corrected outcomes require correction text',
 			);
 		}
+		// PR #2310 feedback FB-3: correction text is free text that lands in
+		// durable outcome storage and is re-injected into prompts via the
+		// reflection path — run it through the same write-boundary checks as
+		// record bodies (sentinel/bundle bans + configured PII policy).
+		if (input.correction) {
+			await this.enforcePiiTextPolicy(normalizeMemoryText(input.correction));
+		}
 		let targetId = input.memoryId;
 		if (!targetId) {
 			const candidate = this.createRecord({
@@ -453,7 +486,13 @@ export class MemoryGateway {
 				metadata: { outcomeQuestion: question },
 			});
 			const existing = await this.provider.get(candidate.id);
-			if (!existing) await this.provider.upsert(candidate);
+			if (!existing) {
+				// #1466: the outcome-evidence record embeds the (user-supplied)
+				// question text — run PII enforcement on it like any other
+				// durable write.
+				await this.validateRecordWithPiiPolicy(candidate);
+				await this.provider.upsert(candidate);
+			}
 			targetId = candidate.id;
 		}
 		// A write-through publication failure may cause the exact tool invocation
@@ -523,7 +562,171 @@ export class MemoryGateway {
 		}
 		const parsed = validateCuratorMemoryDecision(decision);
 		const resolved = this.resolveCuratorDecision(parsed);
+		// #1466: PII enforcement on curator-materialized durable records
+		// (add / supersede replacement). The records were already rule-validated
+		// by createRecordFromNew; re-validation with findings is idempotent.
+		if (resolved.action === 'add' && resolved.memory) {
+			await this.validateRecordWithPiiPolicy(resolved.memory);
+		} else if (resolved.action === 'supersede' && resolved.replacement) {
+			await this.validateRecordWithPiiPolicy(resolved.replacement);
+		} else if (
+			resolved.action === 'update' &&
+			resolved.patch?.text !== undefined
+		) {
+			// #1466 (final-critic item 1): the provider merges the patch inside
+			// its own transaction, where the PII detector cannot run — so the
+			// gateway pre-merges patch text against the current record and runs
+			// the SAME validation funnel on the merged result before applying.
+			// Patch-less text edits (no new text) are covered by the original
+			// record's validation.
+			const existing = await this.provider.get(resolved.targetMemoryId);
+			if (existing) {
+				const merged = applyPatchToMemory(
+					existing,
+					resolved.patch,
+					this.now().toISOString(),
+				);
+				await this.validateRecordWithPiiPolicy(merged);
+			}
+			// Absent target: the provider fails the decision with its own
+			// typed error — nothing to validate.
+		}
 		return this.provider.applyCuratorDecision(resolved);
+	}
+
+	/**
+	 * #1466: single write-boundary validation for every durable-record-
+	 * materializing path (propose, upsertCurated, recordOutcome-created
+	 * records, applyCuratorDecision).
+	 *
+	 * ALWAYS runs the full `validateMemoryRecordRules` rule set exactly ONCE
+	 * per record (evidence/secret/sentinel rules — including when PII policy
+	 * is off, the default). When `detectPii`/`rejectDurablePii` is on, the
+	 * configured detector runs first and its findings ride the same single
+	 * validation call (threshold logic lives only in the schema funnel). On a
+	 * PII rejection the `pii_rejected` audit event is logged (types/score
+	 * only, never matched text) before rethrowing; the rejected record is NOT
+	 * persisted — storing rejected PII text would defeat the control.
+	 *
+	 * Returns the parsed record plus a matched-text-free PII summary for
+	 * metadata annotation (undefined when nothing was found or detection is
+	 * off). A detector that cannot run (opt-in NER without the peer
+	 * dependency) fails closed with a typed error — never a silent skip.
+	 */
+	private async validateRecordWithPiiPolicy(record: MemoryRecord): Promise<{
+		parsed: MemoryRecord;
+		piiSummary?: { score: number; countsByType: Record<string, number> };
+	}> {
+		const { detectPii, rejectDurablePii } = this.config.redaction;
+		let findings: PiiFinding[] | undefined;
+		if (detectPii || rejectDurablePii) {
+			if (!this.piiDetector) {
+				this.piiDetector = createPiiDetector(this.config.redaction.piiDetector);
+			}
+			findings = await this.piiDetector.detect(record.text);
+		}
+		try {
+			const parsed = validateMemoryRecordRules(record, {
+				rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
+				piiFindings: findings,
+				rejectDurablePii,
+				piiThreshold: this.config.redaction.piiThreshold,
+			});
+			return {
+				parsed,
+				...(findings && findings.length > 0
+					? {
+							piiSummary: {
+								score: computePiiScore(findings),
+								countsByType: findings.reduce<Record<string, number>>(
+									(acc, f) => {
+										acc[f.type] = (acc[f.type] ?? 0) + 1;
+										return acc;
+									},
+									{},
+								),
+							},
+						}
+					: {}),
+			};
+		} catch (err) {
+			if (
+				err instanceof MemoryValidationError &&
+				err.code === 'memory_pii_rejected'
+			) {
+				// PR #2310 feedback PRR-003/FB-L3: an audit-write failure must
+				// never REPLACE the typed privacy-rejection error, and the
+				// event target must not be the content-derived record id (a
+				// hash of the rejected raw text).
+				try {
+					await this.provider.recordEvent?.(
+						'pii_rejected',
+						PII_REJECTION_EVENT_TARGET,
+						err.message,
+					);
+				} catch (auditErr) {
+					warn(
+						'[memory] failed to persist pii_rejected audit event (the PII rejection itself still applies)',
+						{
+							reason:
+								auditErr instanceof Error ? auditErr.message : String(auditErr),
+						},
+					);
+				}
+			}
+			throw err;
+		}
+	}
+
+	/**
+	 * PR #2310 feedback FB-3: free-text that becomes durable memory state
+	 * WITHOUT being a MemoryRecord body (outcome `correction` text — up to
+	 * 4000 chars, agent-callable, and re-injected into prompts via the
+	 * reflection path) must pass the same write-boundary checks: the DD-14
+	 * sentinel/bundle bans and, when configured, the PII threshold.
+	 */
+	private async enforcePiiTextPolicy(text: string): Promise<void> {
+		if (text.includes(MEMORY_RECALL_SENTINEL)) {
+			throw new MemoryValidationError(
+				'correction text cannot contain the recall sentinel header',
+			);
+		}
+		if (text.includes('bundle_')) {
+			throw new MemoryValidationError(
+				'correction text cannot contain the recall bundle marker prefix',
+			);
+		}
+		const { detectPii, rejectDurablePii } = this.config.redaction;
+		if (!detectPii && !rejectDurablePii) return;
+		if (!this.piiDetector) {
+			this.piiDetector = createPiiDetector(this.config.redaction.piiDetector);
+		}
+		const findings = await this.piiDetector.detect(text);
+		const score = computePiiScore(findings);
+		if (rejectDurablePii && score > this.config.redaction.piiThreshold) {
+			const summary = summarizePiiFindings(findings);
+			const message = `durable memory correction exceeds the PII threshold: score ${score.toFixed(2)} (types: ${
+				Object.entries(summary.countsByType)
+					.map(([t, n]) => `${t}x${n}`)
+					.join(', ') || 'none'
+			}) exceeded threshold ${this.config.redaction.piiThreshold.toFixed(2)}`;
+			try {
+				await this.provider.recordEvent?.(
+					'pii_rejected',
+					PII_REJECTION_EVENT_TARGET,
+					message,
+				);
+			} catch (auditErr) {
+				warn(
+					'[memory] failed to persist pii_rejected audit event (the PII rejection itself still applies)',
+					{
+						reason:
+							auditErr instanceof Error ? auditErr.message : String(auditErr),
+					},
+				);
+			}
+			throw new MemoryValidationError(message, 'memory_pii_rejected');
+		}
 	}
 
 	createRecord(input: {
@@ -538,8 +741,16 @@ export class MemoryGateway {
 		metadata?: Record<string, unknown>;
 		anchors?: MemoryAnchor[];
 		outcomes?: MemoryOutcome[];
+		/** #1466: audit reason stamped when this record supersedes another. */
+		supersedesReason?: string;
 	}): MemoryRecord {
-		const now = this.now().toISOString();
+		// PR #2310 feedback FB-3: ONE clock read for createdAt and expiresAt.
+		// Two separate this.now() reads straddling a millisecond made the
+		// scratch 7-day expiry check compute (now2 - now1) + 7d > 7d and
+		// spuriously reject legitimate scratch proposals (and flaked the
+		// write-boundary test at the same rate).
+		const nowDate = this.now();
+		const now = nowDate.toISOString();
 		const text = normalizeMemoryText(input.text);
 		const kind = input.kind;
 		const stability =
@@ -551,7 +762,7 @@ export class MemoryGateway {
 		const scope = this.resolveRecordScope(input.scope, stability);
 		const expiresAt =
 			kind === 'scratch'
-				? new Date(this.now().getTime() + 7 * 24 * 60 * 60 * 1000).toISOString()
+				? new Date(nowDate.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString()
 				: undefined;
 		const recordBase = { scope, kind, text };
 		const record: MemoryRecord = {
@@ -579,10 +790,19 @@ export class MemoryGateway {
 				: undefined,
 			producerSessionId: this.context.sessionID,
 			producerAgentRole: this.context.agentRole,
-			redactionPolicyVersion: computeRedactionPolicyVersion(
-				this.config.redaction.rejectDurableSecrets,
-			),
+			redactionPolicyVersion: computeRedactionPolicyVersion({
+				rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
+				detectPii: this.config.redaction.detectPii,
+				rejectDurablePii: this.config.redaction.rejectDurablePii,
+				piiDetector: this.config.redaction.piiDetector,
+			}),
 			providerVersion: this.provider.name,
+			// #1466 Phase 6 provenance. sourceTaskId comes from the unit-of-work
+			// identity and is never defaulted to sessionID (MemoryContext.unitId
+			// contract). validFrom records when this memory became authoritative.
+			sourceTaskId: this.context.unitId,
+			validFrom: now,
+			supersedesReason: input.supersedesReason,
 		};
 		return record;
 	}

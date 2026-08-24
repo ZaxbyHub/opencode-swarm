@@ -73,7 +73,7 @@ function dbPathFor(root: string): string {
 // v2 is skipped (LEGACY_JSONL_MIGRATION_VERSION — see jsonl-migration.ts)
 // ---------------------------------------------------------------------------
 describe('FB-001 — migration renumber coverage', () => {
-	test('migrations v1-v11 are sequential with no version skipping except v2', async () => {
+	test('migrations v1-v13 are sequential with no version skipping except v2', async () => {
 		const root = await providerRoot('v1-v10-sequential');
 		const provider = track(
 			new SQLiteMemoryProvider(root, { enabled: true, provider: 'sqlite' }),
@@ -88,7 +88,7 @@ describe('FB-001 — migration renumber coverage', () => {
 				'SELECT MAX(version) as max_version FROM schema_migrations',
 			)
 			.get();
-		expect(row?.max_version).toBe(11);
+		expect(row?.max_version).toBe(13);
 
 		// Verify each expected version is recorded.
 		// v2 is inserted by LEGACY_JSONL_MIGRATION_VERSION (jsonl-migration.ts:9)
@@ -99,7 +99,7 @@ describe('FB-001 — migration renumber coverage', () => {
 			)
 			.all();
 		expect(applied.map((r) => r.version)).toEqual([
-			1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+			1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
 		]);
 	});
 
@@ -274,6 +274,6 @@ describe('FB-001 — migration renumber coverage', () => {
 				'SELECT MAX(version) as max_version FROM schema_migrations',
 			)
 			.get();
-		expect(maxRow?.max_version).toBe(11);
+		expect(maxRow?.max_version).toBe(13);
 	});
 });

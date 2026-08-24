@@ -360,7 +360,9 @@ describe('swarm-subcommand-parity', () => {
 		// after verifying the skill's subcommand list is updated to match.
 		// 102 → 103: /swarm recover added (issue #2268), documented in
 		// .claude/skills/swarm/SKILL.md.
-		expect(expectedCommands.size).toBe(103);
+		// 103 → 104: /swarm memory audit-verify added (issue #1466), documented
+		// in .claude/skills/swarm/SKILL.md.
+		expect(expectedCommands.size).toBe(104);
 
 		console.info(
 			`[swarm-subcommand-parity] skill documented commands (raw): ${skillRawCommands.length}`,

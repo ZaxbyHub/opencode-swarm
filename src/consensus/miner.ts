@@ -1245,7 +1245,9 @@ export async function mineConsensus(
 		attributes: summary.attributes,
 		proposals,
 		truncation,
-		redactionPolicyVersion: computeRedactionPolicyVersion(false),
+		redactionPolicyVersion: computeRedactionPolicyVersion({
+			rejectDurableSecrets: false,
+		}),
 	};
 	const integrityHash = computeConsensusIntegrityHash(body);
 	const report = ConsensusReportV1Schema.parse({
