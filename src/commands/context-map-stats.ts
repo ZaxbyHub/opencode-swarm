@@ -15,7 +15,7 @@ export async function handleContextMapStatsCommand(
 ): Promise<string> {
 	const summary = getTelemetrySummary(directory);
 
-	if (summary.total_delegations === 0) {
+	if (summary.total_delegations === 0 && summary.corrupt_entries === 0) {
 		return 'No capsule telemetry recorded.';
 	}
 

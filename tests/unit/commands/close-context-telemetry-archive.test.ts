@@ -31,8 +31,16 @@ describe('/swarm close × context-map telemetry store (#2037)', () => {
 		for (const artifact of CONTEXT_TELEMETRY_ARTIFACTS) {
 			expect(archive).toContain(`'${artifact}'`);
 		}
-		// The finalize-before-archive wiring must exist (fold tail => atomic cut).
-		expect(closeSource).toContain('finalizeContextTelemetry(');
+		// The finalize-before-archive wiring must EXIST and be ORDERED ahead of
+		// the archive loop (fold tail => atomic cut). A refactor that moves the
+		// call after the copy, or into a dead branch, must fail here.
+		const finalizeIndex = closeSource.indexOf('finalizeContextTelemetry(');
+		const archiveLoopIndex = closeSource.indexOf(
+			'for (const artifact of ARCHIVE_ARTIFACTS)',
+		);
+		expect(finalizeIndex).toBeGreaterThan(-1);
+		expect(archiveLoopIndex).toBeGreaterThan(-1);
+		expect(finalizeIndex).toBeLessThan(archiveLoopIndex);
 	});
 
 	it('never cleans the context-map telemetry store (cross-session state survives close)', () => {

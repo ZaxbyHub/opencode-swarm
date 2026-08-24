@@ -3,7 +3,7 @@
 Companion to `docs/evidence-and-telemetry.md` (evidence bundles + the legacy
 telemetry stream from a user's point of view) and `docs/engineering-invariants.md`
 (the invariant this PR establishes). This document is the contract definition for
-`src/observability/`: the canonical event envelope, the 44-entry event catalog,
+`src/observability/`: the canonical event envelope, the 46-entry event catalog,
 the legacy adapter, sampling/cardinality rules, the OTel mapping pin, and the
 exhaustive producer/consumer matrix across all seventeen known observability
 stores in the repository.
@@ -16,7 +16,7 @@ Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
 
 **What this PR defines.** A single canonical `ObservabilityEvent` envelope
 (`src/observability/envelope.ts`), a discriminated catalog of every event kind
-the codebase emits today (`src/observability/catalog.ts`, 44 entries), a
+the codebase emits today (`src/observability/catalog.ts`, 46 entries), a
 relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. It wires the envelope into the one live production
@@ -75,7 +75,7 @@ in production stops anything or is visible anywhere today — it is not.
 
 Defined in `src/observability/envelope.ts` as a zod schema (`z.infer`d for the
 `ObservabilityEvent` type). The schema is safe-parsed by the tests
-(`tests/unit/observability/envelope-roundtrip.test.ts`, all 44 kinds). It is **not** parsed by the
+(`tests/unit/observability/envelope-roundtrip.test.ts`, all 46 kinds). It is **not** parsed by the
 CI contract check, and **not** parsed on the `emit()` hot path; `createObservation` builds a plain
 object and never calls `.parse()`, because parsing would reallocate on every
 emit and would clone or reject `legacy.raw` (see §4).
@@ -598,7 +598,7 @@ contents or workspace layout.
 
 **Every row carries a `file:line` citation, but those citations are
 UNGATED and go stale on any rebase that shifts a cited file.**
-`scripts/check-event-contract.ts` mechanically validates the 44-entry
+`scripts/check-event-contract.ts` mechanically validates the 46-entry
 *catalog* in §5 (catalog ↔ `TelemetryEvent` union parity, per-entry
 completeness) — it does not and cannot check this prose matrix. Treat a
 citation here as "verified as of `origin/main` `0060f48d`", not as a standing
@@ -627,7 +627,7 @@ row 17 records the authoritative knowledge-receipt partition added by #2031.
 | # | Store | Writer (file:line) | Reader(s) (file:line) | Discriminator | Clock | Schema ver. | Correlation carried | Correlation MISSING | Close/archive | State class | Owner |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | 1 | `.swarm/telemetry.jsonl` (+`.1`) | `src/telemetry.ts:299` (the `stream.write(line, …)` call) | `src/services/cost-accounting.ts:133` (`readTelemetryEvents`) → `summarizeTelemetryCosts:124` → `/swarm costs`; `src/evaluation/gate-stats.ts:99`; in-process `addTelemetryListener` heartbeat (`src/telemetry.ts:146-163`) → `/swarm status` | `event` | ISO string | none | `sessionId`, `taskId`, `agentName`, `gate` | no trace/span id, no delegation id linking begin↔end; `gate_parse_error` has no `sessionId` (`gateParseError` emit payload, `src/telemetry.ts:457-461`) | yes — `close.ts:270-297` | operational | #2045 (lifecycle/terminals), #2043 (cost provenance) |
-| 2 | `.swarm/context-telemetry.jsonl` | `src/context-map/telemetry.ts:154` | `src/context-map/telemetry.ts:181,225` → `src/commands/context-map-stats.ts:6,11` (sole non-test consumer, verified) | none (uniform shape) | ISO string | none | `task_id` only | `session_id`, agent identity beyond a free-text `agent_role` | **no** | operational | **#2037** |
+| 2 | `.swarm/context-telemetry.jsonl` | `src/context-map/telemetry.ts:663` `recordTelemetry` (writes the store; compaction/atomic-rewrite at `compactStore:859` / `atomicReplace:488`) | `src/context-map/telemetry.ts:734` `getTelemetrySummary` → `src/commands/context-map-stats.ts:16` (sole non-test consumer, verified) | none (uniform shape) | ISO string | none | `task_id` only | `session_id`, agent identity beyond a free-text `agent_role` | **no** | operational | **#2037** |
 | 3 | `.swarm/skill-usage.jsonl` | `src/hooks/skill-usage-log.ts:233` | `readSkillUsageEntries:321`, `readSkillUsageEntriesTail:389`, `applySkillUsageFeedback:760` → `bumpKnowledgeConfidenceBatch` | `type` (marker variant only) | ISO string | none (`skillVersion` versions the *skill*, not the record) | `sessionID`, `agentName`, `taskID`, `skillPath` | no trace/span | **no** | derived | **#2038** |
 | 4 | `.swarm/events.jsonl` | ~30 call sites | `src/services/context-budget-service.ts:195` (line-count proxy for turn count — does NOT parse JSON); `src/hooks/curator.ts:1524` | **`event` OR `type`** (split across writers: `src/context/role-filter.ts:147`/`src/tools/phase-complete.ts:1571` use `event:`; `src/hooks/curator.ts:1759`/`src/hooks/full-auto-intercept.ts:269` use `type:`) | ISO string | none | inconsistent per writer | `sessionID` absent on `phase_complete`, `auto_oversight`, `context_filtered` | yes — `close.ts:275` | operational | **#2039** |
 | 5 | `<knowledgeStore>/knowledge-events.jsonl` | `src/hooks/knowledge-events.ts` | `curator-postmortem.ts`, `knowledge-escalator.ts` (display-only escalation history), `knowledge-diagnostics.ts`, `learning-metrics.ts`; **no correctness reader** | `type` | ISO string | `schema_version` = 1 | `event_id`, `trace_id`, `session_id`, `task_id`, `phase`, `agent` | not authoritative; rows may be evicted and source values remain #2032-owned | follows the linked knowledge store; bounded FIFO | operational | #2032 (outcome/source normalization) |

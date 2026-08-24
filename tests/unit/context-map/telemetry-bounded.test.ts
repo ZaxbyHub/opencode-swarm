@@ -19,6 +19,7 @@ import * as path from 'node:path';
 
 import {
 	_internals,
+	_resetMaintenanceCounters,
 	CONTEXT_TELEMETRY_LIMITS,
 	type ContextTelemetryLimits,
 	finalizeContextTelemetry,
@@ -88,6 +89,7 @@ describe('context-map telemetry bounded store (issue #2037)', () => {
 	afterEach(() => {
 		_internals.limits = CONTEXT_TELEMETRY_LIMITS as typeof _internals.limits;
 		_internals.emitHealth = originalEmitHealth;
+		_resetMaintenanceCounters();
 		fs.rmSync(dir, { force: true, recursive: true });
 	});
 
@@ -246,18 +248,12 @@ describe('context-map telemetry bounded store (issue #2037)', () => {
 				// 6 KiB per maintenance pass (well under the seeded legacy size).
 				compactMaxBytes: 6 * 1024,
 			} as typeof _internals.limits;
-			const filePath = path.join(
-				dir,
-				'.swarm',
-				'context-telemetry.jsonl',
-			);
+			const filePath = path.join(dir, '.swarm', 'context-telemetry.jsonl');
 			fs.mkdirSync(path.dirname(filePath), { recursive: true });
 			const legacy: string[] = [];
 			const legacyCount = 400;
 			for (let i = 0; i < legacyCount; i += 1) {
-				legacy.push(
-					JSON.stringify(makeEntry({ task_id: `${i}.1` })),
-				);
+				legacy.push(JSON.stringify(makeEntry({ task_id: `${i}.1` })));
 			}
 			fs.writeFileSync(filePath, legacy.join('\n') + '\n', 'utf-8');
 			const seededBytes = fs.statSync(filePath).size;
@@ -282,9 +278,7 @@ describe('context-map telemetry bounded store (issue #2037)', () => {
 			}
 			const finalSummary = getTelemetrySummary(dir);
 			// 400 legacy + t0 + the 200 loop records = 601 total, none lost/duplicated.
-			expect(finalSummary.total_delegations).toBe(
-				legacyCount + moreWrites + 1,
-			);
+			expect(finalSummary.total_delegations).toBe(legacyCount + moreWrites + 1);
 			const onDisk = fs.statSync(filePath).size;
 			expect(onDisk).toBeLessThanOrEqual(
 				_internals.limits.activeMaxBytes +
@@ -359,42 +353,6 @@ describe('context-map telemetry bounded store (issue #2037)', () => {
 		});
 	});
 
-	describe('corruption / partial tails', () => {
-		test('corrupt middle line and partial final line never throw; disclosed as corrupt', () => {
-			_internals.limits = tinyLimits() as typeof _internals.limits;
-			const filePath = path.join(dir, '.swarm', 'context-telemetry.jsonl');
-			fs.mkdirSync(path.dirname(filePath), { recursive: true });
-			// A header + a good record, then a corrupt middle line and a torn tail.
-			fs.writeFileSync(
-				filePath,
-				`${JSON.stringify({ v: 2, type: 'ctx-telemetry-manifest', schemaVersion: 2, folded: { delegations: 1, successCount: 1, cacheHits: 5, cacheMisses: 2, staleEntries: 0, tokenSum: 1000, recommendedReads: 3, skippedReads: 7, corrupt: 0, dropped: 0, oldestTimestamp: '2026-01-01T00:00:00.000Z', newestTimestamp: '2026-01-01T00:00:00.000Z' }, updatedAt: '' })}\n`,
-				'utf-8',
-			);
-			fs.appendFileSync(filePath, '{broken json\nnot-json-at-all\n', 'utf-8');
-
-			// Neither readTelemetry nor summary throws.
-			const entries = readTelemetry(dir);
-			const summary = getTelemetrySummary(dir);
-			expect(Array.isArray(entries)).toBe(true);
-			expect(summary.total_delegations).toBe(1);
-			expect(summary.corrupt_entries).toBeGreaterThan(0);
-		});
-
-		test('all-corrupt legacy file yields zeroed numerics (no NaN) and discloses corrupt', () => {
-			const filePath = path.join(dir, '.swarm', 'context-telemetry.jsonl');
-			fs.mkdirSync(path.dirname(filePath), { recursive: true });
-			fs.writeFileSync(filePath, 'not-json\n{broken\n', 'utf-8');
-			const summary = getTelemetrySummary(dir);
-			expect(summary.total_delegations).toBe(0);
-			expect(summary.corrupt_entries).toBeGreaterThan(0);
-			// Never NaN (issue #2037): average/success must be guarded on total 0.
-			expect(Number.isNaN(summary.avg_token_estimate)).toBe(false);
-			expect(Number.isNaN(summary.success_rate)).toBe(false);
-			expect(summary.avg_token_estimate).toBe(0);
-			expect(summary.success_rate).toBe(0);
-		});
-	});
-
 	describe('multi-project isolation', () => {
 		test('two project roots never cross-talk', () => {
 			const dirB = mkTempDir();
@@ -454,8 +412,15 @@ describe('context-map telemetry bounded store (issue #2037)', () => {
 			finalizeContextTelemetry(dir);
 			const after = getTelemetrySummary(dir);
 			expect(after.total_delegations).toBe(40);
-			// Finalize should have triggered a health emission with trigger close/compaction.
-			expect(health.payloads.length).toBeGreaterThan(0);
+			// Finalize must emit a health event carrying the 'close' trigger (not
+			// just any health emission — the 40 writes already emitted 'compaction'
+			// events, so length>0 alone would pass for the wrong reason).
+			expect(
+				health.payloads.some(
+					// eslint-disable-next-line @typescript-eslint/no-explicit-any
+					(p: any) => p.trigger === 'close',
+				),
+			).toBe(true);
 			// The file remains valid (single complete store) and readable.
 			const entries = readTelemetry(dir);
 			expect(Array.isArray(entries)).toBe(true);

@@ -280,7 +280,7 @@ rg -n "CREATE TABLE" src --type ts -g '!**/__tests__/**' -g '!*.test.ts'
 
 # The gate's own enumeration (single source of truth going forward)
 bun run scripts/check-retention-registry.ts
-# Result: "Retention registry check passed: 98 rows … every enumerated writer
+# Result: "Retention registry check passed: 99 rows … every enumerated writer
 # module is registered or exempt."
 ```
 

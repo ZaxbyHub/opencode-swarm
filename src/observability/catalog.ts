@@ -10,7 +10,7 @@
  * The 42nd is the human-only `knowledge_maintenance` quarantine audit
  * (issue #2033), the 43rd is the aggregate `context_pruned` transcript
  * mutation audit, the 44th is the bounded `residue_health` atomic-write
- * residue audit (issue #2035), and the 45th is the bounded
+ * residue audit (issue #2035), and the 46th is the bounded
  * `context_telemetry_health` storage audit for the issue-#2037
  * `.swarm/context-telemetry.jsonl` store. These late additions are instances of
  * the defect class this contract exists to close: an event kind entering the

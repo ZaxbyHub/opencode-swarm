@@ -96,26 +96,36 @@ export const CONTEXT_TELEMETRY_LIMITS: ContextTelemetryLimits = {
 /**
  * Runtime validator for parsed JSONL lines (the TelemetryEntry shape). Ensures
  * all required fields are present and have the correct primitive types so that
- * aggregation never produces `NaN` from undefined/non-number fields. The
- * manifest header line (`v`/`type`/...) fails this validator, which is intended
- * — the header is handled explicitly before records are parsed.
+ * aggregation never produces `NaN` (or `Infinity`) from undefined/non-finite
+ * number fields. The manifest header line (`v`/`type`/...) fails this
+ * validator, which is intended — the header is handled explicitly before
+ * records are parsed.
+ *
+ * The on-disk file is UNTRUSTED (issue #2037): a manually edited or externally
+ * written line could carry a non-finite number (`JSON.parse('1e309')` →
+ * `Infinity`), so every numeric field is also required to be finite and
+ * non-negative, matching the defensive `num()` guard used for the manifest
+ * header. Such lines are treated as corrupt and never folded into the
+ * aggregate.
  */
 function isValidTelemetryEntry(value: unknown): value is TelemetryEntry {
 	if (typeof value !== 'object' || value === null) {
 		return false;
 	}
 	const obj = value as Record<string, unknown>;
+	const nonNegFinite = (v: unknown): boolean =>
+		typeof v === 'number' && Number.isFinite(v) && v >= 0;
 	return (
 		typeof obj.timestamp === 'string' &&
 		typeof obj.task_id === 'string' &&
 		typeof obj.agent_role === 'string' &&
 		typeof obj.delegation_reason === 'string' &&
-		typeof obj.token_estimate === 'number' &&
-		typeof obj.cache_hits === 'number' &&
-		typeof obj.cache_misses === 'number' &&
-		typeof obj.stale_entries === 'number' &&
-		typeof obj.recommended_reads === 'number' &&
-		typeof obj.skipped_reads === 'number' &&
+		nonNegFinite(obj.token_estimate) &&
+		nonNegFinite(obj.cache_hits) &&
+		nonNegFinite(obj.cache_misses) &&
+		nonNegFinite(obj.stale_entries) &&
+		nonNegFinite(obj.recommended_reads) &&
+		nonNegFinite(obj.skipped_reads) &&
 		typeof obj.success === 'boolean'
 	);
 }
@@ -410,6 +420,11 @@ function readBoundedChunk(
 			_internals.closeSync(fd);
 		}
 	} catch {
+		// Fail-open: never break the caller on a transient I/O error (EIO,
+		// EBUSY on Windows AV, permissions). Emit a debug-gated ops signal
+		// so a silent empty read isn't mistaken for "no data yet" (issue
+		// #2037). `warnThrottled` is debug-gated, so this is not chat noise.
+		warnThrottled('bounded read failed (transient I/O)');
 		return { text: '', truncated: false };
 	}
 }
@@ -456,10 +471,10 @@ function cloneFolded(agg: FoldedAggregate): FoldedAggregate {
 		skippedReads: agg.skippedReads,
 		corrupt: agg.corrupt,
 		dropped: agg.dropped,
-			oldestTimestamp: agg.oldestTimestamp,
-			newestTimestamp: agg.newestTimestamp,
-		};
-	}
+		oldestTimestamp: agg.oldestTimestamp,
+		newestTimestamp: agg.newestTimestamp,
+	};
+}
 
 // ---------------------------------------------------------------------------
 // Atomic single-file publish
@@ -548,6 +563,17 @@ function withStoreLock<T>(directory: string, fn: () => T): T | null {
 let _recordCount = 0;
 let _lastWarnAt = 0;
 
+/**
+ * Test seam (AGENTS.md invariant 7): resets the module-scoped maintenance
+ * counters so an unswept run in Bun's shared test-runner process cannot shift
+ * a later test's first maintenance pass. Restore is one call, always in
+ * `afterEach`.
+ */
+export function _resetMaintenanceCounters(): void {
+	_recordCount = 0;
+	_lastWarnAt = 0;
+}
+
 function shouldRunMaintenance(): boolean {
 	_recordCount += 1;
 	if (_recordCount >= _internals.limits.checkInterval) {
@@ -580,11 +606,11 @@ interface StoreView {
 }
 
 function readStore(directory: string, bounded: boolean): StoreView {
-		const filePath = telemetryFilePath(directory);
-		if (!_internals.existsSync(filePath)) {
-			return { manifest: null, records: [], corruptLines: 0, truncated: false };
-		}
-		let text: string;
+	const filePath = telemetryFilePath(directory);
+	if (!_internals.existsSync(filePath)) {
+		return { manifest: null, records: [], corruptLines: 0, truncated: false };
+	}
+	let text: string;
 	let truncated = false;
 	if (bounded) {
 		const chunk = readBoundedChunk(filePath, _internals.limits.readMaxBytes);
@@ -760,7 +786,8 @@ export function getTelemetrySummary(directory: string): TelemetrySummary {
 			avg_token_estimate: total > 0 ? Math.round(folded.tokenSum / total) : 0,
 			total_recommended_reads: folded.recommendedReads,
 			total_skipped_reads: folded.skippedReads,
-			success_rate: total > 0 ? Math.round((folded.successCount / total) * 100) : 0,
+			success_rate:
+				total > 0 ? Math.round((folded.successCount / total) * 100) : 0,
 			coverage,
 			tracked_period_ms: periodMs(
 				folded.oldestTimestamp,
@@ -778,7 +805,11 @@ export function getTelemetrySummary(directory: string): TelemetrySummary {
 	const agg = cloneFolded(view.manifest.folded);
 	for (const rec of view.records) foldEntryInto(agg, rec);
 	const total = agg.delegations;
-	if (total === 0 && view.records.length === 0) {
+	// Mirror the legacy branch's corrupt check: a valid header with zero
+	// delegations but a corrupt-only raw window must still disclose the corrupt
+	// count rather than a fully-zeroed (corrupt_entries: 0) summary (issue
+	// #2037).
+	if (total === 0 && view.records.length === 0 && corrupt === 0) {
 		return zero();
 	}
 	// Header present. A header'd store can exceed the read bound only while a
@@ -1078,8 +1109,7 @@ function runMaintenance(directory: string): void {
 			filePath,
 			_internals.limits.headerMaxBytes + 64,
 		);
-		const isLegacy =
-			parseManifestLine(head.text.split('\n')[0] ?? '') === null;
+		const isLegacy = parseManifestLine(head.text.split('\n')[0] ?? '') === null;
 		const drainThreshold =
 			_internals.limits.activeMaxBytes +
 			_internals.limits.headerMaxBytes +
