@@ -72,6 +72,12 @@ export interface DispatchWithModelFallbackOptions<T> {
 	backoffMs?: (retryAttempt: number) => number;
 	/** Notified when advancing to a fallback model (for advisory/telemetry). */
 	onFallback?: (info: { toModel: string; fallbackIndex: number }) => void;
+	/**
+	 * Issue #2103 workstream E: initial fallback index (0 = primary). Callers
+	 * pass `peekModelFallbackIndex(sessionID, swarmId, baseRole)` so a
+	 * guardrails-recorded per-session override reaches the actual dispatch.
+	 */
+	startFallbackIndex?: number;
 	/** DI for tests (avoid real waits). */
 	sleep?: (ms: number) => Promise<void>;
 }
@@ -97,8 +103,12 @@ export async function dispatchWithModelFallback<T>(
 	let lastError: unknown;
 	let anyDispatched = false;
 
-	// fallbackIndex 0 = primary (registered model, override undefined).
-	for (let fallbackIndex = 0; ; fallbackIndex++) {
+	// fallbackIndex 0 = primary (registered model, override undefined). A
+	// startFallbackIndex > 0 honors a per-session override recorded by
+	// guardrails (issue #2103 workstream E): the loop seeds at that index so
+	// the first dispatch already uses the recorded fallback model.
+	const startIndex = Math.max(0, Math.floor(opts.startFallbackIndex ?? 0));
+	for (let fallbackIndex = startIndex; ; fallbackIndex++) {
 		let model: ModelOverride | undefined;
 		let modelUsed: string | undefined;
 		if (fallbackIndex > 0) {

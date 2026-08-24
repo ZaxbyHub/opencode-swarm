@@ -38,6 +38,7 @@ import {
 	ALLOWED_SKILL_PATH_PREFIXES,
 	validateSkillPath,
 } from '../hooks/knowledge-validator.js';
+import { withAbortDeadline } from '../utils/abort-deadline.js';
 import { atomicWriteFileAnyRoot } from '../utils/atomic-write';
 import { warn } from '../utils/logger.js';
 import { appendSkillChangelog } from './skill-changelog.js';
@@ -1514,10 +1515,8 @@ export async function autoApplyProposals(
 		].join('\n');
 
 		try {
-			const response = await llmDelegate(
-				'',
-				prompt,
-				AbortSignal.timeout(30_000),
+			const response = await withAbortDeadline(30_000, (signal) =>
+				llmDelegate('', prompt, signal),
 			);
 			const verdict = response.trim().toUpperCase();
 			if (verdict === 'APPROVE') {

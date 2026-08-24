@@ -20,7 +20,17 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { WRITE_TOOL_NAMES } from '../config/constants';
+import {
+	AGENT_TOOL_MAP,
+	COUNCIL_AGENT_TOOL_MAP,
+	EXTERNAL_SKILL_AGENT_TOOL_MAP,
+	GENERAL_COUNCIL_AGENT_TOOL_MAP,
+	MEMORY_AGENT_TOOL_MAP,
+	SKILL_AGENT_TOOL_MAP,
+	TURBO_AGENT_TOOL_MAP,
+	WRITE_TOOL_NAMES,
+} from '../config/constants';
+import { stripKnownSwarmPrefix } from '../config/schema';
 import { normalizePath } from '../utils/path';
 
 // ---------------------------------------------------------------------------
@@ -177,6 +187,64 @@ const NETWORK_TOOLS = new Set<string>([
 ]);
 
 const SUBAGENT_TOOLS = new Set<string>(['task', 'agent', 'delegate']);
+
+// ---------------------------------------------------------------------------
+// Issue #2103 workstream F: capability-grounded delegation risk.
+//
+// A delegation may take the lower-risk supervised/assisted route ONLY when the
+// REGISTERED capability map for the resolved role is strictly analysis-only.
+// The registered map is authoritative — a caller-provided role label or
+// "read-only" prose in the delegation args is NEVER consulted. Unknown roles
+// and any mutation/network/execution-capable role stay escalated high. Strict
+// mode short-circuits before this lookup and always escalates.
+// ---------------------------------------------------------------------------
+
+/** Tools a strictly-read-only role may hold without escalating (fail-closed allowlist). */
+const SAFE_ANALYSIS_TOOLS: ReadonlySet<string> = new Set([
+	...READ_ONLY_TOOLS,
+	'knowledge_recall',
+	'knowledge_receipt',
+	'summarize_work',
+	'req_coverage',
+	// Read-only memory overlay tools (swarm_memory_propose is deliberately NOT
+	// here — it proposes new memory content).
+	'swarm_memory_recall',
+	'swarm_memory_outcome',
+]);
+
+function capabilityToolsForRole(baseRole: string): string[] | null {
+	const tools = new Set<string>();
+	let known = false;
+	for (const map of [
+		AGENT_TOOL_MAP,
+		MEMORY_AGENT_TOOL_MAP,
+		EXTERNAL_SKILL_AGENT_TOOL_MAP,
+		COUNCIL_AGENT_TOOL_MAP,
+		GENERAL_COUNCIL_AGENT_TOOL_MAP,
+		TURBO_AGENT_TOOL_MAP,
+		SKILL_AGENT_TOOL_MAP,
+	] as Record<string, readonly string[]>[]) {
+		const entry = map[baseRole];
+		if (entry) {
+			known = true;
+			for (const tool of entry) tools.add(tool);
+		}
+	}
+	return known ? [...tools] : null;
+}
+
+/**
+ * True only when the role is REGISTERED and every tool in its capability map
+ * is a safe analysis tool. Unknown roles, and roles holding any mutation,
+ * network, execution, or unrecognized tool, return false (escalate high).
+ */
+export function isStrictlyReadOnlyRole(subagentName: string): boolean {
+	const baseRole = stripKnownSwarmPrefix(subagentName).trim().toLowerCase();
+	if (!baseRole) return false;
+	const tools = capabilityToolsForRole(baseRole);
+	if (tools === null) return false;
+	return tools.every((tool) => SAFE_ANALYSIS_TOOLS.has(tool));
+}
 
 const HIGH_RISK_BUILD_PATHS = [
 	'src/index.ts',
@@ -676,6 +744,25 @@ export function classifyFullAutoToolAction(
 				input.args.subagent_type) ||
 			(typeof input.args?.agent === 'string' && input.args.agent) ||
 			'unknown';
+		// Issue #2103 workstream F: strict mode ALWAYS escalates (short-circuit
+		// before the capability lookup — a disabled auxiliary policy flag cannot
+		// weaken strict enforcement). Supervised/assisted may take a lower-risk
+		// route for delegations to REGISTERED strictly-read-only roles; the
+		// registered capability map is authoritative and delegation-args prose
+		// is never consulted. Existing containment/destructive/protected gates
+		// still run independently after this decision.
+		if (
+			mode !== 'strict' &&
+			subagentName !== 'unknown' &&
+			isStrictlyReadOnlyRole(subagentName)
+		) {
+			return {
+				action: 'allow',
+				reason:
+					'delegation to registered strictly-read-only role (capability-map verified)',
+				tier: 'local',
+			};
+		}
 		return {
 			action: 'escalate_critic',
 			reason: 'subagent delegation requires plan/scope verification',

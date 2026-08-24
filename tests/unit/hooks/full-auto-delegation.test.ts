@@ -203,7 +203,7 @@ describe('return check', () => {
 		expect(warning).toBeTruthy();
 	});
 
-	test('pauses run on severe return warning (out_of_scope_files)', async () => {
+	test('prose-only out-of-scope claim is advisory and does NOT pause (#2103 H)', async () => {
 		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
 		const hook = createFullAutoDelegationHook({
 			config: config(),
@@ -216,8 +216,83 @@ describe('return check', () => {
 					'I generated files outside the declared scope including src/index.ts.',
 			},
 		);
+		// Issue #2103 workstream H: free-form prose can never durably pause.
 		const state = loadFullAutoRunState(tmpDir, 'sess-1');
+		expect(state?.status).toBe('running');
+	});
+
+	test('negated compliant prose does not pause or warn severely (#2103 H)', async () => {
+		startFullAutoRun(tmpDir, 'sess-neg', { enabled: true });
+		const hook = createFullAutoDelegationHook({
+			config: config(),
+			directory: tmpDir,
+		});
+		await hook.toolAfter(
+			{ tool: 'Task', sessionID: 'sess-neg', callID: 'c1' },
+			{ output: 'No files were modified outside the declared scope.' },
+		);
+		const state = loadFullAutoRunState(tmpDir, 'sess-neg');
+		expect(state?.status).toBe('running');
+	});
+
+	test('structured + corroborated out-of-scope claim pauses (#2103 H)', async () => {
+		startFullAutoRun(tmpDir, 'sess-struct', { enabled: true });
+		const hook = createFullAutoDelegationHook({
+			config: config(),
+			directory: tmpDir,
+		});
+		// Seed a deterministic scope event naming the claimed path so the
+		// structured claim is corroborated by guardrail state.
+		fs.mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
+		fs.appendFileSync(
+			path.join(tmpDir, '.swarm', 'events.jsonl'),
+			JSON.stringify({
+				type: 'scope_denial',
+				path: 'src/outside.ts',
+				reason: 'write outside declared scope',
+			}) + '\n',
+		);
+		await hook.toolAfter(
+			{ tool: 'Task', sessionID: 'sess-struct', callID: 'c1' },
+			{
+				output:
+					'Done.\nSWARM_RETURN_STATUS: {"out_of_scope_files":["src/outside.ts"]}',
+			},
+		);
+		const state = loadFullAutoRunState(tmpDir, 'sess-struct');
 		expect(state?.status).toBe('paused');
+		expect(state?.pauseReason).toContain('structured + corroborated');
+	});
+
+	test('structured but UNcorroborated claim stays advisory (#2103 H)', async () => {
+		startFullAutoRun(tmpDir, 'sess-uncorr', { enabled: true });
+		const hook = createFullAutoDelegationHook({
+			config: config(),
+			directory: tmpDir,
+		});
+		await hook.toolAfter(
+			{ tool: 'Task', sessionID: 'sess-uncorr', callID: 'c1' },
+			{
+				output:
+					'Done.\nSWARM_RETURN_STATUS: {"out_of_scope_files":["src/ghost.ts"]}',
+			},
+		);
+		const state = loadFullAutoRunState(tmpDir, 'sess-uncorr');
+		expect(state?.status).toBe('running');
+	});
+
+	test('malformed envelope never fabricates a violation (#2103 H)', async () => {
+		startFullAutoRun(tmpDir, 'sess-mal', { enabled: true });
+		const hook = createFullAutoDelegationHook({
+			config: config(),
+			directory: tmpDir,
+		});
+		await hook.toolAfter(
+			{ tool: 'Task', sessionID: 'sess-mal', callID: 'c1' },
+			{ output: 'Done.\nSWARM_RETURN_STATUS: {not json' },
+		);
+		const state = loadFullAutoRunState(tmpDir, 'sess-mal');
+		expect(state?.status).toBe('running');
 	});
 
 	test('throws when warning event write fails', async () => {

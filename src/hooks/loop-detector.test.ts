@@ -70,8 +70,9 @@ describe('loop-detector', () => {
 			const r3 = detectLoop(SESSION_ID, 'Task', args);
 			expect(r3.looping).toBe(true);
 			expect(r3.count).toBe(3);
-			// firstArgKey is the FIRST key in the args object, which is subagent_type
-			expect(r3.pattern).toBe('Task:coder:subagent_type');
+			// Issue #2103 workstream B: the pattern is now a semantic digest
+			// `Task:<role>#[taskId?]:<argDigest>` — assert the stable prefix.
+			expect(r3.pattern).toMatch(/^Task:coder:/);
 		});
 
 		it('3. Loop counter resets when a different pattern intervenes (A, A, B, A → count back to 1)', () => {
@@ -136,7 +137,7 @@ describe('loop-detector', () => {
 			const r = detectLoop(SESSION_ID, 'Task', null);
 			expect(r.looping).toBe(false);
 			expect(r.count).toBe(1);
-			expect(r.pattern).toBe('Task:unknown:noargs');
+			expect(r.pattern).toMatch(/^Task:unknown:/);
 		});
 
 		it('8. Array args → handled gracefully (not treated as Record)', () => {
@@ -144,8 +145,8 @@ describe('loop-detector', () => {
 			const r = detectLoop(SESSION_ID, 'Task', ['coder', 'task-1'] as unknown);
 			expect(r.looping).toBe(false);
 			// Array is not a proper object, so argsRecord becomes undefined
-			// hash becomes Task:unknown:noargs
-			expect(r.pattern).toBe('Task:unknown:noargs');
+			// digest becomes Task:unknown:<empty-args digest>
+			expect(r.pattern).toMatch(/^Task:unknown:/);
 			expect(r.count).toBe(1);
 		});
 
@@ -189,7 +190,7 @@ describe('loop-detector', () => {
 	describe('edge cases', () => {
 		it('undefined args treated as noargs', () => {
 			const r = detectLoop(SESSION_ID, 'Task', undefined);
-			expect(r.pattern).toBe('Task:unknown:noargs');
+			expect(r.pattern).toMatch(/^Task:unknown:/);
 			expect(r.count).toBe(1);
 		});
 
@@ -201,14 +202,14 @@ describe('loop-detector', () => {
 			const r1 = detectLoop(SESSION_ID, 'Task', args1);
 			const r2 = detectLoop(SESSION_ID, 'Task', args2);
 
-			expect(r1.pattern).toBe('Task:coder:taskId');
-			expect(r2.pattern).toBe('Task:coder:file');
+			expect(r1.pattern).toMatch(/^Task:coder:/);
+			expect(r2.pattern).toMatch(/^Task:coder:/);
 			expect(r1.pattern).not.toBe(r2.pattern);
 		});
 
 		it('first arg key is empty string when args is empty object', () => {
 			const r = detectLoop(SESSION_ID, 'Task', { subagent_type: 'coder' });
-			expect(r.pattern).toBe('Task:coder:subagent_type');
+			expect(r.pattern).toMatch(/^Task:coder:/);
 			expect(r.count).toBe(1);
 		});
 
@@ -224,8 +225,8 @@ describe('loop-detector', () => {
 			const session = swarmState.agentSessions.get(SESSION_ID);
 			expect(session?.loopDetectionWindow?.length).toBe(5);
 			expect(
-				session?.loopDetectionWindow?.every(
-					(e) => e.hash === 'Task:test-engineer:taskId',
+				session?.loopDetectionWindow?.every((e) =>
+					e.hash.startsWith('Task:test-engineer:'),
 				),
 			).toBe(true);
 		});
@@ -246,7 +247,7 @@ describe('loop-detector', () => {
 
 			// Last entry should be C
 			const last = session?.loopDetectionWindow?.at(-1);
-			expect(last?.hash).toBe('Task:explorer:taskId');
+			expect(last?.hash?.startsWith('Task:explorer:')).toBe(true);
 		});
 	});
 });

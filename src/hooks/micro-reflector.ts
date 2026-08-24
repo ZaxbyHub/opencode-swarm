@@ -25,6 +25,7 @@ import { canonicalHash } from '../evaluation/hashing.js';
 import { sanitizeTaskId } from '../evidence/manager.js';
 import { enqueueCandidate } from '../learning/candidate-queue.js';
 import { reserveQuota } from '../services/skill-improver-quota.js';
+import { withAbortDeadline } from '../utils/abort-deadline.js';
 import { warn } from '../utils/logger.js';
 import type { CuratorLLMDelegate } from './curator.js';
 import { getStoredInputArgs } from './guardrails/stored-input-args.js';
@@ -534,10 +535,8 @@ export async function runMicroReflection(params: {
 			transcript: params.transcript,
 			trajectory: params.trajectory,
 		});
-		const response = await params.llmDelegate(
-			'',
-			prompt,
-			AbortSignal.timeout(MICRO_LLM_TIMEOUT_MS),
+		const response = await withAbortDeadline(MICRO_LLM_TIMEOUT_MS, (signal) =>
+			params.llmDelegate!('', prompt, signal),
 		);
 		result.reflected = true;
 		const candidates = parseMicroCandidates(response, {

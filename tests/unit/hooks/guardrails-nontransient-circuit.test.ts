@@ -110,10 +110,18 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 			sameCategoryCount: 3,
 			hardStop: true,
 		});
+		// Issue #2103 workstream C: the repeated failure was recorded by the
+		// bash tool, so only bash is blocked; read stays reachable.
 		await expect(
 			hooks.toolBefore(
-				{ tool: 'read', sessionID, callID: 'blocked-next' },
+				{ tool: 'read', sessionID, callID: 'diagnose-next' },
 				{ args: { filePath: 'package.json' } },
+			),
+		).resolves.toBeUndefined();
+		await expect(
+			hooks.toolBefore(
+				{ tool: 'bash', sessionID, callID: 'blocked-next' },
+				{ args: { command: 'another failing command' } },
 			),
 		).rejects.toThrow('NON-TRANSIENT CIRCUIT BREAKER');
 	});
@@ -450,10 +458,18 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 			},
 			shellResult('ParserError: MissingEndCurlyBrace', 1),
 		);
+		// Issue #2103 workstream C: shell_parse_error blocks shell execution
+		// only; read remains reachable even before the takeover turn.
 		await expect(
 			hooks.toolBefore(
-				{ tool: 'read', sessionID, callID: 'blocked-old-turn' },
+				{ tool: 'read', sessionID, callID: 'read-still-allowed' },
 				{ args: { filePath: 'package.json' } },
+			),
+		).resolves.toBeUndefined();
+		await expect(
+			hooks.toolBefore(
+				{ tool: 'bash', sessionID, callID: 'blocked-old-turn' },
+				{ args: { command: 'echo x' } },
 			),
 		).rejects.toThrow('NON-TRANSIENT CIRCUIT BREAKER');
 

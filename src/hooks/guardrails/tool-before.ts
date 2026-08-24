@@ -1589,8 +1589,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const loopResult = detectLoop(sessionID, tool, loopArgs);
 
 		if (loopResult.count >= 5) {
+			// Issue #2103 workstream B: the digest is now SEMANTIC (target role +
+			// plan-task identity + argument-value digest), so this only fires on a
+			// true repeated action. The stop is delegation-scoped, not a session
+			// pause — other tools remain available (workstream C).
 			throw new Error(
-				`CIRCUIT BREAKER: Delegation loop detected (${loopResult.count} identical patterns). Session paused. Ask the user for guidance.`,
+				`CIRCUIT BREAKER: Delegation loop detected (${loopResult.count} identical delegation actions — same target, task, and arguments). Delegations are blocked for this loop; report the blocker to the user instead of retrying. Other tools remain available.`,
 			);
 		} else if (loopResult.count >= 3 && loopResult.count < 5) {
 			const agentName =
@@ -2104,7 +2108,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		input: { tool: string; sessionID: string; callID: string },
 		output: { args: unknown },
 	): Promise<void> => {
-		assertNonTransientCircuitAllowsTool(input.sessionID);
+		assertNonTransientCircuitAllowsTool(input.sessionID, input.tool);
 		// Establish the lazy fallback invocation before recording this tool's
 		// before/after correlation. Beginning it later would clear the command we
 		// just stored, losing whether a parser error came from the sandbox wrapper.

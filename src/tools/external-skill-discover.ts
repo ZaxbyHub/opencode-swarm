@@ -19,6 +19,7 @@ import type {
 } from '../config/schema.js';
 import { createExternalSkillStore } from '../services/external-skill-store.js';
 import { evaluateCandidate } from '../services/external-skill-validator.js';
+import { withAbortDeadline } from '../utils/abort-deadline.js';
 import { createSwarmTool } from './create-tool.js';
 
 // ---------------------------------------------------------------------------
@@ -31,9 +32,9 @@ export const _internals = {
 		_timeoutMs: number,
 	): Promise<{ content: string; finalUrl: string }> => {
 		assertSafeFetchUrl(_url);
-		const response = await fetch(_url, {
-			signal: AbortSignal.timeout(_timeoutMs),
-		});
+		const response = await withAbortDeadline(_timeoutMs, (signal) =>
+			fetch(_url, { signal }),
+		);
 		if (!response.ok) {
 			throw new Error(`HTTP ${response.status}: ${response.statusText}`);
 		}

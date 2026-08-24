@@ -48,6 +48,7 @@ import { stripKnownSwarmPrefix } from '../config/schema';
 import { ensureAgentSession } from '../state';
 import { telemetry } from '../telemetry.js';
 import { pushAdvisory } from '../utils/advisory-queue';
+import { isStrictTaskId } from '../validation/task-id.js';
 import { normalizeToolNameLowerCase } from './normalize-tool-name';
 
 /** Default streak length at which the "do not retry" guidance is appended. */
@@ -138,26 +139,34 @@ function streakKeyPrefix(
  * `subagent_type` is absent or not a string — yields `''`, which preserves the
  * pre-discriminator behavior for them exactly.
  *
- * Deliberately reads `subagent_type` ONLY. `parseDelegationArgs`
- * (`hooks/skill-propagation-gate.ts:400`) additionally falls back to the first
- * non-empty line of the delegation PROMPT, which would turn arbitrary
- * model-authored prose into a map key — an unbounded-cardinality hazard
- * (invariant 8) and a way for the model to shatter its own streak into
- * singletons by varying one line of text.
+ * Issue #2103 workstream C: when the delegation args carry a STRICT plan-task
+ * identity (`task_id`/`taskId` matching the strict task-id grammar), it is
+ * appended to the discriminator so DENIALS FOR DIFFERENT PLAN TASKS to the same
+ * role no longer share one streak (acceptance test 10). The strict grammar
+ * keeps cardinality bounded — arbitrary prose still never becomes a key
+ * (invariant 8), so the model cannot shatter its own streak into singletons.
  *
  * Never throws.
  */
 export function gateDenialDiscriminator(tool: string, args: unknown): string {
 	try {
 		if (normalizeToolNameLowerCase(tool ?? '') !== 'task') return '';
-		const subagentType = (args as Record<string, unknown> | undefined)
-			?.subagent_type;
+		const record = args as Record<string, unknown> | undefined;
+		const subagentType = record?.subagent_type;
 		if (typeof subagentType !== 'string' || subagentType.length === 0) {
 			return '';
 		}
 		const canonical = stripKnownSwarmPrefix(subagentType).trim().toLowerCase();
 		if (canonical.length === 0) return '';
-		return canonical.slice(0, MAX_DISCRIMINATOR_LENGTH);
+		let discriminator = canonical.slice(0, MAX_DISCRIMINATOR_LENGTH);
+		const taskId = record?.task_id ?? record?.taskId;
+		if (typeof taskId === 'string' && isStrictTaskId(taskId)) {
+			discriminator = `${discriminator}#${taskId}`.slice(
+				0,
+				MAX_DISCRIMINATOR_LENGTH,
+			);
+		}
+		return discriminator;
 	} catch {
 		return '';
 	}

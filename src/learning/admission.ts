@@ -57,6 +57,7 @@ import {
 	resolveInsightCandidateId,
 	unionInsightMarker,
 } from '../hooks/micro-reflector.js';
+import { abortDeadline } from '../utils/abort-deadline.js';
 import { warn } from '../utils/logger.js';
 import type { QueuedCandidate } from './candidate-queue.js';
 import {
@@ -121,20 +122,13 @@ export interface AdmissionDeps {
 /**
  * Cross-platform substitute for `AbortSignal.timeout(ms)` (oven-sh/bun#29546 —
  * see the module header). The timer is always cleared by the caller so a
- * candidate that resolves before the deadline cannot leak it.
+ * candidate that resolves before the deadline cannot leak it. Delegates to the
+ * shared utility (issue #2103 / #1964) with identical behavior.
  */
-function timeoutSignal(ms: number): {
+const timeoutSignal: (ms: number) => {
 	signal: AbortSignal;
 	clear: () => void;
-} {
-	const controller = new AbortController();
-	const timer = setTimeout(() => {
-		controller.abort(
-			new DOMException('The operation timed out.', 'TimeoutError'),
-		);
-	}, ms);
-	return { signal: controller.signal, clear: () => clearTimeout(timer) };
-}
+} = abortDeadline;
 
 /** Bounded estimate of the tokens one screening call costs. */
 const SCREENING_TOKEN_ESTIMATE = 400;

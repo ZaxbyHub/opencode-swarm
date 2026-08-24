@@ -1,4 +1,5 @@
 import { getSwarmAgents, resolveFallbackModel } from '../agents/index.js';
+import { peekModelFallbackIndex } from '../agents/model-override.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { swarmState } from '../state.js';
 import { telemetry } from '../telemetry.js';
@@ -218,6 +219,13 @@ export function createCuratorLLMDelegate(
 			// only the prompt: the ephemeral session is reused across attempts and
 			// still torn down in `finally`.
 			const dispatched = await dispatchWithModelFallback({
+				// Issue #2103 workstream E: honor a per-session override recorded
+				// by guardrails so it reaches the actual per-call model argument.
+				startFallbackIndex: peekModelFallbackIndex(
+					sessionId ?? '',
+					swarmId ?? 'default',
+					baseRole,
+				),
 				dispatch: async (model) => {
 					const promptResult = await client.session.prompt({
 						path: { id: promptSessionId },

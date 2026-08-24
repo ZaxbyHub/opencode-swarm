@@ -21,6 +21,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { getSwarmAgents, resolveFallbackModel } from '../../agents/index';
+import { peekModelFallbackIndex } from '../../agents/model-override.js';
 import { stripKnownSwarmPrefix } from '../../config/schema';
 import type { ReviewModelDispatcher } from '../../review/contracts';
 import {
@@ -732,7 +733,21 @@ export async function dispatchPhaseCritic(
 	const legacyModelConfig = resolveLegacyCriticModelConfig(agentName, config);
 	let responseText: string;
 	try {
+		// Issue #2103 workstream E: role identity for the per-session override store.
+		const overrideBaseRole = stripKnownSwarmPrefix(agentName);
+		const overrideStoreSwarmId =
+			overrideBaseRole !== agentName
+				? agentName.slice(0, agentName.length - overrideBaseRole.length - 1)
+				: 'default';
+		const overrideStoreBaseRole = overrideBaseRole;
 		const dispatched = await dispatchWithModelFallback<string>({
+			// Issue #2103 workstream E: honor a per-session override recorded by
+			// guardrails so it reaches the actual per-call model argument.
+			startFallbackIndex: peekModelFallbackIndex(
+				sessionID,
+				overrideStoreSwarmId,
+				overrideStoreBaseRole,
+			),
 			dispatch: (model) =>
 				_internals.dispatchCriticAgent(
 					directory,

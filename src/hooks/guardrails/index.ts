@@ -15,6 +15,10 @@ import {
 	getSwarmAgents,
 	resolveFallbackModel,
 } from '../../agents/index';
+import {
+	advanceModelFallback,
+	resetModelFallback,
+} from '../../agents/model-override';
 import { WRITE_TOOL_NAMES } from '../../config/constants';
 import {
 	type AuthorityConfig,
@@ -39,6 +43,7 @@ import {
 	ensureAgentSession,
 	getActiveWindow,
 	getReviewerScopeGenerationForCoderCall,
+	type NonTransientErrorCategory,
 	recordReviewerScopeGenerationCaptureFailure,
 	recordReviewerScopeGenerationFileFingerprint,
 	resolveSessionWorkspaceDirectory,
@@ -48,6 +53,7 @@ import {
 import { telemetry } from '../../telemetry.js';
 import { log, warn } from '../../utils';
 import { pushAdvisory } from '../../utils/advisory-queue';
+import { classifyInvocationFailure } from '../../utils/invocation-failure';
 import * as logger from '../../utils/logger';
 import {
 	extractStatusCode,
@@ -80,7 +86,10 @@ import {
 import {
 	classifyToolOutcome,
 	clearNonTransientCircuit,
+	deriveActionIdentity,
 	isToolExecutionCurrent,
+	recordActionFailure,
+	recordActionSuccess,
 	recordNonTransientFailure,
 	takeToolExecution,
 } from './nontransient-circuit';
@@ -1537,6 +1546,14 @@ export function createGuardrailsHooks(
 					outcome.signal,
 				);
 			} else if (outcome.kind === 'success' || outcome.kind === 'neutral') {
+				// Issue #2103 workstream C: a corrected success of the same
+				// action clears its action-local circuit (immediate shell
+				// categories stay fail-closed; see recordActionSuccess).
+				recordActionSuccess(
+					input.sessionID,
+					input.tool,
+					deriveActionIdentity(input.tool, input.args),
+				);
 				clearNonTransientCircuit(input.sessionID);
 			} else if (outcome.kind === 'failure') {
 				const circuitSignal = extractErrorSignal(outcome.signal);
@@ -1549,9 +1566,33 @@ export function createGuardrailsHooks(
 				if (circuitIsTransient || circuitIsDegraded) {
 					clearNonTransientCircuit(input.sessionID);
 				} else {
+					// Issue #2103 workstream A/D: classify through the shared
+					// taxonomy (error channel — never tool stdout) so ENOSPC,
+					// EPERM, git conflicts, locks, and deadlines land in distinct,
+					// actionable circuit categories instead of one catch-all.
+					const classified = classifyInvocationFailure({
+						channel: 'error',
+						errorSignal: circuitSignal,
+						toolKind:
+							input.tool?.toLowerCase() === 'bash' ||
+							input.tool?.toLowerCase() === 'shell'
+								? 'shell'
+								: 'other',
+					});
+					const circuitCategory: NonTransientErrorCategory =
+						(classified?.category as NonTransientErrorCategory | undefined) ??
+						'general_permanent';
 					recordNonTransientFailure(
 						input.sessionID,
-						'general_permanent',
+						circuitCategory,
+						outcome.signal,
+						input.tool,
+					);
+					recordActionFailure(
+						input.sessionID,
+						input.tool,
+						deriveActionIdentity(input.tool, input.args),
+						circuitCategory,
 						outcome.signal,
 					);
 				}
@@ -1673,14 +1714,26 @@ export function createGuardrailsHooks(
 					const primaryModel = swarmAgents?.[baseAgentName]?.model ?? 'default';
 
 					if (fallbackModel) {
-						if (swarmAgents?.[baseAgentName]) {
-							swarmAgents[baseAgentName].model = fallbackModel;
-						}
+						// Issue #2103 workstream E: the fallback override is now
+						// recorded in the per-session model-override store instead
+						// of mutating the shared `swarmAgents[role].model` config
+						// (which leaked across sessions and was never read by any
+						// real dispatch path). The shared resolver in
+						// `src/agents/model-override.ts` is what dispatch paths
+						// consult to put the override on the actual per-call
+						// SDK `model` argument; a successful response for the
+						// role resets it to primary.
+						advanceModelFallback(
+							input.sessionID,
+							swarmId ?? 'default',
+							baseAgentName,
+							fallbackModels?.length ?? 0,
+						);
 
 						pushAdvisory(
 							session,
-							`MODEL FALLBACK: Applied fallback model "${fallbackModel}" (attempt ${session.model_fallback_index}). ` +
-								`Using /swarm handoff to reset to primary model.`,
+							`MODEL FALLBACK: Applied fallback model "${fallbackModel}" (attempt ${session.model_fallback_index}) for this session/role. ` +
+								`The next dispatch for this role uses the fallback via its per-call model override; a successful response resets to the primary model.`,
 						);
 						modelFallbackAdvisoryEmitted = true;
 					} else {
@@ -1732,6 +1785,16 @@ export function createGuardrailsHooks(
 					if (session.model_fallback_index > 0) {
 						session.model_fallback_index = 0;
 						session.modelFallbackExhausted = false;
+						// Issue #2103 workstream E: success for this role is the
+						// documented reset boundary for the per-session override.
+						resetModelFallback(
+							input.sessionID,
+							_internals.extractSwarmIdFromAgentName(session.agentName) ??
+								'default',
+							session.agentName
+								? session.agentName.replace(/^[^_]+[_]/, '')
+								: '',
+						);
 					}
 				}
 			}

@@ -82,10 +82,20 @@ describe('guardrails non-transient boundaries — issue #1875 review', () => {
 			hardStop: true,
 			lastSignal: stoppedSignal,
 		});
+		// Issue #2103 workstream C (semantic redefinition of the hard-stop
+		// scope): a shell_parse_error stop blocks further SHELL execution only.
+		// Diagnostic/read tools remain reachable so the agent can report the
+		// blocker; the failing action itself stays blocked below.
 		await expect(
 			hooks.toolBefore(
-				{ tool: 'read', sessionID, callID: 'blocked-next' },
+				{ tool: 'read', sessionID, callID: 'diagnose-next' },
 				{ args: { filePath: 'package.json' } },
+			),
+		).resolves.toBeUndefined();
+		await expect(
+			hooks.toolBefore(
+				{ tool: 'bash', sessionID, callID: 'blocked-next' },
+				{ args: { command: 'echo retry' } },
 			),
 		).rejects.toThrow('NON-TRANSIENT CIRCUIT BREAKER');
 	});

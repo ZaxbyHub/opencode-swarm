@@ -3650,6 +3650,16 @@ export const PluginConfigSchema = z.object({
 						.min(0)
 						.max(50)
 						.default(3),
+					// Issue #2103 workstream G: ONE total wall-clock deadline covering
+					// session creation, prompt, retries, backoff, parse, and cleanup
+					// for a single oversight operation. Timeout denies the escalated
+					// action (fail-closed) and pauses the run.
+					total_timeout_ms: z
+						.number()
+						.int()
+						.min(10_000)
+						.max(600_000)
+						.default(120_000),
 				})
 				.default(() => ({
 					on_plan_change: true,
@@ -3662,6 +3672,7 @@ export const PluginConfigSchema = z.object({
 					every_minutes: 20,
 					max_dispatch_retries: 2,
 					max_consecutive_dispatch_failures: 3,
+					total_timeout_ms: 120_000,
 				})),
 		})
 		.optional()
@@ -3718,6 +3729,7 @@ export const PluginConfigSchema = z.object({
 				every_minutes: 20,
 				max_dispatch_retries: 2,
 				max_consecutive_dispatch_failures: 3,
+				total_timeout_ms: 120_000,
 			},
 		})),
 

@@ -25,16 +25,21 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createCriticAutonomousOversightAgent } from '../agents/critic';
 import { getSwarmAgents, resolveFallbackModel } from '../agents/index';
+import { peekModelFallbackIndex } from '../agents/model-override';
 import { stripKnownSwarmPrefix } from '../config/schema';
 import { validateSwarmPath } from '../hooks/utils';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { _internals as stateInternals } from '../state.js';
 import { telemetry } from '../telemetry';
+import { abortDeadline } from '../utils/abort-deadline';
 import { sleep } from '../utils/bun-compat';
 import { teardownEphemeralSession } from '../utils/ephemeral-session-teardown';
 import { advanceInlineFallback } from '../utils/inline-fallback-advancer';
 import * as logger from '../utils/logger';
-import type { ModelOverride } from '../utils/model-dispatch-fallback';
+import {
+	type ModelOverride,
+	parseModelString,
+} from '../utils/model-dispatch-fallback';
 import { isTransientProviderError } from '../utils/provider-error-classification';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import {
@@ -116,6 +121,8 @@ export interface DispatchFullAutoOversightInput {
 		max_dispatch_retries?: number;
 		/** Override for max consecutive dispatch failures (default from schema: 3). */
 		max_consecutive_dispatch_failures?: number;
+		/** Issue #2103 workstream G: total deadline for the whole oversight operation (default 120_000 ms). */
+		total_timeout_ms?: number;
 	};
 }
 
@@ -396,6 +403,38 @@ export async function dispatchFullAutoOversight(
 		}
 	};
 
+	// Issue #2103 workstream G: ONE total deadline around the complete
+	// oversight operation — session creation, prompt, retries, backoff, parse,
+	// cleanup. Manually armed AbortController + clearable timer (never
+	// AbortSignal.timeout — #1964). The caller returns at the deadline even if
+	// the host ignores the signal: backoff sleeps are capped to the remaining
+	// budget and every attempt checks the flag. Timeout is recorded distinctly
+	// from a rejection.
+	const totalTimeoutMs = Math.max(
+		10_000,
+		input.fullAutoConfig?.total_timeout_ms ?? 120_000,
+	);
+	const deadline = _internals.newDeadline(totalTimeoutMs);
+	let timedOut = false;
+	const deadlineStart = Date.now();
+	const deadlineError = new DOMException(
+		`oversight total deadline of ${totalTimeoutMs}ms exceeded`,
+		'TimeoutError',
+	);
+	deadline.signal.addEventListener('abort', () => {
+		timedOut = true;
+		// Abort any in-flight prompt so a well-behaved host unwinds promptly.
+		promptController.abort();
+	});
+	const remainingDeadlineMs = (): number =>
+		Math.max(0, totalTimeoutMs - (Date.now() - deadlineStart));
+	const finishDeadline = deadline.clear;
+	// Outer race: the caller returns at the deadline EVEN IF a host ignores the
+	// abort signal and the underlying promise never settles (#2103 G).
+	const deadlineRace = new Promise<never>((_, reject) => {
+		deadline.signal.addEventListener('abort', () => reject(deadlineError));
+	});
+
 	let criticResponse = '';
 	let dispatchError: unknown;
 	let dispatchFailureWasTransient = false;
@@ -426,8 +465,27 @@ export async function dispatchFullAutoOversight(
 		: 'critic';
 	const resolveOversightFallback = (index: number): string | null =>
 		resolveFallbackModel(oversightFallbackRole, index, oversightSwarmAgents);
-	let modelFallbackIndex = 0;
+	// Issue #2103 workstream E: seed from the per-session override store so a
+	// guardrails-recorded fallback for this session/role reaches the actual
+	// first dispatch (per-call `model` override below).
+	let modelFallbackIndex = peekModelFallbackIndex(
+		input.sessionID,
+		oversightSwarmId ?? 'default',
+		oversightBaseRole,
+	);
 	let modelOverride: ModelOverride | undefined;
+	if (modelFallbackIndex > 0) {
+		const seeded = resolveOversightFallback(modelFallbackIndex);
+		if (seeded) {
+			try {
+				modelOverride = parseModelString(seeded);
+			} catch {
+				modelFallbackIndex = 0;
+			}
+		} else {
+			modelFallbackIndex = 0;
+		}
+	}
 	let modelUsedLabel = input.criticModel;
 
 	// Helper: returns { ok, response, error }
@@ -450,10 +508,21 @@ export async function dispatchFullAutoOversight(
 				error: new Error('OpenCode client unavailable'),
 			};
 		}
-		// On retry attempts, wait before retrying (1s, 2s, 4s, …).
+		// Issue #2103 workstream G: a timed-out operation stops retrying — the
+		// risky action stays denied (fail-closed) instead of looping past the
+		// deadline.
+		if (timedOut) {
+			return { ok: false, response: '', error: deadlineError };
+		}
+		// On retry attempts, wait before retrying (1s, 2s, 4s, …). Backoff
+		// consumes the REMAINING deadline rather than sleeping past it (#2103 G).
 		if (attempt > 0) {
-			const delay = 2 ** (attempt - 1) * 1000;
-			await sleep(delay);
+			const delay = Math.min(2 ** (attempt - 1) * 1000, remainingDeadlineMs());
+			if (delay > 0) await sleep(delay);
+			if (remainingDeadlineMs() <= 0) {
+				timedOut = true;
+				return { ok: false, response: '', error: deadlineError };
+			}
 		}
 
 		// Reset any stale session id from a previous attempt.
@@ -528,7 +597,18 @@ export async function dispatchFullAutoOversight(
 	let lastError: unknown;
 	for (let attempt = 0; attempt <= maxRetries; attempt++) {
 		// eslint-disable-next-line no-await-in-loop
-		const result = await attemptDispatch(attempt, modelOverride);
+		const attemptPromise = attemptDispatch(attempt, modelOverride);
+		// If the deadline wins the race, a late attempt rejection must not
+		// surface as an unhandled rejection.
+		attemptPromise.catch(() => {});
+		// eslint-disable-next-line no-await-in-loop
+		const result = await Promise.race([attemptPromise, deadlineRace]).catch(
+			(err: unknown) => ({
+				ok: false,
+				response: '',
+				error: err,
+			}),
+		);
 		if (result.ok) {
 			criticResponse = result.response;
 			dispatchError = undefined;
@@ -579,6 +659,7 @@ export async function dispatchFullAutoOversight(
 	}
 
 	cleanup();
+	finishDeadline();
 
 	// #1896: reflect the ACTUAL model used — a fallback may have replaced the
 	// configured criticModel — so the event audit trail is not stale.
@@ -587,9 +668,17 @@ export async function dispatchFullAutoOversight(
 	}
 
 	if (dispatchError) {
-		const infraReason = dispatchFailureWasTransient
-			? `oversight infrastructure failure after ${maxRetries + 1} attempt(s): ${dispatchError instanceof Error ? dispatchError.message : String(dispatchError)}`
-			: `oversight dispatch failed without retry: ${dispatchError instanceof Error ? dispatchError.message : String(dispatchError)}`;
+		// Issue #2103 workstream G: a TIMEOUT is recorded distinctly from a
+		// rejection. The high-risk action remains denied (fail-closed) and the
+		// run pauses; the named controls stay callable while paused.
+		const timeoutPrefix = timedOut
+			? `OVERSIGHT TIMEOUT (total deadline ${totalTimeoutMs}ms). The risky action remains DENIED. Recovery controls (all remain callable while paused): /swarm full-auto status (diagnose), /swarm full-auto on (retry oversight after repair), /swarm handoff, /swarm full-auto off (exit Full-Auto). `
+			: '';
+		const infraReason =
+			timeoutPrefix +
+			(dispatchFailureWasTransient
+				? `oversight infrastructure failure after ${maxRetries + 1} attempt(s): ${dispatchError instanceof Error ? dispatchError.message : String(dispatchError)}`
+				: `oversight dispatch failed without retry: ${dispatchError instanceof Error ? dispatchError.message : String(dispatchError)}`);
 		// Increment consecutive-failure counter. After threshold, auto-degrade to
 		// manual (terminate) so the run doesn't stay paused forever.
 		let consecutive = 0;
@@ -800,8 +889,14 @@ export async function dispatchFullAutoOversight(
  */
 export const _internals: {
 	resetSequence: () => void;
+	/**
+	 * Issue #2103 workstream G: deadline factory seam — tests inject a short
+	 * deadline to exercise the timeout path without waiting the 10s minimum.
+	 */
+	newDeadline: typeof abortDeadline;
 } = {
 	resetSequence: () => {
 		oversightSequenceCounter = 0;
 	},
+	newDeadline: abortDeadline,
 };

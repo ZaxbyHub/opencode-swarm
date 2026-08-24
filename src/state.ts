@@ -778,7 +778,20 @@ export type NonTransientErrorCategory =
 	| 'shell_parse_error'
 	| 'command_not_found'
 	| 'sandbox_wrapper_failure'
-	| 'general_permanent';
+	| 'general_permanent'
+	// Issue #2103 taxonomy-derived categories (see src/utils/invocation-failure.ts):
+	| 'fs_busy_lock'
+	| 'fs_permission'
+	| 'fs_readonly'
+	| 'fs_no_space'
+	| 'fs_containment'
+	| 'fs_not_found'
+	| 'git_conflict'
+	| 'git_lock_busy'
+	| 'git_unavailable'
+	| 'git_timeout'
+	| 'git_corrupt'
+	| 'abort_or_deadline';
 
 export interface NonTransientCircuitState {
 	ownerAgent: string;
@@ -787,6 +800,22 @@ export interface NonTransientCircuitState {
 	sameCategoryCount: number;
 	hardStop: boolean;
 	lastSignal: string | null;
+	/** Tool that recorded the failure (issue #2103 action-local scoping). */
+	tool?: string;
+	/**
+	 * Issue #2103 workstream C: action-local circuits keyed by
+	 * `${tool}::${actionKey}`. Bounded, LRU-evicted, in-memory only.
+	 */
+	actions?: Map<string, ActionCircuitState>;
+}
+
+export interface ActionCircuitState {
+	tool: string;
+	category: NonTransientErrorCategory;
+	count: number;
+	hardStop: boolean;
+	lastSignal: string | null;
+	updatedAt: number;
 }
 
 export interface PendingToolExecution {

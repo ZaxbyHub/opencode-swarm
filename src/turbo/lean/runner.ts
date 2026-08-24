@@ -17,6 +17,7 @@
  */
 import type { OpencodeClient } from '@opencode-ai/sdk';
 import { getSwarmAgents, resolveFallbackModel } from '../../agents/index';
+import { peekModelFallbackIndex } from '../../agents/model-override.js';
 import { DEFAULT_LEAN_TURBO_CONFIG } from '../../config/constants';
 import type { Plan } from '../../config/plan-schema';
 import type { LeanTurboConfig } from '../../config/schema';
@@ -1456,6 +1457,13 @@ export class LeanTurboRunner {
 		let dispatchResult: LaneDispatchResult;
 		try {
 			const fb = await dispatchWithModelFallback<LaneDispatchResult>({
+				// Issue #2103 workstream E: honor a per-session override recorded
+				// by guardrails so it reaches the actual per-call model argument.
+				startFallbackIndex: peekModelFallbackIndex(
+					this._sessionID ?? '',
+					coderSwarmId ?? 'default',
+					coderBase,
+				),
 				dispatch: async (model) => {
 					const r = await this.dispatchLane(
 						lane,

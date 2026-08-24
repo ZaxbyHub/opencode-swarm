@@ -12,6 +12,7 @@ import * as fs from 'node:fs';
 
 import { createCriticAutonomousOversightAgent } from '../agents/critic';
 import { getSwarmAgents, resolveFallbackModel } from '../agents/index.js';
+import { peekModelFallbackIndex } from '../agents/model-override.js';
 import type { PluginConfig } from '../config';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import {
@@ -36,11 +37,15 @@ import {
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { _internals as stateInternals } from '../state.js';
 import { telemetry } from '../telemetry';
+import { abortDeadline } from '../utils/abort-deadline.js';
 import { sleep } from '../utils/bun-compat';
 import { teardownEphemeralSession } from '../utils/ephemeral-session-teardown';
 import { advanceInlineFallback } from '../utils/inline-fallback-advancer.js';
 import * as logger from '../utils/logger';
-import type { ModelOverride } from '../utils/model-dispatch-fallback.js';
+import {
+	type ModelOverride,
+	parseModelString,
+} from '../utils/model-dispatch-fallback.js';
 import { isTransientProviderError } from '../utils/provider-error-classification.js';
 import { validateSwarmPath } from './utils';
 
@@ -474,6 +479,8 @@ export async function dispatchCriticAndWriteEvent(
 	// FR-003: optional retry config with schema defaults.
 	maxDispatchRetries = 2,
 	maxConsecutiveDispatchFailures = 3,
+	// Issue #2103 workstream G: total deadline for the whole dispatch.
+	totalTimeoutMsOverride?: number,
 ): Promise<CriticDispatchResult> {
 	const client = stateInternals.swarmState.opencodeClient;
 
@@ -595,6 +602,28 @@ export async function dispatchCriticAndWriteEvent(
 		}
 	};
 
+	// Issue #2103 workstream G: one total deadline around the whole critic
+	// dispatch (session create, prompt, retries, backoff, cleanup). Mirrors
+	// src/full-auto/oversight.ts. The caller returns at the deadline even if a
+	// host ignores the signal; timeout is recorded distinctly from rejection.
+	const totalTimeoutMs = Math.max(10_000, totalTimeoutMsOverride ?? 120_000);
+	const deadline = abortDeadline(totalTimeoutMs);
+	let timedOut = false;
+	const deadlineStart = Date.now();
+	const deadlineError = new DOMException(
+		`critic dispatch total deadline of ${totalTimeoutMs}ms exceeded`,
+		'TimeoutError',
+	);
+	deadline.signal.addEventListener('abort', () => {
+		timedOut = true;
+		promptController.abort();
+	});
+	const remainingDeadlineMs = (): number =>
+		Math.max(0, totalTimeoutMs - (Date.now() - deadlineStart));
+	const deadlineRace = new Promise<never>((_, reject) => {
+		deadline.signal.addEventListener('abort', () => reject(deadlineError));
+	});
+
 	// FR-003 retry helper: attempts one dispatch, returns { ok, response, error }.
 	// On retry attempts, waits 1s, 2s, 4s, … between tries.
 	// #1905: `modelOverride` lets a transient/quota retry fail over to a configured
@@ -616,9 +645,17 @@ export async function dispatchCriticAndWriteEvent(
 				error: new Error('OpenCode client unavailable'),
 			};
 		}
+		if (timedOut) {
+			return { ok: false, response: '', error: deadlineError };
+		}
 		if (attempt > 0) {
-			const delay = 2 ** (attempt - 1) * 1000;
-			await sleep(delay);
+			// Backoff consumes the REMAINING deadline rather than sleeping past it.
+			const delay = Math.min(2 ** (attempt - 1) * 1000, remainingDeadlineMs());
+			if (delay > 0) await sleep(delay);
+			if (remainingDeadlineMs() <= 0) {
+				timedOut = true;
+				return { ok: false, response: '', error: deadlineError };
+			}
 		}
 		if (ephemeralSessionId) {
 			const staleId = ephemeralSessionId;
@@ -724,15 +761,45 @@ export async function dispatchCriticAndWriteEvent(
 		: 'critic';
 	const resolveOversightFallback = (index: number): string | null =>
 		resolveFallbackModel(oversightFallbackRole, index, oversightSwarmAgents);
-	let modelFallbackIndex = 0;
+	// Issue #2103 workstream E: seed from the per-session override store so a
+	// guardrails-recorded fallback for this session/role reaches the actual
+	// first dispatch (per-call `model` override below).
+	let modelFallbackIndex = sessionID
+		? peekModelFallbackIndex(
+				sessionID,
+				oversightSwarmId ?? 'default',
+				oversightBaseRole,
+			)
+		: 0;
 	let modelOverride: ModelOverride | undefined;
+	if (modelFallbackIndex > 0) {
+		const seeded = resolveOversightFallback(modelFallbackIndex);
+		if (seeded) {
+			try {
+				modelOverride = parseModelString(seeded);
+			} catch {
+				modelFallbackIndex = 0;
+			}
+		} else {
+			modelFallbackIndex = 0;
+		}
+	}
 	let modelUsedLabel = criticModel;
 
 	let criticResponse = '';
 	let lastDispatchError: unknown;
 	for (let attempt = 0; attempt <= maxDispatchRetries; attempt++) {
 		// eslint-disable-next-line no-await-in-loop
-		const result = await attemptDispatch(attempt, modelOverride);
+		const attemptPromise = attemptDispatch(attempt, modelOverride);
+		attemptPromise.catch(() => {});
+		// eslint-disable-next-line no-await-in-loop
+		const result = await Promise.race([attemptPromise, deadlineRace]).catch(
+			(err: unknown) => ({
+				ok: false,
+				response: '',
+				error: err,
+			}),
+		);
 		if (result.ok) {
 			criticResponse = result.response;
 			lastDispatchError = undefined;
@@ -783,7 +850,12 @@ export async function dispatchCriticAndWriteEvent(
 			}
 		} else {
 			// Exhausted retries: SC-011 auto-degrade.
-			const infraReason = `oversight infrastructure failure after ${maxDispatchRetries + 1} attempt(s): ${lastDispatchError instanceof Error ? lastDispatchError.message : String(lastDispatchError)}`;
+			const timeoutPrefix = timedOut
+				? `OVERSIGHT TIMEOUT (total deadline ${totalTimeoutMs}ms). The escalated action remains denied. Recovery controls: /swarm full-auto status, /swarm full-auto on (retry), /swarm handoff, /swarm full-auto off. `
+				: '';
+			const infraReason =
+				timeoutPrefix +
+				`oversight infrastructure failure after ${maxDispatchRetries + 1} attempt(s): ${lastDispatchError instanceof Error ? lastDispatchError.message : String(lastDispatchError)}`;
 			const consecutive = incrementOversightFailureCounter(
 				directory,
 				sessionID ?? '',
@@ -809,6 +881,7 @@ export async function dispatchCriticAndWriteEvent(
 	}
 
 	cleanup();
+	deadline.clear();
 
 	// 4. Parse the critic response
 	let parsed: CriticDispatchResult;
@@ -1076,6 +1149,7 @@ export function createFullAutoInterceptHook(
 			sessionID,
 			fullAutoConfig.oversight?.max_dispatch_retries ?? 2,
 			fullAutoConfig.oversight?.max_consecutive_dispatch_failures ?? 3,
+			fullAutoConfig.oversight?.total_timeout_ms ?? 120_000,
 		);
 
 		// Inject verdict into message stream

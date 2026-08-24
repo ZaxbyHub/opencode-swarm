@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import { stripKnownSwarmPrefix } from '../../config/schema';
 import {
+	type ActionCircuitState,
 	ensureAgentSession,
 	getAgentSession,
 	type NonTransientCircuitState,
@@ -18,6 +20,28 @@ const IMMEDIATE_HARD_STOP_CATEGORIES = new Set<NonTransientErrorCategory>([
 ]);
 const MAX_PENDING_EXECUTIONS_PER_SESSION = 100;
 const MAX_SIGNAL_LENGTH = 1_000;
+
+// Issue #2103 workstream C: maximum per-session action circuits (LRU evicted).
+const MAX_ACTION_CIRCUITS_PER_SESSION = 200;
+
+/**
+ * Issue #2103 workstream C: tools that are NEVER blocked by any circuit.
+ * Diagnostics, scope correction, repair, handoff, and abort controls stay
+ * reachable so a stopped action cannot wedge the whole session.
+ */
+const ALWAYS_ALLOWED_TOOLS = new Set([
+	'read',
+	'grep',
+	'glob',
+	'ls',
+	'check_gate_status',
+	'swarm_doctor',
+	'get_approved_plan',
+	'save_plan',
+	'update_task_status',
+	'handoff',
+	'phase_complete',
+]);
 
 export type ToolOutcome =
 	| { kind: 'success'; signal: string }
@@ -114,6 +138,21 @@ function isNeutralExitOne(command: string): boolean {
 	);
 }
 
+// Issue #2103 workstream C: missing-command classification accepts ONLY
+// structured shell-diagnostic grammar — exit 127, spawn/execFile ENOENT,
+// PowerShell's CommandNotFoundException, cmd.exe's "not recognized" error, or
+// a LINE-ANCHORED `name: command not found` shell diagnostic. The bare
+// substring "command not found" mid-prose (e.g. a build log quoting it) must
+// never manufacture the category.
+const SHELL_MISSING_COMMAND_DIAGNOSTIC = new RegExp(
+	'\\bCommandNotFoundException\\b|' +
+		'\\bis not recognized as (?:the name of a cmdlet|an internal or external command)\\b|' +
+		'(?:^|\\n)(?:\\/bin\\/)?(?:ba|da|z|k)?sh(?:\\.exe)?:\\s+(?:(?:line\\s+)?\\d+:\\s+)?[^:\\r\\n]+:\\s+not found\\b|' +
+		'(?:^|\\n)[^\\s:\\r\\n][^:\\r\\n]{0,120}:\\s+command not found\\b|' +
+		'\\b(?:spawn|execFile)\\s+\\S+\\s+ENOENT\\b',
+	'igm',
+);
+
 function classifyFatalSignal(
 	signal: string,
 	sandboxWrapped: boolean,
@@ -128,17 +167,7 @@ function classifyFatalSignal(
 	) {
 		return sandboxWrapped ? 'sandbox_wrapper_failure' : 'shell_parse_error';
 	}
-	if (
-		/\bCommandNotFoundException\b/i.test(signal) ||
-		/\bis not recognized as (?:the name of a cmdlet|an internal or external command)\b/i.test(
-			signal,
-		) ||
-		/\bcommand not found\b/i.test(signal) ||
-		/(?:^|\n)(?:\/bin\/)?(?:ba|da|z|k)?sh(?:\.exe)?:\s+(?:(?:line\s+)?\d+:\s+)?[^:\r\n]+:\s+not found\b/im.test(
-			signal,
-		) ||
-		/\b(?:spawn|execFile)\s+\S+\s+ENOENT\b/i.test(signal)
-	) {
+	if (SHELL_MISSING_COMMAND_DIAGNOSTIC.test(signal)) {
 		return 'command_not_found';
 	}
 	return null;
@@ -190,10 +219,24 @@ export function classifyToolOutcome(
 	// non-shell tool with explicitFailure falls through to 'failure' below (no
 	// hard-stop), preserving diagnostics without the false-positive hard-stop.
 	if ((explicitFailure || rawShellFailure) && shell) {
-		const category = classifyFatalSignal(
-			signal,
+		// Issue #2103 workstream C: fatal classification prefers the ERROR
+		// channel (explicit error) and structured exit-code proof; shell
+		// diagnostic grammar in the merged output stream qualifies only in its
+		// structured, line-anchored form — loose mid-prose stdout substrings
+		// never manufacture a stop.
+		if (exit === 127) {
+			return { kind: 'fatal', category: 'command_not_found', signal };
+		}
+		let category = classifyFatalSignal(
+			explicitError,
 			correlation?.sandboxWrapped === true || correlatedWrappedCommand,
 		);
+		if (!category) {
+			category = classifyFatalSignal(
+				outputSignal,
+				correlation?.sandboxWrapped === true || correlatedWrappedCommand,
+			);
+		}
 		if (category) return { kind: 'fatal', category, signal };
 	}
 	const provenFailure = explicitFailure || (rawShellFailure && !neutralExitOne);
@@ -259,6 +302,7 @@ export function recordNonTransientFailure(
 	sessionID: string,
 	category: NonTransientErrorCategory,
 	signal: string,
+	tool?: string,
 ): NonTransientCircuitState | null {
 	ensureCircuitSession(sessionID);
 	const circuit = ensureCircuit(sessionID);
@@ -273,6 +317,7 @@ export function recordNonTransientFailure(
 		circuit.sameCategoryCount = 1;
 	}
 	circuit.lastSignal = signal.slice(0, MAX_SIGNAL_LENGTH);
+	circuit.tool = tool;
 	const threshold = IMMEDIATE_HARD_STOP_CATEGORIES.has(category)
 		? 1
 		: SAME_CATEGORY_HARD_STOP_THRESHOLD;
@@ -284,6 +329,13 @@ export function recordNonTransientFailure(
 			circuit.ownerAgent,
 			`nontransient:${category}`,
 		);
+		// Issue #2103 workstream C: the stop is scoped. Immediate shell
+		// categories block further SHELL execution for this action; recovery
+		// controls (diagnose/read/rescope/handoff/abort) remain reachable.
+		const scope =
+			IMMEDIATE_HARD_STOP_CATEGORIES.has(category) && tool && isShellTool(tool)
+				? ` Blocked scope: further \`${tool}\` execution in this invocation. Read/diagnose/rescope/handoff/abort tools remain available.`
+				: '';
 		pushAdvisory(
 			session,
 			'NON-TRANSIENT STOP (' +
@@ -292,10 +344,160 @@ export function recordNonTransientFailure(
 				circuit.sameCategoryCount +
 				'/' +
 				threshold +
-				'): STOP. Do not retry this failure with another command or tool. Report the blocker and wait for corrected input, environment, or scope.',
+				'): STOP. Do not retry this failing action with another command or tool. Report the blocker and wait for corrected input, environment, or scope.' +
+				scope,
 		);
 	}
+	recordActionFailure(
+		sessionID,
+		tool ?? 'unknown',
+		'invocation',
+		category,
+		signal,
+	);
 	return circuit;
+}
+
+// --- Issue #2103 workstream C: action-local circuits --------------------------
+
+function ensureActionMap(
+	circuit: NonTransientCircuitState,
+): Map<string, ActionCircuitState> {
+	circuit.actions ??= new Map();
+	return circuit.actions;
+}
+
+function actionKey(tool: string, action: string): string {
+	return `${tool}::${action}`;
+}
+
+/**
+ * Stable, privacy-safe action identity for action-local circuits. A retry of
+ * the same command/delegation yields the same identity; a different command
+ * does not. Only bounded digests are stored (never raw command text beyond the
+ * existing MAX_SIGNAL_LENGTH evidence bound).
+ */
+export function deriveActionIdentity(
+	tool: string,
+	args?: Record<string, unknown>,
+): string {
+	if (args && typeof args.command === 'string' && args.command.length > 0) {
+		return `${tool}:cmd:${createHash('sha256').update(args.command).digest('hex').slice(0, 16)}`;
+	}
+	if (args && typeof args.prompt === 'string' && args.prompt.length > 0) {
+		// Delegation: target role + prompt digest — same task retry collides
+		// (intended), different task does not.
+		const target =
+			typeof args.subagent_type === 'string' ? args.subagent_type : '';
+		return `${tool}:task:${target}:${createHash('sha256').update(args.prompt).digest('hex').slice(0, 16)}`;
+	}
+	if (args && typeof args.file_path === 'string') {
+		return `${tool}:file:${createHash('sha256').update(args.file_path).digest('hex').slice(0, 16)}`;
+	}
+	return `${tool}:default`;
+}
+
+/** Record a failure for one action (digest or coarse identity) in its own circuit. */
+export function recordActionFailure(
+	sessionID: string,
+	tool: string,
+	action: string,
+	category: NonTransientErrorCategory,
+	signal: string,
+): ActionCircuitState | null {
+	ensureCircuitSession(sessionID);
+	const circuit = ensureCircuit(sessionID);
+	if (!circuit) return null;
+	const map = ensureActionMap(circuit);
+	const key = actionKey(tool, action);
+	const existing = map.get(key);
+	const count =
+		existing && existing.category === category ? existing.count + 1 : 1;
+	const threshold = IMMEDIATE_HARD_STOP_CATEGORIES.has(category)
+		? 1
+		: SAME_CATEGORY_HARD_STOP_THRESHOLD;
+	// LRU: delete-before-set keeps the map bounded.
+	if (!map.has(key) && map.size >= MAX_ACTION_CIRCUITS_PER_SESSION) {
+		const oldest = map.keys().next().value;
+		if (typeof oldest === 'string') map.delete(oldest);
+	}
+	const state: ActionCircuitState = {
+		tool,
+		category,
+		count,
+		hardStop: count >= threshold,
+		lastSignal: signal.slice(0, MAX_SIGNAL_LENGTH),
+		updatedAt: Date.now(),
+	};
+	map.delete(key);
+	map.set(key, state);
+	return state;
+}
+
+/**
+ * Corrected success of the same action clears its circuit. Immediate shell
+ * categories (parser / missing-command / sandbox-wrapper) stay fail-closed
+ * across a late success per AGENTS.md invariant 9 — they clear only through
+ * the audited recovery transition or a verified new invocation.
+ */
+export function recordActionSuccess(
+	sessionID: string,
+	tool: string,
+	action: string,
+): void {
+	const circuit = getAgentSession(sessionID)?.nonTransientCircuit;
+	if (!circuit?.actions) return;
+	const key = actionKey(tool, action);
+	const entry = circuit.actions.get(key);
+	if (!entry) return;
+	if (IMMEDIATE_HARD_STOP_CATEGORIES.has(entry.category)) return;
+	circuit.actions.delete(key);
+}
+
+/**
+ * Audited recovery/reset transition (issue #2103 workstream C): clears even an
+ * immediate-category hard stop after external repair, emitting telemetry so the
+ * recovery is observable. This is the ONLY way a stopped sandbox/parser circuit
+ * re-arms without a new invocation.
+ */
+export function recoverNonTransientCircuit(
+	sessionID: string,
+	tool?: string,
+): boolean {
+	const circuit = getAgentSession(sessionID)?.nonTransientCircuit;
+	if (!circuit) return false;
+	const session = getAgentSession(sessionID);
+	let recovered = false;
+	if (circuit.actions?.size) {
+		for (const [key, entry] of circuit.actions) {
+			if (tool && entry.tool !== tool) continue;
+			circuit.actions.delete(key);
+			recovered = true;
+		}
+	}
+	if (circuit.hardStop && (!tool || !circuit.tool || circuit.tool === tool)) {
+		circuit.hardStop = false;
+		circuit.category = null;
+		circuit.sameCategoryCount = 0;
+		circuit.lastSignal = null;
+		recovered = true;
+	}
+	if (recovered) {
+		telemetry.loopDetected(
+			sessionID,
+			circuit.ownerAgent,
+			`nontransient:recovered${tool ? `:${tool}` : ''}`,
+		);
+		if (session) {
+			pushAdvisory(
+				session,
+				'NON-TRANSIENT CIRCUIT RECOVERED' +
+					(tool ? ` (${tool})` : '') +
+					': circuit cleared via audited recovery transition. Shell execution may resume for the repaired action.',
+			);
+		}
+	}
+	return recovered;
 }
 
 export function clearNonTransientCircuit(sessionID: string): void {
@@ -353,11 +555,39 @@ export function nonTransientHardStopMessage(
 	);
 }
 
-export function assertNonTransientCircuitAllowsTool(sessionID: string): void {
+/**
+ * Issue #2103 workstream C: the hard stop is now SCOPED, not invocation-wide.
+ * - Immediate shell categories (parser / missing-command / sandbox-wrapper)
+ *   block further SHELL execution only; every recovery/diagnostic/read tool
+ *   stays reachable.
+ * - Non-immediate categories block the tool that recorded the repeated
+ *   failure; other tools remain usable.
+ * Recovery controls in ALWAYS_ALLOWED_TOOLS are never blocked.
+ */
+export function assertNonTransientCircuitAllowsTool(
+	sessionID: string,
+	tool?: string,
+): void {
 	const circuit = ensureCircuit(sessionID);
-	if (circuit?.hardStop) {
-		throw new Error(nonTransientHardStopMessage(circuit));
+	if (!circuit?.hardStop) return;
+	const callingTool = (tool ?? '').toLowerCase();
+	if (callingTool && ALWAYS_ALLOWED_TOOLS.has(callingTool)) return;
+	if (
+		circuit.category &&
+		IMMEDIATE_HARD_STOP_CATEGORIES.has(circuit.category)
+	) {
+		// Shell-execution failures block shell execution only.
+		if (callingTool && !isShellTool(callingTool)) return;
+		if (!callingTool && circuit.tool && !isShellTool(circuit.tool)) return;
+	} else if (
+		callingTool &&
+		circuit.tool &&
+		callingTool !== circuit.tool.toLowerCase()
+	) {
+		// Non-immediate: block only the tool that recorded the failure.
+		return;
 	}
+	throw new Error(nonTransientHardStopMessage(circuit));
 }
 
 export function rememberToolExecution(
@@ -428,4 +658,9 @@ export function forgetToolExecution(sessionID: string, callID: string): void {
 export const _test_exports = {
 	isNeutralExitOne,
 	classifyFatalSignal,
+	deriveActionIdentity,
+	recordActionFailure,
+	recordActionSuccess,
+	recoverNonTransientCircuit,
+	ALWAYS_ALLOWED_TOOLS,
 };
