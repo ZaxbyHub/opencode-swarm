@@ -11,9 +11,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
-
 import {
 	_internals,
 	_resetMaintenanceCounters,
@@ -24,6 +22,7 @@ import {
 	recordTelemetry,
 	type TelemetryEntry,
 } from '../../../src/context-map/telemetry';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function makeEntry(overrides: Partial<TelemetryEntry> = {}): TelemetryEntry {
 	return {
@@ -43,7 +42,7 @@ function makeEntry(overrides: Partial<TelemetryEntry> = {}): TelemetryEntry {
 }
 
 function mkTempDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), 'ctx-telemetry-corrupt-'));
+	return canonicalMkdtemp('ctx-telemetry-corrupt-');
 }
 
 describe('context-map telemetry corruption tolerance (issue #2037)', () => {
