@@ -63,14 +63,53 @@ At `post_explorer` every record must be `PENDING` with
 
 ## Severity semantics
 
-`severity` is optional at every boundary and is not validated on
-`post_explorer` records. When present it must equal the authoritative severity
-verbatim: the reviewer `final_severity` at `post_reviewer` (and for
-non-critic-routed records at `post_critic`); for critic-routed records at
-`post_critic` it must satisfy BOTH the reviewer and critic severities — so
-when the critic downgrades (reviewer `MEDIUM`, critic `LOW`), the only
-accepted record omits `severity` entirely until the severity-dialect
-unification lands (#2279). Omitting the field is accepted at every boundary.
+`severity` is REQUIRED on every findings record, at every boundary. Omitting it
+is a violation, not a shortcut — the rejection names the value you owed, e.g.
+`severity expected "MEDIUM", got (omitted)` (issue #2279).
+
+The vocabulary is the VERDICT dialect — `INFO | LOW | MEDIUM | HIGH | CRITICAL |
+NONE` — because a findings record is a projection of an authenticated
+`[REVIEWED]`/`[CRITIC]` row. `NONE` is a first-class value here: a `DISPROVED`
+critic verdict is required to carry it, and a CONFIRMED-but-cosmetic reviewer
+verdict legitimately does. (This is a WIDER set than the `[CANDIDATE]` row
+severities, which exclude `NONE` — a discovered candidate asserting "no severity"
+is a contradiction.)
+
+Exactly one authority applies per record; there is never a value that must
+satisfy two:
+
+| Boundary | Routing | `severity` must equal |
+| --- | --- | --- |
+| `post_explorer` | has a `[CANDIDATE]` row | the severity that row declared (never `NONE`) |
+| `post_explorer` | `CLEAN-REVIEW` with no row | `NONE` |
+| `post_reviewer` | any | the reviewer `final_severity` |
+| `post_critic` | not critic-routed | the reviewer `final_severity` |
+| `post_critic` | critic-routed | the **critic** `final_severity` — the final word |
+
+A record is critic-routed when the reviewer classification is `CONFIRMED` and the
+reviewer severity is `CRITICAL`, `HIGH`, or `MEDIUM`.
+
+Because the critic is authoritative for critic-routed records, a **downgrade is
+encodable verbatim**: reviewer `MEDIUM` + critic `LOW` persists as
+`severity: "LOW"` and validates. The former rule — omit the field when the two
+authorities disagree — is gone; it disabled the comparison against both
+authorities and is now itself rejected.
+
+At `post_explorer` the authority is the `[CANDIDATE]` row the record projects:
+the severity must equal what that row declared, compared exactly (issue #2320).
+Because candidate rows validate against the candidate vocabulary, `NONE` can
+never match one.
+
+The one exception is the mechanically derived `CLEAN-REVIEW` sentinel, emitted
+as the whole inventory when discovery found nothing at all. It has no
+`[CANDIDATE]` row, so its severity is `NONE` — the same value its mandated
+reviewer row carries — and a zero-finding review never has to invent a severity
+and then change it.
+
+`CLEAN-REVIEW` is **not a reserved id**: `candidate_id` is free text, so a lane
+may name a real finding that. The rule is therefore keyed on the authority, not
+the name — whenever a `[CANDIDATE]` row exists for the id, that row wins and its
+severity is compared exactly. The sentinel rule applies only when no row exists.
 
 ## Error reporting
 
@@ -86,10 +125,11 @@ BLOCKED: PR_REVIEW post_reviewer artifact invalid — 4 violation(s):
   C-1: severity expected "HIGH", got "LOW"
 ```
 
-A critic-downgraded record that carries a severity is told the only passing
-value explicitly: `severity expected NONE (omit field; reviewer "MEDIUM" and
-critic "LOW" disagree), got "LOW"`. Repair every listed violation and resubmit
-in a single round trip; do not guess-and-retry one record at a time.
+A critic-downgraded record is compared against the critic alone, so carrying the
+stale reviewer value is reported plainly: `severity expected "LOW", got "MEDIUM"`.
+An omitted severity is reported the same way: `severity expected "LOW", got
+(omitted)`. Repair every listed violation and resubmit in a single round trip; do
+not guess-and-retry one record at a time.
 
 ## Handoff artifact schema
 

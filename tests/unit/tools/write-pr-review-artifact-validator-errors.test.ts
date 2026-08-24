@@ -6,6 +6,7 @@ import {
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
 	artifactRecord,
+	artifactRecordWithoutSeverity,
 	establishPrReviewPrerequisites,
 	PR_ARTIFACT_HEAD_SHA,
 	PR_ARTIFACT_REVISION_DIGEST,
@@ -64,7 +65,7 @@ function persistExplorerCheckpoint(runId: string): Promise<string> {
 		runId,
 		'post_explorer',
 		candidateIds.map((id) =>
-			artifactRecord(id, 'PENDING', 'route_to_reviewer'),
+			artifactRecord(id, 'PENDING', 'route_to_reviewer', 'HIGH'),
 		),
 	);
 }
@@ -88,12 +89,12 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 		);
 		const message = await rejectionMessage(
 			writePrReviewFindings(directory, 'golden-run', 'post_reviewer', [
-				artifactRecord('C-0', 'CONFIRMED', 'report'),
+				artifactRecord('C-0', 'CONFIRMED', 'report', 'LOW'),
 				artifactRecord('C-1', 'CONFIRMED', 'report', 'LOW'),
-				artifactRecord('C-2', 'CONFIRMED', 'route_to_critic'),
-				artifactRecord('C-3', 'CONFIRMED', 'route_to_critic'),
-				artifactRecord('C-4', 'CONFIRMED', 'route_to_critic'),
-				artifactRecord('C-5', 'CONFIRMED', 'route_to_critic'),
+				artifactRecord('C-2', 'CONFIRMED', 'route_to_critic', 'HIGH'),
+				artifactRecord('C-3', 'CONFIRMED', 'route_to_critic', 'HIGH'),
+				artifactRecord('C-4', 'CONFIRMED', 'route_to_critic', 'HIGH'),
+				artifactRecord('C-5', 'CONFIRMED', 'route_to_critic', 'HIGH'),
 			]),
 		);
 		expect(message).toBe(
@@ -111,12 +112,12 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 		await establishPrReviewPrerequisites(directory, 'explorer-errs');
 		const message = await rejectionMessage(
 			writePrReviewFindings(directory, 'explorer-errs', 'post_explorer', [
-				artifactRecord('C-0', 'CONFIRMED', 'route_to_reviewer'),
-				artifactRecord('C-1', 'PENDING', 'report'),
+				artifactRecord('C-0', 'CONFIRMED', 'route_to_reviewer', 'HIGH'),
+				artifactRecord('C-1', 'PENDING', 'report', 'HIGH'),
 				artifactRecord('C-2', 'CONFIRMED', 'report', 'HIGH'),
-				artifactRecord('C-3', 'PENDING', 'route_to_reviewer'),
-				artifactRecord('C-4', 'PENDING', 'route_to_reviewer'),
-				artifactRecord('C-5', 'PENDING', 'route_to_reviewer'),
+				artifactRecord('C-3', 'PENDING', 'route_to_reviewer', 'HIGH'),
+				artifactRecord('C-4', 'PENDING', 'route_to_reviewer', 'HIGH'),
+				artifactRecord('C-5', 'PENDING', 'route_to_reviewer', 'HIGH'),
 			]),
 		);
 		expect(message).toBe(
@@ -150,12 +151,12 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 		);
 		const message = await rejectionMessage(
 			writePrReviewFindings(directory, 'matrix-run', 'post_reviewer', [
-				artifactRecord('C-0', 'CONFIRMED', 'report'),
-				artifactRecord('C-1', 'CONFIRMED', 'report'),
-				artifactRecord('C-2', 'CONFIRMED', 'report'),
-				artifactRecord('C-3', 'CONFIRMED', 'report'),
-				artifactRecord('C-4', 'PRE_EXISTING', 'report'),
-				artifactRecord('C-5', 'DISPROVED', 'report'),
+				artifactRecord('C-0', 'CONFIRMED', 'report', 'CRITICAL'),
+				artifactRecord('C-1', 'CONFIRMED', 'report', 'HIGH'),
+				artifactRecord('C-2', 'CONFIRMED', 'report', 'MEDIUM'),
+				artifactRecord('C-3', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-4', 'PRE_EXISTING', 'report', 'MEDIUM'),
+				artifactRecord('C-5', 'DISPROVED', 'report', 'HIGH'),
 			]),
 		);
 		expect(message).toBe(
@@ -187,10 +188,10 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 		);
 		const message = await rejectionMessage(
 			writePrReviewFindings(directory, 'unverified-run', 'post_reviewer', [
-				artifactRecord('C-0', 'CONFIRMED', 'report'),
+				artifactRecord('C-0', 'CONFIRMED', 'report', 'HIGH'),
 				...candidateIds
 					.slice(1)
-					.map((id) => artifactRecord(id, 'CONFIRMED', 'report')),
+					.map((id) => artifactRecord(id, 'CONFIRMED', 'report', 'LOW')),
 			]),
 		);
 		expect(message).toBe(
@@ -202,7 +203,7 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 		);
 	});
 
-	test('post_critic severity disagreement names omission as the only passing value', async () => {
+	test('post_critic downgrade persists the critic severity verbatim', async () => {
 		await establishPrReviewPrerequisites(directory, 'downgrade-run');
 		await settleReviewerPhase(
 			directory,
@@ -228,44 +229,105 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 		);
 		await expect(
 			writePrReviewFindings(directory, 'downgrade-run', 'post_reviewer', [
-				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason'),
-				artifactRecord('C-1', 'CONFIRMED', 'route_to_critic'),
-				artifactRecord('C-2', 'CONFIRMED', 'report'),
-				artifactRecord('C-3', 'CONFIRMED', 'report'),
-				artifactRecord('C-4', 'CONFIRMED', 'report'),
-				artifactRecord('C-5', 'CONFIRMED', 'report'),
+				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason', 'LOW'),
+				artifactRecord('C-1', 'CONFIRMED', 'route_to_critic', 'MEDIUM'),
+				artifactRecord('C-2', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-3', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-4', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-5', 'CONFIRMED', 'report', 'LOW'),
 			]),
 		).resolves.toContain('"success": true');
 
-		const message = await rejectionMessage(
+		// The critic's downgraded severity (LOW) is authoritative at post_critic,
+		// even though the reviewer's severity (MEDIUM) differs.
+		await expect(
 			writePrReviewFindings(directory, 'downgrade-run', 'post_critic', [
-				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason'),
+				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason', 'LOW'),
 				artifactRecord('C-1', 'CONFIRMED', 'report', 'LOW'),
-				artifactRecord('C-2', 'CONFIRMED', 'report'),
-				artifactRecord('C-3', 'CONFIRMED', 'report'),
-				artifactRecord('C-4', 'CONFIRMED', 'report'),
-				artifactRecord('C-5', 'CONFIRMED', 'report'),
+				artifactRecord('C-2', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-3', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-4', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-5', 'CONFIRMED', 'report', 'LOW'),
+			]),
+		).resolves.toContain('"success": true');
+	});
+
+	test('post_critic severity disagreement rejects the reviewer value and omission', async () => {
+		await establishPrReviewPrerequisites(directory, 'downgrade-reject-run');
+		await settleReviewerPhase(
+			directory,
+			'downgrade-reject-run',
+			[
+				reviewedRow('C-0', 'DISPROVED', 'LOW'),
+				reviewedRow('C-1', 'CONFIRMED', 'MEDIUM'),
+				reviewedRow('C-2', 'CONFIRMED', 'LOW'),
+				reviewedRow('C-3', 'CONFIRMED', 'LOW'),
+				reviewedRow('C-4', 'CONFIRMED', 'LOW'),
+				reviewedRow('C-5', 'CONFIRMED', 'LOW'),
+			],
+			candidateIds,
+		);
+		await settleCriticPhase(
+			directory,
+			'downgrade-reject-run',
+			['[CRITIC] | C-1 | DOWNGRADED | LOW | rationale | suggested change'],
+			['C-1'],
+		);
+		await expect(
+			persistExplorerCheckpoint('downgrade-reject-run'),
+		).resolves.toContain('"success": true');
+		await expect(
+			writePrReviewFindings(
+				directory,
+				'downgrade-reject-run',
+				'post_reviewer',
+				[
+					artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason', 'LOW'),
+					artifactRecord('C-1', 'CONFIRMED', 'route_to_critic', 'MEDIUM'),
+					artifactRecord('C-2', 'CONFIRMED', 'report', 'LOW'),
+					artifactRecord('C-3', 'CONFIRMED', 'report', 'LOW'),
+					artifactRecord('C-4', 'CONFIRMED', 'report', 'LOW'),
+					artifactRecord('C-5', 'CONFIRMED', 'report', 'LOW'),
+				],
+			),
+		).resolves.toContain('"success": true');
+
+		// Reporting the reviewer's (pre-downgrade) severity at post_critic is
+		// rejected: the critic's severity is authoritative here.
+		const reviewerSeverityMessage = await rejectionMessage(
+			writePrReviewFindings(directory, 'downgrade-reject-run', 'post_critic', [
+				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason', 'LOW'),
+				artifactRecord('C-1', 'CONFIRMED', 'report', 'MEDIUM'),
+				artifactRecord('C-2', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-3', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-4', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-5', 'CONFIRMED', 'report', 'LOW'),
 			]),
 		);
-		expect(message).toBe(
+		expect(reviewerSeverityMessage).toBe(
 			[
 				'BLOCKED: PR_REVIEW post_critic artifact invalid — 1 violation(s):',
-				'  C-1: severity expected NONE (omit field; reviewer "MEDIUM" and critic "LOW" disagree), got "LOW"',
+				'  C-1: severity expected "LOW", got "MEDIUM"',
 			].join('\n'),
 		);
 
-		// The omission cell of the severity truth table: omitting the optional
-		// field is accepted even when the authorities disagree.
-		await expect(
-			writePrReviewFindings(directory, 'downgrade-run', 'post_critic', [
-				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason'),
-				artifactRecord('C-1', 'CONFIRMED', 'report'),
-				artifactRecord('C-2', 'CONFIRMED', 'report'),
-				artifactRecord('C-3', 'CONFIRMED', 'report'),
-				artifactRecord('C-4', 'CONFIRMED', 'report'),
-				artifactRecord('C-5', 'CONFIRMED', 'report'),
+		// Omitting severity is rejected too: presence is mandatory now.
+		const omittedMessage = await rejectionMessage(
+			writePrReviewFindings(directory, 'downgrade-reject-run', 'post_critic', [
+				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason', 'LOW'),
+				artifactRecordWithoutSeverity('C-1', 'CONFIRMED', 'report'),
+				artifactRecord('C-2', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-3', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-4', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-5', 'CONFIRMED', 'report', 'LOW'),
 			]),
-		).resolves.toContain('"success": true');
+		);
+		expect(omittedMessage).toBe(
+			[
+				'BLOCKED: PR_REVIEW post_critic artifact invalid — 1 violation(s):',
+				'  C-1: severity expected "LOW", got (omitted)',
+			].join('\n'),
+		);
 	});
 
 	test('post_critic disposition matrix: critic DISPROVED preservation and non-critic override refusal', async () => {
@@ -297,25 +359,27 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 		);
 		await expect(
 			writePrReviewFindings(directory, 'critic-matrix', 'post_reviewer', [
-				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason'),
-				artifactRecord('C-1', 'CONFIRMED', 'route_to_critic'),
-				artifactRecord('C-2', 'CONFIRMED', 'route_to_critic'),
-				artifactRecord('C-3', 'CONFIRMED', 'report'),
-				artifactRecord('C-4', 'CONFIRMED', 'report'),
-				artifactRecord('C-5', 'CONFIRMED', 'report'),
+				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason', 'LOW'),
+				artifactRecord('C-1', 'CONFIRMED', 'route_to_critic', 'HIGH'),
+				artifactRecord('C-2', 'CONFIRMED', 'route_to_critic', 'HIGH'),
+				artifactRecord('C-3', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-4', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-5', 'CONFIRMED', 'report', 'LOW'),
 			]),
 		).resolves.toContain('"success": true');
 
 		// C-2's reviewer and critic severities AGREE (both HIGH), so its present
 		// but differing severity pins the agreement cell of the truth table.
+		// C-1 is critic-routed and DISPROVED with severity NONE, so its
+		// authoritative severity here is NONE.
 		const message = await rejectionMessage(
 			writePrReviewFindings(directory, 'critic-matrix', 'post_critic', [
-				artifactRecord('C-0', 'CONFIRMED', 'report'),
-				artifactRecord('C-1', 'CONFIRMED', 'report'),
+				artifactRecord('C-0', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-1', 'CONFIRMED', 'report', 'NONE'),
 				artifactRecord('C-2', 'DISPROVED', 'suppress_with_reason', 'LOW'),
-				artifactRecord('C-3', 'CONFIRMED', 'report'),
-				artifactRecord('C-4', 'CONFIRMED', 'report'),
-				artifactRecord('C-5', 'CONFIRMED', 'report'),
+				artifactRecord('C-3', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-4', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-5', 'CONFIRMED', 'report', 'LOW'),
 			]),
 		);
 		expect(message).toBe(

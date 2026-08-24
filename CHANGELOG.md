@@ -1,5 +1,25 @@
 # Changelog
 
+## [7.146.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.146.2...v7.146.3) (2026-08-24)
+
+
+### Bug Fixes
+
+* **context-map:** bound telemetry storage and reads ([#2037](https://github.com/ZaxbyHub/opencode-swarm/issues/2037)) ([072beb5](https://github.com/ZaxbyHub/opencode-swarm/commit/072beb59dcd028762b7d79696946228dfa34409c))
+* **context-map:** bound telemetry storage and reads ([#2037](https://github.com/ZaxbyHub/opencode-swarm/issues/2037)) ([2212adc](https://github.com/ZaxbyHub/opencode-swarm/commit/2212adc05a19ecac0cbad78ce72f4941b867fd35))
+* **telemetry:** close store-lock and torn-tail review findings ([#2037](https://github.com/ZaxbyHub/opencode-swarm/issues/2037) F-2/F-4/F-5/F-6/F-8/F-7) ([e9a0b58](https://github.com/ZaxbyHub/opencode-swarm/commit/e9a0b5844eecc6d193c7b37537b96c4464c42150))
+* **telemetry:** harden context-map telemetry store (issue [#2037](https://github.com/ZaxbyHub/opencode-swarm/issues/2037)) per PR review ([d3b4829](https://github.com/ZaxbyHub/opencode-swarm/commit/d3b4829c22944fdf1b87562f45551f5513325fa0))
+* **telemetry:** register stats/atomic-write CI gates for PRR-007 fix ([d6f393a](https://github.com/ZaxbyHub/opencode-swarm/commit/d6f393a484eaf9a495ebf06d908a574d540e4322))
+
+## [7.146.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.146.1...v7.146.2) (2026-08-24)
+
+
+### Bug Fixes
+
+* **knowledge-gate:** apply biome format/import-order to gate test ([#2325](https://github.com/ZaxbyHub/opencode-swarm/issues/2325)) ([03395df](https://github.com/ZaxbyHub/opencode-swarm/commit/03395dfee2e6947a63ab34a6bd0433f2782fcfb4))
+* **knowledge-gate:** make gate denial ack format self-discoverable and surface directive content ([229754e](https://github.com/ZaxbyHub/opencode-swarm/commit/229754e4e06781ac362e8b8452e59aed54c05188))
+* **knowledge-gate:** make gate denial ack format self-discoverable and surface directive content ([8b37108](https://github.com/ZaxbyHub/opencode-swarm/commit/8b371086123b681f36c8211ffe24b7a7961b1b1d)), closes [#2299](https://github.com/ZaxbyHub/opencode-swarm/issues/2299)
+
 ## [7.146.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.146.0...v7.146.1) (2026-08-24)
 
 

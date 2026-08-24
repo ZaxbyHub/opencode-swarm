@@ -11,6 +11,10 @@ import type { ToolContext, tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { loadPluginConfig } from '../config/loader';
 import {
+	computeCouncilReviewIdentity,
+	councilIdentityEvidenceFields,
+} from '../council/council-review-identity';
+import {
 	recordUnscopedCouncilAttempt,
 	runCouncilAttempt,
 } from '../council/council-round-state';
@@ -20,24 +24,20 @@ import type {
 	CouncilMemberVerdict,
 	PhaseCouncilSynthesis,
 } from '../council/types';
+import { COUNCIL_MEMBER_ROLES } from '../council/types';
 import { COUNCIL_VERDICT_REWARDS } from '../memory/config';
 import { createConfiguredMemoryProvider } from '../memory/gateway';
 import {
 	applyCouncilReward,
 	truncateObjectForJson,
 } from '../memory/reward-capture';
+import { loadPlan } from '../plan/manager.js';
 import * as logger from '../utils/logger';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { createSwarmTool } from './create-tool';
 import { resolveWorkingDirectory } from './resolve-working-directory';
 
-const ALL_MEMBERS = [
-	'critic',
-	'reviewer',
-	'sme',
-	'test_engineer',
-	'explorer',
-] as const;
+const ALL_MEMBERS = COUNCIL_MEMBER_ROLES;
 
 const FindingSchema = z.object({
 	severity: z.enum(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']),
@@ -137,6 +137,19 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 			const workingDir = resolved.directory;
 			const config = loadPluginConfig(workingDir);
 			const councilConfig = config.council;
+			let plan: Awaited<ReturnType<typeof loadPlan>> = null;
+			try {
+				plan = await loadPlan(workingDir);
+			} catch {
+				// A missing plan yields an identity with null plan fields; any
+				// consumer holding a plan fails closed against it.
+			}
+			const identity = computeCouncilReviewIdentity({
+				level: 'phase',
+				scope: { kind: 'phase', phaseNumber: input.phaseNumber },
+				plan,
+				config: councilConfig,
+			});
 			const distinctMembers = new Set(
 				input.verdicts.map((verdict) => verdict.agent),
 			);
@@ -147,10 +160,15 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 
 			return runCouncilAttempt({
 				directory: workingDir,
-				scope: { kind: 'phase', phaseNumber: input.phaseNumber },
+				scope: {
+					kind: 'phase',
+					phaseNumber: input.phaseNumber,
+					identityDigest: identity.identityDigest,
+				},
 				clientRound: input.roundNumber,
 				maxRounds: councilConfig?.maxRounds ?? 3,
 				sessionID: ctx?.sessionID,
+				escalationConfigured: councilConfig?.escalateOnMaxRounds !== undefined,
 				request: input,
 				verdictCount: input.verdicts.length,
 				members: membersVoted,
@@ -288,6 +306,7 @@ export const submit_phase_council_verdicts: ReturnType<typeof tool> =
 									synthesis,
 									provenance,
 									attemptId,
+									identity,
 								),
 						},
 						afterCommit: async () =>
@@ -411,6 +430,7 @@ async function writePhaseCouncilEvidence(
 		| { agent_name?: string; session_id?: string; captured_at?: string }
 		| undefined,
 	attemptId: string,
+	identity: ReturnType<typeof computeCouncilReviewIdentity>,
 ): Promise<void> {
 	const evidenceFile = phaseEvidencePath(workingDir, synthesis.phaseNumber);
 	mkdirSync(path.dirname(evidenceFile), { recursive: true });
@@ -430,6 +450,7 @@ async function writePhaseCouncilEvidence(
 				roundNumber: synthesis.roundNumber,
 				allCriteriaMet: synthesis.allCriteriaMet,
 				attemptId,
+				...councilIdentityEvidenceFields(identity),
 				...(provenance ? { provenance } : {}),
 			},
 		],

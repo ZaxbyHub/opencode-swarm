@@ -1,7 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { loadPluginConfig } from '../../../src/config/loader';
+import { PlanSchema } from '../../../src/config/plan-schema';
+import { computeCouncilReviewIdentity } from '../../../src/council/council-review-identity';
 import { closeProjectDb } from '../../../src/db/project-db';
 import { setGatesForIdentity } from '../../../src/db/qa-gate-profile';
 import { resetSwarmState } from '../../../src/state';
@@ -109,10 +118,23 @@ function writePhaseCouncil(options: {
 	quorumSize?: number;
 	timestamp?: string;
 	phaseNumber?: number;
+	omitIdentity?: boolean;
+	reviewHashOverride?: string;
 }) {
 	const evidencePath = join(tempDir, '.swarm', 'evidence', '1');
 	mkdirSync(evidencePath, { recursive: true });
 	const ts = options.timestamp ?? new Date().toISOString();
+	// The gate recomputes the identity from the same shared implementation and
+	// the same parsed council config, so fixtures written here bind exactly.
+	const plan = PlanSchema.parse(
+		JSON.parse(readFileSync(join(tempDir, '.swarm', 'plan.json'), 'utf-8')),
+	);
+	const identity = computeCouncilReviewIdentity({
+		level: 'phase',
+		scope: { kind: 'phase', phaseNumber: options.phaseNumber ?? 1 },
+		plan,
+		config: loadPluginConfig(tempDir).council,
+	});
 	writeFileSync(
 		join(evidencePath, 'phase-council.json'),
 		JSON.stringify({
@@ -133,6 +155,14 @@ function writePhaseCouncil(options: {
 					advisoryFindings: [],
 					roundNumber: 1,
 					allCriteriaMet: true,
+					...(options.omitIdentity
+						? {}
+						: {
+								identity_version: identity.version,
+								review_hash: options.reviewHashOverride ?? identity.reviewHash,
+								policy_digest: identity.policyDigest,
+								identity_digest: identity.identityDigest,
+							}),
 				},
 			],
 		}),

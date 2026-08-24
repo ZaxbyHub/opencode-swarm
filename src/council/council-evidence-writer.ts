@@ -29,6 +29,8 @@ import {
 	parseTaskEvidence,
 } from '../gate-evidence.js';
 import { assertProjectRoot } from '../utils/project-boundary.js';
+import type { CouncilReviewIdentity } from './council-review-identity';
+import { councilIdentityEvidenceFields } from './council-review-identity';
 import type { CouncilSynthesis } from './types';
 
 const EVIDENCE_DIR = '.swarm/evidence';
@@ -98,6 +100,7 @@ export async function writeCouncilEvidence(
 	synthesis: CouncilSynthesis,
 	attemptId?: string,
 	expectedGeneration?: number,
+	identity?: CouncilReviewIdentity,
 ): Promise<void> {
 	// Defense in depth — library-level writer should not trust upstream validation.
 	if (!VALID_TASK_ID.test(synthesis.taskId)) {
@@ -183,6 +186,12 @@ export async function writeCouncilEvidence(
 				// distinct members. Old evidence files (pre-quorum) lack this field
 				// and are conservatively rehydrated as quorumSize: 1.
 				quorumSize: synthesis.quorumSize,
+				// Council review identity (issue #2102): binds this approval to the
+				// exact review-relevant plan content + council policy. The
+				// rehydration consumer validates identity_digest against the current
+				// identity; evidence without these fields is legacy and fails closed
+				// on the fast path after the cutover.
+				...(identity ? councilIdentityEvidenceFields(identity) : {}),
 				...(expectedGeneration !== undefined
 					? { workflowGeneration: expectedGeneration }
 					: {}),

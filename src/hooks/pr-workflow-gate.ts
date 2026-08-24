@@ -11,6 +11,8 @@ import {
 	type CandidateSeverity,
 	CLEAN_TEMPLATES,
 	candidateHeaderFamily,
+	type FindingsSeverity,
+	isCandidateSeverity,
 	normalizeCandidateArtifact,
 	type RowFormatFamily,
 	selectCandidateHeader,
@@ -477,7 +479,14 @@ type PrReviewArtifactRecord = {
 		| 'report'
 		| 'suppress_with_reason'
 		| 'handoff_to_feedback';
-	severity?: CandidateSeverity;
+	/**
+	 * Optional in the TYPE only so a legacy findings row persisted before
+	 * required-severity landed still loads (`readFindings` JSON-parses without
+	 * re-validating). Presence is REQUIRED by
+	 * `assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts`, which treats an
+	 * omitted severity as a mismatch rather than skipping the check (issue #2279).
+	 */
+	severity?: FindingsSeverity;
 };
 
 interface PrFeedbackScopeDeclarationRecord {
@@ -6093,7 +6102,44 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 			detail: `${field} expected ${expected}, got ${actual}`,
 		});
 	};
+	/**
+	 * The severity comparison, unconditional by design. An OMITTED severity is a
+	 * mismatch, never a skip: presence-guarding this check (`if (record.severity
+	 * && …)`) is what let a caller bypass verification against BOTH the reviewer
+	 * and the critic simply by leaving the field out (issue #2279). The message
+	 * names the required value, so a caller repairs the payload in one round trip.
+	 */
+	const reportSeverity = (
+		record: PrReviewArtifactRecord,
+		expected: string,
+	): void => {
+		if (record.severity === expected) return;
+		// A corrupted artifact must not be misdiagnosed as merely missing the
+		// field: an absent key, `null`, and `""` are distinct defects and all
+		// previously rendered as `(omitted)` (PRR-008). Widened deliberately —
+		// the field is typed to the enum, but the schema leaves it optional and
+		// `readFindings` reloads legacy rows without re-validating, so `null` and
+		// `""` are reachable at runtime.
+		const raw = record.severity as string | null | undefined;
+		const actual =
+			raw === undefined
+				? '(omitted)'
+				: raw === null
+					? '(null)'
+					: raw === ''
+						? '(empty)'
+						: `"${raw}"`;
+		report(record.finding_id, 'severity', `"${expected}"`, actual);
+	};
 	if (boundary === 'post_explorer') {
+		// The candidate rows the inventory was derived from ARE the authority for
+		// this boundary: a post_explorer record is a projection of one
+		// `[CANDIDATE]` row, so its severity must equal that row's (issue #2320).
+		const candidateSeverities = derivePrReviewCandidateSeverities(
+			directory,
+			state,
+			await createPrReviewGateContext(directory, state),
+		);
 		for (const record of records) {
 			if (record.status !== 'PENDING') {
 				report(record.finding_id, 'status', '"PENDING"', `"${record.status}"`);
@@ -6106,6 +6152,41 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 					`"${record.next_action}"`,
 				);
 			}
+			// A DERIVED AUTHORITY ALWAYS WINS. This ordering is load-bearing:
+			// `candidate_id` is unconstrained free text (`analyzeCandidateFields`
+			// requires only non-empty), so a lane can legitimately — or
+			// maliciously — name a real finding `CLEAN-REVIEW`. Testing the id
+			// first let such a record be compared against `NONE` instead of the row
+			// it projects, which both accepted a fabricated `NONE` for a CRITICAL
+			// row and rejected the truthful value. Consulting the map first makes
+			// the sentinel branch reachable only when there is genuinely no row.
+			const candidateSeverity = candidateSeverities.get(record.finding_id);
+			if (candidateSeverity) {
+				// Exact-value comparison against the row that produced this record.
+				reportSeverity(record, candidateSeverity);
+				continue;
+			}
+			if (record.finding_id === PR_REVIEW_CLEAN_SENTINEL_ID) {
+				// The zero-candidate sentinel, reached only with no row of its own.
+				// Its mandated reviewer row carries `NONE` and `post_reviewer`
+				// compares against exactly that, so `NONE` is correct here too —
+				// requiring anything else would force a clean review to invent a
+				// value and then flip it one boundary later.
+				reportSeverity(record, 'NONE');
+				continue;
+			}
+			// Unreachable by construction: `assertPrReviewArtifactBoundary` has
+			// already forced every id to be in the inventory, and every
+			// non-sentinel inventory id is appended from the same row that
+			// contributed its severity (a row only enters the inventory once
+			// `analyzeCandidateFields` validated its severity). Reported as a
+			// violation rather than silently tolerated, so an invariant break
+			// fails closed instead of quietly disabling the comparison.
+			violations.push({
+				findingId: record.finding_id,
+				detail:
+					'no authoritative candidate severity (absent from the derived candidate inventory)',
+			});
 		}
 	} else {
 		const ctx = await createPrReviewGateContext(directory, state);
@@ -6169,14 +6250,7 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 						`"${record.next_action}"`,
 					);
 				}
-				if (record.severity && record.severity !== reviewer.severity) {
-					report(
-						record.finding_id,
-						'severity',
-						`"${reviewer.severity}"`,
-						`"${record.severity}"`,
-					);
-				}
+				reportSeverity(record, reviewer.severity);
 				continue;
 			}
 
@@ -6205,28 +6279,17 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 						`"${record.next_action}"`,
 					);
 				}
-				if (record.severity && record.severity !== reviewer.severity) {
-					report(
-						record.finding_id,
-						'severity',
-						`"${reviewer.severity}"`,
-						`"${record.severity}"`,
-					);
-				}
+				reportSeverity(record, reviewer.severity);
 				continue;
 			}
 
 			// post_critic, critic-routed: the critic verdict is authoritative.
 			const critic = criticVerdicts?.get(record.finding_id);
 			if (!critic) {
-				if (record.severity && record.severity !== reviewer.severity) {
-					report(
-						record.finding_id,
-						'severity',
-						`"${reviewer.severity}"`,
-						`"${record.severity}"`,
-					);
-				}
+				// No critic verdict settled: the reviewer severity is the best
+				// available authority, and the missing-critic violation below is
+				// reported alongside it.
+				reportSeverity(record, reviewer.severity);
 				violations.push({
 					findingId: record.finding_id,
 					detail:
@@ -6269,28 +6332,14 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 					);
 				}
 			}
-			if (record.severity) {
-				if (reviewer.severity === critic.severity) {
-					if (record.severity !== reviewer.severity) {
-						report(
-							record.finding_id,
-							'severity',
-							`"${reviewer.severity}"`,
-							`"${record.severity}"`,
-						);
-					}
-				} else {
-					// The reviewer and critic severities disagree, so no present
-					// value satisfies both presence-guarded checks; omitting the
-					// optional field is the only passing option.
-					report(
-						record.finding_id,
-						'severity',
-						`NONE (omit field; reviewer "${reviewer.severity}" and critic "${critic.severity}" disagree)`,
-						`"${record.severity}"`,
-					);
-				}
-			}
+			// The critic is the FINAL word for a critic-routed item, so its severity
+			// is the single authority here — including when it downgrades the
+			// reviewer (reviewer MEDIUM -> critic LOW), which is now encodable
+			// verbatim as `severity: "LOW"`. The previous code compared against the
+			// reviewer when the two agreed and, when they disagreed, instructed the
+			// caller to omit the field — which disabled the check entirely
+			// (issue #2279).
+			reportSeverity(record, critic.severity);
 		}
 	}
 	if (violations.length > 0) {
@@ -9099,6 +9148,12 @@ interface PrReviewGateContext {
 	reviewer?: PrReviewPhaseComposition;
 	critic?: PrReviewPhaseComposition;
 	candidateInventory?: string[];
+	/**
+	 * candidate_id -> the severity its `[CANDIDATE]` row declared. Populated
+	 * as a by-product of deriving the inventory, so it is exactly as
+	 * authoritative and as scoped as the inventory itself (issue #2320).
+	 */
+	candidateSeverities?: Map<string, CandidateSeverity>;
 }
 
 /**
@@ -9180,6 +9235,15 @@ function assertStringSetSubset(
 		);
 	}
 }
+
+/**
+ * The single synthetic inventory id used when discovery found no candidates at
+ * all. Its reviewer row is mandated to carry `final_severity: NONE`
+ * (swarm-pr-review SKILL.md), so `NONE` is the CORRECT severity for it at every
+ * boundary — including `post_explorer`, which has no `[CANDIDATE]` row to
+ * compare against because there are none.
+ */
+const PR_REVIEW_CLEAN_SENTINEL_ID = 'CLEAN-REVIEW';
 
 function derivePrReviewCandidateInventory(
 	directory: string,
@@ -9380,6 +9444,7 @@ function derivePrReviewCandidateInventory(
 		}
 	}
 	const candidateIds: string[] = [];
+	const candidateSeverities = new Map<string, CandidateSeverity>();
 	// A consolidated lane can be the provenance source for several sources
 	// (one base lane owning several dimensions collapses to one source
 	// already, but micro trigger rows are per-family: several rows may cite
@@ -9444,13 +9509,20 @@ function derivePrReviewCandidateInventory(
 			const laneKey = `${source.batchId}\0${source.laneId}`;
 			if (!extractedLaneKeys.has(laneKey)) {
 				extractedLaneKeys.add(laneKey);
-				candidateIds.push(
-					...extractCandidateIds(
-						artifact.text,
-						resolvePrReviewRowFamily(source.workflowLane, source.mode),
-						source.creditedLanes,
-					),
+				const extracted = extractCandidateRows(
+					artifact.text,
+					resolvePrReviewRowFamily(source.workflowLane, source.mode),
+					source.creditedLanes,
 				);
+				for (const row of extracted) {
+					candidateIds.push(row.candidateId);
+					// Duplicate ids are rejected by assertNoDuplicates below, so a
+					// first-write here is also the only write; recording it
+					// unconditionally would mask that check rather than defer to it.
+					if (row.severity && !candidateSeverities.has(row.candidateId)) {
+						candidateSeverities.set(row.candidateId, row.severity);
+					}
+				}
 			}
 		}
 		if (source.mode === 'swarm-pr-review:micro' && !resolvedArtifact) {
@@ -9466,8 +9538,11 @@ function derivePrReviewCandidateInventory(
 		}
 	}
 	assertNoDuplicates(candidateIds, 'PR_REVIEW discovery candidate ids');
+	ctx.candidateSeverities = candidateSeverities;
 	ctx.candidateInventory =
-		candidateIds.length > 0 ? candidateIds.sort() : ['CLEAN-REVIEW'];
+		candidateIds.length > 0
+			? candidateIds.sort()
+			: [PR_REVIEW_CLEAN_SENTINEL_ID];
 	return ctx.candidateInventory;
 }
 
@@ -9482,6 +9557,13 @@ function derivePrReviewCandidateInventory(
 interface CanonicalCandidateArtifactRow {
 	candidateId: string;
 	workflowLane: string;
+	/**
+	 * The row's declared severity, already validated against
+	 * `CANDIDATE_SEVERITIES` by `analyzeCandidateFields` (so never `NONE`).
+	 * Carried so the `post_explorer` findings boundary can compare a record's
+	 * severity against the candidate row that produced it (issue #2320).
+	 */
+	severity: CandidateSeverity | null;
 	evidence: string;
 	lineNumber: number;
 }
@@ -9577,6 +9659,9 @@ function parseCanonicalCandidateRows(
 		rows.push({
 			candidateId: analysis.candidateId,
 			workflowLane: analysis.workflowLane,
+			severity: isCandidateSeverity(analysis.values.severity)
+				? analysis.values.severity
+				: null,
 			evidence: candidateFields.slice(2).join('\0'),
 			lineNumber: index + 1,
 		});
@@ -9584,16 +9669,59 @@ function parseCanonicalCandidateRows(
 	return { rows, issues };
 }
 
+function extractCandidateRows(
+	text: string,
+	fallbackFamily: RowFormatFamily,
+	scopeToLanes?: readonly string[],
+): CanonicalCandidateArtifactRow[] {
+	const inScope = (lane: string | undefined) =>
+		!scopeToLanes || (lane !== undefined && scopeToLanes.includes(lane));
+	return parseCanonicalCandidateRows(text, fallbackFamily).rows.filter((row) =>
+		inScope(row.workflowLane),
+	);
+}
+
 function extractCandidateIds(
 	text: string,
 	fallbackFamily: RowFormatFamily,
 	scopeToLanes?: readonly string[],
 ): string[] {
-	const inScope = (lane: string | undefined) =>
-		!scopeToLanes || (lane !== undefined && scopeToLanes.includes(lane));
-	return parseCanonicalCandidateRows(text, fallbackFamily)
-		.rows.filter((row) => inScope(row.workflowLane))
-		.map((row) => row.candidateId);
+	return extractCandidateRows(text, fallbackFamily, scopeToLanes).map(
+		(row) => row.candidateId,
+	);
+}
+
+/**
+ * candidate_id -> declared severity, for the SAME authoritative rows the
+ * candidate inventory is derived from. Deriving the inventory populates this as
+ * a by-product, so the two can never disagree about which rows are credited.
+ *
+ * Every non-sentinel inventory id is guaranteed present: an id and its severity
+ * are appended from the same validated row, and a lane that cannot contribute a
+ * row contributes no id either. The `CLEAN-REVIEW` sentinel is the one id with
+ * no `[CANDIDATE]` row, and the gate handles it explicitly rather than through a
+ * lenient fallback (issue #2320).
+ */
+function derivePrReviewCandidateSeverities(
+	directory: string,
+	state: PrWorkflowGateState,
+	ctx: PrReviewGateContext,
+): Map<string, CandidateSeverity> {
+	if (!ctx.candidateSeverities) {
+		derivePrReviewCandidateInventory(directory, state, ctx);
+	}
+	if (!ctx.candidateSeverities) {
+		// Fail closed. `derivePrReviewCandidateInventory` early-returns on a
+		// memoized `ctx.candidateInventory` WITHOUT populating the severity map, so
+		// a caller threading in a context that already derived the inventory would
+		// otherwise silently receive an empty map — every record would fall through
+		// to the no-authority branch and exact comparison would disappear with no
+		// test failing. An empty map is never a legitimate result here.
+		throw new Error(
+			'BLOCKED: PR_REVIEW candidate severity authority is unavailable for this gate context',
+		);
+	}
+	return ctx.candidateSeverities;
 }
 
 type PrReviewComposablePhase = 'reviewer' | 'critic';
@@ -11090,6 +11218,12 @@ interface PrReviewDiscoveryCoverageAnalysis {
 	 */
 	salvaged: boolean;
 	repairKinds: readonly CandidateArtifactRepairKind[];
+	/**
+	 * The parse retained this lane's candidate rows but discredited a conflicting
+	 * `[CLEAN]` attestation. Tracked separately from `repairKinds` because nothing
+	 * was repaired — an assertion was dropped (issue #2279).
+	 */
+	cleanAttestationSalvaged: boolean;
 	failurePredicate?: Extract<
 		PrReviewLaneValidationPredicate,
 		'discovery.header' | 'discovery.row' | 'discovery.coverage'
@@ -11112,7 +11246,8 @@ function analyzePrReviewDiscoveryArtifact(
 	const normalized = normalizeCandidateArtifact(text, fallbackFamily);
 	const canonicalText = normalized.text;
 	const repairKinds = normalized.repairKinds;
-	const salvaged = repairKinds.length > 0;
+	let salvaged = repairKinds.length > 0;
+	let cleanAttestationSalvaged = false;
 	const header = selectCandidateHeader(canonicalText.split(/\r?\n/));
 	if (
 		header === null ||
@@ -11130,6 +11265,7 @@ function analyzePrReviewDiscoveryArtifact(
 			coverageKind: null,
 			salvaged,
 			repairKinds,
+			cleanAttestationSalvaged,
 			failurePredicate: 'discovery.header',
 		};
 	}
@@ -11166,6 +11302,20 @@ function analyzePrReviewDiscoveryArtifact(
 		},
 	);
 	if (parsed.error) appendBoundedCandidateIssue(issues, parsed.error);
+	// A discredited-but-salvaged CLEAN no longer arrives as `parsed.error`, so it
+	// is re-entered here as BOTH an issue and a salvage signal. The two are
+	// redundant on purpose — `salvaged = true` alone already keeps the lane in
+	// the durable salvagedLanes/recoveries ledger — but the issue entry is what
+	// carries the human-readable reason into the post-mortem diagnostics.
+	if (parsed.clean_attestation_salvaged) {
+		cleanAttestationSalvaged = true;
+		salvaged = true;
+		appendBoundedCandidateIssue(
+			issues,
+			parsed.clean_attestation_salvage_reason ??
+				'CLEAN attestation discredited; candidate rows retained',
+		);
+	}
 	for (const detail of parsed.diagnostics.parse_error_details) {
 		appendBoundedCandidateIssue(
 			issues,
@@ -11173,7 +11323,12 @@ function analyzePrReviewDiscoveryArtifact(
 		);
 	}
 	const hasParseFailure =
-		Boolean(parsed.error) || parsed.diagnostics.parse_error_details.length > 0;
+		Boolean(parsed.error) ||
+		// Keeps the predicate identical to pre-#2279 behaviour: this shape used to
+		// surface as `parsed.error`, so a lane that ends up uncovered must still
+		// report `discovery.row` rather than silently becoming `discovery.coverage`.
+		Boolean(parsed.clean_attestation_salvaged) ||
+		parsed.diagnostics.parse_error_details.length > 0;
 	// Duplicate candidate ids are the one row defect that is never salvaged: the
 	// inventory they feed is asserted globally unique, so admitting them would
 	// convert a recoverable lane defect into a late workflow-wide failure.
@@ -11199,6 +11354,7 @@ function analyzePrReviewDiscoveryArtifact(
 			coverageKind: null,
 			salvaged,
 			repairKinds,
+			cleanAttestationSalvaged,
 			failurePredicate: 'discovery.row',
 		};
 	}
@@ -11225,6 +11381,7 @@ function analyzePrReviewDiscoveryArtifact(
 			coverageKind: 'candidate',
 			salvaged,
 			repairKinds,
+			cleanAttestationSalvaged,
 		};
 	}
 	const clean = parsed.clean_attestation;
@@ -11241,6 +11398,7 @@ function analyzePrReviewDiscoveryArtifact(
 			coverageKind: 'clean',
 			salvaged,
 			repairKinds,
+			cleanAttestationSalvaged,
 		};
 	}
 	return {
@@ -11250,6 +11408,7 @@ function analyzePrReviewDiscoveryArtifact(
 		coverageKind: null,
 		salvaged,
 		repairKinds,
+		cleanAttestationSalvaged,
 		// Preserve today's predicate: a row-level defect is still reported as
 		// such once it turns out no valid row could establish coverage.
 		failurePredicate: hasParseFailure ? 'discovery.row' : 'discovery.coverage',
@@ -11367,6 +11526,14 @@ export function validatePrReviewDiscoveryLaneCompletion(
 				workflowLane,
 				kind: 'parser-normalization',
 				reason: `structural repairs applied: ${analysis.repairKinds.join(', ')}`,
+			});
+		}
+		if (analysis.cleanAttestationSalvaged) {
+			laneRecoveries.push({
+				workflowLane,
+				kind: 'clean-attestation-salvaged',
+				reason:
+					'a conflicting [CLEAN] attestation was discredited while the independently validated candidate rows were retained',
 			});
 		}
 		if (analysis.issues.length > 0) {

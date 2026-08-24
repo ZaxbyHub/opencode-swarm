@@ -144,6 +144,78 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Council policy visibility findings (issue #2102 contracts C/E/F), driven by
+ * the RAW config files so they fire ONLY when the user explicitly wrote the
+ * key — schema defaults never produce noise.
+ */
+function collectRawCouncilPolicyFindings(directory: string): ConfigFinding[] {
+	const findings: ConfigFinding[] = [];
+	const { userConfigPath, projectConfigPath } = getConfigPaths(directory);
+
+	for (const configPath of [userConfigPath, projectConfigPath]) {
+		if (!fs.existsSync(configPath)) continue;
+		try {
+			const stats = fs.statSync(configPath);
+			if (stats.size > CONFIG_DOCTOR_MAX_CONFIG_FILE_BYTES) continue;
+			const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as unknown;
+			if (!isPlainObject(raw) || raw.council === undefined) continue;
+			if (!isPlainObject(raw.council)) continue;
+			const council = raw.council;
+
+			if ('parallelTimeoutMs' in council) {
+				findings.push({
+					id: 'council-parallel-timeout-deprecated',
+					title: 'Deprecated and inert: council.parallelTimeoutMs',
+					description:
+						'Config field "council.parallelTimeoutMs" (in ' +
+						configPath +
+						') is deprecated and inert: no runtime consumer exists and no timeout is enforced. It is accepted only for parse compatibility. Remove the key — dispatch timeouts are governed by the agent host. The field is scheduled for removal in a future release.',
+					severity: 'warn',
+					path: 'council.parallelTimeoutMs',
+					currentValue: council.parallelTimeoutMs,
+					autoFixable: false,
+				});
+			}
+			if ('escalateOnMaxRounds' in council) {
+				findings.push({
+					id: 'council-escalate-inert',
+					title: 'Inert: council.escalateOnMaxRounds',
+					description:
+						'Config field "council.escalateOnMaxRounds" (in ' +
+						configPath +
+						') is set, but the handler/webhook remains INERT in this release: no handler, webhook, or outbound execution exists or was added (issue #1650). Max-rounds exhaustion emits a durable structured event (.swarm/council/events/max-rounds-exhaustion.jsonl) and a user escalation message instead; the run stays fail-closed. Wiring real outbound escalation requires a separate security review.',
+					severity: 'warn',
+					path: 'council.escalateOnMaxRounds',
+					currentValue: '[redacted: handler/webhook strings are never echoed]',
+					autoFixable: false,
+				});
+			}
+			if (
+				isPlainObject(council.finalCompletionPolicy) &&
+				council.finalCompletionPolicy.mode === 'quorum'
+			) {
+				findings.push({
+					id: 'council-final-quorum-weaker',
+					title:
+						'council.finalCompletionPolicy.mode "quorum" weakens the strict final council',
+					description:
+						'Final-council completion is configured in quorum mode (in ' +
+						configPath +
+						'): a bounded minimum of distinct canonical members can accept the project instead of the strict default (all five canonical roles, zero absentees). This is weaker than the strict default. Any change to this policy invalidates previously accepted final-council evidence.',
+					severity: 'warn',
+					path: 'council.finalCompletionPolicy',
+					currentValue: council.finalCompletionPolicy,
+					autoFixable: false,
+				});
+			}
+		} catch {
+			// Malformed raw config is reported by the strict-section collector.
+		}
+	}
+	return findings;
+}
+
 function collectRawGatesConfigFindings(directory: string): ConfigFinding[] {
 	const findings: ConfigFinding[] = [];
 	const { userConfigPath, projectConfigPath } = getConfigPaths(directory);
@@ -1592,6 +1664,11 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 
 		case 'council': {
 			emitObjectTypeMismatch('council', value, findings);
+			// Council policy visibility findings (issue #2102 contracts C/E/F)
+			// live in collectRawCouncilPolicyFindings: they must fire only when
+			// the user EXPLICITLY wrote the key, and the parsed config always
+			// carries schema defaults (e.g. parallelTimeoutMs), so raw config is
+			// the only correct source.
 			break;
 		}
 
@@ -1806,6 +1883,7 @@ export function runConfigDoctor(
 	// Walk the config and validate
 	walkConfigAndValidate(config, '', findings);
 	findings.push(...collectRawGatesConfigFindings(directory));
+	findings.push(...collectRawCouncilPolicyFindings(directory));
 	findings.push(...collectRawStrictSectionFindings(directory));
 	findings.push(...collectRawValueConstraintFindings(directory));
 	findings.push(...collectRawAutoReviewCompatibilityFindings(directory));

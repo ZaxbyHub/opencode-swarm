@@ -631,6 +631,10 @@ export async function executePhaseComplete(
 		gate_pass: false,
 	};
 	const primaryRetroTaskId = `retro-${phase}`;
+	// One captured clock for the whole aggregate preflight (issue #2102
+	// contract D): every freshness-sensitive gate evaluates against this
+	// single timestamp so gates cannot disagree across an age boundary mid-run.
+	const preflightNowMs = Date.now();
 	const gateCtx: GateContext = {
 		phase,
 		dir,
@@ -640,6 +644,7 @@ export async function executePhaseComplete(
 		safeWarn,
 		loadedRetroBundle,
 		loadedRetroTaskId,
+		preflightNowMs,
 	};
 	const passGate = (extra: Record<string, unknown> = {}) => ({
 		blocked: false,

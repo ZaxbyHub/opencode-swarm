@@ -62,7 +62,17 @@ afterEach(async () => {
 
 describe('write_pr_review_artifact', () => {
 	test('ARTIFACT-ORDER regression: requires explorer, reviewer, then critic checkpoints', async () => {
-		await establishPrReviewPrerequisites(directory, 'coverage-order');
+		// The candidate rows declare INFO so this regression still proves a
+		// parser-valid INFO finding survives the writer end to end — now that
+		// post_explorer compares against the candidate row (issue #2320), the
+		// row and the record must agree.
+		await establishPrReviewPrerequisites(
+			directory,
+			'coverage-order',
+			undefined,
+			undefined,
+			{ candidateSeverity: 'INFO' },
+		);
 		const candidateIds = PR_REVIEW_BASE_DIMENSION_IDS.map(
 			(_dimension, index) => `C-${index}`,
 		);
@@ -151,6 +161,7 @@ describe('write_pr_review_artifact', () => {
 			file_line: 'src/index.ts:1',
 			evidence: 'discovery evidence',
 			next_action: 'route_to_reviewer' as const,
+			severity: 'HIGH' as const,
 		}));
 		const reviewerRecords = candidateIds.map((id, index) => ({
 			finding_id: id,
@@ -161,6 +172,7 @@ describe('write_pr_review_artifact', () => {
 				index === 0
 					? ('suppress_with_reason' as const)
 					: ('route_to_critic' as const),
+			severity: index === 0 ? ('LOW' as const) : ('HIGH' as const),
 		}));
 		const criticRecords = candidateIds.map((id, index) => ({
 			finding_id: id,
@@ -173,6 +185,7 @@ describe('write_pr_review_artifact', () => {
 					: index === 1
 						? ('handoff_to_feedback' as const)
 						: ('report' as const),
+			severity: index === 0 ? ('LOW' as const) : ('HIGH' as const),
 		}));
 		const reviewerRows = candidateIds
 			.map((id, index) =>

@@ -74,6 +74,18 @@ describe('council-prompts: protocol preservation', () => {
 			expect(prompt).toContain('"confidence"');
 			expect(prompt).toContain('"areasOfUncertainty"');
 			expect(prompt).toContain('"sources"');
+			// #2102 contract G: bounded structured claims with typed stances.
+			expect(prompt).toContain('"claims"');
+			expect(prompt).toContain('"stance"');
+			for (const stance of [
+				'support',
+				'oppose',
+				'neutral',
+				'concern',
+				'alternative',
+			]) {
+				expect(prompt).toContain(`"${stance}"`);
+			}
 		});
 
 		test(`${name} cites NSED arXiv:2601.16863`, () => {

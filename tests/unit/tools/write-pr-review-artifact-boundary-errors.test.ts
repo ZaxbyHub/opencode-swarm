@@ -209,28 +209,28 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 				'clean-run',
 				'post_explorer',
 				candidateIds.map((id) =>
-					artifactRecord(id, 'PENDING', 'route_to_reviewer'),
+					artifactRecord(id, 'PENDING', 'route_to_reviewer', 'HIGH'),
 				),
 			),
 		).resolves.toContain('"success": true');
 		await expect(
 			writePrReviewFindings(directory, 'clean-run', 'post_reviewer', [
-				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason'),
-				artifactRecord('C-1', 'CONFIRMED', 'route_to_critic'),
-				artifactRecord('C-2', 'CONFIRMED', 'report'),
-				artifactRecord('C-3', 'CONFIRMED', 'report'),
-				artifactRecord('C-4', 'CONFIRMED', 'report'),
-				artifactRecord('C-5', 'CONFIRMED', 'report'),
+				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason', 'LOW'),
+				artifactRecord('C-1', 'CONFIRMED', 'route_to_critic', 'MEDIUM'),
+				artifactRecord('C-2', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-3', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-4', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-5', 'CONFIRMED', 'report', 'LOW'),
 			]),
 		).resolves.toContain('"success": true');
 		await expect(
 			writePrReviewFindings(directory, 'clean-run', 'post_critic', [
-				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason'),
-				artifactRecord('C-1', 'CONFIRMED', 'report'),
-				artifactRecord('C-2', 'CONFIRMED', 'report'),
-				artifactRecord('C-3', 'CONFIRMED', 'report'),
-				artifactRecord('C-4', 'CONFIRMED', 'report'),
-				artifactRecord('C-5', 'CONFIRMED', 'report'),
+				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason', 'LOW'),
+				artifactRecord('C-1', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-2', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-3', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-4', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-5', 'CONFIRMED', 'report', 'LOW'),
 			]),
 		).resolves.toContain('"success": true');
 	});
