@@ -113,7 +113,7 @@ describe('action-local circuits (issue #2103 workstream C)', () => {
 		const c = deriveActionIdentity('bash', { command: 'rg other src' });
 		expect(a).toBe(b);
 		expect(a).not.toBe(c);
-		expect(a.startsWith('cmd:')).toBe(true);
+		expect(a.startsWith('bash:cmd:')).toBe(true);
 		expect(a).not.toContain('rg pattern');
 	});
 });

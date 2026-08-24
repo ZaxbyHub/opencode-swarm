@@ -19,9 +19,9 @@ export interface AbortDeadline {
 }
 
 /**
- * Arm a manual abort deadline. The timer is `unref()`d so it cannot pin the
- * process open, and aborts with a `DOMException` named `TimeoutError` so the
- * reason stays recognizable upstream.
+ * Arm a manual abort deadline. Aborts with a `DOMException` named
+ * `TimeoutError` so the reason stays recognizable upstream. The timer is
+ * deliberately NOT unref'd — see the inline comment below.
  */
 export function abortDeadline(ms: number): AbortDeadline {
 	const controller = new AbortController();

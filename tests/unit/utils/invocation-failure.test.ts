@@ -48,6 +48,23 @@ describe('classifyInvocationFailure — shell family', () => {
 		expect(result?.category).not.toBe('shell_missing_command');
 	});
 
+	test('mid-prose "command not found" in the error channel does NOT classify missing-command (reviewer finding 1)', () => {
+		const result = classifyInvocationFailure(
+			shell({
+				errorSignal:
+					'fatal: earlier "command not found" was already reported in the log',
+			}),
+		);
+		expect(result?.category).not.toBe('shell_missing_command');
+	});
+
+	test('a line-anchored shell diagnostic DOES classify missing-command', () => {
+		const result = classifyInvocationFailure(
+			shell({ errorSignal: 'bash: line 2: missing-tool: command not found' }),
+		);
+		expect(result?.category).toBe('shell_missing_command');
+	});
+
 	test('a non-shell tool with a generic error does not classify as shell missing-command', () => {
 		const result = classifyInvocationFailure({
 			channel: 'error',

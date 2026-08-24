@@ -253,13 +253,22 @@ function classifyProvider(
 
 // --- shell (channels: error / exit_code ONLY — never output text) -----------
 
-const SHELL_MISSING_COMMAND_ERROR = new RegExp(
+/**
+ * Issue #2103: structured shell-diagnostic grammar for a missing command —
+ * exit-code-independent evidence that may run ONLY on the error channel. The
+ * bare substring "command not found" mid-prose (a quoted build log) must
+ * never manufacture the category, so plain occurrences require a
+ * LINE-ANCHORED `name: command not found` shell diagnostic. Shared with (and
+ * byte-equivalent to) the usage in
+ * `src/hooks/guardrails/nontransient-circuit.ts`.
+ */
+export const SHELL_MISSING_COMMAND_DIAGNOSTIC = new RegExp(
 	'\\bCommandNotFoundException\\b|' +
 		'\\bis not recognized as (?:the name of a cmdlet|an internal or external command)\\b|' +
-		'\\bcommand not found\\b|' +
 		'(?:^|\\n)(?:\\/bin\\/)?(?:ba|da|z|k)?sh(?:\\.exe)?:\\s+(?:(?:line\\s+)?\\d+:\\s+)?[^:\\r\\n]+:\\s+not found\\b|' +
+		'(?:^|\\n)[^\\r\\n]{0,160}:\\s+command not found\\b|' +
 		'\\b(?:spawn|execFile)\\s+\\S+\\s+ENOENT\\b',
-	'im',
+	'igm',
 );
 
 const SHELL_PARSE_ERROR =
@@ -289,7 +298,8 @@ function classifyShell(input: ClassifyFailureInput): InvocationFailure | null {
 	// signatures in the ERROR channel. Stdout substring matches never qualify.
 	if (
 		input.exitCode === 127 ||
-		(fromError && SHELL_MISSING_COMMAND_ERROR.test(input.errorSignal ?? ''))
+		(fromError &&
+			SHELL_MISSING_COMMAND_DIAGNOSTIC.test(input.errorSignal ?? ''))
 	) {
 		return failure({
 			family: 'shell',

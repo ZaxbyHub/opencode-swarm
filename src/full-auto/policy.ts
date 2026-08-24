@@ -749,8 +749,9 @@ export function classifyFullAutoToolAction(
 		// weaken strict enforcement). Supervised/assisted may take a lower-risk
 		// route for delegations to REGISTERED strictly-read-only roles; the
 		// registered capability map is authoritative and delegation-args prose
-		// is never consulted. Existing containment/destructive/protected gates
-		// still run independently after this decision.
+		// is never consulted. Containment/destructive/protected gates apply to
+		// the tools the role can later invoke; a strictly-read-only capability
+		// map already excludes them by construction.
 		if (
 			mode !== 'strict' &&
 			subagentName !== 'unknown' &&

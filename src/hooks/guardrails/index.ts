@@ -1567,21 +1567,45 @@ export function createGuardrailsHooks(
 					clearNonTransientCircuit(input.sessionID);
 				} else {
 					// Issue #2103 workstream A/D: classify through the shared
-					// taxonomy (error channel — never tool stdout) so ENOSPC,
-					// EPERM, git conflicts, locks, and deadlines land in distinct,
-					// actionable circuit categories instead of one catch-all.
+					// taxonomy. Channel discipline (reviewer finding): the input
+					// is the tool's structured ERROR channel only — never the
+					// merged stdout signal — and only filesystem/git/abort
+					// categories map onto circuit categories; every other
+					// taxonomy family (provider/policy/agent/shell-nonzero)
+					// stays 'general_permanent' so it cannot bypass the
+					// immediate-hard-stop thresholds.
 					const classified = classifyInvocationFailure({
 						channel: 'error',
-						errorSignal: circuitSignal,
+						errorSignal: extractErrorSignal(
+							typeof (safeOutput as Record<string, unknown> | undefined)
+								?.error === 'string'
+								? ((safeOutput as Record<string, unknown>).error as string)
+								: '',
+						),
 						toolKind:
 							input.tool?.toLowerCase() === 'bash' ||
 							input.tool?.toLowerCase() === 'shell'
 								? 'shell'
 								: 'other',
 					});
+					const TAXONOMY_CIRCUIT_CATEGORIES: ReadonlySet<string> = new Set([
+						'fs_busy_lock',
+						'fs_permission',
+						'fs_readonly',
+						'fs_no_space',
+						'fs_containment',
+						'fs_not_found',
+						'git_conflict',
+						'git_lock_busy',
+						'git_unavailable',
+						'git_timeout',
+						'git_corrupt',
+						'abort_or_deadline',
+					]);
 					const circuitCategory: NonTransientErrorCategory =
-						(classified?.category as NonTransientErrorCategory | undefined) ??
-						'general_permanent';
+						classified && TAXONOMY_CIRCUIT_CATEGORIES.has(classified.category)
+							? (classified.category as NonTransientErrorCategory)
+							: 'general_permanent';
 					recordNonTransientFailure(
 						input.sessionID,
 						circuitCategory,

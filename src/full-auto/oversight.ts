@@ -598,8 +598,9 @@ export async function dispatchFullAutoOversight(
 	for (let attempt = 0; attempt <= maxRetries; attempt++) {
 		// eslint-disable-next-line no-await-in-loop
 		const attemptPromise = attemptDispatch(attempt, modelOverride);
-		// If the deadline wins the race, a late attempt rejection must not
-		// surface as an unhandled rejection.
+		// Defensive: attemptDispatch currently never rejects, but if a future
+		// refactor makes it throwing, a late rejection after the deadline wins
+		// the race must not surface as unhandled.
 		attemptPromise.catch(() => {});
 		// eslint-disable-next-line no-await-in-loop
 		const result = await Promise.race([attemptPromise, deadlineRace]).catch(

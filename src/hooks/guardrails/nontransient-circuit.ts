@@ -11,6 +11,7 @@ import {
 } from '../../state';
 import { telemetry } from '../../telemetry';
 import { pushAdvisory } from '../../utils/advisory-queue';
+import { SHELL_MISSING_COMMAND_DIAGNOSTIC } from '../../utils/invocation-failure';
 
 const SAME_CATEGORY_HARD_STOP_THRESHOLD = 3;
 const IMMEDIATE_HARD_STOP_CATEGORIES = new Set<NonTransientErrorCategory>([
@@ -138,20 +139,10 @@ function isNeutralExitOne(command: string): boolean {
 	);
 }
 
-// Issue #2103 workstream C: missing-command classification accepts ONLY
-// structured shell-diagnostic grammar — exit 127, spawn/execFile ENOENT,
-// PowerShell's CommandNotFoundException, cmd.exe's "not recognized" error, or
-// a LINE-ANCHORED `name: command not found` shell diagnostic. The bare
-// substring "command not found" mid-prose (e.g. a build log quoting it) must
-// never manufacture the category.
-const SHELL_MISSING_COMMAND_DIAGNOSTIC = new RegExp(
-	'\\bCommandNotFoundException\\b|' +
-		'\\bis not recognized as (?:the name of a cmdlet|an internal or external command)\\b|' +
-		'(?:^|\\n)(?:\\/bin\\/)?(?:ba|da|z|k)?sh(?:\\.exe)?:\\s+(?:(?:line\\s+)?\\d+:\\s+)?[^:\\r\\n]+:\\s+not found\\b|' +
-		'(?:^|\\n)[^\\s:\\r\\n][^:\\r\\n]{0,120}:\\s+command not found\\b|' +
-		'\\b(?:spawn|execFile)\\s+\\S+\\s+ENOENT\\b',
-	'igm',
-);
+// Issue #2103: missing-command classification uses the shared structured
+// shell-diagnostic grammar exported from src/utils/invocation-failure.ts
+// (SHELL_MISSING_COMMAND_DIAGNOSTIC) so the taxonomy and the circuit cannot
+// drift.
 
 function classifyFatalSignal(
 	signal: string,
