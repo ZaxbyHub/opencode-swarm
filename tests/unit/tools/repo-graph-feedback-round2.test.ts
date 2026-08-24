@@ -298,11 +298,17 @@ describe('Stage B findings: annotation bound and unwired invariant', () => {
 });
 
 describe('F-06c: the edge-target invariant holds on the incremental path too', () => {
-	// `reconcileEdgeTargetKinds` originally ran only on full builds. An
-	// incremental update rescans a file and re-adds its edges via
-	// `scanFileAsync`, which resolves imports without the walker's skip rules —
-	// so it silently re-introduced the dangling `'node'` edges a full build had
-	// just reconciled away. Dies if the call is removed from `finalizeAndSave`.
+	// `reconcileEdgeTargetKinds` originally ran only on full builds; it is now
+	// also called from `finalizeAndSave` so the invariant holds on every path
+	// that mutates edges.
+	//
+	// HONEST LABEL — this is a SMOKE CHECK, not a mutation-proven pin. Removing
+	// the `finalizeAndSave` call does NOT make it fail: with this fixture the
+	// incremental path never produces a dangling edge for the reconciler to
+	// catch, so the wiring is defence-in-depth whose reachable trigger I could
+	// not construct. It is kept because it asserts a real invariant over the
+	// incremental result, but it must not be cited as evidence that the wiring
+	// is covered. Do not "fix" it by weakening the assertion.
 	test('an incremental update does not re-introduce a dangling node edge', async () => {
 		await withWorkspace(
 			{
