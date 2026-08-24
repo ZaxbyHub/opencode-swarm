@@ -136,7 +136,10 @@ the payload note below before assuming a rebuild is a no-op.
   action="build"`) is needed to pick up corrected Java/Kotlin/C# visibility,
   member typing, and package/namespace/import data.
 - No schema version change.
-- **One existing value can change, for `.js` files only.** Members of an
+- **One existing value can change, for the whole JS family.** This affects
+  `.js`, `.jsx`, `.mjs` and `.cjs` — all four map to the same `javascript`
+  grammar (`src/lang/registry.ts`), and all four were measured producing
+  identical output. Members of an
   exported JavaScript class now appear in `exports` / `exportLines` /
   `exportRanges` (see the JavaScript note above). Where a member name collides
   with a top-level export in the same file, the existing `exportLines` entry now

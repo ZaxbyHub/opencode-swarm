@@ -27,7 +27,7 @@ import {
 	extractRustSymbols,
 	extractTSSymbols,
 } from '../symbols';
-import { extractFileOntology } from './ontology';
+import { extractFileOntology, maskMultilineStringLiterals } from './ontology';
 import { safeRealpathSync } from './safe-realpath';
 import type {
 	BuildWorkspaceGraphOptions,
@@ -1225,7 +1225,15 @@ function finalDottedSegment(value: string): string {
  */
 function parseJavaFileImports(rawContent: string): ParsedImport[] {
 	const imports: ParsedImport[] = [];
-	const content = stripComments(rawContent);
+	// Mask text-block CONTENTS before matching. `stripComments` removes comments
+	// but keeps string literals verbatim, so a line-initial `import ...;` inside
+	// a Java text block matched this line-anchored regex and was fabricated as a
+	// real import. Reachable only when the AST path fails (grammar load failure,
+	// timeout, parse error) and this fallback runs, but real when it does.
+	const content = maskMultilineStringLiterals(
+		stripComments(rawContent),
+		'java',
+	);
 	const re =
 		/^[ \t]*import[ \t]+(static[ \t]+)?([A-Za-z_][\w.]*(?:\.\*)?)[ \t]*;?[ \t]*\r?$/gm;
 	for (let m = re.exec(content); m !== null; m = re.exec(content)) {
@@ -2392,9 +2400,18 @@ export async function scanFileAsync(
 	// Derive exports, exportLines, exportRanges from tree-sitter defs
 	const exportedDefs = facts.defs.filter((d) => d.exported);
 	const exports = exportedDefs.map((d) => d.name);
-	const exportLines: Record<string, number> = {};
+	// NULL-PROTOTYPE maps. A def named after an `Object.prototype` member is
+	// ordinary source — `toString` is one of the most common method names in
+	// Java, Kotlin and C# — and on a plain `{}` the collision read below
+	// (`exportRanges[d.name]`) returns the INHERITED `Object.prototype.toString`,
+	// which is truthy and `!== undefined`. The loop then believed a previous def
+	// already held the slot and silently dropped the real one. Measured: a class
+	// with `toString`/`constructor`/`hasOwnProperty` members lost all of them.
+	// (The `__proto__` setter hazard is also neutralised by a null prototype,
+	// but it was not the cause — the unguarded read was.)
+	const exportLines: Record<string, number> = Object.create(null);
 	const exportRanges: Record<string, { startLine: number; endLine: number }> =
-		{};
+		Object.create(null);
 	for (const d of exportedDefs) {
 		exportLines[d.name] = d.startLine;
 	}
@@ -2420,7 +2437,7 @@ export async function scanFileAsync(
 	// Tracks whether the def currently holding each `exportRanges` slot was
 	// exported. Widening admits non-exported members, so without this an
 	// unexported member could outrank the exported symbol of the same name.
-	const rangeIsExported: Record<string, boolean> = {};
+	const rangeIsExported: Record<string, boolean> = Object.create(null);
 	for (const d of isWidenedGrammar ? facts.defs : exportedDefs) {
 		// Only the widened path needs this. validateGraphNode THROWS on a
 		// non-positive or inverted range and runs during the scan, so one
@@ -2738,6 +2755,51 @@ export async function scanFileAsync(
  * @returns Complete RepoGraph with nodes and edges
  * @throws Error if workspace validation fails
  */
+/**
+ * Restore the documented `targetKind` invariant: a `'node'` target is a file
+ * that actually became a graph node.
+ *
+ * Import resolution and the workspace walker apply different filters. The
+ * walker prunes `SKIP_DIRECTORIES` (`node_modules`, `dist`, `vendor`, ...) and
+ * unfollowed symlinks; `resolveModuleSpecifier` consults neither, so a real
+ * file inside a skipped directory resolves happily and produced an edge marked
+ * `targetKind: 'node'` pointing at a node that does not exist. Measured on both
+ * the dotted JVM/.NET path (`import node_modules.com.example.Foo;`) and the
+ * pre-existing relative path (`import '../node_modules/pkg/index'`).
+ *
+ * The edge is a real dependency, so it is kept rather than dropped — it is
+ * reclassified to `'asset'`, which already means "a real file that never
+ * becomes a node" and is correctly excluded from in-degree ranking, importer
+ * and dependent queries, and node-existence checks during incremental
+ * validation. Returns the number of edges reclassified.
+ */
+function reconcileEdgeTargetKinds(graph: RepoGraph): number {
+	// `graph.nodes` is KEYED with forward slashes while `edge.target` and
+	// `node.filePath` carry the platform separator, so on Windows a direct
+	// `Object.hasOwn(graph.nodes, edge.target)` is false for EVERY edge and
+	// would reclassify the whole graph to 'asset' — silently disabling
+	// dead-export, importer and dependent queries. Compare on a normalised form.
+	const known = new Set<string>();
+	for (const key of Object.keys(graph.nodes)) known.add(toComparablePath(key));
+	for (const node of Object.values(graph.nodes)) {
+		known.add(toComparablePath(node.filePath));
+	}
+	let reclassified = 0;
+	for (const edge of graph.edges) {
+		if (edge.targetKind !== 'node') continue;
+		if (known.has(toComparablePath(edge.target))) continue;
+		edge.targetKind = 'asset';
+		reclassified++;
+	}
+	return reclassified;
+}
+
+/** Separator- and case-normalised path key for cross-map comparison. */
+function toComparablePath(p: string): string {
+	const slashed = p.replace(/\\/g, '/');
+	return process.platform === 'win32' ? slashed.toLowerCase() : slashed;
+}
+
 export function buildWorkspaceGraph(
 	workspaceRoot: string,
 	options?: BuildWorkspaceGraphOptions,
@@ -2977,6 +3039,8 @@ export function buildWorkspaceGraph(
 		}
 	}
 
+	reconcileEdgeTargetKinds(graph);
+
 	// Update final metadata with scan stats
 	graph.metadata = {
 		generatedAt: new Date().toISOString(),
@@ -3158,6 +3222,8 @@ export async function buildWorkspaceGraphAsync(
 			await yieldToEventLoop();
 		}
 	}
+
+	reconcileEdgeTargetKinds(graph);
 
 	graph.metadata = {
 		generatedAt: new Date().toISOString(),

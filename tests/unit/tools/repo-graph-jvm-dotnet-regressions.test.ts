@@ -120,7 +120,14 @@ describe('repo-graph JVM/.NET — implementation-review regressions', () => {
 		);
 		writeFile(
 			'com/example/Api.cs',
-			'namespace Example;\n\nusing Example.Data;\n\npublic class Api {}\n',
+			// `global using` (C# 10) was pinned on the async/tree-sitter path only.
+			// Removing the optional `global` group from the SYNC fallback regex in
+			// parseCSharpFileImports left the whole suite green — mutation-proven.
+			'namespace Example;\n\nusing Example.Data;\nglobal using Example.Other;\n\npublic class Api {}\n',
+		);
+		writeFile(
+			'Example/Other/Extra.cs',
+			'namespace Example.Other;\n\npublic class Extra {}\n',
 		);
 		writeFile(
 			'Example/Data/Thing.cs',
@@ -135,6 +142,8 @@ describe('repo-graph JVM/.NET — implementation-review regressions', () => {
 		expect(kotlinNode.imports).toContain('com.example.Repo');
 		const csharpNode = nodeFor(graph, 'com/example/Api.cs');
 		expect(csharpNode.imports).toContain('Example.Data');
+		// Dies if the sync fallback loses `(?:global[ \t]+)?`.
+		expect(csharpNode.imports).toContain('Example.Other');
 
 		// The fallback must also produce a real resolved edge, not just a
 		// specifier string.

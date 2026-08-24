@@ -255,9 +255,14 @@ never crashing the build.
 **Java, Kotlin, C#** (`.java`, `.kt`, `.kts`, `.cs`, `.csx`) are hardened as
 follows:
 
-- Class/interface/enum/record declarations and constructors are extracted as
-  defs; a nested (non-top-level) type declaration is visibility-classified
-  rather than defaulting to private.
+- Class/interface/enum/record declarations are extracted as defs. **Java and C#
+  explicit constructors** are extracted too, typed `method` (deliberately, to
+  avoid colliding with `Object.prototype.constructor`). Kotlin constructors are
+  **not** extracted at all — primary or secondary — because the Kotlin defs
+  query carries no constructor pattern; nor are primary-constructor and record
+  canonical-constructor forms in any of the three languages, which fold into the
+  enclosing class/record def. A nested (non-top-level) type declaration is
+  visibility-classified rather than defaulting to private.
 - Member methods declared inside a class/interface/enum/record/struct/object
   container are typed `method` (not `function`), matching the Python/Rust
   convention.
@@ -442,6 +447,37 @@ cannot compensate for this. Closing either would require
 changing a shared pre-existing helper used by all ontology extraction; the impact
 is limited to a grouping/display key, so it is recorded here rather than patched
 under this issue.
+
+### Known limitations: dotted resolution and `packageBoundary` (round-2 feedback)
+
+Recorded rather than fixed, with the measurement behind each:
+
+- **Nested multi-module roots are not probed.** `JVM_DOTNET_DOTTED_ROOTS` holds
+  fixed top-level prefixes, so a Gradle/Maven layout such as
+  `moduleA/src/main/java/...` yields no edge. This fails CLOSED — a missing
+  edge, never a fabricated one — which is why it is recorded rather than
+  guessed at with a glob.
+- **A C# file with two namespaces collapses to the first.** `packageBoundary` is
+  a single string per file, so a file declaring `namespace First;` and
+  `namespace Second;` reports `First`. There is no correct single answer for
+  that file; the alternative would be to report nothing.
+- **Dotted resolution is uncached.** Measured: repeat lookups of the same
+  specifier stay flat at ~0.33 ms (no memoization), and an adversarial synthetic
+  workspace (2300 files, 1800 unresolved probes, a 2000-entry package
+  directory) spent ~10% of build time in the probes — the rest is tree-sitter
+  parsing. Cost is bounded by the four fixed roots and `statSync` ENOENT
+  short-circuits before any `readdirSync`, so this is a scaling safeguard to
+  consider later, not a present defect.
+- **Probes run before containment validation.** `statSync`/`readdirSync` touch a
+  candidate path before `safeRealpathSync` and the workspace-boundary check
+  reject it, so a symlink planted inside the workspace can cause a directory
+  listing outside it to be read. The escaped path is still rejected and never
+  reaches graph output; this is an internal confused-deputy oracle, and it
+  requires write access to the scanned workspace to trigger.
+- **Import resolution and the walker apply different filters.** A file inside a
+  `SKIP_DIRECTORIES` entry resolves but is never indexed. Such edges are now
+  reclassified `targetKind: 'asset'` at graph assembly so no edge claims a node
+  that does not exist; the dependency itself is preserved.
 
 ## Invariant audit (for the implementing PR)
 

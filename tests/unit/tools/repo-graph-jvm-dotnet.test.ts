@@ -212,6 +212,32 @@ describe('repo-graph: Kotlin import/symbol resolution + ontology (issue #1529)',
 		);
 		expect(edge).toBeDefined();
 	});
+
+	// Mutation-proven gap: removing `kotlin` from JVM_DOTNET_RANGE_GRAMMARS left
+	// the whole suite green, because only Java asserted a member span or a
+	// symbolEdge. The widening is the entire point of the change for Kotlin too.
+	test('kotlin: member span reaches exportRanges and context_pack in full mode', async () => {
+		const graph = await buildWorkspaceGraphAsync(tempDir);
+		const widgetNode = nodeFor(graph, 'com/example/helper/Widget.kt');
+		expect(widgetNode.exportRanges?.build).toEqual({
+			startLine: 4,
+			endLine: 4,
+		});
+		const pack = getContextPack(graph, widgetNode.moduleName, 'build');
+		expect(pack.spans[0]?.mode).toBe('full');
+	});
+
+	test('kotlin: produces a symbol edge for the resolved import', async () => {
+		const graph = await buildWorkspaceGraphAsync(tempDir);
+		const serviceNode = nodeFor(graph, 'com/example/Service.kt');
+		const widgetNode = nodeFor(graph, 'com/example/helper/Widget.kt');
+		expect(graph.symbolEdges ?? []).toContainEqual({
+			fromFile: serviceNode.filePath,
+			fromSymbol: 'run',
+			toFile: widgetNode.filePath,
+			toSymbol: 'Widget',
+		});
+	});
 });
 
 describe('repo-graph: C# file-scoped and block namespace resolution (issue #1529)', () => {
@@ -262,5 +288,38 @@ describe('repo-graph: C# file-scoped and block namespace resolution (issue #1529
 		const graph = await buildWorkspaceGraphAsync(tempDir);
 		const apiNode = nodeFor(graph, 'Example/App/Services/OrderApi.cs');
 		expect(apiNode.ontology?.packageBoundary).toBe('Example.App.Services');
+	});
+
+	// Mutation-proven gap: removing `csharp` from JVM_DOTNET_RANGE_GRAMMARS left
+	// the whole suite green — only Java pinned a member span or a symbolEdge.
+	test('csharp: member span reaches exportRanges and context_pack in full mode', async () => {
+		const graph = await buildWorkspaceGraphAsync(tempDir);
+		const apiNode = nodeFor(graph, 'Example/App/Services/OrderApi.cs');
+		expect(apiNode.exportRanges?.Run).toEqual({ startLine: 5, endLine: 5 });
+		const pack = getContextPack(graph, apiNode.moduleName, 'Run');
+		expect(pack.spans[0]?.mode).toBe('full');
+	});
+
+	// A plain C# `using Namespace;` imports a NAMESPACE, not a name: it creates
+	// no named binding, so there is nothing for a reference to resolve against
+	// and no symbol edge is emitted. That is correct, not a gap — Kotlin's
+	// `import ...Widget` is a NAMED import, which is why it does emit one.
+	// Pinned so the asymmetry is deliberate rather than looking like a Kotlin/C#
+	// inconsistency to the next reader.
+	test('csharp: a namespace-only using yields a file edge but no symbol edge', async () => {
+		const graph = await buildWorkspaceGraphAsync(tempDir);
+		const controllerNode = nodeFor(graph, 'Example/App/OrderController.cs');
+		const apiNode = nodeFor(graph, 'Example/App/Services/OrderApi.cs');
+		expect(
+			graph.edges.some(
+				(e) =>
+					e.source === controllerNode.filePath && e.target === apiNode.filePath,
+			),
+		).toBe(true);
+		expect(
+			(graph.symbolEdges ?? []).some(
+				(e) => e.fromFile === controllerNode.filePath,
+			),
+		).toBe(false);
 	});
 });

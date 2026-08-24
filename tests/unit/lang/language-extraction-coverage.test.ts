@@ -66,8 +66,15 @@ const EXPECTATIONS: Record<string, Expectation> = {
 		expectBindings: true,
 	},
 	go: {
+		// Explicitly ALIASED import. A bare `import "m"` genuinely has no
+		// bindings — Go binds the package name implicitly — so asserting
+		// `expectBindings` against a bare import was asserting the wrong thing.
+		// It passed only because the single-line bare form captured the literal
+		// keyword `import` as an alias, emitting `{imported:'m', local:'import'}`;
+		// the block form correctly emitted none, so the two disagreed. With that
+		// fixed, this row needs an import that really does carry a binding.
 		source:
-			'package p\nimport "m"\ntype C struct{}\nfunc (c C) M() { m.A() }\n',
+			'package p\nimport m "m"\ntype C struct{}\nfunc (c C) M() { m.A() }\n',
 		expectMethods: true,
 		expectBindings: true,
 	},

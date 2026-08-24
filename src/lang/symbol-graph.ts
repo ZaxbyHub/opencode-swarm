@@ -615,10 +615,18 @@ function buildFacts(
 		// For ESM default exports, normalize the exported name to 'default'
 		// so it matches the 'default' sentinel used by parseEsmImport and
 		// the sync builder's export naming.
+		//
+		// The def must be the statement's OWN declaration, not merely nested
+		// inside it. `isNodeInside` is a pure span-containment test, so for
+		// `export default class Foo { bar() {} }` it is true for the class AND
+		// for every method, getter and static inside it — each of which was then
+		// renamed to `default` and marked exported, destroying the real name
+		// `Foo`. Ask the grammar which node the statement actually declares.
 		let isDefaultExport = false;
 		if (explicitExported && isEsMGrammar(grammarId)) {
 			isDefaultExport = exportNodes.some(
-				(en) => isNodeInside(en, defNode) && isDefaultExportStatement(en),
+				(en) =>
+					isDefaultExportStatement(en) && isOwnExportDeclaration(en, defNode),
 			);
 		}
 
@@ -1313,8 +1321,13 @@ function parseGoImportHardened(
 	const t = text.trim();
 	if (t.startsWith('import (')) return null;
 
+	// The `(?!import\b)` guard matters: without it, a SINGLE-LINE bare import
+	// (`import "fmt"`) matched the bare-alias pattern with the literal keyword
+	// `import` captured as the alias, yielding `{imported:'fmt', local:'import'}`.
+	// Block-form bare imports were unaffected, so the two forms disagreed. A bare
+	// import has no alias in either form and must fall through to `simple` below.
 	const aliased =
-		t.match(/^([\w._]+)\s+["`]([^"`]+)["`]$/) ??
+		t.match(/^(?!import\b)([\w._]+)\s+["`]([^"`]+)["`]$/) ??
 		t.match(/^import\s+([\w._]+)\s+["`]([^"`]+)["`]/);
 	if (aliased) {
 		if (aliased[1] === '_') {
@@ -1353,8 +1366,17 @@ function parseGoImportHardened(
  * matches no def anywhere.
  */
 function finalDottedSegment(path: string): string {
-	const lastDot = path.lastIndexOf('.');
-	return lastDot === -1 ? path : path.slice(lastDot + 1);
+	// Strip a generic argument list first. A C# alias RHS may be a constructed
+	// type (`using L = System.Collections.Generic.List<int>;`), and splitting on
+	// the last dot alone produced `List<int>` as the `imported` name — which can
+	// never match a declaration in the target file, silently creating a wrong
+	// binding instead of cleanly omitting one. That violates this module's own
+	// contract that `bindings[].imported` is the declaration name found in the
+	// target file. A dot inside the generic arguments is also not a namespace
+	// separator, so the argument list must go before `lastIndexOf('.')` runs.
+	const withoutGenerics = path.replace(/<.*>$/s, '');
+	const lastDot = withoutGenerics.lastIndexOf('.');
+	return lastDot === -1 ? withoutGenerics : withoutGenerics.slice(lastDot + 1);
 }
 
 function parseJavaImport(text: string): FileSymbolFacts['imports'][0] | null {
@@ -1635,6 +1657,35 @@ function isInsideImportStatement(node: TsNode): boolean {
 
 function nodeKey(node: TsNode): string {
 	return `${node.startPosition.row},${node.startPosition.column}-${node.endPosition.row},${node.endPosition.column}`;
+}
+
+/**
+ * True when `defNode` is the declaration an export statement itself declares,
+ * rather than something nested deeper inside it.
+ *
+ * Uses the grammar's own `declaration` / `value` field accessors instead of
+ * enumerating child node types: the field is defined by the grammar for every
+ * legal shape, so this stays correct for `export default class`,
+ * `export default function`, `export default <expression>` and anything a
+ * future grammar bump adds, without a skip-list to keep in sync.
+ *
+ * Members of an `export default` declaration are still `exported` (matching the
+ * named-export path, where `export class Foo { bar() {} }` marks `bar`
+ * exported). They simply keep their real names instead of all becoming
+ * `default`.
+ */
+function isOwnExportDeclaration(en: TsNode, defNode: TsNode): boolean {
+	const owner =
+		en.childForFieldName?.('declaration') ?? en.childForFieldName?.('value');
+	if (owner) {
+		return (
+			owner.startIndex === defNode.startIndex &&
+			owner.endIndex === defNode.endIndex
+		);
+	}
+	// No declaration/value field (unusual grammar shape): fall back to the old
+	// containment test rather than silently dropping the default marking.
+	return isNodeInside(en, defNode);
 }
 
 function isDefaultExportStatement(en: TsNode): boolean {
