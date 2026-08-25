@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.146.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.146.4...v7.146.5) (2026-08-25)
+
+
+### Bug Fixes
+
+* **ci:** quarantine flaky pr-monitor-status test ([#1982](https://github.com/ZaxbyHub/opencode-swarm/issues/1982)) ([0fefe63](https://github.com/ZaxbyHub/opencode-swarm/commit/0fefe631b153c1bc0bbc7d017a55308c69b7c066))
+
 ## [7.146.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.146.3...v7.146.4) (2026-08-24)
 
 
