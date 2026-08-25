@@ -138,7 +138,12 @@ export class WorkerManager {
 	}
 
 	/**
-	 * Start processing loop for a worker
+	 * Start processing loop for a worker.
+	 *
+	 * The loop polls (bounded sleeps: 50 ms at the concurrency cap, 100 ms
+	 * when idle or when every queued item is still inside its retry backoff —
+	 * `dequeue` returns undefined for not-yet-due items, so there is no busy
+	 * loop and no retry can run before `nextAttemptAt`).
 	 */
 	private startProcessingLoop(worker: Worker): void {
 		const processLoop = async () => {
@@ -177,7 +182,11 @@ export class WorkerManager {
 	}
 
 	/**
-	 * Handle a single queue item
+	 * Handle a single queue item.
+	 *
+	 * The item is in the queue's in-flight set for the whole handler run
+	 * (issue #2104), so both `complete` and `retry` address it reliably even
+	 * though `dequeue` already removed it from the queued array.
 	 */
 	private async handleItem(worker: Worker, item: QueueItem): Promise<void> {
 		try {
@@ -208,7 +217,15 @@ export class WorkerManager {
 	}
 
 	/**
-	 * Stop a worker
+	 * Stop a worker.
+	 *
+	 * In-flight policy (issue #2104): stopping marks the worker so the loop
+	 * exits at its next bounded check (≤100 ms later); already-running
+	 * handlers are NOT cancelled — they run to completion and settle their
+	 * item through the queue's in-flight `complete`/`retry`. Queued items
+	 * stay queued for a future `start`. The method stays synchronous, so it
+	 * does not wait for those handlers; use the queue's `inflightSize()`
+	 * (exposed via `getStats().queueInflight`) to observe drain progress.
 	 */
 	stop(name: string): boolean {
 		const worker = this.workers.get(name);
@@ -268,6 +285,7 @@ export class WorkerManager {
 				errorCount: number;
 				lastError?: unknown;
 				queueSize: number;
+				queueInflight: number;
 		  }
 		| undefined {
 		const worker = this.workers.get(name);
@@ -280,6 +298,7 @@ export class WorkerManager {
 			errorCount: worker.errorCount,
 			lastError: worker.lastError,
 			queueSize: worker.queue.size(),
+			queueInflight: worker.queue.inflightSize(),
 		};
 	}
 

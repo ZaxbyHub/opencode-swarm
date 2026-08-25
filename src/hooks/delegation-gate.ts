@@ -2917,6 +2917,12 @@ const releaseBackgroundCoderReservationForDispatch: typeof import('../background
 			await import('../background/pending-delegations.js')
 		).releaseBackgroundCoderReservation(...args);
 
+const maintainBackgroundDelegationsForDispatch: typeof import('../background/pending-delegations.js').maintainBackgroundDelegations =
+	async (...args) =>
+		(
+			await import('../background/pending-delegations.js')
+		).maintainBackgroundDelegations(...args);
+
 /**
  * _internals export for testing — do not use in production code.
  * Exposes resolveEvidenceTaskId, resolveDelegatedPlanTaskId,
@@ -2939,6 +2945,7 @@ export const _internals = {
 	reserveBackgroundCoderSlotForDispatch,
 	bindBackgroundCoderReservationForDispatch,
 	releaseBackgroundCoderReservationForDispatch,
+	maintainBackgroundDelegationsForDispatch,
 	resetStandardWorktreeIsolationState,
 	PLAN_CRITIC_TASK_SIGNALS,
 	extractPlanCriticVerdict,
@@ -3979,6 +3986,22 @@ export function createDelegationGateHook(
 			if (!backgroundSubagentsEnabled || !isBackgroundTrue(args.background)) {
 				return;
 			}
+			// Maintenance point P1 (issue #2104): reconcile stale delegations and
+			// expired reservation leases right before admission. Best-effort with a
+			// tight 1 s lock bound — on contention or failure the inline
+			// proven-terminal reconciliation inside reserveBackgroundCoderSlot
+			// still guards admission, and another maintenance point will finish
+			// the wider reclaim later.
+			try {
+				await _internals.maintainBackgroundDelegationsForDispatch(directory, {
+					lockTimeoutMs: 1_000,
+					reason: 'admission',
+				});
+			} catch (error) {
+				logger.warn(
+					`[delegation-gate] pre-admission background maintenance skipped: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
 			const occupiedTaskIds = [...session.taskWorkflowStates.entries()]
 				.filter(([, state]) => state === 'coder_delegated')
 				.map(([taskId]) => taskId);
@@ -3990,6 +4013,13 @@ export function createDelegationGateHook(
 					callID: input.callID,
 					maxConcurrent,
 					occupiedTaskIds,
+					// The reservation seeds generation 1 (the first launch attempt)
+					// regardless of the task's WORKFLOW retry generation: the lease
+					// generation tracks only launch attempts (PR #2091 semantics),
+					// and the bind site couples it to the record's actual launch
+					// generation. Seeding the workflow generation here would make a
+					// retry dispatch (workflow generation >= 2) refuse its own bind
+					// (generation may only move forward), leaking the reservation.
 				},
 			);
 			if (!claim.ok) {
@@ -4769,6 +4799,10 @@ export function createDelegationGateHook(
 											{
 												...coderReservation,
 												correlationId: subagentSessionId,
+												// Bind to the record's launch generation (issue
+												// #2104): the reservation tracks exactly the
+												// generation that owns the durable correlation.
+												generation: pendingInput.generation ?? 1,
 											},
 										);
 									if (!bound) {

@@ -42,6 +42,7 @@ import {
 	claimDelegationIngestion,
 	claimTerminalResult,
 	findDelegationForCompletion,
+	maintainBackgroundDelegations,
 	preparePendingBackgroundAdvisories,
 	promoteDelegationFallback,
 	putPendingBackgroundAdvisory,
@@ -205,6 +206,20 @@ export function createBackgroundCompletionObserver(opts: {
 			const isDuplicate = terminalClaim.disposition === 'duplicate';
 			let record = terminalClaim.record;
 			opts.onTerminalClaimed?.(record);
+
+			// Maintenance point P2 (issue #2104): a trusted terminal (or the
+			// ingestion rejection handled below) is exactly when orphaned
+			// reservations and stale records become provably reclaimable. One
+			// bounded, lock-limited pass; best-effort — the settlement paths
+			// below must proceed regardless.
+			try {
+				await maintainBackgroundDelegations(directory, {
+					lockTimeoutMs: 1_000,
+					reason: 'trusted-terminal',
+				});
+			} catch {
+				// observation only; another maintenance point will finish
+			}
 
 			if (terminal.status !== 'completed') {
 				if (isDuplicate) {
@@ -381,6 +396,18 @@ export function createBackgroundCompletionObserver(opts: {
 							terminal.eventId,
 							applied.stale ? 'stale' : 'ingestion failed',
 						);
+						// Maintenance point P2b (issue #2104): the ingestion
+						// rejection has just been durably recorded — reconcile now
+						// so the rejected record and any orphaned reservation are
+						// handled at this listed point, not only at the next one.
+						try {
+							await maintainBackgroundDelegations(directory, {
+								lockTimeoutMs: 1_000,
+								reason: 'ingestion-rejection',
+							});
+						} catch {
+							// observation only; the facts ring records it
+						}
 						return;
 					}
 				} else if (ingestion?.disposition === 'busy') {
@@ -488,6 +515,8 @@ async function releaseCoderReservation(
 	reason: 'consumed' | 'recovered',
 ): Promise<void> {
 	if (!record.coderReservationId) return;
+	// Deliberately no `generation` here: binding from a late terminal must not
+	// move the reservation's generation (issue #2104).
 	const bound = await bindBackgroundCoderReservation(directory, {
 		reservationId: record.coderReservationId,
 		parentSessionId: record.parentSessionId,
@@ -503,6 +532,9 @@ async function releaseCoderReservation(
 	}
 	const released = await releaseBackgroundCoderReservation(directory, {
 		...bound,
+		// The TERMINAL's generation decides: if the reservation has moved on to
+		// a newer launch generation, this stale terminal must not release it.
+		generation: record.generation ?? 1,
 		reason,
 	});
 	if (!released) {

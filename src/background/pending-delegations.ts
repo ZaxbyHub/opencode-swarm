@@ -41,13 +41,18 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
-import { withEvidenceLock } from '../evidence/lock.js';
+import {
+	EvidenceLockTimeoutError,
+	withEvidenceLock,
+} from '../evidence/lock.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { bunWrite } from '../utils/bun-compat.js';
 import * as logger from '../utils/logger.js';
 import {
+	appendDelegationMaintenanceObservation,
 	DelegationCheckpointAuditSchema,
 	type DelegationCheckpointAuditSummary,
+	type DelegationMaintenanceFact,
 	readDelegationHealthArtifact,
 	writeDelegationHealthArtifact,
 } from './delegation-health.js';
@@ -136,6 +141,34 @@ const INGESTION_CLAIM_LEASE_MS = 30_000;
 
 /** An abandoned ingestion lease may be reclaimed after this bounded interval. */
 export const BACKGROUND_INGESTION_LEASE_MS = 30_000;
+
+/**
+ * Coder-reservation lease bounds (issue #2104). The lease is a liveness hint,
+ * never release authority: expiry only triggers corroborated reconciliation.
+ * `leaseMs` inputs are clamped into [MIN, MAX]. Documented default 15 min,
+ * hard maximum 60 min, floor 60 s.
+ */
+export const BACKGROUND_CODER_RESERVATION_LEASE_MS = 15 * 60_000;
+export const BACKGROUND_CODER_RESERVATION_LEASE_MAX_MS = 60 * 60_000;
+export const BACKGROUND_CODER_RESERVATION_LEASE_MIN_MS = 60_000;
+
+function clampReservationLeaseMs(leaseMs: number | undefined): number {
+	if (leaseMs === undefined) return BACKGROUND_CODER_RESERVATION_LEASE_MS;
+	if (!Number.isFinite(leaseMs)) return BACKGROUND_CODER_RESERVATION_LEASE_MS;
+	return Math.min(
+		Math.max(Math.round(leaseMs), BACKGROUND_CODER_RESERVATION_LEASE_MIN_MS),
+		BACKGROUND_CODER_RESERVATION_LEASE_MAX_MS,
+	);
+}
+
+function isValidReservationGeneration(generation: number | undefined): boolean {
+	return (
+		generation === undefined ||
+		(Number.isInteger(generation) &&
+			generation >= 1 &&
+			generation <= MAX_BACKGROUND_DELEGATION_GENERATION)
+	);
+}
 
 /**
  * Canonical default staleness horizon for a tracked background delegation: a
@@ -408,6 +441,20 @@ export interface BackgroundCoderReservation {
 	callID: string;
 	state: 'reserved' | 'bound';
 	correlationId: string | null;
+	/**
+	 * Launch generation this reservation currently owns (issue #2104). New in
+	 * this schema revision: absent on legacy records and read as 1. The value
+	 * is seeded at reserve time and coupled to the delegation record's launch
+	 * generation at bind; a terminal for an older generation can never renew
+	 * or release it.
+	 */
+	generation?: number;
+	/**
+	 * Lease expiry (issue #2104): a liveness hint for maintenance, never
+	 * release authority by itself. Absent on legacy records, which stay
+	 * protected (only proven-terminal reconciliation may release them).
+	 */
+	leaseExpiresAt?: number;
 	createdAt: number;
 	updatedAt: number;
 }
@@ -655,6 +702,13 @@ const BackgroundCoderReservationSchema = z
 		callID: z.string().min(1).max(256),
 		state: z.enum(['reserved', 'bound']),
 		correlationId: z.string().min(1).max(256).nullable(),
+		generation: z
+			.number()
+			.int()
+			.min(1)
+			.max(MAX_BACKGROUND_DELEGATION_GENERATION)
+			.optional(),
+		leaseExpiresAt: z.number().int().nonnegative().optional(),
 		createdAt: z.number().int().nonnegative(),
 		updatedAt: z.number().int().nonnegative(),
 	})
@@ -3532,12 +3586,14 @@ function sweepStaleLocked(
 		excludeCorrelationIds?: ReadonlySet<string>;
 		includeCorrelationIds?: ReadonlySet<string>;
 	} = {},
+	limits: { maxSweep?: number } = {},
 ): number {
 	let swept = 0;
 	const { excludeCorrelationIds, includeCorrelationIds } = filters;
 	const records = loadRecordsForWrite(directory);
 	if (records === null) return 0;
 	for (const record of records) {
+		if (limits.maxSweep !== undefined && swept >= limits.maxSweep) break;
 		if (
 			includeCorrelationIds !== undefined &&
 			!includeCorrelationIds.has(record.correlationId)
@@ -4275,6 +4331,10 @@ export interface ReserveBackgroundCoderSlotInput {
 	callID: string;
 	maxConcurrent: number;
 	occupiedTaskIds?: readonly string[];
+	/** Launch generation to seed the reservation with (default 1, issue #2104). */
+	generation?: number;
+	/** Lease duration; clamped to the documented min/max bounds. */
+	leaseMs?: number;
 	now?: number;
 }
 
@@ -4310,7 +4370,8 @@ export async function reserveBackgroundCoderSlot(
 		!Number.isInteger(input.maxConcurrent) ||
 		input.maxConcurrent < 1 ||
 		input.maxConcurrent > 64 ||
-		(input.occupiedTaskIds?.length ?? 0) > 64
+		(input.occupiedTaskIds?.length ?? 0) > 64 ||
+		!isValidReservationGeneration(input.generation)
 	) {
 		return { ok: false, reason: 'invalid' };
 	}
@@ -4448,6 +4509,9 @@ export async function reserveBackgroundCoderSlot(
 					};
 				}
 				const now = input.now ?? Date.now();
+				// The lease is created only after every admission/capacity check
+				// above has passed (issue #2104): a denied call never mints a lease.
+				const leaseMs = clampReservationLeaseMs(input.leaseMs);
 				const reservation: BackgroundCoderReservation = {
 					reservationId,
 					parentSessionId: input.parentSessionId,
@@ -4455,6 +4519,8 @@ export async function reserveBackgroundCoderSlot(
 					callID: input.callID,
 					state: 'reserved',
 					correlationId: null,
+					generation: input.generation ?? 1,
+					leaseExpiresAt: now + leaseMs,
 					createdAt: now,
 					updatedAt: now,
 				};
@@ -4494,6 +4560,15 @@ export interface BindBackgroundCoderReservationInput {
 	planTaskId: string | null;
 	callID: string;
 	correlationId: string;
+	/**
+	 * Launch generation of the dispatch being bound (issue #2104). May move
+	 * the reservation's generation FORWARD only (a session.create retry after
+	 * PR #2091 relaunches under a newer generation); an older generation can
+	 * never rebind. Absent keeps the current generation.
+	 */
+	generation?: number;
+	/** Lease duration for the renewal implied by this verified launch; clamped. */
+	leaseMs?: number;
 	now?: number;
 }
 
@@ -4508,7 +4583,8 @@ export async function bindBackgroundCoderReservation(
 		!input.correlationId ||
 		input.correlationId.length > 256 ||
 		input.correlationId.trim() !== input.correlationId ||
-		input.reservationId !== buildBackgroundCoderReservationId(input)
+		input.reservationId !== buildBackgroundCoderReservationId(input) ||
+		!isValidReservationGeneration(input.generation)
 	) {
 		return null;
 	}
@@ -4534,13 +4610,52 @@ export async function bindBackgroundCoderReservation(
 					return null;
 				}
 				if (current.state === 'bound') {
-					return current.correlationId === input.correlationId ? current : null;
+					if (current.correlationId !== input.correlationId) return null;
+					// Idempotent rebind of the same correlation is verified activity
+					// for the bound owner (e.g. the completion observer's repair
+					// path): refresh the lease so status never shows a live bound
+					// reservation as 'expired' between terminal events. Generation
+					// never moves on a rebind — only a reserved→bound transition may
+					// couple to a newer launch generation.
+					const now = input.now ?? Date.now();
+					const leaseMs = clampReservationLeaseMs(input.leaseMs);
+					const next: BackgroundCoderReservation = {
+						...current,
+						leaseExpiresAt: now + leaseMs,
+						updatedAt: now,
+					};
+					const reservations = [...scan.reservations];
+					reservations[index] = next;
+					return (await writeBackgroundCoderReservations(
+						directory,
+						reservations,
+					))
+						? next
+						: current;
 				}
+				const currentGeneration = current.generation ?? 1;
+				if (
+					input.generation !== undefined &&
+					input.generation < currentGeneration
+				) {
+					// An older generation must never rebind (issue #2104): the
+					// reservation is owned by a newer launch.
+					return null;
+				}
+				const now = input.now ?? Date.now();
+				// Binding IS verified launch activity: it (re)news the lease. A
+				// legacy reservation without a lease gains one here — protective,
+				// never a reclaim.
+				const leaseMs = clampReservationLeaseMs(input.leaseMs);
 				const next: BackgroundCoderReservation = {
 					...current,
 					state: 'bound',
 					correlationId: input.correlationId,
-					updatedAt: input.now ?? Date.now(),
+					...(input.generation !== undefined || current.generation === undefined
+						? { generation: input.generation ?? currentGeneration }
+						: {}),
+					leaseExpiresAt: now + leaseMs,
+					updatedAt: now,
 				};
 				const reservations = [...scan.reservations];
 				reservations[index] = next;
@@ -4560,6 +4675,13 @@ export interface ReleaseBackgroundCoderReservationInput {
 	planTaskId: string | null;
 	callID: string;
 	correlationId: string | null;
+	/**
+	 * Generation of the terminal claiming this release (issue #2104). When
+	 * both this and the stored generation are present and differ, the release
+	 * is refused: a terminal for generation N must never release the
+	 * generation N+1 reservation.
+	 */
+	generation?: number;
 	reason: 'consumed' | 'recovered';
 }
 
@@ -4578,7 +4700,8 @@ export async function releaseBackgroundCoderReservation(
 		(input.correlationId !== null &&
 			(input.correlationId.length === 0 ||
 				input.correlationId.length > 256 ||
-				input.correlationId.trim() !== input.correlationId))
+				input.correlationId.trim() !== input.correlationId)) ||
+		!isValidReservationGeneration(input.generation)
 	) {
 		return false;
 	}
@@ -4602,6 +4725,18 @@ export async function releaseBackgroundCoderReservation(
 					current.callID !== input.callID ||
 					current.correlationId !== input.correlationId
 				) {
+					return false;
+				}
+				if (
+					input.generation !== undefined &&
+					current.generation !== undefined &&
+					input.generation !== current.generation
+				) {
+					// A terminal for generation N must never release the
+					// reservation currently owned by generation N+1 (issue #2104).
+					logger.warn(
+						`[background] refusing reservation release: terminal generation ${input.generation} does not match owned generation ${current.generation} for ${input.reservationId}`,
+					);
 					return false;
 				}
 				if (input.reason === 'consumed') {
@@ -4630,4 +4765,423 @@ export async function releaseBackgroundCoderReservation(
 	} catch {
 		return false;
 	}
+}
+
+export interface MaintainBackgroundDelegationsOptions {
+	/** Stale-delegation corroboration timeout (default 30 min). */
+	staleTimeoutMs?: number;
+	/** Per-invocation bound on swept records and reconciled reservations. */
+	maxRecords?: number;
+	/** Lock wait bound. Short values let callers (status, admission) proceed. */
+	lockTimeoutMs?: number;
+	/** Typed label of the maintenance point invoking this run. */
+	reason?: string;
+	now?: number;
+}
+
+export interface MaintainBackgroundDelegationsResult {
+	status: 'ok' | 'contention' | 'failure';
+	reason?: string;
+	sweptStale: number;
+	released: Array<{
+		reservationId: string;
+		generation: number;
+		reason: string;
+	}>;
+	renewed: Array<{ reservationId: string; generation: number }>;
+	retained: Array<{ reservationId: string; reason: string }>;
+	examinedReservations: number;
+}
+
+const DEFAULT_MAINTENANCE_LOCK_TIMEOUT_MS = 5_000;
+const DEFAULT_MAINTENANCE_BATCH = 256;
+
+/**
+ * Shared background maintenance service (issue #2104): one bounded,
+ * event-driven pass that sweeps stale delegation records and reconciles
+ * expired coder-reservation leases with corroborated owner evidence.
+ *
+ * Lock-ordering invariant: this is the ONLY site that touches both store
+ * locks, and it takes them SEQUENTIALLY — the delegations STORE lock first,
+ * fully released, then the RESERVATION lock. Never nested. No code path may
+ * acquire the RESERVATION lock and then the STORE lock.
+ *
+ * Per invocation the work is bounded (maxRecords sweeps / reconciliations;
+ * the underlying reads are already bounded by the checkpoint machinery and
+ * the 4 MiB recovery window). Every release, retained ambiguity, renewal,
+ * contention, and failure emits a durable operator fact into the health
+ * artifact's bounded maintenance ring. Expiry alone never releases: reclaim
+ * requires corroborated owner absence (stale exact owner record, or no owner
+ * record at all beyond the stale timeout), and any uncertainty retains the
+ * reservation fail-closed.
+ */
+export async function maintainBackgroundDelegations(
+	directory: string,
+	options: MaintainBackgroundDelegationsOptions = {},
+): Promise<MaintainBackgroundDelegationsResult> {
+	const now = options.now ?? Date.now();
+	const staleTimeoutMs =
+		options.staleTimeoutMs ?? DEFAULT_STALE_DELEGATION_TIMEOUT_MS;
+	const maxRecords = options.maxRecords ?? DEFAULT_MAINTENANCE_BATCH;
+	const lockTimeoutMs =
+		options.lockTimeoutMs ?? DEFAULT_MAINTENANCE_LOCK_TIMEOUT_MS;
+	const reason = options.reason ?? 'manual';
+	const result: MaintainBackgroundDelegationsResult = {
+		status: 'ok',
+		sweptStale: 0,
+		released: [],
+		renewed: [],
+		retained: [],
+		examinedReservations: 0,
+	};
+	const facts: DelegationMaintenanceFact[] = [];
+	const emitObservation = (
+		status: 'ok' | 'contention' | 'failure',
+		failureReason?: string,
+	): MaintainBackgroundDelegationsResult => {
+		appendDelegationMaintenanceObservation(directory, {
+			at: now,
+			status,
+			reason: failureReason,
+			summary:
+				status === 'ok'
+					? {
+							sweptStale: result.sweptStale,
+							released: result.released.length,
+							renewed: result.renewed.length,
+							retained: result.retained.length,
+						}
+					: undefined,
+			facts,
+		});
+		return {
+			...result,
+			status,
+			...(failureReason ? { reason: failureReason } : {}),
+		};
+	};
+
+	// Phase A — sweep stale delegation records under the STORE lock.
+	try {
+		result.sweptStale = await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () =>
+				sweepStaleLocked(
+					directory,
+					staleTimeoutMs,
+					now,
+					DEFAULT_SWEEPABLE_DELEGATION_STATUSES,
+					{},
+					{ maxSweep: maxRecords },
+				),
+			lockTimeoutMs,
+		);
+	} catch (error) {
+		if (error instanceof EvidenceLockTimeoutError) {
+			facts.push({
+				at: now,
+				kind: 'lock-contention',
+				reason: `maintenance point '${reason}' skipped: delegations store lock contended`,
+			});
+			return emitObservation('contention', error.message);
+		}
+		facts.push({
+			at: now,
+			kind: 'maintenance-failure',
+			reason: `maintenance point '${reason}' sweep failed: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		});
+		return emitObservation(
+			'failure',
+			error instanceof Error ? error.message : String(error),
+		);
+	}
+
+	// Phase B — reconcile reservation leases under the RESERVATION lock.
+	// The decision is re-derived from a FRESH owner scan here; the phase-A
+	// sweep only durably marks records stale, it is not trusted as evidence.
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_CODER_RESERVATIONS_FILE,
+			STORE_LOCK_AGENT,
+			RESERVATION_LOCK_TASK,
+			async () => {
+				const reservationScan =
+					scanBackgroundCoderReservationsForAdmission(directory);
+				if (reservationScan.status === 'uncertain') {
+					result.status = 'failure';
+					result.reason = reservationScan.reason;
+					facts.push({
+						at: now,
+						kind: 'maintenance-failure',
+						reason: `reservation store uncertain: ${reservationScan.reason}`,
+					});
+					return;
+				}
+				const ownerScan = await scanDurableCoderOwners(directory);
+				if (ownerScan.status === 'uncertain') {
+					result.status = 'failure';
+					result.reason = ownerScan.reason;
+					facts.push({
+						at: now,
+						kind: 'maintenance-failure',
+						reason: `owner evidence uncertain; all reservations retained: ${ownerScan.reason}`,
+					});
+					return;
+				}
+				const batch = reservationScan.reservations.slice(0, maxRecords);
+				result.examinedReservations = batch.length;
+				const next: BackgroundCoderReservation[] = [];
+				let mutated = false;
+				for (const reservation of batch) {
+					const generation = reservation.generation ?? 1;
+					const primary = findExactPrimaryReservationOwner(
+						reservation,
+						ownerScan,
+					);
+					if (primary && hasProvenReleasedReservationOwner(primary)) {
+						if ((primary.generation ?? 1) !== generation) {
+							// Proven-terminal owner, but for an OLDER generation: a
+							// newer launch may still own this reservation (issue
+							// #2104 — a terminal for generation N must never release
+							// generation N+1). Retain fail-closed.
+							result.retained.push({
+								reservationId: reservation.reservationId,
+								reason: 'owner-terminal-older-generation',
+							});
+							facts.push({
+								at: now,
+								kind: 'retained-ambiguity',
+								reservationId: reservation.reservationId,
+								correlationId: reservation.correlationId ?? undefined,
+								generation,
+								reason: `proven-terminal owner is generation ${primary.generation ?? 1}, reservation owns ${generation}`,
+							});
+							next.push(reservation);
+							continue;
+						}
+						// Proof-based release (no age involved) — also the only path
+						// that may release a legacy, lease-less reservation.
+						mutated = true;
+						result.released.push({
+							reservationId: reservation.reservationId,
+							generation,
+							reason: 'proven-terminal-owner',
+						});
+						facts.push({
+							at: now,
+							kind: 'release',
+							reservationId: reservation.reservationId,
+							correlationId: reservation.correlationId ?? undefined,
+							generation,
+							reason: 'proven-terminal-owner',
+						});
+						continue;
+					}
+					if (reservation.leaseExpiresAt === undefined) {
+						// Legacy reservation without a lease: protected until
+						// corroborated reconciliation; age never releases it.
+						result.retained.push({
+							reservationId: reservation.reservationId,
+							reason: 'protected-legacy-no-lease',
+						});
+						facts.push({
+							at: now,
+							kind: 'retained-protected-legacy',
+							reservationId: reservation.reservationId,
+							generation,
+							reason: 'legacy reservation without leaseExpiresAt',
+						});
+						next.push(reservation);
+						continue;
+					}
+					const leaseExpired = reservation.leaseExpiresAt <= now;
+					if (!leaseExpired) {
+						next.push(reservation);
+						continue;
+					}
+					if (primary) {
+						if ((primary.generation ?? 1) !== generation) {
+							// Owner evidence from an older generation can neither
+							// release nor renew a newer reservation.
+							result.retained.push({
+								reservationId: reservation.reservationId,
+								reason: 'owner-older-generation',
+							});
+							facts.push({
+								at: now,
+								kind: 'retained-ambiguity',
+								reservationId: reservation.reservationId,
+								correlationId: reservation.correlationId ?? undefined,
+								generation,
+								reason: `owner record is generation ${primary.generation ?? 1}, reservation owns ${generation}`,
+							});
+							next.push(reservation);
+							continue;
+						}
+						if (primary.status === 'stale') {
+							// Corroborated owner verdict: the delegation record itself
+							// was finalized stale (by a sweep under the store lock).
+							mutated = true;
+							result.released.push({
+								reservationId: reservation.reservationId,
+								generation,
+								reason: 'owner-swept-stale',
+							});
+							facts.push({
+								at: now,
+								kind: 'release',
+								reservationId: reservation.reservationId,
+								correlationId: reservation.correlationId ?? undefined,
+								generation,
+								reason: 'owner record durably stale',
+							});
+							continue;
+						}
+						if (isActiveCoderOwner(primary)) {
+							// Fresh durable owner activity: verified evidence of live
+							// work — renew the lease for the same generation only.
+							mutated = true;
+							result.renewed.push({
+								reservationId: reservation.reservationId,
+								generation,
+							});
+							facts.push({
+								at: now,
+								kind: 'lease-renewed',
+								reservationId: reservation.reservationId,
+								correlationId: reservation.correlationId ?? undefined,
+								generation,
+								reason: 'exact owner record still active',
+							});
+							next.push({
+								...reservation,
+								leaseExpiresAt: now + BACKGROUND_CODER_RESERVATION_LEASE_MS,
+								updatedAt: now,
+							});
+							continue;
+						}
+						// Terminal-but-unproven owner (e.g. preserved worktree lane):
+						// ambiguity retains the reservation fail-closed.
+						result.retained.push({
+							reservationId: reservation.reservationId,
+							reason: 'owner-terminal-unproven',
+						});
+						facts.push({
+							at: now,
+							kind: 'retained-ambiguity',
+							reservationId: reservation.reservationId,
+							correlationId: reservation.correlationId ?? undefined,
+							generation,
+							reason: `owner status '${primary.status}' does not prove release`,
+						});
+						next.push(reservation);
+						continue;
+					}
+					// No exact primary owner. A record at this correlation with a
+					// DIFFERENT identity is an ownership ambiguity → retain.
+					if (
+						reservation.correlationId !== null &&
+						ownerScan.recordsByCorrelation.has(reservation.correlationId)
+					) {
+						result.retained.push({
+							reservationId: reservation.reservationId,
+							reason: 'owner-identity-mismatch',
+						});
+						facts.push({
+							at: now,
+							kind: 'retained-ambiguity',
+							reservationId: reservation.reservationId,
+							correlationId: reservation.correlationId ?? undefined,
+							generation,
+							reason: 'correlation exists under a different owner identity',
+						});
+						next.push(reservation);
+						continue;
+					}
+					if (now - reservation.createdAt > staleTimeoutMs) {
+						// Every authoritative owner source available to this
+						// subsystem agrees there is no owner: no primary record, no
+						// fallback record, lease expired, and the pre-launch window
+						// exceeded the stale timeout. Reclaim.
+						mutated = true;
+						result.released.push({
+							reservationId: reservation.reservationId,
+							generation,
+							reason: 'unbound-orphan',
+						});
+						facts.push({
+							at: now,
+							kind: 'release',
+							reservationId: reservation.reservationId,
+							generation,
+							reason:
+								'no durable owner anywhere and pre-launch window exceeded',
+						});
+						continue;
+					}
+					result.retained.push({
+						reservationId: reservation.reservationId,
+						reason: 'unbound-within-stale-window',
+					});
+					facts.push({
+						at: now,
+						kind: 'retained-ambiguity',
+						reservationId: reservation.reservationId,
+						generation,
+						reason:
+							'no owner record yet; still inside the pre-launch stale window',
+					});
+					next.push(reservation);
+				}
+				// Reservations beyond the batch stay untouched.
+				next.push(...reservationScan.reservations.slice(maxRecords));
+				if (mutated) {
+					const written = await writeBackgroundCoderReservations(
+						directory,
+						next,
+					);
+					if (!written) {
+						result.status = 'failure';
+						result.reason = 'reservation reconciliation could not be persisted';
+						facts.push({
+							at: now,
+							kind: 'maintenance-failure',
+							reason: 'reservation store write failed during reconciliation',
+						});
+					}
+				}
+			},
+			lockTimeoutMs,
+		);
+	} catch (error) {
+		if (error instanceof EvidenceLockTimeoutError) {
+			facts.push({
+				at: now,
+				kind: 'lock-contention',
+				reason: `maintenance point '${reason}' skipped: reservation store lock contended`,
+			});
+			return emitObservation('contention', error.message);
+		}
+		facts.push({
+			at: now,
+			kind: 'maintenance-failure',
+			reason: `maintenance point '${reason}' reconciliation failed: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		});
+		return emitObservation(
+			'failure',
+			error instanceof Error ? error.message : String(error),
+		);
+	}
+	if (result.status === 'failure') {
+		return emitObservation('failure', result.reason);
+	}
+	return emitObservation('ok');
 }

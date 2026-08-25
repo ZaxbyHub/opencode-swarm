@@ -305,6 +305,8 @@ const PACKAGE_ROOT = path.resolve(
 // pathological filesystems (antivirus interception, NFS stalls) — on timeout we
 // fail open and the command-path sync remains a backstop.
 const SYNC_BUNDLED_SKILLS_TIMEOUT_MS = 2_000;
+/** Issue #2104: hard budget for the deferred post-init background maintenance pass. */
+const BACKGROUND_MAINTENANCE_INIT_TIMEOUT_MS = 10_000;
 
 // Per Invariant 1 / Issue #704 / repro-704 T1 Windows failures: the plugin
 // init path used to await `loadPluginConfigWithMetaAsync` UNBOUNDED — the only
@@ -947,6 +949,42 @@ async function initializeOpenCodeSwarm(
 		});
 	});
 
+	// Issue #2104 — maintenance point P5: one deferred, time-bounded,
+	// non-fatal background maintenance pass after plugin registration. It only
+	// runs when the operator opted into hooks.background_subagents (default
+	// false), so default configurations schedule no work at all. Like the
+	// bundled-skill sync above it lives on the wrapper-owned post-resolution
+	// queue — never on the server()-resolution path — and is hard-bounded by
+	// withTimeout; on timeout/error it fails open (other maintenance points
+	// remain as backstops).
+	if (
+		(config.hooks as Record<string, unknown> | undefined)
+			?.background_subagents === true
+	) {
+		postResolutionTasks.push(() => {
+			void withTimeout(
+				import('./background/pending-delegations.js').then((m) =>
+					m.maintainBackgroundDelegations(ctx.directory, {
+						lockTimeoutMs: 5_000,
+						reason: 'post-init',
+					}),
+				),
+				BACKGROUND_MAINTENANCE_INIT_TIMEOUT_MS,
+				new Error(
+					`background maintenance exceeded ${BACKGROUND_MAINTENANCE_INIT_TIMEOUT_MS}ms post-init budget; continuing without it (other maintenance points remain)`,
+				),
+			).catch((err: unknown) => {
+				const msg = err instanceof Error ? err.message : String(err);
+				log(
+					'post-init background maintenance timed out or failed (non-fatal)',
+					{
+						error: msg,
+					},
+				);
+			});
+		});
+	}
+
 	// Side tasks are small and scoped to `<ctx.directory>/.swarm/`
 	// or `<ctx.directory>/.opencode/`, so none risks a home-tree scan.
 	writeSwarmConfigExampleIfNew(ctx.directory);
@@ -1322,6 +1360,29 @@ async function initializeOpenCodeSwarm(
 			validationScheduler: findingValidationScheduler,
 		},
 	});
+	// Issue #2104 — maintenance point P3 helper. The dynamic import is
+	// memoized once so terminal session events never re-resolve the module
+	// (it stays off the init path entirely). The 2 s lock bound is a step
+	// looser than admission's 1 s (hot dispatch path) and tighter than the
+	// post-init pass's 5 s (nothing user-facing waits on it): a session-close
+	// event is rare, but the event hook must still return promptly.
+	const backgroundSubagentsEnabled =
+		(config.hooks as Record<string, unknown> | undefined)
+			?.background_subagents === true;
+	let pendingDelegationsModulePromise: Promise<
+		typeof import('./background/pending-delegations.js')
+	> | null = null;
+	const maintainBackgroundDelegationsOnSessionEvent =
+		async (): Promise<void> => {
+			pendingDelegationsModulePromise ??= import(
+				'./background/pending-delegations.js'
+			);
+			const module = await pendingDelegationsModulePromise;
+			await module.maintainBackgroundDelegations(ctx.directory, {
+				lockTimeoutMs: 2_000,
+				reason: 'session-close',
+			});
+		};
 	const delegationSanitizerHook = createDelegationSanitizerHook(ctx.directory);
 	const memoryLifecycleHooks = createMemoryLifecycleHooks({
 		directory: ctx.directory,
@@ -2279,6 +2340,20 @@ async function initializeOpenCodeSwarm(
 							clearPendingTaskModelRoutesForSession(sessionID);
 							clearSessionActionCircuits(sessionID);
 							clearFullAutoSevereSession(sessionID);
+						}
+						// Issue #2104 — maintenance point P3: a closed/idle
+						// session is a listed runtime maintenance trigger (a
+						// parent that dies without a later dispatch must not
+						// strand reservations). Opt-in only; bounded by the
+						// maintenance service's own tight lock bound and
+						// fail-open — failures are recorded in the durable
+						// facts ring, never fatal to the event hook.
+						if (backgroundSubagentsEnabled) {
+							try {
+								await maintainBackgroundDelegationsOnSessionEvent();
+							} catch {
+								// observation only; the facts ring records it
+							}
 						}
 					}
 				}

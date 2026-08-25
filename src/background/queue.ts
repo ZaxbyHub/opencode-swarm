@@ -69,11 +69,27 @@ function comparePriority(a: QueueItem, b: QueueItem): number {
 	return a.createdAt - b.createdAt;
 }
 
+/** Bound for the terminal-ID registry (completed / retry-exhausted). */
+const MAX_TERMINAL_IDS = 2048;
+
 /**
- * In-process queue with priority support and retry metadata
+ * In-process queue with priority support and retry metadata.
+ *
+ * Ownership model (issue #2104): an item exists in exactly one of three
+ * states — `queued` (in `items`), `in-flight` (in `inflight`, handed to a
+ * worker by `dequeue`), or `terminal` (recorded in `terminalIds` after
+ * `complete` or retry exhaustion). `dequeue` moves queued→in-flight, a
+ * scheduled `retry` moves in-flight→queued (honouring `nextAttemptAt`), and
+ * `complete`/retry-exhaustion moves either→terminal exactly once. A terminal
+ * ID can never be completed, retried, or removed again, so a recycled ID
+ * cannot act on a newer item.
  */
 export class AutomationQueue<T = unknown> {
 	private items: QueueItem<T>[] = [];
+	/** Dequeued items awaiting complete/retry; bounded by maxSize. */
+	private inflight: Map<string, QueueItem<T>> = new Map();
+	/** Terminal IDs (completed or exhausted); FIFO-evicted at the cap. */
+	private terminalIds: Map<string, number> = new Map();
 	private readonly maxSize: number;
 	private readonly defaultMaxRetries: number;
 	private readonly defaultBackoffMs: number;
@@ -151,13 +167,28 @@ export class AutomationQueue<T = unknown> {
 	}
 
 	/**
-	 * Dequeue the highest priority item
+	 * Dequeue the highest priority item whose retry backoff has elapsed.
+	 *
+	 * `items` stays sorted by (priority, createdAt); a not-yet-due item is
+	 * skipped without reordering, so a due lower-priority item can be handed
+	 * out ahead of a not-due higher-priority one. The dequeued item moves to
+	 * the in-flight map and remains addressable by ID for `complete`/`retry`
+	 * until it settles (issue #2104: previously `shift()` removed it and every
+	 * later `retry(id)` silently returned false).
 	 */
 	dequeue(): QueueItem<T> | undefined {
-		const item = this.items.shift();
-		if (item) {
-			this.eventBus.publish('queue.item.dequeued', { itemId: item.id });
-		}
+		if (this.inflight.size >= this.maxSize) return undefined;
+		const now = Date.now();
+		const index = this.items.findIndex(
+			(item) =>
+				item.retry?.nextAttemptAt === undefined ||
+				item.retry.nextAttemptAt <= now,
+		);
+		if (index === -1) return undefined;
+		const [item] = this.items.splice(index, 1);
+		if (!item) return undefined;
+		this.inflight.set(item.id, item);
+		this.eventBus.publish('queue.item.dequeued', { itemId: item.id });
 		return item;
 	}
 
@@ -169,39 +200,68 @@ export class AutomationQueue<T = unknown> {
 	}
 
 	/**
-	 * Get item by ID
+	 * Get item by ID (searches queued and in-flight items)
 	 */
 	get(id: string): QueueItem<T> | undefined {
-		return this.items.find((item) => item.id === id);
+		return this.items.find((item) => item.id === id) ?? this.inflight.get(id);
+	}
+
+	/** Number of items currently in flight (dequeued, not yet settled). */
+	inflightSize(): number {
+		return this.inflight.size;
+	}
+
+	private removeQueuedOrInflight(id: string): QueueItem<T> | undefined {
+		const queuedIndex = this.items.findIndex((item) => item.id === id);
+		if (queuedIndex !== -1) {
+			const [removed] = this.items.splice(queuedIndex, 1);
+			return removed;
+		}
+		const inflightItem = this.inflight.get(id);
+		if (inflightItem) this.inflight.delete(id);
+		return inflightItem;
+	}
+
+	private markTerminal(id: string, at: number): void {
+		this.terminalIds.set(id, at);
+		if (this.terminalIds.size > MAX_TERMINAL_IDS) {
+			const oldest = this.terminalIds.keys().next().value;
+			if (oldest !== undefined) this.terminalIds.delete(oldest);
+		}
 	}
 
 	/**
-	 * Remove specific item by ID
+	 * Remove specific item by ID (queued or in-flight)
 	 */
 	remove(id: string): boolean {
-		const index = this.items.findIndex((item) => item.id === id);
-		if (index !== -1) {
-			this.items.splice(index, 1);
-			return true;
-		}
-		return false;
+		if (this.terminalIds.has(id)) return false;
+		return this.removeQueuedOrInflight(id) !== undefined;
 	}
 
 	/**
-	 * Mark item as completed and remove from queue
+	 * Mark item as completed and remove from queue. Exactly once: a second
+	 * call for the same ID (or one for a recycled ID) returns false.
 	 */
 	complete(id: string): boolean {
-		const removed = this.remove(id);
-		if (removed) {
-			this.eventBus.publish('queue.item.completed', { itemId: id });
-		}
-		return removed;
+		if (this.terminalIds.has(id)) return false;
+		const removed = this.removeQueuedOrInflight(id);
+		if (!removed) return false;
+		this.markTerminal(id, Date.now());
+		this.eventBus.publish('queue.item.completed', { itemId: id });
+		return true;
 	}
 
 	/**
-	 * Mark item as failed and schedule retry if possible
+	 * Mark item as failed and schedule retry if possible.
+	 *
+	 * Increments attempts exactly once per failed execution. On exhaustion the
+	 * item becomes terminal: exactly one `queue.item.failed` event is emitted
+	 * and the ID can never reappear. Otherwise the item returns to the queued
+	 * set with `nextAttemptAt` honoured by `dequeue` before it can be handed
+	 * out again (works for in-flight and still-queued items alike).
 	 */
 	retry(id: string, _error?: unknown): boolean {
+		if (this.terminalIds.has(id)) return false;
 		const item = this.get(id);
 		if (!item || !item.retry) return false;
 
@@ -210,11 +270,12 @@ export class AutomationQueue<T = unknown> {
 
 		// Check if max retries exceeded
 		if (item.retry.attempts >= item.retry.maxAttempts) {
+			this.removeQueuedOrInflight(id);
+			this.markTerminal(id, Date.now());
 			this.eventBus.publish('queue.item.failed', {
 				itemId: id,
 				attempts: item.retry.attempts,
 			});
-			this.remove(id);
 			return false;
 		}
 
@@ -224,6 +285,14 @@ export class AutomationQueue<T = unknown> {
 			item.retry.maxBackoffMs,
 		);
 		item.retry.nextAttemptAt = Date.now() + backoff;
+
+		// A failed in-flight execution returns to the queued set; a still-queued
+		// item (scheduled retry) simply gets a fresh nextAttemptAt.
+		this.inflight.delete(id);
+		if (!this.items.some((queued) => queued.id === id)) {
+			this.items.push(item);
+			this.items.sort(comparePriority);
+		}
 
 		this.eventBus.publish('queue.item.retry scheduled', {
 			itemId: id,
@@ -267,10 +336,23 @@ export class AutomationQueue<T = unknown> {
 	}
 
 	/**
-	 * Clear all items from queue
+	 * Clear all items from queue.
+	 *
+	 * Reset policy (issue #2104): both the queued set AND the in-flight set
+	 * are dropped — an in-flight item whose handler is still running will find
+	 * its later `complete`/`retry` returning false (the ID is no longer known;
+	 * it is NOT marked terminal). The bounded terminal-ID registry is kept so
+	 * recycling cannot resurrect a settled ID.
 	 */
 	clear(): void {
+		for (const item of this.items) {
+			this.eventBus.publish('queue.item.evicted', { itemId: item.id });
+		}
 		this.items = [];
+		for (const item of this.inflight.values()) {
+			this.eventBus.publish('queue.item.evicted', { itemId: item.id });
+		}
+		this.inflight.clear();
 	}
 
 	/**
@@ -295,6 +377,7 @@ export class AutomationQueue<T = unknown> {
 		maxSize: number;
 		byPriority: Record<QueuePriority, number>;
 		retryable: number;
+		inflight: number;
 	} {
 		return {
 			size: this.items.length,
@@ -306,6 +389,7 @@ export class AutomationQueue<T = unknown> {
 				low: this.items.filter((i) => i.priority === 'low').length,
 			},
 			retryable: this.getRetryableItems().length,
+			inflight: this.inflight.size,
 		};
 	}
 }
