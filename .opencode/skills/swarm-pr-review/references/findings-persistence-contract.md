@@ -193,3 +193,16 @@ wins).
 All non-I/O rejections name the offending field, its received value, and the
 legal value/domain. The first omitted `run_id` is atomically reserved and
 returned; later omission is legal only when the active run is unambiguous.
+
+## Profile A run identity and verdict-row codec
+
+On the first trigger-evaluation or findings write, an omitted `run_id` is
+atomically reserved at millisecond precision, returned to the caller, and
+persisted in active workflow state; every later write must reuse it. Omission
+is accepted only when exactly one active/reserved run exists, otherwise the
+operation fails closed. `[REVIEWED]` and `[CRITIC]` free-text fields use the
+controller codec: `\\` represents a literal backslash, `\|` a pipe, `\n` a
+newline, and `\r` a carriage return. The byte-zero contract card injected into
+each Profile A lane is authoritative for the live enums and includes positive
+and explicitly discarded negative examples. Discarded examples are
+documentation only and must never be emitted as live marker rows.

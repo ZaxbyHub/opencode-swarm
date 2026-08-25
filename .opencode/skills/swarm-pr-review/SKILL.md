@@ -2026,14 +2026,5 @@ On Profiles B/C there is no durable gate or auto-resume loop to clear: if the
 head bind is genuinely unreachable or bounded lane recovery is exhausted,
 report the blocker to the user and stop.
 
-In Profile A, `run_id` may be omitted on the first trigger-evaluation or
-findings write. The controller then atomically reserves a millisecond-granular
-identifier, returns it, persists it in the active workflow state, and requires
-all later writes to reuse that exact identifier. Omission is accepted only when
-there is exactly one active/reserved run; ambiguity fails closed.
-For `[REVIEWED]` and `[CRITIC]` free-text fields, use the controller codec:
-`\\` for a literal backslash, `\|` for a literal pipe, `\n` for newline, and
-`\r` for carriage return. The byte-zero contract card injected into every
-Profile A PR-review lane is authoritative and contains the live enums plus
-positive and explicitly discarded negative examples. Discarded examples are
-documentation only and must never be emitted as live marker rows.
+For the Profile A run-id reservation and verdict-row codec contract, read
+`references/findings-persistence-contract.md`.
