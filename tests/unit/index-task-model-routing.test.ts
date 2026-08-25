@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Plan } from '../../src/config/plan-schema';
 import { _internals as severeInternals } from '../../src/full-auto/severe-result';
@@ -12,14 +11,13 @@ import {
 } from '../../src/models/task-model-routing';
 import { resetSwarmState } from '../../src/state';
 import { resetTelemetryForTesting } from '../../src/telemetry';
+import { canonicalMkdtemp } from '../helpers/tmpdir';
 
 const PARENT_SESSION = 'parent-session';
 const CHILD_SESSION = 'child-session';
 
 function makeProject(): string {
-	return fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'index-task-model-routing-')),
-	);
+	return canonicalMkdtemp('index-task-model-routing-');
 }
 
 function writeConfig(directory: string): void {

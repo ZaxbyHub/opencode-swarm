@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	loadFullAutoRunState,
@@ -8,15 +7,14 @@ import {
 } from '../../../src/full-auto/state';
 import { dispatchCriticAndWriteEvent } from '../../../src/hooks/full-auto-intercept';
 import { _internals as stateInternals } from '../../../src/state';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 describe('legacy Full-Auto intercept total deadline', () => {
 	let directory = '';
 	let originalClient: typeof stateInternals.swarmState.opencodeClient;
 
 	beforeEach(() => {
-		directory = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'full-auto-intercept-deadline-')),
-		);
+		directory = canonicalMkdtemp('full-auto-intercept-deadline-');
 		fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
 		originalClient = stateInternals.swarmState.opencodeClient;
 	});

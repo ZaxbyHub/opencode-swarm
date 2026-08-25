@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { getAgentConfigs } from '../../../src/agents/index.js';
 import type { PluginConfig } from '../../../src/config/index.js';
@@ -10,11 +9,10 @@ import {
 	executeDispatchLanesAsync,
 	type SessionOps,
 } from '../../../src/tools/dispatch-lanes.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function makeTempDir(): string {
-	const directory = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'dispatch-lanes-model-fallback-')),
-	);
+	const directory = canonicalMkdtemp('dispatch-lanes-model-fallback-');
 	fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
 	return directory;
 }

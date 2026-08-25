@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	dispatchFullAutoOversight,
@@ -11,6 +10,7 @@ import {
 	startFullAutoRun,
 } from '../../../src/full-auto/state';
 import { _internals as stateInternals } from '../../../src/state';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let tmpDir: string;
 let origClient: typeof stateInternals.swarmState.opencodeClient;
@@ -19,9 +19,7 @@ let origClearTimer: typeof oversightInternals.clearTimer;
 let origTeardown: typeof oversightInternals.teardownEphemeralSession;
 
 beforeEach(() => {
-	tmpDir = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'full-auto-deadline-')),
-	);
+	tmpDir = canonicalMkdtemp('full-auto-deadline-');
 	fs.mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
 	origClient = stateInternals.swarmState.opencodeClient;
 	origSetTimer = oversightInternals.setTimer;
