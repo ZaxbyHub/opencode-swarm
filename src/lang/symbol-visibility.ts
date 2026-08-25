@@ -105,7 +105,13 @@ const PRIVATE_INFO: SymbolVisibilityInfo = {
  * Grammars whose members' implicit visibility depends on the *kind* of the
  * enclosing type container rather than on a naming convention.
  */
-const CONTAINER_SCOPED_GRAMMARS = new Set(['java', 'kotlin', 'csharp']);
+const CONTAINER_SCOPED_GRAMMARS = new Set([
+	'java',
+	'kotlin',
+	'csharp',
+	'swift',
+	'cpp',
+]);
 
 /** Node types that declare a type (as opposed to a member of a type). */
 const TYPE_DECLARATION_NODE_TYPES = new Set([
@@ -142,6 +148,17 @@ function containerScopedDefaultVisibility(
 			return 'public';
 		case 'java':
 			return 'package';
+		case 'swift':
+			// Swift's implicit visibility is `internal` everywhere — for members
+			// of any type container and for nested types alike.
+			return 'internal';
+		case 'cpp':
+			// C++ language defaults; access-specifier sections (`public:`) are
+			// not tracked, so these apply conservatively.
+			return containerType === 'struct_specifier' ||
+				containerType === 'union_specifier'
+				? 'public'
+				: 'private';
 		default:
 			// csharp: top-level types default to `internal`, members of a type
 			// default to `private`.
@@ -430,6 +447,11 @@ function modifierLanguageVisibility(
 }
 
 function cppVisibility(ctx: SymbolVisibilityContext): SymbolVisibilityInfo {
+	// Anonymous namespaces give their contents internal linkage — walk the
+	// ancestors for a `namespace_definition` with no `name` child.
+	if (isInsideAnonymousNamespace(ctx.defNode)) {
+		return { ...PRIVATE_INFO };
+	}
 	const text = ctx.defNode.text.trimStart();
 	if (/^static\b/.test(text) || ctx.localName.startsWith('_')) {
 		return { ...PRIVATE_INFO };
@@ -440,6 +462,26 @@ function cppVisibility(ctx: SymbolVisibilityContext): SymbolVisibilityInfo {
 		exportedReason: 'namespace_public',
 		apiSurfaceKind: 'public',
 	};
+}
+
+/**
+ * True when `node` sits inside an anonymous C++ `namespace { … }` block: a
+ * `namespace_definition` ancestor whose children contain no
+ * `namespace_identifier` (the grammar omits the name field for the anonymous
+ * form, and the name child with it).
+ */
+function isInsideAnonymousNamespace(node: SymbolVisibilityNode): boolean {
+	let current = node.parent;
+	while (current) {
+		if (current.type === 'namespace_definition') {
+			const named = current.children.some(
+				(child) => child !== null && child.type === 'namespace_identifier',
+			);
+			if (!named) return true;
+		}
+		current = current.parent;
+	}
+	return false;
 }
 
 function visibilityFromText(grammarId: string, text: string): SymbolVisibility {
@@ -463,10 +505,17 @@ function visibilityFromText(grammarId: string, text: string): SymbolVisibility {
 /**
  * Grammars for which a declaration may begin with annotations/attributes that
  * must be skipped before the visibility modifier is reached. Restricted to the
- * JVM/.NET grammars so decorator-carrying TypeScript/Python/PHP declarations
- * keep their existing behavior.
+ * JVM/.NET and Swift grammars so decorator-carrying TypeScript/Python/PHP
+ * declarations keep their existing behavior. Swift attributes (`@available`,
+ * `@MainActor`, …) sit on their own line before the declaration and would
+ * otherwise consume the first-line header window and hide the modifier.
  */
-const ANNOTATED_DECLARATION_GRAMMARS = new Set(['java', 'kotlin', 'csharp']);
+const ANNOTATED_DECLARATION_GRAMMARS = new Set([
+	'java',
+	'kotlin',
+	'csharp',
+	'swift',
+]);
 
 /**
  * Index just past a balanced bracket group starting at `open`, or -1 if the

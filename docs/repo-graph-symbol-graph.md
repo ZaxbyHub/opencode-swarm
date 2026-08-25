@@ -576,3 +576,51 @@ repo_map { "action": "context_pack", "file": "src/foo.ts", "symbol": "doThing", 
   such an edge as "depends on this package", not as "references this exact
   file". Consumers needing precise per-symbol attribution should use symbol
   edges, which are only emitted for imports that bind a specific name.
+
+### Native language limitations (C/C++ and Swift)
+
+Extraction for C/C++ (`.c`, `.h`, `.cpp`, `.hpp`, `.cc`, `.cxx`) and Swift
+(`.swift`) is syntax-only and deliberately conservative. No compiler or
+SourceKit is invoked (an explicit non-goal), so everything below is derived
+from the tree-sitter parse alone.
+
+- **Include resolution is quoted-only.** A quoted include (`#include
+  "util.h"`) resolves relative to the including file and produces a file edge.
+  An angle include (`#include <vector>`) is treated as external/unresolved and
+  produces no edge: real include paths come from the build system (`-I` flags,
+  CMake/VCPkg/Xcode search paths), which are not known to the extractor.
+- **Overload collapse is conservative.** All C++ overloads of a name are
+  extracted, but the graph is name-keyed: `exportRanges` holds one span per
+  name (last-exported document-order wins), so `context_pack` cannot
+  distinguish overload signatures.
+- **Macros can hide definitions and references.** A definition or reference
+  manufactured by the preprocessor (`#define MAKE_FN(name) ...`) is invisible
+  to the syntactic pass.
+- **Templates are best-effort.** A `template <typename T>` function or class
+  is extracted as a plain symbol; template instantiations and specializations
+  are not resolved, and ranges cover only the declaration as written.
+- **C++ access specifiers are not tracked.** `public:`/`protected:`/`private:`
+  sections carry no per-member visibility: class members default by container
+  kind (class → private, struct/union → public) and are never file-level
+  exports. Before this hardening they were not extracted at all; the
+  conservative non-exported representation avoids advertising
+  access-restricted members as public API.
+- **`static` and anonymous namespaces are internal.** A `static`
+  file-scope function and anything inside `namespace { … }` is marked
+  not-exported (internal linkage), mirroring the linker's view.
+- **Swift struct/enum are modeled as class kind.** The tree-sitter Swift
+  grammar parses `struct`, `enum`, and `extension` blocks all as
+  `class_declaration`; kind discrimination is not modeled, so a struct or enum
+  def carries kind `class` and an extension contributes a `type` def for the
+  extended type. Members inside any of them (including extensions) are
+  attributed as `method`.
+- **Swift `init`/`deinit` and stored properties are not extracted.**
+  Constructors have no name node in the grammar, and properties are outside
+  the issue's symbol scope; only functions, classes/structs/enums, protocols,
+  extensions, and typealiases are represented.
+- **Swift module resolution is conservative.** `import Foundation` records a
+  module-level import; kind-qualified imports (`import class Foo.Bar`) split
+  into module specifier + named binding. Module names never resolve to
+  workspace files (a Swift module spans many files and needs build metadata
+  to map), so Swift file-level edges come from other signals, and Xcode
+  project-specific resolution is out of scope.

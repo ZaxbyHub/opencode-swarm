@@ -2121,11 +2121,20 @@ function getLanguage(filePath: string): string {
 
 /**
  * Grammars whose `exportRanges` map is populated from *all* defs rather than
- * only exported ones. JVM/.NET members are intentionally never `exported`
- * (they are not file-level module exports), so without this `context_pack`
- * could never return a span for a Java method (issue #1529, RC-7).
+ * only exported ones. JVM/.NET and native-language members are intentionally
+ * never `exported` (they are not file-level module exports — a Java method, a
+ * C++ class member, a Swift member inside a type), so without this
+ * `context_pack` could never return a span for them (issue #1529 RC-7 for
+ * JVM/.NET; issue #1530 for C/C++ and Swift, whose static and anonymous-
+ * namespace internals are likewise non-exported).
  */
-const JVM_DOTNET_RANGE_GRAMMARS = new Set(['java', 'kotlin', 'csharp']);
+const RANGE_WIDENED_GRAMMARS = new Set([
+	'java',
+	'kotlin',
+	'csharp',
+	'cpp',
+	'swift',
+]);
 
 /**
  * Check if file content appears to be binary.
@@ -2421,25 +2430,25 @@ export async function scanFileAsync(
 	for (const d of exportedDefs) {
 		exportLines[d.name] = d.startLine;
 	}
-	// `exports` and `exportLines` stay exported-only — the "a JVM/.NET member is
+	// `exports` and `exportLines` stay exported-only — the "a member of a type is
 	// not a file-level module export" contract must not change. `exportRanges`
-	// is widened to ALL defs for java/kotlin/csharp so `context_pack` can return
-	// a real member span instead of the "internal symbol — span unavailable"
-	// placeholder (issue #1529, RC-7).
+	// is widened to ALL defs for java/kotlin/csharp/cpp/swift so `context_pack`
+	// can return a real member span instead of the "internal symbol — span
+	// unavailable" placeholder (issue #1529 RC-7; cpp/swift per issue #1530).
 	//
-	// The widening is language-scoped because only JVM/.NET members are wanted
-	// in `exportRanges`: admitting every non-exported def for other grammars
-	// would put private TypeScript/Python/Rust/Go helpers into a persisted,
-	// schema-validated graph field for no benefit. Non-widened grammars keep the
-	// original exported-only, unconditionally-assigned behavior, so their
-	// payloads are unchanged.
+	// The widening is language-scoped because only member-bearing grammars with
+	// non-exported members are wanted in `exportRanges`: admitting every
+	// non-exported def for other grammars would put private
+	// TypeScript/Python/Rust/Go helpers into a persisted, schema-validated graph
+	// field for no benefit. Non-widened grammars keep the original exported-only,
+	// unconditionally-assigned behavior, so their payloads are unchanged.
 	//
 	// The duplicate-name policy below is likewise scoped, and mirrors
 	// `exportLines` rather than diverging from it: among EXPORTED defs both maps
 	// take the last, so they cannot disagree; among non-exported defs (which
 	// never reach `exportLines`) the first wins, so a constructor or a later
 	// overload cannot displace its enclosing type.
-	const isWidenedGrammar = JVM_DOTNET_RANGE_GRAMMARS.has(grammarId);
+	const isWidenedGrammar = RANGE_WIDENED_GRAMMARS.has(grammarId);
 	// Tracks whether the def currently holding each `exportRanges` slot was
 	// exported. Widening admits non-exported members, so without this an
 	// unexported member could outrank the exported symbol of the same name.
