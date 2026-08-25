@@ -72,11 +72,12 @@ No migration required.
 
 ## Known caveats
 
-- The new `unit-passed` aggregate CI job is not yet added to the branch
-  protection ruleset's required checks, so it does not gate merges yet — this is
-  intentional, deferred to a follow-up change once this branch lands on `main`
-  (adding it now would break the merge queue for every other open PR, since the
-  check doesn't exist on `main` yet).
+- The new `unit-passed` aggregate CI job was initially not added to the branch
+  protection ruleset's required checks (deferred until `main` defined the job).
+  **Superseded 2026-08-25 (issue #2341):** `unit-passed` is now a required check
+  in ruleset 17809658 — a failing unit cell now evicts a merge group immediately
+  with `checks_failed` instead of leaving required `integration`/`smoke` checks
+  unreported (skipped) and timing the whole window out.
 - Several plan items from issue #1737 require live CI signal (a CI-only injection
   budget test failure, remaining quarantined integration tests, and macOS
   `provisionWorktree` root-cause diagnosis) and are intentionally left for
