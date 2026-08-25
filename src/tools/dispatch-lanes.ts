@@ -63,6 +63,7 @@ import {
 	assertPrReviewBaseCoverageSettled,
 	bindPrReviewBase,
 	bindPrReviewTriggerLedger,
+	collectPrWorkflowPendingLaneLiveness,
 	declarePrFeedbackInventory,
 	describePrWorkflowRevisionDigestFailure,
 	enforcePrFeedbackVerificationOwnership,
@@ -76,6 +77,7 @@ import {
 	PrReviewResilienceCircuitOpenError,
 	PrReviewResilienceRetryExhaustedError,
 	type PrReviewVerdictCollectionReceipt,
+	type PrWorkflowPendingLaneLiveness,
 	readPrWorkflowGateState,
 	recordPrFeedbackGateBatch,
 	recordPrReviewValidationBatch,
@@ -804,6 +806,13 @@ export interface CollectLaneResultsResult {
 	consumed: number;
 	all_settled: boolean;
 	lane_results: DispatchLaneResult[];
+	/**
+	 * Alert-only host liveness advisory for still-pending pr-review lanes past
+	 * the pending-liveness threshold (issue #2280 Part B). Present only when at
+	 * least one such lane exists; never affects `success`, counts, settlement,
+	 * or any lane's state.
+	 */
+	pending_liveness?: PrWorkflowPendingLaneLiveness[];
 	errors?: string[];
 }
 
@@ -1847,6 +1856,19 @@ export async function executeCollectLaneResults(
 			reviewReceipts: reviewReceiptFallbacks,
 		},
 	);
+	if (result.pending > 0) {
+		// Issue #2280 Part B: alert-only liveness advisory for long-pending
+		// pr-review lanes. Fail-open (empty on any failure), bounded (at most one
+		// host probe call, none below the threshold), and never mutates lane
+		// state or blocks collection.
+		const pendingLiveness = await collectPrWorkflowPendingLaneLiveness(
+			directory,
+			records,
+		);
+		if (pendingLiveness.length > 0) {
+			result.pending_liveness = pendingLiveness;
+		}
+	}
 	if (hostTimeouts.size > 0) {
 		result.message =
 			result.pending > 0

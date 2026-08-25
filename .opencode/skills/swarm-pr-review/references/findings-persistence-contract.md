@@ -7,27 +7,36 @@ full contract.
 
 ## Enforced write order and prerequisites
 
-The controller admits findings checkpoints only in this exact sequence, each
+The controller admits findings checkpoints in this exact sequence, each
 step a hard prerequisite for the next:
 
-1. Base lanes settle and micro lanes settle.
-2. `write_pr_review_trigger_eval` completes — every findings boundary is
-   refused until this artifact exists (the refusal names the producing call).
-3. `boundary: "post_explorer"` checkpoint: records must exactly cover the
-   discovered candidate inventory, every record `PENDING` with
-   `next_action: "route_to_reviewer"`. The coverage refusal lists the
-   `missing:`, `extra:`, and `duplicates:` ids.
+1. Base lanes settle (all six dimensions successful and parsed).
+2. Optional base-only `boundary: "post_explorer"` checkpoint (issue #2280):
+   admissible immediately after base settlement, BEFORE the micro wave. It
+   is the one exception to trigger-eval-before-findings. Records must
+   exactly cover the BASE-DERIVED candidate inventory — micro candidates are
+   not yet discoverable, so a micro id is refused as `extra:` here — and
+   every record is `PENDING` with `next_action: "route_to_reviewer"`. The
+   coverage refusal lists the `missing:`, `extra:`, and `duplicates:` ids.
+3. Micro lanes settle and `write_pr_review_trigger_eval` completes — every
+   OTHER findings boundary is refused until this artifact exists (the
+   refusal names the producing call). A `post_explorer` write after this
+   point is validated against the FULL base+micro inventory.
 4. `boundary: "post_reviewer"` checkpoint: requires the persisted
-   `post_explorer` checkpoint and a settled reviewer phase.
+   `post_explorer` checkpoint (either variant), a settled reviewer phase, and
+   exact coverage of the FULL base+micro candidate inventory.
 5. `boundary: "post_critic"` checkpoint: requires the persisted
    `post_reviewer` checkpoint and a settled critic phase whenever any
    CONFIRMED CRITICAL/HIGH/MEDIUM verdict exists.
 
 Writing a boundary after a later checkpoint already exists is also refused.
-Every ordering refusal names the missing prerequisite boundary. There is no
-durable findings checkpoint between explorer settlement and trigger-eval
-completion; from trigger-eval completion onward, the persisted ledger is the
-durable recovery point for context compaction.
+Every ordering refusal names the missing prerequisite boundary. The base-only
+`post_explorer` checkpoint is the durable recovery point for context
+compaction immediately after base settlement; once trigger evaluation
+completes, the full-inventory ledger is the recovery point for every later
+phase. (Before issue #2280 there was no durable findings checkpoint between
+explorer settlement and trigger-eval completion — the base-only write closes
+that gap.)
 
 ## Disposition matrix
 
@@ -148,3 +157,13 @@ review context says prior lanes ran, stop and surface the missing artifact as
 a coverage gap instead of reclassifying from memory. Append new records rather
 than overwriting history unless the artifact format explicitly tracks
 revisions; the latest record for a `finding_id` wins during reload.
+
+There are two durable recovery points (issue #2280). The base-only
+`post_explorer` checkpoint — written right after base settlement — is
+sufficient to reconstruct the base candidate ledger and resume a compacted
+session ahead of the micro wave: re-dispatch micro lanes, re-run trigger
+evaluation, then continue. From trigger-eval completion onward the
+full-inventory ledger is the recovery point: `post_reviewer` and
+`post_critic` must cover the FULL (base+micro) inventory, and later boundary
+writes upsert any base-only records the micro wave extended (latest record
+wins).

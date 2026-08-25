@@ -1,0 +1,14 @@
+# Base-only explorer checkpoint and pending-lane liveness advisory
+
+## What changed
+
+Two long-running lane-lifecycle observability gaps from the tier-L PR-review retrospective are closed (issue #2280).
+
+- **The base-only findings checkpoint is real now.** `write_pr_review_artifact` with `boundary: "post_explorer"` is admissible immediately after the base wave settles — BEFORE the micro wave and trigger evaluation — provided it covers exactly the base-derived candidate inventory (micro ids are refused as `extra:` at that point). This is the one exception to trigger-eval-before-findings; `post_reviewer`/`post_critic` (and any post-trigger-eval `post_explorer` write) still require the persisted trigger-eval artifact and the FULL base+micro inventory, unchanged. The bundled `swarm-pr-review` skill and its findings-persistence contract now document the enforced order with this early checkpoint as the durable compaction recovery point after base settlement (superseding the #2277 interim wording that candidly documented the gap). A reconstructed state carrying council batches without a trigger-eval receipt can no longer widen that base-only inventory — council sources are now gated on the receipt exactly like micro sources.
+- **`collect_lane_results` now surfaces a liveness advisory for long-pending pr-review lanes.** Lanes in any `swarm-pr-review:*` mode that have been pending longer than 3 minutes get a `pending_liveness` entry — `{laneId, pendingMs, hostStatus, stalledSuspect, degradedReason?}` — built from a bounded, fail-open host session-status probe (the #2251 pattern, now shared through one probe core). `hostStatus` distinguishes live (`busy`/`retry`) from affirmatively non-live (`idle`, a reported status outside the live allowlist), `absent` (host enumerated sessions without ours), and `unknown` (probe degraded, reason named). `stalledSuspect` is past-threshold AND not affirmatively live. The advisory is ALERT-ONLY — it never cancels, retries, replaces, or settles anything, and the 30-minute presumed-stale sweep remains the only terminal backstop. Below the threshold there is no probe round-trip at all; past it, at most one session-status call per collection, never blocking settlement.
+
+## Why
+
+On tier-L runs — exactly where context-compaction risk peaks — the skill promised a durable findings recovery point right after base settlement, but the controller refused every findings write until `trigger-eval.json` existed and the trigger ledger structurally required the completed micro wave, so the promised window was closed. In the same run family, a dispatched critic lane sat `pending` for 20+ minutes with zero observable signal distinguishing "working long" from "hung"; the only diagnostics were a budget-timeout message and the 30-minute stale sweep at completion, and resolution required manual substitution.
+
+Closes #2280.

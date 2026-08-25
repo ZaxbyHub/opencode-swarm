@@ -94,11 +94,15 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 			HEAD_SHA,
 			{ skipTriggerEvaluation: true },
 		);
+		// `post_explorer` is the one boundary EXEMPT from this prerequisite once
+		// base coverage has settled (issue #2280 Part A — pinned in
+		// pr-workflow-gate-base-only-checkpoint.test.ts), so this message is
+		// pinned here on `post_reviewer`, where the rule still applies.
 		const message = await rejectionMessage(
 			writePrReviewFindings(
 				directory,
 				'no-trigger',
-				'post_explorer',
+				'post_reviewer',
 				candidateIds.map((id) =>
 					artifactRecord(id, 'PENDING', 'route_to_reviewer'),
 				),

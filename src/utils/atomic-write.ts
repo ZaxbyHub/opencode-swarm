@@ -105,8 +105,8 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		token: 'instance',
 		quarantineEligible: true,
 		parsesTarget: true,
-		producers: ['src/hooks/pr-workflow-gate.ts:13358'],
-		note: 'pre/post-rename file-identity verification (assertOpened/ClosedSwarmFileIdentity, pr-workflow-gate.ts:13300-13356) is writer-specific and load-bearing',
+		producers: ['src/hooks/pr-workflow-gate.ts:13557'],
+		note: 'pre/post-rename file-identity verification (assertOpened/ClosedSwarmFileIdentity, pr-workflow-gate.ts:13490-13556) is writer-specific and load-bearing',
 	},
 	{
 		id: 'target-suffix-tmp-num-num-json',
