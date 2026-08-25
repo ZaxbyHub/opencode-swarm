@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { type BigIntStats, readFileSync } from 'node:fs';
+import { type BigIntStats, type Dirent, readFileSync, statSync } from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import type { SessionStatus } from '@opencode-ai/sdk';
@@ -35,7 +35,18 @@ import {
 } from '../background/pending-delegations.js';
 import { MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS } from '../background/pr-review-collection-receipt.js';
 import {
+	generatePrReviewRunId,
+	PR_REVIEW_DISCARDED_EXAMPLE_ITEM_ID,
+	PR_REVIEW_FINDINGS_MAX_BYTES,
+	PR_REVIEW_HANDOFF_MAX_BYTES,
+	PrReviewCriticVerdictFieldsSchema,
+	PrReviewReviewerVerdictFieldsSchema,
+	PrReviewRunIdSchema,
+	parsePrReviewVerdictRow,
+} from '../background/pr-review-contract.js';
+import {
 	PR_REVIEW_REQUIRED_TRIGGER_IDS,
+	PR_REVIEW_TRIGGER_RECEIPT_MAX_BYTES,
 	type PrReviewInlineTriggerRow,
 	PrReviewInlineTriggerRowSchema,
 	parsePrReviewTriggerReceipt,
@@ -600,6 +611,13 @@ export interface PrWorkflowGateState {
 	 * already spent.
 	 */
 	prReviewRetiredConsolidatedLanes?: string[];
+	/**
+	 * Durably reserved run_id for the current PR_REVIEW workflow before either
+	 * writer has successfully committed its artifact. This lets omitted run_id
+	 * calls infer the same run across retries/restarts and keeps the reservation
+	 * separate from the trigger/findings completion receipts.
+	 */
+	prReviewReservedRunId?: string;
 	prReviewArtifactRunId?: string;
 	prReviewFindingsPath?: string;
 	prReviewArtifactBoundaries?: PrReviewArtifactBoundary[];
@@ -1097,6 +1115,7 @@ const PrWorkflowGateStateSchema = z
 			.array(z.string().min(1))
 			.max(MAX_RETIRED_CONSOLIDATED_LANES)
 			.optional(),
+		prReviewReservedRunId: z.string().min(1).optional(),
 		prReviewArtifactRunId: z.string().min(1).optional(),
 		prReviewFindingsPath: z.string().min(1).optional(),
 		prReviewArtifactBoundaries: z
@@ -6073,6 +6092,103 @@ async function assertPrFeedbackPublicationArmed(
 	return state;
 }
 
+export async function resolvePrReviewWriterRunId(
+	directory: string,
+	sessionID: string,
+	requestedRunId?: string,
+): Promise<string> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	return withPrWorkflowCheckoutMutationLock(directory, () =>
+		withSessionStateMutation(directory, normalizedSessionID, async () => {
+			const state = await requireBoundState(
+				directory,
+				normalizedSessionID,
+				'PR_REVIEW',
+			);
+			const workflowInstanceId = workflowIdentity(state);
+			const normalizedRequested = requestedRunId?.trim() || undefined;
+			const stateBoundValues = [
+				state.prReviewReservedRunId,
+				state.prReviewTriggerEvalRunId,
+				state.prReviewArtifactRunId,
+			].filter((value): value is string => Boolean(value?.trim()));
+			const stateDistinct = [...new Set(stateBoundValues)];
+			if (
+				normalizedRequested &&
+				stateDistinct.some((value) => value !== normalizedRequested)
+			) {
+				if (stateDistinct.length === 1) {
+					throw new Error(
+						`BLOCKED: field run_id expected "${stateDistinct[0]}", got "${normalizedRequested}"`,
+					);
+				}
+				throw new Error(
+					`BLOCKED: field run_id expected one unambiguous active value, got "${normalizedRequested}" while active bindings are ${stateDistinct.join(', ')}`,
+				);
+			}
+			const recoveredReservations = normalizedRequested
+				? []
+				: await findOwnedPrReviewRunReservations(
+						directory,
+						normalizedSessionID,
+						workflowInstanceId,
+					);
+			const distinct = [
+				...new Set([...stateBoundValues, ...recoveredReservations]),
+			];
+			if (!normalizedRequested && distinct.length > 1) {
+				throw new Error(
+					`BLOCKED: field run_id expected one unambiguous active value, got (omitted) while active bindings are ${distinct.join(', ')}`,
+				);
+			}
+
+			const reserve = async (runId: string): Promise<string | null> => {
+				const outcome = await tryCreatePrReviewRunReservation(
+					directory,
+					normalizedSessionID,
+					workflowInstanceId,
+					runId,
+				);
+				return outcome === 'occupied' ? null : runId;
+			};
+
+			let resolvedRunId = normalizedRequested ?? distinct[0];
+			if (!resolvedRunId) {
+				const base = generatePrReviewRunId();
+				for (
+					let suffix = 0;
+					suffix < MAX_PR_REVIEW_RUN_ID_SUFFIX_ATTEMPTS && !resolvedRunId;
+					suffix += 1
+				) {
+					const candidate = suffix === 0 ? base : `${base}-${suffix}`;
+					const reserved = await reserve(candidate);
+					if (reserved) resolvedRunId = reserved;
+				}
+				if (!resolvedRunId) {
+					throw new Error(
+						`BLOCKED: PR_REVIEW run_id generation exhausted ${MAX_PR_REVIEW_RUN_ID_SUFFIX_ATTEMPTS} reservation attempts for base "${base}"`,
+					);
+				}
+			} else if ((await reserve(resolvedRunId)) === null) {
+				throw new Error(
+					`BLOCKED: field run_id expected an unused active reservation, got "${resolvedRunId}" which is already occupied by another workflow`,
+				);
+			}
+
+			if (state.prReviewReservedRunId === resolvedRunId) return resolvedRunId;
+			const nextState: PrWorkflowGateState = {
+				...state,
+				updatedAt: isoNow(),
+				prReviewReservedRunId: resolvedRunId,
+			};
+			const persisted = await writeStateWhileLocked(directory, nextState, {
+				replaceWorkflowInstanceId: state.workflowInstanceId,
+			});
+			return persisted.prReviewReservedRunId ?? resolvedRunId;
+		}),
+	);
+}
+
 export async function markPrReviewTriggerEvaluationComplete(
 	directory: string,
 	sessionID: string,
@@ -6618,29 +6734,78 @@ export async function markPrReviewHandoffComplete(
 	sessionID: string,
 	runId: string,
 	artifactPath: string,
-): Promise<PrWorkflowGateState> {
-	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
-	if (
-		state.prReviewArtifactRunId !== runId ||
-		!(state.prReviewArtifactBoundaries ?? []).includes('post_critic')
-	) {
-		throw new Error(
-			'BLOCKED: PR_REVIEW handoff requires the final findings boundary for the same run',
-		);
-	}
-	const nextState: PrWorkflowGateState = {
-		...state,
-		updatedAt: isoNow(),
-		prReviewHandoffPath: artifactPath,
-	};
-	await persistState(directory, nextState);
-	return nextState;
+): Promise<{ state: PrWorkflowGateState; alreadyOffered: boolean }> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	return withPrWorkflowCheckoutMutationLock(directory, () =>
+		withSessionStateMutation(directory, normalizedSessionID, async () => {
+			const state = await requireBoundState(
+				directory,
+				normalizedSessionID,
+				'PR_REVIEW',
+			);
+			if (
+				state.prReviewArtifactRunId !== runId ||
+				!(state.prReviewArtifactBoundaries ?? []).includes('post_critic')
+			) {
+				throw new Error(
+					'BLOCKED: PR_REVIEW handoff requires the final findings boundary for the same run',
+				);
+			}
+			const read = await readPrReviewFeedbackHandoffArtifact(
+				directory,
+				artifactPath,
+			);
+			const command = `/swarm pr-feedback ${read.artifact.pr_url} continue from .swarm/${artifactPath}`;
+			const consentInput = {
+				sessionID: normalizedSessionID,
+				runId,
+				handoffPath: artifactPath,
+				handoffDigest: read.digest,
+				prUrl: read.artifact.pr_url,
+				prHeadSha: read.artifact.pr_head_sha,
+				findingIdsDigest: hashPrReviewFindingIds(read.artifact.finding_ids),
+				sourceWorkflowInstanceId: workflowIdentity(state),
+			};
+			const existing = await readPrReviewFeedbackConsent(directory, runId);
+			const alreadyOffered = existing !== null;
+			if (existing) {
+				assertMatchingPrReviewFeedbackConsent(existing, consentInput);
+			} else {
+				await writePrReviewFeedbackConsent(directory, {
+					schema_version: 1,
+					state: 'offered',
+					session_id: normalizedSessionID,
+					source_workflow_instance_id: workflowIdentity(state),
+					run_id: runId,
+					handoff_path: artifactPath,
+					handoff_digest: read.digest,
+					pr_url: read.artifact.pr_url,
+					pr_head_sha: read.artifact.pr_head_sha.toLowerCase(),
+					finding_ids_digest: consentInput.findingIdsDigest,
+					confirmation_command: command,
+					offered_at: isoNow(),
+				});
+			}
+			if (alreadyOffered && state.prReviewHandoffPath === artifactPath) {
+				return { state, alreadyOffered: true };
+			}
+			const nextState: PrWorkflowGateState = {
+				...state,
+				updatedAt: isoNow(),
+				prReviewHandoffPath: artifactPath,
+			};
+			return {
+				state: await writeStateWhileLocked(directory, nextState),
+				alreadyOffered,
+			};
+		}),
+	);
 }
 
 const PR_REVIEW_HANDOFF_RELATIVE_PATH_PATTERN =
 	/^pr-review\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/feedback-handoff\.json$/;
-const PR_REVIEW_HANDOFF_MAX_BYTES = 128 * 1024;
-const PR_REVIEW_FINDINGS_MAX_BYTES = 10 * 1024 * 1024;
+const PR_REVIEW_FEEDBACK_CONSENT_MAX_BYTES = 64 * 1024;
+const PR_REVIEW_RUN_RESERVATION_MAX_BYTES = 16 * 1024;
 
 const PrReviewFeedbackHandoffArtifactSchema = z
 	.object({
@@ -6655,6 +6820,34 @@ const PrReviewFeedbackHandoffArtifactSchema = z
 	})
 	.strict();
 
+const PrReviewRunReservationSchema = z
+	.object({
+		schema_version: z.literal(1),
+		session_id: z.string().min(1),
+		workflow_instance_id: z.string().min(1),
+		run_id: z.string().min(1).max(128),
+		reserved_at: z.string().datetime(),
+	})
+	.strict();
+
+const PrReviewFeedbackConsentSchema = z
+	.object({
+		schema_version: z.literal(1),
+		state: z.enum(['offered', 'confirmed']),
+		session_id: z.string().min(1),
+		source_workflow_instance_id: z.string().min(1),
+		run_id: z.string().min(1).max(128),
+		handoff_path: z.string().min(1).max(512),
+		handoff_digest: z.string().regex(/^[a-f0-9]{64}$/),
+		pr_url: z.string().url().max(2000),
+		pr_head_sha: z.string().regex(/^[0-9a-f]{6,64}$/i),
+		finding_ids_digest: z.string().regex(/^[a-f0-9]{64}$/),
+		confirmation_command: z.string().min(1).max(4000),
+		offered_at: z.string().datetime(),
+		confirmed_at: z.string().datetime().optional(),
+	})
+	.strict();
+
 function normalizePrReviewFeedbackHandoffPath(
 	handoffPath: string,
 ): { runId: string; relativePath: string } | null {
@@ -6665,6 +6858,20 @@ function normalizePrReviewFeedbackHandoffPath(
 	const matched = relative.match(PR_REVIEW_HANDOFF_RELATIVE_PATH_PATTERN);
 	if (!matched) return null;
 	return { runId: matched[1], relativePath: relative };
+}
+
+function buildAcceptedPrFeedbackContinuationCommands(
+	confirmationCommand: string,
+	relativeHandoffPath: string,
+	requestedPrUrl?: string,
+): Set<string> {
+	const commands = new Set([confirmationCommand]);
+	if (!requestedPrUrl) {
+		commands.add(
+			`/swarm pr-feedback continue from .swarm/${relativeHandoffPath}`,
+		);
+	}
+	return commands;
 }
 
 async function readBoundedSwarmRegularFile(
@@ -6771,6 +6978,202 @@ function sameBigIntFileIdentity(
 function normalizeComparableFsPath(value: string): string {
 	const normalized = path.normalize(path.resolve(value));
 	return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function prReviewRunReservationRelativePath(runId: string): string {
+	return `pr-review/${runId}/run-reservation.json`;
+}
+
+function prReviewFeedbackConsentRelativePath(runId: string): string {
+	return `pr-review/${runId}/feedback-consent.json`;
+}
+
+const MAX_PR_REVIEW_RESERVATION_SCAN_ENTRIES = 1024;
+const MAX_PR_REVIEW_RUN_ID_SUFFIX_ATTEMPTS = 64;
+
+/**
+ * Recover a reservation that reached disk before its gate-state binding did.
+ * The scan is bounded and runs only in the explicit writer path while the
+ * project checkout lock is held; it is never plugin-initialization work.
+ */
+async function findOwnedPrReviewRunReservations(
+	directory: string,
+	sessionID: string,
+	workflowInstanceId: string,
+): Promise<string[]> {
+	const reviewRoot = validateSwarmPath(directory, 'pr-review');
+	let entries: Dirent<string>[];
+	try {
+		entries = await fsp.readdir(reviewRoot, { withFileTypes: true });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+		throw error;
+	}
+	if (entries.length > MAX_PR_REVIEW_RESERVATION_SCAN_ENTRIES) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW reservation recovery expected at most ${MAX_PR_REVIEW_RESERVATION_SCAN_ENTRIES} run entries, got ${entries.length}`,
+		);
+	}
+
+	const owned: string[] = [];
+	for (const entry of entries) {
+		if (
+			!entry.isDirectory() ||
+			!PrReviewRunIdSchema.safeParse(entry.name).success
+		)
+			continue;
+		let reservation: Awaited<ReturnType<typeof readPrReviewRunReservation>>;
+		try {
+			reservation = await readPrReviewRunReservation(directory, entry.name);
+		} catch {
+			// An unrelated corrupt reservation is occupied but cannot establish
+			// ownership for this workflow. Explicit reuse still fails in `reserve`.
+			continue;
+		}
+		if (
+			reservation?.session_id === sessionID &&
+			reservation.workflow_instance_id === workflowInstanceId &&
+			reservation.run_id === entry.name
+		) {
+			owned.push(entry.name);
+		}
+	}
+	return owned.sort();
+}
+
+function hashPrReviewFindingIds(ids: readonly string[]): string {
+	return createHash('sha256')
+		.update([...new Set(ids)].sort().join('\0'), 'utf8')
+		.digest('hex');
+}
+
+async function readPrReviewRunReservation(
+	directory: string,
+	runId: string,
+): Promise<z.infer<typeof PrReviewRunReservationSchema> | null> {
+	try {
+		const raw = await readBoundedSwarmRegularFile(
+			directory,
+			prReviewRunReservationRelativePath(runId),
+			PR_REVIEW_RUN_RESERVATION_MAX_BYTES,
+			'PR_REVIEW run reservation',
+		);
+		const parsed = PrReviewRunReservationSchema.safeParse(JSON.parse(raw));
+		if (!parsed.success) {
+			throw new Error('BLOCKED: PR_REVIEW run reservation is invalid');
+		}
+		return parsed.data;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		if (message.includes('does not exist')) return null;
+		throw error;
+	}
+}
+
+async function tryCreatePrReviewRunReservation(
+	directory: string,
+	sessionID: string,
+	workflowInstanceId: string,
+	runId: string,
+): Promise<'created' | 'owned' | 'occupied'> {
+	const relativePath = prReviewRunReservationRelativePath(runId);
+	const absolutePath = validateSwarmPath(directory, relativePath);
+	const runDirectory = path.dirname(absolutePath);
+	const payload = `${JSON.stringify(
+		{
+			schema_version: 1,
+			session_id: sessionID,
+			workflow_instance_id: workflowInstanceId,
+			run_id: runId,
+			reserved_at: isoNow(),
+		},
+		null,
+		2,
+	)}\n`;
+	await fsp.mkdir(runDirectory, { recursive: true });
+	try {
+		await fsp.writeFile(absolutePath, payload, {
+			encoding: 'utf8',
+			flag: 'wx',
+		});
+		return 'created';
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+	}
+	const existing = await readPrReviewRunReservation(directory, runId);
+	if (
+		existing?.session_id === sessionID &&
+		existing.workflow_instance_id === workflowInstanceId &&
+		existing.run_id === runId
+	) {
+		return 'owned';
+	}
+	const occupiedNames = new Set([
+		'trigger-eval.json',
+		'findings.jsonl',
+		'feedback-handoff.json',
+		'feedback-consent.json',
+	]);
+	try {
+		const entries = await fsp.readdir(runDirectory);
+		if (entries.some((entry) => occupiedNames.has(entry))) return 'occupied';
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+	}
+	return 'occupied';
+}
+
+async function readPrReviewFeedbackConsent(
+	directory: string,
+	runId: string,
+): Promise<z.infer<typeof PrReviewFeedbackConsentSchema> | null> {
+	try {
+		const raw = await readBoundedSwarmRegularFile(
+			directory,
+			prReviewFeedbackConsentRelativePath(runId),
+			PR_REVIEW_FEEDBACK_CONSENT_MAX_BYTES,
+			'PR_REVIEW feedback consent artifact',
+		);
+		const parsed = PrReviewFeedbackConsentSchema.safeParse(JSON.parse(raw));
+		if (!parsed.success) {
+			throw new Error(
+				'BLOCKED: PR_REVIEW feedback consent artifact is invalid',
+			);
+		}
+		return parsed.data;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		if (message.includes('does not exist')) return null;
+		throw error;
+	}
+}
+
+async function writePrReviewFeedbackConsent(
+	directory: string,
+	record: z.infer<typeof PrReviewFeedbackConsentSchema>,
+): Promise<void> {
+	const relativePath = prReviewFeedbackConsentRelativePath(record.run_id);
+	const absolutePath = validateSwarmPath(directory, relativePath);
+	if (record.state === 'confirmed') {
+		// The existing offer must be replaced portably. The shared atomic writer
+		// provides containment checks, fsync, and bounded Windows rename retries.
+		await writeAtomicJson(directory, absolutePath, record);
+		return;
+	}
+	const parent = path.dirname(absolutePath);
+	const tempPath = path.join(parent, `.feedback-consent.${randomUUID()}.tmp`);
+	await fsp.mkdir(parent, { recursive: true });
+	try {
+		await fsp.writeFile(tempPath, `${JSON.stringify(record, null, 2)}\n`, {
+			encoding: 'utf8',
+			flag: 'wx',
+		});
+		// Link publishes the offer as an atomic create-only commit marker. A
+		// concurrent or stale offer can never be silently overwritten.
+		await fsp.link(tempPath, absolutePath);
+	} finally {
+		await fsp.rm(tempPath, { force: true }).catch(() => undefined);
+	}
 }
 
 async function readPrReviewFeedbackHandoffArtifact(
@@ -6890,6 +7293,35 @@ function canonicalGitHubPrUrl(value: string): string | null {
 		return `github.com/${matched[1].toLowerCase()}/${matched[2].toLowerCase()}/pull/${prNumber}`;
 	} catch {
 		return null;
+	}
+}
+
+function assertMatchingPrReviewFeedbackConsent(
+	record: z.infer<typeof PrReviewFeedbackConsentSchema>,
+	input: {
+		sessionID: string;
+		runId: string;
+		handoffPath: string;
+		handoffDigest: string;
+		prUrl: string;
+		prHeadSha: string;
+		findingIdsDigest: string;
+		sourceWorkflowInstanceId: string;
+	},
+): void {
+	if (
+		record.session_id !== input.sessionID ||
+		record.run_id !== input.runId ||
+		record.handoff_path !== input.handoffPath ||
+		record.handoff_digest !== input.handoffDigest ||
+		canonicalGitHubPrUrl(record.pr_url) !== canonicalGitHubPrUrl(input.prUrl) ||
+		record.pr_head_sha.toLowerCase() !== input.prHeadSha.toLowerCase() ||
+		record.finding_ids_digest !== input.findingIdsDigest ||
+		record.source_workflow_instance_id !== input.sourceWorkflowInstanceId
+	) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW feedback consent artifact does not match the requested handoff; remove the stale sidecar or repeat the exact continuation offer',
+		);
 	}
 }
 
@@ -7032,6 +7464,8 @@ export async function transitionPrReviewToFeedback(
 		runId: string;
 		handoffPath: string;
 		prUrl?: string;
+		exactCommand?: string;
+		confirmedByUser?: boolean;
 	},
 ): Promise<PrWorkflowGateState> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
@@ -7077,6 +7511,7 @@ export async function transitionPrReviewToFeedback(
 	}
 
 	let sourceIdentity: string;
+	let expectedConsentSourceIdentity: string;
 	let sourceRevision = 0;
 	let provenance: PrFeedbackReviewHandoffRecord['provenance'];
 	if (preliminary) {
@@ -7113,101 +7548,201 @@ export async function transitionPrReviewToFeedback(
 			);
 		}
 		sourceIdentity = workflowIdentity(ready);
+		expectedConsentSourceIdentity = sourceIdentity;
 		sourceRevision = ready.revision;
 		provenance = 'active-review-v1';
 	} else {
-		if (!request.prUrl) {
+		const reservation = await readPrReviewRunReservation(
+			directory,
+			request.runId,
+		);
+		if (
+			!reservation ||
+			reservation.session_id !== normalizedSessionID ||
+			reservation.run_id !== request.runId
+		) {
 			throw new Error(
-				'BLOCKED: continuing a completed PR_REVIEW requires an explicit GitHub PR URL',
+				'BLOCKED: completed PR_REVIEW continuation requires the matching durable run reservation for this session',
 			);
 		}
-		sourceIdentity = `external-${preliminaryRead.digest.slice(0, 32)}`;
+		expectedConsentSourceIdentity = reservation.workflow_instance_id;
+		sourceIdentity = expectedConsentSourceIdentity;
 		provenance = 'external-v1';
 	}
 
-	await _test_exports.beforePrFeedbackTransitionLock?.();
-	return withSessionStateMutation(directory, normalizedSessionID, async () => {
-		const current = await readPrWorkflowGateStateFromDisk(
-			directory,
-			normalizedSessionID,
+	const consent = await readPrReviewFeedbackConsent(directory, request.runId);
+	if (!consent) {
+		throw new Error(
+			'BLOCKED: PR_FEEDBACK continuation requires explicit confirmation; repeat the exact continuation command first',
 		);
-		if (current?.mode === 'PR_FEEDBACK') {
-			assertSamePrFeedbackHandoff(
-				current,
-				normalizedHandoff.relativePath,
-				preliminaryRead,
-				request.prUrl,
+	}
+	assertMatchingPrReviewFeedbackConsent(consent, {
+		sessionID: normalizedSessionID,
+		runId: request.runId,
+		handoffPath: normalizedHandoff.relativePath,
+		handoffDigest: preliminaryRead.digest,
+		prUrl: artifact.pr_url,
+		prHeadSha: artifact.pr_head_sha,
+		findingIdsDigest: hashPrReviewFindingIds(artifact.finding_ids),
+		sourceWorkflowInstanceId: expectedConsentSourceIdentity,
+	});
+	const exactCommand = request.exactCommand?.trim();
+	const acceptedContinuationCommands =
+		buildAcceptedPrFeedbackContinuationCommands(
+			consent.confirmation_command,
+			normalizedHandoff.relativePath,
+			request.prUrl,
+		);
+	if (
+		request.confirmedByUser !== true ||
+		!exactCommand ||
+		!acceptedContinuationCommands.has(exactCommand)
+	) {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK continuation requires explicit confirmation with the offered command: ${consent.confirmation_command}`,
+		);
+	}
+
+	await _test_exports.beforePrFeedbackTransitionLock?.();
+	return withPrWorkflowCheckoutMutationLock(directory, () =>
+		withSessionStateMutation(directory, normalizedSessionID, async () => {
+			const current = await readPrWorkflowGateStateFromDisk(
+				directory,
+				normalizedSessionID,
 			);
-			return current;
-		}
-		if (provenance === 'active-review-v1') {
-			if (
-				!current ||
-				current.mode !== 'PR_REVIEW' ||
-				workflowIdentity(current) !== sourceIdentity ||
-				current.revision !== sourceRevision ||
-				current.prHeadSha?.toLowerCase() !==
-					artifact.pr_head_sha.toLowerCase() ||
-				current.prReviewArtifactRunId !== request.runId ||
-				current.prReviewHandoffPath !== normalizedHandoff.relativePath
-			) {
+			if (current?.mode === 'PR_FEEDBACK') {
+				assertSamePrFeedbackHandoff(
+					current,
+					normalizedHandoff.relativePath,
+					preliminaryRead,
+					request.prUrl,
+				);
+				return current;
+			}
+			if (provenance === 'active-review-v1') {
+				if (
+					!current ||
+					current.mode !== 'PR_REVIEW' ||
+					workflowIdentity(current) !== sourceIdentity ||
+					current.revision !== sourceRevision ||
+					current.prHeadSha?.toLowerCase() !==
+						artifact.pr_head_sha.toLowerCase() ||
+					current.prReviewArtifactRunId !== request.runId ||
+					current.prReviewHandoffPath !== normalizedHandoff.relativePath
+				) {
+					throw new Error(
+						'BLOCKED: PR_REVIEW state changed while validating the feedback handoff; retry from current state',
+					);
+				}
+			} else if (current) {
 				throw new Error(
-					'BLOCKED: PR_REVIEW state changed while validating the feedback handoff; retry from current state',
+					'BLOCKED: another PR workflow became active while validating the external handoff',
 				);
 			}
-		} else if (current) {
-			throw new Error(
-				'BLOCKED: another PR workflow became active while validating the external handoff',
+			if (provenance === 'external-v1') {
+				const lockedReservation = await readPrReviewRunReservation(
+					directory,
+					request.runId,
+				);
+				if (
+					!lockedReservation ||
+					lockedReservation.session_id !== normalizedSessionID ||
+					lockedReservation.workflow_instance_id !==
+						expectedConsentSourceIdentity
+				) {
+					throw new Error(
+						'BLOCKED: PR_REVIEW run reservation changed during external feedback transition',
+					);
+				}
+			}
+			const lockedRead = await readPrReviewFeedbackHandoffArtifact(
+				directory,
+				normalizedHandoff.relativePath,
 			);
-		}
-		const lockedRead = await readPrReviewFeedbackHandoffArtifact(
-			directory,
-			normalizedHandoff.relativePath,
-		);
-		if (lockedRead.digest !== preliminaryRead.digest) {
-			throw new Error(
-				'BLOCKED: PR_REVIEW feedback handoff artifact changed during transition',
+			if (lockedRead.digest !== preliminaryRead.digest) {
+				throw new Error(
+					'BLOCKED: PR_REVIEW feedback handoff artifact changed during transition',
+				);
+			}
+			if (
+				artifactPr !== canonicalGitHubPrUrl(lockedRead.artifact.pr_url) ||
+				lockedRead.artifact.run_id !== request.runId ||
+				lockedRead.artifact.pr_head_sha.toLowerCase() !==
+					artifact.pr_head_sha.toLowerCase() ||
+				!sameHandoffIds(lockedRead.artifact.finding_ids, artifact.finding_ids)
+			) {
+				throw new Error(
+					'BLOCKED: PR_REVIEW feedback handoff artifact changed during transition',
+				);
+			}
+			const lockedConsent = await readPrReviewFeedbackConsent(
+				directory,
+				request.runId,
 			);
-		}
-		if (
-			artifactPr !== canonicalGitHubPrUrl(lockedRead.artifact.pr_url) ||
-			lockedRead.artifact.run_id !== request.runId ||
-			lockedRead.artifact.pr_head_sha.toLowerCase() !==
-				artifact.pr_head_sha.toLowerCase() ||
-			!sameHandoffIds(lockedRead.artifact.finding_ids, artifact.finding_ids)
-		) {
-			throw new Error(
-				'BLOCKED: PR_REVIEW feedback handoff artifact changed during transition',
-			);
-		}
-		const timestamp = isoNow();
-		const nextState: PrWorkflowGateState = {
-			schemaVersion: GATE_SCHEMA_VERSION,
-			revision: sourceRevision,
-			workflowInstanceId: randomUUID(),
-			sessionID: normalizedSessionID,
-			mode: 'PR_FEEDBACK',
-			activatedAt: timestamp,
-			updatedAt: timestamp,
-			prFeedbackReviewHandoff: {
-				path: normalizedHandoff.relativePath,
-				runId: lockedRead.artifact.run_id,
-				sourcePrHeadSha: lockedRead.artifact.pr_head_sha.toLowerCase(),
+			if (!lockedConsent) {
+				throw new Error(
+					'BLOCKED: PR_REVIEW feedback consent artifact disappeared during transition',
+				);
+			}
+			assertMatchingPrReviewFeedbackConsent(lockedConsent, {
+				sessionID: normalizedSessionID,
+				runId: request.runId,
+				handoffPath: normalizedHandoff.relativePath,
+				handoffDigest: lockedRead.digest,
 				prUrl: lockedRead.artifact.pr_url,
-				findingIds: [...new Set(lockedRead.artifact.finding_ids)].sort(),
-				digest: preliminaryRead.digest,
-				sourceWorkflowInstanceId: sourceIdentity,
-				provenance,
-			},
-			prFeedbackTargetUrl: artifact.pr_url,
-		};
-		return writeStateWhileLocked(directory, nextState, {
-			replaceWorkflowInstanceId:
-				provenance === 'active-review-v1'
-					? current?.workflowInstanceId
-					: undefined,
-		});
-	});
+				prHeadSha: lockedRead.artifact.pr_head_sha,
+				findingIdsDigest: hashPrReviewFindingIds(
+					lockedRead.artifact.finding_ids,
+				),
+				sourceWorkflowInstanceId: expectedConsentSourceIdentity,
+			});
+			if (
+				!buildAcceptedPrFeedbackContinuationCommands(
+					lockedConsent.confirmation_command,
+					normalizedHandoff.relativePath,
+					request.prUrl,
+				).has(exactCommand)
+			) {
+				throw new Error(
+					'BLOCKED: PR_FEEDBACK continuation command changed during transition',
+				);
+			}
+			if (lockedConsent.state === 'offered') {
+				await writePrReviewFeedbackConsent(directory, {
+					...lockedConsent,
+					state: 'confirmed',
+					confirmed_at: isoNow(),
+				});
+			}
+			const timestamp = isoNow();
+			const nextState: PrWorkflowGateState = {
+				schemaVersion: GATE_SCHEMA_VERSION,
+				revision: sourceRevision,
+				workflowInstanceId: randomUUID(),
+				sessionID: normalizedSessionID,
+				mode: 'PR_FEEDBACK',
+				activatedAt: timestamp,
+				updatedAt: timestamp,
+				prFeedbackReviewHandoff: {
+					path: normalizedHandoff.relativePath,
+					runId: lockedRead.artifact.run_id,
+					sourcePrHeadSha: lockedRead.artifact.pr_head_sha.toLowerCase(),
+					prUrl: lockedRead.artifact.pr_url,
+					findingIds: [...new Set(lockedRead.artifact.finding_ids)].sort(),
+					digest: preliminaryRead.digest,
+					sourceWorkflowInstanceId: sourceIdentity,
+					provenance,
+				},
+				prFeedbackTargetUrl: artifact.pr_url,
+			};
+			return writeStateWhileLocked(directory, nextState, {
+				replaceWorkflowInstanceId:
+					provenance === 'active-review-v1'
+						? current?.workflowInstanceId
+						: undefined,
+			});
+		}),
+	);
 }
 
 export async function declarePrFeedbackScope(
@@ -7869,6 +8404,9 @@ export const _test_exports = {
 	// capped merge is content-preserving only when the extra pipes sit in the
 	// trailing (free-text) field.
 	pipeFieldsCapped,
+	// Exposed so tests exercise the production indexing path and pin the
+	// observable classification of legacy overflow recovery.
+	indexVerdictRows,
 	// Exposed so the digest-stability test can hash the same canonical field
 	// view the critic-claim binding hashes.
 	reviewerVerdictRowDigest,
@@ -9652,6 +10190,13 @@ function derivePrReviewCandidateInventory(
 		);
 		let triggerArtifact: unknown;
 		try {
+			const triggerStat = statSync(triggerPath);
+			if (
+				!triggerStat.isFile() ||
+				triggerStat.size > PR_REVIEW_TRIGGER_RECEIPT_MAX_BYTES
+			) {
+				throw new Error('trigger evaluation artifact exceeds its read bound');
+			}
 			triggerArtifact = JSON.parse(readFileSync(triggerPath, 'utf-8'));
 		} catch {
 			throw new Error(
@@ -11479,6 +12024,7 @@ function analyzePrReviewDiscoveryArtifact(
 	expectedWorkflowLane: string,
 	ownedWorkflowLanes: readonly string[] = [expectedWorkflowLane],
 	mode?: string,
+	acceptPartial = false,
 ): PrReviewDiscoveryCoverageAnalysis {
 	// `mode` is threaded in so this site and the extraction site
 	// (derivePrReviewCandidateInventory) resolve the row family from the SAME
@@ -11528,7 +12074,7 @@ function analyzePrReviewDiscoveryArtifact(
 			produced_at: '1970-01-01T00:00:00.000Z',
 		},
 		{
-			accept_partial: false,
+			accept_partial: acceptPartial,
 			accept_degraded: false,
 			degraded: false,
 			row_format_version: 1,
@@ -11711,6 +12257,7 @@ export function validatePrReviewDiscoveryLaneCompletion(
 			workflowLane,
 			ownedWorkflowLanes,
 			input.expected.mode,
+			input.result.transcriptIncomplete === true,
 		),
 	}));
 	// A lane that is covered but carried defects is the whole point of salvage —
@@ -12019,18 +12566,31 @@ export async function validatePrWorkflowTransportRecovery(
 			acceptedReviewItemIds: [...itemIds],
 			rejectedReviewItemIds: [],
 		};
-		return input.result.truncated === true
-			? {
-					ok: true,
-					receipt,
-					recoveries: [
+		const recoveries = [
+			...(analysis.recoveries ?? []).map(({ recovery, itemId }) => ({
+				workflowLane,
+				kind: 'legacy-verdict-row-recovery' as const,
+				reason:
+					recovery === 'legacy-fidelity-safe'
+						? `legacy verdict row ${itemId} used trailing-field pipe recovery with full field fidelity`
+						: `legacy verdict row ${itemId} used trailing-field pipe recovery with lossy prose normalization`,
+			})),
+			...(input.result.truncated === true
+				? [
 						{
 							workflowLane,
-							kind: 'truncated-preview-durable-artifact',
+							kind: 'truncated-preview-durable-artifact' as const,
 							reason:
 								'inline preview truncated; durable artifact retained exact coverage',
 						},
-					],
+					]
+				: []),
+		];
+		return recoveries.length > 0
+			? {
+					ok: true,
+					receipt,
+					recoveries,
 				}
 			: { ok: true, receipt };
 	} else if (mode === 'swarm-pr-feedback:verification') {
@@ -12163,26 +12723,6 @@ function extractLaneCoverageEvidenceText(
 	).evidence;
 }
 
-const REVIEWER_CLASSIFICATIONS = new Set([
-	'CONFIRMED',
-	'DISPROVED',
-	'UNVERIFIED',
-	'PRE_EXISTING',
-]);
-const REVIEWER_EVIDENCE_TYPES = new Set([
-	'STRUCTURALLY_PROVEN',
-	'EXECUTION_PROVEN',
-	'STATIC_TRACE_PROVEN',
-	'PLAUSIBLE_BUT_UNVERIFIED',
-]);
-const REVIEW_SEVERITIES = new Set([
-	'CRITICAL',
-	'HIGH',
-	'MEDIUM',
-	'LOW',
-	'INFO',
-	'NONE',
-]);
 const REVIEW_SEVERITY_RANK = new Map([
 	['NONE', 0],
 	['INFO', 1],
@@ -12190,12 +12730,6 @@ const REVIEW_SEVERITY_RANK = new Map([
 	['MEDIUM', 3],
 	['HIGH', 4],
 	['CRITICAL', 5],
-]);
-const CRITIC_STATUSES = new Set([
-	'UPHELD',
-	'DOWNGRADED',
-	'DISPROVED',
-	'NEEDS_MORE_EVIDENCE',
 ]);
 const FEEDBACK_CLASSIFICATIONS = new Set([
 	'CONFIRMED',
@@ -12226,43 +12760,54 @@ interface ReviewerVerdict {
 interface IndexedVerdictRows {
 	markerRows: string[][];
 	rowsByItemId: Map<string, string[][]>;
+	recoveries: Array<{
+		marker: '[REVIEWED]' | '[CRITIC]';
+		itemId: string;
+		recovery: 'legacy-fidelity-safe' | 'legacy-lossy';
+	}>;
 }
 
 function indexVerdictRows(
 	text: string,
 	marker: '[REVIEWED]' | '[CRITIC]',
-	fieldCount: number,
 ): IndexedVerdictRows {
 	const markerRows: string[][] = [];
 	const rowsByItemId = new Map<string, string[][]>();
+	const recoveries: IndexedVerdictRows['recoveries'] = [];
 	for (const line of text.split(/\r?\n/)) {
-		const fields = pipeFieldsCapped(line, fieldCount);
-		if (fields[0] !== marker) continue;
+		const row = parsePrReviewVerdictRow(
+			line,
+			marker === '[REVIEWED]' ? 'reviewer' : 'critic',
+		);
+		if (!row) continue;
+		const fields = row.fields;
+		if (row.recoveredOverflow) {
+			const recovery = row.overflowClass as
+				| 'legacy-fidelity-safe'
+				| 'legacy-lossy';
+			const itemId = fields[1] ?? '(missing)';
+			recoveries.push({ marker, itemId, recovery });
+			warn(
+				'PR_REVIEW recovered a legacy verdict row with unescaped pipe overflow',
+				{
+					marker,
+					itemId,
+					recovery,
+				},
+			);
+		}
 		markerRows.push(fields);
 		const itemId = fields[1] ?? '';
 		const rows = rowsByItemId.get(itemId);
 		if (rows) rows.push(fields);
 		else rowsByItemId.set(itemId, [fields]);
 	}
-	return { markerRows, rowsByItemId };
+	return { markerRows, rowsByItemId, recoveries };
 }
 
 function validateReviewerVerdictFields(fields: string[]): string[] | null {
-	if (fields.length !== 10 || !fields.slice(1).every(Boolean)) return null;
-	const introduced = fields[5]
-		.replace(/^introduced_by_pr\s*:\s*/i, '')
-		.toUpperCase();
-	if (
-		!REVIEWER_CLASSIFICATIONS.has(fields[2]) ||
-		!REVIEWER_EVIDENCE_TYPES.has(fields[3]) ||
-		!REVIEW_SEVERITIES.has(fields[4]) ||
-		!['YES', 'NO', 'UNKNOWN'].includes(introduced)
-	)
-		return null;
-	if (fields[2] === 'DISPROVED' && fields[4] !== 'NONE') return null;
-	if (fields[7].length < 8 || fields[8].length < 5 || fields[9].length < 3)
-		return null;
-	return fields;
+	const parsed = PrReviewReviewerVerdictFieldsSchema.safeParse(fields);
+	return parsed.success ? [...parsed.data] : null;
 }
 
 /**
@@ -12304,18 +12849,19 @@ function parsePrReviewVerdictRows(
 		string,
 		{ classification: string; severity: string; rowDigest?: string }
 	>;
+	recoveries: IndexedVerdictRows['recoveries'];
 } {
 	const parsed = new Map<
 		string,
 		{ classification: string; severity: string; rowDigest?: string }
 	>();
 	const marker = phase === 'reviewer' ? '[REVIEWED]' : '[CRITIC]';
-	const { markerRows, rowsByItemId } = indexVerdictRows(
+	const { markerRows, rowsByItemId, recoveries } = indexVerdictRows(
 		text,
 		marker,
-		phase === 'reviewer' ? 10 : 6,
 	);
 	for (const itemId of itemIds) {
+		if (itemId === PR_REVIEW_DISCARDED_EXAMPLE_ITEM_ID) continue;
 		if (phase === 'reviewer') {
 			const rows = rowsByItemId.get(itemId);
 			const fields =
@@ -12342,7 +12888,7 @@ function parsePrReviewVerdictRows(
 			severity: verdict.severity,
 		});
 	}
-	return { markerRows, parsed };
+	return { markerRows, parsed, recoveries };
 }
 
 /** Exact assigned-row contract used by both normal and recovered collection. */
@@ -12351,10 +12897,15 @@ function analyzePrReviewVerdictRowContract(
 	itemIds: readonly string[],
 	phase: PrReviewComposablePhase,
 	reviewerClaims?: ReadonlyMap<string, PrReviewItemClaim>,
-): { ok: boolean; expected: string; actual: string } {
+): {
+	ok: boolean;
+	expected: string;
+	actual: string;
+	recoveries: IndexedVerdictRows['recoveries'];
+} {
 	const marker = phase === 'reviewer' ? '[REVIEWED]' : '[CRITIC]';
 	const assigned = new Set(itemIds);
-	const { markerRows, parsed } = parsePrReviewVerdictRows(
+	const { markerRows, parsed, recoveries } = parsePrReviewVerdictRows(
 		text,
 		itemIds,
 		phase,
@@ -12376,6 +12927,7 @@ function analyzePrReviewVerdictRowContract(
 			invalidOrMissingIds,
 			unexpectedIds,
 		}),
+		recoveries,
 	};
 }
 
@@ -12416,7 +12968,7 @@ function parseCriticVerdict(
 	itemId: string,
 	reviewerSeverity?: string,
 ): { status: string; severity: string } | null {
-	const rows = indexVerdictRows(text, '[CRITIC]', 6).rowsByItemId.get(itemId);
+	const rows = indexVerdictRows(text, '[CRITIC]').rowsByItemId.get(itemId);
 	if (!rows || rows.length !== 1) return null;
 	return validateCriticVerdictFields(rows[0], reviewerSeverity);
 }
@@ -12425,30 +12977,17 @@ function validateCriticVerdictFields(
 	fields: string[],
 	reviewerSeverity?: string,
 ): { status: string; severity: string } | null {
-	if (
-		fields.length !== 6 ||
-		!fields.slice(1).every(Boolean) ||
-		!CRITIC_STATUSES.has(fields[2]) ||
-		!REVIEW_SEVERITIES.has(fields[3])
-	)
-		return null;
-	if (fields[2] === 'NEEDS_MORE_EVIDENCE') return null;
-	if (fields[2] === 'DISPROVED' && fields[3] !== 'NONE') return null;
-	if (
-		fields[2] === 'UPHELD' &&
-		!['CRITICAL', 'HIGH', 'MEDIUM'].includes(fields[3])
-	)
-		return null;
-	if (fields[2] === 'DOWNGRADED' && fields[3] === 'CRITICAL') return null;
+	const parsed = PrReviewCriticVerdictFieldsSchema.safeParse(fields);
+	if (!parsed.success) return null;
+	const verdict = parsed.data;
 	if (reviewerSeverity) {
 		const reviewerRank = REVIEW_SEVERITY_RANK.get(reviewerSeverity);
-		const criticRank = REVIEW_SEVERITY_RANK.get(fields[3]);
+		const criticRank = REVIEW_SEVERITY_RANK.get(verdict[3]);
 		if (reviewerRank === undefined || criticRank === undefined) return null;
-		if (fields[2] === 'UPHELD' && criticRank !== reviewerRank) return null;
-		if (fields[2] === 'DOWNGRADED' && criticRank >= reviewerRank) return null;
+		if (verdict[2] === 'UPHELD' && criticRank !== reviewerRank) return null;
+		if (verdict[2] === 'DOWNGRADED' && criticRank >= reviewerRank) return null;
 	}
-	if (fields[4].length < 6 || fields[5].length < 6) return null;
-	return { status: fields[2], severity: fields[3] };
+	return { status: verdict[2], severity: verdict[3] };
 }
 
 function artifactHasExactPositiveVerdictRow(

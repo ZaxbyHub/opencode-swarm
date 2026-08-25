@@ -1,5 +1,21 @@
 # Findings Persistence Contract (Profile A)
 
+## Executable dialect parity
+
+The following machine-readable block mirrors `src/background/pr-review-contract.ts`. CI parses it structurally; changing a skill dialect without the executable schema (or vice versa) fails the contract test.
+
+<!-- PR_REVIEW_EXECUTABLE_DIALECT_START -->
+reviewer_fields: marker | item_id | classification | evidence_type | severity | introduced_by_pr | file:line | rationale | probe | reviewer_notes
+reviewer_classifications: CONFIRMED | DISPROVED | UNVERIFIED | PRE_EXISTING
+reviewer_evidence_types: STRUCTURALLY_PROVEN | EXECUTION_PROVEN | STATIC_TRACE_PROVEN | PLAUSIBLE_BUT_UNVERIFIED
+critic_fields: marker | item_id | status | severity | rationale | required_change
+critic_statuses: UPHELD | DOWNGRADED | DISPROVED | NEEDS_MORE_EVIDENCE
+severities: CRITICAL | HIGH | MEDIUM | LOW | INFO | NONE
+finding_statuses: PENDING | CONFIRMED | DISPROVED | PRE_EXISTING
+finding_actions: route_to_reviewer | route_to_critic | report | suppress_with_reason | handoff_to_feedback
+artifact_boundaries: post_explorer | post_reviewer | post_critic
+<!-- PR_REVIEW_EXECUTABLE_DIALECT_END -->
+
 The enforced write order, per-boundary disposition matrix, severity semantics,
 error-reporting shape, and handoff schema for `write_pr_review_artifact`
 (issue #2277). The entry SKILL.md carries the summary; this reference is the
@@ -164,7 +180,6 @@ review context says prior lanes ran, stop and surface the missing artifact as
 a coverage gap instead of reclassifying from memory. Append new records rather
 than overwriting history unless the artifact format explicitly tracks
 revisions; the latest record for a `finding_id` wins during reload.
-
 There are two durable recovery points (issue #2280). The base-only
 `post_explorer` checkpoint — written right after base settlement — is
 sufficient to reconstruct the base candidate ledger and resume a compacted
@@ -174,3 +189,20 @@ full-inventory ledger is the recovery point: `post_reviewer` and
 `post_critic` must cover the FULL (base+micro) inventory, and later boundary
 writes upsert any base-only records the micro wave extended (latest record
 wins).
+
+All non-I/O rejections name the offending field, its received value, and the
+legal value/domain. The first omitted `run_id` is atomically reserved and
+returned; later omission is legal only when the active run is unambiguous.
+
+## Profile A run identity and verdict-row codec
+
+On the first trigger-evaluation or findings write, an omitted `run_id` is
+atomically reserved at millisecond precision, returned to the caller, and
+persisted in active workflow state; every later write must reuse it. Omission
+is accepted only when exactly one active/reserved run exists, otherwise the
+operation fails closed. `[REVIEWED]` and `[CRITIC]` free-text fields use the
+controller codec: `\\` represents a literal backslash, `\|` a pipe, `\n` a
+newline, and `\r` a carriage return. The byte-zero contract card injected into
+each Profile A lane is authoritative for the live enums and includes positive
+and explicitly discarded negative examples. Discarded examples are
+documentation only and must never be emitted as live marker rows.

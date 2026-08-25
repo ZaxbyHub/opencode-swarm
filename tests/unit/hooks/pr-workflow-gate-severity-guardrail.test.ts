@@ -23,6 +23,7 @@ import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { FINDINGS_SEVERITIES } from '../../../src/background/candidate-contract';
+import { PR_REVIEW_SEVERITIES } from '../../../src/background/pr-review-contract.js';
 
 const GATE_PATH = path.join(
 	import.meta.dir,
@@ -133,27 +134,11 @@ describe('severity-omission bypass cannot return (#2279 recurrence guardrail)', 
 	test('FINDINGS_SEVERITIES stays set-equal to the gate REVIEW_SEVERITIES', () => {
 		// THE LOAD-BEARING INVARIANT of issue #2279. Requiring `severity` is only
 		// safe because every authoritative verdict severity is representable in the
-		// findings schema. `REVIEW_SEVERITIES` is module-private, so the two
-		// constants cannot be compared by import — but an unpinned invariant is one
-		// a future edit silently breaks: adding a member to REVIEW_SEVERITIES would
-		// make the gate demand a value `FindingSchema` rejects, i.e. an
-		// unsatisfiable gate. Parse it out of the source instead.
-		const source = readGateSource();
-		const match = source.match(
-			/const\s+REVIEW_SEVERITIES\s*=\s*new\s+Set\(\s*\[([\s\S]*?)\]\s*\)/,
-		);
-		if (!match) {
-			throw new Error(
-				'REVIEW_SEVERITIES not found — if it was renamed or restructured, update ' +
-					'this invariant check rather than deleting it',
-			);
-		}
-		const reviewSeverities = [...match[1].matchAll(/'([A-Z_]+)'/g)].map(
-			(entry) => entry[1],
-		);
-
-		expect(reviewSeverities.length).toBeGreaterThan(0);
-		expect([...reviewSeverities].sort()).toEqual(
+		// findings schema. #2333 moved the verdict dialect to an executable,
+		// importable contract, so compare the two sources directly rather than
+		// scraping a duplicated private literal from the gate implementation.
+		expect(PR_REVIEW_SEVERITIES.length).toBeGreaterThan(0);
+		expect([...PR_REVIEW_SEVERITIES].sort()).toEqual(
 			[...FINDINGS_SEVERITIES].sort(),
 		);
 	});

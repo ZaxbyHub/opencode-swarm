@@ -2,97 +2,28 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
+import type { FindingsSeverity } from '../background/candidate-contract.js';
 import {
-	FINDINGS_SEVERITIES,
-	type FindingsSeverity,
-} from '../background/candidate-contract.js';
+	formatPrReviewRuntimeFieldError,
+	formatPrReviewValidationIssues,
+	PR_REVIEW_FINDINGS_MAX_BYTES,
+	PR_REVIEW_HANDOFF_MAX_BYTES,
+	PrReviewFindingSchema,
+	PrReviewHandoffSchema,
+	PrReviewRunIdSchema,
+	WritePrReviewArtifactArgsSchema,
+} from '../background/pr-review-contract.js';
 import {
 	assertPrReviewArtifactBoundary,
 	assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts,
 	markPrReviewArtifactBoundary,
 	markPrReviewHandoffComplete,
+	prWorkflowSessionFileStem,
 	readPrWorkflowGateState,
+	resolvePrReviewWriterRunId,
 } from '../hooks/pr-workflow-gate.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { createSwarmTool } from './create-tool.js';
-
-const RunIdSchema = z
-	.string()
-	.regex(
-		/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/,
-		'run_id must be a safe relative identifier',
-	);
-
-const FindingSchema = z
-	.object({
-		finding_id: z.string().trim().min(1).max(128),
-		status: z.enum(['PENDING', 'CONFIRMED', 'DISPROVED', 'PRE_EXISTING']),
-		file_line: z.string().trim().min(1).max(1000),
-		evidence: z.string().trim().min(1).max(20_000),
-		next_action: z.enum([
-			'route_to_reviewer',
-			'route_to_critic',
-			'report',
-			'suppress_with_reason',
-			'handoff_to_feedback',
-		]),
-		/**
-		 * Speaks the VERDICT dialect (includes `NONE`), because a findings record
-		 * is a projection of an authenticated reviewer/critic row.
-		 *
-		 * Kept `.optional()` at the SCHEMA layer on purpose: presence is required,
-		 * but it is `assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts` that
-		 * enforces it, so an omitted field is reported as
-		 * `severity expected "MEDIUM", got (omitted)` — naming the required value —
-		 * alongside every other violation in one batched rejection (the #2277
-		 * one-round-trip repair contract). A schema-level required enum would
-		 * instead abort with a generic domain message and discard that batch.
-		 */
-		// Deliberately NOT `.trim()`ed, unlike the free-text `category` below
-		// (PRR-003): this value is compared for exact equality against an
-		// authoritative verdict/candidate severity, so silently normalizing
-		// `" HIGH "` into `HIGH` would let a malformed payload pass an
-		// integrity gate. Whitespace/case/empty variants are rejected, and that
-		// strictness is pinned by tests rather than left implicit.
-		severity: z.enum(FINDINGS_SEVERITIES).optional(),
-		category: z.string().trim().min(1).max(128).optional(),
-	})
-	.strict();
-
-const HandoffSchema = z
-	.object({
-		pr_url: z.string().url(),
-		finding_ids: z.array(z.string().trim().min(1).max(128)).min(1),
-		summary: z.string().trim().min(1).max(20_000),
-		provenance: z.array(z.string().trim().min(1).max(4000)).min(1),
-	})
-	.strict();
-
-const WritePrReviewArtifactArgsSchema = z.discriminatedUnion('kind', [
-	z
-		.object({
-			kind: z.literal('findings'),
-			run_id: RunIdSchema,
-			pr_head_sha: z
-				.string()
-				.trim()
-				.regex(/^[0-9a-f]{6,64}$/i),
-			boundary: z.enum(['post_explorer', 'post_reviewer', 'post_critic']),
-			records: z.array(FindingSchema).min(1).max(1000),
-		})
-		.strict(),
-	z
-		.object({
-			kind: z.literal('handoff'),
-			run_id: RunIdSchema,
-			pr_head_sha: z
-				.string()
-				.trim()
-				.regex(/^[0-9a-f]{6,64}$/i),
-			handoff: HandoffSchema,
-		})
-		.strict(),
-]);
 
 /**
  * READ shape. Deliberately tolerant of a missing `severity`: `readFindings`
@@ -100,12 +31,30 @@ const WritePrReviewArtifactArgsSchema = z.discriminatedUnion('kind', [
  * severity became mandatory must still load (issue #2279 durable readability).
  * The WRITE boundary is what enforces presence.
  */
-type PersistedFinding = Omit<z.infer<typeof FindingSchema>, 'severity'> & {
+type PersistedFinding = Omit<
+	z.infer<typeof PrReviewFindingSchema>,
+	'severity'
+> & {
 	severity?: FindingsSeverity;
 	boundary: 'post_explorer' | 'post_reviewer' | 'post_critic';
 	pr_head_sha: string;
 	recorded_at: string;
 };
+
+const PersistedFindingSchema = PrReviewFindingSchema.extend({
+	boundary: z.enum(['post_explorer', 'post_reviewer', 'post_critic']),
+	pr_head_sha: z.string().regex(/^[0-9a-f]{6,64}$/i),
+	recorded_at: z.string().datetime(),
+}).strict();
+
+const PersistedHandoffSchema = PrReviewHandoffSchema.extend({
+	schema_version: z.literal(1),
+	run_id: PrReviewRunIdSchema,
+	pr_head_sha: z.string().regex(/^[0-9a-f]{6,64}$/i),
+	created_at: z.string().datetime(),
+}).strict();
+
+type PersistedHandoff = z.infer<typeof PersistedHandoffSchema>;
 
 function failure(message: string): string {
 	return JSON.stringify({ success: false, message }, null, 2);
@@ -113,19 +62,56 @@ function failure(message: string): string {
 
 async function readFindings(filePath: string): Promise<PersistedFinding[]> {
 	try {
-		const stat = await fs.promises.stat(filePath);
-		if (!stat.isFile() || stat.size > 10 * 1024 * 1024) {
-			throw new Error('findings artifact is not a bounded regular file');
-		}
-		const text = await fs.promises.readFile(filePath, 'utf8');
+		const text = await readBoundedUtf8File(
+			filePath,
+			PR_REVIEW_FINDINGS_MAX_BYTES,
+			'findings artifact',
+		);
 		return text
 			.split(/\r?\n/)
 			.filter(Boolean)
-			.map((line) => JSON.parse(line) as PersistedFinding);
+			.map((line, index) => {
+				let decoded: unknown;
+				try {
+					decoded = JSON.parse(line);
+				} catch (error) {
+					throw new Error(
+						`line ${index + 1} is not JSON: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+				const parsed = PersistedFindingSchema.safeParse(decoded);
+				if (!parsed.success) {
+					throw new Error(
+						`line ${index + 1} violates the persisted finding schema: ${formatPrReviewValidationIssues(parsed.error.issues, decoded).join('; ')}`,
+					);
+				}
+				return parsed.data;
+			});
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
 		throw error;
 	}
+}
+
+async function readBoundedUtf8File(
+	filePath: string,
+	maxBytes: number,
+	label: string,
+): Promise<string> {
+	const stat = await fs.promises.stat(filePath);
+	if (!stat.isFile() || stat.size > maxBytes) {
+		throw new Error(
+			`${label} is not a bounded regular file (max ${maxBytes} bytes)`,
+		);
+	}
+	const text = await fs.promises.readFile(filePath, 'utf8');
+	const bytes = Buffer.byteLength(text, 'utf8');
+	if (bytes > maxBytes) {
+		throw new Error(
+			`${label} exceeds ${maxBytes} bytes after read (got ${bytes})`,
+		);
+	}
+	return text;
 }
 
 async function atomicWrite(filePath: string, content: string): Promise<void> {
@@ -145,12 +131,75 @@ async function atomicWrite(filePath: string, content: string): Promise<void> {
 	}
 }
 
+async function atomicCreate(
+	filePath: string,
+	content: string,
+): Promise<boolean> {
+	await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+	const tempPath = path.join(
+		path.dirname(filePath),
+		`.${path.basename(filePath)}.${randomUUID()}.tmp`,
+	);
+	try {
+		await fs.promises.writeFile(tempPath, content, {
+			encoding: 'utf8',
+			flag: 'wx',
+		});
+		try {
+			await fs.promises.link(tempPath, filePath);
+			return true;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+			throw error;
+		}
+	} finally {
+		await fs.promises.rm(tempPath, { force: true }).catch(() => undefined);
+	}
+}
+
+export const _internals = {
+	atomicWrite,
+	atomicCreate,
+};
+
+function operationFailure(
+	operation: string,
+	relativePath: string,
+	expected: string,
+	error: unknown,
+): string {
+	return failure(
+		`operation ${operation} path "${relativePath}": expected ${expected}, got ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
+	);
+}
+
 function latestFindings(
 	records: readonly PersistedFinding[],
 ): Map<string, PersistedFinding> {
 	const latest = new Map<string, PersistedFinding>();
 	for (const record of records) latest.set(record.finding_id, record);
 	return latest;
+}
+
+function canonicalFindingRecords(
+	records: readonly (
+		| PersistedFinding
+		| z.infer<typeof PrReviewFindingSchema>
+	)[],
+): string {
+	return JSON.stringify(
+		records
+			.map((record) => ({
+				finding_id: record.finding_id,
+				status: record.status,
+				file_line: record.file_line,
+				evidence: record.evidence,
+				next_action: record.next_action,
+				severity: record.severity,
+				category: record.category,
+			}))
+			.sort((left, right) => left.finding_id.localeCompare(right.finding_id)),
+	);
 }
 
 export async function executeWritePrReviewArtifact(
@@ -161,94 +210,243 @@ export async function executeWritePrReviewArtifact(
 	const parsed = WritePrReviewArtifactArgsSchema.safeParse(args);
 	if (!parsed.success) {
 		return failure(
-			`Invalid PR-review artifact: ${parsed.error.issues
-				.map((issue) => `${issue.path.join('.')}: ${issue.message}`)
-				.join('; ')}`,
+			`Invalid PR-review artifact: ${formatPrReviewValidationIssues(
+				parsed.error.issues,
+				args,
+			).join('; ')}`,
 		);
 	}
 	const sessionID = context.sessionID?.trim();
 	if (!sessionID)
-		return failure('PR-review artifact requires an active session');
-	const state = await readPrWorkflowGateState(directory, sessionID);
+		return failure(
+			formatPrReviewRuntimeFieldError(
+				'session_id',
+				'a non-empty active session identifier',
+				context.sessionID,
+			),
+		);
+	let state: Awaited<ReturnType<typeof readPrWorkflowGateState>>;
+	try {
+		state = await readPrWorkflowGateState(directory, sessionID);
+	} catch (error) {
+		return operationFailure(
+			'read',
+			`pr-workflow-gates/${prWorkflowSessionFileStem(sessionID)}.json`,
+			'a bounded valid PR workflow state artifact',
+			error,
+		);
+	}
 	if (state?.mode !== 'PR_REVIEW' || !state.prHeadSha) {
 		return failure(
-			'PR-review artifact requires an active, bound PR_REVIEW gate',
+			formatPrReviewRuntimeFieldError(
+				'workflow.mode',
+				'an active head-bound "PR_REVIEW" workflow',
+				state ? { mode: state.mode, pr_head_sha: state.prHeadSha } : null,
+			),
 		);
 	}
 	if (state.prHeadSha !== parsed.data.pr_head_sha.toLowerCase()) {
 		return failure(
-			`PR-review artifact head mismatch: expected ${state.prHeadSha}, received ${parsed.data.pr_head_sha}`,
+			formatPrReviewRuntimeFieldError(
+				'pr_head_sha',
+				`"${state.prHeadSha}"`,
+				parsed.data.pr_head_sha,
+			),
 		);
 	}
-	if (
-		state.prReviewArtifactRunId &&
-		state.prReviewArtifactRunId !== parsed.data.run_id
-	) {
-		return failure(
-			`PR-review artifacts are already bound to run ${state.prReviewArtifactRunId}`,
+	let resolvedRunId: string;
+	try {
+		resolvedRunId = await resolvePrReviewWriterRunId(
+			directory,
+			sessionID,
+			parsed.data.run_id,
 		);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return message.startsWith('BLOCKED: field ')
+			? failure(message)
+			: operationFailure(
+					'reserve',
+					`pr-review/${parsed.data.run_id ?? '<generated-run-id>'}/run-reservation.json`,
+					'a create-only reservation owned by the active workflow',
+					error,
+				);
 	}
 
 	const relativeFindingsPath = path.join(
 		'pr-review',
-		parsed.data.run_id,
+		resolvedRunId,
 		'findings.jsonl',
 	);
-	const findingsPath = validateSwarmPath(directory, relativeFindingsPath);
-	const existing = await readFindings(findingsPath);
+	let findingsPath: string;
+	try {
+		findingsPath = validateSwarmPath(directory, relativeFindingsPath);
+	} catch (error) {
+		return operationFailure(
+			'resolve',
+			relativeFindingsPath.split(path.sep).join('/'),
+			'a contained path below the project .swarm directory',
+			error,
+		);
+	}
+	let existing: PersistedFinding[];
+	try {
+		existing = await readFindings(findingsPath);
+	} catch (error) {
+		return failure(
+			`operation read path "${relativeFindingsPath.split(path.sep).join('/')}": expected bounded JSONL matching the persisted findings schema, got ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
 
 	if (parsed.data.kind === 'findings') {
 		const findingsInput = parsed.data;
 		const findingIds = findingsInput.records.map((record) => record.finding_id);
-		await assertPrReviewArtifactBoundary(
-			directory,
-			sessionID,
-			findingsInput.run_id,
-			findingsInput.boundary,
-			findingIds,
+		const existingBoundaryRecords = existing.filter(
+			(record) => record.boundary === findingsInput.boundary,
 		);
-		await assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
-			directory,
-			sessionID,
-			findingsInput.boundary,
-			findingsInput.records,
+		const hasExistingBoundaryRecords = existingBoundaryRecords.length > 0;
+		const isExactReplay =
+			hasExistingBoundaryRecords &&
+			canonicalFindingRecords(existingBoundaryRecords) ===
+				canonicalFindingRecords(findingsInput.records);
+		const boundaryCommitted =
+			state.prReviewArtifactRunId === resolvedRunId &&
+			(state.prReviewArtifactBoundaries ?? []).includes(findingsInput.boundary);
+		const existingBoundaryIds = new Set(
+			existingBoundaryRecords.map((record) => record.finding_id),
 		);
+		const requestedFindingIds = new Set(findingIds);
+		const isPostExplorerSupersession =
+			boundaryCommitted &&
+			findingsInput.boundary === 'post_explorer' &&
+			Boolean(state.prReviewTriggerEvalPath) &&
+			existingBoundaryIds.size < requestedFindingIds.size &&
+			[...existingBoundaryIds].every((id) => requestedFindingIds.has(id));
+		const isCommittedReplay = isExactReplay && boundaryCommitted;
+		// An exact replay is idempotent and may skip the boundary revalidation,
+		// but a non-identical write must always re-run it.  In particular, the
+		// base-only post_explorer checkpoint is intentionally superseded by the
+		// full-inventory post_explorer checkpoint after trigger evaluation; the
+		// same boundary name is committed in both writes, so `boundaryCommitted`
+		// alone cannot distinguish a legal refresh from an unsafe rewrite.
+		if (!isCommittedReplay) {
+			try {
+				await assertPrReviewArtifactBoundary(
+					directory,
+					sessionID,
+					resolvedRunId,
+					findingsInput.boundary,
+					findingIds,
+				);
+			} catch (error) {
+				return failure(
+					formatPrReviewRuntimeFieldError(
+						'boundary',
+						`the legal next "${findingsInput.boundary}" checkpoint for run "${resolvedRunId}" with exact inventory [${findingIds.join(', ')}]`,
+						error instanceof Error ? error.message : String(error),
+					),
+				);
+			}
+		}
+		try {
+			await assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
+				directory,
+				sessionID,
+				findingsInput.boundary,
+				findingsInput.records,
+			);
+		} catch (error) {
+			return failure(
+				formatPrReviewRuntimeFieldError(
+					'records',
+					`records exactly matching authoritative ${findingsInput.boundary} verdicts and disposition rules`,
+					error instanceof Error ? error.message : String(error),
+				),
+			);
+		}
+		if (
+			hasExistingBoundaryRecords &&
+			boundaryCommitted &&
+			!isExactReplay &&
+			!isPostExplorerSupersession
+		) {
+			return failure(
+				formatPrReviewRuntimeFieldError(
+					'records',
+					`an exact replay of the already-persisted "${findingsInput.boundary}" boundary`,
+					findingsInput.records,
+				),
+			);
+		}
 		const recordedAt = new Date().toISOString();
-		const appended: PersistedFinding[] = findingsInput.records.map(
-			(record) => ({
-				...record,
-				boundary: findingsInput.boundary,
-				pr_head_sha: state.prHeadSha!,
-				recorded_at: recordedAt,
-			}),
-		);
+		const appended: PersistedFinding[] = isExactReplay
+			? []
+			: findingsInput.records.map((record) => ({
+					...record,
+					boundary: findingsInput.boundary,
+					pr_head_sha: state.prHeadSha!,
+					recorded_at: recordedAt,
+				}));
 		const allRecords = [...existing, ...appended];
-		await atomicWrite(
-			findingsPath,
-			allRecords.map((record) => JSON.stringify(record)).join('\n') +
-				(allRecords.length > 0 ? '\n' : ''),
-		);
+		if (!isExactReplay) {
+			const serializedFindings =
+				allRecords.map((record) => JSON.stringify(record)).join('\n') +
+				(allRecords.length > 0 ? '\n' : '');
+			const serializedBytes = Buffer.byteLength(serializedFindings, 'utf8');
+			if (serializedBytes > PR_REVIEW_FINDINGS_MAX_BYTES) {
+				return failure(
+					formatPrReviewRuntimeFieldError(
+						'records',
+						`a complete findings artifact at most ${PR_REVIEW_FINDINGS_MAX_BYTES} UTF-8 bytes`,
+						`${serializedBytes} bytes`,
+					),
+				);
+			}
+			try {
+				await _internals.atomicWrite(findingsPath, serializedFindings);
+			} catch (error) {
+				return operationFailure(
+					'write',
+					relativeFindingsPath.split(path.sep).join('/'),
+					'an atomic findings checkpoint write',
+					error,
+				);
+			}
+		}
 		const latest = latestFindings(allRecords);
 		const handoffRequired = [...latest.values()].some(
 			(record) =>
 				record.status === 'CONFIRMED' &&
 				record.next_action === 'handoff_to_feedback',
 		);
-		await markPrReviewArtifactBoundary(
-			directory,
-			sessionID,
-			findingsInput.run_id,
-			findingsInput.boundary,
-			relativeFindingsPath.split(path.sep).join('/'),
-			findingIds,
-			handoffRequired,
-		);
+		if (!isCommittedReplay) {
+			try {
+				await markPrReviewArtifactBoundary(
+					directory,
+					sessionID,
+					resolvedRunId,
+					findingsInput.boundary,
+					relativeFindingsPath.split(path.sep).join('/'),
+					findingIds,
+					handoffRequired,
+				);
+			} catch (error) {
+				return operationFailure(
+					'update',
+					`pr-workflow-gates/${prWorkflowSessionFileStem(sessionID)}.json`,
+					`a durable ${findingsInput.boundary} boundary receipt`,
+					error,
+				);
+			}
+		}
 		return JSON.stringify(
 			{
 				success: true,
+				run_id: resolvedRunId,
 				path: relativeFindingsPath.split(path.sep).join('/'),
 				boundary: findingsInput.boundary,
 				appended: appended.length,
+				replayed: isExactReplay,
 				handoff_required: handoffRequired,
 			},
 			null,
@@ -271,40 +469,146 @@ export async function executeWritePrReviewArtifact(
 		JSON.stringify(actionableIds) !== JSON.stringify(requestedIds)
 	) {
 		return failure(
-			`handoff finding_ids must exactly match actionable findings: ${actionableIds.join(', ') || '(none)'}`,
+			`field handoff.finding_ids: expected authoritative actionable set [${actionableIds.join(', ') || '(none)'}], got requested [${requestedIds.join(', ') || '(none)'}]`,
 		);
 	}
 	const relativeHandoffPath = path.join(
 		'pr-review',
-		parsed.data.run_id,
+		resolvedRunId,
 		'feedback-handoff.json',
 	);
-	const handoffPath = validateSwarmPath(directory, relativeHandoffPath);
-	await atomicWrite(
-		handoffPath,
-		`${JSON.stringify(
-			{
-				schema_version: 1,
-				run_id: parsed.data.run_id,
-				pr_head_sha: state.prHeadSha,
-				created_at: new Date().toISOString(),
-				...parsed.data.handoff,
-			},
-			null,
-			2,
-		)}\n`,
-	);
-	await markPrReviewHandoffComplete(
-		directory,
-		sessionID,
-		parsed.data.run_id,
-		relativeHandoffPath.split(path.sep).join('/'),
-	);
+	let handoffPath: string;
+	try {
+		handoffPath = validateSwarmPath(directory, relativeHandoffPath);
+	} catch (error) {
+		return operationFailure(
+			'resolve',
+			relativeHandoffPath.split(path.sep).join('/'),
+			'a contained path below the project .swarm directory',
+			error,
+		);
+	}
+	const handoffRecord = {
+		schema_version: 1 as const,
+		run_id: resolvedRunId,
+		pr_head_sha: state.prHeadSha,
+		created_at: new Date().toISOString(),
+		...parsed.data.handoff,
+	};
+	const comparableHandoff = (record: PersistedHandoff) => ({
+		schema_version: record.schema_version,
+		run_id: record.run_id,
+		pr_head_sha: record.pr_head_sha,
+		pr_url: record.pr_url,
+		finding_ids: record.finding_ids,
+		summary: record.summary,
+		provenance: record.provenance,
+	});
+	const handoffsMatch = (existing: PersistedHandoff): boolean =>
+		JSON.stringify(comparableHandoff(existing)) ===
+		JSON.stringify(comparableHandoff(handoffRecord));
+	const readPersistedHandoff = async (): Promise<PersistedHandoff> => {
+		const raw = await readBoundedUtf8File(
+			handoffPath,
+			PR_REVIEW_HANDOFF_MAX_BYTES,
+			'handoff artifact',
+		);
+		let decoded: unknown;
+		try {
+			decoded = JSON.parse(raw);
+		} catch (error) {
+			throw new Error(
+				`invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		const validated = PersistedHandoffSchema.safeParse(decoded);
+		if (!validated.success) {
+			throw new Error(
+				`schema mismatch: ${formatPrReviewValidationIssues(validated.error.issues, decoded).join('; ')}`,
+			);
+		}
+		return validated.data;
+	};
+	let existingHandoff: PersistedHandoff | null = null;
+	try {
+		existingHandoff = await readPersistedHandoff();
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+			return failure(
+				`operation read path "${relativeHandoffPath.split(path.sep).join('/')}": expected bounded JSON matching the persisted handoff schema, got ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+	if (existingHandoff) {
+		if (!handoffsMatch(existingHandoff)) {
+			return failure(
+				'field handoff: expected an exact retry of the persisted handoff, got conflicting handoff content',
+			);
+		}
+	} else {
+		const serializedHandoff = `${JSON.stringify(handoffRecord, null, 2)}\n`;
+		const serializedHandoffBytes = Buffer.byteLength(serializedHandoff, 'utf8');
+		if (serializedHandoffBytes > PR_REVIEW_HANDOFF_MAX_BYTES) {
+			return failure(
+				formatPrReviewRuntimeFieldError(
+					'handoff',
+					`a persisted handoff artifact at most ${PR_REVIEW_HANDOFF_MAX_BYTES} UTF-8 bytes`,
+					`${serializedHandoffBytes} bytes`,
+				),
+			);
+		}
+		let created: boolean;
+		try {
+			created = await _internals.atomicCreate(handoffPath, serializedHandoff);
+		} catch (error) {
+			return operationFailure(
+				'create',
+				relativeHandoffPath.split(path.sep).join('/'),
+				'an atomic create-only handoff artifact',
+				error,
+			);
+		}
+		if (!created) {
+			let raced: PersistedHandoff;
+			try {
+				raced = await readPersistedHandoff();
+			} catch (error) {
+				return failure(
+					`operation read path "${relativeHandoffPath.split(path.sep).join('/')}": expected the concurrently persisted handoff schema, got ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+			if (!handoffsMatch(raced)) {
+				return failure(
+					'field handoff: expected an exact retry of the persisted handoff, got conflicting concurrent handoff content',
+				);
+			}
+		}
+	}
+	let alreadyOffered: boolean;
+	try {
+		const marked = await markPrReviewHandoffComplete(
+			directory,
+			sessionID,
+			resolvedRunId,
+			relativeHandoffPath.split(path.sep).join('/'),
+		);
+		alreadyOffered = marked.alreadyOffered;
+	} catch (error) {
+		return operationFailure(
+			'update',
+			`pr-review/${resolvedRunId}/feedback-consent.json and pr-workflow-gates/${prWorkflowSessionFileStem(sessionID)}.json`,
+			'a matching durable consent offer and handoff receipt',
+			error,
+		);
+	}
 	return JSON.stringify(
 		{
 			success: true,
+			run_id: resolvedRunId,
 			path: relativeHandoffPath.split(path.sep).join('/'),
 			finding_count: actionableIds.length,
+			already_offered: alreadyOffered,
+			confirmation_command: `/swarm pr-feedback ${parsed.data.handoff.pr_url} continue from .swarm/${relativeHandoffPath.split(path.sep).join('/')}`,
 		},
 		null,
 		2,
@@ -318,7 +622,7 @@ export const write_pr_review_artifact: ReturnType<typeof createSwarmTool> =
 			'Persist schema-validated PR-review findings checkpoints and exact actionable feedback handoffs under the active run.',
 		args: {
 			kind: z.enum(['findings', 'handoff']),
-			run_id: RunIdSchema,
+			run_id: PrReviewRunIdSchema.optional(),
 			pr_head_sha: z
 				.string()
 				.trim()
@@ -326,8 +630,8 @@ export const write_pr_review_artifact: ReturnType<typeof createSwarmTool> =
 			boundary: z
 				.enum(['post_explorer', 'post_reviewer', 'post_critic'])
 				.optional(),
-			records: z.array(FindingSchema).min(1).max(1000).optional(),
-			handoff: HandoffSchema.optional(),
+			records: z.array(PrReviewFindingSchema).min(1).max(1000).optional(),
+			handoff: PrReviewHandoffSchema.optional(),
 		},
 		execute: executeWritePrReviewArtifact,
 	});

@@ -35,7 +35,7 @@ path substituted for `<handoff_artifact_path>`:
 ```
 
 `<run_id>` is a stable identifier for this review run, such as
-`pr-<number>-<YYYYMMDDHHMMSS>` or the existing review artifact run ID when one
+`pr-review-<YYYYMMDDHHMMSSmmm>` or the existing review artifact run ID when one
 was already created. Under Profile A, the exact command is parsed mechanically:
 the controller validates the terminal review, the bounded handoff artifact, and
 its provenance before atomically replacing the review gate with an unbound
@@ -1443,7 +1443,7 @@ For each candidate, the reviewer must determine:
 Reviewer output format:
 
 ```text
-[REVIEWED] | candidate_id | classification | evidence_type | final_severity | introduced_by_pr: YES/NO/UNKNOWN | file:line | rationale | falsification_probe | reviewer_id
+[REVIEWED] | item_id | classification | evidence_type | severity | introduced_by_pr | file:line | rationale | probe | reviewer_notes
 ```
 
 For the mechanically derived `CLEAN-REVIEW` sentinel, use the same exact row
@@ -1535,14 +1535,14 @@ The critic must challenge:
 Critic output format:
 
 ```text
-[CRITIC] | finding_id | UPHELD/DOWNGRADED/DISPROVED/NEEDS_MORE_EVIDENCE | final_severity | reason | required_report_change
+[CRITIC] | item_id | status | severity | rationale | required_change
 ```
 
 ## Verdict row contract
 
 The `[CRITIC]` row in the format above is **mandatory contract**, not advisory output. A critic response that does not end with that exact row format is treated as a planning preamble, not a verdict, and must be re-dispatched. Do not proceed past Phase 8 join barrier until each dispatched critic lane has produced a parseable `[CRITIC]` row.
 
-**Re-dispatch trigger:** when a critic lane response is missing the verdict row, the orchestrator must automatically re-dispatch that lane with the explicit instruction: "Your final line MUST be exactly the Phase 8 contract row: `[CRITIC] | finding_id | UPHELD/DOWNGRADED/DISPROVED/NEEDS_MORE_EVIDENCE | final_severity | reason | required_report_change`. A response without that exact row will be treated as a planning message and re-dispatched." Do not synthesize findings from the planning preamble; only from the re-dispatched verdict.
+**Re-dispatch trigger:** when a critic lane response is missing the verdict row, the orchestrator must automatically re-dispatch that lane with the explicit instruction: "Your final line MUST be exactly the Phase 8 contract row: `[CRITIC] | item_id | status | severity | rationale | required_change`. Use only enum values from `references/findings-persistence-contract.md`. A response without that exact row will be treated as a planning message and re-dispatched." Do not synthesize findings from the planning preamble; only from the re-dispatched verdict.
 
 `NEEDS_MORE_EVIDENCE` is deliberately non-terminal and never satisfies critic
 settlement. Re-dispatch a narrower critic/probe lane or report the dimension
@@ -1913,6 +1913,8 @@ mix the two):
 ```text
 /swarm pr-feedback <PR_URL> continue from <handoff_artifact_path>
 ```
+
+Writing the validated handoff durably records one consent offer bound to the exact workflow instance, handoff digest, PR head/URL, and actionable finding set; the first exact continuation confirms it and transitions modes. Internal creation never auto-routes, and malformed, non-actionable, or detached records cannot start PR_FEEDBACK.
 
 ---
 

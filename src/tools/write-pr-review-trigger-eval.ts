@@ -5,8 +5,15 @@ import { z } from 'zod';
 import { readLaneOutput } from '../background/lane-output-store.js';
 import { findByBatchId } from '../background/pending-delegations.js';
 import {
+	formatPrReviewRuntimeFieldError,
+	formatPrReviewValidationIssues,
+	PrReviewRunIdSchema,
+} from '../background/pr-review-contract.js';
+import {
 	buildPrReviewTriggerReceiptV2,
+	PR_REVIEW_TRIGGER_RECEIPT_MAX_BYTES,
 	PrReviewWriterInputRowSchema,
+	parsePrReviewTriggerReceipt,
 	type TriggerCoverageDegradation,
 	validatePrReviewInlineTriggerLedger,
 	validatePrReviewPersistedInputLedger,
@@ -24,6 +31,7 @@ import {
 	PR_REVIEW_MICRO_LANE_FLOORS,
 	prReviewDiscoveryArtifactCoversLane,
 	readPrWorkflowGateState,
+	resolvePrReviewWriterRunId,
 } from '../hooks/pr-workflow-gate.js';
 import { validateSwarmPath } from '../hooks/utils';
 import { criticalWarn } from '../utils/logger.js';
@@ -36,7 +44,73 @@ export const _internals = {
 	resolvePrWorkflowRevisionDigestAsync,
 	resolveMergeBase: resolveExactMergeBase,
 	resolveMergeBaseAsync: resolveExactMergeBaseAsync,
+	markPrReviewTriggerEvaluationComplete,
 };
+
+type TriggerReceiptV2 = ReturnType<typeof buildPrReviewTriggerReceiptV2>;
+
+function comparableTriggerReceipt(receipt: TriggerReceiptV2): string {
+	return JSON.stringify({
+		...receipt,
+		evaluated_at: undefined,
+		base_verification: undefined,
+	});
+}
+
+async function readBoundedTriggerReceipt(
+	destination: string,
+): Promise<TriggerReceiptV2> {
+	const stat = await fs.promises.stat(destination);
+	if (!stat.isFile() || stat.size > PR_REVIEW_TRIGGER_RECEIPT_MAX_BYTES) {
+		throw new Error(
+			`trigger evaluation receipt is not a bounded regular file (max ${PR_REVIEW_TRIGGER_RECEIPT_MAX_BYTES} bytes)`,
+		);
+	}
+	const raw = await fs.promises.readFile(destination, 'utf8');
+	const bytes = Buffer.byteLength(raw, 'utf8');
+	if (bytes > PR_REVIEW_TRIGGER_RECEIPT_MAX_BYTES) {
+		throw new Error(
+			`trigger evaluation receipt exceeds ${PR_REVIEW_TRIGGER_RECEIPT_MAX_BYTES} bytes after read (got ${bytes})`,
+		);
+	}
+	let decoded: unknown;
+	try {
+		decoded = JSON.parse(raw);
+	} catch (error) {
+		throw new Error(
+			`trigger evaluation receipt is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	parsePrReviewTriggerReceipt(decoded);
+	if ((decoded as { schema_version?: unknown }).schema_version !== 2) {
+		throw new Error('trigger evaluation receipt must use schema_version 2');
+	}
+	return decoded as TriggerReceiptV2;
+}
+
+async function createTriggerReceipt(
+	destination: string,
+	content: string,
+): Promise<boolean> {
+	const parent = path.dirname(destination);
+	const tempPath = path.join(parent, `.trigger-eval.${randomUUID()}.tmp`);
+	await fs.promises.mkdir(parent, { recursive: true });
+	try {
+		await fs.promises.writeFile(tempPath, content, {
+			encoding: 'utf8',
+			flag: 'wx',
+		});
+		try {
+			await fs.promises.link(tempPath, destination);
+			return true;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false;
+			throw error;
+		}
+	} finally {
+		await fs.promises.rm(tempPath, { force: true }).catch(() => undefined);
+	}
+}
 
 /**
  * Production uses the non-blocking, chunked digest implementation; the three
@@ -122,12 +196,7 @@ async function resolveReviewMergeBase(
 
 const WritePrReviewTriggerEvalArgsSchema = z
 	.object({
-		run_id: z
-			.string()
-			.regex(
-				/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/,
-				'run_id must be a safe relative identifier',
-			),
+		run_id: PrReviewRunIdSchema.optional(),
 		pr_head_sha: z
 			.string()
 			.trim()
@@ -173,9 +242,10 @@ export async function executeWritePrReviewTriggerEval(
 	const parsed = WritePrReviewTriggerEvalArgsSchema.safeParse(args);
 	if (!parsed.success) {
 		return failure(
-			`Invalid trigger evaluation: ${parsed.error.issues
-				.map((issue) => `${issue.path.join('.')}: ${issue.message}`)
-				.join('; ')}`,
+			`Invalid trigger evaluation: ${formatPrReviewValidationIssues(
+				parsed.error.issues,
+				args,
+			).join('; ')}`,
 		);
 	}
 
@@ -198,26 +268,11 @@ export async function executeWritePrReviewTriggerEval(
 	}
 	if (gateState.prHeadSha !== parsed.data.pr_head_sha) {
 		return failure(
-			`PR_REVIEW trigger evaluation head mismatch: expected ${gateState.prHeadSha}, received ${parsed.data.pr_head_sha}`,
-		);
-	}
-	// Fail fast on a run_id that disagrees with an already-bound run, before the
-	// expensive classification/provenance validation. Mirrors the findings writer
-	// pre-check (`write-pr-review-artifact.ts`) and closes issue #2124.
-	if (
-		gateState.prReviewArtifactRunId &&
-		gateState.prReviewArtifactRunId !== parsed.data.run_id
-	) {
-		return failure(
-			`PR_REVIEW trigger evaluation run_id must match the findings artifact run "${gateState.prReviewArtifactRunId}"`,
-		);
-	}
-	if (
-		gateState.prReviewTriggerEvalRunId &&
-		gateState.prReviewTriggerEvalRunId !== parsed.data.run_id
-	) {
-		return failure(
-			`PR_REVIEW trigger evaluation is already bound to run "${gateState.prReviewTriggerEvalRunId}"`,
+			formatPrReviewRuntimeFieldError(
+				'pr_head_sha',
+				`"${gateState.prHeadSha}"`,
+				parsed.data.pr_head_sha,
+			),
 		);
 	}
 	try {
@@ -532,8 +587,20 @@ export async function executeWritePrReviewTriggerEval(
 			} requires at least ${microFloor} dispatched micro lane(s) across the attestation; the ledger attributes ${matchedCount} matched families to only ${dispatchedMicroLaneCount}`,
 		);
 	}
-	const artifact = buildPrReviewTriggerReceiptV2({
-		run_id: parsed.data.run_id,
+	// Reservation is the first durable mutation. Keep every earlier validation
+	// failure retryable without consuming a run directory or state binding.
+	let resolvedRunId: string;
+	try {
+		resolvedRunId = await resolvePrReviewWriterRunId(
+			directory,
+			sessionID,
+			parsed.data.run_id,
+		);
+	} catch (error) {
+		return failure(error instanceof Error ? error.message : String(error));
+	}
+	let artifact = buildPrReviewTriggerReceiptV2({
+		run_id: resolvedRunId,
 		pr_head_sha: parsed.data.pr_head_sha,
 		base_ref: parsed.data.base_ref,
 		base_sha: parsed.data.base_sha,
@@ -546,7 +613,7 @@ export async function executeWritePrReviewTriggerEval(
 
 	const relativePath = path.join(
 		'pr-review',
-		parsed.data.run_id,
+		resolvedRunId,
 		'trigger-eval.json',
 	);
 	let destination: string;
@@ -555,50 +622,68 @@ export async function executeWritePrReviewTriggerEval(
 	} catch (error) {
 		return failure(error instanceof Error ? error.message : String(error));
 	}
-	// The receipt is a tamper-evident coverage proof consumed once per run. A
-	// repeat write for the same run_id must NOT silently replace the prior
-	// receipt: `fs.rename` clobbers an existing destination, so refuse an existing
-	// destination before writing. This guard closes the single-session retry
-	// threat (#2124's scope): tool calls within a session are serialized, so the
-	// check-then-rename has no intra-session race. A residual cross-session
-	// TOCTOU remains (two sessions writing the same path concurrently) — that is
-	// out of scope and is also bounded by the per-run binding above. Recovery is
-	// `abort_pr_workflow` (see "Aborting an unrecoverable review" in the skill).
-	if (fs.existsSync(destination)) {
-		return failure(
-			`PR_REVIEW trigger evaluation receipt already exists for run "${parsed.data.run_id}" and cannot be overwritten; abort the workflow with abort_pr_workflow to restart`,
-		);
-	}
-
-	const parent = path.dirname(destination);
-	const tempPath = path.join(parent, `.trigger-eval.${randomUUID()}.tmp`);
+	let replayed = false;
 	try {
-		await fs.promises.mkdir(parent, { recursive: true });
-		await fs.promises.writeFile(
-			tempPath,
-			`${JSON.stringify(artifact, null, 2)}\n`,
-			{ encoding: 'utf-8', flag: 'wx' },
-		);
-		await fs.promises.rename(tempPath, destination);
+		let existing: TriggerReceiptV2 | null = null;
+		try {
+			existing = await readBoundedTriggerReceipt(destination);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+		}
+		if (existing) {
+			if (
+				comparableTriggerReceipt(existing) !==
+				comparableTriggerReceipt(artifact)
+			) {
+				return failure(
+					`PR_REVIEW trigger evaluation receipt already exists for run "${resolvedRunId}" with conflicting content`,
+				);
+			}
+			artifact = existing;
+			replayed = true;
+		} else {
+			const created = await createTriggerReceipt(
+				destination,
+				`${JSON.stringify(artifact, null, 2)}\n`,
+			);
+			if (!created) {
+				const raced = await readBoundedTriggerReceipt(destination);
+				if (
+					comparableTriggerReceipt(raced) !== comparableTriggerReceipt(artifact)
+				) {
+					return failure(
+						`PR_REVIEW trigger evaluation receipt concurrently appeared for run "${resolvedRunId}" with conflicting content`,
+					);
+				}
+				artifact = raced;
+				replayed = true;
+			}
+		}
 	} catch (error) {
 		return failure(
-			`Failed to persist trigger evaluation: ${
+			`Failed to read or persist trigger evaluation at "${relativePath.split(path.sep).join('/')}": ${
 				error instanceof Error ? error.message : String(error)
 			}`,
 		);
-	} finally {
-		await fs.promises.rm(tempPath, { force: true }).catch(() => undefined);
 	}
-	await markPrReviewTriggerEvaluationComplete(
-		directory,
-		sessionID,
-		parsed.data.run_id,
-		relativePath.split(path.sep).join('/'),
-	);
+	try {
+		await _internals.markPrReviewTriggerEvaluationComplete(
+			directory,
+			sessionID,
+			resolvedRunId,
+			relativePath.split(path.sep).join('/'),
+		);
+	} catch (error) {
+		return failure(
+			`Failed to persist trigger evaluation gate receipt for "${relativePath.split(path.sep).join('/')}": ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
 
 	return JSON.stringify(
 		{
 			success: true,
+			replayed,
+			run_id: resolvedRunId,
 			path: relativePath.split(path.sep).join('/'),
 			trigger_count: artifact.trigger_count,
 			matched_count: artifact.matched_count,

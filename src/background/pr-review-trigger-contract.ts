@@ -82,6 +82,7 @@ export const PR_REVIEW_TRIGGER_DEFINITIONS = [
 export const PR_REVIEW_REQUIRED_TRIGGER_IDS = PR_REVIEW_TRIGGER_DEFINITIONS.map(
 	(definition) => definition.id,
 );
+export const PR_REVIEW_TRIGGER_RECEIPT_MAX_BYTES = 2 * 1024 * 1024;
 
 export type PrReviewTriggerId = (typeof PR_REVIEW_REQUIRED_TRIGGER_IDS)[number];
 

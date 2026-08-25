@@ -71,6 +71,52 @@ function persistExplorerCheckpoint(runId: string): Promise<string> {
 }
 
 describe('write_pr_review_artifact validator errors (issue #2277)', () => {
+	test('schema rejections describe each offending field with legal contract and actual value', async () => {
+		await establishPrReviewPrerequisites(directory, 'schema-errors');
+		const raw = await writePrReviewFindings(
+			directory,
+			'schema-errors',
+			'post_explorer',
+			[
+				{
+					finding_id: 'C-0',
+					status: 'PENDING',
+					file_line: 'src/index.ts:1',
+					evidence: 'ok',
+					next_action: 'route_to_reviewer',
+					severity: 'HIGH',
+					extra_field: 'surplus',
+				},
+			] as unknown as Parameters<typeof writePrReviewFindings>[3],
+		);
+		const parsed = JSON.parse(raw) as { message?: string };
+		expect(parsed.message).toContain(
+			'field records.0.extra_field: expected no unknown key, got "surplus"',
+		);
+	});
+
+	test('schema rejections render omitted enum fields as omitted instead of generic Zod text', async () => {
+		await establishPrReviewPrerequisites(directory, 'missing-status');
+		const raw = await writePrReviewFindings(
+			directory,
+			'missing-status',
+			'post_explorer',
+			[
+				{
+					finding_id: 'C-0',
+					file_line: 'src/index.ts:1',
+					evidence: 'ok',
+					next_action: 'route_to_reviewer',
+					severity: 'HIGH',
+				},
+			] as unknown as Parameters<typeof writePrReviewFindings>[3],
+		);
+		const parsed = JSON.parse(raw) as { message?: string };
+		expect(parsed.message).toContain(
+			'field records.0.status: expected "PENDING" | "CONFIRMED" | "DISPROVED" | "PRE_EXISTING", got (omitted)',
+		);
+	});
+
 	test('GOLDEN: every violation across every record is reported in one rejection with expected-vs-actual', async () => {
 		await establishPrReviewPrerequisites(directory, 'golden-run');
 		await expect(persistExplorerCheckpoint('golden-run')).resolves.toContain(
@@ -97,7 +143,9 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 				artifactRecord('C-5', 'CONFIRMED', 'route_to_critic', 'HIGH'),
 			]),
 		);
-		expect(message).toBe(
+		expect(message.startsWith('field records: expected')).toBe(true);
+		expect(message).toContain(', got "BLOCKED:');
+		expect(message).toContain(
 			[
 				'BLOCKED: PR_REVIEW post_reviewer artifact invalid — 5 violation(s):',
 				'  C-0: status expected "DISPROVED", got "CONFIRMED"',
@@ -121,7 +169,7 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 				artifactRecord('C-5', 'PENDING', 'route_to_reviewer', 'HIGH'),
 			]),
 		);
-		expect(message).toBe(
+		expect(message).toContain(
 			[
 				'BLOCKED: PR_REVIEW post_explorer artifact invalid — 4 violation(s):',
 				'  C-0: status expected "PENDING", got "CONFIRMED"',
@@ -160,7 +208,7 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 				artifactRecord('C-5', 'DISPROVED', 'report', 'HIGH'),
 			]),
 		);
-		expect(message).toBe(
+		expect(message).toContain(
 			[
 				'BLOCKED: PR_REVIEW post_reviewer artifact invalid — 5 violation(s):',
 				'  C-0: next_action expected "route_to_critic", got "report"',
@@ -196,7 +244,7 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 					.map((id) => artifactRecord(id, 'CONFIRMED', 'report', 'LOW')),
 			]),
 		);
-		expect(message).toBe(
+		expect(message).toContain(
 			[
 				'BLOCKED: PR_REVIEW post_reviewer artifact invalid — 2 violation(s):',
 				'  C-0: status expected "PENDING", got "CONFIRMED"',
@@ -306,7 +354,7 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 				artifactRecord('C-5', 'CONFIRMED', 'report', 'LOW'),
 			]),
 		);
-		expect(reviewerSeverityMessage).toBe(
+		expect(reviewerSeverityMessage).toContain(
 			[
 				'BLOCKED: PR_REVIEW post_critic artifact invalid — 1 violation(s):',
 				'  C-1: severity expected "LOW", got "MEDIUM"',
@@ -324,7 +372,7 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 				artifactRecord('C-5', 'CONFIRMED', 'report', 'LOW'),
 			]),
 		);
-		expect(omittedMessage).toBe(
+		expect(omittedMessage).toContain(
 			[
 				'BLOCKED: PR_REVIEW post_critic artifact invalid — 1 violation(s):',
 				'  C-1: severity expected "LOW", got (omitted)',
@@ -384,7 +432,7 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 				artifactRecord('C-5', 'CONFIRMED', 'report', 'LOW'),
 			]),
 		);
-		expect(message).toBe(
+		expect(message).toContain(
 			[
 				'BLOCKED: PR_REVIEW post_critic artifact invalid — 8 violation(s):',
 				'  C-0: status expected "DISPROVED", got "CONFIRMED"',

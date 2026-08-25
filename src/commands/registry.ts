@@ -350,10 +350,15 @@ async function handlePrFeedbackCommandWithTransition(
 		return handlePrFeedbackCommand(ctx.directory, ctx.args);
 	}
 	if (parsed.continuation) {
+		const exactCommand = parsed.prUrl
+			? `/swarm pr-feedback ${parsed.prUrl} continue from ${parsed.continuation.handoffPath}`
+			: `/swarm pr-feedback continue from ${parsed.continuation.handoffPath}`;
 		await transitionPrReviewToFeedback(ctx.directory, ctx.sessionID, {
 			runId: parsed.continuation.runId,
 			handoffPath: parsed.continuation.handoffPath,
 			prUrl: parsed.prUrl,
+			exactCommand,
+			confirmedByUser: true,
 		});
 	} else {
 		await activatePrWorkflow(ctx.directory, ctx.sessionID, 'PR_FEEDBACK', {

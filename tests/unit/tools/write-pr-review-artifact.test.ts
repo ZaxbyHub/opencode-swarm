@@ -92,32 +92,36 @@ describe('write_pr_review_artifact', () => {
 			'coverage-order',
 			'findings.jsonl',
 		);
-		await expect(
-			executeWritePrReviewArtifact(
-				{
-					kind: 'findings',
-					run_id: 'coverage-order',
-					pr_head_sha: HEAD_SHA,
-					boundary: 'post_explorer',
-					records: explorerRecords.slice(0, -1),
-				},
-				directory,
-				{ sessionID: SESSION_ID },
+		expect(
+			await rejectionMessage(
+				executeWritePrReviewArtifact(
+					{
+						kind: 'findings',
+						run_id: 'coverage-order',
+						pr_head_sha: HEAD_SHA,
+						boundary: 'post_explorer',
+						records: explorerRecords.slice(0, -1),
+					},
+					directory,
+					{ sessionID: SESSION_ID },
+				),
 			),
-		).rejects.toThrow(/exactly cover/i);
-		await expect(
-			executeWritePrReviewArtifact(
-				{
-					kind: 'findings',
-					run_id: 'coverage-order',
-					pr_head_sha: HEAD_SHA,
-					boundary: 'post_reviewer',
-					records: explorerRecords,
-				},
-				directory,
-				{ sessionID: SESSION_ID },
+		).toMatch(/exactly cover/i);
+		expect(
+			await rejectionMessage(
+				executeWritePrReviewArtifact(
+					{
+						kind: 'findings',
+						run_id: 'coverage-order',
+						pr_head_sha: HEAD_SHA,
+						boundary: 'post_reviewer',
+						records: explorerRecords,
+					},
+					directory,
+					{ sessionID: SESSION_ID },
+				),
 			),
-		).rejects.toThrow(/prior post_explorer checkpoint/i);
+		).toMatch(/prior post_explorer checkpoint/i);
 		await expect(fs.stat(findingsPath)).rejects.toThrow();
 		await expect(
 			executeWritePrReviewArtifact(
@@ -135,19 +139,21 @@ describe('write_pr_review_artifact', () => {
 		expect(await fs.readFile(findingsPath, 'utf8')).toContain(
 			'"severity":"INFO"',
 		);
-		await expect(
-			executeWritePrReviewArtifact(
-				{
-					kind: 'findings',
-					run_id: 'coverage-order',
-					pr_head_sha: HEAD_SHA,
-					boundary: 'post_reviewer',
-					records: explorerRecords,
-				},
-				directory,
-				{ sessionID: SESSION_ID },
+		expect(
+			await rejectionMessage(
+				executeWritePrReviewArtifact(
+					{
+						kind: 'findings',
+						run_id: 'coverage-order',
+						pr_head_sha: HEAD_SHA,
+						boundary: 'post_reviewer',
+						records: explorerRecords,
+					},
+					directory,
+					{ sessionID: SESSION_ID },
+				),
 			),
-		).rejects.toThrow(/reviewer/i);
+		).toMatch(/reviewer/i);
 	});
 
 	test('ARTIFACT-VERDICT regression: persists only reviewer and critic-authoritative dispositions', async () => {
@@ -270,7 +276,7 @@ describe('write_pr_review_artifact', () => {
 			),
 			// All violations are reported at once with expected-vs-actual (issue #2277).
 		);
-		expect(reviewerOverrideMessage).toBe(
+		expect(reviewerOverrideMessage).toContain(
 			[
 				'BLOCKED: PR_REVIEW post_reviewer artifact invalid — 10 violation(s):',
 				'  C-1: status expected "CONFIRMED", got "DISPROVED"',
@@ -285,25 +291,25 @@ describe('write_pr_review_artifact', () => {
 				'  C-5: next_action expected "route_to_critic", got "suppress_with_reason"',
 			].join('\n'),
 		);
-		await expect(
-			executeWritePrReviewArtifact(
-				{
-					kind: 'findings',
-					run_id: 'review-boundaries',
-					pr_head_sha: HEAD_SHA,
-					boundary: 'post_reviewer',
-					records: reviewerRecords.map((record, index) =>
-						index === 0
-							? { ...record, next_action: 'report' as const }
-							: record,
-					),
-				},
-				directory,
-				{ sessionID: SESSION_ID },
+		expect(
+			await rejectionMessage(
+				executeWritePrReviewArtifact(
+					{
+						kind: 'findings',
+						run_id: 'review-boundaries',
+						pr_head_sha: HEAD_SHA,
+						boundary: 'post_reviewer',
+						records: reviewerRecords.map((record, index) =>
+							index === 0
+								? { ...record, next_action: 'report' as const }
+								: record,
+						),
+					},
+					directory,
+					{ sessionID: SESSION_ID },
+				),
 			),
-		).rejects.toThrow(
-			/C-0: next_action expected "suppress_with_reason", got "report"/,
-		);
+		).toMatch(/C-0: next_action expected "suppress_with_reason", got "report"/);
 
 		await expect(
 			executeWritePrReviewArtifact(
@@ -335,7 +341,7 @@ describe('write_pr_review_artifact', () => {
 				{ sessionID: SESSION_ID },
 			),
 		);
-		expect(criticOverrideMessage).toBe(
+		expect(criticOverrideMessage).toContain(
 			[
 				'BLOCKED: PR_REVIEW post_critic artifact invalid — 10 violation(s):',
 				'  C-1: status expected "CONFIRMED", got "DISPROVED"',

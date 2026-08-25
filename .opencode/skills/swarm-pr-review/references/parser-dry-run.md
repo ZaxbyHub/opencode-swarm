@@ -235,7 +235,7 @@ Candidates (Chunk A — src/utils/):
 - C-001 | HIGH | null-safety | src/utils/cache.ts:142 | Uncached getter may return undefined on cold start
 
 For each candidate, return:
-[REVIEWED] | candidate_id | CONFIRMED/DISPROVED/UNVERIFIED/PRE_EXISTING | evidence_type | final_severity | introduced_by_pr | file:line | rationale | falsification_probe | reviewer_id
+[REVIEWED] | item_id | classification | evidence_type | severity | introduced_by_pr | file:line | rationale | probe | reviewer_notes
 
 You must check caller context, reachability, schema/middleware/framework mitigations, state-machine constraints, test coverage, PR-introducedness, and severity.
 
@@ -252,4 +252,3 @@ IMPORTANT: If a finding claims behavior is "new" or "introduced by the PR", you 
   is split before dispatch.
 - The `invocation_envelope` in the parser response provides audit provenance
   for every extracted candidate.
-
