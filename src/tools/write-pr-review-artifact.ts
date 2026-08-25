@@ -312,8 +312,24 @@ export async function executeWritePrReviewArtifact(
 		const boundaryCommitted =
 			state.prReviewArtifactRunId === resolvedRunId &&
 			(state.prReviewArtifactBoundaries ?? []).includes(findingsInput.boundary);
+		const existingBoundaryIds = new Set(
+			existingBoundaryRecords.map((record) => record.finding_id),
+		);
+		const requestedFindingIds = new Set(findingIds);
+		const isPostExplorerSupersession =
+			boundaryCommitted &&
+			findingsInput.boundary === 'post_explorer' &&
+			Boolean(state.prReviewTriggerEvalPath) &&
+			existingBoundaryIds.size < requestedFindingIds.size &&
+			[...existingBoundaryIds].every((id) => requestedFindingIds.has(id));
 		const isCommittedReplay = isExactReplay && boundaryCommitted;
-		if (!boundaryCommitted) {
+		// An exact replay is idempotent and may skip the boundary revalidation,
+		// but a non-identical write must always re-run it.  In particular, the
+		// base-only post_explorer checkpoint is intentionally superseded by the
+		// full-inventory post_explorer checkpoint after trigger evaluation; the
+		// same boundary name is committed in both writes, so `boundaryCommitted`
+		// alone cannot distinguish a legal refresh from an unsafe rewrite.
+		if (!isCommittedReplay) {
 			try {
 				await assertPrReviewArtifactBoundary(
 					directory,
@@ -348,7 +364,12 @@ export async function executeWritePrReviewArtifact(
 				),
 			);
 		}
-		if (hasExistingBoundaryRecords && boundaryCommitted && !isExactReplay) {
+		if (
+			hasExistingBoundaryRecords &&
+			boundaryCommitted &&
+			!isExactReplay &&
+			!isPostExplorerSupersession
+		) {
 			return failure(
 				formatPrReviewRuntimeFieldError(
 					'records',

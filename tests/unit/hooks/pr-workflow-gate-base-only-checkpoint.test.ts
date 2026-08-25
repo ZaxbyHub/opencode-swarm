@@ -263,7 +263,10 @@ describe('base-only post_explorer checkpoint (issue #2280 Part A)', () => {
 				pendingRecords(candidateIds),
 			),
 		);
-		expect(message).toBe(
+		expect(message).toContain(
+			'field boundary: expected the legal next "post_reviewer" checkpoint for run "run-order"',
+		);
+		expect(message).toContain(
 			'BLOCKED: PR_REVIEW findings persistence requires the trigger evaluation artifact (write_pr_review_trigger_eval must complete first)',
 		);
 	});
