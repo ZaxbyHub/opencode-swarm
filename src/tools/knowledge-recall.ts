@@ -59,8 +59,12 @@ export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 					repair_id: z.string().uuid(),
 					phase: z.string().min(1).max(256),
 					task_id: z.string().min(1).max(256).optional(),
-					// z.literal(true) serializes as {"enum":[true]}, which Gemini-family
-					// APIs reject (enum must be strings). Runtime check below still requires true.
+					// Gemini-family APIs reject single-value enum constraints on
+					// boolean literals (z.literal(true) serializes to either
+					// {"const":true,"type":"boolean"} under Zod v4 default target or
+					// {"enum":[true],"type":"boolean"} under draft-04/openapi-3.0; both
+					// forms are rejected by Gemini/Google Antigravity validators).
+					// Runtime check below still requires === true.
 					scope_complete: z.boolean(),
 				})
 				.optional()
