@@ -204,6 +204,32 @@ describe('ci.yml coverage sharding — CI-004 + issue #2341', () => {
 		expect(uploadStep).toContain(`if: always() && ${EVENT_GUARD}`);
 	});
 
+	test('EVERY step in both coverage jobs carries the merge_group event guard (PRR-006)', () => {
+		// The named-step test above only pins the four load-bearing steps. A
+		// dropped guard on any SETUP step (checkout / setup-bun / cache /
+		// install / build) would not fail the gate — it would just run those
+		// steps on every pull_request: ~6 shards x (install + build) of pure
+		// waste per PR. Split each job slice on its step boundaries
+		// (6-space "- name:" / "- uses:") and require the guard in every one.
+		for (const [jobLabel, jobSlice] of [
+			['coverage-shard', coverageShardJob],
+			['coverage', coverageAggJob],
+		] as const) {
+			const stepBlocks = jobSlice
+				.split(/\n(?= {6}- (?:name|uses):)/)
+				.filter((block) => /^\s*- (?:name|uses):/.test(block));
+			// 8 steps in coverage-shard, 6 in the aggregator.
+			expect(stepBlocks.length).toBeGreaterThanOrEqual(6);
+			// Fail with the offending step heads rather than an opaque slice.
+			const unguarded = stepBlocks
+				.filter(
+					(block) => !block.includes(`github.event_name == 'merge_group'`),
+				)
+				.map((block) => `${jobLabel}: ${block.split('\n')[0]?.trim()}`);
+			expect(unguarded.join('\n')).toBe('');
+		}
+	});
+
 	test('shard-report download is pinned to the same download-artifact SHA as flake-detection.yml', () => {
 		const downloadStep = extractStep(yml, 'Download shard reports');
 		const pinnedSha = flakeDetectionYml.match(
@@ -265,9 +291,36 @@ describe('run-coverage-gate.sh shard mode — issue #2341', () => {
 		expect(coverageGateScript).toContain(
 			'Shard ${shard_index}/${shard_count} local coverage',
 		);
+		// PRR-007: pin the REASSIGNMENT of $flake_ann in shard mode, not just
+		// the filename string anywhere in the script — a dead variable holding
+		// the shard name while $flake_ann keeps the unsharded default would
+		// silently collide annotations under merge-multiple extraction and
+		// pass a bare substring assertion.
 		expect(coverageGateScript).toContain(
-			'flake-annotations-coverage-shard-${shard_index}.txt',
+			'flake_ann="flake-annotations-coverage-shard-${shard_index}.txt"',
 		);
+		// PRR-012: anchored slice of the sharded threshold branch — the
+		// informational message must be there and the enforcement strings must
+		// NOT be, so a future edit cannot keep the message while quietly
+		// re-adding per-shard enforcement (which would fail slow shards whose
+		// file mix skews the local ratio).
+		const readIdx = coverageGateScript.indexOf(
+			'read -r coverage_value < coverage-value.txt',
+		);
+		expect(readIdx).toBeGreaterThan(-1);
+		const shardedIfIdx = coverageGateScript.indexOf(
+			'if [ "$sharded" -eq 1 ]; then',
+			readIdx,
+		);
+		expect(shardedIfIdx).toBeGreaterThan(readIdx);
+		const elseIdx = coverageGateScript.indexOf('\nelse\n', shardedIfIdx);
+		expect(elseIdx).toBeGreaterThan(shardedIfIdx);
+		const shardedBranch = coverageGateScript.slice(shardedIfIdx, elseIdx);
+		expect(shardedBranch).toContain(
+			'Shard ${shard_index}/${shard_count} local coverage',
+		);
+		expect(shardedBranch).not.toContain('Coverage gate failed');
+		expect(shardedBranch).not.toContain('failed=1');
 	});
 
 	test('helper script never diverges from the ubuntu partition (no OS branches)', () => {

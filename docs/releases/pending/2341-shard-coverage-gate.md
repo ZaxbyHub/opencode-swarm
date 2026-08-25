@@ -28,6 +28,20 @@ distribution changed. Merging shard lcov reports with max-union line-hit
 semantics is equivalent to the previous flat merge, and the aggregator rejects
 an incomplete shard set rather than measuring a smaller denominator.
 
+Post-fix queue math: the merge-group critical path is the unit chain —
+quality (~2 min) → unit matrix (Windows pole ~20-25 min) → integration
+(~5-10 min) → smoke (~10 min) ≈ 40-50 minutes — with the coverage leg
+(shards ~12 min + aggregator ~2, starting after quality) fully in parallel,
+versus a 90-minute from-enqueue budget at any queue position (~2x margin).
+Before: coverage alone ended ~48-57 min after enqueue with the smoke chain
+still to run.
+
+Known caveat (pre-existing, tracked in #2344): within an otherwise-green
+coverage shard, a test file for which bun produces no lcov report only logs a
+warning — that file's lines drop out of the measured denominator. The
+aggregator's fail-closed checks bound this to per-file granularity; a shard
+that produces no lcov at all still fails the gate.
+
 ## Migration
 
 None. Contributors see faster merge-group runs and the same required checks
