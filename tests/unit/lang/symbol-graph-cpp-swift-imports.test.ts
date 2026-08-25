@@ -4,9 +4,10 @@
  * mocks, asserting the normalized import records the graph builder consumes.
  *
  * The include/import distinction is an acceptance criterion: quoted local
- * includes become './'-relative default imports (resolvable to file edges by
- * resolveModuleSpecifier); angle-bracket includes stay external/unresolved
- * namespace imports; Swift kind-qualified imports split module vs symbol.
+ * includes become './'-relative namespace imports (whole-file semantics,
+ * resolvable to file edges by resolveModuleSpecifier); angle-bracket includes
+ * stay external/unresolved namespace imports; Swift kind-qualified imports
+ * split module vs symbol.
  */
 import { beforeEach, describe, expect, test } from 'bun:test';
 import { clearParserCache } from '../../../src/lang/runtime';
@@ -17,7 +18,7 @@ describe('extractFileSymbols C/C++ include forms (issue #1530)', () => {
 		clearParserCache();
 	});
 
-	test('quoted include is a ./-relative default import', async () => {
+	test('quoted include is a ./-relative whole-file (namespace) import', async () => {
 		const facts = await extractFileSymbols(
 			'cpp',
 			'#include "util.h"\nint main() { return 0; }\n',
@@ -25,7 +26,7 @@ describe('extractFileSymbols C/C++ include forms (issue #1530)', () => {
 		expect(facts).not.toBeNull();
 		expect(facts!.imports).toContainEqual({
 			specifier: './util.h',
-			importType: 'default',
+			importType: 'namespace',
 			bindings: [],
 		});
 	});
@@ -38,13 +39,13 @@ describe('extractFileSymbols C/C++ include forms (issue #1530)', () => {
 		expect(facts).not.toBeNull();
 		expect(facts!.imports).toContainEqual({
 			specifier: './sub/nested.h',
-			importType: 'default',
+			importType: 'namespace',
 			bindings: [],
 		});
 		// Already-relative specifiers are not re-prefixed.
 		expect(facts!.imports).toContainEqual({
 			specifier: '../other/up.h',
-			importType: 'default',
+			importType: 'namespace',
 			bindings: [],
 		});
 	});
@@ -190,6 +191,21 @@ describe('extractFileSymbols Swift import forms (issue #1530)', () => {
 		});
 	});
 
+	test('attribute with nested parens on an import is a documented drop', async () => {
+		// Known limitation (PR #2351 review PRR-003): the attribute-argument
+		// scanner stops at the first ')' and cannot span nested parens, so
+		// `@objc(foo(bar)) import X` fails to parse and yields no import.
+		// Real Swift import attributes (@_testable, @_exported,
+		// @_implementationOnly) never carry nested parens; pinned so a change
+		// here is conscious.
+		const facts = await extractFileSymbols(
+			'swift',
+			'@objc(foo(bar)) import Foundation\nfunc f() { return 1 }\n',
+		);
+		expect(facts).not.toBeNull();
+		expect(facts!.imports.length).toBe(0);
+	});
+
 	test('attribute-prefixed imports are parsed, not dropped', async () => {
 		const facts = await extractFileSymbols(
 			'swift',
@@ -228,6 +244,28 @@ describe('extractFileSymbols Swift import forms (issue #1530)', () => {
 		expect(facts!.refs.some((r) => r.identifier === '_')).toBe(false);
 		const bodyUses = facts!.refs.filter((r) => r.identifier === 'input');
 		expect(bodyUses.length).toBe(1);
+	});
+
+	test('swift type references appear in refs (type_identifier capture)', async () => {
+		const facts = await extractFileSymbols(
+			'swift',
+			[
+				'class Holder {}',
+				'',
+				'func make(_ h: Holder) -> Holder {',
+				'    return Holder()',
+				'}',
+				'',
+			].join('\n'),
+		);
+		expect(facts).not.toBeNull();
+		// Return-type AND constructor-call type references surface (pins the
+		// (type_identifier) @ref.identifier pattern in the swift refs query).
+		// The parameter-position `h: Holder` does NOT — the swift-only
+		// parameter-node ref filter (see SWIFT_REF_PARAM_TYPES) skips the
+		// whole parameter node, so exactly 2 remain.
+		const holderRefs = facts!.refs.filter((r) => r.identifier === 'Holder');
+		expect(holderRefs.length).toBe(2);
 	});
 
 	test('parameter-position type refs stay captured for csharp/kotlin (final-critic pin)', async () => {

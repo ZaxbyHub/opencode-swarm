@@ -12,7 +12,11 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { buildWorkspaceGraphAsync } from '../../../src/tools/repo-graph/builder';
-import { getContextPack } from '../../../src/tools/repo-graph/query';
+import {
+	getCallers,
+	getContextPack,
+	getDeadExports,
+} from '../../../src/tools/repo-graph/query';
 import type { RepoGraph } from '../../../src/tools/repo-graph/types';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -73,7 +77,12 @@ describe('repo-graph: C header/source include edges + public symbols (issue #153
 		const edge = graph.edges.find((e) => e.target === utilNode.filePath);
 		expect(edge).toBeDefined();
 		expect(edge!.importSpecifier).toBe('./util.h');
-		expect(edge!.importType).toBe('default');
+		// Whole-file (namespace) semantics: an include binds the entire header,
+		// and callers/consumers/dead_exports must treat it as a whole-file
+		// dependency — a 'default' edge with empty usedSymbols made callers
+		// vanish and flagged every header export dead (PR #2351 review PRR-001).
+		expect(edge!.importType).toBe('namespace');
+		expect(edge!.usedSymbols).toBeUndefined();
 	});
 
 	test('criterion 1: angle include is external — no fabricated edge', async () => {
@@ -265,5 +274,126 @@ describe('repo-graph: Swift visibility, members, and context pack (issue #1530)'
 		expect(node.exportRanges?.globalFn).toEqual({ startLine: 5, endLine: 5 });
 		const pack = getContextPack(graph, node.moduleName, 'Serializable');
 		expect(pack.spans[0]?.mode).toBe('full');
+	});
+});
+
+describe('repo-graph: PR #2351 review fixes (F-001 / PRR-001 / PRR-005 / PRR-006 / PRR-014)', () => {
+	beforeEach(() => {
+		writeFile(
+			'util.h',
+			[
+				'#ifndef UTIL_H',
+				'#define UTIL_H',
+				'int add(int a, int b);',
+				'#endif',
+				'',
+			].join('\n'),
+		);
+		writeFile(
+			'main.c',
+			[
+				'#include <stdio.h>',
+				'#include "util.h"',
+				'',
+				'int add(int a, int b) { return a + b; }',
+				'',
+			].join('\n'),
+		);
+	});
+
+	test('F-001: same-file extension keeps the class declaration span (executed repro)', async () => {
+		writeFile(
+			'Model.swift',
+			[
+				'public class PublicService {',
+				'    public func visible() -> Int { return 1 }',
+				'}',
+				'',
+				'extension PublicService {',
+				'    func extended() -> Int { return 5 }',
+				'}',
+				'',
+			].join('\n'),
+		);
+		const graph = await buildWorkspaceGraphAsync(tempDir);
+		const node = nodeFor(graph, 'Model.swift');
+		// The extension def is non-exported: the class declaration keeps the
+		// exports slot AND the span (pre-fix the extension deterministically
+		// displaced it — extensions are always textually after their type).
+		expect(
+			node.exports.filter((n: string) => n === 'PublicService').length,
+		).toBe(1);
+		expect(node.exportRanges?.PublicService).toEqual({
+			startLine: 1,
+			endLine: 3,
+		});
+		const pack = getContextPack(graph, node.moduleName, 'PublicService');
+		expect(pack.spans[0]?.startLine).toBe(1);
+		expect(pack.spans[0]?.endLine).toBe(3);
+		// Extension members are still attributed.
+		expect(node.exportRanges?.extended).toEqual({ startLine: 6, endLine: 6 });
+	});
+
+	test('F-001 cross-file: extension file does not re-export the extended type', async () => {
+		writeFile(
+			'Type.swift',
+			'public class Payload {\n    public func base() -> Int { return 1 }\n}\n',
+		);
+		writeFile(
+			'Ext.swift',
+			'import Foundation\n\nextension Payload {\n    func extra() -> Int { return 2 }\n}\n',
+		);
+		const graph = await buildWorkspaceGraphAsync(tempDir);
+		const typeNode = nodeFor(graph, 'Type.swift');
+		const extNode = nodeFor(graph, 'Ext.swift');
+		expect(typeNode.exports).toContain('Payload');
+		expect(extNode.exports).not.toContain('Payload');
+		expect(typeNode.exportRanges?.Payload).toEqual({
+			startLine: 1,
+			endLine: 3,
+		});
+	});
+
+	test('PRR-001: quoted include consumers — callers report imported, dead exports skip header', async () => {
+		const graph = await buildWorkspaceGraphAsync(tempDir);
+		const utilNode = nodeFor(graph, 'util.h');
+		// Whole-file include: main.c is a caller with resolution 'imported'.
+		const callers = getCallers(graph, utilNode.moduleName, 'add');
+		expect(callers).toContainEqual({ file: 'main.c', resolution: 'imported' });
+		// The header's usage is per-symbol-unresolvable → skipped, not flagged.
+		const dead = getDeadExports(graph);
+		expect(dead.candidates.filter((c) => c.file.endsWith('util.h'))).toEqual(
+			[],
+		);
+	});
+
+	test('PRR-005: unresolvable quoted include lands in unresolvedImports diagnostics', async () => {
+		writeFile(
+			'broken.c',
+			'#include "missing.h"\n\nint broken() { return 0; }\n',
+		);
+		const graph = await buildWorkspaceGraphAsync(tempDir);
+		const entries = (graph.diagnostics?.unresolvedImports ?? []).filter(
+			(e) => e.specifier === './missing.h',
+		);
+		expect(entries.length).toBe(1);
+		expect(entries[0]!.file).toContain('broken.c');
+	});
+
+	test('PRR-006: bare Swift module imports produce no file edges', async () => {
+		writeFile(
+			'Only.swift',
+			'import Foundation\n\nfunc f() -> Int { return 1 }\n',
+		);
+		const graph = await buildWorkspaceGraphAsync(tempDir);
+		const node = nodeFor(graph, 'Only.swift');
+		expect(node.imports).toContain('Foundation');
+		expect(graph.edges.filter((e) => e.source === node.filePath)).toEqual([]);
+	});
+
+	test('PRR-014: header file nodes carry the cpp language id', async () => {
+		const graph = await buildWorkspaceGraphAsync(tempDir);
+		const utilNode = nodeFor(graph, 'util.h');
+		expect(utilNode.language).toBe('cpp');
 	});
 });

@@ -12,9 +12,11 @@ thin baseline query set (issue #1530, KG-09):
   now produce exported function defs — a `.h` file previously yielded zero
   defs.
 - **C/C++ include edges are represented.** Quoted includes (`#include
-  "util.h"`) normalize to `./`-relative default imports that resolve to real
-  file edges; angle includes (`#include <vector>`) stay external/unresolved
-  namespace imports.
+  "util.h"`) normalize to `./`-relative namespace imports (whole-file import
+  semantics) that resolve to real file edges — so `callers`, `consumers`,
+  and `dead_exports` treat an included header as a whole-file dependency
+  rather than per-symbol usage; angle includes (`#include <vector>`) stay
+  external/unresolved.
 - **C++ class members, constructors, enums, and typedefs are extracted.**
   Method declarations/definitions inside class/struct/union bodies
   (`field_identifier` declarators), in-class constructors, out-of-class
@@ -26,9 +28,10 @@ thin baseline query set (issue #1530, KG-09):
   private, struct/union → public) and are never file-level exports. Access
   specifier sections (`public:`) are not tracked (documented limitation).
 - **Swift struct/enum/extension/typealias and protocol members are
-  represented.** Extension blocks produce a `type` def for the extended type
-  and their members are attributed as `method`; protocol requirements are
-  extracted.
+  represented.** Extension blocks produce a non-exported `type` def for the
+  extended type (the type's own declaration keeps its span and exports
+  entry) and their members are attributed as `method`; protocol requirements
+  are extracted.
 - **Swift visibility is correct in full.** `open`/`public` map to public,
   `internal` to internal, `fileprivate`/`private` to private; members without
   a modifier now default to Swift's implicit `internal` (previously forced to

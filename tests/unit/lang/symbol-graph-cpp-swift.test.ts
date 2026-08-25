@@ -221,8 +221,54 @@ describe('extractFileSymbols — cpp grammar hardening (issue #1530)', () => {
 			].join('\n'),
 		);
 		expect(facts).not.toBeNull();
-		expect(byName(facts!, 'identity')).toBeDefined();
-		expect(byName(facts!, 'Box')).toBeDefined();
+		const identity = byName(facts!, 'identity');
+		expect(identity?.kind).toBe('function');
+		expect(identity?.exported).toBe(true);
+		const box = byName(facts!, 'Box');
+		expect(box?.kind).toBe('class');
+		expect(box?.exported).toBe(true);
+	});
+
+	test('C++ type references appear in refs (type_identifier capture)', async () => {
+		const facts = await extractFileSymbols(
+			'cpp',
+			[
+				'struct Config { int retries; };',
+				'',
+				'Config makeConfig() {',
+				'    Config c = { 1 };',
+				'    return c;',
+				'}',
+				'',
+			].join('\n'),
+		);
+		expect(facts).not.toBeNull();
+		// Signature AND body type references must surface as refs.
+		const configRefs = facts!.refs.filter((r) => r.identifier === 'Config');
+		expect(configRefs.length).toBeGreaterThanOrEqual(2);
+	});
+
+	test('C++ operators and destructors are deliberately not extracted (documented)', async () => {
+		// Documented limitation (PR #2351 review PRR-009): their names parse
+		// as dedicated grammar nodes (operator_name / destructor_name), not
+		// plain identifiers. Pinned so a future change is a conscious one.
+		const facts = await extractFileSymbols(
+			'cpp',
+			[
+				'class Vec {',
+				'public:',
+				'    Vec operator+(const Vec &other) const { return other; }',
+				'    operator int() const { return 0; }',
+				'    ~Vec() {}',
+				'};',
+				'',
+			].join('\n'),
+		);
+		expect(facts).not.toBeNull();
+		const names = facts!.defs.map((d) => d.name);
+		expect(names).not.toContain('operator+');
+		expect(names).not.toContain('operator int');
+		expect(names).not.toContain('~Vec');
 	});
 
 	test('cpp malformed input fails open', async () => {

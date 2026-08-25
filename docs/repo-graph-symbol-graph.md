@@ -591,8 +591,10 @@ from the tree-sitter parse alone.
   CMake/VCPkg/Xcode search paths), which are not known to the extractor.
 - **Overload collapse is conservative.** All C++ overloads of a name are
   extracted, but the graph is name-keyed: `exportRanges` holds one span per
-  name (last-exported document-order wins), so `context_pack` cannot
-  distinguish overload signatures.
+  name (resolved by the three-rule duplicate-name policy — an exported def
+  outranks a non-exported one; two exported defs take the last; two
+  non-exported defs take the first), so `context_pack` cannot distinguish
+  overload signatures.
 - **Macros can hide definitions and references.** A definition or reference
   manufactured by the preprocessor (`#define MAKE_FN(name) ...`) is invisible
   to the syntactic pass.
@@ -622,5 +624,15 @@ from the tree-sitter parse alone.
   module-level import; kind-qualified imports (`import class Foo.Bar`) split
   into module specifier + named binding. Module names never resolve to
   workspace files (a Swift module spans many files and needs build metadata
-  to map), so Swift file-level edges come from other signals, and Xcode
+  to map), so Swift imports produce no file-level edges — `context_pack` on a
+  Swift symbol is served by the target file's own spans. Xcode
   project-specific resolution is out of scope.
+- **C++ operator overloads, conversion operators, and destructors are not
+  extracted.** Their names parse as dedicated grammar nodes
+  (`operator+`, `operator int`, `~Foo`), not plain identifiers, and the
+  query set does not model them. Regular member/static/free functions are
+  unaffected.
+- **Swift extension blocks augment, never re-export.** An `extension Foo`
+  emits a non-exported def for `Foo` so the type's own declaration keeps its
+  `exportRanges` span and `exports[]` entry; extension members are still
+  extracted and attributed as methods.

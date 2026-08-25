@@ -61,8 +61,11 @@ export interface FileSymbolFacts {
 const AST_TIMEOUT_MS = 500;
 
 /**
- * Per-grammar query sets. Task 1.1 defines only 'typescript' as the exemplar;
- * additional grammars are added in task 1.2.
+ * Per-grammar query sets — one defs/imports/refs triple per registered
+ * grammar id. Patterns must be verified against the shipped grammar WASMs
+ * (s-expression dumps) before being added: node types and field names differ
+ * from what source syntax suggests (e.g. C++ method names live in
+ * field_identifier declarators; Swift structs parse as class_declaration).
  */
 const QUERIES: Record<
 	string,
@@ -768,7 +771,7 @@ function buildFacts(
 			const nameNode = asTs(nc.node);
 			const localName = nameNode.text;
 			const commonJsExport = commonJsExports.get(localName);
-			const visibilityInfo = getSymbolVisibilityInfo({
+			let visibilityInfo = getSymbolVisibilityInfo({
 				grammarId,
 				localName,
 				kind,
@@ -781,6 +784,18 @@ function buildFacts(
 				pythonParentClassExported,
 				parentContainerType,
 			});
+			// A Swift extension block augments an already-declared type — it is
+			// not itself a new file-level export. Keeping the extension def
+			// non-exported lets the builder's exported-outranks-non-exported
+			// policy keep the type's OWN declaration span in exportRanges, and
+			// keeps `exports[]` free of the duplicated name (PR #2351 review,
+			// F-001/PRR-002: an exported extension def carries the same name as
+			// the type it extends and displaced that type's span under the
+			// duplicate-name policy — order-independently, since an exported
+			// def outranks a non-exported one in both document orders).
+			if (grammarId === 'swift' && kindKey === 'extension') {
+				visibilityInfo = { ...visibilityInfo, exported: false };
+			}
 			const exportedName = isDefaultExport
 				? 'default'
 				: (commonJsExport?.exportedName ?? localName);
@@ -1590,12 +1605,17 @@ function parseCppInclude(text: string): FileSymbolFacts['imports'][0] | null {
 	// Quoted include: #include "foo.h" / #include "sub/foo.h" / #include "../x.h".
 	// Local includes resolve relative to the including file, so the specifier is
 	// normalized to a './'-prefixed form that resolveModuleSpecifier can turn
-	// into a file edge.
+	// into a file edge. The import TYPE is 'namespace': an include binds the
+	// whole header with no per-symbol binding, and the graph consumers
+	// (getCallers/getSymbolConsumers/getDeadExports) treat namespace imports
+	// as whole-file — a 'default' edge with empty usedSymbols made callers
+	// vanish and flagged every header export as a dead candidate (PR #2351
+	// review, PRR-001).
 	const quoted = t.match(/^#\s*include\s+"([^"]+)"/);
 	if (quoted) {
 		const raw = quoted[1];
 		const specifier = raw.startsWith('.') ? raw : `./${raw}`;
-		return { specifier, importType: 'default', bindings: [] };
+		return { specifier, importType: 'namespace', bindings: [] };
 	}
 	// Angle include: #include <foo.h>. Without build-system include paths these
 	// stay external/unresolved (bare specifier; resolveModuleSpecifier returns
