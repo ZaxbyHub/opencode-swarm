@@ -2647,7 +2647,7 @@ async function startAsyncLanePrompt(args: {
 					`Lane "${args.lane.id}" session.promptAsync launch timed out after ${context.remainingMs ?? args.timeoutMs}ms`,
 					promptController,
 				);
-				if (!result.data) {
+				if (result.error) {
 					throw new Error(
 						`session.promptAsync launch failed: ${formatError(result.error)}`,
 					);
@@ -2661,6 +2661,7 @@ async function startAsyncLanePrompt(args: {
 			},
 			maxTransientRetriesPerModel: 0,
 			deadlineAtMs: _internals.now() + args.timeoutMs,
+			now: _internals.now,
 			scope: {
 				sessionID: args.sessionId,
 				invocationID: `dispatch-lanes-async:${args.lane.id}`,
@@ -2999,6 +3000,7 @@ async function runLane(
 			},
 			maxTransientRetriesPerModel: 0,
 			deadlineAtMs: _internals.now() + timeoutMs,
+			now: _internals.now,
 			scope: {
 				sessionID: sessionId,
 				invocationID: `dispatch-lanes-sync:${lane.id}`,
