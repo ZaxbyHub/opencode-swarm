@@ -1,5 +1,21 @@
 # Changelog
 
+## [7.148.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.147.1...v7.148.0) (2026-08-25)
+
+
+### Features
+
+* **symbol-graph:** harden c/c++ and swift extraction ([3c7d361](https://github.com/ZaxbyHub/opencode-swarm/commit/3c7d3616191db8ca46b8a90659e9b377c8a72f0c))
+* **symbol-graph:** harden c/c++ and swift extraction ([aa543e8](https://github.com/ZaxbyHub/opencode-swarm/commit/aa543e861f5f93d88f040317a681762eefda7b1a))
+
+
+### Bug Fixes
+
+* **pr-review:** admit base-only post_explorer checkpoint and surface pending-lane liveness advisory ([6c70fad](https://github.com/ZaxbyHub/opencode-swarm/commit/6c70fadcc31cb8c15de2a2b1695f2c18827f2326))
+* **pr-review:** admit base-only post_explorer checkpoint and surface pending-lane liveness advisory ([8636b2e](https://github.com/ZaxbyHub/opencode-swarm/commit/8636b2eee28dd2edfdc080e756093d371bb9e728))
+* **pr-review:** close review findings on the pending-liveness advisory and findings contract ([83a5e3b](https://github.com/ZaxbyHub/opencode-swarm/commit/83a5e3b439f2ad2b5c103e5fcf6b40d6f9191c49))
+* **symbol-graph:** address PR [#2351](https://github.com/ZaxbyHub/opencode-swarm/issues/2351) swarm review findings ([4c91a5e](https://github.com/ZaxbyHub/opencode-swarm/commit/4c91a5e374db27793b03882d124a64f7f18b7fa9))
+
 ## [7.147.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.147.0...v7.147.1) (2026-08-25)
 
 
