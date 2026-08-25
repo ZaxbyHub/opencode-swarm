@@ -24,7 +24,7 @@ export const REPO_GRAPH_FILENAME = 'repo-graph.json';
  *
  * 1.2.0 adds per-node `exportRanges` (1-based inclusive line spans keyed by
  * symbol name — exported symbols for every grammar, plus non-exported member
- * defs for java/kotlin/csharp; see the field docs) and the top-level
+ * defs for java/kotlin/csharp/cpp/swift; see the field docs) and the top-level
  * `symbolEdges` array (direct symbol-to-
  * symbol reference edges). Both fields are optional, so 1.0.0 and 1.1.0 graphs
  * still load without corruption. New queries may use these fields to provide
@@ -225,10 +225,12 @@ export interface GraphNode {
 	 * Each span value uses `startLine` / `endLine` to match the codebase
 	 * convention (see `ContextPackSpan` and `FileSymbolFacts`).
 	 *
-	 * SCOPE (issue #1529): exported symbols for every grammar, PLUS
-	 * non-exported member defs for java/kotlin/csharp. A JVM/.NET member is
+	 * SCOPE (issues #1529 and #1530): exported symbols for every grammar,
+	 * PLUS non-exported member defs for java/kotlin/csharp/cpp/swift. A
+	 * JVM/.NET or native-language member (or a Swift extension block) is
 	 * deliberately never a file-level export, so without that widening
-	 * `context_pack` could return no span at all for a Java method.
+	 * `context_pack` could return no span at all for a Java method or a
+	 * private C++ helper.
 	 * `exports` and `exportLines` stay exported-only in every language.
 	 *
 	 * Duplicate names resolve so this map cannot disagree with `exportLines`:

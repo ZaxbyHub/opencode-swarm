@@ -213,7 +213,7 @@ describe('repo-graph: Kotlin import/symbol resolution + ontology (issue #1529)',
 		expect(edge).toBeDefined();
 	});
 
-	// Mutation-proven gap: removing `kotlin` from JVM_DOTNET_RANGE_GRAMMARS left
+	// Mutation-proven gap: removing `kotlin` from RANGE_WIDENED_GRAMMARS (formerly JVM_DOTNET_RANGE_GRAMMARS) left
 	// the whole suite green, because only Java asserted a member span or a
 	// symbolEdge. The widening is the entire point of the change for Kotlin too.
 	test('kotlin: member span reaches exportRanges and context_pack in full mode', async () => {
@@ -290,7 +290,7 @@ describe('repo-graph: C# file-scoped and block namespace resolution (issue #1529
 		expect(apiNode.ontology?.packageBoundary).toBe('Example.App.Services');
 	});
 
-	// Mutation-proven gap: removing `csharp` from JVM_DOTNET_RANGE_GRAMMARS left
+	// Mutation-proven gap: removing `csharp` from RANGE_WIDENED_GRAMMARS (formerly JVM_DOTNET_RANGE_GRAMMARS) left
 	// the whole suite green — only Java pinned a member span or a symbolEdge.
 	test('csharp: member span reaches exportRanges and context_pack in full mode', async () => {
 		const graph = await buildWorkspaceGraphAsync(tempDir);

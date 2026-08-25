@@ -251,7 +251,7 @@ describe('repo-graph JVM/.NET — implementation-review regressions', () => {
 
 	test('the exportRanges widening does not reach non-JVM grammars', async () => {
 		// Pins the LANGUAGE SCOPING itself, not just the widening. Adding
-		// 'typescript' to JVM_DOTNET_RANGE_GRAMMARS previously survived the whole
+		// 'typescript' to RANGE_WIDENED_GRAMMARS (formerly JVM_DOTNET_RANGE_GRAMMARS) previously survived the whole
 		// suite: nothing asserted that a non-exported TypeScript helper stays OUT
 		// of exportRanges, which is the entire reason the set is scoped.
 		writeFile(

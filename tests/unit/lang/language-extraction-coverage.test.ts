@@ -97,17 +97,21 @@ const EXPECTATIONS: Record<string, Expectation> = {
 	},
 	cpp: {
 		source: '#include <m>\nclass C { public: void m() {} };\n',
-		expectMethods: false,
+		expectMethods: true,
+		// C/C++ includes bind no named symbol: a quoted include imports the
+		// whole file and an angle include is external (issue #1530).
 		expectBindings: false,
 		reason:
-			'C/C++ hardening is issue #1530. parseCppInclude returns bindings: [] for both #include forms, and the cpp defs query does not type members as methods.',
+			'C/C++ includes never carry named bindings: quoted includes import the whole file, angle includes are external/unresolved.',
 	},
 	swift: {
 		source: 'import M\npublic class C { public func m() {} }\n',
-		expectMethods: false,
+		expectMethods: true,
+		// A bare `import M` binds a whole module; only kind-qualified imports
+		// (`import class M.C`) carry a named binding (issue #1530).
 		expectBindings: false,
 		reason:
-			'Swift hardening is issue #1530. A Swift `import M` binds a whole module, and members are not re-typed to method.',
+			'A bare Swift `import M` binds a whole module; named bindings require a kind-qualified import (`import class M.C`).',
 	},
 	dart: {
 		source: "import 'm.dart';\nclass C { void m() {} }\n",

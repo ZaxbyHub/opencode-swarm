@@ -61,8 +61,11 @@ export interface FileSymbolFacts {
 const AST_TIMEOUT_MS = 500;
 
 /**
- * Per-grammar query sets. Task 1.1 defines only 'typescript' as the exemplar;
- * additional grammars are added in task 1.2.
+ * Per-grammar query sets — one defs/imports/refs triple per registered
+ * grammar id. Patterns must be verified against the shipped grammar WASMs
+ * (s-expression dumps) before being added: node types and field names differ
+ * from what source syntax suggests (e.g. C++ method names live in
+ * field_identifier declarators; Swift structs parse as class_declaration).
  */
 const QUERIES: Record<
 	string,
@@ -283,8 +286,44 @@ const QUERIES: Record<
 					declarator: (identifier) @func.name
 				)
 			) @func.def
+			(function_definition
+				declarator: (pointer_declarator
+					declarator: (function_declarator
+						declarator: (identifier) @func.name
+					)
+				)
+			) @func.def
+			(function_definition
+				(function_declarator
+					declarator: (qualified_identifier (identifier) @func.name)
+				)
+			) @func.def
+			(declaration
+				declarator: (function_declarator
+					declarator: (identifier) @func.name
+				)
+			) @func.def
+			(declaration
+				declarator: (pointer_declarator
+					declarator: (function_declarator
+						declarator: (identifier) @func.name
+					)
+				)
+			) @func.def
+			(function_definition
+				(function_declarator
+					declarator: (field_identifier) @method.name
+				)
+			) @method.def
+			(field_declaration
+				(function_declarator
+					declarator: (field_identifier) @method.name
+				)
+			) @method.def
 			(class_specifier name: (type_identifier) @class.name) @class.def
 			(struct_specifier name: (type_identifier) @struct.name) @struct.def
+			(enum_specifier name: (type_identifier) @enum.name) @enum.def
+			(type_definition declarator: (type_identifier) @type.name) @type.def
 		`,
 		imports: `
 			(preproc_include) @import
@@ -293,14 +332,20 @@ const QUERIES: Record<
 		refs: `
 			(identifier) @ref.identifier
 			(namespace_identifier) @ref.identifier
+			(type_identifier) @ref.identifier
 		`,
 		exports: ``,
 	},
 	swift: {
 		defs: `
 			(function_declaration name: (simple_identifier) @func.name) @func.def
+			(protocol_function_declaration name: (simple_identifier) @func.name) @func.def
 			(class_declaration name: (type_identifier) @class.name) @class.def
+			(class_declaration
+				name: (user_type (type_identifier) @extension.name)
+			) @extension.def
 			(protocol_declaration name: (type_identifier) @protocol.name) @protocol.def
+			(typealias_declaration name: (type_identifier) @type.name) @type.def
 		`,
 		imports: `
 			(import_declaration) @import
@@ -308,6 +353,7 @@ const QUERIES: Record<
 		refs: `
 			(identifier) @ref.identifier
 			(simple_identifier) @ref.identifier
+			(type_identifier) @ref.identifier
 		`,
 		exports: ``,
 	},
@@ -383,6 +429,10 @@ const CAPTURE_KIND: Record<string, FileSymbolFacts['defs'][0]['kind']> = {
 	// The `Object.hasOwn` guard at the lookup site closes the class for any
 	// future prefix; this name keeps the query readable regardless.
 	ctor: 'method',
+	// Swift extension blocks parse as `class_declaration` with a `user_type`
+	// name; the extended type is already declared elsewhere, so the extension
+	// contributes a type-level augmentation rather than a new type.
+	extension: 'type',
 };
 
 const DEF_TYPES = new Set([
@@ -438,6 +488,24 @@ const JVM_CONTAINER_TYPES = new Set([
 	'record_declaration',
 ]);
 
+/**
+ * Type-container node types for the cpp/swift member re-typing and container
+ * defaults. Only the SPECIFIER/DECLARATION nodes are listed, never the body
+ * (`field_declaration_list`): the ancestor walk passes through the body to the
+ * specifier, and the specifier kind is what the cpp container default needs
+ * (class members default private, struct/union members public).
+ */
+const NATIVE_CONTAINER_TYPES = new Set([
+	// cpp: class/struct/union (an in-class constructor prototype parses as a
+	// plain `declaration` inside the specifier's field_declaration_list).
+	'class_specifier',
+	'struct_specifier',
+	'union_specifier',
+	// swift: class/struct/enum/extension all parse as class_declaration.
+	'class_declaration',
+	'protocol_declaration',
+]);
+
 const PARAM_TYPES = new Set([
 	'formal_parameters',
 	'required_parameter',
@@ -446,6 +514,18 @@ const PARAM_TYPES = new Set([
 	'array_pattern',
 	'object_pattern',
 ]);
+
+/**
+ * Swift-only addition to {@link PARAM_TYPES}. The swift grammar's `parameter`
+ * node wraps each parameter's names and type, and without this skip the
+ * parameter NAMES (`func f(_ input: Int)`) leak into refs. The skip is
+ * deliberately grammar-scoped rather than added to PARAM_TYPES: the same node
+ * type name exists in the csharp, kotlin, and rust grammars, where a
+ * parameter-position TYPE is a genuine reference signal — most notably for
+ * Kotlin named imports, whose bindings are marked used by body/parameter
+ * refs (final-critic finding on issue #1530).
+ */
+const SWIFT_REF_PARAM_TYPES = new Set([...PARAM_TYPES, 'parameter']);
 
 /**
  * Extract symbol, import, and reference facts from a source string using
@@ -608,6 +688,19 @@ function buildFacts(
 				kind = 'method';
 			}
 		}
+		// cpp/swift: members are re-typed the same way, and the container type
+		// feeds the container-scoped implicit-visibility default (Swift members
+		// default `internal`; C++ class members default private, struct/union
+		// members public — see containerScopedDefaultVisibility).
+		if (grammarId === 'cpp' || grammarId === 'swift') {
+			parentContainerType = nearestAncestorType(
+				originalDefNode,
+				NATIVE_CONTAINER_TYPES,
+			);
+			if (parentContainerType !== undefined && kindKey === 'func') {
+				kind = 'method';
+			}
+		}
 		const explicitExported = exportNodes.some((en) =>
 			isNodeInside(en, defNode),
 		);
@@ -678,7 +771,7 @@ function buildFacts(
 			const nameNode = asTs(nc.node);
 			const localName = nameNode.text;
 			const commonJsExport = commonJsExports.get(localName);
-			const visibilityInfo = getSymbolVisibilityInfo({
+			let visibilityInfo = getSymbolVisibilityInfo({
 				grammarId,
 				localName,
 				kind,
@@ -691,6 +784,18 @@ function buildFacts(
 				pythonParentClassExported,
 				parentContainerType,
 			});
+			// A Swift extension block augments an already-declared type — it is
+			// not itself a new file-level export. Keeping the extension def
+			// non-exported lets the builder's exported-outranks-non-exported
+			// policy keep the type's OWN declaration span in exportRanges, and
+			// keeps `exports[]` free of the duplicated name (PR #2351 review,
+			// F-001/PRR-002: an exported extension def carries the same name as
+			// the type it extends and displaced that type's span under the
+			// duplicate-name policy — order-independently, since an exported
+			// def outranks a non-exported one in both document orders).
+			if (grammarId === 'swift' && kindKey === 'extension') {
+				visibilityInfo = { ...visibilityInfo, exported: false };
+			}
 			const exportedName = isDefaultExport
 				? 'default'
 				: (commonJsExport?.exportedName ?? localName);
@@ -830,6 +935,8 @@ function buildFacts(
 		.map((d) => ({ name: d.name, node: d.node }));
 
 	const refs: FileSymbolFacts['refs'] = [];
+	const refParamTypes =
+		grammarId === 'swift' ? SWIFT_REF_PARAM_TYPES : PARAM_TYPES;
 	for (const m of refMatches) {
 		const cap = m.captures.find((c) => c.name === 'ref.identifier');
 		if (!cap) continue;
@@ -838,7 +945,7 @@ function buildFacts(
 		if (defNameKeys.has(nodeKey(refNode))) continue;
 		if (hasAncestorOfType(refNode, 'import_statement')) continue;
 		if (isInsideImportStatement(refNode)) continue;
-		if (hasAncestorOfType(refNode, PARAM_TYPES)) continue;
+		if (hasAncestorOfType(refNode, refParamTypes)) continue;
 		if (refNode.text === 'require' && isInsideRequireCall(refNode)) continue;
 
 		refs.push({
@@ -1495,13 +1602,30 @@ function parseCSharpUsing(text: string): FileSymbolFacts['imports'][0] | null {
 
 function parseCppInclude(text: string): FileSymbolFacts['imports'][0] | null {
 	const t = text.trim();
-	// #include <foo>
-	// #include "foo"
-	// using foo::bar;
-	const include = t.match(/^#\s*include\s+[<"]([^>"]+)[>"]/);
-	if (include) {
-		return { specifier: include[1], importType: 'namespace', bindings: [] };
+	// Quoted include: #include "foo.h" / #include "sub/foo.h" / #include "../x.h".
+	// Local includes resolve relative to the including file, so the specifier is
+	// normalized to a './'-prefixed form that resolveModuleSpecifier can turn
+	// into a file edge. The import TYPE is 'namespace': an include binds the
+	// whole header with no per-symbol binding, and the graph consumers
+	// (getCallers/getSymbolConsumers/getDeadExports) treat namespace imports
+	// as whole-file — a 'default' edge with empty usedSymbols made callers
+	// vanish and flagged every header export as a dead candidate (PR #2351
+	// review, PRR-001).
+	const quoted = t.match(/^#\s*include\s+"([^"]+)"/);
+	if (quoted) {
+		const raw = quoted[1];
+		const specifier = raw.startsWith('.') ? raw : `./${raw}`;
+		return { specifier, importType: 'namespace', bindings: [] };
 	}
+	// Angle include: #include <foo.h>. Without build-system include paths these
+	// stay external/unresolved (bare specifier; resolveModuleSpecifier returns
+	// null and they are not reported as unresolved relative imports).
+	const angle = t.match(/^#\s*include\s+<([^>]+)>/);
+	if (angle) {
+		return { specifier: angle[1], importType: 'namespace', bindings: [] };
+	}
+	// using foo::bar;
+	// using namespace foo;
 	const using = t.match(/^using\s+(?:namespace\s+)?(.+?)\s*;?\s*$/);
 	if (using) {
 		return {
@@ -1515,13 +1639,34 @@ function parseCppInclude(text: string): FileSymbolFacts['imports'][0] | null {
 
 function parseSwiftImport(text: string): FileSymbolFacts['imports'][0] | null {
 	const t = text.trim();
-	// import foo
-	// import class foo.Bar
-	const m = t.match(/^import\s+(?:class\s+)?([^;\s]+)/);
-	if (m) {
-		return { specifier: m[1], importType: 'namespace', bindings: [] };
+	// Optional leading attributes: @_testable import Foo / @_exported import Foo
+	const attrs = /^(?:@\w+(?:\([^)\n]*\))?\s+)*/.source;
+	// import Foo                        → namespace import of module Foo
+	// import Foo.Bar                    → namespace import of submodule Foo.Bar
+	// import class Foo.Bar              → named import: module Foo, symbol Bar
+	// import class Foo.Bar.Baz          → named import: module Foo, symbol Baz
+	//   (middle components are a nested module path; the LAST component is the
+	//   imported symbol — conservative, matches how the symbol is referenced)
+	// The kind group requires its own trailing whitespace, so a module that
+	// merely starts with a keyword (`import classFoo`) is not split.
+	const m = t.match(
+		new RegExp(
+			`${attrs}import\\s+((?:class|struct|enum|protocol|typealias|func|var|let)\\s+)?([A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)*)\\s*$`,
+		),
+	);
+	if (!m) return null;
+	const path = m[2]!.split('.');
+	if (m[1] !== undefined && path.length >= 2) {
+		const imported = path[path.length - 1]!;
+		return {
+			specifier: path[0]!,
+			importType: 'named',
+			bindings: [{ imported, local: imported }],
+		};
 	}
-	return null;
+	// No kind keyword, or a kind with no dotted path (not valid Swift — keep
+	// the whole specifier rather than dropping the import).
+	return { specifier: m[2]!, importType: 'namespace', bindings: [] };
 }
 
 function parseDartImport(text: string): FileSymbolFacts['imports'][0] | null {
