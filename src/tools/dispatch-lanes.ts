@@ -2857,56 +2857,68 @@ async function buildPrReviewWaitDeadlineProspectiveResult(args: {
 		const artifact = output.output_ref
 			? (readLaneOutput(args.directory, output.output_ref)?.artifact ?? null)
 			: null;
-		try {
-			const validation = await _internals.validatePrWorkflowTransportRecovery({
-				directory: args.directory,
-				record: args.record,
-				result: prospectiveResult,
-				artifact,
-				revisionDigest: collectedRevisionDigest ?? '',
-			});
-			if (validation.receipt) {
-				const resultWithReceipt = appendPrReviewCollectionReceipt(
-					args.record,
-					prospectiveResult,
-					validation.receipt,
+		const remainingValidationBudgetMs = remainingCollectionBudgetMs(
+			args.deadline,
+		);
+		if (remainingValidationBudgetMs <= 0) {
+			detail =
+				'PR_WORKFLOW_CONTRACT_INVALID: transport recovery validation skipped because the runtime-deadline finalization budget was exhausted';
+		} else {
+			try {
+				const validation = await withTimeout(
+					_internals.validatePrWorkflowTransportRecovery({
+						directory: args.directory,
+						record: args.record,
+						result: prospectiveResult,
+						artifact,
+						revisionDigest: collectedRevisionDigest ?? '',
+					}),
+					remainingValidationBudgetMs,
+					`transport recovery validation for lane "${args.record.laneId ?? args.record.correlationId}" exceeded the runtime-deadline finalization budget (${remainingValidationBudgetMs}ms)`,
 				);
-				if (resultWithReceipt) {
-					prospectiveResult = resultWithReceipt;
-				} else if (
-					consumePrReviewReceiptAppendFailureLog(
-						args.receiptAppendFailureLogs,
-						args.record.parentSessionId,
-						args.record.correlationId,
-					)
-				) {
-					logger.log(
-						`[dispatch-lanes] withheld PR-review terminal result without receipt during runtime-deadline finalization: correlation=${args.record.correlationId} batch=${args.record.batchId ?? '(missing)'} lane=${args.record.laneId ?? '(missing)'}`,
+				if (validation.receipt) {
+					const resultWithReceipt = appendPrReviewCollectionReceipt(
+						args.record,
+						prospectiveResult,
+						validation.receipt,
 					);
+					if (resultWithReceipt) {
+						prospectiveResult = resultWithReceipt;
+					} else if (
+						consumePrReviewReceiptAppendFailureLog(
+							args.receiptAppendFailureLogs,
+							args.record.parentSessionId,
+							args.record.correlationId,
+						)
+					) {
+						logger.log(
+							`[dispatch-lanes] withheld PR-review terminal result without receipt during runtime-deadline finalization: correlation=${args.record.correlationId} batch=${args.record.batchId ?? '(missing)'} lane=${args.record.laneId ?? '(missing)'}`,
+						);
+					}
 				}
-			}
-			if (!validation.ok) {
-				const errorCode =
-					validation.failure?.predicate === 'reviewer.verdict_rows' ||
-					validation.failure?.predicate === 'critic.verdict_rows'
-						? 'PR_REVIEW_VERDICT_CONTRACT_INVALID'
-						: 'PR_WORKFLOW_CONTRACT_INVALID';
-				detail = `${errorCode}: ${validation.reason}`.slice(0, 800);
-			} else if (validation.recoveries?.length) {
-				const workflowLane = args.record.workflowLane?.trim();
-				if (workflowLane) {
-					prospectiveResult.salvagedWorkflowLanes = [workflowLane];
+				if (!validation.ok) {
+					const errorCode =
+						validation.failure?.predicate === 'reviewer.verdict_rows' ||
+						validation.failure?.predicate === 'critic.verdict_rows'
+							? 'PR_REVIEW_VERDICT_CONTRACT_INVALID'
+							: 'PR_WORKFLOW_CONTRACT_INVALID';
+					detail = `${errorCode}: ${validation.reason}`.slice(0, 800);
+				} else if (validation.recoveries?.length) {
+					const workflowLane = args.record.workflowLane?.trim();
+					if (workflowLane) {
+						prospectiveResult.salvagedWorkflowLanes = [workflowLane];
+					}
+					prospectiveResult.salvagedWorkflowLaneRecoveries = [
+						...(prospectiveResult.salvagedWorkflowLaneRecoveries ?? []),
+						...validation.recoveries,
+					];
 				}
-				prospectiveResult.salvagedWorkflowLaneRecoveries = [
-					...(prospectiveResult.salvagedWorkflowLaneRecoveries ?? []),
-					...validation.recoveries,
-				];
+			} catch (error) {
+				detail = `PR_WORKFLOW_CONTRACT_INVALID: ${formatError(error)}`.slice(
+					0,
+					800,
+				);
 			}
-		} catch (error) {
-			detail = `PR_WORKFLOW_CONTRACT_INVALID: ${formatError(error)}`.slice(
-				0,
-				800,
-			);
 		}
 	}
 

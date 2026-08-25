@@ -47,6 +47,18 @@ function confirmedTransitionRequest(handoffPath: string, runId = RUN_ID) {
 	};
 }
 
+function confirmedUrlLessTransitionRequest(
+	handoffPath: string,
+	runId = RUN_ID,
+) {
+	return {
+		runId,
+		handoffPath,
+		exactCommand: `/swarm pr-feedback continue from ${handoffPath}`,
+		confirmedByUser: true,
+	};
+}
+
 function gateStatePath(): string {
 	return path.join(
 		tempDir,
@@ -279,21 +291,15 @@ describe('PR feedback continuation transition', () => {
 		});
 	});
 
-	test('completed reviews can continue externally only with an explicit matching PR URL', async () => {
+	test('completed reviews can continue externally with either exact continuation command form', async () => {
 		const { handoffPath, findingIds } = await materializeTerminalReview();
 		await expect(
 			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA),
 		).resolves.toBe('completed');
-		await expect(
-			transitionPrReviewToFeedback(tempDir, SESSION_ID, {
-				runId: RUN_ID,
-				handoffPath,
-			}),
-		).rejects.toThrow(/explicit GitHub PR URL/i);
 		const feedback = await transitionPrReviewToFeedback(
 			tempDir,
 			SESSION_ID,
-			confirmedTransitionRequest(handoffPath),
+			confirmedUrlLessTransitionRequest(handoffPath),
 		);
 		expect(feedback).toMatchObject({
 			mode: 'PR_FEEDBACK',

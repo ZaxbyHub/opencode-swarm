@@ -50,6 +50,7 @@ export const PR_REVIEW_FINDINGS_MAX_BYTES = 10 * 1024 * 1024;
 export const PR_REVIEW_FINDINGS_WRITE_MAX_BYTES = 3 * 1024 * 1024;
 export const PR_REVIEW_HANDOFF_MAX_BYTES = 128 * 1024;
 export const PR_REVIEW_HANDOFF_WRITE_MAX_BYTES = 120 * 1024;
+export const PR_REVIEW_DISCARDED_EXAMPLE_ITEM_ID = 'discarded-id';
 
 export function serializedPrReviewArtifactInputBytes(value: unknown): number {
 	return new TextEncoder().encode(JSON.stringify(value)).byteLength;
@@ -360,7 +361,7 @@ export function buildPrReviewContractCard(): string {
 	]);
 	const discardedReviewer = encodePrReviewVerdictRow('reviewer', [
 		reviewer.marker,
-		'discarded-id',
+		PR_REVIEW_DISCARDED_EXAMPLE_ITEM_ID,
 		'DISPROVED',
 		'STRUCTURALLY_PROVEN',
 		'NONE',
@@ -372,7 +373,7 @@ export function buildPrReviewContractCard(): string {
 	]);
 	const discardedCritic = encodePrReviewVerdictRow('critic', [
 		critic.marker,
-		'discarded-id',
+		PR_REVIEW_DISCARDED_EXAMPLE_ITEM_ID,
 		'DISPROVED',
 		'NONE',
 		'illustrative only',
@@ -405,6 +406,10 @@ export function buildPrReviewContractCard(): string {
 		'- assigned_item_ids and workflow_lane come only from the controller block.',
 		'- Omit no assigned row; emit no row for an unassigned or discarded example ID.',
 		'- A settled lane is immutable and is never reprocessed on later collection.',
+		'Transition matrix:',
+		'- reviewer lane: assigned item -> exactly one REVIEWED row -> critic routing or terminal disposition.',
+		'- critic lane: assigned reviewer claim -> exactly one CRITIC row -> final finding disposition.',
+		'- malformed, duplicate, missing, or discarded rows -> contract failure and bounded retry; never acceptance.',
 		'Retry and deadline semantics:',
 		'- Malformed live rows fail closed and may be retried only within the controller retry bound.',
 		'- A waited collection deadline terminalizes active lanes as error after bounded partial salvage.',

@@ -199,4 +199,68 @@ describe('collect_lane_results waited PR-review deadline terminalization (#2333)
 		]);
 		expect(result.lane_results[0]?.accepted_review_item_ids).toBeUndefined();
 	});
+
+	test('a late transport-validator resolution cannot recover a lane after waited deadline terminalization', async () => {
+		const directory = makeTempDir();
+		const batchId = 'review-late-validator';
+		const correlationId = `${batchId}-session`;
+		await recordPending({
+			directory,
+			batchId,
+			correlationId,
+			mode: 'swarm-pr-review:reviewer',
+			workflowLane: 'review-lane',
+			workspace: {
+				directory,
+				gitHead: 'head-1',
+				dirtyHash: null,
+				prHeadSha: 'head-1',
+				scope: 'complete PR diff base-1...head-1',
+			},
+		});
+		let resolveValidator: (() => void) | undefined;
+		_internals.resolvePrWorkflowRevisionDigestAsync = async () => 'revision-1';
+		_internals.validatePrWorkflowTransportRecovery = mock(async () => {
+			return new Promise((resolve) => {
+				resolveValidator = () => resolve({ ok: true });
+			});
+		});
+		const status = mock(() => new Promise<never>(() => {}));
+		const messages = mock(async () => ({
+			data: [
+				assistantMessage(
+					'[REVIEWED] | R-1 | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer',
+					{
+						time: undefined,
+						finish: 'stop',
+					},
+				),
+			],
+		}));
+		_internals.getSessionOps = () => ({ ...baseOps(), status, messages });
+
+		const result = await withTestDeadline(
+			executeCollectLaneResults(
+				{
+					batch_id: batchId,
+					wait: true,
+					include_pending: true,
+					timeout_ms: 25,
+				},
+				directory,
+			),
+		);
+
+		expect(result.failed).toBe(1);
+		expect(result.lane_results[0]?.status).toBe('failed');
+		expect(result.lane_results[0]?.error).toContain(
+			'transport recovery validation',
+		);
+		expect(settledRecord(directory, correlationId).status).toBe('error');
+
+		resolveValidator?.();
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(settledRecord(directory, correlationId).status).toBe('error');
+	});
 });

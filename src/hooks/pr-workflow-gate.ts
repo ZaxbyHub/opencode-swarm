@@ -36,6 +36,7 @@ import {
 import { MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS } from '../background/pr-review-collection-receipt.js';
 import {
 	generatePrReviewRunId,
+	PR_REVIEW_DISCARDED_EXAMPLE_ITEM_ID,
 	PR_REVIEW_FINDINGS_MAX_BYTES,
 	PR_REVIEW_HANDOFF_MAX_BYTES,
 	PrReviewCriticVerdictFieldsSchema,
@@ -6106,31 +6107,35 @@ export async function resolvePrReviewWriterRunId(
 			);
 			const workflowInstanceId = workflowIdentity(state);
 			const normalizedRequested = requestedRunId?.trim() || undefined;
-			const recoveredReservations = await findOwnedPrReviewRunReservations(
-				directory,
-				normalizedSessionID,
-				workflowInstanceId,
-			);
-			const boundValues = [
+			const stateBoundValues = [
 				state.prReviewReservedRunId,
 				state.prReviewTriggerEvalRunId,
 				state.prReviewArtifactRunId,
-				...recoveredReservations,
 			].filter((value): value is string => Boolean(value?.trim()));
-			const distinct = [...new Set(boundValues)];
+			const stateDistinct = [...new Set(stateBoundValues)];
 			if (
 				normalizedRequested &&
-				distinct.some((value) => value !== normalizedRequested)
+				stateDistinct.some((value) => value !== normalizedRequested)
 			) {
-				if (distinct.length === 1) {
+				if (stateDistinct.length === 1) {
 					throw new Error(
-						`BLOCKED: field run_id expected "${distinct[0]}", got "${normalizedRequested}"`,
+						`BLOCKED: field run_id expected "${stateDistinct[0]}", got "${normalizedRequested}"`,
 					);
 				}
 				throw new Error(
-					`BLOCKED: field run_id expected one unambiguous active value, got "${normalizedRequested}" while active bindings are ${distinct.join(', ')}`,
+					`BLOCKED: field run_id expected one unambiguous active value, got "${normalizedRequested}" while active bindings are ${stateDistinct.join(', ')}`,
 				);
 			}
+			const recoveredReservations = normalizedRequested
+				? []
+				: await findOwnedPrReviewRunReservations(
+						directory,
+						normalizedSessionID,
+						workflowInstanceId,
+					);
+			const distinct = [
+				...new Set([...stateBoundValues, ...recoveredReservations]),
+			];
 			if (!normalizedRequested && distinct.length > 1) {
 				throw new Error(
 					`BLOCKED: field run_id expected one unambiguous active value, got (omitted) while active bindings are ${distinct.join(', ')}`,
@@ -6150,12 +6155,19 @@ export async function resolvePrReviewWriterRunId(
 			let resolvedRunId = normalizedRequested ?? distinct[0];
 			if (!resolvedRunId) {
 				const base = generatePrReviewRunId();
-				let suffix = 0;
-				while (!resolvedRunId) {
+				for (
+					let suffix = 0;
+					suffix < MAX_PR_REVIEW_RUN_ID_SUFFIX_ATTEMPTS && !resolvedRunId;
+					suffix += 1
+				) {
 					const candidate = suffix === 0 ? base : `${base}-${suffix}`;
 					const reserved = await reserve(candidate);
 					if (reserved) resolvedRunId = reserved;
-					suffix += 1;
+				}
+				if (!resolvedRunId) {
+					throw new Error(
+						`BLOCKED: PR_REVIEW run_id generation exhausted ${MAX_PR_REVIEW_RUN_ID_SUFFIX_ATTEMPTS} reservation attempts for base "${base}"`,
+					);
 				}
 			} else if ((await reserve(resolvedRunId)) === null) {
 				throw new Error(
@@ -6848,6 +6860,20 @@ function normalizePrReviewFeedbackHandoffPath(
 	return { runId: matched[1], relativePath: relative };
 }
 
+function buildAcceptedPrFeedbackContinuationCommands(
+	confirmationCommand: string,
+	relativeHandoffPath: string,
+	requestedPrUrl?: string,
+): Set<string> {
+	const commands = new Set([confirmationCommand]);
+	if (!requestedPrUrl) {
+		commands.add(
+			`/swarm pr-feedback continue from .swarm/${relativeHandoffPath}`,
+		);
+	}
+	return commands;
+}
+
 async function readBoundedSwarmRegularFile(
 	directory: string,
 	relativePath: string,
@@ -6963,6 +6989,7 @@ function prReviewFeedbackConsentRelativePath(runId: string): string {
 }
 
 const MAX_PR_REVIEW_RESERVATION_SCAN_ENTRIES = 1024;
+const MAX_PR_REVIEW_RUN_ID_SUFFIX_ATTEMPTS = 64;
 
 /**
  * Recover a reservation that reached disk before its gate-state binding did.
@@ -7525,11 +7552,6 @@ export async function transitionPrReviewToFeedback(
 		sourceRevision = ready.revision;
 		provenance = 'active-review-v1';
 	} else {
-		if (!request.prUrl) {
-			throw new Error(
-				'BLOCKED: continuing a completed PR_REVIEW requires an explicit GitHub PR URL',
-			);
-		}
 		const reservation = await readPrReviewRunReservation(
 			directory,
 			request.runId,
@@ -7565,10 +7587,16 @@ export async function transitionPrReviewToFeedback(
 		sourceWorkflowInstanceId: expectedConsentSourceIdentity,
 	});
 	const exactCommand = request.exactCommand?.trim();
+	const acceptedContinuationCommands =
+		buildAcceptedPrFeedbackContinuationCommands(
+			consent.confirmation_command,
+			normalizedHandoff.relativePath,
+			request.prUrl,
+		);
 	if (
 		request.confirmedByUser !== true ||
 		!exactCommand ||
-		exactCommand !== consent.confirmation_command
+		!acceptedContinuationCommands.has(exactCommand)
 	) {
 		throw new Error(
 			`BLOCKED: PR_FEEDBACK continuation requires explicit confirmation with the offered command: ${consent.confirmation_command}`,
@@ -7668,7 +7696,13 @@ export async function transitionPrReviewToFeedback(
 				),
 				sourceWorkflowInstanceId: expectedConsentSourceIdentity,
 			});
-			if (lockedConsent.confirmation_command !== exactCommand) {
+			if (
+				!buildAcceptedPrFeedbackContinuationCommands(
+					lockedConsent.confirmation_command,
+					normalizedHandoff.relativePath,
+					request.prUrl,
+				).has(exactCommand)
+			) {
 				throw new Error(
 					'BLOCKED: PR_FEEDBACK continuation command changed during transition',
 				);
@@ -12532,18 +12566,31 @@ export async function validatePrWorkflowTransportRecovery(
 			acceptedReviewItemIds: [...itemIds],
 			rejectedReviewItemIds: [],
 		};
-		return input.result.truncated === true
-			? {
-					ok: true,
-					receipt,
-					recoveries: [
+		const recoveries = [
+			...(analysis.recoveries ?? []).map(({ recovery, itemId }) => ({
+				workflowLane,
+				kind: 'legacy-verdict-row-recovery' as const,
+				reason:
+					recovery === 'legacy-fidelity-safe'
+						? `legacy verdict row ${itemId} used trailing-field pipe recovery with full field fidelity`
+						: `legacy verdict row ${itemId} used trailing-field pipe recovery with lossy prose normalization`,
+			})),
+			...(input.result.truncated === true
+				? [
 						{
 							workflowLane,
-							kind: 'truncated-preview-durable-artifact',
+							kind: 'truncated-preview-durable-artifact' as const,
 							reason:
 								'inline preview truncated; durable artifact retained exact coverage',
 						},
-					],
+					]
+				: []),
+		];
+		return recoveries.length > 0
+			? {
+					ok: true,
+					receipt,
+					recoveries,
 				}
 			: { ok: true, receipt };
 	} else if (mode === 'swarm-pr-feedback:verification') {
@@ -12802,14 +12849,19 @@ function parsePrReviewVerdictRows(
 		string,
 		{ classification: string; severity: string; rowDigest?: string }
 	>;
+	recoveries: IndexedVerdictRows['recoveries'];
 } {
 	const parsed = new Map<
 		string,
 		{ classification: string; severity: string; rowDigest?: string }
 	>();
 	const marker = phase === 'reviewer' ? '[REVIEWED]' : '[CRITIC]';
-	const { markerRows, rowsByItemId } = indexVerdictRows(text, marker);
+	const { markerRows, rowsByItemId, recoveries } = indexVerdictRows(
+		text,
+		marker,
+	);
 	for (const itemId of itemIds) {
+		if (itemId === PR_REVIEW_DISCARDED_EXAMPLE_ITEM_ID) continue;
 		if (phase === 'reviewer') {
 			const rows = rowsByItemId.get(itemId);
 			const fields =
@@ -12836,7 +12888,7 @@ function parsePrReviewVerdictRows(
 			severity: verdict.severity,
 		});
 	}
-	return { markerRows, parsed };
+	return { markerRows, parsed, recoveries };
 }
 
 /** Exact assigned-row contract used by both normal and recovered collection. */
@@ -12845,10 +12897,15 @@ function analyzePrReviewVerdictRowContract(
 	itemIds: readonly string[],
 	phase: PrReviewComposablePhase,
 	reviewerClaims?: ReadonlyMap<string, PrReviewItemClaim>,
-): { ok: boolean; expected: string; actual: string } {
+): {
+	ok: boolean;
+	expected: string;
+	actual: string;
+	recoveries: IndexedVerdictRows['recoveries'];
+} {
 	const marker = phase === 'reviewer' ? '[REVIEWED]' : '[CRITIC]';
 	const assigned = new Set(itemIds);
-	const { markerRows, parsed } = parsePrReviewVerdictRows(
+	const { markerRows, parsed, recoveries } = parsePrReviewVerdictRows(
 		text,
 		itemIds,
 		phase,
@@ -12870,6 +12927,7 @@ function analyzePrReviewVerdictRowContract(
 			invalidOrMissingIds,
 			unexpectedIds,
 		}),
+		recoveries,
 	};
 }
 

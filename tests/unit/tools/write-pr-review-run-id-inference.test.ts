@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
 	existsSync,
+	mkdirSync,
 	mkdtempSync,
 	readdirSync,
 	realpathSync,
 	rmSync,
+	writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -50,11 +52,34 @@ const originalGateRevisionDigest =
 const originalResolveRevisionDigest =
 	writerInternals.resolvePrWorkflowRevisionDigest;
 const originalResolveMergeBase = writerInternals.resolveMergeBase;
+const RealDate = Date;
 
 function tempRoot(): string {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), 'run-id-inference-')));
 	tempDirs.push(root);
 	return root;
+}
+
+async function withFrozenGlobalDate<T>(
+	isoTimestamp: string,
+	callback: () => Promise<T>,
+): Promise<T> {
+	const frozen = new RealDate(isoTimestamp);
+	class FrozenDate extends RealDate {
+		constructor(value?: string | number | Date) {
+			super(value ?? frozen.toISOString());
+		}
+
+		static override now(): number {
+			return frozen.getTime();
+		}
+	}
+	globalThis.Date = FrozenDate as DateConstructor;
+	try {
+		return await callback();
+	} finally {
+		globalThis.Date = RealDate;
+	}
 }
 
 function rows(sessionID = SESSION_ID) {
@@ -197,6 +222,7 @@ async function establishBoundReviewGate(root: string, sessionID = SESSION_ID) {
 
 afterEach(() => {
 	gateInternals.resetTrackedStateCache();
+	globalThis.Date = RealDate;
 	gateInternals.resolveCurrentGitHead = originalResolveCurrentGitHead;
 	gateInternals.resolveCurrentGitHeadAsync = originalResolveCurrentGitHeadAsync;
 	gateInternals.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
@@ -366,5 +392,76 @@ describe('PR review run_id inference and reservation (#2333)', () => {
 		expect(parsed.success).toBe(false);
 		expect(parsed.message).toContain('run_id');
 		expect(parsed.message).toContain('already occupied');
+	});
+
+	test('explicit run_id writes skip oversized reservation recovery scans', async () => {
+		const root = tempRoot();
+		await establishBoundReviewGate(root);
+		const reviewRoot = join(root, '.swarm', 'pr-review');
+		for (let index = 0; index <= 1024; index += 1) {
+			const dir = join(reviewRoot, `noise-${index}`);
+			mkdirSync(dir, { recursive: true });
+		}
+
+		const raw = await executeWritePrReviewTriggerEval(
+			{
+				run_id: 'explicit-run',
+				pr_head_sha: HEAD_SHA,
+				base_ref: 'origin/main',
+				base_sha: 'def456',
+				rows: rows(),
+			},
+			root,
+			{ sessionID: SESSION_ID },
+		);
+		const parsed = JSON.parse(raw) as {
+			success: boolean;
+			run_id?: string;
+			message?: string;
+		};
+		expect(parsed.success).toBe(true);
+		expect(parsed.run_id).toBe('explicit-run');
+	});
+
+	test('omitted run_id fails closed after a bounded number of occupied suffix attempts', async () => {
+		const root = tempRoot();
+		await establishBoundReviewGate(root);
+		await withFrozenGlobalDate('2026-08-25T12:34:56.789Z', async () => {
+			const reviewRoot = join(root, '.swarm', 'pr-review');
+			const base = 'pr-review-20260825123456789';
+			for (let suffix = 0; suffix < 64; suffix += 1) {
+				const runId = suffix === 0 ? base : `${base}-${suffix}`;
+				const runDir = join(reviewRoot, runId);
+				mkdirSync(runDir, { recursive: true });
+				writeFileSync(
+					join(runDir, 'run-reservation.json'),
+					JSON.stringify(
+						{
+							schema_version: 1,
+							session_id: 'other-session',
+							workflow_instance_id: 'other-workflow',
+							run_id: runId,
+							reserved_at: '2026-08-25T12:34:56.789Z',
+						},
+						null,
+						2,
+					),
+				);
+			}
+
+			const raw = await executeWritePrReviewTriggerEval(
+				{
+					pr_head_sha: HEAD_SHA,
+					base_ref: 'origin/main',
+					base_sha: 'def456',
+					rows: rows(),
+				},
+				root,
+				{ sessionID: SESSION_ID },
+			);
+			const parsed = JSON.parse(raw) as { success: boolean; message?: string };
+			expect(parsed.success).toBe(false);
+			expect(parsed.message).toContain('exhausted 64 reservation attempts');
+		});
 	});
 });
