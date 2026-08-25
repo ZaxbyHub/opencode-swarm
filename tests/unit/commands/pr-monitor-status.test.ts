@@ -7,19 +7,10 @@ import {
 	handlePrMonitorStatusCommand,
 } from '../../../src/commands/pr-monitor-status.js';
 import { COMMAND_REGISTRY } from '../../../src/commands/registry.js';
+import { freezeClock } from '../../helpers/test-clock.js';
 
 const { formatRelativeTime, formatMergeGroupStatus } = _internals;
 const fixedNow = 1_700_000_000_000;
-
-function withFixedNow<T>(callback: () => T): T {
-	const originalNow = Date.now;
-	Date.now = () => fixedNow;
-	try {
-		return callback();
-	} finally {
-		Date.now = originalNow;
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Mock listActive via _internals DI seam — no mock.module needed
@@ -31,84 +22,89 @@ const mockListActive = mock(() => Promise.resolve([]));
 // ---------------------------------------------------------------------------
 let tempDir: string;
 let savedInternals: typeof _internals;
+let restoreClock: () => void;
+// Sync sleeper for the EBUSY retry below (Atomics.wait — no Bun.* API).
+const sleeper = new Int32Array(new SharedArrayBuffer(4));
 
 beforeEach(() => {
 	tempDir = mkdtempSync(join(tmpdir(), 'pr-status-test-'));
 	savedInternals = { ..._internals };
 	_internals.listActive = mockListActive;
 	mockListActive.mockReset();
+	// Freeze the wall clock per-test: fixtures and the render-time
+	// relative-time formatting must see the same instant, or a runner stall
+	// flips the bucket (issue #1982 windows-latest flake class).
+	restoreClock = freezeClock({ fixedNow });
 });
 
 afterEach(() => {
-	rmSync(tempDir, { recursive: true, force: true });
+	restoreClock();
+	removeTempDir(tempDir);
 	mockListActive.mockReset();
 	_internals.listActive = savedInternals.listActive;
 });
+
+// Windows AV can briefly hold the temp-dir handle (EBUSY/EPERM, issue #1782
+// class); retry with bounded backoff before giving up.
+function removeTempDir(dir: string): void {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			rmSync(dir, { recursive: true, force: true });
+			return;
+		} catch (error) {
+			const { code } = error as NodeJS.ErrnoException;
+			if ((code !== 'EBUSY' && code !== 'EPERM') || attempt === 4) throw error;
+			Atomics.wait(sleeper, 0, 0, 100 * (attempt + 1));
+		}
+	}
+}
 
 // ---------------------------------------------------------------------------
 // formatRelativeTime tests
 // ---------------------------------------------------------------------------
 describe('formatRelativeTime', () => {
 	test('returns "just now" for timestamps within the last 5 seconds', () => {
-		withFixedNow(() => {
-			expect(formatRelativeTime(fixedNow)).toBe('just now');
-			expect(formatRelativeTime(fixedNow - 1000)).toBe('just now');
-			expect(formatRelativeTime(fixedNow - 4999)).toBe('just now');
-		});
+		expect(formatRelativeTime(fixedNow)).toBe('just now');
+		expect(formatRelativeTime(fixedNow - 1000)).toBe('just now');
+		expect(formatRelativeTime(fixedNow - 4999)).toBe('just now');
 	});
 
 	test('returns "just now" for future timestamps', () => {
-		withFixedNow(() => {
-			expect(formatRelativeTime(fixedNow + 1000)).toBe('just now');
-		});
+		expect(formatRelativeTime(fixedNow + 1000)).toBe('just now');
 	});
 
 	test('returns seconds ago for timestamps under 60 seconds', () => {
-		withFixedNow(() => {
-			expect(formatRelativeTime(fixedNow - 5000)).toBe('5 seconds ago');
-			expect(formatRelativeTime(fixedNow - 30000)).toBe('30 seconds ago');
-			expect(formatRelativeTime(fixedNow - 59000)).toBe('59 seconds ago');
-		});
+		expect(formatRelativeTime(fixedNow - 5000)).toBe('5 seconds ago');
+		expect(formatRelativeTime(fixedNow - 30000)).toBe('30 seconds ago');
+		expect(formatRelativeTime(fixedNow - 59000)).toBe('59 seconds ago');
 	});
 
 	test('returns singular "minute" for 1 minute', () => {
-		withFixedNow(() => {
-			expect(formatRelativeTime(fixedNow - 60_000)).toBe('1 minute ago');
-		});
+		expect(formatRelativeTime(fixedNow - 60_000)).toBe('1 minute ago');
 	});
 
 	test('returns plural "minutes" for multiple minutes', () => {
-		withFixedNow(() => {
-			expect(formatRelativeTime(fixedNow - 120_000)).toBe('2 minutes ago');
-			expect(formatRelativeTime(fixedNow - 300_000)).toBe('5 minutes ago');
-			expect(formatRelativeTime(fixedNow - 3_599_000)).toBe('59 minutes ago');
-		});
+		expect(formatRelativeTime(fixedNow - 120_000)).toBe('2 minutes ago');
+		expect(formatRelativeTime(fixedNow - 300_000)).toBe('5 minutes ago');
+		expect(formatRelativeTime(fixedNow - 3_599_000)).toBe('59 minutes ago');
 	});
 
 	test('returns singular "hour" for 1 hour', () => {
-		withFixedNow(() => {
-			expect(formatRelativeTime(fixedNow - 3_600_000)).toBe('1 hour ago');
-		});
+		expect(formatRelativeTime(fixedNow - 3_600_000)).toBe('1 hour ago');
 	});
 
 	test('returns plural "hours" for multiple hours', () => {
-		withFixedNow(() => {
-			expect(formatRelativeTime(fixedNow - 7_200_000)).toBe('2 hours ago');
-			expect(formatRelativeTime(fixedNow - 86_399_000)).toBe('23 hours ago');
-		});
+		expect(formatRelativeTime(fixedNow - 7_200_000)).toBe('2 hours ago');
+		expect(formatRelativeTime(fixedNow - 86_399_000)).toBe('23 hours ago');
 	});
 
 	test('returns singular "day" for 1 day', () => {
-		withFixedNow(() => {
-			expect(formatRelativeTime(fixedNow - 86_400_000)).toBe('1 day ago');
-		});
+		expect(formatRelativeTime(fixedNow - 86_400_000)).toBe('1 day ago');
 	});
 
 	test('returns plural "days" for multiple days', () => {
-		withFixedNow(() => {
-			expect(formatRelativeTime(fixedNow - 172_800_000)).toBe('2 days ago');
-			expect(formatRelativeTime(fixedNow - 604_800_000)).toBe('7 days ago');
-		});
+		expect(formatRelativeTime(fixedNow - 172_800_000)).toBe('2 days ago');
+		expect(formatRelativeTime(fixedNow - 604_800_000)).toBe('7 days ago');
 	});
 });
 
