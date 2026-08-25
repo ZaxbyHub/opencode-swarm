@@ -76,7 +76,7 @@ describe('knowledge hive-quarantine policy (issue #2033)', () => {
 		expect(r.remainingArgs).toEqual(['preview', 'id-1']);
 	});
 
-	test('registry human-only bucket still contains exactly the expected 10 commands', () => {
+	test('registry human-only bucket still contains exactly the expected 11 commands', () => {
 		// Mirrors the no-regression bucket snapshot in tool-policy.human-only.test.ts
 		// (moved out of the FR-006 over-capped registry.tool-policy.test.ts) —
 		// #2033's entry made it 9; #2268's /swarm recover made it 10.
@@ -88,6 +88,7 @@ describe('knowledge hive-quarantine policy (issue #2033)', () => {
 		}
 		expect([...actual].sort()).toEqual(
 			[
+				'full-auto',
 				'review',
 				'memory compact',
 				'memory import',

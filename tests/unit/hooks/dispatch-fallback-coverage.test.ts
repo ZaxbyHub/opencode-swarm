@@ -50,10 +50,10 @@ const ALLOWLIST: Record<string, string> = {
 	'src/evaluation/ephemeral-agent-dispatcher.ts':
 		'policy-free primitive: callers own fallback or same-model retry policy',
 	// Issue #1927 "out of scope": generateMutants dispatches with agent:undefined
-	// (no role/chain), so resolveFallbackModel cannot resolve a target; the
-	// existing graceful `return []` is the correct opt-in-tool behavior.
+	// (no role/chain), so it gets bounded same-model retry only and still cannot
+	// consume any role-scoped fallback chain or override state.
 	'src/mutation/generator.ts':
-		'#1927 out-of-scope: agent:undefined, no role/chain; graceful return [] is correct',
+		'#1927 out-of-scope: agent:undefined, no role/chain; bounded same-model retry only',
 };
 
 function listSourceFiles(): string[] {

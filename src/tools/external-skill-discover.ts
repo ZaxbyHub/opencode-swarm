@@ -19,6 +19,7 @@ import type {
 } from '../config/schema.js';
 import { createExternalSkillStore } from '../services/external-skill-store.js';
 import { evaluateCandidate } from '../services/external-skill-validator.js';
+import { withTimeoutSignal } from '../utils/timeout.js';
 import { createSwarmTool } from './create-tool.js';
 
 // ---------------------------------------------------------------------------
@@ -30,16 +31,20 @@ export const _internals = {
 		_url: string,
 		_timeoutMs: number,
 	): Promise<{ content: string; finalUrl: string }> => {
-		assertSafeFetchUrl(_url);
-		const response = await fetch(_url, {
-			signal: AbortSignal.timeout(_timeoutMs),
-		});
-		if (!response.ok) {
-			throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-		}
-		assertSafeFetchUrl(response.url);
-		const content = await response.text();
-		return { content, finalUrl: response.url };
+		return withTimeoutSignal(
+			async (signal) => {
+				assertSafeFetchUrl(_url);
+				const response = await fetch(_url, { signal });
+				if (!response.ok) {
+					throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+				}
+				assertSafeFetchUrl(response.url);
+				const content = await response.text();
+				return { content, finalUrl: response.url };
+			},
+			_timeoutMs,
+			new Error(`External skill fetch timed out after ${_timeoutMs}ms`),
+		);
 	},
 	getTimestamp: (): string => new Date().toISOString(),
 	computeSha256: (content: string): string =>

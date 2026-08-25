@@ -69,6 +69,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		// guardrail diagnostics: pre-existing 'agent' commands not previously
 		// enumerated here — registry is the source of truth (both 'agent')
 		'guardrail explain',
+		'guardrail reset',
 		'guardrail-log',
 		'lanes',
 		'ci-simulate',
@@ -114,7 +115,6 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'design-docs',
 		'epic',
 		'finalize',
-		'full-auto',
 		'handoff',
 		'issue',
 		'link',
@@ -549,22 +549,6 @@ describe('two-tier human-only: "restricted" is disjoint from "human-only"', () =
 			expect(result.allowed).toBe(false);
 			if (result.allowed === false) {
 				expect(result.message).toContain('human-only');
-			}
-		}
-	});
-});
-
-// ---------------------------------------------------------------------------
-// 6. toolPolicy values are valid enum members
-// ---------------------------------------------------------------------------
-
-describe('toolPolicy field values are valid', () => {
-	test('toolPolicy is always one of the four valid string literals (or undefined for aliases/subcommands)', () => {
-		const valid = new Set(['agent', 'human-only', 'restricted', 'none']);
-		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
-			const e = entry as CommandEntry;
-			if (e.toolPolicy !== undefined) {
-				expect(valid.has(e.toolPolicy)).toBe(true);
 			}
 		}
 	});

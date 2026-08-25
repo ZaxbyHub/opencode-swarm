@@ -548,7 +548,8 @@ export const COMMAND_REGISTRY = {
 		deprecated: true,
 	},
 	diagnose: {
-		handler: (ctx) => handleDiagnoseCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleDiagnoseCommand(ctx.directory, ctx.args, ctx.sessionID),
 		description: 'Run health check on swarm state',
 		category: 'diagnostics',
 		toolPolicy: 'agent',
@@ -556,7 +557,8 @@ export const COMMAND_REGISTRY = {
 	},
 	// Alias: users commonly type 'diagnosis' — route to the same handler as 'diagnose'.
 	diagnosis: {
-		handler: (ctx) => handleDiagnoseCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleDiagnoseCommand(ctx.directory, ctx.args, ctx.sessionID),
 		description: 'Run health check on swarm state',
 		category: 'diagnostics',
 		aliasOf: 'diagnose',
@@ -573,6 +575,16 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'agent',
 		toolNoArgs: false,
 	},
+	'guardrail reset': {
+		handler: async (ctx) => {
+			const { handleGuardrailReset } = await import('./guardrail-reset.js');
+			return handleGuardrailReset(ctx.args, ctx.sessionID);
+		},
+		description:
+			'Reset one exact active invocation/action circuit after repair',
+		category: 'diagnostics',
+		toolPolicy: 'agent',
+	},
 	// Alias for TUI shortcut 'swarm-guardrail-explain' which extracts the
 	// subcommand as the single dash token 'guardrail-explain'. Without this alias
 	// resolveCommand(['guardrail-explain']) returns null and the TUI shows
@@ -588,6 +600,20 @@ export const COMMAND_REGISTRY = {
 			'Dry-run: show what the guardrails would do to a command or write target (executes nothing)',
 		category: 'diagnostics',
 		aliasOf: 'guardrail explain',
+		deprecated: true,
+	},
+	// Alias for the TUI shortcut 'swarm-guardrail-reset'. The dash-joined
+	// shortcut resolves to this one-token form, while the canonical command is
+	// the two-token 'guardrail reset' entry above.
+	'guardrail-reset': {
+		handler: async (ctx) => {
+			const { handleGuardrailReset } = await import('./guardrail-reset.js');
+			return handleGuardrailReset(ctx.args, ctx.sessionID);
+		},
+		description:
+			'Reset one exact active invocation/action circuit after repair',
+		category: 'diagnostics',
+		aliasOf: 'guardrail reset',
 		deprecated: true,
 	},
 	'guardrail-log': {
@@ -841,7 +867,8 @@ export const COMMAND_REGISTRY = {
 		deprecated: true,
 	},
 	health: {
-		handler: (ctx) => handleDiagnoseCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleDiagnoseCommand(ctx.directory, ctx.args, ctx.sessionID),
 		description: 'Run health check on swarm state',
 		category: 'diagnostics',
 		aliasOf: 'diagnose',
@@ -1487,15 +1514,18 @@ export const COMMAND_REGISTRY = {
 		handler: (ctx) =>
 			handleFullAutoCommand(ctx.directory, ctx.args, ctx.sessionID),
 		description:
-			'Toggle Full-Auto Mode for the active session [on [mode]|off|status]',
-		args: 'on [assisted|supervised|strict], off, status',
+			'Control Full-Auto Mode for the active session [on [mode]|off|exit|status|retry-oversight|resume|abort]',
+		args: 'on [assisted|supervised|strict], off|exit, status, retry-oversight, resume, abort',
 		details:
 			'First-class toggle for Full-Auto Mode — a critic gate reviewing escalations on your behalf (the architect still plans and delegates; full-auto never executes tasks itself). No config-level enablement is required: "on" activates immediately (unless full_auto.locked is true in config), "off" disarms the run and returns the session to normal interactive operation, "status" reports the durable run state. ' +
 			'An optional mode after "on" overrides full_auto.mode for this run: assisted (critic consulted only on policy escalations), supervised (default — risky/high-impact actions reviewed by the critic), strict (ALL plan mutations reviewed by the critic). ' +
 			'While active, the critic answers architect questions and reviews phase boundaries, delegations, and risky actions on your behalf; only ESCALATE_TO_HUMAN verdicts halt the run for your input. ' +
+			'`retry-oversight` performs a transport-only health probe for an infrastructure/deadline pause and never replays the denied action. `resume` requires a recent successful matching probe and no active recovery blockers. `abort` terminates the durable run immediately. ' +
 			'The run state is durable (.swarm/full-auto-state.json) and survives restarts; toggle with no argument flips the current state.',
 		category: 'utility',
-		toolPolicy: 'none',
+		// An agent running under Full-Auto must not be able to disable its own
+		// oversight with `/swarm full-auto off`.
+		toolPolicy: 'human-only',
 	},
 	'auto-proceed': {
 		handler: (ctx: CommandContext) =>

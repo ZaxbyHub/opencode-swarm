@@ -4,6 +4,9 @@
  * separately; these inert bindings keep unrelated hook modules loadable.
  */
 export const STATE_MOCK_TRANSITIVE_STUBS = {
+	// State's test seam is imported by transitive guardrail modules. Close tests
+	// do not execute it, but the export must exist while state.js is mocked.
+	_internals: {},
 	// Per-session context budget. Reached transitively through index.ts and
 	// services/compaction-service.ts; a missing binding makes Bun throw
 	// "Export named 'getSessionBudgetPct' not found" at import time and fail

@@ -142,7 +142,7 @@ describe('Full-Auto Command Registration', () => {
 			fs.rmSync(projectDir, { recursive: true, force: true });
 		});
 
-		it('should route "full-auto on" subcommand to handleFullAutoCommand', async () => {
+		it('directly enables Full-Auto for a human "full-auto on" command', async () => {
 			const handler = commandsIndex.createSwarmCommandHandler(projectDir, {});
 			const output = { parts: [] as unknown[] };
 
@@ -156,13 +156,12 @@ describe('Full-Auto Command Registration', () => {
 			);
 
 			expect(output.parts).toHaveLength(1);
-			expect((output.parts[0] as { text: string }).text).toContain(
-				'Full-Auto Mode enabled',
-			);
+			const text = (output.parts[0] as { text: string }).text;
+			expect(text).toContain('Full-Auto Mode enabled');
 			expect(getAgentSession(testSessionId)?.fullAutoMode).toBe(true);
 		});
 
-		it('should route "full-auto off" to disable full-auto mode', async () => {
+		it('directly disables Full-Auto for a human "full-auto off" command', async () => {
 			const session = getAgentSession(testSessionId);
 			session!.fullAutoMode = true;
 
@@ -178,13 +177,12 @@ describe('Full-Auto Command Registration', () => {
 				output,
 			);
 
-			expect((output.parts[0] as { text: string }).text).toContain(
-				'Full-Auto Mode disabled',
-			);
+			const text = (output.parts[0] as { text: string }).text;
+			expect(text).toContain('Full-Auto Mode disabled');
 			expect(session?.fullAutoMode).toBe(false);
 		});
 
-		it('should route "full-auto" (no args) to toggle', async () => {
+		it('directly toggles Full-Auto for a human "full-auto" command', async () => {
 			const handler = commandsIndex.createSwarmCommandHandler(projectDir, {});
 			const output = { parts: [] as unknown[] };
 
@@ -198,13 +196,12 @@ describe('Full-Auto Command Registration', () => {
 				output,
 			);
 
-			expect((output.parts[0] as { text: string }).text).toContain(
-				'Full-Auto Mode enabled',
-			);
+			const text = (output.parts[0] as { text: string }).text;
+			expect(text).toContain('Full-Auto Mode enabled');
 			expect(getAgentSession(testSessionId)?.fullAutoMode).toBe(true);
 		});
 
-		it('should return error when no active session', async () => {
+		it('reports the missing active session without executing when no session is bound', async () => {
 			const handler = commandsIndex.createSwarmCommandHandler(projectDir, {});
 			const output = { parts: [] as unknown[] };
 
@@ -218,7 +215,7 @@ describe('Full-Auto Command Registration', () => {
 			);
 
 			expect((output.parts[0] as { text: string }).text).toContain(
-				'Error: No active session. Full-Auto Mode requires an active session to operate.',
+				'No active session',
 			);
 		});
 	});

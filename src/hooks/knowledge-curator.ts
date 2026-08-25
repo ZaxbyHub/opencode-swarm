@@ -13,6 +13,7 @@ import type { CurationContext } from '../knowledge/curation-policy.js';
 import { reserveQuota } from '../services/skill-improver-quota.js';
 import { rebuildSynonymMap } from '../services/synonym-map.js';
 import { warn } from '../utils/logger.js';
+import { withTimeoutSignal } from '../utils/timeout.js';
 import type { CuratorLLMDelegate } from './curator.js';
 import {
 	effectiveRetrievalOutcomes,
@@ -759,10 +760,12 @@ async function enrichLessonsToV3Batched(params: {
 					scope: 'knowledge-enrichment',
 				});
 				if (!reservation.allowed) break;
-				const response = await params.llmDelegate(
-					'',
-					userInput,
-					AbortSignal.timeout(ENRICHMENT_LLM_TIMEOUT_MS),
+				const response = await withTimeoutSignal(
+					(signal) => params.llmDelegate('', userInput, signal),
+					ENRICHMENT_LLM_TIMEOUT_MS,
+					new Error(
+						`Knowledge enrichment timed out after ${ENRICHMENT_LLM_TIMEOUT_MS}ms`,
+					),
 				);
 				const parsed = parseV3BatchEnrichmentResponse(response, batch.length);
 				best = best.map((current, idx) => current ?? parsed.fields[idx]);
@@ -842,10 +845,12 @@ export async function enrichLessonToV3(params: {
 				scope: 'knowledge-enrichment',
 			});
 			if (!reservation.allowed) return null;
-			const response = await params.llmDelegate(
-				'',
-				userInput,
-				AbortSignal.timeout(ENRICHMENT_LLM_TIMEOUT_MS),
+			const response = await withTimeoutSignal(
+				(signal) => params.llmDelegate('', userInput, signal),
+				ENRICHMENT_LLM_TIMEOUT_MS,
+				new Error(
+					`Knowledge enrichment timed out after ${ENRICHMENT_LLM_TIMEOUT_MS}ms`,
+				),
 			);
 			const result = parseV3EnrichmentResponse(response);
 			if ('fields' in result) return result.fields;

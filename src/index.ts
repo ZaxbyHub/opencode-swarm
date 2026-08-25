@@ -3,7 +3,13 @@ import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import type { Plugin } from '@opencode-ai/plugin';
 import packageJson from '../package.json' with { type: 'json' };
-import { type AgentDefinition, createAgents, getAgentConfigs } from './agents';
+import {
+	type AgentDefinition,
+	createAgents,
+	extractSwarmIdFromAgentName,
+	getAgentConfigs,
+	getSwarmAgents,
+} from './agents';
 import { parseSoundingBoardResponse } from './agents/critic.js';
 import {
 	type AutomationStatusArtifact,
@@ -68,7 +74,22 @@ import {
 	observePhaseParticipationToolResult,
 	reserveApprovedPhaseParticipation,
 } from './evidence/phase-participation.js';
+import {
+	clearSessionActionCircuits,
+	listBlockingActionCircuitsForInvocation,
+} from './failures/action-circuit.js';
+import { createActionIdentity } from './failures/action-identity.js';
+import {
+	classifyProviderFailure,
+	isRetryableProviderFailure,
+} from './failures/invocation-failure.js';
 import { tickAndMaybeDispatchCadence } from './full-auto/cadence.js';
+import { registerFullAutoRecoveryBlockerEvaluator } from './full-auto/recovery.js';
+import {
+	bindFullAutoSevereChildSession,
+	clearFullAutoSevereSession,
+} from './full-auto/severe-result.js';
+import { loadFullAutoRunState } from './full-auto/state.js';
 import {
 	composeHandlers,
 	consolidateSystemMessagesInPlace,
@@ -165,6 +186,14 @@ import {
 import { realtimeAdmissionAfter } from './learning/admission.js';
 import { createMemoryLifecycleHooks } from './memory';
 import type { MemoryConfig as RuntimeMemoryConfig } from './memory/config.js';
+import {
+	advancePendingTaskModelRoute,
+	bindPendingTaskModelRouteChild,
+	clearPendingTaskModelRoutesForSession,
+	getPendingTaskModelRouteSnapshot,
+	registerPendingTaskModelRoute,
+	resolveTaskChatModelOverride,
+} from './models/task-model-routing.js';
 import { initObservability } from './observability/index.js';
 import { loadPlan } from './plan/manager.js';
 import { createPrmHook, resolvePrmPatternPersistenceOptions } from './prm';
@@ -181,6 +210,7 @@ import { createSnapshotWriterHook } from './session/snapshot-writer.js';
 import {
 	ensureAgentSession,
 	getActiveWindow,
+	getAgentSession,
 	getSessionBudgetPct,
 	swarmState,
 } from './state';
@@ -1095,6 +1125,115 @@ async function initializeOpenCodeSwarm(
 	const compactionHook = createCompactionCustomizerHook(config, ctx.directory);
 	const resolveIncomingAgentModel = (agentName: string): string | undefined =>
 		resolveRuntimeAgentModel(config, agents, agentName);
+	const resolveTaskRouteModelChain = (
+		exactAgentName: string | undefined,
+	): {
+		exactAgentName: string;
+		role: string;
+		primaryModel?: string;
+		fallbackModels: readonly string[];
+	} | null => {
+		if (!exactAgentName) return null;
+		const trimmedAgentName = exactAgentName.trim();
+		if (!trimmedAgentName) return null;
+		const role = stripKnownSwarmPrefix(trimmedAgentName);
+		const swarmAgents = getSwarmAgents(
+			extractSwarmIdFromAgentName(trimmedAgentName),
+		);
+		return {
+			exactAgentName: trimmedAgentName,
+			role,
+			primaryModel:
+				resolveRuntimeAgentModel(config, agents, trimmedAgentName) ??
+				resolveRegisteredAgentModel(config, trimmedAgentName),
+			fallbackModels: swarmAgents?.[role]?.fallback_models ?? [],
+		};
+	};
+	const extractBoundedErrorSignal = (value: unknown, depth = 0): string[] => {
+		if (depth > 4) return [];
+		if (typeof value === 'string') {
+			const trimmed = value.trim();
+			return trimmed ? [trimmed.slice(0, 512)] : [];
+		}
+		if (typeof value === 'number' || typeof value === 'boolean') {
+			return [String(value)];
+		}
+		if (!value || typeof value !== 'object') return [];
+		if (value instanceof Error) {
+			return [
+				...extractBoundedErrorSignal(value.name, depth + 1),
+				...extractBoundedErrorSignal(value.message, depth + 1),
+			];
+		}
+		const record = value as Record<string, unknown>;
+		const parts: string[] = [];
+		for (const key of [
+			'message',
+			'reason',
+			'code',
+			'status',
+			'statusCode',
+			'error',
+			'cause',
+			'detail',
+			'details',
+		]) {
+			parts.push(...extractBoundedErrorSignal(record[key], depth + 1));
+		}
+		return parts;
+	};
+	const extractSessionErrorSignal = (
+		properties: Record<string, unknown> | undefined,
+	): string => {
+		if (!properties) return '';
+		return extractBoundedErrorSignal(properties)
+			.filter(Boolean)
+			.join(' ')
+			.slice(0, 2048);
+	};
+	const resolveTaskRouteForChildSession = (childSessionID: string) => {
+		const trimmedChildSessionID = childSessionID.trim();
+		if (!trimmedChildSessionID) return undefined;
+		return getPendingTaskModelRouteSnapshot().find(
+			(route) => route.childSessionID === trimmedChildSessionID,
+		);
+	};
+	const lookupParentSessionIDForTaskRoute = async (
+		childSessionID: string,
+	): Promise<string | undefined> => {
+		const sessionApi = ctx.client?.session as
+			| {
+					get?: (args: {
+						path: { id: string };
+						query: { directory: string };
+					}) => Promise<{ data?: { parentID?: unknown }; error?: unknown }>;
+			  }
+			| undefined;
+		if (!sessionApi?.get) return undefined;
+		try {
+			const result = await sessionApi.get({
+				path: { id: childSessionID },
+				query: { directory: ctx.directory },
+			});
+			return typeof result?.data?.parentID === 'string' &&
+				result.data.parentID.trim() !== ''
+				? result.data.parentID.trim()
+				: undefined;
+		} catch {
+			return undefined;
+		}
+	};
+	registerFullAutoRecoveryBlockerEvaluator(({ sessionID }) => {
+		const invocationID = getAgentSession(sessionID)?.activeInvocationId ?? 0;
+		if (invocationID <= 0) return [];
+		return [
+			...new Set(
+				listBlockingActionCircuitsForInvocation(sessionID, invocationID).map(
+					(entry) => entry.circuitKind,
+				),
+			),
+		];
+	});
 	const contextBudgetHandler = createContextBudgetHandler(
 		config,
 		resolveIncomingAgentModel,
@@ -2048,6 +2187,64 @@ async function initializeOpenCodeSwarm(
 							parentSessionID: eventParentSessionID,
 							childSessionID: eventChildSessionID,
 						});
+						bindPendingTaskModelRouteChild({
+							parentSessionID: eventParentSessionID,
+							callID: part.callID,
+							childSessionID: eventChildSessionID,
+						});
+						const fullAutoRunState = loadFullAutoRunState(
+							ctx.directory,
+							eventParentSessionID,
+						);
+						if (fullAutoRunState?.runGeneration !== undefined) {
+							bindFullAutoSevereChildSession({
+								childSessionID: eventChildSessionID,
+								parentSessionID: eventParentSessionID,
+								parentCallID: part.callID,
+								generation: fullAutoRunState.runGeneration,
+							});
+						}
+					}
+				}
+				if (lifecycleEvent?.type === 'session.error') {
+					const properties = lifecycleEvent.properties as
+						| Record<string, unknown>
+						| undefined;
+					const childSessionID =
+						typeof properties?.sessionID === 'string'
+							? properties.sessionID
+							: typeof properties?.sessionId === 'string'
+								? properties.sessionId
+								: typeof properties?.info === 'object' &&
+										properties.info &&
+										typeof (properties.info as { id?: unknown }).id === 'string'
+									? ((properties.info as { id: string }).id ?? '')
+									: '';
+					const route = childSessionID
+						? resolveTaskRouteForChildSession(childSessionID)
+						: undefined;
+					const routeModel = resolveTaskRouteModelChain(
+						route
+							? (swarmState.activeAgent.get(childSessionID) ??
+									swarmState.agentSessions.get(childSessionID)?.agentName ??
+									route.role)
+							: (swarmState.activeAgent.get(childSessionID) ??
+									swarmState.agentSessions.get(childSessionID)?.agentName),
+					);
+					const errorSignal = extractSessionErrorSignal(properties);
+					if (
+						route &&
+						routeModel &&
+						errorSignal &&
+						isRetryableProviderFailure(classifyProviderFailure(errorSignal))
+					) {
+						advancePendingTaskModelRoute({
+							childSessionID,
+							role: route.role,
+							actionDigest: route.actionDigest,
+							primaryModel: routeModel.primaryModel,
+							fallbackModels: routeModel.fallbackModels,
+						});
 					}
 				}
 				const lifecycleStatus = lifecycleEvent?.properties?.status;
@@ -2075,6 +2272,14 @@ async function initializeOpenCodeSwarm(
 							lifecycleEvent.type === 'session.deleted' ||
 								lifecycleEvent.type === 'session.removed',
 						);
+						if (
+							lifecycleEvent.type === 'session.deleted' ||
+							lifecycleEvent.type === 'session.removed'
+						) {
+							clearPendingTaskModelRoutesForSession(sessionID);
+							clearSessionActionCircuits(sessionID);
+							clearFullAutoSevereSession(sessionID);
+						}
 					}
 				}
 				prWorkflowSessionResolver.observeEvent(input);
@@ -2583,6 +2788,10 @@ async function initializeOpenCodeSwarm(
 				'swarm-guardrail-explain': {
 					template: '/swarm guardrail explain $ARGUMENTS',
 					description: shortcutDescription('guardrail explain'),
+				},
+				'swarm-guardrail-reset': {
+					template: '/swarm guardrail reset $ARGUMENTS',
+					description: shortcutDescription('guardrail reset'),
 				},
 				'swarm-guardrail-log': {
 					template: '/swarm guardrail-log $ARGUMENTS',
@@ -3164,6 +3373,26 @@ async function initializeOpenCodeSwarm(
 					args: toolBeforeArgs,
 					policy: config.phase_complete,
 				});
+				if (
+					(normalizeToolName(input.tool) ?? input.tool) === 'Task' &&
+					typeof toolBeforeArgs.subagent_type === 'string' &&
+					toolBeforeArgs.subagent_type.trim() !== ''
+				) {
+					const actionIdentity = createActionIdentity({
+						tool: input.tool,
+						args: toolBeforeArgs,
+					});
+					registerPendingTaskModelRoute({
+						parentSessionID: input.sessionID,
+						invocationID: String(
+							getAgentSession(input.sessionID)?.activeInvocationId ?? 0,
+						),
+						callID: input.callID,
+						role: stripKnownSwarmPrefix(toolBeforeArgs.subagent_type),
+						actionDigest: actionIdentity.digest,
+						swarmID: actionIdentity.swarm ?? undefined,
+					});
+				}
 
 				// B1 (#2063): the WHOLE handler completed, so this tool call is
 				// actually going to run — the denial streak for it is genuinely over.
@@ -3846,64 +4075,133 @@ async function initializeOpenCodeSwarm(
 		}) as any,
 
 		// Track agent delegations and active agent
-		'chat.message': safeHook(
-			// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
-			async (input: any, output: any) => {
-				if (process.env.DEBUG_SWARM)
-					// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for chat message flow
-					console.error(
-						`[DIAG] chat.message agent=${input.agent ?? 'none'} session=${input.sessionID}`,
-					);
-				await delegationHandler(input, output);
-
-				// (#1849) Resolve + cache the canonical cohort id once per session
-				// at chat.message (where sessionID + agent are reliably present), so
-				// the system-enhancer's cohort-identity line and the
-				// PromotionEvidenceRecord writer never re-run resolveCohortId (git)
-				// on a hot path. Fail-open + bounded; ignored error leaves the cache
-				// unset and callers fall back to readLinkPointer / re-resolve-once.
-				if (input?.sessionID) {
-					try {
-						await cacheCohortIdAtMessage(ctx.directory, input.sessionID);
-					} catch {
-						/* non-blocking — cache stays unset */
-					}
-				}
-
-				// Full-Auto v2 cadence: increment architect-turn counter and, when a
-				// cadence trigger fires (every N turns / minutes / near-limit
-				// denials), dispatch a critic oversight call in the background.
-				// Critic-internal tool calls run on ephemeral sessions that have
-				// no durable run state, so they short-circuit inside
-				// tickAndMaybeDispatchCadence and do NOT recurse.
-				try {
-					// First-class toggle: no config.full_auto.enabled gate — the
-					// tick short-circuits on the durable run state when Full-Auto
-					// was never activated for this session.
-					if (input?.sessionID && input?.agent) {
-						const stripped = stripKnownSwarmPrefix(String(input.agent));
-						if (stripped === 'architect') {
-							tickAndMaybeDispatchCadence(
-								ctx.directory,
-								input.sessionID,
-								'architectTurns',
-								config,
-								{ activeAgent: String(input.agent) },
+		// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
+		'chat.message': (async (input: any, output: any) => {
+			// Model-chain exhaustion is a blocking request-boundary condition. Keep
+			// this preflight outside safeHook so the host cannot silently continue on
+			// the primary/default model after every configured model is exhausted.
+			try {
+				if (input?.sessionID && typeof input?.agent === 'string') {
+					const routeModel = resolveTaskRouteModelChain(String(input.agent));
+					if (routeModel) {
+						const resolution = await resolveTaskChatModelOverride({
+							childSessionID: String(input.sessionID),
+							role: routeModel.role,
+							primaryModel: routeModel.primaryModel,
+							fallbackModels: routeModel.fallbackModels,
+							lookupParentSessionID: lookupParentSessionIDForTaskRoute,
+						});
+						if (resolution.status === 'exhausted') {
+							const error = new Error(
+								`MODEL_FALLBACK_EXHAUSTED: no configured model remains for ${routeModel.role}`,
 							);
+							error.name = 'TaskModelFallbackExhaustedError';
+							throw error;
 						}
 					}
-				} catch {
-					// Best-effort — never block chat.message.
 				}
+			} catch (error) {
+				if (
+					error instanceof Error &&
+					error.name === 'TaskModelFallbackExhaustedError'
+				) {
+					throw error;
+				}
+				// Parent lookup is advisory when no bound route can be resolved. The
+				// existing safe handler below preserves diagnostics without blocking an
+				// unrelated message.
+			}
 
-				if (process.env.DEBUG_SWARM)
-					// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for chat message flow
-					console.error(
-						`[DIAG] chat.message DONE agent=${input.agent ?? 'none'}`,
-					);
-			},
+			await safeHook(
+				// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
+				async (input: any, output: any) => {
+					if (process.env.DEBUG_SWARM)
+						// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for chat message flow
+						console.error(
+							`[DIAG] chat.message agent=${input.agent ?? 'none'} session=${input.sessionID}`,
+						);
+					if (
+						input?.sessionID &&
+						typeof input?.agent === 'string' &&
+						output &&
+						typeof output === 'object' &&
+						typeof (output as { message?: unknown }).message === 'object' &&
+						(output as { message?: unknown }).message !== null
+					) {
+						const routeModel = resolveTaskRouteModelChain(String(input.agent));
+						if (routeModel) {
+							const resolution = await resolveTaskChatModelOverride({
+								childSessionID: String(input.sessionID),
+								role: routeModel.role,
+								primaryModel: routeModel.primaryModel,
+								fallbackModels: routeModel.fallbackModels,
+								lookupParentSessionID: lookupParentSessionIDForTaskRoute,
+							});
+							if (resolution.status === 'override' && resolution.model) {
+								(
+									output as {
+										message: {
+											model?: {
+												providerID: string;
+												modelID: string;
+											};
+										};
+									}
+								).message.model = resolution.model;
+							}
+						}
+					}
+					await delegationHandler(input, output);
+
+					// (#1849) Resolve + cache the canonical cohort id once per session
+					// at chat.message (where sessionID + agent are reliably present), so
+					// the system-enhancer's cohort-identity line and the
+					// PromotionEvidenceRecord writer never re-run resolveCohortId (git)
+					// on a hot path. Fail-open + bounded; ignored error leaves the cache
+					// unset and callers fall back to readLinkPointer / re-resolve-once.
+					if (input?.sessionID) {
+						try {
+							await cacheCohortIdAtMessage(ctx.directory, input.sessionID);
+						} catch {
+							/* non-blocking — cache stays unset */
+						}
+					}
+
+					// Full-Auto v2 cadence: increment architect-turn counter and, when a
+					// cadence trigger fires (every N turns / minutes / near-limit
+					// denials), dispatch a critic oversight call in the background.
+					// Critic-internal tool calls run on ephemeral sessions that have
+					// no durable run state, so they short-circuit inside
+					// tickAndMaybeDispatchCadence and do NOT recurse.
+					try {
+						// First-class toggle: no config.full_auto.enabled gate — the
+						// tick short-circuits on the durable run state when Full-Auto
+						// was never activated for this session.
+						if (input?.sessionID && input?.agent) {
+							const stripped = stripKnownSwarmPrefix(String(input.agent));
+							if (stripped === 'architect') {
+								tickAndMaybeDispatchCadence(
+									ctx.directory,
+									input.sessionID,
+									'architectTurns',
+									config,
+									{ activeAgent: String(input.agent) },
+								);
+							}
+						}
+					} catch {
+						// Best-effort — never block chat.message.
+					}
+
+					if (process.env.DEBUG_SWARM)
+						// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM-gated diagnostic for chat message flow
+						console.error(
+							`[DIAG] chat.message DONE agent=${input.agent ?? 'none'}`,
+						);
+				},
+			)(input, output);
 			// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
-		) as any,
+		}) as any,
 
 		// v6.7 Background automation framework (scaffold only)
 		// Exposed for future Task 5.x business feature integration

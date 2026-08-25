@@ -21,6 +21,7 @@ import {
 	resolveGuardrailsConfig,
 	stripKnownSwarmPrefix,
 } from '../../config/schema';
+import { recordFullAutoSevereEvidenceEvent } from '../../full-auto/severe-result.js';
 import { setMacOSSandboxPolicy } from '../../sandbox/executor';
 import { resolveScopePaths } from '../../sandbox/scope-resolver';
 import { sanitizeDiagnosticText } from '../../scope/path-identity';
@@ -1178,8 +1179,17 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				},
 			);
 			if (!authorityCheck.allowed) {
+				const evidenceEventID =
+					authorityCheck.layer === 'protected-path'
+						? recordFullAutoSevereEvidenceEvent({
+								sessionID,
+								childSessionID: sessionID,
+								category: 'protected_state_mutation',
+								paths: [write.resolvedPath],
+							})
+						: undefined;
 				throw new Error(
-					`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${write.resolvedPath}" (via shell). Reason: ${authorityCheck.reason}`,
+					`WRITE BLOCKED: Agent "${shellWriteAgent}" is not authorised to write "${write.resolvedPath}" (via shell). Reason: ${authorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
 				);
 			}
 
@@ -1353,6 +1363,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				sessionID,
 				'sandbox_wrapper_failure',
 				message,
+				{ tool, args: { command: rawCommand }, armAttempt: true },
 			);
 			if (circuit?.hardStop) {
 				throw new Error(nonTransientHardStopMessage(circuit));
@@ -1590,7 +1601,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 
 		if (loopResult.count >= 5) {
 			throw new Error(
-				`CIRCUIT BREAKER: Delegation loop detected (${loopResult.count} identical patterns). Session paused. Ask the user for guidance.`,
+				`CIRCUIT BREAKER: Delegation loop detected (${loopResult.count} identical patterns). Further identical delegations are blocked. Diagnose or rescope the task before retrying.`,
 			);
 		} else if (loopResult.count >= 3 && loopResult.count < 5) {
 			const agentName =
@@ -2104,7 +2115,10 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		input: { tool: string; sessionID: string; callID: string },
 		output: { args: unknown },
 	): Promise<void> => {
-		assertNonTransientCircuitAllowsTool(input.sessionID);
+		assertNonTransientCircuitAllowsTool(input.sessionID, {
+			tool: input.tool,
+			args: output.args,
+		});
 		// Establish the lazy fallback invocation before recording this tool's
 		// before/after correlation. Beginning it later would clear the command we
 		// just stored, losing whether a parser error came from the sandbox wrapper.
@@ -2477,6 +2491,15 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					},
 				);
 				if (!authorityCheck.allowed) {
+					const evidenceEventID =
+						authorityCheck.layer === 'protected-path'
+							? recordFullAutoSevereEvidenceEvent({
+									sessionID: input.sessionID,
+									childSessionID: input.sessionID,
+									category: 'protected_state_mutation',
+									paths: [targetPath],
+								})
+							: undefined;
 					void appendGuardrailDecision(
 						{
 							type: 'file_write',
@@ -2499,7 +2522,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						},
 					);
 					throw new Error(
-						`WRITE BLOCKED: Agent "${agentName}" is not authorised to write "${targetPath}". Reason: ${authorityCheck.reason}`,
+						`WRITE BLOCKED: Agent "${agentName}" is not authorised to write "${targetPath}". Reason: ${authorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
 					);
 				}
 

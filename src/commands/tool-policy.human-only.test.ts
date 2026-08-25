@@ -33,9 +33,11 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 	});
 
 	// Moved from registry.tool-policy.test.ts (FR-006 ratchet: that file is
-	// over the 500-line cap and must not grow). #2268 added 'recover'.
-	test("'human-only' registry bucket contains exactly the expected 10 commands", () => {
+	// over the 500-line cap and must not grow). #2268 added 'recover'; #2103
+	// makes Full-Auto direct-human-only so agents cannot stop it mid-run.
+	test("'human-only' registry bucket contains exactly the expected 11 commands", () => {
 		const expectedHumanOnly = new Set<string>([
+			'full-auto',
 			'review',
 			'memory compact',
 			'memory import',
@@ -56,7 +58,7 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 				actual.add(name);
 			}
 		}
-		expect(actual.size).toBe(10);
+		expect(actual.size).toBe(11);
 		for (const name of expectedHumanOnly) {
 			expect(actual.has(name)).toBe(true);
 		}

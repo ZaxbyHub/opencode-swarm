@@ -1,10 +1,7 @@
 import { beforeEach, describe, expect, it, spyOn } from 'bun:test';
-import type {
-	GuardrailsConfig,
-	PluginConfig,
-} from '../../../src/config/schema';
-import { createDelegationTrackerHook } from '../../../src/hooks/delegation-tracker';
+import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
+import { _test_exports as nonTransientTestExports } from '../../../src/hooks/guardrails/nontransient-circuit';
 import {
 	beginInvocation,
 	getAgentSession,
@@ -55,6 +52,23 @@ function shellResult(
 	return { title: 'shell', output, metadata: { exit } };
 }
 
+async function runToolLifecycle(
+	hooks: ReturnType<typeof createGuardrailsHooks>,
+	input: {
+		tool: string;
+		sessionID: string;
+		callID: string;
+		args?: Record<string, unknown>;
+	},
+	output: unknown,
+): Promise<void> {
+	await hooks.toolBefore(
+		{ tool: input.tool, sessionID: input.sessionID, callID: input.callID },
+		{ args: input.args ?? {} },
+	);
+	await hooks.toolAfter(input, output as never);
+}
+
 describe('guardrails non-transient circuit — regression: issue #1875', () => {
 	beforeEach(() => {
 		resetSwarmState();
@@ -65,17 +79,20 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 		setupSession(sessionID);
 		const hooks = createGuardrailsHooks(TEST_DIRECTORY, config);
 
-		await hooks.toolAfter(
+		await runToolLifecycle(
+			hooks,
 			{
 				tool: 'bash',
 				sessionID,
 				callID: 'parse-1',
 				args: { command: 'broken command 1' },
 			},
-			shellResult(
-				'ParserError: MissingEndCurlyBrace: Missing closing brace',
-				1,
-			),
+			{
+				title: 'shell',
+				output: 'shell parser failed',
+				error: 'ParserError: MissingEndCurlyBrace: Missing closing brace',
+				metadata: { exit: 1 },
+			},
 		);
 
 		expect(circuit(sessionID)).toMatchObject({
@@ -88,13 +105,14 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 		).toContain('STOP');
 	});
 
-	it('hard-stops on the third general permanent failure despite changed arguments', async () => {
+	it('does not hard-stop unrelated general permanent failures with different action identities', async () => {
 		const sessionID = 'general-three';
 		setupSession(sessionID);
 		const hooks = createGuardrailsHooks(TEST_DIRECTORY, config);
 
 		for (let attempt = 1; attempt <= 3; attempt++) {
-			await hooks.toolAfter(
+			await runToolLifecycle(
+				hooks,
 				{
 					tool: 'bash',
 					sessionID,
@@ -107,15 +125,15 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 
 		expect(circuit(sessionID)).toMatchObject({
 			category: 'general_permanent',
-			sameCategoryCount: 3,
-			hardStop: true,
+			sameCategoryCount: 1,
+			hardStop: false,
 		});
 		await expect(
 			hooks.toolBefore(
-				{ tool: 'read', sessionID, callID: 'blocked-next' },
+				{ tool: 'read', sessionID, callID: 'allowed-next' },
 				{ args: { filePath: 'package.json' } },
 			),
-		).rejects.toThrow('NON-TRANSIENT CIRCUIT BREAKER');
+		).resolves.toBeUndefined();
 	});
 
 	it('emits loop telemetry exactly once when each circuit transitions to hard stop', async () => {
@@ -125,21 +143,24 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 		try {
 			const hooks = createGuardrailsHooks(TEST_DIRECTORY, config);
 			setupSession('parser-telemetry');
-			for (let attempt = 1; attempt <= 2; attempt++) {
-				await hooks.toolAfter(
-					{
-						tool: 'bash',
-						sessionID: 'parser-telemetry',
-						callID: `parser-${attempt}`,
-						args: { command: 'broken' },
-					},
-					shellResult('ParserError: MissingEndCurlyBrace', 1),
-				);
-			}
+			await runToolLifecycle(
+				hooks,
+				{
+					tool: 'bash',
+					sessionID: 'parser-telemetry',
+					callID: 'parser-1',
+					args: { command: 'broken' },
+				},
+				{
+					...shellResult('', 1),
+					error: 'ParserError: MissingEndCurlyBrace',
+				},
+			);
 
 			setupSession('general-telemetry');
 			for (let attempt = 1; attempt <= 4; attempt++) {
-				await hooks.toolAfter(
+				await runToolLifecycle(
+					hooks,
 					{
 						tool: 'bash',
 						sessionID: 'general-telemetry',
@@ -150,18 +171,12 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 				);
 			}
 
-			expect(loopDetected).toHaveBeenCalledTimes(2);
+			expect(loopDetected).toHaveBeenCalledTimes(1);
 			expect(loopDetected).toHaveBeenNthCalledWith(
 				1,
 				'parser-telemetry',
 				'coder',
-				'nontransient:shell_parse_error',
-			);
-			expect(loopDetected).toHaveBeenNthCalledWith(
-				2,
-				'general-telemetry',
-				'coder',
-				'nontransient:general_permanent',
+				expect.stringContaining('nontransient:shell_parse_error:'),
 			);
 		} finally {
 			loopDetected.mockRestore();
@@ -173,7 +188,8 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 		setupSession(sessionID);
 		const hooks = createGuardrailsHooks(TEST_DIRECTORY, config);
 		for (let attempt = 1; attempt <= 2; attempt++) {
-			await hooks.toolAfter(
+			await runToolLifecycle(
+				hooks,
 				{
 					tool: 'bash',
 					sessionID,
@@ -183,13 +199,14 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 				shellResult('permission denied', 2),
 			);
 		}
-		await hooks.toolAfter(
+		await runToolLifecycle(
+			hooks,
 			{ tool: 'read', sessionID, callID: 'malformed-result' },
 			undefined as never,
 		);
 		expect(circuit(sessionID)).toMatchObject({
 			category: 'general_permanent',
-			sameCategoryCount: 2,
+			sameCategoryCount: 1,
 			hardStop: false,
 		});
 	});
@@ -199,7 +216,8 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 		setupSession(sessionID);
 		const hooks = createGuardrailsHooks(TEST_DIRECTORY, config);
 
-		await hooks.toolAfter(
+		await runToolLifecycle(
+			hooks,
 			{
 				tool: 'bash',
 				sessionID,
@@ -221,21 +239,22 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 		});
 	});
 
-	it('recognizes command-not-found shapes from sh and spawn failures', async () => {
+	it('recognizes typed command-not-found failures from shell runtimes', async () => {
 		const hooks = createGuardrailsHooks(TEST_DIRECTORY, config);
 		for (const [sessionID, signal] of [
-			['dash-missing', '/bin/sh: 1: missing-tool: not found'],
+			['powershell-missing', 'CommandNotFoundException: missing-tool'],
 			['spawn-missing', 'Error: spawn missing-tool ENOENT'],
 		] as const) {
 			setupSession(sessionID);
-			await hooks.toolAfter(
+			await runToolLifecycle(
+				hooks,
 				{
 					tool: 'bash',
 					sessionID,
 					callID: `${sessionID}-call`,
 					args: { command: 'missing-tool' },
 				},
-				shellResult(signal, 127),
+				{ ...shellResult('', 127), error: signal },
 			);
 			expect(circuit(sessionID)).toMatchObject({
 				category: 'command_not_found',
@@ -245,19 +264,18 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 		}
 	});
 
-	it('breaks a general-permanent streak on success, neutral, transient, and degraded outcomes', async () => {
+	it('breaks a general-permanent streak only on exact success or neutral outcomes', async () => {
 		const hooks = createGuardrailsHooks(TEST_DIRECTORY, config);
 		const breakers = [
 			['success', 'echo ok', shellResult('ok', 0)],
 			['neutral', 'rg absent src', shellResult('', 1)],
-			['transient', 'provider-call', shellResult('503 service unavailable', 2)],
-			['degraded', 'provider-call', shellResult('context length exceeded', 2)],
 		] as const;
 
 		for (const [name, command, breaker] of breakers) {
 			const sessionID = `break-${name}`;
 			setupSession(sessionID);
-			await hooks.toolAfter(
+			await runToolLifecycle(
+				hooks,
 				{
 					tool: 'bash',
 					sessionID,
@@ -268,7 +286,8 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 			);
 			expect(circuit(sessionID)?.sameCategoryCount).toBe(1);
 
-			await hooks.toolAfter(
+			await runToolLifecycle(
+				hooks,
 				{
 					tool: 'bash',
 					sessionID,
@@ -288,7 +307,8 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 			['invalid-exit', { exit: 'not-a-number' }],
 		] as const) {
 			setupSession(sessionID);
-			await hooks.toolAfter(
+			await runToolLifecycle(
+				hooks,
 				{
 					tool: 'bash',
 					sessionID,
@@ -310,7 +330,8 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 		setupSession(sessionID);
 		const hooks = createGuardrailsHooks(TEST_DIRECTORY, config);
 
-		await hooks.toolAfter(
+		await runToolLifecycle(
+			hooks,
 			{
 				tool: 'bash',
 				sessionID,
@@ -335,7 +356,8 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 			['rg-none', 'rg impossible-pattern src'],
 			['git-clean', 'git diff --quiet'],
 		] as const) {
-			await hooks.toolAfter(
+			await runToolLifecycle(
+				hooks,
 				{ tool: 'bash', sessionID, callID, args: { command } },
 				shellResult('(no output)', 1),
 			);
@@ -343,7 +365,8 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 
 		expect(circuit(sessionID)?.sameCategoryCount ?? 0).toBe(0);
 
-		await hooks.toolAfter(
+		await runToolLifecycle(
+			hooks,
 			{
 				tool: 'bash',
 				sessionID,
@@ -354,8 +377,9 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 		);
 
 		expect(circuit(sessionID)).toMatchObject({
-			category: 'command_not_found',
+			category: 'general_permanent',
 			sameCategoryCount: 1,
+			hardStop: false,
 		});
 	});
 
@@ -364,17 +388,18 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 		setupSession(sessionID);
 		const hooks = createGuardrailsHooks(TEST_DIRECTORY, config);
 
-		await hooks.toolAfter(
+		await runToolLifecycle(
+			hooks,
 			{
 				tool: 'bash',
 				sessionID,
 				callID: 'missing-rg-call',
 				args: { command: 'rg absent src' },
 			},
-			shellResult(
-				"'rg' is not recognized as an internal or external command",
-				1,
-			),
+			{
+				...shellResult('', 1),
+				error: 'CommandNotFoundException: rg',
+			},
 		);
 
 		expect(circuit(sessionID)).toMatchObject({
@@ -389,7 +414,8 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 		setupSession(architectID, 'architect');
 		const hooks = createGuardrailsHooks(TEST_DIRECTORY, config);
 
-		await hooks.toolAfter(
+		await runToolLifecycle(
+			hooks,
 			{
 				tool: 'bash',
 				sessionID: architectID,
@@ -421,7 +447,8 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 
 		const coderID = 'new-invocation';
 		setupSession(coderID);
-		await hooks.toolAfter(
+		await runToolLifecycle(
+			hooks,
 			{
 				tool: 'bash',
 				sessionID: coderID,
@@ -436,100 +463,32 @@ describe('guardrails non-transient circuit — regression: issue #1875', () => {
 		expect(circuit(coderID)?.sameCategoryCount ?? 0).toBe(0);
 	});
 
-	it('clears a fatal architect stop on the ordinary no-agent takeover turn', async () => {
-		const sessionID = 'architect-no-agent-turn';
-		setupSession(sessionID, 'architect');
-		const hooks = createGuardrailsHooks(TEST_DIRECTORY, config);
-
-		await hooks.toolAfter(
-			{
-				tool: 'bash',
-				sessionID,
-				callID: 'fatal-parse',
-				args: { command: 'broken' },
-			},
-			shellResult('ParserError: MissingEndCurlyBrace', 1),
+	it('exposes an exact recovery allowlist helper for swarm commands and read-only tools', () => {
+		expect(
+			nonTransientTestExports.isAllowedRecoverySwarmCommand({
+				command: 'diagnose',
+			}),
+		).toBe(true);
+		expect(
+			nonTransientTestExports.isAllowedRecoverySwarmCommand({
+				command: 'full-auto retry-oversight',
+			}),
+		).toBe(true);
+		expect(
+			nonTransientTestExports.isAllowedRecoverySwarmCommand({
+				command: 'status',
+			}),
+		).toBe(false);
+		expect(nonTransientTestExports.isRecoveryAllowedTool('read', {})).toBe(
+			true,
 		);
-		await expect(
-			hooks.toolBefore(
-				{ tool: 'read', sessionID, callID: 'blocked-old-turn' },
-				{ args: { filePath: 'package.json' } },
-			),
-		).rejects.toThrow('NON-TRANSIENT CIRCUIT BREAKER');
-
-		const tracker = createDelegationTrackerHook({} as PluginConfig, true);
-		await tracker({ sessionID }, {});
-
-		expect(circuit(sessionID)).toMatchObject({
-			ownerAgent: 'architect',
-			sameCategoryCount: 0,
-			hardStop: false,
-		});
-		await expect(
-			hooks.toolBefore(
-				{ tool: 'read', sessionID, callID: 'allowed-new-turn' },
-				{ args: { filePath: 'package.json' } },
-			),
-		).resolves.toBeUndefined();
-	});
-
-	it('issue #1976 B7: a NON-shell tool quoting "command not found" does not hard-stop', async () => {
-		// A non-shell tool (e.g. a CI-log inspector) may exit non-zero for an
-		// unrelated reason while its stdout QUOTES "command not found" from the
-		// log it read. The fatal command_not_found category is shell-execution
-		// specific; classifying it on a non-shell tool is a false-positive
-		// hard-stop (reading CI failure logs is a core PR-review activity).
-		const sessionID = 'nonshell-log-reader';
-		setupSession(sessionID);
-		const hooks = createGuardrailsHooks(TEST_DIRECTORY, config);
-
-		await hooks.toolAfter(
-			{
-				tool: 'read',
-				sessionID,
-				callID: 'ci-log-inspect',
-				args: { filePath: 'ci-failure.log' },
-			},
-			{
-				title: 'read',
-				// Tool exited non-zero (success: false) for an unrelated reason,
-				// but its output quotes "command not found" from the CI log.
-				output:
-					'CI run failed. Log excerpt:\n  step 3: make: command not found in build script\n  step 5: tests exited 1',
-				metadata: {},
-				success: false,
-			} as never,
+		expect(
+			nonTransientTestExports.isRecoveryAllowedTool('swarm_command', {
+				command: 'guardrail reset digest --invocation 3',
+			}),
+		).toBe(true);
+		expect(nonTransientTestExports.isRecoveryAllowedTool('bash', {})).toBe(
+			false,
 		);
-
-		// No fatal command_not_found hard-stop for a non-shell tool. The failure
-		// is still recorded (as a non-fatal failure, never the shell-only
-		// command_not_found category) — the point is it must NOT hard-stop.
-		const c = circuit(sessionID);
-		expect(c?.category).not.toBe('command_not_found');
-		expect(c?.hardStop).toBe(false);
-	});
-
-	it('issue #1976 B7: a shell tool with a real command-not-found STILL hard-stops', async () => {
-		// The shell-gating must not weaken real shell command-not-found
-		// detection. A `bash` tool whose command is missing still hard-stops.
-		const sessionID = 'shell-missing';
-		setupSession(sessionID);
-		const hooks = createGuardrailsHooks(TEST_DIRECTORY, config);
-
-		await hooks.toolAfter(
-			{
-				tool: 'bash',
-				sessionID,
-				callID: 'missing-cmd',
-				args: { command: 'totally-missing-tool' },
-			},
-			shellResult('totally-missing-tool: command not found', 127),
-		);
-
-		expect(circuit(sessionID)).toMatchObject({
-			category: 'command_not_found',
-			sameCategoryCount: 1,
-			hardStop: true,
-		});
 	});
 });

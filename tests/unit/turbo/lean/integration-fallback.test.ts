@@ -72,8 +72,8 @@ describe('dispatchPhaseCritic — model failover (#1905)', () => {
 			model,
 		) => {
 			calls.push(model ? `${model.providerID}/${model.modelID}` : undefined);
-			// Primary (registered model, no override) hits quota; fallback succeeds.
-			if (!model)
+			// Primary is explicit at the SDK boundary; fallback succeeds.
+			if (`${model?.providerID}/${model?.modelID}` === 'prov/primary-critic')
 				throw new Error('429 insufficient_quota: usage limit exceeded');
 			return 'VERDICT: APPROVED';
 		};
@@ -90,8 +90,8 @@ describe('dispatchPhaseCritic — model failover (#1905)', () => {
 
 		// Recovered → APPROVED, NOT the old fail-closed REJECTED.
 		expect(result.verdict).toBe('APPROVED');
-		// Primary attempted (undefined), then the first fallback.
-		expect(calls[0]).toBeUndefined();
+		// Primary, then the first fallback, are both explicit request models.
+		expect(calls[0]).toBe('prov/primary-critic');
 		expect(calls[1]).toBe('prov/fb1');
 	});
 
@@ -108,7 +108,9 @@ describe('dispatchPhaseCritic — model failover (#1905)', () => {
 			model,
 		) => {
 			calls.push(model ? `${model.providerID}/${model.modelID}` : undefined);
-			if (!model)
+			if (
+				`${model?.providerID}/${model?.modelID}` === 'instance/primary-critic'
+			)
 				throw new Error('429 insufficient_quota: usage limit exceeded');
 			return 'VERDICT: APPROVED';
 		};
@@ -132,7 +134,10 @@ describe('dispatchPhaseCritic — model failover (#1905)', () => {
 		);
 
 		expect(result.verdict).toBe('APPROVED');
-		expect(calls).toEqual([undefined, 'instance/fallback-critic']);
+		expect(calls).toEqual([
+			'instance/primary-critic',
+			'instance/fallback-critic',
+		]);
 	});
 
 	test('injected dispatcher without a registry fails closed instead of reading legacy global state', async () => {
@@ -191,7 +196,7 @@ describe('dispatchPhaseCritic — model failover (#1905)', () => {
 
 		expect(result.verdict).toBe('REJECTED');
 		// Only the primary was attempted — no fallover on a permanent error.
-		expect(calls).toEqual([undefined]);
+		expect(calls).toEqual(['prov/primary-critic']);
 	});
 
 	test('a critic dispatch timeout is permanent (no failover) — pins the defense-in-depth carve-out', async () => {
@@ -221,7 +226,7 @@ describe('dispatchPhaseCritic — model failover (#1905)', () => {
 
 		expect(result.verdict).toBe('REJECTED');
 		// Only the primary attempted — timeout is permanent, no failover.
-		expect(calls).toEqual([undefined]);
+		expect(calls).toEqual(['prov/primary-critic']);
 	});
 
 	test('quota-annotated REJECTED reason when all fallbacks exhausted on a quota error', async () => {
@@ -271,7 +276,10 @@ describe('dispatchPhaseCritic — model failover (#1905)', () => {
 							? `${(override as any).providerID}/${(override as any).modelID}`
 							: undefined,
 					);
-					if (!override) {
+					if (
+						`${(override as any)?.providerID}/${(override as any)?.modelID}` ===
+						'prov/primary-critic'
+					) {
 						return {
 							data: null,
 							error: {
@@ -300,7 +308,7 @@ describe('dispatchPhaseCritic — model failover (#1905)', () => {
 
 			// Failover fired on the envelope-shaped error → APPROVED.
 			expect(result.verdict).toBe('APPROVED');
-			expect(promptCalls[0]).toBeUndefined();
+			expect(promptCalls[0]).toBe('prov/primary-critic');
 			expect(promptCalls[1]).toBe('prov/fb1');
 		} finally {
 			swarmState.opencodeClient = undefined;

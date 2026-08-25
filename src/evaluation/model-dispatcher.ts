@@ -1,6 +1,10 @@
 import type { Agent, OpencodeClient } from '@opencode-ai/sdk';
 import type { DelegationCostFields } from '../services/cost-accounting.js';
 import {
+	dispatchWithModelFallback,
+	parseModelString,
+} from '../utils/model-dispatch-fallback.js';
+import {
 	isQuotaError,
 	isTransientProviderError,
 } from '../utils/provider-error-classification';
@@ -60,16 +64,13 @@ function parseRequestedModel(
 	modelId: string,
 ): { providerID: string; modelID: string } | undefined {
 	if (modelId === 'configured') return undefined;
-	const separator = modelId.indexOf('/');
-	if (separator <= 0 || separator === modelId.length - 1) {
+	const parsed = parseModelString(modelId);
+	if (!parsed) {
 		throw new Error(
 			'explicit evaluation models must use provider/model syntax',
 		);
 	}
-	return {
-		providerID: modelId.slice(0, separator),
-		modelID: modelId.slice(separator + 1),
-	};
+	return parsed;
 }
 
 export function resolveEvaluationAgentName(
@@ -182,86 +183,80 @@ export function createEvaluationModelDispatcher(
 			// subject. Never substitute a fallback model because doing so corrupts
 			// attribution. A bounded same-model retry still absorbs transient quota
 			// blips; each attempt is cleaned up by dispatchEphemeralAgent.
-			const maxSameModelRetries = 2;
-			for (let attempt = 0; ; attempt++) {
-				try {
-					const requestedModel = parseRequestedModel(request.modelId);
-					// Agent resolution is evaluation policy. The shared primitive
-					// receives only an already-resolved agent name.
-					// eslint-disable-next-line no-await-in-loop
-					const agentsResult = await awaitWithAbort(
-						client.app.agents({
-							query: { directory: request.sessionDirectory },
-							signal: controller.signal,
-						}),
-						controller.signal,
-					);
-					if (!agentsResult.data) {
-						throw new Error(
-							`Failed to list registered evaluation agents: ${JSON.stringify(agentsResult.error)}`,
-						);
-					}
-					resolvedAgentName = resolveEvaluationAgentName(
-						agentsResult.data,
-						request.agentName,
-						request.preferredSwarm,
-					);
-					const remainingMs = Math.max(
-						1,
-						request.timeoutMs - (Date.now() - startedAt),
-					);
-					// eslint-disable-next-line no-await-in-loop
+			const requestedModel = parseRequestedModel(request.modelId);
+			const agentsResult = await awaitWithAbort(
+				client.app.agents({
+					query: { directory: request.sessionDirectory },
+					signal: controller.signal,
+				}),
+				controller.signal,
+			);
+			if (!agentsResult.data) {
+				throw new Error(
+					`Failed to list registered evaluation agents: ${JSON.stringify(agentsResult.error)}`,
+				);
+			}
+			resolvedAgentName = resolveEvaluationAgentName(
+				agentsResult.data,
+				request.agentName,
+				request.preferredSwarm,
+			);
+			const dispatched = await dispatchWithModelFallback({
+				dispatch: async (_model, context) => {
 					const result = await dispatchEphemeralAgent({
 						client,
 						directory: request.sessionDirectory,
 						parentSessionId: request.parentSessionId,
-						agentName: resolvedAgentName,
+						agentName: resolvedAgentName!,
 						model: requestedModel,
 						...(request.system === undefined ? {} : { system: request.system }),
 						prompt: request.prompt,
 						readOnlyTools: DEFAULT_READ_ONLY_TOOLS,
 						title: `evaluation gate (${resolvedAgentName})`,
-						timeoutMs: remainingMs,
+						timeoutMs: context.remainingMs ?? request.timeoutMs,
 						abortSignal: controller.signal,
 					});
-					if (result.status === 'completed') {
-						return {
-							status: 'completed',
-							modelId: result.modelId ?? request.modelId,
-							agentName: resolvedAgentName,
-							text: result.text,
-							durationMs: Date.now() - startedAt,
-							promptBytes: result.promptBytes,
-							responseBytes: result.responseBytes,
-							costFields: result.costFields,
-						};
-					}
+					if (result.status === 'completed') return result;
 					if (result.status === 'timeout') timedOut = true;
 					throw new Error(
 						result.error ?? `evaluation dispatch ${result.status}`,
 					);
-				} catch (error) {
-					const cancelled = request.abortSignal?.aborted === true;
-					const msg = error instanceof Error ? error.message : String(error);
-					const retryable =
-						!cancelled &&
-						!timedOut &&
-						attempt < maxSameModelRetries &&
-						isTransientProviderError(msg);
-					if (!retryable) {
-						return {
-							status: cancelled ? 'cancelled' : timedOut ? 'timeout' : 'error',
-							modelId: request.modelId,
-							agentName: resolvedAgentName,
-							text: '',
-							durationMs: Date.now() - startedAt,
-							error: isQuotaError(msg)
-								? `${msg} (model quota/usage limit; retried the same model ${attempt} time(s) — not substituted, to preserve benchmark attribution)`
-								: msg,
-						};
-					}
-				}
-			}
+				},
+				classify: (error) => {
+					const message =
+						error instanceof Error ? error.message : String(error);
+					return isTransientProviderError(message) ? 'transient' : 'permanent';
+				},
+				maxTransientRetriesPerModel: 2,
+				backoffMs: () => 0,
+				maxAttempts: 3,
+				deadlineAtMs: startedAt + request.timeoutMs,
+			});
+			const result = dispatched.result;
+			return {
+				status: 'completed',
+				modelId: result.modelId ?? request.modelId,
+				agentName: resolvedAgentName,
+				text: result.text,
+				durationMs: Date.now() - startedAt,
+				promptBytes: result.promptBytes,
+				responseBytes: result.responseBytes,
+				costFields: result.costFields,
+			};
+		} catch (error) {
+			const cancelled = request.abortSignal?.aborted === true;
+			const msg = error instanceof Error ? error.message : String(error);
+			const quotaMessage = isQuotaError(msg)
+				? `${msg} (model quota/usage limit; retried the same model 2 time(s) — not substituted, to preserve benchmark attribution)`
+				: msg;
+			return {
+				status: cancelled ? 'cancelled' : timedOut ? 'timeout' : 'error',
+				modelId: request.modelId,
+				agentName: resolvedAgentName,
+				text: '',
+				durationMs: Date.now() - startedAt,
+				error: quotaMessage,
+			};
 		} finally {
 			clearTimeout(timeoutHandle);
 			request.abortSignal?.removeEventListener('abort', abortListener);

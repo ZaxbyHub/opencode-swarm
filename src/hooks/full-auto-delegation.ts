@@ -32,6 +32,12 @@ import {
 } from '../config/schema';
 import { isProtectedPath } from '../full-auto/policy';
 import {
+	clearFullAutoSevereCorrelation,
+	extractFullAutoSevereEnvelope,
+	registerFullAutoSevereCorrelation,
+	validateFullAutoSevereEnvelope,
+} from '../full-auto/severe-result';
+import {
 	incrementFullAutoCounter,
 	loadFullAutoRunState,
 	saveFullAutoRunState,
@@ -99,12 +105,6 @@ const RETURN_WARNING_PATTERNS: Array<{
 			/\b(?:created|generated|wrote|modified|added|edited|patched|touched) (?:files? |code )?(?:outside|beyond|past|not in|that (?:are|were) outside) (?:the )?(?:declared |task |coder |allowed )?(?:scope|file ?list|file ?set|allowed (?:paths|files))\b/i,
 	},
 ];
-
-// Severity classification — these categories are severe and pause Full-Auto.
-const SEVERE_CATEGORIES = new Set<string>([
-	'external_instructions',
-	'out_of_scope_files',
-]);
 
 const CANONICAL_ROLES_LOWER = new Set<string>(
 	(ALL_AGENT_NAMES as readonly string[]).map((s) => s.toLowerCase()),
@@ -291,6 +291,21 @@ export function createFullAutoDelegationHook(
 				(typeof args.message === 'string' && args.message) ||
 				(typeof args.task === 'string' && args.task) ||
 				'';
+			if (input.callID && subagentRaw) {
+				const { instruction } = registerFullAutoSevereCorrelation({
+					sessionID,
+					callID: input.callID,
+					generation: runState.runGeneration ?? 0,
+					subagent: subagentRaw,
+				});
+				if (typeof args.prompt === 'string') {
+					args.prompt = `${args.prompt}\n\n${instruction}`;
+				} else if (typeof args.message === 'string') {
+					args.message = `${args.message}\n\n${instruction}`;
+				} else if (typeof args.task === 'string') {
+					args.task = `${args.task}\n\n${instruction}`;
+				}
+			}
 
 			incrementFullAutoCounter(directory, sessionID, 'coderDelegations');
 
@@ -355,10 +370,24 @@ export function createFullAutoDelegationHook(
 			if (!runState || runState.status !== 'running') return;
 
 			const text = extractText(output.output);
+			const envelope = extractFullAutoSevereEnvelope(text);
 			const warnings = detectReturnWarnings(text);
-			if (warnings.length === 0) return;
-
-			const severe = warnings.some((w) => SEVERE_CATEGORIES.has(w.category));
+			const session = swarmState.agentSessions.get(sessionID);
+			const severeValidation =
+				input.callID && runState
+					? validateFullAutoSevereEnvelope({
+							envelope,
+							sessionID,
+							callID: input.callID,
+							generation: runState.runGeneration ?? 0,
+							declaredScope: session?.declaredCoderScope ?? null,
+							currentTaskID: session?.currentTaskId ?? null,
+							session,
+							projectDirectory: directory,
+						})
+					: { accepted: false, reason: 'missing-call-id' };
+			const severe = severeValidation.accepted;
+			if (warnings.length === 0 && !envelope) return;
 
 			await writeDelegationEvent(directory, {
 				type: 'full_auto_subagent_warning',
@@ -366,6 +395,8 @@ export function createFullAutoDelegationHook(
 				session_id: sessionID,
 				phase: 'return',
 				warnings,
+				envelope_category: envelope?.category,
+				envelope_validation: severeValidation.reason,
 				severe,
 			});
 
@@ -379,13 +410,11 @@ export function createFullAutoDelegationHook(
 				const updated = loadFullAutoRunState(directory, sessionID);
 				if (updated && updated.status === 'running') {
 					updated.status = 'paused';
-					updated.pauseReason = `severe subagent return warning: ${warnings
-						.filter((w) => SEVERE_CATEGORIES.has(w.category))
-						.map((w) => w.category)
-						.join(',')}`;
+					updated.pauseReason = `severe subagent return envelope: ${envelope?.category ?? 'unknown'}`;
 					saveFullAutoRunState(directory, updated);
 				}
 			}
+			if (input.callID) clearFullAutoSevereCorrelation(sessionID, input.callID);
 		},
 	};
 }

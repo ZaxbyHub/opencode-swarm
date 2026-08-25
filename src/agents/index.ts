@@ -977,6 +977,9 @@ export function createAgents(
 	// Clear the gated-agent advisory dedupe set at entry. Tests call createAgents
 	// repeatedly and need isolation; plugin init calls it twice (see note above).
 	_emittedGatedAgentAdvisories.clear();
+	// Config may be reloaded in-process. Do not retain swarm entries which are
+	// absent from the new configuration (and make test resets deterministic).
+	_swarmAgentsMap.clear();
 
 	// Check if we have swarms configured
 	const swarms = config?.swarms;

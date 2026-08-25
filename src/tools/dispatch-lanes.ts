@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import pLimit from 'p-limit';
 import { z } from 'zod';
+import { getSwarmAgents } from '../agents/index.js';
 import {
 	CANDIDATE_FIELD_COUNT,
 	CANDIDATE_HEADERS,
@@ -54,6 +55,7 @@ import {
 	isKnownCanonicalRole,
 	type PrReviewResilienceConfig,
 	resolveGeneratedAgentRole,
+	stripKnownSwarmPrefix,
 } from '../config/schema.js';
 import {
 	activatePrWorkflow,
@@ -87,6 +89,8 @@ import { createParallelDispatcher } from '../parallel/dispatcher/parallel-dispat
 import { swarmState } from '../state.js';
 import { teardownEphemeralSession } from '../utils/ephemeral-session-teardown.js';
 import * as logger from '../utils/logger.js';
+import { dispatchWithModelFallback } from '../utils/model-dispatch-fallback.js';
+import { isTransientProviderError } from '../utils/provider-error-classification.js';
 import { createSwarmTool } from './create-tool.js';
 
 export const MAX_LANES = 8;
@@ -812,6 +816,7 @@ export interface SessionOps {
 		path: { id: string };
 		body: {
 			agent: string;
+			model?: { providerID: string; modelID: string };
 			tools: ReadOnlyToolPermissions;
 			parts: Array<{ type: 'text'; text: string }>;
 		};
@@ -825,6 +830,7 @@ export interface SessionOps {
 		query?: { directory?: string };
 		body: {
 			agent: string;
+			model?: { providerID: string; modelID: string };
 			tools: ReadOnlyToolPermissions;
 			parts: Array<{ type: 'text'; text: string }>;
 		};
@@ -2615,23 +2621,57 @@ async function startAsyncLanePrompt(args: {
 	timeoutMs: number;
 }): Promise<void> {
 	const promptController = new AbortController();
+	const baseRole = stripKnownSwarmPrefix(args.lane.agent);
+	const swarmID =
+		baseRole !== args.lane.agent
+			? args.lane.agent.slice(0, args.lane.agent.length - baseRole.length - 1)
+			: undefined;
+	const swarmAgents = getSwarmAgents(swarmID);
 	let promptResult: { data?: unknown; error?: unknown };
 	try {
-		promptResult = await withTimeout(
-			args.session.promptAsync!({
-				path: { id: args.sessionId },
-				query: { directory: args.directory },
-				body: {
-					agent: args.lane.agent,
-					tools: buildReadOnlyTools(),
-					parts: [{ type: 'text', text: args.lane.prompt }],
-				},
-				signal: promptController.signal,
-			}),
-			args.timeoutMs,
-			`Lane "${args.lane.id}" session.promptAsync launch timed out after ${args.timeoutMs}ms`,
-			promptController,
-		);
+		const dispatched = await dispatchWithModelFallback({
+			dispatch: async (model, context) => {
+				const result = await withTimeout(
+					args.session.promptAsync!({
+						path: { id: args.sessionId },
+						query: { directory: args.directory },
+						body: {
+							agent: args.lane.agent,
+							...(model ? { model } : {}),
+							tools: buildReadOnlyTools(),
+							parts: [{ type: 'text', text: args.lane.prompt }],
+						},
+						signal: promptController.signal,
+					}),
+					context.remainingMs ?? args.timeoutMs,
+					`Lane "${args.lane.id}" session.promptAsync launch timed out after ${context.remainingMs ?? args.timeoutMs}ms`,
+					promptController,
+				);
+				if (result.error) {
+					throw new Error(
+						`session.promptAsync launch failed: ${formatError(result.error)}`,
+					);
+				}
+				return result;
+			},
+			classify: (error) => {
+				const message = error instanceof Error ? error.message : String(error);
+				if (/timed out/i.test(message)) return 'permanent';
+				return isTransientProviderError(message) ? 'transient' : 'permanent';
+			},
+			maxTransientRetriesPerModel: 0,
+			deadlineAtMs: _internals.now() + args.timeoutMs,
+			now: _internals.now,
+			scope: {
+				sessionID: args.sessionId,
+				invocationID: `dispatch-lanes-async:${args.lane.id}`,
+				swarmID,
+				role: baseRole,
+			},
+			primaryModel: swarmAgents?.[baseRole]?.model,
+			fallbackModels: swarmAgents?.[baseRole]?.fallback_models ?? [],
+		});
+		promptResult = dispatched.result;
 	} catch (error) {
 		await appendAsyncLaneLaunchError(
 			args.directory,
@@ -2922,21 +2962,55 @@ async function runLane(
 			);
 		}
 		sessionId = create.sessionId;
-
-		const promptResult = await withTimeout(
-			session.prompt({
-				path: { id: sessionId },
-				body: {
-					agent: lane.agent,
-					tools: buildReadOnlyTools(),
-					parts: [{ type: 'text', text: lane.prompt }],
-				},
-				signal: promptController.signal,
-			}),
-			timeoutMs,
-			`Lane "${lane.id}" session.prompt timed out after ${timeoutMs}ms`,
-			promptController,
-		);
+		const createdSessionId = sessionId;
+		const baseRole = stripKnownSwarmPrefix(lane.agent);
+		const swarmID =
+			baseRole !== lane.agent
+				? lane.agent.slice(0, lane.agent.length - baseRole.length - 1)
+				: undefined;
+		const swarmAgents = getSwarmAgents(swarmID);
+		const dispatched = await dispatchWithModelFallback({
+			dispatch: async (model, context) => {
+				const result = await withTimeout(
+					session.prompt({
+						path: { id: createdSessionId },
+						body: {
+							agent: lane.agent,
+							...(model ? { model } : {}),
+							tools: buildReadOnlyTools(),
+							parts: [{ type: 'text', text: lane.prompt }],
+						},
+						signal: promptController.signal,
+					}),
+					context.remainingMs ?? timeoutMs,
+					`Lane "${lane.id}" session.prompt timed out after ${context.remainingMs ?? timeoutMs}ms`,
+					promptController,
+				);
+				if (!result.data) {
+					throw new Error(
+						`session.prompt failed: ${formatError(result.error)}`,
+					);
+				}
+				return result;
+			},
+			classify: (error) => {
+				const message = error instanceof Error ? error.message : String(error);
+				if (/timed out/i.test(message)) return 'permanent';
+				return isTransientProviderError(message) ? 'transient' : 'permanent';
+			},
+			maxTransientRetriesPerModel: 0,
+			deadlineAtMs: _internals.now() + timeoutMs,
+			now: _internals.now,
+			scope: {
+				sessionID: sessionId,
+				invocationID: `dispatch-lanes-sync:${lane.id}`,
+				swarmID,
+				role: baseRole,
+			},
+			primaryModel: swarmAgents?.[baseRole]?.model,
+			fallbackModels: swarmAgents?.[baseRole]?.fallback_models ?? [],
+		});
+		const promptResult = dispatched.result;
 		if (!promptResult.data) {
 			return failedLane(
 				lane,
@@ -4047,7 +4121,18 @@ function extractText(
 
 function formatError(error: unknown): string {
 	if (error instanceof Error) return error.message;
-	const text = typeof error === 'string' ? error : String(error);
+	let text: string;
+	if (typeof error === 'string') {
+		text = error;
+	} else if (typeof error === 'object' && error !== null) {
+		try {
+			text = JSON.stringify(error);
+		} catch {
+			text = String(error);
+		}
+	} else {
+		text = String(error);
+	}
 	return boundErrorString(text);
 }
 

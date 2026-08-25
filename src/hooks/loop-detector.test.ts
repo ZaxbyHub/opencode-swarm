@@ -70,8 +70,10 @@ describe('loop-detector', () => {
 			const r3 = detectLoop(SESSION_ID, 'Task', args);
 			expect(r3.looping).toBe(true);
 			expect(r3.count).toBe(3);
-			// firstArgKey is the FIRST key in the args object, which is subagent_type
-			expect(r3.pattern).toBe('Task:coder:subagent_type');
+			expect(r3.pattern).toMatch(
+				/^task:coder:task-value-[0-9a-f]{12}:phase-missing:/,
+			);
+			expect(r3.pattern).not.toContain('same-task');
 		});
 
 		it('3. Loop counter resets when a different pattern intervenes (A, A, B, A → count back to 1)', () => {
@@ -136,7 +138,9 @@ describe('loop-detector', () => {
 			const r = detectLoop(SESSION_ID, 'Task', null);
 			expect(r.looping).toBe(false);
 			expect(r.count).toBe(1);
-			expect(r.pattern).toBe('Task:unknown:noargs');
+			expect(r.pattern).toMatch(
+				/^task:unknown-role:task-missing:phase-missing:/,
+			);
 		});
 
 		it('8. Array args → handled gracefully (not treated as Record)', () => {
@@ -144,8 +148,9 @@ describe('loop-detector', () => {
 			const r = detectLoop(SESSION_ID, 'Task', ['coder', 'task-1'] as unknown);
 			expect(r.looping).toBe(false);
 			// Array is not a proper object, so argsRecord becomes undefined
-			// hash becomes Task:unknown:noargs
-			expect(r.pattern).toBe('Task:unknown:noargs');
+			expect(r.pattern).toMatch(
+				/^task:unknown-role:task-missing:phase-missing:/,
+			);
 			expect(r.count).toBe(1);
 		});
 
@@ -189,26 +194,29 @@ describe('loop-detector', () => {
 	describe('edge cases', () => {
 		it('undefined args treated as noargs', () => {
 			const r = detectLoop(SESSION_ID, 'Task', undefined);
-			expect(r.pattern).toBe('Task:unknown:noargs');
+			expect(r.pattern).toMatch(
+				/^task:unknown-role:task-missing:phase-missing:/,
+			);
 			expect(r.count).toBe(1);
 		});
 
-		it('different firstArgKey creates different hash', () => {
-			// Different first key (subagent_type comes second, so first key differs)
+		it('different semantic task inputs create different hashes', () => {
 			const args1 = { taskId: 't1', subagent_type: 'coder' };
 			const args2 = { file: 'src/foo.ts', subagent_type: 'coder' };
 
 			const r1 = detectLoop(SESSION_ID, 'Task', args1);
 			const r2 = detectLoop(SESSION_ID, 'Task', args2);
 
-			expect(r1.pattern).toBe('Task:coder:taskId');
-			expect(r2.pattern).toBe('Task:coder:file');
+			expect(r1.pattern).toMatch(
+				/^task:coder:task-value-[0-9a-f]{12}:phase-missing:/,
+			);
+			expect(r2.pattern).toMatch(/^task:coder:task-missing:phase-missing:/);
 			expect(r1.pattern).not.toBe(r2.pattern);
 		});
 
-		it('first arg key is empty string when args is empty object', () => {
+		it('task calls without a task id still get a stable semantic digest', () => {
 			const r = detectLoop(SESSION_ID, 'Task', { subagent_type: 'coder' });
-			expect(r.pattern).toBe('Task:coder:subagent_type');
+			expect(r.pattern).toMatch(/^task:coder:task-missing:phase-missing:/);
 			expect(r.count).toBe(1);
 		});
 
@@ -224,8 +232,10 @@ describe('loop-detector', () => {
 			const session = swarmState.agentSessions.get(SESSION_ID);
 			expect(session?.loopDetectionWindow?.length).toBe(5);
 			expect(
-				session?.loopDetectionWindow?.every(
-					(e) => e.hash === 'Task:test-engineer:taskId',
+				session?.loopDetectionWindow?.every((e) =>
+					/^task:test-engineer:task-value-[0-9a-f]{12}:phase-missing:/.test(
+						e.hash,
+					),
 				),
 			).toBe(true);
 		});
@@ -246,7 +256,9 @@ describe('loop-detector', () => {
 
 			// Last entry should be C
 			const last = session?.loopDetectionWindow?.at(-1);
-			expect(last?.hash).toBe('Task:explorer:taskId');
+			expect(last?.hash).toMatch(
+				/^task:explorer:task-value-[0-9a-f]{12}:phase-missing:/,
+			);
 		});
 	});
 });

@@ -9,6 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { installScopeGuardBindingSeam } from '../../tests/helpers/scope-guard-binding-seam';
+import { createActionIdentity } from '../failures/action-identity';
 import { resetSwarmState, startAgentSession, swarmState } from '../state';
 import { createDelegationLedgerHook } from './delegation-ledger';
 import { detectLoop } from './loop-detector';
@@ -298,8 +299,9 @@ describe('Watchdog Integration Tests', () => {
 			const result3 = detectLoop(CODER_SID, 'Task', args);
 			expect(result3.looping).toBe(true);
 			expect(result3.count).toBe(3);
-			expect(result3.pattern).toContain('Task'); // tool name in hash
-			expect(result3.pattern).toContain('mega_coder'); // agent in hash
+			expect(result3.pattern).toBe(
+				createActionIdentity({ tool: 'Task', args }).pattern,
+			);
 		});
 
 		it('loop detection with 3 identical calls populates session.loopWarningPending via guardrails pattern', async () => {
@@ -308,11 +310,9 @@ describe('Watchdog Integration Tests', () => {
 			expect(coderSession).toBeDefined();
 			coderSession!.loopDetectionWindow = [];
 
-			// Simulate the loop scenario: 3 identical Task calls
-			// Note: detectLoop uses Object.keys(args)[0] as first arg key,
-			// which for { subagent_type, taskId } is 'subagent_type' (alphabetically first)
+			// Simulate the loop scenario with the canonical action identity.
 			const args = { subagent_type: 'mega_coder', taskId: '3.5' };
-			const hash = `Task:mega_coder:subagent_type`; // matches what detectLoop computes
+			const hash = createActionIdentity({ tool: 'Task', args }).pattern;
 
 			// Add 3 entries to the window (simulating consecutive identical calls)
 			coderSession!.loopDetectionWindow.push({ hash, timestamp: Date.now() });
@@ -378,9 +378,8 @@ describe('Watchdog Integration Tests', () => {
 			expect(coderSession).toBeDefined();
 			coderSession!.loopDetectionWindow = [];
 
-			// Note: detectLoop uses Object.keys(args)[0] as first arg key,
-			// which for { subagent_type, taskId } is 'subagent_type' (alphabetically first)
-			const hash = 'Task:mega_coder:subagent_type'; // matches what detectLoop computes
+			const args = { subagent_type: 'mega_coder', taskId: '3.5' };
+			const hash = createActionIdentity({ tool: 'Task', args }).pattern;
 
 			// Add 10 identical entries
 			for (let i = 0; i < 10; i++) {
@@ -396,8 +395,7 @@ describe('Watchdog Integration Tests', () => {
 			// shift removes oldest -> [H, H, H, H, H, H, H, H, H, H] (10 identical)
 			// consecutiveCount from tail = 10
 			const result = detectLoop(CODER_SID, 'Task', {
-				subagent_type: 'mega_coder',
-				taskId: '3.5',
+				...args,
 			});
 			expect(result.looping).toBe(true);
 			expect(result.count).toBe(10);

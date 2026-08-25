@@ -36,6 +36,8 @@ import {
 	type FullAutoDecision,
 	isReadOnlyTool,
 } from '../full-auto/policy';
+import { isAllowedPausedSwarmCommand } from '../full-auto/recovery';
+import { recordFullAutoSevereEvidenceEvent } from '../full-auto/severe-result.js';
 import {
 	isFullAutoStateUnreadable,
 	loadFullAutoRunState,
@@ -106,6 +108,25 @@ export function createFullAutoPermissionHook(
 			}
 
 			if (runState.status === 'paused' || runState.status === 'terminated') {
+				if (
+					toolName === 'swarm_command' &&
+					output.args &&
+					typeof output.args === 'object' &&
+					typeof (output.args as Record<string, unknown>).command === 'string'
+				) {
+					const raw = output.args as Record<string, unknown>;
+					const command = String(raw.command);
+					const commandArgs = Array.isArray(raw.args)
+						? raw.args.filter(
+								(item): item is string => typeof item === 'string',
+							)
+						: [];
+					if (
+						isAllowedPausedSwarmCommand(command, commandArgs, runState.status)
+					) {
+						return;
+					}
+				}
 				// Fail-closed: while paused/terminated, only deterministically
 				// read-only tools are allowed. Anything else (write, shell, network,
 				// delegation, plan/phase mutation, *and any unknown tool*) must
@@ -202,6 +223,7 @@ export function createFullAutoPermissionHook(
 				sessionID,
 				agentName: activeAgent,
 				normalizedAgentName,
+				generatedAgentNames: swarmState.generatedAgentNames,
 				toolName,
 				args: argsObj,
 				directory,
@@ -214,6 +236,7 @@ export function createFullAutoPermissionHook(
 						? getModifiedFilesForTask(session, taskId)
 						: undefined,
 				fullAutoConfig: effectiveFullAutoConfig,
+				pluginConfig: config,
 			};
 
 			let decision = classifyFullAutoToolAction(classifierInput);
@@ -229,9 +252,16 @@ export function createFullAutoPermissionHook(
 					(typeof argsObj?.url === 'string' && argsObj.url) ||
 					undefined;
 				if (shouldEscalateAfterWarning(toolName, commandOrUrl)) {
+					const evidenceEventID = recordFullAutoSevereEvidenceEvent({
+						sessionID,
+						childSessionID: sessionID,
+						category: 'external_instructions',
+						callID: input.callID,
+						generation: runState.runGeneration,
+					});
 					decision = {
 						action: 'escalate_critic',
-						reason: `risky follow-up after prompt-injection warning (${pendingWarning.categories.join(',')})`,
+						reason: `risky follow-up after prompt-injection warning (${pendingWarning.categories.join(',')}); evidence event ${evidenceEventID}`,
 						risk: 'high',
 						context: {
 							tool: toolName,
@@ -364,6 +394,10 @@ export function createFullAutoPermissionHook(
 							fullAutoConfig?.oversight?.max_dispatch_retries ?? 2,
 						max_consecutive_dispatch_failures:
 							fullAutoConfig?.oversight?.max_consecutive_dispatch_failures ?? 3,
+						total_timeout_ms:
+							fullAutoConfig?.oversight?.total_timeout_ms ?? 120000,
+						cleanup_timeout_ms:
+							fullAutoConfig?.oversight?.cleanup_timeout_ms ?? 2000,
 					},
 				});
 			} catch (error) {

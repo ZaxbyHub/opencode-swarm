@@ -15,6 +15,10 @@ import { getSwarmAgents, resolveFallbackModel } from '../agents/index.js';
 import type { PluginConfig } from '../config';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import {
+	classifyProviderFailure,
+	isRetryableProviderFailure,
+} from '../failures/invocation-failure.js';
+import {
 	type ParsedCriticResponse,
 	parseCriticResponseFields,
 } from '../full-auto/critic-response-parser';
@@ -41,7 +45,7 @@ import { teardownEphemeralSession } from '../utils/ephemeral-session-teardown';
 import { advanceInlineFallback } from '../utils/inline-fallback-advancer.js';
 import * as logger from '../utils/logger';
 import type { ModelOverride } from '../utils/model-dispatch-fallback.js';
-import { isTransientProviderError } from '../utils/provider-error-classification.js';
+import { withTimeout } from '../utils/timeout.js';
 import { validateSwarmPath } from './utils';
 
 // Pattern for detecting end-of-sentence question marks (not mid-sentence like "v1?")
@@ -474,6 +478,7 @@ export async function dispatchCriticAndWriteEvent(
 	// FR-003: optional retry config with schema defaults.
 	maxDispatchRetries = 2,
 	maxConsecutiveDispatchFailures = 3,
+	totalTimeoutMs = 120_000,
 ): Promise<CriticDispatchResult> {
 	const client = stateInternals.swarmState.opencodeClient;
 
@@ -580,12 +585,30 @@ export async function dispatchCriticAndWriteEvent(
 
 	let ephemeralSessionId: string | undefined;
 	const promptController = new AbortController();
+	const deadlineAt = Date.now() + totalTimeoutMs;
+	const remainingDeadlineMs = (): number => deadlineAt - Date.now();
+	const deadlineError = (stage: string) =>
+		new Error(
+			`Full-Auto oversight total deadline (${totalTimeoutMs}ms) exhausted during ${stage}`,
+		);
+	const runWithinDeadline = <T>(
+		operation: () => Promise<T>,
+		stage: string,
+	): Promise<T> => {
+		const remaining = remainingDeadlineMs();
+		if (remaining <= 0) return Promise.reject(deadlineError(stage));
+		return withTimeout(operation(), remaining, deadlineError(stage));
+	};
+	const deadlineTimer = setTimeout(() => {
+		promptController.abort(deadlineError('critic dispatch'));
+	}, totalTimeoutMs);
 
 	// Best-effort cleanup — never throws.
 	// Aborts any in-flight prompt before deleting the session so OpenCode
 	// stops writing message rows before the session row is removed (prevents
 	// FK constraint crashes).
 	const cleanup = () => {
+		clearTimeout(deadlineTimer);
 		promptController.abort();
 		if (ephemeralSessionId) {
 			const id = ephemeralSessionId;
@@ -618,7 +641,7 @@ export async function dispatchCriticAndWriteEvent(
 		}
 		if (attempt > 0) {
 			const delay = 2 ** (attempt - 1) * 1000;
-			await sleep(delay);
+			await runWithinDeadline(() => sleep(delay), 'retry backoff');
 		}
 		if (ephemeralSessionId) {
 			const staleId = ephemeralSessionId;
@@ -631,23 +654,28 @@ export async function dispatchCriticAndWriteEvent(
 			// 1. Create ephemeral session scoped to project directory.
 			// Bind to the calling session as parent so OpenCode treats this as
 			// a child session and does not persist it as a new root in the TUI.
-			const createResult = await client.session.create({
-				...(sessionID
-					? {
-							body: {
-								parentID: sessionID,
-								title: 'full_auto_critic background',
-							},
-						}
-					: {}),
-				query: { directory },
-			});
+			const createResult = await runWithinDeadline(
+				() =>
+					client.session.create({
+						...(sessionID
+							? {
+									body: {
+										parentID: sessionID,
+										title: 'full_auto_critic background',
+									},
+								}
+							: {}),
+						query: { directory },
+					}),
+				'critic session creation',
+			);
 			if (!createResult.data) {
 				lastError = new Error(
 					`Failed to create critic session: ${JSON.stringify(createResult.error)}`,
 				);
 			} else {
-				ephemeralSessionId = createResult.data.id;
+				const createdSessionId = createResult.data.id;
+				ephemeralSessionId = createdSessionId;
 				logger.log(
 					`[full-auto-intercept] Created ephemeral session: ${ephemeralSessionId}`,
 				);
@@ -655,16 +683,20 @@ export async function dispatchCriticAndWriteEvent(
 				// 2. Prompt using the registered oversight agent (read-only tools).
 				// #1905: per-call model override on a fallback attempt; omitted
 				// (undefined) means the registered critic_oversight agent model.
-				const promptResult = await client.session.prompt({
-					path: { id: ephemeralSessionId },
-					body: {
-						agent: oversightAgentName,
-						...(modelOverride ? { model: modelOverride } : {}),
-						tools: { write: false, edit: false, patch: false },
-						parts: [{ type: 'text', text: criticContext }],
-					},
-					signal: promptController.signal,
-				});
+				const promptResult = await runWithinDeadline(
+					() =>
+						client.session.prompt({
+							path: { id: createdSessionId },
+							body: {
+								agent: oversightAgentName,
+								...(modelOverride ? { model: modelOverride } : {}),
+								tools: { write: false, edit: false, patch: false },
+								parts: [{ type: 'text', text: criticContext }],
+							},
+							signal: promptController.signal,
+						}),
+					'critic prompt',
+				);
 
 				if (!promptResult.data) {
 					lastError = new Error(
@@ -753,11 +785,9 @@ export async function dispatchCriticAndWriteEvent(
 			// transient gate here only controls whether a fallback is adopted, not
 			// whether a retry happens. The advance block itself is shared with
 			// `src/full-auto/oversight.ts:543–579` via `advanceInlineFallback`.
-			const failureText =
-				lastDispatchError instanceof Error
-					? lastDispatchError.message
-					: String(lastDispatchError);
-			if (isTransientProviderError(failureText)) {
+			if (
+				isRetryableProviderFailure(classifyProviderFailure(lastDispatchError))
+			) {
 				const advanced = advanceInlineFallback({
 					resolveFallback: resolveOversightFallback,
 					index: modelFallbackIndex,
@@ -1076,6 +1106,7 @@ export function createFullAutoInterceptHook(
 			sessionID,
 			fullAutoConfig.oversight?.max_dispatch_retries ?? 2,
 			fullAutoConfig.oversight?.max_consecutive_dispatch_failures ?? 3,
+			fullAutoConfig.oversight?.total_timeout_ms ?? 120_000,
 		);
 
 		// Inject verdict into message stream

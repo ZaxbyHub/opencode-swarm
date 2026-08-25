@@ -8,10 +8,18 @@
  *   - reject with the supplied error when the deadline elapses,
  *   - clear its timer in `finally` (no leak that holds the loop open),
  *   - never throw synchronously.
+ *
+ * `withTimeoutSignal` is the same contract plus a cooperative abort signal for
+ * callers that can cancel the underlying work.
  */
 
 import { describe, expect, test } from 'bun:test';
-import { withTimeout, yieldToEventLoop } from '../timeout';
+import {
+	_internals,
+	withTimeout,
+	withTimeoutSignal,
+	yieldToEventLoop,
+} from '../timeout';
 
 describe('withTimeout', () => {
 	test('resolves to racer value when racer wins', async () => {
@@ -38,6 +46,96 @@ describe('withTimeout', () => {
 		const start = Date.now();
 		await withTimeout(Promise.resolve('done'), 60_000, new Error('nope'));
 		expect(Date.now() - start).toBeLessThan(500);
+	});
+});
+
+describe('withTimeoutSignal', () => {
+	test('resolves to the operation value when the operation wins', async () => {
+		const result = await withTimeoutSignal(
+			async (signal) => {
+				expect(signal).toBeInstanceOf(AbortSignal);
+				expect(signal.aborted).toBe(false);
+				return 7;
+			},
+			1000,
+			new Error('would not reach'),
+		);
+		expect(result).toBe(7);
+	});
+
+	test('rejects with the supplied error and aborts the signal when the deadline elapses', async () => {
+		const err = new Error('deadline exceeded');
+		let observedSignal: AbortSignal | undefined;
+		await expect(
+			withTimeoutSignal(
+				async (signal) => {
+					observedSignal = signal;
+					await new Promise(() => {});
+					return 99;
+				},
+				25,
+				err,
+			),
+		).rejects.toBe(err);
+		expect(observedSignal).toBeDefined();
+		expect(observedSignal?.aborted).toBe(true);
+		expect(observedSignal?.reason).toBe(err);
+		expect(err.name).toBe('TimeoutError');
+	});
+
+	test('clears its timer on success, operation error, and timeout', async () => {
+		const originalSetTimeout = _internals.setTimeout;
+		const originalClearTimeout = _internals.clearTimeout;
+		const cleared: unknown[] = [];
+		let nextTimer = 0;
+		try {
+			_internals.setTimeout = ((callback: () => void, ms: number) => {
+				const token = { id: ++nextTimer, unref() {} };
+				if (ms === 0) queueMicrotask(callback);
+				return token;
+			}) as typeof setTimeout;
+			_internals.clearTimeout = ((timer: unknown) => {
+				cleared.push(timer);
+			}) as typeof clearTimeout;
+
+			await expect(
+				withTimeoutSignal(async () => 'ok', 100, new Error('late')),
+			).resolves.toBe('ok');
+			await expect(
+				withTimeoutSignal(
+					async () => {
+						throw new Error('operation failed');
+					},
+					100,
+					new Error('late'),
+				),
+			).rejects.toThrow('operation failed');
+			await expect(
+				withTimeoutSignal(
+					async () => new Promise<never>(() => {}),
+					0,
+					new Error('expired'),
+				),
+			).rejects.toThrow('expired');
+			expect(cleared).toHaveLength(3);
+		} finally {
+			_internals.setTimeout = originalSetTimeout;
+			_internals.clearTimeout = originalClearTimeout;
+		}
+	});
+
+	test('rejects invalid timeout bounds before starting the operation', async () => {
+		let started = false;
+		await expect(
+			withTimeoutSignal(
+				async () => {
+					started = true;
+				},
+				Number.POSITIVE_INFINITY,
+				new Error('invalid'),
+			),
+		).rejects.toThrow('finite non-negative');
+		expect(started).toBe(false);
 	});
 });
 
