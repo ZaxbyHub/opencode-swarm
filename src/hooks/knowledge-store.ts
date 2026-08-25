@@ -1246,18 +1246,56 @@ const CONFIDENCE_CEILING = 1.0;
  */
 export async function bumpKnowledgeConfidenceBatch(
 	directory: string,
-	deltas: Array<{
-		id: string;
-		delta: number;
-		receipt_events?: Array<{
-			event_id: string;
-			timestamp: string;
-			outcome: 'applied' | 'violated' | 'ignored';
-		}>;
-	}>,
+	deltas: KnowledgeConfidenceDelta[],
 	options?: ConfidenceFloorOptions,
 ): Promise<number> {
-	if (deltas.length === 0) return 0;
+	const { applied } = await bumpKnowledgeConfidenceBatchResult(
+		directory,
+		deltas,
+		options,
+	);
+	return applied;
+}
+
+/** A single confidence adjustment request. */
+export interface KnowledgeConfidenceDelta {
+	id: string;
+	delta: number;
+	receipt_events?: Array<{
+		event_id: string;
+		timestamp: string;
+		outcome: 'applied' | 'violated' | 'ignored';
+	}>;
+}
+
+/**
+ * Discriminated result of a batch confidence bump (issue #2038, BLK-4).
+ *
+ * `bumpKnowledgeConfidenceBatch` returns `0` both for "no matching knowledge
+ * IDs" (permanent — the ids are archived, deleted, or mistyped) and for
+ * "threw / lock failed" (transient — contention or I/O). A single counter
+ * cannot decide dequeue-vs-retain for the skill-usage pending queue: dequeuing
+ * on the transient case silently drops feedback, retaining on the permanent
+ * case creates an unbounded exempt set. `failed` separates them.
+ */
+export interface BumpKnowledgeConfidenceResult {
+	/** Number of knowledge entries actually touched. */
+	applied: number;
+	/** True when the batch threw or its lock could not be acquired. */
+	failed: boolean;
+}
+
+/**
+ * Additive variant of {@link bumpKnowledgeConfidenceBatch} that distinguishes
+ * "applied nothing" from "failed to run". Existing consumers are unchanged;
+ * `bumpKnowledgeConfidenceBatch` is a thin wrapper over this function.
+ */
+export async function bumpKnowledgeConfidenceBatchResult(
+	directory: string,
+	deltas: KnowledgeConfidenceDelta[],
+	options?: ConfidenceFloorOptions,
+): Promise<BumpKnowledgeConfidenceResult> {
+	if (deltas.length === 0) return { applied: 0, failed: false };
 
 	const swarmPath = resolveSwarmKnowledgePath(directory);
 	const hivePath = resolveHiveKnowledgePath();
@@ -1307,13 +1345,13 @@ export async function bumpKnowledgeConfidenceBatch(
 				err instanceof Error ? err.message : String(err),
 			);
 		});
-		return touchedSwarm.length + touchedHive.length;
+		return { applied: touchedSwarm.length + touchedHive.length, failed: false };
 	} catch (err) {
 		logger.log(
 			'[knowledge-store] bumpKnowledgeConfidenceBatch failed (fail-open):',
 			err instanceof Error ? err.message : String(err),
 		);
-		return 0;
+		return { applied: 0, failed: true };
 	}
 }
 

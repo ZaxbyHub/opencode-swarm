@@ -1690,7 +1690,14 @@ export async function executePhaseComplete(
 	};
 
 	// Skill usage feedback + pruning: close the learning loop at phase boundaries.
-	// Idempotency is provided by feedback_applied markers in the skill-usage log itself.
+	// Idempotency is provided by the authoritative sidecar queue in
+	// `.swarm/skill-usage-pending.json` (issue #2038), NOT by `feedback_applied`
+	// marker lines in the JSONL — those were the unbounded accumulation the issue
+	// is about, and the one-time migration drops them. Each actionable verdict is
+	// enqueued as a record before it is appended to the stream; consumption claims
+	// records under a lock, marks them `in_flight`, and dequeues them once the
+	// confidence bump returns, so a record is applied at most once and a crash
+	// mid-cycle leaves it visible rather than replayed.
 	// Errors never block phase_complete.
 	try {
 		const feedbackResult = await applySkillUsageFeedback(dir, { floorOptions });

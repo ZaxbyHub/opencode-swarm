@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import {
 	collectCitationResolutionErrors,
 	collectCoverageRatchetErrors,
+	collectKeyspaceBoundErrors,
 	collectRegistryIdentityErrors,
 	collectRetentionRegistryErrors,
 	collectRowShapeErrors,
@@ -259,6 +260,131 @@ describe('row-shape validation negatives (PRR-006/F-001/F-006)', () => {
 		expect(
 			collectRowShapeErrors(bad).some((e) => e.includes('unbounded')),
 		).toBe(true);
+	});
+});
+
+/**
+ * Issue #2038 recurrence guardrail. The defect class: a PER-KEY retention cap
+ * was mistaken for a global bound — it bounds each key's history but not the
+ * store, because steady-state size is O(distinct-keys x per-key-cap) and the
+ * keyspace itself (there, `skillPath`) was unbounded. The pre-#2038 gate
+ * constrained only `scope: 'none'`, so such a row registered as bounded and
+ * passed CI. These cases pin the rule that closes that hole; deleting
+ * `collectKeyspaceBoundErrors` (or its call from collectRowShapeErrors) fails
+ * every one of them.
+ */
+describe('per-key keyspace declaration (issue #2038 recurrence guardrail)', () => {
+	const perKey = (
+		keyspaceBound?: string,
+		disposition?: RetentionRow['disposition'],
+	): RetentionRow =>
+		makeRow({
+			writeLimits: {
+				bound: 'MAX_PER_KEY 500 FIFO per key',
+				scope: 'per-key',
+				citation: 'src/some/writer.ts:3',
+				...(keyspaceBound === undefined ? {} : { keyspaceBound }),
+			},
+			...(disposition ? { disposition } : {}),
+		});
+
+	test('a per-key row with a non-fix disposition and NO keyspaceBound is rejected', () => {
+		const errors = collectKeyspaceBoundErrors(perKey());
+		expect(errors).toHaveLength(1);
+		// The message must name the class so the next person understands why.
+		expect(errors[0]).toContain('#2038');
+		expect(errors[0]).toContain('keyspaceBound is missing');
+	});
+
+	test('the missing-keyspaceBound rule fires through the row-shape collector too', () => {
+		// Guards the wiring, not just the function: an unwired rule is no rule.
+		expect(
+			collectRowShapeErrors(perKey()).some((e) =>
+				e.includes('keyspaceBound is missing'),
+			),
+		).toBe(true);
+	});
+
+	test('an empty or whitespace-only keyspaceBound does not satisfy the rule', () => {
+		expect(collectKeyspaceBoundErrors(perKey(''))).toHaveLength(1);
+		expect(collectKeyspaceBoundErrors(perKey('   '))).toHaveLength(1);
+	});
+
+	test('a keyspaceBound that admits the keyspace is not finite cannot stay non-fix', () => {
+		// The #2038 row itself, phrased honestly: naming the defect is not a way
+		// to keep a not-a-defect disposition.
+		const errors = collectKeyspaceBoundErrors(
+			perKey('one key per skill path — UNBOUNDED (src/some/writer.ts:9)'),
+		);
+		expect(errors).toHaveLength(1);
+		expect(errors[0]).toContain('#2038');
+		expect(errors[0]).toContain('NOT finite');
+	});
+
+	test('the other not-finite admissions are caught as well', () => {
+		for (const admission of [
+			'200 FIFO per skill, no global ceiling across skills',
+			'one file per session and nothing deletes them',
+		]) {
+			expect(collectKeyspaceBoundErrors(perKey(admission))).toHaveLength(1);
+		}
+	});
+
+	test('a per-key row that names a finite keyspace passes', () => {
+		expect(
+			collectKeyspaceBoundErrors(
+				perKey(
+					'FINITE: one key per active lane, bounded by the max-concurrency constant (src/some/writer.ts:7)',
+				),
+			),
+		).toEqual([]);
+	});
+
+	test('fix-in-issue per-key rows are exempt — they already own the defect', () => {
+		expect(
+			collectKeyspaceBoundErrors(
+				perKey(undefined, {
+					kind: 'fix-in-issue',
+					issue: 2309,
+					note: 'keyspace bound owned here',
+				}),
+			),
+		).toEqual([]);
+	});
+
+	test('the rule does not fire on non-per-key scopes', () => {
+		// makeRow() defaults to scope "global" with no keyspaceBound.
+		expect(collectKeyspaceBoundErrors(makeRow())).toEqual([]);
+	});
+
+	test('a no-owner-waiver string cannot satisfy keyspaceBound', () => {
+		expect(
+			collectRowShapeErrors(perKey('TBD — nobody has worked this out')).some(
+				(e) => e.includes('not a completed disposition'),
+			),
+		).toBe(true);
+	});
+
+	test('a rotted path cited by keyspaceBound is reported', () => {
+		// Must discriminate: makeRow's default writer/reader citations are also
+		// absent under fixtureRoot, so asserting only "rotted citation" would pass
+		// even if keyspaceBound were never wired into the collector. Assert on the
+		// keyspaceBound path specifically, and pin that it is absent when the field
+		// cites nothing.
+		const withRot = perKey('FINITE: closed enum (src/does/not/exist.ts:1)');
+		expect(
+			collectCitationResolutionErrors(withRot, fixtureRoot).some(
+				(e) =>
+					e.includes('rotted citation') && e.includes('src/does/not/exist.ts'),
+			),
+		).toBe(true);
+
+		const withoutRot = perKey('FINITE: closed enum, no path cited');
+		expect(
+			collectCitationResolutionErrors(withoutRot, fixtureRoot).some((e) =>
+				e.includes('src/does/not/exist.ts'),
+			),
+		).toBe(false);
 	});
 });
 

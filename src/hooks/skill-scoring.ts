@@ -3,7 +3,9 @@
  * usage data from `.swarm/skill-usage.jsonl`.
  *
  * All public functions are pure over their inputs. File I/O goes through
- * `readSkillUsageEntries` (imported from `skill-usage-log.ts`).
+ * `readSkillUsageEntriesWithCoverage` (imported from `skill-usage-log.ts`), the
+ * bounded read funnel of issue #2038: it reports whether the window it returned
+ * is the full history, which `formatSkillIndexWithContext` discloses.
  * An `_internals` DI seam mirrors the pattern in `skill-usage-log.ts`
  * and `skill-propagation-gate.ts` for testability.
  */
@@ -11,8 +13,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
-	readSkillUsageEntries,
+	readSkillUsageEntriesWithCoverage,
 	type SkillUsageEntry,
+	type SkillUsageReadCoverage,
 } from './skill-usage-log.js';
 
 // ============================================================================
@@ -96,6 +99,13 @@ export interface SkillStats {
 	lastUsed: string;
 	/** Top agents by usage count, sorted descending. */
 	topAgents: Array<{ agent: string; count: number }>;
+	/**
+	 * What the window these stats were computed from could and could not see
+	 * (issue #2038 §7). Absent only on a `SkillStats` built by hand; every
+	 * value produced by {@link getSkillStats} carries it, so a consumer can tell
+	 * "0% compliance" from "compaction evicted the compliant half".
+	 */
+	coverage?: SkillUsageReadCoverage;
 }
 
 export type SkillRunner = 'opencode' | 'claude' | 'codex';
@@ -737,7 +747,10 @@ export function rankSkillsForContext(
 	taskContext: string,
 	directory: string,
 ): SkillRankEntry[] {
-	const allEntries = readSkillUsageEntries(directory);
+	// Bounded read funnel (issue #2038 §7). Coverage has no consumer in a
+	// relevance ranking — a ranking is comparative, and every skill in the list
+	// is scored against the same window — so only the entries are taken.
+	const { entries: allEntries } = readSkillUsageEntriesWithCoverage(directory);
 
 	const results: SkillRankEntry[] = [];
 
@@ -785,24 +798,27 @@ export function rankSkillsForContext(
 }
 
 /**
- * Read usage log and compute aggregate statistics for a single skill.
+ * Aggregate one skill's stats from an ALREADY-FILTERED entry list.
  *
- * @param skillPath - Repo-relative path to the skill file.
- * @param directory - Project root directory.
- * @returns `SkillStats` with aggregate metrics. Returns zeros/empty when log is missing.
+ * Extracted so `formatSkillIndexWithContext` can compute every skill's stats
+ * from a single log read instead of one full read per skill (issue #2038 §7).
+ *
+ * The caller must filter with the SAME exact predicate the single-skill read
+ * uses — `entry.skillPath === skillPath`, which is what
+ * `readSkillUsageEntries(directory, { skillPath })` applies. Scoring matches
+ * exactly on purpose; only the curator matches skill paths fuzzily.
  */
-export function getSkillStats(
-	skillPath: string,
-	directory: string,
+function computeSkillStatsFromEntries(
+	entries: SkillUsageEntry[],
+	coverage?: SkillUsageReadCoverage,
 ): SkillStats {
-	const entries = readSkillUsageEntries(directory, { skillPath });
-
 	if (entries.length === 0) {
 		return {
 			totalUsage: 0,
 			complianceRate: 0,
 			lastUsed: '',
 			topAgents: [],
+			...(coverage !== undefined && { coverage }),
 		};
 	}
 
@@ -843,7 +859,59 @@ export function getSkillStats(
 		complianceRate,
 		lastUsed,
 		topAgents,
+		...(coverage !== undefined && { coverage }),
 	};
+}
+
+/**
+ * Read usage log and compute aggregate statistics for a single skill.
+ *
+ * @param skillPath - Repo-relative path to the skill file.
+ * @param directory - Project root directory.
+ * @returns `SkillStats` with aggregate metrics, carrying the coverage of the
+ *          window they were computed from. Returns zeros/empty when log is missing.
+ */
+export function getSkillStats(
+	skillPath: string,
+	directory: string,
+): SkillStats {
+	const { entries, coverage } = readSkillUsageEntriesWithCoverage(directory, {
+		skillPath,
+	});
+	return computeSkillStatsFromEntries(entries, coverage);
+}
+
+/**
+ * One bounded, cardinality-safe line disclosing that the retained usage window
+ * is not the full history (issue #2038 §7).
+ *
+ * Deliberately COUNTS ONLY. The adversarial case in the issue is thousands of
+ * one-off skill IDs, so enumerating the affected skill paths here would be an
+ * unbounded string in the delegation prompt — the exact failure this fix
+ * exists to prevent. Nothing wall-clock-derived either: this string is
+ * rewritten into `.swarm/context.md` on every delegation, so a time-varying
+ * value would churn the file on every pass.
+ *
+ * Returns `''` when the window is complete, which is the steady state — the
+ * index is then byte-identical to what it was before this disclosure existed.
+ */
+function formatCoverageDisclosure(coverage: SkillUsageReadCoverage): string {
+	if (coverage.complete) return '';
+	const detail: string[] = [];
+	if (coverage.entriesDropped > 0) {
+		detail.push(`${coverage.entriesDropped} older entries evicted`);
+	}
+	if (coverage.skillsDropped > 0) {
+		detail.push(`${coverage.skillsDropped} skills dropped whole`);
+	}
+	if (coverage.truncatedRead) detail.push('this read was byte-bounded');
+	const floorNote =
+		coverage.floorPerSkill > 0
+			? ` at least the most recent ${coverage.floorPerSkill} use(s) of each surviving skill are retained, so`
+			: '';
+	return `  NOTE: skill-usage history has been compacted${
+		detail.length > 0 ? ` (${detail.join('; ')})` : ''
+	};${floorNote} the usage counts and compliance rates above are a lower bound, not the full history.`;
 }
 
 /**
@@ -863,8 +931,12 @@ export function formatSkillIndexWithContext(
 	directory: string,
 	metadataBySkillPath?: ReadonlyMap<string, SkillMetadata>,
 ): string {
-	// Bounded check: just verify the log file exists and has content
-	// instead of reading the entire file on every delegation.
+	// Cheap existence gate. This is NOT a substitute for a bounded read — the
+	// comment that used to stand here claimed the whole function avoided
+	// reading the log, which was false: the loop below called `getSkillStats`
+	// per skill and every one of those was a full read. The gate is kept
+	// because the no-history path needs no entries at all, and a `statSync` is
+	// cheaper than opening the log to discover it is empty.
 	const usageLogPath = path.join(directory, '.swarm', 'skill-usage.jsonl');
 	let hasHistory = false;
 	try {
@@ -887,10 +959,29 @@ export function formatSkillIndexWithContext(
 			.join('\n');
 	}
 
+	// ONE read for the whole index (issue #2038 §7). The previous shape called
+	// `getSkillStats` per skill, and every one of those was a full bounded read
+	// of the log — O(skills x log) on the hot delegation path.
+	const { entries, coverage } = readSkillUsageEntriesWithCoverage(directory);
+
+	// Grouped on the RAW `skillPath`, reproducing exactly what
+	// `readSkillUsageEntries(directory, { skillPath })` filtered on. Scoring
+	// matches skill paths exactly; only the curator matches them fuzzily, and
+	// harmonizing the two here would silently change every usage count.
+	const entriesBySkillPath = new Map<string, SkillUsageEntry[]>();
+	for (const entry of entries) {
+		const list = entriesBySkillPath.get(entry.skillPath);
+		if (list) list.push(entry);
+		else entriesBySkillPath.set(entry.skillPath, [entry]);
+	}
+
 	const lines: string[] = [];
 
 	for (const skillPath of skills) {
-		const stats = getSkillStats(skillPath, directory);
+		const stats = computeSkillStatsFromEntries(
+			entriesBySkillPath.get(skillPath) ?? [],
+			coverage,
+		);
 		const meta =
 			metadataBySkillPath?.get(skillPath) ??
 			_internals.readSkillMetadata(skillPath, directory);
@@ -906,7 +997,14 @@ export function formatSkillIndexWithContext(
 		);
 	}
 
-	return lines.join('\n');
+	// Coverage reaches a real surface here: this string is written into the
+	// `## Available Skills` section of `.swarm/context.md` by
+	// `skill-propagation-gate.ts`, i.e. it reaches the delegation prompt. The
+	// disclosure is empty while the window is complete, so the steady-state
+	// index is byte-identical to what it was before.
+	const disclosure = formatCoverageDisclosure(coverage);
+	if (disclosure.length === 0) return lines.join('\n');
+	return lines.length > 0 ? `${lines.join('\n')}\n${disclosure}` : disclosure;
 }
 
 // ============================================================================

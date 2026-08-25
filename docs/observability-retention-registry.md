@@ -61,8 +61,13 @@ open issues' own "independently verified cause" sections — the sequence issues
   metadata to sample it freely).
 - **Limit scope** — `global` (one ceiling for the whole store),
   `per-trigger` (bounded only per invocation), `per-key` (per task/skill/file
-  etc.), `session-scoped` (bounded by the close/finalize lifecycle),
+  etc. — **must also declare `writeLimits.keyspaceBound`**, see the keyspace
+  rule below), `session-scoped` (bounded by the close/finalize lifecycle),
   `none` (verified unbounded → always a fix-in-issue row).
+- **Keyspace bound** (`writeLimits.keyspaceBound`) — for `per-key` rows, what
+  makes the *set of keys* finite, with a `path:line` citation. Optional on the
+  TypeScript type because it is meaningless for the other scopes; **required by
+  the gate** for every `per-key` row whose disposition is not `fix-in-issue`.
 - **Disposition** (issue #2036 rule — no owner waiver):
   - **fix in #NNNN** — a linked implementation issue in the sequence, or the
     sequence-amendment issue #2309 opened under #2036's amendment clause;
@@ -77,15 +82,96 @@ open issues' own "independently verified cause" sections — the sequence issues
 
 Every current full-file reader in the registry satisfies exactly one of:
 (1) a **hard source-proven byte bound** — e.g. telemetry rotation caps both
-generations at ≤20 MiB; skill-usage/changelog/knowledge lists are FIFO-capped;
+generations at ≤20 MiB; `skill-usage` is now a hard global byte/age/count
+bound (`SKILL_USAGE_LIMITS`, issue #2038) backed by the authoritative
+`skill-usage-pending` sidecar, not a FIFO cap; changelog/knowledge lists are
+FIFO-capped;
 (2) a **linked fix PR** — #2039 (events), #2040 (shell-audit), #2037
-(context-telemetry), #2038 (skill-usage), #2041 (PRM), #2042 (subscriptions);
+(context-telemetry), #2041 (PRM), #2042 (subscriptions);
 (3) an **authoritative lifecycle rationale** — plan-ledger replay, receipts-v2
 queries, evaluation-store integrity reads, memory-store loads (all
 cap-bounded or authoritative-by-contract).
 No correctness state is classified as sampleable operational telemetry, and no
 content-bearing stream is reclassified as metadata (privacy classes are
 recorded per row in the data module).
+
+## The keyspace rule for `per-key` limits (issue #2038 recurrence guardrail)
+
+**The defect class.** A retention policy scoped *per key* was mistaken for a
+global bound. A per-key cap bounds each key's history but **not the store**:
+steady-state size is `O(distinct-keys × per-key-cap)`, which is a ceiling only
+when the *keyspace* is finite. In issue #2038 the keyspace was `skillPath` —
+one key per distinct skill name, with no limit on how many exist — so a
+500-entry-per-skill prune produced growth with no ceiling. The row passed CI
+because the gate constrained only `scope: 'none'` and said nothing whatsoever
+about `per-key`.
+
+**The rule.** A row with `writeLimits.scope === 'per-key'` whose disposition is
+**not** `fix-in-issue` MUST declare `writeLimits.keyspaceBound`. The value names
+what makes the keyspace finite and cites `path:line` evidence. A keyspace is
+finite iff **either**
+
+1. the key domain is a **closed set** — a TypeScript enum/union, or an index
+   bounded by a max-concurrency constant; **or**
+2. something **deletes keys** and that deleter's trigger is **global**, not
+   per-key.
+
+A per-key cap is never an answer to this field — it is the thing the field
+exists to qualify. `fix-in-issue` rows are exempt: they already declare the
+stream a defect under a named owning issue, so there is nothing to whitewash.
+
+**The gate rejects two failures**, both in `collectKeyspaceBoundErrors`
+(`scripts/check-retention-registry.ts`), and both name #2038 in the message:
+
+- the field is **missing or empty** on a non-`fix-in-issue` `per-key` row; or
+- the field is present but **declares the keyspace not finite** (matching
+  `unbounded`, `no … ceiling`, `nothing deletes/reaps/removes/prunes`) while the
+  disposition still claims the stream is fine. Admitting the defect in prose is
+  not a way to keep a `not-a-defect` disposition — such a row must become
+  `fix-in-issue`. The `skill-changelogs` row is the reference example of that
+  admission carried honestly, under #2309.
+
+`keyspaceBound` is also swept for the no-owner-waiver strings (`TBD`, `defer`,
+`unknown`, "future issue") and its cited paths are rot-checked like every other
+citation.
+
+**Why a CI check and not a stronger rung.** The obligation is a *conjunction*
+across sibling fields — `writeLimits.scope === 'per-key'` **and**
+`disposition.kind !== 'fix-in-issue'` — and `disposition` is a sibling of
+`writeLimits`, not a member of it, so no discriminated union on `scope` can
+express it; narrowing `scope` alone would force the field onto the
+`fix-in-issue` rows the rule deliberately exempts. A type can also require
+presence but check neither non-emptiness nor whether the prose answers the
+question (`keyspaceBound: ''` typechecks). A lint rule is the wrong tool: this
+is a cross-field semantic property of one project data file, keyed on values
+rather than code shape. And there is no runtime rung — the registry lives under
+`scripts/` and is deliberately never loaded by the plugin (AGENTS.md invariants
+1 and 2). A CI check over the data artifact is the strongest available rung, and
+it is the same rung the sibling `scope: 'none'` rule already occupies.
+
+**Applying the rule to the existing registry found two live instances of the
+#2038 class**, both previously carrying a `not-a-defect` disposition whose only
+proof was a per-key cap. Both are now `fix-in-issue` under #2309, and each keeps
+its `keyspaceBound` field as the source evidence behind that disposition:
+
+- `test-history` (`.swarm/cache/test-history.jsonl`) — `MAX_HISTORY_PER_TEST`
+  = 20 is a per-key FIFO over a `(testFile, testName)` key; the prune re-emits
+  the newest 20 of *every* key it finds, so keys for renamed or deleted tests
+  are never evicted; there is no global count/byte/age cap; and `.swarm/cache/`
+  is in no close or reset list. This row's read bound previously stated the
+  fallacy outright — "bounded transitively by 20/test cap × test population" —
+  which is the clearest illustration in this registry of why the rule exists.
+- `pr-feedback-event-queues` (`.swarm/pr-feedback-events/{session-stem}.json`)
+  — one file per session id; the `MAX_TRACKED_SESSIONS` = 200 FIFO evicts from
+  an in-process `Map` and deletes no file, claiming an event rewrites the record
+  in place rather than removing it, and the directory is in no close or reset
+  list.
+
+They are filed under #2309 rather than a new issue because it already owns this
+exact shape for `skill-changelogs` (a per-key cap with no bound on the key
+population) under #2036's amendment clause. That routing is an inference from
+the `skill-changelogs` precedent, not a pre-existing assignment — if #2309 is
+the wrong owner, the disposition is the thing to change, not the evidence.
 
 ## Close/reset/archive reconciliation (acceptance criterion)
 
@@ -110,14 +196,15 @@ decision is *missing today* (they are untouched, never deleted-and-needed).
 
 ## The registry
 
-### Category 1 — Core telemetry and event streams (4 rows)
+### Category 1 — Core telemetry and event streams (5 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
 | `telemetry-jsonl` | .swarm/telemetry.jsonl (+ single rotated .1) | operational | ROTATION_CHECK_INTERVAL=50 emits; rotate at 10 MiB (rotateTelemetryIfNeeded maxBytes, src… (global) | full-file: ≤ 2×10 MiB — both readers full-read but the rotation i… | archived+cleaned — flush (close.ts:1274), ARCHIVE_ARTI… | retain by design — #2051 (legacy-path retirement/migration owner); this gate (ratification) |
 | `events-jsonl` | .swarm/events.jsonl | operational | NONE — no rotation, no byte/age/count cap (none) | full-file: unbounded — several readers scale with total history | archived+cleaned — ARCHIVE_ARTIFACTS (close.ts:375), A… | **fix in #2039** — #2039 |
 | `context-telemetry` | .swarm/context-telemetry.jsonl | operational | ACTIVE_MAX_BYTES=256KiB / ACTIVE_MAX_ENTRIES=10k / AGE_MAX_MS=30d on the retained raw window; lifetime folded aggregate in the manifest header (global) | manifest+retained-window: bounded — READ_MAX_BYTES=280KiB, independent of total history | archived as a validated cut — finalizeContextTelemetry before copy, ARCHIVE_ARTIFACTS (close.ts); NOT cleaned (persists; compaction is retention) | retain by design — #2037 (shipped PR) |
-| `skill-usage` | .swarm/skill-usage.jsonl | derived-rebuildable | prune trigger 1 MiB (SKILL_USAGE_LOG_ROTATE_BYTES :375) with PER-SKILL 500-entry FIFO (:3… (per-key) | mixed full-file + tail: full-file readers unbounded in file size; tail reader … | untouched — persists across sessions | **fix in #2038** — #2038 |
+| `skill-usage` | .swarm/skill-usage.jsonl | derived-rebuildable | HARD GLOBAL: SKILL_USAGE_LIMITS maxEntries=5,000/maxBytes=1.5MiB/maxAgeMs=90d, floorPerSkill=20 (global) | mixed full-file + tail: full readers bounded at readMaxBytes=1,677,722 B (truncatedRead reported); tail 64 KiB | untouched — persists across sessions | retain by design — #2038 (implemented) |
+| `skill-usage-pending` | .swarm/skill-usage-pending.json | authoritative | queueMaxRecords=5,000/queueMaxBytes=512KiB/maxAgeMs=90d/maxAttempts=5 (global) | indexed: single JSON doc bounded at readMaxBytes=1,677,722 B; oversized reads quarantined | untouched — persists across sessions | retain by design — #2038 (implemented) |
 
 ### Category 2 — Background delegation, PR monitor/feedback, lane sidecars (10 rows)
 
@@ -127,7 +214,7 @@ decision is *missing today* (they are untouched, never deleted-and-needed).
 | `background-delegations-health` | .swarm/background-delegations-health.json | derived-rebuildable | bounded by described data (checkpoint/ledger bounds above) (global) | indexed: single small JSON artifact | archived-only — ARCHIVE_ARTIFACTS (close.ts:420), not … | not a defect — #2034 (merged) |
 | `background-delegations-fallback` | .swarm/background-delegation-fallback/*.json + .swarm/background-code… | authoritative | MAX_LIVE_BACKGROUND_FALLBACKS 256 (:64); per-file 1 MiB (:75); reservations ≤256 entries … (global) | directory-scan: ≤256 files × 1 MiB | untouched (cross-session recovery state) | not a defect — #2034 (merged) |
 | `pr-monitor-subscriptions` | .swarm/pr-monitor/subscriptions.jsonl | operational | maxSubscriptions caller parameter on subscribe ONLY (:99,:265-274); NO global byte/count/… (per-trigger) | full-file: unbounded fold on every poll/update/list/sweep | untouched | **fix in #2042** — #2042 |
-| `pr-feedback-event-queues` | .swarm/pr-feedback-events/{session-stem}.json (+ .lock) | operational | MAX_PR_FEEDBACK_MONITOR_EVENTS 20 per queue (:14); MAX_QUEUE_BYTES 512 KiB per file (:15)… (per-key) | indexed: ≤512 KiB hard read bound | untouched | not a defect — this-gate |
+| `pr-feedback-event-queues` | .swarm/pr-feedback-events/{session-stem}.json (+ .lock) | operational | MAX_PR_FEEDBACK_MONITOR_EVENTS 20 per queue (:14); MAX_QUEUE_BYTES 512 KiB per file (:15)… (per-key; keyspace NOT finite — one file per session id, nothing unlinks it) | indexed: ≤512 KiB hard read bound | untouched | **fix in #2309** — #2309 |
 | `lane-results-outputs` | .swarm/lane-results/{batchDigest}/{laneDigest}/{outputDigest}.json + … | governed-content | MAX_LANE_OUTPUT_STORED_BYTES 10 MiB PER-FILE (lane-output-store.ts:15, degraded beyond); … (per-key) | indexed: per-artifact 10 MiB write ceiling; candidates full-par… | untouched — accumulates across batches | **fix in #2045** — #2045 |
 | `lane-delivery-cache` | .swarm/lane-delivery-cache.json | operational | MAX_DELIVERED_LANE_OUTPUT_KEYS 1024 (:35); MAX_TRACKED_SESSIONS 16 (:36); MAX_TRACKED_DIR… (global) | indexed: single bounded JSON | untouched | not a defect — this-gate |
 | `pr-review-run-artifacts` | .swarm/pr-review/{run_id}/{findings.jsonl, feedback-handoff.json, tri… | governed-content | per-run: findings ≤1000 records/call + 10 MiB read guard; run directories accumulate with… (per-key) | line-bounded: 10 MiB read guard | untouched — accumulates across review runs | **fix in #2309** — #2309 |
@@ -212,7 +299,7 @@ decision is *missing today* (they are untouched, never deleted-and-needed).
 | `documents-cache` | .swarm/evidence-cache/documents.jsonl | derived-rebuildable | config cache_max_bytes (512 B–50 MiB) / cache_max_records (10–100k); no-op when unset (do… (per-trigger) | line-bounded: streamed ≤100 MiB read cap | pruned via close retention forwarding | not a defect — this-gate |
 | `repo-graph` | .swarm/repo-graph.json | derived-rebuildable | rebuildable from source (buildImpactMap/graph builder); archived+cleaned at close (ACTIVE… (session-scoped) | full-file: cached + validated; reflection reader hard-bounded 16 … | archived+cleaned | retain by design — this-gate |
 | `repo-graph-fingerprint` | .swarm/repo-graph.fingerprint.json | derived-rebuildable | bounded read (24 MiB); BUT repo-graph.json is close-cleaned while the fingerprint sidecar… (session-scoped) | indexed: ≤24 MiB / ≤100,256 entries | untouched — orphaned after close cleans the graph | **fix in #2309** — #2309 |
-| `test-history` | .swarm/cache/test-history.jsonl | operational | MAX_HISTORY_PER_TEST 20 FIFO per (file,test) key (:19); bounded error/stack/changed-files… (per-key) | full-file: bounded transitively by 20/test cap × test population | untouched (cache/) | not a defect — this-gate |
+| `test-history` | .swarm/cache/test-history.jsonl | operational | MAX_HISTORY_PER_TEST 20 FIFO per (file,test) key (:19); bounded error/stack/changed-files… (per-key; keyspace NOT finite — no key is ever evicted) | full-file: NOT bounded — the whole file is read; the former "20/test cap × test population" claim is the #2038 fallacy | untouched (cache/) | **fix in #2309** — #2309 |
 | `impact-map` | .swarm/cache/impact-map.json | derived-rebuildable | rebuildable via buildImpactMap (:449-455); size bounded by repository file population (session-scoped) | full-file: rebuildable cache; stale entries rejected by mtime che… | untouched (cache/) | not a defect — this-gate |
 
 ### Category 8 — Close/reset, worktree, doctor, session, warnings/automation, skills (25 rows)
@@ -332,7 +419,11 @@ Verified resolvable on 2026-08-22 via `gh issue view`:
   skill-improver proposals, evolution/skills lifecycle ledgers, capsules,
   summaries, repo-graph fingerprint orphan, pr-review run artifacts,
   review receipts, doc-drift signals; verify items: skill-changelog global
-  ceiling, skills proposals/evals/candidates accumulation).
+  ceiling, skills proposals/evals/candidates accumulation). Extended by the
+  issue #2038 keyspace guardrail with two rows reclassified out of
+  `not-a-defect`: `test-history` and `pr-feedback-event-queues` — both per-key
+  caps over a keyspace nothing bounds, the same shape as the pre-existing
+  skill-changelog verify item.
 - Parents: #1823, #2025. This gate: #2036.
 
 ## Appendix C — full-resolution contract checklist

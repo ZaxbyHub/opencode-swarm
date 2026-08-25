@@ -29,7 +29,7 @@
  *   `task_complexity` remap, which happens in `wrapFlatRetrospective` before the
  *   write branch — so the corpus reads normalized values while the file on disk
  *   keeps its legacy ones.
- *   Three upstream readers do populate PROCESS-LOCAL caches, which is worth
+ *   Four upstream readers do populate PROCESS-LOCAL caches, which is worth
  *   stating rather than hiding behind the word "read-only": `readTrajectory`
  *   fills the PRM in-memory trajectory cache (`src/prm/trajectory-store.ts`),
  *   while `readKnowledge` and `loadEvidence` fill the two SEPARATE maps in
@@ -44,6 +44,13 @@
  *   `floor(maxLines / 2)` = 500 ENTRIES. That 500 is unrelated to
  *   `MAX_TRACKED_TRAJECTORY_SESSIONS` = 500, which bounds how many SESSIONS the
  *   cache holds at once; the two constants merely happen to share a value.
+ *   The fourth is `readPendingManifest` (issue #2038), which the skill-usage
+ *   source calls for its coverage verdict: it memoizes the parsed sidecar
+ *   manifest keyed by the resolved path and validated against that file's mtime
+ *   and size, so a stale entry can never be served, and it holds one entry per
+ *   project directory the process has touched. It takes no lock, never
+ *   migrates, and never quarantines a corrupt sidecar — quarantine is reserved
+ *   for lock-taking paths, so mining still cannot mutate what it counts.
  *   None of these caches is on disk: nothing about them writes a file, and none
  *   survives the process. (The readers themselves obviously do read files — the
  *   claim above is that nothing here WRITES, not that nothing here touches the
@@ -92,7 +99,12 @@ import {
 } from '../hooks/knowledge-store.js';
 import type { RetrievalOutcome } from '../hooks/knowledge-types.js';
 import { readTaskTrajectory } from '../hooks/micro-reflector.js';
-import { readSkillUsageEntries } from '../hooks/skill-usage-log.js';
+import {
+	readSkillUsageEntries,
+	type readSkillUsageEntriesWithCoverage,
+	type SkillUsageEntry,
+} from '../hooks/skill-usage-log.js';
+import { readPendingManifest } from '../hooks/skill-usage-pending.js';
 import { redactSecrets } from '../memory/redaction.js';
 import { readTrajectory } from '../prm/trajectory-store.js';
 import type { TrajectoryEntry } from '../prm/types.js';
@@ -123,7 +135,11 @@ export interface CorpusObservation {
 export interface ConsensusCorpus {
 	observations: CorpusObservation[];
 	hashes: ConsensusCorpusHash[];
-	/** True when `maxEvidenceItems` truncated the stream. */
+	/**
+	 * True when the returned stream is not the complete corpus — either
+	 * `maxEvidenceItems` cut it, or a source could only return a bounded window
+	 * (skill-usage under the issue #2038 compaction budget).
+	 */
 	truncated: boolean;
 	/** Sources that threw while being read. Never fatal — the corpus degrades. */
 	unreadableSources: ConsensusSourceKind[];
@@ -153,6 +169,18 @@ export interface CorpusReaders {
 		directory: string,
 	) => Promise<TrajectoryEntry[]>;
 	readSkillUsageEntries: typeof readSkillUsageEntries;
+	/**
+	 * Additive coverage seam (issue #2038 §7). Optional, and deliberately NOT
+	 * part of `defaultReaders()`.
+	 *
+	 * The entries themselves keep coming from `readSkillUsageEntries` — which is
+	 * already the bounded read funnel, so the observations are byte-identical —
+	 * because `loadConsensusCorpus` merges as `{...defaultReaders(), ...options.readers}`.
+	 * A default entry-bearing coverage reader would therefore silently outrank a
+	 * caller that overrode only `readSkillUsageEntries`, turning an injected
+	 * fixture into an empty corpus. Injecting this member overrides BOTH.
+	 */
+	readSkillUsageEntriesWithCoverage?: typeof readSkillUsageEntriesWithCoverage;
 	readKnowledgeEntries: (directory: string) => Promise<KnowledgeLike[]>;
 	loadEvidence: (
 		directory: string,
@@ -667,13 +695,47 @@ async function loadPrmSessions(
 	return observations;
 }
 
-/** Skill usage / compliance log. The session is the support unit. */
+/**
+ * Skill usage / compliance log. The session is the support unit.
+ *
+ * Issue #2038 §7: this source can no longer promise the full history — the
+ * JSONL is bounded by a hard global byte/age/count budget and compaction evicts
+ * older entries. `onIncompleteWindow` is how that reaches the caller: it sets
+ * `ConsensusCorpus.truncated`, the existing "what you got is not everything"
+ * surface, rather than inventing a second one.
+ *
+ * Entries come from `readSkillUsageEntries` (already the bounded funnel) so an
+ * injected fixture keeps working; the coverage verdict comes from the injected
+ * coverage seam when present, and otherwise from `readPendingManifest`, which
+ * takes no lock, never migrates and never quarantines — mining is a read.
+ *
+ * Known limit of the manifest-only path: it reports compaction eviction but not
+ * `coverage.truncatedRead`, the flag for a single read that hit `readMaxBytes`.
+ * That is unreachable for a store within its budget — `readMaxBytes` (1.6 MiB)
+ * exceeds `maxBytes` (1.5 MiB) by more than a maintenance interval's worth of
+ * appends — so it can only fire on a legacy log that has not been compacted
+ * yet, and the first maintenance pass closes it. Inject the coverage seam to
+ * observe it exactly.
+ */
 function loadSkillUsage(
 	directory: string,
 	readers: CorpusReaders,
 	maxExcerptChars: number,
+	onIncompleteWindow: () => void,
 ): CorpusObservation[] {
-	return readers.readSkillUsageEntries(directory).map((entry) => ({
+	const injected = readers.readSkillUsageEntriesWithCoverage;
+	let entries: SkillUsageEntry[];
+	let complete: boolean;
+	if (injected) {
+		const read = injected(directory);
+		entries = read.entries;
+		complete = read.coverage.complete;
+	} else {
+		entries = readers.readSkillUsageEntries(directory);
+		complete = readPendingManifest(directory).coverage.complete;
+	}
+	if (!complete) onIncompleteWindow();
+	return entries.map((entry) => ({
 		runId: `skill-usage:${entry.sessionID}`,
 		taskId: entry.taskID,
 		agentRole: sanitizeExcerpt(entry.agentName, maxExcerptChars),
@@ -996,6 +1058,9 @@ export async function loadConsensusCorpus(
 ): Promise<ConsensusCorpus> {
 	const readers: CorpusReaders = { ...defaultReaders(), ...options.readers };
 	const maxExcerptChars = Math.max(1, options.maxExcerptChars);
+	// Set when the skill-usage source could only return a bounded window
+	// (issue #2038). Folded into `truncated` below.
+	let skillUsageWindowIncomplete = false;
 	const loaders: Record<
 		ConsensusSourceKind,
 		() => Promise<CorpusObservation[]>
@@ -1009,7 +1074,9 @@ export async function loadConsensusCorpus(
 			loadTaskTrajectories(directory, readers, maxExcerptChars),
 		'prm-session': () => loadPrmSessions(directory, readers, maxExcerptChars),
 		'skill-usage': async () =>
-			loadSkillUsage(directory, readers, maxExcerptChars),
+			loadSkillUsage(directory, readers, maxExcerptChars, () => {
+				skillUsageWindowIncomplete = true;
+			}),
 		knowledge: () => loadKnowledge(directory, readers, maxExcerptChars),
 		'evidence-bundle': () =>
 			loadEvidenceBundles(directory, readers, maxExcerptChars),
@@ -1056,5 +1123,10 @@ export async function loadConsensusCorpus(
 		}
 	}
 
-	return { observations, hashes, truncated, unreadableSources };
+	return {
+		observations,
+		hashes,
+		truncated: truncated || skillUsageWindowIncomplete,
+		unreadableSources,
+	};
 }

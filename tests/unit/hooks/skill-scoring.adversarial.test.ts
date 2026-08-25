@@ -29,7 +29,10 @@ import {
 	getSkillStats,
 	rankSkillsForContext,
 } from '../../../src/hooks/skill-scoring.js';
-import type { SkillUsageEntry } from '../../../src/hooks/skill-usage-log.js';
+import {
+	readSkillUsageEntriesWithCoverage,
+	type SkillUsageEntry,
+} from '../../../src/hooks/skill-usage-log.js';
 
 // ============================================================================
 // Helpers
@@ -57,6 +60,14 @@ function makeEntry(overrides: Partial<SkillUsageEntry> = {}): SkillUsageEntry {
 /** Generate a string of exactly N characters */
 function longString(n: number, char = 'x'): string {
 	return char.repeat(n);
+}
+
+/** Write JSONL usage entries to a log file */
+function writeUsageLog(logPath: string, entries: SkillUsageEntry[]): void {
+	fs.writeFileSync(
+		logPath,
+		entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
+	);
 }
 
 // ============================================================================
@@ -263,9 +274,10 @@ describe('adversarial: very large usage history arrays', () => {
 		expect(score).toBeLessThanOrEqual(1);
 	});
 
-	test('rankSkillsForContext handles 10K entries per skill', () => {
-		// This tests performance — rankSkillsForContext calls readSkillUsageEntries
-		// which reads the JSONL file; create a temp file with 10K entries
+	// #2038: readMaxBytes bounds the funnel, so a 10K-entry file is not read in
+	// full; this proves the bound holds (usageCount < 10_000) and truncation
+	// is reported via coverage, instead of pinning the old unbounded count.
+	test('rankSkillsForContext handles 10K entries per skill (bounded by readMaxBytes)', () => {
 		const tempDir = fs.mkdtempSync(
 			path.join(os.tmpdir(), 'adv-large-history-'),
 		);
@@ -279,22 +291,22 @@ describe('adversarial: very large usage history arrays', () => {
 				taskID: `task-${i % 50}`,
 			}),
 		);
-		fs.writeFileSync(
-			logPath,
-			entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
-		);
+		writeUsageLog(logPath, entries);
 
 		const results = _internals.rankSkillsForContext(
 			['big-skill'],
 			'do something',
 			tempDir,
 		);
+		const { coverage } = readSkillUsageEntriesWithCoverage(tempDir);
 
 		expect(results).toHaveLength(1);
 		expect(typeof results[0].score).toBe('number');
 		expect(Number.isNaN(results[0].score)).toBe(false);
-		expect(results[0].usageCount).toBe(10_000);
-
+		expect(results[0].usageCount).toBeGreaterThan(0);
+		expect(results[0].usageCount).toBeLessThan(10_000);
+		expect(coverage.complete).toBe(false);
+		expect(coverage.truncatedRead).toBe(true);
 		fs.rmSync(tempDir, { recursive: true });
 	});
 });
@@ -660,10 +672,7 @@ describe('adversarial: all entries with not_checked verdict', () => {
 				complianceVerdict: 'not_checked',
 			}),
 		);
-		fs.writeFileSync(
-			logPath,
-			entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
-		);
+		writeUsageLog(logPath, entries);
 
 		const stats = _internals.getSkillStats('not-checked-skill', tempDir);
 
@@ -685,10 +694,7 @@ describe('adversarial: all entries with not_checked verdict', () => {
 			makeEntry({ skillPath: 'test-skill', complianceVerdict: 'not_checked' }),
 			makeEntry({ skillPath: 'test-skill', complianceVerdict: 'not_checked' }),
 		];
-		fs.writeFileSync(
-			logPath,
-			entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
-		);
+		writeUsageLog(logPath, entries);
 
 		const stats = _internals.getSkillStats('test-skill', tempDir);
 		// entriesWithVerdict = [] → compliantCount = 0 → complianceRate = 0 / 0
@@ -707,10 +713,7 @@ describe('adversarial: all entries with not_checked verdict', () => {
 		const entries: SkillUsageEntry[] = Array.from({ length: 3 }, (_, i) =>
 			makeEntry({ skillPath: 'test-skill', complianceVerdict: 'not_checked' }),
 		);
-		fs.writeFileSync(
-			logPath,
-			entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
-		);
+		writeUsageLog(logPath, entries);
 
 		const results = _internals.rankSkillsForContext(
 			['test-skill'],
@@ -752,10 +755,7 @@ describe('adversarial: sorting with NaN scores', () => {
 				makeEntry({ skillPath: 'skill-b', id: `b-${i}` }),
 			),
 		];
-		fs.writeFileSync(
-			logPath,
-			entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
-		);
+		writeUsageLog(logPath, entries);
 
 		// Run sort multiple times — if sort comparator returns NaN inconsistently,
 		// results could vary. We check for at least stable ordering.
