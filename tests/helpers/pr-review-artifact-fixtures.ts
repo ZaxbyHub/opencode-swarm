@@ -351,7 +351,11 @@ export async function rejectionMessage(
 	promise: Promise<string>,
 ): Promise<string> {
 	try {
-		await promise;
+		const result = JSON.parse(await promise) as {
+			success?: boolean;
+			message?: string;
+		};
+		if (result.success === false && result.message) return result.message;
 	} catch (error) {
 		return error instanceof Error ? error.message : String(error);
 	}

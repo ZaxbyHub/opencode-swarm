@@ -81,7 +81,9 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 					.map((id) => artifactRecord(id, 'CONFIRMED', 'report')),
 			]),
 		);
-		expect(message).toBe(
+		expect(message.startsWith('field boundary: expected')).toBe(true);
+		expect(message).toContain(', got "BLOCKED:');
+		expect(message).toContain(
 			'BLOCKED: PR_REVIEW post_reviewer findings require the prior post_explorer checkpoint',
 		);
 	});
@@ -108,7 +110,7 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 				),
 			),
 		);
-		expect(message).toBe(
+		expect(message).toContain(
 			'BLOCKED: PR_REVIEW findings persistence requires the trigger evaluation artifact (write_pr_review_trigger_eval must complete first)',
 		);
 	});
@@ -125,7 +127,7 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 					.map((id) => artifactRecord(id, 'PENDING', 'route_to_reviewer')),
 			),
 		);
-		expect(missingMessage).toBe(
+		expect(missingMessage).toContain(
 			'BLOCKED: PR_REVIEW post_explorer findings must exactly cover the discovered candidate inventory; missing: C-5; extra: (none); duplicates: (none)',
 		);
 		const duplicateMessage = await rejectionMessage(
@@ -137,7 +139,7 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 					.map((id) => artifactRecord(id, 'PENDING', 'route_to_reviewer')),
 			]),
 		);
-		expect(duplicateMessage).toBe(
+		expect(duplicateMessage).toContain(
 			'BLOCKED: PR_REVIEW post_explorer findings must exactly cover the discovered candidate inventory; missing: C-5; extra: (none); duplicates: C-0',
 		);
 		const nonConsecutiveDuplicateMessage = await rejectionMessage(
@@ -150,7 +152,7 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 					.map((id) => artifactRecord(id, 'PENDING', 'route_to_reviewer')),
 			]),
 		);
-		expect(nonConsecutiveDuplicateMessage).toBe(
+		expect(nonConsecutiveDuplicateMessage).toContain(
 			'BLOCKED: PR_REVIEW post_explorer findings must exactly cover the discovered candidate inventory; missing: C-5; extra: (none); duplicates: C-0',
 		);
 		const extraIdMessage = await rejectionMessage(
@@ -163,7 +165,7 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 					.concat(artifactRecord('C-9', 'PENDING', 'route_to_reviewer')),
 			),
 		);
-		expect(extraIdMessage).toBe(
+		expect(extraIdMessage).toContain(
 			'BLOCKED: PR_REVIEW post_explorer findings must exactly cover the discovered candidate inventory; missing: (none); extra: C-9; duplicates: (none)',
 		);
 	});

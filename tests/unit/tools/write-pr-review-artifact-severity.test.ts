@@ -163,7 +163,7 @@ describe('#2279 severity acceptance criteria', () => {
 			]),
 		);
 
-		expect(message).toBe(
+		expect(message).toContain(
 			[
 				'BLOCKED: PR_REVIEW post_reviewer artifact invalid — 1 violation(s):',
 				'  C-0: severity expected "LOW", got (omitted)',
@@ -336,7 +336,7 @@ describe('#2279 severity acceptance criteria', () => {
 				),
 			),
 		);
-		expect(wrong).toBe(
+		expect(wrong).toContain(
 			[
 				'BLOCKED: PR_REVIEW post_explorer artifact invalid — 1 violation(s):',
 				'  C-0: severity expected "HIGH", got "LOW"',

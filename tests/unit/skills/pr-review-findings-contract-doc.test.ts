@@ -18,6 +18,17 @@ import {
 	CANDIDATE_SEVERITIES,
 	FINDINGS_SEVERITIES,
 } from '../../../src/background/candidate-contract';
+import {
+	PR_REVIEW_ARTIFACT_BOUNDARIES,
+	PR_REVIEW_CRITIC_STATUSES,
+	PR_REVIEW_FINDING_ACTIONS,
+	PR_REVIEW_FINDING_STATUSES,
+	PR_REVIEW_REVIEWER_CLASSIFICATIONS,
+	PR_REVIEW_REVIEWER_EVIDENCE_TYPES,
+	PR_REVIEW_SEVERITIES,
+	PR_REVIEW_VERDICT_ROW_DESCRIPTORS,
+	WritePrReviewArtifactArgsSchema,
+} from '../../../src/background/pr-review-contract';
 
 const SKILL_PATH = path.join(
 	import.meta.dir,
@@ -54,6 +65,18 @@ const DRY_RUN_PATH = path.join(
 	'parser-dry-run.md',
 );
 
+const PROMPT_TEMPLATES_PATH = path.join(
+	import.meta.dir,
+	'..',
+	'..',
+	'..',
+	'.opencode',
+	'skills',
+	'swarm-pr-review',
+	'references',
+	'prompt-templates.md',
+);
+
 const RECOVERABILITY_PATH = path.join(
 	import.meta.dir,
 	'..',
@@ -67,6 +90,126 @@ const RECOVERABILITY_PATH = path.join(
 );
 
 const readSkill = (): string => fs.readFileSync(SKILL_PATH, 'utf8');
+
+function executableDialect(source: string): Record<string, string[]> {
+	const block = source.match(
+		/<!-- PR_REVIEW_EXECUTABLE_DIALECT_START -->([\s\S]*?)<!-- PR_REVIEW_EXECUTABLE_DIALECT_END -->/,
+	)?.[1];
+	if (!block) throw new Error('missing executable PR-review dialect block');
+	return Object.fromEntries(
+		block
+			.trim()
+			.split(/\r?\n/)
+			.map((line) => {
+				const [key, values] = line.split(': ');
+				if (!key || !values) throw new Error(`malformed dialect line: ${line}`);
+				return [key, values.split(' | ')];
+			}),
+	);
+}
+
+describe('skill dialect is structurally identical to the executable PR-review contract (#2333)', () => {
+	test('reference enums and row roles match the central schemas exactly', () => {
+		const dialect = executableDialect(fs.readFileSync(CONTRACT_PATH, 'utf8'));
+		expect(dialect.reviewer_fields).toEqual([
+			...PR_REVIEW_VERDICT_ROW_DESCRIPTORS.reviewer.fieldRoles,
+		]);
+		expect(dialect.critic_fields).toEqual([
+			...PR_REVIEW_VERDICT_ROW_DESCRIPTORS.critic.fieldRoles,
+		]);
+		expect(dialect.reviewer_classifications).toEqual([
+			...PR_REVIEW_REVIEWER_CLASSIFICATIONS,
+		]);
+		expect(dialect.reviewer_evidence_types).toEqual([
+			...PR_REVIEW_REVIEWER_EVIDENCE_TYPES,
+		]);
+		expect(dialect.critic_statuses).toEqual([...PR_REVIEW_CRITIC_STATUSES]);
+		expect(dialect.severities).toEqual([...PR_REVIEW_SEVERITIES]);
+		expect(dialect.finding_statuses).toEqual([...PR_REVIEW_FINDING_STATUSES]);
+		expect(dialect.finding_actions).toEqual([...PR_REVIEW_FINDING_ACTIONS]);
+		expect(dialect.artifact_boundaries).toEqual([
+			...PR_REVIEW_ARTIFACT_BOUNDARIES,
+		]);
+	});
+
+	test('every live agent-facing verdict grammar uses the schema field roles', () => {
+		const reviewerGrammar =
+			PR_REVIEW_VERDICT_ROW_DESCRIPTORS.reviewer.fieldRoles
+				.map((role, index) =>
+					index === 0
+						? PR_REVIEW_VERDICT_ROW_DESCRIPTORS.reviewer.marker
+						: role,
+				)
+				.join(' | ');
+		const criticGrammar = PR_REVIEW_VERDICT_ROW_DESCRIPTORS.critic.fieldRoles
+			.map((role, index) =>
+				index === 0 ? PR_REVIEW_VERDICT_ROW_DESCRIPTORS.critic.marker : role,
+			)
+			.join(' | ');
+		const documents = [
+			[SKILL_PATH, 1, 2],
+			[PROMPT_TEMPLATES_PATH, 1, 2],
+			[DRY_RUN_PATH, 1, 0],
+		] as const;
+		for (const [documentPath, reviewerCount, criticCount] of documents) {
+			const lines = fs.readFileSync(documentPath, 'utf8').split(/\r?\n/);
+			const reviewerLines = lines.filter((line) =>
+				line.includes('[REVIEWED] |'),
+			);
+			const criticLines = lines.filter((line) => line.includes('[CRITIC] |'));
+			expect(reviewerLines).toHaveLength(reviewerCount);
+			expect(criticLines).toHaveLength(criticCount);
+			for (const line of reviewerLines) expect(line).toContain(reviewerGrammar);
+			for (const line of criticLines) expect(line).toContain(criticGrammar);
+		}
+	});
+
+	test('the live reviewer classification tables contain the exact schema enums', () => {
+		const source = readSkill();
+		const tableValues = (start: string, end: string): string[] => {
+			const section = source.slice(source.indexOf(start), source.indexOf(end));
+			return [...section.matchAll(/^\| `([^`]+)` \|/gm)].map(
+				(match) => match[1],
+			);
+		};
+		expect(
+			tableValues(
+				'### Reviewer classifications',
+				'### Evidence classifications',
+			),
+		).toEqual([...PR_REVIEW_REVIEWER_CLASSIFICATIONS]);
+		expect(
+			tableValues('### Evidence classifications', 'Reviewer output format:'),
+		).toEqual([...PR_REVIEW_REVIEWER_EVIDENCE_TYPES]);
+	});
+
+	test('tool schema accepts every documented finding enum and boundary token', () => {
+		for (const boundary of PR_REVIEW_ARTIFACT_BOUNDARIES) {
+			for (const status of PR_REVIEW_FINDING_STATUSES) {
+				for (const nextAction of PR_REVIEW_FINDING_ACTIONS) {
+					expect(
+						WritePrReviewArtifactArgsSchema.safeParse({
+							kind: 'findings',
+							run_id: 'parity-run',
+							pr_head_sha: 'abc123',
+							boundary,
+							records: [
+								{
+									finding_id: 'C-1',
+									status,
+									file_line: 'src/index.ts:1',
+									evidence: 'schema parity',
+									next_action: nextAction,
+									severity: 'HIGH',
+								},
+							],
+						}).success,
+					).toBe(true);
+				}
+			}
+		}
+	});
+});
 
 /** The copyable findings-record example under "must include at least". */
 function exampleRecord(source: string): Record<string, unknown> {
