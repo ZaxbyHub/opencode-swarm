@@ -22,8 +22,10 @@ export const REPO_GRAPH_FILENAME = 'repo-graph.json';
  * self-gates via {@link isSchemaVersionAtLeast} rather than relying on the
  * loader (which only checks that a version string is present, not its value).
  *
- * 1.2.0 adds per-node `exportRanges` (1-based inclusive line spans for each
- * exported symbol) and the top-level `symbolEdges` array (direct symbol-to-
+ * 1.2.0 adds per-node `exportRanges` (1-based inclusive line spans keyed by
+ * symbol name — exported symbols for every grammar, plus non-exported member
+ * defs for java/kotlin/csharp; see the field docs) and the top-level
+ * `symbolEdges` array (direct symbol-to-
  * symbol reference edges). Both fields are optional, so 1.0.0 and 1.1.0 graphs
  * still load without corruption. New queries may use these fields to provide
  * more precise context-packing and symbol-level navigation.
@@ -217,11 +219,22 @@ export interface GraphNode {
 	 */
 	exportLines?: Record<string, number>;
 	/**
-	 * 1-based inclusive line span for each exported symbol, keyed by symbol
-	 * name. Present on graphs built at schema >= 1.2.0; absent on older
-	 * graphs. Used for precise context-packing around a symbol.
+	 * 1-based inclusive line span per symbol, keyed by symbol name. Present on
+	 * graphs built at schema >= 1.2.0; absent on older graphs. Used for precise
+	 * context-packing around a symbol.
 	 * Each span value uses `startLine` / `endLine` to match the codebase
 	 * convention (see `ContextPackSpan` and `FileSymbolFacts`).
+	 *
+	 * SCOPE (issue #1529): exported symbols for every grammar, PLUS
+	 * non-exported member defs for java/kotlin/csharp. A JVM/.NET member is
+	 * deliberately never a file-level export, so without that widening
+	 * `context_pack` could return no span at all for a Java method.
+	 * `exports` and `exportLines` stay exported-only in every language.
+	 *
+	 * Duplicate names resolve so this map cannot disagree with `exportLines`:
+	 * an exported def outranks a non-exported one; two exported defs take the
+	 * last (as `exportLines` does); two non-exported defs take the first, and
+	 * never appear in `exportLines` at all.
 	 */
 	exportRanges?: Record<string, { startLine: number; endLine: number }>;
 	/** Imported module specifiers */
@@ -273,7 +286,22 @@ export interface GraphEdge {
 	/**
 	 * Whether the resolved target is a graph node or an asset. `'node'` targets
 	 * are scannable source files that become graph nodes; `'asset'` targets are
-	 * real files (JSON/CSS/etc.) that never become nodes (schema >= 1.3.0).
+	 * real files that never become nodes (schema >= 1.3.0).
+	 *
+	 * `'asset'` covers TWO cases, and the second is easy to miss:
+	 * 1. a non-source file (JSON/CSS/etc.), which was never scannable; and
+	 * 2. a file that IS scannable but the walker never indexed — it sits under a
+	 *    `SKIP_DIRECTORIES` entry (`node_modules`, `dist`, `vendor`, …) or behind
+	 *    an unfollowed symlink. Import resolution does not consult those rules,
+	 *    so it can resolve a real `.ts`/`.java` file the graph has no node for.
+	 *    Such edges are demoted to `'asset'` at graph assembly (see
+	 *    `reconcileEdgeTargetKinds`) so that `'node'` always means "a node exists
+	 *    for this target". The demotion is language-agnostic: it applies to any
+	 *    source file the walker skipped, not only to JVM/.NET ones.
+	 *
+	 * Consequence for consumers: `targetKind: 'asset'` no longer implies "not
+	 * source code". Use `isScannableSourcePath(edge.target)` if that is what you
+	 * actually need to know.
 	 * Absent on older graphs — callers fall back to `isScannableSourcePath` on
 	 * the target path. Asset edges only require their source node to exist
 	 * during incremental validation, and are excluded from in-degree ranking /

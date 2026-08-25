@@ -27,6 +27,7 @@ import {
 	isAssetEdge,
 	isScannableSourcePath,
 	MAX_EXTRACTOR_INPUT_WITNESSES,
+	reconcileEdgeTargetKinds,
 	scanFileAsync,
 	upsertNode,
 } from './builder';
@@ -648,6 +649,13 @@ async function finalizeAndSave(
 	if (graph.symbolEdges && graph.symbolEdges.length === 0) {
 		delete graph.symbolEdges;
 	}
+	// The "a `'node'` target is a file that became a node" invariant has to hold
+	// on EVERY path that mutates edges, not just full builds. An incremental
+	// update rescans a file and re-adds its edges through `scanFileAsync`, which
+	// resolves imports without consulting the walker's skip rules — so without
+	// this, an incremental update silently re-introduces exactly the dangling
+	// edges a full build had just reconciled away.
+	reconcileEdgeTargetKinds(graph);
 	updateGraphMetadata(graph);
 	resetQueryCache();
 	await persistGraph(workspaceRoot, graph, buildOptions);
