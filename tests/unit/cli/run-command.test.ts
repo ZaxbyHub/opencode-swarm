@@ -343,6 +343,7 @@ describe('run() - CLI entry point', () => {
 		expect(mockHandleDiagnoseCommand).toHaveBeenCalledWith(
 			expect.any(String),
 			[],
+			'',
 		);
 		expect(mockConsoleLog).toHaveBeenCalledWith('diagnose mock output');
 	});

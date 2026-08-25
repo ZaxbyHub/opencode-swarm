@@ -60,7 +60,7 @@ describe('model fallback', () => {
 		resetSwarmState();
 	});
 
-	test('applies fallback model advisory on transient error', async () => {
+	test('does not grant fallback authority to transient-looking tool output', async () => {
 		const sessionId = 'session-apply-fallback';
 		const session = await setupSubagentSessionWithWindow(
 			hooks,
@@ -78,12 +78,11 @@ describe('model fallback', () => {
 
 		await hooks.toolAfter(input as any, output as any);
 
-		expect(session.model_fallback_index).toBe(1);
-		expect(session.pendingAdvisoryMessages?.length).toBeGreaterThan(0);
-		expect(session.pendingAdvisoryMessages?.[0]).toContain('MODEL FALLBACK');
+		expect(session.model_fallback_index).toBe(0);
+		expect(session.pendingAdvisoryMessages ?? []).toEqual([]);
 	});
 
-	test('modelFallbackExhausted is true when no fallback_models configured', async () => {
+	test('does not exhaust fallback models from tool output', async () => {
 		const sessionId = 'session-exhaust-no-config';
 		const session = await setupSubagentSessionWithWindow(
 			hooks,
@@ -101,8 +100,7 @@ describe('model fallback', () => {
 
 		await hooks.toolAfter(input as any, output as any);
 
-		// With no fallback_models configured, should be immediately exhausted
-		expect(session.modelFallbackExhausted).toBe(true);
+		expect(session.modelFallbackExhausted).toBe(false);
 	});
 
 	test('resets fallback index on successful call', async () => {
@@ -113,18 +111,8 @@ describe('model fallback', () => {
 			'coder',
 		);
 
-		// Trigger a transient error first
-		const input = { tool: 'bash', sessionID: sessionId, callID: 'call-1' };
-		await hooks.toolAfter(
-			input as any,
-			{
-				title: 'bash',
-				output: null,
-				error: 'rate limit exceeded',
-				metadata: {},
-			} as any,
-		);
-		expect(session.model_fallback_index).toBe(1);
+		// Provider-boundary code owns fallback advancement; tool output cannot.
+		session.model_fallback_index = 1;
 
 		// Now a successful call should reset
 		const successInput = {

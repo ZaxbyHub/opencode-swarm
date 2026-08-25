@@ -127,7 +127,8 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm sdd project` — materialize the effective spec into `.swarm/spec.md`
 - `/swarm epic` — toggle Epic Mode (autonomous coupling-aware parallel activation)
 - `/swarm turbo` — toggle Turbo Mode strategy `[on|off|lean|standard|epic|status]`
-- `/swarm full-auto` — toggle Full-Auto Mode `[on [mode]|off|status]`
+- `/swarm full-auto` — toggle Full-Auto Mode; accepts `on [mode]`, `off`, or `status`
+- `/swarm guardrail reset` — reset an action-local guardrail circuit after external repair
 - `/swarm post-mortem` — run the post-mortem agent (project-end synthesis)
 
 **Read-only audits / research**

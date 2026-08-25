@@ -113,7 +113,6 @@ describe('Command registration parity — classification baselines', () => {
 			'guardrail explain',
 			'guardrail reset',
 			'guardrail-log',
-			'full-auto',
 			'lanes',
 			'memory consolidation-log',
 			'gate-audit',
@@ -149,6 +148,7 @@ describe('Command registration parity — classification baselines', () => {
 			// `approve-plan-critic` is a restricted human-only escape hatch for
 			// the ratchet-tighter critic_pre_plan execution gate (issue #2012).
 			humanOnly: new Set([
+				'full-auto',
 				'memory-import',
 				'memory-migrate',
 				'clear',
@@ -165,6 +165,7 @@ describe('Command registration parity — classification baselines', () => {
 				'recover',
 			]),
 			toolCommands: new Set([
+				'full-auto',
 				'pr subscribe',
 				'pr unsubscribe',
 				'pr status',

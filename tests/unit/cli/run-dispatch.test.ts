@@ -433,7 +433,7 @@ describe('run() dispatch function', () => {
 			const result = await run(['diagnose']);
 
 			expect(result).toBe(0);
-			expect(mockHandleDiagnoseCommand).toHaveBeenCalledWith(cwd, []);
+			expect(mockHandleDiagnoseCommand).toHaveBeenCalledWith(cwd, [], '');
 			expect(mockConsoleLog).toHaveBeenCalledWith('diagnose output');
 		});
 
