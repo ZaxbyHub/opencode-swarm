@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.147.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.146.5...v7.147.0) (2026-08-25)
+
+
+### Features
+
+* **symbol-graph:** harden java, kotlin, and c# symbol graph support ([b732603](https://github.com/ZaxbyHub/opencode-swarm/commit/b7326036fdab589f9fd765a3c769b47abae37373))
+
 ## [7.146.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.146.4...v7.146.5) (2026-08-25)
 
 
