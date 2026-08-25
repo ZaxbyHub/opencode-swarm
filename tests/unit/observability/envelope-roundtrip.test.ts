@@ -309,6 +309,25 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		bytes: 131072,
 		limit_bytes: 262144,
 	},
+
+	// Issue #2038 skill-usage storage health. Payload mirrors the real producer
+	// in src/hooks/skill-usage-log.ts (compactSkillUsageStoreUnlocked and the
+	// pressure/deferred emitters): bounded counts + byte figures only — no
+	// skill paths, no agent names, no content.
+	skill_usage_health: {
+		trigger: 'phase-boundary',
+		acceptedCount: 4200,
+		compactedCount: 1800,
+		retainedCount: 2400,
+		droppedAgeCount: 0,
+		corruptTotal: 2,
+		preservedMarkerCount: 3,
+		droppedMarkerIdsCount: 12,
+		droppedUnderPressureTotal: 0,
+		pressureCount: 0,
+		bytes: 655360,
+		limitBytes: 1048576,
+	},
 };
 
 describe('envelope roundtrip — AC1 positive', () => {

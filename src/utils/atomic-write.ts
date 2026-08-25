@@ -314,8 +314,8 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/test-impact/history-store.ts:225',
 			'src/test-impact/history-store.ts:353',
 			'src/hooks/promotion-evidence-store.ts:102',
-			'src/hooks/skill-usage-log.ts:554',
-			'src/hooks/skill-usage-log.ts:608',
+			// issue #2038: single PID-scoped producer now (atomicReplaceSkillUsage)
+			'src/hooks/skill-usage-log.ts:299',
 			'src/parallel/file-locks.ts:113',
 			'src/plan/ledger.ts:1302',
 			'src/plan/ledger.ts:1303',

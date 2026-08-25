@@ -77,7 +77,8 @@ open issues' own "independently verified cause" sections — the sequence issues
 
 Every current full-file reader in the registry satisfies exactly one of:
 (1) a **hard source-proven byte bound** — e.g. telemetry rotation caps both
-generations at ≤20 MiB; skill-usage/changelog/knowledge lists are FIFO-capped;
+generations at ≤20 MiB; skill-usage is hard-capped by #2038 (1 MiB global
+envelope, SKILL_USAGE_LIMITS); changelog/knowledge lists are FIFO-capped;
 (2) a **linked fix PR** — #2039 (events), #2040 (shell-audit), #2037
 (context-telemetry), #2038 (skill-usage), #2041 (PRM), #2042 (subscriptions);
 (3) an **authoritative lifecycle rationale** — plan-ledger replay, receipts-v2
@@ -117,7 +118,7 @@ decision is *missing today* (they are untouched, never deleted-and-needed).
 | `telemetry-jsonl` | .swarm/telemetry.jsonl (+ single rotated .1) | operational | ROTATION_CHECK_INTERVAL=50 emits; rotate at 10 MiB (rotateTelemetryIfNeeded maxBytes, src… (global) | full-file: ≤ 2×10 MiB — both readers full-read but the rotation i… | archived+cleaned — flush (close.ts:1274), ARCHIVE_ARTI… | retain by design — #2051 (legacy-path retirement/migration owner); this gate (ratification) |
 | `events-jsonl` | .swarm/events.jsonl | operational | NONE — no rotation, no byte/age/count cap (none) | full-file: unbounded — several readers scale with total history | archived+cleaned — ARCHIVE_ARTIFACTS (close.ts:375), A… | **fix in #2039** — #2039 |
 | `context-telemetry` | .swarm/context-telemetry.jsonl | operational | ACTIVE_MAX_BYTES=256KiB / ACTIVE_MAX_ENTRIES=10k / AGE_MAX_MS=30d on the retained raw window; lifetime folded aggregate in the manifest header (global) | manifest+retained-window: bounded — READ_MAX_BYTES=280KiB, independent of total history | archived as a validated cut — finalizeContextTelemetry before copy, ARCHIVE_ARTIFACTS (close.ts); NOT cleaned (persists; compaction is retention) | retain by design — #2037 (shipped PR) |
-| `skill-usage` | .swarm/skill-usage.jsonl | derived-rebuildable | prune trigger 1 MiB (SKILL_USAGE_LOG_ROTATE_BYTES :375) with PER-SKILL 500-entry FIFO (:3… (per-key) | mixed full-file + tail: full-file readers unbounded in file size; tail reader … | untouched — persists across sessions | **fix in #2038** — #2038 |
+| `skill-usage` | .swarm/skill-usage.jsonl (+ .swarm/skill-usage.lock) | derived-rebuildable | ACTIVE_MAX_BYTES=1MiB (manifest+entries+markers) / ACTIVE_MAX_ENTRIES=5k / AGE_MAX_MS=90d for OPERATIONAL entries; unprocessed compliant/violated entries are correctness-relevant and exempt (pressure path); PER-SKILL 500-entry selection is a policy INSIDE the ceilings (global) | tail-bounded: READ_MAX_BYTES=2MiB, independent of file size (records ≤ bytes/min-line; parse time O(bytes)) | untouched — persists across sessions | retain by design — #2038 (shipped PR) |
 
 ### Category 2 — Background delegation, PR monitor/feedback, lane sidecars (10 rows)
 

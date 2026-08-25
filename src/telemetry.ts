@@ -110,7 +110,13 @@ export type TelemetryEvent =
 	// store — accepted/compacted/retained/dropped/corrupt counts, oldest/newest
 	// timestamps, and byte figures. Counts only; no capsule/query content, no
 	// paths.
-	| 'context_telemetry_health';
+	| 'context_telemetry_health'
+	// Skill-usage storage health (issue #2038): bounded counts emitted on
+	// compaction / phase-boundary / feedback passes (and pressure rejections)
+	// for the bounded `.swarm/skill-usage.jsonl` store — accepted/compacted/
+	// retained/dropped/corrupt/preserved-marker/pressure counts and byte
+	// figures. Counts only; no skill paths, no agent names, no content.
+	| 'skill_usage_health';
 
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =
@@ -930,6 +936,33 @@ export const telemetry = {
 		limit_bytes: number;
 	}): void {
 		_internals.emit('context_telemetry_health', data);
+	},
+
+	/**
+	 * Skill-usage storage health (issue #2038). Emitted after a changing
+	 * compaction / phase-boundary / feedback pass for the bounded
+	 * `.swarm/skill-usage.jsonl` store, plus throttled pressure-drop and
+	 * deferred-migration signals. Bounded payload: counts and byte figures
+	 * ONLY — no skill paths, no agent names, no file content — matching the
+	 * observability contract's no-content-in-metrics rule. Enables later
+	 * reporting (PR 16/19) to surface retention pressure without leaking
+	 * workspace layout.
+	 */
+	skillUsageHealth(data: {
+		trigger: string;
+		acceptedCount: number;
+		compactedCount: number;
+		retainedCount: number;
+		droppedAgeCount: number;
+		corruptTotal: number;
+		preservedMarkerCount: number;
+		droppedMarkerIdsCount: number;
+		droppedUnderPressureTotal: number;
+		pressureCount: number;
+		bytes: number;
+		limitBytes: number;
+	}): void {
+		_internals.emit('skill_usage_health', data);
 	},
 
 	/**

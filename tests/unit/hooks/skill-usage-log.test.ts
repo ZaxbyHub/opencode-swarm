@@ -17,9 +17,11 @@ import {
 	pruneSkillUsageLog,
 	readSkillUsageEntries,
 	readSkillUsageEntriesTail,
+	SKILL_USAGE_LIMITS,
 	type SkillUsageEntry,
 	TAIL_BYTES_DEFAULT,
 } from '../../../src/hooks/skill-usage-log.ts';
+import { withFrozenClock } from '../../helpers/test-clock.js';
 
 // =============================================================================
 // Helpers
@@ -454,112 +456,88 @@ describe('pruneSkillUsageLog', () => {
 		expect(result.remaining).toBe(2);
 	});
 
-	test('prunes oldest entries per skill path, keeping newest maxEntriesPerSkill', () => {
-		// 5 entries for skill-a (should keep last 3), 2 for skill-b (should keep all)
-		const entries = [
-			makeEntry({
-				skillPath: 'skill-a',
-				taskID: 'a-oldest',
-				timestamp: '2026-01-01T00:00:00.000Z',
-			}),
-			makeEntry({
-				skillPath: 'skill-a',
-				taskID: 'a-mid',
-				timestamp: '2026-01-02T00:00:00.000Z',
-			}),
-			makeEntry({
-				skillPath: 'skill-a',
-				taskID: 'a-newer',
-				timestamp: '2026-01-03T00:00:00.000Z',
-			}),
-			makeEntry({
-				skillPath: 'skill-a',
-				taskID: 'a-newest',
-				timestamp: '2026-01-04T00:00:00.000Z',
-			}),
-			makeEntry({
-				skillPath: 'skill-a',
-				taskID: 'a-keep-this',
-				timestamp: '2026-01-05T00:00:00.000Z',
-			}), // extra
-			makeEntry({
-				skillPath: 'skill-b',
-				taskID: 'b-001',
-				timestamp: '2026-01-01T00:00:00.000Z',
-			}),
-			makeEntry({
-				skillPath: 'skill-b',
-				taskID: 'b-002',
-				timestamp: '2026-01-02T00:00:00.000Z',
-			}),
-		];
-		writeRawLog(
-			tempDir,
-			entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
-		);
+	test('prunes oldest entries per skill path, keeping newest maxEntriesPerSkill', () =>
+		withFrozenClock(() => {
+			// 5 entries for skill-a (keep last 3), 2 for skill-b (keep all).
+			// Issue #2038: operational (not_checked) + recent timestamps — the
+			// per-skill policy applies to OPERATIONAL entries inside the global
+			// ceilings; unprocessed actionable entries are correctness-relevant
+			// and survive budgets (pinned in skill-usage-global-bound.test.ts).
+			const op = (skillPath: string, taskID: string, daysAgo: number) =>
+				makeEntry({
+					skillPath,
+					taskID,
+					complianceVerdict: 'not_checked',
+					timestamp: new Date(Date.now() - daysAgo * 86_400_000).toISOString(),
+				});
+			const entries = [
+				op('skill-a', 'a-oldest', 5),
+				op('skill-a', 'a-mid', 4),
+				op('skill-a', 'a-newer', 3),
+				op('skill-a', 'a-newest', 2),
+				op('skill-a', 'a-keep-this', 1),
+				op('skill-b', 'b-001', 5),
+				op('skill-b', 'b-002', 4),
+			];
+			writeRawLog(
+				tempDir,
+				entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
+			);
 
-		const result = pruneSkillUsageLog(tempDir, 3);
+			const result = pruneSkillUsageLog(tempDir, 3);
 
-		expect(result.pruned).toBe(2); // 2 oldest a-* removed
-		expect(result.remaining).toBe(5); // 3 a + 2 b
+			expect(result.pruned).toBe(2); // 2 oldest a-* removed
+			expect(result.remaining).toBe(5); // 3 a + 2 b
 
-		const remaining = readSkillUsageEntries(tempDir);
-		expect(remaining).toHaveLength(5);
-		const skillAPaths = remaining
-			.filter((e) => e.skillPath === 'skill-a')
-			.map((e) => e.taskID);
-		// The 3 newest by timestamp
-		expect(skillAPaths).toContain('a-newest');
-		expect(skillAPaths).toContain('a-keep-this');
-		expect(skillAPaths).toContain('a-newer');
-		expect(skillAPaths).not.toContain('a-oldest');
-		expect(skillAPaths).not.toContain('a-mid');
-	});
+			const remaining = readSkillUsageEntries(tempDir);
+			expect(remaining).toHaveLength(5);
+			const skillAPaths = remaining
+				.filter((e) => e.skillPath === 'skill-a')
+				.map((e) => e.taskID);
+			// The 3 newest by timestamp
+			expect(skillAPaths).toContain('a-newest');
+			expect(skillAPaths).toContain('a-keep-this');
+			expect(skillAPaths).toContain('a-newer');
+			expect(skillAPaths).not.toContain('a-oldest');
+			expect(skillAPaths).not.toContain('a-mid');
+		}));
 
-	test('handles multiple skill paths independently', () => {
-		// skill-x: 4 entries, keep 2 → prune 2
-		// skill-y: 1 entry, keep 2 → prune 0
-		const entries = [
-			makeEntry({
-				skillPath: 'skill-x',
-				taskID: 'x-01',
-				timestamp: '2026-01-01T00:00:00.000Z',
-			}),
-			makeEntry({
-				skillPath: 'skill-x',
-				taskID: 'x-02',
-				timestamp: '2026-01-02T00:00:00.000Z',
-			}),
-			makeEntry({
-				skillPath: 'skill-x',
-				taskID: 'x-03',
-				timestamp: '2026-01-03T00:00:00.000Z',
-			}),
-			makeEntry({
-				skillPath: 'skill-x',
-				taskID: 'x-04',
-				timestamp: '2026-01-04T00:00:00.000Z',
-			}),
-			makeEntry({
-				skillPath: 'skill-y',
-				taskID: 'y-01',
-				timestamp: '2026-01-01T00:00:00.000Z',
-			}),
-		];
-		writeRawLog(
-			tempDir,
-			entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
-		);
+	test('handles multiple skill paths independently', () =>
+		withFrozenClock(() => {
+			// skill-x: 4 entries, keep 2 → prune 2; skill-y: 1 entry, keep 2 → 0.
+			// Issue #2038: operational entries — see the per-skill prune note above.
+			const op = (skillPath: string, taskID: string, daysAgo: number) =>
+				makeEntry({
+					skillPath,
+					taskID,
+					complianceVerdict: 'not_checked',
+					timestamp: new Date(Date.now() - daysAgo * 86_400_000).toISOString(),
+				});
+			const entries = [
+				op('skill-x', 'x-01', 5),
+				op('skill-x', 'x-02', 4),
+				op('skill-x', 'x-03', 3),
+				op('skill-x', 'x-04', 2),
+				op('skill-y', 'y-01', 5),
+			];
+			writeRawLog(
+				tempDir,
+				entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
+			);
 
-		const result = pruneSkillUsageLog(tempDir, 2);
+			const result = pruneSkillUsageLog(tempDir, 2);
 
-		expect(result.pruned).toBe(2); // x-01 and x-02 removed
-		expect(result.remaining).toBe(3);
+			expect(result.pruned).toBe(2); // x-01 and x-02 removed
+			expect(result.remaining).toBe(3);
 
-		const remaining = readSkillUsageEntries(tempDir);
-		expect(remaining.filter((e) => e.skillPath === 'skill-x')).toHaveLength(2);
-		expect(remaining.filter((e) => e.skillPath === 'skill-y')).toHaveLength(1);
-	});
+			const remaining = readSkillUsageEntries(tempDir);
+			expect(remaining.filter((e) => e.skillPath === 'skill-x')).toHaveLength(
+				2,
+			);
+			expect(remaining.filter((e) => e.skillPath === 'skill-y')).toHaveLength(
+				1,
+			);
+		}));
 
 	test('returns { pruned: 0, remaining, error } on write failure using _internals override', () => {
 		// Need 2 entries so prune is triggered (maxEntriesPerSkill=1 → pruned>0 → write attempted)
@@ -636,6 +614,12 @@ describe('_internals DI seam', () => {
 		_internals.openSync = fs.openSync.bind(fs);
 		_internals.readSync = fs.readSync.bind(fs);
 		_internals.closeSync = fs.closeSync.bind(fs);
+		_internals.limits = SKILL_USAGE_LIMITS;
+		// Restore the prune seam too: the trigger test stubs it, and a leaked
+		// stub silently no-ops append-path maintenance for every LATER test
+		// file in a shared bun process (invariant 7 cross-file pollution —
+		// caught by the final critic round 2, issue #2038).
+		_internals.pruneSkillUsageLog = pruneSkillUsageLog;
 	});
 
 	test('override generateId for deterministic IDs', () => {
@@ -660,21 +644,29 @@ describe('_internals DI seam', () => {
 		expect(captured).toContain('task-capture');
 	});
 
-	test('override readFileSync for controlled input', () => {
-		// Pre-populate the log with known content
-		writeRawLog(
-			tempDir,
-			JSON.stringify(makeEntry({ taskID: 'real-file-entry' })) + '\n',
-		);
+	test('override readFileSync for controlled input', () =>
+		withFrozenClock(() => {
+			// Pre-populate the log with known content
+			writeRawLog(
+				tempDir,
+				JSON.stringify(makeEntry({ taskID: 'real-file-entry' })) + '\n',
+			);
 
-		// Override readFileSync to return controlled data instead
-		_internals.readFileSync = () =>
-			JSON.stringify(makeEntry({ taskID: 'mocked-entry' })) + '\n';
-
-		const result = readSkillUsageEntries(tempDir);
-		expect(result).toHaveLength(1);
-		expect(result[0]!.taskID).toBe('mocked-entry');
-	});
+			// Issue #2038: readFileSync is the MAINTENANCE (unbounded) read seam —
+			// prune parses through it. The bounded production read seam
+			// (openSync/readSync) is pinned in skill-usage-bounded-read.test.ts.
+			_internals.readFileSync = () =>
+				JSON.stringify(
+					makeEntry({
+						taskID: 'mocked-entry',
+						timestamp: new Date(Date.now() - 86_400_000).toISOString(),
+					}),
+				) + '\n';
+			const result = pruneSkillUsageLog(tempDir, 500);
+			expect(result.remaining).toBe(1);
+			// The compaction published the CONTROLLED input, not the real file.
+			expect(readRawLog(tempDir)).toContain('mocked-entry');
+		}));
 
 	test('override existsSync to simulate file not existing', () => {
 		_internals.existsSync = () => false;
@@ -741,6 +733,9 @@ describe('_internals DI seam', () => {
 		_internals.statSync = ((_path: fs.PathLike) => ({
 			size: 1024 * 1024 + 1,
 		})) as typeof fs.statSync;
+		// Issue #2038: maintenance is throttled to every checkInterval appends
+		// (write-amplification bound); force the check on this single append.
+		_internals.limits = { ..._internals.limits, checkInterval: 1 };
 
 		appendSkillUsageEntry(tempDir, makeEntry());
 		expect(pruneCalled).toBe(true);

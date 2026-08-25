@@ -16,7 +16,7 @@ Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
 
 **What this PR defines.** A single canonical `ObservabilityEvent` envelope
 (`src/observability/envelope.ts`), a discriminated catalog of every event kind
-the codebase emits today (`src/observability/catalog.ts`, 46 entries), a
+the codebase emits today (`src/observability/catalog.ts`, 47 entries), a
 relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. It wires the envelope into the one live production
@@ -75,7 +75,7 @@ in production stops anything or is visible anywhere today — it is not.
 
 Defined in `src/observability/envelope.ts` as a zod schema (`z.infer`d for the
 `ObservabilityEvent` type). The schema is safe-parsed by the tests
-(`tests/unit/observability/envelope-roundtrip.test.ts`, all 46 kinds). It is **not** parsed by the
+(`tests/unit/observability/envelope-roundtrip.test.ts`, all 47 kinds). It is **not** parsed by the
 CI contract check, and **not** parsed on the `emit()` hot path; `createObservation` builds a plain
 object and never calls `.parse()`, because parsing would reallocate on every
 emit and would clone or reject `legacy.raw` (see §4).
@@ -182,9 +182,9 @@ those inputs before this change.
 
 ---
 
-## 5. The 46-entry catalog
+## 5. The 47-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 46 entries = the 38 pre-existing members of
+Source: `src/observability/catalog.ts`. Exactly 47 entries = the 38 pre-existing members of
 `TelemetryEvent` (`src/telemetry.ts:15-109`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
@@ -567,7 +567,7 @@ pressure without leaking workspace layout.
 
 #### context_telemetry_health
 Category `lifecycle`, severity `notice`, privacy `operational`. Producer
-`src/telemetry.ts:932` (`contextTelemetryHealth`, called by the bounded
+`src/telemetry.ts:938` (`contextTelemetryHealth`, called by the bounded
 `.swarm/context-telemetry.jsonl` store in `src/context-map/telemetry.ts` after a
 compaction or close cut; issue #2037). Consumers: none — owner **#2047**.
 Retention: **#2047**. No workflow ID is required: context-map telemetry is
@@ -581,6 +581,26 @@ store itself (`.swarm/context-telemetry.jsonl` manifest + retained window) is
 the authoritative record, and this event only reports the aggregate so later
 reporting (PR 16/19) can surface retention pressure without leaking capsule
 contents or workspace layout.
+
+#### skill_usage_health
+Category `lifecycle`, severity `notice`, privacy `operational`. Producer
+`src/telemetry.ts:965` (`skillUsageHealth`, called by the bounded
+`.swarm/skill-usage.jsonl` store in `src/hooks/skill-usage-log.ts` after a
+changing compaction / phase-boundary / feedback pass, on a throttled pressure
+drop, and on an append-path legacy-migration deferral; issue #2038).
+Consumers: none — owner **#2047**. Retention: **#2047**. No workflow ID is
+required: skill-usage retention is aggregate-only. The payload is strictly
+bounded counts: `trigger` (`append`/`phase-boundary`/`feedback`/
+`deferred`), `acceptedCount`, `compactedCount`, `retainedCount`,
+`droppedAgeCount`, `corruptTotal`, `preservedMarkerCount`,
+`droppedMarkerIdsCount`, `droppedUnderPressureTotal`, `pressureCount`, `bytes`,
+and `limitBytes`. Skill paths, agent names, task IDs, and file content are
+never emitted (path redaction by omission). This is the health signal for the
+issue-#2038 bounded skill-usage store; the store itself
+(`.swarm/skill-usage.jsonl` manifest header + retained window + feedback
+markers) is the authoritative record, and this event only reports the
+aggregate so later reporting (PR 16/19) can surface retention pressure
+without leaking workspace layout or skill-usage content.
 
 ---
 

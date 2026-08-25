@@ -92,7 +92,10 @@ import {
 } from '../hooks/knowledge-store.js';
 import type { RetrievalOutcome } from '../hooks/knowledge-types.js';
 import { readTaskTrajectory } from '../hooks/micro-reflector.js';
-import { readSkillUsageEntries } from '../hooks/skill-usage-log.js';
+import {
+	getSkillUsageCoverage,
+	readSkillUsageEntries,
+} from '../hooks/skill-usage-log.js';
 import { redactSecrets } from '../memory/redaction.js';
 import { readTrajectory } from '../prm/trajectory-store.js';
 import type { TrajectoryEntry } from '../prm/types.js';
@@ -153,6 +156,12 @@ export interface CorpusReaders {
 		directory: string,
 	) => Promise<TrajectoryEntry[]>;
 	readSkillUsageEntries: typeof readSkillUsageEntries;
+	/** Optional coverage probe (issue #2038): when the bounded skill-usage
+	 *  read saw a truncated window (unmigrated legacy tail, pressure, or a
+	 *  read error), the corpus discloses `truncated` instead of silently
+	 *  mining partial history. Optional so existing test fixtures keep
+	 *  compiling; the default readers bind the real probe. */
+	getSkillUsageCoverage?: typeof getSkillUsageCoverage;
 	readKnowledgeEntries: (directory: string) => Promise<KnowledgeLike[]>;
 	loadEvidence: (
 		directory: string,
@@ -403,6 +412,7 @@ function defaultReaders(): CorpusReaders {
 		listTrajectorySessions,
 		readTrajectory,
 		readSkillUsageEntries,
+		getSkillUsageCoverage,
 		readKnowledgeEntries: (directory) =>
 			readKnowledge<KnowledgeLike>(resolveSwarmKnowledgePath(directory)),
 		// `{ migrate: false }` is load-bearing, not defensive. The default
@@ -1029,6 +1039,18 @@ export async function loadConsensusCorpus(
 		} catch {
 			unreadableSources.push(source);
 			continue;
+		}
+		// Issue #2038: a truncated skill-usage window (unmigrated legacy tail,
+		// pressure, read error) means the corpus is partial history — disclose
+		// it through the existing `truncated` flag rather than mining silently.
+		if (source === 'skill-usage' && readers.getSkillUsageCoverage) {
+			try {
+				if (readers.getSkillUsageCoverage(directory).coverage === 'truncated') {
+					truncated = true;
+				}
+			} catch {
+				/* fail-open — the probe is disclosure, not a gate */
+			}
 		}
 		// Deterministic per-source order so truncation never depends on
 		// filesystem enumeration order.

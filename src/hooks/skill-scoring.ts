@@ -11,6 +11,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+	getSkillUsageCoverage,
 	readSkillUsageEntries,
 	type SkillUsageEntry,
 } from './skill-usage-log.js';
@@ -863,16 +864,21 @@ export function formatSkillIndexWithContext(
 	directory: string,
 	metadataBySkillPath?: ReadonlyMap<string, SkillMetadata>,
 ): string {
-	// Bounded check: just verify the log file exists and has content
-	// instead of reading the entire file on every delegation.
-	const usageLogPath = path.join(directory, '.swarm', 'skill-usage.jsonl');
-	let hasHistory = false;
+	// Bounded check (issue #2038): coverage tells us both whether history
+	// exists and whether the bounded read saw the whole file — no full-file
+	// read on any delegation path.
+	let coverage: ReturnType<typeof getSkillUsageCoverage> = {
+		coverage: 'empty',
+		onDiskBytes: 0,
+		retainedEntries: 0,
+		readMaxBytes: 0,
+	};
 	try {
-		const stat = fs.statSync(usageLogPath);
-		hasHistory = stat.size > 0;
+		coverage = getSkillUsageCoverage(directory);
 	} catch {
-		// File doesn't exist — no history yet
+		// Coverage probe failure — treat as no history (fail-open formatting).
 	}
+	const hasHistory = coverage.coverage !== 'empty';
 
 	if (!hasHistory) {
 		// Simple index without stats, but with enough metadata for agents to
@@ -903,6 +909,14 @@ export function formatSkillIndexWithContext(
 		lines.push(
 			`  - file:${meta.path} - ${meta.name}: ${meta.description} (used: ${stats.totalUsage}, compliance: ${compliancePct}%)` +
 				(stats.topAgents.length > 0 ? ` → ${topAgentNames}` : ''),
+		);
+	}
+
+	// Issue #2038: disclose partial coverage so usage counts are never
+	// mistaken for complete history (unmigrated legacy tail or pressure).
+	if (coverage.coverage === 'truncated') {
+		lines.push(
+			'  - [!] usage stats reflect the retained window only — older history is compacting (issue #2038)',
 		);
 	}
 

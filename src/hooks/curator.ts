@@ -100,7 +100,10 @@ import {
 	validateLesson,
 } from './knowledge-validator.js';
 import { writeArchiveTombstoneAndInvalidateSkills } from './skill-invalidator.js';
-import { readSkillUsageEntries } from './skill-usage-log.js';
+import {
+	getSkillUsageCoverage,
+	readSkillUsageEntries,
+} from './skill-usage-log.js';
 import { readSwarmFileAsync, validateSwarmPath } from './utils.js';
 
 /**
@@ -142,6 +145,7 @@ export const _internals = {
 	normalizeAgentName,
 	autoRetireSkills,
 	readSkillUsageEntries,
+	getSkillUsageCoverage,
 	listSkills,
 	parseDraftFrontmatter,
 	retireOrMarkStale,
@@ -317,6 +321,22 @@ async function autoRetireSkills(
 	try {
 		const skillListResult = await _internals.listSkills(directory);
 		const usageEntries = _internals.readSkillUsageEntries(directory);
+		// Issue #2038: violation-rate retirement is a usage-derived DECISION —
+		// defer it when the bounded read was truncated (unmigrated legacy tail
+		// or pressure) rather than deciding on partial evidence. The archived-
+		// source trigger below is usage-independent and still runs.
+		let usageCoverageComplete = true;
+		try {
+			usageCoverageComplete =
+				_internals.getSkillUsageCoverage(directory).coverage !== 'truncated';
+		} catch {
+			usageCoverageComplete = true; // fail-open — retire decisions were pre-#2038 behavior
+		}
+		if (!usageCoverageComplete) {
+			observations.push(
+				'skill-usage history coverage is partial — violation-rate auto-retire deferred this cycle (issue #2038)',
+			);
+		}
 		const allArchivedIds = await _internals.getArchivedKnowledgeIds(directory);
 
 		for (const active of skillListResult.active) {
@@ -354,7 +374,7 @@ async function autoRetireSkills(
 			//      apply path and the knowledge_archive tool).
 			// Skill retirement is therefore a downstream consequence of an
 			// already-authorized knowledge action, never an independent bypass.
-			if (violationRate > 0.3) {
+			if (violationRate > 0.3 && usageCoverageComplete) {
 				const reason = `auto-retire: violation rate ${(violationRate * 100).toFixed(0)}% exceeds 30% threshold`;
 				await _internals.retireSkill(directory, active.slug, reason);
 				observations.push(`Skill '${active.slug}' auto-retired: ${reason}`);
@@ -1812,10 +1832,28 @@ export async function runCuratorPhase(
 		// 8b. Skill revision: revise skills with violation rate in the
 		// 15-30% range (soft threshold). Runs BEFORE auto-retire so
 		// revised skills are not immediately retired. Non-blocking.
+		// Issue #2038: revision is usage-derived — defer the whole pass when
+		// the bounded usage read was truncated (partial evidence).
 		const revisedSlugs = new Set<string>();
 		try {
+			let revisionCoverageComplete = true;
+			try {
+				revisionCoverageComplete =
+					_internals.getSkillUsageCoverage(directory).coverage !== 'truncated';
+			} catch {
+				revisionCoverageComplete = true; // fail-open
+			}
+			if (!revisionCoverageComplete) {
+				logger.warn(
+					'[curator] skill-usage history coverage is partial — revision pass deferred this cycle (issue #2038)',
+				);
+			}
 			const skillListResult = await _internals.listSkills(directory);
-			const usageEntries = _internals.readSkillUsageEntries(directory);
+			// Deferred pass: empty usage list makes every skill's usage filter
+			// yield zero entries, so the loop no-ops without touching skills.
+			const usageEntries = revisionCoverageComplete
+				? _internals.readSkillUsageEntries(directory)
+				: [];
 			let revisionCallsThisPhase = 0;
 
 			for (const active of skillListResult.active) {
@@ -1891,9 +1929,30 @@ export async function runCuratorPhase(
 		// is unchanged.
 		try {
 			const peSkillList = await _internals.listSkills(directory);
-			const peUsageEntries = _internals.readSkillUsageEntries(directory);
+			// Issue #2038: staleness is usage-derived — defer when the bounded
+			// usage read was truncated (empty usage aggregates keep every
+			// promoted-external skill below its usage thresholds).
+			let peCoverageComplete = true;
+			try {
+				peCoverageComplete =
+					_internals.getSkillUsageCoverage(directory).coverage !== 'truncated';
+			} catch {
+				peCoverageComplete = true; // fail-open
+			}
+			if (!peCoverageComplete) {
+				logger.warn(
+					'[curator] skill-usage history coverage is partial — promoted-external staleness deferred this cycle (issue #2038)',
+				);
+			}
+			// Deferred pass: skip every skill — a zero-usage aggregate could
+			// itself look "stale" to the policy, so neither the read nor the
+			// loop runs.
+			const peUsageEntries = peCoverageComplete
+				? _internals.readSkillUsageEntries(directory)
+				: [];
+			const peCandidates = peCoverageComplete ? peSkillList.active : [];
 			const peRetirementMinAgeDays = 60; // default floor; configurable via skill_opt.retirement_min_age_days
-			for (const active of peSkillList.active) {
+			for (const active of peCandidates) {
 				const content = await _internals.readFileAsync(active.path, 'utf-8');
 				const fm = _internals.parseDraftFrontmatter(content);
 				if (!fm || fm.skillOrigin !== 'promoted_external') continue;
