@@ -1717,6 +1717,7 @@ export type PrWorkflowLaneProbeDegradedReason =
 async function probePrWorkflowLaneSessionStatusTypes(
 	directory: string,
 	records: readonly BackgroundDelegationRecord[],
+	timeoutMs?: number,
 ): Promise<{
 	statuses: Map<string, string>;
 	degradedReason?: PrWorkflowLaneProbeDegradedReason;
@@ -1736,7 +1737,7 @@ async function probePrWorkflowLaneSessionStatusTypes(
 	try {
 		response = await withTimeout(
 			(async () => statusOp.call(session, { query: { directory } }))(),
-			_test_exports.laneLivenessProbeTimeoutMs,
+			timeoutMs ?? _test_exports.laneLivenessProbeTimeoutMs,
 			timeoutError,
 		);
 	} catch (error) {
@@ -1835,7 +1836,14 @@ export interface PrWorkflowPendingLaneLiveness {
 	 * `true` value never cancels, retries, replaces, or settles the lane.
 	 */
 	stalledSuspect: boolean;
-	degradedReason?: PrWorkflowLaneProbeDegradedReason;
+	/**
+	 * Why the reading is not a real host status: the probe's own failure reasons,
+	 * plus `'advisory-unavailable'` when the advisory's surrounding accounting
+	 * failed unexpectedly after the past-threshold set was already known — so an
+	 * emitted entry always distinguishes "degraded" from a missing probe, and an
+	 * ABSENT `pending_liveness` keeps meaning "no lane was past the threshold".
+	 */
+	degradedReason?: PrWorkflowLaneProbeDegradedReason | 'advisory-unavailable';
 }
 
 /**
@@ -1849,20 +1857,35 @@ export interface PrWorkflowPendingLaneLiveness {
  * presumed-stale sweep (issue #2251) remains the only terminal backstop.
  *
  * Cost model: below the threshold there is NO host round-trip at all; past it,
- * exactly ONE session-status call (deadline-bounded through the same
- * `_test_exports` seams as the #2251 probe) regardless of how many lanes are
- * pending. Any failure mode degrades (`hostStatus: 'unknown'`,
- * `stalledSuspect: true`, reason named) instead of throwing — collection must
- * never block or fail on this advisory.
+ * exactly ONE session-status call regardless of how many lanes are pending,
+ * deadline-bounded through the same `_test_exports` seams as the #2251 probe
+ * and additionally clamped to the caller's remaining collection budget
+ * (`probeBudgetMs`) — the diagnostic must never add wait beyond the budget the
+ * caller already granted the collection itself. Any failure mode degrades
+ * (`hostStatus: 'unknown'`, `stalledSuspect: true`, reason named) instead of
+ * throwing — collection must never block or fail on this advisory.
  */
 export async function collectPrWorkflowPendingLaneLiveness(
 	directory: string,
 	records: readonly BackgroundDelegationRecord[],
+	options: { probeBudgetMs?: number } = {},
 ): Promise<PrWorkflowPendingLaneLiveness[]> {
+	let now = 0;
+	let pastThreshold: BackgroundDelegationRecord[] = [];
+	const degraded = (
+		record: BackgroundDelegationRecord,
+		reason: PrWorkflowPendingLaneLiveness['degradedReason'],
+	): PrWorkflowPendingLaneLiveness => ({
+		laneId: record.laneId ?? record.correlationId,
+		pendingMs: Math.max(0, now - record.updatedAt),
+		hostStatus: 'unknown',
+		stalledSuspect: true,
+		degradedReason: reason,
+	});
 	try {
-		const now = _test_exports.nowMs();
+		now = _test_exports.nowMs();
 		const threshold = _test_exports.pendingLaneLivenessThresholdMs;
-		const pastThreshold = records.filter(
+		pastThreshold = records.filter(
 			(record) =>
 				(record.status === 'pending' ||
 					record.status === 'running' ||
@@ -1872,9 +1895,24 @@ export async function collectPrWorkflowPendingLaneLiveness(
 				now - record.updatedAt > threshold,
 		);
 		if (pastThreshold.length === 0) return [];
+		const budgetMs = Math.max(
+			0,
+			Math.min(
+				_test_exports.laneLivenessProbeTimeoutMs,
+				options.probeBudgetMs ?? Number.POSITIVE_INFINITY,
+			),
+		);
+		if (budgetMs <= 0) {
+			// No caller budget left to spend on the diagnostic: report the
+			// degradation per lane instead of spending host time the caller
+			// did not grant (the same budgeting `getLaneCollectionReadiness`
+			// applies to its status calls).
+			return pastThreshold.map((record) => degraded(record, 'probe-timeout'));
+		}
 		const probe = await probePrWorkflowLaneSessionStatusTypes(
 			directory,
 			pastThreshold,
+			budgetMs,
 		);
 		const advisories: PrWorkflowPendingLaneLiveness[] = [];
 		for (const record of pastThreshold) {
@@ -1916,9 +1954,14 @@ export async function collectPrWorkflowPendingLaneLiveness(
 		return advisories;
 	} catch {
 		// The advisory is a diagnostic, never a gate: an unexpected failure in
-		// the surrounding accounting degrades to "no advisory" rather than
-		// failing the collection call that hosted it.
-		return [];
+		// the surrounding accounting still emits per-lane 'advisory-unavailable'
+		// entries whenever the past-threshold set is already known, so an absent
+		// `pending_liveness` stays unambiguous ("nothing was past the
+		// threshold") instead of silently conflating the two — and the
+		// collection call that hosted the advisory still never fails.
+		return pastThreshold.map((record) =>
+			degraded(record, 'advisory-unavailable'),
+		);
 	}
 }
 
@@ -2029,9 +2072,11 @@ function isOpenPrWorkflowLane(
  * Issue #2251 adds the second, stronger contradiction: a lane PAST the horizon
  * whose session the host affirmatively reports as `busy`/`retry` is genuinely
  * running (nothing heartbeats `updatedAt`, so age alone cannot see this) and is
- * retained instead of discarded. The probe is fail-open — see
- * {@link probeAlivePrWorkflowLaneSessions} — so an unavailable, erroring or
- * empty probe leaves the age-only behaviour exactly as it was.
+ * retained instead of discarded. The probe is fail-open — the settlement
+ * consumes it through the alive-set wrapper {@link
+ * probeAlivePrWorkflowLaneSessions}; the fail-open taxonomy itself lives in
+ * {@link probePrWorkflowLaneSessionStatusTypes} — so an unavailable, erroring
+ * or empty probe leaves the age-only behaviour exactly as it was.
  */
 export async function settlePresumedStalePrWorkflowLanes(
 	directory: string,

@@ -18,6 +18,9 @@ step a hard prerequisite for the next:
    not yet discoverable, so a micro id is refused as `extra:` here — and
    every record is `PENDING` with `next_action: "route_to_reviewer"`. The
    coverage refusal lists the `missing:`, `extra:`, and `duplicates:` ids.
+   The early write BINDS the run: use the same `run_id` for it and for the
+   later `write_pr_review_trigger_eval` — a receipt under a different run is
+   refused against the bound one.
 3. Micro lanes settle and `write_pr_review_trigger_eval` completes — every
    OTHER findings boundary is refused until this artifact exists (the
    refusal names the producing call). A `post_explorer` write after this
@@ -32,9 +35,13 @@ step a hard prerequisite for the next:
 Writing a boundary after a later checkpoint already exists is also refused.
 Every ordering refusal names the missing prerequisite boundary. The base-only
 `post_explorer` checkpoint is the durable recovery point for context
-compaction immediately after base settlement; once trigger evaluation
-completes, the full-inventory ledger is the recovery point for every later
-phase. (Before issue #2280 there was no durable findings checkpoint between
+compaction immediately after base settlement. From trigger-eval completion
+onward the durable state is the trigger-eval receipt plus the retained lane
+artifacts — the full candidate inventory stays re-derivable from them — so a
+full-inventory `post_explorer` rewrite is OPTIONAL hardening rather than a
+guaranteed artifact: `post_reviewer` accepts the early checkpoint as its
+prerequisite and must itself carry the full (base+micro) inventory.
+(Before issue #2280 there was no durable findings checkpoint between
 explorer settlement and trigger-eval completion — the base-only write closes
 that gap.)
 

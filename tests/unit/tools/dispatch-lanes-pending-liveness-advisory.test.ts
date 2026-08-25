@@ -8,25 +8,17 @@
  * These tests pin the collection-time advisory: bounded (one probe call max,
  * zero below the threshold), fail-open (degrades to `unknown`, never throws,
  * never blocks), and ALERT-ONLY (no cancel/retry/replace in any scenario).
+ *
+ * The collect_entry-point integration cases (surfacing, alert-only disk pins,
+ * budget clamping) live in dispatch-lanes-pending-liveness-collect.test.ts.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
-import {
-	type BackgroundDelegationRecord,
-	recordPendingDelegation,
-} from '../../../src/background/pending-delegations.js';
+import type { BackgroundDelegationRecord } from '../../../src/background/pending-delegations.js';
 import {
 	collectPrWorkflowPendingLaneLiveness,
 	_test_exports as gateInternals,
 } from '../../../src/hooks/pr-workflow-gate.js';
-import {
-	_internals,
-	executeCollectLaneResults,
-} from '../../../src/tools/dispatch-lanes.js';
-import {
-	backdatePrWorkflowLane,
-	laneStatusOnDisk,
-} from '../../helpers/pr-workflow-lane-fixtures.js';
 import { freezeClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
@@ -64,11 +56,8 @@ beforeEach(() => {
 afterEach(async () => {
 	restoreClock();
 	gateInternals.resetTrackedStateCache();
-	_internals.getSessionOps = originalDispatchSessionOps;
 	await fs.rm(directory, { recursive: true, force: true });
 });
-
-const originalDispatchSessionOps = _internals.getSessionOps;
 
 function unitRecord(overrides: {
 	laneId: string;
@@ -257,6 +246,66 @@ describe('collectPrWorkflowPendingLaneLiveness (issue #2280 Part B)', () => {
 		expect(advisories).toEqual([]);
 	});
 
+	test('empty records input returns no advisory and probes nothing', async () => {
+		installGateStatus({});
+		const advisories = await collectPrWorkflowPendingLaneLiveness(
+			directory,
+			[],
+		);
+		expect(advisories).toEqual([]);
+		expect(statusCalls).toBe(0);
+	});
+
+	test('an unexpected accounting failure degrades per lane as advisory-unavailable (PRR-010)', async () => {
+		// getSessionOps ITSELF throwing escapes the probe core's internal
+		// handling; the outer catch must still name the past-threshold lanes so
+		// an absent pending_liveness keeps meaning "nothing was past threshold".
+		gateInternals.getSessionOps = () => {
+			throw new Error('session handle exploded');
+		};
+		const advisories = await collectPrWorkflowPendingLaneLiveness(directory, [
+			unitRecord({
+				laneId: 'critic-1',
+				mode: 'swarm-pr-review:critic',
+				ageMs: FIVE_MINUTES_MS,
+			}),
+		]);
+		expect(advisories).toEqual([
+			{
+				laneId: 'critic-1',
+				pendingMs: FIVE_MINUTES_MS,
+				hostStatus: 'unknown',
+				stalledSuspect: true,
+				degradedReason: 'advisory-unavailable',
+			},
+		]);
+	});
+
+	test('a zero caller probe budget spends no host round-trip (RP-001)', async () => {
+		installGateStatus({ 'sub-critic-1': { type: 'busy' } });
+		const advisories = await collectPrWorkflowPendingLaneLiveness(
+			directory,
+			[
+				unitRecord({
+					laneId: 'critic-1',
+					mode: 'swarm-pr-review:critic',
+					ageMs: FIVE_MINUTES_MS,
+				}),
+			],
+			{ probeBudgetMs: 0 },
+		);
+		expect(statusCalls).toBe(0);
+		expect(advisories).toEqual([
+			{
+				laneId: 'critic-1',
+				pendingMs: FIVE_MINUTES_MS,
+				hostStatus: 'unknown',
+				stalledSuspect: true,
+				degradedReason: 'probe-timeout',
+			},
+		]);
+	});
+
 	test('base and micro discovery lanes are covered; settled and non-pr-review lanes are not', async () => {
 		installGateStatus({
 			'sub-base-1': { type: 'busy' },
@@ -301,141 +350,5 @@ describe('collectPrWorkflowPendingLaneLiveness (issue #2280 Part B)', () => {
 			hostStatus: 'idle',
 			stalledSuspect: true,
 		});
-	});
-});
-
-describe('collect_lane_results surfaces the advisory (issue #2280 Part B)', () => {
-	function installDispatchSession(liveSessionIds: readonly string[]): void {
-		_internals.getSessionOps = () => ({
-			status: async () => ({
-				data: Object.fromEntries(
-					liveSessionIds.map((sessionId) => [sessionId, { type: 'busy' }]),
-				),
-			}),
-			messages: async () => ({ data: [] }),
-		});
-	}
-
-	async function recordCriticLane(
-		correlationId: string,
-		ageMs: number,
-	): Promise<void> {
-		await recordPendingDelegation(directory, {
-			correlationId,
-			jobId: null,
-			subagentSessionId: `sub-${correlationId}`,
-			parentSessionId: 'collect-parent',
-			callID: `call-${correlationId}`,
-			normalizedAgent: 'critic',
-			swarmPrefixedAgent: 'mega_critic',
-			planTaskId: null,
-			evidenceTaskId: null,
-			batchId: 'critic-batch',
-			laneId: 'critic-lane-1',
-			mode: 'swarm-pr-review:critic',
-			workflowLane: 'critic-family',
-			workspace: {
-				directory,
-				gitHead: 'abc123',
-				dirtyHash: null,
-				prHeadSha: 'abc123',
-				scope: null,
-			},
-		});
-		backdatePrWorkflowLane(directory, correlationId, ageMs);
-	}
-
-	test('a long-pending live critic lane gets an advisory and is left completely untouched', async () => {
-		await recordCriticLane('c-critic-1', FIVE_MINUTES_MS);
-		installDispatchSession(['sub-c-critic-1']);
-		installGateStatus({ 'sub-c-critic-1': { type: 'busy' } });
-
-		const result = await executeCollectLaneResults(
-			{ batch_id: 'critic-batch', wait: false },
-			directory,
-		);
-
-		expect(result.pending).toBe(1);
-		expect(result.pending_liveness).toEqual([
-			{
-				laneId: 'critic-lane-1',
-				pendingMs: FIVE_MINUTES_MS,
-				hostStatus: 'busy',
-				stalledSuspect: false,
-			},
-		]);
-		// ALERT-ONLY pinned: the advisory changed nothing about the lane.
-		expect(laneStatusOnDisk(directory, 'c-critic-1')).toBe('pending');
-		expect(result.message).toBeUndefined();
-	});
-
-	test('a fresh pending critic lane produces no probe and no advisory field', async () => {
-		await recordCriticLane('c-fresh-1', 0);
-		installDispatchSession(['sub-c-fresh-1']);
-		installGateStatus({});
-
-		const result = await executeCollectLaneResults(
-			{ batch_id: 'critic-batch', wait: false },
-			directory,
-		);
-
-		expect(result.pending).toBe(1);
-		expect(result.pending_liveness).toBeUndefined();
-		expect(statusCalls).toBe(0);
-	});
-
-	test('a stalled-suspect advisory leaves the lane untouched too (alert-only pinned at the risky value)', async () => {
-		// The AC pins "no automatic cancellation/replacement in ANY scenario".
-		// The benign case is pinned above; this drives the riskiest value —
-		// past threshold with the host affirmatively idle — and proves the
-		// durable record is still byte-identical pending, with no sweep, no
-		// cancel, and no message injected.
-		await recordCriticLane('c-stalled-1', FIVE_MINUTES_MS);
-		installDispatchSession(['sub-c-stalled-1']);
-		installGateStatus({ 'sub-c-stalled-1': { type: 'idle' } });
-
-		const result = await executeCollectLaneResults(
-			{ batch_id: 'critic-batch', wait: false },
-			directory,
-		);
-
-		expect(result.pending).toBe(1);
-		expect(result.pending_liveness).toEqual([
-			{
-				laneId: 'critic-lane-1',
-				pendingMs: FIVE_MINUTES_MS,
-				hostStatus: 'idle',
-				stalledSuspect: true,
-			},
-		]);
-		expect(laneStatusOnDisk(directory, 'c-stalled-1')).toBe('pending');
-		expect(result.message).toBeUndefined();
-		expect(result.errors).toBeUndefined();
-	});
-
-	test('a degraded probe never blocks collection (integration layer)', async () => {
-		// The unit layer pins the degraded classification; this proves the
-		// collect call itself completes normally with the degraded advisory
-		// attached — the advisory can fail without failing its host.
-		await recordCriticLane('c-degraded-1', FIVE_MINUTES_MS);
-		installDispatchSession(['sub-c-degraded-1']);
-		installGateStatus({}, new Error('session.status exploded'));
-
-		const result = await executeCollectLaneResults(
-			{ batch_id: 'critic-batch', wait: false },
-			directory,
-		);
-
-		expect(result.pending).toBe(1);
-		expect(result.pending_liveness).toEqual([
-			{
-				laneId: 'critic-lane-1',
-				pendingMs: FIVE_MINUTES_MS,
-				hostStatus: 'unknown',
-				stalledSuspect: true,
-				degradedReason: 'probe-error',
-			},
-		]);
-		expect(laneStatusOnDisk(directory, 'c-degraded-1')).toBe('pending');
 	});
 });

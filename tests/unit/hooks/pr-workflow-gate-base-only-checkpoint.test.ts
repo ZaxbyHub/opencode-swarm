@@ -441,6 +441,42 @@ describe('base-only post_explorer checkpoint (issue #2280 Part A)', () => {
 		expect(result).toContain('"success": true');
 	});
 
+	test('composite: early checkpoint → trigger-eval → full re-write supersede one run ledger (TF-001)', async () => {
+		// The piecewise tests cover each pair; this exercises the whole
+		// supersession chain on ONE run_id and pins latest-record-wins on disk.
+		await settleBaseWaves();
+		await writePrReviewFindings(
+			directory,
+			'run-super',
+			'post_explorer',
+			pendingRecords(candidateIds),
+		);
+		await completeTriggerEvaluation('run-super');
+		const result = await writePrReviewFindings(
+			directory,
+			'run-super',
+			'post_explorer',
+			pendingRecords([...candidateIds, 'M-0']),
+		);
+		expect(result).toContain('"success": true');
+		const text = await fs.readFile(
+			path.join(
+				directory,
+				'.swarm',
+				'pr-review',
+				'run-super',
+				'findings.jsonl',
+			),
+			'utf-8',
+		);
+		const latest = new Map<string, { boundary: string }>();
+		for (const line of text.split(/\r?\n/).filter(Boolean)) {
+			const row = JSON.parse(line);
+			latest.set(row.finding_id, row);
+		}
+		expect([...latest.keys()].sort()).toEqual([...candidateIds, 'M-0'].sort());
+	});
+
 	test('severity mismatches in the early write keep the #2277 one-round-trip shape', async () => {
 		await settleBaseWaves();
 
