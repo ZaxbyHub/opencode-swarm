@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.148.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.148.1...v7.148.2) (2026-08-25)
+
+
+### Bug Fixes
+
+* **pr-review:** harden verdict row contracts and recovery ([af28e9c](https://github.com/ZaxbyHub/opencode-swarm/commit/af28e9cf04911e601f33965dd2045c0c41d230e5))
+
 ## [7.148.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.148.0...v7.148.1) (2026-08-25)
 
 
