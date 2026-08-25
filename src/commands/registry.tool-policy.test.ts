@@ -71,7 +71,6 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'guardrail explain',
 		'guardrail reset',
 		'guardrail-log',
-		'full-auto',
 		'lanes',
 		'ci-simulate',
 		// #1672: aggregated context-capsule telemetry stats (toolPolicy: 'agent', toolNoArgs)
