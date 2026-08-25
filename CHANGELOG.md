@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.148.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.148.0...v7.148.1) (2026-08-25)
+
+
+### Bug Fixes
+
+* **skill-usage:** add a hard global bound to skill-usage history ([d2be4f7](https://github.com/ZaxbyHub/opencode-swarm/commit/d2be4f78d063d5ec50869d7fdf9c67fb13731da1))
+
 ## [7.148.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.147.1...v7.148.0) (2026-08-25)
 
 
