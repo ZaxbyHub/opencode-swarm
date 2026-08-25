@@ -185,10 +185,11 @@ export const _internals = {
 	pruneSkillUsageLog,
 	resolveSourceKnowledgeIds,
 	applySkillUsageFeedback,
+	/** Test seam: lets FB-008-style tests drive `failed:true` / partial-apply through the real consumption path without `mock.module`. */
+	bumpKnowledgeConfidenceBatchResult,
 	parseGeneratedFromKnowledge,
 	computeComplianceByVersion,
 	normalizeComplianceVerdict,
-	readFeedbackAppliedEntryIds,
 	appendFeedbackAppliedMarker,
 	/**
 	 * Streaming read seam (issue #2038, BLK-11). The one-time migration and the
@@ -311,30 +312,6 @@ function parseFeedbackMarker(raw: unknown): SkillFeedbackAppliedMarker | null {
 		timestamp: marker.timestamp,
 		processedEntryIds,
 	};
-}
-
-/**
- * Legacy acknowledgment reader, retained for backward compatibility and for
- * pre-migration inspection. The migration pass uses the streaming reader
- * instead so that it is bounded in peak memory.
- */
-function readFeedbackAppliedEntryIds(directory: string): Set<string> {
-	const resolved = resolveLogPath(directory);
-	const processed = new Set<string>();
-	if (!_internals.existsSync(resolved)) return processed;
-	const raw = _internals.readFileSync(resolved, 'utf-8') as string;
-	for (const line of raw.split('\n')) {
-		const trimmed = line.trim();
-		if (!trimmed) continue;
-		try {
-			const marker = parseFeedbackMarker(JSON.parse(trimmed));
-			if (!marker) continue;
-			for (const id of marker.processedEntryIds) processed.add(id);
-		} catch {
-			// skip malformed marker lines
-		}
-	}
-	return processed;
 }
 
 /**
@@ -1288,8 +1265,8 @@ function adoptStagedDocument(
  * Legacy entries without an `id` get the deterministic content hash from
  * `legacySkillUsageId`, so a repeated migration mints identical ids and the
  * id-dedupe is exact (BLK-10). Two byte-identical legacy entries collapse to
- * one id and under-count by one — pre-existing behavior of
- * `readFeedbackAppliedEntryIds`, and accepted.
+ * one id and under-count by one — a pre-existing property of the legacy
+ * marker format itself, not something this pass introduces, and accepted.
  */
 function migrateLegacyLog(
 	directory: string,
@@ -1932,6 +1909,49 @@ interface FeedbackCommit {
 }
 
 /**
+ * FB-005: `commitFeedbackOutcomes` re-acquires the lock and reloads the doc,
+ * then mutates by an id-set that was computed in Phase A/B, before the lock
+ * was released and re-acquired. A concurrent write (budget eviction, age
+ * expiry, or a whole-document quarantine) can make one of those ids vanish in
+ * that gap, and `applyTerminalOutcome` / `retainWithRetry` / `dequeueRecords`
+ * silently no-op on an id that is no longer present.
+ *
+ * For budget eviction and age expiry this loss is usually ALREADY counted at
+ * its own mutation site (`pending_evicted`, `dropped`, `uncertain_expired`
+ * in `enforceQueueBounds`) — reusing one of those counters here would
+ * double-count the same event. Whole-document quarantine
+ * (`loadPendingDocument`) is the one path that is NOT counted per-record: it
+ * increments `corrupt` by 1 regardless of how many records were discarded, so
+ * a vanish caused by quarantine would otherwise be invisible at record
+ * granularity.
+ *
+ * Rather than guess the cause (which this function cannot observe), any
+ * mutation that touches fewer ids than it was asked to is folded into
+ * `bump_unrecoverable` — the existing "this record's feedback is permanently
+ * lost" bucket (`SkillUsageTerminalOutcome`), which nothing else in this file
+ * increments for a vanished id, so this adds no double-count risk. A new,
+ * dedicated counter would be more precise, but every consumer of
+ * `SKILL_USAGE_COUNTER_KEYS` (the telemetry payload builder, the registry's
+ * `healthSignal` prose, the event-contract doc) would need the new key added,
+ * for one accounting-mismatch path that is itself only reachable under real
+ * concurrent contention — precision that does not currently pay for the
+ * vocabulary churn. This reuses the closest existing terminal-loss bucket
+ * instead and documents the blend here; revisit if this path needs its own
+ * signal (e.g. because it starts firing often enough to be worth
+ * distinguishing from genuine permanent loss).
+ */
+function recordFeedbackAccountingMismatch(
+	doc: SkillUsagePendingDocument,
+	expectedCount: number,
+	touchedCount: number,
+): void {
+	const missing = expectedCount - touchedCount;
+	if (missing > 0) {
+		doc.counters.bump_unrecoverable += missing;
+	}
+}
+
+/**
  * Phase C — commit, under a re-acquired lock.
  *
  * If the re-acquire fails the records stay `in_flight` on disk. A live
@@ -1959,22 +1979,49 @@ function commitFeedbackOutcomes(
 		// instead of growing without bound. Terminal outcomes never increment
 		// `processed` / `bumps` — only `skill_usage_health` sees them.
 		if (commit.noSourceIds.length > 0) {
-			applyTerminalOutcome(doc, commit.noSourceIds, 'no_source_knowledge');
+			const removed = applyTerminalOutcome(
+				doc,
+				commit.noSourceIds,
+				'no_source_knowledge',
+			);
+			recordFeedbackAccountingMismatch(doc, commit.noSourceIds.length, removed);
 		}
 
 		if (commit.attempted && commit.deltaBearingIds.length > 0) {
 			if (commit.failed) {
 				// Transient (lock contention / I/O): retain and retry, bounded.
-				retainWithRetry(doc, commit.deltaBearingIds);
+				const { retried, unrecoverable } = retainWithRetry(
+					doc,
+					commit.deltaBearingIds,
+				);
+				recordFeedbackAccountingMismatch(
+					doc,
+					commit.deltaBearingIds.length,
+					retried.length + unrecoverable.length,
+				);
 			} else if (commit.applied === 0) {
 				// Permanent: the source knowledge ids no longer exist anywhere.
 				doc.counters.bump_applied_zero += 1;
-				applyTerminalOutcome(
+				const removed = applyTerminalOutcome(
 					doc,
 					commit.deltaBearingIds,
 					'no_matching_knowledge',
 				);
+				recordFeedbackAccountingMismatch(
+					doc,
+					commit.deltaBearingIds.length,
+					removed,
+				);
 			} else {
+				// Success path: the confidence delta was already applied by
+				// `bumpKnowledgeConfidenceBatchResult` before this function ran, so a
+				// record missing here loses nothing new. Do NOT route this through
+				// `recordFeedbackAccountingMismatch` (Stage-B review, PR #2347):
+				// that function folds a mismatch into `bump_unrecoverable`, which
+				// is documented and consumed as "this record's feedback is
+				// permanently lost" — incrementing it here for an event that lost
+				// nothing would make the health telemetry over-report genuine
+				// permanent loss. Just dequeue; nothing is missing to account for.
 				dequeueRecords(doc, commit.deltaBearingIds);
 			}
 		}
@@ -2088,7 +2135,7 @@ export async function applySkillUsageFeedback(
 		let failed = false;
 		const attempted = clampedDeltas.length > 0;
 		if (attempted) {
-			const result = await bumpKnowledgeConfidenceBatchResult(
+			const result = await _internals.bumpKnowledgeConfidenceBatchResult(
 				directory,
 				clampedDeltas,
 				options?.floorOptions,

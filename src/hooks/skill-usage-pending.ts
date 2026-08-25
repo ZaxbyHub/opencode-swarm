@@ -473,7 +473,15 @@ function tryCreateLock(lockPath: string): boolean {
 function breakStaleLock(lockPath: string): boolean {
 	try {
 		const age = _internals.now() - _internals.statSync(lockPath).mtimeMs;
-		if (age <= SKILL_USAGE_LOCK_STALE_MS) return false;
+		// PR #2347 review (FB-009): `age` can be negative if the lock file's
+		// mtime is in the future relative to this process's clock (skew, or a
+		// bad wall clock at lock-creation time). A plain `age <= threshold`
+		// treats any negative age as "fresh" and never breaks the lock, which
+		// wedges every writer until real time catches up to that future
+		// mtime — potentially far longer than the stale window. No writer here
+		// ever legitimately produces a future mtime, so a large negative age is
+		// itself the staleness signal; compare the magnitude, not the sign.
+		if (Math.abs(age) <= SKILL_USAGE_LOCK_STALE_MS) return false;
 	} catch {
 		return false;
 	}
@@ -1206,7 +1214,12 @@ export function resolveStaleInFlight(
 		const age = Number.isNaN(claimedAt)
 			? Number.POSITIVE_INFINITY
 			: nowMs - claimedAt;
-		if (age <= SKILL_USAGE_LOCK_STALE_MS) continue;
+		// PR #2347 review (FB-009): same clock-skew shape as breakStaleLock — a
+		// `claimedAt` in the future (clock skew at claim time) makes `age`
+		// negative, and `age <= threshold` alone treats that as "not stale",
+		// pinning the record `in_flight` forever and blocking the at-most-once
+		// guarantee's resolution path. Compare magnitude, not sign.
+		if (Math.abs(age) <= SKILL_USAGE_LOCK_STALE_MS) continue;
 		record.state = 'uncertain';
 		record.inFlightAt = undefined;
 		resolved += 1;
