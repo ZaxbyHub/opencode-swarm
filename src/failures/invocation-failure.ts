@@ -377,7 +377,7 @@ export function classifyToolInvocationFailure(
 		shell &&
 		(metadataCode === 'SANDBOX_WRAPPER_FAILURE' ||
 			(input.correlation?.sandboxWrapped === true &&
-				/\[sandbox\]\s+BLOCKED:/i.test(explicitError)))
+				/\[sandbox\]\s+BLOCKED:/i.test(signal)))
 	) {
 		return buildRecord({
 			source: 'shell',
@@ -394,7 +394,7 @@ export function classifyToolInvocationFailure(
 		shell &&
 		(metadataCode === 'ParserError' ||
 			/\b(?:MissingEndCurlyBrace|ParserError|ParseError|IncompleteParseException)\b/i.test(
-				explicitError,
+				signal,
 			))
 	) {
 		return buildRecord({

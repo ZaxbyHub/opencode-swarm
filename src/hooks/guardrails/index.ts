@@ -1409,6 +1409,17 @@ export function createGuardrailsHooks(
 						safeOutput as typeof output & Record<string, unknown>,
 						correlatedExecution,
 					);
+			// The sandbox wrapper mutates command before execution. Circuit identity
+			// must stay bound to the agent's original semantic action so that a
+			// result can settle the attempt toolBefore armed, rather than creating a
+			// second, unarmed wrapped-command identity.
+			const circuitArgs =
+				correlatedExecution &&
+				typeof input.args === 'object' &&
+				input.args !== null &&
+				!Array.isArray(input.args)
+					? { ...input.args, command: correlatedExecution.originalCommand }
+					: input.args;
 			if (
 				pendingReviewerScopeWrite &&
 				classifyTaskResult(safeOutput) === 'success'
@@ -1519,12 +1530,19 @@ export function createGuardrailsHooks(
 					input.sessionID,
 					outcome.category,
 					outcome.signal,
-					{ tool: input.tool, args: input.args },
+					{
+						tool: input.tool,
+						args: circuitArgs,
+						// A current correlated execution is proof this result belongs to
+						// the attempt recorded in toolBefore. Re-arm that exact action so
+						// wrapper mutation cannot turn its result into a dropped event.
+						armAttempt: correlatedExecution !== undefined,
+					},
 				);
 			} else if (outcome.kind === 'success' || outcome.kind === 'neutral') {
 				clearNonTransientCircuit(input.sessionID, {
 					tool: input.tool,
-					args: input.args,
+					args: circuitArgs,
 				});
 			} else if (outcome.kind === 'failure') {
 				// Tool output is not a provider SDK channel. A command that prints
@@ -1535,7 +1553,11 @@ export function createGuardrailsHooks(
 					input.sessionID,
 					'general_permanent',
 					outcome.signal,
-					{ tool: input.tool, args: input.args },
+					{
+						tool: input.tool,
+						args: circuitArgs,
+						armAttempt: correlatedExecution !== undefined,
+					},
 				);
 			}
 

@@ -297,10 +297,10 @@ describe('telemetry-guardrails-wiring', () => {
 		});
 	});
 
-	describe('guardrails toolAfter triggers modelFallback telemetry', () => {
-		test('toolAfter with null output and transient error string triggers modelFallback', async () => {
-			// Test that when output.output is null AND error string matches pattern,
-			// modelFallback is triggered
+	describe('guardrails toolAfter preserves model fallback authority', () => {
+		test('toolAfter with null output and transient-looking error string does not trigger modelFallback', async () => {
+			// Tool output is not a structured provider failure channel. A command
+			// printing a quota-like string must not grant model fallback authority.
 			const received: Array<{ event: string; data: Record<string, unknown> }> =
 				[];
 			addTelemetryListener((event, data) => received.push({ event, data }));
@@ -335,10 +335,9 @@ describe('telemetry-guardrails-wiring', () => {
 				} as any,
 			);
 
-			// modelFallback should be emitted
+			// modelFallback must remain reserved for structured provider failures.
 			const found = received.find((r) => r.event === 'model_fallback');
-			expect(found).toBeDefined();
-			expect(found!.data.sessionId).toBe(sessionId);
+			expect(found).toBeUndefined();
 		});
 	});
 

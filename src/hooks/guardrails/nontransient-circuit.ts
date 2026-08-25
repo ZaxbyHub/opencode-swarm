@@ -233,6 +233,13 @@ function currentOwner(sessionID: string): {
 type ActionContext = {
 	tool: string;
 	args?: unknown;
+	/**
+	 * A synchronous failure can occur after toolBefore armed an attempt but before
+	 * the host can return its result. Re-arm that exact attempt only at this
+	 * trusted call site; toolAfter results must remain unable to revive a stale
+	 * generation.
+	 */
+	armAttempt?: boolean;
 };
 
 const RECOVERY_READ_ONLY_TOOLS = new Set(['read', 'grep', 'glob', 'ls']);
@@ -356,6 +363,13 @@ export function recordNonTransientFailure(
 	const threshold = IMMEDIATE_HARD_STOP_CATEGORIES.has(category)
 		? 1
 		: SAME_CATEGORY_HARD_STOP_THRESHOLD;
+	if (context?.armAttempt === true) {
+		armActionCircuitAttempt(
+			sessionID,
+			actionIdentity.ownerInvocationId,
+			actionIdentity.actionDigest,
+		);
+	}
 	const { entry, enteredHardStop, ignoredLateEvent } = noteActionCircuitFailure(
 		{
 			sessionID,

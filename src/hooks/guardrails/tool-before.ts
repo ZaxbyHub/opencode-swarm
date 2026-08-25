@@ -1363,7 +1363,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				sessionID,
 				'sandbox_wrapper_failure',
 				message,
-				{ tool, args: { command: rawCommand } },
+				{ tool, args: { command: rawCommand }, armAttempt: true },
 			);
 			if (circuit?.hardStop) {
 				throw new Error(nonTransientHardStopMessage(circuit));

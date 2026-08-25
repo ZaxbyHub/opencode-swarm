@@ -70,8 +70,7 @@ describe('tool failure classification', () => {
 		const record = classifyToolInvocationFailure({
 			tool: 'bash',
 			args: { command: 'broken' },
-			output: 'wrapper returned a parse failure',
-			error: 'ParserError: MissingEndCurlyBrace',
+			output: 'ParserError: MissingEndCurlyBrace',
 			metadata: { exit: 1 },
 			correlation: {
 				originalCommand: 'broken',
