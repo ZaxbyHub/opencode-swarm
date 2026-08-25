@@ -1914,12 +1914,7 @@ mix the two):
 /swarm pr-feedback <PR_URL> continue from <handoff_artifact_path>
 ```
 
-Writing the validated handoff also durably records the one consent offer bound
-to the exact workflow instance, handoff digest, PR head, PR URL, and actionable
-finding set. The user's first exact continuation command confirms that offer
-and transitions modes. Internal handoff creation never auto-routes, malformed
-or non-actionable records never create an offer, and a detached handoff without
-the durable offer cannot start PR_FEEDBACK.
+Writing the validated handoff durably records one consent offer bound to the exact workflow instance, handoff digest, PR head/URL, and actionable finding set; the first exact continuation confirms it and transitions modes. Internal creation never auto-routes, and malformed, non-actionable, or detached records cannot start PR_FEEDBACK.
 
 ---
 
@@ -2025,6 +2020,3 @@ that is still recoverable, merely expensive, or inconvenient.
 On Profiles B/C there is no durable gate or auto-resume loop to clear: if the
 head bind is genuinely unreachable or bounded lane recovery is exhausted,
 report the blocker to the user and stop.
-
-For the Profile A run-id reservation and verdict-row codec contract, read
-`references/findings-persistence-contract.md`.
