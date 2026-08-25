@@ -3,7 +3,7 @@
 Companion to `docs/evidence-and-telemetry.md` (evidence bundles + the legacy
 telemetry stream from a user's point of view) and `docs/engineering-invariants.md`
 (the invariant this PR establishes). This document is the contract definition for
-`src/observability/`: the canonical event envelope, the 46-entry event catalog,
+`src/observability/`: the canonical event envelope, the 47-entry event catalog,
 the legacy adapter, sampling/cardinality rules, the OTel mapping pin, and the
 exhaustive producer/consumer matrix across all seventeen known observability
 stores in the repository.
@@ -16,7 +16,7 @@ Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
 
 **What this PR defines.** A single canonical `ObservabilityEvent` envelope
 (`src/observability/envelope.ts`), a discriminated catalog of every event kind
-the codebase emits today (`src/observability/catalog.ts`, 46 entries), a
+the codebase emits today (`src/observability/catalog.ts`, 47 entries), a
 relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. It wires the envelope into the one live production
@@ -182,9 +182,9 @@ those inputs before this change.
 
 ---
 
-## 5. The 46-entry catalog
+## 5. The 47-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 46 entries = the 38 pre-existing members of
+Source: `src/observability/catalog.ts`. Exactly 47 entries = the 38 pre-existing members of
 `TelemetryEvent` (`src/telemetry.ts:15-109`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
@@ -196,7 +196,9 @@ mutation audit emitted when context-budget masking and/or pruning changes a
 session transcript) plus `residue_health` (issue #2035 — the counts-only
 atomic-write residue quarantine health aggregate) plus `context_telemetry_health`
 (issue #2037 — the counts-only bounded storage health aggregate for the
-`.swarm/context-telemetry.jsonl` store).
+`.swarm/context-telemetry.jsonl` store) plus `skill_usage_health` (issue #2038 —
+the counts-only bounded storage health aggregate for the
+`.swarm/skill-usage.jsonl` store and its authoritative pending sidecar).
 
 Legend: **Owner** is `futureOwnerIssue` when `consumers` is empty (permitted
 only together with an owner — an empty consumer list with no owner is a CI
@@ -582,6 +584,28 @@ the authoritative record, and this event only reports the aggregate so later
 reporting (PR 16/19) can surface retention pressure without leaking capsule
 contents or workspace layout.
 
+#### skill_usage_health
+Category `lifecycle`, severity `notice`, privacy `operational`. Producer
+`src/telemetry.ts:975` (`skillUsageHealth`, called for the `.swarm/skill-usage.jsonl`
+store during compaction, migration, consumption, and pressure events; issue
+#2038). Consumers: none — owner **#2047**. Retention: **#2047**. No workflow
+ID is required: skill-usage tracking is aggregate-only and not correlated to a
+single session or task. The payload is strictly bounded counts and figures —
+`trigger` (`compaction`/`migration`/`consumption`/`pressure`), `accepted`,
+`compacted`, `dropped`, `skills_dropped`, `corrupt`, `pending_retained`,
+`uncertain_retained`, `uncertain_expired`, `pending_evicted`,
+`no_source_knowledge`,
+`no_matching_knowledge`, `bump_retry`, `bump_unrecoverable`,
+`bump_applied_zero`, `pressure`, `curator_skipped`, `bytes`, `limit_bytes`,
+`oldest_timestamp`, `newest_timestamp`, and `coverage`. No skill path, skill
+ID, or filesystem path is ever emitted (path redaction by omission) — the
+adversarial case is thousands of distinct skill IDs, so a per-skill label
+would be an unbounded label set, and this payload is deliberately
+aggregate-only. The authoritative record of what was compacted, migrated, or
+dropped is `.swarm/skill-usage.jsonl` itself; this event only reports the
+health aggregate so later reporting (PR 16/19) can surface skill-usage
+pressure without leaking per-skill identifiers.
+
 ---
 
 ## 6. The exhaustive producer/consumer matrix (17 rows)
@@ -598,7 +622,7 @@ contents or workspace layout.
 
 **Every row carries a `file:line` citation, but those citations are
 UNGATED and go stale on any rebase that shifts a cited file.**
-`scripts/check-event-contract.ts` mechanically validates the 46-entry
+`scripts/check-event-contract.ts` mechanically validates the 47-entry
 *catalog* in §5 (catalog ↔ `TelemetryEvent` union parity, per-entry
 completeness) — it does not and cannot check this prose matrix. Treat a
 citation here as "verified as of `origin/main` `0060f48d`", not as a standing
@@ -628,7 +652,7 @@ row 17 records the authoritative knowledge-receipt partition added by #2031.
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | 1 | `.swarm/telemetry.jsonl` (+`.1`) | `src/telemetry.ts:299` (the `stream.write(line, …)` call) | `src/services/cost-accounting.ts:133` (`readTelemetryEvents`) → `summarizeTelemetryCosts:124` → `/swarm costs`; `src/evaluation/gate-stats.ts:99`; in-process `addTelemetryListener` heartbeat (`src/telemetry.ts:146-163`) → `/swarm status` | `event` | ISO string | none | `sessionId`, `taskId`, `agentName`, `gate` | no trace/span id, no delegation id linking begin↔end; `gate_parse_error` has no `sessionId` (`gateParseError` emit payload, `src/telemetry.ts:457-461`) | yes — `close.ts:270-297` | operational | #2045 (lifecycle/terminals), #2043 (cost provenance) |
 | 2 | `.swarm/context-telemetry.jsonl` | `src/context-map/telemetry.ts:704` `recordTelemetry` (writes the store under the exclusive lock; compaction/atomic-rewrite at `compactStore:918` / `atomicReplace:492`) | `src/context-map/telemetry.ts:793` `getTelemetrySummary` → `src/commands/context-map-stats.ts:16` (sole non-test consumer, verified) | none (uniform shape) | ISO string | **2** (manifest header, issue #2037) | `task_id` only | `session_id`, agent identity beyond a free-text `agent_role` | **no** | operational | **#2037** |
-| 3 | `.swarm/skill-usage.jsonl` | `src/hooks/skill-usage-log.ts:233` | `readSkillUsageEntries:321`, `readSkillUsageEntriesTail:389`, `applySkillUsageFeedback:760` → `bumpKnowledgeConfidenceBatch` | `type` (marker variant only) | ISO string | none (`skillVersion` versions the *skill*, not the record) | `sessionID`, `agentName`, `taskID`, `skillPath` | no trace/span | **no** | derived | **#2038** |
+| 3 | `.swarm/skill-usage.jsonl` (+ `.swarm/skill-usage-pending.json`) | `src/hooks/skill-usage-log.ts:535` | `readSkillUsageEntries:770`, `readSkillUsageEntriesTail:808`, `applySkillUsageFeedback:2060` → `bumpKnowledgeConfidenceBatchResult` | `type` (legacy marker variant only; acks now live in the sidecar) | ISO string | `version` on the sidecar document (`skillVersion` versions the *skill*, not the record) | `sessionID`, `agentName`, `taskID`, `skillPath` | no trace/span | `skill_usage_health` (counts-only) | derived (stream) / authoritative (sidecar) | **#2038 — closed** |
 | 4 | `.swarm/events.jsonl` | ~30 call sites | `src/services/context-budget-service.ts:195` (line-count proxy for turn count — does NOT parse JSON); `src/hooks/curator.ts:1524` | **`event` OR `type`** (split across writers: `src/context/role-filter.ts:147`/`src/tools/phase-complete.ts:1571` use `event:`; `src/hooks/curator.ts:1759`/`src/hooks/full-auto-intercept.ts:269` use `type:`) | ISO string | none | inconsistent per writer | `sessionID` absent on `phase_complete`, `auto_oversight`, `context_filtered` | yes — `close.ts:275` | operational | **#2039** |
 | 5 | `<knowledgeStore>/knowledge-events.jsonl` | `src/hooks/knowledge-events.ts` | `curator-postmortem.ts`, `knowledge-escalator.ts` (display-only escalation history), `knowledge-diagnostics.ts`, `learning-metrics.ts`; **no correctness reader** | `type` | ISO string | `schema_version` = 1 | `event_id`, `trace_id`, `session_id`, `task_id`, `phase`, `agent` | not authoritative; rows may be evicted and source values remain #2032-owned | follows the linked knowledge store; bounded FIFO | operational | #2032 (outcome/source normalization) |
 | 6 | `<knowledgeStore>/knowledge-application.jsonl` (legacy v2) | `src/hooks/knowledge-application.ts` | compatibility/diagnostic consumers only; gates consume row 17 | none | ISO string | none | `sessionId?`, `taskId?`, `phase?`, `knowledgeId` | `event_id`, `trace_id`; lossy — `n_a` is stored as `acknowledged` | via knowledge store | derived | #2032 |

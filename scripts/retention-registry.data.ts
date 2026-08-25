@@ -76,6 +76,28 @@ export interface RetentionRow {
 		/** Human-readable bound statement (constants + values). */
 		bound: string;
 		scope: LimitScope;
+		/**
+		 * What makes the KEYSPACE finite, with a path:line citation.
+		 *
+		 * Issue #2038 recurrence guardrail. A `scope: 'per-key'` cap bounds each
+		 * KEY's history, not the STORE: steady-state size is
+		 * O(distinct-keys x per-key-cap), so the row is bounded only if the set
+		 * of keys is itself finite. In #2038 the key was `skillPath` and a
+		 * 500-entry-per-skill prune was mistaken for a global bound while the
+		 * set of skill paths was unbounded.
+		 *
+		 * A keyspace is finite iff EITHER the key domain is a closed set (an
+		 * enum/union, or an index bounded by a max-concurrency constant) OR
+		 * something deletes keys on a GLOBAL trigger. A per-key cap is never an
+		 * answer to this field — it is the thing this field exists to qualify.
+		 *
+		 * Optional on the type because it is meaningless for
+		 * global/per-trigger/session-scoped/none rows; `check-retention-registry.ts`
+		 * REQUIRES it for per-key rows whose disposition is not fix-in-issue, and
+		 * rejects a value that declares the keyspace unbounded (such a row is the
+		 * #2038 defect class and must be fix-in-issue, not bounded-by-design).
+		 */
+		keyspaceBound?: string;
 		citation: string;
 	};
 	readBound: {
@@ -261,36 +283,87 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/hooks/skill-usage-log.ts'],
 		writerCitations: [
-			'src/hooks/skill-usage-log.ts:233 appendSkillUsageEntry — appendFileSync :292',
-			'src/hooks/skill-usage-log.ts:205 appendFeedbackAppliedMarker — appendFileSync :220',
+			'src/hooks/skill-usage-log.ts:535 appendSkillUsageEntry — appendFileSync :624-628; enqueues into the sidecar FIRST (:614-621) before the JSONL append',
+			'src/hooks/skill-usage-log.ts:1556 pruneSkillUsageLog — atomic temp+rename rewrite :1697-1703, applies applyRetention (:1014) and the marker-drop rewrite',
+			'src/hooks/skill-usage-log.ts:326 appendFeedbackAppliedMarker — appendFileSync :341 (legacy pre-migration acknowledgment writer, retained for round-trip)',
 		],
 		readerCitations: [
-			'src/hooks/skill-usage-log.ts:321 readSkillUsageEntries — FULL-FILE :331, sync',
-			'src/hooks/skill-usage-log.ts:186 readFeedbackAppliedEntryIds — FULL-FILE :190, sync',
-			'src/hooks/skill-usage-log.ts:760 applySkillUsageFeedback — FULL-FILE (both above), async',
-			'src/hooks/skill-usage-log.ts:389 readSkillUsageEntriesTail — TAIL 64 KiB (TAIL_BYTES_DEFAULT :373), sync',
+			'src/hooks/skill-usage-log.ts:770 readSkillUsageEntries — bounded via readLogSlice :651-691, readMaxBytes=1,677,722 B, sync',
+			'src/hooks/skill-usage-log.ts:745 readSkillUsageEntriesWithCoverage — same bound, additionally reports SkillUsageReadCoverage (truncatedRead + sidecar manifest coverage), sync',
+			"src/hooks/skill-usage-log.ts:302 parseFeedbackMarker — parses feedback_applied markers during the migration's streaming acknowledgment pass (migrateLegacyLog pass 2, :1352-1371); legacy pre-migration reader only, sync",
+			'src/hooks/skill-usage-log.ts:2060 applySkillUsageFeedback — reads the AUTHORITATIVE sidecar queue only (never the JSONL), async',
+			'src/hooks/skill-usage-log.ts:808 readSkillUsageEntriesTail — TAIL 64 KiB (TAIL_BYTES_DEFAULT :782), sync',
 			'src/services/session-reflection.ts:511 gatherSkillViolations — via tail reader',
 		],
 		schemaVersion: 'none on records (skillVersion versions the skill, not the record)',
 		stateClass: 'derived-rebuildable',
 		privacyClass: 'metadata',
 		writeLimits: {
-			bound: 'prune trigger 1 MiB (SKILL_USAGE_LOG_ROTATE_BYTES :375) with PER-SKILL 500-entry FIFO (:376) — NO hard global ceiling across skills/markers',
-			scope: 'per-key',
-			citation: 'src/hooks/skill-usage-log.ts:375-376',
+			bound: 'HARD GLOBAL ceiling across all skills and marker types (issue #2038): maxEntries=5,000 / maxBytes=1.5 MiB / maxAgeMs=90d, with a per-skill floorPerSkill=20 guaranteed retained window; enforced by applyRetention (skill-usage-log.ts:1014-1103) on every compaction pass',
+			scope: 'global',
+			citation: 'src/hooks/skill-usage-pending.ts:85-101 SKILL_USAGE_LIMITS',
 		},
-		readBound: { pattern: 'mixed full-file + tail', bound: 'full-file readers unbounded in file size; tail reader 64 KiB', sync: true, citation: 'src/hooks/skill-usage-log.ts:331,373-374' },
-		lockModel: 'none — synchronous I/O; prune via temp+rename (:614-615)',
-		crashBehavior: 'torn tail skipped (:338,:424); prune atomic, temp zeroed on failure (:619-625)',
+		readBound: {
+			pattern: 'mixed full-file + tail',
+			bound: 'bounded — full readers capped at readMaxBytes=1,677,722 B (~1.6 MiB) via readLogSlice, which reports truncatedRead when a legacy oversized file is only partially read; tail reader 64 KiB (TAIL_BYTES_DEFAULT)',
+			sync: true,
+			citation: 'src/hooks/skill-usage-log.ts:651-691 readLogSlice; :782 TAIL_BYTES_DEFAULT',
+		},
+		lockModel: 'single shared .swarm/skill-usage.lock (openSync wx-create, stale-broken after SKILL_USAGE_LOCK_STALE_MS=5min); guards the sidecar and every migration/compaction touch of the JSONL; the enqueue path is exempt from skip-not-force and retries up to 5x/10ms, throwing (and aborting the append) on failure',
+		crashBehavior: 'malformed JSONL lines skipped by JSON.parse try/catch (parseEntriesFromText :693-706); an overlong unassemblable line in the streaming reader is dropped and counted, not buffered without bound (streamLogLines :359-393); prune/compaction rewrite is atomic temp+rename (pruneSkillUsageLog :1556, rewrite :1697-1703); sidecar save is atomic temp+rename (savePendingDocument :795 -> savePendingDocumentAt, skill-usage-pending.ts:803-853, writeFileSync :820 + renameSync :821)',
 		closePolicy: 'untouched — persists across sessions',
 		resetPolicy: 'not reset',
-		legacyCompatibility: 'normalizeComplianceVerdict maps legacy violation→violated (:96); legacySkillUsageId for pre-id entries (:139)',
-		healthSignal: 'none',
-		owner: '#2038',
+		legacyCompatibility: 'normalizeComplianceVerdict maps legacy violation→violated (skill-usage-log.ts:151-153); legacySkillUsageId mints a deterministic content-hash id for pre-id entries (:270-281); one-time migrateLegacyLog (:1271-1402) folds legacy actionable entries minus any feedback_applied-acknowledged ids into the sidecar; the whole migration runs on a staged copy that is published to the in-memory document only after savePendingDocument returns (stagePendingDocument :1189-1201 / adoptStagedDocument :1204-1213), so a failed sidecar write leaves the JSONL marker lines intact instead of dropping them ahead of a queue that was never written',
+		healthSignal: 'skill_usage_health — counts-only (accepted/compacted/dropped/skills_dropped/corrupt/pending_retained/uncertain_retained/uncertain_expired/pending_evicted/no_source_knowledge/no_matching_knowledge/bump_retry/bump_unrecoverable/bump_applied_zero/pressure/curator_skipped/bytes/limit_bytes/oldest_timestamp/newest_timestamp/coverage), emitted on compaction/migration/consumption/pressure',
+		owner: '#2038 (implemented)',
 		disposition: {
-			kind: 'fix-in-issue',
-			issue: 2038,
-			note: 'PR 10 owns the hard global byte/age/count ceiling across all skills and marker types plus bounded deterministic readers (issue #2038 Required 1-4).',
+			kind: 'retain-by-design',
+			citation:
+				'Issue #2038 landed a hard global byte/age/count bound (SKILL_USAGE_LIMITS: maxEntries=5,000/maxBytes=1.5MiB/maxAgeMs=90d/floorPerSkill=20, src/hooks/skill-usage-pending.ts:85-101) enforced by applyRetention (src/hooks/skill-usage-log.ts:1014-1103), a bounded deterministic full reader (readLogSlice, :651-691, readMaxBytes=1,677,722 B) that reports truncatedRead rather than silently degrading, a shared stale-breakable lock (.swarm/skill-usage.lock, stale window SKILL_USAGE_LOCK_STALE_MS skill-usage-pending.ts:109), atomic temp+rename writes on both the JSONL compaction path (:1697-1703) and the new authoritative sidecar (skill-usage-pending.ts:803-853), and the skill_usage_health counts-only observability signal (skill-usage-pending.ts:1350-1385). The correctness gap the bound creates — an evicted-from-JSONL actionable verdict losing its feedback signal — is closed by enqueueSkillUsageFeedback (skill-usage-pending.ts:1170-1195), called BEFORE the JSONL append (skill-usage-log.ts:614-621) so eviction from the operational stream can never lose an un-consumed compliant/violated verdict; see the new skill-usage-pending row for that authoritative store\'s own bound. Enforcement is covered by tests/unit/hooks/skill-usage-bounds.test.ts (global ceiling, retention order, corrupt-line durability, migration) and tests/unit/hooks/skill-usage-pending.test.ts (queue budgets, terminal outcomes, quarantine), alongside tests/unit/hooks/skill-usage-log.test.ts and skill-usage-feedback.test.ts.',
+		},
+	},
+	{
+		id: 'skill-usage-pending',
+		category: 1,
+		pathGrammar: '.swarm/skill-usage-pending.json',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/hooks/skill-usage-pending.ts'],
+		writerCitations: [
+			'src/hooks/skill-usage-pending.ts:795 savePendingDocument — delegates to savePendingDocumentAt :803, writeFileSync tmp :820, renameSync :821 (atomic replace)',
+			'src/hooks/skill-usage-pending.ts:1170 enqueueSkillUsageFeedback — under the lock, merges + bounds + saves (:1189-1191); the ONLY path exempt from skip-not-force (throws on lock failure)',
+		],
+		readerCitations: [
+			'src/hooks/skill-usage-pending.ts:728 loadPendingDocument — via loadPendingDocumentAt :739, bounded by readMaxBytes=1,677,722 B (:757); oversized/corrupt documents are quarantined, never silently reset to empty (:781)',
+			'src/hooks/skill-usage-pending.ts:863 readPendingManifest — cheap manifest-only read, statSync-mtime-keyed cache (:883-888), no records array materialized',
+			'src/hooks/skill-usage-log.ts:745 readSkillUsageEntriesWithCoverage — folds readPendingManifest coverage into the JSONL read window',
+			'src/hooks/skill-usage-log.ts:2060 applySkillUsageFeedback — sole consumer of the records array (via claimFeedbackRecords :1864-1901), computes compliant/violated deltas from queue records only, never from JSONL entries',
+		],
+		schemaVersion: '1 (SKILL_USAGE_LIMITS.version, skill-usage-pending.ts:86)',
+		stateClass: 'authoritative',
+		privacyClass: 'metadata',
+		writeLimits: {
+			bound: 'queueMaxRecords=5,000 / queueMaxBytes=512 KiB / maxAgeMs=90d (shared with the JSONL age budget) / maxAttempts=5 transient-retry ceiling, enforced by enforceQueueBounds on every enqueue, migration, and consumption pass',
+			scope: 'global',
+			citation: 'src/hooks/skill-usage-pending.ts:85-101 SKILL_USAGE_LIMITS',
+		},
+		readBound: {
+			pattern: 'indexed',
+			bound: 'single JSON document bounded at readMaxBytes=1,677,722 B (~1.6 MiB); oversized reads are quarantined (renamed aside) and counted, never truncated in place',
+			sync: true,
+			citation:
+				'src/hooks/skill-usage-pending.ts:728 loadPendingDocument, via loadPendingDocumentAt :739-789',
+		},
+		lockModel: 'single shared .swarm/skill-usage.lock (openSync wx-create, stale-broken after SKILL_USAGE_LOCK_STALE_MS=5min, skill-usage-pending.ts:109); enqueue is exempt from skip-not-force (acquireSkillUsageLockOrThrow :534-546, 5 attempts/10ms, throws and aborts the caller\'s append on failure); maintenance/consumption skip on lock failure, never force',
+		crashBehavior: 'atomic temp+rename replace (savePendingDocument :795 -> savePendingDocumentAt :803-853, writeFileSync :820 + renameSync :821); a corrupt or oversized document is quarantined (renamed to a timestamped .corrupt- file) rather than silently discarded (quarantinePendingDocument :699-718, invoked from loadPendingDocumentAt :781); an in_flight record whose claim outlives the lock stale-break window is resolved to uncertain — survives, stays visible, never replayed (resolveStaleInFlight :1206-1228)',
+		closePolicy: 'untouched — persists across sessions (same lifecycle as .swarm/skill-usage.jsonl, which it backs)',
+		resetPolicy: 'not reset',
+		legacyCompatibility: 'migrated: false on a fresh/absent document signals the one-time legacy migration has not run; migrateLegacyLog (skill-usage-log.ts:1271-1402) folds pre-existing JSONL actionable entries (minus feedback_applied-acknowledged ids) into this store on first lock-taking touch, then sets migrated: true',
+		healthSignal: 'skill_usage_health — same counts-only payload as the skill-usage row (buildSkillUsageHealthPayload, skill-usage-pending.ts:1350-1385), emitted via emitSkillUsageHealth (:1388-1401)',
+		owner: '#2038 (implemented)',
+		disposition: {
+			kind: 'retain-by-design',
+			citation:
+				'This store is deliberately AUTHORITATIVE, not derived-rebuildable: it is the sole durable record of which actionable (compliant/violated) skill-usage verdicts have not yet been folded into knowledge confidence via bumpKnowledgeConfidenceBatchResult (src/hooks/knowledge-store.ts:1293), driven by applySkillUsageFeedback (src/hooks/skill-usage-log.ts:2060-2163). Nothing else on disk records that fact once an entry is evicted from the bounded JSONL operational stream (issue #2038 requirement: eviction from skill-usage.jsonl must lose no correctness signal). It carries its own hard global bound (queueMaxRecords=5,000/queueMaxBytes=512KiB, src/hooks/skill-usage-pending.ts:85-101) enforced by enforceQueueBounds (:1023-1080, oldest-uncertain-first eviction; an actionable record evicted by the budget is counted as pending_evicted + pressure rather than dropped, a deliberate divergence from approved plan section 4 recorded in evictionRank docblock :980-1012 — every discard counted via the durable counters, never silent), atomic temp+rename writes (savePendingDocument :795 via savePendingDocumentAt :803-853), a shared stale-breakable lock, and the skill_usage_health signal. Enforcement is covered by tests/unit/hooks/skill-usage-pending.test.ts and tests/unit/hooks/skill-usage-bounds.test.ts.',
 		},
 	},
 
@@ -443,6 +516,8 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writeLimits: {
 			bound: 'MAX_PR_FEEDBACK_MONITOR_EVENTS 20 per queue (:14); MAX_QUEUE_BYTES 512 KiB per file (:15); in-memory cache MAX_TRACKED_SESSIONS 200 FIFO (:16)',
 			scope: 'per-key',
+			keyspaceBound:
+				'NOT FINITE — a second newly discovered live instance of the issue #2038 class, found by applying this rule to the existing registry; recorded here as the evidence behind this row\'s fix-in-issue disposition. One file per distinct sessionID, keyed by prWorkflowSessionFileStem(sessionID) — a slug plus a sha256 digest (src/hooks/pr-workflow-gate.ts:13204-13213). All three bounds this row cites are per-key or in-memory: 20 events per queue and 512 KiB per file bound ONE queue, and MAX_TRACKED_SESSIONS=200 (src/background/pr-feedback-event-queue.ts:16) evicts from the in-process Map trackedQueuesByProjectSession (declared :73, eviction :599-602) — it deletes no file on disk. No path removes a queue file: the module\'s only fsp.rm calls target the lock (src/background/pr-feedback-event-queue.ts:377,423), and claimPrFeedbackMonitorEvents stamps events with claimedWorkflowInstanceId and rewrites the record rather than removing them (:124-197), so even a fully drained queue persists at full size. The directory appears in no close or reset list. Disk growth is therefore unbounded at one 512 KiB-capped file per session ever run.',
 			citation: 'src/background/pr-feedback-event-queue.ts:14-19',
 		},
 		readBound: { pattern: 'indexed', bound: '≤512 KiB hard read bound', sync: false, citation: 'src/background/pr-feedback-event-queue.ts:440-470' },
@@ -452,10 +527,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'QueueRecordSchema rejects non-matching shapes',
 		healthSignal: 'lock reclamation counters',
-		owner: 'this-gate',
+		owner: '#2309',
 		disposition: {
-			kind: 'not-a-defect',
-			proof: 'Already bounded: 20 events/queue, 512 KiB/file hard bound, 200-session in-memory FIFO (src/background/pr-feedback-event-queue.ts:14-19) — the issue-directed source citation for retain/not-defect ("PR-feedback queues already have count/byte/session bounds").',
+			kind: 'fix-in-issue',
+			issue: 2309,
+			note: 'RECLASSIFIED from not-a-defect by the issue #2038 keyspace guardrail. The previous proof read "Already bounded: 20 events/queue, 512 KiB/file hard bound, 200-session in-memory FIFO" — every one of those bounds is per-key or in-memory, and none of them bounds the number of queue FILES. See writeLimits.keyspaceBound on this row for the source evidence: the 200-session FIFO evicts from an in-process Map (src/background/pr-feedback-event-queue.ts:73,599-602) and unlinks nothing, claiming an event rewrites the record in place rather than removing it (:124-197), and the directory is in no close or reset list. This is the same shape #2309 already owns for skill-changelogs (per-key cap, no bound on the key population), which is why it is filed here rather than under a new issue.',
 		},
 	},
 	{
@@ -625,6 +701,8 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writeLimits: {
 			bound: 'max_lines default 500 PER-FILE enforced at write time; truncation keeps newest 250 (:114-133, default at :466)',
 			scope: 'per-key',
+			keyspaceBound:
+				'FINITE BY REAPER, not by key domain: one key per taskId directory, and taskId is only shape-validated (src/validation/task-id.ts:69-114 admits any /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/ id, explicitly beyond plan task numbers), so the key domain is open. What bounds it is a GLOBAL deleter: ACTIVE_STATE_DIRS_TO_CLEAN contains "evidence" (src/commands/close.ts:574-583) and the close clean loop runs fs.rm(dirPath, {recursive: true}) over the whole .swarm/evidence/ tree (src/commands/close.ts:1761-1773), dropping every key in one pass on a single session-lifecycle trigger. CAVEAT (verified, do not soften): the trigger is lifecycle-driven rather than size-driven and is archive-first-gated (src/commands/close.ts:1762-1765 skips the delete when the directory was not archived), and neither /swarm reset nor /swarm reset-session touches this tree — so a session that never closes accumulates one directory per distinct taskId.',
 			citation: 'src/hooks/trajectory-logger.ts:114-133,466,558',
 		},
 		readBound: { pattern: 'full-file', bound: '≤500 lines per file by write-side truncation', sync: false, citation: 'src/hooks/trajectory-logger.ts:558 + micro-reflector.ts:262' },
@@ -734,7 +812,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		schemaVersion: 'markdown report (legacy + structured action formats parsed :249,:400)',
 		stateClass: 'governed-content',
 		privacyClass: 'content',
-		writeLimits: { bound: 'one bounded-input report per plan (inputs capped :38-43); idempotent dedup', scope: 'per-key', citation: 'src/hooks/curator-postmortem.ts:38-43,1129-1137' },
+		writeLimits: {
+			bound: 'one bounded-input report per plan (inputs capped :38-43); idempotent dedup',
+			scope: 'per-key',
+			keyspaceBound:
+				'FINITE BY REAPER: one key per planId (.swarm/post-mortem-{planId}.md). The GLOBAL deleter is a directory scan, not a per-plan hook — /swarm close readdirs .swarm/ and matches every /^post-mortem-[^/\\\\]+\\.md$/ name (src/commands/close.ts:1447-1452), copies each into the archive, records it in ctx.archivedActiveStateFiles, and then unlinks each matched artifact from .swarm/ (src/commands/close.ts:1738-1747). Because the sweep is driven by the directory listing rather than by a known set of plan ids, it reclaims keys the writer never told it about. CAVEAT: the unlink runs only for artifacts that archived successfully — src/commands/close.ts:1732-1736 deliberately preserves active state when nothing was archived — and the trigger is session close, so an unclosed session retains one report per plan.',
+			citation: 'src/hooks/curator-postmortem.ts:38-43,1129-1137',
+		},
 		readBound: { pattern: 'full-file', bound: 'single report per plan', sync: true, citation: 'src/hooks/curator-postmortem.ts:819' },
 		lockModel: 'tryAcquireLock non-blocking, skip if held (:836-846,1145-1156)',
 		crashBehavior: 'atomic write; invalid report regenerated next run',
@@ -994,7 +1078,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		schemaVersion: 'workflow WAL states; unrecognized states degrade to null (documented :1048-1052)',
 		stateClass: 'authoritative',
 		privacyClass: 'mixed',
-		writeLimits: { bound: 'retryHistory ≤3 (schema :295); per-task file; evidence/ archived+cleaned at close', scope: 'per-key', citation: 'src/gate-evidence.ts:295; close.ts:568' },
+		writeLimits: {
+			bound: 'retryHistory ≤3 (schema :303); per-task file; evidence/ archived+cleaned at close',
+			scope: 'per-key',
+			keyspaceBound:
+				'FINITE BY REAPER, not by key domain: one key per taskId — a flat .swarm/evidence/{taskId}.json (src/gate-evidence.ts:749 getEvidencePath) whose taskId is only shape-validated (src/validation/task-id.ts:69-114), so the domain is open. The GLOBAL deleter is the same one the task-evidence-trajectory row cites: "evidence" is in ACTIVE_STATE_DIRS_TO_CLEAN (src/commands/close.ts:574-583) and the close clean loop recursively removes the whole tree (src/commands/close.ts:1761-1773), taking every {taskId}.json with it. Note the per-file retryHistory ≤3 cap is NOT the keyspace bound — it caps one key\'s history and says nothing about how many keys exist. CAVEAT: archive-first-gated (src/commands/close.ts:1762-1765) and untouched by /swarm reset and /swarm reset-session, so an unclosed session holds one file per distinct taskId.',
+			citation: 'src/gate-evidence.ts:303; src/commands/close.ts:574 ACTIVE_STATE_DIRS_TO_CLEAN',
+		},
 		readBound: { pattern: 'full-file', bound: 'single per-task JSON', sync: true, citation: 'src/gate-evidence.ts:1054-1089' },
 		lockModel: 'withTaskEvidenceLock (evidence/{taskId}.json key) — proper-lockfile, 60 s timeout, backoff+jitter',
 		crashBehavior: 'atomic write; WAL PREPARED fencing (assertTaskEvidenceWriteAllowed :117)',
@@ -1072,6 +1162,8 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writeLimits: {
 			bound: 'MAX_TASK_GATE_REQUIREMENTS_BYTES 256 KiB per task file (:13, hard-fails OVERSIZED); repaired evidence MAX_TASK_GATE_EVIDENCE_BYTES 256 KiB (:33); quarantine caps 32 files / 12 MiB / 128 entries / 768 KiB per record (:34-37)',
 			scope: 'per-key',
+			keyspaceBound:
+				'Two sub-streams, each finite for a different reason. (1) Requirements files, one key per taskId at .swarm/evidence/task-gate-requirements/{taskId}.jsonl (src/evidence/task-gate-requirements.ts:44) — a true SUBPATH of .swarm/evidence/, so the close-time recursive removal of the whole evidence tree (ACTIVE_STATE_DIRS_TO_CLEAN contains "evidence", src/commands/close.ts:574-583; fs.rm recursive at src/commands/close.ts:1761-1773) is a global deleter over this keyspace too. (2) Quarantine sidecars carry a genuine GLOBAL count cap independent of the close lifecycle: TASK_GATE_EVIDENCE_QUARANTINE_DIR is a single shared directory with NO {taskId} path component (src/evidence/task-gate-repair.ts:29-32), and the admission check opendirs it and sums count/bytes across ALL tasks before admitting a write (src/evidence/task-gate-repair.ts:448-480), so total quarantine files can never exceed 32 / 12 MiB however many taskIds appear. CAVEAT: cap (2) bounds by REFUSAL, not eviction — at the ceiling it throws TASK_GATE_EVIDENCE_QUARANTINE_FULL and admits nothing new rather than making room; and sub-stream (1) inherits the evidence-tree caveat (archive-first-gated, untouched by /swarm reset and /swarm reset-session).',
 			citation: 'src/evidence/task-gate-requirements.ts:13,149-175; src/evidence/task-gate-repair.ts:33-37',
 		},
 		readBound: { pattern: 'line-bounded', bound: 'reads reject files over 256 KiB (typed error)', sync: false, citation: 'src/evidence/task-gate-requirements.ts:149-175' },
@@ -1099,7 +1191,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		schemaVersion: 'baseline schema (truncation-aware)',
 		stateClass: 'governed-content',
 		privacyClass: 'metadata',
-		writeLimits: { bound: 'MAX_BASELINE_FINDINGS 2000 (:37); MAX_BASELINE_BYTES 2 MiB (:40) with truncation :413-433', scope: 'per-key', citation: 'src/tools/sast-baseline.ts:37-40' },
+		writeLimits: {
+			bound: 'MAX_BASELINE_FINDINGS 2000 (:37); MAX_BASELINE_BYTES 2 MiB (:40) with truncation :413-433',
+			scope: 'per-key',
+			keyspaceBound:
+				'FINITE BY REAPER ONLY — the key domain is open. `phase` is a positive integer with no upper limit: the tool schema is z.number().int().min(1) with no .max() (src/tools/sast-scan.ts:914-921, duplicated at src/tools/pre-check-batch.ts:1674-1681), validatePhase rejects only phase < 1 (src/tools/sast-baseline.ts:290-295), and PlanSchema.phases is z.array(PhaseSchema).min(1) with no cap on phase count (src/config/plan-schema.ts:110) — there is no closed phase enum anywhere on this path. What bounds it is the close-time evidence wipe: baselineRelPath resolves through validateSwarmPath (src/tools/sast-baseline.ts:98-99,339) to .swarm/evidence/{phase}/sast-baseline.json, a true subpath of the tree that ACTIVE_STATE_DIRS_TO_CLEAN removes recursively at /swarm close (src/commands/close.ts:574-583,1761-1773). CAVEAT (verified): the taskId-keyed archiveEvidence retention does NOT reach these directories — it looks for evidence/{taskId}/evidence.json and silently skips a phase directory that has none (src/evidence/manager.ts:676-738) — so /swarm close is the ONLY reclaim path here, and one directory accumulates per distinct phase number until it runs.',
+			citation: 'src/tools/sast-baseline.ts:37-40',
+		},
 		readBound: { pattern: 'full-file', bound: '≤2 MiB by write-side cap', sync: true, citation: 'src/tools/sast-baseline.ts:40,553' },
 		lockModel: 'O_EXCL advisory lock with backoff, degrades to no-lock after retries (:43,246-285)',
 		crashBehavior: 'temp+rename; lock released in finally',
@@ -1212,7 +1310,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		schemaVersion: 'EvidenceBundle schema_version; legacy flat retrospective migrated in place (:319-480)',
 		stateClass: 'governed-content',
 		privacyClass: 'content',
-		writeLimits: { bound: '≤100 entries + ≤500 KiB per bundle; retention 30 d / 10 bundles; evidence/ close-scoped', scope: 'per-key', citation: 'src/evidence/manager.ts:261-280; close.ts:1560-1562' },
+		writeLimits: {
+			bound: '≤100 entries + ≤500 KiB per bundle; retention 30 d / 10 bundles; evidence/ close-scoped',
+			scope: 'per-key',
+			keyspaceBound:
+				'FINITE BY A REAL GLOBAL REAPER: one key per taskId bundle directory, and archiveEvidence enumerates the ENTIRE keyspace via listEvidenceTaskIds(directory) and deletes across it (src/evidence/manager.ts:676-738) — the maxAgeDays/maxBundles retention selects victims by comparing every remaining bundle against a global count (src/evidence/manager.ts:719-730), so unlike the ≤100-entry/≤500-KiB per-bundle cap in this row\'s `bound` field, that retention IS a keyspace bound. Belt-and-braces, "evidence" is also in ACTIVE_STATE_DIRS_TO_CLEAN and the whole tree is recursively removed at close (src/commands/close.ts:574-583,1761-1773). CAVEAT: archiveEvidence has exactly two callers — /swarm close (src/commands/close.ts:1622, 30 d / 10 bundles), where the subsequent full-tree removal makes it largely redundant, and the operator-invoked /swarm archive (src/commands/archive.ts:95, 90 d / 1000 bundles). It is not wired to any automatic interval, so mid-session reclamation requires one of those two commands to run.',
+			citation: 'src/evidence/manager.ts:261-280; close.ts:1560-1562',
+		},
 		readBound: { pattern: 'full-file', bound: '≤500 KiB per bundle by write-side enforcement', sync: false, citation: 'src/evidence/manager.ts:275-280,387-416' },
 		lockModel: 'withEvidenceLock per bundle',
 		crashBehavior: 'atomic write + cache invalidation after rename (:308)',
@@ -1290,7 +1394,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		schemaVersion: 'criteria schema (safeId dots→underscores :71-73)',
 		stateClass: 'governed-content',
 		privacyClass: 'content',
-		writeLimits: { bound: 'one criteria file per task; council/ dir close-scoped', scope: 'per-key', citation: 'close.ts:567' },
+		writeLimits: {
+			bound: 'one criteria file per task; council/ dir close-scoped',
+			scope: 'per-key',
+			keyspaceBound:
+				'FINITE BY REAPER, not by key domain: one key per safeId(taskId) flat file under .swarm/council/ (src/council/criteria-store.ts:39,48), and safeId only sanitizes characters for filesystem safety (:71-73) — it constrains the SHAPE of a key, never how many keys exist. The GLOBAL deleter is the close clean loop: "council" is in ACTIVE_STATE_DIRS_TO_CLEAN (src/commands/close.ts:574-583) and the loop recursively removes .swarm/council/ entire (src/commands/close.ts:1761-1773), taking every criteria file (and the sibling round-state/ and attempts/ subtrees) in one pass. CAVEAT: archive-first-gated (src/commands/close.ts:1762-1765); /swarm reset and /swarm reset-session leave council/ alone, so a session that never closes retains one file per distinct taskId passed to declare_council_criteria.',
+			citation: 'close.ts:567',
+		},
 		readBound: { pattern: 'indexed', bound: 'single JSON per task', sync: true, citation: 'src/council/criteria-store.ts:53' },
 		lockModel: 'atomic write (single writer per task)',
 		crashBehavior: 'temp+rename',
@@ -2013,16 +2123,26 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		schemaVersion: 'run record schema (bounded fields :20-22)',
 		stateClass: 'operational',
 		privacyClass: 'metadata',
-		writeLimits: { bound: 'MAX_HISTORY_PER_TEST 20 FIFO per (file,test) key (:19); bounded error/stack/changed-files fields', scope: 'per-key', citation: 'src/test-impact/history-store.ts:19-25' },
-		readBound: { pattern: 'full-file', bound: 'bounded transitively by 20/test cap × test population', sync: true, citation: 'src/test-impact/history-store.ts:19,468-500' },
+		writeLimits: {
+			bound: 'MAX_HISTORY_PER_TEST 20 FIFO per (file,test) key (:19); bounded error/stack/changed-files fields',
+			scope: 'per-key',
+			keyspaceBound:
+				'NOT FINITE — a newly discovered live instance of the issue #2038 class, found by applying this rule to the existing registry; recorded here as the evidence behind this row\'s fix-in-issue disposition. The key is `${testFile.toLowerCase()}|${testName.toLowerCase()}` (src/test-impact/history-store.ts:198). MAX_HISTORY_PER_TEST=20 (src/test-impact/history-store.ts:19) is a PER-KEY FIFO applied at :212 and :339; there is no global entry cap, no byte cap and no age cap. Decisively, the prune rebuilds its map from the records already in the file and re-emits the newest 20 of EVERY key it finds (src/test-impact/history-store.ts:196-214), so a key is never evicted — history for renamed or deleted tests survives indefinitely. Steady-state size is therefore unbounded in time at O(distinct (file,test) identities ever observed x 20), and nothing reclaims it: .swarm/cache/ is in no close or reset list, and readAllRecords is a whole-file readFileSync (src/test-impact/history-store.ts:434-465). The row cites only the per-key FIFO as its not-a-defect proof — precisely the #2038 reasoning error.',
+			citation: 'src/test-impact/history-store.ts:19-25',
+		},
+		readBound: { pattern: 'full-file', bound: 'NOT bounded — this field previously read "bounded transitively by 20/test cap × test population", which is the issue #2038 fallacy stated verbatim: a per-key cap times an open keyspace is not a ceiling. readAllRecords readFileSync-es the whole file with no byte or line limit (:434-465) and both public readers go through it (:468-500)', sync: true, citation: 'src/test-impact/history-store.ts:19,468-500' },
 		lockModel: 'mkdir-based write lock with 60 s stale recovery (:373-432)',
 		crashBehavior: 'atomic temp+rename rewrite',
 		closePolicy: 'untouched (cache/)',
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'n/a',
 		healthSignal: 'n/a',
-		owner: 'this-gate',
-		disposition: { kind: 'not-a-defect', proof: 'Per-key FIFO 20 with locked atomic rewrites (src/test-impact/history-store.ts:19,373-432).' },
+		owner: '#2309',
+		disposition: {
+			kind: 'fix-in-issue',
+			issue: 2309,
+			note: 'RECLASSIFIED from not-a-defect by the issue #2038 keyspace guardrail. The previous proof read "Per-key FIFO 20 with locked atomic rewrites" — a per-key FIFO is exactly the bound #2038 showed is not a store bound, and this row\'s readBound field stated the fallacy outright ("bounded transitively by 20/test cap × test population"). See writeLimits.keyspaceBound on this row for the source evidence: the prune re-emits the newest 20 of every key it finds (src/test-impact/history-store.ts:196-214) so keys for renamed or deleted tests are never evicted, there is no global count/byte/age cap, and .swarm/cache/ is in no close or reset list. Same shape as the skill-changelogs row #2309 already owns.',
+		},
 	},
 	{
 		id: 'impact-map',
@@ -2145,7 +2265,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		schemaVersion: 'env key=value',
 		stateClass: 'operational',
 		privacyClass: 'metadata',
-		writeLimits: { bound: 'one bounded env file per lane per worktree; removed at lane teardown (:219)', scope: 'per-key', citation: 'src/worktree/core.ts:174-230' },
+		writeLimits: {
+			bound: 'one bounded env file per lane per worktree; removed at lane teardown (:219)',
+			scope: 'per-key',
+			keyspaceBound:
+				'FINITE BY CONCURRENCY PLUS TEARDOWN — but NOT by the constant one would reach for: MAX_LANES=8 (src/tools/dispatch-lanes.ts:92) governs the unrelated dispatch_lanes fan-out tool and is not on this path (its only uses are src/tools/dispatch-lanes.ts:471,491,1045,1678). allocateStandardLaneIndex is monotonic per session with no clamp and no recycling (src/hooks/delegation-gate/worktree-isolation.ts:161-164), so the set of index VALUES ever issued grows with dispatch count — that is not the bound. The bound is that each {laneIndex}.env lives INSIDE its own worktree (src/worktree/core.ts:202-203, provisioned per session/task at :674-678): concurrently live worktrees sit under MAX_TRACKED_STANDARD_WORKTREE_CALLS=256 above a max_concurrent_tasks ceiling clamped to <=64 (src/hooks/delegation-gate/worktree-isolation.ts:166-173), each file is unlinked at lane teardown (src/worktree/core.ts:219-238), and re-dispatching the same taskId removes the prior worktree wholesale before recreating it (src/worktree/core.ts:863-892). Crash-orphaned worktrees are swept by a global reaper, runInitOrphanRecovery (src/hooks/init-orphan-recovery.ts:200-224, wired at src/index.ts:914). CAVEAT (verified, do not soften): that sweep runs only at plugin init, is timeout-wrapped and non-fatal (src/hooks/init-orphan-recovery.ts:54; src/index.ts:914-918), and enumerates only the default .swarm-worktrees base (src/hooks/init-orphan-recovery.ts:206-209) — worktrees provisioned under a custom worktree_dir (src/worktree/core.ts:581-582) fall outside its scan root entirely and are reclaimed only by their own teardown path.',
+			citation: 'src/worktree/core.ts:174-230',
+		},
 		readBound: { pattern: 'write-only', bound: 'n/a', sync: false, citation: 'no plugin reader' },
 		lockModel: 'none',
 		crashBehavior: 'write failures swallowed at provisioning (:1013-1017)',

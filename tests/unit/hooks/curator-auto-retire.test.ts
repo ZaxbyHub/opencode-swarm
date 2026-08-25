@@ -32,6 +32,27 @@ function makeMockFn<T extends (...args: any[]) => any>(fn: T) {
 // ---------------------------------------------------------------------------
 import { _internals } from '../../../src/hooks/curator.js';
 
+// #2038: curator reads via `readSkillUsageEntriesWithCoverage`; COMPLETE_COVERAGE
+// marks the window trustworthy so `isSkillWindowTrustworthy` gates only on `curatorMinSample` (10).
+const COMPLETE_COVERAGE = {
+	complete: true,
+	oldestRetained: null,
+	newestRetained: null,
+	entriesDropped: 0,
+	skillsDropped: 0,
+	floorPerSkill: 20,
+	truncatedRead: false,
+};
+function withCoverage(entries: unknown[]) {
+	return { entries, coverage: COMPLETE_COVERAGE };
+}
+function verdicts(skillPath: string, verdict: 'violated' | 'ok', n: number) {
+	return Array.from({ length: n }, () => ({
+		skillPath,
+		complianceVerdict: verdict,
+	}));
+}
+
 // ---------------------------------------------------------------------------
 // Per-test setup/teardown — save and restore _internals references
 // ---------------------------------------------------------------------------
@@ -62,6 +83,30 @@ function makeSkill(slug: string, skillPath: string) {
 }
 
 // ---------------------------------------------------------------------------
+// Helper — build a minimal archived KnowledgeEntry for readKnowledge mocks
+// ---------------------------------------------------------------------------
+function makeArchivedKnowledgeEntry(id: string) {
+	return {
+		id,
+		status: 'archived' as const,
+		lesson: 'l',
+		confidence: 0.5,
+		updated_at: '',
+		created_at: '',
+		tags: [],
+		scope: 'global' as const,
+		category: 'other' as const,
+		retrieval_outcomes: {
+			applied_count: 0,
+			succeeded_after_count: 0,
+			failed_after_count: 0,
+		},
+		schema_version: 1,
+		confirmed_by: [],
+	};
+}
+
+// ---------------------------------------------------------------------------
 // Test suite
 // ---------------------------------------------------------------------------
 describe('autoRetireSkills', () => {
@@ -84,32 +129,25 @@ describe('autoRetireSkills', () => {
 				proposals: [],
 			}),
 		);
-		const mockReadSkillUsageEntries = makeMockFn(() => [
-			{
-				skillPath:
-					'file:/fake/dir/.opencode/skills/generated/high-violation/SKILL.md',
-				complianceVerdict: 'violated' as const,
-			},
-			{
-				skillPath:
-					'/fake/dir/.opencode/skills/generated/high-violation/SKILL.md',
-				complianceVerdict: 'violated' as const,
-			},
-			{
-				skillPath:
-					'/fake/dir/.opencode/skills/generated/high-violation/SKILL.md',
-				complianceVerdict: 'violated' as const,
-			},
-			{
-				skillPath:
-					'/fake/dir/.opencode/skills/generated/high-violation/SKILL.md',
-				complianceVerdict: 'ok' as const,
-			},
-		]);
+		// #2038: curatorMinSample=10 gates the decision; 4/10 violated (40%) > 30%.
+		const skillPath =
+			'/fake/dir/.opencode/skills/generated/high-violation/SKILL.md';
+		const mockReadSkillUsageEntriesWithCoverage = makeMockFn(() =>
+			withCoverage([
+				{
+					skillPath: `file:${skillPath}`,
+					complianceVerdict: 'violated' as const,
+				},
+				...verdicts(skillPath, 'violated', 3),
+				...verdicts(skillPath, 'ok', 6),
+			]),
+		);
 
 		_internals.listSkills = mockListSkills;
-		_internals.readSkillUsageEntries = mockReadSkillUsageEntries;
+		_internals.readSkillUsageEntriesWithCoverage =
+			mockReadSkillUsageEntriesWithCoverage as any;
 		_internals.retireSkill = mockRetireSkill;
+		_internals.recordCuratorSkips = () => {}; // avoid real lock I/O against '/fake/dir'
 		_internals.parseDraftFrontmatter = makeMockFn(() => ({
 			sourceKnowledgeIds: [],
 		}));
@@ -151,22 +189,21 @@ describe('autoRetireSkills', () => {
 				proposals: [],
 			}),
 		);
-		const mockReadSkillUsageEntries = makeMockFn(() => [
-			{
-				skillPath:
+		const mockReadSkillUsageEntriesWithCoverage = makeMockFn(() =>
+			withCoverage(
+				verdicts(
 					'/fake/dir/.opencode/skills/generated/healthy-skill/SKILL.md',
-				complianceVerdict: 'ok' as const,
-			},
-			{
-				skillPath:
-					'/fake/dir/.opencode/skills/generated/healthy-skill/SKILL.md',
-				complianceVerdict: 'ok' as const,
-			},
-		]);
+					'ok',
+					2,
+				),
+			),
+		);
 
 		_internals.listSkills = mockListSkills;
-		_internals.readSkillUsageEntries = mockReadSkillUsageEntries;
+		_internals.readSkillUsageEntriesWithCoverage =
+			mockReadSkillUsageEntriesWithCoverage as any;
 		_internals.retireSkill = mockRetireSkill;
+		_internals.recordCuratorSkips = () => {}; // avoid real lock I/O against '/fake/dir'
 		_internals.parseDraftFrontmatter = makeMockFn(() => ({
 			sourceKnowledgeIds: [],
 		}));
@@ -201,7 +238,9 @@ describe('autoRetireSkills', () => {
 				proposals: [],
 			}),
 		);
-		const mockReadSkillUsageEntries = makeMockFn(() => []);
+		const mockReadSkillUsageEntriesWithCoverage = makeMockFn(() =>
+			withCoverage([]),
+		);
 		const mockRetireOrMarkStale = makeMockFn(() =>
 			Promise.resolve({ action: 'retire' as const }),
 		);
@@ -210,8 +249,10 @@ describe('autoRetireSkills', () => {
 		}));
 
 		_internals.listSkills = mockListSkills;
-		_internals.readSkillUsageEntries = mockReadSkillUsageEntries;
+		_internals.readSkillUsageEntriesWithCoverage =
+			mockReadSkillUsageEntriesWithCoverage as any;
 		_internals.retireSkill = mockRetireSkill;
+		_internals.recordCuratorSkips = () => {}; // avoid real lock I/O against '/fake/dir'
 		_internals.retireOrMarkStale = mockRetireOrMarkStale;
 		_internals.getArchivedKnowledgeIds = makeMockFn(() =>
 			Promise.resolve(new Set(['src1', 'src2'])),
@@ -224,42 +265,8 @@ describe('autoRetireSkills', () => {
 			readCallCount++;
 			if (readCallCount === 1) {
 				return Promise.resolve([
-					{
-						id: 'src1',
-						status: 'archived' as const,
-						lesson: 'l',
-						confidence: 0.5,
-						updated_at: '',
-						created_at: '',
-						tags: [],
-						scope: 'global' as const,
-						category: 'other' as const,
-						retrieval_outcomes: {
-							applied_count: 0,
-							succeeded_after_count: 0,
-							failed_after_count: 0,
-						},
-						schema_version: 1,
-						confirmed_by: [],
-					},
-					{
-						id: 'src2',
-						status: 'archived' as const,
-						lesson: 'l',
-						confidence: 0.5,
-						updated_at: '',
-						created_at: '',
-						tags: [],
-						scope: 'global' as const,
-						category: 'other' as const,
-						retrieval_outcomes: {
-							applied_count: 0,
-							succeeded_after_count: 0,
-							failed_after_count: 0,
-						},
-						schema_version: 1,
-						confirmed_by: [],
-					},
+					makeArchivedKnowledgeEntry('src1'),
+					makeArchivedKnowledgeEntry('src2'),
 				]);
 			}
 			// Subsequent calls (hive) return empty
@@ -300,15 +307,19 @@ describe('autoRetireSkills', () => {
 				proposals: [],
 			}),
 		);
-		const mockReadSkillUsageEntries = makeMockFn(() => []);
+		const mockReadSkillUsageEntriesWithCoverage = makeMockFn(() =>
+			withCoverage([]),
+		);
 		// No sourceKnowledgeIds → no archived check
 		const mockParseDraftFrontmatter = makeMockFn(() => ({
 			sourceKnowledgeIds: [],
 		}));
 
 		_internals.listSkills = mockListSkills;
-		_internals.readSkillUsageEntries = mockReadSkillUsageEntries;
+		_internals.readSkillUsageEntriesWithCoverage =
+			mockReadSkillUsageEntriesWithCoverage as any;
 		_internals.retireSkill = mockRetireSkill;
+		_internals.recordCuratorSkips = () => {}; // avoid real lock I/O against '/fake/dir'
 		_internals.parseDraftFrontmatter = mockParseDraftFrontmatter;
 		_internals.readKnowledge = makeMockFn(() => Promise.resolve([]));
 		_internals.readFileAsync = makeMockFn(() => Promise.resolve(''));
@@ -341,27 +352,23 @@ describe('autoRetireSkills', () => {
 				proposals: [],
 			}),
 		);
-		// 2 violations out of 3 = 66% > 30% → should retire
-		const mockReadSkillUsageEntries = makeMockFn(() => [
-			{
-				skillPath: '/fake/dir/.opencode/skills/generated/no-fm-skill/SKILL.md',
-				complianceVerdict: 'violated' as const,
-			},
-			{
-				skillPath: '/fake/dir/.opencode/skills/generated/no-fm-skill/SKILL.md',
-				complianceVerdict: 'violated' as const,
-			},
-			{
-				skillPath: '/fake/dir/.opencode/skills/generated/no-fm-skill/SKILL.md',
-				complianceVerdict: 'ok' as const,
-			},
-		]);
+		// #2038: curatorMinSample=10 gates the decision — 4/10 violated (40%) > 30%
+		const noFmPath =
+			'/fake/dir/.opencode/skills/generated/no-fm-skill/SKILL.md';
+		const mockReadSkillUsageEntriesWithCoverage = makeMockFn(() =>
+			withCoverage([
+				...verdicts(noFmPath, 'violated', 4),
+				...verdicts(noFmPath, 'ok', 6),
+			]),
+		);
 		// parseDraftFrontmatter returns null → skips archived check
 		const mockParseDraftFrontmatter = makeMockFn(() => null);
 
 		_internals.listSkills = mockListSkills;
-		_internals.readSkillUsageEntries = mockReadSkillUsageEntries;
+		_internals.readSkillUsageEntriesWithCoverage =
+			mockReadSkillUsageEntriesWithCoverage as any;
 		_internals.retireSkill = mockRetireSkill;
+		_internals.recordCuratorSkips = () => {}; // avoid real lock I/O against '/fake/dir'
 		_internals.parseDraftFrontmatter = mockParseDraftFrontmatter;
 		_internals.readKnowledge = makeMockFn(() => Promise.resolve([]));
 		_internals.readFileAsync = makeMockFn(() => Promise.resolve(''));
@@ -397,20 +404,21 @@ describe('autoRetireSkills', () => {
 				proposals: [],
 			}),
 		);
-		const mockReadSkillUsageEntries = makeMockFn(() => [
-			{
-				skillPath: '/fake/dir/.opencode/skills/generated/fail-retire/SKILL.md',
-				complianceVerdict: 'violated' as const,
-			},
-			{
-				skillPath: '/fake/dir/.opencode/skills/generated/fail-retire/SKILL.md',
-				complianceVerdict: 'ok' as const,
-			},
-		]);
+		// #2038: clear curatorMinSample=10 to reach the throwing retireSkill call; 5/10 (50%) > 30%.
+		const failRetirePath =
+			'/fake/dir/.opencode/skills/generated/fail-retire/SKILL.md';
+		const mockReadSkillUsageEntriesWithCoverage = makeMockFn(() =>
+			withCoverage([
+				...verdicts(failRetirePath, 'violated', 5),
+				...verdicts(failRetirePath, 'ok', 5),
+			]),
+		);
 
 		_internals.listSkills = mockListSkills;
-		_internals.readSkillUsageEntries = mockReadSkillUsageEntries;
+		_internals.readSkillUsageEntriesWithCoverage =
+			mockReadSkillUsageEntriesWithCoverage as any;
 		_internals.retireSkill = mockRetireSkill;
+		_internals.recordCuratorSkips = () => {}; // avoid real lock I/O against '/fake/dir'
 		_internals.parseDraftFrontmatter = makeMockFn(() => ({
 			sourceKnowledgeIds: [],
 		}));
@@ -421,6 +429,7 @@ describe('autoRetireSkills', () => {
 		await expect(
 			_internals.autoRetireSkills(directory, '/fake/knowledge'),
 		).resolves.toBeDefined();
+		expect(mockRetireSkill.calls).toHaveLength(1);
 	});
 
 	// -----------------------------------------------------------------------
@@ -462,19 +471,16 @@ describe('autoRetireSkills', () => {
 				proposals: [],
 			}),
 		);
-		// violation-skill: 1/2 = 50% > 30%; archived-skill: no usage
-		const mockReadSkillUsageEntries = makeMockFn(() => [
-			{
-				skillPath:
-					'/fake/dir/.opencode/skills/generated/violation-skill/SKILL.md',
-				complianceVerdict: 'violated' as const,
-			},
-			{
-				skillPath:
-					'/fake/dir/.opencode/skills/generated/violation-skill/SKILL.md',
-				complianceVerdict: 'ok' as const,
-			},
-		]);
+		// #2038 asymmetry: violation-skill clears curatorMinSample=10 (5/10=50%>30%);
+		// archived-skill has NO usage, so it can only retire via the archived-source path.
+		const violationPath =
+			'/fake/dir/.opencode/skills/generated/violation-skill/SKILL.md';
+		const mockReadSkillUsageEntriesWithCoverage = makeMockFn(() =>
+			withCoverage([
+				...verdicts(violationPath, 'violated', 5),
+				...verdicts(violationPath, 'ok', 5),
+			]),
+		);
 		const mockRetireOrMarkStale = makeMockFn(
 			(_directory: string, skillDir: string) => {
 				if (skillDir.replace(/\\/g, '/').endsWith('/archived-skill')) {
@@ -484,8 +490,10 @@ describe('autoRetireSkills', () => {
 			},
 		);
 		_internals.listSkills = mockListSkills;
-		_internals.readSkillUsageEntries = mockReadSkillUsageEntries;
+		_internals.readSkillUsageEntriesWithCoverage =
+			mockReadSkillUsageEntriesWithCoverage as any;
 		_internals.retireSkill = mockRetireSkill;
+		_internals.recordCuratorSkips = () => {}; // avoid real lock I/O against '/fake/dir'
 		_internals.retireOrMarkStale = mockRetireOrMarkStale;
 		_internals.getArchivedKnowledgeIds = makeMockFn(() =>
 			Promise.resolve(new Set(['src1'])),
@@ -499,26 +507,7 @@ describe('autoRetireSkills', () => {
 		_internals.readKnowledge = makeMockFn(() => {
 			readCallCount++;
 			if (readCallCount === 1) {
-				return Promise.resolve([
-					{
-						id: 'src1',
-						status: 'archived' as const,
-						lesson: 'l',
-						confidence: 0.5,
-						updated_at: '',
-						created_at: '',
-						tags: [],
-						scope: 'global' as const,
-						category: 'other' as const,
-						retrieval_outcomes: {
-							applied_count: 0,
-							succeeded_after_count: 0,
-							failed_after_count: 0,
-						},
-						schema_version: 1,
-						confirmed_by: [],
-					},
-				]);
+				return Promise.resolve([makeArchivedKnowledgeEntry('src1')]);
 			}
 			// Subsequent calls (hive) return empty
 			return Promise.resolve([]);
@@ -564,24 +553,21 @@ describe('autoRetireSkills', () => {
 			}),
 		);
 		// Usage entries for a DIFFERENT skill ("test-skill") — should NOT match slug "test"
-		const mockReadSkillUsageEntries = makeMockFn(() => [
-			{
-				skillPath: '/fake/dir/.opencode/skills/generated/test-skill/SKILL.md',
-				complianceVerdict: 'violated' as const,
-			},
-			{
-				skillPath: '/fake/dir/.opencode/skills/generated/test-skill/SKILL.md',
-				complianceVerdict: 'violated' as const,
-			},
-			{
-				skillPath: '/fake/dir/.opencode/skills/generated/test-skill/SKILL.md',
-				complianceVerdict: 'violated' as const,
-			},
-		]);
+		const mockReadSkillUsageEntriesWithCoverage = makeMockFn(() =>
+			withCoverage(
+				verdicts(
+					'/fake/dir/.opencode/skills/generated/test-skill/SKILL.md',
+					'violated',
+					3,
+				),
+			),
+		);
 
 		_internals.listSkills = mockListSkills;
-		_internals.readSkillUsageEntries = mockReadSkillUsageEntries;
+		_internals.readSkillUsageEntriesWithCoverage =
+			mockReadSkillUsageEntriesWithCoverage as any;
 		_internals.retireSkill = mockRetireSkill;
+		_internals.recordCuratorSkips = () => {}; // avoid real lock I/O against '/fake/dir'
 		_internals.parseDraftFrontmatter = makeMockFn(() => ({
 			sourceKnowledgeIds: [],
 		}));

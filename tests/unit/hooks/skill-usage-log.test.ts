@@ -12,6 +12,7 @@ import * as path from 'node:path';
 
 import {
 	_internals,
+	_resetSkillUsageMaintenanceState,
 	appendSkillUsageEntry,
 	MAX_TAIL_BYTES,
 	pruneSkillUsageLog,
@@ -20,6 +21,7 @@ import {
 	type SkillUsageEntry,
 	TAIL_BYTES_DEFAULT,
 } from '../../../src/hooks/skill-usage-log.ts';
+import { SKILL_USAGE_LIMITS } from '../../../src/hooks/skill-usage-pending.ts';
 
 // =============================================================================
 // Helpers
@@ -41,6 +43,11 @@ function writeRawLog(dir: string, content: string): void {
 function readRawLog(dir: string): string {
 	const resolved = path.join(dir, '.swarm', 'skill-usage.jsonl');
 	return fs.existsSync(resolved) ? fs.readFileSync(resolved, 'utf-8') : '';
+}
+
+/** Write JSONL entries to the skill-usage log via writeRawLog. */
+function writeEntries(dir: string, entries: unknown[]): void {
+	writeRawLog(dir, entries.map((e) => JSON.stringify(e)).join('\n') + '\n');
 }
 
 /** Helper: a minimal valid entry template. */
@@ -444,10 +451,7 @@ describe('pruneSkillUsageLog', () => {
 			makeEntry({ taskID: 'task-001', timestamp: '2026-01-01T00:00:00.000Z' }),
 			makeEntry({ taskID: 'task-002', timestamp: '2026-01-02T00:00:00.000Z' }),
 		];
-		writeRawLog(
-			tempDir,
-			entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
-		);
+		writeEntries(tempDir, entries);
 
 		const result = pruneSkillUsageLog(tempDir, 500);
 		expect(result.pruned).toBe(0);
@@ -493,10 +497,7 @@ describe('pruneSkillUsageLog', () => {
 				timestamp: '2026-01-02T00:00:00.000Z',
 			}),
 		];
-		writeRawLog(
-			tempDir,
-			entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
-		);
+		writeEntries(tempDir, entries);
 
 		const result = pruneSkillUsageLog(tempDir, 3);
 
@@ -546,10 +547,7 @@ describe('pruneSkillUsageLog', () => {
 				timestamp: '2026-01-01T00:00:00.000Z',
 			}),
 		];
-		writeRawLog(
-			tempDir,
-			entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
-		);
+		writeEntries(tempDir, entries);
 
 		const result = pruneSkillUsageLog(tempDir, 2);
 
@@ -567,10 +565,7 @@ describe('pruneSkillUsageLog', () => {
 			makeEntry({ taskID: 't-001', timestamp: '2026-01-01T00:00:00.000Z' }),
 			makeEntry({ taskID: 't-002', timestamp: '2026-01-02T00:00:00.000Z' }),
 		];
-		writeRawLog(
-			tempDir,
-			entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
-		);
+		writeEntries(tempDir, entries);
 
 		// Override writeFileSync to always throw
 		_internals.writeFileSync = () => {
@@ -597,10 +592,7 @@ describe('pruneSkillUsageLog', () => {
 				timestamp: `2026-01-${(i + 1).toString().padStart(2, '0')}T00:00:00.000Z`,
 			}),
 		);
-		writeRawLog(
-			tempDir,
-			entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
-		);
+		writeEntries(tempDir, entries);
 
 		const result = pruneSkillUsageLog(tempDir); // default 500
 		expect(result.pruned).toBe(0);
@@ -689,10 +681,7 @@ describe('_internals DI seam', () => {
 			makeEntry({ taskID: 't-001', timestamp: '2026-01-01T00:00:00.000Z' }),
 			makeEntry({ taskID: 't-002', timestamp: '2026-01-02T00:00:00.000Z' }),
 		];
-		writeRawLog(
-			tempDir,
-			entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
-		);
+		writeEntries(tempDir, entries);
 
 		// Simulate write failure
 		_internals.writeFileSync = () => {
@@ -727,7 +716,8 @@ describe('_internals DI seam', () => {
 		);
 	});
 
-	test('triggers best-effort compaction when log exceeds 1 MB', () => {
+	test('triggers best-effort compaction when the log exceeds SKILL_USAGE_LIMITS.maxBytes', () => {
+		_resetSkillUsageMaintenanceState();
 		let pruneCalled = false;
 		_internals.pruneSkillUsageLog = (
 			dir: string,
@@ -739,7 +729,7 @@ describe('_internals DI seam', () => {
 			return { pruned: 0, remaining: 0 };
 		};
 		_internals.statSync = ((_path: fs.PathLike) => ({
-			size: 1024 * 1024 + 1,
+			size: SKILL_USAGE_LIMITS.maxBytes + 1,
 		})) as typeof fs.statSync;
 
 		appendSkillUsageEntry(tempDir, makeEntry());
@@ -779,10 +769,7 @@ describe('readSkillUsageEntriesTail', () => {
 				timestamp: `2026-01-${(i + 1).toString().padStart(2, '0')}T00:00:00.000Z`,
 			}),
 		);
-		writeRawLog(
-			tempDir,
-			entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
-		);
+		writeEntries(tempDir, entries);
 
 		const result = readSkillUsageEntriesTail(tempDir, {
 			sessionID: 'tail-session',
@@ -799,10 +786,7 @@ describe('readSkillUsageEntriesTail', () => {
 				taskID: 'other-001',
 			}),
 		];
-		writeRawLog(
-			tempDir,
-			entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
-		);
+		writeEntries(tempDir, entries);
 
 		const result = readSkillUsageEntriesTail(tempDir, {
 			sessionID: 'nonexistent-session',
@@ -820,10 +804,7 @@ describe('readSkillUsageEntriesTail', () => {
 				timestamp: `2026-01-${((i % 28) + 1).toString().padStart(2, '0')}T00:00:00.000Z`,
 			}),
 		);
-		writeRawLog(
-			tempDir,
-			entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
-		);
+		writeEntries(tempDir, entries);
 
 		// Use a very small maxBytes (256 bytes) — should only read a few entries
 		const result = readSkillUsageEntriesTail(
@@ -960,10 +941,7 @@ describe('readSkillUsageEntriesTail', () => {
 			makeEntry({ sessionID: 'small-session', taskID: 'small-001' }),
 			makeEntry({ sessionID: 'small-session', taskID: 'small-002' }),
 		];
-		writeRawLog(
-			tempDir,
-			entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
-		);
+		writeEntries(tempDir, entries);
 
 		const result = readSkillUsageEntriesTail(
 			tempDir,

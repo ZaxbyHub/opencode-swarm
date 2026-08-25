@@ -570,6 +570,9 @@ export const consensus_mine: ReturnType<typeof createSwarmTool> =
 						source: entry.source,
 						observations: entry.observations,
 					})),
+					// True when `maxEvidenceItems` cut the corpus before tallying, OR
+					// skill-usage compaction evicted history the corpus would
+					// otherwise have covered (issue #2038).
 					corpus_truncated: result.truncated,
 					// Persisted on the report, not merely returned: every one of these
 					// cuts changes what the numbers above MEAN. A reader who cannot see

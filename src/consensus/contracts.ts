@@ -392,7 +392,11 @@ const ConsensusCorpusHashSchema = z
  * the difference between an incomplete report and a misleading one.
  */
 export interface ConsensusTruncationV1 {
-	/** `maxEvidenceItems` cut the corpus before tallying. */
+	/**
+	 * `maxEvidenceItems` cut the corpus before tallying, OR skill-usage
+	 * compaction evicted history the corpus would otherwise have covered
+	 * (issue #2038).
+	 */
 	corpus: boolean;
 	/** Observations actually tallied, after filtering and after the corpus cut. */
 	observations: number;

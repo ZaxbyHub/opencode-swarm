@@ -188,6 +188,51 @@ describe('retention registry rows — disposition rules (issue #2036)', () => {
 			}
 		}
 	});
+
+	/**
+	 * Issue #2038 recurrence guardrail, pinned at the DATA level: a per-key cap
+	 * bounds one key's history, never the store, so a per-key row that still
+	 * claims to be fine must say what makes its keyspace finite.
+	 *
+	 * NOTE ON WHAT THIS TEST DOES AND DOES NOT PROVE: this asserts against the
+	 * registry data, so it does NOT fail if the rule is deleted from
+	 * check-retention-registry.ts. The fail-on-removal property lives in
+	 * tests/unit/scripts/check-retention-registry.test.ts
+	 * ("per-key keyspace declaration"). This test's job is to keep the populated
+	 * rows populated.
+	 */
+	test('every per-key row that is not fix-in-issue declares its keyspace bound', () => {
+		const violations: string[] = [];
+		for (const row of rows()) {
+			if (row.writeLimits.scope !== 'per-key') continue;
+			if (row.disposition.kind === 'fix-in-issue') continue;
+			const declared = (row.writeLimits.keyspaceBound ?? '').trim();
+			if (declared.length === 0) {
+				violations.push(`${row.id}: writeLimits.keyspaceBound missing`);
+				continue;
+			}
+			// A per-key cap is not an answer to "what bounds the keyspace" — it is
+			// the thing the field exists to qualify.
+			if (!/src\/[A-Za-z0-9._/-]+\.ts/.test(declared)) {
+				violations.push(`${row.id}: keyspaceBound cites no source path`);
+			}
+		}
+		expect(violations).toEqual([]);
+	});
+
+	test('the per-key rows the guardrail reclassified are owned by an issue', () => {
+		// Both were `not-a-defect` proved only by a per-key cap; the #2038 rule
+		// found them. If either is ever restored to a non-fix disposition, it must
+		// come with a keyspaceBound that survives the gate.
+		for (const id of ['test-history', 'pr-feedback-event-queues']) {
+			const row = rows().find((candidate) => candidate.id === id);
+			if (!row) throw new Error(`missing ${id} row`);
+			expect(row.writeLimits.scope).toBe('per-key');
+			expect(row.disposition.kind).toBe('fix-in-issue');
+			// The evidence must survive the reclassification, not be replaced by it.
+			expect(row.writeLimits.keyspaceBound ?? '').toContain('#2038');
+		}
+	});
 });
 
 describe('retention registry rows — coverage plumbing', () => {

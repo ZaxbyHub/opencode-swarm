@@ -10,22 +10,16 @@
  * 6. Advisory message in phase-complete.ts includes "Knowledge: N applied, M skipped" text
  *
  * MOCK CONVERSION NOTES:
- * These tests use mock.module() for cross-module mocks because the source
- * modules (knowledge-store, knowledge-validator, knowledge-reader) use direct
- * imports rather than _internals DI seams.
- *
- * Cross-module mocks CANNOT be converted to _internals because:
- * - The source uses direct named imports
- * - _internals seams only exist where they were explicitly designed
+ * These use mock.module() (not _internals) because knowledge-store,
+ * knowledge-validator and knowledge-reader are consumed via direct named
+ * imports, and _internals seams exist only where explicitly designed.
+ * In CI, per-file isolation prevents leakage; for local batch runs use
+ * `bun test --isolate` (Bun >=1.3.13). beforeEach mockClear()s call state.
  *
  * MOCK MODULES (remain as mock.module):
  * - src/hooks/knowledge-store.js: all functions. `dedupeCapped` (#1821) is a bare ESM-resolution stub: this factory does not spread the real module, and its only consumer (insightCandidateToEntry) is not exercised here, so the stub is never called. Real coverage: knowledge-store-dedupe-capped.test.ts.
  * - src/hooks/knowledge-validator.js: validateLesson, quarantineEntry
  * - src/hooks/knowledge-reader.js: updateRetrievalOutcome
- *
- * These tests use mock.module for cross-module mocks. In CI, per-file isolation
- * prevents leakage. For local batch runs, use `bun test --isolate` (Bun >=1.3.13).
- * beforeEach resets mock call state via mockClear() for deterministic test isolation.
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
@@ -88,6 +82,11 @@ mock.module('../../../src/hooks/knowledge-store.js', () => ({
 	sweepAgedEntries: async () => {},
 	sweepStaleTodos: async () => {},
 	bumpKnowledgeConfidenceBatch: async () => {},
+	// #2038: wholesale mock, so a new export must be listed or import throws.
+	bumpKnowledgeConfidenceBatchResult: async () => ({
+		applied: 0,
+		failed: false,
+	}),
 	computeOutcomeSignal: () => 0,
 }));
 

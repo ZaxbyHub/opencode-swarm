@@ -309,6 +309,34 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		bytes: 131072,
 		limit_bytes: 262144,
 	},
+
+	// Issue #2038 skill-usage-log/pending health. Payload mirrors the real
+	// producer in src\hooks\skill-usage-pending.ts (emitSkillUsageHealth):
+	// bounded counts + timestamps only — no skillPath, no per-skill identifier.
+	skill_usage_health: {
+		trigger: 'compaction',
+		accepted: 500,
+		compacted: 400,
+		dropped: 20,
+		skills_dropped: 3,
+		corrupt: 5,
+		pending_retained: 40,
+		uncertain_retained: 10,
+		uncertain_expired: 2,
+		pending_evicted: 1,
+		no_source_knowledge: 0,
+		no_matching_knowledge: 0,
+		bump_retry: 2,
+		bump_unrecoverable: 0,
+		bump_applied_zero: 1,
+		pressure: 0,
+		curator_skipped: 1,
+		bytes: 524288,
+		limit_bytes: 1572864,
+		oldest_timestamp: '2026-07-01T00:00:00.000Z',
+		newest_timestamp: '2026-08-22T00:00:00.000Z',
+		coverage: true,
+	},
 };
 
 describe('envelope roundtrip — AC1 positive', () => {

@@ -175,7 +175,11 @@ export interface MineConsensusDeps {
 
 export interface MineConsensusResult {
 	report: ConsensusReportV1;
-	/** True when `maxEvidenceItems` truncated the corpus. */
+	/**
+	 * True when `maxEvidenceItems` truncated the corpus, OR skill-usage
+	 * compaction evicted history the corpus would otherwise have covered
+	 * (issue #2038).
+	 */
 	truncated: boolean;
 	/** Corpus sources that could not be read. */
 	unreadableSources: string[];
