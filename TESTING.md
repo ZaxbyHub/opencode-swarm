@@ -139,7 +139,7 @@ Phase 4 also consolidated knowledge-curator tests with shared fixtures (`tests/u
 
 ### Coverage Gate
 
-CI enforces a minimum code coverage threshold (41.48%) on the merge queue. Coverage is measured using `bun test --coverage` with output configured in `bunfig.toml`:
+CI enforces a minimum line-coverage threshold (65.00%) on the merge queue. Coverage is measured using `bun test --coverage` with output configured in `bunfig.toml`:
 
 ```toml
 # bunfig.toml
@@ -148,13 +148,16 @@ coverageReporter = ["lcov", "text"]
 coverageDir = "./coverage"
 ```
 
-The coverage gate runs in a dedicated `coverage` job (a required status check) but only on `merge_group` events (not on every PR for speed). It runs the full unit suite once with coverage in its own job, separate from the sharded `unit` job, so the long full-suite measurement does not stack onto a unit shard's timeout budget. To measure coverage locally:
+The coverage gate runs only on `merge_group` events (not on every PR, for speed) and is sharded since issue #2341: a `coverage-shard` matrix (6 shards, partitioned identically to the `unit` job's ubuntu cells) measures coverage per shard, and the dedicated `coverage` merge job (a required status check) unions the shard reports via `scripts/ci/finalize-coverage-gate.sh` and enforces the threshold once, failing closed if any shard report is missing or empty. A quick local approximation of the full gate:
 
 ```bash
-bun test --coverage tests/unit/ --timeout 60000
+SHARD_INDEX=1 SHARD_COUNT=1 bash scripts/ci/run-coverage-gate.sh
+COVERAGE_PARTS_DIR=. EXPECTED_SHARDS=1 SHARD_JOB_RESULT=success bash scripts/ci/finalize-coverage-gate.sh
 ```
 
-The coverage report is output to `./coverage/` as `lcov.info` and text summary.
+(The shard runner's default `SHARD_INDEX=1 SHARD_COUNT=1` selects the full gated set in one process and writes `coverage-part-1.info` to the current directory — hence `COVERAGE_PARTS_DIR=.` so the finalize script finds it there, exactly as CI's download step extracts the shard parts into `coverage-parts/`. A plain `bun test --coverage tests/unit/ --timeout 60000` also prints a per-run text summary, but it is not the gate's measurement.)
+
+The gate's merged report is output to `./coverage/` as `lcov.info` plus the measured percentage in `coverage-value.txt`.
 
 ### Adversarial Tests
 

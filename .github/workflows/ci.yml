@@ -477,12 +477,13 @@ jobs:
       # `unit (ubuntu-latest, 1)`, which made that one cell execute the entire
       # unit suite twice (sharded run + full-suite coverage run) inside the 40m
       # budget — ~30-35 min in practice, intermittently timing out and blocking
-      # the merge queue (PR #1573). It now lives in the dedicated `coverage` job
-      # below so the full-suite run gets its own timeout and the unit cells stay
-      # fast. `coverage` is already enforced: it's a required status check in
-      # branch-protection ruleset 17809658 (confirmed active — issue #1737
-      # FR-014, correcting this comment, which previously and incorrectly
-      # described enforcement as still-pending).
+      # the merge queue (PR #1573). It now lives in the dedicated sharded
+      # coverage jobs below (the `coverage-shard` matrix + the `coverage` merge
+      # job, issue #2341) so the coverage measurement gets its own budgets and
+      # the unit cells stay fast. `coverage` is already enforced: it's a
+      # required status check in branch-protection ruleset 17809658 (confirmed
+      # active — issue #1737 FR-014, correcting this comment, which previously
+      # and incorrectly described enforcement as still-pending).
 
   # Issue #1737 FR-013: aggregate job so branch-protection ruleset 17809658 can
   # require a single stable check name regardless of which OS cells the
@@ -507,31 +508,39 @@ jobs:
           fi
           echo "All unit matrix cells that ran succeeded."
 
-  # Merge-queue-only coverage gate. Runs the full unit suite once with coverage
-  # and enforces the line-coverage threshold. Isolated from the `unit` job so the
-  # inherently ~26-31 min full-suite coverage measurement gets its own generous
-  # timeout instead of stacking onto a sharded unit cell's 40m budget (see the
-  # NOTE in the `unit` job above and PR #1573). On pull_request all steps are
-  # skipped and the job reports success to satisfy the required check without
-  # doing work (same pattern as integration/smoke). Skipped for release-please
+  # Merge-queue-only coverage gate — SHARD MATRIX (issue #2341). The pre-#2341
+  # gate ran the entire gated suite (~2700 files) in ONE serial per-file loop in
+  # ONE job (~45 min clean; see the CI-004 note below). The merge queue's
+  # check_response_timeout budget starts at ENQUEUE, not at check start, so
+  # queue wait + quality + that serial unit evicted green PRs with
+  # `checks_timed_out` (PR #2313 evicted at 60.6 min; the CI-004 fix that
+  # stopped serializing coverage behind `unit` bought headroom but left the
+  # single serial unit as the group's long pole). Sharding divides it: the
+  # matrix + round-robin partition mirror the `unit` job, so coverage shard N
+  # measures exactly the file set of `unit (ubuntu-latest, N)` and a failing
+  # shard maps 1:1 onto a unit shard. Six shards (not 3 or 8) keep per-shard
+  # file counts (~450) at unit-cell parity with >2x timeout headroom for
+  # bounded-retry storms, at +5 concurrent jobs on a public repo (merge-queue
+  # builds one group at a time; each group's `gh-readonly-queue/...` ref gets
+  # its own workflow concurrency key, so groups never serialize behind each
+  # other). Coverage is measured on ubuntu-latest ONLY, deliberately: the
+  # unit job's macOS/Windows cells apply OS-specific quarantine ledgers that a
+  # coverage matrix cell could not mirror, so adding other OSes here would
+  # silently break the coverage-shard-N ↔ unit-(ubuntu-latest, N) mapping. On
+  # pull_request all steps are skipped and every cell reports
+  # success (same pattern as integration/smoke). Skipped for release-please
   # branches (version bumps don't change coverage).
-  coverage:
+  coverage-shard:
     needs: [detect-release, quality]
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     runs-on: ubuntu-latest
-    # Coverage is the merge-group long pole: clean runs for PR #2290 took about
-    # 45 minutes. It must start after `quality`, in parallel with the unit matrix,
-    # so the required result arrives within ruleset 17809658's 60-minute
-    # check_response_timeout_minutes. Serializing it behind `unit` produced
-    # 63-minute merge-group runs; GitHub evicted them 26-43 seconds before the
-    # successful coverage result arrived (CI-004).
-    #
-    # A failing unit shard no longer cancels this independent job early, which
-    # may spend extra runner time on an already-blocked merge group. Correctness
-    # is unchanged: both unit checks and coverage remain required, while the
-    # parallel graph keeps successful groups inside the queue deadline. On
-    # pull_request, coverage's steps remain gated on `merge_group` and report
-    # success without doing work.
-    timeout-minutes: 60
+    # ~12-13 min expected (~450 files at ~1s each under per-file `--isolate
+    # --coverage` + ~4 min checkout/install/build); 30m leaves >2x headroom for
+    # bounded-retry storms while halving the old single-job worst case.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
@@ -557,45 +566,103 @@ jobs:
       - name: Coverage gate enforcement
         if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
         shell: bash
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_COUNT: 6
         run: |
           set -e
-          echo "Running coverage measurement for gate enforcement..."
-          # Run each file in its own coverage process so file-scoped mocks and
-          # runtime state cannot contaminate later files in the merge-queue
-          # coverage gate (issue #1712). The helper merges the per-file lcov
-          # records before enforcing the threshold, so the gate still measures
-          # the full non-quarantined suite rather than a single shard.
+          echo "Running coverage measurement for shard ${SHARD_INDEX}/${SHARD_COUNT}..."
+          # Runs this shard's test files, each in its own coverage process so
+          # file-scoped mocks and runtime state cannot contaminate later files
+          # (issue #1712), and concatenates the per-file lcov into one
+          # uniquely-named shard part for the merge job below.
           bash scripts/ci/run-coverage-gate.sh
+      # if: always() is load-bearing on both uploads: a shard that fails or
+      # times out mid-way still uploads whatever part/diagnostics exist, and
+      # the merge job's fail-closed checks turn the incomplete set into a red
+      # required check instead of a silently smaller measurement.
+      - name: Upload coverage shard part
+        if: always() && github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-part-shard-${{ matrix.shard }}
+          path: |
+            coverage-part-${{ matrix.shard }}.info
+            coverage-output-shard-${{ matrix.shard }}.txt
+          # The part is load-bearing for the merge job: a missing upload must
+          # be a loud error, never a quiet gap (unlike the diagnostics below).
+          if-no-files-found: error
+      # Upload the shard's flake-annotations file `if: always()` so the
+      # downstream flake-detection workflow_run can pick it up alongside the
+      # unit shards' annotations (issue #1782). run-coverage-gate.sh creates
+      # the file unconditionally (`: >`) once past partitioning, so this step
+      # normally always has a file (a 0-byte one on a clean run).
+      # if-no-files-found: ignore covers the case where the script aborted
+      # before creating it (env validation or an empty-shard hard exit); a
+      # missing advisory annotation must not fail the job over an artifact.
+      - name: Upload coverage flake annotations
+        if: always() && github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: flake-annotations-coverage-shard-${{ matrix.shard }}
+          path: flake-annotations-coverage-shard-*.txt
+          if-no-files-found: ignore
+
+  # Merge-queue-only coverage gate — MERGE + THRESHOLD (issue #2341). Keeps the
+  # REQUIRED CHECK CONTEXT `coverage` byte-stable (ruleset 17809658) while the
+  # measurement happens in the coverage-shard matrix above. `if: always()`
+  # follows the unit-passed pattern: a failed, skipped, or timed-out shard cell
+  # must produce a RED `coverage` check, never a MISSING one — a missing
+  # required check reproduces the exact `checks_timed_out` eviction class this
+  # issue exists to close. The finalize script fails closed (shard result →
+  # part count → non-empty + DA records → merge → threshold) so a dropped
+  # shard report can never silently shrink the measured set. Threshold
+  # semantics are unchanged: COVERAGE_THRESHOLD (default 65.00, issue #1778
+  # H4), enforced once over the merged set. On pull_request all steps are
+  # skipped and the job reports success to satisfy the required check without
+  # doing work (same pattern as integration/smoke). Skipped for release-please
+  # branches.
+  coverage:
+    needs: [detect-release, coverage-shard]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+      # merge-lcov.mjs imports only node:* builtins and runs from source, so
+      # this job runs no dependency install and no dist/ build — but bun is
+      # not preinstalled on the runner, so setup-bun stays.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+        with:
+          bun-version: "1.3.13"
+      - name: Download coverage shard parts
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          # Per-shard part artifacts carry uniquely-named files
+          # (coverage-part-<i>.info), so merge-multiple extraction cannot
+          # collide; the same artifact also carries the per-shard output log.
+          pattern: coverage-part-shard-*
+          merge-multiple: true
+          path: coverage-parts
+      - name: Merge coverage shards and enforce threshold
+        if: github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
+        shell: bash
+        env:
+          EXPECTED_SHARDS: 6
+          SHARD_JOB_RESULT: ${{ needs.coverage-shard.result }}
+        run: bash scripts/ci/finalize-coverage-gate.sh
       - name: Upload coverage report
         if: always() && github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-report
           path: |
-            coverage-output.txt
             coverage/lcov.info
+            coverage-value.txt
           if-no-files-found: warn
-      # Upload the coverage job's flake-annotations file `if: always()` so the
-      # downstream flake-detection workflow_run can pick it up alongside the
-      # unit shards' annotations (issue #1782). run-coverage-gate.sh always
-      # creates flake-annotations-coverage.txt unconditionally (`: >`), even
-      # on a clean run with no retries/failures, so this step normally always
-      # has a file to upload (a 0-byte one on a clean run). if-no-files-found:
-      # ignore is not about the skipped case — a step whose `if:` is false
-      # never evaluates the setting at all. It covers the case where the file
-      # was never created. The two upload steps are the only ones in this job
-      # carrying `always()`, so they still run when an earlier step failed:
-      # if install / build / the gate step itself fails, the script never
-      # executes and never creates the file (the common case), and likewise
-      # if the script aborts under `set -euo pipefail` before creating it.
-      # Neither must fail the job over a missing artifact.
-      - name: Upload coverage flake annotations
-        if: always() && github.event_name == 'merge_group' && needs.detect-release.outputs.is-release != 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: flake-annotations-coverage
-          path: flake-annotations-coverage.txt
-          if-no-files-found: ignore
 
   # Merge-queue-only: on pull_request all steps are skipped, job reports success
   # to satisfy required checks without doing work. Also skipped for release-please.

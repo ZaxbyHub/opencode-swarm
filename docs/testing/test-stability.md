@@ -158,9 +158,9 @@ Do NOT un-quarantine without a merge-group validation run confirming the fix.
 
 When a merge-group CI run fails, `.github/workflows/flake-detection.yml`
 (`workflow_run` trigger) downloads every `flake-annotations-*` artifact
-ci.yml uploads — the per-shard unit annotations AND the coverage job's
-`flake-annotations-coverage` artifact (both jobs run a bounded retry, two
-retries / three attempts total, before treating a failure as real) —
+ci.yml uploads — the per-shard unit annotations AND the coverage shards'
+`flake-annotations-coverage-shard-N` artifacts (all of these jobs run a bounded
+retry, two retries / three attempts total, before treating a failure as real) —
 concatenates them, and runs `scripts/ci/detect-and-quarantine-flakes.sh`.
 The script:
 
@@ -196,8 +196,10 @@ reason; a run that self-heals everywhere is invisible to it.
   measurements) needs a separate seam. No current test asserts on those
   durations; if you add one, add a dedicated mock at the call site rather than
   relying on `freezeClock`.
-- **Merge-group greenness requires real queue runs.** A local `run-coverage-gate.sh`
-  pass approximates the coverage leg but cannot prove Windows/macOS stability —
+- **Merge-group greenness requires real queue runs.** A local
+  `SHARD_INDEX=1 SHARD_COUNT=1 bash scripts/ci/run-coverage-gate.sh` followed by
+  `COVERAGE_PARTS_DIR=. EXPECTED_SHARDS=1 SHARD_JOB_RESULT=success bash scripts/ci/finalize-coverage-gate.sh`
+  approximates the coverage leg but cannot prove Windows/macOS stability —
   only a real merge-group run on the 3-OS matrix can.
 - **The test-clock lint is diff-scoped.** It only blocks NEW violations; the
   ~465 pre-existing files that touch the clock without the helper are

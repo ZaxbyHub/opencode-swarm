@@ -39,7 +39,12 @@
 		{
 			"script": "scripts/ci/run-coverage-gate.sh",
 			"category": "ci-infrastructure",
-			"reason": "Consumes merged lcov artifacts produced by the CI shard matrix. Never a pre-push local gate, so a Windows contributor is not expected to run it."
+			"reason": "Runs one shard of the merge-queue coverage gate (issue #2341): per-file isolated coverage measurement producing a uniquely-named shard lcov part for the merge job. Never a pre-push local gate, so a Windows contributor is not expected to run it."
+		},
+		{
+			"script": "scripts/ci/finalize-coverage-gate.sh",
+			"category": "ci-infrastructure",
+			"reason": "Merges the coverage-shard matrix's lcov parts and enforces the threshold in the merge-queue `coverage` merge job (issue #2341). Consumes CI artifacts only; never a pre-push local gate, so a Windows contributor is not expected to run it."
 		}
 	]
 }

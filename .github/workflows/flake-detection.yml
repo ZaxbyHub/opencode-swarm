@@ -7,7 +7,7 @@
 # surfaced when some OTHER job in the same run failed. That is true of the unit
 # shards' annotations as much as the coverage job's.
 # Downloads every flake-annotations artifact uploaded by
-# ci.yml (the per-shard unit annotations AND the coverage job's annotations),
+# ci.yml (the per-shard unit annotations AND the coverage shards' annotations),
 # concatenates them, and runs scripts/ci/detect-and-quarantine-flakes.sh to
 # produce quarantine suggestions + a best-effort tracking issue.
 #

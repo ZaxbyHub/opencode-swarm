@@ -43,8 +43,9 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
  *
  * NOTE ON CI: no CI job would have caught it. Both the `unit` job and the
  * merge-queue `coverage` gate run ONE FILE PER PROCESS
- * (`scripts/ci/run-coverage-gate.sh:53` loops and invokes `bun test --isolate`
- * per file, per issue #1712). What breaks is a plain local
+ * (the per-file
+ * `bun test --isolate --coverage` loop in `scripts/ci/run-coverage-gate.sh`, per
+ * issue #1712). What breaks is a plain local
  * `bun test a.test.ts b.test.ts`. `Bun.spawnSync` is unaffected by a
  * node-module mock, so the fixture is honest under every runner.
  *

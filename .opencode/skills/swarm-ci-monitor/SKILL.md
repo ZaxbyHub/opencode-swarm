@@ -157,9 +157,10 @@ test case inside a shared file.
   syntactically valid but *wrong* path (typo, wrong case, wrong directory) is
   silently ignored in exactly the same way — always copy the exact
   repo-relative path, don't retype it.
-- Quarantining removes the file from the coverage-measured suite — check
-  `scripts/ci/run-coverage-gate.sh`'s threshold before and after; a quarantine
-  can flip a previously-passing coverage gate to failing.
+- Quarantining removes the file from the coverage-measured suite — check the
+  merge-queue coverage gate's threshold (`scripts/ci/finalize-coverage-gate.sh`,
+  default `COVERAGE_THRESHOLD=65.00`) before and after; a quarantine can flip a
+  previously-passing coverage gate to failing.
 
 Do not source-patch a flake under time pressure. If unsure whether a failure is
 a flake or a real regression, check whether the same check failed on `main`'s

@@ -225,7 +225,7 @@ All of these must be green. They run automatically on every PR.
 |---|---|
 | `quality` | TypeScript compiles (`tsc --noEmit`), Biome lint + format clean |
 | `unit` (Ubuntu, macOS, Windows) | Unit tests pass on all platforms |
-| `coverage` (merge queue only) | Code coverage ≥ 41.48% (enforced via `bun test --coverage`) |
+| `coverage` (merge queue only) | Line coverage ≥ 65.00%, measured by the 6-shard `coverage-shard` matrix and enforced once by the `coverage` merge job (issue #2341) |
 | `dist-check` | Committed `dist/` matches a fresh build |
 | `package-check` | Package metadata and publishable artifact checks pass |
 | `integration` (Ubuntu) | Integration tests pass (circuit breakers, gate workflows, state machines) |

@@ -10,6 +10,10 @@ const COVERAGE_GATE_SCRIPT_PATH = join(
 	import.meta.dir,
 	'../../../../scripts/ci/run-coverage-gate.sh',
 );
+const COVERAGE_FINALIZE_SCRIPT_PATH = join(
+	import.meta.dir,
+	'../../../../scripts/ci/finalize-coverage-gate.sh',
+);
 const FLAKE_DETECTION_YML_PATH = join(
 	import.meta.dir,
 	'../../../../.github/workflows/flake-detection.yml',
@@ -62,6 +66,14 @@ function extractCoverageJob(yml: string): string {
 	const normalized = yml.replace(/\r\n/g, '\n');
 	const match = normalized.match(
 		/^ {2}coverage:[\s\S]*?(?=^ {2}[A-Za-z][\w-]*:|(?![\s\S]))/m,
+	);
+	return match ? match[0] : '';
+}
+
+function extractCoverageShardJob(yml: string): string {
+	const normalized = yml.replace(/\r\n/g, '\n');
+	const match = normalized.match(
+		/^ {2}coverage-shard:[\s\S]*?(?=^ {2}[A-Za-z][\w-]*:|(?![\s\S]))/m,
 	);
 	return match ? match[0] : '';
 }
@@ -144,21 +156,31 @@ describe('ci.yml integration — merge-queue coverage isolation', () => {
 	const yml = readFileSync(CI_YML_PATH, 'utf8');
 	const step = extractCoverageMeasurementStep(yml);
 	const coverageJob = extractCoverageJob(yml);
+	const coverageShardJob = extractCoverageShardJob(yml);
 	const coverageGateScript = readFileSync(COVERAGE_GATE_SCRIPT_PATH, 'utf8');
+	const coverageFinalizeScript = readFileSync(
+		COVERAGE_FINALIZE_SCRIPT_PATH,
+		'utf8',
+	);
 
-	test('coverage starts after quality instead of waiting for the unit matrix (CI-004)', () => {
-		// Previous workflow serialized the 45-minute coverage gate behind the unit
-		// matrix, so GitHub's 60-minute merge-queue timeout evicted green runs
-		// seconds before coverage completed.
-		expect(coverageJob).toContain('needs: [detect-release, quality]');
+	test('coverage-shard starts after quality in parallel with unit; the merge job waits only on the shards (CI-004 / #2341)', () => {
+		// The pre-CI-004 workflow serialized the coverage gate behind the unit
+		// matrix, so GitHub's merge-queue check_response_timeout evicted green
+		// runs seconds before coverage completed. Issue #2341 sharded the gate:
+		// the shard matrix keeps the post-quality start (overlapping unit), and
+		// the `coverage` merge job aggregates the shards only. Neither job may
+		// ever depend on `unit` again.
+		expect(coverageShardJob).toContain('needs: [detect-release, quality]');
+		expect(coverageShardJob).not.toMatch(/needs: \[[^\]]*\bunit\b/);
+		expect(coverageJob).toContain('needs: [detect-release, coverage-shard]');
 		expect(coverageJob).not.toMatch(/needs: \[[^\]]*\bunit\b/);
 	});
 
-	test('"Coverage gate enforcement" step delegates to the coverage helper', () => {
+	test('"Coverage gate enforcement" step delegates to the coverage shard helper', () => {
 		expect(step).toContain('bash scripts/ci/run-coverage-gate.sh');
 	});
 
-	test('coverage helper runs each file with Bun isolation', () => {
+	test('coverage shard helper runs each file with Bun isolation', () => {
 		expect(coverageGateScript).toContain('set -euo pipefail');
 		expect(coverageGateScript).toContain(
 			'bun test --isolate --coverage --timeout 60000 "$test_file"',
@@ -168,10 +190,22 @@ describe('ci.yml integration — merge-queue coverage isolation', () => {
 		);
 	});
 
-	test('coverage helper merges per-file lcov before enforcing the threshold', () => {
-		expect(coverageGateScript).toContain('scripts/ci/merge-lcov.mjs');
-		expect(coverageGateScript).toContain('coverage/lcov.info');
-		expect(coverageGateScript).toContain('Coverage gate passed');
+	test('shard helper concatenates per-file lcov into one part; finalize merges and enforces once', () => {
+		// The pre-#2341 script merged + enforced in-process; issue #2341 split
+		// enforcement into the merge job so it happens exactly once over the
+		// union of all shard parts (fail-closed when any part is missing or
+		// empty — see finalize-coverage-gate.test.ts).
+		expect(coverageGateScript).toContain(
+			'cat coverage/lcov.info >> "$part_file"',
+		);
+		expect(coverageGateScript).toContain(
+			'part_file="coverage-part-${shard}.info"',
+		);
+		// Single enforcement point: the shard runner must not carry a threshold.
+		expect(coverageGateScript).not.toContain('COVERAGE_THRESHOLD');
+		expect(coverageFinalizeScript).toContain('scripts/ci/merge-lcov.mjs');
+		expect(coverageFinalizeScript).toContain('coverage/lcov.info');
+		expect(coverageFinalizeScript).toContain('Coverage gate passed');
 	});
 });
 
@@ -236,24 +270,26 @@ describe('ci.yml integration — coverage gate bounded retry (issue #1782 parity
 		expect(bunTestIdx).toBeGreaterThan(mkdirIdx);
 	});
 
-	test('coverage helper appends the "passed on retry" notice to flake-annotations-coverage.txt', () => {
+	test('coverage shard helper appends the "passed on retry" notice to its shard annotation file', () => {
 		expect(coverageGateScript).toContain(
-			'echo "::notice file=${test_file}::Passed on retry ${retry_num} (flaky): ${test_file}" >> flake-annotations-coverage.txt',
+			'echo "::notice file=${test_file}::Passed on retry ${retry_num} (flaky): ${test_file}" >> "$flake_ann"',
 		);
 	});
 
-	test('coverage helper appends the hard-failure error to flake-annotations-coverage.txt', () => {
+	test('coverage shard helper appends the hard-failure error to its shard annotation file', () => {
 		expect(coverageGateScript).toContain(
-			'echo "::error file=${test_file}::FAILED: ${test_file}" >> flake-annotations-coverage.txt',
+			'echo "::error file=${test_file}::FAILED: ${test_file}" >> "$flake_ann"',
 		);
 	});
 
-	test('ci.yml uploads flake-annotations-coverage.txt from the coverage job', () => {
+	test('ci.yml uploads the per-shard flake annotations from the coverage-shard job', () => {
 		const coverageUploadStep = extractCoverageFlakeAnnotationsUploadStep(yml);
 		const unitUploadStep = extractUnitFlakeAnnotationsUploadStep(yml);
-		expect(coverageUploadStep).toContain('name: flake-annotations-coverage');
 		expect(coverageUploadStep).toContain(
-			'path: flake-annotations-coverage.txt',
+			'name: flake-annotations-coverage-shard-${{ matrix.shard }}',
+		);
+		expect(coverageUploadStep).toContain(
+			'path: flake-annotations-coverage-shard-*.txt',
 		);
 		expect(coverageUploadStep).toContain('if-no-files-found: ignore');
 
