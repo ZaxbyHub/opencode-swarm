@@ -59,7 +59,9 @@ export const knowledge_recall: ReturnType<typeof createSwarmTool> =
 					repair_id: z.string().uuid(),
 					phase: z.string().min(1).max(256),
 					task_id: z.string().min(1).max(256).optional(),
-					scope_complete: z.literal(true),
+					// z.literal(true) serializes as {"enum":[true]}, which Gemini-family
+					// APIs reject (enum must be strings). Runtime check below still requires true.
+					scope_complete: z.boolean(),
 				})
 				.optional()
 				.describe(
