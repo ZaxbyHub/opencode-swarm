@@ -777,46 +777,8 @@ export async function dispatchFullAutoOversight(
 
 	// Success — reset consecutive failure counter.
 	resetOversightFailureCounter(input.directory, input.sessionID);
-	if (remainingMs(deadlineMs) <= 0) {
-		dispatchError = timeoutError('oversight parse', totalTimeoutMs);
-		dispatchFailureWasTransient = false;
-	}
-	if (dispatchError) {
-		const reason =
-			dispatchError instanceof Error
-				? dispatchError.message
-				: String(dispatchError);
-		pauseFullAutoRun(
-			input.directory,
-			input.sessionID,
-			`oversight dispatch failed without retry: ${reason}`,
-		);
-		const event: FullAutoOversightEvent = {
-			...baseEvent,
-			verdict: 'BLOCKED',
-			reasoning: reason,
-			decision: 'pause',
-			full_auto_status_after: 'paused',
-		};
-		await writeFullAutoOversightEvent(input.directory, event);
-		const evidencePath = await writeFullAutoOversightEvidence(
-			input.directory,
-			input.phase,
-			event,
-		);
-		return {
-			verdict: 'BLOCKED',
-			reasoning: reason,
-			evidenceChecked: [],
-			antiPatternsDetected: [],
-			escalationNeeded: false,
-			rawResponse: '',
-			decision: 'pause',
-			event,
-			evidencePath,
-		};
-	}
-
+	// A response received within the dispatch budget remains authoritative even
+	// if the wall-clock budget elapses immediately before this synchronous parse.
 	const parsed = parseFullAutoCriticResponse(criticResponse);
 	const decision = decisionFromVerdict(parsed.verdict, parsed.escalationNeeded);
 	let afterStatus = beforeStatus;

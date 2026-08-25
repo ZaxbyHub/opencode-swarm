@@ -25,6 +25,7 @@ import {
 	_internals as stateInternals,
 	swarmState,
 } from '../../../src/state';
+import { withFrozenClockAsync } from '../../helpers/test-clock.js';
 
 let tmpDir: string;
 let originalXdgConfigHome: string | undefined;
@@ -138,27 +139,35 @@ describe('handleFullAutoCommand — durable-first / fail-closed', () => {
 	});
 
 	test('resume refuses when recovery blockers remain', async () => {
-		await handleFullAutoCommand(tmpDir, ['on'], SESSION_ID);
-		const { pauseFullAutoRun, recordFullAutoRecoveryProbe } = await import(
-			'../../../src/full-auto/state'
+		await withFrozenClockAsync(
+			async () => {
+				await handleFullAutoCommand(tmpDir, ['on'], SESSION_ID);
+				const { pauseFullAutoRun, recordFullAutoRecoveryProbe } = await import(
+					'../../../src/full-auto/state'
+				);
+				pauseFullAutoRun(
+					tmpDir,
+					SESSION_ID,
+					'oversight infrastructure failure after 1 attempt(s): server error',
+				);
+				recordFullAutoRecoveryProbe(tmpDir, SESSION_ID, {
+					pauseGeneration:
+						loadFullAutoRunState(tmpDir, SESSION_ID)?.pauseGeneration ?? 0,
+					checkedAt: new Date().toISOString(),
+					expiresAt: new Date(Date.now() + 60_000).toISOString(),
+					attempts: 1,
+					outcome: 'healthy',
+					reason: 'ok',
+				});
+				registerFullAutoRecoveryBlockerEvaluator(() => ['policy_circuit']);
+				const out = await handleFullAutoCommand(tmpDir, ['resume'], SESSION_ID);
+				expect(out).toContain('policy_circuit');
+				expect(loadFullAutoRunState(tmpDir, SESSION_ID)?.status).toBe('paused');
+			},
+			{
+				fixedNow: Date.parse('2026-01-01T00:00:00Z'),
+				tickMs: 1,
+			},
 		);
-		pauseFullAutoRun(
-			tmpDir,
-			SESSION_ID,
-			'oversight infrastructure failure after 1 attempt(s): server error',
-		);
-		recordFullAutoRecoveryProbe(tmpDir, SESSION_ID, {
-			pauseGeneration:
-				loadFullAutoRunState(tmpDir, SESSION_ID)?.pauseGeneration ?? 0,
-			checkedAt: new Date().toISOString(),
-			expiresAt: new Date(Date.now() + 60_000).toISOString(),
-			attempts: 1,
-			outcome: 'healthy',
-			reason: 'ok',
-		});
-		registerFullAutoRecoveryBlockerEvaluator(() => ['policy_circuit']);
-		const out = await handleFullAutoCommand(tmpDir, ['resume'], SESSION_ID);
-		expect(out).toContain('policy_circuit');
-		expect(loadFullAutoRunState(tmpDir, SESSION_ID)?.status).toBe('paused');
 	});
 });

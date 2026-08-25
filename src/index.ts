@@ -79,6 +79,10 @@ import {
 	listBlockingActionCircuitsForInvocation,
 } from './failures/action-circuit.js';
 import { createActionIdentity } from './failures/action-identity.js';
+import {
+	classifyProviderFailure,
+	isRetryableProviderFailure,
+} from './failures/invocation-failure.js';
 import { tickAndMaybeDispatchCadence } from './full-auto/cadence.js';
 import { registerFullAutoRecoveryBlockerEvaluator } from './full-auto/recovery.js';
 import {
@@ -219,7 +223,6 @@ import {
 	ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS,
 	ensureSwarmGitExcluded,
 } from './utils/gitignore-warning';
-import { isTransientProviderError } from './utils/provider-error-classification.js';
 import { withTimeout } from './utils/timeout';
 import { truncateToolOutput } from './utils/tool-output';
 
@@ -2233,7 +2236,7 @@ async function initializeOpenCodeSwarm(
 						route &&
 						routeModel &&
 						errorSignal &&
-						isTransientProviderError(errorSignal)
+						isRetryableProviderFailure(classifyProviderFailure(errorSignal))
 					) {
 						advancePendingTaskModelRoute({
 							childSessionID,

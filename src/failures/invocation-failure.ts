@@ -165,7 +165,10 @@ function buildRecord(input: {
 			...(input.exitCode !== undefined && { exitCode: input.exitCode }),
 			...(input.code && { code: input.code.slice(0, MAX_STRUCTURED_STRING) }),
 			...(input.signal && {
-				signal: input.signal.slice(0, MAX_STRUCTURED_STRING),
+				signal: sanitizeFailureEvidenceDisplay(input.signal).slice(
+					0,
+					MAX_STRUCTURED_STRING,
+				),
 			}),
 		},
 		occurredAt: new Date().toISOString(),

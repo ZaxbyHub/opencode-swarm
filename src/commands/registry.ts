@@ -1523,7 +1523,9 @@ export const COMMAND_REGISTRY = {
 			'`retry-oversight` performs a transport-only health probe for an infrastructure/deadline pause and never replays the denied action. `resume` requires a recent successful matching probe and no active recovery blockers. `abort` terminates the durable run immediately. ' +
 			'The run state is durable (.swarm/full-auto-state.json) and survives restarts; toggle with no argument flips the current state.',
 		category: 'utility',
-		toolPolicy: 'agent',
+		// An agent running under Full-Auto must not be able to disable its own
+		// oversight with `/swarm full-auto off`.
+		toolPolicy: 'human-only',
 	},
 	'auto-proceed': {
 		handler: (ctx: CommandContext) =>

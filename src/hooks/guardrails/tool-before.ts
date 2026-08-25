@@ -1601,7 +1601,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 
 		if (loopResult.count >= 5) {
 			throw new Error(
-				`CIRCUIT BREAKER: Delegation loop detected (${loopResult.count} identical patterns). Session paused. Ask the user for guidance.`,
+				`CIRCUIT BREAKER: Delegation loop detected (${loopResult.count} identical patterns). Further identical delegations are blocked. Diagnose or rescope the task before retrying.`,
 			);
 		} else if (loopResult.count >= 3 && loopResult.count < 5) {
 			const agentName =

@@ -319,12 +319,9 @@ describe('classifyFullAutoToolAction', () => {
 				args: { task_id: '1.1', status: 'completed' },
 			}),
 		);
-		// supervised + on_task_completion default false => unknown tool path
-		// (update_task_status is not write-like classified, falls through to
-		// unknown -> escalate_critic) - Actually it IS in WRITE_LIKE_TOOLS, so
-		// we end up at the write-like branch which has no path => allows pathless.
-		// Either way it must NOT classify as task-completion escalation.
-		expect(d.action === 'allow' || d.action === 'escalate_critic').toBe(true);
+		// In supervised mode, task completion itself is not a distinct trigger,
+		// but the pathless write-like tool still requires critic oversight.
+		expect(d.action).toBe('escalate_critic');
 	});
 
 	test('denies write outside project root', () => {

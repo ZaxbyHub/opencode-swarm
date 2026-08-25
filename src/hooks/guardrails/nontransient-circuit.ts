@@ -126,23 +126,6 @@ function isNeutralExitOne(command: string): boolean {
 	);
 }
 
-function classifyFatalSignal(
-	explicitError: string,
-	outputSignal: string,
-	exit: unknown,
-	sandboxWrapped: boolean,
-): NonTransientErrorCategory | null {
-	const record = classifyToolInvocationFailure({
-		tool: 'bash',
-		output: outputSignal,
-		error: explicitError,
-		metadata:
-			typeof exit === 'number' || typeof exit === 'string' ? { exit } : {},
-		correlation: { sandboxWrapped },
-	});
-	return mapFailureRecordToFatalCategory(record);
-}
-
 function mapFailureRecordToFatalCategory(
 	record: InvocationFailureRecordV1 | null,
 ): NonTransientErrorCategory | null {
@@ -618,8 +601,19 @@ export function forgetToolExecution(sessionID: string, callID: string): void {
 
 export const _test_exports = {
 	isNeutralExitOne,
-	classifyFatalSignal: (signal: string, sandboxWrapped: boolean) =>
-		classifyFatalSignal(signal, signal, undefined, sandboxWrapped),
+	classifyFatalSignal: (
+		signal: string,
+		sandboxWrapped: boolean,
+		tool = 'bash',
+	) =>
+		mapFailureRecordToFatalCategory(
+			classifyToolInvocationFailure({
+				tool,
+				output: signal,
+				error: signal,
+				correlation: { sandboxWrapped },
+			}),
+		),
 	isAllowedRecoverySwarmCommand,
 	isRecoveryAllowedTool,
 };

@@ -30,7 +30,7 @@ Strict mode sends every delegation and plan/completion mutation to critic oversi
 
 Oversight has one total deadline covering ephemeral session creation, prompt, retry/fallback, backoff, parse, and bounded cleanup. Timeout/infrastructure failure keeps the risky action denied and pauses the run.
 
-Paused recovery controls are narrowly parsed: `/swarm diagnose`, `full-auto status`, `full-auto retry-oversight`, handoff, `full-auto abort`, `full-auto resume|on`, and `full-auto off|exit`. A health probe cannot clear policy, containment, sandbox, or action circuits. The original action must be explicitly reissued in a new generation and is reviewed again.
+Paused recovery controls are narrowly parsed: `/swarm diagnose`, `full-auto status`, `full-auto retry-oversight`, handoff, `full-auto abort`, `full-auto resume|on`, and `full-auto off|exit`. A health probe cannot clear policy, containment, sandbox, or action circuits. To reset one externally repairable action circuit, use `/swarm guardrail reset <64-char-action-digest> --invocation <active-id>`; it is audited, session-bound, and never replays the original action. The original action must be explicitly reissued in a new generation and is reviewed again.
 
 ## Severe subagent results
 

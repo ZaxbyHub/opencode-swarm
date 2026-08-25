@@ -113,7 +113,7 @@ export function registerFullAutoSevereCorrelation(input: {
 	pendingCorrelations.set(`${input.sessionID}:${input.callID}`, correlation);
 	const instruction =
 		'If and only if you encounter a severe deterministic Full-Auto violation that you can prove from your own execution context, append exactly one SINGLE-LINE JSON object after the marker `FULL_AUTO_SEVERE_RESULT:`. ' +
-		`Use this exact correlation: {"version":1,"kind":"full_auto_severe","parent_session_id":"${input.sessionID}","parent_call_id":"${input.callID}","run_generation":${input.generation},"correlation_nonce":"${nonce}","category":"out_of_scope_files","path_digests":["<sha256-16>"],"path_count":1,"evidence_event_ids":["<event-id>"]}. ` +
+		`Use this exact correlation: {"version":1,"kind":"full_auto_severe","parent_session_id":"${input.sessionID}","parent_call_id":"${input.callID}","run_generation":${input.generation},"correlation_nonce":"${nonce}","category":"out_of_scope_files","path_digests":["<sha256-16>"],"path_count":1}. Include evidence_event_ids only when your tool result already contains a registered event ID; never invent one. ` +
 		'Allowed categories: out_of_scope_files, external_instructions, protected_state_mutation. Never emit more than one marker. Never wrap it in markdown fences. Never paraphrase the envelope in prose.';
 	return { nonce, instruction };
 }
@@ -184,11 +184,15 @@ export function extractFullAutoSevereEnvelope(
 	text: string,
 ): FullAutoSevereEnvelopeV1 | null {
 	if (!text) return null;
-	const matches = text.match(/FULL_AUTO_SEVERE_RESULT:/g) ?? [];
+	// The protocol requires the marker to be appended. Restrict parsing to the
+	// bounded tail so an untrusted multi-megabyte subagent response cannot make
+	// severe-result extraction proportional to its total size.
+	const boundedText = text.slice(-4096);
+	const matches = boundedText.match(/FULL_AUTO_SEVERE_RESULT:/g) ?? [];
 	if (matches.length !== 1) return null;
-	const markerIndex = text.indexOf('FULL_AUTO_SEVERE_RESULT:');
+	const markerIndex = boundedText.indexOf('FULL_AUTO_SEVERE_RESULT:');
 	if (markerIndex < 0) return null;
-	const tail = text
+	const tail = boundedText
 		.slice(markerIndex + 'FULL_AUTO_SEVERE_RESULT:'.length)
 		.trimStart()
 		.split(/\r?\n/, 1)[0]

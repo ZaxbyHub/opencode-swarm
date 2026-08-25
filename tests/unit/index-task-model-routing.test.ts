@@ -124,8 +124,13 @@ async function dispatchCoderTask(
 
 describe('index task-model routing integration', () => {
 	let directory = '';
+	let configDirectory = '';
+	let previousXdgConfigHome: string | undefined;
 
 	beforeEach(() => {
+		previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
+		configDirectory = makeProject();
+		process.env.XDG_CONFIG_HOME = configDirectory;
 		resetSwarmState();
 		resetTaskModelRoutingStateForTests();
 		directory = makeProject();
@@ -134,6 +139,11 @@ describe('index task-model routing integration', () => {
 	});
 
 	afterEach(() => {
+		if (previousXdgConfigHome === undefined) {
+			delete process.env.XDG_CONFIG_HOME;
+		} else {
+			process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
+		}
 		resetSwarmState();
 		resetTaskModelRoutingStateForTests();
 		resetTelemetryForTesting();
@@ -142,6 +152,7 @@ describe('index task-model routing integration', () => {
 		severeInternals.childBindings.clear();
 		try {
 			fs.rmSync(directory, { recursive: true, force: true });
+			fs.rmSync(configDirectory, { recursive: true, force: true });
 		} catch {
 			// best-effort
 		}
