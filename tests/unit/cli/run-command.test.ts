@@ -8,7 +8,6 @@ import {
 	mock,
 	spyOn,
 } from 'bun:test';
-
 // Mock console methods BEFORE importing
 const mockConsoleLog = spyOn(console, 'log').mockImplementation(() => {});
 const mockConsoleError = spyOn(console, 'error').mockImplementation(() => {});
