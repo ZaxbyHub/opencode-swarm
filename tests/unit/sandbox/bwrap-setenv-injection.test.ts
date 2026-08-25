@@ -41,11 +41,12 @@ import {
  * probe.
  *
  * NOTE ON CI: no CI job would have caught this. Both the `unit` job and the
- * merge-queue `coverage` gate run ONE FILE PER PROCESS
- * (`scripts/ci/run-coverage-gate.sh:53` loops and invokes
- * `bun test --isolate` per file, per issue #1712). What contamination breaks is
- * a plain local `bun test a.test.ts b.test.ts` — which developers run
- * constantly — so the seam matters for the humans, not for the build.
+ * merge-queue `coverage` gate run ONE FILE PER PROCESS (the coverage gate via
+ * the per-file `bun test --isolate --coverage` loop in
+ * `scripts/ci/run-coverage-gate.sh`; the unit job via its own per-file wrapper
+ * `scripts/ci/run-test-with-timeout.ts`; per issue #1712). What contamination
+ * breaks is a plain local `bun test a.test.ts b.test.ts` — which developers
+ * run constantly — so the seam matters for the humans, not for the build.
  *
  * The seam is per-module and genuinely restorable, so the original is captured
  * once here and put back after every test.

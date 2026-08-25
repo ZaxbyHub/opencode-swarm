@@ -225,8 +225,8 @@ All of these must be green. They run automatically on every PR.
 |---|---|
 | `quality` | TypeScript compiles (`tsc --noEmit`), Biome lint + format clean |
 | `unit` (Ubuntu, macOS, Windows) | Unit tests pass on all platforms |
-| `coverage` (merge queue only) | Code coverage ≥ 41.48% (enforced via `bun test --coverage`) |
-| `dist-check` | Committed `dist/` matches a fresh build |
+| `unit-passed` | Aggregate of every `unit` matrix cell (fails fast in the merge queue when any cell fails, instead of leaving the queue to time out on skipped downstream checks) |
+| `coverage` (merge queue only) | Code coverage ≥ 65.00% over the merged union of the 6-way `coverage-shard` matrix (issue #2341; fail-closed if any shard report is missing) |
 | `package-check` | Package metadata and publishable artifact checks pass |
 | `integration` (Ubuntu) | Integration tests pass (circuit breakers, gate workflows, state machines) |
 | `security` (Ubuntu) | Security and adversarial tests pass |
@@ -389,5 +389,5 @@ gh api repos/{owner}/{repo}/git/ref/tags/{tag} --jq '.object.sha'
 - [ ] New tests are in the correct `tests/` subdirectory
 - [ ] Tests updated for any changed behavior (defaults, validation, error messages)
 - [ ] If adding/modifying a workflow, all `uses:` references are SHA-pinned
-- [ ] All CI checks pass locally or remotely as appropriate (`typecheck`, `biome ci`, `unit`, `integration`, `security`, `dist-check`, `package-check`, `php-validation`, `rust-sandbox-runner`, `smoke`)
+- [ ] All CI checks pass locally or remotely as appropriate (`typecheck`, `biome ci`, `unit`, `integration`, `security`, `package-check`, `php-validation`, `rust-sandbox-runner`, `smoke`)
 - [ ] PR description includes a summary and test plan

@@ -139,7 +139,7 @@ Phase 4 also consolidated knowledge-curator tests with shared fixtures (`tests/u
 
 ### Coverage Gate
 
-CI enforces a minimum code coverage threshold (41.48%) on the merge queue. Coverage is measured using `bun test --coverage` with output configured in `bunfig.toml`:
+CI enforces a minimum line-coverage threshold of 65.00% (recalibrated in issue #1778 H4 when the measured set grew to `src/**` + the orphan test trees; measured 73.41% at the time) on the merge queue. Coverage is measured using `bun test --coverage` with output configured in `bunfig.toml`:
 
 ```toml
 # bunfig.toml
@@ -148,7 +148,7 @@ coverageReporter = ["lcov", "text"]
 coverageDir = "./coverage"
 ```
 
-The coverage gate runs in a dedicated `coverage` job (a required status check) but only on `merge_group` events (not on every PR for speed). It runs the full unit suite once with coverage in its own job, separate from the sharded `unit` job, so the long full-suite measurement does not stack onto a unit shard's timeout budget. To measure coverage locally:
+The coverage gate is a required status check but only runs on `merge_group` events (not on every PR, for speed). Since issue #2341 it is sharded: a `coverage-shard` matrix (6 ubuntu shards, the same round-robin partition as the `unit` job) each measures its partition per-file under coverage and uploads its merged lcov, and the dependent `coverage` aggregator job merges all shard reports and enforces the threshold **once** over the union, failing closed if any shard report is missing — a dropped shard can never silently shrink the measured set. To measure coverage locally (unsharded, full set + inline threshold):
 
 ```bash
 bun test --coverage tests/unit/ --timeout 60000

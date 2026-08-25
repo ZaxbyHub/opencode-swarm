@@ -42,11 +42,12 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
  * tests/unit/git/branch.test.ts.
  *
  * NOTE ON CI: no CI job would have caught it. Both the `unit` job and the
- * merge-queue `coverage` gate run ONE FILE PER PROCESS
- * (`scripts/ci/run-coverage-gate.sh:53` loops and invokes `bun test --isolate`
- * per file, per issue #1712). What breaks is a plain local
- * `bun test a.test.ts b.test.ts`. `Bun.spawnSync` is unaffected by a
- * node-module mock, so the fixture is honest under every runner.
+ * merge-queue `coverage` gate run ONE FILE PER PROCESS (the coverage gate via
+ * the per-file `bun test --isolate --coverage` loop in
+ * `scripts/ci/run-coverage-gate.sh`; the unit job via its own per-file wrapper
+ * `scripts/ci/run-test-with-timeout.ts`; per issue #1712). What breaks is a
+ * plain local `bun test a.test.ts b.test.ts`. `Bun.spawnSync` is unaffected by
+ * a node-module mock, so the fixture is honest under every runner.
  *
  * The code under test is unaffected either way — it reaches git via `bunSpawn`.
  */

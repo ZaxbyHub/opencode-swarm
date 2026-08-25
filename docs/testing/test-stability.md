@@ -158,8 +158,9 @@ Do NOT un-quarantine without a merge-group validation run confirming the fix.
 
 When a merge-group CI run fails, `.github/workflows/flake-detection.yml`
 (`workflow_run` trigger) downloads every `flake-annotations-*` artifact
-ci.yml uploads — the per-shard unit annotations AND the coverage job's
-`flake-annotations-coverage` artifact (both jobs run a bounded retry, two
+ci.yml uploads — the per-shard unit annotations AND the coverage shards'
+`flake-annotations-coverage-shard-N` artifacts (the unit shards and the
+coverage shards both run a bounded retry, two
 retries / three attempts total, before treating a failure as real) —
 concatenates them, and runs `scripts/ci/detect-and-quarantine-flakes.sh`.
 The script:
@@ -184,7 +185,7 @@ merge-group run failed, the run goes green and detection never fires — the
 retry is logged in that job's own step output but is not auto-surfaced as a
 quarantine suggestion. This is a property of the trigger, not of any one job:
 it applies to the **unit shards' annotations exactly as much as the coverage
-job's**. Detection only ever sees annotations from runs that failed for some
+shards'**. Detection only ever sees annotations from runs that failed for some
 reason; a run that self-heals everywhere is invisible to it.
 
 ## Known limitations
