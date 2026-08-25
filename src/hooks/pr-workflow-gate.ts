@@ -1602,6 +1602,33 @@ const CAS_ESCAPE_DISCLOSURE =
 const PR_WORKFLOW_LANE_LIVENESS_PROBE_TIMEOUT_MS = 5_000;
 
 /**
+ * How long a pr-review lane may sit pending before `collect_lane_results`
+ * starts probing its host session for a liveness advisory (issue #2280 Part B).
+ * Order-of-minutes by design: far below the 30-minute presumed-stale horizon,
+ * above normal dispatch jitter. Exposed through
+ * `_test_exports.pendingLaneLivenessThresholdMs` and read at CALL time for the
+ * same reason as the probe deadline above — the test clock patches `Date.now()`
+ * without touching timers, so the seam is how a test reaches the boundary
+ * without a wall-clock wait.
+ */
+const PR_WORKFLOW_PENDING_LIVENESS_THRESHOLD_MS = 3 * 60_000;
+
+/**
+ * Pr-review lane modes eligible for the pending-liveness advisory. All five are
+ * covered: discovery (base/micro) lanes stall just as silently as validation
+ * (council/reviewer/critic) lanes, and the evidence run behind this issue lost
+ * whole base waves (issue #2280, second comment). Non-pr-review lanes are never
+ * probed.
+ */
+const PR_WORKFLOW_PENDING_LIVENESS_MODES: ReadonlySet<string> = new Set([
+	'swarm-pr-review:base',
+	'swarm-pr-review:micro',
+	'swarm-pr-review:council',
+	'swarm-pr-review:reviewer',
+	'swarm-pr-review:critic',
+]);
+
+/**
  * The session-status types that count as "provably still running".
  *
  * Deliberately an ALLOWLIST, not `type !== 'idle'`. The SDK's `SessionStatus`
@@ -1678,6 +1705,71 @@ export type PrWorkflowLaneProbeDegradedReason =
 	| 'probe-no-data';
 
 /**
+ * Core session-status probe shared by the fail-open liveness probe below and
+ * the pending-lane liveness advisory (issue #2280 Part B). Same host call,
+ * deadline, and failure taxonomy as the probe; instead of collapsing each
+ * session to allowlist membership it records the status TYPE the host reported
+ * for every record that has one, so a caller can distinguish "live" from
+ * "affirmatively non-live" from "session absent". Failure modes return the
+ * empty map plus a `degradedReason` — a probe that did not fully read its
+ * response never yields a partial map.
+ */
+async function probePrWorkflowLaneSessionStatusTypes(
+	directory: string,
+	records: readonly BackgroundDelegationRecord[],
+	timeoutMs?: number,
+): Promise<{
+	statuses: Map<string, string>;
+	degradedReason?: PrWorkflowLaneProbeDegradedReason;
+}> {
+	const session = _test_exports.getSessionOps();
+	const statusOp = session?.status;
+	if (!session || typeof statusOp !== 'function') {
+		return { statuses: new Map(), degradedReason: 'probe-unavailable' };
+	}
+	// Identity-compared sentinel: the ONLY way to tell "the host took too long"
+	// apart from "the host threw", since withTimeout rejects with this exact
+	// object.
+	const timeoutError = new Error(
+		'PR workflow lane liveness probe exceeded its deadline',
+	);
+	let response: Awaited<ReturnType<NonNullable<typeof statusOp>>> | undefined;
+	try {
+		response = await withTimeout(
+			(async () => statusOp.call(session, { query: { directory } }))(),
+			timeoutMs ?? _test_exports.laneLivenessProbeTimeoutMs,
+			timeoutError,
+		);
+	} catch (error) {
+		return {
+			statuses: new Map(),
+			degradedReason: error === timeoutError ? 'probe-timeout' : 'probe-error',
+		};
+	}
+	try {
+		if (response?.error) {
+			return { statuses: new Map(), degradedReason: 'probe-error' };
+		}
+		const data = response?.data;
+		if (data === null || data === undefined) {
+			return { statuses: new Map(), degradedReason: 'probe-no-data' };
+		}
+		const statuses = new Map<string, string>();
+		for (const record of records) {
+			const subagentSessionId = record.subagentSessionId;
+			if (!subagentSessionId) continue;
+			const type = data[subagentSessionId]?.type;
+			if (typeof type === 'string') {
+				statuses.set(subagentSessionId, type);
+			}
+		}
+		return { statuses };
+	} catch {
+		return { statuses: new Map(), degradedReason: 'probe-error' };
+	}
+}
+
+/**
  * Probe which of `records` have a session the host affirmatively reports as
  * still running (issue #2251).
  *
@@ -1711,50 +1803,165 @@ async function probeAlivePrWorkflowLaneSessions(
 	alive: Set<string>;
 	degradedReason?: PrWorkflowLaneProbeDegradedReason;
 }> {
-	const session = _test_exports.getSessionOps();
-	const statusOp = session?.status;
-	if (!session || typeof statusOp !== 'function') {
-		return { alive: new Set<string>(), degradedReason: 'probe-unavailable' };
+	const probe = await probePrWorkflowLaneSessionStatusTypes(directory, records);
+	if (probe.degradedReason) {
+		return { alive: new Set<string>(), degradedReason: probe.degradedReason };
 	}
-	// Identity-compared sentinel: the ONLY way to tell "the host took too long"
-	// apart from "the host threw", since withTimeout rejects with this exact
-	// object.
-	const timeoutError = new Error(
-		'PR workflow lane liveness probe exceeded its deadline',
-	);
-	let response: Awaited<ReturnType<NonNullable<typeof statusOp>>> | undefined;
+	const alive = new Set<string>();
+	for (const [sessionId, type] of probe.statuses) {
+		if (isLiveSessionStatusType(type)) alive.add(sessionId);
+	}
+	return { alive };
+}
+
+/** One still-pending pr-review lane's host liveness reading (issue #2280 Part B). */
+export interface PrWorkflowPendingLaneLiveness {
+	laneId: string;
+	/**
+	 * Milliseconds since the lane record last changed — the same aging field
+	 * (`updatedAt`) the 30-minute presumed-stale sweep measures age by, so the
+	 * advisory and the terminal sweep can never disagree about how old a lane is.
+	 */
+	pendingMs: number;
+	/**
+	 * Host session status when known: `'busy'`/`'retry'` are live; any other
+	 * reported type is an affirmative non-live reading; `'absent'` means the host
+	 * enumerated sessions without ours; `'unknown'` means the probe degraded (or
+	 * the record has no session id to probe at all).
+	 */
+	hostStatus: string;
+	/**
+	 * Past threshold AND the host did not affirmatively report the session live
+	 * (non-live status, session absent, or probe degraded). DIAGNOSTIC ONLY — a
+	 * `true` value never cancels, retries, replaces, or settles the lane.
+	 */
+	stalledSuspect: boolean;
+	/**
+	 * Why the reading is not a real host status: the probe's own failure reasons,
+	 * plus `'advisory-unavailable'` when the advisory's surrounding accounting
+	 * failed unexpectedly after the past-threshold set was already known — so an
+	 * emitted entry always distinguishes "degraded" from a missing probe, and an
+	 * ABSENT `pending_liveness` keeps meaning "no lane was past the threshold".
+	 */
+	degradedReason?: PrWorkflowLaneProbeDegradedReason | 'advisory-unavailable';
+}
+
+/**
+ * Bounded, fail-open liveness advisory for still-pending pr-review lanes
+ * (issue #2280 Part B).
+ *
+ * ALERT-ONLY, by design: this reads host session status and reports it; it
+ * never cancels, retries, replaces, or settles anything. A stalled-suspect
+ * critic may still be thinking — automatic replacement would risk duplicate
+ * long-running critics racing on the same items — and the 30-minute
+ * presumed-stale sweep (issue #2251) remains the only terminal backstop.
+ *
+ * Cost model: below the threshold there is NO host round-trip at all; past it,
+ * exactly ONE session-status call regardless of how many lanes are pending,
+ * deadline-bounded through the same `_test_exports` seams as the #2251 probe
+ * and additionally clamped to the caller's remaining collection budget
+ * (`probeBudgetMs`) — the diagnostic must never add wait beyond the budget the
+ * caller already granted the collection itself. Any failure mode degrades
+ * (`hostStatus: 'unknown'`, `stalledSuspect: true`, reason named) instead of
+ * throwing — collection must never block or fail on this advisory.
+ */
+export async function collectPrWorkflowPendingLaneLiveness(
+	directory: string,
+	records: readonly BackgroundDelegationRecord[],
+	options: { probeBudgetMs?: number } = {},
+): Promise<PrWorkflowPendingLaneLiveness[]> {
+	let now = 0;
+	let pastThreshold: BackgroundDelegationRecord[] = [];
+	const degraded = (
+		record: BackgroundDelegationRecord,
+		reason: PrWorkflowPendingLaneLiveness['degradedReason'],
+	): PrWorkflowPendingLaneLiveness => ({
+		laneId: record.laneId ?? record.correlationId,
+		pendingMs: Math.max(0, now - record.updatedAt),
+		hostStatus: 'unknown',
+		stalledSuspect: true,
+		degradedReason: reason,
+	});
 	try {
-		response = await withTimeout(
-			(async () => statusOp.call(session, { query: { directory } }))(),
-			_test_exports.laneLivenessProbeTimeoutMs,
-			timeoutError,
+		now = _test_exports.nowMs();
+		const threshold = _test_exports.pendingLaneLivenessThresholdMs;
+		pastThreshold = records.filter(
+			(record) =>
+				(record.status === 'pending' ||
+					record.status === 'running' ||
+					record.status === 'ingesting') &&
+				record.mode !== undefined &&
+				PR_WORKFLOW_PENDING_LIVENESS_MODES.has(record.mode) &&
+				now - record.updatedAt > threshold,
 		);
-	} catch (error) {
-		return {
-			alive: new Set<string>(),
-			degradedReason: error === timeoutError ? 'probe-timeout' : 'probe-error',
-		};
-	}
-	try {
-		if (response?.error) {
-			return { alive: new Set<string>(), degradedReason: 'probe-error' };
+		if (pastThreshold.length === 0) return [];
+		const budgetMs = Math.max(
+			0,
+			Math.min(
+				_test_exports.laneLivenessProbeTimeoutMs,
+				options.probeBudgetMs ?? Number.POSITIVE_INFINITY,
+			),
+		);
+		if (budgetMs <= 0) {
+			// No caller budget left to spend on the diagnostic: report the
+			// degradation per lane instead of spending host time the caller
+			// did not grant (the same budgeting `getLaneCollectionReadiness`
+			// applies to its status calls).
+			return pastThreshold.map((record) => degraded(record, 'probe-timeout'));
 		}
-		const data = response?.data;
-		if (data === null || data === undefined) {
-			return { alive: new Set<string>(), degradedReason: 'probe-no-data' };
-		}
-		const accumulated = new Set<string>();
-		for (const record of records) {
-			const subagentSessionId = record.subagentSessionId;
-			if (!subagentSessionId) continue;
-			const type = data[subagentSessionId]?.type;
-			if (typeof type === 'string' && isLiveSessionStatusType(type)) {
-				accumulated.add(subagentSessionId);
+		const probe = await probePrWorkflowLaneSessionStatusTypes(
+			directory,
+			pastThreshold,
+			budgetMs,
+		);
+		const advisories: PrWorkflowPendingLaneLiveness[] = [];
+		for (const record of pastThreshold) {
+			const pendingMs = now - record.updatedAt;
+			const laneId = record.laneId ?? record.correlationId;
+			if (probe.degradedReason) {
+				advisories.push({
+					laneId,
+					pendingMs,
+					hostStatus: 'unknown',
+					stalledSuspect: true,
+					degradedReason: probe.degradedReason,
+				});
+				continue;
 			}
+			// A record without a session id never reached the host at all, so
+			// 'absent' ("the host enumerated sessions without ours") would
+			// overclaim — 'unknown' is the honest reading for that shape too.
+			const subagentSessionId = record.subagentSessionId;
+			const type = subagentSessionId
+				? probe.statuses.get(subagentSessionId)
+				: undefined;
+			if (type === undefined) {
+				advisories.push({
+					laneId,
+					pendingMs,
+					hostStatus: subagentSessionId ? 'absent' : 'unknown',
+					stalledSuspect: true,
+				});
+				continue;
+			}
+			advisories.push({
+				laneId,
+				pendingMs,
+				hostStatus: type,
+				stalledSuspect: !isLiveSessionStatusType(type),
+			});
 		}
-		return { alive: accumulated };
+		return advisories;
 	} catch {
-		return { alive: new Set<string>(), degradedReason: 'probe-error' };
+		// The advisory is a diagnostic, never a gate: an unexpected failure in
+		// the surrounding accounting still emits per-lane 'advisory-unavailable'
+		// entries whenever the past-threshold set is already known, so an absent
+		// `pending_liveness` stays unambiguous ("nothing was past the
+		// threshold") instead of silently conflating the two — and the
+		// collection call that hosted the advisory still never fails.
+		return pastThreshold.map((record) =>
+			degraded(record, 'advisory-unavailable'),
+		);
 	}
 }
 
@@ -1865,9 +2072,11 @@ function isOpenPrWorkflowLane(
  * Issue #2251 adds the second, stronger contradiction: a lane PAST the horizon
  * whose session the host affirmatively reports as `busy`/`retry` is genuinely
  * running (nothing heartbeats `updatedAt`, so age alone cannot see this) and is
- * retained instead of discarded. The probe is fail-open — see
- * {@link probeAlivePrWorkflowLaneSessions} — so an unavailable, erroring or
- * empty probe leaves the age-only behaviour exactly as it was.
+ * retained instead of discarded. The probe is fail-open — the settlement
+ * consumes it through the alive-set wrapper {@link
+ * probeAlivePrWorkflowLaneSessions}; the fail-open taxonomy itself lives in
+ * {@link probePrWorkflowLaneSessionStatusTypes} — so an unavailable, erroring
+ * or empty probe leaves the age-only behaviour exactly as it was.
  */
 export async function settlePresumedStalePrWorkflowLanes(
 	directory: string,
@@ -5966,10 +6175,25 @@ export async function assertPrReviewArtifactBoundary(
 	findingIds: string[],
 ): Promise<PrWorkflowGateState> {
 	let state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
-	if (!state.prReviewTriggerEvalPath) {
+	// Issue #2280 Part A: the one exception to trigger-eval-before-findings is
+	// the base-only `post_explorer` checkpoint, admissible after base settlement
+	// and before the micro wave. The inventory check below then validates
+	// against exactly the base-derived candidates: micro sources exist only on
+	// the trigger-eval receipt and council sources are gated on the same field,
+	// so with no receipt the derivation is structurally base-only. Every other
+	// boundary keeps the hard trigger-eval prerequisite, message unchanged.
+	const baseOnlyExplorerCheckpoint =
+		boundary === 'post_explorer' && !state.prReviewTriggerEvalPath;
+	if (!state.prReviewTriggerEvalPath && !baseOnlyExplorerCheckpoint) {
 		throw new Error(
 			'BLOCKED: PR_REVIEW findings persistence requires the trigger evaluation artifact (write_pr_review_trigger_eval must complete first)',
 		);
+	}
+	if (baseOnlyExplorerCheckpoint) {
+		// The returned state is the freshest snapshot; the assignment threads it
+		// through every downstream check here (boundary order, run binding,
+		// candidate inventory) rather than mixing two reads of the gate state.
+		state = await assertPrReviewBaseCoverageSettled(directory, sessionID);
 	}
 	const persistedBoundaries = state.prReviewArtifactBoundaries ?? [];
 	const boundaryOrder: readonly PrReviewArtifactBoundary[] = [
@@ -7682,6 +7906,8 @@ export const _test_exports = {
 		_test_exports.getSessionOps = defaultGetSessionOps;
 		_test_exports.laneLivenessProbeTimeoutMs =
 			PR_WORKFLOW_LANE_LIVENESS_PROBE_TIMEOUT_MS;
+		_test_exports.pendingLaneLivenessThresholdMs =
+			PR_WORKFLOW_PENDING_LIVENESS_THRESHOLD_MS;
 	},
 	beforeTerminalClear: undefined as (() => Promise<void>) | undefined,
 	/**
@@ -7738,6 +7964,12 @@ export const _test_exports = {
 	 * `checkoutMutationActionTimeoutMs` above.
 	 */
 	laneLivenessProbeTimeoutMs: PR_WORKFLOW_LANE_LIVENESS_PROBE_TIMEOUT_MS,
+	/**
+	 * Pending-liveness advisory threshold (issue #2280 Part B), seam-read at
+	 * call time for the same clock reason — a test drives the boundary by
+	 * shortening the threshold, not by waiting minutes.
+	 */
+	pendingLaneLivenessThresholdMs: PR_WORKFLOW_PENDING_LIVENESS_THRESHOLD_MS,
 	resolveCurrentGitHead,
 	resolveCurrentGitHeadAsync,
 	resolveCurrentUpstreamPushTarget,
@@ -9373,30 +9605,42 @@ function derivePrReviewCandidateInventory(
 		});
 	}
 	const selectedCouncilLanes = new Set<string>();
-	for (const batch of [...(state.prReviewValidationBatches ?? [])].reverse()) {
-		if (batch.phase !== 'council') continue;
-		const successful = successfulObligationsFromExactBatch(
-			directory,
-			state,
-			batch.batchId,
-			batch.lanes,
-			'swarm-pr-review:council',
-			batch.validatedAt,
-			true,
-			new Set(),
-			ctx.revisionDigest,
-		);
-		for (const lane of batch.lanes) {
-			if (
-				successful.has(lane.workflowLane) &&
-				!selectedCouncilLanes.has(lane.workflowLane)
-			) {
-				sources.push({
-					batchId: batch.batchId,
-					laneId: lane.laneId,
-					mode: 'swarm-pr-review:council',
-				});
-				selectedCouncilLanes.add(lane.workflowLane);
+	// Council batches are unrecordable before the trigger evaluation completes
+	// (`recordPrReviewValidationBatch` refuses every validation phase without a
+	// receipt), so under normal flow this loop only ever runs with the receipt
+	// present. Gating it on the same field as the micro-source block below keeps
+	// the base-only `post_explorer` checkpoint (issue #2280 Part A) STRUCTURALLY
+	// base-only: a reconstructed or hand-modified state that carries council
+	// batches without a receipt must never widen the inventory an early
+	// checkpoint is validated against.
+	if (state.prReviewTriggerEvalPath) {
+		for (const batch of [
+			...(state.prReviewValidationBatches ?? []),
+		].reverse()) {
+			if (batch.phase !== 'council') continue;
+			const successful = successfulObligationsFromExactBatch(
+				directory,
+				state,
+				batch.batchId,
+				batch.lanes,
+				'swarm-pr-review:council',
+				batch.validatedAt,
+				true,
+				new Set(),
+				ctx.revisionDigest,
+			);
+			for (const lane of batch.lanes) {
+				if (
+					successful.has(lane.workflowLane) &&
+					!selectedCouncilLanes.has(lane.workflowLane)
+				) {
+					sources.push({
+						batchId: batch.batchId,
+						laneId: lane.laneId,
+						mode: 'swarm-pr-review:council',
+					});
+					selectedCouncilLanes.add(lane.workflowLane);
+				}
 			}
 		}
 	}

@@ -172,6 +172,43 @@ describe('lane liveness probe — everything that is not affirmative life settle
 		expect(laneStatusOnDisk(directory, 'c-absent')).toBe('stale');
 	});
 
+	test('mixed statuses: exactly the allowlisted members spare a lane (pins the alive-set projection)', async () => {
+		// Since issue #2280 Part B the probe's host call is shared with the
+		// pending-liveness advisory, which needs every session's status TYPE.
+		// The stale sweep still consumes the alive-SET projection of that map —
+		// this pins the filter: only `busy`/`retry` spare a lane, and a
+		// fabricated future status type (`'cancelled'`) settles rather than
+		// leaking through as alive.
+		await seedStaleLane('sess-mixed', 'intent-architecture', 'c-mixed-busy');
+		await seedStaleLane('sess-mixed', 'correctness-state', 'c-mixed-retry');
+		await seedStaleLane('sess-mixed', 'tests-falsifiability', 'c-mixed-idle');
+		await seedStaleLane('sess-mixed', 'security-trust', 'c-mixed-cancelled');
+		installStatusMap({
+			[laneSubagentSessionId('c-mixed-busy')]: { type: 'busy' },
+			[laneSubagentSessionId('c-mixed-retry')]: { type: 'retry' },
+			[laneSubagentSessionId('c-mixed-idle')]: { type: 'idle' },
+			[laneSubagentSessionId('c-mixed-cancelled')]: { type: 'cancelled' },
+		});
+
+		const settlement = await settlePresumedStalePrWorkflowLanes(
+			directory,
+			'sess-mixed',
+		);
+
+		expect([...(settlement.probedAliveLaneIds ?? [])].sort()).toEqual([
+			'correctness-state',
+			'intent-architecture',
+		]);
+		expect([...(settlement.presumedStaleLaneIds ?? [])].sort()).toEqual([
+			'security-trust',
+			'tests-falsifiability',
+		]);
+		expect(laneStatusOnDisk(directory, 'c-mixed-busy')).toBe('pending');
+		expect(laneStatusOnDisk(directory, 'c-mixed-retry')).toBe('pending');
+		expect(laneStatusOnDisk(directory, 'c-mixed-idle')).toBe('stale');
+		expect(laneStatusOnDisk(directory, 'c-mixed-cancelled')).toBe('stale');
+	});
+
 	test('a truthy `error` on the response settles with probe-error', async () => {
 		await seedStaleLane('sess-err', 'intent-architecture', 'c-err');
 		installStatus(async () => ({ error: { message: 'host refused' } }));

@@ -705,9 +705,15 @@ Persist after every major validation boundary (Profile A via the controller
 calls below; Profiles B/C by appending the same boundary-tagged records to the
 ledger file):
 
-1. **Post-explorer:** after Phase 3/4 candidate parsing and before reviewer
-   dispatch, call `write_pr_review_artifact` with `boundary: "post_explorer"`
-   and all candidates as `PENDING` with their lane provenance.
+1. **Post-explorer:** persist as soon as the base wave settles and its
+   candidates parse — BEFORE micro dispatch — by calling
+   `write_pr_review_artifact` with `boundary: "post_explorer"` and the
+   base-derived candidates as `PENDING` with their lane provenance. This
+   base-only write is the compaction recovery point for everything before
+   trigger evaluation; it must cover exactly the base-derived inventory
+   (micro ids are refused as `extra:` at this point). After trigger
+   evaluation a full-inventory `post_explorer` write (base+micro) is also
+   admissible and supersedes the early checkpoint as the recovery point.
 2. **Post-reviewer:** after Phase 6 reviewer validation, call the controller
    with `boundary: "post_reviewer"` and update each reviewed
    record to `CONFIRMED`, `DISPROVED`, `PRE_EXISTING`, or keep `PENDING` with a
@@ -716,18 +722,25 @@ ledger file):
    `boundary: "post_critic"` and update final status, the authoritative
    `severity`, and final reporting or handoff action.
 
-**Enforced order, dispositions, and error reporting (Profile A).** Checkpoints
-are admitted only after the trigger evaluation completes, then strictly
+**Enforced order, dispositions, and error reporting (Profile A).** The
+trigger evaluation must complete before every findings boundary EXCEPT the
+base-only `post_explorer` write above, which is admissible right after base
+settlement (issue #2280); beyond that exception checkpoints run strictly
 `post_explorer` → `post_reviewer` → `post_critic`, each requiring the prior
-checkpoint persisted; records must match the authoritative reviewer/critic
+checkpoint persisted, and `post_reviewer`/`post_critic` must exactly cover
+the FULL (base+micro) candidate inventory against the persisted trigger-eval
+artifact; records must match the authoritative reviewer/critic
 verdict rows, and an invalid payload is rejected in ONE call listing every
 violation as `finding_id: field expected <value>, got <value>`. Full contract
 (write order, dispositions, severity authority table, handoff schema):
 references/findings-persistence-contract.md.
 
 Resume/reload procedure: read the latest `findings.jsonl` and reconstruct the
-ledger from disk before dispatching more lanes; surface a missing artifact as a
-coverage gap, never reclassify from memory; append (latest record wins).
+ledger from disk before dispatching more lanes; the base-only `post_explorer`
+checkpoint alone is enough to resume after a compaction between base
+settlement and the micro wave (re-dispatch micro, re-run trigger evaluation,
+then continue with full-inventory boundaries); surface a missing artifact as
+a coverage gap, never reclassify from memory; append (latest record wins).
 
 ---
 
@@ -944,7 +957,7 @@ sequential candidate-generation passes with the same per-lane ledger records.
 The join barrier is universal: all base lanes settle before Phase 4 completes
 or synthesis begins, whichever layer enforces it.
 
-**Incremental collection (Profile A):** While base lanes are running, poll with `collect_lane_results` (without `wait` (or `wait: false`)) to check progress and process settled lanes as they complete — call `retrieve_lane_output` for full text when `output_ref` is present, then extract candidates via `parse_lane_candidates`, update the candidate ledger, validate output quality — while continuing independent architect work (obligation refinement, micro-lane trigger checks, local reads) between polls. Only use `wait: true` if lanes are still pending and no more independent work remains. Under Profile B, harvest each subagent report as it completes and update the ledger between arrivals; block on stragglers only when no independent work remains.
+**Incremental collection (Profile A):** While base lanes are running, poll with `collect_lane_results` (without `wait` (or `wait: false`)) to check progress and process settled lanes as they complete — call `retrieve_lane_output` for full text when `output_ref` is present, then extract candidates via `parse_lane_candidates`, update the candidate ledger, validate output quality — while continuing independent architect work (obligation refinement, micro-lane trigger checks, local reads) between polls. Only use `wait: true` if lanes are still pending and no more independent work remains. While polling, a `pending_liveness` entry on a still-pending lane is a DIAGNOSTIC only (issue #2280): `stalledSuspect: true` means the lane has been pending for minutes and the host does not report its session live — note the lane id, `pendingMs`, and `hostStatus` and investigate, but never auto-cancel, retry, or replace the lane on this signal; the ~30-minute presumed-stale sweep remains the only terminal backstop. Under Profile B, harvest each subagent report as it completes and update the ledger between arrivals; block on stragglers only when no independent work remains.
 
 Inline `output` is delivered on the first poll that observes a lane settled; subsequent polls carry `output_omitted_repeat: true` with metadata and `output_ref`, and full text is retrieved via `retrieve_lane_output`.
 
@@ -1029,8 +1042,10 @@ candidate parser rather than preview-text extraction:
 If a lane has `output_degraded: true`, no usable `output_ref`, or `transcript_incomplete: true` without typed positive-candidate recovery, apply the COVERAGE GATE (Phase 3). An incomplete base or micro discovery lane may proceed only when it is explicitly named by a `salvaged_workflow_lane_recoveries` entry whose `kind` is `transcript-incomplete-terminal-candidate`; that recovery validates the retained positive `[CANDIDATE]` row only. Council, reviewer, and critic lanes never qualify for this incomplete-transcript recovery and must retry. Recovery never validates `[CLEAN]`, candidate absence, an unowned sibling lane, or an incomplete lane with no matching entry. Do not use blocking or direct-Task fallbacks while the controller is active, mark affected candidates UNVERIFIED to proceed, or infer candidate absence from a preview. Under Profiles B/C, which have no typed recovery validation, a truncated, incomplete, empty, or attestation-free subagent report is the same lane-output failure and takes the same COVERAGE GATE.
 
 After candidate parsing and before reviewer dispatch, persist the post-explorer
-candidate ledger; it is admitted only once trigger-eval completes — from then it
-is the durable recovery point for context compaction ahead of Phase 6.
+candidate ledger. The base-only write is admissible immediately after base
+settlement — it is the durable recovery point for context compaction from base
+settlement onward; once trigger evaluation completes, a full-inventory
+(base+micro) `post_explorer` write may refresh it ahead of Phase 6.
 
 **Profiles B/C row convention:** without the parser, the `[CANDIDATE]` row
 format is the extraction contract itself. Explorers emit the rows directly in

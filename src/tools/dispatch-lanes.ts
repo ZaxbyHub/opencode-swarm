@@ -63,6 +63,7 @@ import {
 	assertPrReviewBaseCoverageSettled,
 	bindPrReviewBase,
 	bindPrReviewTriggerLedger,
+	collectPrWorkflowPendingLaneLiveness,
 	declarePrFeedbackInventory,
 	describePrWorkflowRevisionDigestFailure,
 	enforcePrFeedbackVerificationOwnership,
@@ -76,6 +77,7 @@ import {
 	PrReviewResilienceCircuitOpenError,
 	PrReviewResilienceRetryExhaustedError,
 	type PrReviewVerdictCollectionReceipt,
+	type PrWorkflowPendingLaneLiveness,
 	readPrWorkflowGateState,
 	recordPrFeedbackGateBatch,
 	recordPrReviewValidationBatch,
@@ -804,6 +806,13 @@ export interface CollectLaneResultsResult {
 	consumed: number;
 	all_settled: boolean;
 	lane_results: DispatchLaneResult[];
+	/**
+	 * Alert-only host liveness advisory for still-pending pr-review lanes past
+	 * the pending-liveness threshold (issue #2280 Part B). Present only when at
+	 * least one such lane exists; never affects `success`, counts, settlement,
+	 * or any lane's state.
+	 */
+	pending_liveness?: PrWorkflowPendingLaneLiveness[];
 	errors?: string[];
 }
 
@@ -1847,6 +1856,21 @@ export async function executeCollectLaneResults(
 			reviewReceipts: reviewReceiptFallbacks,
 		},
 	);
+	if (result.pending > 0) {
+		// Issue #2280 Part B: alert-only liveness advisory for long-pending
+		// pr-review lanes. Fail-open (degrades per lane on any failure), bounded
+		// (at most one host probe call, none below the threshold, none beyond
+		// the caller's remaining collection budget), and never mutates lane
+		// state or blocks collection.
+		const pendingLiveness = await collectPrWorkflowPendingLaneLiveness(
+			directory,
+			records,
+			{ probeBudgetMs: Math.max(0, deadline - _internals.now()) },
+		);
+		if (pendingLiveness.length > 0) {
+			result.pending_liveness = pendingLiveness;
+		}
+	}
 	if (hostTimeouts.size > 0) {
 		result.message =
 			result.pending > 0
@@ -4254,7 +4278,7 @@ export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
 export const collect_lane_results: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Collect or poll results for a dispatch_lanes_async batch. Supports two modes: (1) non-blocking poll (wait omitted or false) — performs one collection pass and returns current lane status, including pending lane identities by default, and any settled results so you can process completed lanes while continuing independent work; (2) blocking join (wait: true) — polls until all lanes settle or the collection wait budget expires. Busy/retry lanes do not become stale solely because they run for a long time. Does not advance workflow gates.',
+			'Collect or poll results for a dispatch_lanes_async batch. Supports two modes: (1) non-blocking poll (wait omitted or false) — performs one collection pass and returns current lane status, including pending lane identities by default, and any settled results so you can process completed lanes while continuing independent work; (2) blocking join (wait: true) — polls until all lanes settle or the collection wait budget expires. Busy/retry lanes do not become stale solely because they run for a long time; pr-review lanes pending for minutes additionally carry an alert-only pending_liveness diagnostic (lane id, elapsed ms, host session status, stalledSuspect) that never cancels or replaces anything. Does not advance workflow gates.',
 		args: {
 			batch_id: CollectLaneResultsArgsSchema.shape.batch_id,
 			wait: CollectLaneResultsArgsSchema.shape.wait,
