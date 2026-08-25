@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.147.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.147.0...v7.147.1) (2026-08-25)
+
+
+### Bug Fixes
+
+* **ci:** shard the merge-queue coverage gate and raise the queue timeout ([b77e634](https://github.com/ZaxbyHub/opencode-swarm/commit/b77e634f1bbb7524efca4be5bb5a973e286bf8ac))
+* **ci:** shard the merge-queue coverage gate and raise the queue timeout ([b707792](https://github.com/ZaxbyHub/opencode-swarm/commit/b707792e4c2f7e1ba9d392b51573bdd7dc65893d)), closes [#2341](https://github.com/ZaxbyHub/opencode-swarm/issues/2341)
+* **guardrails:** unify invocation failure recovery ([97dc624](https://github.com/ZaxbyHub/opencode-swarm/commit/97dc624b391c8e2e80ed42f4bfa37876554c24cb))
+
 ## [7.147.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.146.5...v7.147.0) (2026-08-25)
 
 
