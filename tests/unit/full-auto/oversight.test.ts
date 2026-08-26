@@ -109,11 +109,22 @@ describe('dispatchFullAutoOversight fail-closed behavior', () => {
 		// Event must have been written.
 		const eventsPath = path.join(tmpDir, '.swarm', 'events.jsonl');
 		expect(fs.existsSync(eventsPath)).toBe(true);
+		// #2039: skip the manifest header line — only EVENT lines count.
 		const lines = fs
 			.readFileSync(eventsPath, 'utf-8')
 			.trim()
 			.split('\n')
-			.filter(Boolean);
+			.filter(Boolean)
+			.filter((line) => {
+				try {
+					return (
+						(JSON.parse(line) as { type?: unknown }).type !==
+						'swarm-events-manifest'
+					);
+				} catch {
+					return true;
+				}
+			});
 		expect(lines.length).toBe(1);
 		const event = JSON.parse(lines[0]);
 		expect(event.type).toBe('full_auto_oversight');

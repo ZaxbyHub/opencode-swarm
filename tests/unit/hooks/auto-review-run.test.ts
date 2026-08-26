@@ -22,11 +22,15 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
 function readEvents(): Array<Record<string, unknown>> {
 	const target = path.join(tmpDir, '.swarm', 'events.jsonl');
 	if (!fs.existsSync(target)) return [];
-	return fs
-		.readFileSync(target, 'utf8')
-		.split(/\r?\n/)
-		.filter(Boolean)
-		.map((line) => JSON.parse(line));
+	return (
+		fs
+			.readFileSync(target, 'utf8')
+			.split(/\r?\n/)
+			.filter(Boolean)
+			// Skip the core event store manifest header (issue #2039).
+			.filter((line) => !line.includes('swarm-events-manifest'))
+			.map((line) => JSON.parse(line))
+	);
 }
 
 beforeEach(() => {

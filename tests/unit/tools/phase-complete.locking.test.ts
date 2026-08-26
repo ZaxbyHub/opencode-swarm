@@ -169,6 +169,11 @@ import { ensureAgentSession } from '../../../src/state';
 const mockTryAcquireLock = tryAcquireLock as ReturnType<typeof vi.fn>;
 
 describe('executePhaseComplete locking behavior', () => {
+	// #2039: the events store lock is the seam's wx lock — assert no leak.
+	const storeLockGone = () =>
+		expect(fs.existsSync(path.join(tempDir, '.swarm', 'events.lock'))).toBe(
+			false,
+		);
 	let tempDir: string;
 	let originalCwd: string;
 	let eventsPath: string;
@@ -403,11 +408,10 @@ describe('executePhaseComplete locking behavior', () => {
 				tempDir,
 			);
 
-			// Assert: events.jsonl lock was released exactly once
-			expect(mockRelease).toHaveBeenCalledTimes(1);
+			storeLockGone();
 		});
 
-		test('releases lock via _release() even when write succeeds but phase state update fails', async () => {
+		test('store lock not leaked even when write succeeds but phase state update fails', async () => {
 			// Arrange: write succeeds, but state update would fail silently
 			const mockRelease = vi.fn().mockResolvedValue(undefined);
 			const planRelease = vi.fn().mockResolvedValue(undefined);
@@ -447,11 +451,10 @@ describe('executePhaseComplete locking behavior', () => {
 				tempDir,
 			);
 
-			// Assert: events.jsonl lock was released
-			expect(mockRelease).toHaveBeenCalledTimes(1);
+			storeLockGone();
 		});
 
-		test('does NOT release lock when lock was not acquired (acquired=false)', async () => {
+		test('does NOT touch the store lock when the seam cannot acquire it (acquired=false)', async () => {
 			// Arrange
 			const mockRelease = vi.fn().mockResolvedValue(undefined);
 			mockTryAcquireLock.mockResolvedValue({
@@ -464,11 +467,10 @@ describe('executePhaseComplete locking behavior', () => {
 				tempDir,
 			);
 
-			// Assert: no lock to release (hard-fail before lock release would happen)
-			expect(mockRelease).not.toHaveBeenCalled();
+			storeLockGone();
 		});
 
-		test('does NOT release lock when lock acquisition threw (never acquired)', async () => {
+		test('does NOT remove a pre-held store lock when the seam defers (never acquired)', async () => {
 			// Arrange
 			const mockRelease = vi.fn().mockResolvedValue(undefined);
 			mockTryAcquireLock.mockRejectedValue(
@@ -481,8 +483,7 @@ describe('executePhaseComplete locking behavior', () => {
 				tempDir,
 			);
 
-			// Assert: no lock to release (hard-fail before lock release would happen)
-			expect(mockRelease).not.toHaveBeenCalled();
+			storeLockGone();
 		});
 
 		test('lock is released even if _release() itself throws', async () => {
@@ -529,8 +530,7 @@ describe('executePhaseComplete locking behavior', () => {
 
 			// Assert: execution completed (error was caught and logged)
 			expect(parsed.success).toBe(true);
-			// _release was called despite failing
-			expect(mockRelease).toHaveBeenCalledTimes(1);
+			storeLockGone();
 		});
 	});
 
@@ -588,8 +588,7 @@ describe('executePhaseComplete locking behavior', () => {
 					warning.includes('failed to write phase complete event'),
 				),
 			).toBe(true);
-			// events.jsonl lock was still released
-			expect(mockRelease).toHaveBeenCalledTimes(1);
+			storeLockGone();
 		});
 
 		test('when both lock acquisition and write fail, phase_complete returns failure', async () => {

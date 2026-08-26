@@ -14,6 +14,7 @@ import { createCriticAutonomousOversightAgent } from '../agents/critic';
 import { getSwarmAgents, resolveFallbackModel } from '../agents/index.js';
 import type { PluginConfig } from '../config';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
+import { appendCoreEventSync } from '../events/core-events.js';
 import {
 	classifyProviderFailure,
 	isRetryableProviderFailure,
@@ -37,7 +38,6 @@ import {
 	startFullAutoRun,
 	terminateFullAutoRun,
 } from '../full-auto/state';
-import { tryAcquireLock } from '../parallel/file-locks.js';
 import { _internals as stateInternals } from '../state.js';
 import { telemetry } from '../telemetry';
 import { sleep } from '../utils/bun-compat';
@@ -257,8 +257,8 @@ function escalationTypeToInteractionMode(
 }
 
 /**
- * Writes an auto_oversight event to .swarm/events.jsonl.
- * Follows the same pattern as phase-complete.ts: lock acquisition + validateSwarmPath + appendFileSync.
+ * Writes an auto_oversight event to .swarm/events.jsonl through the core
+ * event append seam (issue #2039).
  */
 async function writeAutoOversightEvent(
 	directory: string,
@@ -282,47 +282,13 @@ async function writeAutoOversightEvent(
 		deadlock_count: deadlockCount,
 	};
 
-	const lockTaskId = `auto-oversight-${Date.now()}`;
-	const eventsFilePath = 'events.jsonl';
-	const dir = directory;
-
-	let lockResult: Awaited<ReturnType<typeof tryAcquireLock>> | undefined;
 	try {
-		lockResult = await tryAcquireLock(
-			dir,
-			eventsFilePath,
-			'auto-oversight',
-			lockTaskId,
-		);
-	} catch (error) {
-		logger.warn(
-			`[full-auto-intercept] Warning: failed to acquire lock for auto_oversight event: ${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
-	if (!lockResult?.acquired) {
-		logger.warn(
-			`[full-auto-intercept] Warning: could not acquire lock for events.jsonl write — proceeding without lock`,
-		);
-	}
-	try {
-		const eventsPath = validateSwarmPath(dir, 'events.jsonl');
-		fs.appendFileSync(eventsPath, `${JSON.stringify(event)}\n`, 'utf-8');
+		appendCoreEventSync(directory, { ...event });
 	} catch (writeError) {
 		logger.error(
 			`[full-auto-intercept] Failed to write auto_oversight event: ${writeError instanceof Error ? writeError.message : String(writeError)}`,
 		);
 		throw writeError;
-	} finally {
-		if (lockResult?.acquired && lockResult.lock._release) {
-			try {
-				await lockResult.lock._release();
-			} catch (releaseError) {
-				logger.error(
-					`[full-auto-intercept] Lock release failed:`,
-					releaseError,
-				);
-			}
-		}
 	}
 }
 

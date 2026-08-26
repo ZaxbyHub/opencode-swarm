@@ -4,13 +4,29 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
-import { tryAcquireLock } from '../../../src/parallel/file-locks';
 import { resetStartupLedgerCheck } from '../../../src/plan/manager';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { executeUpdateTaskStatus } from '../../../src/tools/update-task-status';
 import { resetSwarmArtifactCache } from '../../../src/utils/swarm-artifact-cache';
 import { writeApprovedPlan } from '../../helpers/approved-plan';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+
+/**
+ * #2039: the events store lock is now the seam-owned `.swarm/events.lock`
+ * (`openSync` wx create, stale-broken after 5 minutes). The former
+ * per-module `tryAcquireLock(..., 'events.jsonl', ...)` proper-lockfile
+ * calls are gone, so contention is simulated by creating the lock file
+ * directly and removing it to release.
+ */
+function holdStoreLock(dir: string): void {
+	const lockPath = path.join(dir, '.swarm', 'events.lock');
+	const fd = fs.openSync(lockPath, 'wx');
+	fs.closeSync(fd);
+}
+
+function releaseStoreLock(dir: string): void {
+	fs.rmSync(path.join(dir, '.swarm', 'events.lock'), { force: true });
+}
 
 const config = {
 	max_iterations: 5,
@@ -135,26 +151,21 @@ describe('issue #2098 FB-001 delegation-gate task-repair recovery degrades inste
 		fs.mkdirSync(swarmDir, { recursive: true });
 		if (!fs.existsSync(eventsPath)) fs.writeFileSync(eventsPath, '');
 
-		// Produce a COMMITTED-but-unaudited repair WAL: hold the events.jsonl
+		// Produce a COMMITTED-but-unaudited repair WAL: hold the events store
 		// lock externally while the repair commits, so ensureAuditEvent's
-		// internal tryAcquireLock call fails and the WAL is left COMMITTED with
-		// no corresponding audit event on disk. Same technique as the
-		// sibling test 'retrying after an audit-event lock failure...' in
-		// tests/unit/workflow/task-repair-audit-resilience-2098.test.ts.
-		const commitLock = await tryAcquireLock(
-			directory,
-			'events.jsonl',
-			'external-holder',
-			'blocking-audit-commit',
-		);
-		expect(commitLock.acquired).toBe(true);
+		// seam append fails with CORE_EVENT_STORE_LOCKED (mapped to
+		// TASK_REPAIR_AUDIT_LOCKED by task-repair.ts) and the WAL is left
+		// COMMITTED with no corresponding audit event on disk. Same technique
+		// as the sibling test 'retrying after an audit-event lock failure...'
+		// in tests/unit/workflow/task-repair-audit-resilience-2098.test.ts.
+		holdStoreLock(directory);
 
 		const failed = await executeUpdateTaskStatus(repairArgs(), directory, {
 			sessionID: 'repair-caller',
 		} as never);
 		expect(failed.success).toBe(false);
 
-		await commitLock.lock._release?.();
+		releaseStoreLock(directory);
 
 		const walPath = path.join(swarmDir, 'task-repairs', `${TASK_ID}.json`);
 		const wal = JSON.parse(fs.readFileSync(walPath, 'utf-8')) as {
@@ -169,13 +180,7 @@ describe('issue #2098 FB-001 delegation-gate task-repair recovery degrades inste
 		// NEXT, unrelated tool call's lazy recovery attempt (delegation-gate's
 		// toolBefore calls recoverPreparedTaskRepair opportunistically on every
 		// tool call touching this task while the COMMITTED WAL sits on disk).
-		const recoveryLock = await tryAcquireLock(
-			directory,
-			'events.jsonl',
-			'external-holder',
-			'blocking-audit-recovery',
-		);
-		expect(recoveryLock.acquired).toBe(true);
+		holdStoreLock(directory);
 
 		try {
 			const hook = createDelegationGateHook(config, directory);
@@ -198,7 +203,7 @@ describe('issue #2098 FB-001 delegation-gate task-repair recovery degrades inste
 				),
 			).resolves.toBeUndefined();
 		} finally {
-			await recoveryLock.lock._release?.();
+			releaseStoreLock(directory);
 		}
 	});
 });

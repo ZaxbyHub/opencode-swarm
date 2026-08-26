@@ -10,6 +10,7 @@ import {
 } from '../config/cache-paths.js';
 import { loadPluginConfig } from '../config/loader';
 import type { Plan } from '../config/plan-schema';
+import { getCoreEventCoverage, readCoreEvents } from '../events/core-events.js';
 import { getDurableGateEvidenceStatusForTask } from '../evidence/gate-bridge.js';
 import { listEvidenceTaskIds } from '../evidence/manager';
 import { listBlockingActionCircuitsForInvocation } from '../failures/action-circuit.js';
@@ -641,14 +642,15 @@ async function checkCheckpointManifest(
 }
 
 /**
- * Check D: Event Stream Integrity - validates .swarm/events.jsonl has no malformed JSON
+ * Check D: Event Stream Integrity - validates the retained window of the
+ * bounded core event store (issue #2039). The read is hard-bounded and
+ * manifest-stripped; corrupt retained tails are still found. Compacted
+ * history is disclosed via coverage rather than re-read.
  */
 async function checkEventStreamIntegrity(
 	directory: string,
 ): Promise<HealthCheck> {
-	const eventsPath = path.join(directory, '.swarm/events.jsonl');
-
-	if (!existsSync(eventsPath)) {
+	if (getCoreEventCoverage(directory) === 'empty') {
 		return {
 			name: 'Event Stream',
 			status: '✅',
@@ -657,8 +659,8 @@ async function checkEventStreamIntegrity(
 	}
 
 	try {
-		const content = readFileSync(eventsPath, 'utf-8');
-		const lines = content.split('\n').filter((line) => line.trim() !== '');
+		const window = readCoreEvents(directory);
+		const lines = window.text.split('\n').filter((line) => line.trim() !== '');
 
 		let malformedCount = 0;
 		for (const line of lines) {
@@ -669,11 +671,16 @@ async function checkEventStreamIntegrity(
 			}
 		}
 
+		const coverageNote =
+			window.coverage === 'truncated'
+				? ' (retained window — compacted history excluded)'
+				: '';
+
 		if (malformedCount === 0) {
 			return {
 				name: 'Event Stream',
 				status: '✅',
-				detail: `events.jsonl is valid — ${lines.length} event(s)`,
+				detail: `events.jsonl is valid — ${lines.length} event(s)${coverageNote}`,
 			};
 		}
 
@@ -692,14 +699,13 @@ async function checkEventStreamIntegrity(
 }
 
 /**
- * Check E: Steering Directive Staleness - checks for unconsumed steering directives
+ * Check E: Steering Directive Staleness - checks for unconsumed steering
+ * directives within the bounded retained window (issue #2039).
  */
 async function checkSteeringDirectives(
 	directory: string,
 ): Promise<HealthCheck> {
-	const eventsPath = path.join(directory, '.swarm/events.jsonl');
-
-	if (!existsSync(eventsPath)) {
+	if (getCoreEventCoverage(directory) === 'empty') {
 		return {
 			name: 'Steering Directives',
 			status: '✅',
@@ -708,8 +714,8 @@ async function checkSteeringDirectives(
 	}
 
 	try {
-		const content = readFileSync(eventsPath, 'utf-8');
-		const lines = content.split('\n').filter((line) => line.trim() !== '');
+		const window = readCoreEvents(directory);
+		const lines = window.text.split('\n').filter((line) => line.trim() !== '');
 
 		const directivesIssued: string[] = [];
 		const consumedIds = new Set<string>();
@@ -731,10 +737,14 @@ async function checkSteeringDirectives(
 		const unconsumed = directivesIssued.filter((id) => !consumedIds.has(id));
 
 		if (unconsumed.length === 0) {
+			const coverageNote =
+				window.coverage === 'truncated'
+					? ' (within the retained event window)'
+					: '';
 			return {
 				name: 'Steering Directives',
 				status: '✅',
-				detail: 'All steering directives acknowledged (or none issued)',
+				detail: `All steering directives acknowledged (or none issued)${coverageNote}`,
 			};
 		}
 

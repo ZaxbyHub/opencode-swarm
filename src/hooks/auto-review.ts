@@ -7,12 +7,12 @@
  * model/diff/persistence decision to the shared review engine.
  */
 
-import * as fs from 'node:fs';
 import {
 	type AutoReviewConfig,
 	AutoReviewConfigSchema,
 	stripKnownSwarmPrefix,
 } from '../config/schema.js';
+import { appendCoreEventSync } from '../events/core-events.js';
 import type { ReviewModelDispatcher } from '../review/contracts.js';
 import { type ReviewEngineResult, runReviewEngine } from '../review/engine.js';
 import {
@@ -24,7 +24,6 @@ import {
 import { swarmState } from '../state.js';
 import * as logger from '../utils/logger.js';
 import { normalizeToolName } from './normalize-tool-name.js';
-import { validateSwarmPath } from './utils.js';
 
 const MAX_TRACKED_SESSIONS = 256;
 const COOLDOWN_MS = 60_000;
@@ -73,8 +72,7 @@ interface AutoReviewEvent {
 
 function writeAutoReviewEvent(directory: string, event: AutoReviewEvent): void {
 	try {
-		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		fs.appendFileSync(eventsPath, `${JSON.stringify(event)}\n`, 'utf8');
+		appendCoreEventSync(directory, { ...event });
 	} catch (error) {
 		logger.warn(
 			`[auto-review] event write failed: ${error instanceof Error ? error.message : String(error)}`,

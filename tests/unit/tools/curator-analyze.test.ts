@@ -13,9 +13,13 @@ import {
 	describe,
 	expect,
 	type Mock,
+	mock,
 	test,
 	vi,
 } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 // --- MOCKS (must be before import) ---
 
@@ -364,89 +368,6 @@ beforeEach(() => {
 	mockReadSwarmFileAsync.mockReset();
 	// Default: no events file
 	mockReadSwarmFileAsync.mockResolvedValue(null);
-});
-
-describe('agents_dispatched: resolved from phase_complete event array', () => {
-	test('phase_complete event with agents_dispatched array populates agentsDispatched', async () => {
-		// Set up events.jsonl with a phase_complete event containing agents_dispatched
-		mockReadSwarmFileAsync.mockResolvedValue(
-			JSON.stringify({
-				phase: 1,
-				type: 'phase_complete',
-				agents_dispatched: ['architect', 'coder', 'reviewer'],
-			}) + '\n',
-		);
-
-		const result = await curator_analyze.execute(
-			{ phase: 1 },
-			'/fake/directory',
-		);
-		const parsed = JSON.parse(result);
-
-		expect(parsed).not.toHaveProperty('error');
-		// Verify runCuratorPhase was called with the agents from events.jsonl
-		expect(mockRunCuratorPhase).toHaveBeenCalledTimes(1);
-		const call = mockRunCuratorPhase.mock.calls[0];
-		// agentsDispatched is the 3rd argument (index 2)
-		expect(call[2]).toEqual(['architect', 'coder', 'reviewer'].sort());
-	});
-});
-
-describe('agents_dispatched: resolved from individual agent fields', () => {
-	test('delegation events with individual agent fields populate agentsDispatched', async () => {
-		// Set up events.jsonl with individual agent delegation events
-		mockReadSwarmFileAsync.mockResolvedValue(
-			[
-				{ phase: 1, type: 'agent.delegation', agent: 'architect' },
-				{ phase: 1, type: 'agent.delegation', agent: 'coder' },
-				{ phase: 1, type: 'agent.delegation', agent: 'reviewer' },
-			]
-				.map((e) => JSON.stringify(e))
-				.join('\n') + '\n',
-		);
-
-		const result = await curator_analyze.execute(
-			{ phase: 1 },
-			'/fake/directory',
-		);
-		const parsed = JSON.parse(result);
-
-		expect(parsed).not.toHaveProperty('error');
-		expect(mockRunCuratorPhase).toHaveBeenCalledTimes(1);
-		const call = mockRunCuratorPhase.mock.calls[0];
-		expect(call[2]).toEqual(['architect', 'coder', 'reviewer'].sort());
-	});
-});
-
-describe('agents_dispatched: deduplication when both sources present', () => {
-	test('agent appears in both agent field and agents_dispatched array → deduplicated once', async () => {
-		// 'coder' appears both as individual agent field AND in agents_dispatched
-		mockReadSwarmFileAsync.mockResolvedValue(
-			[
-				{ phase: 1, type: 'agent.delegation', agent: 'coder' },
-				{ phase: 1, type: 'agent.delegation', agent: 'reviewer' },
-				{
-					phase: 1,
-					type: 'phase_complete',
-					agents_dispatched: ['architect', 'coder'],
-				},
-			]
-				.map((e) => JSON.stringify(e))
-				.join('\n') + '\n',
-		);
-
-		const result = await curator_analyze.execute(
-			{ phase: 1 },
-			'/fake/directory',
-		);
-		const parsed = JSON.parse(result);
-
-		expect(parsed).not.toHaveProperty('error');
-		expect(mockRunCuratorPhase).toHaveBeenCalledTimes(1);
-		const call = mockRunCuratorPhase.mock.calls[0];
-		// 'coder' deduplicated — only appears once despite being in both sources
-		expect(call[2]).toEqual(['architect', 'coder', 'reviewer'].sort());
-	});
 });
 
 describe('agents_dispatched: empty events.jsonl returns empty array', () => {

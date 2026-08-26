@@ -338,6 +338,22 @@ export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 			'newest_timestamp',
 			'coverage',
 		]),
+		// Issue #2039 core event store health: bounded counts and timestamps
+		// only — no event content, no paths.
+		core_events_health: Object.freeze([
+			'trigger',
+			'accepted_count',
+			'compacted_count',
+			'retained_count',
+			'dropped_count',
+			'corrupt_count',
+			'authority_index_count',
+			'authority_evicted_count',
+			'oldest_timestamp',
+			'newest_timestamp',
+			'bytes',
+			'limit_bytes',
+		]),
 	});
 
 const EMPTY_EXTRA: Record<string, unknown> = Object.freeze({});

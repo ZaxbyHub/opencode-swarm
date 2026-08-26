@@ -63,7 +63,10 @@ describe('handleAcknowledgeSpecDriftCommand smoke', () => {
 		)
 			.trim()
 			.split('\n');
-		const event = JSON.parse(events[0]);
+		// #2039: line 1 is the swarm-events-manifest header — parse the EVENT line.
+		const event = JSON.parse(
+			events.find((l) => !l.includes('swarm-events-manifest') ?? '{}'),
+		);
 		expect(event.type).toBe('spec_drift_acknowledged');
 		expect(event.acknowledgedBy).toBe('cli');
 		expect(event.transitionId).toEqual(expect.any(String));

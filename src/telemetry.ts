@@ -116,7 +116,13 @@ export type TelemetryEvent =
 	// Counts only, no per-skill identifiers or filesystem paths — the
 	// adversarial case is thousands of distinct skill IDs, so a per-skill
 	// label would be an unbounded label set.
-	| 'skill_usage_health';
+	| 'skill_usage_health'
+	// Core event store health (issue #2039): bounded counts emitted on
+	// compaction and close for the bounded `.swarm/events.jsonl` store —
+	// accepted/compacted/retained/dropped/corrupt counts, authority-index
+	// size and eviction counts, oldest/newest timestamps, byte figures.
+	// Counts only; no event content, no paths.
+	| 'core_events_health';
 
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =
@@ -973,6 +979,32 @@ export const telemetry = {
 		coverage: boolean;
 	}): void {
 		_internals.emit('skill_usage_health', data);
+	},
+
+	/**
+	 * Core event store health (issue #2039): emitted on compaction and close
+	 * for the bounded `.swarm/events.jsonl` store. Counts ONLY — no event
+	 * content and no filesystem paths, matching the observability contract's
+	 * no-content-in-metrics rule. `authority_index_count` /
+	 * `authority_evicted_count` disclose the authoritative partition's size
+	 * and FIFO-eviction total (eviction is the only reachable
+	 * absent-after-compaction case for authority lookups).
+	 */
+	coreEventsHealth(data: {
+		trigger: 'compaction' | 'close';
+		accepted_count: number;
+		compacted_count: number;
+		retained_count: number;
+		dropped_count: number;
+		corrupt_count: number;
+		authority_index_count: number;
+		authority_evicted_count: number;
+		oldest_timestamp: string | null;
+		newest_timestamp: string | null;
+		bytes: number;
+		limit_bytes: number;
+	}): void {
+		_internals.emit('core_events_health', data);
 	},
 
 	/**

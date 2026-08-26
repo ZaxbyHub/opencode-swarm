@@ -80,7 +80,14 @@ describe('handleDebuggingSpiral', () => {
 			expect(fs.existsSync(eventsPath)).toBe(true);
 
 			const content = fs.readFileSync(eventsPath, 'utf-8');
-			const event = JSON.parse(content.trim());
+			// The bounded store carries a manifest header at line 1 (issue
+			// #2039); the event is the newest (last) non-manifest line.
+			const eventLine = content
+				.trim()
+				.split('\n')
+				.filter((l: string) => !l.includes('swarm-events-manifest'))
+				.pop() as string;
+			const event = JSON.parse(eventLine);
 
 			expect(event.event).toBe('debugging_spiral_detected');
 			expect(event.taskId).toBe('1.1');
@@ -388,7 +395,14 @@ describe('handleDebuggingSpiral', () => {
 			// Verify event file exists
 			const eventsPath = path.join(tempDir, '.swarm', 'events.jsonl');
 			const content = fs.readFileSync(eventsPath, 'utf-8');
-			const event = JSON.parse(content.trim());
+			// The bounded store carries a manifest header at line 1 (issue
+			// #2039); the event is the newest (last) non-manifest line.
+			const eventLine = content
+				.trim()
+				.split('\n')
+				.filter((l: string) => !l.includes('swarm-events-manifest'))
+				.pop() as string;
+			const event = JSON.parse(eventLine);
 			expect(event.event).toBe('debugging_spiral_detected');
 			expect(event.taskId).toBe('5.7');
 

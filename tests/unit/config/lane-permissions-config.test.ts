@@ -7,6 +7,7 @@
  * external_directory key".
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { DEFAULT_WORKTREE_ISOLATION_CONFIG } from '../../../src/config/constants';
 import type { LaneContext } from '../../../src/config/lane-context';
@@ -16,31 +17,34 @@ import {
 } from '../../../src/config/lane-permissions';
 import { WorktreeIsolationConfigSchema } from '../../../src/config/schema';
 import { evaluateExternalDirectory } from '../../helpers/opencode-permission-model';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
-const lane: LaneContext = {
-	lanePath: path.resolve('/tmp/wt/.swarm-worktrees/ses/1.1'),
-	parentProjectPath: path.resolve('/tmp/wt/my-project'),
-};
+let lane: LaneContext;
 
 let warnings: string[];
-let events: Array<{ file: string; record: Record<string, unknown> }>;
 let originals: typeof _internals;
 
 beforeEach(() => {
 	warnings = [];
-	events = [];
+	// #2039: the event record is written through the core event seam
+	// (`appendCoreEventSync`), so the interception asserts on the REAL
+	// `<lane>/.swarm/events.jsonl` (manifest line skipped) instead of
+	// stubbing lane-permissions `_internals.appendFileSync`/`mkdirSync`,
+	// which production no longer calls.
+	lane = {
+		lanePath: canonicalMkdtemp('lane-perms-2039-'),
+		parentProjectPath: canonicalMkdtemp('lane-perms-parent-2039-'),
+	};
 	originals = { ..._internals };
 	_internals.addDeferredWarning = (w: string) => {
 		warnings.push(w);
-	};
-	_internals.mkdirSync = () => undefined;
-	_internals.appendFileSync = (p: string, data: string) => {
-		events.push({ file: p, record: JSON.parse(data) });
 	};
 });
 
 afterEach(() => {
 	Object.assign(_internals, originals);
+	fs.rmSync(lane.parentProjectPath, { recursive: true, force: true });
+	fs.rmSync(lane.lanePath, { recursive: true, force: true });
 });
 
 function asLane(): void {
@@ -48,6 +52,34 @@ function asLane(): void {
 }
 function asOrdinary(): void {
 	_internals.resolveLaneContext = () => null;
+}
+
+function eventsPath(): string {
+	return path.join(lane.lanePath, '.swarm', 'events.jsonl');
+}
+
+/**
+ * The recorded lane-permissions decision events — parsed from the real
+ * `<lane>/.swarm/events.jsonl`, skipping the #2039 manifest header line.
+ */
+function readEventRecords(): Record<string, unknown>[] {
+	if (!fs.existsSync(eventsPath())) return [];
+	return fs
+		.readFileSync(eventsPath(), 'utf-8')
+		.trim()
+		.split('\n')
+		.filter(Boolean)
+		.filter((line) => {
+			try {
+				return (
+					(JSON.parse(line) as { type?: unknown }).type !==
+					'swarm-events-manifest'
+				);
+			} catch {
+				return true;
+			}
+		})
+		.map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
 /** A config shaped like the one the host hands the hook. */
@@ -101,7 +133,7 @@ describe('ordinary (non-lane) sessions are completely unaffected', () => {
 		expect(result).toEqual({ lane: false });
 		expect(config).toEqual(before);
 		expect(warnings).toEqual([]);
-		expect(events).toEqual([]);
+		expect(readEventRecords()).toEqual([]);
 	});
 
 	test('a config with NO permission key does not gain one', () => {
@@ -161,8 +193,9 @@ describe('lane instance — scoped_allow', () => {
 	test('records one structured decision event with allowlist + remedy', () => {
 		asLane();
 		applyLanePermissions(makeConfig(), lane.lanePath, 'scoped_allow');
-		expect(events.length).toBe(1);
-		const record = events[0].record;
+		const records = readEventRecords();
+		expect(records.length).toBe(1);
+		const record = records[0];
 		expect(record.event).toBe('lane_permissions');
 		expect(record.decision).toBe('applied');
 		expect(record.mode).toBe('scoped_allow');
@@ -171,7 +204,7 @@ describe('lane instance — scoped_allow', () => {
 		expect(Array.isArray(record.allowlist)).toBe(true);
 		expect((record.allowlist as unknown[]).length).toBeGreaterThan(0);
 		expect(String(record.remedy)).toContain('external_directory');
-		expect(events[0].file).toContain('.swarm');
+		expect(eventsPath()).toContain('.swarm');
 	});
 });
 
@@ -251,7 +284,7 @@ describe('regression (HIGH-2): no configuration shape can leave a lane at "ask"'
 		};
 		applyLanePermissions(config, lane.lanePath, 'scoped_allow');
 		expect(warnings[0]).toContain('"deny"');
-		const coerced = events[0].record.coercedAskPatterns as string[];
+		const coerced = readEventRecords()[0].coercedAskPatterns as string[];
 		expect(coerced).toContain('*');
 		expect(coerced).toContain('coder.*');
 	});
@@ -274,7 +307,7 @@ describe('regression (HIGH-2): no configuration shape can leave a lane at "ask"'
 					.permission as Record<string, unknown>
 			).external_directory,
 		).toEqual({ '/a/*': 'allow', '/b/*': 'deny' });
-		expect(events[0].record.coercedAskPatterns).toEqual([]);
+		expect(readEventRecords()[0].coercedAskPatterns).toEqual([]);
 	});
 
 	test('a NON-lane session keeps its per-agent ask untouched', () => {
@@ -298,16 +331,21 @@ describe('regression (invariant 4): the event record anchors to the LANE ROOT', 
 		const nested = path.join(lane.lanePath, 'src', 'deep');
 		applyLanePermissions(makeConfig(), nested, 'scoped_allow');
 
-		expect(events.length).toBe(1);
-		const file = events[0].file;
-		expect(file).toBe(path.join(lane.lanePath, '.swarm', 'events.jsonl'));
-		expect(file).not.toContain(path.join('src', '.swarm'));
+		expect(readEventRecords().length).toBe(1);
+		expect(fs.existsSync(eventsPath())).toBe(true);
+		expect(eventsPath()).toBe(
+			path.join(lane.lanePath, '.swarm', 'events.jsonl'),
+		);
+		expect(fs.existsSync(path.join(lane.lanePath, 'src', '.swarm'))).toBe(
+			false,
+		);
 	});
 
 	test('the same anchoring applies on the "off" (skipped) path', () => {
 		asLane();
 		applyLanePermissions(makeConfig(), path.join(lane.lanePath, 'src'), 'off');
-		expect(events[0].file).toBe(
+		expect(readEventRecords().length).toBe(1);
+		expect(eventsPath()).toBe(
 			path.join(lane.lanePath, '.swarm', 'events.jsonl'),
 		);
 	});
@@ -327,7 +365,7 @@ describe('the event record must report the rules actually emitted', () => {
 
 		const rules = (config.permission as Record<string, unknown>)
 			.external_directory as Record<string, string>;
-		const recorded = events[0].record.allowlist as Array<{
+		const recorded = readEventRecords()[0].allowlist as Array<{
 			pattern: string;
 			reason: string;
 		}>;
@@ -365,32 +403,43 @@ describe('lane instance — off', () => {
 		expect(result).toEqual({ lane: true, mode: 'off' });
 		expect(config).toEqual(before);
 		expect(warnings).toEqual([]);
-		expect(events.length).toBe(1);
-		expect(events[0].record.decision).toBe('skipped');
-		expect(String(events[0].record.reason)).toContain('hang');
+		const records = readEventRecords();
+		expect(records.length).toBe(1);
+		expect(records[0].decision).toBe('skipped');
+		expect(String(records[0].reason)).toContain('hang');
 	});
 });
 
 describe('observability failures never break plugin init', () => {
 	test('an events.jsonl write failure is swallowed and rules still applied', () => {
 		asLane();
-		_internals.appendFileSync = () => {
-			throw new Error('EROFS: read-only file system');
-		};
+		// #2039: the write goes through the core event seam, so the realistic
+		// write failure is store-lock contention — hold `.swarm/events.lock`
+		// and let appendCoreEventSync fail with CORE_EVENT_STORE_LOCKED.
+		const swarmDir = path.join(lane.lanePath, '.swarm');
+		fs.mkdirSync(swarmDir, { recursive: true });
+		const lockPath = path.join(swarmDir, 'events.lock');
+		const fd = fs.openSync(lockPath, 'wx');
+		fs.closeSync(fd);
 		const config = makeConfig();
-		expect(() =>
-			applyLanePermissions(config, lane.lanePath, 'scoped_allow'),
-		).not.toThrow();
-		expect(
-			(config.permission as Record<string, unknown>).external_directory,
-		).toBeDefined();
+		try {
+			expect(() =>
+				applyLanePermissions(config, lane.lanePath, 'scoped_allow'),
+			).not.toThrow();
+			expect(
+				(config.permission as Record<string, unknown>).external_directory,
+			).toBeDefined();
+		} finally {
+			fs.rmSync(lockPath, { force: true });
+		}
 	});
 
-	test('an mkdir failure is swallowed', () => {
+	test('a .swarm creation failure is swallowed', () => {
 		asLane();
-		_internals.mkdirSync = () => {
-			throw new Error('EACCES');
-		};
+		// #2039: make `.swarm` un-creatable by occupying the name with a
+		// regular file — the seam's mkdirSync throws and the event write is
+		// best-effort by design.
+		fs.writeFileSync(path.join(lane.lanePath, '.swarm'), 'not a directory');
 		expect(() =>
 			applyLanePermissions(makeConfig(), lane.lanePath, 'scoped_allow'),
 		).not.toThrow();

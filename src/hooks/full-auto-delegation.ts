@@ -22,7 +22,6 @@
  *     event and increment a per-session counter so the cadence/escalation
  *     layer can react.
  */
-import * as fs from 'node:fs';
 import type { PluginConfig } from '../config';
 import { ALL_AGENT_NAMES } from '../config/constants';
 import {
@@ -30,6 +29,7 @@ import {
 	isKnownCanonicalRole,
 	resolveGeneratedAgentRole,
 } from '../config/schema';
+import { appendCoreEventSync } from '../events/core-events.js';
 import { isProtectedPath } from '../full-auto/policy';
 import {
 	clearFullAutoSevereCorrelation,
@@ -42,11 +42,9 @@ import {
 	loadFullAutoRunState,
 	saveFullAutoRunState,
 } from '../full-auto/state';
-import { tryAcquireLock } from '../parallel/file-locks.js';
 import { swarmState } from '../state';
 import * as logger from '../utils/logger';
 import { normalizeToolName } from './normalize-tool-name';
-import { validateSwarmPath } from './utils';
 
 /**
  * The plugin recognises canonical agent ROLES, not full generated agent
@@ -157,39 +155,13 @@ async function writeDelegationEvent(
 	directory: string,
 	event: Record<string, unknown>,
 ): Promise<void> {
-	const lockTaskId = `full-auto-delegation-${Date.now()}`;
-	let lockResult: Awaited<ReturnType<typeof tryAcquireLock>> | undefined;
 	try {
-		lockResult = await tryAcquireLock(
-			directory,
-			'events.jsonl',
-			'full-auto-delegation',
-			lockTaskId,
-		);
-	} catch (error) {
-		logger.warn(
-			`[full-auto/delegation] failed to acquire lock: ${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
-	try {
-		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		fs.appendFileSync(eventsPath, `${JSON.stringify(event)}\n`, 'utf-8');
+		appendCoreEventSync(directory, event);
 	} catch (error) {
 		logger.error(
 			`[full-auto/delegation] failed to write event: ${error instanceof Error ? error.message : String(error)}`,
 		);
 		throw error;
-	} finally {
-		if (lockResult?.acquired && lockResult.lock._release) {
-			try {
-				await lockResult.lock._release();
-			} catch (releaseError) {
-				logger.error(
-					'[full-auto/delegation] lock release failed:',
-					releaseError,
-				);
-			}
-		}
 	}
 }
 

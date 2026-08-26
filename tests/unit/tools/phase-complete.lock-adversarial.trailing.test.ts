@@ -427,7 +427,11 @@ describe('phase_complete adversarial trailing groups', () => {
 			const parsed = JSON.parse(result);
 
 			expect(parsed.success).toBe(true);
-			expect(eventsRelease).toHaveBeenCalledTimes(1);
+			// #2039: the events store lock is the seam's wx lock (released via
+			// unlinkSync-in-finally, no leak); plan.json still uses _release().
+			expect(fs.existsSync(path.join(tempDir, '.swarm', 'events.lock'))).toBe(
+				false,
+			);
 			expect(planRelease).toHaveBeenCalledTimes(1);
 		});
 

@@ -71,6 +71,7 @@ export async function handleResetCommand(
 		'plan-export/SWARM_PLAN.json',
 		'checkpoints.json',
 		'events.jsonl',
+		'events-authority-index.json',
 		// Per-attempt task outcomes keyed by plan task ID. Reset wipes the plan,
 		// so a survivor would attribute the old plan's failures to the new plan's
 		// identically-numbered tasks in the architect's injected run-memory block.

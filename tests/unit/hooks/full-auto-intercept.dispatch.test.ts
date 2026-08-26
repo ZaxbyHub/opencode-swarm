@@ -27,7 +27,7 @@ import {
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-
+import { readCoreEvents } from '../../../src/events/core-events.js';
 // =============================================================================
 // STATE MODULE - Converted to _internals DI seam
 // =============================================================================
@@ -757,11 +757,9 @@ describe('dispatchCriticAndWriteEvent fallback', () => {
 			'critic_oversight',
 		);
 
-		const eventsPath = path.join(testDir, '.swarm', 'events.jsonl');
-		expect(fs.existsSync(eventsPath)).toBe(true);
-
-		const content = fs.readFileSync(eventsPath, 'utf-8');
-		const event = JSON.parse(content.trim());
+		const windowText = readCoreEvents(testDir).text.trim();
+		expect(windowText.length).toBeGreaterThan(0);
+		const event = JSON.parse(windowText.split('\n').pop()!);
 
 		expect(event.type).toBe('auto_oversight');
 		expect(event.critic_verdict).toBe('PENDING');
@@ -790,6 +788,7 @@ describe('dispatchCriticAndWriteEvent fallback', () => {
 
 	it('throws when fallback event write fails', async () => {
 		fs.rmSync(path.join(testDir, '.swarm'), { recursive: true, force: true });
+		fs.writeFileSync(path.join(testDir, '.swarm'), 'not a directory', 'utf-8');
 
 		await expect(
 			dispatchCriticAndWriteEvent(

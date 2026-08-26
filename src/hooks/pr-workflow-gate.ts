@@ -83,6 +83,7 @@ import {
 	type PrReviewResilienceConfig,
 	resolveGeneratedAgentRole,
 } from '../config/schema.js';
+import { appendCoreEventSync } from '../events/core-events.js';
 import {
 	classifyPrWorkflowGitState,
 	type PrWorkflowGitState,
@@ -2233,23 +2234,16 @@ export async function settlePresumedStalePrWorkflowLanes(
 		// Durability is best-effort; the in-memory decision above already stands.
 	}
 	try {
-		await fsp.appendFile(
-			validateSwarmPath(directory, 'events.jsonl'),
-			`${JSON.stringify({
-				type: 'pr_workflow_lanes_presumed_stale',
-				timestamp: isoNow(),
-				sessionID,
-				presumedStaleLanes: presumedStaleLaneIds.slice(
-					0,
-					MAX_DISCLOSED_LANE_IDS,
-				),
-				staleTimeoutMs: PR_WORKFLOW_STALE_LANE_TIMEOUT_MS,
-				probeStatus: probe.degradedReason ?? 'ok',
-				probedAliveLanes: probedAliveLaneIds.slice(0, MAX_DISCLOSED_LANE_IDS),
-				disclosure,
-			})}\n`,
-			'utf-8',
-		);
+		appendCoreEventSync(directory, {
+			type: 'pr_workflow_lanes_presumed_stale',
+			timestamp: isoNow(),
+			sessionID,
+			presumedStaleLanes: presumedStaleLaneIds.slice(0, MAX_DISCLOSED_LANE_IDS),
+			staleTimeoutMs: PR_WORKFLOW_STALE_LANE_TIMEOUT_MS,
+			probeStatus: probe.degradedReason ?? 'ok',
+			probedAliveLanes: probedAliveLaneIds.slice(0, MAX_DISCLOSED_LANE_IDS),
+			disclosure,
+		});
 	} catch {
 		// The audit trail is best-effort; settlement must not depend on it.
 	}
@@ -2645,12 +2639,7 @@ export async function abortPrWorkflow(
 		reason: sanitizedReason,
 	};
 	try {
-		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		await fsp.appendFile(
-			eventsPath,
-			`${JSON.stringify(abortEvent)}\n`,
-			'utf-8',
-		);
+		appendCoreEventSync(directory, abortEvent);
 	} catch {
 		// Non-fatal: the audit trail is best-effort. The gate must clear
 		// regardless so the deadlock does not persist because of a write error.
@@ -2686,60 +2675,56 @@ export async function abortPrWorkflow(
 		// discipline as the abort event — carrying sessionID/mode/prHeadSha so it
 		// correlates with the record it retracts, then re-throw unchanged.
 		try {
-			await fsp.appendFile(
-				validateSwarmPath(directory, 'events.jsonl'),
-				`${JSON.stringify({
-					type: 'pr_workflow_abort_not_completed',
-					timestamp: isoNow(),
-					sessionID: state.sessionID,
-					mode: state.mode,
-					...(state.prHeadSha ? { prHeadSha: state.prHeadSha } : {}),
-					reason: sanitizedReason,
-					// Issue #2251 closeout F1: the override's irreversible finalization is
-					// ordered AFTER the clear, so reaching here means the OVERRIDE never
-					// ran and touched no retained lane. Scoped to the override on purpose
-					// — two broader readings are false and were shipped and retracted
-					// once each. "This abort touched nothing" is false because settlement
-					// durably sweeps the batch's probe-dead lanes before the clear; "the
-					// retained lanes are untouched" is false because a concurrent force
-					// abort can clear and finalize them, which is itself one of the ways
-					// this CAS loses. The disclosure below is hedged to match.
-					...(overridesProbeRetention
-						? {
-								probeRetentionOverrideLanes: overrideTargetedLaneIds.slice(
-									0,
-									MAX_DISCLOSED_LANE_IDS,
-								),
-								probeRetentionOverrideFinalized: false,
-							}
-						: {}),
-					// Reuses the generic diagnostic char cap rather than declaring a
-					// third one-off bound; the value is a plain length ceiling on an
-					// operator-facing string, not a coverage-specific quantity.
-					failure: (error instanceof Error
-						? error.message
-						: String(error)
-					).slice(0, MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS),
-					// Claims only what this catch can actually observe. Every throw
-					// reachable from `clearPrWorkflowGateState` today precedes the
-					// unlink (CAS mismatch, lock acquisition, non-ENOENT rm), so the
-					// gate is in fact still active — but asserting that here would
-					// depend on a swallow in `releaseSessionStateMutationLock` ~8,500
-					// lines away. Making a DURABLE audit record depend on that is the
-					// same defect class this record exists to retract, so it stays
-					// hedged and the operator revalidates.
-					disclosure:
-						'RETRACTION: the pr_workflow_aborted record for this session did NOT complete — ' +
-						'the clear failed and the gate state may still be active. Revalidate the current ' +
-						'session state before retrying the abort.' +
-						(overridesProbeRetention
-							? ' The probe-retention override finalized no record: it runs only after the ' +
-								'clear succeeds, and this clear failed. Other lanes in the same settlement ' +
-								'batch may already have been finalized as presumed-stale, and a concurrent abort for this session may have finalized more — revalidate the lane records rather than assuming they are untouched.'
-							: ''),
-				})}\n`,
-				'utf-8',
-			);
+			appendCoreEventSync(directory, {
+				type: 'pr_workflow_abort_not_completed',
+				timestamp: isoNow(),
+				sessionID: state.sessionID,
+				mode: state.mode,
+				...(state.prHeadSha ? { prHeadSha: state.prHeadSha } : {}),
+				reason: sanitizedReason,
+				// Issue #2251 closeout F1: the override's irreversible finalization is
+				// ordered AFTER the clear, so reaching here means the OVERRIDE never
+				// ran and touched no retained lane. Scoped to the override on purpose
+				// — two broader readings are false and were shipped and retracted
+				// once each. "This abort touched nothing" is false because settlement
+				// durably sweeps the batch's probe-dead lanes before the clear; "the
+				// retained lanes are untouched" is false because a concurrent force
+				// abort can clear and finalize them, which is itself one of the ways
+				// this CAS loses. The disclosure below is hedged to match.
+				...(overridesProbeRetention
+					? {
+							probeRetentionOverrideLanes: overrideTargetedLaneIds.slice(
+								0,
+								MAX_DISCLOSED_LANE_IDS,
+							),
+							probeRetentionOverrideFinalized: false,
+						}
+					: {}),
+				// Reuses the generic diagnostic char cap rather than declaring a
+				// third one-off bound; the value is a plain length ceiling on an
+				// operator-facing string, not a coverage-specific quantity.
+				failure: (error instanceof Error ? error.message : String(error)).slice(
+					0,
+					MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS,
+				),
+				// Claims only what this catch can actually observe. Every throw
+				// reachable from `clearPrWorkflowGateState` today precedes the
+				// unlink (CAS mismatch, lock acquisition, non-ENOENT rm), so the
+				// gate is in fact still active — but asserting that here would
+				// depend on a swallow in `releaseSessionStateMutationLock` ~8,500
+				// lines away. Making a DURABLE audit record depend on that is the
+				// same defect class this record exists to retract, so it stays
+				// hedged and the operator revalidates.
+				disclosure:
+					'RETRACTION: the pr_workflow_aborted record for this session did NOT complete — ' +
+					'the clear failed and the gate state may still be active. Revalidate the current ' +
+					'session state before retrying the abort.' +
+					(overridesProbeRetention
+						? ' The probe-retention override finalized no record: it runs only after the ' +
+							'clear succeeds, and this clear failed. Other lanes in the same settlement ' +
+							'batch may already have been finalized as presumed-stale, and a concurrent abort for this session may have finalized more — revalidate the lane records rather than assuming they are untouched.'
+						: ''),
+			});
 		} catch {
 			// Non-fatal, exactly like the abort event: a failed correction append
 			// must not mask the clear failure the caller has to see.
@@ -2978,19 +2963,14 @@ export async function rebindPrFeedbackHead(
 		updatedAt: isoNow(),
 	};
 	try {
-		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		await fsp.appendFile(
-			eventsPath,
-			`${JSON.stringify({
-				type: 'pr_feedback_rebound',
-				timestamp: isoNow(),
-				sessionID: state.sessionID,
-				previousPrHeadSha: state.prHeadSha,
-				prHeadSha: normalizedHead,
-				rebindCount: nextState.prFeedbackRebindCount,
-			})}\n`,
-			'utf-8',
-		);
+		appendCoreEventSync(directory, {
+			type: 'pr_feedback_rebound',
+			timestamp: isoNow(),
+			sessionID: state.sessionID,
+			previousPrHeadSha: state.prHeadSha,
+			prHeadSha: normalizedHead,
+			rebindCount: nextState.prFeedbackRebindCount,
+		});
 	} catch {
 		// Non-fatal audit trail.
 	}
@@ -8289,18 +8269,13 @@ export async function completePrWorkflow(
 					);
 				}
 				try {
-					const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-					await fsp.appendFile(
-						eventsPath,
-						`${JSON.stringify({
-							type: 'pr_feedback_verified_no_change',
-							timestamp: isoNow(),
-							sessionID: state.sessionID,
-							prHeadSha: state.prHeadSha,
-							items: inventory.length,
-						})}\n`,
-						'utf-8',
-					);
+					appendCoreEventSync(directory, {
+						type: 'pr_feedback_verified_no_change',
+						timestamp: isoNow(),
+						sessionID: state.sessionID,
+						prHeadSha: state.prHeadSha,
+						items: inventory.length,
+					});
 				} catch {
 					// Non-fatal audit trail (same discipline as abort).
 				}

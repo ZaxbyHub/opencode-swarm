@@ -21,6 +21,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
+import { appendCoreEventSync } from '../events/core-events.js';
 import { criticalWarn, warn } from '../utils/logger.js';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import type { MessageWithParts } from './knowledge-types.js';
@@ -485,13 +486,8 @@ export function writeWarnEvent(
 	directory: string,
 	record: Record<string, unknown>,
 ): void {
-	const filePath = path.join(directory, '.swarm', 'events.jsonl');
 	try {
-		const dir = path.dirname(filePath);
-		if (!_internals.existsSync(dir)) {
-			_internals.mkdirSync(dir, { recursive: true });
-		}
-		_internals.appendFileSync(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
+		appendCoreEventSync(directory, record);
 	} catch (err) {
 		warn(
 			`[skill-propagation-gate] failed to write warning event: ${err instanceof Error ? err.message : String(err)}`,

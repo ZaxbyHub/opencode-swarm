@@ -19,6 +19,7 @@ import {
 	SkillImproverConfigSchema,
 	stripKnownSwarmPrefix,
 } from '../config/schema';
+import { appendCoreEventSync } from '../events/core-events.js';
 import { listEvidenceTaskIds, loadEvidence } from '../evidence/manager';
 import {
 	type ParticipationReadResult,
@@ -1933,47 +1934,12 @@ export async function executePhaseComplete(
 		summary: safeSummary ?? null,
 	};
 
-	const lockTaskId = `phase-complete-${Date.now()}`;
-	const eventsFilePath = 'events.jsonl';
-	let lockResult: Awaited<ReturnType<typeof tryAcquireLock>> | undefined;
 	try {
-		lockResult = await tryAcquireLock(
-			dir,
-			eventsFilePath,
-			phaseCommitAgent,
-			lockTaskId,
-		);
-	} catch (error) {
-		warnings.push(
-			`Warning: failed to acquire lock for phase complete event: ${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
-	if (!lockResult?.acquired) {
-		warnings.push(
-			`Warning: could not acquire lock for events.jsonl write — proceeding without lock`,
-		);
-	}
-	// Write happens unconditionally (with or without lock protection)
-	try {
-		const eventsPath = validateSwarmPath(dir, 'events.jsonl');
-		fs.appendFileSync(eventsPath, `${JSON.stringify(event)}\n`, 'utf-8');
+		appendCoreEventSync(dir, { ...event });
 	} catch (writeError) {
 		warnings.push(
 			`Warning: failed to write phase complete event: ${writeError instanceof Error ? writeError.message : String(writeError)}`,
 		);
-	} finally {
-		if (lockResult?.acquired && lockResult.lock._release) {
-			try {
-				await lockResult.lock._release();
-			} catch (releaseError) {
-				logger.warn(
-					'[phase_complete] Lock release failed (non-blocking):',
-					releaseError instanceof Error
-						? releaseError.message
-						: String(releaseError),
-				);
-			}
-		}
 	}
 
 	// Reset phase state on success
