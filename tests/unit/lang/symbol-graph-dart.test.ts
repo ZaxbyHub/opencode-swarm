@@ -181,3 +181,93 @@ import 'pkg2.dart' as q hide Gamma;
 		);
 	});
 });
+
+describe('extractFileSymbols — dart hardening round 2 (#2361 review)', () => {
+	beforeEach(() => {
+		clearParserCache();
+	});
+
+	test('multiline show clause yields ONE import with all bindings (PRR-002)', async () => {
+		const source = `import 'x.dart' show Alpha
+    , Beta;
+void main() {}
+`;
+		const facts = await extractFileSymbols('dart', source);
+		expect(facts).not.toBeNull();
+		expect(facts!.imports).toHaveLength(1);
+		expect(facts!.imports[0]).toMatchObject({
+			specifier: 'x.dart',
+			importType: 'named',
+			bindings: [
+				{ imported: 'Alpha', local: 'Alpha' },
+				{ imported: 'Beta', local: 'Beta' },
+			],
+		});
+	});
+
+	test('conditional import records both URIs (PRR-007)', async () => {
+		const source = `import 'platform.dart' if (dart.library.io) 'io.dart';
+void main() {}
+`;
+		const facts = await extractFileSymbols('dart', source);
+		expect(facts).not.toBeNull();
+		expect(facts!.imports).toContainEqual(
+			expect.objectContaining({ specifier: 'platform.dart' }),
+		);
+		expect(facts!.imports).toContainEqual(
+			expect.objectContaining({ specifier: 'io.dart' }),
+		);
+	});
+
+	test('bare import stays a namespace import with no bindings (R10)', async () => {
+		const facts = await extractFileSymbols('dart', "import 'm.dart';\n");
+		expect(facts).not.toBeNull();
+		expect(facts!.imports).toEqual([
+			{ specifier: 'm.dart', importType: 'namespace', bindings: [] },
+		]);
+	});
+
+	test('CRLF sources produce identical dart defs to LF', async () => {
+		const lf = `class Model {}
+mixin Renderable {}
+void main() {}
+`;
+		const crlf = lf.replace(/\n/g, '\r\n');
+		const lfFacts = await extractFileSymbols('dart', lf);
+		const crlfFacts = await extractFileSymbols('dart', crlf);
+		expect(crlfFacts!.defs).toEqual(lfFacts!.defs);
+	});
+
+	test('import-shaped text inside a multiline string is not an edge (R4)', async () => {
+		const source = `var doc = '''
+import 'phantom.dart';
+''';
+import 'real.dart';
+`;
+		const facts = await extractFileSymbols('dart', source);
+		expect(facts).not.toBeNull();
+		expect(
+			facts!.imports.filter((i) => i.specifier.includes('phantom')),
+		).toHaveLength(0);
+		expect(facts!.imports).toContainEqual(
+			expect.objectContaining({ specifier: 'real.dart' }),
+		);
+	});
+
+	test('triple-quoted strings with inner apostrophes do not flip the mask (round 3)', async () => {
+		const source = `var doc = '''
+it's here
+import 'phantom.dart';
+''';
+import 'real2.dart';
+`;
+		const facts = await extractFileSymbols('dart', source);
+		expect(facts).not.toBeNull();
+		expect(
+			facts!.imports.filter((i) => i.specifier.includes('phantom')),
+		).toHaveLength(0);
+		expect(facts!.imports).toContainEqual(
+			expect.objectContaining({ specifier: 'real2.dart' }),
+		);
+	});
+});

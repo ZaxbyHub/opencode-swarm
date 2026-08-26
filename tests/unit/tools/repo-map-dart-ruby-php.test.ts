@@ -230,3 +230,83 @@ mixin Renderable {}
 		);
 	});
 });
+
+describe('repo_map dart/ruby/php round 2 (#2361 review)', () => {
+	test('require_relative resolves the .rb sibling, not a same-basename .ts (R3)', async () => {
+		write('helper.rb', 'module Helper\n\tdef self.run\n\tend\nend\n');
+		write('helper.ts', 'export const helper = 1;\n');
+		write('main.rb', "require_relative 'helper'\n");
+
+		const build = await callRepoMap({ action: 'build' });
+		expect(build.success).toBe(true);
+
+		const graph = JSON.parse(
+			fs.readFileSync(path.join(root, '.swarm', 'repo-graph.json'), 'utf-8'),
+		);
+		const mainNode = Object.values(graph.nodes).find(
+			(node: any) => node.moduleName === 'main.rb',
+		) as any;
+		expect(mainNode.imports).toContain('./helper');
+		const edge = (graph.edges as any[]).find(
+			(e) => e.importSpecifier === './helper',
+		);
+		// the edge must target the RUBY file, not helper.ts
+		expect(edge.target).toContain('helper.rb');
+		expect(edge.target).not.toContain('helper.ts');
+	});
+
+	test('context_pack serves a private dart symbol span (PRR-027)', async () => {
+		write(
+			'model.dart',
+			`class Public {}
+void _hidden() {}
+`,
+		);
+		const build = await callRepoMap({ action: 'build' });
+		expect(build.success).toBe(true);
+		const context = await callRepoMap({
+			action: 'context_pack',
+			file: 'model.dart',
+			symbol: '_hidden',
+			top_n: 3,
+		});
+		expect(context.success).toBe(true);
+		expect(context.spans).toContainEqual(
+			expect.objectContaining({
+				file: 'model.dart',
+				symbol: '_hidden',
+				startLine: 2,
+			}),
+		);
+	});
+
+	test('AST fail-open preserves export metadata for php (R9)', async () => {
+		write(
+			'Failing.php',
+			`<?php
+namespace App;
+class Kept {
+	public function run() {}
+}
+`,
+		);
+		// Force the async tree-sitter path to fail via the builder's seam so
+		// the sync fallback (scanFile) must supply exports.
+		const builder = await import('../../../src/tools/repo-graph/builder');
+		const original = builder._internals.extractFileSymbols;
+		builder._internals.extractFileSymbols = (() =>
+			Promise.resolve(null)) as typeof original;
+		try {
+			const graph = await builder.buildWorkspaceGraphAsync(root, {
+				maxFiles: 10,
+			});
+			const node = Object.values(graph.nodes).find(
+				(n: any) => n.moduleName === 'Failing.php',
+			) as any;
+			expect(node).toBeDefined();
+			expect(node.exports).toContain('Kept');
+		} finally {
+			builder._internals.extractFileSymbols = original;
+		}
+	});
+});

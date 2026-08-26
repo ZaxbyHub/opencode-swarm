@@ -22,8 +22,11 @@ import * as logger from '../../utils/logger';
 import { containsControlChars } from '../../utils/path-security';
 import { yieldToEventLoop } from '../../utils/timeout';
 import {
+	extractDartSymbols,
 	extractGoSymbols,
+	extractPhpSymbols,
 	extractPythonSymbols,
+	extractRubySymbols,
 	extractRustSymbols,
 	extractTSSymbols,
 } from '../symbols';
@@ -63,7 +66,13 @@ export const _internals: {
 	extractPythonSymbols: typeof extractPythonSymbols;
 	extractRustSymbols: typeof extractRustSymbols;
 	extractGoSymbols: typeof extractGoSymbols;
+	extractDartSymbols: typeof extractDartSymbols;
+	extractRubySymbols: typeof extractRubySymbols;
+	extractPhpSymbols: typeof extractPhpSymbols;
 	parseFileImports: typeof parseFileImports;
+	parseDartFileImports: typeof parseDartFileImports;
+	parseRubyFileImports: typeof parseRubyFileImports;
+	parsePhpFileImports: typeof parsePhpFileImports;
 	extractFileOntology: typeof extractFileOntology;
 	stripComments: typeof stripComments;
 	computeUsedSymbols: typeof computeUsedSymbols;
@@ -75,7 +84,13 @@ export const _internals: {
 	extractPythonSymbols,
 	extractRustSymbols,
 	extractGoSymbols,
+	extractDartSymbols,
+	extractRubySymbols,
+	extractPhpSymbols,
 	parseFileImports,
+	parseDartFileImports,
+	parseRubyFileImports,
+	parsePhpFileImports,
 	extractFileOntology,
 	stripComments,
 	computeUsedSymbols,
@@ -659,9 +674,25 @@ export function resolveModuleSpecifier(
 			// Try to resolve the extensionless path to a real file.
 			// TypeScript/JavaScript imports commonly omit extensions: import { foo } from './utils'
 			// We need to find the actual file: ./utils.ts, ./utils.js, etc.
+			// The importer's OWN language family probes first: a Ruby
+			// `require_relative 'foo'` must not resolve to a sibling foo.ts
+			// when foo.rb exists (PR #2361 review R3).
 			if (!existsSync(resolved)) {
-				const EXTENSIONS =
-					path.extname(sourceFile).toLowerCase() === '.pyw'
+				const importerExt = path.extname(sourceFile).toLowerCase();
+				const FAMILY_FIRST: Record<string, readonly string[]> = {
+					'.rb': ['.rb'],
+					'.rake': ['.rb'],
+					'.gemspec': ['.rb'],
+					'.dart': ['.dart'],
+					'.php': ['.php'],
+					'.phtml': ['.php'],
+					'.py': ['.py'],
+					'.pyw': ['.pyw'],
+					'.rs': ['.rs'],
+					'.go': ['.go'],
+				};
+				const BASE =
+					importerExt === '.pyw'
 						? [
 								'.pyw',
 								'.py',
@@ -673,13 +704,6 @@ export function resolveModuleSpecifier(
 								'.jsx',
 								'.mjs',
 								'.cjs',
-								'.rb',
-								'.rake',
-								'.gemspec',
-								'.dart',
-								'.php',
-								'.phtml',
-								'.json',
 							]
 						: [
 								'.ts',
@@ -692,14 +716,18 @@ export function resolveModuleSpecifier(
 								'.pyw',
 								'.rs',
 								'.go',
-								'.rb',
-								'.rake',
-								'.gemspec',
-								'.dart',
-								'.php',
-								'.phtml',
-								'.json',
 							];
+				const EXTENSIONS = [
+					...(FAMILY_FIRST[importerExt] ?? []),
+					...BASE,
+					'.rb',
+					'.rake',
+					'.gemspec',
+					'.dart',
+					'.php',
+					'.phtml',
+					'.json',
+				].filter((ext, i, all) => all.indexOf(ext) === i);
 				let found: string | null = null;
 				for (const ext of EXTENSIONS) {
 					const candidate = resolved + ext;
@@ -1352,8 +1380,10 @@ function parseCSharpFileImports(rawContent: string): ParsedImport[] {
  */
 function parseDartFileImports(rawContent: string): ParsedImport[] {
 	const imports: ParsedImport[] = [];
+	// `[^;]*` (not `[^;\n]*`) so a show list split across lines is captured
+	// whole — matching the symbol-graph parser's clause handling.
 	for (const match of rawContent.matchAll(
-		/^[ \t]*(import|export)[ \t]+['"]([^'"]+)['"]([^;\n]*)/gm,
+		/^[ \t]*(import|export)[ \t]+['"]([^'"]+)['"]([^;]*)/gm,
 	)) {
 		const clause = match[3];
 		const shown = clause
@@ -2348,6 +2378,23 @@ export function scanFile(
 			({ exports, exportLines } = collectExports(
 				_internals.extractGoSymbols(relativePath, absoluteRoot),
 			));
+		} else if (ext === '.dart') {
+			// Dynamic-language hardening (#1531): the AST fail-open path must
+			// not lose export metadata for the new languages (PR #2361 R9).
+			const relativePath = path.relative(absoluteRoot, filePath);
+			({ exports, exportLines } = collectExports(
+				_internals.extractDartSymbols(relativePath, absoluteRoot),
+			));
+		} else if (ext === '.rb' || ext === '.rake' || ext === '.gemspec') {
+			const relativePath = path.relative(absoluteRoot, filePath);
+			({ exports, exportLines } = collectExports(
+				_internals.extractRubySymbols(relativePath, absoluteRoot),
+			));
+		} else if (ext === '.php' || ext === '.phtml') {
+			const relativePath = path.relative(absoluteRoot, filePath);
+			({ exports, exportLines } = collectExports(
+				_internals.extractPhpSymbols(relativePath, absoluteRoot),
+			));
 		}
 
 		// Parse imports to get specifiers with types
@@ -3128,6 +3175,23 @@ export function buildWorkspaceGraph(
 				const relativePath = path.relative(absoluteRoot, filePath);
 				({ exports, exportLines } = collectExports(
 					_internals.extractGoSymbols(relativePath, absoluteRoot),
+				));
+			} else if (ext === '.dart') {
+				// Dynamic-language hardening (#1531): the AST fail-open path must
+				// not lose export metadata for the new languages (PR #2361 R9).
+				const relativePath = path.relative(absoluteRoot, filePath);
+				({ exports, exportLines } = collectExports(
+					_internals.extractDartSymbols(relativePath, absoluteRoot),
+				));
+			} else if (ext === '.rb' || ext === '.rake' || ext === '.gemspec') {
+				const relativePath = path.relative(absoluteRoot, filePath);
+				({ exports, exportLines } = collectExports(
+					_internals.extractRubySymbols(relativePath, absoluteRoot),
+				));
+			} else if (ext === '.php' || ext === '.phtml') {
+				const relativePath = path.relative(absoluteRoot, filePath);
+				({ exports, exportLines } = collectExports(
+					_internals.extractPhpSymbols(relativePath, absoluteRoot),
 				));
 			}
 

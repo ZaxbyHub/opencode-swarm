@@ -397,6 +397,8 @@ const QUERIES: Record<
 			) @func.def
 			(class_declaration name: (name) @class.name) @class.def
 			(interface_declaration name: (name) @interface.name) @interface.def
+			(trait_declaration name: (name) @trait.name) @trait.def
+			(enum_declaration name: (name) @enum.name) @enum.def
 		`,
 		imports: `
 			(namespace_use_declaration) @import
@@ -1120,6 +1122,25 @@ function lineNumberAt(text: string, index: number): number {
 	return line;
 }
 
+/**
+ * Byte offset just past the line that starts at `offset` and is
+ * `lineLength` long, accounting for the ACTUAL separator width. CRLF sources
+ * consume two bytes per separator; advancing by `lineLength + 1` after
+ * `split(/\r?\n/)` drifts one byte per line, corrupting startLines and
+ * breaking (name, startLine) upsert matching (issue #1526 bug class,
+ * recurred as PR #2361 PRR-001).
+ */
+function advanceLineOffset(
+	source: string,
+	offset: number,
+	lineLength: number,
+): number {
+	const after = offset + lineLength;
+	if (source[after] === '\r' && source[after + 1] === '\n') return after + 2;
+	if (source[after] === '\n' || source[after] === '\r') return after + 1;
+	return after; // final line with no trailing separator
+}
+
 function declarationEnd(source: string, start: number): number {
 	const open = source.indexOf('{', start);
 	const semi = source.indexOf(';', start);
@@ -1140,18 +1161,37 @@ const dartTypeRe =
 	/\b(extension\s+type|class|mixin|enum|extension|typedef)\s+(?!on\b)([A-Za-z_][A-Za-z0-9_]*)/g;
 
 /**
- * Length-preserving comment mask for the regex augmenters: commented-out
- * declarations must not become graph facts. `//`, `#` (php), and block
- * comments become spaces; newlines survive so offsets and line numbers are
- * unchanged. Best-effort: comment markers inside string literals are also
- * masked (conservative in the safe direction — it can only suppress, never
- * invent, a declaration).
+ * Length-preserving lexical mask for the regex augmenters: commented-out or
+ * string-embedded text must not become graph facts, and structural brace/
+ * semicolon scans must not see braces inside literals. `//`, `#` (php), and
+ * block comments become spaces; single/double-quoted string CONTENTS become
+ * spaces (delimiters are kept). Newlines survive so offsets and line numbers
+ * are unchanged. Best-effort, conservative in the safe direction — it can
+ * only suppress, never invent, a declaration or a brace. Heredocs/nowdocs
+ * are not masked here (the ruby augmenter tracks them separately).
  */
 function maskCommentsForAugment(source: string): string {
 	let out = '';
 	let inBlock = false;
+	let quote: '"' | "'" | null = null;
 	for (let i = 0; i < source.length; i++) {
+		const ch = source[i];
 		const two = source.substring(i, i + 2);
+		if (quote !== null) {
+			if (ch === '\\') {
+				// escaped char: blank both
+				out += '  ';
+				i++;
+				continue;
+			}
+			if (ch === quote) {
+				quote = null;
+				out += ch;
+			} else {
+				out += ch === '\n' ? '\n' : ' ';
+			}
+			continue;
+		}
 		if (!inBlock && two === '/*') {
 			inBlock = true;
 			out += '  ';
@@ -1178,7 +1218,35 @@ function maskCommentsForAugment(source: string): string {
 			}
 			continue;
 		}
-		out += source[i];
+		if (ch === '"' || ch === "'") {
+			// Triple-quoted multiline strings (Dart '''...''' / """..."""):
+			// a run of 3 opens a string that only a matching run of 3 closes.
+			// Treating each quote singly leaves the state machine's parity at
+			// the mercy of the CONTENT (an apostrophe inside the body flipped
+			// it and masked the next real declaration line).
+			if (source[i + 1] === ch && source[i + 2] === ch) {
+				out += ch + ch + ch;
+				i += 2;
+				while (i + 1 < source.length) {
+					if (
+						source[i + 1] === ch &&
+						source[i + 2] === ch &&
+						source[i + 3] === ch
+					) {
+						out += ch + ch + ch;
+						i += 3;
+						break;
+					}
+					out += source[i + 1] === '\n' ? '\n' : ' ';
+					i++;
+				}
+				continue;
+			}
+			quote = ch;
+			out += ch;
+			continue;
+		}
+		out += ch;
 	}
 	return out;
 }
@@ -1212,7 +1280,10 @@ function augmentDartDefs(source: string, defs: FileSymbolFacts['defs']): void {
 }
 
 const rubyMethodDefNameRe = /^def\s+(?:(self)\.)?([A-Za-z_][A-Za-z0-9_?!]*)/;
-/** Heredoc opener: `<<~ID`, `<<-ID`, `<<ID`, `<<"ID"`, `<<'ID'` (no space). */
+/** Targeted visibility: `private :a, :b` / `protected :sym`. */
+const rubyTargetedVisibilityRe =
+	/^(private|protected)\s+((?::[A-Za-z_][A-Za-z0-9_?!]*\s*,\s*)*:[A-Za-z_][A-Za-z0-9_?!]*)$/;
+const rubyEndWordRe = /\bend\b/g;
 /**
  * Heredoc opener: `<<~ID`, `<<-ID`, `<<ID`, `<<"ID"`, `<<'ID'`. Context-
  * anchored so the binary shift operator can never open a heredoc: a real
@@ -1223,41 +1294,48 @@ const rubyMethodDefNameRe = /^def\s+(?:(self)\.)?([A-Za-z_][A-Za-z0-9_?!]*)/;
 const rubyHeredocOpenRe =
 	/(?:^|[=(,[]\s*|(?:puts|print|raise|return|p)\s+)<<[~-]?['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/;
 
+interface RubyAugmentState {
+	visibility: SymbolVisibilityInfo['visibility'];
+	/** Saved outer-section per enclosing class/module, with the `end` level at entry. */
+	stack: Array<{
+		visibility: SymbolVisibilityInfo['visibility'];
+		atEndLevel: number;
+	}>;
+	/** Unclosed `class`/`module`/`def` bodies (approximated by `end` counting). */
+	endLevel: number;
+	heredocId: string | null;
+}
+
 /**
- * Skips heredoc BODY lines for the line-scoped Ruby augmenter: a line that is
- * literally `private` inside a heredoc must not flip the visibility section,
- * and `def`/`class` text inside heredoc bodies is string data, not code.
- * Only well-formed (terminated) heredocs track correctly; for an unterminated
- * one (invalid Ruby) augmentation silently degrades — tree-sitter's query
- * defs still survive, since they do not pass through this line scanner.
+ * Line-scoped Ruby augmentation. Heredoc BODY lines are skipped (a literal
+ * `private` there must not flip the section; `def`/`class` text there is
+ * string data). Bare `private`/`protected` switch the section until the
+ * enclosing class/module closes — the nesting is restored via an approximate
+ * `end`-keyword balance (imprecise for exotic constructs like modifier-`if`
+ * blocks; conservative direction, documented). Targeted `private :sym` marks
+ * the named method in place and does not switch the section.
  */
 function augmentRubyDefs(source: string, defs: FileSymbolFacts['defs']): void {
 	const lines = source.split(/\r?\n/);
+	const state: RubyAugmentState = {
+		visibility: 'public',
+		stack: [],
+		endLevel: 0,
+		heredocId: null,
+	};
 	let offset = 0;
-	let currentVisibility: SymbolVisibilityInfo['visibility'] = 'public';
-	let heredocId: string | null = null;
 	for (const line of lines) {
 		const trimmed = line.trim();
-		if (heredocId !== null) {
-			if (trimmed === heredocId) heredocId = null;
+		if (state.heredocId !== null) {
+			if (trimmed === state.heredocId) state.heredocId = null;
 		} else {
 			// The opener line itself still carries code (e.g. `QUERY = <<~SQL`
 			// declares a constant) — only the body lines are skipped.
 			const open = trimmed.match(rubyHeredocOpenRe);
-			if (open) heredocId = open[1];
-			augmentRubyLine(
-				trimmed,
-				line,
-				offset,
-				source,
-				defs,
-				(v) => {
-					currentVisibility = v;
-				},
-				() => currentVisibility,
-			);
+			if (open) state.heredocId = open[1];
+			augmentRubyLine(trimmed, line, offset, source, defs, state);
 		}
-		offset += line.length + 1;
+		offset = advanceLineOffset(source, offset, line.length);
 	}
 }
 
@@ -1267,40 +1345,44 @@ function augmentRubyLine(
 	offset: number,
 	source: string,
 	defs: FileSymbolFacts['defs'],
-	setVisibility: (v: SymbolVisibilityInfo['visibility']) => void,
-	getVisibility: () => SymbolVisibilityInfo['visibility'],
+	state: RubyAugmentState,
 ): void {
-	// Bare `private` / `protected` statements switch the section for the
-	// rest of the class body (an AST `call`, not a modifier — hence this
-	// line-scoped tracking rather than a query). The `private :sym` form
-	// targets ONE method and deliberately does NOT switch the section.
 	if (trimmed === 'private' || trimmed === 'protected') {
-		setVisibility(trimmed);
+		state.visibility = trimmed;
+	}
+	// `private :a, :b` retro-marks the named methods without switching the
+	// section for later declarations.
+	const targeted = trimmed.match(rubyTargetedVisibilityRe);
+	if (targeted) {
+		const visibility = targeted[1] as SymbolVisibilityInfo['visibility'];
+		for (const name of targeted[2].split(',').map((part) => part.trim())) {
+			const sym = name.replace(/^:/, '');
+			for (let i = defs.length - 1; i >= 0; i--) {
+				const d = defs[i];
+				if (d.name === sym && d.startLine <= lineNumberAt(source, offset)) {
+					d.exported = false;
+					d.visibilityInfo = symbolVisibilityInfo(visibility, false, 'unknown');
+					break;
+				}
+			}
+		}
 	}
 	const moduleMatch = trimmed.match(/^module\s+([A-Z][A-Za-z0-9_:]*)/);
-	if (moduleMatch) {
-		setVisibility('public');
-		addRegexDef(
-			defs,
-			source,
-			moduleMatch[1],
-			'type',
-			offset + line.indexOf(moduleMatch[0]),
-			offset + line.length,
-			'public',
-			true,
-			'module_public',
-		);
-	}
 	const classMatch = trimmed.match(/^class\s+([A-Z][A-Za-z0-9_:]*)/);
-	if (classMatch) {
-		setVisibility('public');
+	if (moduleMatch || classMatch) {
+		state.stack.push({
+			visibility: state.visibility,
+			atEndLevel: state.endLevel,
+		});
+		state.visibility = 'public';
+		state.endLevel++;
+		const name = (moduleMatch ?? classMatch)![1];
 		addRegexDef(
 			defs,
 			source,
-			classMatch[1],
-			'class',
-			offset + line.indexOf(classMatch[0]),
+			name,
+			moduleMatch ? 'type' : 'class',
+			offset + line.indexOf((moduleMatch ?? classMatch)![0]),
 			offset + line.length,
 			'public',
 			true,
@@ -1323,10 +1405,11 @@ function augmentRubyLine(
 	}
 	const methodMatch = trimmed.match(rubyMethodDefNameRe);
 	if (methodMatch) {
+		state.endLevel++;
 		const isSingleton = Boolean(methodMatch[1]);
 		const shortName = methodMatch[2];
 		const name = isSingleton ? `self.${shortName}` : shortName;
-		const visibility = isSingleton ? 'public' : getVisibility();
+		const visibility = isSingleton ? 'public' : state.visibility;
 		const exported = visibility !== 'private' && !shortName.startsWith('_');
 		addRegexDef(
 			defs,
@@ -1340,12 +1423,27 @@ function augmentRubyLine(
 			exported ? 'module_public' : 'unknown',
 		);
 	}
+	// Approximate `end` balance: when the count falls back to a frame's entry
+	// level, that class/module has closed — restore its outer section.
+	rubyEndWordRe.lastIndex = 0;
+	const ends = trimmed.match(rubyEndWordRe)?.length ?? 0;
+	if (ends > 0) {
+		state.endLevel -= ends;
+		while (
+			state.stack.length > 0 &&
+			state.endLevel <= state.stack[state.stack.length - 1].atEndLevel
+		) {
+			state.visibility = state.stack.pop()!.visibility;
+		}
+	}
 }
 
 const phpNamespaceRe = /\bnamespace\s+([^;{]+)\s*[;{]/g;
-const phpTypeRe = /\b(trait|class|interface)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+const phpTypeRe = /\b(trait|class|interface|enum)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+// The modifier group is bounded {0,6}: an unbounded star here is quadratic on
+// adversarial modifier runs (measured ~8s at 1MB — PR #2361 PRR-012).
 const phpFunctionRe =
-	/\b(?:(public|protected|private|static|final|abstract)\s+)*function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+	/\b(?:(public|protected|private|static|final|abstract)\s+){0,6}function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
 
 function augmentPhpDefs(source: string, defs: FileSymbolFacts['defs']): void {
 	const masked = maskCommentsForAugment(source);
@@ -1380,7 +1478,7 @@ function augmentPhpDefs(source: string, defs: FileSymbolFacts['defs']): void {
 			defs,
 			source,
 			m[2],
-			m[1] === 'class' ? 'class' : 'interface',
+			m[1] === 'class' ? 'class' : m[1] === 'enum' ? 'enum' : 'interface',
 			m.index,
 			declarationEnd(masked, m.index),
 			'public',
@@ -1425,6 +1523,13 @@ function augmentPhpDefs(source: string, defs: FileSymbolFacts['defs']): void {
 /**
  * Line-based import fallback for grammars whose import statements the
  * tree-sitter capture can miss (multi-directive lines, unusual node shapes).
+ * Lexical-context aware: detection runs against a comment+string-masked copy
+ * so import-shaped text inside literals cannot match (ruby heredoc bodies are
+ * skipped with the same tracker the augmenter uses; php `use` lines inside a
+ * brace depth > 0 are class-body trait inclusions, not imports). Dart/php
+ * statements are ';'-terminated, so unterminated lines are joined with their
+ * continuations before parsing — a multiline `show` clause yields the same
+ * entry the query path produces and collapses in the semantic dedup.
  * Entries carry startLine/endLine and are deduplicated against query-captured
  * imports by the semantic key in buildFacts.
  */
@@ -1436,27 +1541,119 @@ function fallbackImportsForSource(
 		index: number;
 		entry: FileSymbolFacts['imports'][0];
 	}> = [];
+	if (grammarId !== 'dart' && grammarId !== 'ruby' && grammarId !== 'php') {
+		return entries;
+	}
+	const masked = maskCommentsForAugment(source);
 	const lines = source.split(/\r?\n/);
+	const maskedLines = masked.split(/\r?\n/);
 	let offset = 0;
-	for (const line of lines) {
-		const trimmed = line.trim();
-		const startLine = lineNumberAt(source, offset);
-		let parsed: FileSymbolFacts['imports'][0] | null = null;
-		if (grammarId === 'dart') {
-			parsed = parseDartImport(trimmed);
-		} else if (grammarId === 'ruby') {
-			parsed = parseRubyRequire(trimmed);
-		} else if (grammarId === 'php') {
-			parsed = parsePhpUse(trimmed);
-		}
-		if (parsed) {
+	let heredocId: string | null = null;
+	let braceDepth = 0;
+	let pending: {
+		startOffset: number;
+		startLine: number;
+		text: string;
+		lines: number;
+	} | null = null;
+	const flushPending = (endLine: number) => {
+		if (!pending) return;
+		let parsed:
+			| FileSymbolFacts['imports'][0]
+			| FileSymbolFacts['imports']
+			| null = null;
+		if (grammarId === 'dart') parsed = parseDartImport(pending.text);
+		else if (grammarId === 'php') parsed = parsePhpUse(pending.text);
+		for (const entry of parsed
+			? Array.isArray(parsed)
+				? parsed
+				: [parsed]
+			: []) {
 			entries.push({
-				index: offset,
-				entry: { ...parsed, startLine, endLine: startLine },
+				index: pending.startOffset,
+				entry: { ...entry, startLine: pending.startLine, endLine },
 			});
 		}
-		offset += line.length + 1;
+		pending = null;
+	};
+	for (let li = 0; li < lines.length; li++) {
+		const line = lines[li];
+		const trimmed = line.trim();
+		const maskedTrimmed = maskedLines[li]?.trim() ?? '';
+		const startLine = lineNumberAt(source, offset);
+
+		if (grammarId === 'ruby') {
+			if (heredocId !== null) {
+				if (maskedTrimmed === heredocId) heredocId = null;
+			} else {
+				const open = maskedTrimmed.match(rubyHeredocOpenRe);
+				if (open) heredocId = open[1];
+				else {
+					const parsed = parseRubyRequire(trimmed);
+					if (parsed) {
+						entries.push({
+							index: offset,
+							entry: { ...parsed, startLine, endLine: startLine },
+						});
+					}
+				}
+			}
+			offset = advanceLineOffset(source, offset, line.length);
+			continue;
+		}
+
+		// dart/php: track brace depth on the MASKED line so braces inside
+		// strings cannot skew it.
+		if (grammarId === 'php') {
+			for (const ch of maskedLines[li] ?? '') {
+				if (ch === '{') braceDepth++;
+				else if (ch === '}') braceDepth = Math.max(0, braceDepth - 1);
+			}
+		}
+
+		if (pending) {
+			pending.text += ` ${trimmed}`;
+			pending.lines++;
+			if (trimmed.includes(';') || pending.lines > 10) {
+				flushPending(startLine);
+			} else if (trimmed === '') {
+				pending = null; // blank line aborts an unterminated buffer
+			}
+			offset = advanceLineOffset(source, offset, line.length);
+			continue;
+		}
+
+		const startsStatement =
+			grammarId === 'dart'
+				? /^(import|export)\s/.test(maskedTrimmed)
+				: /^use\s/.test(maskedTrimmed);
+		// php `use` inside a class/trait body is a trait inclusion, not an import
+		const inClassBody = grammarId === 'php' && braceDepth > 0;
+		if (startsStatement && !inClassBody) {
+			if (trimmed.includes(';')) {
+				let parsed:
+					| FileSymbolFacts['imports'][0]
+					| FileSymbolFacts['imports']
+					| null = null;
+				if (grammarId === 'dart') parsed = parseDartImport(trimmed);
+				else if (grammarId === 'php') parsed = parsePhpUse(trimmed);
+				for (const entry of parsed
+					? Array.isArray(parsed)
+						? parsed
+						: [parsed]
+					: []) {
+					entries.push({
+						index: offset,
+						entry: { ...entry, startLine, endLine: startLine },
+					});
+				}
+			} else {
+				pending = { startOffset: offset, startLine, text: trimmed, lines: 1 };
+			}
+		}
+		offset = advanceLineOffset(source, offset, line.length);
 	}
+	flushPending(lineNumberAt(source, offset));
 	return entries;
 }
 
@@ -2141,7 +2338,9 @@ function parseSwiftImport(text: string): FileSymbolFacts['imports'][0] | null {
 	return { specifier: m[2]!, importType: 'namespace', bindings: [] };
 }
 
-function parseDartImport(text: string): FileSymbolFacts['imports'][0] | null {
+function parseDartImport(
+	text: string,
+): FileSymbolFacts['imports'][0] | FileSymbolFacts['imports'] | null {
 	const t = text.trim();
 	// import 'foo';
 	// import 'foo' as bar;   — namespace-prefix access, not a named binding
@@ -2185,7 +2384,7 @@ function parseDartImport(text: string): FileSymbolFacts['imports'][0] | null {
 			.split(',')
 			.map((part) => part.trim())
 			.filter(Boolean);
-		return {
+		const primary: FileSymbolFacts['imports'][0] = {
 			specifier: importMatch[1],
 			importType: !alias && shown && shown.length > 0 ? 'named' : 'namespace',
 			bindings:
@@ -2193,6 +2392,17 @@ function parseDartImport(text: string): FileSymbolFacts['imports'][0] | null {
 					? shown.map((name) => ({ imported: name, local: name }))
 					: [],
 		};
+		// Conditional imports (`import 'a' if (cond) 'b';`) resolve to the
+		// configured URI at RUNTIME; both URIs are recorded so either target
+		// can carry an edge (PR #2361 PRR-007).
+		const conditional = clause?.match(/\bif\s*\([^)]*\)\s*['"]([^'"]+)['"]/);
+		if (conditional) {
+			return [
+				primary,
+				{ specifier: conditional[1], importType: 'namespace', bindings: [] },
+			];
+		}
+		return primary;
 	}
 	return null;
 }
@@ -2397,3 +2607,15 @@ function isEsMGrammar(grammarId: string): boolean {
 		grammarId === 'javascript'
 	);
 }
+
+/**
+ * DI seam for direct parser tests — the import parsers are module-private by
+ * design; tests exercise them through this seam instead of `mock.module`,
+ * which leaks across Bun's shared test-runner process (@see AGENTS.md
+ * invariant #7; PR #2361 review R10/PRR-017).
+ */
+export const _internals = {
+	parseDartImport,
+	parseRubyRequire,
+	parsePhpUse,
+};

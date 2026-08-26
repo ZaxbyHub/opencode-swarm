@@ -147,3 +147,107 @@ class Real {}
 		expect(def(facts!, 'Real')).toMatchObject({ kind: 'class' });
 	});
 });
+
+describe('extractFileSymbols — php hardening round 2 (#2361 review)', () => {
+	beforeEach(() => {
+		clearParserCache();
+	});
+
+	test('PHP 8.1 enums are captured as enum defs (R8)', async () => {
+		const source = `<?php
+namespace App;
+enum Suit: string {
+	case Hearts = 'h';
+	public function color(): string { return 'red'; }
+}
+`;
+		const facts = await extractFileSymbols('php', source);
+		expect(facts).not.toBeNull();
+		expect(def(facts!, 'Suit')).toMatchObject({ kind: 'enum', exported: true });
+		expect(def(facts!, 'color')).toMatchObject({ kind: 'method' });
+	});
+
+	test('trait `use` inside a class body is not an import edge (R5)', async () => {
+		const source = `<?php
+trait Loggable {}
+class Service {
+	use Loggable;
+	public function run() {}
+}
+`;
+		const facts = await extractFileSymbols('php', source);
+		expect(facts).not.toBeNull();
+		expect(facts!.imports).toHaveLength(0);
+	});
+
+	test('string literals with braces/semicolons do not corrupt spans (PRR-011)', async () => {
+		const source = `<?php
+class Service {
+	public function sep($x = '};') { $y = 1; }
+	public function brace($s = '{') { $z = 2; }
+	public function render() {
+		$glue = '}';
+		return $glue;
+	}
+}
+`;
+		const facts = await extractFileSymbols('php', source);
+		expect(facts).not.toBeNull();
+		// render spans its whole declaration (5→8), not truncated at the
+		// string brace nor inflated to the class end
+		expect(def(facts!, 'render')).toMatchObject({
+			kind: 'method',
+			startLine: 5,
+			endLine: 8,
+		});
+		// sep/brace spans stay on their own signature lines
+		const sep = def(facts!, 'sep');
+		const brace = def(facts!, 'brace');
+		expect(sep!.endLine).toBeLessThanOrEqual(3);
+		expect(brace!.endLine).toBeLessThanOrEqual(4);
+		expect(sep!.kind).toBe('method');
+		expect(brace!.kind).toBe('method');
+	});
+
+	test('`#` line comments are masked before augmentation (PRR-020)', async () => {
+		const source = `<?php
+# class GhostHash {}
+# trait PhantomHash {}
+class RealHash {}
+`;
+		const facts = await extractFileSymbols('php', source);
+		expect(facts).not.toBeNull();
+		expect(def(facts!, 'GhostHash')).toBeUndefined();
+		expect(def(facts!, 'PhantomHash')).toBeUndefined();
+		expect(def(facts!, 'RealHash')).toMatchObject({ kind: 'class' });
+	});
+
+	test('CRLF sources produce identical php defs to LF', async () => {
+		const lf = `<?php
+namespace AppServices;
+trait Logs {}
+class Service {
+	function run() {}
+}
+`;
+		const crlf = lf.replace(/\n/g, '\r\n');
+		const lfFacts = await extractFileSymbols('php', lf);
+		const crlfFacts = await extractFileSymbols('php', crlf);
+		expect(crlfFacts!.defs).toEqual(lfFacts!.defs);
+	});
+
+	test('`use` inside a function body string is not an import (lexical mask)', async () => {
+		const source = `<?php
+$doc = 'use Fake\\Import;';
+use RealThing;
+`;
+		const facts = await extractFileSymbols('php', source);
+		expect(facts).not.toBeNull();
+		expect(facts!.imports).toContainEqual(
+			expect.objectContaining({ specifier: 'RealThing' }),
+		);
+		expect(
+			facts!.imports.filter((i) => i.specifier.includes('Fake')),
+		).toHaveLength(0);
+	});
+});

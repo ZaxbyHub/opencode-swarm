@@ -204,3 +204,151 @@ end
 		expect(facts!.defs.filter((d) => d.name === 'phrase')).toHaveLength(1);
 	});
 });
+
+describe('extractFileSymbols — ruby hardening round 2 (#2361 review)', () => {
+	beforeEach(() => {
+		clearParserCache();
+	});
+
+	test('CRLF sources produce identical defs to LF (issue #1526 class)', async () => {
+		const lf = `module Api
+	VERSION = '1'
+	class Client
+		def call
+		end
+
+		private
+
+		def hidden
+		end
+	end
+end
+`;
+		const crlf = lf.replace(/\n/g, '\r\n');
+		const lfFacts = await extractFileSymbols('ruby', lf);
+		const crlfFacts = await extractFileSymbols('ruby', crlf);
+		expect(crlfFacts).not.toBeNull();
+		expect(lfFacts).not.toBeNull();
+		// no duplicates, identical spans — the pre-fix CRLF run produced a
+		// second drifted Client/call def pair
+		expect(crlfFacts!.defs).toEqual(lfFacts!.defs);
+		expect(new Set(crlfFacts!.defs.map((d) => d.name)).size).toBe(
+			crlfFacts!.defs.length,
+		);
+	});
+
+	test('nested class/module restores the outer private section on close (R1)', async () => {
+		const source = `class Outer
+	private
+
+	class Inner
+		def inner_m
+		end
+	end
+
+	def outer_m
+	end
+end
+`;
+		const facts = await extractFileSymbols('ruby', source);
+		expect(facts).not.toBeNull();
+		// Inner opens a fresh public section...
+		expect(def(facts!, 'inner_m')).toMatchObject({ exported: true });
+		// ...and closing it restores Outer's private section
+		expect(def(facts!, 'outer_m')).toMatchObject({
+			exported: false,
+			visibilityInfo: { visibility: 'private' },
+		});
+	});
+
+	test('targeted `private :sym` marks the named method only (R1)', async () => {
+		const source = `class C
+	def a
+	end
+
+	def b
+	end
+
+	private :a
+end
+`;
+		const facts = await extractFileSymbols('ruby', source);
+		expect(facts).not.toBeNull();
+		expect(def(facts!, 'a')).toMatchObject({
+			exported: false,
+			visibilityInfo: { visibility: 'private' },
+		});
+		expect(def(facts!, 'b')).toMatchObject({
+			exported: true,
+			visibilityInfo: { visibility: 'public' },
+		});
+	});
+
+	test('`protected` sections are tracked like private', async () => {
+		const source = `class C
+	protected
+
+	def guarded
+	end
+end
+`;
+		const facts = await extractFileSymbols('ruby', source);
+		expect(facts).not.toBeNull();
+		// protected mirrors the PHP precedent: precise visibility, still an
+		// exported member (only `private` is non-exported)
+		expect(def(facts!, 'guarded')).toMatchObject({
+			exported: true,
+			visibilityInfo: { visibility: 'protected' },
+		});
+	});
+
+	test('heredoc `<<-` and bare `<<` variants skip bodies too', async () => {
+		const dashSource = `text = <<-EOS
+private
+def ghost
+EOS
+class Real
+	def alive
+	end
+end
+`;
+		const facts = await extractFileSymbols('ruby', dashSource);
+		expect(facts).not.toBeNull();
+		expect(def(facts!, 'ghost')).toBeUndefined();
+		expect(def(facts!, 'alive')).toMatchObject({ exported: true });
+
+		const bareSource = `text = <<EOS
+private
+def phantom
+EOS
+class Real2
+	def alive2
+	end
+end
+`;
+		const facts2 = await extractFileSymbols('ruby', bareSource);
+		expect(facts2).not.toBeNull();
+		expect(def(facts2!, 'phantom')).toBeUndefined();
+		expect(def(facts2!, 'alive2')).toMatchObject({ exported: true });
+	});
+
+	test('import-shaped lines inside heredoc bodies produce no edges (R4)', async () => {
+		const source = `text = <<~EOS
+require 'phantom'
+require_relative 'ghost'
+EOS
+require 'real'
+`;
+		const facts = await extractFileSymbols('ruby', source);
+		expect(facts).not.toBeNull();
+		expect(
+			facts!.imports.filter((i) => i.specifier.includes('phantom')),
+		).toHaveLength(0);
+		expect(
+			facts!.imports.filter((i) => i.specifier.includes('ghost')),
+		).toHaveLength(0);
+		expect(facts!.imports).toContainEqual(
+			expect.objectContaining({ specifier: 'real' }),
+		);
+	});
+});

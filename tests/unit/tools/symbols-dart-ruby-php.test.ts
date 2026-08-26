@@ -237,3 +237,127 @@ class Real {}
 		);
 	});
 });
+
+describe('symbols tool — dart/ruby/php extractors round 2 (#2361 review)', () => {
+	test('dart: class members are qualified TypeName.method, not top-level functions (R6)', () => {
+		write(
+			'members.dart',
+			`class Foo {
+  void bar() {}
+  static void staticBaz() {}
+}
+void topLevel() {}
+`,
+		);
+
+		const symbols = extractDartSymbols('members.dart', root);
+		expect(symbols).toContainEqual(
+			expect.objectContaining({ name: 'Foo.bar', kind: 'method' }),
+		);
+		expect(symbols).toContainEqual(
+			expect.objectContaining({ name: 'Foo.staticBaz', kind: 'method' }),
+		);
+		expect(symbols).toContainEqual(
+			expect.objectContaining({ name: 'topLevel', kind: 'function' }),
+		);
+		expect(symbols).not.toContainEqual(
+			expect.objectContaining({ name: 'bar', kind: 'function' }),
+		);
+	});
+
+	test('dart: same-named members of different classes do not collapse (R7)', () => {
+		write(
+			'twins.dart',
+			`class A {
+  void run() {}
+}
+class B {
+  void run() {}
+}
+`,
+		);
+
+		const symbols = extractDartSymbols('twins.dart', root);
+		expect(symbols).toContainEqual(
+			expect.objectContaining({ name: 'A.run', kind: 'method' }),
+		);
+		expect(symbols).toContainEqual(
+			expect.objectContaining({ name: 'B.run', kind: 'method' }),
+		);
+	});
+
+	test('dart: `void Function(int)` type references are not symbols (PRR-006)', () => {
+		write('fnref.dart', 'typedef Cb = void Function(int);\nvoid real() {}\n');
+		const symbols = extractDartSymbols('fnref.dart', root);
+		expect(symbols.find((s) => s.name === 'Function')).toBeUndefined();
+		expect(symbols).toContainEqual(
+			expect.objectContaining({ name: 'real', kind: 'function' }),
+		);
+	});
+
+	test('ruby: CRLF sources report correct line numbers (PRR-001)', () => {
+		write(
+			'crlf.rb',
+			[
+				'module Billing',
+				'class Service',
+				'  def work; end',
+				'end',
+				'end',
+				'',
+			].join('\r\n'),
+		);
+		const symbols = extractRubySymbols('crlf.rb', root);
+		const service = symbols.find((s) => s.name === 'Service');
+		const work = symbols.find((s) => s.name === 'work');
+		expect(service?.line).toBe(2);
+		expect(work?.line).toBe(3);
+	});
+
+	test('php: enums are extracted (R8)', () => {
+		write('suit.php', "<?php\nenum Suit: string {\n\tcase Hearts = 'h';\n}\n");
+		const symbols = extractPhpSymbols('suit.php', root);
+		expect(symbols).toContainEqual(
+			expect.objectContaining({ name: 'Suit', kind: 'enum', exported: true }),
+		);
+	});
+
+	test('ruby: nested class restores outer private section (R1 parity)', () => {
+		write(
+			'nested.rb',
+			[
+				'class Outer',
+				'  private',
+				'  class Inner',
+				'    def inner_m; end',
+				'  end',
+				'  def outer_m; end',
+				'end',
+				'',
+			].join('\n'),
+		);
+		const symbols = extractRubySymbols('nested.rb', root);
+		expect(symbols.find((s) => s.name === 'inner_m')?.exported).toBe(true);
+		expect(symbols.find((s) => s.name === 'outer_m')?.exported).toBe(false);
+	});
+
+	test('php: string literals do not corrupt brace ranges', () => {
+		write(
+			'glue.php',
+			[
+				'<?php',
+				'class S {',
+				'  public function render() {',
+				"    $glue = '}';",
+				'    return $glue;',
+				'  }',
+				'  public function other() {}',
+				'}',
+				'',
+			].join('\n'),
+		);
+		const symbols = extractPhpSymbols('glue.php', root);
+		expect(symbols.find((s) => s.name === 'other')?.kind).toBe('method');
+		expect(symbols.find((s) => s.name === 'render')?.kind).toBe('method');
+	});
+});

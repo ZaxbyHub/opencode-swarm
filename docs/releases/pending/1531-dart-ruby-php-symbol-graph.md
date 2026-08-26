@@ -67,3 +67,38 @@ awareness is out of scope); Blade directives are opaque to the extractor;
 Dart class members (including Flutter `build` methods) are not method defs —
 the enclosing type carries the span. See
 `docs/repo-graph-symbol-graph.md` → "Dynamic language limitations".
+
+## Review round 2 (PR #2361 feedback)
+
+Hardening from the swarm PR review and maintainer review:
+
+- **CRLF-correct line arithmetic** for the Ruby/PHP/Dart line scanners —
+  CRLF and LF sources now produce identical facts (previously CRLF Ruby
+  files accumulated one byte of offset drift per line, producing duplicate
+  defs with wrong spans; the #1526 bug class).
+- **Bounded modifier quantifiers** in the PHP function regex — an unbounded
+  star measured ~8s (quadratic backtracking) on 1MB adversarial modifier
+  runs; now ~15ms.
+- **String-literal-aware masking** — braces/semicolons/import-shaped text
+  inside string literals no longer corrupt spans or create false edges;
+  multiline Dart `'''` strings and PHP string constants are opaque to the
+  augmenters and fallback importer.
+- **Ruby visibility**: nested class/module bodies save and restore the outer
+  `private`/`protected` section; targeted `private :a, :b` marks the named
+  methods.
+- **PHP**: 8.1 `enum` declarations are extracted (`enum` kind) with their
+  methods; trait `use X;` inside a class body no longer becomes a false
+  namespace import edge.
+- **Dart**: class members in the `symbols` tool are qualified
+  `TypeName.member` (kind `method`) instead of top-level functions, so
+  same-named members of different classes no longer collapse; conditional
+  imports record both URIs; multiline `show` clauses parse whole and yield a
+  single import.
+- **Import resolution is importer-language aware**: a Ruby
+  `require_relative 'foo'` resolves `foo.rb` even when a sibling `foo.ts`
+  exists.
+- **AST fail-open preserves export metadata** for dart/ruby/php (the sync
+  fallback export collector now covers the new languages).
+- Direct parser unit tests via new `_internals` seams, CRLF/enum/nested/
+  trait/conditional/qualified-member regression rows, and regex time-budget
+  tests.
