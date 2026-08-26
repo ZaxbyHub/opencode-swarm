@@ -143,7 +143,7 @@ describe('SAST Rule Engine', () => {
 		it('should detect command injection via exec', () => {
 			const findings = executeRulesSync(
 				'test.js',
-				'exec(`rm -rf /`);',
+				"const { exec } = require('child_process'); exec(userInput);",
 				'javascript',
 			);
 			const finding = findings.find(
