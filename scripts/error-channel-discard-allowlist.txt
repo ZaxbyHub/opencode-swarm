@@ -1,0 +1,67 @@
+# Error-channel-discard Allowlist — scripts/error-channel-discard-allowlist.txt
+# One `path:chainText` entry per line. Blank lines and # comments are ignored.
+# EXACT match only against the scanner's `node.getText()` chain (e.g.
+# `candidate.error`) — see scripts/check-error-channel-discard.ts.
+#
+# This is a flat allowlist (mirrors scripts/mock-allowlist.txt), NOT a
+# stale-entry-enforced baseline (unlike check-runtime-src-refs.ts): an entry
+# that stops matching because the code was fixed is simply inert.
+#
+# To add a NEW entry: append it here with a comment explaining why the
+# boolean-only read is acceptable / out of scope. Convention: mark new
+# entries with `# APPROVED-NEW: <entry>` immediately above.
+# Escape hatch for a deliberate growth PR: ERROR_CHANNEL_DISCARD_ENFORCE=0
+# (soft-warn).
+#
+# Last updated: 2026-08-25 (issue #2349 Phase 4.2 rung 3 seed).
+
+# src/hooks/task-result-classifier.ts collapses candidate.error /
+# candidate.errors into the 'non_success' enum member of
+# TaskResultClassification — every Stage-B lifecycle consumer only needs
+# the tri-state classification, not the raw error text, at this call site.
+# Pre-existing, out of scope for #2349.
+src/hooks/task-result-classifier.ts:candidate.error
+
+# The following 5 entries were NOT in the original #2349 seed list — the
+# scanner's initial sweep of the live tree found them independently. They are
+# genuine boolean-only-position reads of a `.error` channel with the value
+# never forwarded elsewhere in the enclosing function, but they are OUT OF
+# SCOPE for the #2349 fix (only src/hooks/agent-activity.ts:82 and
+# src/hooks/pr-workflow-session-resolver.ts:88 were named for repair). Seeded
+# here so the guardrail lands green without silently expanding this PR's
+# blast radius; each is a plausible follow-up, not a false positive.
+
+# src/hooks/guardrails/pre-check-result.ts: toolResult.error === undefined is
+# one of several structural markers (alongside .passed, .result,
+# .result_omitted) used to classify an intentional SAST skip / expected
+# degradation. Same "collapse into a structural classification enum" shape
+# as the seeded task-result-classifier.ts entry above.
+src/hooks/guardrails/pre-check-result.ts:toolResult.error
+
+# src/hooks/semantic-diff-injection.ts + src/tools/diff-summary.ts: astResult
+# containing the error field is pushed into astDiffs when the OR-condition is
+# true, so the error value IS reachable downstream via the pushed object —
+# but reachable through a DIFFERENT identifier (astDiffs[i].error), not
+# through the "astResult.error" text this scanner's chain-identity matching
+# can see. A real false-negative-avoidance gap in the text-match heuristic,
+# not a live #2349-class bug.
+src/hooks/semantic-diff-injection.ts:astResult.error
+src/tools/diff-summary.ts:astResult.error
+
+# src/tools/apply-patch.ts: fuzzy.error is read only to gate the
+# single-match success path; on failure a generic context-mismatch error
+# object is synthesized instead of surfacing fuzzy.error's own message. This
+# IS the #2349-class shape and is a legitimate follow-up fix candidate.
+src/tools/apply-patch.ts:fuzzy.error
+
+# NOTE (could not cleanly classify — see #2349 guardrail report): the two
+# other pre-existing hits named in the seed request —
+# src/services/cost-accounting.ts (~163-166) and src/db/qa-gate-profile.ts
+# (~525-529) — are catch-continue / catch-swallow blocks with NO `.error` /
+# `.errors` / `.failure` MEMBER ACCESS at all (bare `catch { continue }` /
+# `catch {}` with no bound identifier read). They are a broader "silently
+# swallowed catch clause" defect class, not the member-expression
+# boolean-only-read pattern this scanner targets, so they cannot produce a
+# scanner match and are intentionally NOT listed as allowlist entries here
+# (a non-matching entry would be inert but misleading). Flagged for the
+# requester to confirm scope; no entry added.

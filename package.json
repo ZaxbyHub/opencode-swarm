@@ -113,6 +113,7 @@
 		"check:pending-fragment": "bun run scripts/check-pending-fragment.ts",
 		"check:gate-portability": "bun run scripts/check-gate-portability.ts",
 		"check:bare-spawn": "bun run scripts/check-bare-executable-spawn.ts",
+		"check:error-channel-discard": "bun run scripts/check-error-channel-discard.ts",
 		"check:memory-recall": "bun run scripts/memory-recall-regression.ts"
 	},
 	"dependencies": {

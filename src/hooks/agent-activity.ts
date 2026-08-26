@@ -8,10 +8,59 @@
 import * as nodePath from 'node:path';
 import type { PluginConfig } from '../config/schema';
 import { atomicWriteFile } from '../evidence/task-file';
+import type { ToolAggregate } from '../state';
 import { swarmState } from '../state';
 import { warn } from '../utils';
 import { recordRealtimeLearningToolCall } from './realtime-learning-nudge';
 import { readSwarmFileAsync } from './utils';
+
+/**
+ * Bounds on ToolAggregate.failureReasons (issue #2349 follow-up): the error
+ * channel (`output.error`) was previously read only to answer a boolean
+ * question and its value discarded. We now forward a sanitized reason, but
+ * bounded — this repo requires bounded growth for any per-tool accumulator.
+ */
+const MAX_TOOL_FAILURE_REASONS = 5;
+const MAX_TOOL_FAILURE_REASON_LENGTH = 200;
+
+/**
+ * Extracts a bounded, human-readable failure reason from a tool's `error`
+ * output. Returns undefined when no usable reason can be derived (e.g. an
+ * empty string or an object with no message), so callers never store an
+ * empty/noise entry.
+ */
+function extractFailureReason(error: unknown): string | undefined {
+	let raw: string | undefined;
+	if (error instanceof Error) {
+		raw = error.message;
+	} else if (typeof error === 'string') {
+		raw = error;
+	} else if (error && typeof error === 'object') {
+		const maybeMessage = (error as { message?: unknown }).message;
+		raw = typeof maybeMessage === 'string' ? maybeMessage : undefined;
+	}
+	if (!raw) return undefined;
+	const trimmed = raw.trim();
+	if (!trimmed) return undefined;
+	return trimmed.length > MAX_TOOL_FAILURE_REASON_LENGTH
+		? `${trimmed.slice(0, MAX_TOOL_FAILURE_REASON_LENGTH)}...`
+		: trimmed;
+}
+
+/**
+ * Records `reason` onto `aggregate.failureReasons`, bounded to
+ * MAX_TOOL_FAILURE_REASONS DISTINCT entries (issue #2349 follow-up). A
+ * repeat of an already-recorded reason is a no-op — this is a small sample
+ * of WHY a tool fails, not a full failure log.
+ */
+function recordFailureReason(aggregate: ToolAggregate, reason: string): void {
+	if (!aggregate.failureReasons) {
+		aggregate.failureReasons = [];
+	}
+	if (aggregate.failureReasons.includes(reason)) return;
+	if (aggregate.failureReasons.length >= MAX_TOOL_FAILURE_REASONS) return;
+	aggregate.failureReasons.push(reason);
+}
 
 /**
  * Creates agent activity tracking hooks
@@ -84,7 +133,7 @@ export function createAgentActivityHooks(
 
 			// Update toolAggregates
 			const key = entry.tool;
-			const existing = swarmState.toolAggregates.get(key) ?? {
+			const existing: ToolAggregate = swarmState.toolAggregates.get(key) ?? {
 				tool: key,
 				count: 0,
 				successCount: 0,
@@ -93,8 +142,16 @@ export function createAgentActivityHooks(
 			};
 
 			existing.count++;
-			if (success) existing.successCount++;
-			else existing.failureCount++;
+			if (success) {
+				existing.successCount++;
+			} else {
+				existing.failureCount++;
+				// Forward WHY the tool failed (bounded, deduplicated) instead of
+				// discarding output.error after reading it only as a boolean
+				// (issue #2349 follow-up).
+				const reason = extractFailureReason(output.error);
+				if (reason) recordFailureReason(existing, reason);
+			}
 			existing.totalDuration += duration;
 
 			swarmState.toolAggregates.set(key, existing);

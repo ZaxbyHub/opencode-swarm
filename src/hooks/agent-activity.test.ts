@@ -67,6 +67,7 @@ describe('agent-activity hook', () => {
 			successCount: 0,
 			failureCount: 1,
 			totalDuration: expect.any(Number),
+			failureReasons: ['boom'],
 		});
 	});
 

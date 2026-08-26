@@ -113,6 +113,16 @@ export interface ToolAggregate {
 	successCount: number;
 	failureCount: number;
 	totalDuration: number;
+	/**
+	 * A small, bounded, deduplicated sample of WHY this tool failed (issue
+	 * #2349 follow-up: agent-activity.ts previously collapsed `output.error`
+	 * into a pure boolean and discarded the value). Capped at
+	 * MAX_TOOL_FAILURE_REASONS distinct entries, each truncated to
+	 * MAX_TOOL_FAILURE_REASON_LENGTH chars, so a tool that fails thousands of
+	 * times with the same or varying reasons cannot grow this unboundedly.
+	 * Omitted (absent, not an empty array) when no reason was ever recorded.
+	 */
+	failureReasons?: string[];
 }
 
 /**

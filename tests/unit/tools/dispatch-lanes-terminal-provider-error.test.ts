@@ -48,9 +48,7 @@ function assistantMessage(options: {
 			...(options.error === undefined ? {} : { error: options.error }),
 		},
 		parts:
-			options.text === undefined
-				? []
-				: [{ type: 'text', text: options.text }],
+			options.text === undefined ? [] : [{ type: 'text', text: options.text }],
 	};
 }
 
@@ -134,7 +132,8 @@ describe('terminal provider errors settle async lanes (issue #2349)', () => {
 						error: {
 							name: 'APIError',
 							data: {
-								message: "You've reached your usage limit for this billing cycle",
+								message:
+									"You've reached your usage limit for this billing cycle",
 								statusCode: 429,
 								isRetryable: false,
 							},
@@ -180,7 +179,11 @@ describe('terminal provider errors settle async lanes (issue #2349)', () => {
 						completed: undefined,
 						error: {
 							name: 'APIError',
-							data: { message: 'overloaded', statusCode: 529, isRetryable: true },
+							data: {
+								message: 'overloaded',
+								statusCode: 529,
+								isRetryable: true,
+							},
 						},
 					}),
 				],
@@ -373,7 +376,10 @@ describe('terminal provider errors settle async lanes (issue #2349)', () => {
 				messages: [
 					assistantMessage({
 						completed: 8_000,
-						error: { name: 'ProviderAuthError', data: { message: 'invalid api key' } },
+						error: {
+							name: 'ProviderAuthError',
+							data: { message: 'invalid api key' },
+						},
 					}),
 				],
 			});

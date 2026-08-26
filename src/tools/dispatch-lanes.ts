@@ -58,6 +58,7 @@ import {
 	resolveGeneratedAgentRole,
 	stripKnownSwarmPrefix,
 } from '../config/schema.js';
+import { classifyProviderFailure } from '../failures/invocation-failure.js';
 import {
 	activatePrWorkflow,
 	assertCurrentCheckoutHead,
@@ -87,7 +88,6 @@ import {
 	validatePrWorkflowTransportRecovery,
 } from '../hooks/pr-workflow-gate.js';
 import { buildLaneOrientationBlock } from '../hooks/repo-graph-injection.js';
-import { classifyProviderFailure } from '../failures/invocation-failure.js';
 import type { ParallelDispatcher } from '../parallel/dispatcher/parallel-dispatcher.js';
 import { createParallelDispatcher } from '../parallel/dispatcher/parallel-dispatcher.js';
 import { swarmState } from '../state.js';
@@ -2465,7 +2465,6 @@ async function collectOnce(
 		// carried on a still-running message.
 		if (
 			transcript.terminalError &&
-			!transcript.text &&
 			// NOT `transcriptIncomplete`: that also folds in the terminal
 			// finish==='length'/'content-filter' cases, which would make the
 			// output_length classification unreachable. Only the fetch-window
@@ -3385,10 +3384,7 @@ interface LaneTerminalError {
 const LANE_TERMINAL_REASON_MESSAGE_BUDGET = 100;
 
 function laneTerminalErrorReason(error: LaneTerminalError): string {
-	const message = error.message.slice(
-		0,
-		LANE_TERMINAL_REASON_MESSAGE_BUDGET,
-	);
+	const message = error.message.slice(0, LANE_TERMINAL_REASON_MESSAGE_BUDGET);
 	const status =
 		error.statusCode === undefined ? '' : ` status=${error.statusCode}`;
 	const retryable =
@@ -3419,7 +3415,7 @@ function readErrorDataRecord(error: unknown): Record<string, unknown> {
 function classifyLaneTerminalError(error: unknown): LaneTerminalError {
 	const name =
 		typeof (error as { name?: unknown } | null)?.name === 'string'
-			? ((error as { name: string }).name).slice(0, 64)
+			? (error as { name: string }).name.slice(0, 64)
 			: 'UnknownError';
 	const data = readErrorDataRecord(error);
 	// Shape-agnostic on purpose (issue #2349, AC3). The ASYNC path supplies an
@@ -3432,8 +3428,7 @@ function classifyLaneTerminalError(error: unknown): LaneTerminalError {
 	const rawMessage =
 		typeof data.message === 'string' && data.message.trim().length > 0
 			? data.message
-			: typeof topLevelMessage === 'string' &&
-					topLevelMessage.trim().length > 0
+			: typeof topLevelMessage === 'string' && topLevelMessage.trim().length > 0
 				? topLevelMessage
 				: typeof error === 'string' && error.trim().length > 0
 					? error

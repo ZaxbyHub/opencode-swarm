@@ -70,7 +70,8 @@ describe('terminal-error settle vs the #2297 circuit (issue #2349)', () => {
 							status: 'error',
 							error: reason({
 								category: 'provider.quota_billing',
-								message: "you've reached your usage limit for this billing cycle",
+								message:
+									"you've reached your usage limit for this billing cycle",
 								kind: 'provider',
 								name: 'APIError',
 							}),
@@ -162,9 +163,7 @@ describe('terminal-error settle vs the #2297 circuit (issue #2349)', () => {
 			// BEFORE the fix a wedged lane reached the circuit (if at all) only as a
 			// reasonless `stale` record — the coarse bucket that lumps every cause
 			// together.
-			const beforeFix = classify(
-				settledRecord({ status: 'stale' }) as never,
-			);
+			const beforeFix = classify(settledRecord({ status: 'stale' }) as never);
 			expect(beforeFix).toBe('terminal-zero-output:stale');
 
 			// AFTER the fix the same lane carries its reason, so it lands in a
