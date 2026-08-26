@@ -1633,19 +1633,18 @@ const PR_WORKFLOW_LANE_LIVENESS_PROBE_TIMEOUT_MS = 5_000;
 const PR_WORKFLOW_PENDING_LIVENESS_THRESHOLD_MS = 3 * 60_000;
 
 /**
- * Pr-review lane modes eligible for the pending-liveness advisory. All five are
- * covered: discovery (base/micro) lanes stall just as silently as validation
- * (council/reviewer/critic) lanes, and the evidence run behind this issue lost
- * whole base waves (issue #2280, second comment). Non-pr-review lanes are never
- * probed.
+ * The pending-liveness advisory applies to EVERY long-pending async lane.
+ *
+ * It originally covered only the five `swarm-pr-review:*` modes (issue #2280),
+ * which left a plain `dispatch_lanes_async` lane with no liveness signal at all
+ * — the same silent-wedge exposure the pr-review modes were given the advisory
+ * to close. Issue #2349 widened it: a generic lane stalls exactly as silently,
+ * and the advisory is alert-only by construction (it never cancels, retries,
+ * replaces, or settles anything), so widening adds diagnosis without changing
+ * any lane's lifecycle. The probe stays bounded — at most one host
+ * session-status call per collection, none below the threshold, none beyond the
+ * caller's remaining budget.
  */
-const PR_WORKFLOW_PENDING_LIVENESS_MODES: ReadonlySet<string> = new Set([
-	'swarm-pr-review:base',
-	'swarm-pr-review:micro',
-	'swarm-pr-review:council',
-	'swarm-pr-review:reviewer',
-	'swarm-pr-review:critic',
-]);
 
 /**
  * The session-status types that count as "provably still running".
@@ -1909,8 +1908,6 @@ export async function collectPrWorkflowPendingLaneLiveness(
 				(record.status === 'pending' ||
 					record.status === 'running' ||
 					record.status === 'ingesting') &&
-				record.mode !== undefined &&
-				PR_WORKFLOW_PENDING_LIVENESS_MODES.has(record.mode) &&
 				now - record.updatedAt > threshold,
 		);
 		if (pastThreshold.length === 0) return [];
