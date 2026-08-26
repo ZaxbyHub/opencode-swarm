@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.148.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.148.4...v7.148.5) (2026-08-26)
+
+
+### Bug Fixes
+
+* **sast:** bind JavaScript security calls to their callees ([f9c4f50](https://github.com/ZaxbyHub/opencode-swarm/commit/f9c4f5066b70cd4e73d7e00ee468b460b903bd27))
+* **sast:** bind JavaScript security calls to their callees ([01aaeb8](https://github.com/ZaxbyHub/opencode-swarm/commit/01aaeb8c86755d57810201736e3279da484c3c60))
+* **sast:** close JavaScript callee review findings ([2c9c14e](https://github.com/ZaxbyHub/opencode-swarm/commit/2c9c14e0c481d08a19675c94c6627d62a8b98de9))
+
 ## [7.148.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.148.3...v7.148.4) (2026-08-26)
 
 
