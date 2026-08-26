@@ -50,6 +50,9 @@ import type {
 import type { EvaluationModelDispatcher } from '../../evaluation/model-dispatcher.js';
 import { evaluateCandidateV1 } from '../../evaluation/public-api.js';
 import { tryAcquireLock } from '../../parallel/file-locks.js';
+import { withProtectedSetIntegrity } from '../../security/protected-input-integrity.js';
+import { protectedRoots } from '../../security/protected-path-policy.js';
+import { withWriteAuthority } from '../../security/write-authority.js';
 import { emit as emitTelemetry } from '../../telemetry.js';
 import { assertProjectRoot } from '../../utils/project-boundary.js';
 import {
@@ -288,7 +291,9 @@ export async function runOptimizationRound(
 	}
 
 	try {
-		return await runRoundLocked(input, candidateId);
+		return await withWriteAuthority({ origin: 'optimizer_proposed' }, () =>
+			runRoundLocked(input, candidateId),
+		);
 	} finally {
 		// Release in reverse order.
 		await releaseSkill();
@@ -558,27 +563,31 @@ async function runValidationWithTransientRetry(
 				input.dispatcher,
 				input.sessionId,
 			);
-			const result = await _internals.evaluateCandidateV1({
-				projectRoot: input.directory,
-				inputRoot: input.inputRoot ?? input.directory,
-				tasks: input.validationTasks as never,
-				baseline,
-				candidate,
-				split: 'test',
-				seed: randomUUID(),
-				models: input.models,
-				budgets: {
-					maxTasks: input.config.max_validations_per_round * 6,
-					maxRepetitions: 1,
-					maxConcurrency: 1,
-					maxTaskTimeMs: input.config.max_round_time_ms,
-					maxRetries: input.config.max_transient_retries,
-					maxOutputBytes: 512 * 1024,
-				},
-				executor,
-				abortSignal: input.abortSignal,
-				policy: { deadband: input.config.deadband },
-			});
+			const result = await withProtectedSetIntegrity(
+				[evalInputRoot, ...protectedRoots(input.directory)],
+				() =>
+					_internals.evaluateCandidateV1({
+						projectRoot: input.directory,
+						inputRoot: input.inputRoot ?? input.directory,
+						tasks: input.validationTasks as never,
+						baseline,
+						candidate,
+						split: 'test',
+						seed: randomUUID(),
+						models: input.models,
+						budgets: {
+							maxTasks: input.config.max_validations_per_round * 6,
+							maxRepetitions: 1,
+							maxConcurrency: 1,
+							maxTaskTimeMs: input.config.max_round_time_ms,
+							maxRetries: input.config.max_transient_retries,
+							maxOutputBytes: 512 * 1024,
+						},
+						executor,
+						abortSignal: input.abortSignal,
+						policy: { deadband: input.config.deadband },
+					}),
+			);
 			return {
 				status: result.decision.status,
 				reasons: result.decision.reasons,

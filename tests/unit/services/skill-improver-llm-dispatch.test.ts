@@ -8,9 +8,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import {
 	readKnowledge,
@@ -26,15 +25,23 @@ import {
 	getQuotaState,
 	resolveQuotaPath,
 } from '../../../src/services/skill-improver-quota';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let tmp: string;
+let isolatedEnv: ReturnType<typeof createIsolatedTestEnv>;
 beforeEach(() => {
 	mock.restore();
-	tmp = mkdtempSync(path.join(tmpdir(), 'swarm-skill-llm-'));
+	isolatedEnv = createIsolatedTestEnv();
+	tmp = canonicalMkdtemp('swarm-skill-llm-');
 });
 afterEach(() => {
-	rmSync(tmp, { recursive: true, force: true });
-	mock.restore();
+	try {
+		rmSync(tmp, { recursive: true, force: true });
+	} finally {
+		isolatedEnv.cleanup();
+		mock.restore();
+	}
 });
 
 const cfg = {
@@ -47,7 +54,9 @@ const cfg = {
 		'skills' | 'spec' | 'architect_prompt' | 'knowledge'
 	>,
 	write_mode: 'proposal' as const,
-	require_user_approval: true,
+	// Approval-bound write behavior has dedicated coverage; this suite isolates
+	// LLM dispatch, quota, fallback, and source-tagging behavior.
+	require_user_approval: false,
 	quota_window: 'utc' as const,
 	allow_deterministic_fallback: true,
 };

@@ -97,13 +97,24 @@ export class NativeWindowsSandboxExecutor implements SandboxExecutor {
 		scopePaths: string[],
 		tempDir?: string,
 		envOverrides?: Record<string, string | null>,
+		policy?: {
+			network_mode?: 'off' | 'on';
+			network_allowlist?: readonly string[];
+			writable_roots?: readonly string[];
+		},
 	): string {
 		if (!this.isAvailable()) {
 			throw new SandboxError('Sandbox not available', 'SANDBOX_UNAVAILABLE');
 		}
 
 		if (this._strength === 'strong') {
-			return this._wrapWithRunner(command, scopePaths, tempDir, envOverrides);
+			return this._wrapWithRunner(
+				command,
+				scopePaths,
+				tempDir,
+				envOverrides,
+				policy,
+			);
 		}
 
 		return this._fallbackExecutor.wrapCommand(
@@ -119,6 +130,11 @@ export class NativeWindowsSandboxExecutor implements SandboxExecutor {
 		scopePaths: string[],
 		tempDir?: string,
 		_envOverrides?: Record<string, string | null>,
+		policyOverride?: {
+			network_mode?: 'off' | 'on';
+			network_allowlist?: readonly string[];
+			writable_roots?: readonly string[];
+		},
 	): string {
 		const binary = runnerInternals.findRunnerBinary();
 		if (!binary) {
@@ -135,7 +151,11 @@ export class NativeWindowsSandboxExecutor implements SandboxExecutor {
 
 		policy.workspace_roots =
 			scopePaths.length > 0 ? scopePaths : [workspaceRoot];
-		policy.writable_roots = policy.workspace_roots;
+		policy.writable_roots =
+			policyOverride?.writable_roots && policyOverride.writable_roots.length > 0
+				? [...policyOverride.writable_roots]
+				: policy.workspace_roots;
+		policy.network_mode = policyOverride?.network_mode ?? policy.network_mode;
 
 		// Apply per-call env overrides to the runner policy.
 		// String values are set via env_overrides; null values are skipped since

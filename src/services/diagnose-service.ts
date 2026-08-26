@@ -20,6 +20,7 @@ import { getTaskModelRoutingStateSnapshot } from '../models/task-model-routing.j
 import { loadPlanJsonOnly } from '../plan/manager';
 import { SandboxCapabilityProbe } from '../sandbox/capability-probe.js';
 import { getExecutor } from '../sandbox/executor.js';
+import { getSandboxSkipSummary } from '../sandbox/skip-state.js';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import { getAgentSession } from '../state.js';
 import { resolveGitExecutableAsync } from '../utils/git-executable.js';
@@ -844,6 +845,21 @@ async function getSandboxStatus(): Promise<HealthCheck> {
 	try {
 		const capability = await _internals.detectSandboxCapability();
 		const mechanism = capability.mechanism ?? 'none';
+		// A legacy aggregate strength is availability evidence, not behavioral
+		// evidence for any individual containment dimension. Never expand the
+		// old `strong` label into four independent `real` claims.
+		const legacyDimension = capability.status === 'enabled' ? 'weak' : 'none';
+		const filesystem = capability.filesystem ?? legacyDimension;
+		const network = capability.network ?? legacyDimension;
+		const processBoundary = capability.process ?? legacyDimension;
+		const effective = capability.effective ?? legacyDimension;
+		const dimensions = `fs=${filesystem} network=${network} process=${processBoundary} effective=${effective}`;
+		const reasons = (capability.reasons ?? []).join('; ');
+		const skipSummary = getSandboxSkipSummary();
+		const skipDetail =
+			skipSummary.count > 0
+				? ` | observed skips=${skipSummary.count}: ${skipSummary.reasons.join('; ')}`
+				: '';
 
 		const executor = await _internals.getSandboxExecutor();
 		const hasExecutor = executor !== null;
@@ -862,18 +878,18 @@ async function getSandboxStatus(): Promise<HealthCheck> {
 					? 'advisory'
 					: (capability.strength ?? executorStrength ?? 'strong');
 
-			if (strength === 'advisory') {
+			if (effective !== 'real' || strength === 'advisory') {
 				return {
 					name: 'Sandbox',
 					status: '⚠️',
-					detail: `Mechanism: ${mechanism.toLowerCase()} | Available: advisory only | Strength: ADVISORY (env-scrub, NOT kernel-enforced) | Commands are NOT strongly sandboxed`,
+					detail: `Mechanism: ${mechanism.toLowerCase()} | ${dimensions} | Partial boundary: ${reasons}${skipDetail}`,
 				};
 			}
 
 			return {
 				name: 'Sandbox',
 				status: '✅',
-				detail: `Mechanism: ${mechanism.toLowerCase()} | Available: yes | Strength: strong (kernel-enforced) | Sandboxing commands: yes`,
+				detail: `Mechanism: ${mechanism.toLowerCase()} | ${dimensions} | Sandboxing requested dimensions: yes${skipDetail}`,
 			};
 		}
 
@@ -881,7 +897,7 @@ async function getSandboxStatus(): Promise<HealthCheck> {
 			return {
 				name: 'Sandbox',
 				status: '⚠️',
-				detail: `Mechanism: ${mechanism.toLowerCase()} | Available: no (silent pass-through) | Commands NOT sandboxed`,
+				detail: `Mechanism: ${mechanism.toLowerCase()} | ${dimensions} | Available: no | ${reasons}${skipDetail}`,
 			};
 		}
 

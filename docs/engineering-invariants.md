@@ -4,6 +4,14 @@
 
 ## Why this document exists
 
+### Integrity boundary (issue #1824)
+
+Shell classification is a shared bounded tripwire, never a sandbox. Explicit
+required sandbox dimensions fail closed unless behaviorally reported `real`.
+Governed evaluation inputs are hashed before and after candidate execution, and
+human-required writes consume an exact one-shot session/action/content-bound
+approval fact. Turbo never bypasses scope enforcement.
+
 opencode-swarm is an OpenCode plugin that ships as a single ESM bundle and runs across at least:
 
 - Windows 11, macOS, Linux

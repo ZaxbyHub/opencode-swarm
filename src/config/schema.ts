@@ -1160,6 +1160,17 @@ export const GuardrailsConfigSchema = z.object({
 	 * `cfg.sandbox_macos_enabled ?? false` — so an absent key is still disabled.
 	 */
 	sandbox_macos_enabled: z.boolean().optional(),
+	sandbox: z
+		.object({
+			mode: z.enum(['advisory', 'required']).default('advisory'),
+			require_filesystem: z.boolean().default(false),
+			require_network: z.boolean().default(false),
+			require_process: z.boolean().default(false),
+			network_mode: z.enum(['off', 'on']).default('off'),
+			network_allowlist: z.array(z.string().min(1)).max(128).default([]),
+			writable_roots: z.array(z.string().min(1)).max(128).default([]),
+		})
+		.optional(),
 });
 
 export type GuardrailsConfig = z.infer<typeof GuardrailsConfigSchema>;
@@ -1168,8 +1179,6 @@ export type GuardrailsConfig = z.infer<typeof GuardrailsConfigSchema>;
 export const WatchdogConfigSchema = z.object({
 	/** Enable scope-guard hook. Blocks non-architect agents writing outside declared scope. Default: true */
 	scope_guard: z.boolean().default(true),
-	/** Allow scope-guard to be skipped in turbo mode. Default: false (NOT skippable) */
-	skip_in_turbo: z.boolean().default(false),
 	/** Enable delegation-ledger hook. Injects DELEGATION SUMMARY on architect resume. Default: true */
 	delegation_ledger: z.boolean().default(true),
 });

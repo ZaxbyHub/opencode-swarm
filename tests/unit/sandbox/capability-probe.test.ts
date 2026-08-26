@@ -6,11 +6,13 @@ import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import {
 	_internals,
 	_resetCapabilityCache,
+	assessSandboxRequirements,
 	isBubblewrapAvailable,
 	isSandboxExecAvailable,
 	isWindowsSandboxAvailable,
 	SandboxCapabilityProbe,
 } from '../../../src/sandbox/capability-probe';
+import { _internals as linuxExecutorInternals } from '../../../src/sandbox/linux/bubblewrap-executor';
 
 const platform = process.platform;
 
@@ -29,6 +31,11 @@ describe('SandboxCapabilityProbe', () => {
 			expect(result).toHaveProperty('status');
 			expect(result).toHaveProperty('mechanism');
 			expect(result).toHaveProperty('platform');
+			expect(result).toHaveProperty('filesystem');
+			expect(result).toHaveProperty('network');
+			expect(result).toHaveProperty('process');
+			expect(result).toHaveProperty('effective');
+			expect(result).toHaveProperty('identity');
 			expect(['enabled', 'disabled', 'unsupported']).toContain(result.status);
 			expect(typeof result.mechanism).toBe('string');
 		});
@@ -129,6 +136,40 @@ describe('SandboxCapabilityProbe', () => {
 			// Should be the same object reference (cached)
 			expect(result1).toBe(result2);
 		});
+
+		test('cache invalidates when the resolved probe binary identity changes', async () => {
+			const originalPlatform = process.platform;
+			const originalWithProbeTimeout = _internals.withProbeTimeout;
+			const originalResolveBwrapBinary =
+				linuxExecutorInternals.resolveBwrapBinary;
+			let callCount = 0;
+			Object.defineProperty(process, 'platform', {
+				value: 'linux',
+				configurable: true,
+			});
+			linuxExecutorInternals.resolveBwrapBinary = () =>
+				callCount === 0 ? '/usr/bin/bwrap-a' : '/usr/bin/bwrap-b';
+			_internals.withProbeTimeout = mock(async () => {
+				callCount += 1;
+				return 'bubblewrap 1.0';
+			});
+
+			try {
+				const first = await new SandboxCapabilityProbe().detect();
+				const second = await new SandboxCapabilityProbe().detect();
+				expect(callCount).toBe(2);
+				expect(first).not.toBe(second);
+				expect(first.identity).not.toBe(second.identity);
+			} finally {
+				Object.defineProperty(process, 'platform', {
+					value: originalPlatform,
+					configurable: true,
+				});
+				linuxExecutorInternals.resolveBwrapBinary = originalResolveBwrapBinary;
+				_internals.withProbeTimeout = originalWithProbeTimeout;
+				_resetCapabilityCache();
+			}
+		});
 	});
 
 	// -------------------------------------------------------------------------
@@ -176,6 +217,10 @@ describe('SandboxCapabilityProbe', () => {
 			expect(result.strength).toBe('strong');
 			expect(result.mechanism).toBe('sandbox-exec');
 			expect(result.platform).toBe('darwin');
+			expect(result.filesystem).toBe('weak');
+			expect(result.network).toBe('none');
+			expect(result.process).toBe('none');
+			expect(result.effective).toBe('none');
 		});
 
 		test('resolved withProbeTimeout with non-empty stdout ALSO reports enabled (content is irrelevant to the criterion)', async () => {
@@ -230,6 +275,60 @@ describe('SandboxCapabilityProbe', () => {
 			_internals.withProbeTimeout = mock(async () => '');
 			await new SandboxCapabilityProbe().detect();
 			expect(isSandboxExecAvailable()).toBe(true);
+		});
+	});
+
+	describe('requirement assessment', () => {
+		test('required filesystem+network fails when capability is partial', () => {
+			const result = assessSandboxRequirements(
+				{
+					v: 1,
+					status: 'enabled',
+					strength: 'strong',
+					mechanism: 'sandbox-exec',
+					platform: 'darwin',
+					filesystem: 'real',
+					network: 'none',
+					process: 'none',
+					effective: 'none',
+					reasons: ['network outside boundary'],
+					identity: 'darwin:sandbox-exec',
+				},
+				{
+					mode: 'required',
+					require_filesystem: true,
+					require_network: true,
+				},
+			);
+
+			expect(result.satisfied).toBe(false);
+			expect(result.missing).toEqual(['network']);
+		});
+
+		test('advisory mode never blocks', () => {
+			const result = assessSandboxRequirements(
+				{
+					v: 1,
+					status: 'enabled',
+					strength: 'advisory',
+					mechanism: 'PowerShell wrapper',
+					platform: 'win32',
+					filesystem: 'none',
+					network: 'none',
+					process: 'none',
+					effective: 'none',
+					reasons: ['advisory only'],
+					identity: 'win32:powershell-wrapper',
+				},
+				{
+					mode: 'advisory',
+					require_filesystem: true,
+					require_network: true,
+				},
+			);
+
+			expect(result.satisfied).toBe(true);
+			expect(result.missing).toEqual([]);
 		});
 	});
 });

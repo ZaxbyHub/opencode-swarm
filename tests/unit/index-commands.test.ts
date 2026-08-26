@@ -57,9 +57,10 @@ describe('Swarm subcommand registration', () => {
 		// Catch-all plus the current command registry entries. This includes the
 		// evaluation gate commands, main's CI-monitor command, the context-map
 		// stats command (issue #1672), the swarm-skill-opt shortcut (issue #1822),
-		// the swarm-recover shortcut (issue #2268), and the action-local
+		// the swarm-recover shortcut (issue #2268), the human-only exact-write
+		// approval shortcut (issue #1824), and the action-local
 		// guardrail-reset command.
-		expect(commandKeys.length).toBe(85);
+		expect(commandKeys.length).toBe(86);
 
 		expect(commands.swarm).toBeDefined();
 	});
@@ -140,6 +141,7 @@ describe('Swarm subcommand registration', () => {
 			'swarm-pr-feedback',
 			'swarm-abort-pr-workflow',
 			'swarm-approve-plan-critic',
+			'swarm-approve-write',
 			'swarm-pr-subscribe',
 			'swarm-pr-unsubscribe',
 			'swarm-pr-status',

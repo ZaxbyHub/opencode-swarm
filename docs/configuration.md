@@ -808,6 +808,29 @@ An episode disarms — resetting every counter — on **either** of two conditio
 
 ### macOS sandbox activation (`guardrails.sandbox_macos_enabled`)
 
+### Sandbox enforcement requirements (`guardrails.sandbox`)
+
+`guardrails.sandbox` makes containment requirements explicit. The default
+`advisory` mode preserves existing fail-open behavior and records a one-time
+warning plus audit event when containment is unavailable. `required` mode
+blocks a shell command before mutation or execution unless every requested
+dimension is reported `real` by the capability probe.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `mode` | `advisory` | `required` fails closed; `advisory` warns and audits. |
+| `require_filesystem` | `false` | Require real filesystem containment. |
+| `require_network` | `false` | Require real network containment. |
+| `require_process` | `false` | Require real process containment. |
+| `network_mode` | `off` | Requested network posture (`off` or `on`). |
+| `network_allowlist` | `[]` | Bounded network allowlist used for capability identity. |
+| `writable_roots` | `[]` | Additional bounded writable roots used for capability identity. |
+
+The status surface reports filesystem, network, process, and effective
+strength separately as `real`, `weak`, or `none`. Linux reports missing
+seccomp explicitly; macOS does not claim network/process containment; Windows
+fallbacks remain weak/none unless independently verified.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `sandbox_macos_enabled` | boolean | `false` | Enables `sandbox-exec` containment for bash/shell tool calls on macOS. |

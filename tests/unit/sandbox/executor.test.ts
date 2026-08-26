@@ -5,6 +5,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
 	_resetExecutorCache,
+	_resetSandboxAssessmentCache,
+	assessSandboxEnforcement,
 	getExecutor,
 	SandboxError,
 	type SandboxExecutor,
@@ -40,6 +42,7 @@ describe('getExecutor()', () => {
 	afterEach(() => {
 		// Reset after each test so module state doesn't pollute other tests
 		_resetExecutorCache();
+		_resetSandboxAssessmentCache();
 	});
 
 	test('getExecutor() returns a Promise', () => {
@@ -87,6 +90,7 @@ describe('_resetExecutorCache()', () => {
 
 	afterEach(() => {
 		_resetExecutorCache();
+		_resetSandboxAssessmentCache();
 	});
 
 	test('calling _resetExecutorCache() allows getExecutor() to run again', async () => {
@@ -110,5 +114,27 @@ describe('_resetExecutorCache()', () => {
 	test('_resetExecutorCache() is callable multiple times without error', () => {
 		expect(() => _resetExecutorCache()).not.toThrow();
 		expect(() => _resetExecutorCache()).not.toThrow();
+	});
+});
+
+describe('assessSandboxEnforcement()', () => {
+	afterEach(() => {
+		_resetSandboxAssessmentCache();
+	});
+
+	test('returns a stable cache key for identical requirements', async () => {
+		const first = await assessSandboxEnforcement({
+			mode: 'required',
+			require_filesystem: true,
+			require_network: true,
+		});
+		const second = await assessSandboxEnforcement({
+			mode: 'required',
+			require_filesystem: true,
+			require_network: true,
+		});
+
+		expect(first.cacheKey).toBe(second.cacheKey);
+		expect(first.capability.identity).toBe(second.capability.identity);
 	});
 });

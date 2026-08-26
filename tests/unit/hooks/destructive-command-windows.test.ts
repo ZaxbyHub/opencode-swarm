@@ -173,7 +173,7 @@ describe('Windows cmd.exe destructive command guard (adversarial)', () => {
 			const input = makeBashInput('test-session', cmd);
 			const output = makeBashOutput(cmd);
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/BLOCKED.*vssadmin delete/i,
+				/BLOCKED: catastrophic shell operation detected/,
 			);
 		});
 
@@ -206,7 +206,7 @@ describe('Windows cmd.exe destructive command guard (adversarial)', () => {
 			const input = makeBashInput('test-session', cmd);
 			const output = makeBashOutput(cmd);
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/BLOCKED.*wbadmin delete/i,
+				/BLOCKED: catastrophic shell operation detected/,
 			);
 		});
 
@@ -228,7 +228,7 @@ describe('Windows cmd.exe destructive command guard (adversarial)', () => {
 			const input = makeBashInput('test-session', 'diskpart');
 			const output = makeBashOutput('diskpart');
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/BLOCKED.*diskpart/i,
+				/BLOCKED: catastrophic shell operation detected/,
 			);
 		});
 
@@ -259,7 +259,7 @@ describe('Windows cmd.exe destructive command guard (adversarial)', () => {
 			const input = makeBashInput('test-session', cmd);
 			const output = makeBashOutput(cmd);
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/BLOCKED.*bcdedit/i,
+				/BLOCKED: catastrophic shell operation detected/,
 			);
 		});
 
@@ -434,7 +434,7 @@ describe('Windows cmd.exe destructive command guard (adversarial)', () => {
 			const input = makeBashInput('test-session', cmd);
 			const output = makeBashOutput(cmd);
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/BLOCKED.*format/i,
+				/BLOCKED: catastrophic shell operation detected/,
 			);
 		});
 

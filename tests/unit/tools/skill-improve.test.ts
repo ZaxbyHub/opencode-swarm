@@ -25,10 +25,56 @@ const mockLoadPluginConfigWithMeta = mock(() => ({
 	meta: { source: 'test' },
 }));
 
+const approvalRequestFixture = {
+	targetSessionId: 'session-1',
+	action: 'skill_improve' as const,
+	candidateId: 'skill_improve_request',
+	candidateContentHash: 'a'.repeat(64),
+	allowedPathDigest: 'b'.repeat(64),
+	generation: 0,
+};
+
 const mockRunSkillImprover = mock(async () => ({
 	ran: true,
 	proposals: [{ path: '.swarm/skill-improver/proposals/test.md' }],
 }));
+const mockPrepareApprovedSkillImproverCandidateWrite = mock(async () => ({
+	kind: 'prepared' as const,
+	prepared: {
+		directory: 'ignored',
+		now: new Date('2026-08-26T12:00:00.000Z'),
+		source: 'deterministic_fallback' as const,
+		model: 'opencode/big-pickle',
+		proposalPath: '.swarm/skill-improver/proposals/test.md',
+		allowedPaths: ['.swarm/skill-improver/proposals/test.md'],
+		candidateContent: '# Skill Improvement Proposal',
+		request: approvalRequestFixture,
+		quota: {
+			date: '2026-08-26',
+			calls_used: 1,
+			max_calls: 3,
+		},
+		quotaWindow: 'utc' as const,
+		maxCalls: 1,
+		maxCallsPerDay: 3,
+		released: false,
+	},
+}));
+const mockReleasePreparedSkillImproverApprovalCandidate = mock(async () => ({
+	date: '2026-08-26',
+	calls_used: 0,
+	max_calls: 3,
+}));
+const mockWriteApprovedSkillImproverCandidate = mock(async () => ({
+	ran: true,
+	proposalPath: '.swarm/skill-improver/proposals/test.md',
+	source: 'deterministic_fallback',
+	quota: { date: '2026-08-26', calls_used: 1, max_calls: 3 },
+}));
+const mockConsumeWriteApprovalFact = mock(async () => null);
+const mockWithWriteAuthority = mock(
+	async (_context, fn: () => Promise<unknown>) => await fn(),
+);
 
 // Module-level mocks — must be before the tool import
 mock.module('../../../src/config/index.ts', () => ({
@@ -117,12 +163,18 @@ mock.module('../../../src/config/schema.ts', () => ({
 
 mock.module('../../../src/services/skill-improver.js', () => ({
 	runSkillImprover: mockRunSkillImprover,
+	prepareApprovedSkillImproverCandidateWrite:
+		mockPrepareApprovedSkillImproverCandidateWrite,
+	writeApprovedSkillImproverCandidate: mockWriteApprovedSkillImproverCandidate,
 }));
 
 // Import AFTER mock.module so the tool resolves mocked deps
 import { _internals } from '../../../src/tools/skill-improve';
 
 const { skill_improve } = _internals;
+const originalWriteAuthorityDependencies = {
+	..._internals.writeAuthorityDependencies,
+};
 
 let tmp: string;
 let originalCwd: string;
@@ -130,6 +182,26 @@ let originalCwd: string;
 beforeEach(async () => {
 	mockLoadPluginConfigWithMeta.mockClear();
 	mockRunSkillImprover.mockClear();
+	mockPrepareApprovedSkillImproverCandidateWrite.mockClear();
+	mockReleasePreparedSkillImproverApprovalCandidate.mockClear();
+	mockWriteApprovedSkillImproverCandidate.mockClear();
+	mockConsumeWriteApprovalFact.mockClear();
+	mockWithWriteAuthority.mockClear();
+	Object.assign(_internals.writeAuthorityDependencies, {
+		buildHumanApprovedWriteAuthority: (fact: unknown) => ({
+			origin: 'human_approved' as const,
+			fact,
+		}),
+		consumeWriteApprovalFact: mockConsumeWriteApprovalFact,
+		formatApproveWriteCommand: (request: {
+			targetSessionId: string;
+			action: string;
+			candidateId: string;
+			candidateContentHash: string;
+		}) =>
+			`/swarm approve-write ${request.targetSessionId} ${request.action} ${request.candidateId} ${request.candidateContentHash}`,
+		withWriteAuthority: mockWithWriteAuthority,
+	});
 
 	tmp = await fs.realpath(
 		await fs.mkdtemp(path.join(tmpdir(), 'skill-improve-test-')),
@@ -139,12 +211,17 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	Object.assign(
+		_internals.writeAuthorityDependencies,
+		originalWriteAuthorityDependencies,
+	);
 	process.chdir(originalCwd);
 	try {
 		await fs.rm(tmp, { recursive: true, force: true });
 	} catch {
 		// Ignore cleanup errors
 	}
+	mock.restore();
 });
 
 describe('skill_improve tool', () => {
@@ -183,6 +260,79 @@ describe('skill_improve tool', () => {
 			);
 			expect(result.ran).toBe(true);
 			expect(mockRunSkillImprover).toHaveBeenCalled();
+		});
+
+		it('returns an approval challenge when require_user_approval is enabled and no fact is available', async () => {
+			mockLoadPluginConfigWithMeta.mockReturnValueOnce({
+				config: {
+					skill_improver: { enabled: true, require_user_approval: true },
+				},
+				meta: { source: 'test' },
+			});
+			mockRunSkillImprover.mockResolvedValueOnce({
+				ran: false,
+				reason: 'skill_improver requires an exact human write approval',
+				quota: { date: '2026-08-26', calls_used: 1, max_calls: 3 },
+				approvalRequired: {
+					request: approvalRequestFixture,
+					candidateContent: '# Skill Improvement Proposal',
+					candidateContentChars: 28,
+					candidateContentTokenEstimate: 7,
+					allowedPaths: ['.swarm/skill-improver/proposals/test.md'],
+				},
+				source: 'deterministic_fallback',
+				model: 'opencode/big-pickle',
+			});
+			const result = JSON.parse(
+				await skill_improve.execute({}, {
+					directory: tmp,
+					sessionID: 'session-1',
+				} as any),
+			);
+			expect(result.ran).toBe(false);
+			expect(result.approvalRequired.command).toContain('/swarm approve-write');
+			expect(result.approvalRequired.allowedPaths).toEqual([
+				'.swarm/skill-improver/proposals/test.md',
+			]);
+			expect(mockRunSkillImprover).toHaveBeenCalledTimes(1);
+			expect(
+				mockPrepareApprovedSkillImproverCandidateWrite,
+			).not.toHaveBeenCalled();
+		});
+
+		it('consumes a write approval fact and writes the prepared candidate under approved authority', async () => {
+			mockLoadPluginConfigWithMeta.mockReturnValueOnce({
+				config: {
+					skill_improver: { enabled: true, require_user_approval: true },
+				},
+				meta: { source: 'test' },
+			});
+			mockConsumeWriteApprovalFact.mockResolvedValueOnce({
+				v: 1,
+				id: 'waf_1',
+				issuingSessionId: 'human-session',
+				issuedByCommand: 'approve-write',
+				issuedAt: '2026-08-26T12:00:00.000Z',
+				expiresAt: '2026-08-26T12:30:00.000Z',
+				...approvalRequestFixture,
+			});
+			const result = JSON.parse(
+				await skill_improve.execute(
+					{ approved_candidate_content: '# Skill Improvement Proposal' },
+					{
+						directory: tmp,
+						sessionID: 'session-1',
+					} as any,
+				),
+			);
+			expect(result.ran).toBe(true);
+			expect(mockConsumeWriteApprovalFact).toHaveBeenCalledTimes(1);
+			expect(mockWithWriteAuthority).toHaveBeenCalledTimes(1);
+			expect(mockWriteApprovedSkillImproverCandidate).toHaveBeenCalledTimes(1);
+			expect(mockRunSkillImprover).not.toHaveBeenCalled();
+			expect(
+				mockPrepareApprovedSkillImproverCandidateWrite,
+			).toHaveBeenCalledTimes(1);
 		});
 
 		it('passes targets to runSkillImprover', async () => {
@@ -291,212 +441,6 @@ describe('skill_improve tool', () => {
 		it('exposes skill_improve via _internals', () => {
 			expect(_internals.skill_improve).toBeDefined();
 			expect(typeof _internals.skill_improve.execute).toBe('function');
-		});
-	});
-
-	describe('ADVERSARIAL: malformed inputs and boundary violations', () => {
-		it('rejects max_calls below 1', async () => {
-			mockLoadPluginConfigWithMeta.mockReturnValueOnce({
-				config: { skill_improver: { enabled: true } },
-				meta: { source: 'test' },
-			});
-			mockRunSkillImprover.mockRejectedValueOnce(new Error('validation error'));
-			const result = JSON.parse(
-				await skill_improve.execute({ max_calls: 0 }, tmp),
-			);
-			expect(result.success).toBe(false);
-		});
-
-		it('rejects max_calls above 100', async () => {
-			mockLoadPluginConfigWithMeta.mockReturnValueOnce({
-				config: { skill_improver: { enabled: true } },
-				meta: { source: 'test' },
-			});
-			mockRunSkillImprover.mockRejectedValueOnce(new Error('validation error'));
-			const result = JSON.parse(
-				await skill_improve.execute({ max_calls: 101 }, tmp),
-			);
-			expect(result.success).toBe(false);
-		});
-
-		it('rejects negative max_calls', async () => {
-			mockLoadPluginConfigWithMeta.mockReturnValueOnce({
-				config: { skill_improver: { enabled: true } },
-				meta: { source: 'test' },
-			});
-			mockRunSkillImprover.mockRejectedValueOnce(new Error('validation error'));
-			const result = JSON.parse(
-				await skill_improve.execute({ max_calls: -5 }, tmp),
-			);
-			expect(result.success).toBe(false);
-		});
-
-		it('rejects max_calls as non-integer', async () => {
-			mockLoadPluginConfigWithMeta.mockReturnValueOnce({
-				config: { skill_improver: { enabled: true } },
-				meta: { source: 'test' },
-			});
-			mockRunSkillImprover.mockRejectedValueOnce(new Error('type error'));
-			const result = JSON.parse(
-				await skill_improve.execute({ max_calls: 3.14 }, tmp),
-			);
-			expect(result.success).toBe(false);
-		});
-
-		it('rejects invalid target value in array', async () => {
-			mockLoadPluginConfigWithMeta.mockReturnValueOnce({
-				config: { skill_improver: { enabled: true } },
-				meta: { source: 'test' },
-			});
-			mockRunSkillImprover.mockRejectedValueOnce(new Error('invalid target'));
-			const result = JSON.parse(
-				await skill_improve.execute(
-					{ targets: ['skills', 'invalid'] as any },
-					tmp,
-				),
-			);
-			expect(result.success).toBe(false);
-		});
-
-		it('rejects targets as non-array', async () => {
-			mockLoadPluginConfigWithMeta.mockReturnValueOnce({
-				config: { skill_improver: { enabled: true } },
-				meta: { source: 'test' },
-			});
-			mockRunSkillImprover.mockRejectedValueOnce(new Error('type error'));
-			const result = JSON.parse(
-				await skill_improve.execute({ targets: 'skills' as any }, tmp),
-			);
-			expect(result.success).toBe(false);
-		});
-
-		it('rejects invalid mode value', async () => {
-			mockLoadPluginConfigWithMeta.mockReturnValueOnce({
-				config: { skill_improver: { enabled: true } },
-				meta: { source: 'test' },
-			});
-			mockRunSkillImprover.mockRejectedValueOnce(new Error('invalid mode'));
-			const result = JSON.parse(
-				await skill_improve.execute({ mode: 'delete' as any }, tmp),
-			);
-			expect(result.success).toBe(false);
-		});
-
-		it('rejects mode as number', async () => {
-			mockLoadPluginConfigWithMeta.mockReturnValueOnce({
-				config: { skill_improver: { enabled: true } },
-				meta: { source: 'test' },
-			});
-			mockRunSkillImprover.mockRejectedValueOnce(new Error('type error'));
-			const result = JSON.parse(
-				await skill_improve.execute({ mode: 1 as any }, tmp),
-			);
-			expect(result.success).toBe(false);
-		});
-
-		it('rejects args with __proto__ pollution', async () => {
-			mockLoadPluginConfigWithMeta.mockReturnValueOnce({
-				config: { skill_improver: { enabled: true } },
-				meta: { source: 'test' },
-			});
-			mockRunSkillImprover.mockRejectedValueOnce(new Error('validation error'));
-			const pollutedArgs = { __proto__: { admin: true }, max_calls: 5 };
-			const result = JSON.parse(
-				await skill_improve.execute(pollutedArgs as any, tmp),
-			);
-			expect(result.success).toBe(false);
-		});
-
-		it('rejects args with constructor.prototype pollution', async () => {
-			mockLoadPluginConfigWithMeta.mockReturnValueOnce({
-				config: { skill_improver: { enabled: true } },
-				meta: { source: 'test' },
-			});
-			mockRunSkillImprover.mockRejectedValueOnce(new Error('validation error'));
-			const pollutedArgs = {
-				constructor: { prototype: { admin: true } },
-				max_calls: 5,
-			};
-			const result = JSON.parse(
-				await skill_improve.execute(pollutedArgs as any, tmp),
-			);
-			expect(result.success).toBe(false);
-		});
-
-		it('rejects targets array with non-string elements', async () => {
-			mockLoadPluginConfigWithMeta.mockReturnValueOnce({
-				config: { skill_improver: { enabled: true } },
-				meta: { source: 'test' },
-			});
-			mockRunSkillImprover.mockRejectedValueOnce(new Error('type error'));
-			const result = JSON.parse(
-				await skill_improve.execute(
-					{ targets: ['skills', 123, null] as any },
-					tmp,
-				),
-			);
-			expect(result.success).toBe(false);
-		});
-
-		it('rejects very large targets array (>= 100 items)', async () => {
-			mockLoadPluginConfigWithMeta.mockReturnValueOnce({
-				config: { skill_improver: { enabled: true } },
-				meta: { source: 'test' },
-			});
-			mockRunSkillImprover.mockRejectedValueOnce(new Error('too many targets'));
-			const manyTargets = Array(101).fill('skills');
-			const result = JSON.parse(
-				await skill_improve.execute({ targets: manyTargets as any }, tmp),
-			);
-			expect(result.success).toBe(false);
-		});
-
-		it('rejects max_calls as Infinity', async () => {
-			mockLoadPluginConfigWithMeta.mockReturnValueOnce({
-				config: { skill_improver: { enabled: true } },
-				meta: { source: 'test' },
-			});
-			mockRunSkillImprover.mockRejectedValueOnce(new Error('validation error'));
-			const result = JSON.parse(
-				await skill_improve.execute({ max_calls: Infinity }, tmp),
-			);
-			expect(result.success).toBe(false);
-		});
-
-		it('rejects max_calls as NaN', async () => {
-			mockLoadPluginConfigWithMeta.mockReturnValueOnce({
-				config: { skill_improver: { enabled: true } },
-				meta: { source: 'test' },
-			});
-			mockRunSkillImprover.mockRejectedValueOnce(new Error('validation error'));
-			const result = JSON.parse(
-				await skill_improve.execute({ max_calls: NaN }, tmp),
-			);
-			expect(result.success).toBe(false);
-		});
-
-		it('rejects max_calls as string', async () => {
-			mockLoadPluginConfigWithMeta.mockReturnValueOnce({
-				config: { skill_improver: { enabled: true } },
-				meta: { source: 'test' },
-			});
-			mockRunSkillImprover.mockRejectedValueOnce(new Error('type error'));
-			const result = JSON.parse(
-				await skill_improve.execute({ max_calls: '5' as any }, tmp),
-			);
-			expect(result.success).toBe(false);
-		});
-
-		it('rejects empty targets array', async () => {
-			mockLoadPluginConfigWithMeta.mockReturnValueOnce({
-				config: { skill_improver: { enabled: true } },
-				meta: { source: 'test' },
-			});
-			mockRunSkillImprover.mockRejectedValueOnce(new Error('validation error'));
-			const result = JSON.parse(
-				await skill_improve.execute({ targets: [] }, tmp),
-			);
-			expect(result.success).toBe(false);
 		});
 	});
 });

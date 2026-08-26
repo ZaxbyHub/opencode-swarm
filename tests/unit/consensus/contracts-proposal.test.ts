@@ -99,6 +99,22 @@ describe('ProposedSkillChangeSchema — the proposal boundary itself', () => {
 		).toBe(true);
 	});
 
+	test('accepts an optional authority field on writeOrigin', () => {
+		expect(
+			ProposedSkillChangeSchema.safeParse(
+				proposal({
+					provenance: {
+						...proposal().provenance,
+						writeOrigin: {
+							producedAt: '2026-07-24T00:00:00.000Z',
+							authority: 'human_approved',
+						},
+					},
+				}),
+			).success,
+		).toBe(true);
+	});
+
 	test('REJECTS an agentId — the consensus path can never produce one', () => {
 		// The shared `LearningWriteOriginSchema` admits `agentId`, but nothing on
 		// this path can set it: `MineConsensusDeps` has no such field and
@@ -114,6 +130,22 @@ describe('ProposedSkillChangeSchema — the proposal boundary itself', () => {
 						writeOrigin: {
 							producedAt: '2026-07-24T00:00:00.000Z',
 							agentId: 'agent-7',
+						},
+					},
+				}),
+			).success,
+		).toBe(false);
+	});
+
+	test('rejects an unknown authority value', () => {
+		expect(
+			ProposedSkillChangeSchema.safeParse(
+				proposal({
+					provenance: {
+						...proposal().provenance,
+						writeOrigin: {
+							producedAt: '2026-07-24T00:00:00.000Z',
+							authority: 'superuser',
 						},
 					},
 				}),

@@ -16,8 +16,25 @@ import {
 	KnowledgeConfigSchema,
 	SkillImproverConfigSchema,
 } from '../config/schema';
-import { runSkillImprover } from '../services/skill-improver.js';
+import {
+	buildHumanApprovedWriteAuthority,
+	consumeWriteApprovalFact,
+	formatApproveWriteCommand,
+	withWriteAuthority,
+} from '../security/write-authority.js';
+import {
+	prepareApprovedSkillImproverCandidateWrite,
+	runSkillImprover,
+	writeApprovedSkillImproverCandidate,
+} from '../services/skill-improver.js';
 import { createSwarmTool } from './create-tool.js';
+
+const writeAuthorityDependencies = {
+	buildHumanApprovedWriteAuthority,
+	consumeWriteApprovalFact,
+	formatApproveWriteCommand,
+	withWriteAuthority,
+};
 
 export const skill_improve: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
@@ -44,6 +61,13 @@ export const skill_improve: ReturnType<typeof createSwarmTool> =
 				.describe(
 					'When mode="draft_skills", validate generated draft skills before writing proposals. Default false.',
 				),
+			approved_candidate_content: z
+				.string()
+				.max(64_000)
+				.optional()
+				.describe(
+					'Exact approval candidate returned by a prior challenge. When provided, skill_improve writes this approved proposal or draft manifest verbatim instead of regenerating it.',
+				),
 		},
 		execute: async (args: unknown, directory, ctx): Promise<string> => {
 			const a = (args ?? {}) as {
@@ -51,6 +75,7 @@ export const skill_improve: ReturnType<typeof createSwarmTool> =
 				mode?: 'proposal' | 'draft_skills';
 				max_calls?: number;
 				evaluate?: boolean;
+				approved_candidate_content?: string;
 			};
 			const { config } = loadPluginConfigWithMeta(directory);
 			const parsed = SkillImproverConfigSchema.parse(
@@ -74,7 +99,7 @@ export const skill_improve: ReturnType<typeof createSwarmTool> =
 					2,
 				);
 			}
-			const result = await runSkillImprover({
+			const request = {
 				directory,
 				config: parsed,
 				targets: a.targets,
@@ -86,11 +111,83 @@ export const skill_improve: ReturnType<typeof createSwarmTool> =
 					window: enrichmentConfig.quota_window,
 				},
 				evaluateDrafts: a.evaluate ?? false,
-			});
+				approvedCandidateContent: a.approved_candidate_content,
+			} as const;
+			if (parsed.require_user_approval) {
+				if (a.approved_candidate_content) {
+					const prepared =
+						await prepareApprovedSkillImproverCandidateWrite(request);
+					if (prepared.kind === 'result') {
+						return JSON.stringify(prepared.result, null, 2);
+					}
+					const fact =
+						await writeAuthorityDependencies.consumeWriteApprovalFact({
+							directory,
+							request: prepared.prepared.request,
+						});
+					if (!fact) {
+						return JSON.stringify(
+							{
+								ran: false,
+								reason: 'skill_improver requires an exact human write approval',
+								approvalRequired: {
+									request: prepared.prepared.request,
+									command: writeAuthorityDependencies.formatApproveWriteCommand(
+										prepared.prepared.request,
+									),
+									candidateContent: prepared.prepared.candidateContent,
+									candidateContentChars:
+										prepared.prepared.candidateContent.length,
+									candidateContentTokenEstimate: Math.max(
+										1,
+										Math.ceil(prepared.prepared.candidateContent.length / 4),
+									),
+									allowedPaths: prepared.prepared.allowedPaths,
+								},
+								quota: prepared.prepared.quota,
+								source: prepared.prepared.source,
+								model: prepared.prepared.model,
+							},
+							null,
+							2,
+						);
+					}
+					const result = await writeAuthorityDependencies.withWriteAuthority(
+						writeAuthorityDependencies.buildHumanApprovedWriteAuthority(fact),
+						() => writeApprovedSkillImproverCandidate(prepared.prepared),
+					);
+					return JSON.stringify(result, null, 2);
+				}
+				const result = await runSkillImprover({
+					...request,
+					allowAutoApply: false,
+				});
+				if (result.approvalRequired?.request) {
+					return JSON.stringify(
+						{
+							...result,
+							approvalRequired: {
+								...result.approvalRequired,
+								command: writeAuthorityDependencies.formatApproveWriteCommand(
+									result.approvalRequired.request,
+								),
+							},
+						},
+						null,
+						2,
+					);
+				}
+				return JSON.stringify(result, null, 2);
+			}
+			const result = await runSkillImprover(request);
 			return JSON.stringify(result, null, 2);
 		},
 	});
 
-export const _internals: { skill_improve: typeof skill_improve } = {
+export const _internals: {
+	skill_improve: typeof skill_improve;
+	writeAuthorityDependencies: typeof writeAuthorityDependencies;
+} = {
 	skill_improve,
+	writeAuthorityDependencies,
 };

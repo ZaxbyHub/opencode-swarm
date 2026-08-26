@@ -96,6 +96,68 @@ describe('outbound delegation check', () => {
 		).resolves.toBeUndefined();
 	});
 
+	test('denies coder delegation that targets a centrally protected path', async () => {
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
+		const hook = createFullAutoDelegationHook({
+			config: config(),
+			directory: tmpDir,
+		});
+		await expect(
+			hook.toolBefore(
+				{ tool: 'Task', sessionID: 'sess-1', callID: 'protected' },
+				{
+					args: {
+						subagent_type: 'coder',
+						prompt: 'Modify src/security/write-authority.ts',
+					},
+				},
+			),
+		).rejects.toThrow(/protected path/);
+	});
+
+	test('denies coder delegation when a protected path is hidden in a non-prompt field', async () => {
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
+		const hook = createFullAutoDelegationHook({
+			config: config(),
+			directory: tmpDir,
+		});
+		await expect(
+			hook.toolBefore(
+				{ tool: 'Task', sessionID: 'sess-1', callID: 'protected-args' },
+				{
+					args: {
+						subagent_type: 'coder',
+						files: ['src/security/write-authority.ts'],
+						scope: {
+							targets: [
+								'docs/releases/pending/1824-integrity-sandbox-boundary.md',
+							],
+						},
+					},
+				},
+			),
+		).rejects.toThrow(/protected path/);
+	});
+
+	test('fails closed when a coder payload exceeds the protected-path scan budget', async () => {
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
+		const hook = createFullAutoDelegationHook({
+			config: config(),
+			directory: tmpDir,
+		});
+		await expect(
+			hook.toolBefore(
+				{ tool: 'Task', sessionID: 'sess-1', callID: 'oversized-args' },
+				{
+					args: {
+						subagent_type: 'coder',
+						metadata: Array.from({ length: 65 }, (_, index) => `item-${index}`),
+					},
+				},
+			),
+		).rejects.toThrow(/scan budget/);
+	});
+
 	test('no-op when no Full-Auto run is active', async () => {
 		const hook = createFullAutoDelegationHook({
 			config: config(),

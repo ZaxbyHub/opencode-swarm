@@ -52,13 +52,11 @@ const WRITE_TOOLS = new Set<string>(WRITE_TOOL_NAMES);
 export interface ScopeGuardConfig {
 	/** Whether scope guard is enabled (default: true) */
 	enabled: boolean;
-	/** Whether to skip in turbo mode (default: false — NOT skippable by design) */
-	skip_in_turbo: boolean;
 }
 
 /**
  * Creates the scope-guard hook that blocks out-of-scope writes.
- * @param config - ScopeGuardConfig (enabled, skip_in_turbo)
+ * @param config - ScopeGuardConfig. Scope enforcement is never skipped in Turbo.
  * @param fallbackDirectory - The plugin-root directory (`ctx.directory`). Used
  *   ONLY as the fallback for sessions with no recorded workspace root. Issue
  *   #2002: this hook is constructed once per plugin instance and serves every
@@ -78,7 +76,6 @@ export function createScopeGuardHook(
 	) => Promise<void>;
 } {
 	const enabled = config.enabled ?? true;
-	const _skipInTurbo = config.skip_in_turbo ?? false; // NOT skippable by default (reserved for future turbo detection)
 
 	return {
 		toolBefore: async (input, output) => {

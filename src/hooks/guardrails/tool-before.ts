@@ -24,6 +24,10 @@ import {
 import { recordFullAutoSevereEvidenceEvent } from '../../full-auto/severe-result.js';
 import { setMacOSSandboxPolicy } from '../../sandbox/executor';
 import { resolveScopePaths } from '../../sandbox/scope-resolver';
+import {
+	clearSandboxWrapOutcome,
+	recordSandboxWrapOutcome,
+} from '../../sandbox/skip-state';
 import { sanitizeDiagnosticText } from '../../scope/path-identity';
 import type { ScopeLeaseCandidateInput } from '../../scope/scope-lease-renewal';
 import {
@@ -31,6 +35,7 @@ import {
 	resolveAuthorizedScopeBindingForSessionDetailed,
 } from '../../scope/scope-persistence';
 import { formatScopeResolutionDiagnostic } from '../../scope/scope-resolution-diagnostic';
+import { classifyCommand } from '../../security/command-classifier.js';
 import {
 	beginInvocation,
 	ensureAgentSession,
@@ -126,6 +131,8 @@ export interface ToolBeforeContext {
 	worktreeBaseDirOverrides?: string[];
 	/** Sandbox executor getter seam for tests and platform-specific overrides. */
 	getSandboxExecutor: typeof import('../../sandbox/executor').getExecutor;
+	/** Sandbox capability assessment seam for deterministic cross-platform tests. */
+	assessSandboxEnforcement: typeof import('../../sandbox/executor').assessSandboxEnforcement;
 	/** Hold exact child-write provenance until the matching after-hook succeeds. */
 	rememberReviewerScopeWrite?: (input: {
 		callID: string;
@@ -151,6 +158,15 @@ import {
 
 let hasWarnedSandboxUnavailable = false;
 
+function normalizeSandboxMechanism(mechanism: string): string {
+	return mechanism.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+/** @internal test seam */
+export function _resetSandboxUnavailableWarningState(): void {
+	hasWarnedSandboxUnavailable = false;
+}
+
 /**
  * Creates a toolBefore handler with the given shared context.
  *
@@ -170,6 +186,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		consecutiveNoToolTurns,
 		worktreeBaseDirOverrides,
 		getSandboxExecutor,
+		assessSandboxEnforcement,
 		rememberReviewerScopeWrite,
 		rememberScopeLeaseCandidate,
 	} = ctx;
@@ -357,6 +374,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const rawCommand =
 			typeof toolArgs?.command === 'string' ? toolArgs.command.trim() : '';
 		if (!rawCommand) return;
+		const sharedClassification = classifyCommand(rawCommand);
+		if (sharedClassification.aggregate === 'catastrophic') {
+			throw new Error(
+				'BLOCKED: catastrophic shell operation detected by the shared command classifier; critic approval cannot waive this policy',
+			);
+		}
 
 		// Issue #2002: a lane coder's shell command runs with the lane as cwd, so
 		// destructive-target containment must be evaluated against the lane root.
@@ -1274,8 +1297,108 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 	): Promise<void> {
 		if (tool !== 'bash' && tool !== 'shell') return;
 
+		const toolArgs = args as Record<string, unknown> | undefined;
+		const rawCommand =
+			typeof toolArgs?.command === 'string' ? toolArgs.command.trim() : '';
+		if (!rawCommand || !toolArgs) return;
 		const executor = await getSandboxExecutor();
+		const sandboxConfig = cfg.sandbox;
+		const originalCommandHash = hashArgs({ command: rawCommand });
+		const commandIdentity = `cmd=${originalCommandHash}`;
+		const assessment = await assessSandboxEnforcement(
+			sandboxConfig
+				? {
+						mode: sandboxConfig.mode,
+						require_filesystem: sandboxConfig.require_filesystem,
+						require_network: sandboxConfig.require_network,
+						require_process: sandboxConfig.require_process,
+						network_mode: sandboxConfig.network_mode,
+						network_allowlist: sandboxConfig.network_allowlist,
+						writable_roots: sandboxConfig.writable_roots,
+					}
+				: undefined,
+		);
+		const capabilityIdentity = `cap=${assessment.capability.identity}`;
+		const recordOutcome = (
+			outcome: Omit<
+				import('../../sandbox/skip-state').SandboxWrapOutcome,
+				| 'sessionID'
+				| 'callID'
+				| 'originalCommandHash'
+				| 'originalCommand'
+				| 'assessmentCacheKey'
+				| 'executorMechanism'
+				| 'capabilityMechanism'
+			>,
+		): void =>
+			recordSandboxWrapOutcome({
+				...outcome,
+				sessionID,
+				callID,
+				originalCommandHash,
+				originalCommand: rawCommand,
+				assessmentCacheKey: assessment.cacheKey,
+				executorMechanism: executor?.mechanism ?? 'none',
+				capabilityMechanism: assessment.capability.mechanism,
+			});
+		const clearRecordedOutcome = (): void => {
+			clearSandboxWrapOutcome(sessionID, callID);
+		};
+		if (sandboxConfig?.mode === 'required') {
+			const assessmentSupported = assessment.supported !== false;
+			const assessmentUnsupported = assessment.unsupported ?? [];
+			const missing =
+				!executor || !executor.isAvailable()
+					? ['executor']
+					: assessment.missing;
+			if (
+				!executor ||
+				!executor.isAvailable() ||
+				!assessmentSupported ||
+				!assessment.satisfied
+			) {
+				const missingOrUnsupported = assessmentSupported
+					? missing.join(', ')
+					: assessmentUnsupported.join(', ');
+				const skipReason =
+					missing[0] === 'executor'
+						? `required sandbox executor unavailable [${commandIdentity} ${capabilityIdentity}]`
+						: !assessmentSupported
+							? `required sandbox policy unsupported (${missingOrUnsupported}) [${commandIdentity} ${capabilityIdentity}]`
+							: `required sandbox capability unsatisfied (${missingOrUnsupported}) [${commandIdentity} ${capabilityIdentity}]`;
+				recordOutcome({
+					finalCommandHash: originalCommandHash,
+					wrapped: false,
+					capabilityIdentity: assessment.capability.identity,
+					reason: skipReason,
+				});
+				clearRecordedOutcome();
+				void appendGuardrailDecision(
+					{
+						type: 'sandbox_skip',
+						ts: new Date().toISOString(),
+						sessionID,
+						agent,
+						tool,
+						command,
+						executorMechanism: executor?.mechanism ?? 'none',
+						skipReason,
+					},
+					{ auditPath, enabled: auditEnabled },
+				);
+				throw new Error(
+					`[sandbox] BLOCKED: Required sandbox policy unsatisfied (${missingOrUnsupported}). [${commandIdentity} ${capabilityIdentity}] Command will not be executed unsandboxed.`,
+				);
+			}
+		}
+
 		if (!executor || !executor.isAvailable()) {
+			recordOutcome({
+				finalCommandHash: originalCommandHash,
+				wrapped: false,
+				capabilityIdentity: assessment.capability.identity,
+				reason: 'executor not available',
+			});
 			if (!hasWarnedSandboxUnavailable) {
 				hasWarnedSandboxUnavailable = true;
 				warn(
@@ -1298,13 +1421,22 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			return;
 		}
 
-		const toolArgs = args as Record<string, unknown> | undefined;
-		const rawCommand =
-			typeof toolArgs?.command === 'string' ? toolArgs.command.trim() : '';
-		if (!rawCommand || !toolArgs) return;
-
 		const declaredPaths = resolveDeclaredScope(sessionID);
-		if (!declaredPaths || declaredPaths.length === 0) return;
+		if (!declaredPaths || declaredPaths.length === 0) {
+			recordOutcome({
+				finalCommandHash: originalCommandHash,
+				wrapped: false,
+				capabilityIdentity: assessment.capability.identity,
+				reason: 'no declared scope',
+			});
+			if (sandboxConfig?.mode === 'required') {
+				clearRecordedOutcome();
+				throw new Error(
+					'[sandbox] BLOCKED: Required sandbox policy needs a declared writable scope; command will not execute unsandboxed.',
+				);
+			}
+			return;
+		}
 
 		// Issue #2002: these become the filesystem paths the OS sandbox is allowed
 		// to touch. For a lane command they must be lane-rooted, or the sandbox is
@@ -1314,7 +1446,43 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			declaredPaths,
 			sessionWorkspaceDirectory(sessionID),
 		);
-		if (resolved.paths.length === 0) return;
+		const configuredWritableRoots = resolveScopePaths(
+			sandboxConfig?.writable_roots ?? [],
+			sessionWorkspaceDirectory(sessionID),
+		);
+		if (configuredWritableRoots.rejected.length > 0) {
+			recordOutcome({
+				finalCommandHash: originalCommandHash,
+				wrapped: false,
+				capabilityIdentity: assessment.capability.identity,
+				reason: `configured writable_roots rejected (${configuredWritableRoots.rejected.map((item) => item.path).join(', ')})`,
+			});
+			if (sandboxConfig?.mode === 'required') {
+				clearRecordedOutcome();
+				throw new Error(
+					'[sandbox] BLOCKED: Required sandbox policy contains writable_roots outside the session workspace; command will not execute unsandboxed.',
+				);
+			}
+			return;
+		}
+		if (resolved.paths.length === 0) {
+			recordOutcome({
+				finalCommandHash: originalCommandHash,
+				wrapped: false,
+				capabilityIdentity: assessment.capability.identity,
+				reason: 'resolved scope empty',
+			});
+			if (sandboxConfig?.mode === 'required') {
+				clearRecordedOutcome();
+				throw new Error(
+					'[sandbox] BLOCKED: Required sandbox policy resolved no writable scope; command will not execute unsandboxed.',
+				);
+			}
+			return;
+		}
+		const writablePaths = [
+			...new Set([...resolved.paths, ...configuredWritableRoots.paths]),
+		];
 
 		try {
 			// Issue #2236 F6b: bake the macOS DYLD-stripping env hardening
@@ -1335,11 +1503,50 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					: undefined;
 			const wrappedCommand = executor.wrapCommand(
 				rawCommand,
-				resolved.paths,
+				writablePaths,
 				undefined,
 				envOverrides,
+				{
+					network_mode: sandboxConfig?.network_mode ?? 'off',
+					network_allowlist: sandboxConfig?.network_allowlist ?? [],
+					writable_roots: configuredWritableRoots.paths,
+				},
 			);
+			if (wrappedCommand.trim() === rawCommand) {
+				recordOutcome({
+					finalCommandHash: originalCommandHash,
+					wrapped: false,
+					capabilityIdentity: assessment.capability.identity,
+					reason: 'sandbox wrapper returned the original command unchanged',
+				});
+				clearRecordedOutcome();
+				throw new Error(
+					`[sandbox] BLOCKED: ${executor.mechanism} returned the original command unchanged. [${commandIdentity} ${capabilityIdentity}] Command will not be executed unsandboxed.`,
+				);
+			}
+			if (
+				normalizeSandboxMechanism(executor.mechanism) !==
+				normalizeSandboxMechanism(assessment.capability.mechanism)
+			) {
+				recordOutcome({
+					finalCommandHash: originalCommandHash,
+					wrapped: false,
+					capabilityIdentity: assessment.capability.identity,
+					reason:
+						'sandbox executor mechanism no longer matches the assessed capability',
+				});
+				clearRecordedOutcome();
+				throw new Error(
+					`[sandbox] BLOCKED: sandbox executor mechanism drifted from the assessed capability (${executor.mechanism} != ${assessment.capability.mechanism}). [${commandIdentity} ${capabilityIdentity}]`,
+				);
+			}
 			toolArgs.command = wrappedCommand;
+			recordOutcome({
+				finalCommandHash: hashArgs({ command: wrappedCommand }),
+				wrapped: true,
+				capabilityIdentity: assessment.capability.identity,
+				reason: 'wrapped',
+			});
 			markToolExecutionSandboxWrapped(sessionID, callID);
 
 			void appendGuardrailDecision(
@@ -1355,6 +1562,13 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				{ auditPath, enabled: auditEnabled },
 			);
 		} catch (err) {
+			recordOutcome({
+				finalCommandHash: originalCommandHash,
+				wrapped: false,
+				capabilityIdentity: assessment.capability.identity,
+				reason: err instanceof Error ? err.message : String(err),
+			});
+			clearRecordedOutcome();
 			forgetToolExecution(sessionID, callID);
 			const message =
 				`[sandbox] BLOCKED: Failed to wrap command with ${executor.mechanism}: ${err}. ` +

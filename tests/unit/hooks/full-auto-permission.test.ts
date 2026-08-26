@@ -17,11 +17,21 @@ import {
 	loadFullAutoRunState,
 	startFullAutoRun,
 } from '../../../src/full-auto/state';
-import { createFullAutoPermissionHook } from '../../../src/hooks/full-auto-permission';
+import {
+	createFullAutoPermissionHook,
+	_internals as permissionInternals,
+} from '../../../src/hooks/full-auto-permission';
+import { hashArgs } from '../../../src/hooks/guardrails/file-authority';
+import {
+	_resetSandboxWrapOutcomeState,
+	readSandboxWrapOutcome,
+	recordSandboxWrapOutcome,
+} from '../../../src/sandbox/skip-state';
 import { _internals as stateInternals, swarmState } from '../../../src/state';
 
 let tmpDir: string;
 let origClient: typeof stateInternals.swarmState.opencodeClient;
+let origAssessSandboxEnforcement: typeof permissionInternals.assessSandboxEnforcement;
 
 function makeConfig(): PluginConfig {
 	return {
@@ -46,14 +56,18 @@ beforeEach(() => {
 	);
 	fs.mkdirSync(path.join(tmpDir, '.swarm'), { recursive: true });
 	origClient = stateInternals.swarmState.opencodeClient;
+	origAssessSandboxEnforcement = permissionInternals.assessSandboxEnforcement;
 	stateInternals.swarmState.opencodeClient = null;
 	swarmState.activeAgent.set('sess-1', 'architect');
+	_resetSandboxWrapOutcomeState();
 });
 
 afterEach(() => {
 	stateInternals.swarmState.opencodeClient = origClient;
+	permissionInternals.assessSandboxEnforcement = origAssessSandboxEnforcement;
 	swarmState.activeAgent.delete('sess-1');
 	swarmState.agentSessions.delete('sess-1');
+	_resetSandboxWrapOutcomeState();
 	try {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	} catch {
@@ -270,5 +284,166 @@ describe('createFullAutoPermissionHook', () => {
 				args: { query: 'foo' },
 			}),
 		).rejects.toThrow(/FULL_AUTO_(BLOCKED|CRITIC_DENY|ESCALATE_HUMAN|PAUSE)/);
+	});
+
+	test('strict shell denies when guardrails did not record a sandbox wrap outcome', async () => {
+		permissionInternals.assessSandboxEnforcement = async () =>
+			({
+				capability: { identity: 'cap-1' },
+				requirements: {
+					mode: 'advisory',
+					require_filesystem: false,
+					require_network: false,
+					require_process: false,
+				},
+				satisfied: true,
+				missing: [],
+				cacheKey: 'cap-1',
+			}) as never;
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: true, mode: 'strict' });
+		const hook = createFullAutoPermissionHook({
+			config: makeConfig(),
+			directory: tmpDir,
+		});
+
+		await expect(
+			hook.toolBefore(fakeInput('bash', 'shell-1'), {
+				args: { command: 'echo hi' },
+			}),
+		).rejects.toThrow(/sandbox_unverified/);
+	});
+
+	test('strict shell consumes and clears a mismatched sandbox wrap outcome', async () => {
+		permissionInternals.assessSandboxEnforcement = async () =>
+			({
+				capability: { identity: 'cap-1' },
+				requirements: {
+					mode: 'advisory',
+					require_filesystem: false,
+					require_network: false,
+					require_process: false,
+				},
+				satisfied: true,
+				missing: [],
+				cacheKey: 'cap-1',
+			}) as never;
+		recordSandboxWrapOutcome({
+			sessionID: 'sess-1',
+			callID: 'shell-2',
+			originalCommandHash: 1,
+			finalCommandHash: 2,
+			wrapped: false,
+			capabilityIdentity: 'cap-1',
+			reason: 'no declared scope',
+			originalCommand: 'echo hi',
+			executorMechanism: 'none',
+			capabilityMechanism: 'none',
+			assessmentCacheKey: 'cap-1',
+		});
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: true, mode: 'strict' });
+		const hook = createFullAutoPermissionHook({
+			config: makeConfig(),
+			directory: tmpDir,
+		});
+
+		await expect(
+			hook.toolBefore(fakeInput('bash', 'shell-2'), {
+				args: { command: 'echo hi' },
+			}),
+		).rejects.toThrow(/sandbox_unverified/);
+		expect(readSandboxWrapOutcome('sess-1', 'shell-2')).toBeNull();
+	});
+
+	test('strict shell accepts one correctly bound outcome and rejects replay', async () => {
+		permissionInternals.assessSandboxEnforcement = async () =>
+			({
+				capability: { identity: 'cap-1', mechanism: 'bubblewrap' },
+				requirements: {
+					mode: 'advisory',
+					require_filesystem: false,
+					require_network: false,
+					require_process: false,
+					network_mode: 'off',
+					network_allowlist: [],
+					writable_roots: [],
+				},
+				policy: {
+					network_mode: 'off',
+					network_allowlist: [],
+					writable_roots: [],
+				},
+				satisfied: true,
+				missing: [],
+				supported: true,
+				unsupported: [],
+				cacheKey: 'assessment-1',
+			}) as never;
+		const originalCommand = 'echo hi';
+		const wrappedCommand = "bwrap -- bash -c 'echo hi'";
+		recordSandboxWrapOutcome({
+			sessionID: 'sess-1',
+			callID: 'shell-ok',
+			originalCommandHash: hashArgs({ command: originalCommand }),
+			finalCommandHash: hashArgs({ command: wrappedCommand }),
+			wrapped: true,
+			capabilityIdentity: 'cap-1',
+			assessmentCacheKey: 'assessment-1',
+			reason: 'wrapped',
+			originalCommand,
+			executorMechanism: 'bubblewrap',
+			capabilityMechanism: 'bubblewrap',
+		});
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: true, mode: 'strict' });
+		const hook = createFullAutoPermissionHook({
+			config: makeConfig(),
+			directory: tmpDir,
+		});
+		await hook.toolBefore(fakeInput('bash', 'shell-ok'), {
+			args: { command: wrappedCommand },
+		});
+		expect(readSandboxWrapOutcome('sess-1', 'shell-ok')).toBeNull();
+		await expect(
+			hook.toolBefore(fakeInput('bash', 'shell-ok'), {
+				args: { command: wrappedCommand },
+			}),
+		).rejects.toThrow(/sandbox_unverified/);
+	});
+
+	test('strict shell rejects an independently mismatched original command hash', async () => {
+		permissionInternals.assessSandboxEnforcement = async () =>
+			({
+				capability: { identity: 'cap-1', mechanism: 'bubblewrap' },
+				requirements: { mode: 'advisory' },
+				policy: {},
+				satisfied: true,
+				missing: [],
+				supported: true,
+				unsupported: [],
+				cacheKey: 'assessment-1',
+			}) as never;
+		const wrappedCommand = "bwrap -- bash -c 'echo hi'";
+		recordSandboxWrapOutcome({
+			sessionID: 'sess-1',
+			callID: 'shell-original-mismatch',
+			originalCommandHash: 123,
+			finalCommandHash: hashArgs({ command: wrappedCommand }),
+			wrapped: true,
+			capabilityIdentity: 'cap-1',
+			assessmentCacheKey: 'assessment-1',
+			reason: 'wrapped',
+			originalCommand: 'echo hi',
+			executorMechanism: 'bubblewrap',
+			capabilityMechanism: 'bubblewrap',
+		});
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: true, mode: 'strict' });
+		const hook = createFullAutoPermissionHook({
+			config: makeConfig(),
+			directory: tmpDir,
+		});
+		await expect(
+			hook.toolBefore(fakeInput('bash', 'shell-original-mismatch'), {
+				args: { command: wrappedCommand },
+			}),
+		).rejects.toThrow(/sandbox_unverified/);
 	});
 });
