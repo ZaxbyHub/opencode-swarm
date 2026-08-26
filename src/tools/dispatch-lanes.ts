@@ -595,6 +595,12 @@ const DispatchLanesAsyncArgsSchema = DispatchLanesArgsSchema.extend({
 		.describe(
 			'PR_REVIEW base-only staged attempt number, required together with pr_review_wave_stage at depth tier M or L while resilience is enabled: attempt 0 is the initial wave, followed by at most two retry attempts (1 and 2) over the exact unresolved-obligation target left by the previous attempt.',
 		),
+	pr_review_contract_retry: z
+		.boolean()
+		.optional()
+		.describe(
+			'PR_REVIEW base-only contract retry marker. Use only for one admitted retry of exactly one dimension whose previous terminal record was a contract failure; it is mutually exclusive with pr_review_wave_stage and pr_review_wave_attempt and does not consume staged retry budget.',
+		),
 });
 
 const CollectLaneResultsArgsSchema = z.object({
@@ -739,6 +745,7 @@ export interface DispatchLaneResult {
 	output_artifact_error?: string;
 	transcript_incomplete?: boolean;
 	message_count?: number;
+	workflow_lane_failure_class?: BackgroundDelegationResult['workflowLaneFailureClass'];
 	salvaged_workflow_lanes?: string[];
 	salvaged_workflow_lane_recoveries?: Array<{
 		workflow_lane: string;
@@ -1185,6 +1192,16 @@ export async function executeDispatchLanesAsync(
 		});
 	}
 	if (
+		parsed.data.pr_review_contract_retry &&
+		parsed.data.mode !== 'swarm-pr-review:base'
+	) {
+		return asyncFailureResult({
+			failure_class: 'invalid_args',
+			message:
+				'BLOCKED: pr_review_contract_retry is valid only when mode is exactly "swarm-pr-review:base".',
+		});
+	}
+	if (
 		context.sessionID?.trim() &&
 		parsed.data.pr_head_sha &&
 		(parsed.data.mode?.startsWith('swarm-pr-review:') ||
@@ -1380,12 +1397,21 @@ export async function executeDispatchLanesAsync(
 						configuredResilience,
 						gateState,
 					);
+					const contractRetry = parsed.data.pr_review_contract_retry === true;
 					const waveStage = parsed.data.pr_review_wave_stage;
 					const waveAttempt = parsed.data.pr_review_wave_attempt as
 						| 0
 						| 1
 						| 2
 						| undefined;
+					if (
+						contractRetry &&
+						(waveStage !== undefined || waveAttempt !== undefined)
+					) {
+						throw new Error(
+							'BLOCKED: PR_REVIEW contract retry is mutually exclusive with pr_review_wave_stage and pr_review_wave_attempt',
+						);
+					}
 					if ((waveStage === undefined) !== (waveAttempt === undefined)) {
 						throw new Error(
 							'BLOCKED: PR_REVIEW staged base dispatch requires both pr_review_wave_stage and pr_review_wave_attempt together',
@@ -1403,6 +1429,7 @@ export async function executeDispatchLanesAsync(
 					if (
 						effectiveResilience.enabled &&
 						depthTier !== 'S' &&
+						!contractRetry &&
 						(waveStage === undefined || waveAttempt === undefined)
 					) {
 						throw new Error(
@@ -1501,6 +1528,7 @@ export async function executeDispatchLanesAsync(
 							// per-dimension artifact state; neither may add a fresh
 							// synchronous digest resolution to the dispatch path.
 							revisionDigest: workflowRevisionDigest,
+							prReviewContractRetry: contractRetry,
 							prReviewWaveStage: waveStage,
 							prReviewWaveAttempt: waveAttempt,
 							prReviewResiliencePolicy: effectiveResilience,
@@ -1783,6 +1811,7 @@ export async function executeCollectLaneResults(
 	const timeoutMs = parsed.data.timeout_ms ?? DEFAULT_COLLECT_TIMEOUT_MS;
 	const deadline = _internals.now() + timeoutMs;
 	const hostTimeouts = new Set<string>();
+	const collectionResourceFailures = new Set<string>();
 	// This call processes at most MAX_LANES records, so this per-invocation set
 	// is bounded and prevents a persistently unencodable terminal receipt from
 	// logging once per wait-loop poll.
@@ -1812,6 +1841,14 @@ export async function executeCollectLaneResults(
 				records,
 				deadline: _internals.now(),
 				receiptAppendFailureLogs,
+				resourceFailures: new Set(
+					records
+						.filter(
+							(record) =>
+								record.status === 'pending' || record.status === 'running',
+						)
+						.map((record) => record.correlationId),
+				),
 			});
 			records = findByBatchId(directory, parsed.data.batch_id, batchFilter);
 			const reviewReceiptFallbacks = await resolvePrReviewReceiptFallbacks(
@@ -1868,6 +1905,7 @@ export async function executeCollectLaneResults(
 				pollingDeadline,
 				hostTimeouts,
 				receiptAppendFailureLogs,
+				collectionResourceFailures,
 			);
 			await sweepStaleAsyncLaneRecords(
 				session,
@@ -1909,6 +1947,7 @@ export async function executeCollectLaneResults(
 			records,
 			deadline,
 			receiptAppendFailureLogs,
+			resourceFailures: collectionResourceFailures,
 		});
 		records = findByBatchId(directory, parsed.data.batch_id, batchFilter);
 	}
@@ -2362,6 +2401,7 @@ async function collectOnce(
 	deadline: number,
 	hostTimeouts: Set<string>,
 	receiptAppendFailureLogs: Set<string>,
+	collectionResourceFailures: Set<string>,
 ): Promise<void> {
 	const activeRecords = records.filter(
 		(record) => record.status === 'pending' || record.status === 'running',
@@ -2422,9 +2462,19 @@ async function collectOnce(
 				laneBudgets.messagesBudgetMs,
 			);
 		} catch {
+			if (
+				!hostTimeouts.has(
+					`session.messages for lane "${record.laneId ?? record.correlationId}"`,
+				)
+			) {
+				collectionResourceFailures.add(record.correlationId);
+			}
 			continue;
 		}
-		if (!messages.data) continue;
+		if (!messages.data) {
+			if (messages.error) collectionResourceFailures.add(record.correlationId);
+			continue;
+		}
 		const transcript = extractAssistantTranscript(messages.data);
 		if (!transcript.text) continue;
 		if (readiness === 'unknown' && !transcript.terminalAssistantProof) {
@@ -2563,6 +2613,7 @@ async function settleCollectedLane(args: {
 			// terminal assistant proof. That proof is sufficient to persist a
 			// deterministic contract failure instead of leaving the lane pending.
 			terminalStatus = 'error';
+			prospectiveResult.workflowLaneFailureClass = 'contract';
 			const family =
 				record.mode === 'swarm-pr-review:base' ? 'base_explorer' : 'micro_lane';
 			prospectiveResult.error =
@@ -2838,6 +2889,7 @@ async function buildPrReviewWaitDeadlineProspectiveResult(args: {
 			}
 		}
 		if (!validation.ok) {
+			prospectiveResult.workflowLaneFailureClass = 'contract';
 			const family =
 				args.record.mode === 'swarm-pr-review:base'
 					? 'base_explorer'
@@ -2921,7 +2973,6 @@ async function buildPrReviewWaitDeadlineProspectiveResult(args: {
 			}
 		}
 	}
-
 	return { result: prospectiveResult, detail };
 }
 
@@ -2931,6 +2982,7 @@ async function finalizePrReviewWaitDeadlineLanes(args: {
 	records: readonly BackgroundDelegationRecord[];
 	deadline: number;
 	receiptAppendFailureLogs: Set<string>;
+	resourceFailures?: ReadonlySet<string>;
 }): Promise<void> {
 	for (const record of args.records) {
 		const current = getCurrentPrReviewWaitDeadlineCandidate(
@@ -3021,6 +3073,10 @@ async function finalizePrReviewWaitDeadlineLanes(args: {
 				digest: digestText(finalError),
 			} satisfies BackgroundDelegationResult);
 		terminalResult.error = finalError;
+		terminalResult.workflowLaneFailureClass ??=
+			args.resourceFailures?.has(current.correlationId) === true
+				? 'resource'
+				: 'deadline';
 		await appendDelegationTransition(args.directory, current.correlationId, {
 			status: 'error',
 			result: terminalResult,
@@ -3148,6 +3204,8 @@ async function appendAsyncLaneLaunchError(
 	sessionId: string,
 	message: string,
 ): Promise<void> {
+	const record = findByCorrelationId(directory, sessionId);
+	const isPrReviewLane = record?.mode?.startsWith('swarm-pr-review:') === true;
 	await appendDelegationTransition(directory, sessionId, {
 		status: 'error',
 		result: {
@@ -3155,6 +3213,9 @@ async function appendAsyncLaneLaunchError(
 			chars: message.length,
 			truncated: false,
 			digest: digestText(message),
+			...(isPrReviewLane
+				? { workflowLaneFailureClass: 'resource' as const }
+				: {}),
 		},
 	});
 	cleanupAsyncLaunchSession(session, sessionId);
@@ -3787,6 +3848,12 @@ function recordToLaneResult(
 					...(record.result.messageCount !== undefined
 						? { message_count: record.result.messageCount }
 						: {}),
+					...(record.result.workflowLaneFailureClass !== undefined
+						? {
+								workflow_lane_failure_class:
+									record.result.workflowLaneFailureClass,
+							}
+						: {}),
 					...(record.result.salvagedWorkflowLanes?.length
 						? {
 								salvaged_workflow_lanes: [
@@ -4183,6 +4250,10 @@ function applyExplorerFormatSuffix(
 		const isPrReviewCouncilExplorer =
 			options.mode === 'swarm-pr-review:council' && role.startsWith('council_');
 		if (role !== 'explorer' && !isPrReviewCouncilExplorer) return lane;
+		const isPrReviewDiscovery =
+			options.mode === 'swarm-pr-review:base' ||
+			options.mode === 'swarm-pr-review:micro' ||
+			isPrReviewCouncilExplorer;
 		const rowFamilyIdentity =
 			options.mode === 'swarm-pr-review:base'
 				? 'For this base explorer lane, use the base row family and put the exact workflow_lane only in the `lane` field.'
@@ -4275,6 +4346,24 @@ function applyExplorerFormatSuffix(
 				`[dispatch-lanes] applyExplorerFormatSuffix: ${diagnostic}; preserving the caller prompt for generic compatibility`,
 			);
 			return lane;
+		}
+		if (isPrReviewDiscovery) {
+			const forbidden = [
+				lane.prompt.includes(CANDIDATE_HEADERS.base_explorer)
+					? 'the canonical base discovery header'
+					: null,
+				lane.prompt.includes(CANDIDATE_HEADERS.micro_lane)
+					? 'the canonical micro discovery header'
+					: null,
+				/\[CANDIDATE\]/.test(lane.prompt) ? '[CANDIDATE]' : null,
+				/\[CLEAN\]/.test(lane.prompt) ? '[CLEAN]' : null,
+			].find((value): value is string => value !== null);
+			if (forbidden) {
+				errors.push(
+					`Lane "${lane.id}" operator prompt contains ${forbidden}; PR-review discovery prompts carry content only and the controller injects the authoritative output contract`,
+				);
+				return lane;
+			}
 		}
 		const prompt = `${lane.prompt}
 
@@ -4686,6 +4775,8 @@ export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
 			scope: DispatchLanesAsyncArgsSchema.shape.scope,
 			trigger_evaluation: DispatchLanesAsyncArgsSchema.shape.trigger_evaluation,
 			feedback_inventory: DispatchLanesAsyncArgsSchema.shape.feedback_inventory,
+			pr_review_contract_retry:
+				DispatchLanesAsyncArgsSchema.shape.pr_review_contract_retry,
 			pr_review_wave_stage:
 				DispatchLanesAsyncArgsSchema.shape.pr_review_wave_stage,
 			pr_review_wave_attempt:

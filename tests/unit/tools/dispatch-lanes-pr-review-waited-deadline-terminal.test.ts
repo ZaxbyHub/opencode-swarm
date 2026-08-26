@@ -93,6 +93,7 @@ describe('collect_lane_results waited PR-review deadline terminalization (#2333)
 
 		const record = settledRecord(directory, correlationId);
 		expect(record.status).toBe('error');
+		expect(record.result?.workflowLaneFailureClass).toBe('deadline');
 		expect(record.result?.error).toContain(
 			'PR_REVIEW_COLLECTION_DEADLINE_EXCEEDED',
 		);
@@ -121,7 +122,9 @@ describe('collect_lane_results waited PR-review deadline terminalization (#2333)
 		expect(result.errors).toEqual([
 			'OpenCode session messages client is not available',
 		]);
-		expect(settledRecord(directory, correlationId).status).toBe('error');
+		const record = settledRecord(directory, correlationId);
+		expect(record.status).toBe('error');
+		expect(record.result?.workflowLaneFailureClass).toBe('resource');
 	});
 
 	test('no-client behavior remains fail-closed for a non-review waited batch', async () => {
@@ -198,6 +201,63 @@ describe('collect_lane_results waited PR-review deadline terminalization (#2333)
 			'intent-architecture',
 		]);
 		expect(result.lane_results[0]?.accepted_review_item_ids).toBeUndefined();
+	});
+
+	test('wait:true preserves contract failure classification when deadline terminalization validates malformed discovery output', async () => {
+		const directory = makeTempDir();
+		const batchId = 'review-deadline-contract';
+		const correlationId = `${batchId}-session`;
+		await recordPending({
+			directory,
+			batchId,
+			correlationId,
+			mode: 'swarm-pr-review:base',
+			workflowLane: 'intent-architecture',
+			workspace: {
+				directory,
+				gitHead: 'head-1',
+				dirtyHash: null,
+				prHeadSha: 'head-1',
+				scope: 'complete PR diff base-1...head-1',
+			},
+		});
+		_internals.resolvePrWorkflowRevisionDigestAsync = async () => 'revision-1';
+		const status = mock(() => new Promise<never>(() => {}));
+		const messages = mock(async () => ({
+			data: [assistantMessage('plain malformed discovery prose', {})],
+		}));
+		_internals.getSessionOps = () => ({ ...baseOps(), status, messages });
+
+		const result = await withTestDeadline(
+			executeCollectLaneResults(
+				{
+					batch_id: batchId,
+					wait: true,
+					include_pending: true,
+					timeout_ms: 25,
+				},
+				directory,
+			),
+		);
+
+		expect(result.failed).toBe(1);
+		expect(result.lane_results[0]?.status).toBe('failed');
+		expect(result.lane_results[0]?.error).toContain(
+			'PR_REVIEW_COLLECTION_DEADLINE_EXCEEDED',
+		);
+		expect(result.lane_results[0]?.error).toContain(
+			'PR_REVIEW_DISCOVERY_CONTRACT_INVALID',
+		);
+		expect(result.lane_results[0]?.workflow_lane_failure_class).toBe(
+			'contract',
+		);
+
+		const record = settledRecord(directory, correlationId);
+		expect(record.status).toBe('error');
+		expect(record.result?.workflowLaneFailureClass).toBe('contract');
+		expect(record.result?.error).toContain(
+			'PR_REVIEW_DISCOVERY_CONTRACT_INVALID',
+		);
 	});
 
 	test('a late transport-validator resolution cannot recover a lane after waited deadline terminalization', async () => {

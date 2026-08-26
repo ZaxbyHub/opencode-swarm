@@ -135,6 +135,7 @@ describe('PR-review discovery validation during collection', () => {
 			status: 'failed',
 			output: 'I reviewed the lane and found nothing concerning.',
 			output_chars: 49,
+			workflow_lane_failure_class: 'contract',
 		});
 		const error = first.lane_results[0].error!;
 		expect(error).toContain('batch=malformed-base');
@@ -152,6 +153,10 @@ describe('PR-review discovery validation during collection', () => {
 			readLaneOutput(directory, first.lane_results[0].output_ref!)?.artifact
 				.text,
 		).toBe('I reviewed the lane and found nothing concerning.');
+		expect(
+			findByCorrelationId(directory, 'session-malformed-base-intent-lane')
+				?.result?.workflowLaneFailureClass,
+		).toBe('contract');
 		const retrieved = await retrieve_lane_output.execute(
 			{ ref: first.lane_results[0].output_ref },
 			{ directory } as never,

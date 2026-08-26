@@ -177,6 +177,8 @@ export type CandidateArtifactRepairKind =
 	| 'terminal-protocol-fence'
 	| 'redundant-clean-confidence'
 	| 'clean-evidence-pipe-tail-merge'
+	| 'candidate-evidence-pipe-recovery-lossy'
+	| 'late-canonical-header-resynchronized'
 	| 'summary-row-dropped'
 	| 'duplicate-header-row-dropped';
 
@@ -431,6 +433,99 @@ function repairCleanEvidencePipes(text: string): {
 	return { text: lines.join('\n'), repaired };
 }
 
+function escapeCandidateField(value: string): string {
+	return value.trim().replace(/\|/g, '\\|');
+}
+
+function repairCandidateEvidencePipes(
+	text: string,
+	family: RowFormatFamily,
+): { text: string; repaired: boolean } {
+	let repaired = false;
+	const lines = text.split(/\r?\n/).map((line) => {
+		const fields = splitPipeFields(line);
+		if (
+			fields[0]?.trim() !== CANDIDATE_MARKER ||
+			fields.length <= CANDIDATE_FIELD_COUNT + 1 ||
+			fields.length > CANDIDATE_FIELD_COUNT + 17 ||
+			!isCandidateConfidence(fields.at(-1)?.trim())
+		) {
+			return line;
+		}
+		const normalized = fields.map(escapeCandidateField);
+		const overflowEvidence =
+			family === 'base_explorer'
+				? normalized.slice(7, -2)
+				: normalized.slice(8, -1);
+		// Two overflow fields are indistinguishable from a base/micro hybrid row.
+		// Require three substantial prose fragments so recovery remains narrow and
+		// explicitly lossy instead of silently retyping a shifted schema column.
+		if (
+			overflowEvidence.length < 3 ||
+			overflowEvidence.some((fragment) => fragment.length < 4)
+		) {
+			return line;
+		}
+		const rebuilt =
+			family === 'base_explorer'
+				? [
+						...normalized.slice(0, 7),
+						overflowEvidence.join(' \\| '),
+						...normalized.slice(-2),
+					]
+				: [
+						...normalized.slice(0, 8),
+						overflowEvidence.join(' \\| '),
+						normalized.at(-1) ?? '',
+					];
+		if (rebuilt.length !== CANDIDATE_FIELD_COUNT + 1) return line;
+		repaired = true;
+		return rebuilt.join(' | ');
+	});
+	return { text: lines.join('\n'), repaired };
+}
+
+function resynchronizeLateCanonicalHeader(
+	text: string,
+	family: RowFormatFamily,
+): { text: string; repaired: boolean } {
+	const lines = text.split(/\r?\n/);
+	const firstMarker = lines.findIndex((line) => {
+		const marker = splitPipeFields(line)[0]?.trim();
+		return marker === CANDIDATE_MARKER || marker === CLEAN_MARKER;
+	});
+	if (
+		firstMarker < 0 ||
+		!analyzeCandidateLine(lines[firstMarker]!, family)?.valid
+	) {
+		return { text, repaired: false };
+	}
+	const headerIndexes = lines.flatMap((line, index) =>
+		line.trim() === CANDIDATE_HEADERS[family] ? [index] : [],
+	);
+	if (!headerIndexes.some((index) => index > firstMarker)) {
+		return { text, repaired: false };
+	}
+	if (declaredCanonicalFamilies(text).some((declared) => declared !== family)) {
+		return { text, repaired: false };
+	}
+	const withoutHeaders = lines.filter(
+		(_line, index) => !headerIndexes.includes(index),
+	);
+	const insertion = withoutHeaders.findIndex((line) => {
+		const marker = splitPipeFields(line)[0]?.trim();
+		return marker === CANDIDATE_MARKER || marker === CLEAN_MARKER;
+	});
+	return {
+		text: [
+			...withoutHeaders.slice(0, insertion),
+			CANDIDATE_HEADERS[family],
+			...withoutHeaders.slice(insertion),
+		].join('\n'),
+		repaired: true,
+	};
+}
+
 function isStrictProtocolDataLine(
 	line: string,
 	family: RowFormatFamily,
@@ -550,11 +645,25 @@ export function normalizeCandidateArtifact(
 	if (cleanRepair.repaired) repairKinds.push('redundant-clean-confidence');
 	const pipeRepair = repairCleanEvidencePipes(cleanRepair.text);
 	if (pipeRepair.repaired) repairKinds.push('clean-evidence-pipe-tail-merge');
+	const candidatePipeRepair = repairCandidateEvidencePipes(
+		pipeRepair.text,
+		fallbackFamily,
+	);
+	if (candidatePipeRepair.repaired) {
+		repairKinds.push('candidate-evidence-pipe-recovery-lossy');
+	}
+	const lateHeaderRepair = resynchronizeLateCanonicalHeader(
+		candidatePipeRepair.text,
+		fallbackFamily,
+	);
+	if (lateHeaderRepair.repaired) {
+		repairKinds.push('late-canonical-header-resynchronized');
+	}
 	// Runs LAST of the line-set repairs, so the duplicate-header scan sees the
 	// final line set: both the marker-row drop and the terminal-fence recovery
 	// above add or remove lines that header selection would otherwise disagree
 	// about.
-	const duplicateHeaderDrop = dropDuplicateHeaderRows(pipeRepair.text);
+	const duplicateHeaderDrop = dropDuplicateHeaderRows(lateHeaderRepair.text);
 	if (duplicateHeaderDrop.dropped) {
 		repairKinds.push('duplicate-header-row-dropped');
 	}

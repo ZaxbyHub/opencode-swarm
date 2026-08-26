@@ -14,6 +14,7 @@ import {
 	WritePrReviewArtifactArgsSchema,
 } from '../background/pr-review-contract.js';
 import {
+	admitPrReviewPartialBaseCoverage,
 	assertPrReviewArtifactBoundary,
 	assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts,
 	markPrReviewArtifactBoundary,
@@ -329,25 +330,6 @@ export async function executeWritePrReviewArtifact(
 		// full-inventory post_explorer checkpoint after trigger evaluation; the
 		// same boundary name is committed in both writes, so `boundaryCommitted`
 		// alone cannot distinguish a legal refresh from an unsafe rewrite.
-		if (!isCommittedReplay) {
-			try {
-				await assertPrReviewArtifactBoundary(
-					directory,
-					sessionID,
-					resolvedRunId,
-					findingsInput.boundary,
-					findingIds,
-				);
-			} catch (error) {
-				return failure(
-					formatPrReviewRuntimeFieldError(
-						'boundary',
-						`the legal next "${findingsInput.boundary}" checkpoint for run "${resolvedRunId}" with exact inventory [${findingIds.join(', ')}]`,
-						error instanceof Error ? error.message : String(error),
-					),
-				);
-			}
-		}
 		try {
 			await assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 				directory,
@@ -378,13 +360,55 @@ export async function executeWritePrReviewArtifact(
 				),
 			);
 		}
+		if (!isCommittedReplay) {
+			try {
+				if (findingsInput.partial_base_coverage) {
+					// Validate every boundary predicate except exact-six before the
+					// admission mutates durable state. The normal call below then proves
+					// the newly committed disclosure closes that sole coverage gap.
+					await assertPrReviewArtifactBoundary(
+						directory,
+						sessionID,
+						resolvedRunId,
+						findingsInput.boundary,
+						findingIds,
+						{ skipBaseCoverage: true },
+					);
+					state = await admitPrReviewPartialBaseCoverage(
+						directory,
+						sessionID,
+						resolvedRunId,
+						findingsInput.partial_base_coverage.missing_dimension,
+					);
+				}
+				await assertPrReviewArtifactBoundary(
+					directory,
+					sessionID,
+					resolvedRunId,
+					findingsInput.boundary,
+					findingIds,
+				);
+			} catch (error) {
+				return failure(
+					formatPrReviewRuntimeFieldError(
+						findingsInput.partial_base_coverage
+							? 'partial_base_coverage'
+							: 'boundary',
+						findingsInput.partial_base_coverage
+							? 'exactly five successful base dimensions plus one named typed terminal failure after every other boundary predicate passes'
+							: `the legal next "${findingsInput.boundary}" checkpoint for run "${resolvedRunId}" with exact inventory [${findingIds.join(', ')}]`,
+						error instanceof Error ? error.message : String(error),
+					),
+				);
+			}
+		}
 		const recordedAt = new Date().toISOString();
 		const appended: PersistedFinding[] = isExactReplay
 			? []
 			: findingsInput.records.map((record) => ({
 					...record,
 					boundary: findingsInput.boundary,
-					pr_head_sha: state.prHeadSha!,
+					pr_head_sha: state!.prHeadSha!,
 					recorded_at: recordedAt,
 				}));
 		const allRecords = [...existing, ...appended];
@@ -448,6 +472,17 @@ export async function executeWritePrReviewArtifact(
 				appended: appended.length,
 				replayed: isExactReplay,
 				handoff_required: handoffRequired,
+				...(state.prReviewPartialBaseCoverage
+					? {
+							partial_base_coverage: {
+								missing_dimension:
+									state.prReviewPartialBaseCoverage.missingDimension,
+								failure_class: state.prReviewPartialBaseCoverage.failureClass,
+								path: state.prReviewCoverageDisclosurePath,
+								digest: state.prReviewCoverageDisclosureDigest,
+							},
+						}
+					: {}),
 			},
 			null,
 			2,

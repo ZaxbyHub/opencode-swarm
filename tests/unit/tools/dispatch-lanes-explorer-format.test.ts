@@ -69,6 +69,27 @@ describe('applyExplorerFormatSuffix', () => {
 		);
 	});
 
+	test.each([
+		['[CANDIDATE]', 'inspect and emit [CANDIDATE] rows'],
+		['[CLEAN]', 'emit [CLEAN] when no issue is found'],
+		[
+			'canonical header',
+			'| [CANDIDATE] | lane | claim | evidence | impact | confidence |',
+		],
+	] as const)('rejects operator-owned %s text for PR-review discovery', (_label, prompt) => {
+		_internals.getGeneratedAgentNames = () => ['swarm_explorer'];
+		const result = _test_exports.applyExplorerFormatSuffix(
+			[{ id: 'L1', agent: 'swarm_explorer', prompt }],
+			{ failClosed: true, mode: 'swarm-pr-review:base' },
+		);
+		expect(result.ok).toBe(false);
+		if (result.ok) throw new Error('expected prompt lint failure');
+		expect(result.errors.join('\n')).toContain('operator prompt contains');
+		expect(result.errors.join('\n')).toContain(
+			'controller injects the authoritative output contract',
+		);
+	});
+
 	test('applying the controller contract twice is idempotent', () => {
 		_internals.getGeneratedAgentNames = () => ['swarm_explorer'];
 		const lanes = [

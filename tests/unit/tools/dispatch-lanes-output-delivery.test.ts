@@ -100,6 +100,7 @@ describe('recordToLaneResult output delivery de-duplication (S1.1)', () => {
 				outputDegraded: false,
 				transcriptIncomplete: false,
 				messageCount: 4,
+				workflowLaneFailureClass: 'contract',
 				salvagedWorkflowLanes: ['correctness-state'],
 				salvagedWorkflowLaneRecoveries: [
 					{
@@ -123,6 +124,7 @@ describe('recordToLaneResult output delivery de-duplication (S1.1)', () => {
 		expect(repeat.output_degraded).toBe(false);
 		expect(repeat.transcript_incomplete).toBe(false);
 		expect(repeat.message_count).toBe(4);
+		expect(repeat.workflow_lane_failure_class).toBe('contract');
 		expect(repeat.salvaged_workflow_lanes).toEqual(['correctness-state']);
 		expect(repeat.salvaged_workflow_lane_recoveries).toEqual([
 			{
