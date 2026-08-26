@@ -187,13 +187,13 @@ function writeRetroBundle(directory: string, phaseNumber: number): void {
 		JSON.stringify({
 			schema_version: '1.0.0',
 			task_id: `retro-${phaseNumber}`,
-			created_at: new Date().toISOString(),
-			updated_at: new Date().toISOString(),
+			created_at: '1970-01-01T00:00:00.000Z',
+			updated_at: '1970-01-01T00:00:00.000Z',
 			entries: [
 				{
 					task_id: `retro-${phaseNumber}`,
 					type: 'retrospective',
-					timestamp: new Date().toISOString(),
+					timestamp: '1970-01-01T00:00:00.000Z',
 					agent: 'architect',
 					verdict: 'pass',
 					summary: 'Phase retrospective',
@@ -300,8 +300,8 @@ describe('phase_complete adversarial locking + path tests', () => {
 								filePath: 'events.jsonl',
 								agent: 'phase-complete',
 								taskId: 'phase-complete-events',
-								timestamp: new Date().toISOString(),
-								expiresAt: Date.now() + 300000,
+							timestamp: '1970-01-01T00:00:00.000Z',
+							expiresAt: 300000,
 								_release: release2,
 							},
 						};
@@ -315,8 +315,8 @@ describe('phase_complete adversarial locking + path tests', () => {
 								filePath: 'plan.json',
 								agent: 'phase-complete',
 								taskId: 'phase-complete-plan-first',
-								timestamp: new Date().toISOString(),
-								expiresAt: Date.now() + 300000,
+							timestamp: '1970-01-01T00:00:00.000Z',
+							expiresAt: 300000,
 								_release: release1,
 							},
 						};
@@ -407,8 +407,8 @@ describe('phase_complete adversarial locking + path tests', () => {
 								filePath: 'events.jsonl',
 								agent: 'phase-complete',
 								taskId: 'phase-complete-test',
-								timestamp: new Date().toISOString(),
-								expiresAt: Date.now() + 300000,
+							timestamp: '1970-01-01T00:00:00.000Z',
+							expiresAt: 300000,
 								_release: release,
 							},
 						};
@@ -420,8 +420,8 @@ describe('phase_complete adversarial locking + path tests', () => {
 							filePath: 'plan.json',
 							agent: 'phase-complete',
 							taskId: 'phase-complete-plan-test',
-							timestamp: new Date().toISOString(),
-							expiresAt: Date.now() + 300000,
+							timestamp: '1970-01-01T00:00:00.000Z',
+							expiresAt: 300000,
 							_release: planRelease,
 						},
 					};
@@ -457,8 +457,8 @@ describe('phase_complete adversarial locking + path tests', () => {
 					filePath: 'events.jsonl',
 					agent: 'phase-complete',
 					taskId: 'phase-complete-test',
-					timestamp: new Date().toISOString(),
-					expiresAt: Date.now() + 300000,
+							timestamp: '1970-01-01T00:00:00.000Z',
+							expiresAt: 300000,
 					_release: release,
 				},
 			});
@@ -495,8 +495,8 @@ describe('phase_complete adversarial locking + path tests', () => {
 					filePath: 'events.jsonl',
 					agent: 'phase-complete',
 					taskId: 'phase-complete-test',
-					timestamp: new Date().toISOString(),
-					expiresAt: Date.now() + 300000,
+							timestamp: '1970-01-01T00:00:00.000Z',
+							expiresAt: 300000,
 					_release: release,
 				},
 			});
@@ -509,8 +509,8 @@ describe('phase_complete adversarial locking + path tests', () => {
 					filePath: 'events.jsonl',
 					agent: 'phase-complete',
 					taskId: 'phase-complete-test',
-					timestamp: new Date().toISOString(),
-					expiresAt: Date.now() + 300000,
+							timestamp: '1970-01-01T00:00:00.000Z',
+							expiresAt: 300000,
 					_release: release,
 				},
 			});
