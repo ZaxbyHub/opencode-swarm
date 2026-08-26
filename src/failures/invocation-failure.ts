@@ -111,24 +111,35 @@ function redactUrl(match: string): string {
 }
 
 /**
- * Whitespace, C0/C1 control chars (`\p{Cc}`), and Unicode format chars
- * (`\p{Cf}`, e.g. zero-width space) are all tolerated as "fill" at every
- * inter-token position in the redaction patterns below (keyword letters,
- * keyword-to-separator, separator-to-Bearer, Bearer-to-value, suffix-to-`=`):
- * a byte from any of these classes can sit anywhere provider-controlled text
- * places it, and treating only a subset as fill left the rest free to break a
- * `\b` boundary or truncate a match before the real secret (see PR #2363
- * review history, rounds 1-5, for the specific bypasses this closed). Each
- * fill run is bounded (not `*`) as defense in depth, but the primary ReDoS
- * fix is structural: `SCREAMING_KV_CANDIDATE_PATTERN` below matches the key
- * run with a single flat character class instead of a repeated
+ * Whitespace, C0/C1 control chars (`\p{Cc}`), Unicode format chars (`\p{Cf}`,
+ * e.g. zero-width space), and default-ignorable code points (`\p{DI}`, e.g.
+ * variation selectors and Hangul filler — render as nothing but aren't `Cc`
+ * or `Cf`) are all tolerated as "fill" at every inter-token position in the
+ * redaction patterns below (keyword letters, keyword-to-separator,
+ * separator-to-Bearer, Bearer-to-value, suffix-to-`=`): a byte from any of
+ * these classes can sit anywhere provider-controlled text places it, and
+ * treating only a subset as fill left the rest free to break a `\b` boundary
+ * or truncate a match before the real secret (see PR #2363 review history,
+ * rounds 1-6, for the specific bypasses this closed). Each fill run is
+ * bounded (not `*`) as defense in depth, but the primary ReDoS fix is
+ * structural: `SCREAMING_KV_CANDIDATE_PATTERN` below matches the key run
+ * with a single flat character class instead of a repeated
  * `(?:[A-Z0-9_]${FILL})*` group — that nesting let the regex engine
  * backtrack over many equivalent fill-length distributions and stayed
  * superlinear even with each individual fill run bounded (round 5).
+ *
+ * This is best-effort defense-in-depth for a log-display string, not a
+ * security boundary: six rounds of closing one invisible/control-character
+ * category at a time is evidence that a keyword-matching redactor cannot be
+ * made complete against an adversarial Unicode alphabet (e.g. combining
+ * marks like U+0300 still defeat it, deliberately not fixed here — see
+ * `sanitizeFailureEvidenceDisplay`'s doc comment). Anything downstream that
+ * treats this function's output as a guarantee rather than a best effort is
+ * relying on more than it provides.
  */
 const FILL_MAX_RUN = 8;
-const FILL = `[\\s\\p{Cc}\\p{Cf}]{0,${FILL_MAX_RUN}}`;
-const CONTROL_CHAR_RUN = /[\p{Cc}\p{Cf}]+/gu;
+const FILL = `[\\s\\p{Cc}\\p{Cf}\\p{Default_Ignorable_Code_Point}]{0,${FILL_MAX_RUN}}`;
+const CONTROL_CHAR_RUN = /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]+/gu;
 
 /** Hard cap on input length before any redaction regex runs, independent of
  * the final `boundedUtf8` display cap — bounds worst-case regex work against
@@ -174,7 +185,7 @@ const CREDENTIAL_KV_PATTERN = new RegExp(
  * JS after the match, not by the regex — see `screamingKeyContainsSuffix`.
  */
 const SCREAMING_KV_CANDIDATE_PATTERN = new RegExp(
-	`\\b([A-Z0-9_\\s\\p{Cc}\\p{Cf}]{1,80})${FILL}=${FILL}([^\\s]+)`,
+	`\\b([A-Z0-9_\\s\\p{Cc}\\p{Cf}\\p{Default_Ignorable_Code_Point}]{1,80})${FILL}=${FILL}([^\\s]+)`,
 	'gu',
 );
 

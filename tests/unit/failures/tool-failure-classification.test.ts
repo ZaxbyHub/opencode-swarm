@@ -145,7 +145,7 @@ describe('tool failure classification', () => {
 		expect(display).toContain('authorization=<redacted>');
 	});
 
-	// Property test (Stage B rounds 4-5): prior rounds each found a leak
+	// Property test (Stage B rounds 4-6): prior rounds each found a leak
 	// from a single fill byte at a different inter-token position, and round
 	// 5 found the initial version of this test was partly vacuous — the
 	// secret sat at the tail of every template, so insertions landing
@@ -153,8 +153,10 @@ describe('tool failure classification', () => {
 	// for, making that iteration pass regardless of redaction correctness.
 	// Insertion positions are bounded to the key/separator region (up to but
 	// not including the secret) so every iteration is a real probe. The
-	// fill-byte set also covers C1 controls and a Unicode format char
-	// (round 5's live bypass), not just C0/DEL.
+	// fill-byte set covers C0/DEL, C1 controls, a Unicode format char
+	// (round 5), and default-ignorable code points like variation selectors
+	// and Hangul filler (round 6) — every category found to render as
+	// invisible while still breaking a `\b` boundary.
 	it('never leaks a secret for any single or adjacent-pair fill-byte insertion in the key/separator region, across every credential pattern family', () => {
 		const SECRET = 'hunter2xyz';
 		const FILL_BYTES = [
@@ -169,6 +171,9 @@ describe('tool failure classification', () => {
 			String.fromCharCode(0x85), // NEL (C1 control)
 			String.fromCharCode(0x9b), // CSI (C1 control)
 			String.fromCharCode(0x200b), // zero-width space (Unicode format char)
+			String.fromCharCode(0xfe0f), // variation selector 16 (Default_Ignorable)
+			String.fromCharCode(0x3164), // Hangul Filler (Default_Ignorable)
+			String.fromCodePoint(0xe0100), // variation selector supplement (Default_Ignorable)
 		];
 		const TEMPLATES = [
 			(s: string) => `authorization=Bearer ${s}`,
@@ -216,6 +221,9 @@ describe('tool failure classification', () => {
 			}
 		}
 
-		expect(leaks.slice(0, 10)).toEqual([]);
+		expect({ count: leaks.length, sample: leaks.slice(0, 10) }).toEqual({
+			count: 0,
+			sample: [],
+		});
 	});
 });
