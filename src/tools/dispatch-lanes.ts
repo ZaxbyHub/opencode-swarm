@@ -810,7 +810,7 @@ export interface CollectLaneResultsResult {
 	all_settled: boolean;
 	lane_results: DispatchLaneResult[];
 	/**
-	 * Alert-only host liveness advisory for still-pending pr-review lanes past
+	 * Alert-only host liveness advisory for still-pending async lanes past
 	 * the pending-liveness threshold (issue #2280 Part B). Present only when at
 	 * least one such lane exists; never affects `success`, counts, settlement,
 	 * or any lane's state.
@@ -1935,7 +1935,7 @@ export async function executeCollectLaneResults(
 	);
 	if (result.pending > 0) {
 		// Issue #2280 Part B: alert-only liveness advisory for long-pending
-		// pr-review lanes. Fail-open (degrades per lane on any failure), bounded
+		// async lanes (any mode). Fail-open (degrades per lane on any failure), bounded
 		// (at most one host probe call, none below the threshold, none beyond
 		// the caller's remaining collection budget), and never mutates lane
 		// state or blocks collection.
@@ -5022,7 +5022,7 @@ export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
 export const collect_lane_results: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Collect or poll results for a dispatch_lanes_async batch. Supports two modes: (1) non-blocking poll (wait omitted or false) — performs one collection pass and returns current lane status, including pending lane identities by default, and any settled results so you can process completed lanes while continuing independent work; (2) blocking join (wait: true) — polls until all lanes settle or the collection wait budget expires. Busy/retry lanes do not become stale solely because they run for a long time; any lane pending for minutes additionally carries an alert-only pending_liveness diagnostic (lane id, elapsed ms, host session status, stalledSuspect) that never cancels or replaces anything. A lane whose backing session reports a terminal provider error (quota/billing/auth) settles to failed with the classified reason instead of staying pending. Does not advance workflow gates.',
+			'Collect or poll results for a dispatch_lanes_async batch. Supports two modes: (1) non-blocking poll (wait omitted or false) — performs one collection pass and returns current lane status, including pending lane identities by default, and any settled results so you can process completed lanes while continuing independent work; (2) blocking join (wait: true) — polls until all lanes settle or the collection wait budget expires. Busy/retry lanes do not become stale solely because they run for a long time; any lane pending for minutes additionally carries an alert-only pending_liveness diagnostic (lane id, elapsed ms, host session status, stalledSuspect) that never cancels or replaces anything. A lane whose backing session records a terminal provider error (quota/billing/auth) AND produced no output AND has an over turn (a completed timestamp, or an idle host) settles immediately with the classified reason instead of staying pending — as failed, or as cancelled when the host reports the turn was aborted. A lane that produced output, or whose turn may still be retrying, keeps polling. Does not advance workflow gates.',
 		args: {
 			batch_id: CollectLaneResultsArgsSchema.shape.batch_id,
 			wait: CollectLaneResultsArgsSchema.shape.wait,

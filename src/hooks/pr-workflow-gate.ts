@@ -1621,7 +1621,7 @@ const CAS_ESCAPE_DISCLOSURE =
 const PR_WORKFLOW_LANE_LIVENESS_PROBE_TIMEOUT_MS = 5_000;
 
 /**
- * How long a pr-review lane may sit pending before `collect_lane_results`
+ * How long an async lane may sit pending before `collect_lane_results`
  * starts probing its host session for a liveness advisory (issue #2280 Part B).
  * Order-of-minutes by design: far below the 30-minute presumed-stale horizon,
  * above normal dispatch jitter. Exposed through
@@ -1832,7 +1832,7 @@ async function probeAlivePrWorkflowLaneSessions(
 	return { alive };
 }
 
-/** One still-pending pr-review lane's host liveness reading (issue #2280 Part B). */
+/** One still-pending lane's host liveness reading (issue #2280 Part B). */
 export interface PrWorkflowPendingLaneLiveness {
 	laneId: string;
 	/**
@@ -1865,7 +1865,7 @@ export interface PrWorkflowPendingLaneLiveness {
 }
 
 /**
- * Bounded, fail-open liveness advisory for still-pending pr-review lanes
+ * Bounded, fail-open liveness advisory for still-pending async lanes
  * (issue #2280 Part B).
  *
  * ALERT-ONLY, by design: this reads host session status and reports it; it

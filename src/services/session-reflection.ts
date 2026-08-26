@@ -47,6 +47,13 @@ export interface ToolProblem {
 	totalCalls: number;
 	failureRate: number;
 	avgDurationMs: number;
+	/**
+	 * Issue #2349 sweep: a bounded, deduplicated sample of WHY this tool failed.
+	 * Reporting only that a tool failed N times is the same defect class the
+	 * sweep set out to close — the reason has to reach a surface a human or
+	 * agent actually reads, which is this one.
+	 */
+	failureReasons?: string[];
 }
 
 export interface AgentDispatchSummary {
@@ -188,6 +195,9 @@ function gatherToolProblems(toolAggregates: Map<string, ToolAggregate>): {
 					totalCalls: agg.count,
 					failureRate: Math.round(failureRate * 100) / 100,
 					avgDurationMs: Math.round(agg.totalDuration / agg.count),
+					...(agg.failureReasons && agg.failureReasons.length > 0
+						? { failureReasons: agg.failureReasons }
+						: {}),
 				});
 			}
 		}
@@ -711,6 +721,10 @@ function buildReflectionDataSummary(data: SessionReflectionData): string {
 			lines.push(
 				`  - ${p.tool}: ${p.failureCount}/${p.totalCalls} failures (${Math.round(p.failureRate * 100)}%), avg ${p.avgDurationMs}ms`,
 			);
+			// Issue #2349 sweep: surface WHY, not just how often.
+			if (p.failureReasons && p.failureReasons.length > 0) {
+				lines.push(`      reasons: ${p.failureReasons.join('; ')}`);
+			}
 		}
 		lines.push('');
 	}

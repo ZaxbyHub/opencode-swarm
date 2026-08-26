@@ -48,12 +48,6 @@ src/hooks/guardrails/pre-check-result.ts:toolResult.error
 src/hooks/semantic-diff-injection.ts:astResult.error
 src/tools/diff-summary.ts:astResult.error
 
-# src/tools/apply-patch.ts: fuzzy.error is read only to gate the
-# single-match success path; on failure a generic context-mismatch error
-# object is synthesized instead of surfacing fuzzy.error's own message. This
-# IS the #2349-class shape and is a legitimate follow-up fix candidate.
-src/tools/apply-patch.ts:fuzzy.error
-
 # NOTE (could not cleanly classify — see #2349 guardrail report): the two
 # other pre-existing hits named in the seed request —
 # src/services/cost-accounting.ts (~163-166) and src/db/qa-gate-profile.ts
