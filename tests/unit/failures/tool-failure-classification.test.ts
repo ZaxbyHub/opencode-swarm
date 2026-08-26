@@ -153,4 +153,16 @@ describe('tool failure classification', () => {
 		expect(joined).not.toContain('hunter2');
 		expect(joined).toContain('token=<redacted>');
 	});
+
+	// Stage B review round 3: a control byte embedded inside the literal
+	// "Bearer" prefix (not the credential keyword itself) broke the optional
+	// `(?:Bearer\s+)?` match, truncating the redaction span before the real
+	// secret and leaking it in cleartext after a following space.
+	it('redacts the full value even when a control byte is embedded inside the "Bearer" prefix', () => {
+		const display = invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
+			'authorization=Be\x1barer topsecret123',
+		);
+		expect(display).not.toContain('topsecret123');
+		expect(display).toContain('authorization=<redacted>');
+	});
 });

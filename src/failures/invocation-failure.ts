@@ -149,8 +149,9 @@ const SCREAMING_SUFFIX_ALTERNATION = [
 	.map(tolerantKeyword)
 	.join('|');
 
+const TOLERANT_BEARER_PREFIX = tolerantKeyword('Bearer');
 const CREDENTIAL_KV_PATTERN = new RegExp(
-	`\\b(${CREDENTIAL_KEYWORD_ALTERNATION})\\b${CONTROL_CHAR_GAP}\\s*[:=]\\s*(?:Bearer\\s+)?[^\\s,;]+`,
+	`\\b(${CREDENTIAL_KEYWORD_ALTERNATION})\\b${CONTROL_CHAR_GAP}\\s*[:=]\\s*(?:${TOLERANT_BEARER_PREFIX}${CONTROL_CHAR_GAP}\\s+)?[^\\s,;]+`,
 	'gi',
 );
 const SCREAMING_KV_PATTERN = new RegExp(
@@ -192,6 +193,16 @@ export function sanitizeFailureEvidenceDisplay(value: string): string {
 	// safety (issue #2349 follow-up: an unstripped ESC sequence in
 	// provider-controlled text could otherwise spoof terminal output or
 	// consume a caller's length budget before the meaningful text).
+	//
+	//  3. TRUNCATED-MATCH bypass (round 3): the "Bearer " prefix inside
+	//     CREDENTIAL_KV_PATTERN was a hardcoded literal, not control-tolerant
+	//     like the keyword alternation. A control byte inside "Bearer"
+	//     ("Be\x1barer topsecret") makes the optional `(?:Bearer\s+)?` group
+	//     fail to match, so the value capture falls back to matching just the
+	//     mangled "Be\x1barer" token (stopping at the following space) —
+	//     redacting that fragment while leaving the real secret after the
+	//     space untouched. Fixed by making the "Bearer" prefix control-char
+	//     tolerant too, via the same `tolerantKeyword` helper.
 	const redacted = value
 		.replace(/\bhttps?:\/\/[^\s'"<>]+/gi, (match) => redactUrl(match))
 		.replace(CREDENTIAL_KV_PATTERN, (_, key: string) => {
