@@ -4185,6 +4185,7 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 	directory: string,
 	sessionID: string,
 	batchId: string,
+	contractRetry = false,
 ): Promise<boolean> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
 	const normalizedBatchId = normalizeBatchId(batchId);
@@ -4204,6 +4205,20 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 			});
 			if (batchRecords.length > 0) return false;
 			const nextBaseDispatches = currentBaseDispatches.slice(0, -1);
+			const rolledBackDimensions = new Set(
+				currentBaseDispatches
+					.at(-1)
+					?.lanes.flatMap((lane) =>
+						lane.ownedWorkflowLanes?.length
+							? lane.ownedWorkflowLanes
+							: [lane.workflowLane],
+					) ?? [],
+			);
+			const nextContractRetryDimensions = contractRetry
+				? (state.prReviewContractRetryDimensions ?? []).filter(
+						(dimension) => !rolledBackDimensions.has(dimension),
+					)
+				: state.prReviewContractRetryDimensions;
 			const lastAttempt = state.prReviewResilience?.attempts.at(-1);
 			let nextResilience = state.prReviewResilience;
 			if (lastAttempt?.canaryBatchId === normalizedBatchId) {
@@ -4238,6 +4253,9 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 				...(shouldKeepResilience
 					? { prReviewResilience: nextResilience }
 					: { prReviewResilience: undefined }),
+				...(nextContractRetryDimensions?.length
+					? { prReviewContractRetryDimensions: nextContractRetryDimensions }
+					: { prReviewContractRetryDimensions: undefined }),
 			});
 			return true;
 		}),

@@ -8,6 +8,7 @@ import {
 	enforcePrReviewBaseDimensions,
 	PR_REVIEW_BASE_DIMENSION_IDS,
 	readPrWorkflowGateState,
+	rollbackPrReviewBaseAdmissionIfUnlaunched,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import { executeWritePrReviewArtifact } from '../../../src/tools/write-pr-review-artifact.js';
 import {
@@ -33,7 +34,7 @@ const originalResolveIsWorkingTreeCleanAsync =
 	_test_exports.resolveIsWorkingTreeCleanAsync;
 
 beforeEach(() => {
-	directory = canonicalMkdtemp('pr-artifact-partial-base-');
+	directory = canonicalMkdtemp('pr-artifact-partial-base-adversarial-');
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = () => PR_ARTIFACT_HEAD_SHA;
 	_test_exports.resolveCurrentGitHeadAsync = async () => PR_ARTIFACT_HEAD_SHA;
@@ -140,98 +141,74 @@ async function establishFivePlusOne(
 	};
 }
 
-describe('write_pr_review_artifact partial base coverage (#2350)', () => {
-	test('admits one contract-only retry without consuming staged attempts', async () => {
+describe('write_pr_review_artifact partial base coverage adversarial cases (#2350)', () => {
+	test('rolls back an unlaunched contract retry so it can be admitted again', async () => {
 		const { missingDimension } = await establishFivePlusOne();
+		const retry = { laneId: 'contract-retry', workflowLane: missingDimension };
 		await enforcePrReviewBaseDimensions(
 			directory,
 			PR_ARTIFACT_SESSION_ID,
-			[{ laneId: 'contract-retry', workflowLane: missingDimension }],
+			[retry],
 			{
-				batchId: 'contract-retry',
+				batchId: 'contract-unlaunched',
 				prHeadSha: PR_ARTIFACT_HEAD_SHA,
 				prReviewContractRetry: true,
 				prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 			},
 		);
+		expect(
+			await rollbackPrReviewBaseAdmissionIfUnlaunched(
+				directory,
+				PR_ARTIFACT_SESSION_ID,
+				'contract-unlaunched',
+				true,
+			),
+		).toBe(true);
 		const state = await readPrWorkflowGateState(
 			directory,
 			PR_ARTIFACT_SESSION_ID,
 		);
-		expect(state?.prReviewContractRetryDimensions).toEqual([missingDimension]);
-		expect(state?.prReviewResilience?.attempts ?? []).toHaveLength(0);
+		expect(state?.prReviewContractRetryDimensions).toBeUndefined();
 		await expect(
 			enforcePrReviewBaseDimensions(
 				directory,
 				PR_ARTIFACT_SESSION_ID,
-				[{ laneId: 'duplicate-retry', workflowLane: missingDimension }],
+				[retry],
 				{
-					batchId: 'duplicate-contract-retry',
+					batchId: 'contract-retry-again',
 					prHeadSha: PR_ARTIFACT_HEAD_SHA,
 					prReviewContractRetry: true,
 					prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 				},
 			),
-		).rejects.toThrow('was already admitted');
+		).resolves.toBeDefined();
 	});
-	test('admits five-of-six at post_explorer and persists an immutable disclosure', async () => {
+
+	test('rejects partial admission while the missing dimension is still in flight', async () => {
 		const { missingDimension, records } = await establishFivePlusOne();
-		await expect(
-			assertPrReviewBaseCoverageSettled(directory, PR_ARTIFACT_SESSION_ID),
-		).rejects.toThrow(`missing dimensions: ${missingDimension}`);
-
-		const raw = await executeWritePrReviewArtifact(
-			{
-				kind: 'findings',
-				run_id: 'partial-run',
-				pr_head_sha: PR_ARTIFACT_HEAD_SHA,
-				boundary: 'post_explorer',
-				records,
-				partial_base_coverage: { missing_dimension: missingDimension },
-			},
-			directory,
-			{ sessionID: PR_ARTIFACT_SESSION_ID },
-		);
-		const result = JSON.parse(raw);
-		expect(result).toMatchObject({
-			success: true,
-			partial_base_coverage: {
-				missing_dimension: missingDimension,
-				failure_class: 'contract',
-				path: 'pr-review/partial-run/coverage-disclosure.json',
-				digest: expect.stringMatching(/^[0-9a-f]{64}$/),
-			},
-		});
-		await expect(
-			assertPrReviewBaseCoverageSettled(directory, PR_ARTIFACT_SESSION_ID),
-		).resolves.toMatchObject({ prHeadSha: PR_ARTIFACT_HEAD_SHA });
-
-		_test_exports.resetTrackedStateCache();
-		const state = await readPrWorkflowGateState(
+		await enforcePrReviewBaseDimensions(
 			directory,
 			PR_ARTIFACT_SESSION_ID,
+			[{ laneId: 'retry-in-flight', workflowLane: missingDimension }],
+			{
+				batchId: 'retry-in-flight',
+				prHeadSha: PR_ARTIFACT_HEAD_SHA,
+				prReviewContractRetry: true,
+				prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
+			},
 		);
-		expect(state?.prReviewPartialBaseCoverage).toMatchObject({
-			runId: 'partial-run',
-			missingDimension,
-			failureClass: 'contract',
-		});
-		const disclosurePath = path.join(
+		await persistPrReviewBatch(
 			directory,
-			'.swarm',
-			'pr-review',
-			'partial-run',
-			'coverage-disclosure.json',
+			'retry-in-flight',
+			'swarm-pr-review:base',
+			[{ laneId: 'retry-in-flight', workflowLane: missingDimension }],
+			{ status: 'running' },
 		);
-		expect(JSON.parse(await fs.readFile(disclosurePath, 'utf8'))).toEqual(
-			state?.prReviewPartialBaseCoverage,
-		);
-
-		const replay = JSON.parse(
+		const result = JSON.parse(
 			await executeWritePrReviewArtifact(
 				{
 					kind: 'findings',
-					run_id: 'partial-run',
+					run_id: 'in-flight-run',
 					pr_head_sha: PR_ARTIFACT_HEAD_SHA,
 					boundary: 'post_explorer',
 					records,
@@ -241,79 +218,110 @@ describe('write_pr_review_artifact partial base coverage (#2350)', () => {
 				{ sessionID: PR_ARTIFACT_SESSION_ID },
 			),
 		);
-		expect(replay).toMatchObject({ success: true, replayed: true });
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('still has an in-flight lane');
 	});
 
-	test('rejects a mismatched missing dimension and non-post-explorer use', async () => {
-		const { records } = await establishFivePlusOne();
-		const wrong = await executeWritePrReviewArtifact(
-			{
-				kind: 'findings',
-				run_id: 'wrong-dimension',
-				pr_head_sha: PR_ARTIFACT_HEAD_SHA,
-				boundary: 'post_explorer',
-				records,
-				partial_base_coverage: {
-					missing_dimension: PR_REVIEW_BASE_DIMENSION_IDS[0],
+	test('rejects partial admission without a typed terminal failure', async () => {
+		const { missingDimension, records } = await establishFivePlusOne({
+			typedFailure: false,
+		});
+		const result = JSON.parse(
+			await executeWritePrReviewArtifact(
+				{
+					kind: 'findings',
+					run_id: 'untyped-run',
+					pr_head_sha: PR_ARTIFACT_HEAD_SHA,
+					boundary: 'post_explorer',
+					records,
+					partial_base_coverage: { missing_dimension: missingDimension },
 				},
-			},
-			directory,
-			{ sessionID: PR_ARTIFACT_SESSION_ID },
+				directory,
+				{ sessionID: PR_ARTIFACT_SESSION_ID },
+			),
 		);
-		expect(wrong).toContain('actual missing');
-
-		const wrongBoundary = await executeWritePrReviewArtifact(
-			{
-				kind: 'findings',
-				run_id: 'wrong-boundary',
-				pr_head_sha: PR_ARTIFACT_HEAD_SHA,
-				boundary: 'post_reviewer',
-				records,
-				partial_base_coverage: {
-					missing_dimension: PR_REVIEW_BASE_DIMENSION_IDS[5],
-				},
-			},
-			directory,
-			{ sessionID: PR_ARTIFACT_SESSION_ID },
-		);
-		expect(wrongBoundary).toContain(
-			'is valid only for the post_explorer boundary',
-		);
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('lacks a typed terminal failure');
 	});
 
-	test('does not persist admission when later artifact predicates reject the write', async () => {
+	test('fails closed when an admitted disclosure is tampered with', async () => {
 		const { missingDimension, records } = await establishFivePlusOne();
-		const rejected = await executeWritePrReviewArtifact(
+		await executeWritePrReviewArtifact(
 			{
 				kind: 'findings',
-				run_id: 'rejected-partial',
+				run_id: 'tamper-run',
 				pr_head_sha: PR_ARTIFACT_HEAD_SHA,
 				boundary: 'post_explorer',
-				records: [
-					{ ...records[0]!, finding_id: 'FOREIGN' },
-					...records.slice(1),
-				],
+				records,
 				partial_base_coverage: { missing_dimension: missingDimension },
 			},
 			directory,
 			{ sessionID: PR_ARTIFACT_SESSION_ID },
 		);
-		expect(JSON.parse(rejected).success).toBe(false);
-		const state = await readPrWorkflowGateState(
+		const disclosurePath = path.join(
 			directory,
-			PR_ARTIFACT_SESSION_ID,
+			'.swarm',
+			'pr-review',
+			'tamper-run',
+			'coverage-disclosure.json',
 		);
-		expect(state?.prReviewPartialBaseCoverage).toBeUndefined();
+		const disclosure = JSON.parse(await fs.readFile(disclosurePath, 'utf8'));
+		disclosure.failureClass = 'resource';
+		await fs.writeFile(disclosurePath, JSON.stringify(disclosure, null, 2));
 		await expect(
-			fs.stat(
-				path.join(
-					directory,
-					'.swarm',
-					'pr-review',
-					'rejected-partial',
-					'coverage-disclosure.json',
-				),
+			assertPrReviewBaseCoverageSettled(directory, PR_ARTIFACT_SESSION_ID),
+		).rejects.toThrow('disclosure digest does not match durable state');
+	});
+
+	test('rejects four-of-six coverage even when a missing dimension is named', async () => {
+		const { missingDimension, records } = await establishFivePlusOne({
+			successfulCount: 4,
+		});
+		const result = JSON.parse(
+			await executeWritePrReviewArtifact(
+				{
+					kind: 'findings',
+					run_id: 'four-of-six-run',
+					pr_head_sha: PR_ARTIFACT_HEAD_SHA,
+					boundary: 'post_explorer',
+					records,
+					partial_base_coverage: { missing_dimension: missingDimension },
+				},
+				directory,
+				{ sessionID: PR_ARTIFACT_SESSION_ID },
 			),
-		).rejects.toMatchObject({ code: 'ENOENT' });
+		);
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('exactly five successful dimensions');
+		expect(result.message).toContain('actual missing:');
+	});
+
+	test('rejects a colliding disclosure path instead of overwriting it', async () => {
+		const { missingDimension, records } = await establishFivePlusOne();
+		const collisionPath = path.join(
+			directory,
+			'.swarm',
+			'pr-review',
+			'collision-run',
+			'coverage-disclosure.json',
+		);
+		await fs.mkdir(path.dirname(collisionPath), { recursive: true });
+		await fs.writeFile(collisionPath, '{"foreign":true}', 'utf8');
+		const result = JSON.parse(
+			await executeWritePrReviewArtifact(
+				{
+					kind: 'findings',
+					run_id: 'collision-run',
+					pr_head_sha: PR_ARTIFACT_HEAD_SHA,
+					boundary: 'post_explorer',
+					records,
+					partial_base_coverage: { missing_dimension: missingDimension },
+				},
+				directory,
+				{ sessionID: PR_ARTIFACT_SESSION_ID },
+			),
+		);
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('path already contains different content');
 	});
 });

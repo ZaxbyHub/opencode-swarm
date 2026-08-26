@@ -1757,13 +1757,15 @@ export async function executeDispatchLanesAsync(
 		if (
 			parsed.data.mode === 'swarm-pr-review:base' &&
 			context.sessionID?.trim() &&
-			parsed.data.pr_review_wave_stage !== undefined
+			(parsed.data.pr_review_wave_stage !== undefined ||
+				parsed.data.pr_review_contract_retry === true)
 		) {
 			try {
 				await rollbackPrReviewBaseAdmissionIfUnlaunched(
 					directory,
 					context.sessionID,
 					batchId,
+					parsed.data.pr_review_contract_retry === true,
 				);
 			} catch (error) {
 				logger.log('pr-review base-admission rollback failed', {
@@ -2462,9 +2464,10 @@ async function collectOnce(
 				laneBudgets.messagesBudgetMs,
 			);
 		} catch {
+			const messageTimeoutPrefix = `session.messages for lane "${record.laneId ?? record.correlationId}" exceeded the remaining collect_lane_results budget`;
 			if (
-				!hostTimeouts.has(
-					`session.messages for lane "${record.laneId ?? record.correlationId}"`,
+				![...hostTimeouts].some((entry) =>
+					entry.startsWith(messageTimeoutPrefix),
 				)
 			) {
 				collectionResourceFailures.add(record.correlationId);
@@ -4348,6 +4351,10 @@ function applyExplorerFormatSuffix(
 			return lane;
 		}
 		if (isPrReviewDiscovery) {
+			const encouragesVerbatimShellQuoting =
+				/(?:\b(?:quote|copy|transcribe|reproduce)\b.{0,80}\b(?:pipeline|shell|command|text)\b.{0,80}\b(?:faithfully|verbatim|exactly|literally)\b|\b(?:faithfully|verbatim|exactly|literally)\b.{0,80}\b(?:quote|copy|transcribe|reproduce)\b.{0,80}\b(?:pipeline|shell|command|text)\b)/i.test(
+					lane.prompt,
+				);
 			const forbidden = [
 				lane.prompt.includes(CANDIDATE_HEADERS.base_explorer)
 					? 'the canonical base discovery header'
@@ -4357,6 +4364,9 @@ function applyExplorerFormatSuffix(
 					: null,
 				/\[CANDIDATE\]/.test(lane.prompt) ? '[CANDIDATE]' : null,
 				/\[CLEAN\]/.test(lane.prompt) ? '[CLEAN]' : null,
+				encouragesVerbatimShellQuoting
+					? 'verbatim shell or pipeline quoting guidance'
+					: null,
 			].find((value): value is string => value !== null);
 			if (forbidden) {
 				errors.push(

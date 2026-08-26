@@ -10,6 +10,7 @@ import {
 	PR_REVIEW_HANDOFF_MAX_BYTES,
 	PrReviewFindingSchema,
 	PrReviewHandoffSchema,
+	PrReviewPartialBaseCoverageSchema,
 	PrReviewRunIdSchema,
 	WritePrReviewArtifactArgsSchema,
 } from '../background/pr-review-contract.js';
@@ -330,6 +331,36 @@ export async function executeWritePrReviewArtifact(
 		// full-inventory post_explorer checkpoint after trigger evaluation; the
 		// same boundary name is committed in both writes, so `boundaryCommitted`
 		// alone cannot distinguish a legal refresh from an unsafe rewrite.
+		if (!isCommittedReplay) {
+			try {
+				// Preserve the actionable boundary/coverage error contract before
+				// checking the record projection. A caller writing too early must be
+				// told which checkpoint or inventory is missing, not that its records
+				// cannot yet match verdicts that are not authoritative at this point.
+				await assertPrReviewArtifactBoundary(
+					directory,
+					sessionID,
+					resolvedRunId,
+					findingsInput.boundary,
+					findingIds,
+					findingsInput.partial_base_coverage
+						? { skipBaseCoverage: true }
+						: undefined,
+				);
+			} catch (error) {
+				return failure(
+					formatPrReviewRuntimeFieldError(
+						findingsInput.partial_base_coverage
+							? 'partial_base_coverage'
+							: 'boundary',
+						findingsInput.partial_base_coverage
+							? 'exactly five successful base dimensions plus one named typed terminal failure after every other boundary predicate passes'
+							: `the legal next "${findingsInput.boundary}" checkpoint for run "${resolvedRunId}" with exact inventory [${findingIds.join(', ')}]`,
+						error instanceof Error ? error.message : String(error),
+					),
+				);
+			}
+		}
 		try {
 			await assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 				directory,
@@ -381,13 +412,15 @@ export async function executeWritePrReviewArtifact(
 						findingsInput.partial_base_coverage.missing_dimension,
 					);
 				}
-				await assertPrReviewArtifactBoundary(
-					directory,
-					sessionID,
-					resolvedRunId,
-					findingsInput.boundary,
-					findingIds,
-				);
+				if (findingsInput.partial_base_coverage) {
+					await assertPrReviewArtifactBoundary(
+						directory,
+						sessionID,
+						resolvedRunId,
+						findingsInput.boundary,
+						findingIds,
+					);
+				}
 			} catch (error) {
 				return failure(
 					formatPrReviewRuntimeFieldError(
@@ -666,6 +699,7 @@ export const write_pr_review_artifact: ReturnType<typeof createSwarmTool> =
 				.enum(['post_explorer', 'post_reviewer', 'post_critic'])
 				.optional(),
 			records: z.array(PrReviewFindingSchema).min(1).max(1000).optional(),
+			partial_base_coverage: PrReviewPartialBaseCoverageSchema.optional(),
 			handoff: PrReviewHandoffSchema.optional(),
 		},
 		execute: executeWritePrReviewArtifact,

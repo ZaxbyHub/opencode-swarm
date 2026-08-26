@@ -36,7 +36,7 @@ export async function persistPrReviewBatch(
 	mode: string,
 	lanes: ReadonlyArray<{ laneId: string; workflowLane: string }>,
 	options: {
-		status?: 'completed' | 'error';
+		status?: 'pending' | 'running' | 'completed' | 'error';
 		head?: string;
 		empty?: boolean;
 		textOverride?: string;

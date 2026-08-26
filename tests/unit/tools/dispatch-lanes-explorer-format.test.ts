@@ -76,6 +76,10 @@ describe('applyExplorerFormatSuffix', () => {
 			'canonical header',
 			'| [CANDIDATE] | lane | claim | evidence | impact | confidence |',
 		],
+		[
+			'verbatim shell quoting guidance',
+			'quote pipeline text faithfully in your evidence fields',
+		],
 	] as const)('rejects operator-owned %s text for PR-review discovery', (_label, prompt) => {
 		_internals.getGeneratedAgentNames = () => ['swarm_explorer'];
 		const result = _test_exports.applyExplorerFormatSuffix(
