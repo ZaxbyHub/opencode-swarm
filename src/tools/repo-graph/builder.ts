@@ -32,6 +32,12 @@ import {
 } from '../symbols';
 import { extractFileOntology, maskMultilineStringLiterals } from './ontology';
 import { safeRealpathSync } from './safe-realpath';
+import {
+	createSymbolEdgeV2,
+	deriveRepoRootId,
+	hashSymbolEdgeSnippet,
+	mergeSymbolEdges,
+} from './symbol-edge';
 import type {
 	BuildWorkspaceGraphOptions,
 	GraphEdge,
@@ -2818,6 +2824,21 @@ export async function scanFileAsync(
 	// binding, resolve that binding's specifier to a target file and emit
 	// a symbol→symbol edge.
 	const symbolEdges: SymbolEdge[] = [];
+	const repoRootId = deriveRepoRootId(absoluteRoot);
+	const sourceLines = content.split(/\r?\n/);
+	const evidenceForLine = (line: number | undefined) => {
+		if (!Number.isInteger(line) || (line ?? 0) < 1) return [];
+		const snippet = sourceLines[(line as number) - 1];
+		if (snippet === undefined) return [];
+		return [
+			{
+				file: moduleName,
+				line: line as number,
+				snippetHash: hashSymbolEdgeSnippet(snippet),
+				extractor: `tree-sitter/${grammarId}`,
+			},
+		];
+	};
 	const localToImported = new Map<
 		string,
 		{ specifier: string; imported: string }
@@ -2856,12 +2877,24 @@ export async function scanFileAsync(
 		if (seenSymbolEdgeKeys.has(key)) continue;
 		seenSymbolEdgeKeys.add(key);
 
-		symbolEdges.push({
-			fromFile: filePath,
-			fromSymbol,
-			toFile: resolvedTarget,
-			toSymbol: mapping.imported,
-		});
+		const evidence = evidenceForLine(ref.line);
+		symbolEdges.push(
+			createSymbolEdgeV2(
+				{
+					fromFile: filePath,
+					fromSymbol,
+					toFile: resolvedTarget,
+					toSymbol: mapping.imported,
+				},
+				absoluteRoot,
+				repoRootId,
+				{
+					confidence: evidence.length > 0 ? 0.9 : 0,
+					resolution: evidence.length > 0 ? 'import_binding' : 'unresolved',
+					evidence,
+				},
+			),
+		);
 	}
 	for (const imp of facts.imports) {
 		const packageInitBindings =
@@ -2897,12 +2930,24 @@ export async function scanFileAsync(
 			if (seenSymbolEdgeKeys.has(key)) continue;
 			seenSymbolEdgeKeys.add(key);
 
-			symbolEdges.push({
-				fromFile: filePath,
-				fromSymbol: binding.exported,
-				toFile: resolvedTarget,
-				toSymbol: binding.imported,
-			});
+			const evidence = evidenceForLine(imp.startLine);
+			symbolEdges.push(
+				createSymbolEdgeV2(
+					{
+						fromFile: filePath,
+						fromSymbol: binding.exported,
+						toFile: resolvedTarget,
+						toSymbol: binding.imported,
+					},
+					absoluteRoot,
+					repoRootId,
+					{
+						confidence: evidence.length > 0 ? 0.9 : 0,
+						resolution: evidence.length > 0 ? 'import_binding' : 'unresolved',
+						evidence,
+					},
+				),
+			);
 		}
 	}
 
@@ -3057,6 +3102,7 @@ export function buildWorkspaceGraph(
 
 	// Create graph with original workspaceRoot form (not absolute path)
 	const graph = createEmptyGraph(workspaceRoot);
+	graph.repoRootId = deriveRepoRootId(absoluteRoot);
 	const stats: ScanStats = {
 		filesScanned: 0,
 		skippedDirs: 0,
@@ -3347,6 +3393,7 @@ export async function buildWorkspaceGraphAsync(
 	}
 
 	const graph = createEmptyGraph(workspaceRoot);
+	graph.repoRootId = deriveRepoRootId(absoluteRoot);
 	const stats: ScanStats = {
 		filesScanned: 0,
 		skippedDirs: 0,
@@ -3398,8 +3445,7 @@ export async function buildWorkspaceGraphAsync(
 	// scan interval bounds event-loop monopolization even when symbol extraction
 	// or its fail-open fallback resolves synchronously (issues #704 and #1144).
 	const seenEdges = new Set<string>();
-	const seenSymbolEdges = new Set<string>();
-	const allSymbolEdges: SymbolEdge[] = [];
+	const symbolEdgesById = new Map<string, SymbolEdge>();
 	let processedSinceYield = 0;
 	for (const filePath of sourceFiles) {
 		const result = await scanFileAsync(
@@ -3445,18 +3491,19 @@ export async function buildWorkspaceGraphAsync(
 				}
 				// Aggregate symbolEdges across all files (dedup)
 				for (const symbolEdge of result.symbolEdges) {
-					const key =
-						symbolEdge.fromFile +
-						'\u0000' +
-						symbolEdge.fromSymbol +
-						'\u0000' +
-						symbolEdge.toFile +
-						'\u0000' +
-						symbolEdge.toSymbol;
-					if (!seenSymbolEdges.has(key)) {
-						seenSymbolEdges.add(key);
-						allSymbolEdges.push(symbolEdge);
-					}
+					const key = symbolEdge.id as string;
+					const existing = symbolEdgesById.get(key);
+					symbolEdgesById.set(
+						key,
+						existing
+							? mergeSymbolEdges(
+									existing,
+									symbolEdge,
+									absoluteRoot,
+									deriveRepoRootId(absoluteRoot),
+								)
+							: symbolEdge,
+					);
 				}
 				stats.filesScanned++;
 			}
@@ -3477,8 +3524,8 @@ export async function buildWorkspaceGraphAsync(
 	};
 
 	// Attach symbolEdges when present (schema >= 1.2.0); keep additive.
-	if (allSymbolEdges.length > 0) {
-		graph.symbolEdges = allSymbolEdges;
+	if (symbolEdgesById.size > 0) {
+		graph.symbolEdges = [...symbolEdgesById.values()];
 	}
 	// AFTER symbolEdges are attached: the reconciler prunes symbol edges whose
 	// endpoints have no node, so it has to run once both edge collections exist.

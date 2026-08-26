@@ -9,7 +9,7 @@
 
 Repository memory is the graph-backed context-reduction layer that lets agents
 ask targeted structural questions before opening broad file sets. It builds on
-the native `repo_map` tool, `.swarm/repo-graph.json`, graph schema `1.2.0`,
+the native `repo_map` tool, `.swarm/repo-graph.json`, graph schema `1.5.0`,
 `exportRanges`, `symbolEdges`, and `context_pack`, then adds a durable contract
 for provenance, freshness, confidence, truncation, warnings, and graph-first
 retrieval.
@@ -36,13 +36,16 @@ including `importers`, `dependencies`, `blast_radius`, `localization`,
 `key_files`, `ontology`, `package_boundaries`, `preflight_packet`, `callers`,
 `dead_exports`, `context_pack`, and `graph_health`.
 
-Current schema `1.2.0` is additive:
+Current schema `1.5.0` is additive:
 
 | Schema | Added fields | Compatibility rule |
 | --- | --- | --- |
 | `1.0.0` | file nodes, file edges, graph metadata | Must continue to load when structurally valid. |
 | `1.1.0` | `GraphEdge.usedSymbols`, `GraphNode.exportLines` | Optional fields; symbol-usage queries self-gate when absent. |
 | `1.2.0` | `GraphNode.exportRanges`, `RepoGraph.symbolEdges` | Optional fields; `context_pack` returns `schemaSupported: false` and a rebuild note on older graphs. |
+| `1.3.0` | `GraphEdge.targetKind` | Optional node/asset target classification; older graphs use a safe extension fallback. |
+| `1.4.0` | `GraphNode.sizeBytes`, `GraphNode.mtimeMs` | Optional freshness witnesses; older graphs require rebuild before certification. |
+| `1.5.0` | `RepoGraph.repoRootId`, SymbolEdge stable IDs, kind, confidence, resolution, evidence | Additive fields; legacy four-field edges normalize in memory and remain traversable but unscored. |
 | additive diagnostics | `RepoGraph.diagnostics` | Optional on every schema version; `graph_health` reports empty diagnostics with a rebuild note for old graphs. |
 
 The loader validates that a graph is structurally safe enough to read. Query

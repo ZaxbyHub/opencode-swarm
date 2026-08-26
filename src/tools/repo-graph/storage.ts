@@ -13,7 +13,6 @@ import { validateSwarmPath } from '../../hooks/utils';
 import * as logger from '../../utils/logger';
 import {
 	containsControlChars,
-	containsPathTraversal,
 	validateSymlinkBoundary,
 } from '../../utils/path-security';
 import {
@@ -25,6 +24,7 @@ import {
 } from './cache';
 import { type FreshnessOptions, writeFingerprint } from './freshness';
 import { safeRealpathSync } from './safe-realpath';
+import { deriveRepoRootId, normalizeSymbolEdge } from './symbol-edge';
 import type { RepoGraph } from './types';
 import {
 	createEmptyGraph,
@@ -144,31 +144,36 @@ function validateLoadedGraph(parsed: RepoGraph): void {
 				{ code: 'CORRUPTION' },
 			);
 		}
-		for (const entry of parsed.symbolEdges) {
-			if (
-				typeof entry !== 'object' ||
-				entry === null ||
-				typeof entry.fromFile !== 'string' ||
-				typeof entry.fromSymbol !== 'string' ||
-				typeof entry.toFile !== 'string' ||
-				typeof entry.toSymbol !== 'string' ||
-				entry.fromFile === '' ||
-				entry.fromSymbol === '' ||
-				entry.toFile === '' ||
-				entry.toSymbol === '' ||
-				containsControlChars(entry.fromFile) ||
-				containsControlChars(entry.fromSymbol) ||
-				containsControlChars(entry.toFile) ||
-				containsControlChars(entry.toSymbol) ||
-				containsPathTraversal(entry.fromFile) ||
-				containsPathTraversal(entry.toFile)
-			) {
-				throw Object.assign(
-					new Error('repo-graph.json contains invalid symbolEdges entry'),
-					{ code: 'CORRUPTION' },
-				);
-			}
-		}
+	}
+	normalizeGraphSymbolEdges(parsed);
+}
+
+function normalizeGraphSymbolEdges(graph: RepoGraph): void {
+	const repoRootId = graph.repoRootId ?? deriveRepoRootId(graph.workspaceRoot);
+	if (
+		typeof repoRootId !== 'string' ||
+		repoRootId.length === 0 ||
+		repoRootId.length > 512 ||
+		containsControlChars(repoRootId)
+	) {
+		throw Object.assign(
+			new Error('repo-graph.json contains invalid repoRootId'),
+			{
+				code: 'CORRUPTION',
+			},
+		);
+	}
+	graph.repoRootId = repoRootId;
+	if (!graph.symbolEdges) return;
+	try {
+		graph.symbolEdges = graph.symbolEdges.map((entry) =>
+			normalizeSymbolEdge(entry, graph.workspaceRoot, repoRootId),
+		);
+	} catch (cause) {
+		throw Object.assign(
+			new Error('repo-graph.json contains invalid symbolEdges entry'),
+			{ code: 'CORRUPTION', cause },
+		);
 	}
 }
 
@@ -384,6 +389,10 @@ export async function saveGraph(
 			`Graph workspaceRoot mismatch: graph was built for "${graph.workspaceRoot}" but save was called for "${workspace}"`,
 		);
 	}
+
+	// Normalize legacy edges and reject structurally or semantically invalid v2
+	// facts before any write. This is the same trust boundary used by both loaders.
+	normalizeGraphSymbolEdges(graph);
 
 	const normalized = normalizedWorkspace;
 

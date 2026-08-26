@@ -35,6 +35,11 @@ import { clearCache, getCachedMtime } from './cache';
 import { writeFingerprint } from './freshness';
 import { resetQueryCache } from './query';
 import { getGraphPath, loadGraph, saveGraph } from './storage';
+import {
+	deriveRepoRootId,
+	mergeSymbolEdges,
+	normalizeSymbolEdge,
+} from './symbol-edge';
 import type {
 	BuildWorkspaceGraphOptions,
 	GraphEdge,
@@ -574,17 +579,32 @@ async function applyAsyncFileUpdates(
 				if (!graph.symbolEdges) {
 					graph.symbolEdges = [];
 				}
-				const existingKeys = new Set(
-					graph.symbolEdges.map(
-						(se) =>
-							`${se.fromFile}\u0000${se.fromSymbol}\u0000${se.toFile}\u0000${se.toSymbol}`,
-					),
+				const repoRootId =
+					graph.repoRootId ?? deriveRepoRootId(graph.workspaceRoot);
+				graph.repoRootId = repoRootId;
+				graph.symbolEdges = graph.symbolEdges.map((edge) =>
+					normalizeSymbolEdge(edge, graph.workspaceRoot, repoRootId),
+				);
+				const existingById = new Map(
+					graph.symbolEdges.map((edge, index) => [edge.id as string, index]),
 				);
 				for (const symbolEdge of result.symbolEdges) {
-					const key = `${symbolEdge.fromFile}\u0000${symbolEdge.fromSymbol}\u0000${symbolEdge.toFile}\u0000${symbolEdge.toSymbol}`;
-					if (!existingKeys.has(key)) {
-						graph.symbolEdges.push(symbolEdge);
-						existingKeys.add(key);
+					const normalized = normalizeSymbolEdge(
+						symbolEdge,
+						graph.workspaceRoot,
+						repoRootId,
+					);
+					const existingIndex = existingById.get(normalized.id);
+					if (existingIndex === undefined) {
+						graph.symbolEdges.push(normalized);
+						existingById.set(normalized.id, graph.symbolEdges.length - 1);
+					} else {
+						graph.symbolEdges[existingIndex] = mergeSymbolEdges(
+							graph.symbolEdges[existingIndex] as SymbolEdge,
+							normalized,
+							graph.workspaceRoot,
+							repoRootId,
+						);
 					}
 				}
 			}

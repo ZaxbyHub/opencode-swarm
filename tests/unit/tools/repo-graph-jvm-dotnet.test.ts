@@ -231,12 +231,14 @@ describe('repo-graph: Kotlin import/symbol resolution + ontology (issue #1529)',
 		const graph = await buildWorkspaceGraphAsync(tempDir);
 		const serviceNode = nodeFor(graph, 'com/example/Service.kt');
 		const widgetNode = nodeFor(graph, 'com/example/helper/Widget.kt');
-		expect(graph.symbolEdges ?? []).toContainEqual({
-			fromFile: serviceNode.filePath,
-			fromSymbol: 'run',
-			toFile: widgetNode.filePath,
-			toSymbol: 'Widget',
-		});
+		expect(graph.symbolEdges ?? []).toContainEqual(
+			expect.objectContaining({
+				fromFile: serviceNode.filePath,
+				fromSymbol: 'run',
+				toFile: widgetNode.filePath,
+				toSymbol: 'Widget',
+			}),
+		);
 	});
 });
 

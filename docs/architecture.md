@@ -92,11 +92,13 @@ actions include:
   limitations.
 - `context_pack` returns a token-budgeted, symbol-level source slice (definition
   + transitive callers/callees) built on tree-sitter extraction across all **12**
-  first-class languages (schema 1.2.0). See `docs/repo-graph-symbol-graph.md` for
-  design and limitations.
+  first-class languages. Schema 1.5.0 adds stable IDs, relationship kind,
+  confidence, resolution provenance, and hashed source evidence while retaining
+  schema 1.2.0 edge compatibility. See `docs/repo-graph-symbol-graph.md`.
 - `graph_health` returns graph freshness plus bounded extraction diagnostics,
   including stale files, symbol-extraction failures, unresolved relative imports,
-  oversized files, unsupported files, binary skips, and unreadable skips.
+  oversized files, unsupported files, binary skips, unreadable skips, and
+  advisory low-confidence/unresolved SymbolEdge v2 counts.
 
 The ontology extractor is intentionally conservative. It records detected facts
 and "detected missing guard" findings; it does not claim formal security proofs.
