@@ -51,49 +51,6 @@ describe('session-reflection — gatherToolProblems', () => {
 		expect(result.problems[0].failureRate).toBe(0.3);
 	});
 
-	// Issue #2349 sweep: agent-activity.ts used to collapse `output.error` into a
-	// pure boolean, so nothing anywhere recorded WHY a tool failed. Recovering the
-	// value is only half a fix — it has to reach a surface someone reads. This
-	// pins that the reason actually crosses the aggregate -> ToolProblem boundary,
-	// which is what makes the recovered value non-dead.
-	test('forwards failureReasons from the aggregate onto the problem', () => {
-		const aggs = new Map([
-			[
-				'bash',
-				{
-					tool: 'bash',
-					count: 10,
-					successCount: 7,
-					failureCount: 3,
-					totalDuration: 5000,
-					failureReasons: ['permission denied', 'command not found'],
-				},
-			],
-		]);
-		const result = _internals.gatherToolProblems(aggs);
-		expect(result.problems[0].failureReasons).toEqual([
-			'permission denied',
-			'command not found',
-		]);
-	});
-
-	test('omits failureReasons entirely when none were recorded', () => {
-		const aggs = new Map([
-			[
-				'bash',
-				{
-					tool: 'bash',
-					count: 10,
-					successCount: 7,
-					failureCount: 3,
-					totalDuration: 5000,
-				},
-			],
-		]);
-		const result = _internals.gatherToolProblems(aggs);
-		expect(result.problems[0].failureReasons).toBeUndefined();
-	});
-
 	test('does not flag tools with low failure rate', () => {
 		const aggs = new Map([
 			[

@@ -912,7 +912,14 @@ export function buildSignalsBlock(data: SessionReflectionData): string {
 		if (p.failureCount > 0) {
 			reproBacked.push({
 				title: `Tool ${p.tool} failing (${p.failureCount}/${p.totalCalls}, ${Math.round(p.failureRate * 100)}%)`,
-				evidence: `tool failure rate ${Math.round(p.failureRate * 100)}% (${p.failureCount}/${p.totalCalls})`,
+				// Issue #2349 sweep: `close.ts` renders the signals block
+				// UNCONDITIONALLY, so this is the one tool-problem surface a human
+				// always sees. Carry the reason into the evidence string.
+				evidence: `tool failure rate ${Math.round(p.failureRate * 100)}% (${p.failureCount}/${p.totalCalls})${
+					p.failureReasons && p.failureReasons.length > 0
+						? `; reasons: ${p.failureReasons.join('; ')}`
+						: ''
+				}`,
 			});
 		}
 	}
@@ -1105,6 +1112,13 @@ function buildDeterministicReport(data: SessionReflectionData): string {
 			lines.push(
 				`- **${p.tool}**: ${p.failureCount}/${p.totalCalls} failures (${Math.round(p.failureRate * 100)}%), avg ${p.avgDurationMs}ms per call`,
 			);
+			// Issue #2349 sweep: the DETERMINISTIC report is what a reader sees when
+			// no LLM delegate is configured, the signal aborts, or the delegate
+			// throws. Rendering the reason only in the delegate prompt would drop it
+			// on exactly the paths where there is no model to infer it.
+			if (p.failureReasons && p.failureReasons.length > 0) {
+				lines.push(`  - reasons: ${p.failureReasons.join('; ')}`);
+			}
 		}
 		lines.push('');
 	}

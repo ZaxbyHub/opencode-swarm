@@ -162,7 +162,9 @@ export function readTelemetryEvents(
 	// Issue #2349 sweep: an unreadable snapshot silently undercounted cost with
 	// no signal at all, so a systematic cause (permissions, a partial copy)
 	// looked identical to "there was nothing to read". Count and name the first
-	// failure so the undercount is at least observable.
+	// failure so the undercount is observable under OPENCODE_SWARM_DEBUG=1
+	// (`warn` is debug-gated; this is not promoted to criticalWarn because the
+	// site is advisory, not an operator-must-see signal).
 	let unreadableSnapshots = 0;
 	let firstUnreadableReason = '';
 	for (const file of snapshotFiles) {

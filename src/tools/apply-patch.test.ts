@@ -976,6 +976,14 @@ describe('swarm_apply_patch fuzzy-match fallback', () => {
 		);
 		expect(offResult.success).toBe(false);
 		expect(offResult.files[0]?.errors?.[0]?.type).toBe('context-mismatch');
+		// Issue #2349 sweep: fuzzy IS enabled here (context_aware off), so the
+		// fallback runs and fails. `fuzzy.error` used to be read ONLY as `=== null`
+		// with its value discarded, so a caller learned the fallback failed but
+		// never WHY. Without this assertion the forwarding branch is unpinned —
+		// deleting the interpolation would leave every other patch test green.
+		expect(offResult.files[0]?.errors?.[0]?.message).toContain(
+			'fuzzy fallback:',
+		);
 
 		// Fresh file, then with context_aware ON: must succeed (strategy 9 accepts).
 		createFile(workspace, targetFile, 'def foo():\n    x = 1\n    return x\n');
