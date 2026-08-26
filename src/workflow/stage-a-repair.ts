@@ -1,5 +1,5 @@
-import { appendFile, mkdir, readdir } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { readdir } from 'node:fs/promises';
+import { appendCoreEventSync } from '../events/core-events.js';
 import { isSecretscanEvidence, loadEvidence } from '../evidence/manager.js';
 import {
 	getTaskWorkflowSnapshot,
@@ -13,8 +13,6 @@ import { isStrictTaskId } from '../validation/task-id.js';
 import { listCoderSettlementWalStates } from './coder-settlement.js';
 
 const MAX_STAGE_A_REPAIR_SCAN = 200;
-/** Same EBUSY/EPERM one-retry policy as coder-settlement's lifecycle events. */
-const RETRYABLE_EVENT_CODES = new Set(['EBUSY', 'EPERM']);
 
 export type StageARepairOutcome =
 	| {
@@ -39,40 +37,23 @@ export interface StageARepairResult {
 /**
  * Appends a stage_a_repair lifecycle event to `.swarm/events.jsonl`.
  * Mirrors coder-settlement's appendSettlementEvent contract: best-effort,
- * never throws, parent dir created, one EBUSY/EPERM retry, final failure
- * surfaced via criticalWarn so a silently missing audit line is visible.
+ * never throws, appended through the canonical `appendCoreEventSync` seam
+ * (which owns `.swarm` creation, lock retry, and torn-tail framing — its
+ * single atomic append replaces the former EBUSY/EPERM one-retry), final
+ * failure surfaced via criticalWarn so a silently missing audit line is
+ * visible.
  */
 async function appendStageARepairEvent(
 	directory: string,
 	payload: Record<string, unknown>,
 ): Promise<void> {
-	const line = `${JSON.stringify({
-		type: 'stage_a_repair',
-		timestamp: new Date().toISOString(),
-		...payload,
-	})}\n`;
 	try {
-		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		await mkdir(dirname(eventsPath), { recursive: true });
-		await appendFile(eventsPath, line, 'utf-8');
+		appendCoreEventSync(directory, {
+			type: 'stage_a_repair',
+			timestamp: new Date().toISOString(),
+			...payload,
+		});
 	} catch (error) {
-		const code = (error as NodeJS.ErrnoException).code;
-		if (code && RETRYABLE_EVENT_CODES.has(code)) {
-			try {
-				const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-				await appendFile(eventsPath, line, 'utf-8');
-				return;
-			} catch (retryError) {
-				logger.criticalWarn(
-					`[stage-a-repair] audit event write failed after retry: ${
-						retryError instanceof Error
-							? retryError.message
-							: String(retryError)
-					}`,
-				);
-				return;
-			}
-		}
 		logger.criticalWarn(
 			`[stage-a-repair] audit event write failed: ${
 				error instanceof Error ? error.message : String(error)

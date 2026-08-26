@@ -205,9 +205,22 @@ describe('delegation-sanitizer - Task 4d.1 fixes verification', () => {
 			// Verify events.jsonl was created
 			expect(fs.existsSync(eventsPath)).toBe(true);
 
-			// Read and parse events
+			// Read and parse events (#2039: skip the manifest header line —
+			// only EVENT lines count).
 			const eventsContent = fs.readFileSync(eventsPath, 'utf-8');
-			const lines = eventsContent.trim().split('\n');
+			const lines = eventsContent
+				.trim()
+				.split('\n')
+				.filter((line) => {
+					try {
+						return (
+							(JSON.parse(line) as { type?: unknown }).type !==
+							'swarm-events-manifest'
+						);
+					} catch {
+						return true;
+					}
+				});
 			expect(lines.length).toBe(1);
 
 			const event = JSON.parse(lines[0]);
@@ -237,9 +250,22 @@ describe('delegation-sanitizer - Task 4d.1 fixes verification', () => {
 
 			await hook({}, output);
 
-			// Verify events.jsonl has 2 events
+			// Verify events.jsonl has 2 events (#2039: skip the manifest
+			// header line — only EVENT lines count).
 			const eventsContent = fs.readFileSync(eventsPath, 'utf-8');
-			const lines = eventsContent.trim().split('\n');
+			const lines = eventsContent
+				.trim()
+				.split('\n')
+				.filter((line) => {
+					try {
+						return (
+							(JSON.parse(line) as { type?: unknown }).type !==
+							'swarm-events-manifest'
+						);
+					} catch {
+						return true;
+					}
+				});
 			expect(lines.length).toBe(2);
 		});
 

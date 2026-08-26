@@ -105,8 +105,8 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		token: 'instance',
 		quarantineEligible: true,
 		parsesTarget: true,
-		producers: ['src/hooks/pr-workflow-gate.ts:14143'],
-		note: 'pre/post-rename file-identity verification (assertOpened/ClosedSwarmFileIdentity, pr-workflow-gate.ts:14085-14132) is writer-specific and load-bearing',
+		producers: ['src/hooks/pr-workflow-gate.ts:14118'],
+		note: 'pre/post-rename file-identity verification (assertOpened/ClosedSwarmFileIdentity, pr-workflow-gate.ts:14060-14107) is writer-specific and load-bearing',
 	},
 	{
 		id: 'target-suffix-tmp-num-num-json',
@@ -129,9 +129,9 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/evidence/task-file.ts:67 (pre-#2035)',
 			'src/scope/scope-persistence.ts:2304 (pre-#2035)',
 			'src/scope/scope-persistence.ts:2318 (pre-#2035)',
-			'src/plan/manager.ts:628',
-			'src/plan/manager.ts:1793',
-			'src/plan/manager.ts:1839',
+			'src/plan/manager.ts:629',
+			'src/plan/manager.ts:1785',
+			'src/plan/manager.ts:1831',
 			'src/review/evidence.ts:160',
 			'src/turbo/lean/evidence.ts:182',
 			'src/summaries/manager.ts:122',
@@ -257,7 +257,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		token: 'instance',
 		quarantineEligible: true,
 		parsesTarget: true,
-		producers: ['src/plan/manager.ts:1979', 'src/plan/manager.ts:2168'],
+		producers: ['src/plan/manager.ts:1971', 'src/plan/manager.ts:2160'],
 		note: 'plan-durability (invariant 5) fd-write paths; grammars registered, writers unchanged in this PR',
 	},
 	{
@@ -308,7 +308,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		quarantineEligible: false,
 		parsesTarget: false,
 		producers: [
-			'src/tools/checkpoint.ts:194',
+			'src/tools/checkpoint.ts:195',
 			'src/full-auto/state.ts:460',
 			'src/context-map/persistence.ts:119',
 			'src/context-map/capsule-persistence.ts:107',
@@ -386,6 +386,10 @@ export const WRITER_CLASSIFICATION: Readonly<
 	// bespoke atomic single-file rewrite (write tmp + rename) for the bounded
 	// context-map telemetry store; PID-scoped `.context-telemetry.jsonl.<pid>.tmp`
 	'src/context-map/telemetry.ts': 'registered-bespoke',
+	// bespoke atomic single-file rewrites (write tmp + rename) for the bounded
+	// core event store and its authority index (issue #2039); PID-scoped
+	// `.events.jsonl.<pid>.tmp` / `.events-authority-index.json.<pid>.tmp`
+	'src/events/core-events.ts': 'registered-bespoke',
 	'src/evidence/documents-retention.ts': 'registered-bespoke',
 	'src/evidence/manager.ts': 'registered-bespoke',
 	'src/full-auto/state.ts': 'registered-bespoke',

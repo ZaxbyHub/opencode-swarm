@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
 import { type Plan, PlanSchema } from '../config/plan-schema';
+import { appendCoreEventSync } from '../events/core-events.js';
 import { validateSwarmPath } from '../hooks/utils';
 import { appendLedgerEvent, computePlanHash, initLedger } from '../plan/ledger';
 import { derivePlanId } from '../plan/utils.js';
@@ -90,7 +91,6 @@ async function restoreGitCheckpoint(
 		return `Error: ${parsed.error || `Failed to restore checkpoint "${selected.label}"`}`;
 	}
 
-	const eventsPath = validateSwarmPath(directory, 'events.jsonl');
 	const rollbackEvent = {
 		type: 'rollback',
 		label: selected.label,
@@ -100,7 +100,7 @@ async function restoreGitCheckpoint(
 	};
 
 	try {
-		fs.appendFileSync(eventsPath, `${JSON.stringify(rollbackEvent)}\n`);
+		appendCoreEventSync(directory, rollbackEvent);
 	} catch (error) {
 		log(
 			'Failed to write rollback event:',
@@ -352,7 +352,6 @@ export async function handleRollbackCommand(
 	}
 
 	// Write rollback event to JSONL
-	const eventsPath = validateSwarmPath(directory, 'events.jsonl');
 	const rollbackEvent = {
 		type: 'rollback',
 		phase: targetPhase,
@@ -361,7 +360,7 @@ export async function handleRollbackCommand(
 	};
 
 	try {
-		fs.appendFileSync(eventsPath, `${JSON.stringify(rollbackEvent)}\n`);
+		appendCoreEventSync(directory, rollbackEvent);
 	} catch (error) {
 		log(
 			'Failed to write rollback event:',

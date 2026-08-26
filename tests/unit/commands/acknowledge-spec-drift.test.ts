@@ -8,6 +8,27 @@ import { handleAcknowledgeSpecDriftCommand } from '../../../src/commands/acknowl
 import { readEffectiveSpecSync } from '../../../src/sdd/effective-spec';
 import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
+/**
+ * #2039: `.swarm/events.jsonl` line 1 is now the `swarm-events-manifest`
+ * header written by the core event store. Raw line-count assertions must
+ * skip the manifest and count EVENT lines only.
+ */
+function readEventLines(directory: string): string[] {
+	return readFileSync(join(directory, '.swarm', 'events.jsonl'), 'utf-8')
+		.trim()
+		.split('\n')
+		.filter((line) => {
+			try {
+				return (
+					(JSON.parse(line) as { type?: unknown }).type !==
+					'swarm-events-manifest'
+				);
+			} catch {
+				return true;
+			}
+		});
+}
+
 function buildPlan(specHash?: string) {
 	return {
 		schema_version: '1.0.0',
@@ -101,12 +122,8 @@ describe('handleAcknowledgeSpecDriftCommand', () => {
 		) as { specHash?: string };
 		expect(plan.specHash).toBe(readEffectiveSpecSync(tempDir)?.hash);
 
-		const events = readFileSync(
-			join(tempDir, '.swarm', 'events.jsonl'),
-			'utf-8',
-		)
-			.trim()
-			.split('\n');
+		// #2039: skip the manifest header line — only EVENT lines count.
+		const events = readEventLines(tempDir);
 		expect(events).toHaveLength(1);
 		const event = JSON.parse(events[0]);
 		expect(event.type).toBe('spec_drift_acknowledged');
@@ -134,12 +151,8 @@ describe('handleAcknowledgeSpecDriftCommand', () => {
 		await writeFile(join(tempDir, '.swarm', 'spec-staleness.json'), markerRaw);
 
 		await handleAcknowledgeSpecDriftCommand(tempDir, [], 'cli');
-		const firstEvents = readFileSync(
-			join(tempDir, '.swarm', 'events.jsonl'),
-			'utf-8',
-		)
-			.trim()
-			.split('\n');
+		// #2039: skip the manifest header line — only EVENT lines count.
+		const firstEvents = readEventLines(tempDir);
 		expect(firstEvents).toHaveLength(1);
 
 		await writeFile(join(tempDir, '.swarm', 'spec-staleness.json'), markerRaw);
@@ -152,19 +165,14 @@ describe('handleAcknowledgeSpecDriftCommand', () => {
 		expect(retryResult).toContain(
 			'Spec drift acknowledged for plan "Test Plan"',
 		);
-		const secondEvents = readFileSync(
-			join(tempDir, '.swarm', 'events.jsonl'),
-			'utf-8',
-		)
-			.trim()
-			.split('\n');
+		const secondEvents = readEventLines(tempDir);
 		expect(secondEvents).toHaveLength(1);
 		expect(existsSync(join(tempDir, '.swarm', 'spec-staleness.json'))).toBe(
 			false,
 		);
 	});
 
-	test('fails closed when events.jsonl is corrupt and leaves the marker in place', async () => {
+	test('fails closed when the authority index is corrupt and leaves the marker in place', async () => {
 		await writeFile(
 			join(tempDir, '.swarm', 'plan.json'),
 			JSON.stringify(buildPlan('oldhash123'), null, 2),
@@ -181,14 +189,53 @@ describe('handleAcknowledgeSpecDriftCommand', () => {
 				timestamp: '2026-08-14T12:10:00.000Z',
 			}),
 		);
-		await writeFile(join(tempDir, '.swarm', 'events.jsonl'), '{not jsonl}\n');
+		// #2039 CONTRACT CHANGE: the fail-closed surface moved from a malformed
+		// events.jsonl line to the authority index
+		// (`.swarm/events-authority-index.json`). A corrupt index throws
+		// CORE_EVENT_AUTHORITY_INDEX_UNREADABLE from hasSpecDriftAuditEvent —
+		// mirroring the malformed-JSONL throw it replaced — so the command
+		// fails closed and the marker stays blocking.
+		await writeFile(
+			join(tempDir, '.swarm', 'events-authority-index.json'),
+			'{not json',
+		);
 
 		const result = await handleAcknowledgeSpecDriftCommand(tempDir, []);
 
 		expect(result).toContain('Spec drift recovery failed and remains blocking');
-		expect(result).toContain('events.jsonl is not valid JSONL');
+		expect(result).toContain('CORE_EVENT_AUTHORITY_INDEX_UNREADABLE');
 		expect(existsSync(join(tempDir, '.swarm', 'spec-staleness.json'))).toBe(
 			true,
+		);
+	});
+
+	test('tolerates a malformed events.jsonl window line while acknowledging (#2039 documented tolerance)', async () => {
+		await writeFile(
+			join(tempDir, '.swarm', 'plan.json'),
+			JSON.stringify(buildPlan('oldhash123'), null, 2),
+		);
+		await writeFile(join(tempDir, '.swarm', 'spec.md'), '# Spec\n\nCurrent.\n');
+		await writeFile(
+			join(tempDir, '.swarm', 'spec-staleness.json'),
+			JSON.stringify({
+				planTitle: 'Test Plan',
+				phase: 1,
+				specHash_plan: 'oldhash123',
+				specHash_current: 'newhash789',
+				reason: 'spec.md changed since plan saved',
+				timestamp: '2026-08-14T12:15:00.000Z',
+			}),
+		);
+		// #2039: malformed window lines are now SKIPPED by every consumer
+		// (the bounded window scan never blocks authority lookups), so a
+		// corrupt event line no longer blocks acknowledgment.
+		await writeFile(join(tempDir, '.swarm', 'events.jsonl'), '{not jsonl}\n');
+
+		const result = await handleAcknowledgeSpecDriftCommand(tempDir, []);
+
+		expect(result).toContain('Spec drift acknowledged for plan "Test Plan"');
+		expect(existsSync(join(tempDir, '.swarm', 'spec-staleness.json'))).toBe(
+			false,
 		);
 	});
 });

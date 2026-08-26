@@ -21,6 +21,7 @@ import {
 	stripKnownSwarmPrefix,
 } from '../../config/schema';
 import { classifyFile, type FileZone } from '../../context/zone-classifier';
+import { appendCoreEventSync } from '../../events/core-events.js';
 import {
 	getPathFlavor,
 	isOnDifferentPathRoot,
@@ -142,9 +143,6 @@ export async function validateAndRecordAttestation(
 ): Promise<{ valid: true } | { valid: false; reason: string }> {
 	const result = validateAttestation(attestation, findingId, agent, action);
 	if (!result.valid) {
-		const swarmDir = path.join(dir, '.swarm');
-		await fs.mkdir(swarmDir, { recursive: true });
-		const eventsPath = path.join(swarmDir, 'events.jsonl');
 		const event = {
 			event: 'attestation_rejected',
 			findingId,
@@ -153,7 +151,7 @@ export async function validateAndRecordAttestation(
 			reason: result.reason,
 			timestamp: new Date().toISOString(),
 		};
-		await fs.appendFile(eventsPath, `${JSON.stringify(event)}\n`);
+		appendCoreEventSync(dir, event);
 		return result;
 	}
 	const record: AttestationRecord = {

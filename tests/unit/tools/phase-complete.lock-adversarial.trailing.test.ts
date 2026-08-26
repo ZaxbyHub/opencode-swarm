@@ -6,9 +6,9 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
+import { newestEventLine } from '../../helpers/event-lines.js';
 import { freezeClock } from '../../helpers/test-clock';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -202,6 +202,10 @@ function writeRetroBundle(directory: string, phaseNumber: number): void {
 	);
 }
 
+// #2039: line 1 is the swarm-events-manifest header — newest EVENT line.
+const newestEvent = (p: string): Record<string, unknown> =>
+	JSON.parse(newestEventLine(fs.readFileSync(p, 'utf-8')));
+
 describe('phase_complete adversarial trailing groups', () => {
 	let tempDir: string;
 	let originalCwd: string;
@@ -292,8 +296,7 @@ describe('phase_complete adversarial trailing groups', () => {
 			expect(afterPrefix.length).toBe(500);
 			expect(afterPrefix).toBe('A'.repeat(500));
 
-			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
-			const event = JSON.parse(content);
+			const event = newestEvent(eventsPath);
 			expect(event.event).toBe('phase_complete');
 			expect(event.summary).toBe('A'.repeat(500));
 			expect(event.summary.length).toBe(500);
@@ -310,8 +313,7 @@ describe('phase_complete adversarial trailing groups', () => {
 
 			expect(parsed.success).toBe(true);
 
-			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
-			const event = JSON.parse(content);
+			const event = newestEvent(eventsPath);
 			expect(event.summary).toBe('X'.repeat(500));
 			expect(event.summary.length).toBe(500);
 		});
@@ -327,8 +329,7 @@ describe('phase_complete adversarial trailing groups', () => {
 
 			expect(parsed.success).toBe(true);
 
-			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
-			const event = JSON.parse(content);
+			const event = newestEvent(eventsPath);
 			expect(event.summary).toBe(exactSummary);
 			expect(event.summary.length).toBe(500);
 		});
@@ -360,8 +361,7 @@ describe('phase_complete adversarial trailing groups', () => {
 
 			expect(parsed.success).toBe(true);
 
-			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
-			const event = JSON.parse(content);
+			const event = newestEvent(eventsPath);
 			expect(event.summary).toBe('');
 		});
 
@@ -378,8 +378,7 @@ describe('phase_complete adversarial trailing groups', () => {
 
 			expect(parsed.success).toBe(true);
 
-			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
-			const event = JSON.parse(content);
+			const event = newestEvent(eventsPath);
 			expect(event.summary).toBeNull();
 		});
 	});
@@ -427,7 +426,11 @@ describe('phase_complete adversarial trailing groups', () => {
 			const parsed = JSON.parse(result);
 
 			expect(parsed.success).toBe(true);
-			expect(eventsRelease).toHaveBeenCalledTimes(1);
+			// #2039: the events store lock is the seam's wx lock (released via
+			// unlinkSync-in-finally, no leak); plan.json still uses _release().
+			expect(fs.existsSync(path.join(tempDir, '.swarm', 'events.lock'))).toBe(
+				false,
+			);
 			expect(planRelease).toHaveBeenCalledTimes(1);
 		});
 

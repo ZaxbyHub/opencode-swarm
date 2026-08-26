@@ -1,8 +1,8 @@
-import * as fsp from 'node:fs/promises';
 import {
 	claimPrFeedbackMonitorEvents,
 	readPrFeedbackMonitorQueue,
 } from '../background/pr-feedback-event-queue.js';
+import { appendCoreEventSync } from '../events/core-events.js';
 import { log } from '../utils';
 import {
 	cancelPrWorkflowPluginWake,
@@ -15,7 +15,6 @@ import {
 	type PrReviewDepthTier,
 	readPrWorkflowGateState,
 } from './pr-workflow-gate.js';
-import { validateSwarmPath } from './utils.js';
 
 const DEFAULT_WAKE_TIMEOUT_MS = 5_000;
 // Keep automatic wake delivery out of active composition unless the bounded
@@ -957,13 +956,12 @@ export function createPrWorkflowResponseGate(options: {
 	 * surface for "why did this review stop resuming".
 	 *
 	 * Shape and failure policy mirror the abort-path append in
-	 * `pr-workflow-gate.ts` (`pr_workflow_aborted`): a `type`-tagged JSON line,
-	 * a path resolved through {@link validateSwarmPath}, and a non-fatal
-	 * try/catch. `validateSwarmPath` itself throws synchronously (null bytes,
-	 * traversal, symlinked `.swarm`), so it stays INSIDE the try. A missing
-	 * `.swarm` directory yields ENOENT and is likewise swallowed — the audit
-	 * trail is best-effort and must never break the gate or the wake
-	 * bookkeeping that surrounds this call.
+	 * `pr-workflow-gate.ts` (`pr_workflow_aborted`): a `type`-tagged JSON line
+	 * appended through the core event seam (issue #2039), and a non-fatal
+	 * try/catch. The seam throws synchronously (store contention, oversize
+	 * line), so it stays INSIDE the try — the audit trail is best-effort and
+	 * must never break the gate or the wake bookkeeping that surrounds this
+	 * call.
 	 *
 	 * Awaited, never fire-and-forget: this runs inside the async `event`
 	 * handler, and a `queueMicrotask`-style detachment would let the process
@@ -979,7 +977,6 @@ export function createPrWorkflowResponseGate(options: {
 		tier: PrReviewDepthTier;
 	}): Promise<void> {
 		try {
-			const eventsPath = validateSwarmPath(options.directory, 'events.jsonl');
 			const suspendedEvent = {
 				type: 'pr_workflow_wake_suspended',
 				timestamp: new Date().toISOString(),
@@ -992,11 +989,7 @@ export function createPrWorkflowResponseGate(options: {
 				maxConsecutiveUnproductiveWakes: maxConsecutive,
 				totalWakeCeiling: resolveTotalWakeCeiling(fields.tier),
 			};
-			await fsp.appendFile(
-				eventsPath,
-				`${JSON.stringify(suspendedEvent)}\n`,
-				'utf-8',
-			);
+			appendCoreEventSync(options.directory, suspendedEvent);
 		} catch {
 			// Non-fatal: the audit trail is best-effort. A failed write must
 			// never break the gate or abort the suspension bookkeeping.

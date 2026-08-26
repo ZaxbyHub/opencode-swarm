@@ -174,6 +174,7 @@ bash scripts/check-test-clock.sh
 bun run check:runtime-src-refs
 bun run check:events
 bun run check:retention
+bun run check:core-events
 bun run check:test-file-cap
 bun run check:pending-fragment
 bun run check:gate-portability

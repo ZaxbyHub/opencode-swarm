@@ -8,6 +8,7 @@ import type { ToolContext } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
 import { CuratorConfigSchema, KnowledgeConfigSchema } from '../config/schema';
+import { readCoreEvents } from '../events/core-events.js';
 import {
 	applyCuratorKnowledgeUpdates,
 	runCuratorPhase,
@@ -20,7 +21,6 @@ import {
 	buildRejectedReceipt,
 	persistReviewReceipt,
 } from '../hooks/review-receipt.js';
-import { readSwarmFileAsync } from '../hooks/utils.js';
 import { createSwarmTool } from './create-tool';
 
 export const curator_analyze: ReturnType<typeof createSwarmTool> =
@@ -131,16 +131,14 @@ export const curator_analyze: ReturnType<typeof createSwarmTool> =
 					config.knowledge ?? {},
 				);
 
-				// Resolve agents dispatched from phase events (best-effort, fail-open)
+				// Resolve agents dispatched from phase events (best-effort,
+				// fail-open) via the bounded core event window (issue #2039).
 				let agentsDispatched: string[] = [];
 				try {
-					const eventsContent = await readSwarmFileAsync(
-						directory,
-						'events.jsonl',
-					);
-					if (eventsContent) {
+					const eventsWindow = readCoreEvents(directory);
+					if (eventsWindow.text.length > 0) {
 						const phaseEvents = filterPhaseEvents(
-							eventsContent,
+							eventsWindow.text,
 							typedArgs.phase,
 						);
 						const agentSet = new Set<string>();

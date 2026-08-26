@@ -39,6 +39,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { collectToolRegistrationErrors } from './check-tool-registration';
 import { collectEventContractErrors } from './check-event-contract';
+import { collectCoreEventsUsageErrors } from './check-core-events-usage';
 import { detectDocsClaimDrift } from './drift-check-docs-claims';
 import { checkSkillAssertions, formatBrokenAssertions } from './check-skill-assertions';
 import { BUNDLED_PROJECT_SKILLS } from '../src/config/bundled-skills';
@@ -835,6 +836,19 @@ export function detectEventContractDrift(): DriftFinding[] {
 }
 
 // ---------------------------------------------------------------------------
+// 3b) Core event store usage drift (issue #2039 anti-bypass ratchet)
+// ---------------------------------------------------------------------------
+
+export function detectCoreEventsUsageDrift(): DriftFinding[] {
+	return collectCoreEventsUsageErrors().map((message) => ({
+		category: 'core-events-usage',
+		severity: 'error' as const,
+		file: 'src/events/core-events.ts',
+		message,
+	}));
+}
+
+// ---------------------------------------------------------------------------
 // 4) Command registry drift
 // ---------------------------------------------------------------------------
 
@@ -1307,6 +1321,7 @@ const DETECTORS: Array<[string, () => DriftFinding[]]> = [
 	['package-json-files', detectPackageJsonFilesDuplicates],
 	['tool', detectToolRegistrationDrift],
 	['event-contract', detectEventContractDrift],
+	['core-events-usage', detectCoreEventsUsageDrift],
 	['command', detectCommandDrift],
 	['agent', detectAgentDrift],
 	['docs-claim', detectDocsClaimDrift],

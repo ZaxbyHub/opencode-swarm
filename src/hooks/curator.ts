@@ -34,6 +34,11 @@ import {
 } from '../agents/explorer.js';
 import { getGlobalEventBus } from '../background/event-bus.js';
 import { getCanonicalAgentRole } from '../config/schema.js';
+import {
+	appendCoreEventSync,
+	appendCoreEventsSync,
+	readCoreEvents,
+} from '../events/core-events.js';
 import { authorizeCuration } from '../knowledge/curation-policy.js';
 import { alreadyCuratedThisGeneration } from '../knowledge/scan-cursor.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
@@ -1677,14 +1682,30 @@ export async function runCuratorPhase(
 			};
 		}
 
-		// 2. Read events.jsonl filtered to this phase window
-		const eventsJsonlContent = await readSwarmFileAsync(
-			directory,
-			'events.jsonl',
-		);
-		const phaseEvents = eventsJsonlContent
-			? _internals.filterPhaseEvents(eventsJsonlContent, phase)
-			: [];
+		// 2. Read the bounded core event window filtered to this phase
+		// (issue #2039: no whole-file reads; compacted history beyond the
+		// window is disclosed, never silently treated as the phase record).
+		const eventsWindow = readCoreEvents(directory);
+		const phaseEvents =
+			eventsWindow.text.length > 0
+				? _internals.filterPhaseEvents(eventsWindow.text, phase)
+				: [];
+		if (eventsWindow.coverage === 'truncated') {
+			// Disclosure without a PhaseDigestEntry schema change: a
+			// best-effort curator audit line records that this digest's
+			// phase events came from a truncated window.
+			try {
+				appendCoreEventSync(directory, {
+					timestamp: new Date().toISOString(),
+					event: 'curator_skipped',
+					scope: 'phase_digest',
+					phase,
+					reason: 'events_window_truncated',
+				});
+			} catch {
+				// disclosure is best-effort; the digest itself still builds
+			}
+		}
 
 		// 3. Read context.md decisions
 		const contextMd = await readSwarmFileAsync(directory, 'context.md');
@@ -1910,17 +1931,28 @@ export async function runCuratorPhase(
 			}
 		}
 
-		// 8. Write compliance observations to events.jsonl as curator_compliance events
-		const eventsPath = path.join(directory, '.swarm', 'events.jsonl');
-		for (const obs of complianceObservations) {
-			await appendKnowledge(eventsPath, {
-				type: 'curator_compliance',
-				timestamp: obs.timestamp,
-				phase: obs.phase,
-				observation_type: obs.type,
-				severity: obs.severity,
-				description: obs.description,
-			});
+		// 8. Write compliance observations to the core event store as
+		// curator_compliance events (issue #2039 seam; per-line semantics and
+		// serialized shape preserved — appendKnowledge's proper-lockfile
+		// path remains for the knowledge store only).
+		try {
+			appendCoreEventsSync(
+				directory,
+				complianceObservations.map((obs) => ({
+					type: 'curator_compliance',
+					timestamp: obs.timestamp,
+					phase: obs.phase,
+					observation_type: obs.type,
+					severity: obs.severity,
+					description: obs.description,
+				})),
+			);
+		} catch (err) {
+			logger.warn(
+				`[curator] failed to append compliance events: ${
+					err instanceof Error ? err.message : String(err)
+				}`,
+			);
 		}
 
 		// v2: optional skill generation when curator returns skill_candidates and

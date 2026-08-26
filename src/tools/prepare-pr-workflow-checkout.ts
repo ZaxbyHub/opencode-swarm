@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { z } from 'zod';
+import { appendCoreEventSync } from '../events/core-events.js';
 import { classifyPrWorkflowGitState } from '../git/pr-workflow-state.js';
 import {
 	type PrWorkflowCheckoutRecoveryRecord,
@@ -1494,20 +1495,15 @@ async function appendRestoreEvent(
 	receipt: CheckoutRestoreReceipt,
 ): Promise<void> {
 	try {
-		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		await fsp.appendFile(
-			eventsPath,
-			`${JSON.stringify({
-				type: 'pr_workflow_checkout_restored',
-				timestamp: new Date().toISOString(),
-				sessionID,
-				mode: receipt.mode,
-				stashOid: receipt.stashOid,
-				originalHead: receipt.originalHead,
-				originalBranch: receipt.originalBranch,
-			})}\n`,
-			'utf8',
-		);
+		appendCoreEventSync(directory, {
+			type: 'pr_workflow_checkout_restored',
+			timestamp: new Date().toISOString(),
+			sessionID,
+			mode: receipt.mode,
+			stashOid: receipt.stashOid,
+			originalHead: receipt.originalHead,
+			originalBranch: receipt.originalBranch,
+		});
 	} catch {
 		// Receipt removal after verified restore is authoritative; audit is best-effort.
 	}
@@ -1862,20 +1858,15 @@ async function appendPreparationEvent(
 	preparation: CheckoutPreparation,
 ): Promise<void> {
 	try {
-		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		await fsp.appendFile(
-			eventsPath,
-			`${JSON.stringify({
-				type: 'pr_workflow_checkout_prepared',
-				timestamp: preparation.preparedAt,
-				sessionID,
-				mode: preparation.mode,
-				gateRevision: preparation.gateRevision,
-				stashOid: preparation.stashOid,
-				paths: preparation.paths,
-			})}\n`,
-			'utf-8',
-		);
+		appendCoreEventSync(directory, {
+			type: 'pr_workflow_checkout_prepared',
+			timestamp: preparation.preparedAt,
+			sessionID,
+			mode: preparation.mode,
+			gateRevision: preparation.gateRevision,
+			stashOid: preparation.stashOid,
+			paths: preparation.paths,
+		});
 	} catch {
 		// The receipt is authoritative. Audit detail must not recreate the deadlock.
 	}

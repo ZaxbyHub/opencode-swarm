@@ -53,7 +53,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { type Plan, PlanSchema } from '../config/plan-schema';
-import { validateSwarmPath } from '../hooks/utils';
+import { appendCoreEventSync } from '../events/core-events.js';
 import { computePlanStructureHash } from '../plan/ledger';
 import { derivePlanId } from '../plan/utils';
 import {
@@ -2074,21 +2074,15 @@ function appendScopeBindingRevivalEvent(
 	revived: ScopeBinding,
 ): void {
 	try {
-		const eventsPath = validateSwarmPath(workspace, 'events.jsonl');
-		fs.mkdirSync(path.dirname(eventsPath), { recursive: true });
-		fs.appendFileSync(
-			eventsPath,
-			`${JSON.stringify({
-				type: 'scope_binding_auto_recovered',
-				timestamp: new Date().toISOString(),
-				taskId: revived.taskId,
-				sessionId: revived.ownerSessionId,
-				generationId: revived.generationId,
-				revision: revived.revision,
-				expiresAt: new Date(revived.expiresAt).toISOString(),
-			})}\n`,
-			'utf-8',
-		);
+		appendCoreEventSync(workspace, {
+			type: 'scope_binding_auto_recovered',
+			timestamp: new Date().toISOString(),
+			taskId: revived.taskId,
+			sessionId: revived.ownerSessionId,
+			generationId: revived.generationId,
+			revision: revived.revision,
+			expiresAt: new Date(revived.expiresAt).toISOString(),
+		});
 	} catch {
 		/* best-effort audit trail */
 	}

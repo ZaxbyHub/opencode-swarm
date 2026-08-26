@@ -337,6 +337,24 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		newest_timestamp: '2026-08-22T00:00:00.000Z',
 		coverage: true,
 	},
+
+	// Issue #2039 core event store health. Payload mirrors the real producer
+	// in src/events/core-events.ts (foldPass/finalize): bounded counts +
+	// timestamps only — no event content, no paths.
+	core_events_health: {
+		trigger: 'compaction',
+		accepted_count: 5250,
+		compacted_count: 5000,
+		retained_count: 250,
+		dropped_count: 0,
+		corrupt_count: 1,
+		authority_index_count: 7,
+		authority_evicted_count: 0,
+		oldest_timestamp: '2026-07-01T00:00:00.000Z',
+		newest_timestamp: '2026-08-22T00:00:00.000Z',
+		bytes: 524288,
+		limit_bytes: 2097152,
+	},
 };
 
 describe('envelope roundtrip — AC1 positive', () => {

@@ -9,17 +9,15 @@
  *
  * The probe never blocks tool execution by itself.
  */
-import * as fs from 'node:fs';
 import type { PluginConfig } from '../config';
+import { appendCoreEventSync } from '../events/core-events.js';
 import {
 	type FullAutoInputProbeResult,
 	probeFullAutoInput,
 } from '../full-auto/input-probe';
 import { loadFullAutoRunState } from '../full-auto/state';
-import { tryAcquireLock } from '../parallel/file-locks.js';
 import * as logger from '../utils/logger';
 import { normalizeToolName } from './normalize-tool-name';
-import { validateSwarmPath } from './utils';
 
 const PROBED_TOOLS = new Set<string>([
 	'web_search',
@@ -68,38 +66,12 @@ async function writeWarningEvent(
 		tool,
 		warnings: probe.warnings,
 	};
-	const lockTaskId = `full-auto-input-warning-${Date.now()}`;
-	let lockResult: Awaited<ReturnType<typeof tryAcquireLock>> | undefined;
 	try {
-		lockResult = await tryAcquireLock(
-			directory,
-			'events.jsonl',
-			'full-auto-input-warning',
-			lockTaskId,
-		);
-	} catch (error) {
-		logger.warn(
-			`[full-auto/input-probe] failed to acquire lock: ${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
-	try {
-		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		fs.appendFileSync(eventsPath, `${JSON.stringify(event)}\n`, 'utf-8');
+		appendCoreEventSync(directory, event);
 	} catch (error) {
 		logger.error(
 			`[full-auto/input-probe] failed to write event: ${error instanceof Error ? error.message : String(error)}`,
 		);
-	} finally {
-		if (lockResult?.acquired && lockResult.lock._release) {
-			try {
-				await lockResult.lock._release();
-			} catch (releaseError) {
-				logger.error(
-					'[full-auto/input-probe] lock release failed:',
-					releaseError,
-				);
-			}
-		}
 	}
 }
 

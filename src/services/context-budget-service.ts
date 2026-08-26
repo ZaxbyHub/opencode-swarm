@@ -7,6 +7,7 @@
  */
 
 import { DEFAULT_MODEL_CONTEXT_TOKENS } from '../config/schema';
+import { getCoreEventLifetimeCount } from '../events/core-events.js';
 import { resolveSwarmKnowledgePath } from '../hooks/knowledge-store';
 import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
 import { bunFile, bunWrite } from '../utils/bun-compat';
@@ -211,20 +212,18 @@ async function writeBudgetState(
 }
 
 /**
- * Count lines in events.jsonl to estimate turn count
+ * Lifetime event count from the bounded core event store — the explicit
+ * counter/projection issue #2039 requires for turn estimation. O(header)
+ * once the store manifest exists (lifetime = folded + retained window);
+ * a legacy header-less file falls back to a bounded newest-window count.
+ * The figure is advisory-only (it feeds report display fields, not the
+ * budget status decision).
  *
  * @param directory - The swarm workspace directory
  * @returns Number of events (proxy for turn count)
  */
 async function countEvents(directory: string): Promise<number> {
-	const content = await readSwarmFileAsync(directory, 'events.jsonl');
-	if (!content) {
-		return 0;
-	}
-
-	// Count non-empty lines
-	const lines = content.split('\n').filter((line) => line.trim().length > 0);
-	return lines.length;
+	return getCoreEventLifetimeCount(directory);
 }
 
 /**

@@ -12,6 +12,12 @@ import {
 	createSteeringConsumedHook,
 	recordSteeringConsumed,
 } from '../../../src/hooks/steering-consumed.js';
+import { eventLinesOf } from '../../helpers/event-lines.js';
+
+/** #2039: line 1 is the swarm-events-manifest header — count EVENT lines only. */
+function readEventLines(filePath: string): string[] {
+	return eventLinesOf(fs.readFileSync(filePath, 'utf-8'));
+}
 
 describe('recordSteeringConsumed', () => {
 	let tempDir: string;
@@ -38,8 +44,7 @@ describe('recordSteeringConsumed', () => {
 
 		expect(fs.existsSync(eventsPath)).toBe(true);
 
-		const content = fs.readFileSync(eventsPath, 'utf-8');
-		const lines = content.trim().split('\n');
+		const lines = readEventLines(eventsPath);
 
 		expect(lines.length).toBe(1);
 
@@ -57,8 +62,9 @@ describe('recordSteeringConsumed', () => {
 	it('should have correct type, directiveId, and valid ISO timestamp', () => {
 		recordSteeringConsumed(tempDir, 'test-directive-abc');
 
-		const content = fs.readFileSync(eventsPath, 'utf-8');
-		const event = JSON.parse(content.trim()) as {
+		const lines = readEventLines(eventsPath);
+		expect(lines.length).toBe(1);
+		const event = JSON.parse(lines[0]) as {
 			type: string;
 			directiveId: string;
 			timestamp: string;
@@ -75,17 +81,11 @@ describe('recordSteeringConsumed', () => {
 	});
 
 	it('should NOT throw on missing .swarm directory (silently swallows)', () => {
+		// #2039: the seam's ensureSwarmDir:false preserves this append-only
+		// containment contract exactly (no state under uninitialized dirs).
 		const noSwarmDir = fs.mkdtempSync(path.join(os.tmpdir(), 'no-swarm-'));
-
-		expect(() => {
-			recordSteeringConsumed(noSwarmDir, 'dir-456');
-		}).not.toThrow();
-
-		// Verify no events.jsonl was created
-		const swarmPath = path.join(noSwarmDir, '.swarm');
-		expect(fs.existsSync(swarmPath)).toBe(false);
-
-		// Clean up
+		expect(() => recordSteeringConsumed(noSwarmDir, 'dir-456')).not.toThrow();
+		expect(fs.existsSync(path.join(noSwarmDir, '.swarm'))).toBe(false);
 		fs.rmSync(noSwarmDir, { recursive: true, force: true });
 	});
 
@@ -117,8 +117,7 @@ describe('recordSteeringConsumed', () => {
 		recordSteeringConsumed(tempDir, 'dir-twice');
 		recordSteeringConsumed(tempDir, 'dir-twice');
 
-		const content = fs.readFileSync(eventsPath, 'utf-8');
-		const lines = content.trim().split('\n');
+		const lines = readEventLines(eventsPath);
 
 		expect(lines.length).toBe(2);
 

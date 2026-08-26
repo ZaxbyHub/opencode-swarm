@@ -17,6 +17,7 @@
 
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
+import { readCoreEvents } from '../events/core-events.js';
 import {
 	jaccardBigram,
 	readKnowledge,
@@ -415,9 +416,14 @@ async function gatherLedgerRejections(
 		return readLedger(target);
 	};
 
-	let content = await readLedger(
-		path.join(directory, '.swarm', 'events.jsonl'),
-	);
+	// Live read goes through the bounded core event window (issue #2039):
+	// manifest-stripped, hard read bound — strictly tighter than the previous
+	// 16 MiB tail cap. The archive fallback keeps its own bounded read
+	// (archived copies are immutable validated cuts).
+	let content: string | null = readCoreEvents(directory).text;
+	if (content === '') {
+		content = null;
+	}
 	if (content === null) {
 		try {
 			const archiveRoot = path.join(directory, '.swarm', 'archive');
@@ -451,6 +457,9 @@ async function gatherLedgerRejections(
 				sessionId?: unknown;
 				sessionID?: unknown;
 			};
+			// Archived post-#2039 cuts carry the store manifest as line 1;
+			// it is not a rejection event, skip it defensively (R2-4).
+			if (parsed.type === 'swarm-events-manifest') continue;
 			if (
 				typeof parsed.type === 'string' &&
 				REJECTION_LEDGER_EVENT_TYPES.has(parsed.type)
