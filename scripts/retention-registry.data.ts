@@ -401,7 +401,6 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/init-orphan-recovery.ts',
 			'src/tools/prepare-pr-workflow-checkout.ts',
 			'src/hooks/pr-workflow-gate.ts',
-			'src/hooks/pr-workflow-gate.ts',
 		],
 		writerCitations: [
 			'src/background/pending-delegations.ts:2244 appendRecord — appendFileSync :2249 (16 mutation entry points :2396-4035)',
