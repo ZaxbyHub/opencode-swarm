@@ -1,0 +1,47 @@
+# Fix `knowledge_recall` tool schema rejection on Gemini-family providers
+
+## What
+
+The `knowledge_recall` tool's `repair_re_evaluation.scope_complete` field used
+`z.literal(true)`, which serializes to a single-value enum constraint on a
+boolean. Gemini-family API providers (Gemini CLI, Google Antigravity, and
+direct `google/*` model endpoints) strictly validate enum values as
+`TYPE_STRING` and reject the entire request, making every `google/*` model
+unusable alongside this tool.
+
+## Fix
+
+Replace `scope_complete: z.literal(true)` with `scope_complete: z.boolean()`.
+The runtime handler at `src/tools/knowledge-recall.ts` already enforces
+`candidate.scope_complete !== true` and returns
+`RECEIPT_REEVALUATION_PROOF_INVALID` when the value is anything other than the
+literal `true`, so the visible behavior is unchanged for valid inputs. Invalid
+inputs are now rejected at execute-time instead of schema-parse-time.
+
+## Why
+
+Verified on opencode 1.18.23 + opencode-swarm 7.146.0 with a Google
+Antigravity OAuth account. The runtime error path was:
+
+```
+AI_APICallError: Invalid value at
+'request.tools[0].function_declarations[99].parameters.properties[4].value.properties[3].value.enum[0]'
+(TYPE_STRING), true
+```
+
+Anthropic and OpenAI tolerate the original schema; the rejection only surfaces
+on Gemini-validated endpoints.
+
+## Migration
+
+No migration required. Existing call sites that send `scope_complete: true`
+continue to work unchanged.
+
+## Caveats
+
+- The `repair_re_evaluation` subobject is architect-only; non-architect callers
+  still receive `RECEIPT_REEVALUATION_ARCHITECT_ONLY` before the
+  `scope_complete` check runs.
+- A new test file `tests/unit/tools/knowledge-recall-scope-complete-falsy.test.ts`
+  covers execute-time rejection of `scope_complete: false` and other malformed
+  inputs.
