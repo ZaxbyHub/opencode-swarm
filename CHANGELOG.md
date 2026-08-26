@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.150.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.149.1...v7.150.0) (2026-08-26)
+
+
+### Features
+
+* **symbol-graph:** harden Dart, Ruby, and PHP symbol graph support ([#1531](https://github.com/ZaxbyHub/opencode-swarm/issues/1531)) ([d7ddf0f](https://github.com/ZaxbyHub/opencode-swarm/commit/d7ddf0f4d68490b1a6fa362270191e5b92efce02))
+
+
+### Bug Fixes
+
+* **symbol-graph:** address PR [#2361](https://github.com/ZaxbyHub/opencode-swarm/issues/2361) review round 2 (dart/ruby/php hardening) ([18893d6](https://github.com/ZaxbyHub/opencode-swarm/commit/18893d6fa13905f243c693ad44af1d652facd1e4))
+
 ## [7.149.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.149.0...v7.149.1) (2026-08-26)
 
 
