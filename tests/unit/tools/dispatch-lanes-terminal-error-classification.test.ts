@@ -14,9 +14,11 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
+import { createAgents } from '../../../src/agents/index.js';
 import {
 	_internals,
 	_test_exports,
+	executeDispatchLanes,
 } from '../../../src/tools/dispatch-lanes.js';
 import {
 	assistantMessage,
@@ -114,25 +116,58 @@ describe('terminal-error classification and reason format (issue #2349)', () => 
 	);
 
 	test(
-		'a >100-char transient provider message keeps model failover on the sync path',
+		'a >100-char transient error still fails over, and the LAST attempt owns the reason',
 		async () => {
-			// Regression pin for the review blocker: composing the classified reason
-			// INTO the thrown message truncated it at 100 chars, so a transient token
-			// past that point was cut and `isTransientProviderError` flipped
-			// transient → permanent, silently suppressing model fallback. The thrown
-			// message is now byte-identical to its pre-#2349 form; only the recorded
-			// lane reason is classified.
-			const { isTransientProviderError } = await import(
-				'../../../src/utils/provider-error-classification.js'
+			// This drives the REAL production path end to end. An earlier version of
+			// this test asserted `isTransientProviderError()` against a locally-built
+			// string — it pinned the library, not the fix, and would still have passed
+			// if the classified reason were re-composed into the thrown message.
+			//
+			// It pins two things at once:
+			//  1. FAILOVER SURVIVES. Attempt 1's provider message is 115 chars with
+			//     its transient token ("overloaded") past char 100. Composing the
+			//     classified reason into the throw truncated at 100, cutting that
+			//     token and flipping transient -> permanent, which silently skipped
+			//     failover. `prompt` being called TWICE proves the fallback ran.
+			//  2. NO STALE REASON. Attempt 2 REJECTS rather than returning
+			//     `{data: undefined}`, so it never reaches the site that sets
+			//     `syncClassifiedReason`. Without the per-attempt reset, attempt 1's
+			//     provider reason leaks and the lane is recorded with the wrong cause.
+			const directory = canonicalMkdtemp('lane-failover-attribution-');
+			createAgents({
+				agents: { reviewer: { model: 'p/m1', fallback_models: ['p/m2'] } },
+			} as never);
+
+			let attempts = 0;
+			_internals.getSessionOps = () =>
+				({
+					create: async () => ({ data: { id: 'sess-failover' } }),
+					prompt: async () => {
+						attempts += 1;
+						if (attempts === 1) {
+							return {
+								data: undefined,
+								error: `${'x'.repeat(104)} overloaded`,
+							};
+						}
+						throw new Error('disk exploded');
+					},
+					delete: async () => ({}),
+				}) as never;
+
+			const result = await executeDispatchLanes(
+				{
+					max_concurrent: 1,
+					lanes: [{ id: 'l', agent: 'reviewer', prompt: 'p' }],
+				},
+				directory,
 			);
-			const raw = `${'x'.repeat(104)} overloaded`;
-			expect(raw.length).toBeGreaterThan(100);
-			expect(isTransientProviderError(`session.prompt failed: ${raw}`)).toBe(
-				true,
-			);
-			// And no synthetic `status=NNN` is injected into what the classifier sees,
-			// which previously flipped a permanent failure to transient.
-			expect(`session.prompt failed: ${raw}`).not.toContain('status=');
+
+			expect(attempts).toBe(2);
+			const laneError = result.lane_results[0]?.error ?? '';
+			expect(laneError).toContain('disk exploded');
+			expect(laneError).not.toContain('overloaded');
+			await fs.rm(directory, { recursive: true, force: true });
 		},
 		TEST_TIMEOUT_MS,
 	);

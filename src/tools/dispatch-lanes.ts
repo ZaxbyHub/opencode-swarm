@@ -3699,6 +3699,16 @@ async function runLane(
 		const swarmAgents = getSwarmAgents(swarmID);
 		const dispatched = await dispatchWithModelFallback({
 			dispatch: async (model, context) => {
+				// Reset per ATTEMPT. `dispatchWithModelFallback` invokes this callback
+				// once per model in its fallback chain, and the variable is scoped to
+				// the whole of `runLane`. Without this, attempt 1's provider reason
+				// survives into (a) attempt 2 failing for an unrelated cause — a
+				// timeout, a non-provider fault — and (b) attempt 2 SUCCEEDING and a
+				// later step (prepareLaneOutput/extractText, inside the same `try`)
+				// throwing. Either way the outer catch would record the stale
+				// attempt-1 reason: a wrong-attribution bug, which is the exact class
+				// #2349 exists to close.
+				syncClassifiedReason = undefined;
 				const result = await withTimeout(
 					session.prompt({
 						path: { id: createdSessionId },
