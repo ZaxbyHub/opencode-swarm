@@ -58,6 +58,7 @@ import {
 	resolveGeneratedAgentRole,
 	stripKnownSwarmPrefix,
 } from '../config/schema.js';
+import { classifyProviderFailure } from '../failures/invocation-failure.js';
 import {
 	activatePrWorkflow,
 	assertCurrentCheckoutHead,
@@ -816,7 +817,7 @@ export interface CollectLaneResultsResult {
 	all_settled: boolean;
 	lane_results: DispatchLaneResult[];
 	/**
-	 * Alert-only host liveness advisory for still-pending pr-review lanes past
+	 * Alert-only host liveness advisory for still-pending async lanes past
 	 * the pending-liveness threshold (issue #2280 Part B). Present only when at
 	 * least one such lane exists; never affects `success`, counts, settlement,
 	 * or any lane's state.
@@ -1852,6 +1853,9 @@ export async function executeCollectLaneResults(
 	// is bounded and prevents a persistently unencodable terminal receipt from
 	// logging once per wait-loop poll.
 	const receiptAppendFailureLogs = new Set<string>();
+	// Issue #2349: bounded the same way (at most MAX_LANES entries, keyed by lane
+	// label), and self-clearing when a later poll settles the lane successfully.
+	const settleFailureLogs = new Set<string>();
 	const batchFilter =
 		context.sessionID !== undefined
 			? { parentSessionId: context.sessionID }
@@ -1942,6 +1946,7 @@ export async function executeCollectLaneResults(
 				hostTimeouts,
 				receiptAppendFailureLogs,
 				collectionResourceFailures,
+				settleFailureLogs,
 			);
 			await sweepStaleAsyncLaneRecords(
 				session,
@@ -2005,7 +2010,7 @@ export async function executeCollectLaneResults(
 	);
 	if (result.pending > 0) {
 		// Issue #2280 Part B: alert-only liveness advisory for long-pending
-		// pr-review lanes. Fail-open (degrades per lane on any failure), bounded
+		// async lanes (any mode). Fail-open (degrades per lane on any failure), bounded
 		// (at most one host probe call, none below the threshold, none beyond
 		// the caller's remaining collection budget), and never mutates lane
 		// state or blocks collection.
@@ -2023,7 +2028,17 @@ export async function executeCollectLaneResults(
 			result.pending > 0
 				? 'Collection deadline exhausted while waiting for OpenCode host calls; pending lanes remain safe to retry.'
 				: 'Collection recovered and settled all lanes despite bounded OpenCode host-call timeouts; no collection retry is required.';
-		result.errors = [...hostTimeouts];
+	}
+	// Issue #2349: `errors` is assigned from the UNION of host-call timeouts and
+	// terminal-settle write failures. `result.message` stays keyed on
+	// `hostTimeouts` alone, so a settle failure never mislabels itself as a
+	// collection-deadline exhaustion. Assigning inside the `hostTimeouts` block
+	// (as this previously did) meant a settle failure with zero host timeouts
+	// never surfaced at all — the exact silent-wedge class this issue exists to
+	// close.
+	const diagnostics = [...hostTimeouts, ...settleFailureLogs];
+	if (diagnostics.length > 0) {
+		result.errors = diagnostics;
 	}
 	return result;
 }
@@ -2438,6 +2453,14 @@ async function collectOnce(
 	hostTimeouts: Set<string>,
 	receiptAppendFailureLogs: Set<string>,
 	collectionResourceFailures: Set<string>,
+	/**
+	 * Issue #2349: lane labels whose terminal-error settle write did NOT land.
+	 * Distinct from `hostTimeouts` on purpose — reusing that set would falsely
+	 * claim a host-deadline exhaustion in `result.message`. Entries are removed
+	 * again when a later poll settles the same lane, so the diagnostic reflects
+	 * current state rather than history.
+	 */
+	settleFailureLogs: Set<string>,
 ): Promise<void> {
 	const activeRecords = records.filter(
 		(record) => record.status === 'pending' || record.status === 'running',
@@ -2513,6 +2536,98 @@ async function collectOnce(
 			continue;
 		}
 		const transcript = extractAssistantTranscript(messages.data);
+		// Issue #2349: a lane whose backing session died AFTER promptAsync
+		// acceptance (provider quota/billing/auth exhaustion at first inference)
+		// records an assistant message carrying `info.error` and zero text parts.
+		// Before this branch the `!transcript.text` guard below skipped it on
+		// every poll, so the lane sat `pending` until the 30-minute presumed-stale
+		// sweep or a manual cancel. Settle it here on POSITIVE error evidence.
+		//
+		// The predicate deliberately does NOT use elapsed time: readiness collapses
+		// six distinct conditions (including status-budget exhaustion caused purely
+		// by lane pressure) into 'unknown', so a timer would terminalize healthy
+		// lanes. Instead it requires a second, independent turn-over discriminator
+		// — a stamped `time.completed` OR an affirmative `idle` — either of which
+		// rules out a live in-flight retry, which the host models as an ApiError
+		// carried on a still-running message.
+		// PR #2363 review (FB-004): `completedAt` stamped is not, on its own,
+		// proof the session won't retry — the host models an in-flight retry as
+		// an ApiError already carrying a completed message within the same
+		// SDK-modeled turn (RetryPart/SessionStatus.retry), and this repo has no
+		// test exercising that exact combination. When readiness is affirmatively
+		// 'idle' the host has told us directly there is nothing left running, so
+		// the completedAt fallback is only load-bearing when readiness could NOT
+		// be read (the six-way 'unknown' collapse). In that narrower case, refuse
+		// to settle+delete a lane the host explicitly marked retryable —
+		// `hostRetryable` (ApiError.data.isRetryable) was previously computed and
+		// discarded; gate on it instead of silently deleting a session the host
+		// itself said may still recover. Aborts are exempt: `MessageAbortedError`
+		// is unambiguous and carries no `isRetryable` semantics.
+		const relyingOnCompletedAtOnly =
+			readiness !== 'idle' && Number.isFinite(transcript.completedAt);
+		const hostSaysRetryable =
+			transcript.terminalError?.kind !== 'aborted' &&
+			transcript.terminalError?.hostRetryable === true;
+		if (
+			transcript.terminalError &&
+			// Load-bearing: a lane that produced REAL OUTPUT must keep taking the
+			// existing settlement route below, so partial findings are preserved
+			// rather than replaced by an error settle. Dropping this term silently
+			// discards the output of any lane that spoke and then died.
+			!transcript.text &&
+			// NOT `transcriptIncomplete`: that also folds in the terminal
+			// finish==='length'/'content-filter' cases, which would make the
+			// output_length classification unreachable. Only the fetch-window
+			// truncation term is relevant to "did this lane produce no output".
+			!transcript.windowTruncated &&
+			(Number.isFinite(transcript.completedAt) || readiness === 'idle') &&
+			!(relyingOnCompletedAtOnly && hostSaysRetryable)
+		) {
+			const settledStatus =
+				transcript.terminalError.kind === 'aborted' ? 'cancelled' : 'error';
+			const reason = laneTerminalErrorReason(transcript.terminalError);
+			const settled = await appendDelegationTransition(
+				directory,
+				record.correlationId,
+				{
+					status: settledStatus,
+					result: {
+						error: reason,
+						chars: reason.length,
+						truncated: false,
+						digest: digestText(reason),
+					},
+					expectedCurrentStatuses: ['pending', 'running'],
+				},
+			);
+			const laneLabel = record.laneId ?? record.correlationId;
+			if (settled?.status === settledStatus) {
+				// Only tear down once the terminal write is CONFIRMED.
+				// `appendDelegationTransition` returns null on an exception path and
+				// the UNCHANGED record when its CAS/first-terminal guard rejects;
+				// deleting the host session in those cases would leave the record
+				// open with no readable session — a permanent wedge strictly worse
+				// than the bug being fixed.
+				settleFailureLogs.delete(laneLabel);
+				cleanupAsyncLaunchSession(session, record.subagentSessionId);
+			} else if (
+				settled !== null &&
+				ASYNC_LANE_TERMINAL_STATUSES.has(settled.status)
+			) {
+				// Benign: the record was ALREADY terminal, so a concurrent writer
+				// (the 30-minute stale sweep, an abort, an earlier pass) settled it
+				// first and the first-terminal-wins guard correctly rejected ours.
+				// The lane is settled either way, so this is not a failure — logging
+				// it would cry wolf on every routine race. Teardown belongs to
+				// whoever landed the write, so we do not perform it here.
+				settleFailureLogs.delete(laneLabel);
+			} else {
+				// Genuine failure: the write threw (null) or the record is STILL
+				// open, so nothing settled it and the reason would otherwise vanish.
+				settleFailureLogs.add(laneLabel);
+			}
+			continue;
+		}
 		if (!transcript.text) continue;
 		if (readiness === 'unknown' && !transcript.terminalAssistantProof) {
 			continue;
@@ -3061,7 +3176,14 @@ async function finalizePrReviewWaitDeadlineLanes(args: {
 						prospectiveResult = built.result;
 						detail = built.detail;
 					} else {
-						salvageState = 'salvage_skipped=empty_output';
+						// Issue #2349: same defect class as the steady-state loop —
+						// the error evidence was already in hand and discarded, so the
+						// operator saw only "empty output" and never the reason. This
+						// site already terminalizes at deadline, so naming the cause is
+						// a DISCLOSURE improvement, not a settlement change.
+						salvageState = transcript.terminalError
+							? `salvage_skipped=provider_error:${transcript.terminalError.category}`
+							: 'salvage_skipped=empty_output';
 					}
 				} else {
 					salvageState = 'salvage_skipped=no_messages';
@@ -3359,6 +3481,151 @@ function getCurrentStaleSweepCandidate(
 	return current;
 }
 
+/**
+ * Issue #2349: a terminal error read off the last assistant message of a lane
+ * session, classified for settlement.
+ *
+ * `kind` derives from the SDK's discriminated `AssistantMessage.error` union and
+ * is AUTHORITATIVE for the settled lane status. `category`/`retryClass` come
+ * from the canonical {@link classifyProviderFailure} and are advisory
+ * classification for operator legibility. The two are NOT required to agree: an
+ * `APIError` whose message merely contains the word "aborted" settles as an
+ * error (the SDK says `APIError`) while carrying `provider.cancelled` from the
+ * text classifier. The reason string names both so the divergence is visible.
+ */
+interface LaneTerminalError {
+	kind: 'provider' | 'aborted' | 'output_length' | 'unknown';
+	/** SDK discriminator (`error.name`), bounded. */
+	name: string;
+	/** Sanitized + bounded provider message. */
+	message: string;
+	statusCode: number | undefined;
+	/** `ApiError.data.isRetryable` — host-stated, not inferred. */
+	hostRetryable: boolean | undefined;
+	category: string;
+}
+
+/**
+ * Per-field budget for the settled reason string (issue #2349).
+ *
+ * `classifyTerminalFailureSignature` normalizes to 160 chars
+ * (`src/hooks/pr-workflow-gate.ts`), so the DISCRIMINATING content — category
+ * and provider message — must lead, and the constant `kind`/`name` suffix must
+ * be small enough that it cannot push the discriminator out of the window.
+ * Composing in the other order would collapse genuinely different failures into
+ * one correlated-failure signature.
+ */
+const LANE_TERMINAL_REASON_MESSAGE_BUDGET = 100;
+
+/**
+ * Mirrors `isTerminal` in `src/background/pending-delegations.ts` — the statuses
+ * whose presence makes the first-terminal-wins guard reject a further
+ * transition. Used to tell a BENIGN settle race (someone else terminalized the
+ * record first) apart from a genuine settle-write failure (the write threw, or
+ * the record is still open), so the #2349 diagnostic does not cry wolf.
+ */
+const ASYNC_LANE_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
+	'completed',
+	'error',
+	'cancelled',
+	'stale',
+	'consumed',
+]);
+
+function laneTerminalErrorReason(error: LaneTerminalError): string {
+	const message = error.message.slice(0, LANE_TERMINAL_REASON_MESSAGE_BUDGET);
+	const status =
+		error.statusCode === undefined ? '' : ` status=${error.statusCode}`;
+	const retryable =
+		error.hostRetryable === undefined
+			? ''
+			: ` host_retryable=${error.hostRetryable}`;
+	// Discriminating content first (category, message), constant tail last.
+	return `${error.category}: ${message} [kind=${error.kind} name=${error.name}${status}${retryable}]`;
+}
+
+function readErrorDataRecord(error: unknown): Record<string, unknown> {
+	if (typeof error !== 'object' || error === null) return {};
+	const data = (error as { data?: unknown }).data;
+	return typeof data === 'object' && data !== null
+		? (data as Record<string, unknown>)
+		: {};
+}
+
+/**
+ * Issue #2349: classify an `AssistantMessage.error` union value for lane
+ * settlement. Host truth (the SDK discriminator and `ApiError.data.isRetryable`)
+ * takes precedence over text pattern matching; the provider message is still run
+ * through the canonical {@link classifyProviderFailure} for its category and
+ * bounded, sanitized display.
+ *
+ * Never throws: an unrecognized or malformed shape degrades to `unknown`.
+ */
+function classifyLaneTerminalError(error: unknown): LaneTerminalError {
+	const name =
+		typeof (error as { name?: unknown } | null)?.name === 'string'
+			? (error as { name: string }).name.slice(0, 64)
+			: 'UnknownError';
+	const data = readErrorDataRecord(error);
+	// Shape-agnostic on purpose (issue #2349, AC3). The ASYNC path supplies an
+	// `AssistantMessage.error` union (`{ name, data: { message } }`) while the
+	// SYNC path supplies a `session.prompt` ENVELOPE error whose message sits at
+	// the top level. Normalizing both here is what lets the two paths report the
+	// same category for the same underlying provider condition; classifying only
+	// one shape would make async strictly better-labeled than sync.
+	const topLevelMessage = (error as { message?: unknown } | null)?.message;
+	const rawMessage =
+		typeof data.message === 'string' && data.message.trim().length > 0
+			? data.message
+			: typeof topLevelMessage === 'string' && topLevelMessage.trim().length > 0
+				? topLevelMessage
+				: typeof error === 'string' && error.trim().length > 0
+					? error
+					: name;
+	const statusCode =
+		typeof data.statusCode === 'number' && Number.isFinite(data.statusCode)
+			? data.statusCode
+			: undefined;
+	const hostRetryable =
+		typeof data.isRetryable === 'boolean' ? data.isRetryable : undefined;
+	const kind: LaneTerminalError['kind'] =
+		name === 'MessageAbortedError'
+			? 'aborted'
+			: name === 'MessageOutputLengthError'
+				? 'output_length'
+				: name === 'APIError' || name === 'ProviderAuthError'
+					? 'provider'
+					: 'unknown';
+	// Reuse the canonical classifier (AGENTS.md invariant 9: structured,
+	// source-aware classification with bounded display). `info.error` is a
+	// provider channel, not arbitrary tool output, so the provider quota
+	// patterns apply correctly here.
+	// Feed the host-stated status IN rather than patching it on afterwards: the
+	// classifier's own status-driven branches (401/403 → auth, 429 → rate limit)
+	// are otherwise unreachable from this path, which produced self-contradictory
+	// records like `provider.unknown … status=429`.
+	const classified = classifyProviderFailure(
+		statusCode === undefined
+			? rawMessage
+			: { message: rawMessage, status: statusCode },
+	);
+	// The SDK discriminator is authoritative for an abort. `isAbortLike` tests
+	// /\baborted\b/, which does NOT match inside the single token
+	// "MessageAbortedError", so an abort carrying no `data.message` would
+	// otherwise be recorded as `provider.unknown` — and per the approved plan
+	// that empty-data shape is the one empirically proven to occur.
+	const category =
+		kind === 'aborted' ? 'provider.cancelled' : classified.category;
+	return {
+		kind,
+		name,
+		message: classified.evidence.display,
+		statusCode: statusCode ?? classified.evidence.statusCode,
+		hostRetryable,
+		category,
+	};
+}
+
 function extractAssistantTranscript(
 	messages: Array<{
 		info?: {
@@ -3374,6 +3641,29 @@ function extractAssistantTranscript(
 	messageCount: number;
 	transcriptIncomplete: boolean;
 	terminalAssistantProof: boolean;
+	/**
+	 * Issue #2349: `time.completed` of the last assistant message, surfaced so the
+	 * collection loop can require positive turn-over evidence before settling a
+	 * lane on an error. Previously computed here but discarded.
+	 */
+	completedAt: number | undefined;
+	/**
+	 * Issue #2349: the fetch-window truncation term ALONE, deliberately split out
+	 * of {@link transcriptIncomplete}. `transcriptIncomplete` also folds in the
+	 * TERMINAL `finish === 'length' | 'content-filter'` cases, so gating the
+	 * error-settle on it would make the `output_length` classification
+	 * unreachable. Only the "there may be unfetched earlier messages" signal is
+	 * relevant to "did this lane really produce no output".
+	 */
+	windowTruncated: boolean;
+	/**
+	 * Issue #2349: the classified terminal error from the last assistant message,
+	 * when present. The host records this on the persisted message; before this
+	 * change the value was read only as an `=== undefined` existence test for
+	 * {@link terminalAssistantProof} and then discarded, so no caller could ever
+	 * learn WHY a lane died.
+	 */
+	terminalError: LaneTerminalError | undefined;
 } {
 	const assistantTexts: string[] = [];
 	let lastAssistantInfo:
@@ -3412,6 +3702,12 @@ function extractAssistantTranscript(
 			Number.isFinite(completedAt) &&
 			terminalAssistantFinish &&
 			lastAssistantInfo?.error === undefined,
+		completedAt: typeof completedAt === 'number' ? completedAt : undefined,
+		windowTruncated: messages.length >= ASYNC_MESSAGE_FETCH_LIMIT,
+		terminalError:
+			lastAssistantInfo?.error === undefined
+				? undefined
+				: classifyLaneTerminalError(lastAssistantInfo.error),
 	};
 }
 
@@ -3471,6 +3767,10 @@ async function runLane(
 	const validation = validateLaneAgent(lane.agent, context);
 	const role = validation.role;
 	const startedAt = isoNow();
+	// Issue #2349 (AC3 parity): set at the dispatch-failure site, consumed by the
+	// outer catch. Carried out-of-band so the thrown message — which the
+	// model-failover classifier reads — stays byte-identical to its prior form.
+	let syncClassifiedReason: string | undefined;
 	if (!validation.ok) {
 		return {
 			id: lane.id,
@@ -3516,6 +3816,16 @@ async function runLane(
 		const swarmAgents = getSwarmAgents(swarmID);
 		const dispatched = await dispatchWithModelFallback({
 			dispatch: async (model, context) => {
+				// Reset per ATTEMPT. `dispatchWithModelFallback` invokes this callback
+				// once per model in its fallback chain, and the variable is scoped to
+				// the whole of `runLane`. Without this, attempt 1's provider reason
+				// survives into (a) attempt 2 failing for an unrelated cause — a
+				// timeout, a non-provider fault — and (b) attempt 2 SUCCEEDING and a
+				// later step (prepareLaneOutput/extractText, inside the same `try`)
+				// throwing. Either way the outer catch would record the stale
+				// attempt-1 reason: a wrong-attribution bug, which is the exact class
+				// #2349 exists to close.
+				syncClassifiedReason = undefined;
 				const result = await withTimeout(
 					session.prompt({
 						path: { id: createdSessionId },
@@ -3532,6 +3842,22 @@ async function runLane(
 					promptController,
 				);
 				if (!result.data) {
+					// Issue #2349 (AC3 parity): record the CLASSIFIED reason out-of-band
+					// and throw the RAW message unchanged.
+					//
+					// The `classify` callback below reads this thrown message to decide
+					// transient-vs-permanent, which gates model failover in
+					// `dispatchWithModelFallback`. Composing the classified reason INTO
+					// the message changed that decision in both directions — the
+					// LANE_TERMINAL_REASON_MESSAGE_BUDGET truncation can cut a transient
+					// token (e.g. "overloaded") past char 100, flipping transient →
+					// permanent and silently losing failover, and an injected
+					// `status=NNN` can flip permanent → transient. So the message stays
+					// byte-identical to its pre-#2349 form and only the recorded lane
+					// reason is classified.
+					syncClassifiedReason = `session.prompt failed: ${laneTerminalErrorReason(
+						classifyLaneTerminalError(result.error),
+					)}`;
 					throw new Error(
 						`session.prompt failed: ${formatError(result.error)}`,
 					);
@@ -3561,6 +3887,12 @@ async function runLane(
 				lane,
 				role,
 				startedAt,
+				// NOTE: this branch is defensive and currently UNREACHABLE — the
+				// dispatch callback above throws whenever `!result.data`, and
+				// dispatchWithModelFallback only returns a dispatch-produced result
+				// or rethrows. Left byte-identical to its pre-#2349 form rather than
+				// given new behavior, so no unwired code is introduced here; the
+				// AC3 classification lives at the reachable throw site above.
 				`session.prompt failed: ${formatError(promptResult.error)}`,
 				create.slotId,
 				create.runId,
@@ -3598,7 +3930,12 @@ async function runLane(
 			lane,
 			role,
 			startedAt,
-			formatError(error),
+			// Issue #2349 (AC3 parity): prefer the classified reason captured at the
+			// dispatch-failure site, so the sync path records the same category as
+			// the async collect path. Falls back to the raw message for every other
+			// failure kind reaching this catch (timeouts, session-create faults),
+			// whose text is deliberately left untouched.
+			syncClassifiedReason ?? formatError(error),
 			create.slotId,
 			create.runId,
 			sessionId,
@@ -4839,7 +5176,7 @@ export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
 export const collect_lane_results: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Collect or poll results for a dispatch_lanes_async batch. Supports two modes: (1) non-blocking poll (wait omitted or false) — performs one collection pass and returns current lane status, including pending lane identities by default, and any settled results so you can process completed lanes while continuing independent work; (2) blocking join (wait: true) — polls until all lanes settle or the collection wait budget expires. Busy/retry lanes do not become stale solely because they run for a long time; pr-review lanes pending for minutes additionally carry an alert-only pending_liveness diagnostic (lane id, elapsed ms, host session status, stalledSuspect) that never cancels or replaces anything. Does not advance workflow gates.',
+			'Collect or poll results for a dispatch_lanes_async batch. Supports two modes: (1) non-blocking poll (wait omitted or false) — performs one collection pass and returns current lane status, including pending lane identities by default, and any settled results so you can process completed lanes while continuing independent work; (2) blocking join (wait: true) — polls until all lanes settle or the collection wait budget expires. Busy/retry lanes do not become stale solely because they run for a long time; any lane pending for minutes additionally carries an alert-only pending_liveness diagnostic (lane id, elapsed ms, host session status, stalledSuspect) that never cancels or replaces anything. A lane whose backing session records a terminal provider error (quota/billing/auth) AND produced no output AND has an over turn (a completed timestamp, or an idle host) settles immediately with the classified reason instead of staying pending — as failed, or as cancelled when the host reports the turn was aborted. A lane that produced output, or whose turn may still be retrying, keeps polling. Does not advance workflow gates.',
 		args: {
 			batch_id: CollectLaneResultsArgsSchema.shape.batch_id,
 			wait: CollectLaneResultsArgsSchema.shape.wait,

@@ -253,6 +253,14 @@ jobs:
       - name: Bare-executable-spawn ratchet (issue #2236)
         if: needs.detect-release.outputs.is-release != 'true'
         run: bun run check:bare-spawn
+      # Issue #2349 (Phase 4.2 rung 3) recurrence guardrail: a host/library
+      # error channel (`.error`/`.errors`/`.failure`) read only for a boolean
+      # side-condition, discarding the value, so nothing downstream can learn
+      # WHY something failed. Allowlist-ratcheted (mirrors mock-allowlist.txt)
+      # at scripts/error-channel-discard-allowlist.txt.
+      - name: Error-channel-discard ratchet (issue #2349)
+        if: needs.detect-release.outputs.is-release != 'true'
+        run: bun run check:error-channel-discard
       # Line-scoped (not file-scoped): fails only on NEW/changed lines that add
       # a raw tmpdir() call not wrapped in realpathSync. Pre-existing raw calls
       # elsewhere in a touched file are not flagged (issue #1737 FR-011 scope

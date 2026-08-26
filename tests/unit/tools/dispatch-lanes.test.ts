@@ -542,7 +542,7 @@ describe('executeDispatchLanes', () => {
 			expect.objectContaining({
 				id: 'bad',
 				status: 'failed',
-				error: 'session.prompt failed: critic unavailable',
+				error: expect.stringContaining('provider.unknown: critic unavailable'),
 			}),
 		]);
 		expect(ops.delete).toHaveBeenCalledTimes(2);

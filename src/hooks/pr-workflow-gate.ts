@@ -1661,7 +1661,7 @@ const CAS_ESCAPE_DISCLOSURE =
 const PR_WORKFLOW_LANE_LIVENESS_PROBE_TIMEOUT_MS = 5_000;
 
 /**
- * How long a pr-review lane may sit pending before `collect_lane_results`
+ * How long an async lane may sit pending before `collect_lane_results`
  * starts probing its host session for a liveness advisory (issue #2280 Part B).
  * Order-of-minutes by design: far below the 30-minute presumed-stale horizon,
  * above normal dispatch jitter. Exposed through
@@ -1673,19 +1673,18 @@ const PR_WORKFLOW_LANE_LIVENESS_PROBE_TIMEOUT_MS = 5_000;
 const PR_WORKFLOW_PENDING_LIVENESS_THRESHOLD_MS = 3 * 60_000;
 
 /**
- * Pr-review lane modes eligible for the pending-liveness advisory. All five are
- * covered: discovery (base/micro) lanes stall just as silently as validation
- * (council/reviewer/critic) lanes, and the evidence run behind this issue lost
- * whole base waves (issue #2280, second comment). Non-pr-review lanes are never
- * probed.
+ * The pending-liveness advisory applies to EVERY long-pending async lane.
+ *
+ * It originally covered only the five `swarm-pr-review:*` modes (issue #2280),
+ * which left a plain `dispatch_lanes_async` lane with no liveness signal at all
+ * — the same silent-wedge exposure the pr-review modes were given the advisory
+ * to close. Issue #2349 widened it: a generic lane stalls exactly as silently,
+ * and the advisory is alert-only by construction (it never cancels, retries,
+ * replaces, or settles anything), so widening adds diagnosis without changing
+ * any lane's lifecycle. The probe stays bounded — at most one host
+ * session-status call per collection, none below the threshold, none beyond the
+ * caller's remaining budget.
  */
-const PR_WORKFLOW_PENDING_LIVENESS_MODES: ReadonlySet<string> = new Set([
-	'swarm-pr-review:base',
-	'swarm-pr-review:micro',
-	'swarm-pr-review:council',
-	'swarm-pr-review:reviewer',
-	'swarm-pr-review:critic',
-]);
 
 /**
  * The session-status types that count as "provably still running".
@@ -1873,7 +1872,7 @@ async function probeAlivePrWorkflowLaneSessions(
 	return { alive };
 }
 
-/** One still-pending pr-review lane's host liveness reading (issue #2280 Part B). */
+/** One still-pending lane's host liveness reading (issue #2280 Part B). */
 export interface PrWorkflowPendingLaneLiveness {
 	laneId: string;
 	/**
@@ -1906,7 +1905,7 @@ export interface PrWorkflowPendingLaneLiveness {
 }
 
 /**
- * Bounded, fail-open liveness advisory for still-pending pr-review lanes
+ * Bounded, fail-open liveness advisory for still-pending async lanes
  * (issue #2280 Part B).
  *
  * ALERT-ONLY, by design: this reads host session status and reports it; it
@@ -1949,8 +1948,6 @@ export async function collectPrWorkflowPendingLaneLiveness(
 				(record.status === 'pending' ||
 					record.status === 'running' ||
 					record.status === 'ingesting') &&
-				record.mode !== undefined &&
-				PR_WORKFLOW_PENDING_LIVENESS_MODES.has(record.mode) &&
 				now - record.updatedAt > threshold,
 		);
 		if (pastThreshold.length === 0) return [];
@@ -8814,6 +8811,11 @@ export async function completePrWorkflow(
 }
 
 export const _test_exports = {
+	// Issue #2349: the terminal-error settle newly feeds this classifier with a
+	// populated `result.error`, so the correlated-failure signature it derives is
+	// now load-bearing for that path. Exposed so the convergence / no-false-trip /
+	// bucket-migration properties can be asserted directly instead of inferred.
+	classifyTerminalFailureSignature,
 	minimumConsolidatedLaneCover,
 	analyzePrReviewBatchRecordIntegrity,
 	MAX_COVER_UNIVERSE_BITS,

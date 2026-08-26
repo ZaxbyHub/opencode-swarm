@@ -306,7 +306,13 @@ describe('collectPrWorkflowPendingLaneLiveness (issue #2280 Part B)', () => {
 		]);
 	});
 
-	test('base and micro discovery lanes are covered; settled and non-pr-review lanes are not', async () => {
+	// Issue #2349 widened the advisory from the five `swarm-pr-review:*` modes to
+	// EVERY long-pending async lane: a generic lane wedges just as silently, and
+	// the advisory is alert-only so covering it changes no lane's lifecycle. This
+	// test previously asserted that a non-pr-review lane was excluded; that
+	// expectation is realigned here rather than left as drift. What must still
+	// hold — and is what this test now pins — is that SETTLED lanes are excluded.
+	test('every pending lane is covered regardless of mode; settled lanes are not', async () => {
 		installGateStatus({
 			'sub-base-1': { type: 'busy' },
 			'sub-micro-1': { type: 'idle' },
@@ -337,7 +343,11 @@ describe('collectPrWorkflowPendingLaneLiveness (issue #2280 Part B)', () => {
 		]);
 
 		expect(statusCalls).toBe(1);
-		expect(advisories).toHaveLength(2);
+		// base-1, micro-1 AND the generic coder-1 lane (issue #2349); stale-1 is
+		// settled and therefore still excluded.
+		expect(advisories).toHaveLength(3);
+		expect(advisories.some((entry) => entry.laneId === 'coder-1')).toBe(true);
+		expect(advisories.some((entry) => entry.laneId === 'stale-1')).toBe(false);
 		expect(advisories.find((entry) => entry.laneId === 'base-1')).toEqual({
 			laneId: 'base-1',
 			pendingMs: FIVE_MINUTES_MS,

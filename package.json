@@ -1,6 +1,6 @@
 {
 	"name": "opencode-swarm",
-	"version": "7.148.5",
+	"version": "7.149.0",
 	"description": "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -114,6 +114,7 @@
 		"check:pending-fragment": "bun run scripts/check-pending-fragment.ts",
 		"check:gate-portability": "bun run scripts/check-gate-portability.ts",
 		"check:bare-spawn": "bun run scripts/check-bare-executable-spawn.ts",
+		"check:error-channel-discard": "bun run scripts/check-error-channel-discard.ts",
 		"check:memory-recall": "bun run scripts/memory-recall-regression.ts"
 	},
 	"dependencies": {
