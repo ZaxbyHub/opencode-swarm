@@ -157,6 +157,14 @@ export function executeRulesSync(
 	const findings: SastFinding[] = [];
 	const normalizedLang = language.toLowerCase();
 	const rules = getRulesForLanguage(normalizedLang);
+	// Reuse one context object for the entire file. Language-specific validators
+	// may attach context-keyed, garbage-collectable analysis without reparsing the
+	// same content once per match.
+	const context: SastContext = {
+		filePath,
+		content,
+		language: normalizedLang,
+	};
 
 	for (const rule of rules) {
 		// Use pattern if available, otherwise skip (we can't run queries sync)
@@ -167,11 +175,6 @@ export function executeRulesSync(
 		for (const match of matches) {
 			// Apply optional validation
 			if (rule.validate) {
-				const context: SastContext = {
-					filePath,
-					content,
-					language: normalizedLang,
-				};
 				if (!rule.validate(match, context)) {
 					continue;
 				}
