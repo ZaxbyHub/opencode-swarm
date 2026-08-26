@@ -14,6 +14,7 @@ import * as path from 'node:path';
 import { _internals as coreEventsInternals } from '../../../src/events/core-events.js';
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
+import { eventLinesOf } from '../../helpers/event-lines.js';
 
 // -----------------------------------------------------------------------
 // Module-level mocks — MUST be before any import of the mocked module
@@ -223,15 +224,6 @@ describe('phase_complete adversarial locking + path tests', () => {
 		expect(fs.existsSync(path.join(tempDir, '.swarm', 'events.lock'))).toBe(
 			false,
 		);
-	// #2039: line 1 is the swarm-events-manifest header — newest EVENT line.
-	const newestEvent = (p2: string): Record<string, unknown> =>
-		JSON.parse(
-			fs
-				.readFileSync(p2, 'utf-8')
-				.trim()
-				.split('\n')
-				.find((l: string) => !l.includes('swarm-events-manifest'))!,
-		);
 	let tempDir: string;
 	let originalCwd: string;
 	let eventsPath: string;
@@ -370,9 +362,7 @@ describe('phase_complete adversarial locking + path tests', () => {
 			// Only the successful caller may publish a completion event.
 			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
 			// #2039: skip the swarm-events-manifest header line.
-			const phaseEvents = content
-				.split('\n')
-				.filter((l) => l && !l.includes('swarm-events-manifest'))
+			const phaseEvents = eventLinesOf(content)
 				.map((l) => JSON.parse(l))
 				.filter((e: Record<string, unknown>) => e.event === 'phase_complete');
 			expect(phaseEvents.length).toBe(1);

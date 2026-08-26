@@ -19,6 +19,7 @@ import {
 	type AdversarialPatternMatch,
 	handleDebuggingSpiral,
 } from '../../../src/hooks/adversarial-detector';
+import { newestEventLine } from '../../helpers/event-lines.js';
 
 // Mock the checkpoint module
 mock.module('../../../src/tools/checkpoint.js', () => ({
@@ -82,12 +83,7 @@ describe('handleDebuggingSpiral', () => {
 			const content = fs.readFileSync(eventsPath, 'utf-8');
 			// The bounded store carries a manifest header at line 1 (issue
 			// #2039); the event is the newest (last) non-manifest line.
-			const eventLine = content
-				.trim()
-				.split('\n')
-				.filter((l: string) => !l.includes('swarm-events-manifest'))
-				.pop() as string;
-			const event = JSON.parse(eventLine);
+			const event = JSON.parse(newestEventLine(content));
 
 			expect(event.event).toBe('debugging_spiral_detected');
 			expect(event.taskId).toBe('1.1');
@@ -397,12 +393,7 @@ describe('handleDebuggingSpiral', () => {
 			const content = fs.readFileSync(eventsPath, 'utf-8');
 			// The bounded store carries a manifest header at line 1 (issue
 			// #2039); the event is the newest (last) non-manifest line.
-			const eventLine = content
-				.trim()
-				.split('\n')
-				.filter((l: string) => !l.includes('swarm-events-manifest'))
-				.pop() as string;
-			const event = JSON.parse(eventLine);
+			const event = JSON.parse(newestEventLine(content));
 			expect(event.event).toBe('debugging_spiral_detected');
 			expect(event.taskId).toBe('5.7');
 

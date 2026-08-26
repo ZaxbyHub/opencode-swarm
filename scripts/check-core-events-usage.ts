@@ -18,6 +18,11 @@
  *   archive-reader — reads ARCHIVED copies (immutable validated cuts)
  *   prompt-doc     — prompt/help/output TEXT mentioning the stream (no I/O)
  *
+ * Limitation (PR review PRR-029): this is a LITERAL-mention ratchet. Source
+ * that constructs the path at runtime ('events' + '.jsonl', fromCharCode,
+ * computed member access) is invisible to it — bypassing requires deliberate
+ * intent and survives code review; the allowlist edit is the visible control.
+ *
  * Escape hatch: CORE_EVENTS_USAGE_ENFORCE=0|false|no|off soft-warns (same
  * convention as TEST_CAP_ENFORCE / FRAGMENT_CHECK_ENFORCE).
  *

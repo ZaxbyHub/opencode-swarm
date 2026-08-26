@@ -196,7 +196,7 @@ decision is *missing today* (they are untouched, never deleted-and-needed).
 
 ## The registry
 
-### Category 1 — Core telemetry and event streams (5 rows)
+### Category 1 — Core telemetry and event streams (6 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|

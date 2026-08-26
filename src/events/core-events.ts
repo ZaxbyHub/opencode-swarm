@@ -568,7 +568,7 @@ function authorityIndexAtomicReplace(
 			}
 		}
 		_internals.writeFileSync(tmpPath, `${JSON.stringify(index)}\n`, 'utf-8');
-		_internals.renameSync(tmpPath, finalPath);
+		renameSyncWithRetry(tmpPath, finalPath);
 	} catch {
 		try {
 			if (_internals.existsSync(tmpPath)) {
@@ -621,7 +621,7 @@ function atomicReplace(directory: string, content: string): void {
 		if (_internals.readFileSync(tmpPath, 'utf-8') !== content) {
 			throw new Error('tmp verify mismatch');
 		}
-		_internals.renameSync(tmpPath, finalPath);
+		renameSyncWithRetry(tmpPath, finalPath);
 	} catch {
 		try {
 			if (_internals.existsSync(tmpPath)) {
@@ -643,14 +643,49 @@ const LOCK_RETRY_DELAY_MS = 5;
 const LOCK_STALE_MS = 5 * 60_000;
 
 /** Bounded synchronous sleep (works on Node/Bun main threads, unlike the
- *  browser restriction). Used only between lock-retry attempts. */
+ *  browser restriction). On the theoretical runtime where Atomics.wait is
+ *  unavailable, falls back to a bounded busy-wait — the atomic-write.ts:648
+ *  precedent (PR review PRR-006). */
 const sleepScratch = new Int32Array(new SharedArrayBuffer(4));
 function syncSleep(ms: number): void {
 	try {
 		Atomics.wait(sleepScratch, 0, 0, ms);
 	} catch {
-		/* fall back to returning immediately — the retry bound still holds */
+		const start = _internals.now();
+		while (_internals.now() - start < ms) {
+			/* bounded busy-wait fallback */
+		}
 	}
+}
+
+// Windows AV scanners transiently hold new files, making the tmp→final rename
+// fail with EPERM/EBUSY/EACCES (and EEXIST for clobbered tmp names). Mirrors
+// src/utils/atomic-write.ts RENAME_RETRY_DELAYS_MS/RETRYABLE_RENAME_CODES —
+// PR review PRR-003: the raw renameSync here predates noticing that precedent.
+const RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 200] as const;
+const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES', 'EEXIST']);
+
+/** Rename with the bounded retryable-delay loop (atomic-write precedent). */
+function renameSyncWithRetry(fromPath: string, toPath: string): void {
+	let lastError: unknown;
+	for (
+		let attempt = 0;
+		attempt <= RENAME_RETRY_DELAYS_MS.length;
+		attempt += 1
+	) {
+		try {
+			_internals.renameSync(fromPath, toPath);
+			return;
+		} catch (err) {
+			lastError = err;
+			const code = (err as NodeJS.ErrnoException)?.code;
+			if (!code || !RETRYABLE_RENAME_CODES.has(code)) throw err;
+			if (attempt < RENAME_RETRY_DELAYS_MS.length) {
+				syncSleep(RENAME_RETRY_DELAYS_MS[attempt]);
+			}
+		}
+	}
+	throw lastError;
 }
 
 /** Internal: one lock acquisition attempt (wx create + stale-break). */
@@ -864,11 +899,16 @@ export function readCoreEvents(directory: string): CoreEventReadResult {
 		text = lines.slice(1).join('\n');
 	}
 	const eventLineCount = text.split('\n').filter((l) => l.trim() !== '').length;
-	return {
-		text,
-		truncated,
-		coverage: coverageFor(true, eventLineCount, truncated),
-	};
+	// A manifest-present store with an empty retained window (everything
+	// folded) is a REAL store with history, not an absent one — report
+	// 'complete' rather than 'empty' (PR review PRR-009).
+	const coverage: CoreEventCoverage =
+		start === 1
+			? truncated
+				? 'truncated'
+				: 'complete'
+			: coverageFor(true, eventLineCount, truncated);
+	return { text, truncated, coverage };
 }
 
 /** Coverage disclosure without reading the window body. */
@@ -1042,11 +1082,6 @@ export function appendCoreEventsSync(
 	options?: { dedupeOnAuthorityKey?: boolean; ensureSwarmDir?: boolean },
 ): void {
 	if (events.length === 0) return;
-	if (options?.ensureSwarmDir === false) {
-		if (!_internals.existsSync(path.join(directory, '.swarm'))) {
-			throw new Error(CORE_EVENT_NO_STORE);
-		}
-	}
 	const lines = events.map((event) => `${JSON.stringify(event)}\n`);
 	for (const line of lines) {
 		if (Buffer.byteLength(line) - 1 > _internals.limits.maxLineBytes) {
@@ -1061,6 +1096,9 @@ export function appendCoreEventsSync(
 	// present the append fails (and the producer swallows) instead of
 	// creating state under a directory the plugin was never initialized
 	// in — the containment property the steering traversal tests pin.
+	// This is the SOLE guard (PRR-012): it sits pre-lock so the typed throw
+	// fires before any lock churn; the historical in-lock duplicate was the
+	// one removed.
 	if (options?.ensureSwarmDir === false) {
 		if (!_internals.existsSync(swarmDir)) {
 			throw new Error(CORE_EVENT_NO_STORE);
@@ -1267,6 +1305,7 @@ function foldPass(
 	directory: string,
 	trigger: 'compaction' | 'close',
 	forceFull: boolean,
+	preloadedAuthorityState?: AuthorityIndexState,
 ): void {
 	const filePath = eventsFilePath(directory);
 	if (!_internals.existsSync(filePath)) return;
@@ -1392,18 +1431,22 @@ function foldPass(
 		outLines.length > 1 ? `${outLines.join('\n')}\n` : `${outLines[0]}\n`,
 	);
 
-	emitHealth(directory, {
-		trigger,
-		accepted: folded.totalEvents + finalRetained.length,
-		compacted: toFold.size - dropped,
-		retained: finalRetained.length,
-		dropped,
-		corrupt: folded.corrupt,
-		oldest: folded.oldestTimestamp,
-		newest: folded.newestTimestamp,
-		bytes: fileSizeOrZero(filePath),
-		limitBytes: _internals.limits.activeMaxBytes,
-	});
+	emitHealth(
+		directory,
+		{
+			trigger,
+			accepted: folded.totalEvents + finalRetained.length,
+			compacted: toFold.size - dropped,
+			retained: finalRetained.length,
+			dropped,
+			corrupt: folded.corrupt,
+			oldest: folded.oldestTimestamp,
+			newest: folded.newestTimestamp,
+			bytes: fileSizeOrZero(filePath),
+			limitBytes: _internals.limits.activeMaxBytes,
+		},
+		preloadedAuthorityState,
+	);
 }
 
 /** External compaction trigger (diagnose maintenance). Fail-open. */
@@ -1430,9 +1473,16 @@ function runMaintenance(directory: string): void {
 			_internals.limits.headerMaxBytes +
 			2048;
 		withCoreEventStoreLock(directory, () => {
+			// Health emission reloads the authority index unless preloaded —
+			// load once per maintenance invocation, not per pass (PRR-014).
+			// NOTE: the snapshot predates this invocation's fold-time index
+			// merges, so authority_index_count under-reports keys folded by
+			// passes 2..N of this drain (advisory telemetry; disclosed in the
+			// event contract doc).
+			const authorityState = loadAuthorityIndex(directory);
 			// First pass is unconditional: it enforces the ENTRY/AGE budgets
 			// (which a size check cannot see) and folds the bounded slice.
-			foldPass(directory, 'compaction', false);
+			foldPass(directory, 'compaction', false, authorityState);
 			// Converge a size overshoot with additional bounded passes.
 			let prevSize = Number.POSITIVE_INFINITY;
 			for (let pass = 0; pass < 64; pass += 1) {
@@ -1440,7 +1490,7 @@ function runMaintenance(directory: string): void {
 				if (size <= drainThreshold) break;
 				if (size >= prevSize) break; // no progress — next tick resumes
 				prevSize = size;
-				foldPass(directory, 'compaction', false);
+				foldPass(directory, 'compaction', false, authorityState);
 			}
 			return true;
 		});
@@ -1461,6 +1511,8 @@ export function finalizeCoreEventsForClose(directory: string): void {
 		const filePath = eventsFilePath(directory);
 		if (!_internals.existsSync(filePath)) return;
 		withCoreEventStoreLock(directory, () => {
+			// Same PRR-014 snapshot semantics as runMaintenance (see note there).
+			const authorityState = loadAuthorityIndex(directory);
 			let prev = Number.POSITIVE_INFINITY;
 			for (let pass = 0; pass < 10_000; pass += 1) {
 				const view = readStoreFull(directory);
@@ -1468,9 +1520,9 @@ export function finalizeCoreEventsForClose(directory: string): void {
 				if (view.lines.length === 0) break;
 				if (view.lines.length >= prev) break; // no progress — bail
 				prev = view.lines.length;
-				foldPass(directory, 'close', false);
+				foldPass(directory, 'close', false, authorityState);
 			}
-			foldPass(directory, 'close', true);
+			foldPass(directory, 'close', true, authorityState);
 			return true;
 		});
 	} catch {
@@ -1496,10 +1548,14 @@ function emitCoreEventsHealth(
 		bytes: number;
 		limitBytes: number;
 	},
+	preloadedAuthorityState?: AuthorityIndexState,
 ): void {
 	let authorityCount = 0;
 	let authorityEvicted = 0;
-	const state = loadAuthorityIndex(directory);
+	// Callers that run many fold passes under one maintenance invocation pass
+	// the state in (loaded once) — a per-emission reload cost O(index size)
+	// up to 64 times per drain (PR review PRR-014).
+	const state = preloadedAuthorityState ?? loadAuthorityIndex(directory);
 	if (state.kind === 'ok') {
 		authorityCount = Object.keys(state.index.entries).length;
 		authorityEvicted = state.index.evicted;
@@ -1538,6 +1594,7 @@ function emitHealth(
 		bytes: number;
 		limitBytes: number;
 	},
+	preloadedAuthorityState?: AuthorityIndexState,
 ): void {
-	_internals.emitHealth(directory, payload);
+	_internals.emitHealth(directory, payload, preloadedAuthorityState);
 }

@@ -13,6 +13,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
+import { newestEventLine } from '../../helpers/event-lines.js';
 import { withFrozenClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
@@ -235,13 +236,7 @@ describe('phase_complete adversarial locking + path tests', () => {
 		);
 	// #2039: line 1 is the swarm-events-manifest header — newest EVENT line.
 	const newestEvent = (p2: string): Record<string, unknown> =>
-		JSON.parse(
-			fs
-				.readFileSync(p2, 'utf-8')
-				.trim()
-				.split('\n')
-				.find((l: string) => !l.includes('swarm-events-manifest'))!,
-		);
+		JSON.parse(newestEventLine(fs.readFileSync(p2, 'utf-8')));
 	let tempDir: string;
 	let originalCwd: string;
 	let eventsPath: string;

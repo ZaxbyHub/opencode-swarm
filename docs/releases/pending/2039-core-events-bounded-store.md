@@ -50,7 +50,10 @@ evictions, and byte figures on every compaction and close cut.
 
 Legacy `.swarm` directories need no manual migration: header-less files read
 bounded (newest window), authority lookups fall back to the window scan, and
-the first maintenance pass migrates the file incrementally under the lock.
+the first maintenance pass migrates the file incrementally under the lock. One downgrade nuance: a
+pre-#2039 plugin reading a v1 store counts the manifest header as one extra
+valid event in `/swarm diagnose` (display-only; every other legacy reader
+skips the header harmlessly).
 
 One small behavior change to know about: `/swarm diagnose` reports the
 retained-window view with explicit coverage wording ("retained window —

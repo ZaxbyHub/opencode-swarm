@@ -7,16 +7,7 @@
  * - Valid UUID v4 entry_id → passes through (update existing path)
  */
 
-import {
-	afterEach,
-	beforeEach,
-	describe,
-	expect,
-	type Mock,
-	mock,
-	test,
-	vi,
-} from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';

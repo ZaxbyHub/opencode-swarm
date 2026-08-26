@@ -12,14 +12,11 @@ import {
 	createSteeringConsumedHook,
 	recordSteeringConsumed,
 } from '../../../src/hooks/steering-consumed.js';
+import { eventLinesOf } from '../../helpers/event-lines.js';
 
 /** #2039: line 1 is the swarm-events-manifest header — count EVENT lines only. */
 function readEventLines(filePath: string): string[] {
-	return fs
-		.readFileSync(filePath, 'utf-8')
-		.trim()
-		.split('\n')
-		.filter((l) => !l.includes('swarm-events-manifest'));
+	return eventLinesOf(fs.readFileSync(filePath, 'utf-8'));
 }
 
 describe('recordSteeringConsumed', () => {

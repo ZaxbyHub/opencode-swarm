@@ -620,7 +620,20 @@ redaction by omission). This is the health signal for the issue-#2039 bounded
 core event store; `authority_evicted_count` discloses the only reachable
 absent-after-compaction case for the authoritative partition lookups (FIFO
 eviction past the index cap — a single benign duplicate audit line, never a
-changed gate verdict).
+changed gate verdict). `authority_index_count` reflects the index state at
+the START of a maintenance invocation — a multi-pass drain under-reports
+keys folded by its own later passes; the next invocation's emission is
+current.
+
+**Schema-version bump checklist:** when a future version bumps
+`swarm-events-manifest` (v2) or `events-authority-index` (v2), a v1 reader
+treats the new manifest line as an ordinary event line (folded into the
+window) and treats the new index as corrupt (authority queries fail closed
+with `CORE_EVENT_AUTHORITY_INDEX_UNREADABLE`). Both are safe-by-design for a
+staged rollout, but the bump must follow the AGENTS.md invariant-12 cache
+migration discipline (announce, then roll), and the v1 fold of a v2 manifest
+line is lossy for the window — do not stage a v2 writer against v1 readers
+for longer than the cache-refresh window.
 
 ---
 

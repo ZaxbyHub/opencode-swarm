@@ -6,9 +6,9 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
+import { newestEventLine } from '../../helpers/event-lines.js';
 import { freezeClock } from '../../helpers/test-clock';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -204,13 +204,7 @@ function writeRetroBundle(directory: string, phaseNumber: number): void {
 
 // #2039: line 1 is the swarm-events-manifest header — newest EVENT line.
 const newestEvent = (p: string): Record<string, unknown> =>
-	JSON.parse(
-		fs
-			.readFileSync(p, 'utf-8')
-			.trim()
-			.split('\n')
-			.find((l: string) => !l.includes('swarm-events-manifest'))!,
-	);
+	JSON.parse(newestEventLine(fs.readFileSync(p, 'utf-8')));
 
 describe('phase_complete adversarial trailing groups', () => {
 	let tempDir: string;
