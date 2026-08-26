@@ -118,4 +118,71 @@ describe('terminal-error settle vs. host-reported retryability (issue #2349 FB-0
 		},
 		TEST_TIMEOUT_MS,
 	);
+
+	// Stage B review gap: the FB-004 gate is `relyingOnCompletedAtOnly &&
+	// hostSaysRetryable`, where `relyingOnCompletedAtOnly` is false whenever
+	// readiness IS affirmatively 'idle'. That means an affirmative-idle
+	// settle must fire regardless of hostRetryable — the host has directly
+	// told us nothing is running, so there is no live-retry risk left for
+	// hostRetryable to protect against. This was true by construction but
+	// untested; per this repo's contract an untested branch counts as
+	// unwired code.
+	test(
+		'an affirmative-idle settle fires even when the host also says isRetryable: true',
+		async () => {
+			await recordLaneFixture(directory);
+			installLaneHost({
+				statusType: 'idle',
+				messages: [
+					assistantMessage({
+						completed: 10_000,
+						error: {
+							name: 'APIError',
+							data: {
+								message: 'overloaded',
+								statusCode: 529,
+								isRetryable: true,
+							},
+						},
+					}),
+				],
+			});
+
+			const result = await collectLaneFixture(directory);
+
+			expect(laneStatusOnDisk(directory, LANE_CORRELATION_ID)).toBe('error');
+			expect(result.failed).toBe(1);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	// Stage B review gap: `hostSaysRetryable` is forced false whenever
+	// `kind === 'aborted'`, so an abort must settle even under the exact
+	// readiness-unreadable condition that blocks a provider error. Aborts
+	// carry no `isRetryable` semantics — the abort itself is the unambiguous
+	// terminal signal — so this branch is not (and should not be) gated by
+	// FB-004 at all.
+	test(
+		'an abort settles under readiness-unreadable conditions, unaffected by the FB-004 gate',
+		async () => {
+			await recordLaneFixture(directory);
+			installLaneHost({
+				statusType: null,
+				messages: [
+					assistantMessage({
+						completed: 10_000,
+						error: { name: 'MessageAbortedError', data: {} },
+					}),
+				],
+			});
+
+			const result = await collectLaneFixture(directory);
+
+			expect(laneStatusOnDisk(directory, LANE_CORRELATION_ID)).toBe(
+				'cancelled',
+			);
+			expect(result.cancelled).toBe(1);
+		},
+		TEST_TIMEOUT_MS,
+	);
 });

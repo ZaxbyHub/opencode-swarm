@@ -113,4 +113,25 @@ describe('tool failure classification', () => {
 		expect(display).not.toMatch(/[\x00-\x1f\x7f]/);
 		expect(display).toContain('real message');
 	});
+
+	// Stage B review: a naive fix (strip control chars LAST, or strip them by
+	// REPLACING with a space rather than removing) leaves this bypassable —
+	// a control byte embedded inside a keyword breaks the `\b(keyword)\b`
+	// redaction regex's word boundary, so redaction silently no-ops and the
+	// secret survives. Control chars must be REMOVED (not space-replaced)
+	// BEFORE redaction runs, so the keyword rejoins and redaction matches.
+	it('redacts a secret even when a control byte is embedded inside the keyword or the value', () => {
+		const keywordSplit =
+			invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
+				'author\x1bization=Bearer top-secret-abc123',
+			);
+		expect(keywordSplit).not.toContain('top-secret-abc123');
+		expect(keywordSplit).toContain('authorization=<redacted>');
+
+		const valueSplit =
+			invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
+				'authorization=Bearer top\x1bsecret-abc123',
+			);
+		expect(valueSplit).not.toContain('secret-abc123');
+	});
 });

@@ -111,7 +111,28 @@ function redactUrl(match: string): string {
 }
 
 export function sanitizeFailureEvidenceDisplay(value: string): string {
-	const redacted = value
+	// PR #2363 review (Stage B): control chars must be REMOVED (not
+	// replaced with a space) BEFORE redaction runs, or redaction can be
+	// bypassed entirely. The redaction regexes match on `\b(keyword)\b` word
+	// boundaries — a control byte embedded inside a keyword (e.g.
+	// "author\x1bization=Bearer <secret>") breaks that boundary. Reordering
+	// alone is NOT sufficient: replacing the control byte with a SPACE still
+	// leaves two separate words ("author ization"), so the redaction regex
+	// still fails to match and the secret still leaks — verified empirically
+	// while implementing this fix. Removing the byte outright rejoins the
+	// keyword ("authorization"), which the redaction regex then matches
+	// normally. This applies whether the control byte sits inside the
+	// keyword or inside the secret VALUE itself — both were confirmed
+	// leaking under space-replacement and both are closed by removal.
+	//
+	// This also fixes the ESC/C0-in-terminal-output risk this strip was
+	// originally added for (issue #2349 follow-up): an unstripped ESC
+	// sequence in provider-controlled error text could otherwise spoof
+	// terminal output or consume a caller's length budget before the
+	// meaningful text.
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: intentionally matching control chars to strip them
+	const controlStripped = value.replace(/[\x00-\x1f\x7f]+/g, '');
+	const redacted = controlStripped
 		.replace(/\bhttps?:\/\/[^\s'"<>]+/gi, (match) => redactUrl(match))
 		.replace(
 			/\b((?:api[_-]?key|bearer|token|secret|password|authorization))\b\s*[:=]\s*(?:Bearer\s+)?[^\s,;]+/gi,
@@ -120,16 +141,7 @@ export function sanitizeFailureEvidenceDisplay(value: string): string {
 		.replace(
 			/\b([A-Z][A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH)[A-Z0-9_]*)=([^\s]+)/g,
 			(_, key: string) => `${key}=<redacted>`,
-		)
-		// PR #2363 review: this display string is rendered to terminals/logs
-		// (e.g. laneTerminalErrorReason in dispatch-lanes.ts) without further
-		// escaping downstream. An unstripped ESC/C0 sequence in provider-
-		// controlled error text could spoof terminal output or consume the
-		// caller's length budget before the meaningful text. Collapse C0
-		// controls (incl. ESC \x1b) and DEL to a single space, matching the
-		// existing stripControlChars convention in src/commands/doctor.ts.
-		// biome-ignore lint/suspicious/noControlCharactersInRegex: intentionally matching control chars to strip them
-		.replace(/[\x00-\x1f\x7f]+/g, ' ');
+		);
 	return boundedUtf8(redacted.trim());
 }
 
