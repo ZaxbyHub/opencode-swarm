@@ -23,6 +23,7 @@ import {
 	prWorkflowSessionFileStem,
 	readPrWorkflowGateState,
 	resolvePrReviewWriterRunId,
+	rollbackPrReviewPartialBaseCoverageAdmission,
 } from '../hooks/pr-workflow-gate.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { createSwarmTool } from './create-tool.js';
@@ -325,6 +326,43 @@ export async function executeWritePrReviewArtifact(
 			existingBoundaryIds.size < requestedFindingIds.size &&
 			[...existingBoundaryIds].every((id) => requestedFindingIds.has(id));
 		const isCommittedReplay = isExactReplay && boundaryCommitted;
+		let partialAdmissionToRollback:
+			| {
+					runId: string;
+					boundary: 'post_explorer' | 'post_reviewer' | 'post_critic';
+					relativePath: string;
+					digest: string;
+			  }
+			| undefined;
+		const rollbackPartialAdmission = async (): Promise<string | undefined> => {
+			if (!partialAdmissionToRollback) return undefined;
+			try {
+				const rolledBack = await rollbackPrReviewPartialBaseCoverageAdmission(
+					directory,
+					sessionID,
+					partialAdmissionToRollback,
+				);
+				return rolledBack
+					? undefined
+					: 'partial base coverage admission could not be safely rolled back because durable state changed';
+			} catch (error) {
+				return `partial base coverage admission rollback failed: ${error instanceof Error ? error.message : String(error)}`;
+			}
+		};
+		const withPartialAdmissionRollback = async (
+			result: string,
+		): Promise<string> => {
+			const rollbackError = await rollbackPartialAdmission();
+			if (!rollbackError) return result;
+			try {
+				const decoded = JSON.parse(result) as { message?: unknown };
+				return typeof decoded.message === 'string'
+					? failure(`${decoded.message}; ${rollbackError}`)
+					: result;
+			} catch {
+				return result;
+			}
+		};
 		// An exact replay is idempotent and may skip the boundary revalidation,
 		// but a non-identical write must always re-run it.  In particular, the
 		// base-only post_explorer checkpoint is intentionally superseded by the
@@ -394,6 +432,11 @@ export async function executeWritePrReviewArtifact(
 		if (!isCommittedReplay) {
 			try {
 				if (findingsInput.partial_base_coverage) {
+					const hadPartialAdmission = Boolean(
+						state.prReviewPartialBaseCoverage ||
+							state.prReviewCoverageDisclosurePath ||
+							state.prReviewCoverageDisclosureDigest,
+					);
 					// Validate every boundary predicate except exact-six before the
 					// admission mutates durable state. The normal call below then proves
 					// the newly committed disclosure closes that sole coverage gap.
@@ -411,6 +454,19 @@ export async function executeWritePrReviewArtifact(
 						resolvedRunId,
 						findingsInput.partial_base_coverage.missing_dimension,
 					);
+					if (
+						!hadPartialAdmission &&
+						state.prReviewPartialBaseCoverage &&
+						state.prReviewCoverageDisclosurePath &&
+						state.prReviewCoverageDisclosureDigest
+					) {
+						partialAdmissionToRollback = {
+							runId: state.prReviewPartialBaseCoverage.runId,
+							boundary: findingsInput.boundary,
+							relativePath: state.prReviewCoverageDisclosurePath,
+							digest: state.prReviewCoverageDisclosureDigest,
+						};
+					}
 				}
 				if (findingsInput.partial_base_coverage) {
 					await assertPrReviewArtifactBoundary(
@@ -451,22 +507,26 @@ export async function executeWritePrReviewArtifact(
 				(allRecords.length > 0 ? '\n' : '');
 			const serializedBytes = Buffer.byteLength(serializedFindings, 'utf8');
 			if (serializedBytes > PR_REVIEW_FINDINGS_MAX_BYTES) {
-				return failure(
-					formatPrReviewRuntimeFieldError(
-						'records',
-						`a complete findings artifact at most ${PR_REVIEW_FINDINGS_MAX_BYTES} UTF-8 bytes`,
-						`${serializedBytes} bytes`,
+				return withPartialAdmissionRollback(
+					failure(
+						formatPrReviewRuntimeFieldError(
+							'records',
+							`a complete findings artifact at most ${PR_REVIEW_FINDINGS_MAX_BYTES} UTF-8 bytes`,
+							`${serializedBytes} bytes`,
+						),
 					),
 				);
 			}
 			try {
 				await _internals.atomicWrite(findingsPath, serializedFindings);
 			} catch (error) {
-				return operationFailure(
-					'write',
-					relativeFindingsPath.split(path.sep).join('/'),
-					'an atomic findings checkpoint write',
-					error,
+				return withPartialAdmissionRollback(
+					operationFailure(
+						'write',
+						relativeFindingsPath.split(path.sep).join('/'),
+						'an atomic findings checkpoint write',
+						error,
+					),
 				);
 			}
 		}
@@ -488,11 +548,13 @@ export async function executeWritePrReviewArtifact(
 					handoffRequired,
 				);
 			} catch (error) {
-				return operationFailure(
-					'update',
-					`pr-workflow-gates/${prWorkflowSessionFileStem(sessionID)}.json`,
-					`a durable ${findingsInput.boundary} boundary receipt`,
-					error,
+				return withPartialAdmissionRollback(
+					operationFailure(
+						'update',
+						`pr-workflow-gates/${prWorkflowSessionFileStem(sessionID)}.json`,
+						`a durable ${findingsInput.boundary} boundary receipt`,
+						error,
+					),
 				);
 			}
 		}

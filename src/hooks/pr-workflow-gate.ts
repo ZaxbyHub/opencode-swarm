@@ -5173,6 +5173,17 @@ export async function admitPrReviewPartialBaseCoverage(
 				'BLOCKED: partial base coverage disclosure exceeds its write bound',
 			);
 		}
+		let disclosureWasMissing = false;
+		const removeNewDisclosure = async (): Promise<void> => {
+			if (!disclosureWasMissing) return;
+			try {
+				if ((await fsp.readFile(absolutePath, 'utf8')) === raw) {
+					await fsp.rm(absolutePath, { force: true });
+				}
+			} catch {
+				// Preserve the original admission error; cleanup is best effort.
+			}
+		};
 		try {
 			const persisted = readFileSync(absolutePath, 'utf8');
 			if (persisted !== raw) {
@@ -5182,19 +5193,81 @@ export async function admitPrReviewPartialBaseCoverage(
 			}
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-				await writeAtomicJson(directory, absolutePath, record);
+				disclosureWasMissing = true;
+				try {
+					await writeAtomicJson(directory, absolutePath, record);
+				} catch (writeError) {
+					await removeNewDisclosure();
+					throw writeError;
+				}
 			} else {
 				throw error;
 			}
 		}
 		const digest = createHash('sha256').update(raw, 'utf8').digest('hex');
-		return writeStateWhileLocked(directory, {
+		try {
+			return await writeStateWhileLocked(directory, {
+				...state,
+				updatedAt: isoNow(),
+				prReviewPartialBaseCoverage: record,
+				prReviewCoverageDisclosurePath: relativePath,
+				prReviewCoverageDisclosureDigest: digest,
+			});
+		} catch (error) {
+			await removeNewDisclosure();
+			throw error;
+		}
+	});
+}
+
+/**
+ * Undo a newly admitted partial-base disclosure when the findings checkpoint
+ * cannot be completed. The compare-and-clear checks keep a stale writer from
+ * deleting a disclosure that another writer has already committed.
+ */
+export async function rollbackPrReviewPartialBaseCoverageAdmission(
+	directory: string,
+	sessionID: string,
+	options: {
+		runId: string;
+		boundary: 'post_explorer' | 'post_reviewer' | 'post_critic';
+		relativePath: string;
+		digest: string;
+	},
+): Promise<boolean> {
+	return withSessionStateMutation(directory, sessionID.trim(), async () => {
+		const state = await readPrWorkflowGateStateFromDisk(
+			directory,
+			sessionID.trim(),
+		);
+		const record = state?.prReviewPartialBaseCoverage;
+		if (!state || !record || record.runId !== options.runId) return false;
+		if ((state.prReviewArtifactBoundaries ?? []).includes(options.boundary)) {
+			return false;
+		}
+		if (
+			state.prReviewCoverageDisclosurePath !== options.relativePath ||
+			state.prReviewCoverageDisclosureDigest !== options.digest
+		) {
+			return false;
+		}
+		const absolutePath = validateSwarmPath(directory, options.relativePath);
+		try {
+			const raw = await fsp.readFile(absolutePath, 'utf8');
+			const digest = createHash('sha256').update(raw, 'utf8').digest('hex');
+			if (digest !== options.digest) return false;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+		}
+		await fsp.rm(absolutePath, { force: true });
+		await writeStateWhileLocked(directory, {
 			...state,
 			updatedAt: isoNow(),
-			prReviewPartialBaseCoverage: record,
-			prReviewCoverageDisclosurePath: relativePath,
-			prReviewCoverageDisclosureDigest: digest,
+			prReviewPartialBaseCoverage: undefined,
+			prReviewCoverageDisclosurePath: undefined,
+			prReviewCoverageDisclosureDigest: undefined,
 		});
+		return true;
 	});
 }
 

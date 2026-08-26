@@ -10,7 +10,10 @@ import {
 	readPrWorkflowGateState,
 	rollbackPrReviewBaseAdmissionIfUnlaunched,
 } from '../../../src/hooks/pr-workflow-gate.js';
-import { executeWritePrReviewArtifact } from '../../../src/tools/write-pr-review-artifact.js';
+import {
+	_internals as artifactInternals,
+	executeWritePrReviewArtifact,
+} from '../../../src/tools/write-pr-review-artifact.js';
 import {
 	PR_ARTIFACT_HEAD_SHA,
 	PR_ARTIFACT_REVISION_DIGEST,
@@ -32,6 +35,8 @@ const originalResolveIsWorkingTreeClean =
 	_test_exports.resolveIsWorkingTreeClean;
 const originalResolveIsWorkingTreeCleanAsync =
 	_test_exports.resolveIsWorkingTreeCleanAsync;
+const originalBeforeAtomicRename = _test_exports.beforeAtomicRename;
+const originalAtomicWrite = artifactInternals.atomicWrite;
 
 beforeEach(() => {
 	directory = canonicalMkdtemp('pr-artifact-partial-base-adversarial-');
@@ -46,6 +51,8 @@ beforeEach(() => {
 	});
 	_test_exports.resolveIsWorkingTreeClean = () => true;
 	_test_exports.resolveIsWorkingTreeCleanAsync = async () => true;
+	_test_exports.beforeAtomicRename = originalBeforeAtomicRename;
+	artifactInternals.atomicWrite = originalAtomicWrite;
 });
 
 afterEach(async () => {
@@ -58,6 +65,8 @@ afterEach(async () => {
 	_test_exports.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
 	_test_exports.resolveIsWorkingTreeCleanAsync =
 		originalResolveIsWorkingTreeCleanAsync;
+	_test_exports.beforeAtomicRename = originalBeforeAtomicRename;
+	artifactInternals.atomicWrite = originalAtomicWrite;
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -323,5 +332,86 @@ describe('write_pr_review_artifact partial base coverage adversarial cases (#235
 		);
 		expect(result.success).toBe(false);
 		expect(result.message).toContain('path already contains different content');
+	});
+
+	test('rolls back a new admission when the findings checkpoint fails', async () => {
+		const { missingDimension, records } = await establishFivePlusOne();
+		artifactInternals.atomicWrite = async () => {
+			throw new Error('injected findings disk failure');
+		};
+		const result = JSON.parse(
+			await executeWritePrReviewArtifact(
+				{
+					kind: 'findings',
+					run_id: 'write-rollback-run',
+					pr_head_sha: PR_ARTIFACT_HEAD_SHA,
+					boundary: 'post_explorer',
+					records,
+					partial_base_coverage: { missing_dimension: missingDimension },
+				},
+				directory,
+				{ sessionID: PR_ARTIFACT_SESSION_ID },
+			),
+		) as { success: boolean; message: string };
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('injected findings disk failure');
+		const state = await readPrWorkflowGateState(
+			directory,
+			PR_ARTIFACT_SESSION_ID,
+		);
+		expect(state?.prReviewPartialBaseCoverage).toBeUndefined();
+		expect(state?.prReviewCoverageDisclosurePath).toBeUndefined();
+		await expect(
+			fs.stat(
+				path.join(
+					directory,
+					'.swarm',
+					'pr-review',
+					'write-rollback-run',
+					'coverage-disclosure.json',
+				),
+			),
+		).rejects.toThrow();
+	});
+
+	test('cleans up the disclosure when durable admission state cannot be written', async () => {
+		const { missingDimension, records } = await establishFivePlusOne();
+		let renameCalls = 0;
+		_test_exports.beforeAtomicRename = async () => {
+			renameCalls += 1;
+			if (renameCalls === 2) throw new Error('injected gate state failure');
+		};
+		const result = JSON.parse(
+			await executeWritePrReviewArtifact(
+				{
+					kind: 'findings',
+					run_id: 'admission-rollback-run',
+					pr_head_sha: PR_ARTIFACT_HEAD_SHA,
+					boundary: 'post_explorer',
+					records,
+					partial_base_coverage: { missing_dimension: missingDimension },
+				},
+				directory,
+				{ sessionID: PR_ARTIFACT_SESSION_ID },
+			),
+		) as { success: boolean; message: string };
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('injected gate state failure');
+		const state = await readPrWorkflowGateState(
+			directory,
+			PR_ARTIFACT_SESSION_ID,
+		);
+		expect(state?.prReviewPartialBaseCoverage).toBeUndefined();
+		await expect(
+			fs.stat(
+				path.join(
+					directory,
+					'.swarm',
+					'pr-review',
+					'admission-rollback-run',
+					'coverage-disclosure.json',
+				),
+			),
+		).rejects.toThrow();
 	});
 });
