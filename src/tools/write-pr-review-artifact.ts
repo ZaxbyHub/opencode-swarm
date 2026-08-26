@@ -163,6 +163,7 @@ async function atomicCreate(
 export const _internals = {
 	atomicWrite,
 	atomicCreate,
+	assertBoundary: assertPrReviewArtifactBoundary,
 };
 
 function operationFailure(
@@ -375,7 +376,7 @@ export async function executeWritePrReviewArtifact(
 				// checking the record projection. A caller writing too early must be
 				// told which checkpoint or inventory is missing, not that its records
 				// cannot yet match verdicts that are not authoritative at this point.
-				await assertPrReviewArtifactBoundary(
+				await _internals.assertBoundary(
 					directory,
 					sessionID,
 					resolvedRunId,
@@ -386,15 +387,17 @@ export async function executeWritePrReviewArtifact(
 						: undefined,
 				);
 			} catch (error) {
-				return failure(
-					formatPrReviewRuntimeFieldError(
-						findingsInput.partial_base_coverage
-							? 'partial_base_coverage'
-							: 'boundary',
-						findingsInput.partial_base_coverage
-							? 'exactly five successful base dimensions plus one named typed terminal failure after every other boundary predicate passes'
-							: `the legal next "${findingsInput.boundary}" checkpoint for run "${resolvedRunId}" with exact inventory [${findingIds.join(', ')}]`,
-						error instanceof Error ? error.message : String(error),
+				return withPartialAdmissionRollback(
+					failure(
+						formatPrReviewRuntimeFieldError(
+							findingsInput.partial_base_coverage
+								? 'partial_base_coverage'
+								: 'boundary',
+							findingsInput.partial_base_coverage
+								? 'exactly five successful base dimensions plus one named typed terminal failure after every other boundary predicate passes'
+								: `the legal next "${findingsInput.boundary}" checkpoint for run "${resolvedRunId}" with exact inventory [${findingIds.join(', ')}]`,
+							error instanceof Error ? error.message : String(error),
+						),
 					),
 				);
 			}
@@ -440,7 +443,7 @@ export async function executeWritePrReviewArtifact(
 					// Validate every boundary predicate except exact-six before the
 					// admission mutates durable state. The normal call below then proves
 					// the newly committed disclosure closes that sole coverage gap.
-					await assertPrReviewArtifactBoundary(
+					await _internals.assertBoundary(
 						directory,
 						sessionID,
 						resolvedRunId,
@@ -469,7 +472,7 @@ export async function executeWritePrReviewArtifact(
 					}
 				}
 				if (findingsInput.partial_base_coverage) {
-					await assertPrReviewArtifactBoundary(
+					await _internals.assertBoundary(
 						directory,
 						sessionID,
 						resolvedRunId,
@@ -478,15 +481,17 @@ export async function executeWritePrReviewArtifact(
 					);
 				}
 			} catch (error) {
-				return failure(
-					formatPrReviewRuntimeFieldError(
-						findingsInput.partial_base_coverage
-							? 'partial_base_coverage'
-							: 'boundary',
-						findingsInput.partial_base_coverage
-							? 'exactly five successful base dimensions plus one named typed terminal failure after every other boundary predicate passes'
-							: `the legal next "${findingsInput.boundary}" checkpoint for run "${resolvedRunId}" with exact inventory [${findingIds.join(', ')}]`,
-						error instanceof Error ? error.message : String(error),
+				return withPartialAdmissionRollback(
+					failure(
+						formatPrReviewRuntimeFieldError(
+							findingsInput.partial_base_coverage
+								? 'partial_base_coverage'
+								: 'boundary',
+							findingsInput.partial_base_coverage
+								? 'exactly five successful base dimensions plus one named typed terminal failure after every other boundary predicate passes'
+								: `the legal next "${findingsInput.boundary}" checkpoint for run "${resolvedRunId}" with exact inventory [${findingIds.join(', ')}]`,
+							error instanceof Error ? error.message : String(error),
+						),
 					),
 				);
 			}

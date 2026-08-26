@@ -37,6 +37,7 @@ const originalResolveIsWorkingTreeCleanAsync =
 	_test_exports.resolveIsWorkingTreeCleanAsync;
 const originalBeforeAtomicRename = _test_exports.beforeAtomicRename;
 const originalAtomicWrite = artifactInternals.atomicWrite;
+const originalAssertBoundary = artifactInternals.assertBoundary;
 
 beforeEach(() => {
 	directory = canonicalMkdtemp('pr-artifact-partial-base-adversarial-');
@@ -53,6 +54,7 @@ beforeEach(() => {
 	_test_exports.resolveIsWorkingTreeCleanAsync = async () => true;
 	_test_exports.beforeAtomicRename = originalBeforeAtomicRename;
 	artifactInternals.atomicWrite = originalAtomicWrite;
+	artifactInternals.assertBoundary = originalAssertBoundary;
 });
 
 afterEach(async () => {
@@ -67,6 +69,7 @@ afterEach(async () => {
 		originalResolveIsWorkingTreeCleanAsync;
 	_test_exports.beforeAtomicRename = originalBeforeAtomicRename;
 	artifactInternals.atomicWrite = originalAtomicWrite;
+	artifactInternals.assertBoundary = originalAssertBoundary;
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -409,6 +412,52 @@ describe('write_pr_review_artifact partial base coverage adversarial cases (#235
 					'.swarm',
 					'pr-review',
 					'admission-rollback-run',
+					'coverage-disclosure.json',
+				),
+			),
+		).rejects.toThrow();
+	});
+
+	test('rolls back when post-admission boundary revalidation fails', async () => {
+		const { missingDimension, records } = await establishFivePlusOne();
+		let boundaryCalls = 0;
+		artifactInternals.assertBoundary = async (...args) => {
+			boundaryCalls += 1;
+			if (boundaryCalls === 2) {
+				throw new Error('injected post-admission boundary failure');
+			}
+			return originalAssertBoundary(...args);
+		};
+		const result = JSON.parse(
+			await executeWritePrReviewArtifact(
+				{
+					kind: 'findings',
+					run_id: 'boundary-rollback-run',
+					pr_head_sha: PR_ARTIFACT_HEAD_SHA,
+					boundary: 'post_explorer',
+					records,
+					partial_base_coverage: { missing_dimension: missingDimension },
+				},
+				directory,
+				{ sessionID: PR_ARTIFACT_SESSION_ID },
+			),
+		) as { success: boolean; message: string };
+		expect(result.success).toBe(false);
+		expect(result.message).toContain(
+			'injected post-admission boundary failure',
+		);
+		const state = await readPrWorkflowGateState(
+			directory,
+			PR_ARTIFACT_SESSION_ID,
+		);
+		expect(state?.prReviewPartialBaseCoverage).toBeUndefined();
+		await expect(
+			fs.stat(
+				path.join(
+					directory,
+					'.swarm',
+					'pr-review',
+					'boundary-rollback-run',
 					'coverage-disclosure.json',
 				),
 			),
