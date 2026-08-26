@@ -8388,6 +8388,11 @@ export async function completePrWorkflow(
 }
 
 export const _test_exports = {
+	// Issue #2349: the terminal-error settle newly feeds this classifier with a
+	// populated `result.error`, so the correlated-failure signature it derives is
+	// now load-bearing for that path. Exposed so the convergence / no-false-trip /
+	// bucket-migration properties can be asserted directly instead of inferred.
+	classifyTerminalFailureSignature,
 	minimumConsolidatedLaneCover,
 	analyzePrReviewBatchRecordIntegrity,
 	MAX_COVER_UNIVERSE_BITS,
