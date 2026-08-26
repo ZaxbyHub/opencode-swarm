@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.149.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.148.5...v7.149.0) (2026-08-26)
+
+
+### Features
+
+* **events:** bound .swarm/events.jsonl store with authoritative audit index ([824b458](https://github.com/ZaxbyHub/opencode-swarm/commit/824b4585ef124ee53b5918056fecf672b644b6b2))
+
+
+### Bug Fixes
+
+* **events:** close PR-review findings on the core event store (PRR batch) ([6359c43](https://github.com/ZaxbyHub/opencode-swarm/commit/6359c43b87d316c6c5285e38365fe37a0a2890a5))
+
 ## [7.148.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.148.4...v7.148.5) (2026-08-26)
 
 
