@@ -40,11 +40,17 @@ export function recordSteeringConsumed(
 	directiveId: string,
 ): void {
 	try {
-		appendCoreEventSync(directory, {
-			type: 'steering-consumed',
-			directiveId,
-			timestamp: new Date().toISOString(),
-		});
+		// ensureSwarmDir:false preserves the pre-#2039 append-only contract
+		// (no state creation under directories the plugin never initialized).
+		appendCoreEventSync(
+			directory,
+			{
+				type: 'steering-consumed',
+				directiveId,
+				timestamp: new Date().toISOString(),
+			},
+			{ ensureSwarmDir: false },
+		);
 	} catch {
 		// Silently swallow errors - non-fatal operation
 	}
@@ -107,6 +113,7 @@ export function createSteeringConsumedHook(
 						directiveId,
 						timestamp: new Date().toISOString(),
 					})),
+					{ ensureSwarmDir: false },
 				);
 			}
 		} catch {

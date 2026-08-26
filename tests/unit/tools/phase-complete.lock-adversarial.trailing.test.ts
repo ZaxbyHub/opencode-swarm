@@ -202,6 +202,16 @@ function writeRetroBundle(directory: string, phaseNumber: number): void {
 	);
 }
 
+// #2039: line 1 is the swarm-events-manifest header — newest EVENT line.
+const newestEvent = (p: string): Record<string, unknown> =>
+	JSON.parse(
+		fs
+			.readFileSync(p, 'utf-8')
+			.trim()
+			.split('\n')
+			.find((l: string) => !l.includes('swarm-events-manifest'))!,
+	);
+
 describe('phase_complete adversarial trailing groups', () => {
 	let tempDir: string;
 	let originalCwd: string;
@@ -292,8 +302,7 @@ describe('phase_complete adversarial trailing groups', () => {
 			expect(afterPrefix.length).toBe(500);
 			expect(afterPrefix).toBe('A'.repeat(500));
 
-			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
-			const event = JSON.parse(content);
+			const event = newestEvent(eventsPath);
 			expect(event.event).toBe('phase_complete');
 			expect(event.summary).toBe('A'.repeat(500));
 			expect(event.summary.length).toBe(500);
@@ -310,8 +319,7 @@ describe('phase_complete adversarial trailing groups', () => {
 
 			expect(parsed.success).toBe(true);
 
-			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
-			const event = JSON.parse(content);
+			const event = newestEvent(eventsPath);
 			expect(event.summary).toBe('X'.repeat(500));
 			expect(event.summary.length).toBe(500);
 		});
@@ -327,8 +335,7 @@ describe('phase_complete adversarial trailing groups', () => {
 
 			expect(parsed.success).toBe(true);
 
-			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
-			const event = JSON.parse(content);
+			const event = newestEvent(eventsPath);
 			expect(event.summary).toBe(exactSummary);
 			expect(event.summary.length).toBe(500);
 		});
@@ -360,8 +367,7 @@ describe('phase_complete adversarial trailing groups', () => {
 
 			expect(parsed.success).toBe(true);
 
-			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
-			const event = JSON.parse(content);
+			const event = newestEvent(eventsPath);
 			expect(event.summary).toBe('');
 		});
 
@@ -378,8 +384,7 @@ describe('phase_complete adversarial trailing groups', () => {
 
 			expect(parsed.success).toBe(true);
 
-			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
-			const event = JSON.parse(content);
+			const event = newestEvent(eventsPath);
 			expect(event.summary).toBeNull();
 		});
 	});

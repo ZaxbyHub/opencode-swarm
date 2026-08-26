@@ -83,15 +83,13 @@ describe('recordSteeringConsumed', () => {
 		);
 	});
 
-	it('should not throw on missing .swarm directory', () => {
-		// #2039: durable-recording contract moved to
-		// tests/unit/events/steering-consumed-store-contract.test.ts (FR-006).
+	it('should NOT throw on missing .swarm directory (silently swallows)', () => {
+		// #2039: the seam's ensureSwarmDir:false preserves this append-only
+		// containment contract exactly (no state under uninitialized dirs).
 		const noSwarmDir = fs.mkdtempSync(path.join(os.tmpdir(), 'no-swarm-'));
-		try {
-			expect(() => recordSteeringConsumed(noSwarmDir, 'dir-456')).not.toThrow();
-		} finally {
-			fs.rmSync(noSwarmDir, { recursive: true, force: true });
-		}
+		expect(() => recordSteeringConsumed(noSwarmDir, 'dir-456')).not.toThrow();
+		expect(fs.existsSync(path.join(noSwarmDir, '.swarm'))).toBe(false);
+		fs.rmSync(noSwarmDir, { recursive: true, force: true });
 	});
 
 	it('should NOT throw on permission errors (silently swallows)', () => {

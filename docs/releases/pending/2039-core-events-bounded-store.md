@@ -52,9 +52,6 @@ Legacy `.swarm` directories need no manual migration: header-less files read
 bounded (newest window), authority lookups fall back to the window scan, and
 the first maintenance pass migrates the file incrementally under the lock.
 
-Two small behavior changes to know about: `recordSteeringConsumed` now
-**durably records** the consumption event (creating `.swarm/` if absent)
-where it previously dropped the record silently on a missing directory, and
-`/swarm diagnose` reports the retained-window view with explicit coverage
-wording ("retained window — compacted history excluded") when history has
-been compacted.
+One small behavior change to know about: `/swarm diagnose` reports the
+retained-window view with explicit coverage wording ("retained window —
+compacted history excluded") when history has been compacted.

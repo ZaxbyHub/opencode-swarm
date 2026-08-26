@@ -1,4 +1,9 @@
 /**
+ * #2039 split (FR-006): the events-store write-failure scenarios moved
+ * out of phase-complete.lock-adversarial.test.ts so that over-cap file
+ * does not grow. Scaffolding mirrors the parent suite.
+ */
+/**
  * Adversarial locking + path traversal tests for phase_complete tool.
  * Targets: lock contention, working_directory path traversal, events.jsonl write failures,
  * extreme phase/summary boundary values.
@@ -8,8 +13,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
+import { withFrozenClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
+
+/** Deterministic fixture timestamp (test-clock lint, issue #1782). */
+const FIXED_TS = withFrozenClock(() => new Date().toISOString());
+
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { _internals as coreEventsInternals } from '../../../src/events/core-events.js';
 import { resetSwarmState, swarmState } from '../../../src/state';
@@ -187,13 +197,13 @@ function writeRetroBundle(directory: string, phaseNumber: number): void {
 		JSON.stringify({
 			schema_version: '1.0.0',
 			task_id: `retro-${phaseNumber}`,
-			created_at: new Date().toISOString(),
-			updated_at: new Date().toISOString(),
+			created_at: FIXED_TS,
+			updated_at: FIXED_TS,
 			entries: [
 				{
 					task_id: `retro-${phaseNumber}`,
 					type: 'retrospective',
-					timestamp: new Date().toISOString(),
+					timestamp: FIXED_TS,
 					agent: 'architect',
 					verdict: 'pass',
 					summary: 'Phase retrospective',
@@ -238,9 +248,7 @@ describe('phase_complete adversarial locking + path tests', () => {
 	let parentDir: string;
 
 	beforeEach(() => {
-		tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'phase-adversarial-')),
-		);
+		tempDir = canonicalMkdtemp('phase-adversarial-');
 		parentDir = path.dirname(tempDir);
 		originalCwd = process.cwd();
 		process.chdir(tempDir);
@@ -296,15 +304,11 @@ describe('phase_complete adversarial locking + path tests', () => {
 		resetSwarmState();
 	});
 
-	// =======================================================================
-	// CONCURRENT LOCK CONTENTION
-	// =======================================================================
-	describe('Real lock contention', () => {
-		test('second caller gets acquired=false and returns failure (plan.json contention)', async () => {
-			// First call acquires lock
-			const release1 = vi.fn().mockResolvedValue(undefined);
-			const release2 = vi.fn().mockResolvedValue(undefined);
-			const planLockCalls: string[] = [];
+	describe('events.jsonl write failures', () => {
+		test('write to a directory (not a file) adds warning but returns success', async () => {
+			// Lock succeeds but events.jsonl is a directory → write throws
+			const release = vi.fn().mockResolvedValue(undefined);
+			const planRelease = vi.fn().mockResolvedValue(undefined);
 			mockTryAcquireLock.mockImplementation(
 				(_dir: string, filePath: string) => {
 					if (filePath === 'events.jsonl') {
@@ -313,74 +317,31 @@ describe('phase_complete adversarial locking + path tests', () => {
 							lock: {
 								filePath: 'events.jsonl',
 								agent: 'phase-complete',
-								taskId: 'phase-complete-events',
-								timestamp: new Date().toISOString(),
+								taskId: 'phase-complete-test',
+								timestamp: FIXED_TS,
 								expiresAt: Date.now() + 300000,
-								_release: release2,
+								_release: release,
 							},
 						};
 					}
-					// plan.json: first caller gets lock, second gets contention
-					if (planLockCalls.length === 0) {
-						planLockCalls.push('first');
-						return {
-							acquired: true,
-							lock: {
-								filePath: 'plan.json',
-								agent: 'phase-complete',
-								taskId: 'phase-complete-plan-first',
-								timestamp: new Date().toISOString(),
-								expiresAt: Date.now() + 300000,
-								_release: release1,
-							},
-						};
-					}
-					// Second plan.json caller: contention
-					return { acquired: false };
+					// plan.json also acquired
+					return {
+						acquired: true,
+						lock: {
+							filePath: 'plan.json',
+							agent: 'phase-complete',
+							taskId: 'phase-complete-plan-test',
+							timestamp: FIXED_TS,
+							expiresAt: Date.now() + 300000,
+							_release: planRelease,
+						},
+					};
 				},
 			);
 
-			// Fire two calls nearly simultaneously
-			const [r1, r2] = await Promise.all([
-				executePhaseComplete({ phase: 1, sessionID: 'test-session' }, tempDir),
-				executePhaseComplete({ phase: 1, sessionID: 'test-session' }, tempDir),
-			]);
-
-			const p1 = JSON.parse(r1);
-			const p2 = JSON.parse(r2);
-
-			// One call should succeed, the other should fail (order non-deterministic)
-			const successes = [p1, p2].filter((p) => p.success);
-			const failures = [p1, p2].filter((p) => !p.success);
-			expect(successes.length).toBe(1);
-			expect(failures.length).toBe(1);
-
-			const failed = failures[0];
-			expect(failed.status).toBe('incomplete');
-			expect(failed.reason).toBe('PHASE_COMMIT_LOCKED');
-			expect(failed.message).toContain('Plan write is locked by another agent');
-			expect(failed.recovery).toEqual({
-				kind: 'retry',
-				action: 'phase_complete',
-			});
-			expect(failed.errors.length).toBeGreaterThan(0);
-			expect(failed.errors[0]).toContain('Concurrent plan write detected');
-			expect(failed.recovery_guidance).toBeDefined();
-
-			// Only the successful caller may publish a completion event.
-			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
-			// #2039: skip the swarm-events-manifest header line.
-			const phaseEvents = content
-				.split('\n')
-				.filter((l) => l && !l.includes('swarm-events-manifest'))
-				.map((l) => JSON.parse(l))
-				.filter((e: Record<string, unknown>) => e.event === 'phase_complete');
-			expect(phaseEvents.length).toBe(1);
-		});
-
-		test('lock throw causes phase_complete to return failure', async () => {
-			// Simulate filesystem error on lock acquisition
-			mockTryAcquireLock.mockRejectedValue(new Error('Cannot create lock dir'));
+			// Replace file with directory
+			fs.rmSync(eventsPath);
+			fs.mkdirSync(eventsPath);
 
 			const result = await executePhaseComplete(
 				{ phase: 1, sessionID: 'test-session' },
@@ -388,168 +349,119 @@ describe('phase_complete adversarial locking + path tests', () => {
 			);
 			const parsed = JSON.parse(result);
 
-			// Must return failure with clear error, not throw
-			expect(parsed.success).toBe(false);
-			expect(parsed.status).toBe('incomplete');
-			expect(parsed.reason).toBe('PHASE_COMMIT_LOCK_ERROR');
-			expect(parsed.message).toContain(
-				'Failed to acquire the guarded phase commit lock',
-			);
-			expect(parsed.message).toContain('Cannot create lock dir');
-			expect(parsed.errors.length).toBeGreaterThan(0);
-			expect(parsed.errors[0]).toContain('Cannot create lock dir');
-			expect(parsed.recovery_guidance).toBeDefined();
-
-			// Fail closed: a lock error cannot publish a completion event.
-			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
-			expect(content).toBe('');
-		});
-	});
-
-	// =======================================================================
-	// EVENTS.JSONL WRITE FAILURES
-	// =======================================================================
-	describe('working_directory path traversal via executePhaseComplete', () => {
-		test('path traversal via .. segments — no crash, fails at retro gate', async () => {
-			// path.join preserves .., normalize resolves it to parent dirs.
-			// realpathSync resolves to real existing dirs on filesystem.
-			// The actual outcome is execution reaching RETROSPECTIVE_MISSING (retro
-			// bundle not found at resolved parent dir) — not a crash.
-			const traversalPath = path.join(path.basename(tempDir), '..', '..', '..');
-
-			const result = await executePhaseComplete(
-				{ phase: 1, sessionID: 'test-session' },
-				traversalPath,
-			);
-			const parsed = JSON.parse(result);
-
-			expect(parsed.success).toBe(false);
-			expect(['blocked', 'incomplete']).toContain(parsed.status);
+			// Phase must still report success (write failure → warning, not error)
+			expect(parsed.success).toBe(true);
 			expect(
-				parsed.gate_report.entries.some((entry: { outcome: string }) =>
-					['block', 'error'].includes(entry.outcome),
+				parsed.warnings.some((w: string) =>
+					w.includes('failed to write phase complete event'),
 				),
 			).toBe(true);
+			// #2039: the seam's store lock is released via unlink-in-finally.
+			storeLockGone();
 		});
 
-		test('deeply nested ../ traversal — no crash', async () => {
-			// Multiple .. segments
-			const deepTraversal = 'a/../b/../c/../d/../e/../f';
+		test('read-only filesystem: appendFileSync throws EPERM, warning is added', async () => {
+			const release = vi.fn().mockResolvedValue(undefined);
+			mockTryAcquireLock.mockResolvedValue({
+				acquired: true,
+				lock: {
+					filePath: 'events.jsonl',
+					agent: 'phase-complete',
+					taskId: 'phase-complete-test',
+					timestamp: FIXED_TS,
+					expiresAt: Date.now() + 300000,
+					_release: release,
+				},
+			});
 
-			const result = await executePhaseComplete(
-				{ phase: 1, sessionID: 'test-session' },
-				deepTraversal,
-			);
-			const parsed = JSON.parse(result);
-
-			// Does not crash
-			expect(parsed.success).toBe(false);
-		});
-
-		test('symlink traversal — resolves to real path via realpathSync', async () => {
-			// Create a symlink inside tempDir pointing to parent
-			const linkName = path.join(tempDir, 'link-to-parent');
+			// Mock the seam's append to throw EPERM once — chmod is unreliable as
+			// root in CI, and the store captured fs.appendFileSync at module
+			// init, so the seam's _internals is the interception point (#2039).
+			const realAppend = coreEventsInternals.appendFileSync;
+			(
+				coreEventsInternals as {
+					appendFileSync: typeof fs.appendFileSync;
+				}
+			).appendFileSync = (() => {
+				const err = Object.assign(new Error('EPERM: operation not permitted'), {
+					code: 'EPERM',
+				});
+				throw err;
+			}) as typeof fs.appendFileSync;
 			try {
-				fs.symlinkSync(parentDir, linkName);
-			} catch {
-				// symlinks may require admin on Windows.
-				return;
-			}
+				const result = await executePhaseComplete(
+					{ phase: 1, sessionID: 'test-session' },
+					tempDir,
+				);
+				const parsed = JSON.parse(result);
 
-			// Symlink resolves via realpathSync — execution proceeds to retro gate
+				// Must not throw
+				expect(parsed.success).toBe(true);
+				// Write failure warning must be present
+				expect(
+					parsed.warnings.some((w: string) =>
+						w.includes('failed to write phase complete event'),
+					),
+				).toBe(true);
+			} finally {
+				(
+					coreEventsInternals as {
+						appendFileSync: typeof fs.appendFileSync;
+					}
+				).appendFileSync = realAppend;
+			}
+		});
+
+		test('events.jsonl missing (deleted after lock acquired) — appendFileSync creates it', async () => {
+			const release = vi.fn().mockResolvedValue(undefined);
+			mockTryAcquireLock.mockResolvedValue({
+				acquired: true,
+				lock: {
+					filePath: 'events.jsonl',
+					agent: 'phase-complete',
+					taskId: 'phase-complete-test',
+					timestamp: FIXED_TS,
+					expiresAt: Date.now() + 300000,
+					_release: release,
+				},
+			});
+
+			// Delete events.jsonl after lock acquired but before write
+			// (simulate race between lock acquisition and write)
+			mockTryAcquireLock.mockResolvedValueOnce({
+				acquired: true,
+				lock: {
+					filePath: 'events.jsonl',
+					agent: 'phase-complete',
+					taskId: 'phase-complete-test',
+					timestamp: FIXED_TS,
+					expiresAt: Date.now() + 300000,
+					_release: release,
+				},
+			});
+
+			// Delete file
+			fs.rmSync(eventsPath);
+
 			const result = await executePhaseComplete(
 				{ phase: 1, sessionID: 'test-session' },
-				linkName,
+				tempDir,
 			);
 			const parsed = JSON.parse(result);
 
-			// Does not crash — fails gracefully at retro gate
-			expect(parsed.success).toBe(false);
+			// appendFileSync creates missing files — should succeed
+			expect(parsed.success).toBe(true);
+			const event = newestEvent(eventsPath);
+			expect(event.event).toBe('phase_complete');
 		});
 	});
 
 	// =======================================================================
-	// EXTREME PHASE NUMBER BOUNDARIES
+	// WORKING_DIRECTORY PATH TRAVERSAL
+	// resolveWorkingDirectory is called at runtime by createSwarmTool's execute callback.
+	// executePhaseComplete is tested directly, bypassing the createSwarmTool wrapper,
+	// so we test the ACTUAL behavior (no mock intercept possible for direct calls).
+	// Key insight: realpathSync resolves traversal paths to real dirs, so the
+	// traversal check passes, and execution reaches the RETROSPECTIVE_MISSING gate.
 	// =======================================================================
-	describe('Extreme phase number boundaries', () => {
-		test('phase = Number.MIN_SAFE_INTEGER is rejected', async () => {
-			const result = await executePhaseComplete(
-				{ phase: Number.MIN_SAFE_INTEGER, sessionID: 'test-session' },
-				tempDir,
-			);
-			const parsed = JSON.parse(result);
-
-			expect(parsed.success).toBe(false);
-			expect(parsed.message).toBe('Invalid phase number');
-		});
-
-		test('phase = Number.MIN_VALUE is rejected', async () => {
-			const result = await executePhaseComplete(
-				{ phase: Number.MIN_VALUE, sessionID: 'test-session' },
-				tempDir,
-			);
-			const parsed = JSON.parse(result);
-
-			// MIN_VALUE is still a positive number > 1, but tiny.
-			// Number.isInteger(MIN_VALUE) = false → Invalid phase number
-			expect(parsed.success).toBe(false);
-			expect(parsed.message).toBe('Invalid phase number');
-		});
-
-		test('phase = -Infinity is rejected', async () => {
-			const result = await executePhaseComplete(
-				{ phase: -Infinity, sessionID: 'test-session' },
-				tempDir,
-			);
-			const parsed = JSON.parse(result);
-
-			expect(parsed.success).toBe(false);
-			expect(parsed.message).toBe('Invalid phase number');
-		});
-
-		test('phase = Infinity is rejected', async () => {
-			const result = await executePhaseComplete(
-				{ phase: Infinity, sessionID: 'test-session' },
-				tempDir,
-			);
-			const parsed = JSON.parse(result);
-
-			expect(parsed.success).toBe(false);
-			expect(parsed.message).toBe('Invalid phase number');
-		});
-
-		test('phase = Number.NaN is rejected', async () => {
-			const result = await executePhaseComplete(
-				{ phase: Number.NaN, sessionID: 'test-session' },
-				tempDir,
-			);
-			const parsed = JSON.parse(result);
-
-			expect(parsed.success).toBe(false);
-			expect(parsed.message).toBe('Invalid phase number');
-		});
-
-		test('phase = 0.999 (near-zero float) is rejected', async () => {
-			const result = await executePhaseComplete(
-				{ phase: 0.999, sessionID: 'test-session' },
-				tempDir,
-			);
-			const parsed = JSON.parse(result);
-
-			// 0.999 is not an integer → Invalid phase number
-			expect(parsed.success).toBe(false);
-			expect(parsed.message).toBe('Invalid phase number');
-		});
-
-		test('phase = 1.0000000001 (near-one float) — not integer, rejected', async () => {
-			const result = await executePhaseComplete(
-				{ phase: 1.0000000001, sessionID: 'test-session' },
-				tempDir,
-			);
-			const parsed = JSON.parse(result);
-
-			expect(parsed.success).toBe(false);
-			expect(parsed.message).toBe('Invalid phase number');
-		});
-	});
 });

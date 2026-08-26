@@ -84,6 +84,9 @@ function lastWindowEvent(dir: string): Record<string, unknown> {
 describe('recordSteeringConsumed serialized shape', () => {
 	test('appends exactly {type, directiveId, timestamp} in that key order', () => {
 		const dir = makeProjectDir();
+		// recordSteeringConsumed is append-only (ensureSwarmDir:false) — the
+		// store directory must already exist, as in an initialized project.
+		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		recordSteeringConsumed(dir, 'sd-shape-1');
 		const event = lastWindowEvent(dir);
 		expect(Object.keys(event)).toEqual(['type', 'directiveId', 'timestamp']);

@@ -943,10 +943,12 @@ export const CORE_EVENT_LINE_TOO_LARGE = 'CORE_EVENT_LINE_TOO_LARGE';
  * serialize error for oversized lines — every producer's existing error
  * handling applies unchanged.
  */
+export const CORE_EVENT_NO_STORE = 'CORE_EVENT_NO_STORE';
+
 export function appendCoreEventSync(
 	directory: string,
 	event: Record<string, unknown>,
-	options?: { dedupeOnAuthorityKey?: boolean },
+	options?: { dedupeOnAuthorityKey?: boolean; ensureSwarmDir?: boolean },
 ): void {
 	const line = `${JSON.stringify(event)}\n`;
 	const lineBytes = Buffer.byteLength(line);
@@ -956,7 +958,18 @@ export function appendCoreEventSync(
 	const filePath = eventsFilePath(directory);
 	const swarmDir = path.join(directory, '.swarm');
 
-	_internals.mkdirSync(swarmDir, { recursive: true });
+	// ensureSwarmDir:false restores the pre-#2039 append-only contract for
+	// producers whose old writers created no directories: with no `.swarm`
+	// present the append fails (and the producer swallows) instead of
+	// creating state under a directory the plugin was never initialized
+	// in — the containment property the steering traversal tests pin.
+	if (options?.ensureSwarmDir === false) {
+		if (!_internals.existsSync(swarmDir)) {
+			throw new Error(CORE_EVENT_NO_STORE);
+		}
+	} else {
+		_internals.mkdirSync(swarmDir, { recursive: true });
+	}
 	const authorityKey = authorityKeyFor(event);
 	const wrote = withCoreEventStoreLock(directory, () => {
 		if (authorityKey && options?.dedupeOnAuthorityKey) {
@@ -1026,9 +1039,14 @@ function authorityKeyPresent(
 export function appendCoreEventsSync(
 	directory: string,
 	events: readonly Record<string, unknown>[],
-	options?: { dedupeOnAuthorityKey?: boolean },
+	options?: { dedupeOnAuthorityKey?: boolean; ensureSwarmDir?: boolean },
 ): void {
 	if (events.length === 0) return;
+	if (options?.ensureSwarmDir === false) {
+		if (!_internals.existsSync(path.join(directory, '.swarm'))) {
+			throw new Error(CORE_EVENT_NO_STORE);
+		}
+	}
 	const lines = events.map((event) => `${JSON.stringify(event)}\n`);
 	for (const line of lines) {
 		if (Buffer.byteLength(line) - 1 > _internals.limits.maxLineBytes) {
@@ -1038,7 +1056,18 @@ export function appendCoreEventsSync(
 	const filePath = eventsFilePath(directory);
 	const swarmDir = path.join(directory, '.swarm');
 
-	_internals.mkdirSync(swarmDir, { recursive: true });
+	// ensureSwarmDir:false restores the pre-#2039 append-only contract for
+	// producers whose old writers created no directories: with no `.swarm`
+	// present the append fails (and the producer swallows) instead of
+	// creating state under a directory the plugin was never initialized
+	// in — the containment property the steering traversal tests pin.
+	if (options?.ensureSwarmDir === false) {
+		if (!_internals.existsSync(swarmDir)) {
+			throw new Error(CORE_EVENT_NO_STORE);
+		}
+	} else {
+		_internals.mkdirSync(swarmDir, { recursive: true });
+	}
 	const wrote = withCoreEventStoreLock(directory, () => {
 		let appended = 0;
 		// Framing is checked once before the first append; under the store
