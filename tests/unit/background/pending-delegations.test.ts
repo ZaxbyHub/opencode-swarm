@@ -448,6 +448,7 @@ describe('pending-delegations store', () => {
 				chars: 15,
 				truncated: false,
 				digest: 'd'.repeat(64),
+				workflowLaneFailureClass: 'contract',
 				salvagedWorkflowLanes: ['correctness-state'],
 				salvagedWorkflowLaneRecoveries: [
 					{
@@ -464,6 +465,7 @@ describe('pending-delegations store', () => {
 		expect(record?.result?.salvagedWorkflowLanes).toEqual([
 			'correctness-state',
 		]);
+		expect(record?.result?.workflowLaneFailureClass).toBe('contract');
 		expect(record?.result?.salvagedWorkflowLaneRecoveries).toEqual([
 			{
 				workflowLane: 'correctness-state',

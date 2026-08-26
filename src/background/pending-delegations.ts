@@ -340,6 +340,11 @@ export interface BackgroundDelegationWorkflowLaneRecovery {
 	reason: string;
 }
 
+export type BackgroundDelegationWorkflowLaneFailureClass =
+	| 'contract'
+	| 'resource'
+	| 'deadline';
+
 export interface BackgroundDelegationResult {
 	text?: string;
 	error?: string;
@@ -352,6 +357,11 @@ export interface BackgroundDelegationResult {
 	outputArtifactError?: string;
 	transcriptIncomplete?: boolean;
 	messageCount?: number;
+	/**
+	 * Durable failure provenance for a lane-atomic PR-workflow terminalization.
+	 * Optional because successful lanes and legacy terminal results have none.
+	 */
+	workflowLaneFailureClass?: BackgroundDelegationWorkflowLaneFailureClass;
 	/**
 	 * Workflow lanes whose discovery artifact was accepted only after repair — a
 	 * synthesized canonical header, or valid rows retained beside malformed ones.
@@ -492,6 +502,9 @@ const ResultSchema = z
 		outputArtifactError: z.string().optional(),
 		transcriptIncomplete: z.boolean().optional(),
 		messageCount: z.number().optional(),
+		workflowLaneFailureClass: z
+			.enum(['contract', 'resource', 'deadline'])
+			.optional(),
 		// Must be declared here: this schema is .strict() and readDelegations
 		// safeParse-skips any record it rejects, so an undeclared field would make
 		// the entire terminal transition invisible to every reader — turning a
@@ -2595,6 +2608,7 @@ function sameRetainedResult(
 		left.outputArtifactError === right.outputArtifactError &&
 		left.transcriptIncomplete === right.transcriptIncomplete &&
 		left.messageCount === right.messageCount &&
+		left.workflowLaneFailureClass === right.workflowLaneFailureClass &&
 		sameJson(left.salvagedWorkflowLanes, right.salvagedWorkflowLanes) &&
 		sameJson(
 			left.salvagedWorkflowLaneRecoveries,

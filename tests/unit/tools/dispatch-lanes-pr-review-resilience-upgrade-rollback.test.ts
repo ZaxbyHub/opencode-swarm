@@ -314,4 +314,75 @@ describe('dispatch_lanes PR review resilience upgrade rollback', () => {
 			PR_REVIEW_BASE_DIMENSION_IDS[5],
 		]);
 	});
+
+	test('contract retry admission rolls back when launch fails without staged markers', async () => {
+		let created = 0;
+		dispatchInternals.getSessionOps = () => ({
+			create: mock(async () => ({ data: { id: `lane-session-${created++}` } })),
+			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			delete: mock(async () => undefined),
+		});
+
+		const sessionID = 'contract-retry-rollback';
+		const initial = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-review:base',
+				pr_head_sha: HEAD_SHA,
+				base_sha: BASE_SHA,
+				base_ref: 'origin/main',
+				max_concurrent: 6,
+				lanes: fullWave('contract-seed'),
+			},
+			directory,
+			{ sessionID },
+		);
+		expect(initial.success).toBe(true);
+		const initialRecords = findByBatchId(directory, String(initial.batch_id), {
+			parentSessionId: sessionID,
+		});
+		expect(initialRecords).toHaveLength(PR_REVIEW_BASE_DIMENSION_IDS.length);
+		for (const record of initialRecords) {
+			if (record.workflowLane === PR_REVIEW_BASE_DIMENSION_IDS[5]) {
+				await appendDelegationTransition(directory, record.correlationId, {
+					status: 'error',
+					result: {
+						...terminalErrorResult(`contract failure ${record.laneId}`),
+						workflowLaneFailureClass: 'contract',
+					},
+					expectedCurrentStatuses: ['pending', 'running'],
+				});
+				continue;
+			}
+			await appendSuccessfulBaseTransition(sessionID, record);
+		}
+
+		dispatchInternals.getSessionOps = () => ({
+			create: mock(async () => ({ error: 'upstream create unavailable' })),
+			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			delete: mock(async () => undefined),
+		});
+		const failed = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-review:base',
+				pr_head_sha: HEAD_SHA,
+				base_sha: BASE_SHA,
+				base_ref: 'origin/main',
+				pr_review_contract_retry: true,
+				max_concurrent: 1,
+				lanes: [
+					lane('contract-retry-unlaunched', PR_REVIEW_BASE_DIMENSION_IDS[5]!),
+				],
+			},
+			directory,
+			{ sessionID },
+		);
+		expect(failed.success).toBe(false);
+		const state = await readPrWorkflowGateState(directory, sessionID);
+		expect(state?.prReviewContractRetryDimensions).toBeUndefined();
+		expect(
+			findByBatchId(directory, String(failed.batch_id), {
+				parentSessionId: sessionID,
+			}),
+		).toHaveLength(0);
+	});
 });

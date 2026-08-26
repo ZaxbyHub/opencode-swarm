@@ -1,7 +1,8 @@
 /**
  * Adversarial locking + path traversal tests for phase_complete tool.
- * Targets: lock contention, working_directory path traversal, events.jsonl write failures,
- * extreme phase/summary boundary values.
+ * Targets: plan-lock contention, working_directory path traversal, and extreme
+ * phase/summary boundary values. Core event-store write failures are covered by
+ * phase-complete-store-write-failures.test.ts.
  *
  * These tests complement phase-complete.adversarial.test.ts (sessionID/summary injection)
  * and phase-complete.locking.test.ts (mocked lock behavior).
@@ -11,7 +12,6 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { _internals as coreEventsInternals } from '../../../src/events/core-events.js';
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 import { eventLinesOf } from '../../helpers/event-lines.js';
@@ -188,13 +188,13 @@ function writeRetroBundle(directory: string, phaseNumber: number): void {
 		JSON.stringify({
 			schema_version: '1.0.0',
 			task_id: `retro-${phaseNumber}`,
-			created_at: new Date().toISOString(),
-			updated_at: new Date().toISOString(),
+			created_at: '1970-01-01T00:00:00.000Z',
+			updated_at: '1970-01-01T00:00:00.000Z',
 			entries: [
 				{
 					task_id: `retro-${phaseNumber}`,
 					type: 'retrospective',
-					timestamp: new Date().toISOString(),
+					timestamp: '1970-01-01T00:00:00.000Z',
 					agent: 'architect',
 					verdict: 'pass',
 					summary: 'Phase retrospective',
@@ -293,26 +293,11 @@ describe('phase_complete adversarial locking + path tests', () => {
 	// =======================================================================
 	describe('Real lock contention', () => {
 		test('second caller gets acquired=false and returns failure (plan.json contention)', async () => {
-			// First call acquires lock
 			const release1 = vi.fn().mockResolvedValue(undefined);
-			const release2 = vi.fn().mockResolvedValue(undefined);
 			const planLockCalls: string[] = [];
 			mockTryAcquireLock.mockImplementation(
-				(_dir: string, filePath: string) => {
-					if (filePath === 'events.jsonl') {
-						return {
-							acquired: true,
-							lock: {
-								filePath: 'events.jsonl',
-								agent: 'phase-complete',
-								taskId: 'phase-complete-events',
-								timestamp: new Date().toISOString(),
-								expiresAt: Date.now() + 300000,
-								_release: release2,
-							},
-						};
-					}
-					// plan.json: first caller gets lock, second gets contention
+				(_dir: string, _filePath: string) => {
+					// plan.json: first caller gets lock, second gets contention.
 					if (planLockCalls.length === 0) {
 						planLockCalls.push('first');
 						return {
@@ -321,8 +306,8 @@ describe('phase_complete adversarial locking + path tests', () => {
 								filePath: 'plan.json',
 								agent: 'phase-complete',
 								taskId: 'phase-complete-plan-first',
-								timestamp: new Date().toISOString(),
-								expiresAt: Date.now() + 300000,
+								timestamp: '1970-01-01T00:00:00.000Z',
+								expiresAt: 300000,
 								_release: release1,
 							},
 						};
@@ -397,7 +382,12 @@ describe('phase_complete adversarial locking + path tests', () => {
 	});
 
 	// =======================================================================
-	// EVENTS.JSONL WRITE FAILURES
+	// WORKING_DIRECTORY PATH TRAVERSAL
+	// resolveWorkingDirectory is called at runtime by createSwarmTool's execute callback.
+	// executePhaseComplete is tested directly, bypassing the createSwarmTool wrapper,
+	// so we test the ACTUAL behavior (no mock intercept possible for direct calls).
+	// Key insight: realpathSync resolves traversal paths to real dirs, so the
+	// traversal check passes, and execution reaches the RETROSPECTIVE_MISSING gate.
 	// =======================================================================
 	describe('working_directory path traversal via executePhaseComplete', () => {
 		test('path traversal via .. segments — no crash, fails at retro gate', async () => {

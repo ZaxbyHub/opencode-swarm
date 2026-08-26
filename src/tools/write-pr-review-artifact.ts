@@ -10,10 +10,12 @@ import {
 	PR_REVIEW_HANDOFF_MAX_BYTES,
 	PrReviewFindingSchema,
 	PrReviewHandoffSchema,
+	PrReviewPartialBaseCoverageSchema,
 	PrReviewRunIdSchema,
 	WritePrReviewArtifactArgsSchema,
 } from '../background/pr-review-contract.js';
 import {
+	admitPrReviewPartialBaseCoverage,
 	assertPrReviewArtifactBoundary,
 	assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts,
 	markPrReviewArtifactBoundary,
@@ -21,6 +23,7 @@ import {
 	prWorkflowSessionFileStem,
 	readPrWorkflowGateState,
 	resolvePrReviewWriterRunId,
+	rollbackPrReviewPartialBaseCoverageAdmission,
 } from '../hooks/pr-workflow-gate.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { createSwarmTool } from './create-tool.js';
@@ -160,6 +163,7 @@ async function atomicCreate(
 export const _internals = {
 	atomicWrite,
 	atomicCreate,
+	assertBoundary: assertPrReviewArtifactBoundary,
 };
 
 function operationFailure(
@@ -323,6 +327,43 @@ export async function executeWritePrReviewArtifact(
 			existingBoundaryIds.size < requestedFindingIds.size &&
 			[...existingBoundaryIds].every((id) => requestedFindingIds.has(id));
 		const isCommittedReplay = isExactReplay && boundaryCommitted;
+		let partialAdmissionToRollback:
+			| {
+					runId: string;
+					boundary: 'post_explorer' | 'post_reviewer' | 'post_critic';
+					relativePath: string;
+					digest: string;
+			  }
+			| undefined;
+		const rollbackPartialAdmission = async (): Promise<string | undefined> => {
+			if (!partialAdmissionToRollback) return undefined;
+			try {
+				const rolledBack = await rollbackPrReviewPartialBaseCoverageAdmission(
+					directory,
+					sessionID,
+					partialAdmissionToRollback,
+				);
+				return rolledBack
+					? undefined
+					: 'partial base coverage admission could not be safely rolled back because durable state changed';
+			} catch (error) {
+				return `partial base coverage admission rollback failed: ${error instanceof Error ? error.message : String(error)}`;
+			}
+		};
+		const withPartialAdmissionRollback = async (
+			result: string,
+		): Promise<string> => {
+			const rollbackError = await rollbackPartialAdmission();
+			if (!rollbackError) return result;
+			try {
+				const decoded = JSON.parse(result) as { message?: unknown };
+				return typeof decoded.message === 'string'
+					? failure(`${decoded.message}; ${rollbackError}`)
+					: result;
+			} catch {
+				return result;
+			}
+		};
 		// An exact replay is idempotent and may skip the boundary revalidation,
 		// but a non-identical write must always re-run it.  In particular, the
 		// base-only post_explorer checkpoint is intentionally superseded by the
@@ -331,19 +372,32 @@ export async function executeWritePrReviewArtifact(
 		// alone cannot distinguish a legal refresh from an unsafe rewrite.
 		if (!isCommittedReplay) {
 			try {
-				await assertPrReviewArtifactBoundary(
+				// Preserve the actionable boundary/coverage error contract before
+				// checking the record projection. A caller writing too early must be
+				// told which checkpoint or inventory is missing, not that its records
+				// cannot yet match verdicts that are not authoritative at this point.
+				await _internals.assertBoundary(
 					directory,
 					sessionID,
 					resolvedRunId,
 					findingsInput.boundary,
 					findingIds,
+					findingsInput.partial_base_coverage
+						? { skipBaseCoverage: true }
+						: undefined,
 				);
 			} catch (error) {
-				return failure(
-					formatPrReviewRuntimeFieldError(
-						'boundary',
-						`the legal next "${findingsInput.boundary}" checkpoint for run "${resolvedRunId}" with exact inventory [${findingIds.join(', ')}]`,
-						error instanceof Error ? error.message : String(error),
+				return withPartialAdmissionRollback(
+					failure(
+						formatPrReviewRuntimeFieldError(
+							findingsInput.partial_base_coverage
+								? 'partial_base_coverage'
+								: 'boundary',
+							findingsInput.partial_base_coverage
+								? 'exactly five successful base dimensions plus one named typed terminal failure after every other boundary predicate passes'
+								: `the legal next "${findingsInput.boundary}" checkpoint for run "${resolvedRunId}" with exact inventory [${findingIds.join(', ')}]`,
+							error instanceof Error ? error.message : String(error),
+						),
 					),
 				);
 			}
@@ -378,13 +432,77 @@ export async function executeWritePrReviewArtifact(
 				),
 			);
 		}
+		if (!isCommittedReplay) {
+			try {
+				if (findingsInput.partial_base_coverage) {
+					const hadPartialAdmission = Boolean(
+						state.prReviewPartialBaseCoverage ||
+							state.prReviewCoverageDisclosurePath ||
+							state.prReviewCoverageDisclosureDigest,
+					);
+					// Validate every boundary predicate except exact-six before the
+					// admission mutates durable state. The normal call below then proves
+					// the newly committed disclosure closes that sole coverage gap.
+					await _internals.assertBoundary(
+						directory,
+						sessionID,
+						resolvedRunId,
+						findingsInput.boundary,
+						findingIds,
+						{ skipBaseCoverage: true },
+					);
+					state = await admitPrReviewPartialBaseCoverage(
+						directory,
+						sessionID,
+						resolvedRunId,
+						findingsInput.partial_base_coverage.missing_dimension,
+					);
+					if (
+						!hadPartialAdmission &&
+						state.prReviewPartialBaseCoverage &&
+						state.prReviewCoverageDisclosurePath &&
+						state.prReviewCoverageDisclosureDigest
+					) {
+						partialAdmissionToRollback = {
+							runId: state.prReviewPartialBaseCoverage.runId,
+							boundary: findingsInput.boundary,
+							relativePath: state.prReviewCoverageDisclosurePath,
+							digest: state.prReviewCoverageDisclosureDigest,
+						};
+					}
+				}
+				if (findingsInput.partial_base_coverage) {
+					await _internals.assertBoundary(
+						directory,
+						sessionID,
+						resolvedRunId,
+						findingsInput.boundary,
+						findingIds,
+					);
+				}
+			} catch (error) {
+				return withPartialAdmissionRollback(
+					failure(
+						formatPrReviewRuntimeFieldError(
+							findingsInput.partial_base_coverage
+								? 'partial_base_coverage'
+								: 'boundary',
+							findingsInput.partial_base_coverage
+								? 'exactly five successful base dimensions plus one named typed terminal failure after every other boundary predicate passes'
+								: `the legal next "${findingsInput.boundary}" checkpoint for run "${resolvedRunId}" with exact inventory [${findingIds.join(', ')}]`,
+							error instanceof Error ? error.message : String(error),
+						),
+					),
+				);
+			}
+		}
 		const recordedAt = new Date().toISOString();
 		const appended: PersistedFinding[] = isExactReplay
 			? []
 			: findingsInput.records.map((record) => ({
 					...record,
 					boundary: findingsInput.boundary,
-					pr_head_sha: state.prHeadSha!,
+					pr_head_sha: state!.prHeadSha!,
 					recorded_at: recordedAt,
 				}));
 		const allRecords = [...existing, ...appended];
@@ -394,22 +512,26 @@ export async function executeWritePrReviewArtifact(
 				(allRecords.length > 0 ? '\n' : '');
 			const serializedBytes = Buffer.byteLength(serializedFindings, 'utf8');
 			if (serializedBytes > PR_REVIEW_FINDINGS_MAX_BYTES) {
-				return failure(
-					formatPrReviewRuntimeFieldError(
-						'records',
-						`a complete findings artifact at most ${PR_REVIEW_FINDINGS_MAX_BYTES} UTF-8 bytes`,
-						`${serializedBytes} bytes`,
+				return withPartialAdmissionRollback(
+					failure(
+						formatPrReviewRuntimeFieldError(
+							'records',
+							`a complete findings artifact at most ${PR_REVIEW_FINDINGS_MAX_BYTES} UTF-8 bytes`,
+							`${serializedBytes} bytes`,
+						),
 					),
 				);
 			}
 			try {
 				await _internals.atomicWrite(findingsPath, serializedFindings);
 			} catch (error) {
-				return operationFailure(
-					'write',
-					relativeFindingsPath.split(path.sep).join('/'),
-					'an atomic findings checkpoint write',
-					error,
+				return withPartialAdmissionRollback(
+					operationFailure(
+						'write',
+						relativeFindingsPath.split(path.sep).join('/'),
+						'an atomic findings checkpoint write',
+						error,
+					),
 				);
 			}
 		}
@@ -431,11 +553,13 @@ export async function executeWritePrReviewArtifact(
 					handoffRequired,
 				);
 			} catch (error) {
-				return operationFailure(
-					'update',
-					`pr-workflow-gates/${prWorkflowSessionFileStem(sessionID)}.json`,
-					`a durable ${findingsInput.boundary} boundary receipt`,
-					error,
+				return withPartialAdmissionRollback(
+					operationFailure(
+						'update',
+						`pr-workflow-gates/${prWorkflowSessionFileStem(sessionID)}.json`,
+						`a durable ${findingsInput.boundary} boundary receipt`,
+						error,
+					),
 				);
 			}
 		}
@@ -448,6 +572,17 @@ export async function executeWritePrReviewArtifact(
 				appended: appended.length,
 				replayed: isExactReplay,
 				handoff_required: handoffRequired,
+				...(state.prReviewPartialBaseCoverage
+					? {
+							partial_base_coverage: {
+								missing_dimension:
+									state.prReviewPartialBaseCoverage.missingDimension,
+								failure_class: state.prReviewPartialBaseCoverage.failureClass,
+								path: state.prReviewCoverageDisclosurePath,
+								digest: state.prReviewCoverageDisclosureDigest,
+							},
+						}
+					: {}),
 			},
 			null,
 			2,
@@ -631,6 +766,7 @@ export const write_pr_review_artifact: ReturnType<typeof createSwarmTool> =
 				.enum(['post_explorer', 'post_reviewer', 'post_critic'])
 				.optional(),
 			records: z.array(PrReviewFindingSchema).min(1).max(1000).optional(),
+			partial_base_coverage: PrReviewPartialBaseCoverageSchema.optional(),
 			handoff: PrReviewHandoffSchema.optional(),
 		},
 		execute: executeWritePrReviewArtifact,

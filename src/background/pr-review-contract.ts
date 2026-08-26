@@ -84,6 +84,19 @@ export const PrReviewHandoffSchema = z
 	})
 	.strict();
 
+export const PrReviewPartialBaseCoverageSchema = z
+	.object({
+		missing_dimension: z.enum([
+			'intent-architecture',
+			'correctness-state',
+			'tests-falsifiability',
+			'security-trust',
+			'reliability-performance',
+			'compatibility-delivery',
+		]),
+	})
+	.strict();
+
 export const WritePrReviewArtifactArgsSchema = z
 	.discriminatedUnion('kind', [
 		z
@@ -96,6 +109,7 @@ export const WritePrReviewArtifactArgsSchema = z
 					.regex(/^[0-9a-f]{6,64}$/i),
 				boundary: z.enum(PR_REVIEW_ARTIFACT_BOUNDARIES),
 				records: z.array(PrReviewFindingSchema).min(1).max(1000),
+				partial_base_coverage: PrReviewPartialBaseCoverageSchema.optional(),
 			})
 			.strict(),
 		z
@@ -111,6 +125,17 @@ export const WritePrReviewArtifactArgsSchema = z
 			.strict(),
 	])
 	.superRefine((value, ctx) => {
+		if (
+			value.kind === 'findings' &&
+			value.partial_base_coverage !== undefined &&
+			value.boundary !== 'post_explorer'
+		) {
+			ctx.addIssue({
+				code: 'custom',
+				path: ['partial_base_coverage'],
+				message: 'is valid only for the post_explorer boundary',
+			});
+		}
 		const bytes = serializedPrReviewArtifactInputBytes(value);
 		const maxBytes =
 			value.kind === 'findings'

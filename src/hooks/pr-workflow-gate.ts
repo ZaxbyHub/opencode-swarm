@@ -26,6 +26,7 @@ import {
 import {
 	type BackgroundDelegationRecord,
 	type BackgroundDelegationResult,
+	type BackgroundDelegationWorkflowLaneFailureClass,
 	type BackgroundDelegationWorkflowLaneRecovery,
 	DEFAULT_STALE_DELEGATION_TIMEOUT_MS,
 	findByBatchId,
@@ -578,6 +579,8 @@ export interface PrWorkflowGateState {
 	/** @deprecated Compatibility projection of the most recent base dispatch. */
 	prReviewBaseDispatch?: PrReviewBaseDispatchRecord;
 	prReviewResilience?: PrReviewResilienceStateRecord;
+	/** Dimensions that consumed their one contract-only retry; top-level for rollback readability. */
+	prReviewContractRetryDimensions?: PrReviewBaseDimensionId[];
 	/** Canonical ordered semantic ledger frozen by the first micro dispatch. */
 	prReviewTriggerLedger?: PrReviewInlineTriggerRow[];
 	prReviewTriggerEvalPath?: string;
@@ -622,6 +625,9 @@ export interface PrWorkflowGateState {
 	prReviewArtifactRunId?: string;
 	prReviewFindingsPath?: string;
 	prReviewArtifactBoundaries?: PrReviewArtifactBoundary[];
+	prReviewPartialBaseCoverage?: PrReviewPartialBaseCoverageRecord;
+	prReviewCoverageDisclosurePath?: string;
+	prReviewCoverageDisclosureDigest?: string;
 	prReviewHandoffPath?: string;
 	prReviewHandoffRequired?: boolean;
 	checkoutRecovery?: PrWorkflowCheckoutRecoveryRecord;
@@ -660,6 +666,16 @@ export interface PrWorkflowGateState {
 	 */
 	prFeedbackRebindCount?: number;
 	prFeedbackScopes?: PrFeedbackScopeDeclarationRecord[];
+}
+
+export interface PrReviewPartialBaseCoverageRecord {
+	runId: string;
+	prHeadSha: string;
+	revisionDigest: string;
+	missingDimension: PrReviewBaseDimensionId;
+	failureClass: BackgroundDelegationWorkflowLaneFailureClass;
+	terminalEventId: string;
+	admittedAt: string;
 }
 
 interface SessionStateMutationLock {
@@ -837,6 +853,18 @@ const PrReviewResilienceStateRecordSchema = z
 		policy: PrReviewResiliencePolicyRecordSchema,
 		attempts: z.array(PrReviewResilienceAttemptRecordSchema).max(3),
 		circuit: PrReviewResilienceCircuitRecordSchema.optional(),
+	})
+	.strict();
+
+const PrReviewPartialBaseCoverageRecordSchema = z
+	.object({
+		runId: z.string().min(1).max(128),
+		prHeadSha: z.string().regex(/^[0-9a-f]{6,64}$/i),
+		revisionDigest: z.string().min(1).max(256),
+		missingDimension: z.enum(PR_REVIEW_BASE_DIMENSION_IDS),
+		failureClass: z.enum(['contract', 'resource', 'deadline']),
+		terminalEventId: z.string().min(1).max(256),
+		admittedAt: z.string().datetime(),
 	})
 	.strict();
 
@@ -1091,6 +1119,10 @@ const PrWorkflowGateStateSchema = z
 			.optional(),
 		prReviewBaseDispatch: PrReviewBaseDispatchRecordSchema.optional(),
 		prReviewResilience: PrReviewResilienceStateRecordSchema.optional(),
+		prReviewContractRetryDimensions: z
+			.array(PrReviewBaseDimensionIdSchema)
+			.max(PR_REVIEW_BASE_DIMENSION_IDS.length)
+			.optional(),
 		prReviewTriggerLedger: z
 			.array(PrReviewInlineTriggerRowSchema)
 			.length(PR_REVIEW_REQUIRED_TRIGGER_IDS.length)
@@ -1119,6 +1151,13 @@ const PrWorkflowGateStateSchema = z
 		prReviewReservedRunId: z.string().min(1).optional(),
 		prReviewArtifactRunId: z.string().min(1).optional(),
 		prReviewFindingsPath: z.string().min(1).optional(),
+		prReviewPartialBaseCoverage:
+			PrReviewPartialBaseCoverageRecordSchema.optional(),
+		prReviewCoverageDisclosurePath: z.string().min(1).max(512).optional(),
+		prReviewCoverageDisclosureDigest: z
+			.string()
+			.regex(/^[0-9a-f]{64}$/)
+			.optional(),
 		prReviewArtifactBoundaries: z
 			.array(z.enum(['post_explorer', 'post_reviewer', 'post_critic']))
 			.max(3)
@@ -3634,6 +3673,7 @@ interface EnforcePrReviewBaseDimensionsOptions {
 	batchId: string;
 	prHeadSha: string;
 	revisionDigest?: string;
+	prReviewContractRetry?: boolean;
 	prReviewWaveStage?: 'canary' | 'fanout';
 	prReviewWaveAttempt?: 0 | 1 | 2;
 	prReviewResiliencePolicy?: PrReviewResilienceConfig;
@@ -3723,8 +3763,17 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 		);
 	}
 	const depthTier = state.prReviewDepthTier ?? 'L';
+	const requestedContractRetry = options.prReviewContractRetry === true;
 	const requestedWaveStage = options.prReviewWaveStage;
 	const requestedWaveAttempt = options.prReviewWaveAttempt;
+	if (
+		requestedContractRetry &&
+		(requestedWaveStage !== undefined || requestedWaveAttempt !== undefined)
+	) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW contract retry is mutually exclusive with pr_review_wave_stage and pr_review_wave_attempt',
+		);
+	}
 	if (
 		(requestedWaveStage === undefined) !==
 		(requestedWaveAttempt === undefined)
@@ -3777,7 +3826,8 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 	if (
 		resiliencePolicy.enabled &&
 		depthTier !== 'S' &&
-		requestedWaveStage === undefined
+		requestedWaveStage === undefined &&
+		!requestedContractRetry
 	) {
 		throw new Error(
 			'BLOCKED: PR_REVIEW base dispatch at depth tier M or L requires canary-first staged admission while pr_review_resilience is enabled',
@@ -4035,6 +4085,47 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 			};
 		}
 	}
+	if (requestedContractRetry) {
+		const revisionDigest =
+			options.revisionDigest ??
+			(await createPrReviewGateContext(directory, state)).revisionDigest;
+		const attempts = summarizePrReviewBaseDimensionAttempts(
+			directory,
+			state,
+			revisionDigest,
+		);
+		if (
+			normalizedLanes.length !== 1 ||
+			(normalizedLanes[0]?.ownedWorkflowLanes?.length ?? 1) !== 1
+		) {
+			throw new Error(
+				'BLOCKED: PR_REVIEW contract retry requires exactly one singleton lane',
+			);
+		}
+		const contractedDimension =
+			declaredBaseDimensions(normalizedLanes)[0] ??
+			normalizedLanes[0]!.workflowLane;
+		if (attempts.successful.has(contractedDimension)) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW contract retry cannot target already-successful dimension "${contractedDimension}"`,
+			);
+		}
+		if (attempts.inFlight.has(contractedDimension)) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW contract retry cannot target in-flight dimension "${contractedDimension}"`,
+			);
+		}
+		if (!attempts.contractFailed.has(contractedDimension)) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW contract retry requires a recorded terminal contract failure for dimension "${contractedDimension}"`,
+			);
+		}
+		if (attempts.contractRetried.has(contractedDimension)) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW contract retry for dimension "${contractedDimension}" was already admitted`,
+			);
+		}
+	}
 	const record: PrReviewBaseDispatchRecord = {
 		batchId,
 		lanes: normalizedLanes.map((lane) => ({
@@ -4054,6 +4145,14 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 		updatedAt: isoNow(),
 		prReviewBaseDispatches: [...previous, record],
 		prReviewBaseDispatch: record,
+		...(requestedContractRetry
+			? {
+					prReviewContractRetryDimensions: [
+						...(state.prReviewContractRetryDimensions ?? []),
+						declaredBaseDimensions(normalizedLanes)[0]!,
+					],
+				}
+			: {}),
 		...(nextResilience ? { prReviewResilience: nextResilience } : {}),
 	};
 	return writeStateWhileLocked(directory, nextState);
@@ -4063,6 +4162,7 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 	directory: string,
 	sessionID: string,
 	batchId: string,
+	contractRetry = false,
 ): Promise<boolean> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
 	const normalizedBatchId = normalizeBatchId(batchId);
@@ -4082,6 +4182,20 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 			});
 			if (batchRecords.length > 0) return false;
 			const nextBaseDispatches = currentBaseDispatches.slice(0, -1);
+			const rolledBackDimensions = new Set(
+				currentBaseDispatches
+					.at(-1)
+					?.lanes.flatMap((lane) =>
+						lane.ownedWorkflowLanes?.length
+							? lane.ownedWorkflowLanes
+							: [lane.workflowLane],
+					) ?? [],
+			);
+			const nextContractRetryDimensions = contractRetry
+				? (state.prReviewContractRetryDimensions ?? []).filter(
+						(dimension) => !rolledBackDimensions.has(dimension),
+					)
+				: state.prReviewContractRetryDimensions;
 			const lastAttempt = state.prReviewResilience?.attempts.at(-1);
 			let nextResilience = state.prReviewResilience;
 			if (lastAttempt?.canaryBatchId === normalizedBatchId) {
@@ -4116,6 +4230,9 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 				...(shouldKeepResilience
 					? { prReviewResilience: nextResilience }
 					: { prReviewResilience: undefined }),
+				...(nextContractRetryDimensions?.length
+					? { prReviewContractRetryDimensions: nextContractRetryDimensions }
+					: { prReviewContractRetryDimensions: undefined }),
 			});
 			return true;
 		}),
@@ -4152,6 +4269,10 @@ interface PrReviewBaseDimensionAttempts {
 	successful: Set<string>;
 	/** Dimensions with a currently in-flight or retryable recorded lane. */
 	inFlight: Set<string>;
+	/** Dimensions whose terminal record was a contract failure. */
+	contractFailed: Set<string>;
+	/** Dimensions that already consumed the dedicated contract retry channel. */
+	contractRetried: Set<string>;
 	/**
 	 * The subset of `successful` supplied by a lane that owns that dimension
 	 * alone. Used by the cumulative tier-L lane floor to decide when an earlier
@@ -4186,6 +4307,10 @@ function summarizePrReviewBaseDimensionAttempts(
 ): PrReviewBaseDimensionAttempts {
 	const successful = new Set<string>();
 	const inFlight = new Set<string>();
+	const contractFailed = new Set<string>();
+	const contractRetried = new Set<string>(
+		state.prReviewContractRetryDimensions ?? [],
+	);
 	const dedicatedSuccessful = new Set<string>();
 	const terminallyFailed = new Set<string>();
 	for (const batch of state.prReviewBaseDispatches ?? []) {
@@ -4252,10 +4377,22 @@ function summarizePrReviewBaseDimensionAttempts(
 				? lane.ownedWorkflowLanes
 				: [lane.workflowLane]) {
 				terminallyFailed.add(dimension);
+				if (
+					laneRecords.at(-1)?.result?.workflowLaneFailureClass === 'contract'
+				) {
+					contractFailed.add(dimension);
+				}
 			}
 		}
 	}
-	return { successful, inFlight, dedicatedSuccessful, terminallyFailed };
+	return {
+		successful,
+		inFlight,
+		contractFailed,
+		contractRetried,
+		dedicatedSuccessful,
+		terminallyFailed,
+	};
 }
 
 function hasRevisionIndependentDiscoverySemantics(
@@ -4280,6 +4417,51 @@ function hasRevisionIndependentDiscoverySemantics(
 			reviewScope: qualified.record.workspace?.scope ?? undefined,
 		},
 	}).ok;
+}
+
+interface PrReviewLatestTypedFailure {
+	failureClass: BackgroundDelegationWorkflowLaneFailureClass;
+	terminalEventId: string;
+	recordedAt: number;
+}
+
+function latestTypedFailureForBaseDimension(
+	directory: string,
+	state: PrWorkflowGateState,
+	dimension: PrReviewBaseDimensionId,
+): PrReviewLatestTypedFailure | null {
+	let latest: PrReviewLatestTypedFailure | null = null;
+	for (const batch of state.prReviewBaseDispatches ?? []) {
+		for (const lane of batch.lanes) {
+			const owned = lane.ownedWorkflowLanes?.length
+				? lane.ownedWorkflowLanes
+				: [lane.workflowLane];
+			if (!owned.includes(dimension)) continue;
+			for (const record of findByBatchId(directory, batch.batchId, {
+				parentSessionId: state.sessionID,
+			}).filter((candidate) => candidate.laneId === lane.laneId)) {
+				const terminal = record.terminalResult;
+				const result = terminal?.result ?? record.result;
+				const failureClass = result?.workflowLaneFailureClass;
+				if (!terminal || !failureClass || terminal.status === 'completed')
+					continue;
+				const candidate = {
+					failureClass,
+					terminalEventId: terminal.eventId,
+					recordedAt: terminal.recordedAt,
+				};
+				if (
+					latest === null ||
+					candidate.recordedAt > latest.recordedAt ||
+					(candidate.recordedAt === latest.recordedAt &&
+						candidate.terminalEventId.localeCompare(latest.terminalEventId) > 0)
+				) {
+					latest = candidate;
+				}
+			}
+		}
+	}
+	return latest;
 }
 
 /**
@@ -4814,7 +4996,259 @@ function pruneWorkflowBatches(
 	};
 }
 
-/** Validate durable exact-six PR review evidence across all base and retry batches. */
+const PR_REVIEW_COVERAGE_DISCLOSURE_MAX_BYTES = 4_096;
+
+function coverageDisclosureRelativePath(runId: string): string {
+	return path.join('pr-review', runId, 'coverage-disclosure.json');
+}
+
+async function readAndVerifyCoverageDisclosure(
+	directory: string,
+	state: PrWorkflowGateState,
+): Promise<PrReviewPartialBaseCoverageRecord | null> {
+	const record = state.prReviewPartialBaseCoverage;
+	const relativePath = state.prReviewCoverageDisclosurePath;
+	const expectedDigest = state.prReviewCoverageDisclosureDigest;
+	if (!record && !relativePath && !expectedDigest) return null;
+	if (!record || !relativePath || !expectedDigest) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW partial base coverage disclosure state is incomplete',
+		);
+	}
+	const expectedPath = coverageDisclosureRelativePath(record.runId)
+		.split(path.sep)
+		.join('/');
+	if (relativePath !== expectedPath) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW partial base coverage disclosure path does not match its bound run',
+		);
+	}
+	const raw = await readBoundedSwarmRegularFile(
+		directory,
+		relativePath,
+		PR_REVIEW_COVERAGE_DISCLOSURE_MAX_BYTES,
+		'PR_REVIEW partial base coverage disclosure',
+	);
+	const digest = createHash('sha256').update(raw, 'utf8').digest('hex');
+	if (digest !== expectedDigest) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW partial base coverage disclosure digest does not match durable state',
+		);
+	}
+	let decoded: unknown;
+	try {
+		decoded = JSON.parse(raw);
+	} catch {
+		throw new Error(
+			'BLOCKED: PR_REVIEW partial base coverage disclosure is invalid JSON',
+		);
+	}
+	const parsed = PrReviewPartialBaseCoverageRecordSchema.safeParse(decoded);
+	if (
+		!parsed.success ||
+		JSON.stringify(parsed.data) !== JSON.stringify(record)
+	) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW partial base coverage disclosure does not match durable state',
+		);
+	}
+	return record;
+}
+
+export async function admitPrReviewPartialBaseCoverage(
+	directory: string,
+	sessionID: string,
+	runId: string,
+	missingDimension: PrReviewBaseDimensionId,
+): Promise<PrWorkflowGateState> {
+	return withSessionStateMutation(directory, sessionID.trim(), async () => {
+		const state = await readPrWorkflowGateStateFromDisk(
+			directory,
+			sessionID.trim(),
+		);
+		if (!state || state.mode !== 'PR_REVIEW' || !state.prHeadSha) {
+			throw new Error(
+				'BLOCKED: partial base coverage requires an active head-bound PR_REVIEW workflow',
+			);
+		}
+		const normalizedRunId = PrReviewRunIdSchema.parse(runId);
+		if (
+			state.prReviewReservedRunId &&
+			state.prReviewReservedRunId !== normalizedRunId
+		) {
+			throw new Error(
+				'BLOCKED: partial base coverage run does not match the reserved PR-review run',
+			);
+		}
+		const ctx = await createPrReviewGateContext(directory, state);
+		const attempts = summarizePrReviewBaseDimensionAttempts(
+			directory,
+			state,
+			ctx.revisionDigest,
+		);
+		const missing = PR_REVIEW_BASE_DIMENSION_IDS.filter(
+			(dimension) => !attempts.successful.has(dimension),
+		);
+		if (
+			attempts.successful.size !== PR_REVIEW_BASE_DIMENSION_IDS.length - 1 ||
+			missing.length !== 1 ||
+			missing[0] !== missingDimension
+		) {
+			throw new Error(
+				`BLOCKED: partial base coverage requires exactly five successful dimensions and named missing dimension "${missingDimension}"; actual missing: ${missing.join(', ') || '(none)'}`,
+			);
+		}
+		if (attempts.inFlight.has(missingDimension)) {
+			throw new Error(
+				`BLOCKED: partial base coverage dimension "${missingDimension}" still has an in-flight lane`,
+			);
+		}
+		const latestFailure = latestTypedFailureForBaseDimension(
+			directory,
+			state,
+			missingDimension,
+		);
+		if (!latestFailure) {
+			throw new Error(
+				`BLOCKED: partial base coverage dimension "${missingDimension}" lacks a typed terminal failure`,
+			);
+		}
+		const existing = await readAndVerifyCoverageDisclosure(directory, state);
+		if (existing) {
+			if (
+				existing.runId === normalizedRunId &&
+				existing.prHeadSha === state.prHeadSha &&
+				existing.revisionDigest === ctx.revisionDigest &&
+				existing.missingDimension === missingDimension &&
+				existing.failureClass === latestFailure.failureClass &&
+				existing.terminalEventId === latestFailure.terminalEventId
+			) {
+				return state;
+			}
+			throw new Error(
+				'BLOCKED: partial base coverage admission differs from the immutable existing disclosure',
+			);
+		}
+		const record: PrReviewPartialBaseCoverageRecord = {
+			runId: normalizedRunId,
+			prHeadSha: state.prHeadSha,
+			revisionDigest: ctx.revisionDigest,
+			missingDimension,
+			failureClass: latestFailure.failureClass,
+			terminalEventId: latestFailure.terminalEventId,
+			admittedAt: isoNow(),
+		};
+		const relativePath = coverageDisclosureRelativePath(normalizedRunId)
+			.split(path.sep)
+			.join('/');
+		const absolutePath = validateSwarmPath(directory, relativePath);
+		const raw = JSON.stringify(record, null, 2);
+		if (
+			Buffer.byteLength(raw, 'utf8') > PR_REVIEW_COVERAGE_DISCLOSURE_MAX_BYTES
+		) {
+			throw new Error(
+				'BLOCKED: partial base coverage disclosure exceeds its write bound',
+			);
+		}
+		let disclosureWasMissing = false;
+		const removeNewDisclosure = async (): Promise<void> => {
+			if (!disclosureWasMissing) return;
+			try {
+				if ((await fsp.readFile(absolutePath, 'utf8')) === raw) {
+					await fsp.rm(absolutePath, { force: true });
+				}
+			} catch {
+				// Preserve the original admission error; cleanup is best effort.
+			}
+		};
+		try {
+			const persisted = readFileSync(absolutePath, 'utf8');
+			if (persisted !== raw) {
+				throw new Error(
+					'BLOCKED: partial base coverage disclosure path already contains different content',
+				);
+			}
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+				disclosureWasMissing = true;
+				try {
+					await writeAtomicJson(directory, absolutePath, record);
+				} catch (writeError) {
+					await removeNewDisclosure();
+					throw writeError;
+				}
+			} else {
+				throw error;
+			}
+		}
+		const digest = createHash('sha256').update(raw, 'utf8').digest('hex');
+		try {
+			return await writeStateWhileLocked(directory, {
+				...state,
+				updatedAt: isoNow(),
+				prReviewPartialBaseCoverage: record,
+				prReviewCoverageDisclosurePath: relativePath,
+				prReviewCoverageDisclosureDigest: digest,
+			});
+		} catch (error) {
+			await removeNewDisclosure();
+			throw error;
+		}
+	});
+}
+
+/**
+ * Undo a newly admitted partial-base disclosure when the findings checkpoint
+ * cannot be completed. The compare-and-clear checks keep a stale writer from
+ * deleting a disclosure that another writer has already committed.
+ */
+export async function rollbackPrReviewPartialBaseCoverageAdmission(
+	directory: string,
+	sessionID: string,
+	options: {
+		runId: string;
+		boundary: 'post_explorer' | 'post_reviewer' | 'post_critic';
+		relativePath: string;
+		digest: string;
+	},
+): Promise<boolean> {
+	return withSessionStateMutation(directory, sessionID.trim(), async () => {
+		const state = await readPrWorkflowGateStateFromDisk(
+			directory,
+			sessionID.trim(),
+		);
+		const record = state?.prReviewPartialBaseCoverage;
+		if (!state || !record || record.runId !== options.runId) return false;
+		if ((state.prReviewArtifactBoundaries ?? []).includes(options.boundary)) {
+			return false;
+		}
+		if (
+			state.prReviewCoverageDisclosurePath !== options.relativePath ||
+			state.prReviewCoverageDisclosureDigest !== options.digest
+		) {
+			return false;
+		}
+		const absolutePath = validateSwarmPath(directory, options.relativePath);
+		try {
+			const raw = await fsp.readFile(absolutePath, 'utf8');
+			const digest = createHash('sha256').update(raw, 'utf8').digest('hex');
+			if (digest !== options.digest) return false;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+		}
+		await fsp.rm(absolutePath, { force: true });
+		await writeStateWhileLocked(directory, {
+			...state,
+			updatedAt: isoNow(),
+			prReviewPartialBaseCoverage: undefined,
+			prReviewCoverageDisclosurePath: undefined,
+			prReviewCoverageDisclosureDigest: undefined,
+		});
+		return true;
+	});
+}
+
+/** Validate durable exact-six or explicitly admitted N-1 PR review evidence. */
 export async function assertPrReviewBaseCoverageSettled(
 	directory: string,
 	sessionID: string,
@@ -4853,6 +5287,19 @@ export async function assertPrReviewBaseCoverageSettled(
 		missing.length > 0 ||
 		covered.size !== PR_REVIEW_BASE_DIMENSION_IDS.length
 	) {
+		const disclosure = await readAndVerifyCoverageDisclosure(directory, state);
+		if (
+			disclosure &&
+			missing.length === 1 &&
+			covered.size === PR_REVIEW_BASE_DIMENSION_IDS.length - 1 &&
+			disclosure.missingDimension === missing[0] &&
+			disclosure.prHeadSha === state.prHeadSha &&
+			disclosure.revisionDigest === ctx.revisionDigest &&
+			disclosure.runId ===
+				(state.prReviewArtifactRunId ?? state.prReviewReservedRunId)
+		) {
+			return state;
+		}
 		throw new Error(
 			`BLOCKED: PR_REVIEW base coverage is incomplete; missing dimensions: ${missing.join(', ') || '(none)'}${
 				malformedDiagnostics.length > 0
@@ -6266,6 +6713,7 @@ export async function assertPrReviewArtifactBoundary(
 	runId: string,
 	boundary: PrReviewArtifactBoundary,
 	findingIds: string[],
+	options: { skipBaseCoverage?: boolean } = {},
 ): Promise<PrWorkflowGateState> {
 	let state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
 	// Issue #2280 Part A: the one exception to trigger-eval-before-findings is
@@ -6282,7 +6730,7 @@ export async function assertPrReviewArtifactBoundary(
 			'BLOCKED: PR_REVIEW findings persistence requires the trigger evaluation artifact (write_pr_review_trigger_eval must complete first)',
 		);
 	}
-	if (baseOnlyExplorerCheckpoint) {
+	if (baseOnlyExplorerCheckpoint && !options.skipBaseCoverage) {
 		// The returned state is the freshest snapshot; the assignment threads it
 		// through every downstream check here (boundary order, run binding,
 		// candidate inventory) rather than mixing two reads of the gate state.

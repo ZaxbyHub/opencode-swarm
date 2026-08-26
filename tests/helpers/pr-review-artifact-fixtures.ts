@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { storeLaneOutput } from '../../src/background/lane-output-store.js';
 import {
 	appendDelegationTransition,
+	claimTerminalResult,
 	recordPendingDelegation,
 } from '../../src/background/pending-delegations.js';
 import {
@@ -35,7 +36,7 @@ export async function persistPrReviewBatch(
 	mode: string,
 	lanes: ReadonlyArray<{ laneId: string; workflowLane: string }>,
 	options: {
-		status?: 'completed' | 'error';
+		status?: 'pending' | 'running' | 'completed' | 'error';
 		head?: string;
 		empty?: boolean;
 		textOverride?: string;
@@ -56,6 +57,7 @@ export async function persistPrReviewBatch(
 		 * compares such a record against ITS OWN row (issue #2320).
 		 */
 		firstCandidateId?: string;
+		workflowLaneFailureClass?: 'contract' | 'resource' | 'deadline';
 	} = {},
 ): Promise<void> {
 	for (const [index, lane] of lanes.entries()) {
@@ -113,17 +115,32 @@ export async function persistPrReviewBatch(
 			text,
 			transcriptIncomplete: options.transcriptIncomplete,
 		});
-		await appendDelegationTransition(directory, correlationId, {
-			status: options.status ?? 'completed',
-			result: {
-				text,
-				chars: stored.chars,
-				truncated: false,
-				digest: stored.digest,
-				...(stored.ref ? { outputRef: stored.ref } : {}),
-				...(options.transcriptIncomplete ? { transcriptIncomplete: true } : {}),
-			},
-		});
+		const result = {
+			text,
+			chars: stored.chars,
+			truncated: false,
+			digest: stored.digest,
+			...(stored.ref ? { outputRef: stored.ref } : {}),
+			...(options.transcriptIncomplete ? { transcriptIncomplete: true } : {}),
+			...(options.workflowLaneFailureClass
+				? {
+						workflowLaneFailureClass: options.workflowLaneFailureClass,
+					}
+				: {}),
+		};
+		if (options.workflowLaneFailureClass) {
+			await claimTerminalResult(directory, correlationId, {
+				eventId: `fixture-terminal-${correlationId}`,
+				status: options.status ?? 'completed',
+				recordedAt: Date.now(),
+				result,
+			});
+		} else {
+			await appendDelegationTransition(directory, correlationId, {
+				status: options.status ?? 'completed',
+				result,
+			});
+		}
 	}
 }
 
