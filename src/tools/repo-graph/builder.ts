@@ -673,6 +673,12 @@ export function resolveModuleSpecifier(
 								'.jsx',
 								'.mjs',
 								'.cjs',
+								'.rb',
+								'.rake',
+								'.gemspec',
+								'.dart',
+								'.php',
+								'.phtml',
 								'.json',
 							]
 						: [
@@ -686,6 +692,12 @@ export function resolveModuleSpecifier(
 								'.pyw',
 								'.rs',
 								'.go',
+								'.rb',
+								'.rake',
+								'.gemspec',
+								'.dart',
+								'.php',
+								'.phtml',
 								'.json',
 							];
 				let found: string | null = null;
@@ -1123,6 +1135,19 @@ function parseFileImports(
 	if (ext === '.cs' || ext === '.csx') {
 		return parseCSharpFileImports(rawContent);
 	}
+	if (ext === '.dart') {
+		return parseDartFileImports(rawContent);
+	}
+	if (ext === '.rb' || ext === '.rake' || ext === '.gemspec') {
+		return parseRubyFileImports(rawContent);
+	}
+	if (
+		ext === '.php' ||
+		ext === '.phtml' ||
+		sourceFile?.endsWith('.blade.php')
+	) {
+		return parsePhpFileImports(rawContent);
+	}
 
 	const imports: ParsedImport[] = [];
 	const content = stripComments(rawContent);
@@ -1314,6 +1339,87 @@ function parseCSharpFileImports(rawContent: string): ParsedImport[] {
 					{ imported: finalDottedSegment(specifier), local: alias },
 				])
 			: makeParsedImport(specifier, 'namespace', []);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
+}
+
+/**
+ * Regex import fallback for Dart (see {@link parseCSharpFileImports}).
+ * `hide` clauses are intentionally unhandled — the import is still recorded
+ * as a namespace import (all symbols minus hidden ones), which is correct
+ * for graph purposes.
+ */
+function parseDartFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	for (const match of rawContent.matchAll(
+		/^[ \t]*(import|export)[ \t]+['"]([^'"]+)['"]([^;\n]*)/gm,
+	)) {
+		const clause = match[3];
+		const shown = clause
+			?.match(/\bshow\s+([^;]+)/)?.[1]
+			.split(',')
+			.map((part) => part.trim())
+			.filter(Boolean);
+		const alias = clause?.match(/\bas\s+\w+/);
+		// A prefix (`as p`) makes the import namespace-qualified with no named
+		// binding, even when a show/hide clause follows.
+		const bindings =
+			!alias && shown && shown.length > 0
+				? shown.map((name) => ({ imported: name, local: name }))
+				: [];
+		const parsed = makeParsedImport(
+			match[2],
+			bindings.length > 0 ? 'named' : 'namespace',
+			bindings,
+			match[1] === 'export',
+		);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
+}
+
+/**
+ * Regex import fallback for Ruby require/require_relative. `require_relative`
+ * resolves against the requiring file's directory, so the specifier is
+ * normalized to './name' when no explicit relative prefix is present.
+ */
+function parseRubyFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	for (const match of rawContent.matchAll(
+		/^[ \t]*(require_relative|require)[ \t]+['"]([^'"]+)['"]/gm,
+	)) {
+		const relative = match[1] === 'require_relative';
+		const specifier =
+			relative && !match[2].startsWith('.') ? `./${match[2]}` : match[2];
+		const parsed = makeParsedImport(
+			specifier,
+			relative ? 'default' : 'namespace',
+			[],
+		);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
+}
+
+/**
+ * Regex import fallback for PHP `use` declarations. Grouped `use A\B, C\D;`
+ * forms are a known limitation (the whole group is skipped); FQN specifiers
+ * are recorded as-is — mapping them to workspace files requires composer
+ * PSR-4 awareness, which is out of scope (#1531 "where practical").
+ */
+function parsePhpFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	for (const match of rawContent.matchAll(
+		/^[ \t]*use[ \t]+(?:(?:function|const)[ \t]+)?([^;\s]+)(?:[ \t]+as[ \t]+(\w+))?[ \t]*;?[ \t]*\r?$/gim,
+	)) {
+		const imported = match[1].split('\\').pop() ?? match[1];
+		const bindings = match[2] ? [{ imported, local: match[2] }] : [];
+		const parsed = makeParsedImport(
+			match[1],
+			bindings.length > 0 ? 'named' : 'namespace',
+			bindings,
+		);
 		if (parsed) imports.push(parsed);
 	}
 	return imports;
@@ -2134,6 +2240,12 @@ const RANGE_WIDENED_GRAMMARS = new Set([
 	'csharp',
 	'cpp',
 	'swift',
+	// Dynamic-language hardening (#1531): member defs (Ruby methods, PHP
+	// methods) are non-exported at file level but must still carry spans for
+	// context_pack; widening admits them into exportRanges only.
+	'dart',
+	'ruby',
+	'php',
 ]);
 
 /**

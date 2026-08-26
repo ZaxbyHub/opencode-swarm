@@ -42,6 +42,12 @@ const SYMBOL_EXTENSIONS = new Set([
 	'.pyw',
 	'.rs',
 	'.go',
+	'.dart',
+	'.rb',
+	'.rake',
+	'.gemspec',
+	'.php',
+	'.phtml',
 ]);
 
 // Directories to skip during workspace scanning
@@ -630,6 +636,310 @@ export function extractGoSymbols(filePath: string, cwd: string): SymbolInfo[] {
 	});
 }
 
+// ============ Dart / Ruby / PHP Extraction (issue #1531) ============
+
+/** 1-based line number of the character at `index`. */
+function lineNumberAt(content: string, index: number): number {
+	let line = 1;
+	for (let i = 0; i < index && i < content.length; i++) {
+		if (content[i] === '\n') line++;
+	}
+	return line;
+}
+
+function lineTextAt(content: string, index: number): string {
+	const lineStart = content.lastIndexOf('\n', Math.max(0, index - 1)) + 1;
+	const lineEnd = content.indexOf('\n', lineStart);
+	return content
+		.substring(lineStart, lineEnd === -1 ? content.length : lineEnd)
+		.trim()
+		.substring(0, 120);
+}
+
+function findMatchingBrace(content: string, openIndex: number): number | null {
+	if (content[openIndex] !== '{') return null;
+	let depth = 0;
+	for (let i = openIndex; i < content.length; i++) {
+		const ch = content[i];
+		if (ch === '{') depth++;
+		else if (ch === '}') {
+			depth--;
+			if (depth === 0) return i;
+		}
+	}
+	return null;
+}
+
+/**
+ * Conservative comment mask for regex scanning: replaces `//`, `#`, and
+ * block comments with spaces, preserving newlines (and thus offsets/line
+ * structure) so `lineNumberAt`/`lineTextAt` stay accurate against the
+ * original text. Quote-awareness is intentionally minimal — this is a
+ * best-effort filter for declaration regexes, not a lexer.
+ */
+function stripLineCommentsForScan(content: string): string {
+	let out = '';
+	let inBlock = false;
+	for (let i = 0; i < content.length; i++) {
+		const two = content.substring(i, i + 2);
+		if (!inBlock && two === '/*') {
+			inBlock = true;
+			out += '  ';
+			i++;
+			continue;
+		}
+		if (inBlock) {
+			if (two === '*/') {
+				inBlock = false;
+				out += '  ';
+				i++;
+			} else {
+				out += content[i] === '\n' ? '\n' : ' ';
+			}
+			continue;
+		}
+		if (two === '//' || content[i] === '#') {
+			// Line comment: mask the marker and everything to end of line.
+			out += two === '//' ? '  ' : ' ';
+			if (two === '//') i++;
+			while (i + 1 < content.length && content[i + 1] !== '\n') {
+				out += ' ';
+				i++;
+			}
+			continue;
+		}
+		out += content[i];
+	}
+	return out;
+}
+
+function addUniqueSymbol(
+	symbols: SymbolInfo[],
+	seen: Set<string>,
+	candidate: SymbolInfo,
+): void {
+	const key = `${candidate.name}:${candidate.kind}`;
+	if (seen.has(key)) return;
+	seen.add(key);
+	symbols.push(candidate);
+}
+
+function sortSymbols(symbols: SymbolInfo[]): SymbolInfo[] {
+	return symbols.sort((a, b) => {
+		if (a.line !== b.line) return a.line - b.line;
+		return a.name.localeCompare(b.name);
+	});
+}
+
+/**
+ * Dart symbols: classes/mixins/enums/extensions and top-level functions.
+ * Visibility is the `_`-prefix convention. Method bodies inside classes are
+ * skipped — the function regex only fires on type-position patterns that
+ * survive the keyword skip lists (see #1681 review round 3).
+ */
+export function extractDartSymbols(
+	filePath: string,
+	cwd: string,
+): SymbolInfo[] {
+	const raw = readValidatedSourceFile(filePath, cwd);
+	if (raw === null) return [];
+	const content = stripLineCommentsForScan(raw);
+	const symbols: SymbolInfo[] = [];
+	const seen = new Set<string>();
+	// `extension type` (Dart 3) must match before bare `extension`; the
+	// `(?!on\b)` lookahead skips unnamed extensions; `typedef` is a type def.
+	for (const match of content.matchAll(
+		/\b(extension\s+type|class|mixin|enum|extension|typedef)\s+(?!on\b)([A-Za-z_][A-Za-z0-9_]*)/g,
+	)) {
+		const kindWord = match[1].trim().split(/\s+/).pop() ?? match[1];
+		const kind: SymbolInfo['kind'] =
+			kindWord === 'enum' ? 'enum' : kindWord === 'class' ? 'class' : 'type';
+		addUniqueSymbol(symbols, seen, {
+			name: match[2],
+			kind,
+			exported: !match[2].startsWith('_'),
+			signature: lineTextAt(raw, match.index),
+			line: lineNumberAt(raw, match.index),
+		});
+	}
+	const dartFunctionRe =
+		/\b(?:void|[A-Za-z_][A-Za-z0-9_<>,?]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+	const KEYWORD_NAME_SKIP = new Set([
+		'if',
+		'for',
+		'while',
+		'switch',
+		'return',
+		'else',
+		'throw',
+		'new',
+		'await',
+		'yield',
+		'case',
+		'catch',
+	]);
+	const KEYWORD_TYPE_SKIP = new Set([
+		'return',
+		'else',
+		'throw',
+		'new',
+		'await',
+		'yield',
+		'case',
+		'catch',
+		'final',
+		'const',
+	]);
+	for (const match of content.matchAll(dartFunctionRe)) {
+		if (KEYWORD_NAME_SKIP.has(match[1])) continue;
+		if (KEYWORD_TYPE_SKIP.has(match[0].split(/\s+/)[0])) continue;
+		addUniqueSymbol(symbols, seen, {
+			name: match[1],
+			kind: 'function',
+			exported: !match[1].startsWith('_'),
+			signature: lineTextAt(raw, match.index),
+			line: lineNumberAt(raw, match.index),
+		});
+	}
+	return sortSymbols(symbols);
+}
+
+/**
+ * Ruby symbols: modules, classes, constants, and `def` methods with
+ * `private`/`protected` section tracking. Singleton methods keep their
+ * `self.` qualification in the name. Dynamic constructs (`define_method`,
+ * `send`, metaprogramming) are invisible to this scanner by design.
+ */
+export function extractRubySymbols(
+	filePath: string,
+	cwd: string,
+): SymbolInfo[] {
+	const raw = readValidatedSourceFile(filePath, cwd);
+	if (raw === null) return [];
+	const symbols: SymbolInfo[] = [];
+	const seen = new Set<string>();
+	let offset = 0;
+	let currentVisibility: 'public' | 'protected' | 'private' = 'public';
+	let heredocId: string | null = null;
+	for (const line of raw.split(/\r?\n/)) {
+		const trimmed = line.trim();
+		if (heredocId !== null) {
+			// Heredoc body: string data, not code — a literal `private` here
+			// must not flip the visibility section.
+			if (trimmed === heredocId) heredocId = null;
+		} else {
+			// The opener line itself still carries code (`QUERY = <<~SQL`).
+			// Context-anchored: binary shift (`arr <<item`, `x << y`) never
+			// opens a heredoc — only line start, `=`/`(`/`,`/`[`, or a
+			// value-position keyword (puts/print/raise/return/p) does.
+			const open = trimmed.match(
+				/(?:^|[=(,[]\s*|(?:puts|print|raise|return|p)\s+)<<[~-]?['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/,
+			);
+			if (open) heredocId = open[1];
+			if (trimmed === 'private' || trimmed === 'protected') {
+				currentVisibility = trimmed;
+			}
+			const moduleMatch = trimmed.match(/^module\s+([A-Z][A-Za-z0-9_:]*)/);
+			const classMatch = trimmed.match(/^class\s+([A-Z][A-Za-z0-9_:]*)/);
+			if (moduleMatch || classMatch) {
+				currentVisibility = 'public';
+			}
+			const constMatch = trimmed.match(/^([A-Z][A-Za-z0-9_]*)\s*=/);
+			const methodMatch = trimmed.match(
+				/^def\s+(?:(self)\.)?([A-Za-z_][A-Za-z0-9_?!]*)/,
+			);
+			const lineIndex = offset + Math.max(0, line.indexOf(trimmed));
+			if (moduleMatch || classMatch || constMatch || methodMatch) {
+				const singleton = Boolean(methodMatch?.[1]);
+				const shortName = methodMatch?.[2];
+				const name =
+					moduleMatch?.[1] ??
+					classMatch?.[1] ??
+					constMatch?.[1] ??
+					(singleton && shortName ? `self.${shortName}` : shortName!);
+				const visibility = singleton ? 'public' : currentVisibility;
+				addUniqueSymbol(symbols, seen, {
+					name,
+					kind: moduleMatch
+						? 'type'
+						: classMatch
+							? 'class'
+							: constMatch
+								? 'const'
+								: 'method',
+					exported: methodMatch
+						? visibility !== 'private' && !(shortName ?? '').startsWith('_')
+						: true,
+					signature: trimmed.substring(0, 100),
+					line: lineNumberAt(raw, lineIndex),
+				});
+			}
+		}
+		offset += line.length + 1;
+	}
+	return sortSymbols(symbols);
+}
+
+/**
+ * PHP symbols: namespaces, traits/interfaces/classes, functions and methods
+ * with visibility modifiers. Dynamic constructs (variable functions/classes,
+ * variable variables, Blade directives in `.blade.php`) are best-effort
+ * only — see docs/php-laravel.md.
+ */
+export function extractPhpSymbols(filePath: string, cwd: string): SymbolInfo[] {
+	const raw = readValidatedSourceFile(filePath, cwd);
+	if (raw === null) return [];
+	const content = stripLineCommentsForScan(raw);
+	const symbols: SymbolInfo[] = [];
+	const seen = new Set<string>();
+	const typeRanges: Array<{ start: number; end: number }> = [];
+	for (const match of content.matchAll(
+		/\bnamespace\s+([A-Za-z_\\][A-Za-z0-9_\\]*)\s*[;{]/g,
+	)) {
+		addUniqueSymbol(symbols, seen, {
+			name: match[1],
+			kind: 'type',
+			exported: true,
+			signature: lineTextAt(raw, match.index),
+			line: lineNumberAt(raw, match.index),
+		});
+	}
+	for (const match of content.matchAll(
+		/\b(?:final\s+|abstract\s+)?(class|interface|trait)\s+([A-Za-z_][A-Za-z0-9_]*)/g,
+	)) {
+		const bodyStart = content.indexOf('{', match.index);
+		const bodyEnd =
+			bodyStart === -1 ? null : findMatchingBrace(content, bodyStart);
+		if (bodyStart !== -1 && bodyEnd !== null) {
+			typeRanges.push({ start: bodyStart, end: bodyEnd });
+		}
+		addUniqueSymbol(symbols, seen, {
+			name: match[2],
+			kind: match[1] === 'class' ? 'class' : 'interface',
+			exported: !match[2].startsWith('_'),
+			signature: lineTextAt(raw, match.index),
+			line: lineNumberAt(raw, match.index),
+		});
+	}
+	for (const match of content.matchAll(
+		/\b(?:(public|protected|private|static|final|abstract)\s+)*function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
+	)) {
+		const insideType = typeRanges.some(
+			(range) => match.index >= range.start && match.index <= range.end,
+		);
+		const modifiers = match[0].slice(0, match[0].indexOf('function'));
+		const visibility = modifiers.match(/\b(public|protected|private)\b/)?.[1];
+		addUniqueSymbol(symbols, seen, {
+			name: match[2],
+			kind: insideType ? 'method' : 'function',
+			exported: visibility !== 'private' && !match[2].startsWith('_'),
+			signature: lineTextAt(raw, match.index),
+			line: lineNumberAt(raw, match.index),
+		});
+	}
+	return sortSymbols(symbols);
+}
+
 // ============ Workspace File Discovery ============
 
 /**
@@ -722,6 +1032,18 @@ function searchWorkspaceSymbols(
 			case '.go':
 				syms = extractGoSymbols(relFile, cwd);
 				break;
+			case '.dart':
+				syms = _internals.extractDartSymbols(relFile, cwd);
+				break;
+			case '.rb':
+			case '.rake':
+			case '.gemspec':
+				syms = _internals.extractRubySymbols(relFile, cwd);
+				break;
+			case '.php':
+			case '.phtml':
+				syms = _internals.extractPhpSymbols(relFile, cwd);
+				break;
 			default:
 				continue;
 		}
@@ -774,8 +1096,9 @@ export const symbols: ToolDefinition = createSwarmTool({
 	description:
 		'Extract all exported symbols from a source file: functions with signatures, ' +
 		'classes with public members, interfaces, types, enums, constants. ' +
-		'Supports TypeScript/JavaScript, Python, Rust, and Go. Use for architect planning, ' +
-		'designer scaffolding, and understanding module public API surface.',
+		'Supports TypeScript/JavaScript, Python, Rust, Go, Dart, Ruby, and PHP. ' +
+		'Use for architect planning, designer scaffolding, and understanding module ' +
+		'public API surface.',
 	args: {
 		file: z
 			.string()
@@ -925,11 +1248,23 @@ export const symbols: ToolDefinition = createSwarmTool({
 			case '.go':
 				syms = extractGoSymbols(file, cwd);
 				break;
+			case '.dart':
+				syms = _internals.extractDartSymbols(file, cwd);
+				break;
+			case '.rb':
+			case '.rake':
+			case '.gemspec':
+				syms = _internals.extractRubySymbols(file, cwd);
+				break;
+			case '.php':
+			case '.phtml':
+				syms = _internals.extractPhpSymbols(file, cwd);
+				break;
 			default:
 				return JSON.stringify(
 					{
 						file,
-						error: `Unsupported file extension: ${ext}. Supported: .ts, .tsx, .js, .jsx, .mjs, .cjs, .py, .pyw, .rs, .go`,
+						error: `Unsupported file extension: ${ext}. Supported: .ts, .tsx, .js, .jsx, .mjs, .cjs, .py, .pyw, .rs, .go, .dart, .rb, .rake, .gemspec, .php, .phtml`,
 						symbols: [],
 					},
 					null,
@@ -957,3 +1292,14 @@ export const symbols: ToolDefinition = createSwarmTool({
 		);
 	},
 });
+
+/**
+ * DI seam for testability — tests substitute via `_internals.fn` rather than
+ * `mock.module`, which leaks across Bun's shared test-runner process.
+ * @see AGENTS.md invariant #7
+ */
+export const _internals = {
+	extractDartSymbols,
+	extractRubySymbols,
+	extractPhpSymbols,
+};

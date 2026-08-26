@@ -114,25 +114,26 @@ const EXPECTATIONS: Record<string, Expectation> = {
 			'A bare Swift `import M` binds a whole module; named bindings require a kind-qualified import (`import class M.C`).',
 	},
 	dart: {
-		source: "import 'm.dart';\nclass C { void m() {} }\n",
+		// A `show` clause is the only import form that binds names (a bare or
+		// aliased Dart import binds a namespace/prefix).
+		source: "import 'm.dart' show A;\nclass C { void m() {} }\n",
 		expectMethods: false,
-		expectBindings: false,
+		expectBindings: true,
 		reason:
-			'Dart hardening is issue #1531. A bare Dart import binds no named symbol without a `show` clause.',
+			'Dart class members are not def-captured as methods: the tree-sitter path captures top-level function_signature defs and class/mixin/enum/extension types; augmentation (#1531) adds no member defs. Bindings come from `show` clauses.',
 	},
 	ruby: {
 		source: "require 'm'\nclass C\n  def m\n  end\nend\n",
-		expectMethods: false,
+		expectMethods: true,
 		expectBindings: false,
 		reason:
-			'Ruby hardening is issue #1531. `require` loads a file and binds no name, and members are not re-typed to method.',
+			'Ruby require/require_relative load whole files and bind no names (module-level require semantics); mixin inclusion (include/extend) is not an import edge in this extractor. Methods are typed via the #1531 augmentation layer.',
 	},
 	php: {
-		source: '<?php\nuse M\\A;\nclass C { public function m() {} }\n',
-		expectMethods: false,
-		expectBindings: false,
-		reason:
-			'PHP hardening is issue #1531. Members are not re-typed to method today.',
+		source:
+			'<?php\nuse M\\A as Alias;\nclass C { public function m() { Alias::x(); } }\n',
+		expectMethods: true,
+		expectBindings: true,
 	},
 };
 
