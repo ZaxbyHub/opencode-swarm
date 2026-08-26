@@ -267,6 +267,90 @@ describe('collectErrorChannelDiscardErrors — filesystem-backed, allowlist supp
 		}
 	});
 
+	// Closeout review: a single-attempt readdirSync fails the whole
+	// (CI-wired, 3-OS-matrix) gate closed on any thrown error, including a
+	// momentarily busy filesystem (AV scanner / search indexer holding a
+	// directory handle throws EBUSY/EPERM/EMFILE/ENFILE). A transient error
+	// must be retried and, once the filesystem is available again, must NOT
+	// be reported as an unreadable subtree.
+	test('closeout review: a transient EBUSY on readdirSync is retried and does not fail the scan closed', () => {
+		const root = canonicalMkdtemp('error-channel-discard-fixture-');
+		writeFixture(root, 'src/hooks/clean.ts', 'export function f() {}\n');
+		fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
+		fs.writeFileSync(
+			path.join(root, 'scripts', 'error-channel-discard-allowlist.txt'),
+			'',
+			'utf-8',
+		);
+
+		const originalReaddirSync = _internals.readdirSync;
+		let srcAttempts = 0;
+		_internals.readdirSync = ((
+			dir: fs.PathLike,
+			options?: { withFileTypes: true },
+		) => {
+			if (String(dir).endsWith(path.join('src'))) {
+				srcAttempts++;
+				if (srcAttempts < 2) {
+					const err = new Error(
+						'EBUSY: resource busy or locked (simulated)',
+					) as NodeJS.ErrnoException;
+					err.code = 'EBUSY';
+					throw err;
+				}
+			}
+			return originalReaddirSync(dir, options as { withFileTypes: true });
+		}) as typeof fs.readdirSync;
+
+		try {
+			const result = collectErrorChannelDiscardErrors(root);
+			expect(srcAttempts).toBeGreaterThan(1);
+			expect(result.errors.some((e) => e.includes('INCOMPLETE SCAN'))).toBe(
+				false,
+			);
+			expect(result.scannedFiles).toBeGreaterThan(0);
+		} finally {
+			_internals.readdirSync = originalReaddirSync;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test('closeout review: a persistent transient error (EBUSY) still fails closed after retries exhaust', () => {
+		const root = canonicalMkdtemp('error-channel-discard-fixture-');
+		writeFixture(root, 'src/hooks/clean.ts', 'export function f() {}\n');
+		fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
+		fs.writeFileSync(
+			path.join(root, 'scripts', 'error-channel-discard-allowlist.txt'),
+			'',
+			'utf-8',
+		);
+
+		const originalReaddirSync = _internals.readdirSync;
+		_internals.readdirSync = ((
+			dir: fs.PathLike,
+			options?: { withFileTypes: true },
+		) => {
+			if (String(dir).endsWith(path.join('src'))) {
+				const err = new Error(
+					'EBUSY: resource busy or locked (simulated)',
+				) as NodeJS.ErrnoException;
+				err.code = 'EBUSY';
+				throw err;
+			}
+			return originalReaddirSync(dir, options as { withFileTypes: true });
+		}) as typeof fs.readdirSync;
+
+		try {
+			const result = collectErrorChannelDiscardErrors(root);
+			expect(result.errors.some((e) => e.includes('INCOMPLETE SCAN'))).toBe(
+				true,
+			);
+		} finally {
+			_internals.readdirSync = originalReaddirSync;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	test('*.test.ts files are excluded from the scan', () => {
 		const root = canonicalMkdtemp('error-channel-discard-fixture-');
 		writeFixture(

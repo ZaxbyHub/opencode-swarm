@@ -47,10 +47,11 @@ function extractFailureReason(error: unknown): string | undefined {
 	// session-reflection.ts surfaces (the LLM prompt, the always-printed
 	// signals block, and the deterministic report written to
 	// .swarm/session-reflection.md). Route through the canonical
-	// sanitizeFailureEvidenceDisplay (URL/secret redaction + C0/ESC control-
-	// char strip) rather than a narrower ad-hoc strip, so a captured reason
-	// can neither smuggle ANSI escapes into a terminal/report nor retain a
-	// secret that happened to appear in tool stderr.
+	// sanitizeFailureEvidenceDisplay (URL/secret redaction + control-char
+	// strip) rather than a narrower ad-hoc strip. This is best-effort
+	// defense-in-depth, not a security boundary (see that function's doc
+	// comment) — it closes the ANSI-escape and common-keyword-secret cases
+	// but is not a guarantee against every adversarial encoding.
 	const trimmed = sanitizeFailureEvidenceDisplay(raw).trim();
 	if (!trimmed) return undefined;
 	return trimmed.length > MAX_TOOL_FAILURE_REASON_LENGTH

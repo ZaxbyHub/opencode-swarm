@@ -95,8 +95,8 @@ const EQ_NEQ_OPERATORS: ReadonlySet<ts.SyntaxKind> = new Set([
 
 /**
  * ERROR_CHANNEL_DISCARD_ENFORCE truth table (mirrors
- * check-test-file-cap.ts's resolveEnforce): unset OR any value other than
- * 0/false/no/off → hard-fail (default enforce). 0/false/no/off → soft-warn.
+ * check-test-file-cap.ts's resolveEnforce): unset, or any value other than
+ * 0/false/no/off, → hard-fail (default enforce). 0/false/no/off → soft-warn.
  */
 export function resolveEnforce(raw: string | undefined): boolean {
 	if (raw === undefined) return true;
@@ -285,6 +285,60 @@ export const _internals = {
 };
 
 /**
+ * Error codes that indicate a momentarily busy filesystem (an AV scanner or
+ * search indexer holding a directory handle) rather than a genuinely
+ * unreadable subtree. Retried with backoff before being recorded as a real
+ * failure — see `readDirWithRetry`.
+ */
+const TRANSIENT_READDIR_ERROR_CODES = new Set([
+	'EBUSY',
+	'EMFILE',
+	'ENFILE',
+	'EPERM',
+]);
+const TRANSIENT_READDIR_RETRY_DELAYS_MS = [20, 60, 150];
+
+function syncSleep(ms: number): void {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * PR #2363 closeout review: the original single-attempt `readdirSync` fails
+ * the whole (now CI-wired, 3-OS-matrix) gate closed on ANY thrown error,
+ * including transient ones — an AV scanner or search indexer holding a
+ * directory handle throws EBUSY/EPERM/EMFILE/ENFILE on Windows with enough
+ * frequency to have produced an observed 1-in-9 flake in this exact test
+ * suite during review. Retrying transient codes with short backoff before
+ * giving up preserves the fail-closed intent (a genuinely unreadable
+ * subtree, e.g. real permission denial or a broken symlink, still fails
+ * after retries exhaust) without making a repo-wide ratchet hostage to a
+ * momentary OS-level lock.
+ */
+function readDirWithRetry(dir: string): fs.Dirent[] {
+	let lastErr: unknown;
+	for (let attempt = 0; attempt <= TRANSIENT_READDIR_RETRY_DELAYS_MS.length; attempt++) {
+		try {
+			return _internals.readdirSync(dir, { withFileTypes: true });
+		} catch (err) {
+			lastErr = err;
+			const code =
+				err && typeof err === 'object' && 'code' in err
+					? String((err as { code: unknown }).code)
+					: undefined;
+			if (
+				!code ||
+				!TRANSIENT_READDIR_ERROR_CODES.has(code) ||
+				attempt === TRANSIENT_READDIR_RETRY_DELAYS_MS.length
+			) {
+				throw err;
+			}
+			syncSleep(TRANSIENT_READDIR_RETRY_DELAYS_MS[attempt]);
+		}
+	}
+	throw lastErr;
+}
+
+/**
  * Recursively yield every `.ts` file under `dir`, sorted for determinism.
  *
  * PR #2363 review: an unreadable subtree (permissions, a broken symlink)
@@ -300,9 +354,9 @@ function* walkTsFiles(
 ): Generator<string> {
 	let entries: fs.Dirent[];
 	try {
-		entries = _internals
-			.readdirSync(dir, { withFileTypes: true })
-			.sort((a, b) => a.name.localeCompare(b.name));
+		entries = readDirWithRetry(dir).sort((a, b) =>
+			a.name.localeCompare(b.name),
+		);
 	} catch (err) {
 		unreadableDirs.push(
 			`${dir}: ${err instanceof Error ? err.message : String(err)}`,
