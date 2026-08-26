@@ -114,12 +114,6 @@ describe('tool failure classification', () => {
 		expect(display).toContain('real message');
 	});
 
-	// Stage B review: a naive fix (strip control chars LAST, or strip them by
-	// REPLACING with a space rather than removing) leaves this bypassable —
-	// a control byte embedded inside a keyword breaks the `\b(keyword)\b`
-	// redaction regex's word boundary, so redaction silently no-ops and the
-	// secret survives. Control chars must be REMOVED (not space-replaced)
-	// BEFORE redaction runs, so the keyword rejoins and redaction matches.
 	it('redacts a secret even when a control byte is embedded inside the keyword or the value', () => {
 		const keywordSplit =
 			invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
@@ -135,17 +129,6 @@ describe('tool failure classification', () => {
 		expect(valueSplit).not.toContain('secret-abc123');
 	});
 
-	// Stage B review round 2: the round-1 fix (remove control chars, THEN
-	// redact) closed the split bypass above but opened the opposite one — a
-	// control byte sitting BETWEEN unrelated preceding text and a keyword
-	// MERGES them once the byte is removed ("qux\x1btoken" ->
-	// "quxtoken"), which breaks the `\b` boundary from the other side and
-	// again leaves the secret unredacted. Reproduced and confirmed while
-	// fixing: `sanitizeFailureEvidenceDisplay('qux\x1btoken=hunter2')` ->
-	// `"quxtoken=hunter2"` under the round-1 fix. The real fix redacts
-	// FIRST against the raw (control-char-intact) value, so `\b` — which
-	// already treats a control byte as non-word — gives a genuine boundary
-	// here without needing removal at all.
 	it('redacts a keyword even when a control byte sits between it and unrelated preceding text (no false join)', () => {
 		const joined = invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
 			'qux\x1btoken=hunter2',
@@ -154,15 +137,66 @@ describe('tool failure classification', () => {
 		expect(joined).toContain('token=<redacted>');
 	});
 
-	// Stage B review round 3: a control byte embedded inside the literal
-	// "Bearer" prefix (not the credential keyword itself) broke the optional
-	// `(?:Bearer\s+)?` match, truncating the redaction span before the real
-	// secret and leaking it in cleartext after a following space.
 	it('redacts the full value even when a control byte is embedded inside the "Bearer" prefix', () => {
 		const display = invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
 			'authorization=Be\x1barer topsecret123',
 		);
 		expect(display).not.toContain('topsecret123');
 		expect(display).toContain('authorization=<redacted>');
+	});
+
+	// Property test (Stage B round 4): four prior rounds each found a
+	// leak from a single control/whitespace byte at a different
+	// inter-token position. Instead of one regression test per bypass,
+	// enumerate every single-byte and adjacent-pair insertion across every
+	// pattern family and assert the secret never survives.
+	it('never leaks a secret for any single or adjacent-pair fill-byte insertion across every credential pattern family', () => {
+		const SECRET = 'hunter2xyz';
+		const FILL_BYTES = ['\x1b', '\x00', '\x7f', '\t', '\r', '\n'];
+		const TEMPLATES = [
+			(s: string) => `authorization=Bearer ${s}`,
+			(s: string) => `authorization: Bearer ${s}`,
+			(s: string) => `token=${s}`,
+			(s: string) => `secret=${s}`,
+			(s: string) => `password=${s}`,
+			(s: string) => `api_key=${s}`,
+			(s: string) => `API_KEY=${s}`,
+			(s: string) => `MY_AUTH=${s}`,
+			(s: string) => `X_TOKEN=${s}`,
+		];
+
+		const leaks: string[] = [];
+		for (const template of TEMPLATES) {
+			const base = template(SECRET);
+			for (let i = 0; i <= base.length; i++) {
+				for (const b of FILL_BYTES) {
+					const single = base.slice(0, i) + b + base.slice(i);
+					const out =
+						invocationFailureTestExports.sanitizeFailureEvidenceDisplay(single);
+					if (out.includes(SECRET)) {
+						leaks.push(
+							`single@${i} byte=${JSON.stringify(b)}: ${JSON.stringify(base)} -> ${JSON.stringify(out)}`,
+						);
+					}
+					for (let j = i; j <= base.length; j++) {
+						for (const b2 of FILL_BYTES) {
+							const pair =
+								base.slice(0, i) + b + base.slice(i, j) + b2 + base.slice(j);
+							const out2 =
+								invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
+									pair,
+								);
+							if (out2.includes(SECRET)) {
+								leaks.push(
+									`pair@${i},${j} bytes=${JSON.stringify(b)},${JSON.stringify(b2)}: ${JSON.stringify(base)} -> ${JSON.stringify(out2)}`,
+								);
+							}
+						}
+					}
+				}
+			}
+		}
+
+		expect(leaks.slice(0, 10)).toEqual([]);
 	});
 });
