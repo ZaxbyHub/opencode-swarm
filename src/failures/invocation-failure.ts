@@ -120,7 +120,16 @@ export function sanitizeFailureEvidenceDisplay(value: string): string {
 		.replace(
 			/\b([A-Z][A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH)[A-Z0-9_]*)=([^\s]+)/g,
 			(_, key: string) => `${key}=<redacted>`,
-		);
+		)
+		// PR #2363 review: this display string is rendered to terminals/logs
+		// (e.g. laneTerminalErrorReason in dispatch-lanes.ts) without further
+		// escaping downstream. An unstripped ESC/C0 sequence in provider-
+		// controlled error text could spoof terminal output or consume the
+		// caller's length budget before the meaningful text. Collapse C0
+		// controls (incl. ESC \x1b) and DEL to a single space, matching the
+		// existing stripControlChars convention in src/commands/doctor.ts.
+		// biome-ignore lint/suspicious/noControlCharactersInRegex: intentionally matching control chars to strip them
+		.replace(/[\x00-\x1f\x7f]+/g, ' ');
 	return boundedUtf8(redacted.trim());
 }
 

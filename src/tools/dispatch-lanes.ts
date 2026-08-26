@@ -2463,6 +2463,24 @@ async function collectOnce(
 		// — a stamped `time.completed` OR an affirmative `idle` — either of which
 		// rules out a live in-flight retry, which the host models as an ApiError
 		// carried on a still-running message.
+		// PR #2363 review (FB-004): `completedAt` stamped is not, on its own,
+		// proof the session won't retry — the host models an in-flight retry as
+		// an ApiError already carrying a completed message within the same
+		// SDK-modeled turn (RetryPart/SessionStatus.retry), and this repo has no
+		// test exercising that exact combination. When readiness is affirmatively
+		// 'idle' the host has told us directly there is nothing left running, so
+		// the completedAt fallback is only load-bearing when readiness could NOT
+		// be read (the six-way 'unknown' collapse). In that narrower case, refuse
+		// to settle+delete a lane the host explicitly marked retryable —
+		// `hostRetryable` (ApiError.data.isRetryable) was previously computed and
+		// discarded; gate on it instead of silently deleting a session the host
+		// itself said may still recover. Aborts are exempt: `MessageAbortedError`
+		// is unambiguous and carries no `isRetryable` semantics.
+		const relyingOnCompletedAtOnly =
+			readiness !== 'idle' && Number.isFinite(transcript.completedAt);
+		const hostSaysRetryable =
+			transcript.terminalError?.kind !== 'aborted' &&
+			transcript.terminalError?.hostRetryable === true;
 		if (
 			transcript.terminalError &&
 			// Load-bearing: a lane that produced REAL OUTPUT must keep taking the
@@ -2475,7 +2493,8 @@ async function collectOnce(
 			// output_length classification unreachable. Only the fetch-window
 			// truncation term is relevant to "did this lane produce no output".
 			!transcript.windowTruncated &&
-			(Number.isFinite(transcript.completedAt) || readiness === 'idle')
+			(Number.isFinite(transcript.completedAt) || readiness === 'idle') &&
+			!(relyingOnCompletedAtOnly && hostSaysRetryable)
 		) {
 			const settledStatus =
 				transcript.terminalError.kind === 'aborted' ? 'cancelled' : 'error';

@@ -99,4 +99,18 @@ describe('tool failure classification', () => {
 		expect(display).not.toContain('secret@example.com');
 		expect(Buffer.byteLength(display, 'utf8')).toBeLessThanOrEqual(512);
 	});
+
+	// PR #2363 review (FB-006): this display string is rendered to
+	// terminals/logs downstream (e.g. laneTerminalErrorReason in
+	// dispatch-lanes.ts) without further escaping. An unstripped ESC/C0
+	// sequence in provider-controlled text could spoof terminal output or
+	// consume a caller's length budget before the meaningful text.
+	it('strips C0 control characters and ESC/ANSI sequences', () => {
+		const display = invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
+			'\x1b[31mFAKE ERROR\x1b[0m real message\x00\x07',
+		);
+
+		expect(display).not.toMatch(/[\x00-\x1f\x7f]/);
+		expect(display).toContain('real message');
+	});
 });

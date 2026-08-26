@@ -48,6 +48,7 @@ const CI_COMMAND_TO_SKILL_STRING: Record<string, string> = {
 	'bash scripts/check-test-tmpdir.sh': 'bash scripts/check-test-tmpdir.sh',
 	'bash scripts/check-bash-portability.sh':
 		'bash scripts/check-bash-portability.sh',
+	'bun run check:error-channel-discard': 'bun run check:error-channel-discard',
 	'cd scripts/swarm-model && node --test':
 		'(cd scripts/swarm-model && node --test)',
 };

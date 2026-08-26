@@ -13,4 +13,3 @@
 - **`swarm_apply_patch` now says why the fuzzy fallback failed.** When an exact hunk match fails and the opt-in fuzzy fallback also fails, the `context-mismatch` message carries the fuzzy failure reason (`… (fuzzy fallback: <reason>)`) instead of reporting only that the context did not match. Same defect class as the lane fix: the error value was read solely as an `=== null` existence test and its content discarded.
 
 - **Tool-failure reasons now reach the session reflection surfaces.** `agent-activity` previously collapsed a tool's `output.error` into a boolean that only incremented a failure counter, so nothing recorded *why* a tool failed. A bounded, deduplicated, length-capped sample now rides on the tool aggregate and renders in all three reflection surfaces — the deterministic report, the signals block that `/swarm close` always prints, and the LLM delegate prompt.
-

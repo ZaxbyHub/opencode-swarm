@@ -8,6 +8,7 @@
 import * as nodePath from 'node:path';
 import type { PluginConfig } from '../config/schema';
 import { atomicWriteFile } from '../evidence/task-file';
+import { sanitizeFailureEvidenceDisplay } from '../failures/invocation-failure';
 import type { ToolAggregate } from '../state';
 import { swarmState } from '../state';
 import { warn } from '../utils';
@@ -40,7 +41,17 @@ function extractFailureReason(error: unknown): string | undefined {
 		raw = typeof maybeMessage === 'string' ? maybeMessage : undefined;
 	}
 	if (!raw) return undefined;
-	const trimmed = raw.trim();
+	// PR #2363 review: `output.error` is frequently colored shell stderr
+	// (cargo/npm/tsc/git/pytest), and any provider/tool text could carry a
+	// bearer token, API key, or URL. It is rendered unescaped at three
+	// session-reflection.ts surfaces (the LLM prompt, the always-printed
+	// signals block, and the deterministic report written to
+	// .swarm/session-reflection.md). Route through the canonical
+	// sanitizeFailureEvidenceDisplay (URL/secret redaction + C0/ESC control-
+	// char strip) rather than a narrower ad-hoc strip, so a captured reason
+	// can neither smuggle ANSI escapes into a terminal/report nor retain a
+	// secret that happened to appear in tool stderr.
+	const trimmed = sanitizeFailureEvidenceDisplay(raw).trim();
 	if (!trimmed) return undefined;
 	return trimmed.length > MAX_TOOL_FAILURE_REASON_LENGTH
 		? `${trimmed.slice(0, MAX_TOOL_FAILURE_REASON_LENGTH)}...`

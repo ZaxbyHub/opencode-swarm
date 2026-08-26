@@ -272,17 +272,41 @@ export function scanSourceForErrorChannelDiscard(
  * stub `_internals.scanSourceForErrorChannelDiscard` and assert it is
  * invoked once per scanned file, so the per-file loop can't silently
  * disconnect from the scanner.
+ *
+ * `readdirSync` is also seamed (PR #2363 review) so a test can force a
+ * traversal failure deterministically. Real filesystem permission tricks
+ * (`chmod 000`) are not portable across this repo's macOS/Linux/Windows CI
+ * matrix — Windows does not enforce POSIX directory-read permission bits the
+ * same way — so DI is the only way to exercise this path on every OS.
  */
-export const _internals = { scanSourceForErrorChannelDiscard };
+export const _internals = {
+	scanSourceForErrorChannelDiscard,
+	readdirSync: fs.readdirSync,
+};
 
-/** Recursively yield every `.ts` file under `dir`, sorted for determinism. */
-function* walkTsFiles(dir: string): Generator<string> {
+/**
+ * Recursively yield every `.ts` file under `dir`, sorted for determinism.
+ *
+ * PR #2363 review: an unreadable subtree (permissions, a broken symlink)
+ * previously vanished silently — `readdirSync` failures were swallowed and
+ * the walk just yielded fewer files, so a partial scan could still exit 0.
+ * `unreadableDirs` is a caller-owned accumulator; every failed directory is
+ * recorded on it so the caller can fail the check closed instead of
+ * reporting "no violations found" over files that were never scanned.
+ */
+function* walkTsFiles(
+	dir: string,
+	unreadableDirs: string[],
+): Generator<string> {
 	let entries: fs.Dirent[];
 	try {
-		entries = fs
+		entries = _internals
 			.readdirSync(dir, { withFileTypes: true })
 			.sort((a, b) => a.name.localeCompare(b.name));
-	} catch {
+	} catch (err) {
+		unreadableDirs.push(
+			`${dir}: ${err instanceof Error ? err.message : String(err)}`,
+		);
 		return;
 	}
 	for (const entry of entries) {
@@ -290,7 +314,7 @@ function* walkTsFiles(dir: string): Generator<string> {
 		if (entry.name === '__tests__') continue;
 		const full = path.join(dir, entry.name);
 		if (entry.isDirectory()) {
-			yield* walkTsFiles(full);
+			yield* walkTsFiles(full, unreadableDirs);
 		} else if (entry.isFile() && entry.name.endsWith('.ts')) {
 			yield full;
 		}
@@ -348,8 +372,9 @@ export function collectErrorChannelDiscardErrors(
 	const errors: string[] = [];
 	let scannedFiles = 0;
 	let allowlistedSkipped = 0;
+	const unreadableDirs: string[] = [];
 
-	for (const file of walkTsFiles(srcDir)) {
+	for (const file of walkTsFiles(srcDir, unreadableDirs)) {
 		if (file.endsWith('.test.ts')) continue;
 		const rel = path.relative(root, file).replace(/\\/g, '/');
 		scannedFiles++;
@@ -362,6 +387,15 @@ export function collectErrorChannelDiscardErrors(
 			}
 			errors.push(formatViolation(v));
 		}
+	}
+
+	// PR #2363 review: fail closed on an incomplete scan. A partial traversal
+	// must never be reported as "no violations found" — that would be a green
+	// result the check never actually earned.
+	for (const failure of unreadableDirs) {
+		errors.push(
+			`INCOMPLETE SCAN: directory unreadable, contents not checked: ${failure}`,
+		);
 	}
 
 	return { errors, scannedFiles, allowlistedSkipped };

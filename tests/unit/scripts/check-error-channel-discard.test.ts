@@ -12,6 +12,7 @@ import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+	_internals,
 	allowlistKey,
 	collectErrorChannelDiscardErrors,
 	FLAGGED_PROPS,
@@ -224,6 +225,46 @@ describe('collectErrorChannelDiscardErrors — filesystem-backed, allowlist supp
 		expect(result.allowlistedSkipped).toBe(1);
 
 		fs.rmSync(root, { recursive: true, force: true });
+	});
+
+	test('PR #2363 review: an unreadable subtree fails the check closed instead of silently under-scanning', () => {
+		const root = canonicalMkdtemp('error-channel-discard-fixture-');
+		// A clean file the scanner CAN read, so a naive "any violations found?"
+		// gate would otherwise report success despite the sibling directory
+		// never being traversed at all.
+		writeFixture(root, 'src/hooks/clean.ts', 'export function f() {}\n');
+		fs.mkdirSync(path.join(root, 'src', 'blocked'), { recursive: true });
+		fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
+		fs.writeFileSync(
+			path.join(root, 'scripts', 'error-channel-discard-allowlist.txt'),
+			'',
+			'utf-8',
+		);
+
+		const originalReaddirSync = _internals.readdirSync;
+		_internals.readdirSync = ((
+			dir: fs.PathLike,
+			options?: { withFileTypes: true },
+		) => {
+			if (String(dir).endsWith(path.join('src', 'blocked'))) {
+				throw new Error('EACCES: permission denied (simulated)');
+			}
+			return originalReaddirSync(dir, options as { withFileTypes: true });
+		}) as typeof fs.readdirSync;
+
+		try {
+			const result = collectErrorChannelDiscardErrors(root);
+			// Fails closed: a partial scan is reported as a FAILURE, never as
+			// zero violations found.
+			expect(result.errors.length).toBeGreaterThan(0);
+			expect(result.errors.some((e) => e.includes('INCOMPLETE SCAN'))).toBe(
+				true,
+			);
+			expect(result.errors.some((e) => e.includes('blocked'))).toBe(true);
+		} finally {
+			_internals.readdirSync = originalReaddirSync;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	test('*.test.ts files are excluded from the scan', () => {
