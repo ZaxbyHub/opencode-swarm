@@ -1,7 +1,9 @@
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
 import { redactPath } from '../hooks/guardrails/audit-log.js';
 import { redactShellCommand } from '../hooks/guardrails/helpers.js';
+import {
+	getShellAuditFoldedSummary,
+	readShellAuditTail,
+} from '../hooks/guardrails/shell-audit-store.js';
 
 export interface GuardrailLogEntry {
 	ts: string;
@@ -18,6 +20,14 @@ const BLOCK_TYPES = new Set<string>([
 	'scope_violation',
 	'destructive_block',
 ]);
+
+/** Bounded output: only the most recent N entries are rendered, with an
+ *  explicit footer disclosing the cap (issue #2040 requirement 3: stable,
+ *  bounded output). */
+const MAX_RENDERED_ENTRIES = 200;
+
+/** Per-rendered-line character cap for the diagnostic display. */
+const MAX_RENDERED_LINE_CHARS = 512;
 
 function isBlockEntry(entry: GuardrailLogEntry): boolean {
 	if (entry.type === null || entry.type === undefined) return false;
@@ -45,39 +55,45 @@ function redactSummary(entry: GuardrailLogEntry): string {
 	return '';
 }
 
+/**
+ * Display sanitization (issue #2040 edge case: newline/control/ANSI/bidi
+ * injection). Strips C0/C1 control characters (tab preserved), ANSI CSI
+ * escape sequences, and bidirectional-override controls from every rendered
+ * field so stored bytes cannot re-shape or forge the markdown output.
+ */
+function sanitizeDisplayText(value: string): string {
+	return (
+		value
+			// biome-ignore lint/suspicious/noControlCharactersInRegex: intentionally matching control chars to strip them
+			.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '') // ANSI CSI sequences
+			// biome-ignore lint/suspicious/noControlCharactersInRegex: intentionally matching control chars to strip them
+			.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '') // C0/C1 minus tab
+			.replace(/[\u202a-\u202e\u2066-\u2069]/g, '') // bidi overrides / isolates
+			.replace(/\u200e|\u200f/g, '') // LRM / RLM marks
+	);
+}
+
 function formatEntry(entry: GuardrailLogEntry): string {
 	const decisionType = entry.type ?? 'shell';
 	const summary = redactSummary(entry);
 
-	return `- [${entry.ts}] ${decisionType} | agent: ${entry.agent} | ${summary}`;
+	const line = `- [${sanitizeDisplayText(entry.ts)}] ${sanitizeDisplayText(
+		decisionType,
+	)} | agent: ${sanitizeDisplayText(entry.agent)} | ${sanitizeDisplayText(summary)}`;
+	return line.length > MAX_RENDERED_LINE_CHARS
+		? `${line.slice(0, MAX_RENDERED_LINE_CHARS)}…`
+		: line;
 }
 
-export async function handleGuardrailLog(
-	directory: string,
-	args: string[],
-): Promise<string> {
-	const auditPath = path.join(
-		directory,
-		'.swarm',
-		'session',
-		'shell-audit.jsonl',
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		(value.constructor === Object || Object.getPrototypeOf(value) === null)
 	);
+}
 
-	let raw: string;
-	try {
-		raw = await fs.readFile(auditPath, 'utf-8');
-	} catch (error) {
-		if (
-			typeof error === 'object' &&
-			error !== null &&
-			'code' in error &&
-			(error as { code?: string }).code === 'ENOENT'
-		) {
-			return 'No guardrail decisions recorded yet.';
-		}
-		throw error;
-	}
-
+function parseEntries(raw: string): GuardrailLogEntry[] {
 	const lines = raw.split(/\r?\n/);
 	const entries: GuardrailLogEntry[] = [];
 
@@ -117,11 +133,35 @@ export async function handleGuardrailLog(
 		entries.push(entry);
 	}
 
-	if (entries.length === 0) {
-		return 'No guardrail decisions recorded yet.';
-	}
+	return entries;
+}
+
+export async function handleGuardrailLog(
+	directory: string,
+	args: string[],
+): Promise<string> {
+	// BOUNDED READ (issue #2040 requirement 3): the newest readMaxBytes of the
+	// store, never the whole file. Legacy records re-redact at render time
+	// through the CURRENT policy (redactSummary) — no legacy bypass.
+	const window = readShellAuditTail(directory);
+	const entries = parseEntries(window.text);
 
 	const blocksOnly = args.includes('--blocks-only');
+
+	if (entries.length === 0) {
+		// A manifest-present store whose window is fully folded still has
+		// history — disclose it instead of claiming nothing was recorded.
+		const folded = getShellAuditFoldedSummary(directory);
+		if (folded !== null && folded.totalDecisions > 0) {
+			const note = `${folded.totalDecisions} earlier decision(s) compacted into the audit manifest.`;
+			return blocksOnly
+				? `No guardrail block decisions in the read window; ${note}`
+				: `No guardrail decisions in the read window; ${note}`;
+		}
+		return blocksOnly
+			? 'No guardrail block decisions recorded yet.'
+			: 'No guardrail decisions recorded yet.';
+	}
 
 	const filtered = blocksOnly ? entries.filter(isBlockEntry) : entries;
 
@@ -137,19 +177,35 @@ export async function handleGuardrailLog(
 		return diff === 0 ? 0 : diff;
 	});
 
+	const rendered = filtered.slice(0, MAX_RENDERED_ENTRIES);
+
 	const header = blocksOnly
 		? '# Guardrail Block Log (most-recent-first)'
 		: '# Guardrail Decision Log (most-recent-first)';
 
-	const body = filtered.map(formatEntry).join('\n');
+	const body = rendered.map(formatEntry).join('\n');
 
-	return `${header}\n\n${body}`;
-}
+	// Bounded disclosure footer (issue #2040: coverage gaps are explicit).
+	const notes: string[] = [];
+	if (rendered.length < filtered.length) {
+		notes.push(
+			`showing ${rendered.length} most recent of ${filtered.length} matching entries in the read window`,
+		);
+	}
+	if (window.truncated || window.coverage === 'truncated') {
+		notes.push(
+			`read window truncated to the newest bounded tail (older decisions may exist beyond it)`,
+		);
+	}
+	const folded = getShellAuditFoldedSummary(directory);
+	if (folded !== null && folded.totalDecisions > 0) {
+		notes.push(
+			`${folded.totalDecisions} earlier decision(s) already compacted into the audit manifest (lifetime total)`,
+		);
+	}
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-	return (
-		typeof value === 'object' &&
-		value !== null &&
-		(value.constructor === Object || Object.getPrototypeOf(value) === null)
-	);
+	if (notes.length === 0) {
+		return `${header}\n\n${body}`;
+	}
+	return `${header}\n\n${body}\n\n---\n${notes.join('; ')}.`;
 }

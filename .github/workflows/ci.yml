@@ -206,6 +206,9 @@ jobs:
       - name: Core event store usage ratchet (issue #2039)
         if: needs.detect-release.outputs.is-release != 'true'
         run: bun run check:core-events
+      - name: Shell-audit store usage ratchet (issue #2040)
+        if: needs.detect-release.outputs.is-release != 'true'
+        run: bun run check:shell-audit
       - name: Cross-contamination check (mock.module / vi.mock leaks)
         if: needs.detect-release.outputs.is-release != 'true'
         shell: bash

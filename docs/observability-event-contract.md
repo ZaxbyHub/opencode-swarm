@@ -3,7 +3,7 @@
 Companion to `docs/evidence-and-telemetry.md` (evidence bundles + the legacy
 telemetry stream from a user's point of view) and `docs/engineering-invariants.md`
 (the invariant this PR establishes). This document is the contract definition for
-`src/observability/`: the canonical event envelope, the 48-entry event catalog,
+`src/observability/`: the canonical event envelope, the 49-entry event catalog,
 the legacy adapter, sampling/cardinality rules, the OTel mapping pin, and the
 exhaustive producer/consumer matrix across all seventeen known observability
 stores in the repository.
@@ -16,7 +16,7 @@ Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
 
 **What this PR defines.** A single canonical `ObservabilityEvent` envelope
 (`src/observability/envelope.ts`), a discriminated catalog of every event kind
-the codebase emits today (`src/observability/catalog.ts`, 48 entries), a
+the codebase emits today (`src/observability/catalog.ts`, 49 entries), a
 relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. It wires the envelope into the one live production
@@ -75,7 +75,7 @@ in production stops anything or is visible anywhere today — it is not.
 
 Defined in `src/observability/envelope.ts` as a zod schema (`z.infer`d for the
 `ObservabilityEvent` type). The schema is safe-parsed by the tests
-(`tests/unit/observability/envelope-roundtrip.test.ts`, all 48 kinds). It is **not** parsed by the
+(`tests/unit/observability/envelope-roundtrip.test.ts`, all 49 kinds). It is **not** parsed by the
 CI contract check, and **not** parsed on the `emit()` hot path; `createObservation` builds a plain
 object and never calls `.parse()`, because parsing would reallocate on every
 emit and would clone or reject `legacy.raw` (see §4).
@@ -182,9 +182,9 @@ those inputs before this change.
 
 ---
 
-## 5. The 48-entry catalog
+## 5. The 49-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 48 entries = the 38 pre-existing members of
+Source: `src/observability/catalog.ts`. Exactly 49 entries = the 38 pre-existing members of
 `TelemetryEvent` (`src/telemetry.ts:15-109`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
@@ -635,6 +635,26 @@ migration discipline (announce, then roll), and the v1 fold of a v2 manifest
 line is lossy for the window — do not stage a v2 writer against v1 readers
 for longer than the cache-refresh window.
 
+#### shell_audit_health
+Category `lifecycle`, severity `notice`, privacy `operational`. Producer
+`src/telemetry.ts:1037` (`shellAuditHealth`, called by the bounded
+`.swarm/session/shell-audit.jsonl` security-audit store in
+`src/hooks/guardrails/shell-audit-store.ts` after a compaction or close cut;
+issue #2040). Consumers: none — owner **#2047**. Retention: **#2047**. No
+workflow ID is required: the aggregate is store-level and counts-only. The
+payload is strictly bounded counts: `trigger` (`compaction`/`close`),
+`accepted_count`, `compacted_count`, `retained_count`, `dropped_count`,
+`corrupt_count`, `oldest_timestamp`, `newest_timestamp`, `bytes`, and
+`limit_bytes`. Command content, filesystem paths, agent names, and session
+identifiers are never emitted (path redaction by omission — issue #2040
+requirement 5: no raw command/path/session/repo IDs in metric labels). This
+is the health signal for the issue-#2040 bounded shell-audit store;
+`dropped_count` discloses allowed-class decisions folded by the age ceiling
+(72 h) while security-class decisions (blocks, violations, sandbox
+transitions) are age-exempt — they leave the window only through the
+sovereign byte/count budgets, which `compacted_count` and the manifest
+per-type folded counts disclose.
+
 ---
 
 ## 6. The exhaustive producer/consumer matrix (17 rows)
@@ -688,7 +708,7 @@ row 17 records the authoritative knowledge-receipt partition added by #2031.
 | 7 | `.swarm/evidence/{taskId}/trajectory.jsonl` | `src/hooks/trajectory-logger.ts:385` | `src/hooks/micro-reflector.ts:262`, `src/services/trajectory-cluster.ts:99` | none | ISO string | none | `agent`, `step` | `task_id`/`session_id`/`trace_id` **only in the path**, never the record body | yes — `evidence/` dir | derived | **#2036** (retention registry; #2041 owns *PRM session* trajectories, not this task-scoped store) |
 | 8 | `.swarm/trajectories/{sessionId}.jsonl` | `src/prm/trajectory-store.ts:80` | `src/prm/index.ts:275,279`, `src/consensus/corpus.ts:641` | none | ISO string | none | `agent`, `step` | `session_id` **only in the filename** | **no** | derived | **#2041** |
 | 9 | `.swarm/background-delegations.jsonl` | `src/background/pending-delegations.ts` (checkpoint layer, #2034) | `pr-workflow-session-resolver.ts`, `pr-workflow-gate.ts`, `init-orphan-recovery.ts`, `delegation-gate/worktree-collision-ownership.ts` | `status` | **epoch-ms number** | `schemaVersion` 1\|2\|3 | `correlationId`, `parentSessionId`, `callID`, `jobId`, `planTaskId`, `evidenceTaskId`, `batchId`, `laneId`, `workflowLane`, `worktreeId` | no swarm-run id distinct from `parentSessionId` | bounded — compacted to checkpoint + tail above 1 MiB (#2034) | authoritative | **#2034** |
-| 10 | `.swarm/session/shell-audit.jsonl` | `src/hooks/guardrails/audit-log.ts:332` | `src/services/guardrail-log-service.ts:63` (the only module that resolves the store path); `src/hooks/guardrails/index.ts:568` names the same path when wiring the writer. **Correction:** an earlier draft of this row cited `src/commands/archive.ts` as a reader with invented line numbers and behaviour — that file contains no reference to `shell-audit` at all, and the claim was removed (issue #2029 final-critic B-4). | `type` (**stripped for `shell`**, `:344-351`) | ISO string (caller-supplied) | none | `sessionID`, `agent`, `tool` | **no `callID`** → cannot join to row 9 (`background-delegations.jsonl`) | via `session/` dir — `close.ts:421-426` | operational | **#2040** |
+| 10 | `.swarm/session/shell-audit.jsonl` | `src/hooks/guardrails/audit-log.ts` (validated+redacted decision seam; persistence owned by the bounded store `src/hooks/guardrails/shell-audit-store.ts`, issue #2040) | `src/hooks/guardrails/shell-audit-store.ts` `readShellAuditTail` / `getShellAuditFoldedSummary` (tail-bounded, manifest-stripped); rendered by `src/services/guardrail-log-service.ts`. **Correction:** an earlier draft of this row cited `src/commands/archive.ts` as a reader with invented line numbers and behaviour — that file contains no reference to `shell-audit` at all, and the claim was removed (issue #2029 final-critic B-4). **Post-#2040:** the pre-store whole-file reader no longer exists. | `type` (**stripped for `shell`**) | ISO string (caller-supplied) | `swarm-shell-audit-manifest` v1 header (issue #2040) | `sessionID`, `agent`, `tool` (+ `commandHash` on typed command entries, never rendered) | **no `callID`** → cannot join to row 9 (`background-delegations.jsonl`) | via `session/` dir, finalized as a validated cut first (`close.ts` finalize stage, issue #2040) | operational | **#2040** |
 | 11 | council evidence + `.swarm/council/{taskId}.rounds.jsonl` | `src/council/council-evidence-writer.ts:91` (evidence rewrite at `.swarm/evidence/{taskId}.json`; rounds append) | (council-consuming code paths; not itemized separately from evidence consumers) | none | `synthesis.timestamp` | none (implicit: `quorumSize` defaulted to 1 when absent, `:156-158`) | `sessionId` (= `swarmId`), `roundNumber` | `taskId` only in filename on the rounds log; no `callID` | evidence: yes; `council/`: **no** | authoritative | **#2046** |
 | 12 | `.swarm/archive/swarm-{ts}-{suffix}/` | `src/commands/close.ts:1051-1054` | `src/commands/close.ts:2233-2235` (`readdir` + `startsWith('swarm-')` — finalize-idempotency + reflection filename scans only; nothing re-reads bundle *contents*) | n/a | ISO in path | preserves bytes verbatim | n/a | n/a | is the archive | governed content | **#2030** |
 | 13 | SQLite `memory_events` | `src/memory/sqlite-provider.ts:200-207` | memory-provider internal readers (not itemized here — index design is #2048's scope) | `operation` column | `timestamp` column, ISO string | table has no explicit version column (SQLite `_meta` table tracks migration version 4+, not per-row) | `target_id` | no `session_id`/`task_id` column | **no** | authoritative | **#2036** (retention), #2048 (index) |

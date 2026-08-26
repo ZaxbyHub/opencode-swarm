@@ -1,26 +1,34 @@
 /**
- * Tests for src/hooks/guardrails/audit-log.ts (Task 1.1)
+ * Tests for src/hooks/guardrails/audit-log.ts (Task 1.1, reworked for the
+ * issue #2040 bounded store).
  *
  * Covers:
  * - SC-119: type:'shell' entry has exactly {ts, sessionID, agent, tool, command}
- * - SC-118: entries stored under given auditPath
+ * - Entries land in the canonical store (.swarm/session/shell-audit.jsonl)
+ *   behind a swarm-shell-audit-manifest header
  * - Additive schema for file_write / destructive_block / sandbox_wrap / sandbox_skip
+ *   (typed command entries additionally carry commandHash — never on shell)
+ * - Command truncation at SHELL_AUDIT_LIMITS.maxCommandChars
  * - Write-time validation: malformed entry rejected, nothing written, no throw
  * - enabled=false → nothing written
  * - Command redaction via redactShellCommand
- * - Failure is fail-open
+ * - Failure is fail-open (store errors never propagate)
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-	_internals,
 	appendGuardrailDecision,
+	hashRedactedCommand,
 	redactPath,
 } from '../../../src/hooks/guardrails/audit-log';
+import {
+	_resetMaintenanceCounters,
+	shellAuditFilePath,
+} from '../../../src/hooks/guardrails/shell-audit-store';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -30,50 +38,23 @@ async function mkTempDir(): Promise<string> {
 	return mkdtemp(join(tmpdir(), 'audit-log-test-'));
 }
 
-async function readAuditLog(path: string): Promise<string[]> {
-	try {
-		return readFileSync(path, 'utf-8')
-			.split('\n')
-			.filter((l) => l.trim().length > 0);
-	} catch {
-		return [];
-	}
+function storePath(dir: string): string {
+	return shellAuditFilePath(dir);
 }
 
-function jsonLine(line: string): Record<string, unknown> {
-	return JSON.parse(line);
+/** Read decision lines (manifest header stripped) from the real store file. */
+function readDecisionLines(dir: string): Array<Record<string, unknown>> {
+	const raw = readFileSync(storePath(dir), 'utf-8');
+	const lines = raw.split('\n').filter((l) => l.trim().length > 0);
+	// Line 1 is the swarm-shell-audit-manifest header on a fresh store.
+	const body = lines[0]?.includes('swarm-shell-audit-manifest')
+		? lines.slice(1)
+		: lines;
+	return body.map((l) => JSON.parse(l) as Record<string, unknown>);
 }
-
-// ---------------------------------------------------------------------------
-// DI-seam via _internals (avoids the Bun module-level fs mock that leaks across test
-// files in the shared runner — AGENTS.md invariant 7). Function refs on the exported
-// _internals object are reassigned in beforeEach and restored in afterEach, so nothing
-// leaks across files.
-// ---------------------------------------------------------------------------
-
-// Track append calls for verification
-const appendCalls: Array<{ path: string; content: string }> = [];
-const mkdirCalls: string[] = [];
-
-const realMkdir = _internals.mkdir;
-const realAppendFile = _internals.appendFile;
-
-beforeEach(() => {
-	appendCalls.length = 0;
-	mkdirCalls.length = 0;
-	_internals.mkdir = (async (p: string) => {
-		mkdirCalls.push(p);
-		return;
-	}) as typeof _internals.mkdir;
-	_internals.appendFile = (async (p: string, content: string) => {
-		appendCalls.push({ path: p, content });
-		return;
-	}) as typeof _internals.appendFile;
-});
 
 afterEach(() => {
-	_internals.mkdir = realMkdir;
-	_internals.appendFile = realAppendFile;
+	_resetMaintenanceCounters();
 });
 
 // ---------------------------------------------------------------------------
@@ -82,9 +63,8 @@ afterEach(() => {
 
 describe('appendGuardrailDecision', () => {
 	// ---- SC-119: type:shell entry has EXACTLY 5 fields byte-for-byte — no type discriminator ----
-	test('SC-119 shell entry writes EXACTLY 5 fields: {ts, sessionID, agent, tool, command} — no type discriminator', async () => {
+	test('SC-119 shell entry writes EXACTLY 5 fields: {ts, sessionID, agent, tool, command} — no type discriminator, no commandHash', async () => {
 		const dir = await mkTempDir();
-		const auditPath = join(dir, 'audit.jsonl');
 
 		const entry = {
 			type: 'shell' as const,
@@ -95,10 +75,11 @@ describe('appendGuardrailDecision', () => {
 			command: 'echo hello',
 		};
 
-		await appendGuardrailDecision(entry, { auditPath, enabled: true });
+		await appendGuardrailDecision(entry, { directory: dir, enabled: true });
 
-		expect(appendCalls.length).toBe(1);
-		const parsed = jsonLine(appendCalls[0]!.content.trim());
+		const decisions = readDecisionLines(dir);
+		expect(decisions.length).toBe(1);
+		const parsed = decisions[0]!;
 		// Exactly the 5 original fields — no more, no less
 		expect(Object.keys(parsed).sort()).toEqual(
 			['agent', 'command', 'sessionID', 'tool', 'ts'].sort(),
@@ -110,6 +91,8 @@ describe('appendGuardrailDecision', () => {
 		expect(parsed.command).toBe('echo hello');
 		// type discriminator is NOT written for shell entries (additive schema preserves original shape)
 		expect(parsed.type).toBeUndefined();
+		// SC-119 extension (issue #2040): shell entries never carry the hash either
+		expect(parsed.commandHash).toBeUndefined();
 
 		await rm(dir, { recursive: true, force: true });
 	});
@@ -117,7 +100,6 @@ describe('appendGuardrailDecision', () => {
 	// ---- SC-119 regression: ensure shell entry NEVER gets a type field even when passed in entry ----
 	test('SC-119 regression: shell entry persisted JSON has no type field even if input had one', async () => {
 		const dir = await mkTempDir();
-		const auditPath = join(dir, 'audit.jsonl');
 
 		// The input type: 'shell' is only used for routing; it is stripped on write
 		const entry = {
@@ -129,9 +111,9 @@ describe('appendGuardrailDecision', () => {
 			command: 'ls',
 		};
 
-		await appendGuardrailDecision(entry, { auditPath, enabled: true });
+		await appendGuardrailDecision(entry, { directory: dir, enabled: true });
 
-		const parsed = jsonLine(appendCalls[0]!.content.trim());
+		const parsed = readDecisionLines(dir)[0]!;
 		// The fixed implementation writes exactly 5 fields with NO type
 		expect(Object.keys(parsed)).toHaveLength(5);
 		expect(parsed.type).toBeUndefined();
@@ -140,10 +122,9 @@ describe('appendGuardrailDecision', () => {
 		await rm(dir, { recursive: true, force: true });
 	});
 
-	// ---- SC-118: entries stored under the given auditPath ----
-	test('SC-118 entry is written to the configured auditPath', async () => {
+	// ---- Entries land in the canonical store under .swarm/session/ ----
+	test('entry is written to the canonical .swarm/session/shell-audit.jsonl store behind the manifest header', async () => {
 		const dir = await mkTempDir();
-		const auditPath = join(dir, '.swarm', 'session', 'audit.jsonl');
 
 		const entry = {
 			type: 'shell' as const,
@@ -154,9 +135,11 @@ describe('appendGuardrailDecision', () => {
 			command: 'ls',
 		};
 
-		await appendGuardrailDecision(entry, { auditPath, enabled: true });
+		await appendGuardrailDecision(entry, { directory: dir, enabled: true });
 
-		expect(appendCalls.some((c) => c.path === auditPath)).toBe(true);
+		const raw = readFileSync(storePath(dir), 'utf-8');
+		const firstLine = raw.split('\n')[0]!;
+		expect(JSON.parse(firstLine).type).toBe('swarm-shell-audit-manifest');
 
 		await rm(dir, { recursive: true, force: true });
 	});
@@ -164,7 +147,6 @@ describe('appendGuardrailDecision', () => {
 	// ---- Additive schema: file_write entry ----
 	test('file_write entry includes type discriminator and per-type fields', async () => {
 		const dir = await mkTempDir();
-		const auditPath = join(dir, 'audit.jsonl');
 
 		// Use a path that will NOT be transformed by redactPath on any platform
 		const testPath = join(dir, 'subdir', 'test.txt');
@@ -180,10 +162,9 @@ describe('appendGuardrailDecision', () => {
 			resolvedScope: dir,
 		};
 
-		await appendGuardrailDecision(entry, { auditPath, enabled: true });
+		await appendGuardrailDecision(entry, { directory: dir, enabled: true });
 
-		expect(appendCalls.length).toBe(1);
-		const parsed = jsonLine(appendCalls[0]!.content.trim());
+		const parsed = readDecisionLines(dir)[0]!;
 		expect(parsed.type).toBe('file_write');
 		// path is present (redactPath may transform it on Windows home dirs)
 		expect(parsed.path).toBeDefined();
@@ -197,7 +178,6 @@ describe('appendGuardrailDecision', () => {
 
 	test('F-003: file_write reason is redacted before persistence', async () => {
 		const dir = await mkTempDir();
-		const auditPath = join(dir, 'audit.jsonl');
 
 		const entry = {
 			type: 'file_write' as const,
@@ -210,19 +190,18 @@ describe('appendGuardrailDecision', () => {
 			resolvedScope: '/home/alice/project',
 		};
 
-		await appendGuardrailDecision(entry, { auditPath, enabled: true });
+		await appendGuardrailDecision(entry, { directory: dir, enabled: true });
 
-		const parsed = jsonLine(appendCalls[0]!.content.trim());
+		const parsed = readDecisionLines(dir)[0]!;
 		expect(parsed.reason).not.toContain('/home/alice');
 		expect(parsed.reason).toContain('~/project/link');
 
 		await rm(dir, { recursive: true, force: true });
 	});
 
-	// ---- Additive schema: destructive_block entry ----
-	test('destructive_block entry includes type discriminator and per-type fields', async () => {
+	// ---- Additive schema: destructive_block entry (+ commandHash) ----
+	test('destructive_block entry includes type discriminator, per-type fields, and a commandHash of the REDACTED command', async () => {
 		const dir = await mkTempDir();
-		const auditPath = join(dir, 'audit.jsonl');
 
 		const entry = {
 			type: 'destructive_block' as const,
@@ -234,13 +213,15 @@ describe('appendGuardrailDecision', () => {
 			destructiveCategory: 'dangerous_delete',
 		};
 
-		await appendGuardrailDecision(entry, { auditPath, enabled: true });
+		await appendGuardrailDecision(entry, { directory: dir, enabled: true });
 
-		expect(appendCalls.length).toBe(1);
-		const parsed = jsonLine(appendCalls[0]!.content.trim());
+		const parsed = readDecisionLines(dir)[0]!;
 		expect(parsed.type).toBe('destructive_block');
 		expect(parsed.destructiveCategory).toBe('dangerous_delete');
-		expect(parsed.command).toBeDefined(); // redaction applied
+		expect(parsed.command).toBe('rm -rf /'); // redaction applied (no secrets present)
+		expect(parsed.commandHash).toBe(hashRedactedCommand('rm -rf /'));
+		// Deterministic correlation: same redacted command → same hash
+		expect(parsed.commandHash).toMatch(/^[0-9a-f]{16}$/);
 
 		await rm(dir, { recursive: true, force: true });
 	});
@@ -248,7 +229,6 @@ describe('appendGuardrailDecision', () => {
 	// ---- Additive schema: sandbox_wrap entry ----
 	test('sandbox_wrap entry includes type discriminator and per-type fields', async () => {
 		const dir = await mkTempDir();
-		const auditPath = join(dir, 'audit.jsonl');
 
 		const entry = {
 			type: 'sandbox_wrap' as const,
@@ -260,13 +240,13 @@ describe('appendGuardrailDecision', () => {
 			executorMechanism: 'bubblewrap',
 		};
 
-		await appendGuardrailDecision(entry, { auditPath, enabled: true });
+		await appendGuardrailDecision(entry, { directory: dir, enabled: true });
 
-		expect(appendCalls.length).toBe(1);
-		const parsed = jsonLine(appendCalls[0]!.content.trim());
+		const parsed = readDecisionLines(dir)[0]!;
 		expect(parsed.type).toBe('sandbox_wrap');
 		expect(parsed.executorMechanism).toBe('bubblewrap');
-		expect(parsed.command).toBeDefined();
+		expect(parsed.command).toBe('npm install');
+		expect(parsed.commandHash).toBeDefined();
 
 		await rm(dir, { recursive: true, force: true });
 	});
@@ -274,7 +254,6 @@ describe('appendGuardrailDecision', () => {
 	// ---- Additive schema: sandbox_skip entry ----
 	test('sandbox_skip entry includes type discriminator and per-type fields', async () => {
 		const dir = await mkTempDir();
-		const auditPath = join(dir, 'audit.jsonl');
 
 		const entry = {
 			type: 'sandbox_skip' as const,
@@ -287,14 +266,14 @@ describe('appendGuardrailDecision', () => {
 			skipReason: 'read-only command',
 		};
 
-		await appendGuardrailDecision(entry, { auditPath, enabled: true });
+		await appendGuardrailDecision(entry, { directory: dir, enabled: true });
 
-		expect(appendCalls.length).toBe(1);
-		const parsed = jsonLine(appendCalls[0]!.content.trim());
+		const parsed = readDecisionLines(dir)[0]!;
 		expect(parsed.type).toBe('sandbox_skip');
 		expect(parsed.executorMechanism).toBe('none');
 		expect(parsed.skipReason).toBe('read-only command');
-		expect(parsed.command).toBeDefined();
+		expect(parsed.command).toBe('echo hi');
+		expect(parsed.commandHash).toBeDefined();
 
 		await rm(dir, { recursive: true, force: true });
 	});
@@ -302,7 +281,6 @@ describe('appendGuardrailDecision', () => {
 	// ---- Additive schema: scope_violation entry ----
 	test('scope_violation entry includes type discriminator and per-type fields', async () => {
 		const dir = await mkTempDir();
-		const auditPath = join(dir, 'audit.jsonl');
 
 		const entry = {
 			type: 'scope_violation' as const,
@@ -316,10 +294,9 @@ describe('appendGuardrailDecision', () => {
 			action: 'write',
 		};
 
-		await appendGuardrailDecision(entry, { auditPath, enabled: true });
+		await appendGuardrailDecision(entry, { directory: dir, enabled: true });
 
-		expect(appendCalls.length).toBe(1);
-		const parsed = jsonLine(appendCalls[0]!.content.trim());
+		const parsed = readDecisionLines(dir)[0]!;
 		expect(parsed.type).toBe('scope_violation');
 		// declaredScope/resolvedScope are redacted via redactPath (separators normalized on Windows)
 		expect(parsed.declaredScope).toBe(redactPath('/project/src'));
@@ -329,10 +306,37 @@ describe('appendGuardrailDecision', () => {
 		await rm(dir, { recursive: true, force: true });
 	});
 
+	// ---- Issue #2040: giant commands are truncated at line-shaping time ----
+	test('giant command is truncated to maxCommandChars with an explicit marker (shell entry)', async () => {
+		const dir = await mkTempDir();
+		const giant = `echo ${'a'.repeat(50_000)}`;
+
+		const entry = {
+			type: 'shell' as const,
+			ts: '2026-01-01T00:00:00.000Z',
+			sessionID: 'sess-big',
+			agent: 'coder',
+			tool: 'bash',
+			command: giant,
+		};
+
+		await appendGuardrailDecision(entry, { directory: dir, enabled: true });
+
+		const parsed = readDecisionLines(dir)[0]!;
+		expect(typeof parsed.command).toBe('string');
+		expect((parsed.command as string).length).toBeLessThan(5_000);
+		expect(parsed.command).toContain('…[truncated]');
+		// The persisted line must stay under the store's hard maxLineBytes.
+		const raw = readFileSync(storePath(dir), 'utf-8');
+		const decisionLine = raw.split('\n').filter((l) => l.trim())[1]!;
+		expect(Buffer.byteLength(decisionLine)).toBeLessThan(64 * 1024);
+
+		await rm(dir, { recursive: true, force: true });
+	});
+
 	// ---- Write-time validation: malformed entry (missing sessionID) is rejected ----
 	test('malformed entry missing sessionID is rejected: nothing written, no exception propagates', async () => {
 		const dir = await mkTempDir();
-		const auditPath = join(dir, 'audit.jsonl');
 
 		// entry missing sessionID (required string field)
 		const badEntry = {
@@ -347,15 +351,21 @@ describe('appendGuardrailDecision', () => {
 		let threw = false;
 		try {
 			await appendGuardrailDecision(badEntry as any, {
-				auditPath,
+				directory: dir,
 				enabled: true,
 			});
 		} catch {
 			threw = true;
 		}
 		expect(threw).toBe(false);
-		// Nothing should have been appended
-		expect(appendCalls.length).toBe(0);
+		// Nothing should have been appended — the store file is never created
+		let exists = true;
+		try {
+			readFileSync(storePath(dir));
+		} catch {
+			exists = false;
+		}
+		expect(exists).toBe(false);
 
 		await rm(dir, { recursive: true, force: true });
 	});
@@ -363,7 +373,6 @@ describe('appendGuardrailDecision', () => {
 	// ---- Write-time validation: invalid type discriminator is rejected ----
 	test('entry with invalid type discriminator is rejected: nothing written, no exception', async () => {
 		const dir = await mkTempDir();
-		const auditPath = join(dir, 'audit.jsonl');
 
 		const badEntry = {
 			type: 'not_a_valid_type' as any,
@@ -376,12 +385,18 @@ describe('appendGuardrailDecision', () => {
 
 		let threw = false;
 		try {
-			await appendGuardrailDecision(badEntry, { auditPath, enabled: true });
+			await appendGuardrailDecision(badEntry, { directory: dir, enabled: true });
 		} catch {
 			threw = true;
 		}
 		expect(threw).toBe(false);
-		expect(appendCalls.length).toBe(0);
+		let exists = true;
+		try {
+			readFileSync(storePath(dir));
+		} catch {
+			exists = false;
+		}
+		expect(exists).toBe(false);
 
 		await rm(dir, { recursive: true, force: true });
 	});
@@ -443,14 +458,19 @@ describe('appendGuardrailDecision', () => {
 		for (const testCase of cases) {
 			test(`${testCase.name} is rejected`, async () => {
 				const dir = await mkTempDir();
-				const auditPath = join(dir, 'audit.jsonl');
 
 				await appendGuardrailDecision(testCase.entry as any, {
-					auditPath,
+					directory: dir,
 					enabled: true,
 				});
 
-				expect(appendCalls.length).toBe(0);
+				let exists = true;
+				try {
+					readFileSync(storePath(dir));
+				} catch {
+					exists = false;
+				}
+				expect(exists).toBe(false);
 				await rm(dir, { recursive: true, force: true });
 			});
 		}
@@ -459,7 +479,6 @@ describe('appendGuardrailDecision', () => {
 	// ---- enabled=false → nothing written ----
 	test('enabled=false skips writing entirely', async () => {
 		const dir = await mkTempDir();
-		const auditPath = join(dir, 'audit.jsonl');
 
 		const entry = {
 			type: 'shell' as const,
@@ -470,9 +489,15 @@ describe('appendGuardrailDecision', () => {
 			command: 'ls',
 		};
 
-		await appendGuardrailDecision(entry, { auditPath, enabled: false });
+		await appendGuardrailDecision(entry, { directory: dir, enabled: false });
 
-		expect(appendCalls.length).toBe(0);
+		let exists = true;
+		try {
+			readFileSync(storePath(dir));
+		} catch {
+			exists = false;
+		}
+		expect(exists).toBe(false);
 
 		await rm(dir, { recursive: true, force: true });
 	});
@@ -480,7 +505,6 @@ describe('appendGuardrailDecision', () => {
 	// ---- Command redaction: shell entry with secret is redacted ----
 	test('shell entry with secret pattern is redacted via redactShellCommand', async () => {
 		const dir = await mkTempDir();
-		const auditPath = join(dir, 'audit.jsonl');
 
 		const entry = {
 			type: 'shell' as const,
@@ -492,10 +516,9 @@ describe('appendGuardrailDecision', () => {
 				"curl -H 'Authorization: Bearer sk-test1234567890' https://api.example.com",
 		};
 
-		await appendGuardrailDecision(entry, { auditPath, enabled: true });
+		await appendGuardrailDecision(entry, { directory: dir, enabled: true });
 
-		expect(appendCalls.length).toBe(1);
-		const parsed = jsonLine(appendCalls[0]!.content.trim());
+		const parsed = readDecisionLines(dir)[0]!;
 		// The Bearer token should be redacted
 		expect(parsed.command).not.toContain('sk-test1234567890');
 		expect(parsed.command).toContain('[REDACTED]');
@@ -506,7 +529,6 @@ describe('appendGuardrailDecision', () => {
 	// ---- Command redaction: destructive_block with API key is redacted ----
 	test('destructive_block entry with API_TOKEN in command is redacted', async () => {
 		const dir = await mkTempDir();
-		const auditPath = join(dir, 'audit.jsonl');
 
 		const entry = {
 			type: 'destructive_block' as const,
@@ -518,20 +540,21 @@ describe('appendGuardrailDecision', () => {
 			destructiveCategory: 'path_destruction',
 		};
 
-		await appendGuardrailDecision(entry, { auditPath, enabled: true });
+		await appendGuardrailDecision(entry, { directory: dir, enabled: true });
 
-		expect(appendCalls.length).toBe(1);
-		const parsed = jsonLine(appendCalls[0]!.content.trim());
+		const parsed = readDecisionLines(dir)[0]!;
 		expect(parsed.command).not.toContain('abc123xyz');
 		expect(parsed.command).toContain('[REDACTED]');
 
 		await rm(dir, { recursive: true, force: true });
 	});
 
-	// ---- Failure is fail-open: invalid/unwritable path does not throw ----
-	test('fail-open: appending to an invalid path does not throw', async () => {
-		// Use a path that cannot be written to (no parent directory will ever exist)
-		const invalidPath = '/this/path/does/not/exist/anywhere/audit.jsonl';
+	// ---- Failure is fail-open: unusable directory does not throw ----
+	test('fail-open: appending into an unusable directory does not throw', async () => {
+		const dir = await mkTempDir();
+		// A FILE where the store wants a DIRECTORY — mkdirSync fails on every platform.
+		const blocker = join(dir, 'blocker');
+		await writeFile(blocker, 'not a directory', 'utf-8');
 
 		const entry = {
 			type: 'shell' as const,
@@ -542,18 +565,18 @@ describe('appendGuardrailDecision', () => {
 			command: 'ls',
 		};
 
-		// The real fs.appendFile would throw if mkdir + appendFile fails,
-		// but appendGuardrailDecision catches and logs, so it must not propagate.
 		let threw = false;
 		try {
 			await appendGuardrailDecision(entry, {
-				auditPath: invalidPath,
+				directory: join(blocker, 'nested'),
 				enabled: true,
 			});
 		} catch {
 			threw = true;
 		}
 		expect(threw).toBe(false);
+
+		await rm(dir, { recursive: true, force: true });
 	});
 });
 
@@ -593,12 +616,11 @@ describe('redactPath', () => {
 		expect(redactPath('')).toBe('');
 	});
 
-	test('null returns null (passthrough for non-strings)', () => {
-		// redactPath returns the original value for non-strings (bug in source, verified here)
-		expect(redactPath(null as any)).toBe(null);
-	});
-
-	test('undefined returns undefined', () => {
-		expect(redactPath(undefined as any)).toBe(undefined);
+	test('null and undefined return empty string (non-strings are coerced, never passed through)', () => {
+		// Issue #2040 reviewer round R2: the old passthrough (returning the
+		// non-string verbatim) was a minimization weakening; the strengthened
+		// contract coerces to ''.
+		expect(redactPath(null as any)).toBe('');
+		expect(redactPath(undefined as any)).toBe('');
 	});
 });

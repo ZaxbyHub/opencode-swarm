@@ -524,7 +524,7 @@ describe('guardrail decision-log capture (task 2.1)', () => {
 					reason: 'blocked',
 					resolvedScope: '',
 				},
-				{ auditPath, enabled: true },
+				{ directory: tempDir, enabled: true },
 			);
 
 			await waitForAuditEntryType(auditPath, 'file_write');

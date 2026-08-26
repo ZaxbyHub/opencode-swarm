@@ -40,6 +40,7 @@ import { fileURLToPath } from 'node:url';
 import { collectToolRegistrationErrors } from './check-tool-registration';
 import { collectEventContractErrors } from './check-event-contract';
 import { collectCoreEventsUsageErrors } from './check-core-events-usage';
+import { collectShellAuditUsageErrors } from './check-shell-audit-usage';
 import { detectDocsClaimDrift } from './drift-check-docs-claims';
 import { checkSkillAssertions, formatBrokenAssertions } from './check-skill-assertions';
 import { BUNDLED_PROJECT_SKILLS } from '../src/config/bundled-skills';
@@ -849,6 +850,19 @@ export function detectCoreEventsUsageDrift(): DriftFinding[] {
 }
 
 // ---------------------------------------------------------------------------
+// 3c) Shell-audit store usage drift (issue #2040 anti-bypass ratchet)
+// ---------------------------------------------------------------------------
+
+export function detectShellAuditUsageDrift(): DriftFinding[] {
+	return collectShellAuditUsageErrors().map((message) => ({
+		category: 'shell-audit-usage',
+		severity: 'error' as const,
+		file: 'src/hooks/guardrails/shell-audit-store.ts',
+		message,
+	}));
+}
+
+// ---------------------------------------------------------------------------
 // 4) Command registry drift
 // ---------------------------------------------------------------------------
 
@@ -1322,6 +1336,7 @@ const DETECTORS: Array<[string, () => DriftFinding[]]> = [
 	['tool', detectToolRegistrationDrift],
 	['event-contract', detectEventContractDrift],
 	['core-events-usage', detectCoreEventsUsageDrift],
+	['shell-audit-usage', detectShellAuditUsageDrift],
 	['command', detectCommandDrift],
 	['agent', detectAgentDrift],
 	['docs-claim', detectDocsClaimDrift],
