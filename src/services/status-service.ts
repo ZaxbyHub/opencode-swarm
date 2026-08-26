@@ -4,12 +4,17 @@ import * as path from 'node:path';
 import type { AgentDefinition } from '../agents';
 import {
 	collectDelegationLedgerHealth,
+	type DelegationHealthMaintenanceSection,
 	type DelegationLedgerHealth,
+	readDelegationHealthArtifact,
 } from '../background/delegation-health';
 import {
 	DELEGATION_COMPACTION_HIGH_WATER_BYTES,
 	DELEGATION_COMPACTION_LOW_WATER_BYTES,
 	MAX_RECOVERY_LEDGER_BYTES,
+	maintainBackgroundDelegations,
+	scanBackgroundCoderReservationsForAdmission,
+	scanDelegationsForRecovery,
 } from '../background/pending-delegations';
 import { loadPluginConfig } from '../config/loader';
 import { MemoryConfigSchema } from '../config/schema';
@@ -213,6 +218,144 @@ export interface StatusData {
 	 * exist (clean repos keep their previous byte-identical output).
 	 */
 	delegationLedgerHealth?: DelegationLedgerHealth;
+	/**
+	 * Issue #2104: opt-in background-work status. Populated ONLY when
+	 * `hooks.background_subagents` is enabled — a disabled (default) feature
+	 * adds no section and no output. All reads are bounded (recovery scan +
+	 * bounded reservation store + health artifact); over-bound or corrupt
+	 * stores surface as typed uncertainty, never partially-trusted counts.
+	 */
+	backgroundWork?: BackgroundWorkStatus;
+}
+
+/** Issue #2104: opt-in background-work status snapshot for /swarm status. */
+export interface BackgroundWorkStatus {
+	/** Live-set counts by delegation status (bounded recovery scan). */
+	counts: {
+		pending: number;
+		running: number;
+		completed: number;
+		consumed: number;
+		stale: number;
+		cancelled: number;
+		error: number;
+		ingestion_error: number;
+	};
+	/** Active coder reservations with their lease state. */
+	reservations: Array<{
+		reservationId: string;
+		planTaskId: string | null;
+		generation: number;
+		state: 'reserved' | 'bound';
+		leaseState: 'active' | 'expired' | 'protected-legacy';
+		leaseExpiresAt?: number;
+	}>;
+	/** Durable maintenance state from the health artifact (null when absent). */
+	maintenance: DelegationHealthMaintenanceSection | null;
+	/**
+	 * Provenance: 'validated-recovery' when the bounded recovery scan and
+	 * reservation scan both validated; 'uncertain' when either store is
+	 * corrupt/over-bound — in that case counts/reservations are NOT presented
+	 * (never a partial record set as authoritative) and `uncertainty` carries
+	 * the typed reason.
+	 */
+	source: 'validated-recovery' | 'uncertain';
+	/** Typed uncertainty reason when source is 'uncertain'. */
+	uncertainty?: string;
+}
+
+/**
+ * Issue #2104: collect the opt-in background-work snapshot. Runs maintenance
+ * point P4 (bounded, tight lock) and reads only bounded surfaces: the
+ * recovery scan (checkpoint + ≤4 MiB tail, never a full ledger read), the
+ * bounded reservation store, and the small health artifact. Any corrupt or
+ * over-bound store yields typed uncertainty — never partially-trusted counts.
+ * Never throws: a status command must not fail because a store is unreadable.
+ */
+async function collectBackgroundWorkStatus(
+	directory: string,
+): Promise<BackgroundWorkStatus> {
+	// Maintenance point P4 (issue #2104), awaited: bounded by the tight 2 s
+	// lock so a contended store still returns promptly, and the rendered
+	// facts reflect this run. Never fatal to the status path.
+	try {
+		await maintainBackgroundDelegations(directory, {
+			lockTimeoutMs: 2_000,
+			reason: 'status',
+		});
+	} catch {
+		// observation only; the facts ring records the failure
+	}
+	const counts = {
+		pending: 0,
+		running: 0,
+		completed: 0,
+		consumed: 0,
+		stale: 0,
+		cancelled: 0,
+		error: 0,
+		ingestion_error: 0,
+	};
+	const maintenance =
+		readDelegationHealthArtifact(directory)?.maintenance ?? null;
+	const empty: BackgroundWorkStatus = {
+		counts,
+		reservations: [],
+		maintenance,
+		source: 'uncertain',
+	};
+	let scan: ReturnType<typeof scanDelegationsForRecovery>;
+	try {
+		scan = scanDelegationsForRecovery(directory);
+	} catch (error) {
+		return {
+			...empty,
+			uncertainty: `delegation recovery scan failed: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		};
+	}
+	if (scan.status === 'uncertain') {
+		return {
+			...empty,
+			uncertainty: `delegation ledger over its recovery bound or corrupt: ${scan.reason}`,
+		};
+	}
+	const reservationScan =
+		scanBackgroundCoderReservationsForAdmission(directory);
+	if (reservationScan.status === 'uncertain') {
+		return {
+			...empty,
+			uncertainty: `coder reservation store unreadable: ${reservationScan.reason}`,
+		};
+	}
+	for (const record of scan.owners) {
+		if (record.status in counts) {
+			counts[record.status as keyof typeof counts] += 1;
+		}
+	}
+	const now = Date.now();
+	const reservations = reservationScan.reservations.map((reservation) => ({
+		reservationId: reservation.reservationId,
+		planTaskId: reservation.planTaskId,
+		generation: reservation.generation ?? 1,
+		state: reservation.state,
+		leaseState:
+			reservation.leaseExpiresAt === undefined
+				? ('protected-legacy' as const)
+				: reservation.leaseExpiresAt > now
+					? ('active' as const)
+					: ('expired' as const),
+		...(reservation.leaseExpiresAt !== undefined
+			? { leaseExpiresAt: reservation.leaseExpiresAt }
+			: {}),
+	}));
+	return {
+		counts,
+		reservations,
+		maintenance,
+		source: 'validated-recovery',
+	};
 }
 
 /** #2034: compact human-readable byte figure for the delegation-health block. */
@@ -282,6 +425,14 @@ export async function getStatusData(
 	directory: string,
 	agents: Record<string, AgentDefinition>,
 	sessionId?: string,
+	options?: {
+		/**
+		 * Explicit `hooks.background_subagents` value (issue #2104). When
+		 * omitted, the service resolves it from the same config loader it
+		 * already uses for the memory section (fail-open to disabled).
+		 */
+		backgroundSubagents?: boolean;
+	},
 ): Promise<StatusData> {
 	// Try structured plan first
 	const plan = await loadPlan(directory);
@@ -407,6 +558,27 @@ export async function getStatusData(
 			}) ?? undefined;
 	} catch {
 		status.delegationLedgerHealth = undefined;
+	}
+
+	// Issue #2104: opt-in background-work section. Gated on
+	// hooks.background_subagents — when the feature is disabled (the default)
+	// this adds no section and no output. The maintenance pass is maintenance
+	// point P4: bounded with a tight lock so status stays fast even when the
+	// stores are contended.
+	const backgroundSubagentsEnabled =
+		options?.backgroundSubagents ??
+		(() => {
+			try {
+				return (
+					(loadPluginConfig(directory) as { hooks?: Record<string, unknown> })
+						?.hooks?.background_subagents === true
+				);
+			} catch {
+				return false;
+			}
+		})();
+	if (backgroundSubagentsEnabled) {
+		status.backgroundWork = await collectBackgroundWorkStatus(directory);
 	}
 
 	// Issue #1846: surface cohort/link status so `/swarm status` makes the
@@ -937,7 +1109,88 @@ export function formatStatusMarkdown(status: StatusData): string {
 		}
 	}
 
+	// Issue #2104: opt-in background-work section. Present ONLY when
+	// hooks.background_subagents is enabled — the collector is config-gated,
+	// so a disabled (default) feature renders nothing here.
+	const backgroundWork = status.backgroundWork;
+	if (backgroundWork) {
+		lines.push(...renderBackgroundWorkLines(backgroundWork));
+	}
+
 	return lines.join('\n');
+}
+
+/** Issue #2104: render the opt-in background-work section. */
+function renderBackgroundWorkLines(
+	backgroundWork: BackgroundWorkStatus,
+): string[] {
+	const lines: string[] = ['', '**Background Work** (opt-in):'];
+	if (backgroundWork.source === 'uncertain') {
+		lines.push(
+			`  - ⚠ State uncertain: ${backgroundWork.uncertainty ?? 'unknown reason'} — counts and reservations are not shown rather than partially trusted`,
+		);
+	} else {
+		const counts = backgroundWork.counts;
+		lines.push(
+			`  - Delegations: ${counts.pending} pending, ${counts.running} running, ${counts.completed} completed (unconsumed), ${counts.consumed} consumed, ${counts.stale} stale, ${counts.cancelled} cancelled, ${counts.error} error, ${counts.ingestion_error} ingestion_error`,
+		);
+		if (backgroundWork.reservations.length > 0) {
+			lines.push(
+				`  - Reservations (${backgroundWork.reservations.length} active):`,
+			);
+			for (const reservation of backgroundWork.reservations) {
+				const lease =
+					reservation.leaseState === 'active' && reservation.leaseExpiresAt
+						? `active until ${new Date(reservation.leaseExpiresAt).toISOString()}`
+						: reservation.leaseState;
+				lines.push(
+					`    - ${reservation.reservationId.slice(0, 12)}… ${reservation.state} gen ${reservation.generation} task ${reservation.planTaskId ?? '(call-scoped)'} — lease ${lease}`,
+				);
+			}
+		} else {
+			lines.push('  - Reservations: none');
+		}
+		lines.push('  - Source: validated recovery (bounded scan)');
+	}
+	const maintenance = backgroundWork.maintenance;
+	if (maintenance) {
+		if (maintenance.lastOkAt !== null) {
+			const summary = maintenance.lastSummary;
+			lines.push(
+				`  - Maintenance: last ok ${new Date(maintenance.lastOkAt).toISOString()} (swept ${summary.sweptStale}, released ${summary.released}, renewed ${summary.renewed}, retained ${summary.retained})`,
+			);
+		} else {
+			lines.push('  - Maintenance: no successful run recorded');
+		}
+		if (maintenance.lastFailure) {
+			lines.push(
+				`  - ⚠ Last maintenance failure (${new Date(maintenance.lastFailure.at).toISOString()}): ${maintenance.lastFailure.reason}`,
+			);
+		}
+		if (maintenance.lastContentionAt !== null) {
+			lines.push(
+				`  - ⚠ Last maintenance lock contention: ${new Date(maintenance.lastContentionAt).toISOString()}`,
+			);
+		}
+		// The bounded facts ring is the durable record of every release,
+		// retained ambiguity, renewal, and failure — render it so operators
+		// can see WHY a reservation disappeared or stayed (issue #2104's
+		// durable rejection/uncertainty reasons). Bounded by the ring (≤20).
+		if (maintenance.facts.length > 0) {
+			lines.push(`  - Recent maintenance facts (${maintenance.facts.length}):`);
+			for (const fact of maintenance.facts.slice(-5).reverse()) {
+				const target = fact.reservationId
+					? ` ${fact.reservationId.slice(0, 12)}…`
+					: fact.correlationId
+						? ` ${fact.correlationId.slice(0, 12)}…`
+						: '';
+				lines.push(
+					`    - ${new Date(fact.at).toISOString()} ${fact.kind}${target} — ${fact.reason}`,
+				);
+			}
+		}
+	}
+	return lines;
 }
 
 /**
@@ -948,10 +1201,18 @@ export async function handleStatusCommand(
 	directory: string,
 	agents: Record<string, AgentDefinition>,
 	sessionId?: string,
+	options?: { backgroundSubagents?: boolean },
 ): Promise<string> {
-	const statusData = await getStatusData(directory, agents, sessionId);
+	const statusData = await getStatusData(directory, agents, sessionId, options);
 
 	if (!statusData.hasPlan) {
+		// Issue #2104: the opt-in background-work section stays visible without
+		// a plan — an orphaned reservation is most interesting exactly then.
+		if (statusData.backgroundWork) {
+			const lines = ['No active swarm plan found.'];
+			lines.push(...renderBackgroundWorkLines(statusData.backgroundWork));
+			return lines.join('\n');
+		}
 		// Issue #853 Layer C: surface spec drift even with no active plan, so
 		// /swarm status never hides the staleness signal that gates writes.
 		if (statusData.specStale) {

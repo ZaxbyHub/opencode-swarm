@@ -823,7 +823,7 @@ sequence #2030–#2051.
   missing lineage remains explicitly missing.
 - **The guardrail audit log has no `callID`.** `src/hooks/guardrails/audit-log.ts:51-112`
   has no field matching the `callID` that `background-delegations.jsonl` uses
-  as its join key (`pending-delegations.ts:84`), so a guardrail decision
+  as its join key (`pending-delegations.ts:235`), so a guardrail decision
   cannot be joined to the delegation it occurred inside. See §6 row 10.
 - **`TrajectoryEntry` is declared twice, and the two declarations have
   drifted.** `src/hooks/trajectory-logger.ts:28-40` requires `tool`,

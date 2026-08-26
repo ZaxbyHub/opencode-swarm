@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.148.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.148.3...v7.148.4) (2026-08-26)
+
+
+### Bug Fixes
+
+* **background:** [Guardrail remediation 9/12] Make background work reclaimable, retryable, and visible ([a561203](https://github.com/ZaxbyHub/opencode-swarm/commit/a561203ff8a06b52da2f6b85b83e8bc895cfdf7c))
+* **background:** close PR review findings on [#2104](https://github.com/ZaxbyHub/opencode-swarm/issues/2104) (citations, clock lint, docs) ([af6457b](https://github.com/ZaxbyHub/opencode-swarm/commit/af6457baf4de567cf9e4aaa4bb04ad3cd7a000e2))
+
 ## [7.148.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.148.2...v7.148.3) (2026-08-26)
 
 
