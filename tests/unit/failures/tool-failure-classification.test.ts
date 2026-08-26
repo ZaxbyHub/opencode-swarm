@@ -134,4 +134,23 @@ describe('tool failure classification', () => {
 			);
 		expect(valueSplit).not.toContain('secret-abc123');
 	});
+
+	// Stage B review round 2: the round-1 fix (remove control chars, THEN
+	// redact) closed the split bypass above but opened the opposite one — a
+	// control byte sitting BETWEEN unrelated preceding text and a keyword
+	// MERGES them once the byte is removed ("qux\x1btoken" ->
+	// "quxtoken"), which breaks the `\b` boundary from the other side and
+	// again leaves the secret unredacted. Reproduced and confirmed while
+	// fixing: `sanitizeFailureEvidenceDisplay('qux\x1btoken=hunter2')` ->
+	// `"quxtoken=hunter2"` under the round-1 fix. The real fix redacts
+	// FIRST against the raw (control-char-intact) value, so `\b` — which
+	// already treats a control byte as non-word — gives a genuine boundary
+	// here without needing removal at all.
+	it('redacts a keyword even when a control byte sits between it and unrelated preceding text (no false join)', () => {
+		const joined = invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
+			'qux\x1btoken=hunter2',
+		);
+		expect(joined).not.toContain('hunter2');
+		expect(joined).toContain('token=<redacted>');
+	});
 });

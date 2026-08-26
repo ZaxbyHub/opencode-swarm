@@ -110,38 +110,97 @@ function redactUrl(match: string): string {
 	}
 }
 
+/**
+ * A control-char run matcher, exported as a constant so the keyword builder
+ * and the final display-safety strip stay in lockstep — see the two-bypass
+ * analysis on `sanitizeFailureEvidenceDisplay` below.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: intentionally matching control chars
+const CONTROL_CHAR_RUN = /[\x00-\x1f\x7f]+/g;
+const CONTROL_CHAR_GAP = '[\\x00-\\x1f\\x7f]*';
+
+/**
+ * Builds a keyword alternative tolerant of a control-char run between every
+ * letter, e.g. `tolerantKeyword('token')` matches `t`, an optional control
+ * run, `o`, an optional control run, `k`, … — so "to\x1bken" still matches
+ * as one keyword instead of splitting into two non-matching fragments.
+ */
+function tolerantKeyword(word: string): string {
+	return word.split('').join(CONTROL_CHAR_GAP);
+}
+
+const CREDENTIAL_KEYWORDS_LOWER = [
+	'bearer',
+	'token',
+	'secret',
+	'password',
+	'authorization',
+].map(tolerantKeyword);
+const API_KEY_PATTERN = `${tolerantKeyword('api')}[_-]?${CONTROL_CHAR_GAP}${tolerantKeyword('key')}`;
+const CREDENTIAL_KEYWORD_ALTERNATION = `(?:${API_KEY_PATTERN}|${CREDENTIAL_KEYWORDS_LOWER.join('|')})`;
+
+const SCREAMING_SUFFIX_ALTERNATION = [
+	'TOKEN',
+	'KEY',
+	'SECRET',
+	'PASSWORD',
+	'AUTH',
+]
+	.map(tolerantKeyword)
+	.join('|');
+
+const CREDENTIAL_KV_PATTERN = new RegExp(
+	`\\b(${CREDENTIAL_KEYWORD_ALTERNATION})\\b${CONTROL_CHAR_GAP}\\s*[:=]\\s*(?:Bearer\\s+)?[^\\s,;]+`,
+	'gi',
+);
+const SCREAMING_KV_PATTERN = new RegExp(
+	`\\b([A-Z]${CONTROL_CHAR_GAP}(?:[A-Z0-9_]${CONTROL_CHAR_GAP})*(?:${SCREAMING_SUFFIX_ALTERNATION})(?:${CONTROL_CHAR_GAP}[A-Z0-9_])*)=([^\\s]+)`,
+	'g',
+);
+
 export function sanitizeFailureEvidenceDisplay(value: string): string {
-	// PR #2363 review (Stage B): control chars must be REMOVED (not
-	// replaced with a space) BEFORE redaction runs, or redaction can be
-	// bypassed entirely. The redaction regexes match on `\b(keyword)\b` word
-	// boundaries — a control byte embedded inside a keyword (e.g.
-	// "author\x1bization=Bearer <secret>") breaks that boundary. Reordering
-	// alone is NOT sufficient: replacing the control byte with a SPACE still
-	// leaves two separate words ("author ization"), so the redaction regex
-	// still fails to match and the secret still leaks — verified empirically
-	// while implementing this fix. Removing the byte outright rejoins the
-	// keyword ("authorization"), which the redaction regex then matches
-	// normally. This applies whether the control byte sits inside the
-	// keyword or inside the secret VALUE itself — both were confirmed
-	// leaking under space-replacement and both are closed by removal.
+	// PR #2363 review (Stage B, two rounds): a control byte in
+	// provider-controlled text can defeat naive redaction in EITHER
+	// direction depending on how control chars are handled relative to the
+	// redaction pass:
 	//
-	// This also fixes the ESC/C0-in-terminal-output risk this strip was
-	// originally added for (issue #2349 follow-up): an unstripped ESC
-	// sequence in provider-controlled error text could otherwise spoof
-	// terminal output or consume a caller's length budget before the
-	// meaningful text.
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: intentionally matching control chars to strip them
-	const controlStripped = value.replace(/[\x00-\x1f\x7f]+/g, '');
-	const redacted = controlStripped
+	//  1. SPLIT bypass (round 1): strip-then-redact with a control byte
+	//     REPLACED BY A SPACE, or redact-then-strip at all, lets a byte
+	//     embedded INSIDE a keyword ("SEC\x1bRET=hunter2") survive as two
+	//     separate non-matching words ("SEC RET"). Reordering alone does not
+	//     fix this — verified empirically.
+	//  2. JOIN bypass (round 2): strip-then-redact with the control byte
+	//     REMOVED (not spaced) lets a byte sitting BETWEEN unrelated
+	//     preceding text and a keyword MERGE them ("qux\x1btoken=hunter2" ->
+	//     "quxtoken=hunter2"), breaking the `\b` boundary from the other
+	//     side and again leaving the secret unredacted.
+	//
+	// Every single global transform of control chars (strip-then-redact,
+	// redact-then-strip, remove, or space-replace) is bypassable in one
+	// direction or the other, because `\b` boundary matching is inherently
+	// sensitive to whatever the control byte gets turned into. The fix that
+	// closes BOTH directions: redact FIRST against the RAW (control-char
+	// intact) value, using keyword patterns that tolerate an embedded
+	// control-char run between every letter of the keyword (closes the
+	// split bypass — "SEC\x1bRET" matches as one keyword). The join bypass
+	// needs no special handling: JS `\b` already treats a control byte as a
+	// non-word character, so "qux\x1btoken" already has a genuine boundary
+	// before "token" without any control-char removal at all — confirmed
+	// empirically (`/\btoken\b/.test('qux\x1btoken')` is `true`). Only
+	// AFTER redaction has consumed the matched span (control chars and all)
+	// is the control-char strip applied, purely for terminal/display
+	// safety (issue #2349 follow-up: an unstripped ESC sequence in
+	// provider-controlled text could otherwise spoof terminal output or
+	// consume a caller's length budget before the meaningful text).
+	const redacted = value
 		.replace(/\bhttps?:\/\/[^\s'"<>]+/gi, (match) => redactUrl(match))
-		.replace(
-			/\b((?:api[_-]?key|bearer|token|secret|password|authorization))\b\s*[:=]\s*(?:Bearer\s+)?[^\s,;]+/gi,
-			(_, key: string) => `${key}=<redacted>`,
-		)
-		.replace(
-			/\b([A-Z][A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH)[A-Z0-9_]*)=([^\s]+)/g,
-			(_, key: string) => `${key}=<redacted>`,
-		);
+		.replace(CREDENTIAL_KV_PATTERN, (_, key: string) => {
+			return `${key.replace(CONTROL_CHAR_RUN, '')}=<redacted>`;
+		})
+		.replace(SCREAMING_KV_PATTERN, (_, key: string) => {
+			return `${key.replace(CONTROL_CHAR_RUN, '')}=<redacted>`;
+		})
+		.replace(CONTROL_CHAR_RUN, ' ');
 	return boundedUtf8(redacted.trim());
 }
 
