@@ -1309,37 +1309,71 @@ export async function executeDispatchLanesAsync(
 	// A formatting failure must be a side-effect-free invalid request: otherwise
 	// an unlaunchable batch consumes durable workflow state and cannot be retried
 	// with the same identity.
-	const contracted = applyPrWorkflowPromptContract(lanes, {
-		mode: parsed.data.mode,
-		prHeadSha: verifiedPrHead,
-		revisionDigest: workflowRevisionDigest,
-		scope: verifiedReviewBaseSha
-			? `complete PR diff ${verifiedReviewBaseSha}...${verifiedPrHead}`
-			: 'the complete immutable feedback inventory on the exact checked-out revision',
-		callerFocus: parsed.data.scope,
-	});
-	if (!contracted.ok) {
-		return asyncFailureResult({
-			failure_class: 'invalid_args',
-			message: 'Invalid mandatory PR workflow prompt contract',
-			errors: contracted.errors,
+	const formatExplorerLanes = (input: DispatchLaneSpec[]) =>
+		applyExplorerFormatSuffix(input, {
+			failClosed: Boolean(
+				parsed.data.mode?.startsWith('swarm-pr-review:') ||
+					parsed.data.mode?.startsWith('swarm-pr-feedback:'),
+			),
+			mode: parsed.data.mode,
 		});
-	}
-	const formatted = applyExplorerFormatSuffix(contracted.lanes, {
-		failClosed: Boolean(
-			parsed.data.mode?.startsWith('swarm-pr-review:') ||
-				parsed.data.mode?.startsWith('swarm-pr-feedback:'),
-		),
-		mode: parsed.data.mode,
-	});
-	if (!formatted.ok) {
-		return asyncFailureResult({
-			failure_class: 'invalid_args',
-			message: 'Invalid mandatory PR workflow explorer output contract',
-			errors: formatted.errors,
+	const contractPromptLanes = (input: DispatchLaneSpec[]) =>
+		applyPrWorkflowPromptContract(input, {
+			mode: parsed.data.mode,
+			prHeadSha: verifiedPrHead,
+			revisionDigest: workflowRevisionDigest,
+			scope: verifiedReviewBaseSha
+				? `complete PR diff ${verifiedReviewBaseSha}...${verifiedPrHead}`
+				: 'the complete immutable feedback inventory on the exact checked-out revision',
+			callerFocus: parsed.data.scope,
 		});
+	// Consolidated fanout lanes can exceed the explorer suffix budget before the
+	// structural floor check gets a chance to return its actionable diagnostic.
+	// Format those caller prompts first; initial/canary dispatches retain the
+	// established contract-then-format overflow behavior.
+	const formatFirst =
+		parsed.data.pr_review_wave_stage === 'fanout' ||
+		(parsed.data.mode === 'swarm-pr-review:base' &&
+			parsed.data.lanes.some(
+				(lane) => (lane.owned_workflow_lanes?.length ?? 0) > 1,
+			));
+	if (formatFirst) {
+		const formatted = formatExplorerLanes(lanes);
+		if (!formatted.ok) {
+			return asyncFailureResult({
+				failure_class: 'invalid_args',
+				message: 'Invalid mandatory PR workflow explorer output contract',
+				errors: formatted.errors,
+			});
+		}
+		const contracted = contractPromptLanes(formatted.lanes);
+		if (!contracted.ok) {
+			return asyncFailureResult({
+				failure_class: 'invalid_args',
+				message: 'Invalid mandatory PR workflow prompt contract',
+				errors: contracted.errors,
+			});
+		}
+		lanes = contracted.lanes;
+	} else {
+		const contracted = contractPromptLanes(lanes);
+		if (!contracted.ok) {
+			return asyncFailureResult({
+				failure_class: 'invalid_args',
+				message: 'Invalid mandatory PR workflow prompt contract',
+				errors: contracted.errors,
+			});
+		}
+		const formatted = formatExplorerLanes(contracted.lanes);
+		if (!formatted.ok) {
+			return asyncFailureResult({
+				failure_class: 'invalid_args',
+				message: 'Invalid mandatory PR workflow explorer output contract',
+				errors: formatted.errors,
+			});
+		}
+		lanes = formatted.lanes;
 	}
-	lanes = formatted.lanes;
 	if (context.sessionID?.trim()) {
 		try {
 			let gateState = await enforcePrWorkflowDispatchLanesAsync(
