@@ -397,6 +397,8 @@ const QUERIES: Record<
 			) @func.def
 			(class_declaration name: (name) @class.name) @class.def
 			(interface_declaration name: (name) @interface.name) @interface.def
+			(trait_declaration name: (name) @trait.name) @trait.def
+			(enum_declaration name: (name) @enum.name) @enum.def
 		`,
 		imports: `
 			(namespace_use_declaration) @import
@@ -816,6 +818,8 @@ function buildFacts(
 		}
 	}
 
+	augmentNativeDynamicDefs(grammarId, root.text, defs);
+
 	const importsWithIndex: Array<{
 		index: number;
 		entry: FileSymbolFacts['imports'][0];
@@ -921,14 +925,33 @@ function buildFacts(
 			}
 		}
 	}
-	if (isEsMGrammar(grammarId)) {
+	if (isEsMGrammar(grammarId) || grammarId === 'dart') {
 		for (const exportNode of exportNodes) {
 			addImport(parseImport(grammarId, exportNode.text.trim()), exportNode);
 		}
 	}
+	for (const fallback of fallbackImportsForSource(grammarId, root.text)) {
+		importsWithIndex.push(fallback);
+	}
+	// The tree-sitter import captures and the line-based fallback above both
+	// parse the same statement for dart/ruby/php; keep one entry per semantic
+	// import (same specifier/type/bindings/re-export shape).
+	const seenImports = new Set<string>();
 	const imports = importsWithIndex
 		.sort((a, b) => a.index - b.index)
-		.map((item) => item.entry);
+		.map((item) => item.entry)
+		.filter((entry) => {
+			const key = JSON.stringify([
+				entry.specifier,
+				entry.importType,
+				entry.bindings,
+				entry.reExport ?? false,
+				entry.exportedBindings ?? [],
+			]);
+			if (seenImports.has(key)) return false;
+			seenImports.add(key);
+			return true;
+		});
 
 	const topLevelDefs = defNodes
 		.filter((d) => isTopLevelDef(d.node, root))
@@ -985,7 +1008,653 @@ function buildFacts(
 		}
 	}
 
-	return { defs, imports, refs };
+	// Regex-augmented defs can yield an endLine that trails the startLine when
+	// a declaration has no braces/semicolon to scan to (unterminated input);
+	// widened-grammar range validation rejects inverted ranges, so clamp.
+	const normalizedDefs = defs.map((def) => ({
+		...def,
+		endLine: Math.max(def.endLine, def.startLine),
+	}));
+	return { defs: normalizedDefs, imports, refs };
+}
+
+/**
+ * Regex-based augmentation for the dynamic-language grammars (dart, ruby,
+ * php). Tree-sitter queries stay the primary source; these layers add facts
+ * the queries cannot express (Ruby visibility sections and constants, PHP
+ * method visibility and namespaces, Dart mixin/enum/extension) and re-type
+ * query defs that need it (Ruby `def` → method). Augmented defs upsert into
+ * query defs by (name, startLine) so spans from the AST win.
+ */
+function augmentNativeDynamicDefs(
+	grammarId: string,
+	source: string,
+	defs: FileSymbolFacts['defs'],
+): void {
+	switch (grammarId) {
+		case 'dart':
+			augmentDartDefs(source, defs);
+			return;
+		case 'ruby':
+			augmentRubyDefs(source, defs);
+			return;
+		case 'php':
+			augmentPhpDefs(source, defs);
+			return;
+	}
+}
+
+function upsertAugmentedDef(
+	defs: FileSymbolFacts['defs'],
+	def: FileSymbolFacts['defs'][0],
+): void {
+	const existing = defs.find(
+		(item) => item.name === def.name && item.startLine === def.startLine,
+	);
+	if (existing) {
+		existing.kind = def.kind;
+		existing.exported = def.exported;
+		existing.visibilityInfo = def.visibilityInfo;
+		existing.endLine = Math.max(existing.endLine, def.endLine);
+		return;
+	}
+	defs.push(def);
+}
+
+function symbolVisibilityInfo(
+	visibility: SymbolVisibilityInfo['visibility'],
+	exported: boolean,
+	exportedReason: SymbolVisibilityInfo['exportedReason'],
+): SymbolVisibilityInfo {
+	// Augmented defs carry a binary apiSurfaceKind approximation: there is no
+	// AST node to re-run getSymbolVisibilityInfo against, and nothing in
+	// production consumes apiSurfaceKind today. `visibility` below remains
+	// precise (protected/private/public from modifiers or sections).
+	return {
+		exported,
+		visibility,
+		exportedReason,
+		apiSurfaceKind: exported ? 'public' : 'private',
+	};
+}
+
+function addRegexDef(
+	defs: FileSymbolFacts['defs'],
+	source: string,
+	name: string,
+	kind: FileSymbolFacts['defs'][0]['kind'],
+	start: number,
+	end: number,
+	visibility: SymbolVisibilityInfo['visibility'],
+	exported: boolean,
+	exportedReason: SymbolVisibilityInfo['exportedReason'],
+): void {
+	upsertAugmentedDef(defs, {
+		name,
+		kind,
+		exported,
+		visibilityInfo: symbolVisibilityInfo(visibility, exported, exportedReason),
+		startLine: lineNumberAt(source, start),
+		endLine: lineNumberAt(source, end),
+	});
+}
+
+function findMatchingBrace(source: string, openIndex: number): number | null {
+	if (source[openIndex] !== '{') return null;
+	let depth = 0;
+	for (let i = openIndex; i < source.length; i++) {
+		const ch = source[i];
+		if (ch === '{') depth++;
+		else if (ch === '}') {
+			depth--;
+			if (depth === 0) return i;
+		}
+	}
+	return null;
+}
+
+/** 1-based line number of the character at `index` (matches tree-sitter row+1). */
+function lineNumberAt(text: string, index: number): number {
+	let line = 1;
+	for (let i = 0; i < index && i < text.length; i++) {
+		if (text[i] === '\n') line++;
+	}
+	return line;
+}
+
+/**
+ * Byte offset just past the line that starts at `offset` and is
+ * `lineLength` long, accounting for the ACTUAL separator width. CRLF sources
+ * consume two bytes per separator; advancing by `lineLength + 1` after
+ * `split(/\r?\n/)` drifts one byte per line, corrupting startLines and
+ * breaking (name, startLine) upsert matching (issue #1526 bug class,
+ * recurred as PR #2361 PRR-001).
+ */
+function advanceLineOffset(
+	source: string,
+	offset: number,
+	lineLength: number,
+): number {
+	const after = offset + lineLength;
+	if (source[after] === '\r' && source[after + 1] === '\n') return after + 2;
+	if (source[after] === '\n' || source[after] === '\r') return after + 1;
+	return after; // final line with no trailing separator
+}
+
+function declarationEnd(source: string, start: number): number {
+	const open = source.indexOf('{', start);
+	const semi = source.indexOf(';', start);
+	if (open !== -1 && (semi === -1 || open < semi)) {
+		return findMatchingBrace(source, open) ?? open;
+	}
+	return semi === -1 ? start : semi;
+}
+
+/**
+ * Dart type declarations. `extension type` (Dart 3 extension types) must be
+ * matched BEFORE bare `extension` so the type's real name is captured instead
+ * of the literal word `type`. The `(?!on\b)` lookahead skips unnamed
+ * extensions (`extension on String { ... }`) — they carry no name to record.
+ * `typedef` aliases are included as `type` defs.
+ */
+const dartTypeRe =
+	/\b(extension\s+type|class|mixin|enum|extension|typedef)\s+(?!on\b)([A-Za-z_][A-Za-z0-9_]*)/g;
+
+/**
+ * Length-preserving lexical mask for the regex augmenters: commented-out or
+ * string-embedded text must not become graph facts, and structural brace/
+ * semicolon scans must not see braces inside literals. `//`, `#` (php), and
+ * block comments become spaces; single/double-quoted string CONTENTS become
+ * spaces (delimiters are kept). Newlines survive so offsets and line numbers
+ * are unchanged. Best-effort, conservative in the safe direction — it can
+ * only suppress, never invent, a declaration or a brace. Heredocs/nowdocs
+ * are not masked here (the ruby augmenter tracks them separately).
+ */
+function maskCommentsForAugment(source: string): string {
+	let out = '';
+	let inBlock = false;
+	let quote: '"' | "'" | null = null;
+	for (let i = 0; i < source.length; i++) {
+		const ch = source[i];
+		const two = source.substring(i, i + 2);
+		if (quote !== null) {
+			if (ch === '\\') {
+				// escaped char: blank both
+				out += '  ';
+				i++;
+				continue;
+			}
+			if (ch === quote) {
+				quote = null;
+				out += ch;
+			} else {
+				out += ch === '\n' ? '\n' : ' ';
+			}
+			continue;
+		}
+		if (!inBlock && two === '/*') {
+			inBlock = true;
+			out += '  ';
+			i++;
+			continue;
+		}
+		if (inBlock) {
+			if (two === '*/') {
+				inBlock = false;
+				out += '  ';
+				i++;
+			} else {
+				out += source[i] === '\n' ? '\n' : ' ';
+			}
+			continue;
+		}
+		if (two === '//' || source[i] === '#') {
+			// Line comment: mask the marker and everything to end of line.
+			out += two === '//' ? '  ' : ' ';
+			if (two === '//') i++;
+			while (i + 1 < source.length && source[i + 1] !== '\n') {
+				out += ' ';
+				i++;
+			}
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			// Triple-quoted multiline strings (Dart '''...''' / """..."""):
+			// a run of 3 opens a string that only a matching run of 3 closes.
+			// Treating each quote singly leaves the state machine's parity at
+			// the mercy of the CONTENT (an apostrophe inside the body flipped
+			// it and masked the next real declaration line).
+			if (source[i + 1] === ch && source[i + 2] === ch) {
+				out += ch + ch + ch;
+				i += 2;
+				while (i + 1 < source.length) {
+					if (
+						source[i + 1] === ch &&
+						source[i + 2] === ch &&
+						source[i + 3] === ch
+					) {
+						out += ch + ch + ch;
+						i += 3;
+						break;
+					}
+					out += source[i + 1] === '\n' ? '\n' : ' ';
+					i++;
+				}
+				continue;
+			}
+			quote = ch;
+			out += ch;
+			continue;
+		}
+		out += ch;
+	}
+	return out;
+}
+
+function augmentDartDefs(source: string, defs: FileSymbolFacts['defs']): void {
+	const masked = maskCommentsForAugment(source);
+	dartTypeRe.lastIndex = 0;
+	for (
+		let m = dartTypeRe.exec(masked);
+		m !== null;
+		m = dartTypeRe.exec(masked)
+	) {
+		const exported = !m[2].startsWith('_');
+		const kindWord = m[1].trim().split(/\s+/).pop() ?? m[1];
+		addRegexDef(
+			defs,
+			source,
+			m[2],
+			kindWord === 'enum' ? 'enum' : kindWord === 'class' ? 'class' : 'type',
+			m.index,
+			declarationEnd(masked, m.index),
+			exported ? 'public' : 'private',
+			exported,
+			exported ? 'naming_convention' : 'unknown',
+		);
+	}
+	// Dart function declarations are already captured by tree-sitter's
+	// (function_signature name: (identifier) @func.name) query — no regex
+	// fallback here (a `Type name(` pattern also matches calls and control
+	// flow; see the #1681 review round-3 finding).
+}
+
+const rubyMethodDefNameRe = /^def\s+(?:(self)\.)?([A-Za-z_][A-Za-z0-9_?!]*)/;
+/** Targeted visibility: `private :a, :b` / `protected :sym`. */
+const rubyTargetedVisibilityRe =
+	/^(private|protected)\s+((?::[A-Za-z_][A-Za-z0-9_?!]*\s*,\s*)*:[A-Za-z_][A-Za-z0-9_?!]*)$/;
+const rubyEndWordRe = /\bend\b/g;
+/**
+ * Heredoc opener: `<<~ID`, `<<-ID`, `<<ID`, `<<"ID"`, `<<'ID'`. Context-
+ * anchored so the binary shift operator can never open a heredoc: a real
+ * opener sits at line start or after `=`, `(`, `,`, `[`, or a value-position
+ * keyword (`puts`/`print`/`raise`/`return`/`p`) — `arr <<item` and `x << y`
+ * have an identifier (operand) before the `<<` and do not match.
+ */
+const rubyHeredocOpenRe =
+	/(?:^|[=(,[]\s*|(?:puts|print|raise|return|p)\s+)<<[~-]?['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/;
+
+interface RubyAugmentState {
+	visibility: SymbolVisibilityInfo['visibility'];
+	/** Saved outer-section per enclosing class/module, with the `end` level at entry. */
+	stack: Array<{
+		visibility: SymbolVisibilityInfo['visibility'];
+		atEndLevel: number;
+	}>;
+	/** Unclosed `class`/`module`/`def` bodies (approximated by `end` counting). */
+	endLevel: number;
+	heredocId: string | null;
+}
+
+/**
+ * Line-scoped Ruby augmentation. Heredoc BODY lines are skipped (a literal
+ * `private` there must not flip the section; `def`/`class` text there is
+ * string data). Bare `private`/`protected` switch the section until the
+ * enclosing class/module closes — the nesting is restored via an approximate
+ * `end`-keyword balance (imprecise for exotic constructs like modifier-`if`
+ * blocks; conservative direction, documented). Targeted `private :sym` marks
+ * the named method in place and does not switch the section.
+ */
+function augmentRubyDefs(source: string, defs: FileSymbolFacts['defs']): void {
+	const lines = source.split(/\r?\n/);
+	const state: RubyAugmentState = {
+		visibility: 'public',
+		stack: [],
+		endLevel: 0,
+		heredocId: null,
+	};
+	let offset = 0;
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (state.heredocId !== null) {
+			if (trimmed === state.heredocId) state.heredocId = null;
+		} else {
+			// The opener line itself still carries code (e.g. `QUERY = <<~SQL`
+			// declares a constant) — only the body lines are skipped.
+			const open = trimmed.match(rubyHeredocOpenRe);
+			if (open) state.heredocId = open[1];
+			augmentRubyLine(trimmed, line, offset, source, defs, state);
+		}
+		offset = advanceLineOffset(source, offset, line.length);
+	}
+}
+
+function augmentRubyLine(
+	trimmed: string,
+	line: string,
+	offset: number,
+	source: string,
+	defs: FileSymbolFacts['defs'],
+	state: RubyAugmentState,
+): void {
+	if (trimmed === 'private' || trimmed === 'protected') {
+		state.visibility = trimmed;
+	}
+	// `private :a, :b` retro-marks the named methods without switching the
+	// section for later declarations.
+	const targeted = trimmed.match(rubyTargetedVisibilityRe);
+	if (targeted) {
+		const visibility = targeted[1] as SymbolVisibilityInfo['visibility'];
+		for (const name of targeted[2].split(',').map((part) => part.trim())) {
+			const sym = name.replace(/^:/, '');
+			for (let i = defs.length - 1; i >= 0; i--) {
+				const d = defs[i];
+				if (d.name === sym && d.startLine <= lineNumberAt(source, offset)) {
+					d.exported = false;
+					d.visibilityInfo = symbolVisibilityInfo(visibility, false, 'unknown');
+					break;
+				}
+			}
+		}
+	}
+	const moduleMatch = trimmed.match(/^module\s+([A-Z][A-Za-z0-9_:]*)/);
+	const classMatch = trimmed.match(/^class\s+([A-Z][A-Za-z0-9_:]*)/);
+	if (moduleMatch || classMatch) {
+		state.stack.push({
+			visibility: state.visibility,
+			atEndLevel: state.endLevel,
+		});
+		state.visibility = 'public';
+		state.endLevel++;
+		const name = (moduleMatch ?? classMatch)![1];
+		addRegexDef(
+			defs,
+			source,
+			name,
+			moduleMatch ? 'type' : 'class',
+			offset + line.indexOf((moduleMatch ?? classMatch)![0]),
+			offset + line.length,
+			'public',
+			true,
+			'module_public',
+		);
+	}
+	const constMatch = trimmed.match(/^([A-Z][A-Za-z0-9_]*)\s*=/);
+	if (constMatch) {
+		addRegexDef(
+			defs,
+			source,
+			constMatch[1],
+			'const',
+			offset + line.indexOf(constMatch[1]),
+			offset + line.length,
+			'public',
+			true,
+			'module_public',
+		);
+	}
+	const methodMatch = trimmed.match(rubyMethodDefNameRe);
+	if (methodMatch) {
+		state.endLevel++;
+		const isSingleton = Boolean(methodMatch[1]);
+		const shortName = methodMatch[2];
+		const name = isSingleton ? `self.${shortName}` : shortName;
+		const visibility = isSingleton ? 'public' : state.visibility;
+		const exported = visibility !== 'private' && !shortName.startsWith('_');
+		addRegexDef(
+			defs,
+			source,
+			name,
+			'method',
+			offset + line.indexOf('def'),
+			offset + line.length,
+			visibility,
+			exported,
+			exported ? 'module_public' : 'unknown',
+		);
+	}
+	// Approximate `end` balance: when the count falls back to a frame's entry
+	// level, that class/module has closed — restore its outer section.
+	rubyEndWordRe.lastIndex = 0;
+	const ends = trimmed.match(rubyEndWordRe)?.length ?? 0;
+	if (ends > 0) {
+		state.endLevel -= ends;
+		while (
+			state.stack.length > 0 &&
+			state.endLevel <= state.stack[state.stack.length - 1].atEndLevel
+		) {
+			state.visibility = state.stack.pop()!.visibility;
+		}
+	}
+}
+
+const phpNamespaceRe = /\bnamespace\s+([^;{]+)\s*[;{]/g;
+const phpTypeRe = /\b(trait|class|interface|enum)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+// The modifier group is bounded {0,6}: an unbounded star here is quadratic on
+// adversarial modifier runs (measured ~8s at 1MB — PR #2361 PRR-012).
+const phpFunctionRe =
+	/\b(?:(public|protected|private|static|final|abstract)\s+){0,6}function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+
+function augmentPhpDefs(source: string, defs: FileSymbolFacts['defs']): void {
+	const masked = maskCommentsForAugment(source);
+	phpNamespaceRe.lastIndex = 0;
+	for (
+		let m = phpNamespaceRe.exec(masked);
+		m !== null;
+		m = phpNamespaceRe.exec(masked)
+	) {
+		addRegexDef(
+			defs,
+			source,
+			m[1].trim(),
+			'type',
+			m.index,
+			m.index + m[0].length,
+			'public',
+			true,
+			'namespace_public',
+		);
+	}
+	const typeRanges: Array<{ start: number; end: number }> = [];
+	phpTypeRe.lastIndex = 0;
+	for (let m = phpTypeRe.exec(masked); m !== null; m = phpTypeRe.exec(masked)) {
+		const bodyStart = masked.indexOf('{', m.index);
+		const bodyEnd =
+			bodyStart === -1 ? null : findMatchingBrace(masked, bodyStart);
+		if (bodyStart !== -1 && bodyEnd !== null) {
+			typeRanges.push({ start: bodyStart, end: bodyEnd });
+		}
+		addRegexDef(
+			defs,
+			source,
+			m[2],
+			m[1] === 'class' ? 'class' : m[1] === 'enum' ? 'enum' : 'interface',
+			m.index,
+			declarationEnd(masked, m.index),
+			'public',
+			true,
+			'module_public',
+		);
+	}
+	phpFunctionRe.lastIndex = 0;
+	for (
+		let m = phpFunctionRe.exec(masked);
+		m !== null;
+		m = phpFunctionRe.exec(masked)
+	) {
+		const modifiers = m[0].slice(0, m[0].indexOf('function'));
+		const visibility =
+			(modifiers.match(/\b(public|protected|private)\b/)?.[1] as
+				| SymbolVisibilityInfo['visibility']
+				| undefined) ??
+			// PHP class members default to public; top-level functions are public.
+			'public';
+		const exported = visibility !== 'private' && !m[2].startsWith('_');
+		const effectiveVisibility = m[2].startsWith('_') ? 'private' : visibility;
+		const kind = typeRanges.some(
+			(range) => m.index >= range.start && m.index <= range.end,
+		)
+			? 'method'
+			: 'function';
+		addRegexDef(
+			defs,
+			source,
+			m[2],
+			kind,
+			m.index,
+			declarationEnd(masked, m.index),
+			effectiveVisibility,
+			exported,
+			exported ? 'module_public' : 'unknown',
+		);
+	}
+}
+
+/**
+ * Line-based import fallback for grammars whose import statements the
+ * tree-sitter capture can miss (multi-directive lines, unusual node shapes).
+ * Lexical-context aware: detection runs against a comment+string-masked copy
+ * so import-shaped text inside literals cannot match (ruby heredoc bodies are
+ * skipped with the same tracker the augmenter uses; php `use` lines inside a
+ * brace depth > 0 are class-body trait inclusions, not imports). Dart/php
+ * statements are ';'-terminated, so unterminated lines are joined with their
+ * continuations before parsing — a multiline `show` clause yields the same
+ * entry the query path produces and collapses in the semantic dedup.
+ * Entries carry startLine/endLine and are deduplicated against query-captured
+ * imports by the semantic key in buildFacts.
+ */
+function fallbackImportsForSource(
+	grammarId: string,
+	source: string,
+): Array<{ index: number; entry: FileSymbolFacts['imports'][0] }> {
+	const entries: Array<{
+		index: number;
+		entry: FileSymbolFacts['imports'][0];
+	}> = [];
+	if (grammarId !== 'dart' && grammarId !== 'ruby' && grammarId !== 'php') {
+		return entries;
+	}
+	const masked = maskCommentsForAugment(source);
+	const lines = source.split(/\r?\n/);
+	const maskedLines = masked.split(/\r?\n/);
+	let offset = 0;
+	let heredocId: string | null = null;
+	let braceDepth = 0;
+	let pending: {
+		startOffset: number;
+		startLine: number;
+		text: string;
+		lines: number;
+	} | null = null;
+	const flushPending = (endLine: number) => {
+		if (!pending) return;
+		let parsed:
+			| FileSymbolFacts['imports'][0]
+			| FileSymbolFacts['imports']
+			| null = null;
+		if (grammarId === 'dart') parsed = parseDartImport(pending.text);
+		else if (grammarId === 'php') parsed = parsePhpUse(pending.text);
+		for (const entry of parsed
+			? Array.isArray(parsed)
+				? parsed
+				: [parsed]
+			: []) {
+			entries.push({
+				index: pending.startOffset,
+				entry: { ...entry, startLine: pending.startLine, endLine },
+			});
+		}
+		pending = null;
+	};
+	for (let li = 0; li < lines.length; li++) {
+		const line = lines[li];
+		const trimmed = line.trim();
+		const maskedTrimmed = maskedLines[li]?.trim() ?? '';
+		const startLine = lineNumberAt(source, offset);
+
+		if (grammarId === 'ruby') {
+			if (heredocId !== null) {
+				if (maskedTrimmed === heredocId) heredocId = null;
+			} else {
+				const open = maskedTrimmed.match(rubyHeredocOpenRe);
+				if (open) heredocId = open[1];
+				else {
+					const parsed = parseRubyRequire(trimmed);
+					if (parsed) {
+						entries.push({
+							index: offset,
+							entry: { ...parsed, startLine, endLine: startLine },
+						});
+					}
+				}
+			}
+			offset = advanceLineOffset(source, offset, line.length);
+			continue;
+		}
+
+		// dart/php: track brace depth on the MASKED line so braces inside
+		// strings cannot skew it.
+		if (grammarId === 'php') {
+			for (const ch of maskedLines[li] ?? '') {
+				if (ch === '{') braceDepth++;
+				else if (ch === '}') braceDepth = Math.max(0, braceDepth - 1);
+			}
+		}
+
+		if (pending) {
+			pending.text += ` ${trimmed}`;
+			pending.lines++;
+			if (trimmed.includes(';') || pending.lines > 10) {
+				flushPending(startLine);
+			} else if (trimmed === '') {
+				pending = null; // blank line aborts an unterminated buffer
+			}
+			offset = advanceLineOffset(source, offset, line.length);
+			continue;
+		}
+
+		const startsStatement =
+			grammarId === 'dart'
+				? /^(import|export)\s/.test(maskedTrimmed)
+				: /^use\s/.test(maskedTrimmed);
+		// php `use` inside a class/trait body is a trait inclusion, not an import
+		const inClassBody = grammarId === 'php' && braceDepth > 0;
+		if (startsStatement && !inClassBody) {
+			if (trimmed.includes(';')) {
+				let parsed:
+					| FileSymbolFacts['imports'][0]
+					| FileSymbolFacts['imports']
+					| null = null;
+				if (grammarId === 'dart') parsed = parseDartImport(trimmed);
+				else if (grammarId === 'php') parsed = parsePhpUse(trimmed);
+				for (const entry of parsed
+					? Array.isArray(parsed)
+						? parsed
+						: [parsed]
+					: []) {
+					entries.push({
+						index: offset,
+						entry: { ...entry, startLine, endLine: startLine },
+					});
+				}
+			} else {
+				pending = { startOffset: offset, startLine, text: trimmed, lines: 1 };
+			}
+		}
+		offset = advanceLineOffset(source, offset, line.length);
+	}
+	flushPending(lineNumberAt(source, offset));
+	return entries;
 }
 
 function safeMatches(
@@ -1669,23 +2338,71 @@ function parseSwiftImport(text: string): FileSymbolFacts['imports'][0] | null {
 	return { specifier: m[2]!, importType: 'namespace', bindings: [] };
 }
 
-function parseDartImport(text: string): FileSymbolFacts['imports'][0] | null {
+function parseDartImport(
+	text: string,
+): FileSymbolFacts['imports'][0] | FileSymbolFacts['imports'] | null {
 	const t = text.trim();
 	// import 'foo';
-	// import 'foo' as bar;
+	// import 'foo' as bar;   — namespace-prefix access, not a named binding
 	// import 'foo' show A, B;
-	// import 'foo' hide A;
-	const m = t.match(/^import\s+['"]([^'"]+)['"]\s+as\s+(\w+)/);
-	if (m) {
+	// import 'foo' hide A;   — hide clause intentionally unhandled: recorded as
+	//                          a namespace import (all symbols minus hidden),
+	//                          which is correct for graph purposes
+	// export 'foo' show A, B;
+	const exportMatch = t.match(
+		/^export\s+['"]([^'"]+)['"](?:\s+show\s+([^;]+))?/,
+	);
+	if (exportMatch) {
+		const shown = exportMatch[2]
+			?.split(',')
+			.map((part) => part.trim())
+			.filter(Boolean);
+		const bindings =
+			shown && shown.length > 0
+				? shown.map((name) => ({ imported: name, local: name }))
+				: [{ imported: '*', local: '*' }];
 		return {
-			specifier: m[1],
-			importType: 'named',
-			bindings: [{ imported: m[1], local: m[2] }],
+			specifier: exportMatch[1],
+			importType: shown && shown.length > 0 ? 'named' : 'namespace',
+			bindings,
+			reExport: true,
+			exportedBindings: bindings.map((binding) => ({
+				imported: binding.imported,
+				exported: binding.local,
+			})),
 		};
 	}
-	const simple = t.match(/^import\s+['"]([^'"]+)['"]/);
-	if (simple) {
-		return { specifier: simple[1], importType: 'namespace', bindings: [] };
+	const importMatch = t.match(/^import\s+['"]([^'"]+)['"]([^;]*)/);
+	if (importMatch) {
+		// A prefix (`as p`) makes all access prefix-qualified — even when a
+		// show/hide clause follows (`import 'x' as p show A;`), the import is
+		// classified as namespace with no named binding.
+		const clause = importMatch[2];
+		const alias = clause?.match(/\bas\s+\w+/);
+		const shown = clause
+			?.match(/\bshow\s+([^;]+)/)?.[1]
+			.split(',')
+			.map((part) => part.trim())
+			.filter(Boolean);
+		const primary: FileSymbolFacts['imports'][0] = {
+			specifier: importMatch[1],
+			importType: !alias && shown && shown.length > 0 ? 'named' : 'namespace',
+			bindings:
+				!alias && shown && shown.length > 0
+					? shown.map((name) => ({ imported: name, local: name }))
+					: [],
+		};
+		// Conditional imports (`import 'a' if (cond) 'b';`) resolve to the
+		// configured URI at RUNTIME; both URIs are recorded so either target
+		// can carry an edge (PR #2361 PRR-007).
+		const conditional = clause?.match(/\bif\s*\([^)]*\)\s*['"]([^'"]+)['"]/);
+		if (conditional) {
+			return [
+				primary,
+				{ specifier: conditional[1], importType: 'namespace', bindings: [] },
+			];
+		}
+		return primary;
 	}
 	return null;
 }
@@ -1696,13 +2413,19 @@ function parseRubyRequire(text: string): FileSymbolFacts['imports'][0] | null {
 	// e.g. "json" for require 'json'
 	// e.g. "./foo" for require_relative './foo'
 	// When the require keyword is included (full call text), strip it.
+	// require_relative resolves against the requiring file's directory — the
+	// specifier is normalized to './name' so downstream relative resolution
+	// can find the target file.
+	const isRequireRelative = /^require_relative\b/.test(t);
 	const stripped = t
 		.replace(/^(?:require(?:_relative)?)\s+['"]?/, '')
 		.replace(/['"]$/, '');
 	if (!stripped || stripped === t) return null;
-	const isRelative = stripped.startsWith('./') || stripped.startsWith('../');
+	const specifier =
+		isRequireRelative && !stripped.startsWith('.') ? `./${stripped}` : stripped;
+	const isRelative = specifier.startsWith('./') || specifier.startsWith('../');
 	return {
-		specifier: stripped,
+		specifier,
 		importType: isRelative ? 'default' : 'namespace',
 		bindings: [],
 	};
@@ -1721,7 +2444,9 @@ function parsePhpUse(text: string): FileSymbolFacts['imports'][0] | null {
 		return {
 			specifier: m[1],
 			importType: 'named',
-			bindings: [{ imported: m[1], local: m[2] }],
+			// Bindings match on the short name (what a referencing expression
+			// in the body actually spells), mirroring builder.ts semantics.
+			bindings: [{ imported: m[1].split('\\').pop() ?? m[1], local: m[2] }],
 		};
 	}
 	const simple = t.match(
@@ -1823,7 +2548,10 @@ const IMPORT_ANCESTOR_TYPES = new Set([
 	'use_declaration',
 	'using_directive',
 	'namespace_use_declaration',
+	'namespace_use_clause', // php use clause under a grouped declaration
 	'library_import', // dart
+	'library_export', // dart
+	'export_directive', // dart
 ]);
 
 function isInsideImportStatement(node: TsNode): boolean {
@@ -1879,3 +2607,15 @@ function isEsMGrammar(grammarId: string): boolean {
 		grammarId === 'javascript'
 	);
 }
+
+/**
+ * DI seam for direct parser tests — the import parsers are module-private by
+ * design; tests exercise them through this seam instead of `mock.module`,
+ * which leaks across Bun's shared test-runner process (@see AGENTS.md
+ * invariant #7; PR #2361 review R10/PRR-017).
+ */
+export const _internals = {
+	parseDartImport,
+	parseRubyRequire,
+	parsePhpUse,
+};

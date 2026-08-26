@@ -14,12 +14,12 @@ module: per-edge `usedSymbols` (which exported names an importer actually
 references) and per-node `exportLines` (exported symbol → definition line), plus
 the `repo_map` actions `callers` and `dead_exports`. That work deliberately used
 the module's existing **conservative regex scanner** and covered only TS/JS/Python
-(`SUPPORTED_EXTENSIONS` at `src/tools/repo-graph/builder.ts:113`).
+(`SUPPORTED_EXTENSIONS` at `src/tools/repo-graph/builder.ts:140`).
 
 Two ceilings remain, and they are exactly what an external "codebase memory" MCP
 server claims to break through:
 
-1. **Answers are file-level.** Edges are file→file (`GraphEdge`, `types.ts:216`).
+1. **Answers are file-level.** Edges are file→file (`GraphEdge`, `types.ts:269`).
    The graph can say "file A references symbol `foo` from file B" but not
    "function `bar()` calls `foo()`". Agents still open whole files to act, which
    is where context burden actually accrues.
@@ -65,7 +65,7 @@ first-class, **on-demand** dependency used at tool time:
 - `src/tools/syntax-check.ts` and `src/tools/placeholder-scan.ts` follow the same
   pattern with bounded concurrency.
 
-`loadGrammar(languageId)` (`src/lang/runtime.ts:185`) is lazy, memoized, request-
+`loadGrammar(languageId)` (`src/lang/runtime.ts:196`) is lazy, memoized, request-
 coalesced, and 10 s-bounded. Crucially, **`src/index.ts` never imports the
 tree-sitter runtime** — init is triggered only by query-time tools, so this work
 adds **zero** init-path cost. Regex cannot give reliable declaration boundaries or
@@ -181,7 +181,7 @@ export interface ContextPackResult {
 }
 ```
 
-`GRAPH_SCHEMA_VERSION` (`types.ts:25`) bumps to `'1.2.0'`. Every new query
+`GRAPH_SCHEMA_VERSION` (now `'1.4.0'` at `types.ts:52`; this design originally bumped it to `'1.2.0'`). Every new query
 self-gates with `isSchemaVersionAtLeast(graph.schema_version, '1.2.0')` and returns
 `{ schemaSupported: false, note: 'rebuild with repo_map action="build"' }` on older
 graphs (the `getDeadExports` pattern, `query.ts:257`).
@@ -214,9 +214,9 @@ graphs (the `getDeadExports` pattern, `query.ts:257`).
 Per the `callers`/`dead_exports` precedent, a new action is incomplete until it
 touches **every** one of these (no unwired code):
 
-1. `VALID_ACTIONS` array (`repo-map.ts:49`).
-2. The duplicated zod `action` enum + its `.describe()` (`repo-map.ts:163`).
-3. The tool `description` action catalog (`repo-map.ts:150`).
+1. `VALID_ACTIONS` array (`repo-map.ts:60`).
+2. The duplicated zod `action` enum + its `.describe()` (`repo-map.ts:245`).
+3. The tool `description` action catalog (`repo-map.ts:60`).
 4. The args schema — add `max_depth`/budget handling to `RepoMapArgs` if needed
    (`repo-map.ts:68`,`162`).
 5. The dispatch branch in `execute` (file+symbol required → after the `!a.file`
@@ -226,10 +226,10 @@ touches **every** one of these (no unwired code):
 
 ## The sync/async + #1144 parity decision
 
-`loadGrammar` is async; the sync `buildWorkspaceGraph` (`builder.ts:1216`) cannot
+`loadGrammar` is async; the sync `buildWorkspaceGraph` (`builder.ts:3032`) cannot
 await it. Investigation shows the production build hook already defaults to
-`buildWorkspaceGraphAsync` (`src/hooks/repo-graph-builder.ts:110`), and
-`loadGraphSync` only **reads** persisted JSON (`src/hooks/repo-graph-injection.ts:59`).
+`buildWorkspaceGraphAsync` (`src/hooks/repo-graph-builder.ts:177`), and
+`loadGraphSync` only **reads** persisted JSON (`src/hooks/repo-graph-injection.ts:105`).
 
 **Decision:** symbol-level data (`exportRanges`, `symbolEdges`) is populated **only
 by the async builder**. The sync builder remains for the homedir-guard tests and
@@ -290,7 +290,7 @@ change.
 
 | grammars | contents |
 |---|---|
-| java, kotlin, csharp | extracted defs including non-exported members, subject to the collision rules and the malformed-range guard below |
+| java, kotlin, csharp, cpp, swift (#1530), dart, ruby, php (#1531) | extracted defs including non-exported members, subject to the collision rules and the malformed-range guard below |
 | all others | exported defs only (scope unchanged) |
 
 "Including non-exported members" is not "every def": a name collision keeps one
@@ -636,3 +636,102 @@ from the tree-sitter parse alone.
   emits a non-exported def for `Foo` so the type's own declaration keeps its
   `exportRanges` span and `exports[]` entry; extension members are still
   extracted and attributed as methods.
+
+### Dynamic language limitations (Dart, Ruby, PHP — issue #1531)
+
+Extraction for Dart (`.dart`), Ruby (`.rb`, `.rake`, `.gemspec`), and PHP
+(`.php`, `.phtml`, `.blade.php`) is syntax-only and deliberately conservative.
+Tree-sitter queries remain the primary source; a regex augmentation layer
+(`augmentNativeDynamicDefs` in `src/lang/symbol-graph.ts`) adds facts the
+queries cannot express (Ruby visibility sections/constants/singleton methods,
+PHP method visibility/namespaces/enums, Dart mixin/enum/extension). Commented
+and string-literal text is masked before augmentation (length-preserving, so
+line/offset arithmetic is exact and CRLF-safe — the #1526 bug class). The
+line scanners advance offsets by the actual separator width, so CRLF and LF
+sources produce identical facts. Modifier-keyword quantifiers are bounded
+(an unbounded `(?:(kw)\s+)*` star measured ~8s at 1MB — quadratic
+backtracking). No language runtime, Flutter, Bundler, or Composer tooling is
+invoked (explicit non-goals).
+
+- **Dart visibility is the `_`-prefix convention.** Public-by-default names are
+  exported; `_`-prefixed names are private and never file-level exports.
+- **Dart `show`/`hide`/`as` clauses.** `show` imports produce named bindings;
+  `hide` is intentionally unhandled (the import is recorded as a namespace
+  import of everything minus the hidden names — correct for graph purposes);
+  `as` prefix imports are namespace imports with no named binding, including
+  when a `show`/`hide` clause follows the prefix (`import 'x' as p show A;`).
+  `export 'x' show A` produces a re-export edge with exported bindings. A show
+list split across lines is parsed whole. Conditional imports
+(`import 'a' if (dart.library.io) 'b';`) record BOTH URIs — resolution
+happens at runtime, so either target can carry an edge.
+- **Dart type declarations include Dart 3 forms.** `class`/`mixin`/`enum`/
+  `extension`/`typedef` and `extension type` (extension types capture the
+  type's name) are extracted as defs; Dart 3 class modifiers
+  (`base`/`final`/`interface`/`sealed`/`abstract`) do not change the captured
+  name. Unnamed `extension on X` carries no def (there is no name to record).
+- **Dart class members are not def-captured as methods.** Only top-level
+  `function_signature` defs and type defs exist. Flutter widget `build`
+  methods are therefore invisible as method defs; the enclosing widget class
+  def carries the span. `package:` URIs are recorded as import specifiers but
+  do not resolve to workspace files (pub package layout is external).
+- **Ruby singleton methods keep their `self.` prefix in the name.** A
+  `def self.build` is keyed as `self.build` in `exportRanges` and
+  `context_pack` lookups — query it as `self.build`, not `build`.
+- **Ruby visibility sections are line-tracked with nesting restore.** Bare
+  `private`/`protected` statements switch the section for the remainder of the
+  class body; entering a nested `class`/`module` pushes a fresh public section
+  and closing it (approximate `end`-keyword balance) restores the outer one.
+  The symbol-argument form (`private :a, :b`) marks the named methods in place
+  without switching the section. `private_class_method` and per-definition
+  `private def x` forms are not modeled.
+- **Ruby heredoc bodies are skipped.** A literal `private` or a `def`/`class`
+  line inside a heredoc body is string data, not code — it neither flips the
+  visibility section nor creates defs; the opener line's own declarations
+  (e.g. `QUERY = <<~SQL`) still count. Openers are context-anchored (line
+  start, after `=`/`(`/`,`/`[`, or a value-position keyword like `puts`), so
+  the binary shift operator (`arr <<item`, `x << y`) never opens a heredoc.
+  An unterminated heredoc (invalid Ruby) silently degrades augmentation after
+  the opener; tree-sitter query defs still survive.
+- **Ruby dynamic constructs are invisible by design.** `send`, `const_get`,
+  `define_method`, `method_missing`, and metaprogramming-generated methods
+  produce no facts. `include`/`extend`/`prepend` mixin composition is not an
+  import or symbol edge. Constants are extracted from simple `NAME = value`
+  lines only.
+- **Ruby requires bind no names.** `require`/`require_relative` produce file
+  edges only (`require_relative 'x'` normalizes to `./x`); there are no named
+  bindings, so no Ruby symbol edges arise from imports.
+- **PHP method visibility comes from modifiers** (`public`/`protected`/
+  `private`, defaulting public), and `_`-prefixed names are treated private.
+  Trait declarations are extracted typed `interface` (matching the Rust
+  trait→interface precedent). Namespaces (`namespace X;` and brace form) are
+  extracted as `type` defs. PHP 8.1 `enum` declarations are extracted as
+  `enum` defs with their methods.
+- **PHP `use` semantics.** An aliased `use A\B\C as D` binds the SHORT name
+  (`C`) to `D` — what body expressions spell. A non-aliased `use A\B\C;` is a
+  namespace import with no bindings, and its FQN specifier does not resolve to
+  a workspace file: mapping namespaces to paths requires composer PSR-4
+  awareness, which is out of scope. Grouped `use A\B, C\D;` statements are
+  skipped entirely (known limitation). A `use TraitName;` INSIDE a class or
+  trait body is a trait inclusion, not an import — it produces no edge.
+- **PHP dynamic constructs are invisible by design.** Variable functions
+  (`$f()`), variable classes (`new $cls`), `call_user_func`, and string-built
+  symbol references produce no facts.
+- **Blade templates are best-effort.** `.blade.php` files parse through the
+  PHP path; Blade directives (`@foreach`, `{{ }}`) are opaque to the extractor
+  and `@php` blocks are scanned as ordinary PHP. See `docs/php-laravel.md`.
+- **Augmented defs carry a binary `apiSurfaceKind`.** Regex-augmented defs
+  populate `apiSurfaceKind` as `public`/`private` only (there is no AST node
+  to run the full visibility classifier against); the `visibility` field
+  remains precise (e.g. `protected` from a modifier).
+- **`dart`, `ruby`, `php` are `RANGE_WIDENED_GRAMMARS`.** Non-exported member
+  defs (Ruby/PHP methods) enter `exportRanges` so `context_pack` can serve
+  member spans; `exports[]`/`exportLines` stay exported-only. The sync
+  `buildWorkspaceGraph` fallback also collects exports for these languages
+  via the regex extractors, so an AST timeout does not lose export metadata.
+- **Import resolution is importer-language aware.** An extensionless relative
+  specifier probes the importing file's own language family first: a Ruby
+  `require_relative 'foo'` resolves `foo.rb` even when a sibling `foo.ts`
+  exists.
+- **The `symbols` tool qualifies Dart class members** as `TypeName.member`
+  with kind `method` (mirroring the Swift extractor), so same-named members of
+  different classes do not collapse.
