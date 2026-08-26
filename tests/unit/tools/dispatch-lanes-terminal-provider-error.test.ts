@@ -17,9 +17,13 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
-import { recordPendingDelegation } from '../../../src/background/pending-delegations.js';
+import {
+	appendDelegationTransition,
+	recordPendingDelegation,
+} from '../../../src/background/pending-delegations.js';
 import {
 	_internals,
+	_test_exports,
 	executeCollectLaneResults,
 } from '../../../src/tools/dispatch-lanes.js';
 import { laneStatusOnDisk } from '../../helpers/pr-workflow-lane-fixtures.js';
@@ -111,6 +115,12 @@ async function collect(): Promise<
 beforeEach(() => {
 	restoreClock = freezeClock();
 	directory = canonicalMkdtemp('lane-terminal-provider-error-');
+	// The lane-output delivery de-dupe is MODULE-level state keyed by
+	// batch/lane/digest. Every test here reuses the same batch and lane ids, so
+	// without this reset an output delivered by an earlier test is suppressed as
+	// `output_omitted_repeat` in a later one — cross-test pollution that makes a
+	// passing assertion depend on file ordering.
+	_test_exports.resetDeliveredLaneOutputs();
 });
 
 afterEach(async () => {
@@ -363,6 +373,36 @@ describe('terminal provider errors settle async lanes (issue #2349)', () => {
 
 			expect(laneStatusOnDisk(directory, CORRELATION_ID)).toBe('error');
 			expect(result.lane_results[0]?.error).toContain('kind=unknown');
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		'a benign settle race is NOT reported as a settle-write failure',
+		async () => {
+			await recordLane();
+			// Pre-settle the record so the first-terminal-wins guard rejects our
+			// write. That is a routine race (the stale sweep, an abort, an earlier
+			// pass) — the lane IS settled, so surfacing a diagnostic would cry wolf
+			// on every occurrence. Regression pin for the reviewer's blocker 2.
+			await appendDelegationTransition(directory, CORRELATION_ID, {
+				status: 'cancelled',
+			});
+			installHost({
+				statusType: 'idle',
+				messages: [
+					assistantMessage({
+						completed: 9_000,
+						error: { name: 'APIError', data: { message: 'quota exceeded' } },
+					}),
+				],
+			});
+
+			const result = await collect();
+
+			expect(laneStatusOnDisk(directory, CORRELATION_ID)).toBe('cancelled');
+			// No spurious diagnostic for a race that settled correctly.
+			expect(result.errors ?? []).toEqual([]);
 		},
 		TEST_TIMEOUT_MS,
 	);

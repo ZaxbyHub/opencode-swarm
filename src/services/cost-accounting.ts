@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { warn } from '../utils/logger.js';
 
 export type CostSource = 'reported' | 'estimated' | 'unavailable';
 
@@ -158,11 +159,22 @@ export function readTelemetryEvents(
 	}
 
 	const events: Record<string, unknown>[] = [];
+	// Issue #2349 sweep: an unreadable snapshot silently undercounted cost with
+	// no signal at all, so a systematic cause (permissions, a partial copy)
+	// looked identical to "there was nothing to read". Count and name the first
+	// failure so the undercount is at least observable.
+	let unreadableSnapshots = 0;
+	let firstUnreadableReason = '';
 	for (const file of snapshotFiles) {
 		let content = '';
 		try {
 			content = fs.readFileSync(file, 'utf-8');
-		} catch {
+		} catch (err) {
+			unreadableSnapshots += 1;
+			if (!firstUnreadableReason) {
+				firstUnreadableReason =
+					err instanceof Error ? err.message : String(err);
+			}
 			continue;
 		}
 		for (const line of content.split(/\r?\n/)) {
@@ -173,6 +185,11 @@ export function readTelemetryEvents(
 				if (isRecord(parsed)) events.push(parsed);
 			} catch {}
 		}
+	}
+	if (unreadableSnapshots > 0) {
+		warn(
+			`[cost-accounting] ${unreadableSnapshots} of ${snapshotFiles.length} snapshot file(s) were unreadable; cost totals undercount. First reason: ${firstUnreadableReason}`,
+		);
 	}
 	// Best-effort cleanup of snapshot dir
 	try {

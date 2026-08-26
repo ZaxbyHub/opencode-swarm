@@ -542,7 +542,12 @@ describe('executeDispatchLanes', () => {
 			expect.objectContaining({
 				id: 'bad',
 				status: 'failed',
-				error: 'session.prompt failed: critic unavailable',
+				// Issue #2349 (AC3 parity): the sync failure reason is now classified
+				// through the same classifier as the async collect path, instead of
+				// being a raw formatError string. The provider text is preserved
+				// verbatim inside the composed reason.
+				error:
+					'session.prompt failed: provider.unknown: critic unavailable [kind=unknown name=UnknownError]',
 			}),
 		]);
 		expect(ops.delete).toHaveBeenCalledTimes(2);

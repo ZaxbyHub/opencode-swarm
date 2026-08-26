@@ -2465,6 +2465,11 @@ async function collectOnce(
 		// carried on a still-running message.
 		if (
 			transcript.terminalError &&
+			// Load-bearing: a lane that produced REAL OUTPUT must keep taking the
+			// existing settlement route below, so partial findings are preserved
+			// rather than replaced by an error settle. Dropping this term silently
+			// discards the output of any lane that spoke and then died.
+			!transcript.text &&
 			// NOT `transcriptIncomplete`: that also folds in the terminal
 			// finish==='length'/'content-filter' cases, which would make the
 			// output_length classification unreachable. Only the fetch-window
@@ -2499,7 +2504,20 @@ async function collectOnce(
 				// than the bug being fixed.
 				settleFailureLogs.delete(laneLabel);
 				cleanupAsyncLaunchSession(session, record.subagentSessionId);
+			} else if (
+				settled !== null &&
+				ASYNC_LANE_TERMINAL_STATUSES.has(settled.status)
+			) {
+				// Benign: the record was ALREADY terminal, so a concurrent writer
+				// (the 30-minute stale sweep, an abort, an earlier pass) settled it
+				// first and the first-terminal-wins guard correctly rejected ours.
+				// The lane is settled either way, so this is not a failure — logging
+				// it would cry wolf on every routine race. Teardown belongs to
+				// whoever landed the write, so we do not perform it here.
+				settleFailureLogs.delete(laneLabel);
 			} else {
+				// Genuine failure: the write threw (null) or the record is STILL
+				// open, so nothing settled it and the reason would otherwise vanish.
 				settleFailureLogs.add(laneLabel);
 			}
 			continue;
@@ -3383,6 +3401,21 @@ interface LaneTerminalError {
  */
 const LANE_TERMINAL_REASON_MESSAGE_BUDGET = 100;
 
+/**
+ * Mirrors `isTerminal` in `src/background/pending-delegations.ts` — the statuses
+ * whose presence makes the first-terminal-wins guard reject a further
+ * transition. Used to tell a BENIGN settle race (someone else terminalized the
+ * record first) apart from a genuine settle-write failure (the write threw, or
+ * the record is still open), so the #2349 diagnostic does not cry wolf.
+ */
+const ASYNC_LANE_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
+	'completed',
+	'error',
+	'cancelled',
+	'stale',
+	'consumed',
+]);
+
 function laneTerminalErrorReason(error: LaneTerminalError): string {
 	const message = error.message.slice(0, LANE_TERMINAL_REASON_MESSAGE_BUDGET);
 	const status =
@@ -3665,8 +3698,20 @@ async function runLane(
 					promptController,
 				);
 				if (!result.data) {
+					// Issue #2349 (AC3 parity): this throw — NOT the `!promptResult.data`
+					// branch below — is the reachable sync failure path, because
+					// dispatchWithModelFallback only ever returns a dispatch-produced
+					// result or rethrows. Classify here so the same underlying provider
+					// condition reports the same category as the async collect path.
+					//
+					// The `classify` callback below still reads this message for its
+					// transient/permanent decision; the composed reason embeds the raw
+					// provider text, so `isTransientProviderError` keeps matching exactly
+					// what it matched before.
 					throw new Error(
-						`session.prompt failed: ${formatError(result.error)}`,
+						`session.prompt failed: ${laneTerminalErrorReason(
+							classifyLaneTerminalError(result.error),
+						)}`,
 					);
 				}
 				return result;
@@ -3694,13 +3739,13 @@ async function runLane(
 				lane,
 				role,
 				startedAt,
-				// Issue #2349 (AC3 parity): classify the reason the same way the
-				// async collect path does, so the same underlying provider
-				// condition reports the same category on both paths instead of
-				// async carrying a classified reason and sync a raw string.
-				`session.prompt failed: ${laneTerminalErrorReason(
-					classifyLaneTerminalError(promptResult.error),
-				)}`,
+				// NOTE: this branch is defensive and currently UNREACHABLE — the
+				// dispatch callback above throws whenever `!result.data`, and
+				// dispatchWithModelFallback only returns a dispatch-produced result
+				// or rethrows. Left byte-identical to its pre-#2349 form rather than
+				// given new behavior, so no unwired code is introduced here; the
+				// AC3 classification lives at the reachable throw site above.
+				`session.prompt failed: ${formatError(promptResult.error)}`,
 				create.slotId,
 				create.runId,
 				sessionId,
