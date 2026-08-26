@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.149.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.149.0...v7.149.1) (2026-08-26)
+
+
+### Bug Fixes
+
+* **ci:** refresh atomic writer registry anchors ([a7c8762](https://github.com/ZaxbyHub/opencode-swarm/commit/a7c8762a3afae89c8a57cf8269cf2b5c8496e07c))
+* **dispatch-lanes:** settle async lanes on terminal provider errors ([#2349](https://github.com/ZaxbyHub/opencode-swarm/issues/2349)) ([bacbed6](https://github.com/ZaxbyHub/opencode-swarm/commit/bacbed644f0f326575186f8e3b4159d443cfecd6))
+* **pr-review:** recover discovery wave contract failures ([69fd9c4](https://github.com/ZaxbyHub/opencode-swarm/commit/69fd9c429428de92a6a81a40ac1cb4a06567e2f7))
+
 ## [7.149.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.148.5...v7.149.0) (2026-08-26)
 
 
