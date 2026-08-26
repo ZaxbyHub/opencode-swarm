@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.148.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.148.2...v7.148.3) (2026-08-26)
+
+
+### Bug Fixes
+
+* **tools:** boolean enum in knowledge_recall breaks all Gemini-API providers ([df8b5c5](https://github.com/ZaxbyHub/opencode-swarm/commit/df8b5c5e427d020e6b7335bbbe22646f7a35f8bf))
+
 ## [7.148.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.148.1...v7.148.2) (2026-08-25)
 
 
