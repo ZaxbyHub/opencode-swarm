@@ -145,21 +145,47 @@ describe('tool failure classification', () => {
 		expect(display).toContain('authorization=<redacted>');
 	});
 
-	// Property test (Stage B rounds 4-6): prior rounds each found a leak
-	// from a single fill byte at a different inter-token position, and round
-	// 5 found the initial version of this test was partly vacuous — the
-	// secret sat at the tail of every template, so insertions landing
-	// *inside* the secret itself corrupted the very substring being checked
-	// for, making that iteration pass regardless of redaction correctness.
-	// Insertion positions are bounded to the key/separator region (up to but
-	// not including the secret) so every iteration is a real probe. The
-	// fill-byte set covers C0/DEL, C1 controls, a Unicode format char
-	// (round 5), and default-ignorable code points like variation selectors
-	// and Hangul filler (round 6) — every category found to render as
-	// invisible while still breaking a `\b` boundary.
+	// Property test (Stage B rounds 4-6, closeout critic): prior rounds
+	// each found a leak from a single fill byte at a different inter-token
+	// position, and round 5 found the initial version of this test was
+	// partly vacuous — the secret sat at the tail of every template, so
+	// insertions landing *inside* the secret itself corrupted the very
+	// substring being checked for, making that iteration pass regardless of
+	// redaction correctness. Insertion positions are bounded to the
+	// key/separator region (up to but not including the secret) so every
+	// iteration is a real probe. The fill-byte set covers C0/DEL, C1
+	// controls, a Unicode format char (round 5), and default-ignorable code
+	// points like variation selectors and Hangul filler (round 6) — every
+	// category found to render as invisible while still breaking a `\b`
+	// boundary.
+	//
+	// Closeout critic: the SCREAMING_KV key class used to tolerate vertical
+	// whitespace (\n, \r, \v, \f) as fill, which let two unrelated log lines
+	// merge into one redaction match (e.g. "AUTH FAILED\nHTTP_STATUS=401"
+	// collapsed to "AUTHFAILEDHTTP_STATUS=<redacted>", destroying the
+	// failure-reason legibility this PR exists to preserve, and making
+	// different status codes produce byte-identical output). Fixed by
+	// excluding vertical whitespace from the SCREAMING_KV key class — see
+	// SCREAMING_KEY_HORIZONTAL_FILL_CHARS in invocation-failure.ts. That
+	// necessarily reopens a narrow, accepted-residual-risk gap symmetrical
+	// to it: a vertical-whitespace byte inserted INSIDE a SCREAMING key name
+	// itself (not between log lines) now defeats that key's own \b-tolerant
+	// matching, the same way any other never-widened Unicode category would
+	// (e.g. combining marks, deliberately not covered either — see the FILL
+	// doc comment). Never-mangle-multi-line-text was judged to outweigh
+	// never-leak-via-a-newline-spliced-into-a-key-name: the latter requires
+	// an attacker to embed a raw CR/LF/VT/FF inside what's meant to be a
+	// single unbroken identifier, which is a narrower and stranger shape
+	// than "two adjacent lines of ordinary log output." SCREAMING-family
+	// templates (uppercase keys, matched by SCREAMING_KV_CANDIDATE_PATTERN)
+	// are therefore probed with a vertical-whitespace-free fill-byte subset;
+	// lowercase credential templates (matched by CREDENTIAL_KV_PATTERN,
+	// whose fill gaps are small and fixed-position, not an unbounded
+	// multi-word span) are unaffected and keep the full corpus.
 	it('never leaks a secret for any single or adjacent-pair fill-byte insertion in the key/separator region, across every credential pattern family', () => {
 		const SECRET = 'hunter2xyz';
-		const FILL_BYTES = [
+		const VERTICAL_WHITESPACE_BYTES = new Set(['\r', '\n', '\x0b', '\x0c']);
+		const ALL_FILL_BYTES = [
 			'\x1b',
 			'\x00',
 			'\x7f',
@@ -175,23 +201,29 @@ describe('tool failure classification', () => {
 			String.fromCharCode(0x3164), // Hangul Filler (Default_Ignorable)
 			String.fromCodePoint(0xe0100), // variation selector supplement (Default_Ignorable)
 		];
+		const HORIZONTAL_ONLY_FILL_BYTES = ALL_FILL_BYTES.filter(
+			(b) => !VERTICAL_WHITESPACE_BYTES.has(b),
+		);
 		const TEMPLATES = [
-			(s: string) => `authorization=Bearer ${s}`,
-			(s: string) => `authorization: Bearer ${s}`,
-			(s: string) => `token=${s}`,
-			(s: string) => `secret=${s}`,
-			(s: string) => `password=${s}`,
-			(s: string) => `api_key=${s}`,
-			(s: string) => `api-key=${s}`,
-			(s: string) => `API_KEY=${s}`,
-			(s: string) => `MY_AUTH=${s}`,
-			(s: string) => `X_TOKEN=${s}`,
+			{ make: (s: string) => `authorization=Bearer ${s}`, screaming: false },
+			{ make: (s: string) => `authorization: Bearer ${s}`, screaming: false },
+			{ make: (s: string) => `token=${s}`, screaming: false },
+			{ make: (s: string) => `secret=${s}`, screaming: false },
+			{ make: (s: string) => `password=${s}`, screaming: false },
+			{ make: (s: string) => `api_key=${s}`, screaming: false },
+			{ make: (s: string) => `api-key=${s}`, screaming: false },
+			{ make: (s: string) => `API_KEY=${s}`, screaming: true },
+			{ make: (s: string) => `MY_AUTH=${s}`, screaming: true },
+			{ make: (s: string) => `X_TOKEN=${s}`, screaming: true },
 		];
 
 		const leaks: string[] = [];
 		for (const template of TEMPLATES) {
-			const base = template(SECRET);
+			const base = template.make(SECRET);
 			const keyRegionEnd = base.indexOf(SECRET);
+			const FILL_BYTES = template.screaming
+				? HORIZONTAL_ONLY_FILL_BYTES
+				: ALL_FILL_BYTES;
 			for (let i = 0; i <= keyRegionEnd; i++) {
 				for (const b of FILL_BYTES) {
 					const single = base.slice(0, i) + b + base.slice(i);
@@ -225,5 +257,29 @@ describe('tool failure classification', () => {
 			count: 0,
 			sample: [],
 		});
+	});
+
+	// Closeout critic: SCREAMING_KV's key class used to include \s (all
+	// whitespace, including newlines), so two unrelated log lines could
+	// merge into one redaction match and collapse distinct failures (e.g.
+	// different HTTP status codes) into byte-identical redacted output.
+	it('does not merge two unrelated lines of SCREAMING_CASE log text across a newline', () => {
+		const distinctOutputs = new Set([
+			invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
+				'AUTH FAILED\nHTTP_STATUS=401',
+			),
+			invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
+				'AUTH FAILED\nHTTP_STATUS=500',
+			),
+		]);
+		// Different status codes must not collapse to the same output.
+		expect(distinctOutputs.size).toBe(2);
+
+		const display = invocationFailureTestExports.sanitizeFailureEvidenceDisplay(
+			'AUTH FAILED\nHTTP_STATUS=401',
+		);
+		// The unrelated preceding line survives un-redacted and un-merged.
+		expect(display).toContain('AUTH FAILED');
+		expect(display).not.toContain('AUTHFAILED');
 	});
 });

@@ -184,8 +184,26 @@ const CREDENTIAL_KV_PATTERN = new RegExp(
  * (TOKEN/KEY/SECRET/PASSWORD/AUTH, tolerant of embedded fill) is checked in
  * JS after the match, not by the regex — see `screamingKeyContainsSuffix`.
  */
+/**
+ * Fill class for the SCREAMING_KV key run specifically — like `FILL`, but
+ * excludes vertical whitespace (`\n`, `\r`, `\v`, `\f`, U+2028/U+2029). The
+ * general `FILL` includes all of `\s` because it's used in small, bounded
+ * gaps immediately around a fixed keyword (e.g. between "authorization" and
+ * its separator); the SCREAMING_KV key run, by contrast, is an unbounded
+ * (up to 80-char) span that can legitimately contain space/tab between
+ * words. Letting THAT span also cross a newline merges two unrelated log
+ * lines into one redaction match — e.g. `AUTH FAILED\nHTTP_STATUS=401`
+ * collapsed to `AUTHFAILEDHTTP_STATUS=<redacted>`, destroying the very
+ * failure-reason legibility this PR (#2349) exists to preserve, and making
+ * different status codes produce byte-identical redacted output (closeout
+ * critic finding). Horizontal fill (space/tab/other control/format/DI
+ * chars) is still tolerated so the round 1-6 bypasses stay closed; only the
+ * line-merging vector is closed here.
+ */
+const SCREAMING_KEY_HORIZONTAL_FILL_CHARS =
+	'\\x00-\\x09\\x0e-\\x1f\\x7f-\\x9f\\p{Zs}\\p{Cf}\\p{Default_Ignorable_Code_Point}';
 const SCREAMING_KV_CANDIDATE_PATTERN = new RegExp(
-	`\\b([A-Z0-9_\\s\\p{Cc}\\p{Cf}\\p{Default_Ignorable_Code_Point}]{1,80})${FILL}=${FILL}([^\\s]+)`,
+	`\\b([A-Z0-9_${SCREAMING_KEY_HORIZONTAL_FILL_CHARS}]{1,80})${FILL}=${FILL}([^\\s]+)`,
 	'gu',
 );
 
