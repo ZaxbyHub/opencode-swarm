@@ -145,14 +145,31 @@ describe('tool failure classification', () => {
 		expect(display).toContain('authorization=<redacted>');
 	});
 
-	// Property test (Stage B round 4): four prior rounds each found a
-	// leak from a single control/whitespace byte at a different
-	// inter-token position. Instead of one regression test per bypass,
-	// enumerate every single-byte and adjacent-pair insertion across every
-	// pattern family and assert the secret never survives.
-	it('never leaks a secret for any single or adjacent-pair fill-byte insertion across every credential pattern family', () => {
+	// Property test (Stage B rounds 4-5): prior rounds each found a leak
+	// from a single fill byte at a different inter-token position, and round
+	// 5 found the initial version of this test was partly vacuous — the
+	// secret sat at the tail of every template, so insertions landing
+	// *inside* the secret itself corrupted the very substring being checked
+	// for, making that iteration pass regardless of redaction correctness.
+	// Insertion positions are bounded to the key/separator region (up to but
+	// not including the secret) so every iteration is a real probe. The
+	// fill-byte set also covers C1 controls and a Unicode format char
+	// (round 5's live bypass), not just C0/DEL.
+	it('never leaks a secret for any single or adjacent-pair fill-byte insertion in the key/separator region, across every credential pattern family', () => {
 		const SECRET = 'hunter2xyz';
-		const FILL_BYTES = ['\x1b', '\x00', '\x7f', '\t', '\r', '\n'];
+		const FILL_BYTES = [
+			'\x1b',
+			'\x00',
+			'\x7f',
+			'\t',
+			'\r',
+			'\n',
+			'\x0b',
+			'\x0c',
+			String.fromCharCode(0x85), // NEL (C1 control)
+			String.fromCharCode(0x9b), // CSI (C1 control)
+			String.fromCharCode(0x200b), // zero-width space (Unicode format char)
+		];
 		const TEMPLATES = [
 			(s: string) => `authorization=Bearer ${s}`,
 			(s: string) => `authorization: Bearer ${s}`,
@@ -160,6 +177,7 @@ describe('tool failure classification', () => {
 			(s: string) => `secret=${s}`,
 			(s: string) => `password=${s}`,
 			(s: string) => `api_key=${s}`,
+			(s: string) => `api-key=${s}`,
 			(s: string) => `API_KEY=${s}`,
 			(s: string) => `MY_AUTH=${s}`,
 			(s: string) => `X_TOKEN=${s}`,
@@ -168,7 +186,8 @@ describe('tool failure classification', () => {
 		const leaks: string[] = [];
 		for (const template of TEMPLATES) {
 			const base = template(SECRET);
-			for (let i = 0; i <= base.length; i++) {
+			const keyRegionEnd = base.indexOf(SECRET);
+			for (let i = 0; i <= keyRegionEnd; i++) {
 				for (const b of FILL_BYTES) {
 					const single = base.slice(0, i) + b + base.slice(i);
 					const out =
@@ -178,7 +197,7 @@ describe('tool failure classification', () => {
 							`single@${i} byte=${JSON.stringify(b)}: ${JSON.stringify(base)} -> ${JSON.stringify(out)}`,
 						);
 					}
-					for (let j = i; j <= base.length; j++) {
+					for (let j = i; j <= keyRegionEnd; j++) {
 						for (const b2 of FILL_BYTES) {
 							const pair =
 								base.slice(0, i) + b + base.slice(i, j) + b2 + base.slice(j);
