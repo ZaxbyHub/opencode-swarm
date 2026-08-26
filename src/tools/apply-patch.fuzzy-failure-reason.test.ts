@@ -16,9 +16,9 @@
  * the branch is never reached and the assertion cannot bite.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
+import { canonicalMkdtemp } from '../../tests/helpers/tmpdir';
 import type { ApplyPatchResult } from './apply-patch';
 import { _internals, swarmApplyPatch } from './apply-patch';
 
@@ -28,7 +28,8 @@ let workspace = '';
 const originalLoadConfig = _internals.loadPluginConfigWithMeta;
 
 beforeEach(() => {
-	workspace = mkdtempSync(path.join(tmpdir(), 'apply-patch-fuzzy-reason-'));
+	// FR-011: canonicalMkdtemp closes the macOS /var -> /private/var symlink gap.
+	workspace = canonicalMkdtemp('apply-patch-fuzzy-reason-');
 });
 
 afterEach(() => {
