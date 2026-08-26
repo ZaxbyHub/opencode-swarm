@@ -110,17 +110,127 @@ function redactUrl(match: string): string {
 	}
 }
 
+/**
+ * Whitespace, C0/C1 control chars (`\p{Cc}`), Unicode format chars (`\p{Cf}`,
+ * e.g. zero-width space), and default-ignorable code points (`\p{DI}`, e.g.
+ * variation selectors and Hangul filler — render as nothing but aren't `Cc`
+ * or `Cf`) are all tolerated as "fill" at every inter-token position in the
+ * redaction patterns below (keyword letters, keyword-to-separator,
+ * separator-to-Bearer, Bearer-to-value, suffix-to-`=`): a byte from any of
+ * these classes can sit anywhere provider-controlled text places it, and
+ * treating only a subset as fill left the rest free to break a `\b` boundary
+ * or truncate a match before the real secret (see PR #2363 review history,
+ * rounds 1-6, for the specific bypasses this closed). Each fill run is
+ * bounded (not `*`) as defense in depth, but the primary ReDoS fix is
+ * structural: `SCREAMING_KV_CANDIDATE_PATTERN` below matches the key run
+ * with a single flat character class instead of a repeated
+ * `(?:[A-Z0-9_]${FILL})*` group — that nesting let the regex engine
+ * backtrack over many equivalent fill-length distributions and stayed
+ * superlinear even with each individual fill run bounded (round 5).
+ *
+ * This is best-effort defense-in-depth for a log-display string, not a
+ * security boundary: six rounds of closing one invisible/control-character
+ * category at a time is evidence that a keyword-matching redactor cannot be
+ * made complete against an adversarial Unicode alphabet (e.g. combining
+ * marks like U+0300 still defeat it, deliberately not fixed here — see
+ * `sanitizeFailureEvidenceDisplay`'s doc comment). Anything downstream that
+ * treats this function's output as a guarantee rather than a best effort is
+ * relying on more than it provides.
+ */
+const FILL_MAX_RUN = 8;
+const FILL = `[\\s\\p{Cc}\\p{Cf}\\p{Default_Ignorable_Code_Point}]{0,${FILL_MAX_RUN}}`;
+const CONTROL_CHAR_RUN = /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]+/gu;
+
+/** Hard cap on input length before any redaction regex runs, independent of
+ * the final `boundedUtf8` display cap — bounds worst-case regex work against
+ * adversarially long control-char-heavy input. */
+const MAX_SANITIZE_INPUT_CHARS = MAX_DISPLAY_BYTES * 8;
+
+/**
+ * Builds a keyword alternative tolerant of a control/whitespace run between
+ * every letter, e.g. `tolerantKeyword('token')` matches `t`, optional fill,
+ * `o`, optional fill, `k`, … — so "to\x1bken" still matches as one keyword
+ * instead of splitting into two non-matching fragments.
+ */
+function tolerantKeyword(word: string): string {
+	return word.split('').join(FILL);
+}
+
+const CREDENTIAL_KEYWORDS_LOWER = [
+	'bearer',
+	'token',
+	'secret',
+	'password',
+	'authorization',
+].map(tolerantKeyword);
+const API_KEY_PATTERN = `${tolerantKeyword('api')}${FILL}[_-]?${FILL}${tolerantKeyword('key')}`;
+const CREDENTIAL_KEYWORD_ALTERNATION = `(?:${API_KEY_PATTERN}|${CREDENTIAL_KEYWORDS_LOWER.join('|')})`;
+
+const SCREAMING_SUFFIXES = ['TOKEN', 'KEY', 'SECRET', 'PASSWORD', 'AUTH'];
+
+const TOLERANT_BEARER_PREFIX = tolerantKeyword('Bearer');
+const CREDENTIAL_KV_PATTERN = new RegExp(
+	`\\b(${CREDENTIAL_KEYWORD_ALTERNATION})\\b${FILL}[:=]${FILL}(?:${TOLERANT_BEARER_PREFIX}${FILL})?[^\\s,;]+`,
+	'giu',
+);
+/**
+ * Matches a candidate SCREAMING_CASE `KEY=value` span using a single flat
+ * character class for the key run (bounded to 80 chars) instead of the
+ * nested `(?:[A-Z0-9_]${FILL})*` repetition an earlier version used — that
+ * nesting let the regex engine backtrack over many equivalent ways to
+ * distribute fill-run length across repetitions, causing superlinear time on
+ * long fill-heavy input even with each individual fill run bounded (PR #2363
+ * review round 5). Whether the key actually contains a credential suffix
+ * (TOKEN/KEY/SECRET/PASSWORD/AUTH, tolerant of embedded fill) is checked in
+ * JS after the match, not by the regex — see `screamingKeyContainsSuffix`.
+ */
+/**
+ * Fill class for the SCREAMING_KV key run specifically — like `FILL`, but
+ * excludes vertical whitespace (`\n`, `\r`, `\v`, `\f`, U+2028/U+2029). The
+ * general `FILL` includes all of `\s` because it's used in small, bounded
+ * gaps immediately around a fixed keyword (e.g. between "authorization" and
+ * its separator); the SCREAMING_KV key run, by contrast, is an unbounded
+ * (up to 80-char) span that can legitimately contain space/tab between
+ * words. Letting THAT span also cross a newline merges two unrelated log
+ * lines into one redaction match — e.g. `AUTH FAILED\nHTTP_STATUS=401`
+ * collapsed to `AUTHFAILEDHTTP_STATUS=<redacted>`, destroying the very
+ * failure-reason legibility this PR (#2349) exists to preserve, and making
+ * different status codes produce byte-identical redacted output (closeout
+ * critic finding). Horizontal fill (space/tab/other control/format/DI
+ * chars) is still tolerated so the round 1-6 bypasses stay closed; only the
+ * line-merging vector is closed here.
+ */
+const SCREAMING_KEY_HORIZONTAL_FILL_CHARS =
+	'\\x00-\\x09\\x0e-\\x1f\\x7f-\\x9f\\p{Zs}\\p{Cf}\\p{Default_Ignorable_Code_Point}';
+const SCREAMING_KV_CANDIDATE_PATTERN = new RegExp(
+	`\\b([A-Z0-9_${SCREAMING_KEY_HORIZONTAL_FILL_CHARS}]{1,80})${FILL}=${FILL}([^\\s]+)`,
+	'gu',
+);
+
+function screamingKeyContainsSuffix(key: string): boolean {
+	const stripped = key.replace(CONTROL_CHAR_RUN, '').replace(/\s+/g, '');
+	return SCREAMING_SUFFIXES.some((suffix) => stripped.includes(suffix));
+}
+
+/**
+ * Redacts secrets/URLs and strips control chars for terminal/display safety.
+ * Redaction runs FIRST against the raw value so `\b` sees genuine boundaries;
+ * control-char stripping runs LAST so it can't interfere with matching. See
+ * the FILL doc comment above for why control chars and whitespace are both
+ * treated as tolerated fill throughout the redaction patterns.
+ */
 export function sanitizeFailureEvidenceDisplay(value: string): string {
-	const redacted = value
+	const bounded = value.slice(0, MAX_SANITIZE_INPUT_CHARS);
+	const redacted = bounded
 		.replace(/\bhttps?:\/\/[^\s'"<>]+/gi, (match) => redactUrl(match))
-		.replace(
-			/\b((?:api[_-]?key|bearer|token|secret|password|authorization))\b\s*[:=]\s*(?:Bearer\s+)?[^\s,;]+/gi,
-			(_, key: string) => `${key}=<redacted>`,
-		)
-		.replace(
-			/\b([A-Z][A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH)[A-Z0-9_]*)=([^\s]+)/g,
-			(_, key: string) => `${key}=<redacted>`,
-		);
+		.replace(CREDENTIAL_KV_PATTERN, (_, key: string) => {
+			return `${key.replace(CONTROL_CHAR_RUN, '')}=<redacted>`;
+		})
+		.replace(SCREAMING_KV_CANDIDATE_PATTERN, (match, key: string) => {
+			if (!screamingKeyContainsSuffix(key)) return match;
+			return `${key.replace(CONTROL_CHAR_RUN, '').replace(/\s+/g, '')}=<redacted>`;
+		})
+		.replace(CONTROL_CHAR_RUN, ' ');
 	return boundedUtf8(redacted.trim());
 }
 

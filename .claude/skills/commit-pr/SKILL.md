@@ -181,6 +181,7 @@ bun run check:gate-portability
 bun run check:bare-spawn
 bash scripts/check-test-tmpdir.sh
 bash scripts/check-bash-portability.sh
+bun run check:error-channel-discard
 (cd scripts/swarm-model && node --test)
 bun run package:smoke
 ```

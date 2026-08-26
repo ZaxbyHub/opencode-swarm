@@ -132,7 +132,7 @@ const FORBID_SESSION: readonly WorkflowIdKey[] = Object.freeze([
 
 /** Live reader of `delegation_end` cost fields. */
 const CONSUMER_COST_ACCOUNTING = Object.freeze([
-	'src/services/cost-accounting.ts:127',
+	'src/services/cost-accounting.ts:128',
 ]);
 /** Live reader of reviewer-gate decisions. */
 const CONSUMER_GATE_STATS = Object.freeze(['src/evaluation/gate-stats.ts:99']);

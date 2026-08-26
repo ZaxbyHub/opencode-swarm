@@ -620,6 +620,8 @@ function applyHunks(
 		const hunk = fileDiff.hunks[hunkIdx];
 		// Reset per-hunk: true when fuzzy fallback ran and still missed.
 		let fuzzyAttemptedThisHunk = false;
+		/** Issue #2349 sweep: why fuzzy matching failed, forwarded to the caller. */
+		let fuzzyFailureReason: string | undefined;
 
 		// Compute match position: declared position adjusted by accumulated delta from prior hunks
 		const searchStart = Math.max(0, hunk.oldStart - 1 + accumulatedDelta);
@@ -692,7 +694,16 @@ function applyHunks(
 			}
 			// Fuzzy also failed — fall through to the context-mismatch return,
 			// flagging that fuzzy was attempted so the caller can append a hint.
+			// Issue #2349 sweep: `fuzzy.error` was previously read ONLY as
+			// `=== null` and its value discarded, so the caller learned that fuzzy
+			// matching failed but never WHY. Carry the reason to the return below.
 			fuzzyAttemptedThisHunk = true;
+			fuzzyFailureReason =
+				typeof fuzzy.error === 'string' && fuzzy.error.trim().length > 0
+					? fuzzy.error.trim()
+					: fuzzy.matchCount > 1
+						? `fuzzy match was ambiguous (${fuzzy.matchCount} candidates)`
+						: undefined;
 		}
 
 		if (!matchFound) {
@@ -712,7 +723,9 @@ function applyHunks(
 				error: {
 					hunkIndex: hunkIdx,
 					type: 'context-mismatch',
-					message: `Context mismatch in hunk ${hunkIdx + 1} at line ${searchStart + 1}: expected context does not match file content`,
+					message: `Context mismatch in hunk ${hunkIdx + 1} at line ${searchStart + 1}: expected context does not match file content${
+						fuzzyFailureReason ? ` (fuzzy fallback: ${fuzzyFailureReason})` : ''
+					}`,
 					expected:
 						expectedContent.length > 200
 							? `${expectedContent.slice(0, 200)}... (truncated)`
