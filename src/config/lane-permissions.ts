@@ -99,8 +99,8 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { appendCoreEventSync } from '../events/core-events.js';
 import { SKILL_SEARCH_ROOTS } from '../hooks/skill-propagation-gate';
-import { validateSwarmPath } from '../hooks/utils';
 import { addDeferredWarning } from '../services/warning-buffer';
 import {
 	getHostConfigDir,
@@ -896,13 +896,7 @@ function recordLanePermissionEvent(
 	event: Record<string, unknown>,
 ): void {
 	try {
-		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		_internals.mkdirSync(path.dirname(eventsPath), { recursive: true });
-		_internals.appendFileSync(
-			eventsPath,
-			`${JSON.stringify(event)}\n`,
-			'utf-8',
-		);
+		appendCoreEventSync(directory, event);
 	} catch {
 		// Intentionally swallowed — see doc comment.
 	}

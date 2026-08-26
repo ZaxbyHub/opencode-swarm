@@ -3,7 +3,7 @@
 Companion to `docs/evidence-and-telemetry.md` (evidence bundles + the legacy
 telemetry stream from a user's point of view) and `docs/engineering-invariants.md`
 (the invariant this PR establishes). This document is the contract definition for
-`src/observability/`: the canonical event envelope, the 47-entry event catalog,
+`src/observability/`: the canonical event envelope, the 48-entry event catalog,
 the legacy adapter, sampling/cardinality rules, the OTel mapping pin, and the
 exhaustive producer/consumer matrix across all seventeen known observability
 stores in the repository.
@@ -16,7 +16,7 @@ Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
 
 **What this PR defines.** A single canonical `ObservabilityEvent` envelope
 (`src/observability/envelope.ts`), a discriminated catalog of every event kind
-the codebase emits today (`src/observability/catalog.ts`, 47 entries), a
+the codebase emits today (`src/observability/catalog.ts`, 48 entries), a
 relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. It wires the envelope into the one live production
@@ -75,7 +75,7 @@ in production stops anything or is visible anywhere today — it is not.
 
 Defined in `src/observability/envelope.ts` as a zod schema (`z.infer`d for the
 `ObservabilityEvent` type). The schema is safe-parsed by the tests
-(`tests/unit/observability/envelope-roundtrip.test.ts`, all 46 kinds). It is **not** parsed by the
+(`tests/unit/observability/envelope-roundtrip.test.ts`, all 48 kinds). It is **not** parsed by the
 CI contract check, and **not** parsed on the `emit()` hot path; `createObservation` builds a plain
 object and never calls `.parse()`, because parsing would reallocate on every
 emit and would clone or reject `legacy.raw` (see §4).
@@ -182,9 +182,9 @@ those inputs before this change.
 
 ---
 
-## 5. The 47-entry catalog
+## 5. The 48-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 47 entries = the 38 pre-existing members of
+Source: `src/observability/catalog.ts`. Exactly 48 entries = the 38 pre-existing members of
 `TelemetryEvent` (`src/telemetry.ts:15-109`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
@@ -605,6 +605,35 @@ aggregate-only. The authoritative record of what was compacted, migrated, or
 dropped is `.swarm/skill-usage.jsonl` itself; this event only reports the
 health aggregate so later reporting (PR 16/19) can surface skill-usage
 pressure without leaking per-skill identifiers.
+#### core_events_health
+Category `lifecycle`, severity `notice`, privacy `operational`. Producer
+`src/telemetry.ts:964` (`coreEventsHealth`, called by the bounded
+`.swarm/events.jsonl` store in `src/events/core-events.ts` after a compaction
+or close cut; issue #2039). Consumers: none — owner **#2047**. Retention:
+**#2047**. No workflow ID is required: the aggregate is store-level and
+counts-only. The payload is strictly bounded counts: `trigger`
+(`compaction`/`close`), `accepted_count`, `compacted_count`, `retained_count`,
+`dropped_count`, `corrupt_count`, `authority_index_count`,
+`authority_evicted_count`, `oldest_timestamp`, `newest_timestamp`, `bytes`,
+and `limit_bytes`. Event content and filesystem paths are never emitted (path
+redaction by omission). This is the health signal for the issue-#2039 bounded
+core event store; `authority_evicted_count` discloses the only reachable
+absent-after-compaction case for the authoritative partition lookups (FIFO
+eviction past the index cap — a single benign duplicate audit line, never a
+changed gate verdict). `authority_index_count` reflects the index state at
+the START of a maintenance invocation — a multi-pass drain under-reports
+keys folded by its own later passes; the next invocation's emission is
+current.
+
+**Schema-version bump checklist:** when a future version bumps
+`swarm-events-manifest` (v2) or `events-authority-index` (v2), a v1 reader
+treats the new manifest line as an ordinary event line (folded into the
+window) and treats the new index as corrupt (authority queries fail closed
+with `CORE_EVENT_AUTHORITY_INDEX_UNREADABLE`). Both are safe-by-design for a
+staged rollout, but the bump must follow the AGENTS.md invariant-12 cache
+migration discipline (announce, then roll), and the v1 fold of a v2 manifest
+line is lossy for the window — do not stage a v2 writer against v1 readers
+for longer than the cache-refresh window.
 
 ---
 
@@ -800,9 +829,16 @@ bugs fixed in this PR. Each already has a named downstream owner in the
 sequence #2030–#2051.
 
 - **The `event:` vs `type:` discriminator split in `.swarm/events.jsonl`.**
-  `src/context/role-filter.ts:147` and `src/tools/phase-complete.ts:1571` write `event:`; `src/hooks/curator.ts:1755` and `src/hooks/full-auto-intercept.ts:269`
-  writes `type:` — the split exists *within a single file*. A generic
-  consumer must check both keys or silently miss records. Owner: **#2039**.
+  `src/context/role-filter.ts` and `src/tools/phase-complete.ts` write `event:`; `src/hooks/curator.ts` and `src/hooks/full-auto-intercept.ts`
+  write `type:` — the split exists *within a single file*. A generic
+  consumer must check both keys or silently miss records. **RESOLVED for
+  #2039**: the split is deliberately PRESERVED (normalizing discriminators
+  would break every existing consumer and archive), but all producers now
+  append through the single `appendCoreEventSync` seam
+  (`src/events/core-events.ts`), the store manifest carries a schema version,
+  and bounded seam reads are manifest-stripped — new consumers must use the
+  seam's read/authority APIs rather than parsing the file directly
+  (enforced by `scripts/check-core-events-usage.ts`).
 - **Eight of ten named legacy stores have no schema version at all.** Only
   `knowledge-events.jsonl` (`schema_version`, default 1) and
   `background-delegations.jsonl` (`schemaVersion` 1\|2\|3) version their

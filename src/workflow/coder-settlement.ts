@@ -1,8 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { appendFile, mkdir, readdir } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { readdir } from 'node:fs/promises';
 import type {
 	BackgroundTaskChangeContext,
 	BackgroundWorktreeDescriptor,
@@ -11,6 +10,7 @@ import {
 	captureWorkspaceSnapshot,
 	changedFilesSinceSnapshot,
 } from '../background/workspace-snapshot.js';
+import { appendCoreEventSync } from '../events/core-events.js';
 import {
 	getTaskWorkflowSnapshot,
 	type TaskEvidence,
@@ -107,8 +107,9 @@ async function writeWal(
  * settlement dispatch/settle/abort must be observable in events.jsonl). Never
  * throws — the WAL and evidence files remain the authoritative state; this is
  * the human-readable trail, matching the plan-critic audit-event precedent.
- * The parent directory is created (future call sites may append before any WAL
- * write) and a transient Windows EBUSY/EPERM gets one retry (PRR-003). Final
+ * Appends go through the canonical `appendCoreEventSync` seam, which owns
+ * `.swarm` creation, lock retry, and torn-tail framing (its single atomic
+ * append replaces the former Windows EBUSY/EPERM one-retry, PRR-003). Final
  * failure surfaces via criticalWarn — always visible, not debug-gated — because
  * a silently missing lifecycle event voids the observability claim.
  */
@@ -123,37 +124,17 @@ async function appendSettlementEvent(
 	wal: Pick<CoderSettlementWal, 'taskId' | 'transitionId' | 'actor'>,
 	extra?: Record<string, unknown>,
 ): Promise<void> {
-	const line = `${JSON.stringify({
-		type: 'coder_settlement',
-		action,
-		timestamp: new Date().toISOString(),
-		taskId: wal.taskId,
-		transitionId: wal.transitionId,
-		actor: wal.actor,
-		...(extra ?? {}),
-	})}\n`;
 	try {
-		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		await mkdir(dirname(eventsPath), { recursive: true });
-		await appendFile(eventsPath, line, 'utf-8');
+		appendCoreEventSync(directory, {
+			type: 'coder_settlement',
+			action,
+			timestamp: new Date().toISOString(),
+			taskId: wal.taskId,
+			transitionId: wal.transitionId,
+			actor: wal.actor,
+			...(extra ?? {}),
+		});
 	} catch (error) {
-		const code = (error as NodeJS.ErrnoException).code;
-		if (code === 'EBUSY' || code === 'EPERM') {
-			try {
-				const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-				await appendFile(eventsPath, line, 'utf-8');
-				return;
-			} catch (retryError) {
-				logger.criticalWarn(
-					`[coder-settlement] lifecycle event write failed after retry (${action} ${wal.taskId}): ${
-						retryError instanceof Error
-							? retryError.message
-							: String(retryError)
-					}`,
-				);
-				return;
-			}
-		}
 		logger.criticalWarn(
 			`[coder-settlement] lifecycle event write failed (${action} ${wal.taskId}): ${
 				error instanceof Error ? error.message : String(error)

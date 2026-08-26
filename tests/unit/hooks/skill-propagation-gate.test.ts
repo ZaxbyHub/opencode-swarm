@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-
+import { readCoreEvents } from '../../../src/events/core-events.js';
 // Static import of the module under test
 import {
 	_internals,
@@ -1327,9 +1327,8 @@ describe('writeWarnEvent', () => {
 		writeWarnEvent(tmp, { type: 'event_one', n: 1 });
 		writeWarnEvent(tmp, { type: 'event_two', n: 2 });
 
-		const filePath = path.join(tmp, '.swarm', 'events.jsonl');
-		const content = fs.readFileSync(filePath, 'utf-8');
-		const lines = content.trim().split('\n');
+		// #2039: the store read is manifest-stripped.
+		const lines = readCoreEvents(tmp).text.trim().split('\n');
 
 		expect(lines).toHaveLength(2);
 		expect(JSON.parse(lines[0])).toEqual({ type: 'event_one', n: 1 });

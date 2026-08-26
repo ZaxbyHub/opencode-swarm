@@ -30,9 +30,13 @@ import {
 	getProfileForIdentity,
 	type QaGates,
 } from '../db/qa-gate-profile.js';
+import {
+	appendCoreEventSync,
+	CORE_EVENT_LOCKED,
+	getCoderRetryEscalationActions,
+} from '../events/core-events.js';
 import { isReadOnlyTool } from '../full-auto/policy';
 import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
-import { tryAcquireLock } from '../parallel/file-locks.js';
 import {
 	routeReviewForChanges,
 	shouldParallelizeReview,
@@ -1919,21 +1923,17 @@ export async function forceRecordPlanCriticApproval(
 
 	// Best-effort non-fatal audit event (matches abortPrWorkflow / knowledge-gate
 	// precedent). The snapshot is authoritative for the gate; the audit event is
-	// the human-readable trail.
+	// the human-readable trail. Issue #2039: appended through the core event
+	// seam.
 	try {
-		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		await fs.promises.appendFile(
-			eventsPath,
-			`${JSON.stringify({
-				type: 'plan_critic_gate_manual_approval',
-				timestamp: recordedAt,
-				sessionID,
-				plan_id: planId,
-				user_confirmed: userConfirmed,
-				...(sanitizedReason ? { reason: sanitizedReason } : {}),
-			})}\n`,
-			'utf-8',
-		);
+		appendCoreEventSync(directory, {
+			type: 'plan_critic_gate_manual_approval',
+			timestamp: recordedAt,
+			sessionID,
+			plan_id: planId,
+			user_confirmed: userConfirmed,
+			...(sanitizedReason ? { reason: sanitizedReason } : {}),
+		});
 	} catch (err) {
 		logger.warn(
 			`[delegation-gate] plan_critic_gate_manual_approval audit event write failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -2316,39 +2316,20 @@ type CoderRetryEscalationAction =
 	| 'simplification'
 	| 'user_escalation';
 
+/**
+ * Issue #2039: escalation audit state moved off raw events.jsonl scans to
+ * the authoritative core event index (index answer UNION the bounded
+ * retained-window scan). Verdict semantics are identical to the previous
+ * whole-file scan for everything within the window, and complete after
+ * compaction via the index (the fold pass indexes authority lines before
+ * removing them).
+ */
 function readCoderRetryEscalations(
 	directory: string,
 	taskId: string,
 	retryEpoch: number,
 ): Set<CoderRetryEscalationAction> {
-	const actions = new Set<CoderRetryEscalationAction>();
-	try {
-		const raw = fs.readFileSync(
-			validateSwarmPath(directory, 'events.jsonl'),
-			'utf-8',
-		);
-		for (const line of raw.split('\n')) {
-			if (!line.trim()) continue;
-			try {
-				const event = JSON.parse(line) as Record<string, unknown>;
-				if (
-					event.type === 'coder_retry_circuit_breaker' &&
-					event.taskId === taskId &&
-					event.retryEpoch === retryEpoch &&
-					(event.action === 'sounding_board_consultation' ||
-						event.action === 'simplification' ||
-						event.action === 'user_escalation')
-				) {
-					actions.add(event.action);
-				}
-			} catch {
-				// A malformed unrelated audit line does not erase exact workflow state.
-			}
-		}
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-	}
-	return actions;
+	return getCoderRetryEscalationActions(directory, taskId, retryEpoch);
 }
 
 async function emitCoderRetryEscalation(
@@ -2362,27 +2343,15 @@ async function emitCoderRetryEscalation(
 		action: CoderRetryEscalationAction;
 	},
 ): Promise<void> {
-	const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-	const lock = await tryAcquireLock(
-		directory,
-		'events.jsonl',
-		'workflow-retry-escalation',
-		`coder-retry:${input.taskId}:${input.generation}:${input.action}`,
-	);
-	if (!lock.acquired) {
-		throw new Error('TASK_RETRY_AUDIT_LOCKED');
-	}
+	// Issue #2039: the store's exclusive lock replaces the former
+	// tryAcquireLock/proper-lockfile sentinel on this file, and
+	// dedupeOnAuthorityKey restores the at-most-once contract the old
+	// lock-then-recheck read enforced. The hard-fail contract is preserved —
+	// sustained contention still throws TASK_RETRY_AUDIT_LOCKED.
 	try {
-		const prior = readCoderRetryEscalations(
+		appendCoreEventSync(
 			directory,
-			input.taskId,
-			input.retryEpoch,
-		);
-		if (prior.has(input.action)) return;
-		await fs.promises.mkdir(path.dirname(eventsPath), { recursive: true });
-		await fs.promises.appendFile(
-			eventsPath,
-			`${JSON.stringify({
+			{
 				type: 'coder_retry_circuit_breaker',
 				timestamp: new Date().toISOString(),
 				taskId: input.taskId,
@@ -2392,11 +2361,14 @@ async function emitCoderRetryEscalation(
 				rejectionHistory: input.rejectionHistory,
 				phase: Number(input.taskId.split('.')[0]) || 0,
 				action: input.action,
-			})}\n`,
-			'utf-8',
+			},
+			{ dedupeOnAuthorityKey: true },
 		);
-	} finally {
-		if (lock.lock._release) await lock.lock._release().catch(() => {});
+	} catch (error) {
+		if (error instanceof Error && error.message === CORE_EVENT_LOCKED) {
+			throw new Error('TASK_RETRY_AUDIT_LOCKED');
+		}
+		throw error;
 	}
 }
 
@@ -2410,11 +2382,24 @@ async function enforceCoderRetryEscalation(input: {
 	criticSatisfied: boolean;
 }): Promise<void> {
 	if (input.retryCount < 3) return;
-	const prior = readCoderRetryEscalations(
-		input.directory,
-		input.taskId,
-		input.retryEpoch,
-	);
+	let prior: Set<CoderRetryEscalationAction>;
+	try {
+		prior = readCoderRetryEscalations(
+			input.directory,
+			input.taskId,
+			input.retryEpoch,
+		);
+	} catch (error) {
+		// A corrupt authority index fails closed (the pre-#2039 malformed-JSONL
+		// throw had the same effect) — surface a typed, diagnosable code.
+		if (
+			error instanceof Error &&
+			error.message === 'CORE_EVENT_AUTHORITY_INDEX_UNREADABLE'
+		) {
+			throw new Error('TASK_RETRY_AUDIT_INDEX_UNREADABLE');
+		}
+		throw error;
+	}
 	if (!prior.has('sounding_board_consultation')) {
 		await emitCoderRetryEscalation(input.directory, {
 			...input,
@@ -4366,29 +4351,21 @@ export function createDelegationGateHook(
 				);
 				if (degradation) {
 					try {
-						const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-						await fs.promises.mkdir(path.dirname(eventsPath), {
-							recursive: true,
+						appendCoreEventSync(directory, {
+							type: 'worktree_isolation_degraded',
+							timestamp: new Date().toISOString(),
+							sessionId: input.sessionID,
+							callId: input.callID,
+							taskId: incomingCoderTaskId,
+							// PR-review PRR-014: the reason embeds git stderr /
+							// session-create error text whose producers are not
+							// all length-bounded — cap the durable ledger copy.
+							reason:
+								degradation.reason.length > 500
+									? `${degradation.reason.slice(0, 500)}… (truncated)`
+									: degradation.reason,
+							degradedAt: new Date(degradation.at).toISOString(),
 						});
-						await fs.promises.appendFile(
-							eventsPath,
-							`${JSON.stringify({
-								type: 'worktree_isolation_degraded',
-								timestamp: new Date().toISOString(),
-								sessionId: input.sessionID,
-								callId: input.callID,
-								taskId: incomingCoderTaskId,
-								// PR-review PRR-014: the reason embeds git stderr /
-								// session-create error text whose producers are not
-								// all length-bounded — cap the durable ledger copy.
-								reason:
-									degradation.reason.length > 500
-										? `${degradation.reason.slice(0, 500)}… (truncated)`
-										: degradation.reason,
-								degradedAt: new Date(degradation.at).toISOString(),
-							})}\n`,
-							'utf-8',
-						);
 					} catch (eventError) {
 						logger.log(
 							`[delegation-gate] worktree_isolation_degraded event write failed: ${

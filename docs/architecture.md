@@ -948,7 +948,7 @@ Swarm uses file locking to prevent concurrent writes from corrupting shared stat
 | File | Tool | Lock Behavior |
 |------|------|---------------|
 | `.swarm/plan.json` | `update_task_status` | Exclusive lock acquired before calling `updateTaskStatus()`. Lock losers return `success: false` with `recovery_guidance: "retry"`. |
-| `.swarm/events.jsonl` | `phase_complete` | Lock acquired before `appendFileSync`. If lock is unavailable, logs a warning and proceeds without lock protection (non-blocking). |
+| `.swarm/events.jsonl` | `phase_complete` (and every other core event producer) | Appends go through the core event store seam (`src/events/core-events.ts`), which holds the exclusive `.swarm/events.lock` (`wx` create, 5-min stale-break, bounded ~100 ms retry) for EVERY write — appends, compaction, and the authority-index update. On sustained contention the seam throws a typed `CORE_EVENT_STORE_LOCKED` that producers map onto their own contracts (operational producers catch+warn; the retry-escalation and repair-audit producers hard-fail with their pre-existing audit-locked codes). No producer ever appends without the store lock (issue #2039). |
 
 ### `update_task_status` Lock Semantics
 
