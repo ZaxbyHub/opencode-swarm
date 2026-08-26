@@ -35,16 +35,6 @@ import {
 } from '../../../src/tools/write-pr-review-trigger-eval';
 import { LEGACY_PR_REVIEW_RESILIENCE_POLICY } from '../pr-review-test-policy.js';
 
-// Issue #2124: the trigger-evaluation receipt must be immutable after
-// consumption — run_id is bound to the gate state (mirroring
-// prReviewArtifactRunId) and the destination write is fail-closed (no clobber).
-// This file covers: (A) a second write under a different run_id is rejected,
-// (B) a repeat write under the same run_id is rejected and the receipt is not
-// replaced, (C) cross-consistency with the findings artifact run_id, (D) the
-// gate-level binding throw via a direct mark call, and (E) forward-compat: an
-// older state without prReviewTriggerEvalRunId reads cleanly and the first
-// consumption binds the run.
-
 const tempDirs: string[] = [];
 const SESSION_ID = 'trigger-eval-run-binding';
 const HEAD_SHA = 'abc123';
@@ -62,6 +52,8 @@ const originalGateRevisionDigest =
 const originalResolveRevisionDigest =
 	writerInternals.resolvePrWorkflowRevisionDigest;
 const originalResolveMergeBase = writerInternals.resolveMergeBase;
+const originalMarkTriggerEvaluationComplete =
+	writerInternals.markPrReviewTriggerEvaluationComplete;
 
 function tempRoot(): string {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), 'trigger-eval-bind-')));
@@ -234,6 +226,8 @@ afterEach(() => {
 	writerInternals.resolvePrWorkflowRevisionDigest =
 		originalResolveRevisionDigest;
 	writerInternals.resolveMergeBase = originalResolveMergeBase;
+	writerInternals.markPrReviewTriggerEvaluationComplete =
+		originalMarkTriggerEvaluationComplete;
 	for (const dir of tempDirs.splice(0)) {
 		rmSync(dir, { recursive: true, force: true });
 	}
@@ -242,19 +236,53 @@ afterEach(() => {
 async function writeTriggerEval(
 	root: string,
 	runId: string,
-): Promise<{ success: boolean; message: string }> {
+): Promise<{ success: boolean; message: string; replayed?: boolean }> {
 	const raw = await executeWritePrReviewTriggerEval(writerArgs(runId), root, {
 		sessionID: SESSION_ID,
 	});
 	try {
 		const parsed = JSON.parse(raw);
-		return { success: parsed.success === true, message: parsed.message ?? '' };
+		return {
+			success: parsed.success === true,
+			message: parsed.message ?? '',
+			replayed: parsed.replayed,
+		};
 	} catch {
 		return { success: false, message: raw };
 	}
 }
 
 describe('write_pr_review_trigger_eval — run_id binding + fail-closed receipt (#2124)', () => {
+	test('omitted run_id is inferred, reserved once, and returned to the caller', async () => {
+		const root = tempRoot();
+		await establishBoundReviewGate(root);
+
+		const raw = await executeWritePrReviewTriggerEval(
+			{
+				pr_head_sha: HEAD_SHA,
+				base_ref: 'origin/main',
+				base_sha: 'def456',
+				rows: rows(),
+			},
+			root,
+			{ sessionID: SESSION_ID },
+		);
+		const parsed = JSON.parse(raw) as {
+			success: boolean;
+			path?: string;
+			message?: string;
+		};
+		expect(parsed.success).toBe(true);
+		expect(parsed.path).toMatch(
+			/^pr-review\/pr-review-\d{17}(?:-[A-Za-z0-9_-]+)?\/trigger-eval\.json$/,
+		);
+		const state = await readPrWorkflowGateState(root, SESSION_ID);
+		expect(state?.prReviewTriggerEvalPath).toBe(parsed.path);
+		expect(state?.prReviewTriggerEvalRunId).toMatch(
+			/^pr-review-\d{17}(?:-[A-Za-z0-9_-]+)?$/,
+		);
+	});
+
 	test('a second write under a different run_id is rejected and the bound run/path are unchanged', async () => {
 		const root = tempRoot();
 		await establishBoundReviewGate(root);
@@ -275,10 +303,11 @@ describe('write_pr_review_trigger_eval — run_id binding + fail-closed receipt 
 
 		const second = await writeTriggerEval(root, 'run-B');
 		expect(second.success).toBe(false);
-		expect(second.message).toContain('already bound to run');
+		expect(second.message).toContain(
+			'field run_id expected "run-A", got "run-B"',
+		);
 		expect(second.message).toContain('run-A');
 
-		// The rejected write must not have created a run-B receipt or changed state.
 		expect(existsSync(artifactPath(root, 'run-B'))).toBe(false);
 		const afterSecond = await readPrWorkflowGateState(root, SESSION_ID);
 		expect(afterSecond?.prReviewTriggerEvalRunId).toBe('run-A');
@@ -287,32 +316,55 @@ describe('write_pr_review_trigger_eval — run_id binding + fail-closed receipt 
 		);
 	});
 
-	test('a repeat write under the same run_id is rejected fail-closed and the receipt is not replaced', async () => {
+	test('a response-loss retry repairs the gate receipt without replacing the trigger artifact', async () => {
 		const root = tempRoot();
 		await establishBoundReviewGate(root);
 
+		writerInternals.markPrReviewTriggerEvaluationComplete = async () => {
+			throw new Error('injected crash after artifact publication');
+		};
 		const first = await writeTriggerEval(root, 'run-same');
-		expect(first.success).toBe(true);
+		expect(first.success).toBe(false);
+		expect(first.message).toContain(
+			'injected crash after artifact publication',
+		);
 		const receiptPath = artifactPath(root, 'run-same');
 		const originalContent = readFileSync(receiptPath, 'utf-8');
 		const originalMtime = statMtimeMs(receiptPath);
+		expect(
+			(await readPrWorkflowGateState(root, SESSION_ID))
+				?.prReviewTriggerEvalPath,
+		).toBeUndefined();
 
+		writerInternals.markPrReviewTriggerEvaluationComplete =
+			originalMarkTriggerEvaluationComplete;
 		const second = await writeTriggerEval(root, 'run-same');
-		expect(second.success).toBe(false);
-		expect(second.message).toContain('already exists for run');
+		expect(second.success).toBe(true);
+		expect(second.replayed).toBe(true);
 
-		// The receipt on disk is byte-identical and was not rewritten.
 		expect(readFileSync(receiptPath, 'utf-8')).toBe(originalContent);
 		expect(statMtimeMs(receiptPath)).toBe(originalMtime);
+		expect(
+			(await readPrWorkflowGateState(root, SESSION_ID))
+				?.prReviewTriggerEvalPath,
+		).toBe('pr-review/run-same/trigger-eval.json');
+
+		const tampered = JSON.parse(originalContent);
+		tampered.rows[0].evidence = 'schema-valid conflicting evidence';
+		writeFileSync(
+			receiptPath,
+			`${JSON.stringify(tampered, null, 2)}\n`,
+			'utf8',
+		);
+		const conflict = await writeTriggerEval(root, 'run-same');
+		expect(conflict.success).toBe(false);
+		expect(conflict.message).toContain('conflicting content');
 	});
 
 	test('cross-consistency: a trigger-eval write is rejected when the findings artifact is bound to a different run', async () => {
 		const root = tempRoot();
 		await establishBoundReviewGate(root);
 
-		// Simulate the findings artifact having already bound a different run_id
-		// by editing the durable state directly (the findings persistence path
-		// is too heavy to drive here; the state field is what the guard reads).
 		const stateRel = gateInternals.workflowGateStateRelativePath(SESSION_ID);
 		const stateAbs = join(root, '.swarm', stateRel);
 		const state = JSON.parse(readFileSync(stateAbs, 'utf-8'));
@@ -322,7 +374,9 @@ describe('write_pr_review_trigger_eval — run_id binding + fail-closed receipt 
 
 		const result = await writeTriggerEval(root, 'trigger-run');
 		expect(result.success).toBe(false);
-		expect(result.message).toContain('findings artifact run');
+		expect(result.message).toContain(
+			'field run_id expected "findings-run", got "trigger-run"',
+		);
 		expect(result.message).toContain('findings-run');
 		expect(existsSync(artifactPath(root, 'trigger-run'))).toBe(false);
 	});
@@ -351,8 +405,6 @@ describe('markPrReviewTriggerEvaluationComplete — run binding (#2124)', () => 
 			),
 		).rejects.toThrow('already bound to run');
 
-		// Forward-compat: an older state shape (field absent) is the first-write
-		// branch; re-reading confirms the bound run survived the rejected call.
 		const afterReject = await readPrWorkflowGateState(root, SESSION_ID);
 		expect(afterReject?.prReviewTriggerEvalRunId).toBe('gate-run-A');
 	});
@@ -361,7 +413,6 @@ describe('markPrReviewTriggerEvaluationComplete — run binding (#2124)', () => 
 		const root = tempRoot();
 		await establishBoundReviewGate(root);
 
-		// Strip the field to emulate an older state written before this fix.
 		const stateRel = gateInternals.workflowGateStateRelativePath(SESSION_ID);
 		const stateAbs = join(root, '.swarm', stateRel);
 		const state = JSON.parse(readFileSync(stateAbs, 'utf-8'));
@@ -372,7 +423,6 @@ describe('markPrReviewTriggerEvaluationComplete — run binding (#2124)', () => 
 		const reloaded = await readPrWorkflowGateState(root, SESSION_ID);
 		expect(reloaded?.prReviewTriggerEvalRunId).toBeUndefined();
 
-		// First consumption must NOT throw (field unset → first-write branch).
 		await markPrReviewTriggerEvaluationComplete(
 			root,
 			SESSION_ID,
@@ -387,7 +437,6 @@ describe('markPrReviewTriggerEvaluationComplete — run binding (#2124)', () => 
 		const root = tempRoot();
 		await establishBoundReviewGate(root);
 
-		// Bind the trigger-eval run first (the normal production order).
 		await markPrReviewTriggerEvaluationComplete(
 			root,
 			SESSION_ID,
@@ -395,8 +444,6 @@ describe('markPrReviewTriggerEvaluationComplete — run binding (#2124)', () => 
 			'pr-review/boundary-run-A/trigger-eval.json',
 		);
 
-		// A findings boundary check under a DIFFERENT run must fail closed
-		// before the candidate-inventory derivation runs.
 		await expect(
 			assertPrReviewArtifactBoundary(
 				root,
@@ -409,10 +456,6 @@ describe('markPrReviewTriggerEvaluationComplete — run binding (#2124)', () => 
 			'findings must use the same run as the trigger evaluation',
 		);
 
-		// The matching run passes the cross-check: it is rejected by a LATER gate
-		// (the artifact/inventory reader), never by the run-mismatch check, which
-		// proves the cross-check is what rejected the other run and does not
-		// over-fire on the matching run.
 		const matchingError = await assertPrReviewArtifactBoundary(
 			root,
 			SESSION_ID,
@@ -427,7 +470,6 @@ describe('markPrReviewTriggerEvaluationComplete — run binding (#2124)', () => 
 		const root = tempRoot();
 		await establishBoundReviewGate(root);
 
-		// Simulate the findings artifact having already bound a different run_id.
 		const stateRel = gateInternals.workflowGateStateRelativePath(SESSION_ID);
 		const stateAbs = join(root, '.swarm', stateRel);
 		const state = JSON.parse(readFileSync(stateAbs, 'utf-8'));
@@ -435,8 +477,6 @@ describe('markPrReviewTriggerEvaluationComplete — run binding (#2124)', () => 
 		writeFileSync(stateAbs, JSON.stringify(state));
 		gateInternals.resetTrackedStateCache();
 
-		// A direct mark call under a mismatched run must throw the cross-consistency
-		// error (the mark-level guard, distinct from the writer pre-check).
 		await expect(
 			markPrReviewTriggerEvaluationComplete(
 				root,
@@ -446,7 +486,6 @@ describe('markPrReviewTriggerEvaluationComplete — run binding (#2124)', () => 
 			),
 		).rejects.toThrow('must match the findings artifact run');
 
-		// The rejected call must not have bound the trigger-eval run or path.
 		const after = await readPrWorkflowGateState(root, SESSION_ID);
 		expect(after?.prReviewTriggerEvalRunId).toBeUndefined();
 		expect(after?.prReviewTriggerEvalPath).toBeUndefined();

@@ -242,12 +242,17 @@ export function collectRowShapeErrors(row: RetentionRow): string[] {
 			`${label}: writeLimits.scope is "none" (verified unbounded) but the disposition is "${row.disposition.kind}" — an unbounded stream must be fix-in-issue.`,
 		);
 	}
+	errors.push(...collectKeyspaceBoundErrors(row));
 	for (const forbidden of DISPOSITION_FORBIDDEN_STRINGS) {
 		const texts = [
 			...Object.values(row.disposition).filter(
 				(v): v is string => typeof v === 'string',
 			),
 			row.writeLimits.bound,
+			// The #2038 keyspace declaration is held to the same no-owner-waiver
+			// bar as every other bound statement: "TBD"/"defer"/"unknown" is not
+			// an answer to "what makes this keyspace finite".
+			row.writeLimits.keyspaceBound ?? '',
 			row.readBound.bound,
 			...row.writerCitations,
 			...row.readerCitations,
@@ -263,6 +268,83 @@ export function collectRowShapeErrors(row: RetentionRow): string[] {
 	return errors;
 }
 
+
+/**
+ * Phrases by which a keyspace declaration admits that the keyspace is NOT
+ * finite. Matching one is not a formatting problem — it means the row is the
+ * #2038 defect class and its disposition is wrong.
+ *
+ * Deliberately narrow (whole-word `unbounded`, plus the two idioms this
+ * registry already uses for the same admission — see the `skill-changelogs`
+ * row's "NO global ceiling across skills"). A broad heuristic here would fire
+ * on honest finite justifications that merely mention the word in passing.
+ */
+const KEYSPACE_NOT_FINITE_PATTERNS: readonly RegExp[] = [
+	/\bunbounded\b/i,
+	/\bno (?:hard |aggregate )?(?:global )?ceiling\b/i,
+	/\bnothing (?:deletes|reaps|removes|prunes)\b/i,
+];
+
+/**
+ * Issue #2038 recurrence guardrail — the CI-check rung.
+ *
+ * DEFECT CLASS: a retention policy scoped PER-KEY was mistaken for a global
+ * bound. A per-key cap bounds each key's history but not the store, because
+ * steady-state size is O(distinct-keys x per-key-cap) — which is a bound only
+ * when the KEYSPACE is finite. In #2038 the keyspace was `skillPath`
+ * (unbounded: one key per distinct skill name), so a 500-entry-per-skill cap
+ * yielded growth with no ceiling, and the row passed CI because the pre-#2038
+ * gate constrained only `scope: 'none'` and said nothing about `per-key`.
+ *
+ * WHY THIS RUNG, AND NOT A STRONGER ONE. The stronger rungs are infeasible
+ * here, not merely unattractive:
+ *
+ *   - Not a TYPE constraint. The obligation is a CONJUNCTION across sibling
+ *     fields — `writeLimits.scope === 'per-key'` AND
+ *     `disposition.kind !== 'fix-in-issue'`. `disposition` is a sibling of
+ *     `writeLimits`, not a member of it, so no discriminated union on `scope`
+ *     can express it. Narrowing `scope` alone would force the field onto every
+ *     per-key row including the fix-in-issue ones the rule deliberately
+ *     exempts — a different, stricter rule. And a type can require presence but
+ *     can check neither non-emptiness nor whether the prose actually answers
+ *     the question (`keyspaceBound: ''` and `keyspaceBound: 'TBD'` both
+ *     typecheck).
+ *   - Not a LINT rule. Biome lints syntax and local semantics; this is a
+ *     cross-field semantic property of a specific DATA registry, keyed on
+ *     values (`'per-key'`) rather than on code shape. Encoding it as a lint
+ *     rule would mean teaching a general-purpose linter about one project data
+ *     file.
+ *   - Not a RUNTIME assertion. The registry is build-time documentation-as-data
+ *     under `scripts/`; it is deliberately never loaded by the plugin
+ *     (AGENTS.md invariants 1 and 2), so there is no runtime in which to assert.
+ *
+ * CI check over the data artifact is therefore the strongest rung available,
+ * and it is the same rung the sibling `scope: 'none'` rule already occupies.
+ */
+export function collectKeyspaceBoundErrors(row: RetentionRow): string[] {
+	if (row.writeLimits.scope !== 'per-key') return [];
+	// fix-in-issue rows are exempt: they already declare the stream a defect
+	// with a named owning issue, so there is nothing to whitewash.
+	if (row.disposition.kind === 'fix-in-issue') return [];
+
+	const label = `Row "${row.id}"`;
+	const declared = (row.writeLimits.keyspaceBound ?? '').trim();
+
+	if (!declared) {
+		return [
+			`${label}: writeLimits.scope is "per-key" and the disposition is "${row.disposition.kind}", but writeLimits.keyspaceBound is missing. A per-key retention cap bounds each KEY's history, NOT the store — steady-state size is O(distinct-keys x per-key-cap), which is a bound only if the KEYSPACE is finite. This is the issue #2038 defect class: a 500-entry-per-skillPath prune was registered as an adequate bound while the set of skill paths was unbounded, and the gate passed it because it only ever constrained scope "none". Declare what makes this keyspace finite, with a path:line citation — either a closed key domain (an enum/union, or an index bounded by a max-concurrency constant) or a reaper that deletes keys on a GLOBAL trigger. A per-key cap is not an answer. If nothing bounds the keyspace, the honest disposition is fix-in-issue, not "${row.disposition.kind}".`,
+		];
+	}
+
+	const admission = KEYSPACE_NOT_FINITE_PATTERNS.find((p) => p.test(declared));
+	if (admission) {
+		return [
+			`${label}: writeLimits.keyspaceBound declares the keyspace NOT finite (matched ${admission}) while the disposition is "${row.disposition.kind}". A per-key cap over an unbounded keyspace is the issue #2038 defect class, not a bounded-by-design stream — O(distinct-keys x per-key-cap) has no ceiling. Set the disposition to fix-in-issue under an owning issue (see the "skill-changelogs" row, which carries this same admission honestly under #2309), or bound the keyspace in code and restate this field.`,
+		];
+	}
+
+	return [];
+}
 
 function collectDispositionErrors(row: RetentionRow): string[] {
 	const errors: string[] = [];
@@ -305,6 +387,10 @@ export function collectCitationResolutionErrors(
 		...row.writerCitations,
 		...row.readerCitations,
 		row.writeLimits.citation,
+		// #2038 keyspace declarations carry their own path:line evidence; run it
+		// through the same rot detector. Purely additive — a value with no repo
+		// path in it yields no citations and so cannot fail here.
+		row.writeLimits.keyspaceBound ?? '',
 		row.readBound.citation,
 	];
 	if (row.disposition.kind === 'retain-by-design') {

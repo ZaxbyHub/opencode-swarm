@@ -80,4 +80,15 @@ describe('PR-review settlement exact-row contract for completed records', () => 
 			).rejects.toThrow('items lack an authenticated verdict');
 		});
 	}
+
+	test('reserved discarded example IDs are never accepted as live assigned verdict rows', () => {
+		const analysis = _test_exports.analyzePrReviewVerdictRowContract(
+			'[REVIEWED] | discarded-id | DISPROVED | STRUCTURALLY_PROVEN | NONE | YES | file.ts:1 | illustrative only | not routable | not routable',
+			['discarded-id'],
+			'reviewer',
+		);
+
+		expect(analysis.ok).toBe(false);
+		expect(analysis.actual).toContain('discarded-id');
+	});
 });

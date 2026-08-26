@@ -3380,7 +3380,7 @@ describe('skillPropagationTransformScan — dedup on repeated calls', () => {
 			// NOT to skillA (earlier unrelated task)
 			expect(complianceEntries.length).toBeGreaterThanOrEqual(1);
 			const compliancePaths = complianceEntries.map((e) => e.skillPath);
-			expect(compliancePaths).toContain(skillB);
+			expect(compliancePaths).toContain(skillB.replace('file:', '')); // #2038: canonicalized
 			expect(compliancePaths).not.toContain(skillA);
 
 			// Compliance entries should carry the latest delegation's taskID,
@@ -3452,7 +3452,7 @@ describe('skillPropagationTransformScan — dedup on repeated calls', () => {
 				sessionID,
 			}).filter((e) => e.agentName === 'reviewer');
 			expect(complianceEntries).toHaveLength(1);
-			expect(complianceEntries[0].skillPath).toBe(skillA);
+			expect(complianceEntries[0].skillPath).toBe(skillA.replace('file:', '')); // #2038: canonicalized
 			expect(complianceEntries[0].taskID).toBe('task-earlier');
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
@@ -3595,7 +3595,7 @@ SKILL_COMPLIANCE: COMPLIANT — skill A rules followed`,
 			// NOT to task-b (which would be the latest delegation without TASK:)
 			expect(entry.taskID).toBe('task-a');
 			expect(entry.complianceVerdict).toBe('compliant');
-			expect(entry.skillPath).toBe(skillA);
+			expect(entry.skillPath).toBe(skillA.replace('file:', '')); // #2038: canonicalized
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -3666,7 +3666,7 @@ SKILL_COMPLIANCE: COMPLIANT — skill A rules followed`,
 			expect(complianceEntries).toHaveLength(1);
 			const entry = complianceEntries[0];
 			expect(entry.taskID).toBe('task-b');
-			expect(entry.skillPath).toBe(skillB);
+			expect(entry.skillPath).toBe(skillB.replace('file:', '')); // #2038: canonicalized
 			expect(entry.complianceVerdict).toBe('compliant');
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });

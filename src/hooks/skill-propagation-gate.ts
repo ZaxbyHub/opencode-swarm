@@ -21,7 +21,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
-import { warn } from '../utils/logger.js';
+import { criticalWarn, warn } from '../utils/logger.js';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import type { MessageWithParts } from './knowledge-types.js';
 import {
@@ -1198,7 +1198,6 @@ export async function skillPropagationTransformScan(
 	if (!sessionID) return;
 
 	const messages = output.messages;
-	let hadRecordingError = false;
 	const audienceContext = resolveSkillAudienceContext(config);
 	let remainingProvenanceValidationBudget =
 		MAX_PROVENANCE_SKILL_REFERENCES_PER_TRANSFORM;
@@ -1336,8 +1335,21 @@ export async function skillPropagationTransformScan(
 			// record a single entry with the verdict
 			const paths = skillPaths.length > 0 ? skillPaths : ['__overall__'];
 
+			// PR #2347 Stage-B review: each remaining skill path is still
+			// attempted independently (`continue`, never `break`) — a contended
+			// enqueue lock is not guaranteed to still be held by the time the
+			// NEXT path's own internal lock-retry runs (`appendSkillUsageEntry`
+			// retries the lock for ~40 ms per call), so an earlier failure must
+			// not preclude a later path's genuinely successful recording. The
+			// added latency is bounded by the number of skill paths on ONE
+			// message (small in practice), traded deliberately against
+			// correctness: dropping an attempt that would have succeeded is
+			// worse than a bounded extra stall. Per-path detail is debug-gated
+			// (`warn`); one ungated `criticalWarn` summary after the loop keeps
+			// total log volume O(1) per verdict regardless of how many paths
+			// failed, instead of the old `break`'s single silent-batch-loss.
+			let recordingFailureCount = 0;
 			for (const skillPath of paths) {
-				if (hadRecordingError) break;
 				if (isDuplicate(skillPath, 'reviewer', resolvedTaskID)) continue;
 				try {
 					_internals.appendSkillUsageEntry(directory, {
@@ -1350,11 +1362,16 @@ export async function skillPropagationTransformScan(
 						timestamp: new Date().toISOString(),
 					});
 				} catch (err) {
-					hadRecordingError = true;
+					recordingFailureCount += 1;
 					warn(
-						`[skill-propagation-gate] transform-scan compliance recording failed: ${err instanceof Error ? err.message : String(err)}`,
+						`[skill-propagation-gate] transform-scan compliance recording failed for ${skillPath}: ${err instanceof Error ? err.message : String(err)}`,
 					);
 				}
+			}
+			if (recordingFailureCount > 0) {
+				criticalWarn(
+					`[skill-propagation-gate] transform-scan: ${recordingFailureCount} of ${paths.length} skill path(s) failed compliance recording`,
+				);
 			}
 
 			break; // only process the first compliance verdict per message
@@ -1365,8 +1382,15 @@ export async function skillPropagationTransformScan(
 	}
 
 	// --- Scan architect messages for skill delegation patterns ---
-	if (hadRecordingError) return;
-
+	// PR #2347 Stage-B review, round 2: this used to `return` early whenever
+	// the reviewer-verdict loop above failed to record anything, silently
+	// skipping the ENTIRE delegation scan below — even for an unrelated
+	// architect message whose own recording would have succeeded. That
+	// contradicted the "attempt every skill path independently" property the
+	// per-path fix in each loop establishes, just one level up (one loop's
+	// failure blocking the other's independent success). Removed: each loop
+	// is now genuinely independent, with its own local failure counter and
+	// its own bounded summary warning.
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const m = messages[i];
 		const agent = m.info?.agent;
@@ -1412,8 +1436,12 @@ export async function skillPropagationTransformScan(
 				const skillPaths = validatedProvenancePaths(skillsField);
 				const taskId = _internals.extractTaskIdFromPrompt(text);
 
+				// PR #2347 Stage-B review (same reasoning as the reviewer-verdict
+				// loop above): attempt every skillPath independently rather than
+				// `break`ing the batch on the first failure, and keep per-path
+				// log volume bounded to one ungated summary line.
+				let delegationFailureCount = 0;
 				for (const skillPath of skillPaths) {
-					if (hadRecordingError) break;
 					if (isDuplicate(skillPath, currentTargetAgent, taskId)) continue;
 					try {
 						_internals.appendSkillUsageEntry(directory, {
@@ -1425,11 +1453,16 @@ export async function skillPropagationTransformScan(
 							timestamp: new Date().toISOString(),
 						});
 					} catch (err) {
-						hadRecordingError = true;
+						delegationFailureCount += 1;
 						warn(
-							`[skill-propagation-gate] transform-scan delegation recording failed: ${err instanceof Error ? err.message : String(err)}`,
+							`[skill-propagation-gate] transform-scan delegation recording failed for ${skillPath}: ${err instanceof Error ? err.message : String(err)}`,
 						);
 					}
+				}
+				if (delegationFailureCount > 0) {
+					criticalWarn(
+						`[skill-propagation-gate] transform-scan: ${delegationFailureCount} of ${skillPaths.length} delegation skill path(s) failed recording`,
+					);
 				}
 				currentTargetAgent = '';
 				skillsField = '';

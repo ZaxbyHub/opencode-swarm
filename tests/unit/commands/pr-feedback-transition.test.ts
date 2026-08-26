@@ -37,6 +37,28 @@ function handoffRelativePath(runId = RUN_ID): string {
 	return `.swarm/pr-review/${runId}/feedback-handoff.json`;
 }
 
+function confirmedTransitionRequest(handoffPath: string, runId = RUN_ID) {
+	return {
+		runId,
+		handoffPath,
+		prUrl: PR_URL,
+		exactCommand: `/swarm pr-feedback ${PR_URL} continue from ${handoffPath}`,
+		confirmedByUser: true,
+	};
+}
+
+function confirmedUrlLessTransitionRequest(
+	handoffPath: string,
+	runId = RUN_ID,
+) {
+	return {
+		runId,
+		handoffPath,
+		exactCommand: `/swarm pr-feedback continue from ${handoffPath}`,
+		confirmedByUser: true,
+	};
+}
+
 function gateStatePath(): string {
 	return path.join(
 		tempDir,
@@ -269,22 +291,16 @@ describe('PR feedback continuation transition', () => {
 		});
 	});
 
-	test('completed reviews can continue externally only with an explicit matching PR URL', async () => {
+	test('completed reviews can continue externally with either exact continuation command form', async () => {
 		const { handoffPath, findingIds } = await materializeTerminalReview();
 		await expect(
 			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA),
 		).resolves.toBe('completed');
-		await expect(
-			transitionPrReviewToFeedback(tempDir, SESSION_ID, {
-				runId: RUN_ID,
-				handoffPath,
-			}),
-		).rejects.toThrow(/explicit GitHub PR URL/i);
-		const feedback = await transitionPrReviewToFeedback(tempDir, SESSION_ID, {
-			runId: RUN_ID,
-			handoffPath,
-			prUrl: PR_URL,
-		});
+		const feedback = await transitionPrReviewToFeedback(
+			tempDir,
+			SESSION_ID,
+			confirmedUrlLessTransitionRequest(handoffPath),
+		);
 		expect(feedback).toMatchObject({
 			mode: 'PR_FEEDBACK',
 			prFeedbackReviewHandoff: {
@@ -296,16 +312,16 @@ describe('PR feedback continuation transition', () => {
 
 	test('exact retries are idempotent but different handoffs are blocked', async () => {
 		const { handoffPath } = await materializeTerminalReview();
-		const first = await transitionPrReviewToFeedback(tempDir, SESSION_ID, {
-			runId: RUN_ID,
-			handoffPath,
-			prUrl: PR_URL,
-		});
-		const retried = await transitionPrReviewToFeedback(tempDir, SESSION_ID, {
-			runId: RUN_ID,
-			handoffPath,
-			prUrl: PR_URL,
-		});
+		const first = await transitionPrReviewToFeedback(
+			tempDir,
+			SESSION_ID,
+			confirmedTransitionRequest(handoffPath),
+		);
+		const retried = await transitionPrReviewToFeedback(
+			tempDir,
+			SESSION_ID,
+			confirmedTransitionRequest(handoffPath),
+		);
 		expect(retried.workflowInstanceId).toBe(first.workflowInstanceId);
 
 		await overwriteHandoffArtifact('other-run', {
@@ -365,11 +381,11 @@ describe('PR feedback continuation transition', () => {
 
 	test('inventory must include every handed-off finding but may include more', async () => {
 		const { handoffPath, findingIds } = await materializeTerminalReview();
-		await transitionPrReviewToFeedback(tempDir, SESSION_ID, {
-			runId: RUN_ID,
-			handoffPath,
-			prUrl: PR_URL,
-		});
+		await transitionPrReviewToFeedback(
+			tempDir,
+			SESSION_ID,
+			confirmedTransitionRequest(handoffPath),
+		);
 
 		await expect(
 			declarePrFeedbackInventory(tempDir, SESSION_ID, ['FB-999'], {
@@ -408,11 +424,11 @@ describe('PR feedback continuation transition', () => {
 		};
 
 		await expect(
-			transitionPrReviewToFeedback(tempDir, SESSION_ID, {
-				runId: RUN_ID,
-				handoffPath,
-				prUrl: PR_URL,
-			}),
+			transitionPrReviewToFeedback(
+				tempDir,
+				SESSION_ID,
+				confirmedTransitionRequest(handoffPath),
+			),
 		).rejects.toThrow(/state changed while validating the feedback handoff/i);
 	});
 

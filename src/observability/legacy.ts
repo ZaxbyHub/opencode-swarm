@@ -312,6 +312,32 @@ export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 			'bytes',
 			'limit_bytes',
 		]),
+		// Issue #2038 skill-usage tracking storage health: bounded counts and
+		// timestamps only — no per-skill identifier, no filesystem paths.
+		skill_usage_health: Object.freeze([
+			'trigger',
+			'accepted',
+			'compacted',
+			'dropped',
+			'skills_dropped',
+			'corrupt',
+			'pending_retained',
+			'uncertain_retained',
+			'uncertain_expired',
+			'pending_evicted',
+			'no_source_knowledge',
+			'no_matching_knowledge',
+			'bump_retry',
+			'bump_unrecoverable',
+			'bump_applied_zero',
+			'pressure',
+			'curator_skipped',
+			'bytes',
+			'limit_bytes',
+			'oldest_timestamp',
+			'newest_timestamp',
+			'coverage',
+		]),
 	});
 
 const EMPTY_EXTRA: Record<string, unknown> = Object.freeze({});

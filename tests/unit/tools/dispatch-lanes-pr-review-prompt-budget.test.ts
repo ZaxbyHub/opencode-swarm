@@ -153,6 +153,45 @@ describe('pr-review lane response budget derivation (#2276)', () => {
 });
 
 describe('controller-appended prompt budget block (#2276)', () => {
+	test('every swarm-pr-review:* prompt begins with the contract card at byte zero', () => {
+		for (const prompt of [
+			contractedPrompt('swarm-pr-review:base', {
+				workflow_lane: 'intent-architecture',
+			}),
+			contractedPrompt('swarm-pr-review:micro', {
+				workflow_lane: 'api-schema-migrations',
+			}),
+			contractedPrompt('swarm-pr-review:council', {
+				workflow_lane: 'correctness-state',
+			}),
+			contractedPrompt('swarm-pr-review:reviewer', {
+				workflow_lane: 'review-chunk-1',
+				review_item_ids: ['C-1'],
+			}),
+			contractedPrompt('swarm-pr-review:critic', {
+				workflow_lane: 'critic-chunk-1',
+				review_item_ids: ['C-1'],
+			}),
+		]) {
+			expect(prompt.startsWith('[PR-REVIEW CONTRACT CARD]')).toBe(true);
+		}
+	});
+
+	test('the contract card carries distinct discarded negative examples that are not routable live markers', () => {
+		const prompt = contractedPrompt('swarm-pr-review:reviewer', {
+			workflow_lane: 'review-chunk-1',
+			review_item_ids: ['C-1'],
+		});
+		expect(prompt).toContain(
+			'DISCARDED REVIEWED EXAMPLE: [REVIEWED] | discarded-id | DISPROVED | STRUCTURALLY_PROVEN | NONE',
+		);
+		expect(prompt).toContain(
+			'DISCARDED CRITIC EXAMPLE: [CRITIC] | discarded-id | DISPROVED | NONE',
+		);
+		expect(prompt).not.toContain('\n[REVIEWED] | discarded-id |');
+		expect(prompt).not.toContain('\n[CRITIC] | discarded-id |');
+	});
+
 	test('every swarm-pr-review:* mode carries its derived budget line', () => {
 		expect(
 			contractedPrompt('swarm-pr-review:base', {

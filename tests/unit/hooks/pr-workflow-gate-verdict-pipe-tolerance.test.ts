@@ -25,6 +25,35 @@ beforeEach(setupPrWorkflowGateFixtures);
 afterEach(teardownPrWorkflowGateFixtures);
 
 describe('verdict row pipe tolerance', () => {
+	test('escaped reviewer delimiters round-trip into the canonical digest instead of dropping the row', () => {
+		// Regression for issue #2333 item 1: REVIEWED rows now carry a real codec
+		// (`\\`, `\|`, `\n`, `\r`) rather than a tail-merge heuristic. This row
+		// previously vanished because `\|` still split the raw text.
+		const row =
+			'[REVIEWED] | C-0 | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale a\\|b | probe c\\\\d | reviewer line1\\nline2\\rline3';
+		const parsed = gateInternals.parseLaneItemVerdicts(
+			row,
+			['C-0'],
+			'reviewer',
+		);
+		expect(parsed.get('C-0')).toEqual({
+			classification: 'CONFIRMED',
+			severity: 'HIGH',
+			rowDigest: gateInternals.reviewerVerdictRowDigest([
+				'[REVIEWED]',
+				'C-0',
+				'CONFIRMED',
+				'STRUCTURALLY_PROVEN',
+				'HIGH',
+				'YES',
+				'file.ts:1',
+				'rationale a|b',
+				'probe c\\d',
+				'reviewer line1\nline2\rline3',
+			]),
+		});
+	});
+
 	test('pipeFieldsCapped preserves all fields exactly when the pipe is trailing', () => {
 		// Fidelity-safe shape: extra pipes in the LAST (free-text) field merge
 		// back into it; every earlier field is byte-identical.
@@ -95,7 +124,52 @@ describe('verdict row pipe tolerance', () => {
 		expect(capped[6]).toBe('file.ts:1');
 	});
 
-	test('a [REVIEWED] row with pipes in the rationale still authenticates', async () => {
+	test('feedback four-field parsing retains the legacy capped merge behavior', () => {
+		// Issue #2333 hardens only REVIEWED/CRITIC rows. The older four-field
+		// families keep the raw capped merge so PR_FEEDBACK parsing does not drift.
+		const row =
+			'[FEEDBACK-VERIFIED] | F-1 | CONFIRMED | evidence mentioning a | b';
+		expect(gateInternals.pipeFieldsCapped(row, 4)).toEqual([
+			'[FEEDBACK-VERIFIED]',
+			'F-1',
+			'CONFIRMED',
+			'evidence mentioning a|b',
+		]);
+	});
+
+	test('production indexing retains both legacy overflow recovery classes', () => {
+		const fidelitySafe = gateInternals.indexVerdictRows(
+			'[REVIEWED] | C-safe | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer |',
+			'[REVIEWED]',
+		);
+		expect(fidelitySafe.recoveries).toEqual([
+			{
+				marker: '[REVIEWED]',
+				itemId: 'C-safe',
+				recovery: 'legacy-fidelity-safe',
+			},
+		]);
+
+		const lossy = gateInternals.indexVerdictRows(
+			'[CRITIC] | C-lossy | UPHELD | HIGH | rationale with | a pipe | required change',
+			'[CRITIC]',
+		);
+		expect(lossy.recoveries).toEqual([
+			{
+				marker: '[CRITIC]',
+				itemId: 'C-lossy',
+				recovery: 'legacy-lossy',
+			},
+		]);
+
+		const ordinaryLegacy = gateInternals.indexVerdictRows(
+			'[CRITIC] | C-ordinary | UPHELD | HIGH | rationale | required change',
+			'[CRITIC]',
+		);
+		expect(ordinaryLegacy.recoveries).toEqual([]);
+	});
+
+	test('a lossy legacy [REVIEWED] row with unescaped rationale pipes is recovered and routed', async () => {
 		await establishReviewPrerequisites();
 		const itemIds = ['C-0', 'C-1', 'C-2', 'C-3', 'C-4', 'C-5'];
 		await recordPrReviewValidationBatch(
@@ -133,7 +207,7 @@ describe('verdict row pipe tolerance', () => {
 		).resolves.toMatchObject({ mode: 'PR_REVIEW' });
 	});
 
-	test('a [CRITIC] row with pipes in its rationale still authenticates', async () => {
+	test('a lossy legacy [CRITIC] row with unescaped rationale pipes is recovered and routed', async () => {
 		await establishReviewPrerequisites();
 		const itemIds = ['C-0', 'C-1', 'C-2', 'C-3', 'C-4', 'C-5'];
 		await recordPrReviewValidationBatch(

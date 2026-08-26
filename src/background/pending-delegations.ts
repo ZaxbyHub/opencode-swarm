@@ -321,6 +321,7 @@ export interface BackgroundPromptSnapshot {
 }
 
 export type BackgroundDelegationRecoveryKind =
+	| 'legacy-verdict-row-recovery'
 	| 'parser-normalization'
 	| 'parser-row-recovery'
 	| 'truncated-preview-durable-artifact'
@@ -463,6 +464,7 @@ const WorkflowLaneRecoverySchema = z
 	.object({
 		workflowLane: z.string(),
 		kind: z.enum([
+			'legacy-verdict-row-recovery',
 			'parser-normalization',
 			'parser-row-recovery',
 			'truncated-preview-durable-artifact',

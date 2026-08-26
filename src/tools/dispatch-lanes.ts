@@ -39,6 +39,7 @@ import {
 	projectPrReviewCollectionReceipt,
 	projectPrReviewCollectionReceiptShedMarker,
 } from '../background/pr-review-collection-receipt.js';
+import { buildPrReviewContractCard } from '../background/pr-review-contract.js';
 import {
 	PrReviewInlineTriggerRowSchema,
 	validatePrReviewInlineTriggerLedger,
@@ -115,6 +116,7 @@ const MAX_COLLECT_TIMEOUT_MS = 60 * 60_000;
 const COLLECT_POLL_INTERVAL_MS = 500;
 const MAX_COLLECT_POLL_INTERVAL_MS = 10_000;
 const MAX_STATUS_CALL_BUDGET_MS = 2_000;
+const PR_REVIEW_WAIT_FINALIZATION_RESERVE_MS = 250;
 // #2276: per-lane-kind final-response budgets for swarm-pr-review lanes. All
 // derive from the 20_000-char inline preview window (MAX_LANE_OUTPUT_CHARS):
 // every budget stays ≥2_000 under it, so a conforming lane's preview is never
@@ -1778,14 +1780,6 @@ export async function executeCollectLaneResults(
 			errors: boundZodIssues(parsed.error.issues),
 		});
 	}
-	const session = _internals.getSessionOps();
-	if (!session || typeof session.messages !== 'function') {
-		return collectFailureResult({
-			failure_class: 'no_client',
-			batch_id: parsed.data.batch_id,
-			message: 'OpenCode session messages client is not available',
-		});
-	}
 	const timeoutMs = parsed.data.timeout_ms ?? DEFAULT_COLLECT_TIMEOUT_MS;
 	const deadline = _internals.now() + timeoutMs;
 	const hostTimeouts = new Set<string>();
@@ -1805,40 +1799,118 @@ export async function executeCollectLaneResults(
 			message: `No async lane batch found for ${parsed.data.batch_id}`,
 		});
 	}
+	const session = _internals.getSessionOps();
+	if (!session || typeof session.messages !== 'function') {
+		if (
+			parsed.data.wait === true &&
+			hasActivePrReviewWaitDeadlineLanes(records)
+		) {
+			const receiptAppendFailureLogs = new Set<string>();
+			await finalizePrReviewWaitDeadlineLanes({
+				session: session ?? {},
+				directory,
+				records,
+				deadline: _internals.now(),
+				receiptAppendFailureLogs,
+			});
+			records = findByBatchId(directory, parsed.data.batch_id, batchFilter);
+			const reviewReceiptFallbacks = await resolvePrReviewReceiptFallbacks(
+				directory,
+				context.sessionID,
+				records,
+			);
+			const result = buildCollectResult(
+				parsed.data.batch_id,
+				records,
+				parsed.data.include_pending ?? false,
+				{
+					directory,
+					sessionID: context.sessionID,
+					reviewReceipts: reviewReceiptFallbacks,
+				},
+			);
+			result.message =
+				'OpenCode session messages client was unavailable; active PR_REVIEW lanes were terminalized locally.';
+			result.errors = ['OpenCode session messages client is not available'];
+			return result;
+		}
+		return collectFailureResult({
+			failure_class: 'no_client',
+			batch_id: parsed.data.batch_id,
+			message: 'OpenCode session messages client is not available',
+		});
+	}
+
+	const prReviewWaitFinalizationBudgetMs =
+		parsed.data.wait === true
+			? reservePrReviewWaitFinalizationBudgetMs(records, timeoutMs)
+			: 0;
+	const pollingDeadline =
+		prReviewWaitFinalizationBudgetMs > 0
+			? Math.max(_internals.now(), deadline - prReviewWaitFinalizationBudgetMs)
+			: deadline;
+	const skipOrdinaryWaitPolling =
+		parsed.data.wait === true &&
+		hasActivePrReviewWaitDeadlineLanes(records) &&
+		(timeoutMs === 0 ||
+			(prReviewWaitFinalizationBudgetMs > 0 &&
+				prReviewWaitFinalizationBudgetMs >= timeoutMs));
 
 	let keepPolling = true;
 	let pollIntervalMs = COLLECT_POLL_INTERVAL_MS;
-	while (keepPolling) {
-		await collectOnce(
+	if (!skipOrdinaryWaitPolling) {
+		while (keepPolling) {
+			await collectOnce(
+				session,
+				directory,
+				records,
+				parsed.data.cancel_pending === true,
+				pollingDeadline,
+				hostTimeouts,
+				receiptAppendFailureLogs,
+			);
+			await sweepStaleAsyncLaneRecords(
+				session,
+				directory,
+				records,
+				DEFAULT_ASYNC_STALE_TIMEOUT_MS,
+				pollingDeadline,
+				hostTimeouts,
+			);
+			records = findByBatchId(directory, parsed.data.batch_id, batchFilter);
+			if (allSettled(records) || parsed.data.wait !== true) {
+				keepPolling = false;
+				continue;
+			}
+			if (_internals.now() >= pollingDeadline) {
+				keepPolling = false;
+				continue;
+			}
+			await _internals.sleep(
+				Math.min(
+					pollIntervalMs,
+					Math.max(0, pollingDeadline - _internals.now()),
+				),
+			);
+			pollIntervalMs = nextCollectPollInterval(pollIntervalMs);
+		}
+	}
+	if (
+		parsed.data.wait === true &&
+		finalizePrReviewWaitDeadlineNeeded(
+			records,
+			skipOrdinaryWaitPolling,
+			pollingDeadline,
+		)
+	) {
+		await finalizePrReviewWaitDeadlineLanes({
 			session,
 			directory,
 			records,
-			parsed.data.cancel_pending === true,
 			deadline,
-			hostTimeouts,
 			receiptAppendFailureLogs,
-		);
-		await sweepStaleAsyncLaneRecords(
-			session,
-			directory,
-			records,
-			DEFAULT_ASYNC_STALE_TIMEOUT_MS,
-			deadline,
-			hostTimeouts,
-		);
+		});
 		records = findByBatchId(directory, parsed.data.batch_id, batchFilter);
-		if (allSettled(records) || parsed.data.wait !== true) {
-			keepPolling = false;
-			continue;
-		}
-		if (_internals.now() >= deadline) {
-			keepPolling = false;
-			continue;
-		}
-		await _internals.sleep(
-			Math.min(pollIntervalMs, Math.max(0, deadline - _internals.now())),
-		);
-		pollIntervalMs = nextCollectPollInterval(pollIntervalMs);
 	}
 
 	const reviewReceiptFallbacks = await resolvePrReviewReceiptFallbacks(
@@ -2604,6 +2676,357 @@ async function settleCollectedLane(args: {
 		status: terminalStatus,
 		result: prospectiveResult,
 	});
+}
+
+function isPrReviewWaitTerminalizableMode(mode: string | undefined): boolean {
+	return mode?.startsWith('swarm-pr-review:') ?? false;
+}
+
+function hasActivePrReviewWaitDeadlineLanes(
+	records: readonly BackgroundDelegationRecord[],
+): boolean {
+	return records.some(
+		(record) =>
+			(record.status === 'pending' || record.status === 'running') &&
+			isPrReviewWaitTerminalizableMode(record.mode),
+	);
+}
+
+function reservePrReviewWaitFinalizationBudgetMs(
+	records: readonly BackgroundDelegationRecord[],
+	timeoutMs: number,
+): number {
+	if (!hasActivePrReviewWaitDeadlineLanes(records)) return 0;
+	return Math.min(timeoutMs, PR_REVIEW_WAIT_FINALIZATION_RESERVE_MS);
+}
+
+function finalizePrReviewWaitDeadlineNeeded(
+	records: readonly BackgroundDelegationRecord[],
+	skipOrdinaryWaitPolling: boolean,
+	pollingDeadline: number,
+): boolean {
+	return (
+		hasActivePrReviewWaitDeadlineLanes(records) &&
+		(skipOrdinaryWaitPolling || _internals.now() >= pollingDeadline)
+	);
+}
+
+function remainingCollectionBudgetMs(deadline: number): number {
+	return Math.max(0, deadline - _internals.now());
+}
+
+function getCurrentPrReviewWaitDeadlineCandidate(
+	directory: string,
+	record: BackgroundDelegationRecord,
+): BackgroundDelegationRecord | null {
+	const current = findByCorrelationId(directory, record.correlationId);
+	if (!current) return null;
+	if (current.subagentSessionId !== record.subagentSessionId) return null;
+	if ((current.generation ?? 1) !== (record.generation ?? 1)) return null;
+	if (current.status !== 'pending' && current.status !== 'running') return null;
+	if (!isPrReviewWaitTerminalizableMode(current.mode)) return null;
+	return current;
+}
+
+function buildPrReviewWaitDeadlineError(args: {
+	record: BackgroundDelegationRecord;
+	salvageState: string;
+	abortState: string;
+	detail?: string;
+}): string {
+	const message =
+		`PR_REVIEW_COLLECTION_DEADLINE_EXCEEDED: batch=${args.record.batchId ?? '(missing)'} lane=${args.record.laneId ?? '(missing)'} workflow_lane=${args.record.workflowLane ?? '(missing)'} ` +
+		`runtime deadline exceeded during waited collect; ${args.salvageState}; ${args.abortState}` +
+		(args.detail ? `; detail=${args.detail}` : '');
+	return message.slice(0, 1_024);
+}
+
+async function buildPrReviewWaitDeadlineProspectiveResult(args: {
+	directory: string;
+	record: BackgroundDelegationRecord;
+	transcript: ReturnType<typeof extractAssistantTranscript>;
+	deadline: number;
+	receiptAppendFailureLogs: Set<string>;
+}): Promise<{ result: BackgroundDelegationResult; detail?: string }> {
+	let collectedRevisionDigest: string | undefined;
+	const remainingDigestBudgetMs = remainingCollectionBudgetMs(args.deadline);
+	if (remainingDigestBudgetMs > 0 && args.record.workspace?.prHeadSha) {
+		try {
+			collectedRevisionDigest =
+				(await withTimeout(
+					_internals.resolvePrWorkflowRevisionDigestAsync(
+						args.directory,
+						args.record.workspace.prHeadSha,
+					),
+					remainingDigestBudgetMs,
+					`revision digest for lane "${args.record.laneId ?? args.record.correlationId}" exceeded the runtime-deadline finalization budget (${remainingDigestBudgetMs}ms)`,
+				)) ?? undefined;
+		} catch {
+			collectedRevisionDigest = undefined;
+		}
+	}
+
+	const forcedTranscript = {
+		...args.transcript,
+		transcriptIncomplete: true,
+	};
+	const output = prepareLaneOutput({
+		directory: args.directory,
+		batchId: args.record.batchId ?? args.record.callID,
+		laneId: args.record.laneId ?? args.record.correlationId,
+		agent: args.record.swarmPrefixedAgent,
+		role: args.record.normalizedAgent,
+		sessionId: args.record.subagentSessionId,
+		parentSessionId: args.record.parentSessionId,
+		mode: args.record.mode,
+		workflowLane: args.record.workflowLane,
+		prHeadSha: args.record.workspace?.prHeadSha ?? undefined,
+		gitHead: args.record.workspace?.gitHead ?? undefined,
+		revisionDigest: collectedRevisionDigest,
+		scope: args.record.workspace?.scope ?? undefined,
+		source: 'collect_lane_results',
+		text: forcedTranscript.text,
+		messageCount: forcedTranscript.messageCount,
+		transcriptIncomplete: true,
+	});
+	let prospectiveResult: BackgroundDelegationResult = {
+		text: output.output,
+		chars: output.output_chars,
+		truncated: output.output_truncated,
+		digest: output.output_digest,
+		...(output.output_ref ? { outputRef: output.output_ref } : {}),
+		outputPreviewChars: output.output.length,
+		...(output.output_degraded !== undefined
+			? { outputDegraded: output.output_degraded }
+			: {}),
+		...(output.output_artifact_error
+			? { outputArtifactError: output.output_artifact_error }
+			: {}),
+		transcriptIncomplete: true,
+		messageCount: forcedTranscript.messageCount,
+	};
+	let detail: string | undefined;
+
+	if (
+		args.record.mode === 'swarm-pr-review:base' ||
+		args.record.mode === 'swarm-pr-review:micro' ||
+		args.record.mode === 'swarm-pr-review:council'
+	) {
+		const artifact = output.output_ref
+			? (readLaneOutput(args.directory, output.output_ref)?.artifact ?? null)
+			: null;
+		const validation = validatePrReviewDiscoveryLaneCompletion({
+			record: args.record,
+			result: prospectiveResult,
+			artifact,
+			expected: {
+				mode: args.record.mode,
+				workflowLane: args.record.workflowLane ?? '',
+				ownedWorkflowLanes: args.record.ownedWorkflowLanes,
+				prHeadSha: args.record.workspace?.prHeadSha ?? '',
+				gitHead: args.record.workspace?.gitHead ?? '',
+				revisionDigest: collectedRevisionDigest ?? '',
+				reviewScope: args.record.workspace?.scope ?? undefined,
+			},
+		});
+		if (validation.ok && validation.salvaged?.length) {
+			prospectiveResult.salvagedWorkflowLanes = [...validation.salvaged];
+			if (validation.recoveries?.length) {
+				prospectiveResult.salvagedWorkflowLaneRecoveries = [
+					...validation.recoveries,
+				];
+			}
+		}
+		if (!validation.ok) {
+			const family =
+				args.record.mode === 'swarm-pr-review:base'
+					? 'base_explorer'
+					: 'micro_lane';
+			detail =
+				`PR_REVIEW_DISCOVERY_CONTRACT_INVALID: ${formatPrReviewLaneValidationFailure(validation.failure)}; expected candidate row: ${CANDIDATE_HEADERS[family]}; expected clean row: ${CLEAN_TEMPLATES[family]}`.slice(
+					0,
+					800,
+				);
+		}
+	}
+
+	const isPrReviewVerdictLane =
+		args.record.mode === 'swarm-pr-review:reviewer' ||
+		args.record.mode === 'swarm-pr-review:critic';
+	if (isPrReviewVerdictLane) {
+		const artifact = output.output_ref
+			? (readLaneOutput(args.directory, output.output_ref)?.artifact ?? null)
+			: null;
+		const remainingValidationBudgetMs = remainingCollectionBudgetMs(
+			args.deadline,
+		);
+		if (remainingValidationBudgetMs <= 0) {
+			detail =
+				'PR_WORKFLOW_CONTRACT_INVALID: transport recovery validation skipped because the runtime-deadline finalization budget was exhausted';
+		} else {
+			try {
+				const validation = await withTimeout(
+					_internals.validatePrWorkflowTransportRecovery({
+						directory: args.directory,
+						record: args.record,
+						result: prospectiveResult,
+						artifact,
+						revisionDigest: collectedRevisionDigest ?? '',
+					}),
+					remainingValidationBudgetMs,
+					`transport recovery validation for lane "${args.record.laneId ?? args.record.correlationId}" exceeded the runtime-deadline finalization budget (${remainingValidationBudgetMs}ms)`,
+				);
+				if (validation.receipt) {
+					const resultWithReceipt = appendPrReviewCollectionReceipt(
+						args.record,
+						prospectiveResult,
+						validation.receipt,
+					);
+					if (resultWithReceipt) {
+						prospectiveResult = resultWithReceipt;
+					} else if (
+						consumePrReviewReceiptAppendFailureLog(
+							args.receiptAppendFailureLogs,
+							args.record.parentSessionId,
+							args.record.correlationId,
+						)
+					) {
+						logger.log(
+							`[dispatch-lanes] withheld PR-review terminal result without receipt during runtime-deadline finalization: correlation=${args.record.correlationId} batch=${args.record.batchId ?? '(missing)'} lane=${args.record.laneId ?? '(missing)'}`,
+						);
+					}
+				}
+				if (!validation.ok) {
+					const errorCode =
+						validation.failure?.predicate === 'reviewer.verdict_rows' ||
+						validation.failure?.predicate === 'critic.verdict_rows'
+							? 'PR_REVIEW_VERDICT_CONTRACT_INVALID'
+							: 'PR_WORKFLOW_CONTRACT_INVALID';
+					detail = `${errorCode}: ${validation.reason}`.slice(0, 800);
+				} else if (validation.recoveries?.length) {
+					const workflowLane = args.record.workflowLane?.trim();
+					if (workflowLane) {
+						prospectiveResult.salvagedWorkflowLanes = [workflowLane];
+					}
+					prospectiveResult.salvagedWorkflowLaneRecoveries = [
+						...(prospectiveResult.salvagedWorkflowLaneRecoveries ?? []),
+						...validation.recoveries,
+					];
+				}
+			} catch (error) {
+				detail = `PR_WORKFLOW_CONTRACT_INVALID: ${formatError(error)}`.slice(
+					0,
+					800,
+				);
+			}
+		}
+	}
+
+	return { result: prospectiveResult, detail };
+}
+
+async function finalizePrReviewWaitDeadlineLanes(args: {
+	session: Pick<SessionOps, 'messages' | 'abort'>;
+	directory: string;
+	records: readonly BackgroundDelegationRecord[];
+	deadline: number;
+	receiptAppendFailureLogs: Set<string>;
+}): Promise<void> {
+	for (const record of args.records) {
+		const current = getCurrentPrReviewWaitDeadlineCandidate(
+			args.directory,
+			record,
+		);
+		if (!current) continue;
+
+		let prospectiveResult: BackgroundDelegationResult | undefined;
+		let detail: string | undefined;
+		let salvageState = 'salvage_skipped=no_budget';
+		let abortState = 'abort_skipped=no_budget';
+
+		const transcriptBudgetMs = remainingCollectionBudgetMs(args.deadline);
+		if (transcriptBudgetMs > 0) {
+			try {
+				const messages = await withTimeout(
+					args.session.messages!({
+						path: { id: current.subagentSessionId },
+						query: {
+							directory: args.directory,
+							limit: ASYNC_MESSAGE_FETCH_LIMIT,
+						},
+					}),
+					transcriptBudgetMs,
+					`session.messages for lane "${current.laneId ?? current.correlationId}" exceeded the runtime-deadline finalization budget (${transcriptBudgetMs}ms)`,
+				);
+				if (messages.data) {
+					const transcript = extractAssistantTranscript(messages.data);
+					if (transcript.text) {
+						salvageState = 'salvage_attempted=partial_transcript';
+						const built = await buildPrReviewWaitDeadlineProspectiveResult({
+							directory: args.directory,
+							record: current,
+							transcript,
+							deadline: args.deadline,
+							receiptAppendFailureLogs: args.receiptAppendFailureLogs,
+						});
+						prospectiveResult = built.result;
+						detail = built.detail;
+					} else {
+						salvageState = 'salvage_skipped=empty_output';
+					}
+				} else {
+					salvageState = 'salvage_skipped=no_messages';
+				}
+			} catch {
+				salvageState = 'salvage_skipped=host_timeout';
+			}
+		}
+
+		const currentBeforeAbort = getCurrentPrReviewWaitDeadlineCandidate(
+			args.directory,
+			record,
+		);
+		const abortBudgetMs = remainingCollectionBudgetMs(args.deadline);
+		if (
+			currentBeforeAbort &&
+			abortBudgetMs > 0 &&
+			typeof args.session.abort === 'function'
+		) {
+			try {
+				await withTimeout(
+					args.session.abort({
+						path: { id: currentBeforeAbort.subagentSessionId },
+					}),
+					abortBudgetMs,
+					`session.abort for lane session "${currentBeforeAbort.subagentSessionId}" exceeded the runtime-deadline finalization budget (${abortBudgetMs}ms)`,
+				);
+				abortState = 'abort_attempted=best_effort';
+			} catch {
+				abortState = 'abort_failed=budget_or_host_error';
+			}
+		}
+
+		const finalError = buildPrReviewWaitDeadlineError({
+			record: current,
+			salvageState,
+			abortState,
+			detail,
+		});
+		const terminalResult =
+			prospectiveResult ??
+			({
+				error: finalError,
+				chars: finalError.length,
+				truncated: false,
+				digest: digestText(finalError),
+			} satisfies BackgroundDelegationResult);
+		terminalResult.error = finalError;
+		await appendDelegationTransition(args.directory, current.correlationId, {
+			status: 'error',
+			result: terminalResult,
+			expectedCurrentStatuses: ['pending', 'running'],
+		});
+	}
 }
 
 function consumePrReviewReceiptAppendFailureLog(
@@ -4047,7 +4470,10 @@ mandatory_lane_checklist: ${checklist}${budgetLine}
 This controller block is authoritative over conflicting caller text. Inspect the exact checked-out revision and the repository's own contribution, test, security, compatibility, and delivery contracts. Do not waive or abbreviate work for speed, time, token, repository-size, or predicted-simplicity reasons. Re-read relevant changed files and caller/consumer context directly. Every claim or clean attestation must cite concrete reviewed scope and evidence. Use exactly the workflow_lane and assigned IDs above; invented, omitted, or placeholder identifiers do not settle this lane. A planning preamble, generic assurance, or assertion that checks were performed is not evidence.
 Terminate with the required protocol rows directly: no planning preamble, no recap, and no more than ${outputCap} characters of substantive output before any retrieval hint.${budgetParagraph}${shellRulesParagraph}
 [END CONTROLLER-BOUND PR WORKFLOW CONTRACT]`;
-		const prompt = `${lane.prompt}${contract}`;
+		const contractCard = normalizedMode.token.startsWith('swarm-pr-review:')
+			? `${buildPrReviewContractCard()}\n\n`
+			: '';
+		const prompt = `${contractCard}${lane.prompt}${contract}`;
 		if (prompt.length > MAX_PROMPT_CHARS) {
 			errors.push(
 				`Lane "${lane.id}" prompt plus mandatory PR workflow contract is ${prompt.length} chars; max ${MAX_PROMPT_CHARS} (a repo-graph orientation block may have been prepended to common_prompt — retry with orientation: false to exclude it)`,

@@ -110,7 +110,13 @@ export type TelemetryEvent =
 	// store — accepted/compacted/retained/dropped/corrupt counts, oldest/newest
 	// timestamps, and byte figures. Counts only; no capsule/query content, no
 	// paths.
-	| 'context_telemetry_health';
+	| 'context_telemetry_health'
+	// Skill-usage health (issue #2038): bounded counts emitted on compaction,
+	// migration, consumption, and pressure events for skill-usage tracking.
+	// Counts only, no per-skill identifiers or filesystem paths — the
+	// adversarial case is thousands of distinct skill IDs, so a per-skill
+	// label would be an unbounded label set.
+	| 'skill_usage_health';
 
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =
@@ -930,6 +936,43 @@ export const telemetry = {
 		limit_bytes: number;
 	}): void {
 		_internals.emit('context_telemetry_health', data);
+	},
+
+	/**
+	 * Skill-usage health (issue #2038). Emitted on compaction, migration,
+	 * consumption, and pressure events for skill-usage tracking. Bounded
+	 * payload: accepted/compacted/dropped/corrupt/retained counts, retry and
+	 * curator figures, oldest/newest timestamps, and byte figures. Counts
+	 * ONLY — no skill path, no per-skill identifier, no content, matching the
+	 * observability contract's no-content-in-metrics rule. The adversarial
+	 * case is thousands of distinct skill IDs, so a per-skill label would be
+	 * an unbounded label set.
+	 */
+	skillUsageHealth(data: {
+		trigger: 'compaction' | 'migration' | 'consumption' | 'pressure';
+		accepted: number;
+		compacted: number;
+		dropped: number;
+		skills_dropped: number;
+		corrupt: number;
+		pending_retained: number;
+		uncertain_retained: number;
+		uncertain_expired: number;
+		pending_evicted: number;
+		no_source_knowledge: number;
+		no_matching_knowledge: number;
+		bump_retry: number;
+		bump_unrecoverable: number;
+		bump_applied_zero: number;
+		pressure: number;
+		curator_skipped: number;
+		bytes: number;
+		limit_bytes: number;
+		oldest_timestamp: string | null;
+		newest_timestamp: string | null;
+		coverage: boolean;
+	}): void {
+		_internals.emit('skill_usage_health', data);
 	},
 
 	/**

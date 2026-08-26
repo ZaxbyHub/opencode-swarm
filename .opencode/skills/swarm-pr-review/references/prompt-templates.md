@@ -20,7 +20,11 @@ Candidates:
 - ...
 
 For each candidate, return:
-[REVIEWED] | candidate_id | CONFIRMED/DISPROVED/UNVERIFIED/PRE_EXISTING | evidence_type | final_severity | introduced_by_pr | file:line | rationale | falsification_probe | reviewer_id
+[REVIEWED] | item_id | classification | evidence_type | severity | introduced_by_pr | file:line | rationale | probe | reviewer_notes
+
+Escape free-text fields with the executable verdict codec: `\\` (backslash),
+`\|` (pipe), `\n` (newline), and `\r` (carriage return). Do not copy the
+contract card's explicitly `DISCARDED` examples as live marker rows.
 
 You must check caller context, reachability, schema/middleware/framework mitigations, state-machine constraints, test coverage, PR-introducedness, and severity.
 
@@ -48,10 +52,14 @@ For each finding, challenge:
 - whether multiple findings should be grouped.
 
 Return:
-[CRITIC] | finding_id | UPHELD/DOWNGRADED/DISPROVED/NEEDS_MORE_EVIDENCE | final_severity | reason | required_report_change
+[CRITIC] | item_id | status | severity | rationale | required_change
+
+The same free-text escaping rules apply to critic reason and required-change
+fields. A waited collection deadline is terminal: the controller makes one
+bounded partial-salvage attempt, then records any still-active lane as error.
 
 REQUIRED FINAL LINE — your final line MUST be exactly the row above (no variations, no labeled fields, no placeholders):
-[CRITIC] | finding_id | UPHELD/DOWNGRADED/DISPROVED/NEEDS_MORE_EVIDENCE | final_severity | reason | required_report_change
+[CRITIC] | item_id | status | severity | rationale | required_change
 
 A response without this exact row is treated as a planning preamble and re-dispatched. Do not output only a planning or investigation message.
 ```
