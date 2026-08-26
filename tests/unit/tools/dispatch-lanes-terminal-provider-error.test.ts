@@ -381,24 +381,42 @@ describe('terminal provider errors settle async lanes (issue #2349)', () => {
 		'a benign settle race is NOT reported as a settle-write failure',
 		async () => {
 			await recordLane();
-			// Pre-settle the record so the first-terminal-wins guard rejects our
-			// write. That is a routine race (the stale sweep, an abort, an earlier
-			// pass) — the lane IS settled, so surfacing a diagnostic would cry wolf
-			// on every occurrence. Regression pin for the reviewer's blocker 2.
-			await appendDelegationTransition(directory, CORRELATION_ID, {
-				status: 'cancelled',
-			});
-			installHost({
-				statusType: 'idle',
-				messages: [
-					assistantMessage({
-						completed: 9_000,
-						error: { name: 'APIError', data: { message: 'quota exceeded' } },
-					}),
-				],
-			});
+			// The record MUST still be pending when collectOnce loads it, or it is
+			// filtered out of `activeRecords` and the settle block never runs at all
+			// — a pre-settled fixture makes this test vacuous. So terminalize it
+			// out-of-band from INSIDE the messages mock: the record is pending at
+			// load, terminal by the time appendDelegationTransition fires, which is
+			// exactly the race the branch exists to absorb.
+			let raced = false;
+			_internals.getSessionOps = () =>
+				({
+					status: async () => ({ data: { [SESSION_ID]: { type: 'idle' } } }),
+					messages: async () => {
+						if (!raced) {
+							raced = true;
+							await appendDelegationTransition(directory, CORRELATION_ID, {
+								status: 'cancelled',
+							});
+						}
+						return {
+							data: [
+								assistantMessage({
+									completed: 9_000,
+									error: {
+										name: 'APIError',
+										data: { message: 'quota exceeded' },
+									},
+								}),
+							],
+						};
+					},
+					abort: async () => ({}),
+					delete: async () => ({}),
+				}) as never;
 
 			const result = await collect();
+
+			expect(raced).toBe(true);
 
 			expect(laneStatusOnDisk(directory, CORRELATION_ID)).toBe('cancelled');
 			// No spurious diagnostic for a race that settled correctly.

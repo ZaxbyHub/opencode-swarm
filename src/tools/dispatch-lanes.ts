@@ -3386,7 +3386,6 @@ interface LaneTerminalError {
 	/** `ApiError.data.isRetryable` — host-stated, not inferred. */
 	hostRetryable: boolean | undefined;
 	category: string;
-	retryClass: string;
 }
 
 /**
@@ -3484,15 +3483,29 @@ function classifyLaneTerminalError(error: unknown): LaneTerminalError {
 	// source-aware classification with bounded display). `info.error` is a
 	// provider channel, not arbitrary tool output, so the provider quota
 	// patterns apply correctly here.
-	const classified = classifyProviderFailure(rawMessage);
+	// Feed the host-stated status IN rather than patching it on afterwards: the
+	// classifier's own status-driven branches (401/403 → auth, 429 → rate limit)
+	// are otherwise unreachable from this path, which produced self-contradictory
+	// records like `provider.unknown … status=429`.
+	const classified = classifyProviderFailure(
+		statusCode === undefined
+			? rawMessage
+			: { message: rawMessage, status: statusCode },
+	);
+	// The SDK discriminator is authoritative for an abort. `isAbortLike` tests
+	// /\baborted\b/, which does NOT match inside the single token
+	// "MessageAbortedError", so an abort carrying no `data.message` would
+	// otherwise be recorded as `provider.unknown` — and per the approved plan
+	// that empty-data shape is the one empirically proven to occur.
+	const category =
+		kind === 'aborted' ? 'provider.cancelled' : classified.category;
 	return {
 		kind,
 		name,
 		message: classified.evidence.display,
 		statusCode: statusCode ?? classified.evidence.statusCode,
 		hostRetryable,
-		category: classified.category,
-		retryClass: classified.retryClass,
+		category,
 	};
 }
 
@@ -3637,6 +3650,10 @@ async function runLane(
 	const validation = validateLaneAgent(lane.agent, context);
 	const role = validation.role;
 	const startedAt = isoNow();
+	// Issue #2349 (AC3 parity): set at the dispatch-failure site, consumed by the
+	// outer catch. Carried out-of-band so the thrown message — which the
+	// model-failover classifier reads — stays byte-identical to its prior form.
+	let syncClassifiedReason: string | undefined;
 	if (!validation.ok) {
 		return {
 			id: lane.id,
@@ -3698,20 +3715,24 @@ async function runLane(
 					promptController,
 				);
 				if (!result.data) {
-					// Issue #2349 (AC3 parity): this throw — NOT the `!promptResult.data`
-					// branch below — is the reachable sync failure path, because
-					// dispatchWithModelFallback only ever returns a dispatch-produced
-					// result or rethrows. Classify here so the same underlying provider
-					// condition reports the same category as the async collect path.
+					// Issue #2349 (AC3 parity): record the CLASSIFIED reason out-of-band
+					// and throw the RAW message unchanged.
 					//
-					// The `classify` callback below still reads this message for its
-					// transient/permanent decision; the composed reason embeds the raw
-					// provider text, so `isTransientProviderError` keeps matching exactly
-					// what it matched before.
+					// The `classify` callback below reads this thrown message to decide
+					// transient-vs-permanent, which gates model failover in
+					// `dispatchWithModelFallback`. Composing the classified reason INTO
+					// the message changed that decision in both directions — the
+					// LANE_TERMINAL_REASON_MESSAGE_BUDGET truncation can cut a transient
+					// token (e.g. "overloaded") past char 100, flipping transient →
+					// permanent and silently losing failover, and an injected
+					// `status=NNN` can flip permanent → transient. So the message stays
+					// byte-identical to its pre-#2349 form and only the recorded lane
+					// reason is classified.
+					syncClassifiedReason = `session.prompt failed: ${laneTerminalErrorReason(
+						classifyLaneTerminalError(result.error),
+					)}`;
 					throw new Error(
-						`session.prompt failed: ${laneTerminalErrorReason(
-							classifyLaneTerminalError(result.error),
-						)}`,
+						`session.prompt failed: ${formatError(result.error)}`,
 					);
 				}
 				return result;
@@ -3782,7 +3803,12 @@ async function runLane(
 			lane,
 			role,
 			startedAt,
-			formatError(error),
+			// Issue #2349 (AC3 parity): prefer the classified reason captured at the
+			// dispatch-failure site, so the sync path records the same category as
+			// the async collect path. Falls back to the raw message for every other
+			// failure kind reaching this catch (timeouts, session-create faults),
+			// whose text is deliberately left untouched.
+			syncClassifiedReason ?? formatError(error),
 			create.slotId,
 			create.runId,
 			sessionId,
@@ -4986,7 +5012,7 @@ export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
 export const collect_lane_results: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Collect or poll results for a dispatch_lanes_async batch. Supports two modes: (1) non-blocking poll (wait omitted or false) — performs one collection pass and returns current lane status, including pending lane identities by default, and any settled results so you can process completed lanes while continuing independent work; (2) blocking join (wait: true) — polls until all lanes settle or the collection wait budget expires. Busy/retry lanes do not become stale solely because they run for a long time; pr-review lanes pending for minutes additionally carry an alert-only pending_liveness diagnostic (lane id, elapsed ms, host session status, stalledSuspect) that never cancels or replaces anything. Does not advance workflow gates.',
+			'Collect or poll results for a dispatch_lanes_async batch. Supports two modes: (1) non-blocking poll (wait omitted or false) — performs one collection pass and returns current lane status, including pending lane identities by default, and any settled results so you can process completed lanes while continuing independent work; (2) blocking join (wait: true) — polls until all lanes settle or the collection wait budget expires. Busy/retry lanes do not become stale solely because they run for a long time; any lane pending for minutes additionally carries an alert-only pending_liveness diagnostic (lane id, elapsed ms, host session status, stalledSuspect) that never cancels or replaces anything. A lane whose backing session reports a terminal provider error (quota/billing/auth) settles to failed with the classified reason instead of staying pending. Does not advance workflow gates.',
 		args: {
 			batch_id: CollectLaneResultsArgsSchema.shape.batch_id,
 			wait: CollectLaneResultsArgsSchema.shape.wait,
