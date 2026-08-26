@@ -6,6 +6,7 @@ import { AutoReviewConfigSchema } from '../../../src/config/schema';
 import { _internals, runAutoReview } from '../../../src/hooks/auto-review';
 import type { ReviewModelDispatcher } from '../../../src/review/contracts';
 import { captureReviewAgentModelRegistry } from '../../../src/review/runtime';
+import { eventLinesOf } from '../../helpers/event-lines.js';
 
 let tmpDir: string;
 const originalRunReviewEngine = _internals.runReviewEngine;
@@ -22,11 +23,9 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
 function readEvents(): Array<Record<string, unknown>> {
 	const target = path.join(tmpDir, '.swarm', 'events.jsonl');
 	if (!fs.existsSync(target)) return [];
-	return fs
-		.readFileSync(target, 'utf8')
-		.split(/\r?\n/)
-		.filter(Boolean)
-		.map((line) => JSON.parse(line));
+	return eventLinesOf(fs.readFileSync(target, 'utf8')).map((l) =>
+		JSON.parse(l),
+	);
 }
 
 beforeEach(() => {

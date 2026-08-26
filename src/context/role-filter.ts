@@ -3,9 +3,8 @@
  * Filters context entries based on [FOR: ...] tags for role-based context delivery.
  */
 
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
+import { appendCoreEventSync } from '../events/core-events.js';
 import { parseDelegationEnvelope } from '../hooks/delegation-gate.js';
 import { log } from '../utils';
 
@@ -147,8 +146,7 @@ function logFilteringMetrics(
 	includedEntries: number,
 ): void {
 	try {
-		const eventsPath = path.join(directory, '.swarm', 'events.jsonl');
-		const event = {
+		appendCoreEventSync(directory, {
 			event: 'context_filtered',
 			timestamp: new Date().toISOString(),
 			agentName: targetRole,
@@ -156,15 +154,7 @@ function logFilteringMetrics(
 			includedEntries,
 			filteredEntries: totalEntries - includedEntries,
 			estimatedTokensSaved: (totalEntries - includedEntries) * 100,
-		};
-
-		// Ensure .swarm directory exists
-		const swarmDir = path.dirname(eventsPath);
-		if (!fs.existsSync(swarmDir)) {
-			fs.mkdirSync(swarmDir, { recursive: true });
-		}
-
-		fs.appendFileSync(eventsPath, `${JSON.stringify(event)}\n`, 'utf-8');
+		});
 	} catch (error) {
 		log('[RoleFilter] event append failed', {
 			error: error instanceof Error ? error.message : String(error),

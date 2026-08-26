@@ -14,10 +14,15 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
+import { readCoreEvents } from '../../../src/events/core-events.js';
 import {
 	createSteeringConsumedHook,
 	recordSteeringConsumed,
 } from '../../../src/hooks/steering-consumed.js';
+
+function readEventLines(dir: string): string[] {
+	return readCoreEvents(dir).text.trim().split('\n');
+}
 
 describe('steering-consumed adversarial security tests', () => {
 	let tempDir: string;
@@ -143,7 +148,7 @@ describe('steering-consumed adversarial security tests', () => {
 				// The JSON.stringify should escape the quotes
 				expect(content).toContain('\\"malicious\\"');
 				// The content should be valid JSON when parsed line by line
-				const lines = content.trim().split('\n');
+				const lines = readEventLines(tempDir);
 				for (const line of lines) {
 					const parsed = JSON.parse(line);
 					expect(parsed).toHaveProperty('type');
@@ -159,8 +164,7 @@ describe('steering-consumed adversarial security tests', () => {
 			recordSteeringConsumed(tempDir, nestedInjection);
 
 			if (fs.existsSync(eventsPath)) {
-				const content = fs.readFileSync(eventsPath, 'utf-8');
-				const lines = content.trim().split('\n');
+				const lines = readEventLines(tempDir);
 				for (const line of lines) {
 					const parsed = JSON.parse(line);
 					// The directiveId should be a string, not parsed as JSON
@@ -360,7 +364,7 @@ describe('steering-consumed adversarial security tests', () => {
 			if (fs.existsSync(eventsPath)) {
 				const content = fs.readFileSync(eventsPath, 'utf-8');
 				expect(content).toContain('directiveId');
-				const lines = content.trim().split('\n');
+				const lines = readEventLines(tempDir);
 				for (const line of lines) {
 					const parsed = JSON.parse(line);
 					expect(parsed.directiveId).toBe(emojiDirectiveId);
@@ -376,7 +380,7 @@ describe('steering-consumed adversarial security tests', () => {
 			if (fs.existsSync(eventsPath)) {
 				const content = fs.readFileSync(eventsPath, 'utf-8');
 				expect(content).toContain('directiveId');
-				const lines = content.trim().split('\n');
+				const lines = readEventLines(tempDir);
 				for (const line of lines) {
 					const parsed = JSON.parse(line);
 					expect(parsed.directiveId).toBe(cjkDirectiveId);
@@ -390,8 +394,7 @@ describe('steering-consumed adversarial security tests', () => {
 			recordSteeringConsumed(tempDir, rtlDirectiveId);
 
 			if (fs.existsSync(eventsPath)) {
-				const content = fs.readFileSync(eventsPath, 'utf-8');
-				const lines = content.trim().split('\n');
+				const lines = readEventLines(tempDir);
 				for (const line of lines) {
 					const parsed = JSON.parse(line);
 					expect(parsed.directiveId).toBe(rtlDirectiveId);
@@ -405,8 +408,7 @@ describe('steering-consumed adversarial security tests', () => {
 			recordSteeringConsumed(tempDir, mixedDirectiveId);
 
 			if (fs.existsSync(eventsPath)) {
-				const content = fs.readFileSync(eventsPath, 'utf-8');
-				const lines = content.trim().split('\n');
+				const lines = readEventLines(tempDir);
 				for (const line of lines) {
 					const parsed = JSON.parse(line);
 					expect(parsed.directiveId).toBe(mixedDirectiveId);
@@ -420,8 +422,7 @@ describe('steering-consumed adversarial security tests', () => {
 			recordSteeringConsumed(tempDir, zwsDirectiveId);
 
 			if (fs.existsSync(eventsPath)) {
-				const content = fs.readFileSync(eventsPath, 'utf-8');
-				const lines = content.trim().split('\n');
+				const lines = readEventLines(tempDir);
 				for (const line of lines) {
 					const parsed = JSON.parse(line);
 					expect(parsed.directiveId).toBe(zwsDirectiveId);
@@ -489,8 +490,7 @@ describe('steering-consumed adversarial security tests', () => {
 
 			// Should not crash
 			if (fs.existsSync(eventsPath)) {
-				const content = fs.readFileSync(eventsPath, 'utf-8');
-				const lines = content.trim().split('\n');
+				const lines = readEventLines(tempDir);
 				for (const line of lines) {
 					const parsed = JSON.parse(line);
 					expect(parsed.directiveId).toBe(controlDirectiveId);

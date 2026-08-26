@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
-import { appendFile, mkdir, readFile, unlink } from 'node:fs/promises';
+import { mkdir, readFile, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import {
+	appendCoreEventSync,
+	hasSpecDriftAuditEvent,
+} from '../events/core-events.js';
 import { atomicWriteFile } from '../evidence/task-file.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
@@ -275,21 +279,28 @@ async function ensureSnapshotEvent(
 	});
 }
 
+/**
+ * Issue #2039: audit events append through the core event seam with the
+ * authority-key dedupe restoring the old pre-check (lock-scoped, at-most-once),
+ * and presence verification reads the authoritative index — never the whole
+ * file. Fail-closed semantics are preserved: a corrupt authority index throws
+ * (previously a malformed events.jsonl line threw).
+ */
 async function appendEvent(
-	eventsPath: string,
+	directory: string,
 	event: SpecDriftAcknowledgedEvent | SpecDriftRepairedEvent,
 ): Promise<void> {
 	const existing = await _internals.verifyEventPresence(
-		eventsPath,
+		directory,
 		event.type,
 		event.transitionId,
 	);
 	if (existing) return;
 
-	await appendFile(eventsPath, `${JSON.stringify(event)}\n`, 'utf-8');
+	appendCoreEventSync(directory, { ...event }, { dedupeOnAuthorityKey: true });
 
 	const verified = await _internals.verifyEventPresence(
-		eventsPath,
+		directory,
 		event.type,
 		event.transitionId,
 	);
@@ -301,31 +312,11 @@ async function appendEvent(
 }
 
 async function verifyEventPresence(
-	eventsPath: string,
+	directory: string,
 	eventType: 'spec_drift_acknowledged' | 'spec_drift_repaired',
 	transitionId: string,
 ): Promise<boolean> {
-	const raw = await _internals.readFileText(eventsPath);
-	if (raw === null) return false;
-
-	for (const line of raw.split('\n')) {
-		const trimmed = line.trim();
-		if (trimmed.length === 0) continue;
-		let parsed: Record<string, unknown>;
-		try {
-			parsed = JSON.parse(trimmed) as Record<string, unknown>;
-		} catch (error) {
-			throw new Error(
-				`events.jsonl is not valid JSONL near "${trimmed.slice(0, 80)}": ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			);
-		}
-		if (parsed.type === eventType && parsed.transitionId === transitionId) {
-			return true;
-		}
-	}
-	return false;
+	return hasSpecDriftAuditEvent(directory, eventType, transitionId);
 }
 
 function buildTransitionId(
@@ -408,7 +399,6 @@ export async function reconcileSpecDrift(
 		directory,
 		'spec-snapshot.md',
 	);
-	const eventsPath = _internals.validateSwarmPath(directory, 'events.jsonl');
 
 	const markerMaybe = await _internals.readFileText(markerPath);
 	if (markerMaybe === null) {
@@ -607,7 +597,7 @@ export async function reconcileSpecDrift(
 					previousHash: wal.previousHash,
 					transitionId,
 				});
-				await _internals.appendEvent(eventsPath, event);
+				await _internals.appendEvent(directory, event);
 				await _internals.writeWal(walPath, { ...wal, state: 'COMMITTED' });
 			}
 

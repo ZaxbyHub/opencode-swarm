@@ -3,8 +3,8 @@
  * Strips attempt metadata, urgency references, and consequence claims from gate agent messages.
  */
 
-import * as fs from 'node:fs';
-import { safeHook, validateSwarmPath } from './utils.js';
+import { appendCoreEventSync } from '../events/core-events.js';
+import { safeHook } from './utils.js';
 
 interface MessageInfo {
 	role: string;
@@ -131,7 +131,6 @@ export function createDelegationSanitizerHook(
 
 					// Log sanitization event to events.jsonl
 					try {
-						const eventsPath = validateSwarmPath(directory, 'events.jsonl');
 						const event = {
 							event: 'message_sanitized',
 							agent,
@@ -140,11 +139,7 @@ export function createDelegationSanitizerHook(
 							stripped_patterns: result.stripped,
 							timestamp: new Date().toISOString(),
 						};
-						fs.appendFileSync(
-							eventsPath,
-							`${JSON.stringify(event)}\n`,
-							'utf-8',
-						);
+						appendCoreEventSync(directory, event);
 					} catch {
 						// Silently swallow errors - non-fatal operation
 					}

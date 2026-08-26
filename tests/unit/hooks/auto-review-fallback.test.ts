@@ -31,6 +31,7 @@ import {
 } from '../../../src/review/runtime';
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { _internals as telemetryInternals } from '../../../src/telemetry';
+import { eventLinesOf } from '../../helpers/event-lines.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const APPROVED = [
@@ -174,11 +175,7 @@ function runInput(
 function readEvents(): Array<Record<string, unknown>> {
 	const p = path.join(tmpDir, '.swarm', 'events.jsonl');
 	if (!fs.existsSync(p)) return [];
-	return fs
-		.readFileSync(p, 'utf-8')
-		.split('\n')
-		.filter(Boolean)
-		.map((l) => JSON.parse(l));
+	return eventLinesOf(fs.readFileSync(p, 'utf-8')).map((l) => JSON.parse(l));
 }
 
 describe('runAutoReview — model failover (#1905)', () => {

@@ -76,6 +76,7 @@ import {
 	advanceTaskCheckpointReceiptGeneration,
 	repairTaskCheckpointReceiptForCompletion,
 } from '../db/task-checkpoint-receipt.js';
+import { appendCoreEventSync } from '../events/core-events.js';
 import { isGitRepo } from '../git/branch';
 import { getWorktreeMergeFailure } from '../hooks/delegation-gate/worktree-merge-status';
 import { readSwarmFileAsync } from '../hooks/utils';
@@ -916,11 +917,6 @@ export async function loadPlan(
 								// Emit spec_stale_detected to events.jsonl
 								try {
 									assertProjectRoot(directory);
-									const eventsPath = path.join(
-										directory,
-										'.swarm',
-										'events.jsonl',
-									);
 									const event: SpecStaleDetectedEvent = {
 										type: 'spec_stale_detected',
 										timestamp: new Date().toISOString(),
@@ -930,11 +926,7 @@ export async function loadPlan(
 										reason: staleResult.reason ?? 'unknown',
 										planTitle: validated.title,
 									};
-									await fsPromises.appendFile(
-										eventsPath,
-										`${JSON.stringify(event)}\n`,
-										'utf-8',
-									);
+									appendCoreEventSync(directory, { ...event });
 								} catch {
 									// Non-fatal: event write failure does not block plan loading
 								}

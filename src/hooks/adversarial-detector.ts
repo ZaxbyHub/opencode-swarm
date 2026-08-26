@@ -1,9 +1,8 @@
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
 import type { PluginConfig } from '../config';
 import { resolveRegisteredAgentModel } from '../config/agent-model';
 import { DEFAULT_MODELS } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
+import { appendCoreEventSync } from '../events/core-events.js';
 import { boundedBunHash, coarseObjectDiscriminator } from '../utils/arg-hash';
 import { stableCanonicalStringify } from '../utils/stable-stringify';
 
@@ -411,13 +410,15 @@ export async function handleDebuggingSpiral(
 	let checkpointCreated = false;
 
 	try {
-		const swarmDir = path.join(directory, '.swarm');
-		await fs.mkdir(swarmDir, { recursive: true });
-		const eventsPath = path.join(swarmDir, 'events.jsonl');
-		await fs.appendFile(
-			eventsPath,
-			`${formatDebuggingSpiralEvent(match, taskId)}\n`,
-		);
+		appendCoreEventSync(directory, {
+			event: 'debugging_spiral_detected',
+			taskId,
+			pattern: match.pattern,
+			severity: match.severity,
+			matchedText: match.matchedText,
+			confidence: match.confidence,
+			timestamp: new Date().toISOString(),
+		});
 		eventLogged = true;
 	} catch {
 		// non-fatal

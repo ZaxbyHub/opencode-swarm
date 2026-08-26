@@ -35,9 +35,8 @@
  */
 
 import { existsSync } from 'node:fs';
-import { appendFile, mkdir } from 'node:fs/promises';
-import * as path from 'node:path';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
+import { appendCoreEventSync } from '../events/core-events.js';
 import {
 	addKnowledgeAckDedup,
 	buildGateDenialDirectiveKey,
@@ -497,9 +496,7 @@ async function writeWarnEvent(
 	directory: string,
 	record: Record<string, unknown>,
 ): Promise<void> {
-	const filePath = path.join(directory, '.swarm', 'events.jsonl');
-	await mkdir(path.dirname(filePath), { recursive: true });
-	await appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
+	appendCoreEventSync(directory, record);
 }
 
 /**

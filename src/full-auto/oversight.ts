@@ -26,12 +26,12 @@ import * as path from 'node:path';
 import { createCriticAutonomousOversightAgent } from '../agents/critic';
 import { getSwarmAgents, resolveFallbackModel } from '../agents/index';
 import { stripKnownSwarmPrefix } from '../config/schema';
+import { appendCoreEventSync } from '../events/core-events.js';
 import {
 	classifyProviderFailure,
 	isRetryableProviderFailure,
 } from '../failures/invocation-failure';
 import { validateSwarmPath } from '../hooks/utils';
-import { tryAcquireLock } from '../parallel/file-locks.js';
 import { _internals as stateInternals } from '../state.js';
 import { telemetry } from '../telemetry';
 import { sleep } from '../utils/bun-compat';
@@ -259,52 +259,23 @@ async function cleanupEphemeralSessionWithinBudget(
  * durably audited is not a real verdict — the dispatcher converts the
  * thrown error into a BLOCKED/pause outcome.
  *
- * The lock acquisition is best-effort (some platforms / test sandboxes
- * cannot acquire the cross-process lock); the actual append is the
- * mandatory step and any failure throws.
+ * The append goes through the canonical store seam (`appendCoreEventSync`),
+ * which holds the exclusive store lock for the write and throws a typed
+ * error when the store stays contended. The seam releases its lock before
+ * any throw, so the mandatory rethrow below preserves the original
+ * rethrow-after-lock-release contract.
  */
 export async function writeFullAutoOversightEvent(
 	directory: string,
 	event: FullAutoOversightEvent,
 ): Promise<void> {
-	const lockTaskId = `full-auto-oversight-${Date.now()}`;
-	let lockResult: Awaited<ReturnType<typeof tryAcquireLock>> | undefined;
 	try {
-		lockResult = await tryAcquireLock(
-			directory,
-			'events.jsonl',
-			'full-auto-oversight',
-			lockTaskId,
-		);
+		appendCoreEventSync(directory, { ...event });
 	} catch (error) {
-		logger.warn(
-			`[full-auto/oversight] failed to acquire lock for events.jsonl: ${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
-	let writeError: unknown;
-	try {
-		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		fs.appendFileSync(eventsPath, `${JSON.stringify(event)}\n`, 'utf-8');
-	} catch (error) {
-		writeError = error;
 		logger.error(
 			`[full-auto/oversight] Failed to write event: ${error instanceof Error ? error.message : String(error)}`,
 		);
-	} finally {
-		if (lockResult?.acquired && lockResult.lock._release) {
-			try {
-				await lockResult.lock._release();
-			} catch (releaseError) {
-				logger.error(
-					'[full-auto/oversight] Lock release failed:',
-					releaseError,
-				);
-			}
-		}
-	}
-	if (writeError) {
-		const msg =
-			writeError instanceof Error ? writeError.message : String(writeError);
+		const msg = error instanceof Error ? error.message : String(error);
 		throw new Error(`Full-Auto oversight event persistence failed: ${msg}`);
 	}
 }

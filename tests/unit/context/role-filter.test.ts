@@ -6,6 +6,7 @@ import {
 	type ContextEntry,
 	filterByRole,
 } from '../../../src/context/role-filter';
+import { readCoreEvents } from '../../../src/events/core-events.js';
 import { resetSwarmState } from '../../../src/state';
 
 describe('filterByRole', () => {
@@ -428,6 +429,8 @@ This is documented in swarm knowledge base.`,
 	});
 
 	describe('context_filtered event logged', () => {
+		const readContextFilteredEvent = (dir: string): Record<string, unknown> =>
+			JSON.parse(readCoreEvents(dir).text.trim());
 		it('logs context_filtered event to events.jsonl', () => {
 			const entries: ContextEntry[] = [
 				{
@@ -445,8 +448,7 @@ This is documented in swarm knowledge base.`,
 			const eventsPath = path.join(tempDir, '.swarm', 'events.jsonl');
 			expect(fs.existsSync(eventsPath)).toBe(true);
 
-			const eventContent = fs.readFileSync(eventsPath, 'utf-8');
-			const event = JSON.parse(eventContent.trim());
+			const event = readContextFilteredEvent(tempDir);
 
 			expect(event.event).toBe('context_filtered');
 			expect(event.agentName).toBe('coder');
@@ -466,8 +468,7 @@ This is documented in swarm knowledge base.`,
 			filterByRole(entries, 'mega_coder', tempDir);
 
 			const eventsPath = path.join(tempDir, '.swarm', 'events.jsonl');
-			const eventContent = fs.readFileSync(eventsPath, 'utf-8');
-			const event = JSON.parse(eventContent.trim());
+			const event = readContextFilteredEvent(tempDir);
 
 			expect(event.agentName).toBe('mega_coder');
 		});
@@ -483,8 +484,7 @@ This is documented in swarm knowledge base.`,
 			filterByRole(entries, 'coder', tempDir);
 
 			const eventsPath = path.join(tempDir, '.swarm', 'events.jsonl');
-			const eventContent = fs.readFileSync(eventsPath, 'utf-8');
-			const event = JSON.parse(eventContent.trim());
+			const event = readContextFilteredEvent(tempDir);
 
 			expect(event.estimatedTokensSaved).toBe(100); // 1 filtered * 100
 		});

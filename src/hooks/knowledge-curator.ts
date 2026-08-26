@@ -1,14 +1,9 @@
 /** Knowledge curator hook for opencode-swarm v6.17 two-tier knowledge system. */
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import {
-	appendFile,
-	mkdir,
-	readFile,
-	realpath,
-	writeFile,
-} from 'node:fs/promises';
+import { readFile, realpath, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
+import { appendCoreEventSync } from '../events/core-events.js';
 import type { CurationContext } from '../knowledge/curation-policy.js';
 import { reserveQuota } from '../services/skill-improver-quota.js';
 import { rebuildSynonymMap } from '../services/synonym-map.js';
@@ -875,19 +870,13 @@ async function appendCuratorSkippedEvent(
 	record: { entry_id: string; lesson: string; reason: string },
 ): Promise<void> {
 	try {
-		const filePath = path.join(directory, '.swarm', 'events.jsonl');
-		await mkdir(path.dirname(filePath), { recursive: true });
-		await appendFile(
-			filePath,
-			`${JSON.stringify({
-				timestamp: new Date().toISOString(),
-				event: 'curator_skipped',
-				entry_id: record.entry_id,
-				lesson: record.lesson.slice(0, 200),
-				reason: record.reason,
-			})}\n`,
-			'utf-8',
-		);
+		appendCoreEventSync(directory, {
+			timestamp: new Date().toISOString(),
+			event: 'curator_skipped',
+			entry_id: record.entry_id,
+			lesson: record.lesson.slice(0, 200),
+			reason: record.reason,
+		});
 	} catch {
 		// audit log is best-effort; never break curation
 	}

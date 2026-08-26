@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import {
+	appendCoreEventSync,
+	_internals as coreEventsInternals,
+} from '../../../src/events/core-events.js';
 import { getDiagnoseData } from '../../../src/services/diagnose-service.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 // Mock all the imported modules
 vi.mock('../../../src/plan/manager.js', () => ({
@@ -19,7 +26,14 @@ vi.mock('../../../src/hooks/utils.js', () => ({
 vi.mock('../../../src/config/loader.js', () => ({
 	loadPluginConfig: vi.fn(),
 }));
+
+// Spread the REAL node:fs exports (AGENTS.md invariant 7 / check-mock-cleanup
+// Check 2): a partial mock replaces the module for every co-run test file in
+// Bun's shared process and broke sibling suites relying on other exports.
+import * as realFs from 'node:fs';
+
 vi.mock('node:fs', () => ({
+	...realFs,
 	readdirSync: vi.fn(),
 	existsSync: vi.fn(),
 	statSync: vi.fn(),
@@ -51,6 +65,24 @@ function findCheck(checks: any[], name: string) {
 	return checks.find((c) => c.name === name);
 }
 
+/**
+ * #2039: Checks D (Event Stream) and E (Steering Directives) now read
+ * `.swarm/events.jsonl` through the core event store seam, whose `_internals`
+ * captured the REAL `node:fs` bindings at module load — the file-wide
+ * `vi.mock('node:fs')` scaffolding never intercepts it. Those tests therefore
+ * use REAL fixtures in canonicalMkdtemp project dirs; raw fixture writes go
+ * through `coreEventsInternals` (real fs, mock-free) since the test file's
+ * own `node:fs` import is mocked.
+ */
+const realFixtureDirs: string[] = [];
+
+function newProjectDir(prefix: string): string {
+	const dir = canonicalMkdtemp(prefix);
+	realFixtureDirs.push(dir);
+	coreEventsInternals.mkdirSync(join(dir, '.swarm'), { recursive: true });
+	return dir;
+}
+
 beforeEach(() => {
 	vi.clearAllMocks();
 	mockLoadPlanJsonOnly.mockResolvedValue(null);
@@ -75,8 +107,12 @@ beforeEach(() => {
 	delete process.env.OPENCODE_SWARM_ID;
 });
 
-afterEach(() => {
+afterEach(async () => {
 	delete process.env.OPENCODE_SWARM_ID;
+	for (const dir of realFixtureDirs) {
+		await rm(dir, { recursive: true, force: true }).catch(() => {});
+	}
+	realFixtureDirs.length = 0;
 });
 
 describe('checkConfigParseability', () => {
@@ -399,24 +435,12 @@ describe('checkEventStreamIntegrity', () => {
 	});
 
 	it('should pass when events.jsonl has valid JSONL content', async () => {
-		mockExistsSync.mockImplementation((path: any) => {
-			if (typeof path !== 'string') return false;
-			return (
-				path === '/test/dir' ||
-				path === '/test/dir/' ||
-				path.endsWith('/test/dir') ||
-				path.endsWith('\\test\\dir') ||
-				path.endsWith('.swarm/events.jsonl') ||
-				path.endsWith('.swarm\\events.jsonl')
-			);
-		});
-		mockReadFileSync.mockReturnValue(
-			'{"type": "task-started", "taskId": "1.1"}\n' +
-				'{"type": "task-completed", "taskId": "1.1"}\n' +
-				'{"type": "phase-started", "phase": 1}',
-		);
+		const dir = newProjectDir('diagnose-events-valid-');
+		appendCoreEventSync(dir, { type: 'task-started', taskId: '1.1' });
+		appendCoreEventSync(dir, { type: 'task-completed', taskId: '1.1' });
+		appendCoreEventSync(dir, { type: 'phase-started', phase: 1 });
 
-		const result = await getDiagnoseData('/test/dir');
+		const result = await getDiagnoseData(dir);
 		const check = findCheck(result.checks, 'Event Stream');
 
 		expect(check).toBeDefined();
@@ -425,47 +449,48 @@ describe('checkEventStreamIntegrity', () => {
 	});
 
 	it('should pass when events.jsonl is empty', async () => {
-		mockExistsSync.mockImplementation((path: any) => {
-			if (typeof path !== 'string') return false;
-			return (
-				path === '/test/dir' ||
-				path === '/test/dir/' ||
-				path.endsWith('/test/dir') ||
-				path.endsWith('\\test\\dir') ||
-				path.endsWith('.swarm/events.jsonl') ||
-				path.endsWith('.swarm\\events.jsonl')
-			);
-		});
-		mockReadFileSync.mockReturnValue('');
+		// #2039: a 0-byte events file is coverage 'empty' for the bounded
+		// store — indistinguishable from absent — so the check now reports
+		// 'No events.jsonl present' instead of 'valid — 0 event(s)'.
+		const dir = newProjectDir('diagnose-events-empty-');
+		coreEventsInternals.writeFileSync(join(dir, '.swarm', 'events.jsonl'), '');
 
-		const result = await getDiagnoseData('/test/dir');
+		const result = await getDiagnoseData(dir);
 		const check = findCheck(result.checks, 'Event Stream');
 
 		expect(check).toBeDefined();
 		expect(check.status).toBe('✅');
-		expect(check.detail).toContain('events.jsonl is valid — 0 event(s)');
+		expect(check.detail).toBe('No events.jsonl present');
+
+		// A manifest-only store (all events folded away) reports an empty
+		// retained window — the modern equivalent of "0 events".
+		const manifestOnly = newProjectDir('diagnose-events-manifest-only-');
+		coreEventsInternals.writeFileSync(
+			join(manifestOnly, '.swarm', 'events.jsonl'),
+			'{"v":1,"type":"swarm-events-manifest","schemaVersion":1,"folded":{"totalEvents":0,"byType":{},"corrupt":0,"dropped":0,"oldestTimestamp":null,"newestTimestamp":null},"updatedAt":"2026-08-25T00:00:00.000Z"}\n',
+		);
+
+		const manifestResult = await getDiagnoseData(manifestOnly);
+		const manifestCheck = findCheck(manifestResult.checks, 'Event Stream');
+
+		expect(manifestCheck).toBeDefined();
+		expect(manifestCheck.status).toBe('✅');
+		expect(manifestCheck.detail).toContain(
+			'events.jsonl is valid — 0 event(s)',
+		);
 	});
 
 	it('should fail when events.jsonl has malformed JSON lines', async () => {
-		mockExistsSync.mockImplementation((path: any) => {
-			if (typeof path !== 'string') return false;
-			return (
-				path === '/test/dir' ||
-				path === '/test/dir/' ||
-				path.endsWith('/test/dir') ||
-				path.endsWith('\\test\\dir') ||
-				path.endsWith('.swarm/events.jsonl') ||
-				path.endsWith('.swarm\\events.jsonl')
-			);
-		});
-		mockReadFileSync.mockReturnValue(
-			'{"type": "task-started", "taskId": "1.1"}\n' +
-				'{invalid json line}\n' +
+		const dir = newProjectDir('diagnose-events-malformed-');
+		appendCoreEventSync(dir, { type: 'task-started', taskId: '1.1' });
+		coreEventsInternals.appendFileSync(
+			join(dir, '.swarm', 'events.jsonl'),
+			'{invalid json line}\n' +
 				'{"type": "task-completed", "taskId": "1.1"}\n' +
-				'{"broken": "json}',
+				'{"broken": "json}\n',
 		);
 
-		const result = await getDiagnoseData('/test/dir');
+		const result = await getDiagnoseData(dir);
 		const check = findCheck(result.checks, 'Event Stream');
 
 		expect(check).toBeDefined();
@@ -475,24 +500,15 @@ describe('checkEventStreamIntegrity', () => {
 	});
 
 	it('should handle events.jsonl with trailing newlines and blank lines', async () => {
-		mockExistsSync.mockImplementation((path: any) => {
-			if (typeof path !== 'string') return false;
-			return (
-				path === '/test/dir' ||
-				path === '/test/dir/' ||
-				path.endsWith('/test/dir') ||
-				path.endsWith('\\test\\dir') ||
-				path.endsWith('.swarm/events.jsonl') ||
-				path.endsWith('.swarm\\events.jsonl')
-			);
-		});
-		mockReadFileSync.mockReturnValue(
+		const dir = newProjectDir('diagnose-events-blank-');
+		coreEventsInternals.writeFileSync(
+			join(dir, '.swarm', 'events.jsonl'),
 			'{"type": "task-started", "taskId": "1.1"}\n\n' +
 				'\n' +
 				'{"type": "task-completed", "taskId": "1.1"}\n\n',
 		);
 
-		const result = await getDiagnoseData('/test/dir');
+		const result = await getDiagnoseData(dir);
 		const check = findCheck(result.checks, 'Event Stream');
 
 		expect(check).toBeDefined();
@@ -524,23 +540,11 @@ describe('checkSteeringDirectives', () => {
 	});
 
 	it('should pass when no steering directives have been issued', async () => {
-		mockExistsSync.mockImplementation((path: any) => {
-			if (typeof path !== 'string') return false;
-			return (
-				path === '/test/dir' ||
-				path === '/test/dir/' ||
-				path.endsWith('/test/dir') ||
-				path.endsWith('\\test\\dir') ||
-				path.endsWith('.swarm/events.jsonl') ||
-				path.endsWith('.swarm\\events.jsonl')
-			);
-		});
-		mockReadFileSync.mockReturnValue(
-			'{"type": "task-started", "taskId": "1.1"}\n' +
-				'{"type": "task-completed", "taskId": "1.1"}',
-		);
+		const dir = newProjectDir('diagnose-steering-none-');
+		appendCoreEventSync(dir, { type: 'task-started', taskId: '1.1' });
+		appendCoreEventSync(dir, { type: 'task-completed', taskId: '1.1' });
 
-		const result = await getDiagnoseData('/test/dir');
+		const result = await getDiagnoseData(dir);
 		const check = findCheck(result.checks, 'Steering Directives');
 
 		expect(check).toBeDefined();
@@ -551,25 +555,25 @@ describe('checkSteeringDirectives', () => {
 	});
 
 	it('should pass when all steering directives have been consumed', async () => {
-		mockExistsSync.mockImplementation((path: any) => {
-			if (typeof path !== 'string') return false;
-			return (
-				path === '/test/dir' ||
-				path === '/test/dir/' ||
-				path.endsWith('/test/dir') ||
-				path.endsWith('\\test\\dir') ||
-				path.endsWith('.swarm/events.jsonl') ||
-				path.endsWith('.swarm\\events.jsonl')
-			);
+		const dir = newProjectDir('diagnose-steering-consumed-');
+		appendCoreEventSync(dir, {
+			type: 'steering-directive',
+			directiveId: 'dir-001',
 		});
-		mockReadFileSync.mockReturnValue(
-			'{"type": "steering-directive", "directiveId": "dir-001"}\n' +
-				'{"type": "steering-consumed", "directiveId": "dir-001"}\n' +
-				'{"type": "steering-directive", "directiveId": "dir-002"}\n' +
-				'{"type": "steering-consumed", "directiveId": "dir-002"}',
-		);
+		appendCoreEventSync(dir, {
+			type: 'steering-consumed',
+			directiveId: 'dir-001',
+		});
+		appendCoreEventSync(dir, {
+			type: 'steering-directive',
+			directiveId: 'dir-002',
+		});
+		appendCoreEventSync(dir, {
+			type: 'steering-consumed',
+			directiveId: 'dir-002',
+		});
 
-		const result = await getDiagnoseData('/test/dir');
+		const result = await getDiagnoseData(dir);
 		const check = findCheck(result.checks, 'Steering Directives');
 
 		expect(check).toBeDefined();
@@ -580,25 +584,25 @@ describe('checkSteeringDirectives', () => {
 	});
 
 	it('should fail when some steering directives are not consumed', async () => {
-		mockExistsSync.mockImplementation((path: any) => {
-			if (typeof path !== 'string') return false;
-			return (
-				path === '/test/dir' ||
-				path === '/test/dir/' ||
-				path.endsWith('/test/dir') ||
-				path.endsWith('\\test\\dir') ||
-				path.endsWith('.swarm/events.jsonl') ||
-				path.endsWith('.swarm\\events.jsonl')
-			);
+		const dir = newProjectDir('diagnose-steering-unconsumed-');
+		appendCoreEventSync(dir, {
+			type: 'steering-directive',
+			directiveId: 'dir-001',
 		});
-		mockReadFileSync.mockReturnValue(
-			'{"type": "steering-directive", "directiveId": "dir-001"}\n' +
-				'{"type": "steering-directive", "directiveId": "dir-002"}\n' +
-				'{"type": "steering-consumed", "directiveId": "dir-001"}\n' +
-				'{"type": "steering-directive", "directiveId": "dir-003"}',
-		);
+		appendCoreEventSync(dir, {
+			type: 'steering-directive',
+			directiveId: 'dir-002',
+		});
+		appendCoreEventSync(dir, {
+			type: 'steering-consumed',
+			directiveId: 'dir-001',
+		});
+		appendCoreEventSync(dir, {
+			type: 'steering-directive',
+			directiveId: 'dir-003',
+		});
 
-		const result = await getDiagnoseData('/test/dir');
+		const result = await getDiagnoseData(dir);
 		const check = findCheck(result.checks, 'Steering Directives');
 
 		expect(check).toBeDefined();
@@ -609,24 +613,18 @@ describe('checkSteeringDirectives', () => {
 	});
 
 	it('should pass when events.jsonl has malformed lines (graceful handling)', async () => {
-		mockExistsSync.mockImplementation((path: any) => {
-			if (typeof path !== 'string') return false;
-			return (
-				path === '/test/dir' ||
-				path === '/test/dir/' ||
-				path.endsWith('/test/dir') ||
-				path.endsWith('\\test\\dir') ||
-				path.endsWith('.swarm/events.jsonl') ||
-				path.endsWith('.swarm\\events.jsonl')
-			);
+		const dir = newProjectDir('diagnose-steering-malformed-');
+		appendCoreEventSync(dir, {
+			type: 'steering-directive',
+			directiveId: 'dir-001',
 		});
-		mockReadFileSync.mockReturnValue(
-			'{"type": "steering-directive", "directiveId": "dir-001"}\n' +
-				'invalid json line\n' +
-				'{"type": "steering-consumed", "directiveId": "dir-001"}',
+		coreEventsInternals.appendFileSync(
+			join(dir, '.swarm', 'events.jsonl'),
+			'invalid json line\n' +
+				'{"type": "steering-consumed", "directiveId": "dir-001"}\n',
 		);
 
-		const result = await getDiagnoseData('/test/dir');
+		const result = await getDiagnoseData(dir);
 		const check = findCheck(result.checks, 'Steering Directives');
 
 		expect(check).toBeDefined();
@@ -637,49 +635,43 @@ describe('checkSteeringDirectives', () => {
 	});
 
 	it('should handle empty events.jsonl', async () => {
-		mockExistsSync.mockImplementation((path: any) => {
-			if (typeof path !== 'string') return false;
-			return (
-				path === '/test/dir' ||
-				path === '/test/dir/' ||
-				path.endsWith('/test/dir') ||
-				path.endsWith('\\test\\dir') ||
-				path.endsWith('.swarm/events.jsonl') ||
-				path.endsWith('.swarm\\events.jsonl')
-			);
-		});
-		mockReadFileSync.mockReturnValue('');
+		// #2039: a 0-byte events file is coverage 'empty' for the bounded
+		// store — indistinguishable from absent — so the check takes the
+		// 'No events.jsonl' gate instead of scanning an empty window. Still
+		// a ✅ pass (no stale directives).
+		const dir = newProjectDir('diagnose-steering-empty-');
+		coreEventsInternals.writeFileSync(join(dir, '.swarm', 'events.jsonl'), '');
 
-		const result = await getDiagnoseData('/test/dir');
+		const result = await getDiagnoseData(dir);
 		const check = findCheck(result.checks, 'Steering Directives');
 
 		expect(check).toBeDefined();
 		expect(check.status).toBe('✅');
 		expect(check.detail).toBe(
-			'All steering directives acknowledged (or none issued)',
+			'No events.jsonl — no steering directives to check',
 		);
 	});
 
 	it('should fail when a directive is issued multiple times but not all consumed', async () => {
-		mockExistsSync.mockImplementation((path: any) => {
-			if (typeof path !== 'string') return false;
-			return (
-				path === '/test/dir' ||
-				path === '/test/dir/' ||
-				path.endsWith('/test/dir') ||
-				path.endsWith('\\test\\dir') ||
-				path.endsWith('.swarm/events.jsonl') ||
-				path.endsWith('.swarm\\events.jsonl')
-			);
+		const dir = newProjectDir('diagnose-steering-repeat-');
+		appendCoreEventSync(dir, {
+			type: 'steering-directive',
+			directiveId: 'dir-001',
 		});
-		mockReadFileSync.mockReturnValue(
-			'{"type": "steering-directive", "directiveId": "dir-001"}\n' +
-				'{"type": "steering-directive", "directiveId": "dir-001"}\n' +
-				'{"type": "steering-consumed", "directiveId": "dir-001"}\n' +
-				'{"type": "steering-directive", "directiveId": "dir-002"}',
-		);
+		appendCoreEventSync(dir, {
+			type: 'steering-directive',
+			directiveId: 'dir-001',
+		});
+		appendCoreEventSync(dir, {
+			type: 'steering-consumed',
+			directiveId: 'dir-001',
+		});
+		appendCoreEventSync(dir, {
+			type: 'steering-directive',
+			directiveId: 'dir-002',
+		});
 
-		const result = await getDiagnoseData('/test/dir');
+		const result = await getDiagnoseData(dir);
 		const check = findCheck(result.checks, 'Steering Directives');
 
 		expect(check).toBeDefined();
