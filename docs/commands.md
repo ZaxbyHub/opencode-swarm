@@ -48,6 +48,15 @@ Tasks: 3/5 complete
 Agents: 11 registered
 ```
 
+When `hooks.background_subagents` is enabled (default `false`), status additionally renders a
+**Background Work** section: delegation counts by status (pending, running,
+completed-unconsumed, consumed, stale, cancelled, error, ingestion_error), active coder
+reservations with their generation and lease state (active / expired / protected-legacy), the
+durable maintenance summary (last ok, last failure, last lock contention), and a
+`Source: validated recovery (bounded scan)` provenance label. Corrupt or over-bound stores
+render a `⚠ State uncertain: …` line instead of partially-trusted counts. Disabled
+configurations see no section and schedule no maintenance.
+
 ### `/swarm learning [--json] [--phase N] [--timeout-ms N]`
 
 Show aggregate learning metrics computed from `.swarm/knowledge-events.jsonl` and the knowledge store:

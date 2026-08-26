@@ -235,7 +235,9 @@ describe('resolveCommand()', () => {
 		test('resolves single-token command "status"', () => {
 			const result = resolveCommand(['status']);
 			expect(result).not.toBeNull();
-			expect(result!.entry.description).toBe('Show current swarm state');
+			expect(result!.entry.description).toBe(
+				'Show current swarm state (plus background-work health when hooks.background_subagents is enabled)',
+			);
 			expect(result!.remainingArgs).toEqual([]);
 		});
 

@@ -188,7 +188,9 @@ describe('CommandEntry type', () => {
 		it('resolveCommand should find known commands', () => {
 			const result = resolveCommand(['status']);
 			expect(result).not.toBeNull();
-			expect(result!.entry.description).toBe('Show current swarm state');
+			expect(result!.entry.description).toBe(
+				'Show current swarm state (plus background-work health when hooks.background_subagents is enabled)',
+			);
 		});
 
 		it('resolveCommand should find compound commands', () => {
