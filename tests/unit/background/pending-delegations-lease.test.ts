@@ -71,6 +71,7 @@ describe('coder reservation leases (issue #2104)', () => {
 
 	afterEach(() => {
 		restoreClock();
+		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
 	it('reserve creates the lease with generation and documented defaults', async () => {

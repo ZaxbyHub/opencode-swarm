@@ -101,6 +101,7 @@ describe('maintainBackgroundDelegations (issue #2104)', () => {
 
 	afterEach(() => {
 		restoreClock();
+		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
 	it('returns ok on an empty store and records the run in the health artifact', async () => {
@@ -207,6 +208,7 @@ describe('maintainBackgroundDelegations (issue #2104)', () => {
 		expect(result.released).toEqual([]);
 		expect(result.renewed).toEqual([{ reservationId, generation: 1 }]);
 		const scan = scanBackgroundCoderReservationsForAdmission(dir);
+		expect(scan.status).toBe('ok');
 		if (scan.status === 'ok') {
 			expect(scan.reservations[0]?.leaseExpiresAt).toBeGreaterThan(
 				maintenanceNow,

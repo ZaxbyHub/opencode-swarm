@@ -1172,6 +1172,23 @@ function renderBackgroundWorkLines(
 				`  - ⚠ Last maintenance lock contention: ${new Date(maintenance.lastContentionAt).toISOString()}`,
 			);
 		}
+		// The bounded facts ring is the durable record of every release,
+		// retained ambiguity, renewal, and failure — render it so operators
+		// can see WHY a reservation disappeared or stayed (issue #2104's
+		// durable rejection/uncertainty reasons). Bounded by the ring (≤20).
+		if (maintenance.facts.length > 0) {
+			lines.push(`  - Recent maintenance facts (${maintenance.facts.length}):`);
+			for (const fact of maintenance.facts.slice(-5).reverse()) {
+				const target = fact.reservationId
+					? ` ${fact.reservationId.slice(0, 12)}…`
+					: fact.correlationId
+						? ` ${fact.correlationId.slice(0, 12)}…`
+						: '';
+				lines.push(
+					`    - ${new Date(fact.at).toISOString()} ${fact.kind}${target} — ${fact.reason}`,
+				);
+			}
+		}
 	}
 	return lines;
 }

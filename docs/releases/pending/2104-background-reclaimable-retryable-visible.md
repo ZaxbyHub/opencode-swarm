@@ -29,17 +29,32 @@ a newer reservation. Legacy reservations without a lease are never released by a
 
 ### Event-driven bounded maintenance
 
-A new shared `maintainBackgroundDelegations` service runs at five production points: before
-background coder admission (1 s lock bound, skipped on contention — inline proven-terminal
-reconciliation still guards admission), after a trusted terminal claim or ingestion rejection,
-on terminal session events, from the opt-in status path, and as a deferred post-init task
-(time-bounded 10 s, registered only when `hooks.background_subagents` is enabled). Each
-invocation is batch-bounded, serialized under the existing store locks (taken sequentially,
-never nested), and emits a durable operator fact for every release, retained ambiguity,
-renewal, contention, and failure into the health artifact's bounded maintenance ring (latest
-20). Reclaim requires corroborated owner evidence — a durably stale exact owner record, or no
-owner record anywhere beyond the stale window — never wall-clock age alone; uncertain owner
-evidence retains everything fail-closed.
+A new shared `maintainBackgroundDelegations` service runs at six call sites covering five event
+triggers: before background coder admission (P1, 1 s lock-acquire bound, skipped on contention —
+inline proven-terminal reconciliation still guards admission), after a trusted terminal claim
+(P2) and after a durably recorded ingestion rejection (P2b), on terminal session events (P3,
+2 s), from the opt-in status path (P4, 2 s), and as a deferred post-init task (P5, wrapped in a
+10 s withTimeout, registered only when `hooks.background_subagents` is enabled). Each invocation
+bounds the reservation-reconciliation loop to a record batch (default 256); the underlying
+reads are themselves size-capped by the existing checkpoint machinery and the 4 MiB recovery
+window, and the lock bounds cap the lock *acquire* wait (total hold time is additionally
+bounded by those read caps). Changes serialize under the existing store locks (taken
+sequentially, never nested), and every release, retained ambiguity, renewal, contention, and
+failure emits a durable operator fact into the health artifact's bounded maintenance ring
+(latest 20; the latest facts are also rendered by the opt-in status section). Reclaim requires
+corroborated owner evidence — a durably stale exact owner record, or no owner record anywhere
+beyond the stale window — never wall-clock age alone; uncertain owner evidence retains
+everything fail-closed.
+
+### Rollback / downgrade note (opt-in users)
+
+Reservation records written by this version carry two new fields (`generation`,
+`leaseExpiresAt`). A pre-#2104 plugin version reading such a store rejects the unknown keys
+under its strict schema, so background coder admission fails closed
+(`BACKGROUND_CODER_RESERVATION_UNCERTAIN`) until the store is cleared. If you downgrade while
+`hooks.background_subagents` was enabled, delete `.swarm/background-coder-reservations.json` —
+reservations are transient admission state, and live slots remain correctly bounded by the
+durable delegation-owner scan, so deleting the file cannot over-admit a live task.
 
 ### Opt-in `/swarm status` background-work section
 

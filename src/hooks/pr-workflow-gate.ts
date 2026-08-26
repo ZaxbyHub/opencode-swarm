@@ -4149,7 +4149,7 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
  * Delegation statuses that prove a lane will produce nothing further.
  *
  * Enumerated here rather than reusing `isTerminal`
- * (`src/background/pending-delegations.ts:1829`) because that helper is private
+ * (`src/background/pending-delegations.ts:3555`) because that helper is private
  * to its module and because the two sets deliberately differ: `consumed` is a
  * *successfully ingested* terminal state, so treating it as a failure would let
  * a healthy lane be consolidated over. `pending` / `running` / `ingesting` /

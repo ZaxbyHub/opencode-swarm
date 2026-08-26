@@ -1374,10 +1374,23 @@ async function initializeOpenCodeSwarm(
 	> | null = null;
 	const maintainBackgroundDelegationsOnSessionEvent =
 		async (): Promise<void> => {
-			pendingDelegationsModulePromise ??= import(
-				'./background/pending-delegations.js'
-			);
-			const module = await pendingDelegationsModulePromise;
+			// A rejected import must not poison the memo: reset the promise so
+			// the next session-close event retries instead of skipping
+			// maintenance for the rest of the process lifetime. The local
+			// binding is required — after a rejection resets the memo, a fresh
+			// call may have replaced it while this call still awaits (and
+			// surfaces) the original rejection.
+			let modulePromise = pendingDelegationsModulePromise;
+			if (modulePromise === null) {
+				modulePromise = import('./background/pending-delegations.js').catch(
+					(err: unknown) => {
+						pendingDelegationsModulePromise = null;
+						throw err;
+					},
+				);
+				pendingDelegationsModulePromise = modulePromise;
+			}
+			const module = await modulePromise;
 			await module.maintainBackgroundDelegations(ctx.directory, {
 				lockTimeoutMs: 2_000,
 				reason: 'session-close',

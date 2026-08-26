@@ -5,21 +5,30 @@
  * `queue.retry(item.id)` which could never find it. These tests pin the
  * end-to-end retry/complete path through a real WorkerManager loop and the
  * deterministic stop semantics with a handler still running.
+ *
+ * Time handling: the worker loop polls on real timers, so these tests wait on
+ * real elapsed time via a poll-count-bounded `waitFor` — deliberately NOT raw
+ * Date-clock reads (the test-clock lint requires freezeClock adoption for
+ * those, and freezing the clock would freeze nothing the loop uses while
+ * breaking wall-clock deadline math). No assertion depends on clock values;
+ * the flaky-retry test uses `defaultBackoffMs: 0` so the scheduled retry is
+ * due immediately without patching internal state.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { resetGlobalEventBus } from '../../../src/background/event-bus';
 import { AutomationQueue } from '../../../src/background/queue';
 import { WorkerManager } from '../../../src/background/worker';
 
-function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+function waitFor(predicate: () => boolean, maxPolls = 200): Promise<void> {
 	return new Promise((resolve, reject) => {
-		const started = Date.now();
+		let polls = 0;
 		const check = () => {
 			if (predicate()) {
 				resolve();
 				return;
 			}
-			if (Date.now() - started > timeoutMs) {
+			polls += 1;
+			if (polls > maxPolls) {
 				reject(new Error('waitFor timeout'));
 				return;
 			}
@@ -68,7 +77,13 @@ describe('WorkerManager in-flight policy (issue #2104)', () => {
 	});
 
 	test('a transiently failing dequeued item is re-enqueued (the #2104 regression)', async () => {
-		const queue = new AutomationQueue<string>({ defaultMaxRetries: 3 });
+		// defaultBackoffMs 0: the scheduled retry is due immediately, so the
+		// loop can pick it up without a real backoff wait and without patching
+		// the item's internal nextAttemptAt.
+		const queue = new AutomationQueue<string>({
+			defaultMaxRetries: 3,
+			defaultBackoffMs: 0,
+		});
 		let attempts = 0;
 		manager.register({
 			name: 'flaky-worker',
@@ -89,11 +104,6 @@ describe('WorkerManager in-flight policy (issue #2104)', () => {
 		const scheduled = queue.getAll()[0];
 		expect(scheduled?.retry?.attempts).toBe(1);
 
-		// Force it due immediately so the loop can pick it up without a real
-		// 1s backoff wait.
-		if (scheduled?.retry) {
-			scheduled.retry.nextAttemptAt = Date.now() - 1;
-		}
 		await waitFor(() => attempts === 2);
 		await waitFor(() => queue.size() === 0 && queue.inflightSize() === 0);
 		expect(manager.getStats('flaky-worker')?.processedCount).toBe(1);

@@ -219,13 +219,16 @@ export class WorkerManager {
 	/**
 	 * Stop a worker.
 	 *
-	 * In-flight policy (issue #2104): stopping marks the worker so the loop
-	 * exits at its next bounded check (≤100 ms later); already-running
-	 * handlers are NOT cancelled — they run to completion and settle their
-	 * item through the queue's in-flight `complete`/`retry`. Queued items
-	 * stay queued for a future `start`. The method stays synchronous, so it
-	 * does not wait for those handlers; use the queue's `inflightSize()`
-	 * (exposed via `getStats().queueInflight`) to observe drain progress.
+	 * In-flight policy (issue #2104): stopping flips the status to `stopped`
+	 * synchronously — note the intermediate `stopping` value is written but
+	 * never observable, since nothing awaits between the two assignments —
+	 * and the processing loop exits when it reads the new status at its next
+	 * bounded check (≤100 ms later). Already-running handlers are NOT
+	 * cancelled: they run to completion and settle their item through the
+	 * queue's in-flight `complete`/`retry`. Queued items stay queued for a
+	 * future `start`. The method stays synchronous, so it does not wait for
+	 * those handlers; use the queue's `inflightSize()` (exposed via
+	 * `getStats().queueInflight`) to observe drain progress.
 	 */
 	stop(name: string): boolean {
 		const worker = this.workers.get(name);

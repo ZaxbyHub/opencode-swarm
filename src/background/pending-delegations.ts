@@ -444,10 +444,14 @@ export interface BackgroundCoderReservation {
 	correlationId: string | null;
 	/**
 	 * Launch generation this reservation currently owns (issue #2104). New in
-	 * this schema revision: absent on legacy records and read as 1. The value
-	 * is seeded at reserve time and coupled to the delegation record's launch
-	 * generation at bind; a terminal for an older generation can never renew
-	 * or release it.
+	 * this schema revision: absent on legacy records and read as 1. Bind
+	 * couples the reservation to the delegation record's launch generation and
+	 * may only move it forward. No current dispatch path advances a record
+	 * past generation 1 (PR #2091 hydrates replays at the stored generation),
+	 * so the generation fences in bind/release/maintenance are currently
+	 * forward-looking defense-in-depth: they exist so a future
+	 * generation-advancing relaunch caller cannot have its reservation
+	 * released or rebound by an older attempt's terminal.
 	 */
 	generation?: number;
 	/**
