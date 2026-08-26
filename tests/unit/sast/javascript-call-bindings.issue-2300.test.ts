@@ -11,6 +11,7 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const CONFIRMED_EXEC = 'sast/js-command-injection';
 const REVIEW_EXEC = 'sast/js-command-exec-review';
+const REPO_ROOT = path.resolve(import.meta.dir, '../../..');
 
 function jsFindings(source: string) {
 	return executeRulesSync('fixture.ts', source, 'typescript');
@@ -92,6 +93,21 @@ describe('issue #2300 JavaScript callee binding classification', () => {
 				expectOnly(source, REVIEW_EXEC, CONFIRMED_EXEC);
 		});
 
+		test('regression: unrelated same-name declarations do not hide top-level exec bindings (F-001)', () => {
+			// Previous code compared the visible declaration count to a file-wide total,
+			// so a disjoint helper-scope `exec`/`cp` shadow downgraded the real sink.
+			const cases = [
+				"import { exec } from 'child_process'; exec(input); function otherHelper() { function exec(cb) { cb(); } exec(() => {}); }",
+				"const cp = require('child_process'); cp.exec(input); function otherHelper() { const cp = copy; cp.run(); }",
+			];
+			for (const source of cases) {
+				const findings = findingsFor(source, CONFIRMED_EXEC, REVIEW_EXEC);
+				expect(
+					findings.some((finding) => finding.rule_id === CONFIRMED_EXEC),
+				).toBe(true);
+			}
+		});
+
 		test('does not extend trusted bindings outside lexical scope', () => {
 			for (const source of [
 				"{ const { exec } = require('child_process'); } exec(input);",
@@ -146,6 +162,39 @@ describe('issue #2300 JavaScript callee binding classification', () => {
 			expect(findings.map((finding) => finding.rule_id)).toEqual([
 				CONFIRMED_EXEC,
 			]);
+		});
+
+		test('regression: chained argument references are not treated as callees (F-002)', () => {
+			// Previous parsing skipped any trailing `)` after the identifier, so
+			// `foo(a, exec)(input)` and `foo(a, eval)(input)` were misread as direct
+			// sink calls from the identifier argument itself.
+			expect(
+				findingsFor(
+					"import { exec } from 'child_process'; foo(a, exec)(input);",
+					CONFIRMED_EXEC,
+					REVIEW_EXEC,
+				),
+			).toEqual([]);
+			expect(
+				findingsFor(
+					'foo(a, eval)(input);',
+					'sast/js-eval',
+					'sast/js-eval-review',
+				),
+			).toEqual([]);
+			expectOnly(
+				"import { exec } from 'child_process'; promisify(exec)(input);",
+				CONFIRMED_EXEC,
+				REVIEW_EXEC,
+			);
+		});
+
+		test('related regression: var-backed child_process bindings hoist to function scope', () => {
+			expectOnly(
+				"function run(input) { if (flag) { var cp = require('child_process'); } cp.exec(input); }",
+				CONFIRMED_EXEC,
+				REVIEW_EXEC,
+			);
 		});
 	});
 
@@ -291,15 +340,19 @@ describe('issue #2300 JavaScript callee binding classification', () => {
 		expect(getRuleStats().bySeverity.low).toBeGreaterThanOrEqual(6);
 	});
 
-	test('removes all reported command-injection false positives', () => {
+	test('removes all reported command-injection false positives (F-006)', () => {
+		// Previous code asserted only the critical rule and could miss its paired
+		// low-severity review finding at the same location.
 		for (const file of [
 			'scripts/check-skill-assertions.ts',
 			'scripts/drift-check.ts',
 		]) {
-			const content = fs.readFileSync(file, 'utf8');
+			const content = fs.readFileSync(path.join(REPO_ROOT, file), 'utf8');
 			expect(
 				executeRulesSync(file, content, 'typescript').filter(
-					(finding) => finding.rule_id === CONFIRMED_EXEC,
+					(finding) =>
+						finding.rule_id === CONFIRMED_EXEC ||
+						finding.rule_id === REVIEW_EXEC,
 				),
 			).toEqual([]);
 		}
@@ -363,16 +416,17 @@ describe('issue #2300 JavaScript callee binding classification', () => {
 		});
 	});
 
-	test('keeps direct analysis bounded for near-limit high-match input', () => {
+	test('regression: near-limit single-line input stays analyzable (F-003)', () => {
 		const calls = Array.from(
-			{ length: 2_000 },
-			() => 'runner.exec(input);',
-		).join('\n');
-		const source = `${' '.repeat(460_000)}\n${calls}`;
+			{ length: 18_000 },
+			(_, index) => `const a${index}=${index};`,
+		).join('');
+		const source = "import{exec}from'child_process';" + calls + 'exec(input);';
+		const started = performance.now();
 		const findings = findingsFor(source, CONFIRMED_EXEC, REVIEW_EXEC);
-		expect(findings).toHaveLength(2_000);
-		expect(findings.every((finding) => finding.rule_id === REVIEW_EXEC)).toBe(
-			true,
-		);
+		expect(performance.now() - started).toBeLessThan(1000);
+		expect(findings.map((finding) => finding.rule_id)).toEqual([
+			CONFIRMED_EXEC,
+		]);
 	});
 });

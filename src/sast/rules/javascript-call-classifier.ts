@@ -40,12 +40,19 @@ interface Analysis {
 	lineStarts: number[];
 	scopeAtToken: number[];
 	scopeParents: number[];
+	scopeIsFunction: boolean[];
 	declarations: Map<string, number>;
 	declarationScopes: Map<string, Map<number, number>>;
 	facts: Map<string, Set<BindingFact>>;
+	factScopes: Map<string, Map<number, Set<BindingFact>>>;
 	reassigned: Set<string>;
+	reassignedScopes: Map<string, Set<number>>;
 	mutatedMembers: Set<string>;
+	mutatedMemberScopes: Map<string, Set<number>>;
 	requireDerived: Set<string>;
+	requireDerivedScopes: Map<string, Set<number>>;
+	parameterScopes: Map<number, number>;
+	varDeclarationIndexes: Set<number>;
 	oversizedOrMalformed: boolean;
 }
 
@@ -59,6 +66,11 @@ interface Callee {
 const MAX_ANALYSIS_BYTES = 512 * 1024;
 const CHILD_PROCESS_MODULES = new Set(['child_process', 'node:child_process']);
 const analysisByContext = new WeakMap<SastContext, Analysis>();
+const dispositionByContext = new WeakMap<
+	SastContext,
+	Map<string, JavascriptCallDisposition>
+>();
+const tokenPairsByList = new WeakMap<Token[], Map<number, number>>();
 const ASSIGNMENTS = new Set([
 	'=',
 	'+=',
@@ -315,18 +327,113 @@ function addDeclaration(analysis: Analysis, name: string): void {
 	analysis.declarations.set(name, (analysis.declarations.get(name) ?? 0) + 1);
 }
 
-function addFact(analysis: Analysis, name: string, fact: BindingFact): void {
+function addFact(
+	analysis: Analysis,
+	name: string,
+	fact: BindingFact,
+	tokenIndex: number,
+): void {
 	const facts = analysis.facts.get(name) ?? new Set<BindingFact>();
 	facts.add(fact);
 	analysis.facts.set(name, facts);
+	const scope = declarationScope(analysis, tokenIndex);
+	const scopedFacts =
+		analysis.factScopes.get(name) ?? new Map<number, Set<BindingFact>>();
+	const factsAtScope = scopedFacts.get(scope) ?? new Set<BindingFact>();
+	factsAtScope.add(fact);
+	scopedFacts.set(scope, factsAtScope);
+	analysis.factScopes.set(name, scopedFacts);
+}
+
+function addScopedMarker(
+	store: Map<string, Set<number>>,
+	name: string,
+	scope: number,
+): void {
+	const scopes = store.get(name) ?? new Set<number>();
+	scopes.add(scope);
+	store.set(name, scopes);
+}
+
+function hasScopedMarker(
+	store: Map<string, Set<number>>,
+	name: string,
+	scope: number | null,
+): boolean {
+	return scope !== null && (store.get(name)?.has(scope) ?? false);
+}
+
+function visibleScopeAt(
+	analysis: Analysis,
+	name: string,
+	callIndex: number,
+): number {
+	return (
+		visibleDeclarationScope(analysis, name, callIndex) ??
+		analysis.scopeAtToken[callIndex] ??
+		0
+	);
+}
+
+function hasVisibleMarker(
+	analysis: Analysis,
+	store: Map<string, Set<number>>,
+	name: string,
+	callIndex: number,
+): boolean {
+	let scope = visibleScopeAt(analysis, name, callIndex);
+	while (scope >= 0) {
+		if (store.get(name)?.has(scope)) return true;
+		scope = analysis.scopeParents[scope] ?? -1;
+	}
+	return false;
+}
+
+function factsAtVisibleScope(
+	analysis: Analysis,
+	name: string,
+	callIndex: number,
+): Set<BindingFact> | undefined {
+	const scope = visibleDeclarationScope(analysis, name, callIndex);
+	return scope === null ? undefined : analysis.factScopes.get(name)?.get(scope);
+}
+
+function tokenPairs(tokens: Token[]): Map<number, number> {
+	const cached = tokenPairsByList.get(tokens);
+	if (cached) return cached;
+	const pairs = new Map<number, number>();
+	const stack: Array<{ value: string; index: number }> = [];
+	const matching: Record<string, string> = { ')': '(', ']': '[', '}': '{' };
+	for (let index = 0; index < tokens.length; index++) {
+		const value = tokens[index]?.value;
+		if (value === '(' || value === '[' || value === '{') {
+			stack.push({ value, index });
+			continue;
+		}
+		const open = matching[value ?? ''];
+		if (!open) continue;
+		const top = stack.at(-1);
+		if (!top || top.value !== open) continue;
+		stack.pop();
+		pairs.set(top.index, index);
+		pairs.set(index, top.index);
+	}
+	tokenPairsByList.set(tokens, pairs);
+	return pairs;
+}
+
+function pairedToken(tokens: Token[], index: number): number {
+	return tokenPairs(tokens).get(index) ?? -1;
 }
 
 function buildScopes(tokens: Token[]): {
 	scopeAtToken: number[];
 	scopeParents: number[];
+	scopeIsFunction: boolean[];
 } {
 	const scopeAtToken: number[] = [];
 	const scopeParents = [-1];
+	const scopeIsFunction = [true];
 	const stack = [0];
 	const braceCreatesScope: boolean[] = [];
 	for (let index = 0; index < tokens.length; index++) {
@@ -347,40 +454,39 @@ function buildScopes(tokens: Token[]): {
 			if (createsScope) {
 				const child = scopeParents.length;
 				scopeParents.push(stack.at(-1)!);
+				const previousValue = previous?.value;
+				let functionBody = previousValue === '=>';
+				if (previousValue === ')') {
+					const open = pairedToken(tokens, index - 1);
+					for (let cursor = open - 1; cursor >= 0; cursor--) {
+						const value = tokens[cursor]?.value;
+						if (value === 'function') {
+							functionBody = true;
+							break;
+						}
+						if (value === ';' || value === '{' || value === '}') break;
+					}
+				}
+				scopeIsFunction.push(functionBody);
 				stack.push(child);
 			}
 		} else if (tokens[index]?.value === '}') {
 			if (braceCreatesScope.pop() && stack.length > 1) stack.pop();
 		}
 	}
-	return { scopeAtToken, scopeParents };
+	return { scopeAtToken, scopeParents, scopeIsFunction };
 }
 
 function declarationScope(analysis: Analysis, tokenIndex: number): number {
-	// Parameters belong to the function/arrow body rather than the surrounding
-	// scope in which the signature is written.
-	let cursor = tokenIndex;
-	while (cursor >= 0 && analysis.tokens[cursor]?.value !== '(') cursor--;
-	if (cursor >= 0) {
-		const close = matchingToken(analysis.tokens, cursor, '(', ')');
-		if (close >= tokenIndex) {
-			const body = analysis.tokens.findIndex(
-				(token, index) => index > close && token.value === '{',
-			);
-			const arrowBeforeBody = analysis.tokens
-				.slice(close + 1, body > close ? body : close + 1)
-				.some((token) => token.value === '=>');
-			if (
-				body > close &&
-				(analysis.tokens
-					.slice(Math.max(0, cursor - 3), cursor)
-					.some((token) => token.value === 'function') ||
-					arrowBeforeBody)
-			) {
-				return analysis.scopeAtToken[body + 1] ?? analysis.scopeAtToken[body]!;
-			}
+	if (analysis.varDeclarationIndexes.has(tokenIndex)) {
+		let scope = analysis.scopeAtToken[tokenIndex] ?? 0;
+		while (scope > 0 && !analysis.scopeIsFunction[scope]) {
+			scope = analysis.scopeParents[scope] ?? 0;
 		}
+		return scope;
 	}
+	const parameterScope = analysis.parameterScopes.get(tokenIndex);
+	if (parameterScope !== undefined) return parameterScope;
 	return analysis.scopeAtToken[tokenIndex] ?? 0;
 }
 
@@ -405,12 +511,9 @@ function matchingToken(
 	open: string,
 	close: string,
 ): number {
-	let depth = 0;
-	for (let index = start; index < tokens.length; index++) {
-		if (tokens[index]?.value === open) depth++;
-		if (tokens[index]?.value === close && --depth === 0) return index;
-	}
-	return -1;
+	if (tokens[start]?.value !== open) return -1;
+	const match = pairedToken(tokens, start);
+	return tokens[match]?.value === close ? match : -1;
 }
 
 function moduleAtCall(
@@ -452,6 +555,24 @@ function declarationNames(
 		names.push({ name: tokens[start]!.value, index: start });
 	}
 	return names;
+}
+
+function nextFunctionOpen(tokens: Token[], start: number): number {
+	for (let index = start + 1; index < tokens.length; index++) {
+		const value = tokens[index]?.value;
+		if (value === '(') return index;
+		if (value === '{' || value === ';' || value === '=>') return -1;
+	}
+	return -1;
+}
+
+function nextFunctionBody(tokens: Token[], start: number): number {
+	for (let index = start; index < tokens.length; index++) {
+		const value = tokens[index]?.value;
+		if (value === '{') return index;
+		if (value === ';' || value === '=>') return -1;
+	}
+	return -1;
 }
 
 function collectDeclarations(analysis: Analysis): Set<number> {
@@ -504,6 +625,8 @@ function collectDeclarations(analysis: Analysis): Set<number> {
 			for (const item of declarationNames(tokens, start, close)) {
 				addDeclaration(analysis, item.name);
 				declarationTokenIndexes.add(item.index);
+				if (token.value === 'var')
+					analysis.varDeclarationIndexes.add(item.index);
 			}
 		}
 		if (
@@ -514,11 +637,14 @@ function collectDeclarations(analysis: Analysis): Set<number> {
 			declarationTokenIndexes.add(index + 1);
 		}
 		if (token.value === 'function') {
-			const open = tokens.findIndex(
-				(candidate, cursor) => cursor > index && candidate.value === '(',
-			);
+			const open = nextFunctionOpen(tokens, index);
 			if (open > index) {
 				const close = matchingToken(tokens, open, '(', ')');
+				const body = close >= 0 ? nextFunctionBody(tokens, close + 1) : -1;
+				const bodyScope =
+					body >= 0
+						? (analysis.scopeAtToken[body + 1] ?? analysis.scopeAtToken[body]!)
+						: undefined;
 				for (let cursor = open + 1; cursor < close; cursor++) {
 					if (
 						tokens[cursor]?.kind === 'identifier' &&
@@ -526,6 +652,8 @@ function collectDeclarations(analysis: Analysis): Set<number> {
 					) {
 						addDeclaration(analysis, tokens[cursor]!.value);
 						declarationTokenIndexes.add(cursor);
+						if (bodyScope !== undefined)
+							analysis.parameterScopes.set(cursor, bodyScope);
 						while (cursor < close && tokens[cursor]?.value !== ',') cursor++;
 					}
 				}
@@ -542,6 +670,12 @@ function collectDeclarations(analysis: Analysis): Set<number> {
 		if (token.kind === 'identifier' && tokens[index + 1]?.value === '=>') {
 			addDeclaration(analysis, token.value);
 			declarationTokenIndexes.add(index);
+			const body = nextFunctionBody(tokens, index + 2);
+			if (body >= 0)
+				analysis.parameterScopes.set(
+					index,
+					analysis.scopeAtToken[body + 1] ?? analysis.scopeAtToken[body]!,
+				);
 		}
 		if (token.value === '=>') {
 			let close = index - 1;
@@ -553,10 +687,17 @@ function collectDeclarations(analysis: Analysis): Set<number> {
 				else if (tokens[cursor]?.value === '(') depth--;
 				cursor--;
 			}
+			const body = nextFunctionBody(tokens, index + 1);
+			const bodyScope =
+				body >= 0
+					? (analysis.scopeAtToken[body + 1] ?? analysis.scopeAtToken[body]!)
+					: undefined;
 			for (cursor += 2; cursor < close; cursor++) {
 				if (tokens[cursor]?.kind === 'identifier') {
 					addDeclaration(analysis, tokens[cursor]!.value);
 					declarationTokenIndexes.add(cursor);
+					if (bodyScope !== undefined)
+						analysis.parameterScopes.set(cursor, bodyScope);
 					while (cursor < close && tokens[cursor]?.value !== ',') cursor++;
 				}
 			}
@@ -590,8 +731,19 @@ function collectFacts(analysis: Analysis): void {
 							CHILD_PROCESS_MODULES.has(module ?? '') &&
 							imported.value === 'exec'
 						) {
-							addFact(analysis, local.value, 'child-direct');
-						} else if (module) addFact(analysis, local.value, 'other-import');
+							addFact(
+								analysis,
+								local.value,
+								'child-direct',
+								tokens[cursor + 1]?.value === 'as' ? cursor + 2 : cursor,
+							);
+						} else if (module)
+							addFact(
+								analysis,
+								local.value,
+								'other-import',
+								tokens[cursor + 1]?.value === 'as' ? cursor + 2 : cursor,
+							);
 					}
 					while (cursor < close && tokens[cursor]?.value !== ',') cursor++;
 				}
@@ -609,8 +761,14 @@ function collectFacts(analysis: Analysis): void {
 						CHILD_PROCESS_MODULES.has(module)
 							? 'child-namespace'
 							: 'other-import',
+						index + 3,
 					);
 					analysis.requireDerived.add(local.value);
+					addScopedMarker(
+						analysis.requireDerivedScopes,
+						local.value,
+						declarationScope(analysis, index + 3),
+					);
 				}
 			} else if (
 				tokens[index + 1]?.kind === 'identifier' &&
@@ -625,6 +783,7 @@ function collectFacts(analysis: Analysis): void {
 						CHILD_PROCESS_MODULES.has(module)
 							? 'child-namespace'
 							: 'other-import',
+						index + 1,
 					);
 			} else if (
 				tokens[index + 1]?.kind === 'identifier' &&
@@ -638,6 +797,7 @@ function collectFacts(analysis: Analysis): void {
 					CHILD_PROCESS_MODULES.has(tokens[index + 3]!.value)
 						? 'child-namespace'
 						: 'other-import',
+					index + 1,
 				);
 			}
 		}
@@ -661,15 +821,48 @@ function collectFacts(analysis: Analysis): void {
 					tokens[cursor + 1]?.value === ':' ? tokens[cursor + 2] : imported;
 				if (local?.kind === 'identifier' && imported.value === 'exec') {
 					if (module && CHILD_PROCESS_MODULES.has(module)) {
-						addFact(analysis, local.value, 'child-direct');
+						addFact(
+							analysis,
+							local.value,
+							'child-direct',
+							tokens[cursor + 1]?.value === ':' ? cursor + 2 : cursor,
+						);
 						analysis.requireDerived.add(local.value);
+						addScopedMarker(
+							analysis.requireDerivedScopes,
+							local.value,
+							declarationScope(
+								analysis,
+								tokens[cursor + 1]?.value === ':' ? cursor + 2 : cursor,
+							),
+						);
 					} else if (
 						namespace &&
-						hasUniqueFact(analysis, namespace, 'child-namespace')
+						hasUniqueFact(analysis, namespace, rhs + 1, 'child-namespace')
 					) {
-						addFact(analysis, local.value, 'child-direct');
-						if (analysis.requireDerived.has(namespace))
+						addFact(
+							analysis,
+							local.value,
+							'child-direct',
+							tokens[cursor + 1]?.value === ':' ? cursor + 2 : cursor,
+						);
+						if (
+							hasScopedMarker(
+								analysis.requireDerivedScopes,
+								namespace,
+								visibleDeclarationScope(analysis, namespace, rhs + 1),
+							)
+						) {
 							analysis.requireDerived.add(local.value);
+							addScopedMarker(
+								analysis.requireDerivedScopes,
+								local.value,
+								declarationScope(
+									analysis,
+									tokens[cursor + 1]?.value === ':' ? cursor + 2 : cursor,
+								),
+							);
+						}
 					}
 				}
 				while (cursor < close && tokens[cursor]?.value !== ',') cursor++;
@@ -686,8 +879,14 @@ function collectFacts(analysis: Analysis): void {
 				analysis,
 				local.value,
 				CHILD_PROCESS_MODULES.has(module) ? 'child-namespace' : 'other-import',
+				start,
 			);
 			analysis.requireDerived.add(local.value);
+			addScopedMarker(
+				analysis.requireDerivedScopes,
+				local.value,
+				declarationScope(analysis, start),
+			);
 		} else if (
 			tokens[rhs]?.value === 'import' ||
 			(tokens[rhs]?.value === 'await' && tokens[rhs + 1]?.value === 'import')
@@ -701,22 +900,35 @@ function collectFacts(analysis: Analysis): void {
 					CHILD_PROCESS_MODULES.has(importedModule)
 						? 'child-namespace'
 						: 'other-import',
+					start,
 				);
 			}
 		} else if (
 			tokens[rhs]?.kind === 'regex' ||
 			(tokens[rhs]?.value === 'new' && tokens[rhs + 1]?.value === 'RegExp')
 		) {
-			addFact(analysis, local.value, 'regex');
+			addFact(analysis, local.value, 'regex', start);
 		} else if (
 			tokens[rhs]?.kind === 'identifier' &&
 			(tokens[rhs + 1]?.value === '.' || tokens[rhs + 1]?.value === '?.') &&
 			tokens[rhs + 2]?.value === 'exec' &&
-			hasUniqueFact(analysis, tokens[rhs]!.value, 'child-namespace')
+			hasUniqueFact(analysis, tokens[rhs]!.value, rhs, 'child-namespace')
 		) {
-			addFact(analysis, local.value, 'child-direct');
-			if (analysis.requireDerived.has(tokens[rhs]!.value))
+			addFact(analysis, local.value, 'child-direct', start);
+			if (
+				hasScopedMarker(
+					analysis.requireDerivedScopes,
+					tokens[rhs]!.value,
+					visibleDeclarationScope(analysis, tokens[rhs]!.value, rhs),
+				)
+			) {
 				analysis.requireDerived.add(local.value);
+				addScopedMarker(
+					analysis.requireDerivedScopes,
+					local.value,
+					declarationScope(analysis, start),
+				);
+			}
 		}
 	}
 }
@@ -724,12 +936,16 @@ function collectFacts(analysis: Analysis): void {
 function hasUniqueFact(
 	analysis: Analysis,
 	name: string,
+	callIndex: number,
 	fact: BindingFact,
 ): boolean {
-	const facts = analysis.facts.get(name);
+	const scope = visibleDeclarationScope(analysis, name, callIndex);
+	const facts =
+		scope === null ? undefined : analysis.factScopes.get(name)?.get(scope);
 	return (
-		analysis.declarations.get(name) === 1 &&
-		!analysis.reassigned.has(name) &&
+		scope !== null &&
+		analysis.declarationScopes.get(name)?.get(scope) === 1 &&
+		!hasScopedMarker(analysis.reassignedScopes, name, scope) &&
 		facts?.size === 1 &&
 		facts.has(fact)
 	);
@@ -746,12 +962,19 @@ function buildAnalysis(context: SastContext): Analysis {
 			lineStarts,
 			scopeAtToken: [],
 			scopeParents: [-1],
+			scopeIsFunction: [true],
 			declarations: new Map(),
 			declarationScopes: new Map(),
 			facts: new Map(),
+			factScopes: new Map(),
 			reassigned: new Set(),
+			reassignedScopes: new Map(),
 			mutatedMembers: new Set(),
+			mutatedMemberScopes: new Map(),
 			requireDerived: new Set(),
+			requireDerivedScopes: new Map(),
+			parameterScopes: new Map(),
+			varDeclarationIndexes: new Set(),
 			oversizedOrMalformed: true,
 		};
 	}
@@ -762,12 +985,19 @@ function buildAnalysis(context: SastContext): Analysis {
 		lineStarts,
 		scopeAtToken: scopes.scopeAtToken,
 		scopeParents: scopes.scopeParents,
+		scopeIsFunction: scopes.scopeIsFunction,
 		declarations: new Map(),
 		declarationScopes: new Map(),
 		facts: new Map(),
+		factScopes: new Map(),
 		reassigned: new Set(),
+		reassignedScopes: new Map(),
 		mutatedMembers: new Set(),
+		mutatedMemberScopes: new Map(),
 		requireDerived: new Set(),
+		requireDerivedScopes: new Map(),
+		parameterScopes: new Map(),
+		varDeclarationIndexes: new Set(),
 		oversizedOrMalformed: tokenized.malformed,
 	};
 	const declarationIndexes = collectDeclarations(analysis);
@@ -792,8 +1022,16 @@ function buildAnalysis(context: SastContext): Analysis {
 					analysis.tokens[index - 3]?.value === 'delete')
 			) {
 				const receiver = analysis.tokens[index - 2];
-				if (receiver?.kind === 'identifier')
+				if (receiver?.kind === 'identifier') {
 					analysis.mutatedMembers.add(receiver.value);
+					addScopedMarker(
+						analysis.mutatedMemberScopes,
+						receiver.value,
+						visibleDeclarationScope(analysis, receiver.value, index - 2) ??
+							analysis.scopeAtToken[index - 2] ??
+							0,
+					);
+				}
 			}
 			continue;
 		}
@@ -805,6 +1043,13 @@ function buildAnalysis(context: SastContext): Analysis {
 			analysis.tokens[index + 1]?.value === '--'
 		) {
 			analysis.reassigned.add(token.value);
+			addScopedMarker(
+				analysis.reassignedScopes,
+				token.value,
+				visibleDeclarationScope(analysis, token.value, index) ??
+					analysis.scopeAtToken[index] ??
+					0,
+			);
 		}
 	}
 	return analysis;
@@ -842,6 +1087,33 @@ function directRequireBefore(tokens: Token[], dotIndex: number): boolean {
 	return false;
 }
 
+function isTransparentWrapperCall(tokens: Token[], openIndex: number): boolean {
+	return tokens[openIndex - 1]?.kind === 'identifier'
+		? tokens[openIndex - 1]!.value === 'promisify'
+		: false;
+}
+
+function shouldSkipTrailingClose(
+	tokens: Token[],
+	nameIndex: number,
+	closeIndex: number,
+): boolean {
+	const openIndex = pairedToken(tokens, closeIndex);
+	if (openIndex < 0 || openIndex > nameIndex) return false;
+	const beforeOpen = tokens[openIndex - 1];
+	if (
+		!beforeOpen ||
+		(beforeOpen.kind !== 'identifier' &&
+			beforeOpen.kind !== 'string' &&
+			beforeOpen.kind !== 'regex' &&
+			beforeOpen.value !== ')' &&
+			beforeOpen.value !== ']')
+	) {
+		return true;
+	}
+	return isTransparentWrapperCall(tokens, openIndex);
+}
+
 function parseCallee(tokens: Token[], nameIndex: number): Callee | null {
 	const nameToken = tokens[nameIndex];
 	if (!nameToken) return null;
@@ -855,8 +1127,15 @@ function parseCallee(tokens: Token[], nameIndex: number): Callee | null {
 		cursor = nameIndex + 2;
 	}
 	// Parenthesized and indirect calls such as `(eval)(input)` and
-	// `(0, eval)(input)` retain eval semantics.
-	while (tokens[cursor]?.value === ')') cursor++;
+	// `(0, eval)(input)` retain eval semantics. Ordinary argument positions such
+	// as `foo(a, exec)(input)` must not attribute the returned function back to
+	// the identifier argument itself.
+	while (
+		tokens[cursor]?.value === ')' &&
+		shouldSkipTrailingClose(tokens, nameIndex, cursor)
+	) {
+		cursor++;
+	}
 	if (tokens[cursor]?.value === '?.') cursor++;
 	if (tokens[cursor]?.value !== '(') return null;
 	const callee: Callee = { name: nameToken.value, openParen: cursor };
@@ -895,17 +1174,16 @@ function bindingDisposition(
 	if (visibleScope === null) return 'ambiguous';
 	const declarationCount =
 		analysis.declarationScopes.get(name)?.get(visibleScope) ?? 0;
-	const facts = analysis.facts.get(name);
+	const facts = analysis.factScopes.get(name)?.get(visibleScope);
 	if (
-		analysis.requireDerived.has(name) &&
+		hasScopedMarker(analysis.requireDerivedScopes, name, visibleScope) &&
 		globalDisposition(analysis, 'require', callIndex) !== 'confirmed'
 	) {
 		return 'ambiguous';
 	}
 	if (
 		declarationCount !== 1 ||
-		analysis.declarations.get(name) !== declarationCount ||
-		analysis.reassigned.has(name) ||
+		hasScopedMarker(analysis.reassignedScopes, name, visibleScope) ||
 		!facts ||
 		facts.size !== 1
 	) {
@@ -922,15 +1200,22 @@ function globalDisposition(
 	callIndex: number,
 ): JavascriptCallDisposition {
 	const visibleScope = visibleDeclarationScope(analysis, name, callIndex);
-	if (visibleScope === null && !analysis.reassigned.has(name)) {
+	if (
+		visibleScope === null &&
+		!hasVisibleMarker(analysis, analysis.reassignedScopes, name, callIndex)
+	) {
 		return 'confirmed';
 	}
-	const facts = analysis.facts.get(name);
+	const facts =
+		visibleScope === null
+			? undefined
+			: analysis.factScopes.get(name)?.get(visibleScope);
 	if (
 		facts?.size === 1 &&
 		facts.has('other-import') &&
 		visibleScope !== null &&
-		analysis.declarationScopes.get(name)?.get(visibleScope) === 1
+		analysis.declarationScopes.get(name)?.get(visibleScope) === 1 &&
+		!hasScopedMarker(analysis.reassignedScopes, name, visibleScope)
 	) {
 		return 'safe';
 	}
@@ -960,26 +1245,7 @@ function oversizedCandidate(
 	return expected.includes(match.text) ? 'ambiguous' : 'none';
 }
 
-function insideTemplateExpression(
-	content: string,
-	token: Token,
-	offset: number,
-): boolean {
-	let depth = 0;
-	for (let index = token.start + 1; index < offset; index++) {
-		if (content[index] === '\\') {
-			index++;
-			continue;
-		}
-		if (content[index] === '$' && content[index + 1] === '{') {
-			depth++;
-			index++;
-		} else if (content[index] === '}' && depth > 0) depth--;
-	}
-	return depth > 0;
-}
-
-export function classifyJavascriptCall(
+function classifyJavascriptCallUncached(
 	match: SastMatch,
 	context: SastContext,
 	family: JavascriptCallFamily,
@@ -989,16 +1255,6 @@ export function classifyJavascriptCall(
 	const offset = (analysis.lineStarts[match.line - 1] ?? 0) + match.column - 1;
 	const tokenIndex = tokenIndexAtOffset(analysis.tokens, offset);
 	if (tokenIndex < 0) return 'none';
-	if (analysis.tokens[tokenIndex]?.kind === 'template') {
-		return match.text === 'exec' &&
-			insideTemplateExpression(
-				context.content,
-				analysis.tokens[tokenIndex]!,
-				offset,
-			)
-			? 'ambiguous'
-			: 'none';
-	}
 	const callee = parseCallee(analysis.tokens, tokenIndex);
 	if (!callee) return 'none';
 	const argument = firstArgument(analysis.tokens, callee.openParen);
@@ -1016,7 +1272,15 @@ export function classifyJavascriptCall(
 			}
 			if (callee.receiver) {
 				if (callee.name !== 'exec') return 'none';
-				if (analysis.mutatedMembers.has(callee.receiver)) return 'ambiguous';
+				if (
+					hasScopedMarker(
+						analysis.mutatedMemberScopes,
+						callee.receiver,
+						visibleDeclarationScope(analysis, callee.receiver, tokenIndex),
+					)
+				) {
+					return 'ambiguous';
+				}
 				return bindingDisposition(
 					analysis,
 					callee.receiver,
@@ -1026,7 +1290,9 @@ export function classifyJavascriptCall(
 			}
 			if (
 				callee.name === 'exec' ||
-				analysis.facts.get(callee.name)?.has('child-direct')
+				factsAtVisibleScope(analysis, callee.name, tokenIndex)?.has(
+					'child-direct',
+				)
 			) {
 				return bindingDisposition(
 					analysis,
@@ -1106,4 +1372,19 @@ export function classifyJavascriptCall(
 			}
 			return globalDisposition(analysis, 'addEventListener', tokenIndex);
 	}
+}
+
+export function classifyJavascriptCall(
+	match: SastMatch,
+	context: SastContext,
+	family: JavascriptCallFamily,
+): JavascriptCallDisposition {
+	const key = `${family}:${match.line}:${match.column}:${match.text}`;
+	const cache = dispositionByContext.get(context) ?? new Map();
+	const cached = cache.get(key);
+	if (cached !== undefined) return cached;
+	const disposition = classifyJavascriptCallUncached(match, context, family);
+	cache.set(key, disposition);
+	dispositionByContext.set(context, cache);
+	return disposition;
 }

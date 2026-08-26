@@ -157,6 +157,7 @@ export function executeRulesSync(
 	const findings: SastFinding[] = [];
 	const normalizedLang = language.toLowerCase();
 	const rules = getRulesForLanguage(normalizedLang);
+	const lines = content.split('\n');
 	// Reuse one context object for the entire file. Language-specific validators
 	// may attach context-keyed, garbage-collectable analysis without reparsing the
 	// same content once per match.
@@ -181,7 +182,6 @@ export function executeRulesSync(
 			}
 
 			// Extract code excerpt
-			const lines = content.split('\n');
 			const excerpt = lines[match.line - 1]?.trim() || '';
 
 			findings.push({
