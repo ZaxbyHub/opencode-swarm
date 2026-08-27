@@ -27,7 +27,7 @@ const MODE_PROTOCOL_INSERTIONS = [
 	},
 	{
 		nextMarker: '### MODE: CLARIFY',
-		protocol: readSkill('resume'),
+		protocol: readSkill('swarm-resume'),
 	},
 	{
 		nextMarker: '### MODE: DISCOVER',

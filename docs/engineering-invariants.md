@@ -521,7 +521,7 @@ evidence as trustworthy only within that cooperative-agent threat model. Strong
 integrity against a same-user adversarial process would require a protected
 trust root outside the workspace.
 
-**Session-reset worktree resilience (FR-004):** `.swarm-worktrees/` directories created by parallel lanes must be reconciled on session resume/reset. `provisionWorktree` in `src/worktree/core.ts` implements idempotent provisioning: if a branch exists but is not checked out in any active worktree, it is adopted; if it is active elsewhere, an error is returned. `reset-session.ts` wipes `.swarm-worktrees/` and orphan branches. The resume skill explicitly calls out reconciliation as the first step. This prevents stale worktrees from causing provisioning failures or silent git state corruption when a session resumes after reset.
+**Session-reset worktree resilience (FR-004):** `.swarm-worktrees/` directories created by parallel lanes must be reconciled on session resume/reset. `provisionWorktree` in `src/worktree/core.ts` implements idempotent provisioning: if a branch exists but is not checked out in any active worktree, it is adopted; if it is active elsewhere, an error is returned. `reset-session.ts` wipes `.swarm-worktrees/` and orphan branches. The swarm-resume skill (slug `resume` before the #2379 rename) explicitly calls out reconciliation as the first step. This prevents stale worktrees from causing provisioning failures or silent git state corruption when a session resumes after reset.
 
 **Anti-pattern:**
 
