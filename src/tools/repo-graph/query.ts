@@ -848,9 +848,23 @@ export function getContextPack(
 	// Edge-resolution telemetry (issue #1533). Symbol-keyed (`file\0symbol`),
 	// collected at first discovery so duplicate edges toward the same
 	// destination count once. `lowConfidence` uses the same predicate as the
-	// internal-symbol span fallback below, so coverage and spans agree.
+	// internal-symbol span fallback below, so coverage and spans agree. The
+	// seeded target is classified too (F-002): when the target itself lacks an
+	// export range it renders as an internal-symbol fallback span, and the
+	// coverage count must include it. The target node always exists here (an
+	// absent node returned early above), so it can never be `unresolved`.
 	const unresolved = new Set<string>();
 	const lowConfidence = new Set<string>();
+	const targetRanges = targetNode.exportRanges;
+	if (
+		!(
+			targetRanges !== undefined &&
+			Object.hasOwn(targetRanges, symbol) &&
+			targetRanges[symbol]
+		)
+	) {
+		lowConfidence.add(targetKey);
+	}
 	const enqueue = (nextFile: string, nextSymbol: string, nextDepth: number) => {
 		const nextKey = `${nextFile}\0${nextSymbol}`;
 		if (visited.has(nextKey)) return;

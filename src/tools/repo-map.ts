@@ -633,7 +633,13 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 					return p;
 				}
 			};
-			const normalizedTarget = { ...raw.target, file: toRel(raw.target.file) };
+			// `|| target`: toRel yields '' only when the graph node's path IS the
+			// workspace root itself (hand-crafted graph); fall back to the
+			// validated workspace-relative input instead of emitting an empty file.
+			const normalizedTarget = {
+				...raw.target,
+				file: toRel(raw.target.file) || target,
+			};
 			const normalizedSpans = raw.spans
 				.map((s) => ({ ...s, file: toRel(s.file) }))
 				.filter((s) => s.file.length > 0);

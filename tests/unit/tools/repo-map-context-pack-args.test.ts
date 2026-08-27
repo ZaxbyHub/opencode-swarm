@@ -119,8 +119,31 @@ describe('repo_map context_pack KG-12 args (issue #1533)', () => {
 		expect(sn.hash).toBe(createHash('sha256').update(sn.text).digest('hex'));
 		expect(typeof sn.startLine).toBe('number');
 		expect(typeof sn.endLine).toBe('number');
-		expect(r.coverage.reachedSymbols).toBeGreaterThan(0);
-		expect(Array.isArray(r.warnings)).toBe(true);
+		// Target plus its three callers are all reached by the BFS.
+		expect(r.coverage.reachedSymbols).toBeGreaterThanOrEqual(2);
+		expect(r.warnings.every((w: unknown) => typeof w === 'string')).toBe(true);
+	});
+
+	test('include_source with tight max_tokens stays consistent end-to-end', async () => {
+		await call({ action: 'build' });
+		const r = await call({
+			action: 'context_pack',
+			file: 'src/util.ts',
+			symbol: 'add',
+			include_source: true,
+			max_tokens: 50,
+		});
+		expect(r.truncated).toBe(true);
+		expect(r.spans).toHaveLength(1);
+		expect(r.spans[0].symbol).toBe('add');
+		// Snippets mirror the budgeted spans exactly.
+		expect(r.snippets).toHaveLength(1);
+		expect(r.snippets[0].symbol).toBe('add');
+		expect(r.coverage.returnedSymbols).toBe(1);
+		expect(r.coverage.omittedByBudget).toBe(r.coverage.reachedSymbols - 1);
+		expect(
+			r.warnings.some((w: string) => w.includes('omitted by token budget')),
+		).toBe(true);
 	});
 
 	test('span-only compat: no snippets, no span text, coverage + warnings present', async () => {

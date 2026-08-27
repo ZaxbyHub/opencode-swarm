@@ -64,6 +64,12 @@ function makeGraph(opts: {
 	};
 }
 
+function writeFile(rel: string, content: string): void {
+	const filePath = path.join(tempDir, rel);
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, content);
+}
+
 function singleNodeGraph(
 	rel: string,
 	symbol: string,
@@ -290,6 +296,71 @@ describe('getContextPack coverage + warnings (issue #1533)', () => {
 			result.warnings!.includes('... and 2 more source read failed cases'),
 		).toBe(true);
 		expect(result.snippets).toEqual([]);
+	});
+
+	test('exactly five failures produce five details and no aggregate line', () => {
+		const files = Array.from({ length: 5 }, (_, i) => ({
+			moduleName: `e${i}.ts`,
+			exports: [`sym${i}`],
+			exportRanges: { [`sym${i}`]: { startLine: 1, endLine: 2 } },
+		}));
+		const symbolEdges = files.slice(1).map((f, i) => ({
+			fromFile: f.moduleName,
+			fromSymbol: `sym${i + 1}`,
+			toFile: 'e0.ts',
+			toSymbol: 'sym0',
+		}));
+		const result = getContextPack(
+			makeGraph({ files, symbolEdges }),
+			'e0.ts',
+			'sym0',
+			{ includeSource: true, directory: tempDir },
+		);
+		const details = result.warnings!.filter((w) =>
+			w.startsWith('source read failed for '),
+		);
+		expect(details).toHaveLength(5);
+		expect(result.warnings!.some((w) => w.startsWith('... and'))).toBe(false);
+	});
+
+	test('target without export range counts as low-confidence and stays snippet-free in body mode', () => {
+		writeFile('src/a.ts', 'export function target(x) {\n  return x;\n}\n');
+		const graph = makeGraph({
+			files: [
+				{ moduleName: 'src/a.ts', exports: ['target'], exportRanges: {} },
+			],
+		});
+		const result = getContextPack(graph, 'src/a.ts', 'target', {
+			includeSource: true,
+			sourceMode: 'body',
+		});
+		expect(result.spans[0]!.note).toBe('internal symbol — span unavailable');
+		expect(result.coverage!.lowConfidenceEdges).toBe(1);
+		expect(result.snippets).toEqual([]);
+		expect(
+			result.warnings!.some((w) => w.includes('lack an export range')),
+		).toBe(true);
+	});
+
+	test('directory option falls back to graph.workspaceRoot', () => {
+		writeFile(
+			'src/util.ts',
+			'export function add(a: number, b: number) {\n  return a + b;\n}\n',
+		);
+		const graph = makeGraph({
+			files: [
+				{
+					moduleName: 'src/util.ts',
+					exports: ['add'],
+					exportRanges: { add: { startLine: 1, endLine: 3 } },
+				},
+			],
+		});
+		// No directory option: extraction must resolve against workspaceRoot.
+		const result = getContextPack(graph, 'src/util.ts', 'add', {
+			includeSource: true,
+		});
+		expect(result.snippets![0]!.text).toContain('function add');
 	});
 
 	test('schema below 1.2.0: zeroed coverage + rebuild warning, note preserved', () => {

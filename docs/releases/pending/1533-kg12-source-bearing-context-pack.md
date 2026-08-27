@@ -20,7 +20,9 @@ No breaking changes. All new response fields are additive; span-only callers (no
 
 ## Caveats
 
-- Snippet `confidence` is a deterministic resolution-quality score (1.0 exact target, 0.8 resolved neighbor), not language grammar quality. Real edge confidence/provenance arrives with KG-11 (SymbolEdge v2, #1532); `unresolvedEdges`/`lowConfidenceEdges` count distinct destination symbols, not edge instances.
-- Snippet `hash` fingerprints the returned text, so `summary`-mode hashes (80-line cap) change when the cap truncates differently.
+- Snippet `confidence` is a deterministic resolution-quality score (1.0 exact target, 0.8 resolved neighbor), not language grammar quality. Real edge confidence/provenance arrives with KG-11 (SymbolEdge v2, #1532); `unresolvedEdges`/`lowConfidenceEdges` count distinct destination symbols (including the seeded target when it lacks an export range), not edge instances.
+- Snippet `hash` fingerprints the returned text, so `summary`-mode hashes (80-line cap) change when the cap truncates differently, and text/hashes reflect the file's on-disk line endings — CRLF and LF checkouts of the same commit hash differently.
 - Packing is deterministic (target → depth → file → symbol, greedy) and the target span is always included even if it alone exceeds `max_tokens` — a warning states this when it happens.
+- `estimatedTokens` and `warnings` describe the query result BEFORE the handler's `top_n` slice trims `spans`/`snippets` (`coverage.omittedByBudget` and `budget.dropped` disclose the drop count); `truncated: true` covers both budget exhaustion and `top_n` capping (pre-existing semantics of the flag).
+- `source_mode: "body"` text is capped at 80 lines per span; a capped body is returned as snippet mode `summary`, not complete source.
 - Signature extraction is a documented heuristic (decorator-skip + `{`/`:` terminator within a bounded window; single line for no-terminator languages like Ruby), not a parser.
