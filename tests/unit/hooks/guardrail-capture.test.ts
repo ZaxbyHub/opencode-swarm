@@ -18,11 +18,10 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fsSync from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
-
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
+import { _resetMaintenanceCounters } from '../../../src/hooks/guardrails/shell-audit-store.js';
 import {
 	getAgentSession,
 	resetSwarmState,
@@ -30,6 +29,7 @@ import {
 	swarmState,
 } from '../../../src/state';
 import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 function defaultConfig(
 	overrides?: Partial<GuardrailsConfig>,
@@ -169,20 +169,13 @@ describe('guardrail decision-log capture (task 2.1)', () => {
 	beforeEach(() => {
 		resetSwarmState();
 		// Temp dir for this test — the hook writes its audit file here
-		tempDir = fsSync.realpathSync(
-			fsSync.mkdtempSync(path.join(os.tmpdir(), 'guardrail-capture-test-')),
-		);
+		// (canonicalMkdtemp: FR-011 symlink-safe form.)
+		tempDir = canonicalMkdtemp('guardrail-capture-test-');
 		// The hook always writes to .swarm/session/shell-audit.jsonl under the passed directory
 		auditPath = path.join(tempDir, '.swarm', 'session', 'shell-audit.jsonl');
 	});
 
 	afterEach(async () => {
-		// Reset the shell-audit store's module-scoped maintenance counters so
-		// this file's appends cannot shift throttled maintenance for later
-		// files in the shared test-runner process (review round PRR-016a).
-		const { _resetMaintenanceCounters } = await import(
-			'../../../src/hooks/guardrails/shell-audit-store.js'
-		);
 		_resetMaintenanceCounters();
 		// Best-effort cleanup guard if a test failed before its own wait.
 		if (fsSync.existsSync(auditPath)) {

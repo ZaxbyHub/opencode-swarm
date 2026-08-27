@@ -9,8 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
 	_resetMaintenanceCounters,
@@ -21,11 +20,14 @@ import {
 	shellAuditFilePath,
 	_internals as storeInternals,
 } from '../../../src/hooks/guardrails/shell-audit-store';
+import { freezeClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
+const FRESH_NOW = Date.parse('2026-06-01T00:00:00.000Z');
 const REAL_LIMITS = storeInternals.limits;
 
 async function mkTempDir(): Promise<string> {
-	return mkdtemp(join(tmpdir(), 'shell-audit-close-test-'));
+	return canonicalMkdtemp('shell-audit-close-test-');
 }
 
 function writeLegacyStore(dir: string, lines: string[]): void {
@@ -34,7 +36,10 @@ function writeLegacyStore(dir: string, lines: string[]): void {
 	writeFileSync(shellAuditFilePath(dir), lines.join(''), 'utf-8');
 }
 
-function legacyShell(i: number, ts = new Date().toISOString()): string {
+function legacyShell(
+	i: number,
+	ts = new Date(FRESH_NOW).toISOString(),
+): string {
 	return `${JSON.stringify({
 		ts,
 		sessionID: 's',
@@ -44,13 +49,18 @@ function legacyShell(i: number, ts = new Date().toISOString()): string {
 	})}\n`;
 }
 
+let restoreClock: () => void = () => {};
+
 beforeEach(() => {
+	restoreClock = freezeClock({ fixedNow: FRESH_NOW });
 	_resetMaintenanceCounters();
 });
 
 afterEach(() => {
 	storeInternals.limits = REAL_LIMITS;
 	_resetMaintenanceCounters();
+	restoreClock();
+	restoreClock = () => {};
 });
 
 describe('finalizeShellAuditForClose — the archived cut', () => {
@@ -88,7 +98,7 @@ describe('finalizeShellAuditForClose — the archived cut', () => {
 			(_, i) =>
 				`${JSON.stringify({
 					type: 'scope_violation',
-					ts: new Date().toISOString(),
+					ts: new Date(FRESH_NOW).toISOString(),
 					sessionID: 's',
 					agent: 'coder',
 					tool: 'bash',
@@ -216,7 +226,7 @@ describe('review-round fixes — archive-boundary re-redaction (F4 / RC-gap1)', 
 		// Pre-#2040 legacy line: URL credentials the old writer never redacted.
 		writeLegacyStore(dir, [
 			`${JSON.stringify({
-				ts: new Date().toISOString(),
+				ts: new Date(FRESH_NOW).toISOString(),
 				sessionID: 's',
 				agent: 'coder',
 				tool: 'bash',

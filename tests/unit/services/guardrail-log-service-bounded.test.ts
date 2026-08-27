@@ -7,10 +7,9 @@
  * - blocks-only keeps its exact semantics over the bounded window
  */
 
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
 	_resetMaintenanceCounters,
@@ -18,11 +17,16 @@ import {
 	_internals as storeInternals,
 } from '../../../src/hooks/guardrails/shell-audit-store';
 import { handleGuardrailLog } from '../../../src/services/guardrail-log-service';
+import { freezeClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
+
+const FRESH_NOW = Date.parse('2026-06-01T00:00:00.000Z');
+let restoreClock: () => void = () => {};
 
 const REAL_LIMITS = storeInternals.limits;
 
 async function mkTempDir(): Promise<string> {
-	return mkdtemp(join(tmpdir(), 'guardrail-log-bounded-test-'));
+	return canonicalMkdtemp('guardrail-log-bounded-test-');
 }
 
 function writeStore(dir: string, content: string): void {
@@ -60,9 +64,16 @@ function blockLine(i: number, ts = tsFor(i)): string {
 	})}\n`;
 }
 
+beforeEach(() => {
+	restoreClock = freezeClock({ fixedNow: FRESH_NOW });
+	_resetMaintenanceCounters();
+});
+
 afterEach(() => {
 	storeInternals.limits = REAL_LIMITS;
 	_resetMaintenanceCounters();
+	restoreClock();
+	restoreClock = () => {};
 });
 
 describe('bounded reads (large-log scenario)', () => {
@@ -112,7 +123,7 @@ describe('bounded reads (large-log scenario)', () => {
 		for (let i = 0; i < 25; i += 1) {
 			appendShellAuditLineSync(
 				dir,
-				shellLine(i, new Date(Date.now() - i * 1_000).toISOString()),
+				shellLine(i, new Date(FRESH_NOW - i * 1_000).toISOString()),
 			);
 		}
 		compactShellAudit(dir);
@@ -159,7 +170,7 @@ describe('blocks-only over the bounded window', () => {
 				shellLine(2),
 				`${JSON.stringify({
 					type: 'sandbox_wrap',
-					ts: new Date().toISOString(),
+					ts: new Date(FRESH_NOW).toISOString(),
 					sessionID: 's',
 					agent: 'coder',
 					tool: 'bash',
@@ -188,7 +199,7 @@ describe('display sanitization (render injection)', () => {
 		writeStore(
 			dir,
 			`${JSON.stringify({
-				ts: new Date().toISOString(),
+				ts: new Date(FRESH_NOW).toISOString(),
 				sessionID: 's',
 				agent: 'co\u001b[31mder',
 				tool: 'bash',
@@ -208,7 +219,7 @@ describe('display sanitization (render injection)', () => {
 		writeStore(
 			dir,
 			`${JSON.stringify({
-				ts: new Date().toISOString(),
+				ts: new Date(FRESH_NOW).toISOString(),
 				sessionID: 's',
 				agent: 'co\u202eder', // RLE bidi override
 				tool: 'bash',
@@ -228,7 +239,7 @@ describe('display sanitization (render injection)', () => {
 		writeStore(
 			dir,
 			`${JSON.stringify({
-				ts: new Date().toISOString(),
+				ts: new Date(FRESH_NOW).toISOString(),
 				sessionID: 's',
 				agent: 'coder',
 				tool: 'bash',
@@ -247,7 +258,7 @@ describe('display sanitization (render injection)', () => {
 		writeStore(
 			dir,
 			`${JSON.stringify({
-				ts: new Date().toISOString(),
+				ts: new Date(FRESH_NOW).toISOString(),
 				sessionID: 's',
 				agent: 'coder',
 				tool: 'bash',
@@ -301,7 +312,7 @@ describe('review-round fixes — LF/zero-width sanitization (PRR-004 / PRR-020c)
 		writeStore(
 			dir,
 			`${JSON.stringify({
-				ts: new Date().toISOString(),
+				ts: new Date(FRESH_NOW).toISOString(),
 				sessionID: 's',
 				agent: 'coder',
 				tool: 'bash',
@@ -331,7 +342,7 @@ describe('review-round fixes — LF/zero-width sanitization (PRR-004 / PRR-020c)
 		writeStore(
 			dir,
 			`${JSON.stringify({
-				ts: new Date().toISOString(),
+				ts: new Date(FRESH_NOW).toISOString(),
 				sessionID: 's',
 				agent: 'coder',
 				tool: 'bash',
@@ -355,7 +366,7 @@ describe('review-round fixes — fingerprint render (PRR-014)', () => {
 			dir,
 			`${JSON.stringify({
 				type: 'destructive_block',
-				ts: new Date().toISOString(),
+				ts: new Date(FRESH_NOW).toISOString(),
 				sessionID: 's',
 				agent: 'coder',
 				tool: 'bash',
@@ -401,7 +412,7 @@ describe('review-round fixes — folded historical blocks (RC-1 / RC-8)', () => 
 			dir,
 			`${JSON.stringify({
 				type: 'destructive_block',
-				ts: new Date().toISOString(),
+				ts: new Date(FRESH_NOW).toISOString(),
 				sessionID: 's',
 				agent: 'coder',
 				tool: 'bash',
@@ -409,7 +420,10 @@ describe('review-round fixes — folded historical blocks (RC-1 / RC-8)', () => 
 				destructiveCategory: 'dangerous_delete',
 			})}\n`,
 		);
-		appendShellAuditLineSync(dir, shellLine(1, new Date().toISOString()));
+		appendShellAuditLineSync(
+			dir,
+			shellLine(1, new Date(FRESH_NOW).toISOString()),
+		);
 		compactShellAudit(dir);
 
 		const out = await handleGuardrailLog(dir, ['--blocks-only']);
@@ -430,8 +444,14 @@ describe('review-round fixes — folded historical blocks (RC-1 / RC-8)', () => 
 		const { appendShellAuditLineSync, compactShellAudit } = await import(
 			'../../../src/hooks/guardrails/shell-audit-store'
 		);
-		appendShellAuditLineSync(dir, shellLine(1, new Date().toISOString()));
-		appendShellAuditLineSync(dir, shellLine(2, new Date().toISOString()));
+		appendShellAuditLineSync(
+			dir,
+			shellLine(1, new Date(FRESH_NOW).toISOString()),
+		);
+		appendShellAuditLineSync(
+			dir,
+			shellLine(2, new Date(FRESH_NOW).toISOString()),
+		);
 		compactShellAudit(dir);
 
 		const out = await handleGuardrailLog(dir, ['--blocks-only']);

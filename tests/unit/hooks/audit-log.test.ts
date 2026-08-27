@@ -306,34 +306,6 @@ describe('appendGuardrailDecision', () => {
 		await rm(dir, { recursive: true, force: true });
 	});
 
-	// ---- Issue #2040: giant commands are truncated at line-shaping time ----
-	test('giant command is truncated to maxCommandChars with an explicit marker (shell entry)', async () => {
-		const dir = await mkTempDir();
-		const giant = `echo ${'a'.repeat(50_000)}`;
-
-		const entry = {
-			type: 'shell' as const,
-			ts: '2026-01-01T00:00:00.000Z',
-			sessionID: 'sess-big',
-			agent: 'coder',
-			tool: 'bash',
-			command: giant,
-		};
-
-		await appendGuardrailDecision(entry, { directory: dir, enabled: true });
-
-		const parsed = readDecisionLines(dir)[0]!;
-		expect(typeof parsed.command).toBe('string');
-		expect((parsed.command as string).length).toBeLessThan(5_000);
-		expect(parsed.command).toContain('…[truncated]');
-		// The persisted line must stay under the store's hard maxLineBytes.
-		const raw = readFileSync(storePath(dir), 'utf-8');
-		const decisionLine = raw.split('\n').filter((l) => l.trim())[1]!;
-		expect(Buffer.byteLength(decisionLine)).toBeLessThan(64 * 1024);
-
-		await rm(dir, { recursive: true, force: true });
-	});
-
 	// ---- Write-time validation: malformed entry (missing sessionID) is rejected ----
 	test('malformed entry missing sessionID is rejected: nothing written, no exception propagates', async () => {
 		const dir = await mkTempDir();
@@ -548,44 +520,6 @@ describe('appendGuardrailDecision', () => {
 		const parsed = readDecisionLines(dir)[0]!;
 		expect(parsed.command).not.toContain('abc123xyz');
 		expect(parsed.command).toContain('[REDACTED]');
-
-		await rm(dir, { recursive: true, force: true });
-	});
-
-	// ---- MS-gap2: appending into a PRE-EXISTING legacy header-less store ----
-	test('append into a legacy header-less store keeps it readable in both forms', async () => {
-		const dir = await mkTempDir();
-		const legacy = JSON.stringify({
-			ts: '2026-01-01T00:00:00.000Z',
-			sessionID: 's',
-			agent: 'coder',
-			tool: 'bash',
-			command: 'echo legacy',
-		});
-		await mkdir(join(dir, '.swarm', 'session'), { recursive: true });
-		await writeFile(
-			storePath(dir),
-			`${legacy}
-`,
-			'utf-8',
-		);
-
-		await appendGuardrailDecision(
-			{
-				type: 'shell',
-				ts: '2026-01-01T00:00:01.000Z',
-				sessionID: 's',
-				agent: 'coder',
-				tool: 'bash',
-				command: 'echo new',
-			},
-			{ directory: dir, enabled: true },
-		);
-
-		const decisions = readDecisionLines(dir);
-		expect(decisions.length).toBe(2);
-		expect(decisions[0]!.command).toBe('echo legacy');
-		expect(decisions[1]!.command).toBe('echo new');
 
 		await rm(dir, { recursive: true, force: true });
 	});

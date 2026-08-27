@@ -12,8 +12,7 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
 	appendGuardrailDecision,
@@ -26,9 +25,10 @@ import {
 	shellAuditFilePath,
 } from '../../../src/hooks/guardrails/shell-audit-store';
 import { handleGuardrailLog } from '../../../src/services/guardrail-log-service';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 async function mkTempDir(): Promise<string> {
-	return mkdtemp(join(tmpdir(), 'shell-audit-redaction-test-'));
+	return canonicalMkdtemp('shell-audit-redaction-test-');
 }
 
 /** Persist a shell decision with the given command and return the stored command. */
@@ -37,7 +37,7 @@ async function persistedCommand(command: string): Promise<string> {
 	await appendGuardrailDecision(
 		{
 			type: 'shell',
-			ts: new Date().toISOString(),
+			ts: '2026-06-01T00:00:00.000Z',
 			sessionID: 's',
 			agent: 'coder',
 			tool: 'bash',
@@ -221,7 +221,7 @@ describe('write boundary — persisted lines never contain the fixtures', () => 
 		await appendGuardrailDecision(
 			{
 				type: 'destructive_block',
-				ts: new Date().toISOString(),
+				ts: '2026-06-01T00:00:00.000Z',
 				sessionID: 's',
 				agent: 'coder',
 				tool: 'bash',
@@ -249,7 +249,7 @@ describe('write boundary — persisted lines never contain the fixtures', () => 
 		await appendGuardrailDecision(
 			{
 				type: 'destructive_block',
-				ts: new Date().toISOString(),
+				ts: '2026-06-01T00:00:00.000Z',
 				sessionID: 's',
 				agent: 'coder',
 				tool: 'bash',

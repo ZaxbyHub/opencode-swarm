@@ -10,8 +10,7 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
 	_internals,
@@ -27,14 +26,19 @@ import {
 	shellAuditFilePath,
 	withShellAuditStoreLock,
 } from '../../../src/hooks/guardrails/shell-audit-store';
+import { freezeClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const REAL_LIMITS = _internals.limits;
 
+const FRESH_NOW = Date.parse('2026-06-01T00:00:00.000Z');
+let restoreClock: () => void = () => {};
+
 async function mkTempDir(): Promise<string> {
-	return mkdtemp(join(tmpdir(), 'shell-audit-store-test-'));
+	return canonicalMkdtemp('shell-audit-store-test-');
 }
 
-const FRESH_TS = new Date().toISOString();
+const FRESH_TS = new Date(FRESH_NOW).toISOString();
 
 function legacyShellLine(i: number, ts = FRESH_TS): string {
 	return `${JSON.stringify({
@@ -96,12 +100,15 @@ function ageEverything(dir: string): void {
 }
 
 beforeEach(() => {
+	restoreClock = freezeClock({ fixedNow: FRESH_NOW });
 	_resetMaintenanceCounters();
 });
 
 afterEach(() => {
 	_internals.limits = REAL_LIMITS;
 	_resetMaintenanceCounters();
+	restoreClock();
+	restoreClock = () => {};
 });
 
 describe('appendShellAuditLineSync — first write + framing', () => {
