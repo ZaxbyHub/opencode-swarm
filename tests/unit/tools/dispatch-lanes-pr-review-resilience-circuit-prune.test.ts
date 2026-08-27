@@ -213,7 +213,10 @@ describe('dispatch_lanes PR review resilience circuit prune ordering', () => {
 					prHeadSha: 'abc123',
 					prReviewWaveStage: 'canary',
 					prReviewWaveAttempt: 0,
-					prReviewResiliencePolicy: DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+					prReviewResiliencePolicy: {
+						...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+						enabled: true,
+					},
 				},
 			);
 		} catch (error) {
@@ -247,7 +250,10 @@ describe('dispatch_lanes PR review resilience circuit prune ordering', () => {
 					prHeadSha: 'abc123',
 					prReviewWaveStage: 'canary',
 					prReviewWaveAttempt: 0,
-					prReviewResiliencePolicy: DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+					prReviewResiliencePolicy: {
+						...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+						enabled: true,
+					},
 				},
 			),
 		).rejects.toBeInstanceOf(PrReviewResilienceCircuitOpenError);

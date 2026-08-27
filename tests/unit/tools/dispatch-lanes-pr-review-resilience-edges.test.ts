@@ -100,7 +100,10 @@ beforeEach(async () => {
 		dispatchInternals.resolveExactMergeBase(...args);
 	dispatchInternals.loadPluginConfig = () =>
 		({
-			pr_review_resilience: DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+			pr_review_resilience: {
+				...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+				enabled: true,
+			},
 		}) as ReturnType<typeof originalDispatchLoadPluginConfig>;
 });
 
@@ -290,6 +293,7 @@ describe('dispatch_lanes PR review resilience edges', () => {
 			({
 				pr_review_resilience: {
 					...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+					enabled: true,
 					correlated_failure_threshold: 2,
 					max_retry_attempts_after_initial: 2,
 				},
@@ -322,6 +326,7 @@ describe('dispatch_lanes PR review resilience edges', () => {
 			({
 				pr_review_resilience: {
 					...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+					enabled: true,
 					correlated_failure_threshold: 1,
 					max_retry_attempts_after_initial: 0,
 				},

@@ -52,7 +52,10 @@ const HEAD_SHA = 'abc123';
 const BASE_SHA = 'def456';
 const REVISION_DIGEST = 'revision-1';
 const BASE_SCOPE = `complete PR diff ${BASE_SHA}...${HEAD_SHA}`;
-const RESILIENCE_POLICY = DEFAULT_PR_REVIEW_RESILIENCE_CONFIG;
+const RESILIENCE_POLICY = {
+	...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+	enabled: true,
+};
 const [DIM_A, DIM_B, DIM_C, DIM_D, DIM_E, DIM_F] = PR_REVIEW_BASE_DIMENSION_IDS;
 
 function lane(id: string, workflowLane: string, ownedWorkflowLanes?: string[]) {

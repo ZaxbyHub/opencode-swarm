@@ -608,20 +608,22 @@ After a successful delivery the subscription's `hasUnaddressedEvents` flag is cl
 ### pr_review_resilience
 
 Controls staged canary/fanout resilience for Profile A `PR_REVIEW` base waves.
-When enabled, depth tiers M and L must run each base attempt as a singleton
-canary batch followed by a fanout batch for the remaining unresolved
-obligations. Attempt 0 plus at most two retry attempts are allowed. Tier S, or
-an explicit `enabled: false`, keeps the legacy single-wave base dispatch.
+**Disabled by default** (issue #2381): the legacy single-wave base dispatch is
+the default path at every depth tier while the #2380 PR-review repair program is
+incomplete. When explicitly enabled, depth tiers M and L must run each base
+attempt as a singleton canary batch followed by a fanout batch for the remaining
+unresolved obligations. Attempt 0 plus at most two retry attempts are allowed.
+Tier S always keeps the legacy single-wave base dispatch.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | boolean | `true` | Enable staged canary/fanout base-wave resilience for Profile A PR review. `false` preserves the legacy one-wave base dispatch. |
+| `enabled` | boolean | `false` | Enable staged canary/fanout base-wave resilience for Profile A PR review. The default `false` uses the legacy one-wave base dispatch; set `true` to opt in. |
 | `canary_probe_ms` | number | `300000` | Milliseconds to wait before probing whether an unresolved canary lane is still live (1–3600000). |
 | `status_probe_timeout_ms` | number | `2000` | Deadline for the bounded status probe that decides whether a canary is still live before admitting a later retry (1–60000). |
 | `correlated_failure_threshold` | number | `2` | Number of normalized matching terminal failures that opens the shared base-wave circuit and blocks further staged attempts (2–8). |
 | `max_retry_attempts_after_initial` | number | `2` | Maximum retry attempts after attempt 0. The controller therefore allows attempts 0, 1, and 2 by default (0–2). |
 
-**Example** — keep staged resilience enabled with defaults:
+**Example** — opt in to staged canary/fanout resilience (off by default):
 
 ```json
 {
@@ -631,7 +633,7 @@ an explicit `enabled: false`, keeps the legacy single-wave base dispatch.
 }
 ```
 
-**Example** — disable staged canary/fanout and keep the legacy one-wave base dispatch:
+**Example** — the default: staged canary/fanout off, legacy one-wave base dispatch:
 
 ```json
 {

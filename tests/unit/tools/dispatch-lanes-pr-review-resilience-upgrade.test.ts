@@ -236,7 +236,10 @@ describe('dispatch_lanes PR review resilience upgrade migration', () => {
 		await removePersistedResilienceSnapshot(sessionID);
 		dispatchInternals.loadPluginConfig = () =>
 			({
-				pr_review_resilience: DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+				pr_review_resilience: {
+					...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+					enabled: true,
+				},
 			}) as ReturnType<typeof originalDispatchLoadPluginConfig>;
 
 		const migratedCanary = await executeDispatchLanesAsync(
@@ -326,7 +329,10 @@ describe('dispatch_lanes PR review resilience upgrade migration', () => {
 		await removePersistedResilienceSnapshot(sessionID);
 		dispatchInternals.loadPluginConfig = () =>
 			({
-				pr_review_resilience: DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+				pr_review_resilience: {
+					...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+					enabled: true,
+				},
 			}) as ReturnType<typeof originalDispatchLoadPluginConfig>;
 
 		const blocked = await executeDispatchLanesAsync(
@@ -379,7 +385,10 @@ describe('dispatch_lanes PR review resilience upgrade migration', () => {
 		await removePersistedResilienceSnapshot(sessionID);
 		dispatchInternals.loadPluginConfig = () =>
 			({
-				pr_review_resilience: DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+				pr_review_resilience: {
+					...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+					enabled: true,
+				},
 			}) as ReturnType<typeof originalDispatchLoadPluginConfig>;
 
 		const blocked = await executeDispatchLanesAsync(
