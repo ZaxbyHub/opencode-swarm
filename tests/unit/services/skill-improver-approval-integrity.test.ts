@@ -3,8 +3,14 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store';
-import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
+import {
+	resolveHiveKnowledgePath,
+	resolveSwarmKnowledgePath,
+} from '../../../src/hooks/knowledge-store';
+import type {
+	HiveKnowledgeEntry,
+	SwarmKnowledgeEntry,
+} from '../../../src/hooks/knowledge-types';
 import { issueWriteApprovalFact } from '../../../src/security/write-authority';
 import {
 	buildSkillImproverApprovalRequest,
@@ -55,7 +61,12 @@ afterEach(() => {
 });
 
 describe('skill_improver approval integrity', () => {
-	it('FB-002 rejects absolute approved paths during manifest preparation', async () => {
+	it('FB-002 rejects arbitrary external approved paths during manifest preparation', async () => {
+		const escapedPath = path.join(
+			path.dirname(resolveHiveKnowledgePath()),
+			'escape',
+			'SKILL.md',
+		);
 		const candidateContent = JSON.stringify(
 			{
 				kind: 'skill_improver_write_manifest',
@@ -66,7 +77,7 @@ describe('skill_improver approval integrity', () => {
 				drafts: [
 					{
 						slug: 'escape',
-						path: '/tmp/escape/SKILL.md',
+						path: escapedPath,
 						content: 'bad',
 						sourceKnowledgeIds: [],
 					},
@@ -89,7 +100,109 @@ describe('skill_improver approval integrity', () => {
 		});
 		expect(result.ran).toBe(false);
 		expect(result.reason).toContain('approved path rejected');
-		expect(result.reason).toContain('/tmp/escape/SKILL.md');
+		expect(result.reason).toContain(escapedPath);
+	});
+
+	it('FB-002 allows the canonical hive knowledge path through approval preparation and apply', async () => {
+		const hivePath = resolveHiveKnowledgePath();
+		const canonicalHiveApprovalPath = path.resolve(hivePath).replace(/\\/g, '/');
+		const hiveEntry: HiveKnowledgeEntry = {
+			id: '99999999-9999-4999-8999-999999999999',
+			tier: 'hive',
+			lesson: 'persist canonical hive source stamps',
+			category: 'process',
+			tags: ['approval'],
+			scope: 'global',
+			confidence: 0.95,
+			status: 'established',
+			confirmed_by: [],
+			retrieval_outcomes: {
+				applied_count: 0,
+				succeeded_after_count: 0,
+				failed_after_count: 0,
+			},
+			schema_version: 3,
+			created_at: new Date().toISOString(),
+			updated_at: new Date().toISOString(),
+			project_name: 't',
+		};
+		await mkdir(path.dirname(hivePath), { recursive: true });
+		await writeFile(hivePath, `${JSON.stringify(hiveEntry)}\n`, 'utf8');
+		const approvedCandidateContent = JSON.stringify(
+			{
+				kind: 'skill_improver_write_manifest',
+				version: 1,
+				writeMode: 'draft_skills',
+				source: 'llm',
+				proposalContent: '# Skill Improvement Proposal\n',
+				drafts: [
+					{
+						slug: 'hive-skill',
+						path: '.swarm/skills/proposals/hive-skill/SKILL.md',
+						content: '# hive skill\n',
+						sourceKnowledgeIds: [hiveEntry.id],
+					},
+				],
+				draftSourceStamps: [
+					{
+						knowledgePath: canonicalHiveApprovalPath,
+						ids: [hiveEntry.id],
+						slug: 'hive-skill',
+						draftGeneratedSkillPath: '.swarm/skills/proposals/hive-skill/SKILL.md',
+						updatedAt: '2026-08-26T12:00:00.000Z',
+					},
+				],
+			},
+			null,
+			2,
+		);
+		const request = buildSkillImproverApprovalRequest({
+			sessionId: 'sess-fb-002-hive',
+			candidateContent: approvedCandidateContent,
+			allowedPaths: [
+				'.swarm/skill-improver/proposals/demo.md',
+				'.swarm/skills/proposals/hive-skill/SKILL.md',
+				canonicalHiveApprovalPath,
+			],
+		});
+		if (!request) {
+			throw new Error('expected approval request');
+		}
+		await issueWriteApprovalFact({
+			directory: tmp,
+			request,
+			issuingSessionId: 'sess-human',
+		});
+		const result = await runSkillImprover({
+			directory: tmp,
+			config: {
+				...baseConfig,
+				require_user_approval: true,
+				write_mode: 'draft_skills',
+			},
+			mode: 'draft_skills',
+			sessionId: 'sess-fb-002-hive',
+			approvedCandidateContent,
+		});
+		expect(result.ran).toBe(true);
+		expect(
+			readFileSync(
+				path.join(
+					tmp,
+					'.swarm',
+					'skills',
+					'proposals',
+					'hive-skill',
+					'SKILL.md',
+				),
+				'utf8',
+			),
+		).toBe('# hive skill\n');
+		const stampedHive = readFileSync(hivePath, 'utf8');
+		expect(stampedHive).toContain('"draft_generated_skill_slug":"hive-skill"');
+		expect(stampedHive).toContain(
+			'"draft_generated_skill_path":".swarm/skills/proposals/hive-skill/SKILL.md"',
+		);
 	});
 
 	it('FB-007 consumes an approved candidate exactly once after a successful write', async () => {
