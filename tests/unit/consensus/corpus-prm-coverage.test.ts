@@ -17,6 +17,9 @@ import {
 } from '../../../src/consensus/corpus';
 import type { TrajectoryEntry } from '../../../src/prm/types';
 
+// FR-011 (issue #1737): canonicalize the macOS /var symlink gap.
+const canonicalTmp = fs.realpathSync(os.tmpdir());
+
 function emptyReaders(): CorpusReaders {
 	return {
 		listEvaluationRunIds: async () => [],
@@ -49,7 +52,7 @@ describe('PRM-session corpus coverage disclosure (issue #2041)', () => {
 	let directory: string;
 
 	beforeEach(() => {
-		directory = fs.mkdtempSync(path.join(os.tmpdir(), 'corpus-prm-cov-'));
+		directory = fs.mkdtempSync(path.join(canonicalTmp, 'corpus-prm-cov-'));
 	});
 
 	afterEach(() => {

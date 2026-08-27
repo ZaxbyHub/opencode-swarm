@@ -20,6 +20,9 @@ import {
 } from '../trajectory-store';
 import type { TrajectoryEntry } from '../types';
 
+// FR-011 (issue #1737): canonicalize the macOS /var symlink gap.
+const canonicalTmp = fs.realpathSync(os.tmpdir());
+
 function createEntry(step: number): TrajectoryEntry {
 	return {
 		step,
@@ -37,8 +40,8 @@ describe('trajectory-store cache isolation (issue #2041)', () => {
 	let rootB: string;
 
 	beforeEach(() => {
-		rootA = fs.mkdtempSync(path.join(os.tmpdir(), 'traj-iso-a-'));
-		rootB = fs.mkdtempSync(path.join(os.tmpdir(), 'traj-iso-b-'));
+		rootA = fs.mkdtempSync(path.join(canonicalTmp, 'traj-iso-a-'));
+		rootB = fs.mkdtempSync(path.join(canonicalTmp, 'traj-iso-b-'));
 		clearTrajectoryCache();
 	});
 
@@ -65,8 +68,11 @@ describe('trajectory-store cache isolation (issue #2041)', () => {
 
 	test('a junction/symlink alias of a root shares one cache identity', async () => {
 		const sessionId = 'ses-alias';
-		const realRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'traj-iso-real-'));
-		const alias = path.join(os.tmpdir(), `traj-alias-${Date.now()}`);
+		const realRoot = fs.mkdtempSync(path.join(canonicalTmp, 'traj-iso-real-'));
+		const alias = path.join(
+			fs.realpathSync(os.tmpdir()),
+			`traj-alias-${Date.now()}`,
+		);
 		// Junctions need no privileges on Windows; symlinks elsewhere.
 		fs.symlinkSync(
 			realRoot,

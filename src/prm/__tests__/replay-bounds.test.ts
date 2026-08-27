@@ -11,6 +11,9 @@ import path from 'node:path';
 
 import { _test_exports, recordReplayEntry } from '../replay';
 
+// FR-011 (issue #1737): canonicalize the macOS /var symlink gap.
+const canonicalTmp = fs.realpathSync(os.tmpdir());
+
 const { REPLAY_LIMITS, resetReplayByteTracking } = _test_exports;
 
 function makeArtifact(tempDir: string): string {
@@ -23,7 +26,7 @@ describe('replay byte cap (issue #2041)', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'replay-bounds-'));
+		tempDir = fs.mkdtempSync(path.join(canonicalTmp, 'replay-bounds-'));
 		resetReplayByteTracking();
 	});
 

@@ -30,8 +30,11 @@ import {
 	swarmState,
 } from '../../../src/state';
 
+// FR-011 (issue #1737): canonicalize the macOS /var symlink gap.
+const canonicalTmp = fs.realpathSync(os.tmpdir());
+
 function makeTempDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), 'traj-restart-'));
+	return fs.mkdtempSync(path.join(canonicalTmp, 'traj-restart-'));
 }
 
 /** Simulates a process restart: every module-level session state is dropped. */

@@ -16,6 +16,9 @@ import {
 	scheduleTrajectoryCleanup,
 } from '../trajectory-store';
 
+// FR-011 (issue #1737): canonicalize the macOS /var symlink gap.
+const canonicalTmp = fs.realpathSync(os.tmpdir());
+
 const { TRAJECTORY_LIMITS } = _test_exports;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -37,7 +40,7 @@ describe('trajectory-store cleanup budgets (issue #2041)', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'trajectory-cleanup-'));
+		tempDir = fs.mkdtempSync(path.join(canonicalTmp, 'trajectory-cleanup-'));
 		// The debounce timestamp is module-global; a sibling test file's real
 		// scheduling call inside the 10-minute window would otherwise no-op
 		// this file's first call under a directory-level co-run.

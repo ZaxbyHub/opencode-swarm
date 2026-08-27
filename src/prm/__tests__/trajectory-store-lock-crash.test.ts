@@ -19,6 +19,9 @@ import {
 } from '../trajectory-store';
 import type { TrajectoryEntry } from '../types';
 
+// FR-011 (issue #1737): canonicalize the macOS /var symlink gap.
+const canonicalTmp = fs.realpathSync(os.tmpdir());
+
 function createEntry(step: number): TrajectoryEntry {
 	return {
 		step,
@@ -39,7 +42,7 @@ describe('trajectory-store lock/crash semantics (issue #2041)', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'trajectory-lock-'));
+		tempDir = fs.mkdtempSync(path.join(canonicalTmp, 'trajectory-lock-'));
 		clearTrajectoryCache();
 	});
 

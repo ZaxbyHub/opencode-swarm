@@ -24,6 +24,9 @@ import {
 } from '../trajectory-store';
 import type { TrajectoryEntry } from '../types';
 
+// FR-011 (issue #1737): canonicalize the macOS /var symlink gap.
+const canonicalTmp = fs.realpathSync(os.tmpdir());
+
 const { sessionMaxBytesFor, TRAJECTORY_LIMITS } = _test_exports;
 
 function createEntry(
@@ -62,7 +65,7 @@ describe('trajectory-store disk bounds (issue #2041)', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'trajectory-bounds-'));
+		tempDir = fs.mkdtempSync(path.join(canonicalTmp, 'trajectory-bounds-'));
 		clearTrajectoryCache();
 	});
 

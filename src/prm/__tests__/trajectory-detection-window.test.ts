@@ -21,6 +21,9 @@ import {
 } from '../trajectory-store';
 import type { PrmConfig, TrajectoryEntry } from '../types';
 
+// FR-011 (issue #1737): canonicalize the macOS /var symlink gap.
+const canonicalTmp = fs.realpathSync(os.tmpdir());
+
 const config: PrmConfig = {
 	enabled: true,
 	pattern_thresholds: {
@@ -55,7 +58,7 @@ describe('pattern detection over the retained window (issue #2041)', () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'traj-window-'));
+		tempDir = fs.mkdtempSync(path.join(canonicalTmp, 'traj-window-'));
 		clearTrajectoryCache();
 	});
 
