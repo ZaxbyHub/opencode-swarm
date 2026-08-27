@@ -390,6 +390,10 @@ export const WRITER_CLASSIFICATION: Readonly<
 	// core event store and its authority index (issue #2039); PID-scoped
 	// `.events.jsonl.<pid>.tmp` / `.events-authority-index.json.<pid>.tmp`
 	'src/events/core-events.ts': 'registered-bespoke',
+	// bespoke atomic single-file rewrites (write tmp + rename) for the bounded
+	// shell-audit security store (issue #2040); PID-scoped
+	// `.shell-audit.jsonl.<pid>.tmp`
+	'src/hooks/guardrails/shell-audit-store.ts': 'registered-bespoke',
 	'src/evidence/documents-retention.ts': 'registered-bespoke',
 	'src/evidence/manager.ts': 'registered-bespoke',
 	'src/full-auto/state.ts': 'registered-bespoke',
