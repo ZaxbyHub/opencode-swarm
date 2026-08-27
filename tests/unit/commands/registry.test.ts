@@ -54,13 +54,11 @@ describe('CommandRegistry types and structure', () => {
 			).toBeGreaterThan(0);
 		}
 	});
-
 	test('loop help resolves its plugin-owned protocol from the bundled skill root', () => {
 		const details = COMMAND_REGISTRY.loop.details ?? '';
 		expect(details).toContain('.swarm/bundled-skills/loop/SKILL.md');
 		expect(details).not.toContain('.opencode/skills/loop/SKILL.md');
 	});
-
 	test('entries with subcommandOf are subcommands', () => {
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
 			const cmdEntry = entry as CommandEntry;
