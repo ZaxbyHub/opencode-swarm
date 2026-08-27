@@ -30,10 +30,6 @@ import {
 	shellAuditFilePath,
 } from '../../../src/hooks/guardrails/shell-audit-store';
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 async function mkTempDir(): Promise<string> {
 	return mkdtemp(join(tmpdir(), 'audit-log-test-'));
 }

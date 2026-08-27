@@ -13,7 +13,6 @@ import { validateSwarmPath } from '../../hooks/utils';
 import * as logger from '../../utils/logger';
 import {
 	containsControlChars,
-	containsPathTraversal,
 	validateSymlinkBoundary,
 } from '../../utils/path-security';
 import {
@@ -25,6 +24,11 @@ import {
 } from './cache';
 import { type FreshnessOptions, writeFingerprint } from './freshness';
 import { safeRealpathSync } from './safe-realpath';
+import {
+	deriveRepoRootId,
+	hasSymbolEdgeV2Fields,
+	normalizeSymbolEdge,
+} from './symbol-edge';
 import type { RepoGraph } from './types';
 import {
 	createEmptyGraph,
@@ -80,37 +84,66 @@ export const _internals: {
 	writeFingerprint,
 };
 
-function validateLoadedGraph(parsed: RepoGraph): void {
+function corruption(message: string, cause?: unknown): Error {
+	return Object.assign(new Error(message), { code: 'CORRUPTION', cause });
+}
+
+function resolveTrustedWorkspaceRoot(workspace: string): string {
+	const resolved = path.resolve(workspace);
+	const trusted = _internals.safeRealpathSync(resolved, resolved);
+	if (trusted === null) {
+		throw corruption(`Workspace realpath security check failed: ${workspace}`);
+	}
+	return trusted;
+}
+
+function bindGraphToWorkspace(graph: RepoGraph, workspace: string): void {
+	if (
+		typeof graph.workspaceRoot !== 'string' ||
+		graph.workspaceRoot.length === 0 ||
+		containsControlChars(graph.workspaceRoot)
+	) {
+		throw corruption('repo-graph.json missing or invalid workspaceRoot');
+	}
+	const trustedWorkspace = resolveTrustedWorkspaceRoot(workspace);
+	const persistedWorkspace = path.resolve(graph.workspaceRoot);
+	const trustedPersisted = _internals.safeRealpathSync(
+		persistedWorkspace,
+		persistedWorkspace,
+	);
+	if (trustedPersisted === null) {
+		throw corruption(
+			`repo-graph.json workspaceRoot realpath security check failed: ${graph.workspaceRoot}`,
+		);
+	}
+	if (path.normalize(trustedPersisted) !== path.normalize(trustedWorkspace)) {
+		throw corruption(
+			`repo-graph.json workspaceRoot mismatch: ${graph.workspaceRoot}`,
+		);
+	}
+	graph.workspaceRoot = trustedWorkspace;
+	graph.repoRootId = deriveRepoRootId(trustedWorkspace);
+}
+
+function validateLoadedGraph(parsed: RepoGraph, workspace: string): void {
 	if (!parsed.schema_version) {
-		throw Object.assign(new Error('repo-graph.json missing schema_version'), {
-			code: 'CORRUPTION',
-		});
+		throw corruption('repo-graph.json missing schema_version');
 	}
 	if (!parsed.nodes || typeof parsed.nodes !== 'object') {
-		throw Object.assign(new Error('repo-graph.json missing or invalid nodes'), {
-			code: 'CORRUPTION',
-		});
+		throw corruption('repo-graph.json missing or invalid nodes');
 	}
 	if (!Array.isArray(parsed.edges)) {
-		throw Object.assign(new Error('repo-graph.json missing or invalid edges'), {
-			code: 'CORRUPTION',
-		});
+		throw corruption('repo-graph.json missing or invalid edges');
 	}
 	for (const [key, node] of Object.entries(parsed.nodes)) {
 		if (!key || typeof key !== 'string') {
-			throw Object.assign(
-				new Error('repo-graph.json contains invalid node key'),
-				{ code: 'CORRUPTION' },
-			);
+			throw corruption('repo-graph.json contains invalid node key');
 		}
 		try {
 			validateGraphNode(node);
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : 'Invalid node structure';
-			throw Object.assign(
-				new Error(`repo-graph.json node validation failed: ${msg}`),
-				{ code: 'CORRUPTION' },
-			);
+			throw corruption(`repo-graph.json node validation failed: ${msg}`);
 		}
 	}
 	for (const edge of parsed.edges) {
@@ -118,10 +151,7 @@ function validateLoadedGraph(parsed: RepoGraph): void {
 			validateGraphEdge(edge);
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : 'Invalid edge structure';
-			throw Object.assign(
-				new Error(`repo-graph.json edge validation failed: ${msg}`),
-				{ code: 'CORRUPTION' },
-			);
+			throw corruption(`repo-graph.json edge validation failed: ${msg}`);
 		}
 	}
 	if (
@@ -132,44 +162,38 @@ function validateLoadedGraph(parsed: RepoGraph): void {
 		typeof parsed.metadata.nodeCount !== 'number' ||
 		typeof parsed.metadata.edgeCount !== 'number'
 	) {
-		throw Object.assign(
-			new Error('repo-graph.json missing or invalid metadata'),
-			{ code: 'CORRUPTION' },
-		);
+		throw corruption('repo-graph.json missing or invalid metadata');
 	}
 	if (parsed.symbolEdges !== undefined) {
 		if (!Array.isArray(parsed.symbolEdges)) {
-			throw Object.assign(
-				new Error('repo-graph.json symbolEdges must be an array'),
-				{ code: 'CORRUPTION' },
-			);
-		}
-		for (const entry of parsed.symbolEdges) {
-			if (
-				typeof entry !== 'object' ||
-				entry === null ||
-				typeof entry.fromFile !== 'string' ||
-				typeof entry.fromSymbol !== 'string' ||
-				typeof entry.toFile !== 'string' ||
-				typeof entry.toSymbol !== 'string' ||
-				entry.fromFile === '' ||
-				entry.fromSymbol === '' ||
-				entry.toFile === '' ||
-				entry.toSymbol === '' ||
-				containsControlChars(entry.fromFile) ||
-				containsControlChars(entry.fromSymbol) ||
-				containsControlChars(entry.toFile) ||
-				containsControlChars(entry.toSymbol) ||
-				containsPathTraversal(entry.fromFile) ||
-				containsPathTraversal(entry.toFile)
-			) {
-				throw Object.assign(
-					new Error('repo-graph.json contains invalid symbolEdges entry'),
-					{ code: 'CORRUPTION' },
-				);
-			}
+			throw corruption('repo-graph.json symbolEdges must be an array');
 		}
 	}
+	bindGraphToWorkspace(parsed, workspace);
+	normalizeGraphSymbolEdges(parsed);
+}
+
+function normalizeGraphSymbolEdges(graph: RepoGraph): void {
+	const repoRootId = deriveRepoRootId(graph.workspaceRoot);
+	graph.repoRootId = repoRootId;
+	if (!graph.symbolEdges) return;
+	const normalized = [];
+	for (const entry of graph.symbolEdges) {
+		try {
+			const validated = normalizeSymbolEdge(
+				entry,
+				graph.workspaceRoot,
+				repoRootId,
+			);
+			normalized.push(hasSymbolEdgeV2Fields(entry) ? validated : entry);
+		} catch (cause) {
+			throw corruption(
+				'repo-graph.json contains invalid symbolEdges entry',
+				cause,
+			);
+		}
+	}
+	graph.symbolEdges = normalized;
 }
 
 // ============ Safe Load/Save Operations ============
@@ -257,7 +281,7 @@ export async function loadGraph(workspace: string): Promise<RepoGraph | null> {
 				code: 'CORRUPTION',
 			});
 		}
-		validateLoadedGraph(parsed);
+		validateLoadedGraph(parsed, workspace);
 
 		// Update cache with current file mtime
 		setCachedGraph(normalized, parsed, stats.mtimeMs);
@@ -312,7 +336,7 @@ export function loadGraphSync(workspace: string): RepoGraph | null {
 				code: 'CORRUPTION',
 			});
 		}
-		validateLoadedGraph(parsed);
+		validateLoadedGraph(parsed, workspace);
 		setCachedGraph(normalized, parsed, stats.mtimeMs);
 		return parsed;
 	} catch (error: unknown) {
@@ -384,6 +408,11 @@ export async function saveGraph(
 			`Graph workspaceRoot mismatch: graph was built for "${graph.workspaceRoot}" but save was called for "${workspace}"`,
 		);
 	}
+	graph.repoRootId = deriveRepoRootId(realWorkspace);
+
+	// Normalize legacy edges and reject structurally or semantically invalid v2
+	// facts before any write. This is the same trust boundary used by both loaders.
+	normalizeGraphSymbolEdges(graph);
 
 	const normalized = normalizedWorkspace;
 

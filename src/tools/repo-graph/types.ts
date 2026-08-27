@@ -48,8 +48,12 @@ export const REPO_GRAPH_FILENAME = 'repo-graph.json';
  * source read. The content-freshness sidecar requires both witnesses before
  * it will certify a graph; older graphs remain readable but are intentionally
  * treated as needing a rebuild before certification.
+ *
+ * 1.5.0 adds an optional graph-level `repoRootId` plus additive SymbolEdge v2
+ * identity, kind, confidence, resolution, and evidence fields. Legacy 1.2.0
+ * four-coordinate symbol edges remain readable and are normalized in memory.
  */
-export const GRAPH_SCHEMA_VERSION = '1.4.0';
+export const GRAPH_SCHEMA_VERSION = '1.5.0';
 
 /**
  * Compare dotted numeric version strings (e.g. '1.1.0' >= '1.1.0').
@@ -332,6 +336,45 @@ export interface SymbolReference {
  * than {@link GraphEdge} (which tracks file-level imports) and enable
  * precise context-packing and symbol navigation queries.
  */
+export const SYMBOL_EDGE_KIND_VALUES = [
+	'CALLS',
+	'REFERENCES',
+	'USES_TYPE',
+	'INSTANTIATES',
+	'IMPLEMENTS',
+	'OVERRIDES',
+] as const;
+export type SymbolEdgeKind = (typeof SYMBOL_EDGE_KIND_VALUES)[number];
+
+export const SYMBOL_EDGE_RESOLUTION_VALUES = [
+	'exact',
+	'import_binding',
+	'same_file_scope',
+	'unique_name',
+	'type_resolved',
+	'lsp',
+	'scip',
+	'heuristic',
+	'unresolved',
+] as const;
+export type SymbolEdgeResolution =
+	(typeof SYMBOL_EDGE_RESOLUTION_VALUES)[number];
+
+export type SymbolIdentityKind = 'symbol' | 'module';
+
+export interface SymbolEdgeEvidence {
+	/** Workspace-relative source path; source text itself is never persisted. */
+	file: string;
+	/** 1-based source line. */
+	line: number;
+	/** Optional 1-based source column. */
+	column?: number;
+	/** SHA-256 of the NFC-normalized logical source line. */
+	snippetHash: string;
+	/** Extractor that produced the fact, for example `tree-sitter/typescript`. */
+	extractor: string;
+}
+
 export interface SymbolEdge {
 	/** Resolved absolute path of the source file (matches `GraphNode.filePath` keys). */
 	fromFile: string;
@@ -341,6 +384,20 @@ export interface SymbolEdge {
 	toFile: string;
 	/** Exported symbol referenced in the target file. */
 	toSymbol: string;
+	/** Stable SHA-256 identity of this edge (schema >= 1.5.0). */
+	id?: string;
+	/** Stable SHA-256 identity of the source symbol. */
+	fromId?: string;
+	/** Stable SHA-256 identity of the target symbol. */
+	toId?: string;
+	/** Relationship kind. Current tree-sitter extraction emits REFERENCES. */
+	kind?: SymbolEdgeKind;
+	/** Advisory confidence in the inclusive range 0..1. */
+	confidence?: number;
+	/** How the relationship was resolved. */
+	resolution?: SymbolEdgeResolution;
+	/** Bounded provenance records. Empty only when no honest location exists. */
+	evidence?: SymbolEdgeEvidence[];
 }
 
 /**
@@ -506,6 +563,7 @@ export interface GraphHealthResult {
 	unreadableFiles: string[];
 	validationSkippedFiles: string[];
 	lowConfidenceEdgeCount: number;
+	unresolvedSymbolEdgeCount: number;
 	walkTruncated: boolean;
 	walkTruncationReason: 'budget' | 'cap' | null;
 	incrementalFallbacks: number;
@@ -560,6 +618,8 @@ export interface RepoGraph {
 	schema_version: string;
 	/** Workspace root directory */
 	workspaceRoot: string;
+	/** Root-independent repository label used to scope stable symbol IDs. */
+	repoRootId?: string;
 	/** Graph nodes keyed by resolved file path */
 	nodes: Record<string, GraphNode>;
 	/** Graph edges representing dependencies */
