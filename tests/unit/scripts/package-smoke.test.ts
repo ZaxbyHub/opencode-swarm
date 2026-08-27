@@ -18,7 +18,7 @@ const requiredProjectSkillSlugs = [
 	'brainstorm',
 	'specify',
 	'clarify-spec',
-	'resume',
+	'swarm-resume',
 	'clarify',
 	'discover',
 	'consult',
