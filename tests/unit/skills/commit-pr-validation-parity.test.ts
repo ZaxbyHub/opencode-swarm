@@ -39,6 +39,7 @@ const CI_COMMAND_TO_SKILL_STRING: Record<string, string> = {
 	'bun run check:events': 'bun run check:events',
 	'bun run check:retention': 'bun run check:retention',
 	'bun run check:core-events': 'bun run check:core-events',
+	'bun run check:shell-audit': 'bun run check:shell-audit',
 	'bash scripts/check-cross-contamination.sh':
 		'bash scripts/check-cross-contamination.sh',
 	'bash scripts/check-test-clock.sh': 'bash scripts/check-test-clock.sh',

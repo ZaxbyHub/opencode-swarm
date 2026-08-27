@@ -36,6 +36,8 @@ export const closeReceiptLifecycleInternals = {
 
 import { finalizeContextTelemetry as finalizeContextTelemetryImpl } from '../context-map/telemetry.js';
 import { finalizeCoreEventsForClose as finalizeCoreEventsForCloseImpl } from '../events/core-events.js';
+import { redactDecisionLineForArchive } from '../hooks/guardrails/audit-log.js';
+import { finalizeShellAuditForClose as finalizeShellAuditForCloseImpl } from '../hooks/guardrails/shell-audit-store.js';
 import {
 	readKnowledge,
 	resolveSwarmKnowledgePath,
@@ -1322,6 +1324,23 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 					? finalizeErr.message
 					: String(finalizeErr);
 			ctx.warnings.push(`Core events finalize before archive failed: ${msg}`);
+		}
+
+		// Finalize the shell-audit security store (issue #2040) BEFORE the
+		// session/ directory archive copy so the archived `shell-audit.jsonl`
+		// is a defined, VALIDATED cut (legacy header-less tail drained to
+		// convergence, window compacted under the decision-class priority
+		// policy, pre-rename validation). Releasing the store lock also
+		// unlinks it, so a stale lock file is never archived. Fail-open: a
+		// finalize failure only warns; the close pipeline continues.
+		try {
+			_internals.finalizeShellAudit(ctx.directory);
+		} catch (finalizeErr) {
+			const msg =
+				finalizeErr instanceof Error
+					? finalizeErr.message
+					: String(finalizeErr);
+			ctx.warnings.push(`Shell audit finalize before archive failed: ${msg}`);
 		}
 
 		// Copy swarm artifacts to archive.
@@ -2727,5 +2746,16 @@ export const _internals = {
 	},
 	finalizeCoreEvents: (directory: string): void => {
 		finalizeCoreEventsForCloseImpl(directory);
+	},
+	// Finalizes the bounded shell-audit security store before the session/
+	// directory archive copy (issue #2040). Synchronous, fail-open. Seam so
+	// close tests can substitute a no-op / throwing stub and pin ordering.
+	// The lineTransform re-applies the CURRENT redaction policy to retained
+	// lines so a legacy pre-#2040 record cannot bypass it in the archived
+	// cut (review round F4 — "re-redact at the archive boundary").
+	finalizeShellAudit: (directory: string): void => {
+		finalizeShellAuditForCloseImpl(directory, {
+			lineTransform: redactDecisionLineForArchive,
+		});
 	},
 };

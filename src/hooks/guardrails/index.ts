@@ -782,12 +782,6 @@ export function createGuardrailsHooks(
 		cfg.interpreter_allowed_agents;
 
 	const shellAuditEnabled: boolean = cfg.shell_audit_log ?? true;
-	const shellAuditPath = path.join(
-		effectiveDirectory,
-		'.swarm',
-		'session',
-		'shell-audit.jsonl',
-	);
 
 	// Shared consecutiveNoToolTurns Map (shared between toolBefore and messagesTransform)
 	const consecutiveNoToolTurns = new Map<string, number>();
@@ -901,7 +895,6 @@ export function createGuardrailsHooks(
 		cfg,
 		precomputedAuthorityRules,
 		universalDenyPrefixes,
-		shellAuditPath,
 		shellAuditEnabled,
 		interpreterAllowedAgents,
 		authorityConfig,

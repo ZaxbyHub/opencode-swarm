@@ -122,7 +122,13 @@ export type TelemetryEvent =
 	// accepted/compacted/retained/dropped/corrupt counts, authority-index
 	// size and eviction counts, oldest/newest timestamps, byte figures.
 	// Counts only; no event content, no paths.
-	| 'core_events_health';
+	| 'core_events_health'
+	// Shell-audit store health (issue #2040): bounded counts emitted on
+	// compaction and close for the bounded `.swarm/session/shell-audit.jsonl`
+	// security-audit store — accepted/compacted/retained/dropped/corrupt
+	// counts, oldest/newest timestamps, byte figures. Counts only; no
+	// commands, no paths, no agents, no session IDs.
+	| 'shell_audit_health';
 
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =
@@ -1005,6 +1011,30 @@ export const telemetry = {
 		limit_bytes: number;
 	}): void {
 		_internals.emit('core_events_health', data);
+	},
+
+	/**
+	 * Shell-audit store health (issue #2040): emitted on compaction and close
+	 * for the bounded `.swarm/session/shell-audit.jsonl` security-audit
+	 * store. Counts ONLY — no command content, no filesystem paths, no agent
+	 * or session identifiers, matching the observability contract's
+	 * no-content-in-metrics rule (issue #2040 requirement 5). `dropped_count`
+	 * discloses allowed-class decisions folded by the age ceiling;
+	 * `compacted_count` budget folds (byte/count caps).
+	 */
+	shellAuditHealth(data: {
+		trigger: 'compaction' | 'close';
+		accepted_count: number;
+		compacted_count: number;
+		retained_count: number;
+		dropped_count: number;
+		corrupt_count: number;
+		oldest_timestamp: string | null;
+		newest_timestamp: string | null;
+		bytes: number;
+		limit_bytes: number;
+	}): void {
+		_internals.emit('shell_audit_health', data);
 	},
 
 	/**

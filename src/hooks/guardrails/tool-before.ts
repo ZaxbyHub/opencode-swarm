@@ -114,8 +114,6 @@ export interface ToolBeforeContext {
 	precomputedAuthorityRules: Record<string, AgentRule>;
 	/** Global deny prefixes — apply to all agents regardless of per-agent rules */
 	universalDenyPrefixes: string[];
-	/** Shell audit log path */
-	shellAuditPath: string;
 	/** Whether shell audit logging is enabled */
 	shellAuditEnabled: boolean;
 	/** Agents allowed to use bash/shell interpreter (undefined = all allowed) */
@@ -179,7 +177,6 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		cfg,
 		precomputedAuthorityRules,
 		universalDenyPrefixes,
-		shellAuditPath,
 		shellAuditEnabled,
 		interpreterAllowedAgents,
 		authorityConfig,
@@ -1292,7 +1289,6 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		args: unknown,
 		agent: string,
 		command: string,
-		auditPath: string,
 		auditEnabled: boolean,
 	): Promise<void> {
 		if (tool !== 'bash' && tool !== 'shell') return;
@@ -1416,7 +1412,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					executorMechanism: executor?.mechanism ?? 'none',
 					skipReason: 'executor not available',
 				},
-				{ auditPath, enabled: auditEnabled },
+				{ directory: effectiveDirectory, enabled: auditEnabled },
 			);
 			return;
 		}
@@ -1559,7 +1555,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					command: rawCommand,
 					executorMechanism: executor.mechanism,
 				},
-				{ auditPath, enabled: auditEnabled },
+				{ directory: effectiveDirectory, enabled: auditEnabled },
 			);
 		} catch (err) {
 			recordOutcome({
@@ -2408,7 +2404,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					})(),
 				},
 				{
-					auditPath: shellAuditPath,
+					directory: effectiveDirectory,
 					enabled: shellAuditEnabled,
 				},
 			);
@@ -2482,7 +2478,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					destructiveCategory,
 				},
 				{
-					auditPath: shellAuditPath,
+					directory: effectiveDirectory,
 					enabled: shellAuditEnabled,
 				},
 			);
@@ -2569,7 +2565,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					action: 'bash',
 				},
 				{
-					auditPath: shellAuditPath,
+					directory: effectiveDirectory,
 					enabled: shellAuditEnabled,
 				},
 			);
@@ -2595,7 +2591,6 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			output.args,
 			agentNameForSandbox,
 			rawShellCommand,
-			shellAuditPath,
 			shellAuditEnabled,
 		);
 
@@ -2681,7 +2676,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 							})(),
 						},
 						{
-							auditPath: shellAuditPath,
+							directory: effectiveDirectory,
 							enabled: shellAuditEnabled,
 						},
 					);
@@ -2731,7 +2726,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 							})(),
 						},
 						{
-							auditPath: shellAuditPath,
+							directory: effectiveDirectory,
 							enabled: shellAuditEnabled,
 						},
 					);
