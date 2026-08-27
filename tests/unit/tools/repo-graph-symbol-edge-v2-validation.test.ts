@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 
 import {
@@ -14,6 +13,7 @@ import {
 	deriveRepoRootId,
 	hashSymbolEdgeSnippet,
 } from '../../../src/tools/repo-graph/symbol-edge';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 type SymbolEdge = NonNullable<RepoGraph['symbolEdges']>[number];
 
@@ -21,9 +21,7 @@ describe('SymbolEdge v2 persistence validation — issue #1532', () => {
 	let workspace: string;
 
 	beforeEach(() => {
-		workspace = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'repo-graph-edge-v2-store-')),
-		);
+		workspace = canonicalMkdtemp('repo-graph-edge-v2-store-');
 		fs.mkdirSync(path.join(workspace, '.swarm'), { recursive: true });
 	});
 

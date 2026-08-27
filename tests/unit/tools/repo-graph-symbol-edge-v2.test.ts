@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 
 import {
@@ -19,15 +18,14 @@ import {
 	hashSymbolEdgeSnippet,
 	mergeSymbolEdges,
 } from '../../../src/tools/repo-graph/symbol-edge';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 describe('SymbolEdge v2 — issue #1532 regression', () => {
 	let workspace: string;
 	let originalExtractFileSymbols: typeof builderInternals.extractFileSymbols;
 
 	beforeEach(() => {
-		workspace = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'repo-graph-edge-v2-')),
-		);
+		workspace = canonicalMkdtemp('repo-graph-edge-v2-');
 		originalExtractFileSymbols = builderInternals.extractFileSymbols;
 	});
 
@@ -90,7 +88,7 @@ describe('SymbolEdge v2 — issue #1532 regression', () => {
 				} as RepoGraph['symbolEdges'][number],
 			],
 			metadata: {
-				generatedAt: new Date().toISOString(),
+				generatedAt: new Date(0).toISOString(),
 				generator: 'test',
 				nodeCount: 0,
 				edgeCount: 0,
@@ -128,7 +126,7 @@ describe('SymbolEdge v2 — issue #1532 regression', () => {
 			edges: [],
 			symbolEdges: [edge],
 			metadata: {
-				generatedAt: new Date().toISOString(),
+				generatedAt: new Date(0).toISOString(),
 				generator: 'test',
 				nodeCount: 0,
 				edgeCount: 0,
