@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { classifyCommand } from '../../../src/security/command-classifier.js';
+import {
+	classifyCommand,
+	getSharedClassifierGuardrailBlock,
+} from '../../../src/security/command-classifier.js';
 
 describe('shared command classifier', () => {
 	test('uses most severe compound segment', () => {
@@ -14,6 +17,21 @@ describe('shared command classifier', () => {
 		expect(classifyCommand('find . -delete').aggregate).toBe('destructive');
 	});
 
+	test('surfaces shared immediate-block metadata for unconditional destructive commands only', () => {
+		const findDelete = classifyCommand('find . -delete');
+		expect(getSharedClassifierGuardrailBlock(findDelete)).toEqual({
+			ruleId: 'find-delete',
+			category: 'destructive',
+			destructiveCategory: 'find delete',
+			message:
+				'BLOCKED: "find -delete" detected — dynamic delete expansion is not allowed from shell commands',
+		});
+
+		const scopedDelete = classifyCommand('rm -rf build');
+		expect(scopedDelete.aggregate).toBe('destructive');
+		expect(getSharedClassifierGuardrailBlock(scopedDelete)).toBeNull();
+	});
+
 	test('does not overstate bare mkfs without a typed filesystem suffix', () => {
 		expect(classifyCommand('mkfs /dev/sdb').aggregate).toBe('unknown');
 		expect(classifyCommand('mkfs.ext4 /dev/sdb').aggregate).toBe(
@@ -24,6 +42,12 @@ describe('shared command classifier', () => {
 	test('never treats substitutions or interpreter pipelines as safe', () => {
 		expect(classifyCommand('echo $(cat file)').aggregate).toBe('unknown');
 		expect(classifyCommand('printf payload | bash').aggregate).toBe('unknown');
+	});
+
+	test('treats $IFS indirection as ambiguous shell syntax', () => {
+		const result = classifyCommand('echo$IFShello');
+		expect(result.aggregate).toBe('unknown');
+		expect(result.ambiguous).toBe(true);
 	});
 
 	test('normalizes wrappers and quote splicing', () => {

@@ -18,7 +18,7 @@
  */
 
 import { existsSync } from 'node:fs';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, unlink } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { EnrichmentQuotaOptions } from '../hooks/knowledge-curator.js';
 import {
@@ -38,12 +38,14 @@ import {
 } from '../hooks/skill-improver-llm-factory.js';
 import {
 	computeWriteApprovalHash,
-	currentWriteAuthoritySatisfies,
+	consumeWriteApprovalFact,
+	findWriteApprovalFact,
 	type WriteApprovalRequest,
 } from '../security/write-authority.js';
 import { hasActiveFullAuto } from '../state.js';
 import { atomicWriteSwarmFile } from '../utils/atomic-write';
 import { warn } from '../utils/logger.js';
+import { validateTargetWithinRoot } from '../utils/path-security.js';
 import {
 	type AutoApplyResult,
 	autoApplyProposals,
@@ -230,6 +232,7 @@ export function buildSkillImproverApprovalRequest(input: {
 
 export interface PreparedSkillImproverApprovalCandidate {
 	directory: string;
+	sessionId: string;
 	now: Date;
 	source: 'llm' | 'deterministic_fallback';
 	model?: string;
@@ -271,11 +274,52 @@ function toApprovalPath(directory: string, targetPath: string): string {
 	return path.resolve(targetPath).replace(/\\/g, '/');
 }
 
-function resolveApprovedPath(directory: string, approvedPath: string): string {
-	const normalized = approvedPath.replace(/\//g, path.sep);
-	return path.isAbsolute(normalized)
-		? normalized
-		: path.resolve(directory, normalized);
+function isSameFilesystemPath(left: string, right: string): boolean {
+	const normalizedLeft = path.normalize(left);
+	const normalizedRight = path.normalize(right);
+	return process.platform === 'win32'
+		? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+		: normalizedLeft === normalizedRight;
+}
+
+function validateApprovedPath(
+	directory: string,
+	approvedPath: string,
+	options?: { allowCanonicalHiveKnowledge?: boolean },
+): { approvalPath: string; resolvedPath: string } {
+	const normalized = approvedPath.replace(/\\/g, '/').trim();
+	const reason = validateTargetWithinRoot(normalized, directory);
+	if (!reason) {
+		const resolvedPath = path.resolve(directory, normalized);
+		return {
+			approvalPath: path.relative(directory, resolvedPath).replace(/\\/g, '/'),
+			resolvedPath,
+		};
+	}
+	if (
+		options?.allowCanonicalHiveKnowledge === true &&
+		reason.startsWith('Absolute path rejected:')
+	) {
+		const expectedHivePath = path.resolve(resolveHiveKnowledgePath());
+		const resolvedPath = path.resolve(normalized);
+		if (isSameFilesystemPath(resolvedPath, expectedHivePath)) {
+			return {
+				approvalPath: expectedHivePath.replace(/\\/g, '/'),
+				resolvedPath: expectedHivePath,
+			};
+		}
+	}
+	throw new Error(
+		`skill_improver approved path rejected: ${approvedPath} (${reason})`,
+	);
+}
+
+function resolveApprovedPath(
+	directory: string,
+	approvedPath: string,
+	options?: { allowCanonicalHiveKnowledge?: boolean },
+): string {
+	return validateApprovedPath(directory, approvedPath, options).resolvedPath;
 }
 
 function buildDraftSkillsWriteManifest(input: {
@@ -400,7 +444,7 @@ async function buildDraftSourceStampTargets(
 		const ids = draft.sourceKnowledgeIds.filter((id) => swarmIds.has(id));
 		if (ids.length > 0) {
 			targets.push({
-				knowledgePath: swarmPath,
+				knowledgePath: toApprovalPath(directory, swarmPath),
 				ids,
 				slug: draft.slug,
 				draftGeneratedSkillPath: draft.path,
@@ -416,7 +460,7 @@ async function buildDraftSourceStampTargets(
 		const ids = draft.sourceKnowledgeIds.filter((id) => hiveIds.has(id));
 		if (ids.length > 0) {
 			targets.push({
-				knowledgePath: hivePath,
+				knowledgePath: toApprovalPath(directory, hivePath),
 				ids,
 				slug: draft.slug,
 				draftGeneratedSkillPath: draft.path,
@@ -446,27 +490,42 @@ async function preflightDraftSourceStampTargets(
 async function applyDraftSourceStampTargets(
 	targets: SkillImproverDraftSourceStampTarget[],
 ): Promise<void> {
+	const grouped = new Map<string, SkillImproverDraftSourceStampTarget[]>();
 	for (const target of targets) {
-		const expectedIds = new Set(target.ids);
-		const matched = new Set<string>();
-		await transactKnowledge<KnowledgeEntryBase>(
-			target.knowledgePath,
-			(entries) => {
-				let changed = false;
-				for (const entry of entries) {
-					if (!expectedIds.has(entry.id)) continue;
+		const bucket = grouped.get(target.knowledgePath);
+		if (bucket) {
+			bucket.push(target);
+			continue;
+		}
+		grouped.set(target.knowledgePath, [target]);
+	}
+	for (const [knowledgePath, group] of grouped) {
+		let staleSlug: string | null = null;
+		await transactKnowledge<KnowledgeEntryBase>(knowledgePath, (entries) => {
+			const byId = new Map(entries.map((entry) => [entry.id, entry]));
+			for (const target of group) {
+				const missing = target.ids.filter((id) => !byId.has(id));
+				if (missing.length > 0) {
+					staleSlug = target.slug;
+					return null;
+				}
+			}
+			let changed = false;
+			for (const target of group) {
+				for (const id of target.ids) {
+					const entry = byId.get(id);
+					if (!entry) continue;
 					entry.draft_generated_skill_slug = target.slug;
 					entry.draft_generated_skill_path = target.draftGeneratedSkillPath;
 					entry.updated_at = target.updatedAt;
-					matched.add(entry.id);
 					changed = true;
 				}
-				return changed ? entries : null;
-			},
-		);
-		if (matched.size !== expectedIds.size) {
+			}
+			return changed ? entries : null;
+		});
+		if (staleSlug) {
 			throw new Error(
-				`skill_improver approval manifest is stale; source stamp set for ${target.slug} changed during apply`,
+				`skill_improver approval manifest is stale; source stamp set for ${staleSlug} changed during apply`,
 			);
 		}
 	}
@@ -500,18 +559,61 @@ function buildPreparedApprovalCandidate(input: {
 	);
 	const draftWrites = input.draftWrites ?? [];
 	const draftSourceStamps = input.draftSourceStamps ?? [];
-	const allowedPaths = [
-		toApprovalPath(input.directory, proposalPath),
-		...draftWrites.map((draft) => draft.path),
-		...draftSourceStamps.map((target) =>
-			toApprovalPath(input.directory, target.knowledgePath),
-		),
-	];
-	const normalizedAllowedPaths = [...new Set(allowedPaths)].sort();
+	const normalizedAllowedPaths = new Set<string>();
+	const normalizedDraftWrites: SkillImproverDraftWrite[] = [];
+	const normalizedDraftSourceStamps: SkillImproverDraftSourceStampTarget[] = [];
+	try {
+		normalizedAllowedPaths.add(
+			validateApprovedPath(
+				input.directory,
+				toApprovalPath(input.directory, proposalPath),
+			).approvalPath,
+		);
+		for (const draft of draftWrites) {
+			const validatedDraftPath = validateApprovedPath(
+				input.directory,
+				draft.path,
+			);
+			normalizedAllowedPaths.add(validatedDraftPath.approvalPath);
+			normalizedDraftWrites.push({
+				...draft,
+				path: validatedDraftPath.approvalPath,
+			});
+		}
+		for (const target of draftSourceStamps) {
+			const validatedKnowledgePath = validateApprovedPath(
+				input.directory,
+				target.knowledgePath,
+				{ allowCanonicalHiveKnowledge: true },
+			);
+			const validatedDraftPath = validateApprovedPath(
+				input.directory,
+				target.draftGeneratedSkillPath,
+			);
+			normalizedAllowedPaths.add(validatedKnowledgePath.approvalPath);
+			normalizedDraftSourceStamps.push({
+				...target,
+				knowledgePath: validatedKnowledgePath.approvalPath,
+				draftGeneratedSkillPath: validatedDraftPath.approvalPath,
+			});
+		}
+	} catch (error) {
+		return {
+			kind: 'result',
+			result: {
+				ran: false,
+				reason: error instanceof Error ? error.message : String(error),
+				quota: input.quota,
+				source: input.source,
+				model: input.model,
+			},
+		};
+	}
+	const allowedPaths = [...normalizedAllowedPaths].sort();
 	const approvalRequest = buildSkillImproverApprovalRequest({
 		sessionId: input.sessionId,
 		candidateContent: input.candidateContent,
-		allowedPaths: normalizedAllowedPaths,
+		allowedPaths,
 	});
 	if (!approvalRequest) {
 		return {
@@ -529,15 +631,16 @@ function buildPreparedApprovalCandidate(input: {
 		kind: 'prepared',
 		prepared: {
 			directory: input.directory,
+			sessionId: input.sessionId ?? '',
 			now: input.now,
 			source: input.source,
 			model: input.model,
 			proposalPath,
 			proposalContent: input.proposalContent,
-			allowedPaths: normalizedAllowedPaths,
+			allowedPaths,
 			candidateContent: input.candidateContent,
-			draftWrites,
-			draftSourceStamps,
+			draftWrites: normalizedDraftWrites,
+			draftSourceStamps: normalizedDraftSourceStamps,
 			request: approvalRequest,
 			quota: input.quota,
 			quotaWindow: input.quotaWindow,
@@ -1338,7 +1441,31 @@ export async function writeApprovedSkillImproverCandidate(
 			quota: prepared.quota,
 		};
 	}
-	if (!currentWriteAuthoritySatisfies(prepared.request)) {
+	if (!prepared.sessionId.trim()) {
+		return {
+			ran: false,
+			reason:
+				'skill_improver requires a session-bound write approval; no sessionId was provided',
+			quota: await releasePreparedSkillImproverApprovalCandidate(prepared),
+			approvalRequired: {
+				request: prepared.request,
+				candidateContent: prepared.candidateContent,
+				candidateContentChars: prepared.candidateContent.length,
+				candidateContentTokenEstimate: estimateTokenCount(
+					prepared.candidateContent,
+				),
+				allowedPaths: prepared.allowedPaths,
+			},
+			source: prepared.source,
+			model: prepared.model,
+		};
+	}
+	const activeApproval = await findWriteApprovalFact({
+		directory: prepared.directory,
+		request: prepared.request,
+		now: prepared.now,
+	});
+	if (!activeApproval) {
 		return {
 			ran: false,
 			reason: 'skill_improver requires an exact human write approval',
@@ -1356,8 +1483,33 @@ export async function writeApprovedSkillImproverCandidate(
 			model: prepared.model,
 		};
 	}
+	let resolvedDraftPaths: string[];
+	let validatedStampTargets: SkillImproverDraftSourceStampTarget[];
+	try {
+		resolvedDraftPaths = prepared.draftWrites.map((draft) =>
+			resolveApprovedPath(prepared.directory, draft.path),
+		);
+		validatedStampTargets = prepared.draftSourceStamps.map((target) => ({
+			...target,
+			knowledgePath: resolveApprovedPath(
+				prepared.directory,
+				target.knowledgePath,
+				{ allowCanonicalHiveKnowledge: true },
+			),
+			draftGeneratedSkillPath: validateApprovedPath(
+				prepared.directory,
+				target.draftGeneratedSkillPath,
+			).approvalPath,
+		}));
+	} catch (error) {
+		return {
+			ran: false,
+			reason: error instanceof Error ? error.message : String(error),
+			quota: prepared.quota,
+		};
+	}
 	const staleStampReason = await preflightDraftSourceStampTargets(
-		prepared.draftSourceStamps,
+		validatedStampTargets,
 	);
 	if (staleStampReason) {
 		return {
@@ -1366,30 +1518,81 @@ export async function writeApprovedSkillImproverCandidate(
 			quota: prepared.quota,
 		};
 	}
-	await atomicWrite(prepared.proposalPath, prepared.proposalContent);
-	for (const draft of prepared.draftWrites) {
-		await atomicWrite(
-			resolveApprovedPath(prepared.directory, draft.path),
-			draft.content,
+	const fileRollback = new Map<
+		string,
+		{ existed: boolean; content: string | null }
+	>();
+	for (const targetPath of [prepared.proposalPath, ...resolvedDraftPaths]) {
+		try {
+			fileRollback.set(targetPath, {
+				existed: true,
+				content: await readFile(targetPath, 'utf-8'),
+			});
+		} catch {
+			fileRollback.set(targetPath, { existed: false, content: null });
+		}
+	}
+	const knowledgeRollback = new Map<string, KnowledgeEntryBase[]>();
+	for (const target of validatedStampTargets) {
+		if (knowledgeRollback.has(target.knowledgePath)) continue;
+		knowledgeRollback.set(
+			target.knowledgePath,
+			await readKnowledge<KnowledgeEntryBase>(target.knowledgePath),
 		);
 	}
-	await applyDraftSourceStampTargets(prepared.draftSourceStamps);
-	return {
-		ran: true,
-		proposalPath: prepared.proposalPath,
-		source: prepared.source,
-		quota: prepared.quota,
-		model: prepared.model,
-		...(prepared.draftWrites.length > 0
-			? {
-					draftSkillsWritten: prepared.draftWrites.map((draft) => ({
-						slug: draft.slug,
-						path: resolveApprovedPath(prepared.directory, draft.path),
-						sourceKnowledgeIds: draft.sourceKnowledgeIds,
-					})),
-				}
-			: {}),
-	};
+	try {
+		await atomicWrite(prepared.proposalPath, prepared.proposalContent);
+		for (let i = 0; i < prepared.draftWrites.length; i++) {
+			await atomicWrite(
+				resolvedDraftPaths[i]!,
+				prepared.draftWrites[i]!.content,
+			);
+		}
+		await applyDraftSourceStampTargets(validatedStampTargets);
+		const consumed = await consumeWriteApprovalFact({
+			directory: prepared.directory,
+			request: prepared.request,
+			consumerSessionId: prepared.sessionId,
+			now: prepared.now,
+		});
+		if (!consumed) {
+			throw new Error('skill_improver requires an exact human write approval');
+		}
+		return {
+			ran: true,
+			proposalPath: prepared.proposalPath,
+			source: prepared.source,
+			quota: prepared.quota,
+			model: prepared.model,
+			...(prepared.draftWrites.length > 0
+				? {
+						draftSkillsWritten: prepared.draftWrites.map((draft, index) => ({
+							slug: draft.slug,
+							path: resolvedDraftPaths[index]!,
+							sourceKnowledgeIds: draft.sourceKnowledgeIds,
+						})),
+					}
+				: {}),
+		};
+	} catch (error) {
+		for (const [knowledgePath, snapshot] of knowledgeRollback) {
+			await transactKnowledge<KnowledgeEntryBase>(knowledgePath, () =>
+				snapshot.map((entry) => structuredClone(entry)),
+			).catch(() => {});
+		}
+		for (const [targetPath, state] of fileRollback) {
+			if (state.existed && state.content !== null) {
+				await atomicWrite(targetPath, state.content).catch(() => {});
+				continue;
+			}
+			await unlink(targetPath).catch(() => {});
+		}
+		return {
+			ran: false,
+			reason: error instanceof Error ? error.message : String(error),
+			quota: prepared.quota,
+		};
+	}
 }
 
 export async function runSkillImprover(
@@ -1443,7 +1646,7 @@ export async function runSkillImprover(
 		if (prepared.kind === 'result') {
 			return prepared.result;
 		}
-		if (!currentWriteAuthoritySatisfies(prepared.prepared.request)) {
+		if (req.approvedCandidateContent === undefined) {
 			return buildApprovalRequiredResult({
 				reason: 'skill_improver requires an exact human write approval',
 				quota: prepared.prepared.quota,

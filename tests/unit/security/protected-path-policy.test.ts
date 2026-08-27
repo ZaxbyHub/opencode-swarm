@@ -4,8 +4,12 @@ import { isPolicyProtectedPath } from '../../../src/security/protected-path-poli
 describe('central protected path policy', () => {
 	test('protects security, evaluation, release, secret, and nested control paths', () => {
 		for (const candidate of [
+			'.swarm',
+			'.swarm/authority/write-approvals.jsonl',
+			'src/security',
 			'src/security/x.ts',
 			'src/evaluation/runner.ts',
+			'docs/releases',
 			'.github/workflows/ci.yml',
 			'docs/releases/pending/x.md',
 			'pkg/.git/config',

@@ -1,3 +1,5 @@
+import { sanitizeDiagnosticText } from '../scope/path-identity';
+
 export interface SandboxWrapOutcome {
 	sessionID: string;
 	callID: string;
@@ -13,8 +15,10 @@ export interface SandboxWrapOutcome {
 }
 
 const MAX_SANDBOX_WRAP_OUTCOMES = 512;
+const MAX_TRACKED_SKIP_SESSIONS = 128;
+const MAX_SKIP_REASONS_PER_SESSION = 128;
 const sandboxWrapOutcomes = new Map<string, SandboxWrapOutcome>();
-const sandboxSkipReasons: string[] = [];
+const sandboxSkipReasonsBySession = new Map<string, string[]>();
 
 function key(sessionID: string, callID: string): string {
 	return JSON.stringify([sessionID, callID]);
@@ -28,6 +32,39 @@ function prune(): void {
 	}
 }
 
+function pruneSkipSessions(): void {
+	while (sandboxSkipReasonsBySession.size > MAX_TRACKED_SKIP_SESSIONS) {
+		const oldest = sandboxSkipReasonsBySession.keys().next().value;
+		if (oldest === undefined) return;
+		sandboxSkipReasonsBySession.delete(oldest);
+	}
+}
+
+function redactSandboxSkipReason(reason: string): string {
+	return sanitizeDiagnosticText(reason, 1024)
+		.replace(/\\\\[^\\\s,;)\]]+(?:\\[^\\\s,;)\]]+)+/g, '[redacted-path]')
+		.replace(/[A-Za-z]:\\[^\\\s,;)\]]+(?:\\[^\\\s,;)\]]+)*/g, '[redacted-path]')
+		.replace(/\/[^/\s,;)\]]+(?:\/[^/\s,;)\]]+)+/g, '[redacted-path]')
+		.replace(
+			/(^|[\s(])(?:\.\.?[\\/][^\s,;)\]]+|~[\\/][^\s,;)\]]+)/g,
+			'$1[redacted-path]',
+		)
+		.slice(0, 512);
+}
+
+function recordSandboxSkipReason(sessionID: string, reason: string): void {
+	let reasons = sandboxSkipReasonsBySession.get(sessionID);
+	if (!reasons) {
+		reasons = [];
+		sandboxSkipReasonsBySession.set(sessionID, reasons);
+		pruneSkipSessions();
+	}
+	reasons.push(redactSandboxSkipReason(reason));
+	while (reasons.length > MAX_SKIP_REASONS_PER_SESSION) {
+		reasons.shift();
+	}
+}
+
 export function recordSandboxWrapOutcome(outcome: SandboxWrapOutcome): void {
 	const bounded = {
 		...outcome,
@@ -36,10 +73,7 @@ export function recordSandboxWrapOutcome(outcome: SandboxWrapOutcome): void {
 	};
 	sandboxWrapOutcomes.set(key(outcome.sessionID, outcome.callID), bounded);
 	if (!bounded.wrapped) {
-		sandboxSkipReasons.push(bounded.reason);
-		while (sandboxSkipReasons.length > MAX_SANDBOX_WRAP_OUTCOMES) {
-			sandboxSkipReasons.shift();
-		}
+		recordSandboxSkipReason(outcome.sessionID, bounded.reason);
 	}
 	prune();
 }
@@ -58,20 +92,27 @@ export function clearSandboxWrapOutcome(
 	sandboxWrapOutcomes.delete(key(sessionID, callID));
 }
 
-export function getSandboxSkipSummary(): {
+export function getSandboxSkipSummary(sessionID?: string): {
 	count: number;
 	reasons: readonly string[];
 } {
+	if (!sessionID) {
+		return {
+			count: 0,
+			reasons: Object.freeze([]),
+		};
+	}
+	const reasons = sandboxSkipReasonsBySession.get(sessionID) ?? [];
 	return {
-		count: sandboxSkipReasons.length,
-		reasons: Object.freeze([...new Set(sandboxSkipReasons)].slice(-10)),
+		count: reasons.length,
+		reasons: Object.freeze([...new Set(reasons)].slice(-10)),
 	};
 }
 
 /** @internal test seam */
 export function _resetSandboxWrapOutcomeState(): void {
 	sandboxWrapOutcomes.clear();
-	sandboxSkipReasons.length = 0;
+	sandboxSkipReasonsBySession.clear();
 }
 
 /** @internal test seam */

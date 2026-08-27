@@ -126,7 +126,7 @@ describe('destructive command guard', () => {
 			const input = makeBashInput('test-session', 'git push --force');
 			const output = makeBashOutput('git push --force');
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/BLOCKED: catastrophic shell operation detected by the shared command classifier/,
+				/BLOCKED: Force push detected/,
 			);
 		});
 

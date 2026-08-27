@@ -3,6 +3,7 @@ import {
 	_resetSandboxWrapOutcomeState,
 	_sandboxWrapOutcomeStateSize,
 	clearSandboxWrapOutcome,
+	getSandboxSkipSummary,
 	readSandboxWrapOutcome,
 	recordSandboxWrapOutcome,
 } from '../../../src/sandbox/skip-state';
@@ -85,5 +86,48 @@ describe('sandbox wrap outcome state', () => {
 			64 * 1024,
 		);
 		expect(readSandboxWrapOutcome('a', 'b:c')?.reason).toBe('other');
+	});
+
+	test('regression FB-006: skip summaries are session-scoped and redact path-bearing reasons', () => {
+		_resetSandboxWrapOutcomeState();
+		recordSandboxWrapOutcome({
+			sessionID: 'sess-a',
+			callID: 'c1',
+			originalCommandHash: 1,
+			finalCommandHash: 1,
+			wrapped: false,
+			capabilityIdentity: 'cap',
+			assessmentCacheKey: 'assessment',
+			reason:
+				'configured writable_roots rejected (C:\\Users\\Brett\\secret, ../outside, /tmp/private/file)',
+			originalCommand: 'echo ok',
+			executorMechanism: 'none',
+			capabilityMechanism: 'none',
+		});
+		recordSandboxWrapOutcome({
+			sessionID: 'sess-b',
+			callID: 'c2',
+			originalCommandHash: 2,
+			finalCommandHash: 2,
+			wrapped: false,
+			capabilityIdentity: 'cap',
+			assessmentCacheKey: 'assessment',
+			reason: 'configured writable_roots rejected (/var/tmp/other)',
+			originalCommand: 'echo ok',
+			executorMechanism: 'none',
+			capabilityMechanism: 'none',
+		});
+
+		const sessionASummary = getSandboxSkipSummary('sess-a');
+		const noSessionSummary = getSandboxSkipSummary();
+
+		expect(sessionASummary.count).toBe(1);
+		expect(sessionASummary.reasons[0]).toContain('[redacted-path]');
+		expect(sessionASummary.reasons[0]).not.toContain(
+			'C:\\Users\\Brett\\secret',
+		);
+		expect(sessionASummary.reasons[0]).not.toContain('../outside');
+		expect(sessionASummary.reasons[0]).not.toContain('/tmp/private/file');
+		expect(noSessionSummary).toEqual({ count: 0, reasons: [] });
 	});
 });

@@ -3,6 +3,9 @@
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import {
 	_internals,
 	_resetCapabilityCache,
@@ -169,6 +172,95 @@ describe('SandboxCapabilityProbe', () => {
 				_internals.withProbeTimeout = originalWithProbeTimeout;
 				_resetCapabilityCache();
 			}
+		});
+	});
+
+	describe('regressions FB-023 and FB-024', () => {
+		const originalSpawnSync = _internals.spawnSync;
+		const originalRemoveProbeTempRoot = _internals.removeProbeTempRoot;
+		const originalComSpec = process.env.ComSpec;
+		const originalPathEnv = process.env.Path;
+		const originalResolveBwrapBinary =
+			linuxExecutorInternals.resolveBwrapBinary;
+
+		afterEach(() => {
+			_internals.spawnSync = originalSpawnSync;
+			_internals.removeProbeTempRoot = originalRemoveProbeTempRoot;
+			linuxExecutorInternals.resolveBwrapBinary = originalResolveBwrapBinary;
+			if (originalComSpec === undefined) {
+				delete process.env.ComSpec;
+			} else {
+				process.env.ComSpec = originalComSpec;
+			}
+			if (originalPathEnv === undefined) {
+				delete process.env.Path;
+			} else {
+				process.env.Path = originalPathEnv;
+			}
+			_resetCapabilityCache();
+		});
+
+		test('regression FB-023: windows probe source identity follows the resolved command processor instead of a hardcoded system path literal', () => {
+			const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'probe-cmd-'));
+			const cmdA = path.join(tempRoot, 'cmd-a.exe');
+			const cmdB = path.join(tempRoot, 'cmd-b.exe');
+			fs.writeFileSync(cmdA, '');
+			fs.writeFileSync(cmdB, '');
+			process.env.Path = '';
+			process.env.ComSpec = cmdA;
+			const first = _internals.currentProbeSourceIdentity('win32');
+			process.env.ComSpec = cmdB;
+			const second = _internals.currentProbeSourceIdentity('win32');
+
+			try {
+				expect(first).toContain(path.normalize(cmdA));
+				expect(second).toContain(path.normalize(cmdB));
+				expect(first).not.toContain('C:\\Windows\\System32\\cmd.exe');
+				expect(second).not.toContain('C:\\Windows\\System32\\cmd.exe');
+				expect(first).not.toBe(second);
+			} finally {
+				fs.rmSync(tempRoot, { recursive: true, force: true });
+			}
+		});
+
+		test('regression FB-024: behavioral probes surface cleanup failures without discarding a bounded success result', () => {
+			linuxExecutorInternals.resolveBwrapBinary = () => 'bwrap';
+			_internals.spawnSync = mock(
+				(_cmd: string, args: string[], options?: { input?: string }) => {
+					const target = args.at(-1) ?? '';
+					if (target.endsWith('inside.txt')) {
+						fs.writeFileSync(target, String(options?.input ?? ''));
+						return { status: 0, stdout: '', stderr: '' };
+					}
+					if (target.endsWith('outside.txt')) {
+						return { status: 1, stdout: '', stderr: 'denied' };
+					}
+					if (target === '/proc/self/ns/net') {
+						return { status: 0, stdout: '', stderr: '' };
+					}
+					return { status: 0, stdout: '', stderr: '' };
+				},
+			) as unknown as typeof originalSpawnSync;
+			_internals.removeProbeTempRoot = (() => {
+				const error = new Error('busy') as NodeJS.ErrnoException;
+				error.code = 'EPERM';
+				throw error;
+			}) as typeof originalRemoveProbeTempRoot;
+
+			const result = _internals.detectBehavioralEvidence({
+				status: 'enabled',
+				strength: 'strong',
+				mechanism: 'Bubblewrap',
+				platform: 'linux',
+			});
+
+			expect(result.filesystem).toBe('real');
+			expect(result.reasons).toContain(
+				'bubblewrap allowed in-scope writes and blocked out-of-scope writes in a bounded probe',
+			);
+			expect(result.reasons).toContain(
+				'bubblewrap probe temp cleanup failed (EPERM)',
+			);
 		});
 	});
 

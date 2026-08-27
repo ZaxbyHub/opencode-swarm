@@ -806,8 +806,6 @@ An episode disarms — resetting every counter — on **either** of two conditio
 }
 ```
 
-### macOS sandbox activation (`guardrails.sandbox_macos_enabled`)
-
 ### Sandbox enforcement requirements (`guardrails.sandbox`)
 
 `guardrails.sandbox` makes containment requirements explicit. The default
@@ -830,6 +828,8 @@ The status surface reports filesystem, network, process, and effective
 strength separately as `real`, `weak`, or `none`. Linux reports missing
 seccomp explicitly; macOS does not claim network/process containment; Windows
 fallbacks remain weak/none unless independently verified.
+
+### macOS sandbox activation (`guardrails.sandbox_macos_enabled`)
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

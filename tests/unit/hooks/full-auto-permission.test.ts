@@ -409,6 +409,49 @@ describe('createFullAutoPermissionHook', () => {
 		).rejects.toThrow(/sandbox_unverified/);
 	});
 
+	test('regression FB-008: strict shell accepts one verified PowerShell wrapper outcome after mechanism canonicalization', async () => {
+		permissionInternals.assessSandboxEnforcement = async () =>
+			({
+				capability: {
+					identity: 'cap-ps',
+					mechanism: 'PowerShell wrapper',
+				},
+				requirements: { mode: 'advisory' },
+				policy: {},
+				satisfied: true,
+				missing: [],
+				supported: true,
+				unsupported: [],
+				cacheKey: 'assessment-ps',
+			}) as never;
+		const originalCommand = 'echo hi';
+		const wrappedCommand = 'powershell-wrapper --command "echo hi"';
+		recordSandboxWrapOutcome({
+			sessionID: 'sess-1',
+			callID: 'shell-ps',
+			originalCommandHash: hashArgs({ command: originalCommand }),
+			finalCommandHash: hashArgs({ command: wrappedCommand }),
+			wrapped: true,
+			capabilityIdentity: 'cap-ps',
+			assessmentCacheKey: 'assessment-ps',
+			reason: 'wrapped',
+			originalCommand,
+			executorMechanism: 'powershell-wrapper',
+			capabilityMechanism: 'PowerShell wrapper',
+		});
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: true, mode: 'strict' });
+		const hook = createFullAutoPermissionHook({
+			config: makeConfig(),
+			directory: tmpDir,
+		});
+
+		await expect(
+			hook.toolBefore(fakeInput('bash', 'shell-ps'), {
+				args: { command: wrappedCommand },
+			}),
+		).resolves.toBeUndefined();
+	});
+
 	test('strict shell rejects an independently mismatched original command hash', async () => {
 		permissionInternals.assessSandboxEnforcement = async () =>
 			({

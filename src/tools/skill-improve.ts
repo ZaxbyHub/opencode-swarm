@@ -17,10 +17,8 @@ import {
 	SkillImproverConfigSchema,
 } from '../config/schema';
 import {
-	buildHumanApprovedWriteAuthority,
-	consumeWriteApprovalFact,
+	findWriteApprovalFact,
 	formatApproveWriteCommand,
-	withWriteAuthority,
 } from '../security/write-authority.js';
 import {
 	prepareApprovedSkillImproverCandidateWrite,
@@ -30,10 +28,8 @@ import {
 import { createSwarmTool } from './create-tool.js';
 
 const writeAuthorityDependencies = {
-	buildHumanApprovedWriteAuthority,
-	consumeWriteApprovalFact,
+	findWriteApprovalFact,
 	formatApproveWriteCommand,
-	withWriteAuthority,
 };
 
 export const skill_improve: ReturnType<typeof createSwarmTool> =
@@ -120,11 +116,11 @@ export const skill_improve: ReturnType<typeof createSwarmTool> =
 					if (prepared.kind === 'result') {
 						return JSON.stringify(prepared.result, null, 2);
 					}
-					const fact =
-						await writeAuthorityDependencies.consumeWriteApprovalFact({
-							directory,
-							request: prepared.prepared.request,
-						});
+					const fact = await writeAuthorityDependencies.findWriteApprovalFact({
+						directory,
+						request: prepared.prepared.request,
+						now: prepared.prepared.now,
+					});
 					if (!fact) {
 						return JSON.stringify(
 							{
@@ -152,9 +148,8 @@ export const skill_improve: ReturnType<typeof createSwarmTool> =
 							2,
 						);
 					}
-					const result = await writeAuthorityDependencies.withWriteAuthority(
-						writeAuthorityDependencies.buildHumanApprovedWriteAuthority(fact),
-						() => writeApprovedSkillImproverCandidate(prepared.prepared),
+					const result = await writeApprovedSkillImproverCandidate(
+						prepared.prepared,
 					);
 					return JSON.stringify(result, null, 2);
 				}

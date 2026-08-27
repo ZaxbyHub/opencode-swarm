@@ -110,6 +110,15 @@ const CANONICAL_ROLES_LOWER = new Set<string>(
 
 const PROTECTED_PATH_SCAN =
 	/(?:^|\s)([A-Za-z0-9._/-]+(?:\.[A-Za-z0-9_-]+|\/(?:CODEOWNERS|package\.json|bun\.lock|CHANGELOG\.md)))/g;
+const BARE_PROTECTED_PATH_SCAN = [
+	'.git',
+	'.opencode',
+	'.swarm',
+	'.github/workflows',
+	'docs/releases',
+	'src/security',
+	'src/hooks/guardrails',
+].map((entry) => entry.toLowerCase());
 
 function isExactCanonicalRole(name: string): boolean {
 	return CANONICAL_ROLES_LOWER.has(name.toLowerCase());
@@ -173,6 +182,17 @@ function scanForProtectedPaths(
 		for (const match of text.matchAll(PROTECTED_PATH_SCAN)) {
 			const candidate = match[1]?.trim();
 			if (candidate) candidatePaths.add(candidate);
+		}
+		const normalized = text.replace(/\\/g, '/').toLowerCase();
+		for (const candidate of BARE_PROTECTED_PATH_SCAN) {
+			const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+			const match = normalized.match(
+				new RegExp(
+					`(?:^|[^A-Za-z0-9._/-])(${escaped})(?=$|[^A-Za-z0-9._/-])`,
+					'i',
+				),
+			);
+			if (match?.[1]) candidatePaths.add(match[1]);
 		}
 	}
 	const hits: string[] = [];

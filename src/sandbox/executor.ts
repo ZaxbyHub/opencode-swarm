@@ -26,6 +26,10 @@ export class SandboxError extends Error {
 	}
 }
 
+export function normalizeSandboxMechanism(mechanism: string): string {
+	return mechanism.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
 /**
  * Validate that a string is a valid POSIX environment variable name.
  * POSIX env var names: [a-zA-Z_][a-zA-Z0-9_]*
@@ -128,6 +132,16 @@ const _sandboxAssessmentCache = new Map<
 	Promise<SandboxEnforcementAssessment>
 >();
 
+function detectSandboxCapability(): Promise<SandboxCapabilityV1> {
+	return new SandboxCapabilityProbe().detect();
+}
+
+export const _internals: {
+	detectSandboxCapability: typeof detectSandboxCapability;
+} = {
+	detectSandboxCapability,
+} as const;
+
 export interface SandboxEnforcementAssessment {
 	capability: SandboxCapabilityV1;
 	requirements: Required<SandboxRequirements>;
@@ -196,10 +210,10 @@ function evaluatePolicySupport(
 	if (policy.network_allowlist.length > 0) {
 		unsupported.push('network_allowlist');
 	}
-	const mechanism = capability.mechanism.toLowerCase();
+	const mechanism = normalizeSandboxMechanism(capability.mechanism);
 	if (
 		policy.network_mode === 'off' &&
-		(capability.platform === 'darwin' || mechanism === 'powershell-wrapper')
+		(capability.platform === 'darwin' || mechanism === 'powershellwrapper')
 	) {
 		unsupported.push('network_mode');
 	}
@@ -217,7 +231,7 @@ function pruneSandboxAssessmentCache(): void {
 export async function assessSandboxEnforcement(
 	requirements: SandboxRequirements | undefined,
 ): Promise<SandboxEnforcementAssessment> {
-	const capability = await new SandboxCapabilityProbe().detect();
+	const capability = await _internals.detectSandboxCapability();
 	const normalized = normalizeSandboxRequirements(requirements);
 	const policy = normalizeSandboxPolicy(normalized);
 	const cacheKey = buildSandboxAssessmentCacheKey(

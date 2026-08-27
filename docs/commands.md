@@ -127,7 +127,7 @@ The command is used when `skill_improver.require_user_approval` is enabled;
 approval text in a prompt or critic response is not authority.
 
 ```text
-/swarm approve-write <session> skill_improve <candidate-id> <sha256> [--generation <n>] [--allowed-path-digest <sha256>]
+/swarm approve-write <target-session-id> <action> <candidate-id> <candidate-content-hash> [--generation <n>] [--allowed-path-digest <sha256>]
 ```
 
 On success, returns the approval ID, target session, action, candidate, expiry,
@@ -138,7 +138,7 @@ or generation.
 
 ### `/swarm guardrail-log [--blocks-only]`
 
-Read and print the unified guardrail decision log (`.swarm/session/shell-audit.jsonl`) most-recent-first. Agent-callable via `swarm_command`.
+Read and print the current unified guardrail decision window (`.swarm/session/shell-audit.jsonl`) most-recent-first. Agent-callable via `swarm_command`.
 
 ```text
 /swarm guardrail-log
@@ -151,6 +151,7 @@ Read and print the unified guardrail decision log (`.swarm/session/shell-audit.j
 
 - Entries sorted most-recent-first
 - Commands and paths are redacted
+- The on-disk window is bounded; older legacy allowed-shell rows are age-folded into the manifest aggregate rather than retained inline forever
 - Missing log file → friendly message: "No guardrail decisions recorded yet."
 - On-demand only — no hot-path cost; reads the log only when invoked
 

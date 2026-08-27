@@ -29,6 +29,8 @@ const DEFAULT_PREFIXES = [
 	'tests/fixtures/evaluation',
 ] as const;
 
+export const DEFAULT_PROTECTED_PATH_PREFIXES = DEFAULT_PREFIXES;
+
 export function normalizeProtectedPath(value: string): string {
 	return value.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
 }

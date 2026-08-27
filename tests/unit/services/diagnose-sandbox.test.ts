@@ -15,6 +15,10 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+	_resetSandboxWrapOutcomeState,
+	recordSandboxWrapOutcome,
+} from '../../../src/sandbox/skip-state';
+import {
 	_internals,
 	getDiagnoseData,
 } from '../../../src/services/diagnose-service';
@@ -137,6 +141,7 @@ beforeEach(() => {
 afterEach(() => {
 	_internals.detectSandboxCapability = realDetectSandboxCapability;
 	_internals.getSandboxExecutor = realGetSandboxExecutor;
+	_resetSandboxWrapOutcomeState();
 	mock.restore();
 	probeThrows = false;
 	executorThrows = false;
@@ -368,6 +373,44 @@ describe('Sandbox HealthCheck in getDiagnoseData', () => {
 		expect(sandbox.status).not.toBe('✅');
 		expect(sandbox.detail).toContain('fs=none');
 		expect(sandbox.detail).toContain('Partial boundary');
+	});
+
+	test('regression FB-006: diagnose only surfaces redacted skip reasons for the active session', async () => {
+		recordSandboxWrapOutcome({
+			sessionID: 'sess-a',
+			callID: 'skip-a',
+			originalCommandHash: 1,
+			finalCommandHash: 1,
+			wrapped: false,
+			capabilityIdentity: 'cap-a',
+			assessmentCacheKey: 'assessment-a',
+			reason:
+				'configured writable_roots rejected (C:\\Users\\Brett\\secret, ../outside)',
+			originalCommand: 'echo a',
+			executorMechanism: 'none',
+			capabilityMechanism: 'none',
+		});
+		recordSandboxWrapOutcome({
+			sessionID: 'sess-b',
+			callID: 'skip-b',
+			originalCommandHash: 2,
+			finalCommandHash: 2,
+			wrapped: false,
+			capabilityIdentity: 'cap-b',
+			assessmentCacheKey: 'assessment-b',
+			reason: 'configured writable_roots rejected (/tmp/private/file)',
+			originalCommand: 'echo b',
+			executorMechanism: 'none',
+			capabilityMechanism: 'none',
+		});
+
+		const result = await getDiagnoseData('/test/dir', 'sess-a');
+		const sandbox = result.checks.find((c) => c.name === 'Sandbox')!;
+
+		expect(sandbox.detail).toContain('observed skips=1');
+		expect(sandbox.detail).toContain('[redacted-path]');
+		expect(sandbox.detail).not.toContain('C:\\Users\\Brett\\secret');
+		expect(sandbox.detail).not.toContain('/tmp/private/file');
 	});
 
 	test('strong kernel mechanism stays ✅ with strength in detail (#1778 H2)', async () => {

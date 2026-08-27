@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { rmSync } from 'node:fs';
+import { readFileSync, rmSync } from 'node:fs';
+import * as path from 'node:path';
 import {
 	buildHumanApprovedWriteAuthority,
 	computeWriteApprovalHash,
@@ -39,14 +40,37 @@ describe('write authority', () => {
 		const first = await consumeWriteApprovalFact({
 			directory: dir,
 			request,
+			consumerSessionId: 'writer-session-1',
 		});
 		expect(first?.targetSessionId).toBe(request.targetSessionId);
 
 		const second = await consumeWriteApprovalFact({
 			directory: dir,
 			request,
+			consumerSessionId: 'writer-session-2',
 		});
 		expect(second).toBeNull();
+	});
+
+	it('FB-014 records the actual consuming session id in the authority ledger', async () => {
+		await issueWriteApprovalFact({
+			directory: dir,
+			request,
+			issuingSessionId: 'human-session',
+		});
+		await consumeWriteApprovalFact({
+			directory: dir,
+			request,
+			consumerSessionId: 'writer-session-actual',
+		});
+		const entries = readFileSync(
+			path.join(dir, '.swarm', 'authority', 'write-approvals.jsonl'),
+			'utf8',
+		)
+			.trim()
+			.split('\n')
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
+		expect(entries.at(-1)?.consumerSessionId).toBe('writer-session-actual');
 	});
 
 	it('fails closed when multiple unconsumed approvals match the same request', async () => {
@@ -64,6 +88,7 @@ describe('write authority', () => {
 		const consumed = await consumeWriteApprovalFact({
 			directory: dir,
 			request,
+			consumerSessionId: 'writer-session',
 		});
 		expect(consumed).toBeNull();
 	});
@@ -78,6 +103,7 @@ describe('write authority', () => {
 		const consumed = await consumeWriteApprovalFact({
 			directory: dir,
 			request,
+			consumerSessionId: 'writer-session',
 		});
 		expect(consumed).not.toBeNull();
 
@@ -95,13 +121,51 @@ describe('write authority', () => {
 		expect(currentWriteAuthoritySatisfies(request)).toBe(false);
 	});
 
+	it('rejects cross-session reuse of a consumed approval fact', async () => {
+		await issueWriteApprovalFact({
+			directory: dir,
+			request,
+			issuingSessionId: 'human-session',
+		});
+		const consumed = await consumeWriteApprovalFact({
+			directory: dir,
+			request,
+			consumerSessionId: 'writer-session',
+		});
+		expect(consumed).not.toBeNull();
+
+		const otherSessionRequest: WriteApprovalRequest = {
+			...request,
+			targetSessionId: 'different-session',
+		};
+
+		await withWriteAuthority(
+			buildHumanApprovedWriteAuthority(consumed!),
+			async () => {
+				expect(currentWriteAuthoritySatisfies(request)).toBe(true);
+				expect(currentWriteAuthoritySatisfies(otherSessionRequest)).toBe(false);
+			},
+		);
+
+		const crossSessionConsume = await consumeWriteApprovalFact({
+			directory: dir,
+			request: otherSessionRequest,
+			consumerSessionId: 'different-writer-session',
+		});
+		expect(crossSessionConsume).toBeNull();
+	});
+
 	it('revokes authority from callbacks that outlive the approved extent', async () => {
 		await issueWriteApprovalFact({
 			directory: dir,
 			request,
 			issuingSessionId: 'human-session',
 		});
-		const fact = await consumeWriteApprovalFact({ directory: dir, request });
+		const fact = await consumeWriteApprovalFact({
+			directory: dir,
+			request,
+			consumerSessionId: 'writer-session',
+		});
 		let observe!: () => void;
 		const observed = new Promise<string>((resolve) => {
 			observe = () => resolve(getCurrentWriteAuthority().origin);

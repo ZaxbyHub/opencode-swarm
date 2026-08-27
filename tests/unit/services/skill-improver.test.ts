@@ -11,7 +11,7 @@ import * as path from 'node:path';
 import { resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types';
 import type { SkillImproverLLMDelegate } from '../../../src/hooks/skill-improver-llm-factory';
-import { withWriteAuthority } from '../../../src/security/write-authority';
+import { issueWriteApprovalFact } from '../../../src/security/write-authority';
 import { runSkillImprover } from '../../../src/services/skill-improver';
 import {
 	getQuotaState,
@@ -218,30 +218,22 @@ describe('runSkillImprover', () => {
 		if (!candidateContent || !request) {
 			throw new Error('expected exact draft approval manifest');
 		}
-		const fact = {
-			v: 1 as const,
-			id: 'waf_draft_test',
+		await issueWriteApprovalFact({
+			directory: tmp,
+			request,
 			issuingSessionId: 'sess-human',
-			issuedByCommand: 'approve-write' as const,
-			issuedAt: new Date().toISOString(),
-			expiresAt: new Date(Date.now() + 30_000).toISOString(),
-			...request,
-		};
-		const applied = await withWriteAuthority(
-			{ origin: 'human_approved', fact },
-			() =>
-				runSkillImprover({
-					directory: tmp,
-					config: {
-						...baseConfig,
-						require_user_approval: true,
-						write_mode: 'draft_skills',
-					},
-					mode: 'draft_skills',
-					sessionId: 'sess-approval-draft',
-					approvedCandidateContent: candidateContent,
-				}),
-		);
+		});
+		const applied = await runSkillImprover({
+			directory: tmp,
+			config: {
+				...baseConfig,
+				require_user_approval: true,
+				write_mode: 'draft_skills',
+			},
+			mode: 'draft_skills',
+			sessionId: 'sess-approval-draft',
+			approvedCandidateContent: candidateContent,
+		});
 		expect(applied.ran).toBe(true);
 		const approvedDraftPath = path.resolve(tmp, manifest.drafts[0].path);
 		expect(readFileSync(approvedDraftPath, 'utf-8')).toBe(
@@ -267,29 +259,22 @@ describe('runSkillImprover', () => {
 				'expected approval challenge with exact candidate content',
 			);
 		}
-		const fact = {
-			v: 1 as const,
-			id: 'waf_test',
+		await issueWriteApprovalFact({
+			directory: tmp,
+			request: approvalRequest,
 			issuingSessionId: 'sess-human',
-			issuedByCommand: 'approve-write' as const,
-			issuedAt: '2026-08-26T12:00:00.000Z',
-			expiresAt: '2026-08-26T12:30:00.000Z',
-			...approvalRequest,
-		};
+			now: new Date('2026-08-26T12:00:00.000Z'),
+		});
 		const changedDelegate: SkillImproverLLMDelegate = async () =>
 			'## Concrete recommendations\n- second candidate that must not be written';
-		const result = await withWriteAuthority(
-			{ origin: 'human_approved', fact },
-			() =>
-				runSkillImprover({
-					directory: tmp,
-					config: { ...baseConfig, require_user_approval: true },
-					sessionId: 'sess-approval-2',
-					approvedCandidateContent,
-					delegate: changedDelegate,
-					now: new Date('2026-08-26T12:05:00.000Z'),
-				}),
-		);
+		const result = await runSkillImprover({
+			directory: tmp,
+			config: { ...baseConfig, require_user_approval: true },
+			sessionId: 'sess-approval-2',
+			approvedCandidateContent,
+			delegate: changedDelegate,
+			now: new Date('2026-08-26T12:05:00.000Z'),
+		});
 		expect(result.ran).toBe(true);
 		expect(existsSync(result.proposalPath!)).toBe(true);
 		const persisted = readFileSync(result.proposalPath!, 'utf-8');

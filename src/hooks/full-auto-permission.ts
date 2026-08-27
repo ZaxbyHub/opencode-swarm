@@ -48,7 +48,10 @@ import {
 	shouldPauseForDenials,
 	terminateFullAutoRun,
 } from '../full-auto/state';
-import { assessSandboxEnforcement } from '../sandbox/executor';
+import {
+	assessSandboxEnforcement,
+	normalizeSandboxMechanism,
+} from '../sandbox/executor';
 import {
 	clearSandboxWrapOutcome,
 	readSandboxWrapOutcome,
@@ -298,8 +301,8 @@ export function createFullAutoPermissionHook(
 						wrapOutcome.originalCommandHash === wrapOutcome.finalCommandHash ||
 						wrapOutcome.finalCommandHash !==
 							hashArgs({ command: rawCommand }) ||
-						wrapOutcome.executorMechanism.toLowerCase() !==
-							wrapOutcome.capabilityMechanism.toLowerCase() ||
+						normalizeSandboxMechanism(wrapOutcome.executorMechanism) !==
+							normalizeSandboxMechanism(wrapOutcome.capabilityMechanism) ||
 						wrapOutcome.capabilityIdentity !==
 							identityAssessment.capability.identity ||
 						wrapOutcome.assessmentCacheKey !== identityAssessment.cacheKey

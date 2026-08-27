@@ -44,6 +44,8 @@ describe('issue #2096 staged authority evaluator', () => {
 
 	test.each([
 		['.swarm/plan.json', 'AUTHORITY_PROTECTED_PATH'],
+		['packages/core/.swarm/state.json', 'AUTHORITY_PROTECTED_PATH'],
+		['packages/core/.git/config', 'AUTHORITY_PROTECTED_PATH'],
 		['biome.json', 'AUTHORITY_VERIFIER_CONFIG'],
 		['config/eslint.config.mjs', 'AUTHORITY_VERIFIER_CONFIG'],
 	] as const)('scope cannot grant hard protected path %s', (file, code) => {

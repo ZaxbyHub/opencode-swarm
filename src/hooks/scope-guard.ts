@@ -30,10 +30,19 @@ import {
 } from '../scope/scope-persistence';
 import { formatScopeResolutionDiagnostic } from '../scope/scope-resolution-diagnostic';
 import {
+	DEFAULT_PROTECTED_PATH_PREFIXES,
+	isPolicyProtectedPath,
+	normalizeProtectedPath,
+} from '../security/protected-path-policy.js';
+import {
 	type AgentSessionState,
 	resolveSessionWorkspaceDirectory,
 	swarmState,
 } from '../state';
+import {
+	checkFileAuthorityWithRules,
+	DEFAULT_AGENT_AUTHORITY_RULES,
+} from './guardrails/file-authority';
 import { normalizeToolName } from './normalize-tool-name';
 import { validatePrFeedbackScopeBinding } from './pr-workflow-gate';
 import { resolveWriteTargets } from './write-target-resolver';
@@ -238,6 +247,15 @@ export function createScopeGuardHook(
 						swarmState,
 					);
 				}
+				enforceProtectedPathAuthority(
+					agentName,
+					filePath,
+					directory,
+					sessionId,
+					session,
+					injectAdvisory,
+					declaredScope,
+				);
 				if (!isFileInScope(filePath, declaredScope, directory)) {
 					reportScopeViolation(
 						agentName,
@@ -331,6 +349,61 @@ export const _internals = {
 	resolveTaskId: (session: AgentSessionState | undefined): string | null =>
 		session?.currentTaskId ?? null,
 };
+
+function enforceProtectedPathAuthority(
+	agentName: string,
+	filePath: string,
+	directory: string,
+	sessionID: string,
+	session: AgentSessionState | undefined,
+	injectAdvisory: ((sessionId: string, message: string) => void) | undefined,
+	declaredScope: string[],
+): void {
+	const normalizedPath = normalizeProtectedPath(
+		path.relative(directory, path.resolve(directory, filePath)),
+	);
+	const protectedPrefix = DEFAULT_PROTECTED_PATH_PREFIXES.find((candidate) =>
+		isPolicyProtectedPath(normalizedPath, {
+			includeDefaults: false,
+			additional: [candidate],
+		}),
+	);
+	if (protectedPrefix) {
+		const evidenceEventID = recordFullAutoSevereEvidenceEvent({
+			sessionID,
+			childSessionID: sessionID,
+			category: 'protected_state_mutation',
+			paths: [normalizedPath],
+		});
+		denyWithArchitectAdvisory(
+			`WRITE BLOCKED: Agent "${sanitizeDiagnosticText(agentName, 96)}" is not authorised to write "${sanitizeDiagnosticText(normalizedPath, 256)}". Reason: AUTHORITY_PROTECTED_PATH: Path blocked: target is under central protected prefix ${sanitizeDiagnosticText(protectedPrefix, 160)} [agent=${sanitizeDiagnosticText(agentName, 96)}; path=${sanitizeDiagnosticText(normalizedPath, 256)}]${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
+			session,
+			injectAdvisory,
+			swarmState,
+		);
+	}
+	const authorityCheck = checkFileAuthorityWithRules(
+		agentName,
+		filePath,
+		directory,
+		DEFAULT_AGENT_AUTHORITY_RULES,
+		{ declaredScope },
+	);
+	if (authorityCheck.allowed || authorityCheck.layer !== 'protected-path')
+		return;
+	const evidenceEventID = recordFullAutoSevereEvidenceEvent({
+		sessionID,
+		childSessionID: sessionID,
+		category: 'protected_state_mutation',
+		paths: [filePath],
+	});
+	denyWithArchitectAdvisory(
+		`WRITE BLOCKED: Agent "${sanitizeDiagnosticText(agentName, 96)}" is not authorised to write "${authorityCheck.path}". Reason: ${authorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
+		session,
+		injectAdvisory,
+		swarmState,
+	);
+}
 
 function denyWithArchitectAdvisory(
 	message: string,

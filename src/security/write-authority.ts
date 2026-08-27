@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { transactFile } from '../hooks/knowledge-store.js';
 import { atomicWriteSwarmFile } from '../utils/atomic-write.js';
+import { isPolicyProtectedPath } from './protected-path-policy.js';
 
 export type WriteAuthorityOrigin =
 	| 'autonomous'
@@ -53,6 +54,21 @@ export interface WriteAuthorityContext {
 const DEFAULT_TTL_MS = 30 * 60 * 1000;
 const MAX_LEDGER_ENTRIES = 512;
 const SHA256_RE = /^[a-f0-9]{64}$/;
+const WRITE_APPROVAL_LEDGER_RELATIVE_PATH =
+	'.swarm/authority/write-approvals.jsonl';
+
+function formatTimestampIsoUtc(epochMs: number): string {
+	const stamp = new Date(epochMs);
+	const year = String(stamp.getUTCFullYear()).padStart(4, '0');
+	const month = String(stamp.getUTCMonth() + 1).padStart(2, '0');
+	const day = String(stamp.getUTCDate()).padStart(2, '0');
+	const hour = String(stamp.getUTCHours()).padStart(2, '0');
+	const minute = String(stamp.getUTCMinutes()).padStart(2, '0');
+	const second = String(stamp.getUTCSeconds()).padStart(2, '0');
+	const millisecond = String(stamp.getUTCMilliseconds()).padStart(3, '0');
+	return `${year}-${month}-${day}T${hour}:${minute}:${second}.${millisecond}Z`;
+}
+
 interface AuthorityExtent {
 	context: WriteAuthorityContext;
 	active: boolean;
@@ -68,7 +84,12 @@ const ORIGIN_RANK: Record<WriteAuthorityOrigin, number> = {
 };
 
 function ledgerPath(directory: string): string {
-	return path.join(directory, '.swarm', 'authority', 'write-approvals.jsonl');
+	if (!isPolicyProtectedPath(WRITE_APPROVAL_LEDGER_RELATIVE_PATH)) {
+		throw new Error(
+			'write approval ledger path must remain centrally protected',
+		);
+	}
+	return path.join(directory, WRITE_APPROVAL_LEDGER_RELATIVE_PATH);
 }
 
 function stableSerialize(value: unknown): string {
@@ -168,6 +189,27 @@ function matchesRequest(
 	);
 }
 
+function selectUniqueActiveFact(
+	entries: LedgerEntry[],
+	request: WriteApprovalRequest,
+	now: Date,
+): WriteApprovalFactV1 | null {
+	const consumedIds = new Set(
+		entries
+			.filter(
+				(entry): entry is ConsumedLedgerEntry => entry.kind === 'consumed',
+			)
+			.map((entry) => entry.factId),
+	);
+	const matches = entries
+		.filter((entry): entry is IssuedLedgerEntry => entry.kind === 'issued')
+		.map((entry) => entry.fact)
+		.filter((fact) => matchesRequest(fact, request))
+		.filter((fact) => !consumedIds.has(fact.id))
+		.filter((fact) => Date.parse(fact.expiresAt) >= now.getTime());
+	return matches.length === 1 ? matches[0] : null;
+}
+
 function leastPrivilege(
 	left: WriteAuthorityContext,
 	right: WriteAuthorityContext,
@@ -244,6 +286,27 @@ export function formatApproveWriteCommand(
 	return parts.join(' ');
 }
 
+export async function findWriteApprovalFact(args: {
+	directory: string;
+	request: WriteApprovalRequest;
+	now?: Date;
+}): Promise<WriteApprovalFactV1 | null> {
+	validateRequest(args.request);
+	const now = args.now ?? new Date();
+	const filePath = ledgerPath(args.directory);
+	let match: WriteApprovalFactV1 | null = null;
+	await transactFile<LedgerEntry[]>(
+		filePath,
+		ledgerRead,
+		ledgerWrite,
+		(entries) => {
+			match = selectUniqueActiveFact(entries, args.request, now);
+			return null;
+		},
+	);
+	return match;
+}
+
 export async function issueWriteApprovalFact(args: {
 	directory: string;
 	request: WriteApprovalRequest;
@@ -253,16 +316,16 @@ export async function issueWriteApprovalFact(args: {
 }): Promise<WriteApprovalFactV1> {
 	validateRequest(args.request);
 	const now = args.now ?? new Date();
+	const issuedAtMs = now.getTime();
+	const expiresAtMs = issuedAtMs + (args.ttlMs ?? DEFAULT_TTL_MS);
 	const normalized = normalizeRequest(args.request);
 	const fact: WriteApprovalFactV1 = {
 		v: 1,
 		id: `waf_${randomUUID()}`,
 		issuingSessionId: args.issuingSessionId.trim(),
 		issuedByCommand: 'approve-write',
-		issuedAt: now.toISOString(),
-		expiresAt: new Date(
-			now.getTime() + (args.ttlMs ?? DEFAULT_TTL_MS),
-		).toISOString(),
+		issuedAt: formatTimestampIsoUtc(issuedAtMs),
+		expiresAt: formatTimestampIsoUtc(expiresAtMs),
 		...normalized,
 	};
 	const filePath = ledgerPath(args.directory);
@@ -286,37 +349,31 @@ export async function issueWriteApprovalFact(args: {
 export async function consumeWriteApprovalFact(args: {
 	directory: string;
 	request: WriteApprovalRequest;
+	consumerSessionId: string;
 	now?: Date;
 }): Promise<WriteApprovalFactV1 | null> {
 	validateRequest(args.request);
+	const consumerSessionId = args.consumerSessionId.trim();
+	if (!consumerSessionId) {
+		throw new Error('write approval consumerSessionId is required');
+	}
 	const now = args.now ?? new Date();
 	const filePath = ledgerPath(args.directory);
 	let consumed: WriteApprovalFactV1 | null = null;
+	const consumedAt = formatTimestampIsoUtc(now.getTime());
 	await transactFile<LedgerEntry[]>(
 		filePath,
 		ledgerRead,
 		ledgerWrite,
 		(entries) => {
-			const consumedIds = new Set(
-				entries
-					.filter(
-						(entry): entry is ConsumedLedgerEntry => entry.kind === 'consumed',
-					)
-					.map((entry) => entry.factId),
-			);
-			const matches = entries
-				.filter((entry): entry is IssuedLedgerEntry => entry.kind === 'issued')
-				.map((entry) => entry.fact)
-				.filter((fact) => matchesRequest(fact, args.request))
-				.filter((fact) => !consumedIds.has(fact.id))
-				.filter((fact) => Date.parse(fact.expiresAt) >= now.getTime());
-			if (matches.length !== 1) return null;
-			consumed = matches[0];
+			const match = selectUniqueActiveFact(entries, args.request, now);
+			if (!match) return null;
+			consumed = match;
 			entries.push({
 				kind: 'consumed',
-				factId: matches[0].id,
-				consumedAt: now.toISOString(),
-				consumerSessionId: normalizeRequest(args.request).targetSessionId,
+				factId: match.id,
+				consumedAt,
+				consumerSessionId,
 			});
 			return entries;
 		},

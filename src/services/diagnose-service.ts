@@ -841,7 +841,7 @@ async function checkCurator(directory: string): Promise<HealthCheck> {
  * the cached sandbox executor. Never re-probes and never crashes
  * diagnose on sandbox errors.
  */
-async function getSandboxStatus(): Promise<HealthCheck> {
+async function getSandboxStatus(sessionID?: string): Promise<HealthCheck> {
 	try {
 		const capability = await _internals.detectSandboxCapability();
 		const mechanism = capability.mechanism ?? 'none';
@@ -855,7 +855,7 @@ async function getSandboxStatus(): Promise<HealthCheck> {
 		const effective = capability.effective ?? legacyDimension;
 		const dimensions = `fs=${filesystem} network=${network} process=${processBoundary} effective=${effective}`;
 		const reasons = (capability.reasons ?? []).join('; ');
-		const skipSummary = getSandboxSkipSummary();
+		const skipSummary = getSandboxSkipSummary(sessionID);
 		const skipDetail =
 			skipSummary.count > 0
 				? ` | observed skips=${skipSummary.count}: ${skipSummary.reasons.join('; ')}`
@@ -1179,7 +1179,7 @@ export async function getDiagnoseData(
 	checks.push(await checkGitRepository(directory));
 
 	// Check: Sandbox
-	checks.push(await getSandboxStatus());
+	checks.push(await getSandboxStatus(sessionID));
 
 	// Check: Spec Staleness
 	checks.push(await checkSpecStaleness(directory, plan));

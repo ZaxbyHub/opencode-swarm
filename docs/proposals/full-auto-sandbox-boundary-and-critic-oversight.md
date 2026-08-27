@@ -20,6 +20,12 @@ Governed optimizer evaluation snapshots the complete protected input tree before
 
 Writes requiring user approval consume a one-shot fact bound to the target session, action, candidate identity, content hash, allowed-path digest, generation, and expiry. Only `/swarm approve-write` issues the fact. Prompt text, critic prose, tool arguments, and service calls cannot mint it. Consumed authority propagates through async work and is stamped into learning/consensus provenance as `human_approved`; absent authority remains `autonomous`.
 
+## Current state ledger and durable artifacts
+
+- Write approvals persist in `.swarm/authority/write-approvals.jsonl` as an issued/consumed ledger with exact session, action, candidate, hash, optional path digest, and generation binding.
+- Guardrail decisions persist in the bounded `.swarm/session/shell-audit.jsonl` window. Typed security entries remain explicit rows; older legacy allowed-shell rows fold into the manifest aggregate instead of remaining inline indefinitely.
+- Protected-input integrity snapshots are ephemeral verification artifacts, not a long-lived approval ledger. The durable proof is the guarded result path rejecting mutations or ambiguity when verification replays.
+
 ## Failure behavior
 
 - Default/absent sandbox configuration: warn once, audit the skip, retain existing tool guardrails.

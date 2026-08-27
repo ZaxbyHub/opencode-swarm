@@ -15,6 +15,7 @@ import { execFile, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { warn } from '../utils/logger';
 import { _internals as bwrapInternals } from './linux/bubblewrap-executor';
 import { _internals as macosExecutorInternals } from './macos/sandbox-exec-executor';
 
@@ -126,17 +127,64 @@ function currentProbeSourceIdentity(
 		return `darwin:${fileIdentity(macosExecutorInternals.resolveSandboxExecBinary())}:${fileIdentity(macosExecutorInternals.resolveProbeTargetBinary())}`;
 	}
 	if (platform === 'win32') {
+		const cmdBinary = resolveWindowsCommandProcessorBinary();
 		try {
 			// eslint-disable-next-line @typescript-eslint/no-var-requires
 			const {
 				_internals: runnerClientInternals,
 			} = require('./win32/runner-client');
-			return `win32:${fileIdentity(runnerClientInternals.findRunnerBinary?.())}:${fileIdentity('C:\\Windows\\System32\\cmd.exe')}`;
+			return `win32:${fileIdentity(runnerClientInternals.findRunnerBinary?.())}:${fileIdentity(cmdBinary)}`;
 		} catch {
-			return `win32:${fileIdentity('C:\\Windows\\System32\\cmd.exe')}`;
+			return `win32:${fileIdentity(cmdBinary)}`;
 		}
 	}
 	return `unknown:${platform}`;
+}
+
+function resolveWindowsCommandProcessorBinary(): string {
+	const candidates: string[] = [];
+	const comSpec = process.env.ComSpec?.trim();
+	if (comSpec) {
+		candidates.push(comSpec);
+	}
+	const pathEnv = process.env.Path ?? process.env.PATH ?? '';
+	for (const entry of pathEnv.split(path.delimiter)) {
+		const trimmed = entry.trim();
+		if (!trimmed) continue;
+		candidates.push(path.join(trimmed, 'cmd.exe'));
+	}
+	for (const candidate of candidates) {
+		try {
+			if (fs.statSync(candidate).isFile()) {
+				return candidate;
+			}
+		} catch {
+			// Ignore missing/non-file candidates and continue the bounded search.
+		}
+	}
+	return comSpec || 'cmd';
+}
+
+function cleanupProbeTempRoot(
+	tempRoot: string,
+	mechanism: string,
+	reasons: string[],
+): void {
+	try {
+		_internals.removeProbeTempRoot(tempRoot);
+	} catch (error) {
+		const code =
+			typeof error === 'object' &&
+			error !== null &&
+			'code' in error &&
+			typeof (error as { code?: unknown }).code === 'string'
+				? ((error as { code: string }).code ?? 'unknown')
+				: 'unknown';
+		reasons.push(`${mechanism} probe temp cleanup failed (${code})`);
+		warn(
+			`[sandbox] ${mechanism} probe temp cleanup failed (${code}); continuing with bounded probe result`,
+		);
+	}
 }
 
 function weakest(
@@ -333,9 +381,7 @@ function probeLinuxBehavior(): BehavioralEvidence {
 			);
 		}
 	} finally {
-		try {
-			fs.rmSync(tempRoot, { recursive: true, force: true });
-		} catch {}
+		cleanupProbeTempRoot(tempRoot, 'bubblewrap', reasons);
 	}
 	return {
 		filesystem,
@@ -389,9 +435,7 @@ function probeMacOSBehavior(): BehavioralEvidence {
 			);
 		}
 	} finally {
-		try {
-			fs.rmSync(tempRoot, { recursive: true, force: true });
-		} catch {}
+		cleanupProbeTempRoot(tempRoot, 'sandbox-exec', reasons);
 	}
 	reasons.push(
 		'(allow default) leaves network, IPC, and process-spawn behavior outside the boundary',
@@ -519,10 +563,16 @@ export const _internals: {
 	withProbeTimeout: typeof withProbeTimeout;
 	spawnSync: typeof spawnSync;
 	detectBehavioralEvidence: typeof detectBehavioralEvidence;
+	resolveWindowsCommandProcessorBinary: typeof resolveWindowsCommandProcessorBinary;
+	currentProbeSourceIdentity: typeof currentProbeSourceIdentity;
+	removeProbeTempRoot: typeof fs.rmSync;
 } = {
 	withProbeTimeout,
 	spawnSync,
 	detectBehavioralEvidence,
+	resolveWindowsCommandProcessorBinary,
+	currentProbeSourceIdentity,
+	removeProbeTempRoot: fs.rmSync,
 } as const;
 
 /** Probe for Linux Bubblewrap (bwrap). */
@@ -647,7 +697,8 @@ function probeWindows(): SandboxCapability {
 	// Fallback: check that cmd.exe and PowerShell are available for the
 	// environment-restriction executor (weak sandbox).
 	try {
-		const result = spawnSync('cmd', ['/c', 'echo', 'ok'], {
+		const cmdBinary = resolveWindowsCommandProcessorBinary();
+		const result = _internals.spawnSync(cmdBinary, ['/c', 'echo', 'ok'], {
 			windowsHide: true,
 			encoding: 'utf-8',
 			timeout: 5000,

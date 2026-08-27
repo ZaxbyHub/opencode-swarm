@@ -20,7 +20,8 @@ describe('command-classifier source guard', () => {
 
 	test('guardrail explain blocks through the shared classifier before target-aware parity checks', () => {
 		const explain = source('src/services/guardrail-explain-service.ts');
-		expect(explain).toContain('import { classifyCommand }');
+		expect(explain).toContain('classifyCommand');
+		expect(explain).toContain('getSharedClassifierGuardrailBlock');
 		expect(explain).toContain('shared_classifier: ${shared.aggregate}');
 		expect(explain).not.toContain('vssadmin delete');
 		expect(explain).not.toContain('wbadmin delete');
@@ -30,5 +31,19 @@ describe('command-classifier source guard', () => {
 		expect(explain).not.toContain('chmod -R 000');
 		expect(explain).not.toContain('TRUNCATE TABLE statement');
 		expect(explain).not.toContain('mkfs (filesystem format)');
+	});
+
+	test('live tool-before uses shared classifier block metadata instead of duplicating unconditional shell corpora', () => {
+		const toolBefore = source('src/hooks/guardrails/tool-before.ts');
+		expect(toolBefore).toContain('getSharedClassifierGuardrailBlock');
+		expect(toolBefore).not.toContain('BLOCKED: "git reset --hard" detected');
+		expect(toolBefore).not.toContain('BLOCKED: "docker system prune" detected');
+		expect(toolBefore).not.toContain('BLOCKED: SQL TRUNCATE command detected');
+		expect(toolBefore).not.toContain('vssadmin delete');
+		expect(toolBefore).not.toContain('wbadmin delete');
+		expect(toolBefore).not.toContain('diskpart" detected');
+		expect(toolBefore).not.toContain('robocopy /MIR');
+		expect(toolBefore).not.toContain('chmod -R 000');
+		expect(toolBefore).not.toContain('find -delete');
 	});
 });

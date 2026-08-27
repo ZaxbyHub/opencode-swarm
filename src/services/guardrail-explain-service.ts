@@ -22,7 +22,10 @@ import {
 	detectWindowsWrites,
 	resolveWriteTargets,
 } from '../hooks/shell-write-detect.js';
-import { classifyCommand } from '../security/command-classifier.js';
+import {
+	classifyCommand,
+	getSharedClassifierGuardrailBlock,
+} from '../security/command-classifier.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -153,21 +156,6 @@ function resolveShellType(command: string): 'posix' | 'powershell' | 'cmd' {
 // the same shared evaluator as the live hook. CLI `--scope` is hypothetical and
 // never becomes verified active authority for a nested delete (#2096).
 
-function isTargetAwareDestructiveSegment(segment: string): boolean {
-	return (
-		dcExtractRecursiveRmTargets(segment) !== null ||
-		/^(?:rmdir|rd)(?:\.exe)?\s+.*\/[sS]/i.test(segment) ||
-		/^del(?:\.exe)?\s+.*\/[sS]/i.test(segment) ||
-		/^(?:Remove-Item|ri|rm|rmdir|del|erase|rd)\b.*-[Rr](?:ecurse)?\b/i.test(
-			segment,
-		) ||
-		/Get-ChildItem\b.*\|\s*Remove-Item\b.*-[Rr]ecurse/i.test(segment) ||
-		/gci\b.*\|\s*ri\b.*-[Rr]ecurse/i.test(segment) ||
-		/^rsync\b.*--delete(?:-after|-before|-during|-delay)?\b/i.test(segment) ||
-		/^git\s+worktree\s+remove\b.*--force\b/i.test(segment)
-	);
-}
-
 /**
  * Evaluate the destructive-command decision for a shell command in dry-run mode.
  * Returns { decision, firingRule } without throwing.
@@ -186,7 +174,7 @@ function evaluateDestructiveDecision(
 
 	const shared = classifyCommand(rawCommand);
 	const sharedFiringRule = `shared_classifier: ${shared.aggregate}`;
-	if (shared.aggregate === 'catastrophic') {
+	if (getSharedClassifierGuardrailBlock(shared)) {
 		return { decision: 'block', firingRule: sharedFiringRule };
 	}
 
@@ -199,18 +187,6 @@ function evaluateDestructiveDecision(
 	const allSegments = [
 		...new Set([...outerSegments, ...innerSegments, ...perSegmentUnwrapped]),
 	];
-	const sharedDestructiveSegments = shared.segments.filter(
-		(segment) => segment.category === 'destructive',
-	);
-	if (
-		shared.aggregate === 'destructive' &&
-		sharedDestructiveSegments.length > 0 &&
-		!sharedDestructiveSegments.every((segment) =>
-			isTargetAwareDestructiveSegment(segment.segment),
-		)
-	) {
-		return { decision: 'block', firingRule: sharedFiringRule };
-	}
 
 	for (const segment of allSegments) {
 		const seg = segment.trim();

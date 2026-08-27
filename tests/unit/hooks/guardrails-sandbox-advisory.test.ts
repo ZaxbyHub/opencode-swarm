@@ -118,6 +118,106 @@ describe('guardrails sandbox advisory', () => {
 		}
 	});
 
+	it('default advisory mode preserves command bytes and warns only once when the executor is unavailable', async () => {
+		const tempDir = canonicalMkdtemp('guardrails-sandbox-advisory-once-');
+		process.env.OPENCODE_SWARM_DEBUG = '1';
+		guardrailsInternals.getSandboxExecutor = async () => ({
+			isAvailable: () => false,
+			mechanism: 'none',
+		});
+		const warnSpy = mock(() => {});
+		const originalConsoleWarn = console.warn;
+		console.warn = warnSpy as typeof console.warn;
+
+		try {
+			const hooks = createGuardrailsHooks(tempDir, undefined, {
+				enabled: true,
+				max_tool_calls: 200,
+				max_duration_minutes: 30,
+				idle_timeout_minutes: 60,
+				max_repetitions: 10,
+				max_consecutive_errors: 5,
+				warning_threshold: 0.75,
+				shell_audit_log: true,
+				profiles: undefined,
+			});
+			const first = { args: { command: 'echo hi && printf ok' } };
+			const second = { args: { command: 'echo hi && printf ok' } };
+
+			await hooks.toolBefore(
+				{ tool: 'bash', sessionID: 'sandbox-once', callID: 'call-a' },
+				first,
+			);
+			await hooks.toolBefore(
+				{ tool: 'bash', sessionID: 'sandbox-once', callID: 'call-b' },
+				second,
+			);
+
+			expect(first.args.command).toBe('echo hi && printf ok');
+			expect(second.args.command).toBe('echo hi && printf ok');
+			expect(warnSpy).toHaveBeenCalledTimes(1);
+			expect(String(warnSpy.mock.calls[0]?.[0] ?? '')).toContain(
+				'sandbox executor unavailable',
+			);
+		} finally {
+			console.warn = originalConsoleWarn;
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it('required mode still records sandbox_skip before blocking on unavailable executor', async () => {
+		const tempDir = canonicalMkdtemp('guardrails-sandbox-required-skip-');
+		process.env.OPENCODE_SWARM_DEBUG = '1';
+		guardrailsInternals.getSandboxExecutor = async () => ({
+			isAvailable: () => false,
+			mechanism: 'none',
+		});
+
+		try {
+			const hooks = createGuardrailsHooks(tempDir, undefined, {
+				enabled: true,
+				max_tool_calls: 200,
+				max_duration_minutes: 30,
+				idle_timeout_minutes: 60,
+				max_repetitions: 10,
+				max_consecutive_errors: 5,
+				warning_threshold: 0.75,
+				shell_audit_log: true,
+				profiles: undefined,
+				sandbox: {
+					mode: 'required',
+					require_filesystem: true,
+					require_network: false,
+					require_process: false,
+				},
+			});
+
+			await expect(
+				hooks.toolBefore(
+					{
+						tool: 'bash',
+						sessionID: 'sandbox-required-skip',
+						callID: 'call-required',
+					},
+					{ args: { command: 'echo hi' } },
+				),
+			).rejects.toThrow(/Required sandbox policy unsatisfied/);
+
+			const auditPath = path.join(
+				tempDir,
+				'.swarm',
+				'session',
+				'shell-audit.jsonl',
+			);
+			await waitForFile(auditPath);
+			const contents = fs.readFileSync(auditPath, 'utf-8');
+			expect(contents).toContain('"type":"sandbox_skip"');
+			expect(contents).toContain('required sandbox executor unavailable');
+		} finally {
+			fs.rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it('required mode passes only the exact configured dimensions to sandbox assessment', async () => {
 		resetSwarmState();
 		const tempDir = canonicalMkdtemp('guardrails-sandbox-required-');

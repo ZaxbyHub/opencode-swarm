@@ -71,10 +71,7 @@ const mockWriteApprovedSkillImproverCandidate = mock(async () => ({
 	source: 'deterministic_fallback',
 	quota: { date: '2026-08-26', calls_used: 1, max_calls: 3 },
 }));
-const mockConsumeWriteApprovalFact = mock(async () => null);
-const mockWithWriteAuthority = mock(
-	async (_context, fn: () => Promise<unknown>) => await fn(),
-);
+const mockFindWriteApprovalFact = mock(async () => null);
 
 // Module-level mocks — must be before the tool import
 mock.module('../../../src/config/index.ts', () => ({
@@ -185,14 +182,9 @@ beforeEach(async () => {
 	mockPrepareApprovedSkillImproverCandidateWrite.mockClear();
 	mockReleasePreparedSkillImproverApprovalCandidate.mockClear();
 	mockWriteApprovedSkillImproverCandidate.mockClear();
-	mockConsumeWriteApprovalFact.mockClear();
-	mockWithWriteAuthority.mockClear();
+	mockFindWriteApprovalFact.mockClear();
 	Object.assign(_internals.writeAuthorityDependencies, {
-		buildHumanApprovedWriteAuthority: (fact: unknown) => ({
-			origin: 'human_approved' as const,
-			fact,
-		}),
-		consumeWriteApprovalFact: mockConsumeWriteApprovalFact,
+		findWriteApprovalFact: mockFindWriteApprovalFact,
 		formatApproveWriteCommand: (request: {
 			targetSessionId: string;
 			action: string;
@@ -200,7 +192,6 @@ beforeEach(async () => {
 			candidateContentHash: string;
 		}) =>
 			`/swarm approve-write ${request.targetSessionId} ${request.action} ${request.candidateId} ${request.candidateContentHash}`,
-		withWriteAuthority: mockWithWriteAuthority,
 	});
 
 	tmp = await fs.realpath(
@@ -300,14 +291,14 @@ describe('skill_improve tool', () => {
 			).not.toHaveBeenCalled();
 		});
 
-		it('consumes a write approval fact and writes the prepared candidate under approved authority', async () => {
+		it('checks for a matching write approval fact and writes the prepared candidate', async () => {
 			mockLoadPluginConfigWithMeta.mockReturnValueOnce({
 				config: {
 					skill_improver: { enabled: true, require_user_approval: true },
 				},
 				meta: { source: 'test' },
 			});
-			mockConsumeWriteApprovalFact.mockResolvedValueOnce({
+			mockFindWriteApprovalFact.mockResolvedValueOnce({
 				v: 1,
 				id: 'waf_1',
 				issuingSessionId: 'human-session',
@@ -326,8 +317,7 @@ describe('skill_improve tool', () => {
 				),
 			);
 			expect(result.ran).toBe(true);
-			expect(mockConsumeWriteApprovalFact).toHaveBeenCalledTimes(1);
-			expect(mockWithWriteAuthority).toHaveBeenCalledTimes(1);
+			expect(mockFindWriteApprovalFact).toHaveBeenCalledTimes(1);
 			expect(mockWriteApprovedSkillImproverCandidate).toHaveBeenCalledTimes(1);
 			expect(mockRunSkillImprover).not.toHaveBeenCalled();
 			expect(

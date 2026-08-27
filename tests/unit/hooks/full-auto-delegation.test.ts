@@ -115,6 +115,25 @@ describe('outbound delegation check', () => {
 		).rejects.toThrow(/protected path/);
 	});
 
+	test('FB-028 denies coder delegation that targets a bare protected directory root', async () => {
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
+		const hook = createFullAutoDelegationHook({
+			config: config(),
+			directory: tmpDir,
+		});
+		await expect(
+			hook.toolBefore(
+				{ tool: 'Task', sessionID: 'sess-1', callID: 'protected-root' },
+				{
+					args: {
+						subagent_type: 'coder',
+						prompt: 'Inspect src/security before making changes elsewhere.',
+					},
+				},
+			),
+		).rejects.toThrow(/protected path/);
+	});
+
 	test('denies coder delegation when a protected path is hidden in a non-prompt field', async () => {
 		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
 		const hook = createFullAutoDelegationHook({
