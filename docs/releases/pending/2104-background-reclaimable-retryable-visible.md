@@ -59,7 +59,7 @@ durable delegation-owner scan, so deleting the file cannot over-admit a live tas
 ### Opt-in `/swarm status` background-work section
 
 When `hooks.background_subagents` is enabled, `/swarm status` now shows delegation counts
-(pending, running, completed-unconsumed, consumed, stale, cancelled, error, ingestion_error),
+(pending, running, completed (unconsumed), consumed, stale, cancelled, error, ingestion_error),
 active reservations with their generation and lease state (active / expired / protected-legacy),
 the durable maintenance summary (last ok, last failure, last lock contention), and a
 provenance label. All reads are bounded (recovery scan + bounded reservation store + health

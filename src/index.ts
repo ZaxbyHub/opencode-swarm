@@ -961,8 +961,12 @@ async function initializeOpenCodeSwarm(
 		(config.hooks as Record<string, unknown> | undefined)
 			?.background_subagents === true
 	) {
-		postResolutionTasks.push(() => {
-			void withTimeout(
+		postResolutionTasks.push(function backgroundMaintenancePostInitTask() {
+			// Returned (not `void`ed) so the task is awaitable like
+			// regenerateMemoryReflectionTask — tests and any future awaiter of
+			// the post-resolution queue can observe completion. The scheduler
+			// already treats tasks as void | Promise<void>.
+			return withTimeout(
 				import('./background/pending-delegations.js').then((m) =>
 					m.maintainBackgroundDelegations(ctx.directory, {
 						lockTimeoutMs: 5_000,
@@ -973,15 +977,17 @@ async function initializeOpenCodeSwarm(
 				new Error(
 					`background maintenance exceeded ${BACKGROUND_MAINTENANCE_INIT_TIMEOUT_MS}ms post-init budget; continuing without it (other maintenance points remain)`,
 				),
-			).catch((err: unknown) => {
-				const msg = err instanceof Error ? err.message : String(err);
-				log(
-					'post-init background maintenance timed out or failed (non-fatal)',
-					{
-						error: msg,
-					},
-				);
-			});
+			)
+				.catch((err: unknown) => {
+					const msg = err instanceof Error ? err.message : String(err);
+					log(
+						'post-init background maintenance timed out or failed (non-fatal)',
+						{
+							error: msg,
+						},
+					);
+				})
+				.then(() => undefined);
 		});
 	}
 

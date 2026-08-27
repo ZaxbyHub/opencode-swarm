@@ -442,7 +442,8 @@ export const COMMAND_REGISTRY = {
 	status: {
 		handler: async (ctx) =>
 			handleStatusCommand(ctx.directory, ctx.agents, ctx.sessionID),
-		description: 'Show current swarm state',
+		description:
+			'Show current swarm state (plus background-work health when hooks.background_subagents is enabled)',
 		category: 'core',
 		clashesWithNativeCcCommand: '/status',
 		toolPolicy: 'agent',
@@ -858,7 +859,8 @@ export const COMMAND_REGISTRY = {
 	info: {
 		handler: async (ctx) =>
 			handleStatusCommand(ctx.directory, ctx.agents, ctx.sessionID),
-		description: 'Show current swarm state',
+		description:
+			'Show current swarm state (plus background-work health when hooks.background_subagents is enabled)',
 		category: 'core',
 		aliasOf: 'status',
 		deprecated: true,

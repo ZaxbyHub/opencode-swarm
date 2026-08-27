@@ -54,13 +54,11 @@ describe('CommandRegistry types and structure', () => {
 			).toBeGreaterThan(0);
 		}
 	});
-
 	test('loop help resolves its plugin-owned protocol from the bundled skill root', () => {
 		const details = COMMAND_REGISTRY.loop.details ?? '';
 		expect(details).toContain('.swarm/bundled-skills/loop/SKILL.md');
 		expect(details).not.toContain('.opencode/skills/loop/SKILL.md');
 	});
-
 	test('entries with subcommandOf are subcommands', () => {
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
 			const cmdEntry = entry as CommandEntry;
@@ -235,7 +233,9 @@ describe('resolveCommand()', () => {
 		test('resolves single-token command "status"', () => {
 			const result = resolveCommand(['status']);
 			expect(result).not.toBeNull();
-			expect(result!.entry.description).toBe('Show current swarm state');
+			expect(result!.entry.description).toBe(
+				'Show current swarm state (plus background-work health when hooks.background_subagents is enabled)',
+			);
 			expect(result!.remainingArgs).toEqual([]);
 		});
 
