@@ -15,6 +15,7 @@ import { issueWriteApprovalFact } from '../../../src/security/write-authority';
 import {
 	buildSkillImproverApprovalRequest,
 	type PreparedSkillImproverApprovalCandidate,
+	prepareApprovedSkillImproverCandidateWrite,
 	runSkillImprover,
 	writeApprovedSkillImproverCandidate,
 } from '../../../src/services/skill-improver';
@@ -105,7 +106,9 @@ describe('skill_improver approval integrity', () => {
 
 	it('FB-002 allows the canonical hive knowledge path through approval preparation and apply', async () => {
 		const hivePath = resolveHiveKnowledgePath();
-		const canonicalHiveApprovalPath = path.resolve(hivePath).replace(/\\/g, '/');
+		const canonicalHiveApprovalPath = path
+			.resolve(hivePath)
+			.replace(/\\/g, '/');
 		const hiveEntry: HiveKnowledgeEntry = {
 			id: '99999999-9999-4999-8999-999999999999',
 			tier: 'hive',
@@ -148,7 +151,8 @@ describe('skill_improver approval integrity', () => {
 						knowledgePath: canonicalHiveApprovalPath,
 						ids: [hiveEntry.id],
 						slug: 'hive-skill',
-						draftGeneratedSkillPath: '.swarm/skills/proposals/hive-skill/SKILL.md',
+						draftGeneratedSkillPath:
+							'.swarm/skills/proposals/hive-skill/SKILL.md',
 						updatedAt: '2026-08-26T12:00:00.000Z',
 					},
 				],
@@ -156,24 +160,7 @@ describe('skill_improver approval integrity', () => {
 			null,
 			2,
 		);
-		const request = buildSkillImproverApprovalRequest({
-			sessionId: 'sess-fb-002-hive',
-			candidateContent: approvedCandidateContent,
-			allowedPaths: [
-				'.swarm/skill-improver/proposals/demo.md',
-				'.swarm/skills/proposals/hive-skill/SKILL.md',
-				canonicalHiveApprovalPath,
-			],
-		});
-		if (!request) {
-			throw new Error('expected approval request');
-		}
-		await issueWriteApprovalFact({
-			directory: tmp,
-			request,
-			issuingSessionId: 'sess-human',
-		});
-		const result = await runSkillImprover({
+		const prepared = await prepareApprovedSkillImproverCandidateWrite({
 			directory: tmp,
 			config: {
 				...baseConfig,
@@ -184,6 +171,18 @@ describe('skill_improver approval integrity', () => {
 			sessionId: 'sess-fb-002-hive',
 			approvedCandidateContent,
 		});
+		if (prepared.kind !== 'prepared') {
+			throw new Error(
+				`expected prepared approval candidate, got: ${prepared.result.reason}`,
+			);
+		}
+		expect(prepared.prepared.allowedPaths).toContain(canonicalHiveApprovalPath);
+		await issueWriteApprovalFact({
+			directory: tmp,
+			request: prepared.prepared.request,
+			issuingSessionId: 'sess-human',
+		});
+		const result = await writeApprovedSkillImproverCandidate(prepared.prepared);
 		expect(result.ran).toBe(true);
 		expect(
 			readFileSync(
