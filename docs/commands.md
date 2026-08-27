@@ -863,6 +863,7 @@ For conflicted lanes, the recovery block shows the immutable v2 recovery identit
 
 - `available` — the next exact same-task worktree dispatch will claim the preserved lane instead of provisioning a new one
 - `claimed` — a retry already owns the preserved lane; wait for that claimant to settle or cancel it before retrying again
+- `manual-only` — the recovery authority is finalized; the lane is retained for audit/manual inspection and cannot be claimed again
 - `unsupported-legacy` / `uncertain` — automatic same-task redispatch is unavailable; use the manual merge hint shown for the lane
 
 #### Runtime profile state

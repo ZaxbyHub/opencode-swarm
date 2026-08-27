@@ -21,10 +21,6 @@ const MAX_PROVISIONING_JOURNAL_ENTRIES = 512;
 export const WORKTREE_PROVISIONING_OWNER_LEASE_MS = 5 * 60 * 1000;
 export const WORKTREE_LIFECYCLE_LOCK_FILE =
 	'.swarm/locks/init-orphan-recovery.lock';
-export const WORKTREE_PROVISIONING_OWNER_MUTATOR_NAMES = [
-	'record',
-	'remove',
-] as const;
 export const WORKTREE_PROVISIONING_LIFECYCLE_STATES = [
 	'OWNER_PUBLISHED',
 	'OWNER_REMOVED',

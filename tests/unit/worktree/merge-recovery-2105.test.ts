@@ -285,6 +285,61 @@ describe('recoverMergeBackFromImmutableCoordinates', () => {
 		).toBe(false);
 	});
 
+	test('recovery overlap preflight blocks dirty primary paths before immutable merge', async () => {
+		const fixture = createFixture();
+		const capturedSourceHead = commitInLane(
+			fixture,
+			'shared.txt',
+			'lane value\n',
+			'lane shared change',
+		);
+		writeText(path.join(fixture.root, 'shared.txt'), 'primary dirty\n');
+
+		const result = await recover(fixture, {
+			sourceBaseOid: fixture.baseHead,
+			sourceHeadOid: capturedSourceHead,
+			targetHeadOid: fixture.baseHead,
+			strategy: 'merge',
+		});
+
+		expect(result).toMatchObject({
+			error:
+				'Primary checkout has overlapping dirty paths with incoming preserved lane changes: shared.txt',
+		});
+		expect(readFileNormalized(path.join(fixture.root, 'shared.txt'))).toBe(
+			'primary dirty\n',
+		);
+		expect(git(fixture.root, 'rev-parse', 'HEAD')).toBe(fixture.baseHead);
+	});
+
+	test('recovery aborts a non-conflict cherry-pick failure that leaves a sequencer', async () => {
+		const fixture = createFixture();
+		const firstCommit = commitInLane(fixture, 'one.txt', 'one\n', 'lane one');
+		const capturedSourceHead = commitInLane(
+			fixture,
+			'two.txt',
+			'two\n',
+			'lane two',
+		);
+		commitInPrimary(fixture, 'two.txt', 'two\n', 'primary two');
+
+		const result = await recover(fixture, {
+			sourceBaseOid: fixture.baseHead,
+			sourceHeadOid: capturedSourceHead,
+			targetHeadOid: fixture.baseHead,
+			strategy: 'cherry-pick',
+		});
+
+		expect(result).toMatchObject({
+			conflict: true,
+			sourceCommitOrder: [firstCommit, capturedSourceHead],
+		});
+		expect(git(fixture.root, 'rev-parse', 'HEAD')).not.toBe(firstCommit);
+		expect(fs.existsSync(path.join(fixture.root, '.git', 'sequencer'))).toBe(
+			false,
+		);
+	});
+
 	test('fails closed when the current primary head no longer descends from the captured target head', async () => {
 		const fixture = createFixture();
 		const capturedSourceHead = commitInLane(

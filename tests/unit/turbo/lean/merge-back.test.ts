@@ -665,13 +665,7 @@ describe('attemptMergeBackFromDirty', () => {
 		worktreeInternals.bunSpawn = savedWorktreeSpawn;
 	});
 
-	/**
-	 * Helper: configure mock bunSpawn for worktree operations AND merge operations.
-	 *
-	 * The worktree functions (autoCommitDirty, cleanUntrackedFiles) use worktree's _internals.bunSpawn.
-	 * The merge function (mergeLaneBranch) uses merge-back's _internals.bunSpawn.
-	 * Both must be set independently.
-	 */
+	/** Helper: configure worktree + merge git seams for dirty merge-back tests. */
 	function setupMocks(opts: {
 		/** git add exit code (autoCommitDirty step 1) */
 		commitAddExit?: number;
@@ -720,8 +714,15 @@ describe('attemptMergeBackFromDirty', () => {
 			return mockProc(0, '', '');
 		};
 
-		// Configure merge-back's bunSpawn (for mergeLaneBranch)
-		_internals.bunSpawn = (_args: string[]) => {
+		_internals.bunSpawn = (args: string[]) => {
+			if (args[1] === 'rev-parse')
+				return mockProc(
+					0,
+					args[2] === fakeBranch ? '1'.repeat(40) : '0'.repeat(40),
+				);
+			if (args[1] === 'merge-base') return mockProc(0, '0'.repeat(40));
+			if (args[1] === 'status' || args[1] === 'ls-files' || args[1] === 'diff')
+				return mockProc(0);
 			return mockProc(mergeExit, '', mergeStderr);
 		};
 	}
@@ -824,7 +825,15 @@ describe('attemptMergeBackFromDirty', () => {
 		// mergeLaneBranch runs merge, detects conflict, then runs --abort
 		// So we need two merge-back bunSpawn calls: merge (fail with conflict) and --abort (success)
 		let mergeCallCount = 0;
-		_internals.bunSpawn = (_args: string[]) => {
+		_internals.bunSpawn = (args: string[]) => {
+			if (args[1] === 'rev-parse')
+				return mockProc(
+					0,
+					args[2] === fakeBranch ? '1'.repeat(40) : '0'.repeat(40),
+				);
+			if (args[1] === 'merge-base') return mockProc(0, '0'.repeat(40));
+			if (args[1] === 'status' || args[1] === 'ls-files' || args[1] === 'diff')
+				return mockProc(0);
 			mergeCallCount++;
 			if (mergeCallCount === 1) {
 				return mockProc(

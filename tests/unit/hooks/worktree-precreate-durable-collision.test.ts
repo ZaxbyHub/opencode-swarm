@@ -23,6 +23,7 @@ const originals = {
 	recordWorktreeProvisioningOwner: _internals.recordWorktreeProvisioningOwner,
 	removeWorktreeProvisioningOwner: _internals.removeWorktreeProvisioningOwner,
 	provisionWorktree: _internals.provisionWorktree,
+	worktreeSessionCreateTimeoutMs: _internals.worktreeSessionCreateTimeoutMs,
 };
 
 function git(directory: string, args: string[]): string {
@@ -66,7 +67,7 @@ describe('precreate durable collision protection', () => {
 		cleanup();
 	});
 
-	function args() {
+	function args(options?: { generation?: number }) {
 		return {
 			config: { worktree: { policy: 'auto' } } as never,
 			directory,
@@ -74,6 +75,9 @@ describe('precreate durable collision protection', () => {
 			callID: 'call-1',
 			taskId,
 			outputArgs: {},
+			...(options?.generation !== undefined
+				? { generation: options.generation }
+				: {}),
 		};
 	}
 

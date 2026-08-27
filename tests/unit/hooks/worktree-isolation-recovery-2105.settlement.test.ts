@@ -439,4 +439,32 @@ describe('issue #2105 worktree isolation recovery settlement', () => {
 			stage: 'recovery-authority-publish',
 		});
 	});
+
+	test('unexpected merge dependency failure returns typed settlement and clears awaiting registry', async () => {
+		const dispatch = makeDispatch();
+		awaitingMergeByCallID.set(dispatch.callID, {
+			callID: dispatch.callID,
+			parentSessionID: dispatch.parentSessionID,
+			taskId: dispatch.taskId,
+			planTaskId: dispatch.planTaskId,
+			branch: dispatch.handle.branchName,
+			worktreePath: dispatch.handle.worktreePath,
+			mergeStrategy: dispatch.mergeStrategy,
+			queuedAt: QUEUED_AT,
+		});
+		_internals.attemptMergeBackFromDirty = mock(async () => {
+			throw new Error('simulated merge dependency failure');
+		}) as never;
+
+		const result = await finishStandardWorktreeDispatch(
+			harness.directory,
+			dispatch,
+			undefined,
+			dispatch.callID,
+		);
+
+		expect(result).toMatchObject({ outcome: 'failed', stage: 'merge' });
+		expect(result.message).toContain('simulated merge dependency failure');
+		expect(awaitingMergeByCallID.has(dispatch.callID)).toBe(false);
+	});
 });

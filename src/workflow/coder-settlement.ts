@@ -17,6 +17,7 @@ import {
 	withTaskEvidenceTransaction,
 } from '../gate-evidence.js';
 import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
+import { removeWorktreeProvisioningOwner } from '../hooks/delegation-gate/worktree-provisioning-owner.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { isPathWithinDeclaredScope } from '../scope/path-identity.js';
@@ -716,20 +717,21 @@ async function cleanupRecoveredWorktree(
 	if (existsSync(descriptor.worktreePath) || branchExists()) {
 		throw new Error('CODER_SETTLEMENT_WORKTREE_CLEANUP_UNVERIFIED');
 	}
-	const { removeWorktreeProvisioningOwner } = await import(
-		'../hooks/delegation-gate/worktree-provisioning-owner.js'
-	);
+	const provisioningOwner =
+		descriptor.provisioningOwner ??
+		(descriptor.reservationId !== undefined &&
+		descriptor.generation !== undefined
+			? {
+					reservationId: descriptor.reservationId,
+					generation: descriptor.generation,
+					branchName: descriptor.branchName,
+				}
+			: undefined);
 	if (
-		!removeWorktreeProvisioningOwner(
+		!_internals.removeWorktreeProvisioningOwner(
 			directory,
 			descriptor.callID,
-			descriptor.reservationId && descriptor.generation
-				? {
-						reservationId: descriptor.reservationId,
-						generation: descriptor.generation,
-						branchName: descriptor.branchName,
-					}
-				: undefined,
+			provisioningOwner,
 		)
 	) {
 		throw new Error('CODER_SETTLEMENT_OWNER_CLEANUP_FAILED');
@@ -1379,6 +1381,9 @@ export async function recoverStaleCoderSettlements(
 
 export const _internals = {
 	liveDispatches,
+	// Test seam: owner cleanup is a mutation boundary whose failure must leave
+	// the settlement recoverable rather than being reported as successful.
+	removeWorktreeProvisioningOwner,
 	/**
 	 * Test seam for the lane-branch existence probe. Production reads it here,
 	 * so the #2236 fail-closed invariants — never mark a WAL terminal while the

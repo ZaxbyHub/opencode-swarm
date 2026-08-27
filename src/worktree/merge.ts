@@ -11,6 +11,7 @@
  */
 
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { advisoryWarn } from '../services/warning-buffer';
 import {
 	hasRecoveryRecordForBranch,
@@ -48,6 +49,8 @@ export const _internals: {
 	cleanupOrphanedBranches: typeof cleanupOrphanedBranches;
 	/** Test seam for startupOrphanRecovery — allows tests to intercept the recovery call. */
 	startupOrphanRecovery: typeof startupOrphanRecovery;
+	/** Test seam for the dirty merge overlap preflight. */
+	captureMergeOverlapSnapshot: typeof captureMergeOverlapSnapshot;
 	/** FR-001b: exposes extractSessionId for lane ownership validation. */
 	extractSessionId: typeof extractSessionId;
 	/**
@@ -63,6 +66,7 @@ export const _internals: {
 		new Promise<void>((resolve) => setTimeout(resolve, ms)),
 	cleanupOrphanedBranches,
 	startupOrphanRecovery,
+	captureMergeOverlapSnapshot,
 	extractSessionId,
 	resolveGitExecutable,
 };
@@ -422,15 +426,29 @@ async function finalizeMergeStrategyResult<
 	}
 
 	const combinedOutput = `${result.stderr}\n${result.stdout}`;
-	const hasConflict =
-		/CONFLICT/i.test(combinedOutput) || /conflict/i.test(combinedOutput);
+	const hasConflict = /CONFLICT/i.test(combinedOutput);
+	const operationState = await detectInProgressOperation(primaryDir);
 
-	if (hasConflict) {
-		await runGit(abortArgsForStrategy(strategy), primaryDir);
+	if (hasConflict || operationState.inProgress) {
+		const abortResult = await runGit(
+			abortArgsForStrategy(strategy),
+			primaryDir,
+		);
+		if (abortResult.exitCode !== 0) {
+			return {
+				error: `${strategy} abort failed after a non-zero merge result: ${abortResult.stderr.trim() || abortResult.stdout.trim() || 'unknown abort failure'}`,
+				...metadata,
+			};
+		}
 		return {
 			conflict: true,
 			files: parseConflictFiles(combinedOutput),
-			message: result.stderr.trim(),
+			message:
+				result.stderr.trim() ||
+				result.stdout.trim() ||
+				(operationState.inProgress
+					? `${strategy} left an in-progress operation; it was aborted`
+					: `${strategy} reported a conflict`),
 			...metadata,
 		};
 	}
@@ -439,6 +457,37 @@ async function finalizeMergeStrategyResult<
 		error: result.stderr.trim() || result.stdout.trim(),
 		...metadata,
 	};
+}
+
+/**
+ * Detect Git operation state independently of human-readable stderr. Git can
+ * leave a sequencer or merge marker behind after applying some commits and
+ * then failing for a non-conflict reason (for example an untracked-file
+ * overwrite). Such state must be aborted before the caller can retry.
+ */
+async function detectInProgressOperation(
+	primaryDir: string,
+): Promise<{ inProgress: boolean }> {
+	for (const marker of [
+		'MERGE_HEAD',
+		'CHERRY_PICK_HEAD',
+		'rebase-merge',
+		'rebase-apply',
+		'sequencer',
+	]) {
+		const result = await runGit(
+			['rev-parse', '--git-path', marker],
+			primaryDir,
+		);
+		if (result.exitCode !== 0) continue;
+		const rawPath = result.stdout.trim();
+		if (!rawPath) continue;
+		const markerPath = path.isAbsolute(rawPath)
+			? rawPath
+			: path.resolve(primaryDir, rawPath);
+		if (fs.existsSync(markerPath)) return { inProgress: true };
+	}
+	return { inProgress: false };
 }
 
 interface PathNormalizationResult {
@@ -722,6 +771,27 @@ async function captureMergeOverlapSnapshot(
 	};
 }
 
+async function captureImmutableMergeOverlapSnapshot(
+	primaryDir: string,
+	coordinates: ImmutableMergeRecoveryCoordinates,
+): Promise<{ snapshot: MergeOverlapSnapshot } | { error: string }> {
+	const snapshot = await captureMergeOverlapSnapshot(
+		primaryDir,
+		coordinates.sourceHeadOid,
+	);
+	if ('error' in snapshot) return snapshot;
+	if (
+		snapshot.snapshot.laneHead !== coordinates.sourceHeadOid ||
+		snapshot.snapshot.mergeBase !== coordinates.sourceBaseOid
+	) {
+		return {
+			error:
+				'Immutable recovery coordinates changed during overlap preflight; refusing merge-back',
+		};
+	}
+	return snapshot;
+}
+
 function sameOverlapSnapshot(
 	left: MergeOverlapSnapshot,
 	right: MergeOverlapSnapshot,
@@ -953,6 +1023,41 @@ export async function recoverMergeBackFromImmutableCoordinates(
 	);
 	if (!currentTargetRelation.ok) {
 		return { error: currentTargetRelation.error };
+	}
+
+	// Recovery must apply the same two-snapshot overlap fence as the dirty
+	// merge-back path. Use only the immutable object ids captured in the
+	// authority; resolving a mutable lane branch here would allow a later branch
+	// advance to bypass the preflight.
+	const initialOverlapSnapshot = await captureImmutableMergeOverlapSnapshot(
+		primaryDir,
+		coordinates,
+	);
+	if ('error' in initialOverlapSnapshot) {
+		return { error: initialOverlapSnapshot.error };
+	}
+	if (initialOverlapSnapshot.snapshot.overlapPaths.length > 0) {
+		return {
+			error: `Primary checkout has overlapping dirty paths with incoming preserved lane changes: ${initialOverlapSnapshot.snapshot.overlapPaths.join(', ')}`,
+		};
+	}
+	const finalOverlapSnapshot = await captureImmutableMergeOverlapSnapshot(
+		primaryDir,
+		coordinates,
+	);
+	if ('error' in finalOverlapSnapshot) {
+		return { error: finalOverlapSnapshot.error };
+	}
+	if (
+		!sameOverlapSnapshot(
+			initialOverlapSnapshot.snapshot,
+			finalOverlapSnapshot.snapshot,
+		)
+	) {
+		return {
+			error:
+				'Primary or preserved lane state changed during overlap preflight; refusing merge-back',
+		};
 	}
 
 	if (coordinates.strategy === 'merge') {
@@ -1606,7 +1711,7 @@ export async function attemptMergeBackFromDirty(
 		}
 	}
 
-	const initialOverlapSnapshot = await captureMergeOverlapSnapshot(
+	const initialOverlapSnapshot = await _internals.captureMergeOverlapSnapshot(
 		primaryDir,
 		branchName,
 	);
@@ -1649,7 +1754,7 @@ export async function attemptMergeBackFromDirty(
 		}
 	}
 
-	const finalOverlapSnapshot = await captureMergeOverlapSnapshot(
+	const finalOverlapSnapshot = await _internals.captureMergeOverlapSnapshot(
 		primaryDir,
 		branchName,
 	);

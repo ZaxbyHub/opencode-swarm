@@ -115,6 +115,20 @@ describe('issue #2105 worktree provisioning owner v3 journal', () => {
 		);
 	});
 
+	test('rejects generation 0 so the durable owner ledger stays 1-based', () => {
+		expect(() =>
+			recordWorktreeProvisioningOwner(directory, {
+				callID: 'call-zero',
+				parentSessionId: 'parent-1',
+				worktreeSessionId: 'child-1',
+				taskId: '2.1',
+				reservationId: 'reservation-1',
+				generation: 0,
+				branchName: 'swarm/lane/child-1/2.1',
+			}),
+		).toThrow('invalid worktree provisioning owner');
+	});
+
 	test('fails closed when the lifecycle journal is malformed', () => {
 		const journalPath = _internals.getJournalPath(directory);
 		fs.mkdirSync(path.dirname(journalPath), { recursive: true });

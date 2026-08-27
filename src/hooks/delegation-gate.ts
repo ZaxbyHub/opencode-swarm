@@ -116,6 +116,7 @@ import {
 	precreateStandardWorktreeSession,
 	resetStandardWorktreeIsolationState,
 	resolveWorktreeIsolationConfig,
+	type StandardWorktreeDispatch,
 	sanitizeWorktreeTaskId,
 	standardWorktreeByCallID,
 	standardWorktreeSerializationSessions,
@@ -210,6 +211,23 @@ export const pendingCoderScopeByTaskId = new BoundedPendingScopeMap();
 function pendingScopeKey(directory: string, taskId: string): string | null {
 	const workspace = canonicalWorkspaceIdentity(directory);
 	return workspace ? `${workspace}\0${taskId}` : null;
+}
+
+function exactProvisioningOwnerForBackgroundDescriptor(
+	owner: StandardWorktreeDispatch['provisioningOwner'],
+): BackgroundWorktreeDescriptor['provisioningOwner'] | undefined {
+	if (
+		owner?.reservationId === undefined ||
+		owner.generation === undefined ||
+		owner.branchName === undefined
+	) {
+		return undefined;
+	}
+	return {
+		reservationId: owner.reservationId,
+		generation: owner.generation,
+		branchName: owner.branchName,
+	};
 }
 
 export function setPendingCoderScope(
@@ -4404,6 +4422,9 @@ export function createDelegationGateHook(
 							mergeStrategy: standardDispatch.mergeStrategy,
 							laneIndex: standardDispatch.laneIndex,
 							worktreeDir: standardDispatch.worktree_dir ?? null,
+							provisioningOwner: exactProvisioningOwnerForBackgroundDescriptor(
+								standardDispatch.provisioningOwner,
+							),
 						}
 					: undefined,
 			);
@@ -4699,6 +4720,10 @@ export function createDelegationGateHook(
 											mergeStrategy: standardDispatch.mergeStrategy,
 											laneIndex: standardDispatch.laneIndex,
 											worktreeDir: standardDispatch.worktree_dir ?? null,
+											provisioningOwner:
+												exactProvisioningOwnerForBackgroundDescriptor(
+													standardDispatch.provisioningOwner,
+												),
 											reservationId: standardDispatch.reservationId,
 											generation: standardDispatch.generation,
 										}
@@ -4834,16 +4859,20 @@ export function createDelegationGateHook(
 					}
 				}
 				if (backgroundOwnershipDurable) {
-					_wtiInternals.removeWorktreeProvisioningOwner(
-						directory,
-						input.callID,
-						standardDispatch
+					const provisioningOwner =
+						standardDispatch?.provisioningOwner ??
+						(standardDispatch?.reservationId !== undefined &&
+						standardDispatch?.generation !== undefined
 							? {
 									reservationId: standardDispatch.reservationId,
 									generation: standardDispatch.generation,
 									branchName: standardDispatch.handle.branchName,
 								}
-							: undefined,
+							: undefined);
+					_wtiInternals.removeWorktreeProvisioningOwner(
+						directory,
+						input.callID,
+						provisioningOwner,
 					);
 				}
 				if (backgroundRecordDurable) {

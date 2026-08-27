@@ -19,6 +19,7 @@ import {
 import {
 	type ClaimWorktreeRecoveryAuthorityResult,
 	claimWorktreeRecoveryAuthority,
+	finalizeWorktreeRecoveryAuthority,
 	type PublishWorktreeRecoveryAuthorityResult,
 	publishWorktreeRecoveryAuthority,
 } from '../../../src/hooks/delegation-gate/worktree-recovery-authority';
@@ -221,5 +222,42 @@ describe('handleLanesCommand — recovery visibility (issue #2105)', () => {
 			authorityStatus: 'unsupported-legacy',
 			redispatchStatus: 'unsupported-legacy',
 		});
+	});
+
+	test('reports finalized recovery authorities as manual-only and does not advertise redispatch', async () => {
+		const authority = publishAuthority(tempDir);
+		const claimed = await claimAuthority(tempDir, authority.authorityDigest);
+		const finalized = finalizeWorktreeRecoveryAuthority(tempDir, {
+			authorityDigest: authority.authorityDigest,
+			claimantCallID: 'call-B',
+			claimRevision: claimed.authority.claim!.claimRevision,
+			rawToken: claimed.rawToken,
+			settlement: { sourceCommitOrder: [], rewrittenCommitOrder: [] },
+			now: 20_000,
+		});
+		expect(finalized.ok).toBe(true);
+
+		addConflictedLane({
+			taskId: authority.immutable.taskId,
+			worktreePath: authority.immutable.lanePath,
+			branch: authority.immutable.laneBranch,
+			stage: 'merge',
+			message: 'finalized recovery retained for manual inspection',
+		});
+
+		const text = handleLanesCommand(tempDir, []);
+		const json = JSON.parse(handleLanesCommand(tempDir, ['--json'])) as {
+			lanes: Array<Record<string, unknown>>;
+		};
+		const recovery = json.lanes[0]!.recovery as Record<string, unknown>;
+
+		expect(recovery).toMatchObject({
+			authorityStatus: 'finalized',
+			redispatchStatus: 'manual-only',
+		});
+		expect(text).toContain(
+			'redispatch: Merge-back failed at stage "merge" (finalized recovery retained for manual inspection). Manual review required.',
+		);
+		expect(text).not.toContain('Re-dispatch the exact same task');
 	});
 });

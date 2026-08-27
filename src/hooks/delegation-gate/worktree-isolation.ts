@@ -27,6 +27,7 @@ import { bunSpawn } from '../../utils/bun-compat';
 import { teardownEphemeralSession } from '../../utils/ephemeral-session-teardown.js';
 import { resolveGitExecutable } from '../../utils/git-executable.js';
 import * as logger from '../../utils/logger.js';
+import { withTimeout } from '../../utils/timeout.js';
 import type { WorktreeHandle } from '../../worktree';
 import {
 	attemptMergeBackFromDirty,
@@ -55,6 +56,7 @@ import {
 	clearWorktreeMergeStatus,
 	recordWorktreeMergeFailure,
 } from './worktree-merge-status';
+import type { WorktreeProvisioningOwnerRemovalIdentity } from './worktree-provisioning-owner';
 import {
 	recordWorktreeProvisioningOwner,
 	removeWorktreeProvisioningOwner,
@@ -200,6 +202,7 @@ export interface StandardWorktreeDispatch {
 	planTaskId?: string;
 	reservationId?: string;
 	generation?: number;
+	provisioningOwner?: WorktreeProvisioningOwnerRemovalIdentity;
 	canonicalBranch?: string;
 	canonicalPath?: string;
 	handle: WorktreeHandle;
@@ -313,6 +316,38 @@ const serializationStateBySessionID = new Map<
 >();
 
 const WORKTREE_RECOVERY_CLAIM_LEASE_MS = 5 * 60_000;
+const WORKTREE_SESSION_CREATE_TIMEOUT_MS = 5_000;
+
+async function createSessionWithinBudget<T>(
+	promise: Promise<T>,
+	label: string,
+	onLateResolve?: (result: T) => Promise<void> | void,
+): Promise<T> {
+	let timedOut = false;
+	void promise.then(
+		(result) => {
+			if (timedOut) {
+				void onLateResolve?.(result);
+			}
+		},
+		() => {
+			// If the create promise rejects after the timeout fires, the caller's
+			// failure path has already been entered. No extra cleanup is needed.
+		},
+	);
+	try {
+		return await withTimeout(
+			promise,
+			_internals.worktreeSessionCreateTimeoutMs,
+			new Error(
+				`${label} deadline expired after ${_internals.worktreeSessionCreateTimeoutMs}ms`,
+			),
+		);
+	} catch (error) {
+		timedOut = true;
+		throw error;
+	}
+}
 
 interface RecoverySessionLaunch {
 	childSessionId: string;
@@ -321,6 +356,7 @@ interface RecoverySessionLaunch {
 	strategy: WorktreeRecoveryStrategy;
 	reservationId: string;
 	generation: number;
+	provisioningOwner: WorktreeProvisioningOwnerRemovalIdentity;
 	canonicalBranch: string;
 	canonicalPath: string;
 	recoveryClaim: NonNullable<StandardWorktreeDispatch['recoveryClaim']>;
@@ -373,6 +409,15 @@ function hasInFlightStandardWorktreeDispatch(parentSessionID: string): boolean {
 	return false;
 }
 
+class StandardWorktreeLifecycleError extends Error {
+	readonly kind = 'standard-worktree-lifecycle';
+
+	constructor(message: string) {
+		super(message);
+		this.name = 'StandardWorktreeLifecycleError';
+	}
+}
+
 /**
  * Handle a standard worktree isolation failure under the resolved policy.
  *
@@ -390,9 +435,9 @@ function handleStandardWorktreeFailure(
 	policy: WorktreeIsolationConfig['policy'],
 	message: string,
 ): void {
-	if (policy === 'required') throw new Error(message);
+	if (policy === 'required') throw new StandardWorktreeLifecycleError(message);
 	if (hasInFlightStandardWorktreeDispatch(parentSessionID)) {
-		throw new Error(
+		throw new StandardWorktreeLifecycleError(
 			`STANDARD_WORKTREE_ISOLATION_UNSAFE: ${message} ` +
 				`Sibling coder task(s) are isolated in worktrees for this session, so ` +
 				`dispatching this coder un-isolated in the main tree would risk a ` +
@@ -409,7 +454,7 @@ function hardStopStandardWorktreeLifecycle(
 ): never {
 	const session = ensureAgentSession(parentSessionID);
 	pushAdvisory(session, message);
-	throw new Error(message);
+	throw new StandardWorktreeLifecycleError(message);
 }
 
 function serializeStandardWorktreeDispatches(
@@ -1042,11 +1087,11 @@ export async function precreateStandardWorktreeSession(args: {
 	// so the profile is available for materialization inside the worktree.
 	// Indices are per-session and monotonically increase.
 	const laneIndex = allocateStandardLaneIndex(args.parentSessionID);
-	const provisioningOwnerIdentity = {
+	let provisioningOwnerIdentity: WorktreeProvisioningOwnerRemovalIdentity = {
 		reservationId:
 			args.reservationId ??
 			`foreground:${args.parentSessionID}:${resolveRecoveryTaskId(args)}:${args.callID}`,
-		generation: args.generation ?? 1,
+		generation: Math.max(1, args.generation ?? 1),
 		branchName: makeWorktreeBranchName(args.parentSessionID, args.taskId, {
 			purpose: 'lane' as const,
 		}),
@@ -1142,13 +1187,25 @@ export async function precreateStandardWorktreeSession(args: {
 							claimantSessionId: args.parentSessionID,
 							leaseMs: WORKTREE_RECOVERY_CLAIM_LEASE_MS,
 							createChildSession: async () => {
-								const createResult = await client.session.create({
-									body: {
-										parentID: args.parentSessionID,
-										title: `${args.description ?? args.taskId} (worktree recovery lane)`,
+								const createResult = await createSessionWithinBudget(
+									client.session.create({
+										body: {
+											parentID: args.parentSessionID,
+											title: `${args.description ?? args.taskId} (worktree recovery lane)`,
+										},
+										query: { directory: collision.worktreePath },
+									}),
+									'STANDARD_WORKTREE_RECOVERY_SESSION_CREATE',
+									async (result) => {
+										const lateChildSessionId = result.data?.id;
+										if (lateChildSessionId) {
+											await teardownEphemeralSession(
+												client.session,
+												lateChildSessionId,
+											);
+										}
 									},
-									query: { directory: collision.worktreePath },
-								});
+								);
 								recoveredChildSessionId = createResult.data?.id ?? '';
 								if (!recoveredChildSessionId) {
 									const createError = (createResult as { error?: unknown })
@@ -1234,6 +1291,11 @@ export async function precreateStandardWorktreeSession(args: {
 					strategy: recoveryCandidate.authority.immutable.strategy,
 					reservationId: recoveryCandidate.authority.immutable.reservationId,
 					generation: recoveryCandidate.authority.immutable.generation,
+					provisioningOwner: {
+						reservationId: recoveryCandidate.authority.immutable.reservationId,
+						generation: recoveryCandidate.authority.immutable.generation,
+						branchName: collision.existingBranch,
+					},
 					canonicalBranch:
 						recoveryCandidate.authority.immutable.canonicalBranch,
 					canonicalPath: recoveryCandidate.authority.immutable.canonicalPath,
@@ -1369,11 +1431,7 @@ export async function precreateStandardWorktreeSession(args: {
 			...provisioningOwnerIdentity,
 		});
 	} catch (error) {
-		if (
-			error instanceof Error &&
-			(error.message.startsWith('STANDARD_WORKTREE_') ||
-				error.message.startsWith('PREPROVISION_COLLISION'))
-		) {
+		if (error instanceof StandardWorktreeLifecycleError) {
 			throw error;
 		}
 		hardStopStandardWorktreeLifecycle(
@@ -1411,6 +1469,7 @@ export async function precreateStandardWorktreeSession(args: {
 		mergeStrategy = recoveryLaunch.strategy;
 		reservationId = recoveryLaunch.reservationId;
 		generation = recoveryLaunch.generation;
+		provisioningOwnerIdentity = recoveryLaunch.provisioningOwner;
 		canonicalBranch = recoveryLaunch.canonicalBranch;
 		canonicalPath = recoveryLaunch.canonicalPath;
 		recoveryClaim = recoveryLaunch.recoveryClaim;
@@ -1418,10 +1477,9 @@ export async function precreateStandardWorktreeSession(args: {
 		reservationId =
 			args.reservationId ??
 			`foreground:${args.parentSessionID}:${resolveRecoveryTaskId(args)}:${args.callID}`;
-		generation = args.generation ?? 1;
+		generation = provisioningOwnerIdentity.generation;
 		canonicalPath = args.directory;
-		// Reserve a placeholder worktreePath for profile computation (updated after provision).
-		// The profile needs the actual worktreePath, so we compute it after provisioning.
+		// The profile needs the actual lane path, so we compute it after provisioning.
 		let provisionResult: Awaited<ReturnType<typeof provisionWorktree>>;
 		try {
 			provisionResult = await _internals.provisionWorktree(
@@ -1525,14 +1583,56 @@ export async function precreateStandardWorktreeSession(args: {
 	}
 
 	if (!recoveryLaunch) {
-		const createResult = await client.session.create({
-			body: {
-				parentID: args.parentSessionID,
-				title: `${args.description ?? args.taskId} (worktree lane)`,
-			},
-			query: { directory: handle.worktreePath },
-		});
-		if (!createResult.data?.id) {
+		let createResult:
+			| Awaited<ReturnType<typeof client.session.create>>
+			| undefined;
+		try {
+			createResult = await createSessionWithinBudget(
+				client.session.create({
+					body: {
+						parentID: args.parentSessionID,
+						title: `${args.description ?? args.taskId} (worktree lane)`,
+					},
+					query: { directory: handle.worktreePath },
+				}),
+				'STANDARD_WORKTREE_SESSION_CREATE',
+				async (result) => {
+					const lateChildSessionId = result.data?.id;
+					if (lateChildSessionId) {
+						await teardownEphemeralSession(client.session, lateChildSessionId);
+					}
+				},
+			);
+		} catch (error) {
+			await _internals
+				.removeWorktree(handle.worktreePath, args.directory, {
+					force: true,
+					worktreeDir: worktreeConfig.worktree_dir,
+				})
+				.catch((cleanupError: unknown) => {
+					logger.log(
+						`[worktree-isolation] session-create failure cleanup could not remove lane ${handle.worktreePath}: ${
+							cleanupError instanceof Error
+								? cleanupError.message
+								: String(cleanupError)
+						}`,
+					);
+				});
+			_internals.removeWorktreeProvisioningOwner(
+				args.directory,
+				args.callID,
+				provisioningOwnerIdentity,
+			);
+			const detail = error instanceof Error ? error.message : String(error);
+			const message = `STANDARD_WORKTREE_SESSION_CREATE_FAILED: ${detail}.`;
+			handleStandardWorktreeFailure(
+				args.parentSessionID,
+				worktreeConfig.policy,
+				message,
+			);
+			return;
+		}
+		if (!createResult?.data?.id) {
 			// Issue #2271 bug 1: an abandoned lane here feeds future collision
 			// churn — surface the failed cleanup instead of swallowing it silently.
 			await _internals
@@ -1589,8 +1689,8 @@ export async function precreateStandardWorktreeSession(args: {
 	// delegation-gate.ts: that call sits inside `if (resolvedTaskId)`, so a lane
 	// dispatched without a resolvable plan task id would get a lane-rooted
 	// session with no recorded root. This site covers every lane-rooted session
-	// unconditionally. `provisionResult.worktreePath` is provisionWorktree's own
-	// output and is never reachable from a tool argument.
+	// unconditionally. `handle.worktreePath` is provisionWorktree's own output
+	// and is never reachable from a tool argument.
 	//
 	// ORDER IS LOAD-BEARING. The child session must be registered with its real
 	// agent name BEFORE its workspace root is recorded. `recordSessionWorkspaceRoot`
@@ -1611,6 +1711,7 @@ export async function precreateStandardWorktreeSession(args: {
 		planTaskId: args.planTaskId,
 		reservationId,
 		generation,
+		provisioningOwner: provisioningOwnerIdentity,
 		canonicalBranch,
 		canonicalPath,
 		handle,
@@ -3081,7 +3182,49 @@ export async function finishStandardWorktreeDispatch(
 
 	const queuedRun = standardWorktreeMergeQueue.then(run, run);
 	standardWorktreeMergeQueue = queuedRun;
-	const result = await queuedRun;
+	let result: StandardWorktreeSettlementResult;
+	try {
+		result = await queuedRun;
+	} catch (error) {
+		// A dependency failure must not strand either the in-memory awaiting
+		// registry or a durable recovery claim. Preserve the lane for a later
+		// retry, release only this exact claim, and return a typed settlement
+		// failure to the completion observer instead of rejecting into a log-only
+		// path.
+		standardWorktreeByCallID.delete(resolvedCallID);
+		awaitingMergeByCallID.delete(resolvedCallID);
+		if (dispatch.recoveryClaim) {
+			try {
+				_internals.releaseWorktreeRecoveryClaim(directory, {
+					authorityDigest: dispatch.recoveryClaim.authorityDigest,
+					claimantCallID: resolvedCallID,
+					claimRevision: dispatch.recoveryClaim.claimRevision,
+					rawToken: dispatch.recoveryClaim.rawToken,
+				});
+			} catch {
+				// Startup replay remains the durable backstop when release itself fails.
+			}
+		}
+		const message = `Unexpected worktree settlement failure: ${error instanceof Error ? error.message : String(error)}`;
+		recordWorktreeMergeFailure(dispatch.planTaskId ?? dispatch.taskId, {
+			outcome: 'failed',
+			stage: 'merge',
+			message,
+			worktreePath: dispatch.handle.worktreePath,
+			branch: dispatch.handle.branchName,
+			completedAt: Date.now(),
+		});
+		const session = ensureAgentSession(dispatch.parentSessionID);
+		pushAdvisory(
+			session,
+			`STANDARD_WORKTREE_SETTLEMENT_FAILED: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; ${message}.`,
+		);
+		return {
+			outcome: 'failed',
+			stage: 'merge',
+			message,
+		};
+	}
 
 	// SC-115: Remove from awaiting-merge registry after merge-back completes
 	// (success, partial, or failed — all three paths).
@@ -3195,6 +3338,8 @@ export const _internals = {
 	buildWorktreeRecoveryPublishIdentity,
 	/** FR-001b SC-004: path-based dirty worktree preservation for stale-lane fallback. */
 	preserveDirtyWorktreeAtPath,
+	/** Bounded lane session.create timeout (tests may override). */
+	worktreeSessionCreateTimeoutMs: WORKTREE_SESSION_CREATE_TIMEOUT_MS,
 	/** FR-001a: abort entry point for in-flight dispatches. */
 	abortStandardWorktreeDispatch,
 	standardWorktreeByCallID,

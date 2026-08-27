@@ -135,7 +135,7 @@ describe('packaging smoke tests', () => {
 		// Bumped 7.5 -> 8.5 MiB for issue #2105's durable worktree-recovery
 		// infrastructure (see docs/releases/pending/ci-bundle-size-cap-flake.md
 		// for the bump history and cross-platform build-variance rationale): the
-		// bundle crossed 7.5 MiB after normal source growth, exactly
+		// bundle crossed 7.5 MiB after intentional durable-recovery source growth, exactly
 		// the "will eventually approach the cap and need another bump" case that
 		// doc calls out. The exact merged size is still rechecked after every build.
 		expect(stats.size).toBeLessThan(MAIN_BUNDLE_MAX_BYTES);

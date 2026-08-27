@@ -18,6 +18,11 @@ const AUTHORITY_LOCK_RELATIVE_PATH = path.join(
 	'worktree-recovery-authority.lock',
 );
 const AUTHORITY_LOCK_STALE_MS = 10 * 60_000;
+type AuthorityLockRecord = {
+	nonce: string;
+	acquiredAt: number;
+	pid: number;
+};
 const MAX_STORE_BYTES = 2 * 1024 * 1024;
 const MAX_STORE_AUTHORITIES = 512;
 const MAX_JOURNAL_BYTES = 2 * 1024 * 1024;
@@ -47,6 +52,7 @@ export type WorktreeRecoveryStatus =
 export type WorktreeRecoveryJournalState =
 	| 'PREPARED'
 	| 'COMMITTED'
+	| 'CLAIM_RENEWED'
 	| 'ABORTED'
 	| 'RELEASED'
 	| 'FINALIZED';
@@ -259,43 +265,106 @@ function credentialPath(directory: string, authorityDigest: string): string {
 	return path.join(directory, CREDENTIAL_DIRECTORY, `${authorityDigest}.json`);
 }
 
+function readAuthorityLockRecord(
+	lockPath: string,
+): AuthorityLockRecord | undefined {
+	try {
+		const parsed = JSON.parse(fs.readFileSync(lockPath, 'utf8')) as
+			| Partial<AuthorityLockRecord>
+			| undefined;
+		if (
+			typeof parsed?.nonce === 'string' &&
+			typeof parsed?.acquiredAt === 'number' &&
+			Number.isFinite(parsed.acquiredAt) &&
+			typeof parsed?.pid === 'number' &&
+			Number.isInteger(parsed.pid)
+		) {
+			return {
+				nonce: parsed.nonce,
+				acquiredAt: parsed.acquiredAt,
+				pid: parsed.pid,
+			};
+		}
+	} catch {
+		// Ignore malformed lock contents and fail closed.
+	}
+	return undefined;
+}
+
+function writeAuthorityLockRecord(
+	lockPath: string,
+	record: AuthorityLockRecord,
+): boolean {
+	try {
+		fs.writeFileSync(lockPath, JSON.stringify(record, null, 2), { flag: 'wx' });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function isProcessAlive(pid: number): boolean {
+	if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 function acquireAuthorityLock(directory: string): (() => void) | undefined {
 	const lockPath = path.join(directory, AUTHORITY_LOCK_RELATIVE_PATH);
 	fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-	const attempt = (): number | undefined => {
+	const nonce = randomBytes(16).toString('hex');
+	const acquiredAt = Date.now();
+	const attempt = (): boolean =>
+		writeAuthorityLockRecord(lockPath, {
+			nonce,
+			acquiredAt,
+			pid: process.pid,
+		});
+	if (!attempt()) {
 		try {
-			return fs.openSync(lockPath, 'wx');
-		} catch {
-			return undefined;
-		}
-	};
-	let descriptor = attempt();
-	if (descriptor === undefined) {
-		try {
+			const observed = readAuthorityLockRecord(lockPath);
+			if (!observed) return undefined;
 			if (
 				Date.now() - fs.statSync(lockPath).mtimeMs >
 				AUTHORITY_LOCK_STALE_MS
 			) {
-				fs.unlinkSync(lockPath);
-				descriptor = attempt();
+				// A stale mtime alone is not proof that the holder died. Keep a
+				// live owner's lock even when it has been held longer than the
+				// reclaim threshold; only an owner whose process is gone may be
+				// reclaimed.
+				if (isProcessAlive(observed.pid)) return undefined;
+				const reread = readAuthorityLockRecord(lockPath);
+				if (
+					reread &&
+					reread.nonce === observed.nonce &&
+					reread.acquiredAt === observed.acquiredAt &&
+					reread.pid === observed.pid
+				) {
+					fs.unlinkSync(lockPath);
+					if (!attempt()) return undefined;
+				}
 			}
 		} catch {
 			return undefined;
 		}
 	}
-	if (descriptor === undefined) return undefined;
+	const acquired = readAuthorityLockRecord(lockPath);
+	if (!acquired || acquired.nonce !== nonce) return undefined;
 	let released = false;
 	return () => {
 		if (released) return;
 		released = true;
 		try {
-			fs.closeSync(descriptor);
-		} finally {
-			try {
+			const current = readAuthorityLockRecord(lockPath);
+			if (current?.nonce === nonce) {
 				fs.unlinkSync(lockPath);
-			} catch {
-				// A missing lock is already released; other failures remain bounded.
 			}
+		} catch {
+			// A missing lock is already released; other failures remain bounded.
 		}
 	};
 }
@@ -468,6 +537,7 @@ function isJournalEntry(
 	const validState =
 		candidate.state === 'PREPARED' ||
 		candidate.state === 'COMMITTED' ||
+		candidate.state === 'CLAIM_RENEWED' ||
 		candidate.state === 'ABORTED' ||
 		candidate.state === 'RELEASED' ||
 		candidate.state === 'FINALIZED';
@@ -942,6 +1012,53 @@ async function claimWorktreeRecoveryAuthorityUnlocked(
 	});
 
 	const childSessionId = await request.createChildSession();
+	// The lock normally serializes this whole transaction, but the awaited SDK
+	// call is an external boundary. Re-read the authoritative record before
+	// publishing a credential or committing a claim so a repaired/replaced store
+	// cannot be overwritten by this stale snapshot.
+	const refreshedStore = loadStoreWritable(directory);
+	if ('ok' in refreshedStore) {
+		throw new Error(
+			`worktree recovery authority could not be revalidated: ${refreshedStore.reason}`,
+		);
+	}
+	const refreshedAuthority = refreshedStore.authorities.find(
+		(candidate) => candidate.authorityDigest === request.authorityDigest,
+	);
+	if (
+		!refreshedAuthority ||
+		stableStringify({
+			status: refreshedAuthority.status,
+			claim: refreshedAuthority.claim,
+			claimCursor: refreshedAuthority.claimCursor,
+			immutable: refreshedAuthority.immutable,
+		}) !==
+			stableStringify({
+				status: authority.status,
+				claim: authority.claim,
+				claimCursor: authority.claimCursor,
+				immutable: authority.immutable,
+			})
+	) {
+		recordJournalEntry(directory, {
+			schemaVersion: 1,
+			authorityDigest: authority.authorityDigest,
+			state: 'ABORTED',
+			claimantCallID: request.claimantCallID,
+			claimantSessionId: request.claimantSessionId,
+			childSessionId,
+			claimRevision: nextRevision,
+			attempt: nextAttempt,
+			leaseExpiresAt: currentTime + request.leaseMs,
+			claimTokenDigest,
+			preparedAt: currentTime,
+			abortedAt: nowMs(),
+			reason: 'authority changed while child session was being created',
+		});
+		throw new Error(
+			'worktree recovery authority changed while child session was being created',
+		);
+	}
 	recordJournalEntry(directory, {
 		schemaVersion: 1,
 		authorityDigest: authority.authorityDigest,
@@ -1095,6 +1212,21 @@ function renewWorktreeRecoveryClaimUnlocked(
 		rawToken: request.rawToken,
 		leaseExpiresAt: renewed.claim!.leaseExpiresAt,
 		createdAt: renewed.claim!.claimedAt,
+	});
+	recordJournalEntry(directory, {
+		schemaVersion: 1,
+		authorityDigest: renewed.authorityDigest,
+		state: 'CLAIM_RENEWED',
+		claimantCallID: renewed.claim!.claimantCallID,
+		claimantSessionId: renewed.claim!.claimantSessionId,
+		childSessionId: renewed.claim!.childSessionId,
+		claimRevision: renewed.claim!.claimRevision,
+		attempt: renewed.claim!.attempt,
+		leaseExpiresAt: renewed.claim!.leaseExpiresAt,
+		claimTokenDigest: renewed.claim!.claimTokenDigest,
+		preparedAt: renewed.claim!.claimedAt,
+		committedAt: nowMs(request.now),
+		reason: 'claim lease renewed',
 	});
 	return { ok: true, authority: renewed };
 }
@@ -1287,6 +1419,7 @@ function replayWorktreeRecoveryClaimJournalUnlocked(
 	for (const entry of latestJournalEntriesByAuthority(loadJournal(directory))) {
 		if (
 			entry.state === 'ABORTED' ||
+			entry.state === 'CLAIM_RENEWED' ||
 			entry.state === 'RELEASED' ||
 			entry.state === 'FINALIZED'
 		) {
@@ -1439,11 +1572,14 @@ export const _internals = {
 		targetPath: string,
 		credential: WorktreeRecoveryCredential,
 	): void => {
-		atomicWriteSwarmFileSync(targetPath, JSON.stringify(credential, null, 2));
+		atomicWriteSwarmFileSync(targetPath, JSON.stringify(credential, null, 2), {
+			mode: 0o600,
+		});
 	},
 	getRecoveryStorePath: storePath,
 	getClaimJournalPath: journalPath,
 	getCredentialPath: credentialPath,
+	acquireAuthorityLock,
 	readClaimJournal(directory: string): WorktreeRecoveryClaimJournal {
 		return loadJournal(directory);
 	},

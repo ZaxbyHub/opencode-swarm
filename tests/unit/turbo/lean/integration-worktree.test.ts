@@ -1553,9 +1553,7 @@ describe('DD-7: git clean -fd in cleanup — untracked files cleaned', () => {
 	test('attemptMergeBackFromDirty calls autoCommitDirty then cleanUntrackedFiles then merge', async () => {
 		const callOrder: string[] = [];
 
-		// autoCommitDirty and cleanUntrackedFiles are imported from worktree.ts
-		// and use worktree._internals.bunSpawn, while attemptMergeBackFromDirty's
-		// own runGit uses merge-back._internals.bunSpawn. Mock both seams.
+		// Mock both worktree git helpers and merge-back git calls.
 		worktreeModule._internals.bunSpawn = mock((args: string[]) => {
 			if (args[1] === 'add' && args[2] === '-A') {
 				callOrder.push('autoCommit:git-add');
@@ -1572,6 +1570,41 @@ describe('DD-7: git clean -fd in cleanup — untracked files cleaned', () => {
 			};
 		});
 		mergeBackModule._internals.bunSpawn = mock((args: string[]) => {
+			if (args[1] === 'rev-parse') {
+				return {
+					exited: Promise.resolve(0),
+					exitCode: 0,
+					stdout: {
+						text: () =>
+							Promise.resolve(
+								args[2] === 'swarm-lane/session-1/lane-1'
+									? '1'.repeat(40)
+									: '0'.repeat(40),
+							),
+					},
+					stderr: { text: () => Promise.resolve('') },
+				};
+			}
+			if (args[1] === 'merge-base') {
+				return {
+					exited: Promise.resolve(0),
+					exitCode: 0,
+					stdout: { text: () => Promise.resolve('0'.repeat(40)) },
+					stderr: { text: () => Promise.resolve('') },
+				};
+			}
+			if (
+				args[1] === 'status' ||
+				args[1] === 'ls-files' ||
+				args[1] === 'diff'
+			) {
+				return {
+					exited: Promise.resolve(0),
+					exitCode: 0,
+					stdout: { text: () => Promise.resolve('') },
+					stderr: { text: () => Promise.resolve('') },
+				};
+			}
 			if (args[1] === 'merge') {
 				callOrder.push('merge:git-merge');
 			}

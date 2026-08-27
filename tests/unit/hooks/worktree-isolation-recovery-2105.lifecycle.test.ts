@@ -1,4 +1,4 @@
-import { describe, expect, mock, test } from 'bun:test';
+import { afterEach, describe, expect, mock, test } from 'bun:test';
 import {
 	_internals,
 	abortStandardWorktreeDispatch,
@@ -17,6 +17,26 @@ import {
 
 describe('issue #2105 worktree isolation recovery routing lifecycle', () => {
 	const harness = setupRecoveryIsolationHarness();
+	const originalTimeoutMs = _internals.worktreeSessionCreateTimeoutMs;
+	const originals = {
+		tryAcquireWorktreeLifecycleLock: _internals.tryAcquireWorktreeLifecycleLock,
+		preProvisionCollisionCheck: _internals.preProvisionCollisionCheck,
+		lookupWorktreeRecoveryAuthoritiesByTask:
+			_internals.lookupWorktreeRecoveryAuthoritiesByTask,
+		claimWorktreeRecoveryAuthority: _internals.claimWorktreeRecoveryAuthority,
+		inspectStandardWorktreeCollisionOwnership:
+			_internals.inspectStandardWorktreeCollisionOwnership,
+		provisionWorktree: _internals.provisionWorktree,
+		removeWorktree: _internals.removeWorktree,
+		postMergeCleanup: _internals.postMergeCleanup,
+		replayWorktreeRecoveryClaimJournal:
+			_internals.replayWorktreeRecoveryClaimJournal,
+	};
+
+	afterEach(() => {
+		Object.assign(_internals, originals);
+		_internals.worktreeSessionCreateTimeoutMs = originalTimeoutMs;
+	});
 
 	test('precreate re-dispatch claims a preserved authority and reuses the preserved lane', async () => {
 		const worktreePath = `${harness.directory}/.swarm-worktrees/parent-1/task-1`;
@@ -63,7 +83,7 @@ describe('issue #2105 worktree isolation recovery routing lifecycle', () => {
 			status: 'ok' as const,
 			authorities: [authority],
 		})) as never;
-		const claim = mock((_dir, request) => ({
+		const claim = mock(async (_dir, request) => ({
 			ok: true as const,
 			rawToken: 'token-1',
 			credentialPath: `${harness.directory}/.swarm/worktree-recovery-claims/digest-1.json`,
@@ -73,7 +93,7 @@ describe('issue #2105 worktree isolation recovery routing lifecycle', () => {
 				claim: {
 					claimantCallID: 'call-1',
 					claimantSessionId: 'parent-1',
-					childSessionId: request.createChildSession(),
+					childSessionId: await request.createChildSession(),
 					claimRevision: 4,
 					attempt: 2,
 					leaseExpiresAt: 1234,
@@ -133,6 +153,104 @@ describe('issue #2105 worktree isolation recovery routing lifecycle', () => {
 			claimRevision: 4,
 			rawToken: 'token-1',
 		});
+	});
+
+	test('precreate recovery child session creation times out and replays the claim journal', async () => {
+		const worktreePath = `${harness.directory}/.swarm-worktrees/parent-1/task-1`;
+		const branchName = 'swarm/lane/parent-1/task-1';
+		const authority = {
+			schemaVersion: 2 as const,
+			authorityDigest: 'digest-timeout',
+			status: 'preserved' as const,
+			immutable: {
+				originalCallID: 'call-original',
+				parentSessionId: 'parent-1',
+				taskId: '2.1',
+				reservationId: 'reservation-1',
+				generation: 3,
+				canonicalBranch: 'swarm/task-2-1',
+				canonicalPath: `${harness.directory}/.swarm-canonical/2.1`,
+				laneBranch: branchName,
+				lanePath: worktreePath,
+				expectedPrimaryHead: HEX_A,
+				sourceBaseOid: HEX_B,
+				sourceHeadOid: HEX_C,
+				targetHeadOid: HEX_D,
+				strategy: 'rebase' as const,
+				createdAt: 1,
+			},
+		};
+		const createSession = mock(async () => new Promise(() => {}));
+		swarmState.opencodeClient = {
+			session: { create: createSession },
+		} as never;
+		_internals.worktreeSessionCreateTimeoutMs = 1;
+		const replay = mock(() => [
+			{ authorityDigest: 'digest-timeout', outcome: 'noop' as const },
+		]);
+		_internals.replayWorktreeRecoveryClaimJournal = replay as never;
+		_internals.tryAcquireWorktreeLifecycleLock = mock(async () => ({
+			acquired: true,
+			lock: { _release: async () => {} },
+		})) as never;
+		_internals.preProvisionCollisionCheck = mock(async () => ({
+			collision: true,
+			existingBranch: branchName,
+			ownerSessionId: 'parent-1',
+			worktreePath,
+		}));
+		_internals.lookupWorktreeRecoveryAuthoritiesByTask = mock(() => ({
+			status: 'ok' as const,
+			authorities: [authority],
+		})) as never;
+		_internals.claimWorktreeRecoveryAuthority = mock(async (_dir, request) => {
+			await request.createChildSession();
+			return {
+				ok: true as const,
+				rawToken: 'token-timeout',
+				credentialPath: `${harness.directory}/.swarm/worktree-recovery-claims/digest-timeout.json`,
+				authority: {
+					...authority,
+					status: 'claimed' as const,
+					claim: {
+						claimantCallID: 'call-1',
+						claimantSessionId: 'parent-1',
+						childSessionId: 'child-timeout',
+						claimRevision: 4,
+						attempt: 2,
+						leaseExpiresAt: 1234,
+						claimTokenDigest: 'digest-token',
+						claimedAt: 1000,
+					},
+				},
+			};
+		}) as never;
+		_internals.inspectStandardWorktreeCollisionOwnership = mock(async () => {
+			throw new Error('must not classify a claimed recovery lane');
+		}) as never;
+		_internals.provisionWorktree = mock(async () => {
+			throw new Error('must not provision a new lane for claimed recovery');
+		});
+		_internals.removeWorktree = mock(async () => {
+			throw new Error('must not remove a preserved recovery lane');
+		}) as never;
+		_internals.postMergeCleanup = mock(async () => {
+			throw new Error('must not delete a preserved recovery branch');
+		}) as never;
+
+		await expect(
+			precreateStandardWorktreeSession({
+				config: { worktree: { policy: 'auto' } } as never,
+				directory: harness.directory,
+				parentSessionID: 'parent-1',
+				callID: 'call-1',
+				taskId: 'task-1',
+				planTaskId: '2.1',
+				outputArgs: { prompt: 'TASK: 2.1\nFILE: src/retry.ts' },
+			}),
+		).rejects.toThrow('STANDARD_WORKTREE_RECOVERY_SESSION_CREATE_FAILED');
+		expect(createSession).toHaveBeenCalledTimes(1);
+		expect(replay).toHaveBeenCalledTimes(1);
 	});
 
 	test('precreate blocks expired-claim transfer while the previous claimant dispatch is still tracked live', async () => {
