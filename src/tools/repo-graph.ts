@@ -114,6 +114,10 @@ export type {
 	RouteMethod,
 	SecurityFact,
 	SymbolEdge,
+	SymbolEdgeEvidence,
+	SymbolEdgeKind,
+	SymbolEdgeResolution,
+	SymbolIdentityKind,
 	SymbolReference,
 } from './repo-graph/types';
 export {

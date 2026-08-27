@@ -6,6 +6,10 @@ import {
 } from '../../utils/path-security';
 import { isAssetEdge } from './builder';
 import type { FreshnessProbe } from './freshness';
+import {
+	isCompleteSymbolEdge,
+	LOW_CONFIDENCE_SYMBOL_EDGE_THRESHOLD,
+} from './symbol-edge';
 import type {
 	BlastRadiusResult,
 	CallerReference,
@@ -259,6 +263,7 @@ export function getGraphHealth(
 			unreadableFiles: [],
 			validationSkippedFiles: [],
 			lowConfidenceEdgeCount: 0,
+			unresolvedSymbolEdgeCount: 0,
 			walkTruncated: false,
 			walkTruncationReason: null,
 			incrementalFallbacks: 0,
@@ -269,6 +274,10 @@ export function getGraphHealth(
 	}
 
 	const diagnostics = graph.diagnostics as Record<string, unknown> | undefined;
+	const rawSymbolEdges = graph.symbolEdges ?? [];
+	const completeSymbolEdges = rawSymbolEdges.filter(isCompleteSymbolEdge);
+	const legacySymbolEdgeCount =
+		rawSymbolEdges.length - completeSymbolEdges.length;
 	const fresh = probeState === 'clean';
 	const staleFiles = getProbeStaleFiles(
 		probe,
@@ -291,6 +300,11 @@ export function getGraphHealth(
 	if (!diagnostics) {
 		notes.push(
 			'Graph has no recorded diagnostics. Rebuild with repo_map action="build" to collect health details.',
+		);
+	}
+	if (legacySymbolEdgeCount > 0) {
+		notes.push(
+			`${legacySymbolEdgeCount} legacy symbol edge(s) have no confidence or resolution metadata; rebuild the graph to score them.`,
 		);
 	}
 	const binaryFiles = sanitizePathList(diagnostics?.binaryFiles);
@@ -348,11 +362,18 @@ export function getGraphHealth(
 			diagnostics?.validationSkippedFiles,
 		),
 		lowConfidenceEdgeCount:
-			typeof diagnostics?.lowConfidenceEdgeCount === 'number' &&
-			Number.isFinite(diagnostics.lowConfidenceEdgeCount) &&
-			diagnostics.lowConfidenceEdgeCount > 0
-				? Math.floor(diagnostics.lowConfidenceEdgeCount)
-				: 0,
+			completeSymbolEdges.length > 0
+				? completeSymbolEdges.filter(
+						(edge) => edge.confidence < LOW_CONFIDENCE_SYMBOL_EDGE_THRESHOLD,
+					).length
+				: typeof diagnostics?.lowConfidenceEdgeCount === 'number' &&
+						Number.isFinite(diagnostics.lowConfidenceEdgeCount) &&
+						diagnostics.lowConfidenceEdgeCount > 0
+					? Math.floor(diagnostics.lowConfidenceEdgeCount)
+					: 0,
+		unresolvedSymbolEdgeCount: completeSymbolEdges.filter(
+			(edge) => edge.resolution === 'unresolved',
+		).length,
 		walkTruncated,
 		walkTruncationReason,
 		incrementalFallbacks,
