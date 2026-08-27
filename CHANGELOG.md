@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.151.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.151.0...v7.151.1) (2026-08-27)
+
+
+### Bug Fixes
+
+* **status:** [#2104](https://github.com/ZaxbyHub/opencode-swarm/issues/2104) follow-through — status help surface + init-bound maintenance tests ([3968f21](https://github.com/ZaxbyHub/opencode-swarm/commit/3968f212ac8071e803b1c13ef6dd9504b35875a1))
+* **status:** address PR [#2372](https://github.com/ZaxbyHub/opencode-swarm/issues/2372) review findings (biome ci, labels, assertions, state reset) ([0dc26b7](https://github.com/ZaxbyHub/opencode-swarm/commit/0dc26b7a54e02e1a043705382df4e4922b11ea48))
+* **tests:** keep registry.test.ts within its FR-006 line-cap ratchet baseline ([016e366](https://github.com/ZaxbyHub/opencode-swarm/commit/016e3666b9e090b9db3648e90c498bf8ca53ab8c))
+
 ## [7.151.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.150.0...v7.151.0) (2026-08-27)
 
 
