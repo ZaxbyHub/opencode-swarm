@@ -614,7 +614,7 @@ describe('destructive command guard - .swarm path protection (sections 16-21)', 
 			const input = makeBashInput('test-session', 'git push --force');
 			const output = makeBashOutput('git push --force origin main');
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/git push --force is not allowed \(use --force-with-lease instead\)/,
+				/BLOCKED: Force push detected/,
 			);
 		});
 	});
