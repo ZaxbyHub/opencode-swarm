@@ -16,6 +16,7 @@ import {
 	SandboxCapabilityProbe,
 } from '../../../src/sandbox/capability-probe';
 import { _internals as linuxExecutorInternals } from '../../../src/sandbox/linux/bubblewrap-executor';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const platform = process.platform;
 
@@ -201,7 +202,7 @@ describe('SandboxCapabilityProbe', () => {
 		});
 
 		test('regression FB-023: windows probe source identity follows the resolved command processor instead of a hardcoded system path literal', () => {
-			const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'probe-cmd-'));
+			const tempRoot = canonicalMkdtemp('probe-cmd-');
 			const cmdA = path.join(tempRoot, 'cmd-a.exe');
 			const cmdB = path.join(tempRoot, 'cmd-b.exe');
 			fs.writeFileSync(cmdA, '');

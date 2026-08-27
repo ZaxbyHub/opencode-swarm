@@ -21,6 +21,7 @@ import {
 } from '../../../src/services/skill-improver';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env';
 import { freezeClock, type Restore } from '../../helpers/test-clock';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let tmp: string;
 let isolatedEnv: ReturnType<typeof createIsolatedTestEnv>;
@@ -48,7 +49,7 @@ beforeEach(() => {
 		isoNow: '2026-08-26T12:00:00.000Z',
 	});
 	isolatedEnv = createIsolatedTestEnv();
-	tmp = mkdtempSync(path.join(tmpdir(), 'swarm-skill-improve-approval-'));
+	tmp = canonicalMkdtemp('swarm-skill-improve-approval-');
 });
 
 afterEach(() => {
