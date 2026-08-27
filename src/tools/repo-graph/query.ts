@@ -7,10 +7,8 @@ import {
 import { isAssetEdge } from './builder';
 import type { FreshnessProbe } from './freshness';
 import {
-	deriveRepoRootId,
 	isCompleteSymbolEdge,
 	LOW_CONFIDENCE_SYMBOL_EDGE_THRESHOLD,
-	normalizeSymbolEdge,
 } from './symbol-edge';
 import type {
 	BlastRadiusResult,
@@ -276,11 +274,8 @@ export function getGraphHealth(
 	}
 
 	const diagnostics = graph.diagnostics as Record<string, unknown> | undefined;
-	const repoRootId = graph.repoRootId ?? deriveRepoRootId(graph.workspaceRoot);
 	const rawSymbolEdges = graph.symbolEdges ?? [];
-	const completeSymbolEdges = rawSymbolEdges
-		.filter(isCompleteSymbolEdge)
-		.map((edge) => normalizeSymbolEdge(edge, graph.workspaceRoot, repoRootId));
+	const completeSymbolEdges = rawSymbolEdges.filter(isCompleteSymbolEdge);
 	const legacySymbolEdgeCount =
 		rawSymbolEdges.length - completeSymbolEdges.length;
 	const fresh = probeState === 'clean';
@@ -773,10 +768,7 @@ export function getContextPack(
 	// reverse (incoming callers), keyed by normalized file + symbol.
 	const forward = new Map<string, SymbolEdge[]>();
 	const reverse = new Map<string, SymbolEdge[]>();
-	const repoRootId = graph.repoRootId ?? deriveRepoRootId(graph.workspaceRoot);
-	const symbolEdges = (graph.symbolEdges ?? []).map((edge) =>
-		normalizeSymbolEdge(edge, graph.workspaceRoot, repoRootId),
-	);
+	const symbolEdges = graph.symbolEdges ?? [];
 	for (const edge of symbolEdges) {
 		const fromKey = `${normalizeGraphPath(edge.fromFile)}\0${edge.fromSymbol}`;
 		const toKey = `${normalizeGraphPath(edge.toFile)}\0${edge.toSymbol}`;

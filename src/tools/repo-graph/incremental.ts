@@ -37,6 +37,7 @@ import { resetQueryCache } from './query';
 import { getGraphPath, loadGraph, saveGraph } from './storage';
 import {
 	deriveRepoRootId,
+	isCompleteSymbolEdge,
 	mergeSymbolEdges,
 	normalizeSymbolEdge,
 } from './symbol-edge';
@@ -281,6 +282,27 @@ function scanDiagnostics(
 	};
 }
 
+function appendExtractionFailure(
+	diagnostics: RepoGraphDiagnostics | undefined,
+	failure: { file: string; language: string; reason: string },
+): RepoGraphDiagnostics {
+	const extractionFailures = diagnostics?.extractionFailures ?? [];
+	if (
+		extractionFailures.some(
+			(entry) =>
+				entry.file === failure.file &&
+				entry.language === failure.language &&
+				entry.reason === failure.reason,
+		)
+	) {
+		return diagnostics ?? {};
+	}
+	return {
+		...(diagnostics ?? {}),
+		extractionFailures: [...extractionFailures, failure],
+	};
+}
+
 function isEnoent(error: unknown): boolean {
 	return (
 		error instanceof Error &&
@@ -505,11 +527,33 @@ async function applyAsyncFileUpdates(
 			continue;
 		}
 
-		const result = await _internals.scanFileAsync(
-			rawFilePath,
-			absoluteRoot,
-			maxFileSize,
-			hasManifest,
+		const repoRootId =
+			graph.repoRootId ?? deriveRepoRootId(graph.workspaceRoot);
+		graph.repoRootId = repoRootId;
+		let result: Awaited<ReturnType<typeof _internals.scanFileAsync>>;
+		try {
+			result = await _internals.scanFileAsync(
+				rawFilePath,
+				absoluteRoot,
+				maxFileSize,
+				hasManifest,
+				repoRootId,
+			);
+		} catch {
+			replaceFileDiagnostics(graph, fileDiagnosticName, {
+				extractionFailures: [
+					{
+						file: fileDiagnosticName,
+						language: path.extname(rawFilePath).slice(1) || 'unknown',
+						reason: 'symbol_edge_validation_failed',
+					},
+				],
+			});
+			continue;
+		}
+		let replacementDiagnostics = scanDiagnostics(
+			result.diagnostics,
+			result.inputWitness,
 		);
 
 		if (result.node) {
@@ -579,40 +623,58 @@ async function applyAsyncFileUpdates(
 				if (!graph.symbolEdges) {
 					graph.symbolEdges = [];
 				}
-				const repoRootId =
-					graph.repoRootId ?? deriveRepoRootId(graph.workspaceRoot);
-				graph.repoRootId = repoRootId;
-				graph.symbolEdges = graph.symbolEdges.map((edge) =>
-					normalizeSymbolEdge(edge, graph.workspaceRoot, repoRootId),
-				);
-				const existingById = new Map(
-					graph.symbolEdges.map((edge, index) => [edge.id as string, index]),
-				);
+				const existingById = new Map<string, number>();
+				graph.symbolEdges.forEach((edge, index) => {
+					if (isCompleteSymbolEdge(edge)) {
+						existingById.set(edge.id, index);
+					}
+				});
 				for (const symbolEdge of result.symbolEdges) {
-					const normalized = normalizeSymbolEdge(
-						symbolEdge,
-						graph.workspaceRoot,
-						repoRootId,
-					);
-					const existingIndex = existingById.get(normalized.id);
-					if (existingIndex === undefined) {
-						graph.symbolEdges.push(normalized);
-						existingById.set(normalized.id, graph.symbolEdges.length - 1);
-					} else {
-						graph.symbolEdges[existingIndex] = mergeSymbolEdges(
-							graph.symbolEdges[existingIndex] as SymbolEdge,
-							normalized,
+					let normalized: ReturnType<typeof normalizeSymbolEdge>;
+					try {
+						normalized = normalizeSymbolEdge(
+							symbolEdge,
 							graph.workspaceRoot,
 							repoRootId,
 						);
+					} catch {
+						replacementDiagnostics = appendExtractionFailure(
+							replacementDiagnostics,
+							{
+								file: fileDiagnosticName,
+								language: result.node.language,
+								reason: 'symbol_edge_validation_failed',
+							},
+						);
+						continue;
+					}
+					const normalizedId = normalized.id;
+					const existingIndex = existingById.get(normalizedId);
+					if (existingIndex === undefined) {
+						graph.symbolEdges.push(normalized);
+						existingById.set(normalizedId, graph.symbolEdges.length - 1);
+					} else {
+						try {
+							graph.symbolEdges[existingIndex] = mergeSymbolEdges(
+								graph.symbolEdges[existingIndex] as SymbolEdge,
+								normalized,
+								graph.workspaceRoot,
+								repoRootId,
+							);
+						} catch {
+							replacementDiagnostics = appendExtractionFailure(
+								replacementDiagnostics,
+								{
+									file: fileDiagnosticName,
+									language: result.node.language,
+									reason: 'symbol_edge_validation_failed',
+								},
+							);
+						}
 					}
 				}
 			}
-			replaceFileDiagnostics(
-				graph,
-				fileDiagnosticName,
-				scanDiagnostics(result.diagnostics, result.inputWitness),
-			);
+			replaceFileDiagnostics(graph, fileDiagnosticName, replacementDiagnostics);
 		} else {
 			const definitelyUnindexable =
 				(result.diagnostics?.oversizedFiles?.length ?? 0) > 0 ||

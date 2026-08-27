@@ -197,9 +197,12 @@ describe('SymbolEdge v2 — issue #1532 regression', () => {
 			resolution: 'import_binding',
 			evidence: [evidenceB],
 		});
-		expect(mergeSymbolEdges(a, b, workspace, repoRootId)).toEqual(
-			mergeSymbolEdges(b, a, workspace, repoRootId),
-		);
+		const merged = mergeSymbolEdges(a, b, workspace, repoRootId);
+		expect(merged).toEqual(mergeSymbolEdges(b, a, workspace, repoRootId));
+		expect(merged.evidence).toEqual([
+			expect.objectContaining({ line: 2 }),
+			expect.objectContaining({ line: 4 }),
+		]);
 	});
 
 	test('equal-confidence duplicates choose resolution deterministically', () => {

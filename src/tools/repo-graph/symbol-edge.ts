@@ -68,7 +68,7 @@ export function relativeSymbolPath(
 	filePath: string,
 ): string {
 	const root = canonicalPath(path.resolve(workspaceRoot));
-	const file = canonicalPath(path.resolve(filePath));
+	const file = canonicalPath(path.resolve(workspaceRoot, filePath));
 	const prefix = `${root}/`;
 	return file.startsWith(prefix) ? file.slice(prefix.length) : file;
 }
@@ -99,12 +99,30 @@ export function hashSymbolEdgeSnippet(snippet: string): string {
 	return digest([canonicalText(snippet.replace(/\r$/, ''))]);
 }
 
-export function isCompleteSymbolEdge(edge: SymbolEdge): boolean {
+export function isCompleteSymbolEdge(
+	edge: SymbolEdge,
+): edge is SymbolEdge & Required<Pick<SymbolEdge, (typeof V2_KEYS)[number]>> {
 	return V2_KEYS.every((key) => edge[key] !== undefined);
 }
 
-function hasAnyV2Field(edge: SymbolEdge): boolean {
+export function hasSymbolEdgeV2Fields(edge: SymbolEdge): boolean {
 	return V2_KEYS.some((key) => edge[key] !== undefined);
+}
+
+function resolveTrustedCoordinate(
+	name: 'fromFile' | 'toFile',
+	value: string,
+	workspaceRoot: string,
+): string {
+	const resolvedWorkspace = canonicalPath(path.resolve(workspaceRoot));
+	const resolvedValue = canonicalPath(path.resolve(workspaceRoot, value));
+	if (
+		resolvedValue !== resolvedWorkspace &&
+		!resolvedValue.startsWith(`${resolvedWorkspace}/`)
+	) {
+		throw new Error(`invalid ${name}`);
+	}
+	return path.resolve(workspaceRoot, value);
 }
 
 function identityKind(symbol: string): SymbolIdentityKind {
@@ -222,10 +240,16 @@ export function normalizeSymbolEdge(
 		throw new Error('invalid symbol edge path');
 	}
 
-	const anyV2 = hasAnyV2Field(edge);
+	const anyV2 = hasSymbolEdgeV2Fields(edge);
 	if (anyV2 && !isCompleteSymbolEdge(edge)) {
 		throw new Error('partial SymbolEdge v2 fields');
 	}
+	const fromFile = anyV2
+		? resolveTrustedCoordinate('fromFile', edge.fromFile, workspaceRoot)
+		: edge.fromFile;
+	const toFile = anyV2
+		? resolveTrustedCoordinate('toFile', edge.toFile, workspaceRoot)
+		: edge.toFile;
 	const kind = (edge.kind ?? 'REFERENCES') as SymbolEdgeKind;
 	const resolution = (edge.resolution ?? 'unresolved') as SymbolEdgeResolution;
 	const confidence = edge.confidence ?? 0;
@@ -239,7 +263,12 @@ export function normalizeSymbolEdge(
 	}
 	validateEvidence(evidence);
 
-	const ids = computedIds(edge, workspaceRoot, repoRootId, kind);
+	const ids = computedIds(
+		{ ...edge, fromFile, toFile },
+		workspaceRoot,
+		repoRootId,
+		kind,
+	);
 	if (
 		anyV2 &&
 		(edge.fromId !== ids.fromId || edge.toId !== ids.toId || edge.id !== ids.id)
@@ -248,6 +277,8 @@ export function normalizeSymbolEdge(
 	}
 	return {
 		...edge,
+		fromFile,
+		toFile,
 		...ids,
 		kind,
 		confidence,

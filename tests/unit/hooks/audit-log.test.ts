@@ -22,10 +22,6 @@ import {
 	redactPath,
 } from '../../../src/hooks/guardrails/audit-log';
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 async function mkTempDir(): Promise<string> {
 	return mkdtemp(join(tmpdir(), 'audit-log-test-'));
 }

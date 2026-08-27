@@ -91,7 +91,7 @@ actions include:
   at graph schema 1.1.0; see `docs/repo-graph-call-graph.md` for scope and
   limitations.
 - `context_pack` returns a token-budgeted, symbol-level source slice (definition
-  + transitive callers/callees) built on tree-sitter extraction across all **12**
+  + transitive callers/callees) built on tree-sitter extraction across all **13**
   first-class languages. Schema 1.5.0 adds stable IDs, relationship kind,
   confidence, resolution provenance, and hashed source evidence while retaining
   schema 1.2.0 edge compatibility. See `docs/repo-graph-symbol-graph.md`.
