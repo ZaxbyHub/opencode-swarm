@@ -24,6 +24,7 @@ import {
 } from '../../state';
 import { pushAdvisory } from '../../utils/advisory-queue';
 import { bunSpawn } from '../../utils/bun-compat';
+import { teardownEphemeralSession } from '../../utils/ephemeral-session-teardown.js';
 import { resolveGitExecutable } from '../../utils/git-executable.js';
 import * as logger from '../../utils/logger.js';
 import type { WorktreeHandle } from '../../worktree';
@@ -31,15 +32,18 @@ import {
 	attemptMergeBackFromDirty,
 	cleanupOrphanedBranches,
 	getMergeStrategy,
+	makeWorktreeBranchName,
 	mergeInternals,
 	postMergeCleanup,
 	provisionWorktree,
 	pruneStaleWorktreeMetadata,
+	recoverMergeBackFromImmutableCoordinates,
 	removeWorktree,
 	startupOrphanRecovery,
 } from '../../worktree';
 import type {
 	DirtyMergeOptions,
+	ImmutableMergeRecoveryCoordinates,
 	MergeOperationProvenance,
 } from '../../worktree/merge';
 import {
@@ -56,6 +60,22 @@ import {
 	removeWorktreeProvisioningOwner,
 	WORKTREE_LIFECYCLE_LOCK_FILE,
 } from './worktree-provisioning-owner';
+import type {
+	ClaimWorktreeRecoveryAuthorityRequest,
+	WorktreeRecoveryAuthorityRecord,
+	WorktreeRecoveryImmutableIdentityInput,
+	WorktreeRecoveryLookupResult,
+	WorktreeRecoveryStrategy,
+} from './worktree-recovery-authority';
+import {
+	claimWorktreeRecoveryAuthority,
+	finalizeWorktreeRecoveryAuthority,
+	lookupWorktreeRecoveryAuthoritiesByTask,
+	publishWorktreeRecoveryAuthority,
+	releaseWorktreeRecoveryClaim,
+	renewWorktreeRecoveryClaim,
+	replayWorktreeRecoveryClaimJournal,
+} from './worktree-recovery-authority';
 
 /**
  * FR-201: Per-lane runtime profile injected into spawned child processes.
@@ -178,8 +198,22 @@ export interface StandardWorktreeDispatch {
 	parentSessionID: string;
 	taskId: string;
 	planTaskId?: string;
+	reservationId?: string;
+	generation?: number;
+	canonicalBranch?: string;
+	canonicalPath?: string;
 	handle: WorktreeHandle;
 	mergeStrategy: 'merge' | 'rebase' | 'cherry-pick';
+	recoveryClaim?: {
+		authorityDigest: string;
+		claimRevision: number;
+		rawToken: string;
+		coordinates?: ImmutableMergeRecoveryCoordinates;
+		settlement?: {
+			sourceCommitOrder: string[];
+			rewrittenCommitOrder: string[];
+		};
+	};
 	/** FR-201: 0-based lane index for runtime profile derivation. */
 	laneIndex: number;
 	/** Configured worktree-dir override, so cleanup trusts the same base. */
@@ -231,6 +265,9 @@ export interface AwaitingMergeRecord {
 	parentSessionID: string;
 	taskId: string;
 	planTaskId?: string;
+	/** Exact durable launch identity threaded from the delegation gate. */
+	reservationId?: string;
+	generation?: number;
 	branch: string;
 	worktreePath: string;
 	mergeStrategy: 'merge' | 'rebase' | 'cherry-pick';
@@ -275,10 +312,45 @@ const serializationStateBySessionID = new Map<
 	SessionSerializationState
 >();
 
+const WORKTREE_RECOVERY_CLAIM_LEASE_MS = 5 * 60_000;
+
+interface RecoverySessionLaunch {
+	childSessionId: string;
+	worktreePath: string;
+	branchName: string;
+	strategy: WorktreeRecoveryStrategy;
+	reservationId: string;
+	generation: number;
+	canonicalBranch: string;
+	canonicalPath: string;
+	recoveryClaim: NonNullable<StandardWorktreeDispatch['recoveryClaim']>;
+}
+
+interface CleanupStandardWorktreeResult {
+	removedWorktree: boolean;
+	cleanedBranch: boolean;
+	preservedRecoveryLane: boolean;
+}
+
 function rememberStandardWorktreeDispatch(
 	dispatch: StandardWorktreeDispatch,
 ): void {
 	standardWorktreeByCallID.set(dispatch.callID, dispatch);
+}
+
+function resolveRecoveryTaskId(input: {
+	taskId: string;
+	planTaskId?: string;
+}): string {
+	return input.planTaskId ?? input.taskId;
+}
+
+function toRecoveryStrategy(
+	strategy:
+		| StandardWorktreeDispatch['mergeStrategy']
+		| MergeOperationProvenance['strategy'],
+): WorktreeRecoveryStrategy {
+	return strategy;
 }
 
 function hasStandardWorktreeDispatchCapacity(): boolean {
@@ -718,6 +790,194 @@ async function inspectStandardWorktreeCollisionOwnership(identity: {
 	return collisionOwnership.inspectStandardWorktreeCollisionOwnership(identity);
 }
 
+async function runRecoveryGit(
+	directory: string,
+	args: string[],
+	timeoutMs = 15_000,
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+	let proc: ReturnType<typeof _internals.bunSpawn> | undefined;
+	try {
+		proc = _internals.bunSpawn(
+			[_internals.resolveGitExecutable(), '-C', directory, ...args],
+			{
+				stdin: 'ignore',
+				stdout: 'pipe',
+				stderr: 'pipe',
+				timeout: timeoutMs,
+				env: { ...process.env, LC_ALL: 'C' },
+			},
+		);
+		const exitCode = await proc.exited;
+		const stdout = await proc.stdout.text();
+		const stderr = await proc.stderr.text();
+		return { exitCode, stdout, stderr };
+	} catch (error) {
+		return {
+			exitCode: 1,
+			stdout: '',
+			stderr: error instanceof Error ? error.message : String(error),
+		};
+	} finally {
+		try {
+			proc?.kill();
+		} catch {
+			// best-effort
+		}
+	}
+}
+
+async function buildWorktreeRecoveryPublishIdentity(input: {
+	directory: string;
+	dispatch: StandardWorktreeDispatch;
+	taskId: string;
+	provenance: MergeOperationProvenance;
+	conflictFiles?: string[];
+}): Promise<WorktreeRecoveryImmutableIdentityInput | undefined> {
+	const mergeBase = await runRecoveryGit(input.directory, [
+		'merge-base',
+		input.provenance.targetHeadBefore,
+		input.provenance.sourceHead,
+	]);
+	const mergeBaseOid = mergeBase.stdout.trim();
+	if (
+		mergeBase.exitCode !== 0 ||
+		!/^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(mergeBaseOid)
+	) {
+		return undefined;
+	}
+
+	const targetHead = await runRecoveryGit(input.directory, [
+		'rev-parse',
+		'HEAD',
+	]);
+	const targetHeadOid = targetHead.stdout.trim();
+	if (
+		targetHead.exitCode !== 0 ||
+		!/^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(targetHeadOid)
+	) {
+		return undefined;
+	}
+
+	return {
+		originalCallID: input.dispatch.callID,
+		parentSessionId: input.dispatch.parentSessionID,
+		taskId: input.taskId,
+		reservationId:
+			input.dispatch.reservationId ??
+			`worktree:${input.dispatch.parentSessionID}:${input.taskId}`,
+		generation: input.dispatch.generation ?? 1,
+		canonicalBranch:
+			input.dispatch.canonicalBranch ?? input.dispatch.handle.branchName,
+		canonicalPath:
+			input.dispatch.canonicalPath ?? input.dispatch.handle.worktreePath,
+		laneBranch: input.dispatch.handle.branchName,
+		lanePath: input.dispatch.handle.worktreePath,
+		expectedPrimaryHead: input.provenance.targetHeadBefore,
+		sourceBaseOid: mergeBaseOid,
+		sourceHeadOid: input.provenance.sourceHead,
+		targetHeadOid,
+		strategy: toRecoveryStrategy(input.provenance.strategy),
+		...(input.conflictFiles && input.conflictFiles.length > 0
+			? { declaredConflictFiles: input.conflictFiles }
+			: {}),
+	};
+}
+
+async function publishRecoveryAuthorityForSettlement(input: {
+	directory: string;
+	dispatch: StandardWorktreeDispatch;
+	taskId: string;
+	provenance?: MergeOperationProvenance;
+	conflictFiles?: string[];
+}): Promise<
+	| { ok: true }
+	| {
+			ok: false;
+			code: string;
+			reason: string;
+	  }
+> {
+	if (input.dispatch.recoveryClaim || !input.provenance) {
+		return { ok: true };
+	}
+	const identity = await _internals.buildWorktreeRecoveryPublishIdentity({
+		directory: input.directory,
+		dispatch: input.dispatch,
+		taskId: input.taskId,
+		provenance: input.provenance,
+		conflictFiles: input.conflictFiles,
+	});
+	if (!identity) {
+		return {
+			ok: false,
+			code: 'identity_unavailable',
+			reason:
+				'worktree recovery publish identity could not be derived from the merge provenance',
+		};
+	}
+	const published = _internals.publishWorktreeRecoveryAuthority(
+		input.directory,
+		identity,
+	);
+	return published.ok
+		? { ok: true }
+		: { ok: false, code: published.code, reason: published.reason };
+}
+
+function isExactRecoveryClaimantStillActive(
+	authority: WorktreeRecoveryAuthorityRecord,
+): boolean {
+	const claim = authority.claim;
+	if (!claim) return false;
+	if (
+		standardWorktreeByCallID.has(claim.claimantCallID) ||
+		awaitingMergeByCallID.has(claim.claimantCallID)
+	) {
+		return true;
+	}
+	const childSession = swarmState.agentSessions.get(claim.childSessionId);
+	if (!childSession?.workspaceDirectory?.trim()) {
+		return false;
+	}
+	try {
+		return (
+			path.resolve(childSession.workspaceDirectory) ===
+			path.resolve(authority.immutable.lanePath)
+		);
+	} catch {
+		return childSession.workspaceDirectory === authority.immutable.lanePath;
+	}
+}
+
+function describeRecoveryMutationFailure(input: {
+	action: 'publish' | 'renew' | 'release' | 'finalize';
+	code: string;
+	reason: string;
+}): string {
+	return `recovery claim ${input.action} failed (${input.code}): ${input.reason}`;
+}
+
+function maybeSelectRecoverableAuthority(
+	lookup: WorktreeRecoveryLookupResult,
+	collision: { existingBranch?: string; worktreePath?: string },
+):
+	| { status: 'match'; authority: WorktreeRecoveryAuthorityRecord }
+	| {
+			status: 'none';
+	  }
+	| { status: 'uncertain'; reason: string } {
+	if (lookup.status !== 'ok') {
+		return { status: 'uncertain', reason: lookup.reason };
+	}
+	const authority = lookup.authorities.find(
+		(candidate) =>
+			candidate.status !== 'finalized' &&
+			candidate.immutable.laneBranch === collision.existingBranch &&
+			candidate.immutable.lanePath === collision.worktreePath,
+	);
+	return authority ? { status: 'match', authority } : { status: 'none' };
+}
+
 export async function precreateStandardWorktreeSession(args: {
 	config: PluginConfig;
 	directory: string;
@@ -725,6 +985,9 @@ export async function precreateStandardWorktreeSession(args: {
 	callID: string;
 	taskId: string;
 	planTaskId?: string;
+	/** Exact durable launch identity threaded from the delegation gate. */
+	reservationId?: string;
+	generation?: number;
 	description?: string;
 	outputArgs: Record<string, unknown>;
 	/** Scope to materialize into the lane for durability across restart (FR-102). */
@@ -779,6 +1042,16 @@ export async function precreateStandardWorktreeSession(args: {
 	// so the profile is available for materialization inside the worktree.
 	// Indices are per-session and monotonically increase.
 	const laneIndex = allocateStandardLaneIndex(args.parentSessionID);
+	const provisioningOwnerIdentity = {
+		reservationId:
+			args.reservationId ??
+			`foreground:${args.parentSessionID}:${resolveRecoveryTaskId(args)}:${args.callID}`,
+		generation: args.generation ?? 1,
+		branchName: makeWorktreeBranchName(args.parentSessionID, args.taskId, {
+			purpose: 'lane' as const,
+		}),
+	};
+	let recoveryLaunch: RecoverySessionLaunch | undefined;
 
 	// Serialize collision classification, destructive stale-lane cleanup, and
 	// provisional-owner publication with init orphan recovery. The lock must be
@@ -844,105 +1117,247 @@ export async function precreateStandardWorktreeSession(args: {
 				}
 			}
 
-			const ownership =
-				await _internals.inspectStandardWorktreeCollisionOwnership({
-					directory: args.directory,
+			const recoveryCandidate = maybeSelectRecoverableAuthority(
+				_internals.lookupWorktreeRecoveryAuthoritiesByTask(args.directory, {
 					parentSessionId: args.parentSessionID,
-					taskId: args.taskId,
-					branchName: collision.existingBranch,
-					worktreePath: collision.worktreePath,
-				});
-			if (ownership.status === 'uncertain') {
-				hardStopStandardWorktreeLifecycle(
-					args.parentSessionID,
-					`STANDARD_WORKTREE_OWNERSHIP_UNCERTAIN: ${ownership.reason}. Destructive cleanup and provisioning were blocked.`,
-				);
-			}
-			if (ownership.status === 'protected') {
-				hardStopStandardWorktreeLifecycle(
-					args.parentSessionID,
-					`STANDARD_WORKTREE_OWNER_PROTECTED: ${ownership.ownerKind} owner is ${ownership.lifecycle}; ${ownership.reason}. Destructive cleanup and provisioning were blocked.`,
-				);
-			}
-
-			let collisionPathExists = true;
-			try {
-				await fs.stat(collision.worktreePath);
-			} catch (error) {
-				const code = (error as NodeJS.ErrnoException).code;
-				if (code === 'ENOENT' || code === 'ENOTDIR') {
-					collisionPathExists = false;
-				} else {
-					hardStopStandardWorktreeLifecycle(
-						args.parentSessionID,
-						`STANDARD_WORKTREE_COLLISION_PATH_STAT_FAILED: ${
-							error instanceof Error ? error.message : String(error)
-						}. Destructive cleanup and provisioning were blocked.`,
-					);
-				}
-			}
-
-			if (collisionPathExists) {
-				const preserveResult = await _internals.preserveDirtyWorktreeAtPath(
-					collision.worktreePath,
-					collision.existingBranch,
-					'denied',
-					args.directory,
-					worktreeConfig.worktree_dir,
-				);
-				if (preserveResult.outcome === 'preserve-failed') {
-					hardStopStandardWorktreeLifecycle(
-						args.parentSessionID,
-						`STANDARD_WORKTREE_PRESERVATION_FAILED_ABORT_CLEANUP: pre-provision collision for task ${args.taskId} could not be preserved (${preserveResult.error}). Cleanup and provisioning were blocked.`,
-					);
-				}
-
-				const removeResult = await _internals.removeWorktree(
-					collision.worktreePath,
-					args.directory,
-					{ force: true, worktreeDir: worktreeConfig.worktree_dir },
-				);
-				if ('error' in removeResult) {
-					hardStopStandardWorktreeLifecycle(
-						args.parentSessionID,
-						`STANDARD_WORKTREE_COLLISION_REMOVE_FAILED: ${removeResult.error}. Provisioning was blocked.`,
-					);
-				}
-				const cleanupResult = await _internals.postMergeCleanup(
-					args.directory,
-					collision.existingBranch,
-				);
-				if ('error' in cleanupResult) {
-					hardStopStandardWorktreeLifecycle(
-						args.parentSessionID,
-						`STANDARD_WORKTREE_COLLISION_BRANCH_CLEANUP_FAILED: ${cleanupResult.error}. Provisioning was blocked.`,
-					);
-				}
-			} else {
-				const pruneResult = await _internals.pruneStaleWorktreeMetadata(
-					args.directory,
-				);
-				if ('error' in pruneResult) {
-					hardStopStandardWorktreeLifecycle(
-						args.parentSessionID,
-						`STANDARD_WORKTREE_COLLISION_PRUNE_FAILED: ${pruneResult.error}. Provisioning was blocked without deleting the lane branch.`,
-					);
-				}
-			}
-
-			const verification = await _internals.preProvisionCollisionCheck(
-				args.taskId,
-				args.directory,
-				args.parentSessionID,
+					taskId: resolveRecoveryTaskId(args),
+				}),
+				collision,
 			);
-			if (verification.uncertainty || verification.collision) {
+			if (recoveryCandidate.status === 'uncertain') {
 				hardStopStandardWorktreeLifecycle(
 					args.parentSessionID,
-					`STANDARD_WORKTREE_COLLISION_CLEANUP_UNVERIFIED: ${
-						verification.uncertainty ??
-						'git still reports the colliding lane after cleanup'
-					}. Provisioning was blocked.`,
+					`STANDARD_WORKTREE_RECOVERY_AUTHORITY_UNCERTAIN: ${recoveryCandidate.reason}. Recovery re-dispatch was blocked.`,
 				);
+			}
+			if (recoveryCandidate.status === 'match') {
+				let recoveredChildSessionId = '';
+				let claimed: Awaited<ReturnType<typeof claimWorktreeRecoveryAuthority>>;
+				try {
+					claimed = await _internals.claimWorktreeRecoveryAuthority(
+						args.directory,
+						{
+							authorityDigest: recoveryCandidate.authority.authorityDigest,
+							claimantCallID: args.callID,
+							claimantSessionId: args.parentSessionID,
+							leaseMs: WORKTREE_RECOVERY_CLAIM_LEASE_MS,
+							createChildSession: async () => {
+								const createResult = await client.session.create({
+									body: {
+										parentID: args.parentSessionID,
+										title: `${args.description ?? args.taskId} (worktree recovery lane)`,
+									},
+									query: { directory: collision.worktreePath },
+								});
+								recoveredChildSessionId = createResult.data?.id ?? '';
+								if (!recoveredChildSessionId) {
+									const createError = (createResult as { error?: unknown })
+										.error;
+									throw new Error(
+										typeof createError === 'string'
+											? createError
+											: JSON.stringify(createError ?? 'missing session id'),
+									);
+								}
+								return recoveredChildSessionId;
+							},
+							revalidateExpiredClaim: async ({ authority }) => {
+								if (isExactRecoveryClaimantStillActive(authority)) {
+									return {
+										ok: false,
+										reason:
+											'expired recovery claim still belongs to a live claimant session or dispatch',
+									};
+								}
+								if (
+									authority.immutable.laneBranch !== collision.existingBranch ||
+									authority.immutable.lanePath !== collision.worktreePath
+								) {
+									return {
+										ok: false,
+										reason:
+											'preserved lane coordinates drifted before claim transfer',
+									};
+								}
+								try {
+									await fs.stat(authority.immutable.lanePath);
+								} catch {
+									return {
+										ok: false,
+										reason: 'preserved lane path is no longer live',
+									};
+								}
+								const laneHead = await runRecoveryGit(args.directory, [
+									'rev-parse',
+									`${authority.immutable.laneBranch}^{commit}`,
+								]);
+								if (
+									laneHead.exitCode !== 0 ||
+									laneHead.stdout.trim() !== authority.immutable.sourceHeadOid
+								) {
+									return {
+										ok: false,
+										reason:
+											'preserved lane head changed since authority publication',
+									};
+								}
+								return { ok: true };
+							},
+						} satisfies ClaimWorktreeRecoveryAuthorityRequest,
+					);
+				} catch (error) {
+					// Complete the PREPARED rollback in-process; startup replay remains
+					// the crash backstop. The child is ephemeral and never received a
+					// prompt, so abort-then-delete is safe and bounded.
+					_internals.replayWorktreeRecoveryClaimJournal(args.directory);
+					if (recoveredChildSessionId) {
+						await teardownEphemeralSession(
+							client.session,
+							recoveredChildSessionId,
+						);
+					}
+					hardStopStandardWorktreeLifecycle(
+						args.parentSessionID,
+						`STANDARD_WORKTREE_RECOVERY_SESSION_CREATE_FAILED: ${error instanceof Error ? error.message : String(error)}. The PREPARED claim was rolled back and recovery re-dispatch was blocked.`,
+					);
+				}
+				if (!claimed.ok) {
+					hardStopStandardWorktreeLifecycle(
+						args.parentSessionID,
+						`STANDARD_WORKTREE_RECOVERY_CLAIM_FAILED: ${claimed.reason}. The recovery child session ${recoveredChildSessionId} was created but the preserved lane was not reassigned.`,
+					);
+				}
+				recoveryLaunch = {
+					childSessionId: recoveredChildSessionId,
+					worktreePath: collision.worktreePath,
+					branchName: collision.existingBranch,
+					strategy: recoveryCandidate.authority.immutable.strategy,
+					reservationId: recoveryCandidate.authority.immutable.reservationId,
+					generation: recoveryCandidate.authority.immutable.generation,
+					canonicalBranch:
+						recoveryCandidate.authority.immutable.canonicalBranch,
+					canonicalPath: recoveryCandidate.authority.immutable.canonicalPath,
+					recoveryClaim: {
+						authorityDigest: recoveryCandidate.authority.authorityDigest,
+						claimRevision:
+							claimed.authority.claim?.claimRevision ??
+							recoveryCandidate.authority.claimCursor?.lastClaimRevision ??
+							1,
+						rawToken: claimed.rawToken,
+						coordinates: {
+							sourceBaseOid:
+								recoveryCandidate.authority.immutable.sourceBaseOid,
+							sourceHeadOid:
+								recoveryCandidate.authority.immutable.sourceHeadOid,
+							targetHeadOid:
+								recoveryCandidate.authority.immutable.targetHeadOid,
+							strategy: recoveryCandidate.authority.immutable.strategy,
+						},
+					},
+				};
+			}
+
+			if (!recoveryLaunch) {
+				const ownership =
+					await _internals.inspectStandardWorktreeCollisionOwnership({
+						directory: args.directory,
+						parentSessionId: args.parentSessionID,
+						taskId: args.taskId,
+						branchName: collision.existingBranch,
+						worktreePath: collision.worktreePath,
+					});
+				if (ownership.status === 'uncertain') {
+					hardStopStandardWorktreeLifecycle(
+						args.parentSessionID,
+						`STANDARD_WORKTREE_OWNERSHIP_UNCERTAIN: ${ownership.reason}. Destructive cleanup and provisioning were blocked.`,
+					);
+				}
+				if (ownership.status === 'protected') {
+					hardStopStandardWorktreeLifecycle(
+						args.parentSessionID,
+						`STANDARD_WORKTREE_OWNER_PROTECTED: ${ownership.ownerKind} owner is ${ownership.lifecycle}; ${ownership.reason}. Destructive cleanup and provisioning were blocked.`,
+					);
+				}
+
+				let collisionPathExists = true;
+				try {
+					await fs.stat(collision.worktreePath);
+				} catch (error) {
+					const code = (error as NodeJS.ErrnoException).code;
+					if (code === 'ENOENT' || code === 'ENOTDIR') {
+						collisionPathExists = false;
+					} else {
+						hardStopStandardWorktreeLifecycle(
+							args.parentSessionID,
+							`STANDARD_WORKTREE_COLLISION_PATH_STAT_FAILED: ${
+								error instanceof Error ? error.message : String(error)
+							}. Destructive cleanup and provisioning were blocked.`,
+						);
+					}
+				}
+
+				if (collisionPathExists) {
+					const preserveResult = await _internals.preserveDirtyWorktreeAtPath(
+						collision.worktreePath,
+						collision.existingBranch,
+						'denied',
+						args.directory,
+						worktreeConfig.worktree_dir,
+					);
+					if (preserveResult.outcome === 'preserve-failed') {
+						hardStopStandardWorktreeLifecycle(
+							args.parentSessionID,
+							`STANDARD_WORKTREE_PRESERVATION_FAILED_ABORT_CLEANUP: pre-provision collision for task ${args.taskId} could not be preserved (${preserveResult.error}). Cleanup and provisioning were blocked.`,
+						);
+					}
+
+					const removeResult = await _internals.removeWorktree(
+						collision.worktreePath,
+						args.directory,
+						{ force: true, worktreeDir: worktreeConfig.worktree_dir },
+					);
+					if ('error' in removeResult) {
+						hardStopStandardWorktreeLifecycle(
+							args.parentSessionID,
+							`STANDARD_WORKTREE_COLLISION_REMOVE_FAILED: ${removeResult.error}. Provisioning was blocked.`,
+						);
+					}
+					const cleanupResult = await _internals.postMergeCleanup(
+						args.directory,
+						collision.existingBranch,
+					);
+					if ('error' in cleanupResult) {
+						hardStopStandardWorktreeLifecycle(
+							args.parentSessionID,
+							`STANDARD_WORKTREE_COLLISION_BRANCH_CLEANUP_FAILED: ${cleanupResult.error}. Provisioning was blocked.`,
+						);
+					}
+				} else {
+					const pruneResult = await _internals.pruneStaleWorktreeMetadata(
+						args.directory,
+					);
+					if ('error' in pruneResult) {
+						hardStopStandardWorktreeLifecycle(
+							args.parentSessionID,
+							`STANDARD_WORKTREE_COLLISION_PRUNE_FAILED: ${pruneResult.error}. Provisioning was blocked without deleting the lane branch.`,
+						);
+					}
+				}
+
+				const verification = await _internals.preProvisionCollisionCheck(
+					args.taskId,
+					args.directory,
+					args.parentSessionID,
+				);
+				if (verification.uncertainty || verification.collision) {
+					hardStopStandardWorktreeLifecycle(
+						args.parentSessionID,
+						`STANDARD_WORKTREE_COLLISION_CLEANUP_UNVERIFIED: ${
+							verification.uncertainty ??
+							'git still reports the colliding lane after cleanup'
+						}. Provisioning was blocked.`,
+					);
+				}
 			}
 		}
 
@@ -951,6 +1366,7 @@ export async function precreateStandardWorktreeSession(args: {
 			parentSessionId: args.parentSessionID,
 			worktreeSessionId: args.parentSessionID,
 			taskId: args.taskId,
+			...provisioningOwnerIdentity,
 		});
 	} catch (error) {
 		if (
@@ -974,43 +1390,86 @@ export async function precreateStandardWorktreeSession(args: {
 		}
 	}
 
-	// Reserve a placeholder worktreePath for profile computation (updated after provision).
-	// The profile needs the actual worktreePath, so we compute it after provisioning.
-	let provisionResult: Awaited<ReturnType<typeof provisionWorktree>>;
-	try {
-		provisionResult = await _internals.provisionWorktree(
-			args.directory,
-			args.taskId,
-			args.parentSessionID,
-			{
-				purpose: 'lane',
-				worktreeDir: worktreeConfig.worktree_dir,
-				mergeStrategy: worktreeConfig.merge_strategy,
-				depsStrategy: worktreeConfig.deps_strategy,
-				scope: args.scope,
-			},
-		);
-	} catch (error) {
-		_internals.removeWorktreeProvisioningOwner(args.directory, args.callID);
-		throw error;
-	}
-	if ('error' in provisionResult) {
-		_internals.removeWorktreeProvisioningOwner(args.directory, args.callID);
-		const message = `STANDARD_WORKTREE_PROVISION_FAILED: ${provisionResult.error}.`;
-		handleStandardWorktreeFailure(
-			args.parentSessionID,
-			worktreeConfig.policy,
-			message,
-		);
-		return;
+	let childSessionId = '';
+	let handle: WorktreeHandle;
+	let mergeStrategy: StandardWorktreeDispatch['mergeStrategy'];
+	let reservationId: string | undefined;
+	let generation: number | undefined;
+	let canonicalBranch: string | undefined;
+	let canonicalPath: string | undefined;
+	let recoveryClaim: StandardWorktreeDispatch['recoveryClaim'];
+
+	if (recoveryLaunch) {
+		childSessionId = recoveryLaunch.childSessionId;
+		handle = {
+			worktreePath: recoveryLaunch.worktreePath,
+			branchName: recoveryLaunch.branchName,
+			purpose: 'lane',
+			id: sanitizeWorktreeTaskId(args.taskId),
+			sessionId: args.parentSessionID,
+		};
+		mergeStrategy = recoveryLaunch.strategy;
+		reservationId = recoveryLaunch.reservationId;
+		generation = recoveryLaunch.generation;
+		canonicalBranch = recoveryLaunch.canonicalBranch;
+		canonicalPath = recoveryLaunch.canonicalPath;
+		recoveryClaim = recoveryLaunch.recoveryClaim;
+	} else {
+		reservationId =
+			args.reservationId ??
+			`foreground:${args.parentSessionID}:${resolveRecoveryTaskId(args)}:${args.callID}`;
+		generation = args.generation ?? 1;
+		canonicalPath = args.directory;
+		// Reserve a placeholder worktreePath for profile computation (updated after provision).
+		// The profile needs the actual worktreePath, so we compute it after provisioning.
+		let provisionResult: Awaited<ReturnType<typeof provisionWorktree>>;
+		try {
+			provisionResult = await _internals.provisionWorktree(
+				args.directory,
+				args.taskId,
+				args.parentSessionID,
+				{
+					purpose: 'lane',
+					worktreeDir: worktreeConfig.worktree_dir,
+					mergeStrategy: worktreeConfig.merge_strategy,
+					depsStrategy: worktreeConfig.deps_strategy,
+					scope: args.scope,
+				},
+			);
+		} catch (error) {
+			_internals.removeWorktreeProvisioningOwner(
+				args.directory,
+				args.callID,
+				provisioningOwnerIdentity,
+			);
+			throw error;
+		}
+		if ('error' in provisionResult) {
+			_internals.removeWorktreeProvisioningOwner(
+				args.directory,
+				args.callID,
+				provisioningOwnerIdentity,
+			);
+			const message = `STANDARD_WORKTREE_PROVISION_FAILED: ${provisionResult.error}.`;
+			handleStandardWorktreeFailure(
+				args.parentSessionID,
+				worktreeConfig.policy,
+				message,
+			);
+			return;
+		}
+		handle = provisionResult;
+		mergeStrategy = worktreeConfig.merge_strategy;
 	}
 
 	const originalPrompt =
 		typeof args.outputArgs.prompt === 'string' ? args.outputArgs.prompt : '';
 	args.outputArgs.prompt = [
 		'<worktree_lane_context>',
-		`authoritative_lane_root: ${JSON.stringify(provisionResult.worktreePath)}`,
+		`authoritative_lane_root: ${JSON.stringify(handle.worktreePath)}`,
 		'All FILE declarations and scope-bound edit/write paths must be workspace-relative to authoritative_lane_root.',
+		'Remain in authoritative_lane_root: do not change directory into, or edit/write through, the primary checkout or any other worktree.',
+		'Example: FILE: src/example.ts means <authoritative_lane_root>/src/example.ts, never <primary-checkout>/src/example.ts.',
 		'Do not declare project-root absolute paths; resolve and operate inside this lane root.',
 		'</worktree_lane_context>',
 		'',
@@ -1023,7 +1482,7 @@ export async function precreateStandardWorktreeSession(args: {
 	const laneProfile = computeLaneRuntimeProfile(
 		worktreeConfig.runtime_isolation,
 		laneIndex,
-		provisionResult.worktreePath,
+		handle.worktreePath,
 	);
 	if (laneProfile) {
 		try {
@@ -1031,7 +1490,7 @@ export async function precreateStandardWorktreeSession(args: {
 				'../../worktree/core'
 			);
 			await writeLaneProfileToDiskReal(
-				provisionResult.worktreePath,
+				handle.worktreePath,
 				laneProfile.laneIndex,
 				laneProfile.envOverrides,
 			);
@@ -1065,46 +1524,58 @@ export async function precreateStandardWorktreeSession(args: {
 		}
 	}
 
-	const createResult = await client.session.create({
-		body: {
-			parentID: args.parentSessionID,
-			title: `${args.description ?? args.taskId} (worktree lane)`,
-		},
-		query: { directory: provisionResult.worktreePath },
-	});
-	if (!createResult.data?.id) {
-		// Issue #2271 bug 1: an abandoned lane here feeds future collision
-		// churn — surface the failed cleanup instead of swallowing it silently.
-		await _internals
-			.removeWorktree(provisionResult.worktreePath, args.directory, {
-				force: true,
-				worktreeDir: worktreeConfig.worktree_dir,
-			})
-			.catch((cleanupError: unknown) => {
-				logger.log(
-					`[worktree-isolation] session-create failure cleanup could not remove lane ${provisionResult.worktreePath}: ${
-						cleanupError instanceof Error
-							? cleanupError.message
-							: String(cleanupError)
-					}`,
-				);
-			});
-		_internals.removeWorktreeProvisioningOwner(args.directory, args.callID);
-		const createError = (createResult as { error?: unknown }).error;
-		const detail =
-			typeof createError === 'string'
-				? createError
-				: JSON.stringify(createError ?? 'missing session id');
-		const message = `STANDARD_WORKTREE_SESSION_CREATE_FAILED: ${detail}.`;
-		handleStandardWorktreeFailure(
-			args.parentSessionID,
-			worktreeConfig.policy,
-			message,
+	if (!recoveryLaunch) {
+		const createResult = await client.session.create({
+			body: {
+				parentID: args.parentSessionID,
+				title: `${args.description ?? args.taskId} (worktree lane)`,
+			},
+			query: { directory: handle.worktreePath },
+		});
+		if (!createResult.data?.id) {
+			// Issue #2271 bug 1: an abandoned lane here feeds future collision
+			// churn — surface the failed cleanup instead of swallowing it silently.
+			await _internals
+				.removeWorktree(handle.worktreePath, args.directory, {
+					force: true,
+					worktreeDir: worktreeConfig.worktree_dir,
+				})
+				.catch((cleanupError: unknown) => {
+					logger.log(
+						`[worktree-isolation] session-create failure cleanup could not remove lane ${handle.worktreePath}: ${
+							cleanupError instanceof Error
+								? cleanupError.message
+								: String(cleanupError)
+						}`,
+					);
+				});
+			_internals.removeWorktreeProvisioningOwner(
+				args.directory,
+				args.callID,
+				provisioningOwnerIdentity,
+			);
+			const createError = (createResult as { error?: unknown }).error;
+			const detail =
+				typeof createError === 'string'
+					? createError
+					: JSON.stringify(createError ?? 'missing session id');
+			const message = `STANDARD_WORKTREE_SESSION_CREATE_FAILED: ${detail}.`;
+			handleStandardWorktreeFailure(
+				args.parentSessionID,
+				worktreeConfig.policy,
+				message,
+			);
+			return;
+		}
+		childSessionId = createResult.data.id;
+	}
+	if (!childSessionId) {
+		throw new Error(
+			'STANDARD_WORKTREE_SESSION_CREATE_FAILED: missing child session id.',
 		);
-		return;
 	}
 
-	args.outputArgs.task_id = createResult.data.id;
+	args.outputArgs.task_id = childSessionId;
 	// Issue #2002: the child session executes in the lane, not in the project
 	// root. Record that root so the write gates (scope-guard, guardrails
 	// tool-before) resolve this session's scope binding and path containment
@@ -1131,22 +1602,20 @@ export async function precreateStandardWorktreeSession(args: {
 	// child's shell writes would run unenforced. Registering as 'coder' first also
 	// restores this session's `recordSessionStart` and disk rehydration, which the
 	// `directory` argument drives on the create path.
-	ensureAgentSession(
-		createResult.data.id,
-		'coder',
-		provisionResult.worktreePath,
-	);
-	recordSessionWorkspaceRoot(
-		createResult.data.id,
-		provisionResult.worktreePath,
-	);
+	ensureAgentSession(childSessionId, 'coder', handle.worktreePath);
+	recordSessionWorkspaceRoot(childSessionId, handle.worktreePath);
 	rememberStandardWorktreeDispatch({
 		callID: args.callID,
 		parentSessionID: args.parentSessionID,
 		taskId: args.taskId,
 		planTaskId: args.planTaskId,
-		handle: provisionResult,
-		mergeStrategy: worktreeConfig.merge_strategy,
+		reservationId,
+		generation,
+		canonicalBranch,
+		canonicalPath,
+		handle,
+		mergeStrategy,
+		recoveryClaim,
 		laneIndex,
 		worktree_dir: worktreeConfig.worktree_dir,
 	});
@@ -1914,7 +2383,7 @@ export async function cleanupStandardWorktreeForCallId(
 	reason: 'success' | 'denied' | 'cancelled',
 	directory: string,
 	worktree_dir?: string,
-): Promise<void> {
+): Promise<CleanupStandardWorktreeResult> {
 	// Look in standardWorktreeByCallID first (active dispatch).
 	const dispatch = standardWorktreeByCallID.get(callID);
 	let worktreePath: string;
@@ -1931,11 +2400,70 @@ export async function cleanupStandardWorktreeForCallId(
 		const awaiting = awaitingMergeByCallID.get(callID);
 		if (!awaiting) {
 			// No entry — either never provisioned or already cleaned up.
-			return;
+			return {
+				removedWorktree: false,
+				cleanedBranch: false,
+				preservedRecoveryLane: false,
+			};
 		}
 		worktreePath = awaiting.worktreePath;
 		branchName = awaiting.branch;
 		parentSessionID = awaiting.parentSessionID;
+	}
+
+	if (
+		dispatch?.recoveryClaim &&
+		(reason === 'denied' || reason === 'cancelled')
+	) {
+		const renewResult = _internals.renewWorktreeRecoveryClaim(directory, {
+			authorityDigest: dispatch.recoveryClaim.authorityDigest,
+			claimantCallID: callID,
+			claimRevision: dispatch.recoveryClaim.claimRevision,
+			rawToken: dispatch.recoveryClaim.rawToken,
+			leaseMs: WORKTREE_RECOVERY_CLAIM_LEASE_MS,
+		});
+		if (!renewResult.ok) {
+			const message =
+				`STANDARD_WORKTREE_RECOVERY_ABORT_RELEASE_FAILED: dispatch ${callID} preserved lane ${worktreePath} (${branchName}) after ${reason}, ` +
+				`but ${describeRecoveryMutationFailure({
+					action: 'renew',
+					code: renewResult.code,
+					reason: renewResult.reason,
+				})}. No tracking teardown was performed.`;
+			const session = ensureAgentSession(parentSessionID);
+			pushAdvisory(session, message);
+			throw new Error(message);
+		}
+		const releaseResult = _internals.releaseWorktreeRecoveryClaim(directory, {
+			authorityDigest: dispatch.recoveryClaim.authorityDigest,
+			claimantCallID: callID,
+			claimRevision: dispatch.recoveryClaim.claimRevision,
+			rawToken: dispatch.recoveryClaim.rawToken,
+		});
+		if (!releaseResult.ok) {
+			const message =
+				`STANDARD_WORKTREE_RECOVERY_ABORT_RELEASE_FAILED: dispatch ${callID} preserved lane ${worktreePath} (${branchName}) after ${reason}, ` +
+				`but ${describeRecoveryMutationFailure({
+					action: 'release',
+					code: releaseResult.code,
+					reason: releaseResult.reason,
+				})}. No tracking teardown was performed.`;
+			const session = ensureAgentSession(parentSessionID);
+			pushAdvisory(session, message);
+			throw new Error(message);
+		}
+		standardWorktreeByCallID.delete(callID);
+		awaitingMergeByCallID.delete(callID);
+		const session = ensureAgentSession(parentSessionID);
+		pushAdvisory(
+			session,
+			`STANDARD_WORKTREE_RECOVERY_ABORT_PRESERVED: dispatch ${callID} released its recovery claim and preserved lane ${worktreePath} (${branchName}) after ${reason}.`,
+		);
+		return {
+			removedWorktree: false,
+			cleanedBranch: false,
+			preservedRecoveryLane: true,
+		};
 	}
 
 	// FR-001c: Preserve dirty work before cleanup on denial or cancellation.
@@ -2007,33 +2535,41 @@ export async function cleanupStandardWorktreeForCallId(
 				`Cleanup aborted to protect uncommitted work. Investigate and resolve manually. ` +
 				`Worktree=${worktreePath}; branch=${branchName}.`,
 		);
-		return;
+		return {
+			removedWorktree: false,
+			cleanedBranch: false,
+			preservedRecoveryLane: false,
+		};
 	}
 
 	// Remove the worktree directory.
-	await _internals
-		.removeWorktree(worktreePath, directory, {
+	let removedWorktree = false;
+	try {
+		const result = await _internals.removeWorktree(worktreePath, directory, {
 			force: true,
 			worktreeDir: worktree_dir,
-		})
-		.catch((err) =>
-			logger.log(
-				`[swarm] cleanupStandardWorktreeForCallId: removeWorktree failed for ${callID}: ${err}`,
-			),
+		});
+		removedWorktree = !('error' in result);
+	} catch (err) {
+		logger.log(
+			`[swarm] cleanupStandardWorktreeForCallId: removeWorktree failed for ${callID}: ${err}`,
 		);
+	}
 
 	// BRANCH DELETION: unconditionally on every dispatch outcome.
 	// The branch is deleted on success (merge-back completed cleanly), denied
 	// (orchestrator denied the dispatch), and cancelled (user/system cancelled).
 	// Branch deletion is safe in all cases — the user's work is preserved in
 	// the commit history via the lane branch reflog until GC.
-	await _internals
-		.postMergeCleanup(directory, branchName)
-		.catch((err) =>
-			logger.log(
-				`[swarm] cleanupStandardWorktreeForCallId: postMergeCleanup failed for ${callID}: ${err}`,
-			),
+	let cleanedBranch = false;
+	try {
+		const result = await _internals.postMergeCleanup(directory, branchName);
+		cleanedBranch = !('error' in result);
+	} catch (err) {
+		logger.log(
+			`[swarm] cleanupStandardWorktreeForCallId: postMergeCleanup failed for ${callID}: ${err}`,
 		);
+	}
 
 	// Remove entries from in-memory tracking maps.
 	standardWorktreeByCallID.delete(callID);
@@ -2044,6 +2580,11 @@ export async function cleanupStandardWorktreeForCallId(
 		session,
 		`STANDARD_WORKTREE_CLEANUP: dispatch ${callID} cleaned up (reason: ${reason}); worktree=${worktreePath}; branch=${branchName}.`,
 	);
+	return {
+		removedWorktree,
+		cleanedBranch,
+		preservedRecoveryLane: false,
+	};
 }
 
 /**
@@ -2102,27 +2643,194 @@ export async function finishStandardWorktreeDispatch(
 	const resolvedCallID = callID ?? dispatch.callID;
 
 	const run = async (): Promise<StandardWorktreeSettlementResult> => {
-		const mergeResult = await _internals.attemptMergeBackFromDirty(
-			dispatch.handle.worktreePath,
-			dispatch.handle.branchName,
-			directory,
-			getMergeStrategy({ merge_strategy: dispatch.mergeStrategy }),
-			{
-				operationId: settlement.operationId,
-				resume: settlement.resume,
-				onBeforeMerge: settlement.onBeforeMerge,
-			},
-		);
-		// Key the merge-back status by the plan task id (which equals the
-		// `taskId` Epic Rule 2 sees in `updateTaskStatus`); fall back to the
-		// dispatch taskId for non-plan dispatches.
 		const statusKey = dispatch.planTaskId ?? dispatch.taskId;
+		const failRecoverySettlement = (
+			stage:
+				| 'recovery-claim-renew'
+				| 'recovery-claim-release'
+				| 'recovery-claim-finalize'
+				| 'recovery-authority-publish',
+			message: string,
+			provenance?: MergeOperationProvenance,
+		): StandardWorktreeFailedSettlement => {
+			recordWorktreeMergeFailure(statusKey, {
+				outcome: 'failed',
+				stage,
+				message,
+				worktreePath: dispatch.handle.worktreePath,
+				branch: dispatch.handle.branchName,
+				completedAt: Date.now(),
+			});
+			const session = ensureAgentSession(dispatch.parentSessionID);
+			pushAdvisory(
+				session,
+				`STANDARD_WORKTREE_RECOVERY_MUTATION_FAILED: task ${dispatch.taskId} preserved at ${dispatch.handle.worktreePath}; ${message}.`,
+			);
+			return {
+				outcome: 'failed',
+				stage,
+				message,
+				provenance,
+			};
+		};
+		const renewRecoveryClaimLease = (
+			phase: 'before merge-back' | 'before cleanup/finalization',
+			provenance?: MergeOperationProvenance,
+		): StandardWorktreeFailedSettlement | undefined => {
+			if (!dispatch.recoveryClaim) return undefined;
+			const renewed = _internals.renewWorktreeRecoveryClaim(directory, {
+				authorityDigest: dispatch.recoveryClaim.authorityDigest,
+				claimantCallID: resolvedCallID,
+				claimRevision: dispatch.recoveryClaim.claimRevision,
+				rawToken: dispatch.recoveryClaim.rawToken,
+				leaseMs: WORKTREE_RECOVERY_CLAIM_LEASE_MS,
+			});
+			if (renewed.ok) return undefined;
+			return failRecoverySettlement(
+				'recovery-claim-renew',
+				`The live recovery lane could not extend its lease ${phase}; ${describeRecoveryMutationFailure(
+					{
+						action: 'renew',
+						code: renewed.code,
+						reason: renewed.reason,
+					},
+				)}`,
+				provenance,
+			);
+		};
+		const releaseRecoveryClaim = (
+			provenance?: MergeOperationProvenance,
+		): StandardWorktreeFailedSettlement | undefined => {
+			if (!dispatch.recoveryClaim) return undefined;
+			const released = _internals.releaseWorktreeRecoveryClaim(directory, {
+				authorityDigest: dispatch.recoveryClaim.authorityDigest,
+				claimantCallID: resolvedCallID,
+				claimRevision: dispatch.recoveryClaim.claimRevision,
+				rawToken: dispatch.recoveryClaim.rawToken,
+			});
+			if (released.ok) return undefined;
+			return failRecoverySettlement(
+				'recovery-claim-release',
+				`The preserved recovery lane could not release its exact claim after settlement; ${describeRecoveryMutationFailure(
+					{
+						action: 'release',
+						code: released.code,
+						reason: released.reason,
+					},
+				)}`,
+				provenance,
+			);
+		};
+		const publishRecoveryAuthority = async (
+			provenance: MergeOperationProvenance | undefined,
+			conflictFiles?: string[],
+		): Promise<StandardWorktreeFailedSettlement | undefined> => {
+			const published = await publishRecoveryAuthorityForSettlement({
+				directory,
+				dispatch,
+				taskId: statusKey,
+				provenance,
+				conflictFiles,
+			});
+			if (published.ok) return undefined;
+			return failRecoverySettlement(
+				'recovery-authority-publish',
+				`The preserved original lane could not publish recoverable authority; ${describeRecoveryMutationFailure(
+					{
+						action: 'publish',
+						code: published.code,
+						reason: published.reason,
+					},
+				)}`,
+				provenance,
+			);
+		};
+		const preMergeRenewFailure = renewRecoveryClaimLease('before merge-back');
+		if (preMergeRenewFailure) {
+			return preMergeRenewFailure;
+		}
+		const mergeResult = await (async () => {
+			if (!dispatch.recoveryClaim) {
+				return _internals.attemptMergeBackFromDirty(
+					dispatch.handle.worktreePath,
+					dispatch.handle.branchName,
+					directory,
+					getMergeStrategy({ merge_strategy: dispatch.mergeStrategy }),
+					{
+						operationId: settlement.operationId,
+						resume: settlement.resume,
+						onBeforeMerge: settlement.onBeforeMerge,
+					},
+				);
+			}
+			const coordinates = dispatch.recoveryClaim.coordinates;
+			if (!coordinates) {
+				return {
+					failed: true as const,
+					stage: 'recovery-coordinates',
+					message: 'Claimed recovery lane is missing immutable Git coordinates',
+				};
+			}
+			const provenance: MergeOperationProvenance = {
+				operationId:
+					settlement.operationId ??
+					`recovery:${dispatch.recoveryClaim.authorityDigest}`,
+				sourceHead: coordinates.sourceHeadOid,
+				targetHeadBefore: coordinates.targetHeadOid,
+				branchName: dispatch.handle.branchName,
+				strategy: coordinates.strategy,
+			};
+			if (settlement.onBeforeMerge) {
+				await settlement.onBeforeMerge(provenance);
+			}
+			const recovered =
+				await _internals.recoverMergeBackFromImmutableCoordinates(
+					directory,
+					coordinates,
+				);
+			if ('merged' in recovered && recovered.merged) {
+				if (recovered.sourceCommitOrder && recovered.rewrittenCommitOrder) {
+					dispatch.recoveryClaim.settlement = {
+						sourceCommitOrder: recovered.sourceCommitOrder,
+						rewrittenCommitOrder: recovered.rewrittenCommitOrder,
+					};
+				}
+				return {
+					merged: true as const,
+					strategy: recovered.strategy,
+					autoCommitted: false,
+					cleaned: true,
+					reconciled: false,
+					provenance,
+				};
+			}
+			if ('conflict' in recovered && recovered.conflict) {
+				return {
+					partial: true as const,
+					stage: 'conflict',
+					autoCommitted: false,
+					cleaned: true,
+					message: recovered.message,
+					conflictFiles: recovered.files,
+					provenance,
+				};
+			}
+			return {
+				failed: true as const,
+				stage: 'recovery',
+				message:
+					'error' in recovered
+						? recovered.error
+						: 'Immutable recovery returned an unexpected result',
+				provenance,
+			};
+		})();
 		if ('merged' in mergeResult && mergeResult.merged) {
 			const mergedSettlement: StandardWorktreeMergedSettlement = {
 				outcome: 'merged',
 				strategy: mergeResult.strategy,
-				autoCommitted: mergeResult.autoCommitted,
-				cleaned: mergeResult.cleaned,
+				autoCommitted: mergeResult.autoCommitted ?? false,
+				cleaned: mergeResult.cleaned ?? false,
 				reconciled: mergeResult.reconciled ?? false,
 				provenance: mergeResult.provenance,
 			};
@@ -2137,6 +2845,16 @@ export async function finishStandardWorktreeDispatch(
 						message: `Git merge-back succeeded but settlement persistence failed: ${String(error)}`,
 						provenance: mergeResult.provenance,
 					};
+					const publishFailure = await publishRecoveryAuthority(
+						mergeResult.provenance,
+					);
+					if (publishFailure) {
+						failedSettlement.message = `${failedSettlement.message} ${publishFailure.message}`;
+					}
+					const releaseFailure = releaseRecoveryClaim(mergeResult.provenance);
+					if (releaseFailure) {
+						failedSettlement.message = `${failedSettlement.message} ${releaseFailure.message}`;
+					}
 					recordWorktreeMergeFailure(statusKey, {
 						outcome: 'failed',
 						stage: failedSettlement.stage,
@@ -2153,9 +2871,55 @@ export async function finishStandardWorktreeDispatch(
 					return failedSettlement;
 				}
 			}
+			const preCleanupRenewFailure = renewRecoveryClaimLease(
+				'before cleanup/finalization',
+				mergeResult.provenance,
+			);
+			if (preCleanupRenewFailure) {
+				return preCleanupRenewFailure;
+			}
 
 			// Clean merge supersedes any earlier failure for this task so a
 			// successful re-dispatch re-enables Rule 2's marker commit.
+			const cleanupResult = await cleanupStandardWorktreeForCallId(
+				resolvedCallID,
+				'success',
+				directory,
+				dispatch.worktree_dir,
+			);
+			if (dispatch.recoveryClaim) {
+				const request = {
+					authorityDigest: dispatch.recoveryClaim.authorityDigest,
+					claimantCallID: resolvedCallID,
+					claimRevision: dispatch.recoveryClaim.claimRevision,
+					rawToken: dispatch.recoveryClaim.rawToken,
+					settlement: dispatch.recoveryClaim.settlement,
+				};
+				if (cleanupResult.removedWorktree && cleanupResult.cleanedBranch) {
+					const finalized = _internals.finalizeWorktreeRecoveryAuthority(
+						directory,
+						request,
+					);
+					if (!finalized.ok) {
+						return failRecoverySettlement(
+							'recovery-claim-finalize',
+							`The merged recovery lane was cleaned up but could not finalize its exact claim; ${describeRecoveryMutationFailure(
+								{
+									action: 'finalize',
+									code: finalized.code,
+									reason: finalized.reason,
+								},
+							)}`,
+							mergeResult.provenance,
+						);
+					}
+				} else {
+					const releaseFailure = releaseRecoveryClaim(mergeResult.provenance);
+					if (releaseFailure) {
+						return releaseFailure;
+					}
+				}
+			}
 			clearWorktreeMergeStatus(statusKey);
 
 			// FR-205 SC-134: Remove lane profile at successful merge-back teardown.
@@ -2197,17 +2961,20 @@ export async function finishStandardWorktreeDispatch(
 				// Best-effort; a verification failure retains the generation.
 			}
 
-			// Cleanup unconditionally — runs on success, partial, AND failed.
-			await cleanupStandardWorktreeForCallId(
-				resolvedCallID,
-				'success',
-				directory,
-				dispatch.worktree_dir,
-			);
-
 			return mergedSettlement;
 		}
 		if ('partial' in mergeResult) {
+			const publishFailure = await publishRecoveryAuthority(
+				mergeResult.provenance,
+				mergeResult.conflictFiles,
+			);
+			if (publishFailure) {
+				return publishFailure;
+			}
+			const releaseFailure = releaseRecoveryClaim(mergeResult.provenance);
+			if (releaseFailure) {
+				return releaseFailure;
+			}
 			recordWorktreeMergeFailure(statusKey, {
 				outcome: 'partial',
 				stage: mergeResult.stage,
@@ -2249,6 +3016,16 @@ export async function finishStandardWorktreeDispatch(
 		}
 
 		if ('failed' in mergeResult) {
+			const publishFailure = await publishRecoveryAuthority(
+				mergeResult.provenance,
+			);
+			if (publishFailure) {
+				return publishFailure;
+			}
+			const releaseFailure = releaseRecoveryClaim(mergeResult.provenance);
+			if (releaseFailure) {
+				return releaseFailure;
+			}
 			recordWorktreeMergeFailure(statusKey, {
 				outcome: 'failed',
 				stage: mergeResult.stage,
@@ -2382,6 +3159,7 @@ export const _internals = {
 	provisionWorktree,
 	removeWorktree,
 	attemptMergeBackFromDirty,
+	recoverMergeBackFromImmutableCoordinates,
 	postMergeCleanup,
 	pruneStaleWorktreeMetadata,
 	/** FR-201: read lane runtime profile from disk for spawn injection. */
@@ -2407,6 +3185,14 @@ export const _internals = {
 	tryAcquireWorktreeLifecycleLock: tryAcquireLock,
 	recordWorktreeProvisioningOwner,
 	removeWorktreeProvisioningOwner,
+	lookupWorktreeRecoveryAuthoritiesByTask,
+	claimWorktreeRecoveryAuthority,
+	renewWorktreeRecoveryClaim,
+	releaseWorktreeRecoveryClaim,
+	finalizeWorktreeRecoveryAuthority,
+	publishWorktreeRecoveryAuthority,
+	replayWorktreeRecoveryClaimJournal,
+	buildWorktreeRecoveryPublishIdentity,
 	/** FR-001b SC-004: path-based dirty worktree preservation for stale-lane fallback. */
 	preserveDirtyWorktreeAtPath,
 	/** FR-001a: abort entry point for in-flight dispatches. */

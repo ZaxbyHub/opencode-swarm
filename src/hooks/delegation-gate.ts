@@ -15,6 +15,7 @@ import type {
 	BackgroundWorktreeDescriptor,
 	RecordPendingInput,
 } from '../background/pending-delegations.js';
+import { buildBackgroundCoderReservationId } from '../background/pending-delegations.js';
 import {
 	captureWorkspaceSnapshot,
 	changedFilesSinceSnapshot,
@@ -4258,6 +4259,14 @@ export function createDelegationGateHook(
 				callID: input.callID,
 				taskId: resolvedTaskId ?? sanitizeWorktreeTaskId(input.callID),
 				planTaskId: resolvedTaskId ?? undefined,
+				reservationId:
+					backgroundCoderReservationByCallID.get(input.callID)?.reservationId ??
+					buildBackgroundCoderReservationId({
+						parentSessionId: input.sessionID,
+						planTaskId: resolvedTaskId,
+						callID: input.callID,
+					}),
+				generation: coderDispatchGeneration,
 				description:
 					typeof args.description === 'string' ? args.description : undefined,
 				outputArgs: args,
@@ -4690,6 +4699,8 @@ export function createDelegationGateHook(
 											mergeStrategy: standardDispatch.mergeStrategy,
 											laneIndex: standardDispatch.laneIndex,
 											worktreeDir: standardDispatch.worktree_dir ?? null,
+											reservationId: standardDispatch.reservationId,
+											generation: standardDispatch.generation,
 										}
 									: undefined,
 								coderReservationId: coderReservation?.reservationId,
@@ -4826,6 +4837,13 @@ export function createDelegationGateHook(
 					_wtiInternals.removeWorktreeProvisioningOwner(
 						directory,
 						input.callID,
+						standardDispatch
+							? {
+									reservationId: standardDispatch.reservationId,
+									generation: standardDispatch.generation,
+									branchName: standardDispatch.handle.branchName,
+								}
+							: undefined,
 					);
 				}
 				if (backgroundRecordDurable) {

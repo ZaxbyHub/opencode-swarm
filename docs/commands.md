@@ -765,7 +765,7 @@ Manage the session-scoped runtime concurrency override for plan execution. This 
 
 ### `/swarm lanes [--json]`
 
-Show the current worktree lane state: active lanes (running), awaiting-merge lanes (completed but not yet merged back), and conflicted lanes (merge failures).
+Show the current worktree lane state: active lanes (running), awaiting-merge lanes (completed but not yet merged back), and conflicted lanes (merge failures). Conflicted lanes also surface the recovery authority state for exact same-task redispatch.
 
 ```text
 /swarm lanes
@@ -778,14 +778,15 @@ Show the current worktree lane state: active lanes (running), awaiting-merge lan
     worktree=<project-root>/.swarm-worktrees/session-abc/lane-1
 
 ## awaiting-merge (1)
-  - lane-2 task=1.2 branch=swarm-lane/session-def/lane-2 [partial @ commit]
+  - lane-2 task=1.2 branch=swarm-lane/session-def/lane-2
     worktree=<project-root>/.swarm-worktrees/session-def/lane-2
     hint: Merge-back in progress; check `/swarm status` for the latest.
 
 ## conflicted (1)
   - lane-3 task=1.3 branch=swarm-lane/session-ghi/lane-3
     worktree=<project-root>/.swarm-worktrees/session-ghi/lane-3
-    hint: Partial merge preserved at <project-root>/.swarm-worktrees/session-ghi/lane-3. Stage and commit, then re-run merge.
+    recovery: generation=4 status=preserved parentSession=session-ghi originalCall=call-A reservation=reservation-A strategy=merge
+    redispatch: Re-dispatch the exact same task in parent session session-ghi to claim generation 4 instead of allocating a new lane.
 
 Total: 3 lanes
 ```
@@ -829,7 +830,21 @@ Total: 3 lanes
         "stage": "commit",
         "message": "merge-back committed with conflicts"
       },
-      "recoveryHint": "Partial merge preserved at <project-root>/.swarm-worktrees/session-ghi/lane-3. Stage and commit, then re-run merge."
+      "recovery": {
+        "authorityStatus": "preserved",
+        "generation": 4,
+        "originalCallID": "call-A",
+        "parentSessionId": "session-ghi",
+        "reservationId": "reservation-A",
+        "canonicalBranch": "main",
+        "canonicalPath": "<project-root>",
+        "laneBranch": "swarm-lane/session-ghi/lane-3",
+        "lanePath": "<project-root>/.swarm-worktrees/session-ghi/lane-3",
+        "strategy": "merge",
+        "redispatchStatus": "available"
+      },
+      "manualRecoveryHint": "Partial merge preserved at <project-root>/.swarm-worktrees/session-ghi/lane-3. Stage and commit, then re-run merge.",
+      "recoveryHint": "Re-dispatch the exact same task in parent session session-ghi to claim generation 4 instead of allocating a new lane."
     }
   ],
   "totalCount": 3
@@ -843,6 +858,12 @@ Total: 3 lanes
 | Active | Lane is currently running with an active session |
 | Awaiting merge | Lane work is complete but the branch has not yet been merged back into the main branch |
 | Conflicted | Merge-back was attempted but encountered conflicts; the worktree and branch are preserved for recovery |
+
+For conflicted lanes, the recovery block shows the immutable v2 recovery identity (`generation`, `originalCallID`, `reservationId`, parent session, and strategy) plus the mutable claimant state when a same-task retry already owns the preserved lane. `redispatch` means:
+
+- `available` — the next exact same-task worktree dispatch will claim the preserved lane instead of provisioning a new one
+- `claimed` — a retry already owns the preserved lane; wait for that claimant to settle or cancel it before retrying again
+- `unsupported-legacy` / `uncertain` — automatic same-task redispatch is unavailable; use the manual merge hint shown for the lane
 
 #### Runtime profile state
 
@@ -860,7 +881,7 @@ The `/swarm diagnose` command reports the detected sandbox mechanism (Linux: `bu
 
 See [Runtime Isolation](modes.md#runtime-isolation-fr-201--fr-206) for the full description, cross-platform parity notes, and configuration examples.
 
-See [Recovery Runbook](troubleshooting/recovery-guide.md) for manual recovery steps when lanes are stuck in conflicted state.
+See [Recovery Runbook](troubleshooting/recovery-guide.md) for manual recovery steps when a conflicted lane reports `unsupported-legacy`, `uncertain`, or otherwise cannot be reclaimed through same-task redispatch.
 
 ---
 
