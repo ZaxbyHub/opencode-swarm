@@ -10,6 +10,26 @@ import { createTickingDetectPatterns } from './episodes';
  * only matches `*.test.ts`).
  */
 
+/**
+ * One-line coverage wrapper for `readTrajectoryWithCoverage` mocks: the
+ * complete-window verdict for a fixture trajectory. Exists so migrating the
+ * old `readTrajectory` mocks to the coverage seam does not grow the
+ * over-cap (FR-006 ratchet) test files.
+ */
+export function covOf(entries: TrajectoryEntry[]): {
+	entries: TrajectoryEntry[];
+	coverage: 'complete';
+	droppedByCompaction: 0;
+	skippedMalformed: 0;
+} {
+	return {
+		entries,
+		coverage: 'complete',
+		droppedByCompaction: 0,
+		skippedMalformed: 0,
+	};
+}
+
 export function createMockConfig(
 	overrides: Partial<PrmConfig> = {},
 ): PrmConfig {

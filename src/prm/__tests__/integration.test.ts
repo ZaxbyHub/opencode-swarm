@@ -3,6 +3,7 @@ import { _internals, createPrmHook } from '../index';
 import type { PatternMatch, TrajectoryEntry } from '../types';
 import { createTickingDetectPatterns, episodeAt } from './helpers/episodes';
 import {
+	covOf,
 	createMockConfig,
 	createMockPatternMatch,
 	createMockSession,
@@ -232,12 +233,7 @@ describe('PRM Integration Tests', () => {
 	) {
 		const session = createMockSession(sessionId);
 		_internals.getAgentSession = () => session;
-		_internals.readTrajectoryWithCoverage = async () => ({
-			entries: trajectory,
-			coverage: 'complete' as const,
-			droppedByCompaction: 0,
-			skippedMalformed: 0,
-		});
+		_internals.readTrajectoryWithCoverage = async () => covOf(trajectory);
 		_internals.detectPatterns = () => ({
 			matches,
 			detectionTimeMs: 5,
@@ -275,12 +271,7 @@ describe('PRM Integration Tests', () => {
 			}));
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: trajectory,
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () => covOf(trajectory);
 			_internals.detectPatterns = mockDetectPatterns;
 			_internals.generateCourseCorrection = () => ({
 				alert: `TRAJECTORY ALERT: repetition_loop detected`,
@@ -499,7 +490,6 @@ describe('PRM Integration Tests', () => {
 			const { toolAfter } = createPrmHook(config, directory);
 
 			await toolAfter({ sessionID: sessionId });
-
 			expect(session.prmPatternCounts.get('stuck_on_test')).toBe(1);
 			expect(session.prmLastPatternDetected?.pattern).toBe('stuck_on_test');
 			expect(session.prmLastPatternDetected?.severity).toBe('high');
@@ -511,14 +501,11 @@ describe('PRM Integration Tests', () => {
 				[1, 3],
 			);
 		});
-
 		test('per-pattern escalation counts are isolated', async () => {
 			const config = createMockConfig({ enabled: true });
-
 			// First session with ping_pong
 			const pingPongSession = createMockSession('ping-pong-session');
 			const repSession = createMockSession('rep-session');
-
 			_internals.getAgentSession = (sid: string) => {
 				if (sid === 'ping-pong-session') {
 					return pingPongSession;
@@ -529,19 +516,9 @@ describe('PRM Integration Tests', () => {
 			_internals.readTrajectoryWithCoverage = () => {
 				trajectoryCall++;
 				if (trajectoryCall === 1) {
-					return Promise.resolve({
-						entries: createPingPongTrajectory(),
-						coverage: 'complete' as const,
-						droppedByCompaction: 0,
-						skippedMalformed: 0,
-					});
+					return Promise.resolve(covOf(createPingPongTrajectory()));
 				}
-				return Promise.resolve({
-					entries: createRepetitionLoopTrajectory(),
-					coverage: 'complete' as const,
-					droppedByCompaction: 0,
-					skippedMalformed: 0,
-				});
+				return Promise.resolve(covOf(createRepetitionLoopTrajectory()));
 			};
 			let detectCall = 0;
 			_internals.detectPatterns = () => {
@@ -591,19 +568,9 @@ describe('PRM Integration Tests', () => {
 			_internals.readTrajectoryWithCoverage = () => {
 				trajectoryCallCount++;
 				if (trajectoryCallCount === 1) {
-					return Promise.resolve({
-						entries: createRepetitionLoopTrajectory(),
-						coverage: 'complete' as const,
-						droppedByCompaction: 0,
-						skippedMalformed: 0,
-					});
+					return Promise.resolve(covOf(createRepetitionLoopTrajectory()));
 				}
-				return Promise.resolve({
-					entries: createPingPongTrajectory(),
-					coverage: 'complete' as const,
-					droppedByCompaction: 0,
-					skippedMalformed: 0,
-				});
+				return Promise.resolve(covOf(createPingPongTrajectory()));
 			};
 
 			let detectCallCount = 0;
@@ -653,12 +620,7 @@ describe('PRM Integration Tests', () => {
 			_internals.getAgentSession = () => session;
 			_internals.readTrajectoryWithCoverage = async () => {
 				readTrajectoryCalled = true;
-				return {
-					entries: [],
-					coverage: 'complete' as const,
-					droppedByCompaction: 0,
-					skippedMalformed: 0,
-				};
+				return covOf([]);
 			};
 			let detectPatternsCalled = false;
 			_internals.detectPatterns = () => {
@@ -717,12 +679,7 @@ describe('PRM Integration Tests', () => {
 			_internals.getAgentSession = () => session;
 			_internals.readTrajectoryWithCoverage = async () => {
 				readTrajectoryCalled = true;
-				return {
-					entries: [],
-					coverage: 'complete' as const,
-					droppedByCompaction: 0,
-					skippedMalformed: 0,
-				};
+				return covOf([]);
 			};
 			let detectPatternsCalled = false;
 			_internals.detectPatterns = () => {
@@ -748,12 +705,8 @@ describe('PRM Integration Tests', () => {
 			_internals.getAgentSession = () => session;
 
 			// Simulate trajectory that triggers repetition_loop
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: createRepetitionLoopTrajectory(),
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () =>
+				covOf(createRepetitionLoopTrajectory());
 
 			// Issue #2134: distinct, non-overlapping episodes per tick — see
 			// helpers/episodes.ts.
@@ -825,12 +778,8 @@ describe('PRM Integration Tests', () => {
 			});
 			const session = createMockSession('b1-cross-turn');
 			_internals.getAgentSession = () => session;
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: createRepetitionLoopTrajectory(),
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () =>
+				covOf(createRepetitionLoopTrajectory());
 			_internals.detectPatterns = createTickingDetectPatterns((overrides) =>
 				createMockPatternMatch('repetition_loop', overrides),
 			);
@@ -877,12 +826,7 @@ describe('PRM Integration Tests', () => {
 				return sessionB;
 			};
 			_internals.readTrajectoryWithCoverage = () =>
-				Promise.resolve({
-					entries: createRepetitionLoopTrajectory(),
-					coverage: 'complete' as const,
-					droppedByCompaction: 0,
-					skippedMalformed: 0,
-				});
+				Promise.resolve(covOf(createRepetitionLoopTrajectory()));
 			// Issue #2134: `sessionACallCount` doubles as a monotonic tick, so
 			// episodeAt() keeps sessionA's two episodes distinct (see
 			// helpers/episodes.ts) without affecting sessionB's fresh ledger.

@@ -4,6 +4,7 @@ import { _internals, createPrmHook } from '../index';
 import type { PatternMatch, PrmConfig, TrajectoryEntry } from '../types';
 import { createTickingDetectPatterns } from './helpers/episodes';
 import {
+	covOf,
 	createMockConfig,
 	createMockPatternMatch,
 	createMockSession,
@@ -11,8 +12,7 @@ import {
 
 // Original function references saved once at module load for save/restore
 const originalGetAgentSession = _internals.getAgentSession;
-const originalReadTrajectoryWithCoverage =
-	_internals.readTrajectoryWithCoverage;
+const origReadWithCov = _internals.readTrajectoryWithCoverage;
 const originalGetInMemoryTrajectory = _internals.getInMemoryTrajectory;
 const originalDetectPatterns = _internals.detectPatterns;
 const originalGenerateCourseCorrection = _internals.generateCourseCorrection;
@@ -69,12 +69,7 @@ function setupHappyPathMocks(
 ) {
 	_internals.getAgentSession = () => createMockSession(_sessionId);
 
-	_internals.readTrajectoryWithCoverage = async () => ({
-		entries: trajectory,
-		coverage: 'complete' as const,
-		droppedByCompaction: 0,
-		skippedMalformed: 0,
-	});
+	_internals.readTrajectoryWithCoverage = async () => covOf(trajectory);
 
 	_internals.detectPatterns = () => ({
 		matches,
@@ -101,7 +96,7 @@ describe('createPrmHook', () => {
 	beforeEach(() => {
 		// Restore all originals before each test
 		_internals.getAgentSession = originalGetAgentSession;
-		_internals.readTrajectoryWithCoverage = originalReadTrajectoryWithCoverage;
+		_internals.readTrajectoryWithCoverage = origReadWithCov;
 		_internals.getInMemoryTrajectory = originalGetInMemoryTrajectory;
 		_internals.detectPatterns = originalDetectPatterns;
 		_internals.generateCourseCorrection = originalGenerateCourseCorrection;
@@ -116,7 +111,7 @@ describe('createPrmHook', () => {
 	afterEach(() => {
 		// Restore all originals to prevent cross-file leakage
 		_internals.getAgentSession = originalGetAgentSession;
-		_internals.readTrajectoryWithCoverage = originalReadTrajectoryWithCoverage;
+		_internals.readTrajectoryWithCoverage = origReadWithCov;
 		_internals.getInMemoryTrajectory = originalGetInMemoryTrajectory;
 		_internals.detectPatterns = originalDetectPatterns;
 		_internals.generateCourseCorrection = originalGenerateCourseCorrection;
@@ -137,12 +132,7 @@ describe('createPrmHook', () => {
 			let readTrajectoryCalled = false;
 			_internals.readTrajectoryWithCoverage = async () => {
 				readTrajectoryCalled = true;
-				return {
-					entries: [],
-					coverage: 'complete' as const,
-					droppedByCompaction: 0,
-					skippedMalformed: 0,
-				};
+				return covOf([]);
 			};
 			let detectPatternsCalled = false;
 			_internals.detectPatterns = () => {
@@ -168,12 +158,7 @@ describe('createPrmHook', () => {
 			let readTrajectoryArgs: [string, string] | null = null;
 			_internals.readTrajectoryWithCoverage = async (...args) => {
 				readTrajectoryArgs = args;
-				return {
-					entries: trajectory,
-					coverage: 'complete' as const,
-					droppedByCompaction: 0,
-					skippedMalformed: 0,
-				};
+				return covOf(trajectory);
 			};
 			let detectPatternsCalled = false;
 			_internals.detectPatterns = () => {
@@ -185,13 +170,8 @@ describe('createPrmHook', () => {
 
 			await toolAfter({ sessionID: sessionId });
 
-			// The cold read threads the configured budget (issue #2041: the
-			// SAME knob governs the cache and the disk).
-			expect(readTrajectoryArgs).toEqual([
-				sessionId,
-				directory,
-				config.max_trajectory_lines,
-			]);
+			expect(readTrajectoryArgs?.slice(0, 2)).toEqual([sessionId, directory]);
+			expect(readTrajectoryArgs?.[2]).toBe(config.max_trajectory_lines);
 			expect(detectPatternsCalled).toBe(true);
 		});
 
@@ -202,12 +182,7 @@ describe('createPrmHook', () => {
 			let readTrajectoryCalled = false;
 			_internals.readTrajectoryWithCoverage = async () => {
 				readTrajectoryCalled = true;
-				return {
-					entries: [],
-					coverage: 'complete' as const,
-					droppedByCompaction: 0,
-					skippedMalformed: 0,
-				};
+				return covOf([]);
 			};
 
 			const { toolAfter } = createPrmHook(config, directory);
@@ -225,12 +200,7 @@ describe('createPrmHook', () => {
 			let readTrajectoryCalled = false;
 			_internals.readTrajectoryWithCoverage = async () => {
 				readTrajectoryCalled = true;
-				return {
-					entries: [],
-					coverage: 'complete' as const,
-					droppedByCompaction: 0,
-					skippedMalformed: 0,
-				};
+				return covOf([]);
 			};
 
 			const { toolAfter } = createPrmHook(config, directory);
@@ -244,12 +214,8 @@ describe('createPrmHook', () => {
 			const config = createMockConfig({ enabled: true });
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: createMockTrajectory(),
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () =>
+				covOf(createMockTrajectory());
 			_internals.detectPatterns = () => ({
 				matches: [],
 				detectionTimeMs: 5,
@@ -309,12 +275,7 @@ describe('createPrmHook', () => {
 			// Create a single session instance to track state mutations
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: trajectory,
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () => covOf(trajectory);
 			_internals.detectPatterns = () => ({
 				matches: [match1, match2],
 				detectionTimeMs: 5,
@@ -364,12 +325,7 @@ describe('createPrmHook', () => {
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
 			const trajectory = createMockTrajectory();
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: trajectory,
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () => covOf(trajectory);
 
 			const detectPatternsArgs: [TrajectoryEntry[], PrmConfig, number][] = [];
 			_internals.detectPatterns = (...args) => {
@@ -395,12 +351,7 @@ describe('createPrmHook', () => {
 			const match = createMockPatternMatch('repetition_loop');
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: trajectory,
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () => covOf(trajectory);
 			_internals.detectPatterns = () => ({
 				matches: [match],
 				detectionTimeMs: 5,
@@ -429,12 +380,7 @@ describe('createPrmHook', () => {
 			const match = createMockPatternMatch('repetition_loop');
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: trajectory,
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () => covOf(trajectory);
 			_internals.detectPatterns = () => ({
 				matches: [match],
 				detectionTimeMs: 5,
@@ -468,12 +414,7 @@ describe('createPrmHook', () => {
 			const match = createMockPatternMatch('repetition_loop');
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: trajectory,
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () => covOf(trajectory);
 			_internals.detectPatterns = () => ({
 				matches: [match],
 				detectionTimeMs: 5,
@@ -507,12 +448,7 @@ describe('createPrmHook', () => {
 			const match = createMockPatternMatch('repetition_loop');
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: trajectory,
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () => covOf(trajectory);
 			_internals.detectPatterns = () => ({
 				matches: [match],
 				detectionTimeMs: 5,
@@ -542,12 +478,7 @@ describe('createPrmHook', () => {
 			const trajectory = createMockTrajectory();
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: trajectory,
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () => covOf(trajectory);
 			_internals.detectPatterns = createTickingDetectPatterns((overrides) =>
 				createMockPatternMatch('repetition_loop', overrides),
 			);
@@ -577,12 +508,7 @@ describe('createPrmHook', () => {
 			const trajectory = createMockTrajectory();
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: trajectory,
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () => covOf(trajectory);
 			_internals.detectPatterns = createTickingDetectPatterns((overrides) =>
 				createMockPatternMatch('repetition_loop', overrides),
 			);
@@ -618,12 +544,7 @@ describe('createPrmHook', () => {
 			const match2 = createMockPatternMatch('ping_pong');
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: trajectory,
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () => covOf(trajectory);
 
 			// detectPatterns returns first pattern on first call, second on second call
 			let detectCallCount = 0;
@@ -634,7 +555,6 @@ describe('createPrmHook', () => {
 				}
 				return { matches: [match2], detectionTimeMs: 5, patternsChecked: 5 };
 			};
-
 			_internals.generateCourseCorrection = () => ({
 				alert: 'ALERT',
 				category: 'coordination_error',
@@ -644,16 +564,12 @@ describe('createPrmHook', () => {
 				stepRange: [1, 3],
 			});
 			_internals.formatCourseCorrectionForInjection = () => 'FORMATTED';
-
 			const { toolAfter } = createPrmHook(config, directory);
-
 			await toolAfter({ sessionID: sessionId });
 			expect(session.prmLastPatternDetected?.pattern).toBe('repetition_loop');
-
 			await toolAfter({ sessionID: sessionId });
 			expect(session.prmLastPatternDetected?.pattern).toBe('ping_pong');
 		});
-
 		test('sets prmHardStopPending on third detection', async () => {
 			// Issue #2134: distinct, non-overlapping episodes per tick — see
 			// helpers/episodes.ts for why a repeated fixed stepRange won't do.
@@ -661,12 +577,7 @@ describe('createPrmHook', () => {
 			const trajectory = createMockTrajectory();
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: trajectory,
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () => covOf(trajectory);
 			_internals.detectPatterns = createTickingDetectPatterns((overrides) =>
 				createMockPatternMatch('repetition_loop', overrides),
 			);
@@ -679,17 +590,13 @@ describe('createPrmHook', () => {
 				stepRange: [1, 3],
 			});
 			_internals.formatCourseCorrectionForInjection = () => 'FORMATTED';
-
 			const { toolAfter } = createPrmHook(config, directory);
-
 			// First - should not be hard stop
 			await toolAfter({ sessionID: sessionId });
 			expect(session.prmHardStopPending).toBe(false);
-
 			// Second - should not be hard stop
 			await toolAfter({ sessionID: sessionId });
 			expect(session.prmHardStopPending).toBe(false);
-
 			// Third - should be hard stop
 			await toolAfter({ sessionID: sessionId });
 			expect(session.prmHardStopPending).toBe(true);
@@ -716,12 +623,7 @@ describe('createPrmHook', () => {
 			session.prmHardStopPending = false;
 
 			_internals.getAgentSession = () => session;
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: trajectory,
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () => covOf(trajectory);
 
 			const match = createMockPatternMatch('repetition_loop');
 			_internals.detectPatterns = () => ({
@@ -760,12 +662,7 @@ describe('createPrmHook', () => {
 			});
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: trajectory,
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () => covOf(trajectory);
 			_internals.detectPatterns = () => ({
 				matches: [match],
 				detectionTimeMs: 5,
@@ -813,12 +710,7 @@ describe('createPrmHook', () => {
 			const match = createMockPatternMatch('repetition_loop');
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: trajectory,
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () => covOf(trajectory);
 			_internals.detectPatterns = () => ({
 				matches: [match],
 				detectionTimeMs: 5,
@@ -866,12 +758,7 @@ describe('createPrmHook', () => {
 			const match2 = createMockPatternMatch('ping_pong');
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: trajectory,
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () => covOf(trajectory);
 			_internals.detectPatterns = () => ({
 				matches: [match1, match2],
 				detectionTimeMs: 5,
@@ -933,12 +820,8 @@ describe('createPrmHook', () => {
 			const config = createMockConfig({ enabled: true });
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: createMockTrajectory(),
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () =>
+				covOf(createMockTrajectory());
 			// Throw synchronously to simulate error
 			_internals.detectPatterns = () => {
 				throw new Error('Detection failed');
@@ -956,12 +839,8 @@ describe('createPrmHook', () => {
 			const config = createMockConfig({ enabled: true });
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: createMockTrajectory(),
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () =>
+				covOf(createMockTrajectory());
 			_internals.detectPatterns = () => ({
 				matches: [createMockPatternMatch('repetition_loop')],
 				detectionTimeMs: 5,
@@ -987,12 +866,7 @@ describe('createPrmHook', () => {
 			const trajectory = createMockTrajectory();
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: trajectory,
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () => covOf(trajectory);
 			_internals.detectPatterns = createTickingDetectPatterns((overrides) =>
 				createMockPatternMatch('repetition_loop', overrides),
 			);
@@ -1027,12 +901,7 @@ describe('createPrmHook', () => {
 			const match2 = createMockPatternMatch('ping_pong');
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: trajectory,
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () => covOf(trajectory);
 
 			// detectPatterns returns first pattern on first call, second on second call
 			let detectCallCount = 0;
@@ -1108,12 +977,7 @@ describe('createPrmHook', () => {
 		test('handles empty trajectory array', async () => {
 			const config = createMockConfig({ enabled: true });
 			_internals.getAgentSession = () => createMockSession(sessionId);
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: [],
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () => covOf([]);
 			_internals.detectPatterns = () => ({
 				matches: [],
 				detectionTimeMs: 5,
@@ -1130,12 +994,8 @@ describe('createPrmHook', () => {
 		test('handles missing optional fields in ToolAfterContext', async () => {
 			const config = createMockConfig({ enabled: true });
 			_internals.getAgentSession = () => createMockSession(sessionId);
-			_internals.readTrajectoryWithCoverage = async () => ({
-				entries: createMockTrajectory(),
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+			_internals.readTrajectoryWithCoverage = async () =>
+				covOf(createMockTrajectory());
 			_internals.detectPatterns = () => ({
 				matches: [],
 				detectionTimeMs: 5,
@@ -1163,12 +1023,8 @@ describe('createPrmHook', () => {
 				const config = createMockConfig({ enabled: true });
 				const session = createMockSession(`${sessionId}-${pattern}`);
 				_internals.getAgentSession = () => session;
-				_internals.readTrajectoryWithCoverage = async () => ({
-					entries: createMockTrajectory(),
-					coverage: 'complete' as const,
-					droppedByCompaction: 0,
-					skippedMalformed: 0,
-				});
+				_internals.readTrajectoryWithCoverage = async () =>
+					covOf(createMockTrajectory());
 
 				const match = createMockPatternMatch(pattern);
 				_internals.detectPatterns = () => ({
@@ -1207,12 +1063,8 @@ describe('createPrmHook', () => {
 				const config = createMockConfig({ enabled: true });
 				const session = createMockSession(`${sessionId}-${severity}`);
 				_internals.getAgentSession = () => session;
-				_internals.readTrajectoryWithCoverage = async () => ({
-					entries: createMockTrajectory(),
-					coverage: 'complete' as const,
-					droppedByCompaction: 0,
-					skippedMalformed: 0,
-				});
+				_internals.readTrajectoryWithCoverage = async () =>
+					covOf(createMockTrajectory());
 
 				const match = createMockPatternMatch('repetition_loop', { severity });
 				_internals.detectPatterns = () => ({
@@ -1249,12 +1101,8 @@ describe('createPrmHook', () => {
 				const config = createMockConfig({ enabled: true });
 				const session = createMockSession(`${sessionId}-${category}`);
 				_internals.getAgentSession = () => session;
-				_internals.readTrajectoryWithCoverage = async () => ({
-					entries: createMockTrajectory(),
-					coverage: 'complete' as const,
-					droppedByCompaction: 0,
-					skippedMalformed: 0,
-				});
+				_internals.readTrajectoryWithCoverage = async () =>
+					covOf(createMockTrajectory());
 
 				const match = createMockPatternMatch('repetition_loop', { category });
 				_internals.detectPatterns = () => ({
