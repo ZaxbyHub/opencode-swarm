@@ -1,11 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import OpenCodeSwarm, {
-	overrideIndexInternalsForTest,
-} from '../../src/index';
-import { canonicalMkdtemp } from '../helpers/tmpdir';
+import OpenCodeSwarm, { overrideIndexInternalsForTest } from '../../src/index';
+import { resetSwarmState } from '../../src/state';
 import { createIsolatedTestEnv } from '../helpers/isolated-test-env';
+import { canonicalMkdtemp } from '../helpers/tmpdir';
 
 /**
  * Issue #2104 acceptance coverage for the plugin-init maintenance wiring:
@@ -49,13 +48,28 @@ function writeProjectConfig(directory: string, hooks: unknown): void {
 	);
 }
 
+/** Write a GLOBAL (XDG) config with no project config present. */
+function writeGlobalConfigOnly(configDir: string, hooks: unknown): void {
+	fs.mkdirSync(path.join(configDir, 'opencode'), { recursive: true });
+	fs.writeFileSync(
+		path.join(configDir, 'opencode', 'opencode-swarm.json'),
+		JSON.stringify({
+			quiet: true,
+			version_check: false,
+			hooks,
+		}),
+	);
+}
+
 function healthArtifactPath(directory: string): string {
 	return path.join(directory, '.swarm', HEALTH_ARTIFACT);
 }
 
-function readMaintenanceSection(
-	directory: string,
-): { lastRunAt: number; lastOkAt: number | null; lastFailure: { reason: string; at: number } | null } | null {
+function readMaintenanceSection(directory: string): {
+	lastRunAt: number;
+	lastOkAt: number | null;
+	lastFailure: { reason: string; at: number } | null;
+} | null {
 	const raw = fs.readFileSync(healthArtifactPath(directory), 'utf-8');
 	const parsed = JSON.parse(raw) as {
 		maintenance?: {
@@ -99,15 +113,20 @@ async function bootWithCapturedTasks(directory: string): Promise<{
 
 describe('issue #2104 background maintenance init wiring', () => {
 	let directory = '';
+	let configDir = '';
 	let cleanupIsolatedEnv: () => void = () => {};
 
 	beforeEach(() => {
-		cleanupIsolatedEnv = createIsolatedTestEnv().cleanup;
+		const isolated = createIsolatedTestEnv();
+		configDir = isolated.configDir;
+		cleanupIsolatedEnv = isolated.cleanup;
+		resetSwarmState();
 		directory = makeProject();
 		fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
 	});
 
 	afterEach(() => {
+		resetSwarmState();
 		fs.rmSync(directory, { recursive: true, force: true });
 		cleanupIsolatedEnv();
 		cleanupIsolatedEnv = () => {};
@@ -141,6 +160,8 @@ describe('issue #2104 background maintenance init wiring', () => {
 		expect(maintenance).not.toBeNull();
 		expect(maintenance!.lastRunAt).toBeGreaterThan(0);
 		expect(maintenance!.lastFailure).not.toBeNull();
+		// A failure observation must not record a success stamp.
+		expect(maintenance!.lastOkAt).toBeNull();
 	});
 
 	test('P5 is not scheduled when hooks.background_subagents is disabled', async () => {
@@ -163,11 +184,22 @@ describe('issue #2104 background maintenance init wiring', () => {
 		).toBeUndefined();
 	});
 
+	test('P5 is scheduled when only the XDG global config enables it', async () => {
+		// No project config: the loader deep-merges the XDG global config, so a
+		// global hooks.background_subagents:true must enable the deferred pass.
+		writeGlobalConfigOnly(configDir, { background_subagents: true });
+		const { scheduledTasks } = await bootWithCapturedTasks(directory);
+		expect(
+			scheduledTasks.find(
+				(task) => task.name === 'backgroundMaintenancePostInitTask',
+			),
+		).toBeDefined();
+	});
+
 	test('P3 fires maintenance from the event hook on session.deleted', async () => {
 		writeProjectConfig(directory, { background_subagents: true });
-		const { serverResult, scheduledTasks } = await bootWithCapturedTasks(
-			directory,
-		);
+		const { serverResult, scheduledTasks } =
+			await bootWithCapturedTasks(directory);
 
 		// The scheduler is captured, so only the session-close maintenance
 		// point can write the artifact from here.
@@ -189,5 +221,7 @@ describe('issue #2104 background maintenance init wiring', () => {
 		const maintenance = readMaintenanceSection(directory);
 		expect(maintenance).not.toBeNull();
 		expect(maintenance!.lastRunAt).toBeGreaterThan(0);
+		// Empty stores ⇒ the P3 pass completes ok and stamps lastOkAt.
+		expect(maintenance!.lastOkAt).not.toBeNull();
 	});
 });

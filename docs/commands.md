@@ -50,7 +50,7 @@ Agents: 11 registered
 
 When `hooks.background_subagents` is enabled (default `false`), status additionally renders a
 **Background Work** section: delegation counts by status (pending, running,
-completed-unconsumed, consumed, stale, cancelled, error, ingestion_error), active coder
+completed (unconsumed), consumed, stale, cancelled, error, ingestion_error), active coder
 reservations with their generation and lease state (active / expired / protected-legacy), the
 durable maintenance summary (last ok, last failure, last lock contention), and a
 `Source: validated recovery (bounded scan)` provenance label. Corrupt or over-bound stores
