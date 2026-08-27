@@ -24,6 +24,7 @@ import {
 } from '../../../../src/turbo/lean/merge-back';
 import { _internals as worktreeInternals } from '../../../../src/turbo/lean/worktree';
 import type { BunCompatSubprocess } from '../../../../src/utils/bun-compat';
+import { cleanMergeOverlapSnapshot } from '../../../helpers/merge-overlap-fixture';
 
 // ---------------------------------------------------------------------------
 // Mock helpers
@@ -654,14 +655,19 @@ describe('attemptMergeBackFromDirty', () => {
 	const fakePrimary = 'C:\\project-root';
 
 	let savedWorktreeSpawn: typeof worktreeInternals.bunSpawn;
+	let savedOverlapSnapshot: typeof _internals.captureMergeOverlapSnapshot;
 
 	beforeEach(() => {
 		savedWorktreeSpawn = worktreeInternals.bunSpawn;
+		savedOverlapSnapshot = _internals.captureMergeOverlapSnapshot;
+		_internals.captureMergeOverlapSnapshot = async () =>
+			cleanMergeOverlapSnapshot;
 	});
 
 	afterEach(() => {
 		// Restore both DI seams
 		_internals.bunSpawn = realBunSpawn;
+		_internals.captureMergeOverlapSnapshot = savedOverlapSnapshot;
 		worktreeInternals.bunSpawn = savedWorktreeSpawn;
 	});
 
@@ -714,15 +720,7 @@ describe('attemptMergeBackFromDirty', () => {
 			return mockProc(0, '', '');
 		};
 
-		_internals.bunSpawn = (args: string[]) => {
-			if (args[1] === 'rev-parse')
-				return mockProc(
-					0,
-					args[2] === fakeBranch ? '1'.repeat(40) : '0'.repeat(40),
-				);
-			if (args[1] === 'merge-base') return mockProc(0, '0'.repeat(40));
-			if (args[1] === 'status' || args[1] === 'ls-files' || args[1] === 'diff')
-				return mockProc(0);
+		_internals.bunSpawn = (_args: string[]) => {
 			return mockProc(mergeExit, '', mergeStderr);
 		};
 	}
@@ -825,15 +823,7 @@ describe('attemptMergeBackFromDirty', () => {
 		// mergeLaneBranch runs merge, detects conflict, then runs --abort
 		// So we need two merge-back bunSpawn calls: merge (fail with conflict) and --abort (success)
 		let mergeCallCount = 0;
-		_internals.bunSpawn = (args: string[]) => {
-			if (args[1] === 'rev-parse')
-				return mockProc(
-					0,
-					args[2] === fakeBranch ? '1'.repeat(40) : '0'.repeat(40),
-				);
-			if (args[1] === 'merge-base') return mockProc(0, '0'.repeat(40));
-			if (args[1] === 'status' || args[1] === 'ls-files' || args[1] === 'diff')
-				return mockProc(0);
+		_internals.bunSpawn = (_args: string[]) => {
 			mergeCallCount++;
 			if (mergeCallCount === 1) {
 				return mockProc(

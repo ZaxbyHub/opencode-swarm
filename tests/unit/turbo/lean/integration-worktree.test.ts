@@ -37,6 +37,7 @@ import type {
 } from '../../../../src/turbo/lean/state';
 import * as leanState from '../../../../src/turbo/lean/state';
 import * as worktreeModule from '../../../../src/turbo/lean/worktree';
+import { cleanMergeOverlapSnapshot } from '../../../helpers/merge-overlap-fixture';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -302,8 +303,9 @@ beforeEach(() => {
 	LeanTurboRunner._internals.assertCleanWorkingTree = mock(() =>
 		Promise.resolve({ clean: true }),
 	);
+	mergeBackModule._internals.captureMergeOverlapSnapshot = async () =>
+		cleanMergeOverlapSnapshot;
 });
-
 afterEach(() => {
 	restoreAllSeams();
 	leanState.repairStateUnreadable(tmpDir);
@@ -1570,41 +1572,6 @@ describe('DD-7: git clean -fd in cleanup — untracked files cleaned', () => {
 			};
 		});
 		mergeBackModule._internals.bunSpawn = mock((args: string[]) => {
-			if (args[1] === 'rev-parse') {
-				return {
-					exited: Promise.resolve(0),
-					exitCode: 0,
-					stdout: {
-						text: () =>
-							Promise.resolve(
-								args[2] === 'swarm-lane/session-1/lane-1'
-									? '1'.repeat(40)
-									: '0'.repeat(40),
-							),
-					},
-					stderr: { text: () => Promise.resolve('') },
-				};
-			}
-			if (args[1] === 'merge-base') {
-				return {
-					exited: Promise.resolve(0),
-					exitCode: 0,
-					stdout: { text: () => Promise.resolve('0'.repeat(40)) },
-					stderr: { text: () => Promise.resolve('') },
-				};
-			}
-			if (
-				args[1] === 'status' ||
-				args[1] === 'ls-files' ||
-				args[1] === 'diff'
-			) {
-				return {
-					exited: Promise.resolve(0),
-					exitCode: 0,
-					stdout: { text: () => Promise.resolve('') },
-					stderr: { text: () => Promise.resolve('') },
-				};
-			}
 			if (args[1] === 'merge') {
 				callOrder.push('merge:git-merge');
 			}
