@@ -24,10 +24,9 @@ function config(overrides: Partial<GuardrailsConfig> = {}): GuardrailsConfig {
 
 async function waitForAudit(
 	filePath: string,
-	timeoutMs = 1_000,
+	attempts = 100,
 ): Promise<void> {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
+	for (let attempt = 0; attempt < attempts; attempt += 1) {
 		if (fs.existsSync(filePath) && fs.readFileSync(filePath, 'utf8').trim())
 			return;
 		await new Promise((resolve) => setTimeout(resolve, 10));
