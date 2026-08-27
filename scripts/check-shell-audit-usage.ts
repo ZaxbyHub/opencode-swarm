@@ -83,8 +83,11 @@ export const SHELL_AUDIT_IMPORT_ALLOWLIST: Readonly<
 	},
 });
 
-/** Matches an import of the store module (static or dynamic, .js optional). */
-export const SHELL_AUDIT_IMPORT = /from\s+'[^']*shell-audit-store(?:\.js)?'|import\(\s*'[^']*shell-audit-store(?:\.js)?'\s*\)/;
+/** Matches an import of the store module (static or dynamic, .js optional,
+ *  BOTH quote styles — review round RC-5/MS-1: a double-quoted import must
+ *  not bypass the ratchet). */
+export const SHELL_AUDIT_IMPORT =
+	/from\s+['"][^'"]*shell-audit-store(?:\.js)?['"]|import\(\s*['"][^'"]*shell-audit-store(?:\.js)?['"]\s*\)/;
 
 /** Strip // line comments and /* block *\/ comments while preserving string
  *  literals verbatim (mentions inside strings and template literals COUNT —

@@ -68,6 +68,12 @@ decision field is added without declaring its redaction/content class.
 
 ## Caveats
 
+- The close-archived cut is NOT byte-for-byte: before the `session/` directory
+  archive copy, close finalize re-applies the CURRENT redaction policy to every
+  retained decision line (archive-boundary re-redaction), so a legacy
+  pre-#2040 record with weaker redaction is normalized in the archived copy
+  and the archived bytes may differ from the live file.
+
 - The 1 MiB byte ceiling is sovereign over both decision classes: a
   pathological burst of security decisions can still push older security
   lines out of the window via the byte budget (disclosed via the folded

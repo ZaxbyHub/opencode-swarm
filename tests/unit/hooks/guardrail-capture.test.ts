@@ -177,6 +177,13 @@ describe('guardrail decision-log capture (task 2.1)', () => {
 	});
 
 	afterEach(async () => {
+		// Reset the shell-audit store's module-scoped maintenance counters so
+		// this file's appends cannot shift throttled maintenance for later
+		// files in the shared test-runner process (review round PRR-016a).
+		const { _resetMaintenanceCounters } = await import(
+			'../../../src/hooks/guardrails/shell-audit-store.js'
+		);
+		_resetMaintenanceCounters();
 		// Best-effort cleanup guard if a test failed before its own wait.
 		if (fsSync.existsSync(auditPath)) {
 			await waitForAuditEntries(auditPath, 1, 200).catch(() => {});

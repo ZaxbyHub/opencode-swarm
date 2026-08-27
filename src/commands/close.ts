@@ -36,6 +36,7 @@ export const closeReceiptLifecycleInternals = {
 
 import { finalizeContextTelemetry as finalizeContextTelemetryImpl } from '../context-map/telemetry.js';
 import { finalizeCoreEventsForClose as finalizeCoreEventsForCloseImpl } from '../events/core-events.js';
+import { redactDecisionLineForArchive } from '../hooks/guardrails/audit-log.js';
 import { finalizeShellAuditForClose as finalizeShellAuditForCloseImpl } from '../hooks/guardrails/shell-audit-store.js';
 import {
 	readKnowledge,
@@ -2749,7 +2750,12 @@ export const _internals = {
 	// Finalizes the bounded shell-audit security store before the session/
 	// directory archive copy (issue #2040). Synchronous, fail-open. Seam so
 	// close tests can substitute a no-op / throwing stub and pin ordering.
+	// The lineTransform re-applies the CURRENT redaction policy to retained
+	// lines so a legacy pre-#2040 record cannot bypass it in the archived
+	// cut (review round F4 — "re-redact at the archive boundary").
 	finalizeShellAudit: (directory: string): void => {
-		finalizeShellAuditForCloseImpl(directory);
+		finalizeShellAuditForCloseImpl(directory, {
+			lineTransform: redactDecisionLineForArchive,
+		});
 	},
 };

@@ -50,6 +50,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 
 import { telemetry } from '../../telemetry.js';
 import { warn } from '../../utils/logger.js';
@@ -85,6 +86,14 @@ export interface ShellAuditLimits {
 	maxCommandChars: number;
 	/** Free-text (reason) truncation bound applied at line-shaping time. */
 	maxReasonChars: number;
+	/**
+	 * Hard bound on any single whole-file store read. A legacy header-less
+	 * file larger than this migrates through the bounded STREAMING reader
+	 * (chunked line folding) instead of being materialized whole (review
+	 * round RC-2: the legacy path is exactly the file that lacks the
+	 * activeMaxBytes ceiling).
+	 */
+	migrationMaxBytes: number;
 }
 
 export const SHELL_AUDIT_LIMITS: ShellAuditLimits = {
@@ -106,6 +115,7 @@ export const SHELL_AUDIT_LIMITS: ShellAuditLimits = {
 	maxLineBytes: 64 * 1024,
 	maxCommandChars: 4_096,
 	maxReasonChars: 1_024,
+	migrationMaxBytes: 8 * 1024 * 1024,
 };
 
 // ---------------------------------------------------------------------------
@@ -121,7 +131,9 @@ export type ShellAuditDecisionClass = 'security' | 'allowed';
  * discriminator used for folded per-type counts is the `type` field when
  * present, `shell` otherwise.
  */
-function decisionClassOf(event: Record<string, unknown>): ShellAuditDecisionClass {
+function decisionClassOf(
+	event: Record<string, unknown>,
+): ShellAuditDecisionClass {
 	return typeof event.type === 'string' && event.type.length > 0
 		? 'security'
 		: 'allowed';
@@ -625,18 +637,122 @@ interface StoreView {
 	manifest: ShellAuditManifest | null;
 	lines: StoreLine[]; // decision lines only (manifest excluded), append order
 	corruptLines: number;
+	/**
+	 * Aggregate already folded at READ time by the bounded streaming legacy
+	 * reader (RC-2): when a header-less legacy file exceeds
+	 * migrationMaxBytes, its oldest lines are folded chunk-by-chunk without
+	 * materializing the whole file, and foldPass merges this aggregate into
+	 * the manifest it writes. Null on every normal (bounded) read.
+	 */
+	prefixFolded: ShellAuditFolded | null;
+}
+
+const EMPTY_VIEW: StoreView = {
+	manifest: null,
+	lines: [],
+	corruptLines: 0,
+	prefixFolded: null,
+};
+
+/**
+ * Bounded streaming read for an oversized LEGACY (header-less) file (RC-2):
+ * walks the file forward in chunks, folding every complete line outside the
+ * newest retained window into `prefixFolded` without ever holding more than
+ * the retained window + one chunk in memory. The returned view has
+ * manifest === null; foldPass treats the retained lines exactly like a
+ * normal legacy migration and merges prefixFolded into the manifest it
+ * writes, so the first maintenance/finalize pass rewrites the file down to
+ * the bounded manifest+window layout with lifetime counters preserved.
+ */
+function streamLegacyStore(filePath: string): StoreView {
+	const size = fileSizeOrZero(filePath);
+	const prefixFolded = emptyFolded();
+	const retained: StoreLine[] = [];
+	let retainedBytes = 0;
+	const windowBudget =
+		_internals.limits.activeMaxBytes + _internals.limits.headerMaxBytes;
+	const chunkBytes = Math.min(
+		512 * 1024,
+		Math.max(1 * 1024, _internals.limits.compactMaxBytes * 2),
+	);
+	/** Fold-or-retain one complete line under the window budget. */
+	const ingest = (line: string): void => {
+		if (line.trim() === '') return;
+		let event: Record<string, unknown> | null = null;
+		try {
+			const parsed: unknown = JSON.parse(line);
+			if (
+				typeof parsed === 'object' &&
+				parsed !== null &&
+				!Array.isArray(parsed)
+			) {
+				event = parsed as Record<string, unknown>;
+			}
+		} catch {
+			/* corrupt */
+		}
+		if (event === null) {
+			prefixFolded.corrupt += 1;
+			return;
+		}
+		const lineBytes = Buffer.byteLength(line) + 1;
+		if (retainedBytes + lineBytes > windowBudget && retained.length > 0) {
+			const oldest = retained.shift()!;
+			retainedBytes -= Buffer.byteLength(oldest.line) + 1;
+			foldLineInto(prefixFolded, oldest.event!);
+		}
+		retained.push({ line, event });
+		retainedBytes += lineBytes;
+	};
+
+	// Final-critic round: read RAW bytes and decode through a StringDecoder
+	// so a multibyte UTF-8 sequence straddling a chunk boundary is buffered
+	// and reassembled, never replaced with U+FFFD, and the offset advances by
+	// the bytes actually read (the previous decoded-length advance skipped
+	// continuation bytes on every straddle).
+	let offset = 0;
+	let carry = '';
+	const decoder = new StringDecoder('utf-8');
+	const fd = _internals.openSync(filePath, 'r');
+	try {
+		const buf = Buffer.alloc(chunkBytes);
+		for (;;) {
+			const n = _internals.readSync(fd, buf, 0, chunkBytes, offset);
+			if (n <= 0) break;
+			offset += n;
+			const decoded = decoder.write(buf.subarray(0, n));
+			const parts = `${carry}${decoded}`.split('\n');
+			carry = parts.pop() ?? ''; // partial tail line carries forward
+			for (const line of parts) ingest(line);
+			if (offset >= size) break;
+		}
+	} finally {
+		_internals.closeSync(fd);
+	}
+	// Flush any decoder residue (incomplete final sequence) into the carry
+	// before treating it as the file's last line.
+	const residue = decoder.end();
+	if (residue !== '') carry += residue;
+	// A final unterminated tail line is still a complete decision record.
+	if (carry.trim() !== '') ingest(carry);
+	return { manifest: null, lines: retained, corruptLines: 0, prefixFolded };
 }
 
 function readStoreFull(directory: string): StoreView {
 	const filePath = shellAuditFilePath(directory);
 	if (!_internals.existsSync(filePath)) {
-		return { manifest: null, lines: [], corruptLines: 0 };
+		return EMPTY_VIEW;
+	}
+	// Oversized legacy files (the only inputs lacking the activeMaxBytes
+	// ceiling) migrate through the bounded streaming reader (RC-2).
+	if (fileSizeOrZero(filePath) > _internals.limits.migrationMaxBytes) {
+		return streamLegacyStore(filePath);
 	}
 	let text: string;
 	try {
 		text = _internals.readFileSync(filePath, 'utf-8');
 	} catch {
-		return { manifest: null, lines: [], corruptLines: 0 };
+		return EMPTY_VIEW;
 	}
 	const rawLines = text.split('\n');
 	const lines: StoreLine[] = [];
@@ -664,7 +780,7 @@ function readStoreFull(directory: string): StoreView {
 			corruptLines += 1;
 		}
 	}
-	return { manifest, lines, corruptLines };
+	return { manifest, lines, corruptLines, prefixFolded: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -691,7 +807,13 @@ export function readShellAuditTail(
 	directory: string,
 	maxBytes?: number,
 ): ShellAuditReadResult {
-	const bound = Math.max(1024, Math.min(maxBytes ?? _internals.limits.readMaxBytes, _internals.limits.readMaxBytes));
+	const bound = Math.max(
+		1024,
+		Math.min(
+			maxBytes ?? _internals.limits.readMaxBytes,
+			_internals.limits.readMaxBytes,
+		),
+	);
 	const filePath = shellAuditFilePath(directory);
 	if (!_internals.existsSync(filePath)) {
 		return { text: '', truncated: false, coverage: 'empty' };
@@ -699,10 +821,20 @@ export function readShellAuditTail(
 	// TAIL read: the diagnostic reader wants the NEWEST decisions. When the
 	// file exceeds the bound, read the last `bound` bytes and drop the torn
 	// partial line the cut creates at the head of the chunk.
-	const size = fileSizeOrZero(filePath);
-	const truncated = size > bound;
-	const offset = truncated ? Math.max(0, size - bound) : 0;
+	// RC-3: the outer stat can go stale if an atomicReplace lands between the
+	// stat and the chunk read — when the truncated read comes back EMPTY,
+	// retry the whole stat+read once against the current file instead of
+	// reporting an empty window for a store that just got smaller.
+	let size = fileSizeOrZero(filePath);
+	let truncated = size > bound;
+	let offset = truncated ? Math.max(0, size - bound) : 0;
 	let text = readBoundedChunk(filePath, bound, offset).text;
+	if (truncated && text === '') {
+		size = fileSizeOrZero(filePath);
+		truncated = size > bound;
+		offset = truncated ? Math.max(0, size - bound) : 0;
+		text = readBoundedChunk(filePath, bound, offset).text;
+	}
 	if (truncated) {
 		const firstNewline = text.indexOf('\n');
 		text = firstNewline === -1 ? '' : text.slice(firstNewline + 1);
@@ -772,7 +904,10 @@ export const SHELL_AUDIT_LINE_TOO_LARGE = 'SHELL_AUDIT_LINE_TOO_LARGE';
  * `SHELL_AUDIT_LINE_TOO_LARGE` for oversized lines — the audit append path
  * catches both and logs non-fatally (logging failure never blocks a tool).
  */
-export function appendShellAuditLineSync(directory: string, line: string): void {
+export function appendShellAuditLineSync(
+	directory: string,
+	line: string,
+): void {
 	if (Buffer.byteLength(line) - 1 > _internals.limits.maxLineBytes) {
 		throw new Error(SHELL_AUDIT_LINE_TOO_LARGE);
 	}
@@ -789,6 +924,16 @@ export function appendShellAuditLineSync(directory: string, line: string): void 
 			// Re-establish line framing if a prior crash tore the tail.
 			const prefix = fileEndsWithNewline(filePath) ? '' : '\n';
 			_internals.appendFileSync(filePath, `${prefix}${line}`, 'utf-8');
+		}
+		// RC-4: the byte ceiling binds at APPEND time, not only at the
+		// throttled maintenance tick. Under the same lock, an over-ceiling
+		// store folds immediately (one bounded pass re-establishes the
+		// manifest+window bound) — the overshoot never survives the append.
+		if (
+			fileSizeOrZero(filePath) >
+			_internals.limits.activeMaxBytes + _internals.limits.headerMaxBytes
+		) {
+			foldPass(directory, 'compaction', false);
 		}
 		return 'appended';
 	});
@@ -828,10 +973,44 @@ function foldPass(
 	if (!_internals.existsSync(filePath)) return;
 
 	const view = readStoreFull(directory);
-	if (view.manifest === null && view.lines.length === 0) return;
+	// F12: a legacy file containing ONLY corrupt lines still migrates — the
+	// rewrite below gives it a manifest header counting the corruption, so
+	// close finalizes/bounds it instead of leaving it untouched.
+	if (
+		view.manifest === null &&
+		view.lines.length === 0 &&
+		view.corruptLines === 0 &&
+		view.prefixFolded === null
+	) {
+		return;
+	}
 	const folded = view.manifest
 		? cloneFolded(view.manifest.folded)
 		: emptyFolded();
+	// Merge the streaming reader's already-folded prefix (RC-2 oversized
+	// legacy migration) so lifetime counters survive the cutover.
+	if (view.prefixFolded !== null) {
+		folded.totalDecisions += view.prefixFolded.totalDecisions;
+		for (const [k, v] of Object.entries(view.prefixFolded.byType)) {
+			folded.byType[k] = (folded.byType[k] ?? 0) + v;
+		}
+		folded.corrupt += view.prefixFolded.corrupt;
+		folded.dropped += view.prefixFolded.dropped;
+		if (
+			view.prefixFolded.oldestTimestamp !== null &&
+			(folded.oldestTimestamp === null ||
+				view.prefixFolded.oldestTimestamp < folded.oldestTimestamp)
+		) {
+			folded.oldestTimestamp = view.prefixFolded.oldestTimestamp;
+		}
+		if (
+			view.prefixFolded.newestTimestamp !== null &&
+			(folded.newestTimestamp === null ||
+				view.prefixFolded.newestTimestamp > folded.newestTimestamp)
+		) {
+			folded.newestTimestamp = view.prefixFolded.newestTimestamp;
+		}
+	}
 	const now = _internals.now();
 
 	// Age partition (allowed class only; security class is exempt).
@@ -864,12 +1043,12 @@ function foldPass(
 
 	// Retain the NEWEST kept lines that fit the per-class count caps and the
 	// sovereign byte ceiling, oldest-first folding for the rest.
+	// (+1 for the manifest line's own trailing newline — review round PRR-020e.)
 	const retained: StoreLine[] = [];
 	let securityCount = 0;
 	let allowedCount = 0;
-	let bytes = Buffer.byteLength(
-		JSON.stringify(view.manifest ?? emptyManifest()),
-	);
+	let bytes =
+		Buffer.byteLength(JSON.stringify(view.manifest ?? emptyManifest())) + 1;
 	for (let i = kept.length - 1; i >= 0; i -= 1) {
 		const entry = kept[i]!;
 		const lineBytes = Buffer.byteLength(entry.line) + 1;
@@ -1011,8 +1190,17 @@ function runMaintenance(directory: string): void {
  * validation), which `/swarm close` then archives as part of the session
  * directory copy. Fail-open: never throws to the close pipeline. Releasing
  * the lock also unlinks it, so a stale lock file is never archived.
+ *
+ * `options.lineTransform` (review round F4): when provided, every retained
+ * decision line is passed through it before the final validated rewrite —
+ * the close pipeline supplies the CURRENT redaction policy so a legacy
+ * record with weaker pre-#2040 redaction cannot bypass it in the archived
+ * cut ("re-redact at the archive boundary").
  */
-export function finalizeShellAuditForClose(directory: string): void {
+export function finalizeShellAuditForClose(
+	directory: string,
+	options?: { lineTransform?: (line: string) => string },
+): void {
 	try {
 		const filePath = shellAuditFilePath(directory);
 		if (!_internals.existsSync(filePath)) return;
@@ -1027,6 +1215,28 @@ export function finalizeShellAuditForClose(directory: string): void {
 				foldPass(directory, 'close', false);
 			}
 			foldPass(directory, 'close', true);
+			// Archive-boundary re-redaction: transform retained lines under the
+			// same lock, then republish a validated cut. Transform failures on
+			// individual lines keep the original line (parse-safe passthrough
+			// is the transform's own contract).
+			const transform = options?.lineTransform;
+			if (transform !== undefined) {
+				const view = readStoreFull(directory);
+				if (view.manifest !== null) {
+					const manifest: ShellAuditManifest = {
+						...view.manifest,
+						folded: cloneFolded(view.manifest.folded),
+						updatedAt: new Date().toISOString(),
+					};
+					const outLines = [`${JSON.stringify(manifest)}`];
+					for (const entry of view.lines) outLines.push(transform(entry.line));
+					try {
+						atomicReplace(directory, `${outLines.join('\n')}\n`);
+					} catch {
+						warnThrottled('archive re-redaction rewrite failed');
+					}
+				}
+			}
 			return true;
 		});
 	} catch {

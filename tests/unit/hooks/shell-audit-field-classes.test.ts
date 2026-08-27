@@ -16,12 +16,21 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-	SHELL_AUDIT_FIELD_CLASSES,
 	type GuardrailDecisionEntry,
+	SHELL_AUDIT_FIELD_CLASSES,
 } from '../../../src/hooks/guardrails/audit-log';
 
 const SOURCE = readFileSync(
-	join(process.cwd(), 'src/hooks/guardrails/audit-log.ts'),
+	join(
+		import.meta.dir,
+		'..',
+		'..',
+		'..',
+		'src',
+		'hooks',
+		'guardrails',
+		'audit-log.ts',
+	),
 	'utf-8',
 );
 

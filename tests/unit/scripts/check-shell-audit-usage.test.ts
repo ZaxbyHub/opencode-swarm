@@ -15,11 +15,11 @@ import { describe, expect, test } from 'bun:test';
 import { join } from 'node:path';
 
 import {
-	SHELL_AUDIT_IMPORT_ALLOWLIST,
-	SHELL_AUDIT_MENTION_ALLOWLIST,
 	collectShellAuditUsageErrors,
-	SHELL_AUDIT_LITERAL,
 	findViolations,
+	SHELL_AUDIT_IMPORT_ALLOWLIST,
+	SHELL_AUDIT_LITERAL,
+	SHELL_AUDIT_MENTION_ALLOWLIST,
 	stripComments,
 } from '../../../scripts/check-shell-audit-usage.js';
 
@@ -63,9 +63,7 @@ describe('SHELL_AUDIT_LITERAL boundary', () => {
 
 	test('does NOT match the store module path (distinct stream name)', () => {
 		expect(
-			SHELL_AUDIT_LITERAL.test(
-				"import { x } from './shell-audit-store.js';",
-			),
+			SHELL_AUDIT_LITERAL.test("import { x } from './shell-audit-store.js';"),
 		).toBe(false);
 	});
 });
@@ -171,11 +169,33 @@ describe('import-graph ratchet (reviewer round R3)', () => {
 		);
 	});
 
+	test('an unregistered DOUBLE-QUOTED static import is flagged (RC-5/MS-1)', () => {
+		const violations = findViolations([
+			{
+				file: 'src/hooks/sneaky-dq.ts',
+				source: 'import { shellAuditFilePath } from "./shell-audit-store.js";',
+			},
+		]);
+		expect(violations.length).toBe(1);
+	});
+
+	test('an unregistered DOUBLE-QUOTED dynamic import is flagged (RC-5/MS-1)', () => {
+		const violations = findViolations([
+			{
+				file: 'src/hooks/sneaky-dqd.ts',
+				source:
+					'const m = await import("../hooks/guardrails/shell-audit-store");',
+			},
+		]);
+		expect(violations.length).toBe(1);
+	});
+
 	test('an unregistered DYNAMIC importer is flagged', () => {
 		const violations = findViolations([
 			{
 				file: 'src/hooks/sneaky-dynamic.ts',
-				source: "const m = await import('../hooks/guardrails/shell-audit-store');",
+				source:
+					"const m = await import('../hooks/guardrails/shell-audit-store');",
 			},
 		]);
 		expect(violations.length).toBe(1);
@@ -200,8 +220,17 @@ describe('real repo tree', () => {
 
 	test('the script module itself exists at the documented path', async () => {
 		const { existsSync } = await import('node:fs');
-		expect(existsSync(join(process.cwd(), 'scripts/check-shell-audit-usage.ts'))).toBe(
-			true,
-		);
+		expect(
+			existsSync(
+				join(
+					import.meta.dir,
+					'..',
+					'..',
+					'..',
+					'scripts',
+					'check-shell-audit-usage.ts',
+				),
+			),
+		).toBe(true);
 	});
 });

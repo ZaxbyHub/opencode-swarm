@@ -31,11 +31,11 @@ import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 
 import { log } from '../../utils/logger';
+import { redactShellCommand } from './helpers';
 import {
 	appendShellAuditLineSync,
 	SHELL_AUDIT_LIMITS,
 } from './shell-audit-store';
-import { redactShellCommand } from './helpers';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -333,7 +333,10 @@ function truncateUtf8Safe(text: string, maxChars: number): string {
  *  reversible content. Deterministic: identical redacted commands hash
  *  identically (issue #2040 edge-case: deterministic-enough-for-correlation). */
 export function hashRedactedCommand(redacted: string): string {
-	return createHash('sha256').update(redacted, 'utf-8').digest('hex').slice(0, 16);
+	return createHash('sha256')
+		.update(redacted, 'utf-8')
+		.digest('hex')
+		.slice(0, 16);
 }
 
 /**
@@ -397,6 +400,68 @@ function redactEmbeddedPaths(text: string): string {
 		.replace(/\\\\[^\\\s]+\\[^\\\s]+\\[^\\\s]+(\\[^\s"'`)]*)?/g, (match) =>
 			redactPath(match),
 		);
+}
+
+// Directly unit-tested (review round MS-gap1): exported for the adversarial
+// embedded-path fixtures in shell-audit-redaction.test.ts.
+export { redactEmbeddedPaths };
+
+/**
+ * Archive-boundary re-redaction (issue #2040 requirement 4 / review round
+ * F4): re-apply the CURRENT redaction policy to one persisted decision line
+ * before the close pipeline archives it. Legacy pre-#2040 lines written with
+ * weaker redaction are normalized here so no legacy record can bypass
+ * current policy in the archived cut. Parse-safe passthrough: an
+ * unparseable line is returned unchanged (the store's corrupt accounting
+ * owns it).
+ */
+export function redactDecisionLineForArchive(line: string): string {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(line);
+	} catch {
+		return line;
+	}
+	if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+		return line;
+	}
+	const record = parsed as Record<string, unknown>;
+	let changed = false;
+	if (typeof record.command === 'string') {
+		const redacted = redactShellCommand(record.command);
+		if (redacted !== record.command) {
+			record.command = redacted;
+			changed = true;
+			// Keep the fingerprint consistent with the re-redacted content.
+			if (typeof record.commandHash === 'string') {
+				record.commandHash = hashRedactedCommand(redacted);
+			}
+		}
+	}
+	if (typeof record.path === 'string') {
+		const redacted = redactPath(record.path);
+		if (redacted !== record.path) {
+			record.path = redacted;
+			changed = true;
+		}
+	}
+	if (typeof record.reason === 'string') {
+		const redacted = redactEmbeddedPaths(record.reason);
+		if (redacted !== record.reason) {
+			record.reason = redacted;
+			changed = true;
+		}
+	}
+	for (const field of ['declaredScope', 'resolvedScope'] as const) {
+		if (typeof record[field] === 'string') {
+			const redacted = redactPath(record[field] as string);
+			if (redacted !== record[field]) {
+				record[field] = redacted;
+				changed = true;
+			}
+		}
+	}
+	return changed ? JSON.stringify(record) : line;
 }
 
 // ---------------------------------------------------------------------------
@@ -475,10 +540,7 @@ export async function appendGuardrailDecision(
 			line = `${JSON.stringify({
 				...entry,
 				path: redactPath(entry.path),
-				reason: truncateUtf8Safe(
-					redactEmbeddedPaths(entry.reason),
-					maxReason,
-				),
+				reason: truncateUtf8Safe(redactEmbeddedPaths(entry.reason), maxReason),
 				resolvedScope: redactPath(entry.resolvedScope),
 			})}\n`;
 			break;

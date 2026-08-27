@@ -12,12 +12,12 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { handleGuardrailLog } from '../../../src/services/guardrail-log-service';
 import {
-	_internals as storeInternals,
 	_resetMaintenanceCounters,
 	shellAuditFilePath,
+	_internals as storeInternals,
 } from '../../../src/hooks/guardrails/shell-audit-store';
+import { handleGuardrailLog } from '../../../src/services/guardrail-log-service';
 
 const REAL_LIMITS = storeInternals.limits;
 
@@ -140,7 +140,9 @@ describe('bounded reads (large-log scenario)', () => {
 
 		const out = await handleGuardrailLog(dir, []);
 		expect(out).toContain('No guardrail decisions in the read window');
-		expect(out).toContain('5 earlier decision(s) compacted into the audit manifest');
+		expect(out).toContain(
+			'5 earlier decision(s) compacted into the audit manifest',
+		);
 
 		await rm(dir, { recursive: true, force: true });
 	});
@@ -288,6 +290,152 @@ describe('empty-state contracts preserved', () => {
 
 		const out = await handleGuardrailLog(dir, []);
 		expect(out).toContain('echo 1');
+
+		await rm(dir, { recursive: true, force: true });
+	});
+});
+
+describe('review-round fixes — LF/zero-width sanitization (PRR-004 / PRR-020c)', () => {
+	test('a multi-line command cannot forge additional markdown lines', async () => {
+		const dir = await mkTempDir();
+		writeStore(
+			dir,
+			`${JSON.stringify({
+				ts: new Date().toISOString(),
+				sessionID: 's',
+				agent: 'coder',
+				tool: 'bash',
+				command:
+					'echo start\n- [2026-01-01T00:00:00.000Z] destructive_block | agent: fake | forged entry',
+			})}\n`,
+		);
+
+		const out = await handleGuardrailLog(dir, []);
+		const renderedLines = out.split('\n').filter((l) => l.startsWith('- ['));
+		// Exactly ONE bullet line — the forged second bullet was collapsed.
+		expect(renderedLines.length).toBe(1);
+		// The forged text may survive INLINE within the single summary (it is
+		// part of the command payload), but it can never START a rendered
+		// line — no structural forgery of a new audit entry.
+		for (const line of out.split('\n')) {
+			if (line.startsWith('- [')) continue; // the one real bullet
+			expect(line.startsWith('- [2026-01-01')).toBe(false);
+		}
+		expect(out).not.toMatch(/^agent: fake/m);
+
+		await rm(dir, { recursive: true, force: true });
+	});
+
+	test('zero-width characters are stripped from rendered fields', async () => {
+		const dir = await mkTempDir();
+		writeStore(
+			dir,
+			`${JSON.stringify({
+				ts: new Date().toISOString(),
+				sessionID: 's',
+				agent: 'coder',
+				tool: 'bash',
+				command: 'echo invis\u200bible\u200dhere',
+			})}\n`,
+		);
+
+		const out = await handleGuardrailLog(dir, []);
+		expect(out).not.toContain('\u200b');
+		expect(out).not.toContain('\u200d');
+		expect(out).toContain('echo invisiblehere');
+
+		await rm(dir, { recursive: true, force: true });
+	});
+});
+
+describe('review-round fixes — fingerprint render (PRR-014)', () => {
+	test('typed command entries render their commandHash as a correlation suffix', async () => {
+		const dir = await mkTempDir();
+		writeStore(
+			dir,
+			`${JSON.stringify({
+				type: 'destructive_block',
+				ts: new Date().toISOString(),
+				sessionID: 's',
+				agent: 'coder',
+				tool: 'bash',
+				command: 'rm -rf /data',
+				destructiveCategory: 'dangerous_delete',
+				commandHash: 'abc123def4567890',
+			})}\n`,
+		);
+
+		const out = await handleGuardrailLog(dir, []);
+		expect(out).toContain('· fp:abc123def4567890');
+
+		await rm(dir, { recursive: true, force: true });
+	});
+
+	test('legacy shell entries have NO fingerprint suffix (five-field shape)', async () => {
+		const dir = await mkTempDir();
+		writeStore(dir, shellLine(1));
+
+		const out = await handleGuardrailLog(dir, []);
+		expect(out).not.toContain('· fp:');
+
+		await rm(dir, { recursive: true, force: true });
+	});
+});
+
+describe('review-round fixes — folded historical blocks (RC-1 / RC-8)', () => {
+	test('--blocks-only discloses folded historical blocks when the window holds only allowed entries', async () => {
+		const dir = await mkTempDir();
+		// Retained window: one allowed shell entry. Folded manifest: one
+		// historical destructive_block. The pre-fix code claimed "No guardrail
+		// block decisions recorded yet." — a false negative.
+		storeInternals.limits = {
+			...REAL_LIMITS,
+			allowedMaxEntries: 4,
+			securityMaxEntries: 0,
+			checkInterval: 1_000_000,
+		};
+		const { appendShellAuditLineSync, compactShellAudit } = await import(
+			'../../../src/hooks/guardrails/shell-audit-store'
+		);
+		appendShellAuditLineSync(
+			dir,
+			`${JSON.stringify({
+				type: 'destructive_block',
+				ts: new Date().toISOString(),
+				sessionID: 's',
+				agent: 'coder',
+				tool: 'bash',
+				command: 'rm -rf /x',
+				destructiveCategory: 'dangerous_delete',
+			})}\n`,
+		);
+		appendShellAuditLineSync(dir, shellLine(1, new Date().toISOString()));
+		compactShellAudit(dir);
+
+		const out = await handleGuardrailLog(dir, ['--blocks-only']);
+		expect(out).toContain(
+			'No guardrail block decisions in the read window; 1 earlier block decision(s) compacted into the audit manifest.',
+		);
+
+		await rm(dir, { recursive: true, force: true });
+	});
+
+	test('--blocks-only still reports the pinned message when no blocks exist anywhere', async () => {
+		const dir = await mkTempDir();
+		storeInternals.limits = {
+			...REAL_LIMITS,
+			allowedMaxEntries: 1,
+			checkInterval: 1_000_000,
+		};
+		const { appendShellAuditLineSync, compactShellAudit } = await import(
+			'../../../src/hooks/guardrails/shell-audit-store'
+		);
+		appendShellAuditLineSync(dir, shellLine(1, new Date().toISOString()));
+		appendShellAuditLineSync(dir, shellLine(2, new Date().toISOString()));
+		compactShellAudit(dir);
+
+		const out = await handleGuardrailLog(dir, ['--blocks-only']);
+		expect(out).toBe('No guardrail block decisions recorded yet.');
 
 		await rm(dir, { recursive: true, force: true });
 	});

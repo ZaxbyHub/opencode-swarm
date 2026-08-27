@@ -13,6 +13,10 @@ export interface GuardrailLogEntry {
 	tool: string;
 	command?: string;
 	path?: string;
+	/** 16-hex sha256 fingerprint of the redacted command (typed entries only);
+	 *  rendered as a correlation suffix so duplicate/related decisions can be
+	 *  linked without repeating command content. */
+	commandHash?: string;
 }
 
 const BLOCK_TYPES = new Set<string>([
@@ -57,9 +61,11 @@ function redactSummary(entry: GuardrailLogEntry): string {
 
 /**
  * Display sanitization (issue #2040 edge case: newline/control/ANSI/bidi
- * injection). Strips C0/C1 control characters (tab preserved), ANSI CSI
- * escape sequences, and bidirectional-override controls from every rendered
- * field so stored bytes cannot re-shape or forge the markdown output.
+ * injection). Strips C0/C1 control characters EXCEPT tab — including LF/CR,
+ * so stored multi-line commands cannot forge additional markdown lines —
+ * ANSI CSI escape sequences, bidirectional-override controls, and invisible
+ * zero-width/format characters from every rendered field so stored bytes
+ * cannot re-shape or forge the markdown output.
  */
 function sanitizeDisplayText(value: string): string {
 	return (
@@ -67,9 +73,9 @@ function sanitizeDisplayText(value: string): string {
 			// biome-ignore lint/suspicious/noControlCharactersInRegex: intentionally matching control chars to strip them
 			.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '') // ANSI CSI sequences
 			// biome-ignore lint/suspicious/noControlCharactersInRegex: intentionally matching control chars to strip them
-			.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '') // C0/C1 minus tab
+			.replace(/[\u0000-\u0008\u000a-\u001f\u007f-\u009f]/g, '') // C0/C1 minus tab (LF included — line forgery)
 			.replace(/[\u202a-\u202e\u2066-\u2069]/g, '') // bidi overrides / isolates
-			.replace(/\u200e|\u200f/g, '') // LRM / RLM marks
+			.replace(/[\u200e\u200f\u200b-\u200d\u2060-\u2064\ufeff]/g, '') // LRM/RLM + zero-width/format/BOM
 	);
 }
 
@@ -77,9 +83,14 @@ function formatEntry(entry: GuardrailLogEntry): string {
 	const decisionType = entry.type ?? 'shell';
 	const summary = redactSummary(entry);
 
-	const line = `- [${sanitizeDisplayText(entry.ts)}] ${sanitizeDisplayText(
+	let line = `- [${sanitizeDisplayText(entry.ts)}] ${sanitizeDisplayText(
 		decisionType,
 	)} | agent: ${sanitizeDisplayText(entry.agent)} | ${sanitizeDisplayText(summary)}`;
+	// Fingerprint suffix (issue #2040 requirement 5): the persisted hash
+	// correlates repeated/related decisions without repeating content.
+	if (entry.commandHash !== undefined) {
+		line += ` · fp:${sanitizeDisplayText(entry.commandHash)}`;
+	}
 	return line.length > MAX_RENDERED_LINE_CHARS
 		? `${line.slice(0, MAX_RENDERED_LINE_CHARS)}…`
 		: line;
@@ -129,6 +140,9 @@ function parseEntries(raw: string): GuardrailLogEntry[] {
 		if (typeof parsed.path === 'string') {
 			entry.path = parsed.path;
 		}
+		if (typeof parsed.commandHash === 'string') {
+			entry.commandHash = parsed.commandHash;
+		}
 
 		entries.push(entry);
 	}
@@ -166,6 +180,20 @@ export async function handleGuardrailLog(
 	const filtered = blocksOnly ? entries.filter(isBlockEntry) : entries;
 
 	if (filtered.length === 0) {
+		// Folded history can still contain matching decisions (review round
+		// RC-1): a store whose blocks were all compacted into the manifest must
+		// disclose them, not claim none were recorded. Consult the manifest
+		// whenever the FILTERED result is empty, not only when the window is.
+		const folded = getShellAuditFoldedSummary(directory);
+		if (blocksOnly && folded !== null) {
+			const foldedBlocks = [...BLOCK_TYPES].reduce(
+				(sum, type) => sum + (folded.byType[type] ?? 0),
+				0,
+			);
+			if (foldedBlocks > 0) {
+				return `No guardrail block decisions in the read window; ${foldedBlocks} earlier block decision(s) compacted into the audit manifest.`;
+			}
+		}
 		if (blocksOnly) {
 			return 'No guardrail block decisions recorded yet.';
 		}

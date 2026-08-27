@@ -15,11 +15,17 @@ import { readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { appendGuardrailDecision } from '../../../src/hooks/guardrails/audit-log';
+import {
+	appendGuardrailDecision,
+	redactDecisionLineForArchive,
+	redactEmbeddedPaths,
+} from '../../../src/hooks/guardrails/audit-log';
 import { redactShellCommand } from '../../../src/hooks/guardrails/helpers';
-import { shellAuditFilePath } from '../../../src/hooks/guardrails/shell-audit-store';
+import {
+	_resetMaintenanceCounters,
+	shellAuditFilePath,
+} from '../../../src/hooks/guardrails/shell-audit-store';
 import { handleGuardrailLog } from '../../../src/services/guardrail-log-service';
-import { _resetMaintenanceCounters } from '../../../src/hooks/guardrails/shell-audit-store';
 
 async function mkTempDir(): Promise<string> {
 	return mkdtemp(join(tmpdir(), 'shell-audit-redaction-test-'));
@@ -77,7 +83,8 @@ describe('redactShellCommand — adversarial secret fixtures (unit)', () => {
 	const cases: Array<{ name: string; command: string; secret: string }> = [
 		{
 			name: 'OpenAI-style token value',
-			command: 'curl https://api.openai.com/v1/x -H "x: sk-abcdefghijklmnopqrstuvwx" ',
+			command:
+				'curl https://api.openai.com/v1/x -H "x: sk-abcdefghijklmnopqrstuvwx" ',
 			secret: 'sk-abcdefghijklmnopqrstuvwx',
 		},
 		{
@@ -102,7 +109,8 @@ describe('redactShellCommand — adversarial secret fixtures (unit)', () => {
 		},
 		{
 			name: 'PowerShell $env: assignment (sensitive name)',
-			command: 'powershell -Command "$env:API_KEY = \'abc123secret\'; ./tool.ps1"',
+			command:
+				'powershell -Command "$env:API_KEY = \'abc123secret\'; ./tool.ps1"',
 			secret: 'abc123secret',
 		},
 		{
@@ -161,7 +169,9 @@ describe('redactShellCommand — no over-redaction guards', () => {
 	});
 
 	test('ordinary URLs survive', () => {
-		const out = redactShellCommand('pip install https://example.com/pkg-1.2.3.whl');
+		const out = redactShellCommand(
+			'pip install https://example.com/pkg-1.2.3.whl',
+		);
 		expect(out).toContain('https://example.com/pkg-1.2.3.whl');
 	});
 
@@ -172,7 +182,9 @@ describe('redactShellCommand — no over-redaction guards', () => {
 	});
 
 	test('non-sensitive PowerShell env assignments survive', () => {
-		const out = redactShellCommand('powershell -Command "$env:PATH = \'C:/tools\'"');
+		const out = redactShellCommand(
+			'powershell -Command "$env:PATH = \'C:/tools\'"',
+		);
 		expect(out).toContain('C:/tools');
 	});
 });
@@ -221,7 +233,10 @@ describe('write boundary — persisted lines never contain the fixtures', () => 
 		const lines = readFileSync(shellAuditFilePath(dir), 'utf-8')
 			.split('\n')
 			.filter((l) => l.trim().length > 0);
-		const decision = JSON.parse(lines[lines.length - 1]!) as Record<string, unknown>;
+		const decision = JSON.parse(lines[lines.length - 1]!) as Record<
+			string,
+			unknown
+		>;
 		expect(decision.commandHash).toMatch(/^[0-9a-f]{16}$/);
 		// The hash is of the redacted command — recompute from the stored value.
 		const { createHash } = await import('node:crypto');
@@ -246,7 +261,10 @@ describe('write boundary — persisted lines never contain the fixtures', () => 
 		const lines2 = readFileSync(shellAuditFilePath(dir), 'utf-8')
 			.split('\n')
 			.filter((l) => l.trim().length > 0);
-		const second = JSON.parse(lines2[lines2.length - 1]!) as Record<string, unknown>;
+		const second = JSON.parse(lines2[lines2.length - 1]!) as Record<
+			string,
+			unknown
+		>;
 		expect(second.commandHash).toBe(decision.commandHash);
 
 		await rm(dir, { recursive: true, force: true });
@@ -273,5 +291,122 @@ describe('render boundary — legacy records re-redact through the CURRENT polic
 		const out = await renderedLegacyCommand('cat /home/alice/notes.txt');
 		expect(out).not.toContain('/home/alice');
 		expect(out).toContain('~/notes.txt');
+	});
+});
+
+describe('review-round fixes — ReDoS bounded time (PRR-003)', () => {
+	test('adversarial 100 KB non-matching inputs redact in bounded time (was 7.6-14 s)', () => {
+		const cases = [
+			'a'.repeat(100_000), // lowercase-only run
+			'aB'.repeat(50_000), // alternating case, no digit
+		];
+		for (const input of cases) {
+			const t0 = performance.now();
+			const out = redactShellCommand(input);
+			const elapsed = performance.now() - t0;
+			// The pre-fix quadratic lookaheads took 7,600-14,200 ms on this
+			// class of input; the single-pass rewrite must stay two orders of
+			// magnitude under that.
+			expect(elapsed).toBeLessThan(2_000);
+			expect(out.length).toBeGreaterThan(0);
+		}
+	});
+});
+
+describe('review-round fixes — quoted multiword secrets (RC-gap2)', () => {
+	test('quoted POSIX env value is consumed through the closing quote', () => {
+		const out = redactShellCommand('deploy API_TOKEN="two words secret" tail');
+		expect(out).not.toContain('two');
+		expect(out).not.toContain('words');
+		expect(out).toBe('deploy API_TOKEN=[REDACTED] tail');
+	});
+
+	test('single-quoted PowerShell env value tail is redacted', () => {
+		const out = redactShellCommand(
+			'pwsh -c "$env:MY_API_TOKEN=\'sk-multi word tail\'"',
+		);
+		expect(out).not.toContain('sk-multi');
+		expect(out).toContain('[REDACTED]');
+	});
+});
+
+describe('review-round fixes — UNC paths in command strings (RC-gap3)', () => {
+	test('UNC profile material in a command is minimized', () => {
+		const unc = String.raw`robocopy \\server\share\bob\docs dest`;
+		const out = redactShellCommand(unc);
+		expect(out).not.toContain('server');
+		expect(out).not.toContain(String.raw`\bob`);
+		expect(out).toContain('~');
+	});
+});
+
+describe('review-round fixes — short GitHub PAT fragments (PRR-015b)', () => {
+	test('a 20+ char ghp_ fragment is redacted', () => {
+		const out = redactShellCommand(`echo ${'gh' + 'p_abc123def456ghi789jkl'}`);
+		expect(out).toContain('[REDACTED:github]');
+	});
+});
+
+describe('direct redactEmbeddedPaths coverage (MS-gap1)', () => {
+	test('embedded home paths in free text are rewritten to the tilde form', () => {
+		const out = redactEmbeddedPaths(
+			'WRITE BLOCKED: symlink at /home/alice/project/link and /Users/bob/x',
+		);
+		expect(out).not.toContain('/home/alice');
+		expect(out).not.toContain('/Users/bob');
+		expect(out).toContain('~/project/link');
+	});
+
+	test('text without profile paths is unchanged', () => {
+		const text = 'blocked by blockedGlobs: **/*.env';
+		expect(redactEmbeddedPaths(text)).toBe(text);
+	});
+});
+
+describe('archive-boundary re-redaction (F4 / RC-gap1)', () => {
+	test('redactDecisionLineForArchive normalizes a weakly-redacted legacy line', () => {
+		const legacy = JSON.stringify({
+			ts: '2026-01-01T00:00:00.000Z',
+			sessionID: 's',
+			agent: 'coder',
+			tool: 'bash',
+			command: 'curl https://alice:topsecret99@example.com/api',
+		});
+		const out = redactDecisionLineForArchive(legacy);
+		expect(out).not.toContain('topsecret99');
+		expect(out).toContain('[REDACTED]');
+		// Byte-identical passthrough when nothing changes.
+		const clean = JSON.stringify({
+			ts: 'x',
+			sessionID: 's',
+			agent: 'a',
+			tool: 't',
+		});
+		expect(redactDecisionLineForArchive(clean)).toBe(clean);
+	});
+
+	test('redactDecisionLineForArchive refreshes commandHash when the command changes', async () => {
+		const { createHash } = await import('node:crypto');
+		const line = JSON.stringify({
+			type: 'destructive_block',
+			ts: '2026-01-01T00:00:00.000Z',
+			sessionID: 's',
+			agent: 'coder',
+			tool: 'bash',
+			command: 'run --token=supersecret99 x',
+			commandHash: '0000000000000000',
+		});
+		const out = redactDecisionLineForArchive(line);
+		const parsed = JSON.parse(out) as { commandHash: string; command: string };
+		const expected = createHash('sha256')
+			.update(parsed.command, 'utf-8')
+			.digest('hex')
+			.slice(0, 16);
+		expect(parsed.commandHash).toBe(expected);
+		expect(parsed.commandHash).not.toBe('0000000000000000');
+	});
+
+	test('unparseable lines pass through unchanged (corrupt accounting owns them)', () => {
+		expect(redactDecisionLineForArchive('{{{not json')).toBe('{{{not json');
 	});
 });

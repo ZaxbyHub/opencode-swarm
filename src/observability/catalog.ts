@@ -2,7 +2,7 @@
  * The event catalog (issue #2029).
  *
  * Exactly 49 entries, matching the `TelemetryEvent` union at
- * `src/telemetry.ts:15-125`. Thirty-eight predate the #2029 contract; the 39th is
+ * `src/telemetry.ts:15-131`. Thirty-eight predate the #2029 contract; the 39th is
  * `agent_conflict_detected` (previously emitted through a force-cast past the
  * type system), the 40th is `close_archive_result` (issue #2030 — the
  * structured close/archive result event), the 41st is the bounded diagnostic

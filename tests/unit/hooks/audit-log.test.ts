@@ -17,7 +17,7 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -385,7 +385,10 @@ describe('appendGuardrailDecision', () => {
 
 		let threw = false;
 		try {
-			await appendGuardrailDecision(badEntry, { directory: dir, enabled: true });
+			await appendGuardrailDecision(badEntry, {
+				directory: dir,
+				enabled: true,
+			});
 		} catch {
 			threw = true;
 		}
@@ -545,6 +548,44 @@ describe('appendGuardrailDecision', () => {
 		const parsed = readDecisionLines(dir)[0]!;
 		expect(parsed.command).not.toContain('abc123xyz');
 		expect(parsed.command).toContain('[REDACTED]');
+
+		await rm(dir, { recursive: true, force: true });
+	});
+
+	// ---- MS-gap2: appending into a PRE-EXISTING legacy header-less store ----
+	test('append into a legacy header-less store keeps it readable in both forms', async () => {
+		const dir = await mkTempDir();
+		const legacy = JSON.stringify({
+			ts: '2026-01-01T00:00:00.000Z',
+			sessionID: 's',
+			agent: 'coder',
+			tool: 'bash',
+			command: 'echo legacy',
+		});
+		await mkdir(join(dir, '.swarm', 'session'), { recursive: true });
+		await writeFile(
+			storePath(dir),
+			`${legacy}
+`,
+			'utf-8',
+		);
+
+		await appendGuardrailDecision(
+			{
+				type: 'shell',
+				ts: '2026-01-01T00:00:01.000Z',
+				sessionID: 's',
+				agent: 'coder',
+				tool: 'bash',
+				command: 'echo new',
+			},
+			{ directory: dir, enabled: true },
+		);
+
+		const decisions = readDecisionLines(dir);
+		expect(decisions.length).toBe(2);
+		expect(decisions[0]!.command).toBe('echo legacy');
+		expect(decisions[1]!.command).toBe('echo new');
 
 		await rm(dir, { recursive: true, force: true });
 	});

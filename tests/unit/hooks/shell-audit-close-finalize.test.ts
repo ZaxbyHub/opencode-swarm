@@ -13,13 +13,13 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-	_internals as storeInternals,
 	_resetMaintenanceCounters,
 	compactShellAudit,
 	finalizeShellAuditForClose,
 	getShellAuditFoldedSummary,
 	readShellAuditTail,
 	shellAuditFilePath,
+	_internals as storeInternals,
 } from '../../../src/hooks/guardrails/shell-audit-store';
 
 const REAL_LIMITS = storeInternals.limits;
@@ -28,10 +28,7 @@ async function mkTempDir(): Promise<string> {
 	return mkdtemp(join(tmpdir(), 'shell-audit-close-test-'));
 }
 
-function writeLegacyStore(
-	dir: string,
-	lines: string[],
-): void {
+function writeLegacyStore(dir: string, lines: string[]): void {
 	const sessionDir = join(dir, '.swarm', 'session');
 	mkdirSync(sessionDir, { recursive: true });
 	writeFileSync(shellAuditFilePath(dir), lines.join(''), 'utf-8');
@@ -86,18 +83,20 @@ describe('finalizeShellAuditForClose — the archived cut', () => {
 			activeMaxBytes: 4_096,
 			securityMaxEntries: 5,
 		};
-		const lines = Array.from({ length: 60 }, (_, i) =>
-			`${JSON.stringify({
-				type: 'scope_violation',
-				ts: new Date().toISOString(),
-				sessionID: 's',
-				agent: 'coder',
-				tool: 'bash',
-				path: `/etc/x/${i}`,
-				declaredScope: '/project',
-				resolvedScope: '/etc',
-				action: 'write',
-			})}\n`,
+		const lines = Array.from(
+			{ length: 60 },
+			(_, i) =>
+				`${JSON.stringify({
+					type: 'scope_violation',
+					ts: new Date().toISOString(),
+					sessionID: 's',
+					agent: 'coder',
+					tool: 'bash',
+					path: `/etc/x/${i}`,
+					declaredScope: '/project',
+					resolvedScope: '/etc',
+					action: 'write',
+				})}\n`,
 		);
 		writeLegacyStore(dir, lines);
 
@@ -146,9 +145,9 @@ describe('finalizeShellAuditForClose — the archived cut', () => {
 
 		finalizeShellAuditForClose(dir);
 
-		expect(
-			existsSync(join(dir, '.swarm', 'session', 'shell-audit.lock')),
-		).toBe(false);
+		expect(existsSync(join(dir, '.swarm', 'session', 'shell-audit.lock'))).toBe(
+			false,
+		);
 
 		await rm(dir, { recursive: true, force: true });
 	});
@@ -157,15 +156,7 @@ describe('finalizeShellAuditForClose — the archived cut', () => {
 describe('close.ts ordering source-contract (issue #2040)', () => {
 	test('the shell-audit finalize runs BEFORE both archive loops (validated cut before copy)', () => {
 		const closeSource = readFileSync(
-			join(
-				import.meta.dir,
-				'..',
-				'..',
-				'..',
-				'src',
-				'commands',
-				'close.ts',
-			),
+			join(import.meta.dir, '..', '..', '..', 'src', 'commands', 'close.ts'),
 			'utf-8',
 		);
 		// The finalize-before-archive wiring must EXIST and be ORDERED ahead of
@@ -193,9 +184,8 @@ describe('close.ts seam delegation', () => {
 		const dir = await mkTempDir();
 		writeLegacyStore(dir, [legacyShell(1), legacyShell(2)]);
 
-		const closeInternals = (
-			await import('../../../src/commands/close.js')
-		)._internals;
+		const closeInternals = (await import('../../../src/commands/close.js'))
+			._internals;
 		closeInternals.finalizeShellAudit(dir);
 
 		const firstLine = readFileSync(shellAuditFilePath(dir), 'utf-8').split(
@@ -215,6 +205,49 @@ describe('compactShellAudit — external trigger parity', () => {
 		writeFileSync(shellAuditFilePath(dir), 'not-json-at-all\n', 'utf-8');
 
 		expect(() => compactShellAudit(dir)).not.toThrow();
+
+		await rm(dir, { recursive: true, force: true });
+	});
+});
+
+describe('review-round fixes — archive-boundary re-redaction (F4 / RC-gap1)', () => {
+	test('the close seam re-redacts a weakly-redacted legacy line in the archived cut', async () => {
+		const dir = await mkTempDir();
+		// Pre-#2040 legacy line: URL credentials the old writer never redacted.
+		writeLegacyStore(dir, [
+			`${JSON.stringify({
+				ts: new Date().toISOString(),
+				sessionID: 's',
+				agent: 'coder',
+				tool: 'bash',
+				command: 'curl https://alice:archivesecret7@example.com/api',
+			})}\n`,
+		]);
+
+		const closeInternals = (await import('../../../src/commands/close.js'))
+			._internals;
+		closeInternals.finalizeShellAudit(dir);
+
+		const raw = readFileSync(shellAuditFilePath(dir), 'utf-8');
+		const firstLine = raw.split('\n')[0]!;
+		expect(JSON.parse(firstLine).type).toBe('swarm-shell-audit-manifest');
+		// The archived cut re-redacts the legacy line — no archive bypass.
+		expect(raw).not.toContain('archivesecret7');
+		expect(raw).toContain('[REDACTED]');
+
+		await rm(dir, { recursive: true, force: true });
+	});
+
+	test('finalizeShellAuditForClose applies an explicit lineTransform under the lock', async () => {
+		const dir = await mkTempDir();
+		writeLegacyStore(dir, [legacyShell(1)]);
+
+		finalizeShellAuditForClose(dir, {
+			lineTransform: (line) => line.replace('echo 1', 'echo [transformed]'),
+		});
+
+		const raw = readFileSync(shellAuditFilePath(dir), 'utf-8');
+		expect(raw).toContain('echo [transformed]');
 
 		await rm(dir, { recursive: true, force: true });
 	});
