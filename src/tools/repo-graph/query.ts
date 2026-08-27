@@ -1,15 +1,20 @@
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
 	containsControlChars,
 	containsPathTraversal,
+	isCanonicalPathWithinRoot,
 } from '../../utils/path-security';
 import { isAssetEdge } from './builder';
 import type { FreshnessProbe } from './freshness';
 import type {
 	BlastRadiusResult,
 	CallerReference,
+	ContextPackCoverage,
 	ContextPackResult,
+	ContextPackSnippet,
+	ContextPackSourceMode,
 	ContextPackSpan,
 	DeadExportCandidate,
 	DeadExportsResult,
@@ -700,6 +705,71 @@ export function getLocalizationContext(
 	};
 }
 
+// Deterministic source-text token estimate. Same formula as
+// estimateTokens in src/services/context-budget-service.ts; kept local so the
+// query layer does not inherit the service module's dependency web.
+function estimateTextTokens(text: string): number {
+	return Math.ceil(text.length / 3.5);
+}
+
+// Signature extraction (issue #1533). Deterministic, language-agnostic:
+// skip up to 3 leading decorator lines (`@…` — Python decorated_definition
+// ranges start at the first decorator; TS decorators are already excluded by
+// the AST), then scan at most 3 lines stopping at the first trimmed line
+// ending `{` or `:` (TS-family opening brace, Python def/class colon). With
+// no terminator in the window (Ruby `def foo(x)`), emit only the first
+// non-decorator line. Total scan bounded at 6 lines from startLine.
+function extractSignatureText(lines: string[], startLine: number): string {
+	let idx = Math.max(0, startLine - 1);
+	if (idx >= lines.length) return '';
+	let skipped = 0;
+	while (
+		idx < lines.length &&
+		skipped < 3 &&
+		lines[idx]!.trim().startsWith('@')
+	) {
+		idx++;
+		skipped++;
+	}
+	if (idx >= lines.length) return '';
+	let last = idx;
+	let found = false;
+	for (let i = 0; i < 3 && idx + i < lines.length; i++) {
+		const line = lines[idx + i]!.trim();
+		if (line.endsWith('{') || line.endsWith(':')) {
+			last = idx + i;
+			found = true;
+			break;
+		}
+	}
+	// No terminator in the window (Ruby `def foo(x)`): emit only the first
+	// non-decorator line rather than dragging body lines into the signature.
+	if (!found) return lines[idx]!;
+	return lines.slice(idx, last + 1).join('\n');
+}
+
+const EMPTY_COVERAGE: ContextPackCoverage = {
+	reachedSymbols: 0,
+	returnedSymbols: 0,
+	omittedByBudget: 0,
+	unresolvedEdges: 0,
+	lowConfidenceEdges: 0,
+};
+
+const MAX_DETAIL_WARNINGS = 5;
+
+function boundedDetails(details: string[], label: string): string[] {
+	const out = details
+		.slice(0, MAX_DETAIL_WARNINGS)
+		.map((d) => `${label} for ${d}`);
+	if (details.length > MAX_DETAIL_WARNINGS) {
+		out.push(
+			`... and ${details.length - MAX_DETAIL_WARNINGS} more ${label} cases`,
+		);
+	}
+	return out;
+}
+
 export function getContextPack(
 	graph: RepoGraph,
 	file: string,
@@ -708,6 +778,7 @@ export function getContextPack(
 		maxDepth?: number;
 		maxTokens?: number;
 		includeSource?: boolean;
+		sourceMode?: ContextPackSourceMode;
 		directory?: string;
 	} = {},
 ): ContextPackResult {
@@ -719,6 +790,10 @@ export function getContextPack(
 			truncated: false,
 			estimatedTokens: 0,
 			note: 'rebuild with repo_map action="build"',
+			coverage: { ...EMPTY_COVERAGE },
+			warnings: [
+				'graph schema 1.2.0+ required for context packs; rebuild with repo_map action="build"',
+			],
 		};
 	}
 
@@ -739,6 +814,8 @@ export function getContextPack(
 			truncated: false,
 			estimatedTokens: 0,
 			note: 'Target file not found in graph',
+			coverage: { ...EMPTY_COVERAGE },
+			warnings: [],
 		};
 	}
 	const targetFile = normalizeGraphPath(targetNode.filePath);
@@ -768,6 +845,30 @@ export function getContextPack(
 	visited.set(targetKey, 0);
 	const reached: { file: string; symbol: string; depth: number }[] = [];
 
+	// Edge-resolution telemetry (issue #1533). Symbol-keyed (`file\0symbol`),
+	// collected at first discovery so duplicate edges toward the same
+	// destination count once. `lowConfidence` uses the same predicate as the
+	// internal-symbol span fallback below, so coverage and spans agree.
+	const unresolved = new Set<string>();
+	const lowConfidence = new Set<string>();
+	const enqueue = (nextFile: string, nextSymbol: string, nextDepth: number) => {
+		const nextKey = `${nextFile}\0${nextSymbol}`;
+		if (visited.has(nextKey)) return;
+		visited.set(nextKey, nextDepth);
+		queue.push({ key: nextKey, depth: nextDepth });
+		const node = graph.nodes[nextFile];
+		if (!node) {
+			unresolved.add(nextKey);
+			return;
+		}
+		const ranges = node.exportRanges;
+		const hasRange =
+			ranges !== undefined &&
+			Object.hasOwn(ranges, nextSymbol) &&
+			ranges[nextSymbol];
+		if (!hasRange) lowConfidence.add(nextKey);
+	};
+
 	let queueHead = 0;
 	while (queueHead < queue.length) {
 		const { key, depth } = queue[queueHead]!;
@@ -780,21 +881,13 @@ export function getContextPack(
 		// Forward: follow edges where this symbol is the source (callees).
 		const outEdges = forward.get(key) ?? [];
 		for (const edge of outEdges) {
-			const nextKey = `${normalizeGraphPath(edge.toFile)}\0${edge.toSymbol}`;
-			if (!visited.has(nextKey)) {
-				visited.set(nextKey, depth + 1);
-				queue.push({ key: nextKey, depth: depth + 1 });
-			}
+			enqueue(normalizeGraphPath(edge.toFile), edge.toSymbol, depth + 1);
 		}
 
 		// Reverse: follow edges where this symbol is the target (callers).
 		const inEdges = reverse.get(key) ?? [];
 		for (const edge of inEdges) {
-			const nextKey = `${normalizeGraphPath(edge.fromFile)}\0${edge.fromSymbol}`;
-			if (!visited.has(nextKey)) {
-				visited.set(nextKey, depth + 1);
-				queue.push({ key: nextKey, depth: depth + 1 });
-			}
+			enqueue(normalizeGraphPath(edge.fromFile), edge.fromSymbol, depth + 1);
 		}
 	}
 
@@ -865,13 +958,35 @@ export function getContextPack(
 	});
 
 	const includeSource = options.includeSource ?? false;
+	const sourceMode: ContextPackSourceMode = options.sourceMode ?? 'mixed';
 	const directory = options.directory ?? graph.workspaceRoot;
+	const resolvedDir = path.resolve(directory);
 	const MAX_SOURCE_LINES = 80;
 
-	// Apply token budget; keep at least the target span if present.
+	const displayPath = (p: string): string => {
+		if (!path.isAbsolute(p)) return p.replace(/\\/g, '/');
+		try {
+			return path.relative(resolvedDir, p).replace(/\\/g, '/') || p;
+		} catch {
+			return p;
+		}
+	};
+
+	// Apply token budget; keep at least the target span if present. Packing is
+	// deterministic: spans are greedily admitted in the sorted relevance order
+	// above, so the same graph + options always produce the same spans. With
+	// include_source the per-span cost is the char-based estimate of the
+	// extracted text (issue #1533: budget over source text, not line counts);
+	// span-only mode keeps the line-based heuristic.
 	let estimatedTokens = 0;
 	const finalSpans: ContextPackSpan[] = [];
 	let truncated = false;
+	const readFailures: string[] = [];
+	const outsideWorkspace: string[] = [];
+	const snippetKinds = new Map<
+		ContextPackSpan,
+		'full' | 'signature' | 'summary'
+	>();
 
 	for (const { span } of spansWithDepth) {
 		let spanTokens =
@@ -884,30 +999,47 @@ export function getContextPack(
 			break;
 		}
 
-		if (includeSource && !span.note && span.mode === 'full') {
+		if (includeSource && !span.note) {
 			const absPath = path.isAbsolute(span.file)
 				? span.file
-				: path.resolve(directory, span.file);
+				: path.resolve(resolvedDir, span.file);
 			const resolved = path.resolve(absPath);
-			const resolvedDir = path.resolve(directory);
-			if (
-				resolved.startsWith(resolvedDir + path.sep) ||
-				resolved === resolvedDir
-			) {
+			// Canonical containment (both sides realpath'd, nearest-existing
+			// ancestor walk): a missing file inside the workspace still passes
+			// here and then fails the read below; a symlink/junction escape or
+			// an out-of-workspace span.file fails closed.
+			if (!isCanonicalPathWithinRoot(resolved, resolvedDir)) {
+				span.note = 'source outside workspace';
+				outsideWorkspace.push(`${displayPath(span.file)}:${span.symbol}`);
+			} else {
 				try {
 					const content = fs.readFileSync(resolved, 'utf-8');
 					const lines = content.split('\n');
 					const start = Math.max(0, span.startLine - 1);
-					const end = Math.min(
-						lines.length,
-						span.startLine - 1 + MAX_SOURCE_LINES,
-						span.endLine,
-					);
-					const slice = lines.slice(start, end);
-					span.text = slice.join('\n');
-					spanTokens = slice.length * TOKENS_PER_LINE;
+					const wantSignature =
+						sourceMode === 'signature' ||
+						(sourceMode === 'mixed' && span.mode === 'signature');
+					if (wantSignature) {
+						span.text = extractSignatureText(lines, span.startLine);
+						snippetKinds.set(span, 'signature');
+					} else {
+						const rangeLength = span.endLine - span.startLine + 1;
+						const end = Math.min(
+							lines.length,
+							start + MAX_SOURCE_LINES,
+							span.endLine,
+						);
+						const slice = lines.slice(start, end);
+						span.text = slice.join('\n');
+						const capped =
+							rangeLength > MAX_SOURCE_LINES &&
+							end === start + MAX_SOURCE_LINES;
+						snippetKinds.set(span, capped ? 'summary' : 'full');
+					}
+					spanTokens = estimateTextTokens(span.text ?? '');
 				} catch {
 					span.note = 'source read failed';
+					readFailures.push(`${displayPath(span.file)}:${span.symbol}`);
 				}
 			}
 		}
@@ -916,16 +1048,79 @@ export function getContextPack(
 		estimatedTokens += spanTokens;
 	}
 
+	// Snippets: one per returned span with non-empty extracted text. Spans
+	// whose read failed, fell outside the workspace, or lack an export range
+	// produce no snippet (their state is visible via span.note + warnings).
+	const snippets: ContextPackSnippet[] = [];
+	if (includeSource) {
+		for (const span of finalSpans) {
+			if (span.text === undefined || span.text.length === 0) continue;
+			const kind = snippetKinds.get(span) ?? 'full';
+			snippets.push({
+				file: span.file,
+				symbol: span.symbol,
+				startLine: span.startLine,
+				endLine: span.endLine,
+				mode: kind,
+				text: span.text,
+				hash: createHash('sha256').update(span.text).digest('hex'),
+				// Resolution-quality score (not language grammar quality):
+				// the exact target is a 1.0; resolved neighbors are 0.8. Real
+				// edge confidence arrives with KG-11 (issue #1532).
+				confidence:
+					span.file === targetFile && span.symbol === symbol ? 1.0 : 0.8,
+			});
+		}
+	}
+
+	const coverage: ContextPackCoverage = {
+		reachedSymbols: reached.length,
+		returnedSymbols: finalSpans.length,
+		omittedByBudget: Math.max(0, reached.length - finalSpans.length),
+		unresolvedEdges: unresolved.size,
+		lowConfidenceEdges: lowConfidence.size,
+	};
+
+	const rawWarnings: string[] = [];
+	if (truncated && coverage.omittedByBudget > 0) {
+		rawWarnings.push(
+			`${coverage.omittedByBudget} span(s) omitted by token budget (max_tokens=${maxTokens}); spans are ordered target → depth → file → symbol, so the most relevant context was kept`,
+		);
+	}
+	if (estimatedTokens > maxTokens) {
+		rawWarnings.push(
+			`returned pack exceeds max_tokens (${estimatedTokens} > ${maxTokens}); the target span is always included`,
+		);
+	}
+	if (unresolved.size > 0) {
+		rawWarnings.push(
+			`${unresolved.size} symbol-edge destination(s) not present in the graph (unresolved)`,
+		);
+	}
+	if (lowConfidence.size > 0) {
+		rawWarnings.push(
+			`${lowConfidence.size} symbol-edge destination(s) lack an export range (low confidence)`,
+		);
+	}
+	rawWarnings.push(...boundedDetails(readFailures, 'source read failed'));
+	rawWarnings.push(
+		...boundedDetails(outsideWorkspace, 'source outside workspace'),
+	);
+	const warnings = [...new Set(rawWarnings)];
+
 	const result: ContextPackResult = {
 		schemaSupported: true,
 		target: { file: targetFile, symbol },
 		spans: finalSpans,
 		truncated,
 		estimatedTokens,
+		coverage,
+		warnings,
 	};
 
 	if (includeSource) {
 		result.sourceIncluded = true;
+		result.snippets = snippets;
 	}
 
 	return result;

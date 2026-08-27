@@ -358,6 +358,67 @@ export interface ContextPackSpan {
 }
 
 /**
+ * Source-text extraction mode for source-bearing context packs (issue #1533).
+ * `include_source` remains the sole gate; `source_mode` only refines what is
+ * extracted once source was requested.
+ *
+ * - `mixed` (default): body text for near spans (span mode 'full'), signature
+ *   text for periphery spans (span mode 'signature').
+ * - `body`: body text for every span with an export range.
+ * - `signature`: signature text for every span with an export range.
+ */
+export type ContextPackSourceMode = 'signature' | 'body' | 'mixed';
+
+/**
+ * A bounded source snippet with provenance (issue #1533). Emitted one per
+ * returned span that actually had text extracted; internal-symbol fallback
+ * spans produce no snippet.
+ *
+ * `mode` describes the returned text, independent of the owning span's
+ * traversal mode: 'full' = whole range text; 'signature' = signature-only
+ * extraction; 'summary' = body text line-capped at 80 lines.
+ *
+ * `hash` is the sha256 hex of the returned `text` — a content fingerprint.
+ * It is stable for a given source mode and file content; summary-mode hashes
+ * are cap-dependent by design because the text itself is truncated.
+ *
+ * `confidence` is a deterministic resolution-quality score in [0, 1]:
+ * 1.0 = the exact requested target symbol, 0.8 = a resolved neighbor with
+ * extracted text. Spans whose read failed or which lack an export range
+ * produce no snippet at all (their state surfaces via span.note, coverage,
+ * and warnings). It is NOT language grammar quality; issue #1532 (KG-11
+ * SymbolEdge v2) will replace this derivation with real edge confidence.
+ */
+export interface ContextPackSnippet {
+	file: string;
+	symbol: string;
+	startLine: number;
+	endLine: number;
+	mode: 'full' | 'signature' | 'summary';
+	text: string;
+	hash: string;
+	confidence: number;
+}
+
+/**
+ * Coverage accounting for a context pack (issue #1533).
+ *
+ * `unresolvedEdges` and `lowConfidenceEdges` count distinct destination
+ * SYMBOLS (keyed `file\0symbol`, collected at BFS first discovery), not edge
+ * instances — duplicate edges toward the same unresolved symbol count once.
+ * `lowConfidenceEdges` uses exactly the same predicate as the internal-symbol
+ * span fallback (destination file present, no own-property export range for
+ * the symbol), so coverage and spans can never disagree.
+ */
+export interface ContextPackCoverage {
+	reachedSymbols: number;
+	returnedSymbols: number;
+	omittedByBudget: number;
+	unresolvedEdges: number;
+	lowConfidenceEdges: number;
+}
+
+/**
  * Result of a context-pack query: the set of spans needed to understand
  * how a target symbol is used across the workspace.
  */
@@ -376,6 +437,12 @@ export interface ContextPackResult {
 	note?: string;
 	/** Whether source text was embedded in spans (only present when include_source was requested). */
 	sourceIncluded?: boolean;
+	/** Source snippets with provenance; only present when include_source was requested. */
+	snippets?: ContextPackSnippet[];
+	/** Reach/omission and edge-resolution accounting; present on every result. */
+	coverage?: ContextPackCoverage;
+	/** Bounded, deduplicated non-fatal warnings (budget omissions, read failures, containment). */
+	warnings?: string[];
 }
 
 export interface AskHit {

@@ -98,6 +98,8 @@ interface RepoMapArgs {
 	max_depth?: number;
 	question?: string;
 	include_source?: boolean;
+	max_tokens?: number;
+	source_mode?: 'signature' | 'body' | 'mixed';
 }
 
 function validateFile(p: string): string | null {
@@ -308,7 +310,22 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			.boolean()
 			.optional()
 			.describe(
-				'For action="context_pack": embed source text in spans (default false).',
+				'For action="context_pack": embed source text in spans and return snippet objects (default false).',
+			),
+		max_tokens: z
+			.number()
+			.int()
+			.min(1)
+			.max(100000)
+			.optional()
+			.describe(
+				'For action="context_pack": approximate token budget for the returned pack (default 4000). Packing is deterministic: spans are greedily admitted in relevance order (target → depth → file → symbol); the target span is always included even if it alone exceeds the budget. With include_source the budget is measured over the extracted source text.',
+			),
+		source_mode: z
+			.enum(['signature', 'body', 'mixed'])
+			.optional()
+			.describe(
+				'For action="context_pack" with include_source=true: "mixed" (default) embeds body text for near spans and signatures for the periphery; "body" embeds full range text for every span; "signature" embeds signatures only. Ignored (with a warning) when include_source is not true.',
 			),
 	},
 	async execute(
@@ -598,8 +615,9 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			if (sErr) return err(action, `invalid symbol: ${sErr}`);
 			const raw = getContextPack(graph, target, a.symbol, {
 				maxDepth: a.max_depth ?? 2,
-				maxTokens: 4000,
+				maxTokens: a.max_tokens ?? 4000,
 				includeSource: a.include_source ?? false,
+				sourceMode: a.source_mode,
 				directory,
 			});
 			// Normalize absolute paths to workspace-relative (Phase 4 SME caveat).
@@ -626,6 +644,43 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				a.top_n !== undefined
 					? normalizedSpans.slice(0, a.top_n)
 					: normalizedSpans;
+			// Coverage must reflect the FINAL response: top_n slicing happens
+			// here, after the query-layer token budget already shaped the spans.
+			const topNDropped = normalizedSpans.length - cappedSpans.length;
+			const coverage = raw.coverage
+				? {
+						...raw.coverage,
+						returnedSymbols: cappedSpans.length,
+						omittedByBudget:
+							raw.coverage.omittedByBudget + Math.max(0, topNDropped),
+					}
+				: undefined;
+			// Bounded, deduplicated query-layer warnings + handler-level ones.
+			const warnings = [...(raw.warnings ?? [])];
+			if (
+				a.source_mode !== undefined &&
+				a.include_source !== true &&
+				!warnings.includes('source_mode ignored: include_source is not true')
+			) {
+				warnings.push('source_mode ignored: include_source is not true');
+			}
+			if (freshnessNote && !warnings.includes(freshnessNote)) {
+				warnings.push(freshnessNote);
+			}
+			// Snippets mirror the returned spans exactly: the top_n slice that
+			// shaped `cappedSpans` must also bound `snippets`, or the response
+			// would carry source text for symbols that were dropped.
+			const returnedKeys = new Set(
+				cappedSpans.map((s) => `${s.file}\0${s.symbol}`),
+			);
+			const normalizedSnippets = raw.snippets
+				? raw.snippets
+						.map((s) => ({ ...s, file: toRel(s.file) }))
+						.filter(
+							(s) =>
+								s.file.length > 0 && returnedKeys.has(`${s.file}\0${s.symbol}`),
+						)
+				: undefined;
 			return ok(action, {
 				target: normalizedTarget,
 				spans: cappedSpans,
@@ -639,6 +694,9 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				schemaSupported: raw.schemaSupported,
 				...(raw.note ? { note: raw.note } : {}),
 				...(raw.sourceIncluded ? { sourceIncluded: true } : {}),
+				...(normalizedSnippets ? { snippets: normalizedSnippets } : {}),
+				...(coverage ? { coverage } : {}),
+				warnings,
 			});
 		}
 
