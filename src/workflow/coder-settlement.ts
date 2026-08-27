@@ -719,7 +719,19 @@ async function cleanupRecoveredWorktree(
 	const { removeWorktreeProvisioningOwner } = await import(
 		'../hooks/delegation-gate/worktree-provisioning-owner.js'
 	);
-	if (!removeWorktreeProvisioningOwner(directory, descriptor.callID)) {
+	if (
+		!removeWorktreeProvisioningOwner(
+			directory,
+			descriptor.callID,
+			descriptor.reservationId && descriptor.generation
+				? {
+						reservationId: descriptor.reservationId,
+						generation: descriptor.generation,
+						branchName: descriptor.branchName,
+					}
+				: undefined,
+		)
+	) {
 		throw new Error('CODER_SETTLEMENT_OWNER_CLEANUP_FAILED');
 	}
 }

@@ -200,7 +200,7 @@ describe('precreate durable collision protection', () => {
 		_internals.recordWorktreeProvisioningOwner = mock((_directory, owner) => {
 			events.push('record-owner');
 			ownerInputs.push(owner);
-			return { schemaVersion: 2, ...owner, createdAt: 1 };
+			return { schemaVersion: 3, ...owner, createdAt: 1 };
 		}) as never;
 		_internals.provisionWorktree = mock(async () => {
 			events.push('provision');
@@ -236,6 +236,9 @@ describe('precreate durable collision protection', () => {
 				parentSessionId: parentSessionID,
 				worktreeSessionId: parentSessionID,
 				taskId,
+				reservationId: 'foreground:parent-1:task-1:call-1',
+				generation: 1,
+				branchName,
 			},
 		]);
 		expect(dispatchArgs.outputArgs.prompt).toContain(

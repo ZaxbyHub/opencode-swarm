@@ -403,15 +403,16 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/pr-workflow-gate.ts',
 		],
 		writerCitations: [
-			'src/background/pending-delegations.ts:2244 appendRecord — appendFileSync :2249 (16 mutation entry points :2396-4035)',
-			'src/background/pending-delegations.ts:994 writeDurableFileSync — fsync+rename-with-retry for checkpoint/manifest/rolled-tail (:2049-2090)',
+			'src/background/pending-delegations.ts:2248 appendRecord — appendFileSync :2253 (16 mutation entry points :2400-4039)',
+			'src/background/pending-delegations.ts:998 writeDurableFileSync — fsync+rename-with-retry for checkpoint/manifest/rolled-tail (:2053-2094)',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:2187 readDelegations — checkpoint+tail fold (lenient), sync',
-			'src/background/pending-delegations.ts:2208 scanDelegationsForRecovery — strict, fails closed',
+			'src/background/pending-delegations.ts:2191 readDelegations — checkpoint+tail fold (lenient), sync',
+			'src/background/pending-delegations.ts:2212 scanDelegationsForRecovery — strict, fails closed',
 			'pr-workflow-session-resolver / pr-workflow-gate / init-orphan-recovery / delegation-gate worktree-collision-ownership — via readDelegations',
 		],
-		schemaVersion: 'RecordSchema schemaVersion 1|2|3; checkpoint/manifest literal 1 (:888,:909,:919)',
+		schemaVersion:
+			'RecordSchema schemaVersion 1|2|3; checkpoint/manifest literal 1 (:892,:913,:923)',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
 		writeLimits: {
@@ -423,13 +424,15 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			pattern: 'indexed (checkpoint+tail) with full-fold fallback',
 			bound: 'legacy/tail reads hard-bounded at 4 MiB (MAX_RECOVERY_LEDGER_BYTES)',
 			sync: true,
-			citation: 'src/background/pending-delegations.ts:82-87,1417',
+			citation: 'src/background/pending-delegations.ts:82-87,1421',
 		},
 		lockModel: 'withEvidenceLock agent=background on every mutation (:134-137); reads lock-free',
-		crashBehavior: 'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1158-1170)',
+		crashBehavior:
+			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1162-1174)',
 		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (close.ts:422-424); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, close.ts:417-425 docblock)',
 		resetPolicy: 'reset/reset-session do not delete',
-		legacyCompatibility: 'loadLegacyLedger pre-checkpoint fold (:1417); mixed-version lines safeParse individually',
+		legacyCompatibility:
+			'loadLegacyLedger pre-checkpoint fold (:1421); mixed-version lines safeParse individually',
 		healthSignal: 'delegation-health artifact + #2034 recovery observations',
 		owner: '#2034 (merged)',
 		disposition: {
@@ -2277,30 +2280,49 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 	{
 		id: 'worktree-status-owners',
 		category: 8,
-		pathGrammar: '.swarm/worktree-merge-status.json + .swarm/worktree-provisioning-owners/{sha256}.json',
+		pathGrammar:
+			'.swarm/worktree-merge-status.json + .swarm/worktree-provisioning-owners/{sha256}.json + .swarm/worktree-provisioning-lifecycle.json + .swarm/worktree-merge-recovery-v2.json + .swarm/worktree-merge-recovery-v2-journal.json + .swarm/worktree-recovery-claims/{sha256}.json',
 		canonicalRoot: 'project-swarm',
-		writerModules: ['src/hooks/delegation-gate/worktree-merge-status.ts', 'src/hooks/delegation-gate/worktree-provisioning-owner.ts'],
+		writerModules: [
+			'src/hooks/delegation-gate/worktree-merge-status.ts',
+			'src/hooks/delegation-gate/worktree-provisioning-owner.ts',
+			'src/hooks/delegation-gate/worktree-recovery-authority.ts',
+		],
 		writerCitations: [
 			'src/hooks/delegation-gate/worktree-merge-status.ts:259 recordWorktreeMergeFailure / :273 clearWorktreeMergeStatus — in-memory authority + atomic durable save (:103-125)',
-			'src/hooks/delegation-gate/worktree-provisioning-owner.ts:83 recordWorktreeProvisioningOwner / :119 remove — atomic per-file',
+			'src/hooks/delegation-gate/worktree-provisioning-owner.ts recordWorktreeProvisioningOwner/removeWorktreeProvisioningOwner — atomic per-owner files plus bounded lifecycle journal',
+			'src/hooks/delegation-gate/worktree-recovery-authority.ts publish/claim/renew/release/finalize/replay — atomic authority, journal, and credential writes under one cross-process lock',
 		],
 		readerCitations: [
 			'worktree-merge-status.ts:166 scanWorktreeMergeFailuresForRecovery — bounded 2 MiB / 512 entries (:59-60)',
-			'worktree-provisioning-owner.ts:135 scanWorktreeProvisioningOwnersForRecovery — ≤512 files / 16 KiB per file (:7-8), fail-closed uncertain',
+			'worktree-provisioning-owner.ts scanWorktreeProvisioningOwnersForRecovery/scanWorktreeProvisioningLifecycleJournalForRecovery — ≤512 files / 16 KiB per file plus ≤256 KiB / 512-entry journal, fail-closed uncertain',
+			'worktree-recovery-authority.ts bounded store/journal/credential readers and recovery scans — ≤2 MiB / 512 authority or journal entries and ≤16 KiB per credential',
 		],
-		schemaVersion: 'typed records',
+		schemaVersion: 'typed merge records; provisioning owners v1-v3/journal v1; recovery authority store v2/journal+credential v1',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
-		writeLimits: { bound: 'merge-status ≤2 MiB / ≤512 entries; owners ≤512 files / ≤16 KiB each', scope: 'global', citation: 'worktree-merge-status.ts:59-60; worktree-provisioning-owner.ts:7-8' },
+		writeLimits: {
+			bound:
+				'merge-status ≤2 MiB / ≤512 entries; owners ≤512 files / ≤16 KiB each; provisioning journal ≤256 KiB / 512 entries; recovery authority store+journal ≤2 MiB / 512 entries each; credentials ≤512 files / ≤16 KiB each',
+			scope: 'global',
+			citation:
+				'worktree-merge-status.ts bounds; worktree-provisioning-owner.ts MAX_* constants; worktree-recovery-authority.ts MAX_* constants',
+		},
 		readBound: { pattern: 'directory-scan', bound: 'hard scan caps above', sync: true, citation: 'scan functions cited' },
-		lockModel: 'in-memory maps + unique-suffix atomic writes (no cross-process lock; races benign)',
-		crashBehavior: 'fail-open load (corrupt → empty map); fail-open save (in-memory still authoritative)',
+		lockModel:
+			'merge-status retains its legacy in-memory/atomic model; provisioning mutations hold the shared lifecycle lock at callers; all recovery-authority mutations use one stale-bounded cross-process lock',
+		crashBehavior:
+			'strict recovery scans fail closed; claim/provisioning journals replay bounded interrupted transitions; terminal recovery state repairs the store-write/journal-append crash window',
 		closePolicy: 'untouched (cross-session recovery state)',
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'n/a',
 		healthSignal: 'recovery scan results',
 		owner: 'this-gate',
-		disposition: { kind: 'not-a-defect', proof: 'Hard byte/entry/file caps on both stores with fail-closed recovery scans (worktree-merge-status.ts:59-60; worktree-provisioning-owner.ts:7-8).' },
+		disposition: {
+			kind: 'not-a-defect',
+			proof:
+				'Hard byte/entry/file caps on every store, bounded journals, exact teardown, and fail-closed recovery scans prevent unbounded retention or unsafe omission.',
+		},
 	},
 	{
 		id: 'worktree-lane-profiles',

@@ -32,6 +32,8 @@ export type {
 	DirtyMergeFailure,
 	DirtyMergePartial,
 	DirtyMergeSuccess,
+	ImmutableMergeRecoveryCoordinates,
+	ImmutableMergeRecoveryResult,
 	MergeConflict,
 	MergeFailure,
 	MergeSuccess,
@@ -47,6 +49,7 @@ export {
 	mergeLaneBranch,
 	postMergeCleanup,
 	pruneStaleWorktreeMetadata,
+	recoverMergeBackFromImmutableCoordinates,
 	scanRegisteredWorktreeLiveness,
 	startupOrphanRecovery,
 } from './merge';

@@ -13,6 +13,13 @@ import {
 	initDurableStatusPath,
 	type WorktreeMergeFailure,
 } from '../hooks/delegation-gate/worktree-merge-status';
+import {
+	scanWorktreeRecoveryAuthoritiesForRecovery,
+	type WorktreeRecoveryAuthorityRecord,
+	type WorktreeRecoveryClaimState,
+	type WorktreeRecoveryStatus,
+	type WorktreeRecoveryStrategy,
+} from '../hooks/delegation-gate/worktree-recovery-authority';
 
 /**
  * Lane record shape for machine-parseable output (--json).
@@ -27,13 +34,147 @@ export interface LaneRecord {
 	parentSessionID: string;
 	mergeStrategy: 'merge' | 'rebase' | 'cherry-pick';
 	mergeOutcome?: WorktreeMergeFailure;
+	recovery?: LaneRecoveryView;
+	manualRecoveryHint?: string;
 	recoveryHint: string;
+}
+
+export interface LaneRecoveryView {
+	authorityStatus: WorktreeRecoveryStatus | 'unsupported-legacy' | 'uncertain';
+	generation?: number;
+	originalCallID?: string;
+	parentSessionId?: string;
+	reservationId?: string;
+	canonicalBranch?: string;
+	canonicalPath?: string;
+	laneBranch?: string;
+	lanePath?: string;
+	strategy?: WorktreeRecoveryStrategy;
+	claim?: LaneRecoveryClaimView;
+	redispatchStatus:
+		| 'available'
+		| 'claimed'
+		| 'manual-only'
+		| 'unsupported-legacy'
+		| 'uncertain';
+}
+
+export interface LaneRecoveryClaimView {
+	claimantCallID: string;
+	claimantSessionId: string;
+	childSessionId: string;
+	claimRevision: number;
+	attempt: number;
+	leaseState: 'claimed';
+}
+
+function renderRecoveryIdentity(recovery: LaneRecoveryView): string {
+	const parts = [`status=${recovery.authorityStatus}`];
+	if (recovery.generation !== undefined) {
+		parts.unshift(`generation=${recovery.generation}`);
+	}
+	if (recovery.parentSessionId) {
+		parts.push(`parentSession=${recovery.parentSessionId}`);
+	}
+	if (recovery.originalCallID) {
+		parts.push(`originalCall=${recovery.originalCallID}`);
+	}
+	if (recovery.reservationId) {
+		parts.push(`reservation=${recovery.reservationId}`);
+	}
+	if (recovery.strategy) {
+		parts.push(`strategy=${recovery.strategy}`);
+	}
+	return parts.join(' ');
+}
+
+function toClaimView(claim: WorktreeRecoveryClaimState): LaneRecoveryClaimView {
+	return {
+		claimantCallID: claim.claimantCallID,
+		claimantSessionId: claim.claimantSessionId,
+		childSessionId: claim.childSessionId,
+		claimRevision: claim.claimRevision,
+		attempt: claim.attempt,
+		leaseState: 'claimed',
+	};
+}
+
+function selectRecoveryAuthority(
+	authorities: WorktreeRecoveryAuthorityRecord[],
+	taskId: string,
+	failure: WorktreeMergeFailure,
+): WorktreeRecoveryAuthorityRecord | undefined {
+	const taskMatches = authorities.filter(
+		(authority) => authority.immutable.taskId === taskId,
+	);
+	if (taskMatches.length === 0) return undefined;
+
+	let narrowed = taskMatches;
+	if (failure.branch) {
+		const branchMatches = narrowed.filter(
+			(authority) => authority.immutable.laneBranch === failure.branch,
+		);
+		if (branchMatches.length > 0) narrowed = branchMatches;
+	}
+	if (failure.worktreePath) {
+		const pathMatches = narrowed.filter(
+			(authority) => authority.immutable.lanePath === failure.worktreePath,
+		);
+		if (pathMatches.length > 0) narrowed = pathMatches;
+	}
+
+	return [...narrowed].sort(
+		(left, right) =>
+			right.immutable.generation - left.immutable.generation ||
+			right.immutable.createdAt - left.immutable.createdAt,
+	)[0];
+}
+
+function buildRecoveryView(
+	directory: string,
+	taskId: string,
+	failure: WorktreeMergeFailure,
+): LaneRecoveryView | undefined {
+	const scan = scanWorktreeRecoveryAuthoritiesForRecovery(directory);
+	if (scan.status === 'unsupported-legacy') {
+		return {
+			authorityStatus: 'unsupported-legacy',
+			redispatchStatus: 'unsupported-legacy',
+		};
+	}
+	if (scan.status === 'uncertain') {
+		return {
+			authorityStatus: 'uncertain',
+			redispatchStatus: 'uncertain',
+		};
+	}
+	const authority = selectRecoveryAuthority(scan.authorities, taskId, failure);
+	if (!authority) return undefined;
+	return {
+		authorityStatus: authority.status,
+		generation: authority.immutable.generation,
+		originalCallID: authority.immutable.originalCallID,
+		parentSessionId: authority.immutable.parentSessionId,
+		reservationId: authority.immutable.reservationId,
+		canonicalBranch: authority.immutable.canonicalBranch,
+		canonicalPath: authority.immutable.canonicalPath,
+		laneBranch: authority.immutable.laneBranch,
+		lanePath: authority.immutable.lanePath,
+		strategy: authority.immutable.strategy,
+		claim: authority.claim ? toClaimView(authority.claim) : undefined,
+		redispatchStatus:
+			authority.status === 'claimed'
+				? 'claimed'
+				: authority.status === 'finalized'
+					? 'manual-only'
+					: 'available',
+	};
 }
 
 /**
  * Build a one-line recovery hint from merge failure data.
  */
-function buildRecoveryHint(
+function buildManualRecoveryHint(
 	failure: WorktreeMergeFailure | undefined,
 	worktreePath: string,
 ): string {
@@ -45,6 +186,27 @@ function buildRecoveryHint(
 		return `Partial merge preserved at ${worktreePath}. Stage and commit, then re-run merge.`;
 	}
 	return `Merge-back failed at stage "${failure.stage}" (${failure.message}). Manual review required.`;
+}
+
+function buildRecoveryHint(
+	failure: WorktreeMergeFailure | undefined,
+	worktreePath: string,
+	recovery?: LaneRecoveryView,
+): string {
+	if (!failure) return '';
+	if (recovery?.redispatchStatus === 'available') {
+		return `Re-dispatch the exact same task in parent session ${recovery.parentSessionId} to claim generation ${recovery.generation} instead of allocating a new lane.`;
+	}
+	if (recovery?.redispatchStatus === 'claimed' && recovery.claim) {
+		return `Same-task recovery is already claimed by ${recovery.claim.claimantCallID}; wait for that claimant to settle or cancel it before retrying again.`;
+	}
+	if (recovery?.redispatchStatus === 'unsupported-legacy') {
+		return 'Same-task redispatch is unavailable because only legacy recovery metadata was found; use manual lane recovery for this preserved worktree.';
+	}
+	if (recovery?.redispatchStatus === 'uncertain') {
+		return 'Same-task redispatch is unavailable until the recovery metadata is repaired; use manual lane recovery for this preserved worktree.';
+	}
+	return buildManualRecoveryHint(failure, worktreePath);
 }
 
 /**
@@ -137,6 +299,7 @@ export function handleLanesCommand(directory: string, args: string[]): string {
 		// fall back to an empty string for pre-extension durable records.
 		const worktreePath = failure.worktreePath ?? '';
 		const branch = failure.branch ?? '';
+		const recovery = buildRecoveryView(directory, taskId, failure);
 
 		lanes.push({
 			state: 'conflicted',
@@ -148,7 +311,9 @@ export function handleLanesCommand(directory: string, args: string[]): string {
 			parentSessionID: '',
 			mergeStrategy: 'merge',
 			mergeOutcome: failure,
-			recoveryHint: buildRecoveryHint(failure, worktreePath),
+			manualRecoveryHint: buildManualRecoveryHint(failure, worktreePath),
+			recovery,
+			recoveryHint: buildRecoveryHint(failure, worktreePath, recovery),
 		});
 	}
 
@@ -190,7 +355,26 @@ export function handleLanesCommand(directory: string, args: string[]): string {
 					`  - ${lane.laneId} task=${lane.taskId} branch=${lane.branch}${outcome}`,
 				);
 				lines.push(`    worktree=${lane.worktreePath}`);
-				if (lane.recoveryHint) lines.push(`    hint: ${lane.recoveryHint}`);
+				if (lane.recovery) {
+					lines.push(`    recovery: ${renderRecoveryIdentity(lane.recovery)}`);
+					if (lane.recovery.claim) {
+						lines.push(
+							`    claimant: call=${lane.recovery.claim.claimantCallID} session=${lane.recovery.claim.claimantSessionId} child=${lane.recovery.claim.childSessionId} revision=${lane.recovery.claim.claimRevision} attempt=${lane.recovery.claim.attempt}`,
+						);
+					}
+					if (lane.recoveryHint) {
+						lines.push(`    redispatch: ${lane.recoveryHint}`);
+					}
+					if (
+						lane.manualRecoveryHint &&
+						lane.recovery.redispatchStatus !== 'available' &&
+						lane.recovery.redispatchStatus !== 'claimed'
+					) {
+						lines.push(`    hint: ${lane.manualRecoveryHint}`);
+					}
+				} else if (lane.recoveryHint) {
+					lines.push(`    hint: ${lane.recoveryHint}`);
+				}
 			}
 		}
 		lines.push('');

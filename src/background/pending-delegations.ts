@@ -311,6 +311,8 @@ export interface BackgroundWorktreeDescriptor {
 	mergeStrategy: 'merge' | 'rebase' | 'cherry-pick';
 	laneIndex: number;
 	worktreeDir: string | null;
+	reservationId?: string;
+	generation?: number;
 }
 
 export interface BackgroundPromptSnapshot {
@@ -582,6 +584,8 @@ const WorktreeDescriptorSchema = z
 		mergeStrategy: z.enum(['merge', 'rebase', 'cherry-pick']),
 		laneIndex: z.number().int().nonnegative().max(255),
 		worktreeDir: z.string().min(1).max(4_096).nullable(),
+		reservationId: z.string().min(1).max(512).optional(),
+		generation: z.number().int().min(1).optional(),
 	})
 	.strict();
 
