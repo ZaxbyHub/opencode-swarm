@@ -197,6 +197,7 @@ import {
 import { initObservability } from './observability/index.js';
 import { loadPlan } from './plan/manager.js';
 import { createPrmHook, resolvePrmPatternPersistenceOptions } from './prm';
+import { cleanupOldTrajectoryFiles } from './prm/trajectory-store';
 import { createReviewModelDispatcher } from './review/contracts.js';
 import { createFindingValidationScheduler } from './review/finding-validator.js';
 import { captureReviewAgentModelRegistry } from './review/runtime.js';
@@ -307,6 +308,16 @@ const PACKAGE_ROOT = path.resolve(
 const SYNC_BUNDLED_SKILLS_TIMEOUT_MS = 2_000;
 /** Issue #2104: hard budget for the deferred post-init background maintenance pass. */
 const BACKGROUND_MAINTENANCE_INIT_TIMEOUT_MS = 10_000;
+
+/**
+ * Issue #2041 — one bounded, fail-open post-resolution pass of the PRM
+ * trajectory/replay age+count cleanup. A project whose sessions never go
+ * delegation-active would otherwise never reap idle files (the lazy trigger
+ * rides on PRM-active tool calls), so plugin load schedules exactly one
+ * sweep on the wrapper-owned post-resolution queue — never on the
+ * server()-resolution path (Invariant 1).
+ */
+const TRAJECTORY_CLEANUP_INIT_TIMEOUT_MS = 10_000;
 
 // Per Invariant 1 / Issue #704 / repro-704 T1 Windows failures: the plugin
 // init path used to await `loadPluginConfigWithMetaAsync` UNBOUNDED — the only
@@ -949,6 +960,31 @@ async function initializeOpenCodeSwarm(
 		});
 	});
 
+	// Issue #2041 — one bounded, fail-open PRM trajectory/replay cleanup pass.
+	// The lazy trigger inside the PRM hook only fires for sessions that go
+	// delegation-active; a project that never delegates would otherwise never
+	// reap idle trajectory files. This pass rides the wrapper-owned
+	// post-resolution queue (never the server()-resolution path), is
+	// hard-bounded by withTimeout, deletes at most a bounded number of files
+	// per run, and fails open — the lazy per-session trigger and every
+	// subsequent plugin load remain as backstops.
+	postResolutionTasks.push(function trajectoryCleanupPostInitTask() {
+		return withTimeout(
+			cleanupOldTrajectoryFiles(ctx.directory),
+			TRAJECTORY_CLEANUP_INIT_TIMEOUT_MS,
+			new Error(
+				`trajectory cleanup exceeded ${TRAJECTORY_CLEANUP_INIT_TIMEOUT_MS}ms post-init budget; continuing without it (lazy per-session cleanup remains a backstop)`,
+			),
+		)
+			.catch((err: unknown) => {
+				const msg = err instanceof Error ? err.message : String(err);
+				log('post-init trajectory cleanup timed out or failed (non-fatal)', {
+					error: msg,
+				});
+			})
+			.then(() => undefined);
+	});
+
 	// Issue #2104 — maintenance point P5: one deferred, time-bounded,
 	// non-fatal background maintenance pass after plugin registration. It only
 	// runs when the operator opted into hooks.background_subagents (default
@@ -1317,8 +1353,14 @@ async function initializeOpenCodeSwarm(
 	// Parsed once at init (pure Zod, no I/O) so the hot hook path reads plain
 	// numbers rather than re-parsing per tool call.
 	const learningConfig = LearningConfigSchema.parse(config.learning ?? {});
+	// Parsed once, shared by the PRM hook and the trajectory logger: the
+	// `prm.max_trajectory_lines` knob is the ONE budget governing the session
+	// store's cache trim AND disk compaction (issue #2041 Required 5) — the
+	// append path previously hardcoded 1000 here and at the denied-call site
+	// while the schema default never reached production.
+	const prmConfig = config.prm ?? PrmConfigSchema.parse({});
 	const prmHook = createPrmHook(
-		config.prm ?? PrmConfigSchema.parse({}),
+		prmConfig,
 		ctx.directory,
 		// #1821 F3: this mapping used to be an inline literal that ANDed
 		// `realtime_admission.enabled` into the producer's `enabled` flag, which
@@ -1334,7 +1376,7 @@ async function initializeOpenCodeSwarm(
 	const trajectoryLoggerHook = createTrajectoryLoggerHook(
 		{
 			enabled: true,
-			max_lines: 1000,
+			max_lines: prmConfig.max_trajectory_lines,
 		},
 		ctx.directory,
 	);
@@ -3582,7 +3624,9 @@ async function initializeOpenCodeSwarm(
 								},
 								deniedMessage,
 								ctx.directory,
-								{ maxLines: 1000 },
+								// Same knob as the successful-call path (issue
+								// #2041 Required 5): prm.max_trajectory_lines.
+								{ maxLines: prmConfig.max_trajectory_lines },
 							);
 						} catch {
 							/* D1 recording is observational; never alters the rethrow */

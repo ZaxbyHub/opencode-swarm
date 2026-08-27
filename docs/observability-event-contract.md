@@ -16,7 +16,7 @@ Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
 
 **What this PR defines.** A single canonical `ObservabilityEvent` envelope
 (`src/observability/envelope.ts`), a discriminated catalog of every event kind
-the codebase emits today (`src/observability/catalog.ts`, 49 entries), a
+the codebase emits today (`src/observability/catalog.ts`, 50 entries), a
 relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. It wires the envelope into the one live production
@@ -182,9 +182,9 @@ those inputs before this change.
 
 ---
 
-## 5. The 49-entry catalog
+## 5. The 50-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 49 entries = the 38 pre-existing members of
+Source: `src/observability/catalog.ts`. Exactly 50 entries = the 38 pre-existing members of
 `TelemetryEvent` (`src/telemetry.ts:15-109`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
@@ -198,7 +198,9 @@ atomic-write residue quarantine health aggregate) plus `context_telemetry_health
 (issue #2037 — the counts-only bounded storage health aggregate for the
 `.swarm/context-telemetry.jsonl` store) plus `skill_usage_health` (issue #2038 —
 the counts-only bounded storage health aggregate for the
-`.swarm/skill-usage.jsonl` store and its authoritative pending sidecar).
+`.swarm/skill-usage.jsonl` store and its authoritative pending sidecar) plus
+`trajectory_health` (issue #2041 — the counts-only bounded storage health
+aggregate for the `.swarm/trajectories/` PRM session-trajectory store).
 
 Legend: **Owner** is `futureOwnerIssue` when `consumers` is empty (permitted
 only together with an owner — an empty consumer list with no owner is a CI
@@ -637,7 +639,7 @@ for longer than the cache-refresh window.
 
 #### shell_audit_health
 Category `lifecycle`, severity `notice`, privacy `operational`. Producer
-`src/telemetry.ts:1037` (`shellAuditHealth`, called by the bounded
+`src/telemetry.ts:1043` (`shellAuditHealth`, called by the bounded
 `.swarm/session/shell-audit.jsonl` security-audit store in
 `src/hooks/guardrails/shell-audit-store.ts` after a compaction or close cut;
 issue #2040). Consumers: none — owner **#2047**. Retention: **#2047**. No
@@ -654,6 +656,26 @@ is the health signal for the issue-#2040 bounded shell-audit store;
 transitions) are age-exempt — they leave the window only through the
 sovereign byte/count budgets, which `compacted_count` and the manifest
 per-type folded counts disclose.
+
+#### trajectory_health
+Category `lifecycle`, severity `notice`, privacy `operational`. Producer
+`src/telemetry.ts:1066` (`trajectoryHealth`, called by the bounded
+`.swarm/trajectories/` PRM session-trajectory store in
+`src/prm/trajectory-store.ts` after a compaction pass or cleanup sweep, and —
+cooldown-bounded to one event per minute — when an append is skipped because
+the per-file cross-process lock stayed busy; issue #2041). Consumers: none —
+owner **#2047**. Retention: **#2047**. No workflow ID is required: the
+aggregate is store-level and counts-only. The payload is strictly bounded
+counts: `trigger` (`compaction`/`cleanup`/`append_skip`), `retained_count`,
+`dropped_count`, `corrupt_count`, `skipped_lock_count`, `bytes`, and
+`limit_bytes`. Trajectory content, filesystem paths, and session identifiers
+are never emitted (path redaction by omission). This is the health signal for
+the issue-#2041 bounded PRM session-trajectory store: `dropped_count`
+discloses entries folded by compaction (the shared `max_trajectory_lines`
+line budget or the sovereign derived byte ceiling) and files removed by the
+age/count cleanup sweep; `skipped_lock_count` discloses best-effort appends
+skipped under lock contention (telemetry loss is preferred over file
+corruption in this store).
 
 ---
 
@@ -706,7 +728,7 @@ row 17 records the authoritative knowledge-receipt partition added by #2031.
 | 5 | `<knowledgeStore>/knowledge-events.jsonl` | `src/hooks/knowledge-events.ts` | `curator-postmortem.ts`, `knowledge-escalator.ts` (display-only escalation history), `knowledge-diagnostics.ts`, `learning-metrics.ts`; **no correctness reader** | `type` | ISO string | `schema_version` = 1 | `event_id`, `trace_id`, `session_id`, `task_id`, `phase`, `agent` | not authoritative; rows may be evicted and source values remain #2032-owned | follows the linked knowledge store; bounded FIFO | operational | #2032 (outcome/source normalization) |
 | 6 | `<knowledgeStore>/knowledge-application.jsonl` (legacy v2) | `src/hooks/knowledge-application.ts` | compatibility/diagnostic consumers only; gates consume row 17 | none | ISO string | none | `sessionId?`, `taskId?`, `phase?`, `knowledgeId` | `event_id`, `trace_id`; lossy — `n_a` is stored as `acknowledged` | via knowledge store | derived | #2032 |
 | 7 | `.swarm/evidence/{taskId}/trajectory.jsonl` | `src/hooks/trajectory-logger.ts:385` | `src/hooks/micro-reflector.ts:262`, `src/services/trajectory-cluster.ts:99` | none | ISO string | none | `agent`, `step` | `task_id`/`session_id`/`trace_id` **only in the path**, never the record body | yes — `evidence/` dir | derived | **#2036** (retention registry; #2041 owns *PRM session* trajectories, not this task-scoped store) |
-| 8 | `.swarm/trajectories/{sessionId}.jsonl` | `src/prm/trajectory-store.ts:80` | `src/prm/index.ts:275,279`, `src/consensus/corpus.ts:641` | none | ISO string | none | `agent`, `step` | `session_id` **only in the filename** | **no** | derived | **#2041** |
+| 8 | `.swarm/trajectories/{sessionId}.jsonl` | `src/prm/trajectory-store.ts:80` | `src/prm/index.ts:303` (cache fast path) and `src/prm/index.ts:312` cold start via the tail-bounded `readTrajectoryWithCoverage` (issue #2041: newest-window read, coverage disclosed); `src/consensus/corpus.ts` `loadPrmSessions` | none | ISO string | `trajectory` checkpoint v1 (`{sessionId}.jsonl.meta.json`, issue #2041) | `agent`, `step` | `session_id` **only in the filename** | **no** | derived | **#2041** |
 | 9 | `.swarm/background-delegations.jsonl` | `src/background/pending-delegations.ts` (checkpoint layer, #2034) | `pr-workflow-session-resolver.ts`, `pr-workflow-gate.ts`, `init-orphan-recovery.ts`, `delegation-gate/worktree-collision-ownership.ts` | `status` | **epoch-ms number** | `schemaVersion` 1\|2\|3 | `correlationId`, `parentSessionId`, `callID`, `jobId`, `planTaskId`, `evidenceTaskId`, `batchId`, `laneId`, `workflowLane`, `worktreeId` | no swarm-run id distinct from `parentSessionId` | bounded — compacted to checkpoint + tail above 1 MiB (#2034) | authoritative | **#2034** |
 | 10 | `.swarm/session/shell-audit.jsonl` | `src/hooks/guardrails/audit-log.ts:496` (validated+redacted decision seam; persistence owned by the bounded store `src/hooks/guardrails/shell-audit-store.ts:786`, issue #2040) | `src/hooks/guardrails/shell-audit-store.ts:787` `readShellAuditTail` / `getShellAuditFoldedSummary` (tail-bounded, manifest-stripped); rendered by `src/services/guardrail-log-service.ts:146`. **Correction:** an earlier draft of this row cited `src/commands/archive.ts` as a reader with invented line numbers and behaviour — that file contains no reference to `shell-audit` at all, and the claim was removed (issue #2029 final-critic B-4). **Post-#2040:** the pre-store whole-file reader no longer exists. | `type` (**stripped for `shell`**) | ISO string (caller-supplied) | `swarm-shell-audit-manifest` v1 header (issue #2040) | `sessionID`, `agent`, `tool` (+ `commandHash` on typed command entries, never rendered) | **no `callID`** → cannot join to row 9 (`background-delegations.jsonl`) | via `session/` dir, finalized as a validated cut first (`close.ts` finalize stage, issue #2040) | operational | **#2040** |
 | 11 | council evidence + `.swarm/council/{taskId}.rounds.jsonl` | `src/council/council-evidence-writer.ts:91` (evidence rewrite at `.swarm/evidence/{taskId}.json`; rounds append) | (council-consuming code paths; not itemized separately from evidence consumers) | none | `synthesis.timestamp` | none (implicit: `quorumSize` defaulted to 1 when absent, `:156-158`) | `sessionId` (= `swarmId`), `roundNumber` | `taskId` only in filename on the rounds log; no `callID` | evidence: yes; `council/`: **no** | authoritative | **#2046** |

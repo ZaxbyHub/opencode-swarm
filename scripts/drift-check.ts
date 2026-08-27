@@ -41,6 +41,7 @@ import { collectToolRegistrationErrors } from './check-tool-registration';
 import { collectEventContractErrors } from './check-event-contract';
 import { collectCoreEventsUsageErrors } from './check-core-events-usage';
 import { collectShellAuditUsageErrors } from './check-shell-audit-usage';
+import { collectTrajectoryStoreUsageErrors } from './check-trajectory-store-usage';
 import { detectDocsClaimDrift } from './drift-check-docs-claims';
 import { checkSkillAssertions, formatBrokenAssertions } from './check-skill-assertions';
 import { BUNDLED_PROJECT_SKILLS } from '../src/config/bundled-skills';
@@ -863,6 +864,19 @@ export function detectShellAuditUsageDrift(): DriftFinding[] {
 }
 
 // ---------------------------------------------------------------------------
+// 3d) Trajectory-store usage drift (issue #2041 anti-bypass ratchet)
+// ---------------------------------------------------------------------------
+
+export function detectTrajectoryStoreUsageDrift(): DriftFinding[] {
+	return collectTrajectoryStoreUsageErrors().map((message) => ({
+		category: 'trajectory-store-usage',
+		severity: 'error' as const,
+		file: 'src/prm/trajectory-store.ts',
+		message,
+	}));
+}
+
+// ---------------------------------------------------------------------------
 // 4) Command registry drift
 // ---------------------------------------------------------------------------
 
@@ -1337,6 +1351,7 @@ const DETECTORS: Array<[string, () => DriftFinding[]]> = [
 	['event-contract', detectEventContractDrift],
 	['core-events-usage', detectCoreEventsUsageDrift],
 	['shell-audit-usage', detectShellAuditUsageDrift],
+	['trajectory-store-usage', detectTrajectoryStoreUsageDrift],
 	['command', detectCommandDrift],
 	['agent', detectAgentDrift],
 	['docs-claim', detectDocsClaimDrift],

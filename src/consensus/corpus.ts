@@ -106,7 +106,13 @@ import {
 } from '../hooks/skill-usage-log.js';
 import { readPendingManifest } from '../hooks/skill-usage-pending.js';
 import { redactSecrets } from '../memory/redaction.js';
-import { readTrajectory } from '../prm/trajectory-store.js';
+import {
+	readTrajectory,
+	readTrajectoryCheckpoint,
+	TRAJECTORY_LIMITS,
+	type TrajectoryReadWithCoverage,
+	trajectoryFileBytes,
+} from '../prm/trajectory-store.js';
 import type { TrajectoryEntry } from '../prm/types.js';
 import { rejectedEditsPath } from '../services/skill-evaluator.js';
 import type { ConsensusCorpusHash, ConsensusSourceKind } from './contracts.js';
@@ -168,6 +174,24 @@ export interface CorpusReaders {
 		sessionId: string,
 		directory: string,
 	) => Promise<TrajectoryEntry[]>;
+	/**
+	 * Additive coverage seam (issue #2041 Required 4), mirroring
+	 * `readSkillUsageEntriesWithCoverage` above: optional, deliberately NOT
+	 * part of `defaultReaders()`, and injecting it overrides BOTH the entries
+	 * and the coverage verdict so an injected fixture stays coherent.
+	 *
+	 * Without it, entries keep coming from `readTrajectory` (injected fixtures
+	 * keep working) and the default coverage verdict comes from the session's
+	 * persisted checkpoint (`readTrajectoryCheckpoint`) — the same
+	 * manifest-only precedent the skill-usage source uses. The default path's
+	 * known limit mirrors that precedent too: it discloses compaction eviction
+	 * (`droppedEntries`) but not a single read that hit the tail-window byte
+	 * cap, which for a within-budget store is unreachable.
+	 */
+	readTrajectoryWithCoverage?: (
+		sessionId: string,
+		directory: string,
+	) => Promise<TrajectoryReadWithCoverage>;
 	readSkillUsageEntries: typeof readSkillUsageEntries;
 	/**
 	 * Additive coverage seam (issue #2038 §7). Optional, and deliberately NOT
@@ -658,15 +682,41 @@ async function loadTaskTrajectories(
  * is the only task attribution this source has; it is sanitized and used as
  * `taskId` so session evidence can contribute real task diversity rather than
  * being permanently stranded below the anecdote gate.
+ *
+ * Issue #2041: the session store is now hard-bounded (cache AND disk), so a
+ * long session's older entries are compacted away. `onIncompleteWindow` is how
+ * that reaches the caller — same surface the skill-usage source (issue #2038
+ * §7) uses — instead of silently presenting a partial window as the session's
+ * full history.
  */
 async function loadPrmSessions(
 	directory: string,
 	readers: CorpusReaders,
 	maxExcerptChars: number,
+	onIncompleteWindow: () => void,
 ): Promise<CorpusObservation[]> {
 	const observations: CorpusObservation[] = [];
 	for (const sessionId of await readers.listTrajectorySessions(directory)) {
-		const entries = await readers.readTrajectory(sessionId, directory);
+		const injected = readers.readTrajectoryWithCoverage;
+		let entries: TrajectoryEntry[];
+		let complete: boolean;
+		if (injected) {
+			const read = await injected(sessionId, directory);
+			entries = read.entries;
+			complete = read.coverage !== 'truncated';
+		} else {
+			entries = await readers.readTrajectory(sessionId, directory);
+			const checkpoint = await readTrajectoryCheckpoint(sessionId, directory);
+			// Parity with the live reader's coverage semantics
+			// (implementation-review round 1): a window is partial when
+			// compaction dropped entries OR the file exceeds the read window
+			// — the same two conditions `readTrajectoryWithCoverage` ORs.
+			const bytes = await trajectoryFileBytes(sessionId, directory);
+			complete =
+				(checkpoint?.droppedEntries ?? 0) === 0 &&
+				(bytes ?? 0) <= TRAJECTORY_LIMITS.readMaxBytes;
+		}
+		if (!complete) onIncompleteWindow();
 		for (const [index, entry] of entries.entries()) {
 			const target = entry.target
 				? sanitizeExcerpt(entry.target, maxExcerptChars)
@@ -1058,9 +1108,11 @@ export async function loadConsensusCorpus(
 ): Promise<ConsensusCorpus> {
 	const readers: CorpusReaders = { ...defaultReaders(), ...options.readers };
 	const maxExcerptChars = Math.max(1, options.maxExcerptChars);
-	// Set when the skill-usage source could only return a bounded window
-	// (issue #2038). Folded into `truncated` below.
+	// Set when a bounded source could only return a partial window
+	// (skill-usage: issue #2038; PRM sessions: issue #2041). Folded into
+	// `truncated` below.
 	let skillUsageWindowIncomplete = false;
+	let prmSessionWindowIncomplete = false;
 	const loaders: Record<
 		ConsensusSourceKind,
 		() => Promise<CorpusObservation[]>
@@ -1072,7 +1124,10 @@ export async function loadConsensusCorpus(
 			loadGateGroundTruth(directory, readers, maxExcerptChars),
 		'task-trajectory': () =>
 			loadTaskTrajectories(directory, readers, maxExcerptChars),
-		'prm-session': () => loadPrmSessions(directory, readers, maxExcerptChars),
+		'prm-session': () =>
+			loadPrmSessions(directory, readers, maxExcerptChars, () => {
+				prmSessionWindowIncomplete = true;
+			}),
 		'skill-usage': async () =>
 			loadSkillUsage(directory, readers, maxExcerptChars, () => {
 				skillUsageWindowIncomplete = true;
@@ -1126,7 +1181,8 @@ export async function loadConsensusCorpus(
 	return {
 		observations,
 		hashes,
-		truncated: truncated || skillUsageWindowIncomplete,
+		truncated:
+			truncated || skillUsageWindowIncomplete || prmSessionWindowIncomplete,
 		unreadableSources,
 	};
 }

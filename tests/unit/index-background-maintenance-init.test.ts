@@ -224,4 +224,32 @@ describe('issue #2104 background maintenance init wiring', () => {
 		// Empty stores ⇒ the P3 pass completes ok and stamps lastOkAt.
 		expect(maintenance!.lastOkAt).not.toBeNull();
 	});
+
+	test('issue #2041: the bounded PRM trajectory cleanup pass is always scheduled post-resolution', async () => {
+		// No opt-in flag: a project whose sessions never go delegation-active
+		// must still reap idle trajectory files, so this pass is unconditional
+		// (unlike P5). It rides the same wrapper-owned post-resolution queue.
+		writeProjectConfig(directory, {});
+		const { scheduledTasks } = await bootWithCapturedTasks(directory);
+
+		const task = scheduledTasks.find(
+			(t) => t.name === 'trajectoryCleanupPostInitTask',
+		);
+		expect(task).toBeDefined();
+
+		// Running it is bounded and fail-open: a stale trajectory file is
+		// reaped (with its checkpoint sibling), and the task never throws.
+		const trajectoriesDir = path.join(directory, '.swarm', 'trajectories');
+		fs.mkdirSync(trajectoriesDir, { recursive: true });
+		const stale = path.join(trajectoriesDir, 'stale-session.jsonl');
+		fs.writeFileSync(stale, '{"step":1}\n');
+		fs.writeFileSync(`${stale}.meta.json`, '{"version":1}\n');
+		const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+		fs.utimesSync(stale, old, old);
+		fs.utimesSync(`${stale}.meta.json`, old, old);
+
+		await expect(task!.run()).resolves.toBeUndefined();
+		expect(fs.existsSync(stale)).toBe(false);
+		expect(fs.existsSync(`${stale}.meta.json`)).toBe(false);
+	});
 });

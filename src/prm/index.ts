@@ -63,10 +63,10 @@ import { EscalationTracker, resolveLadderKey } from './escalation';
 import { detectPatterns, resolvePatternThreshold } from './pattern-detector';
 import { recordReplayEntry, startReplayRecording } from './replay';
 import {
-	cleanupOldTrajectoryFiles,
 	clearTrajectoryCache,
 	getInMemoryTrajectory,
-	readTrajectory,
+	readTrajectoryWithCoverage,
+	scheduleTrajectoryCleanup,
 } from './trajectory-store';
 import type { PatternMatch, PrmConfig } from './types';
 
@@ -80,12 +80,12 @@ import type { PatternMatch, PrmConfig } from './types';
  */
 export const _internals: {
 	getAgentSession: typeof getAgentSession;
-	readTrajectory: typeof readTrajectory;
+	readTrajectoryWithCoverage: typeof readTrajectoryWithCoverage;
 	getInMemoryTrajectory: typeof getInMemoryTrajectory;
 	detectPatterns: typeof detectPatterns;
 	generateCourseCorrection: typeof generateCourseCorrection;
 	formatCourseCorrectionForInjection: typeof formatCourseCorrectionForInjection;
-	cleanupOldTrajectoryFiles: typeof cleanupOldTrajectoryFiles;
+	scheduleTrajectoryCleanup: typeof scheduleTrajectoryCleanup;
 	clearTrajectoryCache: typeof clearTrajectoryCache;
 	recordReplayEntry: typeof recordReplayEntry;
 	startReplayRecording: typeof startReplayRecording;
@@ -95,12 +95,12 @@ export const _internals: {
 	appendInsightCandidates: typeof appendInsightCandidates;
 } = {
 	getAgentSession,
-	readTrajectory,
+	readTrajectoryWithCoverage,
 	getInMemoryTrajectory,
 	detectPatterns,
 	generateCourseCorrection,
 	formatCourseCorrectionForInjection,
-	cleanupOldTrajectoryFiles,
+	scheduleTrajectoryCleanup,
 	clearTrajectoryCache,
 	recordReplayEntry,
 	startReplayRecording,
@@ -299,12 +299,47 @@ export function createPrmHook(
 		}
 
 		try {
-			// Use in-memory cache (O(1)) with disk fallback on cold start (process restart)
-			const cachedTrajectory = _internals.getInMemoryTrajectory(sessionID);
-			const trajectory =
-				cachedTrajectory.length > 0
-					? cachedTrajectory
-					: await _internals.readTrajectory(sessionID, directory);
+			// Once per session (debounced, fire-and-forget): the bounded
+			// age+count cleanup sweep over .swarm/trajectories/ and
+			// .swarm/replays/ (issue #2041). Placement is load-bearing: the
+			// OLD call site sat below the no-match early return, so only
+			// sessions that DETECTED a pattern ever reaped stale files —
+			// healthy projects accumulated trajectory files forever. Here it
+			// fires on every PRM-active session's first tool call, still off
+			// any init path.
+			const sessionPrmState = session as typeof session & SessionPrmState;
+			if (!sessionPrmState.prmInitialized) {
+				sessionPrmState.prmInitialized = true;
+				_internals.scheduleTrajectoryCleanup(directory);
+			}
+
+			// Use in-memory cache (O(1)) with disk fallback on cold start (process
+			// restart). The cold read is tail-bounded and discloses coverage
+			// (issue #2041): a truncated window is surfaced once per cold start
+			// so pattern detection's inputs are never silently partial.
+			const cachedTrajectory = _internals.getInMemoryTrajectory(
+				sessionID,
+				directory,
+			);
+			let trajectory = cachedTrajectory;
+			if (cachedTrajectory.length === 0) {
+				// maxLines = the SAME knob the append path enforces, so the
+				// cold-read cache population cannot exceed the configured
+				// budget (implementation-review round 1).
+				const coldRead = await _internals.readTrajectoryWithCoverage(
+					sessionID,
+					directory,
+					config.max_trajectory_lines,
+				);
+				trajectory = coldRead.entries;
+				if (coldRead.coverage === 'truncated') {
+					logger.log(
+						`[prm] session ${sessionID} trajectory window is partial: ` +
+							`${coldRead.droppedByCompaction} older entries were dropped by compaction ` +
+							`(pattern detection runs on the newest retained window)`,
+					);
+				}
+			}
 
 			// Run pattern detection, filtering out historical matches already processed
 			const detectionResult = _internals.detectPatterns(
@@ -495,7 +530,8 @@ export function createPrmHook(
 			}
 
 			// Get or create escalation tracker for this session
-			const sessionPrmState = session as typeof session & SessionPrmState;
+			// (`sessionPrmState` was already narrowed at the top of toolAfter,
+			// where the once-per-session cleanup trigger now lives.)
 			let escalationTracker = sessionPrmState.prmEscalationTracker;
 
 			// Initialize replay recording on first use (lazy initialization)
@@ -505,14 +541,6 @@ export function createPrmHook(
 			}
 
 			const artifactPath = sessionPrmState.replayArtifactPath;
-
-			// One-time per session: run file TTL cleanup (non-blocking, fire-and-forget)
-			if (!sessionPrmState.prmInitialized) {
-				sessionPrmState.prmInitialized = true;
-				_internals.cleanupOldTrajectoryFiles(directory).catch(() => {
-					/* non-blocking */
-				});
-			}
 
 			if (!escalationTracker) {
 				// PRM escalation state is session-scoped and transient — resets on session start.

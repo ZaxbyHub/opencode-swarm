@@ -371,6 +371,20 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		bytes: 524288,
 		limit_bytes: 1048576,
 	},
+
+	// Issue #2041 PRM session-trajectory store health. Payload mirrors the
+	// real producer in src/prm/trajectory-store.ts (compaction/cleanup/
+	// append_skip): bounded counts only — no session IDs, no paths, no
+	// trajectory content.
+	trajectory_health: {
+		trigger: 'compaction',
+		retained_count: 500,
+		dropped_count: 1500,
+		corrupt_count: 2,
+		skipped_lock_count: 0,
+		bytes: 204800,
+		limit_bytes: 524288,
+	},
 };
 
 describe('envelope roundtrip — AC1 positive', () => {
