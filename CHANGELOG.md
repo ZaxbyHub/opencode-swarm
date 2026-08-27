@@ -1,5 +1,20 @@
 # Changelog
 
+## [7.151.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.150.0...v7.151.0) (2026-08-27)
+
+
+### Features
+
+* **guardrails:** bound and harden shell-audit retention and queries (issue [#2040](https://github.com/ZaxbyHub/opencode-swarm/issues/2040)) ([7e216a0](https://github.com/ZaxbyHub/opencode-swarm/commit/7e216a0b179c7f569c9ff45db55d6135a912a388))
+
+
+### Bug Fixes
+
+* **guardrails:** address PR review findings for the shell-audit store (issue [#2040](https://github.com/ZaxbyHub/opencode-swarm/issues/2040)) ([87067dc](https://github.com/ZaxbyHub/opencode-swarm/commit/87067dc3f6baf4fd06e85ecbf3dcb2b0907ee1a2))
+* **guardrails:** adopt freezeClock + canonical tmpdir + test-file caps in shell-audit tests (PR [#2374](https://github.com/ZaxbyHub/opencode-swarm/issues/2374) feedback) ([dc91cde](https://github.com/ZaxbyHub/opencode-swarm/commit/dc91cdebf02ceebd3140c1ed0603260156c6ac33))
+* **skills:** teach commit-pr Tier 1 the check:shell-audit gate (PR [#2374](https://github.com/ZaxbyHub/opencode-swarm/issues/2374) parity) ([8a85da5](https://github.com/ZaxbyHub/opencode-swarm/commit/8a85da5a5a1b7005e57602bd17901527109ab4a7))
+* **utils:** classify the shell-audit store temp writer in the atomic-write ratchet (PR [#2374](https://github.com/ZaxbyHub/opencode-swarm/issues/2374)) ([637aa6a](https://github.com/ZaxbyHub/opencode-swarm/commit/637aa6a436b56d351b0de709e60d323cd4042bcf))
+
 ## [7.150.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.149.1...v7.150.0) (2026-08-26)
 
 
