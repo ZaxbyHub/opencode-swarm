@@ -226,7 +226,10 @@ describe('dispatch_lanes PR review resilience upgrade rollback', () => {
 		await removePersistedResilienceSnapshot(sessionID);
 		dispatchInternals.loadPluginConfig = () =>
 			({
-				pr_review_resilience: DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+				pr_review_resilience: {
+					...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+					enabled: true,
+				},
 			}) as ReturnType<typeof originalDispatchLoadPluginConfig>;
 		dispatchInternals.getSessionOps = () => ({
 			create: mock(async () => {

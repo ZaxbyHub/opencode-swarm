@@ -117,7 +117,6 @@ const MAX_COLLECT_TIMEOUT_MS = 60 * 60_000;
 const COLLECT_POLL_INTERVAL_MS = 500;
 const MAX_COLLECT_POLL_INTERVAL_MS = 10_000;
 const MAX_STATUS_CALL_BUDGET_MS = 2_000;
-const PR_REVIEW_WAIT_FINALIZATION_RESERVE_MS = 250;
 // #2276: per-lane-kind final-response budgets for swarm-pr-review lanes. All
 // derive from the 20_000-char inline preview window (MAX_LANE_OUTPUT_CHARS):
 // every budget stays ≥2_000 under it, so a conforming lane's preview is never
@@ -823,7 +822,30 @@ export interface CollectLaneResultsResult {
 	 * or any lane's state.
 	 */
 	pending_liveness?: PrWorkflowPendingLaneLiveness[];
+	/**
+	 * Issue #2381: identities of every lane that had NOT settled when this
+	 * collection returned. Present whenever any lane is unsettled, INDEPENDENT of
+	 * `include_pending` — a caller must never have to opt in to learn that work is
+	 * still outstanding, and a wait budget expiring is not evidence the work died.
+	 *
+	 * Purely additive: `lane_results` filtering and every aggregate counter are
+	 * unchanged, so existing consumers are unaffected.
+	 */
+	pending_lanes?: CollectPendingLaneIdentity[];
 	errors?: string[];
+}
+
+/**
+ * Issue #2381: minimal, stable identity of an unsettled lane. `output_ref` is
+ * carried when the record already has one (for example an `ingesting` lane whose
+ * artifact was written before settlement) so a caller can still recover partial
+ * output via `retrieve_lane_output` without a second collection.
+ */
+export interface CollectPendingLaneIdentity {
+	batch_id: string;
+	lane_id: string;
+	status: string;
+	output_ref?: string;
 }
 
 export interface SessionOps {
@@ -1868,129 +1890,92 @@ export async function executeCollectLaneResults(
 			message: `No async lane batch found for ${parsed.data.batch_id}`,
 		});
 	}
+	// Issue #2381: one bounded revision context per unique (project root, PR head)
+	// for THIS invocation only. Deliberately NOT keyed by any `generation`: the
+	// record's `generation` is `createLaneSession`'s session-create RETRY counter
+	// (see :149/:2076/:2139), not a PR workflow generation, and no PR-workflow
+	// generation value is reachable from the collection path at all. Keying on it
+	// would resolve the digest twice whenever one lane needed a create retry —
+	// exactly the redundancy this snapshot removes. Invocation-locality IS the
+	// epoch boundary: a new workflow generation necessarily means a new
+	// `collect_lane_results` call, hence a fresh map, so a later invocation always
+	// resolves again. The key equals the digest function's own argument list, so it
+	// can never hand one lane a digest computed for another lane's head.
+	//
+	// The map stores the RAW resolution promise, never a budget-wrapped one. Digest
+	// budgets are per-lane (`reserveCollectionLaneCallBudgets`), and
+	// `withCollectionDeadline` throws immediately at a zero budget; memoizing a
+	// wrapped promise would let one starved lane poison every other lane in the
+	// invocation. Each lane wraps the shared promise in its OWN deadline instead.
+	const revisionSnapshots = new Map<string, Promise<string | null>>();
+
 	const session = _internals.getSessionOps();
 	if (!session || typeof session.messages !== 'function') {
-		if (
-			parsed.data.wait === true &&
-			hasActivePrReviewWaitDeadlineLanes(records)
-		) {
-			const receiptAppendFailureLogs = new Set<string>();
-			await finalizePrReviewWaitDeadlineLanes({
-				session: session ?? {},
+		// Issue #2381: an unavailable host messages client is an OBSERVER transport
+		// failure. It says nothing about the child work, so it must never write a
+		// terminal transition. Return the STORED status plus a typed diagnostic,
+		// for every mode — the previous PR-review-only terminalization branch is
+		// deleted, and the non-review branch's zeroed-counter shape is replaced by
+		// the same truthful stored-status view.
+		const reviewReceiptFallbacks = await resolvePrReviewReceiptFallbacks(
+			directory,
+			context.sessionID,
+			records,
+		);
+		const result = buildCollectResult(
+			parsed.data.batch_id,
+			records,
+			parsed.data.include_pending ?? parsed.data.wait !== true,
+			{
 				directory,
-				records,
-				deadline: _internals.now(),
-				receiptAppendFailureLogs,
-				resourceFailures: new Set(
-					records
-						.filter(
-							(record) =>
-								record.status === 'pending' || record.status === 'running',
-						)
-						.map((record) => record.correlationId),
-				),
-			});
-			records = findByBatchId(directory, parsed.data.batch_id, batchFilter);
-			const reviewReceiptFallbacks = await resolvePrReviewReceiptFallbacks(
-				directory,
-				context.sessionID,
-				records,
-			);
-			const result = buildCollectResult(
-				parsed.data.batch_id,
-				records,
-				parsed.data.include_pending ?? false,
-				{
-					directory,
-					sessionID: context.sessionID,
-					reviewReceipts: reviewReceiptFallbacks,
-				},
-			);
-			result.message =
-				'OpenCode session messages client was unavailable; active PR_REVIEW lanes were terminalized locally.';
-			result.errors = ['OpenCode session messages client is not available'];
-			return result;
-		}
-		return collectFailureResult({
-			failure_class: 'no_client',
-			batch_id: parsed.data.batch_id,
-			message: 'OpenCode session messages client is not available',
-		});
+				sessionID: context.sessionID,
+				reviewReceipts: reviewReceiptFallbacks,
+			},
+		);
+		result.failure_class = 'no_client';
+		result.message =
+			'OpenCode session messages client is not available; lane state is reported as stored and no lane was cancelled or terminalized. Poll again once the host client is available, cancel explicitly, or rely on the presumed-stale backstop.';
+		result.errors = ['OpenCode session messages client is not available'];
+		await attachPendingLaneLiveness(result, directory, records, deadline);
+		return result;
 	}
-
-	const prReviewWaitFinalizationBudgetMs =
-		parsed.data.wait === true
-			? reservePrReviewWaitFinalizationBudgetMs(records, timeoutMs)
-			: 0;
-	const pollingDeadline =
-		prReviewWaitFinalizationBudgetMs > 0
-			? Math.max(_internals.now(), deadline - prReviewWaitFinalizationBudgetMs)
-			: deadline;
-	const skipOrdinaryWaitPolling =
-		parsed.data.wait === true &&
-		hasActivePrReviewWaitDeadlineLanes(records) &&
-		(timeoutMs === 0 ||
-			(prReviewWaitFinalizationBudgetMs > 0 &&
-				prReviewWaitFinalizationBudgetMs >= timeoutMs));
 
 	let keepPolling = true;
 	let pollIntervalMs = COLLECT_POLL_INTERVAL_MS;
-	if (!skipOrdinaryWaitPolling) {
-		while (keepPolling) {
-			await collectOnce(
-				session,
-				directory,
-				records,
-				parsed.data.cancel_pending === true,
-				pollingDeadline,
-				hostTimeouts,
-				receiptAppendFailureLogs,
-				collectionResourceFailures,
-				settleFailureLogs,
-			);
-			await sweepStaleAsyncLaneRecords(
-				session,
-				directory,
-				records,
-				DEFAULT_ASYNC_STALE_TIMEOUT_MS,
-				pollingDeadline,
-				hostTimeouts,
-			);
-			records = findByBatchId(directory, parsed.data.batch_id, batchFilter);
-			if (allSettled(records) || parsed.data.wait !== true) {
-				keepPolling = false;
-				continue;
-			}
-			if (_internals.now() >= pollingDeadline) {
-				keepPolling = false;
-				continue;
-			}
-			await _internals.sleep(
-				Math.min(
-					pollIntervalMs,
-					Math.max(0, pollingDeadline - _internals.now()),
-				),
-			);
-			pollIntervalMs = nextCollectPollInterval(pollIntervalMs);
-		}
-	}
-	if (
-		parsed.data.wait === true &&
-		finalizePrReviewWaitDeadlineNeeded(
-			records,
-			skipOrdinaryWaitPolling,
-			pollingDeadline,
-		)
-	) {
-		await finalizePrReviewWaitDeadlineLanes({
+	while (keepPolling) {
+		await collectOnce(
 			session,
 			directory,
 			records,
+			parsed.data.cancel_pending === true,
 			deadline,
+			hostTimeouts,
 			receiptAppendFailureLogs,
-			resourceFailures: collectionResourceFailures,
-		});
+			collectionResourceFailures,
+			settleFailureLogs,
+			revisionSnapshots,
+		);
+		await sweepStaleAsyncLaneRecords(
+			session,
+			directory,
+			records,
+			DEFAULT_ASYNC_STALE_TIMEOUT_MS,
+			deadline,
+			hostTimeouts,
+		);
 		records = findByBatchId(directory, parsed.data.batch_id, batchFilter);
+		if (allSettled(records) || parsed.data.wait !== true) {
+			keepPolling = false;
+			continue;
+		}
+		if (_internals.now() >= deadline) {
+			keepPolling = false;
+			continue;
+		}
+		await _internals.sleep(
+			Math.min(pollIntervalMs, Math.max(0, deadline - _internals.now())),
+		);
+		pollIntervalMs = nextCollectPollInterval(pollIntervalMs);
 	}
 
 	const reviewReceiptFallbacks = await resolvePrReviewReceiptFallbacks(
@@ -2008,21 +1993,7 @@ export async function executeCollectLaneResults(
 			reviewReceipts: reviewReceiptFallbacks,
 		},
 	);
-	if (result.pending > 0) {
-		// Issue #2280 Part B: alert-only liveness advisory for long-pending
-		// async lanes (any mode). Fail-open (degrades per lane on any failure), bounded
-		// (at most one host probe call, none below the threshold, none beyond
-		// the caller's remaining collection budget), and never mutates lane
-		// state or blocks collection.
-		const pendingLiveness = await collectPrWorkflowPendingLaneLiveness(
-			directory,
-			records,
-			{ probeBudgetMs: Math.max(0, deadline - _internals.now()) },
-		);
-		if (pendingLiveness.length > 0) {
-			result.pending_liveness = pendingLiveness;
-		}
-	}
+	await attachPendingLaneLiveness(result, directory, records, deadline);
 	if (hostTimeouts.size > 0) {
 		result.message =
 			result.pending > 0
@@ -2036,11 +2007,53 @@ export async function executeCollectLaneResults(
 	// (as this previously did) meant a settle failure with zero host timeouts
 	// never surfaced at all — the exact silent-wedge class this issue exists to
 	// close.
-	const diagnostics = [...hostTimeouts, ...settleFailureLogs];
+	// Issue #2381 adds `collectionResourceFailures` to this union. It was
+	// write-only after the wait-deadline terminalizer (its sole reader) was
+	// deleted, which silently dropped the transcript-fetch TRANSPORT-ERROR
+	// diagnostic the issue requires — the timeout half surfaced via
+	// `hostTimeouts`, the error half surfaced nowhere. `result.message` stays
+	// keyed on `hostTimeouts` alone so a transport error is never mislabelled as
+	// a collection-deadline exhaustion.
+	const diagnostics = [
+		...hostTimeouts,
+		...settleFailureLogs,
+		...collectionResourceFailures,
+	];
 	if (diagnostics.length > 0) {
 		result.errors = diagnostics;
 	}
 	return result;
+}
+
+/**
+ * Issue #2280 Part B / #2381: alert-only host liveness advisory for still-pending
+ * async lanes (any mode). Fail-open (degrades per lane on any failure), bounded
+ * (at most one host probe call, none below the threshold, none beyond the
+ * caller's remaining collection budget), and it NEVER mutates lane state.
+ *
+ * Issue #2381 runs this on every path that can return pending work — including
+ * the no-client path, which previously returned before liveness was ever
+ * evaluated. `collectPrWorkflowPendingLaneLiveness` already distinguishes
+ * busy/retry from idle/unknown/absent via `hostStatus`, and reports
+ * `probe-unavailable` (host client unavailable), `probe-error`, `probe-timeout`,
+ * `probe-no-data`, and `advisory-unavailable` via `degradedReason`. These are
+ * observer diagnostics: none of them may be read as terminal provider failure.
+ */
+async function attachPendingLaneLiveness(
+	result: CollectLaneResultsResult,
+	directory: string,
+	records: readonly BackgroundDelegationRecord[],
+	deadline: number,
+): Promise<void> {
+	if (result.pending <= 0) return;
+	const pendingLiveness = await collectPrWorkflowPendingLaneLiveness(
+		directory,
+		records,
+		{ probeBudgetMs: Math.max(0, deadline - _internals.now()) },
+	);
+	if (pendingLiveness.length > 0) {
+		result.pending_liveness = pendingLiveness;
+	}
 }
 
 type LaneSessionCreateOutcome =
@@ -2461,6 +2474,13 @@ async function collectOnce(
 	 * current state rather than history.
 	 */
 	settleFailureLogs: Set<string>,
+	/**
+	 * Issue #2381: invocation-local revision snapshots, keyed by
+	 * `${directory}\0${prHeadSha}`. Holds the RAW resolution promise so each lane
+	 * can apply its own per-lane budget without one starved lane poisoning the
+	 * rest. See the map's definition in `executeCollectLaneResults`.
+	 */
+	revisionSnapshots: Map<string, Promise<string | null>>,
 ): Promise<void> {
 	const activeRecords = records.filter(
 		(record) => record.status === 'pending' || record.status === 'running',
@@ -2468,7 +2488,16 @@ async function collectOnce(
 	const pendingSettlements: Promise<void>[] = [];
 	for (let index = 0; index < activeRecords.length; index++) {
 		const record = activeRecords[index];
+		const laneLabel = record.laneId ?? record.correlationId;
 		const remainingLaneCount = activeRecords.length - index;
+		// Issue #2381: price a digest call for EVERY lane that needs a digest, even
+		// though at most one of them performs the host resolution. The others await
+		// the shared in-flight promise, and they must do so under a real budget of
+		// their own — a zero budget would make `withCollectionDeadline` throw
+		// immediately and leave every reusing lane pending, and an absent budget
+		// would let a slow resolution consume the entire collection deadline. The
+		// saving item 4 is after is one HOST CALL per (root, head), which the
+		// snapshot map already guarantees; it is not a saving in reserved time.
 		const needsRevisionDigest = Boolean(record.workspace?.prHeadSha);
 		const laneBudgets = reserveCollectionLaneCallBudgets(
 			deadline,
@@ -2516,25 +2545,54 @@ async function collectOnce(
 						query: { directory, limit: ASYNC_MESSAGE_FETCH_LIMIT },
 					}),
 				deadline,
-				`session.messages for lane "${record.laneId ?? record.correlationId}"`,
+				`session.messages for lane "${laneLabel}"`,
 				hostTimeouts,
 				laneBudgets.messagesBudgetMs,
 			);
-		} catch {
-			const messageTimeoutPrefix = `session.messages for lane "${record.laneId ?? record.correlationId}" exceeded the remaining collect_lane_results budget`;
+		} catch (error) {
+			const messageTimeoutPrefix = `session.messages for lane "${laneLabel}" exceeded the remaining collect_lane_results budget`;
 			if (
 				![...hostTimeouts].some((entry) =>
 					entry.startsWith(messageTimeoutPrefix),
 				)
 			) {
-				collectionResourceFailures.add(record.correlationId);
+				// Issue #2381: a transcript-fetch TRANSPORT ERROR (as opposed to a
+				// budget timeout, which `hostTimeouts` already reports) leaves the lane
+				// pending. That is correct — a broken observer transport says nothing
+				// about the child — but it must not be SILENT. The only consumer of
+				// this signal used to be the wait-deadline terminalizer, which read it
+				// to choose a failure class; deleting the terminalizer left this
+				// recording site with no reader, so the ERROR half of the issue's
+				// "pending plus diagnostic" requirement reported nothing at all.
+				collectionResourceFailures.add(
+					`session.messages transport error for lane "${laneLabel}"; lane left pending: ${formatError(
+						error,
+					).slice(0, 300)}`,
+				);
 			}
 			continue;
 		}
 		if (!messages.data) {
-			if (messages.error) collectionResourceFailures.add(record.correlationId);
+			if (messages.error) {
+				// Same class: the host answered with an error payload and no
+				// transcript. Pending, and now stated rather than swallowed.
+				collectionResourceFailures.add(
+					`session.messages returned an error for lane "${laneLabel}"; lane left pending: ${formatError(
+						messages.error,
+					).slice(0, 300)}`,
+				);
+			}
 			continue;
 		}
+		// Issue #2381: the transcript fetch SUCCEEDED, so any transport diagnostic
+		// an earlier poll recorded for this lane is now history, not current state.
+		// Retire it here rather than on the settle path: a lane whose transport
+		// recovered may still be legitimately running, and it should not carry a
+		// stale "lane left pending" reason into a later result — least of all one
+		// that reports `success: true`. This mirrors the same-shape clearing done
+		// for `settleFailureLogs`, and closes the identical staleness hole in the
+		// other producer.
+		clearLaneDiagnostics(collectionResourceFailures, laneLabel);
 		const transcript = extractAssistantTranscript(messages.data);
 		// Issue #2349: a lane whose backing session died AFTER promptAsync
 		// acceptance (provider quota/billing/auth exhaustion at first inference)
@@ -2600,7 +2658,6 @@ async function collectOnce(
 					expectedCurrentStatuses: ['pending', 'running'],
 				},
 			);
-			const laneLabel = record.laneId ?? record.correlationId;
 			if (settled?.status === settledStatus) {
 				// Only tear down once the terminal write is CONFIRMED.
 				// `appendDelegationTransition` returns null on an exception path and
@@ -2608,7 +2665,7 @@ async function collectOnce(
 				// deleting the host session in those cases would leave the record
 				// open with no readable session — a permanent wedge strictly worse
 				// than the bug being fixed.
-				settleFailureLogs.delete(laneLabel);
+				clearLaneDiagnostics(settleFailureLogs, laneLabel);
 				cleanupAsyncLaunchSession(session, record.subagentSessionId);
 			} else if (
 				settled !== null &&
@@ -2620,7 +2677,7 @@ async function collectOnce(
 				// The lane is settled either way, so this is not a failure — logging
 				// it would cry wolf on every routine race. Teardown belongs to
 				// whoever landed the write, so we do not perform it here.
-				settleFailureLogs.delete(laneLabel);
+				clearLaneDiagnostics(settleFailureLogs, laneLabel);
 			} else {
 				// Genuine failure: the write threw (null) or the record is STILL
 				// open, so nothing settled it and the reason would otherwise vanish.
@@ -2644,10 +2701,58 @@ async function collectOnce(
 				hostTimeouts,
 				revisionDigestBudgetMs: laneBudgets.revisionDigestBudgetMs,
 				receiptAppendFailureLogs,
+				revisionSnapshots,
+				settleFailureLogs,
 			}),
 		);
 	}
 	await Promise.all(pendingSettlements);
+}
+
+/**
+ * Issue #2381: key for the invocation-local revision-snapshot map. Exactly the
+ * argument list of `resolvePrWorkflowRevisionDigestAsync(directory, prHeadSha)`,
+ * so a memoized entry can never be handed to a lane bound to a different head.
+ * NUL-joined because neither component may contain a NUL byte.
+ */
+function revisionSnapshotKey(
+	directory: string,
+	prHeadSha: string | undefined | null,
+): string {
+	return `${directory}\u0000${prHeadSha ?? ''}`;
+}
+
+/**
+ * Issue #2381: retire every diagnostic recorded for one lane.
+ *
+ * These sets are keyed by MESSAGE, not by lane, and their producers use
+ * different shapes: `collectOnce` records a bare lane label for a failed settle
+ * write, while `settleCollectedLane` and the transport-error sites record full
+ * sentences naming the lane. A plain `delete(laneLabel)` therefore clears only
+ * the bare shape, so a lane that failed on one poll and recovered on the next
+ * kept reporting "lane left pending" on a collection that actually completed.
+ * Diagnostics must describe CURRENT state, not history.
+ *
+ * Matching on the QUOTED label is what makes this safe: every sentence-shaped
+ * entry writes `lane "<label>"`, so lane "a" cannot clear lane "ab" — `lane
+ * "ab"` does not contain `"a"`. The label is `laneId ?? correlationId`;
+ * `LaneSchema.id` forbids quotes outright, and `correlationId` is the host
+ * session id in practice, though its schema only bounds length. Entries also
+ * embed bounded `formatError(...)` text, so a host error string that literally
+ * contained `"<another-lane>"` could cross-clear that lane's entry; the
+ * consequence is a MISSING diagnostic, never a wrong lane state. A
+ * `Map<laneLabel, Set<string>>` would close that residue if this is revisited.
+ * Deleting from a Set during `for..of` is well-defined — visited and current
+ * entries are unaffected and no other entry is skipped.
+ */
+function clearLaneDiagnostics(
+	diagnostics: Set<string>,
+	laneLabel: string,
+): void {
+	diagnostics.delete(laneLabel);
+	for (const entry of diagnostics) {
+		if (entry.includes(`"${laneLabel}"`)) diagnostics.delete(entry);
+	}
 }
 
 async function settleCollectedLane(args: {
@@ -2658,6 +2763,8 @@ async function settleCollectedLane(args: {
 	hostTimeouts: Set<string>;
 	revisionDigestBudgetMs: number;
 	receiptAppendFailureLogs: Set<string>;
+	revisionSnapshots: Map<string, Promise<string | null>>;
+	settleFailureLogs: Set<string>;
 }): Promise<void> {
 	const {
 		directory,
@@ -2666,29 +2773,88 @@ async function settleCollectedLane(args: {
 		deadline,
 		hostTimeouts,
 		receiptAppendFailureLogs,
+		revisionSnapshots,
+		settleFailureLogs,
 	} = args;
+	const laneLabel = record.laneId ?? record.correlationId;
 	let collectedRevisionDigest: string | undefined;
 	const prHeadSha = record.workspace?.prHeadSha;
 	if (prHeadSha) {
 		try {
+			// Issue #2381: resolve at most once per (project root, PR head) for this
+			// invocation. The map holds the RAW promise; the per-lane deadline wraps
+			// the AWAIT of that shared promise, so a lane with no remaining budget
+			// degrades only itself instead of binding its starved budget to every
+			// other lane's view of the digest.
+			const key = revisionSnapshotKey(directory, prHeadSha);
+			let snapshot = revisionSnapshots.get(key);
+			if (snapshot === undefined) {
+				snapshot = _internals.resolvePrWorkflowRevisionDigestAsync(
+					directory,
+					prHeadSha,
+				);
+				const pending = snapshot;
+				// Two jobs, both required:
+				//  1. Never let this surface as an unhandled rejection — a lane whose
+				//     own budget expires stops awaiting, so nothing else may be
+				//     attached by then.
+				//  2. EVICT a rejected snapshot. Eviction runs before the awaiting
+				//     lanes' own catch handlers, so within one pass a later lane on
+				//     the same head may start a fresh resolution — at worst one host
+				//     call per lane for a head that is failing outright. That is
+				//     INTENTIONAL: retrying is the entire point of evicting, each
+				//     lane now carries its own digest reserve, and the retry is
+				//     bounded by the lane count and writes nothing.
+				//     The map outlives a single poll
+				//     iteration (it is invocation-scoped so that `wait: true` does not
+				//     re-resolve the digest on every poll), so caching a REJECTION
+				//     would make one transient `git` failure terminal for the whole
+				//     invocation: every later poll would re-await the same rejected
+				//     promise and the lane would stay pending until the caller's
+				//     budget ran out. Memoize successes, retry failures.
+				pending.catch(() => {
+					if (revisionSnapshots.get(key) === pending) {
+						revisionSnapshots.delete(key);
+					}
+				});
+				revisionSnapshots.set(key, pending);
+			}
+			const shared = snapshot;
+			// EVERY digest-needing lane awaits under its OWN budget, whether it
+			// started the resolution or is reusing one already in flight. That is
+			// what keeps a slow resolution from becoming an unbounded wait for the
+			// lanes that merely joined it: each lane fails on its own clock and is
+			// left pending with its own diagnostic. `collectOnce` correspondingly
+			// prices one digest call for every such lane.
 			collectedRevisionDigest =
 				(await withCollectionDeadline(
-					() =>
-						_internals.resolvePrWorkflowRevisionDigestAsync(
-							directory,
-							prHeadSha,
-						),
+					() => shared,
 					deadline,
-					`revision digest for lane "${record.laneId ?? record.correlationId}"`,
+					`revision digest for lane "${laneLabel}"`,
 					hostTimeouts,
 					args.revisionDigestBudgetMs,
 				)) ?? undefined;
-		} catch {
-			// Without a bounded, current digest the durable artifact cannot be
-			// correlated safely. Leave the lane pending; late completion is ignored.
+		} catch (error) {
+			// Issue #2381: without a bounded, current digest the durable artifact
+			// cannot be correlated safely, so the lane stays PENDING and is retried
+			// on a later collection — snapshot failure is never converted into a
+			// child failure. This previously returned silently, so an operator saw a
+			// lane sit pending with no stated reason. Report it through the existing
+			// settle-diagnostic channel, which surfaces in `result.errors`.
+			settleFailureLogs.add(
+				`revision snapshot unavailable for lane "${laneLabel}"; lane left pending: ${formatError(
+					error,
+				).slice(0, 300)}`,
+			);
 			return;
 		}
 	}
+	// Issue #2381: the digest resolved (or was not needed), so this lane is
+	// proceeding to settle. Retire any diagnostic an earlier poll recorded for
+	// it — otherwise a lane that failed its digest once and succeeded on the next
+	// poll would keep reporting "lane left pending" on a collection that actually
+	// completed. Diagnostics describe CURRENT state, not history.
+	clearLaneDiagnostics(settleFailureLogs, laneLabel);
 	const output = prepareLaneOutput({
 		directory,
 		batchId: record.batchId ?? record.callID,
@@ -2881,369 +3047,25 @@ async function settleCollectedLane(args: {
 	});
 }
 
-function isPrReviewWaitTerminalizableMode(mode: string | undefined): boolean {
-	return mode?.startsWith('swarm-pr-review:') ?? false;
-}
-
-function hasActivePrReviewWaitDeadlineLanes(
-	records: readonly BackgroundDelegationRecord[],
-): boolean {
-	return records.some(
-		(record) =>
-			(record.status === 'pending' || record.status === 'running') &&
-			isPrReviewWaitTerminalizableMode(record.mode),
-	);
-}
-
-function reservePrReviewWaitFinalizationBudgetMs(
-	records: readonly BackgroundDelegationRecord[],
-	timeoutMs: number,
-): number {
-	if (!hasActivePrReviewWaitDeadlineLanes(records)) return 0;
-	return Math.min(timeoutMs, PR_REVIEW_WAIT_FINALIZATION_RESERVE_MS);
-}
-
-function finalizePrReviewWaitDeadlineNeeded(
-	records: readonly BackgroundDelegationRecord[],
-	skipOrdinaryWaitPolling: boolean,
-	pollingDeadline: number,
-): boolean {
-	return (
-		hasActivePrReviewWaitDeadlineLanes(records) &&
-		(skipOrdinaryWaitPolling || _internals.now() >= pollingDeadline)
-	);
-}
-
-function remainingCollectionBudgetMs(deadline: number): number {
-	return Math.max(0, deadline - _internals.now());
-}
-
-function getCurrentPrReviewWaitDeadlineCandidate(
-	directory: string,
-	record: BackgroundDelegationRecord,
-): BackgroundDelegationRecord | null {
-	const current = findByCorrelationId(directory, record.correlationId);
-	if (!current) return null;
-	if (current.subagentSessionId !== record.subagentSessionId) return null;
-	if ((current.generation ?? 1) !== (record.generation ?? 1)) return null;
-	if (current.status !== 'pending' && current.status !== 'running') return null;
-	if (!isPrReviewWaitTerminalizableMode(current.mode)) return null;
-	return current;
-}
-
-function buildPrReviewWaitDeadlineError(args: {
-	record: BackgroundDelegationRecord;
-	salvageState: string;
-	abortState: string;
-	detail?: string;
-}): string {
-	const message =
-		`PR_REVIEW_COLLECTION_DEADLINE_EXCEEDED: batch=${args.record.batchId ?? '(missing)'} lane=${args.record.laneId ?? '(missing)'} workflow_lane=${args.record.workflowLane ?? '(missing)'} ` +
-		`runtime deadline exceeded during waited collect; ${args.salvageState}; ${args.abortState}` +
-		(args.detail ? `; detail=${args.detail}` : '');
-	return message.slice(0, 1_024);
-}
-
-async function buildPrReviewWaitDeadlineProspectiveResult(args: {
-	directory: string;
-	record: BackgroundDelegationRecord;
-	transcript: ReturnType<typeof extractAssistantTranscript>;
-	deadline: number;
-	receiptAppendFailureLogs: Set<string>;
-}): Promise<{ result: BackgroundDelegationResult; detail?: string }> {
-	let collectedRevisionDigest: string | undefined;
-	const remainingDigestBudgetMs = remainingCollectionBudgetMs(args.deadline);
-	if (remainingDigestBudgetMs > 0 && args.record.workspace?.prHeadSha) {
-		try {
-			collectedRevisionDigest =
-				(await withTimeout(
-					_internals.resolvePrWorkflowRevisionDigestAsync(
-						args.directory,
-						args.record.workspace.prHeadSha,
-					),
-					remainingDigestBudgetMs,
-					`revision digest for lane "${args.record.laneId ?? args.record.correlationId}" exceeded the runtime-deadline finalization budget (${remainingDigestBudgetMs}ms)`,
-				)) ?? undefined;
-		} catch {
-			collectedRevisionDigest = undefined;
-		}
-	}
-
-	const forcedTranscript = {
-		...args.transcript,
-		transcriptIncomplete: true,
-	};
-	const output = prepareLaneOutput({
-		directory: args.directory,
-		batchId: args.record.batchId ?? args.record.callID,
-		laneId: args.record.laneId ?? args.record.correlationId,
-		agent: args.record.swarmPrefixedAgent,
-		role: args.record.normalizedAgent,
-		sessionId: args.record.subagentSessionId,
-		parentSessionId: args.record.parentSessionId,
-		mode: args.record.mode,
-		workflowLane: args.record.workflowLane,
-		prHeadSha: args.record.workspace?.prHeadSha ?? undefined,
-		gitHead: args.record.workspace?.gitHead ?? undefined,
-		revisionDigest: collectedRevisionDigest,
-		scope: args.record.workspace?.scope ?? undefined,
-		source: 'collect_lane_results',
-		text: forcedTranscript.text,
-		messageCount: forcedTranscript.messageCount,
-		transcriptIncomplete: true,
-	});
-	let prospectiveResult: BackgroundDelegationResult = {
-		text: output.output,
-		chars: output.output_chars,
-		truncated: output.output_truncated,
-		digest: output.output_digest,
-		...(output.output_ref ? { outputRef: output.output_ref } : {}),
-		outputPreviewChars: output.output.length,
-		...(output.output_degraded !== undefined
-			? { outputDegraded: output.output_degraded }
-			: {}),
-		...(output.output_artifact_error
-			? { outputArtifactError: output.output_artifact_error }
-			: {}),
-		transcriptIncomplete: true,
-		messageCount: forcedTranscript.messageCount,
-	};
-	let detail: string | undefined;
-
-	if (
-		args.record.mode === 'swarm-pr-review:base' ||
-		args.record.mode === 'swarm-pr-review:micro' ||
-		args.record.mode === 'swarm-pr-review:council'
-	) {
-		const artifact = output.output_ref
-			? (readLaneOutput(args.directory, output.output_ref)?.artifact ?? null)
-			: null;
-		const validation = validatePrReviewDiscoveryLaneCompletion({
-			record: args.record,
-			result: prospectiveResult,
-			artifact,
-			expected: {
-				mode: args.record.mode,
-				workflowLane: args.record.workflowLane ?? '',
-				ownedWorkflowLanes: args.record.ownedWorkflowLanes,
-				prHeadSha: args.record.workspace?.prHeadSha ?? '',
-				gitHead: args.record.workspace?.gitHead ?? '',
-				revisionDigest: collectedRevisionDigest ?? '',
-				reviewScope: args.record.workspace?.scope ?? undefined,
-			},
-		});
-		if (validation.ok && validation.salvaged?.length) {
-			prospectiveResult.salvagedWorkflowLanes = [...validation.salvaged];
-			if (validation.recoveries?.length) {
-				prospectiveResult.salvagedWorkflowLaneRecoveries = [
-					...validation.recoveries,
-				];
-			}
-		}
-		if (!validation.ok) {
-			prospectiveResult.workflowLaneFailureClass = 'contract';
-			const family =
-				args.record.mode === 'swarm-pr-review:base'
-					? 'base_explorer'
-					: 'micro_lane';
-			detail =
-				`PR_REVIEW_DISCOVERY_CONTRACT_INVALID: ${formatPrReviewLaneValidationFailure(validation.failure)}; expected candidate row: ${CANDIDATE_HEADERS[family]}; expected clean row: ${CLEAN_TEMPLATES[family]}`.slice(
-					0,
-					800,
-				);
-		}
-	}
-
-	const isPrReviewVerdictLane =
-		args.record.mode === 'swarm-pr-review:reviewer' ||
-		args.record.mode === 'swarm-pr-review:critic';
-	if (isPrReviewVerdictLane) {
-		const artifact = output.output_ref
-			? (readLaneOutput(args.directory, output.output_ref)?.artifact ?? null)
-			: null;
-		const remainingValidationBudgetMs = remainingCollectionBudgetMs(
-			args.deadline,
-		);
-		if (remainingValidationBudgetMs <= 0) {
-			detail =
-				'PR_WORKFLOW_CONTRACT_INVALID: transport recovery validation skipped because the runtime-deadline finalization budget was exhausted';
-		} else {
-			try {
-				const validation = await withTimeout(
-					_internals.validatePrWorkflowTransportRecovery({
-						directory: args.directory,
-						record: args.record,
-						result: prospectiveResult,
-						artifact,
-						revisionDigest: collectedRevisionDigest ?? '',
-					}),
-					remainingValidationBudgetMs,
-					`transport recovery validation for lane "${args.record.laneId ?? args.record.correlationId}" exceeded the runtime-deadline finalization budget (${remainingValidationBudgetMs}ms)`,
-				);
-				if (validation.receipt) {
-					const resultWithReceipt = appendPrReviewCollectionReceipt(
-						args.record,
-						prospectiveResult,
-						validation.receipt,
-					);
-					if (resultWithReceipt) {
-						prospectiveResult = resultWithReceipt;
-					} else if (
-						consumePrReviewReceiptAppendFailureLog(
-							args.receiptAppendFailureLogs,
-							args.record.parentSessionId,
-							args.record.correlationId,
-						)
-					) {
-						logger.log(
-							`[dispatch-lanes] withheld PR-review terminal result without receipt during runtime-deadline finalization: correlation=${args.record.correlationId} batch=${args.record.batchId ?? '(missing)'} lane=${args.record.laneId ?? '(missing)'}`,
-						);
-					}
-				}
-				if (!validation.ok) {
-					const errorCode =
-						validation.failure?.predicate === 'reviewer.verdict_rows' ||
-						validation.failure?.predicate === 'critic.verdict_rows'
-							? 'PR_REVIEW_VERDICT_CONTRACT_INVALID'
-							: 'PR_WORKFLOW_CONTRACT_INVALID';
-					detail = `${errorCode}: ${validation.reason}`.slice(0, 800);
-				} else if (validation.recoveries?.length) {
-					const workflowLane = args.record.workflowLane?.trim();
-					if (workflowLane) {
-						prospectiveResult.salvagedWorkflowLanes = [workflowLane];
-					}
-					prospectiveResult.salvagedWorkflowLaneRecoveries = [
-						...(prospectiveResult.salvagedWorkflowLaneRecoveries ?? []),
-						...validation.recoveries,
-					];
-				}
-			} catch (error) {
-				detail = `PR_WORKFLOW_CONTRACT_INVALID: ${formatError(error)}`.slice(
-					0,
-					800,
-				);
-			}
-		}
-	}
-	return { result: prospectiveResult, detail };
-}
-
-async function finalizePrReviewWaitDeadlineLanes(args: {
-	session: Pick<SessionOps, 'messages' | 'abort'>;
-	directory: string;
-	records: readonly BackgroundDelegationRecord[];
-	deadline: number;
-	receiptAppendFailureLogs: Set<string>;
-	resourceFailures?: ReadonlySet<string>;
-}): Promise<void> {
-	for (const record of args.records) {
-		const current = getCurrentPrReviewWaitDeadlineCandidate(
-			args.directory,
-			record,
-		);
-		if (!current) continue;
-
-		let prospectiveResult: BackgroundDelegationResult | undefined;
-		let detail: string | undefined;
-		let salvageState = 'salvage_skipped=no_budget';
-		let abortState = 'abort_skipped=no_budget';
-
-		const transcriptBudgetMs = remainingCollectionBudgetMs(args.deadline);
-		if (transcriptBudgetMs > 0) {
-			try {
-				const messages = await withTimeout(
-					args.session.messages!({
-						path: { id: current.subagentSessionId },
-						query: {
-							directory: args.directory,
-							limit: ASYNC_MESSAGE_FETCH_LIMIT,
-						},
-					}),
-					transcriptBudgetMs,
-					`session.messages for lane "${current.laneId ?? current.correlationId}" exceeded the runtime-deadline finalization budget (${transcriptBudgetMs}ms)`,
-				);
-				if (messages.data) {
-					const transcript = extractAssistantTranscript(messages.data);
-					if (transcript.text) {
-						salvageState = 'salvage_attempted=partial_transcript';
-						const built = await buildPrReviewWaitDeadlineProspectiveResult({
-							directory: args.directory,
-							record: current,
-							transcript,
-							deadline: args.deadline,
-							receiptAppendFailureLogs: args.receiptAppendFailureLogs,
-						});
-						prospectiveResult = built.result;
-						detail = built.detail;
-					} else {
-						// Issue #2349: same defect class as the steady-state loop —
-						// the error evidence was already in hand and discarded, so the
-						// operator saw only "empty output" and never the reason. This
-						// site already terminalizes at deadline, so naming the cause is
-						// a DISCLOSURE improvement, not a settlement change.
-						salvageState = transcript.terminalError
-							? `salvage_skipped=provider_error:${transcript.terminalError.category}`
-							: 'salvage_skipped=empty_output';
-					}
-				} else {
-					salvageState = 'salvage_skipped=no_messages';
-				}
-			} catch {
-				salvageState = 'salvage_skipped=host_timeout';
-			}
-		}
-
-		const currentBeforeAbort = getCurrentPrReviewWaitDeadlineCandidate(
-			args.directory,
-			record,
-		);
-		const abortBudgetMs = remainingCollectionBudgetMs(args.deadline);
-		if (
-			currentBeforeAbort &&
-			abortBudgetMs > 0 &&
-			typeof args.session.abort === 'function'
-		) {
-			try {
-				await withTimeout(
-					args.session.abort({
-						path: { id: currentBeforeAbort.subagentSessionId },
-					}),
-					abortBudgetMs,
-					`session.abort for lane session "${currentBeforeAbort.subagentSessionId}" exceeded the runtime-deadline finalization budget (${abortBudgetMs}ms)`,
-				);
-				abortState = 'abort_attempted=best_effort';
-			} catch {
-				abortState = 'abort_failed=budget_or_host_error';
-			}
-		}
-
-		const finalError = buildPrReviewWaitDeadlineError({
-			record: current,
-			salvageState,
-			abortState,
-			detail,
-		});
-		const terminalResult =
-			prospectiveResult ??
-			({
-				error: finalError,
-				chars: finalError.length,
-				truncated: false,
-				digest: digestText(finalError),
-			} satisfies BackgroundDelegationResult);
-		terminalResult.error = finalError;
-		terminalResult.workflowLaneFailureClass ??=
-			args.resourceFailures?.has(current.correlationId) === true
-				? 'resource'
-				: 'deadline';
-		await appendDelegationTransition(args.directory, current.correlationId, {
-			status: 'error',
-			result: terminalResult,
-			expectedCurrentStatuses: ['pending', 'running'],
-		});
-	}
-}
-
+// Issue #2381: the PR-review wait-deadline terminalizer and its entire helper
+// cluster were deleted here. A collection wait budget is an OBSERVER deadline;
+// its expiry says nothing about the child and must never write a terminal
+// transition. The 30-minute presumed-stale sweep (src/hooks/pr-workflow-gate.ts,
+// PR_WORKFLOW_STALE_LANE_TIMEOUT_MS, issue #2251) remains the only terminal
+// backstop for an active PR-review lane.
+//
+// Known consequence: this removed the only producer of
+// `workflowLaneFailureClass: 'deadline'`. The stale sweep writes `status: 'stale'`
+// with no `result`, so a pure-wedge lane now carries no typed failure class and
+// the partial-base-coverage admission gate (pr-workflow-gate.ts,
+// `latestTypedFailureForBaseDimension`) is unavailable for that case. The
+// `'contract'` and `'resource'` producers that classify a lane on the CHILD's own
+// evidence are unaffected (`settleCollectedLane`, `appendAsyncLaneLaunchError`),
+// and normal six-of-six completion is unaffected. Note the removed no-client
+// branch also used to stamp `'resource'` from observer transport failure; that
+// classification is intentionally gone too, since an observer's broken transport
+// is not evidence about the child. Terminal N-of-6 completion is issue #2383
+// (PR 3 of the #2380 program); this PR deliberately does not pre-empt it.
 function consumePrReviewReceiptAppendFailureLog(
 	loggedFailures: Set<string>,
 	parentSessionId: string,
@@ -3999,6 +3821,17 @@ function buildCollectResult(
 			record.status === 'ingesting',
 	);
 	const consumed = records.filter((record) => record.status === 'consumed');
+	// Issue #2381: pending identities are derived from the UNFILTERED record set,
+	// so they are reported even when `includePending` excluded these lanes from
+	// `lane_results` (the default under `wait: true`).
+	const pendingLanes: CollectPendingLaneIdentity[] = pending.map((record) => ({
+		batch_id: batchId,
+		lane_id: record.laneId ?? record.correlationId,
+		status: record.status,
+		...(record.result?.outputRef
+			? { output_ref: record.result.outputRef }
+			: {}),
+	}));
 	return {
 		success:
 			pending.length === 0 &&
@@ -4015,6 +3848,7 @@ function buildCollectResult(
 		consumed: consumed.length,
 		all_settled: pending.length === 0,
 		lane_results: laneResults,
+		...(pendingLanes.length > 0 ? { pending_lanes: pendingLanes } : {}),
 	};
 }
 
@@ -5176,7 +5010,7 @@ export const dispatch_lanes_async: ReturnType<typeof createSwarmTool> =
 export const collect_lane_results: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Collect or poll results for a dispatch_lanes_async batch. Supports two modes: (1) non-blocking poll (wait omitted or false) — performs one collection pass and returns current lane status, including pending lane identities by default, and any settled results so you can process completed lanes while continuing independent work; (2) blocking join (wait: true) — polls until all lanes settle or the collection wait budget expires. Busy/retry lanes do not become stale solely because they run for a long time; any lane pending for minutes additionally carries an alert-only pending_liveness diagnostic (lane id, elapsed ms, host session status, stalledSuspect) that never cancels or replaces anything. A lane whose backing session records a terminal provider error (quota/billing/auth) AND produced no output AND has an over turn (a completed timestamp, or an idle host) settles immediately with the classified reason instead of staying pending — as failed, or as cancelled when the host reports the turn was aborted. A lane that produced output, or whose turn may still be retrying, keeps polling. Does not advance workflow gates.',
+			'Collect or poll results for a dispatch_lanes_async batch. This tool is a pure OBSERVER of lane state: it never cancels or terminalizes child work except when you explicitly pass cancel_pending. Supports two modes: (1) non-blocking poll (wait omitted or false) — performs one collection pass and returns current lane status plus any settled results so you can process completed lanes while continuing independent work; (2) blocking join (wait: true) — polls until all lanes settle or the collection wait budget expires. The wait budget (timeout_ms) bounds THIS OBSERVER CALL ONLY: its expiry does not cancel, kill, or fail the lanes, and it is not evidence that a lane died. timeout_ms: 0 is a valid immediate, non-destructive snapshot. Whenever any lane is still unsettled the result carries pending_lanes (batch_id, lane_id, stored status, and output_ref when one exists) regardless of include_pending, so outstanding work is never silently omitted. If a collection returns pending lanes, poll again, cancel explicitly with cancel_pending, or let the presumed-stale backstop settle genuinely dead lanes — do NOT abort the workflow merely because an observer call expired or because the host messages client was unavailable. Busy/retry lanes do not become stale solely because they run for a long time; any lane pending for minutes additionally carries an alert-only pending_liveness diagnostic (lane id, elapsed ms, host session status, stalledSuspect, degradedReason) that never cancels or replaces anything and never proves provider failure. A lane whose backing session records a terminal provider error (quota/billing/auth) AND produced no output AND has an over turn (a completed timestamp, or an idle host) settles immediately with the classified reason instead of staying pending — as failed, or as cancelled when the host reports the turn was aborted. A lane that produced output, or whose turn may still be retrying, keeps polling. Does not advance workflow gates.',
 		args: {
 			batch_id: CollectLaneResultsArgsSchema.shape.batch_id,
 			wait: CollectLaneResultsArgsSchema.shape.wait,

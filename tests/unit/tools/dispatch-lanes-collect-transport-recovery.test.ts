@@ -291,20 +291,42 @@ describe('collect_lane_results transport recovery provenance', () => {
 			),
 		);
 
-		expect(digestCalls).toBe(2);
-		expect(result.completed).toBe(1);
-		expect(result.pending).toBe(1);
+		// Issue #2381: both lanes are bound to the SAME (project root, PR head), so
+		// the collection resolves ONE shared revision snapshot rather than one per
+		// lane. The previous expectation of two calls encoded exactly the redundancy
+		// item 4 removes, and its mock made the second call succeed instantly —
+		// which the real host would not do, since a hung digest for a given tree
+		// hangs identically on a retry.
+		expect(digestCalls).toBe(1);
+
+		// With the shared resolution hung, NEITHER lane can be safely correlated, so
+		// both stay pending with a bounded diagnostic. Critically, the observer still
+		// RETURNS (bounded by each lane's own deadline) and terminalizes nothing.
+		expect(result.completed).toBe(0);
+		expect(result.pending).toBe(2);
+		expect(result.failed).toBe(0);
 		expect(
 			result.lane_results.find((lane) => lane.id === 'lane-a')?.status,
 		).toBe('pending');
 		expect(
 			result.lane_results.find((lane) => lane.id === 'lane-b')?.status,
-		).toBe('completed');
-		expect(result.errors?.join('; ')).toContain('revision digest for lane');
+		).toBe('pending');
+		expect(result.pending_lanes).toHaveLength(2);
+		// Each lane times out on its OWN digest budget rather than one lane
+		// blocking on the other's: both lane labels appear in the diagnostics. If a
+		// reusing lane awaited with no budget of its own it would ride the whole
+		// collection deadline instead of emitting its own bounded diagnostic.
+		const digestErrors = (result.errors ?? []).filter((entry) =>
+			entry.includes('revision digest for lane'),
+		);
+		expect(digestErrors.some((entry) => entry.includes('lane-a'))).toBe(true);
+		expect(digestErrors.some((entry) => entry.includes('lane-b'))).toBe(true);
 
 		resolveHungDigest?.('late-revision');
 		await Promise.resolve();
 		await Promise.resolve();
+		// The hung resolution landing late does not retroactively settle or
+		// terminalize anything; a LATER collection picks the lanes up.
 		expect(findByCorrelationId(directory, 'lane-a-session')?.status).toBe(
 			'pending',
 		);

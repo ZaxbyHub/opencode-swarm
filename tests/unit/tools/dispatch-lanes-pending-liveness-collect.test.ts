@@ -225,4 +225,59 @@ describe('collect_lane_results surfaces the advisory (issue #2280 Part B)', () =
 		// caller's (exhausted) budget.
 		expect(statusCalls).toBe(0);
 	});
+
+	test('the no-client path still runs the liveness advisory (issue #2381)', async () => {
+		// Issue #2381 made the missing-messages-client branch fall through to the
+		// shared result assembly instead of returning early, so liveness is now
+		// evaluated on a path that previously returned before it ever ran. The
+		// advisory stays alert-only here too: the lane must be untouched.
+		await recordCriticLane('c-noclient-1', FIVE_MINUTES_MS);
+		// A session object with NO `messages` function at all.
+		_internals.getSessionOps = () => ({
+			status: async () => ({ data: { 'sub-c-noclient-1': { type: 'busy' } } }),
+		});
+		installGateStatus({ 'sub-c-noclient-1': { type: 'busy' } });
+
+		const result = await executeCollectLaneResults(
+			{ batch_id: 'critic-batch', wait: true },
+			directory,
+		);
+
+		expect(result.failure_class).toBe('no_client');
+		expect(result.pending).toBe(1);
+		expect(result.failed).toBe(0);
+		expect(result.pending_liveness).toEqual([
+			{
+				laneId: 'critic-lane-1',
+				pendingMs: FIVE_MINUTES_MS,
+				hostStatus: 'busy',
+				stalledSuspect: false,
+			},
+		]);
+		// Alert-only, and non-destructive: an unavailable observer transport says
+		// nothing about the child.
+		expect(laneStatusOnDisk(directory, 'c-noclient-1')).toBe('pending');
+	});
+
+	test('no-client with an unavailable probe degrades rather than terminalizing (issue #2381)', async () => {
+		await recordCriticLane('c-noclient-2', FIVE_MINUTES_MS);
+		_internals.getSessionOps = () => ({});
+		// The gate-side probe has no host either.
+		gateInternals.getSessionOps = () => ({});
+
+		const result = await executeCollectLaneResults(
+			{ batch_id: 'critic-batch', wait: true },
+			directory,
+		);
+
+		expect(result.failure_class).toBe('no_client');
+		expect(result.pending).toBe(1);
+		expect(result.failed).toBe(0);
+		expect(result.pending_liveness?.[0]?.stalledSuspect).toBe(true);
+		expect(result.pending_liveness?.[0]?.degradedReason).toBe(
+			'probe-unavailable',
+		);
+		// A degraded probe is an observer diagnostic, never terminal evidence.
+		expect(laneStatusOnDisk(directory, 'c-noclient-2')).toBe('pending');
+	});
 });

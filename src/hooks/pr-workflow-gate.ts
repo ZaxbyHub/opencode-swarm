@@ -81,6 +81,7 @@ import {
 } from '../background/workspace-snapshot.js';
 import { WRITE_TOOL_NAMES } from '../config/constants.js';
 import {
+	DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
 	type PrReviewResilienceConfig,
 	resolveGeneratedAgentRole,
 } from '../config/schema.js';
@@ -3280,7 +3281,12 @@ function snapshotPrReviewResiliencePolicy(
 	policy?: PrReviewResilienceConfig,
 ): PrReviewResiliencePolicyRecord {
 	return {
-		enabled: policy?.enabled ?? true,
+		// Issue #2381: must track DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.enabled. A
+		// hardcoded `?? true` here would force staged admission on for any caller
+		// that omits the policy, which then hard-BLOCKs tier M/L base dispatch —
+		// while the architect prompt now (correctly) tells the controller not to
+		// emit stage metadata by default.
+		enabled: policy?.enabled ?? DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.enabled,
 		canaryProbeMs: policy?.canary_probe_ms ?? 300_000,
 		statusProbeTimeoutMs: policy?.status_probe_timeout_ms ?? 2_000,
 		correlatedFailureThreshold: policy?.correlated_failure_threshold ?? 2,
@@ -8933,6 +8939,16 @@ export const _test_exports = {
 	 * shortening the threshold, not by waiting minutes.
 	 */
 	pendingLaneLivenessThresholdMs: PR_WORKFLOW_PENDING_LIVENESS_THRESHOLD_MS,
+	/**
+	 * Issue #2381: exposed so the staged-resilience DEFAULT can be pinned
+	 * directly. This resolution path is reached whenever a gate state carries no
+	 * recorded policy and no policy is supplied, and it previously hardcoded
+	 * `enabled: true`; the default flip is only real if this agrees with
+	 * `DEFAULT_PR_REVIEW_RESILIENCE_CONFIG`. Pure functions of their arguments,
+	 * so `_test_exports` is the right seam (no `mock.module` needed).
+	 */
+	effectivePrReviewResiliencePolicy,
+	snapshotPrReviewResiliencePolicy,
 	resolveCurrentGitHead,
 	resolveCurrentGitHeadAsync,
 	resolveCurrentUpstreamPushTarget,
