@@ -30,10 +30,11 @@ const originalAssessSandboxEnforcement =
 	guardrailsInternals.assessSandboxEnforcement;
 
 async function waitForFile(filePath: string, timeoutMs = 1_000): Promise<void> {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
+	const pollIntervalMs = 5;
+	const attempts = Math.max(1, Math.ceil(timeoutMs / pollIntervalMs));
+	for (let attempt = 0; attempt < attempts; attempt += 1) {
 		if (fs.existsSync(filePath)) return;
-		await new Promise((resolve) => setTimeout(resolve, 5));
+		await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
 	}
 }
 

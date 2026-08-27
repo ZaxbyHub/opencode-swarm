@@ -22,10 +22,7 @@ function config(overrides: Partial<GuardrailsConfig> = {}): GuardrailsConfig {
 	};
 }
 
-async function waitForAudit(
-	filePath: string,
-	attempts = 100,
-): Promise<void> {
+async function waitForAudit(filePath: string, attempts = 100): Promise<void> {
 	for (let attempt = 0; attempt < attempts; attempt += 1) {
 		if (fs.existsSync(filePath) && fs.readFileSync(filePath, 'utf8').trim())
 			return;
