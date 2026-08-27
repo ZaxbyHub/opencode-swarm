@@ -8,6 +8,9 @@ import {
 	_test_exports,
 	executeCollectLaneResults,
 } from '../../../src/tools/dispatch-lanes';
+
+const { assembleCollectionDiagnostics, addLaneDiagnostic } = _test_exports;
+
 import { createCollectLaneTimeoutFixture } from './dispatch-lanes-collect-host-timeout.fixtures';
 
 /**
@@ -319,5 +322,154 @@ describe('collection diagnostics report and then retire (#2381)', () => {
 		expect(
 			result.errors?.some((entry) => entry.includes('lane left pending')),
 		).toBeFalsy();
+	});
+
+	test('a host error carrying a secret, credential URL, or command is REDACTED out of result.errors', async () => {
+		// PR-review FB-1 falsification probe, verbatim from the review: make a
+		// pending lane's session.messages reject with an error containing sentinel
+		// secrets, then assert the sentinels do not appear in result.errors.
+		// `formatError` returns a raw Error.message (unbounded) or a JSON.stringify
+		// of an arbitrary payload; truncation is not redaction, so the cause is
+		// routed through the repository's failure-evidence redactor.
+		const directory = makeTempDir();
+		const batchId = 'lifecycle-redaction';
+		await recordPending({
+			directory,
+			batchId,
+			laneId: 'lane-a',
+			correlationId: `${batchId}-lane-a`,
+		});
+
+		const status = mock(async () => ({
+			data: { [`${batchId}-lane-a`]: { type: 'idle' } },
+			error: undefined,
+		}));
+		const messages = mock(async () => {
+			throw new Error(
+				'upstream failed: https://user:hunter2@api.example.com/v1/generate ' +
+					'AWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE ' +
+					'while running `curl -H "Authorization: Bearer sk_live_abcdef123456"`',
+			);
+		});
+		_internals.getSessionOps = () => ({ ...baseOps(), status, messages });
+
+		const result = await executeCollectLaneResults(
+			{ batch_id: batchId, wait: false, include_pending: true },
+			directory,
+		);
+
+		// The lane is still reported, and still pending — redaction must not cost
+		// the diagnostic the issue requires.
+		expect(result.pending).toBe(1);
+		const joined = (result.errors ?? []).join(' | ');
+		expect(joined).toContain('lane-a');
+		expect(joined).toContain('transport error');
+
+		// None of the sentinels survive.
+		for (const sentinel of [
+			'hunter2',
+			'AKIAIOSFODNN7EXAMPLE',
+			'sk_live_abcdef123456',
+			'api.example.com/v1/generate',
+		]) {
+			expect(joined).not.toContain(sentinel);
+		}
+	});
+
+	test('one lane error text cannot clear another lane diagnostic', async () => {
+		// PR-review FB-2. Diagnostics were message-keyed, so clearing matched on the
+		// quoted lane label INSIDE the message — and host error text can literally
+		// contain another lane's quoted id. Lane-keyed storage makes clearing an
+		// exact delete, so message content can no longer reach another lane.
+		const directory = makeTempDir();
+		const batchId = 'lifecycle-cross-lane';
+		for (const lane of ['lane-a', 'lane-b']) {
+			await recordPending({
+				directory,
+				batchId,
+				laneId: lane,
+				correlationId: `${batchId}-${lane}`,
+			});
+		}
+
+		const status = mock(async () => ({
+			data: {
+				[`${batchId}-lane-a`]: { type: 'idle' },
+				[`${batchId}-lane-b`]: { type: 'idle' },
+			},
+			error: undefined,
+		}));
+		// lane-a fails with an error whose payload NAMES lane-b in quotes; lane-b
+		// then succeeds. Under message-keyed clearing, lane-b's success deleted
+		// lane-a's diagnostic.
+		const messages = mock(async ({ path }: { path: { id: string } }) => {
+			if (path.id === `${batchId}-lane-a`) {
+				throw new Error('routing failure for "lane-b" upstream');
+			}
+			return {
+				data: [assistantMessage('lane-b settled output')],
+				error: undefined,
+			};
+		});
+		_internals.getSessionOps = () => ({ ...baseOps(), status, messages });
+
+		const result = await executeCollectLaneResults(
+			{ batch_id: batchId, wait: false, include_pending: true },
+			directory,
+		);
+
+		expect(result.completed).toBe(1);
+		expect(result.pending).toBe(1);
+		// lane-a's diagnostic SURVIVES lane-b's success.
+		expect(result.errors?.some((entry) => entry.includes('"lane-a"'))).toBe(
+			true,
+		);
+	});
+
+	test('a flood of host-call timeouts cannot starve the lane-keyed diagnostics', () => {
+		// Closeout-review blocker, pinned directly on the union assembly.
+		//
+		// An earlier revision used ONE shared cap and spread `hostTimeouts` FIRST.
+		// `hostTimeouts` is not bounded by lane count — a lane can time out on
+		// abort/status/messages/digest in a single poll, and each entry embeds the
+		// remaining budget, so a `wait: true` invocation accrues fresh, never-cleared
+		// entries every poll. Spread first into a shared slice, that unbounded
+		// channel could consume the whole budget and truncate away the lane-keyed
+		// transport diagnostic that #2381 exists to surface.
+		//
+		// Driving a real timeout flood through the poll loop would need a mocked
+		// clock, which trips the stale sweep and masks what is under test. The
+		// invariant is a property of the ASSEMBLY, so it is pinned here instead:
+		// channels are bounded independently and cannot starve one another.
+		const hostTimeouts = new Set<string>(
+			Array.from(
+				{ length: 500 },
+				(_, i) =>
+					`session.messages for lane "t${i}" exceeded the remaining collect_lane_results budget (${i}ms)`,
+			),
+		);
+		const settleFailureLogs = new Map<string, Set<string>>();
+		const collectionResourceFailures = new Map<string, Set<string>>();
+		addLaneDiagnostic(
+			collectionResourceFailures,
+			'victim',
+			'session.messages transport error for lane "victim"; lane left pending: boom',
+		);
+
+		const diagnostics = assembleCollectionDiagnostics(
+			hostTimeouts,
+			settleFailureLogs,
+			collectionResourceFailures,
+		);
+
+		// The lane-keyed diagnostic survives 500 host timeouts.
+		expect(
+			diagnostics.some(
+				(entry) =>
+					entry.includes('"victim"') && entry.includes('transport error'),
+			),
+		).toBe(true);
+		// ...and the union stays bounded rather than echoing all 500.
+		expect(diagnostics.length).toBeLessThan(100);
 	});
 });

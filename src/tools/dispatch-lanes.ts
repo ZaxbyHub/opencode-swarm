@@ -58,7 +58,10 @@ import {
 	resolveGeneratedAgentRole,
 	stripKnownSwarmPrefix,
 } from '../config/schema.js';
-import { classifyProviderFailure } from '../failures/invocation-failure.js';
+import {
+	classifyProviderFailure,
+	sanitizeFailureEvidenceDisplay,
+} from '../failures/invocation-failure.js';
 import {
 	activatePrWorkflow,
 	assertCurrentCheckoutHead,
@@ -938,6 +941,8 @@ export const _test_exports = {
 	nextCollectPollInterval,
 	promptHash,
 	reserveCollectionLaneCallBudgets,
+	assembleCollectionDiagnostics,
+	addLaneDiagnostic,
 	isRetryableSessionCreateFailure,
 	DispatchLanesArgsSchema,
 	DispatchLanesAsyncArgsSchema,
@@ -1870,14 +1875,14 @@ export async function executeCollectLaneResults(
 	const timeoutMs = parsed.data.timeout_ms ?? DEFAULT_COLLECT_TIMEOUT_MS;
 	const deadline = _internals.now() + timeoutMs;
 	const hostTimeouts = new Set<string>();
-	const collectionResourceFailures = new Set<string>();
+	const collectionResourceFailures: LaneDiagnostics = new Map();
 	// This call processes at most MAX_LANES records, so this per-invocation set
 	// is bounded and prevents a persistently unencodable terminal receipt from
 	// logging once per wait-loop poll.
 	const receiptAppendFailureLogs = new Set<string>();
 	// Issue #2349: bounded the same way (at most MAX_LANES entries, keyed by lane
 	// label), and self-clearing when a later poll settles the lane successfully.
-	const settleFailureLogs = new Set<string>();
+	const settleFailureLogs: LaneDiagnostics = new Map();
 	const batchFilter =
 		context.sessionID !== undefined
 			? { parentSessionId: context.sessionID }
@@ -2014,11 +2019,11 @@ export async function executeCollectLaneResults(
 	// `hostTimeouts`, the error half surfaced nowhere. `result.message` stays
 	// keyed on `hostTimeouts` alone so a transport error is never mislabelled as
 	// a collection-deadline exhaustion.
-	const diagnostics = [
-		...hostTimeouts,
-		...settleFailureLogs,
-		...collectionResourceFailures,
-	];
+	const diagnostics = assembleCollectionDiagnostics(
+		hostTimeouts,
+		settleFailureLogs,
+		collectionResourceFailures,
+	);
 	if (diagnostics.length > 0) {
 		result.errors = diagnostics;
 	}
@@ -2465,7 +2470,7 @@ async function collectOnce(
 	deadline: number,
 	hostTimeouts: Set<string>,
 	receiptAppendFailureLogs: Set<string>,
-	collectionResourceFailures: Set<string>,
+	collectionResourceFailures: LaneDiagnostics,
 	/**
 	 * Issue #2349: lane labels whose terminal-error settle write did NOT land.
 	 * Distinct from `hostTimeouts` on purpose — reusing that set would falsely
@@ -2473,7 +2478,7 @@ async function collectOnce(
 	 * again when a later poll settles the same lane, so the diagnostic reflects
 	 * current state rather than history.
 	 */
-	settleFailureLogs: Set<string>,
+	settleFailureLogs: LaneDiagnostics,
 	/**
 	 * Issue #2381: invocation-local revision snapshots, keyed by
 	 * `${directory}\0${prHeadSha}`. Holds the RAW resolution promise so each lane
@@ -2564,10 +2569,12 @@ async function collectOnce(
 				// to choose a failure class; deleting the terminalizer left this
 				// recording site with no reader, so the ERROR half of the issue's
 				// "pending plus diagnostic" requirement reported nothing at all.
-				collectionResourceFailures.add(
-					`session.messages transport error for lane "${laneLabel}"; lane left pending: ${formatError(
+				addLaneDiagnostic(
+					collectionResourceFailures,
+					laneLabel,
+					`session.messages transport error for lane "${laneLabel}"; lane left pending: ${safeDiagnosticCause(
 						error,
-					).slice(0, 300)}`,
+					)}`,
 				);
 			}
 			continue;
@@ -2576,10 +2583,12 @@ async function collectOnce(
 			if (messages.error) {
 				// Same class: the host answered with an error payload and no
 				// transcript. Pending, and now stated rather than swallowed.
-				collectionResourceFailures.add(
-					`session.messages returned an error for lane "${laneLabel}"; lane left pending: ${formatError(
+				addLaneDiagnostic(
+					collectionResourceFailures,
+					laneLabel,
+					`session.messages returned an error for lane "${laneLabel}"; lane left pending: ${safeDiagnosticCause(
 						messages.error,
-					).slice(0, 300)}`,
+					)}`,
 				);
 			}
 			continue;
@@ -2681,7 +2690,11 @@ async function collectOnce(
 			} else {
 				// Genuine failure: the write threw (null) or the record is STILL
 				// open, so nothing settled it and the reason would otherwise vanish.
-				settleFailureLogs.add(laneLabel);
+				addLaneDiagnostic(
+					settleFailureLogs,
+					laneLabel,
+					`terminal settle write did not land for lane "${laneLabel}"; lane left open`,
+				);
 			}
 			continue;
 		}
@@ -2723,36 +2736,121 @@ function revisionSnapshotKey(
 }
 
 /**
- * Issue #2381: retire every diagnostic recorded for one lane.
+ * Issue #2381 (PR review follow-up): lane-keyed collection diagnostics.
  *
- * These sets are keyed by MESSAGE, not by lane, and their producers use
- * different shapes: `collectOnce` records a bare lane label for a failed settle
- * write, while `settleCollectedLane` and the transport-error sites record full
- * sentences naming the lane. A plain `delete(laneLabel)` therefore clears only
- * the bare shape, so a lane that failed on one poll and recovered on the next
- * kept reporting "lane left pending" on a collection that actually completed.
- * Diagnostics must describe CURRENT state, not history.
- *
- * Matching on the QUOTED label is what makes this safe: every sentence-shaped
- * entry writes `lane "<label>"`, so lane "a" cannot clear lane "ab" — `lane
- * "ab"` does not contain `"a"`. The label is `laneId ?? correlationId`;
- * `LaneSchema.id` forbids quotes outright, and `correlationId` is the host
- * session id in practice, though its schema only bounds length. Entries also
- * embed bounded `formatError(...)` text, so a host error string that literally
- * contained `"<another-lane>"` could cross-clear that lane's entry; the
- * consequence is a MISSING diagnostic, never a wrong lane state. A
- * `Map<laneLabel, Set<string>>` would close that residue if this is revisited.
- * Deleting from a Set during `for..of` is well-defined — visited and current
- * entries are unaffected and no other entry is skipped.
+ * These were message-keyed `Set<string>`s, which forced clearing to match on the
+ * quoted lane label inside the message. Because entries embed host-derived error
+ * text, one lane's error could literally contain another lane's quoted id and
+ * clear it — a missing diagnostic, never a wrong lane state, but a real residue.
+ * Keying by lane removes the class outright: clearing is an exact `delete`, and
+ * no message content can ever influence another lane's entries.
  */
+type LaneDiagnostics = Map<string, Set<string>>;
+
+/**
+ * Per-lane and aggregate caps. Entries dedupe by string, but host error text can
+ * vary per poll (timestamps, remaining-ms), so a long `wait: true` invocation
+ * could otherwise accumulate one entry per poll per lane. These bound the worst
+ * case regardless of what the host emits.
+ */
+const MAX_DIAGNOSTICS_PER_LANE = 3;
+/**
+ * Per-CHANNEL caps, applied independently before the channels are concatenated.
+ *
+ * An earlier revision used one shared total and spread `hostTimeouts` first.
+ * That was wrong twice over. `hostTimeouts` is NOT bounded by lane count: a lane
+ * can time out on `session.abort`, `session.status`, `session.messages`, and the
+ * revision digest within a single poll, plus the stale-sweep sites, and each
+ * entry embeds the remaining budget in its text — so a `wait: true` invocation
+ * accrues fresh, never-cleared entries on every poll. Spread first into a shared
+ * slice, that unbounded channel could consume the whole budget and truncate the
+ * lane-keyed transport-error diagnostics this issue exists to surface, which is
+ * precisely the starvation the shared cap was meant to prevent.
+ *
+ * Capping each channel on its own removes the coupling: no channel can starve
+ * another, and the union stays bounded regardless of how one channel behaves.
+ */
+const MAX_HOST_TIMEOUT_DIAGNOSTICS = MAX_LANES * 4;
+const MAX_LANE_DIAGNOSTICS_PER_CHANNEL = MAX_LANES * MAX_DIAGNOSTICS_PER_LANE;
+
+/**
+ * Assemble `result.errors` from the three diagnostic channels.
+ *
+ * Extracted as a pure function so the starvation invariant is testable without
+ * having to drive the poll loop into a real timeout flood: each channel is
+ * bounded INDEPENDENTLY, so no channel can crowd out another no matter how one
+ * of them behaves. The lane-keyed channels lead because they carry the per-lane
+ * cause an operator acts on; `hostTimeouts` is the coarser "a host call ran out
+ * of budget" signal and takes its own slice.
+ */
+function assembleCollectionDiagnostics(
+	hostTimeouts: ReadonlySet<string>,
+	settleFailureLogs: LaneDiagnostics,
+	collectionResourceFailures: LaneDiagnostics,
+): string[] {
+	return [
+		...flattenLaneDiagnostics(settleFailureLogs),
+		...flattenLaneDiagnostics(collectionResourceFailures),
+		...[...hostTimeouts].slice(0, MAX_HOST_TIMEOUT_DIAGNOSTICS),
+	];
+}
+
+function addLaneDiagnostic(
+	diagnostics: LaneDiagnostics,
+	laneLabel: string,
+	message: string,
+): void {
+	let entries = diagnostics.get(laneLabel);
+	if (entries === undefined) {
+		entries = new Set<string>();
+		diagnostics.set(laneLabel, entries);
+	}
+	if (entries.has(message)) return;
+	// Keep the FIRST diagnostics for a lane rather than the most recent: the
+	// original failure is the one an operator needs, and later polls of a wedged
+	// lane tend to repeat the same cause with drifting detail.
+	if (entries.size >= MAX_DIAGNOSTICS_PER_LANE) return;
+	entries.add(message);
+}
+
+/** Exact, by-key retirement — no message content is consulted. */
 function clearLaneDiagnostics(
-	diagnostics: Set<string>,
+	diagnostics: LaneDiagnostics,
 	laneLabel: string,
 ): void {
 	diagnostics.delete(laneLabel);
-	for (const entry of diagnostics) {
-		if (entry.includes(`"${laneLabel}"`)) diagnostics.delete(entry);
+}
+
+function flattenLaneDiagnostics(diagnostics: LaneDiagnostics): string[] {
+	const flat: string[] = [];
+	for (const entries of diagnostics.values()) {
+		for (const entry of entries) {
+			if (flat.length >= MAX_LANE_DIAGNOSTICS_PER_CHANNEL) return flat;
+			flat.push(entry);
+		}
 	}
+	return flat;
+}
+
+/**
+ * Render host/provider error text for an operator-visible diagnostic.
+ *
+ * `formatError` returns a raw `Error.message` unbounded, or a `JSON.stringify`
+ * of an arbitrary payload — either can carry URLs with credentials, secrets,
+ * commands, or prompt/output fragments. Truncation is not redaction, so route
+ * it through the repository's existing failure-evidence redactor (URL and
+ * credential redaction plus control-character stripping) and bound it tightly.
+ * The lane, the operation, and the fact that the lane stayed pending are carried
+ * by the caller's own text; this is only the trailing cause.
+ */
+const MAX_DIAGNOSTIC_CAUSE_CHARS = 160;
+
+function safeDiagnosticCause(error: unknown): string {
+	const redacted = sanitizeFailureEvidenceDisplay(formatError(error));
+	if (redacted.length === 0) return '(no detail)';
+	return redacted.length > MAX_DIAGNOSTIC_CAUSE_CHARS
+		? `${redacted.slice(0, MAX_DIAGNOSTIC_CAUSE_CHARS)}…`
+		: redacted;
 }
 
 async function settleCollectedLane(args: {
@@ -2764,7 +2862,7 @@ async function settleCollectedLane(args: {
 	revisionDigestBudgetMs: number;
 	receiptAppendFailureLogs: Set<string>;
 	revisionSnapshots: Map<string, Promise<string | null>>;
-	settleFailureLogs: Set<string>;
+	settleFailureLogs: LaneDiagnostics;
 }): Promise<void> {
 	const {
 		directory,
@@ -2841,10 +2939,12 @@ async function settleCollectedLane(args: {
 			// child failure. This previously returned silently, so an operator saw a
 			// lane sit pending with no stated reason. Report it through the existing
 			// settle-diagnostic channel, which surfaces in `result.errors`.
-			settleFailureLogs.add(
-				`revision snapshot unavailable for lane "${laneLabel}"; lane left pending: ${formatError(
+			addLaneDiagnostic(
+				settleFailureLogs,
+				laneLabel,
+				`revision snapshot unavailable for lane "${laneLabel}"; lane left pending: ${safeDiagnosticCause(
 					error,
-				).slice(0, 300)}`,
+				)}`,
 			);
 			return;
 		}

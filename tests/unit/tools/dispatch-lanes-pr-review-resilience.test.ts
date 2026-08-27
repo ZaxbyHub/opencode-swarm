@@ -404,8 +404,11 @@ describe('dispatch_lanes PR review resilience', () => {
 		expect(String(enabled.message)).toContain('canary-first');
 
 		// DEFAULT (no config at all): the same dispatch is no longer gated on staged
-		// admission. It fails only on the absent host client, proving it passed the
-		// resilience gate rather than being rejected by it.
+		// admission — it is ADMITTED and launches all six lanes. (An earlier draft
+		// of this test asserted only that it failed later at `no_client`; that
+		// passed vacuously, because the dispatch died before ever reaching the
+		// resilience gate. The positive control above plus the topology assertions
+		// below are what make the default case a real claim.)
 		dispatchInternals.loadPluginConfig = () =>
 			({}) as ReturnType<typeof originalDispatchLoadPluginConfig>;
 		const defaulted = await executeDispatchLanesAsync(dispatchArgs, directory, {
@@ -413,6 +416,13 @@ describe('dispatch_lanes PR review resilience', () => {
 		});
 		expect(defaulted.failure_class).not.toBe('invalid_args');
 		expect(String(defaulted.message ?? '')).not.toContain('canary-first');
+		// PR-review FB-4: admission alone is not the claim — assert the TOPOLOGY.
+		// `success: true` only says the async dispatch started without an
+		// invalid_args/no_client failure; it says nothing about how many lanes were
+		// actually launched. A bug that admitted the call but collapsed six lanes
+		// into one wave would pass without this.
+		expect(created).toBe(dispatchArgs.lanes.length);
+		expect(defaulted.dispatched).toBe(dispatchArgs.lanes.length);
 		// It is ADMITTED: the legacy one-wave base dispatch now succeeds where
 		// the enabled policy would have demanded canary/fanout staging.
 		expect(defaulted.success).toBe(true);

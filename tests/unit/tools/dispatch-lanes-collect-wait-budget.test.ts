@@ -115,6 +115,13 @@ test('wait=true on a busy PR-review lane leaves it running and never aborts it',
 	expect(result.lane_results[0]?.status).toBe('pending');
 	expect(result.pending_lanes?.[0]?.status).toBe('pending');
 	expect(abort).not.toHaveBeenCalled();
+	// PR-review FB-5: the `sleeps` array was recorded but never asserted, so a
+	// bug where the loop returns after ONE pass — never re-polling and never
+	// consuming the wait budget — looked identical to correct behavior. Assert
+	// the loop actually iterated and that the budget was spent.
+	expect(sleeps.length).toBeGreaterThan(0);
+	expect(status.mock.calls.length).toBeGreaterThan(1);
+	expect(now).toBeGreaterThanOrEqual(2_000_000_000_000 + 25);
 });
 
 test('repeat waited collect on a settled lane uses the durable delivery cache and skips host calls, including after restart', async () => {

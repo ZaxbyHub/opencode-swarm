@@ -26,6 +26,14 @@ failing silently, and a slow resolution for one lane can no longer starve the ot
 fetch that fails outright — a transport error rather than a budget timeout — is likewise reported
 rather than leaving a silently pending lane.
 
+Collection diagnostics are redacted and bounded. The cause attached to a pending lane is routed
+through the same failure-evidence redactor the guardrail circuit already uses, so a provider or host
+error carrying a credentialed URL, an API key, or a command line no longer reaches the collection
+result verbatim, and each diagnostic channel is bounded independently so a flood of host-call
+timeouts cannot crowd out the per-lane cause an operator needs. Diagnostics are also
+tracked per lane rather than per message, so one lane's error text can no longer retire another
+lane's diagnostic.
+
 Staged canary/fanout PR-review resilience (`pr_review_resilience`) now defaults to disabled while
 the wider PR-review repair program is in progress; projects that set `enabled: true` keep the staged
 behavior unchanged.
