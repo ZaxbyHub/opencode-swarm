@@ -48,6 +48,10 @@ function makeDelegatingSession(sessionId: string, taskId = '1.1'): void {
 	session.currentTaskId = taskId;
 }
 
+/** Fixed call-start instant: elapsed_ms is never asserted here.
+ * (tests/unit is covered by the test-clock lint — no raw clock reads.) */
+const CALL_START_MS = 1_700_000_000_000;
+
 async function readSessionSteps(
 	tempDir: string,
 	sessionId: string,
@@ -79,7 +83,7 @@ describe('trajectory restart step seeding (issue #2041)', () => {
 		// First "process": three tool calls mint steps 1..3.
 		makeDelegatingSession(sessionId);
 		for (let i = 1; i <= 3; i++) {
-			recordToolCallStart(sessionId, `call-${i}`, Date.now());
+			recordToolCallStart(sessionId, `call-${i}`, CALL_START_MS);
 			await hook.toolAfter(
 				{ tool: 'Read', sessionID: sessionId, callID: `call-${i}`, args: {} },
 				{ title: 't', output: 'ok', metadata: { success: true } },
@@ -92,7 +96,7 @@ describe('trajectory restart step seeding (issue #2041)', () => {
 		simulateRestart();
 		makeDelegatingSession(sessionId);
 
-		recordToolCallStart(sessionId, 'call-4', Date.now());
+		recordToolCallStart(sessionId, 'call-4', CALL_START_MS);
 		await hook.toolAfter(
 			{ tool: 'Read', sessionID: sessionId, callID: 'call-4', args: {} },
 			{ title: 't', output: 'ok', metadata: { success: true } },
@@ -113,7 +117,7 @@ describe('trajectory restart step seeding (issue #2041)', () => {
 		);
 
 		makeDelegatingSession(sessionId);
-		recordToolCallStart(sessionId, 'call-1', Date.now());
+		recordToolCallStart(sessionId, 'call-1', CALL_START_MS);
 		await hook.toolAfter(
 			{ tool: 'Read', sessionID: sessionId, callID: 'call-1', args: {} },
 			{ title: 't', output: 'ok', metadata: { success: true } },
@@ -145,7 +149,7 @@ describe('trajectory restart step seeding (issue #2041)', () => {
 		);
 		makeDelegatingSession(sessionId);
 
-		recordToolCallStart(sessionId, 'call-1', Date.now());
+		recordToolCallStart(sessionId, 'call-1', CALL_START_MS);
 		await hook.toolAfter(
 			{ tool: 'Read', sessionID: sessionId, callID: 'call-1', args: {} },
 			{ title: 't', output: 'ok', metadata: { success: true } },
@@ -162,7 +166,7 @@ describe('trajectory restart step seeding (issue #2041)', () => {
 		);
 
 		makeDelegatingSession(sessionId);
-		recordToolCallStart(sessionId, 'call-1', Date.now());
+		recordToolCallStart(sessionId, 'call-1', CALL_START_MS);
 		await hook.toolAfter(
 			{ tool: 'Read', sessionID: sessionId, callID: 'call-1', args: {} },
 			{ title: 't', output: 'ok', metadata: { success: true } },
@@ -172,7 +176,7 @@ describe('trajectory restart step seeding (issue #2041)', () => {
 		// `/swarm reset` clears the counter AND the gate — the next mint must
 		// re-seed from the persisted mark instead of rewinding to 1.
 		clearTrajectoryStep(sessionId);
-		recordToolCallStart(sessionId, 'call-2', Date.now());
+		recordToolCallStart(sessionId, 'call-2', CALL_START_MS);
 		await hook.toolAfter(
 			{ tool: 'Read', sessionID: sessionId, callID: 'call-2', args: {} },
 			{ title: 't', output: 'ok', metadata: { success: true } },
@@ -193,7 +197,7 @@ describe('trajectory restart step seeding (issue #2041)', () => {
 		);
 		makeDelegatingSession(sessionId);
 		for (let i = 1; i <= 2; i++) {
-			recordToolCallStart(sessionId, `call-${i}`, Date.now());
+			recordToolCallStart(sessionId, `call-${i}`, CALL_START_MS);
 			await hook.toolAfter(
 				{ tool: 'Read', sessionID: sessionId, callID: `call-${i}`, args: {} },
 				{ title: 't', output: 'ok', metadata: { success: true } },

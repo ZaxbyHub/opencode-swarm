@@ -244,9 +244,11 @@ describe('issue #2104 background maintenance init wiring', () => {
 		const stale = path.join(trajectoriesDir, 'stale-session.jsonl');
 		fs.writeFileSync(stale, '{"step":1}\n');
 		fs.writeFileSync(`${stale}.meta.json`, '{"version":1}\n');
-		const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-		fs.utimesSync(stale, old, old);
-		fs.utimesSync(`${stale}.meta.json`, old, old);
+		// Epoch SECONDS (utimes' numeric form): 2020-01-01 is deterministically
+		// older than any 7-day cutoff without reading the real clock.
+		const oldSeconds = 1_577_836_800;
+		fs.utimesSync(stale, oldSeconds, oldSeconds);
+		fs.utimesSync(`${stale}.meta.json`, oldSeconds, oldSeconds);
 
 		await expect(task!.run()).resolves.toBeUndefined();
 		expect(fs.existsSync(stale)).toBe(false);

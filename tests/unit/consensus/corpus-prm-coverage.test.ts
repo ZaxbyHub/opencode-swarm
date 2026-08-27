@@ -41,7 +41,7 @@ const entry = (step: number): TrajectoryEntry => ({
 	action: 'edit',
 	target: 'src/a.ts',
 	intent: 'coverage',
-	timestamp: new Date().toISOString(),
+	timestamp: '2026-01-01T00:00:00.000Z',
 	result: 'success',
 });
 
@@ -111,7 +111,7 @@ describe('PRM-session corpus coverage disclosure (issue #2041)', () => {
 				version: 1,
 				highestStep: 1,
 				droppedEntries: 99,
-				compactedAt: new Date().toISOString(),
+				compactedAt: '2026-01-01T00:00:00.000Z',
 			}) + '\n',
 		);
 
