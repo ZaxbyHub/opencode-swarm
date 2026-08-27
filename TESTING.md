@@ -2,7 +2,7 @@
 
 > **For LLM agents:** Load the `writing-tests` skill (`.opencode/skills/writing-tests/SKILL.md`) before writing or modifying any test file. It contains the full mock isolation rules, CI pipeline structure, and anti-patterns. For agent operational safety and the broader engineering invariants of this repo (especially the `test_runner` broad-scope restriction and the `_internals` DI-seam pattern for mock isolation), read [`AGENTS.md`](./AGENTS.md) at the repo root.
 
-> **Writing stable tests?** See [`docs/testing/test-stability.md`](./docs/testing/test-stability.md) — the runbook for the four root-cause classes of merge-group flaky tests (time-sensitive, coverage-sensitivity, cross-platform, subprocess) and the `freezeClock` / `withIsolatedState` helpers that prevent them. The `check-test-clock.sh` lint (CI `quality` job) fails on NEW time-touching tests that don't use the helper.
+> **Writing stable tests?** See [`docs/testing/test-stability.md`](./docs/testing/test-stability.md) — the runbook for the four root-cause classes of merge-group flaky tests (time-sensitive, coverage-sensitivity, cross-platform, subprocess) and the `freezeClock` / `withIsolatedState` helpers that prevent them. The `bun run check:test-clock` lint (CI `quality` job) fails on NEW time-touching tests that don't use the helper.
 
 > **⚠️ Do NOT use the OpenCode `test_runner` tool to validate the full repo.** It is for targeted agent validation with explicit `files: [...]` or small targeted scopes. `scope: 'all'` is gated behind the `SWARM_ALLOW_FULL_SUITE=1` env var (intended for opt-in CI mirrors only; there is no `allow_full_suite` arg). Broad scopes can stall or kill OpenCode before the `MAX_SAFE_TEST_FILES = 50` guard in `src/tools/test-runner.ts` fires. For repo validation, use the shell commands below — per-file isolation loops match CI behavior. See [`AGENTS.md`](./AGENTS.md) invariant 6 for the full contract.
 
@@ -53,16 +53,16 @@ mock.module('node:child_process', () => ({
 
 **Always add `afterEach(mock.restore())` for cross-module mocks.** Even though unreliable in Bun v1.3.11, it provides best-effort cleanup. **Exception — Windows EBUSY:** Test files that spawn async child processes (pre-check-batch suite) must NOT call `mock.restore()` on Windows. Child process handles hold directory locks and trigger `EBUSY` errors. Skip affected tests with `test.skipIf(process.platform === 'win32')`.
 
-**Mock cleanup enforcement:** `scripts/check-mock-cleanup.sh` runs in CI (quality job) and enforces two checks:
+**Mock cleanup enforcement:** `bun run check:mock-cleanup` runs in CI (quality job) and enforces two checks:
 1. All `mock.module` calls have `afterEach(mock.restore())` cleanup or file-scoped `mockClear`/`mockReset` pattern
 2. All `mock.module('node:*', ...)` calls spread real exports (e.g., `...realFs`) to prevent test pollution
 
-**Allowlist growth ratchet (issue #1666):** `scripts/check-invariants.sh` Check 4 ratchets `scripts/mock-allowlist.txt` closed against unapproved growth. Adding a new `mock.module` target requires a matching standalone marker line `# APPROVED-NEW: <normalized-target>` in the allowlist (preserved across regen by `scripts/generate-mock-allowlist.sh`). `MOCK_ALLOWLIST_ENFORCE=0` soft-warns for a deliberate growth PR. Prefer the `_internals` DI seam for new code.
+**Allowlist growth ratchet (issue #1666):** `bun run check:invariants` Check 4 ratchets `scripts/mock-allowlist.txt` closed against unapproved growth. Adding a new `mock.module` target requires a matching standalone marker line `# APPROVED-NEW: <normalized-target>` in the allowlist (preserved across regen by `scripts/generate-mock-allowlist.sh`). `MOCK_ALLOWLIST_ENFORCE=0` soft-warns for a deliberate growth PR. Prefer the `_internals` DI seam for new code.
 
 Run locally before pushing:
 ```bash
-bash scripts/check-mock-cleanup.sh
-bash scripts/check-invariants.sh
+bun run check:mock-cleanup
+bun run check:invariants
 ```
 
 Intentionally skipped on Windows (async child process handles cause EBUSY):

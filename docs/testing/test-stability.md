@@ -68,7 +68,7 @@ describe('plan.md sync', () => {
 `spyOn(Date, 'now')` and `spyOn(Date.prototype, 'toISOString')`, which is what
 the helper uses internally.
 
-**Enforcement:** `scripts/check-test-clock.sh` (diff-scoped — runs in the
+**Enforcement:** `bun run check:test-clock` (diff-scoped — runs in the
 `quality` CI job). Any NEW test file that touches `Date.now()` / `new Date()` /
 `spyOn(Date` without referencing `freezeClock` / `withFrozenClock` /
 `withIsolatedState` fails the build. Pre-existing files are non-blocking
@@ -207,7 +207,7 @@ reason; a run that self-heals everywhere is invisible to it.
 ## Reference
 
 - Helpers: `tests/helpers/test-clock.ts`, `tests/helpers/test-isolation.ts`
-- Lint: `scripts/check-test-clock.sh`
+- Lint: `bun run check:test-clock`
 - Detection: `scripts/ci/detect-and-quarantine-flakes.sh`,
   `.github/workflows/flake-detection.yml`
 - Coverage gate (per-file isolation): `scripts/ci/run-coverage-gate.sh`

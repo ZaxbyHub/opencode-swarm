@@ -9,7 +9,7 @@
 # To add a NEW mock target: append it here with a comment explaining why.
 # Prefer _internals DI seam for new code — mock.module is a legacy pattern.
 #
-# The allowlist is growth-ratcheted by scripts/check-invariants.sh Check 4
+# The allowlist is growth-ratcheted by bun run check:invariants Check 4
 # (issue #1666). To approve a new target added in a PR, add a standalone
 # marker line:  # APPROVED-NEW: <normalized-target>
 # The marker may appear anywhere in this file (flat set-membership, not

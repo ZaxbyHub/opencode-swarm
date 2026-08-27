@@ -65,7 +65,7 @@ capability-detection and host-privilege failure classes while #1908 is open.
 
 ## Recurrence prevention
 
-- `scripts/check-test-tmpdir.sh` now rejects newly added project-relative test
+- `bun run check:test-tmpdir` rejects newly added project-relative test
   temp roots as well as uncanonicalized system-temp paths.
 - Privilege-sensitive path regressions use DI seams or Windows junctions; they
   do not require Developer Mode or drive-root write access.

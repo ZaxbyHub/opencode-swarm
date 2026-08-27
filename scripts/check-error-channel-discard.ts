@@ -49,7 +49,7 @@
  * (data-flow) check if evidence of recurrence in those shapes appears.
  *
  * Allowlist ratchet (mirrors `scripts/mock-allowlist.txt` +
- * `check-invariants.sh` Check 4): `scripts/error-channel-discard-allowlist.txt`,
+ * `bun run check:invariants` Check 4): `scripts/error-channel-discard-allowlist.txt`,
  * one `path:chainText` entry per line, `#` comments allowed, `# APPROVED-NEW:`
  * marker convention for reviewer visibility on new entries. Unlike
  * `check-runtime-src-refs.ts`'s baseline, this is NOT stale-entry-enforced

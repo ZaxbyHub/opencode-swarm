@@ -655,8 +655,8 @@ Split criteria: one behavioral aspect per file, shared test utilities extracted 
 
 **Verification:**
 
-- Run `scripts/check-mock-cleanup.sh` — it enforces Check 2: every `mock.module('node:*', ...)` must spread real exports (e.g., `...realFs`, `...realChildProcess`).
-- Run `scripts/check-invariants.sh` — Check 3 enforces the `scripts/mock-allowlist.txt` membership, and Check 4 (issue #1666) ratchets the allowlist closed against unapproved growth. Adding a new `mock.module` target requires a matching `# APPROVED-NEW: <normalized-target>` marker line in `scripts/mock-allowlist.txt`; `MOCK_ALLOWLIST_ENFORCE=0` soft-warns for a deliberate growth PR.
+- Run `bun run check:mock-cleanup` — it enforces Check 2: every `mock.module('node:*', ...)` must spread real exports (e.g., `...realFs`, `...realChildProcess`).
+- Run `bun run check:invariants` — Check 3 enforces the `scripts/mock-allowlist.txt` membership, and Check 4 (issue #1666) ratchets the allowlist closed against unapproved growth. Adding a new `mock.module` target requires a matching `# APPROVED-NEW: <normalized-target>` marker line in `scripts/mock-allowlist.txt`; `MOCK_ALLOWLIST_ENFORCE=0` soft-warns for a deliberate growth PR.
 - Run the new bounded tests alongside the existing real-git tests; no cross-file pollution.
 - New test files must be under 500 lines — `delegation-gate.test.ts` split is the exemplar pattern.
 - FR-009 Lean Turbo tests cover: acquire-locks, plan-lanes, review, runner-status, generate-mutants, set-qa-gates, get-qa-gate-profile.

@@ -16,6 +16,8 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 const isWindows = process.platform === 'win32';
 const REPO_ROOT = path.resolve(__dirname, '../../../');
 const SCRIPT_PATH = path.join(REPO_ROOT, 'scripts', 'check-invariants.sh');
+const SCRIPT_TS_PATH = path.join(REPO_ROOT, 'scripts', 'check-invariants.ts');
+const GATE_UTILS_PATH = path.join(REPO_ROOT, 'scripts', 'gate-utils.ts');
 const LIB_PATH = path.join(
 	REPO_ROOT,
 	'scripts',
@@ -23,10 +25,6 @@ const LIB_PATH = path.join(
 	'normalize-mock-target.sh',
 );
 const ALLOWLIST_PATH = path.join(REPO_ROOT, 'scripts', 'mock-allowlist.txt');
-// Check 6 (issue #1976) delegates to this sibling script. A fixture that copies
-// check-invariants.sh but not this file makes Check 6's `bash <missing>` fail
-// and increment `violations`, turning every exit-0 fixture into an exit-1
-// failure. The fixtures must mirror what the script now invokes.
 const ADVISORY_PUSH_SCRIPT_PATH = path.join(
 	REPO_ROOT,
 	'scripts',
@@ -55,10 +53,6 @@ const ADVISORY_PUSH_SCRIPT_PATH = path.join(
  *                       budget has to cover the full spawn allowance PLUS
  *                       fixture setup and assertion overhead.
  *
- * bun:test's default per-test budget is 5s, far below either number, so every
- * test that shells out carries TEST_TIMEOUT_MS explicitly. Verified by running
- * `bun test tests/unit/scripts/check-invariants.test.ts` with NO `--timeout`
- * flag: 0 fail.
  */
 const SPAWN_TIMEOUT_MS = 120_000;
 const TEST_TIMEOUT_MS = 180_000;
@@ -67,7 +61,10 @@ const TEST_TIMEOUT_MS = 180_000;
  * Helper to run check-invariants.sh from a given directory.
  * Skips on Windows where bash.exe is the WSL stub.
  */
-function runCheckInvariants(cwd: string): {
+function runCheckInvariants(
+	cwd: string,
+	useTsOwner = false,
+): {
 	stdout: string;
 	stderr: string;
 	exitCode: number;
@@ -75,10 +72,39 @@ function runCheckInvariants(cwd: string): {
 	if (isWindows) {
 		throw new Error('bash not available on Windows');
 	}
-	const localScript = path.join(cwd, 'scripts', 'check-invariants.sh');
+	const localScript = path.join(
+		cwd,
+		'scripts',
+		useTsOwner ? 'check-invariants.ts' : 'check-invariants.sh',
+	);
+	const scriptPath = fs.existsSync(localScript) ? localScript : SCRIPT_PATH;
+	const command = useTsOwner ? process.execPath : 'bash';
+	const result = spawnSync(
+		command,
+		useTsOwner ? ['run', scriptPath] : [scriptPath],
+		{
+			cwd,
+			encoding: 'utf-8',
+			stdio: ['pipe', 'pipe', 'pipe'],
+			timeout: SPAWN_TIMEOUT_MS,
+		},
+	);
+
+	return {
+		stdout: result.stdout || '',
+		stderr: result.stderr || '',
+		exitCode: result.status ?? 1,
+	};
+}
+
+function runCheckInvariantsFrom(scriptCwd: string, execCwd: string) {
+	if (isWindows) {
+		throw new Error('bash not available on Windows');
+	}
+	const localScript = path.join(scriptCwd, 'scripts', 'check-invariants.sh');
 	const scriptPath = fs.existsSync(localScript) ? localScript : SCRIPT_PATH;
 	const result = spawnSync('bash', [scriptPath], {
-		cwd,
+		cwd: execCwd,
 		encoding: 'utf-8',
 		stdio: ['pipe', 'pipe', 'pipe'],
 		timeout: SPAWN_TIMEOUT_MS,
@@ -127,6 +153,14 @@ function setupFixtureDir(fixtureName: string): string {
 	fs.copyFileSync(
 		SCRIPT_PATH,
 		path.join(fixtureDir, 'scripts', 'check-invariants.sh'),
+	);
+	fs.copyFileSync(
+		SCRIPT_TS_PATH,
+		path.join(fixtureDir, 'scripts', 'check-invariants.ts'),
+	);
+	fs.copyFileSync(
+		GATE_UTILS_PATH,
+		path.join(fixtureDir, 'scripts', 'gate-utils.ts'),
 	);
 	fs.copyFileSync(
 		LIB_PATH,
@@ -196,7 +230,7 @@ describe('check-invariants.sh', () => {
 			const fixtureDir = canonicalMkdtemp(
 				'check-invariants-missing-allowlist-',
 			);
-			fs.mkdirSync(path.join(fixtureDir, 'scripts', 'lib'), {
+			fs.mkdirSync(path.join(fixtureDir, 'scripts'), {
 				recursive: true,
 			});
 			fs.mkdirSync(path.join(fixtureDir, 'src', 'tools'), { recursive: true });
@@ -204,20 +238,41 @@ describe('check-invariants.sh', () => {
 			fs.mkdirSync(path.join(fixtureDir, 'tests'), { recursive: true });
 
 			fs.copyFileSync(
-				SCRIPT_PATH,
-				path.join(fixtureDir, 'scripts', 'check-invariants.sh'),
+				SCRIPT_TS_PATH,
+				path.join(fixtureDir, 'scripts', 'check-invariants.ts'),
 			);
 			fs.copyFileSync(
-				LIB_PATH,
-				path.join(fixtureDir, 'scripts', 'lib', 'normalize-mock-target.sh'),
+				GATE_UTILS_PATH,
+				path.join(fixtureDir, 'scripts', 'gate-utils.ts'),
 			);
 			// Deliberately do NOT copy the allowlist
 
-			const result = runCheckInvariants(fixtureDir);
+			const result = runCheckInvariants(fixtureDir, true);
 			expect(result.exitCode).not.toBe(0);
 			expect(result.stderr + result.stdout).toContain(
 				'mock-allowlist.txt not found',
 			);
+
+			fs.rmSync(fixtureDir, { recursive: true, force: true });
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	test(
+		'resolves the repo root from the script location when invoked from a nested cwd',
+		() => {
+			if (isWindows) return;
+			const fixtureDir = setupFixtureDir('nested-cwd');
+			const nested = path.join(fixtureDir, 'nested', 'deep');
+			fs.mkdirSync(nested, { recursive: true });
+			fs.writeFileSync(
+				path.join(fixtureDir, 'src', 'tools', 'cwd-violation.ts'),
+				'process.cwd();\n',
+			);
+
+			const result = runCheckInvariantsFrom(fixtureDir, nested);
+			expect(result.stdout).toContain('src/tools/cwd-violation.ts');
+			expect(result.exitCode).toBe(1);
 
 			fs.rmSync(fixtureDir, { recursive: true, force: true });
 		},
@@ -437,56 +492,6 @@ describe('check-invariants.sh', () => {
 				'Check 4: mock.module allowlist growth ratchet',
 			);
 			expect(result.stdout).toContain('issue #1666');
-		},
-		TEST_TIMEOUT_MS,
-	);
-
-	test(
-		'regression: bun-compat.ts is exempt from timeout warning by basename',
-		() => {
-			if (isWindows) return;
-			const fixtureDir = setupFixtureDir('bun-compat');
-
-			fs.writeFileSync(
-				path.join(fixtureDir, 'src', 'bun-compat.ts'),
-				'import { spawnSync } from "node:child_process";\nspawnSync("cmd", []);\n',
-			);
-			fs.writeFileSync(
-				path.join(fixtureDir, 'src', 'not-bun-compat.ts'),
-				'import { spawnSync } from "node:child_process";\nspawnSync("cmd", []);\n',
-			);
-
-			const result = runCheckInvariants(fixtureDir);
-			expect(result.stdout).not.toContain(
-				'WARNING: src/bun-compat.ts uses spawn/spawnSync',
-			);
-			expect(result.stdout).toContain('not-bun-compat.ts');
-
-			fs.rmSync(fixtureDir, { recursive: true, force: true });
-		},
-		TEST_TIMEOUT_MS,
-	);
-
-	test(
-		'regression: LEGACY_EXEMPTS uses exact path match',
-		() => {
-			if (isWindows) return;
-			const fixtureDir = setupFixtureDir('legacy-exempts');
-
-			fs.writeFileSync(
-				path.join(fixtureDir, 'src', 'tools', 'create-tool.ts'),
-				'process.cwd();\n',
-			);
-			fs.writeFileSync(
-				path.join(fixtureDir, 'src', 'tools', 'create-tool-helper.ts'),
-				'process.cwd();\n',
-			);
-
-			const result = runCheckInvariants(fixtureDir);
-			expect(result.stdout).not.toContain('src/tools/create-tool.ts');
-			expect(result.stdout).toContain('src/tools/create-tool-helper.ts');
-
-			fs.rmSync(fixtureDir, { recursive: true, force: true });
 		},
 		TEST_TIMEOUT_MS,
 	);

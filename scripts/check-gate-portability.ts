@@ -108,15 +108,53 @@ export interface PortabilityResult {
 	unbaselined: string[];
 	staleBaseline: string[];
 	invalidCategories: string[];
+	duplicateBaseline: string[];
+	invalidShims: string[];
 	exitCode: number;
+}
+
+export interface PortableShimSource {
+	script: string;
+	typescript: string;
+	content: string;
+}
+
+/**
+ * A migrated shell entry point may contain comments, but its executable body
+ * is fixed: strict mode, script-directory resolution, and `exec bun run` of
+ * the same-named TypeScript file. This prevents policy from drifting back into
+ * a Bash compatibility shim after a gate is ported.
+ */
+export function validatePortableShim(source: PortableShimSource): string | null {
+	const executable = source.content
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0 && !line.startsWith('#'));
+	const expected = [
+		'set -euo pipefail',
+		'script_dir="$(cd "$(dirname "$0")" && pwd)"',
+		`exec bun run "\${script_dir}/${path.basename(source.typescript)}" "$@"`,
+	];
+	return JSON.stringify(executable) === JSON.stringify(expected)
+		? null
+		: `ERROR (shim contains policy): ${source.script} has executable logic beyond the zero-logic TypeScript delegation contract.`;
 }
 
 export function evaluatePortability(
 	referenced: Map<string, string[]>,
 	baseline: BaselineEntry[],
+	portableShims: PortableShimSource[] = [],
 ): PortabilityResult {
 	const messages: string[] = [];
 	const baselineScripts = new Set(baseline.map((entry) => entry.script));
+	const duplicateBaseline = [...new Set(
+		baseline
+			.map((entry) => entry.script)
+			.filter((script, index, rows) => rows.indexOf(script) !== index),
+	)].sort();
+	for (const script of duplicateBaseline) {
+		messages.push(`ERROR (duplicate baseline): ${script} appears more than once.`);
+	}
 
 	const invalidCategories: string[] = [];
 	for (const entry of baseline) {
@@ -163,8 +201,21 @@ export function evaluatePortability(
 		}
 	}
 
+	const invalidShims: string[] = [];
+	for (const shim of portableShims) {
+		const error = validatePortableShim(shim);
+		if (error) {
+			invalidShims.push(shim.script);
+			messages.push(error);
+		}
+	}
+
 	const failures =
-		unbaselined.length + staleBaseline.length + invalidCategories.length;
+		unbaselined.length +
+		staleBaseline.length +
+		invalidCategories.length +
+		duplicateBaseline.length +
+		invalidShims.length;
 
 	messages.push('');
 	messages.push('=== CI gate portability (issue #2078) summary ===');
@@ -172,6 +223,8 @@ export function evaluatePortability(
 	messages.push(`Unbaselined (new):       ${unbaselined.length}`);
 	messages.push(`Stale baseline entries:  ${staleBaseline.length}`);
 	messages.push(`Invalid baseline rows:   ${invalidCategories.length}`);
+	messages.push(`Duplicate baseline rows: ${duplicateBaseline.length}`);
+	messages.push(`Invalid portable shims:  ${invalidShims.length}`);
 
 	if (failures === 0) {
 		messages.push('All CI gate portability checks passed.');
@@ -182,8 +235,37 @@ export function evaluatePortability(
 		unbaselined,
 		staleBaseline,
 		invalidCategories,
+		duplicateBaseline,
+		invalidShims,
 		exitCode: failures > 0 ? 1 : 0,
 	};
+}
+
+export function readPortableShimSources(
+	scriptsDir: string = path.join(REPO_ROOT, 'scripts'),
+): PortableShimSource[] {
+	const sources: PortableShimSource[] = [];
+	const visit = (dir: string): void => {
+		for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+			const absolute = path.join(dir, entry.name);
+			if (entry.isDirectory()) {
+				visit(absolute);
+				continue;
+			}
+			if (!entry.isFile() || !entry.name.endsWith('.sh')) continue;
+			const typescriptAbsolute = absolute.replace(/\.sh$/, '.ts');
+			if (!fs.existsSync(typescriptAbsolute)) continue;
+			const shellRelative = path.relative(scriptsDir, absolute).replace(/\\/g, '/');
+			const typescriptRelative = shellRelative.replace(/\.sh$/, '.ts');
+			sources.push({
+				script: `scripts/${shellRelative}`,
+				typescript: `scripts/${typescriptRelative}`,
+				content: fs.readFileSync(absolute, 'utf8'),
+			});
+		}
+	};
+	visit(scriptsDir);
+	return sources.sort((a, b) => a.script.localeCompare(b.script));
 }
 
 /**
@@ -260,7 +342,11 @@ export function main(
 	// test instead of quietly disarming the guardrail.
 	console.log(formatScanRoots(roots));
 	const referenced = collectScriptRefs(readWorkflowSources(roots));
-	const result = evaluatePortability(referenced, readBaseline());
+	const result = evaluatePortability(
+		referenced,
+		readBaseline(),
+		readPortableShimSources(),
+	);
 	for (const line of result.messages) {
 		console.log(line);
 	}

@@ -177,12 +177,10 @@ jobs:
         run: bunx biome ci .
       - name: Mock isolation compliance check
         if: needs.detect-release.outputs.is-release != 'true'
-        shell: bash
-        run: chmod +x scripts/check-mock-cleanup.sh && bash scripts/check-mock-cleanup.sh
+        run: bun run check:mock-cleanup
       - name: Engineering invariant checks
         if: needs.detect-release.outputs.is-release != 'true'
-        shell: bash
-        run: chmod +x scripts/check-invariants.sh && bash scripts/check-invariants.sh
+        run: bun run check:invariants
       - name: Tool registration coherence check
         if: needs.detect-release.outputs.is-release != 'true'
         run: bun run scripts/check-tool-registration.ts
@@ -211,8 +209,7 @@ jobs:
         run: bun run check:shell-audit
       - name: Cross-contamination check (mock.module / vi.mock leaks)
         if: needs.detect-release.outputs.is-release != 'true'
-        shell: bash
-        run: chmod +x scripts/check-cross-contamination.sh && bash scripts/check-cross-contamination.sh
+        run: bun run check:cross-contamination
       # Line-scoped: fails only on lines ADDED by the diff that introduce a
       # raw-clock pattern in a test that doesn't reference the freezeClock
       # helper. Merely touching a file that already violates stays a
@@ -220,8 +217,7 @@ jobs:
       # (issue #1782 root-cause class 1 prevention).
       - name: Test-clock lint (freezeClock adoption)
         if: needs.detect-release.outputs.is-release != 'true'
-        shell: bash
-        run: chmod +x scripts/check-test-clock.sh && bash scripts/check-test-clock.sh
+        run: bun run check:test-clock
       # Diff-scoped ratchet (FR-006): fails only on NEW test files over 500
       # lines or existing over-cap files that grew. Pre-existing violators
       # are non-blocking. Escape hatch: TEST_CAP_ENFORCE=0 soft-warns.
@@ -271,8 +267,7 @@ jobs:
       # scope). Prefer tests/helpers/tmpdir.ts (canonicalTmpDir/canonicalMkdtemp).
       - name: Test tmpdir canonicalization lint (FR-011)
         if: needs.detect-release.outputs.is-release != 'true'
-        shell: bash
-        run: chmod +x scripts/check-test-tmpdir.sh && bash scripts/check-test-tmpdir.sh
+        run: bun run check:test-tmpdir
       # Not diff-scoped (unlike the sibling checks above): a bash4+-only
       # construct is exactly as broken on macOS as it was the day it was
       # added, so this scans full current file content in scripts/, not just
@@ -280,8 +275,7 @@ jobs:
       # check-invariants.sh `declare -A` incident, issue #1729).
       - name: Bash portability lint (FR-012)
         if: needs.detect-release.outputs.is-release != 'true'
-        shell: bash
-        run: chmod +x scripts/check-bash-portability.sh && bash scripts/check-bash-portability.sh
+        run: bun run check:bash-portability
 
       # Standalone helper under scripts/swarm-model/ has its own node:test suite
       # (not part of the src/**/*.test.ts glob the unit job discovers). Run it
