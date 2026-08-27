@@ -112,9 +112,9 @@ describe('trajectory-store lock/crash semantics (issue #2041)', () => {
 		// Releasing the lock unblocks subsequent appends.
 		fs.unlinkSync(lock);
 		await appendTrajectoryEntry(sessionId, createEntry(3), tempDir, 1000);
-		expect((await readTrajectory(sessionId, tempDir)).map((e) => e.step)).toEqual([
-			1, 3,
-		]);
+		expect(
+			(await readTrajectory(sessionId, tempDir)).map((e) => e.step),
+		).toEqual([1, 3]);
 	});
 
 	test('concurrent appends (two writers, one process) serialize without corruption', async () => {
@@ -141,6 +141,8 @@ describe('trajectory-store lock/crash semantics (issue #2041)', () => {
 			expect(() => JSON.parse(line)).not.toThrow();
 		}
 		// No lock residue after a clean run.
-		expect(fs.existsSync(`${trajectoryFile(tempDir, sessionId)}.lock`)).toBe(false);
+		expect(fs.existsSync(`${trajectoryFile(tempDir, sessionId)}.lock`)).toBe(
+			false,
+		);
 	});
 });

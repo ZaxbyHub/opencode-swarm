@@ -37,7 +37,11 @@ function entry(step: number): string {
 	});
 }
 
-function makeSessionFile(tempDir: string, sessionId: string, lines: string[]): string {
+function makeSessionFile(
+	tempDir: string,
+	sessionId: string,
+	lines: string[],
+): string {
 	const dir = path.join(tempDir, '.swarm', 'trajectories');
 	fs.mkdirSync(dir, { recursive: true });
 	const file = path.join(dir, `${sessionId}.jsonl`);
@@ -145,7 +149,10 @@ describe('trajectory-store bounded reads (issue #2041)', () => {
 		const sessionId = 'oversize-lines';
 		makeSessionFile(tempDir, sessionId, [
 			entry(1),
-			JSON.stringify({ step: 2, blob: 'o'.repeat(TRAJECTORY_LIMITS.maxLineBytes + 1024) }),
+			JSON.stringify({
+				step: 2,
+				blob: 'o'.repeat(TRAJECTORY_LIMITS.maxLineBytes + 1024),
+			}),
 			entry(3),
 		]);
 
@@ -171,7 +178,9 @@ describe('trajectory-store bounded reads (issue #2041)', () => {
 		fs.writeFileSync(file, 'garbage\nnot json either\n');
 
 		expect(await getCurrentStep(sessionId, tempDir)).toBe(2000);
-		expect((await readTrajectoryCheckpoint(sessionId, tempDir))?.highestStep).toBe(2000);
+		expect(
+			(await readTrajectoryCheckpoint(sessionId, tempDir))?.highestStep,
+		).toBe(2000);
 	});
 
 	test('a checkpoint can never lower the high-water mark (merge takes max)', async () => {

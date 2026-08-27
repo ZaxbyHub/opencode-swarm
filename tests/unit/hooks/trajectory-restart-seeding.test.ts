@@ -14,14 +14,21 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
-	_test_exports as loggerInternals,
 	clearTrajectoryStep,
 	createTrajectoryLoggerHook,
+	_test_exports as loggerInternals,
 	recordDeniedToolCall,
 	recordToolCallStart,
 } from '../../../src/hooks/trajectory-logger';
-import { clearTrajectoryCache, readTrajectory } from '../../../src/prm/trajectory-store';
-import { resetSwarmState, startAgentSession, swarmState } from '../../../src/state';
+import {
+	clearTrajectoryCache,
+	readTrajectory,
+} from '../../../src/prm/trajectory-store';
+import {
+	resetSwarmState,
+	startAgentSession,
+	swarmState,
+} from '../../../src/state';
 
 function makeTempDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), 'traj-restart-'));
@@ -41,7 +48,10 @@ function makeDelegatingSession(sessionId: string, taskId = '1.1'): void {
 	session.currentTaskId = taskId;
 }
 
-async function readSessionSteps(tempDir: string, sessionId: string): Promise<number[]> {
+async function readSessionSteps(
+	tempDir: string,
+	sessionId: string,
+): Promise<number[]> {
 	const entries = await readTrajectory(sessionId, tempDir);
 	return entries.map((e) => e.step);
 }
@@ -61,7 +71,10 @@ describe('trajectory restart step seeding (issue #2041)', () => {
 
 	test('after a restart, the next minted step continues past the persisted high-water mark', async () => {
 		const sessionId = 'ses-restart';
-		const hook = createTrajectoryLoggerHook({ enabled: true, max_lines: 1000 }, tempDir);
+		const hook = createTrajectoryLoggerHook(
+			{ enabled: true, max_lines: 1000 },
+			tempDir,
+		);
 
 		// First "process": three tool calls mint steps 1..3.
 		makeDelegatingSession(sessionId);
@@ -94,7 +107,10 @@ describe('trajectory restart step seeding (issue #2041)', () => {
 
 	test('the denied-call path seeds too: a post-restart denial mints N+1', async () => {
 		const sessionId = 'ses-denied-restart';
-		const hook = createTrajectoryLoggerHook({ enabled: true, max_lines: 1000 }, tempDir);
+		const hook = createTrajectoryLoggerHook(
+			{ enabled: true, max_lines: 1000 },
+			tempDir,
+		);
 
 		makeDelegatingSession(sessionId);
 		recordToolCallStart(sessionId, 'call-1', Date.now());
@@ -123,7 +139,10 @@ describe('trajectory restart step seeding (issue #2041)', () => {
 
 	test('a fresh session (no persisted trajectory) still starts at step 1', async () => {
 		const sessionId = 'ses-fresh';
-		const hook = createTrajectoryLoggerHook({ enabled: true, max_lines: 1000 }, tempDir);
+		const hook = createTrajectoryLoggerHook(
+			{ enabled: true, max_lines: 1000 },
+			tempDir,
+		);
 		makeDelegatingSession(sessionId);
 
 		recordToolCallStart(sessionId, 'call-1', Date.now());
@@ -137,7 +156,10 @@ describe('trajectory restart step seeding (issue #2041)', () => {
 
 	test('clearTrajectoryStep invalidates the seed gate: the next mint re-seeds from disk', async () => {
 		const sessionId = 'ses-reset';
-		const hook = createTrajectoryLoggerHook({ enabled: true, max_lines: 1000 }, tempDir);
+		const hook = createTrajectoryLoggerHook(
+			{ enabled: true, max_lines: 1000 },
+			tempDir,
+		);
 
 		makeDelegatingSession(sessionId);
 		recordToolCallStart(sessionId, 'call-1', Date.now());
@@ -165,7 +187,10 @@ describe('trajectory restart step seeding (issue #2041)', () => {
 	test('concurrent first toolAfters after a restart mint distinct, monotonic steps', async () => {
 		const sessionId = 'ses-concurrent';
 		// Persist two steps, then "restart".
-		const hook = createTrajectoryLoggerHook({ enabled: true, max_lines: 1000 }, tempDir);
+		const hook = createTrajectoryLoggerHook(
+			{ enabled: true, max_lines: 1000 },
+			tempDir,
+		);
 		makeDelegatingSession(sessionId);
 		for (let i = 1; i <= 2; i++) {
 			recordToolCallStart(sessionId, `call-${i}`, Date.now());

@@ -11,7 +11,8 @@ import {
 
 // Original function references saved once at module load for save/restore
 const originalGetAgentSession = _internals.getAgentSession;
-const originalReadTrajectoryWithCoverage = _internals.readTrajectoryWithCoverage;
+const originalReadTrajectoryWithCoverage =
+	_internals.readTrajectoryWithCoverage;
 const originalGetInMemoryTrajectory = _internals.getInMemoryTrajectory;
 const originalDetectPatterns = _internals.detectPatterns;
 const originalGenerateCourseCorrection = _internals.generateCourseCorrection;
@@ -275,11 +276,11 @@ describe('PRM Integration Tests', () => {
 			const session = createMockSession(sessionId);
 			_internals.getAgentSession = () => session;
 			_internals.readTrajectoryWithCoverage = async () => ({
-			entries: trajectory,
-			coverage: 'complete' as const,
-			droppedByCompaction: 0,
-			skippedMalformed: 0,
-		});
+				entries: trajectory,
+				coverage: 'complete' as const,
+				droppedByCompaction: 0,
+				skippedMalformed: 0,
+			});
 			_internals.detectPatterns = mockDetectPatterns;
 			_internals.generateCourseCorrection = () => ({
 				alert: `TRAJECTORY ALERT: repetition_loop detected`,
@@ -529,18 +530,18 @@ describe('PRM Integration Tests', () => {
 				trajectoryCall++;
 				if (trajectoryCall === 1) {
 					return Promise.resolve({
-				entries: createPingPongTrajectory(),
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+						entries: createPingPongTrajectory(),
+						coverage: 'complete' as const,
+						droppedByCompaction: 0,
+						skippedMalformed: 0,
+					});
 				}
 				return Promise.resolve({
-				entries: createRepetitionLoopTrajectory(),
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+					entries: createRepetitionLoopTrajectory(),
+					coverage: 'complete' as const,
+					droppedByCompaction: 0,
+					skippedMalformed: 0,
+				});
 			};
 			let detectCall = 0;
 			_internals.detectPatterns = () => {
@@ -591,18 +592,18 @@ describe('PRM Integration Tests', () => {
 				trajectoryCallCount++;
 				if (trajectoryCallCount === 1) {
 					return Promise.resolve({
-				entries: createRepetitionLoopTrajectory(),
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+						entries: createRepetitionLoopTrajectory(),
+						coverage: 'complete' as const,
+						droppedByCompaction: 0,
+						skippedMalformed: 0,
+					});
 				}
 				return Promise.resolve({
-				entries: createPingPongTrajectory(),
-				coverage: 'complete' as const,
-				droppedByCompaction: 0,
-				skippedMalformed: 0,
-			});
+					entries: createPingPongTrajectory(),
+					coverage: 'complete' as const,
+					droppedByCompaction: 0,
+					skippedMalformed: 0,
+				});
 			};
 
 			let detectCallCount = 0;

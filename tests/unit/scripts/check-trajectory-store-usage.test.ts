@@ -9,9 +9,9 @@ import {
 	findViolations,
 	stripComments,
 	TRAJECTORY_LITERAL,
+	TRAJECTORY_MENTION_ALLOWLIST,
 	TRAJECTORY_STORE_IMPORT,
 	TRAJECTORY_STORE_IMPORT_ALLOWLIST,
-	TRAJECTORY_MENTION_ALLOWLIST,
 } from '../../../scripts/check-trajectory-store-usage';
 
 describe('stripComments', () => {
@@ -32,15 +32,25 @@ describe('stripComments', () => {
 
 describe('pattern constants', () => {
 	test('the import pattern matches static, dynamic, .js, and double-quoted imports', () => {
-		expect(TRAJECTORY_STORE_IMPORT.test("from './trajectory-store'")).toBe(true);
-		expect(TRAJECTORY_STORE_IMPORT.test("from '../prm/trajectory-store.js'")).toBe(true);
-		expect(TRAJECTORY_STORE_IMPORT.test('from "./trajectory-store"')).toBe(true);
-		expect(TRAJECTORY_STORE_IMPORT.test("import('./prm/trajectory-store.js')")).toBe(true);
+		expect(TRAJECTORY_STORE_IMPORT.test("from './trajectory-store'")).toBe(
+			true,
+		);
+		expect(
+			TRAJECTORY_STORE_IMPORT.test("from '../prm/trajectory-store.js'"),
+		).toBe(true);
+		expect(TRAJECTORY_STORE_IMPORT.test('from "./trajectory-store"')).toBe(
+			true,
+		);
+		expect(
+			TRAJECTORY_STORE_IMPORT.test("import('./prm/trajectory-store.js')"),
+		).toBe(true);
 		expect(TRAJECTORY_STORE_IMPORT.test("from './replay'")).toBe(false);
 	});
 
 	test('the literal pattern matches quoted directory segments only', () => {
-		expect(TRAJECTORY_LITERAL.test("path.join(dir, 'trajectories')")).toBe(true);
+		expect(TRAJECTORY_LITERAL.test("path.join(dir, 'trajectories')")).toBe(
+			true,
+		);
 		expect(TRAJECTORY_LITERAL.test('const x = "trajectories";')).toBe(true);
 		expect(TRAJECTORY_LITERAL.test('const trajectories = 1;')).toBe(false);
 		expect(TRAJECTORY_LITERAL.test('const x = trajectories;')).toBe(false);
@@ -52,7 +62,12 @@ describe('findViolations', () => {
 
 	test('flags an unregistered importer of the store', () => {
 		const violations = findViolations(
-			[{ file: 'src/some/new-module.ts', source: "import { readTrajectory } from '../prm/trajectory-store';" }],
+			[
+				{
+					file: 'src/some/new-module.ts',
+					source: "import { readTrajectory } from '../prm/trajectory-store';",
+				},
+			],
 			noAllowlists,
 			noAllowlists,
 		);
@@ -65,7 +80,8 @@ describe('findViolations', () => {
 			[
 				{
 					file: 'src/some/reader.ts',
-					source: "const root = path.join(directory, '.swarm', 'trajectories');",
+					source:
+						"const root = path.join(directory, '.swarm', 'trajectories');",
 				},
 			],
 			noAllowlists,
@@ -73,7 +89,7 @@ describe('findViolations', () => {
 		);
 		expect(violations).toHaveLength(1);
 		expect(violations[0].line).toBe(1);
-		expect(violations[0].text).toContain("path-literal mention");
+		expect(violations[0].text).toContain('path-literal mention');
 	});
 
 	test('comment-only mentions do not violate (the gate is fail-closed for CODE)', () => {
@@ -96,7 +112,8 @@ describe('findViolations', () => {
 	});
 
 	test('allowlisted files are exempt from both rules', () => {
-		const seamSource = "import { x } from './trajectory-store'; const p = 'trajectories';";
+		const seamSource =
+			"import { x } from './trajectory-store'; const p = 'trajectories';";
 		expect(
 			findViolations(
 				[{ file: 'src/prm/trajectory-store.ts', source: seamSource }],
@@ -109,7 +126,9 @@ describe('findViolations', () => {
 
 describe('allowlist integrity (the repo contract)', () => {
 	test('every allowlisted importer has a reason and class', () => {
-		for (const [file, entry] of Object.entries(TRAJECTORY_STORE_IMPORT_ALLOWLIST)) {
+		for (const [file, entry] of Object.entries(
+			TRAJECTORY_STORE_IMPORT_ALLOWLIST,
+		)) {
 			expect(file).toMatch(/^src\/.+\.ts$/);
 			expect(entry.reason.length).toBeGreaterThan(10);
 			expect(entry.cls.length).toBeGreaterThan(0);

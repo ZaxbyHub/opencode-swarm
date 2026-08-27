@@ -13,13 +13,12 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-
+import { detectPatterns } from '../pattern-detector';
 import {
 	appendTrajectoryEntry,
 	clearTrajectoryCache,
 	readTrajectoryWithCoverage,
 } from '../trajectory-store';
-import { detectPatterns } from '../pattern-detector';
 import type { PrmConfig, TrajectoryEntry } from '../types';
 
 const config: PrmConfig = {
@@ -36,7 +35,10 @@ const config: PrmConfig = {
 	detection_timeout_ms: 100,
 };
 
-function entry(step: number, overrides: Partial<TrajectoryEntry> = {}): TrajectoryEntry {
+function entry(
+	step: number,
+	overrides: Partial<TrajectoryEntry> = {},
+): TrajectoryEntry {
 	return {
 		step,
 		agent: 'coder',
@@ -121,10 +123,14 @@ describe('pattern detection over the retained window (issue #2041)', () => {
 
 		clearTrajectoryCache();
 		const read = await readTrajectoryWithCoverage(sessionId, tempDir);
-		expect(read.entries.some((e) => e.target === 'src/old-stuck.ts')).toBe(false);
+		expect(read.entries.some((e) => e.target === 'src/old-stuck.ts')).toBe(
+			false,
+		);
 
 		const result = detectPatterns(read.entries, config, 0);
-		expect(result.matches.find((m) => m.pattern === 'repetition_loop')).toBeUndefined();
+		expect(
+			result.matches.find((m) => m.pattern === 'repetition_loop'),
+		).toBeUndefined();
 	});
 
 	test('detection over the compacted disk window equals detection over the equally-trimmed cache', async () => {

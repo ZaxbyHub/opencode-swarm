@@ -68,7 +68,11 @@ describe('trajectory-store cache isolation (issue #2041)', () => {
 		const realRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'traj-iso-real-'));
 		const alias = path.join(os.tmpdir(), `traj-alias-${Date.now()}`);
 		// Junctions need no privileges on Windows; symlinks elsewhere.
-		fs.symlinkSync(realRoot, alias, process.platform === 'win32' ? 'junction' : 'dir');
+		fs.symlinkSync(
+			realRoot,
+			alias,
+			process.platform === 'win32' ? 'junction' : 'dir',
+		);
 
 		try {
 			await appendTrajectoryEntry(sessionId, createEntry(1), realRoot, 1000);
