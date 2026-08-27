@@ -6,7 +6,15 @@
  * per the test-file-split protocol.
  */
 
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import {
+	afterEach,
+	beforeEach,
+	describe,
+	expect,
+	mock,
+	spyOn,
+	test,
+} from 'bun:test';
 import * as fs from 'node:fs';
 import * as realFsPromises from 'node:fs/promises';
 import * as path from 'node:path';
@@ -15,7 +23,19 @@ import {
 	BUNDLED_PROJECT_SKILL_ROOT,
 	syncBundledProjectSkillsIfMissingAsync,
 } from '../../../src/config/bundled-skills';
+import {
+	clearDeferredWarnings,
+	getDeferredWarnings,
+} from '../../../src/services/warning-buffer';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
+
+// Capture the REAL rm at module scope, BEFORE any mock.module runs. Passing
+// `realFsPromises.rm` directly inside the mock factory's delegate branch is
+// self-referential: mock.module mutates the live namespace binding, so the
+// captured namespace's `rm` IS the mock by call time and the delegate branch
+// re-enters itself forever (PR #2387 review finding F-002). The repo
+// precedent is tests/helpers/prod-store-tripwire.ts.
+const realRm = realFsPromises.rm.bind(realFsPromises);
 
 function writePackageSkill(
 	packageRoot: string,
@@ -23,8 +43,13 @@ function writePackageSkill(
 	body = 'canonical skill\n',
 ): void {
 	const skillDir = path.join(packageRoot, '.opencode', 'skills', slug);
-	fs.mkdirSync(skillDir, { recursive: true });
+	fs.mkdirSync(path.join(skillDir, 'references'), { recursive: true });
 	fs.writeFileSync(path.join(skillDir, 'SKILL.md'), body, 'utf-8');
+	fs.writeFileSync(
+		path.join(skillDir, 'references', 'review-protocol-v8.2.md'),
+		'protocol\n',
+		'utf-8',
+	);
 }
 
 describe('retired bundled-skill cleanup (issue #2379: resume → swarm-resume)', () => {
@@ -32,9 +57,12 @@ describe('retired bundled-skill cleanup (issue #2379: resume → swarm-resume)',
 	let packageRoot: string;
 	let cleanupProject: () => void;
 	let cleanupPackage: () => void;
+	let warnOutput: string[];
+	let warnSpy: ReturnType<typeof spyOn>;
 
 	beforeEach(() => {
 		_test_exports.resetBundledProjectSkillSyncCache();
+		clearDeferredWarnings();
 		({ dir: projectDir, cleanup: cleanupProject } = createSafeTestDir(
 			'swarm-bundled-skill-retired-project-',
 		));
@@ -43,16 +71,32 @@ describe('retired bundled-skill cleanup (issue #2379: resume → swarm-resume)',
 		));
 		writePackageSkill(packageRoot);
 		writePackageSkill(packageRoot, 'design-docs', 'design docs skill\n');
+		warnOutput = [];
+		warnSpy = spyOn(console, 'warn').mockImplementation(
+			(...args: unknown[]) => {
+				warnOutput.push(args.map(String).join(' '));
+			},
+		);
 	});
 
 	afterEach(() => {
+		warnSpy.mockRestore();
 		mock.restore();
+		clearDeferredWarnings();
 		cleanupProject();
 		cleanupPackage();
 	});
 
 	const retiredDir = () =>
 		path.join(projectDir, BUNDLED_PROJECT_SKILL_ROOT, 'resume');
+
+	const activeSkillPath = () =>
+		path.join(
+			projectDir,
+			BUNDLED_PROJECT_SKILL_ROOT,
+			'codebase-review-swarm',
+			'SKILL.md',
+		);
 
 	test('removes a stale retired bundled-slug directory during sync', async () => {
 		fs.mkdirSync(retiredDir(), { recursive: true });
@@ -65,17 +109,38 @@ describe('retired bundled-skill cleanup (issue #2379: resume → swarm-resume)',
 		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
 
 		expect(fs.existsSync(retiredDir())).toBe(false);
+		expect(fs.readFileSync(activeSkillPath(), 'utf-8')).toBe(
+			'canonical skill\n',
+		);
+	});
+
+	test('cleanup still runs when the copy loop fails mid-sync', async () => {
+		// PR #2387 review finding F-003: the cleanup runs in a finally gated on
+		// the validated skillsDir, so a copy failure (here: a file where the
+		// references directory belongs) must not leave the stale retired
+		// directory behind.
+		fs.mkdirSync(retiredDir(), { recursive: true });
+		fs.writeFileSync(path.join(retiredDir(), 'SKILL.md'), 'legacy\n', 'utf-8');
+		const blocked = path.join(
+			projectDir,
+			BUNDLED_PROJECT_SKILL_ROOT,
+			'codebase-review-swarm',
+			'references',
+		);
+		fs.mkdirSync(path.dirname(blocked), { recursive: true });
+		fs.writeFileSync(blocked, 'not a directory\n', 'utf-8');
+
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
+
+		// The copy failure surfaces its advisory as designed (non-quiet call →
+		// legacy console.warn routing, matching bundled-skills-async.test.ts)...
 		expect(
-			fs.readFileSync(
-				path.join(
-					projectDir,
-					BUNDLED_PROJECT_SKILL_ROOT,
-					'codebase-review-swarm',
-					'SKILL.md',
-				),
-				'utf-8',
+			warnOutput.some((m) =>
+				m.includes('Could not install bundled project skills'),
 			),
-		).toBe('canonical skill\n');
+		).toBe(true);
+		// ...but the retired directory is still removed.
+		expect(fs.existsSync(retiredDir())).toBe(false);
 	});
 
 	test('leaves sibling bundled skills and unrelated .swarm content untouched', async () => {
@@ -120,6 +185,21 @@ describe('retired bundled-skill cleanup (issue #2379: resume → swarm-resume)',
 		expect(fs.existsSync(retiredDir())).toBe(true);
 	});
 
+	test('skips a plain file at the retired slug path (never deletes user data)', async () => {
+		// PR #2387 review finding PRR-003: the isDirectory guard's skip branch
+		// was previously untested. A plain file at the retired path is by
+		// definition user-owned — cleanup must leave it alone.
+		fs.mkdirSync(path.dirname(retiredDir()), { recursive: true });
+		fs.writeFileSync(retiredDir(), 'user notes\n', 'utf-8');
+
+		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
+
+		expect(fs.readFileSync(retiredDir(), 'utf-8')).toBe('user notes\n');
+		expect(fs.readFileSync(activeSkillPath(), 'utf-8')).toBe(
+			'canonical skill\n',
+		);
+	});
+
 	test('fails open when removal of a retired directory errors', async () => {
 		fs.mkdirSync(retiredDir(), { recursive: true });
 		// Portable stand-in for Windows EPERM/EACCES on a locked directory:
@@ -127,29 +207,27 @@ describe('retired bundled-skill cleanup (issue #2379: resume → swarm-resume)',
 		// cleanup must catch them itself and leave the sync green. Tier-2
 		// mock per the writing-tests skill: spread the real module, override
 		// only `rm`, reject only for the retired path, delegate everything
-		// else to the real implementation. Restored in afterEach via
-		// mock.restore().
+		// else to the real implementation (captured at module scope — see the
+		// realRm note above). Restored in afterEach via mock.restore().
 		mock.module('node:fs/promises', () => ({
 			...realFsPromises,
-			rm: (target: string, options?: unknown) =>
+			rm: (target: string, options?: never) =>
 				typeof target === 'string' &&
 				path.resolve(target) === path.resolve(retiredDir())
 					? Promise.reject(new Error('EPERM: locked'))
-					: realFsPromises.rm(target, options as never),
+					: realRm(target, options),
 		}));
 
 		await syncBundledProjectSkillsIfMissingAsync(projectDir, packageRoot);
 
-		expect(
-			fs.readFileSync(
-				path.join(
-					projectDir,
-					BUNDLED_PROJECT_SKILL_ROOT,
-					'codebase-review-swarm',
-					'SKILL.md',
-				),
-				'utf-8',
-			),
-		).toBe('canonical skill\n');
+		// PR #2387 review finding F-008: prove the test discriminates — the
+		// rejected rm must have left the retired directory in place, and the
+		// failure must stay debug-gated (no user-facing warning surfaces).
+		expect(fs.existsSync(retiredDir())).toBe(true);
+		expect(warnOutput).toEqual([]);
+		expect(getDeferredWarnings()).toEqual([]);
+		expect(fs.readFileSync(activeSkillPath(), 'utf-8')).toBe(
+			'canonical skill\n',
+		);
 	});
 });

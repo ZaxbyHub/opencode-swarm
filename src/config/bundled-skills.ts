@@ -301,15 +301,17 @@ async function copyBundledDirectoryBoundedAsync(
 }
 /**
  * Best-effort removal of retired bundled-slug directories from a project's
- * private runtime root. Bounded (fixed retired list — no directory scanning),
- * contained (each target is verified to sit under `skillsDir` before any
- * delete), symlink-refusing, and fail-open per slug: a removal failure
- * (including Windows EPERM/EACCES, which `force: true` does not swallow)
- * logs and continues without failing the surrounding sync.
+ * private runtime root. Validates its own root (refuses a symlinked
+ * `skillsDir` before any delete), is bounded (fixed retired list — no
+ * directory scanning), contained (each target is verified to sit under
+ * `skillsDir` before any delete), symlink-refusing, and fail-open per slug:
+ * a removal failure (including Windows EPERM/EACCES, which `force: true`
+ * does not swallow) logs and continues without failing the surrounding sync.
  */
 async function removeRetiredBundledSkillDirsAsync(
 	skillsDir: string,
 ): Promise<void> {
+	if (!(await ensureNotSymlinkedDirectoryAsync(skillsDir))) return;
 	const safeRoot = path.resolve(skillsDir);
 	for (const slug of RETIRED_BUNDLED_PROJECT_SKILLS) {
 		try {
@@ -343,6 +345,15 @@ async function performBundledProjectSkillSyncAsync(
 	packageRoot: string,
 	quiet: boolean,
 ): Promise<void> {
+	// Tracks whether `skillsDir` passed its symlink/directory guards. The
+	// retired-dir cleanup below must ONLY run on that validated path: running
+	// it unconditionally (e.g. via a bare `finally`) would also fire on the
+	// guard early-returns above, where `skillsDir` may be a symlink and a
+	// recursive rm could follow it outside the project (PR #2387 review
+	// finding F-003). Inside the validated region the cleanup must also run
+	// when the copy loop throws, so a failed copy can never leave the stale
+	// retired directory behind.
+	let skillsDirValidated = false;
 	try {
 		const sourceRoot = path.join(packageRoot, '.opencode', 'skills');
 		const swarmDir = path.join(projectDirectory, '.swarm');
@@ -352,6 +363,7 @@ async function performBundledProjectSkillSyncAsync(
 		}
 		if (!(await ensureNotSymlinkedDirectoryAsync(swarmDir))) return;
 		if (!(await ensureNotSymlinkedDirectoryAsync(skillsDir))) return;
+		skillsDirValidated = true;
 		for (const slug of BUNDLED_PROJECT_SKILLS) {
 			const sourceDir = path.join(sourceRoot, slug);
 			const sourceSkill = path.join(sourceDir, 'SKILL.md');
@@ -371,11 +383,6 @@ async function performBundledProjectSkillSyncAsync(
 				slug: bundledProjectSkillFileReference(slug),
 			});
 		}
-		// Retired slugs (renamed away in past releases) have no copy loop entry,
-		// so remove their stale materialized directories separately. Fail-open
-		// per slug inside the helper; a cleanup failure must never surface as a
-		// sync failure.
-		await removeRetiredBundledSkillDirsAsync(skillsDir);
 	} catch (err) {
 		// Non-fatal: plugin init and command registration must remain fail-open.
 		// The failure IS operator-actionable (the backstop broke): under
@@ -391,6 +398,18 @@ async function performBundledProjectSkillSyncAsync(
 		} else {
 			// biome-ignore lint/suspicious/noConsole: Fallback user-facing warning when bundled skill sync fails non-quietly — cannot use advisoryWarn as it would duplicate the already-raised advisory
 			console.warn(failureMsg);
+		}
+	} finally {
+		// Retired slugs (renamed away in past releases) have no copy loop entry,
+		// so remove their stale materialized directories separately — on the
+		// success path AND after a caught copy failure. Gated on the validated
+		// flag so the guard early-returns above never reach it. Fail-open per
+		// slug inside the helper; a cleanup failure must never surface as a
+		// sync failure.
+		if (skillsDirValidated) {
+			await removeRetiredBundledSkillDirsAsync(
+				path.join(projectDirectory, BUNDLED_PROJECT_SKILL_ROOT),
+			);
 		}
 	}
 }

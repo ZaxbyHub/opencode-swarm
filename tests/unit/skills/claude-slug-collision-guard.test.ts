@@ -71,8 +71,8 @@ function allFilesBelow(directory: string): string[] {
  * - `plan` (both trees): pre-existing same-class collision (shadows Claude
  *   Code plan mode). It gets the same dedicated reviewed rename PR treatment
  *   as `resume` in #2379 — the issue explicitly prescribes one rename PR per
- *   slug — and is tracked as a follow-up issue referencing #2379. Remove this
- *   entry when that rename lands.
+ *   slug — and is tracked as follow-up issue #2388. Remove this entry when
+ *   that rename lands.
  * - OPENCODE_ONLY_ARCHITECT_MODE_SKILLS (.opencode tree, derived — not
  *   duplicated): those slugs are intentionally not mirrored to `.claude`
  *   precisely because a mirror would shadow a Claude Code built-in (e.g.
@@ -89,6 +89,15 @@ const ACKNOWLEDGED_CLAUDE_COMMAND_COLLISIONS: Record<string, string[]> = {
 };
 
 describe('native skill slugs must not shadow host built-in commands (#2379)', () => {
+	// PR #2387 review finding F-007: nativeSkillSlugs returns [] for a missing
+	// tree, which would make every collision assertion silently vacuous. Pin
+	// the trees as populated so a future deletion or cwd change fails loudly.
+	for (const tree of NATIVE_SKILL_TREES) {
+		test(`${tree}: inventory is non-empty (guard cannot pass vacuously)`, () => {
+			expect(nativeSkillSlugs(tree).length).toBeGreaterThan(0);
+		});
+	}
+
 	for (const tree of NATIVE_SKILL_TREES) {
 		test(`${tree}: no slug is a Claude Code built-in slash command`, () => {
 			const acknowledged = ACKNOWLEDGED_CLAUDE_COMMAND_COLLISIONS[tree] ?? [];
