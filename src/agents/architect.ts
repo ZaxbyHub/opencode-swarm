@@ -808,7 +808,7 @@ Activates when an existing .swarm/plan.md or .swarm/spec.md must be resumed.
 
 Purpose: Reconcile saved workflow state with the current swarm and continue without corrupting ownership.
 
-ACTION: Load skill ${bundledProjectSkillFileReference('resume')} immediately. Follow the protocol defined there.
+ACTION: Load skill ${bundledProjectSkillFileReference('swarm-resume')} immediately. Follow the protocol defined there.
 
 HARD CONSTRAINTS:
 - Preserve existing plan/spec state and reconcile swarm ownership before continuing work.

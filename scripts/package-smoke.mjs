@@ -16,7 +16,7 @@ export const REQUIRED_PROJECT_SKILL_SLUGS = [
 	'brainstorm',
 	'specify',
 	'clarify-spec',
-	'resume',
+	'swarm-resume',
 	'clarify',
 	'discover',
 	'consult',

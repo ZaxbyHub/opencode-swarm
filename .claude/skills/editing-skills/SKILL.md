@@ -22,7 +22,7 @@ OpenCode and Claude Code surfaces. Classify first, then edit.
 Look the slug up in `src/config/skill-mirrors.ts`:
 
 - **MIRRORED_ARCHITECT_MODE_SKILLS** (brainstorm, specify, clarify-spec,
-  resume, clarify, discover, consult, pre-phase-briefing, council, deep-dive,
+  swarm-resume, clarify, discover, consult, pre-phase-briefing, council, deep-dive,
   deep-research, issue-ingest, plan, critic-gate, design-docs): `.opencode`
   and `.claude` copies must stay **byte-identical**.
   Any edit is a dual-tree edit — apply the identical change to both files.
