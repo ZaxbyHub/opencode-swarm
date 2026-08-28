@@ -11,6 +11,7 @@
  */
 
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { advisoryWarn } from '../services/warning-buffer';
 import {
 	hasRecoveryRecordForBranch,
@@ -48,6 +49,8 @@ export const _internals: {
 	cleanupOrphanedBranches: typeof cleanupOrphanedBranches;
 	/** Test seam for startupOrphanRecovery — allows tests to intercept the recovery call. */
 	startupOrphanRecovery: typeof startupOrphanRecovery;
+	/** Test seam for the dirty merge overlap preflight. */
+	captureMergeOverlapSnapshot: typeof captureMergeOverlapSnapshot;
 	/** FR-001b: exposes extractSessionId for lane ownership validation. */
 	extractSessionId: typeof extractSessionId;
 	/**
@@ -63,6 +66,7 @@ export const _internals: {
 		new Promise<void>((resolve) => setTimeout(resolve, ms)),
 	cleanupOrphanedBranches,
 	startupOrphanRecovery,
+	captureMergeOverlapSnapshot,
 	extractSessionId,
 	resolveGitExecutable,
 };
@@ -353,6 +357,27 @@ export type MergeReconciliationResult =
 			error?: string;
 	  };
 
+/**
+ * Immutable preserved-lane coordinates captured by the #2105 recovery
+ * authority. This path deliberately consumes exact object ids rather than a
+ * mutable branch ref, so a redispatch can recover the preserved lane even if
+ * the lane branch later advances, rewinds, or is renamed.
+ */
+export interface ImmutableMergeRecoveryCoordinates {
+	sourceBaseOid: string;
+	sourceHeadOid: string;
+	targetHeadOid: string;
+	strategy: MergeStrategy;
+}
+
+export type ImmutableMergeRecoveryResult =
+	| (MergeSuccess & {
+			sourceCommitOrder?: string[];
+			rewrittenCommitOrder?: string[];
+	  })
+	| (MergeConflict & { sourceCommitOrder?: string[] })
+	| (MergeFailure & { sourceCommitOrder?: string[] });
+
 export interface DirtyMergeOptions {
 	/** Stable identifier allocated before the merge-back begins. */
 	operationId?: string;
@@ -363,6 +388,422 @@ export interface DirtyMergeOptions {
 	 * A rejection fails closed without invoking the merge.
 	 */
 	onBeforeMerge?: (provenance: MergeOperationProvenance) => Promise<void>;
+}
+
+type PathCasePolicy = 'sensitive' | 'insensitive';
+
+interface MergeOverlapSnapshot {
+	targetHead: string;
+	laneHead: string;
+	mergeBase: string;
+	indexDigest: string;
+	statusDigest: string;
+	incomingDigest: string;
+	overlapPaths: string[];
+}
+
+function abortArgsForStrategy(strategy: MergeStrategy): string[] {
+	return strategy === 'rebase'
+		? ['rebase', '--abort']
+		: strategy === 'cherry-pick'
+			? ['cherry-pick', '--abort']
+			: ['merge', '--abort'];
+}
+
+async function finalizeMergeStrategyResult<
+	T extends {
+		sourceCommitOrder?: string[];
+		rewrittenCommitOrder?: string[];
+	},
+>(
+	primaryDir: string,
+	strategy: MergeStrategy,
+	result: GitResult,
+	metadata: T,
+): Promise<(MergeSuccess & T) | (MergeConflict & T) | (MergeFailure & T)> {
+	if (result.exitCode === 0) {
+		return { merged: true, strategy, ...metadata };
+	}
+
+	const combinedOutput = `${result.stderr}\n${result.stdout}`;
+	const hasConflict = /CONFLICT/i.test(combinedOutput);
+	const operationState = await detectInProgressOperation(primaryDir);
+
+	if (hasConflict || operationState.inProgress) {
+		const abortResult = await runGit(
+			abortArgsForStrategy(strategy),
+			primaryDir,
+		);
+		if (abortResult.exitCode !== 0) {
+			return {
+				error: `${strategy} abort failed after a non-zero merge result: ${abortResult.stderr.trim() || abortResult.stdout.trim() || 'unknown abort failure'}`,
+				...metadata,
+			};
+		}
+		return {
+			conflict: true,
+			files: parseConflictFiles(combinedOutput),
+			message:
+				result.stderr.trim() ||
+				result.stdout.trim() ||
+				(operationState.inProgress
+					? `${strategy} left an in-progress operation; it was aborted`
+					: `${strategy} reported a conflict`),
+			...metadata,
+		};
+	}
+
+	return {
+		error: result.stderr.trim() || result.stdout.trim(),
+		...metadata,
+	};
+}
+
+/**
+ * Detect Git operation state independently of human-readable stderr. Git can
+ * leave a sequencer or merge marker behind after applying some commits and
+ * then failing for a non-conflict reason (for example an untracked-file
+ * overwrite). Such state must be aborted before the caller can retry.
+ */
+async function detectInProgressOperation(
+	primaryDir: string,
+): Promise<{ inProgress: boolean }> {
+	for (const marker of [
+		'MERGE_HEAD',
+		'CHERRY_PICK_HEAD',
+		'rebase-merge',
+		'rebase-apply',
+		'sequencer',
+	]) {
+		const result = await runGit(
+			['rev-parse', '--git-path', marker],
+			primaryDir,
+		);
+		if (result.exitCode !== 0) continue;
+		const rawPath = result.stdout.trim();
+		if (!rawPath) continue;
+		const markerPath = path.isAbsolute(rawPath)
+			? rawPath
+			: path.resolve(primaryDir, rawPath);
+		if (fs.existsSync(markerPath)) return { inProgress: true };
+	}
+	return { inProgress: false };
+}
+
+interface PathNormalizationResult {
+	normalized: string;
+	display: string;
+}
+
+function currentPathCasePolicy(): PathCasePolicy {
+	return _internals.platform === 'win32' ? 'insensitive' : 'sensitive';
+}
+
+function normalizeGitPath(
+	rawPath: string,
+	casePolicy: PathCasePolicy,
+): PathNormalizationResult | null {
+	if (rawPath.includes('\0')) {
+		return null;
+	}
+	const slashNormalized = rawPath.replaceAll('\\', '/');
+	const segments = slashNormalized.split('/');
+	const normalizedSegments: string[] = [];
+	const displaySegments: string[] = [];
+	for (const segment of segments) {
+		if (segment.length === 0 || segment === '.') {
+			continue;
+		}
+		if (segment === '..') {
+			return null;
+		}
+		displaySegments.push(segment);
+		normalizedSegments.push(
+			casePolicy === 'insensitive' ? segment.toLowerCase() : segment,
+		);
+	}
+	if (displaySegments.length === 0) {
+		return null;
+	}
+	return {
+		normalized: normalizedSegments.join('/'),
+		display: displaySegments.join('/'),
+	};
+}
+
+function collapseOverlapPaths(paths: Iterable<string>): string[] {
+	return Array.from(new Set(paths)).sort((a, b) => a.localeCompare(b));
+}
+
+function extractRecordPath(
+	record: string,
+	spacesToSkip: number,
+): string | null {
+	let cursor = 0;
+	for (let index = 0; index < spacesToSkip; index++) {
+		const next = record.indexOf(' ', cursor);
+		if (next === -1) {
+			return null;
+		}
+		cursor = next + 1;
+	}
+	return record.slice(cursor);
+}
+
+function parsePrimaryDirtyPaths(
+	rawStatus: string,
+	casePolicy: PathCasePolicy,
+): { paths: Map<string, string> } | { error: string } {
+	const paths = new Map<string, string>();
+	const records = rawStatus.split('\0');
+	for (let index = 0; index < records.length; index++) {
+		const record = records[index];
+		if (!record) {
+			continue;
+		}
+		switch (record[0]) {
+			case '1': {
+				const path = extractRecordPath(record, 8);
+				const normalized = path ? normalizeGitPath(path, casePolicy) : null;
+				if (!normalized) {
+					return { error: `Malformed porcelain v2 entry: ${record}` };
+				}
+				paths.set(normalized.normalized, normalized.display);
+				break;
+			}
+			case '2': {
+				const path = extractRecordPath(record, 9);
+				const previousPath = records[++index];
+				const normalizedPath = path ? normalizeGitPath(path, casePolicy) : null;
+				const normalizedPrevious = previousPath
+					? normalizeGitPath(previousPath, casePolicy)
+					: null;
+				if (!normalizedPath || !normalizedPrevious) {
+					return {
+						error: `Malformed porcelain v2 rename/copy entry: ${record}`,
+					};
+				}
+				paths.set(normalizedPath.normalized, normalizedPath.display);
+				paths.set(normalizedPrevious.normalized, normalizedPrevious.display);
+				break;
+			}
+			case 'u': {
+				const path = extractRecordPath(record, 10);
+				const normalized = path ? normalizeGitPath(path, casePolicy) : null;
+				if (!normalized) {
+					return { error: `Malformed porcelain v2 unmerged entry: ${record}` };
+				}
+				paths.set(normalized.normalized, normalized.display);
+				break;
+			}
+			case '?': {
+				const normalized = normalizeGitPath(record.slice(2), casePolicy);
+				if (!normalized) {
+					return { error: `Malformed porcelain v2 untracked entry: ${record}` };
+				}
+				paths.set(normalized.normalized, normalized.display);
+				break;
+			}
+			case '!':
+				break;
+			default:
+				return { error: `Malformed porcelain v2 record kind: ${record}` };
+		}
+	}
+	return { paths };
+}
+
+function parseIncomingPaths(
+	rawDiff: string,
+	casePolicy: PathCasePolicy,
+): { paths: Map<string, string> } | { error: string } {
+	const paths = new Map<string, string>();
+	const records = rawDiff.split('\0');
+	for (let index = 0; index < records.length; ) {
+		const status = records[index++];
+		if (!status) {
+			continue;
+		}
+		if (status.startsWith('R') || status.startsWith('C')) {
+			const fromPath = records[index++];
+			const toPath = records[index++];
+			const normalizedFrom = fromPath
+				? normalizeGitPath(fromPath, casePolicy)
+				: null;
+			const normalizedTo = toPath ? normalizeGitPath(toPath, casePolicy) : null;
+			if (!normalizedFrom || !normalizedTo) {
+				return { error: `Malformed diff rename/copy entry: ${status}` };
+			}
+			paths.set(normalizedFrom.normalized, normalizedFrom.display);
+			paths.set(normalizedTo.normalized, normalizedTo.display);
+			continue;
+		}
+		const path = records[index++];
+		const normalized = path ? normalizeGitPath(path, casePolicy) : null;
+		if (!normalized) {
+			return { error: `Malformed diff entry: ${status}` };
+		}
+		paths.set(normalized.normalized, normalized.display);
+	}
+	return { paths };
+}
+
+function pathsOverlap(left: string, right: string): boolean {
+	return (
+		left === right ||
+		left.startsWith(`${right}/`) ||
+		right.startsWith(`${left}/`)
+	);
+}
+
+function buildOverlapPaths(
+	dirtyPaths: Map<string, string>,
+	incomingPaths: Map<string, string>,
+): string[] {
+	const collisions = new Set<string>();
+	for (const dirtyNormalized of dirtyPaths.keys()) {
+		for (const incomingNormalized of incomingPaths.keys()) {
+			if (!pathsOverlap(dirtyNormalized, incomingNormalized)) {
+				continue;
+			}
+			collisions.add(dirtyNormalized);
+			collisions.add(incomingNormalized);
+		}
+	}
+	return collapseOverlapPaths(collisions);
+}
+
+async function readVerifiedGitObjectId(
+	cwd: string,
+	ref: string,
+	description: string,
+): Promise<{ oid: string } | { error: string }> {
+	const result = await runGit(['rev-parse', '--verify', `${ref}^0`], cwd);
+	const oid = result.stdout.trim();
+	if (result.exitCode !== 0 || !GIT_OBJECT_ID_PATTERN.test(oid)) {
+		return {
+			error: `Unable to verify ${description} for overlap preflight`,
+		};
+	}
+	return { oid };
+}
+
+async function captureMergeOverlapSnapshot(
+	primaryDir: string,
+	branchName: string,
+): Promise<{ snapshot: MergeOverlapSnapshot } | { error: string }> {
+	const casePolicy = currentPathCasePolicy();
+	const targetHead = await readVerifiedGitObjectId(
+		primaryDir,
+		'HEAD',
+		'primary HEAD',
+	);
+	if ('error' in targetHead) {
+		return targetHead;
+	}
+	const laneHead = await readVerifiedGitObjectId(
+		primaryDir,
+		branchName,
+		'lane HEAD',
+	);
+	if ('error' in laneHead) {
+		return laneHead;
+	}
+	const mergeBaseResult = await runGit(
+		['merge-base', targetHead.oid, laneHead.oid],
+		primaryDir,
+	);
+	const mergeBase = mergeBaseResult.stdout.trim();
+	if (
+		mergeBaseResult.exitCode !== 0 ||
+		!GIT_OBJECT_ID_PATTERN.test(mergeBase)
+	) {
+		return {
+			error: 'Unable to determine incoming lane changes for overlap preflight',
+		};
+	}
+	const statusResult = await runGit(
+		['status', '--porcelain=v2', '-z', '--untracked-files=all'],
+		primaryDir,
+	);
+	if (statusResult.exitCode !== 0) {
+		return {
+			error: 'Unable to inspect primary dirty state for overlap preflight',
+		};
+	}
+	const parsedStatus = parsePrimaryDirtyPaths(statusResult.stdout, casePolicy);
+	if ('error' in parsedStatus) {
+		return { error: parsedStatus.error };
+	}
+	const indexResult = await runGit(['ls-files', '--stage', '-z'], primaryDir);
+	if (indexResult.exitCode !== 0) {
+		return { error: 'Unable to inspect primary index for overlap preflight' };
+	}
+	const incomingResult = await runGit(
+		[
+			'diff',
+			'--name-status',
+			'-z',
+			'--find-renames',
+			`${mergeBase}..${laneHead.oid}`,
+		],
+		primaryDir,
+	);
+	if (incomingResult.exitCode !== 0) {
+		return {
+			error: 'Unable to inspect incoming lane paths for overlap preflight',
+		};
+	}
+	const parsedIncoming = parseIncomingPaths(incomingResult.stdout, casePolicy);
+	if ('error' in parsedIncoming) {
+		return { error: parsedIncoming.error };
+	}
+	return {
+		snapshot: {
+			targetHead: targetHead.oid,
+			laneHead: laneHead.oid,
+			mergeBase,
+			indexDigest: indexResult.stdout,
+			statusDigest: statusResult.stdout,
+			incomingDigest: incomingResult.stdout,
+			overlapPaths: buildOverlapPaths(parsedStatus.paths, parsedIncoming.paths),
+		},
+	};
+}
+
+async function captureImmutableMergeOverlapSnapshot(
+	primaryDir: string,
+	coordinates: ImmutableMergeRecoveryCoordinates,
+): Promise<{ snapshot: MergeOverlapSnapshot } | { error: string }> {
+	const snapshot = await captureMergeOverlapSnapshot(
+		primaryDir,
+		coordinates.sourceHeadOid,
+	);
+	if ('error' in snapshot) return snapshot;
+	if (
+		snapshot.snapshot.laneHead !== coordinates.sourceHeadOid ||
+		snapshot.snapshot.mergeBase !== coordinates.sourceBaseOid
+	) {
+		return {
+			error:
+				'Immutable recovery coordinates changed during overlap preflight; refusing merge-back',
+		};
+	}
+	return snapshot;
+}
+
+function sameOverlapSnapshot(
+	left: MergeOverlapSnapshot,
+	right: MergeOverlapSnapshot,
+): boolean {
+	return (
+		left.targetHead === right.targetHead &&
+		left.laneHead === right.laneHead &&
+		left.mergeBase === right.mergeBase &&
+		left.indexDigest === right.indexDigest &&
+		left.statusDigest === right.statusDigest &&
+		left.incomingDigest === right.incomingDigest
+	);
 }
 
 // ---------------------------------------------------------------------------
@@ -467,36 +908,247 @@ export async function mergeLaneBranch(
 		}
 	}
 
-	if (result.exitCode === 0) {
-		return { merged: true, strategy };
+	return finalizeMergeStrategyResult(primaryDir, strategy, result, {});
+}
+
+async function requireAncestorRelation(
+	primaryDir: string,
+	ancestor: string,
+	descendant: string,
+	description: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+	const relation = await runGit(
+		['merge-base', '--is-ancestor', ancestor, descendant],
+		primaryDir,
+	);
+	if (relation.exitCode === 0) {
+		return { ok: true };
 	}
+	if (relation.exitCode === 1) {
+		return { ok: false, error: description };
+	}
+	return {
+		ok: false,
+		error:
+			relation.stderr.trim() ||
+			relation.stdout.trim() ||
+			`git merge-base exited ${relation.exitCode}`,
+	};
+}
 
-	const combinedOutput = `${result.stderr}\n${result.stdout}`;
-	const hasConflict =
-		/CONFLICT/i.test(combinedOutput) || /conflict/i.test(combinedOutput);
-
-	if (hasConflict) {
-		// Parse conflicted files from output
-		const files = parseConflictFiles(combinedOutput);
-
-		// Abort the in-progress merge/rebase/cherry-pick to restore clean state
-		const abortArgs =
-			strategy === 'rebase'
-				? ['rebase', '--abort']
-				: strategy === 'cherry-pick'
-					? ['cherry-pick', '--abort']
-					: ['merge', '--abort'];
-		await runGit(abortArgs, primaryDir);
-
+async function readOrderedCommitRange(
+	primaryDir: string,
+	fromExclusive: string,
+	toInclusive: string,
+	description: string,
+): Promise<{ commits: string[] } | { error: string }> {
+	const revList = await runGit(
+		[
+			'rev-list',
+			'--reverse',
+			'--topo-order',
+			`${fromExclusive}..${toInclusive}`,
+		],
+		primaryDir,
+	);
+	if (revList.exitCode !== 0) {
 		return {
-			conflict: true,
-			files,
-			message: result.stderr.trim(),
+			error:
+				revList.stderr.trim() ||
+				revList.stdout.trim() ||
+				`${description}: git rev-list exited ${revList.exitCode}`,
+		};
+	}
+	const commits = revList.stdout
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0);
+	if (!commits.every((commit) => GIT_OBJECT_ID_PATTERN.test(commit))) {
+		return {
+			error: `${description}: git rev-list returned a malformed object id`,
+		};
+	}
+	return { commits };
+}
+
+/**
+ * Re-applies a preserved lane using exact immutable object ids captured by the
+ * #2105 recovery authority.
+ *
+ * This is the strategy-specific recovery primitive that `worktree-isolation`
+ * can call when a same-task redispatch claims a preserved lane. It refuses to
+ * operate on mutable branch refs, verifies that the captured lane ancestry is
+ * coherent, and fails closed if the current primary checkout no longer
+ * descends from the captured target head.
+ */
+export async function recoverMergeBackFromImmutableCoordinates(
+	primaryDir: string,
+	coordinates: ImmutableMergeRecoveryCoordinates,
+): Promise<ImmutableMergeRecoveryResult> {
+	if (
+		!GIT_OBJECT_ID_PATTERN.test(coordinates.sourceBaseOid) ||
+		!GIT_OBJECT_ID_PATTERN.test(coordinates.sourceHeadOid) ||
+		!GIT_OBJECT_ID_PATTERN.test(coordinates.targetHeadOid)
+	) {
+		return {
+			error: 'Malformed preserved lane recovery coordinates',
 		};
 	}
 
+	const laneAncestry = await requireAncestorRelation(
+		primaryDir,
+		coordinates.sourceBaseOid,
+		coordinates.sourceHeadOid,
+		'Preserved lane recovery base does not reach the preserved lane head',
+	);
+	if (!laneAncestry.ok) {
+		return { error: laneAncestry.error };
+	}
+
+	const targetBaseRelation = await requireAncestorRelation(
+		primaryDir,
+		coordinates.sourceBaseOid,
+		coordinates.targetHeadOid,
+		'Preserved lane recovery base does not reach the captured target head',
+	);
+	if (!targetBaseRelation.ok) {
+		return { error: targetBaseRelation.error };
+	}
+
+	const currentTargetRelation = await requireAncestorRelation(
+		primaryDir,
+		coordinates.targetHeadOid,
+		'HEAD',
+		'Current primary HEAD no longer descends from the captured recovery target',
+	);
+	if (!currentTargetRelation.ok) {
+		return { error: currentTargetRelation.error };
+	}
+
+	// Recovery must apply the same two-snapshot overlap fence as the dirty
+	// merge-back path. Use only the immutable object ids captured in the
+	// authority; resolving a mutable lane branch here would allow a later branch
+	// advance to bypass the preflight.
+	const initialOverlapSnapshot = await captureImmutableMergeOverlapSnapshot(
+		primaryDir,
+		coordinates,
+	);
+	if ('error' in initialOverlapSnapshot) {
+		return { error: initialOverlapSnapshot.error };
+	}
+	if (initialOverlapSnapshot.snapshot.overlapPaths.length > 0) {
+		return {
+			error: `Primary checkout has overlapping dirty paths with incoming preserved lane changes: ${initialOverlapSnapshot.snapshot.overlapPaths.join(', ')}`,
+		};
+	}
+	const finalOverlapSnapshot = await captureImmutableMergeOverlapSnapshot(
+		primaryDir,
+		coordinates,
+	);
+	if ('error' in finalOverlapSnapshot) {
+		return { error: finalOverlapSnapshot.error };
+	}
+	if (
+		!sameOverlapSnapshot(
+			initialOverlapSnapshot.snapshot,
+			finalOverlapSnapshot.snapshot,
+		)
+	) {
+		return {
+			error:
+				'Primary or preserved lane state changed during overlap preflight; refusing merge-back',
+		};
+	}
+
+	if (coordinates.strategy === 'merge') {
+		return finalizeMergeStrategyResult(
+			primaryDir,
+			'merge',
+			await runGit(
+				['merge', '--no-edit', coordinates.sourceHeadOid],
+				primaryDir,
+			),
+			{},
+		);
+	}
+
+	if (coordinates.strategy === 'rebase') {
+		return finalizeMergeStrategyResult(
+			primaryDir,
+			'rebase',
+			await runGit(
+				[
+					'rebase',
+					'--onto',
+					coordinates.sourceHeadOid,
+					coordinates.sourceBaseOid,
+				],
+				primaryDir,
+			),
+			{},
+		);
+	}
+
+	const sourceCommitOrder = await readOrderedCommitRange(
+		primaryDir,
+		coordinates.sourceBaseOid,
+		coordinates.sourceHeadOid,
+		'Malformed preserved lane recovery coordinates: exact cherry-pick order could not be reconstructed',
+	);
+	if ('error' in sourceCommitOrder) {
+		return { error: sourceCommitOrder.error };
+	}
+	if (sourceCommitOrder.commits.length === 0) {
+		return {
+			merged: true,
+			strategy: 'cherry-pick',
+			sourceCommitOrder: [],
+		};
+	}
+	const headBefore = await readVerifiedGitObjectId(
+		primaryDir,
+		'HEAD',
+		'current primary HEAD before preserved cherry-pick recovery',
+	);
+	if ('error' in headBefore) {
+		return { error: headBefore.error };
+	}
+	const cherryPickResult = await finalizeMergeStrategyResult(
+		primaryDir,
+		'cherry-pick',
+		await runGit(
+			['cherry-pick', ...sourceCommitOrder.commits, '-x'],
+			primaryDir,
+		),
+		{ sourceCommitOrder: sourceCommitOrder.commits },
+	);
+	if (!('merged' in cherryPickResult) || !cherryPickResult.merged) {
+		return cherryPickResult;
+	}
+	const rewrittenCommitOrder = await readOrderedCommitRange(
+		primaryDir,
+		headBefore.oid,
+		'HEAD',
+		'Unable to reconstruct rewritten preserved cherry-pick order',
+	);
+	if ('error' in rewrittenCommitOrder) {
+		return {
+			error: rewrittenCommitOrder.error,
+			sourceCommitOrder: sourceCommitOrder.commits,
+		};
+	}
+	if (
+		rewrittenCommitOrder.commits.length !== sourceCommitOrder.commits.length
+	) {
+		return {
+			error:
+				'Unable to reconstruct rewritten preserved cherry-pick order: rewritten commit count did not match the captured lane range',
+			sourceCommitOrder: sourceCommitOrder.commits,
+		};
+	}
 	return {
-		error: result.stderr.trim() || result.stdout.trim(),
+		...cherryPickResult,
+		rewrittenCommitOrder: rewrittenCommitOrder.commits,
 	};
 }
 
@@ -1059,6 +1711,19 @@ export async function attemptMergeBackFromDirty(
 		}
 	}
 
+	const initialOverlapSnapshot = await _internals.captureMergeOverlapSnapshot(
+		primaryDir,
+		branchName,
+	);
+	if ('error' in initialOverlapSnapshot) {
+		return {
+			failed: true,
+			stage: 'pre-merge',
+			message: initialOverlapSnapshot.error,
+			...(provenance ? { provenance } : {}),
+		};
+	}
+
 	if (!provenance && (options.operationId || options.onBeforeMerge)) {
 		if (!options.operationId) {
 			return {
@@ -1068,41 +1733,10 @@ export async function attemptMergeBackFromDirty(
 			};
 		}
 		// #2236 BR-1: same relocation as the provenance branch above.
-		const source = await captureLaneSourceHead(
-			worktreePath,
-			branchName,
-			primaryDir,
-			sourceWorktreeMissing,
-		);
-		if (source.sourceWorktreeMissing && !sourceWorktreeMissing) {
-			const unrecoverable = await handleSourceWorktreeGone(
-				source.result,
-				worktreePath,
-				branchName,
-				primaryDir,
-				provenance,
-			);
-			if (unrecoverable) return unrecoverable;
-			sourceWorktreeMissing = true;
-		}
-		const sourceHead = source.result;
-		const targetHead = await runGit(['rev-parse', 'HEAD'], primaryDir);
-		if (
-			sourceHead.exitCode !== 0 ||
-			targetHead.exitCode !== 0 ||
-			!sourceHead.stdout.trim() ||
-			!targetHead.stdout.trim()
-		) {
-			return {
-				failed: true,
-				stage: 'pre-merge',
-				message: 'Unable to capture source and target HEAD before merge-back',
-			};
-		}
 		provenance = {
 			operationId: options.operationId,
-			sourceHead: sourceHead.stdout.trim(),
-			targetHeadBefore: targetHead.stdout.trim(),
+			sourceHead: initialOverlapSnapshot.snapshot.laneHead,
+			targetHeadBefore: initialOverlapSnapshot.snapshot.targetHead,
 			branchName,
 			strategy,
 		};
@@ -1118,6 +1752,44 @@ export async function attemptMergeBackFromDirty(
 				};
 			}
 		}
+	}
+
+	const finalOverlapSnapshot = await _internals.captureMergeOverlapSnapshot(
+		primaryDir,
+		branchName,
+	);
+	if ('error' in finalOverlapSnapshot) {
+		return {
+			failed: true,
+			stage: 'pre-merge',
+			message: finalOverlapSnapshot.error,
+			...(provenance ? { provenance } : {}),
+		};
+	}
+	if (finalOverlapSnapshot.snapshot.overlapPaths.length > 0) {
+		return {
+			partial: true,
+			stage: 'pre-merge-overlap',
+			autoCommitted,
+			cleaned,
+			message: `Primary checkout has overlapping dirty paths with incoming lane changes: ${finalOverlapSnapshot.snapshot.overlapPaths.join(', ')}`,
+			conflictFiles: finalOverlapSnapshot.snapshot.overlapPaths,
+			...(provenance ? { provenance } : {}),
+		};
+	}
+	if (
+		!sameOverlapSnapshot(
+			initialOverlapSnapshot.snapshot,
+			finalOverlapSnapshot.snapshot,
+		)
+	) {
+		return {
+			failed: true,
+			stage: 'pre-merge',
+			message:
+				'Primary or lane state changed during overlap preflight; refusing merge-back',
+			...(provenance ? { provenance } : {}),
+		};
 	}
 
 	// Step 3b: Attempt merge-back

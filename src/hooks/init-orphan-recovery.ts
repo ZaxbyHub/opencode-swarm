@@ -46,10 +46,15 @@ import { scanWorktreeMergeFailuresForRecovery } from './delegation-gate/worktree
 import { scanBackgroundWorktreeOwnershipTagsForRecovery } from './delegation-gate/worktree-ownership-tag';
 import {
 	removeWorktreeProvisioningOwner,
+	scanWorktreeProvisioningLifecycleJournalForRecovery,
 	scanWorktreeProvisioningOwnersForRecovery,
 	WORKTREE_LIFECYCLE_LOCK_FILE,
 	WORKTREE_PROVISIONING_OWNER_LEASE_MS,
 } from './delegation-gate/worktree-provisioning-owner';
+import {
+	replayWorktreeRecoveryClaimJournal,
+	scanWorktreeRecoveryAuthoritiesForRecovery,
+} from './delegation-gate/worktree-recovery-authority';
 
 const INIT_ORPHAN_RECOVERY_TIMEOUT_MS = 10_000;
 const OWNERSHIP_TAG_SCAN_TIMEOUT_MS = 2_000;
@@ -91,7 +96,10 @@ export const _internals: {
 	recordDelegationRecoveryObservation: typeof recordDelegationRecoveryObservation;
 	scanDelegationFallbacksForRecovery: typeof scanDelegationFallbacksForRecovery;
 	scanWorktreeMergeFailuresForRecovery: typeof scanWorktreeMergeFailuresForRecovery;
+	scanWorktreeRecoveryAuthoritiesForRecovery: typeof scanWorktreeRecoveryAuthoritiesForRecovery;
+	replayWorktreeRecoveryClaimJournal: typeof replayWorktreeRecoveryClaimJournal;
 	scanWorktreeProvisioningOwnersForRecovery: typeof scanWorktreeProvisioningOwnersForRecovery;
+	scanWorktreeProvisioningLifecycleJournalForRecovery: typeof scanWorktreeProvisioningLifecycleJournalForRecovery;
 	scanRegisteredWorktreeLiveness: typeof scanRegisteredWorktreeLiveness;
 	removeWorktreeProvisioningOwner: typeof removeWorktreeProvisioningOwner;
 } = {
@@ -105,7 +113,10 @@ export const _internals: {
 	recordDelegationRecoveryObservation,
 	scanDelegationFallbacksForRecovery,
 	scanWorktreeMergeFailuresForRecovery,
+	scanWorktreeRecoveryAuthoritiesForRecovery,
+	replayWorktreeRecoveryClaimJournal,
 	scanWorktreeProvisioningOwnersForRecovery,
+	scanWorktreeProvisioningLifecycleJournalForRecovery,
 	scanRegisteredWorktreeLiveness,
 	removeWorktreeProvisioningOwner,
 };
@@ -375,6 +386,7 @@ export async function runInitOrphanRecovery(
 ): Promise<InitOrphanRecoveryResult> {
 	let result: InitOrphanRecoveryResult;
 	let recoveryLockRelease: (() => Promise<void>) | undefined;
+	const recoveryReplayWarnings: string[] = [];
 
 	try {
 		// Acquire the shared lifecycle exclusion before reading any owner store.
@@ -408,6 +420,73 @@ export async function runInitOrphanRecovery(
 		// Durable background owners survive process restart, when swarmState is
 		// empty. Protect their exact worktree coordinates from orphan cleanup.
 		const activeSessionIds = Array.from(swarmState.agentSessions.keys());
+		// Issue #2105: repair interrupted claim publication before consulting the
+		// authoritative v2 store. Replay is idempotent and runs under the same
+		// lifecycle exclusion as destructive cleanup, so a PREPARED claimant can
+		// never race orphan reclamation.
+		const replayedClaims =
+			_internals.replayWorktreeRecoveryClaimJournal(directory);
+		const uncertainReplay = replayedClaims.find(
+			(entry) => entry.outcome === 'uncertain_committed_without_authority',
+		);
+		if (uncertainReplay) {
+			_internals.recordDelegationRecoveryObservation(directory, {
+				source: 'unknown',
+				ok: false,
+				reason: `worktree recovery replay is uncertain for authority ${uncertainReplay.authorityDigest}: committed claim is missing its authoritative record`,
+			});
+			throw new Error(
+				`worktree recovery replay is uncertain for authority ${uncertainReplay.authorityDigest}; destructive orphan cleanup skipped`,
+			);
+		}
+		const replayRepairs = replayedClaims.filter(
+			(entry) =>
+				entry.outcome === 'aborted_prepared_claim' ||
+				entry.outcome === 'removed_uncommitted_credential' ||
+				entry.outcome === 'released_orphaned_committed_claim',
+		);
+		if (replayRepairs.length > 0) {
+			recoveryReplayWarnings.push(
+				`Recovered ${replayRepairs.length} interrupted worktree recovery claim${
+					replayRepairs.length === 1 ? '' : 's'
+				} during startup replay before orphan cleanup.`,
+			);
+		}
+		const recoveryAuthorityScan =
+			_internals.scanWorktreeRecoveryAuthoritiesForRecovery(directory);
+		if (recoveryAuthorityScan.status !== 'ok') {
+			_internals.recordDelegationRecoveryObservation(directory, {
+				source: 'unknown',
+				ok: false,
+				reason: `worktree recovery authority state is uncertain: ${recoveryAuthorityScan.reason}`,
+			});
+			throw new Error(
+				`worktree recovery authority state is uncertain; destructive orphan cleanup skipped: ${recoveryAuthorityScan.reason}`,
+			);
+		}
+		const liveRecoveryAuthorities = recoveryAuthorityScan.authorities.filter(
+			(authority) => authority.status !== 'finalized',
+		);
+		for (const authority of liveRecoveryAuthorities) {
+			for (const sessionId of [
+				authority.immutable.parentSessionId,
+				authority.claim?.claimantSessionId,
+				authority.claim?.childSessionId,
+			]) {
+				if (sessionId && !activeSessionIds.includes(sessionId)) {
+					activeSessionIds.push(sessionId);
+				}
+			}
+			if (
+				authority.status === 'claimed' &&
+				authority.claim &&
+				!swarmState.agentSessions.has(authority.claim.childSessionId)
+			) {
+				recoveryReplayWarnings.push(
+					`Preserved claimed recovery lane "${authority.immutable.laneBranch}" for task ${authority.immutable.taskId}; restart reconciliation may still need to resume prompt delivery for child session ${authority.claim.childSessionId}.`,
+				);
+			}
+		}
 		const provisioningOwnerScan = await withTimeout(
 			// Best-effort: the scan is synchronous (uses fs.*Sync) so the
 			// withTimeout cannot interrupt a stuck call. File-size bounds
@@ -425,6 +504,34 @@ export async function runInitOrphanRecovery(
 			throw new Error(
 				`worktree provisioning ownership state is uncertain; destructive orphan cleanup skipped: ${provisioningOwnerScan.reason}`,
 			);
+		}
+		const provisioningLifecycleScan =
+			_internals.scanWorktreeProvisioningLifecycleJournalForRecovery(directory);
+		if (provisioningLifecycleScan.status === 'uncertain') {
+			throw new Error(
+				`worktree provisioning lifecycle state is uncertain; destructive orphan cleanup skipped: ${provisioningLifecycleScan.reason}`,
+			);
+		}
+		const latestLifecycleByCall = new Map(
+			provisioningLifecycleScan.entries.map((entry) => [entry.callID, entry]),
+		);
+		for (const owner of provisioningOwnerScan.owners) {
+			if (owner.schemaVersion !== 3) continue;
+			const lifecycle = latestLifecycleByCall.get(owner.callID);
+			if (
+				!lifecycle ||
+				lifecycle.state !== 'OWNER_PUBLISHED' ||
+				lifecycle.parentSessionId !== owner.parentSessionId ||
+				lifecycle.worktreeSessionId !== owner.worktreeSessionId ||
+				lifecycle.taskId !== owner.taskId ||
+				lifecycle.reservationId !== owner.reservationId ||
+				lifecycle.generation !== owner.generation ||
+				lifecycle.branchName !== owner.branchName
+			) {
+				throw new Error(
+					`worktree provisioning owner ${owner.callID} is not corroborated by its exact lifecycle journal entry; destructive orphan cleanup skipped`,
+				);
+			}
 		}
 		const registeredWorktrees =
 			provisioningOwnerScan.owners.length === 0
@@ -469,7 +576,17 @@ export async function runInitOrphanRecovery(
 						});
 			if (!leaseIsLive && !branchIsLive) {
 				if (
-					!_internals.removeWorktreeProvisioningOwner(directory, owner.callID)
+					!_internals.removeWorktreeProvisioningOwner(
+						directory,
+						owner.callID,
+						owner.schemaVersion === 3
+							? {
+									reservationId: owner.reservationId,
+									generation: owner.generation,
+									branchName: owner.branchName,
+								}
+							: undefined,
+					)
 				) {
 					throw new Error(
 						`expired worktree provisioning owner ${owner.callID} could not be removed; destructive orphan cleanup skipped`,
@@ -581,6 +698,9 @@ export async function runInitOrphanRecovery(
 			[
 				...allDurableOwners.map((record) => record.worktree?.worktreePath),
 				...preservedMergeFailures.map((failure) => failure.worktreePath),
+				...liveRecoveryAuthorities.map(
+					(authority) => authority.immutable.lanePath,
+				),
 			]
 				.filter((value): value is string => typeof value === 'string')
 				.map((value) => path.resolve(value)),
@@ -678,11 +798,12 @@ export async function runInitOrphanRecovery(
 		);
 
 		const allWarnings = [...worktreeWarnings, ...branchWarnings];
+		const mergedWarnings = [...recoveryReplayWarnings, ...allWarnings];
 
 		result = {
 			attempted: true,
 			crossProcessLockHeld: false,
-			warnings: allWarnings,
+			warnings: mergedWarnings,
 			orphanedBranches: cleanupResult.removed, // branches actually deleted by cleanup (orphaned = no active session)
 			removedWorktrees,
 			// #1657 fail-safe: when recovery records are unreadable,
@@ -695,7 +816,7 @@ export async function runInitOrphanRecovery(
 		await writeAdvisoryFile(
 			directory,
 			cleanupResult,
-			allWarnings,
+			mergedWarnings,
 			true,
 			removedWorktrees,
 		);

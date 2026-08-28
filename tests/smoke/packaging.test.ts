@@ -8,7 +8,7 @@ import {
 } from '../helpers/test-isolation.js';
 
 const ROOT = path.resolve(import.meta.dir, '../../');
-const MAIN_BUNDLE_MAX_BYTES = 8.0 * 1024 * 1024;
+const MAIN_BUNDLE_MAX_BYTES = 8.5 * 1024 * 1024;
 
 /**
  * Issue #2010 isolation for the one test below that BOOTS the shipped bundle.
@@ -128,14 +128,16 @@ describe('packaging smoke tests', () => {
 		expect(typeof plugin.config).toBe('function');
 	});
 
-	test('dist/index.js file size is reasonable (< 8.0MiB)', () => {
+	test('dist/index.js file size is reasonable (< 8.5MiB)', () => {
 		const stats = Bun.file(path.join(ROOT, 'dist/index.js'));
 		// The main bundle is built with identifier-preserving minification
 		// (`--minify-whitespace --minify-syntax`, no `--minify-identifiers`).
-		// Bumped 7.5 -> 8.0 MiB after the issue #1824 integrity-boundary changes
-		// grew the bundle past the old tripwire. Keep meaningful headroom for
-		// normal source growth and cross-platform build variance; the exact merged
-		// size is still rechecked after every build.
+		// Bumped 7.5 -> 8.5 MiB for issue #2105's durable worktree-recovery
+		// infrastructure (see docs/releases/pending/ci-bundle-size-cap-flake.md
+		// for the bump history and cross-platform build-variance rationale): the
+		// bundle crossed 7.5 MiB after intentional durable-recovery source growth, exactly
+		// the "will eventually approach the cap and need another bump" case that
+		// doc calls out. The exact merged size is still rechecked after every build.
 		expect(stats.size).toBeLessThan(MAIN_BUNDLE_MAX_BYTES);
 		// But should be at least 10KB (non-empty)
 		expect(stats.size).toBeGreaterThan(10 * 1024);

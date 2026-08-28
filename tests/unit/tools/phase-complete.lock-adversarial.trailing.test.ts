@@ -462,7 +462,7 @@ describe('phase_complete adversarial trailing groups', () => {
 	});
 
 	describe('Multi-session phase isolation under adversarial calls', () => {
-		test('two different sessions, same phase — both succeed with correct agent sets', async () => {
+		test('two different sessions, same phase — preserve agent sets across a stale concurrent commit', async () => {
 			const sessionA = ensureAgentSession('session-A', 'architect', tempDir);
 			sessionA.phaseAgentsDispatched = new Set(['coder']);
 			sessionA.lastPhaseCompleteTimestamp = 0;
@@ -479,8 +479,16 @@ describe('phase_complete adversarial trailing groups', () => {
 			const pA = JSON.parse(rA);
 			const pB = JSON.parse(rB);
 
-			expect(pA.success).toBe(true);
-			expect(pB.success).toBe(true);
+			expect(pA.agentsDispatched).toEqual(['coder', 'reviewer']);
+			expect(pB.agentsDispatched).toEqual(['coder', 'reviewer']);
+			const failures = [pA, pB].filter((result) => !result.success);
+			// A concurrent loser must retry after the winner changes the evidence snapshot.
+			expect(failures.length).toBeLessThan(2);
+			for (const failure of failures) {
+				expect(['PHASE_PREFLIGHT_STALE', 'PHASE_COMMIT_LOCKED']).toContain(
+					failure.reason,
+				);
+			}
 		});
 	});
 });

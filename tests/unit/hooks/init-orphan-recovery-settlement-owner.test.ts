@@ -10,6 +10,7 @@ import {
 	recordPendingDelegation,
 	updateCoderSettlement,
 } from '../../../src/background/pending-delegations';
+import { publishWorktreeRecoveryAuthority } from '../../../src/hooks/delegation-gate/worktree-recovery-authority';
 import { runInitOrphanRecovery } from '../../../src/hooks/init-orphan-recovery';
 import { resetSwarmState } from '../../../src/state';
 
@@ -118,5 +119,31 @@ describe('init orphan recovery settlement ownership', () => {
 
 		expect(result.removedWorktrees).toContain(worktreePath);
 		expect(fs.existsSync(worktreePath)).toBe(false);
+	});
+
+	test('protects an unresolved v2 recovery authority after restart', async () => {
+		const { directory, worktreePath } = setup();
+		const published = publishWorktreeRecoveryAuthority(directory, {
+			originalCallID: 'call-original',
+			parentSessionId: 'parent-session',
+			taskId: '1.1',
+			reservationId: 'reservation-1',
+			generation: 1,
+			canonicalBranch: 'main',
+			canonicalPath: directory,
+			laneBranch: 'swarm/lane/child-session/1.1',
+			lanePath: worktreePath,
+			expectedPrimaryHead: '1'.repeat(40),
+			sourceBaseOid: '2'.repeat(40),
+			sourceHeadOid: '3'.repeat(40),
+			targetHeadOid: '4'.repeat(40),
+			strategy: 'merge',
+		});
+		expect(published.ok).toBe(true);
+
+		const result = await runInitOrphanRecovery(directory);
+
+		expect(result.removedWorktrees).not.toContain(worktreePath);
+		expect(fs.existsSync(path.join(worktreePath, 'valuable.txt'))).toBe(true);
 	});
 });

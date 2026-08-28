@@ -37,6 +37,7 @@ import type {
 } from '../../../../src/turbo/lean/state';
 import * as leanState from '../../../../src/turbo/lean/state';
 import * as worktreeModule from '../../../../src/turbo/lean/worktree';
+import { cleanMergeOverlapSnapshot } from '../../../helpers/merge-overlap-fixture';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -302,8 +303,9 @@ beforeEach(() => {
 	LeanTurboRunner._internals.assertCleanWorkingTree = mock(() =>
 		Promise.resolve({ clean: true }),
 	);
+	mergeBackModule._internals.captureMergeOverlapSnapshot = async () =>
+		cleanMergeOverlapSnapshot;
 });
-
 afterEach(() => {
 	restoreAllSeams();
 	leanState.repairStateUnreadable(tmpDir);
@@ -1553,9 +1555,7 @@ describe('DD-7: git clean -fd in cleanup — untracked files cleaned', () => {
 	test('attemptMergeBackFromDirty calls autoCommitDirty then cleanUntrackedFiles then merge', async () => {
 		const callOrder: string[] = [];
 
-		// autoCommitDirty and cleanUntrackedFiles are imported from worktree.ts
-		// and use worktree._internals.bunSpawn, while attemptMergeBackFromDirty's
-		// own runGit uses merge-back._internals.bunSpawn. Mock both seams.
+		// Mock both worktree git helpers and merge-back git calls.
 		worktreeModule._internals.bunSpawn = mock((args: string[]) => {
 			if (args[1] === 'add' && args[2] === '-A') {
 				callOrder.push('autoCommit:git-add');
