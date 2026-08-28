@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.153.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.153.1...v7.153.2) (2026-08-28)
+
+
+### Bug Fixes
+
+* **ci:** port legacy quality gates to typescript ([e2fab5a](https://github.com/ZaxbyHub/opencode-swarm/commit/e2fab5abc549959865148159f3a55554c72ba05e))
+* **knowledge:** address PR [#2403](https://github.com/ZaxbyHub/opencode-swarm/issues/2403) review findings (audit accuracy, caveats, docs) ([d345e17](https://github.com/ZaxbyHub/opencode-swarm/commit/d345e17b5ed4487898bb8b3181b5c7fcd0d8ed48))
+* **knowledge:** stop the application gate from re-arming satisfied directives ([#2398](https://github.com/ZaxbyHub/opencode-swarm/issues/2398)) ([228cc42](https://github.com/ZaxbyHub/opencode-swarm/commit/228cc4248270e94a12dbd6c4a6085adfe21a1cc1))
+
 ## [7.153.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.153.0...v7.153.1) (2026-08-28)
 
 
