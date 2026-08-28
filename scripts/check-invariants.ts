@@ -749,10 +749,29 @@ const INLINE_TOKEN_FORMULA_ALLOWLIST: ReadonlyArray<{
 			+ '(byteLength * 4 worst-case JSON-escaped char cost) — NOT a char→token '
 			+ 'estimation; the module otherwise imports the canonical estimator.',
 	},
+	{
+		file: 'src/background/lane-output-store.ts',
+		reason: 'lane-output head/tail CHAR-budget split (Math.ceil/floor of budget/2 '
+			+ 'around line 242) — a truncation-policy halving, not a char↔token '
+			+ 'conversion.',
+	},
+	{
+		file: 'src/consensus/miner.ts',
+		reason: 'consensus excerpt sizing (maxExcerptChars * 2 clamped by a char cap '
+			+ 'around line 457) — a domain excerpt policy, not a char↔token conversion.',
+	},
+	{
+		file: 'src/hooks/knowledge-injector.ts',
+		reason: 'three-regime injection-budget scaling (maxInjectChars * 0.5 / * 0.25 '
+			+ 'around lines 1013–1014: half/quarter budget by context headroom) — a '
+			+ 'budget policy on an already-char-denominated budget, not a char↔token '
+			+ 'conversion; every actual token estimate in the module imports the '
+			+ 'canonical helpers.',
+	},
 ];
 
 const TOKEN_FORMULA_RATIO_RE =
-	/(?:0\.33|\/\s*3\.5|\/\s*0\.33|\/\s*4(?![\d.])|\*\s*4(?![\d.]))/;
+	/(?:0\.33|0\.25|0\.5(?!\d)|\/\s*3\.5|\/\s*0\.33|\/\s*[234](?![\d.])|\*\s*[234](?![\d.]))/;
 const TOKEN_FORMULA_CONTEXT_RE = /[Tt]oken|[Cc]har/;
 const TOKEN_FORMULA_SHAPE_RE = /Math\.(?:ceil|floor|max| min)\s*\(/;
 

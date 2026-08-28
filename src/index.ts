@@ -1343,6 +1343,10 @@ async function initializeOpenCodeSwarm(
 	// consolidation in the messages.transform chain).
 	const finalContextAccountingStep = createFinalContextAccountingStep({
 		config,
+		// Same seam createContextBudgetHandler consumes: keeps the final
+		// accounting step's model-identity ladder identical to physical
+		// pruning's (agent handoffs included).
+		resolveAgentModelFn: resolveIncomingAgentModel,
 	});
 	const evaluationModelDispatcher = createEvaluationModelDispatcher(ctx.client);
 	const reviewModelDispatcher = createReviewModelDispatcher(ctx.client);

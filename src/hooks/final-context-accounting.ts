@@ -29,11 +29,18 @@
  * content and says so), suppressed to once per session per band, and its own
  * token cost is included in the recorded total AND recorded as a ledger
  * emission — it cannot escape accounting. Fail-open by design: an accounting
- * failure must never break request composition.
+ * failure must never break request composition. The step is registered
+ * inside the plugin's single composeHandlers chain for messages.transform
+ * (one handler per hook type is all the host allows), which wraps it in
+ * safeHook; the inner try/catch below is the intentional first-line
+ * fail-open and logs the failure itself, so the outer wrapper is only a
+ * redundant backstop, never the primary swallowing layer.
  */
 
+import { parseAgentModel } from '../config/agent-model.js';
 import type { PluginConfig } from '../config/index.js';
 import {
+	advanceTurnGeneration,
 	getTurnLedgerSummary,
 	recordProducerEmission,
 } from '../services/injection-budget.js';
@@ -54,11 +61,19 @@ import { estimateTokens } from './utils.js';
 
 interface FinalAccountingOptions {
 	config: PluginConfig;
+	/** Same seam createContextBudgetHandler uses: resolves the
+	 * configured target model for an agent name. */
+	resolveAgentModelFn?: (agentName: string) => string | undefined;
 }
 
 /**
  * Bounded one-shot-per-band warning suppression (AGENTS.md invariant 8).
- * Keyed by sessionID; FIFO-evicted past the cap.
+ * Keyed by sessionID; FIFO-evicted past the cap. Deliberately NOT reset
+ * on compaction: "once per session per band" mirrors the established
+ * contextPressureWarningSent one-shot pattern; the compaction tiers have
+ * their own per-session hysteresis. The map is intentionally independent
+ * of the ledger's own eviction — both are capped, so the worst case is a
+ * re-warn for a session that outlived the 256-entry working set.
  */
 const warningBandSentBySession = new Map<
 	string,
@@ -89,7 +104,12 @@ export function createFinalContextAccountingStep(
 	input: unknown,
 	output: { messages?: MessageWithParts[] },
 ) => Promise<void> {
-	const { config } = options;
+	// No default resolver: production wiring passes the plugin's
+	// resolveIncomingAgentModel (the same seam createContextBudgetHandler
+	// consumes); without one, the ladder falls to live identity → message
+	// extraction, which is still correct for sessions without agent-model
+	// overrides.
+	const { config, resolveAgentModelFn } = options;
 
 	return async (_input: unknown, output: { messages?: MessageWithParts[] }) => {
 		const messages = output?.messages;
@@ -102,13 +122,32 @@ export function createFinalContextAccountingStep(
 			// Respect a full context_budget opt-out.
 			if (config.context_budget?.enabled === false) return;
 
-			// Model identity ladder — identical to context-budget.ts so this step
-			// and physical pruning always agree on the denominator. The live
-			// identity/window is relayed from the system.transform hook via
-			// session state (this chain receives messages but no Model).
+			// Model identity ladder — IDENTICAL to context-budget.ts so this
+			// step and physical pruning always agree on the denominator:
+			// the latest user message's configured agent model first
+			// (handles agent handoffs where the live identity still
+			// describes the PREVIOUS agent's model), then the live
+			// identity/window relayed from the system.transform hook via
+			// session state (this chain receives messages but no Model),
+			// then extraction from the messages themselves.
+			let agentName: string | undefined;
+			for (let i = messages.length - 1; i >= 0; i--) {
+				const info = messages[i]?.info;
+				if (info?.role === 'user' && info.agent) {
+					agentName = info.agent;
+					break;
+				}
+			}
+			const configuredTargetModel =
+				agentName && resolveAgentModelFn
+					? resolveAgentModelFn(agentName)
+					: undefined;
+			const targetModelInfo = configuredTargetModel
+				? parseAgentModel(configuredTargetModel)
+				: undefined;
 			const liveModelInfo = getLiveContextModelIdentity(sessionID);
 			const { modelID, providerID } =
-				liveModelInfo ?? extractModelInfo(messages);
+				targetModelInfo ?? liveModelInfo ?? extractModelInfo(messages);
 			const liveContextLimit = getLiveContextWindow(sessionID, {
 				modelID,
 				providerID,
@@ -225,6 +264,16 @@ export function createFinalContextAccountingStep(
 			log(
 				`[swarm] Final context accounting: session=${sessionID} used=${usedTokens} limit=${modelLimit} pct=${pct.toFixed(1)}% source=${usage.source} systemSurface=${systemSurfaceTokens}`,
 			);
+
+			// Consume the turn ledger: this step is the LAST reader of the
+			// composition's producer accounting. Advancing the generation here
+			// guarantees a LATER turn that somehow reaches accounting without a
+			// fresh beginTurnLedger (system-enhancer skipped: native agent,
+			// disabled hook, early return) can never attribute a PRIOR turn's
+			// system-surface emissions to the current measurement. When the
+			// system-enhancer does run next turn it begins a fresh ledger
+			// regardless.
+			advanceTurnGeneration(sessionID);
 		} catch (error) {
 			// Fail-open: accounting must never break request composition.
 			log(

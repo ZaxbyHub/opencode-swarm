@@ -195,6 +195,12 @@ const turnLedgers = new Map<string, TurnLedger>();
 
 const MAX_TRACKED_SESSIONS = 256;
 
+// Eviction note: Map.set on an existing key preserves the ORIGINAL insertion
+// position, so eviction is by FIRST-insert order — a long-lived session that is
+// re-begun every turn is never evicted by newer sessions, and the worst
+// case for a churned-out session is the documented fail-open (claims fall
+// to local maxima). Matches the lastBudgetBySession contract in state.ts.
+
 /** Global monotonic turn generation. Embedded per ledger so any consumer can
  * observe that a new request composition began. */
 let turnGenerationCounter = 0;

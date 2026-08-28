@@ -79,4 +79,47 @@ describe('findInlineTokenFormulaViolations (drift guard, #2107 §1)', () => {
 			]),
 		).toHaveLength(1);
 	});
+	test('flags /3, *3, 0.25, and 0.5 estimation forms (#2107 hardening)', () => {
+		expect(
+			findInlineTokenFormulaViolations('src/services/example.ts', [
+				'return Math.ceil(chars / 3); // tokens',
+			]),
+		).toHaveLength(1);
+		expect(
+			findInlineTokenFormulaViolations('src/services/example.ts', [
+				'return Math.floor(tokenBudget * 3); // chars',
+			]),
+		).toHaveLength(1);
+		expect(
+			findInlineTokenFormulaViolations('src/services/example.ts', [
+				'return Math.ceil(text.length * 0.25); // token estimate',
+			]),
+		).toHaveLength(1);
+		expect(
+			findInlineTokenFormulaViolations('src/services/example.ts', [
+				'return Math.ceil(text.length * 0.5); // token estimate',
+			]),
+		).toHaveLength(1);
+	});
+	test('does not flag 0.5 in a non-estimation context (e.g. * 50)', () => {
+		expect(
+			findInlineTokenFormulaViolations('src/services/example.ts', [
+				'const pct = Math.round(ratio * 50); // percent display',
+			]),
+		).toHaveLength(0);
+	});
+	test('all four allowlisted files are exempt', () => {
+		for (const file of [
+			'src/hooks/context-usage.ts',
+			'src/background/lane-output-store.ts',
+			'src/consensus/miner.ts',
+			'src/hooks/knowledge-injector.ts',
+		]) {
+			expect(
+				findInlineTokenFormulaViolations(file, [
+					'return Math.max(byteLength * 4, marker.length); // chars',
+				]),
+			).toHaveLength(0);
+		}
+	});
 });

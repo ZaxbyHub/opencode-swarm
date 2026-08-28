@@ -705,6 +705,12 @@ export function createSystemEnhancerHook(
 				// to 0 on the next read, letting combined injected tokens
 				// exceed a configured unified_injection_tokens ceiling.
 				let actualDemand = 0;
+				// (#2107 §2) Tokens that actually REACHED output.system. tryInject
+				// adds candidate tokens to actualDemand BEFORE the cap check, so
+				// actualDemand alone overstates the emitted surface whenever a
+				// candidate is rejected; the finally block must book the emitted
+				// amount from THIS counter.
+				let injectedTokens = 0;
 				let unifiedBudget: number | undefined;
 				// The live context window for THIS turn's model. This hook is the
 				// only one the host hands a `Model` to, so it is also the only
@@ -792,7 +798,6 @@ export function createSystemEnhancerHook(
 
 					const maxInjectionTokens =
 						config.context_budget?.max_injection_tokens ?? 4000;
-					let injectedTokens = 0;
 
 					// FR-002 / #2107 §2: begin the per-turn producer ledger exactly
 					// once per request composition, BEFORE any injection. Ceiling
@@ -1882,20 +1887,14 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 							// Non-blocking — environment injection failure must not break the hook
 						}
 
-						// Finalize unified budget for Path A (non-scoring).
-						// Recompute seAllocation from actual demand so knowledge-injector
-						// sees the real system-enhancer demand (not the legacy 4K max).
-						// (Ledger emission is recorded once in the finally block below —
-						// this early return still flows through it.)
-						if (unifiedBudget !== undefined && _input.sessionID) {
-							const totalDemand = actualDemand; // Path A has no late candidates
-							const allocation = allocateInjectionBudget(totalDemand, 0, {
-								totalBudgetTokens: unifiedBudget,
-							});
-							seAllocation = allocation.systemEnhancerTokens;
-						} else {
-							// Unified budget not configured; legacy caps apply.
-						}
+						// Finalize unified budget for Path A (non-scoring): nothing to
+						// recompute. The pre-#2107 code re-derived seAllocation here, but
+						// every tryInject() call already ran under the allocation set at
+						// composition start, so a post-hoc reassignment could never gate
+						// anything. The ledger write (grant + emission) happens exactly
+						// once in the finally block below; this early return still flows
+						// through it, and the knowledge-injector reads the SE demand via
+						// getProducerEmission().
 
 						return;
 					}
@@ -2758,16 +2757,9 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 						}
 					}
 
-					// Finalize unified budget for Path B (scoring).
-					// Path B may have late candidates; use the full actualDemand.
-					// (Ledger emission is recorded once in the finally block below.)
-					if (unifiedBudget !== undefined && _input.sessionID) {
-						const totalDemand = actualDemand;
-						const allocation = allocateInjectionBudget(totalDemand, 0, {
-							totalBudgetTokens: unifiedBudget,
-						});
-						seAllocation = allocation.systemEnhancerTokens;
-					}
+					// Finalize unified budget for Path B (scoring): nothing to
+					// recompute — see the Path A note; the ledger write happens
+					// exactly once in the finally block below.
 				} catch (error) {
 					warn('System enhancer failed:', error);
 				} finally {
@@ -2779,23 +2771,26 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 					// context-budget warning text when one was injected (it is
 					// counted into actualDemand at its push site).
 					if (_input.sessionID) {
-						// Book the SE's allocator-derived grant into the shared
-						// ceiling (no-op deduction when the ceiling is inactive),
-						// then record what was actually emitted. actualDemand is
-						// capped at seAllocation by tryInject, so the grant never
-						// exceeds the SE's FR-002 share.
+						// Book the SE's actual grant + emission into the shared
+						// ledger. EMISSION is `injectedTokens` — the bytes that
+						// actually reached output.system — NOT actualDemand, which
+						// also counts candidates tryInject rejected at the cap;
+						// final accounting sums surface:'system' emissions into
+						// the prompt total, so demand-inflation there would
+						// overstate what the model sees. The rejected difference
+						// is disclosed as the producer's own truncation.
 						recordProducerGrant(
 							_input.sessionID,
 							'system-enhancer',
 							actualDemand,
-							actualDemand,
+							injectedTokens,
 							'system',
 						);
 						recordProducerEmission(
 							_input.sessionID,
 							'system-enhancer',
-							actualDemand,
-							0,
+							injectedTokens,
+							Math.max(0, actualDemand - injectedTokens),
 							'system',
 						);
 					}

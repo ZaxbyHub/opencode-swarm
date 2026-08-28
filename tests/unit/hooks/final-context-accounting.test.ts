@@ -5,6 +5,7 @@ import {
 	createFinalContextAccountingStep,
 } from '../../../src/hooks/final-context-accounting';
 import type { MessageWithParts } from '../../../src/hooks/knowledge-types';
+import { estimateTokens } from '../../../src/hooks/utils';
 import {
 	beginTurnLedger,
 	clearTurnLedger,
@@ -151,14 +152,15 @@ describe('final context accounting (#2107 §3)', () => {
 		const snapshot = getFinalPromptPressure(SESSION);
 		expect(snapshot?.pct).toBeGreaterThan(78);
 
-		// The warning's own cost is recorded in the ledger (it cannot escape
-		// accounting) as a messages-surface emission.
-		const ledger = getTurnLedgerSummary(SESSION);
-		const warningProducer = ledger?.producers.find(
-			(p) => p.producer === 'final-accounting-warning',
-		);
-		expect(warningProducer?.emitted).toBeGreaterThan(0);
-		expect(warningProducer?.surface).toBe('messages');
+		// The warning's own cost cannot escape accounting: the recorded total
+		// exceeds the raw measured tokens by exactly the warning's estimate.
+		// (The step records the warning as a ledger emission and then
+		// CONSUMES the ledger — advanceTurnGeneration — so later turns can never
+		// read stale system-surface entries; the ledger is therefore empty
+		// for direct inspection here.)
+		const rawTokens = estimateTokens('y'.repeat(240_000));
+		expect(snapshot?.usedTokens).toBeGreaterThan(rawTokens);
+		expect(getTurnLedgerSummary(SESSION)).toBeNull();
 
 		// Second run in the same band is suppressed (once per session per band).
 		const messages2 = [messageOf('user', 'y'.repeat(240_000))];
@@ -207,6 +209,20 @@ describe('final context accounting (#2107 §3)', () => {
 		});
 		await step({}, { messages: [messageOf('user', TEXT_10K_TOKENS)] });
 		expect(getFinalPromptPressure(SESSION)).toBeUndefined();
+	});
+
+	test('consumes the ledger: a later accounting pass without a fresh begin reads no stale emissions', async () => {
+		beginTurnLedger(SESSION, 4000, false);
+		recordProducerEmission(SESSION, 'system-enhancer', 3000, 0, 'system');
+		const step = createFinalContextAccountingStep({ config: makeConfig() });
+		await step({}, { messages: [messageOf('user', TEXT_10K_TOKENS)] });
+		// Ledger consumed by the first pass...
+		expect(getTurnLedgerSummary(SESSION)).toBeNull();
+		// ...so a second pass WITHOUT beginTurnLedger measures only the
+		// messages surface — no prior-turn system-surface contamination.
+		await step({}, { messages: [messageOf('user', TEXT_10K_TOKENS)] });
+		const second = getFinalPromptPressure(SESSION);
+		expect(second?.usedTokens).toBeLessThan(11_000);
 	});
 
 	test('never throws on malformed input', async () => {
