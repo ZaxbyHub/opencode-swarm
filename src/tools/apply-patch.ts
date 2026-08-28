@@ -22,6 +22,7 @@ import * as path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
+import { isPolicyProtectedPath } from '../security/protected-path-policy.js';
 import { findClosestLines, fuzzyFindAndReplace } from '../utils/fuzzy-match';
 import { normalizePatchIndentation } from '../utils/patch-dedent';
 import {
@@ -141,9 +142,7 @@ function containsWindowsAttacks(filePath: string): boolean {
  * Rejects ANY occurrence of .git or .swarm in the path (not just first segment).
  */
 function isProtectedPath(filePath: string): boolean {
-	const normalized = filePath.replace(/\\/g, '/');
-	const segments = normalized.split('/');
-	return segments.some((seg) => seg === '.git' || seg === '.swarm');
+	return isPolicyProtectedPath(filePath);
 }
 
 /**
@@ -172,8 +171,7 @@ function isCanonicalProtectedPath(
 		const relative = path
 			.relative(canonicalWorkspace, canonicalTarget)
 			.replace(/\\/g, '/');
-		const segments = relative.split('/').filter(Boolean);
-		return segments.some((seg) => seg === '.git' || seg === '.swarm');
+		return isPolicyProtectedPath(relative);
 	} catch {
 		// Path doesn't exist — check parent directory's canonical segments
 		const parentDir = path.dirname(targetPath);
@@ -184,8 +182,7 @@ function isCanonicalProtectedPath(
 			const relative = path
 				.relative(canonicalWorkspace, canonicalParent)
 				.replace(/\\/g, '/');
-			const segments = relative.split('/').filter(Boolean);
-			return segments.some((seg) => seg === '.git' || seg === '.swarm');
+			return isPolicyProtectedPath(relative);
 		} catch {
 			return false;
 		}
@@ -212,9 +209,7 @@ function isCanonicalPathWithinWorkspace(
 		const relative = path.relative(canonicalWorkspace, canonicalTarget);
 		if (relative.startsWith('..') || path.isAbsolute(relative)) return false;
 		// Re-apply protected-directory ban on the canonical target (all segments)
-		const segments = relative.replace(/\\/g, '/').split('/').filter(Boolean);
-		if (segments.some((seg) => seg === '.git' || seg === '.swarm'))
-			return false;
+		if (isPolicyProtectedPath(relative)) return false;
 		return true;
 	} catch {
 		// realpathSync failed (path doesn't exist) — validate parent directory instead
@@ -229,9 +224,7 @@ function isCanonicalPathWithinWorkspace(
 			const relative = path.relative(canonicalWorkspace, canonicalParent);
 			if (relative.startsWith('..') || path.isAbsolute(relative)) return false;
 			// Re-apply protected-directory ban on the canonical parent (all segments)
-			const segments = relative.replace(/\\/g, '/').split('/').filter(Boolean);
-			if (segments.some((seg) => seg === '.git' || seg === '.swarm'))
-				return false;
+			if (isPolicyProtectedPath(relative)) return false;
 			return true;
 		} catch {
 			// Parent also doesn't resolve — fall back to lexical check

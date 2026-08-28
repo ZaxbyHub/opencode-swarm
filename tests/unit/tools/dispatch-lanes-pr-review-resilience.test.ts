@@ -95,7 +95,10 @@ beforeEach(async () => {
 		dispatchInternals.resolveExactMergeBase(...args);
 	dispatchInternals.loadPluginConfig = () =>
 		({
-			pr_review_resilience: DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+			pr_review_resilience: {
+				...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+				enabled: true,
+			},
 		}) as ReturnType<typeof originalDispatchLoadPluginConfig>;
 });
 
@@ -351,5 +354,77 @@ describe('dispatch_lanes PR review resilience', () => {
 		expect(String(blocked.message)).toContain(
 			'pr_review_resilience is enabled',
 		);
+	});
+
+	test('the default flip changes tier-L gate behavior: staged admission is required only when explicitly enabled (issue #2381)', async () => {
+		// DIFFERENTIAL test with a positive control. An earlier version of this
+		// asserted only that the default-config dispatch lacked the
+		// "requires canary-first" message — which passed VACUOUSLY, because the
+		// dispatch failed earlier at `no_client` and never reached the resilience
+		// gate at all, so the negative assertion held trivially.
+		//
+		// The meaningful claim is a DIFFERENCE in gate behavior for one identical
+		// dispatch. The positive control below proves the gate is reachable and does
+		// block when resilience is enabled; the default case then proves it no
+		// longer does. Its failure is the downstream `no_client`, which is itself
+		// the evidence that it got PAST the resilience gate.
+		let created = 0;
+		dispatchInternals.getSessionOps = () => ({
+			create: mock(async () => ({ data: { id: `flip-session-${created++}` } })),
+			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			delete: mock(async () => undefined),
+		});
+
+		const dispatchArgs = {
+			mode: 'swarm-pr-review:base' as const,
+			pr_head_sha: 'abc123',
+			base_sha: 'def456',
+			base_ref: 'origin/main',
+			// Tier L in this harness: six singleton lanes, max_concurrent 6.
+			max_concurrent: 6,
+			lanes: PR_REVIEW_BASE_DIMENSION_IDS.map((dimension, index) =>
+				lane(`legacy-${index}`, dimension),
+			),
+		};
+
+		// POSITIVE CONTROL: explicitly enabled -> the gate blocks a dispatch that
+		// carries no stage metadata.
+		dispatchInternals.loadPluginConfig = () =>
+			({
+				pr_review_resilience: {
+					...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+					enabled: true,
+				},
+			}) as ReturnType<typeof originalDispatchLoadPluginConfig>;
+		const enabled = await executeDispatchLanesAsync(dispatchArgs, directory, {
+			sessionID: 'review-session-enabled',
+		});
+		expect(enabled.success).toBe(false);
+		expect(enabled.failure_class).toBe('invalid_args');
+		expect(String(enabled.message)).toContain('canary-first');
+
+		// DEFAULT (no config at all): the same dispatch is no longer gated on staged
+		// admission — it is ADMITTED and launches all six lanes. (An earlier draft
+		// of this test asserted only that it failed later at `no_client`; that
+		// passed vacuously, because the dispatch died before ever reaching the
+		// resilience gate. The positive control above plus the topology assertions
+		// below are what make the default case a real claim.)
+		dispatchInternals.loadPluginConfig = () =>
+			({}) as ReturnType<typeof originalDispatchLoadPluginConfig>;
+		const defaulted = await executeDispatchLanesAsync(dispatchArgs, directory, {
+			sessionID: 'review-session-default',
+		});
+		expect(defaulted.failure_class).not.toBe('invalid_args');
+		expect(String(defaulted.message ?? '')).not.toContain('canary-first');
+		// PR-review FB-4: admission alone is not the claim — assert the TOPOLOGY.
+		// `success: true` only says the async dispatch started without an
+		// invalid_args/no_client failure; it says nothing about how many lanes were
+		// actually launched. A bug that admitted the call but collapsed six lanes
+		// into one wave would pass without this.
+		expect(created).toBe(dispatchArgs.lanes.length);
+		expect(defaulted.dispatched).toBe(dispatchArgs.lanes.length);
+		// It is ADMITTED: the legacy one-wave base dispatch now succeeds where
+		// the enabled policy would have demanded canary/fanout staging.
+		expect(defaulted.success).toBe(true);
 	});
 });

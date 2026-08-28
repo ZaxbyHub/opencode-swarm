@@ -1160,6 +1160,17 @@ export const GuardrailsConfigSchema = z.object({
 	 * `cfg.sandbox_macos_enabled ?? false` — so an absent key is still disabled.
 	 */
 	sandbox_macos_enabled: z.boolean().optional(),
+	sandbox: z
+		.object({
+			mode: z.enum(['advisory', 'required']).default('advisory'),
+			require_filesystem: z.boolean().default(false),
+			require_network: z.boolean().default(false),
+			require_process: z.boolean().default(false),
+			network_mode: z.enum(['off', 'on']).default('off'),
+			network_allowlist: z.array(z.string().min(1)).max(128).default([]),
+			writable_roots: z.array(z.string().min(1)).max(128).default([]),
+		})
+		.optional(),
 });
 
 export type GuardrailsConfig = z.infer<typeof GuardrailsConfigSchema>;
@@ -1168,8 +1179,6 @@ export type GuardrailsConfig = z.infer<typeof GuardrailsConfigSchema>;
 export const WatchdogConfigSchema = z.object({
 	/** Enable scope-guard hook. Blocks non-architect agents writing outside declared scope. Default: true */
 	scope_guard: z.boolean().default(true),
-	/** Allow scope-guard to be skipped in turbo mode. Default: false (NOT skippable) */
-	skip_in_turbo: z.boolean().default(false),
 	/** Enable delegation-ledger hook. Injects DELEGATION SUMMARY on architect resume. Default: true */
 	delegation_ledger: z.boolean().default(true),
 });
@@ -3216,8 +3225,15 @@ export interface PrReviewResilienceConfig {
 	max_retry_attempts_after_initial: number;
 }
 
+/**
+ * Issue #2381: staged PR-review resilience defaults OFF while the #2380 repair
+ * program is incomplete. Tier M/L base waves therefore use the legacy one-wave
+ * dispatch unless a project explicitly opts in with `enabled: true`, which
+ * remains fully honored. The tracker re-enables this by default only after its
+ * host/OS/depth validation matrix is green.
+ */
 export const DEFAULT_PR_REVIEW_RESILIENCE_CONFIG: PrReviewResilienceConfig = {
-	enabled: true,
+	enabled: false,
 	canary_probe_ms: 300_000,
 	status_probe_timeout_ms: 2_000,
 	correlated_failure_threshold: 2,
@@ -3226,7 +3242,7 @@ export const DEFAULT_PR_REVIEW_RESILIENCE_CONFIG: PrReviewResilienceConfig = {
 
 export const PrReviewResilienceConfigSchema = z
 	.object({
-		enabled: z.boolean().default(true),
+		enabled: z.boolean().default(false),
 		canary_probe_ms: z.number().int().min(1).max(3_600_000).default(300_000),
 		status_probe_timeout_ms: z.number().int().min(1).max(60_000).default(2_000),
 		correlated_failure_threshold: z.number().int().min(2).max(8).default(2),

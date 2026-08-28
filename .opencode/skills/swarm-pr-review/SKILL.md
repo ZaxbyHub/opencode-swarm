@@ -860,8 +860,8 @@ cost, or predicted simplicity — permits fewer lanes than the classified tier,
 and no tier permits skipping a dimension or family. Under Profile A the
 controller computes the tier itself from the bound `base_sha...pr_head_sha`
 diff (`--numstat` totals; an uncomputable diff fails strict to tier L) and
- mechanically enforces the matching floors on every base and micro batch. With
- the default `pr_review_resilience` policy enabled, the initial base wave is
+ mechanically enforces the matching floors on every base and micro batch. When a project explicitly enables the `pr_review_resilience` policy (it is
+ DISABLED by default), the initial base wave is
  staged at tiers M/L: `pr_review_wave_stage: "canary"` / `pr_review_wave_attempt: 0`
  launches one singleton base lane first, then
  `pr_review_wave_stage: "fanout"` carries only the remaining unresolved
@@ -904,8 +904,8 @@ identifier from the table below, bind every batch with the exact current
 merge base and its base ref as `base_sha` and `base_ref`. Use the
 REMOTE-TRACKING form for `base_ref` (`origin/main`, not `main` or
 `refs/heads/main`) and compute `base_sha` against that same ref, so the
-controller's recomputation matches yours. With the default
-`pr_review_resilience` policy enabled, tier-M/L initial base dispatch is
+controller's recomputation matches yours. When a project explicitly enables the
+`pr_review_resilience` policy (DISABLED by default), tier-M/L initial base dispatch is
  staged exactly as a singleton canary batch (`pr_review_wave_stage: "canary"`,
  `pr_review_wave_attempt: 0`) followed by exactly one fanout batch
 (`pr_review_wave_stage: "fanout"`) that include only still-unresolved
@@ -931,17 +931,17 @@ All six dimensions must be covered on every PR — "small PR", "docs-only", and
 "CI-only" change what each dimension examines, never whether it is evaluated.
 Every dimension ends in its own `[CANDIDATE]` rows or a fully populated
 per-dimension `[CLEAN]` attestation. Under Profile A, the top-level
-`pr_review_resilience` config (enabled by default) requires depth tiers M/L to
+`pr_review_resilience` config (DISABLED by default; opt in with `enabled: true`) requires depth tiers M/L to
 stage each base attempt as a singleton `pr_review_wave_stage: "canary"` batch
 followed by its matching `"fanout"` batch. Attempt 0 still has to cover all six
 dimensions exactly once across the combined canary+fanout ownership: tier M
 needs at least three combined lanes, tier L needs six singleton combined lanes,
 and every later retry attempt may carry forward only the still-unresolved
 obligations into its canary/fanout pair. Use one singleton canary lane; attempts
-are numbered with `pr_review_wave_attempt`, and the default
-policy permits attempt 0 plus two retry attempts (1 and 2). If the project sets
-`pr_review_resilience.enabled: false`, or the computed tier is S, Profile A
-falls back to the legacy single-wave base dispatch. Under Profiles B/C, the
+are numbered with `pr_review_wave_attempt`, and the
+policy permits attempt 0 plus two retry attempts (1 and 2). If the project leaves
+`pr_review_resilience` at its default `enabled: false`, or the computed tier is S,
+Profile A uses the legacy single-wave base dispatch. Under Profiles B/C, the
 depth tier governs lane count the same way — a tier-S diff may cover the six
 dimensions in one or two consolidated lanes — while dimension coverage and
 per-dimension attestation remain mandatory.
@@ -957,7 +957,7 @@ sequential candidate-generation passes with the same per-lane ledger records.
 The join barrier is universal: all base lanes settle before Phase 4 completes
 or synthesis begins, whichever layer enforces it.
 
-**Incremental collection (Profile A):** While base lanes are running, poll with `collect_lane_results` (without `wait` (or `wait: false`)) to check progress and process settled lanes as they complete — call `retrieve_lane_output` for full text when `output_ref` is present, then extract candidates via `parse_lane_candidates`, update the candidate ledger, validate output quality — while continuing independent architect work (obligation refinement, micro-lane trigger checks, local reads) between polls. Only use `wait: true` if lanes are still pending and no more independent work remains. While polling, a `pending_liveness` entry on a still-pending lane is a DIAGNOSTIC only (issue #2280): `stalledSuspect: true` means the lane has been pending for minutes and the host does not report its session live — note the lane id, `pendingMs`, and `hostStatus` and investigate, but never auto-cancel, retry, or replace the lane on this signal; the ~30-minute presumed-stale sweep remains the only terminal backstop. Under Profile B, harvest each subagent report as it completes and update the ledger between arrivals; block on stragglers only when no independent work remains.
+**Incremental collection (Profile A):** While base lanes are running, poll with `collect_lane_results` (without `wait` (or `wait: false`)) to check progress and process settled lanes as they complete — call `retrieve_lane_output` for full text when `output_ref` is present, then extract candidates via `parse_lane_candidates`, update the candidate ledger, validate output quality — while continuing independent architect work (obligation refinement, micro-lane trigger checks, local reads) between polls. Only use `wait: true` if lanes are still pending and no more independent work remains. While polling, a `pending_liveness` entry on a still-pending lane is a DIAGNOSTIC only (issue #2280): `stalledSuspect: true` means the lane has been pending for minutes and the host does not report its session live — note the lane id, `pendingMs`, and `hostStatus` and investigate, but never auto-cancel, retry, or replace the lane on this signal; the ~30-minute presumed-stale sweep remains the only terminal backstop. Under Profile B, harvest each subagent report as it completes and update the ledger between arrivals; block on stragglers only when no independent work remains. **`collect_lane_results` is an OBSERVER (issue #2381).** Its wait budget (`timeout_ms`) bounds THAT CALL ONLY. An expired wait budget does not cancel, kill, or fail a lane, and it is not evidence that a lane died; `timeout_ms: 0` is a valid immediate, non-destructive snapshot, and an unavailable host messages client likewise reports stored lane state without terminalizing anything. Whenever lanes remain unsettled the result carries `pending_lanes` (batch id, lane id, stored status, and `output_ref` when one exists) regardless of `include_pending`, so outstanding work is never silently omitted. When a collection returns pending lanes you have exactly three legitimate moves: poll again, cancel explicitly with `cancel_pending`, or let the ~30-minute presumed-stale sweep settle genuinely dead lanes. Do NOT abort the PR workflow, re-dispatch the lane, or report a lane as failed merely because an observer call expired or the host client was briefly unavailable.
 
 Inline `output` is delivered on the first poll that observes a lane settled; subsequent polls carry `output_omitted_repeat: true` with metadata and `output_ref`, and full text is retrieved via `retrieve_lane_output`.
 

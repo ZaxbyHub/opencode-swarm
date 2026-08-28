@@ -37,5 +37,5 @@ None.
 
 ## Known caveats
 
-- The bundle-safety skill's `MAIN_BUNDLE_MAX_BYTES = 4.6 MB` gate in the reviewer checks references a specific packaging test; if that threshold changes the skill's reviewer-check section should be updated.
+- The bundle-safety skill's `MAIN_BUNDLE_MAX_BYTES = 8.0 MiB` gate in the reviewer checks references a specific packaging test; keep the reviewer guidance synchronized if that threshold changes again.
 - The writing-tests mock-coverage requirement applies to new tests and tests that add new partial mocks; existing tests with undocumented partial mocks are not auto-updated.

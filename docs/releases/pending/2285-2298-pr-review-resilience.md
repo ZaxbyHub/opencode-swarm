@@ -8,4 +8,4 @@ Medium and large PR reviews use a configurable canary-first base-wave protocol. 
 
 The PR-review read-only gate now accepts the `search` tool's `literal` and `regex` selector modes, reports the exact unsafe argument path when a named observation tool is rejected, and retains the existing controller-owned protection for genuine writes under `.swarm`.
 
-The new `pr_review_resilience` configuration block defaults to canary enforcement enabled, a five-minute probe, a two-second status timeout, a two-failure shared-circuit threshold, and two retry attempts after the initial attempt. Set `enabled: false` to preserve the legacy single-wave base dispatch for a project.
+The new `pr_review_resilience` configuration block ships **disabled by default**, with a five-minute probe, a two-second status timeout, a two-failure shared-circuit threshold, and two retry attempts after the initial attempt once enabled. Projects keep the legacy single-wave base dispatch unless they explicitly set `enabled: true`.

@@ -117,8 +117,6 @@ Returns: decision (`allow`/`block`), firing rule, resolved scope, and detected w
 /swarm guardrail explain --write src/hooks/guardrails.ts --write .swarm/plan.json
 ```
 
-Returns per-target: decision, firing rule, resolved scope, and zone classification.
-
 **Flags:**
 
 | Flag | Effect |
@@ -130,9 +128,26 @@ Returns per-target: decision, firing rule, resolved scope, and zone classificati
 
 Output is fully advisory and redacted. No side effects, no writes, no process execution.
 
+### `/swarm approve-write`
+
+Issues and persists a short-lived, one-shot human approval bound to an exact
+target session, action, candidate ID, content hash, path digest, and generation.
+The command is used when `skill_improver.require_user_approval` is enabled;
+approval text in a prompt or critic response is not authority.
+
+```text
+/swarm approve-write <target-session-id> <action> <candidate-id> <candidate-content-hash> [--generation <n>] [--allowed-path-digest <sha256>]
+```
+
+On success, returns the approval ID, target session, action, candidate, expiry,
+and exact replay command. Issuing the fact is a state-changing operation; the
+fact can be consumed once only by the matching write and cannot be reused after
+expiry or for a different session, action, candidate, content hash, path digest,
+or generation.
+
 ### `/swarm guardrail-log [--blocks-only]`
 
-Read and print the unified guardrail decision log (`.swarm/session/shell-audit.jsonl`) most-recent-first. Agent-callable via `swarm_command`.
+Read and print the current unified guardrail decision window (`.swarm/session/shell-audit.jsonl`) most-recent-first. Agent-callable via `swarm_command`.
 
 ```text
 /swarm guardrail-log
@@ -145,6 +160,7 @@ Read and print the unified guardrail decision log (`.swarm/session/shell-audit.j
 
 - Entries sorted most-recent-first
 - Commands and paths are redacted
+- The on-disk window is bounded; older legacy allowed-shell rows are age-folded into the manifest aggregate rather than retained inline forever
 - Missing log file → friendly message: "No guardrail decisions recorded yet."
 - On-demand only — no hot-path cost; reads the log only when invoked
 

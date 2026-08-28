@@ -18,6 +18,7 @@ import { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift.js';
 import { handleAgentsCommand } from './agents.js';
 import { handleAnalyzeCommand } from './analyze.js';
 import { handleApprovePlanCriticCommand } from './approve-plan-critic.js';
+import { handleApproveWriteCommand } from './approve-write.js';
 import { handleArchiveCommand } from './archive.js';
 import { handleAutoProceedCommand } from './auto-proceed.js';
 import { handleBenchmarkCommand } from './benchmark.js';
@@ -438,6 +439,15 @@ export const COMMAND_REGISTRY = {
 		args: '',
 		category: 'diagnostics',
 		toolPolicy: 'restricted',
+	},
+	'approve-write': {
+		handler: (ctx) =>
+			handleApproveWriteCommand(ctx.directory, ctx.args, ctx.sessionID),
+		description:
+			'Issue a one-shot session/action/candidate/hash-bound write approval',
+		args: '<target-session-id> skill_improve <candidate-id> <candidate-content-hash> [--generation <n>] [--allowed-path-digest <sha256>]',
+		category: 'utility',
+		toolPolicy: 'human-only',
 	},
 	status: {
 		handler: async (ctx) =>

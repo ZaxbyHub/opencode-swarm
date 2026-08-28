@@ -13,6 +13,7 @@ import {
 	MAX_REFS_PER_CLASS,
 	stampLearningProvenance,
 } from '../../../src/learning/provenance.js';
+import { withWriteAuthority } from '../../../src/security/write-authority.js';
 import { withFrozenClock } from '../../helpers/test-clock.js';
 
 const PRODUCED_AT = '2026-07-24T12:00:00.000Z';
@@ -40,7 +41,7 @@ describe('stampLearningProvenance — defaults', () => {
 			sourceEvidenceRefs: [],
 			sourceRunIds: [],
 			sourceModelIds: [],
-			writeOrigin: { producedAt: PRODUCED_AT },
+			writeOrigin: { producedAt: PRODUCED_AT, authority: 'autonomous' },
 		});
 	});
 
@@ -82,6 +83,7 @@ describe('stampLearningProvenance — defaults', () => {
 		expect(stamped.writeOrigin).toEqual({
 			agentRole: 'architect',
 			producedAt: PRODUCED_AT,
+			authority: 'autonomous',
 		});
 		expect('sessionId' in stamped.writeOrigin).toBe(false);
 	});
@@ -92,6 +94,7 @@ describe('stampLearningProvenance — defaults', () => {
 			{
 				sessionId: 'ses_abc',
 				agentRole: 'architect',
+				authority: 'critic_approved',
 				producedAt: PRODUCED_AT,
 			},
 		);
@@ -99,8 +102,33 @@ describe('stampLearningProvenance — defaults', () => {
 		expect(stamped.writeOrigin).toEqual({
 			sessionId: 'ses_abc',
 			agentRole: 'architect',
+			authority: 'critic_approved',
 			producedAt: PRODUCED_AT,
 		});
+	});
+
+	it('inherits human-approved authority from the ambient write-authority context', async () => {
+		const stamped = await withWriteAuthority(
+			{ origin: 'human_approved' },
+			async () =>
+				stampLearningProvenance(
+					{ mechanism: 'skill_improver' },
+					{ producedAt: PRODUCED_AT },
+				),
+		);
+		expect(stamped.writeOrigin.authority).toBe('human_approved');
+	});
+
+	it('inherits optimizer-proposed authority from the ambient write-authority context', async () => {
+		const stamped = await withWriteAuthority(
+			{ origin: 'optimizer_proposed' },
+			async () =>
+				stampLearningProvenance(
+					{ mechanism: 'skill_improver' },
+					{ producedAt: PRODUCED_AT },
+				),
+		);
+		expect(stamped.writeOrigin.authority).toBe('optimizer_proposed');
 	});
 });
 
@@ -140,6 +168,7 @@ describe('writeOrigin has no agentId', () => {
 		expect(stamped.writeOrigin).toEqual({
 			agentRole: 'architect',
 			producedAt: PRODUCED_AT,
+			authority: 'autonomous',
 		});
 		expect('agentId' in stamped.writeOrigin).toBe(false);
 	});
@@ -153,6 +182,7 @@ describe('writeOrigin has no agentId', () => {
 		);
 		expect(Object.keys(stamped.writeOrigin).sort()).toEqual([
 			'agentRole',
+			'authority',
 			'producedAt',
 			'sessionId',
 		]);
