@@ -1046,6 +1046,14 @@ interface AuditCompactionPlan {
 	dropped: number;
 }
 
+function storageErrorCode(err: unknown): string {
+	if (typeof err === 'object' && err !== null && 'code' in err) {
+		const code = (err as { code?: unknown }).code;
+		if (typeof code === 'string' && code.length > 0) return code;
+	}
+	return 'unknown';
+}
+
 function planAuditCompaction(directory: string): AuditCompactionPlan | null {
 	let size: number;
 	try {
@@ -1121,24 +1129,38 @@ function planAuditCompaction(directory: string): AuditCompactionPlan | null {
 function applyAuditCompaction(
 	directory: string,
 	plan: AuditCompactionPlan | null,
-): void {
-	if (!plan) return;
+): boolean {
+	if (!plan) return false;
 	try {
-		atomicWriteSwarmFileSync(auditPath(directory), plan.content);
+		_internals.auditCompactionWrite(auditPath(directory), plan.content);
+		return true;
 	} catch (err) {
 		log(
-			`[pr-monitor] audit compaction failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+			`[pr-monitor] audit compaction failed (non-fatal): ${storageErrorCode(err)}`,
 		);
+		return false;
 	}
 }
 
-function prepareAuditCompaction(
-	directory: string,
-	maintenance: PrSubscriptionMaintenance,
-): AuditCompactionPlan | null {
+function prepareAuditCompaction(directory: string): AuditCompactionPlan | null {
 	const plan = planAuditCompaction(directory);
-	if (plan) maintenance.droppedAuditTransitions += plan.dropped;
 	return plan;
+}
+
+function persistCheckpointWithAuditCompaction(
+	directory: string,
+	checkpoint: PrSubscriptionCheckpoint,
+	plan: AuditCompactionPlan | null,
+): void {
+	// Persist durable state before touching the diagnostic audit file. This keeps
+	// a checkpoint-write failure from publishing an audit transition for a state
+	// the caller never observed. A successful audit rewrite is accounted for by a
+	// second checkpoint write; if that accounting write fails, the metric
+	// under-reports rather than claiming drops that never landed.
+	_internals.writeCheckpointFile(directory, checkpoint);
+	if (!applyAuditCompaction(directory, plan) || !plan) return;
+	checkpoint.maintenance.droppedAuditTransitions += plan.dropped;
+	_internals.writeCheckpointFile(directory, checkpoint);
 }
 
 function auditStats(directory: string): { lines: number; bytes: number } {
@@ -1228,7 +1250,7 @@ function maybeArchiveLegacy(
 			migration.archived = true;
 		} else {
 			log(
-				`[pr-monitor] legacy archive inspection deferred: ${err instanceof Error ? err.message : String(err)}`,
+				`[pr-monitor] legacy archive inspection deferred: ${storageErrorCode(err)}`,
 			);
 		}
 		return null;
@@ -1312,9 +1334,7 @@ function maybeArchiveLegacy(
 		} catch {
 			/* keep the bounded candidate for a later recovery attempt */
 		}
-		log(
-			`[pr-monitor] legacy archive deferred: ${err instanceof Error ? err.message : String(err)}`,
-		);
+		log(`[pr-monitor] legacy archive deferred: ${storageErrorCode(err)}`);
 		return null;
 	}
 	// renameSync preserves the source mtime — an idle legacy log would have
@@ -1724,18 +1744,15 @@ async function bootstrapCheckpointFromLegacy(directory: string): Promise<void> {
 				} catch {
 					return;
 				}
-				// Read-bootstrap is optional. Keep its locked work within the same
-				// per-operation budget as write migration; larger sources converge via
-				// the crash-resumable mutation path.
-				if (
-					beforeFold.size > PR_SUBSCRIPTION_LIMITS.migrationMaxBytesPerOperation
-				) {
-					return;
-				}
+				// Read-bootstrap is one-time convergence work. The source was already
+				// admitted against the finite 64 MiB ceiling, and foldLegacyRegion keeps
+				// memory bounded to a 64 KiB chunk plus the capped live set. Do not apply
+				// the 8 MiB mutation budget here: admitted 8–64 MiB stores must still
+				// converge to a checkpoint after a read-only install.
 				const lockedFold = foldLegacyRegion(
 					storePath(directory),
 					0,
-					Number.MAX_SAFE_INTEGER,
+					PR_SUBSCRIPTION_LIMITS.legacySourceMaxBytes,
 				);
 				if (lockedFold.ioError) return;
 				let afterFold: fs.Stats;
@@ -1778,12 +1795,12 @@ async function bootstrapCheckpointFromLegacy(directory: string): Promise<void> {
 				};
 				checkpoint.sequence = 1;
 				checkpoint.updatedAt = Date.now();
-				const auditCompaction = prepareAuditCompaction(
+				const auditCompaction = prepareAuditCompaction(directory);
+				persistCheckpointWithAuditCompaction(
 					directory,
-					checkpoint.maintenance,
+					checkpoint,
+					auditCompaction,
 				);
-				_internals.writeCheckpointFile(directory, checkpoint);
-				applyAuditCompaction(directory, auditCompaction);
 				const archiveEvent = maybeArchiveLegacy(directory, checkpoint);
 				if (archiveEvent) {
 					checkpoint.sequence += 1;
@@ -1806,9 +1823,7 @@ async function bootstrapCheckpointFromLegacy(directory: string): Promise<void> {
 		);
 	} catch (err) {
 		// Best-effort only — the read result was already computed.
-		log(
-			`[pr-monitor] read-bootstrap skipped: ${err instanceof Error ? err.message : String(err)}`,
-		);
+		log(`[pr-monitor] read-bootstrap skipped: ${storageErrorCode(err)}`);
 	}
 }
 
@@ -1840,7 +1855,7 @@ function loadViewForWrite(directory: string): LoadedView {
 		} catch (err) {
 			if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
 				throw new Error(
-					`PR subscription foreign legacy log could not be inspected; refusing to rebind: ${err instanceof Error ? err.message : String(err)}`,
+					`PR subscription foreign legacy log could not be inspected; refusing to rebind (${storageErrorCode(err)})`,
 				);
 			}
 		}
@@ -1855,7 +1870,7 @@ function loadViewForWrite(directory: string): LoadedView {
 				_internals.renameWithRetry(legacy, foreignLegacy);
 			} catch (err) {
 				throw new Error(
-					`PR subscription foreign legacy log could not be quarantined; refusing to rebind: ${err instanceof Error ? err.message : String(err)}`,
+					`PR subscription foreign legacy log could not be quarantined; refusing to rebind (${storageErrorCode(err)})`,
 				);
 			}
 		}
@@ -1892,7 +1907,7 @@ function loadViewForWrite(directory: string): LoadedView {
 			reconcileLegacyArchiveStaging(directory, checkpoint.migration);
 		} catch (err) {
 			throw new Error(
-				`PR subscription legacy archive staging could not be reconciled; refusing mutation: ${err instanceof Error ? err.message : String(err)}`,
+				`PR subscription legacy archive staging could not be reconciled; refusing mutation (${storageErrorCode(err)})`,
 			);
 		}
 	}
@@ -1904,7 +1919,7 @@ function loadViewForWrite(directory: string): LoadedView {
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
 			throw new Error(
-				`PR subscription legacy store could not be inspected; refusing mutation: ${err instanceof Error ? err.message : String(err)}`,
+				`PR subscription legacy store could not be inspected; refusing mutation (${storageErrorCode(err)})`,
 			);
 		}
 	}
@@ -1982,7 +1997,7 @@ function loadViewForWrite(directory: string): LoadedView {
 			);
 			if (fold.ioError) {
 				throw new Error(
-					`PR subscription legacy migration read failed: ${fold.ioError}`,
+					'PR subscription legacy migration read failed (I/O error)',
 				);
 			}
 			mergeFoldedRecords(view, fold.folded);
@@ -2142,12 +2157,12 @@ function finalizeWrite(
 		if (!archiveEvent) return;
 		checkpoint.updatedAt = Date.now();
 		checkpoint.sequence += 1;
-		const auditCompaction = prepareAuditCompaction(
+		const auditCompaction = prepareAuditCompaction(directory);
+		persistCheckpointWithAuditCompaction(
 			directory,
-			checkpoint.maintenance,
+			checkpoint,
+			auditCompaction,
 		);
-		_internals.writeCheckpointFile(directory, checkpoint);
-		applyAuditCompaction(directory, auditCompaction);
 		flushAuditEvents(
 			directory,
 			[archiveEvent],
@@ -2163,16 +2178,11 @@ function finalizeWrite(
 	checkpoint.updatedAt = Date.now();
 	checkpoint.rootPath = path.resolve(directory);
 	checkpoint.sequence += 1;
-	// Durable state FIRST — writeCheckpointFile enforces checkpoint replay
-	// capacity and throws before anything is published, so a capacity
-	// violation can never follow an already-archived legacy source (which
-	// would strand the only copy of unabsorbed records).
-	const auditCompaction = prepareAuditCompaction(
-		directory,
-		checkpoint.maintenance,
-	);
-	_internals.writeCheckpointFile(directory, checkpoint);
-	applyAuditCompaction(directory, auditCompaction);
+	// Audit compaction is diagnostic-only. The helper preserves checkpoint-first
+	// ordering while accounting dropped transitions only after a successful
+	// atomic rewrite; a failed rewrite must not publish a false loss counter.
+	const auditCompaction = prepareAuditCompaction(directory);
+	persistCheckpointWithAuditCompaction(directory, checkpoint, auditCompaction);
 	flushAuditEvents(
 		directory,
 		events,
@@ -2602,7 +2612,7 @@ export async function getPrSubscriptionHealth(
 		return health;
 	} catch (err) {
 		log(
-			`[pr-monitor] getPrSubscriptionHealth failed: ${err instanceof Error ? err.message : String(err)}`,
+			`[pr-monitor] getPrSubscriptionHealth failed: ${storageErrorCode(err)}`,
 		);
 		return emptyHealth();
 	}
@@ -2685,6 +2695,7 @@ function healthFromView(
 export const _internals = {
 	afterCheckpointFstat: (_filePath: string): void => {},
 	archiveStatSync: fs.statSync,
+	auditCompactionWrite: atomicWriteSwarmFileSync,
 	beforeBootstrapLock: (_directory: string): void => {},
 	beforeArchiveLegacy: (_directory: string): void => {},
 	beforeArchiveRename: (_directory: string): void => {},
