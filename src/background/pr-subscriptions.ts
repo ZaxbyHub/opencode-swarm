@@ -67,6 +67,7 @@ const FOREIGN_CHECKPOINT_FILE =
 	'pr-monitor/subscriptions.checkpoint.foreign.json';
 const CORRUPT_CHECKPOINT_FILE =
 	'pr-monitor/subscriptions.checkpoint.corrupt.json';
+const FOREIGN_LEGACY_FILE = 'pr-monitor/subscriptions.legacy.foreign.jsonl';
 
 /** Lock + diagnostics identity for the project-scoped store lock. */
 const STORE_LOCK_AGENT = 'pr-monitor';
@@ -83,6 +84,8 @@ export const PR_SUBSCRIPTION_LIMITS = {
 	maxRecordBytes: 64 * 1024,
 	/** Legacy-migration progress persistence granularity (crash-resume). */
 	migrationChunkBytes: 1024 * 1024,
+	/** Maximum legacy bytes folded while one mutation holds the store lock. */
+	migrationMaxBytesPerOperation: 8 * 1024 * 1024,
 	/**
 	 * Hard ceiling on legacy-log folding per store operation — the explicit
 	 * finite migration work budget (issue #2042 Required 6). A legacy source
@@ -146,11 +149,6 @@ let onSubscriptionCreated:
 /**
  * Register the lazy-start callback invoked after a successful subscription.
  * Called once during plugin init to wire the PR monitor worker lifecycle.
- *
- * Contract: the callback MUST NOT call store operations synchronously — it
- * runs while the caller still holds the store's evidence lock, and
- * proper-lockfile has no in-process reentrancy, so a re-entering callback
- * would block until the lock times out.
  */
 export function setOnSubscriptionCreated(
 	callback: (directory: string, record: PrSubscriptionRecord) => void,
@@ -240,7 +238,7 @@ const RecordSchema = z
 		errorCount: z.number().int().min(0),
 		customPollIntervalSeconds: z.number().int().positive().optional(),
 		customFailureThreshold: z.number().int().min(0).optional(),
-		customCooldownSeconds: z.number().int().positive().optional(),
+		customCooldownSeconds: z.number().int().min(0).optional(),
 	})
 	.strict();
 
@@ -255,7 +253,7 @@ export interface PrSubscriptionTerminalSummary {
 }
 
 export interface PrSubscriptionMigrationState {
-	/** Byte cursor of the incremental legacy fold (always a line boundary). */
+	/** Byte cursor; may sit inside an oversized line when discard state is true. */
 	scannedBytes: number;
 	/** Legacy size at the last scan (change detection). */
 	sourceBytes: number;
@@ -267,6 +265,10 @@ export interface PrSubscriptionMigrationState {
 	sourceMtimeMs: number;
 	/** Corrupt/oversize lines skipped during migration scanning. */
 	corruptLines: number;
+	discardingOversizeLine: boolean;
+	/** Native checkpoint authority captured before any legacy records are folded. */
+	baselineRecords: Record<string, PrSubscriptionRecord>;
+	baselineTerminalSummary: PrSubscriptionTerminalSummary;
 	done: boolean;
 	archived: boolean;
 	startedAt: number;
@@ -307,6 +309,13 @@ const MigrationSchema = z
 		sourceBytes: z.number().int().nonnegative(),
 		sourceMtimeMs: z.number().nonnegative(),
 		corruptLines: z.number().int().nonnegative(),
+		discardingOversizeLine: z.boolean().optional().default(false),
+		baselineRecords: z.record(z.string(), RecordSchema).optional().default({}),
+		baselineTerminalSummary: TerminalSummarySchema.optional().default({
+			removed: 0,
+			expired: 0,
+			lastTerminalAt: null,
+		}),
 		done: z.boolean(),
 		archived: z.boolean(),
 		startedAt: z.number().int().nonnegative(),
@@ -418,12 +427,34 @@ function legacyArchivePath(directory: string): string {
 	return validateSwarmPath(directory, LEGACY_ARCHIVE_FILE);
 }
 
+function legacyArchiveNextPath(directory: string): string {
+	return `${legacyArchivePath(directory)}.next`;
+}
+
+function legacyArchivePreviousPath(directory: string): string {
+	return `${legacyArchivePath(directory)}.previous`;
+}
+
+function fileExistsStrict(filePath: string): boolean {
+	try {
+		fs.statSync(filePath);
+		return true;
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+		throw err;
+	}
+}
+
 function foreignSlotPath(directory: string): string {
 	return validateSwarmPath(directory, FOREIGN_CHECKPOINT_FILE);
 }
 
 function corruptSlotPath(directory: string): string {
 	return validateSwarmPath(directory, CORRUPT_CHECKPOINT_FILE);
+}
+
+function foreignLegacySlotPath(directory: string): string {
+	return validateSwarmPath(directory, FOREIGN_LEGACY_FILE);
 }
 
 function ensureSwarmDir(directory: string): void {
@@ -449,12 +480,6 @@ export function buildCorrelationId(
  * compares case-insensitively (drive-letter/segment case). No
  * realpath/UNC/8.3 normalization — an unresolved mismatch fails SAFE
  * (foreign → no monitor start, rebind on write, health-visible).
- *
- * This intentionally treats a MOVED project directory the same as a copied
- * `.swarm`: the stored rootPath no longer resolves to the current root, so
- * reads see nothing and the next write rebinds (the displaced checkpoint is
- * preserved in `subscriptions.checkpoint.foreign.json`). Re-create
- * subscriptions with `/swarm pr subscribe` after a move.
  */
 function sameProjectRoot(recorded: string, current: string): boolean {
 	const a = path.resolve(recorded);
@@ -511,6 +536,8 @@ interface LegacyFoldResult {
 	 */
 	aborted: boolean;
 	corruptLines: number;
+	ioError: string | null;
+	discardingOversizeLine: boolean;
 }
 
 /**
@@ -522,13 +549,16 @@ interface LegacyFoldResult {
  * oversize, and identity-mismatched lines are skipped and COUNTED — never
  * silently treated as removed or active (issue #2042 Required 5/6). A final
  * unterminated line is processed leniently (v1 `split('\n')` semantics).
- * `maxBytes` is a soft budget — the region extends to the end of the current
- * line so the cursor always lands on a boundary.
+ * `maxBytes` is a soft budget for valid-sized records — the region extends to
+ * the end of the current line. Once a line exceeds `maxRecordBytes`, however,
+ * its bytes are discarded incrementally and the cursor may resume inside that
+ * corrupt line using `discardingOversizeLine`.
  */
 function foldLegacyRegion(
 	filePath: string,
 	startByte: number,
 	maxBytes: number,
+	discardingOversizeLine = false,
 ): LegacyFoldResult {
 	const folded = new Map<string, PrSubscriptionRecord>();
 	let corruptLines = 0;
@@ -537,13 +567,15 @@ function foldLegacyRegion(
 	let fd: number;
 	try {
 		fd = fs.openSync(filePath, 'r');
-	} catch {
+	} catch (err) {
 		return {
 			folded,
 			nextByte: startByte,
-			eof: true,
+			eof: false,
 			aborted: true,
 			corruptLines,
+			ioError: err instanceof Error ? err.message : String(err),
+			discardingOversizeLine,
 		};
 	}
 
@@ -576,7 +608,7 @@ function foldLegacyRegion(
 	};
 
 	try {
-		const size = fs.fstatSync(fd).size;
+		const size = _internals.legacyFstatSync(fd).size;
 		if (startByte >= size) {
 			return {
 				folded,
@@ -584,18 +616,18 @@ function foldLegacyRegion(
 				eof: true,
 				aborted: false,
 				corruptLines,
+				ioError: null,
+				discardingOversizeLine: false,
 			};
 		}
 		const chunk = Buffer.alloc(PR_SUBSCRIPTION_LIMITS.readChunkBytes);
 		let pending: Buffer[] = [];
 		let pendingLen = 0;
-		let oversize = false;
+		let oversize = discardingOversizeLine;
 		let pos = startByte;
 
 		const flushPendingAtEof = (): LegacyFoldResult => {
-			if (oversize) {
-				corruptLines += 1;
-			} else if (pendingLen > 0) {
+			if (!oversize && pendingLen > 0) {
 				processLineBytes(Buffer.concat(pending));
 			}
 			// A final unterminated line was processed leniently — the cursor
@@ -610,13 +642,15 @@ function foldLegacyRegion(
 				eof: true,
 				aborted: false,
 				corruptLines,
+				ioError: null,
+				discardingOversizeLine: false,
 			};
 		};
 
 		while (true) {
 			const want = Math.min(chunk.length, size - pos);
 			if (want <= 0) return flushPendingAtEof();
-			const n = fs.readSync(fd, chunk, 0, want, pos);
+			const n = _internals.readSync(fd, chunk, 0, want, pos);
 			if (n <= 0) return flushPendingAtEof();
 			const data = chunk.subarray(0, n);
 			const base = pos;
@@ -627,14 +661,16 @@ function foldLegacyRegion(
 				if (nl === -1) {
 					// Copy: `chunk` is reused by the next read — a view would be
 					// overwritten out from under the pending list.
-					pending.push(Buffer.from(data.subarray(scan)));
-					pendingLen += data.length - scan;
+					if (!oversize) {
+						pending.push(Buffer.from(data.subarray(scan)));
+						pendingLen += data.length - scan;
+					}
 					break;
 				}
 				const lineLen = pendingLen + (nl - scan);
-				if (oversize || lineLen > PR_SUBSCRIPTION_LIMITS.maxRecordBytes) {
+				if (!oversize && lineLen > PR_SUBSCRIPTION_LIMITS.maxRecordBytes) {
 					corruptLines += 1;
-				} else {
+				} else if (!oversize) {
 					const pieces =
 						pending.length > 0
 							? [...pending, data.subarray(scan, nl)]
@@ -646,10 +682,22 @@ function foldLegacyRegion(
 				oversize = false;
 				consumedTo = base + nl + 1;
 				scan = nl + 1;
+				if (consumedTo - startByte >= maxBytes) {
+					return {
+						folded,
+						nextByte: consumedTo,
+						eof: consumedTo >= size,
+						aborted: false,
+						corruptLines,
+						ioError: null,
+						discardingOversizeLine: false,
+					};
+				}
 			}
 			// Oversize guard: never buffer an unbounded partial line.
 			if (!oversize && pendingLen > PR_SUBSCRIPTION_LIMITS.maxRecordBytes) {
 				oversize = true;
+				corruptLines += 1;
 				pending = [];
 				pendingLen = 0;
 			}
@@ -661,6 +709,19 @@ function foldLegacyRegion(
 					eof,
 					aborted: false,
 					corruptLines,
+					ioError: null,
+					discardingOversizeLine: false,
+				};
+			}
+			if (oversize && pos - startByte >= maxBytes) {
+				return {
+					folded,
+					nextByte: pos,
+					eof: pos >= size,
+					aborted: false,
+					corruptLines,
+					ioError: null,
+					discardingOversizeLine: pos < size,
 				};
 			}
 		}
@@ -669,15 +730,17 @@ function foldLegacyRegion(
 			`[pr-monitor] foldLegacyRegion failed: ${err instanceof Error ? err.message : String(err)}`,
 		);
 		return {
-			folded,
-			nextByte: consumedTo,
-			eof: true,
+			folded: new Map(),
+			nextByte: startByte,
+			eof: false,
 			aborted: true,
-			corruptLines,
+			corruptLines: 0,
+			ioError: err instanceof Error ? err.message : String(err),
+			discardingOversizeLine,
 		};
 	} finally {
 		try {
-			fs.closeSync(fd);
+			_internals.legacyCloseSync(fd);
 		} catch {
 			/* already closed */
 		}
@@ -715,9 +778,11 @@ type CheckpointRead =
 	| { kind: 'invalid'; reason: string };
 
 function readCheckpoint(directory: string): CheckpointRead {
+	const filePath = checkpointPath(directory);
+	let fd: number;
 	let stat: fs.Stats;
 	try {
-		stat = fs.statSync(checkpointPath(directory));
+		fd = fs.openSync(filePath, 'r');
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
 			return { kind: 'absent' };
@@ -727,23 +792,60 @@ function readCheckpoint(directory: string): CheckpointRead {
 			reason: `unreadable (${(err as NodeJS.ErrnoException).code ?? 'unknown'})`,
 		};
 	}
-	// Hard read-side bound: an over-ceiling checkpoint can only be external
-	// tampering (or a caller bypassing the config-bounded subscribe cap) —
-	// never synchronously load it (fail-safe quarantine + legacy recovery).
-	if (stat.size > PR_SUBSCRIPTION_LIMITS.checkpointHardReadBytes) {
+	try {
+		stat = fs.fstatSync(fd);
+	} catch (err) {
+		try {
+			fs.closeSync(fd);
+		} catch {
+			/* best-effort descriptor cleanup */
+		}
 		return {
 			kind: 'invalid',
-			reason: `checkpoint exceeds hard read ceiling (${stat.size} > ${PR_SUBSCRIPTION_LIMITS.checkpointHardReadBytes} bytes)`,
+			reason: `unreadable (${(err as NodeJS.ErrnoException).code ?? 'unknown'})`,
 		};
 	}
 	let raw: string;
 	try {
-		raw = fs.readFileSync(checkpointPath(directory), 'utf-8');
+		// The size check and bounded read use one open descriptor, eliminating the
+		// stat/path-read replacement race. Growth after fstat cannot enlarge this
+		// allocation or requested read length.
+		if (stat.size > PR_SUBSCRIPTION_LIMITS.checkpointHardReadBytes) {
+			return {
+				kind: 'invalid',
+				reason: `checkpoint exceeds hard read ceiling (${stat.size} > ${PR_SUBSCRIPTION_LIMITS.checkpointHardReadBytes} bytes)`,
+			};
+		}
+		_internals.afterCheckpointFstat(filePath);
+		const buffer = Buffer.alloc(stat.size);
+		let bytesRead = 0;
+		while (bytesRead < stat.size) {
+			const read = _internals.readSync(
+				fd,
+				buffer,
+				bytesRead,
+				stat.size - bytesRead,
+				bytesRead,
+			);
+			if (read <= 0) {
+				throw new Error(
+					`premature checkpoint EOF (${bytesRead}/${stat.size} bytes)`,
+				);
+			}
+			bytesRead += read;
+		}
+		raw = buffer.subarray(0, bytesRead).toString('utf-8');
 	} catch (err) {
 		return {
 			kind: 'invalid',
 			reason: `unreadable (${(err as NodeJS.ErrnoException).code ?? 'unknown'})`,
 		};
+	} finally {
+		try {
+			fs.closeSync(fd);
+		} catch {
+			/* read result remains valid/invalid; close failure must not escape */
+		}
 	}
 	let parsed: unknown;
 	try {
@@ -781,6 +883,29 @@ function readCheckpoint(directory: string): CheckpointRead {
 				kind: 'invalid',
 				reason: `record identity mismatch at key "${key}"`,
 			};
+		}
+	}
+	if (checkpoint.migration !== null) {
+		const baselineEntries = Object.entries(
+			checkpoint.migration.baselineRecords,
+		);
+		if (baselineEntries.length > PR_SUBSCRIPTION_LIMITS.maxCheckpointRecords) {
+			return {
+				kind: 'invalid',
+				reason: `migration baseline count ${baselineEntries.length} exceeds guard ${PR_SUBSCRIPTION_LIMITS.maxCheckpointRecords}`,
+			};
+		}
+		for (const [key, rec] of baselineEntries) {
+			if (
+				key !== rec.correlationId ||
+				rec.correlationId !==
+					buildCorrelationId(rec.sessionID, rec.repoFullName, rec.prNumber)
+			) {
+				return {
+					kind: 'invalid',
+					reason: `migration baseline identity mismatch at key "${key}"`,
+				};
+			}
 		}
 	}
 	return { kind: 'ok', value: checkpoint };
@@ -874,7 +999,7 @@ function quarantineCheckpoint(
 		} catch {
 			/* no previous slot */
 		}
-		renameWithRetry(from, to);
+		_internals.renameWithRetry(from, to);
 		return true;
 	} catch (err) {
 		log(
@@ -892,7 +1017,7 @@ function flushAuditEvents(
 	directory: string,
 	events: AuditEvent[],
 	sequence: number,
-	maintenance: PrSubscriptionMaintenance,
+	_maintenance: PrSubscriptionMaintenance,
 ): void {
 	if (events.length === 0) return;
 	ensureSwarmDir(directory);
@@ -914,50 +1039,61 @@ function flushAuditEvents(
 		);
 		return;
 	}
-	compactAuditTail(directory, maintenance);
 }
 
-function compactAuditTail(
-	directory: string,
-	maintenance: PrSubscriptionMaintenance,
-): void {
+interface AuditCompactionPlan {
+	content: string;
+	dropped: number;
+}
+
+function planAuditCompaction(directory: string): AuditCompactionPlan | null {
 	let size: number;
 	try {
 		size = fs.statSync(auditPath(directory)).size;
 	} catch {
-		return;
+		return null;
 	}
-	if (size <= PR_SUBSCRIPTION_LIMITS.auditMaxBytesLow) return;
-	// Bounded read: only the newest 2×high-water bytes matter for a rewrite
-	// that keeps the newest Low lines. An externally enlarged file must not
-	// be loaded whole (same defense as auditStats).
-	const windowBytes = 2 * PR_SUBSCRIPTION_LIMITS.auditMaxBytesHigh;
+	if (size <= PR_SUBSCRIPTION_LIMITS.auditMaxBytesLow) return null;
 	let content: string;
+	let omittedPrefix = false;
 	try {
-		if (size > windowBytes) {
-			const fd = fs.openSync(auditPath(directory), 'r');
-			try {
-				const tail = Buffer.alloc(windowBytes);
-				const n = fs.readSync(fd, tail, 0, windowBytes, size - windowBytes);
-				// Drop the first (almost certainly partial) line of the window.
-				const text = tail.subarray(0, n).toString('utf-8');
-				const firstNl = text.indexOf('\n');
-				content = firstNl === -1 ? '' : text.slice(firstNl + 1);
-			} finally {
-				fs.closeSync(fd);
+		const filePath = auditPath(directory);
+		const maxRead = PR_SUBSCRIPTION_LIMITS.auditMaxBytesHigh;
+		const start = Math.max(0, size - maxRead);
+		const length = Math.min(size, maxRead);
+		const buffer = Buffer.alloc(length);
+		const fd = fs.openSync(filePath, 'r');
+		try {
+			let bytesRead = 0;
+			while (bytesRead < length) {
+				const read = _internals.readSync(
+					fd,
+					buffer,
+					bytesRead,
+					length - bytesRead,
+					start + bytesRead,
+				);
+				if (read <= 0) return null;
+				bytesRead += read;
 			}
-		} else {
-			content = fs.readFileSync(auditPath(directory), 'utf-8');
+			content = buffer.toString('utf-8');
+		} finally {
+			fs.closeSync(fd);
+		}
+		if (start > 0) {
+			omittedPrefix = true;
+			const firstNewline = content.indexOf('\n');
+			content = firstNewline >= 0 ? content.slice(firstNewline + 1) : '';
 		}
 	} catch {
-		return;
+		return null;
 	}
 	const all = content.split('\n').filter((line) => line.trim().length > 0);
 	if (
 		all.length <= PR_SUBSCRIPTION_LIMITS.auditMaxLinesHigh &&
 		size <= PR_SUBSCRIPTION_LIMITS.auditMaxBytesHigh
 	) {
-		return;
+		return null;
 	}
 	// Keep the newest lines (later file position = newer) under Low watermarks.
 	const kept: string[] = [];
@@ -973,18 +1109,36 @@ function compactAuditTail(
 		kept.unshift(all[i]);
 		bytes += lineBytes;
 	}
-	const dropped = all.length - kept.length;
+	// The exact line count of an omitted external prefix is intentionally not
+	// scanned. Record a conservative lower bound while keeping I/O capped.
+	const dropped = all.length - kept.length + (omittedPrefix ? 1 : 0);
+	return {
+		content: kept.length > 0 ? `${kept.join('\n')}\n` : '',
+		dropped,
+	};
+}
+
+function applyAuditCompaction(
+	directory: string,
+	plan: AuditCompactionPlan | null,
+): void {
+	if (!plan) return;
 	try {
-		atomicWriteSwarmFileSync(
-			auditPath(directory),
-			kept.length > 0 ? `${kept.join('\n')}\n` : '',
-		);
-		maintenance.droppedAuditTransitions += dropped;
+		atomicWriteSwarmFileSync(auditPath(directory), plan.content);
 	} catch (err) {
 		log(
 			`[pr-monitor] audit compaction failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
 		);
 	}
+}
+
+function prepareAuditCompaction(
+	directory: string,
+	maintenance: PrSubscriptionMaintenance,
+): AuditCompactionPlan | null {
+	const plan = planAuditCompaction(directory);
+	if (plan) maintenance.droppedAuditTransitions += plan.dropped;
+	return plan;
 }
 
 function auditStats(directory: string): { lines: number; bytes: number } {
@@ -1065,21 +1219,99 @@ function maybeArchiveLegacy(
 	const migration = checkpoint.migration;
 	if (!migration || !migration.done || migration.archived) return null;
 	const legacy = storePath(directory);
-	const size = fileSizeOrNull(legacy);
-	if (size === null) {
-		// Crash-after-rename repair: already gone → mark archived.
-		migration.archived = true;
+	let stat: fs.Stats;
+	try {
+		stat = _internals.archiveStatSync(legacy);
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+			// Crash-after-rename repair: already gone → mark archived.
+			migration.archived = true;
+		} else {
+			log(
+				`[pr-monitor] legacy archive inspection deferred: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
 		return null;
 	}
-	if (size !== migration.sourceBytes) return null; // unstable — wait
+	if (
+		stat.size !== migration.sourceBytes ||
+		stat.mtimeMs !== migration.sourceMtimeMs
+	)
+		return null; // unstable — wait
+	_internals.beforeArchiveLegacy(directory);
 	try {
+		stat = _internals.archiveStatSync(legacy);
+	} catch {
+		return null;
+	}
+	if (
+		stat.size !== migration.sourceBytes ||
+		stat.mtimeMs !== migration.sourceMtimeMs
+	)
+		return null;
+	const archive = legacyArchivePath(directory);
+	const next = legacyArchiveNextPath(directory);
+	const previous = legacyArchivePreviousPath(directory);
+	try {
+		_internals.beforeArchiveRename(directory);
 		try {
-			fs.unlinkSync(legacyArchivePath(directory));
+			fs.unlinkSync(next);
 		} catch {
-			/* no previous archive */
+			/* no abandoned candidate */
 		}
-		renameWithRetry(legacy, legacyArchivePath(directory));
+		_internals.renameWithRetry(legacy, next);
+		const archivedStat = _internals.archiveStatSync(next);
+		if (
+			archivedStat.size !== migration.sourceBytes ||
+			archivedStat.mtimeMs !== migration.sourceMtimeMs
+		) {
+			// A legacy writer changed the source after preflight. Restore it so
+			// the next operation re-folds those bytes instead of stranding them.
+			_internals.renameWithRetry(next, legacy);
+			return null;
+		}
+		// Retention begins when the verified archive candidate is created, not
+		// when the legacy source was last written. Rename preserves source mtime,
+		// which could otherwise make an old source expire immediately.
+		const archivedAt = new Date();
+		fs.utimesSync(next, archivedAt, archivedAt);
+		let movedPrevious = false;
+		try {
+			fs.unlinkSync(previous);
+		} catch {
+			/* no stale backup */
+		}
+		try {
+			_internals.renameWithRetry(archive, previous);
+			movedPrevious = true;
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+		}
+		try {
+			_internals.renameWithRetry(next, archive);
+		} catch (err) {
+			if (movedPrevious) _internals.renameWithRetry(previous, archive);
+			_internals.renameWithRetry(next, legacy);
+			throw err;
+		}
+		if (movedPrevious) {
+			try {
+				fs.unlinkSync(previous);
+			} catch {
+				/* bounded stale backup is safer than deleting the rollback copy */
+			}
+		}
 	} catch (err) {
+		// If any step after source -> candidate fails before replacement is
+		// committed, put the candidate back at the authoritative legacy path.
+		// This includes stat failures and failures while staging the old archive.
+		try {
+			if (fs.existsSync(next) && !fs.existsSync(legacy)) {
+				_internals.renameWithRetry(next, legacy);
+			}
+		} catch {
+			/* keep the bounded candidate for a later recovery attempt */
+		}
 		log(
 			`[pr-monitor] legacy archive deferred: ${err instanceof Error ? err.message : String(err)}`,
 		);
@@ -1096,6 +1328,97 @@ function maybeArchiveLegacy(
 	}
 	migration.archived = true;
 	return { kind: 'archive' };
+}
+
+/**
+ * Repair bounded archive-replacement staging after an interrupted mutation.
+ * The canonical archive is never displaced in favour of an unverified
+ * candidate. When both generations survive, the candidate returns to the
+ * legacy path for an ordinary re-fold and the prior archive stays canonical.
+ */
+function reconcileLegacyArchiveStaging(
+	directory: string,
+	migration: PrSubscriptionMigrationState,
+): void {
+	const legacy = storePath(directory);
+	const archive = legacyArchivePath(directory);
+	const next = legacyArchiveNextPath(directory);
+	const previous = legacyArchivePreviousPath(directory);
+	let legacyExists = fileExistsStrict(legacy);
+	let archiveExists = fileExistsStrict(archive);
+	let nextExists = fileExistsStrict(next);
+	let previousExists = fileExistsStrict(previous);
+	if (!nextExists && !previousExists) return;
+
+	if (legacyExists) {
+		// The authoritative source already exists. Staging files are bounded
+		// crash residue; retain a previous archive only when no canonical one is
+		// available for restoration.
+		if (!archiveExists && previousExists) {
+			_internals.renameWithRetry(previous, archive);
+			archiveExists = true;
+			previousExists = false;
+		}
+		if (!archiveExists && nextExists) {
+			const candidate = fs.statSync(next);
+			if (
+				migration.done &&
+				candidate.size === migration.sourceBytes &&
+				candidate.mtimeMs === migration.sourceMtimeMs
+			) {
+				_internals.renameWithRetry(next, archive);
+				archiveExists = true;
+				nextExists = false;
+			}
+		}
+		if (archiveExists && previousExists) fs.unlinkSync(previous);
+		if (nextExists) fs.unlinkSync(next);
+		return;
+	}
+
+	if (archiveExists) {
+		// A prior canonical rollback copy exists, so an interrupted candidate
+		// must be re-folded rather than replacing it implicitly.
+		if (nextExists) {
+			_internals.renameWithRetry(next, legacy);
+			migration.archived = false;
+			legacyExists = true;
+			nextExists = false;
+		}
+		if (previousExists) fs.unlinkSync(previous);
+		return;
+	}
+
+	if (previousExists) {
+		// Crash after archive -> previous: restore the known-good canonical copy
+		// before making the candidate visible again.
+		_internals.renameWithRetry(previous, archive);
+		archiveExists = true;
+		previousExists = false;
+		if (nextExists) {
+			_internals.renameWithRetry(next, legacy);
+			migration.archived = false;
+			legacyExists = true;
+			nextExists = false;
+		}
+		return;
+	}
+
+	if (nextExists) {
+		const candidate = fs.statSync(next);
+		if (
+			migration.done &&
+			candidate.size === migration.sourceBytes &&
+			candidate.mtimeMs === migration.sourceMtimeMs
+		) {
+			// No older rollback generation exists and the candidate is exactly the
+			// completed source. Finish the interrupted first-time archive.
+			_internals.renameWithRetry(next, archive);
+		} else {
+			_internals.renameWithRetry(next, legacy);
+			migration.archived = false;
+		}
+	}
 }
 
 function cleanupStaleLegacyArchive(directory: string): void {
@@ -1126,7 +1449,10 @@ function emitHealthTelemetry(
 		compactions: checkpoint.maintenance.compactions,
 		corrupt_count: checkpoint.maintenance.corruptLegacyRecords,
 		dropped_audit_count: checkpoint.maintenance.droppedAuditTransitions,
-		checkpoint_bytes: Buffer.byteLength(JSON.stringify(checkpoint), 'utf-8'),
+		checkpoint_bytes: Buffer.byteLength(
+			`${JSON.stringify(checkpoint)}\n`,
+			'utf-8',
+		),
 		limit_bytes: PR_SUBSCRIPTION_LIMITS.maxCheckpointBytes,
 		recovery_resets: checkpoint.maintenance.resets,
 	});
@@ -1191,7 +1517,7 @@ function overlayLegacy(
 	/** True when a fold ran but ended on an I/O error — never settle/archive on it. */
 	aborted: boolean;
 } {
-	const view: Record<string, PrSubscriptionRecord> = { ...checkpoint.records };
+	let view: Record<string, PrSubscriptionRecord> = { ...checkpoint.records };
 	const legacy = storePath(directory);
 	let stat: fs.Stats | null = null;
 	try {
@@ -1224,9 +1550,35 @@ function overlayLegacy(
 	}
 	const migration = checkpoint.migration;
 	if (migration === null || !migration.done) {
-		let cursor = migration?.scannedBytes ?? 0;
-		if (cursor > stat.size) cursor = 0; // regressed/recreated file — restart cursor
-		const fold = foldLegacyRegion(legacy, cursor, Number.MAX_SAFE_INTEGER);
+		const baselineRecords = migration?.baselineRecords ?? {
+			...checkpoint.records,
+		};
+		const sameGeneration =
+			migration !== null &&
+			stat.size === migration.sourceBytes &&
+			stat.mtimeMs === migration.sourceMtimeMs;
+		const cursor = sameGeneration ? migration.scannedBytes : 0;
+		const discardingOversizeLine = sameGeneration
+			? migration.discardingOversizeLine
+			: false;
+		if (!sameGeneration && migration !== null) {
+			view = { ...baselineRecords };
+		}
+		const fold = foldLegacyRegion(
+			legacy,
+			cursor,
+			Number.MAX_SAFE_INTEGER,
+			discardingOversizeLine,
+		);
+		if (fold.ioError)
+			return {
+				view,
+				usedLegacy: false,
+				absorbed: 0,
+				corruptLines: 0,
+				overLimit: false,
+				aborted: true,
+			};
 		const absorbed = mergeFoldedRecords(view, fold.folded);
 		return {
 			view,
@@ -1254,6 +1606,15 @@ function overlayLegacy(
 	}
 	// Changed (downgrade writer / recreated file) — full bounded-memory re-fold.
 	const fold = foldLegacyRegion(legacy, 0, Number.MAX_SAFE_INTEGER);
+	if (fold.ioError)
+		return {
+			view,
+			usedLegacy: false,
+			absorbed: 0,
+			corruptLines: 0,
+			overLimit: false,
+			aborted: true,
+		};
 	const absorbed = mergeFoldedRecords(view, fold.folded);
 	return {
 		view,
@@ -1299,7 +1660,7 @@ async function loadViewForRead(directory: string): Promise<{
 		const size = fileSizeOrNull(legacy);
 		if (size !== null && size <= PR_SUBSCRIPTION_LIMITS.legacySourceMaxBytes) {
 			const fold = foldLegacyRegion(legacy, 0, Number.MAX_SAFE_INTEGER);
-			mergeFoldedRecords(view, fold.folded);
+			if (!fold.ioError) mergeFoldedRecords(view, fold.folded);
 		} else if (size !== null) {
 			warnLegacyOverLimit(directory, size);
 		}
@@ -1307,22 +1668,27 @@ async function loadViewForRead(directory: string): Promise<{
 	}
 	// No checkpoint.
 	const legacyPath = storePath(directory);
-	const legacySize = fileSizeOrNull(legacyPath);
-	if (legacySize === null) {
+	let legacyStat: fs.Stats;
+	try {
+		legacyStat = fs.statSync(legacyPath);
+	} catch {
 		return { view: {}, recoverySource: 'empty' };
 	}
+	const legacySize = legacyStat.size;
 	if (legacySize > PR_SUBSCRIPTION_LIMITS.legacySourceMaxBytes) {
 		warnLegacyOverLimit(directory, legacySize);
 		return { view: {}, recoverySource: 'legacy-log' };
 	}
 	const fold = foldLegacyRegion(legacyPath, 0, Number.MAX_SAFE_INTEGER);
 	const view: Record<string, PrSubscriptionRecord> = {};
+	if (fold.ioError) return { view, recoverySource: 'legacy-log' };
 	mergeFoldedRecords(view, fold.folded);
 	// One-time read-bootstrap (best-effort, bounded lock timeout). An ABORTED
 	// fold (I/O failure) must not bootstrap a checkpoint that claims a
 	// complete scan — the next read retries the fold instead.
 	if (!fold.aborted) {
-		await bootstrapCheckpointFromLegacy(directory, view, fold);
+		_internals.beforeBootstrapLock(directory);
+		await bootstrapCheckpointFromLegacy(directory);
 	}
 	return { view, recoverySource: 'legacy-log' };
 }
@@ -1335,11 +1701,7 @@ async function loadViewForRead(directory: string): Promise<{
  * would otherwise pay the same bounded lock wait again.
  */
 const bootstrapAttempted = new Map<string, boolean>();
-async function bootstrapCheckpointFromLegacy(
-	directory: string,
-	foldedView: Record<string, PrSubscriptionRecord>,
-	fold: LegacyFoldResult,
-): Promise<void> {
+async function bootstrapCheckpointFromLegacy(directory: string): Promise<void> {
 	if (bootstrapAttempted.has(directory)) return;
 	if (bootstrapAttempted.size >= 32) {
 		bootstrapAttempted.delete(bootstrapAttempted.keys().next().value!);
@@ -1356,6 +1718,39 @@ async function bootstrapCheckpointFromLegacy(
 				// checkpoint is still absent (a corrupt file is left for the
 				// write path to quarantine).
 				if (readCheckpoint(directory).kind !== 'absent') return;
+				let beforeFold: fs.Stats;
+				try {
+					beforeFold = fs.statSync(storePath(directory));
+				} catch {
+					return;
+				}
+				// Read-bootstrap is optional. Keep its locked work within the same
+				// per-operation budget as write migration; larger sources converge via
+				// the crash-resumable mutation path.
+				if (
+					beforeFold.size > PR_SUBSCRIPTION_LIMITS.migrationMaxBytesPerOperation
+				) {
+					return;
+				}
+				const lockedFold = foldLegacyRegion(
+					storePath(directory),
+					0,
+					Number.MAX_SAFE_INTEGER,
+				);
+				if (lockedFold.ioError) return;
+				let afterFold: fs.Stats;
+				try {
+					afterFold = fs.statSync(storePath(directory));
+				} catch {
+					return;
+				}
+				if (
+					afterFold.size !== beforeFold.size ||
+					afterFold.mtimeMs !== beforeFold.mtimeMs
+				)
+					return;
+				const foldedView: Record<string, PrSubscriptionRecord> = {};
+				mergeFoldedRecords(foldedView, lockedFold.folded);
 				const checkpoint = freshCheckpoint(directory);
 				checkpoint.records = { ...foldedView };
 				const terminals = Object.values(foldedView).filter(
@@ -1364,38 +1759,48 @@ async function bootstrapCheckpointFromLegacy(
 				checkpoint.terminalSummary.lastTerminalAt = terminals.length
 					? Math.max(...terminals.map((rec) => rec.updatedAt))
 					: null;
-				checkpoint.maintenance.corruptLegacyRecords = fold.corruptLines;
-				let bootstrapMtime = 0;
-				try {
-					bootstrapMtime = fs.statSync(storePath(directory)).mtimeMs;
-				} catch {
-					/* vanished mid-bootstrap — cursor records what was folded */
-				}
-				// sourceBytes intentionally snapshots the FOLD-TIME size (the
-				// fold cursor), not a fresh stat: if the legacy file changed
-				// between the fold and this persist, the size/mtime mismatch is
-				// detected on the next read and the change is re-folded — a
-				// fresh (larger) size here could instead claim stability over
-				// bytes that were never folded.
+				checkpoint.maintenance.corruptLegacyRecords = lockedFold.corruptLines;
 				checkpoint.migration = {
-					scannedBytes: fold.nextByte,
-					sourceBytes: fold.nextByte,
-					sourceMtimeMs: bootstrapMtime,
-					corruptLines: fold.corruptLines,
+					scannedBytes: lockedFold.nextByte,
+					sourceBytes: beforeFold.size,
+					sourceMtimeMs: beforeFold.mtimeMs,
+					corruptLines: lockedFold.corruptLines,
+					discardingOversizeLine: false,
+					baselineRecords: {},
+					baselineTerminalSummary: {
+						removed: 0,
+						expired: 0,
+						lastTerminalAt: null,
+					},
 					done: true,
 					archived: false,
 					startedAt: Date.now(),
 				};
 				checkpoint.sequence = 1;
 				checkpoint.updatedAt = Date.now();
-				writeCheckpointFile(directory, checkpoint);
+				const auditCompaction = prepareAuditCompaction(
+					directory,
+					checkpoint.maintenance,
+				);
+				_internals.writeCheckpointFile(directory, checkpoint);
+				applyAuditCompaction(directory, auditCompaction);
+				const archiveEvent = maybeArchiveLegacy(directory, checkpoint);
+				if (archiveEvent) {
+					checkpoint.sequence += 1;
+					checkpoint.updatedAt = Date.now();
+					_internals.writeCheckpointFile(directory, checkpoint);
+				}
 				flushAuditEvents(
 					directory,
-					[{ kind: 'migrate-complete' }],
+					[
+						{ kind: 'migrate-complete' },
+						...(archiveEvent ? [archiveEvent] : []),
+					],
 					checkpoint.sequence,
 					checkpoint.maintenance,
 				);
 				emitHealthTelemetry('migrate-complete', checkpoint);
+				if (archiveEvent) emitHealthTelemetry('archive', checkpoint);
 			},
 			PR_SUBSCRIPTION_LIMITS.bootstrapLockTimeoutMs,
 		);
@@ -1416,20 +1821,49 @@ async function bootstrapCheckpointFromLegacy(
 function loadViewForWrite(directory: string): LoadedView {
 	const audit: AuditEvent[] = [];
 	let dirty = false;
+	let reboundForeign = false;
 
 	let checkpoint: PrSubscriptionCheckpoint;
 	const read = readCheckpoint(directory);
 	if (read.kind === 'ok' && sameProjectRoot(read.value.rootPath, directory)) {
 		checkpoint = cloneCheckpoint(read.value);
 	} else if (read.kind === 'ok') {
-		// Foreign checkpoint (copied `.swarm` OR a moved/renamed project —
-		// the two are indistinguishable from inside): quarantine first, then
-		// rebind to this root. The legacy log in the moved directory is still
-		// folded below, so a RENAME recovers its subscriptions through the
-		// normal migration path. The displaced checkpoint survives in the
-		// quarantine slot (plus one `.prev` generation).
 		const displaced = Object.keys(read.value.records).length;
-		quarantineCheckpoint(directory, 'foreign');
+		// Quarantine a co-copied legacy source first. If the later checkpoint
+		// quarantine fails, the still-present foreign checkpoint keeps reads and
+		// subsequent writes fail-closed; the wrong legacy state cannot be adopted.
+		const legacy = storePath(directory);
+		let foreignLegacyExists = false;
+		try {
+			_internals.statSync(legacy);
+			foreignLegacyExists = true;
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+				throw new Error(
+					`PR subscription foreign legacy log could not be inspected; refusing to rebind: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
+		}
+		if (foreignLegacyExists) {
+			const foreignLegacy = foreignLegacySlotPath(directory);
+			try {
+				try {
+					fs.unlinkSync(foreignLegacy);
+				} catch {
+					/* no previous slot */
+				}
+				_internals.renameWithRetry(legacy, foreignLegacy);
+			} catch (err) {
+				throw new Error(
+					`PR subscription foreign legacy log could not be quarantined; refusing to rebind: ${err instanceof Error ? err.message : String(err)}`,
+				);
+			}
+		}
+		if (!quarantineCheckpoint(directory, 'foreign')) {
+			throw new Error(
+				'PR subscription foreign checkpoint could not be quarantined; refusing to rebind',
+			);
+		}
 		checkpoint = freshCheckpoint(directory);
 		// Lifetime reset accounting: carry the displaced checkpoint's own
 		// reset history forward so the counter is monotone across generations.
@@ -1439,6 +1873,7 @@ function loadViewForWrite(directory: string): LoadedView {
 		log(
 			`[pr-monitor] foreign checkpoint quarantined (${displaced} displaced records, recorded root ${read.value.rootPath}); store rebound to ${directory}`,
 		);
+		reboundForeign = true;
 	} else if (read.kind === 'invalid') {
 		quarantineCheckpoint(directory, 'corrupt');
 		checkpoint = freshCheckpoint(directory);
@@ -1452,14 +1887,30 @@ function loadViewForWrite(directory: string): LoadedView {
 		checkpoint = freshCheckpoint(directory);
 	}
 
+	if (!reboundForeign && checkpoint.migration !== null) {
+		try {
+			reconcileLegacyArchiveStaging(directory, checkpoint.migration);
+		} catch (err) {
+			throw new Error(
+				`PR subscription legacy archive staging could not be reconciled; refusing mutation: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+	}
+
 	const legacy = storePath(directory);
 	let legacyStat: fs.Stats | null = null;
 	try {
-		legacyStat = fs.statSync(legacy);
-	} catch {
-		/* no legacy source */
+		legacyStat = _internals.statSync(legacy);
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+			throw new Error(
+				`PR subscription legacy store could not be inspected; refusing mutation: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
 	}
 	let view: Record<string, PrSubscriptionRecord>;
+
+	if (reboundForeign) legacyStat = null;
 
 	if (legacyStat === null) {
 		view = { ...checkpoint.records };
@@ -1474,37 +1925,72 @@ function loadViewForWrite(directory: string): LoadedView {
 	if (legacyStat.size > PR_SUBSCRIPTION_LIMITS.legacySourceMaxBytes) {
 		// Explicit finite work budget: an over-ceiling legacy source is never
 		// folded and never archived (archiving unabsorbed data would lose it
-		// silently). Refuse, report, and operate from the checkpoint state.
+		// silently). Refuse before a checkpoint can shadow active legacy state.
 		warnLegacyOverLimit(directory, legacyStat.size);
-		return { checkpoint, view: { ...checkpoint.records }, audit, dirty };
+		throw new Error(
+			`PR subscription legacy store exceeds the ${PR_SUBSCRIPTION_LIMITS.legacySourceMaxBytes}-byte migration ceiling; refusing mutation until the file is archived or split`,
+		);
 	}
 
 	const legacySize = legacyStat.size;
 	const legacyMtime = legacyStat.mtimeMs;
 	const migration = checkpoint.migration;
 	if (migration === null || !migration.done) {
-		// Incremental migration with per-chunk progress persists. Size and
-		// mtime are snapshotted before the loop: an external actor replacing
-		// the legacy file MID-loop (bypassing the evidence lock) can produce a
-		// mixed fold for this one op, but the persisted sourceBytes/mtime then
-		// disagree with the new file, so the next op force-re-folds it and
-		// converges (every record stays schema/identity validated).
-		let cursor = migration?.scannedBytes ?? 0;
-		if (cursor > legacySize) cursor = 0; // regressed/recreated file — restart cursor
-		const startedAt = migration?.startedAt ?? Date.now();
-		let corruptTotal = migration?.corruptLines ?? 0;
+		// Incremental migration with per-chunk progress persists.
+		const baselineRecords = migration?.baselineRecords ?? {
+			...checkpoint.records,
+		};
+		const baselineTerminalSummary = migration?.baselineTerminalSummary ?? {
+			...checkpoint.terminalSummary,
+		};
+		const sameGeneration =
+			migration !== null &&
+			legacySize === migration.sourceBytes &&
+			legacyMtime === migration.sourceMtimeMs;
+		let cursor = sameGeneration ? migration.scannedBytes : 0;
+		const startedAt = sameGeneration ? migration.startedAt : Date.now();
+		let corruptTotal = sameGeneration ? migration.corruptLines : 0;
+		let discardingOversizeLine = sameGeneration
+			? migration.discardingOversizeLine
+			: false;
+		if (!sameGeneration && migration !== null) {
+			checkpoint.records = { ...baselineRecords };
+			checkpoint.terminalSummary = { ...baselineTerminalSummary };
+			checkpoint.maintenance.corruptLegacyRecords = Math.max(
+				0,
+				checkpoint.maintenance.corruptLegacyRecords - migration.corruptLines,
+			);
+		}
 		view = { ...checkpoint.records };
 		let capacityRefused = false;
+		let foldedThisOperation = 0;
 		while (true) {
+			const chunkStart = cursor;
+			const remainingOperationBytes = Math.max(
+				1,
+				PR_SUBSCRIPTION_LIMITS.migrationMaxBytesPerOperation -
+					foldedThisOperation,
+			);
 			const fold = foldLegacyRegion(
 				legacy,
 				cursor,
-				PR_SUBSCRIPTION_LIMITS.migrationChunkBytes,
+				Math.min(
+					PR_SUBSCRIPTION_LIMITS.migrationChunkBytes,
+					remainingOperationBytes,
+				),
+				discardingOversizeLine,
 			);
+			if (fold.ioError) {
+				throw new Error(
+					`PR subscription legacy migration read failed: ${fold.ioError}`,
+				);
+			}
 			mergeFoldedRecords(view, fold.folded);
 			checkpoint.maintenance.corruptLegacyRecords += fold.corruptLines;
 			corruptTotal += fold.corruptLines;
+			discardingOversizeLine = fold.discardingOversizeLine;
 			cursor = fold.nextByte;
+			foldedThisOperation += Math.max(0, cursor - chunkStart);
 
 			if (fold.aborted) {
 				// I/O failure mid-scan (EBUSY/EPERM-class — the same hazard
@@ -1519,6 +2005,9 @@ function loadViewForWrite(directory: string): LoadedView {
 					sourceBytes: legacySize,
 					sourceMtimeMs: legacyMtime,
 					corruptLines: corruptTotal,
+					discardingOversizeLine,
+					baselineRecords: { ...baselineRecords },
+					baselineTerminalSummary: { ...baselineTerminalSummary },
 					done: false,
 					archived: false,
 					startedAt,
@@ -1560,6 +2049,9 @@ function loadViewForWrite(directory: string): LoadedView {
 					sourceBytes: legacySize,
 					sourceMtimeMs: legacyMtime,
 					corruptLines: corruptTotal,
+					discardingOversizeLine,
+					baselineRecords: { ...baselineRecords },
+					baselineTerminalSummary: { ...baselineTerminalSummary },
 					done: false,
 					archived: false,
 					startedAt,
@@ -1569,6 +2061,14 @@ function loadViewForWrite(directory: string): LoadedView {
 				writeCheckpointFile(directory, progress);
 				checkpoint.sequence = progress.sequence;
 				dirty = true;
+				if (
+					foldedThisOperation >=
+					PR_SUBSCRIPTION_LIMITS.migrationMaxBytesPerOperation
+				) {
+					throw new Error(
+						`PR subscription legacy migration is in progress (${cursor}/${legacySize} bytes); retry the operation to continue`,
+					);
+				}
 				continue;
 			}
 			checkpoint.migration = {
@@ -1576,6 +2076,13 @@ function loadViewForWrite(directory: string): LoadedView {
 				sourceBytes: legacySize,
 				sourceMtimeMs: legacyMtime,
 				corruptLines: corruptTotal,
+				discardingOversizeLine: false,
+				baselineRecords: {},
+				baselineTerminalSummary: {
+					removed: 0,
+					expired: 0,
+					lastTerminalAt: null,
+				},
 				done: true,
 				archived: false,
 				startedAt,
@@ -1616,7 +2123,7 @@ function loadViewForWrite(directory: string): LoadedView {
 }
 
 // ---------------------------------------------------------------------------
-// Write finalization (order: compaction → archive → audit → checkpoint write)
+// Write finalization (order: compaction → checkpoint → audit → archive)
 // ---------------------------------------------------------------------------
 
 function finalizeWrite(
@@ -1630,29 +2137,48 @@ function finalizeWrite(
 	const compactEvent = compactTerminalRecords(loaded.view, checkpoint);
 	if (compactEvent) events.push(compactEvent);
 
-	if (!loaded.dirty && events.length === 0) return;
+	if (!loaded.dirty && events.length === 0) {
+		const archiveEvent = maybeArchiveLegacy(directory, checkpoint);
+		if (!archiveEvent) return;
+		checkpoint.updatedAt = Date.now();
+		checkpoint.sequence += 1;
+		const auditCompaction = prepareAuditCompaction(
+			directory,
+			checkpoint.maintenance,
+		);
+		_internals.writeCheckpointFile(directory, checkpoint);
+		applyAuditCompaction(directory, auditCompaction);
+		flushAuditEvents(
+			directory,
+			[archiveEvent],
+			checkpoint.sequence,
+			checkpoint.maintenance,
+		);
+		cleanupStaleLegacyArchive(directory);
+		emitHealthTelemetry('archive', checkpoint);
+		return;
+	}
 
 	checkpoint.records = loaded.view;
 	checkpoint.updatedAt = Date.now();
 	checkpoint.rootPath = path.resolve(directory);
 	checkpoint.sequence += 1;
-	// Audit is flushed BEFORE the checkpoint write so compactAuditTail's
-	// dropped-transition counter lands in the same persisted write. If the
-	// checkpoint write then throws (ENOSPC/capacity), the audit tail keeps
-	// lines for an op whose state never landed — acceptable: the tail is
-	// diagnostic-only (no decision logic reads it) and bounded. Durable
-	// state still comes first in the ordering that matters:
-	// writeCheckpointFile enforces checkpoint replay capacity and throws
-	// before the legacy archive rename, so a capacity violation can never
-	// follow an already-archived legacy source (which would strand the only
-	// copy of unabsorbed records).
+	// Durable state FIRST — writeCheckpointFile enforces checkpoint replay
+	// capacity and throws before anything is published, so a capacity
+	// violation can never follow an already-archived legacy source (which
+	// would strand the only copy of unabsorbed records).
+	const auditCompaction = prepareAuditCompaction(
+		directory,
+		checkpoint.maintenance,
+	);
+	_internals.writeCheckpointFile(directory, checkpoint);
+	applyAuditCompaction(directory, auditCompaction);
 	flushAuditEvents(
 		directory,
 		events,
 		checkpoint.sequence,
 		checkpoint.maintenance,
 	);
-	writeCheckpointFile(directory, checkpoint);
 
 	// Safe to archive the stable legacy source now; a crash between the write
 	// and this rename resumes archiving on the next op (or repairs via the
@@ -1664,13 +2190,13 @@ function finalizeWrite(
 		// immediately (a crash between the rename and this second write is
 		// repaired by the absent-file path in loadViewForWrite).
 		checkpoint.sequence += 1;
+		_internals.writeCheckpointFile(directory, checkpoint);
 		flushAuditEvents(
 			directory,
 			[archiveEvent],
 			checkpoint.sequence,
 			checkpoint.maintenance,
 		);
-		writeCheckpointFile(directory, checkpoint);
 	}
 	cleanupStaleLegacyArchive(directory);
 
@@ -1908,6 +2434,7 @@ export async function updateSnapshot(
 				createdAt: match.createdAt,
 				updatedAt: Date.now(),
 			};
+			validateRecord(updated);
 			loaded.view[correlationId] = updated;
 			loaded.dirty = true;
 			// Per-poll snapshot updates are not transitions — no audit line.
@@ -2041,7 +2568,7 @@ export async function getPrSubscriptionHealth(
 					Number.MAX_SAFE_INTEGER,
 				);
 				const view: Record<string, PrSubscriptionRecord> = {};
-				mergeFoldedRecords(view, fold.folded);
+				if (!fold.ioError) mergeFoldedRecords(view, fold.folded);
 				health = healthFromView(view, freshCheckpoint(directory));
 				health.corruptLegacyRecords = fold.corruptLines;
 			} else {
@@ -2058,7 +2585,7 @@ export async function getPrSubscriptionHealth(
 					Number.MAX_SAFE_INTEGER,
 				);
 				const view: Record<string, PrSubscriptionRecord> = {};
-				mergeFoldedRecords(view, fold.folded);
+				if (!fold.ioError) mergeFoldedRecords(view, fold.folded);
 				health = healthFromView(view, freshCheckpoint(directory));
 				health.corruptLegacyRecords = fold.corruptLines;
 			}
@@ -2156,7 +2683,18 @@ function healthFromView(
  * mock.module). Restore in afterEach.
  */
 export const _internals = {
+	afterCheckpointFstat: (_filePath: string): void => {},
+	archiveStatSync: fs.statSync,
+	beforeBootstrapLock: (_directory: string): void => {},
+	beforeArchiveLegacy: (_directory: string): void => {},
+	beforeArchiveRename: (_directory: string): void => {},
 	foldLegacyRegion,
+	legacyCloseSync: fs.closeSync,
+	legacyFstatSync: fs.fstatSync,
 	mergeFoldedRecords,
+	readSync: fs.readSync,
+	renameWithRetry,
 	sameProjectRoot,
+	statSync: fs.statSync,
+	writeCheckpointFile,
 };

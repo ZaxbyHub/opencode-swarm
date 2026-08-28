@@ -120,8 +120,10 @@ describe('pr-subscriptions legacy migration', () => {
 		expect(cp.migration?.done).toBe(true);
 		expect(cp.rootPath).toBe(path.resolve(dir));
 		expect(Object.keys(cp.records)).toHaveLength(1);
-		// The legacy file is untouched by the read.
-		expect(fs.existsSync(legacyPath(dir))).toBe(true);
+		// Bootstrap completes the lifecycle under the same lock so read-only
+		// installs do not retain the source forever.
+		expect(fs.existsSync(legacyPath(dir))).toBe(false);
+		expect(fs.existsSync(archivePath(dir))).toBe(true);
 
 		// Subsequent reads come from the checkpoint with no overlay work.
 		const health = await getPrSubscriptionHealth(dir);
@@ -379,23 +381,26 @@ describe('pr-subscriptions legacy migration', () => {
 		expect(health.legacyOverLimit).toBe(true);
 		expect(health.recoverySource).toBe('legacy-log');
 
-		// Writes proceed from empty checkpoint state; the legacy file is left
-		// untouched (archiving unabsorbed data would lose it silently).
-		const rec = await subscribe(dir, {
-			sessionID: 'sess_new',
-			prNumber: 1,
-			repoFullName: 'o/r',
-			prUrl: 'https://github.com/o/r/pull/1',
-		});
-		expect(rec.status).toBe('active');
+		// Review regression F1: a successful write from an empty view would
+		// publish a checkpoint that shadows every unabsorbed active legacy record.
+		// Fail before publication; the operator-visible health remains the repair path.
+		await expect(
+			subscribe(dir, {
+				sessionID: 'sess_new',
+				prNumber: 1,
+				repoFullName: 'o/r',
+				prUrl: 'https://github.com/o/r/pull/1',
+			}),
+		).rejects.toThrow(/exceeds.*migration ceiling/i);
 		expect(fs.statSync(legacy).size).toBe(sizeBefore);
 		expect(fs.existsSync(archivePath(dir))).toBe(false);
+		expect(fs.existsSync(checkpointPath(dir))).toBe(false);
 
 		const after = await listActive(dir);
-		expect(after).toHaveLength(1);
+		expect(after).toHaveLength(0);
 		const healthAfter = await getPrSubscriptionHealth(dir);
 		expect(healthAfter.legacyOverLimit).toBe(true);
-		expect(healthAfter.recoverySource).toBe('checkpoint');
+		expect(healthAfter.recoverySource).toBe('legacy-log');
 	}, 30_000);
 
 	test('a multi-chunk legacy file migrates completely within the finite fold budget', async () => {
