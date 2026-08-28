@@ -1,6 +1,11 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { SWARM_WORKTREE_DIR_NAME } from '../config/constants';
+import { appendCoreEventSync } from '../events/core-events';
+import {
+	commitGateReleaseBatch,
+	queryLiveMemberships,
+} from '../hooks/knowledge-receipt-ledger';
 import { clearTrajectoryStep } from '../hooks/trajectory-logger';
 import { validateSwarmPath } from '../hooks/utils';
 import { resetPrmSessionState } from '../prm';
@@ -33,10 +38,19 @@ export const _internals: {
 		relEntries: string[],
 	) => ResetBackupResult;
 	recoverStaleCoderSettlements: typeof recoverStaleCoderSettlements;
+	queryLiveMemberships: typeof queryLiveMemberships;
+	commitGateReleaseBatch: typeof commitGateReleaseBatch;
+	releaseKnowledgeGateObligations: (
+		directory: string,
+		sessionID: string,
+	) => Promise<string[]>;
 } = {
 	cleanupOrphanedBranches,
 	backupSwarmStateBeforeReset,
 	recoverStaleCoderSettlements,
+	queryLiveMemberships,
+	commitGateReleaseBatch,
+	releaseKnowledgeGateObligations: releaseKnowledgeGateObligations,
 };
 
 function errorMessage(err: unknown): string {
@@ -45,14 +59,129 @@ function errorMessage(err: unknown): string {
 }
 
 /**
+ * Durably release every pending knowledge-application gate obligation for the
+ * invoking session (issue #2398). Before this existed, `/swarm reset-session`
+ * cleared no knowledge-gate state, so a session whose architect was stuck on
+ * unacknowledged critical directives stayed blocked even after an explicit
+ * operator reset. Only the invoking session's `architect_directive`
+ * memberships without an application marker or an effective gate release are
+ * touched; the knowledge store, its history, and every other session are
+ * preserved. The summary line and the audit event count only durably
+ * committed releases — rejections and failures surface as their own warning
+ * lines so a partial release is never overstated. Returns best-effort result
+ * lines; never throws.
+ */
+async function releaseKnowledgeGateObligations(
+	directory: string,
+	sessionID: string,
+): Promise<string[]> {
+	const results: string[] = [];
+	let live: Awaited<ReturnType<typeof queryLiveMemberships>>;
+	try {
+		live = await _internals.queryLiveMemberships(directory, {
+			session_id: sessionID,
+			include_terminal: true,
+		});
+	} catch (err) {
+		return [
+			`⚠️ Knowledge gate state not cleared: receipt authority unavailable (${errorMessage(err)})`,
+		];
+	}
+	if (!live.ok) {
+		return [
+			`⚠️ Knowledge gate state not cleared: receipt authority unavailable (${live.code})`,
+		];
+	}
+	// Deliberately broader than the gate's own predicate (which releases only
+	// critical memberships in the current phase/task scope): the reset is the
+	// operator's full architect-directive obligation wipe for this session,
+	// so non-critical and out-of-scope pending memberships are released too.
+	const pending = live.memberships.filter(
+		(membership) =>
+			membership.exposure_kind === 'architect_directive' &&
+			!membership.application_marker &&
+			membership.gate_release?.membership_event_id !==
+				membership.membership_event_id,
+	);
+	if (pending.length === 0) {
+		return ['⏭️ No pending knowledge gate obligations for this session'];
+	}
+	const byTrace = new Map<string, typeof pending>();
+	for (const membership of pending) {
+		const group = byTrace.get(membership.trace_id) ?? [];
+		group.push(membership);
+		byTrace.set(membership.trace_id, group);
+	}
+	// Only durably committed releases count toward the summary and the audit
+	// event — idempotent re-releases and rejected items must not inflate the
+	// operator-facing evidence (PR review PRR-002 on #2398).
+	let committedCount = 0;
+	const releasedPairs: string[] = [];
+	for (const [traceId, group] of byTrace) {
+		const committed = await _internals.commitGateReleaseBatch(directory, {
+			trace_id: traceId,
+			session_id: sessionID,
+			items: group.map((membership) => ({
+				entry_id: membership.entry_id,
+				source: 'application_gate_session_reset_release',
+				reason: '/swarm reset-session operator escape (#2398)',
+			})),
+		});
+		if (!committed.ok) {
+			results.push(
+				`⚠️ Failed to release knowledge gate obligations on trace ${sanitizeDiagnosticText(traceId, 64)}: ${committed.code}`,
+			);
+			continue;
+		}
+		committedCount += committed.committed.length;
+		for (const item of committed.committed) {
+			releasedPairs.push(`${traceId}/${item.entry_id}`);
+		}
+		if (committed.rejected.length > 0) {
+			results.push(
+				`⚠️ Partially released trace ${sanitizeDiagnosticText(traceId, 64)}: ${committed.rejected
+					.map((item) => item.reason)
+					.join('; ')}`,
+			);
+		}
+	}
+	if (committedCount === 0) {
+		return results;
+	}
+	if (committedCount < pending.length) {
+		results.push(
+			`⚠️ Released ${committedCount} of ${pending.length} pending knowledge gate obligation(s) — ${pending.length - committedCount} not released; see warnings above`,
+		);
+	} else {
+		results.push(
+			`✅ Released ${committedCount} pending knowledge gate obligation(s) for this session`,
+		);
+	}
+	try {
+		appendCoreEventSync(directory, {
+			timestamp: new Date().toISOString(),
+			event: 'knowledge_application_gate_session_reset_clear',
+			sessionID,
+			released_pairs: releasedPairs,
+		});
+	} catch {
+		/* best-effort audit — the durable ledger release above is the authority */
+	}
+	return results;
+}
+
+/**
  * Handles the /swarm reset-session command.
  * Deletes only the session state file (.swarm/session/state.json)
  * and clears in-memory agent sessions. Preserves plan, evidence,
- * and knowledge for continuity across sessions.
+ * and knowledge for continuity across sessions — but DOES release this
+ * session's pending knowledge-application gate obligations (issue #2398) so
+ * the reset is a real escape from an enforce-mode lockout.
  */
 export async function handleResetSessionCommand(
 	directory: string,
 	_args: string[],
+	sessionID?: string,
 ): Promise<string> {
 	const results: string[] = [];
 
@@ -152,6 +281,31 @@ export async function handleResetSessionCommand(
 	const activeAgentCount = swarmState.activeAgent.size;
 	swarmState.activeAgent.clear();
 	results.push(`✅ Cleared ${activeAgentCount} active-agent mapping(s)`);
+
+	// Issue #2398: reset-session is the operator's documented escape from the
+	// knowledge-application enforcement gate. Durably release THIS session's
+	// pending architect-directive obligations and clear the gate's in-memory
+	// denial/shown state (process-wide, like the clears above). Other
+	// sessions' obligations and the knowledge store itself are preserved.
+	if (sessionID) {
+		try {
+			results.push(
+				...(await _internals.releaseKnowledgeGateObligations(
+					directory,
+					sessionID,
+				)),
+			);
+		} catch (err) {
+			results.push(`⚠️ Knowledge gate state not cleared: ${errorMessage(err)}`);
+		}
+	} else {
+		results.push(
+			'⚠️ Knowledge gate obligations not released: no session context on this invocation',
+		);
+	}
+	swarmState.gateDenialCounts.clear();
+	swarmState.currentCriticalShownIds.clear();
+	results.push('✅ Cleared in-memory knowledge gate denial state');
 
 	// Issue #2268: recover stale coder settlements. reset-session already
 	// clears every session's in-process state process-wide, so it is the

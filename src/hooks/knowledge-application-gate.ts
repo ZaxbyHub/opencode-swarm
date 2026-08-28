@@ -30,6 +30,8 @@
  *   - update_task_status
  *   - phase_complete
  *   - Task (delegations to coder/reviewer/test_engineer/sme/docs/designer)
+ *   - skill_regenerate
+ *   - skill_retire
  *
  * Non-architect agents are never gated.
  */
@@ -69,7 +71,14 @@ import type {
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
 
-/** Tools that require knowledge-directive acknowledgment before execution. */
+/**
+ * Fallback set used only when `config.high_risk_tools` is absent. The parsed
+ * config schema (`KnowledgeApplicationConfigSchema`) defaults
+ * `high_risk_tools` to a 5-tool list (save_plan, update_task_status,
+ * phase_complete, task, Task) that is always populated post-parse, so this
+ * constant is shadowed in practice and `skill_regenerate` / `skill_retire`
+ * are NOT gated unless the operator's config lists them explicitly.
+ */
 export const HIGH_RISK_TOOLS = new Set([
 	'save_plan',
 	'update_task_status',
@@ -277,18 +286,16 @@ export async function knowledgeApplicationGateBefore(
 			);
 		}
 		// Log warning event for missing sessionID (warn mode only)
-		void _internals
-			.writeWarnEvent(directory, {
-				timestamp: new Date().toISOString(),
-				event: 'knowledge_application_gate_warn',
-				tool: toolName,
-				agent: agentRaw,
-				reason: 'missing_sessionID',
-				mode: config.mode,
-			})
-			.catch(() => {
-				/* never block tool path */
-			});
+		void writeWarnEvent(directory, {
+			timestamp: new Date().toISOString(),
+			event: 'knowledge_application_gate_warn',
+			tool: toolName,
+			agent: agentRaw,
+			reason: 'missing_sessionID',
+			mode: config.mode,
+		}).catch(() => {
+			/* never block tool path */
+		});
 		return;
 	}
 
@@ -324,9 +331,29 @@ export async function knowledgeApplicationGateBefore(
 		clearGateDenialCount(sessionID);
 		return;
 	}
+	// An architect-issued application marker acknowledges the knowledge ENTRY,
+	// not just the exact (trace_id, entry_id) pair it names: the injector
+	// re-surfaces acked entries under fresh trace ids on every message-driven
+	// retrieval cache miss (issue #2398), so a marker on any membership of the
+	// entry within the current phase/task scope discharges every other live
+	// trace of that entry. Only architect-authored markers count — the
+	// transform scanner is the sole production writer of the
+	// 'architect_marker' source — so a delegate- or reviewer-sourced marker can
+	// never satisfy this gate, and terminal outcomes from non-marker sources
+	// remain non-discharging by design.
+	const acknowledgedEntryIds = new Set(
+		currentMemberships
+			.filter(
+				(membership) =>
+					membership.application_marker?.source === 'architect_marker',
+			)
+			.map((membership) => membership.entry_id),
+	);
 	let unackedMemberships = criticalMemberships.filter(
 		(membership) =>
-			!membership.application_marker && !hasEffectiveGateRelease(membership),
+			!membership.application_marker &&
+			!hasEffectiveGateRelease(membership) &&
+			!acknowledgedEntryIds.has(membership.entry_id),
 	);
 	if (unackedMemberships.length === 0) {
 		clearGateDenialCount(sessionID);
@@ -334,7 +361,7 @@ export async function knowledgeApplicationGateBefore(
 	}
 
 	// The receipt ledger is the gate authority. Diagnostic logs and the
-	// compatibility dedup cache never widen this pending exact-pair set.
+	// compatibility dedup cache never widen this pending obligation set.
 	if (config.mode === 'enforce' && config.critical_requires_ack) {
 		const maxDenials = config.max_gate_denials ?? DEFAULT_MAX_GATE_DENIALS;
 		const stalenessMs = config.gate_staleness_ms ?? DEFAULT_GATE_STALENESS_MS;
@@ -378,7 +405,12 @@ export async function knowledgeApplicationGateBefore(
 			const staleIds = [
 				...new Set(staleMemberships.map((membership) => membership.entry_id)),
 			];
-			clearGateDenialCount(sessionID);
+			// The denial counter is deliberately NOT cleared here: with the
+			// entry-id directive identity, a staleness release followed by a
+			// fresh re-arm of the same entry must continue the same budget
+			// (issue #2398). A genuine directive-set change still resets the
+			// count through incrementGateDenialCount's key-mismatch path on
+			// the next denial.
 			// Awaited (not fire-and-forget): the bypass state above is already
 			// committed, so the audit write is the only remaining evidence of
 			// this security-relevant auto-clear. Awaiting it before returning
@@ -413,18 +445,17 @@ export async function knowledgeApplicationGateBefore(
 
 		// Escape hatch 2: denial count — if this session has been denied more
 		// than the configured max, auto-clear and allow the action. The
-		// counter is keyed to the current directive-id-set identity, so a
-		// session whose critical directives were swapped out from under it
-		// (an ordinary phase/task-transition occurrence via
-		// setCriticalShownIds) starts a fresh count instead of inheriting a
-		// stale one accrued against an unrelated, earlier directive.
-		const unackedPairs = unackedMemberships.map(
-			(membership) => `${membership.trace_id}/${membership.entry_id}`,
-		);
+		// counter is keyed to the current critical-directive ENTRY-id set, so
+		// re-injecting the same directive under a fresh trace (an ordinary
+		// occurrence — the injector's retrieval cache key includes the latest
+		// user message, issue #2398) does not reset the count, while swapping
+		// to a genuinely different directive set (an ordinary phase/task
+		// transition) starts a fresh count instead of inheriting a stale one
+		// accrued against an unrelated, earlier directive.
 		const unacked = [
 			...new Set(unackedMemberships.map((membership) => membership.entry_id)),
 		];
-		const directiveKey = buildGateDenialDirectiveKey(unackedPairs);
+		const directiveKey = buildGateDenialDirectiveKey(unacked);
 		const denials = incrementGateDenialCount(sessionID, directiveKey);
 		if (denials > maxDenials) {
 			for (const [traceId, memberships] of groupMembershipsByTrace(

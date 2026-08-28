@@ -200,6 +200,7 @@ describe('knowledge outcome/source semantic matrix (#2032)', () => {
 				'phase_override',
 				'application_gate_staleness_release',
 				'application_gate_denial_limit_release',
+				'application_gate_session_reset_release',
 				'manual',
 				'migration',
 				'unknown',

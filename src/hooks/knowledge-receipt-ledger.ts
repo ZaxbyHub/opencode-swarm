@@ -71,6 +71,7 @@ export type ReceiptSourceCode =
 	| 'phase_override'
 	| 'application_gate_staleness_release'
 	| 'application_gate_denial_limit_release'
+	| 'application_gate_session_reset_release'
 	| 'manual'
 	| 'migration'
 	| 'unknown';
@@ -85,6 +86,7 @@ export const CANONICAL_RECEIPT_SOURCES: ReadonlySet<string> = new Set([
 	'phase_override',
 	'application_gate_staleness_release',
 	'application_gate_denial_limit_release',
+	'application_gate_session_reset_release',
 	'manual',
 	'migration',
 	'unknown',

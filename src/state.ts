@@ -3941,10 +3941,12 @@ export function clearCriticalShownIds(sessionID: string): boolean {
 }
 
 /** Build the directive-identity fingerprint used to key the gate denial
- *  counter — a sorted, joined snapshot of a critical-directive-id set. Two
- *  calls with the same id set (regardless of order) produce the same key,
- *  so re-injecting the identical directive on a later turn does not reset
- *  the counter, but swapping to a genuinely different directive set does. */
+ *  counter — a sorted, joined snapshot of a critical-directive ENTRY-id set.
+ *  Two calls with the same entry-id set (regardless of order, and regardless
+ *  of which trace ids re-displayed those entries — issue #2398) produce the
+ *  same key, so re-injecting the same directive on a later turn does not
+ *  reset the counter, but swapping to a genuinely different directive set
+ *  does. */
 export function buildGateDenialDirectiveKey(ids: string[]): string {
 	return [...ids].sort().join(',');
 }

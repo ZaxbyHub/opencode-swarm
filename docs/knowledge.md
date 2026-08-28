@@ -604,17 +604,22 @@ critical directive was shown but received no terminal acknowledgment
 two escape hatches so the gate cannot deadlock a session forever:
 
 - **`max_gate_denials`** (default `5`) — after this many consecutive denials
-  against the same unacknowledged critical-directive set, the gate
+  against the same unacknowledged critical-directive set (keyed by the
+  stable entry-id set, so re-injecting the same directive under a fresh
+  trace does not reset the count — #2398), the gate
   records a nonterminal gate release for the pending directives and lets the
   action through without claiming they were applied.
 - **`gate_staleness_ms`** (default `600000`, 10 minutes) — a critical
   directive shown longer ago than this receives the same nonterminal release,
-  regardless of denial count.
+  regardless of denial count. A release does not reset the denial budget: a
+  fresh re-display of the same entry continues the accumulated count (#2398).
 
 Both auto-clears write an audit event to `.swarm/events.jsonl`
 (`knowledge_application_gate_denial_limit_clear` or
 `knowledge_application_gate_staleness_clear`) before the action proceeds — the
-bypass is never silent. These are safety nets against a broken acknowledgment
+bypass is never silent (the `/swarm reset-session` escape writes
+`knowledge_application_gate_session_reset_clear` the same way). These are
+safety nets against a broken acknowledgment
 pipeline (e.g. an ack marker that failed to parse), not a routine escape path:
 enforcement still applies for the first `max_gate_denials` attempts or the
 full `gate_staleness_ms` window. A release is not a terminal outcome, does not
