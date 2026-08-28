@@ -1,5 +1,15 @@
 # Changelog
 
+## [7.153.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.153.0...v7.153.1) (2026-08-28)
+
+
+### Bug Fixes
+
+* **ci:** correct frozen-clock option and teach the trajectory-store ratchet to commit-pr ([403bf4f](https://github.com/ZaxbyHub/opencode-swarm/commit/403bf4feac5972bcd8720ea609b92632c2eab1b2))
+* **prm:** bound session trajectories and reads (issue [#2041](https://github.com/ZaxbyHub/opencode-swarm/issues/2041)) ([eace081](https://github.com/ZaxbyHub/opencode-swarm/commit/eace081f2f7999686039a32ad624a6b0dcc67c87))
+* **prm:** review hardening for bounded trajectories (PR [#2395](https://github.com/ZaxbyHub/opencode-swarm/issues/2395) feedback) ([ed84d72](https://github.com/ZaxbyHub/opencode-swarm/commit/ed84d72c40d828f0bda3ebceee503d651d050fae))
+* **worktree:** [Guardrail remediation 10/12] Make worktree provisioning and merge-back recoverable ([102d4cb](https://github.com/ZaxbyHub/opencode-swarm/commit/102d4cb1dc5321a94331a29ab489d60be7fac2a8))
+
 ## [7.153.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.152.1...v7.153.0) (2026-08-28)
 
 
