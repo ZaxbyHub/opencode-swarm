@@ -26,6 +26,7 @@ import {
 } from '../state.js';
 import { pushAdvisory } from '../utils/advisory-queue';
 import * as logger from '../utils/logger.js';
+import { transferCoderSettlementToBackground } from '../workflow/coder-settlement.js';
 import {
 	GIT_OBJECT_ID_PATTERN,
 	type MergeOperationProvenance,
@@ -222,12 +223,24 @@ export function createBackgroundCompletionObserver(opts: {
 			}
 
 			if (terminal.status !== 'completed') {
-				if (isDuplicate) {
-					// Duplicate error/cancelled event: scope was already preserved
-					// on first processing; just return without re-discarding.
+				if (isDuplicate && record.normalizedAgent !== 'coder') {
+					// Non-coder failure cleanup has no durable sub-transition to resume.
 					return;
 				}
 				if (record.normalizedAgent === 'coder') {
+					const legacyTransfer = await transferLegacyCoderSettlement(
+						directory,
+						record,
+					);
+					if (!legacyTransfer.ok) {
+						await publishAdvisory(
+							directory,
+							record,
+							terminal.eventId,
+							legacyTransfer.outcome,
+						);
+						return;
+					}
 					if (record.planTaskId) {
 						const expectedGeneration =
 							record.taskChangeContext?.workflowGeneration;
@@ -317,6 +330,19 @@ export function createBackgroundCompletionObserver(opts: {
 						record,
 						terminal.eventId,
 						settled.outcome,
+					);
+					return;
+				}
+				const legacyTransfer = await transferLegacyCoderSettlement(
+					directory,
+					record,
+				);
+				if (!legacyTransfer.ok) {
+					await publishAdvisory(
+						directory,
+						record,
+						terminal.eventId,
+						legacyTransfer.outcome,
 					);
 					return;
 				}
@@ -507,6 +533,32 @@ export function createBackgroundCompletionObserver(opts: {
 				prepared.eventIds,
 			),
 	};
+}
+
+async function transferLegacyCoderSettlement(
+	directory: string,
+	record: BackgroundDelegationRecord,
+): Promise<{ ok: true; outcome: string } | { ok: false; outcome: string }> {
+	if (!record.planTaskId) {
+		return { ok: true, outcome: 'no task-scoped legacy settlement' };
+	}
+	try {
+		const outcome = await transferCoderSettlementToBackground({
+			directory,
+			taskId: record.planTaskId,
+			transitionId: `coder:${record.callID}`,
+		});
+		return { ok: true, outcome };
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		logger.warn(
+			`[background] legacy coder settlement transfer failed for ${record.planTaskId}: ${detail}`,
+		);
+		return {
+			ok: false,
+			outcome: `legacy coder settlement transfer failed: ${detail}`,
+		};
+	}
 }
 
 async function releaseCoderReservation(
