@@ -209,6 +209,9 @@ jobs:
       - name: Shell-audit store usage ratchet (issue #2040)
         if: needs.detect-release.outputs.is-release != 'true'
         run: bun run check:shell-audit
+      - name: Trajectory store usage ratchet (issue #2041)
+        if: needs.detect-release.outputs.is-release != 'true'
+        run: bun run check:trajectory-store
       - name: Cross-contamination check (mock.module / vi.mock leaks)
         if: needs.detect-release.outputs.is-release != 'true'
         shell: bash

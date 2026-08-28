@@ -113,7 +113,7 @@ describe('PRM real trajectory pipeline', () => {
 			await prmHook.toolAfter({ sessionID: sessionId });
 		}
 
-		expect(getInMemoryTrajectory(sessionId)).toHaveLength(2);
+		expect(getInMemoryTrajectory(sessionId, tempDir)).toHaveLength(2);
 		expect(await readTrajectory(sessionId, tempDir)).toHaveLength(2);
 		expect(session.pendingAdvisoryMessages).toHaveLength(1);
 		expect(session.replayArtifactPath).toContain(
@@ -128,7 +128,7 @@ describe('PRM real trajectory pipeline', () => {
 		session.prmTrajectoryStep = 0;
 		clearTrajectoryCache(sessionId);
 		await prmHook.toolAfter({ sessionID: sessionId });
-		expect(getInMemoryTrajectory(sessionId)).toHaveLength(2);
+		expect(getInMemoryTrajectory(sessionId, tempDir)).toHaveLength(2);
 		// Issue #2134: this call re-derives the SAME repetition_loop episode
 		// (stepRange [1,2]) that already struck two calls ago — only
 		// `prmTrajectoryStep` was reset above to force a cache-miss disk re-read
@@ -166,10 +166,10 @@ describe('PRM real trajectory pipeline', () => {
 				metadata: { success: true },
 			},
 		);
-		expect(getInMemoryTrajectory(sessionId)).toHaveLength(1);
+		expect(getInMemoryTrajectory(sessionId, tempDir)).toHaveLength(1);
 
 		resetSwarmState();
-		expect(getInMemoryTrajectory(sessionId)).toEqual([]);
+		expect(getInMemoryTrajectory(sessionId, tempDir)).toEqual([]);
 
 		seedSession(sessionId);
 		recordToolCallStart(sessionId, 'call-after-reset', Date.now() - 10);
@@ -188,6 +188,10 @@ describe('PRM real trajectory pipeline', () => {
 		);
 
 		const entries = await readTrajectory(sessionId, tempDir);
-		expect(entries.map((entry) => entry.step)).toEqual([1, 1]);
+		// Issue #2041 (maintainer review #2395 / PRR-013): resetSwarmState
+		// bumps the step-counter generation, which invalidates the logger's
+		// restart-seed gate — the post-reset mint re-seeds from the persisted
+		// high-water mark instead of duplicating step 1.
+		expect(entries.map((entry) => entry.step)).toEqual([1, 2]);
 	});
 });

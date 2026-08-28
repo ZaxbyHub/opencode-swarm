@@ -133,8 +133,44 @@ export async function startReplayRecording(
 }
 
 /**
- * Appends a ReplayEntry to the replay artifact file.
- * Non-blocking: errors are caught and logged, never thrown.
+ * Hard budgets for replay artifacts (issue #2041 Required 1 — the PRM budget
+ * set covers replays as well as trajectories). Replays are write-only
+ * best-effort diagnostics: at the cap, further entries for that artifact are
+ * skipped with a one-time warning rather than rotated (rotation would create
+ * unbounded sibling files, which is exactly what this cap exists to prevent).
+ * The 7-day age sweep + per-directory count cap in trajectory-store's
+ * `cleanupOldTrajectoryFiles` bound the directory as a whole.
+ */
+export const REPLAY_LIMITS = {
+	/** Per-artifact byte ceiling. */
+	maxBytes: 1024 * 1024,
+	/** Stat cadence per artifact (bytes are tracked in memory between stats). */
+	checkIntervalEntries: 16,
+	/** Bound on tracked artifacts (Invariant 8). */
+	maxTrackedArtifacts: 256,
+} as const;
+
+/**
+ * Byte estimate per artifact path, maintained in memory and reconciled with a
+ * real `stat` every `checkIntervalEntries` appends (and on first append after
+ * a restart, where the estimate is unknown).
+ */
+const replayByteEstimates = new Map<string, number>();
+const replayEntriesSinceStat = new Map<string, number>();
+const replayCapWarned = new Map<string, true>();
+
+function boundReplayMap(map: Map<string, unknown>, key: string): void {
+	if (map.has(key)) return;
+	while (map.size >= REPLAY_LIMITS.maxTrackedArtifacts) {
+		const oldest = map.keys().next().value;
+		if (oldest === undefined) break;
+		map.delete(oldest);
+	}
+}
+
+/**
+ * Appends a ReplayEntry to the replay artifact file, enforcing the per-artifact
+ * byte cap. Non-blocking: errors are caught and logged, never thrown.
  *
  * @param artifactPath - Path to the replay artifact file
  * @param sessionID - Session identifier
@@ -154,6 +190,44 @@ export async function recordReplayEntry(
 			return;
 		}
 
+		// Byte-cap enforcement (issue #2041). The estimate starts unknown
+		// (restart) and is reconciled with the real size on the stat cadence;
+		// between stats the estimate only grows, so the cap errs toward
+		// catching oversize slightly late, never toward dropping early.
+		const sinceStat = (replayEntriesSinceStat.get(artifactPath) ?? 0) + 1;
+		if (
+			!replayByteEstimates.has(artifactPath) ||
+			sinceStat >= REPLAY_LIMITS.checkIntervalEntries
+		) {
+			// ENOENT is expected before the first append (startReplayRecording
+			// only prepares the path); treat it as an empty artifact.
+			let sizeBytes = 0;
+			try {
+				sizeBytes = (await fs.stat(artifactPath)).size;
+			} catch (err) {
+				if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+			}
+			boundReplayMap(replayByteEstimates, artifactPath);
+			boundReplayMap(replayEntriesSinceStat, artifactPath);
+			replayByteEstimates.set(artifactPath, sizeBytes);
+			replayEntriesSinceStat.set(artifactPath, 0);
+		} else {
+			boundReplayMap(replayEntriesSinceStat, artifactPath);
+			replayEntriesSinceStat.set(artifactPath, sinceStat);
+		}
+		const estimatedBytes = replayByteEstimates.get(artifactPath) ?? 0;
+		if (estimatedBytes >= REPLAY_LIMITS.maxBytes) {
+			if (!replayCapWarned.has(artifactPath)) {
+				boundReplayMap(replayCapWarned, artifactPath);
+				replayCapWarned.set(artifactPath, true);
+				logger.warn(
+					`[replay] Artifact reached the ${REPLAY_LIMITS.maxBytes} B cap; ` +
+						`further entries for this artifact are skipped (best-effort diagnostics, issue #2041)`,
+				);
+			}
+			return;
+		}
+
 		const fullEntry: ReplayEntry = {
 			timestamp: new Date().toISOString(),
 			sessionID,
@@ -161,8 +235,13 @@ export async function recordReplayEntry(
 		};
 		const line = `${JSON.stringify(fullEntry)}\n`;
 		await fs.appendFile(artifactPath, line, 'utf-8');
+		boundReplayMap(replayByteEstimates, artifactPath);
+		replayByteEstimates.set(
+			artifactPath,
+			estimatedBytes + Buffer.byteLength(line, 'utf-8'),
+		);
 	} catch (err) {
-		// Non-blocking: log error and continue
+		// Non-blocking: log and continue
 		logger.log(`[replay] Failed to record entry: ${err}`);
 	}
 }
@@ -171,4 +250,11 @@ export const _test_exports = {
 	isPathSafe,
 	isWithinReplaysDir,
 	sanitizeFilename,
+	REPLAY_LIMITS,
+	/** Test isolation: drop per-artifact byte-cap bookkeeping. */
+	resetReplayByteTracking: (): void => {
+		replayByteEstimates.clear();
+		replayEntriesSinceStat.clear();
+		replayCapWarned.clear();
+	},
 } as const;

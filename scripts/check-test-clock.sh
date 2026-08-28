@@ -137,7 +137,10 @@ while IFS= read -r file; do
     else
         pre_existing_violations=$((pre_existing_violations + 1))
     fi
-done < <(grep -rlE "Date\.now\(\)|new Date[[:space:]]*\([[:space:]]*\)|spyOn\(Date" tests/ --include="*.test.ts" \
+# Scan BOTH tests/ and src/ (maintainer review #2395: the issue-#2041 PR
+# added seven src/prm/__tests__/*.test.ts files that the tests/-only scan
+# never saw — in-tree src tests are the same flake surface).
+done < <(grep -rlE "Date\.now\(\)|new Date[[:space:]]*\([[:space:]]*\)|spyOn\(Date" tests/ src/ --include="*.test.ts" \
     --exclude-dir=node_modules --exclude-dir=dist 2>/dev/null || true)
 
 echo ""

@@ -376,6 +376,10 @@ export const WRITER_CLASSIFICATION: Readonly<
 	'src/services/skill-generator.ts': 'migrated',
 	'src/services/skill-improver.ts': 'migrated',
 	'src/summaries/store.ts': 'migrated',
+	// delegates every atomic rewrite to the canonical helper (trajectory data
+	// file + checkpoint, issue #2041); its `.tmp` mention is the cleanup
+	// READER reaping stale atomic-write leftovers, not a constructor
+	'src/prm/trajectory-store.ts': 'migrated',
 	// registered-bespoke: grammar registered, writer kept (see grammar notes)
 	'src/background/delegation-health.ts': 'registered-bespoke',
 	'src/background/lane-output-store.ts': 'registered-bespoke',
