@@ -186,9 +186,8 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/tools/spec-write.ts:98',
 			'src/sdd/effective-spec.ts:1149',
 			'src/background/lane-output-store.ts:353',
-			'src/background/pending-delegations.ts:995',
+			'src/background/pending-delegations.ts:1012',
 			'src/background/delegation-health.ts:390',
-			'src/hooks/delegation-gate/worktree-provisioning-owner.ts:100',
 			'src/tools/submit-phase-council-verdicts.ts:458',
 			'src/summaries/store.ts:46 (pre-#2035)',
 		],
@@ -402,8 +401,7 @@ export const WRITER_CLASSIFICATION: Readonly<
 	'src/evidence/manager.ts': 'registered-bespoke',
 	'src/full-auto/state.ts': 'registered-bespoke',
 	'src/hooks/delegation-gate/worktree-merge-status.ts': 'registered-bespoke',
-	'src/hooks/delegation-gate/worktree-provisioning-owner.ts':
-		'registered-bespoke',
+	'src/hooks/delegation-gate/worktree-provisioning-owner.ts': 'migrated',
 	'src/hooks/issue-trace-state.ts': 'registered-bespoke',
 	'src/hooks/knowledge-receipt-ledger-storage.ts': 'registered-bespoke',
 	'src/hooks/pr-workflow-gate.ts': 'registered-bespoke',
@@ -617,6 +615,8 @@ const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES', 'EEXIST']);
 export interface AtomicWriteOptions {
 	/** Skip the pre-rename fsync (tests / truly ephemeral data). */
 	readonly skipFsync?: boolean;
+	/** File mode for the per-write temporary file before rename. */
+	readonly mode?: number;
 	/**
 	 * Override the bounded-write cap (default MAX_ATOMIC_WRITE_BYTES). Exposed
 	 * so the bound itself is testable without allocating 256 MiB.
@@ -721,7 +721,7 @@ function writeAtomicSync(
 	// acceptance: "failed writes clean only their own temp and preserve the
 	// previous target").
 	try {
-		const fd = fs.openSync(tempPath, 'wx');
+		const fd = fs.openSync(tempPath, 'wx', options?.mode);
 		try {
 			let written = 0;
 			while (written < buffer.byteLength) {

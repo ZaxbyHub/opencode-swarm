@@ -105,14 +105,24 @@ const DECLARED_SITES: DeclaredSite[] = [
 	},
 	{
 		file: 'src/hooks/delegation-gate/worktree-isolation.ts',
-		directoryExpr: 'provisionResult.worktreePath',
+		directoryExpr: 'collision.worktreePath',
 		classification: 'foreign',
 		disposition: 'lane-permission-handled',
 		note:
-			'PRIMARY FIX SITE. Creates the worktree-lane session that started this defect. ' +
-			'provisionWorktree builds the path under resolveWorktreeBaseDir (.swarm-worktrees), ' +
-			'so the lane instance is recognised by src/config/lane-context.ts and its ' +
-			'permissions are pre-resolved by the plugin config hook.',
+			'PRIMARY FIX SITE. Recovery creates a child session against the preserved ' +
+			'worktree path reported by the collision scan. The lane instance is recognised ' +
+			'by src/config/lane-context.ts and its permissions are pre-resolved by the ' +
+			'plugin config hook.',
+	},
+	{
+		file: 'src/hooks/delegation-gate/worktree-isolation.ts',
+		directoryExpr: 'handle.worktreePath',
+		classification: 'foreign',
+		disposition: 'lane-permission-handled',
+		note:
+			'PRIMARY FIX SITE. Creates the normal provisioned worktree-lane session. ' +
+			'handle.worktreePath is the verified lane root returned by provisionWorktree, ' +
+			'and src/config/lane-context.ts pre-resolves permissions for that lane instance.',
 	},
 	{
 		file: 'src/hooks/full-auto-intercept.ts',
