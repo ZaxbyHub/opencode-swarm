@@ -542,23 +542,38 @@ async function transferLegacyCoderSettlement(
 	if (!record.planTaskId) {
 		return { ok: true, outcome: 'no task-scoped legacy settlement' };
 	}
-	try {
-		const outcome = await transferCoderSettlementToBackground({
-			directory,
-			taskId: record.planTaskId,
-			transitionId: `coder:${record.callID}`,
-		});
-		return { ok: true, outcome };
-	} catch (error) {
-		const detail = error instanceof Error ? error.message : String(error);
-		logger.warn(
-			`[background] legacy coder settlement transfer failed for ${record.planTaskId}: ${detail}`,
-		);
-		return {
-			ok: false,
-			outcome: `legacy coder settlement transfer failed: ${detail}`,
-		};
+	let detail = 'unknown transfer failure';
+	for (let attempt = 0; attempt < 3; attempt += 1) {
+		try {
+			const outcome = await transferCoderSettlementToBackground({
+				directory,
+				taskId: record.planTaskId,
+				transitionId: `coder:${record.callID}`,
+			});
+			return { ok: true, outcome };
+		} catch (error) {
+			detail = error instanceof Error ? error.message : String(error);
+			if (
+				attempt === 2 ||
+				(!detail.includes('CODER_SETTLEMENT_LOCKED') &&
+					!detail.includes('EACCES') &&
+					!detail.includes('EBUSY') &&
+					!detail.includes('EIO') &&
+					!detail.includes('ETIMEDOUT'))
+			) {
+				break;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+		}
 	}
+	logger.warn(
+		`[background] legacy coder settlement transfer failed for ${record.planTaskId}: ${detail}`,
+	);
+	return {
+		ok: false,
+		outcome:
+			'legacy coder settlement transfer is pending; retrying durable reconciliation',
+	};
 }
 
 async function releaseCoderReservation(

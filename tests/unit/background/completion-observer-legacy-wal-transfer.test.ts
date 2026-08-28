@@ -291,6 +291,28 @@ describe('issue #2402 legacy coder WAL ownership transfer', () => {
 		});
 	});
 
+	test('transfer failure keeps WAL diagnostics out of the parent advisory', async () => {
+		await launchMixedBackground(directory);
+		const walPath = path.join(
+			directory,
+			'.swarm',
+			'coder-settlements',
+			'1.1.json',
+		);
+		fs.writeFileSync(walPath, '{ malformed legacy WAL');
+
+		await deliverTerminal(directory, 'completed');
+
+		const session = ensureAgentSession('parent', 'architect', directory);
+		expect(session.pendingAdvisoryMessages.at(-1)).toContain(
+			'legacy coder settlement transfer is pending',
+		);
+		expect(session.pendingAdvisoryMessages.at(-1)).not.toContain(walPath);
+		expect(session.pendingAdvisoryMessages.at(-1)).not.toContain(
+			'CODER_SETTLEMENT_WAL',
+		);
+	});
+
 	test('durable terminal replay transfers without call-scoped in-memory state', async () => {
 		await launchMixedBackground(directory);
 		resetStandardWorktreeIsolationState();
