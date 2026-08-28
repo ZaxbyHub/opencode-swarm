@@ -22,6 +22,7 @@ import { validateSwarmPath } from '../hooks/utils.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { isPathWithinDeclaredScope } from '../scope/path-identity.js';
 import { advisoryWarn } from '../services/warning-buffer.js';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import { resolveGitExecutable } from '../utils/git-executable.js';
 import * as logger from '../utils/logger.js';
 import type { MergeOperationProvenance } from '../worktree/merge.js';
@@ -59,7 +60,7 @@ function dispatchKey(
 	taskId: string,
 	transitionId: string,
 ): string {
-	return `${directory}\u0000${taskId}\u0000${transitionId}`;
+	return `${canonicalRootKeyFresh(directory)}\u0000${taskId}\u0000${transitionId}`;
 }
 
 function walPath(directory: string, taskId: string): string {

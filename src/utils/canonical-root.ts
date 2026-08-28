@@ -30,10 +30,7 @@ const canonicalRootMemo = new Map<string, string>();
 /** Bound on the memoized canonical-root map (Invariant 8). */
 const MAX_CANONICAL_ROOT_CACHE = 128;
 
-export function canonicalRootKey(directory: string): string {
-	const memoized = canonicalRootMemo.get(directory);
-	if (memoized !== undefined) return memoized;
-
+function resolveCanonicalRootKey(directory: string): string {
 	let resolved = path.resolve(directory);
 	try {
 		resolved = fsSync.realpathSync(resolved);
@@ -41,6 +38,14 @@ export function canonicalRootKey(directory: string): string {
 		/* root missing / inaccessible — resolve() is the best identity we have */
 	}
 	const key = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+	return key;
+}
+
+export function canonicalRootKey(directory: string): string {
+	const memoized = canonicalRootMemo.get(directory);
+	if (memoized !== undefined) return memoized;
+
+	const key = resolveCanonicalRootKey(directory);
 
 	if (!canonicalRootMemo.has(directory)) {
 		while (canonicalRootMemo.size >= MAX_CANONICAL_ROOT_CACHE) {
@@ -51,6 +56,11 @@ export function canonicalRootKey(directory: string): string {
 	}
 	canonicalRootMemo.set(directory, key);
 	return key;
+}
+
+/** Resolve a root without consulting the bounded memoized cache. */
+export function canonicalRootKeyFresh(directory: string): string {
+	return resolveCanonicalRootKey(directory);
 }
 
 /** Composite map key: canonical root + NUL + session id. */

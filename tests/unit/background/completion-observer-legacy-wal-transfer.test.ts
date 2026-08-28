@@ -147,6 +147,8 @@ describe('issue #2402 legacy coder WAL ownership transfer', () => {
 	let directory = '';
 	let cleanup = (): void => {};
 	const realTransfer = observerInternals.transferCoderSettlementToBackground;
+	const realMarkPending =
+		observerInternals.markLegacyCoderSettlementTransferPending;
 	const realSleep = observerInternals.sleep;
 
 	beforeEach(() => {
@@ -169,6 +171,8 @@ describe('issue #2402 legacy coder WAL ownership transfer', () => {
 
 	afterEach(() => {
 		observerInternals.transferCoderSettlementToBackground = realTransfer;
+		observerInternals.markLegacyCoderSettlementTransferPending =
+			realMarkPending;
 		observerInternals.sleep = realSleep;
 		releaseCoderDispatchOwnership(directory, '1.1', 'coder:coder-call');
 		resetStandardWorktreeIsolationState();
@@ -315,16 +319,13 @@ describe('issue #2402 legacy coder WAL ownership transfer', () => {
 
 		const session = ensureAgentSession('parent', 'architect', directory);
 		expect(session.pendingAdvisoryMessages.at(-1)).toContain(
-			'legacy coder settlement transfer is pending',
+			'legacy coder settlement requires manual recovery',
 		);
 		const pending = await findDelegationForCompletion(
 			directory,
 			'coder-session',
 		);
-		expect(pending?.record.legacyCoderSettlementTransfer).toMatchObject({
-			taskId: '1.1',
-			transitionId: 'coder:coder-call',
-		});
+		expect(pending?.record.legacyCoderSettlementTransfer).toBeUndefined();
 		expect(session.pendingAdvisoryMessages.at(-1)).not.toContain(walPath);
 		expect(session.pendingAdvisoryMessages.at(-1)).not.toContain(
 			'CODER_SETTLEMENT_WAL',
@@ -333,40 +334,120 @@ describe('issue #2402 legacy coder WAL ownership transfer', () => {
 
 	test('retries a transient Windows EPERM transfer failure before succeeding', async () => {
 		await launchMixedBackground(directory);
+		const sleeps: number[] = [];
 		let attempts = 0;
 		observerInternals.transferCoderSettlementToBackground = async (options) => {
 			attempts += 1;
 			if (attempts === 1) throw new Error('EPERM');
 			return realTransfer(options);
 		};
-		observerInternals.sleep = async () => {};
+		observerInternals.sleep = async (milliseconds) => {
+			sleeps.push(milliseconds);
+		};
 
 		await deliverTerminal(directory, 'completed');
 
 		expect(attempts).toBe(2);
+		expect(sleeps).toEqual([50]);
 		expect(readLegacyWal(directory)).toMatchObject({
 			state: 'ABORTED',
 			cleanupComplete: true,
 		});
 	});
 
-	test('maintenance retries a failed transfer and replays the terminal ingestion', async () => {
+	test('does not claim durable retry when the marker cannot be persisted', async () => {
 		await launchMixedBackground(directory);
 		fs.mkdirSync(path.join(directory, 'src'), { recursive: true });
 		fs.writeFileSync(path.join(directory, 'src', 'feature.ts'), 'feature\n');
-		const walPath = path.join(
-			directory,
-			'.swarm',
-			'coder-settlements',
-			'1.1.json',
-		);
-		const originalWal = fs.readFileSync(walPath, 'utf8');
-		fs.writeFileSync(walPath, '{ malformed legacy WAL');
+		observerInternals.transferCoderSettlementToBackground = async () => {
+			throw new Error('EPERM');
+		};
+		observerInternals.sleep = async () => {};
+		observerInternals.markLegacyCoderSettlementTransferPending = async () =>
+			null;
 
 		await deliverTerminal(directory, 'completed');
-		expect(fs.readFileSync(walPath, 'utf8')).toContain('malformed');
 
-		fs.writeFileSync(walPath, originalWal);
+		const session = ensureAgentSession('parent', 'architect', directory);
+		const pending = await findDelegationForCompletion(
+			directory,
+			'coder-session',
+		);
+		expect(pending?.record.legacyCoderSettlementTransfer).toBeUndefined();
+		expect(session.pendingAdvisoryMessages.at(-1)).toContain(
+			'legacy coder settlement requires manual recovery',
+		);
+	});
+
+	test('retry exhaustion keeps a durable retry marker after bounded transient sleeps', async () => {
+		await launchMixedBackground(directory);
+		const sleeps: number[] = [];
+		let attempts = 0;
+		observerInternals.transferCoderSettlementToBackground = async () => {
+			attempts += 1;
+			throw new Error('CODER_SETTLEMENT_LOCKED: task 1.1');
+		};
+		observerInternals.sleep = async (milliseconds) => {
+			sleeps.push(milliseconds);
+		};
+
+		await deliverTerminal(directory, 'error');
+
+		const session = ensureAgentSession('parent', 'architect', directory);
+		const pending = await findDelegationForCompletion(
+			directory,
+			'coder-session',
+		);
+		expect(attempts).toBe(3);
+		expect(sleeps).toEqual([50, 100]);
+		expect(pending?.record.legacyCoderSettlementTransfer).toMatchObject({
+			taskId: '1.1',
+			transitionId: 'coder:coder-call',
+		});
+		expect(session.pendingAdvisoryMessages.at(-1)).toContain(
+			'legacy coder settlement transfer is pending',
+		);
+	});
+
+	test.each([
+		'CODER_SETTLEMENT_WAL_REPLACED',
+		'CODER_SETTLEMENT_IN_PROGRESS',
+	] as const)('permanent transfer code %s skips automatic retry and points to manual recovery', async (code) => {
+		await launchMixedBackground(directory);
+		let sleeps = 0;
+		observerInternals.transferCoderSettlementToBackground = async () => {
+			throw new Error(code);
+		};
+		observerInternals.sleep = async () => {
+			sleeps += 1;
+		};
+
+		await deliverTerminal(directory, 'completed');
+
+		const session = ensureAgentSession('parent', 'architect', directory);
+		const pending = await findDelegationForCompletion(
+			directory,
+			'coder-session',
+		);
+		expect(sleeps).toBe(0);
+		expect(pending?.record.legacyCoderSettlementTransfer).toBeUndefined();
+		expect(session.pendingAdvisoryMessages.at(-1)).toContain(
+			'legacy coder settlement requires manual recovery',
+		);
+	});
+
+	test('maintenance retries a transient transfer and replaces the stale queued advisory', async () => {
+		await launchMixedBackground(directory);
+		observerInternals.transferCoderSettlementToBackground = async () => {
+			throw new Error('CODER_SETTLEMENT_LOCKED: task 1.1');
+		};
+		observerInternals.sleep = async () => {};
+
+		await deliverTerminal(directory, 'cancelled');
+		const session = ensureAgentSession('parent', 'architect', directory);
+		session.pendingAdvisoryMessages.unshift('[OTHER] keep me');
+		observerInternals.transferCoderSettlementToBackground = realTransfer;
+		observerInternals.sleep = realSleep;
 		await maintainBackgroundDelegations(directory, {
 			lockTimeoutMs: 1_000,
 		});
@@ -374,9 +455,6 @@ describe('issue #2402 legacy coder WAL ownership transfer', () => {
 			state: 'ABORTED',
 			cleanupComplete: true,
 		});
-		expect((await readTaskEvidence(directory, '1.1'))?.workflow?.state).toBe(
-			'coder_delegated',
-		);
 		const recovered = await findDelegationForCompletion(
 			directory,
 			'coder-session',
@@ -385,9 +463,14 @@ describe('issue #2402 legacy coder WAL ownership transfer', () => {
 		expect(recovered?.record.advisoryInbox?.message).not.toContain(
 			'legacy coder settlement transfer is pending',
 		);
-		expect(recovered?.record.advisoryInbox?.message).toContain(
-			'completed and settled',
-		);
+		expect(recovered?.record.advisoryInbox?.message).toContain('cancelled');
+		expect(session.pendingAdvisoryMessages).toContain('[OTHER] keep me');
+		expect(
+			session.pendingAdvisoryMessages.some((message) =>
+				message.includes('legacy coder settlement transfer is pending'),
+			),
+		).toBe(false);
+		expect(session.pendingAdvisoryMessages.at(-1)).toContain('cancelled');
 	});
 
 	test('durable terminal replay transfers without call-scoped in-memory state', async () => {

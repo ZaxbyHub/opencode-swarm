@@ -47,6 +47,7 @@ import {
 } from '../evidence/lock.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { bunWrite } from '../utils/bun-compat.js';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import * as logger from '../utils/logger.js';
 import {
 	appendDelegationMaintenanceObservation,
@@ -3099,7 +3100,20 @@ export type LegacyCoderSettlementReconciler = (
 	record: BackgroundDelegationRecord,
 ) => Promise<boolean>;
 
+export interface ReplacePendingBackgroundAdvisoryResult {
+	advisory: BackgroundAdvisoryInboxEntry;
+	replacedMessage?: string;
+}
+
 const MAX_LEGACY_CODER_SETTLEMENT_RECONCILERS = 32;
+const RETRYABLE_LEGACY_SETTLEMENT_ERROR_CODES = new Set([
+	'CODER_SETTLEMENT_LOCKED',
+	'EACCES',
+	'EBUSY',
+	'EIO',
+	'EPERM',
+	'ETIMEDOUT',
+]);
 const legacyCoderSettlementReconcilers = new Map<
 	string,
 	LegacyCoderSettlementReconciler
@@ -3116,8 +3130,13 @@ export function registerLegacyCoderSettlementReconciler(
 	directory: string,
 	reconciler: LegacyCoderSettlementReconciler,
 ): void {
-	const key = path.resolve(directory);
+	const key = canonicalRootKeyFresh(directory);
 	if (legacyCoderSettlementReconcilers.has(key)) {
+		const existingIndex = legacyCoderSettlementReconcilerOrder.indexOf(key);
+		if (existingIndex >= 0) {
+			legacyCoderSettlementReconcilerOrder.splice(existingIndex, 1);
+		}
+		legacyCoderSettlementReconcilerOrder.push(key);
 		legacyCoderSettlementReconcilers.set(key, reconciler);
 		return;
 	}
@@ -3135,8 +3154,20 @@ export function registerLegacyCoderSettlementReconciler(
 function getLegacyCoderSettlementReconciler(
 	directory: string,
 ): LegacyCoderSettlementReconciler | undefined {
-	return legacyCoderSettlementReconcilers.get(path.resolve(directory));
+	return legacyCoderSettlementReconcilers.get(canonicalRootKeyFresh(directory));
 }
+
+/** Test-only seam for the bounded legacy-settlement reconciler registry. */
+export const _internals = {
+	getLegacyCoderSettlementReconciler,
+	getLegacyCoderSettlementReconcilerOrder: () => [
+		...legacyCoderSettlementReconcilerOrder,
+	],
+	resetLegacyCoderSettlementReconcilers: () => {
+		legacyCoderSettlementReconcilers.clear();
+		legacyCoderSettlementReconcilerOrder.length = 0;
+	},
+};
 
 /** Record an exact legacy-WAL transfer that must be retried after contention. */
 export async function markLegacyCoderSettlementTransferPending(
@@ -3490,7 +3521,7 @@ export async function replacePendingBackgroundAdvisory(
 	directory: string,
 	correlationId: string,
 	input: PutPendingBackgroundAdvisoryInput,
-): Promise<BackgroundAdvisoryInboxEntry | null> {
+): Promise<ReplacePendingBackgroundAdvisoryResult | null> {
 	const createdAt = input.createdAt ?? Date.now();
 	const parsed = AdvisoryInboxSchema.safeParse({
 		eventId: input.eventId,
@@ -3500,7 +3531,7 @@ export async function replacePendingBackgroundAdvisory(
 		createdAt,
 	});
 	if (!correlationId || !parsed.success) return null;
-	let result: BackgroundAdvisoryInboxEntry | null = null;
+	let result: ReplacePendingBackgroundAdvisoryResult | null = null;
 	try {
 		await withEvidenceLock(
 			directory,
@@ -3524,6 +3555,14 @@ export async function replacePendingBackgroundAdvisory(
 						LEGACY_CODER_SETTLEMENT_PENDING_ADVISORY_MARKER,
 					)
 				) {
+					if (
+						existing &&
+						existing.eventId === parsed.data.eventId &&
+						existing.parentSessionId === parsed.data.parentSessionId &&
+						existing.message === parsed.data.message
+					) {
+						result = { advisory: existing };
+					}
 					return;
 				}
 				const next: BackgroundDelegationRecord = {
@@ -3534,7 +3573,10 @@ export async function replacePendingBackgroundAdvisory(
 				};
 				appendRecord(directory, next);
 				maybeCompactDelegationsLocked(directory);
-				result = parsed.data;
+				result = {
+					advisory: parsed.data,
+					replacedMessage: existing.message,
+				};
 			},
 		);
 		return result;
@@ -5039,6 +5081,8 @@ export interface MaintainBackgroundDelegationsOptions {
 	onLegacyCoderSettlementReconciled?: (
 		record: BackgroundDelegationRecord,
 	) => Promise<boolean>;
+	/** Skip legacy coder WAL replay when this pass is already handling that path. */
+	skipLegacyCoderSettlementReconciliation?: boolean;
 }
 
 export interface MaintainBackgroundDelegationsResult {
@@ -5108,12 +5152,68 @@ async function reconcileLegacyCoderSettlements(
 			}
 			if (outcome === 'transferred') transferred += 1;
 		} catch (error) {
+			const code = legacySettlementErrorCode(error);
+			if (!RETRYABLE_LEGACY_SETTLEMENT_ERROR_CODES.has(code ?? '')) {
+				const advisory = record.advisoryInbox;
+				const manualMessage =
+					`[BACKGROUND COMPLETION ${record.terminalResult?.eventId ?? record.correlationId}] ` +
+					`coder task ${record.evidenceTaskId ?? record.planTaskId ?? 'unknown'} ` +
+					'legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session).';
+				let advisoryRecorded = false;
+				if (advisory?.state === 'pending') {
+					const replaced = await replacePendingBackgroundAdvisory(
+						directory,
+						record.correlationId,
+						{
+							eventId: advisory.eventId,
+							parentSessionId: advisory.parentSessionId,
+							message: manualMessage,
+						},
+					);
+					advisoryRecorded = replaced !== null;
+				} else if (record.terminalResult) {
+					const stored = await putPendingBackgroundAdvisory(
+						directory,
+						record.correlationId,
+						{
+							eventId: record.terminalResult.eventId,
+							parentSessionId: record.parentSessionId,
+							message: manualMessage,
+						},
+					);
+					advisoryRecorded = stored !== null;
+				}
+				if (advisoryRecorded) {
+					await clearLegacyCoderSettlementTransferPending(
+						directory,
+						record.correlationId,
+					);
+				}
+				logger.warn(
+					`[background] legacy coder settlement reconciliation requires manual recovery for ${record.correlationId}: ${code ?? 'unknown transfer failure'}`,
+				);
+				continue;
+			}
 			logger.warn(
 				`[background] legacy coder settlement reconciliation deferred for ${record.correlationId}: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
 	}
 	return transferred;
+}
+
+function legacySettlementErrorCode(error: unknown): string | null {
+	if (
+		error &&
+		typeof error === 'object' &&
+		'code' in error &&
+		typeof (error as NodeJS.ErrnoException).code === 'string'
+	) {
+		return (error as NodeJS.ErrnoException).code ?? null;
+	}
+	const detail = error instanceof Error ? error.message : String(error);
+	const match = /^([A-Z][A-Z0-9_]*)(?::|$)/.exec(detail.trim());
+	return match?.[1] ?? null;
 }
 
 /**
@@ -5505,17 +5605,19 @@ export async function maintainBackgroundDelegations(
 	// was temporarily unavailable. Reconcile those exact task/call identities at
 	// every successful maintenance point, including admission before the next
 	// coder dispatch. The work is bounded by the same maintenance batch.
-	try {
-		await reconcileLegacyCoderSettlements(
-			directory,
-			maxRecords,
-			options.onLegacyCoderSettlementReconciled ??
-				getLegacyCoderSettlementReconciler(directory),
-		);
-	} catch (error) {
-		logger.warn(
-			`[background] legacy coder settlement reconciliation pass failed: ${error instanceof Error ? error.message : String(error)}`,
-		);
+	if (!options.skipLegacyCoderSettlementReconciliation) {
+		try {
+			await reconcileLegacyCoderSettlements(
+				directory,
+				maxRecords,
+				options.onLegacyCoderSettlementReconciled ??
+					getLegacyCoderSettlementReconciler(directory),
+			);
+		} catch (error) {
+			logger.warn(
+				`[background] legacy coder settlement reconciliation pass failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	}
 	if (result.status === 'failure') {
 		return emitObservation('failure', result.reason);
