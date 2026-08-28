@@ -13,7 +13,7 @@ function timeoutProbe(markerPath: string): string[] {
 			'powershell',
 			'-NoProfile',
 			'-Command',
-			`[System.IO.File]::WriteAllText(${escapePowerShellLiteral(startedPath)}, 'started'); Start-Sleep -Milliseconds 1500; [System.IO.File]::WriteAllText(${escapePowerShellLiteral(markerPath)}, 'alive'); while ($true) { Start-Sleep -Seconds 1 }`,
+			`[System.IO.File]::WriteAllText(${escapePowerShellLiteral(startedPath)}, 'started'); Start-Sleep -Milliseconds 5000; [System.IO.File]::WriteAllText(${escapePowerShellLiteral(markerPath)}, 'alive'); while ($true) { Start-Sleep -Seconds 1 }`,
 		];
 	}
 
@@ -37,7 +37,9 @@ describe('gate-utils subprocess ownership', () => {
 		const markerPath = path.join(markerDir, 'child-alive.txt');
 		try {
 			const started = performance.now();
-			const timeoutMs = process.platform === 'win32' ? 500 : 200;
+			// PowerShell startup on a cold Windows runner can exceed 500 ms; keep
+			// enough margin to observe the startup marker before timing out.
+			const timeoutMs = process.platform === 'win32' ? 2_500 : 200;
 			const result = await spawnUtf8(
 				timeoutProbe(markerPath),
 				process.cwd(),
@@ -45,7 +47,7 @@ describe('gate-utils subprocess ownership', () => {
 			);
 
 			expect(result.exitCode).toBe(1);
-			expect(performance.now() - started).toBeLessThan(2_000);
+			expect(performance.now() - started).toBeLessThan(4_000);
 			await new Promise((resolve) => setTimeout(resolve, 350));
 			expect(fs.existsSync(`${markerPath}.started`)).toBe(true);
 			expect(fs.existsSync(markerPath)).toBe(false);
