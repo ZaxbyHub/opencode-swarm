@@ -358,6 +358,7 @@ describe('dispatch_lanes PR review resilience edges', () => {
 			statusProbeTimeoutMs: 2_000,
 			correlatedFailureThreshold: 2,
 			maxRetryAttemptsAfterInitial: 2,
+			circuitOpenDurationMs: 60_000,
 		});
 	});
 

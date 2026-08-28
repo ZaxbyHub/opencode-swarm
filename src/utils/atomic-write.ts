@@ -105,7 +105,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		token: 'instance',
 		quarantineEligible: true,
 		parsesTarget: true,
-		producers: ['src/hooks/pr-workflow-gate.ts:14582'],
+		producers: ['src/hooks/pr-workflow-gate.ts:14774'],
 		note: 'pre/post-rename file-identity verification (assertOpened/ClosedSwarmFileIdentity, pr-workflow-gate.ts:14547-14595) is writer-specific and load-bearing',
 	},
 	{
@@ -186,7 +186,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/tools/spec-write.ts:98',
 			'src/sdd/effective-spec.ts:1149',
 			'src/background/lane-output-store.ts:353',
-			'src/background/pending-delegations.ts:1012',
+			'src/background/pending-delegations.ts:1053',
 			'src/background/delegation-health.ts:390',
 			'src/tools/submit-phase-council-verdicts.ts:458',
 			'src/summaries/store.ts:46 (pre-#2035)',

@@ -289,6 +289,11 @@ describe('dispatch_lanes PR review resilience upgrade migration', () => {
 			expectedCurrentStatuses: ['pending', 'running'],
 		});
 
+		// Issue #2382: the CURRENT config's enabled flag is authoritative. A
+		// staged retry under a disabled config is invalid — the persisted
+		// enabled snapshot no longer keeps resilience semantics alive — and the
+		// enforcement's guarded audit write marks the persisted policy disabled
+		// (record kept for audit, attempt ledger untouched).
 		const persistedRetry = await executeDispatchLanesAsync(
 			{
 				mode: 'swarm-pr-review:base',
@@ -303,8 +308,15 @@ describe('dispatch_lanes PR review resilience upgrade migration', () => {
 			directory,
 			{ sessionID },
 		);
-		expect(persistedRetry.success).toBe(true);
-		expect(created).toBe(8);
+		expect(persistedRetry.success).toBe(false);
+		expect(persistedRetry.failure_class).toBe('invalid_args');
+		expect(String(persistedRetry.message)).toContain(
+			'staged PR_REVIEW base dispatch is valid only when pr_review_resilience is enabled',
+		);
+		// (The audit write that marks the persisted policy disabled is exercised
+		// by the follow-ups suite's legacy-wave disable test; the staged path is
+		// rejected at the dispatch layer before any gate enforcement runs.)
+		expect(created).toBe(7);
 	});
 
 	test('migrated legacy state fails closed when every obligation is already successful', async () => {
