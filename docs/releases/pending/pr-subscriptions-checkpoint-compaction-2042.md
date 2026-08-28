@@ -1,0 +1,84 @@
+# PR-monitor subscription store: bounded checkpoint + compaction (issue #2042)
+
+The PR-monitor subscription store under `.swarm/pr-monitor/` previously persisted
+every mutation as a full snapshot appended to `subscriptions.jsonl` and re-read the
+ENTIRE history synchronously on every subscribe / update / list / sweep / worker
+poll — unbounded file growth and O(lifetime-history) read amplification on every
+operation (the poll worker writes two snapshots per PR per poll).
+
+## What changed
+
+- **Bounded checkpoint store**: the authoritative state is now
+  `.swarm/pr-monitor/subscriptions.checkpoint.json` — a versioned, crash-safe
+  (atomic tmp+rename) snapshot of the latest validated record per
+  `correlationId`, plus a migration cursor and maintenance counters. Reads are
+  bounded by the live set, never by history.
+- **Bounded audit tail**: `subscriptions.audit.jsonl` records state transitions
+  only (subscribe / unsubscribe / expire / compaction / migration / archive /
+  recovery) — never per-poll snapshots — and rewrites to a bounded shape when it
+  crosses the byte high-water mark.
+- **Incremental legacy migration**: pre-existing `subscriptions.jsonl` logs are
+  folded by a streaming, bounded-memory scan with a crash-resumable byte cursor,
+  then archived (renamed) and deleted after 7 days. Migration work per store
+  operation is explicitly finite — at most 64 MiB of legacy per op; a larger
+  legacy source is refused (never folded, never archived — no silent loss) and
+  disclosed via health and a `/swarm pr status` footer warning with a repair
+  hint. The replay guards are writer-enforced as well: terminal compaction runs
+  before every persist, and a folded live set that still exceeds the checkpoint
+  replay capacity (512 records / 1 MiB) refuses migration and fails writes with
+  a loud capacity error — the store never persists a checkpoint its own reader
+  would reject and never archives unabsorbed data; reads keep folding the
+  legacy source exactly. v1 append semantics keep working: a downgraded
+  writer's changes are detected (size or mtime) and re-folded;
+  same-`updatedAt` external appends still win (positional last-write-wins).
+- **Read bootstrap**: the first read on a legacy-only store persists the
+  checkpoint (best-effort, short lock timeout) so read-only installs converge to
+  bounded reads after one read.
+- **Identity validation**: the checkpoint is bound to its project root. A copied
+  `.swarm` reads as empty — the wrong monitor never starts — and the next write
+  rebinds, quarantining the foreign checkpoint to a single bounded slot. Corrupt
+  checkpoints are quarantined and recovered from the legacy log.
+- **Hard limits** (`PR_SUBSCRIPTION_LIMITS`): live-subscription cap (explicit
+  `max_subscriptions` wins; store-side safety net 20 when omitted), terminal
+  (removed/expired) records compacted 60-high → 30-newest with a 30-day age
+  ceiling into monotone summary counters, a 256 KiB checkpoint pressure guard
+  (active records are never dropped for bytes) backed by HARD read-side guards
+  (512-record replay guard and a 1 MiB file ceiling — an over-limit checkpoint
+  is quarantined and recovered from the legacy log, never synchronously
+  loaded), and audit watermarks. Checkpoint replay re-validates every record's
+  identity (map key + composite correlation key must compose from the record's
+  parts) — identity-invalid state never starts a monitor. Unaddressed-event
+  actives and custom monitor policy survive compaction.
+- **Health surfacing**: new `pr_subscription_health` telemetry event (counts
+  only) on compaction / migration / archive / recovery triggers, a
+  `getPrSubscriptionHealth()` API, and a storage-health footer on
+  `/swarm pr status` (checkpoint age/sequence, active/expired counts,
+  bytes/pressure, corrupt/dropped counters, recovery source).
+
+## Behavior preserved
+
+Observable PR-monitor semantics are unchanged: idempotent subscribe (same record,
+no duplicate), unaddressed-event retention, custom thresholds, merged/closed
+expiration, TTL sweep rules, lazy worker restart, the cross-process evidence lock
+(unchanged v1 lock key), and the PR feedback event queues' existing bounds. Two
+internal I/O details differ by design: the first store operation on a legacy-only
+store (including an idempotent re-subscribe) completes the one-time legacy
+migration — persisting the checkpoint and appending a `migrate-complete` audit
+transition — and store writes now update the checkpoint instead of appending
+JSONL snapshots. Public store API signatures are unchanged; all pre-existing
+suites pass (one assertion updated to the checkpoint file, one legacy-seeding
+test modernized to exercise the migration overlay).
+
+## Operational notes
+
+- **Moving the project directory** re-binds the store (same fail-safe as a
+  copied `.swarm`): reads see nothing and the next write quarantines the old
+  checkpoint to `subscriptions.checkpoint.foreign.json`. Re-create
+  subscriptions with `/swarm pr subscribe`; no history is lost.
+- **Downgrading** to a pre-#2042 build: the legacy `subscriptions.jsonl` has
+  been absorbed and archived, so the old build sees an empty store and will
+  re-subscribe from scratch. Re-upgrading re-detects a (re)created legacy log
+  and re-folds it — nothing durable is lost either way.
+
+Part of the observability sequence (#1823). Retention registry row
+`pr-monitor-subscriptions` moved to `retain-by-design`.

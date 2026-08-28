@@ -6,7 +6,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-// Re-export sweepStale from pr-subscriptions for lazySweepStaleForTest
 import {
 	PR_SUBSCRIPTIONS_FILE,
 	sweepStale as realSweepStale,
@@ -16,6 +15,8 @@ import {
 	type PrSubscriptionState,
 	rehydratePrSubscriptions,
 } from '../../../src/state';
+// Re-export sweepStale from pr-subscriptions for lazySweepStaleForTest
+import { freezeClock } from '../../helpers/test-clock';
 
 function makeTempProject(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-state-pr-'));
@@ -141,24 +142,49 @@ describe('rehydratePrSubscriptions', () => {
 	});
 
 	test('uses mergeableState as lastKnownStatus when present', async () => {
-		// Subscribe then update snapshot with mergeableState
-		await subscribe(dir, {
-			sessionID: 'sess_1',
-			prNumber: 1,
-			repoFullName: 'o/r',
-			prUrl: 'https://github.com/o/r/pull/1',
-		});
-		// Update via direct JSONL append to set mergeableState
-		const filePath = path.join(dir, '.swarm', PR_SUBSCRIPTIONS_FILE);
-		const content = fs.readFileSync(filePath, 'utf-8');
-		const lines = content.trim().split('\n');
-		const record = JSON.parse(lines[0]!);
-		record.mergeableState = 'CONFLICTING';
-		fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
+		// Pre-seed the legacy v1 log so subscribe() migrates it into the
+		// #2042 bounded checkpoint; then append an externally-updated copy of
+		// the record with UNCHANGED updatedAt and verify the appended (later
+		// positioned) line still wins — v1 positional last-line-wins semantics
+		// preserved by the checkpoint overlay merge. Frozen clock keeps the
+		// tie (seeded updatedAt === store-written updatedAt) deterministic.
+		const restore = freezeClock();
+		try {
+			const filePath = path.join(dir, '.swarm', PR_SUBSCRIPTIONS_FILE);
+			const seededAt = Date.now();
+			const record = {
+				correlationId: 'sess_1::o/r::1',
+				sessionID: 'sess_1',
+				prNumber: 1,
+				repoFullName: 'o/r',
+				prUrl: 'https://github.com/o/r/pull/1',
+				lastCheckedAt: seededAt,
+				isWatching: true,
+				hasUnaddressedEvents: false,
+				status: 'active',
+				createdAt: seededAt,
+				updatedAt: seededAt,
+				errorCount: 0,
+			};
+			fs.writeFileSync(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
 
-		const map = await rehydratePrSubscriptions('sess_1', dir);
-		const state = map.get('o/r::1');
-		expect(state!.lastKnownStatus).toBe('CONFLICTING');
+			await subscribe(dir, {
+				sessionID: 'sess_1',
+				prNumber: 1,
+				repoFullName: 'o/r',
+				prUrl: 'https://github.com/o/r/pull/1',
+			});
+
+			// External v1 writer appends a modified copy with the same updatedAt.
+			record.mergeableState = 'CONFLICTING';
+			fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, 'utf-8');
+
+			const map = await rehydratePrSubscriptions('sess_1', dir);
+			const state = map.get('o/r::1');
+			expect(state!.lastKnownStatus).toBe('CONFLICTING');
+		} finally {
+			restore();
+		}
 	});
 
 	test('key format is repoFullName::prNumber', async () => {
