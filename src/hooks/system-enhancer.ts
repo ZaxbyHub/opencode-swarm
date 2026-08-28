@@ -1831,6 +1831,9 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 									// reports on.
 									actualDemand += estimateTokens(budgetWarning);
 									output.system.push(`[FOR: architect]\n${budgetWarning}`);
+									// The warning IS emitted to output.system (outside
+									// tryInject), so its tokens count as injected, not truncated.
+									injectedTokens += estimateTokens(budgetWarning);
 								}
 							} catch (error) {
 								warn('Context budget check failed:', error);
@@ -2750,6 +2753,8 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 								// See the Path A note: deliberately not routed through
 								// tryInject, but still counted into actualDemand.
 								actualDemand += estimateTokens(budgetWarning_b);
+								// Emitted directly to output.system — count as injected.
+								injectedTokens += estimateTokens(budgetWarning_b);
 								output.system.push(`[FOR: architect]\n${budgetWarning_b}`);
 							}
 						} catch (error) {
