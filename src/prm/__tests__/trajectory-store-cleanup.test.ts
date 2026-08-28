@@ -98,7 +98,7 @@ describe('trajectory-store cleanup budgets (issue #2041)', () => {
 				expect(remaining).toContain('s-0199.jsonl');
 				expect(remaining).not.toContain('s-0209.jsonl');
 			},
-			{ fixedNowMs },
+			{ fixedNow: fixedNowMs },
 		);
 	});
 
