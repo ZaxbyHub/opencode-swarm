@@ -100,9 +100,11 @@ only after exhausting the configured grace period.
   routine escape path: enforcement still applies for the first
   `max_gate_denials` attempts against a given directive set, or the full
   `gate_staleness_ms` window, and every auto-clear is logged.
-- The staleness clock measures time since the directive was *last shown*
-  (`cached.generatedAt`), not time since it was *first* shown — the injector
-  re-stamps this on every cache-hit re-injection of the same directive set.
+- The staleness clock measures time since the directive's receipt-ledger
+  membership was committed (`committed_at`), not time since it was *first*
+  shown — re-displaying the same directive under a fresh trace commits a new
+  membership with a new clock, and a staleness release does not reset the
+  denial-count budget (a fresh re-arm of the same entry continues it; #2398).
   The denial-count hatch remains a functioning backstop for turns that
   actually retry the gated tool call.
 - `knowledge_receipt` still intentionally does not satisfy the gate — only

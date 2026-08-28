@@ -38,6 +38,8 @@ export const _internals: {
 		relEntries: string[],
 	) => ResetBackupResult;
 	recoverStaleCoderSettlements: typeof recoverStaleCoderSettlements;
+	queryLiveMemberships: typeof queryLiveMemberships;
+	commitGateReleaseBatch: typeof commitGateReleaseBatch;
 	releaseKnowledgeGateObligations: (
 		directory: string,
 		sessionID: string,
@@ -46,6 +48,8 @@ export const _internals: {
 	cleanupOrphanedBranches,
 	backupSwarmStateBeforeReset,
 	recoverStaleCoderSettlements,
+	queryLiveMemberships,
+	commitGateReleaseBatch,
 	releaseKnowledgeGateObligations: releaseKnowledgeGateObligations,
 };
 
@@ -62,7 +66,10 @@ function errorMessage(err: unknown): string {
  * operator reset. Only the invoking session's `architect_directive`
  * memberships without an application marker or an effective gate release are
  * touched; the knowledge store, its history, and every other session are
- * preserved. Returns best-effort result lines; never throws.
+ * preserved. The summary line and the audit event count only durably
+ * committed releases — rejections and failures surface as their own warning
+ * lines so a partial release is never overstated. Returns best-effort result
+ * lines; never throws.
  */
 async function releaseKnowledgeGateObligations(
 	directory: string,
@@ -71,7 +78,7 @@ async function releaseKnowledgeGateObligations(
 	const results: string[] = [];
 	let live: Awaited<ReturnType<typeof queryLiveMemberships>>;
 	try {
-		live = await queryLiveMemberships(directory, {
+		live = await _internals.queryLiveMemberships(directory, {
 			session_id: sessionID,
 			include_terminal: true,
 		});
@@ -105,8 +112,13 @@ async function releaseKnowledgeGateObligations(
 		group.push(membership);
 		byTrace.set(membership.trace_id, group);
 	}
+	// Only durably committed releases count toward the summary and the audit
+	// event — idempotent re-releases and rejected items must not inflate the
+	// operator-facing evidence (PR review PRR-002 on #2398).
+	let committedCount = 0;
+	const releasedPairs: string[] = [];
 	for (const [traceId, group] of byTrace) {
-		const committed = await commitGateReleaseBatch(directory, {
+		const committed = await _internals.commitGateReleaseBatch(directory, {
 			trace_id: traceId,
 			session_id: sessionID,
 			items: group.map((membership) => ({
@@ -121,6 +133,10 @@ async function releaseKnowledgeGateObligations(
 			);
 			continue;
 		}
+		committedCount += committed.committed.length;
+		for (const item of committed.committed) {
+			releasedPairs.push(`${traceId}/${item.entry_id}`);
+		}
 		if (committed.rejected.length > 0) {
 			results.push(
 				`⚠️ Partially released trace ${sanitizeDiagnosticText(traceId, 64)}: ${committed.rejected
@@ -129,21 +145,28 @@ async function releaseKnowledgeGateObligations(
 			);
 		}
 	}
+	if (committedCount === 0) {
+		return results;
+	}
+	if (committedCount < pending.length) {
+		results.push(
+			`⚠️ Released ${committedCount} of ${pending.length} pending knowledge gate obligation(s) — ${pending.length - committedCount} not released; see warnings above`,
+		);
+	} else {
+		results.push(
+			`✅ Released ${committedCount} pending knowledge gate obligation(s) for this session`,
+		);
+	}
 	try {
 		appendCoreEventSync(directory, {
 			timestamp: new Date().toISOString(),
 			event: 'knowledge_application_gate_session_reset_clear',
 			sessionID,
-			released_pairs: pending.map(
-				(membership) => `${membership.trace_id}/${membership.entry_id}`,
-			),
+			released_pairs: releasedPairs,
 		});
 	} catch {
 		/* best-effort audit — the durable ledger release above is the authority */
 	}
-	results.push(
-		`✅ Released ${pending.length} pending knowledge gate obligation(s) for this session`,
-	);
 	return results;
 }
 

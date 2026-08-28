@@ -71,7 +71,14 @@ import type {
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
 
-/** Tools that require knowledge-directive acknowledgment before execution. */
+/**
+ * Fallback set used only when `config.high_risk_tools` is absent. The parsed
+ * config schema (`KnowledgeApplicationConfigSchema`) defaults
+ * `high_risk_tools` to a 5-tool list (save_plan, update_task_status,
+ * phase_complete, task, Task) that is always populated post-parse, so this
+ * constant is shadowed in practice and `skill_regenerate` / `skill_retire`
+ * are NOT gated unless the operator's config lists them explicitly.
+ */
 export const HIGH_RISK_TOOLS = new Set([
 	'save_plan',
 	'update_task_status',

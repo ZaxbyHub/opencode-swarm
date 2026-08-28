@@ -617,7 +617,9 @@ two escape hatches so the gate cannot deadlock a session forever:
 Both auto-clears write an audit event to `.swarm/events.jsonl`
 (`knowledge_application_gate_denial_limit_clear` or
 `knowledge_application_gate_staleness_clear`) before the action proceeds — the
-bypass is never silent. These are safety nets against a broken acknowledgment
+bypass is never silent (the `/swarm reset-session` escape writes
+`knowledge_application_gate_session_reset_clear` the same way). These are
+safety nets against a broken acknowledgment
 pipeline (e.g. an ack marker that failed to parse), not a routine escape path:
 enforcement still applies for the first `max_gate_denials` attempts or the
 full `gate_staleness_ms` window. A release is not a terminal outcome, does not

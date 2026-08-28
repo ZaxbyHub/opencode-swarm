@@ -163,13 +163,15 @@ describe('knowledge application gate rolling obligations (#2398)', () => {
 		await expect(gateCall()).rejects.toThrow(/trace-old/);
 		expect(swarmState.gateDenialCounts.get('session-a')?.count).toBe(1);
 
-		await Bun.sleep(600);
+		await Bun.sleep(800);
 		await display('trace-fresh');
 
-		// trace-old is now >500ms old (stale → released); trace-fresh is a
-		// fresh re-arm of the same entry and stays pending. The denial must
-		// continue the budget at 2 — before #2398 the staleness release reset
-		// the counter to 1.
+		// trace-old is now >700ms old (stale → released); trace-fresh is a
+		// fresh re-arm of the same entry and stays pending. The 300ms margin
+		// above the 500ms threshold keeps this deterministic on slow CI (a
+		// stale trace-fresh would flip the loud rejects.toThrow assertion).
+		// The denial must continue the budget at 2 — before #2398 the
+		// staleness release reset the counter to 1.
 		await expect(gateCall({ gate_staleness_ms: 500 })).rejects.toThrow(
 			/trace-fresh/,
 		);

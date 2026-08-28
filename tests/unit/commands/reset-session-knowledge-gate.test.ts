@@ -9,11 +9,15 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
-import { handleResetSessionCommand } from '../../../src/commands/reset-session.js';
+import {
+	_internals,
+	handleResetSessionCommand,
+} from '../../../src/commands/reset-session.js';
 import { DEFAULT_KNOWLEDGE_APPLICATION_CONFIG } from '../../../src/hooks/knowledge-application.js';
 import { knowledgeApplicationGateBefore } from '../../../src/hooks/knowledge-application-gate.js';
 import {
 	commitDisplayedMembership,
+	commitPhaseClosed,
 	_internals as ledgerInternals,
 	queryLiveMemberships,
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
@@ -136,6 +140,83 @@ describe('/swarm reset-session knowledge gate escape (#2398)', () => {
 
 		expect(summary).toContain('no session context on this invocation');
 		expect(summary).toContain('Session state cleared');
+	});
+
+	it('reports only durably committed releases when the ledger partially rejects', async () => {
+		await display('trace-one');
+		await display('trace-two');
+		const original = _internals.commitGateReleaseBatch;
+		_internals.commitGateReleaseBatch = async (_directory, input) =>
+			input.trace_id === 'trace-one'
+				? {
+						ok: true as const,
+						committed: [
+							{
+								entry_id: ENTRY,
+								event_id: 'evt-1',
+								membership_event_id: 'm-1',
+							},
+						],
+						idempotent: [],
+						rejected: [],
+					}
+				: {
+						ok: true as const,
+						committed: [],
+						idempotent: [],
+						rejected: [{ entry_id: ENTRY, reason: 'wrong_session' }],
+					};
+		try {
+			const summary = await handleResetSessionCommand(
+				directory,
+				[],
+				'session-a',
+			);
+
+			expect(summary).toContain('Partially released trace trace-two');
+			expect(summary).toContain('Released 1 of 2 pending');
+			// The append-only audit must not overstate a partial release: only
+			// the durably committed pair may appear in released_pairs.
+			const events = readFileSync(
+				path.join(directory, '.swarm', 'events.jsonl'),
+				'utf8',
+			);
+			expect(events).toContain(
+				'knowledge_application_gate_session_reset_clear',
+			);
+			expect(events).toContain(`trace-one/${ENTRY}`);
+			expect(events).not.toContain(`trace-two/${ENTRY}`);
+		} finally {
+			_internals.commitGateReleaseBatch = original;
+		}
+	});
+
+	it('releases even phase-closed pending obligations (deliberately broad wipe)', async () => {
+		const result = await commitDisplayedMembership(directory, {
+			trace_id: 'trace-closed',
+			session_id: 'session-a',
+			exposure_kind: 'architect_directive',
+			phase: 'Phase X',
+			entries: [{ entry_id: ENTRY, critical: true }],
+		});
+		if (!result.ok) throw new Error(result.detail);
+		const closed = await commitPhaseClosed(directory, 'Phase X');
+		if (!closed.ok) throw new Error(closed.detail);
+
+		const summary = await handleResetSessionCommand(directory, [], 'session-a');
+
+		expect(summary).toContain('Released 1 pending knowledge gate obligation');
+		const state = await queryLiveMemberships(directory, {
+			session_id: 'session-a',
+			include_terminal: true,
+		});
+		if (!state.ok) throw new Error(state.detail);
+		const released = state.memberships.find(
+			(membership) => membership.trace_id === 'trace-closed',
+		);
+		expect(released?.gate_release?.source).toBe(
+			'application_gate_session_reset_release',
+		);
 	});
 
 	it('completes fail-open when the receipt ledger is corrupt', async () => {

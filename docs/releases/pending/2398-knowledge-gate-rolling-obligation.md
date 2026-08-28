@@ -48,3 +48,19 @@ tool) indefinitely, with no working escape through `max_gate_denials`,
   acknowledged entries under fresh traces (reinforcement exposure), which
   appends receipt-ledger membership rows until existing grace-day/phase-close
   compaction reclaims them. The gate no longer amplifies that into a lockout.
+
+## Known caveats
+
+- Discharge is keyed by knowledge-entry identity, not content revision: if an
+  entry's content is later mutated (same entry id), an existing acknowledgment
+  still discharges fresh traces of the mutated content in the same phase/task
+  scope. Deliberately re-acknowledge a directive whose content has materially
+  changed.
+- `/swarm reset-session` releases only the invoking session's ledger
+  obligations, but the in-memory gate denial/shown-id clears are process-wide
+  (consistent with the command's other in-memory clears), so a concurrent
+  session's accumulated denial budget restarts.
+- The `high_risk_tools` config schema defaults to five tools
+  (`save_plan`, `update_task_status`, `phase_complete`, `task`, `Task`);
+  `skill_regenerate` and `skill_retire` are gated only when the operator's
+  config lists them explicitly.
