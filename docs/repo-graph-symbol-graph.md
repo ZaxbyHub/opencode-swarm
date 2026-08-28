@@ -1,6 +1,7 @@
-# repo-graph: symbol-level call graph & context packing (schema 1.2.0)
+# repo-graph: symbol-level graph facts & context packing (schemas 1.2.0–1.5.0)
 
-> Status: implemented (schema 1.2.0). Origin: follow-up to issue #1409 / PR #1468 (schema 1.1.0).
+> Status: implemented. Schema 1.2.0 introduced traversal coordinates; schema
+> 1.5.0 adds stable identity, confidence, resolution, and evidence.
 > Audience: contributors implementing the next slice of structural intelligence in opencode-swarm.
 
 For the broader graph-backed repository memory contract, support matrix,
@@ -167,6 +168,13 @@ export interface SymbolEdge {
   fromSymbol: string;  // enclosing top-level decl, or '<module>' for module-scope refs
   toFile: string;      // resolved target path
   toSymbol: string;    // exported symbol referenced
+  id?: string;         // stable SHA-256 edge identity (1.5.0)
+  fromId?: string;     // stable source symbol identity
+  toId?: string;       // stable target symbol identity
+  kind?: 'CALLS' | 'REFERENCES' | 'USES_TYPE' | 'INSTANTIATES' | 'IMPLEMENTS' | 'OVERRIDES';
+  confidence?: number; // advisory 0..1
+  resolution?: 'exact' | 'import_binding' | 'same_file_scope' | 'unique_name' | 'type_resolved' | 'lsp' | 'scip' | 'heuristic' | 'unresolved';
+  evidence?: Array<{ file: string; line: number; column?: number; snippetHash: string; extractor: string }>;
 }
 
 // Result types for the new query
@@ -181,7 +189,38 @@ export interface ContextPackResult {
 }
 ```
 
-`GRAPH_SCHEMA_VERSION` (now `'1.4.0'` at `types.ts:52`; this design originally bumped it to `'1.2.0'`). Every new query
+### Schema 1.5.0 confidence, identity, and provenance
+
+New async builds retain the four legacy coordinates and add a complete v2 fact.
+Symbol IDs hash a canonical repository label, workspace-relative path, qualified
+name, and the graph identity role (`symbol` or `module`). Paths use forward
+slashes and NFC Unicode while preserving case, so Linux case-distinct files do
+not collide. The repository label comes from the canonical workspace basename;
+renaming that directory intentionally changes the repository identity.
+
+Current tree-sitter extraction proves a reference through an import binding but
+does not prove call or type semantics. It therefore emits `kind: REFERENCES`,
+`resolution: import_binding`, and confidence `0.9` when a real source line is
+available. If an extractor supplies no honest line, the edge remains traversable
+with confidence `0`, resolution `unresolved`, and empty evidence. It never
+invents a location. Evidence contains only a relative path, position, extractor,
+and SHA-256 logical-line hash—never source text.
+
+Confidence below `0.5` is reported as low confidence by `graph_health`; it does
+not block traversal or agent behavior. `unresolvedSymbolEdgeCount` reports only
+complete v2 facts whose resolution is `unresolved`. Legacy four-field edges are
+still normalized and traversed, but are unscored; health emits a rebuild note
+instead of falsely counting every old edge as low-confidence or unresolved.
+
+On load and save, complete v2 IDs are recomputed from canonical coordinates and
+must match the persisted values. Partial v2 records, unknown enums, confidence
+outside 0..1, unsafe evidence, and semantic ID mismatches are corruption. A
+schema 1.2.0 graph remains readable; normalization is in-memory until an
+existing caller explicitly saves it, and neither its schema version nor legacy
+coordinates are rewritten.
+
+Schema 1.2.0 originally introduced these coordinates; the current
+`GRAPH_SCHEMA_VERSION` is `1.5.0`. Context queries still
 self-gates with `isSchemaVersionAtLeast(graph.schema_version, '1.2.0')` and returns
 `{ schemaSupported: false, note: 'rebuild with repo_map action="build"' }` on older
 graphs (the `getDeadExports` pattern, `query.ts:257`).
@@ -530,7 +569,7 @@ Recorded rather than fixed, with the measurement behind each:
 ## Usage
 
 ```text
-repo_map { "action": "build" }                                  # populates 1.2.0 symbol data (async build)
+repo_map { "action": "build" }                                  # populates 1.5.0 symbol facts (async build)
 repo_map { "action": "graph_health" }                           # freshness + extraction diagnostics
 repo_map { "action": "callers", "file": "src/foo.ts", "symbol": "doThing" }
 repo_map { "action": "context_pack", "file": "src/foo.ts", "symbol": "doThing", "max_depth": 2, "top_n": 40 }

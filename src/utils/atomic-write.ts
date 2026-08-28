@@ -95,7 +95,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/commands/handoff.ts:48 (pre-#2035)',
 			'src/commands/handoff.ts:79 (pre-#2035)',
 			'src/memory/local-jsonl-provider.ts:1171',
-			'src/config/bundled-skills.ts:241',
+			'src/config/bundled-skills.ts:250',
 		],
 	},
 	{
@@ -138,7 +138,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/evidence/manager.ts:288',
 			'src/evidence/manager.ts:456',
 			'src/tools/sast-baseline.ts:106',
-			'src/tools/repo-graph/storage.ts:397',
+			'src/tools/repo-graph/storage.ts:426',
 			'src/memory/reflection-service.ts:547 (pre-#2035)',
 			'src/hooks/review-receipt.ts:608',
 			'src/hooks/review-receipt.ts:674',

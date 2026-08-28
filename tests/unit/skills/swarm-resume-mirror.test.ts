@@ -1,5 +1,5 @@
 /**
- * FR-004 task 3.2 verification: resume SKILL.md mirrors stay byte-identical
+ * FR-004 task 3.2 verification: swarm-resume SKILL.md mirrors stay byte-identical
  * and both carry the new worktree-reconciliation step added in the stale
  * worktree/branch reconciliation PR.
  *
@@ -12,15 +12,18 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const OPENCODE_PATH = join(process.cwd(), '.opencode/skills/resume/SKILL.md');
-const CLAUDE_PATH = join(process.cwd(), '.claude/skills/resume/SKILL.md');
+const OPENCODE_PATH = join(
+	process.cwd(),
+	'.opencode/skills/swarm-resume/SKILL.md',
+);
+const CLAUDE_PATH = join(process.cwd(), '.claude/skills/swarm-resume/SKILL.md');
 
 function errorMessage(err: unknown): string {
 	if (err instanceof Error) return err.message;
 	return String(err);
 }
 
-describe('resume SKILL.md mirrors — FR-004 task 3.2', () => {
+describe('swarm-resume SKILL.md mirrors — FR-004 task 3.2', () => {
 	// ─────────────────────────────────────────────────────────────────────
 	// Byte-identity (also covered by skill-mirrors.test.ts)
 	// ─────────────────────────────────────────────────────────────────────
@@ -30,7 +33,7 @@ describe('resume SKILL.md mirrors — FR-004 task 3.2', () => {
 		expect(existsSync(CLAUDE_PATH)).toBe(true);
 	});
 
-	it('.opencode and .claude resumes are byte-identical', () => {
+	it('.opencode and .claude swarm-resume skills are byte-identical', () => {
 		// Normalize line endings so CRLF/LF differences don't cause spurious failures
 		// on Windows git clones.
 		const opencodeContent = readFileSync(OPENCODE_PATH, 'utf-8').replace(
@@ -114,7 +117,7 @@ describe('resume SKILL.md mirrors — FR-004 task 3.2', () => {
 			join(process.cwd(), 'src/config/skill-mirrors.ts'),
 			'utf-8',
 		);
-		expect(skillMirrorsSrc).toContain('resume');
-		expect(skillMirrorsSrc).toContain('.opencode/skills/resume/SKILL.md');
+		expect(skillMirrorsSrc).toContain('swarm-resume');
+		expect(skillMirrorsSrc).toContain('.opencode/skills/swarm-resume/SKILL.md');
 	});
 });

@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.152.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.151.1...v7.152.0) (2026-08-27)
+
+
+### Features
+
+* **repo-graph:** add trustworthy symbol edge metadata ([e678f6b](https://github.com/ZaxbyHub/opencode-swarm/commit/e678f6b4f64c83f0b2a8f1b01a998083eeeb701e))
+
 ## [7.151.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.151.0...v7.151.1) (2026-08-27)
 
 

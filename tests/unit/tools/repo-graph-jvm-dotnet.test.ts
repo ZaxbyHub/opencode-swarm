@@ -108,6 +108,19 @@ describe('repo-graph: Java import/symbol resolution + ontology + context pack (i
 			(e) => e.toSymbol === 'Repo' && e.toFile === repoNode.filePath,
 		);
 		expect(symEdge).toBeDefined();
+		expect(symEdge).toEqual(
+			expect.objectContaining({
+				id: expect.stringMatching(/^[a-f0-9]{64}$/),
+				fromId: expect.stringMatching(/^[a-f0-9]{64}$/),
+				toId: expect.stringMatching(/^[a-f0-9]{64}$/),
+				kind: 'REFERENCES',
+				resolution: 'import_binding',
+				evidence: [
+					expect.objectContaining({ file: 'com/example/OrderService.java' }),
+				],
+			}),
+		);
+		expect(symEdge?.confidence).toBeGreaterThan(0);
 	});
 
 	test('criterion 4: package boundary is the dotted Java package, not the path segment', async () => {
@@ -231,12 +244,20 @@ describe('repo-graph: Kotlin import/symbol resolution + ontology (issue #1529)',
 		const graph = await buildWorkspaceGraphAsync(tempDir);
 		const serviceNode = nodeFor(graph, 'com/example/Service.kt');
 		const widgetNode = nodeFor(graph, 'com/example/helper/Widget.kt');
-		expect(graph.symbolEdges ?? []).toContainEqual({
-			fromFile: serviceNode.filePath,
-			fromSymbol: 'run',
-			toFile: widgetNode.filePath,
-			toSymbol: 'Widget',
-		});
+		expect(graph.symbolEdges ?? []).toContainEqual(
+			expect.objectContaining({
+				fromFile: serviceNode.filePath,
+				fromSymbol: 'run',
+				toFile: widgetNode.filePath,
+				toSymbol: 'Widget',
+				id: expect.stringMatching(/^[a-f0-9]{64}$/),
+				fromId: expect.stringMatching(/^[a-f0-9]{64}$/),
+				toId: expect.stringMatching(/^[a-f0-9]{64}$/),
+				kind: 'REFERENCES',
+				resolution: 'import_binding',
+				evidence: [expect.objectContaining({ file: 'com/example/Service.kt' })],
+			}),
+		);
 	});
 });
 

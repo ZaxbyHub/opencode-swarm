@@ -32,6 +32,12 @@ import {
 } from '../symbols';
 import { extractFileOntology, maskMultilineStringLiterals } from './ontology';
 import { safeRealpathSync } from './safe-realpath';
+import {
+	createSymbolEdgeV2,
+	deriveRepoRootId,
+	hashSymbolEdgeSnippet,
+	mergeSymbolEdges,
+} from './symbol-edge';
 import type {
 	BuildWorkspaceGraphOptions,
 	GraphEdge,
@@ -835,6 +841,21 @@ interface ScanStats {
 	 * because it is build-internal plumbing, not a reported diagnostic.
 	 */
 	_absoluteRoot?: string;
+}
+
+function symbolEdgeValidationFailure(
+	file: string,
+	language: string,
+): RepoGraphDiagnostics {
+	return {
+		extractionFailures: [
+			{
+				file,
+				language,
+				reason: 'symbol_edge_validation_failed',
+			},
+		],
+	};
 }
 
 /**
@@ -2486,15 +2507,17 @@ export async function scanFileAsync(
 	filePath: string,
 	absoluteRoot: string,
 	maxFileSize: number,
-	hasManifest?: (relDir: string) => boolean,
+	hasManifest: ((relDir: string) => boolean) | undefined,
+	repoRootId: string,
 ): Promise<AsyncScanResult> {
+	const moduleName = toModuleName(filePath, absoluteRoot);
+	const grammarId = getLanguage(filePath);
 	let content: string;
 	let fileStats: fsSync.Stats;
 
 	try {
 		fileStats = await fsPromises.stat(filePath);
 		if (fileStats.size > maxFileSize) {
-			const moduleName = toModuleName(filePath, absoluteRoot);
 			return {
 				node: null,
 				edges: [],
@@ -2520,7 +2543,6 @@ export async function scanFileAsync(
 
 	// Skip binary files
 	if (isBinaryContent(content)) {
-		const moduleName = toModuleName(filePath, absoluteRoot);
 		return {
 			node: null,
 			edges: [],
@@ -2535,7 +2557,6 @@ export async function scanFileAsync(
 		};
 	}
 
-	const grammarId = getLanguage(filePath);
 	const facts = await _internals.extractFileSymbols(grammarId, content);
 
 	// Fail-open: tree-sitter unavailable or timed out → minimal node
@@ -2731,7 +2752,6 @@ export async function scanFileAsync(
 	// Derive imports list from tree-sitter facts
 	const imports = facts.imports.map((i) => i.specifier);
 
-	const moduleName = toModuleName(filePath, absoluteRoot);
 	const language = grammarId;
 
 	const node: GraphNode = {
@@ -2818,6 +2838,21 @@ export async function scanFileAsync(
 	// binding, resolve that binding's specifier to a target file and emit
 	// a symbol→symbol edge.
 	const symbolEdges: SymbolEdge[] = [];
+	const sourceLines = content.split(/\r?\n/);
+	let symbolEdgeValidationFailed = false;
+	const evidenceForLine = (line: number | undefined) => {
+		if (!Number.isInteger(line) || (line ?? 0) < 1) return [];
+		const snippet = sourceLines[(line as number) - 1];
+		if (snippet === undefined) return [];
+		return [
+			{
+				file: moduleName,
+				line: line as number,
+				snippetHash: hashSymbolEdgeSnippet(snippet),
+				extractor: `tree-sitter/${grammarId}`,
+			},
+		];
+	};
 	const localToImported = new Map<
 		string,
 		{ specifier: string; imported: string }
@@ -2856,12 +2891,28 @@ export async function scanFileAsync(
 		if (seenSymbolEdgeKeys.has(key)) continue;
 		seenSymbolEdgeKeys.add(key);
 
-		symbolEdges.push({
-			fromFile: filePath,
-			fromSymbol,
-			toFile: resolvedTarget,
-			toSymbol: mapping.imported,
-		});
+		const evidence = evidenceForLine(ref.line);
+		try {
+			symbolEdges.push(
+				createSymbolEdgeV2(
+					{
+						fromFile: filePath,
+						fromSymbol,
+						toFile: resolvedTarget,
+						toSymbol: mapping.imported,
+					},
+					absoluteRoot,
+					repoRootId,
+					{
+						confidence: evidence.length > 0 ? 0.9 : 0,
+						resolution: evidence.length > 0 ? 'import_binding' : 'unresolved',
+						evidence,
+					},
+				),
+			);
+		} catch {
+			symbolEdgeValidationFailed = true;
+		}
 	}
 	for (const imp of facts.imports) {
 		const packageInitBindings =
@@ -2897,21 +2948,45 @@ export async function scanFileAsync(
 			if (seenSymbolEdgeKeys.has(key)) continue;
 			seenSymbolEdgeKeys.add(key);
 
-			symbolEdges.push({
-				fromFile: filePath,
-				fromSymbol: binding.exported,
-				toFile: resolvedTarget,
-				toSymbol: binding.imported,
-			});
+			const evidence = evidenceForLine(imp.startLine);
+			try {
+				symbolEdges.push(
+					createSymbolEdgeV2(
+						{
+							fromFile: filePath,
+							fromSymbol: binding.exported,
+							toFile: resolvedTarget,
+							toSymbol: binding.imported,
+						},
+						absoluteRoot,
+						repoRootId,
+						{
+							confidence: evidence.length > 0 ? 0.9 : 0,
+							resolution: evidence.length > 0 ? 'import_binding' : 'unresolved',
+							evidence,
+						},
+					),
+				);
+			} catch {
+				symbolEdgeValidationFailed = true;
+			}
 		}
 	}
+	const diagnostics: RepoGraphDiagnostics | undefined =
+		unresolvedImports.length > 0 || symbolEdgeValidationFailed
+			? {
+					...(unresolvedImports.length > 0 ? { unresolvedImports } : {}),
+					...(symbolEdgeValidationFailed
+						? symbolEdgeValidationFailure(moduleName, language)
+						: {}),
+				}
+			: undefined;
 
 	return {
 		node,
 		edges,
 		symbolEdges,
-		diagnostics:
-			unresolvedImports.length > 0 ? { unresolvedImports } : undefined,
+		diagnostics,
 	};
 }
 
@@ -3057,6 +3132,7 @@ export function buildWorkspaceGraph(
 
 	// Create graph with original workspaceRoot form (not absolute path)
 	const graph = createEmptyGraph(workspaceRoot);
+	graph.repoRootId = deriveRepoRootId(absoluteRoot);
 	const stats: ScanStats = {
 		filesScanned: 0,
 		skippedDirs: 0,
@@ -3346,7 +3422,9 @@ export async function buildWorkspaceGraphAsync(
 		);
 	}
 
+	const repoRootId = deriveRepoRootId(absoluteRoot);
 	const graph = createEmptyGraph(workspaceRoot);
+	graph.repoRootId = repoRootId;
 	const stats: ScanStats = {
 		filesScanned: 0,
 		skippedDirs: 0,
@@ -3398,16 +3476,33 @@ export async function buildWorkspaceGraphAsync(
 	// scan interval bounds event-loop monopolization even when symbol extraction
 	// or its fail-open fallback resolves synchronously (issues #704 and #1144).
 	const seenEdges = new Set<string>();
-	const seenSymbolEdges = new Set<string>();
-	const allSymbolEdges: SymbolEdge[] = [];
+	const symbolEdgesById = new Map<string, SymbolEdge>();
 	let processedSinceYield = 0;
 	for (const filePath of sourceFiles) {
-		const result = await scanFileAsync(
-			filePath,
-			absoluteRoot,
-			maxFileSize,
-			hasManifest,
-		);
+		let result: AsyncScanResult;
+		try {
+			result = await scanFileAsync(
+				filePath,
+				absoluteRoot,
+				maxFileSize,
+				hasManifest,
+				repoRootId,
+			);
+		} catch {
+			mergeDiagnostics(
+				diagnostics,
+				symbolEdgeValidationFailure(
+					toModuleName(filePath, absoluteRoot),
+					getLanguage(filePath),
+				),
+			);
+			stats.skippedFiles++;
+			processedSinceYield++;
+			if (processedSinceYield % ASYNC_SCAN_YIELD_INTERVAL === 0) {
+				await yieldToEventLoop();
+			}
+			continue;
+		}
 		mergeDiagnostics(diagnostics, result.diagnostics);
 		if (result.inputWitness) {
 			pushInputWitness(
@@ -3445,17 +3540,35 @@ export async function buildWorkspaceGraphAsync(
 				}
 				// Aggregate symbolEdges across all files (dedup)
 				for (const symbolEdge of result.symbolEdges) {
-					const key =
-						symbolEdge.fromFile +
-						'\u0000' +
-						symbolEdge.fromSymbol +
-						'\u0000' +
-						symbolEdge.toFile +
-						'\u0000' +
-						symbolEdge.toSymbol;
-					if (!seenSymbolEdges.has(key)) {
-						seenSymbolEdges.add(key);
-						allSymbolEdges.push(symbolEdge);
+					const key = symbolEdge.id as string | undefined;
+					if (!key) {
+						mergeDiagnostics(
+							diagnostics,
+							symbolEdgeValidationFailure(
+								result.node.moduleName,
+								result.node.language,
+							),
+						);
+						continue;
+					}
+					const existing = symbolEdgesById.get(key);
+					if (!existing) {
+						symbolEdgesById.set(key, symbolEdge);
+						continue;
+					}
+					try {
+						symbolEdgesById.set(
+							key,
+							mergeSymbolEdges(existing, symbolEdge, absoluteRoot, repoRootId),
+						);
+					} catch {
+						mergeDiagnostics(
+							diagnostics,
+							symbolEdgeValidationFailure(
+								result.node.moduleName,
+								result.node.language,
+							),
+						);
 					}
 				}
 				stats.filesScanned++;
@@ -3477,8 +3590,8 @@ export async function buildWorkspaceGraphAsync(
 	};
 
 	// Attach symbolEdges when present (schema >= 1.2.0); keep additive.
-	if (allSymbolEdges.length > 0) {
-		graph.symbolEdges = allSymbolEdges;
+	if (symbolEdgesById.size > 0) {
+		graph.symbolEdges = [...symbolEdgesById.values()];
 	}
 	// AFTER symbolEdges are attached: the reconciler prunes symbol edges whose
 	// endpoints have no node, so it has to run once both edge collections exist.

@@ -15,7 +15,7 @@ const MODE_SKILLS = [
 	],
 	['SPECIFY', 'specify', ['SPEC CONTENT RULES', 'EXTERNAL PLAN IMPORT PATH']],
 	['CLARIFY-SPEC', 'clarify-spec', ['[NEEDS CLARIFICATION]', 'delta format']],
-	['RESUME', 'resume', ['.swarm/plan.md exists', 'Swarm field differs']],
+	['RESUME', 'swarm-resume', ['.swarm/plan.md exists', 'Swarm field differs']],
 	[
 		'CLARIFY',
 		'clarify',

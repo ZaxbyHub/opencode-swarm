@@ -4,3 +4,9 @@
 # starting with # are ignored.
 #
 # No active integration quarantines. Issue #1908 requires merge-group proof.
+
+# Refs #2396: skill_improver quota tests refuse to run inside the merge_group
+# integration batch (r.ran false); pass standalone. Merge-group proof: PR #2377
+# run 33109018048 and PR #2387 run 33110714121 failed identically on
+# 2026-08-27 while the standalone file passed on both branches.
+tests/integration/issue-629-skill-improver.test.ts
