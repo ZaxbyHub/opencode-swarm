@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.152.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.152.0...v7.152.1) (2026-08-27)
+
+
+### Bug Fixes
+
+* **skills:** address PR [#2387](https://github.com/ZaxbyHub/opencode-swarm/issues/2387) review findings and restore CI ([59e0162](https://github.com/ZaxbyHub/opencode-swarm/commit/59e01621398f6805d5533d08cdf1819281c157d2))
+* **skills:** rename resume skill slug to swarm-resume to unshadow /resume ([#2379](https://github.com/ZaxbyHub/opencode-swarm/issues/2379)) ([72761f7](https://github.com/ZaxbyHub/opencode-swarm/commit/72761f7af43195d4eb3b0dd9e625cb3988bc9be6))
+
 ## [7.152.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.151.1...v7.152.0) (2026-08-27)
 
 
