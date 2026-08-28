@@ -8,11 +8,15 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { createBackgroundCompletionObserver } from '../../../src/background/completion-observer';
+import {
+	createBackgroundCompletionObserver,
+	_internals as observerInternals,
+} from '../../../src/background/completion-observer';
 import {
 	buildBackgroundCompletionEventId,
 	claimTerminalResult,
 	findDelegationForCompletion,
+	maintainBackgroundDelegations,
 } from '../../../src/background/pending-delegations';
 import type { PluginConfig } from '../../../src/config';
 import { readTaskEvidence } from '../../../src/gate-evidence';
@@ -142,6 +146,8 @@ async function claimFailedTerminalWithoutProcessing(
 describe('issue #2402 legacy coder WAL ownership transfer', () => {
 	let directory = '';
 	let cleanup = (): void => {};
+	const realTransfer = observerInternals.transferCoderSettlementToBackground;
+	const realSleep = observerInternals.sleep;
 
 	beforeEach(() => {
 		resetSwarmState();
@@ -162,6 +168,8 @@ describe('issue #2402 legacy coder WAL ownership transfer', () => {
 	});
 
 	afterEach(() => {
+		observerInternals.transferCoderSettlementToBackground = realTransfer;
+		observerInternals.sleep = realSleep;
 		releaseCoderDispatchOwnership(directory, '1.1', 'coder:coder-call');
 		resetStandardWorktreeIsolationState();
 		resetSwarmState();
@@ -293,6 +301,8 @@ describe('issue #2402 legacy coder WAL ownership transfer', () => {
 
 	test('transfer failure keeps WAL diagnostics out of the parent advisory', async () => {
 		await launchMixedBackground(directory);
+		fs.mkdirSync(path.join(directory, 'src'), { recursive: true });
+		fs.writeFileSync(path.join(directory, 'src', 'feature.ts'), 'feature\n');
 		const walPath = path.join(
 			directory,
 			'.swarm',
@@ -307,9 +317,76 @@ describe('issue #2402 legacy coder WAL ownership transfer', () => {
 		expect(session.pendingAdvisoryMessages.at(-1)).toContain(
 			'legacy coder settlement transfer is pending',
 		);
+		const pending = await findDelegationForCompletion(
+			directory,
+			'coder-session',
+		);
+		expect(pending?.record.legacyCoderSettlementTransfer).toMatchObject({
+			taskId: '1.1',
+			transitionId: 'coder:coder-call',
+		});
 		expect(session.pendingAdvisoryMessages.at(-1)).not.toContain(walPath);
 		expect(session.pendingAdvisoryMessages.at(-1)).not.toContain(
 			'CODER_SETTLEMENT_WAL',
+		);
+	});
+
+	test('retries a transient Windows EPERM transfer failure before succeeding', async () => {
+		await launchMixedBackground(directory);
+		let attempts = 0;
+		observerInternals.transferCoderSettlementToBackground = async (options) => {
+			attempts += 1;
+			if (attempts === 1) throw new Error('EPERM');
+			return realTransfer(options);
+		};
+		observerInternals.sleep = async () => {};
+
+		await deliverTerminal(directory, 'completed');
+
+		expect(attempts).toBe(2);
+		expect(readLegacyWal(directory)).toMatchObject({
+			state: 'ABORTED',
+			cleanupComplete: true,
+		});
+	});
+
+	test('maintenance retries a failed transfer and replays the terminal ingestion', async () => {
+		await launchMixedBackground(directory);
+		fs.mkdirSync(path.join(directory, 'src'), { recursive: true });
+		fs.writeFileSync(path.join(directory, 'src', 'feature.ts'), 'feature\n');
+		const walPath = path.join(
+			directory,
+			'.swarm',
+			'coder-settlements',
+			'1.1.json',
+		);
+		const originalWal = fs.readFileSync(walPath, 'utf8');
+		fs.writeFileSync(walPath, '{ malformed legacy WAL');
+
+		await deliverTerminal(directory, 'completed');
+		expect(fs.readFileSync(walPath, 'utf8')).toContain('malformed');
+
+		fs.writeFileSync(walPath, originalWal);
+		await maintainBackgroundDelegations(directory, {
+			lockTimeoutMs: 1_000,
+		});
+		expect(readLegacyWal(directory)).toMatchObject({
+			state: 'ABORTED',
+			cleanupComplete: true,
+		});
+		expect((await readTaskEvidence(directory, '1.1'))?.workflow?.state).toBe(
+			'coder_delegated',
+		);
+		const recovered = await findDelegationForCompletion(
+			directory,
+			'coder-session',
+		);
+		expect(recovered?.record.legacyCoderSettlementTransfer).toBeUndefined();
+		expect(recovered?.record.advisoryInbox?.message).not.toContain(
+			'legacy coder settlement transfer is pending',
+		);
+		expect(recovered?.record.advisoryInbox?.message).toContain(
+			'completed and settled',
 		);
 	});
 

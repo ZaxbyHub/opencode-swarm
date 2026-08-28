@@ -1009,6 +1009,8 @@ async function initializeOpenCodeSwarm(
 					m.maintainBackgroundDelegations(ctx.directory, {
 						lockTimeoutMs: 5_000,
 						reason: 'post-init',
+						onLegacyCoderSettlementReconciled:
+							backgroundCompletionObserver.reconcilePending,
 					}),
 				),
 				BACKGROUND_MAINTENANCE_INIT_TIMEOUT_MS,
@@ -1444,6 +1446,8 @@ async function initializeOpenCodeSwarm(
 			await module.maintainBackgroundDelegations(ctx.directory, {
 				lockTimeoutMs: 2_000,
 				reason: 'session-close',
+				onLegacyCoderSettlementReconciled:
+					backgroundCompletionObserver.reconcilePending,
 			});
 		};
 	const delegationSanitizerHook = createDelegationSanitizerHook(ctx.directory);
