@@ -5122,6 +5122,11 @@ export interface MaintainBackgroundDelegationsOptions {
 	onLegacyCoderSettlementReconciled?: (
 		record: BackgroundDelegationRecord,
 	) => Promise<boolean>;
+	/** Notify the live observer after replacing a queued transfer advisory. */
+	onLegacyCoderSettlementAdvisoryReplaced?: (
+		record: BackgroundDelegationRecord,
+		replacement: ReplacePendingBackgroundAdvisoryResult,
+	) => void | Promise<void>;
 	/** Skip legacy coder WAL replay when this pass is already handling that path. */
 	skipLegacyCoderSettlementReconciliation?: boolean;
 }
@@ -5154,6 +5159,7 @@ async function reconcileLegacyCoderSettlements(
 	directory: string,
 	maxRecords: number,
 	onReconciled?: MaintainBackgroundDelegationsOptions['onLegacyCoderSettlementReconciled'],
+	onAdvisoryReplaced?: MaintainBackgroundDelegationsOptions['onLegacyCoderSettlementAdvisoryReplaced'],
 ): Promise<number> {
 	const reconciler =
 		onReconciled ?? getLegacyCoderSettlementReconciler(directory);
@@ -5212,6 +5218,15 @@ async function reconcileLegacyCoderSettlements(
 						},
 					);
 					advisoryRecorded = replaced !== null;
+					if (replaced) {
+						try {
+							await onAdvisoryReplaced?.(record, replaced);
+						} catch (callbackError) {
+							logger.warn(
+								`[background] legacy coder settlement advisory replacement notification failed for ${record.correlationId}: ${callbackError instanceof Error ? callbackError.message : String(callbackError)}`,
+							);
+						}
+					}
 				} else if (record.terminalResult) {
 					const stored = await putPendingBackgroundAdvisory(
 						directory,
@@ -5653,6 +5668,7 @@ export async function maintainBackgroundDelegations(
 				maxRecords,
 				options.onLegacyCoderSettlementReconciled ??
 					getLegacyCoderSettlementReconciler(directory),
+				options.onLegacyCoderSettlementAdvisoryReplaced,
 			);
 		} catch (error) {
 			logger.warn(

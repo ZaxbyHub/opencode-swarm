@@ -51,6 +51,7 @@ import {
 	preparePendingBackgroundAdvisories,
 	promoteDelegationFallback,
 	putPendingBackgroundAdvisory,
+	type ReplacePendingBackgroundAdvisoryResult,
 	recordDelegationIngestionResult,
 	registerLegacyCoderSettlementReconciler,
 	releaseBackgroundCoderReservation,
@@ -139,6 +140,10 @@ export function createBackgroundCompletionObserver(opts: {
 }): {
 	event: (input: { event: unknown }) => Promise<void>;
 	reconcilePending: (record: BackgroundDelegationRecord) => Promise<boolean>;
+	notifyLegacyCoderSettlementAdvisoryReplaced: (
+		record: BackgroundDelegationRecord,
+		replacement: ReplacePendingBackgroundAdvisoryResult,
+	) => void;
 	prepareAdvisories: (
 		parentSessionId: string,
 	) => Promise<PreparedBackgroundAdvisories | null>;
@@ -153,6 +158,23 @@ export function createBackgroundCompletionObserver(opts: {
 } {
 	const { config, directory } = opts;
 	let replayInProgress = false;
+	const notifyLegacyCoderSettlementAdvisoryReplaced = (
+		record: BackgroundDelegationRecord,
+		replacement: ReplacePendingBackgroundAdvisoryResult,
+	): void => {
+		const session = swarmState.agentSessions.get(record.parentSessionId);
+		if (!session) return;
+		removeQueuedLegacyTransferAdvisory(
+			session.pendingAdvisoryMessages,
+			replacement.advisory.eventId,
+		);
+		if (replacement.replacedMessage) {
+			removeQueuedAdvisoryMessage(session.pendingAdvisoryMessages, [
+				replacement.replacedMessage,
+			]);
+		}
+		pushAdvisory(session, replacement.advisory.message);
+	};
 
 	const event = async (input: ObserverEventInput): Promise<void> => {
 		if (!config.enabled) return;
@@ -278,6 +300,8 @@ export function createBackgroundCompletionObserver(opts: {
 						lockTimeoutMs: 1_000,
 						reason: 'trusted-terminal',
 						onLegacyCoderSettlementReconciled: reconcilePending,
+						onLegacyCoderSettlementAdvisoryReplaced:
+							notifyLegacyCoderSettlementAdvisoryReplaced,
 					});
 				} catch {
 					// observation only; another maintenance point will finish
@@ -505,6 +529,8 @@ export function createBackgroundCompletionObserver(opts: {
 								lockTimeoutMs: 1_000,
 								reason: 'ingestion-rejection',
 								skipLegacyCoderSettlementReconciliation: legacyTransferPending,
+								onLegacyCoderSettlementAdvisoryReplaced:
+									notifyLegacyCoderSettlementAdvisoryReplaced,
 							});
 						} catch {
 							// observation only; the facts ring records it
@@ -635,6 +661,7 @@ export function createBackgroundCompletionObserver(opts: {
 	return {
 		event,
 		reconcilePending,
+		notifyLegacyCoderSettlementAdvisoryReplaced,
 		prepareAdvisories,
 		ackObservedAdvisories: (parentSessionId, observedTexts) =>
 			acknowledgeObservedBackgroundAdvisories(

@@ -1011,6 +1011,8 @@ async function initializeOpenCodeSwarm(
 						reason: 'post-init',
 						onLegacyCoderSettlementReconciled:
 							backgroundCompletionObserver.reconcilePending,
+						onLegacyCoderSettlementAdvisoryReplaced:
+							backgroundCompletionObserver.notifyLegacyCoderSettlementAdvisoryReplaced,
 					}),
 				),
 				BACKGROUND_MAINTENANCE_INIT_TIMEOUT_MS,
@@ -1448,6 +1450,8 @@ async function initializeOpenCodeSwarm(
 				reason: 'session-close',
 				onLegacyCoderSettlementReconciled:
 					backgroundCompletionObserver.reconcilePending,
+				onLegacyCoderSettlementAdvisoryReplaced:
+					backgroundCompletionObserver.notifyLegacyCoderSettlementAdvisoryReplaced,
 			});
 		};
 	const delegationSanitizerHook = createDelegationSanitizerHook(ctx.directory);
