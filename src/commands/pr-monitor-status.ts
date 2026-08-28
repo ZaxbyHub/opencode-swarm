@@ -10,7 +10,11 @@
  *   /swarm pr status                              → show session subscriptions
  */
 
-import { listActive } from '../background/pr-subscriptions.js';
+import {
+	getPrSubscriptionHealth,
+	listActive,
+	type PrSubscriptionHealth,
+} from '../background/pr-subscriptions.js';
 import { resolveGhBinary } from '../tools/gh-evidence.js';
 import { runExternalTool } from '../utils/external-tool-runner.js';
 
@@ -152,14 +156,44 @@ function formatMergeGroupStatus(
 }
 
 /**
+ * Format the bounded-store storage-health footer (issue #2042). Counts and
+ * bytes only — never a path or repo identity.
+ */
+function formatStorageHealth(health: PrSubscriptionHealth): string {
+	const age =
+		health.checkpointAgeMs === null
+			? 'n/a'
+			: health.checkpointAgeMs < 5_000
+				? 'now'
+				: `${Math.floor(health.checkpointAgeMs / 1000)}s ago`;
+	const parts = [
+		`checkpoint seq ${health.sequence} (${age})`,
+		`active ${health.activeCount} · removed ${health.removedCount} · expired ${health.expiredCount}`,
+		`store ${health.checkpointBytes}/${health.checkpointLimitBytes} B (${health.pressurePct}%)`,
+		`audit ${health.auditLines} lines`,
+		`compactions ${health.compactions} · corrupt ${health.corruptLegacyRecords} · dropped-audit ${health.droppedAuditTransitions}`,
+		`source ${health.recoverySource}`,
+	];
+	const lines = [`Storage: ${parts.join(' · ')}`];
+	if (health.legacyOverLimit) {
+		lines.push(
+			'Warning: the legacy subscriptions log exceeds the migration size limit and was NOT loaded. Archive or split .swarm/pr-monitor/subscriptions.jsonl (subscriptions can be re-created with /swarm pr subscribe), then remove it.',
+		);
+	}
+	return lines.join('\n');
+}
+
+/**
  * Exposed for unit testing via _internals.
  */
 export const _internals = {
 	formatRelativeTime,
 	formatMergeGroupStatus,
+	formatStorageHealth,
 	listActive,
 	listMergeGroupRuns,
 	parseMergeGroupRuns,
+	getPrSubscriptionHealth,
 };
 
 /**
@@ -191,10 +225,22 @@ export async function handlePrMonitorStatusCommand(
 		? allActive
 		: allActive.filter((record) => record.sessionID === sessionID);
 
+	// Storage-health footer (issue #2042): bounded-store diagnostics rendered
+	// on both return paths; never throws and never blocks the subscription
+	// listing.
+	let storageFooter = '';
+	try {
+		const health = await _internals.getPrSubscriptionHealth(directory);
+		if (health) storageFooter = _internals.formatStorageHealth(health);
+	} catch {
+		// Health is best-effort — omit the footer on failure.
+	}
+
 	if (subs.length === 0) {
-		return allSessions
+		const empty = allSessions
 			? 'No active PR subscriptions.'
 			: 'No active PR subscriptions for this session.';
+		return storageFooter ? `${empty}\n\n${storageFooter}` : empty;
 	}
 
 	const lines: string[] = [];
@@ -264,6 +310,9 @@ export async function handlePrMonitorStatusCommand(
 	lines.push('');
 	if (!allSessions && totalActive !== subs.length) {
 		lines.push(`Total active across all sessions: ${totalActive}`);
+	}
+	if (storageFooter) {
+		lines.push(storageFooter);
 	}
 
 	return lines.join('\n');

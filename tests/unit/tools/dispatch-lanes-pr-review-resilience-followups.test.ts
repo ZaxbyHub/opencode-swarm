@@ -66,6 +66,13 @@ function terminalErrorResult(errorText: string) {
 		chars: text.length,
 		truncated: false,
 		digest: createHash('sha256').update(text).digest('hex'),
+		// Issue #2382: tests inject exactly what the settle path now persists.
+		terminalErrorClass: {
+			kind: 'provider' as const,
+			category: 'provider.rate_limit',
+			statusCode: 503,
+			hostRetryable: true,
+		},
 	};
 }
 
@@ -194,7 +201,7 @@ describe('dispatch_lanes PR review resilience follow-ups', () => {
 		expect(retriedState?.prReviewBaseDispatches ?? []).toHaveLength(1);
 	});
 
-	test('keeps the first admitted enabled policy snapshot even if current config flips disabled later', async () => {
+	test('current-config disable immediately disarms an already-admitted workflow (issue #2382 authoritative live disable)', async () => {
 		let created = 0;
 		dispatchInternals.getSessionOps = () => ({
 			create: mock(async () => ({ data: { id: `lane-session-${created++}` } })),
@@ -228,6 +235,10 @@ describe('dispatch_lanes PR review resilience follow-ups', () => {
 			expectedCurrentStatuses: ['pending', 'running'],
 		});
 
+		// Current config flips DISABLED: the persisted enabled snapshot must NOT
+		// keep resilience semantics alive (the pre-#2382 behavior this test used
+		// to pin). Staged dispatch is no longer even valid, and a legacy one-wave
+		// dispatch proceeds without resilience gating.
 		dispatchInternals.loadPluginConfig = () =>
 			({
 				pr_review_resilience: {
@@ -235,7 +246,8 @@ describe('dispatch_lanes PR review resilience follow-ups', () => {
 					enabled: false,
 				},
 			}) as ReturnType<typeof originalDispatchLoadPluginConfig>;
-		const secondWave = await executeDispatchLanesAsync(
+
+		const stagedWhileDisabled = await executeDispatchLanesAsync(
 			{
 				mode: 'swarm-pr-review:base',
 				pr_head_sha: 'abc123',
@@ -249,55 +261,116 @@ describe('dispatch_lanes PR review resilience follow-ups', () => {
 			directory,
 			{ sessionID: 'review-session-enabled-snapshot' },
 		);
-		expect(secondWave.success).toBe(true);
-		const state = await readPrWorkflowGateState(
-			directory,
-			'review-session-enabled-snapshot',
+		expect(stagedWhileDisabled.success).toBe(false);
+		expect(stagedWhileDisabled.failure_class).toBe('invalid_args');
+		expect(String(stagedWhileDisabled.message)).toContain(
+			'staged PR_REVIEW base dispatch is valid only when pr_review_resilience is enabled',
 		);
-		expect(state?.prReviewResilience?.policy.enabled).toBe(true);
-		expect(state?.prReviewResilience?.attempts).toHaveLength(2);
-		expect(state?.prReviewResilience?.attempts[1]?.attempt).toBe(1);
-		expect(created).toBe(2);
-	});
 
-	test('keeps the first admitted disabled policy snapshot even if current config flips enabled later', async () => {
-		let created = 0;
-		dispatchInternals.getSessionOps = () => ({
-			create: mock(async () => ({ data: { id: `lane-session-${created++}` } })),
-			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
-			delete: mock(async () => undefined),
-		});
-		dispatchInternals.loadPluginConfig = () =>
-			({
-				pr_review_resilience: {
-					...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
-					enabled: false,
-				},
-			}) as ReturnType<typeof originalDispatchLoadPluginConfig>;
-
-		const initialLegacyWave = await executeDispatchLanesAsync(
+		const legacyWave = await executeDispatchLanesAsync(
 			{
 				mode: 'swarm-pr-review:base',
 				pr_head_sha: 'abc123',
 				base_sha: 'def456',
 				base_ref: 'origin/main',
 				max_concurrent: 6,
-				lanes: fullWave('legacy-disabled'),
+				lanes: fullWave('legacy-after-disable'),
 			},
 			directory,
-			{ sessionID: 'review-session-disabled-snapshot' },
+			{ sessionID: 'review-session-enabled-snapshot' },
 		);
-		expect(initialLegacyWave.success).toBe(true);
+		expect(legacyWave.success).toBe(true);
 
-		dispatchInternals.loadPluginConfig = () =>
-			({
-				pr_review_resilience: {
-					...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
-					enabled: true,
+		const state = await readPrWorkflowGateState(
+			directory,
+			'review-session-enabled-snapshot',
+		);
+		// The persisted record survives for audit, marked disabled; the attempt
+		// ledger and (nonexistent) circuit are untouched by the disable.
+		expect(state?.prReviewResilience?.policy.enabled).toBe(false);
+		expect(state?.prReviewResilience?.attempts).toHaveLength(1);
+		expect(state?.prReviewResilience?.circuit).toBeUndefined();
+		expect(created).toBe(1 + 6);
+	});
+
+	test('re-enabling starts from a clean v2 CLOSED generation and never resurrects pre-disable evidence (issue #2382)', async () => {
+		// Seed a workflow whose persisted resilience record was last observed
+		// disabled, with an OPEN circuit carrying pre-disable evidence.
+		const sessionID = 'review-session-re-enable';
+		const statePath = path.join(
+			directory,
+			'.swarm',
+			gateInternals.workflowGateStateRelativePath(sessionID),
+		);
+		await fs.mkdir(path.dirname(statePath), { recursive: true });
+		await fs.writeFile(
+			statePath,
+			JSON.stringify({
+				schemaVersion: 1,
+				revision: 3,
+				sessionID,
+				mode: 'PR_REVIEW',
+				activatedAt: '2026-08-23T01:00:00.000Z',
+				updatedAt: '2026-08-23T02:00:00.000Z',
+				prHeadSha: 'abc123',
+				prReviewBaseRef: 'origin/main',
+				prReviewBaseSha: 'def456',
+				prReviewDepthTier: 'M',
+				prReviewDiffStats: {
+					changedLines: 2_000,
+					changedFiles: 60,
+					hasSubmoduleChange: false,
 				},
-			}) as ReturnType<typeof originalDispatchLoadPluginConfig>;
+				prReviewResilience: {
+					policy: {
+						enabled: false,
+						canaryProbeMs: 300_000,
+						statusProbeTimeoutMs: 2_000,
+						correlatedFailureThreshold: 2,
+						maxRetryAttemptsAfterInitial: 2,
+						circuitOpenDurationMs: 60_000,
+					},
+					attempts: [],
+					circuit: {
+						version: 2,
+						state: 'OPEN',
+						generation: 1,
+						providerClass: 'provider.rate_limit',
+						contributors: [
+							{
+								batchId: 'pre-disable-batch',
+								laneId: 'pre-disable-lane-0',
+								terminalAt: '2026-08-23T01:30:00.000Z',
+							},
+							{
+								batchId: 'pre-disable-batch',
+								laneId: 'pre-disable-lane-1',
+								terminalAt: '2026-08-23T01:31:00.000Z',
+							},
+						],
+						openedAt: '2026-08-23T01:32:00.000Z',
+						openUntil: '2026-08-23T01:33:00.000Z',
+					},
+				},
+			}),
+			'utf-8',
+		);
+		gateInternals.resetTrackedStateCache();
 
-		const stagedBlocked = await executeDispatchLanesAsync(
+		let created = 0;
+		dispatchInternals.getSessionOps = () => ({
+			create: mock(async () => ({
+				data: { id: `re-enable-session-${created++}` },
+			})),
+			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			delete: mock(async () => undefined),
+		});
+
+		// Re-enable in config: the very next staged dispatch must start from a
+		// clean v2 CLOSED generation — the OPEN circuit and its pre-disable
+		// contributors are discarded (waterline = now), and the canary is
+		// admitted rather than blocked by resurrected evidence.
+		const canary = await executeDispatchLanesAsync(
 			{
 				mode: 'swarm-pr-review:base',
 				pr_head_sha: 'abc123',
@@ -306,37 +379,23 @@ describe('dispatch_lanes PR review resilience follow-ups', () => {
 				pr_review_wave_stage: 'canary',
 				pr_review_wave_attempt: 0,
 				max_concurrent: 1,
-				lanes: [
-					lane('disabled-snapshot-canary', PR_REVIEW_BASE_DIMENSION_IDS[0]!),
-				],
+				lanes: [lane('re-enable-canary', PR_REVIEW_BASE_DIMENSION_IDS[0]!)],
 			},
 			directory,
-			{ sessionID: 'review-session-disabled-snapshot' },
+			{ sessionID },
 		);
-		expect(stagedBlocked.success).toBe(false);
-		expect(String(stagedBlocked.message)).toContain(
-			'staged PR_REVIEW base dispatch is valid only when pr_review_resilience is enabled',
-		);
+		expect(canary.success).toBe(true);
 
-		const secondLegacyWave = await executeDispatchLanesAsync(
-			{
-				mode: 'swarm-pr-review:base',
-				pr_head_sha: 'abc123',
-				base_sha: 'def456',
-				base_ref: 'origin/main',
-				max_concurrent: 6,
-				lanes: fullWave('legacy-disabled-second'),
-			},
-			directory,
-			{ sessionID: 'review-session-disabled-snapshot' },
-		);
-		expect(secondLegacyWave.success).toBe(true);
-		const state = await readPrWorkflowGateState(
-			directory,
-			'review-session-disabled-snapshot',
-		);
-		expect(state?.prReviewResilience?.policy.enabled).toBe(false);
-		expect(state?.prReviewResilience?.attempts).toEqual([]);
-		expect(created).toBe(12);
+		const state = await readPrWorkflowGateState(directory, sessionID);
+		expect(state?.prReviewResilience?.policy.enabled).toBe(true);
+		expect(state?.prReviewResilience?.attempts).toHaveLength(1);
+		const circuit = state?.prReviewResilience?.circuit;
+		expect(circuit?.version).toBe(2);
+		expect(circuit?.state).toBe('CLOSED');
+		expect(circuit?.generation).toBe(2);
+		expect(circuit?.contributors).toHaveLength(0);
+		expect(circuit?.evidenceWaterline).toBeDefined();
+		expect(circuit?.probe).toBeUndefined();
+		expect(created).toBe(1);
 	});
 });

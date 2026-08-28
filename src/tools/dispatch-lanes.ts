@@ -986,6 +986,15 @@ interface DispatchLanesExecutionContext {
 	sessionID?: string;
 }
 
+/**
+ * Issue #2382 split policy (critic-reviewed): the `enabled` flag is LIVE — the
+ * current resolved config always wins, so disabling `pr_review_resilience`
+ * immediately disarms an already-admitted workflow and a persisted snapshot can
+ * never keep resilience semantics alive against a disabled config. Numeric
+ * knobs are SNAPSHOT-STICKY: an admitted workflow keeps the knob values it was
+ * admitted under (snapshot ?? configured), so mid-flight config edits cannot
+ * move the threshold under an in-progress wave.
+ */
 function effectivePrReviewResilienceConfig(
 	configured: PrReviewResilienceConfig,
 	gateState?: {
@@ -996,18 +1005,25 @@ function effectivePrReviewResilienceConfig(
 				statusProbeTimeoutMs: number;
 				correlatedFailureThreshold: number;
 				maxRetryAttemptsAfterInitial: number;
+				circuitOpenDurationMs?: number;
 			};
 		};
 	},
 ): PrReviewResilienceConfig {
 	const policy = gateState?.prReviewResilience?.policy;
-	if (!policy) return configured;
 	return {
-		enabled: policy.enabled,
-		canary_probe_ms: policy.canaryProbeMs,
-		status_probe_timeout_ms: policy.statusProbeTimeoutMs,
-		correlated_failure_threshold: policy.correlatedFailureThreshold,
-		max_retry_attempts_after_initial: policy.maxRetryAttemptsAfterInitial,
+		enabled: configured.enabled,
+		canary_probe_ms: policy?.canaryProbeMs ?? configured.canary_probe_ms,
+		status_probe_timeout_ms:
+			policy?.statusProbeTimeoutMs ?? configured.status_probe_timeout_ms,
+		correlated_failure_threshold:
+			policy?.correlatedFailureThreshold ??
+			configured.correlated_failure_threshold,
+		max_retry_attempts_after_initial:
+			policy?.maxRetryAttemptsAfterInitial ??
+			configured.max_retry_attempts_after_initial,
+		circuit_open_duration_ms:
+			policy?.circuitOpenDurationMs ?? configured.circuit_open_duration_ms,
 	};
 }
 
@@ -2663,6 +2679,14 @@ async function collectOnce(
 						chars: reason.length,
 						truncated: false,
 						digest: digestText(reason),
+						// Issue #2382: durable typed classification — only a lane
+						// settled from a real child run with a classified terminal
+						// error carries it. Aborted lanes settle `cancelled`, which
+						// the circuit ignores regardless; carrying the class keeps
+						// the record's provenance complete.
+						terminalErrorClass: terminalErrorClassFromLaneTerminalError(
+							transcript.terminalError,
+						),
 					},
 					expectedCurrentStatuses: ['pending', 'running'],
 				},
@@ -3430,12 +3454,11 @@ interface LaneTerminalError {
 /**
  * Per-field budget for the settled reason string (issue #2349).
  *
- * `classifyTerminalFailureSignature` normalizes to 160 chars
- * (`src/hooks/pr-workflow-gate.ts`), so the DISCRIMINATING content — category
- * and provider message — must lead, and the constant `kind`/`name` suffix must
- * be small enough that it cannot push the discriminator out of the window.
- * Composing in the other order would collapse genuinely different failures into
- * one correlated-failure signature.
+ * Downstream signature/normalization consumers bound themselves to 160 chars,
+ * so the DISCRIMINATING content — category and provider message — must lead,
+ * and the constant `kind`/`name` suffix must be small enough that it cannot
+ * push the discriminator out of the window. Composing in the other order would
+ * collapse genuinely different failures into one correlated-failure signature.
  */
 const LANE_TERMINAL_REASON_MESSAGE_BUDGET = 100;
 
@@ -3464,6 +3487,29 @@ function laneTerminalErrorReason(error: LaneTerminalError): string {
 			: ` host_retryable=${error.hostRetryable}`;
 	// Discriminating content first (category, message), constant tail last.
 	return `${error.category}: ${message} [kind=${error.kind} name=${error.name}${status}${retryable}]`;
+}
+
+/**
+ * Issue #2382: bounded structured classification persisted beside the display
+ * reason so the PR-review resilience circuit can trust a typed
+ * provider-terminal signal without parsing display text. Category is clamped
+ * to the durable schema bound; a missing category degrades to `unknown`.
+ */
+function terminalErrorClassFromLaneTerminalError(
+	error: LaneTerminalError,
+): NonNullable<BackgroundDelegationResult['terminalErrorClass']> {
+	const category =
+		error.category.trim().length > 0
+			? error.category.trim().slice(0, 128)
+			: 'unknown';
+	return {
+		kind: error.kind,
+		category,
+		...(error.statusCode === undefined ? {} : { statusCode: error.statusCode }),
+		...(error.hostRetryable === undefined
+			? {}
+			: { hostRetryable: error.hostRetryable }),
+	};
 }
 
 function readErrorDataRecord(error: unknown): Record<string, unknown> {

@@ -122,7 +122,7 @@ describe('handlePrMonitorStatusCommand', () => {
 				'session-1',
 			);
 
-			expect(result).toBe('No active PR subscriptions for this session.');
+			expect(result).toContain('No active PR subscriptions for this session.');
 		});
 
 		test('returns no-subscriptions message when session has no subs but other sessions do', async () => {
@@ -151,7 +151,7 @@ describe('handlePrMonitorStatusCommand', () => {
 				'session-1',
 			);
 
-			expect(result).toBe('No active PR subscriptions for this session.');
+			expect(result).toContain('No active PR subscriptions for this session.');
 		});
 	});
 
@@ -525,7 +525,7 @@ describe('handlePrMonitorStatusCommand', () => {
 
 			const result = await handlePrMonitorStatusCommand(tempDir, [], '', 'cli');
 
-			expect(result).toBe('No active PR subscriptions.');
+			expect(result).toContain('No active PR subscriptions.');
 		});
 
 		test('non-CLI source with empty sessionID stays session-scoped (no leak)', async () => {
@@ -557,7 +557,7 @@ describe('handlePrMonitorStatusCommand', () => {
 				'chat',
 			);
 
-			expect(result).toBe('No active PR subscriptions for this session.');
+			expect(result).toContain('No active PR subscriptions for this session.');
 			expect(result).not.toContain('other/repo#2');
 		});
 	});
@@ -764,6 +764,6 @@ describe('Registry entry for pr status', () => {
 
 		expect(mockListActive).toHaveBeenCalledTimes(1);
 		expect(mockListActive).toHaveBeenCalledWith(tempDir);
-		expect(result).toBe('No active PR subscriptions for this session.');
+		expect(result).toContain('No active PR subscriptions for this session.');
 	});
 });

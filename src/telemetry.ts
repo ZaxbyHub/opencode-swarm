@@ -134,7 +134,14 @@ export type TelemetryEvent =
 	// bounded `.swarm/trajectories/` store — retained/dropped/corrupt counts,
 	// lock-skip counts, byte figures. Counts only; no session IDs, no paths,
 	// no trajectory content.
-	| 'trajectory_health';
+	| 'trajectory_health'
+	// PR-monitor subscription store health (issue #2042): bounded counts
+	// emitted on terminal compaction, legacy migration completion, legacy
+	// archive, and foreign/corrupt checkpoint recovery for the bounded
+	// `.swarm/pr-monitor/` checkpoint store — active/terminal counts,
+	// compaction and corrupt/drop counters, byte figures. Counts only; no
+	// correlationIds, no paths, no repo identities.
+	| 'pr_subscription_health';
 
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =
@@ -1064,6 +1071,34 @@ export const telemetry = {
 		limit_bytes: number;
 	}): void {
 		_internals.emit('trajectory_health', data);
+	},
+
+	/**
+	 * PR-monitor subscription store health (issue #2042): emitted on terminal
+	 * compaction, legacy migration completion, legacy archive, and
+	 * foreign/corrupt checkpoint recovery for the bounded `.swarm/pr-monitor/`
+	 * checkpoint store. Counts ONLY — no correlationIds, no filesystem paths,
+	 * no repo identities — matching the observability contract's
+	 * no-content-in-metrics rule. `corrupt_count` discloses legacy lines
+	 * skipped by the bounded fold; `dropped_audit_count` discloses audit-tail
+	 * transitions dropped by the high/low-water rewrite.
+	 */
+	prSubscriptionHealth(data: {
+		trigger:
+			| 'compact'
+			| 'migrate-complete'
+			| 'archive'
+			| 'foreign-rebind'
+			| 'corrupt-quarantine';
+		active_count: number;
+		terminal_count: number;
+		compactions: number;
+		corrupt_count: number;
+		dropped_audit_count: number;
+		checkpoint_bytes: number;
+		limit_bytes: number;
+	}): void {
+		_internals.emit('pr_subscription_health', data);
 	},
 
 	/**

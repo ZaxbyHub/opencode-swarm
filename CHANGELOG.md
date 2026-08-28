@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.154.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.153.2...v7.154.0) (2026-08-28)
+
+
+### Features
+
+* **pr-review:** typed recoverable resilience circuit ([#2382](https://github.com/ZaxbyHub/opencode-swarm/issues/2382)) ([9b82751](https://github.com/ZaxbyHub/opencode-swarm/commit/9b82751130c4cf8a92e07cc38b09ef75915c2f5e))
+* **pr-review:** typed recoverable resilience circuit ([#2382](https://github.com/ZaxbyHub/opencode-swarm/issues/2382)) ([cdba7f1](https://github.com/ZaxbyHub/opencode-swarm/commit/cdba7f1b1a0c08e2aa1a1a22db68560e06787394))
+
+
+### Bug Fixes
+
+* **pr-monitor:** compact subscription snapshots and bound reads (issue [#2042](https://github.com/ZaxbyHub/opencode-swarm/issues/2042)) ([f881acc](https://github.com/ZaxbyHub/opencode-swarm/commit/f881accebf86ea1c946e81148ddd1e4ece4bf39b))
+* **pr-monitor:** compact subscription snapshots and bound reads (issue [#2042](https://github.com/ZaxbyHub/opencode-swarm/issues/2042)) ([48cbe55](https://github.com/ZaxbyHub/opencode-swarm/commit/48cbe5560d4508f3cae9af23c1ae43fa5af34289))
+
 ## [7.153.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.153.1...v7.153.2) (2026-08-28)
 
 

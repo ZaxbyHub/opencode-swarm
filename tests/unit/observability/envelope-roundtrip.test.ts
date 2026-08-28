@@ -372,10 +372,7 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		limit_bytes: 1048576,
 	},
 
-	// Issue #2041 PRM session-trajectory store health. Payload mirrors the
-	// real producer in src/prm/trajectory-store.ts (compaction/cleanup/
-	// append_skip): bounded counts only — no session IDs, no paths, no
-	// trajectory content.
+	// Issue #2041 PRM session-trajectory store health (counts only).
 	trajectory_health: {
 		trigger: 'compaction',
 		retained_count: 500,
@@ -384,6 +381,18 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		skipped_lock_count: 0,
 		bytes: 204800,
 		limit_bytes: 524288,
+	},
+
+	// Issue #2042 PR-monitor subscription store health (counts only).
+	pr_subscription_health: {
+		trigger: 'compact',
+		active_count: 12,
+		terminal_count: 30,
+		compactions: 4,
+		corrupt_count: 1,
+		dropped_audit_count: 260,
+		checkpoint_bytes: 16384,
+		limit_bytes: 262144,
 	},
 };
 

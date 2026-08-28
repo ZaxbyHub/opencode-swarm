@@ -26,6 +26,7 @@ describe('PluginConfigSchema pr_review_resilience', () => {
 				status_probe_timeout_ms: 2_000,
 				correlated_failure_threshold: 2,
 				max_retry_attempts_after_initial: 2,
+				circuit_open_duration_ms: 60_000,
 			});
 		}
 
@@ -73,6 +74,8 @@ describe('PluginConfigSchema pr_review_resilience', () => {
 			{ correlated_failure_threshold: 1 },
 			{ max_retry_attempts_after_initial: 3 },
 			{ status_probe_timeout_ms: 0 },
+			{ circuit_open_duration_ms: 999 },
+			{ circuit_open_duration_ms: 1_800_001 },
 			{ unexpected_override: true },
 		]) {
 			expect(
