@@ -48,7 +48,7 @@ function entry(
 		action: 'edit',
 		target: 'src/a.ts',
 		intent: 'window',
-		timestamp: new Date().toISOString(),
+		timestamp: '2026-01-01T00:00:00.000Z',
 		result: 'success',
 		...overrides,
 	};
@@ -184,5 +184,52 @@ describe('pattern detection over the retained window (issue #2041)', () => {
 		const fromDisk = detectPatterns(diskRead.entries, config, 0);
 		expect(fromDisk.matches).toEqual(fromCache.matches);
 		expect(fromCache.matches.length).toBeGreaterThan(0);
+	});
+
+	test('the PRM hook cold-start reads a truncated window and detection sees the newest slice (PRR-028)', async () => {
+		// Real >1 MiB legacy file + empty cache: the hook's cold-start branch
+		// takes readTrajectoryWithCoverage (coverage truncated) and pattern
+		// detection runs on the newest retained window.
+		const { _internals, createPrmHook } = await import('../index');
+		const sessionId = 'ses-cold-truncated';
+		const trajectoriesDir = path.join(tempDir, '.swarm', 'trajectories');
+		fs.mkdirSync(trajectoriesDir, { recursive: true });
+		const lines: string[] = [];
+		for (let i = 1; i <= 8000; i++) {
+			lines.push(JSON.stringify(entry(i, { target: `src/cold-${i}.ts` })));
+		}
+		fs.writeFileSync(
+			path.join(trajectoriesDir, `${sessionId}.jsonl`),
+			lines.join('\n') + '\n',
+		);
+
+		const session = {
+			delegationActive: true,
+			prmTrajectoryStep: 0,
+			prmInjectedAdvisoryKeys: new Set<string>(),
+			prmStruckEpisodes: new Map<string, number>(),
+		};
+		const originalGetAgentSession = _internals.getAgentSession;
+		const originalDetectPatterns = _internals.detectPatterns;
+		let detected: TrajectoryEntry[] | null = null;
+		_internals.getAgentSession = (() => session) as never;
+		_internals.detectPatterns = ((traj: TrajectoryEntry[]) => {
+			if (detected === null) detected = traj;
+			return { matches: [], detectionTimeMs: 1, patternsChecked: 5 };
+		}) as never;
+
+		try {
+			const hook = createPrmHook(config, tempDir);
+			await hook.toolAfter({ sessionID: sessionId });
+
+			expect(detected).not.toBeNull();
+			const steps = (detected as TrajectoryEntry[]).map((e) => e.step);
+			expect(steps.length).toBeGreaterThan(0);
+			expect(steps.length).toBeLessThan(8000);
+			expect(steps[steps.length - 1]).toBe(8000);
+		} finally {
+			_internals.getAgentSession = originalGetAgentSession;
+			_internals.detectPatterns = originalDetectPatterns;
+		}
 	});
 });

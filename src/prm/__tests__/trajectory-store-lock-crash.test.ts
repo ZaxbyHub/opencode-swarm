@@ -13,6 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
+	_test_exports,
 	appendTrajectoryEntry,
 	clearTrajectoryCache,
 	readTrajectory,
@@ -29,7 +30,7 @@ function createEntry(step: number): TrajectoryEntry {
 		action: 'edit',
 		target: `src/f${step}.ts`,
 		intent: 'lock-crash test',
-		timestamp: new Date().toISOString(),
+		timestamp: '2026-01-01T00:00:00.000Z',
 		result: 'success',
 	};
 }
@@ -44,6 +45,9 @@ describe('trajectory-store lock/crash semantics (issue #2041)', () => {
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(canonicalTmp, 'trajectory-lock-'));
 		clearTrajectoryCache();
+		// The held-lock test increments the module-global lock-skip counters;
+		// reset them so co-run files observe a clean slate (PRR-016 seam).
+		_test_exports.resetLockSkipCounters();
 	});
 
 	afterEach(() => {
@@ -84,9 +88,10 @@ describe('trajectory-store lock/crash semantics (issue #2041)', () => {
 		fs.mkdirSync(dir, { recursive: true });
 		const lock = `${trajectoryFile(tempDir, sessionId)}.lock`;
 		// A lock older than lockStaleMs (5 min) is a crashed writer's leftover.
-		const old = new Date(Date.now() - 10 * 60 * 1000);
+		// Fixed 2020 epoch: deterministically stale without reading the clock.
+		const oldSeconds = 1_577_836_800;
 		fs.writeFileSync(lock, '99999');
-		fs.utimesSync(lock, old, old);
+		fs.utimesSync(lock, oldSeconds, oldSeconds);
 
 		await appendTrajectoryEntry(sessionId, createEntry(1), tempDir, 1000);
 

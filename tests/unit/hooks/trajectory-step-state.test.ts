@@ -76,8 +76,13 @@ describe('trajectory-step-state -- regression: bounded session counters (F-001/F
 		nextTrajectoryStep('session-x', rootA);
 		nextTrajectoryStep('session-x', rootB);
 		nextTrajectoryStep('session-x', rootA);
+		const genBefore = _test_exports.getStepCounterGeneration();
 
 		clearTrajectoryStepCounters('session-x');
+
+		// Generation bumps on clear: the logger's seed gate keys on it, so
+		// any counter clear structurally invalidates stale restart gates.
+		expect(_test_exports.getStepCounterGeneration()).toBeGreaterThan(genBefore);
 
 		expect(nextTrajectoryStep('session-x', rootA)).toBe(1);
 		expect(nextTrajectoryStep('session-x', rootB)).toBe(1);

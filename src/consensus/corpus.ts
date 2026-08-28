@@ -708,12 +708,15 @@ async function loadPrmSessions(
 			entries = await readers.readTrajectory(sessionId, directory);
 			const checkpoint = await readTrajectoryCheckpoint(sessionId, directory);
 			// Parity with the live reader's coverage semantics
-			// (implementation-review round 1): a window is partial when
-			// compaction dropped entries OR the file exceeds the read window
-			// — the same two conditions `readTrajectoryWithCoverage` ORs.
+			// (implementation-review round 1 + maintainer review #2395): a
+			// window is partial when compaction dropped entries OR dropped
+			// whole-file bytes beyond its read window OR the file still
+			// exceeds the read window — the same conditions
+			// `readTrajectoryWithCoverage` ORs.
 			const bytes = await trajectoryFileBytes(sessionId, directory);
 			complete =
 				(checkpoint?.droppedEntries ?? 0) === 0 &&
+				(checkpoint?.droppedBytes ?? 0) === 0 &&
 				(bytes ?? 0) <= TRAJECTORY_LIMITS.readMaxBytes;
 		}
 		if (!complete) onIncompleteWindow();

@@ -19,6 +19,26 @@ const MAX_TRACKED_STEP_SESSIONS = 500;
 
 const sessionStepCounters = new Map<string, number>();
 
+/**
+ * Bumped whenever counters are cleared or reset. The logger's restart-seed
+ * gate folds this into its keys, so ANY counter invalidation — including
+ * `resetSwarmState`'s direct `clearTrajectoryStepCounters()` here in module
+ * state, which does not go through the logger's own gate-invalidating entry
+ * points — structurally forces the next mint to re-seed from the persisted
+ * high-water mark instead of minting duplicate step 1s (maintainer review
+ * #2395 / PRR-013).
+ */
+let stepCounterGeneration = 0;
+
+/** Current step-counter generation (changes on every clear/reset). */
+export function trajectoryStepGeneration(): number {
+	return stepCounterGeneration;
+}
+
+function bumpStepCounterGeneration(): void {
+	stepCounterGeneration += 1;
+}
+
 function evictOldestStepSessionIfNeeded(key: string): void {
 	if (sessionStepCounters.has(key)) return;
 	while (sessionStepCounters.size >= MAX_TRACKED_STEP_SESSIONS) {
@@ -79,6 +99,7 @@ export function resetTrajectoryStepCounter(
 	const key = compositeSessionKey(directory, sessionId);
 	evictOldestStepSessionIfNeeded(key);
 	sessionStepCounters.set(key, 0);
+	bumpStepCounterGeneration();
 }
 
 /**
@@ -89,11 +110,17 @@ export function resetTrajectoryStepCounter(
 export function clearTrajectoryStepCounters(sessionId?: string): void {
 	if (sessionId !== undefined) {
 		const suffix = sessionKeySuffix(sessionId);
+		let removed = false;
 		for (const key of sessionStepCounters.keys()) {
-			if (key.endsWith(suffix)) sessionStepCounters.delete(key);
+			if (key.endsWith(suffix)) {
+				sessionStepCounters.delete(key);
+				removed = true;
+			}
 		}
-	} else {
+		if (removed) bumpStepCounterGeneration();
+	} else if (sessionStepCounters.size > 0) {
 		sessionStepCounters.clear();
+		bumpStepCounterGeneration();
 	}
 }
 
@@ -103,4 +130,6 @@ export const _test_exports = {
 	/** Whether a counter exists for this session+root in this process. */
 	hasTrajectoryStepCounter: (sessionId: string, directory: string) =>
 		sessionStepCounters.has(compositeSessionKey(directory, sessionId)),
+	/** Current generation (test seam: gate-invalidation assertions). */
+	getStepCounterGeneration: () => stepCounterGeneration,
 };

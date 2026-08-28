@@ -111,7 +111,7 @@ describe('findViolations', () => {
 		expect(violations).toHaveLength(0);
 	});
 
-	test('allowlisted files are exempt from both rules', () => {
+	test('a file on BOTH allowlists is exempt from both rules', () => {
 		const seamSource =
 			"import { x } from './trajectory-store'; const p = 'trajectories';";
 		expect(
@@ -121,6 +121,37 @@ describe('findViolations', () => {
 				TRAJECTORY_MENTION_ALLOWLIST,
 			),
 		).toHaveLength(0);
+	});
+
+	test('an import-allowlisted file is still ratcheted for raw path literals (de-nest regression, maintainer review #2395)', () => {
+		// trajectory-logger.ts is an APPROVED importer but NOT on the mention
+		// allowlist: a raw .swarm/trajectories literal there must be caught
+		// even though the import rule exempts the file.
+		const callerSource =
+			"import { appendTrajectoryEntry } from '../prm/trajectory-store';\nconst root = path.join(dir, 'trajectories');";
+		const violations = findViolations(
+			[{ file: 'src/hooks/trajectory-logger.ts', source: callerSource }],
+			TRAJECTORY_STORE_IMPORT_ALLOWLIST,
+			TRAJECTORY_MENTION_ALLOWLIST,
+		);
+		expect(violations).toHaveLength(1);
+		expect(violations[0].text).toContain('path-literal mention');
+	});
+
+	test('the two rules gate on INDEPENDENT allowlists (de-nest property)', () => {
+		// A file on the mention allowlist but absent from a given import
+		// allowlist must still be import-ratcheted, and vice versa — the
+		// literal rule must never be shadowed by import-allowlist membership
+		// (maintainer review #2395, finding 1).
+		const source =
+			"import { readTrajectory } from '../prm/trajectory-store';\nconst p = 'trajectories';";
+		const violations = findViolations(
+			[{ file: 'src/some/other.ts', source }],
+			{ 'src/unrelated.ts': {} }, // empty import allowlist
+			{ 'src/some/other.ts': {} }, // file IS mention-allowlisted
+		);
+		expect(violations).toHaveLength(1);
+		expect(violations[0].text).toContain('outside the approved caller set');
 	});
 });
 

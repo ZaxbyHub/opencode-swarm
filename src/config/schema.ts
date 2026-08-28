@@ -2438,7 +2438,8 @@ export const PrmConfigSchema = z.object({
 			stuck_on_test: 3,
 			context_thrash: 10,
 		})),
-	max_trajectory_lines: z.number().min(10).default(1000),
+	// .max bounds the emergent per-project trajectory footprint (200 files/dir x per-session byte ceiling scales with this knob; maintainer review #2395 / PRR-014).
+	max_trajectory_lines: z.number().min(10).max(10000).default(1000),
 	escalation_enabled: z.boolean().default(true),
 	detection_timeout_ms: z.number().min(10).default(100),
 });

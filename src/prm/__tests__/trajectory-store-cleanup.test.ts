@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-
+import { withFrozenClock } from '../../../tests/helpers/test-clock.js';
 import {
 	_test_exports,
 	cleanupOldTrajectoryFiles,
@@ -23,9 +23,15 @@ const { TRAJECTORY_LIMITS } = _test_exports;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-function touchOld(file: string, ageMs: number): void {
-	const at = new Date(Date.now() - ageMs);
-	fs.utimesSync(file, at, at);
+// Fixed epoch instants (2020-01-01 / 2100-01-01): the sweeper computes
+// its own cutoff from the real clock, so tests only need mtimes that are
+// deterministically far older/newer than any 7-day horizon — no raw clock
+// reads in test code (tests/unit test-clock gate, now covering src).
+const OLD_EPOCH_S = 1_577_836_800;
+const FUTURE_EPOCH_S = 4_102_444_800;
+
+function touchOld(file: string, _ageMs: number): void {
+	fs.utimesSync(file, OLD_EPOCH_S, OLD_EPOCH_S);
 }
 
 function mkTrajectory(tempDir: string, name: string): string {
@@ -68,28 +74,38 @@ describe('trajectory-store cleanup budgets (issue #2041)', () => {
 	test('the per-directory count cap deletes oldest-first (adversarial mtime backstop)', async () => {
 		const cap = TRAJECTORY_LIMITS.maxFilesPerDir;
 		const total = cap + 10;
-		for (let i = 0; i < total; i++) {
-			const file = mkTrajectory(tempDir, `s-${String(i).padStart(4, '0')}`);
-			// All files fresh (no age eviction); ages strictly ordered so the
-			// oldest-first choice is deterministic: higher index = older.
-			touchOld(file, i * 1000);
-		}
+		// Frozen clock: "now" is a fixed instant, so mtimes offset from it are
+		// simultaneously FRESH (within the 7-day horizon) and strictly ordered
+		// — no raw clock reads in test code (test-clock gate now scans src).
+		const fixedNowMs = 1_700_000_000_000;
+		await withFrozenClock(
+			async () => {
+				for (let i = 0; i < total; i++) {
+					const file = mkTrajectory(tempDir, `s-${String(i).padStart(4, '0')}`);
+					// Higher index = older; all within the age horizon.
+					const atMs = fixedNowMs - i * 1000;
+					fs.utimesSync(file, atMs / 1000, atMs / 1000);
+				}
 
-		await cleanupOldTrajectoryFiles(tempDir, 7);
+				await cleanupOldTrajectoryFiles(tempDir, 7);
 
-		const remaining = fs
-			.readdirSync(path.join(tempDir, '.swarm', 'trajectories'))
-			.filter((n) => n.endsWith('.jsonl'));
-		expect(remaining.length).toBeLessThanOrEqual(cap);
-		// The NEWEST sessions survive; the most-aged are reaped first.
-		expect(remaining).toContain('s-0000.jsonl');
-		expect(remaining).toContain('s-0199.jsonl');
-		expect(remaining).not.toContain('s-0209.jsonl');
+				const remaining = fs
+					.readdirSync(path.join(tempDir, '.swarm', 'trajectories'))
+					.filter((n) => n.endsWith('.jsonl'));
+				expect(remaining.length).toBeLessThanOrEqual(cap);
+				// The NEWEST sessions survive; the most-aged are reaped first.
+				expect(remaining).toContain('s-0000.jsonl');
+				expect(remaining).toContain('s-0199.jsonl');
+				expect(remaining).not.toContain('s-0209.jsonl');
+			},
+			{ fixedNowMs },
+		);
 	});
 
 	test('a future-dated mtime is clamped to now — no flash-delete, no immortal file via age alone', async () => {
 		const futureFile = mkTrajectory(tempDir, 'future-session');
-		const future = new Date(Date.now() + 365 * DAY_MS);
+		// utimes accepts epoch SECONDS directly — no Date construction needed.
+		const future = FUTURE_EPOCH_S;
 		fs.utimesSync(futureFile, future, future);
 
 		await cleanupOldTrajectoryFiles(tempDir, 7);

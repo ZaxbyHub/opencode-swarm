@@ -188,6 +188,10 @@ describe('PRM real trajectory pipeline', () => {
 		);
 
 		const entries = await readTrajectory(sessionId, tempDir);
-		expect(entries.map((entry) => entry.step)).toEqual([1, 1]);
+		// Issue #2041 (maintainer review #2395 / PRR-013): resetSwarmState
+		// bumps the step-counter generation, which invalidates the logger's
+		// restart-seed gate — the post-reset mint re-seeds from the persisted
+		// high-water mark instead of duplicating step 1.
+		expect(entries.map((entry) => entry.step)).toEqual([1, 2]);
 	});
 });

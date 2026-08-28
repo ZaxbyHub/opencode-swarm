@@ -189,35 +189,43 @@ export function findViolations(
 ): UsageViolation[] {
 	const violations: UsageViolation[] = [];
 	for (const { file, source } of sources) {
-		if (importAllowlist[file] === undefined) {
-			const stripped = stripComments(source);
-			if (TRAJECTORY_STORE_IMPORT.test(stripped)) {
-				violations.push({
-					file,
-					line: 0,
-					text: 'imports the trajectory store module outside the approved caller set',
-				});
-			}
-			if (mentionAllowlist[file] === undefined) {
-				const lines = stripped.split('\n');
-				for (let idx = 0; idx < lines.length; idx += 1) {
-					const trimmedLine = lines[idx]!.trimStart();
-					// JSDoc-body lines and line comments are not code mentions.
-					if (
-						trimmedLine.startsWith('*') ||
-						trimmedLine.startsWith('//')
-					) {
-						continue;
-					}
-					if (TRAJECTORY_LITERAL.test(lines[idx]!)) {
-						violations.push({
-							file,
-							line: idx + 1,
-							text: `unregistered 'trajectories' path-literal mention — ${lines[idx]!
-								.trim()
-								.slice(0, 120)}`,
-						});
-					}
+		const stripped = stripComments(source);
+		// RULE 1: import graph. Any file NOT on the import allowlist that
+		// imports the store is a violation.
+		if (
+			importAllowlist[file] === undefined &&
+			TRAJECTORY_STORE_IMPORT.test(stripped)
+		) {
+			violations.push({
+				file,
+				line: 0,
+				text: 'imports the trajectory store module outside the approved caller set',
+			});
+		}
+		// RULE 2: raw path-literal mention. Guarded ONLY by the mention
+		// allowlist — deliberately NOT nested under RULE 1, otherwise the
+		// import-allowlisted production callers (the files most likely to
+		// introduce a raw .swarm/trajectories read) would be exempt from the
+		// literal ratchet (maintainer review #2395, finding 1).
+		if (mentionAllowlist[file] === undefined) {
+			const lines = stripped.split('\n');
+			for (let idx = 0; idx < lines.length; idx += 1) {
+				const trimmedLine = lines[idx]!.trimStart();
+				// JSDoc-body lines and line comments are not code mentions.
+				if (
+					trimmedLine.startsWith('*') ||
+					trimmedLine.startsWith('//')
+				) {
+					continue;
+				}
+				if (TRAJECTORY_LITERAL.test(lines[idx]!)) {
+					violations.push({
+						file,
+						line: idx + 1,
+						text: `unregistered 'trajectories' path-literal mention — ${lines[idx]!
+							.trim()
+							.slice(0, 120)}`,
+					});
 				}
 			}
 		}

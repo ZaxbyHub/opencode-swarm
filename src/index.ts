@@ -964,10 +964,12 @@ async function initializeOpenCodeSwarm(
 	// The lazy trigger inside the PRM hook only fires for sessions that go
 	// delegation-active; a project that never delegates would otherwise never
 	// reap idle trajectory files. This pass rides the wrapper-owned
-	// post-resolution queue (never the server()-resolution path), is
-	// hard-bounded by withTimeout, deletes at most a bounded number of files
-	// per run, and fails open — the lazy per-session trigger and every
-	// subsequent plugin load remain as backstops.
+	// post-resolution queue (never the server()-resolution path) and fails
+	// open. Bound honesty (maintainer review #2395): withTimeout bounds only
+	// how long the SCHEDULER waits before giving up on the awaited promise —
+	// the fire-and-forget sweep itself is bounded by the sweeper's own
+	// maxDeletionsPerRun/maxFilesPerDir caps, not by the timeout. The lazy
+	// per-session trigger and every subsequent plugin load remain as backstops.
 	postResolutionTasks.push(function trajectoryCleanupPostInitTask() {
 		return withTimeout(
 			cleanupOldTrajectoryFiles(ctx.directory),

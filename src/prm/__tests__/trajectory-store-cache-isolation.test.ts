@@ -30,7 +30,7 @@ function createEntry(step: number): TrajectoryEntry {
 		action: 'edit',
 		target: 'src/a.ts',
 		intent: 'isolation',
-		timestamp: new Date().toISOString(),
+		timestamp: '2026-01-01T00:00:00.000Z',
 		result: 'success',
 	};
 }
@@ -69,10 +69,7 @@ describe('trajectory-store cache isolation (issue #2041)', () => {
 	test('a junction/symlink alias of a root shares one cache identity', async () => {
 		const sessionId = 'ses-alias';
 		const realRoot = fs.mkdtempSync(path.join(canonicalTmp, 'traj-iso-real-'));
-		const alias = path.join(
-			fs.realpathSync(os.tmpdir()),
-			`traj-alias-${Date.now()}`,
-		);
+		const alias = path.join(canonicalTmp, 'traj-alias-fixed');
 		// Junctions need no privileges on Windows; symlinks elsewhere.
 		fs.symlinkSync(
 			realRoot,

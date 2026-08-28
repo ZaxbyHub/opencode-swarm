@@ -39,7 +39,7 @@ function createEntry(
 		action: 'edit',
 		target: `src/file-${step}.ts`,
 		intent: 'bounded-store test',
-		timestamp: new Date().toISOString(),
+		timestamp: '2026-01-01T00:00:00.000Z',
 		result: 'success',
 		tool: 'write',
 		args_summary: `summary-${step}`,
@@ -282,5 +282,22 @@ describe('trajectory-store disk bounds (issue #2041)', () => {
 		// readTrajectory returns the retained window in order.
 		const read = await readTrajectory(sessionId, tempDir);
 		expect(read.length).toBe(entries.length);
+	});
+
+	test('per-session resets do not defeat the line-count compaction cadence (maintainer review #2395, finding 4)', async () => {
+		const sessionId = 'counter-wipe';
+		const maxLines = 20;
+
+		// Interleave UNRELATED-session cache clears with appends: the old
+		// wholesale appendCheckCounters wipe reset this session's compaction
+		// cadence too, so the file overshoot ~2.2x the line budget.
+		for (let i = 1; i <= 30; i++) {
+			await appendTrajectoryEntry(sessionId, createEntry(i), tempDir, maxLines);
+			await clearTrajectoryCache('unrelated-other-session');
+		}
+
+		const entries = readDiskLines(tempDir, sessionId);
+		expect(entries.length).toBeLessThanOrEqual(maxLines);
+		expect(entries[entries.length - 1].step).toBe(30);
 	});
 });

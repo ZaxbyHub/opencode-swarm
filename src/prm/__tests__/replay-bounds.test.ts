@@ -19,7 +19,8 @@ const { REPLAY_LIMITS, resetReplayByteTracking } = _test_exports;
 function makeArtifact(tempDir: string): string {
 	const dir = path.join(tempDir, '.swarm', 'replays');
 	fs.mkdirSync(dir, { recursive: true });
-	return path.join(dir, `ses-test-${Date.now()}.jsonl`);
+	// Unique-enough per test run: each test also uses its own temp root.
+	return path.join(dir, 'ses-test-fixed.jsonl');
 }
 
 describe('replay byte cap (issue #2041)', () => {
@@ -64,9 +65,10 @@ describe('replay byte cap (issue #2041)', () => {
 		}
 
 		const size = fs.statSync(artifact).size;
-		expect(size).toBeLessThanOrEqual(
-			REPLAY_LIMITS.maxBytes + REPLAY_LIMITS.maxBytes, // generous slack for the stat cadence
-		);
+		// Worst case: one entry (~6 KiB) lands between the cap check and the
+		// estimate update; 8 KiB of slack covers it without masking a real
+		// enforcement failure.
+		expect(size).toBeLessThanOrEqual(REPLAY_LIMITS.maxBytes + 8 * 1024);
 		// The cap actually stopped recording (fewer than all 220 entries).
 		const lines = fs
 			.readFileSync(artifact, 'utf-8')

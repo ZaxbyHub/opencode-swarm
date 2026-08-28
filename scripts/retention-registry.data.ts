@@ -721,7 +721,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		stateClass: 'derived-rebuildable',
 		privacyClass: 'metadata',
 		writeLimits: {
-			bound: 'max_lines default 500 PER-FILE enforced at write time; truncation keeps newest 250 (:114-133, default at :466)',
+			bound: 'max_lines PER-FILE enforced at write time; truncation keeps newest floor(max_lines/2) (:114-133). NOTE (maintainer review #2395, finding on claim 7): the production knob is now `prm.max_trajectory_lines` (src/index.ts passes it to createTrajectoryLoggerHook and the denied-call path), previously a hardcoded 1000 — the writer CODE is unchanged but the evidence truncation budget is config-coupled; default 1000 is identical, so no default-config regression.',
 			scope: 'per-key',
 			keyspaceBound:
 				'FINITE BY REAPER, not by key domain: one key per taskId directory, and taskId is only shape-validated (src/validation/task-id.ts:69-114 admits any /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/ id, explicitly beyond plan task numbers), so the key domain is open. What bounds it is a GLOBAL deleter: ACTIVE_STATE_DIRS_TO_CLEAN contains "evidence" (src/commands/close.ts:574-583) and the close clean loop runs fs.rm(dirPath, {recursive: true}) over the whole .swarm/evidence/ tree (src/commands/close.ts:1761-1773), dropping every key in one pass on a single session-lifecycle trigger. CAVEAT (verified, do not soften): the trigger is lifecycle-driven rather than size-driven and is archive-first-gated (src/commands/close.ts:1762-1765 skips the delete when the directory was not archived), and neither /swarm reset nor /swarm reset-session touches this tree — so a session that never closes accumulates one directory per distinct taskId.',
@@ -748,7 +748,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/prm/trajectory-store.ts'],
 		writerCitations: [
-			'src/prm/trajectory-store.ts appendTrajectoryEntry — locked appendFile with torn-tail re-framing; per-file .lock (wx, PID, 5-min stale-break, 20x5ms retry); append-time byte ceiling + every-25-appends line-count check both run bounded reverse compaction keeping the newest floor(maxLines/2) lines (issue #2041)',
+			'src/prm/trajectory-store.ts appendTrajectoryEntry — locked appendFile with torn-tail re-framing; per-file .lock (wx existence lock — PID written for diagnostics only, never liveness-checked — 5-min stale-break, 20x5ms retry); append-time byte ceiling + every-25-appends line-count check both run bounded reverse compaction keeping the newest floor(maxLines/2) lines (issue #2041)',
 		],
 		readerCitations: [
 			'src/prm/trajectory-store.ts readTrajectoryWithCoverage — TAIL-BOUNDED (readMaxBytes 1 MiB), coverage complete/truncated/empty + droppedByCompaction from the checkpoint (issue #2041)',
@@ -770,7 +770,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			sync: false,
 			citation: 'src/prm/trajectory-store.ts readTrajectoryWithCoverage/getCurrentStep',
 		},
-		lockModel: 'per-file cross-process .lock (wx+PID, stale-break, bounded retry) + in-process per-key promise chain; lock-exhaust skips the append with a warned, counted loss (trajectory_health append_skip)',
+		lockModel: 'per-file cross-process .lock (wx existence lock, no PID liveness check, stale-break, bounded retry) + in-process per-key promise chain; lock-exhaust skips the append with a warned, counted loss (trajectory_health append_skip)',
 		crashBehavior: 'tmp+rename atomic publish; checkpoint written after the data rewrite under the same lock and ratchets max(prev, observed); the newest window always retains the max step; torn tails re-framed on append; corrupt lines shed and counted at compaction',
 		closePolicy: 'untouched (bounded at write; age/count sweep owns reaping)',
 		resetPolicy: 'resetPrmSessionState clears pointers, not files; step counters reseed from the checkpoint on next mint',

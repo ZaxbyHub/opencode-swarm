@@ -25,7 +25,8 @@
  *   checkpoint alone preserves step continuity (that is why it exists).
  * - Two writers: an in-process per-key promise chain (same-process appends
  *   never burn the cross-process retry budget) plus a per-file `.lock`
- *   (wx create, PID, stale-break, bounded retry). Lock exhaustion skips the
+ *   (wx existence create — the PID inside is diagnostic only, never
+ *   liveness-checked — stale-break, bounded retry). Lock exhaustion skips the
  *   append with a warning — telemetry loss is preferred over file corruption
  *   in this best-effort store — and is counted into `trajectory_health`.
  *
@@ -196,14 +197,22 @@ export function clearTrajectoryCache(sessionId?: string): void {
 		for (const key of _inMemoryTrajectoryCache.keys()) {
 			if (key.endsWith(suffix)) _inMemoryTrajectoryCache.delete(key);
 		}
+		// Scope the bookkeeping clear to the SAME session: a wholesale wipe
+		// here (fired by per-session reset paths, e.g. the delegation gate's
+		// per-callID reset) would reset every OTHER session's compaction
+		// check counters and let their files overshoot the line budget far
+		// past the check interval (maintainer review #2395, finding 4).
+		for (const key of appendChains.keys()) {
+			if (key.endsWith(suffix)) appendChains.delete(key);
+		}
+		for (const key of appendCheckCounters.keys()) {
+			if (key.endsWith(suffix)) appendCheckCounters.delete(key);
+		}
 	} else {
 		_inMemoryTrajectoryCache.clear();
+		appendChains.clear();
+		appendCheckCounters.clear();
 	}
-	// Chains/counters are bookkeeping, not file state: an in-flight append
-	// still completes its locked write; a cleared chain simply starts a fresh
-	// queue (the per-file lock still serializes any overlap).
-	appendChains.clear();
-	appendCheckCounters.clear();
 }
 
 // ─── In-process per-key serialization + per-file cross-process lock ─────────
@@ -257,10 +266,12 @@ async function acquireTrajectoryLock(
 	lockPath: string,
 ): Promise<TrajectoryLock> {
 	for (let attempt = 0; attempt <= TRAJECTORY_LIMITS.lockRetries; attempt++) {
+		let handle: FileHandle | null = null;
 		try {
-			const handle = await fs.open(lockPath, 'wx');
+			handle = await fs.open(lockPath, 'wx');
 			await handle.writeFile(String(process.pid), 'utf-8');
 			await handle.close();
+			handle = null;
 			return {
 				release: async () => {
 					try {
@@ -271,11 +282,26 @@ async function acquireTrajectoryLock(
 				},
 			};
 		} catch (err) {
+			// A write/close failure after the wx-create leaves an orphaned lock
+			// (and an open fd): close the fd and remove OUR own lock file so we
+			// never gate this session's appends behind our own crashed create
+			// until the stale-break. Only EEXIST (someone else won the race)
+			// proceeds to the retry/backoff path.
+			if (handle !== null) {
+				await handle.close().catch(() => {});
+				await fs.unlink(lockPath).catch(() => {});
+			}
 			const code = (err as NodeJS.ErrnoException).code;
 			if (code !== 'EEXIST') throw err;
 			try {
 				const stat = await fs.stat(lockPath);
-				if (Date.now() - stat.mtimeMs > TRAJECTORY_LIMITS.lockStaleMs) {
+				// Math.abs (not a clamp): a future-dated mtime (clock skew,
+				// utimes manipulation) must ALSO stale-break, and a clamp would
+				// make the diff non-negative so a far-future lock never goes
+				// stale. Same pattern as skill-usage-pending.ts (PR #2347 FB-009).
+				if (
+					Math.abs(Date.now() - stat.mtimeMs) > TRAJECTORY_LIMITS.lockStaleMs
+				) {
 					await fs.unlink(lockPath).catch(() => {});
 					continue;
 				}
@@ -381,6 +407,17 @@ interface TrajectoryCheckpoint {
 	version: 1;
 	highestStep: number;
 	droppedEntries: number;
+	/**
+	 * Cumulative bytes discarded whole — chiefly the pre-window portion of an
+	 * oversized file that a tail-bounded compaction rewrote away (shed
+	 * windowed entries also contribute their bytes here, alongside their
+	 * counts in droppedEntries: the two metrics are independent dimensions
+	 * of the same loss). Without this, a compaction whose window kept every
+	 * windowed entry (droppedEntries delta 0) would silently erase megabytes
+	 * beyond the window while coverage still reported `complete`. Optional
+	 * on READ for checkpoints written before this field existed.
+	 */
+	droppedBytes?: number;
 	compactedAt: string;
 }
 
@@ -388,8 +425,11 @@ async function readCheckpointByPath(
 	metaPath: string,
 ): Promise<TrajectoryCheckpoint | null> {
 	try {
-		const raw = await fs.readFile(metaPath, 'utf-8');
-		const parsed = JSON.parse(raw) as Partial<TrajectoryCheckpoint>;
+		// Bounded read (the checkpoint is a single ~100-byte JSON line); a
+		// planted/oversized sidecar can never balloon memory here.
+		const tail = await readTailBytes(metaPath, 64 * 1024);
+		if (tail === null || tail.totalBytes === 0) return null;
+		const parsed = JSON.parse(tail.content) as Partial<TrajectoryCheckpoint>;
 		if (
 			parsed.version !== 1 ||
 			typeof parsed.highestStep !== 'number' ||
@@ -398,7 +438,11 @@ async function readCheckpointByPath(
 		) {
 			return null;
 		}
-		return parsed as TrajectoryCheckpoint;
+		return {
+			...parsed,
+			droppedBytes:
+				typeof parsed.droppedBytes === 'number' ? parsed.droppedBytes : 0,
+		} as TrajectoryCheckpoint;
 	} catch {
 		return null;
 	}
@@ -508,6 +552,13 @@ async function compactTrajectoryFile(
 	atomicWriteSwarmFileSync(trajectoryPath, content);
 
 	const previous = await readCheckpointByPath(getMetaPath(trajectoryPath));
+	// Bytes discarded WHOLE: everything in the file that neither survived in
+	// keptLines nor counted as a windowed entry/malformed line — chiefly the
+	// pre-window portion when the file exceeded compactMaxBytes. Recording it
+	// keeps coverage honest: a compaction that erases megabytes beyond its
+	// read window must never report full fidelity (maintainer review #2395).
+	const droppedBytes =
+		(previous?.droppedBytes ?? 0) + Math.max(0, tail.totalBytes - keptBytes);
 	const checkpoint: TrajectoryCheckpoint = {
 		version: 1,
 		highestStep: Math.max(parsed.maxStep, previous?.highestStep ?? 0),
@@ -515,6 +566,7 @@ async function compactTrajectoryFile(
 			0,
 			(previous?.droppedEntries ?? 0) + Math.max(0, dropped),
 		),
+		droppedBytes,
 		compactedAt: new Date().toISOString(),
 	};
 	atomicWriteSwarmFileSync(
@@ -699,10 +751,11 @@ export async function readTrajectoryWithCoverage(
 		const key = compositeSessionKey(directory, sessionId);
 		setTrajectoryCache(key, parsed.entries, maxLines);
 		const dropped = checkpoint?.droppedEntries ?? 0;
+		const droppedBytes = checkpoint?.droppedBytes ?? 0;
 		const coverage: TrajectoryCoverage =
 			parsed.entries.length === 0 && tail.totalBytes === 0
 				? 'empty'
-				: tail.offset > 0 || dropped > 0
+				: tail.offset > 0 || dropped > 0 || droppedBytes > 0
 					? 'truncated'
 					: 'complete';
 		return {
@@ -759,6 +812,11 @@ export const _test_exports = {
 	/** Test isolation: the cleanup debounce is module-global state. */
 	resetCleanupDebounce: () => {
 		lastCleanupScheduledAtMs = 0;
+	},
+	/** Test isolation: lock-skip counters are module-global state. */
+	resetLockSkipCounters: () => {
+		skippedLockAppends = 0;
+		lastAppendSkipEventAtMs = 0;
 	},
 	appendFileIsTorn: async (filePath: string): Promise<boolean> => {
 		const tail = await readTailBytes(filePath, 1);

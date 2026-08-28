@@ -35,7 +35,7 @@ function entry(step: number): string {
 		action: 'edit',
 		target: `src/f${step}.ts`,
 		intent: 'read-window',
-		timestamp: new Date().toISOString(),
+		timestamp: '2026-01-01T00:00:00.000Z',
 		result: 'success',
 	});
 }
@@ -122,7 +122,7 @@ describe('trajectory-store bounded reads (issue #2041)', () => {
 				version: 1,
 				highestStep: 51,
 				droppedEntries: 49,
-				compactedAt: new Date().toISOString(),
+				compactedAt: '2026-01-01T00:00:00.000Z',
 			}) + '\n',
 		);
 
@@ -174,7 +174,7 @@ describe('trajectory-store bounded reads (issue #2041)', () => {
 				version: 1,
 				highestStep: 2000,
 				droppedEntries: 1998,
-				compactedAt: new Date().toISOString(),
+				compactedAt: '2026-01-01T00:00:00.000Z',
 			}) + '\n',
 		);
 		// Every data line becomes corrupt (the fully-corrupt compaction case).
@@ -195,10 +195,74 @@ describe('trajectory-store bounded reads (issue #2041)', () => {
 				version: 1,
 				highestStep: 5, // stale/low checkpoint
 				droppedEntries: 0,
-				compactedAt: new Date().toISOString(),
+				compactedAt: '2026-01-01T00:00:00.000Z',
 			}) + '\n',
 		);
 
 		expect(await getCurrentStep(sessionId, tempDir)).toBe(20);
+	});
+
+	test('a compaction whose window keeps every windowed entry still discloses byte loss (maintainer review #2395, finding 3)', async () => {
+		const sessionId = 'fat-window-fidelity';
+		// 60 lines x ~48 KiB = ~2.9 MiB — beyond compactMaxBytes (1 MiB) —
+		// with maxLines=4000: keepCount (2000) keeps EVERY windowed entry and
+		// the derived byte ceiling (~2 MB) sheds nothing, so the old
+		// accounting computed droppedEntries == 0 while rewriting megabytes
+		// of pre-window history away — and coverage reported 'complete'.
+		// Lines stay under maxLineBytes (64 KiB) so they parse as entries.
+		const dir = path.join(tempDir, '.swarm', 'trajectories');
+		fs.mkdirSync(dir, { recursive: true });
+		const file = path.join(dir, `${sessionId}.jsonl`);
+		const fatEntry = (step: number) =>
+			JSON.stringify({
+				step,
+				agent: 'coder',
+				action: 'edit',
+				target: `src/fat-${step}.ts`,
+				intent: 'f',
+				timestamp: '2026-01-01T00:00:00.000Z',
+				result: 'success',
+				args_summary: 'x'.repeat(48 * 1024),
+			});
+		const lines: string[] = [];
+		for (let i = 1; i <= 60; i++) lines.push(fatEntry(i));
+		fs.writeFileSync(file, lines.join('\n') + '\n');
+
+		// One append past the byte ceiling triggers the append-time
+		// compaction, which rewrites from its 1 MiB tail window.
+		const { appendTrajectoryEntry } = await import('../trajectory-store');
+		await appendTrajectoryEntry(
+			sessionId,
+			{
+				step: 61,
+				agent: 'coder',
+				action: 'edit',
+				target: 'src/next.ts',
+				intent: 'f',
+				timestamp: '2026-01-01T00:00:00.000Z',
+				result: 'success',
+			},
+			tempDir,
+			4000,
+		);
+
+		const checkpoint = await readTrajectoryCheckpoint(sessionId, tempDir);
+		expect(checkpoint?.droppedEntries).toBe(0); // every WINDOWED entry kept
+		expect(checkpoint?.droppedBytes).toBeGreaterThan(0); // pre-window bytes disclosed
+
+		const read = await readTrajectoryWithCoverage(sessionId, tempDir, 4000);
+		expect(read.coverage).toBe('truncated'); // never claim full fidelity
+	});
+
+	test('getCurrentStep returns the true max with duplicate and reordered steps (PRR-021)', async () => {
+		const sessionId = 'dup-steps';
+		makeSessionFile(tempDir, sessionId, [
+			entry(1),
+			entry(5),
+			entry(5),
+			entry(3),
+		]);
+		clearTrajectoryCache();
+		expect(await getCurrentStep(sessionId, tempDir)).toBe(5);
 	});
 });

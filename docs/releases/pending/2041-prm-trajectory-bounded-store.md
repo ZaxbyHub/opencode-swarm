@@ -80,6 +80,27 @@ same close/archive consumers. The dead `truncateTrajectoryIfNeeded` export is
 removed (release note for direct importers: use the append path, which now
 enforces the bound itself).
 
+Review hardening (maintainer + swarm review rounds on PR #2395): the usage
+ratchet's literal-mention rule is no longer shadowed by import-allowlist
+membership and runs as a blocking CI step (matching the #2039/#2040 peer
+ratchets); compaction discloses bytes discarded beyond its read window
+(`droppedBytes` in the checkpoint — it can no longer report full fidelity
+while erasing pre-window history, and the corpus flags such sessions);
+per-session cache resets no longer reset other sessions' compaction cadence;
+the lock stale-break uses an absolute-delta comparison so a future-dated lock
+mtime cannot immortalize it, and a failed lock create cleans up its own file;
+the step checkpoint read is byte-bounded like every other read;
+`prm.max_trajectory_lines` gains a schema upper bound (10000) so the emergent
+per-project footprint cannot be configured arbitrarily large; and the
+step-counter generation invalidates the restart-seed gate on any reset, so
+`/swarm close` + same-process re-init no longer mints duplicate step 1s.
+
+Known follow-ups (deliberately deferred, tracked in the PR review): a real
+two-process lock-contention fixture (current tests exercise the lock protocol
+via seeded lock states and same-process concurrency), and a mid-session
+`max_trajectory_lines` lowering test (the budget is captured at hook
+creation; a config reload applies to new sessions).
+
 Anti-regression: a new `trajectory_health` telemetry event is catalogued (the
 50th kind) with producer/consumer/retention ownership; the retention registry
 rows for `prm-session-trajectories` and `prm-replays` move to retain-by-design

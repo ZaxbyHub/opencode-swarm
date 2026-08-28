@@ -23,6 +23,7 @@ import {
 	nextTrajectoryStep,
 	resetTrajectoryStepCounter,
 	seedTrajectoryStepCounter,
+	trajectoryStepGeneration,
 } from './trajectory-step-state.js';
 import { validateSwarmPath } from './utils';
 
@@ -469,8 +470,13 @@ const stepSeedPromises = new Map<string, Promise<void>>();
 function stepSeedKey(sessionId: string, directory: string): string {
 	// Canonical (not literal) directory, matching the step counters and the
 	// trajectory store: two aliases of one root share one seed gate, so the
-	// counter cannot be seeded twice with divergent views.
-	return compositeSessionKey(directory, sessionId);
+	// counter cannot be seeded twice with divergent views. The step-counter
+	// generation prefixes the key: ANY counter clear/reset anywhere (e.g.
+	// resetSwarmState's direct clearTrajectoryStepCounters, which bypasses
+	// this module's gate-invalidating entry points) structurally invalidates
+	// every stale gate, so the next mint re-seeds from disk instead of
+	// duplicating step 1s (maintainer review #2395 / PRR-013).
+	return `${trajectoryStepGeneration()}:${compositeSessionKey(directory, sessionId)}`;
 }
 
 function markStepSeedGate(gateKey: string): void {
