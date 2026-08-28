@@ -1,5 +1,26 @@
 # Changelog
 
+## [7.153.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.152.1...v7.153.0) (2026-08-28)
+
+
+### Features
+
+* **repo-map:** source-bearing context_pack with budgets, snippets, and omissions (KG-12) ([ddede76](https://github.com/ZaxbyHub/opencode-swarm/commit/ddede76c5bdc23084730e265feca75ed42154565))
+
+
+### Bug Fixes
+
+* **dispatch-lanes:** make PR-review collection a non-destructive observer ([04400f1](https://github.com/ZaxbyHub/opencode-swarm/commit/04400f16d32b6055613566fc01c2c54e2001a473))
+* **security:** enforce full-auto integrity boundaries ([0c411cf](https://github.com/ZaxbyHub/opencode-swarm/commit/0c411cfb752bfdcd05a1d34bab8f3933f89007b5))
+
+## [7.152.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.152.0...v7.152.1) (2026-08-27)
+
+
+### Bug Fixes
+
+* **skills:** address PR [#2387](https://github.com/ZaxbyHub/opencode-swarm/issues/2387) review findings and restore CI ([59e0162](https://github.com/ZaxbyHub/opencode-swarm/commit/59e01621398f6805d5533d08cdf1819281c157d2))
+* **skills:** rename resume skill slug to swarm-resume to unshadow /resume ([#2379](https://github.com/ZaxbyHub/opencode-swarm/issues/2379)) ([72761f7](https://github.com/ZaxbyHub/opencode-swarm/commit/72761f7af43195d4eb3b0dd9e625cb3988bc9be6))
+
 ## [7.152.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.151.1...v7.152.0) (2026-08-27)
 
 

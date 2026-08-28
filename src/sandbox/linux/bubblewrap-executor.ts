@@ -208,6 +208,7 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 		scopePaths: string[],
 		tempDir?: string,
 		envOverrides?: Record<string, string | null>,
+		policy?: { network_mode?: 'off' | 'on' },
 	): string {
 		// Re-check availability before each wrap — bwrap may become unavailable mid-session
 		if (!this._available) {
@@ -260,7 +261,6 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 		// Core sandbox arguments
 		const args = [
 			'--unshare-user',
-			'--unshare-net',
 			'--unshare-ipc',
 			'--die-with-parent',
 			'--new-session',
@@ -294,6 +294,9 @@ export class BubblewrapSandboxExecutor implements SandboxExecutor {
 			'-c',
 			`'${shellEscape(command)}'`,
 		];
+		if ((policy?.network_mode ?? 'off') === 'off') {
+			args.splice(1, 0, '--unshare-net');
+		}
 
 		const binary = _internals.resolveBwrapBinary();
 		return `${binary} ${args.join(' ')}`;

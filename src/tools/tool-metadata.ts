@@ -879,7 +879,7 @@ export const TOOL_METADATA = {
 	},
 	collect_lane_results: {
 		description:
-			'collect or poll results for a dispatch_lanes_async batch; supports both non-blocking polling (wait omitted or false) and blocking join (wait: true). Non-blocking polls include pending lane identities by default and process settled lanes incrementally while continuing independent work; busy/retry lanes are not timed out just because they run for a long time. Does not advance workflow gates. Inline output for a settled lane is delivered only once: later polls of the same lane set output_omitted_repeat: true and omit output, but still include output_ref for recovery via retrieve_lane_output.',
+			'collect or poll results for a dispatch_lanes_async batch; a pure OBSERVER that never cancels or terminalizes child work unless you explicitly pass cancel_pending. Supports both non-blocking polling (wait omitted or false) and blocking join (wait: true). The wait budget bounds the observer call only — its expiry never kills a lane and is not evidence a lane died, so do not abort the workflow because a collection expired; poll again, cancel explicitly, or rely on the presumed-stale backstop. Any unsettled lane is reported in pending_lanes (batch_id, lane_id, stored status, output_ref when present) regardless of include_pending; busy/retry lanes are not timed out just because they run for a long time. Does not advance workflow gates. Inline output for a settled lane is delivered only once: later polls of the same lane set output_omitted_repeat: true and omit output, but still include output_ref for recovery via retrieve_lane_output.',
 		agents: ['architect'],
 	},
 	summarize_work: {

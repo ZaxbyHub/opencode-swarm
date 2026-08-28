@@ -95,7 +95,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/commands/handoff.ts:48 (pre-#2035)',
 			'src/commands/handoff.ts:79 (pre-#2035)',
 			'src/memory/local-jsonl-provider.ts:1171',
-			'src/config/bundled-skills.ts:241',
+			'src/config/bundled-skills.ts:250',
 		],
 	},
 	{
@@ -105,8 +105,8 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		token: 'instance',
 		quarantineEligible: true,
 		parsesTarget: true,
-		producers: ['src/hooks/pr-workflow-gate.ts:14566'],
-		note: 'pre/post-rename file-identity verification (assertOpened/ClosedSwarmFileIdentity, pr-workflow-gate.ts:14531-14579) is writer-specific and load-bearing',
+		producers: ['src/hooks/pr-workflow-gate.ts:14582'],
+		note: 'pre/post-rename file-identity verification (assertOpened/ClosedSwarmFileIdentity, pr-workflow-gate.ts:14547-14595) is writer-specific and load-bearing',
 	},
 	{
 		id: 'target-suffix-tmp-num-num-json',

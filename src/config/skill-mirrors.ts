@@ -48,9 +48,13 @@ export const MIRRORED_ARCHITECT_MODE_SKILLS: Array<{
 		canonical: '.opencode',
 	},
 	{
-		slug: 'resume',
-		opencodePath: '.opencode/skills/resume/SKILL.md',
-		claudePath: '.claude/skills/resume/SKILL.md',
+		// Slug renamed from `resume` (issue #2379): both hosts expose native
+		// skill directories as `/<slug>` slash commands, so the bare slug
+		// shadowed Claude Code's built-in `/resume` conversation command. The
+		// internal MODE label stays `RESUME`; only the user-facing slug moved.
+		slug: 'swarm-resume',
+		opencodePath: '.opencode/skills/swarm-resume/SKILL.md',
+		claudePath: '.claude/skills/swarm-resume/SKILL.md',
 		canonical: '.opencode',
 	},
 	{

@@ -227,7 +227,7 @@ graphs (the `getDeadExports` pattern, `query.ts:257`).
 
 ### `context_pack` query (`src/tools/repo-graph/query.ts`)
 
-`getContextPack(graph, file, symbol, { maxDepth, maxTokens })`:
+`getContextPack(graph, file, symbol, { maxDepth, maxTokens, includeSource, sourceMode })`:
 1. Gate on schema ≥ 1.2.0.
 2. Seed with the target's own span from `exportRanges`.
 3. Traverse `symbolEdges` both directions to `maxDepth` (forward callees + reverse
@@ -247,6 +247,67 @@ graphs (the `getDeadExports` pattern, `query.ts:257`).
    carry real spans. The lookup is own-property guarded, so a symbol named after
    an `Object.prototype` member (`constructor`, `toString`) takes this path
    rather than resolving to an inherited function.
+
+#### Source-bearing packs (KG-12, issue #1533)
+
+`include_source: true` embeds extracted source text in spans and adds a parallel
+`snippets` array with provenance. `include_source` is the sole gate; `source_mode`
+only refines extraction once source was requested (`source_mode` without
+`include_source` produces a warning and is ignored).
+
+- `source_mode`:
+  - `mixed` (default) — body text for near spans (span mode `full`), signature
+    text for periphery spans (span mode `signature`);
+  - `body` — range text for every span with an export range, capped at 80 lines
+    (a capped body is returned as snippet mode `summary`, not complete source);
+  - `signature` — signature text for every span with an export range.
+- Snippet `mode` describes the returned text, independent of span mode:
+  `full` (whole range), `signature` (signature-only), `summary` (body capped at
+  80 lines).
+- Signature rule (deterministic, language-agnostic): from the span's
+  `startLine`, skip up to 3 leading decorator lines (`@…` — Python
+  `decorated_definition` ranges start at the first decorator), then scan at most
+  3 lines, stopping at the first trimmed line ending `{` or `:`; with no
+  terminator (Ruby `def foo(x)`), emit only the first non-decorator line.
+- Each snippet carries `hash` (sha256 hex of the returned text — a content
+  fingerprint; summary-mode hashes are cap-dependent because the text itself is
+  truncated, and text/hashes reflect the file's on-disk line endings, so CRLF
+  and LF checkouts of the same commit hash differently) and `confidence`
+  (resolution-quality score: `1.0` exact target, `0.8` resolved neighbor; real
+  edge confidence arrives with KG-11/#1532).
+  Spans whose read failed, fell outside the workspace, or lack an export range
+  produce no snippet.
+- Token budget: span-only packs keep the line-based estimate (12 tokens/line
+  full, 10 signature). With `include_source`, each span's cost is REPLACED by a
+  char-based estimate of the extracted text (`ceil(len / 3.5)`), and
+  `estimatedTokens` reports that sum. Packing is deterministic: spans are
+  greedily admitted in relevance order (target → depth → file → symbol) and the
+  target span is always included, even if it alone exceeds `max_tokens` (a
+  warning states this when it happens).
+- Containment: source reads resolve canonically (`isCanonicalPathWithinRoot` —
+  both sides realpath'd with a nearest-existing-ancestor walk), so symlinks or
+  junctions pointing outside the workspace fail closed with span note
+  `source outside workspace` + warning (missing in-workspace files still fail
+  open with `source read failed`).
+- `coverage` (present on every result): `reachedSymbols` / `returnedSymbols` /
+  `omittedByBudget` (reached − returned, including `top_n` drops applied by the
+  tool handler) plus `unresolvedEdges` and `lowConfidenceEdges` — distinct
+  destination SYMBOLS (symbol-keyed sets, not edge instances) whose edge target
+  file is absent from the graph, or whose target file exists but lacks an
+  own-property export range (the same predicate as the internal-symbol span
+  fallback, so coverage and spans agree — the seeded target symbol is
+  classified too when it itself lacks a range).
+- `warnings` (always an array): bounded and deduplicated — aggregate count
+  strings for budget omissions / unresolved / low-confidence destinations, and
+  at most 5 per-span failure details (`source read failed for <file>:<symbol>`,
+  `source outside workspace for <file>:<symbol>`) followed by
+  `... and N more` aggregates. The tool handler also merges staleness
+  (`freshnessNote`) and `source_mode`-without-`include_source` advisories into
+  `warnings`. Warnings (and `estimatedTokens`) describe the query-layer result
+  BEFORE the handler's `top_n` slice — a warning may reference a span that
+  `top_n` dropped (`budget.dropped` / `coverage.omittedByBudget` disclose the
+  drop count); `truncated: true` likewise covers both budget exhaustion and
+  `top_n` capping (pre-existing semantics).
 
 ### Tool wiring (`src/tools/repo-map.ts`) — all five surfaces
 

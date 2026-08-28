@@ -29,6 +29,8 @@ import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 const originalGetSandboxExecutor = guardrailsInternals.getSandboxExecutor;
+const originalAssessSandboxEnforcement =
+	guardrailsInternals.assessSandboxEnforcement;
 
 const { createGuardrailsHooks } = await import('../../../src/hooks/guardrails');
 const { resetSwarmState, swarmState } = await import('../../../src/state');
@@ -70,6 +72,8 @@ describe('applySandboxExecution — F6b macOS-only env override wiring (#2236)',
 
 	afterEach(() => {
 		guardrailsInternals.getSandboxExecutor = originalGetSandboxExecutor;
+		guardrailsInternals.assessSandboxEnforcement =
+			originalAssessSandboxEnforcement;
 		resetSwarmState();
 		cleanup();
 	});
@@ -93,6 +97,24 @@ describe('applySandboxExecution — F6b macOS-only env override wiring (#2236)',
 				return 'wrapped-command';
 			},
 			getEnvOverrides: () => envOverrides,
+		});
+		guardrailsInternals.assessSandboxEnforcement = async () => ({
+			allowed: true,
+			capability: {
+				platform: 'darwin',
+				mechanism: 'sandbox-exec',
+				status: 'enabled',
+				strength: 'strong',
+				identity:
+					'darwin:sandbox-exec:enabled:strong:fs=enforced:net=enforced:proc=enforced',
+				dimensions: {
+					filesystem: 'enforced',
+					network: 'enforced',
+					process: 'enforced',
+				},
+			},
+			reasons: [],
+			cacheKey: 'darwin:sandbox-exec:test',
 		});
 
 		const hooks = createGuardrailsHooks(directory, { ...baseGuardrailsConfig });
@@ -126,6 +148,24 @@ describe('applySandboxExecution — F6b macOS-only env override wiring (#2236)',
 				getEnvOverridesCalled = true;
 				return {};
 			},
+		});
+		guardrailsInternals.assessSandboxEnforcement = async () => ({
+			allowed: true,
+			capability: {
+				platform: 'linux',
+				mechanism: 'Bubblewrap',
+				status: 'enabled',
+				strength: 'strong',
+				identity:
+					'linux:bubblewrap:enabled:strong:fs=enforced:net=enforced:proc=enforced',
+				dimensions: {
+					filesystem: 'enforced',
+					network: 'enforced',
+					process: 'enforced',
+				},
+			},
+			reasons: [],
+			cacheKey: 'linux:bubblewrap:test',
 		});
 
 		const hooks = createGuardrailsHooks(directory, { ...baseGuardrailsConfig });

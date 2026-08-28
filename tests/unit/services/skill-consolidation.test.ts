@@ -54,7 +54,7 @@ describe('skill consolidation cadence', () => {
 			now: new Date('2026-06-14T12:00:00.000Z'),
 		});
 
-		expect(result.started).toBe(true);
+		expect(result.started, result.reason).toBe(true);
 		expect(result.result?.ran).toBe(true);
 		expect(existsSync(result.result!.proposalPath!)).toBe(true);
 		expect(existsSync(consolidationStatePath(tmp))).toBe(true);

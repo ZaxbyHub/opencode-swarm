@@ -7,7 +7,7 @@ export const BUNDLED_PROJECT_SKILLS = [
 	'brainstorm',
 	'specify',
 	'clarify-spec',
-	'resume',
+	'swarm-resume',
 	'clarify',
 	'discover',
 	'consult',
@@ -48,6 +48,15 @@ export const BUNDLED_PROJECT_SKILLS = [
 	'durable-session-state',
 ] as const;
 export type BundledProjectSkill = (typeof BUNDLED_PROJECT_SKILLS)[number];
+/**
+ * Bundled skill slugs that were retired (renamed away) in shipped releases.
+ * The sync removes their materialized directories from
+ * `.swarm/bundled-skills/` in existing user projects so a rename never leaves
+ * a stale protocol copy behind (issue #2379: `resume` → `swarm-resume`).
+ * A slug must never appear both here and in BUNDLED_PROJECT_SKILLS (asserted
+ * by tests/unit/skills/claude-slug-collision-guard.test.ts).
+ */
+export const RETIRED_BUNDLED_PROJECT_SKILLS = ['resume'] as const;
 /**
  * Project-private runtime location for plugin-owned skills. Repository-native
  * skill roots (`.opencode/skills`, `.claude/skills`, and `.agents/skills`) are
@@ -290,11 +299,61 @@ async function copyBundledDirectoryBoundedAsync(
 		throw err;
 	}
 }
+/**
+ * Best-effort removal of retired bundled-slug directories from a project's
+ * private runtime root. Validates its own root (refuses a symlinked
+ * `skillsDir` before any delete), is bounded (fixed retired list — no
+ * directory scanning), contained (each target is verified to sit under
+ * `skillsDir` before any delete), symlink-refusing, and fail-open per slug:
+ * a removal failure (including Windows EPERM/EACCES, which `force: true`
+ * does not swallow) logs and continues without failing the surrounding sync.
+ */
+async function removeRetiredBundledSkillDirsAsync(
+	skillsDir: string,
+): Promise<void> {
+	if (!(await ensureNotSymlinkedDirectoryAsync(skillsDir))) return;
+	const safeRoot = path.resolve(skillsDir);
+	for (const slug of RETIRED_BUNDLED_PROJECT_SKILLS) {
+		try {
+			const target = path.resolve(safeRoot, slug);
+			const relative = path.relative(safeRoot, target);
+			if (relative.startsWith('..') || path.isAbsolute(relative)) {
+				throw new Error('retired bundled skill path escaped its private root');
+			}
+			try {
+				const stat = await fsp.lstat(target);
+				// Skip symlinks (never delete through a link) and non-directories.
+				if (stat.isSymbolicLink() || !stat.isDirectory()) continue;
+			} catch (err) {
+				// ENOENT: nothing to clean up — the expected state for projects
+				// that never materialized this slug.
+				if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+				throw err;
+			}
+			await fsp.rm(target, { recursive: true, force: true });
+			log('removed retired bundled skill', { slug });
+		} catch (err) {
+			log('could not remove retired bundled skill (continuing)', {
+				slug,
+				message: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+}
 async function performBundledProjectSkillSyncAsync(
 	projectDirectory: string,
 	packageRoot: string,
 	quiet: boolean,
 ): Promise<void> {
+	// Tracks whether `skillsDir` passed its symlink/directory guards. The
+	// retired-dir cleanup below must ONLY run on that validated path: running
+	// it unconditionally (e.g. via a bare `finally`) would also fire on the
+	// guard early-returns above, where `skillsDir` may be a symlink and a
+	// recursive rm could follow it outside the project (PR #2387 review
+	// finding F-003). Inside the validated region the cleanup must also run
+	// when the copy loop throws, so a failed copy can never leave the stale
+	// retired directory behind.
+	let skillsDirValidated = false;
 	try {
 		const sourceRoot = path.join(packageRoot, '.opencode', 'skills');
 		const swarmDir = path.join(projectDirectory, '.swarm');
@@ -304,6 +363,7 @@ async function performBundledProjectSkillSyncAsync(
 		}
 		if (!(await ensureNotSymlinkedDirectoryAsync(swarmDir))) return;
 		if (!(await ensureNotSymlinkedDirectoryAsync(skillsDir))) return;
+		skillsDirValidated = true;
 		for (const slug of BUNDLED_PROJECT_SKILLS) {
 			const sourceDir = path.join(sourceRoot, slug);
 			const sourceSkill = path.join(sourceDir, 'SKILL.md');
@@ -338,6 +398,18 @@ async function performBundledProjectSkillSyncAsync(
 		} else {
 			// biome-ignore lint/suspicious/noConsole: Fallback user-facing warning when bundled skill sync fails non-quietly — cannot use advisoryWarn as it would duplicate the already-raised advisory
 			console.warn(failureMsg);
+		}
+	} finally {
+		// Retired slugs (renamed away in past releases) have no copy loop entry,
+		// so remove their stale materialized directories separately — on the
+		// success path AND after a caught copy failure. Gated on the validated
+		// flag so the guard early-returns above never reach it. Fail-open per
+		// slug inside the helper; a cleanup failure must never surface as a
+		// sync failure.
+		if (skillsDirValidated) {
+			await removeRetiredBundledSkillDirsAsync(
+				path.join(projectDirectory, BUNDLED_PROJECT_SKILL_ROOT),
+			);
 		}
 	}
 }

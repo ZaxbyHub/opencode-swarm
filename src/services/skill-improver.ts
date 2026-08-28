@@ -18,13 +18,14 @@
  */
 
 import { existsSync } from 'node:fs';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, unlink } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { EnrichmentQuotaOptions } from '../hooks/knowledge-curator.js';
 import {
 	readKnowledge,
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
+	transactKnowledge,
 } from '../hooks/knowledge-store.js';
 import type {
 	HiveKnowledgeEntry,
@@ -35,9 +36,16 @@ import {
 	createSkillImproverLLMDelegate,
 	type SkillImproverLLMDelegate,
 } from '../hooks/skill-improver-llm-factory.js';
+import {
+	computeWriteApprovalHash,
+	consumeWriteApprovalFact,
+	findWriteApprovalFact,
+	type WriteApprovalRequest,
+} from '../security/write-authority.js';
 import { hasActiveFullAuto } from '../state.js';
 import { atomicWriteSwarmFile } from '../utils/atomic-write';
 import { warn } from '../utils/logger.js';
+import { validateTargetWithinRoot } from '../utils/path-security.js';
 import {
 	type AutoApplyResult,
 	autoApplyProposals,
@@ -51,6 +59,7 @@ import {
 	selectCandidateEntries,
 } from './skill-generator.js';
 import {
+	getQuotaState,
 	type QuotaWindow,
 	releaseQuota,
 	reserveQuota,
@@ -102,11 +111,21 @@ export interface SkillImproveRequest {
 	evaluateDrafts?: boolean;
 	/** Consolidation callers stage proposals only and must never auto-apply. */
 	allowAutoApply?: boolean;
+	/** Exact approval-phase proposal body returned by a prior challenge. */
+	approvedCandidateContent?: string;
 }
 
 export interface SkillImproveResult {
 	ran: boolean;
 	reason?: string;
+	approvalRequired?: {
+		request?: WriteApprovalRequest;
+		command?: string;
+		candidateContent?: string;
+		candidateContentChars?: number;
+		candidateContentTokenEstimate?: number;
+		allowedPaths?: string[];
+	};
 	proposalPath?: string;
 	source?: 'llm' | 'deterministic_fallback';
 	quota: {
@@ -150,6 +169,509 @@ export interface SkillImproveResult {
 
 function timestampSlug(d: Date): string {
 	return d.toISOString().replace(/[:.]/g, '-');
+}
+
+export const SKILL_IMPROVER_APPROVAL_CANDIDATE_ID = 'skill_improve_request';
+export const MAX_APPROVED_CANDIDATE_CONTENT_CHARS = 64_000;
+
+interface SkillImproverDraftWrite {
+	slug: string;
+	path: string;
+	content: string;
+	sourceKnowledgeIds: string[];
+	missingSourceKnowledgeIds?: string[];
+}
+
+interface SkillImproverDraftSourceStampTarget {
+	knowledgePath: string;
+	ids: string[];
+	slug: string;
+	draftGeneratedSkillPath: string;
+	updatedAt: string;
+}
+
+interface SkillImproverWriteManifestV1 {
+	kind: 'skill_improver_write_manifest';
+	version: 1;
+	writeMode: 'draft_skills';
+	source: 'llm' | 'deterministic_fallback';
+	model?: string;
+	proposalContent: string;
+	drafts: SkillImproverDraftWrite[];
+	draftSourceStamps: SkillImproverDraftSourceStampTarget[];
+}
+
+export function buildSkillImproverApprovalRequest(input: {
+	sessionId?: string;
+	candidateContent: string;
+	allowedPaths: string[];
+	candidateId?: string;
+	generation?: number;
+}): WriteApprovalRequest | null {
+	const sessionId = input.sessionId?.trim();
+	if (!sessionId) return null;
+	const normalizedPaths = [
+		...new Set(input.allowedPaths.map((entry) => entry.trim())),
+	]
+		.filter((entry) => entry.length > 0)
+		.sort();
+	return {
+		targetSessionId: sessionId,
+		action: 'skill_improve',
+		candidateId:
+			input.candidateId?.trim() || SKILL_IMPROVER_APPROVAL_CANDIDATE_ID,
+		candidateContentHash: computeWriteApprovalHash({
+			candidateContent: input.candidateContent,
+		}),
+		allowedPathDigest: computeWriteApprovalHash({
+			allowedPaths: normalizedPaths,
+		}),
+		generation: input.generation ?? 0,
+	};
+}
+
+export interface PreparedSkillImproverApprovalCandidate {
+	directory: string;
+	sessionId: string;
+	now: Date;
+	source: 'llm' | 'deterministic_fallback';
+	model?: string;
+	proposalPath: string;
+	proposalContent: string;
+	allowedPaths: string[];
+	candidateContent: string;
+	draftWrites: SkillImproverDraftWrite[];
+	draftSourceStamps: SkillImproverDraftSourceStampTarget[];
+	request: WriteApprovalRequest;
+	quota: {
+		date: string;
+		calls_used: number;
+		max_calls: number;
+	};
+	quotaWindow: QuotaWindow;
+	maxCalls: number;
+	maxCallsPerDay: number;
+	released: boolean;
+}
+
+type SkillImproverApprovalPreparation =
+	| { kind: 'result'; result: SkillImproveResult }
+	| { kind: 'prepared'; prepared: PreparedSkillImproverApprovalCandidate };
+
+function estimateTokenCount(content: string): number {
+	return Math.max(1, Math.ceil(content.length / 4));
+}
+
+function toApprovalPath(directory: string, targetPath: string): string {
+	const relative = path.relative(directory, targetPath).replace(/\\/g, '/');
+	if (
+		relative.length > 0 &&
+		!relative.startsWith('..') &&
+		!path.isAbsolute(relative)
+	) {
+		return relative;
+	}
+	return path.resolve(targetPath).replace(/\\/g, '/');
+}
+
+function isSameFilesystemPath(left: string, right: string): boolean {
+	const normalizedLeft = path.normalize(left);
+	const normalizedRight = path.normalize(right);
+	return process.platform === 'win32'
+		? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+		: normalizedLeft === normalizedRight;
+}
+
+function validateApprovedPath(
+	directory: string,
+	approvedPath: string,
+	options?: { allowCanonicalHiveKnowledge?: boolean },
+): { approvalPath: string; resolvedPath: string } {
+	const normalized = approvedPath.replace(/\\/g, '/').trim();
+	const reason = validateTargetWithinRoot(normalized, directory);
+	if (!reason) {
+		const resolvedPath = path.resolve(directory, normalized);
+		return {
+			approvalPath: path.relative(directory, resolvedPath).replace(/\\/g, '/'),
+			resolvedPath,
+		};
+	}
+	if (
+		options?.allowCanonicalHiveKnowledge === true &&
+		reason.startsWith('Absolute path rejected:')
+	) {
+		const expectedHivePath = path.resolve(resolveHiveKnowledgePath());
+		const resolvedPath = path.resolve(normalized);
+		if (isSameFilesystemPath(resolvedPath, expectedHivePath)) {
+			return {
+				approvalPath: expectedHivePath.replace(/\\/g, '/'),
+				resolvedPath: expectedHivePath,
+			};
+		}
+	}
+	throw new Error(
+		`skill_improver approved path rejected: ${approvedPath} (${reason})`,
+	);
+}
+
+function resolveApprovedPath(
+	directory: string,
+	approvedPath: string,
+	options?: { allowCanonicalHiveKnowledge?: boolean },
+): string {
+	return validateApprovedPath(directory, approvedPath, options).resolvedPath;
+}
+
+function buildDraftSkillsWriteManifest(input: {
+	source: 'llm' | 'deterministic_fallback';
+	model?: string;
+	proposalContent: string;
+	drafts: SkillImproverDraftWrite[];
+	draftSourceStamps: SkillImproverDraftSourceStampTarget[];
+}): string {
+	const manifest: SkillImproverWriteManifestV1 = {
+		kind: 'skill_improver_write_manifest',
+		version: 1,
+		writeMode: 'draft_skills',
+		source: input.source,
+		...(input.model ? { model: input.model } : {}),
+		proposalContent: input.proposalContent,
+		drafts: input.drafts,
+		draftSourceStamps: input.draftSourceStamps,
+	};
+	return `${JSON.stringify(manifest, null, 2)}\n`;
+}
+
+function parseDraftSkillsWriteManifest(
+	content: string,
+): SkillImproverWriteManifestV1 | null {
+	try {
+		const parsed = JSON.parse(content) as unknown;
+		if (!parsed || typeof parsed !== 'object') return null;
+		const manifest = parsed as Record<string, unknown>;
+		if (
+			manifest.kind !== 'skill_improver_write_manifest' ||
+			manifest.version !== 1 ||
+			manifest.writeMode !== 'draft_skills' ||
+			typeof manifest.proposalContent !== 'string' ||
+			(manifest.source !== 'llm' &&
+				manifest.source !== 'deterministic_fallback') ||
+			!Array.isArray(manifest.drafts) ||
+			!Array.isArray(manifest.draftSourceStamps)
+		) {
+			return null;
+		}
+		const drafts: SkillImproverDraftWrite[] = [];
+		for (const entry of manifest.drafts) {
+			if (!entry || typeof entry !== 'object') return null;
+			const draft = entry as Record<string, unknown>;
+			if (
+				typeof draft.slug !== 'string' ||
+				typeof draft.path !== 'string' ||
+				typeof draft.content !== 'string' ||
+				!Array.isArray(draft.sourceKnowledgeIds) ||
+				!draft.sourceKnowledgeIds.every((id) => typeof id === 'string') ||
+				(draft.missingSourceKnowledgeIds !== undefined &&
+					(!Array.isArray(draft.missingSourceKnowledgeIds) ||
+						!draft.missingSourceKnowledgeIds.every(
+							(id) => typeof id === 'string',
+						)))
+			) {
+				return null;
+			}
+			drafts.push({
+				slug: draft.slug,
+				path: draft.path,
+				content: draft.content,
+				sourceKnowledgeIds: [...new Set(draft.sourceKnowledgeIds)],
+				...(Array.isArray(draft.missingSourceKnowledgeIds)
+					? {
+							missingSourceKnowledgeIds: [
+								...new Set(draft.missingSourceKnowledgeIds),
+							],
+						}
+					: {}),
+			});
+		}
+		const draftSourceStamps: SkillImproverDraftSourceStampTarget[] = [];
+		for (const entry of manifest.draftSourceStamps) {
+			if (!entry || typeof entry !== 'object') return null;
+			const stamp = entry as Record<string, unknown>;
+			if (
+				typeof stamp.knowledgePath !== 'string' ||
+				typeof stamp.slug !== 'string' ||
+				typeof stamp.draftGeneratedSkillPath !== 'string' ||
+				typeof stamp.updatedAt !== 'string' ||
+				!Array.isArray(stamp.ids) ||
+				!stamp.ids.every((id) => typeof id === 'string')
+			) {
+				return null;
+			}
+			draftSourceStamps.push({
+				knowledgePath: stamp.knowledgePath,
+				ids: [...new Set(stamp.ids)],
+				slug: stamp.slug,
+				draftGeneratedSkillPath: stamp.draftGeneratedSkillPath,
+				updatedAt: stamp.updatedAt,
+			});
+		}
+		return {
+			kind: 'skill_improver_write_manifest',
+			version: 1,
+			writeMode: 'draft_skills',
+			source: manifest.source,
+			...(typeof manifest.model === 'string' ? { model: manifest.model } : {}),
+			proposalContent: manifest.proposalContent,
+			drafts,
+			draftSourceStamps,
+		};
+	} catch {
+		return null;
+	}
+}
+
+async function buildDraftSourceStampTargets(
+	directory: string,
+	drafts: SkillImproverDraftWrite[],
+	updatedAt: string,
+): Promise<SkillImproverDraftSourceStampTarget[]> {
+	if (drafts.length === 0) return [];
+	const swarmPath = resolveSwarmKnowledgePath(directory);
+	const swarmEntries = await readKnowledge<KnowledgeEntryBase>(swarmPath);
+	const swarmIds = new Set(swarmEntries.map((entry) => entry.id));
+	const targets: SkillImproverDraftSourceStampTarget[] = [];
+	for (const draft of drafts) {
+		const ids = draft.sourceKnowledgeIds.filter((id) => swarmIds.has(id));
+		if (ids.length > 0) {
+			targets.push({
+				knowledgePath: toApprovalPath(directory, swarmPath),
+				ids,
+				slug: draft.slug,
+				draftGeneratedSkillPath: draft.path,
+				updatedAt,
+			});
+		}
+	}
+	const hivePath = resolveHiveKnowledgePath();
+	if (!existsSync(hivePath)) return targets;
+	const hiveEntries = await readKnowledge<KnowledgeEntryBase>(hivePath);
+	const hiveIds = new Set(hiveEntries.map((entry) => entry.id));
+	for (const draft of drafts) {
+		const ids = draft.sourceKnowledgeIds.filter((id) => hiveIds.has(id));
+		if (ids.length > 0) {
+			targets.push({
+				knowledgePath: toApprovalPath(directory, hivePath),
+				ids,
+				slug: draft.slug,
+				draftGeneratedSkillPath: draft.path,
+				updatedAt,
+			});
+		}
+	}
+	return targets;
+}
+
+async function preflightDraftSourceStampTargets(
+	targets: SkillImproverDraftSourceStampTarget[],
+): Promise<string | null> {
+	for (const target of targets) {
+		const entries = await readKnowledge<KnowledgeEntryBase>(
+			target.knowledgePath,
+		);
+		const ids = new Set(entries.map((entry) => entry.id));
+		const missing = target.ids.filter((id) => !ids.has(id));
+		if (missing.length > 0) {
+			return `skill_improver approval manifest is stale; missing source knowledge ids for ${target.slug}: ${missing.join(', ')}`;
+		}
+	}
+	return null;
+}
+
+async function applyDraftSourceStampTargets(
+	targets: SkillImproverDraftSourceStampTarget[],
+): Promise<void> {
+	const grouped = new Map<string, SkillImproverDraftSourceStampTarget[]>();
+	for (const target of targets) {
+		const bucket = grouped.get(target.knowledgePath);
+		if (bucket) {
+			bucket.push(target);
+			continue;
+		}
+		grouped.set(target.knowledgePath, [target]);
+	}
+	for (const [knowledgePath, group] of grouped) {
+		let staleSlug: string | null = null;
+		await transactKnowledge<KnowledgeEntryBase>(knowledgePath, (entries) => {
+			const byId = new Map(entries.map((entry) => [entry.id, entry]));
+			for (const target of group) {
+				const missing = target.ids.filter((id) => !byId.has(id));
+				if (missing.length > 0) {
+					staleSlug = target.slug;
+					return null;
+				}
+			}
+			let changed = false;
+			for (const target of group) {
+				for (const id of target.ids) {
+					const entry = byId.get(id);
+					if (!entry) continue;
+					entry.draft_generated_skill_slug = target.slug;
+					entry.draft_generated_skill_path = target.draftGeneratedSkillPath;
+					entry.updated_at = target.updatedAt;
+					changed = true;
+				}
+			}
+			return changed ? entries : null;
+		});
+		if (staleSlug) {
+			throw new Error(
+				`skill_improver approval manifest is stale; source stamp set for ${staleSlug} changed during apply`,
+			);
+		}
+	}
+}
+
+function buildPreparedApprovalCandidate(input: {
+	directory: string;
+	now: Date;
+	source: 'llm' | 'deterministic_fallback';
+	model?: string;
+	proposalContent: string;
+	candidateContent: string;
+	draftWrites?: SkillImproverDraftWrite[];
+	draftSourceStamps?: SkillImproverDraftSourceStampTarget[];
+	quota: SkillImproveResult['quota'];
+	quotaWindow: QuotaWindow;
+	maxCalls: number;
+	maxCallsPerDay: number;
+	released: boolean;
+	sessionId?: string;
+}): SkillImproverApprovalPreparation {
+	const contentHash = computeWriteApprovalHash({
+		candidateContent: input.candidateContent,
+	});
+	const proposalPath = path.join(
+		input.directory,
+		'.swarm',
+		'skill-improver',
+		'proposals',
+		`${contentHash}.md`,
+	);
+	const draftWrites = input.draftWrites ?? [];
+	const draftSourceStamps = input.draftSourceStamps ?? [];
+	const normalizedAllowedPaths = new Set<string>();
+	const normalizedDraftWrites: SkillImproverDraftWrite[] = [];
+	const normalizedDraftSourceStamps: SkillImproverDraftSourceStampTarget[] = [];
+	try {
+		normalizedAllowedPaths.add(
+			validateApprovedPath(
+				input.directory,
+				toApprovalPath(input.directory, proposalPath),
+			).approvalPath,
+		);
+		for (const draft of draftWrites) {
+			const validatedDraftPath = validateApprovedPath(
+				input.directory,
+				draft.path,
+			);
+			normalizedAllowedPaths.add(validatedDraftPath.approvalPath);
+			normalizedDraftWrites.push({
+				...draft,
+				path: validatedDraftPath.approvalPath,
+			});
+		}
+		for (const target of draftSourceStamps) {
+			const validatedKnowledgePath = validateApprovedPath(
+				input.directory,
+				target.knowledgePath,
+				{ allowCanonicalHiveKnowledge: true },
+			);
+			const validatedDraftPath = validateApprovedPath(
+				input.directory,
+				target.draftGeneratedSkillPath,
+			);
+			normalizedAllowedPaths.add(validatedKnowledgePath.approvalPath);
+			normalizedDraftSourceStamps.push({
+				...target,
+				knowledgePath: validatedKnowledgePath.approvalPath,
+				draftGeneratedSkillPath: validatedDraftPath.approvalPath,
+			});
+		}
+	} catch (error) {
+		return {
+			kind: 'result',
+			result: {
+				ran: false,
+				reason: error instanceof Error ? error.message : String(error),
+				quota: input.quota,
+				source: input.source,
+				model: input.model,
+			},
+		};
+	}
+	const allowedPaths = [...normalizedAllowedPaths].sort();
+	const approvalRequest = buildSkillImproverApprovalRequest({
+		sessionId: input.sessionId,
+		candidateContent: input.candidateContent,
+		allowedPaths,
+	});
+	if (!approvalRequest) {
+		return {
+			kind: 'result',
+			result: {
+				ran: false,
+				reason:
+					'skill_improver requires a session-bound write approval; no sessionId was provided',
+				quota: input.quota,
+				approvalRequired: {},
+			},
+		};
+	}
+	return {
+		kind: 'prepared',
+		prepared: {
+			directory: input.directory,
+			sessionId: input.sessionId ?? '',
+			now: input.now,
+			source: input.source,
+			model: input.model,
+			proposalPath,
+			proposalContent: input.proposalContent,
+			allowedPaths,
+			candidateContent: input.candidateContent,
+			draftWrites: normalizedDraftWrites,
+			draftSourceStamps: normalizedDraftSourceStamps,
+			request: approvalRequest,
+			quota: input.quota,
+			quotaWindow: input.quotaWindow,
+			maxCalls: input.maxCalls,
+			maxCallsPerDay: input.maxCallsPerDay,
+			released: input.released,
+		},
+	};
+}
+
+function buildApprovalRequiredResult(args: {
+	reason: string;
+	quota: SkillImproveResult['quota'];
+	prepared: PreparedSkillImproverApprovalCandidate;
+}): SkillImproveResult {
+	return {
+		ran: false,
+		reason: args.reason,
+		quota: args.quota,
+		approvalRequired: {
+			request: args.prepared.request,
+			candidateContent: args.prepared.candidateContent,
+			candidateContentChars: args.prepared.candidateContent.length,
+			candidateContentTokenEstimate: estimateTokenCount(
+				args.prepared.candidateContent,
+			),
+			allowedPaths: args.prepared.allowedPaths,
+		},
+		source: args.prepared.source,
+		model: args.prepared.model,
+	};
 }
 
 /**
@@ -497,6 +1019,582 @@ export async function reconcileStaleActiveSkills(
 	return result;
 }
 
+export async function prepareSkillImproverApprovalCandidate(
+	req: SkillImproveRequest,
+): Promise<SkillImproverApprovalPreparation> {
+	const cfg = req.config;
+	const now = req.now ?? new Date();
+	const targets = (
+		req.targets && req.targets.length > 0 ? req.targets : cfg.targets
+	) as SkillImproverTarget[];
+	const writeMode = req.mode ?? cfg.write_mode;
+	const maxCalls = Math.max(
+		1,
+		Math.min(cfg.max_calls_per_day, req.maxCalls ?? 1),
+	);
+	const noQuota = {
+		date: now.toISOString().slice(0, 10),
+		calls_used: 0,
+		max_calls: cfg.max_calls_per_day,
+	};
+
+	if (!cfg.enabled) {
+		return {
+			kind: 'result',
+			result: {
+				ran: false,
+				reason: 'skill_improver.enabled is false',
+				quota: noQuota,
+			},
+		};
+	}
+	if (req.signal?.aborted) {
+		return {
+			kind: 'result',
+			result: {
+				ran: false,
+				reason: 'skill_improver aborted',
+				quota: noQuota,
+			},
+		};
+	}
+	if (!req.sessionId?.trim()) {
+		return {
+			kind: 'result',
+			result: {
+				ran: false,
+				reason:
+					'skill_improver requires a session-bound write approval; no sessionId was provided',
+				quota: noQuota,
+				approvalRequired: {},
+			},
+		};
+	}
+	if (req.allowAutoApply === true) {
+		return {
+			kind: 'result',
+			result: {
+				ran: false,
+				reason:
+					'skill_improver require_user_approval does not permit auto-apply writes',
+				quota: noQuota,
+			},
+		};
+	}
+
+	const delegate =
+		req.delegate ??
+		createSkillImproverLLMDelegate(req.directory, req.sessionId);
+	if (!delegate && !cfg.allow_deterministic_fallback) {
+		return {
+			kind: 'result',
+			result: {
+				ran: false,
+				reason:
+					'no_llm_client: skill_improver.allow_deterministic_fallback is false and no OpenCode client is wired. Run from a session where swarmState.opencodeClient is available, or enable allow_deterministic_fallback to use the offline path.',
+				quota: noQuota,
+			},
+		};
+	}
+
+	const reservation = await reserveQuota(req.directory, {
+		nCalls: maxCalls,
+		maxCalls: cfg.max_calls_per_day,
+		window: cfg.quota_window,
+		now,
+	});
+	if (!reservation.allowed) {
+		return {
+			kind: 'result',
+			result: {
+				ran: false,
+				reason: reservation.reason ?? 'quota exhausted',
+				quota: {
+					date: reservation.state.date,
+					calls_used: reservation.state.calls_used,
+					max_calls: reservation.state.max_calls,
+				},
+			},
+		};
+	}
+
+	const releaseReservedQuota = async () => {
+		const released = await releaseQuota(req.directory, {
+			nCalls: maxCalls,
+			maxCalls: cfg.max_calls_per_day,
+			window: cfg.quota_window,
+			now,
+		}).catch(() => ({
+			...reservation.state,
+			calls_used: Math.max(0, reservation.state.calls_used - maxCalls),
+		}));
+		return {
+			date: released.date,
+			calls_used: released.calls_used,
+			max_calls: released.max_calls,
+		};
+	};
+
+	let inventory: InventorySnapshot;
+	try {
+		throwIfAborted(req.signal);
+		inventory = await gatherInventory(req.directory);
+		throwIfAborted(req.signal);
+	} catch (err) {
+		if (isAbortError(err)) {
+			return {
+				kind: 'result',
+				result: {
+					ran: false,
+					reason: 'skill_improver aborted',
+					quota: await releaseReservedQuota(),
+				},
+			};
+		}
+		return {
+			kind: 'result',
+			result: {
+				ran: false,
+				reason: `inventory_failed: ${err instanceof Error ? err.message : String(err)}`,
+				quota: await releaseReservedQuota(),
+			},
+		};
+	}
+
+	let body: string;
+	let source: 'llm' | 'deterministic_fallback';
+	if (delegate) {
+		try {
+			throwIfAborted(req.signal);
+			body = await delegate(
+				buildSystemPrompt(targets, { ...cfg, write_mode: writeMode }),
+				buildUserPrompt(inventory),
+				req.signal,
+			);
+			throwIfAborted(req.signal);
+			if (!body || body.trim().length === 0) {
+				throw new Error('empty LLM response');
+			}
+			source = 'llm';
+		} catch (err) {
+			if (isAbortError(err)) {
+				return {
+					kind: 'result',
+					result: {
+						ran: false,
+						reason: 'skill_improver aborted',
+						quota: await releaseReservedQuota(),
+					},
+				};
+			}
+			return {
+				kind: 'result',
+				result: {
+					ran: false,
+					reason: `llm_call_failed: ${err instanceof Error ? err.message : String(err)}`,
+					quota: await releaseReservedQuota(),
+				},
+			};
+		}
+	} else {
+		try {
+			throwIfAborted(req.signal);
+		} catch (err) {
+			if (isAbortError(err)) {
+				return {
+					kind: 'result',
+					result: {
+						ran: false,
+						reason: 'skill_improver aborted',
+						quota: await releaseReservedQuota(),
+					},
+				};
+			}
+			throw err;
+		}
+		body = '';
+		source = 'deterministic_fallback';
+	}
+
+	const proposalContent =
+		source === 'llm'
+			? buildLLMProposalFrame({
+					body,
+					targets,
+					model: cfg.model,
+					now,
+				})
+			: buildDeterministicProposal({
+					targets,
+					inventory,
+					model: cfg.model,
+					now,
+				});
+	const draftWrites: SkillImproverDraftWrite[] = [];
+	if (writeMode === 'draft_skills' && inventory.matureCandidates.length > 0) {
+		const draftPreview = await generateSkills({
+			directory: req.directory,
+			mode: 'draft',
+			minConfidence: DEFAULT_SKILL_MIN_CONFIDENCE,
+			minConfirmations: DEFAULT_SKILL_MIN_CONFIRMATIONS,
+			evaluate: req.evaluateDrafts ?? false,
+			preview: true,
+		});
+		for (const written of draftPreview.written) {
+			if (typeof written.content !== 'string') {
+				return {
+					kind: 'result',
+					result: {
+						ran: false,
+						reason:
+							'skill_improver draft preview did not return exact candidate content',
+						quota: {
+							date: reservation.state.date,
+							calls_used: reservation.state.calls_used,
+							max_calls: reservation.state.max_calls,
+						},
+					},
+				};
+			}
+			draftWrites.push({
+				slug: written.slug,
+				path: toApprovalPath(req.directory, written.path),
+				content: written.content,
+				sourceKnowledgeIds: written.sourceKnowledgeIds,
+				...(written.missingSourceKnowledgeIds?.length
+					? {
+							missingSourceKnowledgeIds: written.missingSourceKnowledgeIds,
+						}
+					: {}),
+			});
+		}
+	}
+	const draftSourceStamps =
+		writeMode === 'draft_skills'
+			? await buildDraftSourceStampTargets(
+					req.directory,
+					draftWrites,
+					now.toISOString(),
+				)
+			: [];
+	const candidateContent =
+		writeMode === 'draft_skills'
+			? buildDraftSkillsWriteManifest({
+					source,
+					model: cfg.model ?? undefined,
+					proposalContent,
+					drafts: draftWrites,
+					draftSourceStamps,
+				})
+			: proposalContent;
+	if (candidateContent.length > MAX_APPROVED_CANDIDATE_CONTENT_CHARS) {
+		return {
+			kind: 'result',
+			result: {
+				ran: false,
+				reason: `skill_improver approval candidate exceeds ${MAX_APPROVED_CANDIDATE_CONTENT_CHARS} characters`,
+				quota: {
+					date: reservation.state.date,
+					calls_used: reservation.state.calls_used,
+					max_calls: reservation.state.max_calls,
+				},
+				source,
+				model: cfg.model ?? undefined,
+			},
+		};
+	}
+	return buildPreparedApprovalCandidate({
+		directory: req.directory,
+		now,
+		source,
+		model: cfg.model ?? undefined,
+		proposalContent,
+		candidateContent,
+		draftWrites,
+		draftSourceStamps,
+		quota: {
+			date: reservation.state.date,
+			calls_used: reservation.state.calls_used,
+			max_calls: reservation.state.max_calls,
+		},
+		quotaWindow: cfg.quota_window,
+		maxCalls,
+		maxCallsPerDay: cfg.max_calls_per_day,
+		released: false,
+		sessionId: req.sessionId,
+	});
+}
+
+export async function prepareApprovedSkillImproverCandidateWrite(
+	req: SkillImproveRequest,
+): Promise<SkillImproverApprovalPreparation> {
+	const cfg = req.config;
+	const now = req.now ?? new Date();
+	const noQuota = {
+		date: now.toISOString().slice(0, 10),
+		calls_used: 0,
+		max_calls: cfg.max_calls_per_day,
+	};
+	if (!cfg.enabled) {
+		return {
+			kind: 'result',
+			result: {
+				ran: false,
+				reason: 'skill_improver.enabled is false',
+				quota: noQuota,
+			},
+		};
+	}
+	if (!req.sessionId?.trim()) {
+		return {
+			kind: 'result',
+			result: {
+				ran: false,
+				reason:
+					'skill_improver requires a session-bound write approval; no sessionId was provided',
+				quota: noQuota,
+				approvalRequired: {},
+			},
+		};
+	}
+	const candidateContent = req.approvedCandidateContent;
+	if (
+		!candidateContent ||
+		candidateContent.length > MAX_APPROVED_CANDIDATE_CONTENT_CHARS
+	) {
+		return {
+			kind: 'result',
+			result: {
+				ran: false,
+				reason: `skill_improver approved_candidate_content is required and must be <= ${MAX_APPROVED_CANDIDATE_CONTENT_CHARS} characters`,
+				quota: noQuota,
+			},
+		};
+	}
+	const manifest = parseDraftSkillsWriteManifest(candidateContent);
+	const quotaState = await getQuotaState(req.directory, {
+		maxCalls: cfg.max_calls_per_day,
+		window: cfg.quota_window,
+		now,
+	});
+	return buildPreparedApprovalCandidate({
+		directory: req.directory,
+		now,
+		source:
+			manifest?.source ??
+			(candidateContent.includes('source: llm')
+				? 'llm'
+				: 'deterministic_fallback'),
+		model: manifest?.model ?? cfg.model ?? undefined,
+		proposalContent: manifest?.proposalContent ?? candidateContent,
+		candidateContent,
+		draftWrites: manifest?.drafts ?? [],
+		draftSourceStamps: manifest?.draftSourceStamps ?? [],
+		quota: {
+			date: quotaState.date,
+			calls_used: quotaState.calls_used,
+			max_calls: quotaState.max_calls,
+		},
+		quotaWindow: cfg.quota_window,
+		maxCalls: 0,
+		maxCallsPerDay: cfg.max_calls_per_day,
+		released: true,
+		sessionId: req.sessionId,
+	});
+}
+
+export async function releasePreparedSkillImproverApprovalCandidate(
+	prepared: PreparedSkillImproverApprovalCandidate,
+): Promise<SkillImproveResult['quota']> {
+	if (prepared.maxCalls === 0) {
+		return prepared.quota;
+	}
+	if (prepared.released) {
+		return prepared.quota;
+	}
+	const released = await releaseQuota(prepared.directory, {
+		nCalls: prepared.maxCalls,
+		maxCalls: prepared.maxCallsPerDay,
+		window: prepared.quotaWindow,
+		now: prepared.now,
+	}).catch(() => ({
+		...prepared.quota,
+		calls_used: Math.max(0, prepared.quota.calls_used - prepared.maxCalls),
+	}));
+	prepared.released = true;
+	prepared.quota = {
+		date: released.date,
+		calls_used: released.calls_used,
+		max_calls: released.max_calls,
+	};
+	return prepared.quota;
+}
+
+export async function writeApprovedSkillImproverCandidate(
+	prepared: PreparedSkillImproverApprovalCandidate,
+): Promise<SkillImproveResult> {
+	if (prepared.released && prepared.maxCalls > 0) {
+		return {
+			ran: false,
+			reason:
+				'skill_improver approval candidate has already been released and cannot be written',
+			quota: prepared.quota,
+		};
+	}
+	if (!prepared.sessionId.trim()) {
+		return {
+			ran: false,
+			reason:
+				'skill_improver requires a session-bound write approval; no sessionId was provided',
+			quota: await releasePreparedSkillImproverApprovalCandidate(prepared),
+			approvalRequired: {
+				request: prepared.request,
+				candidateContent: prepared.candidateContent,
+				candidateContentChars: prepared.candidateContent.length,
+				candidateContentTokenEstimate: estimateTokenCount(
+					prepared.candidateContent,
+				),
+				allowedPaths: prepared.allowedPaths,
+			},
+			source: prepared.source,
+			model: prepared.model,
+		};
+	}
+	const activeApproval = await findWriteApprovalFact({
+		directory: prepared.directory,
+		request: prepared.request,
+		now: prepared.now,
+	});
+	if (!activeApproval) {
+		return {
+			ran: false,
+			reason: 'skill_improver requires an exact human write approval',
+			quota: await releasePreparedSkillImproverApprovalCandidate(prepared),
+			approvalRequired: {
+				request: prepared.request,
+				candidateContent: prepared.candidateContent,
+				candidateContentChars: prepared.candidateContent.length,
+				candidateContentTokenEstimate: estimateTokenCount(
+					prepared.candidateContent,
+				),
+				allowedPaths: prepared.allowedPaths,
+			},
+			source: prepared.source,
+			model: prepared.model,
+		};
+	}
+	let resolvedDraftPaths: string[];
+	let validatedStampTargets: SkillImproverDraftSourceStampTarget[];
+	try {
+		resolvedDraftPaths = prepared.draftWrites.map((draft) =>
+			resolveApprovedPath(prepared.directory, draft.path),
+		);
+		validatedStampTargets = prepared.draftSourceStamps.map((target) => ({
+			...target,
+			knowledgePath: resolveApprovedPath(
+				prepared.directory,
+				target.knowledgePath,
+				{ allowCanonicalHiveKnowledge: true },
+			),
+			draftGeneratedSkillPath: validateApprovedPath(
+				prepared.directory,
+				target.draftGeneratedSkillPath,
+			).approvalPath,
+		}));
+	} catch (error) {
+		return {
+			ran: false,
+			reason: error instanceof Error ? error.message : String(error),
+			quota: prepared.quota,
+		};
+	}
+	const staleStampReason = await preflightDraftSourceStampTargets(
+		validatedStampTargets,
+	);
+	if (staleStampReason) {
+		return {
+			ran: false,
+			reason: staleStampReason,
+			quota: prepared.quota,
+		};
+	}
+	const fileRollback = new Map<
+		string,
+		{ existed: boolean; content: string | null }
+	>();
+	for (const targetPath of [prepared.proposalPath, ...resolvedDraftPaths]) {
+		try {
+			fileRollback.set(targetPath, {
+				existed: true,
+				content: await readFile(targetPath, 'utf-8'),
+			});
+		} catch {
+			fileRollback.set(targetPath, { existed: false, content: null });
+		}
+	}
+	const knowledgeRollback = new Map<string, KnowledgeEntryBase[]>();
+	for (const target of validatedStampTargets) {
+		if (knowledgeRollback.has(target.knowledgePath)) continue;
+		knowledgeRollback.set(
+			target.knowledgePath,
+			await readKnowledge<KnowledgeEntryBase>(target.knowledgePath),
+		);
+	}
+	try {
+		await atomicWrite(prepared.proposalPath, prepared.proposalContent);
+		for (let i = 0; i < prepared.draftWrites.length; i++) {
+			await atomicWrite(
+				resolvedDraftPaths[i]!,
+				prepared.draftWrites[i]!.content,
+			);
+		}
+		await applyDraftSourceStampTargets(validatedStampTargets);
+		const consumed = await consumeWriteApprovalFact({
+			directory: prepared.directory,
+			request: prepared.request,
+			consumerSessionId: prepared.sessionId,
+			now: prepared.now,
+		});
+		if (!consumed) {
+			throw new Error('skill_improver requires an exact human write approval');
+		}
+		return {
+			ran: true,
+			proposalPath: prepared.proposalPath,
+			source: prepared.source,
+			quota: prepared.quota,
+			model: prepared.model,
+			...(prepared.draftWrites.length > 0
+				? {
+						draftSkillsWritten: prepared.draftWrites.map((draft, index) => ({
+							slug: draft.slug,
+							path: resolvedDraftPaths[index]!,
+							sourceKnowledgeIds: draft.sourceKnowledgeIds,
+						})),
+					}
+				: {}),
+		};
+	} catch (error) {
+		for (const [knowledgePath, snapshot] of knowledgeRollback) {
+			await transactKnowledge<KnowledgeEntryBase>(knowledgePath, () =>
+				snapshot.map((entry) => structuredClone(entry)),
+			).catch(() => {});
+		}
+		for (const [targetPath, state] of fileRollback) {
+			if (state.existed && state.content !== null) {
+				await atomicWrite(targetPath, state.content).catch(() => {});
+				continue;
+			}
+			await unlink(targetPath).catch(() => {});
+		}
+		return {
+			ran: false,
+			reason: error instanceof Error ? error.message : String(error),
+			quota: prepared.quota,
+		};
+	}
+}
+
 export async function runSkillImprover(
 	req: SkillImproveRequest,
 ): Promise<SkillImproveResult> {
@@ -529,6 +1627,33 @@ export async function runSkillImprover(
 			reason: 'skill_improver aborted',
 			quota: noQuota,
 		};
+	}
+	if (cfg.require_user_approval) {
+		const prepared =
+			req.approvedCandidateContent !== undefined
+				? await prepareApprovedSkillImproverCandidateWrite({
+						...req,
+						now,
+						mode: writeMode,
+					})
+				: await prepareSkillImproverApprovalCandidate({
+						...req,
+						now,
+						mode: writeMode,
+						maxCalls,
+						allowAutoApply: req.allowAutoApply === true,
+					});
+		if (prepared.kind === 'result') {
+			return prepared.result;
+		}
+		if (req.approvedCandidateContent === undefined) {
+			return buildApprovalRequiredResult({
+				reason: 'skill_improver requires an exact human write approval',
+				quota: prepared.prepared.quota,
+				prepared: prepared.prepared,
+			});
+		}
+		return await writeApprovedSkillImproverCandidate(prepared.prepared);
 	}
 
 	// Resolve the delegate BEFORE touching quota. Pre-flight refusal when
@@ -818,6 +1943,7 @@ export const _internals = {
 	buildLLMProposalFrame,
 	buildSystemPrompt,
 	buildUserPrompt,
+	buildSkillImproverApprovalRequest,
 	gatherInventory,
 	reconcileStaleActiveSkills,
 	regenerateSkill,

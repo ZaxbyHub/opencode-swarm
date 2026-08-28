@@ -22,7 +22,7 @@ afterEach(async () => {
 	await cleanupTempDirs();
 });
 
-test('wait=true timeout_ms=0 terminates an expired PR-review lane without spending host calls', async () => {
+test('wait=true timeout_ms=0 is a non-destructive snapshot that spends no host calls', async () => {
 	const directory = makeTempDir();
 	const batchId = 'wait-zero-budget';
 	await recordPending({
@@ -43,7 +43,7 @@ test('wait=true timeout_ms=0 terminates an expired PR-review lane without spendi
 		error: undefined,
 	}));
 	const messages = mock(async () => ({
-		data: [assistantMessage('terminal output that must not be harvested')],
+		data: [assistantMessage('output that must not be discarded')],
 		error: undefined,
 	}));
 	_internals.getSessionOps = () => ({ ...baseOps(), status, messages });
@@ -53,22 +53,21 @@ test('wait=true timeout_ms=0 terminates an expired PR-review lane without spendi
 		directory,
 	);
 
-	// Prior behavior left the lane wedged pending and surfaced only a collector
-	// timeout diagnostic. The runtime deadline fix should synthesize a terminal
-	// PR-review error even when no host-call budget remains.
-	expect(result.success).toBe(false);
-	expect(result.completed).toBe(0);
-	expect(result.failed).toBe(1);
-	expect(result.pending).toBe(0);
-	expect(result.lane_results[0]?.status).toBe('failed');
-	expect(result.lane_results[0]?.error).toContain('runtime deadline');
-	expect(result.message).toBeUndefined();
-	expect(result.errors).toBeUndefined();
+	// Issue #2381: a zero wait budget bounds THIS OBSERVER CALL only. It used to
+	// synthesize a terminal PR-review error; it must now leave the lane exactly as
+	// it found it. The lane is still the child's to finish.
+	expect(result.failed).toBe(0);
+	expect(result.pending).toBe(1);
+	expect(result.all_settled).toBe(false);
+	expect(result.lane_results[0]?.status).toBe('pending');
+	// Pending identities are reported so the caller knows what is outstanding.
+	expect(result.pending_lanes).toHaveLength(1);
+	// A zero budget short-circuits before any host call is issued.
 	expect(status).not.toHaveBeenCalled();
 	expect(messages).not.toHaveBeenCalled();
 });
 
-test('wait=true on a busy PR-review lane performs one bounded salvage attempt, aborts, and records a terminal runtime-deadline error', async () => {
+test('wait=true on a busy PR-review lane leaves it running and never aborts it', async () => {
 	const directory = makeTempDir();
 	const batchId = 'wait-busy-no-harvest';
 	let now = 2_000_000_000_000;
@@ -92,7 +91,7 @@ test('wait=true on a busy PR-review lane performs one bounded salvage attempt, a
 		error: undefined,
 	}));
 	const messages = mock(async () => ({
-		data: [assistantMessage('late terminal candidate salvage')],
+		data: [assistantMessage('partial in-flight output')],
 		error: undefined,
 	}));
 	const abort = mock(async () => undefined);
@@ -108,19 +107,21 @@ test('wait=true on a busy PR-review lane performs one bounded salvage attempt, a
 		directory,
 	);
 
-	// Prior behavior kept the lane pending forever if status stayed busy through
-	// the wait budget. The runtime deadline fix should take one bounded transcript
-	// salvage shot, best-effort abort the wedged lane, and persist a terminal error.
-	expect(result.success).toBe(false);
-	expect(result.completed).toBe(0);
-	expect(result.failed).toBe(1);
-	expect(result.pending).toBe(0);
-	expect(result.lane_results[0]?.status).toBe('failed');
-	expect(result.lane_results[0]?.transcript_incomplete).toBe(true);
-	expect(result.lane_results[0]?.error).toContain('runtime deadline');
-	expect(messages).toHaveBeenCalledTimes(1);
-	expect(abort).toHaveBeenCalledTimes(1);
-	expect(sleeps).toEqual([]);
+	// Issue #2381: the host still reports the turn BUSY, so the child is alive.
+	// The observer's expired budget must not salvage-and-terminalize it, and must
+	// not abort the session either.
+	expect(result.failed).toBe(0);
+	expect(result.pending).toBe(1);
+	expect(result.lane_results[0]?.status).toBe('pending');
+	expect(result.pending_lanes?.[0]?.status).toBe('pending');
+	expect(abort).not.toHaveBeenCalled();
+	// PR-review FB-5: the `sleeps` array was recorded but never asserted, so a
+	// bug where the loop returns after ONE pass — never re-polling and never
+	// consuming the wait budget — looked identical to correct behavior. Assert
+	// the loop actually iterated and that the budget was spent.
+	expect(sleeps.length).toBeGreaterThan(0);
+	expect(status.mock.calls.length).toBeGreaterThan(1);
+	expect(now).toBeGreaterThanOrEqual(2_000_000_000_000 + 25);
 });
 
 test('repeat waited collect on a settled lane uses the durable delivery cache and skips host calls, including after restart', async () => {

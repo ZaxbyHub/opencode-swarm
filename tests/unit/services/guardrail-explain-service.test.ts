@@ -213,6 +213,13 @@ describe('SC-105: --agent and --scope overrides reflected in resolved scope/deci
 });
 
 describe('guardrail explain parity regressions from PR feedback', () => {
+	test('F-003: shared classifier blocks unconditional destructive commands without reimplementing the corpus here', async () => {
+		const result = await handleGuardrailExplain(tempDir, ['find . -delete']);
+
+		expect(result).toMatch(/\|\s*Decision\s*\|\s*block\s*\|/i);
+		expect(result).toContain('shared_classifier: destructive');
+	});
+
 	test('F-001: malformed write syntax fails closed on parseError', async () => {
 		// Previous behavior silently ignored detectPosixWrites parseError and
 		// predicted allow, while the real hook blocks parse failures.

@@ -292,7 +292,7 @@ describe('guardrails shell write scope enforcement', () => {
 					makeOutput('dd if=/dev/zero of=/tmp/out.bin bs=1M count=1'),
 				),
 				// dd is blocked by checkDestructiveCommand first (dev/zero is a destructive pattern)
-			).rejects.toThrow(/data wipe operation|WRITE BLOCKED: SCOPE_VIOLATION:/);
+			).rejects.toThrow(/data-wipe|catastrophic|SCOPE_VIOLATION/);
 		});
 	});
 

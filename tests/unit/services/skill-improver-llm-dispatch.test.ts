@@ -29,8 +29,8 @@ import { createIsolatedTestEnv } from '../../helpers/isolated-test-env';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let tmp: string;
-const FIXED_ISO_TIMESTAMP = '2024-01-02T03:04:05.000Z';
 let isolatedEnv: ReturnType<typeof createIsolatedTestEnv>;
+const FIXED_ISO_TIMESTAMP = '2024-01-02T03:04:05.000Z';
 beforeEach(() => {
 	mock.restore();
 	isolatedEnv = createIsolatedTestEnv();
@@ -55,7 +55,9 @@ const cfg = {
 		'skills' | 'spec' | 'architect_prompt' | 'knowledge'
 	>,
 	write_mode: 'proposal' as const,
-	require_user_approval: true,
+	// Approval-bound write behavior has dedicated coverage; this suite isolates
+	// LLM dispatch, quota, fallback, and source-tagging behavior.
+	require_user_approval: false,
 	quota_window: 'utc' as const,
 	allow_deterministic_fallback: true,
 };
@@ -126,7 +128,6 @@ status: active
 
 async function seedUnactionableRecord(): Promise<void> {
 	await mkdir(path.join(tmp, '.swarm'), { recursive: true });
-	const now = FIXED_ISO_TIMESTAMP;
 	const record: KnowledgeEntryBase & {
 		status: 'quarantined_unactionable';
 		project_name: string;
@@ -148,11 +149,11 @@ async function seedUnactionableRecord(): Promise<void> {
 			failed_after_count: 0,
 		},
 		schema_version: 2,
-		created_at: now,
-		updated_at: now,
+		created_at: FIXED_ISO_TIMESTAMP,
+		updated_at: FIXED_ISO_TIMESTAMP,
 		project_name: 't',
 		unactionable_reason: 'missing_predicate_and_scope',
-		quarantined_at: now,
+		quarantined_at: FIXED_ISO_TIMESTAMP,
 	};
 	await writeFile(
 		resolveUnactionablePath(tmp),
