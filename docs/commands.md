@@ -872,7 +872,7 @@ DELETE active swarm state from `.swarm/`, including `plan.md`, `plan.json`, `SWA
 
 ### `/swarm reset-session`
 
-Clear only session state (`.swarm/session/state.json` and related files). Preserves plan, evidence, and knowledge. Use when starting a new model/session but continuing the same project. Also recovers stale coder settlements (issue #2268): a `DISPATCHED` settlement WAL left behind by a dispatch whose completion never arrived is settled here, so future coder dispatches cannot stay wedged with `CODER_DISPATCH_IN_PROGRESS`. Before deleting, the session state is auto-backed up to `.swarm/reset-backups/<timestamp>/` (newest 5 kept).
+Clear only session state (`.swarm/session/state.json` and related files). Preserves plan, evidence, and knowledge. Use when starting a new model/session but continuing the same project. Also recovers stale coder settlements (issue #2268): a `DISPATCHED` settlement WAL left behind by a dispatch whose completion never arrived is settled here, so future coder dispatches cannot stay wedged with `CODER_DISPATCH_IN_PROGRESS`. Before deleting, the session state is auto-backed up to `.swarm/reset-backups/<timestamp>/` (newest 5 kept). Since #2398 the reset is also a real escape from the `knowledge_application` enforce gate: the invoking session's pending architect-directive obligations are durably released in the receipt ledger (audited as `application_gate_session_reset_release`), and the gate's in-memory denial counters are cleared — other sessions' obligations and the knowledge store itself are preserved.
 
 ### `/swarm recover [task_id] [--force]`
 

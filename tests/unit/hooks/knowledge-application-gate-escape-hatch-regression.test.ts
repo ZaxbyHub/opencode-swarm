@@ -8,6 +8,7 @@ import { knowledgeApplicationGateBefore } from '../../../src/hooks/knowledge-app
 import {
 	commitDisplayedMembership,
 	_internals as ledgerInternals,
+	queryLiveMemberships,
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
 import { resetSwarmState, swarmState } from '../../../src/state.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
@@ -64,29 +65,59 @@ describe('application gate exact-pair denial identity', () => {
 		expect(swarmState.gateDenialCounts.has('session-a')).toBe(false);
 	});
 
-	it('a new trace for the same entry starts a fresh denial identity', async () => {
+	it('a new trace for the same entry continues its denial identity (#2398)', async () => {
+		// Before #2398 the directive key was built from the volatile
+		// trace_id/entry_id pair set, so every re-display under a fresh trace
+		// reset the budget to 1 and max_gate_denials was unreachable. The
+		// identity is now the stable entry-id set.
 		await display('trace-old');
 		await expect(
 			knowledgeApplicationGateBefore(directory, input, config),
 		).rejects.toThrow();
+
+		await display('trace-new');
 		await expect(
 			knowledgeApplicationGateBefore(directory, input, config),
-		).rejects.toThrow();
+		).rejects.toThrow(/trace-new/);
+		// Two denials against the same entry set; with max_gate_denials: 2 the
+		// next call escapes and allows the action instead of restarting the
+		// budget at 1.
+		await knowledgeApplicationGateBefore(directory, input, config);
 
+		const state = await queryLiveMemberships(directory, {
+			session_id: 'session-a',
+			include_terminal: true,
+		});
+		if (!state.ok) throw new Error(state.detail);
+		expect(
+			state.memberships.every(
+				(membership) =>
+					membership.gate_release?.source ===
+					'application_gate_denial_limit_release',
+			),
+		).toBe(true);
+	});
+
+	it('an application marker on one trace discharges a fresh trace of the same entry (#2398)', async () => {
+		// Before #2398 an acknowledgment closed only the exact pair it named,
+		// while the injector re-armed the same entry under a fresh trace on
+		// every message-driven retrieval cache miss — a compliant architect
+		// could be denied indefinitely.
+		await display('trace-old');
 		const closed = await ledgerInternals.commitApplicationMarkerBatch(
 			directory,
 			{
 				trace_id: 'trace-old',
 				session_id: 'session-a',
-				items: [{ entry_id: ENTRY, outcome: 'applied' }],
+				items: [
+					{ entry_id: ENTRY, outcome: 'applied', source: 'architect_marker' },
+				],
 			},
 		);
 		if (!closed.ok) throw new Error(closed.detail);
 		await display('trace-new');
 
-		await expect(
-			knowledgeApplicationGateBefore(directory, input, config),
-		).rejects.toThrow(/trace-new/);
+		await knowledgeApplicationGateBefore(directory, input, config);
 	});
 
 	it('session teardown clears denial counts', async () => {

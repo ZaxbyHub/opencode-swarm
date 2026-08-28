@@ -604,12 +604,15 @@ critical directive was shown but received no terminal acknowledgment
 two escape hatches so the gate cannot deadlock a session forever:
 
 - **`max_gate_denials`** (default `5`) — after this many consecutive denials
-  against the same unacknowledged critical-directive set, the gate
+  against the same unacknowledged critical-directive set (keyed by the
+  stable entry-id set, so re-injecting the same directive under a fresh
+  trace does not reset the count — #2398), the gate
   records a nonterminal gate release for the pending directives and lets the
   action through without claiming they were applied.
 - **`gate_staleness_ms`** (default `600000`, 10 minutes) — a critical
   directive shown longer ago than this receives the same nonterminal release,
-  regardless of denial count.
+  regardless of denial count. A release does not reset the denial budget: a
+  fresh re-display of the same entry continues the accumulated count (#2398).
 
 Both auto-clears write an audit event to `.swarm/events.jsonl`
 (`knowledge_application_gate_denial_limit_clear` or

@@ -889,7 +889,8 @@ export const COMMAND_REGISTRY = {
 		deprecated: true,
 	},
 	clear: {
-		handler: (ctx) => handleResetSessionCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleResetSessionCommand(ctx.directory, ctx.args, ctx.sessionID),
 		description:
 			'Clear session state while preserving plan, evidence, and knowledge',
 		category: 'utility',
@@ -1441,11 +1442,12 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'restricted',
 	},
 	'reset-session': {
-		handler: (ctx) => handleResetSessionCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleResetSessionCommand(ctx.directory, ctx.args, ctx.sessionID),
 		description:
 			'Clear session state while preserving plan, evidence, and knowledge',
 		details:
-			'Deletes only .swarm/session/state.json and any other session files. Clears in-memory agent sessions, delegation chains, and active-agent mappings. Preserves plan, evidence, and knowledge for cross-session continuity. Also recovers stale coder settlements, releasing in-flight ownership held by this process, so dispatches cannot stay wedged on CODER_DISPATCH_IN_PROGRESS (issue #2268). Before deleting, auto-backs up the session files it removes to .swarm/reset-backups/<timestamp>/ (newest 5 kept).',
+			"Deletes only .swarm/session/state.json and other session files. Clears in-memory agent sessions, delegation chains, and active-agent mappings. Preserves plan, evidence, and knowledge. Also releases this session's pending knowledge-gate obligations (#2398) and recovers stale coder settlements so dispatches cannot wedge on CODER_DISPATCH_IN_PROGRESS (#2268). Auto-backs up removed files to .swarm/reset-backups/ (newest 5 kept).",
 		args: '',
 		category: 'utility',
 		toolPolicy: 'restricted',
