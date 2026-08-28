@@ -19,25 +19,37 @@ operation (the poll worker writes two snapshots per PR per poll).
   crosses the byte high-water mark.
 - **Incremental legacy migration**: pre-existing `subscriptions.jsonl` logs are
   folded by a streaming, bounded-memory scan with a crash-resumable byte cursor,
-  then archived (renamed) and deleted after 7 days. Migration work per store
-  operation is explicitly finite — at most 64 MiB of legacy per op; a larger
-  legacy source is refused (never folded, never archived — no silent loss) and
-  disclosed via health and a `/swarm pr status` footer warning with a repair
-  hint. The replay guards are writer-enforced as well: terminal compaction runs
-  before every persist, and a folded live set that still exceeds the checkpoint
-  replay capacity (512 records / 1 MiB) refuses migration and fails writes with
-  a loud capacity error — the store never persists a checkpoint its own reader
-  would reject and never archives unabsorbed data; reads keep folding the
-  legacy source exactly. v1 append semantics keep working: a downgraded
-  writer's changes are detected (size or mtime) and re-folded;
-  same-`updatedAt` external appends still win (positional last-write-wins).
+  then archived (renamed) and deleted after 7 days — the archive is stamped
+  fresh at creation, so the 7-day clock counts from archival, not from the log's
+  last write. Migration work per store operation is explicitly finite — at most
+  64 MiB of legacy per op; a larger legacy source is refused (never folded,
+  never archived — no silent loss) and disclosed via health and a
+  `/swarm pr status` footer warning with a repair hint. An I/O failure mid-scan
+  (transient EBUSY/EPERM/ENOENT-class) marks the scan aborted: migration stays
+  incomplete and retries on the next operation — an unread tail is never
+  archived away. The replay guards are writer-enforced as well: terminal
+  compaction runs before every persist, and a folded live set that still
+  exceeds the checkpoint replay capacity (512 records / 1 MiB) refuses
+  migration and fails writes with a loud capacity error — the store never
+  persists a checkpoint its own reader would reject and never archives
+  unabsorbed data; reads keep folding the legacy source exactly. v1 append
+  semantics keep working: a downgraded writer's changes are detected (size or
+  mtime) and re-folded; same-`updatedAt` external appends still win
+  (positional last-write-wins).
 - **Read bootstrap**: the first read on a legacy-only store persists the
-  checkpoint (best-effort, short lock timeout) so read-only installs converge to
-  bounded reads after one read.
+  checkpoint (best-effort, short lock timeout) so read-only installs converge
+  to bounded reads after one read. Attempted at most once per directory per
+  process: under lock contention the first read may wait up to the bootstrap
+  timeout, and later reads skip the attempt entirely.
 - **Identity validation**: the checkpoint is bound to its project root. A copied
   `.swarm` reads as empty — the wrong monitor never starts — and the next write
-  rebinds, quarantining the foreign checkpoint to a single bounded slot. Corrupt
-  checkpoints are quarantined and recovered from the legacy log.
+  rebinds, quarantining the foreign checkpoint to a bounded slot pair (the
+  current copy plus one `.prev` generation — a second recovery event never
+  destroys the first event's state). Every rebind is logged with the number of
+  displaced records and counted in `maintenance.resets`, surfaced in the
+  `/swarm pr status` storage footer and the `pr_subscription_health` telemetry
+  payload (`recovery_resets`). Corrupt checkpoints are quarantined and
+  recovered from the legacy log.
 - **Hard limits** (`PR_SUBSCRIPTION_LIMITS`): live-subscription cap (explicit
   `max_subscriptions` wins; store-side safety net 20 when omitted), terminal
   (removed/expired) records compacted 60-high → 30-newest with a 30-day age

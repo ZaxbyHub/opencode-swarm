@@ -682,7 +682,7 @@ corruption in this store).
 
 #### pr_subscription_health
 Category `lifecycle`, severity `notice`, privacy `operational`. Producer
-`src/telemetry.ts:1101` (`prSubscriptionHealth`, called by the bounded
+`src/telemetry.ts:1102` (`prSubscriptionHealth`, called by the bounded
 `.swarm/pr-monitor/` PR-monitor subscription checkpoint store in
 `src/background/pr-subscriptions.ts` after a terminal-record compaction, a
 legacy-JSONL migration completion (including the one-time read-bootstrap), a
@@ -692,7 +692,8 @@ required: the aggregate is store-level and counts-only. The payload is
 strictly bounded counts: `trigger`
 (`compact`/`migrate-complete`/`archive`/`foreign-rebind`/`corrupt-quarantine`),
 `active_count`, `terminal_count`, `compactions`, `corrupt_count`,
-`dropped_audit_count`, `checkpoint_bytes`, and `limit_bytes`. CorrelationIds,
+`dropped_audit_count`, `recovery_resets`, `checkpoint_bytes`, and
+`limit_bytes`. CorrelationIds,
 filesystem paths, and repo identities are never emitted (path redaction by
 omission). This is the health signal for the issue-#2042 bounded PR-monitor
 subscription store: `corrupt_count` discloses legacy lines skipped by the

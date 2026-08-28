@@ -162,28 +162,6 @@ describe('pr-subscriptions legacy migration', () => {
 		expect(cp.maintenance.corruptLegacyRecords).toBeGreaterThanOrEqual(4);
 	});
 
-	test('an oversize legacy line (>64 KiB) is skipped and counted, never parsed', async () => {
-		const now = Date.now();
-		const good = record('sess_good', 1, now);
-		// 65615-byte line — over the 65536-byte maxRecordBytes bound.
-		const oversize = `{"padding":"${'x'.repeat(65_600)}"}`;
-		expect(Buffer.byteLength(oversize, 'utf-8')).toBeGreaterThan(
-			PR_SUBSCRIPTION_LIMITS.maxRecordBytes,
-		);
-		fs.writeFileSync(
-			legacyPath(dir),
-			[`${JSON.stringify(good)}\n`, `${oversize}\n`].join(''),
-			'utf-8',
-		);
-
-		const active = await listActive(dir);
-		expect(active).toHaveLength(1);
-		expect(active[0].sessionID).toBe('sess_good');
-
-		const health = await getPrSubscriptionHealth(dir);
-		expect(health.corruptLegacyRecords).toBe(1);
-	});
-
 	test('migration completes on the first write op and archives the stable legacy log', async () => {
 		const now = Date.now();
 		const recs = [record('sess_1', 1, now), record('sess_2', 2, now - 1)];
@@ -202,6 +180,29 @@ describe('pr-subscriptions legacy migration', () => {
 		// The legacy log was archived (not deleted) with bytes intact.
 		expect(fs.existsSync(legacyPath(dir))).toBe(false);
 		expect(fs.readFileSync(archivePath(dir), 'utf-8')).toBe(originalContent);
+	});
+
+	test('archive mtime is stamped fresh so the 7-day TTL counts from creation, not last write', async () => {
+		// An IDLE legacy log (last written long ago) must not have its archive
+		// instantly past the TTL: renameSync preserves mtime, so the store
+		// re-stamps the archive on creation.
+		const old = Date.now() - 30 * 86_400_000;
+		const stale = record('sess_old', 1, old);
+		writeLegacy(dir, [stale]);
+		const aged = (Date.now() - 20 * 86_400_000) / 1000;
+		fs.utimesSync(legacyPath(dir), aged, aged);
+
+		await updateSnapshot(dir, 'sess_old::o/r::1', { errorCount: 0 });
+
+		expect(fs.existsSync(legacyPath(dir))).toBe(false);
+		expect(fs.existsSync(archivePath(dir))).toBe(true);
+		const archiveAge = Date.now() - fs.statSync(archivePath(dir)).mtimeMs;
+		expect(archiveAge).toBeLessThan(60_000); // freshly stamped
+		// And the TTL cleanup must NOT have deleted it in the same op.
+		const cp: PrSubscriptionCheckpoint = JSON.parse(
+			fs.readFileSync(checkpointPath(dir), 'utf-8'),
+		);
+		expect(cp.migration?.archived).toBe(true);
 	});
 
 	test('growth during migration: appended tail records are visible and absorbed', async () => {

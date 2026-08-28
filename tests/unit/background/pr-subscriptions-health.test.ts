@@ -441,6 +441,7 @@ describe('pr-subscriptions health + recovery', () => {
 				expect(result).toMatch(
 					/compactions \d+ · corrupt \d+ · dropped-audit \d+/,
 				);
+				expect(result).toMatch(/resets \d+/);
 			} finally {
 				statusInternals.listMergeGroupRuns = savedRunner;
 			}

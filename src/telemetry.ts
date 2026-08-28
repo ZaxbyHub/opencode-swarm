@@ -1095,6 +1095,7 @@ export const telemetry = {
 		compactions: number;
 		corrupt_count: number;
 		dropped_audit_count: number;
+		recovery_resets: number;
 		checkpoint_bytes: number;
 		limit_bytes: number;
 	}): void {
