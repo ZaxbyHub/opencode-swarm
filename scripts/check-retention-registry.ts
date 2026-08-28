@@ -24,11 +24,20 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+	type CloseLifecycleFacts,
+	type IdentifierResolver,
+	isSqliteArtifact,
+	parseCloseLifecycleFacts,
+} from './close-lifecycle-facts';
+import {
+	CLOSE_ARTIFACTS_WITHOUT_REGISTRY_ROW,
 	DISPOSITION_FORBIDDEN_STRINGS,
 	EXEMPT_WRITER_MODULES,
+	PROJECT_SWARM_ROWS_WITH_INDIRECT_ROOT,
 	RETENTION_ISSUE_SEQUENCE,
 	RETENTION_REGISTRY,
 	type RetentionRow,
+	SQLITE_ARTIFACTS_EXEMPT_FROM_ARCHIVE_CLEAN,
 } from './retention-registry.data';
 
 const REPO_ROOT = path.resolve(
@@ -483,6 +492,298 @@ export function collectCoverageRatchetErrors(
 	return errors;
 }
 
+const CLOSE_MODULE_REL = 'src/commands/close.ts';
+
+/**
+ * Resolve a bare identifier used inside close.ts (e.g. `REPO_MEMORY_FILENAME`)
+ * to its string literal, by following close.ts's own import statements to the
+ * exporting module. Fail-closed: an unresolvable identifier yields undefined,
+ * which the parser turns into a hard error rather than a dropped artifact.
+ */
+export function makeCloseIdentifierResolver(
+	root: string,
+	closeSource: string,
+): IdentifierResolver {
+	const importRe = /import\s*(?:type\s*)?\{([^}]*)\}\s*from\s*'([^']+)'/g;
+	const specsByName = new Map<string, string>();
+	for (const m of closeSource.matchAll(importRe)) {
+		for (const raw of m[1].split(',')) {
+			const name = raw.trim().replace(/^type\s+/, '').split(/\s+as\s+/)[0];
+			if (name) specsByName.set(name.trim(), m[2]);
+		}
+	}
+	return (name: string): string | undefined => {
+		const spec = specsByName.get(name);
+		if (!spec || !spec.startsWith('.')) return undefined;
+		const base = path.resolve(
+			path.dirname(path.join(root, CLOSE_MODULE_REL)),
+			spec.replace(/\.js$/, ''),
+		);
+		for (const candidate of [`${base}.ts`, path.join(base, 'index.ts')]) {
+			let source: string;
+			try {
+				source = fs.readFileSync(candidate, 'utf-8');
+			} catch {
+				continue;
+			}
+			const decl = new RegExp(
+				`export const ${name}\\s*(?::[^=]+)?=\\s*(?:'([^']*)'|"([^"]*)")`,
+			).exec(source);
+			if (decl) return decl[1] ?? decl[2];
+		}
+		return undefined;
+	};
+}
+
+/** Load close.ts and extract its close-lifecycle facts for the real repo. */
+export function loadCloseLifecycleFacts(root: string): CloseLifecycleFacts {
+	let source: string;
+	try {
+		source = fs.readFileSync(path.join(root, CLOSE_MODULE_REL), 'utf-8');
+	} catch (err) {
+		const reason = err instanceof Error ? err.message : String(err);
+		return {
+			archiveArtifacts: [],
+			activeStateToClean: [],
+			sqliteArchiveDispatch: [],
+			sqliteCleanHandleClose: [],
+			parseErrors: [
+				`${CLOSE_MODULE_REL} could not be read (${reason}) — the issue #1534 close-lifecycle gate fails closed rather than passing vacuously.`,
+			],
+		};
+	}
+	return parseCloseLifecycleFacts(
+		source,
+		makeCloseIdentifierResolver(root, source),
+	);
+}
+
+/**
+ * Flat files a row owns DIRECTLY under `.swarm/`, extracted deterministically
+ * from `pathGrammar`: plain `.swarm/<file>` tokens plus `.swarm/{a, b, c}`
+ * brace lists. Deliberately does NOT expand the registry's sidecar shorthand
+ * (`.swarm/x.jsonl (+ .checkpoint.json)`) — an extractor that guesses would
+ * accuse rows falsely, whereas one that misses merely under-requires, and the
+ * close.ts-side totality rule catches those sidecars anyway.
+ */
+export function extractFlatSwarmFiles(pathGrammar: string): string[] {
+	const FILE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.[A-Za-z0-9]+$/;
+	const out: string[] = [];
+	for (const m of pathGrammar.matchAll(/\.swarm\/\{([^}]*)\}/g)) {
+		for (const part of m[1].split(',')) {
+			const token = part.trim();
+			if (FILE.test(token)) out.push(token);
+		}
+	}
+	for (const m of pathGrammar.matchAll(/\.swarm\/([A-Za-z0-9][A-Za-z0-9._-]*)/g)) {
+		if (FILE.test(m[1])) out.push(m[1]);
+	}
+	return [...new Set(out)];
+}
+
+function membershipOf(
+	file: string,
+	facts: CloseLifecycleFacts,
+): 'archive+clean' | 'archive-only' | 'clean-only' | 'neither' {
+	const archived = facts.archiveArtifacts.includes(file);
+	const cleaned = facts.activeStateToClean.includes(file);
+	if (archived && cleaned) return 'archive+clean';
+	if (archived) return 'archive-only';
+	if (cleaned) return 'clean-only';
+	return 'neither';
+}
+
+/**
+ * Issue #1534 recurrence guardrail — the CI-check rung.
+ *
+ * DEFECT CLASS: a durable `.swarm/` artifact whose CREATION is wired but whose
+ * `/swarm close` LIFECYCLE is not. In #1534 the new artifact was
+ * `repo-memory.sqlite` (WAL-mode SQLite) and three wirings were each nearly
+ * omitted: (a) absent from `ARCHIVE_ARTIFACTS`/`ACTIVE_STATE_TO_CLEAN`, so
+ * close orphans it; (b) archived by raw file copy instead of
+ * `archiveSqliteSnapshot` (VACUUM INTO), which is not a consistent snapshot of
+ * a WAL DB; (c) the cached handle not closed before `fs.unlink`, which fails
+ * EBUSY on Windows only — invisible on a Linux CI host.
+ *
+ * Before this gate the registry already forced every durable writer to have a
+ * row, and each row declared a prose `closePolicy` — but NOTHING checked that a
+ * row claiming "archived"/"cleaned" actually appeared in close.ts's arrays, nor
+ * that a SQLite artifact was routed through VACUUM INTO, nor that its handle
+ * was closed before unlink. The loop is closed here in both directions:
+ * registry -> close.ts (a declaration must match reality) and close.ts ->
+ * registry (an artifact in the arrays must be declared by exactly one row).
+ *
+ * WHY THIS RUNG, AND NOT A STRONGER ONE. As with the sibling #2038 rule above,
+ * the stronger rungs are unavailable here, not merely unattractive:
+ *
+ *   - Not a TYPE constraint. `tsconfig.json` is a single config with
+ *     `include: ["src/**\/*"]` and no CI step runs `tsc` over `scripts/`, so a
+ *     required field on `RetentionRow` would be enforced by ZERO gates — the
+ *     types are erased and `bun run check:retention` executes regardless.
+ *     Even with a `scripts/` tsconfig, a type can require the field's PRESENCE
+ *     but cannot check that the declared value MATCHES close.ts, which is the
+ *     entire invariant. The type rung is a complement to this check, never a
+ *     substitute; building it is out of scope for #1534.
+ *   - Not a LINT rule. Biome's configured scope is `src/**` and `tests/**`
+ *     (biome.json), and this is a cross-artifact semantic property keyed on
+ *     data VALUES rather than code shape — teaching a general-purpose linter
+ *     about one project data file and one command module.
+ *   - Not a RUNTIME assertion. The registry is build-time
+ *     documentation-as-data under `scripts/`, deliberately never loaded by the
+ *     plugin (AGENTS.md invariants 1 and 2), so there is no runtime in which
+ *     close.ts could assert against it.
+ *
+ * ANTI-VACUOUS ANCHORS. Every fact is parsed from close.ts source, so parser
+ * rot would otherwise yield a silently green run. The gate therefore requires
+ * both arrays to be non-empty and demands `swarm.db` in the SQLite archive
+ * dispatch set and in the clean-stage handle-close set — facts true on `main`
+ * independently of any artifact this change adds.
+ */
+export function collectCloseLifecycleCoherenceErrors(
+	rows: readonly RetentionRow[],
+	facts: CloseLifecycleFacts,
+	allowlist: readonly string[] = CLOSE_ARTIFACTS_WITHOUT_REGISTRY_ROW,
+	indirectRootRows: readonly string[] = PROJECT_SWARM_ROWS_WITH_INDIRECT_ROOT,
+	sqliteExempt: Readonly<
+		Record<string, string>
+	> = SQLITE_ARTIFACTS_EXEMPT_FROM_ARCHIVE_CLEAN,
+): string[] {
+	const errors: string[] = [...facts.parseErrors];
+
+	// --- Anti-vacuous anchors -------------------------------------------------
+	if (facts.archiveArtifacts.length === 0) {
+		errors.push(
+			'close.ts ARCHIVE_ARTIFACTS parsed as EMPTY — the issue #1534 close-lifecycle gate would be vacuously green. Fix scripts/close-lifecycle-facts.ts.',
+		);
+	}
+	if (facts.activeStateToClean.length === 0) {
+		errors.push(
+			'close.ts ACTIVE_STATE_TO_CLEAN parsed as EMPTY — the issue #1534 close-lifecycle gate would be vacuously green. Fix scripts/close-lifecycle-facts.ts.',
+		);
+	}
+	if (!facts.sqliteArchiveDispatch.includes('swarm.db')) {
+		errors.push(
+			`close.ts SQLite archive dispatch set is ${JSON.stringify(facts.sqliteArchiveDispatch)} and does not contain "swarm.db". swarm.db has been routed through archiveSqliteSnapshot since issue #2030, so its absence means the parser lost track of the dispatch site, not that the wiring changed — the gate fails closed rather than passing vacuously.`,
+		);
+	}
+	if (!facts.sqliteCleanHandleClose.includes('swarm.db')) {
+		errors.push(
+			`close.ts clean-stage handle-close set is ${JSON.stringify(facts.sqliteCleanHandleClose)} and does not contain "swarm.db". closeProjectDb has guarded the swarm.db unlink since the Windows EBUSY fix (swarm-pr-review F-005), so its absence means the parser lost track of the guard, not that the wiring changed.`,
+		);
+	}
+
+	// --- Registry -> close.ts: declarations must match reality ----------------
+	const declaredBy = new Map<string, string[]>();
+	for (const row of rows) {
+		for (const [file, declared] of Object.entries(row.closeArrayMembership ?? {})) {
+			if (!declaredBy.has(file)) declaredBy.set(file, []);
+			declaredBy.get(file)?.push(row.id);
+			const actual = membershipOf(file, facts);
+			// A flat .swarm/ SQLite artifact declared anything other than
+			// archive+clean is issue #1534 sub-defect (a) reintroduced verbatim:
+			// the declaration matches close.ts (which indeed does nothing), and
+			// rules (b)/(c) below never fire because they key on real array
+			// membership. Closing that escape is the point of the frozen exempt map.
+			if (
+				isSqliteArtifact(file) &&
+				declared !== 'archive+clean' &&
+				!Object.prototype.hasOwnProperty.call(sqliteExempt, file)
+			) {
+				errors.push(
+					`Row "${row.id}": closeArrayMembership declares the SQLite artifact "${file}" as "${declared}", not "archive+clean". A WAL-mode database left on disk across /swarm close is exactly the orphaning issue #1534 was about, and declaring it "${declared}" also silently disables the VACUUM INTO and handle-close rules (both key on real array membership). Wire it into close.ts's ARCHIVE_ARTIFACTS and ACTIVE_STATE_TO_CLEAN, or add "${file}" to SQLITE_ARTIFACTS_EXEMPT_FROM_ARCHIVE_CLEAN with a reviewed reason.`,
+				);
+			}
+			if (declared !== actual) {
+				errors.push(
+					`Row "${row.id}": closeArrayMembership declares "${file}" as "${declared}" but src/commands/close.ts actually has it as "${actual}" (ARCHIVE_ARTIFACTS=${facts.archiveArtifacts.includes(file)}, ACTIVE_STATE_TO_CLEAN=${facts.activeStateToClean.includes(file)}). This is the issue #1534 defect class: a durable .swarm/ artifact whose creation is wired but whose /swarm close lifecycle is not. Either wire the artifact into close.ts's arrays or correct the declaration — the two must agree.`,
+				);
+			}
+		}
+	}
+
+	// --- Coverage prompt: in-scope rows must declare --------------------------
+	for (const row of rows) {
+		if (row.canonicalRoot !== 'project-swarm') continue;
+		if (indirectRootRows.includes(row.id)) continue;
+		if (!row.pathGrammar.startsWith('.swarm/')) {
+			errors.push(
+				`Row "${row.id}": canonicalRoot is "project-swarm" but pathGrammar "${row.pathGrammar}" does not start with ".swarm/". The issue #1534 gate derives which flat artifacts a row owns from pathGrammar; a non-conforming grammar would silently exempt the row from declaring closeArrayMembership. Restate the grammar, or add the row to PROJECT_SWARM_ROWS_WITH_INDIRECT_ROOT with its indirection reason.`,
+			);
+			continue;
+		}
+		const declared = row.closeArrayMembership ?? {};
+		for (const file of extractFlatSwarmFiles(row.pathGrammar)) {
+			if (file in declared) continue;
+			errors.push(
+				`Row "${row.id}": pathGrammar names the flat .swarm/ artifact "${file}" but closeArrayMembership does not declare it. Every durable artifact directly under .swarm/ must state what /swarm close does with it — issue #1534 was exactly a new .swarm/ artifact whose close lifecycle was never wired. Declare it as "${membershipOf(file, facts)}" if close.ts is already correct, or wire close.ts first.`,
+			);
+		}
+	}
+
+	// --- close.ts -> registry: every wired artifact must be declared ----------
+	const wired = [
+		...new Set([...facts.archiveArtifacts, ...facts.activeStateToClean]),
+	].sort();
+	for (const file of wired) {
+		const owners = declaredBy.get(file) ?? [];
+		if (owners.length === 1) continue;
+		if (owners.length > 1) {
+			errors.push(
+				`close.ts artifact "${file}" is declared by ${owners.length} registry rows (${owners.join(', ')}). Exactly one row must own each artifact's closeArrayMembership, otherwise a later edit can leave contradictory declarations.`,
+			);
+			continue;
+		}
+		if (allowlist.includes(file)) continue;
+		errors.push(
+			`close.ts wires the artifact "${file}" into its archive/clean arrays but no registry row declares it in closeArrayMembership. Issue #1534 acceptance: an artifact cannot gain a /swarm close lifecycle without a retention-registry row stating that lifecycle. Add "${file}": "${membershipOf(file, facts)}" to the owning row in scripts/retention-registry.data.ts.`,
+		);
+	}
+	for (const file of allowlist) {
+		if (!wired.includes(file)) {
+			errors.push(
+				`CLOSE_ARTIFACTS_WITHOUT_REGISTRY_ROW lists "${file}" but close.ts no longer wires it — remove the stale allowlist entry (the list may only shrink).`,
+			);
+			continue;
+		}
+		if ((declaredBy.get(file) ?? []).length > 0) {
+			errors.push(
+				`CLOSE_ARTIFACTS_WITHOUT_REGISTRY_ROW lists "${file}" but a registry row now declares it — remove the allowlist entry (the list may only shrink).`,
+			);
+		}
+	}
+
+	for (const file of Object.keys(sqliteExempt)) {
+		if (!declaredBy.has(file)) {
+			errors.push(
+				`SQLITE_ARTIFACTS_EXEMPT_FROM_ARCHIVE_CLEAN lists "${file}" but no registry row declares it any more — remove the stale exemption (the map may only shrink).`,
+			);
+		}
+	}
+
+	// --- SQLite sub-defects (b) and (c) --------------------------------------
+	for (const file of wired) {
+		if (!isSqliteArtifact(file)) continue;
+		if (
+			facts.archiveArtifacts.includes(file) &&
+			!facts.sqliteArchiveDispatch.includes(file)
+		) {
+			errors.push(
+				`close.ts archives the SQLite artifact "${file}" but does NOT route it through archiveSqliteSnapshot (dispatch set: ${JSON.stringify(facts.sqliteArchiveDispatch)}). This is issue #1534 sub-defect (b): a raw file copy of a WAL-mode database is not a transactionally consistent snapshot — committed rows still in the -wal sidecar are lost and an in-flight writer can be captured mid-transaction. Add it to the archiveSqliteSnapshot branch in runArchiveStage.`,
+			);
+		}
+		if (
+			facts.activeStateToClean.includes(file) &&
+			!facts.sqliteCleanHandleClose.includes(file)
+		) {
+			errors.push(
+				`close.ts cleans the SQLite artifact "${file}" but the clean stage never closes its cached handle before fs.unlink (handle-close set: ${JSON.stringify(facts.sqliteCleanHandleClose)}). This is issue #1534 sub-defect (c): on Windows a long-lived WAL-mode connection holds a file lock and the unlink fails with EBUSY — a platform-specific failure INVISIBLE on a Linux CI host. Add an \`if (artifact === ...) { closeXxx(ctx.directory); }\` guard before the unlink in runCleanStage.`,
+			);
+		}
+	}
+
+	return errors;
+}
+
 /** Duplicate-row-id and empty-registry guards over an injectable row set. */
 export function collectRegistryIdentityErrors(
 	rows: readonly RetentionRow[],
@@ -516,6 +817,15 @@ export function collectRetentionRegistryErrors(root: string = REPO_ROOT): string
 	// 2+3) Writer coverage ratchet and stale-declaration checks.
 	errors.push(
 		...collectCoverageRatchetErrors(root, RETENTION_REGISTRY, EXEMPT_WRITER_MODULES),
+	);
+
+	// 3b) Issue #1534: close-lifecycle coherence between each row's declared
+	// closeArrayMembership and what src/commands/close.ts actually does.
+	errors.push(
+		...collectCloseLifecycleCoherenceErrors(
+			RETENTION_REGISTRY,
+			loadCloseLifecycleFacts(root),
+		),
 	);
 
 	// 4) Doc coherence: every row id must appear in the registry doc as a

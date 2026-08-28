@@ -45,12 +45,39 @@ import {
 const GRAPH_HEALTH_OUTPUT_LIMIT = 50;
 const MAX_HEALTH_PATH_LENGTH = 500;
 
-let cachedReverseIndex: {
-	graph: RepoGraph;
+interface QueryIndexes {
 	index: Map<string, FileReference[]>;
 	forwardIndex: Map<string, FileReference[]>;
 	moduleNameIndex: Map<string, GraphNode>;
-} | null = null;
+}
+
+/**
+ * Derived query indexes, keyed by graph object identity (issue #1534).
+ *
+ * This was a module-level SINGLE-SLOT cache. A single slot is correct only
+ * while exactly one `RepoGraph` object is live: the moment a second graph is
+ * queried, the first one's indexes are evicted and must be rebuilt from
+ * scratch — O(nodes + edges). `loadSubgraphForFiles`
+ * (`src/tools/repo-graph/indexed-storage.ts`) returns a FRESH `RepoGraph` per
+ * call, so under a single slot every injection-hook subgraph query would evict
+ * the index for the long-lived graph object `repo_map` reuses
+ * (`src/tools/repo-map.ts`), forcing a full-graph index rebuild on every
+ * interleaved call. A `WeakMap` keyed by the graph object removes that thrash
+ * by construction and lets both graphs keep their own indexes; entries are
+ * collected with their graph, so there is no unbounded growth
+ * (AGENTS.md invariant 8).
+ *
+ * CONTRACT — read before mutating a graph in place: the single slot used to
+ * flush *incidentally* whenever any other graph was queried, which sometimes
+ * masked a missing invalidation. The WeakMap removes that accident. Any site
+ * that mutates `graph.nodes` or `graph.edges` in place MUST call
+ * {@link resetQueryCache} afterwards, or its stale indexes persist for the
+ * lifetime of the graph object. Existing in-place mutation sites already do
+ * this (`src/tools/repo-graph/incremental.ts:429,722,742`); the WeakMap
+ * preserves that contract rather than creating it, and
+ * `query-index-cache.test.ts` pins it.
+ */
+let queryIndexCache = new WeakMap<RepoGraph, QueryIndexes>();
 
 function normalizeLookupPath(input: string): string {
 	return normalizeGraphPath(input).replace(/^(?:\.\/)+/, '');
@@ -89,7 +116,7 @@ function moduleNameForEdgePath(graph: RepoGraph, edgePath: string): string {
 	return normalizeLookupPath(path.relative(graphRoot(graph), edgePath));
 }
 
-function buildReverseIndex(graph: RepoGraph): Map<string, FileReference[]> {
+function buildQueryIndexes(graph: RepoGraph): QueryIndexes {
 	const reverse = new Map<string, FileReference[]>();
 	const forward = new Map<string, FileReference[]>();
 	const moduleNameIndex = new Map<string, GraphNode>();
@@ -124,23 +151,19 @@ function buildReverseIndex(graph: RepoGraph): Map<string, FileReference[]> {
 	for (const refs of forward.values()) {
 		refs.sort((a, b) => a.file.localeCompare(b.file));
 	}
-	cachedReverseIndex = {
-		graph,
+	return {
 		index: reverse,
 		forwardIndex: forward,
 		moduleNameIndex,
 	};
-	return reverse;
 }
 
-function getQueryIndexes(
-	graph: RepoGraph,
-): NonNullable<typeof cachedReverseIndex> {
-	if (cachedReverseIndex && cachedReverseIndex.graph === graph) {
-		return cachedReverseIndex;
-	}
-	buildReverseIndex(graph);
-	return cachedReverseIndex as NonNullable<typeof cachedReverseIndex>;
+function getQueryIndexes(graph: RepoGraph): QueryIndexes {
+	const cached = queryIndexCache.get(graph);
+	if (cached) return cached;
+	const built = buildQueryIndexes(graph);
+	queryIndexCache.set(graph, built);
+	return built;
 }
 
 function getReverseIndex(graph: RepoGraph): Map<string, FileReference[]> {
@@ -151,8 +174,15 @@ function getForwardIndex(graph: RepoGraph): Map<string, FileReference[]> {
 	return getQueryIndexes(graph).forwardIndex;
 }
 
+/**
+ * Drop every cached query index. Required after any in-place mutation of a
+ * graph's `nodes` or `edges` (see the {@link queryIndexCache} contract note),
+ * and retained as the test seam for index-staleness assertions. Reassigns a
+ * fresh `WeakMap` rather than deleting keys, so it invalidates graphs this
+ * module can no longer enumerate.
+ */
 export function resetQueryCache(): void {
-	cachedReverseIndex = null;
+	queryIndexCache = new WeakMap();
 }
 
 /**

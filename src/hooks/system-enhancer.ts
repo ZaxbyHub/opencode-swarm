@@ -687,6 +687,12 @@ export function createSystemEnhancerHook(
 		maxFiles: repoGraphConfig.max_files,
 		walkBudgetMs: repoGraphConfig.walk_budget_ms,
 		excludeDirs: repoGraphConfig.exclude_dirs,
+		// issue #1534: the resolved storage mode rides in beside the other
+		// repo-graph settings. It is parsed HERE, once at hook creation, because
+		// repo-graph-injection.ts must not read config synchronously on the
+		// system-prompt path (issue #704/#1900 discipline) — see the
+		// `loadPluginConfigWithMetaAsync` note on that module's `_internals`.
+		storage: repoGraphConfig.storage,
 	};
 
 	return {

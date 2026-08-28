@@ -123,6 +123,7 @@
 		"check:gate-portability": "bun run scripts/check-gate-portability.ts",
 		"check:bare-spawn": "bun run scripts/check-bare-executable-spawn.ts",
 		"check:error-channel-discard": "bun run scripts/check-error-channel-discard.ts",
+		"check:registry-citations": "bun run scripts/check-registry-citations.ts",
 		"check:memory-recall": "bun run scripts/memory-recall-regression.ts"
 	},
 	"dependencies": {

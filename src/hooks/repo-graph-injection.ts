@@ -16,6 +16,14 @@
  * bounded workspace probe gates use of the graph. Uncertified graphs and
  * complete drift above the configured refresh cap are suppressed;
  * inconclusive probes remain usable as freshness-unknown, without mutation.
+ *
+ * Storage modes (issue #1534): when `options.storage === 'indexed'`, the two
+ * FILE-SCOPED block builders may, on a full-graph LRU miss, serve a bounded
+ * subgraph read from `.swarm/repo-memory.sqlite` instead of parsing the whole
+ * JSON document. The kill switch, the stat gate and the freshness probe all
+ * run first and are unchanged, and the LRU hit — the common case — never
+ * touches SQLite. Whole-graph consumers (`buildLaneOrientationBlock`,
+ * `semantic-diff-injection`) always get the full JSON graph.
  */
 
 import * as fs from 'node:fs';
@@ -34,6 +42,7 @@ import {
 	probeFreshness,
 	type RepoGraph,
 } from '../tools/repo-graph';
+import { loadSubgraphForFiles } from '../tools/repo-graph/indexed-storage';
 import { estimateTokens } from './utils';
 
 interface CachedGraph {
@@ -45,19 +54,42 @@ interface CachedGraph {
 const cache = new Map<string, CachedGraph>();
 const MAX_CACHED_DIRECTORIES = 16;
 
+/**
+ * Bounded LRU for indexed-mode subgraphs (issue #1534).
+ *
+ * Deliberately SEPARATE from `cache`: a subgraph is a partial view built for
+ * one specific (files, depth) request and must never be handed to a
+ * whole-graph consumer (`askGraph`, `getKeyFiles`, `semantic-diff-injection`).
+ * Writing one into `cache` would do exactly that.
+ */
+const subgraphCache = new Map<string, RepoGraph>();
+const MAX_CACHED_SUBGRAPHS = 32;
+
 export interface RepoGraphInjectionOptions extends FreshnessOptions {
 	enabled?: boolean;
 	refreshCap?: number;
+	/**
+	 * Resolved `repo_graph.storage` mode (issue #1534). Passed in by the caller
+	 * — this module deliberately never reads config synchronously (see the
+	 * `loadPluginConfigWithMetaAsync` note on `_internals`), so the mode rides
+	 * in beside `enabled` / `refreshCap`. Anything other than `'indexed'`
+	 * (including `undefined`) keeps every path on the JSON document.
+	 */
+	storage?: 'json' | 'indexed';
 }
 
 export const _internals = {
 	probeFreshness,
 	cacheSize: () => cache.size,
+	subgraphCacheSize: () => subgraphCache.size,
 	renderLaneOrientationBlock,
 	orientationFreshnessLine,
 	// Routed through the seam so tests can force the config-load failure
 	// fallback (the sync-free async variant per issue #704/#1900 discipline).
 	loadPluginConfigWithMetaAsync,
+	// Seam (invariant 7: DI over mock.module) so tests can count SQLite reads
+	// and assert the suppression gates return before the index is consulted.
+	loadSubgraphForFiles,
 };
 
 function touchCache(key: string, value: CachedGraph): void {
@@ -70,21 +102,77 @@ function touchCache(key: string, value: CachedGraph): void {
 	}
 }
 
+function touchSubgraphCache(key: string, value: RepoGraph): void {
+	subgraphCache.delete(key);
+	subgraphCache.set(key, value);
+	while (subgraphCache.size > MAX_CACHED_SUBGRAPHS) {
+		const oldest = subgraphCache.keys().next().value;
+		if (oldest === undefined) break;
+		subgraphCache.delete(oldest);
+	}
+}
+
 /**
- * Load the repo graph for `directory`, using a bounded per-directory cache that
- * invalidates on file mtime/size change and a shared content-freshness gate.
- * Returns null if no graph exists or its workspace alignment is unsafe.
- *
- * Exported only for tests; production callers use the buildXxxBlock helpers below.
+ * Cache key for a subgraph request. The graph artifact's `{mtimeMs, size}` is
+ * part of the key, so a graph change invalidates every cached subgraph for
+ * that directory without an explicit sweep — the identical invalidation
+ * contract the full-graph LRU uses. Files are sorted because the closure is a
+ * set union and is order-independent; the caller's own array order (which does
+ * drive `BlastRadiusResult.target` and the rendered target list) is never read
+ * from this key. NUL is the separator because it is the one character that
+ * cannot appear in a path component, so no two distinct requests can collide
+ * by concatenation.
  */
-export async function getCachedGraph(
+function subgraphCacheKey(
+	directoryKey: string,
+	stat: { mtimeMs: number; size: number },
+	files: readonly string[],
+	depth: number,
+): string {
+	return [
+		directoryKey,
+		String(stat.mtimeMs),
+		String(stat.size),
+		String(depth),
+		[...files].sort().join('\u0000'),
+	].join('\u0000');
+}
+
+/**
+ * Outcome of the shared gate sequence that precedes every graph
+ * materialization. Extracted so `getCachedGraph` and the indexed-aware block
+ * builders run the SAME gates in the SAME order rather than duplicating them.
+ */
+type GraphGateResult =
+	| { kind: 'suppressed' }
+	| { kind: 'hit'; graph: RepoGraph }
+	| { kind: 'miss'; key: string; stat: { mtimeMs: number; size: number } };
+
+/**
+ * Gates 1-4 of the injection contract, in the order the approved plan for
+ * issue #1534 fixes:
+ *
+ *   1. `enabled === false` — the `repo_graph.enabled` kill switch. Evicts the
+ *      cache entry and returns without any I/O beyond the eviction.
+ *   2. The graph artifact must stat.
+ *   3. Freshness suppression (`no-fingerprint`, or `drifted` beyond the
+ *      refresh cap). Evaluated BEFORE any graph or subgraph is materialized:
+ *      `probeFreshness` takes only the directory and never reads the graph, so
+ *      hoisting it above materialization is behavior-preserving and avoids a
+ *      full JSON parse (or a SQLite open) on the suppressed path.
+ *   4. Full-graph LRU hit — the common case, which must never touch SQLite.
+ *
+ * A `miss` result means the caller may materialize: indexed subgraph first
+ * where that applies, otherwise the full JSON document.
+ */
+async function evaluateGraphGates(
 	directory: string,
 	options?: RepoGraphInjectionOptions,
-): Promise<RepoGraph | null> {
+): Promise<GraphGateResult> {
 	const key = path.normalize(path.resolve(directory));
 	if (options?.enabled === false) {
 		cache.delete(key);
-		return null;
+		return { kind: 'suppressed' };
 	}
 	const file = getGraphPath(directory);
 	let stat: fs.Stats;
@@ -93,25 +181,7 @@ export async function getCachedGraph(
 	} catch {
 		// No graph file. Drop any stale cache entry.
 		cache.delete(key);
-		return null;
-	}
-	const cached = cache.get(key);
-	let graph: RepoGraph | null;
-	if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
-		graph = cached.graph;
-		touchCache(key, cached);
-	} else {
-		try {
-			graph = loadGraphSync(directory);
-		} catch {
-			cache.delete(key);
-			return null;
-		}
-		if (!graph) {
-			cache.delete(key);
-			return null;
-		}
-		touchCache(key, { graph, mtimeMs: stat.mtimeMs, size: stat.size });
+		return { kind: 'suppressed' };
 	}
 
 	const probe = await _internals.probeFreshness(directory, options);
@@ -121,14 +191,114 @@ export async function getCachedGraph(
 		probe.state === 'no-fingerprint' ||
 		(probe.state === 'drifted' && observedDrift > refreshCap)
 	) {
+		return { kind: 'suppressed' };
+	}
+
+	const cached = cache.get(key);
+	if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+		touchCache(key, cached);
+		return { kind: 'hit', graph: cached.graph };
+	}
+	return {
+		kind: 'miss',
+		key,
+		stat: { mtimeMs: stat.mtimeMs, size: stat.size },
+	};
+}
+
+/** Gate 6: parse the whole JSON document and populate the full-graph LRU. */
+function loadFullGraph(
+	directory: string,
+	key: string,
+	stat: { mtimeMs: number; size: number },
+): RepoGraph | null {
+	let graph: RepoGraph | null;
+	try {
+		graph = loadGraphSync(directory);
+	} catch {
+		cache.delete(key);
 		return null;
 	}
+	if (!graph) {
+		cache.delete(key);
+		return null;
+	}
+	touchCache(key, { graph, mtimeMs: stat.mtimeMs, size: stat.size });
 	return graph;
+}
+
+/**
+ * Load the repo graph for `directory`, using a bounded per-directory cache that
+ * invalidates on file mtime/size change and a shared content-freshness gate.
+ * Returns null if no graph exists or its workspace alignment is unsafe.
+ *
+ * Always returns the WHOLE graph — `semantic-diff-injection` and
+ * `buildLaneOrientationBlock` are whole-graph consumers and must never receive
+ * a bounded subgraph.
+ *
+ * Exported only for tests; production callers use the buildXxxBlock helpers below.
+ */
+export async function getCachedGraph(
+	directory: string,
+	options?: RepoGraphInjectionOptions,
+): Promise<RepoGraph | null> {
+	const gate = await evaluateGraphGates(directory, options);
+	if (gate.kind === 'suppressed') return null;
+	if (gate.kind === 'hit') return gate.graph;
+	return loadFullGraph(directory, gate.key, gate.stat);
+}
+
+/**
+ * Graph resolution for the two file-scoped block builders (issue #1534).
+ *
+ * Identical to {@link getCachedGraph} except for gate 5: on a full-graph LRU
+ * miss in `indexed` mode, a bounded subgraph covering `files` to `depth` is
+ * served instead of a whole-document `JSON.parse`. The subgraph is an ordinary
+ * `RepoGraph` fed to the existing, unmodified `getGraphNode` /
+ * `getLocalizationContext` / `getBlastRadius` — no query logic is duplicated.
+ *
+ * `loadSubgraphForFiles` verifies index freshness, workspace binding and
+ * integrity internally and returns null on any doubt, so a null result simply
+ * falls through to the JSON path.
+ */
+async function resolveGraphForFiles(
+	directory: string,
+	files: readonly string[],
+	depth: number,
+	options?: RepoGraphInjectionOptions,
+): Promise<RepoGraph | null> {
+	const gate = await evaluateGraphGates(directory, options);
+	if (gate.kind === 'suppressed') return null;
+	if (gate.kind === 'hit') return gate.graph;
+
+	if (options?.storage === 'indexed' && files.length > 0) {
+		const subKey = subgraphCacheKey(gate.key, gate.stat, files, depth);
+		const cachedSubgraph = subgraphCache.get(subKey);
+		if (cachedSubgraph) {
+			touchSubgraphCache(subKey, cachedSubgraph);
+			return cachedSubgraph;
+		}
+		let subgraph: RepoGraph | null = null;
+		try {
+			subgraph = _internals.loadSubgraphForFiles(directory, [...files], depth);
+		} catch {
+			// Fail-open: the index is an accelerator, never a durability point.
+			subgraph = null;
+		}
+		if (subgraph) {
+			// Deliberately NOT written into the full-graph LRU.
+			touchSubgraphCache(subKey, subgraph);
+			return subgraph;
+		}
+	}
+
+	return loadFullGraph(directory, gate.key, gate.stat);
 }
 
 /** Test-only: clear the per-directory cache. */
 export function resetGraphInjectionCache(): void {
 	cache.clear();
+	subgraphCache.clear();
 }
 
 /**
@@ -145,9 +315,11 @@ export async function buildCoderLocalizationBlock(
 	options?: RepoGraphInjectionOptions,
 ): Promise<string | null> {
 	if (!targetFile) return null;
-	const graph = await getCachedGraph(directory, options);
-	if (!graph) return null;
 	const normalized = targetFile.replace(/\\/g, '/').replace(/^\.\/+/, '');
+	// Depth 2 matches the `maxDepth` handed to getLocalizationContext below;
+	// the closure must cover exactly what that call can reach.
+	const graph = await resolveGraphForFiles(directory, [normalized], 2, options);
+	if (!graph) return null;
 	const targetNode = getGraphNode(graph, normalized);
 	if (!targetNode) return null;
 	const ctx = getLocalizationContext(graph, normalized, {
@@ -176,11 +348,23 @@ export async function buildReviewerBlastRadiusBlock(
 	options?: RepoGraphInjectionOptions,
 ): Promise<string | null> {
 	if (changedFiles.length === 0) return null;
-	const graph = await getCachedGraph(directory, options);
+	const requested = changedFiles.map((f) =>
+		f.replace(/\\/g, '/').replace(/^\.\/+/, ''),
+	);
+	// The closure is the union over ALL requested files computed in ONE call:
+	// getBlastRadius seeds `visited` with every target simultaneously, so a
+	// file that is both a target and another target's dependent must be
+	// pre-visited. Per-file subgraphs merged afterwards would produce a
+	// different totalDependents and therefore a different riskLevel.
+	// Depth 3 matches the getBlastRadius maxDepth below.
+	const graph = await resolveGraphForFiles(directory, requested, 3, options);
 	if (!graph) return null;
-	const normalized = changedFiles
-		.map((f) => f.replace(/\\/g, '/').replace(/^\.\/+/, ''))
-		.filter((f) => getGraphNode(graph, f) !== undefined);
+	// Requested files absent from the graph are dropped here, against whatever
+	// graph was handed back — the subgraph must resolve every requested file
+	// exactly as the full graph would.
+	const normalized = requested.filter(
+		(f) => getGraphNode(graph, f) !== undefined,
+	);
 	if (normalized.length === 0) return null;
 
 	const blast = getBlastRadius(graph, normalized, 3);
@@ -382,6 +566,15 @@ export async function buildLaneOrientationBlock(
 			// No readable plugin config — fall back to option defaults.
 		}
 
+		// DELIBERATE (issue #1534): this block stays on the JSON path and calls
+		// getCachedGraph, never resolveGraphForFiles. `askGraph` runs a
+		// personalized PageRank over EVERY node and `getKeyFiles` ranks
+		// in-degree over `Object.values(graph.nodes)` — both are whole-graph
+		// computations whose results would silently change (different scores,
+		// different hubs, a different relevance floor outcome) if handed a
+		// bounded subgraph. `getCachedGraph` never consults `options.storage`
+		// for exactly that reason, so this block is unaffected by the mode.
+		// Do not "finish the job" by routing this through the indexed path.
 		const graph = await getCachedGraph(directory, resolved);
 		if (!graph) return null;
 

@@ -1030,6 +1030,7 @@ probe, and automatic incremental refresh behavior.
 | `walk_budget_ms` | integer (1000-60000) | `5000` | Wall-clock budget for graph and freshness walks. An incomplete freshness walk is `inconclusive` and never authorizes refresh or deletion. |
 | `max_files` | integer (100-100000) | `10000` | Source-file cap for graph and freshness walks. Hitting the cap is conservative and produces an incomplete result. |
 | `exclude_dirs` | string[] | `[]` | Extra directory **names** to skip when scanning the workspace, in addition to the built-in defaults. |
+| `storage` | `'json' \| 'indexed'` | `'json'` | Storage mode for the persisted graph. `'json'` keeps the single `.swarm/repo-graph.json` document as the sole store. `'indexed'` additionally maintains a derived `.swarm/repo-memory.sqlite` index that accelerates bounded neighbourhood lookups. See "Storage modes" below. |
 
 The graph scanner already skips common generated directories by default:
 `node_modules`, `.git`, `dist`, `build`, `out`, `coverage`, `.next`, `.nuxt`,
@@ -1081,6 +1082,56 @@ above `refresh_cap` are suppressed.
 > Note: even without configuring `exclude_dirs`, a single unparseable or
 > minified file can no longer abort the whole graph build — such files are
 > skipped individually (issue #1448).
+
+### Storage modes
+
+`repo_graph.storage` selects how the persisted graph is stored on disk
+(issue #1534):
+
+- **`'json'` (default).** The graph lives solely in `.swarm/repo-graph.json`.
+  Behavior is unchanged from prior releases.
+
+> **Enabling `indexed` does not build the index immediately.** The index is
+> created by the next graph save (for example `repo_map action="build"`, a
+> session-start rebuild, or a write-triggered incremental update). There is
+> deliberately no build-on-read path, because that would put a full JSON parse
+> plus a full index build on the synchronous system-prompt path. Until the next
+> save, reads transparently use the JSON path — nothing fails, it is simply not
+> yet accelerated.
+- **`'indexed'`.** In addition to `.swarm/repo-graph.json`, a derived
+  `.swarm/repo-memory.sqlite` index is maintained. `.swarm/repo-graph.json`
+  is **always written and remains authoritative in both modes** — the index
+  is never a second source of truth, only a read-side accelerator built from
+  it.
+
+What the index accelerates: bounded neighbourhood lookups that today require
+parsing the full JSON document — the coder localization block and reviewer
+blast-radius block (which query a small set of changed files' dependents and
+dependencies), and memory-reflection anchor resolution on repositories whose
+`repo-graph.json` exceeds the 16 MB bounded-read budget the reflection
+service enforces. On a fresh-parse turn, indexed lookups avoid reading and
+parsing the entire document.
+
+Fail-safe behavior: a missing, corrupt, or stale index (for example after a
+`storage` mode flip back to `'json'`, or after manual deletion) is detected
+and the affected read silently falls back to the JSON path — it never
+surfaces an error to the caller. Deleting `.swarm/repo-memory.sqlite` (and
+any `-wal`/`-shm` sidecars) by hand is always safe; it is rebuilt on the next
+graph save.
+
+Honest performance tradeoff — this is not a blanket speedup:
+
+- On repositories where `repo-graph.json` is large, and on turns that call
+  only one of the graph-consuming blocks, indexed mode is a clear win: it
+  avoids a full JSON parse.
+- On a turn where **multiple** injection blocks run against the same
+  directory right after a graph change (a full-graph in-memory cache miss),
+  indexed mode costs slightly **more** than JSON mode. The first block takes
+  the cheaper subgraph branch instead of warming the full-graph cache for the
+  document, so a later whole-graph consumer in the same turn still pays a
+  full parse — on top of the subgraph query the first block already did.
+  Single-block turns, and turns after the full-graph cache is already warm,
+  are unaffected by this.
 
 ## Evidence Retention Configuration
 
