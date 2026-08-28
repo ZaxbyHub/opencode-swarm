@@ -363,6 +363,27 @@ export function recordProducerEmission(
 /**
  * Snapshot of the session's current turn ledger (null when absent).
  */
+/**
+ * Deduct tokens from a producer's recorded emission (#2107 §3): downstream
+ * system-chain mutators (the role filter) REMOVE strings after the producer
+ * recorded them, and the final accounting must not count bytes the model
+ * never sees. Floors at zero; no-op without a ledger or producer entry.
+ */
+export function deductProducerEmission(
+	sessionID: string,
+	producer: InjectionProducer,
+	removedTokens: number,
+): void {
+	const ledger = turnLedgers.get(sessionID);
+	if (!ledger) return;
+	const accounting = ledger.producers.get(producer);
+	if (!accounting) return;
+	accounting.emitted = Math.max(
+		0,
+		accounting.emitted - Math.max(0, removedTokens),
+	);
+}
+
 export function getTurnLedgerSummary(
 	sessionID: string,
 ): TurnLedgerSummary | null {
