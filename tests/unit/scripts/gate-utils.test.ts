@@ -13,7 +13,7 @@ function timeoutProbe(markerPath: string): string[] {
 			'powershell',
 			'-NoProfile',
 			'-Command',
-			`[System.IO.File]::WriteAllText(${escapePowerShellLiteral(startedPath)}, 'started'); Start-Sleep -Milliseconds 5000; [System.IO.File]::WriteAllText(${escapePowerShellLiteral(markerPath)}, 'alive'); while ($true) { Start-Sleep -Seconds 1 }`,
+			`[System.IO.File]::WriteAllText(${escapePowerShellLiteral(startedPath)}, 'started'); Start-Sleep -Milliseconds 8000; [System.IO.File]::WriteAllText(${escapePowerShellLiteral(markerPath)}, 'alive'); while ($true) { Start-Sleep -Seconds 1 }`,
 		];
 	}
 
@@ -37,9 +37,15 @@ describe('gate-utils subprocess ownership', () => {
 		const markerPath = path.join(markerDir, 'child-alive.txt');
 		try {
 			const started = performance.now();
-			// PowerShell startup on a cold Windows runner can exceed 500 ms; keep
-			// enough margin to observe the startup marker before timing out.
-			const timeoutMs = process.platform === 'win32' ? 2_500 : 200;
+			// PowerShell startup on a cold/loaded Windows runner can exceed
+			// 2.5 s (observed twice in the merge queue); keep enough margin to
+			// observe the startup marker before timing out, and widen the
+			// bounded-return ceiling to stay above the timeout plus kill
+			// overhead. The child's pre-kill lifetime (8 s on win32) still
+			// exceeds the timeout, so the kill lands before the 'alive' write.
+			const isWindows = process.platform === 'win32';
+			const timeoutMs = isWindows ? 4_000 : 200;
+			const maxElapsedMs = isWindows ? 8_000 : 4_000;
 			const result = await spawnUtf8(
 				timeoutProbe(markerPath),
 				process.cwd(),
@@ -47,7 +53,7 @@ describe('gate-utils subprocess ownership', () => {
 			);
 
 			expect(result.exitCode).toBe(1);
-			expect(performance.now() - started).toBeLessThan(4_000);
+			expect(performance.now() - started).toBeLessThan(maxElapsedMs);
 			await new Promise((resolve) => setTimeout(resolve, 350));
 			expect(fs.existsSync(`${markerPath}.started`)).toBe(true);
 			expect(fs.existsSync(markerPath)).toBe(false);
