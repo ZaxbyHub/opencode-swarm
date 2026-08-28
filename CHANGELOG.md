@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.153.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.152.1...v7.153.0) (2026-08-28)
+
+
+### Features
+
+* **repo-map:** source-bearing context_pack with budgets, snippets, and omissions (KG-12) ([ddede76](https://github.com/ZaxbyHub/opencode-swarm/commit/ddede76c5bdc23084730e265feca75ed42154565))
+
+
+### Bug Fixes
+
+* **dispatch-lanes:** make PR-review collection a non-destructive observer ([04400f1](https://github.com/ZaxbyHub/opencode-swarm/commit/04400f16d32b6055613566fc01c2c54e2001a473))
+* **security:** enforce full-auto integrity boundaries ([0c411cf](https://github.com/ZaxbyHub/opencode-swarm/commit/0c411cfb752bfdcd05a1d34bab8f3933f89007b5))
+
 ## [7.152.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.152.0...v7.152.1) (2026-08-27)
 
 
