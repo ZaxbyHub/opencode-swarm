@@ -42,14 +42,19 @@ import {
 	claimCoderSettlement,
 	claimDelegationIngestion,
 	claimTerminalResult,
+	clearLegacyCoderSettlementTransferPending,
 	findDelegationForCompletion,
+	LEGACY_CODER_SETTLEMENT_PENDING_ADVISORY_MARKER,
 	maintainBackgroundDelegations,
+	markLegacyCoderSettlementTransferPending,
 	preparePendingBackgroundAdvisories,
 	promoteDelegationFallback,
 	putPendingBackgroundAdvisory,
 	recordDelegationIngestionResult,
+	registerLegacyCoderSettlementReconciler,
 	releaseBackgroundCoderReservation,
 	releasePreparedBackgroundAdvisories,
+	replacePendingBackgroundAdvisory,
 	updateCoderSettlement,
 } from './pending-delegations.js';
 import {
@@ -80,11 +85,31 @@ interface MaybeEvent {
 	properties?: { part?: unknown } & Record<string, unknown>;
 }
 
+interface TrustedTerminalReplay {
+	record: BackgroundDelegationRecord;
+	terminal: BackgroundTerminalResult;
+	result: BackgroundDelegationResult;
+}
+
+interface ObserverEventInput {
+	event: unknown;
+	trustedTerminal?: TrustedTerminalReplay;
+}
+
 export interface PreparedBackgroundAdvisories {
 	preparationId: string;
 	eventIds: string[];
 	messages: string[];
 }
+
+const observerInternals = {
+	transferCoderSettlementToBackground,
+	sleep: (milliseconds: number) =>
+		new Promise<void>((resolve) => setTimeout(resolve, milliseconds)),
+};
+
+/** Test-only dependency seam; production callers should use the observer API. */
+export const _internals = observerInternals;
 
 export function createBackgroundCompletionObserver(opts: {
 	config: ObserverConfig;
@@ -96,6 +121,7 @@ export function createBackgroundCompletionObserver(opts: {
 	reviewerReceiptOptions?: Record<string, unknown>;
 }): {
 	event: (input: { event: unknown }) => Promise<void>;
+	reconcilePending: (record: BackgroundDelegationRecord) => Promise<boolean>;
 	prepareAdvisories: (
 		parentSessionId: string,
 	) => Promise<PreparedBackgroundAdvisories | null>;
@@ -109,103 +135,119 @@ export function createBackgroundCompletionObserver(opts: {
 	) => Promise<boolean>;
 } {
 	const { config, directory } = opts;
+	let replayInProgress = false;
 
-	const event = async (input: { event: unknown }): Promise<void> => {
+	const event = async (input: ObserverEventInput): Promise<void> => {
 		if (!config.enabled) return;
 		try {
-			const evt = input?.event as MaybeEvent | undefined;
-			if (!evt || evt.type !== 'message.part.updated') return;
-			const part = evt.properties?.part as MaybeTextPart | undefined;
-			if (
-				!part ||
-				part.type !== 'text' ||
-				part.synthetic !== true ||
-				typeof part.text !== 'string'
-			) {
-				return;
-			}
+			let pending: BackgroundDelegationRecord;
+			let result: BackgroundDelegationResult;
+			let terminal: BackgroundTerminalResult;
+			let record: BackgroundDelegationRecord;
+			let text: string;
+			let isDuplicate = false;
+			if (input.trustedTerminal) {
+				pending = input.trustedTerminal.record;
+				result = input.trustedTerminal.result;
+				terminal = input.trustedTerminal.terminal;
+				text = result.error ?? result.text ?? '';
+				record = pending;
+				isDuplicate = true;
+			} else {
+				const evt = input?.event as MaybeEvent | undefined;
+				if (!evt || evt.type !== 'message.part.updated') return;
+				const part = evt.properties?.part as MaybeTextPart | undefined;
+				if (
+					!part ||
+					part.type !== 'text' ||
+					part.synthetic !== true ||
+					typeof part.text !== 'string'
+				) {
+					return;
+				}
 
-			const envelope = parseTaskEnvelope(part.text);
-			if (
-				!envelope ||
-				(envelope.state !== 'completed' &&
-					envelope.state !== 'error' &&
-					envelope.state !== 'cancelled')
-			) {
-				return;
-			}
-			const parentSessionId =
-				typeof part.sessionID === 'string' ? part.sessionID : '';
-			const lookup = await findDelegationForCompletion(
-				directory,
-				envelope.sessionId,
-			);
-			if (!lookup) {
-				logger.log(
-					`[background] trusted completion for ${envelope.sessionId} has no durable primary or fallback owner; ignored`,
-				);
-				return;
-			}
-			if (
-				!parentSessionId ||
-				lookup.record.parentSessionId !== parentSessionId ||
-				lookup.record.subagentSessionId !== envelope.sessionId
-			) {
-				logger.warn(
-					`[background] trusted completion identity mismatch for ${envelope.sessionId}; ignored`,
-				);
-				return;
-			}
-
-			let pending = lookup.record;
-			if (lookup.source === 'fallback') {
-				const promoted = await promoteDelegationFallback(
+				const envelope = parseTaskEnvelope(part.text);
+				if (
+					!envelope ||
+					(envelope.state !== 'completed' &&
+						envelope.state !== 'error' &&
+						envelope.state !== 'cancelled')
+				) {
+					return;
+				}
+				const parentSessionId =
+					typeof part.sessionID === 'string' ? part.sessionID : '';
+				const lookup = await findDelegationForCompletion(
 					directory,
 					envelope.sessionId,
 				);
-				if (!promoted) {
-					logger.warn(
-						`[background] fallback promotion failed for ${envelope.sessionId}; terminal work remains preserved`,
+				if (!lookup) {
+					logger.log(
+						`[background] trusted completion for ${envelope.sessionId} has no durable primary or fallback owner; ignored`,
 					);
 					return;
 				}
-				pending = promoted.record;
-			}
+				if (
+					!parentSessionId ||
+					lookup.record.parentSessionId !== parentSessionId ||
+					lookup.record.subagentSessionId !== envelope.sessionId
+				) {
+					logger.warn(
+						`[background] trusted completion identity mismatch for ${envelope.sessionId}; ignored`,
+					);
+					return;
+				}
 
-			const text =
-				envelope.state === 'error' || envelope.state === 'cancelled'
-					? (envelope.errorText ?? '')
-					: (envelope.resultText ?? '');
-			const result: BackgroundDelegationResult = {
-				...(envelope.state === 'error' ? { error: text } : { text }),
-				chars: envelope.resultChars ?? text.length,
-				truncated: envelope.resultTruncated ?? false,
-				digest: digest(text),
-			};
-			const terminal: BackgroundTerminalResult = {
-				eventId: buildBackgroundCompletionEventId({
-					correlationId: pending.correlationId,
-					jobId: pending.jobId,
+				pending = lookup.record;
+				if (lookup.source === 'fallback') {
+					const promoted = await promoteDelegationFallback(
+						directory,
+						envelope.sessionId,
+					);
+					if (!promoted) {
+						logger.warn(
+							`[background] fallback promotion failed for ${envelope.sessionId}; terminal work remains preserved`,
+						);
+						return;
+					}
+					pending = promoted.record;
+				}
+
+				text =
+					envelope.state === 'error' || envelope.state === 'cancelled'
+						? (envelope.errorText ?? '')
+						: (envelope.resultText ?? '');
+				result = {
+					...(envelope.state === 'error' ? { error: text } : { text }),
+					chars: envelope.resultChars ?? text.length,
+					truncated: envelope.resultTruncated ?? false,
+					digest: digest(text),
+				};
+				terminal = {
+					eventId: buildBackgroundCompletionEventId({
+						correlationId: pending.correlationId,
+						jobId: pending.jobId,
+						status: envelope.state,
+						resultDigest: result.digest,
+					}),
 					status: envelope.state,
-					resultDigest: result.digest,
-				}),
-				status: envelope.state,
-				recordedAt: pending.terminalResult?.recordedAt ?? Date.now(),
-				result,
-			};
-			const terminalClaim = await claimTerminalResult(
-				directory,
-				pending.correlationId,
-				terminal,
-			);
-			if (!terminalClaim) {
-				logger.warn(
-					`[background] terminal claim failed for ${pending.correlationId}; ignored`,
+					recordedAt: pending.terminalResult?.recordedAt ?? Date.now(),
+					result,
+				};
+				const terminalClaim = await claimTerminalResult(
+					directory,
+					pending.correlationId,
+					terminal,
 				);
-				return;
+				if (!terminalClaim) {
+					logger.warn(
+						`[background] terminal claim failed for ${pending.correlationId}; ignored`,
+					);
+					return;
+				}
+				isDuplicate = terminalClaim.disposition === 'duplicate';
+				record = terminalClaim.record;
 			}
-			const isDuplicate = terminalClaim.disposition === 'duplicate';
-			let record = terminalClaim.record;
 			opts.onTerminalClaimed?.(record);
 
 			// Maintenance point P2 (issue #2104): a trusted terminal (or the
@@ -217,11 +259,13 @@ export function createBackgroundCompletionObserver(opts: {
 				await maintainBackgroundDelegations(directory, {
 					lockTimeoutMs: 1_000,
 					reason: 'trusted-terminal',
+					onLegacyCoderSettlementReconciled: reconcilePending,
 				});
 			} catch {
 				// observation only; another maintenance point will finish
 			}
 
+			let legacyTransferPending = false;
 			if (terminal.status !== 'completed') {
 				if (isDuplicate && record.normalizedAgent !== 'coder') {
 					// Non-coder failure cleanup has no durable sub-transition to resume.
@@ -233,13 +277,7 @@ export function createBackgroundCompletionObserver(opts: {
 						record,
 					);
 					if (!legacyTransfer.ok) {
-						await publishAdvisory(
-							directory,
-							record,
-							terminal.eventId,
-							legacyTransfer.outcome,
-						);
-						return;
+						legacyTransferPending = true;
 					}
 					if (record.planTaskId) {
 						const expectedGeneration =
@@ -316,8 +354,18 @@ export function createBackgroundCompletionObserver(opts: {
 					directory,
 					record,
 					terminal.eventId,
-					terminal.status === 'cancelled' ? 'cancelled' : 'failed',
+					legacyTransferPending
+						? `${terminal.status === 'cancelled' ? 'cancelled' : 'failed'}; legacy coder settlement transfer is pending; durable reconciliation will retry`
+						: terminal.status === 'cancelled'
+							? 'cancelled'
+							: 'failed',
 				);
+				if (!legacyTransferPending) {
+					await clearLegacyCoderSettlementTransferPending(
+						directory,
+						record.correlationId,
+					);
+				}
 				return;
 			}
 
@@ -338,13 +386,7 @@ export function createBackgroundCompletionObserver(opts: {
 					record,
 				);
 				if (!legacyTransfer.ok) {
-					await publishAdvisory(
-						directory,
-						record,
-						terminal.eventId,
-						legacyTransfer.outcome,
-					);
-					return;
+					legacyTransferPending = true;
 				}
 			} else if (!isDuplicate && isBackgroundGateBearingRecord(record)) {
 				// On a duplicate event the workspace was already validated
@@ -420,7 +462,11 @@ export function createBackgroundCompletionObserver(opts: {
 							directory,
 							record,
 							terminal.eventId,
-							applied.stale ? 'stale' : 'ingestion failed',
+							legacyTransferPending
+								? 'ingestion failed; legacy coder settlement transfer is pending; durable reconciliation will retry'
+								: applied.stale
+									? 'stale'
+									: 'ingestion failed',
 						);
 						// Maintenance point P2b (issue #2104): the ingestion
 						// rejection has just been durably recorded — reconcile now
@@ -478,13 +524,21 @@ export function createBackgroundCompletionObserver(opts: {
 
 			if (record.normalizedAgent === 'coder') {
 				await releaseCoderReservation(directory, record, 'consumed');
+				if (!legacyTransferPending) {
+					await clearLegacyCoderSettlementTransferPending(
+						directory,
+						record.correlationId,
+					);
+				}
 			}
 			await publishAdvisory(
 				directory,
 				record,
 				terminal.eventId,
 				record.normalizedAgent === 'coder'
-					? 'completed and settled'
+					? legacyTransferPending
+						? 'completed and settled; legacy coder settlement transfer is pending; durable reconciliation will retry'
+						: 'completed and settled'
 					: 'completed',
 			);
 			logger.log(
@@ -496,6 +550,36 @@ export function createBackgroundCompletionObserver(opts: {
 			);
 		}
 	};
+
+	const reconcilePending = async (
+		record: BackgroundDelegationRecord,
+	): Promise<boolean> => {
+		if (replayInProgress) return false;
+		const terminal = record.terminalResult;
+		if (!terminal) return false;
+		replayInProgress = true;
+		try {
+			await event({
+				event: undefined,
+				trustedTerminal: {
+					record,
+					terminal,
+					result: terminal.result,
+				},
+			});
+			const refreshed = await findDelegationForCompletion(
+				directory,
+				record.subagentSessionId,
+			);
+			return refreshed?.record.status === 'consumed';
+		} finally {
+			replayInProgress = false;
+		}
+	};
+
+	if (config.enabled) {
+		registerLegacyCoderSettlementReconciler(directory, reconcilePending);
+	}
 
 	const prepareAdvisories = async (
 		parentSessionId: string,
@@ -518,6 +602,7 @@ export function createBackgroundCompletionObserver(opts: {
 
 	return {
 		event,
+		reconcilePending,
 		prepareAdvisories,
 		ackObservedAdvisories: (parentSessionId, observedTexts) =>
 			acknowledgeObservedBackgroundAdvisories(
@@ -545,11 +630,12 @@ async function transferLegacyCoderSettlement(
 	let detail = 'unknown transfer failure';
 	for (let attempt = 0; attempt < 3; attempt += 1) {
 		try {
-			const outcome = await transferCoderSettlementToBackground({
-				directory,
-				taskId: record.planTaskId,
-				transitionId: `coder:${record.callID}`,
-			});
+			const outcome =
+				await observerInternals.transferCoderSettlementToBackground({
+					directory,
+					taskId: record.planTaskId,
+					transitionId: `coder:${record.callID}`,
+				});
 			return { ok: true, outcome };
 		} catch (error) {
 			detail = error instanceof Error ? error.message : String(error);
@@ -559,15 +645,24 @@ async function transferLegacyCoderSettlement(
 					!detail.includes('EACCES') &&
 					!detail.includes('EBUSY') &&
 					!detail.includes('EIO') &&
-					!detail.includes('ETIMEDOUT'))
+					!detail.includes('ETIMEDOUT') &&
+					!detail.includes('EPERM'))
 			) {
 				break;
 			}
-			await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+			await observerInternals.sleep(50 * (attempt + 1));
 		}
 	}
 	logger.warn(
 		`[background] legacy coder settlement transfer failed for ${record.planTaskId}: ${detail}`,
+	);
+	await markLegacyCoderSettlementTransferPending(
+		directory,
+		record.correlationId,
+		{
+			taskId: record.planTaskId,
+			transitionId: `coder:${record.callID}`,
+		},
 	);
 	return {
 		ok: false,
@@ -927,15 +1022,27 @@ async function publishAdvisory(
 	const message =
 		`[BACKGROUND COMPLETION ${eventId}] ${record.normalizedAgent} task ` +
 		`${taskLabel(record)} ${outcome}.`;
-	const stored = await putPendingBackgroundAdvisory(
-		directory,
-		record.correlationId,
-		{
-			eventId,
-			parentSessionId: record.parentSessionId,
-			message,
-		},
+	const input = {
+		eventId,
+		parentSessionId: record.parentSessionId,
+		message,
+	};
+	const corrected = !message.includes(
+		LEGACY_CODER_SETTLEMENT_PENDING_ADVISORY_MARKER,
 	);
+	const stored =
+		(corrected
+			? await replacePendingBackgroundAdvisory(
+					directory,
+					record.correlationId,
+					input,
+				)
+			: null) ??
+		(await putPendingBackgroundAdvisory(
+			directory,
+			record.correlationId,
+			input,
+		));
 	if (!stored) return;
 	const session = swarmState.agentSessions.get(record.parentSessionId);
 	if (session) {
