@@ -33,7 +33,15 @@ system-enhancer begins it exactly once per request composition; context
 capsules and memory recall CLAIM from it and feed the GRANTED amount into
 their existing packers (`max_capsule_tokens`, `recall.injection.tokenBudget`);
 the advisory queue, the swarm-command banner, and the context-budget warning
-record their emissions as fixed/base content. Requested/granted/emitted/
+record their emissions as fixed/base content.
+The linked-cohort line, the spec-drift
+advisory, and every string the system-enhancer pushes to the system
+surface are attributed exactly once (pinned by an exact-once attribution
+test). Scope note: the ledger accounts the BUDGET producers named above;
+other messages-surface handlers earlier in the chain (delegation gates,
+full-auto intercept, issue-trace) mutate `output.messages` and are covered
+by the final accounting's direct measurement of that array — they are
+counted, not ledger-attributed. Requested/granted/emitted/
 truncated reconcile per producer; state is FIFO-bounded (256 sessions) and
 reset on `experimental.session.compacting`. When the ledger is absent
 (native-agent turn, first turn, hook disabled) capsule/memory fail open to

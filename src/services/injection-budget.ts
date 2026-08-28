@@ -152,6 +152,8 @@ export type InjectionProducer =
 	| 'advisory-queue'
 	| 'swarm-command-banner'
 	| 'context-budget-warning'
+	| 'linked-cohort-advisory'
+	| 'spec-drift-advisory'
 	| 'final-accounting-warning';
 
 export type InjectionSurface = 'system' | 'messages';

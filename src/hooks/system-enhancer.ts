@@ -186,6 +186,7 @@ function maybeAppendSpecDriftAdvisory(
 	output: { system: string[] },
 	directory: string,
 	plan: RuntimePlan | null,
+	sessionId?: string,
 ): void {
 	if (!plan?._specStale) return;
 	const snap = readSpecStalenessSnapshot(directory);
@@ -211,6 +212,18 @@ function maybeAppendSpecDriftAdvisory(
 			midLoadRemovals: plan._midLoadRemovals,
 		}),
 	);
+	// #2107 §2: direct system-surface push — record under its own
+	// producer (never also into system-enhancer's injectedTokens: that would
+	// double-count the surface in final accounting).
+	if (sessionId) {
+		recordProducerEmission(
+			sessionId,
+			'spec-drift-advisory',
+			estimateTokens(output.system[output.system.length - 1] ?? ''),
+			0,
+			'system',
+		);
+	}
 }
 
 import { buildReflectionInjection } from '../memory/reflection-injection';
@@ -748,6 +761,23 @@ export function createSystemEnhancerHook(
 							return;
 						}
 
+						// #2107 §2: begin the per-turn producer ledger BEFORE any
+						// model-visible system injection (the linked-cohort line below is the
+						// earliest). Ceiling enforcement activates only when
+						// unified_injection_tokens is configured; otherwise the ledger records
+						// accounting only and default-config behavior is unchanged. Every
+						// later producer (capsule, banner — same chain; memory, advisory
+						// drain, knowledge — messages chain) claims against this ledger.
+						if (_input.sessionID) {
+							beginTurnLedger(
+								_input.sessionID,
+								config.context_budget?.unified_injection_tokens ??
+									config.context_budget?.max_injection_tokens ??
+									4000,
+								config.context_budget?.unified_injection_tokens !== undefined,
+							);
+						}
+
 						// (#1849 G) Linked-cohort identity line for the architect. The line
 						// is advisory and reads ONLY already-cached state: the cohort id
 						// (resolved once at chat.message and cached on the session) + the
@@ -774,6 +804,19 @@ export function createSystemEnhancerHook(
 										output.system.push(
 											`[linked-knowledge] cohort=${cohortId} ${health}. A shared knowledge store exists across this cohort's worktrees; retrieval and receipts flow through it.`,
 										);
+										// #2107 §2: this direct system-surface push bypasses
+										// tryInject; record its emission under its own producer so the
+										// final accounting attributes it (do NOT also count it in
+										// injectedTokens — that would double-count the surface).
+										recordProducerEmission(
+											_input.sessionID as string,
+											'linked-cohort-advisory',
+											estimateTokens(
+												`[linked-knowledge] cohort=${cohortId} ${health}. A shared knowledge store exists across this cohort's worktrees; retrieval and receipts flow through it.`,
+											),
+											0,
+											'system',
+										);
 									} else {
 										// (#BOT-HIGH-1) Cohort line skipped: cache miss on turn 1
 										// (chat.message hasn't populated cachedCohortId yet) or a
@@ -798,23 +841,6 @@ export function createSystemEnhancerHook(
 
 					const maxInjectionTokens =
 						config.context_budget?.max_injection_tokens ?? 4000;
-
-					// FR-002 / #2107 §2: begin the per-turn producer ledger exactly
-					// once per request composition, BEFORE any injection. Ceiling
-					// enforcement is only active when unified_injection_tokens is
-					// configured; otherwise the ledger records accounting only and
-					// default-config behavior is unchanged. The system-enhancer is
-					// the first producer in the system.transform chain, so every
-					// later producer (capsule, banner — same chain; memory, advisory
-					// drain, knowledge — messages chain) claims against this ledger.
-					if (_input.sessionID) {
-						beginTurnLedger(
-							_input.sessionID,
-							config.context_budget?.unified_injection_tokens ??
-								maxInjectionTokens,
-							config.context_budget?.unified_injection_tokens !== undefined,
-						);
-					}
 
 					// FR-002: unified injection budget — use pure allocation so
 					// system-enhancer (system.transform) and knowledge-injector
@@ -1061,7 +1087,12 @@ export function createSystemEnhancerHook(
 							);
 						}
 						// Issue #853 Layer A: surface spec drift to the model.
-						maybeAppendSpecDriftAdvisory(output, directory, plan);
+						maybeAppendSpecDriftAdvisory(
+							output,
+							directory,
+							plan,
+							_input.sessionID,
+						);
 						const mode = await detectArchitectMode(directory, planReadCache);
 						let planContent: string | null = null;
 						let phaseHeader = '';
@@ -1948,7 +1979,12 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 						);
 					}
 					// Issue #853 Layer A: surface spec drift to the model.
-					maybeAppendSpecDriftAdvisory(output, directory, plan);
+					maybeAppendSpecDriftAdvisory(
+						output,
+						directory,
+						plan,
+						_input.sessionID,
+					);
 					let currentPhase: string | null = null;
 					let currentTask: string | null = null;
 
@@ -2911,3 +2947,10 @@ export async function detectArchitectMode(
 		return 'UNKNOWN';
 	}
 }
+
+/**
+ * Tier-0 test seam (knowledge-injector precedent): exposes the spec-drift
+ * advisory helper so the #2107 §2 attribution test can drive its direct
+ * output.system push and assert the ledger emission is recorded exactly once.
+ */
+export const _test_exports = { maybeAppendSpecDriftAdvisory };
