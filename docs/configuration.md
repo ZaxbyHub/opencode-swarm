@@ -899,7 +899,7 @@ guidance to the agent before a hard stop.
 | `pattern_thresholds.stuck_on_test` | number (≥ 1) | `3` | Occurrences before an edit → test-fail → edit-same-file cycle is flagged. |
 | `pattern_thresholds.context_thrash` | number (≥ 1) | `10` | Consecutive steps before a monotonically increasing unique-target set (no plateaus) is flagged. Raised from `3` in #2134: three consecutive new targets is indistinguishable from an agent simply reading three files. |
 | `escalation_enabled` | boolean | `true` | Enable the count-based escalation ladder (advisory → hard stop) once a pattern's threshold is met repeatedly. |
-| `max_trajectory_lines` | number (≥ 10) | `1000` | Maximum trajectory entries retained per session before older entries are evicted. |
+| `max_trajectory_lines` | number (≥ 10, ≤ 10000) | `1000` | Maximum trajectory entries retained per session before older entries are evicted. Upper bound caps the emergent per-project trajectory footprint (#2041). |
 | `detection_timeout_ms` | number (≥ 10) | `100` | Bounded time budget for a single pattern-detection pass; detection is skipped (fail-open) if it would exceed this. |
 
 **Example** — tighten the repetition-loop and ping-pong thresholds:

@@ -128,7 +128,13 @@ export type TelemetryEvent =
 	// security-audit store — accepted/compacted/retained/dropped/corrupt
 	// counts, oldest/newest timestamps, byte figures. Counts only; no
 	// commands, no paths, no agents, no session IDs.
-	| 'shell_audit_health';
+	| 'shell_audit_health'
+	// PRM session-trajectory store health (issue #2041): bounded counts
+	// emitted on compaction, cleanup sweeps, and lock-skipped appends for the
+	// bounded `.swarm/trajectories/` store — retained/dropped/corrupt counts,
+	// lock-skip counts, byte figures. Counts only; no session IDs, no paths,
+	// no trajectory content.
+	| 'trajectory_health';
 
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =
@@ -1035,6 +1041,29 @@ export const telemetry = {
 		limit_bytes: number;
 	}): void {
 		_internals.emit('shell_audit_health', data);
+	},
+
+	/**
+	 * PRM session-trajectory store health (issue #2041): emitted on
+	 * compaction, cleanup sweeps, and (cooldown-bounded) lock-skipped appends
+	 * for the bounded `.swarm/trajectories/` store. Counts ONLY — no session
+	 * identifiers, no filesystem paths, no trajectory content — matching the
+	 * observability contract's no-content-in-metrics rule.
+	 * `dropped_count` discloses entries folded by compaction (line budget or
+	 * the sovereign byte ceiling) and files removed by cleanup; `skipped_lock_count`
+	 * discloses appends skipped because the per-file cross-process lock stayed
+	 * busy (best-effort store: telemetry loss is preferred over corruption).
+	 */
+	trajectoryHealth(data: {
+		trigger: 'compaction' | 'cleanup' | 'append_skip';
+		retained_count: number;
+		dropped_count: number;
+		corrupt_count: number;
+		skipped_lock_count: number;
+		bytes: number;
+		limit_bytes: number;
+	}): void {
+		_internals.emit('trajectory_health', data);
 	},
 
 	/**

@@ -111,6 +111,7 @@
 		"check:retention": "bun run scripts/check-retention-registry.ts",
 		"check:core-events": "bun run scripts/check-core-events-usage.ts",
 		"check:shell-audit": "bun run scripts/check-shell-audit-usage.ts",
+		"check:trajectory-store": "bun run scripts/check-trajectory-store-usage.ts",
 		"check:mock-cleanup": "bun run scripts/check-mock-cleanup.ts",
 		"check:invariants": "bun run scripts/check-invariants.ts",
 		"check:cross-contamination": "bun run scripts/check-cross-contamination.ts",
