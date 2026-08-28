@@ -503,6 +503,13 @@ interface LegacyFoldResult {
 	/** Byte offset after the last fully consumed line (always a line boundary). */
 	nextByte: number;
 	eof: boolean;
+	/**
+	 * True when the fold ended on an I/O error (open or mid-read failure)
+	 * rather than a genuine end-of-file. Callers MUST NOT treat an aborted
+	 * fold as fully scanned: never settle sourceBytes, never mark migration
+	 * done, never archive on it.
+	 */
+	aborted: boolean;
 	corruptLines: number;
 }
 
@@ -531,7 +538,13 @@ function foldLegacyRegion(
 	try {
 		fd = fs.openSync(filePath, 'r');
 	} catch {
-		return { folded, nextByte: startByte, eof: true, corruptLines };
+		return {
+			folded,
+			nextByte: startByte,
+			eof: true,
+			aborted: true,
+			corruptLines,
+		};
 	}
 
 	const processLineBytes = (line: Buffer): void => {
@@ -565,7 +578,13 @@ function foldLegacyRegion(
 	try {
 		const size = fs.fstatSync(fd).size;
 		if (startByte >= size) {
-			return { folded, nextByte: startByte, eof: true, corruptLines };
+			return {
+				folded,
+				nextByte: startByte,
+				eof: true,
+				aborted: false,
+				corruptLines,
+			};
 		}
 		const chunk = Buffer.alloc(PR_SUBSCRIPTION_LIMITS.readChunkBytes);
 		let pending: Buffer[] = [];
@@ -585,7 +604,13 @@ function foldLegacyRegion(
 			pending = [];
 			pendingLen = 0;
 			oversize = false;
-			return { folded, nextByte: consumedTo, eof: true, corruptLines };
+			return {
+				folded,
+				nextByte: consumedTo,
+				eof: true,
+				aborted: false,
+				corruptLines,
+			};
 		};
 
 		while (true) {
@@ -630,14 +655,26 @@ function foldLegacyRegion(
 			}
 			if (consumedTo - startByte >= maxBytes && pendingLen === 0 && !oversize) {
 				const eof = consumedTo >= size;
-				return { folded, nextByte: consumedTo, eof, corruptLines };
+				return {
+					folded,
+					nextByte: consumedTo,
+					eof,
+					aborted: false,
+					corruptLines,
+				};
 			}
 		}
 	} catch (err) {
 		log(
 			`[pr-monitor] foldLegacyRegion failed: ${err instanceof Error ? err.message : String(err)}`,
 		);
-		return { folded, nextByte: consumedTo, eof: true, corruptLines };
+		return {
+			folded,
+			nextByte: consumedTo,
+			eof: true,
+			aborted: true,
+			corruptLines,
+		};
 	} finally {
 		try {
 			fs.closeSync(fd);
@@ -801,15 +838,18 @@ function writeCheckpointFile(
 		);
 	}
 	const content = `${JSON.stringify(checkpoint)}\n`;
-	if (content.length > PR_SUBSCRIPTION_LIMITS.checkpointHardReadBytes) {
+	// Compare REAL UTF-8 bytes (the reader gates on stat.size) — string
+	// .length counts UTF-16 code units and under-reports multibyte content.
+	const contentBytes = Buffer.byteLength(content, 'utf-8');
+	if (contentBytes > PR_SUBSCRIPTION_LIMITS.checkpointHardReadBytes) {
 		throw new Error(
-			`PR subscription store over checkpoint capacity: ${content.length} bytes > ${PR_SUBSCRIPTION_LIMITS.checkpointHardReadBytes}. The folded state exceeds the bounded checkpoint — archive or split .swarm/pr-monitor/subscriptions.jsonl (subscriptions can be re-created with /swarm pr subscribe), then remove it.`,
+			`PR subscription store over checkpoint capacity: ${contentBytes} bytes > ${PR_SUBSCRIPTION_LIMITS.checkpointHardReadBytes}. The folded state exceeds the bounded checkpoint — archive or split .swarm/pr-monitor/subscriptions.jsonl (subscriptions can be re-created with /swarm pr subscribe), then remove it.`,
 		);
 	}
-	if (content.length > PR_SUBSCRIPTION_LIMITS.maxCheckpointBytes) {
+	if (contentBytes > PR_SUBSCRIPTION_LIMITS.maxCheckpointBytes) {
 		// Pressure signal only — active records are never dropped for bytes.
 		log(
-			`[pr-monitor] checkpoint pressure: ${content.length}/${PR_SUBSCRIPTION_LIMITS.maxCheckpointBytes} bytes`,
+			`[pr-monitor] checkpoint pressure: ${contentBytes}/${PR_SUBSCRIPTION_LIMITS.maxCheckpointBytes} bytes`,
 		);
 	}
 	ensureSwarmDir(directory);
@@ -826,8 +866,11 @@ function quarantineCheckpoint(
 			? foreignSlotPath(directory)
 			: corruptSlotPath(directory);
 	try {
+		// Preserve the previous quarantined copy (bounded to one generation):
+		// a second recovery event must not destroy the only copy of the first
+		// event's state. The `.prev` slot is overwritten in place.
 		try {
-			fs.unlinkSync(to);
+			fs.renameSync(to, `${to}.prev`);
 		} catch {
 			/* no previous slot */
 		}
@@ -1042,6 +1085,15 @@ function maybeArchiveLegacy(
 		);
 		return null;
 	}
+	// renameSync preserves the source mtime — an idle legacy log would have
+	// its archive instantly past the TTL cleanup. Stamp the archive fresh so
+	// it survives the full legacyArchiveTtlMs from the moment it was created.
+	try {
+		const now = Date.now() / 1000;
+		fs.utimesSync(legacyArchivePath(directory), now, now);
+	} catch {
+		/* best-effort — worst case the archive is TTL-cleaned sooner */
+	}
 	migration.archived = true;
 	return { kind: 'archive' };
 }
@@ -1074,8 +1126,9 @@ function emitHealthTelemetry(
 		compactions: checkpoint.maintenance.compactions,
 		corrupt_count: checkpoint.maintenance.corruptLegacyRecords,
 		dropped_audit_count: checkpoint.maintenance.droppedAuditTransitions,
-		checkpoint_bytes: JSON.stringify(checkpoint).length,
+		checkpoint_bytes: Buffer.byteLength(JSON.stringify(checkpoint), 'utf-8'),
 		limit_bytes: PR_SUBSCRIPTION_LIMITS.maxCheckpointBytes,
+		recovery_resets: checkpoint.maintenance.resets,
 	});
 }
 
@@ -1135,6 +1188,8 @@ function overlayLegacy(
 	absorbed: number;
 	corruptLines: number;
 	overLimit: boolean;
+	/** True when a fold ran but ended on an I/O error — never settle/archive on it. */
+	aborted: boolean;
 } {
 	const view: Record<string, PrSubscriptionRecord> = { ...checkpoint.records };
 	const legacy = storePath(directory);
@@ -1151,6 +1206,7 @@ function overlayLegacy(
 			absorbed: 0,
 			corruptLines: 0,
 			overLimit: false,
+			aborted: false,
 		};
 	}
 	if (stat.size > PR_SUBSCRIPTION_LIMITS.legacySourceMaxBytes) {
@@ -1163,6 +1219,7 @@ function overlayLegacy(
 			absorbed: 0,
 			corruptLines: 0,
 			overLimit: true,
+			aborted: false,
 		};
 	}
 	const migration = checkpoint.migration;
@@ -1177,6 +1234,7 @@ function overlayLegacy(
 			absorbed,
 			corruptLines: fold.corruptLines,
 			overLimit: false,
+			aborted: fold.aborted,
 		};
 	}
 	// Migration is done: consult the legacy file only when it changed. Size
@@ -1191,6 +1249,7 @@ function overlayLegacy(
 			absorbed: 0,
 			corruptLines: 0,
 			overLimit: false,
+			aborted: false,
 		};
 	}
 	// Changed (downgrade writer / recreated file) — full bounded-memory re-fold.
@@ -1202,6 +1261,7 @@ function overlayLegacy(
 		absorbed,
 		corruptLines: fold.corruptLines,
 		overLimit: false,
+		aborted: fold.aborted,
 	};
 }
 
@@ -1229,9 +1289,11 @@ async function loadViewForRead(directory: string): Promise<{
 		};
 	}
 	if (read.kind === 'invalid') {
-		// Corrupt checkpoint: reads stay pure (no quarantine here — the write
-		// path or read-bootstrap quarantines); recover from the legacy log
-		// within the finite fold budget.
+		// Corrupt checkpoint: reads stay pure (no quarantine here — the first
+		// write heals by quarantining + rebinding); recover from the legacy
+		// log within the finite fold budget. A read-only install re-folds on
+		// every read until then — bounded (≤64 MiB) and self-healing on any
+		// write op.
 		const legacy = storePath(directory);
 		const view: Record<string, PrSubscriptionRecord> = {};
 		const size = fileSizeOrNull(legacy);
@@ -1256,21 +1318,33 @@ async function loadViewForRead(directory: string): Promise<{
 	const fold = foldLegacyRegion(legacyPath, 0, Number.MAX_SAFE_INTEGER);
 	const view: Record<string, PrSubscriptionRecord> = {};
 	mergeFoldedRecords(view, fold.folded);
-	// One-time read-bootstrap (best-effort, bounded lock timeout).
-	await bootstrapCheckpointFromLegacy(directory, view, fold);
+	// One-time read-bootstrap (best-effort, bounded lock timeout). An ABORTED
+	// fold (I/O failure) must not bootstrap a checkpoint that claims a
+	// complete scan — the next read retries the fold instead.
+	if (!fold.aborted) {
+		await bootstrapCheckpointFromLegacy(directory, view, fold);
+	}
 	return { view, recoverySource: 'legacy-log' };
 }
 
 /**
  * Persist-if-absent checkpoint bootstrap from a legacy fold. The fold was
  * computed outside the lock; a writer that creates a checkpoint first wins
- * and the bootstrap skips (issue #2042 Required 3).
+ * and the bootstrap skips (issue #2042 Required 3). Attempted AT MOST ONCE
+ * per directory per process: under persistent lock contention each read
+ * would otherwise pay the same bounded lock wait again.
  */
+const bootstrapAttempted = new Map<string, boolean>();
 async function bootstrapCheckpointFromLegacy(
 	directory: string,
 	foldedView: Record<string, PrSubscriptionRecord>,
 	fold: LegacyFoldResult,
 ): Promise<void> {
+	if (bootstrapAttempted.has(directory)) return;
+	if (bootstrapAttempted.size >= 32) {
+		bootstrapAttempted.delete(bootstrapAttempted.keys().next().value!);
+	}
+	bootstrapAttempted.set(directory, true);
 	try {
 		await withEvidenceLock(
 			directory,
@@ -1348,18 +1422,32 @@ function loadViewForWrite(directory: string): LoadedView {
 	if (read.kind === 'ok' && sameProjectRoot(read.value.rootPath, directory)) {
 		checkpoint = cloneCheckpoint(read.value);
 	} else if (read.kind === 'ok') {
-		// Foreign checkpoint: quarantine first, rebind to this root.
+		// Foreign checkpoint (copied `.swarm` OR a moved/renamed project —
+		// the two are indistinguishable from inside): quarantine first, then
+		// rebind to this root. The legacy log in the moved directory is still
+		// folded below, so a RENAME recovers its subscriptions through the
+		// normal migration path. The displaced checkpoint survives in the
+		// quarantine slot (plus one `.prev` generation).
+		const displaced = Object.keys(read.value.records).length;
 		quarantineCheckpoint(directory, 'foreign');
 		checkpoint = freshCheckpoint(directory);
-		checkpoint.maintenance.resets += 1;
+		// Lifetime reset accounting: carry the displaced checkpoint's own
+		// reset history forward so the counter is monotone across generations.
+		checkpoint.maintenance.resets += read.value.maintenance.resets + 1;
 		audit.push({ kind: 'foreign-rebind' });
 		dirty = true;
+		log(
+			`[pr-monitor] foreign checkpoint quarantined (${displaced} displaced records, recorded root ${read.value.rootPath}); store rebound to ${directory}`,
+		);
 	} else if (read.kind === 'invalid') {
 		quarantineCheckpoint(directory, 'corrupt');
 		checkpoint = freshCheckpoint(directory);
 		checkpoint.maintenance.resets += 1;
 		audit.push({ kind: 'corrupt-quarantine' });
 		dirty = true;
+		log(
+			`[pr-monitor] corrupt checkpoint quarantined; store rebound to ${directory}`,
+		);
 	} else {
 		checkpoint = freshCheckpoint(directory);
 	}
@@ -1417,6 +1505,34 @@ function loadViewForWrite(directory: string): LoadedView {
 			checkpoint.maintenance.corruptLegacyRecords += fold.corruptLines;
 			corruptTotal += fold.corruptLines;
 			cursor = fold.nextByte;
+
+			if (fold.aborted) {
+				// I/O failure mid-scan (EBUSY/EPERM-class — the same hazard
+				// renameWithRetry retries for). Persist the REAL consumed
+				// cursor as not-done progress so the next op retries the
+				// fold; NEVER mark done, NEVER settle sourceBytes, NEVER
+				// archive — an unread tail must not be renamed away.
+				const progress = cloneCheckpoint(checkpoint);
+				progress.records = { ...view };
+				progress.migration = {
+					scannedBytes: cursor,
+					sourceBytes: legacySize,
+					sourceMtimeMs: legacyMtime,
+					corruptLines: corruptTotal,
+					done: false,
+					archived: false,
+					startedAt,
+				};
+				progress.updatedAt = Date.now();
+				progress.sequence += 1;
+				writeCheckpointFile(directory, progress);
+				checkpoint.sequence = progress.sequence;
+				log(
+					`[pr-monitor] legacy scan aborted by an I/O error after ${cursor} bytes — migration stays incomplete and will retry`,
+				);
+				dirty = true;
+				return { checkpoint, view, audit, dirty };
+			}
 
 			// The persisted state must stay within checkpoint replay capacity:
 			// compact terminals first (drops most of a long-lived store's
@@ -1481,11 +1597,14 @@ function loadViewForWrite(directory: string): LoadedView {
 	// recreated file) so future reads skip the re-fold; stable → checkpoint only.
 	const overlaid = overlayLegacy(directory, checkpoint);
 	view = overlaid.view;
-	if (overlaid.usedLegacy) {
-		// A changed source was folded. Settle the size+mtime fingerprint even
-		// when no record won the merge — otherwise a source of losing/older
-		// records (or pure garbage) would be re-folded on EVERY read forever.
-		// Re-enter the archive path so the now-stable source gets archived.
+	if (overlaid.usedLegacy && !overlaid.aborted) {
+		// A changed source was folded completely. Settle the size+mtime
+		// fingerprint even when no record won the merge — otherwise a source
+		// of losing/older records (or pure garbage) would be re-folded on
+		// EVERY read forever. Re-enter the archive path so the now-stable
+		// source gets archived. An ABORTED fold never settles: the unchanged
+		// fingerprint forces a full retry on the next op and keeps the
+		// archive blocked.
 		migration.sourceBytes = legacySize;
 		migration.sourceMtimeMs = legacyMtime;
 		migration.scannedBytes = legacySize;

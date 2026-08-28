@@ -638,7 +638,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'error',
 			// DELIVERY of a PRM hard stop, distinct from the `prm_hard_stop` TRIGGER (#2063 C2).
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:1117',
+			producer: 'src/telemetry.ts:1118',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -1028,11 +1028,11 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			// counts ONLY, no correlationIds, no filesystem paths, no repo
 			// identities — so `operational` is the truthful privacy class. No
 			// live consumer yet; the /swarm pr status storage footer surfaces
-			// the same figures synchronously.
+			// the same figures synchronously (including recovery_resets).
 			category: 'lifecycle',
 			severity: 'notice',
 			privacyClass: 'operational',
-			producer: 'src/telemetry.ts:1101',
+			producer: 'src/telemetry.ts:1102',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,

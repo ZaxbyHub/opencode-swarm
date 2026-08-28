@@ -172,6 +172,7 @@ function formatStorageHealth(health: PrSubscriptionHealth): string {
 		`store ${health.checkpointBytes}/${health.checkpointLimitBytes} B (${health.pressurePct}%)`,
 		`audit ${health.auditLines} lines`,
 		`compactions ${health.compactions} · corrupt ${health.corruptLegacyRecords} · dropped-audit ${health.droppedAuditTransitions}`,
+		`resets ${health.resets}`,
 		`source ${health.recoverySource}`,
 	];
 	const lines = [`Storage: ${parts.join(' · ')}`];

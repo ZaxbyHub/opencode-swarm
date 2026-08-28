@@ -386,6 +386,7 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 	// Issue #2042 PR-monitor subscription store health (counts only).
 	pr_subscription_health: {
 		trigger: 'compact',
+		recovery_resets: 2,
 		active_count: 12,
 		terminal_count: 30,
 		compactions: 4,
