@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.154.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.154.0...v7.154.1) (2026-08-28)
+
+
+### Bug Fixes
+
+* **pr-monitor:** harden subscription store recovery paths (2408 follow-up) ([fcb0cbd](https://github.com/ZaxbyHub/opencode-swarm/commit/fcb0cbd1c1f549fa211cb43196bdb671dc5a6e03))
+* **pr-monitor:** harden subscription store recovery paths (PR 2408 follow-up) ([673748c](https://github.com/ZaxbyHub/opencode-swarm/commit/673748c8930de8bb5319e38080eb76e411a37119))
+
 ## [7.154.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.153.2...v7.154.0) (2026-08-28)
 
 
