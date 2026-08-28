@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	_internals,
@@ -14,13 +13,12 @@ import {
 	updateSnapshot,
 } from '../../../src/background/pr-subscriptions';
 import { freezeClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const FROZEN_NOW = 1_780_000_000_000;
 
 function makeTempProject(): string {
-	const dir = fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-pr-sub-io-adversarial-')),
-	);
+	const dir = canonicalMkdtemp('swarm-pr-sub-io-adversarial-');
 	fs.mkdirSync(path.join(dir, '.swarm', 'pr-monitor'), { recursive: true });
 	return dir;
 }
