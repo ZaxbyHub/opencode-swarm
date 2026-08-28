@@ -32,6 +32,7 @@ import {
 	sanitizeDiagnosticText,
 	unsafePathTextReason,
 } from '../../scope/path-identity';
+import { isPolicyProtectedPath } from '../../security/protected-path-policy.js';
 import { log, warn } from '../../utils';
 import {
 	boundedBunHash,
@@ -880,12 +881,19 @@ export function checkFileAuthorityWithRules(
 	}
 
 	const isCoderAgent = normalizedAgent === 'coder' || strippedAgent === 'coder';
-	if (isCoderAgent && matchesPathPrefix(normalizedPath, '.swarm')) {
+	if (
+		isCoderAgent &&
+		isPolicyProtectedPath(normalizedPath, {
+			includeDefaults: false,
+			additional: ['.git', '.swarm'],
+		})
+	) {
 		return denyAuthority(agentName, normalizedPath, {
 			code: 'AUTHORITY_PROTECTED_PATH',
 			layer: 'protected-path',
-			rule: 'coder-swarm-state-protection',
-			detail: 'coder writes to .swarm are always protected',
+			rule: 'coder-control-state-protection',
+			detail:
+				'coder writes to repository control state (.git/.swarm) are always protected',
 		});
 	}
 	const isSwarmRole = Object.hasOwn(AUTHORITY_ROLE_CAPABILITIES, strippedAgent);

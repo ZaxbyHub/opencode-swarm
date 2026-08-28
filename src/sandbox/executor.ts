@@ -6,6 +6,12 @@
  */
 
 import { warn } from '../utils/logger';
+import {
+	assessSandboxRequirements,
+	SandboxCapabilityProbe,
+	type SandboxCapabilityV1,
+	type SandboxRequirements,
+} from './capability-probe';
 
 /**
  * Error thrown when sandbox operations fail.
@@ -18,6 +24,10 @@ export class SandboxError extends Error {
 		super(message);
 		this.name = 'SandboxError';
 	}
+}
+
+export function normalizeSandboxMechanism(mechanism: string): string {
+	return mechanism.toLowerCase().replace(/[^a-z0-9]+/g, '');
 }
 
 /**
@@ -95,6 +105,7 @@ export interface SandboxExecutor {
 		scopePaths: string[],
 		tempDir?: string,
 		envOverrides?: Record<string, string | null>,
+		policy?: SandboxPolicyOptions,
 	): string;
 
 	/**
@@ -104,11 +115,153 @@ export interface SandboxExecutor {
 	getEnvOverrides(): Record<string, string | null>;
 }
 
+export interface SandboxPolicyOptions {
+	network_mode?: 'off' | 'on';
+	network_allowlist?: readonly string[];
+	writable_roots?: readonly string[];
+}
+
 // Cached executor promise — set once at first getExecutor() call.
 // This ensures the capability probe runs only once even if getExecutor()
 // is called multiple times.
 // undefined = not yet initialized, Promise<null> = initialized but no executor available
 let _cachedExecutorPromise: Promise<SandboxExecutor | null> | undefined;
+const MAX_SANDBOX_ASSESSMENT_CACHE = 8;
+const _sandboxAssessmentCache = new Map<
+	string,
+	Promise<SandboxEnforcementAssessment>
+>();
+
+function detectSandboxCapability(): Promise<SandboxCapabilityV1> {
+	return new SandboxCapabilityProbe().detect();
+}
+
+export const _internals: {
+	detectSandboxCapability: typeof detectSandboxCapability;
+} = {
+	detectSandboxCapability,
+} as const;
+
+export interface SandboxEnforcementAssessment {
+	capability: SandboxCapabilityV1;
+	requirements: Required<SandboxRequirements>;
+	policy: Required<SandboxPolicyOptions>;
+	satisfied: boolean;
+	missing: string[];
+	supported: boolean;
+	unsupported: string[];
+	cacheKey: string;
+}
+
+function normalizeSandboxRequirements(
+	requirements: SandboxRequirements | undefined,
+): Required<SandboxRequirements> {
+	return {
+		mode: requirements?.mode ?? 'advisory',
+		require_filesystem: requirements?.require_filesystem ?? false,
+		require_network: requirements?.require_network ?? false,
+		require_process: requirements?.require_process ?? false,
+		network_mode: requirements?.network_mode ?? 'off',
+		network_allowlist: [...(requirements?.network_allowlist ?? [])],
+		writable_roots: [...(requirements?.writable_roots ?? [])],
+	};
+}
+
+function normalizeSandboxPolicy(
+	requirements: Required<SandboxRequirements>,
+): Required<SandboxPolicyOptions> {
+	return {
+		network_mode: requirements.network_mode,
+		network_allowlist: [...requirements.network_allowlist],
+		writable_roots: [...requirements.writable_roots],
+	};
+}
+
+function hashList(values: readonly string[]): string {
+	return values
+		.map((value) => value.trim())
+		.filter((value) => value.length > 0)
+		.sort((a, b) => a.localeCompare(b))
+		.join('\u001f');
+}
+
+function buildSandboxAssessmentCacheKey(
+	capability: SandboxCapabilityV1,
+	requirements: Required<SandboxRequirements>,
+	policy: Required<SandboxPolicyOptions>,
+): string {
+	return [
+		capability.identity,
+		requirements.mode,
+		`fs=${requirements.require_filesystem ? 1 : 0}`,
+		`net=${requirements.require_network ? 1 : 0}`,
+		`proc=${requirements.require_process ? 1 : 0}`,
+		`netmode=${policy.network_mode}`,
+		`allowlist=${hashList(policy.network_allowlist)}`,
+		`roots=${hashList(policy.writable_roots)}`,
+	].join('|');
+}
+
+function evaluatePolicySupport(
+	capability: SandboxCapabilityV1,
+	policy: Required<SandboxPolicyOptions>,
+): { supported: boolean; unsupported: string[] } {
+	const unsupported: string[] = [];
+	if (policy.network_allowlist.length > 0) {
+		unsupported.push('network_allowlist');
+	}
+	const mechanism = normalizeSandboxMechanism(capability.mechanism);
+	if (
+		policy.network_mode === 'off' &&
+		(capability.platform === 'darwin' || mechanism === 'powershellwrapper')
+	) {
+		unsupported.push('network_mode');
+	}
+	return { supported: unsupported.length === 0, unsupported };
+}
+
+function pruneSandboxAssessmentCache(): void {
+	while (_sandboxAssessmentCache.size > MAX_SANDBOX_ASSESSMENT_CACHE) {
+		const oldestKey = _sandboxAssessmentCache.keys().next().value;
+		if (oldestKey === undefined) return;
+		_sandboxAssessmentCache.delete(oldestKey);
+	}
+}
+
+export async function assessSandboxEnforcement(
+	requirements: SandboxRequirements | undefined,
+): Promise<SandboxEnforcementAssessment> {
+	const capability = await _internals.detectSandboxCapability();
+	const normalized = normalizeSandboxRequirements(requirements);
+	const policy = normalizeSandboxPolicy(normalized);
+	const cacheKey = buildSandboxAssessmentCacheKey(
+		capability,
+		normalized,
+		policy,
+	);
+	const cached = _sandboxAssessmentCache.get(cacheKey);
+	if (cached) {
+		return cached;
+	}
+
+	const assessmentPromise = Promise.resolve().then(() => {
+		const support = evaluatePolicySupport(capability, policy);
+		const assessment = assessSandboxRequirements(capability, normalized);
+		return {
+			capability,
+			requirements: normalized,
+			policy,
+			satisfied: support.supported && assessment.satisfied,
+			missing: assessment.missing,
+			supported: support.supported,
+			unsupported: support.unsupported,
+			cacheKey,
+		};
+	});
+	_sandboxAssessmentCache.set(cacheKey, assessmentPromise);
+	pruneSandboxAssessmentCache();
+	return assessmentPromise;
+}
 
 /**
  * Get the platform-appropriate sandbox executor.
@@ -263,4 +416,9 @@ async function _createWindowsExecutor(): Promise<SandboxExecutor | null> {
  */
 export function _resetExecutorCache(): void {
 	_cachedExecutorPromise = undefined;
+}
+
+/** @internal test seam */
+export function _resetSandboxAssessmentCache(): void {
+	_sandboxAssessmentCache.clear();
 }

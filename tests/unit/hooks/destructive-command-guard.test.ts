@@ -220,7 +220,7 @@ describe('destructive command guard', () => {
 			const input = makeBashInput('test-session', ':(){:|:&};:');
 			const output = makeBashOutput(':(){:|:&};:');
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/BLOCKED: Potentially destructive shell command detected/,
+				/BLOCKED: catastrophic shell operation detected by the shared command classifier/,
 			);
 		});
 
@@ -230,7 +230,7 @@ describe('destructive command guard', () => {
 			const input = makeBashInput('test-session', ':(){ :|:& };:');
 			const output = makeBashOutput(':(){ :|:& };:');
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/BLOCKED: Potentially destructive shell command detected/,
+				/BLOCKED: catastrophic shell operation detected by the shared command classifier/,
 			);
 		});
 	});
@@ -332,7 +332,7 @@ describe('destructive command guard', () => {
 			const input = makeBashInput('test-session', 'mkfs.ext4 /dev/sda1');
 			const output = makeBashOutput('mkfs.ext4 /dev/sda1');
 			await expect(hooks.toolBefore(input, output)).rejects.toThrow(
-				/BLOCKED: Disk format command \(mkfs\) detected/,
+				/BLOCKED: catastrophic shell operation detected by the shared command classifier/,
 			);
 		});
 	});

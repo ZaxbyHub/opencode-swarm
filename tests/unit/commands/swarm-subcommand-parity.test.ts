@@ -362,7 +362,8 @@ describe('swarm-subcommand-parity', () => {
 		// .claude/skills/swarm/SKILL.md.
 		// 103 → 104: /swarm memory audit-verify added (issue #1466), documented
 		// in .claude/skills/swarm/SKILL.md.
-		expect(expectedCommands.size).toBe(105);
+		// 105 → 106: /swarm approve-write added for exact human one-shot authority (#1824).
+		expect(expectedCommands.size).toBe(106);
 
 		console.info(
 			`[swarm-subcommand-parity] skill documented commands (raw): ${skillRawCommands.length}`,

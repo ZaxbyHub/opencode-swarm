@@ -27,7 +27,7 @@ import {
 	transitionTaskWorkflowEvidence,
 } from '../../gate-evidence.js';
 import { loadPlan } from '../../plan/manager';
-import { getExecutor } from '../../sandbox/executor';
+import { assessSandboxEnforcement, getExecutor } from '../../sandbox/executor';
 import { sanitizeDiagnosticText } from '../../scope/path-identity';
 import {
 	canonicalWorkspaceIdentity,
@@ -96,6 +96,7 @@ export const _internals = {
 	dcCheckJunctionCreation,
 	extractErrorSignal,
 	getSandboxExecutor: getExecutor,
+	assessSandboxEnforcement,
 	/** Test-only compatibility for legacy direct-after hook tests. */
 	allowUncorrelatedGateReceipts: false,
 	MAX_PENDING_GATE_RECEIPTS_PER_SESSION,
@@ -902,6 +903,7 @@ export function createGuardrailsHooks(
 		rememberReviewerScopeWrite,
 		rememberScopeLeaseCandidate: scopeLeaseRenewal.remember,
 		getSandboxExecutor: _internals.getSandboxExecutor,
+		assessSandboxEnforcement: _internals.assessSandboxEnforcement,
 	});
 	const toolBefore: ReturnType<typeof createToolBeforeHandler> = async (
 		input,

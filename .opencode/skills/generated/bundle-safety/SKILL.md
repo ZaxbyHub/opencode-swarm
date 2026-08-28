@@ -129,7 +129,7 @@ SKILLS: file:.opencode/skills/generated/bundle-safety/SKILL.md
 - Verify `tests/unit/turbo/lean/runtime-conformance.test.ts` passes (Lean Turbo identifier-preservation guardrails green).
 - Verify `tests/unit/build/throw-and-verify-located.test.ts` passes (runtime stack-trace readability).
 - If re-export tracking was modified, verify `tests/unit/tools/repo-graph-reexports.test.ts` covers both `export * from '...'` and `export * as ns from '...'`.
-- Verify `dist/index.js` size is under the packaging gate (`MAIN_BUNDLE_MAX_BYTES = 4.6 MB` in `tests/smoke/packaging.test.ts`).
+- Verify `dist/index.js` size is under the packaging gate (`MAIN_BUNDLE_MAX_BYTES = 8.0 MiB` in `tests/smoke/packaging.test.ts`).
 
 ## Source Knowledge IDs
 

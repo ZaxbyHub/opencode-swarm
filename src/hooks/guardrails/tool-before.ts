@@ -24,6 +24,10 @@ import {
 import { recordFullAutoSevereEvidenceEvent } from '../../full-auto/severe-result.js';
 import { setMacOSSandboxPolicy } from '../../sandbox/executor';
 import { resolveScopePaths } from '../../sandbox/scope-resolver';
+import {
+	clearSandboxWrapOutcome,
+	recordSandboxWrapOutcome,
+} from '../../sandbox/skip-state';
 import { sanitizeDiagnosticText } from '../../scope/path-identity';
 import type { ScopeLeaseCandidateInput } from '../../scope/scope-lease-renewal';
 import {
@@ -31,6 +35,10 @@ import {
 	resolveAuthorizedScopeBindingForSessionDetailed,
 } from '../../scope/scope-persistence';
 import { formatScopeResolutionDiagnostic } from '../../scope/scope-resolution-diagnostic';
+import {
+	classifyCommand,
+	getSharedClassifierGuardrailBlock,
+} from '../../security/command-classifier.js';
 import {
 	beginInvocation,
 	ensureAgentSession,
@@ -124,6 +132,8 @@ export interface ToolBeforeContext {
 	worktreeBaseDirOverrides?: string[];
 	/** Sandbox executor getter seam for tests and platform-specific overrides. */
 	getSandboxExecutor: typeof import('../../sandbox/executor').getExecutor;
+	/** Sandbox capability assessment seam for deterministic cross-platform tests. */
+	assessSandboxEnforcement: typeof import('../../sandbox/executor').assessSandboxEnforcement;
 	/** Hold exact child-write provenance until the matching after-hook succeeds. */
 	rememberReviewerScopeWrite?: (input: {
 		callID: string;
@@ -149,6 +159,32 @@ import {
 
 let hasWarnedSandboxUnavailable = false;
 
+function normalizeSandboxMechanism(mechanism: string): string {
+	return mechanism.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+/** @internal test seam */
+export function _resetSandboxUnavailableWarningState(): void {
+	hasWarnedSandboxUnavailable = false;
+}
+
+class DestructiveCommandBlockedError extends Error {
+	constructor(
+		message: string,
+		readonly destructiveCategory: string,
+	) {
+		super(message);
+		this.name = 'DestructiveCommandBlockedError';
+	}
+}
+
+function throwDestructiveBlock(
+	destructiveCategory: string,
+	message: string,
+): never {
+	throw new DestructiveCommandBlockedError(message, destructiveCategory);
+}
+
 /**
  * Creates a toolBefore handler with the given shared context.
  *
@@ -167,6 +203,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		consecutiveNoToolTurns,
 		worktreeBaseDirOverrides,
 		getSandboxExecutor,
+		assessSandboxEnforcement,
 		rememberReviewerScopeWrite,
 		rememberScopeLeaseCandidate,
 	} = ctx;
@@ -354,6 +391,15 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const rawCommand =
 			typeof toolArgs?.command === 'string' ? toolArgs.command.trim() : '';
 		if (!rawCommand) return;
+		const sharedClassification = classifyCommand(rawCommand);
+		const sharedGuardrailBlock =
+			getSharedClassifierGuardrailBlock(sharedClassification);
+		if (sharedGuardrailBlock) {
+			throwDestructiveBlock(
+				sharedGuardrailBlock.destructiveCategory,
+				sharedGuardrailBlock.message,
+			);
+		}
 
 		// Issue #2002: a lane coder's shell command runs with the lane as cwd, so
 		// destructive-target containment must be evaluated against the lane root.
@@ -361,13 +407,6 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 
 		// --- Normalize the top-level command (NFKC + evasion collapse) ---
 		const command = dcNormalizeCommand(rawCommand);
-
-		// --- Fork bomb ---
-		if (/:\s*\(\s*\)\s*\{[^}]*\|[^}]*:/.test(command)) {
-			throw new Error(
-				`BLOCKED: Potentially destructive shell command detected: fork bomb pattern`,
-			);
-		}
 
 		// --- Unwrap all shell wrappers to the innermost command ---
 		const unwrapped = dcUnwrapWrappers(command);
@@ -401,7 +440,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 
 			// Junction/symlink CREATION with out-of-cwd target
 			const junctionBlock = dcCheckJunctionCreation(seg, cwd);
-			if (junctionBlock) throw new Error(junctionBlock);
+			if (junctionBlock)
+				throwDestructiveBlock('junction/symlink creation', junctionBlock);
 
 			// POSIX rm — recursive/force delete detection.
 			// Extract leading flag tokens then targets, and require a
@@ -416,14 +456,16 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					cwd,
 					verifiedScope,
 				});
-				if (!decision.allowed) throw new Error(decision.reason);
+				if (!decision.allowed)
+					throwDestructiveBlock('recursive delete', decision.reason);
 			}
 
 			// Windows cmd.exe: rmdir /s, rd /s
 			if (/^(?:rmdir|rd)(?:\.exe)?\s+.*\/[sS]/i.test(seg)) {
 				const targets = dcExtractWindowsCmdTargets(seg);
 				if (targets.length === 0) {
-					throw new Error(
+					throwDestructiveBlock(
+						'recursive directory delete',
 						`BLOCKED: Windows recursive directory delete (rmdir /s or rd /s) detected. Verify the target is not a junction/symlink.`,
 					);
 				}
@@ -432,7 +474,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					cwd,
 					verifiedScope,
 				});
-				if (!decision.allowed) throw new Error(decision.reason);
+				if (!decision.allowed)
+					throwDestructiveBlock('recursive directory delete', decision.reason);
 			}
 
 			// Windows cmd.exe: del /s /q /f
@@ -444,7 +487,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						cwd,
 						verifiedScope,
 					});
-					if (!decision.allowed) throw new Error(decision.reason);
+					if (!decision.allowed)
+						throwDestructiveBlock('recursive file delete', decision.reason);
 				}
 			}
 
@@ -462,9 +506,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						cwd,
 						verifiedScope,
 					});
-					if (!decision.allowed) throw new Error(decision.reason);
+					if (!decision.allowed)
+						throwDestructiveBlock('recursive remove', decision.reason);
 				} else {
-					throw new Error(
+					throwDestructiveBlock(
+						'recursive remove',
 						`BLOCKED: PowerShell Remove-Item with -Recurse detected — cannot verify target safety`,
 					);
 				}
@@ -475,83 +521,9 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				/Get-ChildItem\b.*\|\s*Remove-Item\b.*-[Rr]ecurse/i.test(seg) ||
 				/gci\b.*\|\s*ri\b.*-[Rr]ecurse/i.test(seg)
 			) {
-				throw new Error(
+				throwDestructiveBlock(
+					'recursive remove',
 					`BLOCKED: PowerShell pipeline "Get-ChildItem | Remove-Item -Recurse" detected — verify target safety and avoid recursive deletion through symlinks/junctions`,
-				);
-			}
-
-			// Ransomware-grade / disk-level destruction
-			if (/^vssadmin(?:\.exe)?\s+delete\b/i.test(seg)) {
-				throw new Error(
-					`BLOCKED: "vssadmin delete" detected — deletes Volume Shadow Copies (ransomware-grade operation)`,
-				);
-			}
-			if (/^wbadmin(?:\.exe)?\s+delete\b/i.test(seg)) {
-				throw new Error(
-					`BLOCKED: "wbadmin delete" detected — deletes Windows backup catalog (ransomware-grade operation)`,
-				);
-			}
-			if (/^diskpart(?:\.exe)?$/i.test(seg)) {
-				throw new Error(
-					`BLOCKED: "diskpart" detected — interactive disk partitioning tool`,
-				);
-			}
-			if (/^bcdedit(?:\.exe)?\s+\/delete\b/i.test(seg)) {
-				throw new Error(
-					`BLOCKED: "bcdedit /delete" detected — modifies Windows boot configuration`,
-				);
-			}
-			if (/^sdelete(?:\.exe)?\s+/i.test(seg)) {
-				throw new Error(
-					`BLOCKED: "sdelete" detected — secure file deletion (Sysinternals)`,
-				);
-			}
-			if (
-				/^fsutil(?:\.exe)?\s+reparsepoint\s+delete\b/i.test(seg) ||
-				/^fsutil(?:\.exe)?\s+file\s+setzerodata\b/i.test(seg)
-			) {
-				throw new Error(`BLOCKED: "fsutil" destructive subcommand detected`);
-			}
-			if (/^takeown(?:\.exe)?\s+.*\/[rR]\b/i.test(seg)) {
-				throw new Error(
-					`BLOCKED: "takeown /R" (recursive ownership takeover) detected — often precedes destructive operations`,
-				);
-			}
-			if (/^cipher(?:\.exe)?\s+\/[wW]\b/i.test(seg)) {
-				throw new Error(
-					`BLOCKED: "cipher /w" detected — overwrites free disk space (data wipe operation)`,
-				);
-			}
-			if (/^format\s+[A-Za-z]:/i.test(seg)) {
-				throw new Error(`BLOCKED: Windows disk format command detected`);
-			}
-			if (/^robocopy(?:\.exe)?\s+.*\/(?:MIR|mir)\b/.test(seg)) {
-				throw new Error(
-					`BLOCKED: "robocopy /MIR" (mirror) detected — can delete files in the destination that don't exist in the source`,
-				);
-			}
-
-			// POSIX: chmod/chattr/icacls denial-of-service patterns
-			if (/^chmod\s+.*-[rR]\b.*000\b/.test(seg)) {
-				throw new Error(
-					`BLOCKED: "chmod -R 000" detected — removes all permissions recursively`,
-				);
-			}
-			if (/^chattr\s+.*\+i\b/.test(seg)) {
-				throw new Error(
-					`BLOCKED: "chattr +i" detected — makes files immutable`,
-				);
-			}
-			if (/^icacls(?:\.exe)?\s+.*\/deny\b/i.test(seg)) {
-				throw new Error(
-					`BLOCKED: "icacls /deny" detected — denies filesystem permissions`,
-				);
-			}
-
-			// dd data-wipe patterns
-			if (/^dd\b.*\bif=\/dev\/(zero|null|urandom)\b/.test(seg)) {
-				throw new Error(
-					`BLOCKED: "dd" with /dev/zero, /dev/null, or /dev/urandom as input detected — data wipe operation`,
 				);
 			}
 
@@ -561,26 +533,6 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			// publication protocol (commit-pr) mandates for fork/rebase flows. This
 			// matches full-auto/policy.ts, which already exempts it. Bare `--force`
 			// and `-f` remain blocked. (#1692)
-			if (/^git\s+push\b.*?(--force(?!-with-lease)|-f)\b/.test(seg)) {
-				throw new Error(
-					`BLOCKED: Force push detected — git push --force is not allowed (use --force-with-lease instead)`,
-				);
-			}
-			if (/^git\s+reset\s+--hard/.test(seg)) {
-				throw new Error(
-					`BLOCKED: "git reset --hard" detected — use --soft or --mixed with caution`,
-				);
-			}
-			if (/^git\s+reset\s+--mixed\s+\S+/.test(seg)) {
-				throw new Error(
-					`BLOCKED: "git reset --mixed" with a target branch/commit is not allowed`,
-				);
-			}
-			if (/^git\s+clean\s+.*-[fF].*[dD]/.test(seg)) {
-				throw new Error(
-					`BLOCKED: "git clean -fd" detected — permanently deletes untracked files and directories`,
-				);
-			}
 			// git worktree remove --force: scope-exempt when the target resolves inside
 			// the swarm-managed worktree base directory or a coder's declared scope.
 			// Mirrors the rsync --delete scopeExempt pattern below. Unlike rsync, this
@@ -638,7 +590,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 								worktreeBaseDirOverrides ?? [],
 							));
 					if (!scopeExempt) {
-						throw new Error(
+						throwDestructiveBlock(
+							'git worktree remove',
 							`BLOCKED: "git worktree remove --force" detected — can delete working tree contents`,
 						);
 					}
@@ -657,41 +610,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					declaredScope.length > 0 &&
 					isInDeclaredScope(rsyncTarget, declaredScope, cwd);
 				if (!scopeExempt) {
-					throw new Error(
+					throwDestructiveBlock(
+						'rsync delete',
 						`BLOCKED: "rsync --delete" detected — can delete files in the destination. Verify source is not empty.`,
 					);
 				}
-			}
-
-			// kubectl / docker
-			if (/^kubectl\s+delete\b/.test(seg)) {
-				throw new Error(
-					`BLOCKED: "kubectl delete" detected — destructive cluster operation`,
-				);
-			}
-			if (/^docker\s+system\s+prune\b/.test(seg)) {
-				throw new Error(
-					`BLOCKED: "docker system prune" detected — destructive container operation`,
-				);
-			}
-
-			// SQL DDL
-			if (/^\s*DROP\s+(TABLE|DATABASE|SCHEMA)\b/i.test(seg)) {
-				throw new Error(
-					`BLOCKED: SQL DROP command detected — destructive database operation`,
-				);
-			}
-			if (/^\s*TRUNCATE\s+TABLE\b/i.test(seg)) {
-				throw new Error(
-					`BLOCKED: SQL TRUNCATE command detected — destructive database operation`,
-				);
-			}
-
-			// Disk format
-			if (/^mkfs[./]/.test(seg)) {
-				throw new Error(
-					`BLOCKED: Disk format command (mkfs) detected — disk formatting operation`,
-				);
 			}
 
 			// POSIX mv targeting .swarm/ paths
@@ -700,7 +623,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				if (mvMatch) {
 					const argsStr = mvMatch[1].replace(/["']/g, '');
 					if (/\.swarm(?:[\x5c/\s]|$)/.test(argsStr)) {
-						throw new Error(
+						throwDestructiveBlock(
+							'swarm path move',
 							`BLOCKED: "mv" targeting .swarm/ detected — move operations under .swarm/ are not allowed from shell commands`,
 						);
 					}
@@ -713,7 +637,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				if (moveMatch) {
 					const argsStr = moveMatch[1].replace(/["']/g, '');
 					if (/\.swarm(?:[\x5c/\s]|$)/i.test(argsStr)) {
-						throw new Error(
+						throwDestructiveBlock(
+							'move/rename',
 							`BLOCKED: "move" or "ren" targeting .swarm/ detected — move/rename operations under .swarm/ are not allowed from shell commands`,
 						);
 					}
@@ -726,7 +651,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					seg,
 				)
 			) {
-				throw new Error(
+				throwDestructiveBlock(
+					'move/rename',
 					`BLOCKED: PowerShell Move-Item or Rename-Item targeting .swarm/ detected — move/rename operations under .swarm/ are not allowed from shell commands`,
 				);
 			}
@@ -737,7 +663,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				!/^\\?rm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)\b/i.test(seg) &&
 				/\.swarm(?:[\x5c/\s]|$)/i.test(seg)
 			) {
-				throw new Error(
+				throwDestructiveBlock(
+					'swarm path delete',
 					`BLOCKED: "rm" targeting .swarm/ detected — deleting files under .swarm/ is not allowed from shell commands`,
 				);
 			}
@@ -747,7 +674,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				/\bcp\b.*\.swarm(?:[\x5c/\s]|$)/i.test(seg) &&
 				/\brm\b.*\.swarm(?:[\x5c/\s]|$)/i.test(seg)
 			) {
-				throw new Error(
+				throwDestructiveBlock(
+					'copy-and-delete bypass',
 					`BLOCKED: "cp" of .swarm/ file followed by "rm" of .swarm/ source detected — copy-and-delete bypass is not allowed`,
 				);
 			}
@@ -757,7 +685,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				/^rsync\b.*--remove-source-files\b/i.test(seg) &&
 				/\.swarm(?:[\x5c/\s]|$)/i.test(seg)
 			) {
-				throw new Error(
+				throwDestructiveBlock(
+					'archive delete source',
 					`BLOCKED: "rsync" with delete-source flag targeting .swarm/ detected — archive with source deletion under .swarm/ is not allowed`,
 				);
 			}
@@ -765,12 +694,14 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				/^tar\b.*--remove-files\b/i.test(seg) &&
 				/\.swarm(?:[\x5c/\s]|$)/i.test(seg)
 			) {
-				throw new Error(
+				throwDestructiveBlock(
+					'archive delete source',
 					`BLOCKED: "tar" with delete-source flag targeting .swarm/ detected — archive with source deletion under .swarm/ is not allowed`,
 				);
 			}
 			if (/^zip\b.*\s-m\b/i.test(seg) && /\.swarm(?:[\x5c/\s]|$)/i.test(seg)) {
-				throw new Error(
+				throwDestructiveBlock(
+					'archive delete source',
 					`BLOCKED: "zip" with delete-source flag targeting .swarm/ detected — archive with source deletion under .swarm/ is not allowed`,
 				);
 			}
@@ -778,7 +709,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				/^7z\b.*\s-sdel\b/i.test(seg) &&
 				/\.swarm(?:[\x5c/\s]|$)/i.test(seg)
 			) {
-				throw new Error(
+				throwDestructiveBlock(
+					'archive delete source',
 					`BLOCKED: "7z" with delete-source flag targeting .swarm/ detected — archive with source deletion under .swarm/ is not allowed`,
 				);
 			}
@@ -846,7 +778,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					dequote(resolveVars(probe)),
 				]) {
 					if (RUNNER_SHAPE.test(variant)) {
-						throw new Error(
+						throwDestructiveBlock(
+							'human-only swarm command',
 							'BLOCKED: "opencode-swarm run" invoked with an unresolvable shell variable or command substitution in the subcommand position. ' +
 								'Re-run with the literal subcommand name so the human-only policy can be evaluated.',
 						);
@@ -880,7 +813,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 							HUMAN_ONLY_SWARM_SUBCOMMANDS.has(normalized) ||
 							HUMAN_ONLY_SWARM_SUBCOMMANDS.has(firstToken)
 						) {
-							throw new Error(
+							throwDestructiveBlock(
+								'human-only swarm command',
 								`BLOCKED: "${cmdName}" is a human-only swarm command and may not be invoked from shell by an agent. ` +
 									`Present the situation to the user and ask them to run \`/swarm ${cmdName}\` themselves.`,
 							);
@@ -926,7 +860,8 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						);
 					const hasWriteRedirect = />{1,2}\s*[^\s>]/.test(trimmed);
 					if (!looksReadOnly || hasWriteRedirect) {
-						throw new Error(
+						throwDestructiveBlock(
+							'system file tampering',
 							'BLOCKED: shell command targeting .swarm/spec-staleness.json detected. ' +
 								'This file is system-managed and gates plan-mutating tools while spec drift is unresolved. ' +
 								'Present the drift to the user and ask them to run /swarm acknowledge-spec-drift.',
@@ -1270,8 +1205,108 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 	): Promise<void> {
 		if (tool !== 'bash' && tool !== 'shell') return;
 
+		const toolArgs = args as Record<string, unknown> | undefined;
+		const rawCommand =
+			typeof toolArgs?.command === 'string' ? toolArgs.command.trim() : '';
+		if (!rawCommand || !toolArgs) return;
 		const executor = await getSandboxExecutor();
+		const sandboxConfig = cfg.sandbox;
+		const originalCommandHash = hashArgs({ command: rawCommand });
+		const commandIdentity = `cmd=${originalCommandHash}`;
+		const assessment = await assessSandboxEnforcement(
+			sandboxConfig
+				? {
+						mode: sandboxConfig.mode,
+						require_filesystem: sandboxConfig.require_filesystem,
+						require_network: sandboxConfig.require_network,
+						require_process: sandboxConfig.require_process,
+						network_mode: sandboxConfig.network_mode,
+						network_allowlist: sandboxConfig.network_allowlist,
+						writable_roots: sandboxConfig.writable_roots,
+					}
+				: undefined,
+		);
+		const capabilityIdentity = `cap=${assessment.capability.identity}`;
+		const recordOutcome = (
+			outcome: Omit<
+				import('../../sandbox/skip-state').SandboxWrapOutcome,
+				| 'sessionID'
+				| 'callID'
+				| 'originalCommandHash'
+				| 'originalCommand'
+				| 'assessmentCacheKey'
+				| 'executorMechanism'
+				| 'capabilityMechanism'
+			>,
+		): void =>
+			recordSandboxWrapOutcome({
+				...outcome,
+				sessionID,
+				callID,
+				originalCommandHash,
+				originalCommand: rawCommand,
+				assessmentCacheKey: assessment.cacheKey,
+				executorMechanism: executor?.mechanism ?? 'none',
+				capabilityMechanism: assessment.capability.mechanism,
+			});
+		const clearRecordedOutcome = (): void => {
+			clearSandboxWrapOutcome(sessionID, callID);
+		};
+		if (sandboxConfig?.mode === 'required') {
+			const assessmentSupported = assessment.supported !== false;
+			const assessmentUnsupported = assessment.unsupported ?? [];
+			const missing =
+				!executor || !executor.isAvailable()
+					? ['executor']
+					: assessment.missing;
+			if (
+				!executor ||
+				!executor.isAvailable() ||
+				!assessmentSupported ||
+				!assessment.satisfied
+			) {
+				const missingOrUnsupported = assessmentSupported
+					? missing.join(', ')
+					: assessmentUnsupported.join(', ');
+				const skipReason =
+					missing[0] === 'executor'
+						? `required sandbox executor unavailable [${commandIdentity} ${capabilityIdentity}]`
+						: !assessmentSupported
+							? `required sandbox policy unsupported (${missingOrUnsupported}) [${commandIdentity} ${capabilityIdentity}]`
+							: `required sandbox capability unsatisfied (${missingOrUnsupported}) [${commandIdentity} ${capabilityIdentity}]`;
+				recordOutcome({
+					finalCommandHash: originalCommandHash,
+					wrapped: false,
+					capabilityIdentity: assessment.capability.identity,
+					reason: skipReason,
+				});
+				clearRecordedOutcome();
+				void appendGuardrailDecision(
+					{
+						type: 'sandbox_skip',
+						ts: new Date().toISOString(),
+						sessionID,
+						agent,
+						tool,
+						command,
+						executorMechanism: executor?.mechanism ?? 'none',
+						skipReason,
+					},
+					{ directory: effectiveDirectory, enabled: auditEnabled },
+				);
+				throw new Error(
+					`[sandbox] BLOCKED: Required sandbox policy unsatisfied (${missingOrUnsupported}). [${commandIdentity} ${capabilityIdentity}] Command will not be executed unsandboxed.`,
+				);
+			}
+		}
+
 		if (!executor || !executor.isAvailable()) {
+			recordOutcome({
+				finalCommandHash: originalCommandHash,
+				wrapped: false,
+				capabilityIdentity: assessment.capability.identity,
+				reason: 'executor not available',
+			});
 			if (!hasWarnedSandboxUnavailable) {
 				hasWarnedSandboxUnavailable = true;
 				warn(
@@ -1294,13 +1329,22 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			return;
 		}
 
-		const toolArgs = args as Record<string, unknown> | undefined;
-		const rawCommand =
-			typeof toolArgs?.command === 'string' ? toolArgs.command.trim() : '';
-		if (!rawCommand || !toolArgs) return;
-
 		const declaredPaths = resolveDeclaredScope(sessionID);
-		if (!declaredPaths || declaredPaths.length === 0) return;
+		if (!declaredPaths || declaredPaths.length === 0) {
+			recordOutcome({
+				finalCommandHash: originalCommandHash,
+				wrapped: false,
+				capabilityIdentity: assessment.capability.identity,
+				reason: 'no declared scope',
+			});
+			if (sandboxConfig?.mode === 'required') {
+				clearRecordedOutcome();
+				throw new Error(
+					'[sandbox] BLOCKED: Required sandbox policy needs a declared writable scope; command will not execute unsandboxed.',
+				);
+			}
+			return;
+		}
 
 		// Issue #2002: these become the filesystem paths the OS sandbox is allowed
 		// to touch. For a lane command they must be lane-rooted, or the sandbox is
@@ -1310,7 +1354,43 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			declaredPaths,
 			sessionWorkspaceDirectory(sessionID),
 		);
-		if (resolved.paths.length === 0) return;
+		const configuredWritableRoots = resolveScopePaths(
+			sandboxConfig?.writable_roots ?? [],
+			sessionWorkspaceDirectory(sessionID),
+		);
+		if (configuredWritableRoots.rejected.length > 0) {
+			recordOutcome({
+				finalCommandHash: originalCommandHash,
+				wrapped: false,
+				capabilityIdentity: assessment.capability.identity,
+				reason: `configured writable_roots rejected (${configuredWritableRoots.rejected.map((item) => item.path).join(', ')})`,
+			});
+			if (sandboxConfig?.mode === 'required') {
+				clearRecordedOutcome();
+				throw new Error(
+					'[sandbox] BLOCKED: Required sandbox policy contains writable_roots outside the session workspace; command will not execute unsandboxed.',
+				);
+			}
+			return;
+		}
+		if (resolved.paths.length === 0) {
+			recordOutcome({
+				finalCommandHash: originalCommandHash,
+				wrapped: false,
+				capabilityIdentity: assessment.capability.identity,
+				reason: 'resolved scope empty',
+			});
+			if (sandboxConfig?.mode === 'required') {
+				clearRecordedOutcome();
+				throw new Error(
+					'[sandbox] BLOCKED: Required sandbox policy resolved no writable scope; command will not execute unsandboxed.',
+				);
+			}
+			return;
+		}
+		const writablePaths = [
+			...new Set([...resolved.paths, ...configuredWritableRoots.paths]),
+		];
 
 		try {
 			// Issue #2236 F6b: bake the macOS DYLD-stripping env hardening
@@ -1331,11 +1411,50 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					: undefined;
 			const wrappedCommand = executor.wrapCommand(
 				rawCommand,
-				resolved.paths,
+				writablePaths,
 				undefined,
 				envOverrides,
+				{
+					network_mode: sandboxConfig?.network_mode ?? 'off',
+					network_allowlist: sandboxConfig?.network_allowlist ?? [],
+					writable_roots: configuredWritableRoots.paths,
+				},
 			);
+			if (wrappedCommand.trim() === rawCommand) {
+				recordOutcome({
+					finalCommandHash: originalCommandHash,
+					wrapped: false,
+					capabilityIdentity: assessment.capability.identity,
+					reason: 'sandbox wrapper returned the original command unchanged',
+				});
+				clearRecordedOutcome();
+				throw new Error(
+					`[sandbox] BLOCKED: ${executor.mechanism} returned the original command unchanged. [${commandIdentity} ${capabilityIdentity}] Command will not be executed unsandboxed.`,
+				);
+			}
+			if (
+				normalizeSandboxMechanism(executor.mechanism) !==
+				normalizeSandboxMechanism(assessment.capability.mechanism)
+			) {
+				recordOutcome({
+					finalCommandHash: originalCommandHash,
+					wrapped: false,
+					capabilityIdentity: assessment.capability.identity,
+					reason:
+						'sandbox executor mechanism no longer matches the assessed capability',
+				});
+				clearRecordedOutcome();
+				throw new Error(
+					`[sandbox] BLOCKED: sandbox executor mechanism drifted from the assessed capability (${executor.mechanism} != ${assessment.capability.mechanism}). [${commandIdentity} ${capabilityIdentity}]`,
+				);
+			}
 			toolArgs.command = wrappedCommand;
+			recordOutcome({
+				finalCommandHash: hashArgs({ command: wrappedCommand }),
+				wrapped: true,
+				capabilityIdentity: assessment.capability.identity,
+				reason: 'wrapped',
+			});
 			markToolExecutionSandboxWrapped(sessionID, callID);
 
 			void appendGuardrailDecision(
@@ -1351,6 +1470,13 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				{ directory: effectiveDirectory, enabled: auditEnabled },
 			);
 		} catch (err) {
+			recordOutcome({
+				finalCommandHash: originalCommandHash,
+				wrapped: false,
+				capabilityIdentity: assessment.capability.identity,
+				reason: err instanceof Error ? err.message : String(err),
+			});
+			clearRecordedOutcome();
 			forgetToolExecution(sessionID, callID);
 			const message =
 				`[sandbox] BLOCKED: Failed to wrap command with ${executor.mechanism}: ${err}. ` +
@@ -2203,48 +2329,10 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		try {
 			checkDestructiveCommand(input.sessionID, input.tool, output.args);
 		} catch (err) {
-			const destructiveCategory = (() => {
-				const msg = err instanceof Error ? err.message : String(err);
-				if (/fork bomb/i.test(msg)) return 'fork bomb';
-				if (/rm\b.*recursive|recursive.*rm/i.test(msg))
-					return 'recursive delete';
-				if (/rmdir|rd\b/i.test(msg)) return 'recursive directory delete';
-				if (/\bdel\b/i.test(msg)) return 'recursive file delete';
-				if (/Remove-Item|ri\b/i.test(msg)) return 'recursive remove';
-				if (/format/i.test(msg)) return 'disk format';
-				if (/robocopy/i.test(msg)) return 'mirror sync';
-				if (/chmod.*000/i.test(msg)) return 'permission wipe';
-				if (/chattr/i.test(msg)) return 'immutable flag';
-				if (/icacls/i.test(msg)) return 'permission deny';
-				if (/\bdd\b/i.test(msg)) return 'data wipe';
-				if (/git push.*--force|git push.*-f/i.test(msg)) return 'force push';
-				if (/git reset/i.test(msg)) return 'git reset';
-				if (/git clean/i.test(msg)) return 'git clean';
-				if (/git worktree/i.test(msg)) return 'git worktree remove';
-				if (/rsync.*--delete/i.test(msg)) return 'rsync delete';
-				if (/kubectl delete/i.test(msg)) return 'kubectl delete';
-				if (/docker system prune/i.test(msg)) return 'docker prune';
-				if (/DROP\s+TABLE|DROP\s+DATABASE|DROP\s+SCHEMA/i.test(msg))
-					return 'sql drop';
-				if (/TRUNCATE\s+TABLE/i.test(msg)) return 'sql truncate';
-				if (/mkfs/i.test(msg)) return 'disk format';
-				if (/\bmv\b.*\.swarm/i.test(msg)) return 'swarm path move';
-				if (/\bmove\b|\bren\b/i.test(msg)) return 'move/rename';
-				if (/Move-Item|Rename-Item/i.test(msg)) return 'move/rename';
-				if (/\brm\b.*\.swarm/i.test(msg)) return 'swarm path delete';
-				if (/cp\b.*\.swarm.*rm\b|rm\b.*\.swarm/i.test(msg))
-					return 'copy-and-delete bypass';
-				if (
-					/rsync.*remove-source|tar.*remove-files|zip.*-m\b|7z.*-sdel/i.test(
-						msg,
-					)
-				)
-					return 'archive delete source';
-				if (/human-only swarm command/i.test(msg))
-					return 'human-only swarm command';
-				if (/spec-staleness\.json/i.test(msg)) return 'system file tampering';
-				return 'destructive shell command';
-			})();
+			const destructiveCategory =
+				err instanceof DestructiveCommandBlockedError
+					? err.destructiveCategory
+					: 'destructive shell command';
 			void appendGuardrailDecision(
 				{
 					type: 'destructive_block',

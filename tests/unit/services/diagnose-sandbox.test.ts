@@ -15,6 +15,10 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+	_resetSandboxWrapOutcomeState,
+	recordSandboxWrapOutcome,
+} from '../../../src/sandbox/skip-state';
+import {
 	_internals,
 	getDiagnoseData,
 } from '../../../src/services/diagnose-service';
@@ -29,6 +33,13 @@ interface MockSandboxCapability {
 	mechanism: string;
 	platform: 'linux' | 'darwin' | 'win32';
 	error?: string;
+	v: 1;
+	filesystem: 'real' | 'weak' | 'none';
+	network: 'real' | 'weak' | 'none';
+	process: 'real' | 'weak' | 'none';
+	effective: 'real' | 'weak' | 'none';
+	reasons: string[];
+	identity: string;
 }
 
 type MockExecutor = {
@@ -43,6 +54,13 @@ let mockCapability: MockSandboxCapability = {
 	status: 'enabled',
 	mechanism: 'Bubblewrap',
 	platform: 'linux',
+	v: 1,
+	filesystem: 'real',
+	network: 'real',
+	process: 'none',
+	effective: 'none',
+	reasons: ['seccomp unsupported: no filter is installed'],
+	identity: 'linux:bubblewrap:enabled:strong:fs=real:net=real:proc=none',
 };
 let mockExecutor: MockExecutor = {
 	mechanism: 'Bubblewrap',
@@ -123,6 +141,7 @@ beforeEach(() => {
 afterEach(() => {
 	_internals.detectSandboxCapability = realDetectSandboxCapability;
 	_internals.getSandboxExecutor = realGetSandboxExecutor;
+	_resetSandboxWrapOutcomeState();
 	mock.restore();
 	probeThrows = false;
 	executorThrows = false;
@@ -146,6 +165,16 @@ describe('Sandbox HealthCheck in getDiagnoseData', () => {
 			status: 'enabled',
 			mechanism: 'Bubblewrap',
 			platform: 'linux',
+			v: 1,
+			strength: 'strong',
+			filesystem: 'weak',
+			network: 'weak',
+			process: 'none',
+			effective: 'none',
+			reasons: [
+				'availability only; denial behavior not independently exercised',
+			],
+			identity: 'linux:bubblewrap',
 		};
 		mockExecutor = {
 			mechanism: 'Bubblewrap',
@@ -159,7 +188,7 @@ describe('Sandbox HealthCheck in getDiagnoseData', () => {
 		let result = await getDiagnoseData('/test/dir');
 		let sandbox = result.checks.find((c) => c.name === 'Sandbox')!;
 		expect(sandbox.status).not.toBe('❌');
-		expect(sandbox.status).toBe('✅');
+		expect(sandbox.status).toBe('⚠️');
 
 		// Scenario 2: capability enabled, executor NOT available → ⚠️
 		mockExecutor = null;
@@ -174,6 +203,13 @@ describe('Sandbox HealthCheck in getDiagnoseData', () => {
 			status: 'unsupported',
 			mechanism: 'none',
 			platform: 'linux',
+			v: 1,
+			filesystem: 'none',
+			network: 'none',
+			process: 'none',
+			effective: 'none',
+			reasons: ['sandbox mechanism unavailable'],
+			identity: 'linux:none',
 		};
 		result = await getDiagnoseData('/test/dir');
 		sandbox = result.checks.find((c) => c.name === 'Sandbox')!;
@@ -186,6 +222,13 @@ describe('Sandbox HealthCheck in getDiagnoseData', () => {
 			status: 'disabled',
 			mechanism: 'Bubblewrap',
 			platform: 'linux',
+			v: 1,
+			filesystem: 'none',
+			network: 'none',
+			process: 'none',
+			effective: 'none',
+			reasons: ['probe failed'],
+			identity: 'linux:bubblewrap:disabled',
 		};
 		mockExecutor = null;
 		result = await getDiagnoseData('/test/dir');
@@ -219,6 +262,13 @@ describe('Sandbox HealthCheck in getDiagnoseData', () => {
 			status: 'enabled',
 			mechanism: 'Bubblewrap',
 			platform: 'linux',
+			v: 1,
+			filesystem: 'real',
+			network: 'real',
+			process: 'real',
+			effective: 'real',
+			reasons: ['verified strong boundary'],
+			identity: 'linux:bubblewrap',
 		};
 		executorThrows = true;
 
@@ -237,9 +287,19 @@ describe('Sandbox HealthCheck in getDiagnoseData', () => {
 
 	test('detail string mentions mechanism + availability + sandboxing status (✅ path)', async () => {
 		mockCapability = {
+			v: 1,
 			status: 'enabled',
+			strength: 'strong',
 			mechanism: 'Bubblewrap',
 			platform: 'linux',
+			filesystem: 'weak',
+			network: 'weak',
+			process: 'none',
+			effective: 'none',
+			reasons: [
+				'availability only; denial behavior not independently exercised',
+			],
+			identity: 'test-bubblewrap-weak',
 		};
 		mockExecutor = {
 			mechanism: 'Bubblewrap',
@@ -252,8 +312,10 @@ describe('Sandbox HealthCheck in getDiagnoseData', () => {
 		const sandbox = result.checks.find((c) => c.name === 'Sandbox')!;
 
 		expect(sandbox.detail).toContain('bubblewrap');
-		expect(sandbox.detail).toContain('Available: yes');
-		expect(sandbox.detail).toContain('Sandboxing commands: yes');
+		expect(sandbox.status).toBe('⚠️');
+		expect(sandbox.detail).toContain('fs=weak');
+		expect(sandbox.detail).toContain('network=weak');
+		expect(sandbox.detail).toContain('Partial boundary');
 	});
 
 	test('detail string mentions mechanism + availability for ⚠️ path', async () => {
@@ -261,6 +323,14 @@ describe('Sandbox HealthCheck in getDiagnoseData', () => {
 			status: 'enabled',
 			mechanism: 'Bubblewrap',
 			platform: 'linux',
+			v: 1,
+			strength: 'strong',
+			filesystem: 'weak',
+			network: 'weak',
+			process: 'none',
+			effective: 'none',
+			reasons: ['executor unavailable'],
+			identity: 'linux:bubblewrap',
 		};
 		mockExecutor = null;
 
@@ -269,7 +339,7 @@ describe('Sandbox HealthCheck in getDiagnoseData', () => {
 
 		expect(sandbox.detail).toContain('bubblewrap');
 		expect(sandbox.detail).toContain('Available: no');
-		expect(sandbox.detail).toContain('Commands NOT sandboxed');
+		expect(sandbox.detail).toContain('executor unavailable');
 	});
 
 	test('advisory Windows fallback is downgraded to ⚠️, never green (#1778 H2)', async () => {
@@ -280,6 +350,13 @@ describe('Sandbox HealthCheck in getDiagnoseData', () => {
 			strength: 'advisory',
 			mechanism: 'PowerShell wrapper',
 			platform: 'win32',
+			v: 1,
+			filesystem: 'none',
+			network: 'none',
+			process: 'none',
+			effective: 'none',
+			reasons: ['advisory only'],
+			identity: 'win32:powershell-wrapper',
 		};
 		mockExecutor = {
 			mechanism: 'PowerShell wrapper',
@@ -294,8 +371,46 @@ describe('Sandbox HealthCheck in getDiagnoseData', () => {
 
 		expect(sandbox.status).toBe('⚠️');
 		expect(sandbox.status).not.toBe('✅');
-		expect(sandbox.detail.toUpperCase()).toContain('ADVISORY');
-		expect(sandbox.detail).toContain('NOT kernel-enforced');
+		expect(sandbox.detail).toContain('fs=none');
+		expect(sandbox.detail).toContain('Partial boundary');
+	});
+
+	test('regression FB-006: diagnose only surfaces redacted skip reasons for the active session', async () => {
+		recordSandboxWrapOutcome({
+			sessionID: 'sess-a',
+			callID: 'skip-a',
+			originalCommandHash: 1,
+			finalCommandHash: 1,
+			wrapped: false,
+			capabilityIdentity: 'cap-a',
+			assessmentCacheKey: 'assessment-a',
+			reason:
+				'configured writable_roots rejected (C:\\Users\\Brett\\secret, ../outside)',
+			originalCommand: 'echo a',
+			executorMechanism: 'none',
+			capabilityMechanism: 'none',
+		});
+		recordSandboxWrapOutcome({
+			sessionID: 'sess-b',
+			callID: 'skip-b',
+			originalCommandHash: 2,
+			finalCommandHash: 2,
+			wrapped: false,
+			capabilityIdentity: 'cap-b',
+			assessmentCacheKey: 'assessment-b',
+			reason: 'configured writable_roots rejected (/tmp/private/file)',
+			originalCommand: 'echo b',
+			executorMechanism: 'none',
+			capabilityMechanism: 'none',
+		});
+
+		const result = await getDiagnoseData('/test/dir', 'sess-a');
+		const sandbox = result.checks.find((c) => c.name === 'Sandbox')!;
+
+		expect(sandbox.detail).toContain('observed skips=1');
+		expect(sandbox.detail).toContain('[redacted-path]');
+		expect(sandbox.detail).not.toContain('C:\\Users\\Brett\\secret');
+		expect(sandbox.detail).not.toContain('/tmp/private/file');
 	});
 
 	test('strong kernel mechanism stays ✅ with strength in detail (#1778 H2)', async () => {
@@ -304,6 +419,15 @@ describe('Sandbox HealthCheck in getDiagnoseData', () => {
 			strength: 'strong',
 			mechanism: 'Bubblewrap',
 			platform: 'linux',
+			v: 1,
+			filesystem: 'weak',
+			network: 'weak',
+			process: 'none',
+			effective: 'none',
+			reasons: [
+				'availability only; denial behavior not independently exercised',
+			],
+			identity: 'linux:bubblewrap',
 		};
 		mockExecutor = {
 			mechanism: 'Bubblewrap',
@@ -316,8 +440,9 @@ describe('Sandbox HealthCheck in getDiagnoseData', () => {
 		const result = await getDiagnoseData('/test/dir');
 		const sandbox = result.checks.find((c) => c.name === 'Sandbox')!;
 
-		expect(sandbox.status).toBe('✅');
-		expect(sandbox.detail).toContain('strong');
+		expect(sandbox.status).toBe('⚠️');
+		expect(sandbox.detail).toContain('effective=none');
+		expect(sandbox.detail).toContain('Partial boundary');
 	});
 
 	test('detail string mentions mechanism for ⬜ path', async () => {
@@ -325,6 +450,13 @@ describe('Sandbox HealthCheck in getDiagnoseData', () => {
 			status: 'unsupported',
 			mechanism: 'none',
 			platform: 'linux',
+			v: 1,
+			filesystem: 'none',
+			network: 'none',
+			process: 'none',
+			effective: 'none',
+			reasons: ['sandbox mechanism unavailable'],
+			identity: 'linux:none',
 		};
 		mockExecutor = null;
 

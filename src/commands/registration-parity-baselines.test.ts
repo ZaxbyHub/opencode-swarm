@@ -154,6 +154,8 @@ describe('Command registration parity — classification baselines', () => {
 				'clear',
 				'abort-pr-workflow',
 				'approve-plan-critic',
+				// #1824: exact one-shot write approvals are operator-issued only.
+				'approve-write',
 				'review',
 				// #1822: governed skill optimizer — mutating commands (human-gated)
 				'skill-opt run',
@@ -188,6 +190,7 @@ describe('Command registration parity — classification baselines', () => {
 				// #2268: human-only commands stay in the swarm_command z.enum —
 				// agent attempts are refused with a surface-to-user message.
 				'recover',
+				'approve-write',
 			]),
 			noArgs: new Set(['pr status', 'lanes', 'context-map stats']),
 		};

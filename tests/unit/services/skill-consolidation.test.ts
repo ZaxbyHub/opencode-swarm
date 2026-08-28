@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import * as path from 'node:path';
 import {
 	_internals,
@@ -9,18 +8,26 @@ import {
 	shouldRunSkillConsolidation,
 } from '../../../src/services/skill-consolidation';
 import type { SkillImproverConfigInput } from '../../../src/services/skill-improver';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let tmp: string;
+let isolatedEnv: ReturnType<typeof createIsolatedTestEnv>;
 
 beforeEach(() => {
 	mock.restore();
-	tmp = mkdtempSync(path.join(tmpdir(), 'skill-consolidation-'));
+	isolatedEnv = createIsolatedTestEnv();
+	tmp = canonicalMkdtemp('skill-consolidation-');
 });
 
 afterEach(() => {
 	_internals.runningByDirectory.clear();
-	rmSync(tmp, { recursive: true, force: true });
-	mock.restore();
+	try {
+		rmSync(tmp, { recursive: true, force: true });
+	} finally {
+		isolatedEnv.cleanup();
+		mock.restore();
+	}
 });
 
 const config: SkillImproverConfigInput = {
@@ -42,12 +49,12 @@ describe('skill consolidation cadence', () => {
 	it('runs scheduled consolidation and writes cadence state', async () => {
 		const result = await runSkillConsolidation({
 			directory: tmp,
-			config,
+			config: { ...config, require_user_approval: false },
 			source: 'startup',
 			now: new Date('2026-06-14T12:00:00.000Z'),
 		});
 
-		expect(result.started).toBe(true);
+		expect(result.started, result.reason).toBe(true);
 		expect(result.result?.ran).toBe(true);
 		expect(existsSync(result.result!.proposalPath!)).toBe(true);
 		expect(existsSync(consolidationStatePath(tmp))).toBe(true);
@@ -61,7 +68,7 @@ describe('skill consolidation cadence', () => {
 	it('skips opportunistic run inside the configured interval', async () => {
 		await runSkillConsolidation({
 			directory: tmp,
-			config,
+			config: { ...config, require_user_approval: false },
 			source: 'startup',
 			now: new Date('2026-06-14T12:00:00.000Z'),
 		});
@@ -80,7 +87,11 @@ describe('skill consolidation cadence', () => {
 	it('manual force runs even when trigger is manual', async () => {
 		const result = await runSkillConsolidation({
 			directory: tmp,
-			config: { ...config, trigger: 'manual' },
+			config: {
+				...config,
+				trigger: 'manual',
+				require_user_approval: false,
+			},
 			source: 'manual',
 			force: true,
 			now: new Date('2026-06-14T12:00:00.000Z'),

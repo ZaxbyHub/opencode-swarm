@@ -32,6 +32,7 @@ export { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift';
 // Re-export individual handlers
 export { handleAgentsCommand } from './agents';
 export { handleAnalyzeCommand } from './analyze';
+export { handleApproveWriteCommand } from './approve-write';
 export { handleArchiveCommand } from './archive';
 export { handleAutoProceedCommand } from './auto-proceed';
 export { handleBenchmarkCommand } from './benchmark';

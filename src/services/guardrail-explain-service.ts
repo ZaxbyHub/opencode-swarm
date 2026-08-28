@@ -22,6 +22,10 @@ import {
 	detectWindowsWrites,
 	resolveWriteTargets,
 } from '../hooks/shell-write-detect.js';
+import {
+	classifyCommand,
+	getSharedClassifierGuardrailBlock,
+} from '../security/command-classifier.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -168,15 +172,13 @@ function evaluateDestructiveDecision(
 		return { decision: 'allow', firingRule: 'allow: no rule matched' };
 	}
 
-	const command = dcNormalizeCommand(rawCommand);
-
-	// Fork bomb (mirror real checkDestructiveCommand: allows whitespace after the leading ':')
-	if (/:\s*\(\s*\)\s*\{[^}]*\|[^}]*:/.test(command)) {
-		return {
-			decision: 'block',
-			firingRule: 'destructive_block: fork bomb pattern',
-		};
+	const shared = classifyCommand(rawCommand);
+	const sharedFiringRule = `shared_classifier: ${shared.aggregate}`;
+	if (getSharedClassifierGuardrailBlock(shared)) {
+		return { decision: 'block', firingRule: sharedFiringRule };
 	}
+
+	const command = dcNormalizeCommand(rawCommand);
 
 	const unwrapped = dcUnwrapWrappers(command);
 	const outerSegments = dcSplitSegments(command);
@@ -286,135 +288,31 @@ function evaluateDestructiveDecision(
 			};
 		}
 
-		// Ransomware-grade / disk-level destruction
-		if (/^vssadmin(?:\.exe)?\s+delete\b/i.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule: 'destructive_block: vssadmin delete (ransomware-grade)',
-			};
-		}
-		if (/^wbadmin(?:\.exe)?\s+delete\b/i.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule:
-					'destructive_block: wbadmin delete (backup catalog deletion)',
-			};
-		}
-		if (/^diskpart(?:\.exe)?$/i.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule:
-					'destructive_block: diskpart (interactive disk partitioning)',
-			};
-		}
-		if (/^bcdedit(?:\.exe)?\s+\/delete\b/i.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule:
-					'destructive_block: bcdedit /delete (boot config modification)',
-			};
-		}
-		if (/^sdelete(?:\.exe)?\s+/i.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule: 'destructive_block: sdelete (secure file deletion)',
-			};
-		}
-		if (
-			/^fsutil(?:\.exe)?\s+reparsepoint\s+delete\b/i.test(seg) ||
-			/^fsutil(?:\.exe)?\s+file\s+setzerodata\b/i.test(seg)
-		) {
-			return {
-				decision: 'block',
-				firingRule: 'destructive_block: fsutil destructive subcommand',
-			};
-		}
-		if (/^takeown(?:\.exe)?\s+.*\/[rR]\b/i.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule:
-					'destructive_block: takeown /R (recursive ownership takeover)',
-			};
-		}
-		if (/^cipher(?:\.exe)?\s+\/[wW]\b/i.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule: 'destructive_block: cipher /w (free disk space wipe)',
-			};
-		}
-		if (/^format\s+[A-Za-z]:/i.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule: 'destructive_block: Windows disk format command',
-			};
-		}
-		if (/^robocopy(?:\.exe)?\s+.*\/(?:MIR|mir)\b/.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule: 'destructive_block: robocopy /MIR (mirror delete)',
-			};
-		}
-
-		// POSIX: chmod/chattr/icacls denial-of-service patterns
-		if (/^chmod\s+.*-[rR]\b.*000\b/.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule: 'destructive_block: chmod -R 000 (permission wipe)',
-			};
-		}
-		if (/^chattr\s+.*\+i\b/.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule: 'destructive_block: chattr +i (immutable flag)',
-			};
-		}
-		if (/^icacls(?:\.exe)?\s+.*\/deny\b/i.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule: 'destructive_block: icacls /deny (permission denial)',
-			};
-		}
-
-		// dd data-wipe patterns
-		if (/^dd\b.*\bif=\/dev\/(zero|null|urandom)\b/.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule:
-					'destructive_block: dd with /dev/zero|null|urandom (data wipe)',
-			};
-		}
-
-		// Git destructive operations. Mirror tool-before.ts: `--force-with-lease`
-		// is exempt (safe force push); bare `--force`/`-f` stay blocked. (#1692)
-		if (/^git\s+push\b.*?(--force(?!-with-lease)|-f)\b/.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule: 'destructive_block: git push --force',
-			};
-		}
-		if (/^git\s+reset\s+--hard/.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule: 'destructive_block: git reset --hard',
-			};
-		}
-		if (/^git\s+reset\s+--mixed\s+\S+/.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule: 'destructive_block: git reset --mixed with target',
-			};
-		}
-		if (/^git\s+clean\s+.*-[fF].*[dD]/.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule: 'destructive_block: git clean -fd',
-			};
-		}
 		if (/^git\s+worktree\s+remove\s+.*--force\b/i.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule: 'destructive_block: git worktree remove --force',
-			};
+			const worktreeRemoveMatch = /^git\s+worktree\s+remove\s+(.+)$/i.exec(seg);
+			if (worktreeRemoveMatch) {
+				const normalizedArgs = worktreeRemoveMatch[1]
+					.trim()
+					.split(/\s+/)
+					.filter(Boolean)
+					.map((token) => token.replace(/^["']|["']$/g, ''));
+				const pathArgs = normalizedArgs.filter(
+					(token) => !token.startsWith('-'),
+				);
+				const target = pathArgs.length === 1 ? pathArgs[0]?.trim() : null;
+				const scopeExempt =
+					target != null &&
+					target.length > 0 &&
+					declaredScope != null &&
+					declaredScope.length > 0 &&
+					isInDeclaredScope(target, declaredScope, cwd);
+				if (!scopeExempt) {
+					return {
+						decision: 'block',
+						firingRule: 'destructive_block: git worktree remove --force',
+					};
+				}
+			}
 		}
 
 		// rsync mirror / sync with delete
@@ -434,34 +332,6 @@ function evaluateDestructiveDecision(
 					firingRule: `destructive_block: rsync --delete (target: ${redactPath(rsyncTarget ?? 'unknown')})`,
 				};
 			}
-		}
-
-		// kubectl / docker
-		if (/^kubectl\s+delete\b/.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule: 'destructive_block: kubectl delete',
-			};
-		}
-		if (/^docker\s+system\s+prune\b/.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule: 'destructive_block: docker system prune',
-			};
-		}
-
-		// SQL DDL
-		if (/^\s*DROP\s+(TABLE|DATABASE|SCHEMA)\b/i.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule: 'destructive_block: SQL DROP statement',
-			};
-		}
-		if (/^\s*TRUNCATE\s+TABLE\b/i.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule: 'destructive_block: SQL TRUNCATE TABLE statement',
-			};
 		}
 
 		// POSIX mv targeting .swarm/ paths
@@ -565,16 +435,6 @@ function evaluateDestructiveDecision(
 				decision: 'block',
 				firingRule:
 					'destructive_block: "7z" with delete-source flag targeting .swarm/ detected — archive with source deletion under .swarm/ is not allowed',
-			};
-		}
-
-		// Disk format (mkfs only — matches real checkDestructiveCommand). NOTE: wipefs/shred/
-		// truncate/sed -i/perl -i are NOT in real enforcement, so explain must NOT block them
-		// either (over-mirroring causes drift — explain would predict a block that never fires).
-		if (/^mkfs[./]/.test(seg)) {
-			return {
-				decision: 'block',
-				firingRule: 'destructive_block: mkfs (filesystem format)',
 			};
 		}
 
