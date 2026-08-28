@@ -16,7 +16,7 @@ Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
 
 **What this PR defines.** A single canonical `ObservabilityEvent` envelope
 (`src/observability/envelope.ts`), a discriminated catalog of every event kind
-the codebase emits today (`src/observability/catalog.ts`, 50 entries), a
+the codebase emits today (`src/observability/catalog.ts`, 51 entries), a
 relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. It wires the envelope into the one live production
@@ -182,10 +182,10 @@ those inputs before this change.
 
 ---
 
-## 5. The 50-entry catalog
+## 5. The 51-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 50 entries = the 38 pre-existing members of
-`TelemetryEvent` (`src/telemetry.ts:15-109`) plus `agent_conflict_detected`
+Source: `src/observability/catalog.ts`. Exactly 51 entries = the 38 pre-existing members of
+`TelemetryEvent` (`src/telemetry.ts:15-144`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
 result event) plus `knowledge_receipt_transition` (issue #2031, the bounded
@@ -200,7 +200,10 @@ atomic-write residue quarantine health aggregate) plus `context_telemetry_health
 the counts-only bounded storage health aggregate for the
 `.swarm/skill-usage.jsonl` store and its authoritative pending sidecar) plus
 `trajectory_health` (issue #2041 — the counts-only bounded storage health
-aggregate for the `.swarm/trajectories/` PRM session-trajectory store).
+aggregate for the `.swarm/trajectories/` PRM session-trajectory store) plus
+`pr_subscription_health` (issue #2042 — the counts-only bounded storage health
+aggregate for the `.swarm/pr-monitor/` PR-monitor subscription checkpoint
+store).
 
 Legend: **Owner** is `futureOwnerIssue` when `consumers` is empty (permitted
 only together with an owner — an empty consumer list with no owner is a CI
@@ -639,7 +642,7 @@ for longer than the cache-refresh window.
 
 #### shell_audit_health
 Category `lifecycle`, severity `notice`, privacy `operational`. Producer
-`src/telemetry.ts:1043` (`shellAuditHealth`, called by the bounded
+`src/telemetry.ts:1050` (`shellAuditHealth`, called by the bounded
 `.swarm/session/shell-audit.jsonl` security-audit store in
 `src/hooks/guardrails/shell-audit-store.ts` after a compaction or close cut;
 issue #2040). Consumers: none — owner **#2047**. Retention: **#2047**. No
@@ -659,7 +662,7 @@ per-type folded counts disclose.
 
 #### trajectory_health
 Category `lifecycle`, severity `notice`, privacy `operational`. Producer
-`src/telemetry.ts:1066` (`trajectoryHealth`, called by the bounded
+`src/telemetry.ts:1073` (`trajectoryHealth`, called by the bounded
 `.swarm/trajectories/` PRM session-trajectory store in
 `src/prm/trajectory-store.ts` after a compaction pass or cleanup sweep, and —
 cooldown-bounded to one event per minute — when an append is skipped because
@@ -676,6 +679,26 @@ line budget or the sovereign derived byte ceiling) and files removed by the
 age/count cleanup sweep; `skipped_lock_count` discloses best-effort appends
 skipped under lock contention (telemetry loss is preferred over file
 corruption in this store).
+
+#### pr_subscription_health
+Category `lifecycle`, severity `notice`, privacy `operational`. Producer
+`src/telemetry.ts:1101` (`prSubscriptionHealth`, called by the bounded
+`.swarm/pr-monitor/` PR-monitor subscription checkpoint store in
+`src/background/pr-subscriptions.ts` after a terminal-record compaction, a
+legacy-JSONL migration completion (including the one-time read-bootstrap), a
+legacy-log archive, or a foreign/corrupt checkpoint recovery; issue #2042).
+Consumers: none — owner **#2047**. Retention: **#2047**. No workflow ID is
+required: the aggregate is store-level and counts-only. The payload is
+strictly bounded counts: `trigger`
+(`compact`/`migrate-complete`/`archive`/`foreign-rebind`/`corrupt-quarantine`),
+`active_count`, `terminal_count`, `compactions`, `corrupt_count`,
+`dropped_audit_count`, `checkpoint_bytes`, and `limit_bytes`. CorrelationIds,
+filesystem paths, and repo identities are never emitted (path redaction by
+omission). This is the health signal for the issue-#2042 bounded PR-monitor
+subscription store: `corrupt_count` discloses legacy lines skipped by the
+bounded fold; `dropped_audit_count` discloses audit-tail transitions dropped
+by the high/low-water rewrite; the `/swarm pr status` storage footer surfaces
+the same figures synchronously.
 
 ---
 
@@ -736,7 +759,7 @@ row 17 records the authoritative knowledge-receipt partition added by #2031.
 | 13 | SQLite `memory_events` | `src/memory/sqlite-provider.ts:200-207` | memory-provider internal readers (not itemized here — index design is #2048's scope) | `operation` column | `timestamp` column, ISO string | table has no explicit version column (SQLite `_meta` table tracks migration version 4+, not per-row) | `target_id` | no `session_id`/`task_id` column | **no** | authoritative | **#2036** (retention), #2048 (index) |
 | 14 | SQLite `memory_recall_usage` | `src/memory/sqlite-provider.ts:209-214` | memory-provider internal readers | `bundle_id` column | `timestamp` column, ISO string | none (migration-versioned schema, not row-versioned) | `bundle_id`, `run_id` (added migration v9) | no `session_id`/`task_id` column | **no** | derived | **#2036**, #2048 |
 | 15 | SQLite `memory_reward_events` | `src/memory/sqlite-provider.ts:286` | memory-provider internal readers | `verdict` column | `timestamp` column, ISO string | none | `memory_id`, `run_id`, `unit_id` | no `session_id`/`task_id` column | **no** | derived | **#2036**, #2048 |
-| 16 | `.swarm/pr-monitor/subscriptions.jsonl` | `src/background/pr-subscriptions.ts:26` (path constant `PR_SUBSCRIPTIONS_FILE`); writes serialized under `withEvidenceLock` | background PR-monitor poller (reads fold to latest snapshot per `correlationId`, lock-free) | full-record snapshot per line, folded by `correlationId` | ISO string (implementation-supplied) | none observed at the constant/module-doc level | `correlationId` | no explicit `sessionID`/`taskId` columns beyond `correlationId` | not itemized as archived by `/swarm close` in the localization sweep | operational | **#2042** |
+| 16 | `.swarm/pr-monitor/subscriptions.checkpoint.json` (+ bounded `subscriptions.audit.jsonl` transition tail; legacy `subscriptions.jsonl` absorbed then archived; issue #2042) | `src/background/pr-subscriptions.ts` (checkpoint writes serialized under `withEvidenceLock` on the unchanged v1 lock key; atomic tmp+rename) | background PR-monitor poller, `/swarm pr status`, session rehydration (bounded checkpoint read; lock-free; latest validated record per `correlationId` with identity re-validation) | versioned checkpoint `schemaVersion` 1 (records map + migration cursor + maintenance counters); audit line per transition `kind` | epoch-ms number | checkpoint `schemaVersion` 1 (issue #2042) | `correlationId` | no explicit `sessionID`/`taskId` columns beyond `correlationId` | not itemized as archived by `/swarm close` in the localization sweep | operational | **#2042** |
 | 17 | canonical project `.swarm/knowledge-receipts-v2.jsonl` + rebuildable snapshot + closed-summary archive | `src/hooks/knowledge-receipt-ledger.ts` (`commitDisplayedMembership`, `validateAndCommitTerminalBatch`, phase-close/cutover transitions) | receipt validator/tool, architect/delegate/reviewer acknowledgment paths, application and phase gates, promotion, escalation/quarantine, verdict feedback, and destructive-policy checks | versioned transition `kind` | ISO lifecycle clocks plus monotonic sequence | V2 schema + explicit cutover version | exact `trace_id` + `entry_id`, session/phase/task IDs, criticality, terminal event/source/reason, truthful promotion correlation | absent legacy membership is explicitly `legacy_unverifiable`; no synthesized join | `/swarm close` may copy for forensics but never deletes live or within-grace authority; eligible closed summaries compact separately | authoritative | **#2031** |
 
 State classification legend: **authoritative** (the record IS the domain fact —
