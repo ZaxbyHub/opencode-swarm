@@ -22,6 +22,7 @@ import { validateSwarmPath } from '../hooks/utils.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { isPathWithinDeclaredScope } from '../scope/path-identity.js';
 import { advisoryWarn } from '../services/warning-buffer.js';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import { resolveGitExecutable } from '../utils/git-executable.js';
 import * as logger from '../utils/logger.js';
 import type { MergeOperationProvenance } from '../worktree/merge.js';
@@ -59,7 +60,7 @@ function dispatchKey(
 	taskId: string,
 	transitionId: string,
 ): string {
-	return `${directory}\u0000${taskId}\u0000${transitionId}`;
+	return `${canonicalRootKeyFresh(directory)}\u0000${taskId}\u0000${transitionId}`;
 }
 
 function walPath(directory: string, taskId: string): string {
@@ -531,6 +532,63 @@ export async function abortCoderSettlement(options: {
 		}
 	}
 	return outcome;
+}
+
+/**
+ * Retire a foreground coder-settlement WAL after the host has durably
+ * reclassified the same Task call as background work.
+ *
+ * The background delegation record becomes the sole mutation and physical
+ * worktree owner. `cleanupComplete: true` therefore means this legacy WAL has
+ * no remaining cleanup responsibility; this function deliberately performs
+ * no merge, deletion, or worktree cleanup itself.
+ */
+export async function transferCoderSettlementToBackground(options: {
+	directory: string;
+	taskId: string;
+	transitionId: string;
+}): Promise<'transferred' | 'missing' | 'already-terminal'> {
+	return withSettlementLock(
+		options.directory,
+		options.taskId,
+		'coder-background-transfer',
+		async () => {
+			const filePath = walPath(options.directory, options.taskId);
+			const wal = await readWal(filePath, options.taskId);
+			if (wal === null) return 'missing';
+			if (
+				wal.taskId !== options.taskId ||
+				wal.transitionId !== options.transitionId
+			) {
+				throw new Error('CODER_SETTLEMENT_WAL_REPLACED');
+			}
+			if (wal.state === 'PREPARED') {
+				throw new Error('CODER_SETTLEMENT_IN_PROGRESS');
+			}
+			if (wal.state !== 'DISPATCHED') {
+				liveDispatches.delete(
+					dispatchKey(options.directory, options.taskId, options.transitionId),
+				);
+				return 'already-terminal';
+			}
+
+			const reason = 'ownership transferred to durable background completion';
+			await writeWal(filePath, {
+				...wal,
+				state: 'ABORTED',
+				abortReason: reason,
+				cleanupComplete: true,
+			});
+			liveDispatches.delete(
+				dispatchKey(options.directory, options.taskId, options.transitionId),
+			);
+			await appendSettlementEvent(options.directory, 'aborted', wal, {
+				reason,
+				ownership: 'background-delegation',
+			});
+			return 'transferred';
+		},
+	);
 }
 
 async function abortDispatchedWalUnderLock(

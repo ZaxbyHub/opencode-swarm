@@ -26,6 +26,7 @@ import {
 } from '../state.js';
 import { pushAdvisory } from '../utils/advisory-queue';
 import * as logger from '../utils/logger.js';
+import { transferCoderSettlementToBackground } from '../workflow/coder-settlement.js';
 import {
 	GIT_OBJECT_ID_PATTERN,
 	type MergeOperationProvenance,
@@ -41,14 +42,21 @@ import {
 	claimCoderSettlement,
 	claimDelegationIngestion,
 	claimTerminalResult,
+	clearLegacyCoderSettlementTransferPending,
 	findDelegationForCompletion,
+	LEGACY_CODER_SETTLEMENT_PENDING_ADVISORY_MARKER,
+	type LegacyCoderSettlementTransfer,
 	maintainBackgroundDelegations,
+	markLegacyCoderSettlementTransferPending,
 	preparePendingBackgroundAdvisories,
 	promoteDelegationFallback,
 	putPendingBackgroundAdvisory,
+	type ReplacePendingBackgroundAdvisoryResult,
 	recordDelegationIngestionResult,
+	registerLegacyCoderSettlementReconciler,
 	releaseBackgroundCoderReservation,
 	releasePreparedBackgroundAdvisories,
+	replacePendingBackgroundAdvisory,
 	updateCoderSettlement,
 } from './pending-delegations.js';
 import {
@@ -79,11 +87,47 @@ interface MaybeEvent {
 	properties?: { part?: unknown } & Record<string, unknown>;
 }
 
+interface TrustedTerminalReplay {
+	record: BackgroundDelegationRecord;
+	terminal: BackgroundTerminalResult;
+	result: BackgroundDelegationResult;
+	skipMaintenance?: boolean;
+}
+
+interface ObserverEventInput {
+	event: unknown;
+	trustedTerminal?: TrustedTerminalReplay;
+}
+
 export interface PreparedBackgroundAdvisories {
 	preparationId: string;
 	eventIds: string[];
 	messages: string[];
 }
+
+type LegacyCoderSettlementTransferDisposition =
+	| 'ok'
+	| 'retry_pending'
+	| 'manual_recovery';
+
+const RETRYABLE_LEGACY_SETTLEMENT_TRANSFER_ERROR_CODES = new Set([
+	'CODER_SETTLEMENT_LOCKED',
+	'EACCES',
+	'EBUSY',
+	'EIO',
+	'EPERM',
+	'ETIMEDOUT',
+]);
+
+const observerInternals = {
+	transferCoderSettlementToBackground,
+	markLegacyCoderSettlementTransferPending,
+	sleep: (milliseconds: number) =>
+		new Promise<void>((resolve) => setTimeout(resolve, milliseconds)),
+};
+
+/** Test-only dependency seam; production callers should use the observer API. */
+export const _internals = observerInternals;
 
 export function createBackgroundCompletionObserver(opts: {
 	config: ObserverConfig;
@@ -95,6 +139,11 @@ export function createBackgroundCompletionObserver(opts: {
 	reviewerReceiptOptions?: Record<string, unknown>;
 }): {
 	event: (input: { event: unknown }) => Promise<void>;
+	reconcilePending: (record: BackgroundDelegationRecord) => Promise<boolean>;
+	notifyLegacyCoderSettlementAdvisoryReplaced: (
+		record: BackgroundDelegationRecord,
+		replacement: ReplacePendingBackgroundAdvisoryResult,
+	) => void;
 	prepareAdvisories: (
 		parentSessionId: string,
 	) => Promise<PreparedBackgroundAdvisories | null>;
@@ -108,103 +157,136 @@ export function createBackgroundCompletionObserver(opts: {
 	) => Promise<boolean>;
 } {
 	const { config, directory } = opts;
+	let replayInProgress = false;
+	const notifyLegacyCoderSettlementAdvisoryReplaced = (
+		record: BackgroundDelegationRecord,
+		replacement: ReplacePendingBackgroundAdvisoryResult,
+	): void => {
+		const session = swarmState.agentSessions.get(record.parentSessionId);
+		if (!session) return;
+		removeQueuedLegacyTransferAdvisory(
+			session.pendingAdvisoryMessages,
+			replacement.advisory.eventId,
+		);
+		if (replacement.replacedMessage) {
+			removeQueuedAdvisoryMessage(session.pendingAdvisoryMessages, [
+				replacement.replacedMessage,
+			]);
+		}
+		pushAdvisory(session, replacement.advisory.message);
+	};
 
-	const event = async (input: { event: unknown }): Promise<void> => {
+	const event = async (input: ObserverEventInput): Promise<void> => {
 		if (!config.enabled) return;
 		try {
-			const evt = input?.event as MaybeEvent | undefined;
-			if (!evt || evt.type !== 'message.part.updated') return;
-			const part = evt.properties?.part as MaybeTextPart | undefined;
-			if (
-				!part ||
-				part.type !== 'text' ||
-				part.synthetic !== true ||
-				typeof part.text !== 'string'
-			) {
-				return;
-			}
+			let pending: BackgroundDelegationRecord;
+			let result: BackgroundDelegationResult;
+			let terminal: BackgroundTerminalResult;
+			let record: BackgroundDelegationRecord;
+			let text: string;
+			let isDuplicate = false;
+			if (input.trustedTerminal) {
+				pending = input.trustedTerminal.record;
+				result = input.trustedTerminal.result;
+				terminal = input.trustedTerminal.terminal;
+				text = result.error ?? result.text ?? '';
+				record = pending;
+				isDuplicate = true;
+			} else {
+				const evt = input?.event as MaybeEvent | undefined;
+				if (!evt || evt.type !== 'message.part.updated') return;
+				const part = evt.properties?.part as MaybeTextPart | undefined;
+				if (
+					!part ||
+					part.type !== 'text' ||
+					part.synthetic !== true ||
+					typeof part.text !== 'string'
+				) {
+					return;
+				}
 
-			const envelope = parseTaskEnvelope(part.text);
-			if (
-				!envelope ||
-				(envelope.state !== 'completed' &&
-					envelope.state !== 'error' &&
-					envelope.state !== 'cancelled')
-			) {
-				return;
-			}
-			const parentSessionId =
-				typeof part.sessionID === 'string' ? part.sessionID : '';
-			const lookup = await findDelegationForCompletion(
-				directory,
-				envelope.sessionId,
-			);
-			if (!lookup) {
-				logger.log(
-					`[background] trusted completion for ${envelope.sessionId} has no durable primary or fallback owner; ignored`,
-				);
-				return;
-			}
-			if (
-				!parentSessionId ||
-				lookup.record.parentSessionId !== parentSessionId ||
-				lookup.record.subagentSessionId !== envelope.sessionId
-			) {
-				logger.warn(
-					`[background] trusted completion identity mismatch for ${envelope.sessionId}; ignored`,
-				);
-				return;
-			}
-
-			let pending = lookup.record;
-			if (lookup.source === 'fallback') {
-				const promoted = await promoteDelegationFallback(
+				const envelope = parseTaskEnvelope(part.text);
+				if (
+					!envelope ||
+					(envelope.state !== 'completed' &&
+						envelope.state !== 'error' &&
+						envelope.state !== 'cancelled')
+				) {
+					return;
+				}
+				const parentSessionId =
+					typeof part.sessionID === 'string' ? part.sessionID : '';
+				const lookup = await findDelegationForCompletion(
 					directory,
 					envelope.sessionId,
 				);
-				if (!promoted) {
-					logger.warn(
-						`[background] fallback promotion failed for ${envelope.sessionId}; terminal work remains preserved`,
+				if (!lookup) {
+					logger.log(
+						`[background] trusted completion for ${envelope.sessionId} has no durable primary or fallback owner; ignored`,
 					);
 					return;
 				}
-				pending = promoted.record;
-			}
+				if (
+					!parentSessionId ||
+					lookup.record.parentSessionId !== parentSessionId ||
+					lookup.record.subagentSessionId !== envelope.sessionId
+				) {
+					logger.warn(
+						`[background] trusted completion identity mismatch for ${envelope.sessionId}; ignored`,
+					);
+					return;
+				}
 
-			const text =
-				envelope.state === 'error' || envelope.state === 'cancelled'
-					? (envelope.errorText ?? '')
-					: (envelope.resultText ?? '');
-			const result: BackgroundDelegationResult = {
-				...(envelope.state === 'error' ? { error: text } : { text }),
-				chars: envelope.resultChars ?? text.length,
-				truncated: envelope.resultTruncated ?? false,
-				digest: digest(text),
-			};
-			const terminal: BackgroundTerminalResult = {
-				eventId: buildBackgroundCompletionEventId({
-					correlationId: pending.correlationId,
-					jobId: pending.jobId,
+				pending = lookup.record;
+				if (lookup.source === 'fallback') {
+					const promoted = await promoteDelegationFallback(
+						directory,
+						envelope.sessionId,
+					);
+					if (!promoted) {
+						logger.warn(
+							`[background] fallback promotion failed for ${envelope.sessionId}; terminal work remains preserved`,
+						);
+						return;
+					}
+					pending = promoted.record;
+				}
+
+				text =
+					envelope.state === 'error' || envelope.state === 'cancelled'
+						? (envelope.errorText ?? '')
+						: (envelope.resultText ?? '');
+				result = {
+					...(envelope.state === 'error' ? { error: text } : { text }),
+					chars: envelope.resultChars ?? text.length,
+					truncated: envelope.resultTruncated ?? false,
+					digest: digest(text),
+				};
+				terminal = {
+					eventId: buildBackgroundCompletionEventId({
+						correlationId: pending.correlationId,
+						jobId: pending.jobId,
+						status: envelope.state,
+						resultDigest: result.digest,
+					}),
 					status: envelope.state,
-					resultDigest: result.digest,
-				}),
-				status: envelope.state,
-				recordedAt: pending.terminalResult?.recordedAt ?? Date.now(),
-				result,
-			};
-			const terminalClaim = await claimTerminalResult(
-				directory,
-				pending.correlationId,
-				terminal,
-			);
-			if (!terminalClaim) {
-				logger.warn(
-					`[background] terminal claim failed for ${pending.correlationId}; ignored`,
+					recordedAt: pending.terminalResult?.recordedAt ?? Date.now(),
+					result,
+				};
+				const terminalClaim = await claimTerminalResult(
+					directory,
+					pending.correlationId,
+					terminal,
 				);
-				return;
+				if (!terminalClaim) {
+					logger.warn(
+						`[background] terminal claim failed for ${pending.correlationId}; ignored`,
+					);
+					return;
+				}
+				isDuplicate = terminalClaim.disposition === 'duplicate';
+				record = terminalClaim.record;
 			}
-			const isDuplicate = terminalClaim.disposition === 'duplicate';
-			let record = terminalClaim.record;
 			opts.onTerminalClaimed?.(record);
 
 			// Maintenance point P2 (issue #2104): a trusted terminal (or the
@@ -212,22 +294,37 @@ export function createBackgroundCompletionObserver(opts: {
 			// reservations and stale records become provably reclaimable. One
 			// bounded, lock-limited pass; best-effort — the settlement paths
 			// below must proceed regardless.
-			try {
-				await maintainBackgroundDelegations(directory, {
-					lockTimeoutMs: 1_000,
-					reason: 'trusted-terminal',
-				});
-			} catch {
-				// observation only; another maintenance point will finish
+			if (!input.trustedTerminal?.skipMaintenance) {
+				try {
+					await maintainBackgroundDelegations(directory, {
+						lockTimeoutMs: 1_000,
+						reason: 'trusted-terminal',
+						onLegacyCoderSettlementReconciled: reconcilePending,
+						onLegacyCoderSettlementAdvisoryReplaced:
+							notifyLegacyCoderSettlementAdvisoryReplaced,
+					});
+				} catch {
+					// observation only; another maintenance point will finish
+				}
 			}
 
+			let legacyTransferPending = false;
+			let legacyTransferRequiresManualRecovery = false;
 			if (terminal.status !== 'completed') {
-				if (isDuplicate) {
-					// Duplicate error/cancelled event: scope was already preserved
-					// on first processing; just return without re-discarding.
+				if (isDuplicate && record.normalizedAgent !== 'coder') {
+					// Non-coder failure cleanup has no durable sub-transition to resume.
 					return;
 				}
 				if (record.normalizedAgent === 'coder') {
+					const legacyTransfer = await transferLegacyCoderSettlement(
+						directory,
+						record,
+					);
+					if (legacyTransfer.disposition === 'retry_pending') {
+						legacyTransferPending = true;
+					} else if (legacyTransfer.disposition === 'manual_recovery') {
+						legacyTransferRequiresManualRecovery = true;
+					}
 					if (record.planTaskId) {
 						const expectedGeneration =
 							record.taskChangeContext?.workflowGeneration;
@@ -303,8 +400,20 @@ export function createBackgroundCompletionObserver(opts: {
 					directory,
 					record,
 					terminal.eventId,
-					terminal.status === 'cancelled' ? 'cancelled' : 'failed',
+					legacyTransferPending
+						? `${terminal.status === 'cancelled' ? 'cancelled' : 'failed'}; legacy coder settlement transfer is pending; durable reconciliation will retry`
+						: legacyTransferRequiresManualRecovery
+							? `${terminal.status === 'cancelled' ? 'cancelled' : 'failed'}; legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session)`
+							: terminal.status === 'cancelled'
+								? 'cancelled'
+								: 'failed',
 				);
+				if (!legacyTransferPending) {
+					await clearLegacyCoderSettlementTransferPending(
+						directory,
+						record.correlationId,
+					);
+				}
 				return;
 			}
 
@@ -319,6 +428,15 @@ export function createBackgroundCompletionObserver(opts: {
 						settled.outcome,
 					);
 					return;
+				}
+				const legacyTransfer = await transferLegacyCoderSettlement(
+					directory,
+					record,
+				);
+				if (legacyTransfer.disposition === 'retry_pending') {
+					legacyTransferPending = true;
+				} else if (legacyTransfer.disposition === 'manual_recovery') {
+					legacyTransferRequiresManualRecovery = true;
 				}
 			} else if (!isDuplicate && isBackgroundGateBearingRecord(record)) {
 				// On a duplicate event the workspace was already validated
@@ -394,7 +512,13 @@ export function createBackgroundCompletionObserver(opts: {
 							directory,
 							record,
 							terminal.eventId,
-							applied.stale ? 'stale' : 'ingestion failed',
+							legacyTransferPending
+								? 'ingestion failed; legacy coder settlement transfer is pending; durable reconciliation will retry'
+								: legacyTransferRequiresManualRecovery
+									? 'ingestion failed; legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session)'
+									: applied.stale
+										? 'stale'
+										: 'ingestion failed',
 						);
 						// Maintenance point P2b (issue #2104): the ingestion
 						// rejection has just been durably recorded — reconcile now
@@ -404,6 +528,9 @@ export function createBackgroundCompletionObserver(opts: {
 							await maintainBackgroundDelegations(directory, {
 								lockTimeoutMs: 1_000,
 								reason: 'ingestion-rejection',
+								skipLegacyCoderSettlementReconciliation: legacyTransferPending,
+								onLegacyCoderSettlementAdvisoryReplaced:
+									notifyLegacyCoderSettlementAdvisoryReplaced,
 							});
 						} catch {
 							// observation only; the facts ring records it
@@ -452,13 +579,23 @@ export function createBackgroundCompletionObserver(opts: {
 
 			if (record.normalizedAgent === 'coder') {
 				await releaseCoderReservation(directory, record, 'consumed');
+				if (!legacyTransferPending) {
+					await clearLegacyCoderSettlementTransferPending(
+						directory,
+						record.correlationId,
+					);
+				}
 			}
 			await publishAdvisory(
 				directory,
 				record,
 				terminal.eventId,
 				record.normalizedAgent === 'coder'
-					? 'completed and settled'
+					? legacyTransferPending
+						? 'completed and settled; legacy coder settlement transfer is pending; durable reconciliation will retry'
+						: legacyTransferRequiresManualRecovery
+							? 'completed and settled; legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session)'
+							: 'completed and settled'
 					: 'completed',
 			);
 			logger.log(
@@ -470,6 +607,37 @@ export function createBackgroundCompletionObserver(opts: {
 			);
 		}
 	};
+
+	const reconcilePending = async (
+		record: BackgroundDelegationRecord,
+	): Promise<boolean> => {
+		if (replayInProgress) return false;
+		const terminal = record.terminalResult;
+		if (!terminal) return false;
+		replayInProgress = true;
+		try {
+			await event({
+				event: undefined,
+				trustedTerminal: {
+					record,
+					terminal,
+					result: terminal.result,
+					skipMaintenance: true,
+				},
+			});
+			const refreshed = await findDelegationForCompletion(
+				directory,
+				record.subagentSessionId,
+			);
+			return refreshed?.record.status === 'consumed';
+		} finally {
+			replayInProgress = false;
+		}
+	};
+
+	if (config.enabled) {
+		registerLegacyCoderSettlementReconciler(directory, reconcilePending);
+	}
 
 	const prepareAdvisories = async (
 		parentSessionId: string,
@@ -492,6 +660,8 @@ export function createBackgroundCompletionObserver(opts: {
 
 	return {
 		event,
+		reconcilePending,
+		notifyLegacyCoderSettlementAdvisoryReplaced,
 		prepareAdvisories,
 		ackObservedAdvisories: (parentSessionId, observedTexts) =>
 			acknowledgeObservedBackgroundAdvisories(
@@ -506,6 +676,81 @@ export function createBackgroundCompletionObserver(opts: {
 				prepared.preparationId,
 				prepared.eventIds,
 			),
+	};
+}
+
+async function transferLegacyCoderSettlement(
+	directory: string,
+	record: BackgroundDelegationRecord,
+): Promise<{
+	disposition: LegacyCoderSettlementTransferDisposition;
+	outcome: string;
+}> {
+	if (!record.planTaskId) {
+		return { disposition: 'ok', outcome: 'no task-scoped legacy settlement' };
+	}
+	const transfer: LegacyCoderSettlementTransfer = {
+		taskId: record.planTaskId,
+		transitionId: `coder:${record.callID}`,
+	};
+	let detail = 'unknown transfer failure';
+	let lastErrorCode: string | null = null;
+	for (let attempt = 0; attempt < 3; attempt += 1) {
+		try {
+			const outcome =
+				await observerInternals.transferCoderSettlementToBackground({
+					directory,
+					taskId: transfer.taskId,
+					transitionId: transfer.transitionId,
+				});
+			return { disposition: 'ok', outcome };
+		} catch (error) {
+			lastErrorCode = errorCode(error);
+			detail = error instanceof Error ? error.message : String(error);
+			if (attempt === 2 || !isRetryableLegacyTransferErrorCode(lastErrorCode)) {
+				break;
+			}
+			await observerInternals.sleep(50 * (attempt + 1));
+		}
+	}
+	logger.warn(
+		`[background] legacy coder settlement transfer failed for ${record.planTaskId}: ${detail}`,
+	);
+	if (!isRetryableLegacyTransferErrorCode(lastErrorCode)) {
+		return {
+			disposition: 'manual_recovery',
+			outcome:
+				'legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session)',
+		};
+	}
+	let pending: BackgroundDelegationRecord | null = null;
+	for (let markerAttempt = 0; markerAttempt < 3; markerAttempt += 1) {
+		try {
+			pending =
+				await observerInternals.markLegacyCoderSettlementTransferPending(
+					directory,
+					record.correlationId,
+					transfer,
+				);
+		} catch {
+			pending = null;
+		}
+		if (hasExactPendingLegacyTransfer(pending, transfer)) break;
+		if (markerAttempt < 2) {
+			await observerInternals.sleep(50 * (markerAttempt + 1));
+		}
+	}
+	if (hasExactPendingLegacyTransfer(pending, transfer)) {
+		return {
+			disposition: 'retry_pending',
+			outcome:
+				'legacy coder settlement transfer is pending; retrying durable reconciliation',
+		};
+	}
+	return {
+		disposition: 'manual_recovery',
+		outcome:
+			'legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session)',
 	};
 }
 
@@ -860,19 +1105,104 @@ async function publishAdvisory(
 	const message =
 		`[BACKGROUND COMPLETION ${eventId}] ${record.normalizedAgent} task ` +
 		`${taskLabel(record)} ${outcome}.`;
-	const stored = await putPendingBackgroundAdvisory(
-		directory,
-		record.correlationId,
-		{
-			eventId,
-			parentSessionId: record.parentSessionId,
-			message,
-		},
+	const input = {
+		eventId,
+		parentSessionId: record.parentSessionId,
+		message,
+	};
+	const needsCorrection = !message.includes(
+		LEGACY_CODER_SETTLEMENT_PENDING_ADVISORY_MARKER,
 	);
+	const replacement =
+		(needsCorrection
+			? await replacePendingBackgroundAdvisory(
+					directory,
+					record.correlationId,
+					input,
+				)
+			: null) ?? null;
+	const stored =
+		replacement?.advisory ??
+		(await putPendingBackgroundAdvisory(
+			directory,
+			record.correlationId,
+			input,
+		));
 	if (!stored) return;
 	const session = swarmState.agentSessions.get(record.parentSessionId);
 	if (session) {
+		if (needsCorrection) {
+			removeQueuedLegacyTransferAdvisory(
+				session.pendingAdvisoryMessages,
+				eventId,
+			);
+			if (replacement?.replacedMessage) {
+				removeQueuedAdvisoryMessage(session.pendingAdvisoryMessages, [
+					replacement.replacedMessage,
+				]);
+			}
+		}
 		pushAdvisory(session, stored.message);
+	}
+}
+
+function errorCode(error: unknown): string | null {
+	if (
+		error &&
+		typeof error === 'object' &&
+		'code' in error &&
+		typeof (error as NodeJS.ErrnoException).code === 'string'
+	) {
+		return (error as NodeJS.ErrnoException).code ?? null;
+	}
+	const detail = error instanceof Error ? error.message : String(error);
+	const match = /^([A-Z][A-Z0-9_]*)(?::|$)/.exec(detail.trim());
+	return match?.[1] ?? null;
+}
+
+function hasExactPendingLegacyTransfer(
+	record: BackgroundDelegationRecord | null,
+	transfer: LegacyCoderSettlementTransfer,
+): boolean {
+	return (
+		record?.legacyCoderSettlementTransfer?.taskId === transfer.taskId &&
+		record.legacyCoderSettlementTransfer.transitionId === transfer.transitionId
+	);
+}
+
+function isRetryableLegacyTransferErrorCode(code: string | null): boolean {
+	return (
+		code !== null && RETRYABLE_LEGACY_SETTLEMENT_TRANSFER_ERROR_CODES.has(code)
+	);
+}
+
+function removeQueuedAdvisoryMessage(
+	queue: string[] | undefined,
+	messagesToRemove: readonly string[],
+): void {
+	if (!queue || queue.length === 0 || messagesToRemove.length === 0) return;
+	const remove = new Set(messagesToRemove);
+	for (let index = queue.length - 1; index >= 0; index -= 1) {
+		if (remove.has(queue[index]!)) {
+			queue.splice(index, 1);
+		}
+	}
+}
+
+function removeQueuedLegacyTransferAdvisory(
+	queue: string[] | undefined,
+	eventId: string,
+): void {
+	if (!queue || queue.length === 0) return;
+	const prefix = `[BACKGROUND COMPLETION ${eventId}]`;
+	for (let index = queue.length - 1; index >= 0; index -= 1) {
+		const message = queue[index];
+		if (
+			message?.startsWith(prefix) &&
+			message.includes(LEGACY_CODER_SETTLEMENT_PENDING_ADVISORY_MARKER)
+		) {
+			queue.splice(index, 1);
+		}
 	}
 }
 
