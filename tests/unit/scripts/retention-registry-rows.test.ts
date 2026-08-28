@@ -267,9 +267,9 @@ describe('retention registry rows — coverage plumbing', () => {
 		);
 		const tailWrite = lineOf(pending, /^\s*writeDurableFileSync\(storePath/);
 
-		expect(mutationCount).toBe(16);
+		expect(mutationCount).toBe(19);
 		expect(row.writerCitations).toEqual([
-			`src/background/pending-delegations.ts:${appendRecord} appendRecord — appendFileSync :${appendFile} (16 mutation entry points :${firstMutation}-${lastMutation})`,
+			`src/background/pending-delegations.ts:${appendRecord} appendRecord — appendFileSync :${appendFile} (19 mutation entry points :${firstMutation}-${lastMutation})`,
 			`src/background/pending-delegations.ts:${durableWriter} writeDurableFileSync — fsync+rename-with-retry for checkpoint/manifest/rolled-tail (:${checkpointWrite}-${tailWrite})`,
 		]);
 
