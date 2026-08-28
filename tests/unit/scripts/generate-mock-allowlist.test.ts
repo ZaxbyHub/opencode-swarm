@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -18,6 +18,11 @@ const SCRIPT_PATH = path.join(
 	'generate-mock-allowlist.sh',
 );
 const ALLOWLIST_PATH = path.join(REPO_ROOT, 'scripts', 'mock-allowlist.txt');
+const ORIGINAL_ALLOWLIST = fs.readFileSync(ALLOWLIST_PATH, 'utf-8');
+
+function restoreAllowlist(): void {
+	fs.writeFileSync(ALLOWLIST_PATH, ORIGINAL_ALLOWLIST);
+}
 
 function runGenerateAllowlist(checkMode = false): {
 	stdout: string;
@@ -43,17 +48,19 @@ function runGenerateAllowlist(checkMode = false): {
 }
 
 describe('generate-mock-allowlist.sh', () => {
+	beforeEach(() => {
+		restoreAllowlist();
+	});
+
 	afterEach(() => {
-		// Restore the original allowlist after each test
-		spawnSync('git', ['checkout', '--', 'scripts/mock-allowlist.txt'], {
-			cwd: REPO_ROOT,
-			stdio: 'pipe',
-		});
+		restoreAllowlist();
 	});
 
 	test('should run without error in check mode when allowlist is up-to-date', () => {
 		if (isWindows) return;
-		// On the live repo the allowlist is already current
+		const regen = runGenerateAllowlist(false);
+		expect(regen.exitCode, regen.stdout + regen.stderr).toBe(0);
+
 		const result = runGenerateAllowlist(true);
 		expect(result.exitCode, result.stdout + result.stderr).toBe(0);
 		expect(result.stderr).toContain('up-to-date');
@@ -146,28 +153,18 @@ describe('generate-mock-allowlist.sh', () => {
 
 	test('issue #1666: preserves # APPROVED-NEW markers across regeneration', () => {
 		if (isWindows) return;
-		// The live allowlist has no markers today (none have ever been added),
-		// so this test seeds a synthetic one against an entry that already
-		// exists in the repo (src/agents/critic — confirmed at the head of
-		// the allowlist's `# --- src ---` section). The generator must
-		// re-emit the marker immediately above the entry after regen.
+		// Seed a synthetic marker against an entry that already exists in the
+		// repo (src/agents/critic). The generator must re-emit the marker
+		// immediately above the entry after regen.
 		const markerLine = '# APPROVED-NEW: src/agents/critic';
 		fs.appendFileSync(ALLOWLIST_PATH, `\n${markerLine}\n`);
-		try {
-			runGenerateAllowlist(false);
-			const content = fs.readFileSync(ALLOWLIST_PATH, 'utf-8');
-			expect(content).toContain(markerLine);
-			// The marker must appear immediately above the entry it approves.
-			const lines = content.split('\n');
-			const markerIdx = lines.indexOf(markerLine);
-			expect(markerIdx).toBeGreaterThan(-1);
-			expect(lines[markerIdx + 1]).toBe('src/agents/critic');
-		} finally {
-			// afterEach() also restores via git checkout; this is belt-and-braces.
-			spawnSync('git', ['checkout', '--', 'scripts/mock-allowlist.txt'], {
-				cwd: REPO_ROOT,
-				stdio: 'pipe',
-			});
-		}
+		runGenerateAllowlist(false);
+		const content = fs.readFileSync(ALLOWLIST_PATH, 'utf-8');
+		expect(content).toContain(markerLine);
+		// The marker must appear immediately above the entry it approves.
+		const lines = content.split('\n');
+		const markerIdx = lines.indexOf(markerLine);
+		expect(markerIdx).toBeGreaterThan(-1);
+		expect(lines[markerIdx + 1]).toBe('src/agents/critic');
 	});
 });

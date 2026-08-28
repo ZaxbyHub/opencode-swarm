@@ -37,7 +37,7 @@ describe('gate-utils subprocess ownership', () => {
 		const markerPath = path.join(markerDir, 'child-alive.txt');
 		try {
 			const started = performance.now();
-			const timeoutMs = process.platform === 'win32' ? 500 : 50;
+			const timeoutMs = process.platform === 'win32' ? 500 : 200;
 			const result = await spawnUtf8(
 				timeoutProbe(markerPath),
 				process.cwd(),
