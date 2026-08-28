@@ -403,16 +403,16 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/pr-workflow-gate.ts',
 		],
 		writerCitations: [
-			'src/background/pending-delegations.ts:2248 appendRecord — appendFileSync :2253 (16 mutation entry points :2400-4039)',
-			'src/background/pending-delegations.ts:998 writeDurableFileSync — fsync+rename-with-retry for checkpoint/manifest/rolled-tail (:2053-2094)',
+			'src/background/pending-delegations.ts:2261 appendRecord — appendFileSync :2266 (16 mutation entry points :2413-4052)',
+			'src/background/pending-delegations.ts:1011 writeDurableFileSync — fsync+rename-with-retry for checkpoint/manifest/rolled-tail (:2066-2107)',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:2191 readDelegations — checkpoint+tail fold (lenient), sync',
-			'src/background/pending-delegations.ts:2212 scanDelegationsForRecovery — strict, fails closed',
+			'src/background/pending-delegations.ts:2204 readDelegations — checkpoint+tail fold (lenient), sync',
+			'src/background/pending-delegations.ts:2225 scanDelegationsForRecovery — strict, fails closed',
 			'pr-workflow-session-resolver / pr-workflow-gate / init-orphan-recovery / delegation-gate worktree-collision-ownership — via readDelegations',
 		],
 		schemaVersion:
-			'RecordSchema schemaVersion 1|2|3; checkpoint/manifest literal 1 (:892,:913,:923)',
+			'RecordSchema schemaVersion 1|2|3; checkpoint/manifest literal 1 (:905,:926,:936)',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
 		writeLimits: {
@@ -424,15 +424,15 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			pattern: 'indexed (checkpoint+tail) with full-fold fallback',
 			bound: 'legacy/tail reads hard-bounded at 4 MiB (MAX_RECOVERY_LEDGER_BYTES)',
 			sync: true,
-			citation: 'src/background/pending-delegations.ts:82-87,1421',
+			citation: 'src/background/pending-delegations.ts:82-87,1434',
 		},
 		lockModel: 'withEvidenceLock agent=background on every mutation (:134-137); reads lock-free',
 		crashBehavior:
-			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1162-1174)',
+			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1175-1187)',
 		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (close.ts:422-424); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, close.ts:417-425 docblock)',
 		resetPolicy: 'reset/reset-session do not delete',
 		legacyCompatibility:
-			'loadLegacyLedger pre-checkpoint fold (:1421); mixed-version lines safeParse individually',
+			'loadLegacyLedger pre-checkpoint fold (:1434); mixed-version lines safeParse individually',
 		healthSignal: 'delegation-health artifact + #2034 recovery observations',
 		owner: '#2034 (merged)',
 		disposition: {
