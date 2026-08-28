@@ -137,10 +137,9 @@ export function normalizeMockTarget(target: string): string {
 	if (target.startsWith('node:')) {
 		return target;
 	}
-	let normalized = target.replace(/^(\.\.\/)+/, '').replace(/^(\.\/)+/, '');
-	normalized = path.posix.normalize(normalized);
-	if (normalized.startsWith('./')) {
-		normalized = normalized.slice(2);
+	let normalized = target.replace(/^(?:\.\.\/)+/, '').replace(/^(?:\.\/)+/, '');
+	while (normalized.includes('/../')) {
+		normalized = normalized.replace(/[^/]+\/\.\.\//, '');
 	}
 	normalized = normalized.replace(/^src\//, '').replace(/\.js$/, '');
 	return `src/${normalized}`;

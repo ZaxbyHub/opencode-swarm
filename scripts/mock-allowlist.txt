@@ -106,6 +106,7 @@ src/plan/ledger
 src/plan/manager
 src/proper-lockfile
 src/sandbox/executor
+# APPROVED-NEW: src/sandbox/executor
 src/sandbox/linux/bubblewrap-executor
 src/sast/rules/index
 src/sast/semgrep

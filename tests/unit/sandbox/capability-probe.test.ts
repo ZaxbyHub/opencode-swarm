@@ -85,9 +85,9 @@ describe('SandboxCapabilityProbe', () => {
 	describe('timeout / non-blocking behavior', () => {
 		test('detect() resolves within reasonable time (< 5s)', async () => {
 			const probe = new SandboxCapabilityProbe();
-			const start = Date.now();
+			const start = performance.now();
 			await probe.detect();
-			const elapsed = Date.now() - start;
+			const elapsed = performance.now() - start;
 			// 5s guard — real timeout is 2s per probe
 			expect(elapsed).toBeLessThan(5000);
 		});

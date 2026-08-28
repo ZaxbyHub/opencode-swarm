@@ -41,7 +41,6 @@ const hasBash = (() => {
 		return false;
 	}
 })();
-
 const MOCK_CLEANUP_GATE = path.resolve(
 	REPO_ROOT,
 	'scripts/check-mock-cleanup.ts',
@@ -64,7 +63,6 @@ const tempRoots: string[] = [];
 const MOCK_MODULE_CALL = ['mock', "module('./dep', () => ({}));"].join('.');
 const RAW_TMPDIR_CALL = ['tmpdir', '()'].join('');
 const CROSS_CONTAMINATION_TIMEOUT_MS = 180_000;
-
 interface LegacyFixtureEntry {
 	path: string;
 	mode: string;
@@ -104,20 +102,16 @@ async function git(repoDir: string, ...args: string[]): Promise<void> {
 		`git ${args.join(' ')} failed in ${repoDir}: ${result.stderr}`,
 	);
 }
-
 const runArchiveGit = (args: string[]) => runGit(args, REPO_ROOT, 10_000);
-
 function write(repoDir: string, relPath: string, content: string): void {
 	const full = path.join(repoDir, relPath);
 	fs.mkdirSync(path.dirname(full), { recursive: true });
 	fs.writeFileSync(full, content, 'utf-8');
 }
-
 async function commit(repoDir: string, message: string): Promise<void> {
 	await git(repoDir, 'add', '-A');
 	await git(repoDir, 'commit', '-q', '-m', message);
 }
-
 async function makeRepo(prefix: string): Promise<string> {
 	const repoDir = canonicalMkdtemp(prefix);
 	await git(repoDir, 'init', '-q', '-b', 'main');
@@ -247,6 +241,15 @@ describe('issue #2094 legacy-oracle parity', () => {
 			'-e',
 			`${ARCHIVED_SHA}^{commit}`,
 		]);
+		const provenanceMode =
+			archivedCommit.exitCode === 0
+				? 'verified-tree'
+				: 'degraded-shallow-checkout';
+		if (provenanceMode === 'degraded-shallow-checkout') {
+			console.warn(
+				`ARCHIVE PROVENANCE: ${ARCHIVED_SHA} unavailable; verifying manifest/blob hashes only.`,
+			);
+		}
 
 		for (const entry of legacyFixtureManifest.files) {
 			const fixturePath = path.join(ARCHIVE_ROOT, ...entry.path.split('/'));
@@ -254,8 +257,7 @@ describe('issue #2094 legacy-oracle parity', () => {
 			expect(sha256(fixtureContent.replaceAll('\r\n', '\n'))).toBe(
 				entry.sha256,
 			);
-			// Shallow CI may omit the commit; blob and SHA-256 checks stay unconditional.
-			if (archivedCommit.exitCode === 0) {
+			if (provenanceMode === 'verified-tree') {
 				const archivedTree = await runArchiveGit([
 					'ls-tree',
 					ARCHIVED_SHA,

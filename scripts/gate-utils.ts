@@ -11,20 +11,35 @@ export interface SpawnResult {
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const KILL_GRACE_MS = 1_000;
 
+interface BoundedOutput {
+	chunks: Buffer[];
+	bytes: number;
+	overflowed: boolean;
+}
+
 function appendBounded(
-	current: string,
+	output: BoundedOutput,
 	chunk: Buffer | string,
 	maxBytes: number,
-): { next: string; overflowed: boolean } {
-	const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-	if (current.length + text.length <= maxBytes) {
-		return { next: current + text, overflowed: false };
+): void {
+	const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+	const remaining = maxBytes - output.bytes;
+	if (remaining <= 0) {
+		output.overflowed = true;
+		return;
 	}
-	const remaining = Math.max(0, maxBytes - current.length);
-	return {
-		next: current + text.slice(0, remaining),
-		overflowed: true,
-	};
+	if (buffer.length <= remaining) {
+		output.chunks.push(buffer);
+		output.bytes += buffer.length;
+		return;
+	}
+	output.chunks.push(buffer.subarray(0, remaining));
+	output.bytes = maxBytes;
+	output.overflowed = true;
+}
+
+function decodeOutput(output: BoundedOutput): string {
+	return Buffer.concat(output.chunks).toString('utf8');
 }
 
 export async function spawnUtf8(
@@ -38,15 +53,14 @@ export async function spawnUtf8(
 		stdio: ['ignore', 'pipe', 'pipe'],
 	});
 
-	let stdout = '';
-	let stderr = '';
+	const stdout: BoundedOutput = { chunks: [], bytes: 0, overflowed: false };
+	const stderr: BoundedOutput = { chunks: [], bytes: 0, overflowed: false };
 	let overflowed = false;
 	let timedOut = false;
 
 	proc.stdout?.on('data', (chunk) => {
-		const bounded = appendBounded(stdout, chunk, MAX_OUTPUT_BYTES);
-		stdout = bounded.next;
-		if (bounded.overflowed && !overflowed) {
+		appendBounded(stdout, chunk, MAX_OUTPUT_BYTES);
+		if (stdout.overflowed && !overflowed) {
 			overflowed = true;
 			try {
 				proc.kill();
@@ -54,9 +68,8 @@ export async function spawnUtf8(
 		}
 	});
 	proc.stderr?.on('data', (chunk) => {
-		const bounded = appendBounded(stderr, chunk, MAX_OUTPUT_BYTES);
-		stderr = bounded.next;
-		if (bounded.overflowed && !overflowed) {
+		appendBounded(stderr, chunk, MAX_OUTPUT_BYTES);
+		if (stderr.overflowed && !overflowed) {
 			overflowed = true;
 			try {
 				proc.kill();
@@ -110,8 +123,8 @@ export async function spawnUtf8(
 		const { code } = await Promise.race([closePromise, timeoutPromise]);
 		return {
 			exitCode: overflowed || timedOut ? 1 : code ?? 1,
-			stdout,
-			stderr,
+			stdout: decodeOutput(stdout),
+			stderr: decodeOutput(stderr),
 		};
 	} finally {
 		clearTimeout(timer);

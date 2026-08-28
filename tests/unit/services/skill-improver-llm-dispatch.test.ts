@@ -8,9 +8,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import {
 	readKnowledge,
@@ -26,15 +25,24 @@ import {
 	getQuotaState,
 	resolveQuotaPath,
 } from '../../../src/services/skill-improver-quota';
+import { createIsolatedTestEnv } from '../../helpers/isolated-test-env';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let tmp: string;
+const FIXED_ISO_TIMESTAMP = '2024-01-02T03:04:05.000Z';
+let isolatedEnv: ReturnType<typeof createIsolatedTestEnv>;
 beforeEach(() => {
 	mock.restore();
-	tmp = mkdtempSync(path.join(tmpdir(), 'swarm-skill-llm-'));
+	isolatedEnv = createIsolatedTestEnv();
+	tmp = canonicalMkdtemp('swarm-skill-llm-');
 });
 afterEach(() => {
-	rmSync(tmp, { recursive: true, force: true });
-	mock.restore();
+	try {
+		rmSync(tmp, { recursive: true, force: true });
+	} finally {
+		isolatedEnv.cleanup();
+		mock.restore();
+	}
 });
 
 const cfg = {
@@ -66,12 +74,12 @@ async function seedKnowledge(): Promise<void> {
 		confirmed_by: [
 			{
 				phase_number: 1,
-				confirmed_at: new Date().toISOString(),
+				confirmed_at: FIXED_ISO_TIMESTAMP,
 				project_name: 't',
 			},
 			{
 				phase_number: 2,
-				confirmed_at: new Date().toISOString(),
+				confirmed_at: FIXED_ISO_TIMESTAMP,
 				project_name: 't',
 			},
 		],
@@ -81,8 +89,8 @@ async function seedKnowledge(): Promise<void> {
 			failed_after_count: 0,
 		},
 		schema_version: 2,
-		created_at: new Date().toISOString(),
-		updated_at: new Date().toISOString(),
+		created_at: FIXED_ISO_TIMESTAMP,
+		updated_at: FIXED_ISO_TIMESTAMP,
 		project_name: 't',
 		triggers: ['coder delegation'],
 	};
@@ -118,7 +126,7 @@ status: active
 
 async function seedUnactionableRecord(): Promise<void> {
 	await mkdir(path.join(tmp, '.swarm'), { recursive: true });
-	const now = new Date().toISOString();
+	const now = FIXED_ISO_TIMESTAMP;
 	const record: KnowledgeEntryBase & {
 		status: 'quarantined_unactionable';
 		project_name: string;

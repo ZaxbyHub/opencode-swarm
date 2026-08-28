@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { expandScopePattern } from '../../../scripts/check-invariants';
+import {
+	expandScopePattern,
+	normalizeMockTarget,
+} from '../../../scripts/check-invariants';
 import { spawnUtf8 } from '../../../scripts/gate-utils';
 import { bashCommand, resolveBash } from '../../helpers/bash.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
@@ -89,6 +92,14 @@ function setupFixtureDir(fixtureName: string): string {
 }
 
 describe('check-invariants regressions', () => {
+	test('FB-004 regression: mock-target normalization matches Bash edge semantics', () => {
+		// The prior TypeScript path.posix.normalize implementation removed `./`
+		// segments that the archived Bash owner intentionally preserves.
+		expect(normalizeMockTarget('src/./foo.js')).toBe('src/./foo');
+		expect(normalizeMockTarget('src/foo/../../bar.js')).toBe('src/bar');
+		expect(normalizeMockTarget('../../../src/foo/bar.js')).toBe('src/foo/bar');
+	});
+
 	test(
 		'regression: real repo knowledge-scope glob expands without regex failure',
 		() => {

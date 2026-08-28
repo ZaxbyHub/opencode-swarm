@@ -74,9 +74,8 @@ function stripCommentOnlyLines(content: string): string {
 }
 
 function detectSetU(codeOnly: string): boolean {
-	return /(^|[ \t])set[ \t]+-[^-]*u|(^|[ \t])set[ \t]+-[^-]*[eu][^-]*u/.test(
-		codeOnly,
-	);
+	const pattern = /(^|[ \t])set[ \t]+-[^-]*u|(^|[ \t])set[ \t]+-[^-]*[eu][^-]*u/;
+	return codeOnly.split('\n').some((line) => pattern.test(line));
 }
 
 function extractEmptyInitArrayNames(codeOnly: string): string[] {

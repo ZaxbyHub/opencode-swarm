@@ -58,8 +58,8 @@ const SPAWN_TIMEOUT_MS = 120_000;
 const TEST_TIMEOUT_MS = 180_000;
 
 /**
- * Helper to run check-invariants.sh from a given directory.
- * Skips on Windows where bash.exe is the WSL stub.
+ * Helper to run the repository's check-invariants owner from a given directory.
+ * Windows executes the native TypeScript owner because bash.exe is the WSL stub.
  */
 function runCheckInvariants(
 	cwd: string,
@@ -69,19 +69,18 @@ function runCheckInvariants(
 	stderr: string;
 	exitCode: number;
 } {
-	if (isWindows) {
-		throw new Error('bash not available on Windows');
-	}
+	const effectiveTsOwner = useTsOwner || isWindows;
 	const localScript = path.join(
 		cwd,
 		'scripts',
-		useTsOwner ? 'check-invariants.ts' : 'check-invariants.sh',
+		effectiveTsOwner ? 'check-invariants.ts' : 'check-invariants.sh',
 	);
-	const scriptPath = fs.existsSync(localScript) ? localScript : SCRIPT_PATH;
-	const command = useTsOwner ? process.execPath : 'bash';
+	const fallback = effectiveTsOwner ? SCRIPT_TS_PATH : SCRIPT_PATH;
+	const scriptPath = fs.existsSync(localScript) ? localScript : fallback;
+	const command = effectiveTsOwner ? process.execPath : 'bash';
 	const result = spawnSync(
 		command,
-		useTsOwner ? ['run', scriptPath] : [scriptPath],
+		effectiveTsOwner ? ['run', scriptPath] : [scriptPath],
 		{
 			cwd,
 			encoding: 'utf-8',
@@ -98,17 +97,24 @@ function runCheckInvariants(
 }
 
 function runCheckInvariantsFrom(scriptCwd: string, execCwd: string) {
-	if (isWindows) {
-		throw new Error('bash not available on Windows');
-	}
-	const localScript = path.join(scriptCwd, 'scripts', 'check-invariants.sh');
-	const scriptPath = fs.existsSync(localScript) ? localScript : SCRIPT_PATH;
-	const result = spawnSync('bash', [scriptPath], {
-		cwd: execCwd,
-		encoding: 'utf-8',
-		stdio: ['pipe', 'pipe', 'pipe'],
-		timeout: SPAWN_TIMEOUT_MS,
-	});
+	const effectiveTsOwner = isWindows;
+	const localScript = path.join(
+		scriptCwd,
+		'scripts',
+		effectiveTsOwner ? 'check-invariants.ts' : 'check-invariants.sh',
+	);
+	const fallback = effectiveTsOwner ? SCRIPT_TS_PATH : SCRIPT_PATH;
+	const scriptPath = fs.existsSync(localScript) ? localScript : fallback;
+	const result = spawnSync(
+		effectiveTsOwner ? process.execPath : 'bash',
+		effectiveTsOwner ? ['run', scriptPath] : [scriptPath],
+		{
+			cwd: execCwd,
+			encoding: 'utf-8',
+			stdio: ['pipe', 'pipe', 'pipe'],
+			timeout: SPAWN_TIMEOUT_MS,
+		},
+	);
 
 	return {
 		stdout: result.stdout || '',
@@ -213,7 +219,6 @@ describe('check-invariants.sh', () => {
 	test(
 		'should pass when run on the repo',
 		() => {
-			if (isWindows) return;
 			const result = runCheckInvariantsOnRepo();
 			expect(result.stdout).toContain(
 				'All engineering invariant checks passed',
@@ -226,7 +231,6 @@ describe('check-invariants.sh', () => {
 	test(
 		'should detect missing mock allowlist file',
 		() => {
-			if (isWindows) return;
 			const fixtureDir = canonicalMkdtemp(
 				'check-invariants-missing-allowlist-',
 			);
@@ -261,7 +265,6 @@ describe('check-invariants.sh', () => {
 	test(
 		'resolves the repo root from the script location when invoked from a nested cwd',
 		() => {
-			if (isWindows) return;
 			const fixtureDir = setupFixtureDir('nested-cwd');
 			const nested = path.join(fixtureDir, 'nested', 'deep');
 			fs.mkdirSync(nested, { recursive: true });
@@ -282,7 +285,6 @@ describe('check-invariants.sh', () => {
 	test(
 		'should find process.cwd() violations if they exist',
 		() => {
-			if (isWindows) return;
 			const result = runCheckInvariantsOnRepo();
 			expect(result.stdout).toContain(
 				'Check 2: process.cwd() ban in tools/hooks',
@@ -294,7 +296,6 @@ describe('check-invariants.sh', () => {
 	test(
 		'should validate mock.module targets against allowlist',
 		() => {
-			if (isWindows) return;
 			const result = runCheckInvariantsOnRepo();
 			expect(result.stdout).toContain('Check 3: mock.module allowlist');
 			if (result.exitCode === 0) {
@@ -309,7 +310,6 @@ describe('check-invariants.sh', () => {
 	test(
 		'should handle file-level timeout check correctly',
 		() => {
-			if (isWindows) return;
 			const result = runCheckInvariantsOnRepo();
 			expect(result.stdout).toContain('Check 1: Subprocess timeout required');
 		},
@@ -319,7 +319,6 @@ describe('check-invariants.sh', () => {
 	test(
 		'should run all five checks',
 		() => {
-			if (isWindows) return;
 			const result = runCheckInvariantsOnRepo();
 			expect(result.stdout).toContain('Check 1:');
 			expect(result.stdout).toContain('Check 2:');
@@ -334,7 +333,6 @@ describe('check-invariants.sh', () => {
 	test(
 		'issue #1821: Check 5 knowledge array dedup guardrail reports a clean repo',
 		() => {
-			if (isWindows) return;
 			const result = runCheckInvariantsOnRepo();
 			expect(result.stdout).toContain(
 				'Check 5: knowledge array dedup guardrail',
@@ -358,7 +356,6 @@ describe('check-invariants.sh', () => {
 	test(
 		'issue #1821 F6: Check 5 DETECTS a bare positional cap in the widened scope',
 		() => {
-			if (isWindows) return;
 			const fixtureDir = setupCheck5FixtureDir('detect-slice');
 			// src/knowledge/ is exactly where this diff moved the tag/actionability
 			// merge logic, and exactly what the pre-F4 scope was blind to.
@@ -384,7 +381,6 @@ describe('check-invariants.sh', () => {
 	test(
 		'issue #1821 F6: Check 5 DETECTS a capped string[] accumulator with no dedup',
 		() => {
-			if (isWindows) return;
 			const fixtureDir = setupCheck5FixtureDir('detect-accumulator');
 			// The `>= N … break` spelling both #1821 F2 defects were written in, which
 			// the literal `.slice(0, 20)` pattern is blind to.
@@ -416,7 +412,6 @@ describe('check-invariants.sh', () => {
 	test(
 		'issue #1821 F6: Check 5 passes the CORRECT spellings of both patterns',
 		() => {
-			if (isWindows) return;
 			// Negative controls in the same harness: dedupe-then-truncate and a
 			// seen-Set-guarded accumulator are correct code, and a detector that
 			// flagged them would be traded for a false-positive treadmill.
@@ -456,7 +451,6 @@ describe('check-invariants.sh', () => {
 	test(
 		'issue #1821 F4: Check 5 skips a tree where NO scope entry resolves',
 		() => {
-			if (isWindows) return;
 			// The Check 4 ratchet fixtures build a temp git repo with only `scripts/`
 			// and an empty `src/`. Reporting eight "scope entry resolved to no file"
 			// errors there failed every one of those tests for a repository that has
@@ -482,7 +476,6 @@ describe('check-invariants.sh', () => {
 	test(
 		'issue #1666: Check 4 growth ratchet header is present',
 		() => {
-			if (isWindows) return;
 			const result = runCheckInvariantsOnRepo();
 			// The full Check 4 header is emitted whenever the allowlist file
 			// exists and a base branch resolves (REPO_ROOT always has origin/main).

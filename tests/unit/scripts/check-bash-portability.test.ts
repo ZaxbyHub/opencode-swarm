@@ -109,6 +109,25 @@ describe('check-bash-portability', () => {
 		expect(passing.exitCode).toBe(0);
 	});
 
+	test('FB-001 regression: detects set -u per line without blank-line bleed', () => {
+		const afterBlankLine = evaluateBashPortability([
+			{
+				file: 'scripts/e.sh',
+				content: 'set -e\n\nset -u\nitems=()\nprintf "%s\\n" "${items[@]}"\n',
+			},
+		]);
+		expect(afterBlankLine.exitCode).toBe(1);
+
+		const unrelatedU = evaluateBashPortability([
+			{
+				file: 'scripts/e.sh',
+				content:
+					'set -e\n\nu_token=enabled\nitems=()\nprintf "%s\\n" ${items[@]}\n',
+			},
+		]);
+		expect(unrelatedU.exitCode).toBe(0);
+	});
+
 	test('ignores comment-only mentions of banned constructs', () => {
 		const result = evaluateBashPortability([
 			{

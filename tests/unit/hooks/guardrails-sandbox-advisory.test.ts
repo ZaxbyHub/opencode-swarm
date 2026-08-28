@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, mock } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import * as realExecutor from '../../../src/sandbox/executor';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const warnMock = mock((..._args: unknown[]) => {});
 const originalConsoleWarn = console.warn;
@@ -19,8 +19,8 @@ mock.module('../../../src/sandbox/executor', () => ({
 const { createGuardrailsHooks } = await import('../../../src/hooks/guardrails');
 
 async function waitForFile(filePath: string, timeoutMs = 1_000): Promise<void> {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
+	const start = performance.now();
+	while (performance.now() - start < timeoutMs) {
 		if (fs.existsSync(filePath)) return;
 		await new Promise((resolve) => setTimeout(resolve, 5));
 	}
@@ -46,9 +46,7 @@ describe('guardrails sandbox advisory', () => {
 	});
 
 	it('emits a one-time warning and writes a sandbox skip audit entry when the executor is unavailable', async () => {
-		const tempDir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'guardrails-sandbox-advisory-')),
-		);
+		const tempDir = canonicalMkdtemp('guardrails-sandbox-advisory-');
 
 		process.env.OPENCODE_SWARM_DEBUG = '1';
 		console.warn = warnMock as typeof console.warn;
