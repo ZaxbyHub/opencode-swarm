@@ -352,6 +352,27 @@ export type BackgroundDelegationWorkflowLaneFailureClass =
 	| 'resource'
 	| 'deadline';
 
+/**
+ * Issue #2382: structured, bounded classification of the terminal error that
+ * settled a lane, captured from `classifyLaneTerminalError` at settle time so
+ * downstream consumers (the PR-review resilience circuit) can derive a typed
+ * provider-terminal signal from durable evidence instead of parsing the
+ * bounded display string in `error`.
+ *
+ * Deliberately carries NO message text: `error` remains the display surface.
+ * `kind` mirrors the SDK discriminator semantics (authoritative for the
+ * settled status); `category`/`statusCode`/`hostRetryable` are advisory
+ * provenance from `classifyProviderFailure` / `ApiError.data`.
+ */
+export interface BackgroundDelegationTerminalErrorClass {
+	kind: 'provider' | 'aborted' | 'output_length' | 'unknown';
+	/** Canonical `classifyProviderFailure` category (e.g. `provider.rate_limit`). */
+	category: string;
+	statusCode?: number;
+	/** `ApiError.data.isRetryable` — host-stated, not inferred. */
+	hostRetryable?: boolean;
+}
+
 export interface BackgroundDelegationResult {
 	text?: string;
 	error?: string;
@@ -369,6 +390,15 @@ export interface BackgroundDelegationResult {
 	 * Optional because successful lanes and legacy terminal results have none.
 	 */
 	workflowLaneFailureClass?: BackgroundDelegationWorkflowLaneFailureClass;
+	/**
+	 * Issue #2382: typed terminal-error classification captured at settle time
+	 * (see {@link BackgroundDelegationTerminalErrorClass}). Optional because only
+	 * lanes settled from a real child run with a classified terminal error carry
+	 * it; successful, cancelled, stale, and legacy records have none. Present in
+	 * the `.strict()` ResultSchema below in the same edit — an undeclared field
+	 * here would make whole records invisible to `readDelegations`.
+	 */
+	terminalErrorClass?: BackgroundDelegationTerminalErrorClass;
 	/**
 	 * Workflow lanes whose discovery artifact was accepted only after repair — a
 	 * synthesized canonical header, or valid rows retained beside malformed ones.
@@ -511,6 +541,17 @@ const ResultSchema = z
 		messageCount: z.number().optional(),
 		workflowLaneFailureClass: z
 			.enum(['contract', 'resource', 'deadline'])
+			.optional(),
+		// Issue #2382: must be declared here (schema is .strict()) — see the
+		// interface comment and the parity guard below this schema.
+		terminalErrorClass: z
+			.object({
+				kind: z.enum(['provider', 'aborted', 'output_length', 'unknown']),
+				category: z.string().min(1).max(128),
+				statusCode: z.number().int().optional(),
+				hostRetryable: z.boolean().optional(),
+			})
+			.strict()
 			.optional(),
 		// Must be declared here: this schema is .strict() and readDelegations
 		// safeParse-skips any record it rejects, so an undeclared field would make

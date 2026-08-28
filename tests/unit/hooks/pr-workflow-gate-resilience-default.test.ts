@@ -81,6 +81,8 @@ describe('PR-review staged resilience default on the gate path (#2381)', () => {
 				DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.correlated_failure_threshold,
 			maxRetryAttemptsAfterInitial:
 				DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.max_retry_attempts_after_initial,
+			circuitOpenDurationMs:
+				DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.circuit_open_duration_ms,
 		});
 	});
 });
