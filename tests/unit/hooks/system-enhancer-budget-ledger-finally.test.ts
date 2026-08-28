@@ -36,9 +36,9 @@ import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import * as realExtractors from '../../../src/hooks/extractors.js';
 import {
-	clearUnifiedBudget,
-	getSystemEnhancerDemand,
-	getUnifiedBudgetTotal,
+	clearTurnLedger,
+	getProducerEmission,
+	getTurnLedgerSummary,
 } from '../../../src/services/injection-budget.js';
 import { resetSwarmState } from '../../../src/state.js';
 
@@ -110,12 +110,12 @@ describe('system-enhancer budget ledger — unconditional write on mid-turn thro
 		);
 		fs.writeFileSync(path.join(swarmDir, 'context.md'), '# Context\n');
 		resetSwarmState();
-		clearUnifiedBudget(sessionID);
+		clearTurnLedger(sessionID);
 	});
 
 	afterEach(() => {
 		fs.rmSync(tempDir, { recursive: true, force: true });
-		clearUnifiedBudget(sessionID);
+		clearTurnLedger(sessionID);
 	});
 
 	it('writes the actual injected demand to the ledger even when the hook throws after injection', async () => {
@@ -156,16 +156,16 @@ describe('system-enhancer budget ledger — unconditional write on mid-turn thro
 			false,
 		);
 
-		// FR-004 assertion: despite the mid-turn throw, the ledger reflects
-		// the REAL demand accumulated up to the throw point — not the
-		// fail-open-to-0 default getSystemEnhancerDemand() returns for a
+		// FR-004/#2107 §2 assertion: despite the mid-turn throw, the ledger
+		// reflects the REAL demand accumulated up to the throw point — not the
+		// fail-open-to-0 default getProducerEmission() returns for a
 		// missing/stale entry.
-		const recordedDemand = getSystemEnhancerDemand(sessionID);
+		const recordedDemand = getProducerEmission(sessionID, 'system-enhancer');
 		expect(recordedDemand).toBeGreaterThan(0);
 
-		// And resetUnifiedBudget() actually ran with the configured ceiling —
+		// And beginTurnLedger() actually ran with the configured ceiling —
 		// proving a ledger entry exists at all, not merely that
-		// getSystemEnhancerDemand's default happens to be non-zero.
-		expect(getUnifiedBudgetTotal(sessionID)).toBe(unifiedBudget);
+		// getProducerEmission's default happens to be non-zero.
+		expect(getTurnLedgerSummary(sessionID)?.totalBudget).toBe(unifiedBudget);
 	});
 });

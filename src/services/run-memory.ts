@@ -8,7 +8,12 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import { sanitizeContextText } from '../hooks/context-sanitizer.js';
-import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
+import {
+	estimateCharsForTokens,
+	estimateTokens,
+	readSwarmFileAsync,
+	validateSwarmPath,
+} from '../hooks/utils';
 import { warn } from '../utils/logger.js';
 import { validateWorkspaceRoot } from '../utils/path-security';
 
@@ -364,10 +369,8 @@ export async function getRunMemorySummary(
 	let summaryText = summaries.join('\n');
 
 	// Estimate tokens including prefix + content + suffix
-	const estimateTokens = (text: string): number => {
-		return Math.ceil(text.length * 0.33);
-	};
-
+	// (canonical estimator from src/hooks/utils.ts — issue #1616/#2107; this
+	// closure previously duplicated the ratio inline)
 	// Cap at MAX_SUMMARY_TOKENS - include prefix/suffix in token budget
 	const totalText = prefix + summaryText + suffix;
 	const estimatedTokens = estimateTokens(totalText);
@@ -381,7 +384,7 @@ export async function getRunMemorySummary(
 
 		if (availableContentTokens > 0) {
 			// Calculate how many characters we can fit
-			const maxContentChars = Math.floor(availableContentTokens / 0.33);
+			const maxContentChars = estimateCharsForTokens(availableContentTokens);
 			// Truncate content
 			summaryText = summaryText.slice(0, maxContentChars);
 		} else {

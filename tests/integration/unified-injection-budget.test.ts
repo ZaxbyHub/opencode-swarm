@@ -23,10 +23,10 @@ import { createKnowledgeInjectorHook } from '../../src/hooks/knowledge-injector.
 import { createSystemEnhancerHook } from '../../src/hooks/system-enhancer.js';
 import {
 	allocateInjectionBudget,
-	clearUnifiedBudget,
+	beginTurnLedger,
+	clearTurnLedger,
 	type InjectionBudgetConfig,
-	resetUnifiedBudget,
-	setSystemEnhancerDemand,
+	recordProducerEmission,
 } from '../../src/services/injection-budget.js';
 import { resetSwarmState, swarmState } from '../../src/state.js';
 import { canonicalMkdtemp } from '../helpers/tmpdir.js';
@@ -173,7 +173,7 @@ describe('Unified injection budget integration (FR-002)', () => {
 
 	afterEach(() => {
 		fs.rmSync(tempDir, { recursive: true, force: true });
-		clearUnifiedBudget('test-session');
+		clearTurnLedger('test-session');
 	});
 
 	// -----------------------------------------------------------------------
@@ -269,8 +269,14 @@ describe('Unified injection budget integration (FR-002)', () => {
 		// Seed the shared ledger with a real system-enhancer demand that alone
 		// exceeds the ceiling. This isolates the cross-hook budget contract from
 		// unrelated system-enhancer content-selection heuristics.
-		resetUnifiedBudget('test-session', unifiedBudget);
-		setSystemEnhancerDemand('test-session', unifiedBudget + 1);
+		beginTurnLedger('test-session', unifiedBudget, true);
+		recordProducerEmission(
+			'test-session',
+			'system-enhancer',
+			unifiedBudget + 1,
+			0,
+			'system',
+		);
 
 		// knowledge-injector runs after system-enhancer
 		const kiHook = createKnowledgeInjectorHook(

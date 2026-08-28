@@ -36,6 +36,7 @@ import {
 	createSkillImproverLLMDelegate,
 	type SkillImproverLLMDelegate,
 } from '../hooks/skill-improver-llm-factory.js';
+import { estimateTokens } from '../hooks/utils';
 import {
 	computeWriteApprovalHash,
 	consumeWriteApprovalFact,
@@ -258,8 +259,11 @@ type SkillImproverApprovalPreparation =
 	| { kind: 'result'; result: SkillImproveResult }
 	| { kind: 'prepared'; prepared: PreparedSkillImproverApprovalCandidate };
 
+// Canonical estimator (src/hooks/utils.ts — issue #1616/#2107), floored at 1
+// for approval-candidate budget math. Previously an independent length/4 ratio
+// that underestimated tokens ~24% relative to every other path.
 function estimateTokenCount(content: string): number {
-	return Math.max(1, Math.ceil(content.length / 4));
+	return Math.max(1, estimateTokens(content));
 }
 
 function toApprovalPath(directory: string, targetPath: string): string {

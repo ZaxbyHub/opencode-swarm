@@ -988,6 +988,27 @@ export const swarmState = {
 	lastBudgetBySession: new Map<string, { pct: number; tokens: number }>(),
 
 	/**
+	 * Final model-visible prompt pressure per session (#2107 §3) — the ONE
+	 * truthful measurement taken after every injector has run and the system
+	 * messages have been consolidated. Unlike `lastBudgetBySession` (the swarm
+	 * INJECTION FOOTPRINT pct measured from an intermediate file surface),
+	 * this is estimated total prompt tokens vs the same model limit physical
+	 * pruning uses. Written by the final-context-accounting step; read by the
+	 * compaction tiers, the CONTEXT PRESSURE advisory, and `/swarm status`.
+	 * Bounded via {@link setFinalPromptPressure} (AGENTS.md invariant 8).
+	 */
+	finalPromptPressureBySession: new Map<
+		string,
+		{
+			pct: number;
+			usedTokens: number;
+			limitTokens: number;
+			estimatorSource: string;
+			providerReported: boolean;
+		}
+	>(),
+
+	/**
 	 * Live `model.limit.context` per session — keyed by sessionID and bound to
 	 * the reporting model/provider identity. Recorded by the
 	 * `experimental.chat.system.transform` hook (the only hook the host
@@ -1024,6 +1045,7 @@ export function resetSwarmState(): void {
 	swarmState.delegationChains.clear();
 	swarmState.pendingEvents = 0;
 	swarmState.lastBudgetBySession.clear();
+	swarmState.finalPromptPressureBySession.clear();
 	swarmState.liveContextWindows.clear();
 	swarmState.agentSessions.clear();
 	// Reset the opportunistic idle-sweep cooldown so a fresh process / test run
@@ -3881,6 +3903,54 @@ export function setSessionBudget(
 	}
 }
 
+/**
+ * Record this session's final prompt pressure (#2107 " + chr(167) + "3), FIFO-evicting the
+ *  oldest entry past {@link MAX_TRACKED_BUDGET_SESSIONS}. Written once per request
+ *  composition by the final-context-accounting step.
+ */
+export function setFinalPromptPressure(
+	sessionID: string,
+	snapshot: {
+		pct: number;
+		usedTokens: number;
+		limitTokens: number;
+		estimatorSource: string;
+		providerReported: boolean;
+	},
+): void {
+	const map = swarmState.finalPromptPressureBySession;
+	if (map.has(sessionID)) map.delete(sessionID);
+	map.set(sessionID, snapshot);
+	if (map.size > MAX_TRACKED_BUDGET_SESSIONS) {
+		const oldest = map.keys().next().value;
+		if (oldest !== undefined && oldest !== sessionID) {
+			map.delete(oldest);
+		}
+	}
+}
+
+/** The session's final prompt pressure snapshot, or undefined when the final
+ *  accounting step has not run for it (e.g. native-agent sessions). */
+export function getFinalPromptPressure(sessionID: string | undefined):
+	| {
+			pct: number;
+			usedTokens: number;
+			limitTokens: number;
+			estimatorSource: string;
+			providerReported: boolean;
+	  }
+	| undefined {
+	if (!sessionID) return undefined;
+	return swarmState.finalPromptPressureBySession.get(sessionID);
+}
+
+/** Convenience: final prompt pressure pct, or 0 when not yet measured. */
+export function getFinalPromptPressurePct(
+	sessionID: string | undefined,
+): number {
+	return getFinalPromptPressure(sessionID)?.pct ?? 0;
+}
+
 /** This session's last budget percentage, or 0 if it has not been measured.
  *  Consumers that ACT on a session (compaction, the context-pressure advisory)
  *  MUST use this rather than any cross-session aggregate. */
@@ -3903,6 +3973,34 @@ export function getSessionBudgetTokens(sessionID: string | undefined): number {
 export function getDisplayBudget(): { pct: number; tokens: number } | null {
 	let best: { pct: number; tokens: number } | null = null;
 	for (const entry of swarmState.lastBudgetBySession.values()) {
+		if (entry.pct > 0 && (best === null || entry.pct > best.pct)) {
+			best = entry;
+		}
+	}
+	return best;
+}
+
+/**
+ * The most-pressured session's FINAL prompt pressure snapshot, for
+ * process-wide DISPLAY only (`/swarm status` has no single session in scope).
+ * The snapshot is returned whole so the pct, used tokens, limit, and estimator
+ * source shown together always come from one measurement (#2107 " + chr(167) + "3).
+ */
+export function getDisplayFinalPromptPressure(): {
+	pct: number;
+	usedTokens: number;
+	limitTokens: number;
+	estimatorSource: string;
+	providerReported: boolean;
+} | null {
+	let best: {
+		pct: number;
+		usedTokens: number;
+		limitTokens: number;
+		estimatorSource: string;
+		providerReported: boolean;
+	} | null = null;
+	for (const entry of swarmState.finalPromptPressureBySession.values()) {
 		if (entry.pct > 0 && (best === null || entry.pct > best.pct)) {
 			best = entry;
 		}

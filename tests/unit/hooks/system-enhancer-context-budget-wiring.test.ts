@@ -13,9 +13,11 @@
  * project root with `validateProjectDirectory`, so the budget check is ENABLED
  * in every test below and each assertion is on real hook output.
  *
- * Budget arithmetic here is deliberate: `estimateTokens` is chars/3.5, and the
- * seeded system prompt dominates the few hundred tokens the enhancer injects,
- * so the resulting percentage is stable without pinning an exact value.
+ * Budget arithmetic here is deliberate: `estimateTokens` is the canonical
+ * 0.33 tok/char estimator (#2107/#1616 migration — this fixture previously
+ * assumed the independent /3.5 formula), and the seeded system prompt
+ * dominates the few hundred tokens the enhancer injects, so the resulting
+ * percentage is stable without pinning an exact value.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -34,8 +36,8 @@ import {
 const SESSION = 'test-session';
 
 const BUDGET_TOKENS = 100_000;
-/** chars = tokens * 3.5 */
-const promptOf = (tokens: number) => 'x'.repeat(tokens * 3.5);
+/** chars for an exact token count under the canonical 0.33 ratio. */
+const promptOf = (tokens: number) => 'x'.repeat(Math.ceil(tokens / 0.33));
 
 const OK_PROMPT = promptOf(10_000); // 10% of budget
 const WARNING_PROMPT = promptOf(80_000); // 80% — between warn (70) and critical (90)

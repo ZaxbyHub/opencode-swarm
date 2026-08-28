@@ -7,15 +7,21 @@
  *  - Reflection  (default 60%): re-summarise into tighter format
  *  - Emergency   (default 80%): hard truncation to system + current task + last N turns
  *
- * Consumes the per-session budget pct recorded by system-enhancer.ts after
- * each budget calc (`getSessionBudgetPct`).
- * Never throws. Advisory system message injection via callback.
+ * Consumes the per-session FINAL PROMPT PRESSURE recorded by the final
+ * context-accounting step (#2107 " + chr(167) + "3) after every injector has run
+ * (`getFinalPromptPressure`); before that step has run for a session it falls
+ * back to the legacy injection-footprint pct (`getSessionBudgetPct`) so the
+ * tiers never go dark.
+ * Never throws. Advisory system message injection via callback. These tiers
+ * ADVISE the model to compact " + chr(8212) + " they never compact anything themselves and
+ * never claim a compaction was performed (only the physical pruning in
+ * src/hooks/context-budget.ts actually removes content).
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { CompactionConfig } from '../config/schema';
-import { getSessionBudgetPct } from '../state';
+import { getFinalPromptPressure, getSessionBudgetPct } from '../state';
 export type { CompactionConfig };
 
 // ── Compaction state (module-level, resets on plugin reload) ─────────────────
@@ -93,8 +99,8 @@ function appendSnapshot(
 
 function buildObservationMessage(budgetPct: number): string {
 	return (
-		`[CONTEXT COMPACTION — OBSERVATION TIER]\n` +
-		`Context window is ${budgetPct.toFixed(1)}% used. Initiating observation compaction.\n` +
+		`[CONTEXT COMPACTION ADVISORY — OBSERVATION TIER]\n` +
+		`Estimated prompt pressure is ~${budgetPct.toFixed(1)}% of the model window. Consider compacting now (advisory — nothing has been compacted yet).\n` +
 		`INSTRUCTIONS: Summarise the key decisions made so far, files changed, errors resolved, ` +
 		`and the current task state. Discard verbose tool outputs and raw file reads. ` +
 		`Preserve: plan task ID, agent verdicts, file paths touched, unresolved blockers.\n` +
@@ -104,8 +110,8 @@ function buildObservationMessage(budgetPct: number): string {
 
 function buildReflectionMessage(budgetPct: number): string {
 	return (
-		`[CONTEXT COMPACTION — REFLECTION TIER]\n` +
-		`Context window is ${budgetPct.toFixed(1)}% used. Initiating reflection compaction.\n` +
+		`[CONTEXT COMPACTION ADVISORY — REFLECTION TIER]\n` +
+		`Estimated prompt pressure is ~${budgetPct.toFixed(1)}% of the model window. Consider compacting now (advisory — nothing has been compacted yet).\n` +
 		`INSTRUCTIONS: Re-summarise into a tighter format. Discard completed task details ` +
 		`and resolved errors. Retain ONLY: current phase tasks remaining, open blockers, ` +
 		`last 3 reviewer/test verdicts, and active file scope.\n` +
@@ -118,8 +124,8 @@ function buildEmergencyMessage(
 	preserveLastN: number,
 ): string {
 	return (
-		`[CONTEXT COMPACTION — EMERGENCY TIER]\n` +
-		`Context window is ${budgetPct.toFixed(1)}% used. EMERGENCY compaction required.\n` +
+		`[CONTEXT COMPACTION ADVISORY — EMERGENCY TIER]\n` +
+		`Estimated prompt pressure is ~${budgetPct.toFixed(1)}% of the model window. Consider compacting immediately (advisory — nothing has been compacted yet).\n` +
 		`INSTRUCTIONS: Retain ONLY the system prompt, the current task context, and the ` +
 		`last ${preserveLastN} conversation turns. Discard everything else. ` +
 		`If you cannot complete the current task in the remaining context, escalate to the user.\n` +
@@ -145,10 +151,14 @@ export function createCompactionService(
 		toolAfter: async (_input, _output) => {
 			if (!config.enabled) return;
 
-			// Read last known budget from swarmState (set by system-enhancer)
+			// Read the session's final prompt pressure (set by the final
+			// context-accounting step after all injectors ran); fall back to the
+			// legacy injection-footprint pct before that step has run.
 			// Per-session: another session's pressure must never trigger compaction
 			// here (AGENTS.md invariant 8).
-			const budgetPct = getSessionBudgetPct(_input.sessionID);
+			const budgetPct =
+				getFinalPromptPressure(_input.sessionID)?.pct ??
+				getSessionBudgetPct(_input.sessionID);
 			if (budgetPct <= 0) return; // No budget data yet
 
 			const sessionId = _input.sessionID;

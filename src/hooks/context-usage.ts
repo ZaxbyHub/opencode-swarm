@@ -1,4 +1,4 @@
-import { estimateTokens } from './utils';
+import { estimateTokens, estimateTokensFromCharCount } from './utils';
 
 const MAX_TOOL_INPUT_DEPTH = 4;
 const MAX_TOOL_INPUT_COLLECTION_ITEMS = 20;
@@ -465,6 +465,11 @@ function estimateToolInputCharacters(
 		}
 
 		if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
+			// NOT a char→token estimation: this is a conservative
+			// serialization-size heuristic for binary tool input (a binary
+			// payload's worst-case JSON-escaped char cost). It is deliberately
+			// exempt from the canonical estimator and allowlisted in
+			// scripts/check-invariants.ts's inline-token-formula check.
 			const byteLength = value.byteLength;
 			return Math.max(
 				byteLength * 4,
@@ -500,8 +505,8 @@ function estimateToolInputCharacters(
 
 export function estimateToolInputTokens(input: unknown): number {
 	try {
-		return Math.ceil(
-			estimateToolInputCharacters(input, 0, new WeakSet<object>()) * 0.33,
+		return estimateTokensFromCharCount(
+			estimateToolInputCharacters(input, 0, new WeakSet<object>()),
 		);
 	} catch {
 		return estimateTokens('"[Unserializable]"');

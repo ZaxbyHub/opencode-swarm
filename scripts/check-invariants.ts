@@ -727,6 +727,99 @@ export function checkRawAdvisoryPush(repoRoot: string): CheckResult {
 	return { messages, violations: 0 };
 }
 
+/**
+ * Inline char/token formula check (#2107 §1 / #1616): production source must
+ * not contain NEW inline char-to-token (or token-to-char) estimation formulas.
+ * Every conversion routes through the canonical estimator in
+ * src/hooks/utils.ts (estimateTokens / estimateTokensFromCharCount /
+ * estimateCharsForTokens). The detector is line-scoped and code-shaped: a line
+ * is flagged only when it contains a Math rounding call AND a known conversion
+ * ratio AND a token/char context token. File-level exemptions below each carry
+ * a justification and are the complete allowlist.
+ */
+const CANONICAL_TOKEN_ESTIMATOR_MODULE = 'src/hooks/utils.ts';
+
+const INLINE_TOKEN_FORMULA_ALLOWLIST: ReadonlyArray<{
+	file: string;
+	reason: string;
+}> = [
+	{
+		file: 'src/hooks/context-usage.ts',
+		reason: 'binary serialization-size heuristic in estimateToolInputCharacters '
+			+ '(byteLength * 4 worst-case JSON-escaped char cost) — NOT a char→token '
+			+ 'estimation; the module otherwise imports the canonical estimator.',
+	},
+];
+
+const TOKEN_FORMULA_RATIO_RE =
+	/(?:0\.33|\/\s*3\.5|\/\s*0\.33|\/\s*4(?![\d.])|\*\s*4(?![\d.]))/;
+const TOKEN_FORMULA_CONTEXT_RE = /[Tt]oken|[Cc]har/;
+const TOKEN_FORMULA_SHAPE_RE = /Math\.(?:ceil|floor|max| min)\s*\(/;
+
+/** Pure detector over one file's lines (exported for unit tests). */
+export function findInlineTokenFormulaViolations(
+	rel: string,
+	lines: readonly string[],
+): Array<{ lineNo: number; line: string }> {
+	if (rel === CANONICAL_TOKEN_ESTIMATOR_MODULE) return [];
+	if (
+		INLINE_TOKEN_FORMULA_ALLOWLIST.some((entry) => entry.file === rel)
+	) {
+		return [];
+	}
+	const hits: Array<{ lineNo: number; line: string }> = [];
+	lines.forEach((line, index) => {
+		// Cheap pre-filters first.
+		if (!TOKEN_FORMULA_CONTEXT_RE.test(line)) return;
+		if (!TOKEN_FORMULA_SHAPE_RE.test(line)) return;
+		if (!TOKEN_FORMULA_RATIO_RE.test(line)) return;
+		hits.push({ lineNo: index + 1, line });
+	});
+	return hits;
+}
+
+export function checkInlineTokenFormula(repoRoot: string): CheckResult {
+	const messages = [
+		'=== Check 7: no inline char/token formulas outside the canonical estimator (#1616/#2107) ===',
+	];
+	let violationFiles = 0;
+	const details: string[] = [];
+	const files = listFiles(path.join(repoRoot, 'src'), {
+		extensions: ['.ts'],
+		excludeDirs: new Set(['dist', 'node_modules', '__tests__']),
+	});
+	for (const file of files) {
+		const rel = toPosixRelative(repoRoot, file);
+		if (rel.endsWith('.test.ts') || rel.endsWith('.d.ts')) {
+			continue;
+		}
+		const lines = readText(file).split(/\r?\n/);
+		const violations = findInlineTokenFormulaViolations(rel, lines);
+		if (violations.length === 0) continue;
+		violationFiles++;
+		for (const hit of violations) {
+			details.push(`  ${rel}:${hit.lineNo}:${hit.line.trim()}`);
+		}
+	}
+	if (violationFiles > 0) {
+		messages.push(
+			'ERROR: inline char/token conversion formula(s) found. All char↔token',
+		);
+		messages.push(
+			'       math must route through src/hooks/utils.ts (estimateTokens,',
+		);
+		messages.push(
+			'       estimateTokensFromCharCount, estimateCharsForTokens).',
+		);
+		messages.push(`Violations:\n${details.join('\n')}`);
+		return { messages, violations: 1 };
+	}
+	messages.push(
+		`OK — ${INLINE_TOKEN_FORMULA_ALLOWLIST.length} justified allowlist entr${INLINE_TOKEN_FORMULA_ALLOWLIST.length === 1 ? 'y' : 'ies'}; no inline formulas.`,
+	);
+	return { messages, violations: 0 };
+}
+
 export async function main(startDir: string = process.cwd()): Promise<number> {
 	const repoRoot = await resolveRepoRoot(startDir);
 	let violations = 0;
@@ -744,6 +837,7 @@ export async function main(startDir: string = process.cwd()): Promise<number> {
 			],
 			violations: advisory.violations,
 		},
+		checkInlineTokenFormula(repoRoot),
 	];
 
 	for (const output of outputs) {
@@ -763,7 +857,10 @@ export async function main(startDir: string = process.cwd()): Promise<number> {
 		'            3 (mock.module allowlist) | 4 (allowlist growth ratchet) |',
 	);
 	console.log(
-		'            5 (knowledge array dedup guardrail) | 6 (advisory-injection ratchet)',
+		'            5 (knowledge array dedup guardrail) | 6 (advisory-injection ratchet) |',
+	);
+	console.log(
+		'            7 (inline char/token formula ban, #1616/#2107)',
 	);
 	if (violations > 0) {
 		console.log(`${violations} invariant violation(s) found.`);

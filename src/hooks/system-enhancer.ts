@@ -223,8 +223,9 @@ import {
 } from '../services';
 import {
 	allocateInjectionBudget,
-	resetUnifiedBudget,
-	setSystemEnhancerDemand,
+	beginTurnLedger,
+	recordProducerEmission,
+	recordProducerGrant,
 } from '../services/injection-budget.js';
 import { telemetry } from '../telemetry';
 import { _internals as coChangeInternals } from '../tools/co-change-analyzer.js';
@@ -696,14 +697,13 @@ export function createSystemEnhancerHook(
 				output: { system: string[] },
 			): Promise<void> => {
 				// FR-004: hoisted above the try/catch so the finally block below
-				// can always write the actual injected demand to the unified
-				// budget ledger, even if an exception is thrown after injection
+				// can always write the actual injected demand to the turn
+				// ledger, even if an exception is thrown after injection
 				// has already mutated output.system but before the normal
-				// finalize call sites (Path A / Path B) are reached. Without
-				// this, a mid-turn throw silently skips the ledger write and
-				// getSystemEnhancerDemand() fails open to 0 on the next read,
-				// letting combined injected tokens exceed a configured
-				// unified_injection_tokens ceiling.
+				// exit is reached. Without this, a mid-turn throw silently
+				// skips the ledger write and getProducerEmission() fails open
+				// to 0 on the next read, letting combined injected tokens
+				// exceed a configured unified_injection_tokens ceiling.
 				let actualDemand = 0;
 				let unifiedBudget: number | undefined;
 				// The live context window for THIS turn's model. This hook is the
@@ -793,6 +793,23 @@ export function createSystemEnhancerHook(
 					const maxInjectionTokens =
 						config.context_budget?.max_injection_tokens ?? 4000;
 					let injectedTokens = 0;
+
+					// FR-002 / #2107 §2: begin the per-turn producer ledger exactly
+					// once per request composition, BEFORE any injection. Ceiling
+					// enforcement is only active when unified_injection_tokens is
+					// configured; otherwise the ledger records accounting only and
+					// default-config behavior is unchanged. The system-enhancer is
+					// the first producer in the system.transform chain, so every
+					// later producer (capsule, banner — same chain; memory, advisory
+					// drain, knowledge — messages chain) claims against this ledger.
+					if (_input.sessionID) {
+						beginTurnLedger(
+							_input.sessionID,
+							config.context_budget?.unified_injection_tokens ??
+								maxInjectionTokens,
+							config.context_budget?.unified_injection_tokens !== undefined,
+						);
+					}
 
 					// FR-002: unified injection budget — use pure allocation so
 					// system-enhancer (system.transform) and knowledge-injector
@@ -1868,14 +1885,14 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 						// Finalize unified budget for Path A (non-scoring).
 						// Recompute seAllocation from actual demand so knowledge-injector
 						// sees the real system-enhancer demand (not the legacy 4K max).
+						// (Ledger emission is recorded once in the finally block below —
+						// this early return still flows through it.)
 						if (unifiedBudget !== undefined && _input.sessionID) {
 							const totalDemand = actualDemand; // Path A has no late candidates
 							const allocation = allocateInjectionBudget(totalDemand, 0, {
 								totalBudgetTokens: unifiedBudget,
 							});
 							seAllocation = allocation.systemEnhancerTokens;
-							resetUnifiedBudget(_input.sessionID, unifiedBudget);
-							setSystemEnhancerDemand(_input.sessionID, totalDemand);
 						} else {
 							// Unified budget not configured; legacy caps apply.
 						}
@@ -2743,27 +2760,44 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 
 					// Finalize unified budget for Path B (scoring).
 					// Path B may have late candidates; use the full actualDemand.
+					// (Ledger emission is recorded once in the finally block below.)
 					if (unifiedBudget !== undefined && _input.sessionID) {
 						const totalDemand = actualDemand;
 						const allocation = allocateInjectionBudget(totalDemand, 0, {
 							totalBudgetTokens: unifiedBudget,
 						});
 						seAllocation = allocation.systemEnhancerTokens;
-						resetUnifiedBudget(_input.sessionID, unifiedBudget);
-						setSystemEnhancerDemand(_input.sessionID, totalDemand);
 					}
 				} catch (error) {
 					warn('System enhancer failed:', error);
 				} finally {
-					// FR-004: guarantee the unified budget ledger reflects the actual
-					// injected demand for this turn even if the try block above threw
-					// after tryInject() already mutated output.system but before either
-					// the Path A or Path B finalize call sites were reached. Runs on
-					// every exit (normal return, Path A's early return, or exception)
-					// so knowledge-injector never reads a stale/absent demand entry.
-					if (unifiedBudget !== undefined && _input.sessionID) {
-						resetUnifiedBudget(_input.sessionID, unifiedBudget);
-						setSystemEnhancerDemand(_input.sessionID, actualDemand);
+					// FR-004 / #2107 §2: record the system-enhancer's actual emitted
+					// tokens into the turn ledger exactly once, on EVERY exit path
+					// (normal return, Path A's early return, or exception), so the
+					// knowledge-injector and the final accounting step never read a
+					// stale/absent producer entry. The emitted amount includes the
+					// context-budget warning text when one was injected (it is
+					// counted into actualDemand at its push site).
+					if (_input.sessionID) {
+						// Book the SE's allocator-derived grant into the shared
+						// ceiling (no-op deduction when the ceiling is inactive),
+						// then record what was actually emitted. actualDemand is
+						// capped at seAllocation by tryInject, so the grant never
+						// exceeds the SE's FR-002 share.
+						recordProducerGrant(
+							_input.sessionID,
+							'system-enhancer',
+							actualDemand,
+							actualDemand,
+							'system',
+						);
+						recordProducerEmission(
+							_input.sessionID,
+							'system-enhancer',
+							actualDemand,
+							0,
+							'system',
+						);
 					}
 				}
 			},

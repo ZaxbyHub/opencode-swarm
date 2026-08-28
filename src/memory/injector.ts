@@ -8,6 +8,10 @@ import { stripKnownSwarmPrefix } from '../config/schema';
 import type { MessageWithParts } from '../hooks/knowledge-types';
 import { normalizeToolName } from '../hooks/normalize-tool-name';
 import { validateSwarmPath } from '../hooks/utils';
+import {
+	claimTurnBudget,
+	recordProducerEmission,
+} from '../services/injection-budget';
 import { type MemoryConfig, resolveMemoryConfig } from './config';
 import type {
 	MemoryGateway,
@@ -105,6 +109,24 @@ async function injectIntoMessages(
 	// orchestrator session, not the subagent), so recall degrades to
 	// session-scoped runId — the intended graceful degrade.
 	const unitId = options.getActiveTaskId?.(sessionID);
+	// #2107 §2 / #1617: claim the recall block's allocation from the shared
+	// per-turn injection ledger (begun by system-enhancer in the
+	// system.transform chain of this request) and feed the GRANTED amount into
+	// the greedy packer (it replaces the static tokenBudget default of 1000).
+	// When no ledger exists, fail open to the configured local budget and
+	// report that the unified hard ceiling was unavailable.
+	const localTokenBudget = resolveMemoryConfig(options.config).recall.injection
+		.tokenBudget;
+	const claim = claimTurnBudget(
+		sessionID ?? '',
+		'memory-recall',
+		localTokenBudget,
+		{
+			localMaxTokens: localTokenBudget,
+			surface: 'messages',
+		},
+	);
+	const grantedTokenBudget = claim.granted;
 	const result = await recallForAgent({
 		directory: options.directory,
 		config: options.config,
@@ -114,6 +136,7 @@ async function injectIntoMessages(
 		userGoal: latestUserText,
 		agentTask,
 		unitId,
+		tokenBudgetOverride: grantedTokenBudget,
 		createGateway: internals.createGateway,
 		appendRunLog: internals.appendRunLog,
 	});
@@ -138,6 +161,16 @@ async function injectIntoMessages(
 		parts: [{ type: 'text', text: result.bundle.promptBlock }],
 	};
 	messages.splice(insertAt, 0, recallMessage);
+	// #2107 §2: record what actually reached the model-visible surface. This is
+	// a messages-surface producer — final accounting measures it directly, so
+	// this entry is attribution-only and is never added to the measured total.
+	recordProducerEmission(
+		sessionID ?? '',
+		'memory-recall',
+		result.bundle.tokenEstimate,
+		Math.max(0, grantedTokenBudget - result.bundle.tokenEstimate),
+		'messages',
+	);
 	await internals.appendRunLog(options.directory, sessionID, {
 		event: 'prompt_injected',
 		runId: sessionID ?? 'unknown',
@@ -312,6 +345,8 @@ async function recallForAgent(input: {
 	userGoal: string;
 	agentTask: string;
 	unitId?: string;
+	/** Ledger-granted token budget (#2107 §2); when omitted the configured default applies. */
+	tokenBudgetOverride?: number;
 	createGateway: RequiredInternals['createGateway'];
 	appendRunLog: RequiredInternals['appendRunLog'];
 }): Promise<{ bundle: RecallBundle; scopes: MemoryScopeRef[] } | null> {
@@ -347,7 +382,8 @@ async function recallForAgent(input: {
 		};
 		const plan = buildMemoryRecallPlan(planInput, { scopes });
 		plan.maxItems = resolvedConfig.recall.injection.maxItems;
-		plan.tokenBudget = resolvedConfig.recall.injection.tokenBudget;
+		plan.tokenBudget =
+			input.tokenBudgetOverride ?? resolvedConfig.recall.injection.tokenBudget;
 		await input.appendRunLog(input.directory, input.sessionID, {
 			event: 'recall_requested',
 			runId: input.sessionID ?? 'unknown',

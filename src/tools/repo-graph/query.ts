@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { estimateTokens } from '../../hooks/utils';
 import {
 	containsControlChars,
 	containsPathTraversal,
@@ -726,11 +727,12 @@ export function getLocalizationContext(
 	};
 }
 
-// Deterministic source-text token estimate. Same formula as
-// estimateTokens in src/services/context-budget-service.ts; kept local so the
-// query layer does not inherit the service module's dependency web.
+// Deterministic source-text token estimate via the canonical estimator
+// (src/hooks/utils.ts — issue #1616/#2107). This was an independent /3.5 copy
+// of the budget-service formula, so repo-graph summaries silently disagreed
+// with every other measurement of the same text.
 function estimateTextTokens(text: string): number {
-	return Math.ceil(text.length / 3.5);
+	return estimateTokens(text);
 }
 
 // Signature extraction (issue #1533). Deterministic, language-agnostic:
