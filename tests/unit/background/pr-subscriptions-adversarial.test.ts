@@ -15,6 +15,9 @@ import {
 	unsubscribe,
 	updateSnapshot,
 } from '../../../src/background/pr-subscriptions';
+import { freezeClock } from '../../helpers/test-clock.js';
+
+const FROZEN_NOW = 1_780_000_000_000;
 
 function makeTempProject(): string {
 	const dir = fs.realpathSync(
@@ -55,6 +58,7 @@ function legacyRecord(suffix: string) {
 
 describe('pr-subscriptions — adversarial persistence regressions (#2042)', () => {
 	let dir: string;
+	let restoreClock: (() => void) | null = null;
 	const realReadSync = _internals.readSync;
 	const realAfterCheckpointFstat = _internals.afterCheckpointFstat;
 	const realBeforeArchiveLegacy = _internals.beforeArchiveLegacy;
@@ -64,10 +68,13 @@ describe('pr-subscriptions — adversarial persistence regressions (#2042)', () 
 	const realWriteCheckpointFile = _internals.writeCheckpointFile;
 
 	beforeEach(() => {
+		restoreClock = freezeClock({ fixedNow: FROZEN_NOW });
 		dir = makeTempProject();
 	});
 
 	afterEach(() => {
+		restoreClock?.();
+		restoreClock = null;
 		_internals.afterCheckpointFstat = realAfterCheckpointFstat;
 		_internals.beforeArchiveLegacy = realBeforeArchiveLegacy;
 		_internals.beforeArchiveRename = realBeforeArchiveRename;

@@ -13,6 +13,9 @@ import {
 	subscribe,
 	updateSnapshot,
 } from '../../../src/background/pr-subscriptions';
+import { freezeClock } from '../../helpers/test-clock.js';
+
+const FROZEN_NOW = 1_780_000_000_000;
 
 function makeTempProject(): string {
 	const dir = fs.realpathSync(
@@ -54,6 +57,7 @@ function legacyRecord(suffix: string) {
 
 describe('pr-subscriptions — I/O failure regressions (#2042)', () => {
 	let dir: string;
+	let restoreClock: (() => void) | null = null;
 	const realReadSync = _internals.readSync;
 	const realArchiveStatSync = _internals.archiveStatSync;
 	const realLegacyCloseSync = _internals.legacyCloseSync;
@@ -62,10 +66,13 @@ describe('pr-subscriptions — I/O failure regressions (#2042)', () => {
 	const realRenameWithRetry = _internals.renameWithRetry;
 
 	beforeEach(() => {
+		restoreClock = freezeClock({ fixedNow: FROZEN_NOW });
 		dir = makeTempProject();
 	});
 
 	afterEach(() => {
+		restoreClock?.();
+		restoreClock = null;
 		_internals.readSync = realReadSync;
 		_internals.archiveStatSync = realArchiveStatSync;
 		_internals.legacyCloseSync = realLegacyCloseSync;
