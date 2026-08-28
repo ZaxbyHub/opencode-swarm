@@ -2227,6 +2227,60 @@ export type SkillPropagationConfig = z.infer<
 	typeof SkillPropagationConfigSchema
 >;
 
+const HarnessRelativePathSchema = z
+	.string()
+	.min(1)
+	.max(1024)
+	.refine((value) => !value.includes('\0'), 'path contains a NUL byte')
+	.refine((value) => !/^(?:[A-Za-z]:[\\/]|[\\/]{1,2})/.test(value), {
+		message: 'path must be project-relative',
+	})
+	.refine(
+		(value) =>
+			!value
+				.replace(/\\/g, '/')
+				.split('/')
+				.some((segment) => segment === '..'),
+		'path must not traverse outside the project',
+	);
+
+/**
+ * Declarative HarnessOpt mutation policy (issue #1825).
+ *
+ * This block is consumed only by explicit harness API/command calls. It does
+ * not enable activation, optimization, init-time scans, or candidate execution.
+ */
+export const HarnessEvolutionConfigSchema = z
+	.object({
+		source_allowlist: z.array(HarnessRelativePathSchema).max(128).default([]),
+		extra_protected_paths: z
+			.array(HarnessRelativePathSchema)
+			.max(128)
+			.default([]),
+		max_patch_bytes: z.number().int().min(1).max(16_777_216).default(1_048_576),
+		max_files: z.number().int().min(1).max(1024).default(64),
+		max_file_bytes: z.number().int().min(1).max(8_388_608).default(524_288),
+		max_total_bytes: z.number().int().min(1).max(67_108_864).default(4_194_304),
+		max_changed_lines: z.number().int().min(1).max(100_000).default(10_000),
+		max_versions: z.number().int().min(1).max(10_000).default(100),
+		max_inactive_candidates: z.number().int().min(0).max(128).default(32),
+		max_replay_records: z.number().int().min(1).max(100_000).default(10_000),
+		max_output_bytes: z
+			.number()
+			.int()
+			.min(1024)
+			.max(1_048_576)
+			.default(262_144),
+	})
+	.strict();
+
+export type HarnessEvolutionConfig = z.infer<
+	typeof HarnessEvolutionConfigSchema
+>;
+
+export const DEFAULT_HARNESS_EVOLUTION_CONFIG: HarnessEvolutionConfig =
+	Object.freeze(HarnessEvolutionConfigSchema.parse({}));
+
 // Skill-improver agent configuration (issue #629)
 export const SkillImproverConfigSchema = z.object({
 	/** Default: false. Must be explicitly enabled. */
@@ -3462,6 +3516,9 @@ export const PluginConfigSchema = z.object({
 
 	// v2: Skill improver — low-frequency, expensive-model improvement loop (issue #629)
 	skill_improver: SkillImproverConfigSchema.optional(),
+
+	// Declarative, non-executing HarnessOpt mutation policy (issue #1825).
+	harness_evolution: HarnessEvolutionConfigSchema.optional(),
 
 	// v2: Spec writer agent — independent model for .swarm/spec.md authorship
 	spec_writer: SpecWriterConfigSchema.optional(),

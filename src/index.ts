@@ -1338,6 +1338,7 @@ async function initializeOpenCodeSwarm(
 		agentDefinitionMap,
 		{
 			getActiveAgentName: getActiveReviewAgentName,
+			config,
 			packageRoot: PACKAGE_ROOT,
 			registeredAgents: agents,
 			evaluationModelDispatcher,
@@ -2850,6 +2851,38 @@ async function initializeOpenCodeSwarm(
 					template: '/swarm sdd project $ARGUMENTS',
 					description:
 						'Use /swarm sdd project to materialize OpenSpec artifacts into .swarm/spec.md',
+				},
+				'swarm-blueprint-validate': {
+					template: '/swarm blueprint validate $ARGUMENTS',
+					description: shortcutDescription('blueprint validate'),
+				},
+				'swarm-blueprint-current': {
+					template: '/swarm blueprint current',
+					description: shortcutDescription('blueprint current'),
+				},
+				'swarm-blueprint-history': {
+					template: '/swarm blueprint history',
+					description: shortcutDescription('blueprint history'),
+				},
+				'swarm-blueprint-diff': {
+					template: '/swarm blueprint diff $ARGUMENTS',
+					description: shortcutDescription('blueprint diff'),
+				},
+				'swarm-blueprint-export': {
+					template: '/swarm blueprint export $ARGUMENTS',
+					description: shortcutDescription('blueprint export'),
+				},
+				'swarm-harness-candidate-validate': {
+					template: '/swarm harness candidate validate $ARGUMENTS',
+					description: shortcutDescription('harness candidate validate'),
+				},
+				'swarm-harness-candidate-show': {
+					template: '/swarm harness candidate show $ARGUMENTS',
+					description: shortcutDescription('harness candidate show'),
+				},
+				'swarm-harness-candidate-diff': {
+					template: '/swarm harness candidate diff $ARGUMENTS',
+					description: shortcutDescription('harness candidate diff'),
 				},
 				'swarm-issue': {
 					template: '/swarm issue $ARGUMENTS',
@@ -4398,3 +4431,15 @@ export {
 	evaluateCandidateV1,
 	evaluationV1,
 } from './evaluation/public-api.js';
+export type {
+	AgentBlueprintV1,
+	BlueprintPatchV1,
+	HarnessBlueprintV1,
+	HarnessCandidateManifestV1,
+	OrchestrationSpecV1,
+	PromptArtifactV1,
+	ToolSpecV1,
+} from './harness/contracts.js';
+// Public declarative harness API. Callable and pure until explicitly invoked;
+// it performs no plugin-initialization work and exposes no autonomous executor.
+export { harnessMutationV1 } from './harness/public-api.js';

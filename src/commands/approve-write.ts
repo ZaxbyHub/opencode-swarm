@@ -8,7 +8,7 @@ const USAGE = [
 	'Usage: /swarm approve-write <target-session-id> <action> <candidate-id> <candidate-content-hash> [--generation <n>] [--allowed-path-digest <sha256>]',
 	'',
 	'Issue one exact one-shot write approval for a session-bound action. This command is human-only.',
-	'Actions: skill_improve',
+	'Actions: skill_improve, harness_activate, harness_rollback',
 ].join('\n');
 
 function parseApproveWriteArgs(args: string[]): {
@@ -47,7 +47,12 @@ function parseApproveWriteArgs(args: string[]): {
 	}
 	const [targetSessionId, actionRaw, candidateId, candidateContentHash] =
 		positional;
-	if (actionRaw !== undefined && actionRaw !== 'skill_improve') {
+	if (
+		actionRaw !== undefined &&
+		actionRaw !== 'skill_improve' &&
+		actionRaw !== 'harness_activate' &&
+		actionRaw !== 'harness_rollback'
+	) {
 		return { error: `unknown action: ${actionRaw}` };
 	}
 	return {

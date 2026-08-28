@@ -129,6 +129,15 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'turbo',
 		'unlink',
 		'write-retro',
+		// #1825: declarative harness inspection; intentionally absent from tools.
+		'blueprint validate',
+		'blueprint current',
+		'blueprint history',
+		'blueprint diff',
+		'blueprint export',
+		'harness candidate validate',
+		'harness candidate show',
+		'harness candidate diff',
 	]);
 
 	test("'agent' bucket contains exactly the expected commands", () => {
