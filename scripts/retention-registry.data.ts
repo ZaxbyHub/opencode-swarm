@@ -403,41 +403,41 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/pr-workflow-gate.ts',
 		],
 		writerCitations: [
-			'src/background/pending-delegations.ts:2280 appendRecord — appendFileSync :2285 (19 mutation entry points :2432-4273)',
-			'src/background/pending-delegations.ts:1027 writeDurableFileSync — fsync+rename-with-retry for checkpoint/manifest/rolled-tail (:2085-2126)',
+			'src/background/pending-delegations.ts:2281 appendRecord — appendFileSync :2286 (19 mutation entry points :2433-4315)',
+			'src/background/pending-delegations.ts:1028 writeDurableFileSync — fsync+rename-with-retry for checkpoint/manifest/rolled-tail (:2086-2127)',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:2223 readDelegations — checkpoint+tail fold (lenient), sync',
-			'src/background/pending-delegations.ts:2244 scanDelegationsForRecovery — strict, fails closed',
+			'src/background/pending-delegations.ts:2224 readDelegations — checkpoint+tail fold (lenient), sync',
+			'src/background/pending-delegations.ts:2245 scanDelegationsForRecovery — strict, fails closed',
 			'pr-workflow-session-resolver / pr-workflow-gate / init-orphan-recovery / delegation-gate worktree-collision-ownership — via readDelegations',
 		],
 		schemaVersion:
-			'RecordSchema schemaVersion 1|2|3; checkpoint/manifest literal 1 (:921,:942,:952)',
+			'RecordSchema schemaVersion 1|2|3; checkpoint/manifest literal 1 (:922,:943,:953)',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
 		writeLimits: {
-			bound: 'compaction high-water 1 MiB / low 256 KiB (:96-97); MAX_RECOVERY_LEDGER_BYTES 4 MiB (delegation-health.ts:34); MAX_CHECKPOINT_BYTES 2 MiB / 2048 records (:99,:103); TOMBSTONE_MIN_AGE 72 h (:110)',
+			bound: 'compaction high-water 1 MiB / low 256 KiB (:97-98); MAX_RECOVERY_LEDGER_BYTES 4 MiB (delegation-health.ts:34); MAX_CHECKPOINT_BYTES 2 MiB / 2048 records (:100,:104); TOMBSTONE_MIN_AGE 72 h (:111)',
 			scope: 'global',
-			citation: 'src/background/pending-delegations.ts:96-110; src/background/delegation-health.ts:34 (#2034)',
+			citation: 'src/background/pending-delegations.ts:97-111; src/background/delegation-health.ts:34 (#2034)',
 		},
 		readBound: {
 			pattern: 'indexed (checkpoint+tail) with full-fold fallback',
 			bound: 'legacy/tail reads hard-bounded at 4 MiB (MAX_RECOVERY_LEDGER_BYTES)',
 			sync: true,
-			citation: 'src/background/pending-delegations.ts:84-89,1450',
+			citation: 'src/background/pending-delegations.ts:85-90,1451',
 		},
-		lockModel: 'withEvidenceLock agent=background on every mutation (:136-139); reads lock-free',
+		lockModel: 'withEvidenceLock agent=background on every mutation (:137-140); reads lock-free',
 		crashBehavior:
-			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1191-1203)',
+			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1192-1204)',
 		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (close.ts:422-424); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, close.ts:417-425 docblock)',
 		resetPolicy: 'reset/reset-session do not delete',
 		legacyCompatibility:
-			'loadLegacyLedger pre-checkpoint fold (:1450); mixed-version lines safeParse individually',
+			'loadLegacyLedger pre-checkpoint fold (:1451); mixed-version lines safeParse individually',
 		healthSignal: 'delegation-health artifact + #2034 recovery observations',
 		owner: '#2034 (merged)',
 		disposition: {
 			kind: 'not-a-defect',
-			proof: 'Bounded by the #2034 checkpoint/tail compaction contract: 1 MiB high-water global trigger, 4 MiB hard recovery bound, 2 MiB/2048-record checkpoint validation, 72 h tombstone floor (src/background/pending-delegations.ts:96-110; src/background/delegation-health.ts:34).',
+			proof: 'Bounded by the #2034 checkpoint/tail compaction contract: 1 MiB high-water global trigger, 4 MiB hard recovery bound, 2 MiB/2048-record checkpoint validation, 72 h tombstone floor (src/background/pending-delegations.ts:97-111; src/background/delegation-health.ts:34).',
 		},
 	},
 	{

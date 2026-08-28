@@ -446,11 +446,16 @@ describe('issue #2402 legacy coder WAL ownership transfer', () => {
 		await deliverTerminal(directory, 'cancelled');
 		const session = ensureAgentSession('parent', 'architect', directory);
 		session.pendingAdvisoryMessages.unshift('[OTHER] keep me');
-		observerInternals.transferCoderSettlementToBackground = realTransfer;
+		let maintenanceTransfers = 0;
+		observerInternals.transferCoderSettlementToBackground = async (options) => {
+			maintenanceTransfers += 1;
+			return realTransfer(options);
+		};
 		observerInternals.sleep = realSleep;
 		await maintainBackgroundDelegations(directory, {
 			lockTimeoutMs: 1_000,
 		});
+		expect(maintenanceTransfers).toBe(1);
 		expect(readLegacyWal(directory)).toMatchObject({
 			state: 'ABORTED',
 			cleanupComplete: true,
