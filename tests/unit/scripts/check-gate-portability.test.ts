@@ -21,7 +21,9 @@ import {
 	type GateCategory,
 	main,
 	readBaseline,
+	readPortableShimSources,
 	readWorkflowSources,
+	validatePortableShim,
 	WORKFLOW_DIR,
 } from '../../../scripts/check-gate-portability';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
@@ -141,6 +143,34 @@ describe('check-gate-portability — evaluatePortability', () => {
 		const result = evaluatePortability(referenced, [entry({ reason: '   ' })]);
 		expect(result.exitCode).toBe(1);
 		expect(result.messages.join('\n')).toInclude('ERROR (missing reason)');
+	});
+
+	test('duplicate baseline rows fail closed', () => {
+		const referenced = new Map([['scripts/x.sh', ['workflow.yml']]]);
+		const result = evaluatePortability(referenced, [entry({}), entry({})]);
+		expect(result.exitCode).toBe(1);
+		expect(result.duplicateBaseline).toEqual(['scripts/x.sh']);
+	});
+
+	test('zero-logic shim contract accepts delegation and rejects policy', () => {
+		const base = {
+			script: 'scripts/check-x.sh',
+			typescript: 'scripts/check-x.ts',
+		};
+		expect(
+			validatePortableShim({
+				...base,
+				content:
+					'#!/usr/bin/env bash\n# comment\nset -euo pipefail\nscript_dir="$(cd "$(dirname "$0")" && pwd)"\nexec bun run "${script_dir}/check-x.ts" "$@"\n',
+			}),
+		).toBeNull();
+		expect(
+			validatePortableShim({
+				...base,
+				content:
+					'#!/usr/bin/env bash\nset -euo pipefail\nMAX=5\nscript_dir="$(cd "$(dirname "$0")" && pwd)"\nexec bun run "${script_dir}/check-x.ts" "$@"\n',
+			}),
+		).toContain('shim contains policy');
 	});
 });
 
@@ -295,10 +325,33 @@ describe('check-gate-portability — GUARDRAIL BITES (issue #2078 recurrence)', 
 		]);
 	});
 
+	test('portable-shim discovery recursively covers nested script directories', () => {
+		const scriptsDir = canonicalMkdtemp('gate-portability-nested-shim-');
+		try {
+			const nested = path.join(scriptsDir, 'ci');
+			fs.mkdirSync(nested, { recursive: true });
+			fs.writeFileSync(path.join(nested, 'nested.ts'), 'export {};\n');
+			fs.writeFileSync(
+				path.join(nested, 'nested.sh'),
+				'#!/usr/bin/env bash\nset -euo pipefail\necho policy\n',
+			);
+			const sources = readPortableShimSources(scriptsDir);
+			expect(sources.map((source) => source.script)).toEqual([
+				'scripts/ci/nested.sh',
+			]);
+			expect(evaluatePortability(new Map(), [], sources).invalidShims).toEqual([
+				'scripts/ci/nested.sh',
+			]);
+		} finally {
+			fs.rmSync(scriptsDir, { recursive: true, force: true });
+		}
+	});
+
 	test('the real repo state (checked-in workflows + baseline) passes', () => {
 		const result = evaluatePortability(
 			collectScriptRefs(readWorkflowSources()),
 			readBaseline(),
+			readPortableShimSources(),
 		);
 		expect(result.exitCode).toBe(0);
 		expect(result.unbaselined).toEqual([]);

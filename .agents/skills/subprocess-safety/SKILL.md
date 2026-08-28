@@ -16,7 +16,7 @@ Read, in order:
 Codex-specific execution notes:
 - This skill consolidates AGENTS.md Invariant 3 into an actionable checklist.
 - The canonical spawn shape and six required properties are non-negotiable per AGENTS.md.
-- The CI quality job enforces these via `scripts/check-invariants.sh` (Check 1: subprocess timeout).
+- The CI quality job enforces these via `bun run check:invariants` (Check 1: subprocess timeout).
 - Violations are advisory in CI but blocking in code review.
 
 ## When to use this skill

@@ -1,0 +1,53 @@
+{
+	"archivedFromSha": "911787b1252e848525ddd86f58e677478d0a3ca2",
+	"files": [
+		{
+			"path": "scripts/check-mock-cleanup.sh",
+			"mode": "100755",
+			"blob": "38a9a65362e27b2c202817850db04ce795f70874",
+			"sha256": "b36711c6397cfaf5d0a26bb0dc218d0d255186ec319119567d2066524c6a6468"
+		},
+		{
+			"path": "scripts/check-test-clock.sh",
+			"mode": "100644",
+			"blob": "b63eb6e485fc668dcf06eccfe2c69597f4bb30cc",
+			"sha256": "da992e40d1f6a130e3d6750d41ec2c6165e3d8eaa3c100d1139381442a6e2b3f"
+		},
+		{
+			"path": "scripts/check-test-tmpdir.sh",
+			"mode": "100644",
+			"blob": "eb4ac56b39a32e50c29a83489fe39b9ac2729061",
+			"sha256": "3718c9dba8d125dfba74dc5e0ceb20144f561ccc945283882486c0cc2f30f89d"
+		},
+		{
+			"path": "scripts/check-invariants.sh",
+			"mode": "100755",
+			"blob": "8c1014dffb73efbd1fb7fc8b1b9b35c582f1bff1",
+			"sha256": "2b0f2f069aead7aaf31b2c05133c9c43da5ae101793d8bcf0cd3c6e1388ba0ea"
+		},
+		{
+			"path": "scripts/check-bash-portability.sh",
+			"mode": "100644",
+			"blob": "12705435e2bdd6b5f6813c74d41e8a11c7092399",
+			"sha256": "38f9384b30d60049c4cf79e79dfe2d9fb5c8d4086bc6b5fd621701d05bfb1d1e"
+		},
+		{
+			"path": "scripts/check-cross-contamination.sh",
+			"mode": "100644",
+			"blob": "9428b6ac8ec45e06a0d74797a773239c2a14498f",
+			"sha256": "2c900e3acd29cb28c40dad0ae4eeef8af897083984de4b4a46433911731d05ff"
+		},
+		{
+			"path": "scripts/lib/normalize-mock-target.sh",
+			"mode": "100644",
+			"blob": "f597b11a56aabbae918a68baebb4843cabfd76d2",
+			"sha256": "364c102ed8d88a878044fccc685bbfb10f7308cae6175e888f73ddd50e17bd47"
+		},
+		{
+			"path": "scripts/check-no-raw-advisory-push.sh",
+			"mode": "100644",
+			"blob": "aff5fc78a41bfb8666d2bf13a43d2a85625c62d2",
+			"sha256": "d7fc3a89c06cda244bb9424b71c9389b91025d0a58f6e022f8f3189e06492990"
+		}
+	]
+}

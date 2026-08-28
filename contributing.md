@@ -239,11 +239,11 @@ All of these must be green. They run automatically on every PR.
 
 **Do not ask for a merge if any check is red.** Fix the issue first.
 
-The `quality` job also runs `scripts/check-mock-cleanup.sh` which enforces:
+The `quality` job also runs `bun run check:mock-cleanup` which enforces:
 - All `mock.module` calls have proper cleanup (`afterEach(mock.restore())` or file-scoped `mockClear`/`mockReset`)
 - All `mock.module('node:*', ...)` calls spread real exports (e.g., `...realFs`) to prevent test pollution
 
-The same job runs `scripts/check-invariants.sh` Check 4 (issue #1666): the `scripts/mock-allowlist.txt` allowlist is closed against unapproved growth. Adding a new `mock.module` target requires a matching standalone marker line `# APPROVED-NEW: <normalized-target>` in `scripts/mock-allowlist.txt` (preserved across regen by `scripts/generate-mock-allowlist.sh`). `MOCK_ALLOWLIST_ENFORCE=0` soft-warns for a deliberate growth PR. Prefer the `_internals` DI seam for new code — the allowlist is legacy debt, not a bypass.
+The same job runs `bun run check:invariants` Check 4 (issue #1666): the `scripts/mock-allowlist.txt` allowlist is closed against unapproved growth. Adding a new `mock.module` target requires a matching standalone marker line `# APPROVED-NEW: <normalized-target>` in `scripts/mock-allowlist.txt` (preserved across regen by `scripts/generate-mock-allowlist.sh`). `MOCK_ALLOWLIST_ENFORCE=0` soft-warns for a deliberate growth PR. Prefer the `_internals` DI seam for new code — the allowlist is legacy debt, not a bypass.
 
 ---
 

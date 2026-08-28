@@ -1,280 +1,281 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+/**
+ * Issue #2094 — regression coverage for the TypeScript-owned mock cleanup gate.
+ *
+ * Covers direct-import decision logic plus end-to-end execution in a temp git
+ * repo, including repo-root resolution and shell-shim parity.
+ */
 
-// Helper function to create a test file with mock.module content
-async function createTestFile(
-	testDir: string,
-	filename: string,
-	content: string,
-): Promise<string> {
-	const filePath = join(testDir, filename);
-	await Bun.write(filePath, content);
-	return filePath;
+import { afterEach, describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import {
+	assessMockFile,
+	main as runDirectMain,
+	toSpreadVar,
+} from '../../../scripts/check-mock-cleanup';
+import { bashCommand } from '../../helpers/bash';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
+
+const TS_GATE = path.resolve(process.cwd(), 'scripts', 'check-mock-cleanup.ts');
+const SH_SHIM = path.resolve(process.cwd(), 'scripts', 'check-mock-cleanup.sh');
+const tempRoots: string[] = [];
+const MOCK_MODULE_PREFIX = ['mock', 'module'].join('.');
+
+function makeMockModuleCall(target: string, body: string): string {
+	return `${MOCK_MODULE_PREFIX}('${target}', ${body});`;
 }
 
-// Minimal implementation of the script's Check 2 logic for isolated testing
-// The script's full logic (Check 1 + Check 2) is tested via integration,
-// but the spread pattern check (Check 2) is unit-tested here for isolation.
-async function checkSpreadViolations(files: string[]): Promise<{
-	violations: Array<{ file: string; line: number; module: string }>;
-}> {
-	const results: Array<{ file: string; line: number; module: string }> = [];
-
-	for (const file of files) {
-		const content = await readFile(file, 'utf-8');
-		const lines = content.split('\n');
-
-		// Find all mock.module('node:...') calls and extract module name
-		const nodeModuleCalls: Array<{ line: number; module: string }> = [];
-		for (let i = 0; i < lines.length; i++) {
-			const line = lines[i];
-			// Match mock.module('node:fs', ...) or mock.module("node:fs", ...)
-			const match = line.match(/mock\.module\(['"](node:[^'"]+)['"]/);
-			if (match) {
-				nodeModuleCalls.push({ line: i + 1, module: match[1] });
-			}
-		}
-
-		// For each node: module, check if there's a corresponding spread
-		for (const { line, module } of nodeModuleCalls) {
-			// Convert module name to spread variable name
-			// e.g., 'node:fs' -> 'realFs', 'node:fs/promises' -> 'realFsPromises'
-			// Script logic: first letter capitalized, letters after / or _ also capitalized
-			const rawModule = module.split(':')[1]; // e.g. 'fs' or 'child_process' or 'fs/promises'
-			const parts = rawModule.split(/[/ _]/);
-			const camelParts = parts.map(
-				(p) => p.charAt(0).toUpperCase() + p.slice(1),
-			);
-			const spreadVar = 'real' + camelParts.join('');
-
-			// Check if file has the spread pattern (with word-boundary protection)
-			const spreadPattern = new RegExp(`\\.\\.\\.${spreadVar}[^A-Za-z0-9_]`);
-			const hasSpread = spreadPattern.test(content);
-
-			if (!hasSpread) {
-				results.push({ file, line, module });
-			}
-		}
-	}
-
-	return { violations: results };
-}
-
-async function runSpreadCheck(testDir: string): Promise<{
+interface SpawnResult {
 	exitCode: number;
-	violations: Array<{ file: string; line: number; module: string }>;
-}> {
-	// Find all .test.ts files in testDir
-	const { readdirSync, statSync } = await import('node:fs');
-	const testFiles: string[] = [];
+	stdout: string;
+	stderr: string;
+}
 
-	function findTests(dir: string) {
-		const entries = readdirSync(dir, { withFileTypes: true });
-		for (const entry of entries) {
-			const fullPath = join(dir, entry.name);
-			if (entry.isDirectory()) {
-				findTests(fullPath);
-			} else if (entry.isFile() && entry.name.endsWith('.test.ts')) {
-				testFiles.push(fullPath);
-			}
-		}
-	}
-
-	findTests(testDir);
-
-	const { violations } = await checkSpreadViolations(testFiles);
+function spawn(
+	cmd: string[],
+	repoDir: string,
+	env?: Record<string, string>,
+): SpawnResult {
+	const proc = Bun.spawnSync({
+		cmd,
+		cwd: repoDir,
+		env: { ...process.env, ...env },
+		stdin: 'ignore',
+		stdout: 'pipe',
+		stderr: 'pipe',
+		timeout: 30_000,
+	});
 	return {
-		exitCode: violations.length > 0 ? 1 : 0,
-		violations,
+		exitCode: proc.exitCode ?? 1,
+		stdout: proc.stdout.toString(),
+		stderr: proc.stderr.toString(),
 	};
 }
 
-describe('check-mock-cleanup.sh spread check (Check 2)', () => {
-	let testDir: string;
+function runScript(repoDir: string): SpawnResult {
+	return spawn([process.execPath, 'run', TS_GATE], repoDir);
+}
 
-	beforeEach(() => {
-		const prefix = join(tmpdir(), 'mock-cleanup-test-');
-		const rawDir = mkdtempSync(prefix);
-		testDir = realpathSync(rawDir);
+function runShim(repoDir: string): SpawnResult {
+	return spawn(bashCommand(SH_SHIM), repoDir);
+}
+
+function git(repoDir: string, ...args: string[]): void {
+	const proc = Bun.spawnSync({
+		cmd: ['git', ...args],
+		cwd: repoDir,
+		env: process.env,
+		stdin: 'ignore',
+		stdout: 'pipe',
+		stderr: 'pipe',
+		timeout: 10_000,
 	});
+	if (proc.exitCode !== 0) {
+		throw new Error(
+			`git ${args.join(' ')} failed in ${repoDir}: ${proc.stderr.toString()}`,
+		);
+	}
+}
 
-	afterEach(() => {
-		try {
-			rmSync(testDir, { recursive: true, force: true });
-		} catch {
-			// Ignore cleanup errors
+function write(repoDir: string, relPath: string, content: string): void {
+	const full = path.join(repoDir, relPath);
+	fs.mkdirSync(path.dirname(full), { recursive: true });
+	fs.writeFileSync(full, content, 'utf-8');
+}
+
+function commit(repoDir: string, message: string): void {
+	git(repoDir, 'add', '-A');
+	git(repoDir, 'commit', '-q', '-m', message);
+}
+
+function makeRepo(): string {
+	const repoDir = canonicalMkdtemp('mock-cleanup-2094-');
+	git(repoDir, 'init', '-q', '-b', 'main');
+	git(repoDir, 'config', 'user.email', 'test@example.com');
+	git(repoDir, 'config', 'user.name', 'Test');
+	write(repoDir, 'README.md', 'base\n');
+	commit(repoDir, 'init');
+	git(repoDir, 'branch', 'origin/main');
+	tempRoots.push(repoDir);
+	return repoDir;
+}
+
+afterEach(() => {
+	while (tempRoots.length > 0) {
+		const root = tempRoots.pop();
+		if (root) {
+			fs.rmSync(root, { recursive: true, force: true });
 		}
+	}
+});
+
+describe('check-mock-cleanup — pure decision coverage', () => {
+	test('toSpreadVar matches repo naming convention', () => {
+		expect(toSpreadVar('fs')).toBe('realFs');
+		expect(toSpreadVar('child_process')).toBe('realChildProcess');
+		expect(toSpreadVar('fs/promises')).toBe('realFsPromises');
 	});
 
-	test('exits 0 when all files have proper spread', async () => {
-		await createTestFile(
-			testDir,
-			'test1.test.ts',
-			`
-import { mock } from 'bun:test';
-
-mock.module('node:fs', () => ({ ...realFs, ... }));
-mock.module('node:child_process', () => ({ ...realChildProcess, ... }));
-mock.module('node:fs/promises', () => ({ ...realFsPromises, ... }));
-
-describe('test', () => {
-  it('does something', () => {
-    // test code
-  });
-});
-    `,
+	test('flags missing cleanup when no documented exception exists', () => {
+		const result = assessMockFile(
+			makeMockModuleCall('./dep', '() => ({})') + '\n',
 		);
-
-		const result = await runSpreadCheck(testDir);
-		expect(result.exitCode).toBe(0);
-		expect(result.violations).toHaveLength(0);
+		expect(result.missingCleanup).toBe(true);
+		expect(result.spreadViolations).toEqual([]);
 	});
 
-	test('exits 1 when a file lacks spread', async () => {
-		await createTestFile(
-			testDir,
-			'test2.test.ts',
-			`
-import { mock } from 'bun:test';
-
-mock.module('node:fs', () => ({ ... }));
-
-describe('test', () => {
-  it('does something', () => {
-    // test code
-  });
-});
-    `,
+	test('treats file-scoped mockClear/mockReset as an allowed cleanup shape', () => {
+		const result = assessMockFile(
+			[
+				makeMockModuleCall('./dep', '() => ({})'),
+				'beforeEach(() => mockFn.mockClear());',
+			].join('\n'),
 		);
+		expect(result.missingCleanup).toBe(false);
+	});
 
-		const result = await runSpreadCheck(testDir);
+	test('flags node: mocks without spread or async import fallback', () => {
+		const result = assessMockFile(
+			makeMockModuleCall('node:fs', '() => ({ readFileSync: mockFn })') + '\n',
+		);
+		expect(result.spreadViolations).toEqual([
+			{ module: 'fs', line: 1, spreadVar: 'realFs' },
+		]);
+	});
+
+	test('accepts async import spread pattern for node: mocks', () => {
+		const result = assessMockFile(
+			[
+				`${MOCK_MODULE_PREFIX}('node:fs', async () => {`,
+				"  const realFs = await import('node:fs');",
+				'  return { ...realFs, readFileSync: mockFn };',
+				'});',
+			].join('\n'),
+		);
+		expect(result.spreadViolations).toEqual([]);
+	});
+});
+
+describe('check-mock-cleanup — end to end', () => {
+	test('new mock.module cleanup violation is blocking', () => {
+		const repo = makeRepo();
+		write(
+			repo,
+			'tests/fixture.test.ts',
+			[
+				"import { mock } from 'bun:test';",
+				makeMockModuleCall('./dep', '() => ({})'),
+			].join('\n'),
+		);
+		commit(repo, 'add violating test');
+
+		const result = runScript(repo);
 		expect(result.exitCode).toBe(1);
-		expect(result.violations.length).toBeGreaterThan(0);
-		expect(result.violations[0].module).toBe('node:fs');
+		expect(result.stdout).toContain('no afterEach(mock.restore()) cleanup');
 	});
 
-	test('detects both single and double quotes', async () => {
-		await createTestFile(
-			testDir,
-			'test3.test.ts',
-			`
-import { mock } from 'bun:test';
-
-mock.module('node:fs', () => ({ ...realFs, ... }));
-
-describe('test', () => {
-  it('does something', () => {
-    // test code
-  });
-});
-    `,
+	test('pre-existing violation outside the diff is non-blocking', () => {
+		const repo = makeRepo();
+		write(
+			repo,
+			'tests/preexisting.test.ts',
+			[
+				"import { mock } from 'bun:test';",
+				makeMockModuleCall('./dep', '() => ({})'),
+			].join('\n'),
 		);
+		commit(repo, 'seed violating test');
+		git(repo, 'branch', '-f', 'origin/main');
 
-		await createTestFile(
-			testDir,
-			'test4.test.ts',
-			`
-import { mock } from 'bun:test';
+		write(repo, 'src/keep.ts', 'export const keep = 1;\n');
+		commit(repo, 'touch unrelated file');
 
-mock.module("node:fs", () => ({ ...realFs, ... }));
-
-describe('test', () => {
-  it('does something', () => {
-    // test code
-  });
-});
-    `,
-		);
-
-		const result = await runSpreadCheck(testDir);
+		const result = runScript(repo);
 		expect(result.exitCode).toBe(0);
-		expect(result.violations).toHaveLength(0);
+		expect(result.stdout).toContain('pre-existing violation(s) found');
+		expect(result.stdout).not.toContain('NEW violation');
 	});
 
-	test('correctly handles node:fs', async () => {
-		await createTestFile(
-			testDir,
-			'test5.test.ts',
-			`
-import { mock } from 'bun:test';
-
-mock.module('node:fs', () => ({ ...realFs, ... }));
-
-describe('test', () => {
-  it('does something', () => {
-    // test code
-  });
-});
-    `,
+	test('new node builtin mock without spread is blocking', () => {
+		const repo = makeRepo();
+		write(
+			repo,
+			'tests/node-mock.test.ts',
+			[
+				"import { afterEach, mock } from 'bun:test';",
+				makeMockModuleCall('node:fs', '() => ({ readFileSync: mockFn })'),
+				'afterEach(() => mock.restore());',
+			].join('\n'),
 		);
+		commit(repo, 'add node mock violation');
 
-		const result = await runSpreadCheck(testDir);
-		expect(result.exitCode).toBe(0);
-		expect(result.violations).toHaveLength(0);
+		const result = runScript(repo);
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout).toContain('without spreading real exports');
+		expect(result.stdout).toContain('...realFs');
 	});
 
-	test('correctly handles node:child_process', async () => {
-		await createTestFile(
-			testDir,
-			'test6.test.ts',
-			`
-import { mock } from 'bun:test';
-
-mock.module('node:child_process', () => ({ ...realChildProcess, ... }));
-
-describe('test', () => {
-  it('does something', () => {
-    // test code
-  });
-});
-    `,
+	test('repo-root resolution makes subdirectory runs match root runs', () => {
+		const repo = makeRepo();
+		write(
+			repo,
+			'tests/fixture.test.ts',
+			[
+				"import { mock } from 'bun:test';",
+				makeMockModuleCall('./dep', '() => ({})'),
+			].join('\n'),
 		);
+		write(repo, 'src/nested/keep.ts', 'export const keep = 1;\n');
+		commit(repo, 'add violation');
 
-		const result = await runSpreadCheck(testDir);
-		expect(result.exitCode).toBe(0);
-		expect(result.violations).toHaveLength(0);
+		const fromRoot = runScript(repo);
+		const fromSubdir = runScript(path.join(repo, 'src', 'nested'));
+		expect(fromSubdir.exitCode).toBe(fromRoot.exitCode);
+		expect(fromSubdir.stdout).toBe(fromRoot.stdout);
 	});
 
-	test('correctly handles node:fs/promises', async () => {
-		await createTestFile(
-			testDir,
-			'test7.test.ts',
-			`
-import { mock } from 'bun:test';
-
-mock.module('node:fs/promises', () => ({ ...realFsPromises, ... }));
-
-describe('test', () => {
-  it('does something', () => {
-    // test code
-  });
-});
-    `,
+	test('the shell shim is byte-equal with the TypeScript gate', () => {
+		const repo = makeRepo();
+		write(
+			repo,
+			'tests/fixture.test.ts',
+			[
+				"import { mock } from 'bun:test';",
+				makeMockModuleCall('./dep', '() => ({})'),
+			].join('\n'),
 		);
+		commit(repo, 'add violation');
 
-		const result = await runSpreadCheck(testDir);
-		expect(result.exitCode).toBe(0);
-		expect(result.violations).toHaveLength(0);
+		const direct = runScript(repo);
+		const shim = runShim(repo);
+		expect(shim.exitCode).toBe(direct.exitCode);
+		expect(shim.stdout).toBe(direct.stdout);
 	});
 
-	test('correctly handles files without mock.module calls', async () => {
-		await createTestFile(
-			testDir,
-			'test8.test.ts',
-			`
-describe('test', () => {
-  it('does something', () => {
-    // test code without mock.module
-  });
-});
-    `,
-		);
+	test('the shim carries no cleanup or spread policy logic', () => {
+		const shimSource = fs.readFileSync(SH_SHIM, 'utf-8');
+		const body = shimSource
+			.split('\n')
+			.filter((line) => !line.trimStart().startsWith('#'))
+			.join('\n');
+		expect(body).not.toContain('mock.restore');
+		expect(body).not.toContain('mockClear');
+		expect(body).not.toContain('realFs');
+		expect(body).toContain('check-mock-cleanup.ts');
+	});
 
-		const result = await runSpreadCheck(testDir);
-		expect(result.exitCode).toBe(0);
-		expect(result.violations).toHaveLength(0);
+	test('direct-import main matches subprocess exit code for the same repo', async () => {
+		const repo = makeRepo();
+		write(
+			repo,
+			'tests/fixture.test.ts',
+			[
+				"import { mock } from 'bun:test';",
+				makeMockModuleCall('./dep', '() => ({})'),
+			].join('\n'),
+		);
+		commit(repo, 'add violation');
+
+		expect(await runDirectMain(repo)).toBe(runScript(repo).exitCode);
 	});
 });
