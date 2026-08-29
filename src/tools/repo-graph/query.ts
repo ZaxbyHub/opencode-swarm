@@ -45,6 +45,7 @@ import {
 
 const GRAPH_HEALTH_OUTPUT_LIMIT = 50;
 const MAX_HEALTH_PATH_LENGTH = 500;
+const MAX_QUERY_SOURCE_BYTES = 1024 * 1024;
 
 interface QueryIndexes {
 	index: Map<string, FileReference[]>;
@@ -1049,6 +1050,7 @@ export function getContextPack(
 	const finalSpans: ContextPackSpan[] = [];
 	let truncated = false;
 	const readFailures: string[] = [];
+	const oversizedSources: string[] = [];
 	const outsideWorkspace: string[] = [];
 	const snippetKinds = new Map<
 		ContextPackSpan,
@@ -1080,6 +1082,14 @@ export function getContextPack(
 				outsideWorkspace.push(`${displayPath(span.file)}:${span.symbol}`);
 			} else {
 				try {
+					const stats = fs.statSync(resolved);
+					if (stats.size > MAX_QUERY_SOURCE_BYTES) {
+						span.note = 'source too large';
+						oversizedSources.push(`${displayPath(span.file)}:${span.symbol}`);
+						finalSpans.push(span);
+						estimatedTokens += spanTokens;
+						continue;
+					}
 					const content = fs.readFileSync(resolved, 'utf-8');
 					const lines = content.split('\n');
 					const start = Math.max(0, span.startLine - 1);
@@ -1170,6 +1180,7 @@ export function getContextPack(
 		);
 	}
 	rawWarnings.push(...boundedDetails(readFailures, 'source read failed'));
+	rawWarnings.push(...boundedDetails(oversizedSources, 'source too large'));
 	rawWarnings.push(
 		...boundedDetails(outsideWorkspace, 'source outside workspace'),
 	);

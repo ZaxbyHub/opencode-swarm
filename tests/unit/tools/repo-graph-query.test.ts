@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import {
 	buildOntologyPreflightPacket,
@@ -541,5 +543,64 @@ describe('getContextPack', () => {
 			symbol: 'bar',
 			mode: 'full',
 		});
+	});
+
+	test('include_source skips graph-referenced files above the query read cap', () => {
+		const tempRoot = mkdtempSync(path.join(tmpdir(), 'repo-graph-query-'));
+		try {
+			const rel = 'large.ts';
+			const abs = normalizeGraphPath(path.join(tempRoot, rel));
+			writeFileSync(
+				path.join(tempRoot, rel),
+				`${'x'.repeat(1024 * 1024 + 1)}\nexport const huge = 1;\n`,
+				'utf-8',
+			);
+
+			const graph: RepoGraph = {
+				schema_version: '1.2.0',
+				workspaceRoot: tempRoot,
+				nodes: {
+					[abs]: {
+						filePath: abs,
+						moduleName: rel,
+						exports: ['huge'],
+						exportRanges: { huge: { startLine: 2, endLine: 2 } },
+						imports: [],
+						language: 'typescript',
+						mtime: '1',
+						ontology: {
+							roles: ['source_module'],
+							packageBoundary: 'root',
+							routes: [],
+							dataOperations: [],
+							security: [],
+							conventions: [],
+							findings: [],
+						},
+					},
+				},
+				edges: [],
+				metadata: {
+					generatedAt: new Date().toISOString(),
+					generator: 'test',
+					nodeCount: 1,
+					edgeCount: 0,
+				},
+			};
+
+			const result = getContextPack(graph, rel, 'huge', {
+				includeSource: true,
+			});
+
+			expect(result.spans[0]).toMatchObject({
+				file: abs,
+				symbol: 'huge',
+				note: 'source too large',
+			});
+			expect(result.snippets).toEqual([]);
+			expect(result.warnings).toContain('source too large for large.ts:huge');
+		} finally {
+			rmSync(tempRoot, { recursive: true, force: true });
+		}
 	});
 });
