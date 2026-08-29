@@ -184,12 +184,12 @@ import {
 	createTrajectoryLoggerHook,
 	recordDeniedToolCall,
 } from './hooks/trajectory-logger';
+import { estimateTokens } from './hooks/utils';
 import {
 	hasGitMarkerAncestor,
 	hasManifestAncestor,
 	hasSwarmState,
 } from './lang/manifest-files';
-import { estimateTokens } from './hooks/utils';
 import { realtimeAdmissionAfter } from './learning/admission.js';
 import { createMemoryLifecycleHooks } from './memory';
 import type { MemoryConfig as RuntimeMemoryConfig } from './memory/config.js';
