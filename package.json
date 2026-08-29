@@ -1,6 +1,6 @@
 {
 	"name": "opencode-swarm",
-	"version": "7.153.2",
+	"version": "7.154.3",
 	"description": "Architect-centric agentic swarm plugin for OpenCode - hub-and-spoke orchestration with SME consultation, code generation, and QA review",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -114,6 +114,7 @@
 		"check:trajectory-store": "bun run scripts/check-trajectory-store-usage.ts",
 		"check:mock-cleanup": "bun run scripts/check-mock-cleanup.ts",
 		"check:invariants": "bun run scripts/check-invariants.ts",
+		"check:token-formula": "bun run scripts/check-token-formula.ts",
 		"check:cross-contamination": "bun run scripts/check-cross-contamination.ts",
 		"check:test-clock": "bun run scripts/check-test-clock.ts",
 		"check:test-file-cap": "bun run scripts/check-test-file-cap.ts",

@@ -47,7 +47,11 @@ describe('context-transparency', () => {
 
 			// 34% of 200,000 = 68,000 — the estimate tracks the snapshot's own
 			// denominator, so it can no longer contradict the percentage.
-			expect(output).toContain('34.0% used');
+			// (#2107 §3) the label is now the swarm injection footprint (an
+			// intermediate per-turn measurement), not window usage.
+			expect(output).toContain(
+				'**Swarm injection footprint**: 34.0% of model window (intermediate measurement; est. 68,000 / 200,000 tokens)',
+			);
 			expect(output).toContain('68,000 / 200,000 tokens');
 		});
 
@@ -70,7 +74,9 @@ describe('context-transparency', () => {
 
 			const output = formatStatusMarkdown(status);
 
-			expect(output).toContain('**Context**: 34.0% used');
+			expect(output).toContain(
+				'**Swarm injection footprint**: 34.0% of model window (intermediate measurement)',
+			);
 			expect(output).not.toContain('tokens)');
 		});
 

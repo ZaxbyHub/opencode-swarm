@@ -692,9 +692,9 @@ describe('buildCapsule', () => {
 			max_capsule_tokens: 500, // very small budget
 		});
 
-		// Token estimate should be significantly reduced from the unpruned estimate
-		// (unpruned would be ~1500+ tokens for the large goal alone)
-		expect(metadata.token_estimate).toBeLessThan(1500);
+		// (#2107/#1616) 0.33 estimator replaced /3.5: bound moved 1500 -> 1900.
+		expect(metadata.token_estimate).toBeLessThan(1900);
+		expect(metadata.token_estimate).toBeGreaterThan(0);
 		// Mandatory sections should still be present
 		expect(capsule.content).toContain('# Context Capsule: Task 1.1');
 		expect(capsule.content).toContain('## Task Goal');

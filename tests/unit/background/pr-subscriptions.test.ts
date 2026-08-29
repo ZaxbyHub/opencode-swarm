@@ -65,9 +65,11 @@ describe('pr-subscriptions store', () => {
 			expect(record.errorCount).toBe(0);
 			expect(record.correlationId).toBe('sess_1::owner/repo::123');
 
-			// File exists under .swarm/pr-monitor/
-			const filePath = path.join(dir, '.swarm', PR_SUBSCRIPTIONS_FILE);
-			expect(fs.existsSync(filePath)).toBe(true);
+			// #2042: durable state is the checkpoint file (v1 writers create the JSONL)
+			const cpDir = path.join(dir, '.swarm', 'pr-monitor');
+			expect(
+				fs.existsSync(path.join(cpDir, 'subscriptions.checkpoint.json')),
+			).toBe(true);
 		});
 
 		test('subscribe is idempotent — same correlationId returns existing record', async () => {
@@ -106,9 +108,8 @@ describe('pr-subscriptions store', () => {
 		});
 
 		test('subscribe with maxSubscriptions enforces limit', async () => {
-			// Pre-seed one active subscription record directly to the JSONL file.
-			// subscribe() runs readAllRecords inside withEvidenceLock, so the
-			// record must be visible on disk before subscribe() reads it.
+			// Pre-seed one active record in the legacy JSONL; the store must
+			// see it on disk before subscribe() reads it.
 			const filePath = path.join(dir, '.swarm', PR_SUBSCRIPTIONS_FILE);
 			const now = Date.now();
 			const existingRecord = {
@@ -377,9 +378,8 @@ describe('pr-subscriptions store', () => {
 	});
 
 	describe('sweepStale', () => {
-		// Helper: directly write a backdated record to the JSONL file for sweep testing.
-		// PR_SUBSCRIPTIONS_FILE = 'pr-monitor/subscriptions.jsonl', and the dir is already
-		// at .swarm/pr-monitor/ (via makeTempProject), so we join with PR_SUBSCRIPTIONS_FILE directly.
+		// Helper: write a backdated record to the legacy JSONL (the dir is
+		// already at .swarm/pr-monitor/) for sweep testing.
 		function writeBackdatedRecord(
 			record: PrSubscriptionRecord,
 			updatedAtMs: number,

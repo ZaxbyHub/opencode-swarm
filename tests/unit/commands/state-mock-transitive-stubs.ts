@@ -15,6 +15,15 @@ export const STATE_MOCK_TRANSITIVE_STUBS = {
 	getSessionBudgetTokens: () => 0,
 	setSessionBudget: () => undefined,
 	getDisplayBudget: () => null,
+	// #2107 §3 final-prompt-pressure exports. Reached transitively through
+	// services/compaction-service.ts (and the final-context-accounting hook
+	// module via index.ts); same missing-binding failure class as above.
+	setFinalPromptPressure: () => undefined,
+	getFinalPromptPressure: () => undefined,
+	getDisplayFinalPromptPressure: () => null,
+	setFinalAccountingWarningBand: () => undefined,
+	getFinalAccountingWarningBand: () => false,
+	clearFinalAccountingWarningBands: () => undefined,
 	MAX_TRACKED_BUDGET_SESSIONS: 500,
 	beginInvocation: () => undefined,
 	getActiveWindow: () => undefined,

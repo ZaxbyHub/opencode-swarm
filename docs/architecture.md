@@ -1193,7 +1193,7 @@ The hooks system is the foundation of v5.1.x+, extended in v6.0.0 with config-aw
 - **`safeHook(handler)`** — Wraps any hook handler in a try/catch. Errors are logged at warning level; the original payload is returned unchanged. This ensures no hook can crash the plugin.
 - **`composeHandlers<I,O>(...handlers)`** — Composes multiple handlers for the same hook type into a single handler. Runs handlers sequentially on shared mutable output. Each handler is individually wrapped in `safeHook`.
 - **`readSwarmFileAsync(directory, filename)`** — Reads `.swarm/` files using `Bun.file().text()`. Returns empty string on missing files.
-- **`estimateTokens(text)`** — Conservative token estimation: `Math.ceil(text.length * 0.33)`.
+- **`estimateTokens(text)`** — the CANONICAL char→token heuristic (`Math.ceil(len × 0.33)`), plus `estimateTokensFromCharCount` / `estimateCharsForTokens`. Every char/token conversion in the plugin routes through this one module (issue #1616/#2107); provider-reported token usage is authoritative when available. Enforced by the inline-formula check in `scripts/check-invariants.ts` (Check 7).
 
 ### Hook Registration Table
 
@@ -1427,6 +1427,7 @@ Registered on `experimental.chat.system.transform`:
 - Priority ordering: phase → task → decisions → agent context
 - Lower-priority items dropped when budget is exhausted
 - **FR-002 (unified budget):** when `context_budget.unified_injection_tokens` is set, the system-enhancer and knowledge-injector share a single ceiling with proportional split; if one component alone exceeds the ceiling, the other gets zero
+- **#2107 (per-turn producer ledger + final accounting):** the system-enhancer begins a per-session/per-turn producer ledger at composition start; every budget producer (knowledge-injector, context capsule, memory recall, advisory queue, banners, the linked-cohort and spec-drift advisories, the final warning) claims from it or records its emission; other messages-surface handlers earlier in the chain are covered by the final accounting's direct measurement of `output.messages` (requested/granted/emitted/truncated per producer, FIFO-bounded at 256 sessions). Ceiling enforcement activates only when `unified_injection_tokens` is configured; otherwise the ledger records accounting only and default behavior is unchanged (#1617 fail-open when the ledger is absent). A final context-accounting step runs after `consolidateSystemMessagesInPlace` in `messages.transform`: it measures the final surface once (messages via provider-preferring usage + system-chain emissions from the ledger; messages-surface producers are attribution-only; the role filter's later removal of `[FOR: role]` fragments is deducted from the ledger so removed bytes are never counted), resolves the same model limit physical pruning uses, records a `finalPromptPressure` snapshot in session state, and may prepend ONE bounded advisory warning whose own cost is included in the accounting.
 - **v6.0.0**: Injects config override hints for `always_security_review` and `integration_analysis.enabled` when non-default values are detected
 
 ---

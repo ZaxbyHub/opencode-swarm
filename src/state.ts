@@ -64,6 +64,7 @@ import { clearTrajectoryCache } from './prm/trajectory-store.js';
 import type { PatternMatch } from './prm/types.js';
 import { clearScopeBindings } from './scope/scope-binding.js';
 import { clearScopeBindingFromDisk } from './scope/scope-persistence.js';
+import { clearAllTurnLedgers } from './services/injection-budget';
 import { recordSessionStart } from './session/session-start-store.js';
 import { maybeSuggestWorktreeLink } from './session/worktree-link-suggestion.js';
 import { AgentRunContext } from './state/agent-run-context.js';
@@ -988,6 +989,39 @@ export const swarmState = {
 	lastBudgetBySession: new Map<string, { pct: number; tokens: number }>(),
 
 	/**
+	 * Final model-visible prompt pressure per session (#2107 §3) — the ONE
+	 * truthful measurement taken after every injector has run and the system
+	 * messages have been consolidated. Unlike `lastBudgetBySession` (the swarm
+	 * INJECTION FOOTPRINT pct measured from an intermediate file surface),
+	 * this is estimated total prompt tokens vs the same model limit physical
+	 * pruning uses. Written by the final-context-accounting step; read by the
+	 * compaction tiers, the CONTEXT PRESSURE advisory, and `/swarm status`.
+	 * Bounded via {@link setFinalPromptPressure} (AGENTS.md invariant 8).
+	 */
+	finalPromptPressureBySession: new Map<
+		string,
+		{
+			pct: number;
+			usedTokens: number;
+			limitTokens: number;
+			estimatorSource: string;
+			providerReported: boolean;
+		}
+	>(),
+
+	/**
+	 * Per-session final-accounting warning-band latch (#2107 §3): one bounded
+	 * advisory per session per band (warn / critical). Kept here — not in the
+	 * hook module — so `resetSwarmState` covers it like every other
+	 * session-keyed map (AGENTS.md invariant 8). Bounded via
+	 * {@link setFinalAccountingWarningBand}.
+	 */
+	finalAccountingWarningBandsBySession: new Map<
+		string,
+		{ warn: boolean; critical: boolean }
+	>(),
+
+	/**
 	 * Live `model.limit.context` per session — keyed by sessionID and bound to
 	 * the reporting model/provider identity. Recorded by the
 	 * `experimental.chat.system.transform` hook (the only hook the host
@@ -1024,6 +1058,9 @@ export function resetSwarmState(): void {
 	swarmState.delegationChains.clear();
 	swarmState.pendingEvents = 0;
 	swarmState.lastBudgetBySession.clear();
+	swarmState.finalPromptPressureBySession.clear();
+	clearAllTurnLedgers();
+	swarmState.finalAccountingWarningBandsBySession.clear();
 	swarmState.liveContextWindows.clear();
 	swarmState.agentSessions.clear();
 	// Reset the opportunistic idle-sweep cooldown so a fresh process / test run
@@ -3881,6 +3918,83 @@ export function setSessionBudget(
 	}
 }
 
+/**
+ * Record this session's final prompt pressure (#2107 §3), FIFO-evicting the
+ *  oldest entry past {@link MAX_TRACKED_BUDGET_SESSIONS}. Written once per request
+ *  composition by the final-context-accounting step.
+ */
+export function setFinalPromptPressure(
+	sessionID: string,
+	snapshot: {
+		pct: number;
+		usedTokens: number;
+		limitTokens: number;
+		estimatorSource: string;
+		providerReported: boolean;
+	},
+): void {
+	const map = swarmState.finalPromptPressureBySession;
+	if (map.has(sessionID)) map.delete(sessionID);
+	map.set(sessionID, snapshot);
+	if (map.size > MAX_TRACKED_BUDGET_SESSIONS) {
+		const oldest = map.keys().next().value;
+		if (oldest !== undefined && oldest !== sessionID) {
+			map.delete(oldest);
+		}
+	}
+}
+
+/** The session's final prompt pressure snapshot, or undefined when the final
+ *  accounting step has not run for it (e.g. native-agent sessions). */
+export function getFinalPromptPressure(sessionID: string | undefined):
+	| {
+			pct: number;
+			usedTokens: number;
+			limitTokens: number;
+			estimatorSource: string;
+			providerReported: boolean;
+	  }
+	| undefined {
+	if (!sessionID) return undefined;
+	return swarmState.finalPromptPressureBySession.get(sessionID);
+}
+
+/** Record that this session's #2107 §3 advisory already fired for a band
+ *  (one advisory per session per band), FIFO-evicting past the cap. */
+export function setFinalAccountingWarningBand(
+	sessionID: string,
+	band: 'warn' | 'critical',
+): void {
+	const map = swarmState.finalAccountingWarningBandsBySession;
+	const entry = map.get(sessionID) ?? { warn: false, critical: false };
+	if (map.has(sessionID)) map.delete(sessionID);
+	if (band === 'critical') entry.critical = true;
+	else entry.warn = true;
+	map.set(sessionID, entry);
+	if (map.size > MAX_TRACKED_BUDGET_SESSIONS) {
+		const oldest = map.keys().next().value;
+		if (oldest !== undefined && oldest !== sessionID) {
+			map.delete(oldest);
+		}
+	}
+}
+
+/** Whether this session already received the band's advisory. */
+export function getFinalAccountingWarningBand(
+	sessionID: string | undefined,
+	band: 'warn' | 'critical',
+): boolean {
+	if (!sessionID) return false;
+	const entry = swarmState.finalAccountingWarningBandsBySession.get(sessionID);
+	if (!entry) return false;
+	return band === 'critical' ? entry.critical : entry.warn;
+}
+
+/** Clear all band latches (used by resetSwarmState and tests). */
+export function clearFinalAccountingWarningBands(): void {
+	swarmState.finalAccountingWarningBandsBySession.clear();
+}
+
 /** This session's last budget percentage, or 0 if it has not been measured.
  *  Consumers that ACT on a session (compaction, the context-pressure advisory)
  *  MUST use this rather than any cross-session aggregate. */
@@ -3903,6 +4017,34 @@ export function getSessionBudgetTokens(sessionID: string | undefined): number {
 export function getDisplayBudget(): { pct: number; tokens: number } | null {
 	let best: { pct: number; tokens: number } | null = null;
 	for (const entry of swarmState.lastBudgetBySession.values()) {
+		if (entry.pct > 0 && (best === null || entry.pct > best.pct)) {
+			best = entry;
+		}
+	}
+	return best;
+}
+
+/**
+ * The most-pressured session's FINAL prompt pressure snapshot, for
+ * process-wide DISPLAY only (`/swarm status` has no single session in scope).
+ * The snapshot is returned whole so the pct, used tokens, limit, and estimator
+ * source shown together always come from one measurement (#2107 §3).
+ */
+export function getDisplayFinalPromptPressure(): {
+	pct: number;
+	usedTokens: number;
+	limitTokens: number;
+	estimatorSource: string;
+	providerReported: boolean;
+} | null {
+	let best: {
+		pct: number;
+		usedTokens: number;
+		limitTokens: number;
+		estimatorSource: string;
+		providerReported: boolean;
+	} | null = null;
+	for (const entry of swarmState.finalPromptPressureBySession.values()) {
 		if (entry.pct > 0 && (best === null || entry.pct > best.pct)) {
 			best = entry;
 		}

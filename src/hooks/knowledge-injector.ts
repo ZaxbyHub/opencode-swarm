@@ -11,7 +11,9 @@ import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { getCurrentTaskId, loadPlan } from '../plan/manager.js';
 import {
 	allocateInjectionBudget,
-	getSystemEnhancerDemand,
+	getProducerEmission,
+	recordProducerEmission,
+	recordProducerGrant,
 } from '../services/injection-budget.js';
 import { getRunMemorySummary } from '../services/run-memory.js';
 import {
@@ -53,7 +55,13 @@ import type {
 import { isActiveStatus } from './knowledge-types.js';
 import { extractModelInfo, resolveModelLimit } from './model-limits.js';
 import { searchKnowledge } from './search-knowledge.js';
-import { readSwarmFileAsync, safeHook } from './utils.js';
+import {
+	estimateCharsForTokens,
+	estimateTokens,
+	estimateTokensFromCharCount,
+	readSwarmFileAsync,
+	safeHook,
+} from './utils.js';
 
 // ============================================================================
 // Internal Helpers (NOT exported)
@@ -721,7 +729,7 @@ async function injectForDelegateIntoMessages(
 	// delegate can cite it and the ack-collector recovers the original trace.
 	const block = buildDelegateDirectiveBlock(entries, config, trace_id);
 	if (!block) return;
-	injectKnowledgeMessage(output, block);
+	injectKnowledgeMessage(output, block, sessionId);
 }
 
 /** Returns true if this agent is the architect (the sole intended recipient of orchestrator-tier knowledge injection). */
@@ -822,6 +830,7 @@ export function matchesDelegateScope(
 function injectKnowledgeMessage(
 	output: { messages?: MessageWithParts[] },
 	text: string,
+	sessionId?: string,
 ): void {
 	if (!output.messages) return;
 
@@ -847,6 +856,19 @@ function injectKnowledgeMessage(
 	};
 
 	output.messages.splice(insertIdx, 0, knowledgeMessage);
+
+	// #2107 §2: record what actually reached the model-visible surface (this is
+	// a messages-surface producer — final accounting measures it directly, so
+	// this entry is attribution-only and is never added to the measured total).
+	if (sessionId) {
+		recordProducerEmission(
+			sessionId,
+			'knowledge-injector',
+			estimateTokens(knowledgeMessage.parts[0]?.text ?? ''),
+			0,
+			'messages',
+		);
+	}
 }
 
 // ============================================================================
@@ -931,8 +953,8 @@ export function createKnowledgeInjectorHook(
 			}
 
 			// Budget-residual check (BACM-style: evaluate headroom before appending)
-			// Uses the same 0.33 tok/char ratio as estimateTokens() in context-budget.ts
-			const CHARS_PER_TOKEN = 1 / 0.33;
+			// Uses the canonical estimator's inverse (estimateCharsForTokens) — the
+			// single sanctioned char/token conversion (issue #1616/#2107).
 			const liveModelInfo = getLiveContextModelIdentity(sessionId);
 			const { modelID, providerID } =
 				liveModelInfo ?? extractModelInfo(output.messages);
@@ -953,7 +975,7 @@ export function createKnowledgeInjectorHook(
 				modelLimitOverrides,
 				liveContextLimit,
 			);
-			const MODEL_LIMIT_CHARS = Math.floor(modelLimitTokens * CHARS_PER_TOKEN);
+			const MODEL_LIMIT_CHARS = estimateCharsForTokens(modelLimitTokens);
 			const existingChars = output.messages.reduce((sum, msg) => {
 				return (
 					sum + (msg.parts?.reduce((s, p) => s + (p.text?.length ?? 0), 0) ?? 0)
@@ -1008,15 +1030,30 @@ export function createKnowledgeInjectorHook(
 				return;
 			}
 
-			// FR-002: unified injection budget — draw from shared ceiling so
-			// system-enhancer + knowledge-injector combined stay within budget.
+			// FR-002 / #2107 §2: unified injection budget — draw from shared ceiling so
+			// system-enhancer + knowledge-injector combined stay within budget, and
+			// book the allocator-derived grant + actual emission into the turn ledger.
 			if (unifiedInjectionTokens !== undefined) {
 				const sessionID = sessionId;
-				const seDemand = sessionID ? getSystemEnhancerDemand(sessionID) : 0;
+				const seDemand = sessionID
+					? getProducerEmission(sessionID, 'system-enhancer')
+					: 0;
+				const requestedTokens = estimateTokensFromCharCount(effectiveBudget);
 				const allocation = allocateInjectionBudget(seDemand, effectiveBudget, {
 					totalBudgetTokens: unifiedInjectionTokens,
 				});
-				effectiveBudget = Math.floor(allocation.knowledgeInjectorTokens / 0.33);
+				effectiveBudget = estimateCharsForTokens(
+					allocation.knowledgeInjectorTokens,
+				);
+				if (sessionID) {
+					recordProducerGrant(
+						sessionID,
+						'knowledge-injector',
+						requestedTokens,
+						allocation.knowledgeInjectorTokens,
+						'messages',
+					);
+				}
 			}
 
 			if (isDelegatedAgent(agentName)) {
@@ -1089,7 +1126,7 @@ export function createKnowledgeInjectorHook(
 					}
 				}
 				if (cacheVerifiable)
-					injectKnowledgeMessage(output, cachedInjectionText);
+					injectKnowledgeMessage(output, cachedInjectionText, sessionId);
 				const sessionID = sessionId;
 				if (sessionID && cacheVerifiable) {
 					if (cachedCriticalIds.length > 0) {
@@ -1245,7 +1282,7 @@ export function createKnowledgeInjectorHook(
 				}
 				// Drift or briefing exists — cache and inject it directly
 				cachedInjectionText = freshPreamble;
-				injectKnowledgeMessage(output, cachedInjectionText);
+				injectKnowledgeMessage(output, cachedInjectionText, sessionId);
 				return;
 			}
 
@@ -1468,7 +1505,7 @@ export function createKnowledgeInjectorHook(
 					return;
 				}
 			}
-			injectKnowledgeMessage(output, cachedInjectionText);
+			injectKnowledgeMessage(output, cachedInjectionText, sessionId);
 
 			// v2: Populate in-memory currentCriticalShownIds so the toolBefore
 			// enforcement gate can read O(1) without re-scanning JSONL.

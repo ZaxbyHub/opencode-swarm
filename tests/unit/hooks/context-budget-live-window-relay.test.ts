@@ -24,7 +24,7 @@ const SESSION_ID = 'relay-session';
 
 /**
  * ~150k estimated tokens across a preserved user turn plus a prunable tool
- * result. `estimateTokens` is chars/3.5.
+ * result. `estimateTokens` is the canonical 0.33 tok/char heuristic (#1616).
  *
  * Against a 128000 window that is >100% (well past `critical_threshold` 0.9,
  * so hard enforcement runs). Against a 1_000_000 window it is ~15% — nothing
