@@ -171,6 +171,21 @@ describe('final context accounting (#2107 §3)', () => {
 		expect(text2).not.toContain('[CONTEXT PRESSURE');
 	});
 
+	test('bands are independent: warn latch does not suppress a later critical warning', async () => {
+		const step = createFinalContextAccountingStep({ config: makeConfig() });
+		const warnMessages = [messageOf('user', 'y'.repeat(240_000))]; // ~79% → warn
+		await step({}, { messages: warnMessages });
+		expect(
+			String((warnMessages[0]?.parts?.[0] as { text?: string })?.text ?? ''),
+		).toContain('[CONTEXT PRESSURE (estimated):');
+		const critMessages = [messageOf('user', 'z'.repeat(330_000))]; // ~109% → critical
+		await step({}, { messages: critMessages });
+		const critText = String(
+			(critMessages[0]?.parts?.[0] as { text?: string })?.text ?? '',
+		);
+		expect(critText).toContain('CRITICAL (estimated)');
+	});
+
 	test('critical band wording distinguishes advisory from actual pruning', async () => {
 		const step = createFinalContextAccountingStep({ config: makeConfig() });
 		const messages = [messageOf('user', 'z'.repeat(330_000))]; // ~110K > critical

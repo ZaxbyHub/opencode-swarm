@@ -1,8 +1,10 @@
 /**
  * Unified Injection Budget Service (FR-002).
  *
- * Pure, side-effect-free allocation function for the combined
- * system-enhancer + knowledge-injector injection ceiling.
+ * Two responsibilities: (1) the pure, side-effect-free FR-002 allocation
+ * function for the combined system-enhancer + knowledge-injector injection
+ * ceiling, and (2) the per-session/per-turn producer ledger (#2107 §2) that
+ * every model-visible producer claims from or records emissions into.
  *
  * Allocation strategy: proportional share.
  * - When combined demand fits within the budget, each component receives its
@@ -151,7 +153,6 @@ export type InjectionProducer =
 	| 'memory-recall'
 	| 'advisory-queue'
 	| 'swarm-command-banner'
-	| 'context-budget-warning'
 	| 'linked-cohort-advisory'
 	| 'spec-drift-advisory'
 	| 'final-accounting-warning';
@@ -168,8 +169,6 @@ export interface ProducerAccounting {
 	/** Tokens the producer wanted but did not emit (its own pruning). */
 	truncated: number;
 	surface: InjectionSurface;
-	/** True when the producer ran with NO ledger present (fail-open, #1617). */
-	failOpen: boolean;
 }
 
 export interface TurnLedgerSummary {
@@ -228,7 +227,6 @@ function getOrCreateAccounting(
 			emitted: 0,
 			truncated: 0,
 			surface,
-			failOpen: false,
 		};
 		ledger.producers.set(producer, accounting);
 	}
@@ -401,7 +399,6 @@ export function getTurnLedgerSummary(
 			emitted: a.emitted,
 			truncated: a.truncated,
 			surface: a.surface,
-			failOpen: a.failOpen,
 		})),
 	};
 }
@@ -433,4 +430,13 @@ export function advanceTurnGeneration(sessionID: string): void {
  */
 export function clearTurnLedger(sessionID: string): void {
 	turnLedgers.delete(sessionID);
+}
+
+/**
+ * Clear every session's ledger. Called from `resetSwarmState` so the
+ * plugin-wide reset also resets per-turn producer accounting (zaxbysauce
+ * review on PR #2415: the reset pattern must cover ALL module-scoped maps).
+ */
+export function clearAllTurnLedgers(): void {
+	turnLedgers.clear();
 }

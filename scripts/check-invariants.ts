@@ -773,7 +773,7 @@ const INLINE_TOKEN_FORMULA_ALLOWLIST: ReadonlyArray<{
 const TOKEN_FORMULA_RATIO_RE =
 	/(?:0\.33|0\.25|0\.5(?!\d)|\/\s*3\.5|\/\s*0\.33|\/\s*[234](?![\d.])|\*\s*[234](?![\d.]))/;
 const TOKEN_FORMULA_CONTEXT_RE = /[Tt]oken|[Cc]har/;
-const TOKEN_FORMULA_SHAPE_RE = /Math\.(?:ceil|floor|max| min)\s*\(/;
+const TOKEN_FORMULA_SHAPE_RE = /Math\.(?:ceil|floor|max|min)\s*\(/;
 
 /** Pure detector over one file's lines (exported for unit tests). */
 export function findInlineTokenFormulaViolations(

@@ -12,6 +12,7 @@ import {
 	claimTurnBudget,
 	recordProducerEmission,
 } from '../services/injection-budget';
+import { log } from '../utils/logger';
 import { type MemoryConfig, resolveMemoryConfig } from './config';
 import type {
 	MemoryGateway,
@@ -127,6 +128,11 @@ async function injectIntoMessages(
 		},
 	);
 	const grantedTokenBudget = claim.granted;
+	if (!claim.ledgerPresent) {
+		log(
+			'memory-injector: no injection ledger this turn — failing open to recall.injection.tokenBudget; unified hard ceiling unavailable',
+		);
+	}
 	const result = await recallForAgent({
 		directory: options.directory,
 		config: options.config,

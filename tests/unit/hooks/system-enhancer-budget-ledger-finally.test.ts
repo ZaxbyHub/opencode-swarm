@@ -114,6 +114,10 @@ describe('system-enhancer budget ledger — unconditional write on mid-turn thro
 	});
 
 	afterEach(() => {
+		// Best-effort module-mock cleanup (check:mock-cleanup requires it).
+		// Note: Bun's mock.restore does not reliably undo mock.module; this
+		// file stays isolated for that reason (see the header comment).
+		mock.restore();
 		fs.rmSync(tempDir, { recursive: true, force: true });
 		clearTurnLedger(sessionID);
 	});

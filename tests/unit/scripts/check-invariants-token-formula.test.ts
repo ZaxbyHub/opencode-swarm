@@ -72,6 +72,14 @@ describe('findInlineTokenFormulaViolations (drift guard, #2107 §1)', () => {
 		).toHaveLength(0);
 	});
 
+	test('Math.min formulas are detected (shape-regex regression, PR #2415 review)', () => {
+		expect(
+			findInlineTokenFormulaViolations('src/services/example.ts', [
+				'return Math.min(text.length / 4, cap); // token estimate',
+			]),
+		).toHaveLength(1);
+	});
+
 	test('non-exempt files with the same shape are still flagged', () => {
 		expect(
 			findInlineTokenFormulaViolations('src/context-map/example.ts', [

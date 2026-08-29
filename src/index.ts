@@ -218,7 +218,7 @@ import {
 	ensureAgentSession,
 	getActiveWindow,
 	getAgentSession,
-	getFinalPromptPressurePct,
+	getFinalPromptPressure,
 	getSessionBudgetPct,
 	swarmState,
 } from './state';
@@ -3527,7 +3527,7 @@ async function initializeOpenCodeSwarm(
 				// Fall back to the footprint pct before the final accounting step
 				// has run for the session.
 				const pressurePct =
-					getFinalPromptPressurePct(input.sessionID) ||
+					getFinalPromptPressure(input.sessionID)?.pct ??
 					getSessionBudgetPct(input.sessionID);
 				if (pressurePct >= 50) {
 					const pressureSession = ensureAgentSession(

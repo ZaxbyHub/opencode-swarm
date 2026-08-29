@@ -286,6 +286,9 @@ export function createRoleFilterSystemHook(
 					removedTokens += estimateTokens(content);
 				}
 			}
+			// Assumption: only the system-enhancer pushes [FOR: role] fragments
+			// into output.system today (verified by grep); if another producer
+			// ever does, the deduction must be attributed per-producer.
 			if (removedTokens > 0) {
 				deductProducerEmission(
 					input.sessionID,

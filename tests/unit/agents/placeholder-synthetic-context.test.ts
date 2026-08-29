@@ -76,24 +76,25 @@ describe('synthetic ProjectContext placeholder survival (#2107 §6)', () => {
 	});
 
 	test('placeholder-shaped synthetic values are not double-substituted', () => {
+		// BUILD_CMD is carried into the architect prompt verbatim (verified by
+		// the propagation probe below), so a placeholder-shaped VALUE inside it
+		// exercises one-pass substitution: the {{KEY}} tokens in the template
+		// are replaced, but the substituted CONTENT must not be re-scanned,
+		// eaten, or expanded.
 		const tricky: ProjectContext = {
 			...syntheticContext,
-			// A VALUE that looks like a placeholder must survive as literal
-			// content (substitution is one pass), not be eaten or expanded.
-			CODER_CONSTRAINTS: '- literal {{NOT_A_TEMPLATE_KEY}} stays visible',
+			BUILD_CMD: 'bun run build && echo {{NOT_A_TEMPLATE_KEY}}',
 		};
 		const configs = getAgentConfigs(undefined, undefined, undefined, tricky);
-		const coderPrompt = Object.entries(configs)
-			.filter(([name]) => name.includes('coder'))
+		const architectPrompt = Object.entries(configs)
+			.filter(([name]) => name.includes('architect'))
 			.map(([, agentConfig]) => agentConfig.prompt)
 			.find((prompt): prompt is string => typeof prompt === 'string');
-		expect(coderPrompt).toBeDefined();
-		// Lowercase keys never match the uppercase placeholder grammar; the
-		// uppercase-shaped literal here is not a known substitution key, so the
-		// production guard's fail-open path (deferred warning, prompt still
-		// registered) applies — the string may be absent from THIS agent's
-		// prompt if coder constraints land elsewhere, so only assert the
-		// no-known-key property: no {{CODER_CONSTRAINTS}} token remains.
-		expect(coderPrompt).not.toContain('{{CODER_CONSTRAINTS}}');
+		expect(architectPrompt).toBeDefined();
+		// The known key was substituted (no raw {{BUILD_CMD}} survives)…
+		expect(architectPrompt).not.toContain('{{BUILD_CMD}}');
+		// …and the placeholder-shaped VALUE inside the substituted content
+		// survived un-mangled: substitution is one pass.
+		expect(architectPrompt).toContain('{{NOT_A_TEMPLATE_KEY}}');
 	});
 });

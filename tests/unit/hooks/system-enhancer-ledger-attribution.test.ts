@@ -11,7 +11,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import {
@@ -20,10 +20,12 @@ import {
 } from '../../../src/hooks/system-enhancer';
 import { estimateTokens } from '../../../src/hooks/utils';
 import {
+	beginTurnLedger,
 	clearTurnLedger,
 	getTurnLedgerSummary,
 } from '../../../src/services/injection-budget';
 import { resetSwarmState } from '../../../src/state';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const SESSION = 'ledger-attribution-session';
 
@@ -53,7 +55,7 @@ describe('system-enhancer ledger attribution — exact-once system surface (#210
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = mkdtempSync(path.join('.', 'tmp-se-attribution-'));
+		tempDir = canonicalMkdtemp('se-attribution-');
 		const swarmDir = path.join(tempDir, '.swarm');
 		mkdirSync(swarmDir, { recursive: true });
 		writeFileSync(path.join(swarmDir, 'plan.json'), PLAN_JSON);
@@ -132,7 +134,7 @@ describe('system-enhancer ledger attribution — exact-once system surface (#210
 		expect(output.system).toHaveLength(1);
 		const advisory = output.system[0] as string;
 		clearTurnLedger(SESSION);
-		beginLedgerForAttribution();
+		beginTurnLedger(SESSION, 4000, false);
 		_test_exports.maybeAppendSpecDriftAdvisory(output, tempDir, plan, SESSION);
 		const producer = getTurnLedgerSummary(SESSION)?.producers.find(
 			(p) => p.producer === 'spec-drift-advisory',
@@ -149,7 +151,7 @@ describe('system-enhancer ledger attribution — exact-once system surface (#210
 	test('spec-drift helper without a session records nothing and does not throw', () => {
 		const output = { system: [] as string[] };
 		const plan = { _specStale: true } as never;
-		beginLedgerForAttribution();
+		beginTurnLedger(SESSION, 4000, false);
 		expect(() =>
 			_test_exports.maybeAppendSpecDriftAdvisory(output, tempDir, plan),
 		).not.toThrow();
@@ -161,10 +163,3 @@ describe('system-enhancer ledger attribution — exact-once system surface (#210
 		).toBeUndefined();
 	});
 });
-
-function beginLedgerForAttribution(): void {
-	// Mirror the hook's begin (ceiling inactive for the default config shape).
-	// Imported lazily to keep the helper local to this file.
-	const { beginTurnLedger } = require('../../../src/services/injection-budget');
-	beginTurnLedger(SESSION, 4000, false);
-}

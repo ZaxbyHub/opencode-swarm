@@ -956,7 +956,7 @@ export function formatStatusMarkdown(status: StatusData): string {
 				`**Swarm injection footprint**: ${pct}% of model window (intermediate measurement)`,
 			);
 		}
-		// #2107 " + chr(167) + "3: the truthful FINAL pressure line. Measured after every
+		// #2107 §3: the truthful FINAL pressure line. Measured after every
 		// injector ran, against the same model window physical pruning uses.
 		const finalPressure = getDisplayFinalPromptPressure();
 		if (finalPressure && finalPressure.pct > 0) {

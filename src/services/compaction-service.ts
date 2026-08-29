@@ -8,12 +8,12 @@
  *  - Emergency   (default 80%): hard truncation to system + current task + last N turns
  *
  * Consumes the per-session FINAL PROMPT PRESSURE recorded by the final
- * context-accounting step (#2107 " + chr(167) + "3) after every injector has run
+ * context-accounting step (#2107 §3) after every injector has run
  * (`getFinalPromptPressure`); before that step has run for a session it falls
  * back to the legacy injection-footprint pct (`getSessionBudgetPct`) so the
  * tiers never go dark.
  * Never throws. Advisory system message injection via callback. These tiers
- * ADVISE the model to compact " + chr(8212) + " they never compact anything themselves and
+ * ADVISE the model to compact — they never compact anything themselves and
  * never claim a compaction was performed (only the physical pruning in
  * src/hooks/context-budget.ts actually removes content).
  */

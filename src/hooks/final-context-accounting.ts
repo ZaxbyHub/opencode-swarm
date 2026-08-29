@@ -45,8 +45,11 @@ import {
 	recordProducerEmission,
 } from '../services/injection-budget.js';
 import {
+	clearFinalAccountingWarningBands,
+	getFinalAccountingWarningBand,
 	getLiveContextModelIdentity,
 	getLiveContextWindow,
+	setFinalAccountingWarningBand,
 	setFinalPromptPressure,
 } from '../state.js';
 import { log } from '../utils/logger.js';
@@ -67,35 +70,17 @@ interface FinalAccountingOptions {
 }
 
 /**
- * Bounded one-shot-per-band warning suppression (AGENTS.md invariant 8).
- * Keyed by sessionID; FIFO-evicted past the cap. Deliberately NOT reset
- * on compaction: "once per session per band" mirrors the established
- * contextPressureWarningSent one-shot pattern; the compaction tiers have
- * their own per-session hysteresis. The map is intentionally independent
- * of the ledger's own eviction — both are capped, so the worst case is a
- * re-warn for a session that outlived the 256-entry working set.
+ * One-shot-per-band warning suppression (#2107 §3), backed by the
+ * session-keyed `finalAccountingWarningBandsBySession` map in state.ts so
+ * `resetSwarmState` covers it (AGENTS.md invariant 8). Deliberately NOT
+ * reset on compaction: "once per session per band" mirrors the
+ * established contextPressureWarningSent one-shot pattern; the compaction
+ * tiers have their own per-session hysteresis.
  */
-const warningBandSentBySession = new Map<
-	string,
-	{ warn: boolean; critical: boolean }
->();
-const MAX_TRACKED_WARNING_SESSIONS = 256;
-
-function evictionGuard(sessionID: string): void {
-	if (
-		!warningBandSentBySession.has(sessionID) &&
-		warningBandSentBySession.size >= MAX_TRACKED_WARNING_SESSIONS
-	) {
-		const oldest = warningBandSentBySession.keys().next().value;
-		if (oldest !== undefined && oldest !== sessionID) {
-			warningBandSentBySession.delete(oldest);
-		}
-	}
-}
 
 /** Test seam: clear warning-suppression state. */
 export function _resetFinalAccountingState(): void {
-	warningBandSentBySession.clear();
+	clearFinalAccountingWarningBands();
 }
 
 export function createFinalContextAccountingStep(
@@ -160,6 +145,13 @@ export function createFinalContextAccountingStep(
 			);
 			if (modelLimit <= 0) return;
 
+			// NOTE: context-budget.ts (earlier in this chain) also runs
+			// computeContextUsage over the conversation. The second scan here is
+			// REQUIRED, not redundant: the interleaved handlers (advisory drain,
+			// memory recall, knowledge injection) mutate output.messages between
+			// the two points, and context-budget may prune/mask content, so its
+			// pre-mutation number is stale for final accounting. Caching across
+			// handlers would under-count injected content.
 			// Measure the final messages surface exactly once. Provider-reported
 			// usage (latest assistant info.tokens + estimated tail) is preferred
 			// over the pure estimate.
@@ -196,16 +188,7 @@ export function createFinalContextAccountingStep(
 
 			let warningText = '';
 			if (band !== 'ok') {
-				evictionGuard(sessionID);
-				let bandState = warningBandSentBySession.get(sessionID);
-				if (!bandState) {
-					bandState = { warn: false, critical: false };
-					warningBandSentBySession.set(sessionID, bandState);
-				}
-				if (
-					(band === 'critical' && !bandState.critical) ||
-					(band === 'warn' && !bandState.warn)
-				) {
+				if (!getFinalAccountingWarningBand(sessionID, band)) {
 					const pctStr = Math.min(999, Math.round(pctWithout)).toString();
 					const limitK = Math.round(modelLimit / 1000);
 					const source =
@@ -216,8 +199,7 @@ export function createFinalContextAccountingStep(
 						band === 'critical'
 							? `[CONTEXT PRESSURE — CRITICAL (estimated): ~${pctStr}% of the ~${limitK}K-token window (${source}). Consider compacting now or offloading detail to .swarm/context.md. Advisory only — this message removed no content.]\n\n`
 							: `[CONTEXT PRESSURE (estimated): ~${pctStr}% of the ~${limitK}K-token window (${source}). Consider compaction at the next phase boundary. Advisory only — this message removed no content.]\n\n`;
-					if (band === 'critical') bandState.critical = true;
-					else bandState.warn = true;
+					setFinalAccountingWarningBand(sessionID, band);
 				}
 			}
 
