@@ -1155,12 +1155,24 @@ function persistCheckpointWithAuditCompaction(
 	// Persist durable state before touching the diagnostic audit file. This keeps
 	// a checkpoint-write failure from publishing an audit transition for a state
 	// the caller never observed. A successful audit rewrite is accounted for by a
-	// second checkpoint write; if that accounting write fails, the metric
-	// under-reports rather than claiming drops that never landed.
+	// second checkpoint write. That accounting is diagnostic-only: once the
+	// primary write has committed the requested mutation, a failed accounting
+	// write must not make the caller observe a false mutation failure.
 	_internals.writeCheckpointFile(directory, checkpoint);
 	if (!applyAuditCompaction(directory, plan) || !plan) return;
+	const previousDropped = checkpoint.maintenance.droppedAuditTransitions;
 	checkpoint.maintenance.droppedAuditTransitions += plan.dropped;
-	_internals.writeCheckpointFile(directory, checkpoint);
+	try {
+		_internals.writeCheckpointFile(directory, checkpoint);
+	} catch (err) {
+		// Keep the live view aligned with the durable primary checkpoint. The
+		// compacted audit stays valid, while its dropped-count metric conservatively
+		// under-reports until a later successful compaction accounting write.
+		checkpoint.maintenance.droppedAuditTransitions = previousDropped;
+		log(
+			`[pr-monitor] audit compaction accounting failed (non-fatal): ${storageErrorCode(err)}`,
+		);
+	}
 }
 
 function auditStats(directory: string): { lines: number; bytes: number } {

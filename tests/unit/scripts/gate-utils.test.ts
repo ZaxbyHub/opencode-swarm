@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { spawnUtf8 } from '../../../scripts/gate-utils';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
-function timeoutProbe(markerPath: string): string[] {
+function timeoutProbe(markerPath: string, aliveDelayMs: number): string[] {
 	return [
 		Bun.which('node') ?? process.execPath,
 		'-e',
@@ -12,7 +12,7 @@ function timeoutProbe(markerPath: string): string[] {
 			"const fs = require('node:fs');",
 			'const marker = process.argv[process.argv.length - 1];',
 			'fs.writeFileSync(marker + ".started", "started");',
-			'setTimeout(() => fs.writeFileSync(marker, "alive"), 8000);',
+			`setTimeout(() => fs.writeFileSync(marker, "alive"), ${aliveDelayMs});`,
 			'setInterval(() => {}, 1000);',
 		].join(' '),
 		markerPath,
@@ -30,17 +30,21 @@ describe('gate-utils subprocess ownership', () => {
 			// executed its first statement, testing shell startup rather than
 			// spawnUtf8's timeout/termination contract.
 			const isWindows = process.platform === 'win32';
-			const timeoutMs = isWindows ? 1_000 : 200;
+			const timeoutMs = isWindows ? 2_000 : 200;
+			const aliveDelayMs = timeoutMs + 250;
 			const maxElapsedMs = isWindows ? 5_000 : 4_000;
 			const result = await spawnUtf8(
-				timeoutProbe(markerPath),
+				timeoutProbe(markerPath, aliveDelayMs),
 				process.cwd(),
 				timeoutMs,
 			);
 
 			expect(result.exitCode).toBe(1);
 			expect(performance.now() - started).toBeLessThan(maxElapsedMs);
-			await new Promise((resolve) => setTimeout(resolve, 350));
+			// The marker is deliberately scheduled after the timeout. Waiting past
+			// its deadline makes the assertion falsify a child that survived the
+			// timeout instead of merely proving that spawnUtf8 returned promptly.
+			await new Promise((resolve) => setTimeout(resolve, aliveDelayMs + 250));
 			expect(fs.existsSync(`${markerPath}.started`)).toBe(true);
 			expect(fs.existsSync(markerPath)).toBe(false);
 		} finally {

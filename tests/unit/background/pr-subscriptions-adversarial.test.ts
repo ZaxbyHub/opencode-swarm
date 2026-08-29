@@ -338,6 +338,34 @@ describe('pr-subscriptions — adversarial persistence regressions (#2042)', () 
 		expect((await listActive(dir))[0]?.headRefOid).toBeUndefined();
 	});
 
+	test('F9a: a failed audit-compaction accounting write does not reject an already durable mutation', async () => {
+		const created = await subscribe(dir, subscriptionInput('902'));
+		const audit = path.join(dir, '.swarm', PR_SUBSCRIPTIONS_AUDIT_FILE);
+		fs.appendFileSync(
+			audit,
+			'{"ts":1,"seq":1,"kind":"subscribe"}\n'.repeat(10_000),
+		);
+		let writeCalls = 0;
+		_internals.writeCheckpointFile = ((directory, checkpoint) => {
+			writeCalls += 1;
+			if (writeCalls === 2) {
+				throw new Error('injected accounting write failure');
+			}
+			realWriteCheckpointFile(directory, checkpoint);
+		}) as typeof _internals.writeCheckpointFile;
+
+		expect(await unsubscribe(dir, created.correlationId)).not.toBeNull();
+		expect(writeCalls).toBe(2);
+		expect(await listActive(dir)).toEqual([]);
+		const checkpoint = JSON.parse(
+			fs.readFileSync(
+				path.join(dir, '.swarm', PR_SUBSCRIPTIONS_CHECKPOINT_FILE),
+				'utf-8',
+			),
+		) as { maintenance: { droppedAuditTransitions: number } };
+		expect(checkpoint.maintenance.droppedAuditTransitions).toBe(0);
+	});
+
 	test('F10: invalid runtime snapshot updates reject without corrupting the checkpoint', async () => {
 		const created = await subscribe(dir, subscriptionInput('1001'));
 		await expect(
