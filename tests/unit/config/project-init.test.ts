@@ -1,44 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import {
-	writeProjectConfigIfNew,
-	writeSwarmConfigExampleIfNew,
-} from '../../../src/config/project-init';
-import { clearDeferredWarnings } from '../../../src/services/warning-buffer';
+import { writeSwarmConfigExampleIfNew } from '../../../src/config/project-init';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
-
-describe('writeProjectConfigIfNew', () => {
-	let dir: string;
-	let cleanup: () => void;
-
-	beforeEach(() => {
-		({ dir, cleanup } = createSafeTestDir('swarm-project-init-'));
-		clearDeferredWarnings();
-	});
-
-	afterEach(() => {
-		clearDeferredWarnings();
-		cleanup();
-	});
-
-	const configPath = (d: string) =>
-		path.join(d, '.opencode', 'opencode-swarm.json');
-
-	test('does not create .opencode/opencode-swarm.json', () => {
-		writeProjectConfigIfNew(dir);
-		expect(fs.existsSync(configPath(dir))).toBe(false);
-	});
-
-	test('does not create .opencode directory', () => {
-		writeProjectConfigIfNew(dir);
-		expect(fs.existsSync(path.join(dir, '.opencode'))).toBe(false);
-	});
-
-	test('does not throw', () => {
-		expect(() => writeProjectConfigIfNew(dir, true)).not.toThrow();
-	});
-});
 
 describe('writeSwarmConfigExampleIfNew', () => {
 	let dir: string;

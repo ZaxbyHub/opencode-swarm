@@ -3,20 +3,6 @@ import * as path from 'node:path';
 import { DEFAULT_MODELS } from './constants';
 
 /**
- * Intentionally a no-op.
- *
- * Issue #2420: the plugin no longer auto-creates project-level
- * `.opencode/opencode-swarm.json` overrides because empty starter files are
- * frequently mistaken for active overrides.
- */
-export function writeProjectConfigIfNew(
-	_directory: string,
-	_quiet = false,
-): void {
-	// No-op by design: do not auto-create project override files.
-}
-
-/**
  * Writes .swarm/config.example.json on first plugin init for a given project.
  * Creates .swarm/ if it does not yet exist. Non-fatal: all errors are silently
  * ignored.
