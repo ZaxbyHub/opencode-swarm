@@ -67,8 +67,8 @@ export async function executeRebindPrFeedbackHead(
 
 export const rebind_pr_feedback_head: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
-		description:
-			'Rebind a PR_FEEDBACK workflow to a new verified remote PR head after merge/rebase/conflict repair (base-sync). Use ONLY when the history genuinely changed to repair base drift or conflicts: it refuses a no-op rebind to the current intake head, refuses while publication is armed, and refuses while lanes are in flight. It invalidates every ancestry-bound receipt (Stage A, verification, ordered gates) so the full mechanical ladder re-runs on the new ancestry. Requires the full 40-char new PR head SHA; the current checkout must equal it.',
+	description:
+		'Rebind a PR_FEEDBACK workflow to a new verified remote PR head after merge/rebase/conflict repair (base-sync). Use ONLY when the history genuinely changed to repair base drift or conflicts: it refuses a no-op rebind to the current intake head, refuses while publication is armed (to change approved content after arming use invalidate_pr_feedback_publication), and refuses while lanes are in flight. It invalidates every ancestry-bound receipt (Stage A, verification, ordered gates) so the full mechanical ladder re-runs on the new ancestry. Requires the full 40-char new PR head SHA; the current checkout must equal it.',
 		args: {
 			pr_head_sha: RebindPrFeedbackHeadArgsSchema.shape.pr_head_sha,
 		},

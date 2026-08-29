@@ -10,6 +10,7 @@ import {
 	type PrWorkflowGitState,
 } from '../git/pr-workflow-state';
 import {
+	describePrWorkflowPublicationSection,
 	type PrFeedbackInventoryAmendmentRecord,
 	type PrWorkflowGateState,
 	prWorkflowSessionFileStem,
@@ -99,6 +100,13 @@ interface PrWorkflowStatusResult {
 	git: PrWorkflowStatusGitState;
 	checkout: PrWorkflowGitState;
 	gate: PrWorkflowStatusGateSummary;
+	/**
+	 * Issue #2108: publication-generation summary (generation, state, target,
+	 * attempts, invalidation reason, recovery instructions) — the operator
+	 * surface for inspecting the armed/invalidated publication window without
+	 * editing state files. Null when the workflow has no publication state.
+	 */
+	publication: string | null;
 	nextStep: string;
 }
 
@@ -414,6 +422,9 @@ async function executePrWorkflowStatus(
 		git,
 		checkout,
 		gate,
+		publication: activeState
+			? describePrWorkflowPublicationSection(activeState)
+			: null,
 		nextStep: describeNextStep(gate, git, checkout),
 	};
 	return JSON.stringify(result, null, 2);

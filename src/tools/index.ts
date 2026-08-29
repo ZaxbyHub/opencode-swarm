@@ -207,6 +207,10 @@ export {
 	prepare_pr_workflow_checkout,
 } from './prepare-pr-workflow-checkout';
 export {
+	executeInvalidatePrFeedbackPublication,
+	invalidate_pr_feedback_publication,
+} from './invalidate-pr-feedback-publication';
+export {
 	executeRebindPrFeedbackHead,
 	rebind_pr_feedback_head,
 } from './rebind-pr-feedback-head';

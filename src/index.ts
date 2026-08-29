@@ -162,6 +162,7 @@ import { microReflectorAfter } from './hooks/micro-reflector.js';
 import { normalizeToolName } from './hooks/normalize-tool-name';
 import { createPrAutoSubscribeHook } from './hooks/pr-auto-subscribe.js';
 import { enforcePrWorkflowToolBefore } from './hooks/pr-workflow-gate.js';
+import { recordPrFeedbackPushAttemptResult } from './hooks/pr-workflow-gate.js';
 import { createPrWorkflowResponseGate } from './hooks/pr-workflow-response-gate.js';
 import { createPrWorkflowSessionResolver } from './hooks/pr-workflow-session-resolver.js';
 import { collectReviewerReceiptAfter } from './hooks/review-receipt-collector.js';
@@ -3424,6 +3425,7 @@ async function initializeOpenCodeSwarm(
 					normalizeToolName(input.tool) ?? input.tool,
 					prWorkflowToolContext.args ?? undefined,
 					instanceGeneratedAgentNames,
+					input.callID,
 				);
 
 				// 4. Reviewer/delegation gate (FAIL-CLOSED).
@@ -3821,6 +3823,34 @@ async function initializeOpenCodeSwarm(
 			const afterCtx = resolveToolAfterContext(
 				input as { tool: string; sessionID: string; callID: string },
 			);
+			// Issue #2108: record the durable result of an admitted exact-bound
+			// push (`PR_FEEDBACK` publication attempts). Fail-open — a missed
+			// observation is recovered by the gate's reaper as `uncertain`, and
+			// publication truth always comes from complete_pr_workflow's direct
+			// remote verification. The gate session is resolved exactly as the
+			// tool-before enforcement does (child sessions walk to their parent).
+			try {
+				const pushCommand = afterCtx.args?.command;
+				if (
+					typeof pushCommand === 'string' &&
+					pushCommand.trim().toLowerCase().startsWith('git push')
+				) {
+					const pushAttemptSessionID =
+						await prWorkflowSessionResolver.resolve(input.sessionID);
+					await recordPrFeedbackPushAttemptResult(
+						ctx.directory,
+						{
+							sessionID: pushAttemptSessionID,
+							callID: input.callID,
+							tool: input.tool,
+						},
+						pushCommand,
+						output,
+					);
+				}
+			} catch {
+				// Fail-open by design (see comment above).
+			}
 			if (autoReviewConfig.enabled && isTaskTool) {
 				await completeReviewerScopeLifecycle({
 					directory: ctx.directory,

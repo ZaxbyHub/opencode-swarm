@@ -97,6 +97,7 @@ import { pre_check_batch } from './pre-check-batch';
 import { prepare_pr_feedback_scope } from './prepare-pr-feedback-scope';
 import { prepare_pr_workflow_checkout } from './prepare-pr-workflow-checkout';
 import { quality_budget } from './quality-budget';
+import { invalidate_pr_feedback_publication } from './invalidate-pr-feedback-publication';
 import { rebind_pr_feedback_head } from './rebind-pr-feedback-head';
 import { record_directive_override } from './record-directive-override';
 import { record_implementation_review } from './record-implementation-review';
@@ -193,6 +194,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	record_issue_publication: () => record_issue_publication,
 	record_issue_reproduction: () => record_issue_reproduction,
 	record_recurrence_sweep: () => record_recurrence_sweep,
+	invalidate_pr_feedback_publication: () => invalidate_pr_feedback_publication,
 	rebind_pr_feedback_head: () => rebind_pr_feedback_head,
 	run_pr_feedback_stage_a: () => run_pr_feedback_stage_a,
 	submit_council_verdicts: () => submit_council_verdicts,

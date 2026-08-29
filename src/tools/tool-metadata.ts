@@ -243,6 +243,11 @@ export const TOOL_METADATA = {
 			'prepare an auditable PR workflow checkout or restore its exact original branch/HEAD and preserved stash after terminal cleanup',
 		agents: ['architect'],
 	},
+	invalidate_pr_feedback_publication: {
+		description:
+			'invalidate the armed PR_FEEDBACK publication generation so approved content can change, superseding every content-dependent approval and reopening the exact scoped rework + fresh-review path (issue #2108)',
+		agents: ['architect'],
+	},
 	record_implementation_review: {
 		description:
 			'record fresh-context reviewer + critic APPROVE verdicts for the implementation diff so the /swarm issue --trace workflow can satisfy its review gate before commit-pr handoff',
