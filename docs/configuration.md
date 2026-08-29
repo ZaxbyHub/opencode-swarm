@@ -1090,6 +1090,11 @@ above `refresh_cap` are suppressed.
 
 - **`'json'` (default).** The graph lives solely in `.swarm/repo-graph.json`.
   Behavior is unchanged from prior releases.
+- **`'indexed'`.** In addition to `.swarm/repo-graph.json`, a derived
+  `.swarm/repo-memory.sqlite` index is maintained. `.swarm/repo-graph.json`
+  is **always written and remains authoritative in both modes** — the index
+  is never a second source of truth, only a read-side accelerator built from
+  it.
 
 > **Enabling `indexed` does not build the index immediately.** The index is
 > created by the next graph save (for example `repo_map action="build"`, a
@@ -1098,11 +1103,6 @@ above `refresh_cap` are suppressed.
 > plus a full index build on the synchronous system-prompt path. Until the next
 > save, reads transparently use the JSON path — nothing fails, it is simply not
 > yet accelerated.
-- **`'indexed'`.** In addition to `.swarm/repo-graph.json`, a derived
-  `.swarm/repo-memory.sqlite` index is maintained. `.swarm/repo-graph.json`
-  is **always written and remains authoritative in both modes** — the index
-  is never a second source of truth, only a read-side accelerator built from
-  it.
 
 What the index accelerates: bounded neighbourhood lookups that today require
 parsing the full JSON document — the coder localization block and reviewer

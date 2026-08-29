@@ -208,14 +208,25 @@ describe('repo-memory.sqlite clean stage survives closeRepoMemory throwing', () 
 				// The clean stage's own attempt to unlink surfaces truthfully as a
 				// warning rather than crashing: because the connection genuinely
 				// could not be closed (closeRepoMemory threw instead of releasing
-				// its lock), the OS-level unlink legitimately fails with EBUSY on a
-				// platform that locks open file handles (Windows). This is the
-				// expected, non-crashing degraded outcome — not a silent success —
-				// so this test pins the failure mode explicitly rather than
-				// asserting an unlink that the physical file lock makes impossible.
-				expect(output).toContain(
-					`Failed to clean active-state file ${REPO_MEMORY_FILENAME}`,
-				);
+				// its lock), the OS-level unlink legitimately fails with EBUSY on
+				// Windows, which locks open file handles. That is the expected,
+				// non-crashing degraded outcome — not a silent success — so the
+				// warning is pinned explicitly there. POSIX unlink(2) does not
+				// honor an open-handle lock, so on Linux/macOS the same stage
+				// silently succeeds: no warning, and the store file is really
+				// gone once the fixture's connection closes.
+				if (process.platform === 'win32') {
+					expect(output).toContain(
+						`Failed to clean active-state file ${REPO_MEMORY_FILENAME}`,
+					);
+				} else {
+					expect(output).not.toContain(
+						`Failed to clean active-state file ${REPO_MEMORY_FILENAME}`,
+					);
+					expect(existsSync(path.join(swarmDir(), REPO_MEMORY_FILENAME))).toBe(
+						false,
+					);
+				}
 				await fsp.access(archivePath).catch(() => {
 					throw new Error('archive dir missing');
 				});

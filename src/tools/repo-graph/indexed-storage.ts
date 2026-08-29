@@ -330,7 +330,7 @@ export function resolveGraphStorageMode(workspace: string): 'json' | 'indexed' {
 		return 'json';
 	}
 	if (configured !== 'indexed') return 'json';
-	if (!isIndexedStorageAvailable()) {
+	if (!_internals.isIndexedStorageAvailable()) {
 		logger.log(
 			'[repo-graph] storage=indexed requested but no SQLite driver is available; using json',
 		);
@@ -338,6 +338,16 @@ export function resolveGraphStorageMode(workspace: string): 'json' | 'indexed' {
 	}
 	return 'indexed';
 }
+
+/**
+ * Test seam (invariant 7: DI over mock.module) so the driver-unavailable
+ * fallback of {@link resolveGraphStorageMode} is exercisable without patching
+ * the module graph. Tests swap and restore the property; production reads it
+ * unchanged.
+ */
+export const _internals = {
+	isIndexedStorageAvailable,
+};
 
 // ============ Connection management ============
 

@@ -671,7 +671,10 @@ export async function saveGraph(
 		}
 	}
 
-	// Update cache with current file mtime.
+	// Update cache with current file mtime. Best-effort: the document is
+	// already durably renamed at this point, so a cache-refresh failure must
+	// not surface to the caller as a save failure — the entry self-invalidates
+	// against the next read's fresh stat instead.
 	// NOTE (issue #1534): this stat MUST NOT be reused as the index stamp — it is
 	// taken outside the save lock and stats WHATEVER IS AT THE PATH, so a
 	// concurrent unlocked writer's rename could validate an index holding THIS
@@ -679,8 +682,16 @@ export async function saveGraph(
 	// immediately BEFORE the rename above, from a stat of the TEMP file, so it
 	// identifies this writer's own bytes (`rename(2)` leaves the inode's mtime
 	// and size untouched). Do not "simplify" the two into one stat.
-	const stats = await fsPromises.stat(graphPath);
-	setCachedGraph(normalized, graph, stats.mtimeMs);
+	try {
+		const stats = await fsPromises.stat(graphPath);
+		setCachedGraph(normalized, graph, stats.mtimeMs);
+	} catch (error) {
+		logger.log(
+			`[repo-graph] post-save cache refresh failed (document was written): ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+	}
 }
 
 /**

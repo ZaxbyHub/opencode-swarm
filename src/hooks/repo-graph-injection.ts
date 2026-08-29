@@ -49,6 +49,14 @@ interface CachedGraph {
 	graph: RepoGraph;
 	mtimeMs: number;
 	size: number;
+	/**
+	 * File identity from `st.ino`. The indexed freshness stamp relies on it
+	 * because same-size/same-mtime-tick rewrites are common, and these caches
+	 * shadow that stamp (a hit short-circuits before the index is consulted).
+	 * On filesystems reporting no usable id it is 0 on both sides, so the
+	 * comparator degrades to mtime+size exactly as before.
+	 */
+	ino: number;
 }
 
 const cache = new Map<string, CachedGraph>();
@@ -90,6 +98,9 @@ export const _internals = {
 	// Seam (invariant 7: DI over mock.module) so tests can count SQLite reads
 	// and assert the suppression gates return before the index is consulted.
 	loadSubgraphForFiles,
+	// Exposed so tests can pin the key's ino sensitivity (PRR-003): dropping
+	// it would let same-size/same-mtime rewrites reuse stale subgraphs.
+	subgraphCacheKey,
 };
 
 function touchCache(key: string, value: CachedGraph): void {
@@ -113,8 +124,8 @@ function touchSubgraphCache(key: string, value: RepoGraph): void {
 }
 
 /**
- * Cache key for a subgraph request. The graph artifact's `{mtimeMs, size}` is
- * part of the key, so a graph change invalidates every cached subgraph for
+ * Cache key for a subgraph request. The graph artifact's `{mtimeMs, size, ino}`
+ * is part of the key, so a graph change invalidates every cached subgraph for
  * that directory without an explicit sweep — the identical invalidation
  * contract the full-graph LRU uses. Files are sorted because the closure is a
  * set union and is order-independent; the caller's own array order (which does
@@ -125,7 +136,7 @@ function touchSubgraphCache(key: string, value: RepoGraph): void {
  */
 function subgraphCacheKey(
 	directoryKey: string,
-	stat: { mtimeMs: number; size: number },
+	stat: { mtimeMs: number; size: number; ino: number },
 	files: readonly string[],
 	depth: number,
 ): string {
@@ -133,6 +144,7 @@ function subgraphCacheKey(
 		directoryKey,
 		String(stat.mtimeMs),
 		String(stat.size),
+		String(stat.ino),
 		String(depth),
 		[...files].sort().join('\u0000'),
 	].join('\u0000');
@@ -146,7 +158,11 @@ function subgraphCacheKey(
 type GraphGateResult =
 	| { kind: 'suppressed' }
 	| { kind: 'hit'; graph: RepoGraph }
-	| { kind: 'miss'; key: string; stat: { mtimeMs: number; size: number } };
+	| {
+			kind: 'miss';
+			key: string;
+			stat: { mtimeMs: number; size: number; ino: number };
+	  };
 
 /**
  * Gates 1-4 of the injection contract, in the order the approved plan for
@@ -195,14 +211,19 @@ async function evaluateGraphGates(
 	}
 
 	const cached = cache.get(key);
-	if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+	if (
+		cached &&
+		cached.mtimeMs === stat.mtimeMs &&
+		cached.size === stat.size &&
+		cached.ino === stat.ino
+	) {
 		touchCache(key, cached);
 		return { kind: 'hit', graph: cached.graph };
 	}
 	return {
 		kind: 'miss',
 		key,
-		stat: { mtimeMs: stat.mtimeMs, size: stat.size },
+		stat: { mtimeMs: stat.mtimeMs, size: stat.size, ino: stat.ino },
 	};
 }
 
@@ -210,7 +231,7 @@ async function evaluateGraphGates(
 function loadFullGraph(
 	directory: string,
 	key: string,
-	stat: { mtimeMs: number; size: number },
+	stat: { mtimeMs: number; size: number; ino: number },
 ): RepoGraph | null {
 	let graph: RepoGraph | null;
 	try {
@@ -223,7 +244,12 @@ function loadFullGraph(
 		cache.delete(key);
 		return null;
 	}
-	touchCache(key, { graph, mtimeMs: stat.mtimeMs, size: stat.size });
+	touchCache(key, {
+		graph,
+		mtimeMs: stat.mtimeMs,
+		size: stat.size,
+		ino: stat.ino,
+	});
 	return graph;
 }
 

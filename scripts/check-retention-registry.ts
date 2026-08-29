@@ -101,6 +101,9 @@ function listSourceModules(root: string): string[] {
 		for (const entry of fs.readdirSync(dir, {
 			withFileTypes: true,
 		})) {
+			// Never follow symlinks: a planted symlink under src/ must not expand
+			// the scan (or the CI read surface) beyond the repository checkout.
+			if (entry.isSymbolicLink()) continue;
 			const full = path.join(dir, entry.name);
 			if (entry.isDirectory()) {
 				walk(full);

@@ -26,6 +26,7 @@ import { loadDatabaseCtor } from '../../db/sqlite-loader';
 import { tryAcquireLock } from '../../parallel/file-locks';
 import { addEdge, upsertNode } from './builder';
 import {
+	_internals,
 	closeAllRepoMemory,
 	getRepoMemoryPath,
 	isIndexedStorageAvailable,
@@ -197,6 +198,18 @@ describe('resolveGraphStorageMode', () => {
 		expect(resolveGraphStorageMode(makeWorkspace({ storage: 'sqlite' }))).toBe(
 			'json',
 		);
+	});
+
+	test('falls back to json when no SQLite driver is available', () => {
+		// Seam swap (invariant 7): try/finally restores even on failure so the
+		// override cannot leak into sibling tests in a co-run process.
+		const real = _internals.isIndexedStorageAvailable;
+		_internals.isIndexedStorageAvailable = () => false;
+		try {
+			expect(resolveGraphStorageMode(makeWorkspace('indexed'))).toBe('json');
+		} finally {
+			_internals.isIndexedStorageAvailable = real;
+		}
 	});
 });
 

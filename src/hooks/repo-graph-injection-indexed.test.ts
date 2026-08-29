@@ -409,4 +409,20 @@ describe('indexed branch — fail-open to the JSON path', () => {
 		expect(subgraphCalls).toEqual([]);
 		expect(_internals.cacheSize()).toBe(0);
 	});
+
+	test('subgraphCacheKey is ino-sensitive (PRR-003 regression pin)', () => {
+		// A same-size/same-mtime-tick rewrite must not reuse a cached subgraph:
+		// the inode is the only component that changes. If this pin fails after
+		// someone drops `ino` from the key, stale subgraphs become reachable
+		// again through the cache.
+		const key = (ino: number) =>
+			_internals.subgraphCacheKey(
+				'dir',
+				{ mtimeMs: 100, size: 10, ino },
+				['src/a.ts'],
+				1,
+			);
+		expect(key(1)).toBe(key(1));
+		expect(key(1)).not.toBe(key(2));
+	});
 });
