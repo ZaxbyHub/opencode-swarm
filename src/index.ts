@@ -183,6 +183,11 @@ import {
 	createTrajectoryLoggerHook,
 	recordDeniedToolCall,
 } from './hooks/trajectory-logger';
+import {
+	hasGitMarkerAncestor,
+	hasManifestAncestor,
+	hasSwarmState,
+} from './lang/manifest-files';
 import { realtimeAdmissionAfter } from './learning/admission.js';
 import { createMemoryLifecycleHooks } from './memory';
 import type { MemoryConfig as RuntimeMemoryConfig } from './memory/config.js';
@@ -669,10 +674,13 @@ async function initializeOpenCodeSwarm(
 	// On cold Windows CI runners with AV/indexing, each step can take 100–500ms;
 	// the prior sequential shape summed them, easily exceeding the 400ms
 	// repro-704 T1 deadline. Parallelizing drops the floor to `max()` of the
-	// three. Promise.all also preserves the in-source ordering contract at
-	// `src/index.ts` (the `.swarm/` writes below run only after all three
-	// resolve, so `ensureSwarmGitExcluded` still completes before any `.swarm/`
-	// artifact is created).
+	// three. Snapshot and Git hygiene are additionally skipped when a bounded
+	// filesystem preflight proves there is no `.swarm/` state or Git boundary;
+	// those operations cannot produce useful work in a source-only workspace.
+	// Promise.all preserves the in-source ordering contract at `src/index.ts`
+	// (the `.swarm/` writes below run only after all scheduled reads resolve, so
+	// `ensureSwarmGitExcluded` still completes before any `.swarm/` artifact is
+	// created).
 	const __initIoStart = performance.now();
 	const configLoadP = withTimeout(
 		loadPluginConfigWithMetaAsyncForInit(ctx.directory),
@@ -692,33 +700,62 @@ async function initializeOpenCodeSwarm(
 		);
 		return getSafeDefaultConfigLoadResult();
 	});
-	const snapshotP = withTimeout(
-		loadSnapshotForInit(ctx.directory),
-		5_000,
-		new Error(
-			'loadSnapshot exceeded 5s budget; continuing without snapshot rehydration',
-		),
-	).catch((err: unknown) => {
-		const msg = err instanceof Error ? err.message : String(err);
-		log('loadSnapshot timed out or failed (non-fatal)', { error: msg });
-	});
-	const gitExcludeP = withTimeout(
-		// `quiet` defaults to false; the option is currently void-discarded in
-		// `ensureSwarmGitExcluded` (src/utils/gitignore-warning.ts:223-224), so
-		// dropping `{ quiet: config.quiet }` is behavior-identical AND lets us
-		// parallelize without waiting on the config read.
-		ensureSwarmGitExcludedForInit(ctx.directory),
-		ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS,
-		new Error(
-			`ensureSwarmGitExcluded exceeded ${ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS}ms budget; continuing without git-hygiene check`,
-		),
-	).catch((err: unknown) => {
-		const msg = err instanceof Error ? err.message : String(err);
-		log('ensureSwarmGitExcluded timed out or failed (non-fatal)', {
-			error: msg,
-		});
-	});
-	await Promise.all([configLoadP, snapshotP, gitExcludeP]);
+	const snapshotP = hasSwarmState(ctx.directory)
+		? withTimeout(
+				loadSnapshotForInit(ctx.directory),
+				5_000,
+				new Error(
+					'loadSnapshot exceeded 5s budget; continuing without snapshot rehydration',
+				),
+			).catch((err: unknown) => {
+				const msg = err instanceof Error ? err.message : String(err);
+				log('loadSnapshot timed out or failed (non-fatal)', { error: msg });
+			})
+		: Promise.resolve();
+	const gitExcludeP = hasGitMarkerAncestor(ctx.directory)
+		? withTimeout(
+				// `quiet` defaults to false; the option is currently void-discarded in
+				// `ensureSwarmGitExcluded` (src/utils/gitignore-warning.ts:223-224), so
+				// dropping `{ quiet: config.quiet }` is behavior-identical AND lets us
+				// parallelize without waiting on the config read.
+				ensureSwarmGitExcludedForInit(ctx.directory),
+				ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS,
+				new Error(
+					`ensureSwarmGitExcluded exceeded ${ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS}ms budget; continuing without git-hygiene check`,
+				),
+			).catch((err: unknown) => {
+				const msg = err instanceof Error ? err.message : String(err);
+				log('ensureSwarmGitExcluded timed out or failed (non-fatal)', {
+					error: msg,
+				});
+			})
+		: Promise.resolve();
+	// Phase 4b: resolve language-agnostic project context in parallel with the
+	// other independent init reads. Starting the lazy backend import here keeps
+	// its cold-module cost off the tail of the critical path while preserving the
+	// existing requirement that prompt construction waits for the result. A
+	// source-only workspace has no possible backend context, so skip the heavy
+	// language-backend graph entirely after the cheap bounded ancestor preflight.
+	const projectContextP = hasManifestAncestor(ctx.directory)
+		? withTimeout(
+				(async () => {
+					const mod = await import('./agents/project-context');
+					return mod.buildProjectContext(ctx.directory);
+				})(),
+				300, // LANG_BACKEND_DETECTION_TIMEOUT_MS — see project-context.ts
+				new Error(
+					'language-backend detection exceeded 300ms; ' +
+						'continuing with unresolved sentinels',
+				),
+			).catch((err: unknown) => {
+				const msg = err instanceof Error ? err.message : String(err);
+				log('language-backend detection timed out or failed (non-fatal)', {
+					error: msg,
+				});
+				return null;
+			})
+		: Promise.resolve(null);
+	await Promise.all([configLoadP, snapshotP, gitExcludeP, projectContextP]);
 	const { config, loadedFromFile } = await configLoadP;
 	log(
 		`init-path I/O completed in ${(performance.now() - __initIoStart).toFixed(1)}ms (parallel: config+snapshot+git-exclude)`,
@@ -1085,37 +1122,11 @@ async function initializeOpenCodeSwarm(
 			});
 		});
 	}
-	// Phase 4b: resolve language-agnostic project context for agent prompt
-	// substitution. Bounded to 300ms and fails open with `null` (the agent
-	// prompts then ship with `unresolved (run /swarm preflight)` sentinels
-	// that the architect's existing DISCOVER mode picks up). Per Invariant 1
-	// (plugin init bounded + fail-open) — see ENSURE_SWARM_GIT_EXCLUDED
-	// precedent at line 342 above.
-	//
-	// 300ms budget chosen to keep total `server()` time under the 400ms
-	// Issue #704 / repro-704.mjs T1 deadline. `buildProjectContext` itself
-	// does NOT spawn subprocesses (see module docstring); typical runtime
-	// is <20ms on Linux/macOS and <100ms on Windows with cold FS. The
-	// timeout is belt-and-suspenders for pathological filesystems
-	// (antivirus interception, NFS stalls). A failed-open `null` projectContext
-	// is the same as no detection — placeholders resolve to the sentinel.
-	const projectContext = await withTimeout(
-		(async () => {
-			const mod = await import('./agents/project-context');
-			return mod.buildProjectContext(ctx.directory);
-		})(),
-		300, // LANG_BACKEND_DETECTION_TIMEOUT_MS — see project-context.ts
-		new Error(
-			'language-backend detection exceeded 300ms; ' +
-				'continuing with unresolved sentinels',
-		),
-	).catch((err: unknown) => {
-		const msg = err instanceof Error ? err.message : String(err);
-		log('language-backend detection timed out or failed (non-fatal)', {
-			error: msg,
-		});
-		return null;
-	});
+	// `projectContextP` was started alongside config/snapshot/git I/O above and
+	// is already settled before prompt construction. The bounded, fail-open
+	// result supplies `null` when backend detection is unavailable; prompts then
+	// retain their unresolved sentinels for the architect's DISCOVER mode.
+	const projectContext = await projectContextP;
 
 	let autoReviewConfig: AutoReviewConfig;
 	try {
