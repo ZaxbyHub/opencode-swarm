@@ -176,9 +176,7 @@ describe('Unified injection budget integration (FR-002)', () => {
 		clearTurnLedger('test-session');
 	});
 
-	// -----------------------------------------------------------------------
 	// Legacy behavior: no unified budget configured
-	// -----------------------------------------------------------------------
 
 	it('legacy: system-enhancer uses 4000 token cap when unified budget is absent', async () => {
 		const config: PluginConfig = {
@@ -211,9 +209,7 @@ describe('Unified injection budget integration (FR-002)', () => {
 		expect(blockLength).toBeLessThanOrEqual(2000);
 	});
 
-	// -----------------------------------------------------------------------
 	// SC-004: combined demand within budget → both get full demand
-	// -----------------------------------------------------------------------
 
 	it('SC-004: both hooks get full demand when combined demand is under the unified ceiling', async () => {
 		const unifiedBudget = 10_000;
@@ -256,9 +252,7 @@ describe('Unified injection budget integration (FR-002)', () => {
 		expect(kiInjected).toBeDefined();
 	});
 
-	// -----------------------------------------------------------------------
 	// SC-005: system-enhancer alone exceeds budget → knowledge-injector gets 0
-	// -----------------------------------------------------------------------
 
 	it('SC-005: knowledge-injector gets 0 when system-enhancer alone exceeds the unified ceiling', async () => {
 		const unifiedBudget = 1000;
@@ -269,7 +263,13 @@ describe('Unified injection budget integration (FR-002)', () => {
 		// Seed the shared ledger with a real system-enhancer demand that alone
 		// exceeds the ceiling (isolates the cross-hook budget contract).
 		beginTurnLedger('test-session', unifiedBudget, true);
-		recordProducerEmission('test-session', 'system-enhancer', unifiedBudget + 1, 0, 'system');
+		recordProducerEmission(
+			'test-session',
+			'system-enhancer',
+			unifiedBudget + 1,
+			0,
+			'system',
+		);
 
 		// knowledge-injector runs after system-enhancer
 		const kiHook = createKnowledgeInjectorHook(
