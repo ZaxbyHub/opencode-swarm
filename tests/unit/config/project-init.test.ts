@@ -5,10 +5,7 @@ import {
 	writeProjectConfigIfNew,
 	writeSwarmConfigExampleIfNew,
 } from '../../../src/config/project-init';
-import {
-	clearDeferredWarnings,
-	getDeferredWarnings,
-} from '../../../src/services/warning-buffer';
+import { clearDeferredWarnings } from '../../../src/services/warning-buffer';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
 describe('writeProjectConfigIfNew', () => {
@@ -38,11 +35,8 @@ describe('writeProjectConfigIfNew', () => {
 		expect(fs.existsSync(path.join(dir, '.opencode'))).toBe(false);
 	});
 
-	test('records advisory in deferred-warning buffer', () => {
-		writeProjectConfigIfNew(dir, true);
-		expect(
-			getDeferredWarnings().some((m) => m.includes('Skipping creation')),
-		).toBe(true);
+	test('does not throw', () => {
+		expect(() => writeProjectConfigIfNew(dir, true)).not.toThrow();
 	});
 });
 

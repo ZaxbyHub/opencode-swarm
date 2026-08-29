@@ -59,9 +59,8 @@ describe('writeProjectConfigIfNew', () => {
 		});
 	});
 
-	// 4. Epic #1752 PR2: advisory now routes through advisoryWarn (buffered for
-	// /swarm diagnose) regardless of quiet. console.warn is never called.
-	test('4. quiet=true routes advisory to buffer, never raw stderr', () => {
+	// 4. No warning is emitted when skipping auto-creation.
+	test('4. quiet=true does not emit warning', () => {
 		let warned = false;
 		console.warn = (..._args: unknown[]) => {
 			warned = true;
@@ -70,14 +69,10 @@ describe('writeProjectConfigIfNew', () => {
 		writeProjectConfigIfNew(tmpDir, true);
 
 		expect(warned).toBe(false);
-		expect(
-			getDeferredWarnings().some((m) => m.includes('opencode-swarm.json')),
-		).toBe(true);
+		expect(getDeferredWarnings()).toHaveLength(0);
 	});
 
-	// 5. Epic #1752 PR2: even with quiet=false the advisory routes through
-	// advisoryWarn (never raw stderr).
-	test('5. quiet=false routes advisory to buffer, never raw stderr', () => {
+	test('5. quiet=false does not emit warning', () => {
 		let warned = false;
 		console.warn = (..._args: unknown[]) => {
 			warned = true;
@@ -86,8 +81,6 @@ describe('writeProjectConfigIfNew', () => {
 		writeProjectConfigIfNew(tmpDir, false);
 
 		expect(warned).toBe(false);
-		expect(
-			getDeferredWarnings().some((m) => m.includes('opencode-swarm.json')),
-		).toBe(true);
+		expect(getDeferredWarnings()).toHaveLength(0);
 	});
 });

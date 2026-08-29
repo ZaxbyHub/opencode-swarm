@@ -1,6 +1,5 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { advisoryWarn } from '../services/warning-buffer.js';
 import { DEFAULT_MODELS } from './constants';
 
 /**
@@ -17,10 +16,6 @@ export function writeProjectConfigIfNew(
 ): void {
 	void directory;
 	void _quiet;
-	advisoryWarn(
-		'[opencode-swarm] Skipping creation of .opencode/opencode-swarm.json; ' +
-			'create it manually if you need project-local overrides.',
-	);
 }
 
 /**
