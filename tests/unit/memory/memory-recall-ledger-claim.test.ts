@@ -16,6 +16,9 @@ import {
 } from '../../../src/services/injection-budget';
 
 const SESSION_ID = 'memory-ledger-session';
+/** Fixed timestamp — the clock is irrelevant here and the test-clock gate
+ * requires determinism in diff-touched tests (issue #1782). */
+const FIXED_NOW = '2026-01-01T00:00:00.000Z';
 
 function makeMessages(): MessageWithParts[] {
 	return [
@@ -34,7 +37,7 @@ function makeBundle(): RecallBundle {
 	return {
 		id: 'bundle-1',
 		query: 'widget parser',
-		generatedAt: new Date().toISOString(),
+		generatedAt: FIXED_NOW,
 		tokenEstimate: 120,
 		items: [
 			{
@@ -46,8 +49,8 @@ function makeBundle(): RecallBundle {
 					confidence: 0.9,
 					text: 'prefer tabs in this repo',
 					source: { type: 'manual' },
-					createdAt: new Date().toISOString(),
-					updatedAt: new Date().toISOString(),
+					createdAt: FIXED_NOW,
+					updatedAt: FIXED_NOW,
 				},
 			},
 		],
