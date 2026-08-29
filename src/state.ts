@@ -3995,13 +3995,6 @@ export function clearFinalAccountingWarningBands(): void {
 	swarmState.finalAccountingWarningBandsBySession.clear();
 }
 
-/** Convenience: final prompt pressure pct, or 0 when not yet measured. */
-export function getFinalPromptPressurePct(
-	sessionID: string | undefined,
-): number {
-	return getFinalPromptPressure(sessionID)?.pct ?? 0;
-}
-
 /** This session's last budget percentage, or 0 if it has not been measured.
  *  Consumers that ACT on a session (compaction, the context-pressure advisory)
  *  MUST use this rather than any cross-session aggregate. */
