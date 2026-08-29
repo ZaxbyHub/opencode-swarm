@@ -1334,6 +1334,20 @@ export const RepoGraphConfigSchema = z.object({
 	 * than silently ignored.
 	 */
 	exclude_dirs: z.array(z.string().trim().min(1)).default([]),
+	/**
+	 * Storage mode for the repo dependency graph (issue #1534).
+	 *
+	 * - `'json'` (default): the graph is stored solely as the single
+	 *   `.swarm/repo-graph.json` document. Unchanged behavior.
+	 * - `'indexed'`: in addition to the JSON document, a derived
+	 *   `.swarm/repo-memory.sqlite` index is maintained that accelerates
+	 *   bounded neighbourhood lookups (localization / blast-radius / anchor
+	 *   resolution) without a full parse of the JSON document. The JSON
+	 *   document remains authoritative in BOTH modes — the index is a
+	 *   read-side accelerator only, never a second source of truth, and a
+	 *   stale or corrupt index silently falls back to the JSON path.
+	 */
+	storage: z.enum(['json', 'indexed']).default('json'),
 });
 
 export type RepoGraphConfig = z.infer<typeof RepoGraphConfigSchema>;

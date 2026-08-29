@@ -27,6 +27,10 @@ import {
 	reconcilePhaseClose,
 	recordPhaseCloseIntent,
 } from '../hooks/knowledge-receipt-ledger.js';
+import {
+	closeRepoMemory,
+	REPO_MEMORY_FILENAME,
+} from '../tools/repo-graph/indexed-storage';
 
 /** Narrow seam for receipt/plan ordering tests. */
 export const closeReceiptLifecycleInternals = {
@@ -409,6 +413,11 @@ const ARCHIVE_ARTIFACTS = [
 	// transient SQLite sidecars recreated on next open. They are never archived
 	// and never cleaned (preserved on disk). See the ACTIVE_STATE_TO_CLEAN
 	// docblock below.
+	// repo-memory.sqlite (issue #1534): the derived index maintained when
+	// repo_graph.storage === 'indexed'. Mirrors swarm.db exactly — snapshotted
+	// via archiveSqliteSnapshot (VACUUM INTO), and its -shm/-wal sidecars are
+	// likewise deliberately NOT listed here (transient, recreated on next open).
+	REPO_MEMORY_FILENAME,
 	'close-summary.md',
 	'session-reflection.md',
 	'spec.md',
@@ -514,6 +523,9 @@ const ACTIVE_STATE_TO_CLEAN = [
 	'swarm.db',
 	// swarm.db-shm / swarm.db-wal intentionally omitted — preserved on disk
 	// (transient SQLite sidecars, recreated on next open). See docblock above.
+	// repo-memory.sqlite (issue #1534): same treatment as swarm.db — its
+	// -shm/-wal sidecars are intentionally omitted for the same reason.
+	REPO_MEMORY_FILENAME,
 ];
 
 /**
@@ -1379,13 +1391,16 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 				? 'required'
 				: 'optional';
 
-			if (artifact === 'swarm.db') {
+			if (artifact === 'swarm.db' || artifact === REPO_MEMORY_FILENAME) {
 				// In-process VACUUM INTO snapshot via the shared, runtime-portable
 				// loader (src/db/sqlite-loader.ts). Produces a single self-contained
 				// file (journal_mode=delete, no WAL sidecars) containing ALL committed
 				// rows and EXCLUDING uncommitted writers (spike-proven under Bun + Node).
 				// Sidecar files (-shm/-wal) are transient and intentionally neither
-				// archived nor cleaned — left in place, no warning.
+				// archived nor cleaned — left in place, no warning. repo-memory.sqlite
+				// (issue #1534) is a WAL-mode DB exactly like swarm.db, so a raw copy
+				// would not be a consistent snapshot; it is routed through the same
+				// archiveSqliteSnapshot path.
 				const r = await archiveSqliteSnapshot({
 					sourcePath: srcPath,
 					destDir: ctx.archiveDir,
@@ -1746,6 +1761,17 @@ export async function runCleanStage(
 			if (artifact === 'swarm.db') {
 				try {
 					closeProjectDb(ctx.directory);
+				} catch {
+					// best-effort — the unlink below will surface any real failure
+				}
+			}
+			// For repo-memory.sqlite (issue #1534), close the cached repo-memory
+			// connection for this directory BEFORE unlinking, mirroring the
+			// swarm.db Windows EBUSY guard above. Best-effort and never throws
+			// into the clean stage.
+			if (artifact === REPO_MEMORY_FILENAME) {
+				try {
+					_internals.closeRepoMemory(ctx.directory);
 				} catch {
 					// best-effort — the unlink below will surface any real failure
 				}
@@ -2698,6 +2724,7 @@ function detectFullAuto(directory: string, sessionID: string): boolean {
 }
 
 export const _internals = {
+	closeRepoMemory,
 	ACTIVE_STATE_DIRS_TO_CLEAN,
 	countSessionKnowledgeEntries,
 	CLOSE_SKILL_REVIEW_TIMEOUT_MS,
