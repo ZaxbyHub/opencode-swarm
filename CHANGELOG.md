@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.154.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.154.1...v7.154.2) (2026-08-28)
+
+
+### Bug Fixes
+
+* **background:** reconcile mixed coder settlement ownership ([15ae2a2](https://github.com/ZaxbyHub/opencode-swarm/commit/15ae2a2241912c28c2f934bac352fdf98f3c2159))
+
 ## [7.154.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.154.0...v7.154.1) (2026-08-28)
 
 
