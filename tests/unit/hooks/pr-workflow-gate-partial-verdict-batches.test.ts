@@ -17,7 +17,7 @@ import {
 } from './pr-workflow-gate.test-fixtures.js';
 
 const CANDIDATE_HEADER =
-	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 
 beforeEach(setupPrWorkflowGateFixtures);
 afterEach(teardownPrWorkflowGateFixtures);
@@ -33,7 +33,7 @@ const reviewedRows = (
 	ids
 		.map(
 			(id) =>
-				`[REVIEWED] | ${id} | ${classification} | STRUCTURALLY_PROVEN | ${severity} | YES | file.ts:1 | ${rationale} ${id} | probe ${id} | reviewer`,
+				`[REVIEWED] | ${id} | ${classification} | STRUCTURALLY_PROVEN | ${severity} | YES | file.ts:1 | ${rationale} ${id} | probe ${id} | reviewer | ORDINARY | `,
 		)
 		.join('\n');
 
@@ -64,7 +64,7 @@ async function establishTwentyItemInventory(): Promise<string[]> {
 			CANDIDATE_HEADER,
 			...Array.from({ length: 15 }, (_value, index) => {
 				const id = `I-${String(index + 1).padStart(2, '0')}`;
-				return `${id} | ${dimension} | HIGH | correctness | file.ts:${index + 1} | claim ${id} | evidence ${id} | impact ${id} | HIGH`;
+				return `${id} | ${dimension} | HIGH | correctness | file.ts:${index + 1} | claim ${id} | evidence ${id} | impact ${id} | HIGH | ORDINARY | `;
 			}),
 		].join('\n'),
 	});

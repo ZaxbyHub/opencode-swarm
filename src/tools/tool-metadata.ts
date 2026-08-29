@@ -233,6 +233,11 @@ export const TOOL_METADATA = {
 			'abort an unrecoverable PR_REVIEW/PR_FEEDBACK mechanical gate and clear its durable session state',
 		agents: ['architect'],
 	},
+	authorize_pr_review_reentry: {
+		description:
+			'issue a one-use, identity-bound reviewer/test_engineer re-entry authorization for the active PR_REVIEW workflow (issue #2383)',
+		agents: ['architect'],
+	},
 	approve_plan_critic: {
 		description:
 			'record a MANUAL plan_critic_gate approval snapshot to unblock the ratchet-tighter critic_pre_plan execution gate when the critic already returned APPROVED but the mechanical recorder failed to persist it (issue #2012)',

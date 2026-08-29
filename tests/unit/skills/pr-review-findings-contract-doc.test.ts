@@ -201,6 +201,11 @@ describe('skill dialect is structurally identical to the executable PR-review co
 									evidence: 'schema parity',
 									next_action: nextAction,
 									severity: 'HIGH',
+									// Typed risk metadata is REQUIRED on newly
+									// written CONFIRMED records (issue #2383).
+									...(status === 'CONFIRMED'
+										? { risk_impact: 'ORDINARY', risk_tags: [] }
+										: {}),
 								},
 							],
 						}).success,

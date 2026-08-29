@@ -235,7 +235,7 @@ Candidates (Chunk A — src/utils/):
 - C-001 | HIGH | null-safety | src/utils/cache.ts:142 | Uncached getter may return undefined on cold start
 
 For each candidate, return:
-[REVIEWED] | item_id | classification | evidence_type | severity | introduced_by_pr | file:line | rationale | probe | reviewer_notes
+[REVIEWED] | item_id | classification | evidence_type | severity | introduced_by_pr | file:line | rationale | probe | reviewer_notes | risk_impact | risk_tags
 
 You must check caller context, reachability, schema/middleware/framework mitigations, state-machine constraints, test coverage, PR-introducedness, and severity.
 

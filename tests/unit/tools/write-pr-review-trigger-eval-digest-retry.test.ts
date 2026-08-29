@@ -72,7 +72,7 @@ async function recordCompletedBaseLane(
 ): Promise<void> {
 	const correlationId = `base-all-${laneId}-session`;
 	const header =
-		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 	const text = `${header}\n[CLEAN] | ${laneId} | exact reviewed diff | no candidate survived the focused review`;
 	await recordPendingDelegation(root, {
 		correlationId,

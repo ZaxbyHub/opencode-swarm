@@ -32,7 +32,7 @@ export const REVISION_DIGEST = 'tier-l-revision';
 export const TIER_L_MESSAGE =
 	'depth tier L requires one dedicated lane per dimension';
 const CANDIDATE_HEADER =
-	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 
 let directory = '';
 let currentRevisionDigest = REVISION_DIGEST;
@@ -95,7 +95,7 @@ function artifactText(
 		CANDIDATE_HEADER,
 		...rows.map(
 			({ candidateId, dimension }) =>
-				`${candidateId} | ${dimension} | HIGH | correctness | src/${dimension}.ts:1 | claim about ${dimension} | evidence for ${dimension} | impact on ${dimension} | HIGH`,
+				`${candidateId} | ${dimension} | HIGH | correctness | src/${dimension}.ts:1 | claim about ${dimension} | evidence for ${dimension} | impact on ${dimension} | HIGH | ORDINARY | `,
 		),
 	].join('\n');
 }

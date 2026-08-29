@@ -20,7 +20,7 @@ Candidates:
 - ...
 
 For each candidate, return:
-[REVIEWED] | item_id | classification | evidence_type | severity | introduced_by_pr | file:line | rationale | probe | reviewer_notes
+[REVIEWED] | item_id | classification | evidence_type | severity | introduced_by_pr | file:line | rationale | probe | reviewer_notes | risk_impact | risk_tags
 
 Escape free-text fields with the executable verdict codec: `\\` (backslash),
 `\|` (pipe), `\n` (newline), and `\r` (carriage return). Do not copy the
@@ -97,7 +97,7 @@ You must inspect or mark unavailable:
 8. the exact `base_sha...pr_head_sha` merge-base range and both endpoint revisions.
 
 Return:
-[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
+[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags
 
 Emit the marker-bearing header once, then unprefixed data rows.
 For a clean base lane, emit `[CLEAN] | lane | coverage_scope | evidence`.
@@ -138,7 +138,7 @@ You must inspect or mark unavailable:
 8. the exact `base_sha...pr_head_sha` merge-base range and both endpoint revisions.
 
 Return:
-[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence
+[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags
 
 Emit the marker-bearing header once, then unprefixed data rows.
 For a clean micro-lane or council lane, emit `[CLEAN] | micro_lane | coverage_scope | evidence`.

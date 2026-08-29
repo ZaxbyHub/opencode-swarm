@@ -5,7 +5,7 @@
 The following machine-readable block mirrors `src/background/pr-review-contract.ts`. CI parses it structurally; changing a skill dialect without the executable schema (or vice versa) fails the contract test.
 
 <!-- PR_REVIEW_EXECUTABLE_DIALECT_START -->
-reviewer_fields: marker | item_id | classification | evidence_type | severity | introduced_by_pr | file:line | rationale | probe | reviewer_notes
+reviewer_fields: marker | item_id | classification | evidence_type | severity | introduced_by_pr | file:line | rationale | probe | reviewer_notes | risk_impact | risk_tags
 reviewer_classifications: CONFIRMED | DISPROVED | UNVERIFIED | PRE_EXISTING
 reviewer_evidence_types: STRUCTURALLY_PROVEN | EXECUTION_PROVEN | STATIC_TRACE_PROVEN | PLAUSIBLE_BUT_UNVERIFIED
 critic_fields: marker | item_id | status | severity | rationale | required_change
@@ -118,8 +118,16 @@ satisfy two:
 | `post_critic` | not critic-routed | the reviewer `final_severity` |
 | `post_critic` | critic-routed | the **critic** `final_severity` — the final word |
 
-A record is critic-routed when the reviewer classification is `CONFIRMED` and the
-reviewer severity is `CRITICAL`, `HIGH`, or `MEDIUM`.
+A record is critic-routed by the shared typed predicate (issue #2383): reviewer
+classification `CONFIRMED` AND one of — severity `CRITICAL`/`HIGH`; severity
+`MEDIUM` with `risk_impact: "HIGH_IMPACT"`; severity `MEDIUM` with any
+`risk_tags` entry (`SECURITY`, `AUTH_PERMISSIONS`, `STATE_INTEGRITY`,
+`WRITE_PATH`, `EVIDENCE_INTEGRITY`, `GIT`, `CONFIGURATION`); or
+`risk_impact: "UNKNOWN"`. An `ORDINARY` MEDIUM with no tags is NOT
+critic-routed; `LOW` follows the existing no-critic policy once its metadata
+is known. Every CONFIRMED finding record must carry `risk_impact` and
+`risk_tags`; unknown tag values are rejected, and no path- or dimension-based
+inference ever substitutes for the typed values.
 
 Because the critic is authoritative for critic-routed records, a **downgrade is
 encodable verbatim**: reviewer `MEDIUM` + critic `LOW` persists as

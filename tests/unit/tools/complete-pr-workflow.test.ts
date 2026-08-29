@@ -32,7 +32,11 @@ describe('complete_pr_workflow', () => {
 
 		const missingSession = JSON.parse(
 			await executeCompletePrWorkflow(
-				{ mode: 'PR_REVIEW', pr_head_sha: 'abc123' },
+				{
+					mode: 'PR_REVIEW',
+					pr_head_sha: 'abc123',
+					report_verdict: 'APPROVE',
+				},
 				process.cwd(),
 			),
 		);
@@ -47,7 +51,11 @@ describe('complete_pr_workflow', () => {
 		];
 		const result = JSON.parse(
 			await executeCompletePrWorkflow(
-				{ mode: 'PR_REVIEW', pr_head_sha: 'abc123' },
+				{
+					mode: 'PR_REVIEW',
+					pr_head_sha: 'abc123',
+					report_verdict: 'APPROVE',
+				},
 				process.cwd(),
 				{ sessionID: 'restore-after-complete' },
 			),

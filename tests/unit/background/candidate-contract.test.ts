@@ -19,9 +19,9 @@ import {
 
 const DIGEST = 'a'.repeat(64);
 const BASE_HEADER =
-	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 const MICRO_HEADER =
-	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence';
+	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags';
 const CLEAN_SCOPE = 'complete changed-file diff';
 const CLEAN_EVIDENCE = 'no candidate survived focused review';
 
@@ -139,13 +139,13 @@ describe('shared candidate and CLEAN semantics', () => {
 			'base_explorer',
 			BASE_HEADER,
 			'correctness-state',
-			'C-1 | correctness-state | HIGH | correctness | src/a.ts:1 | claim | evidence | impact | HIGH',
+			'C-1 | correctness-state | HIGH | correctness | src/a.ts:1 | claim | evidence | impact | HIGH | ORDINARY |',
 		] as const,
 		[
 			'micro_lane',
 			MICRO_HEADER,
 			'concurrency-state',
-			'M-1 | concurrency-state | HIGH | concurrency | src/a.ts:1 | claim | invariant | evidence | HIGH',
+			'M-1 | concurrency-state | HIGH | concurrency | src/a.ts:1 | claim | invariant | evidence | HIGH | ORDINARY |',
 		] as const,
 	])('rejects a wrong canonical header but repairs an absent one for %s', (family, header, lane, row) => {
 		const misorderedHeader = header.replace(
@@ -404,7 +404,7 @@ describe('shared candidate and CLEAN semantics', () => {
 	});
 
 	test('never credits a micro family outside ownership, even while salvaging', () => {
-		const text = `${MICRO_HEADER}\nM-AUTH | auth-identity-secrets | HIGH | security | src/auth.ts:1 | claim | invariant | auth evidence | HIGH\nM-PRIVACY | privacy-observability | HIGH | privacy | src/log.ts:1 | claim | invariant | privacy evidence | HIGH`;
+		const text = `${MICRO_HEADER}\nM-AUTH | auth-identity-secrets | HIGH | security | src/auth.ts:1 | claim | invariant | auth evidence | HIGH | ORDINARY |\nM-PRIVACY | privacy-observability | HIGH | privacy | src/log.ts:1 | claim | invariant | privacy evidence | HIGH | ORDINARY |`;
 		// The owned row is real work and now establishes coverage (approved
 		// salvage) instead of being discarded because a foreign row sits beside it.
 		expect(
@@ -437,7 +437,7 @@ describe('shared candidate and CLEAN semantics', () => {
 	});
 
 	test('retains a valid owned candidate despite a short foreign row', () => {
-		const text = `${BASE_HEADER}\nC-OWNED | intent-architecture | HIGH | correctness | src/a.ts:1 | claim | evidence | impact | HIGH\nC-FOREIGN | security-trust | HIGH`;
+		const text = `${BASE_HEADER}\nC-OWNED | intent-architecture | HIGH | correctness | src/a.ts:1 | claim | evidence | impact | HIGH | ORDINARY |\nC-FOREIGN | security-trust | HIGH`;
 		expect(
 			prReviewDiscoveryArtifactCoversLane(text, 'intent-architecture', [
 				'intent-architecture',

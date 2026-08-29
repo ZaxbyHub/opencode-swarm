@@ -179,6 +179,11 @@ describe('write_pr_review_artifact', () => {
 					? ('suppress_with_reason' as const)
 					: ('route_to_critic' as const),
 			severity: index === 0 ? ('NONE' as const) : ('HIGH' as const),
+			// Typed risk metadata required on CONFIRMED records (issue #2383),
+			// mirroring the reviewer rows below.
+			...(index === 0
+				? {}
+				: { risk_impact: 'ORDINARY' as const, risk_tags: [] as string[] }),
 		}));
 		const criticRecords = candidateIds.map((id, index) => ({
 			finding_id: id,
@@ -192,12 +197,17 @@ describe('write_pr_review_artifact', () => {
 						? ('handoff_to_feedback' as const)
 						: ('report' as const),
 			severity: index === 0 ? ('NONE' as const) : ('HIGH' as const),
+			// Typed risk metadata required on CONFIRMED records (issue #2383),
+			// mirroring the reviewer rows (CONFIRMED HIGH -> ORDINARY, no tags).
+			...(index === 0
+				? {}
+				: { risk_impact: 'ORDINARY' as const, risk_tags: [] as string[] }),
 		}));
 		const reviewerRows = candidateIds
 			.map((id, index) =>
 				index === 0
-					? `[REVIEWED] | ${id} | DISPROVED | STRUCTURALLY_PROVEN | NONE | YES | file.ts:1 | rationale | probe | reviewer`
-					: `[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer`,
+					? `[REVIEWED] | ${id} | DISPROVED | STRUCTURALLY_PROVEN | NONE | YES | file.ts:1 | rationale | probe | reviewer | ORDINARY | `
+					: `[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer | ORDINARY | `,
 			)
 			.join('\n');
 		await recordPrReviewValidationBatch(
@@ -409,7 +419,9 @@ describe('write_pr_review_artifact', () => {
 			}),
 		).resolves.toContain('feedback-handoff.json');
 		await expect(
-			completePrWorkflow(directory, SESSION_ID, 'PR_REVIEW', HEAD_SHA),
+			completePrWorkflow(directory, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
+				reportVerdict: 'APPROVE',
+			}),
 		).resolves.toBe('completed');
 	});
 });

@@ -45,6 +45,51 @@ export const PR_REVIEW_ARTIFACT_BOUNDARIES = [
 	'post_critic',
 ] as const;
 
+/**
+ * The six canonical PR-review base dimensions (issue #2383).
+ *
+ * Single source of truth: this contract module owns the list; the workflow
+ * gate re-exports it. No other file may define the literal (guarded by a
+ * source-scan test).
+ */
+export const PR_REVIEW_BASE_DIMENSION_IDS = [
+	'intent-architecture',
+	'correctness-state',
+	'tests-falsifiability',
+	'security-trust',
+	'reliability-performance',
+	'compatibility-delivery',
+] as const;
+
+export type PrReviewBaseDimensionId =
+	(typeof PR_REVIEW_BASE_DIMENSION_IDS)[number];
+
+/** Typed risk-impact classification for critic routing (issue #2383). */
+export const PR_REVIEW_RISK_IMPACTS = [
+	'ORDINARY',
+	'HIGH_IMPACT',
+	'UNKNOWN',
+] as const;
+
+export type PrReviewRiskImpact = (typeof PR_REVIEW_RISK_IMPACTS)[number];
+
+/**
+ * Typed risk tags for critic routing (issue #2383). Presence of ANY tag on a
+ * MEDIUM finding routes it to critic; paths, dimensions, keywords, and prompt
+ * prose may suggest risk to the model but can never override the typed result.
+ */
+export const PR_REVIEW_RISK_TAGS = [
+	'SECURITY',
+	'AUTH_PERMISSIONS',
+	'STATE_INTEGRITY',
+	'WRITE_PATH',
+	'EVIDENCE_INTEGRITY',
+	'GIT',
+	'CONFIGURATION',
+] as const;
+
+export type PrReviewRiskTag = (typeof PR_REVIEW_RISK_TAGS)[number];
+
 export const PR_REVIEW_CONTRACT_CARD_HEADER = '[PR-REVIEW CONTRACT CARD]';
 export const PR_REVIEW_FINDINGS_MAX_BYTES = 10 * 1024 * 1024;
 export const PR_REVIEW_FINDINGS_WRITE_MAX_BYTES = 3 * 1024 * 1024;
@@ -72,8 +117,78 @@ export const PrReviewFindingSchema = z
 		next_action: z.enum(PR_REVIEW_FINDING_ACTIONS),
 		severity: z.enum(PR_REVIEW_SEVERITIES).optional(),
 		category: z.string().trim().min(1).max(128).optional(),
+		/**
+		 * Typed risk metadata (issue #2383). Required on every NEWLY written
+		 * CONFIRMED finding; optional elsewhere. Legacy persisted rows missing
+		 * these fields are normalized to `UNKNOWN` / `[]` at the single
+		 * read/migration boundary (`readFindings`), which fail-safely routes
+		 * them to critic review.
+		 */
+		risk_impact: z.enum(PR_REVIEW_RISK_IMPACTS).optional(),
+		risk_tags: z
+			.array(z.enum(PR_REVIEW_RISK_TAGS))
+			.max(PR_REVIEW_RISK_TAGS.length)
+			.optional(),
 	})
-	.strict();
+	.strict()
+	.superRefine((value, ctx) => {
+		if (value.status !== 'CONFIRMED') return;
+		if (value.risk_impact === undefined) {
+			ctx.addIssue({
+				code: 'custom',
+				path: ['risk_impact'],
+				message:
+					'is required on every newly written CONFIRMED finding (issue #2383 typed critic routing)',
+			});
+		}
+		if (value.risk_tags === undefined) {
+			ctx.addIssue({
+				code: 'custom',
+				path: ['risk_tags'],
+				message:
+					'is required on every newly written CONFIRMED finding (issue #2383 typed critic routing)',
+			});
+		}
+	});
+
+export interface PrReviewCriticRoutingInput {
+	classification?: string;
+	severity?: string;
+	risk_impact?: PrReviewRiskImpact;
+	risk_tags?: readonly PrReviewRiskTag[];
+}
+
+/**
+ * THE shared production critic-routing predicate (issue #2383).
+ *
+ * Exactly one definition, imported by every production consumer (critic
+ * inventory derivation, artifact-record validation, coverage admission).
+ * Inline severity triples are forbidden — a parity/centralization guard test
+ * enforces it. Accepts only the normalized canonical shape:
+ *
+ * - non-CONFIRMED classifications are never critic-routed;
+ * - UNKNOWN/missing/invalid risk metadata routes to critic (fail-safe);
+ * - CRITICAL/HIGH always route to critic;
+ * - MEDIUM routes iff HIGH_IMPACT or at least one risk tag;
+ * - LOW/INFO/NONE follow the existing no-critic policy once metadata is known.
+ *
+ * Paths, dimensions, keywords, and prompt prose may suggest risk to the model
+ * but can never override this typed result.
+ */
+export function prReviewFindingRequiresCritic(
+	input: PrReviewCriticRoutingInput,
+): boolean {
+	if (input.classification !== 'CONFIRMED') return false;
+	const impact = input.risk_impact ?? 'UNKNOWN';
+	const tags = input.risk_tags ?? [];
+	if (impact === 'UNKNOWN') return true;
+	if (input.severity === undefined) return true;
+	if (input.severity === 'CRITICAL' || input.severity === 'HIGH') return true;
+	if (input.severity === 'MEDIUM') {
+		return impact === 'HIGH_IMPACT' || tags.length > 0;
+	}
+	return false;
+}
 
 export const PrReviewHandoffSchema = z
 	.object({
@@ -84,18 +199,37 @@ export const PrReviewHandoffSchema = z
 	})
 	.strict();
 
+/**
+ * Terminal N-of-6 settlement disclosure input (issue #2383).
+ *
+ * The controller declares the set of dimensions it believes are unresolved;
+ * the gate derives each dimension's terminal state from lane evidence and
+ * rejects any declaration that does not exactly match. New writers emit ONLY
+ * this array shape; the persisted disclosure record additionally carries the
+ * gate-derived per-dimension terminal states (versioned v2).
+ */
 export const PrReviewPartialBaseCoverageSchema = z
 	.object({
-		missing_dimension: z.enum([
-			'intent-architecture',
-			'correctness-state',
-			'tests-falsifiability',
-			'security-trust',
-			'reliability-performance',
-			'compatibility-delivery',
-		]),
+		unresolved_dimensions: z
+			.array(z.enum(PR_REVIEW_BASE_DIMENSION_IDS))
+			.min(1)
+			.max(PR_REVIEW_BASE_DIMENSION_IDS.length),
 	})
-	.strict();
+	.strict()
+	.superRefine((value, ctx) => {
+		const seen = new Set<string>();
+		for (const dimension of value.unresolved_dimensions) {
+			if (seen.has(dimension)) {
+				ctx.addIssue({
+					code: 'custom',
+					path: ['unresolved_dimensions'],
+					message: `must not contain duplicate dimension "${dimension}"`,
+				});
+				return;
+			}
+			seen.add(dimension);
+		}
+	});
 
 export const WritePrReviewArtifactArgsSchema = z
 	.discriminatedUnion('kind', [
@@ -163,6 +297,37 @@ const introducedByPrSchema = z
 	.string()
 	.regex(/^(?:introduced_by_pr\s*:\s*)?(?:YES|NO|UNKNOWN)$/i);
 
+/**
+ * Wire format of `risk_tags` inside a verdict row: comma-separated subset of
+ * the canonical tags, or empty for "no tags". Pipes remain the field
+ * delimiter, so a comma never needs escaping.
+ */
+const PrReviewRiskTagsFieldPattern = new RegExp(
+	`^(?:(?:${PR_REVIEW_RISK_TAGS.join('|')})(?:,(?:${PR_REVIEW_RISK_TAGS.join('|')}))*)?$`,
+);
+
+const PrReviewRiskTagsFieldSchema = z
+	.string()
+	.regex(
+		PrReviewRiskTagsFieldPattern,
+		`must be a comma-separated subset of the canonical risk tags (${PR_REVIEW_RISK_TAGS.join(', ')}), or empty`,
+	);
+
+/** Field count of pre-#2383 reviewer rows, which lack the two risk fields. */
+export const PR_REVIEW_REVIEWER_LEGACY_FIELD_COUNT = 10;
+
+export function parsePrReviewRiskTagsField(field: string): PrReviewRiskTag[] {
+	const trimmed = field.trim();
+	if (!trimmed) return [];
+	return trimmed.split(',').map((tag) => tag.trim()) as PrReviewRiskTag[];
+}
+
+export function encodePrReviewRiskTagsField(
+	tags: readonly PrReviewRiskTag[],
+): string {
+	return [...tags].join(',');
+}
+
 export const PrReviewReviewerVerdictFieldsSchema = z
 	.tuple([
 		z.literal('[REVIEWED]'),
@@ -175,6 +340,8 @@ export const PrReviewReviewerVerdictFieldsSchema = z
 		z.string().min(8),
 		z.string().min(5),
 		z.string().min(3),
+		z.enum(PR_REVIEW_RISK_IMPACTS),
+		PrReviewRiskTagsFieldSchema,
 	])
 	.superRefine((fields, ctx) => {
 		if (fields[2] === 'DISPROVED' && fields[4] !== 'NONE') {
@@ -239,7 +406,7 @@ export const PR_REVIEW_VERDICT_ROW_DESCRIPTORS: Record<
 > = {
 	reviewer: {
 		marker: '[REVIEWED]',
-		fieldCount: 10,
+		fieldCount: 12,
 		fieldRoles: [
 			'marker',
 			'item_id',
@@ -251,6 +418,8 @@ export const PR_REVIEW_VERDICT_ROW_DESCRIPTORS: Record<
 			'rationale',
 			'probe',
 			'reviewer_notes',
+			'risk_impact',
+			'risk_tags',
 		],
 		schema: PrReviewReviewerVerdictFieldsSchema,
 	},
@@ -375,6 +544,8 @@ export function buildPrReviewContractCard(): string {
 		'rationale with | pipe',
 		'probe with \\ backslash',
 		'reviewer notes',
+		'HIGH_IMPACT',
+		'SECURITY,GIT',
 	]);
 	const positiveCritic = encodePrReviewVerdictRow('critic', [
 		critic.marker,
@@ -395,6 +566,8 @@ export function buildPrReviewContractCard(): string {
 		'illustrative only',
 		'not routable',
 		'not routable',
+		'ORDINARY',
+		'',
 	]);
 	const discardedCritic = encodePrReviewVerdictRow('critic', [
 		critic.marker,
@@ -411,6 +584,8 @@ export function buildPrReviewContractCard(): string {
 		`REVIEWED classifications: ${PR_REVIEW_REVIEWER_CLASSIFICATIONS.join(', ')}`,
 		`REVIEWED evidence types: ${PR_REVIEW_REVIEWER_EVIDENCE_TYPES.join(', ')}`,
 		`REVIEWED severities: ${PR_REVIEW_SEVERITIES.join(', ')}`,
+		`REVIEWED risk impacts: ${PR_REVIEW_RISK_IMPACTS.join(', ')}`,
+		`REVIEWED risk tags (comma-separated subset or empty): ${PR_REVIEW_RISK_TAGS.join(', ')}`,
 		`CRITIC row: ${critic.fieldRoles.map((role, index) => (index === 0 ? critic.marker : role)).join(' | ')}`,
 		`CRITIC statuses: ${PR_REVIEW_CRITIC_STATUSES.join(', ')}`,
 		`CRITIC severities: ${PR_REVIEW_SEVERITIES.join(', ')}`,
@@ -426,6 +601,9 @@ export function buildPrReviewContractCard(): string {
 		'- Emit exactly one live CRITIC row per assigned item in critic lanes.',
 		'- DISPROVED requires severity NONE.',
 		'- NEEDS_MORE_EVIDENCE is not a terminal critic transport row.',
+		'- risk_impact/risk_tags are REQUIRED on every CONFIRMED REVIEWED row; malformed or unknown values fail the row.',
+		'- Critic routing is typed (issue #2383): CRITICAL/HIGH always; MEDIUM only when HIGH_IMPACT or any risk tag; UNKNOWN always; ORDINARY MEDIUMs with no tags are not critic-routed.',
+		'- Paths, dimensions, keywords, and prose may suggest risk but never override the typed risk_impact/risk_tags result.',
 		'- DISCARDED examples above are documentation only; they are not routable live rows.',
 		'Defaults and ownership:',
 		'- assigned_item_ids and workflow_lane come only from the controller block.',
@@ -512,6 +690,17 @@ export function parsePrReviewVerdictRow(
 	}
 	fields.push(current.trim());
 	if (fields[0] !== descriptor.marker) return null;
+	if (
+		kind === 'reviewer' &&
+		fields.length === PR_REVIEW_REVIEWER_LEGACY_FIELD_COUNT
+	) {
+		// Legacy 10-field rows predate typed risk metadata (issue #2383).
+		// Normalized at this single parse boundary to UNKNOWN / no tags, which
+		// fail-safely routes the item to critic review. The row digest is
+		// computed over the NORMALIZED fields on both the critic-batch binder
+		// and the claim-admission side, so normalization is consistent.
+		fields.push('UNKNOWN', '');
+	}
 	if (fields.length > descriptor.fieldCount) {
 		const retained = fields.slice(0, descriptor.fieldCount - 1);
 		retained.push(fields.slice(descriptor.fieldCount - 1).join('|'));

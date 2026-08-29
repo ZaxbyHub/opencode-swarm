@@ -5,12 +5,17 @@ import {
 	analyzeCleanFields,
 	CANDIDATE_FIELD_COUNT,
 	CANDIDATE_FIELDS,
+	CANDIDATE_LEGACY_FIELD_COUNT,
+	CANDIDATE_REQUIRED_FIELDS,
 	type CandidateArtifactRepairKind,
 	type CandidateConfidence,
 	type CandidateSeverity,
 	candidateDiagnosticPreview,
 	isCandidateLookingShortRow,
 	normalizeCandidateArtifact,
+	type PrReviewRiskImpact,
+	type PrReviewRiskTag,
+	parsePrReviewRiskTagsField,
 	type RowFormatFamily,
 	removeCandidateCodeFences,
 	type CleanAttestationRecord as SharedCleanAttestationRecord,
@@ -122,6 +127,13 @@ export interface CandidateRecord {
 	impact_context: string | null;
 	invariant_violated: string | null;
 	confidence: CandidateConfidence | null;
+	/**
+	 * Typed risk metadata (issue #2383). Advisory at candidate stage — the
+	 * reviewer's `[REVIEWED]` row is the authoritative producer for confirmed
+	 * findings. Legacy rows parse as `UNKNOWN` / `[]`.
+	 */
+	risk_impact: PrReviewRiskImpact | null;
+	risk_tags: PrReviewRiskTag[] | null;
 }
 
 /** A machine-readable attestation that a complete lane found no candidates. */
@@ -319,7 +331,7 @@ function mapFields(
 }
 
 function getRequiredFields(family: RowFormatFamily): readonly string[] {
-	return CANDIDATE_FIELDS[family];
+	return CANDIDATE_REQUIRED_FIELDS[family];
 }
 
 /** Runtime assertion: candidate_id is guaranteed non-null after the rowMalformed guard. */
@@ -738,6 +750,15 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 			fields = fields.slice(1);
 		}
 
+		// Legacy nine-field rows predate typed risk metadata (issue #2383).
+		// Normalized at this single parse boundary to UNKNOWN / no tags — an
+		// honest, fail-safe classification. Any other width (except the full
+		// eleven) continues into the short-row/continuation handling below and
+		// fails closed.
+		if (fields.length === CANDIDATE_LEGACY_FIELD_COUNT) {
+			fields = [...fields, 'UNKNOWN', ''];
+		}
+
 		// Continuation line: fewer fields than the format family expects (FR-007).
 		if (fields.length < CANDIDATE_FIELD_COUNT) {
 			if (isCandidateLookingShortRow(fields, flags, hadCandidateMarker)) {
@@ -916,6 +937,11 @@ function parseText(input: ArtifactInput, flags: ParseFlags): ParseResult {
 			impact_context: mapped.impact_context,
 			invariant_violated: mapped.invariant_violated,
 			confidence: mapped.confidence as CandidateConfidence,
+			risk_impact:
+				(mapped.risk_impact as PrReviewRiskImpact | null) ?? 'UNKNOWN',
+			risk_tags: mapped.risk_tags
+				? parsePrReviewRiskTagsField(mapped.risk_tags)
+				: [],
 		};
 
 		// Track duplicate candidate_ids (FR-005).

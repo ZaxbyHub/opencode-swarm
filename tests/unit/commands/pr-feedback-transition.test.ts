@@ -104,6 +104,11 @@ async function materializeTerminalReview(runId = RUN_ID): Promise<{
 				? ('suppress_with_reason' as const)
 				: ('route_to_critic' as const),
 		severity: index === 0 ? ('NONE' as const) : ('HIGH' as const),
+		// Typed risk metadata required on CONFIRMED records (issue #2383),
+		// mirroring the reviewer rows above (CONFIRMED HIGH -> ORDINARY).
+		...(index === 0
+			? {}
+			: { risk_impact: 'ORDINARY' as const, risk_tags: [] as string[] }),
 	}));
 	const criticRecords = candidateIds.map((id, index) => ({
 		finding_id: id,
@@ -117,12 +122,15 @@ async function materializeTerminalReview(runId = RUN_ID): Promise<{
 					? ('handoff_to_feedback' as const)
 					: ('report' as const),
 		severity: index === 0 ? ('NONE' as const) : ('HIGH' as const),
+		...(index === 0
+			? {}
+			: { risk_impact: 'ORDINARY' as const, risk_tags: [] as string[] }),
 	}));
 	const reviewerRows = candidateIds
 		.map((id, index) =>
 			index === 0
-				? `[REVIEWED] | ${id} | DISPROVED | STRUCTURALLY_PROVEN | NONE | YES | file.ts:1 | rationale | probe | reviewer`
-				: `[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer`,
+				? `[REVIEWED] | ${id} | DISPROVED | STRUCTURALLY_PROVEN | NONE | YES | file.ts:1 | rationale | probe | reviewer | ORDINARY | `
+				: `[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer | ORDINARY | `,
 		)
 		.join('\n');
 	const criticRows = candidateIds
@@ -294,7 +302,9 @@ describe('PR feedback continuation transition', () => {
 	test('completed reviews can continue externally with either exact continuation command form', async () => {
 		const { handoffPath, findingIds } = await materializeTerminalReview();
 		await expect(
-			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA),
+			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
+				reportVerdict: 'APPROVE',
+			}),
 		).resolves.toBe('completed');
 		const feedback = await transitionPrReviewToFeedback(
 			tempDir,

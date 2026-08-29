@@ -37,13 +37,18 @@ import {
 import { MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS } from '../background/pr-review-collection-receipt.js';
 import {
 	generatePrReviewRunId,
+	PR_REVIEW_BASE_DIMENSION_IDS,
 	PR_REVIEW_DISCARDED_EXAMPLE_ITEM_ID,
 	PR_REVIEW_FINDINGS_MAX_BYTES,
 	PR_REVIEW_HANDOFF_MAX_BYTES,
 	PrReviewCriticVerdictFieldsSchema,
 	PrReviewReviewerVerdictFieldsSchema,
+	type PrReviewRiskImpact,
+	type PrReviewRiskTag,
 	PrReviewRunIdSchema,
+	parsePrReviewRiskTagsField,
 	parsePrReviewVerdictRow,
+	prReviewFindingRequiresCritic,
 } from '../background/pr-review-contract.js';
 import {
 	PR_REVIEW_REQUIRED_TRIGGER_IDS,
@@ -112,14 +117,12 @@ import {
 } from './pr-review-resilience-circuit.js';
 import { validateSwarmPath } from './utils.js';
 
-export const PR_REVIEW_BASE_DIMENSION_IDS = [
-	'intent-architecture',
-	'correctness-state',
-	'tests-falsifiability',
-	'security-trust',
-	'reliability-performance',
-	'compatibility-delivery',
-] as const;
+/**
+ * Re-exported for compatibility: the canonical six-dimension list is owned by
+ * the PR-review contract module (issue #2383 single-source rule; a
+ * source-scan guard test enforces it).
+ */
+export { PR_REVIEW_BASE_DIMENSION_IDS };
 
 export const PR_REVIEW_REQUIRED_MICRO_LANE_IDS = PR_REVIEW_REQUIRED_TRIGGER_IDS;
 
@@ -633,6 +636,14 @@ type PrReviewArtifactRecord = {
 	 * omitted severity as a mismatch rather than skipping the check (issue #2279).
 	 */
 	severity?: FindingsSeverity;
+	/**
+	 * Typed risk metadata (issue #2383). Optional in the TYPE for the same
+	 * legacy-read reason as `severity`; the WRITE boundary requires both on
+	 * every CONFIRMED record, and this validator compares CONFIRMED records
+	 * against the authoritative reviewer verdict's typed values.
+	 */
+	risk_impact?: PrReviewRiskImpact;
+	risk_tags?: PrReviewRiskTag[];
 };
 
 interface PrFeedbackScopeDeclarationRecord {
@@ -761,6 +772,15 @@ export interface PrWorkflowGateState {
 	prReviewPartialBaseCoverage?: PrReviewPartialBaseCoverageRecord;
 	prReviewCoverageDisclosurePath?: string;
 	prReviewCoverageDisclosureDigest?: string;
+	/**
+	 * Explicit per-dimension cancellations (issue #2383), written only by the
+	 * audited armed-recovery operation. A cancelled dimension is terminal for
+	 * settlement purposes and never counts as covered. Bounded to the six
+	 * canonical dimensions by key.
+	 */
+	prReviewDimensionCancellations?: Partial<
+		Record<PrReviewBaseDimensionId, PrReviewDimensionCancellationRecord>
+	>;
 	prReviewHandoffPath?: string;
 	prReviewHandoffRequired?: boolean;
 	checkoutRecovery?: PrWorkflowCheckoutRecoveryRecord;
@@ -798,6 +818,13 @@ export interface PrWorkflowGateState {
 	 */
 	prFeedbackPublication?: PrFeedbackPublicationState;
 	/**
+	 * Issue #2383: audited armed-recovery marker. Present only after an armed
+	 * workflow was explicitly recovered — lanes settled, one bounded audit
+	 * event appended, staged publication authorization invalidated — leaving a
+	 * recoverable terminal state that preserves validated work.
+	 */
+	prFeedbackArmedRecovery?: PrFeedbackArmedRecoveryRecord;
+	/**
 	 * Issue #2131 criterion C2: count of controlled base-sync/rebind transitions.
 	 * Each rebind moves the immutable intake head to a new verified remote PR
 	 * head after merge/rebase/conflict repair and invalidates every
@@ -808,7 +835,51 @@ export interface PrWorkflowGateState {
 	prFeedbackScopes?: PrFeedbackScopeDeclarationRecord[];
 }
 
-export interface PrReviewPartialBaseCoverageRecord {
+/**
+ * Normalized terminal state of one canonical base dimension (issue #2383).
+ * Every dimension ends in exactly one of these; completion requires every
+ * LAUNCHED lane to be terminal (COVERED/FAILED) or explicitly cancelled, with
+ * no in-flight lane and no late result creditable to the active generation.
+ */
+export type PrReviewDimensionTerminalState =
+	| 'COVERED'
+	| 'FAILED'
+	| 'CANCELLED'
+	| 'NOT_LAUNCHED';
+
+/** Gate-derived per-dimension terminal evidence for an unresolved dimension. */
+export interface PrReviewUnresolvedDimensionRecord {
+	dimension: PrReviewBaseDimensionId;
+	terminalState: 'FAILED' | 'CANCELLED' | 'NOT_LAUNCHED';
+	reasonKind: 'lane_failure' | 'cancelled' | 'not_launched';
+	failureClass?: BackgroundDelegationWorkflowLaneFailureClass;
+	terminalEventId?: string;
+	/** Contributing lane/batch identity, when available. */
+	batchId?: string;
+	laneId?: string;
+	/**
+	 * Bounded safe detail derived from the failure-class vocabulary — never
+	 * lane output, prompts, or secrets.
+	 */
+	safeDetail?: string;
+}
+
+/** v2 terminal-settlement disclosure (issue #2383). The ONLY shape new writers emit. */
+export interface PrReviewPartialBaseCoverageRecordV2 {
+	schemaVersion: 2;
+	runId: string;
+	prHeadSha: string;
+	revisionDigest: string;
+	unresolvedDimensions: PrReviewUnresolvedDimensionRecord[];
+	admittedAt: string;
+}
+
+/**
+ * Legacy v1 disclosure (pre-#2383): singular `missingDimension` with a typed
+ * terminal failure. Read-only — normalized to the v2 in-memory view at the
+ * single read boundary; never rewritten on disk.
+ */
+export interface PrReviewPartialBaseCoverageRecordV1 {
 	runId: string;
 	prHeadSha: string;
 	revisionDigest: string;
@@ -816,6 +887,54 @@ export interface PrReviewPartialBaseCoverageRecord {
 	failureClass: BackgroundDelegationWorkflowLaneFailureClass;
 	terminalEventId: string;
 	admittedAt: string;
+}
+
+export type PrReviewPartialBaseCoverageRecord =
+	| PrReviewPartialBaseCoverageRecordV2
+	| PrReviewPartialBaseCoverageRecordV1;
+
+/** Terminal report kind of an N-of-6 settlement (issue #2383). */
+export type PrReviewTerminalCoverageKind =
+	| 'COMPLETE'
+	| 'PARTIAL'
+	| 'NO_COVERAGE';
+
+/** Controller-declared terminal verdict for a PR_REVIEW completion (issue #2383). */
+export const PR_REVIEW_REPORT_VERDICTS = [
+	'APPROVE',
+	'REQUEST_CHANGES',
+	'INCOMPLETE',
+] as const;
+
+export type PrReviewReportVerdict = (typeof PR_REVIEW_REPORT_VERDICTS)[number];
+
+/**
+ * Verdicts a terminal report may carry by coverage kind (issue #2383):
+ * PARTIAL may only request changes or declare itself incomplete; NO_COVERAGE
+ * is a forced INCOMPLETE operational report. Neither may ever APPROVE or
+ * claim a full review.
+ */
+export function allowedPrReviewReportVerdicts(
+	kind: PrReviewTerminalCoverageKind,
+): readonly PrReviewReportVerdict[] {
+	if (kind === 'COMPLETE') return PR_REVIEW_REPORT_VERDICTS;
+	if (kind === 'PARTIAL') return ['REQUEST_CHANGES', 'INCOMPLETE'];
+	return ['INCOMPLETE'];
+}
+
+export interface PrReviewTerminalCoverageSettlement {
+	kind: PrReviewTerminalCoverageKind;
+	coveredDimensions: PrReviewBaseDimensionId[];
+	unresolvedDimensions: PrReviewUnresolvedDimensionRecord[];
+	/** False while any dimension still has a live (in-flight) lane. */
+	allLaunchedTerminal: boolean;
+}
+
+/** Per-dimension explicit cancellation, written by armed recovery (issue #2383). */
+export interface PrReviewDimensionCancellationRecord {
+	reason: string;
+	cancelledAt: string;
+	source: 'armed_recovery';
 }
 
 interface SessionStateMutationLock {
@@ -908,14 +1027,7 @@ const pendingStateMutationsByProjectSession = new Map<string, Promise<void>>();
 const pendingCheckoutMutationsByProject = new Map<string, Promise<void>>();
 const completedCheckoutLockOwners = new Map<string, string>();
 
-const PrReviewBaseDimensionIdSchema = z.enum([
-	'intent-architecture',
-	'correctness-state',
-	'tests-falsifiability',
-	'security-trust',
-	'reliability-performance',
-	'compatibility-delivery',
-]);
+const PrReviewBaseDimensionIdSchema = z.enum(PR_REVIEW_BASE_DIMENSION_IDS);
 
 const PrReviewBaseDispatchRecordSchema = z
 	.object({
@@ -979,7 +1091,94 @@ const PrReviewResilienceStateRecordSchema = z
 	})
 	.strict();
 
-const PrReviewPartialBaseCoverageRecordSchema = z
+const PR_REVIEW_FAILURE_CLASS_SAFE_DETAILS: Record<
+	BackgroundDelegationWorkflowLaneFailureClass,
+	string
+> = {
+	contract:
+		'lane failed its output contract after the bounded retry budget was exhausted',
+	resource: 'lane exhausted its resource budget before producing valid output',
+	deadline: 'lane passed its collection deadline without valid terminal output',
+};
+
+const PrReviewUnresolvedDimensionRecordSchema = z
+	.object({
+		dimension: z.enum(PR_REVIEW_BASE_DIMENSION_IDS),
+		terminalState: z.enum(['FAILED', 'CANCELLED', 'NOT_LAUNCHED']),
+		reasonKind: z.enum(['lane_failure', 'cancelled', 'not_launched']),
+		failureClass: z.enum(['contract', 'resource', 'deadline']).optional(),
+		terminalEventId: z.string().min(1).max(256).optional(),
+		batchId: z.string().min(1).max(128).optional(),
+		laneId: z.string().min(1).max(128).optional(),
+		safeDetail: z.string().max(200).optional(),
+	})
+	.strict()
+	.superRefine((value, ctx) => {
+		if (
+			value.terminalState === 'FAILED' &&
+			value.reasonKind !== 'lane_failure'
+		) {
+			ctx.addIssue({
+				code: 'custom',
+				path: ['reasonKind'],
+				message: 'FAILED dimensions must use reasonKind "lane_failure"',
+			});
+		}
+		if (
+			(value.terminalState === 'CANCELLED' &&
+				value.reasonKind !== 'cancelled') ||
+			(value.terminalState === 'NOT_LAUNCHED' &&
+				value.reasonKind !== 'not_launched')
+		) {
+			ctx.addIssue({
+				code: 'custom',
+				path: ['reasonKind'],
+				message: `reasonKind must match terminalState "${value.terminalState}"`,
+			});
+		}
+		if (
+			value.terminalState !== 'FAILED' &&
+			(value.failureClass !== undefined || value.terminalEventId !== undefined)
+		) {
+			ctx.addIssue({
+				code: 'custom',
+				path: ['failureClass'],
+				message:
+					'failureClass/terminalEventId are legal only on FAILED dimensions',
+			});
+		}
+	});
+
+const PrReviewPartialBaseCoverageRecordV2Schema = z
+	.object({
+		schemaVersion: z.literal(2),
+		runId: z.string().min(1).max(128),
+		prHeadSha: z.string().regex(/^[0-9a-f]{6,64}$/i),
+		revisionDigest: z.string().min(1).max(256),
+		unresolvedDimensions: z
+			.array(PrReviewUnresolvedDimensionRecordSchema)
+			.min(1)
+			.max(PR_REVIEW_BASE_DIMENSION_IDS.length),
+		admittedAt: z.string().datetime(),
+	})
+	.strict()
+	.superRefine((value, ctx) => {
+		const seen = new Set<string>();
+		for (const entry of value.unresolvedDimensions) {
+			if (seen.has(entry.dimension)) {
+				ctx.addIssue({
+					code: 'custom',
+					path: ['unresolvedDimensions'],
+					message: `must not contain duplicate dimension "${entry.dimension}"`,
+				});
+				return;
+			}
+			seen.add(entry.dimension);
+		}
+	});
+
+/** Legacy pre-#2383 singular disclosure; read-only, normalized on read. */
+const PrReviewPartialBaseCoverageRecordV1Schema = z
 	.object({
 		runId: z.string().min(1).max(128),
 		prHeadSha: z.string().regex(/^[0-9a-f]{6,64}$/i),
@@ -990,6 +1189,49 @@ const PrReviewPartialBaseCoverageRecordSchema = z
 		admittedAt: z.string().datetime(),
 	})
 	.strict();
+
+const PrReviewPartialBaseCoverageRecordSchema = z.union([
+	PrReviewPartialBaseCoverageRecordV2Schema,
+	PrReviewPartialBaseCoverageRecordV1Schema,
+]);
+
+const PrReviewDimensionCancellationRecordSchema = z
+	.object({
+		reason: z.string().min(1).max(500),
+		cancelledAt: z.string().datetime(),
+		source: z.literal('armed_recovery'),
+	})
+	.strict();
+
+/**
+ * Normalize any disclosure record to the v2 in-memory view. A legacy v1
+ * record maps to exactly one FAILED entry; the durable file is never
+ * rewritten (its digest stays bound to the original bytes).
+ */
+export function normalizePrReviewPartialBaseCoverageRecord(
+	record: PrReviewPartialBaseCoverageRecord,
+): PrReviewPartialBaseCoverageRecordV2 {
+	if ('missingDimension' in record) {
+		return {
+			schemaVersion: 2,
+			runId: record.runId,
+			prHeadSha: record.prHeadSha,
+			revisionDigest: record.revisionDigest,
+			unresolvedDimensions: [
+				{
+					dimension: record.missingDimension,
+					terminalState: 'FAILED',
+					reasonKind: 'lane_failure',
+					failureClass: record.failureClass,
+					terminalEventId: record.terminalEventId,
+					safeDetail: PR_REVIEW_FAILURE_CLASS_SAFE_DETAILS[record.failureClass],
+				},
+			],
+			admittedAt: record.admittedAt,
+		};
+	}
+	return record;
+}
 
 const PrFeedbackLaneOwnershipSchema = z
 	.object({
@@ -1396,6 +1638,12 @@ const PrWorkflowGateStateSchema = z
 			.string()
 			.regex(/^[0-9a-f]{64}$/)
 			.optional(),
+		prReviewDimensionCancellations: z
+			.record(
+				z.enum(PR_REVIEW_BASE_DIMENSION_IDS),
+				PrReviewDimensionCancellationRecordSchema,
+			)
+			.optional(),
 		prReviewArtifactBoundaries: z
 			.array(z.enum(['post_explorer', 'post_reviewer', 'post_critic']))
 			.max(3)
@@ -1436,6 +1684,17 @@ const PrWorkflowGateStateSchema = z
 		// pre-#2108 state omits it, and older binaries carry it through the
 		// root `.passthrough()` below without deleting it.
 		prFeedbackPublication: PrFeedbackPublicationStateSchema.optional(),
+		// Issue #2383 armed-recovery recoverable-terminal marker.
+		prFeedbackArmedRecovery: z
+			.object({
+				recoveredAt: z.string().datetime(),
+				prHeadSha: z.string().regex(/^[0-9a-f]{6,64}$/i),
+				revisionDigest: z.string().min(1).max(256),
+				generation: z.number().int().nonnegative(),
+				reason: z.string().min(1).max(500),
+			})
+			.strict()
+			.optional(),
 		prFeedbackRebindCount: z.number().int().nonnegative().optional(),
 		prFeedbackScopes: z
 			.array(PrFeedbackScopeDeclarationRecordSchema)
@@ -3198,6 +3457,245 @@ export async function abortPrWorkflow(
 	};
 }
 
+/** Marker record left by an audited armed recovery (issue #2383). */
+export interface PrFeedbackArmedRecoveryRecord {
+	recoveredAt: string;
+	prHeadSha: string;
+	/** Revision digest of the invalidated staged publication authorization. */
+	revisionDigest: string;
+	/** Gate state revision (CAS generation) at recovery time. */
+	generation: number;
+	reason: string;
+}
+
+/**
+ * Audited armed recovery (issue #2383): the explicit, identity-correlated
+ * escape for a publication-armed workflow whose exact publication cannot
+ * proceed.
+ *
+ * Requires the exact active session (state is session-keyed; a foreign session
+ * finds no armed state), workflow identity, base/head SHA, the staged
+ * authorization's revision digest, and the CURRENT gate-state generation.
+ * Every mismatch fails closed. There is deliberately NO `force` parameter —
+ * force never bypasses identity or revision checks. Exact approved publication
+ * remains available and preferred: this operation never runs when publication
+ * can still proceed by the normal path.
+ *
+ * Order of effects, all under the session-state mutation lock with CAS:
+ *   1. settle/cancel remaining lanes FIRST (fresh open lanes refuse recovery);
+ *   2. append exactly ONE bounded audit event (`pr_workflow_armed_recovery`);
+ *   3. invalidate the staged publication authorization;
+ *   4. transition to a recoverable terminal state — the state is PRESERVED
+ *      (not cleared) with a `prFeedbackArmedRecovery` marker, so validated
+ *      work survives and the controller can re-arm after repair or abort
+ *      cleanly.
+ */
+export async function recoverArmedPrWorkflow(
+	directory: string,
+	sessionID: string,
+	request: {
+		expectedMode?: PrWorkflowMode;
+		prHeadSha: string;
+		/** Exact merge-base SHA; REQUIRED when the active state carries one. */
+		baseSha?: string;
+		revisionDigest: string;
+		generation: number;
+		workflowInstanceId?: string;
+		reason: string;
+	},
+): Promise<{
+	mode: PrWorkflowMode;
+	prHeadSha: string;
+	openLanes: number;
+	settledLanes: number;
+	cancelledDimensions: PrReviewBaseDimensionId[];
+	recoveredAt: string;
+}> {
+	const sanitizedReason =
+		typeof request.reason === 'string' && request.reason.trim().length > 0
+			? request.reason.trim().slice(0, 500)
+			: undefined;
+	if (sanitizedReason === undefined) {
+		throw new Error(
+			'BLOCKED: armed recovery requires a non-empty reason (recorded to the audit trail).',
+		);
+	}
+	return withSessionStateMutation(
+		directory,
+		normalizeSessionID(sessionID),
+		async () => {
+			// Deliberately NOT the salvage-tolerant recovery reader: an armed
+			// recovery must verify the armed record's exact revision digest, and a
+			// state too malformed to load that record fails closed here. The human
+			// `/swarm abort-pr-workflow` force path remains the only exit for a
+			// corrupt armed record.
+			const state = await readPrWorkflowGateStateFromDisk(
+				directory,
+				normalizeSessionID(sessionID),
+			);
+			if (!state) throw noActiveGateError(sessionID);
+			if (request.expectedMode && state.mode !== request.expectedMode) {
+				throw wrongModeError(state, request.expectedMode);
+			}
+			const armed = state.prFeedbackReadyToPublish;
+			if (!armed) {
+				throw new Error(
+					`BLOCKED: ${state.mode} is not armed for publication; armed recovery applies only to an active staged publication authorization (complete or abort normally instead).`,
+				);
+			}
+			if (request.prHeadSha !== state.prHeadSha) {
+				throw new Error(
+					`BLOCKED: armed recovery head mismatch: workflow is bound to "${state.prHeadSha ?? '(none)'}", request declared "${request.prHeadSha}".`,
+				);
+			}
+			// Exact base/head SHA binding (issue #2383): when the active state
+			// carries a merge-base binding (PR_REVIEW-origin workflows), the
+			// request MUST declare the exact same base SHA; a workflow without
+			// one accepts only an omitted value. Either mismatch fails closed.
+			if (
+				(state.prReviewBaseSha === undefined) !==
+				(request.baseSha === undefined)
+			) {
+				throw new Error(
+					`BLOCKED: armed recovery base mismatch: ${
+						state.prReviewBaseSha === undefined
+							? 'the active workflow has no merge-base binding but the request declared one'
+							: 'the active workflow is merge-base bound but the request omitted base_sha'
+					}; fail closed.`,
+				);
+			}
+			if (
+				request.baseSha !== undefined &&
+				state.prReviewBaseSha !== undefined &&
+				request.baseSha !== state.prReviewBaseSha
+			) {
+				throw new Error(
+					`BLOCKED: armed recovery base mismatch: workflow is merge-base bound to "${state.prReviewBaseSha}", request declared "${request.baseSha}".`,
+				);
+			}
+			if (request.revisionDigest !== armed.revisionDigest) {
+				throw new Error(
+					'BLOCKED: armed recovery revision digest does not match the staged publication authorization; fail closed.',
+				);
+			}
+			if (request.generation !== state.revision) {
+				throw new Error(
+					`BLOCKED: armed recovery generation mismatch: current gate generation is ${state.revision}, request declared ${request.generation}. Stale requests fail closed; re-read the workflow state and retry.`,
+				);
+			}
+			if (
+				(request.workflowInstanceId === undefined) !==
+				(state.workflowInstanceId === undefined)
+			) {
+				throw new Error(
+					'BLOCKED: armed recovery workflow identity mismatch: request and active state disagree on workflowInstanceId presence; fail closed.',
+				);
+			}
+			if (
+				request.workflowInstanceId !== undefined &&
+				state.workflowInstanceId !== undefined &&
+				request.workflowInstanceId !== state.workflowInstanceId
+			) {
+				throw new Error(
+					`BLOCKED: armed recovery workflow identity mismatch: active workflow is "${state.workflowInstanceId}", request declared "${request.workflowInstanceId}".`,
+				);
+			}
+			// 1. Cancel/settle remaining lanes FIRST — before any mutation. Fresh
+			// open lanes refuse recovery (collect or settle them first); presumed
+			// stale lanes settle with disclosure, exactly like abort.
+			const laneSettlement = await settlePresumedStalePrWorkflowLanes(
+				directory,
+				state.sessionID,
+			);
+			if (laneSettlement.openLanes > 0) {
+				const laneIds = laneSettlement.openLaneIds
+					.filter(Boolean)
+					.slice(0, MAX_DISCLOSED_LANE_IDS)
+					.join(', ');
+				throw new Error(
+					`BLOCKED: armed recovery refused while ${laneSettlement.openLanes} PR workflow lane(s) are still in flight (lane ids: ${laneIds}). Collect their results or let them settle before recovering.` +
+						describePrWorkflowLaneProbe(laneSettlement),
+				);
+			}
+			// PR_REVIEW-origin dimensions still unresolved after settlement are
+			// explicitly cancelled so a later N-of-6 settlement can truthfully
+			// report them as CANCELLED (issue #2383).
+			const cancelledDimensions: PrReviewBaseDimensionId[] = [];
+			let cancellations:
+				| Partial<
+						Record<PrReviewBaseDimensionId, PrReviewDimensionCancellationRecord>
+				  >
+				| undefined = state.prReviewDimensionCancellations;
+			if (state.mode === 'PR_REVIEW' && state.prHeadSha) {
+				const ctx = await createPrReviewGateContext(directory, state);
+				const settlement = derivePrReviewDimensionSettlement(
+					directory,
+					state,
+					ctx.revisionDigest,
+				);
+				for (const entry of settlement.unresolvedDimensions) {
+					if (entry.terminalState !== 'NOT_LAUNCHED') continue;
+					cancelledDimensions.push(entry.dimension);
+					cancellations = {
+						...cancellations,
+						[entry.dimension]: {
+							reason: sanitizedReason,
+							cancelledAt: isoNow(),
+							source: 'armed_recovery' as const,
+						},
+					};
+				}
+			}
+			const recoveredAt = isoNow();
+			// 2. Exactly ONE bounded audit event, appended BEFORE the state
+			// mutation: no lane output, prompts, or secrets — bounded identity and
+			// outcome fields only. Best-effort (non-fatal), same discipline as abort.
+			try {
+				appendCoreEventSync(directory, {
+					type: 'pr_workflow_armed_recovery',
+					timestamp: recoveredAt,
+					sessionID: state.sessionID,
+					mode: state.mode,
+					prHeadSha: state.prHeadSha,
+					revisionDigest: armed.revisionDigest,
+					generation: state.revision,
+					settledLanes: laneSettlement.presumedStaleLaneIds?.length ?? 0,
+					cancelledDimensions,
+					reason: sanitizedReason,
+				});
+			} catch {
+				// Non-fatal audit trail; the recovery itself must proceed.
+			}
+			// 3 + 4. Invalidate the staged publication authorization and transition
+			// to the recoverable terminal state, CAS-guarded: a concurrent state
+			// change rejects this write and the caller revalidates.
+			await writeStateWhileLocked(directory, {
+				...state,
+				updatedAt: recoveredAt,
+				prFeedbackReadyToPublish: undefined,
+				prFeedbackArmedRecovery: {
+					recoveredAt,
+					prHeadSha: state.prHeadSha!,
+					revisionDigest: armed.revisionDigest,
+					generation: state.revision,
+					reason: sanitizedReason,
+				},
+				...(cancellations
+					? { prReviewDimensionCancellations: cancellations }
+					: {}),
+			});
+			return {
+				mode: state.mode,
+				prHeadSha: state.prHeadSha!,
+				openLanes: laneSettlement.openLanes,
+				settledLanes: laneSettlement.presumedStaleLaneIds?.length ?? 0,
+				cancelledDimensions,
+				recoveredAt,
+			};
+		},
+	);
+}
+
 /** Bind an active PR workflow to one immutable PR head. */
 export async function bindPrWorkflowHead(
 	directory: string,
@@ -4945,6 +5443,9 @@ interface PrReviewLatestTypedFailure {
 	failureClass: BackgroundDelegationWorkflowLaneFailureClass;
 	terminalEventId: string;
 	recordedAt: number;
+	/** Contributing lane/batch identity, when available (issue #2383). */
+	batchId?: string;
+	laneId?: string;
 }
 
 function latestTypedFailureForBaseDimension(
@@ -4971,6 +5472,8 @@ function latestTypedFailureForBaseDimension(
 					failureClass,
 					terminalEventId: terminal.eventId,
 					recordedAt: terminal.recordedAt,
+					batchId: batch.batchId,
+					laneId: lane.laneId,
 				};
 				if (
 					latest === null ||
@@ -5524,10 +6027,129 @@ function coverageDisclosureRelativePath(runId: string): string {
 	return path.join('pr-review', runId, 'coverage-disclosure.json');
 }
 
+/**
+ * Derive the normalized terminal N-of-6 settlement (issue #2383).
+ *
+ * Pure over durable state: no mutation, no audit. Every dimension maps to
+ * exactly one view — COVERED, a terminal unresolved record (FAILED /
+ * CANCELLED / NOT_LAUNCHED), or a live (in-flight) dimension that blocks
+ * settlement. Coverage success is revision-aware (a stale artifact never
+ * counts on the current worktree), and a FAILED dimension carries the typed
+ * terminal-failure evidence plus its contributing lane/batch identity.
+ */
+function derivePrReviewDimensionSettlement(
+	directory: string,
+	state: PrWorkflowGateState,
+	revisionDigest: string,
+): PrReviewTerminalCoverageSettlement & {
+	liveDimensions: PrReviewBaseDimensionId[];
+} {
+	const attempts = summarizePrReviewBaseDimensionAttempts(
+		directory,
+		state,
+		revisionDigest,
+	);
+	const cancellations: Partial<
+		Record<PrReviewBaseDimensionId, PrReviewDimensionCancellationRecord>
+	> = state.prReviewDimensionCancellations ?? {};
+	// Dimensions for which some declared lane actually dispatched (has
+	// delegation records). A declared-but-never-dispatched lane leaves its
+	// dimensions NOT_LAUNCHED, mirroring `summarizePrReviewBaseDimension-
+	// Attempts`'s "no record at all: never dispatched" reading.
+	const dispatched = new Set<string>();
+	for (const batch of state.prReviewBaseDispatches ?? []) {
+		const records = findByBatchId(directory, batch.batchId, {
+			parentSessionId: state.sessionID,
+		});
+		for (const lane of batch.lanes) {
+			if (!records.some((record) => record.laneId === lane.laneId)) continue;
+			for (const dimension of lane.ownedWorkflowLanes?.length
+				? lane.ownedWorkflowLanes
+				: [lane.workflowLane]) {
+				dispatched.add(dimension);
+			}
+		}
+	}
+	const coveredDimensions: PrReviewBaseDimensionId[] = [];
+	const unresolvedDimensions: PrReviewUnresolvedDimensionRecord[] = [];
+	const liveDimensions: PrReviewBaseDimensionId[] = [];
+	for (const dimension of PR_REVIEW_BASE_DIMENSION_IDS) {
+		if (attempts.successful.has(dimension)) {
+			coveredDimensions.push(dimension);
+			continue;
+		}
+		if (attempts.inFlight.has(dimension)) {
+			// A live lane is not terminal: settlement consumers must refuse
+			// completion while any launched lane can still produce a result
+			// creditable to the active generation.
+			liveDimensions.push(dimension);
+			continue;
+		}
+		const cancellation = cancellations[dimension];
+		if (cancellation) {
+			unresolvedDimensions.push({
+				dimension,
+				terminalState: 'CANCELLED',
+				reasonKind: 'cancelled',
+				safeDetail: `explicitly cancelled by the audited armed-recovery operation at ${cancellation.cancelledAt}`,
+			});
+			continue;
+		}
+		const latestFailure = latestTypedFailureForBaseDimension(
+			directory,
+			state,
+			dimension,
+		);
+		if (attempts.terminallyFailed.has(dimension)) {
+			unresolvedDimensions.push({
+				dimension,
+				terminalState: 'FAILED',
+				reasonKind: 'lane_failure',
+				failureClass: latestFailure?.failureClass,
+				terminalEventId: latestFailure?.terminalEventId,
+				batchId: latestFailure?.batchId,
+				laneId: latestFailure?.laneId,
+				safeDetail: latestFailure
+					? PR_REVIEW_FAILURE_CLASS_SAFE_DETAILS[latestFailure.failureClass]
+					: 'lane terminated without a typed failure class',
+			});
+			continue;
+		}
+		if (dispatched.has(dimension)) {
+			// Dispatched but neither successful, live, terminally failed, nor
+			// cancelled: treat as NOT_LAUNCHED evidence-wise is a lie; surface
+			// it as unresolved-not-launched only when nothing was ever
+			// dispatched. A dispatched-yet-unresolved dimension blocks honest
+			// settlement instead of inventing a terminal state.
+			liveDimensions.push(dimension);
+			continue;
+		}
+		unresolvedDimensions.push({
+			dimension,
+			terminalState: 'NOT_LAUNCHED',
+			reasonKind: 'not_launched',
+			safeDetail: 'no lane for this dimension was ever dispatched',
+		});
+	}
+	const kind: PrReviewTerminalCoverageKind =
+		coveredDimensions.length === PR_REVIEW_BASE_DIMENSION_IDS.length
+			? 'COMPLETE'
+			: coveredDimensions.length > 0
+				? 'PARTIAL'
+				: 'NO_COVERAGE';
+	return {
+		kind,
+		coveredDimensions,
+		unresolvedDimensions,
+		liveDimensions,
+		allLaunchedTerminal: liveDimensions.length === 0,
+	};
+}
+
 async function readAndVerifyCoverageDisclosure(
 	directory: string,
 	state: PrWorkflowGateState,
-): Promise<PrReviewPartialBaseCoverageRecord | null> {
+): Promise<PrReviewPartialBaseCoverageRecordV2 | null> {
 	const record = state.prReviewPartialBaseCoverage;
 	const relativePath = state.prReviewCoverageDisclosurePath;
 	const expectedDigest = state.prReviewCoverageDisclosureDigest;
@@ -5574,14 +6196,17 @@ async function readAndVerifyCoverageDisclosure(
 			'BLOCKED: PR_REVIEW partial base coverage disclosure does not match durable state',
 		);
 	}
-	return record;
+	// Issue #2383 single read boundary: legacy singular disclosures normalize
+	// to the v2 view in memory; the durable file and its digest are never
+	// rewritten.
+	return normalizePrReviewPartialBaseCoverageRecord(parsed.data);
 }
 
 export async function admitPrReviewPartialBaseCoverage(
 	directory: string,
 	sessionID: string,
 	runId: string,
-	missingDimension: PrReviewBaseDimensionId,
+	unresolvedDimensions: readonly PrReviewBaseDimensionId[],
 ): Promise<PrWorkflowGateState> {
 	return withSessionStateMutation(directory, sessionID.trim(), async () => {
 		const state = await readPrWorkflowGateStateFromDisk(
@@ -5602,62 +6227,99 @@ export async function admitPrReviewPartialBaseCoverage(
 				'BLOCKED: partial base coverage run does not match the reserved PR-review run',
 			);
 		}
+		const declared = [...new Set(unresolvedDimensions)];
+		if (declared.length !== unresolvedDimensions.length) {
+			throw new Error(
+				'BLOCKED: partial base coverage unresolved_dimensions contains duplicates',
+			);
+		}
+		if (declared.length === 0) {
+			throw new Error(
+				'BLOCKED: partial base coverage requires at least one unresolved dimension; a fully covered run needs no disclosure',
+			);
+		}
 		const ctx = await createPrReviewGateContext(directory, state);
-		const attempts = summarizePrReviewBaseDimensionAttempts(
+		const settlement = derivePrReviewDimensionSettlement(
 			directory,
 			state,
 			ctx.revisionDigest,
 		);
-		const missing = PR_REVIEW_BASE_DIMENSION_IDS.filter(
-			(dimension) => !attempts.successful.has(dimension),
+		if (settlement.liveDimensions.length > 0) {
+			const liveDeclared = settlement.liveDimensions.filter((dimension) =>
+				declared.includes(dimension),
+			);
+			if (liveDeclared.length > 0) {
+				throw new Error(
+					`BLOCKED: partial base coverage dimensions still have in-flight lanes: ${liveDeclared.join(', ')}. Completion is allowed only once every launched lane is terminal or explicitly cancelled.`,
+				);
+			}
+		}
+		const derivedIds = settlement.unresolvedDimensions.map(
+			(entry) => entry.dimension,
+		);
+		const declaredSet = new Set(declared);
+		const derivedSet = new Set(derivedIds);
+		const missingFromDeclaration = derivedIds.filter(
+			(dimension) => !declaredSet.has(dimension),
+		);
+		const unknownInDeclaration = declared.filter(
+			(dimension) => !derivedSet.has(dimension),
 		);
 		if (
-			attempts.successful.size !== PR_REVIEW_BASE_DIMENSION_IDS.length - 1 ||
-			missing.length !== 1 ||
-			missing[0] !== missingDimension
+			missingFromDeclaration.length > 0 ||
+			unknownInDeclaration.length > 0 ||
+			derivedIds.length !== declared.length
 		) {
 			throw new Error(
-				`BLOCKED: partial base coverage requires exactly five successful dimensions and named missing dimension "${missingDimension}"; actual missing: ${missing.join(', ') || '(none)'}`,
+				`BLOCKED: partial base coverage declaration must exactly match the derived terminal settlement; declared: [${declared.join(', ')}]` +
+					`; derived unresolved: [${derivedIds.join(', ') || '(none)'}]` +
+					(unknownInDeclaration.length > 0
+						? `; declared-but-not-unresolved: [${unknownInDeclaration.join(', ')}]`
+						: '') +
+					(settlement.liveDimensions.length > 0
+						? `; still-live (not settleable): [${settlement.liveDimensions.join(', ')}]`
+						: ''),
 			);
 		}
-		if (attempts.inFlight.has(missingDimension)) {
-			throw new Error(
-				`BLOCKED: partial base coverage dimension "${missingDimension}" still has an in-flight lane`,
-			);
-		}
-		const latestFailure = latestTypedFailureForBaseDimension(
-			directory,
-			state,
-			missingDimension,
-		);
-		if (!latestFailure) {
-			throw new Error(
-				`BLOCKED: partial base coverage dimension "${missingDimension}" lacks a typed terminal failure`,
-			);
+		for (const entry of settlement.unresolvedDimensions) {
+			if (
+				entry.terminalState === 'FAILED' &&
+				(!entry.failureClass || !entry.terminalEventId)
+			) {
+				throw new Error(
+					`BLOCKED: partial base coverage dimension "${entry.dimension}" lacks a typed terminal failure`,
+				);
+			}
+			if (
+				entry.terminalState === 'CANCELLED' &&
+				!state.prReviewDimensionCancellations?.[entry.dimension]
+			) {
+				throw new Error(
+					`BLOCKED: partial base coverage dimension "${entry.dimension}" declared CANCELLED without a persisted cancellation record`,
+				);
+			}
 		}
 		const existing = await readAndVerifyCoverageDisclosure(directory, state);
 		if (existing) {
-			if (
+			const sameSettlement =
 				existing.runId === normalizedRunId &&
 				existing.prHeadSha === state.prHeadSha &&
 				existing.revisionDigest === ctx.revisionDigest &&
-				existing.missingDimension === missingDimension &&
-				existing.failureClass === latestFailure.failureClass &&
-				existing.terminalEventId === latestFailure.terminalEventId
-			) {
+				JSON.stringify(existing.unresolvedDimensions) ===
+					JSON.stringify(settlement.unresolvedDimensions);
+			if (sameSettlement) {
 				return state;
 			}
 			throw new Error(
 				'BLOCKED: partial base coverage admission differs from the immutable existing disclosure',
 			);
 		}
-		const record: PrReviewPartialBaseCoverageRecord = {
+		const record: PrReviewPartialBaseCoverageRecordV2 = {
+			schemaVersion: 2,
 			runId: normalizedRunId,
 			prHeadSha: state.prHeadSha,
 			revisionDigest: ctx.revisionDigest,
-			missingDimension,
-			failureClass: latestFailure.failureClass,
-			terminalEventId: latestFailure.terminalEventId,
+			unresolvedDimensions: settlement.unresolvedDimensions,
 			admittedAt: isoNow(),
 		};
 		const relativePath = coverageDisclosureRelativePath(normalizedRunId)
@@ -5770,12 +6432,27 @@ export async function rollbackPrReviewPartialBaseCoverageAdmission(
 	});
 }
 
-/** Validate durable exact-six or explicitly admitted N-1 PR review evidence. */
+/**
+ * Validate durable terminal N-of-6 coverage evidence (issue #2383).
+ *
+ * Returns the settlement: COMPLETE when all six dimensions are covered, or
+ * PARTIAL / NO_COVERAGE when an admitted, still-accurate disclosure exactly
+ * matches the currently derived terminal settlement. Throws while any
+ * unresolved dimension still has a live lane, or when the disclosure has been
+ * invalidated by later evidence (e.g. a late success landing on the same
+ * revision) — the disclosure is immutable, so such a run must re-settle or
+ * restart rather than silently re-crediting.
+ */
 export async function assertPrReviewBaseCoverageSettled(
 	directory: string,
 	sessionID: string,
 	gateContext?: PrReviewGateContext,
-): Promise<PrWorkflowGateState> {
+): Promise<{
+	state: PrWorkflowGateState;
+	settlement: PrReviewTerminalCoverageSettlement & {
+		liveDimensions: PrReviewBaseDimensionId[];
+	};
+}> {
 	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
 	const batches = state.prReviewBaseDispatches ?? [];
 	if (batches.length === 0) {
@@ -5783,54 +6460,47 @@ export async function assertPrReviewBaseCoverageSettled(
 	}
 	const ctx =
 		gateContext ?? (await createPrReviewGateContext(directory, state));
-	const covered = new Set<PrReviewBaseDimensionId>();
-	const malformedDiagnostics: string[] = [];
-	for (const batch of batches) {
-		const successful = successfulObligationsFromExactBatch(
-			directory,
-			state,
-			batch.batchId,
-			batch.lanes,
-			'swarm-pr-review:base',
-			batch.validatedAt,
-			true,
-			new Set(),
-			ctx.revisionDigest,
-			malformedDiagnostics,
-		);
-		for (const obligation of successful) {
-			covered.add(obligation as PrReviewBaseDimensionId);
-		}
+	const settlement = derivePrReviewDimensionSettlement(
+		directory,
+		state,
+		ctx.revisionDigest,
+	);
+	if (settlement.kind === 'COMPLETE') {
+		return { state, settlement };
 	}
-	const missing = PR_REVIEW_BASE_DIMENSION_IDS.filter(
-		(dimension) => !covered.has(dimension),
+	if (settlement.liveDimensions.length > 0) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW base coverage is incomplete and still has live lanes for: ${settlement.liveDimensions.join(', ')}. Completion is allowed only once every launched lane is terminal or explicitly cancelled.`,
+		);
+	}
+	const disclosure = await readAndVerifyCoverageDisclosure(directory, state);
+	const disclosureIds = (disclosure?.unresolvedDimensions ?? []).map(
+		(entry) => entry.dimension,
+	);
+	const derivedIds = settlement.unresolvedDimensions.map(
+		(entry) => entry.dimension,
 	);
 	if (
-		missing.length > 0 ||
-		covered.size !== PR_REVIEW_BASE_DIMENSION_IDS.length
+		disclosure &&
+		JSON.stringify(disclosureIds) === JSON.stringify(derivedIds) &&
+		JSON.stringify(disclosure?.unresolvedDimensions) ===
+			JSON.stringify(settlement.unresolvedDimensions) &&
+		disclosure.prHeadSha === state.prHeadSha &&
+		disclosure.revisionDigest === ctx.revisionDigest &&
+		disclosure.runId ===
+			(state.prReviewArtifactRunId ?? state.prReviewReservedRunId)
 	) {
-		const disclosure = await readAndVerifyCoverageDisclosure(directory, state);
-		if (
-			disclosure &&
-			missing.length === 1 &&
-			covered.size === PR_REVIEW_BASE_DIMENSION_IDS.length - 1 &&
-			disclosure.missingDimension === missing[0] &&
-			disclosure.prHeadSha === state.prHeadSha &&
-			disclosure.revisionDigest === ctx.revisionDigest &&
-			disclosure.runId ===
-				(state.prReviewArtifactRunId ?? state.prReviewReservedRunId)
-		) {
-			return state;
-		}
-		throw new Error(
-			`BLOCKED: PR_REVIEW base coverage is incomplete; missing dimensions: ${missing.join(', ') || '(none)'}${
-				malformedDiagnostics.length > 0
-					? `; first failed lane predicates: ${malformedDiagnostics.join(' | ')}`
-					: ''
-			}; valid dimensions: ${PR_REVIEW_BASE_DIMENSION_IDS.join(', ')}; expected candidate row: ${CANDIDATE_HEADERS.base_explorer}; expected clean row: ${CLEAN_TEMPLATES.base_explorer}`,
-		);
+		return { state, settlement };
 	}
-	return state;
+	const reason =
+		disclosure === null
+			? 'no terminal settlement disclosure is admitted; settle via write_pr_review_artifact partial_base_coverage.unresolved_dimensions'
+			: disclosureIds.join(',') !== derivedIds.join(',')
+				? `the admitted disclosure [${disclosureIds.join(', ')}] no longer matches the derived terminal settlement [${derivedIds.join(', ')}] — later evidence invalidated it; the disclosure is immutable, so re-run the affected dimensions or restart the review`
+				: 'the admitted disclosure no longer matches the derived per-dimension terminal evidence';
+	throw new Error(
+		`BLOCKED: PR_REVIEW base coverage is ${settlement.kind} (${settlement.coveredDimensions.length}/${PR_REVIEW_BASE_DIMENSION_IDS.length} dimensions covered; unresolved: ${derivedIds.join(', ') || '(none)'}); ${reason}`,
+	);
 }
 
 /** Persist a council/reviewer/critic validation batch before launch. */
@@ -8761,7 +9431,8 @@ export async function markPrReviewTriggerEvaluationComplete(
 	runId: string,
 	artifactPath: string,
 ): Promise<PrWorkflowGateState> {
-	const state = await assertPrReviewBaseCoverageSettled(directory, sessionID);
+	const state = (await assertPrReviewBaseCoverageSettled(directory, sessionID))
+		.state;
 	const normalizedRunId = runId.trim();
 	if (!normalizedRunId) {
 		throw new Error('BLOCKED: PR_REVIEW trigger artifact run_id is required');
@@ -8818,7 +9489,8 @@ export async function bindPrReviewTriggerLedger(
 			}`,
 		);
 	}
-	const state = await assertPrReviewBaseCoverageSettled(directory, sessionID);
+	const state = (await assertPrReviewBaseCoverageSettled(directory, sessionID))
+		.state;
 	if (state.prReviewTriggerLedger) {
 		let frozen: ReturnType<typeof validatePrReviewInlineTriggerLedger>;
 		try {
@@ -8876,7 +9548,8 @@ export async function assertPrReviewArtifactBoundary(
 		// The returned state is the freshest snapshot; the assignment threads it
 		// through every downstream check here (boundary order, run binding,
 		// candidate inventory) rather than mixing two reads of the gate state.
-		state = await assertPrReviewBaseCoverageSettled(directory, sessionID);
+		state = (await assertPrReviewBaseCoverageSettled(directory, sessionID))
+			.state;
 	}
 	const persistedBoundaries = state.prReviewArtifactBoundaries ?? [];
 	const boundaryOrder: readonly PrReviewArtifactBoundary[] = [
@@ -9038,6 +9711,40 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 						: `"${raw}"`;
 		report(record.finding_id, 'severity', `"${expected}"`, actual);
 	};
+	/**
+	 * Typed risk metadata comparison (issue #2383): a CONFIRMED record is a
+	 * projection of the authoritative reviewer row, so its risk_impact and
+	 * risk_tags must equal that row's typed values — the metadata that decides
+	 * critic routing may never drift between the verdict and the artifact.
+	 */
+	const reportRiskMetadata = (
+		record: PrReviewArtifactRecord,
+		reviewer: { riskImpact?: PrReviewRiskImpact; riskTags?: PrReviewRiskTag[] },
+	): void => {
+		if (record.status !== 'CONFIRMED') return;
+		const expectedImpact = reviewer.riskImpact ?? 'UNKNOWN';
+		const expectedTags = reviewer.riskTags ?? [];
+		const actualImpact = record.risk_impact ?? 'UNKNOWN';
+		const actualTags = record.risk_tags ?? [];
+		if (actualImpact !== expectedImpact) {
+			report(
+				record.finding_id,
+				'risk_impact',
+				`"${expectedImpact}"`,
+				record.risk_impact === undefined ? '(omitted)' : `"${actualImpact}"`,
+			);
+		}
+		if (actualTags.join(',') !== expectedTags.join(',')) {
+			report(
+				record.finding_id,
+				'risk_tags',
+				JSON.stringify(expectedTags),
+				record.risk_tags === undefined
+					? '(omitted)'
+					: JSON.stringify(actualTags),
+			);
+		}
+	};
 	if (boundary === 'post_explorer') {
 		// The candidate rows the inventory was derived from ARE the authority for
 		// this boundary: a post_explorer record is a projection of one
@@ -9125,9 +9832,12 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 				});
 				continue;
 			}
-			const requiresCritic =
-				reviewer.classification === 'CONFIRMED' &&
-				['CRITICAL', 'HIGH', 'MEDIUM'].includes(reviewer.severity);
+			const requiresCritic = prReviewFindingRequiresCritic({
+				classification: reviewer.classification,
+				severity: reviewer.severity,
+				risk_impact: reviewer.riskImpact,
+				risk_tags: reviewer.riskTags,
+			});
 			const expectedStatus =
 				reviewer.classification === 'UNVERIFIED'
 					? 'PENDING'
@@ -9158,6 +9868,7 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 					);
 				}
 				reportSeverity(record, reviewer.severity);
+				reportRiskMetadata(record, reviewer);
 				continue;
 			}
 
@@ -9187,6 +9898,7 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 					);
 				}
 				reportSeverity(record, reviewer.severity);
+				reportRiskMetadata(record, reviewer);
 				continue;
 			}
 
@@ -9197,6 +9909,7 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 				// available authority, and the missing-critic violation below is
 				// reported alongside it.
 				reportSeverity(record, reviewer.severity);
+				reportRiskMetadata(record, reviewer);
 				violations.push({
 					findingId: record.finding_id,
 					detail:
@@ -9950,7 +10663,12 @@ function assertSamePrFeedbackHandoff(
 async function assertPrReviewTerminalReady(
 	directory: string,
 	sessionID: string,
-): Promise<PrWorkflowGateState> {
+): Promise<{
+	state: PrWorkflowGateState;
+	settlement: PrReviewTerminalCoverageSettlement & {
+		liveDimensions: PrReviewBaseDimensionId[];
+	};
+}> {
 	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
 	await assertPrReviewCleanCheckout(directory, 'PR_REVIEW');
 	// W-4 (issue #2242 R2): stale lanes settle with disclosure; fresh ones block.
@@ -9966,7 +10684,11 @@ async function assertPrReviewTerminalReady(
 	}
 	// One digest + one composed verdict map for the entire terminal check.
 	const ctx = await createPrReviewGateContext(directory, state);
-	await assertPrReviewBaseCoverageSettled(directory, sessionID, ctx);
+	const { settlement } = await assertPrReviewBaseCoverageSettled(
+		directory,
+		sessionID,
+		ctx,
+	);
 	if (!state.prReviewTriggerEvalPath) {
 		throw new Error(
 			'BLOCKED: PR_REVIEW transition requires a persisted trigger evaluation artifact',
@@ -10021,7 +10743,7 @@ async function assertPrReviewTerminalReady(
 			'BLOCKED: PR_REVIEW actionable findings require a persisted feedback handoff artifact',
 		);
 	}
-	return state;
+	return { state, settlement };
 }
 
 export async function transitionPrReviewToFeedback(
@@ -10085,10 +10807,9 @@ export async function transitionPrReviewToFeedback(
 		if (preliminary.mode !== 'PR_REVIEW') {
 			throw wrongModeError(preliminary, 'PR_REVIEW');
 		}
-		const ready = await assertPrReviewTerminalReady(
-			directory,
-			normalizedSessionID,
-		);
+		const ready = (
+			await assertPrReviewTerminalReady(directory, normalizedSessionID)
+		).state;
 		if (
 			workflowIdentity(ready) !== workflowIdentity(preliminary) ||
 			ready.revision !== preliminary.revision ||
@@ -10835,11 +11556,100 @@ export async function enforcePrWorkflowToolBefore(
 }
 
 /** Validate the terminal PR workflow contract before removing its durable gate. */
+/**
+ * Read-only terminal-coverage projection for the completion report surface
+ * (issue #2383). Pure derivation over the CURRENT state; returns null when no
+ * active PR_REVIEW gate exists. The completion tool reads this BEFORE the
+ * terminal clear so the response carries the truthful settlement summary.
+ */
+export async function readPrReviewTerminalCoverageForReport(
+	directory: string,
+	sessionID: string,
+): Promise<{
+	kind: PrReviewTerminalCoverageKind;
+	coveredDimensions: PrReviewBaseDimensionId[];
+	unresolvedDimensions: Array<{
+		dimension: PrReviewBaseDimensionId;
+		terminal_state: PrReviewUnresolvedDimensionRecord['terminalState'];
+		reason_kind: PrReviewUnresolvedDimensionRecord['reasonKind'];
+		failure_class?: BackgroundDelegationWorkflowLaneFailureClass;
+	}>;
+	liveDimensions: PrReviewBaseDimensionId[];
+	allowedVerdicts: readonly PrReviewReportVerdict[];
+} | null> {
+	const state = await readPrWorkflowGateStateFromDisk(
+		directory,
+		normalizeSessionID(sessionID),
+	);
+	if (!state || state.mode !== 'PR_REVIEW' || !state.prHeadSha) return null;
+	const ctx = await createPrReviewGateContext(directory, state);
+	const settlement = derivePrReviewDimensionSettlement(
+		directory,
+		state,
+		ctx.revisionDigest,
+	);
+	return {
+		kind: settlement.kind,
+		coveredDimensions: settlement.coveredDimensions,
+		unresolvedDimensions: settlement.unresolvedDimensions.map((entry) => ({
+			dimension: entry.dimension,
+			terminal_state: entry.terminalState,
+			reason_kind: entry.reasonKind,
+			failure_class: entry.failureClass,
+		})),
+		liveDimensions: settlement.liveDimensions,
+		allowedVerdicts: allowedPrReviewReportVerdicts(settlement.kind),
+	};
+}
+
+/**
+ * Read-only identity binding for reviewer re-entry authorization (issue
+ * #2383). Returns the exact active-session PR_REVIEW identity a one-use
+ * authorization must be issued against and re-verified under at consume time:
+ * bound head SHA, current worktree revision digest, gate generation (CAS
+ * revision), workflow instance id, and the active run id. Null when no active
+ * head-bound PR_REVIEW gate exists for the session.
+ */
+export async function readPrReviewReentryBindingContext(
+	directory: string,
+	sessionID: string,
+): Promise<{
+	prHeadSha: string;
+	revisionDigest: string;
+	generation: number;
+	workflowInstanceId?: string;
+	runId?: string;
+} | null> {
+	const state = await readPrWorkflowGateStateFromDisk(
+		directory,
+		normalizeSessionID(sessionID),
+	);
+	if (!state || state.mode !== 'PR_REVIEW' || !state.prHeadSha) return null;
+	const ctx = await createPrReviewGateContext(directory, state);
+	return {
+		prHeadSha: state.prHeadSha,
+		revisionDigest: ctx.revisionDigest,
+		generation: state.revision,
+		...(state.workflowInstanceId
+			? { workflowInstanceId: state.workflowInstanceId }
+			: {}),
+		...((state.prReviewArtifactRunId ?? state.prReviewReservedRunId)
+			? {
+					runId:
+						state.prReviewArtifactRunId ??
+						state.prReviewReservedRunId ??
+						undefined,
+				}
+			: {}),
+	};
+}
+
 export async function completePrWorkflow(
 	directory: string,
 	sessionID: string,
 	expectedMode: PrWorkflowMode,
 	prHeadSha: string,
+	options?: { reportVerdict?: PrReviewReportVerdict },
 ): Promise<PrWorkflowCompletionStatus> {
 	const state = await requireBoundState(directory, sessionID, expectedMode);
 	const normalizedHead = normalizePrHeadSha(prHeadSha);
@@ -10859,15 +11669,111 @@ export async function completePrWorkflow(
 				describePrWorkflowLaneProbe(laneSettlement),
 		);
 	}
+	// Issue #2383: a NO_COVERAGE completion admits the settlement disclosure
+	// mid-completion, bumping the durable revision; the terminal clear must
+	// CAS against that post-admission revision. Undefined otherwise.
+	let terminalClearRevision: number | undefined;
 	if (expectedMode === 'PR_REVIEW') {
-		const readyState = await assertPrReviewTerminalReady(directory, sessionID);
-		if (
-			workflowIdentity(readyState) !== workflowIdentity(state) ||
-			readyState.revision !== state.revision
-		) {
+		// Issue #2383: the controller must declare its terminal verdict and the
+		// gate validates it against the settlement-derived coverage kind, so a
+		// partial or zero-coverage review can never APPROVE.
+		const verdict = options?.reportVerdict;
+		if (verdict === undefined) {
 			throw new Error(
-				'BLOCKED: PR_REVIEW state changed while checking terminal readiness; retry from current state',
+				'BLOCKED: PR_REVIEW completion requires a terminal report_verdict (APPROVE, REQUEST_CHANGES, or INCOMPLETE)',
 			);
+		}
+		const ctx = await createPrReviewGateContext(directory, state);
+		const settlement = derivePrReviewDimensionSettlement(
+			directory,
+			state,
+			ctx.revisionDigest,
+		);
+		if (settlement.kind === 'NO_COVERAGE') {
+			// NO_COVERAGE settles at completion (issue #2383): zero covered
+			// dimensions means no candidate inventory, no findings ladder, and
+			// nothing for trigger evaluation to cover — the normal
+			// terminal-ready ladder would (correctly) reject a run with
+			// nothing to validate. The run completes as a forced-INCOMPLETE
+			// operational report with explicit reasons; it never claims any
+			// code-quality approval.
+			if (settlement.liveDimensions.length > 0) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW completion has zero covered dimensions and still-live lanes for: ${settlement.liveDimensions.join(', ')}. Collect or settle them, then complete with report_verdict INCOMPLETE.`,
+				);
+			}
+			if (verdict !== 'INCOMPLETE') {
+				throw new Error(
+					`BLOCKED: PR_REVIEW NO_COVERAGE completion must report verdict INCOMPLETE; got "${verdict}". A zero-coverage report never approves and never claims a code-quality review.`,
+				);
+			}
+			// Persist the durable v2 settlement disclosure BEFORE the audit
+			// event and the terminal clear, exactly like a PARTIAL settlement
+			// (plan WS1-8): an external auditor must be able to prove the
+			// NO_COVERAGE kind from the immutable artifact, not only from the
+			// audit line. A run with zero artifacts may have no reserved run
+			// id, so one is generated in that case.
+			const noCoverageRunId =
+				state.prReviewArtifactRunId ??
+				state.prReviewReservedRunId ??
+				generatePrReviewRunId();
+			const admittedState = await admitPrReviewPartialBaseCoverage(
+				directory,
+				sessionID,
+				noCoverageRunId,
+				settlement.unresolvedDimensions.map((entry) => entry.dimension),
+			);
+			// The admission bumped the durable revision; the terminal clear below
+			// must CAS against the post-admission revision. If that clear itself
+			// fails, the gate keeps the admitted (immutable) disclosure and a
+			// retry re-admission throws — a deliberate fail-closed wedge; the
+			// operator re-reads state and recovers via armed recovery rather
+			// than silently re-crediting a zero-coverage settlement.
+			terminalClearRevision = admittedState.revision;
+			try {
+				appendCoreEventSync(directory, {
+					type: 'pr_review_no_coverage_terminal',
+					timestamp: isoNow(),
+					sessionID: state.sessionID,
+					prHeadSha: state.prHeadSha,
+					revisionDigest: ctx.revisionDigest,
+					coveredDimensions: settlement.coveredDimensions.length,
+					unresolvedDimensions: settlement.unresolvedDimensions.map(
+						(entry) => `${entry.dimension}:${entry.terminalState}`,
+					),
+					disclosureRunId: noCoverageRunId,
+					reportVerdict: verdict,
+				});
+			} catch {
+				// Non-fatal audit trail (same discipline as abort).
+			}
+			// Fall through to the shared terminal clear below.
+		} else {
+			// Fail fast on an illegal verdict BEFORE the expensive terminal
+			// ladder, then re-validate against the post-ladder settlement in
+			// case state changed underneath the checks.
+			const preAllowed = allowedPrReviewReportVerdicts(settlement.kind);
+			if (!preAllowed.includes(verdict)) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW ${settlement.kind} completion allows report_verdict ${preAllowed.join(' | ')}; got "${verdict}". Partial coverage never approves and never claims a full review.`,
+				);
+			}
+			const ready = await assertPrReviewTerminalReady(directory, sessionID);
+			const readyState = ready.state;
+			if (
+				workflowIdentity(readyState) !== workflowIdentity(state) ||
+				readyState.revision !== state.revision
+			) {
+				throw new Error(
+					'BLOCKED: PR_REVIEW state changed while checking terminal readiness; retry from current state',
+				);
+			}
+			const allowed = allowedPrReviewReportVerdicts(ready.settlement.kind);
+			if (!allowed.includes(verdict)) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW ${ready.settlement.kind} completion allows report_verdict ${allowed.join(' | ')}; got "${verdict}". Partial coverage never approves and never claims a full review.`,
+				);
+			}
 		}
 	} else {
 		// Issue #2108: legacy armed records migrate (conservatively) before this
@@ -11199,7 +12105,11 @@ export async function completePrWorkflow(
 		return 'completed';
 	}
 	await _test_exports.beforeTerminalClear?.();
-	await clearPrWorkflowGateState(directory, sessionID, state.revision);
+	await clearPrWorkflowGateState(
+		directory,
+		sessionID,
+		terminalClearRevision ?? state.revision,
+	);
 	return 'completed';
 }
 
@@ -13356,6 +14266,12 @@ interface PrReviewItemClaim {
 	classification: string;
 	severity: string;
 	/**
+	 * Typed risk metadata from the reviewer row (issue #2383). Reviewer claims
+	 * only; absent on critic claims, which never re-assess routing risk.
+	 */
+	riskImpact?: PrReviewRiskImpact;
+	riskTags?: PrReviewRiskTag[];
+	/**
 	 * sha256 of the full canonical `[REVIEWED]` row this claim was parsed from.
 	 * Reviewer claims only — this is what a critic batch binds to per item.
 	 */
@@ -13695,7 +14611,7 @@ function composePrReviewPhaseVerdicts(
  *
  * What this guarantees: the critic verdict was produced against reviewer row
  * *content* identical to the content authoritative now. A reviewer verdict keeps
- * only 2 of the 10 required row fields, so a classification/severity tuple would
+ * only 2 of the 12 required row fields, so a classification/severity tuple would
  * still match after the evidence and root cause changed entirely; the full-row
  * digest does not. That also closes the `DOWNGRADED` hole in
  * `parseCriticVerdict`, where a reviewer severity *increase* leaves a stale
@@ -13703,8 +14619,10 @@ function composePrReviewPhaseVerdicts(
  *
  * What this does NOT guarantee (issue #1968 FIX 8; the fix plan's claim that it
  * "closes the leave-and-return readmission path" is retracted as false):
- * `reviewerVerdictRowDigest` hashes the ten parsed `[REVIEWED]` fields and
- * nothing else — no lane, session, or batch identity. So a byte-identical row
+ * `reviewerVerdictRowDigest` hashes the twelve parsed `[REVIEWED]` fields and
+ * nothing else — no lane, session, or batch identity. (Legacy ten-field rows
+ * are normalized to twelve with UNKNOWN / no tags at the parse boundary, so
+ * both the critic-batch binder and claim admission hash a uniform view.) So a byte-identical row
  * emitted by a *different* lane or session re-admits the bound critic claim, and
  * an item that leaves the critic inventory and later returns with an identical
  * row re-admits the original critic verdict rather than requiring a fresh one.
@@ -13824,11 +14742,16 @@ function derivePrReviewCriticInventory(
 		ctx,
 		'derivePrReviewCriticInventory',
 	);
+	// Issue #2383: the ONE shared production routing predicate. Never inline a
+	// severity triple here — the centralization guard test enforces it.
 	return [...verdicts.entries()]
-		.filter(
-			([, verdict]) =>
-				verdict.classification === 'CONFIRMED' &&
-				['CRITICAL', 'HIGH', 'MEDIUM'].includes(verdict.severity),
+		.filter(([, verdict]) =>
+			prReviewFindingRequiresCritic({
+				classification: verdict.classification,
+				severity: verdict.severity,
+				risk_impact: verdict.riskImpact,
+				risk_tags: verdict.riskTags,
+			}),
 		)
 		.map(([itemId]) => itemId)
 		.sort();
@@ -13865,7 +14788,12 @@ function deriveLatestPrReviewReviewerVerdicts(
 		[...authoritativeReviewerClaims(directory, state, ctx)].map(
 			([itemId, claim]) => [
 				itemId,
-				{ classification: claim.classification, severity: claim.severity },
+				{
+					classification: claim.classification,
+					severity: claim.severity,
+					riskImpact: claim.riskImpact,
+					riskTags: claim.riskTags,
+				},
 			],
 		),
 	);
@@ -15587,6 +16515,9 @@ const FEEDBACK_NO_CHANGE_CLASSIFICATIONS = new Set([
 interface ReviewerVerdict {
 	classification: string;
 	severity: string;
+	/** Typed risk metadata projected from the reviewer row (issue #2383). */
+	riskImpact?: PrReviewRiskImpact;
+	riskTags?: PrReviewRiskTag[];
 }
 
 interface IndexedVerdictRows {
@@ -15644,7 +16575,7 @@ function validateReviewerVerdictFields(fields: string[]): string[] | null {
 
 /**
  * Digest of the FULL canonical reviewer row, not the classification/severity
- * pair a reviewer verdict projects to. Only 2 of the 10 required fields survive
+ * pair a reviewer verdict projects to. Only 2 of the 12 required fields survive
  * that projection, so a tuple binding would still match a row whose evidence,
  * file:line and root cause all changed. Fields are joined on NUL, which
  * `pipeFields` can never produce, so no field boundary is forgeable.
@@ -15665,7 +16596,13 @@ function parseLaneItemVerdicts(
 	reviewerClaims?: ReadonlyMap<string, PrReviewItemClaim>,
 ): Map<
 	string,
-	{ classification: string; severity: string; rowDigest?: string }
+	{
+		classification: string;
+		severity: string;
+		riskImpact?: PrReviewRiskImpact;
+		riskTags?: PrReviewRiskTag[];
+		rowDigest?: string;
+	}
 > {
 	return parsePrReviewVerdictRows(text, itemIds, phase, reviewerClaims).parsed;
 }
@@ -15679,13 +16616,25 @@ function parsePrReviewVerdictRows(
 	markerRows: string[][];
 	parsed: Map<
 		string,
-		{ classification: string; severity: string; rowDigest?: string }
+		{
+			classification: string;
+			severity: string;
+			riskImpact?: PrReviewRiskImpact;
+			riskTags?: PrReviewRiskTag[];
+			rowDigest?: string;
+		}
 	>;
 	recoveries: IndexedVerdictRows['recoveries'];
 } {
 	const parsed = new Map<
 		string,
-		{ classification: string; severity: string; rowDigest?: string }
+		{
+			classification: string;
+			severity: string;
+			riskImpact?: PrReviewRiskImpact;
+			riskTags?: PrReviewRiskTag[];
+			rowDigest?: string;
+		}
 	>();
 	const marker = phase === 'reviewer' ? '[REVIEWED]' : '[CRITIC]';
 	const { markerRows, rowsByItemId, recoveries } = indexVerdictRows(
@@ -15702,6 +16651,11 @@ function parsePrReviewVerdictRows(
 			parsed.set(itemId, {
 				classification: fields[2],
 				severity: fields[4],
+				// Fields 10/11 are the typed risk metadata (issue #2383); the
+				// parse boundary guarantees they exist (legacy ten-field rows
+				// were normalized to UNKNOWN / no tags there).
+				riskImpact: fields[10] as PrReviewRiskImpact,
+				riskTags: parsePrReviewRiskTagsField(fields[11] ?? ''),
 				rowDigest: reviewerVerdictRowDigest(fields),
 			});
 			continue;

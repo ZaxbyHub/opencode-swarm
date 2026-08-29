@@ -282,13 +282,20 @@ describe('Architect Agent - Agent Delegation Patterns', () => {
 		expect(section).toContain('provenance-free `NOT_TRIGGERED`');
 		expect(section).toContain('`unclassified-risk` always remains `MATCHED`');
 		expect(section).toContain('a `NOT_TRIGGERED` family must not create');
+		// Issue #2383: abort-only guidance replaced by truthful N-of-6
+		// settlement — INCOMPLETE is now a legitimate terminal verdict.
+		expect(section).toContain('settle N-of-6 truthfully (issue #2383)');
+		expect(section).toContain('never a fabricated full review');
 		expect(section).toContain(
+			'PARTIAL coverage completes with verdict REQUEST_CHANGES or INCOMPLETE',
+		);
+		expect(section).toContain(
+			'zero coverage completes as an INCOMPLETE operational report',
+		);
+		expect(section).not.toContain('continue — do not silently skip it');
+		expect(section).not.toContain(
 			'surface the lane failure to the user as BLOCKED',
 		);
-		expect(section).toContain('do not produce a degraded review');
-		expect(section).toContain('partial verdict');
-		expect(section).not.toContain('continue — do not silently skip it');
-		expect(section).not.toContain('INCOMPLETE');
 	});
 
 	it('async signal-triggered mode stubs direct architect work while lanes run', () => {

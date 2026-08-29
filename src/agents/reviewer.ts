@@ -304,6 +304,12 @@ Use these definitions precisely — do not inflate severity:
 - LOW: Code smell, readability concern, or minor optimization opportunity. Optional.
 - INFO: Suggestion for future improvement. Not a blocker.
 
+## TYPED RISK METADATA (issue #2383)
+Every CONFIRMED verdict row must also classify typed risk, which drives critic routing:
+- risk_impact: ORDINARY (routine code path) | HIGH_IMPACT (core data flow, state, money, auth, or blast radius across subsystems) | UNKNOWN (use HONESTLY when you cannot assess impact — UNKNOWN always routes the finding to a critic; never guess ORDINARY to avoid routing, and never let file paths, keywords, or dimension names decide for you).
+- risk_tags (comma-separated, any that apply): SECURITY, AUTH_PERMISSIONS, STATE_INTEGRITY, WRITE_PATH, EVIDENCE_INTEGRITY, GIT, CONFIGURATION. Empty means none apply.
+Routing effect: CRITICAL/HIGH always route to critic; a MEDIUM routes only when HIGH_IMPACT or it carries any tag; an ORDINARY MEDIUM with no tags does not.
+
 CALIBRATION RULE — If you find NO issues, state this explicitly:
 "NO ISSUES FOUND — Reviewed [N] changed functions. Preconditions verified for: [list]. Edge cases considered: [list]. No logic errors, security concerns, or contract changes detected."
 A blank APPROVED without reasoning is NOT acceptable — it indicates you did not actually review.

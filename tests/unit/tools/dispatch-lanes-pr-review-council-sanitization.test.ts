@@ -78,7 +78,7 @@ async function establishReviewPrerequisites(): Promise<void> {
 	});
 	for (const [index, lane] of lanes.entries()) {
 		const correlationId = `base-${index}`;
-		const text = `[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence\nC-${index} | ${lane.workflowLane} | LOW | correctness | file.ts:1 | claim | evidence | impact | LOW`;
+		const text = `[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags\nC-${index} | ${lane.workflowLane} | LOW | correctness | file.ts:1 | claim | evidence | impact | LOW | ORDINARY | `;
 		await recordPendingDelegation(directory, {
 			correlationId,
 			jobId: null,
@@ -136,7 +136,7 @@ async function establishReviewPrerequisites(): Promise<void> {
 		const batchId = `micro-${index}`;
 		const laneId = `micro-lane-${index}`;
 		const correlationId = `micro-session-${index}`;
-		const text = `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence\n[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`;
+		const text = `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags\n[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`;
 		await recordPendingDelegation(directory, {
 			correlationId,
 			jobId: null,

@@ -33,7 +33,13 @@ async function declareBase(batchId: string, selected = lanes()): Promise<void> {
 }
 
 describe('PR review base settlement diagnostics', () => {
-	test('names the first failed artifact predicate and prints canonical recovery rows', async () => {
+	test('names the coverage gap and settlement path for a failed lane', async () => {
+		// INTENT CHANGE (issue #2383): the settlement refusal no longer embeds
+		// per-lane predicate diagnostics (`first failed lane predicates: ...`).
+		// The N-of-6 settlement message names the coverage kind, the covered
+		// count, every unresolved dimension, and the settlement path instead.
+		// Lane-level predicate diagnostics remain observable on the collect-path
+		// lane result (dispatch-lanes-pr-review-collection-validation tests).
 		await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW');
 		const all = lanes();
 		await declareBase('base-all', all);
@@ -48,18 +54,15 @@ describe('PR review base settlement diagnostics', () => {
 		} catch (caught) {
 			error = caught as Error;
 		}
-		expect(error?.message).toContain('predicate=artifact.role');
-		expect(error?.message).toContain('expected="reviewer"');
-		expect(error?.message).toContain('actual="wrong-role"');
 		expect(error?.message).toContain(
-			'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence',
+			'PR_REVIEW base coverage is PARTIAL (5/6 dimensions covered; unresolved: intent-architecture)',
 		);
 		expect(error?.message).toContain(
-			'[CLEAN] | lane | coverage_scope | evidence',
+			'settle via write_pr_review_artifact partial_base_coverage.unresolved_dimensions',
 		);
 	});
 
-	test('identifies an absent expected lane instead of only listing dimensions', async () => {
+	test('lists every unresolved dimension when an expected lane has no record', async () => {
 		await activatePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW');
 		const all = lanes();
 		await declareBase('base-missing', all);
@@ -71,9 +74,9 @@ describe('PR review base settlement diagnostics', () => {
 		} catch (caught) {
 			error = caught as Error;
 		}
-		expect(error?.message).toContain('predicate=record.missing');
+		expect(error?.message).toContain('PR_REVIEW base coverage is PARTIAL');
 		expect(error?.message).toContain(
-			`valid dimensions: ${PR_REVIEW_BASE_DIMENSION_IDS.join(', ')}`,
+			`unresolved: ${PR_REVIEW_BASE_DIMENSION_IDS.slice(1).join(', ')}`,
 		);
 	});
 
@@ -89,6 +92,6 @@ describe('PR review base settlement diagnostics', () => {
 
 		await expect(
 			assertPrReviewBaseCoverageSettled(tempDir, SESSION_ID),
-		).resolves.toMatchObject({ prHeadSha: HEAD_SHA });
+		).resolves.toMatchObject({ state: { prHeadSha: HEAD_SHA } });
 	});
 });

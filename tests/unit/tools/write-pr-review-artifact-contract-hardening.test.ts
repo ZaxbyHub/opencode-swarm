@@ -46,9 +46,14 @@ beforeEach(() => {
 });
 
 function explorerRecords() {
-	return Array.from({ length: 6 }, (_unused, index) =>
-		artifactRecord(`C-${index}`, 'PENDING', 'route_to_reviewer', 'HIGH'),
-	);
+	return Array.from({ length: 6 }, (_unused, index) => ({
+		...artifactRecord(`C-${index}`, 'PENDING', 'route_to_reviewer', 'HIGH'),
+		// Replay identity includes the typed risk fields (issue #2383): a row
+		// persisted without them reads back normalized to UNKNOWN / no tags, so
+		// an exact retry must carry those same values to be recognized.
+		risk_impact: 'UNKNOWN' as const,
+		risk_tags: [] as string[],
+	}));
 }
 
 afterEach(async () => {

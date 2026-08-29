@@ -24,7 +24,7 @@ import {
 
 const digest = createHash('sha256').update('clean-repair').digest('hex');
 const microHeader =
-	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence';
+	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags';
 const capturedFamily = 'untrusted-input-boundaries';
 const ownedFamilies = [
 	'untrusted-input-boundaries',
