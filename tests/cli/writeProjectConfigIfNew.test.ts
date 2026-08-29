@@ -26,22 +26,18 @@ describe('writeProjectConfigIfNew', () => {
 		clearDeferredWarnings();
 	});
 
-	// 1. .opencode/opencode-swarm.json created in cwd
-	test('1. creates .opencode/opencode-swarm.json in cwd', () => {
+	// 1. Project config is not auto-created
+	test('1. does not create .opencode/opencode-swarm.json in cwd', () => {
 		writeProjectConfigIfNew(tmpDir);
 
 		const configPath = path.join(tmpDir, '.opencode', 'opencode-swarm.json');
-		expect(fs.existsSync(configPath)).toBe(true);
+		expect(fs.existsSync(configPath)).toBe(false);
 	});
 
-	// 2. File is valid JSON with minimal content {}
-	test('2. file is valid JSON with minimal content {}', () => {
+	// 2. .opencode directory is not auto-created
+	test('2. does not create .opencode directory', () => {
 		writeProjectConfigIfNew(tmpDir);
-
-		const configPath = path.join(tmpDir, '.opencode', 'opencode-swarm.json');
-		const content = fs.readFileSync(configPath, 'utf-8');
-		const parsed = JSON.parse(content);
-		expect(parsed).toEqual({});
+		expect(fs.existsSync(path.join(tmpDir, '.opencode'))).toBe(false);
 	});
 
 	// 3. Does NOT overwrite existing file

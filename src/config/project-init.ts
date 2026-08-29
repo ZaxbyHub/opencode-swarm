@@ -3,8 +3,6 @@ import * as path from 'node:path';
 import { advisoryWarn } from '../services/warning-buffer.js';
 import { DEFAULT_MODELS } from './constants';
 
-const STARTER_CONTENT = '{}\n';
-
 /**
  * Creates .opencode/opencode-swarm.json in the given directory if it does not
  * already exist. Uses an atomic exclusive write (flag 'wx') so concurrent
@@ -17,56 +15,12 @@ export function writeProjectConfigIfNew(
 	directory: string,
 	_quiet = false,
 ): void {
-	try {
-		const opencodeDir = path.join(directory, '.opencode');
-		const dest = path.join(opencodeDir, 'opencode-swarm.json');
-		const normalizePathForCompare = (p: string) =>
-			process.platform === 'win32' ? p.toLowerCase() : p;
-
-		// Defense in depth: refuse to write through a symlinked .opencode directory.
-		// Extends the guard pattern in graph-store.ts with realpathSync to also catch
-		// Windows junctions where lstatSync().isSymbolicLink() returns false.
-		try {
-			const stat = fs.lstatSync(opencodeDir);
-			if (stat.isSymbolicLink()) return;
-			const resolvedDir = fs.realpathSync(opencodeDir);
-			// Canonicalize the expected path via the project root to avoid false-positives
-			// on platforms where `directory` itself traverses a symlink (e.g. macOS /tmp).
-			const canonicalOpencode = path.join(
-				fs.realpathSync(directory),
-				'.opencode',
-			);
-			if (
-				normalizePathForCompare(resolvedDir) !==
-				normalizePathForCompare(canonicalOpencode)
-			) {
-				return;
-			}
-		} catch (err) {
-			if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return;
-			// ENOENT: directory doesn't exist yet — proceed to create it below.
-		}
-
-		if (!fs.existsSync(opencodeDir)) {
-			fs.mkdirSync(opencodeDir, { recursive: true });
-		}
-
-		try {
-			fs.writeFileSync(dest, STARTER_CONTENT, {
-				encoding: 'utf-8',
-				flag: 'wx',
-			});
-			advisoryWarn(
-				'[opencode-swarm] Created .opencode/opencode-swarm.json — ' +
-					'edit it to customize agent LLMs for this project, or commit it to share settings with your team',
-			);
-		} catch (_writeErr) {
-			// EEXIST means the file already exists — skip silently.
-			// All other write errors (EACCES, ENOSPC, etc.) are also non-fatal.
-		}
-	} catch {
-		// mkdirSync failure or any other unexpected error — non-fatal.
-	}
+	void directory;
+	void _quiet;
+	advisoryWarn(
+		'[opencode-swarm] Skipping creation of .opencode/opencode-swarm.json; ' +
+			'create it manually if you need project-local overrides.',
+	);
 }
 
 /**
