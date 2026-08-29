@@ -503,7 +503,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writerModules: ['src/background/pr-subscriptions.ts'],
 		writerCitations: [
 			'src/background/pr-subscriptions.ts writeCheckpointFile — atomic tmp+rename (atomicWriteSwarmFileSync) under withEvidenceLock on the unchanged v1 lock key; all mutations (subscribe/unsubscribe/updateSnapshot/sweepStale/migration/archive) serialize cross-process (issue #2042)',
-			'src/background/pr-subscriptions.ts flushAuditEvents/compactAuditTail — transition-only audit appends; compaction reads at most the 128 KiB high-water tail and rewrites newest ≤250 lines / ≤64 KiB',
+			'src/background/pr-subscriptions.ts flushAuditEvents/planAuditCompaction/applyAuditCompaction — transition-only audit appends; compaction reads at most the 128 KiB high-water tail and rewrites newest ≤250 lines / ≤64 KiB',
 		],
 		readerCitations: [
 			'src/background/pr-subscriptions.ts loadViewForRead — bounded checkpoint read (live-set sized); lock-free; legacy overlay only while a legacy source is pending or changed (streaming, bounded memory); one-time read-bootstrap persists the first checkpoint so read-only installs converge (issue #2042)',
