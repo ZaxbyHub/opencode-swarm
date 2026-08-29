@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.154.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.154.2...v7.154.3) (2026-08-29)
+
+
+### Bug Fixes
+
+* **ci:** extract Check 7 into a standalone check:token-formula gate to preserve [#2094](https://github.com/ZaxbyHub/opencode-swarm/issues/2094) legacy-oracle parity; wire into quality job + skill list ([93eed16](https://github.com/ZaxbyHub/opencode-swarm/commit/93eed16d0aaaebed4fcac5b24ee4b0ccdb6e7e69))
+* **context:** [Guardrail remediation 11/12] unify context pressure, injection budgets, and summary continuity ([5fa6c8d](https://github.com/ZaxbyHub/opencode-swarm/commit/5fa6c8df0691baf9dbcc193fd300750c995cefb9))
+
 ## [7.154.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.154.1...v7.154.2) (2026-08-28)
 
 
