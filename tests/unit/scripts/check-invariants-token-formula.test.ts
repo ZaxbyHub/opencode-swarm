@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { findInlineTokenFormulaViolations } from '../../../scripts/check-invariants';
+import { findInlineTokenFormulaViolations } from '../../../scripts/check-token-formula';
 
 /**
  * #2107 §1 / #1616: the inline char/token formula detector must (a) catch a

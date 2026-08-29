@@ -263,6 +263,15 @@ jobs:
       - name: Error-channel-discard ratchet (issue #2349)
         if: needs.detect-release.outputs.is-release != 'true'
         run: bun run check:error-channel-discard
+
+      # Issue #1616/#2107 recurrence guardrail: production source must not
+      # contain NEW inline char/token estimation formulas — every conversion
+      # routes through the canonical estimator in src/hooks/utils.ts.
+      # Standalone script (not a check-invariants Check) so the #2094
+      # legacy-oracle parity of check-invariants stays byte-identical.
+      - name: Inline char/token formula gate (issue #1616/#2107)
+        if: needs.detect-release.outputs.is-release != 'true'
+        run: bun run check:token-formula
       # Line-scoped (not file-scoped): fails only on NEW/changed lines that add
       # a raw tmpdir() call not wrapped in realpathSync. Pre-existing raw calls
       # elsewhere in a touched file are not flagged (issue #1737 FR-011 scope
