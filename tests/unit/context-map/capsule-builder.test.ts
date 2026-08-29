@@ -692,11 +692,7 @@ describe('buildCapsule', () => {
 			max_capsule_tokens: 500, // very small budget
 		});
 
-		// Token estimate should be significantly reduced from the unpruned estimate.
-		// (#2107/#1616 migration note) the canonical 0.33 tok/char estimator
-		// replaced the independent /3.5 formula, so the same pruned content
-		// estimates ~15% higher: the mandatory-section floor for a 5000-char
-		// goal is ~1700 tokens under 0.33 (was ~1470 under /3.5, bound 1500).
+		// (#2107/#1616) 0.33 estimator replaced /3.5: bound moved 1500 -> 1900.
 		expect(metadata.token_estimate).toBeLessThan(1900);
 		expect(metadata.token_estimate).toBeGreaterThan(0);
 		// Mandatory sections should still be present

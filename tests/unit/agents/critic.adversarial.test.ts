@@ -258,12 +258,7 @@ describe('adversarial: createCriticAgent', () => {
 				injection,
 				'plan_critic',
 			);
-			// (#2107) built-in-prompt size lower bound removed: it only
-			// encouraged growth. The 100KB custom injection surviving in
-			// full is asserted directly (strictly stronger than the old
-			// length floor); the built-in ceiling guard lives in
-			// architect-prompt-budget.test.ts.
-			expect(agent.config.prompt).toContain(injection);
+			expect(agent.config.prompt).toContain(injection); // (#2107) implies the removed length floor
 		});
 
 		it('should handle Unicode injection attempt', () => {
@@ -497,9 +492,7 @@ describe('adversarial: createCriticAgent', () => {
 		it('handles very long customAppendPrompt', () => {
 			const injection = 'A'.repeat(100000);
 			const agent = createCriticDriftVerifierAgent('test-model', injection);
-			// (#2107) size lower bound removed: toContain of the 100KB
-			// injection below strictly implies it.
-			expect(agent.config.prompt).toContain(PHASE_DRIFT_VERIFIER_PROMPT);
+			expect(agent.config.prompt).toContain(PHASE_DRIFT_VERIFIER_PROMPT); // (#2107): implies the removed floor
 		});
 
 		it('handles Unicode in customAppendPrompt', () => {

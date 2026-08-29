@@ -267,16 +267,9 @@ describe('Unified injection budget integration (FR-002)', () => {
 		};
 
 		// Seed the shared ledger with a real system-enhancer demand that alone
-		// exceeds the ceiling. This isolates the cross-hook budget contract from
-		// unrelated system-enhancer content-selection heuristics.
+		// exceeds the ceiling (isolates the cross-hook budget contract).
 		beginTurnLedger('test-session', unifiedBudget, true);
-		recordProducerEmission(
-			'test-session',
-			'system-enhancer',
-			unifiedBudget + 1,
-			0,
-			'system',
-		);
+		recordProducerEmission('test-session', 'system-enhancer', unifiedBudget + 1, 0, 'system');
 
 		// knowledge-injector runs after system-enhancer
 		const kiHook = createKnowledgeInjectorHook(
