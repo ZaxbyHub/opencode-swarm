@@ -1,19 +1,17 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	hasGitMarkerAncestor,
 	hasManifestAncestor,
 	hasSwarmState,
 } from '../../../src/lang/manifest-files';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const tempDirs: string[] = [];
 
 function makeTempDir(): string {
-	const directory = fs.mkdtempSync(
-		path.join(os.tmpdir(), 'opencode-swarm-manifest-files-'),
-	);
+	const directory = canonicalMkdtemp('opencode-swarm-manifest-files-');
 	tempDirs.push(directory);
 	return directory;
 }
