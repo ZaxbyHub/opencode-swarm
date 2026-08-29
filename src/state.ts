@@ -3919,7 +3919,7 @@ export function setSessionBudget(
 }
 
 /**
- * Record this session's final prompt pressure (#2107 " + chr(167) + "3), FIFO-evicting the
+ * Record this session's final prompt pressure (#2107 §3), FIFO-evicting the
  *  oldest entry past {@link MAX_TRACKED_BUDGET_SESSIONS}. Written once per request
  *  composition by the final-context-accounting step.
  */
@@ -4035,7 +4035,7 @@ export function getDisplayBudget(): { pct: number; tokens: number } | null {
  * The most-pressured session's FINAL prompt pressure snapshot, for
  * process-wide DISPLAY only (`/swarm status` has no single session in scope).
  * The snapshot is returned whole so the pct, used tokens, limit, and estimator
- * source shown together always come from one measurement (#2107 " + chr(167) + "3).
+ * source shown together always come from one measurement (#2107 §3).
  */
 export function getDisplayFinalPromptPressure(): {
 	pct: number;

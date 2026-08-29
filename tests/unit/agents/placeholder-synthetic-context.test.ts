@@ -77,7 +77,8 @@ describe('synthetic ProjectContext placeholder survival (#2107 §6)', () => {
 
 	test('placeholder-shaped synthetic values are not double-substituted', () => {
 		// BUILD_CMD is carried into the architect prompt verbatim (verified by
-		// the propagation probe below), so a placeholder-shaped VALUE inside it
+		// (the propagation probe in the previous test confirms BUILD_CMD reaches
+		// prompts), so a placeholder-shaped VALUE inside it
 		// exercises one-pass substitution: the {{KEY}} tokens in the template
 		// are replaced, but the substituted CONTENT must not be re-scanned,
 		// eaten, or expanded.
