@@ -3,19 +3,17 @@ import * as path from 'node:path';
 import { DEFAULT_MODELS } from './constants';
 
 /**
- * Creates .opencode/opencode-swarm.json in the given directory if it does not
- * already exist. Uses an atomic exclusive write (flag 'wx') so concurrent
- * plugin loads never double-write or corrupt the file.
+ * Intentionally a no-op.
  *
- * Non-fatal: any fs error (permissions, disk full, etc.) is swallowed so the
- * plugin continues with its default or global config.
+ * Issue #2420: the plugin no longer auto-creates project-level
+ * `.opencode/opencode-swarm.json` overrides because empty starter files are
+ * frequently mistaken for active overrides.
  */
 export function writeProjectConfigIfNew(
-	directory: string,
+	_directory: string,
 	_quiet = false,
 ): void {
-	void directory;
-	void _quiet;
+	// No-op by design: do not auto-create project override files.
 }
 
 /**

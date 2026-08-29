@@ -285,10 +285,6 @@ function saveJson(filepath: string, data: unknown): void {
 	fs.writeFileSync(filepath, `${JSON.stringify(data, null, 2)}\n`, 'utf-8');
 }
 
-function writeProjectConfigIfMissing(cwd: string): void {
-	void cwd;
-}
-
 async function install(): Promise<number> {
 	console.log('🐝 Installing OpenCode Swarm...\n');
 
@@ -400,9 +396,6 @@ async function install(): Promise<number> {
 	} else {
 		console.log('✓ Plugin config already exists at:', PLUGIN_CONFIG_PATH);
 	}
-
-	// Create project-level config if not exists
-	writeProjectConfigIfMissing(process.cwd());
 
 	console.log('\n📁 Configuration files:');
 	console.log(`   OpenCode config: ${OPENCODE_CONFIG_PATH}`);
