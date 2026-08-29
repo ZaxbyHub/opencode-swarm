@@ -20,6 +20,7 @@ export {
 	extractIncompleteTasksFromPlan,
 	extractPatterns,
 } from './extractors';
+export { createFinalContextAccountingStep } from './final-context-accounting';
 export { createFullAutoInterceptHook } from './full-auto-intercept';
 export {
 	checkFileAuthority,

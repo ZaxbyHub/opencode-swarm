@@ -1,8 +1,10 @@
 /**
  * Unified Injection Budget Service (FR-002).
  *
- * Pure, side-effect-free allocation function for the combined
- * system-enhancer + knowledge-injector injection ceiling.
+ * Two responsibilities: (1) the pure, side-effect-free FR-002 allocation
+ * function for the combined system-enhancer + knowledge-injector injection
+ * ceiling, and (2) the per-session/per-turn producer ledger (#2107 §2) that
+ * every model-visible producer claims from or records emissions into.
  *
  * Allocation strategy: proportional share.
  * - When combined demand fits within the budget, each component receives its
@@ -20,9 +22,11 @@
  * Priority-based allocation would require an arbitrary component ranking
  * not specified by the acceptance criteria.
  *
- * Char-to-token conversion uses the project's existing 0.33 tok/char ratio
- * (matches `estimateTokens` in src/hooks/utils.ts:200).
+ * Char-to-token conversion goes through the canonical estimator
+ * (`estimateTokensFromCharCount` in src/hooks/utils.ts — issue #1616/#2107).
  */
+
+import { estimateTokensFromCharCount } from '../hooks/utils';
 
 /**
  * Allocation result for a single turn's unified injection budget.
@@ -45,14 +49,11 @@ export interface InjectionBudgetConfig {
 }
 
 /**
- * Convert a character count to tokens using the project's 0.33 tok/char ratio.
- *
- * @param chars - Character count from the knowledge-injector demand.
- * @returns Estimated token count (ceiling of chars * 0.33).
+ * Convert a character count to tokens via the canonical estimator
+ * (`estimateTokensFromCharCount` in src/hooks/utils.ts — issue #1616/#2107).
  */
 function charsToTokens(chars: number): number {
-	if (chars <= 0) return 0;
-	return Math.ceil(chars * 0.33);
+	return estimateTokensFromCharCount(chars);
 }
 
 /**
@@ -128,121 +129,314 @@ export function allocateInjectionBudget(
 }
 
 // ---------------------------------------------------------------------------
-// Legacy stateful session-ledger API (used by system-enhancer.ts and
-// knowledge-injector.ts until task 1.3 integration). Kept for backward
-// compatibility; the pure allocateInjectionBudget above is the Stage 1 deliverable.
+// Per-session, per-turn producer ledger (issue #2107 §2; supersedes the FR-002
+// "legacy stateful session-ledger API" that shipped with zero production
+// callers). One ledger per session; the system-enhancer begins it exactly once
+// per request composition; every producer that contributes to the model-visible
+// request either claims from it or records its emission as fixed/base content.
 // ---------------------------------------------------------------------------
 
 /**
- * Per-session budget ledger. Keyed by sessionID; each entry is reset at the
- * start of the first component that runs for that turn.
+ * Producers that contribute to the model-visible request surface. The
+ * `surface` on each accounting entry records WHERE the producer's bytes live:
+ * `'system'` entries are pushed to `output.system` in the system.transform
+ * chain (invisible to the messages chain and to final accounting's direct
+ * measurement of `output.messages` — they MUST be added to the final total via
+ * this ledger); `'messages'` entries are spliced into `output.messages` and are
+ * therefore already inside the final measurement (attribution only — adding
+ * them again would double-count).
  */
-const sessionBudgets = new Map<
-	string,
-	{ total: number; used: number; seDemand: number }
->();
+export type InjectionProducer =
+	| 'system-enhancer'
+	| 'knowledge-injector'
+	| 'context-capsule'
+	| 'memory-recall'
+	| 'advisory-queue'
+	| 'swarm-command-banner'
+	| 'linked-cohort-advisory'
+	| 'spec-drift-advisory'
+	| 'final-accounting-warning';
+
+export type InjectionSurface = 'system' | 'messages';
+
+export interface ProducerAccounting {
+	/** Tokens the producer asked the ledger for this turn (claims only). */
+	requested: number;
+	/** Tokens the ledger granted under the ceiling + local max (claims only). */
+	granted: number;
+	/** Tokens actually emitted to the model-visible surface. */
+	emitted: number;
+	/** Tokens the producer wanted but did not emit (its own pruning). */
+	truncated: number;
+	surface: InjectionSurface;
+}
+
+export interface TurnLedgerSummary {
+	generation: number;
+	totalBudget: number;
+	/** Ceiling enforcement is only active when `unified_injection_tokens` is configured. */
+	ceilingActive: boolean;
+	used: number;
+	producers: Array<{ producer: InjectionProducer } & ProducerAccounting>;
+}
+
+interface TurnLedger {
+	generation: number;
+	totalBudget: number;
+	ceilingActive: boolean;
+	used: number;
+	producers: Map<InjectionProducer, ProducerAccounting>;
+}
+
+const turnLedgers = new Map<string, TurnLedger>();
 
 // ============================================================================
-// Bounded session tracking (invariant 8)
+// Bounded session tracking (AGENTS.md invariant 8)
 // ============================================================================
 
 const MAX_TRACKED_SESSIONS = 256;
 
-function evictSessionBudgets(): void {
-	while (sessionBudgets.size > MAX_TRACKED_SESSIONS) {
-		const firstKey = sessionBudgets.keys().next().value;
+// Eviction note: Map.set on an existing key preserves the ORIGINAL insertion
+// position, so eviction is by FIRST-insert order — a long-lived session that is
+// re-begun every turn is never evicted by newer sessions, and the worst
+// case for a churned-out session is the documented fail-open (claims fall
+// to local maxima). Matches the lastBudgetBySession contract in state.ts.
+
+/** Global monotonic turn generation. Embedded per ledger so any consumer can
+ * observe that a new request composition began. */
+let turnGenerationCounter = 0;
+
+function evictTurnLedgers(): void {
+	while (turnLedgers.size > MAX_TRACKED_SESSIONS) {
+		const firstKey = turnLedgers.keys().next().value;
 		if (firstKey === undefined) break;
-		sessionBudgets.delete(firstKey);
+		turnLedgers.delete(firstKey);
 	}
 }
 
+function getOrCreateAccounting(
+	ledger: TurnLedger,
+	producer: InjectionProducer,
+	surface: InjectionSurface,
+): ProducerAccounting {
+	let accounting = ledger.producers.get(producer);
+	if (!accounting) {
+		accounting = {
+			requested: 0,
+			granted: 0,
+			emitted: 0,
+			truncated: 0,
+			surface,
+		};
+		ledger.producers.set(producer, accounting);
+	}
+	accounting.surface = surface;
+	return accounting;
+}
+
 /**
- * Reset the budget for a session to the full unified ceiling.
- * Called by the first component to run for a given turn.
+ * Begin a new turn ledger for a session: reset exactly once at the start of
+ * composing that request (the system-enhancer is the first producer and calls
+ * this). Mints a fresh generation, so any stale claim from a prior composition
+ * is discarded. `ceilingActive` is only true when
+ * `context_budget.unified_injection_tokens` is configured; when false the
+ * ledger records accounting but never denies a claim (default configs keep
+ * their pre-#2107 behavior).
  */
-export function resetUnifiedBudget(
+export function beginTurnLedger(
 	sessionID: string,
 	totalBudget: number,
-): void {
-	sessionBudgets.set(sessionID, { total: totalBudget, used: 0, seDemand: 0 });
-	evictSessionBudgets();
-}
-
-/**
- * Return the remaining unified budget for a session.
- */
-export function getUnifiedBudgetRemaining(sessionID: string): number {
-	const budget = sessionBudgets.get(sessionID);
-	if (!budget) return 0;
-	return Math.max(0, budget.total - budget.used);
-}
-
-/**
- * Request a slice of the unified budget. Returns the granted token count.
- * If the requester's need exceeds the remaining budget, it gets the remainder
- * and the other source is implicitly blocked (remaining drops to 0).
- */
-export function requestUnifiedBudget(
-	sessionID: string,
-	requestedTokens: number,
+	ceilingActive: boolean,
 ): number {
-	const budget = sessionBudgets.get(sessionID);
-	if (!budget) return requestedTokens; // fail-open: no budget set, allow full request
-	const granted = Math.min(
-		requestedTokens,
-		Math.max(0, budget.total - budget.used),
-	);
-	budget.used += granted;
-	return granted;
+	const generation = ++turnGenerationCounter;
+	turnLedgers.set(sessionID, {
+		generation,
+		totalBudget: Math.max(0, totalBudget),
+		ceilingActive,
+		used: 0,
+		producers: new Map(),
+	});
+	evictTurnLedgers();
+	return generation;
 }
 
 /**
- * Return the total unified budget configured for a session (or 0 if unset).
+ * Claim tokens from the turn ledger. The grant is bounded by the producer's
+ * own local maximum (`localMaxTokens`) and, only when the ceiling is active,
+ * by what remains of the unified ceiling. When NO ledger exists for the session
+ * (system-enhancer never ran this turn — native agent, first turn, or hook
+ * disabled), the claim fails open to the local maximum and is not recorded,
+ * preserving #1617's fail-open contract; the caller is expected to report that
+ * the hard ceiling was unavailable.
  */
-export function getUnifiedBudgetTotal(sessionID: string): number {
-	const budget = sessionBudgets.get(sessionID);
-	return budget?.total ?? 0;
-}
-
-/**
- * Remove a session's budget entry. Used for cleanup in tests.
- */
-export function clearUnifiedBudget(sessionID: string): void {
-	sessionBudgets.delete(sessionID);
-}
-
-/**
- * Ensure a budget entry exists for the session. Creates one with the full
- * budget if none exists; leaves an existing entry untouched.
- */
-export function ensureSessionBudget(
+export function claimTurnBudget(
 	sessionID: string,
-	totalBudget: number,
+	producer: InjectionProducer,
+	requestedTokens: number,
+	opts?: { localMaxTokens?: number; surface?: InjectionSurface },
+): { granted: number; ledgerPresent: boolean; ceilingActive: boolean } {
+	const requested = Math.max(0, requestedTokens);
+	const localMax =
+		opts?.localMaxTokens === undefined
+			? requested
+			: Math.max(0, opts.localMaxTokens);
+	const surface = opts?.surface ?? 'system';
+
+	const ledger = turnLedgers.get(sessionID);
+	if (!ledger) {
+		return {
+			granted: Math.min(requested, localMax),
+			ledgerPresent: false,
+			ceilingActive: false,
+		};
+	}
+
+	const accounting = getOrCreateAccounting(ledger, producer, surface);
+	accounting.requested += requested;
+
+	let granted: number;
+	if (!ledger.ceilingActive) {
+		granted = Math.min(requested, localMax);
+	} else {
+		const remaining = Math.max(0, ledger.totalBudget - ledger.used);
+		granted = Math.min(requested, localMax, remaining);
+		ledger.used += granted;
+	}
+	accounting.granted += granted;
+	return { granted, ledgerPresent: true, ceilingActive: ledger.ceilingActive };
+}
+
+/**
+ * Record a producer's grant without claiming through `claimTurnBudget`.
+ *
+ * The system-enhancer and knowledge-injector enforce their split through the
+ * pure `allocateInjectionBudget` (FR-002 contract, pinned by tests) rather than
+ * sequential claims; this books their allocator-derived grants into the shared
+ * ceiling so later claimants (capsule, memory recall) draw from what actually
+ * remains. When the ceiling is inactive the grant is recorded but deducts
+ * nothing. The deduction is clamped to the remaining budget so `used` can never
+ * exceed `totalBudget`.
+ */
+export function recordProducerGrant(
+	sessionID: string,
+	producer: InjectionProducer,
+	requestedTokens: number,
+	grantedTokens: number,
+	surface: InjectionSurface,
 ): void {
-	if (!sessionBudgets.has(sessionID)) {
-		sessionBudgets.set(sessionID, { total: totalBudget, used: 0, seDemand: 0 });
-		evictSessionBudgets();
+	const ledger = turnLedgers.get(sessionID);
+	if (!ledger) return;
+	const accounting = getOrCreateAccounting(ledger, producer, surface);
+	accounting.requested += Math.max(0, requestedTokens);
+	const granted = Math.max(0, grantedTokens);
+	accounting.granted += granted;
+	if (ledger.ceilingActive) {
+		ledger.used += Math.min(
+			granted,
+			Math.max(0, ledger.totalBudget - ledger.used),
+		);
 	}
 }
 
 /**
- * Store the system-enhancer's actual per-turn token demand so that
- * knowledge-injector can read it and compute its proportional share.
+ * Record what a producer actually emitted (and pruned itself) this turn.
+ * Producers that never claim (fixed/base content: advisory queue, banners,
+ * the context-budget warning, the final-accounting warning) still record their
+ * emission here so the final accounting can include them.
  */
-export function setSystemEnhancerDemand(
+export function recordProducerEmission(
 	sessionID: string,
-	demand: number,
+	producer: InjectionProducer,
+	emittedTokens: number,
+	truncatedTokens: number,
+	surface: InjectionSurface,
 ): void {
-	const budget = sessionBudgets.get(sessionID);
-	if (!budget) return;
-	budget.seDemand = demand;
+	const ledger = turnLedgers.get(sessionID);
+	if (!ledger) return;
+	const accounting = getOrCreateAccounting(ledger, producer, surface);
+	accounting.emitted += Math.max(0, emittedTokens);
+	accounting.truncated += Math.max(0, truncatedTokens);
 }
 
 /**
- * Return the system-enhancer's actual per-turn token demand for a session.
- * Returns 0 if no budget entry exists or demand was not set.
+ * Snapshot of the session's current turn ledger (null when absent).
  */
-export function getSystemEnhancerDemand(sessionID: string): number {
-	const budget = sessionBudgets.get(sessionID);
-	return budget?.seDemand ?? 0;
+/**
+ * Deduct tokens from a producer's recorded emission (#2107 §3): downstream
+ * system-chain mutators (the role filter) REMOVE strings after the producer
+ * recorded them, and the final accounting must not count bytes the model
+ * never sees. Floors at zero; no-op without a ledger or producer entry.
+ */
+export function deductProducerEmission(
+	sessionID: string,
+	producer: InjectionProducer,
+	removedTokens: number,
+): void {
+	const ledger = turnLedgers.get(sessionID);
+	if (!ledger) return;
+	const accounting = ledger.producers.get(producer);
+	if (!accounting) return;
+	accounting.emitted = Math.max(
+		0,
+		accounting.emitted - Math.max(0, removedTokens),
+	);
+}
+
+export function getTurnLedgerSummary(
+	sessionID: string,
+): TurnLedgerSummary | null {
+	const ledger = turnLedgers.get(sessionID);
+	if (!ledger) return null;
+	return {
+		generation: ledger.generation,
+		totalBudget: ledger.totalBudget,
+		ceilingActive: ledger.ceilingActive,
+		used: ledger.used,
+		producers: Array.from(ledger.producers.entries()).map(([producer, a]) => ({
+			producer,
+			requested: a.requested,
+			granted: a.granted,
+			emitted: a.emitted,
+			truncated: a.truncated,
+			surface: a.surface,
+		})),
+	};
+}
+
+/**
+ * Emitted tokens recorded for one producer this turn (0 when no ledger or the
+ * producer has not run). Replaces the old `getSystemEnhancerDemand` relay: the
+ * knowledge-injector reads the system-enhancer's actual emission from here.
+ */
+export function getProducerEmission(
+	sessionID: string,
+	producer: InjectionProducer,
+): number {
+	return turnLedgers.get(sessionID)?.producers.get(producer)?.emitted ?? 0;
+}
+
+/**
+ * Advance the turn generation for a session: the current ledger is discarded so
+ * the next request composition starts from a fresh generation. Called when
+ * compaction changes the message surface (`experimental.session.compacting`)
+ * and at session teardown.
+ */
+export function advanceTurnGeneration(sessionID: string): void {
+	turnLedgers.delete(sessionID);
+}
+
+/**
+ * Test/maintenance hook: clear one session's ledger.
+ */
+export function clearTurnLedger(sessionID: string): void {
+	turnLedgers.delete(sessionID);
+}
+
+/**
+ * Clear every session's ledger. Called from `resetSwarmState` so the
+ * plugin-wide reset also resets per-turn producer accounting (zaxbysauce
+ * review on PR #2415: the reset pattern must cover ALL module-scoped maps).
+ */
+export function clearAllTurnLedgers(): void {
+	turnLedgers.clear();
 }

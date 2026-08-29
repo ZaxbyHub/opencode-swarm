@@ -18,6 +18,7 @@ import {
 	stripKnownSwarmPrefix,
 } from '../../config/schema';
 import { loadPlan } from '../../plan/manager';
+import { recordProducerEmission } from '../../services/injection-budget';
 import { getActiveWindow, swarmState } from '../../state';
 import { telemetry } from '../../telemetry.js';
 import { log } from '../../utils';
@@ -29,6 +30,7 @@ import {
 } from '../../utils/provider-error-classification';
 import { extractCurrentPhaseFromPlan } from '../extractors';
 import { extractModelInfo } from '../model-limits';
+import { estimateTokens } from '../utils';
 import { isExecutionEpisodeArmed } from './execution-episode';
 import { hashArgs } from './file-authority';
 
@@ -641,7 +643,19 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 				// block would itself be the content-free injection this is removing.
 				if (kept.length > 0) {
 					const joined = kept.join('\n---\n');
-					textPart.text = `[ADVISORIES]\n${headerNote}${joined}\n[/ADVISORIES]\n\n${textPart.text}`;
+					const advisoryBlock = `[ADVISORIES]\n${headerNote}${joined}\n[/ADVISORIES]\n\n`;
+					textPart.text = `${advisoryBlock}${textPart.text}`;
+					// #2107 §2: fixed/base content — the byte-budgeted advisory block
+					// is COUNTED against the turn ledger (never claimed) so final
+					// accounting attributes it. Messages-surface producer: the final
+					// measurement already includes these bytes; attribution only.
+					recordProducerEmission(
+						sessionId,
+						'advisory-queue',
+						estimateTokens(advisoryBlock),
+						0,
+						'messages',
+					);
 				}
 			}
 			// Clearing sits OUTSIDE the `if (textPart)` above, which silently

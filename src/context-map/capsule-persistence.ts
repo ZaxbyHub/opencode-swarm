@@ -18,6 +18,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+import { estimateTokens } from '../hooks/utils';
 import type { CapsuleMetadata, ContextCapsule } from '../types/context-capsule';
 
 // ---------------------------------------------------------------------------
@@ -62,13 +63,14 @@ function capsulePath(taskId: string, directory: string): string {
 	return path.join(directory, '.swarm', 'capsules', `${taskId}.json`);
 }
 
-/**
- * Estimate token count from raw content length.
- * Inline implementation to avoid importing from capsule-builder (circular dep).
- * Returns at least 1 token.
- */
-function estimateTokens(content: string): number {
-	return Math.max(1, Math.ceil(content.length / 4));
+// Token estimation delegates to the canonical estimator
+// (`estimateTokens` in src/hooks/utils.ts — issue #1616/#2107; this was a
+// silent fourth ratio, length/4). Capsules need at least 1 token to avoid
+// degenerate budget math, so the canonical result is floored at 1. Importing
+// hooks/utils is safe — the old circular-dep ban applied to capsule-builder
+// only.
+function estimateCapsuleTokens(content: string): number {
+	return Math.max(1, estimateTokens(content));
 }
 
 // ---------------------------------------------------------------------------
@@ -117,7 +119,7 @@ export function saveCapsule(
 		return {
 			success: true,
 			capsule_path: finalPath,
-			token_estimate: estimateTokens(capsule.content),
+			token_estimate: estimateCapsuleTokens(capsule.content),
 			cache_hits: 0,
 			cache_misses: 0,
 			stale_entries: 0,

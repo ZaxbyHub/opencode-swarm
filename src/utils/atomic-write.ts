@@ -310,7 +310,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/tools/checkpoint.ts:195',
 			'src/full-auto/state.ts:460',
 			'src/context-map/persistence.ts:119',
-			'src/context-map/capsule-persistence.ts:107',
+			'src/context-map/capsule-persistence.ts:109',
 			'src/test-impact/history-store.ts:225',
 			'src/test-impact/history-store.ts:353',
 			'src/hooks/promotion-evidence-store.ts:102',

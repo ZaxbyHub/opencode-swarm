@@ -99,7 +99,7 @@ export function shouldSummarize(
 
 /**
  * Formats bytes into a human-readable string.
- * @param bytes - The number of bytes
+ * @param bytes - Number of bytes
  * @returns Formatted string (e.g., "20.5 KB", "1.2 MB")
  */
 function formatBytes(bytes: number): string {
@@ -183,33 +183,131 @@ function extractCodeSignatures(code: string): string[] {
 }
 
 /**
- * Build a preview for code output that includes declaration signatures.
+ * Per-line character cap (#2107 §5): a single oversized line (e.g. a 1 MiB
+ * minified blob on one line) must be bounded on its own, with a truthful
+ * omission suffix — never materialized in full and silently cut later.
  */
-function summarizeCode(output: string): string {
-	const signatures = extractCodeSignatures(output);
-	const lines = output
-		.split('\n')
-		.filter((line) => line.trim().length > 0)
-		.slice(0, 5);
+const MAX_SUMMARY_LINE_CHARS = 400;
 
-	if (signatures.length === 0) {
-		return lines.join('\n');
+/**
+ * Codepoint-safe truncation to a UTF-8 byte budget (#2107 §5).
+ *
+ * Iterates code points (never UTF-16 units) so a multibyte CJK/emoji run can
+ * never be split mid-codepoint, and the result is deterministic across Bun and
+ * Node (which disagree on `Buffer.byteLength` for unpaired surrogates — per
+ * code point, both agree). Returns the kept text and the exact number of bytes
+ * omitted.
+ */
+export function truncateToBytes(
+	text: string,
+	maxBytes: number,
+): { text: string; omittedBytes: number } {
+	const totalBytes = Buffer.byteLength(text, 'utf8');
+	if (maxBytes <= 0) {
+		return { text: '', omittedBytes: totalBytes };
 	}
+	let used = 0;
+	let kept = '';
+	for (const codePoint of text) {
+		const cpBytes = Buffer.byteLength(codePoint, 'utf8');
+		if (used + cpBytes > maxBytes) {
+			return { text: kept, omittedBytes: totalBytes - used };
+		}
+		kept += codePoint;
+		used += cpBytes;
+	}
+	return { text, omittedBytes: 0 };
+}
 
-	const sigLine = `// declarations: ${signatures.join(', ')}`;
-	const previewLines = [sigLine, ...lines];
-	return previewLines.join('\n');
+function capLine(line: string): string {
+	if (line.length <= MAX_SUMMARY_LINE_CHARS) {
+		return line;
+	}
+	const omitted = line.length - MAX_SUMMARY_LINE_CHARS;
+	return `${line.slice(0, MAX_SUMMARY_LINE_CHARS)} [... ${omitted} chars omitted on this line ...]`;
 }
 
 /**
- * Build a preview for plain text output (leading non-blank lines).
+ * Deterministic bounded head/tail preview (#2107 §5).
+ *
+ * Head: the leading non-blank identity lines (ceil half of the line budget).
+ * Tail: the trailing RAW outcome lines (floor half) — compiler, test, lint,
+ * and security verdicts live at the END of tool output, so the old head-only
+ * preview discarded exactly the decision-relevant evidence. Lines are never
+ * reordered within either segment, no outcome is invented, and every dropped
+ * region is disclosed with an accurate omitted-line count. When everything
+ * fits, the original text is returned unchanged (modulo per-line caps).
+ */
+function headTailPreview(output: string, maxLines: number): string {
+	const rawLines = output.split('\n');
+	if (maxLines <= 0) {
+		return '';
+	}
+	// Everything fits: return the original text unchanged (modulo per-line
+	// caps). No omission marker, no reordering, no blank-line rewriting.
+	if (rawLines.length <= maxLines) {
+		return rawLines.map(capLine).join('\n');
+	}
+	const headCount = Math.max(1, Math.ceil(maxLines / 2));
+	const tailCount = Math.max(0, maxLines - headCount);
+
+	// Head: leading non-blank identity lines, never reaching into the tail
+	// region (a line must not appear in both segments).
+	const headLimitIndex =
+		tailCount > 0 ? rawLines.length - tailCount : rawLines.length;
+	const headLines: string[] = [];
+	for (let i = 0; i < headLimitIndex && headLines.length < headCount; i++) {
+		const line = rawLines[i];
+		if (line.trim().length === 0) continue;
+		headLines.push(line);
+	}
+	const tailLines: string[] = tailCount > 0 ? rawLines.slice(-tailCount) : [];
+	// Trailing blank lines carry no evidence; trim them from the tail segment.
+	while (
+		tailLines.length > 0 &&
+		tailLines[tailLines.length - 1].trim() === ''
+	) {
+		tailLines.pop();
+	}
+
+	const omittedCount = rawLines.length - headLines.length - tailLines.length;
+	const segments: string[] = [];
+	if (headLines.length > 0) {
+		segments.push(headLines.map(capLine).join('\n'));
+	}
+	if (omittedCount > 0) {
+		segments.push(`[... ${omittedCount} lines omitted ...]`);
+	}
+	if (tailLines.length > 0) {
+		segments.push(tailLines.map(capLine).join('\n'));
+	}
+	return segments.join('\n');
+}
+
+/**
+ * Build a preview for code output that includes declaration signatures plus
+ * the bounded head/tail policy (failure output at the end of a code blob is
+ * preserved).
+ */
+function summarizeCode(output: string): string {
+	const signatures = extractCodeSignatures(output);
+	const preview = headTailPreview(output, 5);
+
+	if (signatures.length === 0) {
+		return preview;
+	}
+
+	const sigLine = `// declarations: ${signatures.join(', ')}`;
+	return [sigLine, preview].join('\n');
+}
+
+/**
+ * Build a preview for plain text output using the bounded head/tail policy
+ * (see headTailPreview). Previously head-only: the first `maxLines` non-blank
+ * lines, which silently discarded trailing failure/exit evidence.
  */
 function summarizeText(output: string, maxLines: number): string {
-	const lines = output
-		.split('\n')
-		.filter((line) => line.trim().length > 0)
-		.slice(0, maxLines);
-	return lines.join('\n');
+	return headTailPreview(output, maxLines);
 }
 
 // ---------------------------------------------------------------------------
@@ -221,7 +319,7 @@ function summarizeText(output: string, maxLines: number): string {
  * @param output - The full tool output string
  * @param toolName - The name of the tool that produced the output
  * @param summaryId - Unique identifier for this summary
- * @param maxSummaryChars - Maximum characters allowed for the preview
+ * @param maxSummaryChars - Maximum bytes allowed for the preview
  * @returns Formatted summary string
  */
 export function createSummary(
@@ -235,10 +333,16 @@ export function createSummary(
 	const byteSize = Buffer.byteLength(output, 'utf8');
 	const formattedSize = formatBytes(byteSize);
 
-	// Calculate overhead for header and footer lines
+	// Calculate overhead for header and footer lines (in BYTES — the footer's
+	// "→" is 3 UTF-8 bytes, so a character count would under-reserve and let
+	// the total slip past the cap).
 	const headerLine = `[SUMMARY ${summaryId}] ${formattedSize} | ${contentType} | ${lineCount} lines`;
 	const footerLine = `→ Use /swarm retrieve ${summaryId} for full content`;
-	const overhead = headerLine.length + 1 + footerLine.length + 1; // +1 for newline each
+	const overhead =
+		Buffer.byteLength(headerLine, 'utf8') +
+		1 +
+		Buffer.byteLength(footerLine, 'utf8') +
+		1;
 
 	const maxPreviewChars = maxSummaryChars - overhead;
 
@@ -277,9 +381,23 @@ export function createSummary(
 		}
 	}
 
-	// Truncate preview if it exceeds max preview chars
-	if (preview.length > maxPreviewChars) {
-		preview = `${preview.substring(0, maxPreviewChars - 3)}...`;
+	// Byte-safe preview cap (#2107 §5). The cap is enforced on UTF-8 bytes with
+	// codepoint-safe truncation — multibyte content can no longer slip past the
+	// implied budget the way the old character-based substring allowed — and
+	// the omission is disclosed truthfully. When even the marker would not fit
+	// the remaining budget, a minimal `...` marker is used so the TOTAL stays
+	// within maxSummaryChars.
+	const previewBytes = Buffer.byteLength(preview, 'utf8');
+	if (previewBytes > maxPreviewChars) {
+		let marker = `[... ${previewBytes} bytes total, truncated ...]`;
+		if (Buffer.byteLength(marker, 'utf8') > maxPreviewChars) {
+			marker = '...';
+		}
+		const { text: kept } = truncateToBytes(
+			preview,
+			Math.max(0, maxPreviewChars - Buffer.byteLength(marker, 'utf8')),
+		);
+		preview = `${kept}${marker}`;
 	}
 
 	return `${headerLine}\n${preview}\n${footerLine}`;
@@ -289,6 +407,8 @@ export function createSummary(
  * Internal helpers exposed for testability.
  */
 export const _internals = {
+	truncateToBytes,
+	headTailPreview,
 	jsonTypeSignature,
 	summarizeJsonObject,
 	summarizeJsonArray,

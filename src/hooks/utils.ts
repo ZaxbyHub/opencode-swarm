@@ -353,10 +353,46 @@ export async function readSwarmFileAsync(
 	return null;
 }
 
+/**
+ * Canonical chars→tokens heuristic ratio for the whole plugin (issue #1616/#2107).
+ *
+ * This is a length-based HEURISTIC, not a tokenizer: provider-reported token usage is
+ * authoritative whenever it is available; every char-derived estimate is a fallback.
+ * This is the ONLY production site of a char/token conversion constant — all other
+ * modules must import these helpers. Enforced by the inline-token-formula check in
+ * scripts/check-invariants.ts.
+ */
+const TOKENS_PER_CHAR = 0.33;
+
+/**
+ * Estimate tokens from a character count using the canonical heuristic.
+ * This is the single sanctioned numeric form (issue #2107 §1).
+ */
+export function estimateTokensFromCharCount(chars: number): number {
+	if (chars <= 0) {
+		return 0;
+	}
+	return Math.ceil(chars * TOKENS_PER_CHAR);
+}
+
+/**
+ * Inverse of the canonical estimator: the character budget that corresponds to a
+ * token budget. Floor, so the result never overruns the token budget when converted
+ * back with `estimateTokensFromCharCount`.
+ */
+export function estimateCharsForTokens(tokens: number): number {
+	if (tokens <= 0) {
+		return 0;
+	}
+	return Math.floor(tokens / TOKENS_PER_CHAR);
+}
+
 export function estimateTokens(text: string): number {
+	// Falsy guard preserved from the pre-#2107 signature: callers (and
+	// utils.test.ts) rely on null/undefined returning 0 rather than throwing
+	// on `.length`.
 	if (!text) {
 		return 0;
 	}
-
-	return Math.ceil(text.length * 0.33);
+	return estimateTokensFromCharCount(text.length);
 }

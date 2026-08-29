@@ -44,6 +44,7 @@ import { loadPlan } from '../plan/manager';
 import {
 	getActiveFullAutoSessionID,
 	getDisplayBudget,
+	getDisplayFinalPromptPressure,
 	hasActiveFullAuto,
 	hasActiveLeanTurbo,
 	hasActiveTurboMode,
@@ -947,10 +948,21 @@ export function formatStatusMarkdown(status: StatusData): string {
 			const est = Math.round((status.contextBudgetPct / 100) * budgetTokens);
 			lines.push(
 				'',
-				`**Context**: ${pct}% used (est. ${est.toLocaleString()} / ${budgetTokens.toLocaleString()} tokens)`,
+				`**Swarm injection footprint**: ${pct}% of model window (intermediate measurement; est. ${est.toLocaleString()} / ${budgetTokens.toLocaleString()} tokens)`,
 			);
 		} else {
-			lines.push('', `**Context**: ${pct}% used`);
+			lines.push(
+				'',
+				`**Swarm injection footprint**: ${pct}% of model window (intermediate measurement)`,
+			);
+		}
+		// #2107 §3: the truthful FINAL pressure line. Measured after every
+		// injector ran, against the same model window physical pruning uses.
+		const finalPressure = getDisplayFinalPromptPressure();
+		if (finalPressure && finalPressure.pct > 0) {
+			lines.push(
+				`**Prompt pressure (final)**: ${finalPressure.pct.toFixed(1)}% estimated (est. ${finalPressure.usedTokens.toLocaleString()} / ${finalPressure.limitTokens.toLocaleString()} tokens; ${finalPressure.estimatorSource}${finalPressure.providerReported ? '; provider-reported' : ''})`,
+			);
 		}
 		if (status.compactionCount > 0) {
 			lines.push(`**Compaction events**: ${status.compactionCount} triggered`);

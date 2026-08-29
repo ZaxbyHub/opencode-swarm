@@ -186,6 +186,7 @@ function maybeAppendSpecDriftAdvisory(
 	output: { system: string[] },
 	directory: string,
 	plan: RuntimePlan | null,
+	sessionId?: string,
 ): void {
 	if (!plan?._specStale) return;
 	const snap = readSpecStalenessSnapshot(directory);
@@ -211,6 +212,18 @@ function maybeAppendSpecDriftAdvisory(
 			midLoadRemovals: plan._midLoadRemovals,
 		}),
 	);
+	// #2107 §2: direct system-surface push — record under its own
+	// producer (never also into system-enhancer's injectedTokens: that would
+	// double-count the surface in final accounting).
+	if (sessionId) {
+		recordProducerEmission(
+			sessionId,
+			'spec-drift-advisory',
+			estimateTokens(output.system[output.system.length - 1] ?? ''),
+			0,
+			'system',
+		);
+	}
 }
 
 import { buildReflectionInjection } from '../memory/reflection-injection';
@@ -223,8 +236,9 @@ import {
 } from '../services';
 import {
 	allocateInjectionBudget,
-	resetUnifiedBudget,
-	setSystemEnhancerDemand,
+	beginTurnLedger,
+	recordProducerEmission,
+	recordProducerGrant,
 } from '../services/injection-budget.js';
 import { telemetry } from '../telemetry';
 import { _internals as coChangeInternals } from '../tools/co-change-analyzer.js';
@@ -696,15 +710,20 @@ export function createSystemEnhancerHook(
 				output: { system: string[] },
 			): Promise<void> => {
 				// FR-004: hoisted above the try/catch so the finally block below
-				// can always write the actual injected demand to the unified
-				// budget ledger, even if an exception is thrown after injection
+				// can always write the actual injected demand to the turn
+				// ledger, even if an exception is thrown after injection
 				// has already mutated output.system but before the normal
-				// finalize call sites (Path A / Path B) are reached. Without
-				// this, a mid-turn throw silently skips the ledger write and
-				// getSystemEnhancerDemand() fails open to 0 on the next read,
-				// letting combined injected tokens exceed a configured
-				// unified_injection_tokens ceiling.
+				// exit is reached. Without this, a mid-turn throw silently
+				// skips the ledger write and getProducerEmission() fails open
+				// to 0 on the next read, letting combined injected tokens
+				// exceed a configured unified_injection_tokens ceiling.
 				let actualDemand = 0;
+				// (#2107 §2) Tokens that actually REACHED output.system. tryInject
+				// adds candidate tokens to actualDemand BEFORE the cap check, so
+				// actualDemand alone overstates the emitted surface whenever a
+				// candidate is rejected; the finally block must book the emitted
+				// amount from THIS counter.
+				let injectedTokens = 0;
 				let unifiedBudget: number | undefined;
 				// The live context window for THIS turn's model. This hook is the
 				// only one the host hands a `Model` to, so it is also the only
@@ -742,6 +761,23 @@ export function createSystemEnhancerHook(
 							return;
 						}
 
+						// #2107 §2: begin the per-turn producer ledger BEFORE any
+						// model-visible system injection (the linked-cohort line below is the
+						// earliest). Ceiling enforcement activates only when
+						// unified_injection_tokens is configured; otherwise the ledger records
+						// accounting only and default-config behavior is unchanged. Every
+						// later producer (capsule, banner — same chain; memory, advisory
+						// drain, knowledge — messages chain) claims against this ledger.
+						if (_input.sessionID) {
+							beginTurnLedger(
+								_input.sessionID,
+								config.context_budget?.unified_injection_tokens ??
+									config.context_budget?.max_injection_tokens ??
+									4000,
+								config.context_budget?.unified_injection_tokens !== undefined,
+							);
+						}
+
 						// (#1849 G) Linked-cohort identity line for the architect. The line
 						// is advisory and reads ONLY already-cached state: the cohort id
 						// (resolved once at chat.message and cached on the session) + the
@@ -768,6 +804,19 @@ export function createSystemEnhancerHook(
 										output.system.push(
 											`[linked-knowledge] cohort=${cohortId} ${health}. A shared knowledge store exists across this cohort's worktrees; retrieval and receipts flow through it.`,
 										);
+										// #2107 §2: this direct system-surface push bypasses
+										// tryInject; record its emission under its own producer so the
+										// final accounting attributes it (do NOT also count it in
+										// injectedTokens — that would double-count the surface).
+										recordProducerEmission(
+											_input.sessionID as string,
+											'linked-cohort-advisory',
+											estimateTokens(
+												`[linked-knowledge] cohort=${cohortId} ${health}. A shared knowledge store exists across this cohort's worktrees; retrieval and receipts flow through it.`,
+											),
+											0,
+											'system',
+										);
 									} else {
 										// (#BOT-HIGH-1) Cohort line skipped: cache miss on turn 1
 										// (chat.message hasn't populated cachedCohortId yet) or a
@@ -792,7 +841,6 @@ export function createSystemEnhancerHook(
 
 					const maxInjectionTokens =
 						config.context_budget?.max_injection_tokens ?? 4000;
-					let injectedTokens = 0;
 
 					// FR-002: unified injection budget — use pure allocation so
 					// system-enhancer (system.transform) and knowledge-injector
@@ -1039,7 +1087,12 @@ export function createSystemEnhancerHook(
 							);
 						}
 						// Issue #853 Layer A: surface spec drift to the model.
-						maybeAppendSpecDriftAdvisory(output, directory, plan);
+						maybeAppendSpecDriftAdvisory(
+							output,
+							directory,
+							plan,
+							_input.sessionID,
+						);
 						const mode = await detectArchitectMode(directory, planReadCache);
 						let planContent: string | null = null;
 						let phaseHeader = '';
@@ -1809,6 +1862,9 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 									// reports on.
 									actualDemand += estimateTokens(budgetWarning);
 									output.system.push(`[FOR: architect]\n${budgetWarning}`);
+									// The warning IS emitted to output.system (outside
+									// tryInject), so its tokens count as injected, not truncated.
+									injectedTokens += estimateTokens(budgetWarning);
 								}
 							} catch (error) {
 								warn('Context budget check failed:', error);
@@ -1865,20 +1921,14 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 							// Non-blocking — environment injection failure must not break the hook
 						}
 
-						// Finalize unified budget for Path A (non-scoring).
-						// Recompute seAllocation from actual demand so knowledge-injector
-						// sees the real system-enhancer demand (not the legacy 4K max).
-						if (unifiedBudget !== undefined && _input.sessionID) {
-							const totalDemand = actualDemand; // Path A has no late candidates
-							const allocation = allocateInjectionBudget(totalDemand, 0, {
-								totalBudgetTokens: unifiedBudget,
-							});
-							seAllocation = allocation.systemEnhancerTokens;
-							resetUnifiedBudget(_input.sessionID, unifiedBudget);
-							setSystemEnhancerDemand(_input.sessionID, totalDemand);
-						} else {
-							// Unified budget not configured; legacy caps apply.
-						}
+						// Finalize unified budget for Path A (non-scoring): nothing to
+						// recompute. The pre-#2107 code re-derived seAllocation here, but
+						// every tryInject() call already ran under the allocation set at
+						// composition start, so a post-hoc reassignment could never gate
+						// anything. The ledger write (grant + emission) happens exactly
+						// once in the finally block below; this early return still flows
+						// through it, and the knowledge-injector reads the SE demand via
+						// getProducerEmission().
 
 						return;
 					}
@@ -1929,7 +1979,12 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 						);
 					}
 					// Issue #853 Layer A: surface spec drift to the model.
-					maybeAppendSpecDriftAdvisory(output, directory, plan);
+					maybeAppendSpecDriftAdvisory(
+						output,
+						directory,
+						plan,
+						_input.sessionID,
+					);
 					let currentPhase: string | null = null;
 					let currentTask: string | null = null;
 
@@ -2734,6 +2789,8 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 								// See the Path A note: deliberately not routed through
 								// tryInject, but still counted into actualDemand.
 								actualDemand += estimateTokens(budgetWarning_b);
+								// Emitted directly to output.system — count as injected.
+								injectedTokens += estimateTokens(budgetWarning_b);
 								output.system.push(`[FOR: architect]\n${budgetWarning_b}`);
 							}
 						} catch (error) {
@@ -2741,29 +2798,42 @@ ${sanitizeContextText(scopedHandoff.body)}`;
 						}
 					}
 
-					// Finalize unified budget for Path B (scoring).
-					// Path B may have late candidates; use the full actualDemand.
-					if (unifiedBudget !== undefined && _input.sessionID) {
-						const totalDemand = actualDemand;
-						const allocation = allocateInjectionBudget(totalDemand, 0, {
-							totalBudgetTokens: unifiedBudget,
-						});
-						seAllocation = allocation.systemEnhancerTokens;
-						resetUnifiedBudget(_input.sessionID, unifiedBudget);
-						setSystemEnhancerDemand(_input.sessionID, totalDemand);
-					}
+					// Finalize unified budget for Path B (scoring): nothing to
+					// recompute — see the Path A note; the ledger write happens
+					// exactly once in the finally block below.
 				} catch (error) {
 					warn('System enhancer failed:', error);
 				} finally {
-					// FR-004: guarantee the unified budget ledger reflects the actual
-					// injected demand for this turn even if the try block above threw
-					// after tryInject() already mutated output.system but before either
-					// the Path A or Path B finalize call sites were reached. Runs on
-					// every exit (normal return, Path A's early return, or exception)
-					// so knowledge-injector never reads a stale/absent demand entry.
-					if (unifiedBudget !== undefined && _input.sessionID) {
-						resetUnifiedBudget(_input.sessionID, unifiedBudget);
-						setSystemEnhancerDemand(_input.sessionID, actualDemand);
+					// FR-004 / #2107 §2: record the system-enhancer's actual emitted
+					// tokens into the turn ledger exactly once, on EVERY exit path
+					// (normal return, Path A's early return, or exception), so the
+					// knowledge-injector and the final accounting step never read a
+					// stale/absent producer entry. The emitted amount includes the
+					// context-budget warning text when one was injected (it is
+					// counted into actualDemand at its push site).
+					if (_input.sessionID) {
+						// Book the SE's actual grant + emission into the shared
+						// ledger. EMISSION is `injectedTokens` — the bytes that
+						// actually reached output.system — NOT actualDemand, which
+						// also counts candidates tryInject rejected at the cap;
+						// final accounting sums surface:'system' emissions into
+						// the prompt total, so demand-inflation there would
+						// overstate what the model sees. The rejected difference
+						// is disclosed as the producer's own truncation.
+						recordProducerGrant(
+							_input.sessionID,
+							'system-enhancer',
+							actualDemand,
+							injectedTokens,
+							'system',
+						);
+						recordProducerEmission(
+							_input.sessionID,
+							'system-enhancer',
+							injectedTokens,
+							Math.max(0, actualDemand - injectedTokens),
+							'system',
+						);
 					}
 				}
 			},
@@ -2877,3 +2947,10 @@ export async function detectArchitectMode(
 		return 'UNKNOWN';
 	}
 }
+
+/**
+ * Tier-0 test seam (knowledge-injector precedent): exposes the spec-drift
+ * advisory helper so the #2107 §2 attribution test can drive its direct
+ * output.system push and assert the ledger emission is recorded exactly once.
+ */
+export const _test_exports = { maybeAppendSpecDriftAdvisory };

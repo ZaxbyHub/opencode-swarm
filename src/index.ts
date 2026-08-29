@@ -100,6 +100,7 @@ import {
 	createDelegationGateHook,
 	createDelegationSanitizerHook,
 	createDelegationTrackerHook,
+	createFinalContextAccountingStep,
 	createFullAutoInterceptHook,
 	createGuardrailsHooks,
 	createPhaseMonitorHook,
@@ -183,6 +184,7 @@ import {
 	createTrajectoryLoggerHook,
 	recordDeniedToolCall,
 } from './hooks/trajectory-logger';
+import { estimateTokens } from './hooks/utils';
 import { realtimeAdmissionAfter } from './learning/admission.js';
 import { createMemoryLifecycleHooks } from './memory';
 import type { MemoryConfig as RuntimeMemoryConfig } from './memory/config.js';
@@ -204,6 +206,10 @@ import { captureReviewAgentModelRegistry } from './review/runtime.js';
 import { createCompactionService } from './services/compaction-service';
 import { shouldRunOnStartup } from './services/config-doctor';
 import { buildDelegationCostFields } from './services/cost-accounting.js';
+import {
+	advanceTurnGeneration,
+	recordProducerEmission,
+} from './services/injection-budget';
 import { runModelPreflight } from './services/model-preflight';
 import { scheduleVersionCheck } from './services/version-check.js';
 import { loadSnapshot } from './session/snapshot-reader.js';
@@ -212,6 +218,7 @@ import {
 	ensureAgentSession,
 	getActiveWindow,
 	getAgentSession,
+	getFinalPromptPressure,
 	getSessionBudgetPct,
 	swarmState,
 } from './state';
@@ -355,13 +362,25 @@ function createSwarmCommandSystemRuleHook(
 			return;
 		}
 
-		system.push(
-			[
-				SWARM_COMMAND_SYSTEM_RULE_TAG,
-				'When a user asks for a supported /swarm command and the message instructs you to call the `swarm_command` tool, call that tool exactly once with the provided JSON arguments. After the tool returns, show the tool output verbatim and do not add extra swarm state, summaries, or invented command output.',
-			].join('\n'),
-		);
+		const banner = [
+			SWARM_COMMAND_SYSTEM_RULE_TAG,
+			'When a user asks for a supported /swarm command and the message instructs you to call the `swarm_command` tool, call that tool exactly once with the provided JSON arguments. After the tool returns, show the tool output verbatim and do not add extra swarm state, summaries, or invented command output.',
+		].join('\n');
+		system.push(banner);
 		output.system = system;
+		// #2107 §2: fixed/base content — the banner is COUNTED against the turn
+		// ledger (never claimed). System-surface producer: final accounting adds
+		// this emission to the total because output.system is invisible to the
+		// messages chain.
+		if (sessionID) {
+			recordProducerEmission(
+				sessionID,
+				'swarm-command-banner',
+				estimateTokens(banner),
+				0,
+				'system',
+			);
+		}
 	};
 }
 
@@ -1324,6 +1343,15 @@ async function initializeOpenCodeSwarm(
 		config,
 		resolveIncomingAgentModel,
 	);
+	// #2107 §3: the ONE final accounting step (registered after
+	// consolidation in the messages.transform chain).
+	const finalContextAccountingStep = createFinalContextAccountingStep({
+		config,
+		// Same seam createContextBudgetHandler consumes: keeps the final
+		// accounting step's model-identity ladder identical to physical
+		// pruning's (agent handoffs included).
+		resolveAgentModelFn: resolveIncomingAgentModel,
+	});
 	const evaluationModelDispatcher = createEvaluationModelDispatcher(ctx.client);
 	const reviewModelDispatcher = createReviewModelDispatcher(ctx.client);
 	const findingValidationScheduler = createFindingValidationScheduler();
@@ -3141,6 +3169,15 @@ async function initializeOpenCodeSwarm(
 						console.error(`[DIAG] messagesTransform DONE`);
 					return Promise.resolve();
 				},
+				// #2107 §3: final context accounting. Runs AFTER consolidation
+				// (which remains the last STRUCTURE-mutating handler). Read-mostly:
+				// measures the final model-visible surface once, resolves the real
+				// model limit through the same ladder physical pruning uses, records
+				// the snapshot in session state + telemetry, and may prepend ONE
+				// bounded advisory warning in place to the last user message. The
+				// handler order (advisory drain < memory < knowledge < consolidation <
+				// accounting) is pinned by tests/unit/hooks/hook-composition-order.test.ts.
+				finalContextAccountingStep,
 			].filter((fn): fn is NonNullable<typeof fn> => Boolean(fn)),
 			// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
 		) as any,
@@ -3223,11 +3260,27 @@ async function initializeOpenCodeSwarm(
 			// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
 		) as any,
 
-		// Handle session compaction
-		'experimental.session.compacting': compactionHook[
-			'experimental.session.compacting'
+		// Handle session compaction. The wrapper advances the per-turn injection
+		// ledger generation (#2107 §4): compaction changes the message surface,
+		// so per-turn accounting/dedup state must not survive into the next
+		// request composition. compactionHook's input carries { sessionID }
+		// (src/hooks/compaction-customizer.ts).
+		'experimental.session.compacting': (async (
+			input: unknown,
+			output: unknown,
+		) => {
+			const { sessionID } = (input ?? {}) as { sessionID?: string };
+			if (sessionID) {
+				advanceTurnGeneration(sessionID);
+			}
+			await (
+				compactionHook['experimental.session.compacting'] as (
+					input: unknown,
+					output: unknown,
+				) => Promise<void>
+			)(input, output);
 			// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
-		] as any,
+		}) as any,
 
 		// Handle /swarm commands
 		// biome-ignore lint/suspicious/noExplicitAny: Plugin API requires generic hook wrappers
@@ -3475,8 +3528,15 @@ async function initializeOpenCodeSwarm(
 				// recording for every architect delegation.
 				setStoredInputArgs(input.callID, output.args);
 
-				// v6.29: One-time 50% context pressure warning
-				const pressurePct = getSessionBudgetPct(input.sessionID);
+				// v6.29: One-time 50% context pressure warning. #2107 §3: the
+				// numerator is now the FINAL PROMPT PRESSURE (estimated total prompt
+				// vs the real model window, measured after all injectors) — not the
+				// legacy swarm injection-footprint pct mislabeled as window usage.
+				// Fall back to the footprint pct before the final accounting step
+				// has run for the session.
+				const pressurePct =
+					getFinalPromptPressure(input.sessionID)?.pct ??
+					getSessionBudgetPct(input.sessionID);
 				if (pressurePct >= 50) {
 					const pressureSession = ensureAgentSession(
 						input.sessionID,
@@ -3486,7 +3546,7 @@ async function initializeOpenCodeSwarm(
 						pressureSession.contextPressureWarningSent = true;
 						pushAdvisory(
 							pressureSession,
-							`CONTEXT PRESSURE: ${pressurePct.toFixed(1)}% of context window used. Prioritize completing the current task before starting new work.`,
+							`CONTEXT PRESSURE (estimated): ${pressurePct.toFixed(1)}% estimated prompt pressure of the model context window. Prioritize completing the current task before starting new work.`,
 						);
 					}
 				}

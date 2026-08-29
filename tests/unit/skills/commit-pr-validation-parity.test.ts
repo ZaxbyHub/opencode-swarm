@@ -50,6 +50,7 @@ const CI_COMMAND_TO_SKILL_STRING: Record<string, string> = {
 	'bun run check:gate-portability': 'bun run check:gate-portability',
 	'bun run check:bare-spawn': 'bun run check:bare-spawn',
 	'bun run check:error-channel-discard': 'bun run check:error-channel-discard',
+	'bun run check:token-formula': 'bun run check:token-formula',
 	'cd scripts/swarm-model && node --test':
 		'(cd scripts/swarm-model && node --test)',
 };

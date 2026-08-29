@@ -16,6 +16,7 @@ import {
 	KnowledgeConfigSchema,
 	SkillImproverConfigSchema,
 } from '../config/schema';
+import { estimateTokens } from '../hooks/utils';
 import {
 	findWriteApprovalFact,
 	formatApproveWriteCommand,
@@ -136,7 +137,7 @@ export const skill_improve: ReturnType<typeof createSwarmTool> =
 										prepared.prepared.candidateContent.length,
 									candidateContentTokenEstimate: Math.max(
 										1,
-										Math.ceil(prepared.prepared.candidateContent.length / 4),
+										estimateTokens(prepared.prepared.candidateContent),
 									),
 									allowedPaths: prepared.prepared.allowedPaths,
 								},
