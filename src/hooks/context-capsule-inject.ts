@@ -28,12 +28,18 @@ import { buildCapsule } from '../context-map/capsule-builder.js';
 import { saveCapsule } from '../context-map/capsule-persistence.js';
 import type { TelemetryEntry } from '../context-map/telemetry.js';
 import { recordTelemetry } from '../context-map/telemetry.js';
+import { estimateTokens } from '../hooks/utils.js';
+import {
+	claimTurnBudget,
+	recordProducerEmission,
+} from '../services/injection-budget.js';
 import type { AgentSessionState } from '../state.js';
 import { swarmState } from '../state.js';
 import type {
 	AgentRole,
 	CapsuleDelegationReason,
 } from '../types/context-capsule.js';
+import { log as debugLog } from '../utils/logger.js';
 
 // ---------------------------------------------------------------------------
 // Delegation reason resolution
@@ -272,8 +278,32 @@ async function injectCapsule(
 	const files = _internals.readScopeFile(effectiveTaskId, directory);
 	if (files.length === 0) return;
 
+	// #2107 §2 / #1617: claim the capsule's allocation from the shared
+	// per-turn injection ledger (begun by system-enhancer earlier in this
+	// system.transform chain). The granted amount — never the bare local max —
+	// feeds buildCapsule's existing PRUNE_ORDER packer. When no ledger exists
+	// (system-enhancer did not run this turn: native agent, first turn, or hook
+	// disabled), fail open to the local maximum and report that the unified hard
+	// ceiling was unavailable.
+	const localMaxCapsuleTokens = config.context_map?.max_capsule_tokens ?? 2000;
+	const claim = claimTurnBudget(
+		sessionID,
+		'context-capsule',
+		localMaxCapsuleTokens,
+		{
+			localMaxTokens: localMaxCapsuleTokens,
+			surface: 'system',
+		},
+	);
+	if (!claim.ledgerPresent) {
+		debugLog(
+			'context-capsule: no injection ledger this turn — failing open to local max_capsule_tokens; unified hard ceiling unavailable',
+		);
+	}
+	const grantedCapsuleTokens = claim.granted;
+
 	// Build the capsule
-	const maxTokens = config.context_map?.max_capsule_tokens;
+	const maxTokens = grantedCapsuleTokens;
 	const delegationReason = _internals.resolveCapsuleDelegationReason(
 		_internals.getSession(sessionID),
 		role,
@@ -297,6 +327,17 @@ async function injectCapsule(
 	if (!capsule.content.trim()) return;
 
 	output.system.push(capsule.content);
+
+	// #2107 §2: record what actually reached the model-visible surface. This is
+	// a system-surface producer (output.system is invisible to the messages
+	// chain), so the final accounting step adds this emission to the total.
+	recordProducerEmission(
+		sessionID,
+		'context-capsule',
+		estimateTokens(capsule.content),
+		Math.max(0, grantedCapsuleTokens - estimateTokens(capsule.content)),
+		'system',
+	);
 
 	// Persist capsule for debugging/inspection
 	try {

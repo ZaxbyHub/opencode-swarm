@@ -92,8 +92,18 @@ import {
 } from '../git/pr-workflow-state.js';
 import { swarmState } from '../state.js';
 import { getPrWorkflowToolCapability } from '../tools/tool-metadata.js';
-import { warn } from '../utils/logger.js';
+import { log, warn } from '../utils/logger.js';
 import { withTimeout } from '../utils/timeout.js';
+import {
+	adoptPrReviewCircuit,
+	advancePrReviewCircuit,
+	classifyPrReviewCircuitSignal,
+	type PrReviewCircuitAdoptionDiagnostic,
+	type PrReviewCircuitLegacyRecord,
+	PrReviewCircuitRecordSchema,
+	type PrReviewCircuitRecordV2,
+	type PrReviewCircuitSignal,
+} from './pr-review-resilience-circuit.js';
 import { validateSwarmPath } from './utils.js';
 
 export const PR_REVIEW_BASE_DIMENSION_IDS = [
@@ -379,6 +389,8 @@ interface PrReviewResiliencePolicyRecord {
 	statusProbeTimeoutMs: number;
 	correlatedFailureThreshold: number;
 	maxRetryAttemptsAfterInitial: number;
+	/** Issue #2382. Optional: policies persisted before the field existed parse unchanged. */
+	circuitOpenDurationMs?: number;
 }
 
 interface PrReviewResilienceAttemptRecord {
@@ -391,12 +403,14 @@ interface PrReviewResilienceAttemptRecord {
 	fanoutBatchId?: string;
 }
 
-interface PrReviewResilienceCircuitRecord {
-	signature: string;
-	count: number;
-	contributors: Array<{ batchId: string; laneId: string }>;
-	openedAt: string;
-}
+/**
+ * Issue #2382: the persisted circuit is a versioned union. The unversioned
+ * pre-#2382 shape migrates once to a nonblocking v2 record on first adoption
+ * (see `adoptPrReviewCircuit`); malformed records fail open.
+ */
+type PrReviewResilienceCircuitRecord =
+	| PrReviewCircuitLegacyRecord
+	| PrReviewCircuitRecordV2;
 
 interface PrReviewResilienceStateRecord {
 	policy: PrReviewResiliencePolicyRecord;
@@ -808,6 +822,12 @@ const PrReviewResiliencePolicyRecordSchema = z
 		statusProbeTimeoutMs: z.number().int().positive(),
 		correlatedFailureThreshold: z.number().int().min(2).max(8),
 		maxRetryAttemptsAfterInitial: z.number().int().min(0).max(2),
+		circuitOpenDurationMs: z
+			.number()
+			.int()
+			.min(1_000)
+			.max(1_800_000)
+			.optional(),
 	})
 	.strict();
 
@@ -826,34 +846,11 @@ const PrReviewResilienceAttemptRecordSchema = z
 	})
 	.strict();
 
-const PrReviewResilienceCircuitRecordSchema = z
-	.object({
-		signature: z.string().min(1).max(512),
-		count: z
-			.number()
-			.int()
-			.min(2)
-			.max(MAX_PR_REVIEW_RESILIENCE_CIRCUIT_CONTRIBUTORS),
-		contributors: z
-			.array(
-				z
-					.object({
-						batchId: z.string().min(1),
-						laneId: z.string().min(1),
-					})
-					.strict(),
-			)
-			.min(2)
-			.max(MAX_PR_REVIEW_RESILIENCE_CIRCUIT_CONTRIBUTORS),
-		openedAt: z.string().min(1),
-	})
-	.strict();
-
 const PrReviewResilienceStateRecordSchema = z
 	.object({
 		policy: PrReviewResiliencePolicyRecordSchema,
 		attempts: z.array(PrReviewResilienceAttemptRecordSchema).max(3),
-		circuit: PrReviewResilienceCircuitRecordSchema.optional(),
+		circuit: PrReviewCircuitRecordSchema.optional(),
 	})
 	.strict();
 
@@ -3291,6 +3288,9 @@ function snapshotPrReviewResiliencePolicy(
 		statusProbeTimeoutMs: policy?.status_probe_timeout_ms ?? 2_000,
 		correlatedFailureThreshold: policy?.correlated_failure_threshold ?? 2,
 		maxRetryAttemptsAfterInitial: policy?.max_retry_attempts_after_initial ?? 2,
+		circuitOpenDurationMs:
+			policy?.circuit_open_duration_ms ??
+			DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.circuit_open_duration_ms,
 	};
 }
 
@@ -3338,15 +3338,6 @@ function batchLaneRecords(
 	}).filter((record) => record.laneId === laneId);
 }
 
-function baseLaneDimensions(lane: {
-	workflowLane: PrReviewBaseDimensionId;
-	ownedWorkflowLanes?: readonly PrReviewBaseDimensionId[];
-}): readonly PrReviewBaseDimensionId[] {
-	return lane.ownedWorkflowLanes?.length
-		? lane.ownedWorkflowLanes
-		: [lane.workflowLane];
-}
-
 function batchIsTerminal(
 	directory: string,
 	state: PrWorkflowGateState,
@@ -3375,114 +3366,219 @@ function effectivePrReviewResiliencePolicy(
 	);
 }
 
-function normalizeFailureSignatureText(value: string): string {
-	return value
-		.toLowerCase()
-		.replace(
-			/\b\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:z|[+-]\d{2}:\d{2})\b/g,
-			'<iso-timestamp>',
-		)
-		.replace(/\b\d{10,16}\b/g, '<epoch>')
-		.replace(
-			/\b((?:session|request|trace|correlation|run)(?:[_-]?id)?)\s*[:=]\s*([a-z0-9._:-]*[0-9_-][a-z0-9._:-]*)\b/g,
-			'$1=<id>',
-		)
-		.replace(
-			/\b((?:session|sess|request|req|trace|correlation|corr|run)(?:[_-]?id)?)\s+((?:(?:sess?|req|trace|corr|run)[_-][a-z0-9._:-]+|[a-z][a-z0-9._:-]*\d[a-z0-9._:-]*))\b/g,
-			'$1 <id>',
-		)
-		.replace(
-			/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/g,
-			'<uuid>',
-		)
-		.replace(/\b[0-9a-f]{16,64}\b/g, '<hex>')
-		.replace(/[a-z]:\\[^\s)]+/gi, '<path>')
-		.replace(/(?:\/[\w.@:-]+)+/g, '<path>')
-		.replace(/\s+/g, ' ')
-		.trim()
-		.slice(0, 160);
+// ---------------------------------------------------------------------------
+// PR-review resilience circuit (issue #2382) — typed, recoverable, versioned.
+// Classification, adoption/migration, and the CLOSED/OPEN/HALF_OPEN machine
+// live in `./pr-review-resilience-circuit.ts` (pure, unit-tested); this file
+// owns the durable reads (delegation ledger), the CAS persistence, and the
+// enforcement wiring.
+// ---------------------------------------------------------------------------
+
+/** Bounded malformed-circuit diagnostic dedup: hash-keyed, FIFO-evicted. */
+const MALFORMED_CIRCUIT_DIAGNOSTIC_LIMIT = 64;
+const malformedCircuitDiagnosticsSeen = new Set<string>();
+
+function reportCircuitAdoptionDiagnostic(
+	diagnostic: PrReviewCircuitAdoptionDiagnostic,
+): void {
+	if (diagnostic.code === 'migrated_legacy_circuit') {
+		log(
+			'PR review resilience circuit: migrated unversioned legacy circuit record to v2 CLOSED (nonblocking, evidence waterlined)',
+			{ legacyContributors: diagnostic.legacySignatureCount },
+		);
+		return;
+	}
+	if (malformedCircuitDiagnosticsSeen.has(diagnostic.bodyHash8)) return;
+	if (
+		malformedCircuitDiagnosticsSeen.size >= MALFORMED_CIRCUIT_DIAGNOSTIC_LIMIT
+	) {
+		const oldest = malformedCircuitDiagnosticsSeen.values().next().value;
+		if (oldest !== undefined) {
+			malformedCircuitDiagnosticsSeen.delete(oldest);
+		}
+	}
+	malformedCircuitDiagnosticsSeen.add(diagnostic.bodyHash8);
+	log(
+		'PR review resilience circuit: malformed circuit record dropped (fail-open)',
+		{
+			bodyHash8: diagnostic.bodyHash8,
+			byteLength: diagnostic.byteLength,
+		},
+	);
 }
 
-function classifyTerminalFailureSignature(
-	record: BackgroundDelegationRecord,
-): string | null {
-	if (!TERMINAL_FAILED_DELEGATION_STATUSES.has(record.status)) return null;
-	const result = record.terminalResult?.result ?? record.result;
-	if (!result) return `terminal-zero-output:${record.status}`;
-	const outputRef = result.outputRef?.trim();
-	const text = result.text?.trim() ?? '';
-	if (!outputRef && text.length === 0 && (result.chars ?? 0) === 0) {
-		return `terminal-zero-output:${record.status}`;
-	}
-	const errorText = result.error?.trim();
-	if (errorText) {
-		return `terminal-error-output:${record.status}:${normalizeFailureSignatureText(errorText)}`;
-	}
-	// `completed` means the child produced a result that has not necessarily been
-	// ingested yet. Non-empty, error-free output is therefore not authoritative
-	// evidence of failure; counting it would let two healthy, pending-ingestion
-	// lanes open the circuit. Empty/error completion remains classifiable above.
-	if (record.status === 'completed') return null;
-	return `terminal-nonzero-output:${record.status}`;
+function circuitOpenDurationMs(policy: PrReviewResiliencePolicyRecord): number {
+	return (
+		policy.circuitOpenDurationMs ??
+		DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.circuit_open_duration_ms
+	);
 }
 
-function computePrReviewResilienceCircuit(
+/** Latest-record typed signal for every recorded dispatch lane. */
+function laneSignalsForCircuitReview(
 	directory: string,
 	state: PrWorkflowGateState,
-	policy: PrReviewResiliencePolicyRecord,
-): PrReviewResilienceCircuitRecord | null {
-	const signatures = new Map<
-		string,
-		{
-			dimensions: Set<PrReviewBaseDimensionId>;
-			contributors: Array<{ batchId: string; laneId: string }>;
-		}
-	>();
+): PrReviewCircuitSignal[] {
+	const signals: PrReviewCircuitSignal[] = [];
 	for (const batch of state.prReviewBaseDispatches ?? []) {
 		for (const lane of batch.lanes) {
 			const latest = latestDelegationRecord(
 				batchLaneRecords(directory, state, batch.batchId, lane.laneId),
 			);
 			if (!latest) continue;
-			const signature = classifyTerminalFailureSignature(latest);
-			if (!signature) continue;
-			const current = signatures.get(signature) ?? {
-				dimensions: new Set<PrReviewBaseDimensionId>(),
-				contributors: [],
-			};
-			for (const dimension of baseLaneDimensions(lane)) {
-				if (current.dimensions.has(dimension)) continue;
-				current.dimensions.add(dimension);
-				current.contributors.push({
-					batchId: batch.batchId,
-					laneId: lane.laneId,
-				});
-			}
-			signatures.set(signature, current);
+			const signal = classifyPrReviewCircuitSignal(latest);
+			if (signal) signals.push(signal);
 		}
 	}
-	const opened = [...signatures.entries()]
-		.filter(
-			([, entry]) => entry.dimensions.size >= policy.correlatedFailureThreshold,
-		)
-		.sort(
-			(left, right) =>
-				right[1].dimensions.size - left[1].dimensions.size ||
-				left[0].localeCompare(right[0]),
-		)[0];
-	if (!opened) return null;
+	return signals;
+}
+
+/**
+ * Observation of the CURRENT probe lane's latest record. Supplied only for a
+ * HALF_OPEN circuit whose recorded probe matches the lane actually read, which
+ * structurally drops late results from older generations.
+ */
+function probeObservationForCircuit(
+	directory: string,
+	state: PrWorkflowGateState,
+	circuit: PrReviewCircuitRecordV2,
+):
+	| {
+			terminalStatus: string;
+			signal: PrReviewCircuitSignal | null;
+			terminalAtMs: number;
+	  }
+	| undefined {
+	if (circuit.state !== 'HALF_OPEN' || !circuit.probe) return undefined;
+	const latest = latestDelegationRecord(
+		batchLaneRecords(
+			directory,
+			state,
+			circuit.probe.batchId,
+			circuit.probe.laneId,
+		),
+	);
+	if (!latest) return undefined;
+	if (!TERMINAL_FAILED_DELEGATION_STATUSES.has(latest.status)) return undefined;
 	return {
-		signature: opened[0],
-		count: opened[1].dimensions.size,
-		contributors: opened[1].contributors,
-		openedAt: state.prReviewResilience?.circuit?.openedAt ?? isoNow(),
+		terminalStatus: latest.status,
+		signal: classifyPrReviewCircuitSignal(latest),
+		terminalAtMs:
+			latest.terminalResult?.recordedAt ??
+			latest.completedAt ??
+			latest.updatedAt ??
+			latest.createdAt ??
+			0,
 	};
 }
 
 function formatPrReviewResilienceCircuitOpenMessage(
 	circuit: PrReviewResilienceCircuitRecord,
+	nowMs: number = Date.now(),
 ): string {
+	if ('version' in circuit) {
+		const openUntilMs = circuit.openUntil ? Date.parse(circuit.openUntil) : 0;
+		const remainingMs = Math.max(0, openUntilMs - nowMs);
+		const retryNote =
+			remainingMs > 0
+				? `the recovery canary probe is admitted in about ${Math.ceil(remainingMs / 1000)}s`
+				: 'the next staged dispatch is admitted as the recovery canary probe';
+		return `BLOCKED: PR_REVIEW resilience retry circuit is ${circuit.state} after ${circuit.contributors.length} distinct terminal provider failures (${circuit.providerClass ?? 'provider'}); ${retryNote}; collect, diagnose, cancel, abort, gap reporting, and config disable remain available`;
+	}
 	return `BLOCKED: PR_REVIEW base dispatch circuit is open after ${circuit.count} correlated terminal failures (${circuit.signature}); collect every launched lane, abort_pr_workflow, and stop without partial findings`;
+}
+
+interface PrReviewResilienceCircuitAdvanceOutcome {
+	state: PrWorkflowGateState;
+	snapshot: PrReviewResilienceStateRecord;
+	/**
+	 * Set ONLY for an admitted HALF_OPEN probe transition: the circuit record is
+	 * persisted together with the successful admission's state write
+	 * (mark-on-success), so a validation failure never leaves a phantom probe.
+	 */
+	pendingProbeCircuit?: PrReviewCircuitRecordV2;
+	blocked?: { reason: 'circuit_open' | 'probe_in_flight' };
+}
+
+/**
+ * Adopt the persisted circuit (v2 pass-through, legacy migration with a
+ * bounded diagnostic, malformed fail-open), advance the machine one step, and
+ * persist evidence-driven transitions under the enforcement lock. Runs inside
+ * `withSessionStateMutation` only.
+ */
+async function advanceResilienceCircuitWhileLocked(args: {
+	directory: string;
+	state: PrWorkflowGateState;
+	snapshot: PrReviewResilienceStateRecord;
+	admission?: { batchId: string; laneId: string };
+}): Promise<PrReviewResilienceCircuitAdvanceOutcome> {
+	const { directory } = args;
+	let state = args.state;
+	let snapshot = args.snapshot;
+
+	// Adoption. A malformed record is dropped IN MEMORY only — the broken bytes
+	// stay on disk for forensics until a legitimate full-state write replaces
+	// them. A legacy record migrates once to a nonblocking v2 CLOSED record and
+	// that migration persists immediately (it must never stay blocking).
+	const nowMs = _test_exports.nowMs();
+	const adoption = adoptPrReviewCircuit(snapshot.circuit, nowMs);
+	let circuit: PrReviewCircuitRecordV2 | null = null;
+	if (adoption.kind === 'v2') {
+		circuit = adoption.record;
+	} else if (adoption.kind === 'migrated') {
+		circuit = adoption.record;
+		snapshot = { ...snapshot, circuit: adoption.record };
+		state = await writeStateWhileLocked(directory, {
+			...state,
+			updatedAt: isoNow(),
+			prReviewResilience: snapshot,
+		});
+		reportCircuitAdoptionDiagnostic(adoption.diagnostic);
+	} else if (adoption.kind === 'malformed') {
+		const withoutCircuit: PrReviewResilienceStateRecord = { ...snapshot };
+		withoutCircuit.circuit = undefined;
+		snapshot = withoutCircuit;
+		reportCircuitAdoptionDiagnostic(adoption.diagnostic);
+	}
+
+	const decision = advancePrReviewCircuit(circuit, {
+		nowMs,
+		threshold: snapshot.policy.correlatedFailureThreshold,
+		openDurationMs: circuitOpenDurationMs(snapshot.policy),
+		admission: args.admission,
+		laneSignals: laneSignalsForCircuitReview(directory, state),
+		probeObservation:
+			circuit?.state === 'HALF_OPEN'
+				? probeObservationForCircuit(directory, state, circuit)
+				: undefined,
+	});
+
+	if (decision.action === 'block') {
+		if (decision.changed && decision.record) {
+			snapshot = { ...snapshot, circuit: decision.record };
+			state = await writeStateWhileLocked(directory, {
+				...state,
+				updatedAt: isoNow(),
+				prReviewResilience: snapshot,
+			});
+		}
+		return { state, snapshot, blocked: { reason: decision.reason } };
+	}
+	if (decision.action === 'admit_as_probe') {
+		if (decision.changed && decision.record) {
+			return { state, snapshot, pendingProbeCircuit: decision.record };
+		}
+		return { state, snapshot };
+	}
+	if (decision.changed && decision.record) {
+		snapshot = { ...snapshot, circuit: decision.record };
+		state = await writeStateWhileLocked(directory, {
+			...state,
+			updatedAt: isoNow(),
+			prReviewResilience: snapshot,
+		});
+	}
+	return { state, snapshot };
 }
 
 async function preflightPrReviewResilienceCircuitBeforePrune(
@@ -3490,6 +3586,7 @@ async function preflightPrReviewResilienceCircuitBeforePrune(
 	state: PrWorkflowGateState,
 	previous: PrReviewBaseDispatchRecord[],
 	policy: PrReviewResiliencePolicyRecord,
+	liveResilienceEnabled: boolean,
 ): Promise<{
 	state: PrWorkflowGateState;
 	previous: PrReviewBaseDispatchRecord[];
@@ -3509,35 +3606,33 @@ async function preflightPrReviewResilienceCircuitBeforePrune(
 			snapshot = nextState.prReviewResilience ?? snapshot;
 		}
 	}
-	if (snapshot.circuit) {
-		throw new PrReviewResilienceCircuitOpenError(
-			formatPrReviewResilienceCircuitOpenMessage(snapshot.circuit),
-		);
-	}
-	const circuit = computePrReviewResilienceCircuit(
-		directory,
-		nextState,
-		policy,
-	);
-	if (!circuit) {
+	// Issue #2382: the CURRENT config's `enabled` flag is authoritative. While
+	// disabled the circuit is fully inert — no transition, no block, no prune
+	// gating — and the persisted record (if any) is preserved for audit.
+	if (!liveResilienceEnabled) {
 		return { state: nextState, previous: nextPrevious };
 	}
-	const nextResilience = { ...snapshot, circuit };
-	if (
-		!nextState.prReviewResilience ||
-		nextState.prReviewResilience.circuit?.signature !== circuit.signature ||
-		nextState.prReviewResilience.circuit?.count !== circuit.count
-	) {
-		nextState = await writeStateWhileLocked(directory, {
-			...nextState,
-			updatedAt: isoNow(),
-			prReviewResilience: nextResilience,
-		});
-		nextPrevious = nextState.prReviewBaseDispatches ?? [];
+	const outcome = await advanceResilienceCircuitWhileLocked({
+		directory,
+		state: nextState,
+		snapshot,
+	});
+	if (outcome.blocked) {
+		throw new PrReviewResilienceCircuitOpenError(
+			formatPrReviewResilienceCircuitOpenMessage(
+				outcome.snapshot.circuit ?? {
+					version: 2,
+					state: 'OPEN',
+					generation: 1,
+					contributors: [],
+				},
+			),
+		);
 	}
-	throw new PrReviewResilienceCircuitOpenError(
-		formatPrReviewResilienceCircuitOpenMessage(circuit),
-	);
+	return {
+		state: outcome.state,
+		previous: outcome.state.prReviewBaseDispatches ?? nextPrevious,
+	};
 }
 
 async function probeResilienceCanaryLiveness(
@@ -3792,18 +3887,24 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 		state,
 		options.prReviewResiliencePolicy,
 	);
+	// Issue #2382: the CURRENT config's `enabled` flag is authoritative for
+	// gating decisions; the persisted snapshot only carries numeric knobs.
+	const liveResilienceEnabled =
+		options.prReviewResiliencePolicy?.enabled ??
+		DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.enabled;
 	if (
 		previous.length >= MAX_WORKFLOW_BATCHES &&
 		requestedWaveStage !== undefined &&
 		requestedWaveAttempt !== undefined &&
 		depthTier !== 'S' &&
-		resiliencePolicy.enabled
+		liveResilienceEnabled
 	) {
 		({ state, previous } = await preflightPrReviewResilienceCircuitBeforePrune(
 			directory,
 			state,
 			previous,
 			resiliencePolicy,
+			liveResilienceEnabled,
 		));
 	}
 	if (previous.length >= MAX_WORKFLOW_BATCHES) {
@@ -3829,8 +3930,54 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 			previous = state.prReviewBaseDispatches ?? [];
 		}
 	}
+	// Issue #2382 live-disable semantics. While the CURRENT config disables
+	// resilience, the circuit is inert: nothing blocks, nothing transitions, and
+	// one guarded audit write marks the persisted policy disabled (detection
+	// anchor; the record itself stays for audit). On the next enforcement with
+	// resilience re-enabled, the whole record resets in ONE CAS write — fresh
+	// v2 CLOSED generation, evidence waterline at now, attempts cleared, policy
+	// refreshed from the current config — so pre-disable evidence can never
+	// resurrect.
+	if (nextResilience && !liveResilienceEnabled) {
+		if (nextResilience.policy.enabled !== false) {
+			nextResilience = {
+				...nextResilience,
+				policy: { ...nextResilience.policy, enabled: false },
+			};
+			state = await writeStateWhileLocked(directory, {
+				...state,
+				updatedAt: isoNow(),
+				prReviewResilience: nextResilience,
+			});
+			previous = state.prReviewBaseDispatches ?? [];
+		}
+	} else if (nextResilience && nextResilience.policy.enabled === false) {
+		const previousGeneration =
+			nextResilience.circuit && 'version' in nextResilience.circuit
+				? nextResilience.circuit.generation
+				: 1;
+		nextResilience = {
+			policy: snapshotPrReviewResiliencePolicy(
+				options.prReviewResiliencePolicy,
+			),
+			attempts: [],
+			circuit: {
+				version: 2,
+				state: 'CLOSED',
+				generation: previousGeneration + 1,
+				contributors: [],
+				evidenceWaterline: isoNow(),
+			},
+		};
+		state = await writeStateWhileLocked(directory, {
+			...state,
+			updatedAt: isoNow(),
+			prReviewResilience: nextResilience,
+		});
+		previous = state.prReviewBaseDispatches ?? [];
+	}
 	if (
-		resiliencePolicy.enabled &&
+		liveResilienceEnabled &&
 		depthTier !== 'S' &&
 		requestedWaveStage === undefined &&
 		!requestedContractRetry
@@ -3840,7 +3987,7 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 		);
 	}
 	if (requestedWaveStage !== undefined && requestedWaveAttempt !== undefined) {
-		if (depthTier === 'S' || !resiliencePolicy.enabled) {
+		if (depthTier === 'S' || !liveResilienceEnabled) {
 			throw new Error(
 				'BLOCKED: staged PR_REVIEW base dispatch is valid only when pr_review_resilience is enabled at depth tier M or L',
 			);
@@ -3850,36 +3997,43 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 			revisionDigest = (await createPrReviewGateContext(directory, state))
 				.revisionDigest;
 		}
-		const snapshot = nextResilience ?? {
+		let snapshot = nextResilience ?? {
 			policy: resiliencePolicy,
 			attempts: [],
 		};
-		if (snapshot.circuit) {
-			throw new PrReviewResilienceCircuitOpenError(
-				formatPrReviewResilienceCircuitOpenMessage(snapshot.circuit),
-			);
-		}
-		const circuit = computePrReviewResilienceCircuit(
-			directory,
-			state,
-			snapshot.policy,
-		);
-		if (circuit) {
-			nextResilience = { ...snapshot, circuit };
-			if (
-				!state.prReviewResilience ||
-				state.prReviewResilience.circuit?.signature !== circuit.signature ||
-				state.prReviewResilience.circuit?.count !== circuit.count
-			) {
-				await writeStateWhileLocked(directory, {
-					...state,
-					updatedAt: isoNow(),
-					prReviewResilience: nextResilience,
-				});
+		// Issue #2382: one machine advance per staged admission. Evidence-driven
+		// transitions persist immediately (inside the advance helper); an admitted
+		// HALF_OPEN probe defers its persist to this admission's success write
+		// (mark-on-success), so a validation failure below never leaves a phantom
+		// probe. `snapshot` is refreshed to the post-advance record so the
+		// attempt bookkeeping below reads the same state the machine left.
+		let pendingProbeCircuit: PrReviewCircuitRecordV2 | undefined;
+		if (liveResilienceEnabled) {
+			const outcome = await advanceResilienceCircuitWhileLocked({
+				directory,
+				state,
+				snapshot,
+				admission: {
+					batchId,
+					laneId: normalizedLanes[0]?.laneId ?? '',
+				},
+			});
+			state = outcome.state;
+			snapshot = outcome.snapshot;
+			nextResilience = outcome.snapshot;
+			pendingProbeCircuit = outcome.pendingProbeCircuit;
+			if (outcome.blocked) {
+				throw new PrReviewResilienceCircuitOpenError(
+					formatPrReviewResilienceCircuitOpenMessage(
+						outcome.snapshot.circuit ?? {
+							version: 2,
+							state: 'OPEN',
+							generation: 1,
+							contributors: [],
+						},
+					),
+				);
 			}
-			throw new PrReviewResilienceCircuitOpenError(
-				formatPrReviewResilienceCircuitOpenMessage(circuit),
-			);
 		}
 		const lastAttempt = snapshot.attempts.at(-1);
 		if (requestedWaveStage === 'canary') {
@@ -3999,6 +4153,12 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 						admittedAt: isoNow(),
 					},
 				],
+				// Issue #2382: an admitted HALF_OPEN probe persists with this very
+				// success write (mark-on-success); any other surviving circuit
+				// record carries forward unchanged.
+				...((pendingProbeCircuit ?? snapshot.circuit)
+					? { circuit: pendingProbeCircuit ?? snapshot.circuit }
+					: {}),
 			};
 		} else {
 			if (
@@ -4221,6 +4381,33 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 							],
 						}
 					: nextResilience;
+			}
+			// Issue #2382 review (PRR-002): a rolled-back HALF_OPEN probe can
+			// never produce a terminal record — this rollback's own precondition
+			// is that the batch has zero delegation records — so leaving the
+			// probe in place would wedge the circuit on probe_in_flight forever.
+			// End the probe lifecycle exactly the way an ignored outcome does:
+			// state stays OPEN with a restarted recovery cooldown, and no
+			// contributor, generation, or waterline changes.
+			const rolledBackCircuit = nextResilience?.circuit;
+			if (
+				rolledBackCircuit &&
+				'version' in rolledBackCircuit &&
+				rolledBackCircuit.state === 'HALF_OPEN' &&
+				rolledBackCircuit.probe?.batchId === normalizedBatchId
+			) {
+				nextResilience = {
+					...nextResilience!,
+					circuit: {
+						...rolledBackCircuit,
+						state: 'OPEN',
+						openUntil: new Date(
+							_test_exports.nowMs() +
+								circuitOpenDurationMs(nextResilience!.policy),
+						).toISOString(),
+						probe: undefined,
+					},
+				};
 			}
 			const shouldKeepResilience =
 				(nextBaseDispatches.length > 0 && Boolean(nextResilience?.policy)) ||
@@ -8817,11 +9004,11 @@ export async function completePrWorkflow(
 }
 
 export const _test_exports = {
-	// Issue #2349: the terminal-error settle newly feeds this classifier with a
-	// populated `result.error`, so the correlated-failure signature it derives is
-	// now load-bearing for that path. Exposed so the convergence / no-false-trip /
-	// bucket-migration properties can be asserted directly instead of inferred.
-	classifyTerminalFailureSignature,
+	// Issue #2382: the text-signature classifier was replaced by the typed
+	// circuit-signal classifier (durable structured evidence only). Exposed so
+	// the provider-terminal / ignored-reason classification can be asserted
+	// directly.
+	classifyPrReviewCircuitSignal,
 	minimumConsolidatedLaneCover,
 	analyzePrReviewBatchRecordIntegrity,
 	MAX_COVER_UNIVERSE_BITS,
@@ -8850,6 +9037,11 @@ export const _test_exports = {
 		pendingStateMutationsByProjectSession.clear();
 		pendingCheckoutMutationsByProject.clear();
 		completedCheckoutLockOwners.clear();
+		// Issue #2382 review (PRR-005): the malformed-circuit diagnostic dedup is
+		// process-level by design in production, but a shared test process must
+		// not carry dedup state between suites — otherwise suite order changes
+		// which diagnostics fire.
+		malformedCircuitDiagnosticsSeen.clear();
 		_test_exports.beforeTerminalClear = undefined;
 		_test_exports.beforeAbortClear = undefined;
 		_test_exports.beforePrFeedbackTransitionLock = undefined;

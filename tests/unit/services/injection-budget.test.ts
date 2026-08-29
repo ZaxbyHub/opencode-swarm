@@ -1,23 +1,25 @@
 /**
- * Unit tests for src/services/injection-budget.ts (FR-002).
+ * Unit tests for src/services/injection-budget.ts (FR-002 + #2107 §2).
  *
  * Verifies the pure allocation function that caps combined system-enhancer +
- * knowledge-injector output per turn against a unified budget ceiling.
+ * knowledge-injector output per turn against a unified budget ceiling, and the
+ * per-session/per-turn producer ledger that every model-visible producer
+ * claims from or records into.
  */
 
 import { afterEach, describe, expect, it } from 'bun:test';
 import {
+	advanceTurnGeneration,
 	allocateInjectionBudget,
-	clearUnifiedBudget,
-	ensureSessionBudget,
-	getSystemEnhancerDemand,
-	getUnifiedBudgetRemaining,
-	getUnifiedBudgetTotal,
+	beginTurnLedger,
+	claimTurnBudget,
+	clearTurnLedger,
+	getProducerEmission,
+	getTurnLedgerSummary,
 	type InjectionBudgetAllocation,
 	type InjectionBudgetConfig,
-	requestUnifiedBudget,
-	resetUnifiedBudget,
-	setSystemEnhancerDemand,
+	recordProducerEmission,
+	recordProducerGrant,
 } from '../../../src/services/injection-budget.js';
 
 describe('Unified Injection Budget (FR-002) — pure allocation service', () => {
@@ -47,7 +49,7 @@ describe('Unified Injection Budget (FR-002) — pure allocation service', () => 
 		it('systemEnhancer=3K tokens + knowledgeInjector=2K chars within 4K budget → total ≤ 4K', () => {
 			const result = allocate(3000, 2000, 4000);
 			expect(result.totalTokens).toBeLessThanOrEqual(4000);
-			// With 0.33 ratio, 2000 chars → Math.ceil(2000 * 0.33) = 660 tokens
+			// Canonical 0.33 tok/char: 2000 chars → Math.ceil(2000 * 0.33) = 660
 			expect(result.systemEnhancerTokens).toBe(3000);
 			expect(result.knowledgeInjectorTokens).toBe(660);
 			expect(result.totalTokens).toBe(3660);
@@ -117,173 +119,255 @@ describe('Unified Injection Budget (FR-002) — pure allocation service', () => 
 	});
 });
 
-describe('Stateful session-ledger helpers', () => {
+describe('Per-turn producer ledger (#2107 §2)', () => {
 	const SESSION_A = 'session-a';
 	const SESSION_B = 'session-b';
 
 	afterEach(() => {
-		// Clean up both sessions after each test to prevent cross-test pollution.
-		clearUnifiedBudget(SESSION_A);
-		clearUnifiedBudget(SESSION_B);
+		clearTurnLedger(SESSION_A);
+		clearTurnLedger(SESSION_B);
 	});
 
-	describe('resetUnifiedBudget', () => {
-		it('initializes a fresh budget entry for the session', () => {
-			resetUnifiedBudget(SESSION_A, 5000);
-			expect(getUnifiedBudgetTotal(SESSION_A)).toBe(5000);
-			expect(getUnifiedBudgetRemaining(SESSION_A)).toBe(5000);
+	describe('beginTurnLedger', () => {
+		it('initializes a fresh ledger and mints a new generation', () => {
+			const gen1 = beginTurnLedger(SESSION_A, 5000, true);
+			const gen2 = beginTurnLedger(SESSION_A, 5000, true);
+			expect(gen2).toBeGreaterThan(gen1);
+			const summary = getTurnLedgerSummary(SESSION_A);
+			expect(summary?.totalBudget).toBe(5000);
+			expect(summary?.ceilingActive).toBe(true);
+			expect(summary?.used).toBe(0);
+			expect(summary?.producers).toEqual([]);
 		});
 
-		it('overwrites an existing budget entry', () => {
-			resetUnifiedBudget(SESSION_A, 5000);
-			requestUnifiedBudget(SESSION_A, 2000); // use 2000
-			expect(getUnifiedBudgetRemaining(SESSION_A)).toBe(3000);
-			resetUnifiedBudget(SESSION_A, 8000); // reset to new total
-			expect(getUnifiedBudgetTotal(SESSION_A)).toBe(8000);
-			expect(getUnifiedBudgetRemaining(SESSION_A)).toBe(8000); // used is reset to 0
+		it('reset discards prior-turn claims exactly once per composition', () => {
+			beginTurnLedger(SESSION_A, 3000, true);
+			claimTurnBudget(SESSION_A, 'memory-recall', 2000, {
+				localMaxTokens: 2000,
+			});
+			// Next request composition: reset, old claims gone.
+			beginTurnLedger(SESSION_A, 3000, true);
+			const summary = getTurnLedgerSummary(SESSION_A);
+			expect(summary?.used).toBe(0);
+			expect(summary?.producers).toEqual([]);
 		});
 
 		it('creates independent entries for different sessions', () => {
-			resetUnifiedBudget(SESSION_A, 5000);
-			resetUnifiedBudget(SESSION_B, 3000);
-			expect(getUnifiedBudgetTotal(SESSION_A)).toBe(5000);
-			expect(getUnifiedBudgetTotal(SESSION_B)).toBe(3000);
+			beginTurnLedger(SESSION_A, 5000, true);
+			beginTurnLedger(SESSION_B, 3000, false);
+			expect(getTurnLedgerSummary(SESSION_A)?.totalBudget).toBe(5000);
+			expect(getTurnLedgerSummary(SESSION_B)?.totalBudget).toBe(3000);
+			expect(getTurnLedgerSummary(SESSION_B)?.ceilingActive).toBe(false);
 		});
 	});
 
-	describe('getUnifiedBudgetRemaining', () => {
-		it('returns 0 for an unknown session', () => {
-			expect(getUnifiedBudgetRemaining('unknown-session')).toBe(0);
+	describe('claimTurnBudget', () => {
+		it('grants the full request when the ceiling has room', () => {
+			beginTurnLedger(SESSION_A, 4000, true);
+			const claim = claimTurnBudget(SESSION_A, 'context-capsule', 2000, {
+				localMaxTokens: 2000,
+			});
+			expect(claim).toEqual({
+				granted: 2000,
+				ledgerPresent: true,
+				ceilingActive: true,
+			});
+			expect(getTurnLedgerSummary(SESSION_A)?.used).toBe(2000);
 		});
 
-		it('returns total minus used after requests', () => {
-			resetUnifiedBudget(SESSION_A, 4000);
-			expect(getUnifiedBudgetRemaining(SESSION_A)).toBe(4000);
-			requestUnifiedBudget(SESSION_A, 1500);
-			expect(getUnifiedBudgetRemaining(SESSION_A)).toBe(2500);
-			requestUnifiedBudget(SESSION_A, 2000);
-			expect(getUnifiedBudgetRemaining(SESSION_A)).toBe(500);
+		it('grants only the remaining ceiling when exhausted', () => {
+			beginTurnLedger(SESSION_A, 1000, true);
+			const claim = claimTurnBudget(SESSION_A, 'context-capsule', 1500, {
+				localMaxTokens: 1500,
+			});
+			expect(claim.granted).toBe(1000);
+			expect(getTurnLedgerSummary(SESSION_A)?.used).toBe(1000);
 		});
 
-		it('returns 0 when budget is fully exhausted', () => {
-			resetUnifiedBudget(SESSION_A, 1000);
-			requestUnifiedBudget(SESSION_A, 1000);
-			expect(getUnifiedBudgetRemaining(SESSION_A)).toBe(0);
+		it('never grants more than the producer local maximum', () => {
+			beginTurnLedger(SESSION_A, 9000, true);
+			const claim = claimTurnBudget(SESSION_A, 'memory-recall', 5000, {
+				localMaxTokens: 1000,
+			});
+			expect(claim.granted).toBe(1000);
+		});
+
+		it('fails open to the local maximum when no ledger exists (#1617)', () => {
+			const claim = claimTurnBudget(
+				'no-such-session',
+				'context-capsule',
+				2500,
+				{
+					localMaxTokens: 2000,
+				},
+			);
+			expect(claim).toEqual({
+				granted: 2000,
+				ledgerPresent: false,
+				ceilingActive: false,
+			});
+			expect(getTurnLedgerSummary('no-such-session')).toBeNull();
+		});
+
+		it('ceiling inactive: grants the local max without deducting', () => {
+			beginTurnLedger(SESSION_A, 1000, false);
+			const claim = claimTurnBudget(SESSION_A, 'context-capsule', 2500, {
+				localMaxTokens: 2000,
+			});
+			expect(claim.granted).toBe(2000);
+			expect(claim.ceilingActive).toBe(false);
+			expect(getTurnLedgerSummary(SESSION_A)?.used).toBe(0);
+		});
+
+		it('sequential claims reconcile: Σgranted ≤ ceiling', () => {
+			beginTurnLedger(SESSION_A, 3000, true);
+			const r1 = claimTurnBudget(SESSION_A, 'context-capsule', 1000, {
+				localMaxTokens: 1000,
+			});
+			const r2 = claimTurnBudget(SESSION_A, 'memory-recall', 1500, {
+				localMaxTokens: 1500,
+			});
+			const r3 = claimTurnBudget(SESSION_A, 'context-capsule', 2000, {
+				localMaxTokens: 2000,
+			});
+			expect(r1.granted).toBe(1000);
+			expect(r2.granted).toBe(1500);
+			expect(r3.granted).toBe(500);
+			const summary = getTurnLedgerSummary(SESSION_A);
+			expect(summary?.used).toBe(3000);
+			// requested = granted + truncated reconciliation, per producer
+			const capsule = summary?.producers.find(
+				(p) => p.producer === 'context-capsule',
+			);
+			expect(capsule?.requested).toBe(3000);
+			expect(capsule?.granted).toBe(1500);
+			expect(capsule?.truncated).toBe(0);
+		});
+
+		it('concurrent sessions never share claims', () => {
+			beginTurnLedger(SESSION_A, 1000, true);
+			beginTurnLedger(SESSION_B, 5000, true);
+			claimTurnBudget(SESSION_A, 'memory-recall', 900, {
+				localMaxTokens: 900,
+			});
+			const bClaim = claimTurnBudget(SESSION_B, 'memory-recall', 4000, {
+				localMaxTokens: 4000,
+			});
+			expect(bClaim.granted).toBe(4000);
+			expect(getTurnLedgerSummary(SESSION_A)?.used).toBe(900);
 		});
 	});
 
-	describe('requestUnifiedBudget', () => {
-		it('grants the full request when budget is sufficient', () => {
-			resetUnifiedBudget(SESSION_A, 4000);
-			const granted = requestUnifiedBudget(SESSION_A, 2000);
-			expect(granted).toBe(2000);
-			expect(getUnifiedBudgetRemaining(SESSION_A)).toBe(2000);
+	describe('recordProducerGrant', () => {
+		it('books a grant and deducts from the ceiling when active', () => {
+			beginTurnLedger(SESSION_A, 4000, true);
+			recordProducerGrant(SESSION_A, 'system-enhancer', 2500, 2500, 'system');
+			expect(getTurnLedgerSummary(SESSION_A)?.used).toBe(2500);
+			const remaining = claimTurnBudget(SESSION_A, 'context-capsule', 2000, {
+				localMaxTokens: 2000,
+			});
+			expect(remaining.granted).toBe(1500);
 		});
 
-		it('grants only the remaining budget when request exceeds remaining', () => {
-			resetUnifiedBudget(SESSION_A, 1000);
-			const granted = requestUnifiedBudget(SESSION_A, 1500);
-			expect(granted).toBe(1000);
-			expect(getUnifiedBudgetRemaining(SESSION_A)).toBe(0);
+		it('clamps the deduction so used never exceeds the ceiling', () => {
+			beginTurnLedger(SESSION_A, 1000, true);
+			recordProducerGrant(SESSION_A, 'system-enhancer', 3000, 3000, 'system');
+			const summary = getTurnLedgerSummary(SESSION_A);
+			expect(summary?.used).toBe(1000);
 		});
 
-		it('fails open (returns full request) when no budget entry exists', () => {
-			const granted = requestUnifiedBudget('no-such-session', 500);
-			expect(granted).toBe(500);
+		it('records but does not deduct when the ceiling is inactive', () => {
+			beginTurnLedger(SESSION_A, 1000, false);
+			recordProducerGrant(SESSION_A, 'system-enhancer', 3000, 3000, 'system');
+			expect(getTurnLedgerSummary(SESSION_A)?.used).toBe(0);
 		});
 
-		it('multiple sequential requests correctly track used amount', () => {
-			resetUnifiedBudget(SESSION_A, 3000);
-			const r1 = requestUnifiedBudget(SESSION_A, 1000);
-			const r2 = requestUnifiedBudget(SESSION_A, 1500);
-			const r3 = requestUnifiedBudget(SESSION_A, 2000);
-			expect(r1).toBe(1000);
-			expect(r2).toBe(1500);
-			expect(r3).toBe(500); // only 500 remaining
-			expect(getUnifiedBudgetRemaining(SESSION_A)).toBe(0);
-		});
-	});
-
-	describe('getUnifiedBudgetTotal', () => {
-		it('returns 0 for an unknown session', () => {
-			expect(getUnifiedBudgetTotal('unknown-session')).toBe(0);
-		});
-
-		it('returns the configured total for an existing session', () => {
-			resetUnifiedBudget(SESSION_A, 6000);
-			expect(getUnifiedBudgetTotal(SESSION_A)).toBe(6000);
-		});
-	});
-
-	describe('clearUnifiedBudget', () => {
-		it('removes the session entry', () => {
-			resetUnifiedBudget(SESSION_A, 5000);
-			clearUnifiedBudget(SESSION_A);
-			expect(getUnifiedBudgetTotal(SESSION_A)).toBe(0);
-			expect(getUnifiedBudgetRemaining(SESSION_A)).toBe(0);
-		});
-
-		it('is idempotent (deleting twice does not throw)', () => {
-			resetUnifiedBudget(SESSION_A, 5000);
-			clearUnifiedBudget(SESSION_A);
-			expect(() => clearUnifiedBudget(SESSION_A)).not.toThrow();
-		});
-	});
-
-	describe('ensureSessionBudget', () => {
-		it('creates a budget entry if none exists', () => {
-			ensureSessionBudget(SESSION_A, 7000);
-			expect(getUnifiedBudgetTotal(SESSION_A)).toBe(7000);
-			expect(getUnifiedBudgetRemaining(SESSION_A)).toBe(7000);
-		});
-
-		it('leaves an existing entry untouched', () => {
-			resetUnifiedBudget(SESSION_A, 5000);
-			requestUnifiedBudget(SESSION_A, 2000);
-			ensureSessionBudget(SESSION_A, 8000); // should NOT reset used
-			expect(getUnifiedBudgetTotal(SESSION_A)).toBe(5000); // unchanged
-			expect(getUnifiedBudgetRemaining(SESSION_A)).toBe(3000); // unchanged
-		});
-	});
-
-	describe('setSystemEnhancerDemand / getSystemEnhancerDemand', () => {
-		it('stores and retrieves system-enhancer demand for a session', () => {
-			resetUnifiedBudget(SESSION_A, 4000);
-			setSystemEnhancerDemand(SESSION_A, 2500);
-			expect(getSystemEnhancerDemand(SESSION_A)).toBe(2500);
-		});
-
-		it('returns 0 for an unknown session', () => {
-			expect(getSystemEnhancerDemand('unknown-session')).toBe(0);
-		});
-
-		it('returns 0 when no demand was set for an existing session', () => {
-			resetUnifiedBudget(SESSION_A, 4000);
-			expect(getSystemEnhancerDemand(SESSION_A)).toBe(0);
-		});
-
-		it('overwrites a previously set demand', () => {
-			resetUnifiedBudget(SESSION_A, 4000);
-			setSystemEnhancerDemand(SESSION_A, 1000);
-			setSystemEnhancerDemand(SESSION_A, 3000);
-			expect(getSystemEnhancerDemand(SESSION_A)).toBe(3000);
-		});
-
-		it('does nothing when no budget entry exists for the session', () => {
-			// Should not throw; demand is silently dropped
+		it('no-ops without a ledger (fail-open)', () => {
 			expect(() =>
-				setSystemEnhancerDemand('no-such-session', 500),
+				recordProducerGrant(
+					'no-such-session',
+					'system-enhancer',
+					1,
+					1,
+					'system',
+				),
 			).not.toThrow();
-			expect(getSystemEnhancerDemand('no-such-session')).toBe(0);
+		});
+	});
+
+	describe('recordProducerEmission / getProducerEmission', () => {
+		it('records emitted and truncated amounts with surface', () => {
+			beginTurnLedger(SESSION_A, 4000, true);
+			recordProducerEmission(
+				SESSION_A,
+				'knowledge-injector',
+				660,
+				40,
+				'messages',
+			);
+			const summary = getTurnLedgerSummary(SESSION_A);
+			const ki = summary?.producers.find(
+				(p) => p.producer === 'knowledge-injector',
+			);
+			expect(ki?.emitted).toBe(660);
+			expect(ki?.truncated).toBe(40);
+			expect(ki?.surface).toBe('messages');
+			expect(getProducerEmission(SESSION_A, 'knowledge-injector')).toBe(660);
 		});
 
-		it('independent sessions have independent demand tracking', () => {
-			resetUnifiedBudget(SESSION_A, 4000);
-			resetUnifiedBudget(SESSION_B, 4000);
-			setSystemEnhancerDemand(SESSION_A, 3000);
-			setSystemEnhancerDemand(SESSION_B, 1500);
-			expect(getSystemEnhancerDemand(SESSION_A)).toBe(3000);
-			expect(getSystemEnhancerDemand(SESSION_B)).toBe(1500);
+		it('emissions never deduct from the ceiling (fixed/base content)', () => {
+			beginTurnLedger(SESSION_A, 1000, true);
+			recordProducerEmission(SESSION_A, 'advisory-queue', 800, 0, 'messages');
+			expect(getTurnLedgerSummary(SESSION_A)?.used).toBe(0);
+		});
+
+		it('returns 0 for unknown session or producer', () => {
+			expect(getProducerEmission('no-such-session', 'system-enhancer')).toBe(0);
+			beginTurnLedger(SESSION_A, 1000, true);
+			expect(getProducerEmission(SESSION_A, 'system-enhancer')).toBe(0);
+		});
+
+		it('se knowledge-injector reads system-enhancer emission (demand relay)', () => {
+			beginTurnLedger(SESSION_A, 4000, true);
+			recordProducerEmission(SESSION_A, 'system-enhancer', 2500, 0, 'system');
+			expect(getProducerEmission(SESSION_A, 'system-enhancer')).toBe(2500);
+		});
+	});
+
+	describe('advanceTurnGeneration / clearTurnLedger', () => {
+		it('advance discards the ledger so the next composition starts fresh', () => {
+			beginTurnLedger(SESSION_A, 4000, true);
+			claimTurnBudget(SESSION_A, 'memory-recall', 2000, {
+				localMaxTokens: 2000,
+			});
+			advanceTurnGeneration(SESSION_A);
+			expect(getTurnLedgerSummary(SESSION_A)).toBeNull();
+		});
+
+		it('clearTurnLedger is idempotent', () => {
+			beginTurnLedger(SESSION_A, 4000, true);
+			clearTurnLedger(SESSION_A);
+			expect(() => clearTurnLedger(SESSION_A)).not.toThrow();
+		});
+	});
+
+	describe('bounded session tracking (invariant 8)', () => {
+		it('FIFO-evicts past MAX_TRACKED_SESSIONS without throwing', () => {
+			// Fill well past the cap; the oldest entries fall out.
+			for (let i = 0; i < 300; i++) {
+				beginTurnLedger(`flood-session-${i}`, 1000, true);
+			}
+			const newest = getTurnLedgerSummary('flood-session-299');
+			expect(newest?.totalBudget).toBe(1000);
+			// The oldest was evicted; claiming against it fails open.
+			const claim = claimTurnBudget('flood-session-0', 'memory-recall', 500, {
+				localMaxTokens: 500,
+			});
+			expect(claim.ledgerPresent).toBe(false);
+			// Cleanup: clear the flood sessions we created.
+			for (let i = 0; i < 300; i++) {
+				clearTurnLedger(`flood-session-${i}`);
+			}
 		});
 	});
 });

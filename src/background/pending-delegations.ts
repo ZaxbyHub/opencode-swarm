@@ -47,6 +47,7 @@ import {
 } from '../evidence/lock.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { bunWrite } from '../utils/bun-compat.js';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import * as logger from '../utils/logger.js';
 import {
 	appendDelegationMaintenanceObservation,
@@ -77,6 +78,8 @@ export const MAX_LIVE_BACKGROUND_FALLBACKS = 256;
 export const MAX_LIVE_BACKGROUND_CODER_RESERVATIONS = 256;
 export const MAX_BACKGROUND_OBSERVED_FILES = 5_000;
 export const MAX_BACKGROUND_ADVISORY_CHARS = 4_000;
+export const LEGACY_CODER_SETTLEMENT_PENDING_ADVISORY_MARKER =
+	'legacy coder settlement transfer is pending';
 const MAX_BACKGROUND_DELEGATION_GENERATION = 1_000_000;
 
 /** Strict recovery bound for the ledger/tail (issue #2034: unchanged guard). */
@@ -277,6 +280,12 @@ export interface BackgroundDelegationRecord {
 	coderSettlement?: BackgroundCoderSettlement;
 	/** Durable parent advisory keyed by terminalResult.eventId. */
 	advisoryInbox?: BackgroundAdvisoryInboxEntry;
+	/** Exact legacy coder WAL transfer that still needs durable reconciliation. */
+	legacyCoderSettlementTransfer?: {
+		taskId: string;
+		transitionId: string;
+		updatedAt: number;
+	};
 	/** CAS marker for exactly one active ingestion attempt. */
 	ingestion?: BackgroundDelegationIngestion;
 	result?: BackgroundDelegationResult;
@@ -352,6 +361,27 @@ export type BackgroundDelegationWorkflowLaneFailureClass =
 	| 'resource'
 	| 'deadline';
 
+/**
+ * Issue #2382: structured, bounded classification of the terminal error that
+ * settled a lane, captured from `classifyLaneTerminalError` at settle time so
+ * downstream consumers (the PR-review resilience circuit) can derive a typed
+ * provider-terminal signal from durable evidence instead of parsing the
+ * bounded display string in `error`.
+ *
+ * Deliberately carries NO message text: `error` remains the display surface.
+ * `kind` mirrors the SDK discriminator semantics (authoritative for the
+ * settled status); `category`/`statusCode`/`hostRetryable` are advisory
+ * provenance from `classifyProviderFailure` / `ApiError.data`.
+ */
+export interface BackgroundDelegationTerminalErrorClass {
+	kind: 'provider' | 'aborted' | 'output_length' | 'unknown';
+	/** Canonical `classifyProviderFailure` category (e.g. `provider.rate_limit`). */
+	category: string;
+	statusCode?: number;
+	/** `ApiError.data.isRetryable` — host-stated, not inferred. */
+	hostRetryable?: boolean;
+}
+
 export interface BackgroundDelegationResult {
 	text?: string;
 	error?: string;
@@ -369,6 +399,15 @@ export interface BackgroundDelegationResult {
 	 * Optional because successful lanes and legacy terminal results have none.
 	 */
 	workflowLaneFailureClass?: BackgroundDelegationWorkflowLaneFailureClass;
+	/**
+	 * Issue #2382: typed terminal-error classification captured at settle time
+	 * (see {@link BackgroundDelegationTerminalErrorClass}). Optional because only
+	 * lanes settled from a real child run with a classified terminal error carry
+	 * it; successful, cancelled, stale, and legacy records have none. Present in
+	 * the `.strict()` ResultSchema below in the same edit — an undeclared field
+	 * here would make whole records invisible to `readDelegations`.
+	 */
+	terminalErrorClass?: BackgroundDelegationTerminalErrorClass;
 	/**
 	 * Workflow lanes whose discovery artifact was accepted only after repair — a
 	 * synthesized canonical header, or valid rows retained beside malformed ones.
@@ -511,6 +550,17 @@ const ResultSchema = z
 		messageCount: z.number().optional(),
 		workflowLaneFailureClass: z
 			.enum(['contract', 'resource', 'deadline'])
+			.optional(),
+		// Issue #2382: must be declared here (schema is .strict()) — see the
+		// interface comment and the parity guard below this schema.
+		terminalErrorClass: z
+			.object({
+				kind: z.enum(['provider', 'aborted', 'output_length', 'unknown']),
+				category: z.string().min(1).max(128),
+				statusCode: z.number().int().optional(),
+				hostRetryable: z.boolean().optional(),
+			})
+			.strict()
 			.optional(),
 		// Must be declared here: this schema is .strict() and readDelegations
 		// safeParse-skips any record it rejects, so an undeclared field would make
@@ -858,6 +908,14 @@ const RecordSchema = z
 		terminalResult: TerminalResultSchema.optional(),
 		coderSettlement: CoderSettlementSchema.optional(),
 		advisoryInbox: AdvisoryInboxSchema.optional(),
+		legacyCoderSettlementTransfer: z
+			.object({
+				taskId: z.string().min(1).max(256),
+				transitionId: z.string().min(1).max(256),
+				updatedAt: z.number().nonnegative(),
+			})
+			.strict()
+			.optional(),
 		ingestion: DelegationIngestionSchema.optional(),
 		result: ResultSchema.optional(),
 		completedAt: z.number().optional(),
@@ -1601,6 +1659,9 @@ export function isUnsettledWorktreeOwner(
 function isCheckpointLiveRecord(record: BackgroundDelegationRecord): boolean {
 	if (!isTerminal(record.status)) return true;
 	if (record.advisoryInbox?.state === 'pending') return true;
+	// A pending legacy transfer still needs the terminal result body for the
+	// observer's durable replay after the WAL becomes writable again.
+	if (record.legacyCoderSettlementTransfer) return true;
 	const settlement = record.coderSettlement;
 	if (settlement && settlement.state !== 'settled') return true;
 	if (settlement?.state === 'settled' && isUnsettledWorktreeOwner(record)) {
@@ -3071,6 +3132,172 @@ export async function updateCoderSettlement(
 	}
 }
 
+export interface LegacyCoderSettlementTransfer {
+	taskId: string;
+	transitionId: string;
+}
+
+export type LegacyCoderSettlementReconciler = (
+	record: BackgroundDelegationRecord,
+) => Promise<boolean>;
+
+export interface ReplacePendingBackgroundAdvisoryResult {
+	advisory: BackgroundAdvisoryInboxEntry;
+	replacedMessage?: string;
+}
+
+const MAX_LEGACY_CODER_SETTLEMENT_RECONCILERS = 32;
+const RETRYABLE_LEGACY_SETTLEMENT_ERROR_CODES = new Set([
+	'CODER_SETTLEMENT_LOCKED',
+	'EACCES',
+	'EBUSY',
+	'EIO',
+	'EPERM',
+	'ETIMEDOUT',
+]);
+const legacyCoderSettlementReconcilers = new Map<
+	string,
+	LegacyCoderSettlementReconciler
+>();
+const legacyCoderSettlementReconcilerOrder: string[] = [];
+
+/**
+ * Register the observer-owned replay callback for a project. Maintenance is
+ * also invoked by admission and status paths that cannot receive the observer
+ * instance directly, so this directory-keyed, bounded registry keeps those
+ * backstops wired without retaining unbounded process state.
+ */
+export function registerLegacyCoderSettlementReconciler(
+	directory: string,
+	reconciler: LegacyCoderSettlementReconciler,
+): void {
+	const key = canonicalRootKeyFresh(directory);
+	if (legacyCoderSettlementReconcilers.has(key)) {
+		const existingIndex = legacyCoderSettlementReconcilerOrder.indexOf(key);
+		if (existingIndex >= 0) {
+			legacyCoderSettlementReconcilerOrder.splice(existingIndex, 1);
+		}
+		legacyCoderSettlementReconcilerOrder.push(key);
+		legacyCoderSettlementReconcilers.set(key, reconciler);
+		return;
+	}
+	if (
+		legacyCoderSettlementReconcilerOrder.length >=
+		MAX_LEGACY_CODER_SETTLEMENT_RECONCILERS
+	) {
+		const evicted = legacyCoderSettlementReconcilerOrder.shift();
+		if (evicted) legacyCoderSettlementReconcilers.delete(evicted);
+	}
+	legacyCoderSettlementReconcilerOrder.push(key);
+	legacyCoderSettlementReconcilers.set(key, reconciler);
+}
+
+function getLegacyCoderSettlementReconciler(
+	directory: string,
+): LegacyCoderSettlementReconciler | undefined {
+	return legacyCoderSettlementReconcilers.get(canonicalRootKeyFresh(directory));
+}
+
+/** Test-only seam for the bounded legacy-settlement reconciler registry. */
+export const _internals = {
+	getLegacyCoderSettlementReconciler,
+	getLegacyCoderSettlementReconcilerOrder: () => [
+		...legacyCoderSettlementReconcilerOrder,
+	],
+	resetLegacyCoderSettlementReconcilers: () => {
+		legacyCoderSettlementReconcilers.clear();
+		legacyCoderSettlementReconcilerOrder.length = 0;
+	},
+};
+
+/** Record an exact legacy-WAL transfer that must be retried after contention. */
+export async function markLegacyCoderSettlementTransferPending(
+	directory: string,
+	correlationId: string,
+	transfer: LegacyCoderSettlementTransfer,
+): Promise<BackgroundDelegationRecord | null> {
+	return updateLegacyCoderSettlementTransfer(
+		directory,
+		correlationId,
+		transfer,
+	);
+}
+
+/** Clear a transfer marker only after the WAL is terminal and any replay succeeds. */
+export async function clearLegacyCoderSettlementTransferPending(
+	directory: string,
+	correlationId: string,
+): Promise<BackgroundDelegationRecord | null> {
+	return updateLegacyCoderSettlementTransfer(directory, correlationId, null);
+}
+
+async function updateLegacyCoderSettlementTransfer(
+	directory: string,
+	correlationId: string,
+	transfer: LegacyCoderSettlementTransfer | null,
+): Promise<BackgroundDelegationRecord | null> {
+	if (!correlationId) return null;
+	let result: BackgroundDelegationRecord | null = null;
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const current = findRecordForWrite(records, correlationId);
+				if (!current) return;
+				if (
+					transfer &&
+					(current.status === 'consumed' ||
+						(current.legacyCoderSettlementTransfer &&
+							(current.legacyCoderSettlementTransfer.taskId !==
+								transfer.taskId ||
+								current.legacyCoderSettlementTransfer.transitionId !==
+									transfer.transitionId)))
+				) {
+					// A racing observer may already have consumed the terminal, or may
+					// own a different exact transfer identity. Never resurrect/overwrite
+					// that durable decision from a late failure report.
+					result = current;
+					return;
+				}
+				const updatedAt = Date.now();
+				const next: BackgroundDelegationRecord = transfer
+					? {
+							...current,
+							schemaVersion: 3,
+							legacyCoderSettlementTransfer: {
+								...transfer,
+								updatedAt,
+							},
+							updatedAt,
+						}
+					: (() => {
+							const { legacyCoderSettlementTransfer: _pending, ...rest } =
+								current;
+							return {
+								...rest,
+								schemaVersion: 3 as const,
+								updatedAt,
+							};
+						})();
+				if (!RecordSchema.safeParse(next).success) return;
+				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
+				result = next;
+			},
+		);
+	} catch (error) {
+		logger.warn(
+			`[background] legacy coder settlement transfer marker update failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	return result;
+}
+
 export type DelegationIngestionDisposition =
 	| 'claimed'
 	| 'retry'
@@ -3320,6 +3547,83 @@ export async function putPendingBackgroundAdvisory(
 	} catch (err) {
 		logger.warn(
 			`[background] putPendingBackgroundAdvisory failed: ${err instanceof Error ? err.message : String(err)}`,
+		);
+		return null;
+	}
+}
+
+/**
+ * Replace a pending transfer-warning advisory with the corrected terminal
+ * status after durable legacy-WAL reconciliation. The replacement is narrowly
+ * gated by the exact terminal identity and the warning marker so the ordinary
+ * one-advisory-per-event immutability contract remains intact.
+ */
+export async function replacePendingBackgroundAdvisory(
+	directory: string,
+	correlationId: string,
+	input: PutPendingBackgroundAdvisoryInput,
+): Promise<ReplacePendingBackgroundAdvisoryResult | null> {
+	const createdAt = input.createdAt ?? Date.now();
+	const parsed = AdvisoryInboxSchema.safeParse({
+		eventId: input.eventId,
+		parentSessionId: input.parentSessionId,
+		state: 'pending',
+		message: input.message,
+		createdAt,
+	});
+	if (!correlationId || !parsed.success) return null;
+	let result: ReplacePendingBackgroundAdvisoryResult | null = null;
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const current = findRecordForWrite(records, correlationId);
+				const existing = current?.advisoryInbox;
+				if (
+					!current?.terminalResult ||
+					current.terminalResult.eventId !== parsed.data.eventId ||
+					current.parentSessionId !== parsed.data.parentSessionId ||
+					!existing ||
+					!existing.message.includes(
+						LEGACY_CODER_SETTLEMENT_PENDING_ADVISORY_MARKER,
+					) ||
+					parsed.data.message.includes(
+						LEGACY_CODER_SETTLEMENT_PENDING_ADVISORY_MARKER,
+					)
+				) {
+					if (
+						existing &&
+						existing.eventId === parsed.data.eventId &&
+						existing.parentSessionId === parsed.data.parentSessionId &&
+						existing.message === parsed.data.message
+					) {
+						result = { advisory: existing };
+					}
+					return;
+				}
+				const next: BackgroundDelegationRecord = {
+					...current,
+					schemaVersion: 3,
+					advisoryInbox: parsed.data,
+					updatedAt: createdAt,
+				};
+				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
+				result = {
+					advisory: parsed.data,
+					replacedMessage: existing.message,
+				};
+			},
+		);
+		return result;
+	} catch (err) {
+		logger.warn(
+			`[background] replacePendingBackgroundAdvisory failed: ${err instanceof Error ? err.message : String(err)}`,
 		);
 		return null;
 	}
@@ -4814,6 +5118,17 @@ export interface MaintainBackgroundDelegationsOptions {
 	/** Typed label of the maintenance point invoking this run. */
 	reason?: string;
 	now?: number;
+	/** Replay a terminal after its exact legacy WAL transfer succeeds. */
+	onLegacyCoderSettlementReconciled?: (
+		record: BackgroundDelegationRecord,
+	) => Promise<boolean>;
+	/** Notify the live observer after replacing a queued transfer advisory. */
+	onLegacyCoderSettlementAdvisoryReplaced?: (
+		record: BackgroundDelegationRecord,
+		replacement: ReplacePendingBackgroundAdvisoryResult,
+	) => void | Promise<void>;
+	/** Skip legacy coder WAL replay when this pass is already handling that path. */
+	skipLegacyCoderSettlementReconciliation?: boolean;
 }
 
 export interface MaintainBackgroundDelegationsResult {
@@ -4832,6 +5147,130 @@ export interface MaintainBackgroundDelegationsResult {
 
 const DEFAULT_MAINTENANCE_LOCK_TIMEOUT_MS = 5_000;
 const DEFAULT_MAINTENANCE_BATCH = 256;
+
+/**
+ * Retry retiring legacy foreground coder WALs after a background terminal was
+ * already durably recorded. This runs outside the delegation/reservation locks
+ * so settlement-lock contention cannot deadlock maintenance. Missing or
+ * already-terminal WALs are harmless: pure background launches have no legacy
+ * WAL, and a successful transfer is idempotent.
+ */
+async function reconcileLegacyCoderSettlements(
+	directory: string,
+	maxRecords: number,
+	onReconciled?: MaintainBackgroundDelegationsOptions['onLegacyCoderSettlementReconciled'],
+	onAdvisoryReplaced?: MaintainBackgroundDelegationsOptions['onLegacyCoderSettlementAdvisoryReplaced'],
+): Promise<number> {
+	const reconciler =
+		onReconciled ?? getLegacyCoderSettlementReconciler(directory);
+	const candidates = readDelegations(directory)
+		.filter(
+			(record) =>
+				record.normalizedAgent === 'coder' &&
+				Boolean(record.legacyCoderSettlementTransfer) &&
+				Boolean(record.terminalResult),
+		)
+		.slice(0, maxRecords);
+	if (candidates.length === 0) return 0;
+
+	const { transferCoderSettlementToBackground } = await import(
+		'../workflow/coder-settlement.js'
+	);
+	let transferred = 0;
+	for (const record of candidates) {
+		try {
+			const outcome = await transferCoderSettlementToBackground({
+				directory,
+				taskId: record.legacyCoderSettlementTransfer!.taskId,
+				transitionId: record.legacyCoderSettlementTransfer!.transitionId,
+			});
+			if (
+				(outcome === 'transferred' ||
+					outcome === 'already-terminal' ||
+					outcome === 'missing') &&
+				reconciler
+			) {
+				if (await reconciler(record)) {
+					await clearLegacyCoderSettlementTransferPending(
+						directory,
+						record.correlationId,
+					);
+				}
+			}
+			if (outcome === 'transferred') transferred += 1;
+		} catch (error) {
+			const code = legacySettlementErrorCode(error);
+			if (!RETRYABLE_LEGACY_SETTLEMENT_ERROR_CODES.has(code ?? '')) {
+				const advisory = record.advisoryInbox;
+				const manualMessage =
+					`[BACKGROUND COMPLETION ${record.terminalResult?.eventId ?? record.correlationId}] ` +
+					`coder task ${record.evidenceTaskId ?? record.planTaskId ?? 'unknown'} ` +
+					'legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session).';
+				let advisoryRecorded = false;
+				if (advisory?.state === 'pending') {
+					const replaced = await replacePendingBackgroundAdvisory(
+						directory,
+						record.correlationId,
+						{
+							eventId: advisory.eventId,
+							parentSessionId: advisory.parentSessionId,
+							message: manualMessage,
+						},
+					);
+					advisoryRecorded = replaced !== null;
+					if (replaced) {
+						try {
+							await onAdvisoryReplaced?.(record, replaced);
+						} catch (callbackError) {
+							logger.warn(
+								`[background] legacy coder settlement advisory replacement notification failed for ${record.correlationId}: ${callbackError instanceof Error ? callbackError.message : String(callbackError)}`,
+							);
+						}
+					}
+				} else if (record.terminalResult) {
+					const stored = await putPendingBackgroundAdvisory(
+						directory,
+						record.correlationId,
+						{
+							eventId: record.terminalResult.eventId,
+							parentSessionId: record.parentSessionId,
+							message: manualMessage,
+						},
+					);
+					advisoryRecorded = stored !== null;
+				}
+				if (advisoryRecorded) {
+					await clearLegacyCoderSettlementTransferPending(
+						directory,
+						record.correlationId,
+					);
+				}
+				logger.warn(
+					`[background] legacy coder settlement reconciliation requires manual recovery for ${record.correlationId}: ${code ?? 'unknown transfer failure'}`,
+				);
+				continue;
+			}
+			logger.warn(
+				`[background] legacy coder settlement reconciliation deferred for ${record.correlationId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+	return transferred;
+}
+
+function legacySettlementErrorCode(error: unknown): string | null {
+	if (
+		error &&
+		typeof error === 'object' &&
+		'code' in error &&
+		typeof (error as NodeJS.ErrnoException).code === 'string'
+	) {
+		return (error as NodeJS.ErrnoException).code ?? null;
+	}
+	const detail = error instanceof Error ? error.message : String(error);
+	const match = /^([A-Z][A-Z0-9_]*)(?::|$)/.exec(detail.trim());
+	return match?.[1] ?? null;
+}
 
 /**
  * Shared background maintenance service (issue #2104): one bounded,
@@ -5216,6 +5655,26 @@ export async function maintainBackgroundDelegations(
 			'failure',
 			error instanceof Error ? error.message : String(error),
 		);
+	}
+
+	// A terminal observer may have completed ingestion while legacy WAL transfer
+	// was temporarily unavailable. Reconcile those exact task/call identities at
+	// every successful maintenance point, including admission before the next
+	// coder dispatch. The work is bounded by the same maintenance batch.
+	if (!options.skipLegacyCoderSettlementReconciliation) {
+		try {
+			await reconcileLegacyCoderSettlements(
+				directory,
+				maxRecords,
+				options.onLegacyCoderSettlementReconciled ??
+					getLegacyCoderSettlementReconciler(directory),
+				options.onLegacyCoderSettlementAdvisoryReplaced,
+			);
+		} catch (error) {
+			logger.warn(
+				`[background] legacy coder settlement reconciliation pass failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	}
 	if (result.status === 'failure') {
 		return emitObservation('failure', result.reason);

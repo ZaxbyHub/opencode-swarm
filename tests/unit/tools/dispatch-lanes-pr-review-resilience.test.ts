@@ -66,6 +66,15 @@ function terminalErrorResult(errorText: string) {
 		chars: text.length,
 		truncated: false,
 		digest: createHash('sha256').update(text).digest('hex'),
+		// Issue #2382: only lanes settled with the structured provider
+		// classification contribute to the circuit — tests inject exactly what
+		// the settle path now persists.
+		terminalErrorClass: {
+			kind: 'provider' as const,
+			category: 'provider.rate_limit',
+			statusCode: 503,
+			hostRetryable: true,
+		},
 	};
 }
 
@@ -158,6 +167,7 @@ describe('dispatch_lanes PR review resilience', () => {
 			statusProbeTimeoutMs: 2_000,
 			correlatedFailureThreshold: 2,
 			maxRetryAttemptsAfterInitial: 2,
+			circuitOpenDurationMs: 60_000,
 		});
 		expect(firstState?.prReviewResilience?.attempts).toHaveLength(1);
 		expect(firstState?.prReviewResilience?.attempts[0]?.attempt).toBe(0);
@@ -233,17 +243,25 @@ describe('dispatch_lanes PR review resilience', () => {
 		);
 		expect(blocked.success).toBe(false);
 		expect(blocked.failure_class).toBe('circuit_open');
-		expect(String(blocked.message)).toContain('circuit is open');
+		expect(String(blocked.message)).toContain('circuit is OPEN');
 		expect(created).toBe(2);
 
 		const blockedState = await readPrWorkflowGateState(
 			directory,
 			'review-session',
 		);
-		expect(blockedState?.prReviewResilience?.circuit?.count).toBe(2);
-		expect(blockedState?.prReviewResilience?.circuit?.signature).toBe(
-			'terminal-error-output:error:http 503 upstream overloaded request_id=<id> session_id=<id> at <iso-timestamp> epoch=<epoch>',
+		// Issue #2382: two distinct provider-terminal lanes of the same provider
+		// class opened a versioned v2 OPEN circuit.
+		const circuit = blockedState?.prReviewResilience?.circuit;
+		expect(circuit?.version).toBe(2);
+		expect(circuit?.state).toBe('OPEN');
+		expect(circuit?.providerClass).toBe('provider.rate_limit');
+		expect(circuit?.contributors).toHaveLength(2);
+		expect(circuit?.contributors?.[0]?.batchId).not.toBe(
+			circuit?.contributors?.[1]?.batchId,
 		);
+		expect(circuit?.openedAt).toBeDefined();
+		expect(circuit?.openUntil).toBeDefined();
 	});
 
 	test('rejects a tier-M attempt-0 fanout whose combined canary+fanout lane count falls below the floor before launching any new lane', async () => {

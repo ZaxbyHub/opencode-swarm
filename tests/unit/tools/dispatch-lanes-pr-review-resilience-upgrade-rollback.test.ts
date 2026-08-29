@@ -285,6 +285,11 @@ describe('dispatch_lanes PR review resilience upgrade rollback', () => {
 			delete: mock(async () => undefined),
 		});
 
+		// Issue #2382: the CURRENT config's enabled flag is authoritative. A
+		// staged canary retry under a disabled config is invalid (the persisted
+		// enabled snapshot no longer keeps staged admission alive), and the
+		// enforcement's guarded audit write marks the persisted policy disabled
+		// while preserving the record for audit.
 		const retried = await executeDispatchLanesAsync(
 			{
 				mode: 'swarm-pr-review:base',
@@ -304,18 +309,18 @@ describe('dispatch_lanes PR review resilience upgrade rollback', () => {
 			directory,
 			{ sessionID },
 		);
-		expect(retried.success).toBe(true);
-		expect(created).toBe(8);
+		expect(retried.success).toBe(false);
+		expect(retried.failure_class).toBe('invalid_args');
+		expect(String(retried.message)).toContain(
+			'staged PR_REVIEW base dispatch is valid only when pr_review_resilience is enabled',
+		);
+		expect(created).toBe(7);
 
-		const retriedState = await readPrWorkflowGateState(directory, sessionID);
-		expect(retriedState?.prReviewResilience?.policy.enabled).toBe(true);
-		expect(
-			retriedState?.prReviewResilience?.attempts[0]?.targetDimensions,
-		).toEqual([
-			PR_REVIEW_BASE_DIMENSION_IDS[2],
-			PR_REVIEW_BASE_DIMENSION_IDS[3],
-			PR_REVIEW_BASE_DIMENSION_IDS[5],
-		]);
+		// The rejection happens at the dispatch layer, before any gate
+		// enforcement — the record is unchanged (still enabled, empty attempts).
+		const unchangedState = await readPrWorkflowGateState(directory, sessionID);
+		expect(unchangedState?.prReviewResilience?.policy.enabled).toBe(true);
+		expect(unchangedState?.prReviewResilience?.attempts).toEqual([]);
 	});
 
 	test('contract retry admission rolls back when launch fails without staged markers', async () => {

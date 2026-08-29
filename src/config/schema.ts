@@ -1334,6 +1334,20 @@ export const RepoGraphConfigSchema = z.object({
 	 * than silently ignored.
 	 */
 	exclude_dirs: z.array(z.string().trim().min(1)).default([]),
+	/**
+	 * Storage mode for the repo dependency graph (issue #1534).
+	 *
+	 * - `'json'` (default): the graph is stored solely as the single
+	 *   `.swarm/repo-graph.json` document. Unchanged behavior.
+	 * - `'indexed'`: in addition to the JSON document, a derived
+	 *   `.swarm/repo-memory.sqlite` index is maintained that accelerates
+	 *   bounded neighbourhood lookups (localization / blast-radius / anchor
+	 *   resolution) without a full parse of the JSON document. The JSON
+	 *   document remains authoritative in BOTH modes — the index is a
+	 *   read-side accelerator only, never a second source of truth, and a
+	 *   stale or corrupt index silently falls back to the JSON path.
+	 */
+	storage: z.enum(['json', 'indexed']).default('json'),
 });
 
 export type RepoGraphConfig = z.infer<typeof RepoGraphConfigSchema>;
@@ -3278,6 +3292,12 @@ export interface PrReviewResilienceConfig {
 	status_probe_timeout_ms: number;
 	correlated_failure_threshold: number;
 	max_retry_attempts_after_initial: number;
+	/**
+	 * Issue #2382: how long an opened PR-review resilience circuit stays OPEN
+	 * before it admits exactly one HALF_OPEN probe. Applies both to the initial
+	 * open and to every provider-failure reopen.
+	 */
+	circuit_open_duration_ms: number;
 }
 
 /**
@@ -3293,6 +3313,7 @@ export const DEFAULT_PR_REVIEW_RESILIENCE_CONFIG: PrReviewResilienceConfig = {
 	status_probe_timeout_ms: 2_000,
 	correlated_failure_threshold: 2,
 	max_retry_attempts_after_initial: 2,
+	circuit_open_duration_ms: 60_000,
 };
 
 export const PrReviewResilienceConfigSchema = z
@@ -3302,6 +3323,12 @@ export const PrReviewResilienceConfigSchema = z
 		status_probe_timeout_ms: z.number().int().min(1).max(60_000).default(2_000),
 		correlated_failure_threshold: z.number().int().min(2).max(8).default(2),
 		max_retry_attempts_after_initial: z.number().int().min(0).max(2).default(2),
+		circuit_open_duration_ms: z
+			.number()
+			.int()
+			.min(1_000)
+			.max(1_800_000)
+			.default(60_000),
 	})
 	.strict();
 

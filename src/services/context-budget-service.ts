@@ -9,7 +9,11 @@
 import { DEFAULT_MODEL_CONTEXT_TOKENS } from '../config/schema';
 import { getCoreEventLifetimeCount } from '../events/core-events.js';
 import { resolveSwarmKnowledgePath } from '../hooks/knowledge-store';
-import { readSwarmFileAsync, validateSwarmPath } from '../hooks/utils';
+import {
+	estimateTokens as canonicalEstimateTokens,
+	readSwarmFileAsync,
+	validateSwarmPath,
+} from '../hooks/utils';
 import { bunFile, bunWrite } from '../utils/bun-compat';
 import * as logger from '../utils/logger.js';
 import { validateProjectDirectory } from '../utils/path-security';
@@ -144,16 +148,20 @@ export const DEFAULT_CONTEXT_BUDGET_CONFIG: ContextBudgetConfig = {
 const COST_PER_1K_TOKENS = 0.003;
 
 /**
- * Estimate token count for text using character-based approximation
+ * Estimate token count for text using the canonical character-based heuristic.
  *
- * @param text - The text to estimate tokens for
- * @returns Estimated token count (ceiling of chars / 3.5)
+ * Delegates to `estimateTokens` in src/hooks/utils.ts (issue #1616/#2107). This
+ * used to be an independent ÷3.5 formula, which made the user-facing budget
+ * report disagree ~15% with the injection-admission path (0.33 tok/char) on
+ * the same text. The export is kept for existing importers (capsule-builder,
+ * the services barrel); it is a heuristic — provider-reported token usage is
+ * authoritative when available.
  */
 export function estimateTokens(text: string): number {
 	if (!text || typeof text !== 'string') {
 		return 0;
 	}
-	return Math.ceil(text.length / 3.5);
+	return canonicalEstimateTokens(text);
 }
 
 /**
@@ -445,7 +453,7 @@ function formatWarningMessage(report: ContextBudgetReport): string {
 	const tokensPerTurn = report.swarmTotalTokens.toLocaleString();
 
 	if (report.status === 'warning') {
-		return `[SWARM INJECTION FOOTPRINT: ${budgetPctStr}% of model window — swarm injecting ~${tokensPerTurn} tokens/turn. Consider reducing injected context before starting new work.]`;
+		return `[SWARM INJECTION FOOTPRINT: ${budgetPctStr}% of model window — swarm injection footprint ~${tokensPerTurn} tokens/turn (intermediate measurement of per-turn injections, not total prompt pressure). Consider reducing injected context before starting new work.]`;
 	}
 
 	// Critical status
@@ -454,7 +462,7 @@ function formatWarningMessage(report: ContextBudgetReport): string {
 		COST_PER_1K_TOKENS
 	).toFixed(3);
 
-	return `[SWARM INJECTION FOOTPRINT: ${budgetPctStr}% CRITICAL — swarm injecting ~${tokensPerTurn} tokens/turn. Reduce injected context or start a fresh session before continuing. Approximate current prompt cost from swarm injections: ~$${costPerTurn}/turn.]`;
+	return `[SWARM INJECTION FOOTPRINT: ${budgetPctStr}% CRITICAL — swarm injection footprint ~${tokensPerTurn} tokens/turn (intermediate measurement of per-turn injections, not total prompt pressure). Reduce injected context or start a fresh session before continuing. Approximate current prompt cost from swarm injections: ~$${costPerTurn}/turn.]`;
 }
 
 /**

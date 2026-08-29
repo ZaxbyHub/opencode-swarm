@@ -61,6 +61,15 @@ function terminalErrorResult(error: string) {
 		chars: error.length + 8,
 		truncated: false,
 		digest: `digest-${error.length}`,
+		// Issue #2382: only lanes settled with the structured provider
+		// classification contribute to the circuit — tests inject exactly what
+		// the settle path now persists.
+		terminalErrorClass: {
+			kind: 'provider' as const,
+			category: 'provider.rate_limit',
+			statusCode: 503,
+			hostRetryable: true,
+		},
 	};
 }
 
@@ -207,9 +216,13 @@ describe('dispatch_lanes PR review resilience state', () => {
 			directory,
 			'review-session-signatures',
 		);
-		expect(state?.prReviewResilience?.circuit?.signature).toBe(
-			'terminal-error-output:error:http 503 upstream overloaded req <id> session <id> at <iso-timestamp> epoch=<epoch>',
-		);
+		// Issue #2382: the circuit is a versioned v2 record; two distinct
+		// provider-terminal lanes of the same provider class opened it.
+		const circuit = state?.prReviewResilience?.circuit;
+		expect(circuit?.version).toBe(2);
+		expect(circuit?.state).toBe('OPEN');
+		expect(circuit?.providerClass).toBe('provider.rate_limit');
+		expect(circuit?.contributors).toHaveLength(2);
 		expect(created).toBe(2);
 	});
 
@@ -273,7 +286,12 @@ describe('dispatch_lanes PR review resilience state', () => {
 			directory,
 			'review-session-monotonic-circuit',
 		);
-		expect(reloadedState?.prReviewResilience?.circuit?.count).toBe(2);
+		// Issue #2382: the versioned v2 circuit persists (and stays OPEN) even
+		// when its contributing delegation records are gone.
+		const reloadedCircuit = reloadedState?.prReviewResilience?.circuit;
+		expect(reloadedCircuit?.version).toBe(2);
+		expect(reloadedCircuit?.state).toBe('OPEN');
+		expect(reloadedCircuit?.contributors).toHaveLength(2);
 
 		const stillBlocked = await executeDispatchLanesAsync(
 			{
@@ -294,7 +312,13 @@ describe('dispatch_lanes PR review resilience state', () => {
 		expect(created).toBe(2);
 	});
 
-	test('does not open the circuit when the same dimension fails in multiple retry waves', async () => {
+	test('opens the circuit when two distinct retry-wave lanes targeting the same dimension fail with the same provider class (issue #2382 distinct-lane threshold)', async () => {
+		// Two DIFFERENT (batchId, laneId) pairs — canary-0 and canary-1 — target
+		// the same dimension and both fail with the same provider class. Under
+		// the issue's distinct-lane accounting those are two independent
+		// failures, so the circuit opens before a third wave. (The genuinely
+		// different property — ONE lane observed across repeated collections
+		// counting once — is covered by the v2 open/close suite.)
 		let created = 0;
 		dispatchInternals.getSessionOps = () => ({
 			create: mock(async () => ({ data: { id: `lane-session-${created++}` } })),
@@ -342,8 +366,8 @@ describe('dispatch_lanes PR review resilience state', () => {
 			directory,
 			{ sessionID: 'review-session-repeat-dimension' },
 		);
-		expect(thirdWave.success).toBe(true);
-		expect(thirdWave.failure_class).toBeUndefined();
-		expect(created).toBe(3);
+		expect(thirdWave.success).toBe(false);
+		expect(thirdWave.failure_class).toBe('circuit_open');
+		expect(created).toBe(2);
 	});
 });

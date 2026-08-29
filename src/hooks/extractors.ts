@@ -1,4 +1,5 @@
 import type { Plan } from '../config/plan-schema';
+import { estimateCharsForTokens } from './utils';
 
 /**
  * Swarm File Extractors
@@ -298,7 +299,10 @@ export function extractPlanCursor(
 	options?: { maxTokens?: number; lookaheadTasks?: number },
 ): string {
 	const maxTokens = options?.maxTokens ?? 1500;
-	const maxChars = maxTokens * 4; // ~4 chars per token
+	// Canonical tokens→chars inverse (src/hooks/utils.ts — issue #1616/#2107).
+	// Previously an inline *4 constant unconnected to the char→token direction;
+	// the two directions could drift independently.
+	const maxChars = estimateCharsForTokens(maxTokens);
 	const lookaheadCount = options?.lookaheadTasks ?? 2;
 
 	// Handle null/undefined/empty input

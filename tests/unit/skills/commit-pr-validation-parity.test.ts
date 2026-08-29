@@ -36,6 +36,7 @@ const CI_COMMAND_TO_SKILL_STRING: Record<string, string> = {
 	'bun run check:runtime-src-refs': 'bun run check:runtime-src-refs',
 	'bun run check:events': 'bun run check:events',
 	'bun run check:retention': 'bun run check:retention',
+	'bun run check:registry-citations': 'bun run check:registry-citations',
 	'bun run check:core-events': 'bun run check:core-events',
 	'bun run check:shell-audit': 'bun run check:shell-audit',
 	'bun run check:trajectory-store': 'bun run check:trajectory-store',
@@ -50,6 +51,7 @@ const CI_COMMAND_TO_SKILL_STRING: Record<string, string> = {
 	'bun run check:gate-portability': 'bun run check:gate-portability',
 	'bun run check:bare-spawn': 'bun run check:bare-spawn',
 	'bun run check:error-channel-discard': 'bun run check:error-channel-discard',
+	'bun run check:token-formula': 'bun run check:token-formula',
 	'cd scripts/swarm-model && node --test':
 		'(cd scripts/swarm-model && node --test)',
 };

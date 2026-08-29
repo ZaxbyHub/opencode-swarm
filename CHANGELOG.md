@@ -1,5 +1,42 @@
 # Changelog
 
+## [7.154.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.154.2...v7.154.3) (2026-08-29)
+
+
+### Bug Fixes
+
+* **ci:** extract Check 7 into a standalone check:token-formula gate to preserve [#2094](https://github.com/ZaxbyHub/opencode-swarm/issues/2094) legacy-oracle parity; wire into quality job + skill list ([93eed16](https://github.com/ZaxbyHub/opencode-swarm/commit/93eed16d0aaaebed4fcac5b24ee4b0ccdb6e7e69))
+* **context:** [Guardrail remediation 11/12] unify context pressure, injection budgets, and summary continuity ([5fa6c8d](https://github.com/ZaxbyHub/opencode-swarm/commit/5fa6c8df0691baf9dbcc193fd300750c995cefb9))
+
+## [7.154.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.154.1...v7.154.2) (2026-08-28)
+
+
+### Bug Fixes
+
+* **background:** reconcile mixed coder settlement ownership ([15ae2a2](https://github.com/ZaxbyHub/opencode-swarm/commit/15ae2a2241912c28c2f934bac352fdf98f3c2159))
+
+## [7.154.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.154.0...v7.154.1) (2026-08-28)
+
+
+### Bug Fixes
+
+* **pr-monitor:** harden subscription store recovery paths (2408 follow-up) ([fcb0cbd](https://github.com/ZaxbyHub/opencode-swarm/commit/fcb0cbd1c1f549fa211cb43196bdb671dc5a6e03))
+* **pr-monitor:** harden subscription store recovery paths (PR 2408 follow-up) ([673748c](https://github.com/ZaxbyHub/opencode-swarm/commit/673748c8930de8bb5319e38080eb76e411a37119))
+
+## [7.154.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.153.2...v7.154.0) (2026-08-28)
+
+
+### Features
+
+* **pr-review:** typed recoverable resilience circuit ([#2382](https://github.com/ZaxbyHub/opencode-swarm/issues/2382)) ([9b82751](https://github.com/ZaxbyHub/opencode-swarm/commit/9b82751130c4cf8a92e07cc38b09ef75915c2f5e))
+* **pr-review:** typed recoverable resilience circuit ([#2382](https://github.com/ZaxbyHub/opencode-swarm/issues/2382)) ([cdba7f1](https://github.com/ZaxbyHub/opencode-swarm/commit/cdba7f1b1a0c08e2aa1a1a22db68560e06787394))
+
+
+### Bug Fixes
+
+* **pr-monitor:** compact subscription snapshots and bound reads (issue [#2042](https://github.com/ZaxbyHub/opencode-swarm/issues/2042)) ([f881acc](https://github.com/ZaxbyHub/opencode-swarm/commit/f881accebf86ea1c946e81148ddd1e4ece4bf39b))
+* **pr-monitor:** compact subscription snapshots and bound reads (issue [#2042](https://github.com/ZaxbyHub/opencode-swarm/issues/2042)) ([48cbe55](https://github.com/ZaxbyHub/opencode-swarm/commit/48cbe5560d4508f3cae9af23c1ae43fa5af34289))
+
 ## [7.153.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.153.1...v7.153.2) (2026-08-28)
 
 

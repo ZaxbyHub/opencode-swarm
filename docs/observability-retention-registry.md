@@ -173,6 +173,80 @@ population) under #2036's amendment clause. That routing is an inference from
 the `skill-changelogs` precedent, not a pre-existing assignment — if #2309 is
 the wrong owner, the disposition is the thing to change, not the evidence.
 
+## The close-lifecycle rule for `.swarm/` artifacts (issue #1534 recurrence guardrail)
+
+**The defect class.** A durable `.swarm/` artifact whose *creation* is wired but
+whose `/swarm close` *lifecycle* is not. Issue #1534 added `repo-memory.sqlite`
+(a WAL-mode SQLite index) and three wirings were each nearly omitted:
+
+- **(a)** the artifact is absent from `ARCHIVE_ARTIFACTS` /
+  `ACTIVE_STATE_TO_CLEAN`, so `/swarm close` orphans it;
+- **(b)** a SQLite artifact is archived by raw file copy instead of
+  `archiveSqliteSnapshot` (VACUUM INTO) — not a transactionally consistent
+  snapshot of a WAL-mode DB, so committed rows still in the `-wal` sidecar are
+  lost and an in-flight writer can be captured mid-transaction;
+- **(c)** the cached DB handle is not closed before `fs.unlink`, which fails
+  with `EBUSY` **on Windows only** — invisible on a Linux CI host.
+
+Before this rule the registry already forced every durable writer to have a
+row, and each row declared a prose `closePolicy` — but nothing verified that a
+row claiming "archived"/"cleaned" actually appeared in close.ts's arrays.
+
+**The rule.** Every `project-swarm` row whose `pathGrammar` names a literal flat
+`.swarm/<file>` MUST declare `closeArrayMembership` for that file, one of
+`archive+clean` / `archive-only` / `clean-only` / `neither`. The value states
+**array membership only** — deliberately, because that is what is mechanically
+checkable; the prose `closePolicy` remains the place for narrative such as
+"context.md is archived and separately rewritten to a stub". Conversely, every
+artifact close.ts wires into either array must be declared by **exactly one**
+row, or appear in the frozen `CLOSE_ARTIFACTS_WITHOUT_REGISTRY_ROW` allowlist
+(which may only shrink).
+
+**The gate**, `collectCloseLifecycleCoherenceErrors`
+(`scripts/check-retention-registry.ts`), parses the real arrays and dispatch
+sites out of `src/commands/close.ts` via `scripts/close-lifecycle-facts.ts` and
+rejects:
+
+- a declaration that disagrees with close.ts (sub-defect **a**);
+- an archived `.db`/`.sqlite`/`.sqlite3` artifact outside the
+  `archiveSqliteSnapshot` dispatch condition (sub-defect **b**);
+- a cleaned SQLite artifact with no `closeXxx(...)` handle-close guard before
+  the unlink in `runCleanStage` (sub-defect **c**);
+- a close.ts artifact no row declares, or that two rows declare;
+- a `project-swarm` row whose `pathGrammar` does not start with `.swarm/`
+  (which would silently exempt it), unless listed in
+  `PROJECT_SWARM_ROWS_WITH_INDIRECT_ROOT`;
+- a declared flat `.swarm/` SQLite artifact whose membership is anything other
+  than `archive+clean`, unless listed in the frozen (today empty)
+  `SQLITE_ARTIFACTS_EXEMPT_FROM_ARCHIVE_CLEAN` map with a reason. Without this
+  last rule an author could reintroduce sub-defect **(a)** verbatim by
+  declaring a new `.swarm/*.sqlite` as `neither`: the declaration would match
+  close.ts, and the VACUUM-INTO and handle-close rules would never fire because
+  they key on real array membership. A WAL-mode database orphaned across
+  `/swarm close` must be an explicit, reviewed exception — never a quiet
+  `neither`.
+
+**Fail-closed, never vacuous.** Every fact is parsed from source, so parser rot
+would otherwise yield a silently green run. Unparsed array entries and
+unresolvable identifiers become errors rather than dropped artifacts, and the
+gate additionally requires both arrays to be non-empty and `swarm.db` to appear
+in *both* SQLite sets — facts true independently of any artifact a given change
+adds. `tests/unit/scripts/check-retention-close-lifecycle.test.ts` drives the
+collectors with synthetic close.ts source for each sub-defect.
+
+**Why the CI-check rung.** `tsconfig.json` is a single config with
+`include: ["src/**/*"]` and no CI step runs `tsc` over `scripts/`, so a required
+field on `RetentionRow` would be enforced by zero gates. Even with a `scripts/`
+tsconfig a type could require the field's *presence* but never that its value
+*matches* close.ts, which is the whole invariant — the type rung is a
+complement, not a substitute. Biome's configured scope is `src/**` and
+`tests/**`, and the property is cross-artifact semantics keyed on data values
+rather than code shape. And the registry is build-time
+documentation-as-data under `scripts/`, deliberately never loaded by the plugin
+(AGENTS.md invariants 1 and 2), so there is no runtime in which to assert it.
+
+---
+
 ## Close/reset/archive reconciliation (acceptance criterion)
 
 `/swarm close` (finalize) semantics are recorded per row. The reconciled sets
@@ -214,7 +288,7 @@ decision is *missing today* (they are untouched, never deleted-and-needed).
 | `background-delegations-ledger` | .swarm/background-delegations.jsonl (+ .checkpoint.json + .manifest.j… | authoritative | compaction high-water 1 MiB / low 256 KiB (:82-83); MAX_RECOVERY_LEDGER_BYTES 4 MiB; MAX_… (global) | indexed (checkpoint+tail) with full-fold fallback: legacy/tail reads hard-bounded at 4 MiB (MAX_RECOVERY_… | archived-only — ARCHIVE_ARTIFACTS (close.ts:417-419); … | not a defect — #2034 (merged) |
 | `background-delegations-health` | .swarm/background-delegations-health.json | derived-rebuildable | bounded by described data (checkpoint/ledger bounds above) (global) | indexed: single small JSON artifact | archived-only — ARCHIVE_ARTIFACTS (close.ts:420), not … | not a defect — #2034 (merged) |
 | `background-delegations-fallback` | .swarm/background-delegation-fallback/*.json + .swarm/background-code… | authoritative | MAX_LIVE_BACKGROUND_FALLBACKS 256 (:64); per-file 1 MiB (:75); reservations ≤256 entries … (global) | directory-scan: ≤256 files × 1 MiB | untouched (cross-session recovery state) | not a defect — #2034 (merged) |
-| `pr-monitor-subscriptions` | .swarm/pr-monitor/subscriptions.jsonl | operational | maxSubscriptions caller parameter on subscribe ONLY (:99,:265-274); NO global byte/count/… (per-trigger) | full-file: unbounded fold on every poll/update/list/sweep | untouched | **fix in #2042** — #2042 |
+| `pr-monitor-subscriptions` | .swarm/pr-monitor/subscriptions.checkpoint.json (+ bounded subscriptions.audit.jsonl; legacy subscriptions.jsonl absorbed→archived→TTL-deleted) | operational | live cap: explicit maxSubscriptions (config default 20/max 100) + store net 20 (PR_SUBSCRIPTION_LIMITS); terminals 60→30 + 30 d age; audit 500/128 KiB→250/64 KiB; checkpoint pressure-guard 256 KiB + HARD read guards (512-record / 1 MiB ceiling → quarantine+recovery); legacy fold ≤64 MiB/op (over-limit refused + reported) (per-project-store) | indexed: bounded checkpoint read (live-set sized); legacy tail fold only while pending/changed | untouched (compaction + archive TTL own reaping) | retain by design — #2042 (bounded checkpoint store shipped) |
 | `pr-feedback-event-queues` | .swarm/pr-feedback-events/{session-stem}.json (+ .lock) | operational | MAX_PR_FEEDBACK_MONITOR_EVENTS 20 per queue (:14); MAX_QUEUE_BYTES 512 KiB per file (:15)… (per-key; keyspace NOT finite — one file per session id, nothing unlinks it) | indexed: ≤512 KiB hard read bound | untouched | **fix in #2309** — #2309 |
 | `lane-results-outputs` | .swarm/lane-results/{batchDigest}/{laneDigest}/{outputDigest}.json + … | governed-content | MAX_LANE_OUTPUT_STORED_BYTES 10 MiB PER-FILE (lane-output-store.ts:15, degraded beyond); … (per-key) | indexed: per-artifact 10 MiB write ceiling; candidates full-par… | untouched — accumulates across batches | **fix in #2045** — #2045 |
 | `lane-delivery-cache` | .swarm/lane-delivery-cache.json | operational | MAX_DELIVERED_LANE_OUTPUT_KEYS 1024 (:35); MAX_TRACKED_SESSIONS 16 (:36); MAX_TRACKED_DIR… (global) | indexed: single bounded JSON | untouched | not a defect — this-gate |
@@ -286,11 +360,12 @@ decision is *missing today* (they are untouched, never deleted-and-needed).
 | `recommendation-ledger` | <knowledgeStore>/learning/recommendation-ledger.jsonl | operational | MAX_RECOMMENDATION_LEDGER_ENTRIES 500 FIFO; MAX_ENTRY_BYTES 4096; ceiling ≈2 MiB (:131,14… (global) | full-file: ≤500 entries × 4 KiB | untouched (bounded) | not a defect — this-gate |
 | `link-pointers` | .swarm/link.json + .swarm/memory-link.json | authoritative | single pointer files (global) | indexed: single JSON | untouched (cross-session link state) | not a defect — this-gate |
 
-### Category 7 — SQLite, memory stores, caches, repo graph (13 rows)
+### Category 7 — SQLite, memory stores, caches, repo graph (14 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
 | `project-db` | .swarm/swarm.db (+ transient -wal/-shm sidecars) | authoritative | small config/profile tables; DB archived (WAL-consistent, #2030) + cleaned at close (session-scoped) | indexed: SQL queries | archived+cleaned — closeProjectDb releases Windows loc… | not a defect — #2030 (merged) |
+| `repo-memory-index` | .swarm/repo-memory.sqlite (+ transient -wal/-shm sidecars) | derived-rebuildable | full replace per save, not append-only; bounded by repo_graph.max_files (default 10,000) (global) | indexed: primary-key / indexed-column lookups over a bounded neighbourhood closure | archived+cleaned — closeRepoMemory releases Windows loc… | not a defect — #1534 |
 | `global-db` | <platformConfigDir>/global-rules.db | governed-content | user-authored global rules content (bounded by user input, not traffic) (global) | indexed: SQL queries | untouched (cross-project user content) | retain by design — this-gate |
 | `memory-sqlite` | .swarm/memory/memory.db (+ cohort roots) | authoritative | no auto-eviction (explicit delete/compactMaintenance); reflection-service asserts total s… (global) | indexed: SQL LIMIT queries; 16 MiB store assertion | untouched (cross-session memory; close does not archiv… | not a defect — this-gate |
 | `memory-jsonl-provider` | .swarm/memory/{memories,proposals,audit,reward-events,outcome-events}… | derived-rebuildable | outcome events ≤1000 per memory (:252-260,322-330); memory entries capped by configured m… (global) | full-file: in-memory store bounded by configured cap | untouched (legacy store; migrated forward) | not a defect — this-gate |

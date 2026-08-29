@@ -174,6 +174,7 @@ bun run check:test-clock
 bun run check:runtime-src-refs
 bun run check:events
 bun run check:retention
+bun run check:registry-citations
 bun run check:core-events
 bun run check:shell-audit
 bun run check:trajectory-store
@@ -184,6 +185,7 @@ bun run check:bare-spawn
 bun run check:test-tmpdir
 bun run check:bash-portability
 bun run check:error-channel-discard
+bun run check:token-formula
 (cd scripts/swarm-model && node --test)
 bun run package:smoke
 ```
