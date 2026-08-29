@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.155.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.154.3...v7.155.0) (2026-08-29)
+
+
+### Features
+
+* **repo-graph:** add indexed repo-memory storage behind json fallback ([9187ae8](https://github.com/ZaxbyHub/opencode-swarm/commit/9187ae8cd15f26683c99e08281db69b5512e527d))
+
+
+### Bug Fixes
+
+* **review:** resolve PR [#2412](https://github.com/ZaxbyHub/opencode-swarm/issues/2412) validated findings (swarm-pr-feedback) ([2e3b2aa](https://github.com/ZaxbyHub/opencode-swarm/commit/2e3b2aa25bf24fd39e65ea4ad83e0ea7e2a205b8))
+
 ## [7.154.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.154.2...v7.154.3) (2026-08-29)
 
 
