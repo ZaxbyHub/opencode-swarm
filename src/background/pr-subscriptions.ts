@@ -571,7 +571,7 @@ function foldLegacyRegion(
 		return {
 			folded,
 			nextByte: startByte,
-			eof: false,
+			eof: true,
 			aborted: true,
 			corruptLines,
 			ioError: err instanceof Error ? err.message : String(err),
@@ -732,7 +732,7 @@ function foldLegacyRegion(
 		return {
 			folded: new Map(),
 			nextByte: startByte,
-			eof: false,
+			eof: true,
 			aborted: true,
 			corruptLines: 0,
 			ioError: err instanceof Error ? err.message : String(err),
