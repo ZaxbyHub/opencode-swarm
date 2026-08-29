@@ -1464,6 +1464,40 @@ path.
 | `deadband` | number | `0` | Promotion policy deadband forwarded to the evaluation substrate (`PromotionPolicyV1.deadband`). |
 | `retirement_min_age_days` | number | `60` | Wall-clock retirement: minimum age (days) before a never-used skill is eligible for archival retirement. Real usage signal is still required; this is a floor. |
 
+## Declarative Harness Evolution
+
+`harness_evolution` configures the bounded, non-executing HarnessOpt mutation
+surface. It does not run during plugin initialization, generate candidates,
+apply source patches, or activate a candidate automatically. Blueprint and
+candidate commands are read-only; activation and rollback are package-API
+operations guarded by exact, one-shot `/swarm approve-write` facts.
+
+Source candidates are inert manifests. Their patches are validated against the
+current Git commit, project containment, the explicit source allowlist, the
+shared protected-path policy, text-only limits, and configured size caps. The
+runtime never applies or evaluates the stored patch.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `source_allowlist` | string[] | `[]` | Project-relative prefixes eligible for inert source candidates. Empty means source candidates are denied. |
+| `extra_protected_paths` | string[] | `[]` | Additional project-relative prefixes denied even when allowlisted. Built-in protected paths always remain denied. |
+| `max_patch_bytes` | number | `1048576` | Maximum UTF-8 patch size. |
+| `max_files` | number | `64` | Maximum files represented by one candidate. |
+| `max_file_bytes` | number | `524288` | Maximum before/after size of an individual text file. |
+| `max_total_bytes` | number | `4194304` | Maximum aggregate candidate output size. |
+| `max_changed_lines` | number | `10000` | Maximum aggregate added plus removed lines. |
+| `max_versions` | number | `100` | Maximum active-history projection size; rollback ancestry remains durable. |
+| `max_inactive_candidates` | number | `32` | Maximum additional inactive candidate records retained on disk after compaction. Candidates referenced by retained versions are always kept, and the newest inactive candidate is always retained as the activation handoff even when this is `0`. |
+| `max_replay_records` | number | `10000` | Maximum ledger records replayed by one operation. Replay exhaustion fails closed. |
+| `max_output_bytes` | number | `262144` | Maximum command output size. |
+
+Durable state lives under `.swarm/evolution/harness/`. The segmented,
+hash-chained ledger is authoritative; `current.json` is only a derived
+projection and read commands never repair it implicitly. Once the store has to
+compact, it rewrites the active ledger to a single authenticated snapshot under
+the ledger generation pointer, prunes inactive candidate directories not named
+by that snapshot, and leaves version-linked candidates available for rollback.
+
 ## External Skills Curation Pipeline
 
 Opt-in pipeline for discovering, quarantining, evaluating, and promoting external skill candidates from configured sources. Candidates are stored under `.swarm/skills/candidates/<uuid>.json`.

@@ -13,12 +13,12 @@ describe('/swarm approve-write', () => {
 		root = canonicalMkdtemp('approve-write-command-');
 		const result = await handleApproveWriteCommand(
 			root,
-			['target-session', 'skill_improve', 'candidate', 'a'.repeat(64)],
+			['target-session', 'harness_activate', 'candidate', 'a'.repeat(64)],
 			'human-session',
 		);
 		expect(result).toContain('Issued write approval waf_');
 		expect(result).toContain(
-			'/swarm approve-write target-session skill_improve candidate',
+			'/swarm approve-write target-session harness_activate candidate',
 		);
 	});
 	test('rejects malformed hashes and unknown actions', async () => {

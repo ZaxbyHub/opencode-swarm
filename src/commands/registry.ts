@@ -3,7 +3,7 @@ import {
 	BUNDLED_PROJECT_SKILL_ROOT,
 	syncBundledProjectSkillsIfMissingAsync,
 } from '../config/bundled-skills.js';
-import type { AutoReviewConfig } from '../config/schema.js';
+import type { AutoReviewConfig, PluginConfig } from '../config/schema.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
 import {
 	activatePrWorkflow,
@@ -53,6 +53,16 @@ import { handleFullAutoCommand } from './full-auto.js';
 import { handleGateAuditCommand } from './gate-audit.js';
 import { handleGateStatsCommand } from './gate-stats.js';
 import { handleHandoffCommand } from './handoff.js';
+import {
+	handleBlueprintCurrentCommand,
+	handleBlueprintDiffCommand,
+	handleBlueprintExportCommand,
+	handleBlueprintHistoryCommand,
+	handleBlueprintValidateCommand,
+	handleHarnessCandidateDiffCommand,
+	handleHarnessCandidateShowCommand,
+	handleHarnessCandidateValidateCommand,
+} from './harness.js';
 import { handleHistoryCommand } from './history.js';
 import { handleKnowledgeHiveQuarantineCommand } from './hive-quarantine.js';
 import { handleIssueCommand } from './issue.js';
@@ -283,6 +293,7 @@ export type CommandContext = {
 	args: string[];
 	sessionID: string;
 	agents: Record<string, AgentDefinition>;
+	config?: PluginConfig;
 	packageRoot?: string;
 	/**
 	 * Dispatch path identifier. Issue #890: forensic audit trail for
@@ -423,6 +434,169 @@ export type CommandEntry = {
 // Adding a command here automatically makes it available in both
 // the in-session hook AND the standalone CLI run() entry point.
 export const COMMAND_REGISTRY = {
+	'blueprint validate': {
+		handler: (ctx) =>
+			handleBlueprintValidateCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description:
+			'Validate a declarative harness blueprint or atomic blueprint patch',
+		args: '<project-relative-json>',
+		category: 'utility',
+		toolPolicy: 'none',
+	},
+	'blueprint current': {
+		handler: (ctx) =>
+			handleBlueprintCurrentCommand(ctx.directory, ctx.agents, {
+				config: ctx.config,
+			}),
+		description: 'Show the ledger-derived current harness blueprint projection',
+		args: '',
+		category: 'utility',
+		toolPolicy: 'none',
+	},
+	'blueprint history': {
+		handler: (ctx) =>
+			handleBlueprintHistoryCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'Show bounded hash-verified harness version history',
+		args: '[--limit <1..100>]',
+		category: 'utility',
+		toolPolicy: 'none',
+	},
+	'blueprint diff': {
+		handler: (ctx) =>
+			handleBlueprintDiffCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'Compare two stored harness blueprint versions',
+		args: '<from-version> <to-version>',
+		category: 'utility',
+		toolPolicy: 'none',
+	},
+	'blueprint export': {
+		handler: (ctx) =>
+			handleBlueprintExportCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'Export a canonical stored harness blueprint',
+		args: '[version]',
+		category: 'utility',
+		toolPolicy: 'none',
+	},
+	'harness candidate validate': {
+		handler: (ctx) =>
+			handleHarnessCandidateValidateCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'Validate an inert harness candidate manifest',
+		args: '<project-relative-json>',
+		category: 'utility',
+		toolPolicy: 'none',
+	},
+	'harness candidate show': {
+		handler: (ctx) =>
+			handleHarnessCandidateShowCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description:
+			'Show bounded harness candidate metadata without raw patch content',
+		args: '<candidate-id>',
+		category: 'utility',
+		toolPolicy: 'none',
+	},
+	'harness candidate diff': {
+		handler: (ctx) =>
+			handleHarnessCandidateDiffCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description:
+			'Show candidate file and blueprint-change metadata without raw patch content',
+		args: '<candidate-id>',
+		category: 'utility',
+		toolPolicy: 'none',
+	},
+	'blueprint-validate': {
+		handler: (ctx) =>
+			handleBlueprintValidateCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'TUI shortcut alias for blueprint validate',
+		category: 'utility',
+		aliasOf: 'blueprint validate',
+		deprecated: true,
+	},
+	'blueprint-current': {
+		handler: (ctx) =>
+			handleBlueprintCurrentCommand(ctx.directory, ctx.agents, {
+				config: ctx.config,
+			}),
+		description: 'TUI shortcut alias for blueprint current',
+		category: 'utility',
+		aliasOf: 'blueprint current',
+		deprecated: true,
+	},
+	'blueprint-history': {
+		handler: (ctx) =>
+			handleBlueprintHistoryCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'TUI shortcut alias for blueprint history',
+		category: 'utility',
+		aliasOf: 'blueprint history',
+		deprecated: true,
+	},
+	'blueprint-diff': {
+		handler: (ctx) =>
+			handleBlueprintDiffCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'TUI shortcut alias for blueprint diff',
+		category: 'utility',
+		aliasOf: 'blueprint diff',
+		deprecated: true,
+	},
+	'blueprint-export': {
+		handler: (ctx) =>
+			handleBlueprintExportCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'TUI shortcut alias for blueprint export',
+		category: 'utility',
+		aliasOf: 'blueprint export',
+		deprecated: true,
+	},
+	'harness-candidate-validate': {
+		handler: (ctx) =>
+			handleHarnessCandidateValidateCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'TUI shortcut alias for harness candidate validate',
+		category: 'utility',
+		aliasOf: 'harness candidate validate',
+		deprecated: true,
+	},
+	'harness-candidate-show': {
+		handler: (ctx) =>
+			handleHarnessCandidateShowCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'TUI shortcut alias for harness candidate show',
+		category: 'utility',
+		aliasOf: 'harness candidate show',
+		deprecated: true,
+	},
+	'harness-candidate-diff': {
+		handler: (ctx) =>
+			handleHarnessCandidateDiffCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'TUI shortcut alias for harness candidate diff',
+		category: 'utility',
+		aliasOf: 'harness candidate diff',
+		deprecated: true,
+	},
 	'acknowledge-spec-drift': {
 		handler: (ctx) =>
 			handleAcknowledgeSpecDriftCommand(
@@ -1971,8 +2145,20 @@ export function resolveCommand(tokens: string[]): {
 } | null {
 	if (tokens.length === 0) return null;
 
-	// Try two-token compound key first (e.g. "evidence summary")
+	// Try the longest supported compound key first.
 	// Use Object.hasOwn to avoid prototype pollution via keys like "__proto__"
+	if (tokens.length >= 3) {
+		const compound =
+			`${tokens[0]} ${tokens[1]} ${tokens[2]}` as RegisteredCommand;
+		if (Object.hasOwn(COMMAND_REGISTRY, compound)) {
+			return {
+				entry: COMMAND_REGISTRY[compound] as CommandEntry,
+				remainingArgs: tokens.slice(3),
+				key: compound,
+			};
+		}
+	}
+	// Try two-token compound key (e.g. "evidence summary")
 	if (tokens.length >= 2) {
 		const compound = `${tokens[0]} ${tokens[1]}` as RegisteredCommand;
 		if (Object.hasOwn(COMMAND_REGISTRY, compound)) {

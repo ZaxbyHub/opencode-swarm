@@ -59,8 +59,9 @@ describe('Swarm subcommand registration', () => {
 		// stats command (issue #1672), the swarm-skill-opt shortcut (issue #1822),
 		// the swarm-recover shortcut (issue #2268), the human-only exact-write
 		// approval shortcut (issue #1824), and the action-local
-		// guardrail-reset command.
-		expect(commandKeys.length).toBe(86);
+		// guardrail-reset command. Issue #1825 adds five blueprint commands and
+		// three harness-candidate commands.
+		expect(commandKeys.length).toBe(94);
 
 		expect(commands.swarm).toBeDefined();
 	});
@@ -190,6 +191,14 @@ describe('Swarm subcommand registration', () => {
 			'swarm-ci-monitor',
 			'swarm-context-map-stats',
 			'swarm-skill-opt',
+			'swarm-blueprint-validate',
+			'swarm-blueprint-current',
+			'swarm-blueprint-history',
+			'swarm-blueprint-diff',
+			'swarm-blueprint-export',
+			'swarm-harness-candidate-validate',
+			'swarm-harness-candidate-show',
+			'swarm-harness-candidate-diff',
 		];
 
 		for (const subcommand of expectedSubcommands) {

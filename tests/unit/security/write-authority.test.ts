@@ -52,6 +52,28 @@ describe('write authority', () => {
 		expect(second).toBeNull();
 	});
 
+	it('supports harness activation and rollback approvals as exact actions', async () => {
+		for (const action of ['harness_activate', 'harness_rollback'] as const) {
+			const harnessRequest: WriteApprovalRequest = {
+				targetSessionId: 'target-session',
+				action,
+				candidateId: `${action}-candidate`,
+				candidateContentHash: computeWriteApprovalHash({ action }),
+			};
+			await issueWriteApprovalFact({
+				directory: dir,
+				request: harnessRequest,
+				issuingSessionId: 'human-session',
+			});
+			const consumed = await consumeWriteApprovalFact({
+				directory: dir,
+				request: harnessRequest,
+				consumerSessionId: 'writer-session',
+			});
+			expect(consumed?.action).toBe(action);
+		}
+	});
+
 	it('FB-014 records the actual consuming session id in the authority ledger', async () => {
 		await issueWriteApprovalFact({
 			directory: dir,

@@ -1,5 +1,5 @@
 import type { AgentDefinition } from '../agents/index.js';
-import type { AutoReviewConfig } from '../config/schema.js';
+import type { AutoReviewConfig, PluginConfig } from '../config/schema.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
 import type { ReviewModelDispatcher } from '../review/contracts.js';
 import type { ReviewAgentModelRegistry } from '../review/runtime.js';
@@ -73,6 +73,7 @@ export async function executeSwarmCommand(args: {
 	sessionID: string;
 	tokens: string[];
 	packageRoot?: string;
+	config?: PluginConfig;
 	buildHelpText?: () => string;
 	policy?: SwarmCommandPolicy;
 	evaluationModelDispatcher?: EvaluationModelDispatcher;
@@ -87,6 +88,7 @@ export async function executeSwarmCommand(args: {
 		sessionID,
 		tokens,
 		packageRoot,
+		config,
 		buildHelpText,
 		policy,
 		evaluationModelDispatcher,
@@ -115,6 +117,7 @@ export async function executeSwarmCommand(args: {
 					args: resolved.remainingArgs,
 					sessionID,
 					agents,
+					config,
 					packageRoot,
 					source: 'chat',
 					evaluationModelDispatcher,
