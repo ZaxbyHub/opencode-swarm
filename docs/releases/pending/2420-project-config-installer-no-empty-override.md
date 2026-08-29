@@ -16,4 +16,4 @@ replacement of global agent settings.
 - Skip automatic project override file creation in installer and runtime startup.
 - Keep global `~/.config/opencode/opencode-swarm.json` as the single active config
   unless a user explicitly creates a project override file.
-- Update CLI and unit tests to assert no project override file is auto-created.
+- Update tests to assert no project override file is auto-created.
