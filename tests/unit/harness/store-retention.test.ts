@@ -168,6 +168,41 @@ describe('harness durable store physical retention', () => {
 		).toBe(true);
 	});
 
+	it('does not rotate the active generation until the replay bound is exceeded again', async () => {
+		for (const id of ['candidate-c1-1', 'candidate-c1-2', 'candidate-c1-3']) {
+			await recordHarnessCandidate({
+				directory: root,
+				candidate: candidate(id, id[0]!.repeat(64)),
+				maxReplayRecords: 2,
+			});
+		}
+		const pointerPath = path.join(
+			root,
+			'.swarm',
+			'evolution',
+			'harness',
+			'ledger',
+			'active-generation.json',
+		);
+		const firstPointer = readFileSync(pointerPath, 'utf8');
+		await recordHarnessCandidate({
+			directory: root,
+			candidate: candidate('candidate-c1-4', '4'.repeat(64)),
+			maxReplayRecords: 2,
+		});
+		expect(readFileSync(pointerPath, 'utf8')).toBe(firstPointer);
+		const audit = await auditHarnessLedger(root, {
+			maxReplayRecords: 10,
+			maxSegments: 10,
+		});
+		expect(audit.outcome).toBe('ok');
+		if (audit.outcome !== 'ok') throw new Error('expected audit');
+		expect(audit.records.map((record) => record.kind)).toEqual([
+			'compacted',
+			'candidate_recorded',
+		]);
+	});
+
 	it('retains version-linked candidates across compaction even when inactive retention is disabled', async () => {
 		const first = candidate('candidate-active-first', '1'.repeat(64));
 		const second = candidate('candidate-active-second', '2'.repeat(64));

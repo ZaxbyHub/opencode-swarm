@@ -1,4 +1,11 @@
-import { lstatSync, readFileSync } from 'node:fs';
+import {
+	closeSync,
+	constants as FS_CONSTANTS,
+	fstatSync,
+	lstatSync,
+	openSync,
+	readFileSync,
+} from 'node:fs';
 import * as path from 'node:path';
 import type { AgentDefinition } from '../agents/index.js';
 import {
@@ -218,10 +225,52 @@ function boundedJsonFile(
 	if (!stat.isFile() || stat.isSymbolicLink()) {
 		throw new Error('input must be a regular non-symlink file');
 	}
+	if ((stat.nlink ?? 1) > 1) {
+		throw new Error('input must not be a hardlinked file');
+	}
 	if (stat.size > config.max_output_bytes) {
 		throw new Error('input exceeds the configured harness command size limit');
 	}
-	return JSON.parse(readFileSync(target, 'utf8')) as unknown;
+	const fd = openSync(target, FS_CONSTANTS.O_RDONLY);
+	try {
+		const opened = fstatSync(fd);
+		if (
+			!opened.isFile() ||
+			opened.isSymbolicLink() ||
+			(opened.nlink ?? 1) > 1 ||
+			opened.dev !== stat.dev ||
+			opened.ino !== stat.ino
+		) {
+			throw new Error('input changed while being read');
+		}
+		if (opened.size > config.max_output_bytes) {
+			throw new Error(
+				'input exceeds the configured harness command size limit',
+			);
+		}
+		const raw = readFileSync(fd, 'utf8');
+		const after = fstatSync(fd);
+		if (
+			after.dev !== opened.dev ||
+			after.ino !== opened.ino ||
+			after.size !== opened.size
+		) {
+			throw new Error('input changed while being read');
+		}
+		return JSON.parse(raw) as unknown;
+	} finally {
+		closeSync(fd);
+	}
+}
+
+function inputPathExists(directory: string, relativePath: string): boolean {
+	if (validateTargetWithinRoot(relativePath, directory)) return false;
+	try {
+		lstatSync(path.resolve(directory, relativePath));
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 function requireArtifactId(
@@ -315,28 +364,38 @@ function summarizeBlueprintDiff(
 }
 
 function projectStaticBlueprint(agents: Record<string, AgentDefinition>) {
-	const runtimeDefinitions: RuntimeAgentDefinition[] = Object.values(
-		agents,
-	).map((agent) => {
-		const config = agent.config as RuntimeAgentDefinition['config'];
-		return {
-			name: agent.name,
-			description: agent.description,
-			config: {
-				...config,
-				mode: config.mode === 'primary' ? 'primary' : 'subagent',
-				temperature: config.temperature ?? 0.1,
-				prompt: config.prompt ?? `Static runtime definition for ${agent.name}`,
-			},
-		};
-	});
+	const runtimeDefinitions: RuntimeAgentDefinition[] = Object.entries(agents)
+		.sort(
+			([leftKey, left], [rightKey, right]) =>
+				left.name.localeCompare(right.name) || leftKey.localeCompare(rightKey),
+		)
+		.map(([, agent]) => {
+			const config = agent.config as RuntimeAgentDefinition['config'];
+			const tools = config.tools
+				? Object.fromEntries(
+						Object.entries(config.tools).sort(([a], [b]) => a.localeCompare(b)),
+					)
+				: config.tools;
+			return {
+				name: agent.name,
+				description: agent.description,
+				config: {
+					...config,
+					tools,
+					mode: config.mode === 'primary' ? 'primary' : 'subagent',
+					temperature: config.temperature ?? 0.1,
+					prompt:
+						config.prompt ?? `Static runtime definition for ${agent.name}`,
+				},
+			};
+		});
 	const registeredToolIds = [
 		...new Set(
 			runtimeDefinitions.flatMap((definition) =>
 				Object.keys(definition.config.tools ?? {}),
 			),
 		),
-	];
+	].sort();
 	return createAgentFactory({
 		runtimeDefinitions,
 		registeredToolIds,
@@ -466,6 +525,7 @@ export async function handleBlueprintValidateCommand(
 		try {
 			value = boundedJsonFile(directory, args[0], config);
 		} catch (fileError) {
+			if (inputPathExists(directory, args[0])) throw fileError;
 			const artifactIdError = requireArtifactId(
 				command,
 				args[0],

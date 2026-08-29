@@ -2,8 +2,10 @@ import { describe, expect, test } from 'bun:test';
 import {
 	AgentBlueprintV1Schema,
 	computeHarnessBlueprintHash,
+	computeHarnessCandidateManifestHash,
 	computePromptArtifactHash,
 	deriveHarnessCandidateFloors,
+	deriveHarnessCandidateRiskTier,
 	HarnessBlueprintV1Schema,
 	HarnessCandidateManifestV1Schema,
 	HarnessConstraintsV1Schema,
@@ -57,6 +59,7 @@ describe('harness canonical hashing', () => {
 		);
 		expect(canonicalHash({ b: 2, a: 1 })).toBe(canonicalHash({ a: 1, b: 2 }));
 		expect(() => canonicalJson({ value: Number.NaN })).toThrow('non-finite');
+		expect(() => canonicalJson(undefined)).toThrow('top-level undefined');
 	});
 });
 
@@ -233,6 +236,96 @@ describe('harness contracts', () => {
 		});
 	});
 
+	test('rejects duplicate file relative paths in candidate manifests', () => {
+		const manifestBase = {
+			v: 1 as const,
+			candidateId: 'candidate-duplicate-paths',
+			baseSha: 'b'.repeat(40),
+			origin: 'issue-1825',
+			patchSha256: 'c'.repeat(64),
+			approvedPaths: ['src/agents/demo.ts', 'src/agents/demo.ts'],
+			promptArtifactHashes: [],
+			files: [
+				{
+					relativePath: 'src/agents/demo.ts',
+					trackedMode: '100644',
+					beforeSha256: 'd'.repeat(64),
+					afterSha256: 'e'.repeat(64),
+					bytesBefore: 120,
+					bytesAfter: 180,
+					addedLines: 4,
+					removedLines: 2,
+					changedLines: 6,
+				},
+				{
+					relativePath: 'src/agents/demo.ts',
+					trackedMode: '100644',
+					beforeSha256: 'f'.repeat(64),
+					afterSha256: '0'.repeat(64),
+					bytesBefore: 90,
+					bytesAfter: 95,
+					addedLines: 1,
+					removedLines: 0,
+					changedLines: 1,
+				},
+			],
+		};
+		const manifest = {
+			...manifestBase,
+			manifestHash: computeHarnessCandidateManifestHash(manifestBase),
+			riskTier: deriveHarnessCandidateRiskTier(manifestBase),
+		};
+		expect(() => parseHarnessCandidateManifest(manifest)).toThrow(
+			'relative paths must be unique',
+		);
+	});
+
+	test('rejects duplicate prompt ids while migrating v0 harness blueprints', () => {
+		expect(() =>
+			parseHarnessBlueprint({
+				v: 0,
+				id: 'bp-duplicate-prompts',
+				definitionHash: 'a'.repeat(64),
+				prompts: [
+					legacyPrompt('You are the architect.'),
+					legacyPrompt('You are the reviewer.'),
+				],
+				tools: [{ v: 1, toolId: 'diff' }],
+				agents: [
+					{
+						v: 1,
+						agentName: 'architect',
+						description: 'Primary agent',
+						mode: 'primary',
+						temperature: 0.1,
+						promptId: 'architect.prompt',
+						tools: ['diff'],
+					},
+				],
+				orchestration: {
+					v: 1,
+					defaultAgent: 'architect',
+					activation: 'manual',
+					execution: 'disabled',
+					multiSwarm: false,
+				},
+				constraints: {
+					v: 1,
+					sourceAllowlist: ['src/agents'],
+					extraProtectedPaths: [],
+					maxPatchBytes: 1_048_576,
+					maxFiles: 64,
+					maxFileBytes: 524_288,
+					maxTotalBytes: 4_194_304,
+					maxChangedLines: 10_000,
+					maxVersions: 100,
+					maxReplayRecords: 10_000,
+					maxOutputBytes: 262_144,
+				},
+			}),
+		).toThrow('ambiguous duplicate promptId');
+	});
+
 	test('enforces patch target kinds and payload ids during parse and migration', () => {
 		const migrated = parseBlueprintPatch({
 			v: 0,
@@ -294,5 +387,21 @@ describe('harness contracts', () => {
 				],
 			}),
 		).toThrow('upsert_agent agentName must match the target fieldPath');
+
+		expect(() =>
+			parseBlueprintPatch({
+				v: 1,
+				patchId: 'patch-remove-prompt',
+				expectedBaseHash: 'a'.repeat(64),
+				expectedResultHash: 'b'.repeat(64),
+				operations: [
+					{
+						op: 'remove_prompt',
+						fieldPath: 'prompts/architect.prompt',
+						expectedFieldHash: 'c'.repeat(64),
+					},
+				],
+			}),
+		).toThrow();
 	});
 });

@@ -42,7 +42,12 @@ function canonicalize(value: unknown, ancestors: Set<object>): unknown {
 }
 
 export function canonicalJson(value: unknown): string {
-	return JSON.stringify(canonicalize(value, new Set()));
+	const encoded = canonicalize(value, new Set());
+	const serialized = JSON.stringify(encoded);
+	if (typeof serialized !== 'string') {
+		throw new TypeError('canonical JSON cannot encode top-level undefined');
+	}
+	return serialized;
 }
 
 export function sha256(value: string | Uint8Array): string {

@@ -102,13 +102,15 @@ function inferMultiSwarm(agentNames: readonly string[]): boolean {
 function toolIdsFromRuntime(agent: RuntimeAgentDefinition): string[] {
 	return Object.entries(agent.config.tools ?? {})
 		.filter(([, enabled]) => enabled === true)
-		.map(([toolId]) => toolId);
+		.map(([toolId]) => toolId)
+		.sort();
 }
 
 function disabledToolIdsFromRuntime(agent: RuntimeAgentDefinition): string[] {
 	return Object.entries(agent.config.tools ?? {})
 		.filter(([, enabled]) => enabled === false)
-		.map(([toolId]) => toolId);
+		.map(([toolId]) => toolId)
+		.sort();
 }
 
 function resolveStaticPrompt(

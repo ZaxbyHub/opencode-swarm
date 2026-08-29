@@ -365,6 +365,16 @@ export const HarnessCandidateManifestV1Schema = z
 				message: 'candidate prompt artifact hashes must be unique',
 			});
 		}
+		const normalizedFilePaths = value.files.map((file) =>
+			file.relativePath.replace(/\\/g, '/'),
+		);
+		if (new Set(normalizedFilePaths).size !== normalizedFilePaths.length) {
+			ctx.addIssue({
+				code: 'custom',
+				path: ['files'],
+				message: 'candidate file relative paths must be unique',
+			});
+		}
 	});
 export type HarnessCandidateManifestV1 = z.infer<
 	typeof HarnessCandidateManifestV1Schema
@@ -392,13 +402,6 @@ export const BlueprintPatchOperationV1Schema = z
 				fieldPath: FieldPathSchema,
 				expectedFieldHash: ExpectedFieldHashSchema,
 				prompt: PromptArtifactV1Schema,
-			})
-			.strict(),
-		z
-			.object({
-				op: z.literal('remove_prompt'),
-				fieldPath: FieldPathSchema,
-				expectedFieldHash: Sha256Schema,
 			})
 			.strict(),
 		z
@@ -464,15 +467,6 @@ export const BlueprintPatchOperationV1Schema = z
 				}
 				return;
 			}
-			case 'remove_prompt':
-				if (extractFieldPathId(value.fieldPath, 'prompts') === null) {
-					ctx.addIssue({
-						code: 'custom',
-						path: ['fieldPath'],
-						message: 'remove_prompt fieldPath must target prompts/<promptId>',
-					});
-				}
-				return;
 			case 'upsert_tool': {
 				const fieldId = extractFieldPathId(value.fieldPath, 'tools');
 				if (fieldId !== value.tool.toolId) {
@@ -700,9 +694,15 @@ export function parseHarnessBlueprint(value: unknown): HarnessBlueprintV1 {
 	const v1 = HarnessBlueprintV1Schema.safeParse(value);
 	if (v1.success) return v1.data;
 	const v0 = HarnessBlueprintV0Schema.parse(value);
-	const promptById = new Map(
-		v0.prompts.map((prompt) => [prompt.promptId, prompt] as const),
-	);
+	const promptById = new Map<string, (typeof v0.prompts)[number]>();
+	for (const prompt of v0.prompts) {
+		if (promptById.has(prompt.promptId)) {
+			throw new Error(
+				'legacy harness blueprint contains ambiguous duplicate promptId values',
+			);
+		}
+		promptById.set(prompt.promptId, prompt);
+	}
 	const migrated = {
 		v: 1 as const,
 		blueprintId: v0.id,

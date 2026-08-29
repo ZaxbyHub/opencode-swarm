@@ -6,6 +6,7 @@ import {
 	fstatSync,
 	fsyncSync,
 	ftruncateSync,
+	lstatSync,
 	mkdirSync,
 	opendirSync,
 	openSync,
@@ -377,6 +378,7 @@ function parseLedgerGenerationPointer(
 function activeLedgerDir(directory: string): string {
 	const pointerValue = readJsonFile<Record<string, unknown>>(
 		ledgerPointerPath(directory),
+		rootDir(directory),
 	);
 	if (!pointerValue) return ledgerDir(directory);
 	const pointer = parseLedgerGenerationPointer(
@@ -391,10 +393,6 @@ function activeLedgerDir(directory: string): string {
 		);
 	}
 	return target;
-}
-
-function hasLedgerGenerationPointer(directory: string): boolean {
-	return existsSync(ledgerPointerPath(directory));
 }
 
 function ensureStoreDirectories(directory: string): void {
@@ -453,13 +451,79 @@ function buildCurrentProjection(
 	};
 }
 
-function readJsonFile<T>(filePath: string): T | null {
+function assertSafeArtifactPath(filePath: string, root: string): void {
+	const resolvedFile = path.resolve(filePath);
+	const resolvedRoot = path.resolve(root);
+	const relative = path.relative(resolvedRoot, resolvedFile);
+	if (relative.startsWith('..') || path.isAbsolute(relative)) {
+		throw new HarnessStoreIntegrityError(
+			filePath,
+			'harness artifact path escapes its store root',
+		);
+	}
+	let probe = resolvedFile;
+	for (let index = 0; index < 4096; index++) {
+		try {
+			if (lstatSync(probe).isSymbolicLink()) {
+				throw new HarnessStoreIntegrityError(
+					filePath,
+					'harness artifact path contains a symlink or junction',
+				);
+			}
+		} catch (error) {
+			if (error instanceof HarnessStoreIntegrityError) throw error;
+			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+		}
+		if (probe === resolvedRoot) return;
+		const parent = path.dirname(probe);
+		if (parent === probe) break;
+		probe = parent;
+	}
+	throw new HarnessStoreIntegrityError(
+		filePath,
+		'harness artifact path is not contained by its store root',
+	);
+}
+
+function readJsonFile<T>(filePath: string, storeRoot?: string): T | null {
+	if (storeRoot) assertSafeArtifactPath(filePath, storeRoot);
 	if (!existsSync(filePath)) return null;
 	try {
-		if (statSync(filePath).size > MAX_CANDIDATE_ARTIFACT_BYTES) {
+		const initial = lstatSync(filePath);
+		if (
+			!initial.isFile() ||
+			initial.isSymbolicLink() ||
+			(initial.nlink ?? 1) > 1
+		) {
+			throw new Error('artifact must be a regular non-linked file');
+		}
+		if (initial.size > MAX_CANDIDATE_ARTIFACT_BYTES) {
 			throw new Error('artifact exceeds byte bound');
 		}
-		return JSON.parse(readFileSync(filePath, 'utf8')) as T;
+		const fd = openSync(filePath, 'r');
+		try {
+			const opened = fstatSync(fd);
+			if (
+				!opened.isFile() ||
+				opened.dev !== initial.dev ||
+				opened.ino !== initial.ino ||
+				opened.size !== initial.size
+			) {
+				throw new Error('artifact identity changed during read');
+			}
+			const raw = readFileSync(fd, 'utf8');
+			const after = fstatSync(fd);
+			if (
+				after.dev !== opened.dev ||
+				after.ino !== opened.ino ||
+				after.size !== opened.size
+			) {
+				throw new Error('artifact identity changed during read');
+			}
+			return JSON.parse(raw) as T;
+		} finally {
+			closeSync(fd);
+		}
 	} catch {
 		throw new HarnessStoreIntegrityError(filePath, 'malformed harness JSON');
 	}
@@ -570,7 +634,10 @@ function readStoredCurrentProjection(
 	directory: string,
 ): HarnessCurrentProjectionV1 | null {
 	try {
-		const value = readJsonFile<Record<string, unknown>>(currentPath(directory));
+		const value = readJsonFile<Record<string, unknown>>(
+			currentPath(directory),
+			rootDir(directory),
+		);
 		if (!value) return null;
 		return parseStoredCurrentProjection(value, currentPath(directory));
 	} catch {
@@ -585,6 +652,7 @@ function readStoredPromptArtifact(
 ): PromptArtifactV1 | null {
 	const value = readJsonFile<Record<string, unknown>>(
 		candidatePromptPath(directory, candidateId, promptHash),
+		rootDir(directory),
 	);
 	if (!value) return null;
 	try {
@@ -609,7 +677,10 @@ function readStoredCandidate(
 	candidateId: string,
 ): StoredHarnessCandidateV1 | null {
 	const filePath = candidatePath(directory, candidateId);
-	const value = readJsonFile<Record<string, unknown>>(filePath);
+	const value = readJsonFile<Record<string, unknown>>(
+		filePath,
+		rootDir(directory),
+	);
 	if (!value) return null;
 	try {
 		if (value.v !== 1 || typeof value.recordedAt !== 'string')
@@ -789,7 +860,10 @@ function assertCandidateCoherence(
 }
 
 function readStoredVersion(filePath: string): HarnessVersionV1 | null {
-	const value = readJsonFile<HarnessVersionV1>(filePath);
+	const value = readJsonFile<HarnessVersionV1>(
+		filePath,
+		path.dirname(path.dirname(filePath)),
+	);
 	if (!value) return null;
 	if (
 		Object.keys(value).some(
@@ -2072,11 +2146,13 @@ function collectAccessibleVersionIds(
 ): Set<string> {
 	const cache = new Map<string, HarnessVersionV1>();
 	const versionIds = new Set<string>();
+	const maxVisited = Math.max(MAX_ORPHAN_SCAN, current.versionIds.length + 1);
 	for (const versionId of current.versionIds) {
 		for (const closureVersionId of collectVersionClosure(
 			directory,
 			versionId,
 			cache,
+			maxVisited,
 		)) {
 			versionIds.add(closureVersionId);
 		}
@@ -2356,13 +2432,10 @@ function loadCurrentForMutation(
 	if (fast && !fast.truncated) {
 		return { current: fast.current, initialTruncated: false };
 	}
-	const repaired = fast?.truncated
-		? repairTornLedgerTailUnderLock(
-				directory,
-				readVerifiedLedgerRecords(directory, maxReplayRecords),
-				maxReplayRecords,
-			)
-		: readVerifiedLedgerRecords(directory, maxReplayRecords);
+	const scan = readVerifiedLedgerRecords(directory, maxReplayRecords);
+	const repaired = scan.tornTail
+		? repairTornLedgerTailUnderLock(directory, scan, maxReplayRecords)
+		: scan;
 	return {
 		current: ledgerRecordsToCurrent(repaired.records),
 		initialTruncated: repaired.truncated,
@@ -2673,10 +2746,7 @@ async function reconcileHarnessPhysicalRetentionUnderLock(args: {
 	const failures: string[] = [];
 	let effectiveCurrent = args.current;
 	let compacted = false;
-	if (
-		args.current.ledgerHeadSeq > replayBound ||
-		hasLedgerGenerationPointer(args.directory)
-	) {
+	if (args.current.ledgerHeadSeq > replayBound) {
 		try {
 			effectiveCurrent = await compactHarnessLedgerUnderLock({
 				directory: args.directory,
@@ -2811,7 +2881,7 @@ function collectVersionClosure(
 	directory: string,
 	versionId: string,
 	cache: Map<string, HarnessVersionV1>,
-	maxVisited = MAX_ORPHAN_SCAN,
+	maxVisited: number,
 ): string[] {
 	const closure = new Set<string>();
 	const visited = new Set<string>();

@@ -31,4 +31,25 @@ describe('public harness mutation API', () => {
 		expect('recordCandidate' in harnessMutationV1).toBe(false);
 		expect('activateCandidate' in harnessMutationV1).toBe(false);
 	});
+
+	it('projects static agents deterministically regardless of insertion order', () => {
+		const agent = (name: string, toolIds: string[]) => ({
+			name,
+			description: `${name} agent`,
+			config: {
+				mode: 'subagent' as const,
+				prompt: `${name} prompt`,
+				tools: Object.fromEntries(toolIds.map((toolId) => [toolId, true])),
+			},
+		});
+		const first = harnessMutationV1.projectStaticBlueprint({
+			alpha: agent('alpha', ['z-tool', 'a-tool']),
+			beta: agent('beta', ['b-tool']),
+		});
+		const second = harnessMutationV1.projectStaticBlueprint({
+			beta: agent('beta', ['b-tool']),
+			alpha: agent('alpha', ['a-tool', 'z-tool']),
+		});
+		expect(second).toEqual(first);
+	});
 });

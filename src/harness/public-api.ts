@@ -16,28 +16,38 @@ import {
 } from './store.js';
 
 function projectStaticBlueprint(agents: Record<string, AgentDefinition>) {
-	const runtimeDefinitions: RuntimeAgentDefinition[] = Object.values(
-		agents,
-	).map((agent) => {
-		const config = agent.config as RuntimeAgentDefinition['config'];
-		return {
-			name: agent.name,
-			description: agent.description,
-			config: {
-				...config,
-				mode: config.mode === 'primary' ? 'primary' : 'subagent',
-				temperature: config.temperature ?? 0.1,
-				prompt: config.prompt ?? `Static runtime definition for ${agent.name}`,
-			},
-		};
-	});
+	const runtimeDefinitions: RuntimeAgentDefinition[] = Object.entries(agents)
+		.sort(
+			([leftKey, left], [rightKey, right]) =>
+				left.name.localeCompare(right.name) || leftKey.localeCompare(rightKey),
+		)
+		.map(([, agent]) => {
+			const config = agent.config as RuntimeAgentDefinition['config'];
+			const tools = config.tools
+				? Object.fromEntries(
+						Object.entries(config.tools).sort(([a], [b]) => a.localeCompare(b)),
+					)
+				: config.tools;
+			return {
+				name: agent.name,
+				description: agent.description,
+				config: {
+					...config,
+					tools,
+					mode: config.mode === 'primary' ? 'primary' : 'subagent',
+					temperature: config.temperature ?? 0.1,
+					prompt:
+						config.prompt ?? `Static runtime definition for ${agent.name}`,
+				},
+			};
+		});
 	const registeredToolIds = [
 		...new Set(
 			runtimeDefinitions.flatMap((definition) =>
 				Object.keys(definition.config.tools ?? {}),
 			),
 		),
-	];
+	].sort();
 	return createAgentFactory({
 		runtimeDefinitions,
 		registeredToolIds,

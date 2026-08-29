@@ -175,7 +175,7 @@ describe('harness blueprint patching', () => {
 		).toThrow('expected result hash');
 	});
 
-	test('rejects cross-target operations and missing removals', () => {
+	test('rejects cross-target operations', () => {
 		const base = blueprint();
 
 		expect(() =>
@@ -194,22 +194,6 @@ describe('harness blueprint patching', () => {
 				],
 			}),
 		).toThrow('target fieldPath');
-
-		expect(() =>
-			applyBlueprintPatch(base, {
-				v: 1,
-				patchId: 'patch-missing-remove',
-				expectedBaseHash: base.contentHash,
-				expectedResultHash: base.contentHash,
-				operations: [
-					{
-						op: 'remove_prompt',
-						fieldPath: 'prompts/missing.prompt',
-						expectedFieldHash: 'a'.repeat(64),
-					},
-				],
-			}),
-		).toThrow('expected field hash');
 	});
 
 	test('derives conservative risk from the touched fields', () => {

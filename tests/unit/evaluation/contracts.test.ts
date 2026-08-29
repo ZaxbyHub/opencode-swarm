@@ -127,6 +127,7 @@ describe('canonical evaluation hashing', () => {
 
 	test('rejects values that cannot be represented deterministically', () => {
 		expect(() => canonicalJson({ value: Number.NaN })).toThrow('non-finite');
+		expect(() => canonicalJson(undefined)).toThrow('top-level undefined');
 		const cyclic: Record<string, unknown> = {};
 		cyclic.self = cyclic;
 		expect(() => canonicalJson(cyclic)).toThrow('cyclic');

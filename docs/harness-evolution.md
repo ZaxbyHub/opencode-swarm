@@ -79,4 +79,4 @@ Unknown versions, unknown fields, malformed hashes, and ambiguous legacy state
 are rejected. There is no implicit import from earlier ad-hoc files and no
 startup scan. To adopt the feature, add a narrow `source_allowlist` only when
 source-candidate inspection is needed, validate a canonical blueprint, and let
-the package API record it as a new immutable candidate/version lineage.
+the package API record it as a new hash-addressed candidate/version lineage.

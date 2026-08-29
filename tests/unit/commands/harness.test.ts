@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
 	handleBlueprintCurrentCommand,
@@ -154,6 +154,20 @@ describe('declarative harness commands', () => {
 		expect(outputBytes(oversizedRaw)).toBeLessThanOrEqual(1024);
 	});
 
+	it('rejects hardlinked JSON inputs before parsing them', async () => {
+		const sourcePath = path.join(root, 'source.json');
+		const hardlinkPath = path.join(root, 'hardlinked.json');
+		writeFileSync(sourcePath, '{"v":1,"value":"ok"}', 'utf8');
+		linkSync(sourcePath, hardlinkPath);
+
+		const output = parseEnvelope(
+			await handleBlueprintValidateCommand(root, ['hardlinked.json']),
+		);
+		expect(output.ok).toBe(false);
+		expect(output.error?.code).toBe('HARNESS_VALIDATION_FAILED');
+		expect(output.error?.message).toContain('hardlinked file');
+	});
+
 	it('projects the supplied static runtime inventory when no version is active', async () => {
 		const output = parseEnvelope(
 			await handleBlueprintCurrentCommand(root, {
@@ -184,6 +198,37 @@ describe('declarative harness commands', () => {
 		expect(blueprint.orchestration.defaultAgent).toBe('architect');
 		expect(blueprint.agents[0]?.prompt.ref).toBe('static:architect');
 		expect(blueprint.agents[0]?.tools).toEqual(['read']);
+	});
+
+	it('keeps command static projection stable across insertion order', async () => {
+		const first = parseEnvelope(
+			await handleBlueprintCurrentCommand(root, {
+				zeta: {
+					name: 'zeta',
+					config: { mode: 'subagent', tools: { write: true, read: true } },
+				},
+				alpha: {
+					name: 'alpha',
+					config: { mode: 'primary', tools: { execute: true, read: true } },
+				},
+			}),
+		);
+		const second = parseEnvelope(
+			await handleBlueprintCurrentCommand(root, {
+				alpha: {
+					name: 'alpha',
+					config: { mode: 'primary', tools: { read: true, execute: true } },
+				},
+				zeta: {
+					name: 'zeta',
+					config: { mode: 'subagent', tools: { read: true, write: true } },
+				},
+			}),
+		);
+
+		expect(first.ok).toBe(true);
+		expect(second.ok).toBe(true);
+		expect(first.result?.blueprint).toEqual(second.result?.blueprint);
 	});
 
 	it('never exposes raw source patch content and falls back to a bounded summary', async () => {

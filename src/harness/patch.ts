@@ -176,13 +176,6 @@ function applyOperation(
 				operation.prompt.promptId,
 				operation,
 			);
-		case 'remove_prompt': {
-			const promptId = requireFieldPathId(operation.fieldPath, 'prompts');
-			if (findPromptBinding(blueprint, promptId)) {
-				throw new Error(`cannot remove referenced prompt binding ${promptId}`);
-			}
-			throw new Error(`patch remove target missing for ${operation.fieldPath}`);
-		}
 		case 'upsert_tool':
 			assertMatchingFieldPathId(
 				operation.fieldPath,
@@ -272,8 +265,7 @@ export function deriveBlueprintPatchRiskTier(
 			(operation) =>
 				operation.op === 'upsert_agent' ||
 				operation.op === 'remove_tool' ||
-				operation.op === 'upsert_tool' ||
-				operation.op === 'remove_prompt',
+				operation.op === 'upsert_tool',
 		)
 	) {
 		return 'medium';
