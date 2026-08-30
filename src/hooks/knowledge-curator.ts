@@ -5,6 +5,7 @@ import { readFile, realpath, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { appendCoreEventSync } from '../events/core-events.js';
 import type { CurationContext } from '../knowledge/curation-policy.js';
+import { redactSecrets } from '../memory/redaction.js';
 import { reserveQuota } from '../services/skill-improver-quota.js';
 import { rebuildSynonymMap } from '../services/synonym-map.js';
 import { warn } from '../utils/logger.js';
@@ -867,15 +868,25 @@ export async function enrichLessonToV3(params: {
 /** Append a curator_skipped audit line to `.swarm/events.jsonl` (best-effort). */
 async function appendCuratorSkippedEvent(
 	directory: string,
-	record: { entry_id: string; lesson: string; reason: string },
+	record: {
+		entry_id: string;
+		lesson: string;
+		reason: string;
+		duplicate_target_id?: string;
+	},
 ): Promise<void> {
 	try {
+		const redactedLesson = redactSecrets(record.lesson);
 		appendCoreEventSync(directory, {
 			timestamp: new Date().toISOString(),
 			event: 'curator_skipped',
 			entry_id: record.entry_id,
-			lesson: record.lesson.slice(0, 200),
+			content_hash: hashContent(redactedLesson),
+			lesson: redactedLesson.slice(0, 200),
 			reason: record.reason,
+			...(record.duplicate_target_id
+				? { duplicate_target_id: record.duplicate_target_id }
+				: {}),
 		});
 	} catch {
 		// audit log is best-effort; never break curation
@@ -1156,18 +1167,8 @@ export async function curateAndStoreSwarm(
 				continue;
 			}
 		}
-		// Check for near-duplicates against snapshot + already-planned new entries
-		const duplicate = findActiveSwarmNearDuplicate(
-			lesson,
-			snapshotPlusNew,
-			config.dedup_threshold,
-		);
-		if (duplicate) {
-			pendingReinforcementIds.add(duplicate.id);
-			skipped++;
-			continue; // skip duplicate
-		}
-		// Build the new swarm entry
+		// Build a candidate entry before deduplication so every audit event carries
+		// the same valid entry identity that a non-skipped candidate would have.
 		const entry: SwarmKnowledgeEntry = {
 			id: crypto.randomUUID(),
 			tier: 'swarm',
@@ -1195,6 +1196,23 @@ export async function curateAndStoreSwarm(
 			project_name: projectName,
 			auto_generated: true,
 		};
+		// Check for near-duplicates against snapshot + already-planned new entries
+		const duplicate = findActiveSwarmNearDuplicate(
+			lesson,
+			snapshotPlusNew,
+			config.dedup_threshold,
+		);
+		if (duplicate) {
+			pendingReinforcementIds.add(duplicate.id);
+			skipped++;
+			await appendCuratorSkippedEvent(directory, {
+				entry_id: entry.id,
+				lesson,
+				reason: 'near_duplicate',
+				duplicate_target_id: duplicate.id,
+			});
+			continue; // skip duplicate
+		}
 		// Layer 5 — Mandatory v3 actionability (Change 4). No new entry reaches the
 		// active store without >=1 machine-checkable predicate AND >=1 scope tag.
 		// Plain-prose lessons are enriched via the curator LLM (one retry); entries
@@ -1306,6 +1324,11 @@ export async function curateAndStoreSwarm(
 				} catch {
 					// best-effort
 				}
+				await appendCuratorSkippedEvent(directory, {
+					entry_id: entry.id,
+					lesson: entry.lesson,
+					reason: 'insight_unactionable',
+				});
 				continue;
 			}
 			// #1821 D1 CHECK 1 (pre-transaction): real-time admission may already
@@ -1316,8 +1339,18 @@ export async function curateAndStoreSwarm(
 			// (`hive-policy.ts`). Double-confirming silently inflates confidence and
 			// pushes entries toward automatic promotion.
 			const marker = insightAdmissionMarker(resolveInsightCandidateId(cand));
-			if (findActiveEntryWithInsightMarker(snapshotPlusNew, marker)) {
+			const admitted = findActiveEntryWithInsightMarker(
+				snapshotPlusNew,
+				marker,
+			);
+			if (admitted) {
 				skipped++;
+				await appendCuratorSkippedEvent(directory, {
+					entry_id: entry.id,
+					lesson: entry.lesson,
+					reason: 'already_admitted',
+					duplicate_target_id: admitted.id,
+				});
 				continue;
 			}
 			const duplicate = findActiveSwarmNearDuplicate(
@@ -1332,6 +1365,12 @@ export async function curateAndStoreSwarm(
 				// snapshot-staleness window is invisible to check 1.
 				insightReinforcements.push({ entryId: duplicate.id, marker });
 				skipped++;
+				await appendCuratorSkippedEvent(directory, {
+					entry_id: entry.id,
+					lesson: entry.lesson,
+					reason: 'near_duplicate',
+					duplicate_target_id: duplicate.id,
+				});
 				continue;
 			}
 			toAdd.push(entry);
@@ -1345,6 +1384,12 @@ export async function curateAndStoreSwarm(
 	// same lesson).
 	let stored = 0;
 	let reinforced = 0;
+	const transactionSkipEvents: Array<{
+		entry_id: string;
+		lesson: string;
+		reason: string;
+		duplicate_target_id: string;
+	}> = [];
 	if (
 		toAdd.length > 0 ||
 		pendingReinforcementIds.size > 0 ||
@@ -1401,8 +1446,17 @@ export async function curateAndStoreSwarm(
 				// admitted in the staleness window would otherwise fall through to the
 				// near-duplicate branch below and reinforce the just-admitted entry.
 				const marker = findInsightAdmissionMarker(entry.source_knowledge_ids);
-				if (marker && findActiveEntryWithInsightMarker(current, marker)) {
+				const admitted = marker
+					? findActiveEntryWithInsightMarker(current, marker)
+					: undefined;
+				if (admitted) {
 					skipped++;
+					transactionSkipEvents.push({
+						entry_id: entry.id,
+						lesson: entry.lesson,
+						reason: 'already_admitted',
+						duplicate_target_id: admitted.id,
+					});
 					continue;
 				}
 				const duplicate = findActiveSwarmNearDuplicate(
@@ -1412,6 +1466,12 @@ export async function curateAndStoreSwarm(
 				);
 				if (duplicate) {
 					skipped++;
+					transactionSkipEvents.push({
+						entry_id: entry.id,
+						lesson: entry.lesson,
+						reason: 'near_duplicate',
+						duplicate_target_id: duplicate.id,
+					});
 					const result = reinforceSwarmKnowledgeEntry(duplicate, {
 						phase_number: phaseInfo.phase_number,
 						confirmed_at: new Date().toISOString(),
@@ -1433,6 +1493,9 @@ export async function curateAndStoreSwarm(
 			}
 			return changed ? current : null;
 		});
+		for (const event of transactionSkipEvents) {
+			await appendCuratorSkippedEvent(directory, event);
+		}
 	}
 	// Enforce swarm_max_entries cap (FIFO: drop oldest when exceeded)
 	await enforceKnowledgeCap(knowledgePath, config.swarm_max_entries);
