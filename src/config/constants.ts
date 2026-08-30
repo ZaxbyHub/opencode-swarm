@@ -327,6 +327,26 @@ export const SKILL_AGENT_TOOL_MAP: Partial<Record<AgentName, ToolName[]>> = {
 	architect: [...SKILL_TOOL_NAMES],
 };
 
+// ---------------------------------------------------------------------------
+// PR-review child settlement — runtime overlay for bound discovery lanes only
+// ---------------------------------------------------------------------------
+
+export const PR_REVIEW_CHILD_TOOL_NAMES = [
+	'submit_pr_review_result',
+] as const satisfies readonly ToolName[];
+
+/**
+ * This map documents the role ownership required by the registry invariant.
+ * It is deliberately consumed only by dispatch_lanes' base/micro child tool
+ * overlay; merging it into ordinary agent configs would expose the submission
+ * capability outside an exact controller-bound delegation.
+ */
+export const PR_REVIEW_CHILD_AGENT_TOOL_MAP: Partial<
+	Record<AgentName, ToolName[]>
+> = {
+	explorer: [...PR_REVIEW_CHILD_TOOL_NAMES],
+};
+
 /**
  * Human-readable descriptions for tools shown in the architect Available Tools block.
  * Used to generate the Available Tools section of the architect prompt at construction time.

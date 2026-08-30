@@ -1752,6 +1752,21 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 			break;
 		}
 
+		case 'pr_review_legacy_transcript_compatibility': {
+			if (value !== undefined && typeof value !== 'boolean') {
+				findings.push({
+					id: 'invalid-pr_review_legacy_transcript_compatibility-type',
+					title: 'Invalid pr_review_legacy_transcript_compatibility type',
+					description: `"pr_review_legacy_transcript_compatibility" must be a boolean, got ${typeof value}`,
+					severity: 'error',
+					path: 'pr_review_legacy_transcript_compatibility',
+					currentValue: value,
+					autoFixable: false,
+				});
+			}
+			break;
+		}
+
 		case 'external_skills': {
 			emitObjectTypeMismatch('external_skills', value, findings);
 			break;

@@ -271,6 +271,10 @@ describe('Architect Agent - Agent Delegation Patterns', () => {
 		expect(section).toContain('collect_lane_results');
 		expect(section).toContain('without `wait`');
 		expect(section).toContain('wait: true');
+		expect(section).toContain('submit_pr_review_result');
+		expect(section).toContain('exactly one');
+		expect(section).toContain('pr_review_legacy_transcript_compatibility');
+		expect(section).toContain('legacy-only compatibility');
 		expect(section).toContain('EVALUATE ALL RISK FAMILIES');
 		expect(section).toContain('exact eleven-row `trigger_evaluation`');
 		expect(section).toContain('first micro dispatch MUST pass');

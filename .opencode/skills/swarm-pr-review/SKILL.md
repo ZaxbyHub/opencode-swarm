@@ -66,12 +66,7 @@ This protocol runs on any agent harness. Before Phase 0, detect which profile
 this session is in by checking the actual tool list — never assume from the
 harness name, and never guess:
 
-- **Profile A — structured PR-workflow controller.** The swarm plugin's
-  controller tools are available in this session: `dispatch_lanes_async`,
-  `collect_lane_results`, `retrieve_lane_output`, `parse_lane_candidates`,
-  `write_pr_review_artifact`, `write_pr_review_trigger_eval`,
-  `complete_pr_workflow`. Typical host: OpenCode with the swarm plugin. The
-  controller mechanically enforces this skill's accounting: it computes the
+- **Profile A — structured PR-workflow controller.** The swarm plugin's controller tools are available in this session: `dispatch_lanes_async`, `collect_lane_results`, `retrieve_lane_output`, `parse_lane_candidates`, `submit_pr_review_result`, `write_pr_review_artifact`, `write_pr_review_trigger_eval`, `complete_pr_workflow`. Typical host: OpenCode with the swarm plugin. The controller mechanically enforces this skill's accounting: it computes the
   depth tier itself from the bound merge-base diff (never from caller
   claims), enforces the tier's lane floors and full dimension/family
   partitions for consolidated dispatch, and gates structured reviewer/critic
@@ -101,7 +96,7 @@ harness name, and never guess:
 
 | Harness (typical) | Profile | Lane dispatch | Ledger persistence | Completion gate |
 |---|---|---|---|---|
-| OpenCode + swarm plugin | A | `dispatch_lanes_async` / `collect_lane_results` | `write_pr_review_artifact`, `write_pr_review_trigger_eval` | `complete_pr_workflow` |
+| OpenCode + swarm plugin | A | `dispatch_lanes_async` / `collect_lane_results` | `submit_pr_review_result`, `write_pr_review_artifact`, `write_pr_review_trigger_eval` | `complete_pr_workflow` |
 | Claude Code | B | parallel `Agent`/`Task` subagents | ledger files in the session task workspace | Pre-Synthesis Gate checklist |
 | OpenAI Codex | B | parallel subagents (fresh context) | ledger files in working notes | Pre-Synthesis Gate checklist |
 | ZCode | B | parallel subagents (fresh context) | ledger files in working notes | Pre-Synthesis Gate checklist |
@@ -155,10 +150,14 @@ ordering, vocabulary, or schema.
 Controller order is exact: bind the immutable head/base range; dispatch,
 settle, and parse base lanes; evaluate every trigger row; dispatch micro lanes;
 settle and parse every matched micro family; persist the trigger evaluation;
-persist post-explorer findings; run reviewers; run critics; then persist the
-final artifact and complete the workflow. The **initial** micro dispatch MUST
-supply the complete trigger-evaluation ledger; that dispatch freezes it for the
-session.
+submit exactly one `submit_pr_review_result` receipt for each base/micro
+discovery lane and then stop; persist post-explorer findings; run reviewers;
+run critics; then persist the final artifact and complete the workflow. Transcript
+`[CANDIDATE]` / `[CLEAN]` rows are deprecated legacy compatibility only for
+lanes whose snapped `pr_review_legacy_transcript_compatibility` contract
+explicitly enables them.
+The **initial** micro dispatch MUST supply the complete trigger-evaluation
+ledger; that dispatch freezes it for the session.
 Any subsequent micro batch in that same session MAY omit `trigger_evaluation`
 and reuse the frozen ledger. If a subsequent batch explicitly supplies a copy,
 that copy MUST remain exactly identical to the frozen ledger.
@@ -1107,28 +1106,17 @@ machine-readable rows as unfenced plain text; do not emit the backticks.
 [CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags
 ```
 
-Profile A stores the full assistant transcript, so earlier unmarked progress
-turns may precede the machine-readable section. The parser locates that section
-at the first pipe-delimited line whose first field is exactly `[CANDIDATE]` and
-ignores unmarked preamble, including incidental pipe-delimited text. That first
-marker is authoritative and must be the exact canonical base or micro header;
-a malformed marker or marker-prefixed data row without a header fails closed.
-The Profile A controller coverage gate also refuses a missing marker. The pure
-parser retains markerless positional fallback only for legacy callers outside
-that controller trust boundary. Explorers should continue to make the canonical
-header the first line of their final machine-readable response.
+Profile A now treats `submit_pr_review_result` as the authoritative settlement path for base and micro discovery lanes. The caller-bound structured receipt dominates later prose, truncation, or transcript incompleteness. Transcript candidate/clean rows remain deprecated compatibility only when `pr_review_legacy_transcript_compatibility` was explicitly enabled for that lane and no structured receipt exists; a present-but-invalid structured result fails closed and never falls back.
+
+When compatibility mode is active, Profile A stores the full assistant transcript. The parser locates the first pipe-delimited line whose first field is exactly `[CANDIDATE]`, ignores unmarked preamble, and requires the exact canonical base/micro header; malformed markers or marker-prefixed rows without a header fail closed. The controller refuses a missing marker. Markerless positional fallback remains only for legacy callers outside that trust boundary; explorers should put the canonical header first.
 
 The confidence data value must be exactly LOW, MEDIUM, or HIGH.
 
-Under Profile A the parser normalizes this into a structured `candidates[]`
-array. On Profiles B/C — and as a Profile A fallback when the parser is
-unavailable — the explorer emits the `[CANDIDATE]` row format directly in the
-lane output as the extraction contract.
+Under Profile A the parser-backed transcript path is compatibility-only; a successful `submit_pr_review_result` receipt is authoritative. On Profiles B/C — and on a Profile A lane whose snapped contract explicitly enables deprecated legacy transcript compatibility and lacks a structured receipt — the explorer emits `[CANDIDATE]` rows directly as the extraction contract.
 
 Explorers must not use `CONFIRMED`, `DISPROVED`, or `PRE_EXISTING`.
 
-A base lane that finds no surviving candidates must emit exactly one fully
-populated clean row:
+A base lane that finds no surviving candidates must submit exactly one structured CLEAN result and then stop. Only a lane in the deprecated transcript-compatibility path may instead emit exactly one fully populated clean row:
 
 The fence below is documentation formatting only. Emit the clean attestation
 as unfenced plain text; do not emit the backticks.
@@ -1225,7 +1213,10 @@ artifact; and the completed ledger is persisted as `trigger-eval.json` in the
 session/task workspace before reviewer dispatch. A matched family with no
 attestation row is an unclosed coverage gap.
 
-For each micro `output_ref` (Profile A), call `parse_lane_candidates` with
+For each micro lane in Profile A, prefer the single structured
+`submit_pr_review_result` receipt over transcript parsing. Only for a lane
+whose snapped contract explicitly enables deprecated transcript compatibility
+and lacks a structured receipt should you fall back to `parse_lane_candidates` against its `output_ref`, with
 `producer: "swarm-pr-review"`, `expected_family: "micro_lane"`, and
 `expected_micro_lane` set to the launch-micro-lane value from the
 provenance-linked trigger row. When the artifact came from a consolidated
@@ -1249,7 +1240,7 @@ errors, zero malformed rows, and a complete, non-degraded source:
 [CLEAN] | micro_lane | coverage_scope | evidence
 ```
 
-Header-only or malformed zero output is `UNATTESTED`; apply the COVERAGE GATE (Phase 3). Under Profile A, the structured async PR-workflow path is required to preserve `L1`, exact-head, batch, and workflow-lane provenance; the active controller rejects blocking and direct-Task substitutes, and Task-derived findings or CLEAN prose cannot satisfy Phase 4's controller ledger. Under Profiles B/C, acceptance is the row contract itself: accept a candidate or clean row only when its `micro_lane` field matches the trigger row it claims, and treat prose-only "clean" claims as `UNATTESTED`.
+Header-only or malformed zero output is `UNATTESTED`; apply the COVERAGE GATE (Phase 3). Under Profile A, the structured async PR-workflow path must preserve `L1`, exact-head, batch, and workflow-lane provenance; the active controller rejects blocking and direct-Task substitutes, and Task-derived findings or CLEAN prose cannot satisfy Phase 4's controller ledger unless the lane explicitly runs deprecated transcript compatibility. Under Profiles B/C, acceptance is the row contract: accept a candidate or clean row only when its `micro_lane` matches the trigger row, and treat prose-only "clean" claims as `UNATTESTED`.
 
 Each micro-lane receives:
 

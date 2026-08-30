@@ -3332,6 +3332,14 @@ export const PrReviewResilienceConfigSchema = z
 	})
 	.strict();
 
+/**
+ * Issue #2384: deprecated transcript-row settlement for Profile A PR-review
+ * base/micro discovery lanes is an explicit compatibility opt-in. Omitted
+ * config resolves false in consumers; legacy transcript parsing remains a
+ * migration-only path rather than the default authority.
+ */
+export const DEFAULT_PR_REVIEW_LEGACY_TRANSCRIPT_COMPATIBILITY = false;
+
 // Main plugin configuration
 export const PluginConfigSchema = z.object({
 	/** Config format version for migration table. Increment when deprecating fields. Distinct from knowledge.schema_version. */
@@ -3427,6 +3435,11 @@ export const PluginConfigSchema = z.object({
 
 	// PR_REVIEW base-wave staged canary/fanout resilience.
 	pr_review_resilience: PrReviewResilienceConfigSchema.optional(),
+
+	// Deprecated transcript-row settlement compatibility for Profile A
+	// PR_REVIEW base/micro discovery lanes. Structured submission is the
+	// default authority; this flag is a migration-only opt-in.
+	pr_review_legacy_transcript_compatibility: z.boolean().optional(),
 
 	// Quality gate configuration (v6.9 anti-slop features)
 	gates: GateConfigSchema.optional(),

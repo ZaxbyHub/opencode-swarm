@@ -64,6 +64,10 @@ import {
 	parsePrReviewCollectionReceiptFooter,
 	parsePrReviewCollectionReceiptShedMarker,
 } from './pr-review-collection-receipt.js';
+import {
+	type PrReviewResultReceipt,
+	PrReviewResultReceiptSchema,
+} from './pr-review-contract.js';
 
 export const BACKGROUND_DELEGATIONS_FILE = 'background-delegations.jsonl';
 export const BACKGROUND_DELEGATION_FALLBACK_DIR =
@@ -225,7 +229,7 @@ export const DEFAULT_SWEEPABLE_DELEGATION_STATUSES: ReadonlySet<SweepableDelegat
 	new Set<SweepableDelegationStatus>(['pending', 'running', 'ingestion_error']);
 
 export interface BackgroundDelegationRecord {
-	schemaVersion: 1 | 2 | 3;
+	schemaVersion: 1 | 2 | 3 | 4;
 	/** Subagent session id from the dispatch envelope — the correlation key. */
 	correlationId: string;
 	/** Structured jobId from dispatch metadata when available, else null. */
@@ -260,6 +264,8 @@ export interface BackgroundDelegationRecord {
 	 * singleton lanes (legacy and tier-L dispatches).
 	 */
 	ownedWorkflowLanes?: string[];
+	/** Dispatch-time snapshot; absent legacy records keep transcript compatibility. */
+	prReviewLegacyTranscriptCompatibility?: boolean;
 	/** Canonical hash of prompt/provenance inputs captured at dispatch time. */
 	promptHash?: string;
 	/** Project/root provenance captured at dispatch time. */
@@ -394,6 +400,12 @@ export interface BackgroundDelegationResult {
 	outputArtifactError?: string;
 	transcriptIncomplete?: boolean;
 	messageCount?: number;
+	/**
+	 * Issue #2384: authoritative structured PR-review result receipt. Persisted
+	 * separately from transcript text so compaction and preview truncation can
+	 * never promote presentation-layer text into machine authority.
+	 */
+	prReviewResultReceipt?: import('./pr-review-contract.js').PrReviewResultReceipt;
 	/**
 	 * Durable failure provenance for a lane-atomic PR-workflow terminalization.
 	 * Optional because successful lanes and legacy terminal results have none.
@@ -548,6 +560,7 @@ const ResultSchema = z
 		outputArtifactError: z.string().optional(),
 		transcriptIncomplete: z.boolean().optional(),
 		messageCount: z.number().optional(),
+		prReviewResultReceipt: PrReviewResultReceiptSchema.optional(),
 		workflowLaneFailureClass: z
 			.enum(['contract', 'resource', 'deadline'])
 			.optional(),
@@ -861,7 +874,12 @@ const PromptSchema = z
 
 const RecordSchema = z
 	.object({
-		schemaVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+		schemaVersion: z.union([
+			z.literal(1),
+			z.literal(2),
+			z.literal(3),
+			z.literal(4),
+		]),
 		correlationId: z.string().min(1),
 		jobId: z.string().nullable(),
 		subagentSessionId: z.string().min(1),
@@ -892,6 +910,7 @@ const RecordSchema = z
 			.min(1)
 			.max(11)
 			.optional(),
+		prReviewLegacyTranscriptCompatibility: z.boolean().optional(),
 		promptHash: z.string().optional(),
 		workspace: WorkspaceSchema.optional(),
 		taskChangeContext: TaskChangeContextSchema.optional(),
@@ -2346,6 +2365,7 @@ export interface RecordPendingInput {
 	mode?: string;
 	workflowLane?: string;
 	ownedWorkflowLanes?: string[];
+	prReviewLegacyTranscriptCompatibility?: boolean;
 	promptHash?: string;
 	workspace?: BackgroundWorkspaceSnapshot;
 	taskChangeContext?: BackgroundTaskChangeContext;
@@ -2380,6 +2400,12 @@ function buildPendingRecord(
 		...(input.workflowLane ? { workflowLane: input.workflowLane } : {}),
 		...(input.ownedWorkflowLanes?.length
 			? { ownedWorkflowLanes: [...input.ownedWorkflowLanes] }
+			: {}),
+		...(input.prReviewLegacyTranscriptCompatibility !== undefined
+			? {
+					prReviewLegacyTranscriptCompatibility:
+						input.prReviewLegacyTranscriptCompatibility,
+				}
 			: {}),
 		...(input.promptHash ? { promptHash: input.promptHash } : {}),
 		...(input.workspace ? { workspace: input.workspace } : {}),
@@ -2607,8 +2633,11 @@ export async function appendDelegationTransition(
 				}
 				next = {
 					...current,
-					schemaVersion:
-						current.schemaVersion === 1 ? 2 : current.schemaVersion,
+					schemaVersion: transition.result?.prReviewResultReceipt
+						? 4
+						: current.schemaVersion === 1
+							? 2
+							: current.schemaVersion,
 					status: transition.status,
 					updatedAt: now,
 					...(transition.completedAt !== undefined
@@ -2628,6 +2657,142 @@ export async function appendDelegationTransition(
 			`[background] appendDelegationTransition failed: ${err instanceof Error ? err.message : String(err)}`,
 		);
 		return null;
+	}
+}
+
+export type PublishPrReviewResultReceiptOutcome =
+	| { status: 'recorded'; record: BackgroundDelegationRecord }
+	| { status: 'duplicate'; record: BackgroundDelegationRecord }
+	| { status: 'conflict'; reason: string }
+	| { status: 'not_found'; reason: string }
+	| { status: 'terminal'; reason: string }
+	| { status: 'uncertain'; reason: string };
+
+/**
+ * Atomically publish the child-bound PR-review receipt while its delegation is
+ * still live. The workflow gate performs the outer session-state validation;
+ * this inner transaction rechecks immutable delegation identity under the
+ * evidence lock and provides semantic exactly-once behavior.
+ */
+export async function publishPrReviewResultReceipt(
+	directory: string,
+	input: {
+		parentSessionId: string;
+		childSessionId: string;
+		batchId: string;
+		laneId: string;
+		expectedWorkflowInstanceId: string;
+		expectedWorkflowRevision: number;
+		expectedBaseSha: string;
+		receipt: PrReviewResultReceipt;
+	},
+): Promise<PublishPrReviewResultReceiptOutcome> {
+	const parsed = PrReviewResultReceiptSchema.safeParse(input.receipt);
+	if (!parsed.success) {
+		return { status: 'conflict', reason: 'receipt schema validation failed' };
+	}
+	let outcome: PublishPrReviewResultReceiptOutcome = {
+		status: 'uncertain',
+		reason: 'receipt publication did not complete',
+	};
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				const records = loadRecordsForWrite(directory);
+				if (records === null) {
+					outcome = {
+						status: 'uncertain',
+						reason: 'delegation state is uncertain',
+					};
+					return;
+				}
+				const matches = records.filter(
+					(record) =>
+						record.parentSessionId === input.parentSessionId &&
+						record.subagentSessionId === input.childSessionId &&
+						record.batchId === input.batchId &&
+						record.laneId === input.laneId,
+				);
+				if (matches.length !== 1) {
+					outcome = {
+						status: 'not_found',
+						reason: `expected one exact delegation record, found ${matches.length}`,
+					};
+					return;
+				}
+				const current = matches[0];
+				if (current.result?.prReviewResultReceipt) {
+					const existing = current.result.prReviewResultReceipt;
+					if (sameCanonicalJson(existing, parsed.data)) {
+						outcome = { status: 'duplicate', record: current };
+					} else {
+						outcome = {
+							status: 'conflict',
+							reason: 'a different bound receipt is already recorded',
+						};
+					}
+					return;
+				}
+				if (current.status !== 'pending' && current.status !== 'running') {
+					outcome = {
+						status: 'terminal',
+						reason: `delegation is already ${current.status}`,
+					};
+					return;
+				}
+				const owned = current.ownedWorkflowLanes?.length
+					? current.ownedWorkflowLanes
+					: current.workflowLane
+						? [current.workflowLane]
+						: [];
+				const sameOwned =
+					owned.length === parsed.data.ownedWorkflowLanes.length &&
+					owned.every((lane) => parsed.data.ownedWorkflowLanes.includes(lane));
+				if (
+					parsed.data.workflowInstanceId !== input.expectedWorkflowInstanceId ||
+					parsed.data.workflowRevision !== input.expectedWorkflowRevision ||
+					parsed.data.baseSha !== input.expectedBaseSha ||
+					current.mode !== parsed.data.mode ||
+					current.workflowLane !== parsed.data.workflowLane ||
+					!sameOwned ||
+					current.workspace?.prHeadSha !== parsed.data.headSha ||
+					current.workspace?.gitHead !== parsed.data.headSha ||
+					(current.generation ?? 1) !== parsed.data.generation
+				) {
+					outcome = {
+						status: 'conflict',
+						reason: 'receipt does not match immutable delegation identity',
+					};
+					return;
+				}
+				const next: BackgroundDelegationRecord = {
+					...current,
+					schemaVersion: 4,
+					updatedAt: Date.now(),
+					result: {
+						...(current.result ?? {
+							chars: 0,
+							truncated: false,
+							digest: createHash('sha256').update('').digest('hex'),
+						}),
+						prReviewResultReceipt: parsed.data,
+					},
+				};
+				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
+				outcome = { status: 'recorded', record: next };
+			},
+		);
+		return outcome;
+	} catch (error) {
+		return {
+			status: 'uncertain',
+			reason: error instanceof Error ? error.message : String(error),
+		};
 	}
 }
 
@@ -2653,6 +2818,24 @@ export function buildBackgroundCompletionEventId(
 
 function sameJson(left: unknown, right: unknown): boolean {
 	return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function canonicalJson(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(canonicalJson);
+	if (value && typeof value === 'object') {
+		return Object.fromEntries(
+			Object.entries(value as Record<string, unknown>)
+				.sort(([left], [right]) => left.localeCompare(right))
+				.map(([key, entry]) => [key, canonicalJson(entry)]),
+		);
+	}
+	return value;
+}
+
+function sameCanonicalJson(left: unknown, right: unknown): boolean {
+	return (
+		JSON.stringify(canonicalJson(left)) === JSON.stringify(canonicalJson(right))
+	);
 }
 
 /**
@@ -2686,6 +2869,7 @@ function sameRetainedResult(
 		left.outputArtifactError === right.outputArtifactError &&
 		left.transcriptIncomplete === right.transcriptIncomplete &&
 		left.messageCount === right.messageCount &&
+		sameJson(left.prReviewResultReceipt, right.prReviewResultReceipt) &&
 		left.workflowLaneFailureClass === right.workflowLaneFailureClass &&
 		sameJson(left.salvagedWorkflowLanes, right.salvagedWorkflowLanes) &&
 		sameJson(
@@ -2802,7 +2986,11 @@ export async function claimTerminalResult(
 				);
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: 3,
+					schemaVersion: parsedTerminal.data.result.prReviewResultReceipt
+						? 4
+						: current.schemaVersion === 4
+							? 4
+							: 3,
 					status: parsedTerminal.data.status,
 					terminalResult: parsedTerminal.data,
 					result: parsedTerminal.data.result,
@@ -2935,7 +3123,7 @@ export async function claimCoderSettlement(
 				};
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: 3,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 					coderSettlement: settlement,
 					updatedAt: settlement.updatedAt,
 				};
@@ -3113,7 +3301,7 @@ export async function updateCoderSettlement(
 				};
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: 3,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 					coderSettlement: settlement,
 					updatedAt,
 				};
@@ -3268,7 +3456,7 @@ async function updateLegacyCoderSettlementTransfer(
 				const next: BackgroundDelegationRecord = transfer
 					? {
 							...current,
-							schemaVersion: 3,
+							schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 							legacyCoderSettlementTransfer: {
 								...transfer,
 								updatedAt,
@@ -3390,7 +3578,7 @@ export async function claimDelegationIngestion(
 					.digest('hex');
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: 3,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 					ingestion: {
 						state: 'claimed',
 						attempt,
@@ -3457,7 +3645,7 @@ export async function recordDelegationIngestionResult(
 				const updatedAt = options.now ?? Date.now();
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: 3,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 					status: success ? 'consumed' : 'ingestion_error',
 					ingestion: {
 						state: success ? 'consumed' : 'retryable',
@@ -3534,7 +3722,7 @@ export async function putPendingBackgroundAdvisory(
 				}
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: 3,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 					advisoryInbox: parsed.data,
 					updatedAt: createdAt,
 				};
@@ -3608,7 +3796,7 @@ export async function replacePendingBackgroundAdvisory(
 				}
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: 3,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 					advisoryInbox: parsed.data,
 					updatedAt: createdAt,
 				};
@@ -3690,7 +3878,7 @@ export async function preparePendingBackgroundAdvisories(
 					};
 					const next: BackgroundDelegationRecord = {
 						...current,
-						schemaVersion: 3,
+						schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 						advisoryInbox: nextAdvisory,
 						updatedAt: now,
 					};
@@ -3754,7 +3942,7 @@ async function releaseBackgroundAdvisoryPreparation(
 					const now = Date.now();
 					const next: BackgroundDelegationRecord = {
 						...current,
-						schemaVersion: 3,
+						schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 						advisoryInbox: {
 							...current.advisoryInbox,
 							preparation: undefined,
@@ -3825,7 +4013,7 @@ export async function acknowledgeObservedBackgroundAdvisories(
 					}
 					const next: BackgroundDelegationRecord = {
 						...current,
-						schemaVersion: 3,
+						schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 						advisoryInbox: {
 							...advisory,
 							state: 'delivered',
