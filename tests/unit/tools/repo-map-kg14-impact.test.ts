@@ -117,13 +117,26 @@ describe('repo_map: impact_cone (KG-14)', () => {
 		);
 	});
 
-	it('bounds entries by top_n', async () => {
+	it('bounds symbol-level entries by top_n (PRR-007: symbol mode, real entries)', async () => {
 		await call({ action: 'build' });
+		// main.ts's module scope references `add` — symbol mode produces a real
+		// caller entry that top_n=1 then must NOT drop (only one exists).
 		const r = parse(
-			await call({ action: 'impact_cone', file: 'src/util.ts', top_n: 1 }),
+			await call({
+				action: 'impact_cone',
+				file: 'src/util.ts',
+				symbol: 'add',
+				top_n: 1,
+			}),
 		);
-		// File-level mode has zero entries; the budget envelope still rides.
-		expect(r.budget).toBeDefined();
-		expect(r.truncated).toBe(false);
+		expect(r.success).toBe(true);
+		const entries = r.entries as Array<Record<string, unknown>>;
+		// Two real callers exist in this fixture (main.ts and util.test.ts
+		// both reference `add`); top_n=1 keeps one and drops one.
+		expect(entries).toHaveLength(1);
+		expect(entries[0]?.direction).toBe('caller');
+		expect(r.budget).toEqual({ entriesReturned: 1, dropped: 1 });
+		expect(r.truncated).toBe(true);
+		expect((r.warnings as string[]).join('\n')).toContain('omitted by top_n=1');
 	});
 });

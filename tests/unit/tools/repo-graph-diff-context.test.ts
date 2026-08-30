@@ -92,14 +92,16 @@ beforeEach(() => {
 
 describe('getDiffContext: hunk mode', () => {
 	test('maps hunk line ranges to intersecting symbols', () => {
+		// Well-formed hunks (old/new counts match delivered body lines) — the
+		// parser's hunk-state guard consumes by the promised counts.
 		const diff = [
 			'diff --git a/src/util.ts b/src/util.ts',
 			'--- a/src/util.ts',
 			'+++ b/src/util.ts',
-			'@@ -1,2 +1,2 @@',
+			'@@ -1,1 +1,2 @@',
 			' context',
 			'+changed add body',
-			'@@ -10,3 +12,2 @@',
+			'@@ -12,1 +12,1 @@',
 			'+changed tail',
 		].join('\n');
 		const result = getDiffContext(makeGraph(), { diff });
@@ -205,6 +207,69 @@ describe('getDiffContext: hunk mode', () => {
 			getDiffContext(makeGraph(), { diff: 'just some text\nno headers' }),
 		).toThrow(/no parseable file headers/);
 	});
+
+	test('PRR-004: added body lines starting with "++ " are not file headers', () => {
+		// A real diff of a file that ADDS a line whose content is '++ x' emits
+		// the body line '+++ x' — byte-identical to a file header. The
+		// hunk-state guard must keep it in the body (empirical repro: without
+		// the guard this produced a phantom file "x" and derailed the hunk).
+		const diff = [
+			'diff --git a/src/util.ts b/src/util.ts',
+			'--- a/src/util.ts',
+			'+++ b/src/util.ts',
+			'@@ -1,3 +1,4 @@',
+			' context line',
+			'+added normal line',
+			'+++ x',
+			'+another added line',
+		].join('\n');
+		const result = getDiffContext(makeGraph(), { diff });
+		expect(result.files.map((f) => f.file)).toEqual(['src/util.ts']);
+		expect(result.files[0]?.symbols.map((s) => s.symbol).sort()).toEqual([
+			'add',
+			'sub',
+		]);
+	});
+
+	test('PRR-018: CRLF diffs parse identically', () => {
+		const diff = [
+			'--- a/src/util.ts',
+			'+++ b/src/util.ts',
+			'@@ -1,1 +1,1 @@',
+			'+crlf change',
+		].join('\r\n');
+		const result = getDiffContext(makeGraph(), { diff });
+		expect(result.files[0]?.symbols.map((s) => s.symbol)).toEqual(['add']);
+	});
+
+	test('PRR-018: count-less hunk headers default to one line', () => {
+		const diff = [
+			'--- a/src/util.ts',
+			'+++ b/src/util.ts',
+			'@@ -4 +4 @@',
+			'+no count segment',
+		].join('\n');
+		const result = getDiffContext(makeGraph(), { diff });
+		expect(result.files[0]?.symbols.map((s) => s.symbol)).toEqual(['sub']);
+		expect(result.files[0]?.symbols[0]?.changedLines).toEqual([4]);
+	});
+
+	test('PRR-018: whitelisted space-bearing paths survive sanitization', () => {
+		const graph = makeGraph();
+		graph.nodes[abs('my src/a file.ts')] = node('my src/a file.ts', {
+			exports: ['spaced'],
+			ranges: { spaced: { startLine: 1, endLine: 1 } },
+		});
+		const diff = [
+			'--- a/my src/a file.ts',
+			'+++ b/my src/a file.ts',
+			'@@ -1,1 +1,1 @@',
+			'+spaced change',
+		].join('\n');
+		const result = getDiffContext(graph, { diff });
+		expect(result.files[0]?.file).toBe('my src/a file.ts');
+		expect(result.files[0]?.symbols.map((s) => s.symbol)).toEqual(['spaced']);
+	});
 });
 
 describe('getDiffContext: files mode', () => {
@@ -253,6 +318,10 @@ describe('getDiffContext: unsafe diff paths', () => {
 		expect(result.warnings.join('\n')).toContain(
 			'skipped unsafe or non-graph path',
 		);
+		// OW-1: an unsafe-path skip is a DROP — the budget envelope must not
+		// report a false all-clear alongside the warning.
+		expect(result.truncated).toBe(true);
+		expect(result.budget.dropped).toBeGreaterThanOrEqual(1);
 	});
 
 	test('absolute and drive-letter paths in the diff are skipped', () => {
@@ -265,6 +334,7 @@ describe('getDiffContext: unsafe diff paths', () => {
 		const result = getDiffContext(makeGraph(), { diff });
 		expect(result.files).toEqual([]);
 		expect(result.warnings.join('\n')).toContain('skipped unsafe');
+		expect(result.budget.dropped).toBeGreaterThanOrEqual(1);
 	});
 });
 
@@ -281,6 +351,9 @@ describe('getDiffContext: bounding', () => {
 		expect(result.warnings.join('\n')).toContain(
 			'omitted in src/util.ts by top_n=2',
 		);
+		// OW-1: per-file symbol drops roll into the top-level budget.
+		expect(result.truncated).toBe(true);
+		expect(result.budget.dropped).toBeGreaterThanOrEqual(1);
 	});
 
 	test('changedLines per symbol are capped', () => {
@@ -297,5 +370,37 @@ describe('getDiffContext: bounding', () => {
 		const result = getDiffContext(graph, { diff });
 		const wide = result.files[0]?.symbols[0];
 		expect(wide?.changedLines.length).toBeLessThanOrEqual(50);
+	});
+
+	test('PRR-009: diffs with more than 50 files truncate with drop accounting', () => {
+		const sections = Array.from({ length: 51 }, (_, i) =>
+			[
+				`--- a/gen/f${i}.ts`,
+				`+++ b/gen/f${i}.ts`,
+				'@@ -1,0 +1,1 @@',
+				'+new',
+			].join('\n'),
+		);
+		const result = getDiffContext(makeGraph(), { diff: sections.join('\n') });
+		expect(result.files).toHaveLength(50);
+		expect(result.truncated).toBe(true);
+		expect(result.budget.dropped).toBeGreaterThanOrEqual(1);
+		expect(result.warnings.join('\n')).toContain(
+			'diff file parse capped at 50 files (51 seen)',
+		);
+	});
+
+	test('PRR-009: diffs with more than 200 hunks truncate with a warning', () => {
+		const hunks = Array.from(
+			{ length: 201 },
+			(_, i) => `@@ -1,0 +${i + 1},1 @@\n+line ${i}`,
+		);
+		const diff = ['--- a/src/util.ts', '+++ b/src/util.ts', ...hunks].join(
+			'\n',
+		);
+		const result = getDiffContext(makeGraph(), { diff });
+		expect(result.warnings.join('\n')).toContain(
+			'diff hunk parse capped at 200 hunks',
+		);
 	});
 });

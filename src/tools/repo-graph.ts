@@ -59,7 +59,6 @@ export { extractFileOntology } from './repo-graph/ontology';
 export type { DeadExportsOptions } from './repo-graph/query';
 export {
 	buildOntologyPreflightPacket,
-	extractSignatureText,
 	getBlastRadius,
 	getCallers,
 	getContextPack,

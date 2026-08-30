@@ -440,7 +440,11 @@ function graphHealthSummaries(
 > {
 	const rawSymbolEdges = graph?.symbolEdges ?? [];
 	const complete = completeSymbolEdges ?? [];
-	const resolutionBreakdown: Record<string, number> = {};
+	// NULL-PROTOTYPE accumulators (OW-9): both are written with dynamic keys
+	// derived from graph data (`resolution` enums today, but diagnostics come
+	// from persisted JSON), so a plain object literal would let a crafted
+	// `__proto__`/`toString` key resolve through the prototype chain.
+	const resolutionBreakdown: Record<string, number> = Object.create(null);
 	for (const edge of complete) {
 		const key = edge.resolution ?? 'unrecorded';
 		resolutionBreakdown[key] = (resolutionBreakdown[key] ?? 0) + 1;
@@ -450,7 +454,7 @@ function graphHealthSummaries(
 		resolutionBreakdown.unrecorded =
 			(resolutionBreakdown.unrecorded ?? 0) + legacyCount;
 	}
-	const failureSummary: Record<string, number> = {};
+	const failureSummary: Record<string, number> = Object.create(null);
 	for (const failure of graph?.diagnostics?.extractionFailures ?? []) {
 		if (typeof failure?.reason !== 'string' || failure.reason.length === 0) {
 			continue;

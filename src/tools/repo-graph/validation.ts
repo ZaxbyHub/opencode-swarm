@@ -239,6 +239,22 @@ export function validateGraphNode(node: GraphNode): void {
 					`Invalid node: exportKinds value must be one of ${GRAPH_SYMBOL_KIND_VALUES.join(', ')} (got ${typeof kind})`,
 				);
 			}
+			// Subset invariant (OW-5, schema 1.6.0): a declaration kind exists
+			// only at real definition sites, and every definition site also
+			// writes an exportRanges entry — so a kind without a range is
+			// corruption, not a legitimate shape. Re-export bindings add ranges
+			// WITHOUT kinds (subset, never superset), so this check never fires
+			// on builder output.
+			const ranges = node.exportRanges;
+			if (
+				ranges === undefined ||
+				!Object.hasOwn(ranges, name) ||
+				ranges[name] === undefined
+			) {
+				throw new Error(
+					`Invalid node: exportKinds key "${name.slice(0, 80)}" has no matching exportRanges entry`,
+				);
+			}
 		}
 	}
 	if (node.ontology !== undefined) {

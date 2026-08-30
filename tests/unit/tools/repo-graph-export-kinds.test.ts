@@ -158,6 +158,17 @@ describe('exportKinds validation', () => {
 			imports: [],
 			language: 'typescript',
 			mtime: '1',
+			// The subset invariant (OW-5) requires every kind key to carry an
+			// exportRanges entry — kinds never exist without a definition span.
+			exportRanges: {
+				a: { startLine: 1, endLine: 1 },
+				b: { startLine: 2, endLine: 3 },
+				c: { startLine: 4, endLine: 4 },
+				d: { startLine: 5, endLine: 5 },
+				e: { startLine: 6, endLine: 6 },
+				f: { startLine: 7, endLine: 7 },
+				g: { startLine: 8, endLine: 9 },
+			},
 			exportKinds: {
 				a: 'function',
 				b: 'class',
@@ -169,5 +180,24 @@ describe('exportKinds validation', () => {
 			} as Record<string, 'function'>,
 		};
 		expect(() => validateGraphNode(node)).not.toThrow();
+	});
+
+	test('validateGraphNode rejects a kind without a matching exportRanges entry (OW-5)', () => {
+		const node = {
+			filePath: path.join(tmp, 'src/x.ts'),
+			moduleName: 'src/x.ts',
+			exports: [],
+			imports: [],
+			language: 'typescript',
+			mtime: '1',
+			exportRanges: { a: { startLine: 1, endLine: 1 } },
+			exportKinds: { a: 'function', orphan: 'class' } as Record<
+				string,
+				'function'
+			>,
+		};
+		expect(() => validateGraphNode(node)).toThrow(
+			/exportKinds key "orphan" has no matching exportRanges entry/,
+		);
 	});
 });

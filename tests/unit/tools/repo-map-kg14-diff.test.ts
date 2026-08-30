@@ -63,8 +63,12 @@ describe('repo_map: diff_context (KG-14)', () => {
 		expect(symbols.map((s) => s.symbol)).toEqual(['sub']);
 		expect(symbols[0]?.changedLines).toEqual([2]);
 		const impact = r.impact as Record<string, unknown>;
-		expect((impact.files as string[]).length).toBeGreaterThanOrEqual(0);
+		// The change to src/util.ts is consumed by src/main.ts → non-empty impact.
+		expect(impact.files).toContain('src/main.ts');
 		expect(['low', 'medium', 'high', 'critical']).toContain(impact.risk);
+		// Nothing was dropped in this bounded request (OW-1 envelope).
+		expect(r.truncated).toBe(false);
+		expect((r.budget as Record<string, unknown>).dropped).toBe(0);
 	});
 
 	it('accepts a files list at file granularity', async () => {

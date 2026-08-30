@@ -62,6 +62,17 @@ import {
 const SEARCH_DEFAULT_TOP_N = 25;
 const CONTEXT_DEFAULT_TOP_N = 25;
 const CONE_DEFAULT_TOP_N = 50;
+/**
+ * Hard cap on cone TRAVERSAL (OW-8): a densely connected hub symbol can reach
+ * far more relationships than topN returns, and without this every BFS
+ * structure (queue, dedupe set, visited set, cone-file set, entries) would
+ * scale with local graph density. Once the dedupe set reaches the cap the
+ * BFS stops discovering — no further enqueues, emissions, or file collection —
+ * so all traversal state is O(cap). Discoveries past the cap count as dropped
+ * and a distinct warning discloses that the cone beyond the cap was not
+ * visited (the result is a bounded prefix, not a silently incomplete cone).
+ */
+const CONE_ENTRIES_HARD_CAP = 5000;
 const CONE_ONTOLOGY_CAP = 20;
 const CONE_HUB_NOTE_CAP = 5;
 const CONE_HUB_IMPORTER_THRESHOLD = 10;
@@ -545,8 +556,12 @@ export function getSymbolContext(
 	if (line > 0 && range !== undefined) {
 		const read = readDefinitionSource(graph, node, line, range.endLine);
 		if (read.text !== null) {
-			signature =
-				extractSignatureText(read.text.split('\n'), line) || undefined;
+			// extractSignatureText's contract is absolute-into-FULL-file lines
+			// (its context_pack caller passes whole-file lines). `read.text` is
+			// a slice that already STARTS at the definition line, so the
+			// signature scan begins at slice index 0 (PRR-001: passing the
+			// absolute `line` here read line 2·line−1 or ran out of slice).
+			signature = extractSignatureText(read.text.split('\n'), 1) || undefined;
 			if (options.includeSource === true) {
 				source = {
 					text: read.text,
@@ -611,6 +626,15 @@ export function getImpactCone(
 	const entries: ConeEntry[] = [];
 	const coneFileKeys = new Set<string>();
 	if (node) coneFileKeys.add(normalizeGraphPath(node.filePath));
+	// OW-8: the intermediate entries array is hard-capped so a densely
+	// connected hub symbol cannot grow transient memory with graph density.
+	// Traversal itself is bounded by the cap (OW-8): once the dedupe set
+	// reaches it, no further symbols are enqueued, emitted, or collected, so
+	// `queue`/`emitted`/`visited`/`coneFileKeys`/`entries` all stay O(cap) —
+	// peak memory no longer scales with local graph density. Discoveries past
+	// the cap count as dropped and the warning says the traversal was capped.
+	let overflowDropped = 0;
+	let traversalCapped = false;
 
 	if (node && options.symbol !== undefined) {
 		// Symbol-level cone as TWO direction-scoped BFS runs over symbolEdges:
@@ -641,12 +665,19 @@ export function getImpactCone(
 					const otherSymbol =
 						direction === 'caller' ? edge.fromSymbol : edge.toSymbol;
 					const otherKey = `${normalizeGraphPath(otherFile)}\0${otherSymbol}`;
-					coneFileKeys.add(normalizeGraphPath(otherFile));
 					const dedupeKey = `${direction}\0${otherKey}`;
-					if (!emitted.has(dedupeKey)) {
-						emitted.add(dedupeKey);
-						entries.push(coneEntryFromEdge(graph, edge, direction, depth + 1));
+					if (emitted.has(dedupeKey)) continue;
+					if (emitted.size >= CONE_ENTRIES_HARD_CAP) {
+						// Past the cap: count the relationship as dropped, but
+						// emit nothing, collect nothing, and enqueue nothing —
+						// every BFS structure stays bounded.
+						overflowDropped++;
+						traversalCapped = true;
+						continue;
 					}
+					emitted.add(dedupeKey);
+					entries.push(coneEntryFromEdge(graph, edge, direction, depth + 1));
+					coneFileKeys.add(normalizeGraphPath(otherFile));
 					if (!visited.has(otherKey)) {
 						visited.add(otherKey);
 						if (depth + 1 < maxDepth) {
@@ -673,10 +704,21 @@ export function getImpactCone(
 
 	sortConeEntries(entries);
 	const returnedEntries = entries.slice(0, topN);
-	const dropped = entries.length - returnedEntries.length;
+	const dropped = entries.length - returnedEntries.length + overflowDropped;
 	const truncated = dropped > 0;
 	if (truncated) {
-		warnings.push(`${dropped} cone entr(ies) omitted by top_n=${topN}`);
+		warnings.push(
+			`${dropped} cone entr(ies) omitted${
+				overflowDropped > 0
+					? ` (${overflowDropped} beyond the ${CONE_ENTRIES_HARD_CAP}-entry traversal cap)`
+					: ''
+			} by top_n=${topN}`,
+		);
+	}
+	if (traversalCapped) {
+		warnings.push(
+			`cone traversal stopped at ${CONE_ENTRIES_HARD_CAP} relationships; the cone beyond the cap was not visited — raise nothing, refine with a narrower file/symbol or smaller max_depth`,
+		);
 	}
 
 	// Ontology aggregation over cone files; every list capped + de-duplicated.
@@ -794,7 +836,7 @@ interface ParsedDiffFile {
 
 const DIFF_FILE_HEADER_RE = /^\+\+\+ (?:b\/)?(.+?)\r?$/;
 const DIFF_OLD_HEADER_RE = /^--- (?:a\/)?(.+?)\r?$/;
-const DIFF_HUNK_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/;
+const DIFF_HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
 /**
  * Strict, bounded parse of a unified diff. Returns one entry per file with
@@ -827,6 +869,14 @@ function parseUnifiedDiff(diff: string): {
 	// `+++` becomes a file-granularity entry at the next section boundary/EOF.
 	const pendingOldPaths: string[] = [];
 	let hunks = 0;
+	// Hunk-state guard (PRR-004): while a hunk's body lines remain, NOTHING is
+	// interpreted as a header — an added body line whose content starts with
+	// `++ ` renders as `+++ x` in a real diff and must not hijack the parser
+	// (mirror case: removed lines starting `-- ` → `--- x`). Body lines are
+	// counted exactly: each consumes one old-side and/or new-side slot per
+	// its first character; `\ No newline` markers consume neither.
+	let oldRemaining = 0;
+	let newRemaining = 0;
 	// Returns the (new or merged) entry for a path, or null when the file cap
 	// was hit. Callers assign `current` themselves so control-flow narrowing
 	// sees every assignment.
@@ -853,19 +903,34 @@ function parseUnifiedDiff(diff: string): {
 	};
 	for (const rawLine of diff.split('\n')) {
 		const line = rawLine.replace(/\r$/, '');
+		if (oldRemaining > 0 || newRemaining > 0) {
+			// Inside a hunk body: classify by first character and consume slots.
+			if (!line.startsWith('\\')) {
+				if (line.startsWith('-')) oldRemaining--;
+				else if (line.startsWith('+')) newRemaining--;
+				else {
+					oldRemaining--;
+					newRemaining--;
+				}
+			}
+			continue;
+		}
 		const hunk = DIFF_HUNK_RE.exec(line);
 		if (hunk !== null) {
+			const oldCount = hunk[2] !== undefined ? Number.parseInt(hunk[2], 10) : 1;
+			const newCount = hunk[4] !== undefined ? Number.parseInt(hunk[4], 10) : 1;
+			oldRemaining = Math.max(0, oldCount);
+			newRemaining = Math.max(0, newCount);
 			if (current === null || current.intervals === null) continue;
 			if (hunks >= DIFF_MAX_HUNKS) {
 				hunksTruncated = true;
 				continue;
 			}
 			hunks++;
-			const start = Number.parseInt(hunk[1]!, 10);
-			const count = hunk[2] !== undefined ? Number.parseInt(hunk[2], 10) : 1;
+			const start = Number.parseInt(hunk[3]!, 10);
 			current.intervals.push({
 				start: Math.max(1, start),
-				end: Math.max(1, start) + Math.max(1, count) - 1,
+				end: Math.max(1, start) + Math.max(1, newCount) - 1,
 			});
 			continue;
 		}
@@ -976,9 +1041,15 @@ export function getDiffContext(
 
 	const fileSummaries: DiffFileSummary[] = [];
 	const knownChangedRelFiles: string[] = [];
+	// OW-1: every drop channel must roll into the budget envelope — an
+	// unsafe-path skip and a per-file top_n drop are DROPS, not just warnings,
+	// or `budget.dropped`/`truncated` would report a false all-clear.
+	let unsafePathDrops = 0;
+	let symbolsDropped = 0;
 	for (const entry of parsed) {
 		const safe = sanitizeDiffPath(entry.file);
 		if (safe === null) {
+			unsafePathDrops++;
 			warnings.push(
 				`skipped unsafe or non-graph path in diff: ${entry.file
 					.replace(/[^\x20-\x7e]/g, '?')
@@ -1029,6 +1100,7 @@ export function getDiffContext(
 			});
 		}
 		if (symbolDropped > 0) {
+			symbolsDropped += symbolDropped;
 			warnings.push(
 				`${symbolDropped} changed symbol(s) omitted in ${fileRel} by top_n=${topN}`,
 			);
@@ -1066,6 +1138,11 @@ export function getDiffContext(
 		warnings.push(`${impactDropped} impacted file(s) omitted by top_n=${topN}`);
 	}
 
+	// OW-1: the envelope counts every drop channel — parse caps, unsafe-path
+	// skips, per-file symbol top_n drops, and impact-file drops. A caller
+	// reading `budget.dropped === 0` as "nothing was omitted" must be right.
+	const dropped =
+		filesDropped + unsafePathDrops + symbolsDropped + impactDropped;
 	return {
 		granularity,
 		files: fileSummaries,
@@ -1077,9 +1154,9 @@ export function getDiffContext(
 		},
 		budget: {
 			returned: fileSummaries.length,
-			dropped: filesDropped + impactDropped,
+			dropped,
 		},
-		truncated: filesDropped > 0 || impactDropped > 0,
+		truncated: dropped > 0,
 		warnings,
 	};
 }

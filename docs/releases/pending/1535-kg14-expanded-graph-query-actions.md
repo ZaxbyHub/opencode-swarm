@@ -3,8 +3,9 @@
 ## What
 
 - Five new `repo_map` actions (KG-14, issue #1535):
-  - `symbol_search` — find symbols by name with tiered matching
-    (exact/prefix/substring/fuzzy), filterable by declaration kind, language,
+  - `symbol_search` — find symbols by name with tiered, case-insensitive
+    matching (exact/prefix/substring/subsequence — the tier is reported per
+    hit in the `match` field), filterable by declaration kind, language,
     file, and visibility (`top_n`, default 25).
   - `symbol_context` — focused definition-first context for one symbol:
     identity with a stable 64-hex `symbol_id`, signature, optional hashed
@@ -32,11 +33,13 @@
   kind of every persisted symbol. `validateGraphNode` rejects malformed kind
   maps as corruption, mirroring `exportRanges`.
 - Public API addition: `extractSignatureText` is now exported from
-  `src/tools/repo-graph/query.ts` and re-exported through the
-  `src/tools/repo-graph.ts` barrel (previously module-private). The five new
-  query functions (`searchSymbols`, `getSymbolContext`, `getImpactCone`,
-  `getDiffContext`, `explainGraphEntry`) live in the new
-  `src/tools/repo-graph/symbol-query.ts` module and are exported through the
+  `src/tools/repo-graph/query.ts` (previously module-private) so
+  `symbol-query.ts` can share the exact pack/identity signature extraction.
+  It is deliberately NOT re-exported through the `src/tools/repo-graph.ts`
+  barrel — no consumer needs it from that path, and the public surface stays
+  minimal. The five new query functions (`searchSymbols`, `getSymbolContext`,
+  `getImpactCone`, `getDiffContext`, `explainGraphEntry`) live in the new
+  `src/tools/repo-graph/symbol-query.ts` module and ARE exported through the
   barrel.
 
 ## Why
@@ -71,8 +74,17 @@ No breaking changes. All new fields and actions are additive:
 - `diff_context` parses diff text strictly; a diff with no parseable file
   headers returns a structured validation error. `+++ /dev/null` deletions map
   to file-granularity entries (no new-side line ranges exist).
-- Declaration kinds come from tree-sitter defs; regex-fallback scans (when
-  tree-sitter is unavailable) produce no kinds — visible via
-  `graph_health.kindCoverage` and `kind: null` hits.
+- Declaration kinds come from tree-sitter defs and are populated ONLY by the
+  async build path — the sync `buildWorkspaceGraph` (no live production
+  caller; `repo_map action="build"` and the builder hook both use the async
+  variant) and regex-fallback scans (tree-sitter unavailable) produce no
+  kinds, visible via `graph_health.kindCoverage` and `kind: null` hits.
+- `symbol_search` matching is case-insensitive at every tier (a query
+  `getuser` matches `getUser` as `exact`).
+- `diff_context` parses unified diffs with an exact hunk-body line count
+  (promised by each `@@` header): diff body lines that merely look like
+  `+++`/`---` headers are kept in the body. Malformed/truncated hunks whose
+  body lines fall short of the promised counts therefore swallow subsequent
+  header-looking lines, matching strict-parser behavior.
 - `symbol_context`/`graph_explain` legacy (pre-1.5.0) edges surface with
   `null`/absent confidence and an aggregate warning rather than being dropped.

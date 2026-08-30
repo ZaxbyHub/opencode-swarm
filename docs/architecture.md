@@ -103,7 +103,7 @@ actions include:
   vs probe truncation), extraction-failure summaries by reason, and
   `exportKinds` coverage.
 - KG-14 graph query actions (issue #1535): `symbol_search` finds symbols by
-  name with tiered matching (exact/prefix/substring/fuzzy) filterable by
+  name with tiered, case-insensitive matching (exact/prefix/substring/subsequence) filterable by
   declaration kind, language, file, and visibility; `symbol_context` returns a
   focused definition-first context (stable symbol id, signature, optional
   source, direct callers/callees) for a symbol id or file+symbol;

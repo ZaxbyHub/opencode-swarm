@@ -311,3 +311,76 @@ describe('getImpactCone: bounding', () => {
 		expect(result.tests.every((t) => !path.isAbsolute(t))).toBe(true);
 	});
 });
+
+describe('getImpactCone: OW-8 traversal hard cap', () => {
+	test('intermediate entries are hard-capped and overflow counts as dropped', () => {
+		// 5005 distinct callers — one past the 5000-entry traversal cap. The
+		// returned cone is bounded by top_n; the five overflow entries must
+		// surface in budget.dropped and the warning, not vanish.
+		const graph = makeGraph();
+		graph.symbolEdges = Array.from({ length: 5005 }, (_, i) =>
+			symEdge(
+				{ file: `src/c${i}.ts`, symbol: `run${i}` },
+				{ file: 'src/util.ts', symbol: 'add' },
+				{ confidence: 0.9, resolution: 'import_binding' },
+			),
+		) as RepoGraph['symbolEdges'];
+		for (let i = 0; i < 8; i++) {
+			graph.nodes[node(`src/c${i}.ts`).filePath] = node(`src/c${i}.ts`);
+		}
+		const result = getImpactCone(graph, {
+			file: 'src/util.ts',
+			symbol: 'add',
+			maxDepth: 1,
+			topN: 50,
+		});
+		expect(result.entries).toHaveLength(50);
+		// 5000 collected − 50 returned + 5 overflow beyond the hard cap.
+		expect(result.budget.entriesReturned).toBe(50);
+		expect(result.budget.dropped).toBe(5000 - 50 + 5);
+		expect(result.truncated).toBe(true);
+		expect(result.warnings.join('\n')).toContain(
+			'beyond the 5000-entry traversal cap',
+		);
+		expect(result.warnings.join('\n')).toContain(
+			'cone traversal stopped at 5000 relationships',
+		);
+	});
+
+	test('multi-depth dense graphs bound queue/emitted/file state mid-traversal', () => {
+		// add -> mid (depth 1) -> 6000 leaves (depth 2): the cap fires while
+		// the DEPTH-2 frontier is being discovered, proving the bound applies
+		// to traversal state (queue/emitted/coneFileKeys), not just output.
+		const graph = makeGraph();
+		graph.symbolEdges = [
+			symEdge(
+				{ file: 'src/util.ts', symbol: 'add' },
+				{ file: 'src/mid.ts', symbol: 'mid' },
+				{ confidence: 0.9, resolution: 'import_binding' },
+			),
+			...Array.from({ length: 6000 }, (_, i) =>
+				symEdge(
+					{ file: 'src/mid.ts', symbol: 'mid' },
+					{ file: `src/deep${i}.ts`, symbol: `leaf${i}` },
+					{ confidence: 0.9, resolution: 'import_binding' },
+				),
+			),
+		] as RepoGraph['symbolEdges'];
+		graph.nodes[node('src/mid.ts').filePath] = node('src/mid.ts');
+		const result = getImpactCone(graph, {
+			file: 'src/util.ts',
+			symbol: 'add',
+			maxDepth: 2,
+			topN: 50,
+		});
+		// 1 depth-1 edge + 4999 depth-2 edges emitted = 5000; the remaining
+		// 1001 depth-2 relationships are counted as dropped, unvisited.
+		expect(result.entries).toHaveLength(50);
+		expect(result.budget.entriesReturned).toBe(50);
+		expect(result.budget.dropped).toBe(5000 - 50 + 1001);
+		expect(result.truncated).toBe(true);
+		expect(result.warnings.join('\n')).toContain(
+			'cone traversal stopped at 5000 relationships',
+		);
+	});
+});

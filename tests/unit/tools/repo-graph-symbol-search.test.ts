@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 import * as path from 'node:path';
 import {
+	explainGraphEntry,
 	type GraphNode,
+	getDiffContext,
+	getImpactCone,
+	getSymbolContext,
 	type RepoGraph,
 	resetQueryCache,
 	searchSymbols,
@@ -222,5 +226,38 @@ describe('searchSymbols: bounding and edge cases', () => {
 			expect(hit.file.includes('\\')).toBe(false);
 			expect(path.isAbsolute(hit.file)).toBe(false);
 		}
+	});
+});
+
+describe('PRR-019: empty-graph behavior across the five query functions', () => {
+	const emptyGraph = (): RepoGraph => ({
+		schema_version: '1.6.0',
+		workspaceRoot: root,
+		nodes: {},
+		edges: [],
+		metadata: {
+			generatedAt: '1',
+			generator: 'test',
+			nodeCount: 0,
+			edgeCount: 0,
+		},
+	});
+
+	test('all five functions answer empty graphs without throwing', () => {
+		const graph = emptyGraph();
+		expect(searchSymbols(graph, { query: 'anything' }).hits).toEqual([]);
+		const ctx = getSymbolContext(graph, { file: 'src/x.ts', symbol: 'a' });
+		expect(ctx.found).toBe(false);
+		expect(ctx.note).toContain('Target file not found in graph');
+		const cone = getImpactCone(graph, { file: 'src/x.ts' });
+		expect(cone.entries).toEqual([]);
+		expect(cone.warnings.join('\n')).toContain(
+			'target file not found in graph',
+		);
+		const diff = getDiffContext(graph, { files: ['src/x.ts'] });
+		expect(diff.files[0]?.known).toBe(false);
+		const explain = explainGraphEntry(graph, { file: 'src/x.ts' });
+		expect(explain.fileKnown).toBe(false);
+		expect(explain.reasons).toEqual([]);
 	});
 });

@@ -164,4 +164,16 @@ describe('repo_map: symbol_search (KG-14)', () => {
 		expect((r.hits as unknown[]).length).toBe(1);
 		expect(r.budget).toEqual({ returned: 1, dropped: 1 });
 	});
+
+	it('returns an empty, budgeted result for a zero-hit search term', async () => {
+		await call({ action: 'build' });
+		const r = parse(
+			await call({ action: 'symbol_search', symbol: 'zzzznope' }),
+		);
+		expect(r.success).toBe(true);
+		expect(r.hits).toEqual([]);
+		expect(r.count).toBe(0);
+		expect(r.budget).toEqual({ returned: 0, dropped: 0 });
+		expect((r.warnings as string[]).join('\n')).not.toContain('omitted');
+	});
 });

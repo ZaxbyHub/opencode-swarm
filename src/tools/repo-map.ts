@@ -209,6 +209,17 @@ function ok(action: string, payload: Record<string, unknown>): string {
 	return JSON.stringify({ success: true, action, ...payload }, null, 2);
 }
 
+/**
+ * Uniform error-extraction for the KG-14 action handlers (OW-7): every new
+ * action wraps its query call so an unexpected throw yields THIS module's
+ * `{success, action, error}` envelope rather than the generic
+ * create-tool failure shape, keeping `.action`-keyed consumers working.
+ */
+function failureMessage(e: unknown): string {
+	const message = e instanceof Error ? e.message : String(e);
+	return message;
+}
+
 function resolveRepoGraphConfig(directory: string): RepoGraphConfig {
 	try {
 		const { config } = _internals.loadPluginConfigWithMeta(directory);
@@ -302,7 +313,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 		'"callers" (files that reference an exported symbol, call-site granularity; needs file+symbol), ' +
 		'"dead_exports" (advisory: exported symbols with no detected in-repo reference; results are review candidates, not delete directives), ' +
 		'"context_pack" (token-budgeted slice of source spans for a target symbol — definition + transitive callers/callees; advisory/conservative; needs file+symbol; uses max_depth for traversal depth, top_n for span cap; set include_source=true to embed source text in spans), ' +
-		'"symbol_search" (find symbols by name with tiered matching — exact/prefix/substring/fuzzy — filterable by kind, language, file, and visibility; needs symbol as the search term; kind filters require a schema 1.6.0+ graph), ' +
+		'"symbol_search" (find symbols by name with tiered, case-insensitive matching — exact/prefix/substring/subsequence, reported in each hit\'s `match` field — filterable by kind, language, file, and visibility; needs symbol as the search term; kind filters require a schema 1.6.0+ graph), ' +
 		'"symbol_context" (focused definition-first context for one symbol — identity, stable symbol_id, signature, optional source, and direct callers/callees; needs file+symbol or symbol_id), ' +
 		'"impact_cone" (structured impact of changing a file or symbol — symbol-level callers/callees by depth with confidence, file-level blast radius and risk, affected tests, routes, data/security facts, package boundaries; needs file, optional symbol), ' +
 		'"diff_context" (map changed files or a unified diff to changed symbols and per-file impact cones; needs files or diff; diff paths must be workspace-relative and safe), ' +
@@ -354,7 +365,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			.string()
 			.optional()
 			.describe(
-				'Exported symbol name. Restricts consumers on action="importers"; required for action="callers"/"context_pack". For action="symbol_search" it is the search term (name, prefix, or fuzzy fragment). For action="symbol_context"/"impact_cone"/"graph_explain" it selects a specific symbol in the target file.',
+				'Exported symbol name. Restricts consumers on action="importers"; required for action="callers"/"context_pack". For action="symbol_search" it is the search term (name, prefix, or subsequence fragment; matching is case-insensitive). For action="symbol_context"/"impact_cone"/"graph_explain" it selects a specific symbol in the target file.',
 			),
 		symbol_id: z
 			.string()
@@ -656,15 +667,19 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				if (fErr) return err(action, `invalid file: ${fErr}`);
 				fileTarget = toRelativeGraphPath(a.file, directory);
 			}
-			const result = searchSymbols(graph, {
-				query: a.symbol,
-				...(a.kind !== undefined ? { kind: a.kind } : {}),
-				...(a.visibility !== undefined ? { visibility: a.visibility } : {}),
-				...(a.language !== undefined ? { language: a.language } : {}),
-				...(fileTarget !== undefined ? { file: fileTarget } : {}),
-				...(a.top_n !== undefined ? { topN: a.top_n } : {}),
-			});
-			return ok(action, { ...result, ...freshness });
+			try {
+				const result = searchSymbols(graph, {
+					query: a.symbol,
+					...(a.kind !== undefined ? { kind: a.kind } : {}),
+					...(a.visibility !== undefined ? { visibility: a.visibility } : {}),
+					...(a.language !== undefined ? { language: a.language } : {}),
+					...(fileTarget !== undefined ? { file: fileTarget } : {}),
+					...(a.top_n !== undefined ? { topN: a.top_n } : {}),
+				});
+				return ok(action, { ...result, ...freshness });
+			} catch (e) {
+				return err(action, failureMessage(e));
+			}
 		}
 
 		if (action === 'symbol_context') {
@@ -691,16 +706,20 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				const sErr = validateSymbol(a.symbol);
 				if (sErr) return err(action, `invalid symbol: ${sErr}`);
 			}
-			const result = getSymbolContext(graph, {
-				...(fileTarget !== undefined ? { file: fileTarget } : {}),
-				...(a.symbol !== undefined ? { symbol: a.symbol } : {}),
-				...(a.symbol_id !== undefined ? { symbolId: a.symbol_id } : {}),
-				...(a.include_source !== undefined
-					? { includeSource: a.include_source }
-					: {}),
-				...(a.top_n !== undefined ? { topN: a.top_n } : {}),
-			});
-			return ok(action, { ...result, ...freshness });
+			try {
+				const result = getSymbolContext(graph, {
+					...(fileTarget !== undefined ? { file: fileTarget } : {}),
+					...(a.symbol !== undefined ? { symbol: a.symbol } : {}),
+					...(a.symbol_id !== undefined ? { symbolId: a.symbol_id } : {}),
+					...(a.include_source !== undefined
+						? { includeSource: a.include_source }
+						: {}),
+					...(a.top_n !== undefined ? { topN: a.top_n } : {}),
+				});
+				return ok(action, { ...result, ...freshness });
+			} catch (e) {
+				return err(action, failureMessage(e));
+			}
 		}
 
 		if (action === 'preflight_packet') {
@@ -761,8 +780,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				});
 				return ok(action, { ...result, ...freshness });
 			} catch (e) {
-				const message = e instanceof Error ? e.message : String(e);
-				return err(action, message);
+				return err(action, failureMessage(e));
 			}
 		}
 
@@ -934,13 +952,17 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				const sErr = validateSymbol(a.symbol);
 				if (sErr) return err(action, `invalid symbol: ${sErr}`);
 			}
-			const result = getImpactCone(graph, {
-				file: target,
-				...(a.symbol !== undefined ? { symbol: a.symbol } : {}),
-				maxDepth: a.max_depth ?? 3,
-				topN: a.top_n ?? 50,
-			});
-			return ok(action, { ...result, ...freshness });
+			try {
+				const result = getImpactCone(graph, {
+					file: target,
+					...(a.symbol !== undefined ? { symbol: a.symbol } : {}),
+					maxDepth: a.max_depth ?? 3,
+					topN: a.top_n ?? 50,
+				});
+				return ok(action, { ...result, ...freshness });
+			} catch (e) {
+				return err(action, failureMessage(e));
+			}
 		}
 
 		if (action === 'graph_explain') {
@@ -948,13 +970,17 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				const sErr = validateSymbol(a.symbol);
 				if (sErr) return err(action, `invalid symbol: ${sErr}`);
 			}
-			const result = explainGraphEntry(graph, {
-				file: target,
-				...(a.symbol !== undefined ? { symbol: a.symbol } : {}),
-				...(a.line !== undefined ? { line: a.line } : {}),
-				...(a.top_n !== undefined ? { topN: a.top_n } : {}),
-			});
-			return ok(action, { ...result, ...freshness });
+			try {
+				const result = explainGraphEntry(graph, {
+					file: target,
+					...(a.symbol !== undefined ? { symbol: a.symbol } : {}),
+					...(a.line !== undefined ? { line: a.line } : {}),
+					...(a.top_n !== undefined ? { topN: a.top_n } : {}),
+				});
+				return ok(action, { ...result, ...freshness });
+			} catch (e) {
+				return err(action, failureMessage(e));
+			}
 		}
 
 		if (action === 'dependencies') {

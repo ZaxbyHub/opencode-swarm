@@ -143,6 +143,39 @@ describe('getSymbolContext: resolution', () => {
 		expect(result.callees).toEqual([]);
 	});
 
+	test('PRR-001: signatures come from the definition line for symbols past line 1', () => {
+		// Every other fixture puts the symbol at line 1, which masked the
+		// offset defect: the signature scan received an absolute line number
+		// against a definition-relative slice and went out of bounds.
+		const source = [
+			'export const pad1 = 1;',
+			'export const pad2 = 2;',
+			'export const pad3 = 3;',
+			'export function deep(a: number) {',
+			'  return a;',
+			'}',
+			'export function WRONG_LINE(x: string) { return x; }',
+			'',
+		].join('\n');
+		const util = realNode(
+			tmp,
+			'src/deep.ts',
+			source,
+			['deep'],
+			{ deep: { startLine: 4, endLine: 6 } },
+			{ deep: 'function' },
+		);
+		util.write();
+		const result = getSymbolContext(makeGraph(tmp, [util.node]), {
+			file: 'src/deep.ts',
+			symbol: 'deep',
+		});
+		expect(result.found).toBe(true);
+		expect(result.identity?.startLine).toBe(4);
+		expect(result.signature).toBe('export function deep(a: number) {');
+		expect(result.signature).not.toContain('WRONG_LINE');
+	});
+
 	test('resolves by stable symbol_id matching createStableSymbolId', () => {
 		const util = realNode(
 			tmp,

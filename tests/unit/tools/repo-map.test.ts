@@ -653,13 +653,13 @@ describe('repo_map: context_pack', () => {
 		delete graph.symbolEdges;
 		for (const node of Object.values(graph.nodes)) {
 			delete node.exportRanges;
+			delete node.exportKinds;
 		}
-		// Touch the file to update mtime so loadGraph re-reads it.
-		// Use utimesSync with a clearly-later timestamp rather than relying on
-		// writeFileSync's mtime: on Windows, two writes in the same millisecond
-		// can leave mtime unchanged at filesystem granularity, so loadGraph's
-		// mtime-based cache returns the stale 1.2.0 graph and schemaSupported
-		// wrongly reports true. Issue #1729 Windows quarantine.
+		// Touch the file so loadGraph re-reads it: utimesSync with a clearly-later
+		// timestamp instead of relying on writeFileSync mtime — on Windows two
+		// writes in the same millisecond can leave mtime unchanged at filesystem
+		// granularity, so loadGraph's cache would return the stale 1.2.0 graph
+		// and schemaSupported would wrongly report true (issue #1729).
 		fs.writeFileSync(graphPath, JSON.stringify(graph), 'utf-8');
 		const later = new Date(Date.now() + 5000);
 		fs.utimesSync(graphPath, later, later);
