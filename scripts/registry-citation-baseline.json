@@ -1,5 +1,5 @@
 {
-	"$comment": "Issue #1534 anchor ratchet. Every entry is PRE-EXISTING citation debt in a row owned by another issue, captured so the #1534 gate could be landed without editing rows it does not own. An entry is NOT approved drift: it records a citation whose adjacent identifier does not occur in the cited line range. This baseline may only SHRINK \u2014 scripts/check-registry-citations.ts fails when an entry starts passing, which forces its removal. Keyed on (rowId, file, identifier); line numbers are deliberately excluded so line churn cannot invalidate an entry. Regenerate with `bun run scripts/check-registry-citations.ts --write` (review the diff \u2014 --write will also happily record NEW drift).",
+	"$comment": "Issue #1534 anchor ratchet. Every entry is PRE-EXISTING citation debt in a row owned by another issue, captured so the #1534 gate could be landed without editing rows it does not own. An entry is NOT approved drift: it records a citation whose adjacent identifier does not occur in the cited line range. This baseline may only SHRINK — scripts/check-registry-citations.ts fails when an entry starts passing, which forces its removal. Keyed on (rowId, file, identifier); line numbers are deliberately excluded so line churn cannot invalidate an entry. Regenerate with `bun run scripts/check-registry-citations.ts --write` (review the diff — --write will also happily record NEW drift).",
 	"entries": [
 		{
 			"rowId": "attestations",
@@ -364,13 +364,6 @@
 			"identifier": "readFindings",
 			"kind": "out-of-range",
 			"note": "Pre-existing debt, not approved drift: \"readFindings\" exists in src/tools/write-pr-review-artifact.ts but not inside src/tools/write-pr-review-artifact.ts:86-101 (pr-review-run-artifacts.readerCitations[0])."
-		},
-		{
-			"rowId": "project-init-configs",
-			"file": "src/cli/index.ts",
-			"identifier": "saveJson",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"saveJson\" exists in src/cli/index.ts but not inside src/cli/index.ts:285 (project-init-configs.writerCitations[1])."
 		},
 		{
 			"rowId": "recommendation-ledger",

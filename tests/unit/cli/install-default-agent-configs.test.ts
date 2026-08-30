@@ -9,6 +9,7 @@ import {
 	ORCHESTRATOR_NAME,
 } from '../../../src/config/constants';
 import { loadPluginConfig } from '../../../src/config/loader';
+import { CONFIG_SCHEMA_REF } from '../../../src/config/project-init';
 
 const CLI_PATH = join(import.meta.dir, '../../../src/cli/index.ts');
 
@@ -221,7 +222,8 @@ describe('writeProjectConfigIfMissing', () => {
 		expect(existsSync(configPath)).toBe(true);
 
 		const parsed = JSON.parse(await readFile(configPath, 'utf-8'));
-		expect(parsed).toEqual({ agents: {} });
+		// $schema reference (issue #1663) + the empty agents starter map.
+		expect(parsed).toEqual({ $schema: CONFIG_SCHEMA_REF, agents: {} });
 	});
 });
 
@@ -255,6 +257,8 @@ describe('install() uses DEFAULT_AGENT_CONFIGS', () => {
 		// Plugin config should have agents populated from DEFAULT_AGENT_CONFIGS
 		expect(pluginConfig).toHaveProperty('agents');
 		expect(typeof pluginConfig.agents).toBe('object');
+		// Global install template also carries the $schema reference (issue #1663).
+		expect(pluginConfig.$schema).toBe(CONFIG_SCHEMA_REF);
 
 		// Verify agent entries match DEFAULT_AGENT_CONFIGS structure
 		for (const [agent, expectedConfig] of Object.entries(
@@ -314,7 +318,10 @@ describe('install() uses DEFAULT_AGENT_CONFIGS', () => {
 			await readFile(projectConfigPath, 'utf-8'),
 		);
 
-		expect(projectConfig).toEqual({ agents: {} });
+		expect(projectConfig).toEqual({
+			$schema: CONFIG_SCHEMA_REF,
+			agents: {},
+		});
 	});
 });
 
@@ -365,7 +372,10 @@ describe('global config survives install', () => {
 		const projectConfig = JSON.parse(
 			await readFile(projectConfigPath, 'utf-8'),
 		);
-		expect(projectConfig).toEqual({ agents: {} });
+		expect(projectConfig).toEqual({
+			$schema: CONFIG_SCHEMA_REF,
+			agents: {},
+		});
 
 		// Loader must resolve global custom model, not the schema default.
 		// Set XDG_CONFIG_HOME so getUserConfigDir() points to our temp dir.
@@ -462,6 +472,9 @@ describe('backward compatibility', () => {
 		expect(pluginConfig2).toEqual(pluginConfig1);
 
 		// Project config should still exist with minimal starter content
-		expect(projectConfig2).toEqual({ agents: {} });
+		expect(projectConfig2).toEqual({
+			$schema: CONFIG_SCHEMA_REF,
+			agents: {},
+		});
 	});
 });

@@ -3016,7 +3016,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/utils/gitignore-warning.ts',
 		],
 		writerCitations: [
-			'src/config/project-init.ts:16 writeProjectConfigIfNew (flag wx — exclusive once); :77 writeSwarmConfigExampleIfNew',
+			'src/config/project-init.ts:31 writeProjectConfigIfNew (flag wx — exclusive once); :92 writeSwarmConfigExampleIfNew',
 			'src/cli/index.ts:285 saveJson — CLI project config save (outside .swarm)',
 		],
 		readerCitations: ['config loader; CLI loadJsonc (:270)'],

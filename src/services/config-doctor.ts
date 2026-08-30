@@ -1737,6 +1737,26 @@ function validateConfigKey(path: string, value: unknown): ConfigFinding[] {
 			break;
 		}
 
+		case '$schema': {
+			// Inert editor metadata (issue #1663). The loader's zod schema
+			// degrades malformed values to absent, so a non-string here is only
+			// reachable via direct doctor invocation — but the case must exist
+			// so the every-key validation ratchet holds and direct callers get
+			// an accurate finding.
+			if (value !== undefined && typeof value !== 'string') {
+				findings.push({
+					id: 'invalid-$schema-type',
+					title: 'Invalid $schema type',
+					description: `"$schema" must be a string (JSON Schema URL), got ${typeof value}`,
+					severity: 'error',
+					path: '$schema',
+					currentValue: value,
+					autoFixable: false,
+				});
+			}
+			break;
+		}
+
 		case 'full_auto': {
 			emitObjectTypeMismatch('full_auto', value, findings);
 			break;
