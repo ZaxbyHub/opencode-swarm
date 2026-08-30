@@ -36,6 +36,18 @@ describe('PluginConfigSchema — $schema whitelist (issue #1663)', () => {
 			expect('$schema' in result.data).toBe(false);
 		}
 	});
+
+	test('malformed $schema values degrade to absent, not a parse failure', () => {
+		// `.catch(undefined)` — a non-string $schema is inert metadata and must
+		// never raise invalid_type into the loader's recovery ladder (where,
+		// with guardrails disabled, it could cascade to guardrails-only
+		// defaults; see loader-unknown-top-level-warn.test.ts MF-1 tests).
+		const result = PluginConfigSchema.safeParse({ $schema: 123 });
+		expect(result.success).toBe(true);
+		if (result.success) {
+			expect(result.data.$schema).toBeUndefined();
+		}
+	});
 });
 
 describe('PluginConfigSchema — per-key descriptions ratchet (issue #1663)', () => {

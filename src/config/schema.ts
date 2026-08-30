@@ -3339,11 +3339,17 @@ export const PluginConfigSchema = z.object({
 	// consumer. Whitelisting it here also teaches config-doctor's
 	// KNOWN_TOP_LEVEL_KEYS and the generated opencode-swarm.schema.json about
 	// the key, so editors do not flag it under additionalProperties: false.
+	// `.catch(undefined)` degrades a MALFORMED value (e.g. `$schema: 123`) to
+	// "absent" instead of raising invalid_type — without it, that one inert
+	// metadata typo cascades down the loader recovery ladder and can end in
+	// guardrails-only defaults (pre-#1663 behavior was silent strip, so
+	// failing the whole config here would be a regression).
 	$schema: z
 		.string()
 		.optional()
+		.catch(undefined)
 		.describe(
-			'JSON Schema URL for editor validation/autocomplete of this file (issue #1663). Ignored at runtime.',
+			'JSON Schema URL for editor validation/autocomplete of this file (issue #1663). Ignored at runtime; malformed values are ignored too.',
 		),
 
 	/** Config format version for migration table. Increment when deprecating fields. Distinct from knowledge.schema_version. */
@@ -3423,7 +3429,7 @@ export const PluginConfigSchema = z.object({
 			return trimmed === '' ? false : trimmed;
 		})
 		.describe(
-			'Auto-select the swarm architect for new sessions instead of OpenCode built-ins. false (default): manual selection. true: enable auto-select and disable built-in build/plan agents. "<architect_name>" (e.g. "mega_architect"): enable targeting one architect in multi-swarm setups.',
+			'Auto-select the swarm architect for new sessions instead of OpenCode built-ins. Omitted or false: manual selection (omitted behaves as false). true: enable auto-select and disable built-in build/plan agents. "<architect_name>" (e.g. "mega_architect"): enable targeting one architect in multi-swarm setups.',
 		),
 
 	// Multiple swarms support

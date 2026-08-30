@@ -6,7 +6,7 @@
   "type": "object",
   "properties": {
     "$schema": {
-      "description": "JSON Schema URL for editor validation/autocomplete of this file (issue #1663). Ignored at runtime.",
+      "description": "JSON Schema URL for editor validation/autocomplete of this file (issue #1663). Ignored at runtime; malformed values are ignored too.",
       "type": "string"
     },
     "config_format_version": {
@@ -86,7 +86,7 @@
       "type": "string"
     },
     "auto_select_architect": {
-      "description": "Auto-select the swarm architect for new sessions instead of OpenCode built-ins. false (default): manual selection. true: enable auto-select and disable built-in build/plan agents. \"<architect_name>\" (e.g. \"mega_architect\"): enable targeting one architect in multi-swarm setups.",
+      "description": "Auto-select the swarm architect for new sessions instead of OpenCode built-ins. Omitted or false: manual selection (omitted behaves as false). true: enable auto-select and disable built-in build/plan agents. \"<architect_name>\" (e.g. \"mega_architect\"): enable targeting one architect in multi-swarm setups.",
       "anyOf": [
         {
           "type": "boolean"

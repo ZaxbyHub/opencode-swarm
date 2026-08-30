@@ -6,6 +6,7 @@ import {
 	CONFIG_DOCS_MARKER_BEGIN,
 	CONFIG_DOCS_MARKER_END,
 	CONFIG_SCHEMA_CANONICAL_URL,
+	escapeCell,
 	refreshConfigArtifacts,
 	replaceGeneratedDocsSection,
 	serializeConfigSchema,
@@ -78,6 +79,27 @@ describe('generate-config-schema — docs section artifact', () => {
 		expect(section).toContain('object (strict)');
 		expect(section).toContain('`council`');
 	});
+
+	// Pins for summarizeType's rendered Type cells — without these, a
+	// regression of the union/enum/record branches (e.g. back to the literal
+	// word "unknown") passes every other test.
+	test('Type cells render union, enum, and record shapes exactly', () => {
+		const section = buildConfigDocsSection();
+		expect(section).toContain('`auto_select_architect` | boolean \\| string |');
+		expect(section).toContain(
+			'`execution_mode` | enum(strict \\| balanced \\| fast) |',
+		);
+		expect(section).toContain('`agents` | record<string, object> |');
+		expect(section).not.toContain('| unknown |');
+	});
+
+	test('$schema property keeps its plain string type in the emitted schema', () => {
+		// `.catch(undefined)` must not distort the emitted editor-facing type.
+		const parsed = JSON.parse(serializeConfigSchema()) as {
+			properties: Record<string, { type?: string }>;
+		};
+		expect(parsed.properties.$schema?.type).toBe('string');
+	});
 });
 
 describe('generate-config-schema — refresh + replace', () => {
@@ -129,5 +151,46 @@ describe('generate-config-schema — refresh + replace', () => {
 
 	test('refreshConfigArtifacts throws when the docs source is missing', () => {
 		expect(() => refreshConfigArtifacts(root)).toThrow(/configuration\.md/);
+	});
+
+	test('replaceGeneratedDocsSection pins first-BEGIN-to-first-END span on duplicated markers', () => {
+		const doc =
+			`# top\n${CONFIG_DOCS_MARKER_BEGIN}\nstale\n${CONFIG_DOCS_MARKER_END}\n` +
+			`${CONFIG_DOCS_MARKER_BEGIN}\norphaned\n${CONFIG_DOCS_MARKER_END}\n`;
+		const next = replaceGeneratedDocsSection(doc);
+		// First span is swapped for the generated section; the second marker
+		// pair is left verbatim for the drift detector to flag.
+		expect(next).toContain('## Top-level configuration keys');
+		expect(next).toContain('orphaned');
+		expect(next.split(CONFIG_DOCS_MARKER_BEGIN).length - 1).toBe(2);
+	});
+
+	test('refreshConfigArtifacts normalizes a CRLF docs artifact (section becomes LF, rest preserved)', () => {
+		writeDocs(
+			`# Configuration\r\n\r\n${CONFIG_DOCS_MARKER_BEGIN}\r\n${CONFIG_DOCS_MARKER_END}\r\n`,
+		);
+		const first = refreshConfigArtifacts(root);
+		expect(first.docsChanged).toBe(true);
+		const after = fs.readFileSync(
+			path.join(root, 'docs', 'configuration.md'),
+			'utf-8',
+		);
+		// Generated span is LF; hand-written content outside the span keeps
+		// the CRLF line endings it was checked out with.
+		expect(after).toContain('## Top-level configuration keys');
+		expect(after.includes(`${CONFIG_DOCS_MARKER_BEGIN}\r`)).toBe(false);
+		expect(after.startsWith('# Configuration\r\n')).toBe(true);
+
+		// Second run is idempotent — the LF section now matches expectation.
+		const second = refreshConfigArtifacts(root);
+		expect(second.docsChanged).toBe(false);
+	});
+});
+
+describe('generate-config-schema — escapeCell', () => {
+	test('escapes pipes and flattens newlines', () => {
+		expect(escapeCell('a | b')).toBe('a \\| b');
+		expect(escapeCell('line1\nline2')).toBe('line1 line2');
+		expect(escapeCell('plain')).toBe('plain');
 	});
 });

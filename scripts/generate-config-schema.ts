@@ -40,7 +40,15 @@ export const CONFIG_DOCS_MARKER_BEGIN =
 export const CONFIG_DOCS_MARKER_END =
 	'<!-- opencode-swarm: end generated top-level-config-keys -->';
 
-/** Unversioned canonical URL of the published schema (any published version). */
+/**
+ * Unversioned canonical URL of the published schema (any published version).
+ * Used as the generated artifact's `$id` and in documentation. This is a
+ * DIFFERENT convention from `CONFIG_SCHEMA_REF` in src/config/project-init.ts,
+ * which writes a VERSION-pinned URL into user config files: a config file is
+ * validated by the schema of the plugin version that authored it (no release
+ * race), while this unversioned URL always resolves to the latest published
+ * schema. Both resolve against the same file in every published package.
+ */
 export const CONFIG_SCHEMA_CANONICAL_URL =
 	'https://unpkg.com/opencode-swarm/opencode-swarm.schema.json';
 
@@ -152,7 +160,13 @@ function summarizeDefault(value: unknown): string {
 	return Object.keys(value).length === 0 ? '{}' : '{ … }';
 }
 
-function escapeCell(text: string): string {
+/**
+ * Escape a description for a markdown table cell (pipes and newlines).
+ * Exported for tests — the pipe branch is dead until a future `.describe()`
+ * contains a `|`, and this test pins the contract so that future description
+ * cannot silently break the table.
+ */
+export function escapeCell(text: string): string {
 	return text.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 }
 
@@ -228,6 +242,12 @@ function readFileIfExists(filePath: string): string | undefined {
 /**
  * Regenerate both artifacts under `root` (repo root). Idempotent: when the
  * checked-in content already matches, nothing is written.
+ *
+ * Writes use plain `fs.writeFileSync` rather than the atomic-write helpers in
+ * src/utils/atomic-write.ts on purpose: those are scoped to bounded
+ * `.swarm/` production state (`atomicWriteSwarmFile` refuses non-.swarm
+ * targets), while these artifacts are deterministic dev/build outputs that a
+ * re-run regenerates byte-for-byte if a crash leaves one truncated.
  */
 export function refreshConfigArtifacts(root: string): ConfigArtifactRefreshResult {
 	const schemaPath = path.join(root, CONFIG_SCHEMA_RELATIVE_PATH);

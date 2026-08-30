@@ -6,9 +6,9 @@
   shipped in the npm package.** Config files that reference it via `"$schema"`
   get validation and autocomplete in editors with JSON Schema support. The
   generated schema documents every key (descriptions come from new `.describe()`
-  annotations on all 70 top-level schema fields) and flags unknown top-level
-  keys as editor errors — authoring advice that until now had no edit-time
-  surface at all.
+  annotations on all 71 top-level schema fields, including the new `$schema`
+  key) and flags unknown top-level keys as editor errors — authoring advice
+  that until now had no edit-time surface at all.
 - **Config files created by the plugin now include `"$schema"` automatically**:
   project init (`.opencode/opencode-swarm.json`), the `.swarm/config.example.json`
   example, and both CLI `install` templates (global + project). The reference is

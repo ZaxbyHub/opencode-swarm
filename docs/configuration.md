@@ -28,8 +28,12 @@ configuration key:
 }
 ```
 
-Config files created by the plugin (project init, CLI install) already include this
-reference. `"$schema"` is pure metadata and is ignored at runtime.
+The URL above is the canonical always-latest form. Config files created by the plugin
+(project init, CLI install) write the same URL pinned to the plugin version that authored
+the file (e.g. `https://unpkg.com/opencode-swarm@7.158.1/opencode-swarm.schema.json`) so
+validation matches the installed version; both forms resolve to the same published file.
+To adopt the reference in an existing config, add the `$schema` line shown above as the
+first key. `"$schema"` is pure metadata and is ignored at runtime.
 
 ## Environment variables
 
@@ -70,11 +74,11 @@ Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit insid
 
 | Key | Type | Default | Description |
 | --- | ---- | ------- | ----------- |
-| `$schema` | string | — | JSON Schema URL for editor validation/autocomplete of this file (issue #1663). Ignored at runtime. |
+| `$schema` | string | — | JSON Schema URL for editor validation/autocomplete of this file (issue #1663). Ignored at runtime; malformed values are ignored too. |
 | `config_format_version` | integer | 1 | Config format version for the migration table. Increment when fields are deprecated. Distinct from knowledge.schema_version. |
 | `agents` | record<string, object> | — | Per-agent overrides keyed by agent name for the default swarm (e.g. "architect", "coder"). Multi-swarm setups configure agents under swarms.<id>.agents instead. |
 | `default_agent` | string | — | Agent set as the primary mode. Omitted: every generated *_architect is primary. Exact generated name (e.g. "local_architect"): only that agent. Base role name (e.g. "coder"): every generated agent with that base role. Unknown strings warn once and fall back to architect primaries. |
-| `auto_select_architect` | boolean \| string | — | Auto-select the swarm architect for new sessions instead of OpenCode built-ins. false (default): manual selection. true: enable auto-select and disable built-in build/plan agents. "<architect_name>" (e.g. "mega_architect"): enable targeting one architect in multi-swarm setups. |
+| `auto_select_architect` | boolean \| string | — | Auto-select the swarm architect for new sessions instead of OpenCode built-ins. Omitted or false: manual selection (omitted behaves as false). true: enable auto-select and disable built-in build/plan agents. "<architect_name>" (e.g. "mega_architect"): enable targeting one architect in multi-swarm setups. |
 | `swarms` | record<string, object> | — | Multiple swarms keyed by swarm ID (no underscores allowed). The first swarm, or one named "default", provides the primary architect. |
 | `max_iterations` | number | 5 | Maximum pipeline iterations per task (1-10). |
 | `pipeline` | object | — | Pipeline stage/model settings. |

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { loadPluginConfig } from '../../../src/config/loader';
+import { _internals, loadPluginConfig } from '../../../src/config/loader';
 import {
 	clearDeferredWarnings,
 	getDeferredWarnings,
@@ -44,6 +44,9 @@ beforeEach(() => {
 	process.env.XDG_CONFIG_HOME = path.join(sandbox, 'xdg-empty');
 	fs.mkdirSync(process.env.XDG_CONFIG_HOME, { recursive: true });
 	clearDeferredWarnings();
+	// The warning is deduped per process (bounded module state); reset so
+	// tests stay order-independent (AGENTS.md invariant 7).
+	_internals.resetUnknownTopLevelKeyWarning();
 });
 
 afterEach(() => {
@@ -111,6 +114,86 @@ describe('config/loader — unknown top-level key warning (#1663)', () => {
 
 	it('does not warn when no config file exists', () => {
 		loadPluginConfig(projectDir);
+		expect(unknownKeyWarnings()).toEqual([]);
+	});
+
+	it('warns at most once per distinct unknown-key set (dedup across loads)', () => {
+		writeProjectConfig({ guardrailz: { enabled: true } });
+		loadPluginConfig(projectDir);
+		loadPluginConfig(projectDir);
+		loadPluginConfig(projectDir);
+		expect(unknownKeyWarnings()).toHaveLength(1);
+	});
+
+	it('a changed unknown-key set warns again after a resolved set', () => {
+		writeProjectConfig({ guardrailz: { enabled: true } });
+		loadPluginConfig(projectDir);
+		fs.writeFileSync(
+			path.join(projectDir, '.opencode', 'opencode-swarm.json'),
+			JSON.stringify({ max_iterations: 4 }),
+		);
+		loadPluginConfig(projectDir);
+		expect(unknownKeyWarnings()).toHaveLength(1);
+		fs.writeFileSync(
+			path.join(projectDir, '.opencode', 'opencode-swarm.json'),
+			JSON.stringify({ watchccion: { enabled: true }, max_iterations: 4 }),
+		);
+		loadPluginConfig(projectDir);
+		// Different unknown set → surfaces again; the resolved middle load
+		// warned nothing new.
+		expect(unknownKeyWarnings()).toHaveLength(2);
+	});
+});
+
+describe('config/loader — malformed $schema containment (PR review: MF-1)', () => {
+	it('degrades a malformed $schema to absent instead of failing the load', () => {
+		writeProjectConfig({ $schema: 123, max_iterations: 7 });
+		const config = loadPluginConfig(projectDir);
+		expect(config.max_iterations).toBe(7);
+		expect(config.$schema).toBeUndefined();
+		// Inert metadata — never reported as an unknown key.
+		expect(unknownKeyWarnings()).toEqual([]);
+	});
+
+	it('a malformed $schema never cascades to guardrails-only defaults', () => {
+		// Regression guard for the review finding: a typed $schema raised
+		// invalid_type, which stripUnrecognizedKeys cannot drop, and with
+		// guardrails explicitly disabled the value-recovery path was skipped —
+		// wiping the entire config to guardrails defaults. `.catch(undefined)`
+		// keeps this ordinary payload loading intact.
+		writeProjectConfig({
+			$schema: 123,
+			max_iterations: 7,
+			guardrails: { enabled: false },
+		});
+		const config = loadPluginConfig(projectDir);
+		expect(config.max_iterations).toBe(7);
+		expect(config.guardrails?.enabled).toBe(false);
+		expect(unknownKeyWarnings()).toEqual([]);
+	});
+});
+
+describe('config/loader — dormant legacy v6.12 keys (PR review: MF-2)', () => {
+	it('strips legacy keys with accurate wording when an agents block exists', () => {
+		writeProjectConfig({
+			presets: { remote: { architect: { model: 'x' } } },
+			preset: 'remote',
+			swarm_mode: true,
+			agents: { coder: { model: 'y' } },
+		});
+		const config = loadPluginConfig(projectDir);
+
+		// agents wins; legacy keys are gone from the merged raw config.
+		expect(config.agents?.coder?.model).toBe('y');
+		expect((config as Record<string, unknown>).presets).toBeUndefined();
+
+		// A dedicated legacy warning — NOT the unknown-top-level-key warning,
+		// which would misreport recognized v6.12 fields as typos.
+		expect(
+			getDeferredWarnings().some((w) =>
+				w.includes('Ignored legacy v6.12 config key(s)'),
+			),
+		).toBe(true);
 		expect(unknownKeyWarnings()).toEqual([]);
 	});
 });

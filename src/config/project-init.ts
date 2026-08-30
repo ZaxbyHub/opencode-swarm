@@ -11,7 +11,10 @@ import { DEFAULT_MODELS } from './constants';
  * a config file should be the one shipped by the plugin version that authored
  * it, and unpkg serves every published version. A relative path is unusable
  * because these config files live in the user's project/home directory,
- * outside the installed package.
+ * outside the installed package. This is a DIFFERENT convention from the
+ * unversioned canonical URL (CONFIG_SCHEMA_CANONICAL_URL in
+ * scripts/generate-config-schema.ts) used as the artifact's `$id` and in
+ * docs — both resolve to the same file in every published package.
  */
 export const CONFIG_SCHEMA_REF = `https://unpkg.com/opencode-swarm@${packageJson.version}/opencode-swarm.schema.json`;
 
