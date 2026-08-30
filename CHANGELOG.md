@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.159.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.159.0...v7.159.1) (2026-08-30)
+
+
+### Bug Fixes
+
+* **cost-accounting:** preserve provider cost provenance ([3283f02](https://github.com/ZaxbyHub/opencode-swarm/commit/3283f020c9d6e54fd3e88ba737734322c4f40297))
+
 ## [7.159.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.158.1...v7.159.0) (2026-08-30)
 
 
