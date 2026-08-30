@@ -45,6 +45,7 @@ import type {
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
 import { OUTCOME_BLOCK_THRESHOLD } from './knowledge-types.js';
+import { redactSecrets } from '../memory/redaction.js';
 import {
 	appendUnactionable,
 	quarantineEntry,
@@ -875,12 +876,13 @@ async function appendCuratorSkippedEvent(
 	},
 ): Promise<void> {
 	try {
+		const redactedLesson = redactSecrets(record.lesson);
 		appendCoreEventSync(directory, {
 			timestamp: new Date().toISOString(),
 			event: 'curator_skipped',
 			entry_id: record.entry_id,
-			content_hash: hashContent(record.lesson),
-			lesson: record.lesson.slice(0, 200),
+			content_hash: hashContent(redactedLesson),
+			lesson: redactedLesson.slice(0, 200),
 			reason: record.reason,
 			...(record.duplicate_target_id
 				? { duplicate_target_id: record.duplicate_target_id }
@@ -1165,24 +1167,8 @@ export async function curateAndStoreSwarm(
 				continue;
 			}
 		}
-		// Check for near-duplicates against snapshot + already-planned new entries
-		const duplicate = findActiveSwarmNearDuplicate(
-			lesson,
-			snapshotPlusNew,
-			config.dedup_threshold,
-		);
-		if (duplicate) {
-			pendingReinforcementIds.add(duplicate.id);
-			skipped++;
-			await appendCuratorSkippedEvent(directory, {
-				entry_id: `lesson:${hashContent(lesson)}`,
-				lesson,
-				reason: 'near_duplicate',
-				duplicate_target_id: duplicate.id,
-			});
-			continue; // skip duplicate
-		}
-		// Build the new swarm entry
+		// Build a candidate entry before deduplication so every audit event carries
+		// the same valid entry identity that a non-skipped candidate would have.
 		const entry: SwarmKnowledgeEntry = {
 			id: crypto.randomUUID(),
 			tier: 'swarm',
@@ -1210,6 +1196,23 @@ export async function curateAndStoreSwarm(
 			project_name: projectName,
 			auto_generated: true,
 		};
+		// Check for near-duplicates against snapshot + already-planned new entries
+		const duplicate = findActiveSwarmNearDuplicate(
+			lesson,
+			snapshotPlusNew,
+			config.dedup_threshold,
+		);
+		if (duplicate) {
+			pendingReinforcementIds.add(duplicate.id);
+			skipped++;
+			await appendCuratorSkippedEvent(directory, {
+				entry_id: entry.id,
+				lesson,
+				reason: 'near_duplicate',
+				duplicate_target_id: duplicate.id,
+			});
+			continue; // skip duplicate
+		}
 		// Layer 5 — Mandatory v3 actionability (Change 4). No new entry reaches the
 		// active store without >=1 machine-checkable predicate AND >=1 scope tag.
 		// Plain-prose lessons are enriched via the curator LLM (one retry); entries

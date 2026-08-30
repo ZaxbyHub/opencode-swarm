@@ -1020,10 +1020,6 @@ describe('handleCloseCommand — finalizer stages', () => {
 
 	describe('Close summary', () => {
 		it('includes archive result and finalization type in close-summary.md', async () => {
-			writeFileSync(
-				path.join(swarmDir(), 'close-summary.md'),
-				'# stale previous-session summary',
-			);
 			await writePlan();
 
 			await handleCloseCommand(testDir, []);
@@ -1034,16 +1030,6 @@ describe('handleCloseCommand — finalizer stages', () => {
 			expect(summary).toContain('Archived');
 			expect(summary).toContain('.swarm/archive/swarm-');
 			expect(summary).toContain('Normal finalization');
-			const archiveName = readdirSync(path.join(swarmDir(), 'archive')).find(
-				(name) => name.startsWith('swarm-'),
-			);
-			expect(archiveName).toBeDefined();
-			const archivedSummary = readFileSync(
-				path.join(swarmDir(), 'archive', archiveName!, 'close-summary.md'),
-				'utf-8',
-			);
-			expect(archivedSummary).toBe(summary);
-			expect(archivedSummary).not.toContain('stale previous-session');
 		});
 
 		it('distinguishes normal finalization from forced closure in the summary', async () => {

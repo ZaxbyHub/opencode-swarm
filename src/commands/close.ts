@@ -291,6 +291,23 @@ async function runAbortableSkillReview(
 	}
 }
 
+async function archiveCloseSummary(
+	ctx: Pick<CloseStageContext, 'archiveStageFailed' | 'archiveDir' | 'warnings'>,
+	closeSummaryPath: string,
+): Promise<void> {
+	if (ctx.archiveStageFailed || !ctx.archiveDir) return;
+	try {
+		await fs.copyFile(
+			closeSummaryPath,
+			path.join(ctx.archiveDir, 'close-summary.md'),
+		);
+	} catch (error) {
+		const msg = error instanceof Error ? error.message : String(error);
+		ctx.warnings.push(`Failed to archive close-summary.md: ${msg}`);
+		log('[close-command] Failed to archive close-summary.md:', error);
+	}
+}
+
 function normalizeLessonText(text: string): string {
 	return (text ?? '').trim().toLowerCase();
 }
@@ -2554,17 +2571,12 @@ export async function handleCloseCommand(
 		// exact own-temp cleanup, and cache invalidation in one place.
 		try {
 			await atomicWriteSwarmFile(closeSummaryPath, summaryContent);
-			if (!ctx.archiveStageFailed && ctx.archiveDir) {
-				await fs.copyFile(
-					closeSummaryPath,
-					path.join(ctx.archiveDir, 'close-summary.md'),
-				);
-			}
 		} catch (error) {
 			const msg = error instanceof Error ? error.message : String(error);
 			ctx.warnings.push(`Failed to write close-summary.md: ${msg}`);
 			log('[close-command] Failed to write close-summary.md:', error);
 		}
+		await archiveCloseSummary(ctx, closeSummaryPath);
 
 		// NOTE: writeCheckpoint is intentionally NOT called here. SWARM_PLAN.json and
 		// SWARM_PLAN.md are redundant copies of plan.json/plan.md (already archived in
@@ -2751,6 +2763,7 @@ export const _internals = {
 	runFinalizeRewardSweep,
 	acquireFinalizeLock,
 	runArchiveStage,
+	archiveCloseSummary,
 	runArchiveEvidenceRetention,
 	runCleanStage,
 	runAlignStage,

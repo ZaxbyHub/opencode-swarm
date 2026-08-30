@@ -5,7 +5,13 @@
  * disagree (issue #2030 items 6, 9).
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	rmSync,
+	readFileSync,
+	writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 import type { CloseStageContext } from '../../../src/commands/close.js';
 import { KnowledgeConfigSchema } from '../../../src/config/schema.js';
@@ -413,6 +419,62 @@ describe('close_archive_result telemetry event (issue #2030)', () => {
 			expect(planArt!.attempt).toBe('failed');
 			expect(planArt!.source_disposition).toBe('removed');
 			expect(planArt!.reason_code).toBe('copy_failed');
+		} finally {
+			restore();
+		}
+	});
+});
+
+describe('close-summary archive copy', () => {
+	it('copies the freshly written summary into a healthy archive bundle', async () => {
+		const { ci, restore } = await importClose();
+		try {
+			const summaryPath = path.join(testDir, '.swarm', 'close-summary.md');
+			const archiveDir = path.join(testDir, '.swarm', 'archive', 'swarm-test');
+			mkdirSync(archiveDir, { recursive: true });
+			writeFileSync(summaryPath, '# current summary');
+			const ctx = { archiveStageFailed: false, archiveDir, warnings: [] as string[] };
+
+			await ci.archiveCloseSummary(ctx, summaryPath);
+
+			const archivedPath = path.join(archiveDir, 'close-summary.md');
+			expect(existsSync(archivedPath)).toBe(true);
+			expect(readFileSync(archivedPath, 'utf-8')).toBe('# current summary');
+			expect(ctx.warnings).toEqual([]);
+		} finally {
+			restore();
+		}
+	});
+
+	it('skips the archive copy when archive creation failed', async () => {
+		const { ci, restore } = await importClose();
+		try {
+			const summaryPath = path.join(testDir, '.swarm', 'close-summary.md');
+			const archiveDir = path.join(testDir, '.swarm', 'archive', 'missing');
+			writeFileSync(summaryPath, '# current summary');
+			const ctx = { archiveStageFailed: true, archiveDir, warnings: [] as string[] };
+
+			await ci.archiveCloseSummary(ctx, summaryPath);
+
+			expect(existsSync(path.join(archiveDir, 'close-summary.md'))).toBe(false);
+			expect(ctx.warnings).toEqual([]);
+		} finally {
+			restore();
+		}
+	});
+
+	it('reports archive-copy failures separately from the primary write', async () => {
+		const { ci, restore } = await importClose();
+		try {
+			const summaryPath = path.join(testDir, '.swarm', 'close-summary.md');
+			const archiveDir = path.join(testDir, '.swarm', 'archive', 'missing');
+			writeFileSync(summaryPath, '# current summary');
+			const ctx = { archiveStageFailed: false, archiveDir, warnings: [] as string[] };
+
+			await ci.archiveCloseSummary(ctx, summaryPath);
+
+			expect(ctx.warnings[0]).toContain('Failed to archive close-summary.md:');
+			expect(ctx.warnings[0]).not.toContain('Failed to write close-summary.md');
 		} finally {
 			restore();
 		}
