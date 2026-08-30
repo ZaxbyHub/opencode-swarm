@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.158.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.158.0...v7.158.1) (2026-08-30)
+
+
+### Bug Fixes
+
+* **pr-monitor:** compact subscription snapshots and bound reads ([c53eaa5](https://github.com/ZaxbyHub/opencode-swarm/commit/c53eaa52094b34d0cce7500e8819d630ae9dd5e1))
+
 ## [7.158.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.157.1...v7.158.0) (2026-08-30)
 
 
