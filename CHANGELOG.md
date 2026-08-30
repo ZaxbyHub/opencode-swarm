@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.158.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.157.1...v7.158.0) (2026-08-30)
+
+
+### Features
+
+* **pr-review:** terminal N-of-6 settlement, typed critic routing, and audited armed recovery ([24b7de8](https://github.com/ZaxbyHub/opencode-swarm/commit/24b7de83c8c9454b1322bea0568aa2e42c026709))
+
 ## [7.157.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.157.0...v7.157.1) (2026-08-30)
 
 
