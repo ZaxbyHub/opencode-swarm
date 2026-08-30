@@ -157,6 +157,11 @@ Provider-reported cost metadata wins when it is available. When a provider retur
 ```json
 {
   "pricing": {
+    "currency": "USD",
+    "version": "2026-08-29",
+    "effective_at": "2026-08-29T00:00:00.000Z",
+    "billing_basis": "token",
+    "reported_cost_currency": { "provider": "USD" },
     "models": {
       "provider/custom-model": {
         "input_per_million": 1,
@@ -175,6 +180,8 @@ Provider-reported cost metadata wins when it is available. When a provider retur
 | `output_per_million` | yes | USD per 1M output tokens |
 | `reasoning_per_million` | no | USD per 1M reasoning tokens; defaults to output pricing when omitted |
 | `cache_per_million` | no | USD per 1M cache-read tokens; defaults to input pricing when omitted |
+
+Table provenance is optional and bounded: `currency` is currently `USD`, `version` identifies the price table, `effective_at` is an ISO timestamp, and `billing_basis` is `token`, `request`, or `subscription`. Provider-reported amounts have unknown currency unless `reported_cost_currency` explicitly declares that provider as USD; unknown or conflicting currency remains evidence-inconclusive and is never treated as zero.
 
 Missing usage or missing pricing degrades to `cost_source: "unavailable"` in telemetry and `/swarm costs`.
 

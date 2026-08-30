@@ -5,6 +5,7 @@ import {
 	dispatchEphemeralAgent,
 	type EphemeralAgentDispatchResult,
 } from '../evaluation/ephemeral-agent-dispatcher.js';
+import type { PricingConfig } from '../services/cost-accounting.js';
 import type { ModelOverride } from '../utils/model-dispatch-fallback.js';
 
 export type ReviewDispatchRequest = {
@@ -37,6 +38,7 @@ export interface ReviewModelDispatcher {
  */
 export function createReviewModelDispatcher(
 	client: OpencodeClient,
+	pricing?: PricingConfig,
 ): ReviewModelDispatcher {
 	return {
 		dispatch: (request) =>
@@ -57,6 +59,7 @@ export function createReviewModelDispatcher(
 				promptByteLimit: request.promptByteLimit,
 				responseByteLimit: request.responseByteLimit,
 				abortSignal: request.abortSignal,
+				pricing,
 			}),
 	};
 }

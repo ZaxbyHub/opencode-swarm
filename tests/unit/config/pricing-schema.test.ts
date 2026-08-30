@@ -7,6 +7,12 @@ import {
 describe('PricingConfigSchema', () => {
 	it('accepts per-model token pricing overrides', () => {
 		const result = PricingConfigSchema.safeParse({
+			currency: 'USD',
+			version: '2026-08-29',
+			effective_at: '2026-08-29T00:00:00.000Z',
+			billing_basis: 'token',
+			subscription_unbilled: false,
+			reported_cost_currency: { provider: 'USD' },
 			models: {
 				'provider/custom-model': {
 					input_per_million: 1,
@@ -19,10 +25,24 @@ describe('PricingConfigSchema', () => {
 
 		expect(result.success).toBe(true);
 		if (result.success) {
+			expect(result.data.currency).toBe('USD');
+			expect(result.data.reported_cost_currency.provider).toBe('USD');
 			expect(
 				result.data.models['provider/custom-model'].output_per_million,
 			).toBe(2);
 		}
+	});
+
+	it('rejects unsupported currencies and unbounded provenance labels', () => {
+		expect(
+			PricingConfigSchema.safeParse({ currency: 'EUR', models: {} }).success,
+		).toBe(false);
+		expect(
+			PricingConfigSchema.safeParse({
+				version: 'x'.repeat(129),
+				models: {},
+			}).success,
+		).toBe(false);
 	});
 
 	it('rejects negative pricing values', () => {

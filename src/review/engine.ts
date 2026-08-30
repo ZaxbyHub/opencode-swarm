@@ -639,6 +639,7 @@ function addCost(
 	evidence: AutoReviewEvidence,
 	dispatches: ReviewDispatchResult[],
 ): void {
+	const MAX_REVIEW_COST_EVIDENCE = 32;
 	evidence.cost.model_calls = dispatches.length;
 	evidence.cost.prompt_bytes = dispatches.reduce(
 		(sum, dispatch) => sum + dispatch.promptBytes,
@@ -646,6 +647,14 @@ function addCost(
 	);
 	for (const dispatch of dispatches) {
 		const fields = dispatch.costFields;
+		for (const item of fields?.cost_evidence ?? []) {
+			if (evidence.cost.cost_evidence.length >= MAX_REVIEW_COST_EVIDENCE) break;
+			evidence.cost.cost_evidence.push(item);
+		}
+		if (fields?.evidence_status !== 'complete') {
+			evidence.cost.evidence_status = 'inconclusive';
+			evidence.cost.evidence_reason = fields?.evidence_reason ?? 'missing_cost';
+		}
 		evidence.cost.tokens_input += fields?.tokens_input ?? 0;
 		evidence.cost.tokens_output += fields?.tokens_output ?? 0;
 		evidence.cost.tokens_reasoning += fields?.tokens_reasoning ?? 0;
@@ -705,6 +714,8 @@ function baseEvidence(
 			tokens_cache: 0,
 			cost_usd: null,
 			cost_source: 'unavailable',
+			cost_evidence: [],
+			evidence_status: 'complete',
 		},
 	};
 }

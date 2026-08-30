@@ -12,6 +12,7 @@ import type { Plan } from '../../../src/config/plan-schema';
 import {
 	formatStatusMarkdown,
 	getStatusData,
+	_internals as statusInternals,
 } from '../../../src/services/status-service';
 import {
 	initTelemetry,
@@ -118,6 +119,119 @@ describe('status-service lastActivity (FR-010)', () => {
 		expect(status.completedTasks).toBe(0);
 		expect(status.totalTasks).toBe(1);
 		expect(status.agentCount).toBe(1);
+	});
+
+	test('surfaces cost totals with inconclusive provenance instead of treating missing cost as zero evidence', async () => {
+		resetTelemetryForTesting();
+		fs.writeFileSync(
+			path.join(tempDir, '.swarm', 'telemetry.jsonl'),
+			`${JSON.stringify({
+				event: 'delegation_end',
+				record_id: 'status-cost-1',
+				identity_fingerprint: 'a'.repeat(32),
+				version: 1,
+				agentName: 'coder',
+				taskId: '1.1',
+				cost_usd: null,
+				cost_source: 'unavailable',
+				evidence_status: 'inconclusive',
+			})}\n`,
+		);
+
+		const status = await getStatusData(tempDir, mockAgents);
+		expect(status.costs).toMatchObject({
+			totalCostUsd: 0,
+			delegations: 1,
+			unavailableDelegations: 1,
+			evidenceStatus: 'inconclusive',
+		});
+		expect(formatStatusMarkdown(status)).toContain('inconclusive evidence');
+	});
+
+	test('caches telemetry cost summaries until the telemetry stamp changes', async () => {
+		const original = statusInternals.summarizeTelemetryCosts;
+		let summarizeCalls = 0;
+		statusInternals.summarizeTelemetryCosts = ((directory: string) => {
+			summarizeCalls++;
+			return original(directory);
+		}) as typeof statusInternals.summarizeTelemetryCosts;
+
+		try {
+			fs.writeFileSync(
+				path.join(tempDir, '.swarm', 'telemetry.jsonl'),
+				`${JSON.stringify({
+					event: 'delegation_end',
+					record_id: 'status-cache-1',
+					identity_fingerprint: 'b'.repeat(32),
+					version: 1,
+					agentName: 'coder',
+					taskId: '1.1',
+					cost_usd: 0.1,
+					cost_source: 'reported',
+				})}\n`,
+			);
+
+			const first = await getStatusData(tempDir, mockAgents);
+			const second = await getStatusData(tempDir, mockAgents);
+			expect(summarizeCalls).toBe(1);
+			expect(first.costs).toMatchObject({
+				totalCostUsd: 0.1,
+				delegations: 1,
+			});
+			expect(second.costs).toMatchObject({
+				totalCostUsd: 0.1,
+				delegations: 1,
+			});
+
+			fs.writeFileSync(
+				path.join(tempDir, '.swarm', 'telemetry.jsonl'),
+				[
+					JSON.stringify({
+						event: 'delegation_end',
+						record_id: 'status-cache-1',
+						identity_fingerprint: 'b'.repeat(32),
+						version: 1,
+						agentName: 'coder',
+						taskId: '1.1',
+						cost_usd: 0.1,
+						cost_source: 'reported',
+					}),
+					JSON.stringify({
+						event: 'delegation_end',
+						record_id: 'status-cache-2',
+						identity_fingerprint: 'c'.repeat(32),
+						version: 1,
+						agentName: 'reviewer',
+						taskId: '1.2',
+						cost_usd: 0.2,
+						cost_source: 'reported',
+					}),
+				].join('\n'),
+			);
+
+			const third = await getStatusData(tempDir, mockAgents);
+			expect(summarizeCalls).toBe(2);
+			expect(third.costs).toMatchObject({
+				totalCostUsd: 0.3,
+				delegations: 2,
+			});
+		} finally {
+			statusInternals.summarizeTelemetryCosts = original;
+		}
+	});
+
+	test('fails open when telemetry cost summarization throws', async () => {
+		const original = statusInternals.summarizeTelemetryCosts;
+		statusInternals.summarizeTelemetryCosts = (() => {
+			throw new Error('boom');
+		}) as typeof statusInternals.summarizeTelemetryCosts;
+
+		try {
+			const status = await getStatusData(tempDir, mockAgents);
+			expect(status.costs).toBeUndefined();
+		} finally {
+			statusInternals.summarizeTelemetryCosts = original;
+		}
 	});
 });
 

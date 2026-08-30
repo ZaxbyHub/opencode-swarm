@@ -18,6 +18,9 @@ export type TelemetryEvent =
 	| 'agent_activated'
 	| 'delegation_begin'
 	| 'delegation_end'
+	| 'delegation_cost_correction'
+	| 'delegation_cost_binding'
+	| 'delegation_cost_join'
 	| 'task_state_changed'
 	| 'gate_passed'
 	| 'gate_failed'
@@ -545,6 +548,7 @@ export const telemetry = {
 			tokens_reasoning: costFields?.tokens_reasoning ?? 0,
 			tokens_cache: costFields?.tokens_cache ?? 0,
 			cost_usd: costFields?.cost_usd ?? null,
+			...costFields,
 			cost_source: costFields?.cost_source ?? 'unavailable',
 			model: costFields?.model,
 			gate: costFields?.gate,

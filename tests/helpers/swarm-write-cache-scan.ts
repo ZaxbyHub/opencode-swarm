@@ -3154,6 +3154,18 @@ export function checkExplicitInvalidation(
 
 export const EVIDENCE_WRITE_BLIND_SPOTS: readonly EvidenceWriteBlindSpot[] = [
 	{
+		file: 'src/services/cost-accounting.ts',
+		rule: 'C',
+		target: 'snap',
+		status: 'not-an-evidence-artifact',
+		reason:
+			'readTelemetryEvents() copies telemetry.jsonl snapshots into an OS ' +
+			'temporary directory created with os.tmpdir(); the `snap` target is ' +
+			'always outside the project .swarm/evidence/ tree. The scanner sees the ' +
+			'copyFileSync call in a file that also reads evidence-adjacent telemetry, ' +
+			'but this snapshot is transient input staging, not a cached evidence write.',
+	},
+	{
 		file: 'src/utils/atomic-write.ts',
 		rule: 'R',
 		target: 'to',

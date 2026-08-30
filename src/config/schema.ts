@@ -224,6 +224,15 @@ export const ModelPricingConfigSchema = z.object({
 export type ModelPricingConfig = z.infer<typeof ModelPricingConfigSchema>;
 
 export const PricingConfigSchema = z.object({
+	currency: z.literal('USD').optional().default('USD'),
+	version: z.string().min(1).max(128).optional(),
+	effective_at: z.string().datetime().optional(),
+	billing_basis: z.enum(['token', 'request', 'subscription']).optional(),
+	reported_cost_currency: z
+		.record(z.string().min(1).max(128), z.literal('USD'))
+		.optional()
+		.default({}),
+	subscription_unbilled: z.boolean().optional().default(false),
 	models: z
 		.record(z.string().min(1), ModelPricingConfigSchema)
 		.optional()

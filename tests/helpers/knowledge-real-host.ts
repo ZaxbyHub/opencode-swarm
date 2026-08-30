@@ -4,9 +4,9 @@ import path from 'node:path';
 import OpenCodeSwarmPlugin from '../../src/index';
 import { writeApprovedPlan } from './approved-plan';
 
-function ctxFor(directory: string) {
+function ctxFor(directory: string, client: unknown = {}) {
 	return {
-		client: {} as unknown,
+		client,
 		project: {} as unknown,
 		directory,
 		worktree: directory,
@@ -26,6 +26,7 @@ export function createKnowledgeProject(): string {
 export async function bootKnowledgeHost(
 	directory: string,
 	configOverrides: Record<string, unknown> = {},
+	client: unknown = {},
 ): Promise<{
 	hooks: Record<string, (...args: unknown[]) => Promise<unknown>>;
 	tool: Record<
@@ -56,7 +57,7 @@ export async function bootKnowledgeHost(
 				ctx: ReturnType<typeof ctxFor>,
 			) => Promise<Record<string, unknown>>;
 		}
-	).server(ctxFor(directory));
+	).server(ctxFor(directory, client));
 	return {
 		hooks: result as unknown as Record<
 			string,
