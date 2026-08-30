@@ -267,9 +267,9 @@ describe('retention registry rows — coverage plumbing', () => {
 		);
 		const tailWrite = lineOf(pending, /^\s*writeDurableFileSync\(storePath/);
 
-		expect(mutationCount).toBe(19);
+		expect(mutationCount).toBe(20);
 		expect(row.writerCitations).toEqual([
-			`src/background/pending-delegations.ts:${appendRecord} appendRecord — appendFileSync :${appendFile} (19 mutation entry points :${firstMutation}-${lastMutation})`,
+			`src/background/pending-delegations.ts:${appendRecord} appendRecord — appendFileSync :${appendFile} (20 mutation entry points :${firstMutation}-${lastMutation})`,
 			`src/background/pending-delegations.ts:${durableWriter} writeDurableFileSync — fsync+rename-with-retry for checkpoint/manifest/rolled-tail (:${checkpointWrite}-${tailWrite})`,
 		]);
 
@@ -306,7 +306,7 @@ describe('retention registry rows — coverage plumbing', () => {
 			/^\s*schemaVersion: 1;/,
 		);
 		expect(row.schemaVersion).toBe(
-			`RecordSchema schemaVersion 1|2|3; checkpoint/manifest literal 1 (:${checkpointVersion},:${manifestVersion},:${checkpointSchema})`,
+			`RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:${checkpointVersion},:${manifestVersion},:${checkpointSchema})`,
 		);
 
 		const lowWater = lineOf(

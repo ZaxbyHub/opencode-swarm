@@ -130,6 +130,7 @@ import { skill_retire } from './skill-retire';
 import { spec_write } from './spec-write';
 import { run_stale_reconciliation } from './stale-reconciliation';
 import { submit_phase_council_verdicts } from './submit-phase-council-verdicts';
+import { submit_pr_review_result } from './submit-pr-review-result';
 import { suggestPatch } from './suggest-patch';
 import { summarize_work } from './summarize-work';
 import { swarm_command } from './swarm-command';
@@ -190,6 +191,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	complete_pr_workflow: () => complete_pr_workflow,
 	abort_pr_workflow: () => abort_pr_workflow,
 	authorize_pr_review_reentry: () => authorize_pr_review_reentry,
+	submit_pr_review_result: () => submit_pr_review_result,
 	approve_plan_critic: () => approve_plan_critic,
 	prepare_pr_workflow_checkout: () => prepare_pr_workflow_checkout,
 	record_implementation_review: () => record_implementation_review,

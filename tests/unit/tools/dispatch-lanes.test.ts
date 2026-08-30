@@ -1147,7 +1147,7 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 			'inspect runtime',
 		);
 		expect(promptAsyncCalls[0][0].body.parts[0].text).toContain(
-			'is the literal column header',
+			'literal column header shown below',
 		);
 		expect(promptAsyncCalls[0][0].body.parts[0].text).toContain(
 			'[CLEAN] | lane | coverage_scope | evidence',

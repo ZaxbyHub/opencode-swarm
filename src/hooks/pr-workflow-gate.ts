@@ -6,10 +6,8 @@ import type { SessionStatus } from '@opencode-ai/sdk';
 import { z } from 'zod';
 import {
 	analyzeCandidateFields,
-	CANDIDATE_HEADERS,
 	type CandidateArtifactRepairKind,
 	type CandidateSeverity,
-	CLEAN_TEMPLATES,
 	candidateHeaderFamily,
 	type FindingsSeverity,
 	isCandidateSeverity,
@@ -30,6 +28,7 @@ import {
 	type BackgroundDelegationWorkflowLaneRecovery,
 	DEFAULT_STALE_DELEGATION_TIMEOUT_MS,
 	findByBatchId,
+	publishPrReviewResultReceipt,
 	readDelegations,
 	type SweepableDelegationStatus,
 	sweepStaleDelegations,
@@ -42,6 +41,8 @@ import {
 	PR_REVIEW_FINDINGS_MAX_BYTES,
 	PR_REVIEW_HANDOFF_MAX_BYTES,
 	PrReviewCriticVerdictFieldsSchema,
+	type PrReviewLaneResultEnvelope,
+	PrReviewLaneResultEnvelopeSchema,
 	PrReviewReviewerVerdictFieldsSchema,
 	type PrReviewRiskImpact,
 	type PrReviewRiskTag,
@@ -49,6 +50,7 @@ import {
 	parsePrReviewRiskTagsField,
 	parsePrReviewVerdictRow,
 	prReviewFindingRequiresCritic,
+	prReviewLaneResultEnvelopeDigest,
 } from '../background/pr-review-contract.js';
 import {
 	PR_REVIEW_REQUIRED_TRIGGER_IDS,
@@ -211,6 +213,9 @@ export interface PrReviewDiscoveryLaneValidationInput {
 		prHeadSha: string;
 		gitHead: string;
 		revisionDigest: string;
+		workflowInstanceId?: string;
+		workflowRevision?: number;
+		baseSha?: string;
 		reviewScope?: string;
 		checkWorkflowLane?: boolean;
 	};
@@ -1890,6 +1895,137 @@ export async function readPrWorkflowGateState(
 		);
 	}
 	return state;
+}
+
+export type SubmitPrReviewResultOutcome =
+	| { status: 'recorded' | 'duplicate'; receiptDigest: string }
+	| { status: 'rejected'; reason: string };
+
+/**
+ * Publish one structured base/micro discovery result from the exact child
+ * session that owns the live delegation. Lock order is deliberately
+ * workflow-session -> delegation-evidence; clear/abort takes the same outer
+ * lock and terminalization takes the same inner lock.
+ */
+export async function submitPrReviewResult(
+	directory: string,
+	childSessionId: string,
+	input: {
+		batchId: string;
+		laneId: string;
+		revisionDigest: string;
+		result: PrReviewLaneResultEnvelope;
+	},
+): Promise<SubmitPrReviewResultOutcome> {
+	const child = childSessionId.trim();
+	const parsedResult = PrReviewLaneResultEnvelopeSchema.safeParse(input.result);
+	if (!child || !parsedResult.success) {
+		return {
+			status: 'rejected',
+			reason: 'invalid child session or result envelope',
+		};
+	}
+	const preliminary = readDelegations(directory).filter(
+		(record) =>
+			record.subagentSessionId === child &&
+			record.batchId === input.batchId &&
+			record.laneId === input.laneId,
+	);
+	if (preliminary.length !== 1) {
+		return {
+			status: 'rejected',
+			reason: `expected one exact child delegation, found ${preliminary.length}`,
+		};
+	}
+	const parentSessionId = preliminary[0].parentSessionId;
+	return withSessionStateMutation(directory, parentSessionId, async () => {
+		const state = await readPrWorkflowGateStateFromDisk(
+			directory,
+			parentSessionId,
+		);
+		if (
+			!state ||
+			state.mode !== 'PR_REVIEW' ||
+			!state.workflowInstanceId ||
+			!state.prHeadSha ||
+			!state.prReviewBaseSha
+		) {
+			return {
+				status: 'rejected',
+				reason: 'no active bound PR_REVIEW workflow',
+			};
+		}
+		const ctx = await createPrReviewGateContext(directory, state);
+		if (ctx.revisionDigest !== input.revisionDigest) {
+			return { status: 'rejected', reason: 'stale dispatch revision digest' };
+		}
+		const currentMatches = readDelegations(directory).filter(
+			(record) =>
+				record.parentSessionId === parentSessionId &&
+				record.subagentSessionId === child &&
+				record.batchId === input.batchId &&
+				record.laneId === input.laneId,
+		);
+		if (currentMatches.length !== 1) {
+			return { status: 'rejected', reason: 'delegation identity changed' };
+		}
+		const record = currentMatches[0];
+		if (
+			(record.mode !== 'swarm-pr-review:base' &&
+				record.mode !== 'swarm-pr-review:micro') ||
+			path.resolve(record.workspace?.directory ?? '') !==
+				path.resolve(directory)
+		) {
+			return {
+				status: 'rejected',
+				reason: 'delegation mode or workspace mismatch',
+			};
+		}
+		const ownedWorkflowLanes = record.ownedWorkflowLanes?.length
+			? record.ownedWorkflowLanes
+			: record.workflowLane
+				? [record.workflowLane]
+				: [];
+		if (!record.workflowLane || ownedWorkflowLanes.length === 0) {
+			return { status: 'rejected', reason: 'delegation ownership is missing' };
+		}
+		const semanticEnvelopeDigest = prReviewLaneResultEnvelopeDigest(
+			parsedResult.data,
+		);
+		const published = await publishPrReviewResultReceipt(directory, {
+			parentSessionId,
+			childSessionId: child,
+			batchId: input.batchId,
+			laneId: input.laneId,
+			expectedWorkflowInstanceId: state.workflowInstanceId,
+			expectedWorkflowRevision: state.revision,
+			expectedBaseSha: state.prReviewBaseSha,
+			receipt: {
+				schemaVersion: 1,
+				mode: record.mode,
+				workflowInstanceId: state.workflowInstanceId,
+				workflowRevision: state.revision,
+				batchId: input.batchId,
+				laneId: input.laneId,
+				workflowLane: record.workflowLane,
+				ownedWorkflowLanes,
+				baseSha: state.prReviewBaseSha,
+				headSha: state.prHeadSha,
+				dispatchRevisionDigest: input.revisionDigest,
+				childSessionId: child,
+				generation: record.generation ?? 1,
+				semanticEnvelopeDigest,
+				envelope: parsedResult.data,
+			},
+		});
+		if (published.status === 'recorded' || published.status === 'duplicate') {
+			return {
+				status: published.status,
+				receiptDigest: semanticEnvelopeDigest,
+			};
+		}
+		return { status: 'rejected', reason: published.reason };
+	});
 }
 
 /**
@@ -5434,6 +5570,11 @@ function hasRevisionIndependentDiscoverySemantics(
 			prHeadSha: qualified.record.workspace?.prHeadSha ?? '',
 			gitHead: qualified.record.workspace?.gitHead ?? '',
 			revisionDigest: artifact.revisionDigest,
+			workflowInstanceId:
+				qualified.record.result?.prReviewResultReceipt?.workflowInstanceId,
+			workflowRevision:
+				qualified.record.result?.prReviewResultReceipt?.workflowRevision,
+			baseSha: qualified.record.result?.prReviewResultReceipt?.baseSha,
 			reviewScope: qualified.record.workspace?.scope ?? undefined,
 		},
 	}).ok;
@@ -14002,6 +14143,30 @@ function derivePrReviewCandidateInventory(
 				record.workspace?.gitHead !== state.prHeadSha
 			)
 				continue;
+			const structured = record.result?.prReviewResultReceipt;
+			if (structured) {
+				const credited = source.creditedLanes?.length
+					? structured.envelope.creditedLanes.filter((lane) =>
+							source.creditedLanes?.includes(lane),
+						)
+					: structured.envelope.creditedLanes;
+				if (source.workflowLane && !credited.includes(source.workflowLane)) {
+					continue;
+				}
+				resolvedArtifact = true;
+				const laneKey = `${source.batchId}\0${source.laneId}`;
+				if (!extractedLaneKeys.has(laneKey)) {
+					extractedLaneKeys.add(laneKey);
+					for (const finding of structured.envelope.findings) {
+						if (!credited.includes(finding.workflowLane)) continue;
+						candidateIds.push(finding.id);
+						if (!candidateSeverities.has(finding.id)) {
+							candidateSeverities.set(finding.id, finding.severity);
+						}
+					}
+				}
+				continue;
+			}
 			const ref = record.result?.outputRef?.trim();
 			const artifact = ref
 				? readLaneOutput(directory, ref)?.artifact
@@ -15688,6 +15853,9 @@ function workflowArtifactHasContractMarker(
 				prHeadSha: state.prHeadSha ?? '',
 				gitHead: state.prHeadSha ?? '',
 				revisionDigest: expectedRevisionDigest ?? '',
+				workflowInstanceId: state.workflowInstanceId,
+				workflowRevision: state.revision,
+				baseSha: state.prReviewBaseSha,
 				reviewScope,
 			},
 		});
@@ -15977,6 +16145,49 @@ export function validatePrReviewDiscoveryLaneCompletion(
 	const ownedWorkflowLanes = input.expected.ownedWorkflowLanes?.length
 		? [...input.expected.ownedWorkflowLanes]
 		: [input.expected.workflowLane];
+	const receipt = input.result.prReviewResultReceipt;
+	if (
+		receipt &&
+		(input.expected.mode === 'swarm-pr-review:base' ||
+			input.expected.mode === 'swarm-pr-review:micro')
+	) {
+		const sameOwned =
+			receipt.ownedWorkflowLanes.length === ownedWorkflowLanes.length &&
+			ownedWorkflowLanes.every((lane) =>
+				receipt.ownedWorkflowLanes.includes(lane),
+			);
+		if (
+			receipt.mode !== input.expected.mode ||
+			receipt.workflowInstanceId !== input.expected.workflowInstanceId ||
+			receipt.workflowRevision !== input.expected.workflowRevision ||
+			receipt.baseSha !== input.expected.baseSha ||
+			receipt.batchId !== input.record.batchId ||
+			receipt.laneId !== input.record.laneId ||
+			receipt.childSessionId !== input.record.subagentSessionId ||
+			receipt.workflowLane !== input.expected.workflowLane ||
+			!sameOwned ||
+			receipt.headSha !== input.expected.prHeadSha ||
+			receipt.dispatchRevisionDigest !== input.expected.revisionDigest
+		) {
+			return failedLaneValidation(
+				'discovery.coverage',
+				'exact child/workflow/revision-bound structured receipt',
+				'mismatched structured receipt',
+			);
+		}
+		return { ok: true };
+	}
+	if (
+		(input.expected.mode === 'swarm-pr-review:base' ||
+			input.expected.mode === 'swarm-pr-review:micro') &&
+		input.record.prReviewLegacyTranscriptCompatibility === false
+	) {
+		return failedLaneValidation(
+			'discovery.coverage',
+			'child-bound structured receipt',
+			'missing structured receipt (legacy transcript adapter disabled)',
+		);
+	}
 	const recordIntegrity = analyzeLaneRecordResultIntegrity({
 		record: input.record,
 		result: input.result,

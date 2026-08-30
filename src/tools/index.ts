@@ -148,6 +148,7 @@ export { skill_retire } from './skill-retire';
 export { spec_write } from './spec-write';
 export { run_stale_reconciliation } from './stale-reconciliation';
 export { submit_phase_council_verdicts } from './submit-phase-council-verdicts';
+export { submit_pr_review_result } from './submit-pr-review-result';
 export { summarize_work } from './summarize-work';
 export { createSwarmCommandTool, swarm_command } from './swarm-command';
 export { swarm_memory_outcome } from './swarm-memory-outcome';

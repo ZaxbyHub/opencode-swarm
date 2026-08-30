@@ -152,6 +152,12 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		expect(phase3Section).toContain('retry only the failed `workflow_lane`');
 		expect(phase3Section).toContain('same exact `pr_head_sha`');
 		expect(phase3Section).toContain('direct Task dispatch are not equivalent');
+		expect(phase3Section).toContain('`submit_pr_review_result`');
+		expect(phase3Section).toContain(
+			'`pr_review_legacy_transcript_compatibility`',
+		);
+		expect(phase3Section).toContain('present-but-invalid');
+		expect(phase3Section).toContain('never falls back');
 		// Issue #2383: the abort-only "STOP and surface the lane failure" /
 		// "Do not present partial findings" / "low-quality partial review"
 		// phrasing was replaced by terminal N-of-6 settlement guidance.
@@ -224,13 +230,19 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		expect(phase4Section).toContain('exact eleven-row v2 receipt');
 		expect(phase4Section).toContain('Scope');
 		expect(phase4Section).toContain('universal');
+		expect(phase4Section).toContain(
+			'prefer the single structured\n`submit_pr_review_result` receipt',
+		);
 		expect(phase4Section).not.toContain('swarm-extension');
 		expect(phase4Section).toContain('unclassified-risk');
 		expect(phase4Section).toContain('zero malformed rows');
 		expect(phase4Section).toContain('matches the trigger row');
 		expect(phase4Section).toContain('[CLEAN]');
 		expect(phase4Section).toContain('UNATTESTED');
-		expect(phase4Section).toContain('the active controller rejects blocking');
+		expect(phase4Section).toContain('the active');
+		expect(phase4Section).toContain(
+			'controller rejects blocking and direct-Task substitutes',
+		);
 		expect(phase4Section).toContain('Task-derived');
 		expect(phase4Section).toContain('Repository identity');
 		expect(phase4Section).toContain('never justifies skipping a row');
@@ -349,6 +361,12 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		expect(micro).not.toContain(CANDIDATE_HEADERS.base_explorer);
 		expect(micro).not.toContain(CLEAN_TEMPLATES.base_explorer);
 		for (const templateSection of [base, micro]) {
+			expect(templateSection).toContain('`submit_pr_review_result`');
+			expect(templateSection).toContain(
+				'`pr_review_legacy_transcript_compatibility`',
+			);
+			expect(templateSection).toContain('exactly once');
+			expect(templateSection).toContain('legacy compatibility only');
 			expect(templateSection).toContain('unfenced plain text');
 			expect(templateSection).toContain('documentation only');
 			expect(templateSection).toContain('do not emit backticks');

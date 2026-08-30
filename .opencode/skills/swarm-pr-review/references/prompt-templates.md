@@ -73,6 +73,13 @@ Use this template when dispatching a base explorer:
 ```text
 You are a base explorer. Optimize for recall, not final judgment.
 Return candidates only. Do not use CONFIRMED, DISPROVED, or PRE_EXISTING.
+On Profile A structured PR-review discovery lanes, call `submit_pr_review_result`
+exactly once with the canonical base-lane result and then stop. Do not append
+duplicate `[CANDIDATE]` / `[CLEAN]` transcript rows or recap prose after that
+tool call.
+The transcript rows below are deprecated legacy compatibility only. Emit them
+only when the dispatched lane explicitly enables
+`pr_review_legacy_transcript_compatibility`.
 Do not narrate progress or repeat the prompt. Keep the complete final response at or below 12,000 characters; spend that budget on evidence-bearing rows and the minimum prose needed to make them auditable. When the controller-appended contract declares a per-lane final_response_char_budget, that number is authoritative over this template default.
 
 Lane:
@@ -114,6 +121,13 @@ Use this template when dispatching a micro-lane or council explorer:
 ```text
 You are a micro-lane or council explorer. Optimize for recall, not final judgment.
 Return candidates only. Do not use CONFIRMED, DISPROVED, or PRE_EXISTING.
+On Profile A structured PR-review discovery lanes, call `submit_pr_review_result`
+exactly once with the canonical micro-lane result and then stop. Do not append
+duplicate `[CANDIDATE]` / `[CLEAN]` transcript rows or recap prose after that
+tool call.
+The transcript rows below are deprecated legacy compatibility only. Emit them
+only when the dispatched lane explicitly enables
+`pr_review_legacy_transcript_compatibility`.
 Do not narrate progress or repeat the prompt. Keep the complete final response at or below 12,000 characters; spend that budget on evidence-bearing rows and the minimum prose needed to make them auditable. When the controller-appended contract declares a per-lane final_response_char_budget, that number is authoritative over this template default.
 
 Micro/council lane:
@@ -146,10 +160,12 @@ Emit the final machine-readable header and rows as unfenced plain text. The
 Markdown fence around this prompt is documentation only; do not emit backticks.
 ```
 
-Under Profile A the orchestrator extracts candidates from the full lane
-artifact via `parse_lane_candidates` as the primary mechanism. On Profiles
-B/C — and as a Profile A fallback when the parser is unavailable — the
-`[CANDIDATE]` row format above IS the extraction contract. Explorers emit
-structured records regardless of which harness runs them.
+Under Profile A the authoritative discovery-settlement path is exactly one
+`submit_pr_review_result` call per base/micro lane. Transcript
+`[CANDIDATE]` / `[CLEAN]` rows remain a deprecated fallback only when the
+lane's snapped `pr_review_legacy_transcript_compatibility` contract enables
+them and no structured receipt exists. On Profiles B/C the `[CANDIDATE]` row
+format above remains the extraction contract. Explorers emit structured
+records regardless of which harness runs them.
 
 Do not let speed degrade validation quality.

@@ -22,6 +22,27 @@ afterEach(() => {
 });
 
 describe('dispatch_lanes read-only tool permissions', () => {
+	test('exposes structured settlement only to PR-review base and micro children', () => {
+		expect(
+			_test_exports.buildReadOnlyTools('swarm-pr-review:base')
+				.submit_pr_review_result,
+		).toBe(true);
+		expect(
+			_test_exports.buildReadOnlyTools('swarm-pr-review:micro')
+				.submit_pr_review_result,
+		).toBe(true);
+		for (const mode of [
+			undefined,
+			'swarm-pr-review:council',
+			'swarm-pr-review:reviewer',
+			'swarm-pr-feedback:stage-b-reviewer',
+		]) {
+			expect(_test_exports.buildReadOnlyTools(mode)).not.toHaveProperty(
+				'submit_pr_review_result',
+			);
+		}
+	});
+
 	test('injects immutable lane, head, revision, and ownership into PR workflow prompts', () => {
 		const contracted = _test_exports.applyPrWorkflowPromptContract(
 			[

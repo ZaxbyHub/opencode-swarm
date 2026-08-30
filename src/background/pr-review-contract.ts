@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { type ZodIssue, z } from 'zod';
 
 export const PR_REVIEW_REVIEWER_CLASSIFICATIONS = [
@@ -89,6 +90,407 @@ export const PR_REVIEW_RISK_TAGS = [
 ] as const;
 
 export type PrReviewRiskTag = (typeof PR_REVIEW_RISK_TAGS)[number];
+
+export const PR_REVIEW_RESULT_LANE_MODES = [
+	'swarm-pr-review:base',
+	'swarm-pr-review:micro',
+] as const;
+export const PR_REVIEW_RESULT_OUTCOMES = [
+	'CLEAN',
+	'FINDINGS',
+	'INCOMPLETE',
+] as const;
+export const PR_REVIEW_RESULT_FINDING_SEVERITIES = [
+	'CRITICAL',
+	'HIGH',
+	'MEDIUM',
+	'LOW',
+	'INFO',
+] as const;
+export const PR_REVIEW_RESULT_UNRESOLVED_REASONS = [
+	'NOT_EXECUTED',
+	'PARTIAL_OUTPUT',
+	'CONTRACT_FAILURE',
+	'RESOURCE_LIMIT',
+	'DEADLINE_EXCEEDED',
+	'STALE_BINDING',
+	'PARENT_CANCELLED',
+] as const;
+export const MAX_PR_REVIEW_RESULT_OWNED_LANES = 11;
+export const MAX_PR_REVIEW_RESULT_FINDINGS = 256;
+export const MAX_PR_REVIEW_RESULT_RECEIPT_BYTES = 64 * 1024;
+
+export type PrReviewResultLaneMode =
+	(typeof PR_REVIEW_RESULT_LANE_MODES)[number];
+export type PrReviewResultOutcome = (typeof PR_REVIEW_RESULT_OUTCOMES)[number];
+export type PrReviewResultFindingSeverity =
+	(typeof PR_REVIEW_RESULT_FINDING_SEVERITIES)[number];
+export type PrReviewResultUnresolvedReason =
+	(typeof PR_REVIEW_RESULT_UNRESOLVED_REASONS)[number];
+
+const PrReviewResultLaneIdSchema = z.string().trim().min(1).max(120);
+const PrReviewResultChildSessionSchema = z.string().trim().min(1).max(256);
+const PrReviewResultShaSchema = z
+	.string()
+	.trim()
+	.regex(/^[0-9a-f]{6,64}$/i);
+const PrReviewResultDigestSchema = z
+	.string()
+	.trim()
+	.regex(/^[0-9a-f]{64}$/i);
+
+function addDuplicateIssue(
+	ctx: z.RefinementCtx,
+	path: (string | number)[],
+	label: string,
+	value: string,
+): void {
+	ctx.addIssue({
+		code: z.ZodIssueCode.custom,
+		path,
+		message: `${label} must not contain duplicate value "${value}"`,
+	});
+}
+
+function assertUniqueStrings(
+	values: readonly string[],
+	ctx: z.RefinementCtx,
+	path: (string | number)[],
+	label: string,
+): void {
+	const seen = new Set<string>();
+	for (const value of values) {
+		if (seen.has(value)) {
+			addDuplicateIssue(ctx, path, label, value);
+			return;
+		}
+		seen.add(value);
+	}
+}
+
+export const PrReviewResultLocationSchema = z.discriminatedUnion('kind', [
+	z
+		.object({
+			kind: z.literal('local'),
+			file: z.string().trim().min(1).max(4_096),
+			line: z.number().int().positive().max(1_000_000).optional(),
+			endLine: z.number().int().positive().max(1_000_000).optional(),
+			column: z.number().int().positive().max(10_000).optional(),
+			endColumn: z.number().int().positive().max(10_000).optional(),
+		})
+		.strict()
+		.superRefine((value, ctx) => {
+			if (
+				value.endLine !== undefined &&
+				value.line !== undefined &&
+				value.endLine < value.line
+			) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: ['endLine'],
+					message: 'endLine must be greater than or equal to line',
+				});
+			}
+			if (
+				value.endColumn !== undefined &&
+				value.column !== undefined &&
+				value.endColumn < value.column
+			) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: ['endColumn'],
+					message: 'endColumn must be greater than or equal to column',
+				});
+			}
+		}),
+	z
+		.object({
+			kind: z.literal('non_local'),
+			label: z.string().trim().min(1).max(200),
+			detail: z.string().trim().min(1).max(2_000),
+		})
+		.strict(),
+]);
+
+export type PrReviewResultLocation = z.infer<
+	typeof PrReviewResultLocationSchema
+>;
+
+export const PrReviewResultFindingSchema = z
+	.object({
+		id: z.string().trim().min(1).max(128),
+		workflowLane: PrReviewResultLaneIdSchema,
+		severity: z.enum(PR_REVIEW_RESULT_FINDING_SEVERITIES),
+		riskImpact: z.enum(PR_REVIEW_RISK_IMPACTS),
+		riskTags: z
+			.array(z.enum(PR_REVIEW_RISK_TAGS))
+			.max(PR_REVIEW_RISK_TAGS.length),
+		title: z.string().trim().min(1).max(200),
+		body: z.string().trim().min(1).max(4_000),
+		evidence: z.string().trim().min(1).max(4_000),
+		location: PrReviewResultLocationSchema,
+	})
+	.strict()
+	.superRefine((value, ctx) => {
+		assertUniqueStrings(value.riskTags, ctx, ['riskTags'], 'riskTags');
+	});
+
+export type PrReviewResultFinding = z.infer<typeof PrReviewResultFindingSchema>;
+
+export const PrReviewCleanAttestationSchema = z
+	.object({
+		workflowLane: PrReviewResultLaneIdSchema,
+		coverageScope: z.string().trim().min(12).max(2_000),
+		evidence: z.string().trim().min(20).max(4_000),
+	})
+	.strict();
+
+export type PrReviewCleanAttestation = z.infer<
+	typeof PrReviewCleanAttestationSchema
+>;
+
+export const PrReviewUnresolvedLaneSchema = z
+	.object({
+		workflowLane: PrReviewResultLaneIdSchema,
+		reason: z.enum(PR_REVIEW_RESULT_UNRESOLVED_REASONS),
+		detail: z.string().trim().min(1).max(4_000),
+	})
+	.strict();
+
+export type PrReviewUnresolvedLane = z.infer<
+	typeof PrReviewUnresolvedLaneSchema
+>;
+
+export const PrReviewLaneResultEnvelopeSchema = z
+	.object({
+		schemaVersion: z.literal(1),
+		outcome: z.enum(PR_REVIEW_RESULT_OUTCOMES),
+		creditedLanes: z
+			.array(PrReviewResultLaneIdSchema)
+			.max(MAX_PR_REVIEW_RESULT_OWNED_LANES),
+		findings: z
+			.array(PrReviewResultFindingSchema)
+			.max(MAX_PR_REVIEW_RESULT_FINDINGS),
+		cleanAttestations: z
+			.array(PrReviewCleanAttestationSchema)
+			.max(MAX_PR_REVIEW_RESULT_OWNED_LANES),
+		unresolved: z
+			.array(PrReviewUnresolvedLaneSchema)
+			.max(MAX_PR_REVIEW_RESULT_OWNED_LANES),
+	})
+	.strict()
+	.superRefine((value, ctx) => {
+		assertUniqueStrings(
+			value.creditedLanes,
+			ctx,
+			['creditedLanes'],
+			'creditedLanes',
+		);
+		const findingIds = value.findings.map((finding) => finding.id);
+		assertUniqueStrings(findingIds, ctx, ['findings'], 'findings');
+		const findingLanes = value.findings.map((finding) => finding.workflowLane);
+		assertUniqueStrings(
+			value.cleanAttestations.map((entry) => entry.workflowLane),
+			ctx,
+			['cleanAttestations'],
+			'cleanAttestations',
+		);
+		assertUniqueStrings(
+			value.unresolved.map((entry) => entry.workflowLane),
+			ctx,
+			['unresolved'],
+			'unresolved',
+		);
+		for (const lane of findingLanes) {
+			if (
+				value.cleanAttestations.some((entry) => entry.workflowLane === lane)
+			) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: ['findings'],
+					message: `workflow lane "${lane}" cannot be both CLEAN and FINDINGS`,
+				});
+				return;
+			}
+		}
+		const coveredLanes = new Set<string>([
+			...findingLanes,
+			...value.cleanAttestations.map((entry) => entry.workflowLane),
+		]);
+		for (const lane of value.creditedLanes) {
+			if (!coveredLanes.has(lane)) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: ['creditedLanes'],
+					message: `credited workflow lane "${lane}" must be backed by a finding or CLEAN attestation`,
+				});
+				return;
+			}
+		}
+		for (const lane of coveredLanes) {
+			if (!value.creditedLanes.includes(lane)) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: ['creditedLanes'],
+					message: `covered workflow lane "${lane}" must appear in creditedLanes`,
+				});
+				return;
+			}
+		}
+		for (const lane of value.unresolved.map((entry) => entry.workflowLane)) {
+			if (coveredLanes.has(lane)) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: ['unresolved'],
+					message: `workflow lane "${lane}" cannot be both credited and unresolved`,
+				});
+				return;
+			}
+		}
+		const totalCovered = value.creditedLanes.length + value.unresolved.length;
+		if (totalCovered === 0) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ['creditedLanes'],
+				message: 'result envelope must cover at least one workflow lane',
+			});
+			return;
+		}
+		if (value.outcome === 'CLEAN') {
+			if (value.findings.length > 0 || value.unresolved.length > 0) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: ['outcome'],
+					message: 'CLEAN outcome cannot include findings or unresolved lanes',
+				});
+			}
+			if (value.cleanAttestations.length !== value.creditedLanes.length) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: ['cleanAttestations'],
+					message:
+						'CLEAN outcome must attest every credited workflow lane exactly once',
+				});
+			}
+		}
+		if (value.outcome === 'FINDINGS') {
+			if (value.findings.length === 0) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: ['findings'],
+					message: 'FINDINGS outcome requires at least one finding',
+				});
+			}
+			if (value.unresolved.length > 0) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: ['unresolved'],
+					message: 'FINDINGS outcome cannot include unresolved lanes',
+				});
+			}
+		}
+		if (value.outcome === 'INCOMPLETE' && value.unresolved.length === 0) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ['unresolved'],
+				message: 'INCOMPLETE outcome requires at least one unresolved lane',
+			});
+		}
+	});
+
+export type PrReviewLaneResultEnvelope = z.infer<
+	typeof PrReviewLaneResultEnvelopeSchema
+>;
+
+export function serializedPrReviewResultReceiptBytes(value: unknown): number {
+	return new TextEncoder().encode(JSON.stringify(value)).byteLength;
+}
+
+export function prReviewLaneResultEnvelopeDigest(
+	value: PrReviewLaneResultEnvelope,
+): string {
+	return createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+export const PrReviewResultReceiptSchema = z
+	.object({
+		schemaVersion: z.literal(1),
+		mode: z.enum(PR_REVIEW_RESULT_LANE_MODES),
+		workflowInstanceId: z.string().trim().min(1).max(256),
+		workflowRevision: z.number().int().nonnegative(),
+		batchId: z.string().trim().min(1).max(120),
+		laneId: z.string().trim().min(1).max(120),
+		workflowLane: PrReviewResultLaneIdSchema,
+		ownedWorkflowLanes: z
+			.array(PrReviewResultLaneIdSchema)
+			.min(1)
+			.max(MAX_PR_REVIEW_RESULT_OWNED_LANES),
+		baseSha: PrReviewResultShaSchema,
+		headSha: PrReviewResultShaSchema,
+		dispatchRevisionDigest: PrReviewResultDigestSchema,
+		childSessionId: PrReviewResultChildSessionSchema,
+		generation: z.number().int().positive().max(1_000_000),
+		semanticEnvelopeDigest: PrReviewResultDigestSchema,
+		envelope: PrReviewLaneResultEnvelopeSchema,
+	})
+	.strict()
+	.superRefine((value, ctx) => {
+		assertUniqueStrings(
+			value.ownedWorkflowLanes,
+			ctx,
+			['ownedWorkflowLanes'],
+			'ownedWorkflowLanes',
+		);
+		if (!value.ownedWorkflowLanes.includes(value.workflowLane)) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ['workflowLane'],
+				message: 'workflowLane must be included in ownedWorkflowLanes',
+			});
+		}
+		const covered = new Set<string>([
+			...value.envelope.creditedLanes,
+			...value.envelope.unresolved.map((entry) => entry.workflowLane),
+		]);
+		if (covered.size !== value.ownedWorkflowLanes.length) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ['envelope'],
+				message:
+					'envelope credited and unresolved workflow lanes must exactly partition ownedWorkflowLanes',
+			});
+			return;
+		}
+		for (const lane of value.ownedWorkflowLanes) {
+			if (!covered.has(lane)) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: ['ownedWorkflowLanes'],
+					message: `owned workflow lane "${lane}" is missing from the envelope coverage`,
+				});
+				return;
+			}
+		}
+		const expectedDigest = prReviewLaneResultEnvelopeDigest(value.envelope);
+		if (value.semanticEnvelopeDigest !== expectedDigest) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ['semanticEnvelopeDigest'],
+				message:
+					'semanticEnvelopeDigest must match the canonical envelope digest',
+			});
+		}
+		const bytes = serializedPrReviewResultReceiptBytes(value);
+		if (bytes > MAX_PR_REVIEW_RESULT_RECEIPT_BYTES) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: [],
+				message: `receipt exceeds the ${MAX_PR_REVIEW_RESULT_RECEIPT_BYTES}-byte bound`,
+			});
+		}
+	});
+
+export type PrReviewResultReceipt = z.infer<typeof PrReviewResultReceiptSchema>;
 
 export const PR_REVIEW_CONTRACT_CARD_HEADER = '[PR-REVIEW CONTRACT CARD]';
 export const PR_REVIEW_FINDINGS_MAX_BYTES = 10 * 1024 * 1024;
