@@ -64,13 +64,14 @@ function createMockSwarmState(): MockSwarmState {
 	};
 }
 
-export const mockExecuteWriteRetro = mock(async (_args: unknown, _directory: string) =>
-	JSON.stringify({
-		success: true,
-		phase: 1,
-		task_id: 'retro-1',
-		message: 'Done',
-	}),
+export const mockExecuteWriteRetro = mock(
+	async (_args: unknown, _directory: string) =>
+		JSON.stringify({
+			success: true,
+			phase: 1,
+			task_id: 'retro-1',
+			message: 'Done',
+		}),
 );
 
 export const mockCurateAndStoreSwarm = mock(async () => {});
@@ -142,9 +143,15 @@ export const mockResetSwarmStatePreservingSingletons = mock(() => {
 
 let closeModule: CloseModule | undefined;
 let closeInternals: CloseModule['_internals'] | undefined;
-let realGetGitRepositoryStatus: CloseModule['_internals']['getGitRepositoryStatus'] | undefined;
-let realResetToRemoteBranch: CloseModule['_internals']['resetToRemoteBranch'] | undefined;
-let realResetToMainAfterMerge: CloseModule['_internals']['resetToMainAfterMerge'] | undefined;
+let realGetGitRepositoryStatus:
+	| CloseModule['_internals']['getGitRepositoryStatus']
+	| undefined;
+let realResetToRemoteBranch:
+	| CloseModule['_internals']['resetToRemoteBranch']
+	| undefined;
+let realResetToMainAfterMerge:
+	| CloseModule['_internals']['resetToMainAfterMerge']
+	| undefined;
 let realResetSwarmStatePreservingSingletons:
 	| CloseModule['_internals']['resetSwarmStatePreservingSingletons']
 	| undefined;
@@ -159,12 +166,23 @@ function resetMockedSwarmState(): void {
 	mockedSwarmState.agentSessions = new Map<string, unknown>();
 	mockedSwarmState.pendingRehydrations = new Set<unknown>();
 	mockedSwarmState.opencodeClient = defaultSwarmState.opencodeClient;
-	mockedSwarmState.fullAutoEnabledInConfig = defaultSwarmState.fullAutoEnabledInConfig;
-	mockedSwarmState.curatorInitAgentNames = [...defaultSwarmState.curatorInitAgentNames];
-	mockedSwarmState.curatorPhaseAgentNames = [...defaultSwarmState.curatorPhaseAgentNames];
-	mockedSwarmState.skillImproverAgentNames = [...defaultSwarmState.skillImproverAgentNames];
-	mockedSwarmState.specWriterAgentNames = [...defaultSwarmState.specWriterAgentNames];
-	mockedSwarmState.generatedAgentNames = [...defaultSwarmState.generatedAgentNames];
+	mockedSwarmState.fullAutoEnabledInConfig =
+		defaultSwarmState.fullAutoEnabledInConfig;
+	mockedSwarmState.curatorInitAgentNames = [
+		...defaultSwarmState.curatorInitAgentNames,
+	];
+	mockedSwarmState.curatorPhaseAgentNames = [
+		...defaultSwarmState.curatorPhaseAgentNames,
+	];
+	mockedSwarmState.skillImproverAgentNames = [
+		...defaultSwarmState.skillImproverAgentNames,
+	];
+	mockedSwarmState.specWriterAgentNames = [
+		...defaultSwarmState.specWriterAgentNames,
+	];
+	mockedSwarmState.generatedAgentNames = [
+		...defaultSwarmState.generatedAgentNames,
+	];
 	mockedSwarmState.currentCriticalShownIds = new Map<string, unknown>();
 	mockedSwarmState.knowledgeAckDedup = new Set<unknown>();
 	mockedSwarmState.environmentProfiles = new Map<string, unknown>();
@@ -186,7 +204,10 @@ export async function initializeCloseFinalizerHarness(): Promise<{
 	newTestDir: () => string;
 	cleanupTestDir: (testDir: string) => void;
 	swarmDir: (testDir: string) => string;
-	writePlan: (testDir: string, overrides?: Record<string, unknown>) => Promise<void>;
+	writePlan: (
+		testDir: string,
+		overrides?: Record<string, unknown>,
+	) => Promise<void>;
 }> {
 	if (closeModule && closeInternals) {
 		return {
@@ -197,13 +218,13 @@ export async function initializeCloseFinalizerHarness(): Promise<{
 			mockArchiveEvidence,
 			mockFlushPendingSnapshot,
 			mockGetGitRepositoryStatus,
-	mockResetToRemoteBranch,
-	mockResetToMainAfterMerge,
-	mockRunSkillImprover,
-	mockResetSwarmStatePreservingSingletons,
-	resetState,
-	restoreInternals,
-	newTestDir,
+			mockResetToRemoteBranch,
+			mockResetToMainAfterMerge,
+			mockRunSkillImprover,
+			mockResetSwarmStatePreservingSingletons,
+			resetState,
+			restoreInternals,
+			newTestDir,
 			cleanupTestDir,
 			swarmDir,
 			writePlan,
@@ -244,8 +265,10 @@ export async function initializeCloseFinalizerHarness(): Promise<{
 				'close.ts must call resetSwarmStatePreservingSingletons, not resetSwarmState',
 			);
 		},
-		resetSwarmStatePreservingSingletons: mockResetSwarmStatePreservingSingletons,
-		getAgentSession: (sessionId: string) => mockedSwarmState.agentSessions.get(sessionId),
+		resetSwarmStatePreservingSingletons:
+			mockResetSwarmStatePreservingSingletons,
+		getAgentSession: (sessionId: string) =>
+			mockedSwarmState.agentSessions.get(sessionId),
 		ensureAgentSession: (sessionId: string, agentName?: string) => {
 			let session = mockedSwarmState.agentSessions.get(sessionId);
 			if (!session) {
@@ -296,13 +319,13 @@ export async function initializeCloseFinalizerHarness(): Promise<{
 		mockArchiveEvidence,
 		mockFlushPendingSnapshot,
 		mockGetGitRepositoryStatus,
-	mockResetToRemoteBranch,
-	mockResetToMainAfterMerge,
-	mockRunSkillImprover,
-	mockResetSwarmStatePreservingSingletons,
-	resetState,
-	restoreInternals,
-	newTestDir,
+		mockResetToRemoteBranch,
+		mockResetToMainAfterMerge,
+		mockRunSkillImprover,
+		mockResetSwarmStatePreservingSingletons,
+		resetState,
+		restoreInternals,
+		newTestDir,
 		cleanupTestDir,
 		swarmDir,
 		writePlan,
@@ -427,6 +450,9 @@ export async function writePlan(
 		],
 		...overrides,
 	};
-	writeFileSync(path.join(swarmDir(testDir), 'plan.json'), JSON.stringify(plan));
+	writeFileSync(
+		path.join(swarmDir(testDir), 'plan.json'),
+		JSON.stringify(plan),
+	);
 	await initLedger(testDir, derivePlanId(plan), undefined, plan);
 }

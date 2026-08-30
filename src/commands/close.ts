@@ -292,7 +292,10 @@ async function runAbortableSkillReview(
 }
 
 async function archiveCloseSummary(
-	ctx: Pick<CloseStageContext, 'archiveStageFailed' | 'archiveDir' | 'warnings'>,
+	ctx: Pick<
+		CloseStageContext,
+		'archiveStageFailed' | 'archiveDir' | 'warnings'
+	>,
 	closeSummaryPath: string,
 ): Promise<void> {
 	if (ctx.archiveStageFailed || !ctx.archiveDir) return;

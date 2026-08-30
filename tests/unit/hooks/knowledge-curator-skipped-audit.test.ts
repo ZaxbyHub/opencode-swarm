@@ -1,11 +1,17 @@
 import { describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { redactSecrets } from '../../../src/memory/redaction.js';
-import { curateAndStoreSwarm } from '../../../src/hooks/knowledge-curator.js';
 import { KnowledgeConfigSchema } from '../../../src/config/schema.js';
+import { curateAndStoreSwarm } from '../../../src/hooks/knowledge-curator.js';
+import { redactSecrets } from '../../../src/memory/redaction.js';
 
 describe('curator skipped audit records', () => {
 	test('redacts lesson excerpts and uses a real candidate id for near duplicates', async () => {
@@ -13,7 +19,8 @@ describe('curator skipped audit records', () => {
 		try {
 			mkdirSync(path.join(directory, '.swarm'), { recursive: true });
 			const duplicateId = 'existing-entry-id';
-			const lesson = 'Use gh status before deploy with ghp_12345678901234567890';
+			const lesson =
+				'Use gh status before deploy with ghp_12345678901234567890';
 			const existing = {
 				id: duplicateId,
 				tier: 'swarm',

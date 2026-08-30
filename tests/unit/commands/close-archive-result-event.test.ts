@@ -8,8 +8,8 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import {
 	existsSync,
 	mkdirSync,
-	rmSync,
 	readFileSync,
+	rmSync,
 	writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
@@ -433,7 +433,11 @@ describe('close-summary archive copy', () => {
 			const archiveDir = path.join(testDir, '.swarm', 'archive', 'swarm-test');
 			mkdirSync(archiveDir, { recursive: true });
 			writeFileSync(summaryPath, '# current summary');
-			const ctx = { archiveStageFailed: false, archiveDir, warnings: [] as string[] };
+			const ctx = {
+				archiveStageFailed: false,
+				archiveDir,
+				warnings: [] as string[],
+			};
 
 			await ci.archiveCloseSummary(ctx, summaryPath);
 
@@ -452,7 +456,11 @@ describe('close-summary archive copy', () => {
 			const summaryPath = path.join(testDir, '.swarm', 'close-summary.md');
 			const archiveDir = path.join(testDir, '.swarm', 'archive', 'missing');
 			writeFileSync(summaryPath, '# current summary');
-			const ctx = { archiveStageFailed: true, archiveDir, warnings: [] as string[] };
+			const ctx = {
+				archiveStageFailed: true,
+				archiveDir,
+				warnings: [] as string[],
+			};
 
 			await ci.archiveCloseSummary(ctx, summaryPath);
 
@@ -469,7 +477,11 @@ describe('close-summary archive copy', () => {
 			const summaryPath = path.join(testDir, '.swarm', 'close-summary.md');
 			const archiveDir = path.join(testDir, '.swarm', 'archive', 'missing');
 			writeFileSync(summaryPath, '# current summary');
-			const ctx = { archiveStageFailed: false, archiveDir, warnings: [] as string[] };
+			const ctx = {
+				archiveStageFailed: false,
+				archiveDir,
+				warnings: [] as string[],
+			};
 
 			await ci.archiveCloseSummary(ctx, summaryPath);
 

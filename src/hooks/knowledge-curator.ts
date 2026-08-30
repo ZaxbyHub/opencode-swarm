@@ -5,6 +5,7 @@ import { readFile, realpath, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { appendCoreEventSync } from '../events/core-events.js';
 import type { CurationContext } from '../knowledge/curation-policy.js';
+import { redactSecrets } from '../memory/redaction.js';
 import { reserveQuota } from '../services/skill-improver-quota.js';
 import { rebuildSynonymMap } from '../services/synonym-map.js';
 import { warn } from '../utils/logger.js';
@@ -45,7 +46,6 @@ import type {
 	SwarmKnowledgeEntry,
 } from './knowledge-types.js';
 import { OUTCOME_BLOCK_THRESHOLD } from './knowledge-types.js';
-import { redactSecrets } from '../memory/redaction.js';
 import {
 	appendUnactionable,
 	quarantineEntry,

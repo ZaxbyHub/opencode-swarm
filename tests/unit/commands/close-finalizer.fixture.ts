@@ -37,13 +37,14 @@ type MockSwarmState = {
 };
 
 export async function createCloseFinalizerHarness() {
-	const mockExecuteWriteRetro = mock(async (_args: unknown, _directory: string) =>
-		JSON.stringify({
-			success: true,
-			phase: 1,
-			task_id: 'retro-1',
-			message: 'Done',
-		}),
+	const mockExecuteWriteRetro = mock(
+		async (_args: unknown, _directory: string) =>
+			JSON.stringify({
+				success: true,
+				phase: 1,
+				task_id: 'retro-1',
+				message: 'Done',
+			}),
 	);
 	const mockCurateAndStoreSwarm = mock(async () => {});
 	const mockArchiveEvidence = mock(async () => {});
@@ -110,10 +111,12 @@ export async function createCloseFinalizerHarness() {
 		mockedSwarmState.knowledgeAckDedup?.clear?.();
 		mockedSwarmState.environmentProfiles?.clear?.();
 		mockedSwarmState.opencodeClient = toPreserve.opencodeClient;
-		mockedSwarmState.fullAutoEnabledInConfig = toPreserve.fullAutoEnabledInConfig;
+		mockedSwarmState.fullAutoEnabledInConfig =
+			toPreserve.fullAutoEnabledInConfig;
 		mockedSwarmState.curatorInitAgentNames = toPreserve.curatorInitAgentNames;
 		mockedSwarmState.curatorPhaseAgentNames = toPreserve.curatorPhaseAgentNames;
-		mockedSwarmState.skillImproverAgentNames = toPreserve.skillImproverAgentNames;
+		mockedSwarmState.skillImproverAgentNames =
+			toPreserve.skillImproverAgentNames;
 		mockedSwarmState.specWriterAgentNames = toPreserve.specWriterAgentNames;
 		mockedSwarmState.generatedAgentNames = toPreserve.generatedAgentNames;
 	});
@@ -218,7 +221,9 @@ export async function createCloseFinalizerHarness() {
 		return path.join(testDir, '.swarm');
 	}
 
-	async function writePlan(overrides: Record<string, unknown> = {}): Promise<void> {
+	async function writePlan(
+		overrides: Record<string, unknown> = {},
+	): Promise<void> {
 		const plan = {
 			title: 'Finalizer Test Project',
 			swarm: 'paid',

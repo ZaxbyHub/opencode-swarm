@@ -1,12 +1,11 @@
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import {
-	afterEach,
-	beforeEach,
-	describe,
-	expect,
-	it,
-	mock,
-} from 'bun:test';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 
 import {
@@ -35,7 +34,9 @@ describe('handleCloseCommand — finalizer stages', () => {
 
 			await h.handleCloseCommand(testDir, []);
 
-			expect(h.mockResetSwarmStatePreservingSingletons).toHaveBeenCalledTimes(1);
+			expect(h.mockResetSwarmStatePreservingSingletons).toHaveBeenCalledTimes(
+				1,
+			);
 		});
 
 		it('calls resetSwarmStatePreservingSingletons() and all 7 singletons survive when the close command path runs', async () => {
@@ -55,7 +56,9 @@ describe('handleCloseCommand — finalizer stages', () => {
 
 			const result = await h.handleCloseCommand(testDir, []);
 
-			expect(h.mockResetSwarmStatePreservingSingletons).toHaveBeenCalledTimes(1);
+			expect(h.mockResetSwarmStatePreservingSingletons).toHaveBeenCalledTimes(
+				1,
+			);
 			expect(result).toContain('finalized');
 
 			expect(mockedSwarmState.opencodeClient).toBe(sentinelClient);
@@ -86,7 +89,9 @@ describe('handleCloseCommand — finalizer stages', () => {
 			const result = await h.handleCloseCommand(testDir, []);
 
 			expect(result).toContain('finalized');
-			expect(h.mockResetSwarmStatePreservingSingletons).toHaveBeenCalledTimes(1);
+			expect(h.mockResetSwarmStatePreservingSingletons).toHaveBeenCalledTimes(
+				1,
+			);
 		});
 	});
 
@@ -109,7 +114,10 @@ describe('handleCloseCommand — finalizer stages', () => {
 
 		it('copies plan.json, context.md, and events.jsonl into the archive when they exist', async () => {
 			await h.writePlan(testDir);
-			writeFileSync(path.join(h.swarmDir(testDir), 'context.md'), '# Context\nSome context');
+			writeFileSync(
+				path.join(h.swarmDir(testDir), 'context.md'),
+				'# Context\nSome context',
+			);
 			writeFileSync(
 				path.join(h.swarmDir(testDir), 'events.jsonl'),
 				'{"event":"started"}\n',
@@ -128,7 +136,10 @@ describe('handleCloseCommand — finalizer stages', () => {
 			expect(existsSync(path.join(archivePath, 'context.md'))).toBe(true);
 			expect(existsSync(path.join(archivePath, 'events.jsonl'))).toBe(true);
 
-			const archivedEvents = readFileSync(path.join(archivePath, 'events.jsonl'), 'utf-8');
+			const archivedEvents = readFileSync(
+				path.join(archivePath, 'events.jsonl'),
+				'utf-8',
+			);
 			expect(archivedEvents).toContain('{"event":"started"}');
 		});
 

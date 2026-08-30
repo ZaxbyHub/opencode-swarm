@@ -49,7 +49,9 @@ describe('session reflection — curation sink semantics (#2366)', () => {
 	});
 
 	test('architect review summary uses the same distinct curation sinks', () => {
-		const rendered = _internals.buildReflectionDataSummary(makeReflectionData());
+		const rendered = _internals.buildReflectionDataSummary(
+			makeReflectionData(),
+		);
 
 		expect(rendered).toContain(
 			'skipped (dedup/already-admitted; audit: .swarm/events.jsonl curator_skipped)',

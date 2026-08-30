@@ -153,7 +153,9 @@ describe('copyDirRecursive via _internals (FR-015b)', () => {
 			expect(existsSync(path.join(dest, 'file1.txt'))).toBe(true);
 			expect(readFileSync(path.join(dest, 'file1.txt'), 'utf8')).toBe('hello');
 			expect(existsSync(path.join(dest, 'a', 'file2.txt'))).toBe(true);
-			expect(readFileSync(path.join(dest, 'a', 'file2.txt'), 'utf8')).toBe('world');
+			expect(readFileSync(path.join(dest, 'a', 'file2.txt'), 'utf8')).toBe(
+				'world',
+			);
 			expect(existsSync(path.join(dest, 'a', 'b', 'file3.txt'))).toBe(true);
 			expect(readFileSync(path.join(dest, 'a', 'b', 'file3.txt'), 'utf8')).toBe(
 				'deep',

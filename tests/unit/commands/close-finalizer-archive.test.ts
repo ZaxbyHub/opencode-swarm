@@ -7,10 +7,8 @@ import {
 	writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
-
+import { derivePlanId } from '../../../src/plan/utils.js';
 import { createCloseFinalizerHarness } from './close-finalizer.fixture.js';
-import { derivePlanId } from '../../../src/plan/utils.js';
-import { derivePlanId } from '../../../src/plan/utils.js';
 
 const harness = await createCloseFinalizerHarness();
 const { handleCloseCommand, swarmDir, writePlan } = harness;
@@ -106,7 +104,10 @@ describe('handleCloseCommand — archive and clean stages', () => {
 
 		it('removes root-level SWARM_PLAN.json and SWARM_PLAN.md after close', async () => {
 			await writePlan();
-			writeFileSync(path.join(harness.testDir, 'SWARM_PLAN.json'), '{"title":"Test"}');
+			writeFileSync(
+				path.join(harness.testDir, 'SWARM_PLAN.json'),
+				'{"title":"Test"}',
+			);
 			writeFileSync(path.join(harness.testDir, 'SWARM_PLAN.md'), '# Test Plan');
 
 			await handleCloseCommand(harness.testDir, []);
@@ -114,12 +115,17 @@ describe('handleCloseCommand — archive and clean stages', () => {
 			expect(existsSync(path.join(harness.testDir, 'SWARM_PLAN.json'))).toBe(
 				false,
 			);
-			expect(existsSync(path.join(harness.testDir, 'SWARM_PLAN.md'))).toBe(false);
+			expect(existsSync(path.join(harness.testDir, 'SWARM_PLAN.md'))).toBe(
+				false,
+			);
 		});
 
 		it('removes .swarm/SWARM_PLAN.json and .swarm/SWARM_PLAN.md after close', async () => {
 			await writePlan();
-			writeFileSync(path.join(swarmDir(), 'SWARM_PLAN.json'), '{"title":"Test"}');
+			writeFileSync(
+				path.join(swarmDir(), 'SWARM_PLAN.json'),
+				'{"title":"Test"}',
+			);
 			writeFileSync(path.join(swarmDir(), 'SWARM_PLAN.md'), '# Test Plan');
 
 			await handleCloseCommand(harness.testDir, []);
@@ -140,7 +146,9 @@ describe('handleCloseCommand — archive and clean stages', () => {
 
 			await handleCloseCommand(harness.testDir, []);
 
-			expect(existsSync(path.join(planExportDir, 'SWARM_PLAN.json'))).toBe(false);
+			expect(existsSync(path.join(planExportDir, 'SWARM_PLAN.json'))).toBe(
+				false,
+			);
 			expect(existsSync(path.join(planExportDir, 'SWARM_PLAN.md'))).toBe(false);
 		});
 

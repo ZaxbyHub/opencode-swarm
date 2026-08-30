@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'bun:test';
-import { existsSync, readFileSync, writeFileSync, readdirSync, mkdirSync } from 'node:fs';
-import { rm, symlink } from 'node:fs/promises';
-import fs from 'node:fs/promises';
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	writeFileSync,
+} from 'node:fs';
+import fs, { rm, symlink } from 'node:fs/promises';
 import path from 'node:path';
 
 import { createCloseFinalizerHarness } from './close-finalizer.fixture.js';
@@ -43,7 +48,10 @@ describe('handleCloseCommand — context, summary, and guards', () => {
 
 			await handleCloseCommand(harness.testDir, ['--force']);
 
-			const content = readFileSync(path.join(swarmDir(), 'context.md'), 'utf-8');
+			const content = readFileSync(
+				path.join(swarmDir(), 'context.md'),
+				'utf-8',
+			);
 			expect(content).toContain('Finalization: forced');
 		});
 
@@ -69,7 +77,10 @@ describe('handleCloseCommand — context, summary, and guards', () => {
 
 			await handleCloseCommand(harness.testDir, []);
 
-			const content = readFileSync(path.join(swarmDir(), 'context.md'), 'utf-8');
+			const content = readFileSync(
+				path.join(swarmDir(), 'context.md'),
+				'utf-8',
+			);
 			expect(content).toContain('Finalization: plan-already-done');
 		});
 	});
@@ -107,7 +118,10 @@ describe('handleCloseCommand — context, summary, and guards', () => {
 
 			await handleCloseCommand(harness.testDir, ['--force']);
 
-			const summary = readFileSync(path.join(swarmDir(), 'close-summary.md'), 'utf-8');
+			const summary = readFileSync(
+				path.join(swarmDir(), 'close-summary.md'),
+				'utf-8',
+			);
 			expect(summary).toContain('Forced closure');
 		});
 
@@ -129,7 +143,9 @@ describe('handleCloseCommand — context, summary, and guards', () => {
 			mkdirSync(path.join(swarmDir(), 'session'), { recursive: true });
 			await writePlan();
 
-			const forcedResult = await handleCloseCommand(harness.testDir, ['--force']);
+			const forcedResult = await handleCloseCommand(harness.testDir, [
+				'--force',
+			]);
 
 			expect(normalResult).toContain('Swarm finalized');
 			expect(forcedResult).toContain('Swarm finalized');
@@ -160,7 +176,10 @@ describe('handleCloseCommand — context, summary, and guards', () => {
 			expect(result).toContain('**Git:** Reset to origin/main');
 			expect(result).not.toContain('Not a git repository');
 
-			const summary = readFileSync(path.join(swarmDir(), 'close-summary.md'), 'utf-8');
+			const summary = readFileSync(
+				path.join(swarmDir(), 'close-summary.md'),
+				'utf-8',
+			);
 			expect(summary).toContain('- **Git:** Reset to origin/main');
 		});
 
@@ -269,7 +288,9 @@ describe('handleCloseCommand — context, summary, and guards', () => {
 			expect(retroArgs.task_id).toBe('retro-session');
 			expect(retroArgs.metadata?.session_scope).toBe('plan_free');
 			expect(retroArgs.phase).toBe(1);
-			expect(retroArgs.summary).toBe('Plan-free session closed via /swarm close');
+			expect(retroArgs.summary).toBe(
+				'Plan-free session closed via /swarm close',
+			);
 			expect(retroCall[1]).toBe(harness.testDir);
 			expect(result).toContain('finalized');
 		});
@@ -345,7 +366,9 @@ describe('handleCloseCommand — context, summary, and guards', () => {
 		it('includes the skill review summary in the command output when flag present', async () => {
 			await writePlan();
 
-			const result = await handleCloseCommand(harness.testDir, ['--skill-review']);
+			const result = await handleCloseCommand(harness.testDir, [
+				'--skill-review',
+			]);
 
 			expect(result).toContain('**Skill Review:**');
 			expect(result).toContain('Skill review proposal generated');
