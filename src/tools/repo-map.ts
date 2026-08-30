@@ -12,6 +12,7 @@ import {
 	askGraph,
 	buildOntologyPreflightPacket,
 	buildWorkspaceGraphAsync,
+	explainGraphEntry,
 	type FreshnessOptions,
 	type FreshnessProbe,
 	getBlastRadius,
@@ -19,13 +20,16 @@ import {
 	getContextPack,
 	getDeadExports,
 	getDependencies,
+	getDiffContext,
 	getFileOntology,
 	getGraphHealth,
+	getImpactCone,
 	getImporters,
 	getKeyFiles,
 	getLocalizationContext,
 	getPackageBoundaries,
 	getSymbolConsumers,
+	getSymbolContext,
 	inferPackageBoundary,
 	isGraphWideInputPath,
 	loadGraph,
@@ -33,6 +37,7 @@ import {
 	probeFreshness,
 	type RepoGraph,
 	saveGraph,
+	searchSymbols,
 	updateGraphForFiles,
 	writeFingerprint,
 } from './repo-graph';
@@ -70,6 +75,11 @@ const VALID_ACTIONS = [
 	'callers',
 	'dead_exports',
 	'context_pack',
+	'symbol_search',
+	'symbol_context',
+	'impact_cone',
+	'diff_context',
+	'graph_explain',
 	'graph_health',
 	'ask',
 ] as const;
@@ -79,6 +89,8 @@ type RepoMapAction = (typeof VALID_ACTIONS)[number];
 const MAX_FILE_PATH_LENGTH = 500;
 const MAX_SYMBOL_LENGTH = 256;
 const MAX_QUESTION_LENGTH = 500;
+const MAX_LANGUAGE_LENGTH = 64;
+const MAX_DIFF_LENGTH = 50_000;
 const REPO_GRAPH_DISABLED_NOTICE =
 	'Repository graph is disabled by configuration (repo_graph.enabled=false).';
 
@@ -94,12 +106,25 @@ interface RepoMapArgs {
 	file?: string;
 	files?: string[];
 	symbol?: string;
+	symbol_id?: string;
 	top_n?: number;
 	max_depth?: number;
 	question?: string;
 	include_source?: boolean;
 	max_tokens?: number;
 	source_mode?: 'signature' | 'body' | 'mixed';
+	kind?:
+		| 'function'
+		| 'class'
+		| 'const'
+		| 'type'
+		| 'interface'
+		| 'enum'
+		| 'method';
+	visibility?: 'exported' | 'module-local';
+	language?: string;
+	diff?: string;
+	line?: number;
 }
 
 function validateFile(p: string): string | null {
@@ -134,6 +159,45 @@ function validateQuestion(q: string): string | null {
 		return `question exceeds maximum length of ${MAX_QUESTION_LENGTH}`;
 	}
 	if (containsControlChars(q)) return 'question contains control characters';
+	return null;
+}
+
+function validateSymbolId(id: string): string | null {
+	if (!/^[0-9a-f]{64}$/.test(id)) {
+		return 'symbol_id must be a 64-character lowercase hex string (a stable symbol id from symbol_context)';
+	}
+	return null;
+}
+
+function validateLanguage(language: string): string | null {
+	if (language.length === 0) return 'language is empty';
+	if (language.length > MAX_LANGUAGE_LENGTH) {
+		return `language exceeds maximum length of ${MAX_LANGUAGE_LENGTH}`;
+	}
+	if (containsControlChars(language)) {
+		return 'language contains control characters';
+	}
+	return null;
+}
+
+/**
+ * Validate diff text. `containsControlChars` rejects ALL code points <= 0x1f
+ * — including the \r\n\t a unified diff legitimately contains — so the diff
+ * check first strips those three, then runs the shared scanner. The error
+ * names the character class without echoing the offending byte.
+ */
+function validateDiffText(diff: string): string | null {
+	if (diff.trim().length === 0) return 'diff is empty';
+	if (diff.length > MAX_DIFF_LENGTH) {
+		return `diff exceeds maximum length of ${MAX_DIFF_LENGTH}`;
+	}
+	const stripped = diff.replace(/[\r\n\t]/g, '');
+	if (containsControlChars(stripped)) {
+		const hasBidi = /[\u202a-\u202e\u2066-\u2069]/.test(diff);
+		return `diff contains control characters (class: ${
+			hasBidi ? 'bidi' : 'control'
+		}); only newlines and tabs are allowed`;
+	}
 	return null;
 }
 
@@ -238,6 +302,11 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 		'"callers" (files that reference an exported symbol, call-site granularity; needs file+symbol), ' +
 		'"dead_exports" (advisory: exported symbols with no detected in-repo reference; results are review candidates, not delete directives), ' +
 		'"context_pack" (token-budgeted slice of source spans for a target symbol — definition + transitive callers/callees; advisory/conservative; needs file+symbol; uses max_depth for traversal depth, top_n for span cap; set include_source=true to embed source text in spans), ' +
+		'"symbol_search" (find symbols by name with tiered matching — exact/prefix/substring/fuzzy — filterable by kind, language, file, and visibility; needs symbol as the search term; kind filters require a schema 1.6.0+ graph), ' +
+		'"symbol_context" (focused definition-first context for one symbol — identity, stable symbol_id, signature, optional source, and direct callers/callees; needs file+symbol or symbol_id), ' +
+		'"impact_cone" (structured impact of changing a file or symbol — symbol-level callers/callees by depth with confidence, file-level blast radius and risk, affected tests, routes, data/security facts, package boundaries; needs file, optional symbol), ' +
+		'"diff_context" (map changed files or a unified diff to changed symbols and per-file impact cones; needs files or diff; diff paths must be workspace-relative and safe), ' +
+		'"graph_explain" (explain why a file/symbol/span is graph-relevant — definition, incoming/outgoing symbol edges with provenance evidence, file-level importers; needs file, optional symbol or line), ' +
 		'"graph_health" (freshness and bounded extraction diagnostics; no file required), ' +
 		'"ask" (zero-LLM file localization: pass a natural-language question to rank files by relevance via vocabulary expansion + IDF + PageRank; orientation only — read the located files before asserting anything about them). ' +
 		'Use this before refactoring shared modules to avoid breaking unseen consumers. ' +
@@ -258,11 +327,16 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				'callers',
 				'dead_exports',
 				'context_pack',
+				'symbol_search',
+				'symbol_context',
+				'impact_cone',
+				'diff_context',
+				'graph_explain',
 				'graph_health',
 				'ask',
 			])
 			.describe(
-				'Query action: "build" | "importers" | "dependencies" | "blast_radius" | "localization" | "key_files" | "ontology" | "package_boundaries" | "preflight_packet" | "callers" | "dead_exports" | "context_pack" | "graph_health" | "ask"',
+				'Query action: "build" | "importers" | "dependencies" | "blast_radius" | "localization" | "key_files" | "ontology" | "package_boundaries" | "preflight_packet" | "callers" | "dead_exports" | "context_pack" | "symbol_search" | "symbol_context" | "impact_cone" | "diff_context" | "graph_explain" | "graph_health" | "ask"',
 			),
 		file: z
 			.string()
@@ -280,7 +354,14 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			.string()
 			.optional()
 			.describe(
-				'Exported symbol name. Restricts consumers on action="importers"; required for action="callers"/"context_pack".',
+				'Exported symbol name. Restricts consumers on action="importers"; required for action="callers"/"context_pack". For action="symbol_search" it is the search term (name, prefix, or fuzzy fragment). For action="symbol_context"/"impact_cone"/"graph_explain" it selects a specific symbol in the target file.',
+			),
+		symbol_id: z
+			.string()
+			.regex(/^[0-9a-f]{64}$/)
+			.optional()
+			.describe(
+				'For action="symbol_context": resolve a symbol by its stable 64-hex id (as returned in symbol_context identity) instead of file+symbol.',
 			),
 		top_n: z
 			.number()
@@ -289,7 +370,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			.max(100)
 			.optional()
 			.describe(
-				'For action="key_files"/"package_boundaries": entries to return (default 10). For action="dead_exports": max candidates (default 100). For action="context_pack": max spans returned (default ~40 via token budget).',
+				'For action="key_files"/"package_boundaries": entries to return (default 10). For action="dead_exports": max candidates (default 100). For action="context_pack": max spans returned (default ~40 via token budget). For action="symbol_search": max hits (default 25). For action="symbol_context": max callers and max callees (default 25 each). For action="impact_cone": max cone entries (default 50). For action="diff_context": max changed symbols per file and max impacted files (default 25). For action="graph_explain": max reasons (default 20).',
 			),
 		max_depth: z
 			.number()
@@ -298,7 +379,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			.max(10)
 			.optional()
 			.describe(
-				'For action="blast_radius": max BFS depth (default 3). For action="context_pack": traversal depth (default 2).',
+				'For action="blast_radius": max BFS depth (default 3). For action="context_pack": traversal depth (default 2). For action="impact_cone": symbol/file traversal depth (default 3). For action="diff_context": impact traversal depth (default 2).',
 			),
 		question: z
 			.string()
@@ -326,6 +407,48 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			.optional()
 			.describe(
 				'For action="context_pack" with include_source=true: "mixed" (default) embeds body text for near spans and signatures for the periphery; "body" embeds full range text for every span; "signature" embeds signatures only. Ignored (with a warning) when include_source is not true.',
+			),
+		kind: z
+			.enum([
+				'function',
+				'class',
+				'const',
+				'type',
+				'interface',
+				'enum',
+				'method',
+			])
+			.optional()
+			.describe(
+				'For action="symbol_search": declaration-kind filter. Requires a graph built at schema 1.6.0+; older graphs return a degradation warning instead of failing.',
+			),
+		visibility: z
+			.enum(['exported', 'module-local'])
+			.optional()
+			.describe(
+				'For action="symbol_search": filter by visibility tier — "exported" (public module surface) or "module-local" (widened-grammar member defs only present in exportRanges).',
+			),
+		language: z
+			.string()
+			.max(64)
+			.optional()
+			.describe(
+				'For action="symbol_search": filter by node language (e.g. "typescript", "python").',
+			),
+		diff: z
+			.string()
+			.max(50_000)
+			.optional()
+			.describe(
+				'For action="diff_context": unified diff text. File paths are parsed from +++ b/<path> headers and @@ hunks; hunk new-side line ranges map to changed symbols. Control characters other than newlines/tabs are rejected.',
+			),
+		line: z
+			.number()
+			.int()
+			.min(1)
+			.optional()
+			.describe(
+				'For action="graph_explain": 1-based line in the target file; resolves to the enclosing symbol (smallest containing span wins) before explaining.',
 			),
 	},
 	async execute(
@@ -517,6 +640,69 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			});
 		}
 
+		if (action === 'symbol_search') {
+			if (a.symbol === undefined) {
+				return err(action, 'symbol_search requires `symbol` (the search term)');
+			}
+			const sErr = validateSymbol(a.symbol);
+			if (sErr) return err(action, `invalid symbol: ${sErr}`);
+			if (a.language !== undefined) {
+				const lErr = validateLanguage(a.language);
+				if (lErr) return err(action, `invalid language: ${lErr}`);
+			}
+			let fileTarget: string | undefined;
+			if (a.file !== undefined) {
+				const fErr = validateFile(a.file);
+				if (fErr) return err(action, `invalid file: ${fErr}`);
+				fileTarget = toRelativeGraphPath(a.file, directory);
+			}
+			const result = searchSymbols(graph, {
+				query: a.symbol,
+				...(a.kind !== undefined ? { kind: a.kind } : {}),
+				...(a.visibility !== undefined ? { visibility: a.visibility } : {}),
+				...(a.language !== undefined ? { language: a.language } : {}),
+				...(fileTarget !== undefined ? { file: fileTarget } : {}),
+				...(a.top_n !== undefined ? { topN: a.top_n } : {}),
+			});
+			return ok(action, { ...result, ...freshness });
+		}
+
+		if (action === 'symbol_context') {
+			if (
+				a.symbol_id === undefined &&
+				(a.file === undefined || a.symbol === undefined)
+			) {
+				return err(
+					action,
+					'symbol_context requires `symbol_id`, or `file` + `symbol`',
+				);
+			}
+			if (a.symbol_id !== undefined) {
+				const idErr = validateSymbolId(a.symbol_id);
+				if (idErr) return err(action, `invalid symbol_id: ${idErr}`);
+			}
+			let fileTarget: string | undefined;
+			if (a.file !== undefined) {
+				const fErr = validateFile(a.file);
+				if (fErr) return err(action, `invalid file: ${fErr}`);
+				fileTarget = toRelativeGraphPath(a.file, directory);
+			}
+			if (a.symbol !== undefined) {
+				const sErr = validateSymbol(a.symbol);
+				if (sErr) return err(action, `invalid symbol: ${sErr}`);
+			}
+			const result = getSymbolContext(graph, {
+				...(fileTarget !== undefined ? { file: fileTarget } : {}),
+				...(a.symbol !== undefined ? { symbol: a.symbol } : {}),
+				...(a.symbol_id !== undefined ? { symbolId: a.symbol_id } : {}),
+				...(a.include_source !== undefined
+					? { includeSource: a.include_source }
+					: {}),
+				...(a.top_n !== undefined ? { topN: a.top_n } : {}),
+			});
+			return ok(action, { ...result, ...freshness });
+		}
+
 		if (action === 'preflight_packet') {
 			const inputs =
 				a.files && a.files.length > 0 ? a.files : a.file ? [a.file] : [];
@@ -541,6 +727,43 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			const topN = Math.min(a.top_n ?? 8, 25);
 			const result = askGraph(graph, a.question, { topN });
 			return ok(action, { ...result, ...freshness });
+		}
+
+		if (action === 'diff_context') {
+			if (
+				(a.files === undefined || a.files.length === 0) &&
+				a.diff === undefined
+			) {
+				return err(
+					action,
+					'diff_context requires `files` (non-empty) or `diff`',
+				);
+			}
+			if (a.diff !== undefined) {
+				const dErr = validateDiffText(a.diff);
+				if (dErr) return err(action, `invalid diff: ${dErr}`);
+			}
+			let fileTargets: string[] | undefined;
+			if (a.files !== undefined && a.files.length > 0) {
+				fileTargets = [];
+				for (const f of a.files) {
+					const v = validateFile(f);
+					if (v) return err(action, `invalid file: ${v}`);
+					fileTargets.push(toRelativeGraphPath(f, directory));
+				}
+			}
+			try {
+				const result = getDiffContext(graph, {
+					...(fileTargets !== undefined ? { files: fileTargets } : {}),
+					...(a.diff !== undefined ? { diff: a.diff } : {}),
+					maxDepth: a.max_depth ?? 2,
+					topN: a.top_n ?? 25,
+				});
+				return ok(action, { ...result, ...freshness });
+			} catch (e) {
+				const message = e instanceof Error ? e.message : String(e);
+				return err(action, message);
+			}
 		}
 
 		// Remaining actions need a file or files list.
@@ -704,6 +927,34 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				...(coverage ? { coverage } : {}),
 				warnings,
 			});
+		}
+
+		if (action === 'impact_cone') {
+			if (a.symbol !== undefined) {
+				const sErr = validateSymbol(a.symbol);
+				if (sErr) return err(action, `invalid symbol: ${sErr}`);
+			}
+			const result = getImpactCone(graph, {
+				file: target,
+				...(a.symbol !== undefined ? { symbol: a.symbol } : {}),
+				maxDepth: a.max_depth ?? 3,
+				topN: a.top_n ?? 50,
+			});
+			return ok(action, { ...result, ...freshness });
+		}
+
+		if (action === 'graph_explain') {
+			if (a.symbol !== undefined) {
+				const sErr = validateSymbol(a.symbol);
+				if (sErr) return err(action, `invalid symbol: ${sErr}`);
+			}
+			const result = explainGraphEntry(graph, {
+				file: target,
+				...(a.symbol !== undefined ? { symbol: a.symbol } : {}),
+				...(a.line !== undefined ? { line: a.line } : {}),
+				...(a.top_n !== undefined ? { topN: a.top_n } : {}),
+			});
+			return ok(action, { ...result, ...freshness });
 		}
 
 		if (action === 'dependencies') {

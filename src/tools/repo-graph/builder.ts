@@ -43,6 +43,7 @@ import type {
 	GraphEdge,
 	GraphExtractorInputWitness,
 	GraphNode,
+	GraphSymbolKind,
 	GraphUnresolvedImport,
 	RepoGraph,
 	RepoGraphDiagnostics,
@@ -2608,6 +2609,14 @@ export async function scanFileAsync(
 	const exportLines: Record<string, number> = Object.create(null);
 	const exportRanges: Record<string, { startLine: number; endLine: number }> =
 		Object.create(null);
+	// Declaration kind per persisted symbol (schema 1.6.0, KG-14 / issue
+	// #1535). Filled ONLY at real declaration sites below — the same loop and
+	// duplicate-name policy as `exportRanges` — so a key here always refers to
+	// a def that physically exists in this file. Re-export bindings further
+	// down add `exportRanges` entries WITHOUT kinds on purpose: the symbol is
+	// declared elsewhere, so its kind must not be fabricated here (queries
+	// surface those as `kind: null`).
+	const exportKinds: Record<string, GraphSymbolKind> = Object.create(null);
 	for (const d of exportedDefs) {
 		exportLines[d.name] = d.startLine;
 	}
@@ -2680,6 +2689,7 @@ export async function scanFileAsync(
 			}
 		}
 		exportRanges[d.name] = next;
+		exportKinds[d.name] = d.kind;
 		rangeIsExported[d.name] = d.exported;
 	}
 	const exportsSet = new Set(exports);
@@ -2761,6 +2771,7 @@ export async function scanFileAsync(
 		exports,
 		...(Object.keys(exportLines).length > 0 ? { exportLines } : {}),
 		...(Object.keys(exportRanges).length > 0 ? { exportRanges } : {}),
+		...(Object.keys(exportKinds).length > 0 ? { exportKinds } : {}),
 		imports,
 		language,
 		mtime: fileStats.mtime.toISOString(),

@@ -98,7 +98,25 @@ actions include:
 - `graph_health` returns graph freshness plus bounded extraction diagnostics,
   including stale files, symbol-extraction failures, unresolved relative imports,
   oversized files, unsupported files, binary skips, unreadable skips, and
-  advisory low-confidence/unresolved SymbolEdge v2 counts.
+  advisory low-confidence/unresolved SymbolEdge v2 counts. KG-14 (issue #1535)
+  adds confidence/resolution histograms, stale composition (changed vs removed
+  vs probe truncation), extraction-failure summaries by reason, and
+  `exportKinds` coverage.
+- KG-14 graph query actions (issue #1535): `symbol_search` finds symbols by
+  name with tiered matching (exact/prefix/substring/fuzzy) filterable by
+  declaration kind, language, file, and visibility; `symbol_context` returns a
+  focused definition-first context (stable symbol id, signature, optional
+  source, direct callers/callees) for a symbol id or file+symbol;
+  `impact_cone` returns a structured impact cone (symbol-level callers/callees
+  by depth with confidence, file-level blast-radius risk, affected tests,
+  routes, data/security facts, package boundaries, risk notes); `diff_context`
+  maps changed files or a unified diff to changed symbols and per-file impact;
+  `graph_explain` explains why a file/symbol/span is graph-relevant with
+  definition, symbol-edge provenance evidence, and file-level import reasons.
+  All are bounded (`top_n`) and workspace-relative; declaration kinds come from
+  the additive schema 1.6.0 `GraphNode.exportKinds` map (older graphs degrade
+  with `kind: null` and an explicit warning). See
+  `docs/repo-graph-symbol-graph.md`.
 
 The ontology extractor is intentionally conservative. It records detected facts
 and "detected missing guard" findings; it does not claim formal security proofs.

@@ -307,6 +307,7 @@ export function getGraphHealth(
 			notes: [
 				'No repo graph found at .swarm/repo-graph.json. Run repo_map with action="build" first.',
 			],
+			...graphHealthSummaries(null, undefined, probe),
 		};
 	}
 
@@ -415,6 +416,77 @@ export function getGraphHealth(
 		walkTruncationReason,
 		incrementalFallbacks,
 		notes,
+		...graphHealthSummaries(graph, completeSymbolEdges, probe),
+	};
+}
+
+/**
+ * KG-14 additive health summaries (issue #1535). Always populated by
+ * {@link getGraphHealth}; zero-valued when the underlying data is absent so
+ * consumers never need null checks. `staleSummary` is the one nullable field:
+ * it is `null` when no freshness probe was supplied.
+ */
+function graphHealthSummaries(
+	graph: RepoGraph | null,
+	completeSymbolEdges: SymbolEdge[] | undefined,
+	probe: FreshnessProbe | undefined,
+): Pick<
+	GraphHealthResult,
+	| 'symbolEdgeSummary'
+	| 'resolutionBreakdown'
+	| 'staleSummary'
+	| 'extractionFailureSummary'
+	| 'kindCoverage'
+> {
+	const rawSymbolEdges = graph?.symbolEdges ?? [];
+	const complete = completeSymbolEdges ?? [];
+	const resolutionBreakdown: Record<string, number> = {};
+	for (const edge of complete) {
+		const key = edge.resolution ?? 'unrecorded';
+		resolutionBreakdown[key] = (resolutionBreakdown[key] ?? 0) + 1;
+	}
+	const legacyCount = rawSymbolEdges.length - complete.length;
+	if (legacyCount > 0) {
+		resolutionBreakdown.unrecorded =
+			(resolutionBreakdown.unrecorded ?? 0) + legacyCount;
+	}
+	const failureSummary: Record<string, number> = {};
+	for (const failure of graph?.diagnostics?.extractionFailures ?? []) {
+		if (typeof failure?.reason !== 'string' || failure.reason.length === 0) {
+			continue;
+		}
+		failureSummary[failure.reason] = (failureSummary[failure.reason] ?? 0) + 1;
+	}
+	const nodes = graph ? Object.values(graph.nodes) : [];
+	return {
+		symbolEdgeSummary: {
+			total: rawSymbolEdges.length,
+			withV2Fields: complete.length,
+			lowConfidence: complete.filter(
+				(edge) =>
+					edge.confidence !== undefined &&
+					edge.confidence < LOW_CONFIDENCE_SYMBOL_EDGE_THRESHOLD,
+			).length,
+			unresolved: complete.filter((edge) => edge.resolution === 'unresolved')
+				.length,
+		},
+		resolutionBreakdown,
+		staleSummary: probe
+			? {
+					changed: probe.changed.length,
+					removed: probe.removed.length,
+					probeTruncated: probe.truncated,
+				}
+			: null,
+		extractionFailureSummary: failureSummary,
+		kindCoverage: {
+			nodesWithKinds: nodes.filter(
+				(node) =>
+					node.exportKinds !== undefined &&
+					Object.keys(node.exportKinds).length > 0,
+			).length,
+			nodesTotal: nodes.length,
+		},
 	};
 }
 
@@ -773,7 +845,13 @@ function estimateTextTokens(text: string): number {
 // ending `{` or `:` (TS-family opening brace, Python def/class colon). With
 // no terminator in the window (Ruby `def foo(x)`), emit only the first
 // non-decorator line. Total scan bounded at 6 lines from startLine.
-function extractSignatureText(lines: string[], startLine: number): string {
+//
+// Exported since KG-14 (issue #1535): `symbol_context` reuses the exact same
+// extraction so pack signatures and identity signatures can never diverge.
+export function extractSignatureText(
+	lines: string[],
+	startLine: number,
+): string {
 	let idx = Math.max(0, startLine - 1);
 	if (idx >= lines.length) return '';
 	let skipped = 0;

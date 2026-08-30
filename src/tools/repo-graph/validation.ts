@@ -13,6 +13,7 @@ import {
 	DATA_ACCESS_VALUES,
 	DATA_OPERATION_VALUES,
 	FILE_ROLE_VALUES,
+	GRAPH_SYMBOL_KIND_VALUES,
 	type GraphEdge,
 	type GraphNode,
 	IMPORT_TYPE_VALUES,
@@ -34,6 +35,7 @@ const ONTOLOGY_FINDING_SEVERITY_SET = new Set<string>(
 	ONTOLOGY_FINDING_SEVERITY_VALUES,
 );
 const IMPORT_TYPE_SET = new Set<string>(IMPORT_TYPE_VALUES);
+const GRAPH_SYMBOL_KIND_SET = new Set<string>(GRAPH_SYMBOL_KIND_VALUES);
 const ONTOLOGY_NAME_PATTERN = /^[a-z][a-z0-9_]*$/;
 
 // ============ Validation ============
@@ -214,6 +216,27 @@ export function validateGraphNode(node: GraphNode): void {
 			if (r.startLine > r.endLine) {
 				throw new Error(
 					'Invalid node: exportRanges value must have startLine <= endLine',
+				);
+			}
+		}
+	}
+	if (node.exportKinds !== undefined) {
+		if (
+			typeof node.exportKinds !== 'object' ||
+			node.exportKinds === null ||
+			Array.isArray(node.exportKinds)
+		) {
+			throw new Error('Invalid node: exportKinds must be an object');
+		}
+		for (const [name, kind] of Object.entries(node.exportKinds)) {
+			if (containsControlChars(name)) {
+				throw new Error(
+					'Invalid node: exportKinds key contains control characters',
+				);
+			}
+			if (typeof kind !== 'string' || !GRAPH_SYMBOL_KIND_SET.has(kind)) {
+				throw new Error(
+					`Invalid node: exportKinds value must be one of ${GRAPH_SYMBOL_KIND_VALUES.join(', ')} (got ${typeof kind})`,
 				);
 			}
 		}
