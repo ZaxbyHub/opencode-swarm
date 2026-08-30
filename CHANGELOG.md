@@ -1,5 +1,32 @@
 # Changelog
 
+## [7.159.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.158.1...v7.159.0) (2026-08-30)
+
+
+### Features
+
+* **config:** generate JSON Schema and complete configuration.md key reference from PluginConfigSchema ([ebeaa9b](https://github.com/ZaxbyHub/opencode-swarm/commit/ebeaa9b84e7d8ede68f2bb7f676125f2f8406aea))
+* **config:** generate JSON Schema and complete configuration.md key reference from PluginConfigSchema ([23a55bd](https://github.com/ZaxbyHub/opencode-swarm/commit/23a55bd1249c9b1c983665f72c901e51a23c7845))
+* **repo-map:** KG-14 expanded graph query actions (symbol, impact, diff, explain, health summaries) ([26ecc57](https://github.com/ZaxbyHub/opencode-swarm/commit/26ecc57767420bfca1ba8ff96b2e8fe4f94c9bf4))
+* **repo-map:** KG-14 expanded graph query actions (symbol, impact, diff, explain, health summaries) ([739e214](https://github.com/ZaxbyHub/opencode-swarm/commit/739e214c037c435eb8c204be11ff864896d25be5)), closes [#1535](https://github.com/ZaxbyHub/opencode-swarm/issues/1535)
+
+
+### Bug Fixes
+
+* **cli:** re-anchor retention registry and docs after writer removal ([be74bd9](https://github.com/ZaxbyHub/opencode-swarm/commit/be74bd9aaee5e42e8661b3cbaf095457df459209))
+* **cli:** stop auto-creating empty project override config ([af3899b](https://github.com/ZaxbyHub/opencode-swarm/commit/af3899b961c969356e53b2576864fa317ca35b8e))
+* **close:** finalize feedback follow-up ([258bb2c](https://github.com/ZaxbyHub/opencode-swarm/commit/258bb2c2ef9aff2c02c800a1195bb9676ff3a227))
+* **close:** refresh archive summary and curation audit ([046acc3](https://github.com/ZaxbyHub/opencode-swarm/commit/046acc3ddb21fbf6353f88244794dc2cfce024d4))
+* **config-doctor:** add $schema validation case for the every-key coverage ratchet ([d8b2281](https://github.com/ZaxbyHub/opencode-swarm/commit/d8b2281d55f6b2140120513ccd636c7ed08304ac))
+* **config:** close PR-review findings — malformed $schema containment, legacy-key warning accuracy, citation ratchet, test/docs polish ([f1a8a03](https://github.com/ZaxbyHub/opencode-swarm/commit/f1a8a038a04912dab73bdc46b08c867e801c33c6))
+* **curation:** audit finalize skips and refresh archive summary ([8c6186c](https://github.com/ZaxbyHub/opencode-swarm/commit/8c6186c4d557913e522740ac7642f70c05344017))
+* **curation:** audit finalize skips and refresh archive summary ([e96aecf](https://github.com/ZaxbyHub/opencode-swarm/commit/e96aecfaf081c6172122066c9f338e41768dcc5a))
+* **repo-map:** close swarm-pr-review + owner review findings on KG-14 actions ([200c918](https://github.com/ZaxbyHub/opencode-swarm/commit/200c918d67872e585b08425520c6e0d3edd27923))
+* **retention:** refresh close lifecycle citation anchors ([f8fdd32](https://github.com/ZaxbyHub/opencode-swarm/commit/f8fdd323132821c3cd1ecdba642c5114e3f00b20))
+* **scripts:** correct loadJsonc reader citation to loadJson (:268) ([ff84ddf](https://github.com/ZaxbyHub/opencode-swarm/commit/ff84ddf27f3b2c88e267a61d4fcb416d5a68b3b0))
+* **tests:** import CONFIG_SCHEMA_REF for the ported 11b schema assertion ([1f9de38](https://github.com/ZaxbyHub/opencode-swarm/commit/1f9de3801d871a6ccb34228e6c346728a44e6b38))
+* **test:** use canonicalMkdtemp in runtime no-write test ([50d25a2](https://github.com/ZaxbyHub/opencode-swarm/commit/50d25a20e2f562e72a86453444e518ede8c84bb0))
+
 ## [7.158.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.158.0...v7.158.1) (2026-08-30)
 
 
