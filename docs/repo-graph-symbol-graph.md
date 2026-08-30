@@ -288,7 +288,13 @@ only refines extraction once source was requested (`source_mode` without
   both sides realpath'd with a nearest-existing-ancestor walk), so symlinks or
   junctions pointing outside the workspace fail closed with span note
   `source outside workspace` + warning (missing in-workspace files still fail
-  open with `source read failed`).
+  open with `source read failed`). Query-time source reads are additionally
+  bounded by the per-file ceiling `DEFAULT_MAX_SOURCE_BYTES` (1 MiB): a
+  graph-referenced file larger than the cap is never loaded — its span is
+  admitted with note `source too large` + warning and no text. The graph
+  builder shares this default through its `maxFileSizeBytes` option, but a
+  build that raised the option above 1 MiB still gets `source too large` at
+  query time, because the query layer always enforces the shared constant.
 - `coverage` (present on every result): `reachedSymbols` / `returnedSymbols` /
   `omittedByBudget` (reached − returned, including `top_n` drops applied by the
   tool handler) plus `unresolvedEdges` and `lowConfidenceEdges` — distinct
@@ -300,7 +306,8 @@ only refines extraction once source was requested (`source_mode` without
 - `warnings` (always an array): bounded and deduplicated — aggregate count
   strings for budget omissions / unresolved / low-confidence destinations, and
   at most 5 per-span failure details (`source read failed for <file>:<symbol>`,
-  `source outside workspace for <file>:<symbol>`) followed by
+  `source outside workspace for <file>:<symbol>`,
+  `source too large for <file>:<symbol>`) followed by
   `... and N more` aggregates. The tool handler also merges staleness
   (`freshnessNote`) and `source_mode`-without-`include_source` advisories into
   `warnings`. Warnings (and `estimatedTokens`) describe the query-layer result

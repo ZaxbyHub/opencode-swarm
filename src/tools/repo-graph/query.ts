@@ -38,6 +38,7 @@ import type {
 	SymbolReference,
 } from './types';
 import {
+	DEFAULT_MAX_SOURCE_BYTES,
 	inferPackageBoundary,
 	isSchemaVersionAtLeast,
 	normalizeGraphPath,
@@ -45,7 +46,6 @@ import {
 
 const GRAPH_HEALTH_OUTPUT_LIMIT = 50;
 const MAX_HEALTH_PATH_LENGTH = 500;
-const MAX_QUERY_SOURCE_BYTES = 1024 * 1024;
 
 interface QueryIndexes {
 	index: Map<string, FileReference[]>;
@@ -1083,7 +1083,11 @@ export function getContextPack(
 			} else {
 				try {
 					const stats = fs.statSync(resolved);
-					if (stats.size > MAX_QUERY_SOURCE_BYTES) {
+					if (stats.size > DEFAULT_MAX_SOURCE_BYTES) {
+						// Mirrors the 'source read failed' path: the span is admitted
+						// without text and keeps its pre-read line-count token
+						// estimate, so budget accounting stays span-shaped rather
+						// than file-shaped.
 						span.note = 'source too large';
 						oversizedSources.push(`${displayPath(span.file)}:${span.symbol}`);
 						finalSpans.push(span);
