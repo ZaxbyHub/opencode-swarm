@@ -163,14 +163,14 @@ describe('builder: usedSymbols + exportLines', () => {
 		clearCache(workspacePath);
 		const asyncGraph = await buildWorkspaceGraphAsync(workspacePath);
 
-		// File-level parity: strip async-exclusive exportRanges from each async node
-		// before comparing against sync (sync never produces exportRanges).
+		// File-level parity: strip async-exclusive exportRanges/exportKinds (sync produces neither; KG-14 1.6.0).
 		const fileLevelNodes = <Record<string, object>>{};
 		for (const [key, asyncNode] of Object.entries(asyncGraph.nodes)) {
-			const { exportRanges: _er, ...fileLevel } = asyncNode as Record<
-				string,
-				unknown
-			>;
+			const {
+				exportRanges: _er,
+				exportKinds: _ek,
+				...fileLevel
+			} = asyncNode as Record<string, unknown>;
 			fileLevelNodes[key] = fileLevel;
 		}
 		expect(fileLevelNodes).toEqual(sync.nodes);
