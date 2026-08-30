@@ -122,6 +122,42 @@ async function readAuthorizationFile(
 	return parsed.data;
 }
 
+/**
+ * Windows rename-over-existing can fail transiently (EPERM/EBUSY/EACCES/
+ * EEXIST) while AV/indexers hold the target; mirror the bounded retry
+ * discipline of `renameWithRetry` (src/utils/atomic-write.ts) and
+ * `writeAtomicJson` (pr-workflow-gate.ts) instead of single-shot rename.
+ */
+const RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 200];
+const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES', 'EEXIST']);
+
+async function renameWithRetryAsync(
+	tempPath: string,
+	targetPath: string,
+): Promise<void> {
+	let lastError: unknown;
+	for (
+		let attempt = 0;
+		attempt <= _internals.renameRetryDelaysMs.length;
+		attempt++
+	) {
+		try {
+			await _internals.renameImpl(tempPath, targetPath);
+			return;
+		} catch (err) {
+			lastError = err;
+			const code = (err as NodeJS.ErrnoException)?.code;
+			if (!code || !RETRYABLE_RENAME_CODES.has(code)) throw err;
+			if (attempt < _internals.renameRetryDelaysMs.length) {
+				await new Promise((resolve) =>
+					setTimeout(resolve, _internals.renameRetryDelaysMs[attempt]),
+				);
+			}
+		}
+	}
+	throw lastError;
+}
+
 async function writeAuthorizationFile(
 	filePath: string,
 	file: AuthorizationFile,
@@ -139,7 +175,7 @@ async function writeAuthorizationFile(
 	);
 	try {
 		await fsp.writeFile(tempPath, serialized, { encoding: 'utf8', flag: 'wx' });
-		await fsp.rename(tempPath, filePath);
+		await renameWithRetryAsync(tempPath, filePath);
 	} finally {
 		await fsp.rm(tempPath, { force: true }).catch(() => undefined);
 	}
@@ -359,4 +395,10 @@ export const _internals = {
 	MAX_ACTIVE_AUTHORIZATIONS,
 	reentryAuthorizationFilePath,
 	pruneAuthorizations,
+	/** DI seam: the rename implementation (tests inject failure modes). */
+	renameImpl: (from: string, to: string): Promise<void> => fsp.rename(from, to),
+	/** DI seam: retry backoff schedule (tests shrink to avoid real sleeps). */
+	renameRetryDelaysMs: RENAME_RETRY_DELAYS_MS,
+	renameWithRetryAsync,
+	writeAuthorizationFile,
 };

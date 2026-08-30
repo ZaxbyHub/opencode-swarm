@@ -1,13 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import {
 	_test_exports,
 	activatePrWorkflow,
-	allowedPrReviewReportVerdicts,
+	admitPrReviewPartialBaseCoverage,
 	assertPrReviewBaseCoverageSettled,
 	completePrWorkflow,
 	enforcePrReviewBaseDimensions,
+	markPrReviewTriggerEvaluationComplete,
 	PR_REVIEW_BASE_DIMENSION_IDS,
+	PR_REVIEW_REQUIRED_MICRO_LANE_IDS,
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import { executeWritePrReviewArtifact } from '../../../src/tools/write-pr-review-artifact.js';
@@ -16,6 +19,7 @@ import {
 	PR_ARTIFACT_REVISION_DIGEST,
 	PR_ARTIFACT_SESSION_ID,
 	persistPrReviewBatch,
+	settleReviewerPhase,
 } from '../../helpers/pr-review-artifact-fixtures.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { LEGACY_PR_REVIEW_RESILIENCE_POLICY } from '../pr-review-test-policy.js';
@@ -192,5 +196,155 @@ describe('terminal N-of-6 settlement (issue #2383) — parameterized N=0..6', ()
 		// A disclosure on a fully covered run is rejected.
 		const result = await writePartial(records, ['intent-architecture']);
 		expect(result.success).toBe(false);
+	});
+});
+
+describe('PARTIAL end-to-end completion + immutable disclosure (issue #2383)', () => {
+	test('PARTIAL run completes end-to-end with report_verdict REQUEST_CHANGES', async () => {
+		const { unresolved, records } = await establishNOfSix(4);
+		const admitted = await writePartial(records, unresolved);
+		expect(admitted.success).toBe(true);
+		// Micro-lane CLEAN attestations + trigger evaluation over the covered
+		// inventory, exactly as the full-coverage ladder requires.
+		const MICRO_HEADER =
+			'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags';
+		const triggerRows: Array<Record<string, string>> = [];
+		for (const [
+			index,
+			workflowLane,
+		] of PR_REVIEW_REQUIRED_MICRO_LANE_IDS.entries()) {
+			const batchId = `micro-${index}`;
+			const laneId = `micro-lane-${index}`;
+			await persistPrReviewBatch(
+				directory,
+				batchId,
+				'swarm-pr-review:micro',
+				[{ laneId, workflowLane }],
+				{
+					textOverride: `${MICRO_HEADER}
+[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`,
+				},
+			);
+			triggerRows.push({
+				trigger_id: workflowLane,
+				result: 'MATCHED',
+				evidence: `Test fixture evidence for ${workflowLane}`,
+				source_batch_id: batchId,
+				source_lane_id: laneId,
+			});
+		}
+		const triggerRelative = path.join(
+			'pr-review',
+			'terminal-settlement-run',
+			'trigger-eval.json',
+		);
+		const triggerAbsolute = path.join(directory, '.swarm', triggerRelative);
+		await fs.mkdir(path.dirname(triggerAbsolute), { recursive: true });
+		await fs.writeFile(
+			triggerAbsolute,
+			JSON.stringify({ rows: triggerRows }),
+			'utf8',
+		);
+		await markPrReviewTriggerEvaluationComplete(
+			directory,
+			PR_ARTIFACT_SESSION_ID,
+			'terminal-settlement-run',
+			triggerRelative,
+		);
+		// Reviewer phase over the covered inventory: every candidate DISPROVED
+		// (no critic inventory, no handoff obligation).
+		const itemIds = records.map((record) => record.finding_id as string);
+		await settleReviewerPhase(
+			directory,
+			'terminal-settlement-run',
+			itemIds.map(
+				(id) =>
+					`[REVIEWED] | ${id} | DISPROVED | STRUCTURALLY_PROVEN | NONE | YES | file.ts:1 | refuted by direct test | probe | reviewer | ORDINARY | `,
+			),
+			itemIds,
+		);
+		const reviewerRecords = records.map((record) => ({
+			finding_id: record.finding_id as string,
+			status: 'DISPROVED' as const,
+			file_line: 'file.ts:1',
+			evidence: 'refuted by direct test',
+			next_action: 'suppress_with_reason' as const,
+			severity: 'NONE' as const,
+		}));
+		for (const boundary of ['post_reviewer', 'post_critic'] as const) {
+			const raw = await executeWritePrReviewArtifact(
+				{
+					kind: 'findings',
+					run_id: 'terminal-settlement-run',
+					pr_head_sha: PR_ARTIFACT_HEAD_SHA,
+					boundary,
+					records: reviewerRecords,
+				},
+				directory,
+				{ sessionID: PR_ARTIFACT_SESSION_ID },
+			);
+			expect(JSON.parse(raw).success).toBe(true);
+		}
+		// The central happy path under test: PARTIAL + REQUEST_CHANGES completes.
+		const status = await completePrWorkflow(
+			directory,
+			PR_ARTIFACT_SESSION_ID,
+			'PR_REVIEW',
+			PR_ARTIFACT_HEAD_SHA,
+			{ reportVerdict: 'REQUEST_CHANGES' },
+		);
+		expect(status).toBe('completed');
+		expect(
+			await readPrWorkflowGateState(directory, PR_ARTIFACT_SESSION_ID),
+		).toBeNull();
+	});
+
+	test('re-admission after evidence drift hits the immutable-disclosure branch', async () => {
+		const { unresolved, records } = await establishNOfSix(4);
+		const admitted = await writePartial(records, unresolved);
+		expect(admitted.success).toBe(true);
+		// A late success for one declared-unresolved dimension changes the
+		// derived settlement; declaring the NEW derived set passes the
+		// exact-match check but must then fail against the IMMUTABLE existing
+		// disclosure (PRR-005: this branch had no test coverage).
+		const lateLane = [
+			{ laneId: `late-${unresolved[0]}`, workflowLane: unresolved[0]! },
+		];
+		await enforcePrReviewBaseDimensions(
+			directory,
+			PR_ARTIFACT_SESSION_ID,
+			lateLane,
+			{
+				batchId: 'base-late-success',
+				prHeadSha: PR_ARTIFACT_HEAD_SHA,
+				prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
+			},
+		);
+		await persistPrReviewBatch(
+			directory,
+			'base-late-success',
+			'swarm-pr-review:base',
+			lateLane,
+		);
+		await expect(
+			admitPrReviewPartialBaseCoverage(
+				directory,
+				PR_ARTIFACT_SESSION_ID,
+				'terminal-settlement-run',
+				[unresolved[1]!],
+			),
+		).rejects.toThrow('differs from the immutable existing disclosure');
+		// Re-declaring the ORIGINAL set after the drift fails earlier, at the
+		// exact-match check (derived is now just unresolved[1]).
+		await expect(
+			admitPrReviewPartialBaseCoverage(
+				directory,
+				PR_ARTIFACT_SESSION_ID,
+				'terminal-settlement-run',
+				[unresolved[0]!, unresolved[1]!],
+			),
+		).rejects.toThrow(
+			'declaration must exactly match the derived terminal settlement',
+		);
 	});
 });

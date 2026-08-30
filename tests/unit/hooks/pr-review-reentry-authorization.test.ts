@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import {
 	consumePrReviewReentryAuthorization,
 	issuePrReviewReentryAuthorization,
@@ -255,5 +256,88 @@ describe('pr-review reentry authorization (issue #2383)', () => {
 		);
 		const winners = results.filter((result) => result !== null);
 		expect(winners).toHaveLength(1);
+	});
+});
+
+describe('renameWithRetryAsync Windows retry contract (PRR-003)', () => {
+	const originalRenameImpl = reentryInternals.renameImpl;
+	const originalDelays = reentryInternals.renameRetryDelaysMs;
+	// Shrink the backoff so exhaustion tests do not real-sleep 385 ms.
+	const fastDelays = [1, 1, 1, 1, 1];
+
+	afterEach(() => {
+		reentryInternals.renameImpl = originalRenameImpl;
+		reentryInternals.renameRetryDelaysMs = originalDelays;
+	});
+
+	const codedError = (code: string) => Object.assign(new Error(code), { code });
+
+	test('retries a transient EPERM/EBUSY and succeeds without extra calls', async () => {
+		let calls = 0;
+		reentryInternals.renameImpl = async () => {
+			calls++;
+			if (calls <= 2) throw codedError(calls === 1 ? 'EPERM' : 'EBUSY');
+			return undefined;
+		};
+		await expect(
+			reentryInternals.renameWithRetryAsync('from', 'to'),
+		).resolves.toBeUndefined();
+		expect(calls).toBe(3);
+	});
+
+	test('a non-retryable code rethrows immediately (single call)', async () => {
+		let calls = 0;
+		reentryInternals.renameImpl = async () => {
+			calls++;
+			throw codedError('ENOENT');
+		};
+		await expect(
+			reentryInternals.renameWithRetryAsync('from', 'to'),
+		).rejects.toMatchObject({ code: 'ENOENT' });
+		expect(calls).toBe(1);
+	});
+
+	test('persistent retryable failure exhausts the bounded schedule', async () => {
+		let calls = 0;
+		reentryInternals.renameImpl = async () => {
+			calls++;
+			throw codedError('EBUSY');
+		};
+		reentryInternals.renameRetryDelaysMs = fastDelays;
+		await expect(
+			reentryInternals.renameWithRetryAsync('from', 'to'),
+		).rejects.toMatchObject({ code: 'EBUSY' });
+		// Initial attempt + one retry per delay entry.
+		expect(calls).toBe(fastDelays.length + 1);
+	});
+
+	test('writeAuthorizationFile leaves no stranded temp file after rename failure', async () => {
+		reentryInternals.renameImpl = async () => {
+			throw codedError('ENOENT');
+		};
+		const storePath = reentryInternals.reentryAuthorizationFilePath(
+			directory,
+			PR_ARTIFACT_SESSION_ID,
+		);
+		const record = {
+			schemaVersion: 1 as const,
+			authorizationId: 'temp-leftover',
+			sessionId: PR_ARTIFACT_SESSION_ID,
+			prHeadSha: PR_ARTIFACT_HEAD_SHA,
+			revisionDigest: PR_ARTIFACT_REVISION_DIGEST,
+			role: 'reviewer' as const,
+			generation: 0,
+			createdAt: new Date().toISOString(),
+			expiresAt: new Date(Date.now() + 60_000).toISOString(),
+		};
+		await expect(
+			reentryInternals.writeAuthorizationFile(storePath, {
+				schemaVersion: 1,
+				sessionId: PR_ARTIFACT_SESSION_ID,
+				authorizations: [record],
+			}),
+		).rejects.toMatchObject({ code: 'ENOENT' });
+		const siblings = await fs.readdir(path.dirname(storePath));
+		expect(siblings.filter((name) => name.endsWith('.tmp'))).toEqual([]);
 	});
 });

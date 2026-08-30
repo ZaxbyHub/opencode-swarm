@@ -636,7 +636,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writerModules: ['src/background/lane-output-store.ts', 'src/background/candidate-sidecar-store.ts'],
 		writerCitations: [
 			'src/background/lane-output-store.ts:84 storeLaneOutput — atomic temp+rename :355',
-			'src/background/candidate-sidecar-store.ts:452 appendToSidecar — appendFileSync :506 (optional lockfile :509-513)',
+			'src/background/candidate-sidecar-store.ts:458 appendToSidecar — appendFileSync :506 (optional lockfile :509-513)',
 		],
 		readerCitations: [
 			'src/background/lane-output-store.ts:191 readLaneOutput — single-file by ref with digest/bytes validation, sync',

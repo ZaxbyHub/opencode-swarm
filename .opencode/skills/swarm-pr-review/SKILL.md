@@ -1912,8 +1912,8 @@ For reviewer, critic, and explorer prompt templates, read `references/prompt-tem
 
 Under Profile A, after metrics and durable review artifacts are complete, but
 before emitting the user-facing final report, call `complete_pr_workflow` with
-mode `PR_REVIEW` and the same exact
-`pr_head_sha`. The tool refuses to clear the session gate while required base,
+mode `PR_REVIEW`, the same exact
+`pr_head_sha`, and the terminal `report_verdict` the coverage kind allows (issue #2383). The tool refuses to clear the session gate while required base,
 trigger, declared reviewer/critic, or open-lane obligations remain incomplete.
 While the gate remains active, the runtime prepends a workflow-active banner
 to the first substantive text part of each architect message (the model's text
