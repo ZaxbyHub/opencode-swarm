@@ -88,6 +88,7 @@ const REQUIRED_PACKAGE_FILES = [
 	'README.md',
 	'LICENSE',
 	'package.json',
+	'opencode-swarm.schema.json',
 ];
 
 const FORBIDDEN_PACKAGE_PREFIXES = [

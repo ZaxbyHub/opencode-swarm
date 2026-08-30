@@ -399,8 +399,12 @@ jobs:
           # EXCLUDED — they are owned by the integration/security/smoke jobs.
           {
             find src -name '*.test.ts' -type f
-            find tests/unit tests/adversarial tests/architect tests/cli tests/tools tests/helpers -name '*.test.ts' -type f 2>/dev/null
-            find tests -maxdepth 1 -name '*.test.ts' -type f 2>/dev/null
+            # '|| true': a branch may legitimately empty one of these trees
+            # (git drops the directory, e.g. tests/cli after #2420/#2421), and
+            # a missing-dir find failure here is silent under set -e + pipefail
+            # because the find's stderr goes to /dev/null.
+            find tests/unit tests/adversarial tests/architect tests/cli tests/tools tests/helpers -name '*.test.ts' -type f 2>/dev/null || true
+            find tests -maxdepth 1 -name '*.test.ts' -type f 2>/dev/null || true
           } | sort -u > "$tmpdir/all-tests.txt"
           # Drop known-red pre-existing failures (issue #1705) so the gate reflects
           # new regressions, not the debt backlog CI's old broken detection had been

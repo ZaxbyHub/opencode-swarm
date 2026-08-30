@@ -1,259 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
-	writeProjectConfigIfNew,
+	CONFIG_SCHEMA_REF,
 	writeSwarmConfigExampleIfNew,
 } from '../../../src/config/project-init';
-import {
-	clearDeferredWarnings,
-	getDeferredWarnings,
-} from '../../../src/services/warning-buffer';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
-
-describe('writeProjectConfigIfNew', () => {
-	let dir: string;
-	let cleanup: () => void;
-	let warnOutput: string[];
-	let origWarn: typeof console.warn;
-
-	beforeEach(() => {
-		({ dir, cleanup } = createSafeTestDir('swarm-project-init-'));
-		warnOutput = [];
-		origWarn = console.warn;
-		console.warn = (...args: unknown[]) => {
-			warnOutput.push(args.map(String).join(' '));
-		};
-		// Epic #1752 PR2: advisoryWarn writes to the module-level deferred-warning
-		// buffer. Clear it between tests (AGENTS.md Invariant 7).
-		clearDeferredWarnings();
-	});
-
-	afterEach(() => {
-		console.warn = origWarn;
-		clearDeferredWarnings();
-		cleanup();
-	});
-
-	const configPath = (d: string) =>
-		path.join(d, '.opencode', 'opencode-swarm.json');
-
-	// 1. Creates the file when neither file nor .opencode/ directory exist
-	test('1. creates .opencode/opencode-swarm.json when directory is absent', () => {
-		writeProjectConfigIfNew(dir);
-		expect(fs.existsSync(configPath(dir))).toBe(true);
-	});
-
-	// 2. Creates .opencode/ directory if it does not exist
-	test('2. creates .opencode/ directory when absent', () => {
-		writeProjectConfigIfNew(dir);
-		expect(fs.existsSync(path.join(dir, '.opencode'))).toBe(true);
-	});
-
-	// 3. Created file is valid JSON (compatible with the JSON.parse loader)
-	test('3. created file parses as valid JSON', () => {
-		writeProjectConfigIfNew(dir);
-		const raw = fs.readFileSync(configPath(dir), 'utf-8');
-		expect(() => JSON.parse(raw)).not.toThrow();
-		const parsed = JSON.parse(raw);
-		expect(typeof parsed).toBe('object');
-		expect(parsed).not.toBeNull();
-	});
-
-	// 4. Created file is an empty JSON object (deep-merges as no-op)
-	test('4. created file is an empty JSON object', () => {
-		writeProjectConfigIfNew(dir);
-		const raw = fs.readFileSync(configPath(dir), 'utf-8');
-		expect(JSON.parse(raw)).toEqual({});
-	});
-
-	// 5. Does NOT overwrite an existing file
-	test('5. does not overwrite an existing file', () => {
-		const opencodeDir = path.join(dir, '.opencode');
-		fs.mkdirSync(opencodeDir, { recursive: true });
-		const sentinel = JSON.stringify({ custom: true }, null, 2) + '\n';
-		fs.writeFileSync(configPath(dir), sentinel, 'utf-8');
-		const mtimeBefore = fs.statSync(configPath(dir)).mtimeMs;
-
-		// Small delay to ensure mtime would differ if the file were rewritten
-		Bun.sleepSync(50);
-		writeProjectConfigIfNew(dir);
-
-		expect(fs.statSync(configPath(dir)).mtimeMs).toBe(mtimeBefore);
-		expect(fs.readFileSync(configPath(dir), 'utf-8')).toBe(sentinel);
-	});
-
-	// 6. Calling twice is idempotent — no error, same file content
-	test('6. idempotent: calling twice leaves file unchanged', () => {
-		writeProjectConfigIfNew(dir);
-		const first = fs.readFileSync(configPath(dir), 'utf-8');
-		writeProjectConfigIfNew(dir);
-		expect(fs.readFileSync(configPath(dir), 'utf-8')).toBe(first);
-	});
-
-	// 7. Non-fatal when mkdirSync fails — verified via subprocess with patched fs
-	test('7. non-fatal when mkdirSync fails (EACCES)', async () => {
-		const script = `
-			const fs = require('node:fs');
-			const origMkdir = fs.mkdirSync.bind(fs);
-			const origExists = fs.existsSync.bind(fs);
-			fs.existsSync = function(p) {
-				if (String(p).endsWith('.opencode')) return false;
-				if (String(p).endsWith('opencode-swarm.json')) return false;
-				return origExists(p);
-			};
-			fs.mkdirSync = function(p, ...mkdirArgs) {
-				if (String(p).endsWith('.opencode')) {
-					throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
-				}
-				return origMkdir(p, ...mkdirArgs);
-			};
-			// Inline copy of writeProjectConfigIfNew (uses patched fs via require)
-			const path = require('node:path');
-			const STARTER_CONTENT = '{}\\n';
-			function writeProjectConfigIfNew(directory, _quiet) {
-				try {
-					const opencodeDir = path.join(directory, '.opencode');
-					const dest = path.join(opencodeDir, 'opencode-swarm.json');
-					if (!fs.existsSync(opencodeDir)) {
-						fs.mkdirSync(opencodeDir, { recursive: true });
-					}
-					try {
-						fs.writeFileSync(dest, STARTER_CONTENT, { encoding: 'utf-8', flag: 'wx' });
-					} catch {}
-				} catch {}
-			}
-			writeProjectConfigIfNew(${JSON.stringify(dir)}, false);
-		`;
-
-		const result = await new Promise<{ code: number }>((resolve) => {
-			const child = spawn(process.execPath, ['--eval', script], { cwd: dir });
-			child.on('close', (code) => resolve({ code: code ?? 0 }));
-		});
-
-		// Plugin must not crash — exit 0
-		expect(result.code).toBe(0);
-		// File should not have been created
-		expect(fs.existsSync(configPath(dir))).toBe(false);
-	});
-
-	// 7b. Non-fatal when writeFileSync fails (e.g. ENOSPC)
-	test('7b. non-fatal when writeFileSync fails (ENOSPC)', async () => {
-		const script = `
-			const fs = require('node:fs');
-			const origWriteFileSync = fs.writeFileSync.bind(fs);
-			const origExists = fs.existsSync.bind(fs);
-			fs.existsSync = function(p) {
-				if (String(p).endsWith('opencode-swarm.json')) return false;
-				return origExists(p);
-			};
-			fs.writeFileSync = function(p, ...writeArgs) {
-				if (String(p).endsWith('opencode-swarm.json')) {
-					throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
-				}
-				return origWriteFileSync(p, ...writeArgs);
-			};
-			const path = require('node:path');
-			const STARTER_CONTENT = '{}\\n';
-			function writeProjectConfigIfNew(directory, _quiet) {
-				try {
-					const opencodeDir = path.join(directory, '.opencode');
-					const dest = path.join(opencodeDir, 'opencode-swarm.json');
-					if (!fs.existsSync(opencodeDir)) {
-						fs.mkdirSync(opencodeDir, { recursive: true });
-					}
-					try {
-						fs.writeFileSync(dest, STARTER_CONTENT, { encoding: 'utf-8', flag: 'wx' });
-					} catch {}
-				} catch {}
-			}
-			writeProjectConfigIfNew(${JSON.stringify(dir)});
-		`;
-
-		const result = await new Promise<{ code: number }>((resolve) => {
-			const child = spawn(process.execPath, ['--eval', script], { cwd: dir });
-			child.on('close', (code) => resolve({ code: code ?? 0 }));
-		});
-
-		expect(result.code).toBe(0);
-		expect(fs.existsSync(configPath(dir))).toBe(false);
-	});
-
-	// 7c. Non-fatal when .opencode exists as a file (mkdir ENOTDIR-style path)
-	test('7c. non-fatal when .opencode is a file', () => {
-		fs.writeFileSync(path.join(dir, '.opencode'), 'not-a-dir', 'utf-8');
-		expect(() => writeProjectConfigIfNew(dir)).not.toThrow();
-		expect(fs.existsSync(configPath(dir))).toBe(false);
-	});
-
-	// 8. Epic #1752 PR2: advisory now routes through advisoryWarn (buffered for
-	// /swarm diagnose) regardless of quiet. console.warn is never called; the
-	// message reaches the deferred-warning buffer.
-	test('8. routes the created-config advisory to the deferred buffer (quiet=true)', () => {
-		writeProjectConfigIfNew(dir, true);
-		// advisoryWarn never writes raw stderr — the console.warn override stays empty.
-		expect(warnOutput).toHaveLength(0);
-		// The advisory IS buffered so /swarm diagnose can surface it.
-		expect(
-			getDeferredWarnings().some((m) => m.includes('opencode-swarm.json')),
-		).toBe(true);
-	});
-
-	// 9a. Symlink guard: skips creation when .opencode is a symlink
-	test('9a. does not write through a symlinked .opencode directory', () => {
-		const target = path.join(dir, 'symlink-target');
-		const opencodeLink = path.join(dir, '.opencode');
-		fs.mkdirSync(target, { recursive: true });
-		fs.symlinkSync(
-			target,
-			opencodeLink,
-			process.platform === 'win32' ? 'junction' : 'dir',
-		);
-
-		writeProjectConfigIfNew(dir);
-
-		expect(fs.existsSync(path.join(opencodeLink, 'opencode-swarm.json'))).toBe(
-			false,
-		);
-		expect(fs.existsSync(path.join(target, 'opencode-swarm.json'))).toBe(false);
-	});
-
-	// 9b. No false-positive when the project directory itself traverses a symlink
-	// (e.g. macOS /tmp → /private/tmp). Exercises the realpathSync branch when
-	// .opencode is a real directory but opencodeDir's string path is unresolved.
-	test('9b. writes config when project root is a symlink (parent-path guard does not fire)', () => {
-		const realProject = path.join(dir, 'real-project');
-		const linkProject = path.join(dir, 'link-project');
-		fs.mkdirSync(realProject, { recursive: true });
-		fs.symlinkSync(
-			realProject,
-			linkProject,
-			process.platform === 'win32' ? 'junction' : 'dir',
-		);
-
-		// Pre-create .opencode as a real directory so the realpathSync branch runs.
-		fs.mkdirSync(path.join(linkProject, '.opencode'), { recursive: true });
-
-		writeProjectConfigIfNew(linkProject);
-
-		// Guard must NOT fire — .opencode is real, no redirection.
-		expect(
-			fs.existsSync(path.join(realProject, '.opencode', 'opencode-swarm.json')),
-		).toBe(true);
-	});
-
-	// 9. Epic #1752 PR2: even with quiet=false the advisory routes through
-	// advisoryWarn (never raw stderr). The message reaches the deferred-warning
-	// buffer so /swarm diagnose can surface it.
-	test('9. routes the created-config advisory to the deferred buffer (quiet=false)', () => {
-		writeProjectConfigIfNew(dir, false);
-		expect(warnOutput).toHaveLength(0);
-		expect(
-			getDeferredWarnings().some((m) => m.includes('opencode-swarm.json')),
-		).toBe(true);
-	});
-});
 
 describe('writeSwarmConfigExampleIfNew', () => {
 	let dir: string;
@@ -283,6 +35,24 @@ describe('writeSwarmConfigExampleIfNew', () => {
 		expect(typeof parsed).toBe('object');
 		expect(parsed).not.toBeNull();
 		expect(typeof parsed.agents).toBe('object');
+	});
+
+	// 11b. The example carries the $schema reference (issue #1663) so users
+	//      copying it get editor validation for free.
+	test('11b. written file includes the $schema reference', () => {
+		writeSwarmConfigExampleIfNew(dir);
+		const raw = fs.readFileSync(examplePath(dir), 'utf-8');
+		const parsed = JSON.parse(raw) as Record<string, unknown>;
+		expect(parsed.$schema).toBe(CONFIG_SCHEMA_REF);
+	});
+
+	// 11b. The example carries the $schema reference (issue #1663) so users
+	//      copying it get editor validation for free.
+	test('11b. written file includes the $schema reference', () => {
+		writeSwarmConfigExampleIfNew(dir);
+		const raw = fs.readFileSync(examplePath(dir), 'utf-8');
+		const parsed = JSON.parse(raw) as Record<string, unknown>;
+		expect(parsed.$schema).toBe(CONFIG_SCHEMA_REF);
 	});
 
 	test('12. does not overwrite an existing config.example.json', () => {

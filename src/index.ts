@@ -45,10 +45,7 @@ import {
 	SUMMARIZER_EXEMPT_TOOL_NAMES,
 } from './config/constants';
 import { resolveWorktreeIsolationConfig } from './config/index.js';
-import {
-	writeProjectConfigIfNew,
-	writeSwarmConfigExampleIfNew,
-} from './config/project-init';
+import { writeSwarmConfigExampleIfNew } from './config/project-init';
 import {
 	AuthorityConfigSchema,
 	AutomationConfigSchema,
@@ -850,7 +847,7 @@ async function initializeOpenCodeSwarm(
 
 	// Clear deferred warnings at the very start of the session, BEFORE any
 	// init-path work that buffers advisories via advisoryWarn (config load,
-	// ensureSwarmGitExcluded, writeProjectConfigIfNew). The clear isolates the
+	// ensureSwarmGitExcluded). The clear isolates the
 	// new session from the PREVIOUS session's buffer; running it after config
 	// load (the historical placement) would wipe the current session's
 	// config-validation warnings before /swarm diagnose can surface them
@@ -1278,7 +1275,6 @@ async function initializeOpenCodeSwarm(
 	// Side tasks are small and scoped to `<ctx.directory>/.swarm/`
 	// or `<ctx.directory>/.opencode/`, so none risks a home-tree scan.
 	writeSwarmConfigExampleIfNew(ctx.directory);
-	writeProjectConfigIfNew(ctx.directory, config.quiet);
 	// Materialize the bundled architect MODE skills into the project so the
 	// architect's first auto-entered mode (e.g. SPECIFY on a fresh project) can
 	// load its `.swarm/bundled-skills/<mode>/SKILL.md` without first running a /swarm

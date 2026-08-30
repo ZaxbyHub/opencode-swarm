@@ -9,9 +9,10 @@
 - Updated `tests/unit/config/quiet-config.test.ts` to use a supported embedded
   variant token (`/high`) so quiet/deprecation assertions validate the live
   behavior.
-- Hardened `writeProjectConfigIfNew` to refuse writes when `.opencode` resolves
-  through a symlink/junction path, and extended `project-init` coverage for that
-  path.
+- Hardened the project-config init writer (the `writeProjectConfigIfNew`
+  writer, since removed entirely in the #2420 cleanup) to refuse writes when
+  `.opencode` resolves through a symlink/junction path, and extended
+  `project-init` coverage for that path.
 - Fixed a false-positive in the symlink guard: when the project root directory
   itself traverses a symlink (e.g. macOS `/tmp` → `/private/tmp`), the guard
   now correctly compares against the canonicalized parent path instead of the

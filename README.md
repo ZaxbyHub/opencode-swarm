@@ -164,9 +164,10 @@ The 15-minute guide covers:
 - Troubleshooting common issues
 
 The installer automatically:
-- Creates a project config at `.opencode/opencode-swarm.json` when missing so project-level overrides have a place to live
 - Adds `opencode-swarm` to the OpenCode plugin list
 - Disables the native `explore` and `general` agents to reduce routing conflicts
+
+It does **not** create a project config. `.opencode/opencode-swarm.json` is opt-in — create it yourself only if you want project-level overrides of the global config.
 
 ---
 
@@ -201,7 +202,6 @@ Build me a JWT auth helper with tests.
 ┌──────────────────────────────────────────────────────────────┐
 │ $ bunx opencode-swarm install                                │
 │ ✓ installed opencode-swarm                                   │
-│ ✓ created .opencode/opencode-swarm.json                     │
 │                                                              │
 │ $ opencode                                                   │
 │ [Swarm] Welcome! Architect auto-selected. Type /swarm help  │
@@ -929,6 +929,8 @@ If a lock-holding agent crashes or hangs, the lock file will eventually expire (
 <summary id="configuration-reference"><strong>Full Configuration Reference</strong></summary>
 
 Config file location: `~/.config/opencode/opencode-swarm.json` (global) or `.opencode/opencode-swarm.json` (project). Project config merges over global.
+
+Tip: add `"$schema": "https://unpkg.com/opencode-swarm/opencode-swarm.schema.json"` as the first key of your config (config files created by the plugin already include it) for editor validation and autocomplete of every configuration key. See [docs/configuration.md](docs/configuration.md).
 
 ```json
 {

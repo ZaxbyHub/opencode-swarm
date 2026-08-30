@@ -19,23 +19,22 @@ operation (the poll worker writes two snapshots per PR per poll).
   crosses the byte high-water mark.
 - **Incremental legacy migration**: pre-existing `subscriptions.jsonl` logs are
   folded by a streaming, bounded-memory scan with a crash-resumable byte cursor,
-  then archived (renamed) and deleted after 7 days — the archive is stamped
-  fresh at creation, so the 7-day clock counts from archival, not from the log's
-  last write. Migration work per store operation is explicitly finite — at most
-  64 MiB of legacy per op; a larger legacy source is refused (never folded,
-  never archived — no silent loss) and disclosed via health and a
-  `/swarm pr status` footer warning with a repair hint. An I/O failure mid-scan
-  (transient EBUSY/EPERM/ENOENT-class) marks the scan aborted: migration stays
-  incomplete and retries on the next operation — an unread tail is never
-  archived away. The replay guards are writer-enforced as well: terminal
-  compaction runs before every persist, and a folded live set that still
-  exceeds the checkpoint replay capacity (512 records / 1 MiB) refuses
-  migration and fails writes with a loud capacity error — the store never
-  persists a checkpoint its own reader would reject and never archives
-  unabsorbed data; reads keep folding the legacy source exactly. v1 append
-  semantics keep working: a downgraded writer's changes are detected (size or
-  mtime) and re-folded; same-`updatedAt` external appends still win
-  (positional last-write-wins).
+  then archived (renamed) and deleted after 7 days. Migration work per mutation
+  is explicitly finite — an 8 MiB per-call budget in 1 MiB progress chunks;
+  oversized newline-free corrupt records are discarded incrementally, so they
+  cannot bypass the memory or work budget. The cursor retains a bounded
+  pre-migration checkpoint baseline, allowing a replaced legacy generation to
+  restart without stale records or loss of native subscriptions. Archive
+  replacement keeps the prior archive in a bounded rollback slot until the new
+  candidate is verified and installed; retention starts at archive installation.
+  A source above the 64 MiB admission ceiling is refused before a mutation can
+  publish a shadowing checkpoint (never folded or archived) and is disclosed by
+  health and `/swarm pr status`. An I/O failure does not mark the source done or
+  archive unread data. Replay guards are writer-enforced: terminal compaction
+  runs before every persist, and a folded live set beyond the 512-record / 1 MiB
+  replay capacity refuses migration rather than persisting a checkpoint the
+  reader would reject. Downgraded-writer changes are detected by size or mtime;
+  same-`updatedAt` appends retain positional last-write-wins semantics.
 - **Read bootstrap**: the first read on a legacy-only store persists the
   checkpoint (best-effort, short lock timeout) so read-only installs converge
   to bounded reads after one read. Attempted at most once per directory per
@@ -43,12 +42,12 @@ operation (the poll worker writes two snapshots per PR per poll).
   timeout, and later reads skip the attempt entirely.
 - **Identity validation**: the checkpoint is bound to its project root. A copied
   `.swarm` reads as empty — the wrong monitor never starts — and the next write
-  rebinds, quarantining the foreign checkpoint to a bounded slot pair (the
-  current copy plus one `.prev` generation — a second recovery event never
-  destroys the first event's state). Every rebind is logged with the number of
-  displaced records and counted in `maintenance.resets`, surfaced in the
-  `/swarm pr status` storage footer and the `pr_subscription_health` telemetry
-  payload (`recovery_resets`). Corrupt checkpoints are quarantined and
+  rebinds only after quarantining the foreign checkpoint and any co-copied
+  legacy log. The checkpoint slot retains a bounded `.prev` generation so a
+  second recovery event does not destroy the first; a failed quarantine rejects
+  the mutation and preserves the existing files. Rebinds are counted in
+  `maintenance.resets` and surfaced in `/swarm pr status` and
+  `pr_subscription_health` telemetry. Corrupt checkpoints are quarantined and
   recovered from the legacy log.
 - **Hard limits** (`PR_SUBSCRIPTION_LIMITS`): live-subscription cap (explicit
   `max_subscriptions` wins; store-side safety net 20 when omitted), terminal
@@ -57,7 +56,9 @@ operation (the poll worker writes two snapshots per PR per poll).
   (active records are never dropped for bytes) backed by HARD read-side guards
   (512-record replay guard and a 1 MiB file ceiling — an over-limit checkpoint
   is quarantined and recovered from the legacy log, never synchronously
-  loaded), and audit watermarks. Checkpoint replay re-validates every record's
+  loaded), and audit watermarks whose compactor reads at most the 128 KiB tail
+  even when an external writer enlarged the file. Writer ceilings count UTF-8
+  bytes exactly, matching the reader. Checkpoint replay re-validates every record's
   identity (map key + composite correlation key must compose from the record's
   parts) — identity-invalid state never starts a monitor. Unaddressed-event
   actives and custom monitor policy survive compaction.
@@ -81,16 +82,10 @@ JSONL snapshots. Public store API signatures are unchanged; all pre-existing
 suites pass (one assertion updated to the checkpoint file, one legacy-seeding
 test modernized to exercise the migration overlay).
 
-## Operational notes
-
-- **Moving the project directory** re-binds the store (same fail-safe as a
-  copied `.swarm`): reads see nothing and the next write quarantines the old
-  checkpoint to `subscriptions.checkpoint.foreign.json`. Re-create
-  subscriptions with `/swarm pr subscribe`; no history is lost.
-- **Downgrading** to a pre-#2042 build: the legacy `subscriptions.jsonl` has
-  been absorbed and archived, so the old build sees an empty store and will
-  re-subscribe from scratch. Re-upgrading re-detects a (re)created legacy log
-  and re-folds it — nothing durable is lost either way.
+Downgrade note: v1 cannot read the checkpoint. Before reverting to a pre-#2042
+build, restore `subscriptions.legacy.jsonl` to `subscriptions.jsonl` while the
+seven-day archive exists, or re-create active subscriptions from the
+checkpoint/status output.
 
 Part of the observability sequence (#1823). Retention registry row
 `pr-monitor-subscriptions` moved to `retain-by-design`.

@@ -16,7 +16,24 @@ Project config:
 .opencode/opencode-swarm.json
 ```
 
-Project config merges over global config.
+Project config merges over global config. The project config file is **opt-in** — the installer and plugin startup never create it. Add it manually only when a project needs to override the global config.
+
+Both locations support a `"$schema"` key pointing at the JSON Schema shipped with the
+plugin, which gives supporting editors validation and autocomplete for every
+configuration key:
+
+```json
+{
+  "$schema": "https://unpkg.com/opencode-swarm/opencode-swarm.schema.json"
+}
+```
+
+The URL above is the canonical always-latest form. Config files created by the plugin
+(project init, CLI install) write the same URL pinned to the plugin version that authored
+the file (e.g. `https://unpkg.com/opencode-swarm@7.158.1/opencode-swarm.schema.json`) so
+validation matches the installed version; both forms resolve to the same published file.
+To adopt the reference in an existing config, add the `$schema` line shown above as the
+first key. `"$schema"` is pure metadata and is ignored at runtime.
 
 ## Environment variables
 
@@ -48,6 +65,90 @@ Most behavior is controlled by `opencode-swarm.json`. Environment variables are 
 You only need to define the agents you want to override.
 
 > If `architect` is not set explicitly, it inherits the currently selected OpenCode UI model.
+
+<!-- opencode-swarm: begin generated top-level-config-keys (regenerate: bun run scripts/generate-config-schema.ts) -->
+
+## Top-level configuration keys
+
+Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit inside the markers. Regenerate with `bun run scripts/generate-config-schema.ts`. See also the topic sections below and the shipped JSON Schema (`opencode-swarm.schema.json`, referenced via `$schema` for editor validation).
+
+| Key | Type | Default | Description |
+| --- | ---- | ------- | ----------- |
+| `$schema` | string | — | JSON Schema URL for editor validation/autocomplete of this file (issue #1663). Ignored at runtime; malformed values are ignored too. |
+| `config_format_version` | integer | 1 | Config format version for the migration table. Increment when fields are deprecated. Distinct from knowledge.schema_version. |
+| `agents` | record<string, object> | — | Per-agent overrides keyed by agent name for the default swarm (e.g. "architect", "coder"). Multi-swarm setups configure agents under swarms.<id>.agents instead. |
+| `default_agent` | string | — | Agent set as the primary mode. Omitted: every generated *_architect is primary. Exact generated name (e.g. "local_architect"): only that agent. Base role name (e.g. "coder"): every generated agent with that base role. Unknown strings warn once and fall back to architect primaries. |
+| `auto_select_architect` | boolean \| string | — | Auto-select the swarm architect for new sessions instead of OpenCode built-ins. Omitted or false: manual selection (omitted behaves as false). true: enable auto-select and disable built-in build/plan agents. "<architect_name>" (e.g. "mega_architect"): enable targeting one architect in multi-swarm setups. |
+| `swarms` | record<string, object> | — | Multiple swarms keyed by swarm ID (no underscores allowed). The first swarm, or one named "default", provides the primary architect. |
+| `max_iterations` | number | 5 | Maximum pipeline iterations per task (1-10). |
+| `pipeline` | object | — | Pipeline stage/model settings. |
+| `phase_complete` | object | — | Phase-completion gate settings. |
+| `qa_retry_limit` | number | 3 | Maximum QA retry rounds per task (1-10). |
+| `execution_mode` | enum(strict \| balanced \| fast) | "balanced" | Performance mode controlling optional hook execution overhead: "strict", "balanced", or "fast". |
+| `inject_phase_reminders` | boolean | true | Inject phase reminder directives during execution. |
+| `hooks` | object | — | Hook subsystem toggles and settings. |
+| `pr_review_resilience` | object (strict) | — | PR review base-wave staged canary/fanout resilience settings. |
+| `gates` | object | — | Quality gate configuration (v6.9 anti-slop features). |
+| `context_budget` | object | — | Context budget thresholds. |
+| `pricing` | object | — | Token/cost estimation fallback table. Provider-reported cost wins when present; entries only estimate from usage tokens when reports omit cost. |
+| `guardrails` | object | — | Loop containment and safety guardrails: tool-call caps, denial tracking, destructive-command blocking, shell audit. |
+| `watchdog` | object | — | Scope-guard and delegation-ledger watchdog settings. |
+| `self_review` | object | — | Advisory self-review after coder delegation. |
+| `auto_review` | object | — | Opt-in execution-diff review by the reviewer model in a fresh ephemeral session at task/phase boundaries. |
+| `tool_filter` | object | — | Controls which tools each agent is allowed to use. |
+| `authority` | object | — | Per-agent file write authority rules. |
+| `plan_cursor` | object | — | Compressed plan summary injection settings. |
+| `context_map` | object | — | Context Map (issue #1104, FR-006) — opt-in. |
+| `repo_graph` | object | {} | Repository dependency-graph settings (builder excludes, incremental refresh). Nested defaults materialize when the whole section is omitted. |
+| `evidence` | object | — | Evidence retention and storage settings. |
+| `summaries` | object | — | Summary generation settings. |
+| `review_passes` | object | — | Dual-pass security review settings. |
+| `adversarial_detection` | object | — | Same-model adversarial checker detection settings. |
+| `adversarial_testing` | object | { … } | Cross-model adversarial testing settings. |
+| `integration_analysis` | object | — | Integration analysis settings. |
+| `docs` | object | — | Documentation synthesizer (docs agent) settings. |
+| `design_docs` | object | — | Structured design-doc generation (issue #1080, docs_design agent) — opt-in. |
+| `git` | object | — | Git executable resolution override (issue #2236 hardening). |
+| `ui_review` | object | — | UI/UX review (designer agent) settings. |
+| `compaction_advisory` | object | — | Compaction advisory settings. |
+| `lint` | object | — | Lint gate settings. |
+| `secretscan` | object | — | Secret scanning settings. |
+| `checkpoint` | object (strict) | — | Checkpoint settings. |
+| `apply_patch` | object (strict) | — | Apply-patch opt-in fuzzy matching fallback (issue #1718). |
+| `automation` | object | — | Background automation mode and per-feature toggles (v6.7 background-first rollout). |
+| `knowledge` | object | — | Two-tier cross-project knowledge base (v6.17). |
+| `memory` | object | — | Swarm memory substrate — disabled by default so existing flows are unchanged. |
+| `learning` | object | — | Learning subsystem: real-time admission, PRM persistence, dedup sweep (issue #1821). |
+| `consensus` | object | — | Consensus mining over completed run evidence (issue #1821). |
+| `curator` | object | — | Phase context consolidation and drift detection. |
+| `architectural_supervision` | object | — | Hierarchical summary review (issue #893). |
+| `knowledge_application` | object | — | Knowledge-application contract (v2): warn or enforce modes, ack tracking. |
+| `skillPropagation` | object | — | Skill propagation gate/injection settings. |
+| `skill_improver` | object | — | Low-frequency, expensive-model skill improvement loop (issue #629, v2). |
+| `harness_evolution` | object (strict) | — | Declarative, non-executing HarnessOpt mutation policy (issue #1825). |
+| `spec_writer` | object | — | Spec writer agent (v2) — independent model for .swarm/spec.md authorship. |
+| `tool_output` | object | — | Tool output truncation settings (enable/disable, max lines, per-tool overrides). |
+| `slop_detector` | object | — | Slop detector settings (v6.29). |
+| `todo_gate` | object | — | TODO gate (v6.32): warn or block on new high-priority TODOs (FIXME/HACK/XXX). |
+| `incremental_verify` | object | — | Incremental verification settings (v6.29). |
+| `compaction_service` | object | — | Compaction service settings (v6.29). |
+| `prm` | object | — | PRM (Process Remediation Manager) settings. |
+| `council` | object (strict) | — | Work Complete Council — parallel four-member verification gate, off by default. |
+| `parallelization` | object | — | Parallelization (PR 1 dark foundation) — disabled by default; no production code path branches on enabled=true yet. |
+| `worktree` | object | — | Worktree isolation policy for parallel coder dispatch lanes (general surface; Lean Turbo keeps its legacy per-mode fields). |
+| `turbo` | object | — | Turbo execution strategy block (Phase 1). Absent means current behavior unchanged. |
+| `turbo_mode` | boolean | false | Bypass reviewer/test gates for rapid iteration (v6.40). |
+| `quiet` | boolean | true | Suppress non-critical startup warnings (default true keeps the TUI clean). Set false to restore verbose warnings for debugging. |
+| `version_check` | boolean | true | Background staleness check against npm, throttled to once per 24h (issue #675). Set false to fully disable the network call. |
+| `full_auto` | object | { … } | Full-auto autonomous orchestration with critic oversight: permission policy, denial accounting, oversight cadence triggers (v2 preserves v1 fields so existing configs load unchanged). |
+| `pr_monitor` | object (strict) | — | GitHub PR subscription and polling (FR-001) — disabled by default; opt-in for real-time PR status updates. |
+| `external_skills` | object | — | External skills: candidate model, discovery, and quarantine store (FR-001) — all subsystems opt-in. |
+| `skills` | object | — | Opt-in gate for the 7 skill_* management tools (FR-004). Default false: the tools are absent from the architect tool surface. |
+| `skill_opt` | object (strict) | — | Governed skill optimizer (issue #1822). Disabled by default; /swarm skill-opt run requires enabled: true. All other subcommands are proposal-only/read-only by default. |
+
+Sections marked `(strict)` reject unknown nested keys at config load time - a typo there makes the loader fall back to safe defaults with a startup warning. All other sections silently ignore unknown nested keys.
+
+<!-- opencode-swarm: end generated top-level-config-keys -->
 
 ## Pricing fallback estimates
 
@@ -531,7 +632,7 @@ GitHub PR subscription and background polling infrastructure (FR-001). When enab
 
 **Auto-subscribe**: when `pr_monitor.enabled: true` is set, PR monitoring is available without an additional feature flag — sessions can subscribe to PRs immediately via `/swarm pr subscribe`. In addition, when `auto_subscribe_on_pr_create` (default `true`) is set, a successful `gh pr create` run through the bash tool automatically subscribes the current session to the created PR — no manual command needed.
 
-**Durable store**: subscription state is persisted to a bounded, crash-safe checkpoint at `.swarm/pr-monitor/subscriptions.checkpoint.json` (latest record per `correlationId` = sessionID + repoFullName + prNumber), with a bounded transition-audit tail at `.swarm/pr-monitor/subscriptions.audit.jsonl` (issue #2042). Reads are bounded by the live set — never by history. Pre-#2042 append-only `subscriptions.jsonl` logs are migrated incrementally on first use and then archived. Multiple sessions may independently subscribe to the same PR using a composite key. `/swarm pr status` surfaces storage health (checkpoint age, counts, bytes/pressure, corrupt/dropped counters, recovery resets, recovery source). The checkpoint is bound to the project root: **moving the project directory** re-binds the store (reads see nothing; the next write quarantines the old checkpoint to `subscriptions.checkpoint.foreign.json`) — re-create subscriptions with `/swarm pr subscribe`.
+**Durable store**: subscription state is persisted to a bounded, crash-safe checkpoint at `.swarm/pr-monitor/subscriptions.checkpoint.json` (latest record per `correlationId` = sessionID + repoFullName + prNumber), with a bounded transition-audit tail at `.swarm/pr-monitor/subscriptions.audit.jsonl` (issue #2042). Reads are bounded by the live set — never by history. Pre-#2042 append-only `subscriptions.jsonl` logs migrate in crash-resumable 1 MiB chunks with an 8 MiB mutation budget plus at most one valid-record boundary (64 KiB); oversized corrupt lines are discarded incrementally, a larger in-budget source returns a retryable migration-in-progress error after the cursor is persisted, and sources above the 64 MiB admission ceiling refuse mutations before checkpoint publication and surface a repair hint. The cursor carries a bounded pre-migration baseline so a replaced legacy generation can restart cleanly without retaining stale folded records or dropping native subscriptions that existed before migration began. Archive replacement keeps the prior archive in a bounded rollback slot until the new candidate is verified and installed. Multiple sessions may independently subscribe to the same PR using a composite key. `/swarm pr status` surfaces storage health (checkpoint age, counts, bytes/pressure, corrupt/dropped counters, recovery resets, recovery source). A copied or moved store rebinds only after quarantining the foreign checkpoint and any co-copied legacy log to bounded slots; if quarantine cannot complete, the mutation fails closed and the existing state is preserved.
 
 **Event types**: all PR events flow through the AutomationEventBus with types:
 - `pr.subscribed`, `pr.unsubscribed`, `pr.status.updated`

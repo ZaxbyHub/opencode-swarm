@@ -43,7 +43,8 @@ plugin registration.
   available in `/swarm diagnose`. Operators debugging a bad config without
   debug mode will see the headline in `/swarm diagnose` rather than the full
   Zod path dump on stderr.
-- `writeProjectConfigIfNew(directory, quiet)` and
+- The project-config auto-create hook (the `writeProjectConfigIfNew` writer,
+  since removed entirely in the #2420 cleanup) and
   `warnIfSwarmNotGitignored(directory, quiet)`: the `quiet` parameter is now a
   no-op (renamed `_quiet`). Previously `quiet:true` suppressed the advisory
   entirely; now it is always buffered for `/swarm diagnose`. This matches the
@@ -71,7 +72,7 @@ Updated 5 test files to assert via `getDeferredWarnings()` instead of
 `spyOn(console, 'warn')`, with `clearDeferredWarnings()` in
 `beforeEach`/`afterEach` to prevent cross-test buffer pollution (Invariant 7):
 `tests/unit/config/loader.test.ts`, `src/agents/architect.designer-gate.test.ts`,
-`tests/unit/config/project-init.test.ts`, `tests/cli/writeProjectConfigIfNew.test.ts`,
+`tests/unit/config/project-init.test.ts`, `tests/cli/writeProjectConfigIfNew.test.ts` (since removed alongside the writer in the #2420 cleanup),
 `tests/gitignore-warning.test.ts`.
 
 Also extended `tests/unit/plugin-tui-safety.test.ts` to regression-guard the
