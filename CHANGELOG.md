@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.157.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.156.0...v7.157.0) (2026-08-30)
+
+
+### Features
+
+* **pr-workflow:** [Guardrail remediation 12/12] add audited PR-feedback publication invalidation and reapproval ([a7bf516](https://github.com/ZaxbyHub/opencode-swarm/commit/a7bf5169812ab0ce6d60b74cba870e9cc9c14f53))
+* **pr-workflow:** add audited PR-feedback publication invalidation and reapproval ([#2108](https://github.com/ZaxbyHub/opencode-swarm/issues/2108)) ([669b7f2](https://github.com/ZaxbyHub/opencode-swarm/commit/669b7f257dfe814fdac876d219803bea54fab0dd))
+
+
+### Bug Fixes
+
+* **pr-workflow:** close PR-review findings — pushurl identity binding, redaction authority parsing, deleted-state guard scope, publication-event authority indexing ([0bd17d7](https://github.com/ZaxbyHub/opencode-swarm/commit/0bd17d768807b2b89745f27754d0fd1b034c044c))
+
 ## [7.156.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.155.0...v7.156.0) (2026-08-29)
 
 
