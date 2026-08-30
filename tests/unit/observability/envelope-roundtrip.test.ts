@@ -81,6 +81,21 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		taskId: '1.1',
 		result: 'success',
 	},
+	delegation_cost_correction: {
+		sessionId: 'sess-1',
+		taskId: '1.1',
+		record_id: 'record-1',
+		version: 1,
+		cost_usd: 0.01,
+	},
+	delegation_cost_binding: {
+		sessionId: 'sess-1',
+		record_id: 'record-1',
+	},
+	delegation_cost_join: {
+		sessionId: 'sess-1',
+		reason: 'join_miss',
+	},
 	model_fallback: {
 		sessionId: 'sess-1',
 		agentName: 'coder',
