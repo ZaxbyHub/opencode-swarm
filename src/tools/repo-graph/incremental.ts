@@ -49,7 +49,11 @@ import type {
 	RepoGraphDiagnostics,
 	SymbolEdge,
 } from './types';
-import { normalizeGraphPath, updateGraphMetadata } from './types';
+import {
+	DEFAULT_MAX_SOURCE_BYTES,
+	normalizeGraphPath,
+	updateGraphMetadata,
+} from './types';
 
 /** Public options shared by hook, read-repair, and direct callers. */
 export interface IncrementalUpdateOptions {
@@ -374,7 +378,8 @@ export async function updateGraphForFiles(
 
 	const graph = existingGraph;
 	const absoluteRoot = path.resolve(workspaceRoot);
-	const maxFileSize = options?.buildOptions?.maxFileSizeBytes ?? 1024 * 1024;
+	const maxFileSize =
+		options?.buildOptions?.maxFileSizeBytes ?? DEFAULT_MAX_SOURCE_BYTES;
 
 	// Manifest-aware package boundaries must stay consistent with the initial
 	// build across incremental edits (defect A8). Re-derive a bounded

@@ -38,6 +38,7 @@ import type {
 	SymbolReference,
 } from './types';
 import {
+	DEFAULT_MAX_SOURCE_BYTES,
 	inferPackageBoundary,
 	isSchemaVersionAtLeast,
 	normalizeGraphPath,
@@ -1049,6 +1050,7 @@ export function getContextPack(
 	const finalSpans: ContextPackSpan[] = [];
 	let truncated = false;
 	const readFailures: string[] = [];
+	const oversizedSources: string[] = [];
 	const outsideWorkspace: string[] = [];
 	const snippetKinds = new Map<
 		ContextPackSpan,
@@ -1080,6 +1082,18 @@ export function getContextPack(
 				outsideWorkspace.push(`${displayPath(span.file)}:${span.symbol}`);
 			} else {
 				try {
+					const stats = fs.statSync(resolved);
+					if (stats.size > DEFAULT_MAX_SOURCE_BYTES) {
+						// Mirrors the 'source read failed' path: the span is admitted
+						// without text and keeps its pre-read line-count token
+						// estimate, so budget accounting stays span-shaped rather
+						// than file-shaped.
+						span.note = 'source too large';
+						oversizedSources.push(`${displayPath(span.file)}:${span.symbol}`);
+						finalSpans.push(span);
+						estimatedTokens += spanTokens;
+						continue;
+					}
 					const content = fs.readFileSync(resolved, 'utf-8');
 					const lines = content.split('\n');
 					const start = Math.max(0, span.startLine - 1);
@@ -1170,6 +1184,7 @@ export function getContextPack(
 		);
 	}
 	rawWarnings.push(...boundedDetails(readFailures, 'source read failed'));
+	rawWarnings.push(...boundedDetails(oversizedSources, 'source too large'));
 	rawWarnings.push(
 		...boundedDetails(outsideWorkspace, 'source outside workspace'),
 	);
