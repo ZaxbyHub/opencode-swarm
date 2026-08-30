@@ -2554,6 +2554,12 @@ export async function handleCloseCommand(
 		// exact own-temp cleanup, and cache invalidation in one place.
 		try {
 			await atomicWriteSwarmFile(closeSummaryPath, summaryContent);
+			if (!ctx.archiveStageFailed && ctx.archiveDir) {
+				await fs.copyFile(
+					closeSummaryPath,
+					path.join(ctx.archiveDir, 'close-summary.md'),
+				);
+			}
 		} catch (error) {
 			const msg = error instanceof Error ? error.message : String(error);
 			ctx.warnings.push(`Failed to write close-summary.md: ${msg}`);

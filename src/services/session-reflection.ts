@@ -784,7 +784,7 @@ function buildReflectionDataSummary(data: SessionReflectionData): string {
 		);
 		if (kd.curation) {
 			lines.push(
-				`  - Curation (finalize batch): ${kd.curation.stored} stored, ${kd.curation.reinforced} reinforced, ${kd.curation.skipped} skipped, ${kd.curation.rejected} rejected, ${kd.curation.quarantined} quarantined.`,
+				`  - Curation (finalize batch): ${kd.curation.stored} stored, ${kd.curation.reinforced} reinforced, ${kd.curation.skipped} skipped (dedup/already-admitted; audit: .swarm/events.jsonl curator_skipped), ${kd.curation.rejected} rejected (validator-refused; ledger: .swarm/knowledge-rejected.jsonl), ${kd.curation.quarantined} quarantined (actionability-gated; queue: .swarm/knowledge-unactionable.jsonl; audit: .swarm/events.jsonl curator_skipped).`,
 			);
 		}
 		if (
@@ -852,7 +852,7 @@ export function buildSignalsBlock(data: SessionReflectionData): string {
 		);
 		if (kd.curation) {
 			lines.push(
-				`- Curation (finalize batch): ${kd.curation.stored} stored, ${kd.curation.reinforced} reinforced, ${kd.curation.skipped} skipped, ${kd.curation.rejected} rejected, ${kd.curation.quarantined} quarantined.`,
+				`- Curation (finalize batch): ${kd.curation.stored} stored, ${kd.curation.reinforced} reinforced, ${kd.curation.skipped} skipped (dedup/already-admitted; audit: .swarm/events.jsonl curator_skipped), ${kd.curation.rejected} rejected (validator-refused; ledger: .swarm/knowledge-rejected.jsonl), ${kd.curation.quarantined} quarantined (actionability-gated; queue: .swarm/knowledge-unactionable.jsonl; audit: .swarm/events.jsonl curator_skipped).`,
 			);
 		}
 		if (
