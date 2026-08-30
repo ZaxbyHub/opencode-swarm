@@ -582,7 +582,7 @@ describe('getContextPack', () => {
 				},
 				edges: [],
 				metadata: {
-					generatedAt: new Date().toISOString(),
+					generatedAt: '2026-01-01T00:00:00.000Z',
 					generator: 'test',
 					nodeCount: 1,
 					edgeCount: 0,
@@ -659,7 +659,7 @@ describe('getContextPack', () => {
 				nodes: { [graphNode.filePath]: graphNode },
 				edges: [],
 				metadata: {
-					generatedAt: new Date().toISOString(),
+					generatedAt: '2026-01-01T00:00:00.000Z',
 					generator: 'test',
 					nodeCount: 1,
 					edgeCount: 0,
@@ -715,7 +715,7 @@ describe('getContextPack', () => {
 					},
 				],
 				metadata: {
-					generatedAt: new Date().toISOString(),
+					generatedAt: '2026-01-01T00:00:00.000Z',
 					generator: 'test',
 					nodeCount: 2,
 					edgeCount: 0,
