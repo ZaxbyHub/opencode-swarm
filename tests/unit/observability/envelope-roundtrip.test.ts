@@ -1,8 +1,4 @@
-/**
- * AC1 positive — every catalogued event kind round-trips
- * create -> validate -> project, and Task/lane/resume/cross-process fixtures
- * parse against `ObservabilityEventSchema`.
- */
+/** AC1 positive — every catalogued event kind round-trips create -> validate -> project, and Task/lane/resume/cross-process fixtures parse against `ObservabilityEventSchema`. */
 import { describe, expect, test } from 'bun:test';
 import { CATALOG_KINDS } from '../../../src/observability/catalog.js';
 import { ObservabilityEventSchema } from '../../../src/observability/envelope.js';
@@ -13,11 +9,9 @@ import {
 } from '../../../src/observability/observe.js';
 import { validateEventRelationships } from '../../../src/observability/relationships.js';
 
-/** Representative payloads for every catalogued kind (sessionId/taskId present
- * where the producer genuinely supplies them, per catalog.ts requiredWorkflowIds). */
+/** Representative payloads for every catalogued kind (sessionId/taskId present where the producer genuinely supplies them, per catalog.ts requiredWorkflowIds). */
 const FIXTURES: Record<string, Record<string, unknown>> = {
-	// Issue #2063 / #2065 containment events, catalogued when this branch merged
-	// main. Payloads mirror the real producers in src/telemetry.ts.
+	// Issue #2063 / #2065 containment events, catalogued when this branch merged main. Payloads mirror the real producers in src/telemetry.ts.
 	no_op_strong_warning: {
 		sessionId: 'sess-1',
 		agentName: 'coder',
@@ -88,14 +82,8 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		version: 1,
 		cost_usd: 0.01,
 	},
-	delegation_cost_binding: {
-		sessionId: 'sess-1',
-		record_id: 'record-1',
-	},
-	delegation_cost_join: {
-		sessionId: 'sess-1',
-		reason: 'join_miss',
-	},
+	delegation_cost_binding: { sessionId: 'sess-1', record_id: 'record-1' },
+	delegation_cost_join: { sessionId: 'sess-1', reason: 'join_miss' },
 	model_fallback: {
 		sessionId: 'sess-1',
 		agentName: 'coder',
@@ -325,9 +313,7 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		limit_bytes: 262144,
 	},
 
-	// Issue #2038 skill-usage-log/pending health. Payload mirrors the real
-	// producer in src\hooks\skill-usage-pending.ts (emitSkillUsageHealth):
-	// bounded counts + timestamps only — no skillPath, no per-skill identifier.
+	// Issue #2038 skill-usage-log/pending health. Payload mirrors the real producer in src\hooks\skill-usage-pending.ts (emitSkillUsageHealth): bounded counts + timestamps only — no skillPath, no per-skill identifier.
 	skill_usage_health: {
 		trigger: 'compaction',
 		accepted: 500,
@@ -353,9 +339,7 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		coverage: true,
 	},
 
-	// Issue #2039 core event store health. Payload mirrors the real producer
-	// in src/events/core-events.ts (foldPass/finalize): bounded counts +
-	// timestamps only — no event content, no paths.
+	// Issue #2039 core event store health. Payload mirrors the real producer in src/events/core-events.ts (foldPass/finalize): bounded counts + timestamps only — no event content, no paths.
 	core_events_health: {
 		trigger: 'compaction',
 		accepted_count: 5250,
@@ -371,9 +355,7 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		limit_bytes: 2097152,
 	},
 
-	// Issue #2040 shell-audit store health. Payload mirrors the real producer
-	// in src/hooks/guardrails/shell-audit-store.ts (foldPass/finalize):
-	// bounded counts + timestamps only — no commands, no paths, no agents.
+	// Issue #2040 shell-audit store health. Payload mirrors the real producer in src/hooks/guardrails/shell-audit-store.ts (foldPass/finalize): bounded counts + timestamps only — no commands, no paths, no agents.
 	shell_audit_health: {
 		trigger: 'compaction',
 		accepted_count: 5250,
