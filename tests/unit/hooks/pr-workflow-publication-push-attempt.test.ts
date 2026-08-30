@@ -12,9 +12,9 @@ import {
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
+	createPublicationFixture,
 	HEAD_SHA,
 	POST_COMMIT_SHA,
-	createPublicationFixture,
 	type PublicationFixture,
 } from './pr-workflow-publication.test-fixtures.js';
 
@@ -39,7 +39,10 @@ async function readPublication(sessionId = SESSION_ID) {
 	};
 }
 
-async function admitPush(callId?: string, sessionId = SESSION_ID): Promise<void> {
+async function admitPush(
+	callId?: string,
+	sessionId = SESSION_ID,
+): Promise<void> {
 	await enforcePrWorkflowToolBefore(
 		fixture.directory,
 		sessionId,
@@ -108,7 +111,12 @@ describe('push attempt lifecycle (issue #2108 §3)', () => {
 		// reconciling it as `uncertain` with a fresh remote observation —
 		// before its own remote verification fails closed.
 		await expect(
-			completePrWorkflow(fixture.directory, SESSION_ID, 'PR_FEEDBACK', HEAD_SHA),
+			completePrWorkflow(
+				fixture.directory,
+				SESSION_ID,
+				'PR_FEEDBACK',
+				HEAD_SHA,
+			),
 		).rejects.toThrow('intended remote-tracking ref');
 		const { active, attempts } = await readPublication();
 		expect(active?.state).toBe('armed');

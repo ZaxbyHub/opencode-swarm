@@ -49,7 +49,7 @@ interaction:
 - canonical workspace identity (`canonicalWorkspaceIdentity`)
 - session id and PR target URL
 - immutable intake head SHA; local branch ref + exact local head SHA
-- remote name + **credential-redacted remote URL identity** (`git remote get-url`, userinfo stripped — a repointed remote cannot receive the approved push)
+- remote name + **credential-redacted PUSH-URL identity** (`git remote get-url --push` — i.e. `remote.<name>.pushurl` when set, else the fetch URL — with userinfo redacted and query/fragment stripped: a repointed remote, a differing pushurl, or credential-bearing URL forms cannot receive the approved push or persist secrets)
 - remote branch ref + remote-tracking ref
 - the independently approved revision digest
 - the exact receipt set that authorized the generation (Stage A `validatedAt` + one batch id/lane id per ordered phase)

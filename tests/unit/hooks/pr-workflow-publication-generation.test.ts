@@ -11,13 +11,13 @@ import {
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
+	createPublicationFixture,
 	HEAD_SHA,
 	LOCAL_HEAD_REF,
 	POST_COMMIT_SHA,
+	type PublicationFixture,
 	REMOTE_URL_IDENTITY,
 	REVISION,
-	createPublicationFixture,
-	type PublicationFixture,
 } from './pr-workflow-publication.test-fixtures.js';
 
 const SESSION_ID = 'pub-generation';
@@ -62,9 +62,7 @@ describe('publication generation identity (issue #2108)', () => {
 		]);
 		// Derived legacy mirror present exactly while armed.
 		expect(state?.prFeedbackReadyToPublish?.localHead).toBe(POST_COMMIT_SHA);
-		expect(state?.prFeedbackReadyToPublish?.validatedAt).toBe(
-			active?.armedAt,
-		);
+		expect(state?.prFeedbackReadyToPublish?.validatedAt).toBe(active?.armedAt);
 	});
 
 	test('unresolvable remote URL identity fails arming closed', async () => {
@@ -84,7 +82,12 @@ describe('publication generation identity (issue #2108)', () => {
 	test('completion without an admitted push attempt is refused', async () => {
 		await fixture.prepareArmedGeneration(SESSION_ID);
 		await expect(
-			completePrWorkflow(fixture.directory, SESSION_ID, 'PR_FEEDBACK', HEAD_SHA),
+			completePrWorkflow(
+				fixture.directory,
+				SESSION_ID,
+				'PR_FEEDBACK',
+				HEAD_SHA,
+			),
 		).rejects.toThrow('requires the exact approved push');
 	});
 });
@@ -122,11 +125,15 @@ describe('legacy armed-record migration (issue #2108 §7)', () => {
 		await writeLegacyArmedState(sessionId);
 		// Current head (HEAD_SHA) differs from the armed localHead
 		// (POST_COMMIT_SHA) — proven identity mismatch under the lock.
-		await _test_exports.ensurePublicationGenerationCurrent(fixture.directory, sessionId);
+		await _test_exports.ensurePublicationGenerationCurrent(
+			fixture.directory,
+			sessionId,
+		);
 		const { state, active } = await readActive(sessionId);
 		expect(active?.generation).toBe(1);
 		expect(
-			active?.invalidationReason ?? state?.prFeedbackPublication?.active?.invalidationReason,
+			active?.invalidationReason ??
+				state?.prFeedbackPublication?.active?.invalidationReason,
 		).toBe('legacy-migration-receipt-mismatch');
 		expect(active?.state ?? state?.prFeedbackPublication?.active?.state).toBe(
 			'invalidated',
@@ -148,7 +155,11 @@ describe('legacy armed-record migration (issue #2108 §7)', () => {
 			revisionDigest: REVISION,
 			checks: [
 				{ category: 'build', command: ['build'], durationMs: 1 },
-				{ category: 'diff-check', command: ['git', 'diff', '--check'], durationMs: 1 },
+				{
+					category: 'diff-check',
+					command: ['git', 'diff', '--check'],
+					durationMs: 1,
+				},
 			],
 			validatedAt: '2026-07-19T00:00:00.000Z',
 		};
@@ -168,7 +179,10 @@ describe('legacy armed-record migration (issue #2108 §7)', () => {
 			'utf-8',
 		);
 		fixture.mutators.head(POST_COMMIT_SHA);
-		await _test_exports.ensurePublicationGenerationCurrent(fixture.directory, sessionId);
+		await _test_exports.ensurePublicationGenerationCurrent(
+			fixture.directory,
+			sessionId,
+		);
 		const { state } = await readActive(sessionId);
 		// Workspace identity is unresolvable in the raw fixture path only if
 		// canonicalWorkspaceIdentity fails; on a real tmpdir it resolves, so the
@@ -182,15 +196,16 @@ describe('legacy armed-record migration (issue #2108 §7)', () => {
 		const sessionId = `${SESSION_ID}-legacy-unresolvable`;
 		await writeLegacyArmedState(sessionId);
 		fixture.mutators.upstream(null);
-		await _test_exports.ensurePublicationGenerationCurrent(fixture.directory, sessionId);
+		await _test_exports.ensurePublicationGenerationCurrent(
+			fixture.directory,
+			sessionId,
+		);
 		const { state } = await readActive(sessionId);
 		expect(state?.prFeedbackPublication?.active?.state).toBe('invalidated');
 		expect([
 			'legacy-migration-unresolvable',
 			'legacy-migration-receipt-mismatch',
 			'legacy-migration-identity-mismatch',
-		]).toContain(
-			state?.prFeedbackPublication?.active?.invalidationReason,
-		);
+		]).toContain(state?.prFeedbackPublication?.active?.invalidationReason);
 	});
 });

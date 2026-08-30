@@ -76,6 +76,11 @@ export async function createPublicationFixture(): Promise<PublicationFixture> {
 	let currentHead = HEAD_SHA;
 	let revisionDigest = REVISION;
 	let remoteBranchHead: string | null = POST_COMMIT_SHA;
+	// Snapshot for teardown restore (PR #2422 review PRR-011): the fixture
+	// patches ~20 process-global _test_exports seams; without a restore, any
+	// later test file in the same bun process inherits the stubs. CI runs
+	// per-file processes, but local batch runs and the coverage shard do not.
+	const seamSnapshot = { ..._test_exports };
 
 	const installSeams = (): void => {
 		currentHead = HEAD_SHA;
@@ -269,6 +274,10 @@ export async function createPublicationFixture(): Promise<PublicationFixture> {
 			}
 		},
 		async teardown(): Promise<void> {
+			// Restore EVERY seam this fixture (or a test mutating seams directly)
+			// touched, then drop the cache so no stubbed resolver survives into
+			// another suite in the same process.
+			Object.assign(_test_exports, seamSnapshot);
 			_test_exports.resetTrackedStateCache();
 			await fs.rm(directory, { recursive: true, force: true });
 		},

@@ -10,11 +10,11 @@ import {
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
+	createPublicationFixture,
 	HEAD_SHA,
 	POST_COMMIT_SHA,
-	REVISION,
-	createPublicationFixture,
 	type PublicationFixture,
+	REVISION,
 } from './pr-workflow-publication.test-fixtures.js';
 
 const SESSION_ID = 'pub-invalidation';
@@ -68,13 +68,21 @@ describe('controller invalidation (explicit rework transition)', () => {
 			invalidatePrFeedbackPublication(fixture.directory, SESSION_ID, '   '),
 		).rejects.toThrow('non-empty reason');
 		await expect(
-			invalidatePrFeedbackPublication(fixture.directory, 'no-such-session', 'x'),
+			invalidatePrFeedbackPublication(
+				fixture.directory,
+				'no-such-session',
+				'x',
+			),
 		).rejects.toThrow();
 	});
 
 	test('double invalidation is refused with the current state', async () => {
 		await fixture.prepareArmedGeneration(SESSION_ID);
-		await invalidatePrFeedbackPublication(fixture.directory, SESSION_ID, 'first');
+		await invalidatePrFeedbackPublication(
+			fixture.directory,
+			SESSION_ID,
+			'first',
+		);
 		await expect(
 			invalidatePrFeedbackPublication(fixture.directory, SESSION_ID, 'second'),
 		).rejects.toThrow('already invalidated');
@@ -86,12 +94,19 @@ describe('automatic drift invalidation (every actor, at detection points)', () =
 		['digest', () => fixture.mutators.digest('different-content')],
 		['head', () => fixture.mutators.head('0'.repeat(40))],
 		['worktree', () => fixture.mutators.worktreeClean(false)],
-		['upstream', () => fixture.mutators.upstream({
-			remoteName: 'evil',
-			remoteBranchRef: 'refs/heads/evil',
-			remoteTrackingRef: 'refs/remotes/evil/evil',
-		})],
-		['remote-url', () => fixture.mutators.remoteUrl('https://***@evil.example/repo.git')],
+		[
+			'upstream',
+			() =>
+				fixture.mutators.upstream({
+					remoteName: 'evil',
+					remoteBranchRef: 'refs/heads/evil',
+					remoteTrackingRef: 'refs/remotes/evil/evil',
+				}),
+		],
+		[
+			'remote-url',
+			() => fixture.mutators.remoteUrl('https://***@evil.example/repo.git'),
+		],
 	];
 
 	for (const [name, mutate] of driftScenarios) {
@@ -103,7 +118,9 @@ describe('automatic drift invalidation (every actor, at detection points)', () =
 			);
 			const { state, active } = await readActive();
 			expect(active?.state).toBe('invalidated');
-			expect(active?.invalidationReason).toBe(`drift:${name === 'worktree' ? 'worktree' : name}`);
+			expect(active?.invalidationReason).toBe(
+				`drift:${name === 'worktree' ? 'worktree' : name}`,
+			);
 			expect(state?.prFeedbackReadyToPublish).toBeUndefined();
 			expect(state?.prFeedbackGateBatches).toBeUndefined();
 		});
@@ -127,7 +144,12 @@ describe('automatic drift invalidation (every actor, at detection points)', () =
 		await fixture.prepareArmedGeneration(SESSION_ID);
 		// Several read-only gated interactions with identity intact.
 		for (let i = 0; i < 3; i += 1) {
-			await enforcePrWorkflowToolBefore(fixture.directory, SESSION_ID, 'read', {});
+			await enforcePrWorkflowToolBefore(
+				fixture.directory,
+				SESSION_ID,
+				'read',
+				{},
+			);
 		}
 		const { active, state } = await readActive();
 		expect(active?.state).toBe('armed');
@@ -165,7 +187,11 @@ describe('revocation + fresh approval (evidence N cannot satisfy N+1)', () => {
 
 	test('re-arming after invalidation creates generation N+1 and supersedes N', async () => {
 		await fixture.prepareArmedGeneration(SESSION_ID);
-		await invalidatePrFeedbackPublication(fixture.directory, SESSION_ID, 'rework');
+		await invalidatePrFeedbackPublication(
+			fixture.directory,
+			SESSION_ID,
+			'rework',
+		);
 		// The corrected content walks the full ladder again (fresh batch ids
 		// via sessionSeq so lane records stay distinct).
 		await fixture.prepareArmedGeneration(SESSION_ID, 2);
@@ -180,9 +206,18 @@ describe('revocation + fresh approval (evidence N cannot satisfy N+1)', () => {
 
 	test('from invalidated, the productive recovery paths are reachable', async () => {
 		await fixture.prepareArmedGeneration(SESSION_ID);
-		await invalidatePrFeedbackPublication(fixture.directory, SESSION_ID, 'rework');
+		await invalidatePrFeedbackPublication(
+			fixture.directory,
+			SESSION_ID,
+			'rework',
+		);
 		// Read-only status is reachable.
-		await enforcePrWorkflowToolBefore(fixture.directory, SESSION_ID, 'read', {});
+		await enforcePrWorkflowToolBefore(
+			fixture.directory,
+			SESSION_ID,
+			'read',
+			{},
+		);
 		// The ordered ladder restarts at verification (invalidation superseded
 		// those receipts too): Stage A is gated behind re-settled verification
 		// — reachable, in ladder order, not skipped.
@@ -200,7 +235,12 @@ describe('revocation + fresh approval (evidence N cannot satisfy N+1)', () => {
 			'../../../src/hooks/pr-workflow-gate.js'
 		);
 		await expect(
-			completePrWorkflow(fixture.directory, SESSION_ID, 'PR_FEEDBACK', HEAD_SHA),
+			completePrWorkflow(
+				fixture.directory,
+				SESSION_ID,
+				'PR_FEEDBACK',
+				HEAD_SHA,
+			),
 		).rejects.toThrow();
 		const { active } = await readActive();
 		expect(active?.state).toBe('invalidated');
@@ -212,13 +252,11 @@ describe('cross-workspace binding (copied .swarm cannot authorize)', () => {
 		await fixture.prepareArmedGeneration(SESSION_ID);
 		// Simulate the copied-state attack: the state file is moved to a
 		// DIFFERENT workspace identity. The workspace component re-checks
-		// canonicalWorkspaceIdentity(directory) — patch it to a foreign value.
-		const original = _test_exports.isProcessAlive;
-		const stateBefore = await readActive();
-		expect(stateBefore.active?.workspaceIdentity).toBeTruthy();
-		// The identity comparison lives in the gate; simulate by rewriting the
+		// canonicalWorkspaceIdentity(directory) — simulate by rewriting the
 		// persisted workspace identity to a foreign value (the equivalent of
 		// copying the state into another repository).
+		const stateBefore = await readActive();
+		expect(stateBefore.active?.workspaceIdentity).toBeTruthy();
 		const fs = await import('node:fs/promises');
 		const path = await import('node:path');
 		const relative = _test_exports.workflowGateStateRelativePath(SESSION_ID);
@@ -226,13 +264,33 @@ describe('cross-workspace binding (copied .swarm cannot authorize)', () => {
 		const raw = JSON.parse(await fs.readFile(absolute, 'utf-8')) as {
 			prFeedbackPublication: { active: { workspaceIdentity: string } };
 		};
-		raw.prFeedbackPublication.active.workspaceIdentity =
-			'Z:/other/workspace';
+		raw.prFeedbackPublication.active.workspaceIdentity = 'Z:/other/workspace';
 		await fs.writeFile(absolute, JSON.stringify(raw, null, 2), 'utf-8');
 		_test_exports.resetTrackedStateCache();
 		await expect(attemptExactPush()).rejects.toThrow('INVALIDATED');
 		const { active } = await readActive();
 		expect(active?.invalidationReason).toBe('drift:workspace-identity');
-		_test_exports.isProcessAlive = original;
+	});
+});
+
+describe('evidence-join integrity (defense-in-depth, PR #2422 review PRR-009)', () => {
+	test('a mutated receipt set with identity intact still invalidates via the evidence join', async () => {
+		await fixture.prepareArmedGeneration(SESSION_ID);
+		// Keep every identity component (digest/head/worktree/upstream/remote-
+		// url/workspace) intact; forge ONLY the receipt set the generation's
+		// join pinned — Stage A validatedAt from a different arming.
+		const fs = await import('node:fs/promises');
+		const path = await import('node:path');
+		const relative = _test_exports.workflowGateStateRelativePath(SESSION_ID);
+		const absolute = path.join(fixture.directory, '.swarm', relative);
+		const raw = JSON.parse(await fs.readFile(absolute, 'utf-8')) as {
+			prFeedbackStageA: { validatedAt: string };
+		};
+		raw.prFeedbackStageA.validatedAt = '2000-01-01T00:00:00.000Z';
+		await fs.writeFile(absolute, JSON.stringify(raw, null, 2), 'utf-8');
+		_test_exports.resetTrackedStateCache();
+		await expect(attemptExactPush()).rejects.toThrow('INVALIDATED');
+		const { active } = await readActive();
+		expect(active?.invalidationReason).toBe('drift:evidence-join');
 	});
 });

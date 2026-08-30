@@ -723,37 +723,53 @@ export async function resolveExactRemoteBranchHeadAsync(
  * redacted strings is stable across reads; anything unparseable is returned
  * unchanged (never enriched) and bounded by the caller's cap.
  */
-export function redactRemoteUrlIdentity(
-	url: string,
-	maxChars: number,
-): string {
+export function redactRemoteUrlIdentity(url: string, maxChars: number): string {
+	const cap = (value: string): string =>
+		value.length > maxChars ? value.slice(0, maxChars) : value;
+	const stripQueryAndFragment = (value: string): string => {
+		// Credentials can hide in query strings (`?access_token=…`) or
+		// fragments; the identity must never persist them. Deterministic for
+		// a stable remote URL, which is all the equality comparison needs.
+		const cut = [value.indexOf('?'), value.indexOf('#')]
+			.filter((index) => index >= 0)
+			.sort((a, b) => a - b)[0];
+		return cut === undefined ? value : `${value.slice(0, cut)}?…`;
+	};
 	const trimmed = url.trim();
 	const urlForm = trimmed.match(/^([A-Za-z][A-Za-z0-9+.-]*):\/\/(.*)$/);
-	let redacted: string;
 	if (urlForm) {
 		const [, scheme, rest] = urlForm;
-		const userInfoSplit = rest.indexOf('@');
-		redacted =
-			userInfoSplit >= 0
-				? `${scheme}://***@${rest.slice(userInfoSplit + 1)}`
-				: `${scheme}://${rest}`;
-	} else if (/^[A-Za-z0-9._-]+@[A-Za-z0-9._/-]+:[^/].*$/.test(trimmed)) {
-		// scp-like `user@host:path` — the leading `user@` segment is userinfo.
-		const at = trimmed.indexOf('@');
-		redacted = `***@${trimmed.slice(at + 1)}`;
-	} else {
-		redacted = trimmed;
+		// Userinfo lives ONLY in the authority segment (before the first
+		// `/`); an `@` in the path is path content. Splitting on the first
+		// `@` anywhere let `https://evil.example/pwn@github.com/…` collide
+		// with `https://token@github.com/…` — defeating the armed identity
+		// comparison for a repointed remote (PR #2422 review H2).
+		const authorityEnd = rest.indexOf('/');
+		const authority = authorityEnd >= 0 ? rest.slice(0, authorityEnd) : rest;
+		const pathAndAfter = authorityEnd >= 0 ? rest.slice(authorityEnd) : '';
+		const at = authority.lastIndexOf('@');
+		const redactedAuthority = at >= 0 ? `***${authority.slice(at)}` : authority;
+		return cap(
+			`${scheme}://${redactedAuthority}${stripQueryAndFragment(pathAndAfter)}`,
+		);
 	}
-	return redacted.length > maxChars
-		? redacted.slice(0, maxChars)
-		: redacted;
+	const scpForm = trimmed.match(/^([^/@]+)@([^/@]+):(\S.*)$/);
+	if (scpForm) {
+		// scp-like `user@host:path` — everything before the host colon's `@`
+		// is userinfo.
+		const [, , host, path] = scpForm;
+		return cap(`***@${host}:${stripQueryAndFragment(path)}`);
+	}
+	return cap(stripQueryAndFragment(trimmed));
 }
 
 /**
- * Resolve the credential-redacted URL identity of one configured remote
- * (issue #2108 R1: the armed window must bind the remote's actual URL, not
- * just its name, so a repointed remote cannot receive the approved push).
- * Returns null when the remote name is unsafe or the URL cannot be resolved.
+ * Resolve the credential-redacted URL identity of one configured remote's
+ * PUSH destination (issue #2108 R1: the armed window must bind the remote's
+ * actual push URL — `remote.<name>.pushurl` when set, else the fetch URL —
+ * not just its name, so a repointed remote cannot receive the approved
+ * push). Returns null when the remote name is unsafe or the URL cannot be
+ * resolved.
  */
 export function resolveRemoteUrlIdentity(
 	directory: string,
@@ -767,7 +783,7 @@ export function resolveRemoteUrlIdentity(
 	) {
 		return null;
 	}
-	const output = runGit(directory, ['remote', 'get-url', remoteName]);
+	const output = runGit(directory, ['remote', 'get-url', '--push', remoteName]);
 	if (!output) return null;
 	const url = output.split(/\r?\n/).filter(Boolean)[0];
 	if (!url) return null;
@@ -787,7 +803,12 @@ export async function resolveRemoteUrlIdentityAsync(
 	) {
 		return null;
 	}
-	const output = await runGitAsync(directory, ['remote', 'get-url', remoteName]);
+	const output = await runGitAsync(directory, [
+		'remote',
+		'get-url',
+		'--push',
+		remoteName,
+	]);
 	if (!output) return null;
 	const url = output.split(/\r?\n/).filter(Boolean)[0];
 	if (!url) return null;

@@ -161,8 +161,10 @@ import {
 import { microReflectorAfter } from './hooks/micro-reflector.js';
 import { normalizeToolName } from './hooks/normalize-tool-name';
 import { createPrAutoSubscribeHook } from './hooks/pr-auto-subscribe.js';
-import { enforcePrWorkflowToolBefore } from './hooks/pr-workflow-gate.js';
-import { recordPrFeedbackPushAttemptResult } from './hooks/pr-workflow-gate.js';
+import {
+	enforcePrWorkflowToolBefore,
+	recordPrFeedbackPushAttemptResult,
+} from './hooks/pr-workflow-gate.js';
 import { createPrWorkflowResponseGate } from './hooks/pr-workflow-response-gate.js';
 import { createPrWorkflowSessionResolver } from './hooks/pr-workflow-session-resolver.js';
 import { collectReviewerReceiptAfter } from './hooks/review-receipt-collector.js';
@@ -3833,10 +3835,11 @@ async function initializeOpenCodeSwarm(
 				const pushCommand = afterCtx.args?.command;
 				if (
 					typeof pushCommand === 'string' &&
-					pushCommand.trim().toLowerCase().startsWith('git push')
+					/^\s*git\s+push/i.test(pushCommand)
 				) {
-					const pushAttemptSessionID =
-						await prWorkflowSessionResolver.resolve(input.sessionID);
+					const pushAttemptSessionID = await prWorkflowSessionResolver.resolve(
+						input.sessionID,
+					);
 					await recordPrFeedbackPushAttemptResult(
 						ctx.directory,
 						{

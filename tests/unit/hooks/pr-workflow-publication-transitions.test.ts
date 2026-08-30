@@ -9,16 +9,16 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
-	abortPrWorkflow,
 	_test_exports,
+	abortPrWorkflow,
 	enforcePrWorkflowToolBefore,
 	invalidatePrFeedbackPublication,
 	readPrWorkflowGateState,
 	readPrWorkflowGateStateForRecovery,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
-	POST_COMMIT_SHA,
 	createPublicationFixture,
+	POST_COMMIT_SHA,
 	type PublicationFixture,
 } from './pr-workflow-publication.test-fixtures.js';
 
@@ -165,26 +165,45 @@ describe('concurrency: two admissions serialize on the session lock', () => {
 		_test_exports.resolveExactRemoteBranchHead = () => '0'.repeat(40);
 		_test_exports.resolveExactRemoteBranchHeadAsync = async () =>
 			'0'.repeat(40);
-		// Two racing admissions in the same process serialize through the
-		// in-process pending-mutation queue; across processes the file lock
-		// does the same. The invariant is at most one result-less attempt.
-		await Promise.all([
-			pushCommand(SESSION_ID, 'race-1').catch(() => undefined),
-			pushCommand(SESSION_ID, 'race-2').catch(() => undefined),
+		// Deterministic safe outcome under interleaving (review M5): the two
+		// toolBefore calls interleave between assert and the locked admit, so
+		// exactly ONE admission lands (in flight) and the other is refused by
+		// admit's own armed-state guard with a retryable BLOCKED — never two
+		// in-flight attempts, never a silent pass-through.
+		const results = await Promise.all([
+			pushCommand(SESSION_ID, 'race-1').then(
+				() => 'admitted',
+				(error) => `rejected: ${String(error.message)}`,
+			),
+			pushCommand(SESSION_ID, 'race-2').then(
+				() => 'admitted',
+				(error) => `rejected: ${String(error.message)}`,
+			),
 		]);
+		const admitted = results.filter((r) => r === 'admitted');
+		const rejected = results.filter((r) =>
+			r.startsWith(
+				'rejected: BLOCKED: PR_FEEDBACK push admission requires the armed state',
+			),
+		);
+		expect(admitted.length).toBe(1);
+		expect(rejected.length).toBe(1);
 		const { state } = await readActive();
 		const attempts = state?.prFeedbackPublication?.attempts ?? [];
-		expect(attempts.length).toBeLessThanOrEqual(2);
-		// Exactly one is in flight; the loser was reconciled as uncertain.
-		const inFlight = attempts.filter((a) => !a.result);
-		expect(inFlight.length).toBeLessThanOrEqual(1);
+		expect(attempts.length).toBe(1);
+		expect(attempts[0]?.result).toBeUndefined();
+		expect(['race-1', 'race-2']).toContain(attempts[0]?.callID);
 	});
 });
 
 describe('audit trail', () => {
 	test('every transition appends its bounded core event', async () => {
 		await fixture.prepareArmedGeneration(SESSION_ID);
-		await invalidatePrFeedbackPublication(fixture.directory, SESSION_ID, 'matrix');
+		await invalidatePrFeedbackPublication(
+			fixture.directory,
+			SESSION_ID,
+			'matrix',
+		);
 		const eventsPath = path.join(fixture.directory, '.swarm', 'events.jsonl');
 		const events = await fs.readFile(eventsPath, 'utf-8');
 		expect(events).toContain('pr_feedback_publication_armed');
@@ -264,6 +283,8 @@ describe('dangling guard scope (re-review findings)', () => {
 			`env GIT_SSH_COMMAND=evil git push origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
 			`env -i git push origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
 			`nohup git push origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
+			`git send-pack origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
+			`gh api -X PATCH repos/o/r/git/refs/heads/pr-head -f sha=${POST_COMMIT_SHA}`,
 			`timeout 30 git push origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
 			`git status && git push origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
 			'git push --force origin x:y',
@@ -272,7 +293,9 @@ describe('dangling guard scope (re-review findings)', () => {
 				enforcePrWorkflowToolBefore(fixture.directory, SESSION_ID, 'shell', {
 					command,
 				}),
-			).rejects.toThrow('live in the audit trail but its gate state is missing');
+			).rejects.toThrow(
+				'live in the audit trail but its gate state is missing',
+			);
 		}
 		// Non-push git commands still pass; and per the documented
 		// conservative over-match, a command merely MENTIONING both git and
@@ -286,6 +309,12 @@ describe('dangling guard scope (re-review findings)', () => {
 		await expect(
 			enforcePrWorkflowToolBefore(fixture.directory, SESSION_ID, 'shell', {
 				command: 'ls -la',
+			}),
+		).resolves.toBeUndefined();
+		// gh api NOT touching refs/heads is not publication-shaped.
+		await expect(
+			enforcePrWorkflowToolBefore(fixture.directory, SESSION_ID, 'shell', {
+				command: 'gh api repos/o/r --jq .full_name',
 			}),
 		).resolves.toBeUndefined();
 		await expect(
