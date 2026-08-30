@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+	CONFIG_SCHEMA_REF,
 	writeProjectConfigIfNew,
 	writeSwarmConfigExampleIfNew,
 } from '../../../src/config/project-init';
@@ -61,11 +62,21 @@ describe('writeProjectConfigIfNew', () => {
 		expect(parsed).not.toBeNull();
 	});
 
-	// 4. Created file is an empty JSON object (deep-merges as no-op)
-	test('4. created file is an empty JSON object', () => {
+	// 4. Created file carries only the $schema reference (deep-merges as no-op)
+	//    — issue #1663: authored configs point editors at the shipped JSON Schema.
+	test('4. created file contains only the $schema reference', () => {
 		writeProjectConfigIfNew(dir);
 		const raw = fs.readFileSync(configPath(dir), 'utf-8');
-		expect(JSON.parse(raw)).toEqual({});
+		const parsed = JSON.parse(raw) as Record<string, unknown>;
+		expect(Object.keys(parsed)).toEqual(['$schema']);
+		expect(parsed.$schema).toBe(CONFIG_SCHEMA_REF);
+	});
+
+	// 4b. The $schema reference resolves to the versioned published artifact.
+	test('4b. CONFIG_SCHEMA_REF points at the published versioned schema', () => {
+		expect(CONFIG_SCHEMA_REF).toMatch(
+			/^https:\/\/unpkg\.com\/opencode-swarm@\d+\.\d+\.\d+\/opencode-swarm\.schema\.json$/,
+		);
 	});
 
 	// 5. Does NOT overwrite an existing file
@@ -283,6 +294,15 @@ describe('writeSwarmConfigExampleIfNew', () => {
 		expect(typeof parsed).toBe('object');
 		expect(parsed).not.toBeNull();
 		expect(typeof parsed.agents).toBe('object');
+	});
+
+	// 11b. The example carries the $schema reference (issue #1663) so users
+	//      copying it get editor validation for free.
+	test('11b. written file includes the $schema reference', () => {
+		writeSwarmConfigExampleIfNew(dir);
+		const raw = fs.readFileSync(examplePath(dir), 'utf-8');
+		const parsed = JSON.parse(raw) as Record<string, unknown>;
+		expect(parsed.$schema).toBe(CONFIG_SCHEMA_REF);
 	});
 
 	test('12. does not overwrite an existing config.example.json', () => {

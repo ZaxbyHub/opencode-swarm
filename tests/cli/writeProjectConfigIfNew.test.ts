@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { writeProjectConfigIfNew } from '../../src/config/project-init';
+import {
+	CONFIG_SCHEMA_REF,
+	writeProjectConfigIfNew,
+} from '../../src/config/project-init';
 import {
 	clearDeferredWarnings,
 	getDeferredWarnings,
@@ -34,14 +37,15 @@ describe('writeProjectConfigIfNew', () => {
 		expect(fs.existsSync(configPath)).toBe(true);
 	});
 
-	// 2. File is valid JSON with minimal content {}
-	test('2. file is valid JSON with minimal content {}', () => {
+	// 2. File is valid JSON containing only the $schema reference (issue #1663)
+	test('2. file is valid JSON containing only the $schema reference', () => {
 		writeProjectConfigIfNew(tmpDir);
 
 		const configPath = path.join(tmpDir, '.opencode', 'opencode-swarm.json');
 		const content = fs.readFileSync(configPath, 'utf-8');
-		const parsed = JSON.parse(content);
-		expect(parsed).toEqual({});
+		const parsed = JSON.parse(content) as Record<string, unknown>;
+		expect(Object.keys(parsed)).toEqual(['$schema']);
+		expect(parsed.$schema).toBe(CONFIG_SCHEMA_REF);
 	});
 
 	// 3. Does NOT overwrite existing file

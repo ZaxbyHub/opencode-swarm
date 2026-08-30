@@ -588,6 +588,26 @@ function buildConfigWithMeta(
 		sanitizeSectionConfigs(mergedRaw);
 	mergedRaw = sanitized;
 
+	// 4b. Top-level unknown-key visibility (issue #1663): the root config
+	//     object is intentionally not `.strict()` (legacy configs must keep
+	//     loading), so Zod silently strips unknown top-level keys without any
+	//     error for the recovery ladder to report — the step-6 recovery below
+	//     only ever sees Zod-confirmed *nested* unrecognized_keys. Surface the
+	//     top-level strays here — once, regardless of which parse path
+	//     follows — so a typo'd top-level key (e.g. `guardrailz`, `$shcema`)
+	//     is no longer completely silent. Config migrations (presets,
+	//     git-binary provenance) run above this point, so anything still
+	//     unknown here is genuinely absent from PluginConfigSchema.
+	const knownTopLevel = new Set(Object.keys(PluginConfigSchema.shape));
+	const unknownTopLevel = Object.keys(mergedRaw).filter(
+		(key) => !knownTopLevel.has(key),
+	);
+	if (unknownTopLevel.length > 0) {
+		advisoryWarn(
+			`[opencode-swarm] Ignored ${unknownTopLevel.length} unknown top-level config key(s): ${unknownTopLevel.join(', ')}. These keys have no effect — see docs/configuration.md (Top-level configuration keys) for the valid key list.`,
+		);
+	}
+
 	// Fail-secure closure: when a config file existed but could not be loaded,
 	// force guardrails ENABLED on any recovered config (issue #1778 H6 F2).
 	const secure = (cfg: PluginConfig): PluginConfig =>

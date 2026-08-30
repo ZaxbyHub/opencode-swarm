@@ -3334,11 +3334,35 @@ export const PrReviewResilienceConfigSchema = z
 
 // Main plugin configuration
 export const PluginConfigSchema = z.object({
+	// JSON Schema reference for editor validation/autocomplete of this file
+	// (issue #1663). Pure metadata: parsed through and ignored by every runtime
+	// consumer. Whitelisting it here also teaches config-doctor's
+	// KNOWN_TOP_LEVEL_KEYS and the generated opencode-swarm.schema.json about
+	// the key, so editors do not flag it under additionalProperties: false.
+	$schema: z
+		.string()
+		.optional()
+		.describe(
+			'JSON Schema URL for editor validation/autocomplete of this file (issue #1663). Ignored at runtime.',
+		),
+
 	/** Config format version for migration table. Increment when deprecating fields. Distinct from knowledge.schema_version. */
-	config_format_version: z.number().int().min(0).default(1),
+	config_format_version: z
+		.number()
+		.int()
+		.min(0)
+		.default(1)
+		.describe(
+			'Config format version for the migration table. Increment when fields are deprecated. Distinct from knowledge.schema_version.',
+		),
 
 	// Legacy: Per-agent overrides (default swarm)
-	agents: z.record(z.string(), AgentOverrideConfigSchema).optional(),
+	agents: z
+		.record(z.string(), AgentOverrideConfigSchema)
+		.optional()
+		.describe(
+			'Per-agent overrides keyed by agent name for the default swarm (e.g. "architect", "coder"). Multi-swarm setups configure agents under swarms.<id>.agents instead.',
+		),
 
 	// Default agent — specifies which agent is set as primary mode.
 	//
@@ -3369,7 +3393,10 @@ export const PluginConfigSchema = z.object({
 			if (v === undefined) return undefined;
 			const trimmed = v.trim();
 			return trimmed === '' ? undefined : trimmed;
-		}),
+		})
+		.describe(
+			'Agent set as the primary mode. Omitted: every generated *_architect is primary. Exact generated name (e.g. "local_architect"): only that agent. Base role name (e.g. "coder"): every generated agent with that base role. Unknown strings warn once and fall back to architect primaries.',
+		),
 
 	// Auto-select architect — controls whether the swarm architect is automatically
 	// chosen instead of OpenCode's built-in agents for new sessions.
@@ -3394,7 +3421,10 @@ export const PluginConfigSchema = z.object({
 			if (typeof v === 'boolean') return v;
 			const trimmed = v.trim();
 			return trimmed === '' ? false : trimmed;
-		}),
+		})
+		.describe(
+			'Auto-select the swarm architect for new sessions instead of OpenCode built-ins. false (default): manual selection. true: enable auto-select and disable built-in build/plan agents. "<architect_name>" (e.g. "mega_architect"): enable targeting one architect in multi-swarm setups.',
+		),
 
 	// Multiple swarms support
 	// Keys are swarm IDs (e.g., "cloud", "local", "fast")
@@ -3404,151 +3434,257 @@ export const PluginConfigSchema = z.object({
 			z.string().regex(/^[^_]+$/, 'Swarm ID must not contain underscores'),
 			SwarmConfigSchema,
 		)
-		.optional(),
+		.optional()
+		.describe(
+			'Multiple swarms keyed by swarm ID (no underscores allowed). The first swarm, or one named "default", provides the primary architect.',
+		),
 
 	// Pipeline settings
-	max_iterations: z.number().min(1).max(10).default(5),
-	pipeline: PipelineConfigSchema.optional(),
+	max_iterations: z
+		.number()
+		.min(1)
+		.max(10)
+		.default(5)
+		.describe('Maximum pipeline iterations per task (1-10).'),
+	pipeline: PipelineConfigSchema.optional().describe(
+		'Pipeline stage/model settings.',
+	),
 
 	// Phase complete settings
-	phase_complete: PhaseCompleteConfigSchema.optional(),
+	phase_complete: PhaseCompleteConfigSchema.optional().describe(
+		'Phase-completion gate settings.',
+	),
 
 	// QA workflow settings
-	qa_retry_limit: z.number().min(1).max(10).default(3),
+	qa_retry_limit: z
+		.number()
+		.min(1)
+		.max(10)
+		.default(3)
+		.describe('Maximum QA retry rounds per task (1-10).'),
 
 	// Performance mode — controls optional hook execution overhead
-	execution_mode: z.enum(['strict', 'balanced', 'fast']).default('balanced'),
+	execution_mode: z
+		.enum(['strict', 'balanced', 'fast'])
+		.default('balanced')
+		.describe(
+			'Performance mode controlling optional hook execution overhead: "strict", "balanced", or "fast".',
+		),
 
 	// Feature flags
-	inject_phase_reminders: z.boolean().default(true),
+	inject_phase_reminders: z
+		.boolean()
+		.default(true)
+		.describe('Inject phase reminder directives during execution.'),
 
 	// Hook configuration
-	hooks: HooksConfigSchema.optional(),
+	hooks: HooksConfigSchema.optional().describe(
+		'Hook subsystem toggles and settings.',
+	),
 
 	// PR_REVIEW base-wave staged canary/fanout resilience.
-	pr_review_resilience: PrReviewResilienceConfigSchema.optional(),
+	pr_review_resilience: PrReviewResilienceConfigSchema.optional().describe(
+		'PR review base-wave staged canary/fanout resilience settings.',
+	),
 
 	// Quality gate configuration (v6.9 anti-slop features)
-	gates: GateConfigSchema.optional(),
+	gates: GateConfigSchema.optional().describe(
+		'Quality gate configuration (v6.9 anti-slop features).',
+	),
 
 	// Context budget configuration
-	context_budget: ContextBudgetConfigSchema.optional(),
+	context_budget: ContextBudgetConfigSchema.optional().describe(
+		'Context budget thresholds.',
+	),
 
 	// Token/cost estimation fallback table. Provider-reported cost wins when
 	// present; these entries only estimate from usage tokens when reports omit cost.
-	pricing: PricingConfigSchema.optional(),
+	pricing: PricingConfigSchema.optional().describe(
+		'Token/cost estimation fallback table. Provider-reported cost wins when present; entries only estimate from usage tokens when reports omit cost.',
+	),
 
 	// Guardrails configuration
-	guardrails: GuardrailsConfigSchema.optional(),
+	guardrails: GuardrailsConfigSchema.optional().describe(
+		'Loop containment and safety guardrails: tool-call caps, denial tracking, destructive-command blocking, shell audit.',
+	),
 
 	// Watchdog configuration (scope-guard + delegation-ledger)
-	watchdog: WatchdogConfigSchema.optional(),
+	watchdog: WatchdogConfigSchema.optional().describe(
+		'Scope-guard and delegation-ledger watchdog settings.',
+	),
 
 	// Self-review configuration (advisory after coder delegation)
-	self_review: SelfReviewConfigSchema.optional(),
+	self_review: SelfReviewConfigSchema.optional().describe(
+		'Advisory self-review after coder delegation.',
+	),
 
 	// Auto-review configuration (opt-in execution-diff review by the reviewer
 	// model in a fresh ephemeral session at task/phase boundaries)
-	auto_review: AutoReviewConfigSchema.optional(),
+	auto_review: AutoReviewConfigSchema.optional().describe(
+		'Opt-in execution-diff review by the reviewer model in a fresh ephemeral session at task/phase boundaries.',
+	),
 
 	// Tool filter configuration - controls which tools each agent is allowed to use
-	tool_filter: ToolFilterConfigSchema.optional(),
+	tool_filter: ToolFilterConfigSchema.optional().describe(
+		'Controls which tools each agent is allowed to use.',
+	),
 
 	// Authority configuration - per-agent file write authority rules
-	authority: AuthorityConfigSchema.optional(),
+	authority: AuthorityConfigSchema.optional().describe(
+		'Per-agent file write authority rules.',
+	),
 
 	// Plan cursor configuration - controls compressed plan summary injection
-	plan_cursor: PlanCursorConfigSchema.optional(),
+	plan_cursor: PlanCursorConfigSchema.optional().describe(
+		'Compressed plan summary injection settings.',
+	),
 
 	// Context Map configuration (issue #1104, FR-006 — opt-in)
-	context_map: ContextMapConfigSchema.optional(),
+	context_map: ContextMapConfigSchema.optional().describe(
+		'Context Map (issue #1104, FR-006) — opt-in.',
+	),
 
 	// Repo dependency-graph configuration (issue #1448 — directory excludes)
 	// Materialize nested defaults so every consumer observes one coherent
 	// policy even when the user omits the entire repo_graph section.
-	repo_graph: RepoGraphConfigSchema.prefault({}),
+	repo_graph: RepoGraphConfigSchema.prefault({}).describe(
+		'Repository dependency-graph settings (builder excludes, incremental refresh). Nested defaults materialize when the whole section is omitted.',
+	),
 
 	// Evidence configuration
-	evidence: EvidenceConfigSchema.optional(),
+	evidence: EvidenceConfigSchema.optional().describe(
+		'Evidence retention and storage settings.',
+	),
 
 	// Summary configuration
-	summaries: SummaryConfigSchema.optional(),
+	summaries: SummaryConfigSchema.optional().describe(
+		'Summary generation settings.',
+	),
 
 	// Review passes configuration (dual-pass security review)
-	review_passes: ReviewPassesConfigSchema.optional(),
+	review_passes: ReviewPassesConfigSchema.optional().describe(
+		'Dual-pass security review settings.',
+	),
 
 	// Adversarial detection configuration (same-model checker detection)
-	adversarial_detection: AdversarialDetectionConfigSchema.optional(),
+	adversarial_detection: AdversarialDetectionConfigSchema.optional().describe(
+		'Same-model adversarial checker detection settings.',
+	),
 
 	// Adversarial testing configuration (cross-model adversarial testing)
-	adversarial_testing: AdversarialTestingConfigSchema.optional(),
+	adversarial_testing: AdversarialTestingConfigSchema.optional().describe(
+		'Cross-model adversarial testing settings.',
+	),
 
 	// Integration analysis configuration
-	integration_analysis: IntegrationAnalysisConfigSchema.optional(),
+	integration_analysis: IntegrationAnalysisConfigSchema.optional().describe(
+		'Integration analysis settings.',
+	),
 
 	// Documentation synthesizer configuration
-	docs: DocsConfigSchema.optional(),
+	docs: DocsConfigSchema.optional().describe(
+		'Documentation synthesizer (docs agent) settings.',
+	),
 
 	// Structured design-doc generation (issue #1080 — docs_design agent, opt-in)
-	design_docs: DesignDocsConfigSchema.optional(),
+	design_docs: DesignDocsConfigSchema.optional().describe(
+		'Structured design-doc generation (issue #1080, docs_design agent) — opt-in.',
+	),
 
 	// Git executable resolution override (issue #2236 hardening)
-	git: GitConfigSchema.optional(),
+	git: GitConfigSchema.optional().describe(
+		'Git executable resolution override (issue #2236 hardening).',
+	),
 
 	// UI/UX review configuration (designer agent)
-	ui_review: UIReviewConfigSchema.optional(),
+	ui_review: UIReviewConfigSchema.optional().describe(
+		'UI/UX review (designer agent) settings.',
+	),
 
 	// Compaction advisory configuration
-	compaction_advisory: CompactionAdvisoryConfigSchema.optional(),
+	compaction_advisory: CompactionAdvisoryConfigSchema.optional().describe(
+		'Compaction advisory settings.',
+	),
 
 	// Lint configuration
-	lint: LintConfigSchema.optional(),
+	lint: LintConfigSchema.optional().describe('Lint gate settings.'),
 
 	// Secretscan configuration
-	secretscan: SecretscanConfigSchema.optional(),
+	secretscan: SecretscanConfigSchema.optional().describe(
+		'Secret scanning settings.',
+	),
 
 	// Checkpoint configuration
-	checkpoint: CheckpointConfigSchema.optional(),
+	checkpoint: CheckpointConfigSchema.optional().describe(
+		'Checkpoint settings.',
+	),
 
 	// Apply-patch opt-in fuzzy matching fallback (issue #1718)
-	apply_patch: ApplyPatchConfigSchema.optional(),
+	apply_patch: ApplyPatchConfigSchema.optional().describe(
+		'Apply-patch opt-in fuzzy matching fallback (issue #1718).',
+	),
 
 	// Automation configuration (v6.7 background-first rollout)
 	// Controls background automation mode and per-feature toggles
-	automation: AutomationConfigSchema.optional(),
+	automation: AutomationConfigSchema.optional().describe(
+		'Background automation mode and per-feature toggles (v6.7 background-first rollout).',
+	),
 
 	// Knowledge base configuration (v6.17 two-tier cross-project knowledge)
-	knowledge: KnowledgeConfigSchema.optional(),
+	knowledge: KnowledgeConfigSchema.optional().describe(
+		'Two-tier cross-project knowledge base (v6.17).',
+	),
 
 	// Swarm memory substrate. Disabled by default so existing flows are unchanged.
-	memory: MemoryConfigSchema.optional(),
+	memory: MemoryConfigSchema.optional().describe(
+		'Swarm memory substrate — disabled by default so existing flows are unchanged.',
+	),
 
 	// Learning subsystem — real-time admission, PRM persistence, dedup sweep (issue #1821)
-	learning: LearningConfigSchema.optional(),
+	learning: LearningConfigSchema.optional().describe(
+		'Learning subsystem: real-time admission, PRM persistence, dedup sweep (issue #1821).',
+	),
 
 	// Consensus mining over completed run evidence (issue #1821)
-	consensus: ConsensusConfigSchema.optional(),
+	consensus: ConsensusConfigSchema.optional().describe(
+		'Consensus mining over completed run evidence (issue #1821).',
+	),
 
 	// Curator configuration (phase context consolidation and drift detection)
-	curator: CuratorConfigSchema.optional(),
+	curator: CuratorConfigSchema.optional().describe(
+		'Phase context consolidation and drift detection.',
+	),
 
 	// Architectural supervision — hierarchical summary review (issue #893)
-	architectural_supervision: ArchitecturalSupervisionConfigSchema.optional(),
+	architectural_supervision:
+		ArchitecturalSupervisionConfigSchema.optional().describe(
+			'Hierarchical summary review (issue #893).',
+		),
 
 	// v2: Knowledge-application contract (warn|enforce, ack tracking)
-	knowledge_application: KnowledgeApplicationConfigSchema.optional(),
+	knowledge_application: KnowledgeApplicationConfigSchema.optional().describe(
+		'Knowledge-application contract (v2): warn or enforce modes, ack tracking.',
+	),
 
 	// Skill propagation gate/injection configuration
-	skillPropagation: SkillPropagationConfigSchema.optional(),
+	skillPropagation: SkillPropagationConfigSchema.optional().describe(
+		'Skill propagation gate/injection settings.',
+	),
 
 	// v2: Skill improver — low-frequency, expensive-model improvement loop (issue #629)
-	skill_improver: SkillImproverConfigSchema.optional(),
+	skill_improver: SkillImproverConfigSchema.optional().describe(
+		'Low-frequency, expensive-model skill improvement loop (issue #629, v2).',
+	),
 
 	// Declarative, non-executing HarnessOpt mutation policy (issue #1825).
-	harness_evolution: HarnessEvolutionConfigSchema.optional(),
+	harness_evolution: HarnessEvolutionConfigSchema.optional().describe(
+		'Declarative, non-executing HarnessOpt mutation policy (issue #1825).',
+	),
 
 	// v2: Spec writer agent — independent model for .swarm/spec.md authorship
-	spec_writer: SpecWriterConfigSchema.optional(),
+	spec_writer: SpecWriterConfigSchema.optional().describe(
+		'Spec writer agent (v2) — independent model for .swarm/spec.md authorship.',
+	),
 
 	// Tool output truncation configuration
 	tool_output: z
@@ -3563,10 +3699,15 @@ export const PluginConfigSchema = z.object({
 					'Tools to apply output truncation to. Defaults to diff, symbols, bash, shell, test_runner, lint, pre_check_batch, complexity_hotspots, pkg_audit, sbom_generate, schema_drift.',
 				),
 		})
-		.optional(),
+		.optional()
+		.describe(
+			'Tool output truncation settings (enable/disable, max lines, per-tool overrides).',
+		),
 
 	// Slop detector configuration (v6.29)
-	slop_detector: SlopDetectorConfigSchema.optional(),
+	slop_detector: SlopDetectorConfigSchema.optional().describe(
+		'Slop detector settings (v6.29).',
+	),
 
 	// TODO gate configuration (v6.32)
 	todo_gate: z
@@ -3587,47 +3728,80 @@ export const PluginConfigSchema = z.object({
 					'If true, block phase completion when threshold exceeded. Default: advisory only.',
 				),
 		})
-		.optional(),
+		.optional()
+		.describe(
+			'TODO gate (v6.32): warn or block on new high-priority TODOs (FIXME/HACK/XXX).',
+		),
 
 	// Incremental verification configuration (v6.29)
-	incremental_verify: IncrementalVerifyConfigSchema.optional(),
+	incremental_verify: IncrementalVerifyConfigSchema.optional().describe(
+		'Incremental verification settings (v6.29).',
+	),
 
 	// Compaction service configuration (v6.29)
-	compaction_service: CompactionConfigSchema.optional(),
+	compaction_service: CompactionConfigSchema.optional().describe(
+		'Compaction service settings (v6.29).',
+	),
 
 	// PRM (Process Remediation Manager) configuration
-	prm: PrmConfigSchema.optional(),
+	prm: PrmConfigSchema.optional().describe(
+		'PRM (Process Remediation Manager) settings.',
+	),
 
 	// Work Complete Council configuration — parallel four-member verification gate (off by default)
-	council: CouncilConfigSchema.optional(),
+	council: CouncilConfigSchema.optional().describe(
+		'Work Complete Council — parallel four-member verification gate, off by default.',
+	),
 
 	// Parallelization configuration (PR 1 dark foundation — disabled by default)
 	// Exists structurally; no production code path branches on enabled===true yet.
-	parallelization: ParallelizationConfigSchema.optional(),
+	parallelization: ParallelizationConfigSchema.optional().describe(
+		'Parallelization (PR 1 dark foundation) — disabled by default; no production code path branches on enabled=true yet.',
+	),
 
 	// Worktree isolation policy for standard execution-profile parallel coder
 	// dispatches. Lean Turbo keeps its legacy per-mode fields for backward
 	// compatibility; this top-level block is the general lane-isolation surface.
-	worktree: WorktreeIsolationConfigSchema.optional(),
+	worktree: WorktreeIsolationConfigSchema.optional().describe(
+		'Worktree isolation policy for parallel coder dispatch lanes (general surface; Lean Turbo keeps its legacy per-mode fields).',
+	),
 
 	// Turbo configuration — optional block for turbo execution strategy (Phase 1)
 	// Backward compatible: no turbo key means current behavior unchanged.
-	turbo: TurboConfigSchema.optional(),
+	turbo: TurboConfigSchema.optional().describe(
+		'Turbo execution strategy block (Phase 1). Absent means current behavior unchanged.',
+	),
 
 	// Turbo mode — bypasses reviewer/test gates for rapid iteration (v6.40)
-	turbo_mode: z.boolean().default(false).optional(),
+	turbo_mode: z
+		.boolean()
+		.default(false)
+		.optional()
+		.describe('Bypass reviewer/test gates for rapid iteration (v6.40).'),
 
 	// Quiet mode — suppress non-critical startup warnings. Defaults to true so
 	// console output does not bleed into the OpenCode TUI as overlay notifications.
 	// Set to false to restore verbose warnings (e.g. for debugging startup issues).
-	quiet: z.boolean().default(true).optional(),
+	quiet: z
+		.boolean()
+		.default(true)
+		.optional()
+		.describe(
+			'Suppress non-critical startup warnings (default true keeps the TUI clean). Set false to restore verbose warnings for debugging.',
+		),
 
 	// Background staleness check against npm. When a newer version of
 	// opencode-swarm has been published, emit a single deferred warning so
 	// users notice opencode is running a stale cached copy (issue #675).
 	// Throttled to once per 24h via a small on-disk cache. Set to false to
 	// fully disable the network call.
-	version_check: z.boolean().default(true).optional(),
+	version_check: z
+		.boolean()
+		.default(true)
+		.optional()
+		.describe(
+			'Background staleness check against npm, throttled to once per 24h (issue #675). Set false to fully disable the network call.',
+		),
 
 	// Full-auto mode — autonomous multi-agent orchestration with critic oversight
 	// v2: adds permission policy, denial accounting, and oversight cadence triggers
@@ -3836,26 +4010,37 @@ export const PluginConfigSchema = z.object({
 				total_timeout_ms: 120000,
 				cleanup_timeout_ms: 2000,
 			},
-		})),
+		}))
+		.describe(
+			'Full-auto autonomous orchestration with critic oversight: permission policy, denial accounting, oversight cadence triggers (v2 preserves v1 fields so existing configs load unchanged).',
+		),
 
 	// PR Monitor — GitHub PR subscription and polling (FR-001)
 	// Disabled by default; opt-in for real-time PR status updates.
-	pr_monitor: PrMonitorConfigSchema.optional(),
+	pr_monitor: PrMonitorConfigSchema.optional().describe(
+		'GitHub PR subscription and polling (FR-001) — disabled by default; opt-in for real-time PR status updates.',
+	),
 
 	// External skills — candidate model, discovery, and quarantine store (FR-001)
 	// Disabled by default; all subsystems are opt-in.
-	external_skills: ExternalSkillsConfigSchema.optional(),
+	external_skills: ExternalSkillsConfigSchema.optional().describe(
+		'External skills: candidate model, discovery, and quarantine store (FR-001) — all subsystems opt-in.',
+	),
 
 	// Skill-management tools — opt-in gate for the 7 skill_* tools (FR-004).
 	// When false (default), the tools are absent from the architect tool surface.
 	// Tools remain exported/registered/TOOL_NAMES-listed; only the architect map is gated.
-	skills: SkillsConfigSchema.optional(),
+	skills: SkillsConfigSchema.optional().describe(
+		'Opt-in gate for the 7 skill_* management tools (FR-004). Default false: the tools are absent from the architect tool surface.',
+	),
 
 	// Governed skill optimizer (issue #1822 — SkillOpt 3/7). Disabled by
 	// default. `/swarm skill-opt run` requires `enabled: true` to execute a
 	// round; all other subcommands are proposal-only/read-only by default.
 	// Consulted only inside command handlers, never on the init path.
-	skill_opt: SkillOptConfigSchema.optional(),
+	skill_opt: SkillOptConfigSchema.optional().describe(
+		'Governed skill optimizer (issue #1822). Disabled by default; /swarm skill-opt run requires enabled: true. All other subcommands are proposal-only/read-only by default.',
+	),
 });
 
 export type PluginConfig = z.infer<typeof PluginConfigSchema>;

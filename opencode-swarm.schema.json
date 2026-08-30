@@ -1,0 +1,5160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://unpkg.com/opencode-swarm/opencode-swarm.schema.json",
+  "title": "opencode-swarm plugin configuration",
+  "description": "Configuration for the opencode-swarm plugin, validated from ~/.config/opencode/opencode-swarm.json and .opencode/opencode-swarm.json. Generated from PluginConfigSchema (src/config/schema.ts) by scripts/generate-config-schema.ts - do not hand-edit. Editor note: unknown top-level keys are flagged here as authoring advice; at runtime they are stripped with a warning. Sections with additionalProperties: false (strict) fail config load on unknown nested keys.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "JSON Schema URL for editor validation/autocomplete of this file (issue #1663). Ignored at runtime.",
+      "type": "string"
+    },
+    "config_format_version": {
+      "default": 1,
+      "description": "Config format version for the migration table. Increment when fields are deprecated. Distinct from knowledge.schema_version.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "agents": {
+      "description": "Per-agent overrides keyed by agent name for the default swarm (e.g. \"architect\", \"coder\"). Multi-swarm setups configure agents under swarms.<id>.agents instead.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "variant": {
+            "type": "string",
+            "minLength": 1
+          },
+          "temperature": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 2
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "fallback_models": {
+            "maxItems": 3,
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "reasoning": {
+            "type": "object",
+            "properties": {
+              "effort": {
+                "type": "string",
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  "max"
+                ]
+              }
+            }
+          },
+          "thinking": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "enabled",
+                  "disabled"
+                ]
+              },
+              "budget_tokens": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
+            }
+          }
+        }
+      }
+    },
+    "default_agent": {
+      "description": "Agent set as the primary mode. Omitted: every generated *_architect is primary. Exact generated name (e.g. \"local_architect\"): only that agent. Base role name (e.g. \"coder\"): every generated agent with that base role. Unknown strings warn once and fall back to architect primaries.",
+      "type": "string"
+    },
+    "auto_select_architect": {
+      "description": "Auto-select the swarm architect for new sessions instead of OpenCode built-ins. false (default): manual selection. true: enable auto-select and disable built-in build/plan agents. \"<architect_name>\" (e.g. \"mega_architect\"): enable targeting one architect in multi-swarm setups.",
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "swarms": {
+      "description": "Multiple swarms keyed by swarm ID (no underscores allowed). The first swarm, or one named \"default\", provides the primary architect.",
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[^_]+$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "agents": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string"
+            },
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "model": {
+                  "type": "string"
+                },
+                "variant": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "temperature": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 2
+                },
+                "disabled": {
+                  "type": "boolean"
+                },
+                "fallback_models": {
+                  "maxItems": 3,
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "reasoning": {
+                  "type": "object",
+                  "properties": {
+                    "effort": {
+                      "type": "string",
+                      "enum": [
+                        "low",
+                        "medium",
+                        "high",
+                        "max"
+                      ]
+                    }
+                  }
+                },
+                "thinking": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "enabled",
+                        "disabled"
+                      ]
+                    },
+                    "budget_tokens": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "max_iterations": {
+      "default": 5,
+      "description": "Maximum pipeline iterations per task (1-10).",
+      "type": "number",
+      "minimum": 1,
+      "maximum": 10
+    },
+    "pipeline": {
+      "description": "Pipeline stage/model settings.",
+      "type": "object",
+      "properties": {
+        "parallel_precheck": {
+          "default": true,
+          "type": "boolean"
+        }
+      }
+    },
+    "phase_complete": {
+      "description": "Phase-completion gate settings.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "required_agents": {
+          "default": [
+            "coder",
+            "reviewer",
+            "test_engineer"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "coder",
+              "reviewer",
+              "test_engineer"
+            ]
+          }
+        },
+        "require_docs": {
+          "default": true,
+          "type": "boolean"
+        },
+        "policy": {
+          "default": "enforce",
+          "type": "string",
+          "enum": [
+            "enforce",
+            "warn"
+          ]
+        },
+        "regression_sweep": {
+          "type": "object",
+          "properties": {
+            "enforce": {
+              "default": false,
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "qa_retry_limit": {
+      "default": 3,
+      "description": "Maximum QA retry rounds per task (1-10).",
+      "type": "number",
+      "minimum": 1,
+      "maximum": 10
+    },
+    "execution_mode": {
+      "default": "balanced",
+      "description": "Performance mode controlling optional hook execution overhead: \"strict\", \"balanced\", or \"fast\".",
+      "type": "string",
+      "enum": [
+        "strict",
+        "balanced",
+        "fast"
+      ]
+    },
+    "inject_phase_reminders": {
+      "default": true,
+      "description": "Inject phase reminder directives during execution.",
+      "type": "boolean"
+    },
+    "hooks": {
+      "description": "Hook subsystem toggles and settings.",
+      "type": "object",
+      "properties": {
+        "system_enhancer": {
+          "default": true,
+          "type": "boolean"
+        },
+        "compaction": {
+          "default": true,
+          "type": "boolean"
+        },
+        "agent_activity": {
+          "default": true,
+          "type": "boolean"
+        },
+        "delegation_tracker": {
+          "default": false,
+          "type": "boolean"
+        },
+        "agent_awareness_max_chars": {
+          "default": 300,
+          "type": "number",
+          "minimum": 50,
+          "maximum": 2000
+        },
+        "delegation_gate": {
+          "default": true,
+          "type": "boolean"
+        },
+        "delegation_max_chars": {
+          "default": 4000,
+          "type": "number",
+          "minimum": 500,
+          "maximum": 20000
+        },
+        "background_subagents": {
+          "default": false,
+          "type": "boolean"
+        },
+        "background_pending_timeout_minutes": {
+          "default": 30,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1440
+        }
+      }
+    },
+    "pr_review_resilience": {
+      "description": "PR review base-wave staged canary/fanout resilience settings.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "canary_probe_ms": {
+          "default": 300000,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600000
+        },
+        "status_probe_timeout_ms": {
+          "default": 2000,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60000
+        },
+        "correlated_failure_threshold": {
+          "default": 2,
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 8
+        },
+        "max_retry_attempts_after_initial": {
+          "default": 2,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "circuit_open_duration_ms": {
+          "default": 60000,
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 1800000
+        }
+      },
+      "additionalProperties": false
+    },
+    "gates": {
+      "description": "Quality gate configuration (v6.9 anti-slop features).",
+      "type": "object",
+      "properties": {
+        "syntax_check": {
+          "default": {
+            "enabled": true
+          },
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "type": "boolean"
+            }
+          }
+        },
+        "placeholder_scan": {
+          "default": {
+            "enabled": true,
+            "deny_patterns": [
+              "TODO",
+              "FIXME",
+              "TBD",
+              "XXX",
+              "placeholder",
+              "stub",
+              "wip",
+              "not implemented"
+            ],
+            "allow_globs": [
+              "docs/**",
+              "examples/**",
+              "tests/**",
+              "**/*.test.*",
+              "**/*.spec.*",
+              "**/mocks/**",
+              "**/__tests__/**"
+            ],
+            "max_allowed_findings": 0,
+            "sentinel_allowlist": []
+          },
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "type": "boolean"
+            },
+            "deny_patterns": {
+              "default": [
+                "TODO",
+                "FIXME",
+                "TBD",
+                "XXX",
+                "placeholder",
+                "stub",
+                "wip",
+                "not implemented"
+              ],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allow_globs": {
+              "default": [
+                "docs/**",
+                "examples/**",
+                "tests/**",
+                "**/*.test.*",
+                "**/*.spec.*",
+                "**/mocks/**",
+                "**/__tests__/**"
+              ],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "max_allowed_findings": {
+              "default": 0,
+              "type": "number",
+              "minimum": 0
+            },
+            "sentinel_allowlist": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "sast_scan": {
+          "default": {
+            "enabled": true
+          },
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "type": "boolean"
+            }
+          }
+        },
+        "sbom_generate": {
+          "default": {
+            "enabled": true
+          },
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "type": "boolean"
+            }
+          }
+        },
+        "build_check": {
+          "default": {
+            "enabled": true
+          },
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "type": "boolean"
+            }
+          }
+        },
+        "quality_budget": {
+          "default": {
+            "enabled": true,
+            "max_complexity_delta": 5,
+            "max_public_api_delta": 10,
+            "max_duplication_ratio": 0.05,
+            "min_test_to_code_ratio": 0.3,
+            "enforce_on_globs": [
+              "src/**"
+            ],
+            "exclude_globs": [
+              "docs/**",
+              "tests/**",
+              "**/*.test.*"
+            ]
+          },
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "type": "boolean"
+            },
+            "max_complexity_delta": {
+              "default": 5,
+              "type": "number"
+            },
+            "max_public_api_delta": {
+              "default": 10,
+              "type": "number"
+            },
+            "max_duplication_ratio": {
+              "default": 0.05,
+              "type": "number"
+            },
+            "min_test_to_code_ratio": {
+              "default": 0.3,
+              "type": "number"
+            },
+            "enforce_on_globs": {
+              "default": [
+                "src/**"
+              ],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "exclude_globs": {
+              "default": [
+                "docs/**",
+                "tests/**",
+                "**/*.test.*"
+              ],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "context_budget": {
+      "description": "Context budget thresholds.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "warn_threshold": {
+          "default": 0.7,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "critical_threshold": {
+          "default": 0.9,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "model_limits": {
+          "default": {},
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "number",
+            "minimum": 1000
+          }
+        },
+        "max_injection_tokens": {
+          "default": 4000,
+          "type": "number",
+          "minimum": 100,
+          "maximum": 50000
+        },
+        "unified_injection_tokens": {
+          "type": "number",
+          "minimum": 100,
+          "maximum": 50000
+        },
+        "tracked_agents": {
+          "default": [
+            "architect"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "scoring": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "type": "boolean"
+            },
+            "max_candidates": {
+              "default": 100,
+              "type": "number",
+              "minimum": 10,
+              "maximum": 500
+            },
+            "weights": {
+              "type": "object",
+              "properties": {
+                "phase": {
+                  "default": 1,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 5
+                },
+                "current_task": {
+                  "default": 2,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 5
+                },
+                "blocked_task": {
+                  "default": 1.5,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 5
+                },
+                "recent_failure": {
+                  "default": 2.5,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 5
+                },
+                "recent_success": {
+                  "default": 0.5,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 5
+                },
+                "evidence_presence": {
+                  "default": 1,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 5
+                },
+                "decision_recency": {
+                  "default": 1.5,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 5
+                },
+                "dependency_proximity": {
+                  "default": 1,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 5
+                }
+              }
+            },
+            "decision_decay": {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "default": "exponential",
+                  "type": "string",
+                  "enum": [
+                    "linear",
+                    "exponential"
+                  ]
+                },
+                "half_life_hours": {
+                  "default": 24,
+                  "type": "number",
+                  "minimum": 1,
+                  "maximum": 168
+                }
+              }
+            },
+            "token_ratios": {
+              "type": "object",
+              "properties": {
+                "prose": {
+                  "default": 0.25,
+                  "type": "number",
+                  "minimum": 0.1,
+                  "maximum": 1
+                },
+                "code": {
+                  "default": 0.4,
+                  "type": "number",
+                  "minimum": 0.1,
+                  "maximum": 1
+                },
+                "markdown": {
+                  "default": 0.3,
+                  "type": "number",
+                  "minimum": 0.1,
+                  "maximum": 1
+                },
+                "json": {
+                  "default": 0.35,
+                  "type": "number",
+                  "minimum": 0.1,
+                  "maximum": 1
+                }
+              }
+            }
+          }
+        },
+        "enforce": {
+          "default": true,
+          "type": "boolean"
+        },
+        "prune_target": {
+          "default": 0.7,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "preserve_last_n_turns": {
+          "default": 4,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "recent_window": {
+          "default": 10,
+          "type": "number",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "enforce_on_agent_switch": {
+          "default": true,
+          "type": "boolean"
+        },
+        "tool_output_mask_threshold": {
+          "default": 2000,
+          "type": "number",
+          "minimum": 100,
+          "maximum": 100000
+        }
+      }
+    },
+    "pricing": {
+      "description": "Token/cost estimation fallback table. Provider-reported cost wins when present; entries only estimate from usage tokens when reports omit cost.",
+      "type": "object",
+      "properties": {
+        "models": {
+          "default": {},
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "input_per_million": {
+                "type": "number",
+                "minimum": 0
+              },
+              "output_per_million": {
+                "type": "number",
+                "minimum": 0
+              },
+              "reasoning_per_million": {
+                "type": "number",
+                "minimum": 0
+              },
+              "cache_per_million": {
+                "type": "number",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "input_per_million",
+              "output_per_million"
+            ]
+          }
+        }
+      }
+    },
+    "guardrails": {
+      "description": "Loop containment and safety guardrails: tool-call caps, denial tracking, destructive-command blocking, shell audit.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "max_tool_calls": {
+          "default": 200,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "max_duration_minutes": {
+          "default": 30,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 480
+        },
+        "max_repetitions": {
+          "default": 10,
+          "type": "number",
+          "minimum": 3,
+          "maximum": 50
+        },
+        "max_consecutive_errors": {
+          "default": 5,
+          "type": "number",
+          "minimum": 2,
+          "maximum": 20
+        },
+        "max_transient_retries": {
+          "default": 5,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 20
+        },
+        "warning_threshold": {
+          "default": 0.75,
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 0.9
+        },
+        "idle_timeout_minutes": {
+          "default": 60,
+          "type": "number",
+          "minimum": 5,
+          "maximum": 240
+        },
+        "no_op_warning_threshold": {
+          "default": 15,
+          "type": "number",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "max_coder_revisions": {
+          "default": 5,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "runaway_output_max_turns": {
+          "default": 5,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "qa_gates": {
+          "type": "object",
+          "properties": {
+            "required_tools": {
+              "default": [
+                "diff",
+                "syntax_check",
+                "placeholder_scan",
+                "lint",
+                "pre_check_batch"
+              ],
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "require_reviewer_test_engineer": {
+              "default": true,
+              "type": "boolean"
+            }
+          }
+        },
+        "profiles": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "max_tool_calls": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1000
+              },
+              "max_duration_minutes": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 480
+              },
+              "max_repetitions": {
+                "type": "number",
+                "minimum": 3,
+                "maximum": 50
+              },
+              "max_consecutive_errors": {
+                "type": "number",
+                "minimum": 2,
+                "maximum": 20
+              },
+              "warning_threshold": {
+                "type": "number",
+                "minimum": 0.1,
+                "maximum": 0.9
+              },
+              "idle_timeout_minutes": {
+                "type": "number",
+                "minimum": 5,
+                "maximum": 240
+              },
+              "max_transient_retries": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 20
+              }
+            }
+          }
+        },
+        "block_destructive_commands": {
+          "default": true,
+          "type": "boolean"
+        },
+        "interpreter_allowed_agents": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "shell_audit_log": {
+          "default": true,
+          "type": "boolean"
+        },
+        "gate_denial_warn_threshold": {
+          "default": 3,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "gate_denial_stop_threshold": {
+          "default": 5,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "execution_stall_warn_calls": {
+          "default": 30,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "execution_stall_stop_calls": {
+          "default": 60,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "execution_stall_episode_minutes": {
+          "default": 30,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "sandbox_macos_enabled": {
+          "type": "boolean"
+        },
+        "sandbox": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "default": "advisory",
+              "type": "string",
+              "enum": [
+                "advisory",
+                "required"
+              ]
+            },
+            "require_filesystem": {
+              "default": false,
+              "type": "boolean"
+            },
+            "require_network": {
+              "default": false,
+              "type": "boolean"
+            },
+            "require_process": {
+              "default": false,
+              "type": "boolean"
+            },
+            "network_mode": {
+              "default": "off",
+              "type": "string",
+              "enum": [
+                "off",
+                "on"
+              ]
+            },
+            "network_allowlist": {
+              "default": [],
+              "maxItems": 128,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "writable_roots": {
+              "default": [],
+              "maxItems": 128,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "watchdog": {
+      "description": "Scope-guard and delegation-ledger watchdog settings.",
+      "type": "object",
+      "properties": {
+        "scope_guard": {
+          "default": true,
+          "type": "boolean"
+        },
+        "delegation_ledger": {
+          "default": true,
+          "type": "boolean"
+        }
+      }
+    },
+    "self_review": {
+      "description": "Advisory self-review after coder delegation.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "skip_in_turbo": {
+          "default": true,
+          "type": "boolean"
+        }
+      }
+    },
+    "auto_review": {
+      "description": "Opt-in execution-diff review by the reviewer model in a fresh ephemeral session at task/phase boundaries.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "trigger": {
+          "default": "phase_boundary",
+          "type": "string",
+          "enum": [
+            "task_completion",
+            "phase_boundary",
+            "both"
+          ]
+        },
+        "timeout_ms": {
+          "default": 300000,
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 1800000
+        },
+        "max_diff_kb": {
+          "default": 256,
+          "type": "integer",
+          "minimum": 16,
+          "maximum": 2048
+        },
+        "min_confidence": {
+          "default": 0.7,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "structured_findings": {
+          "default": true,
+          "type": "boolean"
+        },
+        "validate_findings": {
+          "default": false,
+          "type": "boolean"
+        },
+        "validation_model": {
+          "default": null,
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "validation_timeout_ms": {
+          "default": 120000,
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 1800000
+        },
+        "final_review": {
+          "default": {
+            "on_phase_complete": true,
+            "on_plan_complete": true,
+            "model": null,
+            "mode": "advisory",
+            "max_diff_bytes": 262144,
+            "timeout_ms": 300000
+          },
+          "type": "object",
+          "properties": {
+            "on_phase_complete": {
+              "default": true,
+              "type": "boolean"
+            },
+            "on_plan_complete": {
+              "default": true,
+              "type": "boolean"
+            },
+            "model": {
+              "default": null,
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mode": {
+              "default": "advisory",
+              "type": "string",
+              "enum": [
+                "advisory",
+                "gate"
+              ]
+            },
+            "max_diff_bytes": {
+              "default": 262144,
+              "type": "integer",
+              "minimum": 16384,
+              "maximum": 2097152
+            },
+            "timeout_ms": {
+              "default": 300000,
+              "type": "integer",
+              "minimum": 10000,
+              "maximum": 1800000
+            }
+          }
+        }
+      },
+      "required": [
+        "enabled"
+      ]
+    },
+    "tool_filter": {
+      "description": "Controls which tools each agent is allowed to use.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "overrides": {
+          "default": {},
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "authority": {
+      "description": "Per-agent file write authority rules.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "rules": {
+          "default": {},
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "readOnly": {
+                "type": "boolean"
+              },
+              "blockedExact": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "allowedExact": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "blockedPrefix": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "allowedPrefix": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "blockedZones": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "production",
+                    "test",
+                    "config",
+                    "generated",
+                    "docs",
+                    "build"
+                  ]
+                }
+              },
+              "blockedGlobs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "allowedGlobs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "allowedCaseSensitiveGlobs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "universal_deny_prefixes": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "verifier_config_paths": {
+          "description": "Additional glob patterns for verifier config files that are merged into the architect agent's blockedGlobs at plugin init. Writes to matching files are blocked by the authority layer.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "plan_cursor": {
+      "description": "Compressed plan summary injection settings.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "max_tokens": {
+          "default": 1500,
+          "type": "number",
+          "minimum": 500,
+          "maximum": 4000
+        },
+        "lookahead_tasks": {
+          "default": 2,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 5
+        }
+      }
+    },
+    "context_map": {
+      "description": "Context Map (issue #1104, FR-006) — opt-in.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "mode": {
+          "default": "balanced",
+          "type": "string",
+          "enum": [
+            "conservative",
+            "balanced",
+            "aggressive"
+          ]
+        },
+        "max_capsule_tokens": {
+          "default": 2000,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "invalidate_on_hash_change": {
+          "default": true,
+          "type": "boolean"
+        },
+        "agent_profiles": {
+          "default": {},
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "repo_graph": {
+      "description": "Repository dependency-graph settings (builder excludes, incremental refresh). Nested defaults materialize when the whole section is omitted.",
+      "default": {},
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "init_refresh": {
+          "default": true,
+          "type": "boolean"
+        },
+        "refresh_cap": {
+          "default": 50,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 500
+        },
+        "walk_budget_ms": {
+          "default": 5000,
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 60000
+        },
+        "max_files": {
+          "default": 10000,
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 100000
+        },
+        "exclude_dirs": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "storage": {
+          "default": "json",
+          "type": "string",
+          "enum": [
+            "json",
+            "indexed"
+          ]
+        }
+      }
+    },
+    "evidence": {
+      "description": "Evidence retention and storage settings.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "max_age_days": {
+          "default": 90,
+          "type": "number",
+          "minimum": 1,
+          "maximum": 365
+        },
+        "max_bundles": {
+          "default": 1000,
+          "type": "number",
+          "minimum": 10,
+          "maximum": 10000
+        },
+        "auto_archive": {
+          "default": false,
+          "type": "boolean"
+        },
+        "cache_max_bytes": {
+          "type": "number",
+          "minimum": 512,
+          "maximum": 52428800
+        },
+        "cache_max_records": {
+          "type": "number",
+          "minimum": 10,
+          "maximum": 100000
+        }
+      }
+    },
+    "summaries": {
+      "description": "Summary generation settings.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "threshold_bytes": {
+          "default": 16384,
+          "type": "number",
+          "minimum": 1024,
+          "maximum": 1048576
+        },
+        "max_summary_chars": {
+          "default": 1000,
+          "type": "number",
+          "minimum": 100,
+          "maximum": 5000
+        },
+        "max_stored_bytes": {
+          "default": 10485760,
+          "type": "number",
+          "minimum": 10240,
+          "maximum": 104857600
+        },
+        "retention_days": {
+          "default": 7,
+          "type": "number",
+          "minimum": 1,
+          "maximum": 365
+        },
+        "exempt_tools": {
+          "default": [
+            "retrieve_summary",
+            "retrieve_lane_output",
+            "task",
+            "read",
+            "dispatch_lanes",
+            "dispatch_lanes_async",
+            "collect_lane_results",
+            "parse_lane_candidates"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "review_passes": {
+      "description": "Dual-pass security review settings.",
+      "type": "object",
+      "properties": {
+        "always_security_review": {
+          "default": false,
+          "type": "boolean"
+        },
+        "security_globs": {
+          "default": [
+            "**/auth/**",
+            "**/api/**",
+            "**/crypto/**",
+            "**/security/**",
+            "**/middleware/**",
+            "**/session/**",
+            "**/token/**"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "adversarial_detection": {
+      "description": "Same-model adversarial checker detection settings.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "policy": {
+          "default": "warn",
+          "type": "string",
+          "enum": [
+            "warn",
+            "gate",
+            "ignore"
+          ]
+        },
+        "pairs": {
+          "default": [
+            [
+              "coder",
+              "reviewer"
+            ]
+          ],
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "adversarial_testing": {
+      "description": "Cross-model adversarial testing settings.",
+      "default": {
+        "enabled": true,
+        "scope": "all"
+      },
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "scope": {
+          "default": "all",
+          "type": "string",
+          "enum": [
+            "all",
+            "security-only"
+          ]
+        }
+      }
+    },
+    "integration_analysis": {
+      "description": "Integration analysis settings.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        }
+      }
+    },
+    "docs": {
+      "description": "Documentation synthesizer (docs agent) settings.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "doc_patterns": {
+          "default": [
+            "README.md",
+            "CONTRIBUTING.md",
+            "docs/**/*.md",
+            "docs/**/*.rst",
+            "**/CHANGELOG.md"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "design_docs": {
+      "description": "Structured design-doc generation (issue #1080, docs_design agent) — opt-in.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "out_dir": {
+          "default": "docs",
+          "type": "string"
+        },
+        "language": {
+          "type": "string"
+        }
+      }
+    },
+    "git": {
+      "description": "Git executable resolution override (issue #2236 hardening).",
+      "type": "object",
+      "properties": {
+        "binary": {
+          "type": "string"
+        }
+      }
+    },
+    "ui_review": {
+      "description": "UI/UX review (designer agent) settings.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "trigger_paths": {
+          "default": [
+            "**/pages/**",
+            "**/components/**",
+            "**/views/**",
+            "**/screens/**",
+            "**/ui/**",
+            "**/layouts/**"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "trigger_keywords": {
+          "default": [
+            "new page",
+            "new screen",
+            "new component",
+            "redesign",
+            "layout change",
+            "form",
+            "modal",
+            "dialog",
+            "dropdown",
+            "sidebar",
+            "navbar",
+            "dashboard",
+            "landing page",
+            "signup",
+            "login form",
+            "settings page",
+            "profile page"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "compaction_advisory": {
+      "description": "Compaction advisory settings.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "thresholds": {
+          "default": [
+            50,
+            75,
+            100,
+            125,
+            150
+          ],
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 10,
+            "maximum": 500
+          }
+        },
+        "message": {
+          "default": "[SWARM HINT] Session has ${totalToolCalls} tool calls. Consider compacting at next phase boundary to maintain context quality.",
+          "type": "string"
+        }
+      }
+    },
+    "lint": {
+      "description": "Lint gate settings.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "mode": {
+          "default": "check",
+          "type": "string",
+          "enum": [
+            "check",
+            "fix"
+          ]
+        },
+        "linter": {
+          "default": "auto",
+          "type": "string",
+          "enum": [
+            "biome",
+            "eslint",
+            "auto"
+          ]
+        },
+        "patterns": {
+          "default": [
+            "**/*.{ts,tsx,js,jsx,mjs,cjs}",
+            "**/biome.json",
+            "**/biome.jsonc"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exclude": {
+          "default": [
+            "**/node_modules/**",
+            "**/dist/**",
+            "**/.git/**",
+            "**/coverage/**",
+            "**/*.min.js"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "secretscan": {
+      "description": "Secret scanning settings.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "patterns": {
+          "default": [
+            "**/*.{env,properties,yml,yaml,json,js,ts}",
+            "**/.env*",
+            "**/secrets/**",
+            "**/credentials/**",
+            "**/config/**/*.ts",
+            "**/config/**/*.js"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "exclude": {
+          "default": [
+            "**/node_modules/**",
+            "**/dist/**",
+            "**/.git/**",
+            "**/coverage/**",
+            "**/test/**",
+            "**/tests/**",
+            "**/__tests__/**",
+            "**/*.test.ts",
+            "**/*.test.js",
+            "**/*.spec.ts",
+            "**/*.spec.js"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "extensions": {
+          "default": [
+            ".env",
+            ".properties",
+            ".yml",
+            ".yaml",
+            ".json",
+            ".js",
+            ".ts",
+            ".py",
+            ".rb",
+            ".go",
+            ".java",
+            ".cs",
+            ".php"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "checkpoint": {
+      "description": "Checkpoint settings.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "auto_checkpoint_threshold": {
+          "default": 3,
+          "description": "Maximum number of checkpoints to retain. Oldest checkpoints are evicted when this limit is exceeded.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "max_retention": {
+          "default": 20,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "allow_empty_commits": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "apply_patch": {
+      "description": "Apply-patch opt-in fuzzy matching fallback (issue #1718).",
+      "type": "object",
+      "properties": {
+        "fuzzy_match": {
+          "default": false,
+          "type": "boolean"
+        },
+        "fuzzy_match_context_aware": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "automation": {
+      "description": "Background automation mode and per-feature toggles (v6.7 background-first rollout).",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "default": "manual",
+          "type": "string",
+          "enum": [
+            "manual",
+            "hybrid",
+            "auto"
+          ]
+        },
+        "capabilities": {
+          "default": {
+            "plan_sync": true,
+            "phase_preflight": false,
+            "config_doctor_on_startup": false,
+            "config_doctor_autofix": false,
+            "evidence_auto_summaries": true,
+            "decision_drift_detection": true
+          },
+          "type": "object",
+          "properties": {
+            "plan_sync": {
+              "default": true,
+              "type": "boolean"
+            },
+            "phase_preflight": {
+              "default": false,
+              "type": "boolean"
+            },
+            "config_doctor_on_startup": {
+              "default": false,
+              "type": "boolean"
+            },
+            "config_doctor_autofix": {
+              "default": false,
+              "type": "boolean"
+            },
+            "evidence_auto_summaries": {
+              "default": true,
+              "type": "boolean"
+            },
+            "decision_drift_detection": {
+              "default": true,
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    "knowledge": {
+      "description": "Two-tier cross-project knowledge base (v6.17).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "swarm_max_entries": {
+          "default": 100,
+          "type": "number",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "hive_max_entries": {
+          "default": 200,
+          "type": "number",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "auto_promote_days": {
+          "default": 90,
+          "type": "number",
+          "minimum": 1,
+          "maximum": 3650
+        },
+        "max_inject_count": {
+          "default": 5,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 50
+        },
+        "delegate_max_inject_count": {
+          "default": 8,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 50
+        },
+        "inject_char_budget": {
+          "default": 2000,
+          "type": "number",
+          "minimum": 200,
+          "maximum": 10000
+        },
+        "context_budget_threshold": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "max_lesson_display_chars": {
+          "default": 120,
+          "type": "number",
+          "minimum": 40,
+          "maximum": 280
+        },
+        "dedup_threshold": {
+          "default": 0.6,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "scope_filter": {
+          "default": [
+            "global"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "hive_enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "rejected_max_entries": {
+          "default": 20,
+          "type": "number",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "validation_enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "evergreen_confidence": {
+          "default": 0.9,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "evergreen_utility": {
+          "default": 0.8,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "low_utility_threshold": {
+          "default": 0.3,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "min_retrievals_for_utility": {
+          "default": 3,
+          "type": "number",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "receipt_close_grace_days": {
+          "default": 7,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3650
+        },
+        "schema_version": {
+          "default": 1,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "directive_min_confidence": {
+          "default": 0.75,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "same_project_weight": {
+          "default": 1,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "cross_project_weight": {
+          "default": 0.5,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "min_encounter_score": {
+          "default": 0.1,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "initial_encounter_score": {
+          "default": 1,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "encounter_increment": {
+          "default": 0.1,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "max_encounter_score": {
+          "default": 10,
+          "type": "number",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "default_max_phases": {
+          "default": 10,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "todo_max_phases": {
+          "default": 3,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sweep_enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "confidence_floor_action": {
+          "default": "demote",
+          "type": "string",
+          "enum": [
+            "none",
+            "demote",
+            "quarantine"
+          ]
+        },
+        "confidence_floor_min_outcomes": {
+          "default": 3,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "confidence_floor_signal_threshold": {
+          "default": 0,
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        },
+        "contradiction_threshold_action": {
+          "default": "quarantine",
+          "type": "string",
+          "enum": [
+            "tag_only",
+            "quarantine"
+          ]
+        },
+        "contradiction_quarantine_threshold": {
+          "default": 3,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "contradiction_quarantine_window_days": {
+          "default": 30,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "promoted_demotion_min_negative_phases": {
+          "default": 3,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "promoted_demotion_signal_threshold": {
+          "default": -0.3,
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        },
+        "promotion_min_terminal_applications": {
+          "default": 0,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "promotion_min_distinct_cohorts": {
+          "default": 0,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 50
+        },
+        "promotion_require_actionable": {
+          "default": true,
+          "type": "boolean"
+        },
+        "realtime_learning_nudge": {
+          "default": {
+            "enabled": true,
+            "first_after_tool_calls": 10,
+            "repeat_after_tool_calls": 25
+          },
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "type": "boolean"
+            },
+            "first_after_tool_calls": {
+              "default": 10,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            },
+            "repeat_after_tool_calls": {
+              "default": 25,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          }
+        },
+        "retrieval": {
+          "type": "object",
+          "properties": {
+            "mmr_lambda": {
+              "default": 0.5,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "cold_start_bonus": {
+              "default": 0.08,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 0.5
+            },
+            "cold_start_max_age_phases": {
+              "default": 3,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "synonym_min_cooccurrence": {
+              "default": 3,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "synonym_map_max_pairs": {
+              "default": 500,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000
+            }
+          }
+        },
+        "enrichment": {
+          "default": {
+            "max_calls_per_day": 30,
+            "quota_window": "utc"
+          },
+          "type": "object",
+          "properties": {
+            "max_calls_per_day": {
+              "default": 30,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000
+            },
+            "quota_window": {
+              "default": "utc",
+              "type": "string",
+              "enum": [
+                "utc",
+                "local"
+              ]
+            },
+            "batch_size": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        }
+      }
+    },
+    "memory": {
+      "description": "Swarm memory substrate — disabled by default so existing flows are unchanged.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "provider": {
+          "default": "sqlite",
+          "type": "string",
+          "enum": [
+            "local-jsonl",
+            "sqlite"
+          ]
+        },
+        "storageDir": {
+          "default": ".swarm/memory",
+          "type": "string"
+        },
+        "sqlite": {
+          "default": {
+            "path": ".swarm/memory/memory.db",
+            "busyTimeoutMs": 5000
+          },
+          "type": "object",
+          "properties": {
+            "path": {
+              "default": ".swarm/memory/memory.db",
+              "type": "string"
+            },
+            "busyTimeoutMs": {
+              "default": 5000,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 60000
+            }
+          }
+        },
+        "link": {
+          "default": {
+            "enabled": false
+          },
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "type": "boolean"
+            }
+          }
+        },
+        "recall": {
+          "default": {
+            "defaultMaxItems": 8,
+            "defaultTokenBudget": 1200,
+            "minScore": 0.05,
+            "injection": {
+              "enabled": true,
+              "minScore": 0.25,
+              "requireQuerySignal": true,
+              "maxItems": 6,
+              "tokenBudget": 1000
+            }
+          },
+          "type": "object",
+          "properties": {
+            "defaultMaxItems": {
+              "default": 8,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            },
+            "defaultTokenBudget": {
+              "default": 1200,
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 5000
+            },
+            "minScore": {
+              "default": 0.05,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "injection": {
+              "default": {
+                "enabled": true,
+                "minScore": 0.25,
+                "requireQuerySignal": true,
+                "maxItems": 6,
+                "tokenBudget": 1000
+              },
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "minScore": {
+                  "default": 0.25,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "requireQuerySignal": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "maxItems": {
+                  "default": 6,
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 20
+                },
+                "tokenBudget": {
+                  "default": 1000,
+                  "type": "integer",
+                  "minimum": 100,
+                  "maximum": 5000
+                }
+              }
+            }
+          }
+        },
+        "reflection": {
+          "default": {
+            "enabled": false,
+            "halfLifeDays": 30
+          },
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "type": "boolean"
+            },
+            "halfLifeDays": {
+              "default": 30,
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 3650
+            }
+          }
+        },
+        "learning": {
+          "default": {
+            "learningRate": 0.1,
+            "propagationFactor": 0.3,
+            "qValueBoostWeight": 0.1,
+            "suppressionThreshold": 0.15,
+            "promotionThreshold": 0.85,
+            "propagationTokenOverlapThreshold": 0.4,
+            "propagationEmbeddingCosineThreshold": 0.7,
+            "propagationFanout": 20,
+            "propagationLookbackDays": 30
+          },
+          "type": "object",
+          "properties": {
+            "learningRate": {
+              "default": 0.1,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "propagationFactor": {
+              "default": 0.3,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "qValueBoostWeight": {
+              "default": 0.1,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "suppressionThreshold": {
+              "default": 0.15,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "promotionThreshold": {
+              "default": 0.85,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "propagationTokenOverlapThreshold": {
+              "default": 0.4,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "propagationEmbeddingCosineThreshold": {
+              "default": 0.7,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "propagationFanout": {
+              "default": 20,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000
+            },
+            "propagationLookbackDays": {
+              "default": 30,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3650
+            }
+          }
+        },
+        "writes": {
+          "default": {
+            "mode": "propose"
+          },
+          "type": "object",
+          "properties": {
+            "mode": {
+              "default": "propose",
+              "type": "string",
+              "const": "propose"
+            }
+          }
+        },
+        "redaction": {
+          "default": {
+            "rejectDurableSecrets": true,
+            "detectPii": false,
+            "piiDetector": "regex",
+            "rejectDurablePii": false,
+            "piiThreshold": 0.7
+          },
+          "type": "object",
+          "properties": {
+            "rejectDurableSecrets": {
+              "default": true,
+              "type": "boolean"
+            },
+            "detectPii": {
+              "default": false,
+              "type": "boolean"
+            },
+            "piiDetector": {
+              "default": "regex",
+              "type": "string",
+              "enum": [
+                "regex",
+                "ner"
+              ]
+            },
+            "rejectDurablePii": {
+              "default": false,
+              "type": "boolean"
+            },
+            "piiThreshold": {
+              "default": 0.7,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        "maintenance": {
+          "default": {
+            "lowUtilityMaxConfidence": 0.45,
+            "lowUtilityMinAgeDays": 30,
+            "importance": {
+              "wRecency": 0.2,
+              "wFrequency": 0.2,
+              "wFreshness": 0.15,
+              "wConfidence": 0.25,
+              "lambda": 0.05,
+              "mu": 0.01,
+              "n": 50,
+              "threshold": 0.2
+            }
+          },
+          "type": "object",
+          "properties": {
+            "lowUtilityMaxConfidence": {
+              "default": 0.45,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "lowUtilityMinAgeDays": {
+              "default": 30,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3650
+            },
+            "importance": {
+              "default": {
+                "wRecency": 0.2,
+                "wFrequency": 0.2,
+                "wFreshness": 0.15,
+                "wConfidence": 0.25,
+                "lambda": 0.05,
+                "mu": 0.01,
+                "n": 50,
+                "threshold": 0.2
+              },
+              "type": "object",
+              "properties": {
+                "wRecency": {
+                  "default": 0.2,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "wFrequency": {
+                  "default": 0.2,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "wFreshness": {
+                  "default": 0.15,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "wConfidence": {
+                  "default": 0.25,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "lambda": {
+                  "default": 0.05,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10
+                },
+                "mu": {
+                  "default": 0.01,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 10
+                },
+                "n": {
+                  "default": 50,
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100000
+                },
+                "threshold": {
+                  "default": 0.2,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              }
+            }
+          }
+        },
+        "qLearning": {
+          "default": {
+            "learningRate": 0.1,
+            "qValueBoostWeight": 0.1,
+            "suppressionThreshold": 0.15,
+            "promotionThreshold": 0.85,
+            "promotionMinRetrievals": 5,
+            "propagationFraction": 0.3,
+            "propagationFanoutCap": 20,
+            "propagationWindowDays": 30,
+            "propagationRelatednessThreshold": 0.7,
+            "explorationRate": 0.05,
+            "verdictPayloadCapBytes": 8192,
+            "initialQValue": 0.5
+          },
+          "type": "object",
+          "properties": {
+            "learningRate": {
+              "default": 0.1,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "qValueBoostWeight": {
+              "default": 0.1,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "suppressionThreshold": {
+              "default": 0.15,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "promotionThreshold": {
+              "default": 0.85,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "promotionMinRetrievals": {
+              "default": 5,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100000
+            },
+            "propagationFraction": {
+              "default": 0.3,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "propagationFanoutCap": {
+              "default": 20,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000
+            },
+            "propagationWindowDays": {
+              "default": 30,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 3650
+            },
+            "propagationRelatednessThreshold": {
+              "default": 0.7,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "explorationRate": {
+              "default": 0.05,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "verdictPayloadCapBytes": {
+              "default": 8192,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1048576
+            },
+            "initialQValue": {
+              "default": 0.5,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        "consolidation": {
+          "default": {
+            "enabled": false,
+            "maxClustersPerPass": 10,
+            "jaccardThreshold": 0.3,
+            "autoApplyMinConfidence": 0.6,
+            "decayHalfLifeDays": {
+              "user_preference": 0,
+              "project_fact": 0,
+              "architecture_decision": 0,
+              "repo_convention": 0,
+              "api_finding": 180,
+              "code_pattern": 90,
+              "test_pattern": 90,
+              "failure_pattern": 90,
+              "security_note": 0,
+              "evidence": 180,
+              "todo": 30,
+              "scratch": 7
+            }
+          },
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "type": "boolean"
+            },
+            "maxClustersPerPass": {
+              "default": 10,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "jaccardThreshold": {
+              "default": 0.3,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "autoApplyMinConfidence": {
+              "default": 0.6,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "decayHalfLifeDays": {
+              "default": {
+                "user_preference": 0,
+                "project_fact": 0,
+                "architecture_decision": 0,
+                "repo_convention": 0,
+                "api_finding": 180,
+                "code_pattern": 90,
+                "test_pattern": 90,
+                "failure_pattern": 90,
+                "security_note": 0,
+                "evidence": 180,
+                "todo": 30,
+                "scratch": 7
+              },
+              "type": "object",
+              "properties": {
+                "user_preference": {
+                  "default": 0,
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 36500
+                },
+                "project_fact": {
+                  "default": 0,
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 36500
+                },
+                "architecture_decision": {
+                  "default": 0,
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 36500
+                },
+                "repo_convention": {
+                  "default": 0,
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 36500
+                },
+                "api_finding": {
+                  "default": 180,
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 36500
+                },
+                "code_pattern": {
+                  "default": 90,
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 36500
+                },
+                "test_pattern": {
+                  "default": 90,
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 36500
+                },
+                "failure_pattern": {
+                  "default": 90,
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 36500
+                },
+                "security_note": {
+                  "default": 0,
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 36500
+                },
+                "evidence": {
+                  "default": 180,
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 36500
+                },
+                "todo": {
+                  "default": 30,
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 36500
+                },
+                "scratch": {
+                  "default": 7,
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 36500
+                }
+              }
+            }
+          }
+        },
+        "hardDelete": {
+          "default": false,
+          "type": "boolean"
+        },
+        "embeddings": {
+          "default": {
+            "enabled": false,
+            "model": "Xenova/all-MiniLM-L6-v2",
+            "dimension": 384,
+            "cacheSize": 256
+          },
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "type": "boolean"
+            },
+            "model": {
+              "default": "Xenova/all-MiniLM-L6-v2",
+              "type": "string"
+            },
+            "dimension": {
+              "default": 384,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "version": {
+              "type": "string"
+            },
+            "cacheSize": {
+              "default": 256,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        "retrieval": {
+          "default": {
+            "rrfK": 60,
+            "weights": {
+              "lexical": 0.5,
+              "dense": 0.4,
+              "metadata": 0.1
+            },
+            "rerank": {
+              "enabled": false
+            },
+            "latencyBudgetMs": 250
+          },
+          "type": "object",
+          "properties": {
+            "rrfK": {
+              "default": 60,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "weights": {
+              "default": {
+                "lexical": 0.5,
+                "dense": 0.4,
+                "metadata": 0.1
+              },
+              "type": "object",
+              "properties": {
+                "lexical": {
+                  "default": 0.5,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "dense": {
+                  "default": 0.4,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "metadata": {
+                  "default": 0.1,
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              }
+            },
+            "rerank": {
+              "default": {
+                "enabled": false
+              },
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "model": {
+                  "type": "string"
+                }
+              }
+            },
+            "latencyBudgetMs": {
+              "default": 250,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          }
+        }
+      }
+    },
+    "learning": {
+      "description": "Learning subsystem: real-time admission, PRM persistence, dedup sweep (issue #1821).",
+      "type": "object",
+      "properties": {
+        "realtime_admission": {
+          "default": {},
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "type": "boolean"
+            },
+            "max_queue_size": {
+              "default": 50,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            },
+            "min_drain": {
+              "default": 1,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50
+            },
+            "max_drain": {
+              "default": 10,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "drain_depth_factor": {
+              "default": 0.5,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "drain_velocity_factor": {
+              "default": 0.25,
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "max_llm_calls_per_session": {
+              "default": 20,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 500
+            },
+            "max_tokens_per_session": {
+              "default": 50000,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "max_concurrent_admissions": {
+              "default": 2,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16
+            },
+            "max_retries_per_candidate": {
+              "default": 1,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            "per_candidate_llm_timeout_ms": {
+              "default": 60000,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "max_drain_wall_time_ms": {
+              "default": 10000,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "supersede_nudge": {
+              "default": true,
+              "type": "boolean"
+            }
+          }
+        },
+        "prm_persistence": {
+          "default": {},
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "type": "boolean"
+            },
+            "min_support": {
+              "default": 3,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            },
+            "cooldown_ms": {
+              "default": 900000,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          }
+        },
+        "dedup_sweep": {
+          "default": {},
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "type": "boolean"
+            },
+            "max_comparisons": {
+              "default": 2000,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "max_merges_per_sweep": {
+              "default": 10,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          }
+        }
+      }
+    },
+    "consensus": {
+      "description": "Consensus mining over completed run evidence (issue #1821).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "default_min_support": {
+          "default": 3,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "default_min_successful_runs": {
+          "default": 2,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "default_max_evidence_items": {
+          "default": 50,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "max_excerpt_chars": {
+          "default": 500,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "llm_summarization_enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "llm_timeout_ms": {
+          "default": 60000,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "report_retention": {
+          "default": 50,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "curator": {
+      "description": "Phase context consolidation and drift detection.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "init_enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "phase_enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "postmortem_enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "max_summary_tokens": {
+          "default": 2000,
+          "type": "number",
+          "minimum": 500,
+          "maximum": 8000
+        },
+        "min_knowledge_confidence": {
+          "default": 0.7,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "compliance_report": {
+          "default": true,
+          "type": "boolean"
+        },
+        "suppress_warnings": {
+          "default": true,
+          "type": "boolean"
+        },
+        "drift_inject_max_chars": {
+          "default": 500,
+          "type": "number",
+          "minimum": 100,
+          "maximum": 2000
+        },
+        "llm_timeout_ms": {
+          "default": 300000,
+          "type": "integer",
+          "minimum": 5000,
+          "maximum": 600000
+        },
+        "skill_generation_enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "skill_generation_mode": {
+          "default": "draft",
+          "type": "string",
+          "enum": [
+            "draft",
+            "active"
+          ]
+        },
+        "min_skill_confidence": {
+          "default": 0.7,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "min_skill_confirmations": {
+          "default": 2,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        }
+      }
+    },
+    "architectural_supervision": {
+      "description": "Hierarchical summary review (issue #893).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "mode": {
+          "default": "advisory",
+          "type": "string",
+          "enum": [
+            "advisory",
+            "gate"
+          ]
+        },
+        "run_on": {
+          "default": "phase_complete",
+          "type": "string",
+          "enum": [
+            "phase_complete"
+          ]
+        },
+        "summary_model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "max_agent_summary_words": {
+          "default": 100,
+          "type": "integer",
+          "minimum": 20,
+          "maximum": 500
+        },
+        "max_phase_summary_words": {
+          "default": 250,
+          "type": "integer",
+          "minimum": 50,
+          "maximum": 1000
+        },
+        "allow_concerns_to_complete": {
+          "default": true,
+          "type": "boolean"
+        },
+        "persist_knowledge_recommendations": {
+          "default": false,
+          "type": "boolean"
+        },
+        "provenance_verify": {
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "knowledge_application": {
+      "description": "Knowledge-application contract (v2): warn or enforce modes, ack tracking.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "mode": {
+          "default": "warn",
+          "type": "string",
+          "enum": [
+            "warn",
+            "enforce"
+          ]
+        },
+        "min_confidence": {
+          "default": 0.85,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "critical_requires_ack": {
+          "default": true,
+          "type": "boolean"
+        },
+        "require_skill_refs": {
+          "default": true,
+          "type": "boolean"
+        },
+        "high_risk_tools": {
+          "default": [
+            "save_plan",
+            "update_task_status",
+            "phase_complete",
+            "task",
+            "Task"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "max_gate_denials": {
+          "default": 5,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "gate_staleness_ms": {
+          "default": 600000,
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 3600000
+        }
+      }
+    },
+    "skillPropagation": {
+      "description": "Skill propagation gate/injection settings.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "enforce": {
+          "default": false,
+          "type": "boolean"
+        },
+        "audiences": {
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$"
+          }
+        }
+      }
+    },
+    "skill_improver": {
+      "description": "Low-frequency, expensive-model skill improvement loop (issue #629, v2).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "model": {
+          "default": null,
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fallback_models": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "max_calls_per_day": {
+          "default": 10,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "trigger": {
+          "default": "manual",
+          "type": "string",
+          "enum": [
+            "manual",
+            "scheduled"
+          ]
+        },
+        "consolidation_interval_hours": {
+          "default": 24,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 720
+        },
+        "consolidation_max_calls_per_run": {
+          "default": 1,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "targets": {
+          "default": [
+            "skills",
+            "spec",
+            "architect_prompt",
+            "knowledge"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "skills",
+              "spec",
+              "architect_prompt",
+              "knowledge"
+            ]
+          }
+        },
+        "write_mode": {
+          "default": "proposal",
+          "type": "string",
+          "enum": [
+            "proposal",
+            "draft_skills"
+          ]
+        },
+        "require_user_approval": {
+          "default": true,
+          "type": "boolean"
+        },
+        "quota_window": {
+          "default": "utc",
+          "type": "string",
+          "enum": [
+            "utc",
+            "local"
+          ]
+        },
+        "allow_deterministic_fallback": {
+          "default": true,
+          "type": "boolean"
+        }
+      }
+    },
+    "harness_evolution": {
+      "description": "Declarative, non-executing HarnessOpt mutation policy (issue #1825).",
+      "type": "object",
+      "properties": {
+        "source_allowlist": {
+          "default": [],
+          "maxItems": 128,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        },
+        "extra_protected_paths": {
+          "default": [],
+          "maxItems": 128,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        },
+        "max_patch_bytes": {
+          "default": 1048576,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "max_files": {
+          "default": 64,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "max_file_bytes": {
+          "default": 524288,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8388608
+        },
+        "max_total_bytes": {
+          "default": 4194304,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 67108864
+        },
+        "max_changed_lines": {
+          "default": 10000,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "max_versions": {
+          "default": 100,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "max_inactive_candidates": {
+          "default": 32,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 128
+        },
+        "max_replay_records": {
+          "default": 10000,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "max_output_bytes": {
+          "default": 262144,
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 1048576
+        }
+      },
+      "additionalProperties": false
+    },
+    "spec_writer": {
+      "description": "Spec writer agent (v2) — independent model for .swarm/spec.md authorship.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "model": {
+          "default": null,
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fallback_models": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allow_spec_write": {
+          "default": true,
+          "type": "boolean"
+        }
+      }
+    },
+    "tool_output": {
+      "description": "Tool output truncation settings (enable/disable, max lines, per-tool overrides).",
+      "type": "object",
+      "properties": {
+        "truncation_enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "max_lines": {
+          "default": 150,
+          "type": "number",
+          "minimum": 10,
+          "maximum": 500
+        },
+        "per_tool": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "number"
+          }
+        },
+        "truncation_tools": {
+          "description": "Tools to apply output truncation to. Defaults to diff, symbols, bash, shell, test_runner, lint, pre_check_batch, complexity_hotspots, pkg_audit, sbom_generate, schema_drift.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "slop_detector": {
+      "description": "Slop detector settings (v6.29).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "classThreshold": {
+          "default": 3,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "commentStripThreshold": {
+          "default": 5,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "diffLineThreshold": {
+          "default": 200,
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 9007199254740991
+        },
+        "importHygieneThreshold": {
+          "default": 2,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "todo_gate": {
+      "description": "TODO gate (v6.32): warn or block on new high-priority TODOs (FIXME/HACK/XXX).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "max_high_priority": {
+          "default": 0,
+          "description": "Max new high-priority TODOs (FIXME/HACK/XXX) before warning. 0 = warn on any. Set to -1 to disable.",
+          "type": "integer",
+          "minimum": -1,
+          "maximum": 9007199254740991
+        },
+        "block_on_threshold": {
+          "default": false,
+          "description": "If true, block phase completion when threshold exceeded. Default: advisory only.",
+          "type": "boolean"
+        }
+      }
+    },
+    "incremental_verify": {
+      "description": "Incremental verification settings (v6.29).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "command": {
+          "default": null,
+          "anyOf": [
+            {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "timeoutMs": {
+          "default": 30000,
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 300000
+        },
+        "triggerAgents": {
+          "default": [
+            "coder"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "compaction_service": {
+      "description": "Compaction service settings (v6.29).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "observationThreshold": {
+          "default": 40,
+          "type": "number",
+          "minimum": 1,
+          "maximum": 99
+        },
+        "reflectionThreshold": {
+          "default": 60,
+          "type": "number",
+          "minimum": 1,
+          "maximum": 99
+        },
+        "emergencyThreshold": {
+          "default": 80,
+          "type": "number",
+          "minimum": 1,
+          "maximum": 99
+        },
+        "preserveLastNTurns": {
+          "default": 5,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "prm": {
+      "description": "PRM (Process Remediation Manager) settings.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "pattern_thresholds": {
+          "default": {
+            "repetition_loop": 2,
+            "ping_pong": 2,
+            "expansion_drift": 3,
+            "stuck_on_test": 3,
+            "context_thrash": 10
+          },
+          "type": "object",
+          "properties": {
+            "repetition_loop": {
+              "default": 2,
+              "type": "number",
+              "minimum": 1
+            },
+            "ping_pong": {
+              "default": 2,
+              "type": "number",
+              "minimum": 1
+            },
+            "expansion_drift": {
+              "default": 3,
+              "type": "number",
+              "minimum": 1
+            },
+            "stuck_on_test": {
+              "default": 3,
+              "type": "number",
+              "minimum": 1
+            },
+            "context_thrash": {
+              "default": 10,
+              "type": "number",
+              "minimum": 1
+            }
+          }
+        },
+        "max_trajectory_lines": {
+          "default": 1000,
+          "type": "number",
+          "minimum": 10,
+          "maximum": 10000
+        },
+        "escalation_enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "detection_timeout_ms": {
+          "default": 100,
+          "type": "number",
+          "minimum": 10
+        }
+      }
+    },
+    "council": {
+      "description": "Work Complete Council — parallel four-member verification gate, off by default.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "maxRounds": {
+          "default": 3,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "parallelTimeoutMs": {
+          "default": 30000,
+          "description": "DEPRECATED — inert. Accepted for parse compatibility only; no runtime consumer exists and no timeout is enforced. Config doctor warns when this is explicitly set. Remove the key; dispatch timeouts are governed by the agent host. Scheduled for removal in a future release.",
+          "type": "integer",
+          "minimum": 5000,
+          "maximum": 120000
+        },
+        "vetoPriority": {
+          "default": true,
+          "type": "boolean"
+        },
+        "requireAllMembers": {
+          "default": false,
+          "description": "When true, submit_council_verdicts rejects if fewer than 5 member verdicts are provided. Equivalent to minimumMembers: 5.",
+          "type": "boolean"
+        },
+        "minimumMembers": {
+          "default": 3,
+          "description": "Minimum distinct council member verdicts required for synthesis (task/phase councils only — the final council uses finalCompletionPolicy). Default 3. Set to 1 to disable quorum enforcement. requireAllMembers: true overrides this to 5 (stricter constraint wins).",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "escalateOnMaxRounds": {
+          "description": "Optional webhook URL or handler name declared for escalation when maxRounds is reached without APPROVE. REMAINS INERT — no handler or webhook execution exists or is added; config doctor warns when it is set (issue #1650). Max-rounds exhaustion emits a durable structured event and a user escalation message; wiring real outbound escalation requires a separate security review.",
+          "type": "string"
+        },
+        "phaseConcernsAllowComplete": {
+          "default": true,
+          "description": "When true, a phase-level council CONCERNS verdict with only MEDIUM/LOW findings does NOT block phase completion — the advisory notes are logged as warnings and the phase proceeds. When false, CONCERNS blocks like REJECT. Note: HIGH/CRITICAL findings from CONCERNS members are always promoted to requiredFixes and block at the tool level regardless of this setting. Default: true.",
+          "type": "boolean"
+        },
+        "finalCompletionPolicy": {
+          "default": {
+            "mode": "all_required"
+          },
+          "description": "Final-council completion policy. Missing/default is all_required (strict five-member requirement). The normalized policy participates in the council policy digest, so any change invalidates previously accepted final-council evidence.",
+          "type": "object",
+          "properties": {
+            "mode": {
+              "default": "all_required",
+              "description": "'all_required' (default) preserves the exact legacy final council: all five canonical roles, five distinct members, zero absentees. 'quorum' is an explicit weakening that accepts a bounded minimum of distinct canonical members instead of all five.",
+              "type": "string",
+              "enum": [
+                "all_required",
+                "quorum"
+              ]
+            },
+            "minimumMembers": {
+              "description": "Required when mode is \"quorum\": minimum distinct canonical council members (3–5) that must vote. Unknown, duplicate, and cross-swarm identities never count.",
+              "type": "integer",
+              "minimum": 3,
+              "maximum": 5
+            }
+          }
+        },
+        "freshnessMaxAgeHours": {
+          "default": 24,
+          "description": "Maximum age (hours, 1–720) of phase-council, architecture-supervisor, and final-council evidence. Default 24 preserves prior behavior. Part of the council policy digest, so changing it invalidates prior council evidence.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 720
+        },
+        "general": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "type": "boolean"
+            },
+            "searchProvider": {
+              "default": "tavily",
+              "type": "string",
+              "enum": [
+                "tavily",
+                "brave"
+              ]
+            },
+            "searchApiKey": {
+              "type": "string"
+            },
+            "members": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "memberId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "model": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "role": {
+                    "type": "string",
+                    "enum": [
+                      "generalist",
+                      "skeptic",
+                      "domain_expert",
+                      "devil_advocate",
+                      "synthesizer"
+                    ]
+                  },
+                  "persona": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "memberId",
+                  "model",
+                  "role"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "presets": {
+              "default": {},
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "memberId": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "model": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "role": {
+                      "type": "string",
+                      "enum": [
+                        "generalist",
+                        "skeptic",
+                        "domain_expert",
+                        "devil_advocate",
+                        "synthesizer"
+                      ]
+                    },
+                    "persona": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "memberId",
+                    "model",
+                    "role"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "deliberate": {
+              "default": true,
+              "type": "boolean"
+            },
+            "moderator": {
+              "default": true,
+              "type": "boolean"
+            },
+            "moderatorModel": {
+              "type": "string"
+            },
+            "maxSourcesPerMember": {
+              "default": 5,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "parallelization": {
+      "description": "Parallelization (PR 1 dark foundation) — disabled by default; no production code path branches on enabled=true yet.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "maxConcurrentTasks": {
+          "default": 1,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "evidenceLockTimeoutMs": {
+          "default": 60000,
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 300000
+        },
+        "max_coders": {
+          "default": 3,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "max_reviewers": {
+          "default": 2,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        }
+      }
+    },
+    "worktree": {
+      "description": "Worktree isolation policy for parallel coder dispatch lanes (general surface; Lean Turbo keeps its legacy per-mode fields).",
+      "type": "object",
+      "properties": {
+        "policy": {
+          "default": "auto",
+          "type": "string",
+          "enum": [
+            "auto",
+            "required",
+            "disabled"
+          ]
+        },
+        "merge_strategy": {
+          "default": "merge",
+          "type": "string",
+          "enum": [
+            "merge",
+            "rebase",
+            "cherry-pick"
+          ]
+        },
+        "worktree_dir": {
+          "type": "string"
+        },
+        "deps_strategy": {
+          "default": "skip",
+          "type": "string",
+          "enum": [
+            "skip",
+            "copy",
+            "link"
+          ]
+        },
+        "lane_permissions": {
+          "default": "scoped_allow",
+          "type": "string",
+          "enum": [
+            "scoped_allow",
+            "deny",
+            "off"
+          ]
+        },
+        "serialization_release_after_dispatches": {
+          "default": 5,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "serialization_release_after_ms": {
+          "default": 60000,
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "runtime_isolation": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": false,
+              "type": "boolean"
+            },
+            "port_base": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 65535
+            },
+            "port_stride": {
+              "default": 1,
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "env_overrides": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "cache_redirects": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "turbo": {
+      "description": "Turbo execution strategy block (Phase 1). Absent means current behavior unchanged.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "strategy": {
+              "type": "string",
+              "const": "standard"
+            },
+            "lean": {
+              "type": "object",
+              "properties": {
+                "max_parallel_coders": {
+                  "default": 4,
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 6
+                },
+                "require_declared_scope": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "conflict_policy": {
+                  "default": "serialize",
+                  "type": "string",
+                  "enum": [
+                    "serialize",
+                    "degrade"
+                  ]
+                },
+                "degrade_on_risk": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "phase_reviewer": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "phase_critic": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "integrated_diff_required": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "allow_docs_only_without_reviewer": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "worktree_isolation": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "merge_strategy": {
+                  "default": "merge",
+                  "type": "string",
+                  "enum": [
+                    "merge",
+                    "rebase",
+                    "cherry-pick"
+                  ]
+                },
+                "worktree_dir": {
+                  "type": "string"
+                },
+                "deps_strategy": {
+                  "type": "string",
+                  "enum": [
+                    "skip",
+                    "copy",
+                    "link"
+                  ]
+                },
+                "runtime_isolation": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "default": false,
+                      "type": "boolean"
+                    },
+                    "port_base": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 65535
+                    },
+                    "port_stride": {
+                      "default": 1,
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "env_overrides": {
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "cache_redirects": {
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "epic": {
+              "type": "object",
+              "properties": {
+                "cochange": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "default": false,
+                      "type": "boolean"
+                    },
+                    "threshold": {
+                      "default": 0.6,
+                      "type": "number",
+                      "minimum": -1,
+                      "maximum": 1
+                    },
+                    "min_co_changes": {
+                      "default": 5,
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "mode": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "default": false,
+                      "type": "boolean"
+                    },
+                    "activation_threshold": {
+                      "default": 0.3,
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "min_commits_for_signal": {
+                      "default": 20,
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "calibration": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "default": true,
+                      "type": "boolean"
+                    },
+                    "floor_threshold": {
+                      "default": 0.05,
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "tighten_step": {
+                      "default": 0.02,
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "loosen_step": {
+                      "default": 0.01,
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "loosen_window": {
+                      "default": 10,
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "strategy"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "strategy": {
+              "type": "string",
+              "const": "lean"
+            },
+            "lean": {
+              "type": "object",
+              "properties": {
+                "max_parallel_coders": {
+                  "default": 4,
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 6
+                },
+                "require_declared_scope": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "conflict_policy": {
+                  "default": "serialize",
+                  "type": "string",
+                  "enum": [
+                    "serialize",
+                    "degrade"
+                  ]
+                },
+                "degrade_on_risk": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "phase_reviewer": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "phase_critic": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "integrated_diff_required": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "allow_docs_only_without_reviewer": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "worktree_isolation": {
+                  "default": true,
+                  "type": "boolean"
+                },
+                "merge_strategy": {
+                  "default": "merge",
+                  "type": "string",
+                  "enum": [
+                    "merge",
+                    "rebase",
+                    "cherry-pick"
+                  ]
+                },
+                "worktree_dir": {
+                  "type": "string"
+                },
+                "deps_strategy": {
+                  "type": "string",
+                  "enum": [
+                    "skip",
+                    "copy",
+                    "link"
+                  ]
+                },
+                "runtime_isolation": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "default": false,
+                      "type": "boolean"
+                    },
+                    "port_base": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 65535
+                    },
+                    "port_stride": {
+                      "default": 1,
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "env_overrides": {
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "cache_redirects": {
+                      "type": "object",
+                      "propertyNames": {
+                        "type": "string"
+                      },
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "epic": {
+              "type": "object",
+              "properties": {
+                "cochange": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "default": false,
+                      "type": "boolean"
+                    },
+                    "threshold": {
+                      "default": 0.6,
+                      "type": "number",
+                      "minimum": -1,
+                      "maximum": 1
+                    },
+                    "min_co_changes": {
+                      "default": 5,
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "mode": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "default": false,
+                      "type": "boolean"
+                    },
+                    "activation_threshold": {
+                      "default": 0.3,
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "min_commits_for_signal": {
+                      "default": 20,
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "calibration": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "default": true,
+                      "type": "boolean"
+                    },
+                    "floor_threshold": {
+                      "default": 0.05,
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "tighten_step": {
+                      "default": 0.02,
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "loosen_step": {
+                      "default": 0.01,
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "loosen_window": {
+                      "default": 10,
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "strategy",
+            "lean"
+          ]
+        }
+      ]
+    },
+    "turbo_mode": {
+      "description": "Bypass reviewer/test gates for rapid iteration (v6.40).",
+      "default": false,
+      "type": "boolean"
+    },
+    "quiet": {
+      "description": "Suppress non-critical startup warnings (default true keeps the TUI clean). Set false to restore verbose warnings for debugging.",
+      "default": true,
+      "type": "boolean"
+    },
+    "version_check": {
+      "description": "Background staleness check against npm, throttled to once per 24h (issue #675). Set false to fully disable the network call.",
+      "default": true,
+      "type": "boolean"
+    },
+    "full_auto": {
+      "default": {
+        "enabled": false,
+        "locked": false,
+        "max_interactions_per_phase": 50,
+        "deadlock_threshold": 3,
+        "escalation_mode": "pause",
+        "mode": "supervised",
+        "fail_closed": true,
+        "permission_policy": {
+          "enabled": true,
+          "trusted_roots": [
+            "."
+          ],
+          "trusted_domains": [],
+          "protected_paths": [
+            ".git",
+            ".github/workflows",
+            ".opencode",
+            ".swarm",
+            "package.json",
+            "package-lock.json",
+            "bun.lock",
+            "CHANGELOG.md",
+            ".release-please-manifest.json",
+            "release-please-config.json",
+            "src/index.ts",
+            "src/hooks/guardrails.ts",
+            "src/hooks/delegation-gate.ts",
+            "src/hooks/scope-guard.ts",
+            "src/hooks/full-auto-permission.ts",
+            "src/hooks/full-auto-intercept.ts",
+            "src/full-auto",
+            "src/config/schema.ts",
+            "src/config/constants.ts",
+            "src/tools/phase-complete.ts",
+            "dist"
+          ],
+          "allow_defaults": true
+        },
+        "denials": {
+          "max_consecutive": 3,
+          "max_total": 20,
+          "on_limit": "pause"
+        },
+        "oversight": {
+          "on_plan_change": true,
+          "on_task_completion": false,
+          "on_phase_boundary": true,
+          "on_high_risk_action": true,
+          "on_subagent_return_warning": true,
+          "every_tool_calls": 25,
+          "every_architect_turns": 5,
+          "every_minutes": 20,
+          "max_dispatch_retries": 2,
+          "max_consecutive_dispatch_failures": 3,
+          "total_timeout_ms": 120000,
+          "cleanup_timeout_ms": 2000
+        }
+      },
+      "description": "Full-auto autonomous orchestration with critic oversight: permission policy, denial accounting, oversight cadence triggers (v2 preserves v1 fields so existing configs load unchanged).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "locked": {
+          "default": false,
+          "type": "boolean"
+        },
+        "critic_model": {
+          "type": "string"
+        },
+        "max_interactions_per_phase": {
+          "default": 50,
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 200
+        },
+        "deadlock_threshold": {
+          "default": 3,
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 10
+        },
+        "escalation_mode": {
+          "default": "pause",
+          "type": "string",
+          "enum": [
+            "pause",
+            "terminate"
+          ]
+        },
+        "mode": {
+          "default": "supervised",
+          "type": "string",
+          "enum": [
+            "assisted",
+            "supervised",
+            "strict"
+          ]
+        },
+        "fail_closed": {
+          "default": true,
+          "type": "boolean"
+        },
+        "permission_policy": {
+          "default": {
+            "enabled": true,
+            "trusted_roots": [
+              "."
+            ],
+            "trusted_domains": [],
+            "protected_paths": [
+              ".git",
+              ".github/workflows",
+              ".opencode",
+              ".swarm",
+              "package.json",
+              "package-lock.json",
+              "bun.lock",
+              "CHANGELOG.md",
+              ".release-please-manifest.json",
+              "release-please-config.json",
+              "src/index.ts",
+              "src/hooks/guardrails.ts",
+              "src/hooks/delegation-gate.ts",
+              "src/hooks/scope-guard.ts",
+              "src/hooks/full-auto-permission.ts",
+              "src/hooks/full-auto-intercept.ts",
+              "src/full-auto",
+              "src/config/schema.ts",
+              "src/config/constants.ts",
+              "src/tools/phase-complete.ts",
+              "dist"
+            ],
+            "allow_defaults": true
+          },
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "default": true,
+              "type": "boolean"
+            },
+            "trusted_roots": {
+              "default": [
+                "."
+              ],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "trusted_domains": {
+              "default": [],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "protected_paths": {
+              "default": [
+                ".git",
+                ".github/workflows",
+                ".opencode",
+                ".swarm",
+                "package.json",
+                "package-lock.json",
+                "bun.lock",
+                "CHANGELOG.md",
+                ".release-please-manifest.json",
+                "release-please-config.json",
+                "src/index.ts",
+                "src/hooks/guardrails.ts",
+                "src/hooks/delegation-gate.ts",
+                "src/hooks/scope-guard.ts",
+                "src/hooks/full-auto-permission.ts",
+                "src/hooks/full-auto-intercept.ts",
+                "src/full-auto",
+                "src/config/schema.ts",
+                "src/config/constants.ts",
+                "src/tools/phase-complete.ts",
+                "dist"
+              ],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allow_defaults": {
+              "default": true,
+              "type": "boolean"
+            }
+          }
+        },
+        "denials": {
+          "default": {
+            "max_consecutive": 3,
+            "max_total": 20,
+            "on_limit": "pause"
+          },
+          "type": "object",
+          "properties": {
+            "max_consecutive": {
+              "default": 3,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50
+            },
+            "max_total": {
+              "default": 20,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            },
+            "on_limit": {
+              "default": "pause",
+              "type": "string",
+              "enum": [
+                "pause",
+                "terminate"
+              ]
+            }
+          }
+        },
+        "oversight": {
+          "default": {
+            "on_plan_change": true,
+            "on_task_completion": false,
+            "on_phase_boundary": true,
+            "on_high_risk_action": true,
+            "on_subagent_return_warning": true,
+            "every_tool_calls": 25,
+            "every_architect_turns": 5,
+            "every_minutes": 20,
+            "max_dispatch_retries": 2,
+            "max_consecutive_dispatch_failures": 3,
+            "total_timeout_ms": 120000,
+            "cleanup_timeout_ms": 2000
+          },
+          "type": "object",
+          "properties": {
+            "on_plan_change": {
+              "default": true,
+              "type": "boolean"
+            },
+            "on_task_completion": {
+              "default": false,
+              "type": "boolean"
+            },
+            "on_phase_boundary": {
+              "default": true,
+              "type": "boolean"
+            },
+            "on_high_risk_action": {
+              "default": true,
+              "type": "boolean"
+            },
+            "on_subagent_return_warning": {
+              "default": true,
+              "type": "boolean"
+            },
+            "every_tool_calls": {
+              "default": 25,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10000
+            },
+            "every_architect_turns": {
+              "default": 5,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000
+            },
+            "every_minutes": {
+              "default": 20,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1440
+            },
+            "max_dispatch_retries": {
+              "default": 2,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 10
+            },
+            "max_consecutive_dispatch_failures": {
+              "default": 3,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 50
+            },
+            "total_timeout_ms": {
+              "default": 120000,
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 300000
+            },
+            "cleanup_timeout_ms": {
+              "default": 2000,
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 10000
+            }
+          }
+        }
+      }
+    },
+    "pr_monitor": {
+      "description": "GitHub PR subscription and polling (FR-001) — disabled by default; opt-in for real-time PR status updates.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "poll_interval_seconds": {
+          "default": 60,
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 300
+        },
+        "max_subscriptions": {
+          "default": 20,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "max_prs_per_cycle": {
+          "default": 5,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "max_concurrent_pr_polls": {
+          "default": 3,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "poll_timeout_ms": {
+          "default": 30000,
+          "type": "integer",
+          "minimum": 5000,
+          "maximum": 120000
+        },
+        "failure_threshold": {
+          "default": 5,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "cooldown_seconds": {
+          "default": 30,
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 600
+        },
+        "max_cooldown_seconds": {
+          "default": 300,
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 3600
+        },
+        "cleanup_ttl_days": {
+          "default": 7,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 90
+        },
+        "auto_unsubscribe_on_merge": {
+          "default": true,
+          "type": "boolean"
+        },
+        "auto_unsubscribe_on_close": {
+          "default": true,
+          "type": "boolean"
+        },
+        "notify_ci_failure": {
+          "default": true,
+          "type": "boolean"
+        },
+        "notify_new_comments": {
+          "default": true,
+          "type": "boolean"
+        },
+        "notify_merge_conflict": {
+          "default": true,
+          "type": "boolean"
+        },
+        "notify_review_activity": {
+          "default": true,
+          "type": "boolean"
+        },
+        "notify_merged": {
+          "default": true,
+          "type": "boolean"
+        },
+        "notify_closed": {
+          "default": true,
+          "type": "boolean"
+        },
+        "notify_ci_success": {
+          "default": false,
+          "type": "boolean"
+        },
+        "auto_pr_feedback": {
+          "default": false,
+          "type": "boolean"
+        },
+        "event_delivery": {
+          "default": "prompt",
+          "type": "string",
+          "enum": [
+            "advisory",
+            "prompt"
+          ]
+        },
+        "auto_subscribe_on_pr_create": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "external_skills": {
+      "description": "External skills: candidate model, discovery, and quarantine store (FR-001) — all subsystems opt-in.",
+      "type": "object",
+      "properties": {
+        "curation_enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "max_candidates": {
+          "default": 500,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "max_bytes_per_candidate": {
+          "default": 1048576,
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 10485760
+        },
+        "eviction_policy": {
+          "default": "fifo",
+          "type": "string",
+          "enum": [
+            "fifo"
+          ]
+        },
+        "ttl_days": {
+          "default": 90,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3650
+        },
+        "evaluation_enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "sources": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "github",
+                  "url",
+                  "collection",
+                  "manual_import"
+                ]
+              },
+              "location": {
+                "type": "string",
+                "minLength": 1
+              },
+              "enabled": {
+                "default": true,
+                "type": "boolean"
+              },
+              "trust_level": {
+                "default": "low",
+                "type": "string",
+                "enum": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              }
+            },
+            "required": [
+              "type",
+              "location"
+            ]
+          }
+        },
+        "max_candidates_per_discovery": {
+          "default": 50,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "max_concurrent_fetches": {
+          "default": 5,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "fetch_timeout_ms": {
+          "default": 30000,
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 300000
+        }
+      }
+    },
+    "skills": {
+      "description": "Opt-in gate for the 7 skill_* management tools (FR-004). Default false: the tools are absent from the architect tool surface.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "skill_opt": {
+      "description": "Governed skill optimizer (issue #1822). Disabled by default; /swarm skill-opt run requires enabled: true. All other subcommands are proposal-only/read-only by default.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "max_rounds": {
+          "default": 5,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "max_candidates_per_round": {
+          "default": 3,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "max_validations_per_round": {
+          "default": 1,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "max_round_time_ms": {
+          "default": 3600000,
+          "type": "integer",
+          "minimum": 10000,
+          "maximum": 86400000
+        },
+        "max_tokens_per_round": {
+          "default": 50000,
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 2000000
+        },
+        "max_rejections": {
+          "default": 5,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "max_inconclusive_rounds": {
+          "default": 2,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "max_transient_retries": {
+          "default": 5,
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20
+        },
+        "convergence_non_improvements": {
+          "default": 3,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "max_changed_lines": {
+          "default": 200,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2000
+        },
+        "max_changed_bytes": {
+          "default": 20000,
+          "type": "integer",
+          "minimum": 64,
+          "maximum": 200000
+        },
+        "max_changed_sections": {
+          "default": 6,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 40
+        },
+        "deadband": {
+          "default": 0,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "retirement_min_age_days": {
+          "default": 60,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3650
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -18,6 +18,7 @@ import {
 	VERSION_PINNED_LEAF,
 } from '../config/cache-paths.js';
 import { DEFAULT_AGENT_CONFIGS } from '../config/constants.js';
+import { CONFIG_SCHEMA_REF } from '../config/project-init.js';
 import { safeRealpathSync } from '../tools/repo-graph/safe-realpath.js';
 
 const { version } = packageJson;
@@ -298,7 +299,10 @@ function writeProjectConfigIfMissing(cwd: string): void {
 		// Create .opencode/ directory if it doesn't exist
 		ensureDir(opencodeDir);
 
-		saveJson(projectConfigPath, { agents: {} });
+		saveJson(projectConfigPath, {
+			$schema: CONFIG_SCHEMA_REF,
+			agents: {},
+		});
 		console.log('✓ Created project config at:', projectConfigPath);
 	} catch (error) {
 		console.warn(
@@ -404,6 +408,7 @@ async function install(): Promise<number> {
 	// Create default plugin config if not exists
 	if (!fs.existsSync(PLUGIN_CONFIG_PATH)) {
 		const defaultConfig = {
+			$schema: CONFIG_SCHEMA_REF,
 			// Must match PluginConfigSchema in src/config/schema.ts
 			// v6.14: free OpenCode Zen models; v6.73+ switched to big-pickle with gpt-5-nano fallback; architect inherits OpenCode UI selection
 			// v6.85+: Multi-level fallback chains - only big-pickle and gpt-5-nano are consistently available in free tier
