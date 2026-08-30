@@ -34,6 +34,24 @@ describe('writeSwarmConfigExampleIfNew', () => {
 		expect(typeof parsed.agents).toBe('object');
 	});
 
+	// 11b. The example carries the $schema reference (issue #1663) so users
+	//      copying it get editor validation for free.
+	test('11b. written file includes the $schema reference', () => {
+		writeSwarmConfigExampleIfNew(dir);
+		const raw = fs.readFileSync(examplePath(dir), 'utf-8');
+		const parsed = JSON.parse(raw) as Record<string, unknown>;
+		expect(parsed.$schema).toBe(CONFIG_SCHEMA_REF);
+	});
+
+	// 11b. The example carries the $schema reference (issue #1663) so users
+	//      copying it get editor validation for free.
+	test('11b. written file includes the $schema reference', () => {
+		writeSwarmConfigExampleIfNew(dir);
+		const raw = fs.readFileSync(examplePath(dir), 'utf-8');
+		const parsed = JSON.parse(raw) as Record<string, unknown>;
+		expect(parsed.$schema).toBe(CONFIG_SCHEMA_REF);
+	});
+
 	test('12. does not overwrite an existing config.example.json', () => {
 		const swarmDir = path.join(dir, '.swarm');
 		fs.mkdirSync(swarmDir, { recursive: true });

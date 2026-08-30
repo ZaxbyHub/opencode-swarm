@@ -1984,7 +1984,7 @@ Validates project state before agent execution:
 #### Config Doctor
 
 Startup service that validates and fixes configuration:
-- **Extended validation coverage** — validates all 62+ top-level schema keys with type checks for strings, booleans, numbers, and objects
+- **Extended validation coverage** — validates all 71 top-level schema keys with type checks for strings, booleans, numbers, and objects
 - **Unknown key detection** — warns on typos with Levenshtein-based suggestions (edit distance ≤ 2)
 - **Swarms hardening** — warns on empty `swarms` configuration (INFO), rejects path-traversal characters in swarm IDs (`..`, `/`, `\`, `\0`) as HIGH/ERROR
 - **Deprecated field flagging** — emits INFO findings for legacy `skill_improver.model`, `skill_improver.fallback_models`, `spec_writer.model`, `spec_writer.fallback_models` with replacement guidance

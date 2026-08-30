@@ -930,6 +930,8 @@ If a lock-holding agent crashes or hangs, the lock file will eventually expire (
 
 Config file location: `~/.config/opencode/opencode-swarm.json` (global) or `.opencode/opencode-swarm.json` (project). Project config merges over global.
 
+Tip: add `"$schema": "https://unpkg.com/opencode-swarm/opencode-swarm.schema.json"` as the first key of your config (config files created by the plugin already include it) for editor validation and autocomplete of every configuration key. See [docs/configuration.md](docs/configuration.md).
+
 ```json
 {
   "agents": {

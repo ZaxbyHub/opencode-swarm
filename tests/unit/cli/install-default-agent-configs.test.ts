@@ -9,6 +9,7 @@ import {
 	ORCHESTRATOR_NAME,
 } from '../../../src/config/constants';
 import { loadPluginConfig } from '../../../src/config/loader';
+import { CONFIG_SCHEMA_REF } from '../../../src/config/project-init';
 
 const CLI_PATH = join(import.meta.dir, '../../../src/cli/index.ts');
 
@@ -217,6 +218,8 @@ describe('install() uses DEFAULT_AGENT_CONFIGS', () => {
 		// Plugin config should have agents populated from DEFAULT_AGENT_CONFIGS
 		expect(pluginConfig).toHaveProperty('agents');
 		expect(typeof pluginConfig.agents).toBe('object');
+		// Global install template also carries the $schema reference (issue #1663).
+		expect(pluginConfig.$schema).toBe(CONFIG_SCHEMA_REF);
 
 		// Verify agent entries match DEFAULT_AGENT_CONFIGS structure
 		for (const [agent, expectedConfig] of Object.entries(
