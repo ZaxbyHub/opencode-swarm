@@ -51,6 +51,9 @@ async function writeArmedState(sessionID: string): Promise<void> {
 	const relative = _test_exports.workflowGateStateRelativePath(sessionID);
 	const absolute = path.join(directory, '.swarm', relative);
 	await fs.mkdir(path.dirname(absolute), { recursive: true });
+	// Issue #2108: the armed window is the publication-generation record plus
+	// its derived legacy mirror; a consistent pair means no migration runs and
+	// the armed branch (not the invalidated fall-through) governs.
 	const state: PrWorkflowGateState = {
 		schemaVersion: 1,
 		revision: 5,
@@ -67,6 +70,37 @@ async function writeArmedState(sessionID: string): Promise<void> {
 			remoteRef: 'refs/remotes/origin/fix/x',
 			validatedAt: '2026-07-19T00:00:00.000Z',
 		} as PrWorkflowGateState['prFeedbackReadyToPublish'],
+		prFeedbackPublication: {
+			schemaVersion: 1,
+			active: {
+				schemaVersion: 1,
+				generation: 1,
+				state: 'armed',
+				workspaceIdentity: `test-workspace-${sessionID}`,
+				sessionID,
+				intakeHeadSha: 'abc123',
+				localHeadRef: 'refs/heads/fix/x',
+				localHead: 'def456',
+				remoteName: 'origin',
+				remoteBranchRef: 'refs/heads/fix/x',
+				remoteRef: 'refs/remotes/origin/fix/x',
+				revisionDigest: 'revision-1',
+				evidence: {
+					stageAValidatedAt: '2026-07-19T00:00:00.000Z',
+					batches: [
+						{
+							phase: 'closeout-critic',
+							batchId: 'batch-armed',
+							laneId: 'closeout-critic',
+						},
+					],
+				},
+				createdAt: '2026-07-19T00:00:00.000Z',
+				armedAt: '2026-07-19T00:00:00.000Z',
+			},
+			history: [],
+			attempts: [],
+		} as NonNullable<PrWorkflowGateState['prFeedbackPublication']>,
 	};
 	await fs.writeFile(absolute, JSON.stringify(state, null, 2), 'utf-8');
 }

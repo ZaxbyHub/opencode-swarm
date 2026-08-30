@@ -57,6 +57,10 @@ const originalResolveIsExactSingleChildCommitAsync =
 	_test_exports.resolveIsExactSingleChildCommitAsync;
 const originalResolveRemoteRefsContainingHeadAsync =
 	_test_exports.resolveRemoteRefsContainingHeadAsync;
+const originalResolveRemoteUrlIdentityAsync =
+	_test_exports.resolveRemoteUrlIdentityAsync;
+const originalResolveCurrentLocalHeadRefAsync =
+	_test_exports.resolveCurrentLocalHeadRefAsync;
 
 beforeEach(() => {
 	directory = realpathSync(
@@ -92,6 +96,13 @@ beforeEach(() => {
 		_test_exports.resolveIsExactSingleChildCommit(...a);
 	_test_exports.resolveRemoteRefsContainingHeadAsync = async (...a) =>
 		_test_exports.resolveRemoteRefsContainingHead(...a);
+	// Issue #2108: the generation identity requires the local branch ref and
+	// the credential-redacted remote URL identity; both are fail-closed at
+	// arming when unresolvable, so the fixture pins them.
+	_test_exports.resolveRemoteUrlIdentityAsync = async () =>
+		'https://***@github.com/example/repo.git';
+	_test_exports.resolveCurrentLocalHeadRefAsync = async () =>
+		'refs/heads/pr-head';
 });
 
 afterEach(async () => {
@@ -122,6 +133,10 @@ afterEach(async () => {
 		originalResolveIsExactSingleChildCommitAsync;
 	_test_exports.resolveRemoteRefsContainingHeadAsync =
 		originalResolveRemoteRefsContainingHeadAsync;
+	_test_exports.resolveRemoteUrlIdentityAsync =
+		originalResolveRemoteUrlIdentityAsync;
+	_test_exports.resolveCurrentLocalHeadRefAsync =
+		originalResolveCurrentLocalHeadRefAsync;
 	_test_exports.beforeTerminalClear = undefined;
 	await fs.rm(directory, { recursive: true, force: true });
 });
@@ -320,14 +335,6 @@ describe('PR workflow terminal completion - publication and terminal clear', () 
 				command: 'git commit --amend --no-edit',
 			}),
 		).rejects.toThrow('approved commit is immutable');
-		_test_exports.resolvePrWorkflowRevisionDigest = () =>
-			'edited-after-approval';
-		await expect(
-			enforcePrWorkflowToolBefore(directory, SESSION_ID, 'shell', {
-				command: `git push origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
-			}),
-		).rejects.toThrow('changed after publication was armed');
-		_test_exports.resolvePrWorkflowRevisionDigest = () => REVISION;
 		for (const command of [
 			'git push origin HEAD',
 			`git push --force origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
@@ -352,57 +359,58 @@ describe('PR workflow terminal completion - publication and terminal clear', () 
 				{},
 			),
 		).rejects.toThrow('rejects unclassified plugin/MCP tools');
-		_test_exports.resolveCurrentGitHead = () => 'different-head';
-		await expect(
-			enforcePrWorkflowToolBefore(directory, SESSION_ID, 'shell', {
-				command: `git push origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
-			}),
-		).rejects.toThrow('current Git HEAD changed');
-		_test_exports.resolveCurrentGitHead = () => POST_COMMIT_SHA;
-		_test_exports.resolveIsWorkingTreeClean = () => false;
-		await expect(
-			enforcePrWorkflowToolBefore(directory, SESSION_ID, 'shell', {
-				command: `git push origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
-			}),
-		).rejects.toThrow('working tree changed');
-		_test_exports.resolveIsWorkingTreeClean = () => true;
-		_test_exports.resolveCurrentUpstreamPushTarget = () => ({
-			remoteName: 'origin',
-			remoteBranchRef: 'refs/heads/other',
-			remoteTrackingRef: 'refs/remotes/origin/other',
-		});
-		await expect(
-			enforcePrWorkflowToolBefore(directory, SESSION_ID, 'shell', {
-				command: `git push origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
-			}),
-		).rejects.toThrow('upstream publication target changed');
-		_test_exports.resolveCurrentUpstreamPushTarget = () => ({
-			remoteName: 'origin',
-			remoteBranchRef: 'refs/heads/pr-head',
-			remoteTrackingRef: 'refs/remotes/origin/pr-head',
-		});
 		await expect(
 			enforcePrWorkflowToolBefore(directory, SESSION_ID, 'shell', {
 				command: `git push origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
 			}),
 		).resolves.toBeUndefined();
+		// Issue #2108: proven content drift no longer throws-and-forgets — the
+		_test_exports.resolvePrWorkflowRevisionDigest = () =>
+			'edited-after-approval';
+		// generation is DURABLY invalidated (approvals superseded, mirror
+		// cleared) and the error names the recovery path. The full
+		// head/worktree/upstream drift matrix lives in
+		// pr-workflow-publication-invalidation.test.ts.
+		_test_exports.resolvePrWorkflowRevisionDigest = () =>
+			'edited-after-approval';
+		await expect(
+			enforcePrWorkflowToolBefore(directory, SESSION_ID, 'shell', {
+				command: `git push origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
+			}),
+		).rejects.toThrow(
+			'was INVALIDATED because approved content identity drifted',
+		);
+		const invalidated = await readPrWorkflowGateState(directory, SESSION_ID);
+		expect(invalidated?.prFeedbackPublication?.active?.state).toBe(
+			'invalidated',
+		);
+		expect(invalidated?.prFeedbackReadyToPublish).toBeUndefined();
+		expect(invalidated?.prFeedbackStageA).toBeUndefined();
+		expect(invalidated?.prFeedbackGateBatches).toBeUndefined();
+		expect(invalidated?.prFeedbackScopes).toBeUndefined();
 	});
 
 	test('requires exact approved remote alignment and terminal CAS before clearing state', async () => {
 		await prepareReadyToPublishState();
-		_test_exports.resolveCurrentGitHead = () => 'different-same-digest-commit';
+		// Issue #2108: completion requires the exact approved push to have been
+		// admitted (durable attempt) before it may publish.
+		await expect(
+			completePrWorkflow(directory, SESSION_ID, 'PR_FEEDBACK', HEAD_SHA),
+		).rejects.toThrow('requires the exact approved push');
 		_test_exports.resolveRemoteRefsContainingHead = () => [
 			'refs/remotes/origin/pr-head',
 		];
 		_test_exports.resolveExactRemoteBranchHead = () => 'remote-not-approved';
 		await expect(
+			enforcePrWorkflowToolBefore(directory, SESSION_ID, 'shell', {
+				command: `git push origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
+			}),
+		).resolves.toBeUndefined();
+		// Identity intact; the remote branch head is NOT at the approved commit.
+		await expect(
 			completePrWorkflow(directory, SESSION_ID, 'PR_FEEDBACK', HEAD_SHA),
 		).rejects.toThrow('intended remote-tracking ref');
 		_test_exports.resolveExactRemoteBranchHead = () => POST_COMMIT_SHA;
-		await expect(
-			completePrWorkflow(directory, SESSION_ID, 'PR_FEEDBACK', HEAD_SHA),
-		).rejects.toThrow('approved commit');
-		_test_exports.resolveCurrentGitHead = () => POST_COMMIT_SHA;
 		_test_exports.resolveRemoteRefsContainingHead = () => [
 			'refs/remotes/origin/unrelated-branch',
 		];

@@ -625,6 +625,22 @@ export async function resolveCurrentUpstreamPushTargetAsync(
 	return { remoteName, remoteBranchRef, remoteTrackingRef };
 }
 
+/**
+ * Resolve the current local branch ref (`refs/heads/...`) for the publication
+ * generation identity (issue #2108). Returns null when HEAD is detached or
+ * the symbolic ref is unusable.
+ */
+export async function resolveCurrentLocalHeadRefAsync(
+	directory: string,
+): Promise<string | null> {
+	const localBranchRef = await runGitAsync(directory, [
+		'symbolic-ref',
+		'--quiet',
+		'HEAD',
+	]);
+	return localBranchRef?.startsWith('refs/heads/') ? localBranchRef : null;
+}
+
 /** Query the actual remote ref; local tracking refs are not publication proof. */
 export function resolveExactRemoteBranchHead(
 	directory: string,
@@ -695,6 +711,108 @@ export async function resolveExactRemoteBranchHeadAsync(
 		return null;
 	}
 	return objectName;
+}
+
+/**
+ * Deterministically credential-redact one configured remote URL so it can be
+ * persisted and compared as a publication-target identity (issue #2108).
+ *
+ * Policy: URL-form userinfo (`scheme://user:pass@…`, `scheme://token@…`) is
+ * replaced with `***`; scp-form (`user@host:path`, no scheme) prefixes the
+ * same way. The mapping is pure and total over ASCII URLs so equality of two
+ * redacted strings is stable across reads; anything unparseable is returned
+ * unchanged (never enriched) and bounded by the caller's cap.
+ */
+export function redactRemoteUrlIdentity(url: string, maxChars: number): string {
+	const cap = (value: string): string =>
+		value.length > maxChars ? value.slice(0, maxChars) : value;
+	const stripQueryAndFragment = (value: string): string => {
+		// Credentials can hide in query strings (`?access_token=…`) or
+		// fragments; the identity must never persist them. Deterministic for
+		// a stable remote URL, which is all the equality comparison needs.
+		const cut = [value.indexOf('?'), value.indexOf('#')]
+			.filter((index) => index >= 0)
+			.sort((a, b) => a - b)[0];
+		return cut === undefined ? value : `${value.slice(0, cut)}?…`;
+	};
+	const trimmed = url.trim();
+	const urlForm = trimmed.match(/^([A-Za-z][A-Za-z0-9+.-]*):\/\/(.*)$/);
+	if (urlForm) {
+		const [, scheme, rest] = urlForm;
+		// Userinfo lives ONLY in the authority segment (before the first
+		// `/`); an `@` in the path is path content. Splitting on the first
+		// `@` anywhere let `https://evil.example/pwn@github.com/…` collide
+		// with `https://token@github.com/…` — defeating the armed identity
+		// comparison for a repointed remote (PR #2422 review H2).
+		const authorityEnd = rest.indexOf('/');
+		const authority = authorityEnd >= 0 ? rest.slice(0, authorityEnd) : rest;
+		const pathAndAfter = authorityEnd >= 0 ? rest.slice(authorityEnd) : '';
+		const at = authority.lastIndexOf('@');
+		const redactedAuthority = at >= 0 ? `***${authority.slice(at)}` : authority;
+		return cap(
+			`${scheme}://${redactedAuthority}${stripQueryAndFragment(pathAndAfter)}`,
+		);
+	}
+	const scpForm = trimmed.match(/^([^/@]+)@([^/@]+):(\S.*)$/);
+	if (scpForm) {
+		// scp-like `user@host:path` — everything before the host colon's `@`
+		// is userinfo.
+		const [, , host, path] = scpForm;
+		return cap(`***@${host}:${stripQueryAndFragment(path)}`);
+	}
+	return cap(stripQueryAndFragment(trimmed));
+}
+
+/**
+ * Resolve the credential-redacted URL identity of one configured remote's
+ * PUSH destination (issue #2108 R1: the armed window must bind the remote's
+ * actual push URL — `remote.<name>.pushurl` when set, else the fetch URL —
+ * not just its name, so a repointed remote cannot receive the approved
+ * push). Returns null when the remote name is unsafe or the URL cannot be
+ * resolved.
+ */
+export function resolveRemoteUrlIdentity(
+	directory: string,
+	remoteName: string,
+	maxChars = 200,
+): string | null {
+	if (
+		!remoteName ||
+		remoteName.startsWith('-') ||
+		/[\s;&|<>`]/.test(remoteName)
+	) {
+		return null;
+	}
+	const output = runGit(directory, ['remote', 'get-url', '--push', remoteName]);
+	if (!output) return null;
+	const url = output.split(/\r?\n/).filter(Boolean)[0];
+	if (!url) return null;
+	return redactRemoteUrlIdentity(url, maxChars);
+}
+
+/** Async twin of {@link resolveRemoteUrlIdentity} for the gate arm/assert path. */
+export async function resolveRemoteUrlIdentityAsync(
+	directory: string,
+	remoteName: string,
+	maxChars = 200,
+): Promise<string | null> {
+	if (
+		!remoteName ||
+		remoteName.startsWith('-') ||
+		/[\s;&|<>`]/.test(remoteName)
+	) {
+		return null;
+	}
+	const output = await runGitAsync(directory, [
+		'remote',
+		'get-url',
+		'--push',
+		remoteName,
+	]);
+	if (!output) return null;
+	const url = output.split(/\r?\n/).filter(Boolean)[0];
+	if (!url) return null;
+	return redactRemoteUrlIdentity(url, maxChars);
 }
 
 /** Bind Stage-A execution to Git refs, config, HEAD, and index metadata. */

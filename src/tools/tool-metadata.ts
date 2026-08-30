@@ -243,6 +243,11 @@ export const TOOL_METADATA = {
 			'prepare an auditable PR workflow checkout or restore its exact original branch/HEAD and preserved stash after terminal cleanup',
 		agents: ['architect'],
 	},
+	invalidate_pr_feedback_publication: {
+		description:
+			'invalidate the armed PR_FEEDBACK publication generation so approved content can change, superseding every content-dependent approval and reopening the exact scoped rework + fresh-review path (issue #2108)',
+		agents: ['architect'],
+	},
 	record_implementation_review: {
 		description:
 			'record fresh-context reviewer + critic APPROVE verdicts for the implementation diff so the /swarm issue --trace workflow can satisfy its review gate before commit-pr handoff',
@@ -667,7 +672,7 @@ export const TOOL_METADATA = {
 	},
 	pr_workflow_status: {
 		description:
-			'Read-only architect observation of local git state (HEAD, branch, clean/dirty with a bounded changed-file list, remotes) plus a session-pinned PR workflow gate summary. Use to observe state under the fail-closed PR_REVIEW/PR_FEEDBACK gate. Never executes PR-controlled scripts and never reads another session gate.',
+			'Read-only architect observation of local git state (HEAD, branch, clean/dirty with a bounded changed-file list, remotes) plus a session-pinned PR workflow gate summary and the PR_FEEDBACK publication-generation section (state, attempts, invalidation reason, recovery guidance). Use to observe state under the fail-closed PR_REVIEW/PR_FEEDBACK gate. Never executes PR-controlled scripts and never reads another session gate.',
 		agents: ['architect'],
 		prWorkflow: {
 			modes: ['PR_REVIEW', 'PR_FEEDBACK'],

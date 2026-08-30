@@ -110,6 +110,27 @@ const AUTHORITY_REPAIR = 'task_workflow_repaired';
 const AUTHORITY_DRIFT_ACK = 'spec_drift_acknowledged';
 const AUTHORITY_DRIFT_REPAIR = 'spec_drift_repaired';
 
+/**
+ * PR_FEEDBACK publication-window events (issue #2108; PR #2422 review M2).
+ * Authority-partitioned: the deleted-gate-state safety guard
+ * (`findDanglingLivePublicationGeneration`) walks the retained window for a
+ * LIVE armed generation, so arming/attempt-start events must never age-prune
+ * — and their terminals must survive alongside them or the walker would see
+ * an armed event whose terminal was pruned and false-block. Keyed per
+ * session+generation; exempt from age-pruning, subject to the standard
+ * authority-index FIFO cap with disclosure.
+ */
+const PUBLICATION_LIVE_EVENT_TYPES: ReadonlySet<string> = new Set([
+	'pr_feedback_publication_armed',
+	'pr_feedback_publication_migrated',
+	'pr_feedback_push_attempt_started',
+]);
+const PUBLICATION_TERMINAL_EVENT_TYPES: ReadonlySet<string> = new Set([
+	'pr_feedback_publication_invalidated',
+	'pr_feedback_published',
+	'pr_feedback_publication_cancelled',
+]);
+
 export type CoderRetryEscalationAction =
 	| 'sounding_board_consultation'
 	| 'simplification'
@@ -153,8 +174,21 @@ function authorityKeyFor(event: Record<string, unknown>): string | null {
 			}
 			return null;
 		}
-		default:
+		default: {
+			if (
+				PUBLICATION_LIVE_EVENT_TYPES.has(String(event.type)) ||
+				PUBLICATION_TERMINAL_EVENT_TYPES.has(String(event.type))
+			) {
+				if (
+					typeof event.sessionID === 'string' &&
+					typeof event.generation === 'number' &&
+					Number.isFinite(event.generation)
+				) {
+					return `pr_feedback_publication|${event.sessionID}|${event.generation}`;
+				}
+			}
 			return null;
+		}
 	}
 }
 

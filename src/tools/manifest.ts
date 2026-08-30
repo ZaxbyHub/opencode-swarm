@@ -71,6 +71,7 @@ import { gh_evidence } from './gh-evidence';
 import { git_blame } from './git-blame';
 import { gitingest } from './gitingest';
 import { imports } from './imports';
+import { invalidate_pr_feedback_publication } from './invalidate-pr-feedback-publication';
 import { knowledge_add } from './knowledge-add';
 import { knowledge_archive } from './knowledge-archive';
 import { knowledge_query } from './knowledge-query';
@@ -193,6 +194,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	record_issue_publication: () => record_issue_publication,
 	record_issue_reproduction: () => record_issue_reproduction,
 	record_recurrence_sweep: () => record_recurrence_sweep,
+	invalidate_pr_feedback_publication: () => invalidate_pr_feedback_publication,
 	rebind_pr_feedback_head: () => rebind_pr_feedback_head,
 	run_pr_feedback_stage_a: () => run_pr_feedback_stage_a,
 	submit_council_verdicts: () => submit_council_verdicts,

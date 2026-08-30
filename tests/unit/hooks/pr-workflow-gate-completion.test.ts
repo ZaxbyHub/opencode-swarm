@@ -54,6 +54,10 @@ const originalResolveIsExactSingleChildCommitAsync =
 	_test_exports.resolveIsExactSingleChildCommitAsync;
 const originalResolveRemoteRefsContainingHeadAsync =
 	_test_exports.resolveRemoteRefsContainingHeadAsync;
+const originalResolveRemoteUrlIdentityAsync =
+	_test_exports.resolveRemoteUrlIdentityAsync;
+const originalResolveCurrentLocalHeadRefAsync =
+	_test_exports.resolveCurrentLocalHeadRefAsync;
 beforeEach(() => {
 	directory = realpathSync(
 		mkdtempSync(path.join(os.tmpdir(), 'pr-gate-completion-')),
@@ -95,6 +99,12 @@ beforeEach(() => {
 		_test_exports.resolveIsExactSingleChildCommit(...a);
 	_test_exports.resolveRemoteRefsContainingHeadAsync = async (...a) =>
 		_test_exports.resolveRemoteRefsContainingHead(...a);
+	// Issue #2108: generation identity components are fail-closed at arming;
+	// pin them like every other resolver.
+	_test_exports.resolveRemoteUrlIdentityAsync = async () =>
+		'https://***@github.com/example/repo.git';
+	_test_exports.resolveCurrentLocalHeadRefAsync = async () =>
+		'refs/heads/pr-head';
 });
 
 afterEach(async () => {
@@ -125,6 +135,10 @@ afterEach(async () => {
 		originalResolveIsExactSingleChildCommitAsync;
 	_test_exports.resolveRemoteRefsContainingHeadAsync =
 		originalResolveRemoteRefsContainingHeadAsync;
+	_test_exports.resolveRemoteUrlIdentityAsync =
+		originalResolveRemoteUrlIdentityAsync;
+	_test_exports.resolveCurrentLocalHeadRefAsync =
+		originalResolveCurrentLocalHeadRefAsync;
 	await fs.rm(directory, { recursive: true, force: true });
 });
 

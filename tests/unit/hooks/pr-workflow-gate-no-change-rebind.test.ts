@@ -84,6 +84,11 @@ beforeEach(() => {
 		sha: string,
 	) =>
 		sha === HEAD_SHA || sha === NEW_SHA ? ['refs/remotes/origin/pr-head'] : [];
+	// Issue #2108: generation identity components are fail-closed at arming.
+	_test_exports.resolveRemoteUrlIdentityAsync = async () =>
+		'https://***@github.com/example/repo.git';
+	_test_exports.resolveCurrentLocalHeadRefAsync = async () =>
+		'refs/heads/pr-head';
 });
 
 afterEach(async () => {
