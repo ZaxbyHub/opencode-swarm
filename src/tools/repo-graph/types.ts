@@ -52,8 +52,15 @@ export const REPO_GRAPH_FILENAME = 'repo-graph.json';
  * 1.5.0 adds an optional graph-level `repoRootId` plus additive SymbolEdge v2
  * identity, kind, confidence, resolution, and evidence fields. Legacy 1.2.0
  * four-coordinate symbol edges remain readable and are normalized in memory.
+ *
+ * 1.6.0 adds the optional per-node `exportKinds` map (declaration kind per
+ * symbol, keyed exactly like `exportRanges`), powering the KG-14 declaration-
+ * kind query axis (`symbol_search` kind filter, `symbol_context` identity).
+ * The field is optional, so 1.0.0–1.5.0 graphs still load; queries surface
+ * `kind: null` hits and a `kindSupported: false` degradation note instead of
+ * failing (issue #1535).
  */
-export const GRAPH_SCHEMA_VERSION = '1.5.0';
+export const GRAPH_SCHEMA_VERSION = '1.6.0';
 
 /**
  * Default per-file source-size ceiling shared by graph construction and
@@ -253,6 +260,17 @@ export interface GraphNode {
 	 * never appear in `exportLines` at all.
 	 */
 	exportRanges?: Record<string, { startLine: number; endLine: number }>;
+	/**
+	 * Declaration kind per symbol, keyed by symbol name (schema >= 1.6.0;
+	 * optional, so older graphs load unchanged). Keys are assigned in the same
+	 * builder loop and under the same widening + duplicate-name policies as
+	 * `exportRanges`, but ONLY at real declaration sites — re-export bindings
+	 * add an `exportRanges` entry without a kind (the symbol is declared
+	 * elsewhere), so `exportKinds` is a subset of `exportRanges` keys.
+	 * Absent entries read as `kind: null` (old graph, regex-fallback scan, or
+	 * re-exported binding).
+	 */
+	exportKinds?: Record<string, GraphSymbolKind>;
 	/** Imported module specifiers */
 	imports: string[];
 	/** Language/extension of the file */
@@ -371,6 +389,36 @@ export type SymbolEdgeResolution =
 	(typeof SYMBOL_EDGE_RESOLUTION_VALUES)[number];
 
 export type SymbolIdentityKind = 'symbol' | 'module';
+
+/**
+ * Declaration kind of a symbol — WHAT the symbol is (function, class, …).
+ * Mirrors `FileSymbolFacts['defs'][number]['kind']` from
+ * `src/lang/symbol-graph.ts` and is persisted per node via
+ * `GraphNode.exportKinds` (schema >= 1.6.0).
+ *
+ * This is the DECLARATION axis and is deliberately distinct from
+ * {@link SymbolEdgeKind}, the RELATIONSHIP axis (CALLS/REFERENCES/…) that
+ * describes how two symbols connect. A symbol never referenced cross-file has
+ * no symbol edge but still has a declaration kind.
+ */
+export const GRAPH_SYMBOL_KIND_VALUES = [
+	'function',
+	'class',
+	'const',
+	'type',
+	'interface',
+	'enum',
+	'method',
+] as const;
+export type GraphSymbolKind = (typeof GRAPH_SYMBOL_KIND_VALUES)[number];
+
+/**
+ * Visibility tier derived at query time from persisted fields: a symbol in
+ * `GraphNode.exports` is `exported` (public module surface); a symbol that
+ * only exists in `exportRanges` (widened-grammar member defs) is
+ * `module-local`.
+ */
+export type GraphSymbolVisibility = 'exported' | 'module-local';
 
 export interface SymbolEdgeEvidence {
 	/** Workspace-relative source path; source text itself is never persisted. */
@@ -575,6 +623,177 @@ export interface DeadExportsResult {
 	note: string;
 }
 
+// ============ KG-14 expanded graph query results (issue #1535) ============
+
+/** One symbol hit from `symbol_search`, with declaration metadata. */
+export interface SymbolHit {
+	/** Workspace-relative file path. */
+	file: string;
+	symbol: string;
+	/** Declaration kind; `null` on graphs predating schema 1.6.0 (no exportKinds). */
+	kind: GraphSymbolKind | null;
+	visibility: GraphSymbolVisibility;
+	language: string;
+	/** 1-based definition line; 0 when no line is known. */
+	line: number;
+	exported: boolean;
+	/** Which match tier produced this hit (results are tier-ordered). */
+	match: 'exact' | 'prefix' | 'substring' | 'subsequence';
+}
+
+export interface SymbolSearchResult {
+	query: string;
+	hits: SymbolHit[];
+	count: number;
+	budget: { returned: number; dropped: number };
+	/** False when the graph predates schema 1.6.0, so `kind` filters/hits degrade. */
+	kindSupported: boolean;
+	/** Present (non-empty) only when a filter or scan could not be fully applied. */
+	warnings: string[];
+}
+
+/**
+ * One symbol-level edge inside an impact cone. `relationshipKind`,
+ * `confidence`, and `resolution` come from the underlying `SymbolEdge` and
+ * are `null` for legacy (pre-1.5.0) edges.
+ */
+export interface ConeEntry {
+	/** Workspace-relative file path. */
+	file: string;
+	symbol: string;
+	direction: 'caller' | 'callee';
+	/** 1 = direct neighbor of the target. */
+	depth: number;
+	relationshipKind: SymbolEdgeKind | null;
+	confidence: number | null;
+	resolution: SymbolEdgeResolution | null;
+}
+
+/** Focused definition-first context for one symbol. */
+export interface SymbolContextResult {
+	found: boolean;
+	identity: {
+		file: string;
+		symbol: string;
+		symbolId: string | null;
+		kind: GraphSymbolKind | null;
+		visibility: GraphSymbolVisibility;
+		language: string;
+		startLine: number;
+		endLine: number | null;
+	} | null;
+	signature?: string;
+	source?: {
+		text: string;
+		mode: 'full' | 'signature' | 'summary';
+		hash: string;
+		startLine: number;
+		endLine: number;
+	};
+	callers: ConeEntry[];
+	callees: ConeEntry[];
+	/** Present only when resolution scanned stable IDs to match `symbolId`. */
+	symbolIdScan?: { computed: number; capped: boolean };
+	budget: { callersReturned: number; calleesReturned: number; dropped: number };
+	warnings: string[];
+	note?: string;
+}
+
+/** Structured impact cone for a file or file+symbol target. */
+export interface ImpactConeResult {
+	target: { file: string; symbol: string | null };
+	/** Symbol-level entries (empty when no symbol was given or the graph has no symbolEdges). */
+	entries: ConeEntry[];
+	/** File-level blast radius for the same target and depth — risk semantics identical to `blast_radius`. */
+	fileImpact: BlastRadiusResult;
+	risk: BlastRadiusResult['riskLevel'];
+	/** Fixed-vocabulary notes with counts (transitive spread, hubs, low-confidence edges, tests, boundaries). */
+	riskNotes: string[];
+	/** Cone files carrying the `test_file` role. */
+	tests: string[];
+	routes: Array<{ file: string; fact: RouteFact }>;
+	dataFacts: Array<{ file: string; fact: DataOperationFact }>;
+	securityFacts: Array<{ file: string; fact: SecurityFact }>;
+	boundaries: Array<{ name: string; files: string[] }>;
+	budget: { entriesReturned: number; dropped: number };
+	truncated: boolean;
+	warnings: string[];
+}
+
+/** One changed symbol mapped from a diff hunk (or listed file-level). */
+export interface DiffSymbolChange {
+	symbol: string;
+	kind: GraphSymbolKind | null;
+	startLine: number;
+	endLine: number;
+	/** Hunk-mode: changed graph lines that intersect the symbol span (bounded). */
+	changedLines: number[];
+}
+
+export interface DiffFileSummary {
+	/** Workspace-relative file path. */
+	file: string;
+	/** False when the changed file is not present in the graph (e.g. deleted or unscanned). */
+	known: boolean;
+	symbols: DiffSymbolChange[];
+	note?: string;
+}
+
+export interface DiffContextResult {
+	/** `hunk` when a diff text was parsed with line ranges; `file` when only file names were given. */
+	granularity: 'hunk' | 'file';
+	files: DiffFileSummary[];
+	impact: {
+		files: string[];
+		tests: string[];
+		risk: BlastRadiusResult['riskLevel'];
+		notes: string[];
+	};
+	budget: { returned: number; dropped: number };
+	truncated: boolean;
+	warnings: string[];
+}
+
+/**
+ * One reason a file/symbol/span is graph-relevant: its definition, the
+ * symbol edges that connect it, or file-level import relationships.
+ */
+export interface ExplainReason {
+	type:
+		| 'definition'
+		| 'referenced_by'
+		| 'references'
+		| 'imported_by'
+		| 'imports';
+	/** Workspace-relative file path of the OTHER side of the relationship (or the definition file). */
+	file: string;
+	symbol?: string;
+	kind: GraphSymbolKind | null;
+	relationshipKind?: SymbolEdgeKind;
+	/** Undefined for definition/import reasons; `null`-able inside evidence-bearing edges is avoided by omitting. */
+	confidence?: number;
+	resolution?: SymbolEdgeResolution;
+	evidence?: SymbolEdgeEvidence[];
+}
+
+export interface GraphExplainResult {
+	target: { file: string; symbol: string | null; line: number | null };
+	fileKnown: boolean;
+	/** When `line` was given: the symbol whose span contains it (smallest span wins). */
+	resolvedSpan?: { symbol: string; startLine: number; endLine: number };
+	definition?: {
+		file: string;
+		symbol: string;
+		kind: GraphSymbolKind | null;
+		visibility: GraphSymbolVisibility;
+		startLine: number;
+		endLine: number | null;
+	};
+	reasons: ExplainReason[];
+	budget: { returned: number; dropped: number };
+	warnings: string[];
+}
+
 export interface GraphExtractionFailure {
 	file: string;
 	language: string;
@@ -645,6 +864,35 @@ export interface GraphHealthResult {
 	walkTruncationReason: 'budget' | 'cap' | null;
 	incrementalFallbacks: number;
 	notes: string[];
+	/**
+	 * KG-14 additive summaries (issue #1535). Optional on the interface so
+	 * external constructors stay source-compatible; `getGraphHealth` always
+	 * populates them (zero-valued when the underlying data is absent).
+	 */
+	/** Symbol-edge population summary (legacy edges counted under `withV2Fields: false`). */
+	symbolEdgeSummary?: {
+		total: number;
+		withV2Fields: number;
+		lowConfidence: number;
+		unresolved: number;
+	};
+	/** Resolution-attribution histogram over symbol edges (includes `unrecorded`). */
+	resolutionBreakdown?: Record<string, number>;
+	/**
+	 * Stale composition from the freshness probe; `null` when no probe was
+	 * supplied. `probeTruncated` is `FreshnessProbe.truncated` — the freshness
+	 * WALK hitting its budget — and is deliberately a different signal from
+	 * build-time `walkTruncated` above (the graph BUILD walk).
+	 */
+	staleSummary?: {
+		changed: number;
+		removed: number;
+		probeTruncated: boolean;
+	} | null;
+	/** Extraction-failure histogram keyed by failure reason. */
+	extractionFailureSummary?: Record<string, number>;
+	/** How many nodes carry schema 1.6.0 `exportKinds` data. */
+	kindCoverage?: { nodesWithKinds: number; nodesTotal: number };
 }
 
 /** Authoritative states returned by the bounded repository freshness probe. */

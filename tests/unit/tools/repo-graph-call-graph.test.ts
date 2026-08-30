@@ -35,17 +35,13 @@ describe('isSchemaVersionAtLeast', () => {
 	});
 
 	test('pre-release suffix is truncated to numeric part (1.1.0-alpha treated as 1.1.0)', () => {
-		// parseInt('0-alpha', 10) = 0 (stops at '-'); Number.isFinite(0) = true.
-		// Pre-release graphs pass the same gate as their stable counterpart.
-		// In practice GRAPH_SCHEMA_VERSION is always a plain numeric semver, so
-		// this case arises only in test/dev environments.
+		// parseInt stops at '-'; only test/dev graphs carry such suffixes.
 		expect(isSchemaVersionAtLeast('1.1.0-alpha', '1.1.0')).toBe(true);
 		expect(isSchemaVersionAtLeast('1.0.0-rc1', '1.1.0')).toBe(false);
 	});
 
 	test('handles multi-digit version segments (numeric, not lexicographic)', () => {
-		// '1.10.0' > '1.9.0' numerically but NOT lexicographically ('10' < '9' as strings).
-		// parseInt ensures numeric comparison so the ordering is correct.
+		// '1.10.0' > '1.9.0' numerically but NOT lexicographically.
 		expect(isSchemaVersionAtLeast('1.10.0', '1.9.0')).toBe(true);
 		expect(isSchemaVersionAtLeast('1.9.0', '1.10.0')).toBe(false);
 		expect(isSchemaVersionAtLeast('2.0.0', '1.10.0')).toBe(true);
@@ -163,14 +159,14 @@ describe('builder: usedSymbols + exportLines', () => {
 		clearCache(workspacePath);
 		const asyncGraph = await buildWorkspaceGraphAsync(workspacePath);
 
-		// File-level parity: strip async-exclusive exportRanges from each async node
-		// before comparing against sync (sync never produces exportRanges).
+		// File-level parity: strip async-exclusive exportRanges/exportKinds (sync produces neither; KG-14 1.6.0).
 		const fileLevelNodes = <Record<string, object>>{};
 		for (const [key, asyncNode] of Object.entries(asyncGraph.nodes)) {
-			const { exportRanges: _er, ...fileLevel } = asyncNode as Record<
-				string,
-				unknown
-			>;
+			const {
+				exportRanges: _er,
+				exportKinds: _ek,
+				...fileLevel
+			} = asyncNode as Record<string, unknown>;
 			fileLevelNodes[key] = fileLevel;
 		}
 		expect(fileLevelNodes).toEqual(sync.nodes);
@@ -190,7 +186,7 @@ describe('builder: usedSymbols + exportLines', () => {
 		});
 		expect(asyncEdgesProjected).toEqual(syncEdgesProjected);
 
-		// Async-exclusive contract: sync nodes lack exportRanges; async nodes have them.
+		// Async-exclusive: sync lacks exportRanges; async has them.
 		for (const node of Object.values(sync.nodes)) {
 			expect((node as Record<string, unknown>).exportRanges).toBeUndefined();
 		}
@@ -198,14 +194,18 @@ describe('builder: usedSymbols + exportLines', () => {
 			(n) => (n as Record<string, unknown>).exportRanges !== undefined,
 		);
 		expect(anyAsyncHasExportRanges).toBe(true);
-
-		// Async-exclusive contract: sync graph has no symbolEdges; async graph has them.
+		// Same for schema 1.6.0 exportKinds (PRR-008).
+		expect(
+			Object.values(asyncGraph.nodes).some(
+				(n) => (n as Record<string, unknown>).exportKinds !== undefined,
+			),
+		).toBe(true);
+		// Async-exclusive: sync has no symbolEdges; async does.
 		expect((sync as Record<string, unknown>).symbolEdges).toBeUndefined();
 		expect((asyncGraph as Record<string, unknown>).symbolEdges).toBeDefined();
 
-		// usedSymbols correctness is verified separately (alias/namespace/re-export/default
-		// tests above for sync, and the async builder usedSymbols block below for async);
-		// those assertions are preserved intact.
+		// usedSymbols correctness is verified by the alias/namespace/re-export/default
+		// tests above (sync) and the async usedSymbols block below.
 	});
 });
 

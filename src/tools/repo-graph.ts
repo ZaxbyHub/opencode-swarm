@@ -11,6 +11,7 @@
  *   storage.ts     — safe load and save to .swarm/repo-graph.json
  *   builder.ts     — workspace scanning and full-graph construction
  *   incremental.ts — incremental updates for changed files
+ *   symbol-query.ts — KG-14 symbol/impact/diff/explain queries (issue #1535)
  *
  * All existing imports of this module continue to work unchanged.
  */
@@ -82,6 +83,13 @@ export {
 	saveGraph,
 	saveIfDirty,
 } from './repo-graph/storage';
+export {
+	explainGraphEntry,
+	getDiffContext,
+	getImpactCone,
+	getSymbolContext,
+	searchSymbols,
+} from './repo-graph/symbol-query';
 export type {
 	AskHit,
 	AskOptions,
@@ -89,6 +97,7 @@ export type {
 	BlastRadiusResult,
 	BuildWorkspaceGraphOptions,
 	CallerReference,
+	ConeEntry,
 	ContextPackCoverage,
 	ContextPackResult,
 	ContextPackSnippet,
@@ -98,16 +107,24 @@ export type {
 	DataOperationFact,
 	DeadExportCandidate,
 	DeadExportsResult,
+	DiffContextResult,
+	DiffFileSummary,
+	DiffSymbolChange,
+	ExplainReason,
 	FileOntology,
 	FileReference,
 	FileRole,
 	FreshnessProbeState,
 	GraphEdge,
+	GraphExplainResult,
 	GraphExtractionFailure,
 	GraphExtractorInputWitness,
 	GraphHealthResult,
 	GraphNode,
+	GraphSymbolKind,
+	GraphSymbolVisibility,
 	GraphUnresolvedImport,
+	ImpactConeResult,
 	LocalizationBlock,
 	OntologyFinding,
 	PackageBoundarySummary,
@@ -116,12 +133,15 @@ export type {
 	RouteFact,
 	RouteMethod,
 	SecurityFact,
+	SymbolContextResult,
 	SymbolEdge,
 	SymbolEdgeEvidence,
 	SymbolEdgeKind,
 	SymbolEdgeResolution,
+	SymbolHit,
 	SymbolIdentityKind,
 	SymbolReference,
+	SymbolSearchResult,
 } from './repo-graph/types';
 export {
 	createEmptyGraph,

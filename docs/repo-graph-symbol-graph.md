@@ -1,7 +1,9 @@
-# repo-graph: symbol-level graph facts & context packing (schemas 1.2.0–1.5.0)
+# repo-graph: symbol-level graph facts & context packing (schemas 1.2.0–1.6.0)
 
 > Status: implemented. Schema 1.2.0 introduced traversal coordinates; schema
-> 1.5.0 adds stable identity, confidence, resolution, and evidence.
+> 1.5.0 adds stable identity, confidence, resolution, and evidence; schema
+> 1.6.0 (KG-14, issue #1535) persists declaration kinds and powers the expanded
+> graph query actions.
 > Audience: contributors implementing the next slice of structural intelligence in opencode-swarm.
 
 For the broader graph-backed repository memory contract, support matrix,
@@ -220,10 +222,33 @@ existing caller explicitly saves it, and neither its schema version nor legacy
 coordinates are rewritten.
 
 Schema 1.2.0 originally introduced these coordinates; the current
-`GRAPH_SCHEMA_VERSION` is `1.5.0`. Context queries still
+`GRAPH_SCHEMA_VERSION` is `1.6.0`. Context queries still
 self-gates with `isSchemaVersionAtLeast(graph.schema_version, '1.2.0')` and returns
 `{ schemaSupported: false, note: 'rebuild with repo_map action="build"' }` on older
 graphs (the `getDeadExports` pattern, `query.ts:257`).
+
+### Schema 1.6.0 declaration kinds (KG-14, issue #1535)
+
+`GraphNode.exportKinds` maps symbol name → declaration kind
+(`function|class|const|type|interface|enum|method`). Two "kind" axes exist and
+they are deliberately distinct:
+
+- **Declaration kind** (this map): WHAT a symbol is. Every def has one. This
+  powers `symbol_search`'s kind filter and the identity blocks of
+  `symbol_context`/`graph_explain`.
+- **Relationship kind** (`SymbolEdge.kind`, 1.5.0): HOW two symbols connect
+  (CALLS/REFERENCES/…). Only cross-file-referenced symbols have edges, so
+  relationship kinds cannot answer "list all classes".
+
+Population rules mirror `exportRanges`: same builder loop, same widening and
+duplicate-name policies, but only at real declaration sites — re-export
+bindings add an `exportRanges` entry WITHOUT a kind (the symbol is declared
+elsewhere), so `exportKinds` keys are a subset of `exportRanges` keys. The map
+is optional: pre-1.6.0 graphs load unchanged and queries degrade with
+`kind: null` hits; a `kind` filter on an old graph returns
+`kindSupported: false`, empty hits, and an explicit rebuild warning (the
+`context_pack` schema-gate precedent — never silently unfiltered results).
+`graph_health.kindCoverage` reports how many nodes carry kind data.
 
 ### `context_pack` query (`src/tools/repo-graph/query.ts`)
 
@@ -637,11 +662,43 @@ Recorded rather than fixed, with the measurement behind each:
 ## Usage
 
 ```text
-repo_map { "action": "build" }                                  # populates 1.5.0 symbol facts (async build)
-repo_map { "action": "graph_health" }                           # freshness + extraction diagnostics
+repo_map { "action": "build" }                                  # populates 1.6.0 symbol facts (async build)
+repo_map { "action": "graph_health" }                           # freshness + extraction diagnostics + KG-14 summaries
 repo_map { "action": "callers", "file": "src/foo.ts", "symbol": "doThing" }
 repo_map { "action": "context_pack", "file": "src/foo.ts", "symbol": "doThing", "max_depth": 2, "top_n": 40 }
+
+# KG-14 expanded graph queries (issue #1535)
+repo_map { "action": "symbol_search", "symbol": "calcul", "kind": "class", "top_n": 25 }
+repo_map { "action": "symbol_context", "file": "src/foo.ts", "symbol": "doThing", "include_source": true }
+repo_map { "action": "symbol_context", "symbol_id": "<64-hex stable id>" }
+repo_map { "action": "impact_cone", "file": "src/foo.ts", "symbol": "doThing", "max_depth": 3 }
+repo_map { "action": "diff_context", "diff": "--- a/src/foo.ts\n+++ b/src/foo.ts\n@@ -1,3 +1,4 @@ ..." }
+repo_map { "action": "diff_context", "files": ["src/foo.ts", "src/bar.ts"] }
+repo_map { "action": "graph_explain", "file": "src/foo.ts", "line": 42 }
 ```
+
+## KG-14 expanded graph query actions (issue #1535)
+
+Implemented in `src/tools/repo-graph/symbol-query.ts` (stateless, read-only;
+`extractSignatureText` is shared with `query.ts` so pack and identity
+signatures cannot diverge). Every action was wired through all five
+`repo-map.ts` surfaces, emits `{ success, action, ...payload }` JSON with
+`budget {returned, dropped}` envelopes, spreads the freshness metadata, and
+returns workspace-relative forward-slash paths.
+
+| Action | Input | Output (bounded) |
+| --- | --- | --- |
+| `symbol_search` | `symbol` (term) + optional `kind`/`visibility`/`language`/`file`/`top_n` (25) | tiered hits (`exact`>`prefix`>`substring`>`subsequence`) with kind/visibility/line; kind filter degrades on < 1.6.0 graphs |
+| `symbol_context` | `symbol_id` OR `file`+`symbol`, optional `include_source`/`top_n` (25) | identity (stable id, kind, visibility, lines), signature, hashed source, depth-1 callers/callees; `symbolIdScan {computed, capped}` (scan cap 10 000) |
+| `impact_cone` | `file` + optional `symbol`, `max_depth` (3), `top_n` (50) | direction-scoped cone entries with relationshipKind/confidence/resolution, `fileImpact` = verbatim `getBlastRadius` (risk semantics identical to `blast_radius`), tests/routes/data/security facts (≤20 each), boundaries, fixed-vocabulary riskNotes |
+| `diff_context` | `files` OR `diff` (≤ 50 000 chars; only `\r\n\t` whitespace allowed), `max_depth` (2), `top_n` (25) | hunk→symbol mapping with `changedLines` (or file-granularity with a note), per-file impact union with risk; caps: 50 files, 200 hunks, 50 changed lines/symbol; unsafe diff paths are skipped with a warning |
+| `graph_explain` | `file` + optional `symbol`/`line`/`top_n` (20) | `resolvedSpan` (smallest containing range), definition, reasons (`definition`/`referenced_by`/`references`/`imported_by`/`imports`) with ≤3 evidence records each; legacy edges warn |
+
+`graph_health` additionally returns (all optional-but-always-populated on the
+result, zero-valued when data is absent): `symbolEdgeSummary`, `resolutionBreakdown`
+(includes `unrecorded` for legacy edges), `staleSummary` (`null` without a
+probe; `probeTruncated` is the freshness walk, distinct from build-time
+`walkTruncated`), `extractionFailureSummary`, and `kindCoverage`.
 
 ## Limitations (by design)
 
