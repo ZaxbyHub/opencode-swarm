@@ -220,7 +220,7 @@ import {
 	type DelegationCostFields,
 	foldTelemetryEvents,
 	isCostUpgrade,
-	readTelemetryEvents,
+	readTelemetryEventsAsync,
 } from './services/cost-accounting.js';
 import {
 	advanceTurnGeneration,
@@ -594,6 +594,7 @@ const pendingCostCorrectionByChildSession = new Map<
 	string,
 	PendingCostCorrection
 >();
+const scheduledCostCorrectionRecoveryBySession = new Set<string>();
 
 function trackPendingCostCorrection(
 	childSessionId: string,
@@ -651,13 +652,13 @@ function emitPendingCostCorrection(sessionId: string, raw: unknown): boolean {
 	return true;
 }
 
-function recoverPendingCostCorrection(
+async function recoverPendingCostCorrection(
 	directory: string,
 	parentSessionId: string,
 	childSessionId: string,
 	pricing?: CostPricingConfig,
-): PendingCostCorrection | null | undefined {
-	const events = readTelemetryEvents(directory);
+): Promise<PendingCostCorrection | null | undefined> {
+	const events = await readTelemetryEventsAsync(directory);
 	const folded = foldTelemetryEvents(events);
 	const parentSessionDigest = createHash('sha256')
 		.update(`delegation-cost-parent-v1\0${parentSessionId}`)
@@ -1522,6 +1523,78 @@ async function initializeOpenCodeSwarm(
 		} catch {
 			return undefined;
 		}
+	};
+	const schedulePendingCostCorrectionRecovery = (rememberedUsage: {
+		sessionId: string;
+		raw: unknown;
+	}): void => {
+		if (
+			scheduledCostCorrectionRecoveryBySession.has(rememberedUsage.sessionId)
+		) {
+			return;
+		}
+		scheduledCostCorrectionRecoveryBySession.add(rememberedUsage.sessionId);
+		while (
+			scheduledCostCorrectionRecoveryBySession.size >
+			MAX_TRACKED_ASSISTANT_USAGE_EVENTS
+		) {
+			const oldest = scheduledCostCorrectionRecoveryBySession
+				.values()
+				.next().value;
+			if (oldest === undefined) break;
+			scheduledCostCorrectionRecoveryBySession.delete(oldest);
+		}
+		void (async () => {
+			const parentSessionId = await withTimeout(
+				lookupParentSessionIDForTaskRoute(rememberedUsage.sessionId),
+				1_000,
+				new Error('late cost parent lookup exceeded 1000ms'),
+			).catch(() => undefined);
+			if (!parentSessionId) return;
+			const recovered = await recoverPendingCostCorrection(
+				ctx.directory,
+				parentSessionId,
+				rememberedUsage.sessionId,
+				config.pricing,
+			);
+			let corrected = false;
+			if (recovered) {
+				trackPendingCostCorrection(rememberedUsage.sessionId, recovered);
+				emitTelemetry(
+					'delegation_cost_binding' as Parameters<typeof emitTelemetry>[0],
+					{
+						sessionId: parentSessionId,
+						parent_session_digest: recovered.parentSessionDigest,
+						record_id: recovered.recordId,
+						identity_fingerprint: recovered.identityFingerprint,
+						child_session_digest: createHash('sha256')
+							.update(`delegation-cost-child-v1\0${rememberedUsage.sessionId}`)
+							.digest('hex')
+							.slice(0, 32),
+					},
+				);
+				corrected = emitPendingCostCorrection(
+					rememberedUsage.sessionId,
+					rememberedUsage.raw,
+				);
+			}
+			if (recovered === null) corrected = true;
+			if (!corrected) {
+				emitTelemetry(
+					'delegation_cost_join' as Parameters<typeof emitTelemetry>[0],
+					{
+						sessionId: parentSessionId,
+						reason: 'join_miss',
+					},
+				);
+			}
+		})()
+			.catch(() => undefined)
+			.finally(() => {
+				scheduledCostCorrectionRecoveryBySession.delete(
+					rememberedUsage.sessionId,
+				);
+			});
 	};
 	registerFullAutoRecoveryBlockerEvaluator(({ sessionID }) => {
 		const invocationID = getAgentSession(sessionID)?.activeInvocationId ?? 0;
@@ -2484,61 +2557,12 @@ async function initializeOpenCodeSwarm(
 			try {
 				const rememberedUsage = rememberAssistantUsageEvent(input);
 				if (rememberedUsage) {
-					let corrected = emitPendingCostCorrection(
+					const corrected = emitPendingCostCorrection(
 						rememberedUsage.sessionId,
 						rememberedUsage.raw,
 					);
 					if (!corrected) {
-						const parentSessionId = await withTimeout(
-							lookupParentSessionIDForTaskRoute(rememberedUsage.sessionId),
-							1_000,
-							new Error('late cost parent lookup exceeded 1000ms'),
-						).catch(() => undefined);
-						if (parentSessionId) {
-							const recovered = recoverPendingCostCorrection(
-								ctx.directory,
-								parentSessionId,
-								rememberedUsage.sessionId,
-								config.pricing,
-							);
-							if (recovered) {
-								trackPendingCostCorrection(
-									rememberedUsage.sessionId,
-									recovered,
-								);
-								emitTelemetry(
-									'delegation_cost_binding' as Parameters<
-										typeof emitTelemetry
-									>[0],
-									{
-										sessionId: parentSessionId,
-										parent_session_digest: recovered.parentSessionDigest,
-										record_id: recovered.recordId,
-										identity_fingerprint: recovered.identityFingerprint,
-										child_session_digest: createHash('sha256')
-											.update(
-												`delegation-cost-child-v1\0${rememberedUsage.sessionId}`,
-											)
-											.digest('hex')
-											.slice(0, 32),
-									},
-								);
-								corrected = emitPendingCostCorrection(
-									rememberedUsage.sessionId,
-									rememberedUsage.raw,
-								);
-							}
-							if (recovered === null) corrected = true;
-							if (!corrected) {
-								emitTelemetry(
-									'delegation_cost_join' as Parameters<typeof emitTelemetry>[0],
-									{
-										sessionId: parentSessionId,
-										reason: 'join_miss',
-									},
-								);
-							}
-						}
+						schedulePendingCostCorrectionRecovery(rememberedUsage);
 					}
 				}
 				const lifecycleEvent = input.event as

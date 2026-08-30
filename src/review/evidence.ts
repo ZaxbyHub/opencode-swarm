@@ -152,6 +152,12 @@ export interface PersistAutoReviewEvidenceOptions {
 	verifyCurrent?: () => Promise<boolean>;
 }
 
+/** Dependency seam for failure-path tests; production defaults stay unchanged. */
+export const _internals = {
+	bunWrite,
+	renameSync: fs.renameSync,
+};
+
 export async function persistAutoReviewEvidence(
 	directory: string,
 	evidence: AutoReviewEvidence,
@@ -168,7 +174,10 @@ export async function persistAutoReviewEvidence(
 	fs.mkdirSync(path.dirname(target), { recursive: true });
 	const tempPath = `${target}.tmp.${Date.now()}.${Math.floor(Math.random() * 1e9)}`;
 	try {
-		await bunWrite(tempPath, `${JSON.stringify(evidence, null, 2)}\n`);
+		await _internals.bunWrite(
+			tempPath,
+			`${JSON.stringify(evidence, null, 2)}\n`,
+		);
 		const safeTemp = validateSwarmPath(
 			directory,
 			path.relative(path.join(directory, '.swarm'), tempPath),
@@ -196,7 +205,7 @@ export async function persistAutoReviewEvidence(
 		if (!revalidatedStat.isFile() || revalidatedStat.isSymbolicLink()) {
 			throw new Error('auto-review evidence temp path changed before commit');
 		}
-		fs.renameSync(revalidatedTemp, safeTarget);
+		_internals.renameSync(revalidatedTemp, safeTarget);
 		invalidateCachedArtifact(safeTarget);
 		return safeTarget;
 	} finally {

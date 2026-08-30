@@ -93,6 +93,7 @@ export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 			'sessionId',
 			'agentName',
 			'taskId',
+			'parent_session_digest',
 			'record_id',
 			'identity_fingerprint',
 			'version',

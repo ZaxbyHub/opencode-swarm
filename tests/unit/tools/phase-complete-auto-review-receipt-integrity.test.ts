@@ -18,6 +18,7 @@ import {
 	autoReviewEvidenceRelativePath,
 	computeAutoReviewManifestHash,
 	computeAutoReviewPolicyDigest,
+	_internals as evidenceInternals,
 	persistAutoReviewEvidence,
 	validateAutoReviewEvidenceIntegrity,
 } from '../../../src/review/evidence';
@@ -378,5 +379,34 @@ describe('phase final review receipt integrity', () => {
 		expect(
 			fs.readdirSync(targetDir).some((name) => name.includes('.tmp.')),
 		).toBe(false);
+	});
+
+	test('F-007: persistAutoReviewEvidence cleans up when the temp writer fails', async () => {
+		const evidence = createEvidence();
+		const target = path.join(
+			projectDir,
+			'.swarm',
+			autoReviewEvidenceRelativePath(
+				evidence.trigger,
+				evidence.scope.hash,
+				evidence.phase,
+			),
+		);
+		const targetDir = path.dirname(target);
+		const originalWriter = evidenceInternals.bunWrite;
+		evidenceInternals.bunWrite = (async () => {
+			throw new Error('writer failed');
+		}) as typeof originalWriter;
+		try {
+			await expect(
+				persistAutoReviewEvidence(projectDir, evidence),
+			).rejects.toThrow('writer failed');
+			expect(
+				fs.readdirSync(targetDir).some((name) => name.includes('.tmp.')),
+			).toBe(false);
+			expect(fs.existsSync(target)).toBe(false);
+		} finally {
+			evidenceInternals.bunWrite = originalWriter;
+		}
 	});
 });

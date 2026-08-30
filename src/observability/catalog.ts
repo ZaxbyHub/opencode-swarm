@@ -1,7 +1,7 @@
 /**
  * The event catalog (issue #2029).
  *
- * Exactly 51 entries, matching the `TelemetryEvent` union at
+ * Exactly 54 entries, matching the `TelemetryEvent` union at
  * `src/telemetry.ts:15-131`. Thirty-eight predate the #2029 contract; the 39th is
  * `agent_conflict_detected` (previously emitted through a force-cast past the
  * type system), the 40th is `close_archive_result` (issue #2030 — the
@@ -22,7 +22,9 @@
  * the bounded `trajectory_health` storage audit for the issue-#2041
  * `.swarm/trajectories/` PRM session store, and the 51st is the bounded
  * `pr_subscription_health` storage audit for the issue-#2042
- * `.swarm/pr-monitor/` PR-monitor subscription checkpoint store. These late
+ * `.swarm/pr-monitor/` subscription checkpoint store. The 52nd is
+ * `delegation_cost_correction`, the 53rd is `delegation_cost_binding`, and the
+ * 54th is `delegation_cost_join`. These late
  * additions are instances
  * of the defect class this contract exists to close: an event kind entering
  * the stream with no registration.
@@ -85,7 +87,7 @@ export interface CatalogEntry {
 	/**
 	 * Whether an event of this kind must carry `trace.parentSpanId`.
 	 *
-	 * `false` for all 51 entries today, and that is a truthful statement about
+	 * `false` for all 54 entries today, and that is a truthful statement about
 	 * the current system rather than a placeholder: no producer supplies a
 	 * parent span, so `createObservation` never sets one. Setting this to `true`
 	 * for a kind whose producer cannot supply a parent would make every
@@ -139,13 +141,13 @@ const FORBID_SESSION: readonly WorkflowIdKey[] = Object.freeze([
 
 /** Live reader of `delegation_end` cost fields. */
 const CONSUMER_COST_ACCOUNTING = Object.freeze([
-	'src/services/cost-accounting.ts:413',
+	'src/services/cost-accounting.ts:429',
 ]);
 const CONSUMER_COST_CORRECTION = Object.freeze([
-	'src/services/cost-accounting.ts:410',
+	'src/services/cost-accounting.ts:426',
 ]);
 const CONSUMER_COST_JOIN = Object.freeze([
-	'src/services/cost-accounting.ts:397',
+	'src/services/cost-accounting.ts:413',
 ]);
 /** Live reader of reviewer-gate decisions. */
 const CONSUMER_GATE_STATS = Object.freeze(['src/evaluation/gate-stats.ts:99']);
@@ -357,7 +359,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'delegation',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/index.ts:637',
+			producer: 'src/index.ts:638',
 			consumers: CONSUMER_COST_CORRECTION,
 			retentionOwnerIssue: ISSUE_COST_RETENTION,
 			requiredWorkflowIds: REQUIRE_SESSION_AND_TASK,
@@ -370,7 +372,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'delegation',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/index.ts:2500',
+			producer: 'src/index.ts:1564',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_COST_RETENTION,
@@ -384,7 +386,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'delegation',
 			severity: 'notice',
 			privacyClass: 'pseudonymous',
-			producer: 'src/index.ts:2524',
+			producer: 'src/index.ts:1584',
 			consumers: CONSUMER_COST_JOIN,
 			retentionOwnerIssue: ISSUE_COST_RETENTION,
 			requiredWorkflowIds: REQUIRE_SESSION,

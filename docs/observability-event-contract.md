@@ -16,7 +16,7 @@ Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
 
 **What this PR defines.** A single canonical `ObservabilityEvent` envelope
 (`src/observability/envelope.ts`), a discriminated catalog of every event kind
-the codebase emits today (`src/observability/catalog.ts`, 51 entries), a
+the codebase emits today (`src/observability/catalog.ts`, 54 entries), a
 relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. It wires the envelope into the one live production
@@ -182,9 +182,9 @@ those inputs before this change.
 
 ---
 
-## 5. The 51-entry catalog
+## 5. The 54-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 51 entries = the 38 pre-existing members of
+Source: `src/observability/catalog.ts`. Exactly 54 entries = the 38 pre-existing members of
 `TelemetryEvent` (`src/telemetry.ts:15-144`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive

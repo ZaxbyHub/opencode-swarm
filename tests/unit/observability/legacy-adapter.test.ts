@@ -16,6 +16,12 @@ import {
 } from '../../../src/observability/legacy.js';
 
 describe('adaptLegacyTelemetryPayload — AC2', () => {
+	test('F-003: delegation cost corrections retain the parent session digest key', () => {
+		expect(KNOWN_TELEMETRY_KEYS.delegation_cost_correction).toContain(
+			'parent_session_digest',
+		);
+	});
+
 	test('missing IDs: extractWorkflowIds leaves sessionId/taskId absent (undefined), never synthesized', () => {
 		const ids = extractWorkflowIds({ someOtherField: 1 });
 		expect(ids.hostSessionId).toBeUndefined();

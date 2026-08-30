@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { warn } from '../utils/logger.js';
@@ -155,6 +156,8 @@ const ZERO_USAGE: TokenUsage = {
 const MAX_EVIDENCE_ITEMS = 8;
 const MAX_COST_STRING_LENGTH = 128;
 const MAX_PROVIDER_REPORTED_COST_USD = 1_000_000_000;
+const MAX_TELEMETRY_FILE_BYTES = 4 * 1024 * 1024;
+const ASYNC_TELEMETRY_READ_TIMEOUT_MS = 500;
 
 // BUNDLED_MODEL_PRICING is intentionally empty. Cost estimation requires
 // user-provided pricing via `pricing.models` in config (or provider-reported
@@ -383,7 +386,9 @@ export type FoldedCostTelemetry = {
 
 /**
  * Fold append-only cost corrections into one effective delegation snapshot.
- * Invalid/orphan corrections remain diagnostics and can never create a row.
+ * Corrections are buffered and replayed in version order so telemetry arrival
+ * order cannot permanently discard a valid correction. Invalid/orphan
+ * corrections remain diagnostics and can never create a row.
  */
 export function foldTelemetryEvents(
 	events: readonly Record<string, unknown>[],
@@ -402,6 +407,7 @@ export function foldTelemetryEvents(
 		{ version: number; digest?: string; fingerprint?: string }
 	>();
 	const legacy: Record<string, unknown>[] = [];
+	const corrections: Record<string, unknown>[] = [];
 	for (const event of events) {
 		const eventKind = event.event;
 		if (eventKind === 'delegation_cost_join' && event.reason === 'join_miss') {
@@ -454,7 +460,22 @@ export function foldTelemetryEvents(
 			}
 			continue;
 		}
-
+		corrections.push(event);
+	}
+	// A crash or concurrent writer can leave correction lines out of order. A
+	// bounded in-memory replay by record/version lets a later line satisfy the
+	// exact-next-version check without weakening fingerprint or upgrade guards.
+	corrections.sort((left, right) => {
+		const leftRecord = boundedId(left.record_id ?? left.recordId) ?? '';
+		const rightRecord = boundedId(right.record_id ?? right.recordId) ?? '';
+		if (leftRecord !== rightRecord)
+			return leftRecord.localeCompare(rightRecord);
+		return (
+			(validVersion(left.version) ?? Number.MAX_SAFE_INTEGER) -
+			(validVersion(right.version) ?? Number.MAX_SAFE_INTEGER)
+		);
+	});
+	for (const event of corrections) {
 		const recordId = boundedId(event.record_id ?? event.recordId);
 		const state = recordId ? states.get(recordId) : undefined;
 		const current = recordId ? rows.get(recordId) : undefined;
@@ -713,6 +734,11 @@ export function readTelemetryEvents(
 			if (!fs.existsSync(file)) continue;
 			const snap = path.join(tmpDir, path.basename(file));
 			try {
+				const stat = fs.statSync(file);
+				if (!stat.isFile() || stat.size > MAX_TELEMETRY_FILE_BYTES) {
+					telemetryErrors++;
+					continue;
+				}
 				fs.copyFileSync(file, snap);
 				snapshotFiles.push(snap);
 			} catch {
@@ -772,6 +798,76 @@ export function readTelemetryEvents(
 		}
 		fs.rmdirSync(tmpDir);
 	} catch {}
+	if (telemetryErrors > 0) {
+		events.push({ event: 'delegation_cost_join', reason: 'unreadable' });
+	}
+	return events;
+}
+
+/**
+ * Bounded asynchronous telemetry reader for live recovery paths. The status
+ * service and offline summaries retain the atomic synchronous snapshot above;
+ * recovery must not block event delivery on a full-file synchronous read.
+ */
+export async function readTelemetryEventsAsync(
+	directory: string,
+): Promise<Record<string, unknown>[]> {
+	const swarmDir = path.join(directory, '.swarm');
+	const files = [
+		path.join(swarmDir, 'telemetry.jsonl.1'),
+		path.join(swarmDir, 'telemetry.jsonl'),
+	];
+	let telemetryErrors = 0;
+	const contents = await Promise.all(
+		files.map(async (file) => {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			try {
+				const stat = await Promise.race([
+					fsp.stat(file),
+					new Promise<never>((_, reject) => {
+						timer = setTimeout(
+							() => reject(new Error('telemetry stat timeout')),
+							ASYNC_TELEMETRY_READ_TIMEOUT_MS,
+						);
+					}),
+				]);
+				if (!stat.isFile() || stat.size > MAX_TELEMETRY_FILE_BYTES) {
+					telemetryErrors++;
+					return '';
+				}
+				if (timer) clearTimeout(timer);
+				timer = undefined;
+				const content = await Promise.race([
+					fsp.readFile(file, 'utf8'),
+					new Promise<never>((_, reject) => {
+						timer = setTimeout(
+							() => reject(new Error('telemetry read timeout')),
+							ASYNC_TELEMETRY_READ_TIMEOUT_MS,
+						);
+					}),
+				]);
+				return content;
+			} catch {
+				telemetryErrors++;
+				return '';
+			} finally {
+				if (timer) clearTimeout(timer);
+			}
+		}),
+	);
+	const events: Record<string, unknown>[] = [];
+	for (const content of contents) {
+		for (const line of content.split(/\r?\n/)) {
+			const trimmed = line.trim();
+			if (!trimmed) continue;
+			try {
+				const parsed = JSON.parse(trimmed);
+				if (isRecord(parsed)) events.push(parsed);
+			} catch {
+				telemetryErrors++;
+			}
+		}
+	}
 	if (telemetryErrors > 0) {
 		events.push({ event: 'delegation_cost_join', reason: 'unreadable' });
 	}
