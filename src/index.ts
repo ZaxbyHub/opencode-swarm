@@ -311,6 +311,7 @@ const MAX_TRACKED_DELEGATION_TELEMETRY = 500;
 export function _resetDelegationTelemetryPairingForTesting(): void {
 	_delegationTelemetryByCallID.clear();
 	pendingCostCorrectionByChildSession.clear();
+	scheduledCostCorrectionRecoveryBySession.clear();
 	latestAssistantUsageBySession.clear();
 }
 
