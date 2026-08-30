@@ -297,8 +297,9 @@ async function archiveCloseSummary(
 		'archiveStageFailed' | 'archiveDir' | 'warnings'
 	>,
 	closeSummaryPath: string,
+	summaryWritten: boolean,
 ): Promise<void> {
-	if (ctx.archiveStageFailed || !ctx.archiveDir) return;
+	if (!summaryWritten || ctx.archiveStageFailed || !ctx.archiveDir) return;
 	try {
 		await fs.copyFile(
 			closeSummaryPath,
@@ -2572,14 +2573,16 @@ export async function handleCloseCommand(
 
 		// Canonical atomic helper (issue #2035): registered temp grammar,
 		// exact own-temp cleanup, and cache invalidation in one place.
+		let closeSummaryWritten = false;
 		try {
 			await atomicWriteSwarmFile(closeSummaryPath, summaryContent);
+			closeSummaryWritten = true;
 		} catch (error) {
 			const msg = error instanceof Error ? error.message : String(error);
 			ctx.warnings.push(`Failed to write close-summary.md: ${msg}`);
 			log('[close-command] Failed to write close-summary.md:', error);
 		}
-		await archiveCloseSummary(ctx, closeSummaryPath);
+		await archiveCloseSummary(ctx, closeSummaryPath, closeSummaryWritten);
 
 		// NOTE: writeCheckpoint is intentionally NOT called here. SWARM_PLAN.json and
 		// SWARM_PLAN.md are redundant copies of plan.json/plan.md (already archived in

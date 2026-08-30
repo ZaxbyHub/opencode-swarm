@@ -2,14 +2,12 @@ import { describe, expect, test } from 'bun:test';
 import {
 	existsSync,
 	mkdirSync,
-	mkdtempSync,
 	readFileSync,
 	rmSync,
 	writeFileSync,
 } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { createCloseFinalizerHarness } from './close-finalizer.fixture.js';
 
 const { closeInternals } = await createCloseFinalizerHarness();
@@ -137,7 +135,7 @@ describe('guaranteeAllPlansComplete via _internals (FR-006b)', () => {
 
 describe('copyDirRecursive via _internals (FR-015b)', () => {
 	test('copies a nested directory tree with files and subdirectories and returns the correct file count', async () => {
-		const tmp = mkdtempSync(path.join(os.tmpdir(), 'copydir-recursive-test-'));
+		const tmp = canonicalMkdtemp('copydir-recursive-test-');
 		try {
 			const src = path.join(tmp, 'src');
 			const dest = path.join(tmp, 'dest');

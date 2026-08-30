@@ -15,13 +15,11 @@ import * as childProcess from 'node:child_process';
 import {
 	existsSync,
 	mkdirSync,
-	mkdtempSync,
 	readdirSync,
 	readFileSync,
 	rmSync,
 	writeFileSync,
 } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { loadDatabaseCtor } from '../../../src/db/sqlite-loader.js';
 import * as actualEvidenceManager from '../../../src/evidence/manager.js';
@@ -29,6 +27,7 @@ import * as actualKnowledgeCurator from '../../../src/hooks/knowledge-curator.js
 import { initLedger } from '../../../src/plan/ledger.js';
 import { derivePlanId } from '../../../src/plan/utils.js';
 import * as actualState from '../../../src/state.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 // ── Mocks (must precede the dynamic import) ──────────────────────────
 
@@ -203,7 +202,7 @@ describe('handleCloseCommand — close-summary refresh', () => {
 		mockCurateAndStoreSwarm.mockClear();
 		mockArchiveEvidence.mockClear();
 		mockFlushPendingSnapshot.mockClear();
-		testDir = mkdtempSync(path.join(os.tmpdir(), 'close-summary-test-'));
+		testDir = canonicalMkdtemp('close-summary-test-');
 		mkdirSync(path.join(swarmDir(), 'session'), { recursive: true });
 
 		spawnSyncSpy = spyOn(childProcess, 'spawnSync').mockImplementation(
