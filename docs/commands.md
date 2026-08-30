@@ -619,7 +619,7 @@ Show performance metrics: tool call rates, delegation chains, evidence pass rate
 
 - `--cumulative`: aggregate across sessions.
 - `--ci-gate`: return non-zero exit if thresholds exceeded (for CI).
-- `--max-cost-usd <n>`: with `--ci-gate`, fail the benchmark when cumulative telemetry cost exceeds the threshold.
+- `--max-cost-usd <n>`: with `--ci-gate`, compare the threshold only when cumulative telemetry has complete compatible USD evidence. Missing, conflicting, legacy, or unknown-currency spend returns `passed: false`, `evidence_status: "inconclusive"`, and `reason: "budgetInconclusive"` instead of passing as zero.
 - `--gate-audit-run <id>`: include a stored gate-audit result. With `--ci-gate`, the audit must be complete; its run-scoped exact joins must be sufficient and free of corrupt, malformed, ambiguous, or unjoined truth; every joined Tier-1 regression must be caught; and no joined clean control may be rejected. Cell-provided labels never substitute for ground truth.
 
 ### `/swarm gate-audit [options]`

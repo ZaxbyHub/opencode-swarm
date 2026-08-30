@@ -19,6 +19,11 @@ import {
 import { validateSwarmPath } from '../hooks/utils.js';
 import { ledgerExists, replayFromLedgerWithStatus } from '../plan/ledger.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
+import type {
+	CostEvidence,
+	CostEvidenceReason,
+	CostEvidenceStatus,
+} from '../services/cost-accounting.js';
 import { bunWrite } from '../utils/bun-compat.js';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import type {
@@ -95,6 +100,10 @@ export interface AutoReviewEvidence {
 		tokens_cache: number;
 		cost_usd: number | null;
 		cost_source: 'reported' | 'estimated' | 'unavailable';
+		/** Bounded per-dispatch provenance; scalar totals remain compatibility projections. */
+		cost_evidence: CostEvidence[];
+		evidence_status: CostEvidenceStatus;
+		evidence_reason?: CostEvidenceReason;
 	};
 }
 

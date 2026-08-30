@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
@@ -213,7 +214,14 @@ import { createFindingValidationScheduler } from './review/finding-validator.js'
 import { captureReviewAgentModelRegistry } from './review/runtime.js';
 import { createCompactionService } from './services/compaction-service';
 import { shouldRunOnStartup } from './services/config-doctor';
-import { buildDelegationCostFields } from './services/cost-accounting.js';
+import {
+	buildDelegationCostFields,
+	type PricingConfig as CostPricingConfig,
+	type DelegationCostFields,
+	foldTelemetryEvents,
+	isCostUpgrade,
+	readTelemetryEvents,
+} from './services/cost-accounting.js';
 import {
 	advanceTurnGeneration,
 	recordProducerEmission,
@@ -230,7 +238,12 @@ import {
 	getSessionBudgetPct,
 	swarmState,
 } from './state';
-import { initTelemetry, startHeartbeatTracking, telemetry } from './telemetry';
+import {
+	emit as emitTelemetry,
+	initTelemetry,
+	startHeartbeatTracking,
+	telemetry,
+} from './telemetry';
 import { buildPluginToolObject } from './tools/plugin-registration';
 import { error, log, warn } from './utils';
 import { pushAdvisory } from './utils/advisory-queue';
@@ -297,6 +310,8 @@ const MAX_TRACKED_DELEGATION_TELEMETRY = 500;
  * leak into the next. Mirrors resetTelemetryForTesting / resetSwarmState. */
 export function _resetDelegationTelemetryPairingForTesting(): void {
 	_delegationTelemetryByCallID.clear();
+	pendingCostCorrectionByChildSession.clear();
+	latestAssistantUsageBySession.clear();
 }
 
 import { applyLanePermissions } from './config/lane-permissions.js';
@@ -560,26 +575,180 @@ const OpenCodeSwarm: Plugin = async (ctx) => {
 const MAX_TRACKED_ASSISTANT_USAGE_EVENTS = 200;
 const latestAssistantUsageBySession = new Map<string, unknown>();
 
-function rememberAssistantUsageEvent(input: unknown): void {
+type PendingCostCorrection = {
+	recordId: string;
+	identityFingerprint: string;
+	parentSessionId: string;
+	parentSessionDigest: string;
+	agentName: string;
+	taskId: string;
+	model: string;
+	gate?: string;
+	retryIndex?: number;
+	pricing?: CostPricingConfig;
+	version: number;
+	currentFields: DelegationCostFields;
+};
+
+const pendingCostCorrectionByChildSession = new Map<
+	string,
+	PendingCostCorrection
+>();
+
+function trackPendingCostCorrection(
+	childSessionId: string,
+	pending: PendingCostCorrection,
+): void {
+	pendingCostCorrectionByChildSession.delete(childSessionId);
+	pendingCostCorrectionByChildSession.set(childSessionId, pending);
+	while (
+		pendingCostCorrectionByChildSession.size >
+		MAX_TRACKED_ASSISTANT_USAGE_EVENTS
+	) {
+		const oldest = pendingCostCorrectionByChildSession.keys().next().value;
+		if (oldest === undefined) break;
+		pendingCostCorrectionByChildSession.delete(oldest);
+	}
+}
+
+function emitPendingCostCorrection(sessionId: string, raw: unknown): boolean {
+	const pending = pendingCostCorrectionByChildSession.get(sessionId);
+	if (!pending) return false;
+	const fields = buildDelegationCostFields({
+		raw,
+		model: pending.model,
+		gate: pending.gate,
+		retry_index: pending.retryIndex,
+		pricing: pending.pricing,
+	});
+	// A partial or unknown-currency late event is retained in the ordinary usage
+	// cache, but cannot replace the initial snapshot.
+	if (fields.evidence_status !== 'complete') return true;
+	if (
+		!isCostUpgrade(
+			pending.currentFields.cost_evidence ?? [],
+			fields.cost_evidence ?? [],
+		)
+	) {
+		return true;
+	}
+	const nextVersion = pending.version + 1;
+	emitTelemetry(
+		'delegation_cost_correction' as Parameters<typeof emitTelemetry>[0],
+		{
+			sessionId: pending.parentSessionId,
+			agentName: pending.agentName,
+			taskId: pending.taskId,
+			record_id: pending.recordId,
+			identity_fingerprint: pending.identityFingerprint,
+			parent_session_digest: pending.parentSessionDigest,
+			version: nextVersion,
+			...fields,
+		},
+	);
+	pending.version = nextVersion;
+	pending.currentFields = fields;
+	return true;
+}
+
+function recoverPendingCostCorrection(
+	directory: string,
+	parentSessionId: string,
+	pricing?: CostPricingConfig,
+): PendingCostCorrection | null | undefined {
+	const events = readTelemetryEvents(directory);
+	const folded = foldTelemetryEvents(events);
+	if (folded.stats.rejected_corrections > 0) return undefined;
+	const parentSessionDigest = createHash('sha256')
+		.update(`delegation-cost-parent-v1\0${parentSessionId}`)
+		.digest('hex')
+		.slice(0, 32);
+	const candidates = folded.events.filter(
+		(event) =>
+			event.event === 'delegation_end' &&
+			event.parent_session_digest === parentSessionDigest &&
+			event.cost_source !== 'reported' &&
+			typeof event.record_id === 'string' &&
+			typeof event.identity_fingerprint === 'string',
+	);
+	// Zero candidates commonly means usage arrived before Task terminal; retain
+	// the already-bounded usage cache and let the terminal path consume it.
+	if (candidates.length === 0) return null;
+	if (candidates.length !== 1) return undefined;
+	const event = candidates[0];
+	const effective = event;
+	if (effective.cost_source === 'reported') return null;
+	const currentFields = {
+		tokens_input:
+			typeof effective.tokens_input === 'number' ? effective.tokens_input : 0,
+		tokens_output:
+			typeof effective.tokens_output === 'number' ? effective.tokens_output : 0,
+		tokens_reasoning:
+			typeof effective.tokens_reasoning === 'number'
+				? effective.tokens_reasoning
+				: 0,
+		tokens_cache:
+			typeof effective.tokens_cache === 'number' ? effective.tokens_cache : 0,
+		cost_usd:
+			typeof effective.cost_usd === 'number' ? effective.cost_usd : null,
+		cost_source:
+			effective.cost_source === 'reported' ||
+			effective.cost_source === 'estimated'
+				? effective.cost_source
+				: 'unavailable',
+		cost_evidence: Array.isArray(effective.cost_evidence)
+			? (effective.cost_evidence as DelegationCostFields['cost_evidence'])
+			: undefined,
+	} satisfies DelegationCostFields;
+	return {
+		recordId: event.record_id as string,
+		identityFingerprint: event.identity_fingerprint as string,
+		parentSessionId,
+		parentSessionDigest,
+		agentName:
+			typeof event.agentName === 'string' ? event.agentName : 'unknown',
+		taskId: typeof event.taskId === 'string' ? event.taskId : '',
+		model: typeof event.model === 'string' ? event.model : 'unknown',
+		gate: typeof event.gate === 'string' ? event.gate : undefined,
+		retryIndex:
+			typeof event.retry_index === 'number' ? event.retry_index : undefined,
+		pricing,
+		version: folded.versions[event.record_id as string] ?? 1,
+		currentFields,
+	};
+}
+
+function rememberAssistantUsageEvent(
+	input: unknown,
+): { sessionId: string; raw: unknown } | undefined {
 	const event = isPlainRecord(input) ? input.event : undefined;
-	if (!isPlainRecord(event)) return;
+	if (!isPlainRecord(event)) return undefined;
 	if (event.type === 'message.updated') {
 		const properties = isPlainRecord(event.properties)
 			? event.properties
 			: undefined;
 		const info = isPlainRecord(properties?.info) ? properties.info : undefined;
-		if (info?.role === 'assistant')
+		if (info?.role === 'assistant') {
 			rememberAssistantUsage(info.sessionID, info);
-		return;
+			return typeof info.sessionID === 'string'
+				? { sessionId: info.sessionID, raw: info }
+				: undefined;
+		}
+		return undefined;
 	}
 	if (event.type === 'message.part.updated') {
 		const properties = isPlainRecord(event.properties)
 			? event.properties
 			: undefined;
 		const part = isPlainRecord(properties?.part) ? properties.part : undefined;
-		if (part?.type === 'step-finish')
+		if (part?.type === 'step-finish') {
 			rememberAssistantUsage(part.sessionID, part);
+			return typeof part.sessionID === 'string'
+				? { sessionId: part.sessionID, raw: part }
+				: undefined;
+		}
 	}
+	return undefined;
 }
 
 function rememberAssistantUsage(sessionID: unknown, raw: unknown): void {
@@ -595,10 +764,13 @@ function rememberAssistantUsage(sessionID: unknown, raw: unknown): void {
 }
 
 function consumeAssistantUsageForTask(
-	parentSessionID: string,
+	_parentSessionID: string,
 	taskOutput: unknown,
 ): unknown {
-	const sessionIDs = [parentSessionID, ...collectSessionIDs(taskOutput)];
+	// Provider usage belongs to the delegated child. Consuming the parent's most
+	// recent assistant event can silently attribute the architect's own cost to
+	// a Task result when both sessions have usage (#2043).
+	const sessionIDs = collectSessionIDs(taskOutput);
 	for (const sessionID of sessionIDs) {
 		const usage = latestAssistantUsageBySession.get(sessionID);
 		if (usage !== undefined) {
@@ -1366,8 +1538,14 @@ async function initializeOpenCodeSwarm(
 		// pruning's (agent handoffs included).
 		resolveAgentModelFn: resolveIncomingAgentModel,
 	});
-	const evaluationModelDispatcher = createEvaluationModelDispatcher(ctx.client);
-	const reviewModelDispatcher = createReviewModelDispatcher(ctx.client);
+	const evaluationModelDispatcher = createEvaluationModelDispatcher(
+		ctx.client,
+		config.pricing,
+	);
+	const reviewModelDispatcher = createReviewModelDispatcher(
+		ctx.client,
+		config.pricing,
+	);
 	const findingValidationScheduler = createFindingValidationScheduler();
 	const reviewAgentModelRegistry = captureReviewAgentModelRegistry(
 		config,
@@ -2295,7 +2473,64 @@ async function initializeOpenCodeSwarm(
 		// or plugin load. The observer is opt-in and fail-closed.
 		event: async (input: { event: unknown }): Promise<void> => {
 			try {
-				rememberAssistantUsageEvent(input);
+				const rememberedUsage = rememberAssistantUsageEvent(input);
+				if (rememberedUsage) {
+					let corrected = emitPendingCostCorrection(
+						rememberedUsage.sessionId,
+						rememberedUsage.raw,
+					);
+					if (!corrected) {
+						const parentSessionId = await withTimeout(
+							lookupParentSessionIDForTaskRoute(rememberedUsage.sessionId),
+							1_000,
+							new Error('late cost parent lookup exceeded 1000ms'),
+						).catch(() => undefined);
+						if (parentSessionId) {
+							const recovered = recoverPendingCostCorrection(
+								ctx.directory,
+								parentSessionId,
+								config.pricing,
+							);
+							if (recovered) {
+								trackPendingCostCorrection(
+									rememberedUsage.sessionId,
+									recovered,
+								);
+								emitTelemetry(
+									'delegation_cost_binding' as Parameters<
+										typeof emitTelemetry
+									>[0],
+									{
+										sessionId: parentSessionId,
+										parent_session_digest: recovered.parentSessionDigest,
+										record_id: recovered.recordId,
+										identity_fingerprint: recovered.identityFingerprint,
+										child_session_digest: createHash('sha256')
+											.update(
+												`delegation-cost-child-v1\0${rememberedUsage.sessionId}`,
+											)
+											.digest('hex')
+											.slice(0, 32),
+									},
+								);
+								corrected = emitPendingCostCorrection(
+									rememberedUsage.sessionId,
+									rememberedUsage.raw,
+								);
+							}
+							if (recovered === null) corrected = true;
+							if (!corrected) {
+								emitTelemetry(
+									'delegation_cost_join' as Parameters<typeof emitTelemetry>[0],
+									{
+										sessionId: parentSessionId,
+										reason: 'join_miss',
+									},
+								);
+							}
+						}
+					}
+				}
 				const lifecycleEvent = input.event as
 					| {
 							type?: string;
@@ -4278,6 +4513,29 @@ async function initializeOpenCodeSwarm(
 					retry_index: activeWindow?.transientRetryCount,
 					pricing: config.pricing,
 				});
+				const childSessionID = collectSessionIDs(output)[0];
+				const recordMaterial = `${sessionId}\0${input.callID}`;
+				costFields.record_id = createHash('sha256')
+					.update(`delegation-cost-id-v1\0${recordMaterial}`)
+					.digest('hex')
+					.slice(0, 32);
+				costFields.identity_fingerprint = createHash('sha256')
+					.update(
+						`delegation-cost-identity-v1\0${recordMaterial}\0${agentName}\0${configuredModel}`,
+					)
+					.digest('hex')
+					.slice(0, 32);
+				costFields.version = 1;
+				costFields.parent_session_digest = createHash('sha256')
+					.update(`delegation-cost-parent-v1\0${sessionId}`)
+					.digest('hex')
+					.slice(0, 32);
+				if (childSessionID) {
+					costFields.child_session_digest = createHash('sha256')
+						.update(`delegation-cost-child-v1\0${childSessionID}`)
+						.digest('hex')
+						.slice(0, 32);
+				}
 				swarmState.activeAgent.set(sessionId, ORCHESTRATOR_NAME);
 				ensureAgentSession(sessionId, ORCHESTRATOR_NAME);
 				const taskSession = swarmState.agentSessions.get(sessionId);
@@ -4294,14 +4552,37 @@ async function initializeOpenCodeSwarm(
 						// EMPTY taskId — no task was current at dispatch — falls
 						// through to currentTaskId, which guardrails toolAfter may
 						// have populated during this very call.
+						const costTaskId =
+							beganDelegation?.taskId || taskSession.currentTaskId || '';
 						_delegationTelemetryByCallID.delete(input.callID);
 						telemetry.delegationEnd(
 							sessionId,
 							agentName,
-							beganDelegation?.taskId || taskSession.currentTaskId || '',
+							costTaskId,
 							'completed',
 							costFields,
 						);
+						if (
+							childSessionID &&
+							costFields.evidence_status !== 'complete' &&
+							costFields.record_id &&
+							costFields.identity_fingerprint
+						) {
+							trackPendingCostCorrection(childSessionID, {
+								recordId: costFields.record_id,
+								identityFingerprint: costFields.identity_fingerprint,
+								parentSessionId: sessionId,
+								parentSessionDigest: costFields.parent_session_digest,
+								agentName,
+								taskId: costTaskId,
+								model: configuredModel,
+								gate: preHandoffSession?.lastDelegationReason,
+								retryIndex: activeWindow?.transientRetryCount,
+								pricing: config.pricing,
+								version: 1,
+								currentFields: costFields,
+							});
+						}
 						// Pipeline continuation advisory — prevents happy-path stall when
 						// delegated agents return clean results. The architect must resume
 						// direct tool execution for remaining QA gate steps.

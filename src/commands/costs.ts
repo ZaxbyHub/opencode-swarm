@@ -27,6 +27,7 @@ export function renderCostSummary(summary: CostSummary): string {
 		`Delegations: ${summary.delegations}`,
 		`Tokens: input ${summary.total_input_tokens.toLocaleString()}, output ${summary.total_output_tokens.toLocaleString()}, reasoning ${summary.total_reasoning_tokens.toLocaleString()}, cache ${summary.total_cache_tokens.toLocaleString()}`,
 		`Cost source: reported ${formatUsd(summary.total_reported_usd)}, estimated ${formatUsd(summary.total_estimated_usd)}, unavailable ${summary.unavailable_delegations}`,
+		`Evidence: ${summary.evidence_status}; joins missed ${summary.join_miss_count}; telemetry errors ${summary.telemetry_error_count}; corrections accepted ${summary.accepted_corrections}, rejected ${summary.rejected_corrections}, duplicate ${summary.duplicate_corrections}`,
 		'',
 		'### By Agent',
 	];

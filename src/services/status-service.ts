@@ -54,6 +54,7 @@ import { getLastHeartbeat } from '../telemetry';
 import { listRecoveryRecords } from '../turbo/lean/recovery';
 import { loadLeanTurboRunState } from '../turbo/lean/state';
 import { getCompactionMetrics } from './compaction-service';
+import { summarizeTelemetryCosts } from './cost-accounting.js';
 
 /**
  * Dependency-injection seam for status-service.
@@ -227,6 +228,16 @@ export interface StatusData {
 	 * stores surface as typed uncertainty, never partially-trusted counts.
 	 */
 	backgroundWork?: BackgroundWorkStatus;
+	/** Issue #2043: compatibility total plus provenance completeness. */
+	costs?: {
+		totalCostUsd: number;
+		delegations: number;
+		unavailableDelegations: number;
+		evidenceStatus: 'complete' | 'inconclusive';
+		conflictCount: number;
+		joinMissCount: number;
+		telemetryErrorCount: number;
+	};
 }
 
 /** Issue #2104: opt-in background-work status snapshot for /swarm status. */
@@ -716,8 +727,23 @@ export async function getStatusData(
 		}
 	}
 
-	// Enrich with Lean Turbo data if active
-	return enrichWithLeanTurbo(status, directory);
+	// Enrich with Lean Turbo data if active.
+	status = enrichWithLeanTurbo(status, directory);
+	try {
+		const costs = await summarizeTelemetryCosts(directory);
+		status.costs = {
+			totalCostUsd: costs.total_cost_usd,
+			delegations: costs.delegations,
+			unavailableDelegations: costs.unavailable_delegations,
+			evidenceStatus: costs.evidence_status,
+			conflictCount: costs.conflict_count,
+			joinMissCount: costs.join_miss_count,
+			telemetryErrorCount: costs.telemetry_error_count,
+		};
+	} catch {
+		// Status remains fail-open when optional telemetry is unreadable.
+	}
+	return status;
 }
 
 /**
@@ -828,6 +854,16 @@ export function formatStatusMarkdown(status: StatusData): string {
 		`**Tasks**: ${status.completedTasks}/${status.totalTasks} complete`,
 		`**Agents**: ${status.agentCount} registered`,
 	];
+	if (status.costs && status.costs.delegations > 0) {
+		const evidence =
+			status.costs.evidenceStatus === 'complete'
+				? 'complete evidence'
+				: `inconclusive evidence (${status.costs.unavailableDelegations} unavailable, ${status.costs.conflictCount} conflicts, ${status.costs.joinMissCount} join misses, ${status.costs.telemetryErrorCount} telemetry errors)`;
+		lines.push(
+			'',
+			`**Cost**: $${status.costs.totalCostUsd.toFixed(6)} across ${status.costs.delegations} delegations — ${evidence}`,
+		);
+	}
 
 	// FR-010/FR-011: render last activity
 	if (status.lastActivity) {

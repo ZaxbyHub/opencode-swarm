@@ -287,6 +287,32 @@ Category `delegation`, severity `info`, privacy `pseudonymous`. Producer
 (resolved from the begin-side pairing entry), not the parent session's
 `activeAgent`.
 
+#### delegation_cost_correction
+
+Category `delegation`, severity `info`, privacy `pseudonymous`. This append-only
+record supersedes one exact `delegation_end` cost record after authoritative
+child-session usage arrives late. It carries the same immutable record identity,
+an incremented version, and bounded cost evidence. Ambiguous, stale, malformed,
+or identity-changing corrections are rejected by the cost-accounting fold.
+Retention: **#2043**. Required workflow IDs: `hostSessionId`, `taskId`. OTel
+mapping: `genai`.
+
+#### delegation_cost_binding
+
+Category `delegation`, severity `info`, privacy `pseudonymous`. Records the
+bounded parent/child-session association recovered after restart before a late
+cost correction is emitted. It never changes the original delegation identity.
+Retention: **#2043**. Required workflow IDs: `hostSessionId`. OTel mapping:
+`none`.
+
+#### delegation_cost_join
+
+Category `delegation`, severity `notice`, privacy `pseudonymous`. Records a
+bounded `join_miss` when late child usage cannot be matched to exactly one
+unresolved delegation. The miss is observable and leaves cost evidence
+inconclusive instead of guessing. Retention: **#2043**. Required workflow IDs:
+`hostSessionId`. OTel mapping: `none`.
+
 #### model_fallback
 Category `delegation`, severity `notice`, privacy `pseudonymous`. Producer
 `src/telemetry.ts:506`. Consumers: none — owner **#2047**. Retention: **#2045**.

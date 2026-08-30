@@ -119,6 +119,33 @@ describe('status-service lastActivity (FR-010)', () => {
 		expect(status.totalTasks).toBe(1);
 		expect(status.agentCount).toBe(1);
 	});
+
+	test('surfaces cost totals with inconclusive provenance instead of treating missing cost as zero evidence', async () => {
+		resetTelemetryForTesting();
+		fs.writeFileSync(
+			path.join(tempDir, '.swarm', 'telemetry.jsonl'),
+			`${JSON.stringify({
+				event: 'delegation_end',
+				record_id: 'status-cost-1',
+				identity_fingerprint: 'a'.repeat(32),
+				version: 1,
+				agentName: 'coder',
+				taskId: '1.1',
+				cost_usd: null,
+				cost_source: 'unavailable',
+				evidence_status: 'inconclusive',
+			})}\n`,
+		);
+
+		const status = await getStatusData(tempDir, mockAgents);
+		expect(status.costs).toMatchObject({
+			totalCostUsd: 0,
+			delegations: 1,
+			unavailableDelegations: 1,
+			evidenceStatus: 'inconclusive',
+		});
+		expect(formatStatusMarkdown(status)).toContain('inconclusive evidence');
+	});
 });
 
 describe('formatStatusMarkdown last activity rendering (FR-010/FR-011)', () => {

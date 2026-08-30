@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { existsSync, readFileSync } from 'node:fs';
+import * as path from 'node:path';
 import { _resetDelegationTelemetryPairingForTesting } from '../../src/index';
 import {
 	ensureAgentSession,
@@ -16,7 +18,10 @@ import {
 } from '../helpers/knowledge-real-host';
 import { safeRmRecursive } from '../helpers/safe-test-dir';
 
-type CapturedEvent = { event: TelemetryEvent; data: Record<string, unknown> };
+type CapturedEvent = {
+	event: TelemetryEvent | 'delegation_cost_correction';
+	data: Record<string, unknown>;
+};
 
 const SESSION_ID = 'delegation-pairing-parent';
 
@@ -83,13 +88,7 @@ describe('Task delegation telemetry — regression: delegation_begin unreachable
 	}
 
 	test('a delegation emits BOTH delegation_begin and delegation_end when guardrails are disabled (production config)', async () => {
-		// Previous code emitted delegation_begin ONLY inside beginInvocation
-		// (src/state.ts guardrails invocation-window bookkeeping), whose every
-		// reachable call site is gated on guardrails being enabled
-		// (delegation-tracker chat.message hook and the guardrails tool-before
-		// fallback). With `guardrails.enabled: false` — the measured production
-		// config — 33 days of multi-agent use produced 12 delegation_end events
-		// and ZERO delegation_begin events.
+		// Regression: disabled guardrails must not make delegation_begin unreachable.
 		const plugin = await boot({ guardrails: { enabled: false } });
 		await dispatchTask(plugin, 'pairing-call-both-events');
 
@@ -97,13 +96,187 @@ describe('Task delegation telemetry — regression: delegation_begin unreachable
 		expect(ends()).toHaveLength(1);
 	});
 
+	test('late exact-child usage upgrades unavailable to estimated to reported', async () => {
+		const plugin = await boot({
+			guardrails: { enabled: false },
+			pricing: {
+				reported_cost_currency: { provider: 'USD' },
+				models: {
+					'provider/model': { input_per_million: 0.1, output_per_million: 0 },
+				},
+			},
+		});
+		await plugin.hooks['tool.execute.before'](
+			{
+				tool: 'task',
+				sessionID: SESSION_ID,
+				callID: 'late-cost-correction',
+			},
+			{
+				args: {
+					description: 'explore',
+					prompt: 'Explore and report.',
+					subagent_type: 'explorer',
+				},
+			},
+		);
+		await plugin.hooks['tool.execute.after'](
+			{
+				tool: 'task',
+				sessionID: SESSION_ID,
+				callID: 'late-cost-correction',
+			},
+			{
+				state: 'completed',
+				metadata: { sessionID: 'late-cost-child' },
+				output: 'done',
+			},
+		);
+		await plugin.hooks.event({
+			event: {
+				type: 'message.updated',
+				properties: {
+					info: {
+						role: 'assistant',
+						sessionID: 'late-cost-child',
+						providerID: 'provider',
+						modelID: 'model',
+						tokens: { input: 1_000_000, output: 0 },
+					},
+				},
+			},
+		});
+		await plugin.hooks.event({
+			event: {
+				type: 'message.updated',
+				properties: {
+					info: {
+						role: 'assistant',
+						sessionID: 'late-cost-child',
+						providerID: 'provider',
+						modelID: 'model',
+						cost: 0.25,
+						tokens: { input: 1_000_000, output: 5 },
+					},
+				},
+			},
+		});
+
+		const initial = ends().at(-1)?.data;
+		const corrections = events.filter(
+			(event) => event.event === 'delegation_cost_correction',
+		);
+		expect(initial?.record_id).toBeString();
+		expect(initial?.cost_source).toBe('unavailable');
+		expect(corrections).toHaveLength(2);
+		expect(corrections[0]?.data.record_id).toBe(initial?.record_id);
+		expect(corrections.map((event) => event.data.version)).toEqual([2, 3]);
+		expect(corrections.map((event) => event.data.cost_source)).toEqual([
+			'estimated',
+			'reported',
+		]);
+		expect(corrections[1]?.data.cost_usd).toBe(0.25);
+	});
+
+	test('restart recovery binds exactly one unresolved delegation before correcting it', async () => {
+		const plugin = await bootKnowledgeHost(
+			directory,
+			{
+				guardrails: { enabled: false },
+				pricing: {
+					reported_cost_currency: { provider: 'USD' },
+					models: {
+						'provider/model': { input_per_million: 0.1, output_per_million: 0 },
+					},
+				},
+			},
+			{
+				session: {
+					get: async () => ({ data: { parentID: SESSION_ID } }),
+				},
+			},
+		);
+		addTelemetryListener((event, data) => events.push({ event, data }));
+		const session = ensureAgentSession(SESSION_ID, 'architect', directory);
+		session.currentTaskId = '1.1';
+		swarmState.activeAgent.set(SESSION_ID, 'architect');
+
+		await plugin.hooks['tool.execute.before'](
+			{ tool: 'task', sessionID: SESSION_ID, callID: 'restart-cost' },
+			{
+				args: {
+					description: 'explore',
+					prompt: 'Explore and report.',
+					subagent_type: 'explorer',
+				},
+			},
+		);
+		await plugin.hooks['tool.execute.after'](
+			{ tool: 'task', sessionID: SESSION_ID, callID: 'restart-cost' },
+			{
+				state: 'completed',
+				metadata: { sessionID: 'restart-cost-child' },
+				output: 'done',
+			},
+		);
+		await plugin.hooks.event({
+			event: {
+				type: 'message.updated',
+				properties: {
+					info: {
+						role: 'assistant',
+						sessionID: 'restart-cost-child',
+						providerID: 'provider',
+						modelID: 'model',
+						tokens: { input: 1_000_000, output: 0 },
+					},
+				},
+			},
+		});
+
+		const telemetryPath = path.join(directory, '.swarm', 'telemetry.jsonl');
+		for (let attempt = 0; attempt < 50; attempt++) {
+			if (
+				existsSync(telemetryPath) &&
+				readFileSync(telemetryPath, 'utf8').includes(
+					'delegation_cost_correction',
+				)
+			)
+				break;
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		_resetDelegationTelemetryPairingForTesting();
+		await plugin.hooks.event({
+			event: {
+				type: 'message.updated',
+				properties: {
+					info: {
+						role: 'assistant',
+						sessionID: 'restart-cost-child',
+						providerID: 'provider',
+						modelID: 'model',
+						cost: 0.5,
+						tokens: { input: 1_000_000, output: 10 },
+					},
+				},
+			},
+		});
+
+		expect(
+			events.filter((event) => event.event === 'delegation_cost_binding'),
+		).toHaveLength(1);
+		const corrections = events.filter(
+			(event) => event.event === 'delegation_cost_correction',
+		);
+		expect(corrections.map((event) => event.data.version)).toEqual([2, 3]);
+		expect(corrections.at(-1)?.data.cost_source).toBe('reported');
+		expect(
+			events.filter((event) => event.event === 'delegation_cost_join'),
+		).toHaveLength(0);
+	});
+
 	test('begin/end pair carries identical sessionId, agentName, and taskId, with begin observed first', async () => {
-		// Previous code (even with guardrails enabled) emitted begin from the
-		// CHILD session's chat.message path with a prefix-stripped agent name and
-		// taskId 'unknown', while end fired in the PARENT session using
-		// activeAgent — which stays 'architect' because subagents run in child
-		// sessions — so the two events never shared a single identity field and
-		// every production delegation_end was mislabeled agentName='architect'.
+		// Regression: begin/end must use one parent-side delegation identity.
 		const plugin = await boot({ guardrails: { enabled: false } });
 		await dispatchTask(plugin, 'pairing-call-identity');
 
@@ -167,13 +340,7 @@ describe('Task delegation telemetry — regression: delegation_begin unreachable
 	});
 
 	test('pipeline continuation advisory fires from the begin-side identity, not activeAgent', async () => {
-		// The handoff's agentName now prefers the begin-recorded subagent_type.
-		// Before this change it read swarmState.activeAgent — always the
-		// architect, since subagents run in child sessions — so the [PIPELINE]
-		// continuation advisories for reviewer/test_engineer/critic delegations
-		// never fired in production. Dispatching subagent_type 'critic' while
-		// activeAgent stays 'architect' discriminates the two sources: the
-		// legacy fallback would emit no advisory.
+		// Handoff advisories use the begin-recorded subagent identity.
 		const plugin = await boot({ guardrails: { enabled: false } });
 		await dispatchTask(plugin, 'pipeline-advisory-call', 'critic');
 
@@ -188,10 +355,7 @@ describe('Task delegation telemetry — regression: delegation_begin unreachable
 	});
 
 	test('a Task call denied by a fail-closed gate emits no delegation_begin', async () => {
-		// The begin emit is the LAST statement of the fail-closed try block in
-		// tool.execute.before — any gate denial must skip it. A background=true
-		// dispatch without the hooks.background_subagents opt-in is a
-		// deterministic delegation-gate denial.
+		// A fail-closed gate denial must not publish a begin event.
 		const plugin = await boot({ guardrails: { enabled: false } });
 		await expect(
 			plugin.hooks['tool.execute.before'](
@@ -212,14 +376,7 @@ describe('Task delegation telemetry — regression: delegation_begin unreachable
 	});
 
 	test('Task-path taskId asymmetry: begin carries empty taskId when no task is current, end carries the taskId resolved at completion', async () => {
-		// Pins the documented scoped contract (PR #2234): triple equality is
-		// asserted only for the review-engine paths. On the Task path the
-		// begin's taskId is '' when no task is current at dispatch, and the
-		// end's `beganDelegation?.taskId || taskSession.currentTaskId || ''`
-		// deliberately uses || (not ??) so an empty begin-side taskId falls
-		// through to the taskId that became current during the delegated
-		// call. Regressing || to ??, or making the begin read a stale
-		// currentTaskId, breaks this test.
+		// Task completion may resolve a task id that was absent at dispatch.
 		const plugin = await boot({ guardrails: { enabled: false } });
 		const session = swarmState.agentSessions.get(SESSION_ID);
 		if (!session) throw new Error('session missing after boot');

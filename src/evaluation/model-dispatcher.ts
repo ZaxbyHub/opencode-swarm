@@ -1,5 +1,8 @@
 import type { Agent, OpencodeClient } from '@opencode-ai/sdk';
-import type { DelegationCostFields } from '../services/cost-accounting.js';
+import type {
+	DelegationCostFields,
+	PricingConfig,
+} from '../services/cost-accounting.js';
 import {
 	dispatchWithModelFallback,
 	parseModelString,
@@ -154,6 +157,7 @@ async function awaitWithAbort<T>(
 
 export function createEvaluationModelDispatcher(
 	client: OpencodeClient,
+	pricing?: PricingConfig,
 ): EvaluationModelDispatcher {
 	return async (request) => {
 		const startedAt = Date.now();
@@ -215,6 +219,7 @@ export function createEvaluationModelDispatcher(
 						title: `evaluation gate (${resolvedAgentName})`,
 						timeoutMs: context.remainingMs ?? request.timeoutMs,
 						abortSignal: controller.signal,
+						pricing,
 					});
 					if (result.status === 'completed') return result;
 					if (result.status === 'timeout') timedOut = true;

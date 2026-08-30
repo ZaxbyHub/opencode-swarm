@@ -111,6 +111,7 @@ describe('ephemeral agent dispatcher', () => {
 			readOnlyTools: DEFAULT_READ_ONLY_TOOLS,
 			title: 'bounded review',
 			timeoutMs: 1_000,
+			pricing: { reported_cost_currency: { 'actual-provider': 'USD' } },
 		});
 
 		expect(result).toMatchObject({
