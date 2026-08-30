@@ -1,5 +1,64 @@
 # Changelog
 
+## [7.158.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.157.1...v7.158.0) (2026-08-30)
+
+
+### Features
+
+* **pr-review:** terminal N-of-6 settlement, typed critic routing, and audited armed recovery ([24b7de8](https://github.com/ZaxbyHub/opencode-swarm/commit/24b7de83c8c9454b1322bea0568aa2e42c026709))
+
+## [7.157.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.157.0...v7.157.1) (2026-08-30)
+
+
+### Bug Fixes
+
+* bound repo graph source reads ([1edf095](https://github.com/ZaxbyHub/opencode-swarm/commit/1edf09514c95de1691ad62b8b0a241294a4a726c))
+
+## [7.157.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.156.0...v7.157.0) (2026-08-30)
+
+
+### Features
+
+* **pr-workflow:** [Guardrail remediation 12/12] add audited PR-feedback publication invalidation and reapproval ([a7bf516](https://github.com/ZaxbyHub/opencode-swarm/commit/a7bf5169812ab0ce6d60b74cba870e9cc9c14f53))
+* **pr-workflow:** add audited PR-feedback publication invalidation and reapproval ([#2108](https://github.com/ZaxbyHub/opencode-swarm/issues/2108)) ([669b7f2](https://github.com/ZaxbyHub/opencode-swarm/commit/669b7f257dfe814fdac876d219803bea54fab0dd))
+
+
+### Bug Fixes
+
+* **pr-workflow:** close PR-review findings — pushurl identity binding, redaction authority parsing, deleted-state guard scope, publication-event authority indexing ([0bd17d7](https://github.com/ZaxbyHub/opencode-swarm/commit/0bd17d768807b2b89745f27754d0fd1b034c044c))
+
+## [7.156.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.155.0...v7.156.0) (2026-08-29)
+
+
+### Features
+
+* **harness:** add declarative harness mutation surface ([8cf6b52](https://github.com/ZaxbyHub/opencode-swarm/commit/8cf6b526ca6c338e232e89cc918fdb1f8d89f031))
+
+
+### Bug Fixes
+
+* **tests:** canonicalize manifest temp fixtures ([e6e3f2f](https://github.com/ZaxbyHub/opencode-swarm/commit/e6e3f2f732b260c3ff7154b681d547fb38f8f667))
+
+## [7.155.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.154.3...v7.155.0) (2026-08-29)
+
+
+### Features
+
+* **repo-graph:** add indexed repo-memory storage behind json fallback ([9187ae8](https://github.com/ZaxbyHub/opencode-swarm/commit/9187ae8cd15f26683c99e08281db69b5512e527d))
+
+
+### Bug Fixes
+
+* **review:** resolve PR [#2412](https://github.com/ZaxbyHub/opencode-swarm/issues/2412) validated findings (swarm-pr-feedback) ([2e3b2aa](https://github.com/ZaxbyHub/opencode-swarm/commit/2e3b2aa25bf24fd39e65ea4ad83e0ea7e2a205b8))
+
+## [7.154.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.154.2...v7.154.3) (2026-08-29)
+
+
+### Bug Fixes
+
+* **ci:** extract Check 7 into a standalone check:token-formula gate to preserve [#2094](https://github.com/ZaxbyHub/opencode-swarm/issues/2094) legacy-oracle parity; wire into quality job + skill list ([93eed16](https://github.com/ZaxbyHub/opencode-swarm/commit/93eed16d0aaaebed4fcac5b24ee4b0ccdb6e7e69))
+* **context:** [Guardrail remediation 11/12] unify context pressure, injection budgets, and summary continuity ([5fa6c8d](https://github.com/ZaxbyHub/opencode-swarm/commit/5fa6c8df0691baf9dbcc193fd300750c995cefb9))
+
 ## [7.154.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.154.1...v7.154.2) (2026-08-28)
 
 

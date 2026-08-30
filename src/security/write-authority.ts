@@ -12,7 +12,10 @@ export type WriteAuthorityOrigin =
 	| 'critic_approved'
 	| 'human_approved';
 
-export type WriteApprovalAction = 'skill_improve';
+export type WriteApprovalAction =
+	| 'skill_improve'
+	| 'harness_activate'
+	| 'harness_rollback';
 
 export interface WriteApprovalRequest {
 	targetSessionId: string;
@@ -350,6 +353,7 @@ export async function consumeWriteApprovalFact(args: {
 	directory: string;
 	request: WriteApprovalRequest;
 	consumerSessionId: string;
+	expectedFactId?: string;
 	now?: Date;
 }): Promise<WriteApprovalFactV1 | null> {
 	validateRequest(args.request);
@@ -368,6 +372,12 @@ export async function consumeWriteApprovalFact(args: {
 		(entries) => {
 			const match = selectUniqueActiveFact(entries, args.request, now);
 			if (!match) return null;
+			if (
+				args.expectedFactId !== undefined &&
+				match.id !== args.expectedFactId.trim()
+			) {
+				return null;
+			}
 			consumed = match;
 			entries.push({
 				kind: 'consumed',

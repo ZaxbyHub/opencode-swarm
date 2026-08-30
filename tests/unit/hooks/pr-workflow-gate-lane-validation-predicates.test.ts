@@ -15,8 +15,8 @@ const DIGEST = 'a'.repeat(64);
 const REF = `L1:${'b'.repeat(64)}:${'c'.repeat(64)}:${DIGEST}`;
 const LANE = 'correctness-state';
 const HEADER =
-	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
-const TEXT = `${HEADER}\nC-1 | ${LANE} | HIGH | correctness | src/a.ts:1 | claim | evidence | impact | HIGH`;
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
+const TEXT = `${HEADER}\nC-1 | ${LANE} | HIGH | correctness | src/a.ts:1 | claim | evidence | impact | HIGH | ORDINARY | `;
 
 function validInput(): PrReviewDiscoveryLaneValidationInput {
 	const record: BackgroundDelegationRecord = {
@@ -435,7 +435,7 @@ describe('PR review lane-local validation predicates', () => {
 		// A marker-bearing row with no canonical header — the shape that used to
 		// discard an entire lane's findings. It is now accepted, so the repair must
 		// be observable rather than indistinguishable from well-formed output.
-		const text = `[CANDIDATE] | C-1 | ${LANE} | HIGH | correctness | src/a.ts:1 | claim | evidence | impact | HIGH`;
+		const text = `[CANDIDATE] | C-1 | ${LANE} | HIGH | correctness | src/a.ts:1 | claim | evidence | impact | HIGH | ORDINARY | `;
 		const input = validInput();
 		input.result!.text = text;
 		input.result!.chars = text.length;

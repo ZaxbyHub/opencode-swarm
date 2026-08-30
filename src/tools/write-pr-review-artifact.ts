@@ -20,6 +20,7 @@ import {
 	assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts,
 	markPrReviewArtifactBoundary,
 	markPrReviewHandoffComplete,
+	normalizePrReviewPartialBaseCoverageRecord,
 	prWorkflowSessionFileStem,
 	readPrWorkflowGateState,
 	resolvePrReviewWriterRunId,
@@ -81,6 +82,21 @@ async function readFindings(filePath: string): Promise<PersistedFinding[]> {
 					throw new Error(
 						`line ${index + 1} is not JSON: ${error instanceof Error ? error.message : String(error)}`,
 					);
+				}
+				// Issue #2383 single read/migration boundary: a legacy row that
+				// predates typed risk metadata is normalized here to UNKNOWN /
+				// no tags — the honest, fail-safe classification that routes it
+				// to critic review. New writes carry the fields and are
+				// validated by the write boundary; malformed values on new rows
+				// are rejected below rather than backfilled from any heuristic.
+				if (decoded !== null && typeof decoded === 'object') {
+					const record = decoded as Record<string, unknown>;
+					if (record.risk_impact === undefined) {
+						record.risk_impact = 'UNKNOWN';
+					}
+					if (record.risk_tags === undefined) {
+						record.risk_tags = [];
+					}
 				}
 				const parsed = PersistedFindingSchema.safeParse(decoded);
 				if (!parsed.success) {
@@ -164,6 +180,8 @@ export const _internals = {
 	atomicWrite,
 	atomicCreate,
 	assertBoundary: assertPrReviewArtifactBoundary,
+	/** Exposed so the #2383 read/migration boundary is testable directly. */
+	readFindings,
 };
 
 function operationFailure(
@@ -201,6 +219,11 @@ function canonicalFindingRecords(
 				next_action: record.next_action,
 				severity: record.severity,
 				category: record.category,
+				// Typed risk metadata participates in the replay-identity key
+				// (issue #2383): a record whose routing-relevant metadata
+				// differs is never an exact replay.
+				risk_impact: record.risk_impact,
+				risk_tags: record.risk_tags,
 			}))
 			.sort((left, right) => left.finding_id.localeCompare(right.finding_id)),
 	);
@@ -394,7 +417,7 @@ export async function executeWritePrReviewArtifact(
 								? 'partial_base_coverage'
 								: 'boundary',
 							findingsInput.partial_base_coverage
-								? 'exactly five successful base dimensions plus one named typed terminal failure after every other boundary predicate passes'
+								? 'a terminal N-of-6 settlement: every declared unresolved dimension terminal (typed failure, explicit cancellation, or never launched) after every other boundary predicate passes'
 								: `the legal next "${findingsInput.boundary}" checkpoint for run "${resolvedRunId}" with exact inventory [${findingIds.join(', ')}]`,
 							error instanceof Error ? error.message : String(error),
 						),
@@ -440,9 +463,10 @@ export async function executeWritePrReviewArtifact(
 							state.prReviewCoverageDisclosurePath ||
 							state.prReviewCoverageDisclosureDigest,
 					);
-					// Validate every boundary predicate except exact-six before the
-					// admission mutates durable state. The normal call below then proves
-					// the newly committed disclosure closes that sole coverage gap.
+					// Validate every boundary predicate except terminal coverage
+					// before the admission mutates durable state. The normal call
+					// below then proves the newly committed disclosure exactly
+					// closes the derived coverage gap.
 					await _internals.assertBoundary(
 						directory,
 						sessionID,
@@ -455,7 +479,7 @@ export async function executeWritePrReviewArtifact(
 						directory,
 						sessionID,
 						resolvedRunId,
-						findingsInput.partial_base_coverage.missing_dimension,
+						findingsInput.partial_base_coverage.unresolved_dimensions,
 					);
 					if (
 						!hadPartialAdmission &&
@@ -488,7 +512,7 @@ export async function executeWritePrReviewArtifact(
 								? 'partial_base_coverage'
 								: 'boundary',
 							findingsInput.partial_base_coverage
-								? 'exactly five successful base dimensions plus one named typed terminal failure after every other boundary predicate passes'
+								? 'a terminal N-of-6 settlement: every declared unresolved dimension terminal (typed failure, explicit cancellation, or never launched) after every other boundary predicate passes'
 								: `the legal next "${findingsInput.boundary}" checkpoint for run "${resolvedRunId}" with exact inventory [${findingIds.join(', ')}]`,
 							error instanceof Error ? error.message : String(error),
 						),
@@ -575,9 +599,15 @@ export async function executeWritePrReviewArtifact(
 				...(state.prReviewPartialBaseCoverage
 					? {
 							partial_base_coverage: {
-								missing_dimension:
-									state.prReviewPartialBaseCoverage.missingDimension,
-								failure_class: state.prReviewPartialBaseCoverage.failureClass,
+								unresolved_dimensions:
+									normalizePrReviewPartialBaseCoverageRecord(
+										state.prReviewPartialBaseCoverage,
+									).unresolvedDimensions.map((entry) => ({
+										dimension: entry.dimension,
+										terminal_state: entry.terminalState,
+										reason_kind: entry.reasonKind,
+										failure_class: entry.failureClass,
+									})),
 								path: state.prReviewCoverageDisclosurePath,
 								digest: state.prReviewCoverageDisclosureDigest,
 							},

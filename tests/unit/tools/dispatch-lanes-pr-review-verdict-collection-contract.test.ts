@@ -418,7 +418,12 @@ describe('collect_lane_results — regression: reviewer/critic verdict rows vali
 		expect(extra?.error).toContain('predicate=critic.verdict_rows');
 	});
 
-	test('recovers lossy legacy rows while rejecting duplicates and DISPROVED/non-NONE rows', async () => {
+	test('rejects lossy unescaped-pipe rows, duplicates, and DISPROVED/non-NONE rows', async () => {
+		// INTENT CHANGE (issue #2383): the twelve-field REVIEWED row contract
+		// ends trailing-field pipe recovery for reviewer verdicts — an overflow
+		// row's merged tail lands in the enum-constrained risk_tags field and can
+		// never re-validate — so an unescaped pipe in the rationale is now a
+		// fail-closed row rejection instead of a lossy recovery.
 		await establishReviewPrerequisites();
 		const specs = [
 			{ laneId: 'duplicate-row', itemId: 'C-0' },
@@ -479,16 +484,9 @@ describe('collect_lane_results — regression: reviewer/critic verdict rows vali
 			tempDir,
 			{ sessionID: SESSION_ID },
 		);
-		expect(result.completed).toBe(1);
-		expect(result.failed).toBe(2);
-		const recovered = result.lane_results.find(
-			(entry) => entry.id === 'malformed-row',
-		);
-		expect(recovered?.accepted_review_item_ids).toEqual(['C-1']);
-		expect(recovered?.rejected_review_item_ids).toEqual([]);
-		for (const { laneId, itemId } of specs.filter(
-			(spec) => spec.laneId !== 'malformed-row',
-		)) {
+		expect(result.completed).toBe(0);
+		expect(result.failed).toBe(3);
+		for (const { laneId, itemId } of specs) {
 			const lane = result.lane_results.find((entry) => entry.id === laneId);
 			expect(lane?.accepted_review_item_ids).toEqual([]);
 			expect(lane?.rejected_review_item_ids).toEqual([itemId]);

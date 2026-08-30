@@ -89,8 +89,8 @@ async function persistAuthoritativeBaseLane(args: {
 }) {
 	const correlationId = `${args.batchId}--${args.laneId}`;
 	const text = [
-		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence',
-		`${args.candidateId} | ${args.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH`,
+		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags',
+		`${args.candidateId} | ${args.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH | ORDINARY | `,
 	].join('\n');
 	await recordPendingDelegation(directory, {
 		correlationId,
@@ -300,7 +300,7 @@ describe('dispatch_lanes PR review resilience singleton and concurrency', () => 
 
 		await expect(
 			assertPrReviewBaseCoverageSettled(directory, sessionID),
-		).resolves.toMatchObject({ prHeadSha: HEAD_SHA });
+		).resolves.toMatchObject({ state: { prHeadSha: HEAD_SHA } });
 
 		await expect(
 			enforcePrReviewBaseDimensions(

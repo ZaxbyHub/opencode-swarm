@@ -26,6 +26,8 @@ describe('PR-review executable contract (#2333)', () => {
 			'a|b\\c\nd\re',
 			'probe',
 			'reviewer',
+			'HIGH_IMPACT',
+			'SECURITY,GIT',
 		];
 		const encoded = encodePrReviewVerdictRow('reviewer', fields);
 		const parsed = parsePrReviewVerdictRow(encoded, 'reviewer');

@@ -116,7 +116,7 @@ describe('pr-workflow-gate base coverage', () => {
 		});
 		await expect(
 			assertPrReviewBaseCoverageSettled(tempDir, SESSION_ID),
-		).rejects.toThrow('missing dimensions');
+		).rejects.toThrow('no terminal settlement disclosure is admitted');
 
 		const retrySecondHalf = secondHalf.map((lane) => ({
 			...lane,
@@ -132,7 +132,7 @@ describe('pr-workflow-gate base coverage', () => {
 		);
 		await expect(
 			assertPrReviewBaseCoverageSettled(tempDir, SESSION_ID),
-		).resolves.toMatchObject({ prHeadSha: HEAD_SHA });
+		).resolves.toMatchObject({ state: { prHeadSha: HEAD_SHA } });
 	});
 
 	test('base settlement rejects six records from one reused child session', async () => {
@@ -150,7 +150,7 @@ describe('pr-workflow-gate base coverage', () => {
 
 		await expect(
 			assertPrReviewBaseCoverageSettled(tempDir, SESSION_ID),
-		).rejects.toThrow('missing dimensions');
+		).rejects.toThrow('no terminal settlement disclosure is admitted');
 	});
 
 	test('a retry base batch cannot consolidate ownership at depth tier L (legacy/unset tier)', async () => {
@@ -270,7 +270,7 @@ describe('pr-workflow-gate base coverage', () => {
 			);
 			await expect(
 				assertPrReviewBaseCoverageSettled(tempDir, SESSION_ID),
-			).rejects.toThrow(`missing dimensions: ${dimA}, ${dimB}`);
+			).rejects.toThrow(`unresolved: ${dimA}, ${dimB}`);
 
 			await persistBatch(
 				'base-consolidated',
@@ -280,7 +280,7 @@ describe('pr-workflow-gate base coverage', () => {
 			);
 			await expect(
 				assertPrReviewBaseCoverageSettled(tempDir, SESSION_ID),
-			).resolves.toMatchObject({ prHeadSha: HEAD_SHA });
+			).resolves.toMatchObject({ state: { prHeadSha: HEAD_SHA } });
 		} finally {
 			_test_exports.resolvePrReviewDiffStats = originalResolveDiffStats;
 		}
@@ -344,7 +344,7 @@ describe('pr-workflow-gate base coverage', () => {
 			);
 			await expect(
 				assertPrReviewBaseCoverageSettled(tempDir, SESSION_ID),
-			).rejects.toThrow(`missing dimensions: ${dimA}, ${dimB}, ${dimC}`);
+			).rejects.toThrow(`unresolved: ${dimA}, ${dimB}, ${dimC}`);
 
 			// Retrying the same lane with genuinely distinct per-dimension
 			// evidence text succeeds.
@@ -361,7 +361,7 @@ describe('pr-workflow-gate base coverage', () => {
 				{
 					scope: expectedScope,
 					textOverride: [
-						'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence',
+						'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags',
 						`C-0 | ${dimA} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH`,
 						`[CLEAN] | ${dimB} | reviewed diff scoped to ${dimB} | no ${dimB} finding after focused invariant review`,
 						`[CLEAN] | ${dimC} | reviewed diff scoped to ${dimC} | no ${dimC} finding after focused invariant review`,
@@ -370,7 +370,7 @@ describe('pr-workflow-gate base coverage', () => {
 			);
 			await expect(
 				assertPrReviewBaseCoverageSettled(tempDir, SESSION_ID),
-			).resolves.toMatchObject({ prHeadSha: HEAD_SHA });
+			).resolves.toMatchObject({ state: { prHeadSha: HEAD_SHA } });
 		} finally {
 			_test_exports.resolvePrReviewDiffStats = originalResolveDiffStats;
 		}

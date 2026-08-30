@@ -141,7 +141,7 @@ describe('PR_REVIEW tier-L consolidated retry batches', () => {
 		});
 		await expect(
 			assertPrReviewBaseCoverageSettled(tierLDirectory(), SESSION_ID),
-		).resolves.toMatchObject({ prHeadSha: HEAD_SHA });
+		).resolves.toMatchObject({ state: { prHeadSha: HEAD_SHA } });
 	});
 
 	test('(b2) a completed-but-degraded lane counts as a terminal failure', async () => {

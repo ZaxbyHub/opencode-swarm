@@ -125,6 +125,7 @@ export type {
 } from './repo-graph/types';
 export {
 	createEmptyGraph,
+	DEFAULT_MAX_SOURCE_BYTES,
 	GRAPH_SCHEMA_VERSION,
 	inferPackageBoundary,
 	isSchemaVersionAtLeast,

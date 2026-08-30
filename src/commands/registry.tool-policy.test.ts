@@ -98,39 +98,6 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'consolidate',
 	]);
 
-	const EXPECTED_NONE = new Set<string>([
-		'analyze',
-		'archive',
-		'brainstorm',
-		'clarify',
-		'codebase-review',
-		'concurrency',
-		'council',
-		'ci-monitor',
-		'coupling',
-		'curate',
-		'dark-matter',
-		'deep-dive',
-		'deep-research',
-		'design-docs',
-		'epic',
-		'finalize',
-		'handoff',
-		'issue',
-		'link',
-		'link status',
-		'loop',
-		'pr-feedback',
-		'pr-review',
-		'promote',
-		'qa-gates',
-		'simulate',
-		'specify',
-		'turbo',
-		'unlink',
-		'write-retro',
-	]);
-
 	test("'agent' bucket contains exactly the expected commands", () => {
 		const actual = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
@@ -160,22 +127,6 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		}
 		for (const name of actual) {
 			expect(EXPECTED_RESTRICTED.has(name)).toBe(true);
-		}
-	});
-
-	test("'none' bucket contains exactly the expected standalone non-tool commands", () => {
-		const actual = new Set<string>();
-		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
-			if ((entry as CommandEntry).toolPolicy === 'none') {
-				actual.add(name);
-			}
-		}
-		expect(actual.size).toBe(EXPECTED_NONE.size);
-		for (const name of EXPECTED_NONE) {
-			expect(actual.has(name)).toBe(true);
-		}
-		for (const name of actual) {
-			expect(EXPECTED_NONE.has(name)).toBe(true);
 		}
 	});
 

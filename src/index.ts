@@ -158,7 +158,10 @@ import {
 import { microReflectorAfter } from './hooks/micro-reflector.js';
 import { normalizeToolName } from './hooks/normalize-tool-name';
 import { createPrAutoSubscribeHook } from './hooks/pr-auto-subscribe.js';
-import { enforcePrWorkflowToolBefore } from './hooks/pr-workflow-gate.js';
+import {
+	enforcePrWorkflowToolBefore,
+	recordPrFeedbackPushAttemptResult,
+} from './hooks/pr-workflow-gate.js';
 import { createPrWorkflowResponseGate } from './hooks/pr-workflow-response-gate.js';
 import { createPrWorkflowSessionResolver } from './hooks/pr-workflow-session-resolver.js';
 import { collectReviewerReceiptAfter } from './hooks/review-receipt-collector.js';
@@ -182,6 +185,11 @@ import {
 	recordDeniedToolCall,
 } from './hooks/trajectory-logger';
 import { estimateTokens } from './hooks/utils';
+import {
+	hasGitMarkerAncestor,
+	hasManifestAncestor,
+	hasSwarmState,
+} from './lang/manifest-files';
 import { realtimeAdmissionAfter } from './learning/admission.js';
 import { createMemoryLifecycleHooks } from './memory';
 import type { MemoryConfig as RuntimeMemoryConfig } from './memory/config.js';
@@ -685,10 +693,13 @@ async function initializeOpenCodeSwarm(
 	// On cold Windows CI runners with AV/indexing, each step can take 100–500ms;
 	// the prior sequential shape summed them, easily exceeding the 400ms
 	// repro-704 T1 deadline. Parallelizing drops the floor to `max()` of the
-	// three. Promise.all also preserves the in-source ordering contract at
-	// `src/index.ts` (the `.swarm/` writes below run only after all three
-	// resolve, so `ensureSwarmGitExcluded` still completes before any `.swarm/`
-	// artifact is created).
+	// three. Snapshot and Git hygiene are additionally skipped when a bounded
+	// filesystem preflight proves there is no `.swarm/` state or Git boundary;
+	// those operations cannot produce useful work in a source-only workspace.
+	// Promise.all preserves the in-source ordering contract at `src/index.ts`
+	// (the `.swarm/` writes below run only after all scheduled reads resolve, so
+	// `ensureSwarmGitExcluded` still completes before any `.swarm/` artifact is
+	// created).
 	const __initIoStart = performance.now();
 	const configLoadP = withTimeout(
 		loadPluginConfigWithMetaAsyncForInit(ctx.directory),
@@ -708,33 +719,62 @@ async function initializeOpenCodeSwarm(
 		);
 		return getSafeDefaultConfigLoadResult();
 	});
-	const snapshotP = withTimeout(
-		loadSnapshotForInit(ctx.directory),
-		5_000,
-		new Error(
-			'loadSnapshot exceeded 5s budget; continuing without snapshot rehydration',
-		),
-	).catch((err: unknown) => {
-		const msg = err instanceof Error ? err.message : String(err);
-		log('loadSnapshot timed out or failed (non-fatal)', { error: msg });
-	});
-	const gitExcludeP = withTimeout(
-		// `quiet` defaults to false; the option is currently void-discarded in
-		// `ensureSwarmGitExcluded` (src/utils/gitignore-warning.ts:223-224), so
-		// dropping `{ quiet: config.quiet }` is behavior-identical AND lets us
-		// parallelize without waiting on the config read.
-		ensureSwarmGitExcludedForInit(ctx.directory),
-		ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS,
-		new Error(
-			`ensureSwarmGitExcluded exceeded ${ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS}ms budget; continuing without git-hygiene check`,
-		),
-	).catch((err: unknown) => {
-		const msg = err instanceof Error ? err.message : String(err);
-		log('ensureSwarmGitExcluded timed out or failed (non-fatal)', {
-			error: msg,
-		});
-	});
-	await Promise.all([configLoadP, snapshotP, gitExcludeP]);
+	const snapshotP = hasSwarmState(ctx.directory)
+		? withTimeout(
+				loadSnapshotForInit(ctx.directory),
+				5_000,
+				new Error(
+					'loadSnapshot exceeded 5s budget; continuing without snapshot rehydration',
+				),
+			).catch((err: unknown) => {
+				const msg = err instanceof Error ? err.message : String(err);
+				log('loadSnapshot timed out or failed (non-fatal)', { error: msg });
+			})
+		: Promise.resolve();
+	const gitExcludeP = hasGitMarkerAncestor(ctx.directory)
+		? withTimeout(
+				// `quiet` defaults to false; the option is currently void-discarded in
+				// `ensureSwarmGitExcluded` (src/utils/gitignore-warning.ts:223-224), so
+				// dropping `{ quiet: config.quiet }` is behavior-identical AND lets us
+				// parallelize without waiting on the config read.
+				ensureSwarmGitExcludedForInit(ctx.directory),
+				ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS,
+				new Error(
+					`ensureSwarmGitExcluded exceeded ${ENSURE_SWARM_GIT_EXCLUDED_OUTER_TIMEOUT_MS}ms budget; continuing without git-hygiene check`,
+				),
+			).catch((err: unknown) => {
+				const msg = err instanceof Error ? err.message : String(err);
+				log('ensureSwarmGitExcluded timed out or failed (non-fatal)', {
+					error: msg,
+				});
+			})
+		: Promise.resolve();
+	// Phase 4b: resolve language-agnostic project context in parallel with the
+	// other independent init reads. Starting the lazy backend import here keeps
+	// its cold-module cost off the tail of the critical path while preserving the
+	// existing requirement that prompt construction waits for the result. A
+	// source-only workspace has no possible backend context, so skip the heavy
+	// language-backend graph entirely after the cheap bounded ancestor preflight.
+	const projectContextP = hasManifestAncestor(ctx.directory)
+		? withTimeout(
+				(async () => {
+					const mod = await import('./agents/project-context');
+					return mod.buildProjectContext(ctx.directory);
+				})(),
+				300, // LANG_BACKEND_DETECTION_TIMEOUT_MS — see project-context.ts
+				new Error(
+					'language-backend detection exceeded 300ms; ' +
+						'continuing with unresolved sentinels',
+				),
+			).catch((err: unknown) => {
+				const msg = err instanceof Error ? err.message : String(err);
+				log('language-backend detection timed out or failed (non-fatal)', {
+					error: msg,
+				});
+				return null;
+			})
+		: Promise.resolve(null);
+	await Promise.all([configLoadP, snapshotP, gitExcludeP, projectContextP]);
 	const { config, loadedFromFile } = await configLoadP;
 	log(
 		`init-path I/O completed in ${(performance.now() - __initIoStart).toFixed(1)}ms (parallel: config+snapshot+git-exclude)`,
@@ -1104,37 +1144,11 @@ async function initializeOpenCodeSwarm(
 			});
 		});
 	}
-	// Phase 4b: resolve language-agnostic project context for agent prompt
-	// substitution. Bounded to 300ms and fails open with `null` (the agent
-	// prompts then ship with `unresolved (run /swarm preflight)` sentinels
-	// that the architect's existing DISCOVER mode picks up). Per Invariant 1
-	// (plugin init bounded + fail-open) — see ENSURE_SWARM_GIT_EXCLUDED
-	// precedent at line 342 above.
-	//
-	// 300ms budget chosen to keep total `server()` time under the 400ms
-	// Issue #704 / repro-704.mjs T1 deadline. `buildProjectContext` itself
-	// does NOT spawn subprocesses (see module docstring); typical runtime
-	// is <20ms on Linux/macOS and <100ms on Windows with cold FS. The
-	// timeout is belt-and-suspenders for pathological filesystems
-	// (antivirus interception, NFS stalls). A failed-open `null` projectContext
-	// is the same as no detection — placeholders resolve to the sentinel.
-	const projectContext = await withTimeout(
-		(async () => {
-			const mod = await import('./agents/project-context');
-			return mod.buildProjectContext(ctx.directory);
-		})(),
-		300, // LANG_BACKEND_DETECTION_TIMEOUT_MS — see project-context.ts
-		new Error(
-			'language-backend detection exceeded 300ms; ' +
-				'continuing with unresolved sentinels',
-		),
-	).catch((err: unknown) => {
-		const msg = err instanceof Error ? err.message : String(err);
-		log('language-backend detection timed out or failed (non-fatal)', {
-			error: msg,
-		});
-		return null;
-	});
+	// `projectContextP` was started alongside config/snapshot/git I/O above and
+	// is already settled before prompt construction. The bounded, fail-open
+	// result supplies `null` when backend detection is unavailable; prompts then
+	// retain their unresolved sentinels for the architect's DISCOVER mode.
+	const projectContext = await projectContextP;
 
 	let autoReviewConfig: AutoReviewConfig;
 	try {
@@ -1366,6 +1380,7 @@ async function initializeOpenCodeSwarm(
 		agentDefinitionMap,
 		{
 			getActiveAgentName: getActiveReviewAgentName,
+			config,
 			packageRoot: PACKAGE_ROOT,
 			registeredAgents: agents,
 			evaluationModelDispatcher,
@@ -2883,6 +2898,38 @@ async function initializeOpenCodeSwarm(
 					description:
 						'Use /swarm sdd project to materialize OpenSpec artifacts into .swarm/spec.md',
 				},
+				'swarm-blueprint-validate': {
+					template: '/swarm blueprint validate $ARGUMENTS',
+					description: shortcutDescription('blueprint validate'),
+				},
+				'swarm-blueprint-current': {
+					template: '/swarm blueprint current',
+					description: shortcutDescription('blueprint current'),
+				},
+				'swarm-blueprint-history': {
+					template: '/swarm blueprint history',
+					description: shortcutDescription('blueprint history'),
+				},
+				'swarm-blueprint-diff': {
+					template: '/swarm blueprint diff $ARGUMENTS',
+					description: shortcutDescription('blueprint diff'),
+				},
+				'swarm-blueprint-export': {
+					template: '/swarm blueprint export $ARGUMENTS',
+					description: shortcutDescription('blueprint export'),
+				},
+				'swarm-harness-candidate-validate': {
+					template: '/swarm harness candidate validate $ARGUMENTS',
+					description: shortcutDescription('harness candidate validate'),
+				},
+				'swarm-harness-candidate-show': {
+					template: '/swarm harness candidate show $ARGUMENTS',
+					description: shortcutDescription('harness candidate show'),
+				},
+				'swarm-harness-candidate-diff': {
+					template: '/swarm harness candidate diff $ARGUMENTS',
+					description: shortcutDescription('harness candidate diff'),
+				},
 				'swarm-issue': {
 					template: '/swarm issue $ARGUMENTS',
 					description:
@@ -3376,6 +3423,7 @@ async function initializeOpenCodeSwarm(
 					normalizeToolName(input.tool) ?? input.tool,
 					prWorkflowToolContext.args ?? undefined,
 					instanceGeneratedAgentNames,
+					input.callID,
 				);
 
 				// 4. Reviewer/delegation gate (FAIL-CLOSED).
@@ -3773,6 +3821,35 @@ async function initializeOpenCodeSwarm(
 			const afterCtx = resolveToolAfterContext(
 				input as { tool: string; sessionID: string; callID: string },
 			);
+			// Issue #2108: record the durable result of an admitted exact-bound
+			// push (`PR_FEEDBACK` publication attempts). Fail-open — a missed
+			// observation is recovered by the gate's reaper as `uncertain`, and
+			// publication truth always comes from complete_pr_workflow's direct
+			// remote verification. The gate session is resolved exactly as the
+			// tool-before enforcement does (child sessions walk to their parent).
+			try {
+				const pushCommand = afterCtx.args?.command;
+				if (
+					typeof pushCommand === 'string' &&
+					/^\s*git\s+push/i.test(pushCommand)
+				) {
+					const pushAttemptSessionID = await prWorkflowSessionResolver.resolve(
+						input.sessionID,
+					);
+					await recordPrFeedbackPushAttemptResult(
+						ctx.directory,
+						{
+							sessionID: pushAttemptSessionID,
+							callID: input.callID,
+							tool: input.tool,
+						},
+						pushCommand,
+						output,
+					);
+				}
+			} catch {
+				// Fail-open by design (see comment above).
+			}
 			if (autoReviewConfig.enabled && isTaskTool) {
 				await completeReviewerScopeLifecycle({
 					directory: ctx.directory,
@@ -4462,3 +4539,15 @@ export {
 	evaluateCandidateV1,
 	evaluationV1,
 } from './evaluation/public-api.js';
+export type {
+	AgentBlueprintV1,
+	BlueprintPatchV1,
+	HarnessBlueprintV1,
+	HarnessCandidateManifestV1,
+	OrchestrationSpecV1,
+	PromptArtifactV1,
+	ToolSpecV1,
+} from './harness/contracts.js';
+// Public declarative harness API. Callable and pure until explicitly invoked;
+// it performs no plugin-initialization work and exposes no autonomous executor.
+export { harnessMutationV1 } from './harness/public-api.js';

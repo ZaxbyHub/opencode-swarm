@@ -29,7 +29,7 @@ const BASE_IDS = PR_REVIEW_BASE_DIMENSION_IDS.map(
 	(_dimension, index) => `C-${index}`,
 );
 const CANDIDATE_HEADER =
-	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 
 const reviewed = (
 	ids: readonly string[],
@@ -112,7 +112,7 @@ async function establishFiftyItemInventory(): Promise<string[]> {
 			CANDIDATE_HEADER,
 			...Array.from({ length: 45 }, (_value, index) => {
 				const id = `I-${String(index + 1).padStart(2, '0')}`;
-				return `${id} | ${dimension} | HIGH | correctness | file.ts:${index + 1} | claim ${id} | evidence ${id} | impact ${id} | HIGH`;
+				return `${id} | ${dimension} | HIGH | correctness | file.ts:${index + 1} | claim ${id} | evidence ${id} | impact ${id} | HIGH | ORDINARY | `;
 			}),
 		].join('\n'),
 	});
@@ -270,7 +270,9 @@ describe('pr-workflow-gate item-keyed reviewer/critic coherence', () => {
 			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer'),
 		).resolves.toMatchObject({ mode: 'PR_REVIEW' });
 		await expect(
-			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA),
+			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
+				reportVerdict: 'APPROVE',
+			}),
 		).rejects.toThrow(`require critic coverage for: ${BASE_IDS.join(', ')}`);
 	});
 

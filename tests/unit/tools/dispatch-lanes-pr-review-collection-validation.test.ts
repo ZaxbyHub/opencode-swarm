@@ -27,9 +27,9 @@ const HEAD = 'abc123';
 const REVISION = 'revision-test';
 const SCOPE = 'complete PR diff def456...abc123';
 const BASE_HEADER =
-	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 const MICRO_HEADER =
-	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence';
+	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags';
 
 const originalInternals = { ..._internals };
 let directory = '';
@@ -209,8 +209,11 @@ describe('PR-review discovery validation during collection', () => {
 		expect(result.success).toBe(false);
 		expect(result.failed).toBe(1);
 		expect(result.lane_results[0].status).toBe('failed');
+		// Ten data fields is neither the legacy nine-field width (normalized to
+		// UNKNOWN / no tags, issue #2383) nor the canonical eleven — it stays a
+		// structural rejection.
 		expect(result.lane_results[0].error).toContain(
-			'exactly 9 candidate fields',
+			'Structurally short [CANDIDATE] row must be a full candidate or CLEAN attestation',
 		);
 	});
 
@@ -245,7 +248,7 @@ describe('PR-review discovery validation during collection', () => {
 			batch: 'valid-base',
 			mode: 'swarm-pr-review:base',
 			workflowLane: 'intent-architecture',
-			text: `${BASE_HEADER}\nC-1 | intent-architecture | HIGH | correctness | src/a.ts:1 | incorrect state transition | source proves the transition skips validation | user-visible invalid state | HIGH`,
+			text: `${BASE_HEADER}\nC-1 | intent-architecture | HIGH | correctness | src/a.ts:1 | incorrect state transition | source proves the transition skips validation | user-visible invalid state | HIGH | ORDINARY | `,
 		},
 		{
 			name: 'base CLEAN attestation',
@@ -259,14 +262,14 @@ describe('PR-review discovery validation during collection', () => {
 			batch: 'valid-micro',
 			mode: 'swarm-pr-review:micro',
 			workflowLane: 'auth-boundary',
-			text: `${MICRO_HEADER}\nM-1 | auth-boundary | HIGH | security | src/auth.ts:1 | missing authorization check | authorization invariant | request reaches protected state | HIGH`,
+			text: `${MICRO_HEADER}\nM-1 | auth-boundary | HIGH | security | src/auth.ts:1 | missing authorization check | authorization invariant | request reaches protected state | HIGH | ORDINARY | `,
 		},
 		{
 			name: 'framed base candidate',
 			batch: 'valid-framed',
 			mode: 'swarm-pr-review:base',
 			workflowLane: 'tests-falsifiability',
-			text: `Focused review notes follow.\n${BASE_HEADER}\nC-2 | tests-falsifiability | MEDIUM | testing | tests/a.test.ts:1 | missing falsifier | changed behavior lacks a negative probe | false green risk | HIGH`,
+			text: `Focused review notes follow.\n${BASE_HEADER}\nC-2 | tests-falsifiability | MEDIUM | testing | tests/a.test.ts:1 | missing falsifier | changed behavior lacks a negative probe | false green risk | HIGH | ORDINARY | `,
 		},
 	])('completes a valid $name', async ({ batch, mode, workflowLane, text }) => {
 		await recordLane({
@@ -290,7 +293,7 @@ describe('PR-review discovery validation during collection', () => {
 			lane: 'fenced-lane',
 			mode: 'swarm-pr-review:base',
 			workflowLane: 'security-trust',
-			text: `\`\`\`text\n${BASE_HEADER}\nC-3 | security-trust | HIGH | security | src/a.ts:1 | claim text | evidence summary text | impact context text | HIGH\n\`\`\``,
+			text: `\`\`\`text\n${BASE_HEADER}\nC-3 | security-trust | HIGH | security | src/a.ts:1 | claim text | evidence summary text | impact context text | HIGH | ORDINARY | \n\`\`\``,
 		});
 		const result = await collect('fenced-base');
 		expect(result.success).toBe(true);
@@ -464,7 +467,7 @@ describe('PR-review discovery validation during collection', () => {
 			mode: 'swarm-pr-review:base',
 			workflowLane: 'intent-architecture',
 			// Headerless but salvageable: one valid row, canonical header absent.
-			text: 'prose the explorer wrote first\n[CANDIDATE] | S-1 | intent-architecture | HIGH | correctness | src/a.ts:1 | claim text | evidence text | impact text | HIGH',
+			text: 'prose the explorer wrote first\n[CANDIDATE] | S-1 | intent-architecture | HIGH | correctness | src/a.ts:1 | claim text | evidence text | impact text | HIGH | ORDINARY | ',
 		});
 
 		const result = await collect('salvage-ledger');

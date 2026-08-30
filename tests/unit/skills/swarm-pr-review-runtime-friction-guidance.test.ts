@@ -59,8 +59,12 @@ describe('swarm-pr-review runtime friction guidance', () => {
 
 		expect(source).toContain('latest run for the exact bound head SHA');
 		expect(source).toContain('supersedes an older same-check run');
-		expect(source).toContain('After the second failed retry');
-		expect(source).toContain('do not probe downstream writers or micro lanes');
+		// Issue #2383: the exhausted-retry exit now routes through the terminal
+		// N-of-6 settlement guidance instead of the old "After the second
+		// failed retry" abort-first phrasing.
+		expect(source).toContain(
+			'the terminal N-of-6 settlement (issue #2383) is the truthful exit — not abort',
+		);
 		expect(source).toContain('abort_pr_workflow');
 		expect(source).toContain('mode: "PR_REVIEW"');
 		expect(source).toContain('kind: "recovery"');
@@ -80,6 +84,12 @@ describe('swarm-pr-review runtime friction guidance', () => {
 				'- USE ASYNC DISPATCH',
 				architect.indexOf('- RETRY STRUCTURALLY:'),
 			),
+		);
+		expect(retryRule).toContain(
+			'if the second retry still cannot close coverage',
+		);
+		expect(retryRule).toContain(
+			'do not probe downstream writers or micro lanes',
 		);
 		expect(retryRule).toContain('mode: "PR_REVIEW"');
 		expect(retryRule).toContain('kind: "recovery"');

@@ -79,8 +79,8 @@ async function appendSuccessfulBaseTransition(
 	record: NonNullable<ReturnType<typeof findByBatchId>[number]>,
 ) {
 	const text = [
-		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence',
-		`${record.laneId}-candidate | ${record.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH`,
+		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags',
+		`${record.laneId}-candidate | ${record.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH | ORDINARY | `,
 	].join('\n');
 	const stored = storeLaneOutput(directory, {
 		batchId: record.batchId,

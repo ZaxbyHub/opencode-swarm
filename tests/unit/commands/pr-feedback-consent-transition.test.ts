@@ -83,8 +83,8 @@ async function materializeTerminalReview(
 			textOverride: candidateIds
 				.map((id, index) =>
 					index === 0
-						? `[REVIEWED] | ${id} | DISPROVED | STRUCTURALLY_PROVEN | NONE | YES | file.ts:1 | rationale | probe | reviewer`
-						: `[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer`,
+						? `[REVIEWED] | ${id} | DISPROVED | STRUCTURALLY_PROVEN | NONE | YES | file.ts:1 | rationale | probe | reviewer | ORDINARY | `
+						: `[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer | ORDINARY | `,
 				)
 				.join('\n'),
 		},
@@ -146,6 +146,9 @@ async function materializeTerminalReview(
 				evidence: `reviewer evidence for ${id}`,
 				next_action: index === 0 ? 'suppress_with_reason' : 'route_to_critic',
 				severity: index === 0 ? 'NONE' : 'HIGH',
+				...(index === 0
+					? {}
+					: { risk_impact: 'ORDINARY' as const, risk_tags: [] as string[] }),
 			})),
 		},
 		tempDir,
@@ -169,6 +172,9 @@ async function materializeTerminalReview(
 							? 'handoff_to_feedback'
 							: 'report',
 				severity: index === 0 ? 'NONE' : 'HIGH',
+				...(index === 0
+					? {}
+					: { risk_impact: 'ORDINARY' as const, risk_tags: [] as string[] }),
 			})),
 		},
 		tempDir,
@@ -198,7 +204,9 @@ describe('PR feedback continuation consent gates (#2333)', () => {
 	test('post-clear first exact continuation confirms the persisted offer and starts PR_FEEDBACK', async () => {
 		const handoffPath = await materializeTerminalReview();
 		await expect(
-			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA),
+			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
+				reportVerdict: 'APPROVE',
+			}),
 		).resolves.toBe('completed');
 
 		const handler = createSwarmCommandHandler(tempDir, {});
@@ -267,7 +275,9 @@ describe('PR feedback continuation consent gates (#2333)', () => {
 
 	test('post-clear continuation rejects a tampered source workflow identity', async () => {
 		const handoffPath = await materializeTerminalReview();
-		await completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA);
+		await completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
+			reportVerdict: 'APPROVE',
+		});
 		const consentPath = path.join(
 			tempDir,
 			'.swarm',

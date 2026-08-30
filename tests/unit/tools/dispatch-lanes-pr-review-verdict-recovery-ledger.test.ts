@@ -50,7 +50,12 @@ afterEach(async () => {
 	await teardownPrWorkflowGateFixtures();
 });
 
-test('persists lossy legacy verdict-row recovery in the durable lane result', async () => {
+test('no longer persists lossy verdict-row recovery for unescaped pipes under the typed contract', async () => {
+	// INTENT CHANGE (issue #2383): the twelve-field REVIEWED row contract ends
+	// trailing-field pipe recovery for reviewer verdicts — the merged overflow
+	// tail lands in the enum-constrained risk_tags field and can never
+	// re-validate — so the unescaped-pipe row is a fail-closed lane failure and
+	// NO recovery entry is persisted to the durable lane result.
 	await establishReviewPrerequisites();
 	const batchId = 'legacy-reviewer-batch';
 	const laneId = 'legacy-reviewer-lane';
@@ -109,13 +114,10 @@ test('persists lossy legacy verdict-row recovery in the durable lane result', as
 	);
 	const recoveries = findByCorrelationId(tempDir, correlationId)?.result
 		?.salvagedWorkflowLaneRecoveries;
-	expect(result.completed).toBe(1);
-	expect(recoveries).toEqual([
-		{
-			workflowLane: laneId,
-			kind: 'legacy-verdict-row-recovery',
-			reason:
-				'legacy verdict row C-0 used trailing-field pipe recovery with lossy prose normalization',
-		},
-	]);
+	expect(result.completed).toBe(0);
+	expect(result.failed).toBe(1);
+	expect(result.lane_results[0]?.error).toContain(
+		'predicate=reviewer.verdict_rows',
+	);
+	expect(recoveries).toBeUndefined();
 });

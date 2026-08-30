@@ -56,6 +56,16 @@ export const REPO_GRAPH_FILENAME = 'repo-graph.json';
 export const GRAPH_SCHEMA_VERSION = '1.5.0';
 
 /**
+ * Default per-file source-size ceiling shared by graph construction and
+ * query-time source reads. The builder treats this as the default value of
+ * its `maxFileSizeBytes` option (which may be raised per build);
+ * `getContextPack` always enforces this constant at read time regardless of
+ * any build-time override, so a file built into the graph above this size
+ * yields a `source too large` span instead of source text.
+ */
+export const DEFAULT_MAX_SOURCE_BYTES = 1024 * 1024;
+
+/**
  * Compare dotted numeric version strings (e.g. '1.1.0' >= '1.1.0').
  * Missing/non-numeric segments are treated as 0. Returns true when `version`
  * is greater than or equal to `minimum`.

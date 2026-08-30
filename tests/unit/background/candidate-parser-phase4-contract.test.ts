@@ -20,9 +20,9 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 const tempDirs: string[] = [];
 const digest = createHash('sha256').update('phase4').digest('hex');
 const microHeader =
-	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence';
+	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags';
 const baseHeader =
-	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 const microRow =
 	'M-1 | subprocess | HIGH | safety | src/a.ts:1 | unsafe child | invariant 3 | direct evidence | HIGH';
 const cleanScope = 'complete changed subprocess paths';
@@ -312,7 +312,7 @@ describe('candidate parser Phase 4 contract', () => {
 		// NOT synthesize a header, so the two must disagree on the same input — that
 		// asymmetry is the contract, and this pins both halves of it.
 		const headerless =
-			'[CANDIDATE] | M-1 | subprocess | HIGH | correctness | src/a.ts:1 | claim text | invariant text | evidence text | HIGH';
+			'[CANDIDATE] | M-1 | subprocess | HIGH | correctness | src/a.ts:1 | claim text | invariant text | evidence text | HIGH | ORDINARY | ';
 		const parserFlags = flags({
 			expected_family: 'micro_lane',
 			expected_micro_lane: 'subprocess',

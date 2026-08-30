@@ -1030,6 +1030,7 @@ probe, and automatic incremental refresh behavior.
 | `walk_budget_ms` | integer (1000-60000) | `5000` | Wall-clock budget for graph and freshness walks. An incomplete freshness walk is `inconclusive` and never authorizes refresh or deletion. |
 | `max_files` | integer (100-100000) | `10000` | Source-file cap for graph and freshness walks. Hitting the cap is conservative and produces an incomplete result. |
 | `exclude_dirs` | string[] | `[]` | Extra directory **names** to skip when scanning the workspace, in addition to the built-in defaults. |
+| `storage` | `'json' \| 'indexed'` | `'json'` | Storage mode for the persisted graph. `'json'` keeps the single `.swarm/repo-graph.json` document as the sole store. `'indexed'` additionally maintains a derived `.swarm/repo-memory.sqlite` index that accelerates bounded neighbourhood lookups. See "Storage modes" below. |
 
 The graph scanner already skips common generated directories by default:
 `node_modules`, `.git`, `dist`, `build`, `out`, `coverage`, `.next`, `.nuxt`,
@@ -1081,6 +1082,56 @@ above `refresh_cap` are suppressed.
 > Note: even without configuring `exclude_dirs`, a single unparseable or
 > minified file can no longer abort the whole graph build — such files are
 > skipped individually (issue #1448).
+
+### Storage modes
+
+`repo_graph.storage` selects how the persisted graph is stored on disk
+(issue #1534):
+
+- **`'json'` (default).** The graph lives solely in `.swarm/repo-graph.json`.
+  Behavior is unchanged from prior releases.
+- **`'indexed'`.** In addition to `.swarm/repo-graph.json`, a derived
+  `.swarm/repo-memory.sqlite` index is maintained. `.swarm/repo-graph.json`
+  is **always written and remains authoritative in both modes** — the index
+  is never a second source of truth, only a read-side accelerator built from
+  it.
+
+> **Enabling `indexed` does not build the index immediately.** The index is
+> created by the next graph save (for example `repo_map action="build"`, a
+> session-start rebuild, or a write-triggered incremental update). There is
+> deliberately no build-on-read path, because that would put a full JSON parse
+> plus a full index build on the synchronous system-prompt path. Until the next
+> save, reads transparently use the JSON path — nothing fails, it is simply not
+> yet accelerated.
+
+What the index accelerates: bounded neighbourhood lookups that today require
+parsing the full JSON document — the coder localization block and reviewer
+blast-radius block (which query a small set of changed files' dependents and
+dependencies), and memory-reflection anchor resolution on repositories whose
+`repo-graph.json` exceeds the 16 MB bounded-read budget the reflection
+service enforces. On a fresh-parse turn, indexed lookups avoid reading and
+parsing the entire document.
+
+Fail-safe behavior: a missing, corrupt, or stale index (for example after a
+`storage` mode flip back to `'json'`, or after manual deletion) is detected
+and the affected read silently falls back to the JSON path — it never
+surfaces an error to the caller. Deleting `.swarm/repo-memory.sqlite` (and
+any `-wal`/`-shm` sidecars) by hand is always safe; it is rebuilt on the next
+graph save.
+
+Honest performance tradeoff — this is not a blanket speedup:
+
+- On repositories where `repo-graph.json` is large, and on turns that call
+  only one of the graph-consuming blocks, indexed mode is a clear win: it
+  avoids a full JSON parse.
+- On a turn where **multiple** injection blocks run against the same
+  directory right after a graph change (a full-graph in-memory cache miss),
+  indexed mode costs slightly **more** than JSON mode. The first block takes
+  the cheaper subgraph branch instead of warming the full-graph cache for the
+  document, so a later whole-graph consumer in the same turn still pays a
+  full parse — on top of the subgraph query the first block already did.
+  Single-block turns, and turns after the full-graph cache is already warm,
+  are unaffected by this.
 
 ## Evidence Retention Configuration
 
@@ -1412,6 +1463,40 @@ path.
 | `max_changed_sections` | number | `6` | Trust region: max distinct frontmatter/body sections changed. |
 | `deadband` | number | `0` | Promotion policy deadband forwarded to the evaluation substrate (`PromotionPolicyV1.deadband`). |
 | `retirement_min_age_days` | number | `60` | Wall-clock retirement: minimum age (days) before a never-used skill is eligible for archival retirement. Real usage signal is still required; this is a floor. |
+
+## Declarative Harness Evolution
+
+`harness_evolution` configures the bounded, non-executing HarnessOpt mutation
+surface. It does not run during plugin initialization, generate candidates,
+apply source patches, or activate a candidate automatically. Blueprint and
+candidate commands are read-only; activation and rollback are package-API
+operations guarded by exact, one-shot `/swarm approve-write` facts.
+
+Source candidates are inert manifests. Their patches are validated against the
+current Git commit, project containment, the explicit source allowlist, the
+shared protected-path policy, text-only limits, and configured size caps. The
+runtime never applies or evaluates the stored patch.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `source_allowlist` | string[] | `[]` | Project-relative prefixes eligible for inert source candidates. Empty means source candidates are denied. |
+| `extra_protected_paths` | string[] | `[]` | Additional project-relative prefixes denied even when allowlisted. Built-in protected paths always remain denied. |
+| `max_patch_bytes` | number | `1048576` | Maximum UTF-8 patch size. |
+| `max_files` | number | `64` | Maximum files represented by one candidate. |
+| `max_file_bytes` | number | `524288` | Maximum before/after size of an individual text file. |
+| `max_total_bytes` | number | `4194304` | Maximum aggregate candidate output size. |
+| `max_changed_lines` | number | `10000` | Maximum aggregate added plus removed lines. |
+| `max_versions` | number | `100` | Maximum active-history projection size; rollback ancestry remains durable. |
+| `max_inactive_candidates` | number | `32` | Maximum additional inactive candidate records retained on disk after compaction. Candidates referenced by retained versions are always kept, and the newest inactive candidate is always retained as the activation handoff even when this is `0`. |
+| `max_replay_records` | number | `10000` | Maximum ledger records replayed by one operation. Replay exhaustion fails closed. |
+| `max_output_bytes` | number | `262144` | Maximum command output size. |
+
+Durable state lives under `.swarm/evolution/harness/`. The segmented,
+hash-chained ledger is authoritative; `current.json` is only a derived
+projection and read commands never repair it implicitly. Once the store has to
+compact, it rewrites the active ledger to a single authenticated snapshot under
+the ledger generation pointer, prunes inactive candidate directories not named
+by that snapshot, and leaves version-linked candidates available for rollback.
 
 ## External Skills Curation Pipeline
 

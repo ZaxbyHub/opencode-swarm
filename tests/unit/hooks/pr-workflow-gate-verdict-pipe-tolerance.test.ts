@@ -39,6 +39,11 @@ describe('verdict row pipe tolerance', () => {
 		expect(parsed.get('C-0')).toEqual({
 			classification: 'CONFIRMED',
 			severity: 'HIGH',
+			// A legacy ten-field row is normalized at the parse boundary to
+			// UNKNOWN / no tags (issue #2383); the digest binds to the
+			// NORMALIZED twelve-field view.
+			riskImpact: 'UNKNOWN',
+			riskTags: [],
 			rowDigest: gateInternals.reviewerVerdictRowDigest([
 				'[REVIEWED]',
 				'C-0',
@@ -50,6 +55,8 @@ describe('verdict row pipe tolerance', () => {
 				'rationale a|b',
 				'probe c\\d',
 				'reviewer line1\nline2\rline3',
+				'UNKNOWN',
+				'',
 			]),
 		});
 	});
@@ -138,8 +145,10 @@ describe('verdict row pipe tolerance', () => {
 	});
 
 	test('production indexing retains both legacy overflow recovery classes', () => {
+		// Under the twelve-field contract the fidelity-safe shape is a full
+		// canonical row plus ONE extra trailing empty field (issue #2383).
 		const fidelitySafe = gateInternals.indexVerdictRows(
-			'[REVIEWED] | C-safe | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer |',
+			'[REVIEWED] | C-safe | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer | ORDINARY | SECURITY | ',
 			'[REVIEWED]',
 		);
 		expect(fidelitySafe.recoveries).toEqual([
@@ -170,6 +179,12 @@ describe('verdict row pipe tolerance', () => {
 	});
 
 	test('a lossy legacy [REVIEWED] row with unescaped rationale pipes is recovered and routed', async () => {
+		// INTENT CHANGE (issue #2383): the twelve-field REVIEWED contract ends
+		// tail-merge recovery for unescaped mid-row pipes — the merged tail
+		// lands in the enum-constrained risk_tags field and can never
+		// re-validate. The recoverable shape is now the ESCAPED pipe codec, so
+		// the fixture escapes the pipe and the row still authenticates and
+		// settles.
 		await establishReviewPrerequisites();
 		const itemIds = ['C-0', 'C-1', 'C-2', 'C-3', 'C-4', 'C-5'];
 		await recordPrReviewValidationBatch(
@@ -185,15 +200,14 @@ describe('verdict row pipe tolerance', () => {
 			],
 			{ batchId: 'review-pipes', prHeadSha: HEAD_SHA },
 		);
-		// The pipe sits in a MID-row prose field (rationale). The tail-merge
-		// preserves every machine-checked position (classification, severity,
-		// file:line) so authentication succeeds, but trailing prose fields may be
-		// re-arranged — the documented fidelity boundary. The trailing-field case
-		// below pins the fidelity-safe shape.
+		// The pipe sits in a MID-row prose field (rationale). Under the
+		// twelve-field contract (issue #2383) the pipe must be ESCAPED with the
+		// verdict codec (`\|`); authentication then succeeds with the pipe
+		// preserved inside the rationale.
 		const reviewerRows = itemIds
 			.map(
 				(id) =>
-					`[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | regex text mentioning the class \`,;|\` inline | probe | reviewer`,
+					`[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | regex text mentioning the class \`,;\\|\` inline | probe | reviewer | ORDINARY | `,
 			)
 			.join('\n');
 		await persistBatch(
@@ -231,7 +245,7 @@ describe('verdict row pipe tolerance', () => {
 				textOverride: itemIds
 					.map(
 						(id) =>
-							`[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer`,
+							`[REVIEWED] | ${id} | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer | ORDINARY | `,
 					)
 					.join('\n'),
 			},

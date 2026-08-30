@@ -50,6 +50,7 @@ import type {
 } from './types';
 import {
 	createEmptyGraph,
+	DEFAULT_MAX_SOURCE_BYTES,
 	normalizeGraphPath,
 	updateGraphMetadata,
 } from './types';
@@ -3110,7 +3111,7 @@ export function buildWorkspaceGraph(
 ): RepoGraph {
 	validateWorkspace(workspaceRoot);
 
-	const maxFileSize = options?.maxFileSizeBytes ?? 1024 * 1024; // 1MB default
+	const maxFileSize = options?.maxFileSizeBytes ?? DEFAULT_MAX_SOURCE_BYTES;
 	const maxFiles = options?.maxFiles ?? DEFAULT_WALK_FILE_CAP;
 	const walkBudgetMs = options?.walkBudgetMs ?? DEFAULT_WALK_BUDGET_MS;
 	const followSymlinks = options?.followSymlinks ?? false;
@@ -3406,7 +3407,7 @@ export async function buildWorkspaceGraphAsync(
 ): Promise<RepoGraph> {
 	validateWorkspace(workspaceRoot);
 
-	const maxFileSize = options?.maxFileSizeBytes ?? 1024 * 1024;
+	const maxFileSize = options?.maxFileSizeBytes ?? DEFAULT_MAX_SOURCE_BYTES;
 	const maxFiles = options?.maxFiles ?? DEFAULT_WALK_FILE_CAP;
 	const walkBudgetMs = options?.walkBudgetMs ?? DEFAULT_WALK_BUDGET_MS;
 	const followSymlinks = options?.followSymlinks ?? false;

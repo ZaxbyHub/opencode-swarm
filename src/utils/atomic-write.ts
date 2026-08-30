@@ -105,8 +105,8 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		token: 'instance',
 		quarantineEligible: true,
 		parsesTarget: true,
-		producers: ['src/hooks/pr-workflow-gate.ts:14774'],
-		note: 'pre/post-rename file-identity verification (assertOpened/ClosedSwarmFileIdentity, pr-workflow-gate.ts:14547-14595) is writer-specific and load-bearing',
+		producers: ['src/hooks/pr-workflow-gate.ts:17944'],
+		note: 'pre/post-rename file-identity verification (assertOpened/ClosedSwarmFileIdentity, pr-workflow-gate.ts:17880-17980) is writer-specific and load-bearing',
 	},
 	{
 		id: 'target-suffix-tmp-num-num-json',
@@ -138,7 +138,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/evidence/manager.ts:288',
 			'src/evidence/manager.ts:456',
 			'src/tools/sast-baseline.ts:106',
-			'src/tools/repo-graph/storage.ts:426',
+			'src/tools/repo-graph/storage.ts:493',
 			'src/memory/reflection-service.ts:547 (pre-#2035)',
 			'src/hooks/review-receipt.ts:608',
 			'src/hooks/review-receipt.ts:674',
@@ -233,8 +233,8 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		quarantineEligible: true,
 		parsesTarget: true,
 		producers: [
-			'src/tools/write-pr-review-artifact.ts:124',
-			'src/tools/write-pr-review-artifact.ts:144',
+			'src/tools/write-pr-review-artifact.ts:140',
+			'src/tools/write-pr-review-artifact.ts:160',
 			'src/tools/write-pr-review-trigger-eval.ts:96',
 		],
 		note: 'bundled-skills writes outside .swarm (project skill roots) and keeps its own contained-directory logic (invariant 4 bundled-skill ownership)',
@@ -405,6 +405,10 @@ export const WRITER_CLASSIFICATION: Readonly<
 	'src/hooks/issue-trace-state.ts': 'registered-bespoke',
 	'src/hooks/knowledge-receipt-ledger-storage.ts': 'registered-bespoke',
 	'src/hooks/pr-workflow-gate.ts': 'registered-bespoke',
+	// bespoke atomic single-file rewrite (write tmp + rename) for the bounded
+	// PR-review re-entry authorization store (issue #2383); UUID-scoped
+	// `.${basename}.${uuid}.tmp`
+	'src/hooks/pr-review-reentry-authorization.ts': 'registered-bespoke',
 	'src/hooks/promotion-evidence-store.ts': 'registered-bespoke',
 	'src/hooks/review-receipt.ts': 'registered-bespoke',
 	'src/hooks/skill-usage-log.ts': 'registered-bespoke',

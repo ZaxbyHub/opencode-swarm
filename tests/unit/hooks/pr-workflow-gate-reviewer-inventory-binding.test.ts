@@ -33,7 +33,7 @@ import {
 
 const [DIM_0] = PR_REVIEW_BASE_DIMENSION_IDS;
 const CANDIDATE_HEADER =
-	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 /** The five candidates `base-all` contributes for dimensions 1..5. */
 const SURVIVING_IDS = PR_REVIEW_BASE_DIMENSION_IDS.slice(1).map(
 	(_dimension, index) => `C-${index + 1}`,
@@ -87,7 +87,7 @@ describe('pr-workflow-gate reviewer batch inventory binding', () => {
 				CANDIDATE_HEADER,
 				...WITHDRAWN_IDS.map(
 					(id, index) =>
-						`${id} | ${DIM_0} | HIGH | correctness | file.ts:${index + 1} | claim ${id} | evidence ${id} | impact ${id} | HIGH`,
+						`${id} | ${DIM_0} | HIGH | correctness | file.ts:${index + 1} | claim ${id} | evidence ${id} | impact ${id} | HIGH | ORDINARY | `,
 				),
 			].join('\n'),
 		);
@@ -171,7 +171,7 @@ describe('pr-workflow-gate reviewer batch inventory binding', () => {
 				CANDIDATE_HEADER,
 				...WITHDRAWN_IDS.map(
 					(id, index) =>
-						`${id} | ${DIM_0} | HIGH | correctness | file.ts:${index + 1} | claim ${id} | evidence ${id} | impact ${id} | HIGH`,
+						`${id} | ${DIM_0} | HIGH | correctness | file.ts:${index + 1} | claim ${id} | evidence ${id} | impact ${id} | HIGH | ORDINARY | `,
 				),
 			].join('\n'),
 		);

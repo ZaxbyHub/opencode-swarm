@@ -26,6 +26,7 @@ import type { LanguageBackend } from './backend';
 // concrete overrides like typescript. The barrel is idempotent.
 import './backends';
 import { detectProjectLanguages } from './detector';
+import { MANIFEST_FILES } from './manifest-files';
 import { LANGUAGE_BACKEND_REGISTRY } from './registry-backend';
 
 const _internals: {
@@ -62,29 +63,6 @@ let insertCounter = 0;
  * detect files. Listing them explicitly (rather than re-scanning every
  * profile on every cache check) is cheaper.
  */
-const MANIFEST_FILES = [
-	'package.json',
-	'tsconfig.json',
-	'pyproject.toml',
-	'setup.py',
-	'setup.cfg',
-	'requirements.txt',
-	'Pipfile',
-	'Cargo.toml',
-	'go.mod',
-	'pom.xml',
-	'build.gradle',
-	'build.gradle.kts',
-	'build.zig',
-	'CMakeLists.txt',
-	'Makefile',
-	'meson.build',
-	'Package.swift',
-	'pubspec.yaml',
-	'Gemfile',
-	'composer.json',
-] as const;
-
 /**
  * Compute a stable hash of all manifest file contents present in `dir`.
  * Returns the empty string if none are present.
@@ -95,8 +73,6 @@ const MANIFEST_FILES = [
  * layouts). On Windows, fs.statSync returns a synthesized ino that is
  * stable per-handle within a process — sufficient for cache invalidation.
  */
-const _MANIFEST_SET: Set<string> = new Set(MANIFEST_FILES);
-
 /**
  * List a directory's entries safely, returning an empty Set on error
  * (permission denied, ENOENT, etc.). Wrapped to avoid the cost of throw-

@@ -88,30 +88,33 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 
 	// -------------------------------------------------------------------------
 	// SC-019: Parser and prompt agree on field structure
-	// Parser expects exactly 9 fields per row (EXPECTED_FIELD_COUNT = 9)
-	// Prompt instructs 9-pipe format for both base_explorer and micro_lane
+	// Parser expects exactly 11 fields per row (CANDIDATE_FIELD_COUNT = 11,
+	// issue #2383); legacy nine-field rows are normalized at the parse boundary
 	// -------------------------------------------------------------------------
 
-	test('SC-019: shared candidate contract defines 9 fields', () => {
-		expect(CANDIDATE_FIELD_COUNT).toBe(9);
+	test('SC-019: shared candidate contract defines 11 fields', () => {
+		// Issue #2383: the 9 legacy fields plus typed risk_impact/risk_tags.
+		expect(CANDIDATE_FIELD_COUNT).toBe(11);
 	});
 
-	test('SC-019: base_explorer controller contract declares 9 pipe-delimited fields', () => {
-		expect((CANDIDATE_HEADERS.base_explorer.match(/\|/g) || []).length).toBe(9);
+	test('SC-019: base_explorer controller contract declares 11 pipe-delimited fields', () => {
+		expect((CANDIDATE_HEADERS.base_explorer.match(/\|/g) || []).length).toBe(
+			11,
+		);
 	});
 
-	test('SC-019: micro_lane controller contract declares 9 pipe-delimited fields', () => {
-		expect((CANDIDATE_HEADERS.micro_lane.match(/\|/g) || []).length).toBe(9);
+	test('SC-019: micro_lane controller contract declares 11 pipe-delimited fields', () => {
+		expect((CANDIDATE_HEADERS.micro_lane.match(/\|/g) || []).length).toBe(11);
 	});
 
-	test('SC-019: dispatch tool declares same 9-pipe formats as explorer prompt', () => {
+	test('SC-019: dispatch tool declares same 11-pipe formats as explorer prompt', () => {
 		// The dispatch suffix consumes the shared canonical format surface instead
 		// of duplicating literal headers that can drift from parser field order.
 		expect(dispatchSrc).toContain('CANDIDATE_HEADERS.base_explorer');
 		expect(dispatchSrc).toContain('CANDIDATE_HEADERS.micro_lane');
 		for (const line of Object.values(CANDIDATE_HEADERS)) {
 			const pipeCount = (line.match(/\|/g) || []).length;
-			expect(pipeCount).toBe(9);
+			expect(pipeCount).toBe(11);
 		}
 	});
 
@@ -170,7 +173,7 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 	describe('SC-018 behavioral: parseCandidates extracts valid base_explorer row', () => {
 		test('returns one candidate with all fields matching input row', () => {
 			const text = [
-				'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence',
+				'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags',
 				'C-001 | test-lane | LOW | async-ordering | src/utils/test.ts:42 | example claim | observed evidence | affects cache layer | MEDIUM',
 			].join('\n');
 
@@ -196,7 +199,7 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 
 		test('returns one candidate with all fields matching input row (micro_lane format)', () => {
 			const text = [
-				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence',
+				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags',
 				'C-002 | invariant-check | HIGH | null-safety | src/core/parser.ts:88 | possible null | NON_NULL_INVARIANT | observed null access | HIGH',
 			].join('\n');
 
@@ -223,9 +226,9 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 
 	describe('SC-019 behavioral: parseCandidates rejects malformed rows', () => {
 		test('wrong number of fields yields 0 candidates and malformed_rows > 0', () => {
-			// Only 3 fields instead of the expected 9
+			// Only 3 fields instead of the expected 11
 			const text = [
-				'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence',
+				'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags',
 				'C-001 | test-lane | LOW',
 			].join('\n');
 
@@ -240,7 +243,7 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 
 		test('missing candidate_id yields 0 candidates (FR-005)', () => {
 			const text = [
-				'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence',
+				'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags',
 				' | test-lane | LOW | async-ordering | src/utils/test.ts:42 | example claim | observed evidence | affects cache layer | MEDIUM',
 			].join('\n');
 
@@ -264,7 +267,7 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 
 		test('artifact_status ref-not-found returns refusal result', () => {
 			const text = [
-				'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence',
+				'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags',
 				'C-001 | test-lane | LOW | async-ordering | src/utils/test.ts:42 | example claim | observed evidence | affects cache layer | MEDIUM',
 			].join('\n');
 
@@ -280,7 +283,7 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 
 		test('transcriptIncomplete without accept_partial returns refusal result', () => {
 			const text = [
-				'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence',
+				'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags',
 				'C-001 | test-lane | LOW | async-ordering | src/utils/test.ts:42 | example claim | observed evidence | affects cache layer | MEDIUM',
 			].join('\n');
 
@@ -300,7 +303,7 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 			// Older prompt variants put [CANDIDATE] on every data row.
 			// The parser strips this at line 727-729 for backward compatibility.
 			const text = [
-				'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence',
+				'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags',
 				'[CANDIDATE] | C-001 | test-lane | LOW | async-ordering | src/utils/test.ts:42 | example claim | observed evidence | affects cache layer | MEDIUM',
 			].join('\n');
 
@@ -323,7 +326,7 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 
 		test('extracts only the expected family; owned sibling rows skip without errors', () => {
 			const text = [
-				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence',
+				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags',
 				'C-AUTH-1 | auth-identity-secrets | HIGH | secrets | src/auth.ts:10 | leaked token | LEAST_PRIVILEGE | token in log output | HIGH',
 				'C-SUB-1 | subprocess-platform | MEDIUM | shell | src/run.ts:20 | unbounded exec | BOUNDED_EXECUTION | no timeout on spawn | MEDIUM',
 			].join('\n');
@@ -340,7 +343,7 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 
 		test('accepts a CLEAN for the expected family alongside sibling-family candidates', () => {
 			const text = [
-				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence',
+				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags',
 				'C-SUB-1 | subprocess-platform | MEDIUM | shell | src/run.ts:20 | unbounded exec | BOUNDED_EXECUTION | no timeout on spawn | MEDIUM',
 				'[CLEAN] | auth-identity-secrets | exact reviewed diff | no candidate survived the focused review',
 			].join('\n');
@@ -359,7 +362,7 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 
 		test('sibling-family CLEAN rows skip so each per-family call sees one attestation', () => {
 			const text = [
-				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence',
+				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags',
 				'[CLEAN] | auth-identity-secrets | exact reviewed diff | no candidate survived the focused review',
 				'[CLEAN] | subprocess-platform | exact reviewed diff | no candidate survived the focused review',
 			].join('\n');
@@ -377,7 +380,7 @@ describe('CANDIDATE marker contract (FR-007)', () => {
 
 		test('families outside the owned set are still refused as mismatches', () => {
 			const text = [
-				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence',
+				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags',
 				'C-UI-1 | ui-accessibility-i18n | LOW | focus | src/ui.ts:5 | focus trap | KEYBOARD_ACCESS | tab order breaks | LOW',
 			].join('\n');
 

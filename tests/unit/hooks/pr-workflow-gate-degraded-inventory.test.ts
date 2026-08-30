@@ -183,7 +183,7 @@ async function establishBaseAndMicroLanes(
 			'swarm-pr-review:micro',
 			[{ laneId: `micro-lane-${family}`, workflowLane: family }],
 			{
-				textOverride: `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence\n[CLEAN] | ${family} | exact reviewed diff | no finding after focused invariant review`,
+				textOverride: `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags\n[CLEAN] | ${family} | exact reviewed diff | no finding after focused invariant review`,
 			},
 		);
 	}

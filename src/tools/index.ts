@@ -186,6 +186,7 @@ export {
 	approve_plan_critic,
 	executeApprovePlanCritic,
 } from './approve-plan-critic';
+export { authorize_pr_review_reentry } from './authorize-pr-review-reentry';
 export {
 	complete_pr_workflow,
 	executeCompletePrWorkflow,
@@ -194,6 +195,10 @@ export { epic_plan_waves } from './epic-plan-waves';
 export { epic_record_divergence } from './epic-record-divergence';
 export { epic_decide_phase } from './epic-run-phase';
 export { generate_mutants } from './generate-mutants';
+export {
+	executeInvalidatePrFeedbackPublication,
+	invalidate_pr_feedback_publication,
+} from './invalidate-pr-feedback-publication';
 export { lean_turbo_acquire_locks } from './lean-turbo-acquire-locks';
 export { lean_turbo_plan_lanes } from './lean-turbo-plan-lanes';
 export { lean_turbo_review } from './lean-turbo-review';

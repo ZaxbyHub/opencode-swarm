@@ -25,7 +25,7 @@ import {
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const BASE_HEADER =
-	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 
 const candidateRow = (id: string, lane: string): string =>
 	`${id} | ${lane} | HIGH | correctness | src/a.ts:10 | a real claim | evidence text here | impact context here | HIGH`;
@@ -195,7 +195,7 @@ describe('duplicate header emitted as a data row is salvaged (#2279)', () => {
 		// above the real header would survive and the real header would be
 		// deleted — inventing a header failure that does not exist today.
 		const markerless =
-			'candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+			'candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 		const normalized = normalizeCandidateArtifact(
 			[markerless, BASE_HEADER, candidateRow('C-1', 'correctness')].join('\n'),
 			'base_explorer',

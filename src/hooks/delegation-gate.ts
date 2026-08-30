@@ -3854,10 +3854,47 @@ export function createDelegationGateHook(
 					continue;
 				}
 				if (taskId === resolvedTaskId) {
+					// Issue #2383 correlated reviewer re-entry: a direct Task
+					// dispatch of reviewer/test_engineer may bypass the GENERIC
+					// Stage-A task-workflow requirement ONLY through a persisted
+					// one-use authorization issued by the PR workflow controller
+					// and still bound to the exact active session, role, head,
+					// revision digest, and gate generation. No prompt-text
+					// inspection is involved; a missing/expired/replayed/stale
+					// authorization consumes to null and falls through to the
+					// normal Stage-A error below. This is a Stage-A-ONLY
+					// exemption: the council gate above, the background-task
+					// block, acceptance-criteria enforcement, and every other
+					// check in this hook remain fully authoritative.
+					const { consumePrReviewReentryAuthorization } = await import(
+						'./pr-review-reentry-authorization.js'
+					);
+					const consumed = await consumePrReviewReentryAuthorization(
+						directory,
+						input.sessionID,
+						{
+							role:
+								targetAgent === 'test_engineer' ? 'test_engineer' : 'reviewer',
+							callID: input.callID,
+						},
+					);
+					if (consumed) {
+						rememberStageBDispatchGenerations(input.callID, generations);
+						gateDispatchPrimaryTaskByCallID.set(input.callID, resolvedTaskId);
+						stageBDispatchContextByCallID.set(input.callID, {
+							taskIds: new Set(generations.keys()),
+							expectedVerdictKind:
+								targetAgent === 'test_engineer' ? 'TESTED' : 'REVIEWED',
+						});
+						return;
+					}
 					throw new Error(
 						`TASK_WORKFLOW_STAGE_A_REQUIRED: cannot dispatch ${targetAgent} for task ${taskId} from ${workflow.state}. ` +
 							`Stage B (${targetAgent}) requires the task to be at pre_check_passed (or later) — a state written only by the stage_a_passed transition, which is emitted when pre_check_batch completes with the task correctly attributed. ` +
-							`Remediation: run pre_check_batch on the task's changed files first. If pre_check_batch passes but the task remains coder_delegated (typical after /swarm reset-session), run /swarm recover ${taskId} to repair Stage A attribution, then re-dispatch.`,
+							`Remediation: run pre_check_batch on the task's changed files first. If pre_check_batch passes but the task remains coder_delegated (typical after /swarm reset-session), run /swarm recover ${taskId} to repair Stage A attribution, then re-dispatch.` +
+							(targetAgent === 'reviewer' || targetAgent === 'test_engineer'
+								? ` For PR-review re-entry outside the task workflow, issue a one-use authorization with authorize_pr_review_reentry immediately before the Task dispatch.`
+								: ''),
 					);
 				}
 			}
