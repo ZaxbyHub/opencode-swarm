@@ -377,7 +377,9 @@ describe('PR workflow terminal completion - publication and terminal clear', () 
 			enforcePrWorkflowToolBefore(directory, SESSION_ID, 'shell', {
 				command: `git push origin ${POST_COMMIT_SHA}:refs/heads/pr-head`,
 			}),
-		).rejects.toThrow('was INVALIDATED because approved content identity drifted');
+		).rejects.toThrow(
+			'was INVALIDATED because approved content identity drifted',
+		);
 		const invalidated = await readPrWorkflowGateState(directory, SESSION_ID);
 		expect(invalidated?.prFeedbackPublication?.active?.state).toBe(
 			'invalidated',

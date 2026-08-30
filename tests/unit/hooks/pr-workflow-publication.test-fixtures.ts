@@ -147,7 +147,8 @@ export async function createPublicationFixture(): Promise<PublicationFixture> {
 			},
 			upstream(target) {
 				_test_exports.resolveCurrentUpstreamPushTarget = () => target;
-				_test_exports.resolveCurrentUpstreamPushTargetAsync = async () => target;
+				_test_exports.resolveCurrentUpstreamPushTargetAsync = async () =>
+					target;
 			},
 			remoteUrl(value: string | null) {
 				_test_exports.resolveRemoteUrlIdentity = () => value;
