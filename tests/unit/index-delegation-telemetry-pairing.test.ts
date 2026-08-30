@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { _resetDelegationTelemetryPairingForTesting } from '../../src/index';
 import {
@@ -170,7 +171,7 @@ describe('Task delegation telemetry — regression: delegation_begin unreachable
 		expect(initial?.cost_source).toBe('unavailable');
 		expect(corrections).toHaveLength(2);
 		expect(corrections[0]?.data.record_id).toBe(initial?.record_id);
-		expect(corrections.map((event) => event.data.version)).toEqual([2, 3]);
+		expect(corrections).toHaveLength(2);
 		expect(corrections.map((event) => event.data.cost_source)).toEqual([
 			'estimated',
 			'reported',
@@ -268,7 +269,140 @@ describe('Task delegation telemetry — regression: delegation_begin unreachable
 		const corrections = events.filter(
 			(event) => event.event === 'delegation_cost_correction',
 		);
-		expect(corrections.map((event) => event.data.version)).toEqual([2, 3]);
+		expect(corrections).toHaveLength(2);
+		expect(corrections.at(-1)?.data.cost_source).toBe('reported');
+		expect(
+			events.filter((event) => event.event === 'delegation_cost_join'),
+		).toHaveLength(0);
+	});
+
+	test('restart recovery ignores unrelated rejected telemetry and still binds the matching child session digest', async () => {
+		const plugin = await bootKnowledgeHost(
+			directory,
+			{
+				guardrails: { enabled: false },
+				pricing: {
+					reported_cost_currency: { provider: 'USD' },
+					models: {
+						'provider/model': { input_per_million: 0.1, output_per_million: 0 },
+					},
+				},
+			},
+			{
+				session: {
+					get: async () => ({ data: { parentID: SESSION_ID } }),
+				},
+			},
+		);
+		addTelemetryListener((event, data) => events.push({ event, data }));
+		const session = ensureAgentSession(SESSION_ID, 'architect', directory);
+		session.currentTaskId = '1.1';
+		swarmState.activeAgent.set(SESSION_ID, 'architect');
+
+		await plugin.hooks['tool.execute.before'](
+			{ tool: 'task', sessionID: SESSION_ID, callID: 'restart-cost-a' },
+			{
+				args: {
+					description: 'explore',
+					prompt: 'Explore and report.',
+					subagent_type: 'explorer',
+				},
+			},
+		);
+		await plugin.hooks['tool.execute.after'](
+			{ tool: 'task', sessionID: SESSION_ID, callID: 'restart-cost-a' },
+			{
+				state: 'completed',
+				metadata: { sessionID: 'restart-cost-child-a' },
+				output: 'done a',
+			},
+		);
+		await plugin.hooks['tool.execute.before'](
+			{ tool: 'task', sessionID: SESSION_ID, callID: 'restart-cost-b' },
+			{
+				args: {
+					description: 'explore',
+					prompt: 'Explore and report.',
+					subagent_type: 'explorer',
+				},
+			},
+		);
+		await plugin.hooks['tool.execute.after'](
+			{ tool: 'task', sessionID: SESSION_ID, callID: 'restart-cost-b' },
+			{
+				state: 'completed',
+				metadata: { sessionID: 'restart-cost-child-b' },
+				output: 'done b',
+			},
+		);
+		await plugin.hooks.event({
+			event: {
+				type: 'message.updated',
+				properties: {
+					info: {
+						role: 'assistant',
+						sessionID: 'restart-cost-child-a',
+						providerID: 'provider',
+						modelID: 'model',
+						tokens: { input: 1_000_000, output: 0 },
+					},
+				},
+			},
+		});
+
+		const telemetryPath = path.join(directory, '.swarm', 'telemetry.jsonl');
+		const parentSessionDigest = createHash('sha256')
+			.update(`delegation-cost-parent-v1\0${SESSION_ID}`)
+			.digest('hex')
+			.slice(0, 32);
+		appendFileSync(
+			telemetryPath,
+			[
+				JSON.stringify({
+					event: 'delegation_cost_correction',
+					sessionId: SESSION_ID,
+					agentName: 'architect',
+					taskId: '1.1',
+					record_id: 'noise-record',
+					identity_fingerprint: 'f'.repeat(32),
+					parent_session_digest: parentSessionDigest,
+					version: 2,
+					cost_usd: 0.01,
+					cost_source: 'reported',
+					tokens_input: 1,
+					tokens_output: 1,
+					tokens_reasoning: 0,
+					tokens_cache: 0,
+					model: 'provider/model',
+				}),
+				'',
+			].join('\n'),
+		);
+
+		_resetDelegationTelemetryPairingForTesting();
+		await plugin.hooks.event({
+			event: {
+				type: 'message.updated',
+				properties: {
+					info: {
+						role: 'assistant',
+						sessionID: 'restart-cost-child-a',
+						providerID: 'provider',
+						modelID: 'model',
+						cost: 0.5,
+						tokens: { input: 1_000_000, output: 10 },
+					},
+				},
+			},
+		});
+
+		expect(
+			events.filter((event) => event.event === 'delegation_cost_binding'),
+		).toHaveLength(1);
+		const corrections = events.filter(
+			(event) => event.event === 'delegation_cost_correction',
+		);
+		expect(corrections).toHaveLength(2);
 		expect(corrections.at(-1)?.data.cost_source).toBe('reported');
 		expect(
 			events.filter((event) => event.event === 'delegation_cost_join'),

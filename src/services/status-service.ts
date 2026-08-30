@@ -54,7 +54,10 @@ import { getLastHeartbeat } from '../telemetry';
 import { listRecoveryRecords } from '../turbo/lean/recovery';
 import { loadLeanTurboRunState } from '../turbo/lean/state';
 import { getCompactionMetrics } from './compaction-service';
-import { summarizeTelemetryCosts } from './cost-accounting.js';
+import {
+	type CostSummary,
+	summarizeTelemetryCosts,
+} from './cost-accounting.js';
 
 /**
  * Dependency-injection seam for status-service.
@@ -66,7 +69,50 @@ export const _internals = {
 	hasActiveFullAuto,
 	getActiveFullAutoSessionID,
 	loadFullAutoRunState,
+	summarizeTelemetryCosts,
 };
+
+const MAX_TRACKED_TELEMETRY_COST_SUMMARIES = 32;
+const telemetryCostSummaryCache = new Map<
+	string,
+	{ stamp: string; summary: CostSummary }
+>();
+
+function getTelemetryCostSummary(directory: string): CostSummary {
+	const stamp = readTelemetryCostStamp(directory);
+	const cached = telemetryCostSummaryCache.get(directory);
+	if (cached && cached.stamp === stamp) return cached.summary;
+	const summary = _internals.summarizeTelemetryCosts(directory);
+	telemetryCostSummaryCache.set(directory, { stamp, summary });
+	while (
+		telemetryCostSummaryCache.size > MAX_TRACKED_TELEMETRY_COST_SUMMARIES
+	) {
+		const oldest = telemetryCostSummaryCache.keys().next().value;
+		if (oldest === undefined) break;
+		telemetryCostSummaryCache.delete(oldest);
+	}
+	return summary;
+}
+
+function readTelemetryCostStamp(directory: string): string {
+	const swarmDir = path.join(directory, '.swarm');
+	const files = [
+		path.join(swarmDir, 'telemetry.jsonl.1'),
+		path.join(swarmDir, 'telemetry.jsonl'),
+	];
+	return files
+		.map((file) => {
+			try {
+				const stat = fsSync.statSync(file);
+				return stat.isFile()
+					? `${stat.mtimeMs}:${stat.ctimeMs}:${stat.size}`
+					: 'missing';
+			} catch {
+				return 'missing';
+			}
+		})
+		.join('|');
+}
 
 /**
  * Structured status data returned by the status service.
@@ -730,7 +776,7 @@ export async function getStatusData(
 	// Enrich with Lean Turbo data if active.
 	status = enrichWithLeanTurbo(status, directory);
 	try {
-		const costs = await summarizeTelemetryCosts(directory);
+		const costs = getTelemetryCostSummary(directory);
 		status.costs = {
 			totalCostUsd: costs.total_cost_usd,
 			delegations: costs.delegations,

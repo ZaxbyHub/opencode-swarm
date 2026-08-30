@@ -429,7 +429,11 @@ describe('append-only correction folding', () => {
 			{ ...initial, version: 2 },
 			{ ...initial, record_id: 'record-2', identity_fingerprint: undefined },
 		]);
-		expect(malformed.events).toHaveLength(0);
+		expect(malformed.events).toHaveLength(2);
+		expect(malformed.events.map((event) => event.record_id)).toEqual([
+			'record-1',
+			'record-2',
+		]);
 		expect(malformed.stats.rejected_corrections).toBe(2);
 
 		const folded = foldTelemetryEvents([

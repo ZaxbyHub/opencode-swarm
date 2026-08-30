@@ -15,6 +15,7 @@ import type {
 } from '../../../src/review/diff-source';
 import {
 	type AutoReviewEvidence,
+	autoReviewEvidenceRelativePath,
 	computeAutoReviewManifestHash,
 	computeAutoReviewPolicyDigest,
 	persistAutoReviewEvidence,
@@ -331,5 +332,51 @@ describe('phase final review receipt integrity', () => {
 		} finally {
 			outside.cleanup();
 		}
+	});
+
+	test('persistAutoReviewEvidence cleans up the temp file when verifyCurrent rejects the scope (F-IG3)', async () => {
+		const evidence = createEvidence();
+		const target = path.join(
+			projectDir,
+			'.swarm',
+			autoReviewEvidenceRelativePath(
+				evidence.trigger,
+				evidence.scope.hash,
+				evidence.phase,
+			),
+		);
+		const targetDir = path.dirname(target);
+
+		await expect(
+			persistAutoReviewEvidence(projectDir, evidence, {
+				verifyCurrent: async () => false,
+			}),
+		).rejects.toThrow('stale');
+		expect(
+			fs.readdirSync(targetDir).some((name) => name.includes('.tmp.')),
+		).toBe(false);
+		expect(fs.existsSync(target)).toBe(false);
+	});
+
+	test('persistAutoReviewEvidence cleans up the temp file when renameSync fails (F-IG3)', async () => {
+		const evidence = createEvidence();
+		const target = path.join(
+			projectDir,
+			'.swarm',
+			autoReviewEvidenceRelativePath(
+				evidence.trigger,
+				evidence.scope.hash,
+				evidence.phase,
+			),
+		);
+		const targetDir = path.dirname(target);
+		fs.mkdirSync(target, { recursive: true });
+
+		await expect(
+			persistAutoReviewEvidence(projectDir, evidence),
+		).rejects.toThrow();
+		expect(
+			fs.readdirSync(targetDir).some((name) => name.includes('.tmp.')),
+		).toBe(false);
 	});
 });

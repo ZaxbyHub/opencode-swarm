@@ -154,6 +154,7 @@ const ZERO_USAGE: TokenUsage = {
 
 const MAX_EVIDENCE_ITEMS = 8;
 const MAX_COST_STRING_LENGTH = 128;
+const MAX_PROVIDER_REPORTED_COST_USD = 1_000_000_000;
 
 // BUNDLED_MODEL_PRICING is intentionally empty. Cost estimation requires
 // user-provided pricing via `pricing.models` in config (or provider-reported
@@ -271,13 +272,16 @@ export function projectCostEvidence(
 			item.kind === 'provider_reported' && item.reason !== 'missing_cost',
 	);
 	const compatibleReports = reports.filter(
-		(item) => item.amount_usd !== null && item.currency === 'USD',
+		(item) =>
+			item.amount_usd !== null &&
+			item.amount_usd <= MAX_PROVIDER_REPORTED_COST_USD &&
+			item.currency === 'USD',
 	);
 	const incompatibleReport = reports.some(
 		(item) =>
-			item.amount_usd === null ||
-			item.currency !== 'USD' ||
-			item.reason !== 'authoritative',
+			item.amount_usd !== null &&
+			item.amount_usd <= MAX_PROVIDER_REPORTED_COST_USD &&
+			(item.currency !== 'USD' || item.reason !== 'authoritative'),
 	);
 	const reportConflict = hasReportConflict(reports);
 	if (!reportConflict && !incompatibleReport && compatibleReports.length > 0) {
@@ -296,7 +300,13 @@ export function projectCostEvidence(
 			item.currency === 'USD' &&
 			item.reason === 'authoritative',
 	);
-	if (reports.length === 0 && estimate) {
+	const hasHardIncompatibleReport = reports.some(
+		(item) =>
+			item.amount_usd !== null &&
+			item.amount_usd <= MAX_PROVIDER_REPORTED_COST_USD &&
+			(item.currency !== 'USD' || item.reason === 'unsupported_currency'),
+	);
+	if (!reportConflict && !hasHardIncompatibleReport && estimate) {
 		return {
 			cost_usd: roundUsd(estimate.amount_usd ?? 0),
 			cost_source: 'estimated',
@@ -419,6 +429,7 @@ export function foldTelemetryEvents(
 			const fingerprint = boundedDigest(event.identity_fingerprint);
 			const initialVersion = validVersion(event.version);
 			if (!fingerprint || initialVersion !== 1) {
+				legacy.push(event);
 				stats.rejected_corrections++;
 				continue;
 			}
@@ -482,6 +493,11 @@ export function foldTelemetryEvents(
 			boundedDigest(event.digest) ?? costSnapshotDigest(replacement);
 		if (digest === state.digest) {
 			stats.duplicate_corrections++;
+			states.set(recordId, {
+				version: nextVersion,
+				digest: state.digest,
+				fingerprint: state.fingerprint,
+			});
 			continue;
 		}
 		const currentEvidence = readEventEvidence(current);
@@ -545,7 +561,7 @@ function readEventEvidence(event: Record<string, unknown>): CostEvidence[] {
 		const sourcePath = isCostSourcePath(item.source_path)
 			? item.source_path
 			: null;
-		const amount = readFiniteNonNegative(item.amount_usd);
+		const amount = readBoundedReportedCost(item.amount_usd);
 		const usage = isRecord(item.usage)
 			? readPinnedTokens(item.usage)
 			: { ...ZERO_USAGE };
@@ -573,7 +589,7 @@ function readEventEvidence(event: Record<string, unknown>): CostEvidence[] {
 }
 
 function legacyEventEvidence(event: Record<string, unknown>): CostEvidence[] {
-	const amount = readFiniteNonNegative(event.cost_usd);
+	const amount = readBoundedReportedCost(event.cost_usd);
 	return [
 		{
 			kind:
@@ -658,10 +674,13 @@ export function isCostUpgrade(
 	current: readonly CostEvidence[],
 	next: readonly CostEvidence[],
 ): boolean {
+	const currentProjection = projectCostEvidence(current);
+	const nextProjection = projectCostEvidence(next);
 	const currentAuthority = evidenceAuthority(current);
 	const nextAuthority = evidenceAuthority(next);
 	if (nextAuthority > currentAuthority) return true;
 	if (nextAuthority < currentAuthority) return false;
+	if (currentProjection.cost_usd !== nextProjection.cost_usd) return true;
 	const currentUsage = current.reduce(mergeUsage, { ...ZERO_USAGE });
 	const nextUsage = next.reduce(mergeUsage, { ...ZERO_USAGE });
 	return Object.keys(currentUsage).some(
@@ -819,7 +838,7 @@ function collectPinnedCandidates(
 			return;
 		}
 		if (rawCost === undefined) return;
-		const amount = readFiniteNonNegative(rawCost);
+		const amount = readBoundedReportedCost(rawCost);
 		const currency = pinned ? reportedCurrency(model, input) : 'USD'; // Legacy scalar records were historically interpreted as USD.
 		candidates.push({
 			kind: 'provider_reported',
@@ -859,7 +878,7 @@ function collectPinnedCandidates(
 		const legacy = isRecord(raw.output) ? raw.output : raw;
 		const usageRecord = isRecord(legacy.usage) ? legacy.usage : legacy;
 		const usage = readPinnedTokens(usageRecord);
-		const amount = readFiniteNonNegative(
+		const amount = readBoundedReportedCost(
 			legacy.cost_usd ?? legacy.total_cost_usd ?? legacy.cost,
 		);
 		if (
@@ -937,6 +956,13 @@ function mergeUsage(
 function readFiniteNonNegative(value: unknown): number | null {
 	return typeof value === 'number' && Number.isFinite(value) && value >= 0
 		? value
+		: null;
+}
+
+function readBoundedReportedCost(value: unknown): number | null {
+	const amount = readFiniteNonNegative(value);
+	return amount !== null && amount <= MAX_PROVIDER_REPORTED_COST_USD
+		? amount
 		: null;
 }
 

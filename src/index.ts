@@ -654,13 +654,17 @@ function emitPendingCostCorrection(sessionId: string, raw: unknown): boolean {
 function recoverPendingCostCorrection(
 	directory: string,
 	parentSessionId: string,
+	childSessionId: string,
 	pricing?: CostPricingConfig,
 ): PendingCostCorrection | null | undefined {
 	const events = readTelemetryEvents(directory);
 	const folded = foldTelemetryEvents(events);
-	if (folded.stats.rejected_corrections > 0) return undefined;
 	const parentSessionDigest = createHash('sha256')
 		.update(`delegation-cost-parent-v1\0${parentSessionId}`)
+		.digest('hex')
+		.slice(0, 32);
+	const childSessionDigest = createHash('sha256')
+		.update(`delegation-cost-child-v1\0${childSessionId}`)
 		.digest('hex')
 		.slice(0, 32);
 	const candidates = folded.events.filter(
@@ -671,11 +675,16 @@ function recoverPendingCostCorrection(
 			typeof event.record_id === 'string' &&
 			typeof event.identity_fingerprint === 'string',
 	);
+	const exactCandidates = candidates.filter(
+		(event) => event.child_session_digest === childSessionDigest,
+	);
+	const selectedCandidates =
+		exactCandidates.length > 0 ? exactCandidates : candidates;
 	// Zero candidates commonly means usage arrived before Task terminal; retain
 	// the already-bounded usage cache and let the terminal path consume it.
-	if (candidates.length === 0) return null;
-	if (candidates.length !== 1) return undefined;
-	const event = candidates[0];
+	if (selectedCandidates.length === 0) return null;
+	if (selectedCandidates.length !== 1) return undefined;
+	const event = selectedCandidates[0];
 	const effective = event;
 	if (effective.cost_source === 'reported') return null;
 	const currentFields = {
@@ -2489,6 +2498,7 @@ async function initializeOpenCodeSwarm(
 							const recovered = recoverPendingCostCorrection(
 								ctx.directory,
 								parentSessionId,
+								rememberedUsage.sessionId,
 								config.pricing,
 							);
 							if (recovered) {

@@ -85,6 +85,7 @@ export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 			'currency',
 			'record_id',
 			'identity_fingerprint',
+			'parent_session_digest',
 			'child_session_digest',
 			'version',
 		]),
