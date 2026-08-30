@@ -76,8 +76,11 @@ if [ -z "${COVERAGE_TEST_LIST:-}" ]; then
 	# (owned by their own jobs).
 	{
 		find src -name '*.test.ts' -type f
-		find tests/unit tests/adversarial tests/architect tests/cli tests/tools tests/helpers -name '*.test.ts' -type f 2>/dev/null
-		find tests -maxdepth 1 -name '*.test.ts' -type f 2>/dev/null
+		# '|| true': a branch may legitimately empty one of these trees (git
+		# drops the directory, e.g. tests/cli after #2420/#2421) and the find
+		# failure is silent under set -e with stderr already suppressed.
+		find tests/unit tests/adversarial tests/architect tests/cli tests/tools tests/helpers -name '*.test.ts' -type f 2>/dev/null || true
+		find tests -maxdepth 1 -name '*.test.ts' -type f 2>/dev/null || true
 	} | sort -u > all-tests.txt
 	{ grep -vE '^\s*#|^\s*$' scripts/ci/quarantined-tests.txt || true; } | sort > quarantined.txt
 	comm -23 all-tests.txt quarantined.txt > gated-tests.txt
