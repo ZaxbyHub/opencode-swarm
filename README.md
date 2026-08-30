@@ -164,9 +164,10 @@ The 15-minute guide covers:
 - Troubleshooting common issues
 
 The installer automatically:
-- Creates a project config at `.opencode/opencode-swarm.json` when missing so project-level overrides have a place to live
 - Adds `opencode-swarm` to the OpenCode plugin list
 - Disables the native `explore` and `general` agents to reduce routing conflicts
+
+It does **not** create a project config. `.opencode/opencode-swarm.json` is opt-in — create it yourself only if you want project-level overrides of the global config.
 
 ---
 
@@ -201,7 +202,6 @@ Build me a JWT auth helper with tests.
 ┌──────────────────────────────────────────────────────────────┐
 │ $ bunx opencode-swarm install                                │
 │ ✓ installed opencode-swarm                                   │
-│ ✓ created .opencode/opencode-swarm.json                     │
 │                                                              │
 │ $ opencode                                                   │
 │ [Swarm] Welcome! Architect auto-selected. Type /swarm help  │

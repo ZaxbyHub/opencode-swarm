@@ -116,7 +116,7 @@ describe('DEFAULT_AGENT_CONFIGS', () => {
 	});
 });
 
-describe('writeProjectConfigIfMissing', () => {
+describe('install project config policy', () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
@@ -129,7 +129,7 @@ describe('writeProjectConfigIfMissing', () => {
 		}
 	});
 
-	test('creates .opencode/opencode-swarm.json in cwd', async () => {
+	test('does not create .opencode/opencode-swarm.json in cwd', async () => {
 		const result = await runCLI(
 			['install'],
 			{ XDG_CONFIG_HOME: tempDir },
@@ -138,27 +138,12 @@ describe('writeProjectConfigIfMissing', () => {
 		expect(result.exitCode).toBe(0);
 
 		const configPath = join(tempDir, '.opencode', 'opencode-swarm.json');
-		expect(existsSync(configPath)).toBe(true);
+		expect(existsSync(configPath)).toBe(false);
 	});
 
-	test('file contains empty agents object (not populated from DEFAULT_AGENT_CONFIGS)', async () => {
+	test('does not create .opencode directory', async () => {
 		await runCLI(['install'], { XDG_CONFIG_HOME: tempDir }, tempDir);
-
-		const configPath = join(tempDir, '.opencode', 'opencode-swarm.json');
-		const parsed = JSON.parse(await readFile(configPath, 'utf-8'));
-
-		expect(parsed).toHaveProperty('agents');
-		expect(typeof parsed.agents).toBe('object');
-		expect(Object.keys(parsed.agents).length).toBe(0);
-	});
-
-	test('file does not contain default_agent (inherits from global config / schema defaults)', async () => {
-		await runCLI(['install'], { XDG_CONFIG_HOME: tempDir }, tempDir);
-
-		const configPath = join(tempDir, '.opencode', 'opencode-swarm.json');
-		const parsed = JSON.parse(await readFile(configPath, 'utf-8'));
-
-		expect(parsed).not.toHaveProperty('default_agent');
+		expect(existsSync(join(tempDir, '.opencode'))).toBe(false);
 	});
 
 	test('does NOT overwrite existing project config', async () => {
@@ -173,7 +158,7 @@ describe('writeProjectConfigIfMissing', () => {
 		};
 		await writeFile(configPath, JSON.stringify(originalContent, null, 2));
 
-		// Run install (which calls writeProjectConfigIfMissing)
+		// Run install — it must not create or clobber a project config
 		const result = await runCLI(
 			['install'],
 			{ XDG_CONFIG_HOME: tempDir },
@@ -186,17 +171,7 @@ describe('writeProjectConfigIfMissing', () => {
 		expect(parsed).toEqual(originalContent);
 	});
 
-	// Cross-platform error trigger: a regular file at the path where .opencode/
-	// would be created causes mkdirSync to fail on both POSIX (EEXIST) and
-	// Windows (EEXIST/ENOTDIR). The try/catch in writeProjectConfigIfMissing
-	// must surface this as a warning, not abort the install.
-	//
-	// Note: XDG_CONFIG_HOME here is incidental — it only points the install
-	// command at the test's tempDir. The test exercises the writeProjectConfigIfMissing
-	// try/catch regardless of which env var (XDG_CONFIG_HOME on POSIX, APPDATA
-	// on Windows) the production CLI uses internally. The actual production
-	// env var resolution is the installer's job, not this test's job.
-	test('does NOT abort install when .opencode path is blocked by a regular file', async () => {
+	test('does not create a project config when path is blocked by a regular file', async () => {
 		// Pre-create a regular file at the path where .opencode/ would be created
 		const blockedPath = join(tempDir, '.opencode');
 		await writeFile(blockedPath, 'blocked');
@@ -208,22 +183,8 @@ describe('writeProjectConfigIfMissing', () => {
 		);
 		expect(result.exitCode).toBe(0);
 
-		const combined = result.stdout + result.stderr;
-		expect(combined).toContain('Could not create project config');
-
 		const configPath = join(tempDir, '.opencode', 'opencode-swarm.json');
 		expect(existsSync(configPath)).toBe(false);
-	});
-
-	test('creates fresh config when project config does not exist', async () => {
-		await runCLI(['install'], { XDG_CONFIG_HOME: tempDir }, tempDir);
-
-		const configPath = join(tempDir, '.opencode', 'opencode-swarm.json');
-		expect(existsSync(configPath)).toBe(true);
-
-		const parsed = JSON.parse(await readFile(configPath, 'utf-8'));
-		// $schema reference (issue #1663) + the empty agents starter map.
-		expect(parsed).toEqual({ $schema: CONFIG_SCHEMA_REF, agents: {} });
 	});
 });
 
@@ -303,7 +264,7 @@ describe('install() uses DEFAULT_AGENT_CONFIGS', () => {
 		expect(updated.agents.coder.model).toBe('custom/coder-model');
 	});
 
-	test('install creates project config with empty agents and no default_agent', async () => {
+	test('install does not auto-create project config', async () => {
 		const result = await runCLI(
 			['install'],
 			{ XDG_CONFIG_HOME: tempDir },
@@ -312,16 +273,7 @@ describe('install() uses DEFAULT_AGENT_CONFIGS', () => {
 		expect(result.exitCode).toBe(0);
 
 		const projectConfigPath = join(tempDir, '.opencode', 'opencode-swarm.json');
-		expect(existsSync(projectConfigPath)).toBe(true);
-
-		const projectConfig = JSON.parse(
-			await readFile(projectConfigPath, 'utf-8'),
-		);
-
-		expect(projectConfig).toEqual({
-			$schema: CONFIG_SCHEMA_REF,
-			agents: {},
-		});
+		expect(existsSync(projectConfigPath)).toBe(false);
 	});
 });
 
@@ -359,7 +311,7 @@ describe('global config survives install', () => {
 			JSON.stringify(customGlobalConfig, null, 2),
 		);
 
-		// Run install — should create minimal project config without clobbering global
+		// Run install — should not create a project config and must not clobber global
 		const result = await runCLI(
 			['install'],
 			{ XDG_CONFIG_HOME: tempDir },
@@ -367,15 +319,9 @@ describe('global config survives install', () => {
 		);
 		expect(result.exitCode).toBe(0);
 
-		// Project config must be minimal
+		// Project config should not be auto-created
 		const projectConfigPath = join(tempDir, '.opencode', 'opencode-swarm.json');
-		const projectConfig = JSON.parse(
-			await readFile(projectConfigPath, 'utf-8'),
-		);
-		expect(projectConfig).toEqual({
-			$schema: CONFIG_SCHEMA_REF,
-			agents: {},
-		});
+		expect(existsSync(projectConfigPath)).toBe(false);
 
 		// Loader must resolve global custom model, not the schema default.
 		// Set XDG_CONFIG_HOME so getUserConfigDir() points to our temp dir.
@@ -438,7 +384,6 @@ describe('backward compatibility', () => {
 	test('install is idempotent — running twice does not corrupt configs', async () => {
 		const opencodeJsonPath = join(tempDir, 'opencode', 'opencode.json');
 		const pluginConfigPath = join(tempDir, 'opencode', 'opencode-swarm.json');
-		const projectConfigPath = join(tempDir, '.opencode', 'opencode-swarm.json');
 
 		// First install
 		const result1 = await runCLI(
@@ -461,9 +406,6 @@ describe('backward compatibility', () => {
 
 		const config2 = JSON.parse(await readFile(opencodeJsonPath, 'utf-8'));
 		const pluginConfig2 = JSON.parse(await readFile(pluginConfigPath, 'utf-8'));
-		const projectConfig2 = JSON.parse(
-			await readFile(projectConfigPath, 'utf-8'),
-		);
 
 		// opencode.json: plugin list should be identical (no duplicates)
 		expect(config2.plugin).toEqual(config1.plugin);
@@ -471,10 +413,9 @@ describe('backward compatibility', () => {
 		// Plugin config should be identical
 		expect(pluginConfig2).toEqual(pluginConfig1);
 
-		// Project config should still exist with minimal starter content
-		expect(projectConfig2).toEqual({
-			$schema: CONFIG_SCHEMA_REF,
-			agents: {},
-		});
+		// Project config should still not be auto-created
+		expect(existsSync(join(tempDir, '.opencode', 'opencode-swarm.json'))).toBe(
+			false,
+		);
 	});
 });

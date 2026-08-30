@@ -286,32 +286,6 @@ function saveJson(filepath: string, data: unknown): void {
 	fs.writeFileSync(filepath, `${JSON.stringify(data, null, 2)}\n`, 'utf-8');
 }
 
-function writeProjectConfigIfMissing(cwd: string): void {
-	try {
-		const opencodeDir = path.join(cwd, '.opencode');
-		const projectConfigPath = path.join(opencodeDir, 'opencode-swarm.json');
-
-		// Only write if file doesn't already exist
-		if (fs.existsSync(projectConfigPath)) {
-			return;
-		}
-
-		// Create .opencode/ directory if it doesn't exist
-		ensureDir(opencodeDir);
-
-		saveJson(projectConfigPath, {
-			$schema: CONFIG_SCHEMA_REF,
-			agents: {},
-		});
-		console.log('✓ Created project config at:', projectConfigPath);
-	} catch (error) {
-		console.warn(
-			'⚠ Could not create project config — installation will continue:',
-		);
-		console.warn(`  ${error instanceof Error ? error.message : String(error)}`);
-	}
-}
-
 async function install(): Promise<number> {
 	console.log('🐝 Installing OpenCode Swarm...\n');
 
@@ -424,9 +398,6 @@ async function install(): Promise<number> {
 	} else {
 		console.log('✓ Plugin config already exists at:', PLUGIN_CONFIG_PATH);
 	}
-
-	// Create project-level config if not exists
-	writeProjectConfigIfMissing(process.cwd());
 
 	console.log('\n📁 Configuration files:');
 	console.log(`   OpenCode config: ${OPENCODE_CONFIG_PATH}`);
