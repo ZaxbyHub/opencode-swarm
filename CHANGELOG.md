@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.157.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.157.0...v7.157.1) (2026-08-30)
+
+
+### Bug Fixes
+
+* bound repo graph source reads ([1edf095](https://github.com/ZaxbyHub/opencode-swarm/commit/1edf09514c95de1691ad62b8b0a241294a4a726c))
+
 ## [7.157.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.156.0...v7.157.0) (2026-08-30)
 
 
