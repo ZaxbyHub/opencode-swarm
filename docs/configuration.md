@@ -16,7 +16,7 @@ Project config:
 .opencode/opencode-swarm.json
 ```
 
-Project config merges over global config.
+Project config merges over global config. The project config file is **opt-in** — the installer and plugin startup never create it. Add it manually only when a project needs to override the global config.
 
 ## Environment variables
 

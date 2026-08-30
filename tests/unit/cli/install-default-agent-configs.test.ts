@@ -115,7 +115,7 @@ describe('DEFAULT_AGENT_CONFIGS', () => {
 	});
 });
 
-describe('writeProjectConfigIfMissing', () => {
+describe('install project config policy', () => {
 	let tempDir: string;
 
 	beforeEach(async () => {
@@ -157,7 +157,7 @@ describe('writeProjectConfigIfMissing', () => {
 		};
 		await writeFile(configPath, JSON.stringify(originalContent, null, 2));
 
-		// Run install (which calls writeProjectConfigIfMissing)
+		// Run install — it must not create or clobber a project config
 		const result = await runCLI(
 			['install'],
 			{ XDG_CONFIG_HOME: tempDir },

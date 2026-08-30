@@ -435,7 +435,7 @@ export const DEFAULT_MODELS: Record<string, string> = {
 };
 
 // Full agent configuration with model and fallback_models chains.
-// Used by install() and writeProjectConfigIfMissing() to populate default configs.
+// Used by install() to populate default configs.
 // General Council agents (council_generalist, council_skeptic, council_domain_expert)
 // derive their models from reviewer/critic/sme entries and don't need separate entries.
 export const DEFAULT_AGENT_CONFIGS: Record<
