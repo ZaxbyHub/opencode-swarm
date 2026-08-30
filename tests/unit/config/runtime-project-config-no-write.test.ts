@@ -8,12 +8,12 @@ import {
 	test,
 } from 'bun:test';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import OpenCodeSwarm from '../../../src/index';
 import { createIndexCommandsModuleGuards } from '../../helpers/index-commands-shared.js';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 // PRR-004 (issue #2420 follow-up): runtime startup used to call
 // writeProjectConfigIfNew(ctx.directory), auto-creating an empty project
@@ -40,11 +40,11 @@ describe('runtime startup does not create the project override', () => {
 	beforeAll(moduleGuards.setUpAll);
 	afterAll(moduleGuards.tearDownAll);
 
-	beforeEach(async () => {
+	beforeEach(() => {
 		// Same isolation as tests/unit/index.test.ts: redirect XDG config/cache
 		// dirs away from the developer's real home before the unstubbed boot.
 		cleanupIsolatedEnv = createIsolatedTestEnv().cleanup;
-		tempDir = await mkdtemp(path.join(tmpdir(), 'swarm-test-'));
+		tempDir = canonicalMkdtemp('swarm-test-');
 		mockPluginInput.directory = tempDir;
 		mockPluginInput.worktree = tempDir;
 	});
