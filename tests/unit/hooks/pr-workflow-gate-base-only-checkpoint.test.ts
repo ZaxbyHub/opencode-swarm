@@ -42,7 +42,7 @@ const candidateIds = PR_REVIEW_BASE_DIMENSION_IDS.map(
 	(_dimension, index) => `C-${index}`,
 );
 const MICRO_CANDIDATE_HEADER =
-	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence';
+	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags';
 
 let directory = '';
 const originalResolveCurrentGitHead = _test_exports.resolveCurrentGitHead;
@@ -127,7 +127,7 @@ async function completeTriggerEvaluation(runId: string): Promise<void> {
 			{
 				textOverride:
 					index === 0
-						? `${MICRO_CANDIDATE_HEADER}\nM-0 | ${workflowLane} | HIGH | correctness | file.ts:2 | claim | invariant | evidence | HIGH`
+						? `${MICRO_CANDIDATE_HEADER}\nM-0 | ${workflowLane} | HIGH | correctness | file.ts:2 | claim | invariant | evidence | HIGH | ORDINARY | `
 						: `${MICRO_CANDIDATE_HEADER}\n[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`,
 			},
 		);
@@ -243,7 +243,7 @@ describe('base-only post_explorer checkpoint (issue #2280 Part A)', () => {
 				pendingRecords(candidateIds),
 			),
 		);
-		expect(message).toContain('PR_REVIEW base coverage is incomplete');
+		expect(message).toContain('no terminal settlement disclosure is admitted');
 	});
 
 	test('post_reviewer is still refused before trigger evaluation, even with the early checkpoint persisted', async () => {
@@ -282,7 +282,7 @@ describe('base-only post_explorer checkpoint (issue #2280 Part A)', () => {
 			'swarm-pr-review:council',
 			[{ laneId: 'council-lane', workflowLane: 'trigger-x' }],
 			{
-				textOverride: `${MICRO_CANDIDATE_HEADER}\nX-COUNCIL | trigger-x | HIGH | correctness | file.ts:1 | claim | invariant | evidence | HIGH`,
+				textOverride: `${MICRO_CANDIDATE_HEADER}\nX-COUNCIL | trigger-x | HIGH | correctness | file.ts:1 | claim | invariant | evidence | HIGH | ORDINARY | `,
 			},
 		);
 		const state = await readPrWorkflowGateState(
@@ -329,7 +329,7 @@ describe('base-only post_explorer checkpoint (issue #2280 Part A)', () => {
 			'swarm-pr-review:council',
 			[{ laneId: 'council-lane', workflowLane: 'trigger-x' }],
 			{
-				textOverride: `${MICRO_CANDIDATE_HEADER}\nX-COUNCIL | trigger-x | HIGH | correctness | file.ts:1 | claim | invariant | evidence | HIGH`,
+				textOverride: `${MICRO_CANDIDATE_HEADER}\nX-COUNCIL | trigger-x | HIGH | correctness | file.ts:1 | claim | invariant | evidence | HIGH | ORDINARY | `,
 			},
 		);
 		const state = await readPrWorkflowGateState(

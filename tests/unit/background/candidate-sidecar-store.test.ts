@@ -87,7 +87,7 @@ const BASE_FLAGS: ParseFlags = {
 };
 
 const BASE_EXPLORER_HEADER =
-	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 
 function beRow(
 	c1: string,

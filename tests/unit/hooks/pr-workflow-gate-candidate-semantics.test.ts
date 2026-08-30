@@ -21,7 +21,7 @@ beforeEach(setupPrWorkflowGateFixtures);
 afterEach(teardownPrWorkflowGateFixtures);
 
 const BASE_HEADER =
-	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 
 describe('PR-review candidate semantics at the coverage gate', () => {
 	test('reports batch, lane, row, and invalid fields for malformed candidate output', async () => {
@@ -44,8 +44,8 @@ describe('PR-review candidate semantics at the coverage gate', () => {
 			{
 				textOverride: [
 					BASE_HEADER,
-					`BAD-SEVERITY | ${malformedDimension} | BLOCKER-${'x'.repeat(100_000)} | correctness | src/a.ts:1 | claim | evidence | impact | HIGH`,
-					'BAD-LANE | not-a-real-lane | HIGH | correctness | src/a.ts:2 | claim | evidence | impact | HIGH',
+					`BAD-SEVERITY | ${malformedDimension} | BLOCKER-${'x'.repeat(100_000)} | correctness | src/a.ts:1 | claim | evidence | impact | HIGH | ORDINARY | `,
+					'BAD-LANE | not-a-real-lane | HIGH | correctness | src/a.ts:2 | claim | evidence | impact | HIGH | ORDINARY | ',
 				].join('\n'),
 			},
 		);
@@ -66,14 +66,15 @@ describe('PR-review candidate semantics at the coverage gate', () => {
 		} catch (error) {
 			diagnostic = error instanceof Error ? error.message : String(error);
 		}
-		expect(diagnostic).toMatch(/batch=semantic-bad.*lane=bad-intent-output/);
-		expect(diagnostic).toContain('predicate=discovery.row');
-		expect(diagnostic).toMatch(
-			/row 2 field severity: Invalid severity: BLOCKER/,
+		// INTENT CHANGE (issue #2383): the settlement refusal no longer embeds
+		// per-row lane diagnostics; it names the coverage kind, the covered
+		// count, and every unresolved dimension. Row-level diagnostics
+		// (`row 2 field severity: Invalid severity: ...`) remain observable on
+		// the collect-path lane result, pinned in
+		// dispatch-lanes-pr-review-collection-validation tests.
+		expect(diagnostic).toContain(
+			'PR_REVIEW base coverage is PARTIAL (5/6 dimensions covered; unresolved: intent-architecture)',
 		);
-		// The structured diagnostic is deliberately first-failure-only; a later
-		// malformed row cannot replace the deterministic severity predicate.
-		expect(diagnostic).not.toContain('not-a-real-lane');
 		expect(diagnostic.length).toBeLessThan(2_000);
 		expect(diagnostic).not.toContain('x'.repeat(1_000));
 	});
@@ -94,8 +95,8 @@ describe('PR-review candidate semantics at the coverage gate', () => {
 		await persistBatch('semantic-mixed', 'swarm-pr-review:base', [mixedLane], {
 			textOverride: [
 				BASE_HEADER,
-				`VALID | ${malformedDimension} | HIGH | correctness | src/a.ts:1 | valid claim | valid evidence | valid impact | HIGH`,
-				`MALFORMED | ${malformedDimension} | URGENT | correctness | src/a.ts:2 | dropped claim | dropped evidence | dropped impact | HIGH`,
+				`VALID | ${malformedDimension} | HIGH | correctness | src/a.ts:1 | valid claim | valid evidence | valid impact | HIGH | ORDINARY | `,
+				`MALFORMED | ${malformedDimension} | URGENT | correctness | src/a.ts:2 | dropped claim | dropped evidence | dropped impact | HIGH | ORDINARY | `,
 			].join('\n'),
 		});
 
@@ -123,8 +124,8 @@ describe('PR-review candidate semantics at the coverage gate', () => {
 			_test_exports.extractCandidateIds(
 				[
 					BASE_HEADER,
-					`VALID | ${malformedDimension} | HIGH | correctness | src/a.ts:1 | valid claim | valid evidence | valid impact | HIGH`,
-					`MALFORMED | ${malformedDimension} | URGENT | correctness | src/a.ts:2 | dropped claim | dropped evidence | dropped impact | HIGH`,
+					`VALID | ${malformedDimension} | HIGH | correctness | src/a.ts:1 | valid claim | valid evidence | valid impact | HIGH | ORDINARY | `,
+					`MALFORMED | ${malformedDimension} | URGENT | correctness | src/a.ts:2 | dropped claim | dropped evidence | dropped impact | HIGH | ORDINARY | `,
 				].join('\n'),
 				'base_explorer',
 				[malformedDimension],
@@ -173,14 +174,13 @@ describe('PR-review candidate semantics at the coverage gate', () => {
 			});
 			await persistBatch('tier-m-retry', 'swarm-pr-review:base', [retryLane], {
 				scope: 'complete PR diff def456...abc123',
-				textOverride: `${BASE_HEADER}\nBAD-CONFIDENCE | ${retriedDimension} | HIGH | correctness | src/b.ts:1 | claim | evidence | impact | 0.97`,
+				textOverride: `${BASE_HEADER}\nBAD-CONFIDENCE | ${retriedDimension} | HIGH | correctness | src/b.ts:1 | claim | evidence | impact | 0.97 | ORDINARY | `,
 			});
 
 			await expect(
 				assertPrReviewBaseCoverageSettled(tempDir, SESSION_ID),
 			).resolves.toMatchObject({
-				prReviewDepthTier: 'M',
-				prHeadSha: HEAD_SHA,
+				state: { prReviewDepthTier: 'M', prHeadSha: HEAD_SHA },
 			});
 		} finally {
 			_test_exports.resolvePrReviewDiffStats = originalResolveDiffStats;

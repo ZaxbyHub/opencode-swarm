@@ -22,7 +22,25 @@ export const PR_ARTIFACT_HEAD_SHA = 'abc123';
 export const PR_ARTIFACT_REVISION_DIGEST = 'revision-1';
 
 const MICRO_CANDIDATE_HEADER =
-	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence';
+	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags';
+const BASE_CANDIDATE_HEADER =
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
+
+/**
+ * Typed risk metadata for reviewer rows and CONFIRMED records (issue #2383).
+ * CONFIRMED MEDIUM keeps its historical critic-routing intent by declaring
+ * `HIGH_IMPACT` (the old contract routed every CONFIRMED MEDIUM); every other
+ * fixture shape uses `ORDINARY` with no tags — CRITICAL/HIGH still route on
+ * severity alone and LOW/INFO/NONE were never critic-routed.
+ */
+function fixtureRiskImpact(
+	classification: string,
+	severity: string,
+): 'ORDINARY' | 'HIGH_IMPACT' {
+	return classification === 'CONFIRMED' && severity === 'MEDIUM'
+		? 'HIGH_IMPACT'
+		: 'ORDINARY';
+}
 
 /**
  * Shared lane-persistence fixture for `write_pr_review_artifact` tests. These
@@ -88,17 +106,17 @@ export async function persistPrReviewBatch(
 		const text =
 			options.textOverride ??
 			(options.cleanPerLane
-				? `[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence\n[CLEAN] | ${lane.workflowLane} | exact reviewed diff | no actionable finding survived triage`
+				? `${BASE_CANDIDATE_HEADER}\n[CLEAN] | ${lane.workflowLane} | exact reviewed diff | no actionable finding survived triage`
 				: undefined) ??
 			(options.empty
 				? ''
 				: mode === 'swarm-pr-review:reviewer'
-					? '[REVIEWED] | C-001 | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer'
+					? '[REVIEWED] | C-001 | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer | ORDINARY | '
 					: mode === 'swarm-pr-review:critic'
 						? '[CRITIC] | C-001 | UPHELD | HIGH | reason | no change'
 						: mode === 'swarm-pr-feedback:verification'
 							? `[FEEDBACK-VERIFIED] | ${lane.workflowLane} | CONFIRMED | evidence`
-							: `${mode === 'swarm-pr-review:micro' ? MICRO_CANDIDATE_HEADER : '[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence'}\n${index === 0 && options.firstCandidateId ? options.firstCandidateId : `C-${index}`} | ${lane.workflowLane} | ${options.candidateSeverity ?? 'HIGH'} | correctness | file.ts:1 | claim | evidence | impact | HIGH`);
+							: `${mode === 'swarm-pr-review:micro' ? MICRO_CANDIDATE_HEADER : BASE_CANDIDATE_HEADER}\n${index === 0 && options.firstCandidateId ? options.firstCandidateId : `C-${index}`} | ${lane.workflowLane} | ${options.candidateSeverity ?? 'HIGH'} | correctness | file.ts:1 | claim | evidence | impact | HIGH | UNKNOWN | `);
 		const stored = storeLaneOutput(directory, {
 			batchId,
 			laneId: lane.laneId,
@@ -242,7 +260,7 @@ export function reviewedRow(
 	classification: string,
 	severity: string,
 ): string {
-	return `[REVIEWED] | ${id} | ${classification} | STRUCTURALLY_PROVEN | ${severity} | YES | file.ts:1 | rationale text | probe output | reviewer`;
+	return `[REVIEWED] | ${id} | ${classification} | STRUCTURALLY_PROVEN | ${severity} | YES | file.ts:1 | rationale text | probe output | reviewer | ${fixtureRiskImpact(classification, severity)} | `;
 }
 
 export async function settleReviewerPhase(
@@ -313,6 +331,8 @@ export type ArtifactRecord = {
 		| 'suppress_with_reason'
 		| 'handoff_to_feedback';
 	severity?: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO' | 'NONE';
+	risk_impact?: 'ORDINARY' | 'HIGH_IMPACT' | 'UNKNOWN';
+	risk_tags?: string[];
 };
 
 export function artifactRecord(
@@ -328,6 +348,15 @@ export function artifactRecord(
 		evidence: 'validator-errors fixture evidence',
 		next_action: nextAction,
 		severity,
+		// A CONFIRMED record must carry the typed risk metadata of the reviewer
+		// row it projects (issue #2383 write boundary); the values mirror
+		// `reviewedRow` so records and rows stay coherent.
+		...(status === 'CONFIRMED'
+			? {
+					risk_impact: fixtureRiskImpact('CONFIRMED', severity),
+					risk_tags: [] as string[],
+				}
+			: {}),
 	};
 }
 
@@ -335,6 +364,12 @@ export function artifactRecordWithoutSeverity(
 	id: string,
 	status: ArtifactRecord['status'],
 	nextAction: ArtifactRecord['next_action'],
+	/**
+	 * Severity of the authoritative reviewer row, used ONLY to derive the typed
+	 * risk metadata a CONFIRMED record must carry (issue #2383). The record
+	 * itself still omits `severity` — that is the condition under test.
+	 */
+	severityHint?: NonNullable<ArtifactRecord['severity']>,
 ): ArtifactRecord {
 	return {
 		finding_id: id,
@@ -342,6 +377,12 @@ export function artifactRecordWithoutSeverity(
 		file_line: 'src/index.ts:1',
 		evidence: 'validator-errors fixture evidence',
 		next_action: nextAction,
+		...(status === 'CONFIRMED'
+			? {
+					risk_impact: fixtureRiskImpact('CONFIRMED', severityHint ?? 'LOW'),
+					risk_tags: [] as string[],
+				}
+			: {}),
 	};
 }
 

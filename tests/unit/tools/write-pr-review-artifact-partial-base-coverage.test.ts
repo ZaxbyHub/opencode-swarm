@@ -71,6 +71,10 @@ async function establishFivePlusOne(
 		evidence: string;
 		next_action: 'route_to_reviewer';
 		severity: 'HIGH';
+		// Replay identity includes the typed risk fields (issue #2383): a row
+		// persisted without them reads back normalized to UNKNOWN / no tags.
+		risk_impact: 'UNKNOWN';
+		risk_tags: string[];
 	}>;
 }> {
 	await activatePrWorkflow(directory, PR_ARTIFACT_SESSION_ID, 'PR_REVIEW', {
@@ -131,11 +135,13 @@ async function establishFivePlusOne(
 		missingDimension,
 		records: successfulDimensions.map((_dimension, index) => ({
 			finding_id: `C-${index}`,
-			status: 'PENDING',
+			status: 'PENDING' as const,
 			file_line: 'src/index.ts:1',
 			evidence: `authoritative candidate ${index}`,
-			next_action: 'route_to_reviewer',
-			severity: 'HIGH',
+			next_action: 'route_to_reviewer' as const,
+			severity: 'HIGH' as const,
+			risk_impact: 'UNKNOWN' as const,
+			risk_tags: [] as string[],
 		})),
 	};
 }
@@ -178,7 +184,9 @@ describe('write_pr_review_artifact partial base coverage (#2350)', () => {
 		const { missingDimension, records } = await establishFivePlusOne();
 		await expect(
 			assertPrReviewBaseCoverageSettled(directory, PR_ARTIFACT_SESSION_ID),
-		).rejects.toThrow(`missing dimensions: ${missingDimension}`);
+		).rejects.toThrow(
+			'no terminal settlement disclosure is admitted; settle via write_pr_review_artifact partial_base_coverage.unresolved_dimensions',
+		);
 
 		const raw = await executeWritePrReviewArtifact(
 			{
@@ -187,7 +195,7 @@ describe('write_pr_review_artifact partial base coverage (#2350)', () => {
 				pr_head_sha: PR_ARTIFACT_HEAD_SHA,
 				boundary: 'post_explorer',
 				records,
-				partial_base_coverage: { missing_dimension: missingDimension },
+				partial_base_coverage: { unresolved_dimensions: [missingDimension] },
 			},
 			directory,
 			{ sessionID: PR_ARTIFACT_SESSION_ID },
@@ -196,15 +204,24 @@ describe('write_pr_review_artifact partial base coverage (#2350)', () => {
 		expect(result).toMatchObject({
 			success: true,
 			partial_base_coverage: {
-				missing_dimension: missingDimension,
-				failure_class: 'contract',
+				unresolved_dimensions: [
+					{
+						dimension: missingDimension,
+						terminal_state: 'FAILED',
+						reason_kind: 'lane_failure',
+						failure_class: 'contract',
+					},
+				],
 				path: 'pr-review/partial-run/coverage-disclosure.json',
 				digest: expect.stringMatching(/^[0-9a-f]{64}$/),
 			},
 		});
 		await expect(
 			assertPrReviewBaseCoverageSettled(directory, PR_ARTIFACT_SESSION_ID),
-		).resolves.toMatchObject({ prHeadSha: PR_ARTIFACT_HEAD_SHA });
+		).resolves.toMatchObject({
+			state: { prHeadSha: PR_ARTIFACT_HEAD_SHA },
+			settlement: { kind: 'PARTIAL' },
+		});
 
 		_test_exports.resetTrackedStateCache();
 		const state = await readPrWorkflowGateState(
@@ -212,9 +229,16 @@ describe('write_pr_review_artifact partial base coverage (#2350)', () => {
 			PR_ARTIFACT_SESSION_ID,
 		);
 		expect(state?.prReviewPartialBaseCoverage).toMatchObject({
+			schemaVersion: 2,
 			runId: 'partial-run',
-			missingDimension,
-			failureClass: 'contract',
+			unresolvedDimensions: [
+				{
+					dimension: missingDimension,
+					terminalState: 'FAILED',
+					reasonKind: 'lane_failure',
+					failureClass: 'contract',
+				},
+			],
 		});
 		const disclosurePath = path.join(
 			directory,
@@ -235,7 +259,7 @@ describe('write_pr_review_artifact partial base coverage (#2350)', () => {
 					pr_head_sha: PR_ARTIFACT_HEAD_SHA,
 					boundary: 'post_explorer',
 					records,
-					partial_base_coverage: { missing_dimension: missingDimension },
+					partial_base_coverage: { unresolved_dimensions: [missingDimension] },
 				},
 				directory,
 				{ sessionID: PR_ARTIFACT_SESSION_ID },
@@ -254,13 +278,15 @@ describe('write_pr_review_artifact partial base coverage (#2350)', () => {
 				boundary: 'post_explorer',
 				records,
 				partial_base_coverage: {
-					missing_dimension: PR_REVIEW_BASE_DIMENSION_IDS[0],
+					unresolved_dimensions: [PR_REVIEW_BASE_DIMENSION_IDS[0]],
 				},
 			},
 			directory,
 			{ sessionID: PR_ARTIFACT_SESSION_ID },
 		);
-		expect(wrong).toContain('actual missing');
+		expect(wrong).toContain(
+			'declaration must exactly match the derived terminal settlement',
+		);
 
 		const wrongBoundary = await executeWritePrReviewArtifact(
 			{
@@ -270,7 +296,7 @@ describe('write_pr_review_artifact partial base coverage (#2350)', () => {
 				boundary: 'post_reviewer',
 				records,
 				partial_base_coverage: {
-					missing_dimension: PR_REVIEW_BASE_DIMENSION_IDS[5],
+					unresolved_dimensions: [PR_REVIEW_BASE_DIMENSION_IDS[5]],
 				},
 			},
 			directory,
@@ -293,7 +319,7 @@ describe('write_pr_review_artifact partial base coverage (#2350)', () => {
 					{ ...records[0]!, finding_id: 'FOREIGN' },
 					...records.slice(1),
 				],
-				partial_base_coverage: { missing_dimension: missingDimension },
+				partial_base_coverage: { unresolved_dimensions: [missingDimension] },
 			},
 			directory,
 			{ sessionID: PR_ARTIFACT_SESSION_ID },

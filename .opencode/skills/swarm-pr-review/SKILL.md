@@ -142,11 +142,11 @@ ordering, vocabulary, or schema.
   `test-infrastructure`, `ui-accessibility-i18n`, `privacy-observability`,
   `generated-provenance`, `unclassified-risk`.
 - Base candidate header:
-  `[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence`
+  `[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags`
 - Base clean attestation:
   `[CLEAN] | lane | coverage_scope | evidence`
 - Micro/council candidate header:
-  `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence`
+  `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags`
 - Micro/council clean attestation:
   `[CLEAN] | micro_lane | coverage_scope | evidence`
 - Severity is exactly `INFO | LOW | MEDIUM | HIGH | CRITICAL`; confidence is
@@ -972,14 +972,9 @@ Before Phase 4 or synthesis, all base lanes must be settled. `dispatch_lanes_asy
 For ANY lane that failed (either mode):
 1. **Retry** (max 2 attempts after the initial attempt) with materially different parameters — different session or prompt decomposition, while preserving the required structured async mode and exact head provenance.
 2. If a base lane fails under Profile A, retry only the unresolved `workflow_lane` identifiers with `dispatch_lanes_async`, `mode: "swarm-pr-review:base"`, the same exact `pr_head_sha`, explorer agents, and the staged-resilience fields when that policy is enabled: a singleton `pr_review_wave_stage: "canary"` first, then a matching `"fanout"` batch only for the remaining unresolved obligations. The durable gate joins successful provenance across the initial wave and retry batches, carries unresolved obligations forward attempt by attempt, and rejects typed `retry_exhausted` or `circuit_open` outcomes before any new lane is launched. While that controller is active, blocking `dispatch_lanes` and direct Task dispatch are not equivalent because they cannot satisfy the structured provenance gate. Under Profiles B/C, retry only the failed `workflow_lane` identifiers with a fresh subagent or pass, the same exact `pr_head_sha`, and a materially different prompt decomposition.
-3. If no equivalent alternative can be verified, **STOP and surface the lane failure to the user as BLOCKED** with the lane id, scope, failure mode, retry attempts, and why equivalence could not be proven. Do not present partial findings, do not issue a review verdict, and do not synthesize from successful lanes. A low-quality partial review is worse than no review.
-4. Under Profile A: After the second failed retry, collect every lane to a
-   terminal state, do not probe downstream writers or micro lanes, call
-   `abort_pr_workflow` with `mode: "PR_REVIEW"`, `kind: "recovery"`, and a
-   non-empty one-line `reason` naming the failed lane and exhausted retries.
-   Then call `prepare_pr_workflow_checkout` with `operation: "restore"`.
-   Report the preserved failure only after the gate is cleared and the checkout
-   restoration either succeeds or returns a concrete manual-recovery diagnostic.
+3. If no equivalent alternative can be verified AND every launched lane is terminal or explicitly cancelled, **settle N-of-6 truthfully (issue #2383)** instead of discarding validated work: admit the terminal settlement with `write_pr_review_artifact` (`kind: "findings"`, `boundary: "post_explorer"`, the sentinel `CLEAN-REVIEW` record when no candidates exist, and `partial_base_coverage: { unresolved_dimensions: [<exactly the dimensions that are not covered>] }`), run the remaining phases over the covered dimensions' findings, and complete with `complete_pr_workflow` carrying the verdict the settlement allows. NEVER fabricate coverage, NEVER present an unresolved dimension as reviewed, and NEVER let a partial report approve.
+4. **Terminal report kinds (issue #2383):** all six dimensions covered → `COMPLETE` (verdict may be APPROVE, REQUEST_CHANGES, or INCOMPLETE); at least one covered → `PARTIAL` (verdict must be REQUEST_CHANGES or INCOMPLETE; validated findings from covered dimensions remain publishable); zero covered → `NO_COVERAGE` (skip the findings ladder entirely, call `complete_pr_workflow` with `report_verdict: "INCOMPLETE"` directly — the completion returns a truthful operational report with per-dimension reasons and never claims a code-quality review). A still-live lane blocks settlement: poll, cancel explicitly with `cancel_pending`, or let the presumed-stale sweep settle it first.
+5. Under Profile A, when the bind/checkout path itself is genuinely unreachable or the workflow is publication-armed and exact publication cannot proceed, use the bounded recovery exits: `abort_pr_workflow` with `mode: "PR_REVIEW"`, `kind: "recovery"`, and a non-empty one-line `reason` for an unrecoverable unbound/bound gate, or `kind: "armed_recovery"` (issue #2383) for a publication-armed wedge — then `prepare_pr_workflow_checkout` with `operation: "restore"`. Abort remains a recovery tool for the genuinely unrecoverable, never a shortcut past a settleable coverage obligation.
 
 ### Contract-failure diagnosis and recovery
 
@@ -1109,7 +1104,7 @@ The fence below is documentation formatting only. Emit the header and all
 machine-readable rows as unfenced plain text; do not emit the backticks.
 
 ```text
-[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
+[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags
 ```
 
 Profile A stores the full assistant transcript, so earlier unmarked progress
@@ -1312,7 +1307,7 @@ The fence below is documentation formatting only. Emit the header and all
 machine-readable rows as unfenced plain text; do not emit the backticks.
 
 ```text
-[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence
+[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags
 [CLEAN] | micro_lane | coverage_scope | evidence
 ```
 
@@ -1443,7 +1438,7 @@ For each candidate, the reviewer must determine:
 Reviewer output format:
 
 ```text
-[REVIEWED] | item_id | classification | evidence_type | severity | introduced_by_pr | file:line | rationale | probe | reviewer_notes
+[REVIEWED] | item_id | classification | evidence_type | severity | introduced_by_pr | file:line | rationale | probe | reviewer_notes | risk_impact | risk_tags
 ```
 
 For the mechanically derived `CLEAN-REVIEW` sentinel, use the same exact row
@@ -1486,14 +1481,9 @@ A finding may still be reported without a runnable command if it is structurally
 
 ## Phase 8: Critic Challenge
 
-Route every reviewer-confirmed HIGH or CRITICAL finding to a critic. Also route borderline MEDIUM findings when they involve security, state machines, write authority, evidence integrity, model/tool permissions, git safety, or config ratchets.
+Route reviewer-confirmed CRITICAL and HIGH findings to a critic always. Route a MEDIUM finding only when its typed risk metadata says so (issue #2383): `risk_impact: "HIGH_IMPACT"`, or any `risk_tags` entry (`SECURITY`, `AUTH_PERMISSIONS`, `STATE_INTEGRITY`, `WRITE_PATH`, `EVIDENCE_INTEGRITY`, `GIT`, `CONFIGURATION`). An ordinary MEDIUM (`risk_impact: "ORDINARY"`, no tags) is NOT critic-routed. `risk_impact: "UNKNOWN"` always routes to critic — never guess impact you could not assess, and never let file paths, dimension names, or prose override the typed `risk_impact`/`risk_tags` the reviewer row carries.
 
-The controller conservatively derives critic ownership from semantic reviewer
-rows: every reviewer-confirmed CRITICAL, HIGH, or MEDIUM item is mandatory
-critic inventory. This intentionally over-routes ordinary MEDIUM items because
-machine enforcement cannot safely infer every repository-specific trust
-boundary from prose. Completion is blocked until that exact derived inventory
-has valid critic rows.
+The controller derives critic ownership from the typed reviewer rows through the one shared production predicate; every newly written CONFIRMED finding must supply `risk_impact` and `risk_tags` (the write boundary rejects a CONFIRMED record without them, and unknown tag values fail the row). Completion is blocked until that exact derived inventory has valid critic rows.
 
 Reviewer and critic settlement MUST compose successful verdicts item by item
 across complementary partial batches. The newest successful claim wins each
@@ -1694,7 +1684,7 @@ When triggered:
 2. After the default base-dimension and risk-family coverage is complete, launch all supplementary council agents. Under Profile A, use one `dispatch_lanes_async` call with `mode: "swarm-pr-review:council"`, the same exact `pr_head_sha`, and one unique `workflow_lane` per council member; continue independent context preparation while they run, polling with `collect_lane_results` (without `wait`) to process settled agents incrementally, and use `wait: true` only when no independent work remains. All agents must be settled and their candidates added to the ledger before reviewer classification; under Profile A the runtime enforces this join barrier, and blocking, sequential, or direct-Task fallback is not equivalent to the structured council dispatch — bypassing the active controller is `BLOCKED`. Under Profile B, dispatch council members as parallel subagents with the same marker contract and settle them all before reviewer classification; under Profile C, run each council lens as a separate sequential pass.
 3. Each council agent assumes all work is wrong until code evidence proves otherwise.
 4. Each agent hunts within its lane only.
-5. Council uses the micro-lane row family: `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence`. Emit one row per `EVIDENCE_FOUND` or `SUSPICIOUS` claim, or a fully populated `[CLEAN] | micro_lane | coverage_scope | evidence` row when no candidate survives. Put the exact council `workflow_lane` value in the `micro_lane` data field. Council prose without one of those markers does not settle the lane.
+5. Council uses the micro-lane row family: `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags`. Emit one row per `EVIDENCE_FOUND` or `SUSPICIOUS` claim, or a fully populated `[CLEAN] | micro_lane | coverage_scope | evidence` row when no candidate survives. Put the exact council `workflow_lane` value in the `micro_lane` data field. Council prose without one of those markers does not settle the lane.
 6. Agents must not return `CONFIRMED`, `DISPROVED`, or final severity; candidate severity remains provisional until reviewer classification.
 7. The independent reviewer then classifies every council candidate as `CONFIRMED`, `DISPROVED`, `UNVERIFIED`, or `PRE_EXISTING`.
 8. Apply critic challenge to reviewer-confirmed HIGH/CRITICAL or borderline findings.
@@ -1770,7 +1760,7 @@ Before writing the final output, print this checklist with filled values. Every 
 [VALIDATION] repo graph / impact cone source: ___
 [VALIDATION] deterministic signals ingested: ___
 [VALIDATION] lane dispatch mechanism: controller / native subagents / sequential passes — ___
-[VALIDATION] base dimensions covered with attestation: ___ / 6 (lanes dispatched: ___)
+[VALIDATION] terminal coverage: COMPLETE (6/6) OR PARTIAL (___/6 + unresolved dimensions settled) OR NO_COVERAGE (0/6) (issue #2383; lanes dispatched: ___)
 [VALIDATION] base explorer lanes returned: ___ / ___
 [VALIDATION] micro risk families evaluated and attested: ___ / 11 OR BLOCKED — <missing rows> (micro lanes dispatched: ___)
 [VALIDATION] Swarm verifier routing used: ___
@@ -1783,7 +1773,7 @@ Before writing the final output, print this checklist with filled values. Every 
 [VALIDATION] findings marked PRE_EXISTING: ___
 [VALIDATION] findings left UNVERIFIED: ___
 [VALIDATION] findings escalated to critic: ___
-[VALIDATION] critic dispatched: ___ OR "SKIPPED — no reviewer-confirmed HIGH/CRITICAL or borderline findings"
+[VALIDATION] critic dispatched: ___ OR "SKIPPED — no typed critic-routed finding (CRITICAL/HIGH, MEDIUM+HIGH_IMPACT, MEDIUM+risk_tags, or UNKNOWN)"
 [VALIDATION] critic returned: ___ OR "N/A"
 [VALIDATION] findings upheld by critic: ___
 [VALIDATION] findings downgraded by critic: ___
@@ -1922,8 +1912,8 @@ For reviewer, critic, and explorer prompt templates, read `references/prompt-tem
 
 Under Profile A, after metrics and durable review artifacts are complete, but
 before emitting the user-facing final report, call `complete_pr_workflow` with
-mode `PR_REVIEW` and the same exact
-`pr_head_sha`. The tool refuses to clear the session gate while required base,
+mode `PR_REVIEW`, the same exact
+`pr_head_sha`, and the terminal `report_verdict` the coverage kind allows (issue #2383). The tool refuses to clear the session gate while required base,
 trigger, declared reviewer/critic, or open-lane obligations remain incomplete.
 While the gate remains active, the runtime prepends a workflow-active banner
 to the first substantive text part of each architect message (the model's text
@@ -2015,7 +2005,15 @@ the frozen ledger before re-binding.
 Abort is a recovery tool, not a coverage shortcut. Use it only when the
 bind/checkout path is genuinely unreachable or bounded structural recovery or
 retries are genuinely exhausted; never use it to skip a coverage obligation
-that is still recoverable, merely expensive, or inconvenient.
+that is still recoverable, merely expensive, or inconvenient. When lanes have
+settled short of full coverage, the terminal N-of-6 settlement (issue #2383)
+is the truthful exit — not abort. For a publication-armed workflow whose exact
+publication cannot proceed, `abort_pr_workflow` with `kind: "armed_recovery"`
+(plus the armed recovery identity fields from `pr_workflow_status`) is the
+audited escape: it settles lanes, invalidates the staged publication
+authorization, preserves validated work, and leaves a recoverable terminal
+state; exact approved publication via `complete_pr_workflow` remains available
+and preferred whenever it can proceed.
 
 On Profiles B/C there is no durable gate or auto-resume loop to clear: if the
 head bind is genuinely unreachable or bounded lane recovery is exhausted,

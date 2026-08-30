@@ -307,8 +307,8 @@ describe('pr-workflow-gate critic batch eligibility', () => {
 		});
 		await persistBatch('reserved-id-base', 'swarm-pr-review:base', [baseLane], {
 			textOverride: [
-				'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence',
-				`__proto__ | ${workflowLane} | HIGH | correctness | file.ts:1 | reserved key claim | concrete evidence | runtime impact | HIGH`,
+				'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags',
+				`__proto__ | ${workflowLane} | HIGH | correctness | file.ts:1 | reserved key claim | concrete evidence | runtime impact | HIGH | ORDINARY | `,
 			].join('\n'),
 		});
 		const itemIds = ['__proto__', ...BASE_IDS.slice(1)];

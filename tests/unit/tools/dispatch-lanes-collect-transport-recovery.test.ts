@@ -353,7 +353,7 @@ describe('collect_lane_results transport recovery provenance', () => {
 		});
 		_internals.resolvePrWorkflowRevisionDigestAsync = async () => 'revision-1';
 		const candidate = [
-			'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence',
+			'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags',
 			`C-C | ${workflowLane} | HIGH | correctness | src/state.ts:1 | invalid transition | STATE_INVARIANT | direct state evidence | HIGH`,
 		].join('\n');
 		_internals.getSessionOps = () => ({

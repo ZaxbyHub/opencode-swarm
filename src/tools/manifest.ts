@@ -28,6 +28,7 @@ import { actionlint_scan } from './actionlint-scan';
 import { swarmApplyPatch } from './apply-patch';
 import { approve_plan_critic } from './approve-plan-critic';
 import { ast_grep } from './ast-grep';
+import { authorize_pr_review_reentry } from './authorize-pr-review-reentry';
 import { batch_symbols } from './batch-symbols';
 import { build_check } from './build-check';
 import { check_gate_status } from './check-gate-status';
@@ -188,6 +189,7 @@ export const TOOL_MANIFEST = defineHandlers({
 	completion_verify: () => completion_verify,
 	complete_pr_workflow: () => complete_pr_workflow,
 	abort_pr_workflow: () => abort_pr_workflow,
+	authorize_pr_review_reentry: () => authorize_pr_review_reentry,
 	approve_plan_critic: () => approve_plan_critic,
 	prepare_pr_workflow_checkout: () => prepare_pr_workflow_checkout,
 	record_implementation_review: () => record_implementation_review,

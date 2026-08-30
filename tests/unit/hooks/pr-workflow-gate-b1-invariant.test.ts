@@ -305,7 +305,9 @@ describe('pr-workflow-gate B1 invariant: no false positives on the settled path'
 		// The critic-coverage gate is never reached silently: completion blocks on
 		// reviewer settlement first, so critic coverage cannot be skipped.
 		const completion = await errorFrom(
-			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA),
+			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
+				reportVerdict: 'APPROVE',
+			}),
 		);
 		expect(completion?.message).toContain(
 			'reviewer items lack an authenticated verdict',
@@ -368,7 +370,9 @@ describe('pr-workflow-gate B1 invariant: a legitimately empty critic inventory',
 			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer'),
 		).resolves.toMatchObject({ mode: 'PR_REVIEW' });
 		const error = await errorFrom(
-			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA),
+			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
+				reportVerdict: 'APPROVE',
+			}),
 		);
 		// It passed the critic-coverage gate (no critic-related block, no
 		// invariant violation) and stopped at the next unrelated obligation.
@@ -402,7 +406,9 @@ describe('pr-workflow-gate B1 invariant: a legitimately empty critic inventory',
 			`${reviewed(challenged)}\n${reviewed(suppressed, 'DISPROVED', 'NONE')}`,
 		);
 		const error = await errorFrom(
-			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA),
+			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
+				reportVerdict: 'APPROVE',
+			}),
 		);
 		// Non-empty critic inventory: coverage is demanded for exactly the two
 		// CONFIRMED/HIGH items and nothing else.
@@ -411,7 +417,9 @@ describe('pr-workflow-gate B1 invariant: a legitimately empty critic inventory',
 		);
 		await settleCriticPhase('critic-two', challenged);
 		const next = await errorFrom(
-			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA),
+			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
+				reportVerdict: 'APPROVE',
+			}),
 		);
 		expect(next?.message).toContain('requires durable findings checkpoints');
 		expect(next?.message).not.toContain('internal invariant violated');

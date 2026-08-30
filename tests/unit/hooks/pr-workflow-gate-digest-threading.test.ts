@@ -96,10 +96,16 @@ describe('pr-workflow-gate revision digest threading', () => {
 		const counter = countDigestResolutions();
 		// Base coverage, council/reviewer settlement, the critic-inventory
 		// derivation and the candidate-inventory scan all run under this call.
+		// INTENT CHANGE (issue #2383): completion first derives the terminal
+		// N-of-6 settlement (one digest resolution) and then runs the
+		// terminal-ready ladder via its own gate context (a second), so the
+		// chain now resolves the digest exactly twice.
 		await expect(
-			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA),
+			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
+				reportVerdict: 'APPROVE',
+			}),
 		).rejects.toThrow('durable findings checkpoints');
-		expect(counter.calls()).toBe(1);
+		expect(counter.calls()).toBe(2);
 	});
 
 	test('a batch record dispatch resolves one digest per gate entry point', async () => {
@@ -198,7 +204,10 @@ describe('pr-workflow-gate revision digest threading', () => {
 		for (const entryPoint of [
 			() => assertPrReviewBaseCoverageSettled(tempDir, SESSION_ID),
 			() => assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer'),
-			() => completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA),
+			() =>
+				completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
+					reportVerdict: 'APPROVE',
+				}),
 		]) {
 			const error = await entryPoint().then(
 				() => null,

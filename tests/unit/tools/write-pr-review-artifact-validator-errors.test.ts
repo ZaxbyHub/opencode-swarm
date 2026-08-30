@@ -361,11 +361,13 @@ describe('write_pr_review_artifact validator errors (issue #2277)', () => {
 			].join('\n'),
 		);
 
-		// Omitting severity is rejected too: presence is mandatory now.
+		// Omitting severity is rejected too: presence is mandatory now. The
+		// severityHint supplies only the typed risk metadata the CONFIRMED record
+		// must still carry (issue #2383) — C-1's reviewer row declares MEDIUM.
 		const omittedMessage = await rejectionMessage(
 			writePrReviewFindings(directory, 'downgrade-reject-run', 'post_critic', [
 				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason', 'NONE'),
-				artifactRecordWithoutSeverity('C-1', 'CONFIRMED', 'report'),
+				artifactRecordWithoutSeverity('C-1', 'CONFIRMED', 'report', 'MEDIUM'),
 				artifactRecord('C-2', 'CONFIRMED', 'report', 'LOW'),
 				artifactRecord('C-3', 'CONFIRMED', 'report', 'LOW'),
 				artifactRecord('C-4', 'CONFIRMED', 'report', 'LOW'),

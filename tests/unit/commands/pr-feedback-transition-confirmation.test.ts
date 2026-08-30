@@ -133,6 +133,10 @@ async function materializeTerminalReview(): Promise<string> {
 						? ('suppress_with_reason' as const)
 						: ('route_to_critic' as const),
 				severity: index === 0 ? ('NONE' as const) : ('HIGH' as const),
+				// Issue #2383: CONFIRMED records require typed risk metadata
+				// matching the reviewer row's normalized UNKNOWN / no-tags.
+				risk_impact: 'UNKNOWN' as const,
+				risk_tags: [] as string[],
 			})),
 		},
 		tempDir,
@@ -156,6 +160,10 @@ async function materializeTerminalReview(): Promise<string> {
 							? ('handoff_to_feedback' as const)
 							: ('report' as const),
 				severity: index === 0 ? ('NONE' as const) : ('HIGH' as const),
+				// Issue #2383: CONFIRMED records require typed risk metadata
+				// matching the reviewer row's normalized UNKNOWN / no-tags.
+				risk_impact: 'UNKNOWN' as const,
+				risk_tags: [] as string[],
 			})),
 		},
 		tempDir,

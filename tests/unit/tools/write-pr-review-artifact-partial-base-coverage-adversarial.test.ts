@@ -84,6 +84,10 @@ async function establishFivePlusOne(
 		evidence: string;
 		next_action: 'route_to_reviewer';
 		severity: 'HIGH';
+		// Replay identity includes the typed risk fields (issue #2383): a row
+		// persisted without them reads back normalized to UNKNOWN / no tags.
+		risk_impact: 'UNKNOWN';
+		risk_tags: string[];
 	}>;
 }> {
 	await activatePrWorkflow(directory, PR_ARTIFACT_SESSION_ID, 'PR_REVIEW', {
@@ -144,11 +148,13 @@ async function establishFivePlusOne(
 		missingDimension,
 		records: successfulDimensions.map((_dimension, index) => ({
 			finding_id: `C-${index}`,
-			status: 'PENDING',
+			status: 'PENDING' as const,
 			file_line: 'src/index.ts:1',
 			evidence: `authoritative candidate ${index}`,
-			next_action: 'route_to_reviewer',
-			severity: 'HIGH',
+			next_action: 'route_to_reviewer' as const,
+			severity: 'HIGH' as const,
+			risk_impact: 'UNKNOWN' as const,
+			risk_tags: [] as string[],
 		})),
 	};
 }
@@ -224,14 +230,14 @@ describe('write_pr_review_artifact partial base coverage adversarial cases (#235
 					pr_head_sha: PR_ARTIFACT_HEAD_SHA,
 					boundary: 'post_explorer',
 					records,
-					partial_base_coverage: { missing_dimension: missingDimension },
+					partial_base_coverage: { unresolved_dimensions: [missingDimension] },
 				},
 				directory,
 				{ sessionID: PR_ARTIFACT_SESSION_ID },
 			),
 		);
 		expect(result.success).toBe(false);
-		expect(result.message).toContain('still has an in-flight lane');
+		expect(result.message).toContain('still have in-flight lanes');
 	});
 
 	test('rejects partial admission without a typed terminal failure', async () => {
@@ -246,7 +252,7 @@ describe('write_pr_review_artifact partial base coverage adversarial cases (#235
 					pr_head_sha: PR_ARTIFACT_HEAD_SHA,
 					boundary: 'post_explorer',
 					records,
-					partial_base_coverage: { missing_dimension: missingDimension },
+					partial_base_coverage: { unresolved_dimensions: [missingDimension] },
 				},
 				directory,
 				{ sessionID: PR_ARTIFACT_SESSION_ID },
@@ -265,7 +271,7 @@ describe('write_pr_review_artifact partial base coverage adversarial cases (#235
 				pr_head_sha: PR_ARTIFACT_HEAD_SHA,
 				boundary: 'post_explorer',
 				records,
-				partial_base_coverage: { missing_dimension: missingDimension },
+				partial_base_coverage: { unresolved_dimensions: [missingDimension] },
 			},
 			directory,
 			{ sessionID: PR_ARTIFACT_SESSION_ID },
@@ -278,35 +284,17 @@ describe('write_pr_review_artifact partial base coverage adversarial cases (#235
 			'coverage-disclosure.json',
 		);
 		const disclosure = JSON.parse(await fs.readFile(disclosurePath, 'utf8'));
-		disclosure.failureClass = 'resource';
+		disclosure.unresolvedDimensions[0].failureClass = 'resource';
 		await fs.writeFile(disclosurePath, JSON.stringify(disclosure, null, 2));
 		await expect(
 			assertPrReviewBaseCoverageSettled(directory, PR_ARTIFACT_SESSION_ID),
 		).rejects.toThrow('disclosure digest does not match durable state');
 	});
 
-	test('rejects four-of-six coverage even when a missing dimension is named', async () => {
-		const { missingDimension, records } = await establishFivePlusOne({
-			successfulCount: 4,
-		});
-		const result = JSON.parse(
-			await executeWritePrReviewArtifact(
-				{
-					kind: 'findings',
-					run_id: 'four-of-six-run',
-					pr_head_sha: PR_ARTIFACT_HEAD_SHA,
-					boundary: 'post_explorer',
-					records,
-					partial_base_coverage: { missing_dimension: missingDimension },
-				},
-				directory,
-				{ sessionID: PR_ARTIFACT_SESSION_ID },
-			),
-		);
-		expect(result.success).toBe(false);
-		expect(result.message).toContain('exactly five successful dimensions');
-		expect(result.message).toContain('actual missing:');
-	});
+	// INTENT CHANGE (issue #2383): four-of-six with two terminal typed
+	// failures is now ADMISSIBLE (exact-match N-of-6 declaration) and a
+	// partial declaration of it is rejected. Both are covered parameterized
+	// in tests/unit/hooks/pr-review-terminal-coverage-settlement.test.ts.
 
 	test('rejects a colliding disclosure path instead of overwriting it', async () => {
 		const { missingDimension, records } = await establishFivePlusOne();
@@ -327,7 +315,7 @@ describe('write_pr_review_artifact partial base coverage adversarial cases (#235
 					pr_head_sha: PR_ARTIFACT_HEAD_SHA,
 					boundary: 'post_explorer',
 					records,
-					partial_base_coverage: { missing_dimension: missingDimension },
+					partial_base_coverage: { unresolved_dimensions: [missingDimension] },
 				},
 				directory,
 				{ sessionID: PR_ARTIFACT_SESSION_ID },
@@ -350,7 +338,7 @@ describe('write_pr_review_artifact partial base coverage adversarial cases (#235
 					pr_head_sha: PR_ARTIFACT_HEAD_SHA,
 					boundary: 'post_explorer',
 					records,
-					partial_base_coverage: { missing_dimension: missingDimension },
+					partial_base_coverage: { unresolved_dimensions: [missingDimension] },
 				},
 				directory,
 				{ sessionID: PR_ARTIFACT_SESSION_ID },
@@ -392,7 +380,7 @@ describe('write_pr_review_artifact partial base coverage adversarial cases (#235
 					pr_head_sha: PR_ARTIFACT_HEAD_SHA,
 					boundary: 'post_explorer',
 					records,
-					partial_base_coverage: { missing_dimension: missingDimension },
+					partial_base_coverage: { unresolved_dimensions: [missingDimension] },
 				},
 				directory,
 				{ sessionID: PR_ARTIFACT_SESSION_ID },
@@ -436,7 +424,7 @@ describe('write_pr_review_artifact partial base coverage adversarial cases (#235
 					pr_head_sha: PR_ARTIFACT_HEAD_SHA,
 					boundary: 'post_explorer',
 					records,
-					partial_base_coverage: { missing_dimension: missingDimension },
+					partial_base_coverage: { unresolved_dimensions: [missingDimension] },
 				},
 				directory,
 				{ sessionID: PR_ARTIFACT_SESSION_ID },

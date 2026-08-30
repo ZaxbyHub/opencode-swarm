@@ -152,11 +152,14 @@ describe('swarm-pr-review deterministic async lane dispatch guidance', () => {
 		expect(phase3Section).toContain('retry only the failed `workflow_lane`');
 		expect(phase3Section).toContain('same exact `pr_head_sha`');
 		expect(phase3Section).toContain('direct Task dispatch are not equivalent');
-		expect(phase3Section).toContain('STOP and surface the lane failure');
-		expect(phase3Section).toContain('Do not present partial findings');
+		// Issue #2383: the abort-only "STOP and surface the lane failure" /
+		// "Do not present partial findings" / "low-quality partial review"
+		// phrasing was replaced by terminal N-of-6 settlement guidance.
+		expect(phase3Section).toContain('settle N-of-6 truthfully (issue #2383)');
 		expect(phase3Section).toContain(
-			'A low-quality partial review is worse than no review',
+			'NEVER present an unresolved dimension as reviewed',
 		);
+		expect(phase3Section).toContain('NEVER let a partial report approve');
 		expect(phase3Section).toContain(
 			'[CLEAN] | lane | coverage_scope | evidence',
 		);

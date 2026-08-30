@@ -82,8 +82,8 @@ async function recordLane(
 	const correlationId = `${input.batchId}-${input.laneId}-session`;
 	const header =
 		input.mode === 'swarm-pr-review:base'
-			? '[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence'
-			: '[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence';
+			? '[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags'
+			: '[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags';
 	const text = input.emptyOutput
 		? 'the lane produced no usable protocol rows at all'
 		: `${header}\n[CLEAN] | ${input.workflowLane} | exact reviewed diff | no candidate survived the focused review`;
@@ -375,7 +375,7 @@ describe('write_pr_review_trigger_eval recorded degradation path', () => {
 		// family rows at it (family 1's singleton record stays uncited — harmless).
 		const [family0, family1] = PR_REVIEW_REQUIRED_MICRO_LANE_IDS;
 		const consolidatedHeader =
-			'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence';
+			'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags';
 		const text = `${consolidatedHeader}\n[CLEAN] | ${family0} | exact reviewed diff for family zero | no candidate survived the focused review`;
 		await recordPendingDelegation(root, {
 			correlationId: 'consol-session',

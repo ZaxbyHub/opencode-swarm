@@ -3,6 +3,7 @@ import {
 	completePrWorkflow,
 	type PrFeedbackInventoryAmendmentRecord,
 	type PrWorkflowMode,
+	readPrReviewTerminalCoverageForReport,
 	readPrWorkflowGateState,
 	settlePresumedStalePrWorkflowLanes,
 } from '../hooks/pr-workflow-gate.js';
@@ -13,8 +14,28 @@ const CompletePrWorkflowArgsSchema = z
 	.object({
 		mode: z.enum(['PR_REVIEW', 'PR_FEEDBACK']),
 		pr_head_sha: z.string().trim().min(1).max(80),
+		/**
+		 * Terminal report verdict (issue #2383). REQUIRED for PR_REVIEW
+		 * completions: the gate validates it against the settlement-derived
+		 * coverage kind — PARTIAL may only REQUEST_CHANGES or INCOMPLETE,
+		 * NO_COVERAGE is a forced INCOMPLETE operational report, and neither
+		 * may ever APPROVE. Unused for PR_FEEDBACK.
+		 */
+		report_verdict: z
+			.enum(['APPROVE', 'REQUEST_CHANGES', 'INCOMPLETE'])
+			.optional(),
 	})
-	.strict();
+	.strict()
+	.superRefine((value, ctx) => {
+		if (value.mode === 'PR_REVIEW' && value.report_verdict === undefined) {
+			ctx.addIssue({
+				code: 'custom',
+				path: ['report_verdict'],
+				message:
+					'is required for PR_REVIEW completion (issue #2383 terminal report)',
+			});
+		}
+	});
 
 export async function executeCompletePrWorkflow(
 	args: unknown,
@@ -95,11 +116,38 @@ export async function executeCompletePrWorkflow(
 		// Observation only; the gate re-validates everything that matters.
 	}
 	try {
+		// Issue #2383: read the truthful terminal settlement BEFORE the
+		// terminal clear so the response can carry it (read-before-clear, the
+		// same discipline as staleDisclosure above).
+		let terminalReport: Record<string, unknown> | undefined;
+		if (parsed.data.mode === 'PR_REVIEW') {
+			try {
+				const coverage = await _internals.readPrReviewTerminalCoverageForReport(
+					directory,
+					context.sessionID,
+				);
+				if (coverage) {
+					terminalReport = {
+						kind: coverage.kind,
+						covered_dimensions: coverage.coveredDimensions,
+						unresolved_dimensions: coverage.unresolvedDimensions,
+						live_dimensions: coverage.liveDimensions,
+						allowed_verdicts: coverage.allowedVerdicts,
+						report_verdict: parsed.data.report_verdict,
+					};
+				}
+			} catch {
+				// Observation only; the gate re-validates everything that matters.
+			}
+		}
 		const status = await _internals.completePrWorkflow(
 			directory,
 			context.sessionID,
 			parsed.data.mode as PrWorkflowMode,
 			parsed.data.pr_head_sha,
+			parsed.data.mode === 'PR_REVIEW'
+				? { reportVerdict: parsed.data.report_verdict }
+				: undefined,
 		);
 		let checkoutRestoreRequired = false;
 		let checkoutRestoreReceipts: Awaited<
@@ -131,6 +179,7 @@ export async function executeCompletePrWorkflow(
 			gate_cleared: status === 'completed' || status === 'verified-no-change',
 			checkout_restore_required: checkoutRestoreRequired,
 			checkout_restore_receipts: checkoutRestoreReceipts,
+			...(terminalReport ? { terminal_report: terminalReport } : {}),
 			...staleDisclosure,
 			...amendmentDisclosure,
 		});
@@ -151,6 +200,7 @@ export const complete_pr_workflow: ReturnType<typeof createSwarmTool> =
 		args: {
 			mode: CompletePrWorkflowArgsSchema.shape.mode,
 			pr_head_sha: CompletePrWorkflowArgsSchema.shape.pr_head_sha,
+			report_verdict: CompletePrWorkflowArgsSchema.shape.report_verdict,
 		},
 		execute: executeCompletePrWorkflow,
 	});
@@ -159,10 +209,12 @@ export const _internals: {
 	completePrWorkflow: typeof completePrWorkflow;
 	listPendingPrWorkflowCheckoutRestores: typeof listPendingPrWorkflowCheckoutRestores;
 	readPrWorkflowGateState: typeof readPrWorkflowGateState;
+	readPrReviewTerminalCoverageForReport: typeof readPrReviewTerminalCoverageForReport;
 	settlePresumedStalePrWorkflowLanes: typeof settlePresumedStalePrWorkflowLanes;
 } = {
 	completePrWorkflow,
 	listPendingPrWorkflowCheckoutRestores,
 	readPrWorkflowGateState,
+	readPrReviewTerminalCoverageForReport,
 	settlePresumedStalePrWorkflowLanes,
 };

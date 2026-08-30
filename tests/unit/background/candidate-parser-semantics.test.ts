@@ -6,9 +6,9 @@ import {
 
 const DIGEST = 'a'.repeat(64);
 const BASE_HEADER =
-	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 const MICRO_HEADER =
-	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence';
+	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags';
 const CLEAN_SCOPE = 'complete changed-file diff';
 const CLEAN_EVIDENCE = 'no candidate survived focused review';
 

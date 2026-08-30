@@ -30,7 +30,7 @@ import {
 // ---------------------------------------------------------------------------
 
 const DRY_RUN_HEADER =
-	'candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+	'candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 
 const DRY_RUN_C001_LINE =
 	'C-001 | Lane 1: Correctness and edge cases | HIGH | null-safety | src/utils/cache.ts:142 | Uncached getter may return undefined on cold start | The `getCached` function returns `cache[key]` without a fallback when the cache is empty. | Downstream callers in `src/handlers/*.ts` expect a defined value and call `.toString()` directly. | HIGH';

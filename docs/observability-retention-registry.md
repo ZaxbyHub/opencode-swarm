@@ -281,7 +281,7 @@ decision is *missing today* (they are untouched, never deleted-and-needed).
 | `skill-usage` | .swarm/skill-usage.jsonl | derived-rebuildable | HARD GLOBAL: SKILL_USAGE_LIMITS maxEntries=5,000/maxBytes=1.5MiB/maxAgeMs=90d, floorPerSkill=20 (global) | mixed full-file + tail: full readers bounded at readMaxBytes=1,677,722 B (truncatedRead reported); tail 64 KiB | untouched — persists across sessions | retain by design — #2038 (implemented) |
 | `skill-usage-pending` | .swarm/skill-usage-pending.json | authoritative | queueMaxRecords=5,000/queueMaxBytes=512KiB/maxAgeMs=90d/maxAttempts=5 (global) | indexed: single JSON doc bounded at readMaxBytes=1,677,722 B; oversized reads quarantined | untouched — persists across sessions | retain by design — #2038 (implemented) |
 
-### Category 2 — Background delegation, PR monitor/feedback, lane sidecars (10 rows)
+### Category 2 — Background delegation, PR monitor/feedback, lane sidecars (11 rows)
 
 | Row id | Path grammar | State class | Write limit (scope) | Read bound | Close policy | Disposition → owner |
 |---|---|---|---|---|---|---|
@@ -292,6 +292,7 @@ decision is *missing today* (they are untouched, never deleted-and-needed).
 | `pr-feedback-event-queues` | .swarm/pr-feedback-events/{session-stem}.json (+ .lock) | operational | MAX_PR_FEEDBACK_MONITOR_EVENTS 20 per queue (:14); MAX_QUEUE_BYTES 512 KiB per file (:15)… (per-key; keyspace NOT finite — one file per session id, nothing unlinks it) | indexed: ≤512 KiB hard read bound | untouched | **fix in #2309** — #2309 |
 | `lane-results-outputs` | .swarm/lane-results/{batchDigest}/{laneDigest}/{outputDigest}.json + … | governed-content | MAX_LANE_OUTPUT_STORED_BYTES 10 MiB PER-FILE (lane-output-store.ts:15, degraded beyond); … (per-key) | indexed: per-artifact 10 MiB write ceiling; candidates full-par… | untouched — accumulates across batches | **fix in #2045** — #2045 |
 | `lane-delivery-cache` | .swarm/lane-delivery-cache.json | operational | MAX_DELIVERED_LANE_OUTPUT_KEYS 1024 (:35); MAX_TRACKED_SESSIONS 16 (:36); MAX_TRACKED_DIR… (global) | indexed: single bounded JSON | untouched | not a defect — this-gate |
+| `pr-review-reentry-authorizations` | .swarm/pr-review/reentry-authorizations/{session-stem}.json (+ .lock) | operational | ≤8 unconsumed / ≤32 persisted per session, pruned on write; 10-min TTL; file ≤64 KiB (per-key) | indexed: single session file, 64 KiB hard read bound | untouched — pruned by TTL/bound on next write | **fix in #2309** — #2309 |
 | `pr-review-run-artifacts` | .swarm/pr-review/{run_id}/{findings.jsonl, feedback-handoff.json, tri… | governed-content | per-run: findings ≤1000 records/call + 10 MiB read guard; run directories accumulate with… (per-key) | line-bounded: 10 MiB read guard | untouched — accumulates across review runs | **fix in #2309** — #2309 |
 | `status-artifacts` | .swarm/automation-status.json + .swarm/evidence-summary.json | operational | single rewritten snapshot (filename ≤255 chars :66) (global) | indexed: single small JSON | untouched | not a defect — this-gate |
 | `locks-dir` | .swarm/locks/{sha256|.base64}.lock + .meta sidecars | operational | LOCK_TIMEOUT_MS 5 min stale expiry; cleanupExpiredLocks sweep (:250-297) (global) | directory-scan: live locks only (expired filtered) | untouched — deliberately excluded from close (close.ts… | not a defect — #2035 (merged) |

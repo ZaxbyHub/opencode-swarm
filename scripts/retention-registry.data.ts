@@ -636,7 +636,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writerModules: ['src/background/lane-output-store.ts', 'src/background/candidate-sidecar-store.ts'],
 		writerCitations: [
 			'src/background/lane-output-store.ts:84 storeLaneOutput — atomic temp+rename :355',
-			'src/background/candidate-sidecar-store.ts:452 appendToSidecar — appendFileSync :506 (optional lockfile :509-513)',
+			'src/background/candidate-sidecar-store.ts:458 appendToSidecar — appendFileSync :506 (optional lockfile :509-513)',
 		],
 		readerCitations: [
 			'src/background/lane-output-store.ts:191 readLaneOutput — single-file by ref with digest/bytes validation, sync',
@@ -692,6 +692,40 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		healthSignal: 'n/a',
 		owner: 'this-gate',
 		disposition: { kind: 'not-a-defect', proof: 'Hard bounds 1024 keys / 16 sessions / 16 directories with eviction (src/background/lane-delivery-store.ts:35-40,165-204).' },
+	},
+	{
+		id: 'pr-review-reentry-authorizations',
+		category: 2,
+		pathGrammar: '.swarm/pr-review/reentry-authorizations/{session-stem}.json (+ .lock)',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/hooks/pr-review-reentry-authorization.ts'],
+		writerCitations: [
+			'src/hooks/pr-review-reentry-authorization.ts writeAuthorizationFile — atomic temp+rename, proper-lockfile guarded, ≤64 KiB write bound',
+		],
+		readerCitations: [
+			'src/hooks/pr-review-reentry-authorization.ts readAuthorizationFile — bounded single-file read, ≤64 KiB',
+		],
+		schemaVersion: 'schemaVersion 1 (Zod-validated file + records)',
+		stateClass: 'operational',
+		privacyClass: 'metadata',
+		writeLimits: {
+			bound: 'per-session: ≤8 unconsumed authorizations, ≤32 persisted records (pruned on write), 10-min TTL; store file ≤64 KiB',
+			scope: 'per-key',
+			citation: 'src/hooks/pr-review-reentry-authorization.ts AUTHORIZATION_TTL_MS/MAX_ACTIVE_AUTHORIZATIONS/MAX_PERSISTED_AUTHORIZATIONS/REENTRY_AUTHORIZATIONS_MAX_BYTES',
+		},
+		readBound: { pattern: 'indexed', bound: 'single session file, 64 KiB hard read bound', sync: false, citation: 'src/hooks/pr-review-reentry-authorization.ts readAuthorizationFile' },
+		lockModel: 'proper-lockfile (stale 10 s, update 1 s) on the session store file',
+		crashBehavior: 'atomic temp+rename; a torn write loses an unconsumed authorization only (consume fails closed to normal gating)',
+		closePolicy: 'untouched — session-scoped, pruned by TTL/bound on next write',
+		resetPolicy: 'not reset',
+		legacyCompatibility: 'absent store reads as null (fail-closed normal gating)',
+		healthSignal: 'consume-time binding mismatch (stale/expired/replayed) returns null',
+		owner: '#2309',
+		disposition: {
+			kind: 'fix-in-issue',
+			issue: 2309,
+			note: 'Per-session content is bounded (≤8 unconsumed / ≤32 persisted, on-write pruning, 10-min TTL), but one store file per session id is never reaped — the same unbounded-keyspace class as pr-feedback-event-queues. Added to the sequence-amendment issue as a verified accumulation gap.',
+		},
 	},
 	{
 		id: 'pr-review-run-artifacts',

@@ -116,7 +116,7 @@ function buildArtifact(
 /** Build a minimal [CANDIDATE] pipe-delimited text with one row. */
 function buildCandidateText(row: string): string {
 	const header =
-		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 	return `${header}\n${row}`;
 }
 
@@ -391,8 +391,8 @@ describe('parse_lane_candidates', () => {
 		test('expected_family propagates through the public tool for marker-prefixed micro rows', async () => {
 			const dir = makeTempDir();
 			const text =
-				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence\n' +
-				'[CANDIDATE] | M-1 | subprocess | HIGH | safety | src/a.ts:1 | unsafe child | invariant 3 | direct evidence | HIGH';
+				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags\n' +
+				'[CANDIDATE] | M-1 | subprocess | HIGH | safety | src/a.ts:1 | unsafe child | invariant 3 | direct evidence | HIGH | ORDINARY | ';
 			const artifact = buildArtifact({
 				batchId: 'micro-public-batch',
 				laneId: 'micro-public-lane',
@@ -418,7 +418,7 @@ describe('parse_lane_candidates', () => {
 		test('expected_micro_lane rejects a provenance-linked CLEAN identity mismatch', async () => {
 			const dir = makeTempDir();
 			const text =
-				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence\n' +
+				'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags\n' +
 				'[CLEAN] | wrong-lane | complete changed-file scope | no candidate survived focused review';
 			const artifact = buildArtifact({
 				batchId: 'micro-clean-public-batch',

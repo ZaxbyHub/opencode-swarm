@@ -186,6 +186,7 @@ export {
 	approve_plan_critic,
 	executeApprovePlanCritic,
 } from './approve-plan-critic';
+export { authorize_pr_review_reentry } from './authorize-pr-review-reentry';
 export {
 	complete_pr_workflow,
 	executeCompletePrWorkflow,

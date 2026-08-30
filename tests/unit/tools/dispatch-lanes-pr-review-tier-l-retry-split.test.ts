@@ -70,9 +70,12 @@ describe('PR_REVIEW tier-L cumulative consolidation floor', () => {
 			`at least ${PR_REVIEW_TIER_L_CONSOLIDATED_LANE_FLOOR} distinct`,
 		);
 		// The dead end is real: with batch A rejected, the split cannot complete.
+		// (Issue #2383 message shape: the refusal now names the terminal
+		// N-of-6 settlement path instead of the old "base coverage is
+		// incomplete" wording.)
 		await expect(
 			assertPrReviewBaseCoverageSettled(tierLDirectory(), SESSION_ID),
-		).rejects.toThrow('base coverage is incomplete');
+		).rejects.toThrow('no terminal settlement disclosure is admitted');
 	});
 
 	test('splitting the consolidation across separate batches is still blocked', async () => {
@@ -155,7 +158,7 @@ describe('PR_REVIEW tier-L cumulative consolidation floor', () => {
 		}
 		await expect(
 			assertPrReviewBaseCoverageSettled(tierLDirectory(), SESSION_ID),
-		).resolves.toMatchObject({ sessionID: SESSION_ID });
+		).resolves.toMatchObject({ state: { sessionID: SESSION_ID } });
 	});
 
 	test('a consolidated lane superseded by dedicated lanes stops spending budget', async () => {
