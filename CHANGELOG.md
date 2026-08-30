@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.156.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.155.0...v7.156.0) (2026-08-29)
+
+
+### Features
+
+* **harness:** add declarative harness mutation surface ([8cf6b52](https://github.com/ZaxbyHub/opencode-swarm/commit/8cf6b526ca6c338e232e89cc918fdb1f8d89f031))
+
+
+### Bug Fixes
+
+* **tests:** canonicalize manifest temp fixtures ([e6e3f2f](https://github.com/ZaxbyHub/opencode-swarm/commit/e6e3f2f732b260c3ff7154b681d547fb38f8f667))
+
 ## [7.155.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.154.3...v7.155.0) (2026-08-29)
 
 

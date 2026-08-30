@@ -235,6 +235,12 @@ describe('OpenCodeSwarm Plugin Registration', () => {
 		// API to avoid the test-clock lint — these are elapsed-spread
 		// measurements, not time-sensitive assertions that need a frozen clock.
 		const { performance } = await import('node:perf_hooks');
+		// The production init path skips Git hygiene for a definitively non-Git
+		// workspace. Mark this fixture as a project root so the injected Git seam
+		// remains part of the concurrency contract under test.
+		const fs = await import('node:fs/promises');
+		await fs.mkdir(path.join(mockPluginInput.directory, '.git'));
+		await fs.mkdir(path.join(mockPluginInput.directory, '.swarm'));
 		const started: Record<string, number> = {};
 
 		const makeStub = (key: 'config' | 'snapshot' | 'gitExclude') => {
@@ -343,6 +349,9 @@ describe('OpenCodeSwarm Plugin Registration', () => {
 		// ordering was broken (initTelemetry ran during the parallel block
 		// instead of after Promise.all). (Reviewer PRR-011 NEEDS_REVISION fix.)
 		const fs = await import('node:fs');
+		// Keep this fixture on the Git-project path so the injected hygiene seam
+		// observes the ordering contract that this test is asserting.
+		fs.mkdirSync(path.join(mockPluginInput.directory, '.git'));
 		let swarmDirExistedBeforeGitExclude: boolean | undefined;
 		restoreIndexInternals = overrideIndexInternalsForTest({
 			ensureSwarmGitExcluded: (() =>

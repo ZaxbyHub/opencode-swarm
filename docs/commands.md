@@ -1008,6 +1008,51 @@ Acknowledge that the spec has drifted from the plan and suppress further warning
 
 ---
 
+## Declarative Harness Inspection
+
+These commands inspect and validate HarnessOpt artifacts. They never activate
+a blueprint, apply a source patch, execute a candidate, or repair durable state.
+
+### `/swarm blueprint validate <project-relative-json>`
+
+Validate a versioned harness blueprint or blueprint patch, including canonical
+content hashes and schema migration rules.
+
+### `/swarm blueprint current`
+
+Show the ledger-derived current blueprint identity and projection status.
+
+### `/swarm blueprint history`
+
+Show bounded, hash-verified activation and rollback history. Use
+`--limit <1..100>` to reduce the number of returned records without relaxing
+the configured replay bound.
+
+### `/swarm blueprint diff <from-version> <to-version>`
+
+Show a structural blueprint diff without executing either version.
+
+### `/swarm blueprint export [version]`
+
+Export a canonical blueprint JSON document. When omitted, `version` defaults to
+the current version.
+
+### `/swarm harness candidate validate <project-relative-json>`
+
+Validate a candidate manifest and its hash bindings. This command does not
+record or activate the candidate.
+
+### `/swarm harness candidate show <candidate-id>`
+
+Show bounded candidate metadata. Raw source patch content is never printed.
+
+### `/swarm harness candidate diff <candidate-id>`
+
+Show bounded candidate file and blueprint-change metadata. Raw source patch
+content is never printed.
+
+---
+
 ## Compound Command Resolution
 
 When you type a two-word command like `/swarm config doctor`, Swarm tries the compound key first, then falls back to the single-token key. Aliases with hyphens exist for TUI shortcuts (which split on hyphens):

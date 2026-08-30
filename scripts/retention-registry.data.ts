@@ -1295,6 +1295,57 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 	},
 	{
+		id: 'harness-evolution-store',
+		category: 4,
+		pathGrammar:
+			'.swarm/evolution/harness/{current.json,candidates/{candidateId}/**,versions/{versionId}.json,ledger/{active-generation.json,generation-*/NNNNNN.jsonl}}',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/harness/store.ts'],
+		writerCitations: [
+			'src/harness/store.ts recordHarnessCandidate / activateHarnessCandidate / rollbackHarnessVersion — locked immutable artifact writes followed by an authenticated ledger commit',
+			'src/harness/store.ts reconcileHarnessPhysicalRetentionUnderLock — generation-switch compaction followed by candidate and inactive-ledger pruning',
+		],
+		readerCitations: [
+			'src/harness/store.ts loadHarnessCurrent — pointer-fast read or replay bounded by max_replay_records',
+			'src/harness/store.ts loadHarnessHistory / auditHarnessLedger — newest-first bounded history and explicit segment/replay-bounded audit',
+		],
+		schemaVersion: 'v1 strict candidate/version/current records + hash-chained ledger records; compacted records authenticate the retained state and candidate bindings',
+		stateClass: 'authoritative',
+		privacyClass: 'mixed',
+		writeLimits: {
+			bound:
+				'max_versions defaults to 100; max_inactive_candidates defaults to 32 (plus the newest activation handoff); candidate records are individually capped at 8 MiB; ledger segments are capped at 256 KiB and compact to one authenticated snapshot generation when max_replay_records is exceeded, with stale generations pruned after the pointer switch',
+			scope: 'global',
+			citation:
+				'src/harness/store.ts MAX_CANDIDATE_ARTIFACT_BYTES, LEDGER_SEGMENT_MAX_BYTES, reconcileHarnessPhysicalRetentionUnderLock; src/config/schema.ts HarnessEvolutionConfigSchema',
+		},
+		readBound: {
+			pattern: 'indexed + line-bounded',
+			bound:
+				'current and immutable artifacts are single-file reads; ledger replay is capped by max_replay_records (default 10,000), history has an explicit result limit, and audit is bounded by both maxSegments and maxReplayRecords',
+			sync: true,
+			citation:
+				'src/harness/store.ts loadCurrentProjectionFast, readVerifiedLedgerRecords, loadHarnessHistory, auditHarnessLedger',
+		},
+		lockModel:
+			'proper-lockfile on the harness root serializes every mutation, recovery, compaction pointer switch, and post-commit prune',
+		crashBehavior:
+			'fsynced append is the ordinary commit point; torn final lines are explicitly recoverable; compaction writes and verifies a new immutable generation before atomically switching active-generation.json, and only then best-effort prunes the old generation',
+		closePolicy:
+			'untouched — harness versions intentionally survive sessions as the durable activation and rollback substrate',
+		resetPolicy: 'not reset',
+		legacyCompatibility:
+			'pre-compaction flat ledger segments remain readable until the first bounded compaction; absent compacted-record fields default to their v1 empty values',
+		healthSignal:
+			'mutation results report projection, artifact-prune, and physical-retention reconciliation failures separately; integrity and replay-bound failures are typed',
+		owner: '#1825',
+		disposition: {
+			kind: 'retain-by-design',
+			citation:
+				'Issue #1825 requires one durable store for activation and rollback. Physical storage is globally bounded by retained version/candidate caps plus generation-switch ledger compaction, while all replay and query paths have independent record/segment/output bounds; adversarial coverage lives in tests/unit/harness/store-retention.test.ts and store-replay-bounds.test.ts.',
+		},
+	},
+	{
 		id: 'task-gate-evidence',
 		category: 4,
 		pathGrammar: '.swarm/evidence/task-gate-requirements/{taskId}.jsonl (+ repaired task-gate evidence files + task-gate-quarantine/ sidecars)',

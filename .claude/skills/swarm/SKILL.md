@@ -46,6 +46,17 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm auto-proceed` — toggle or set auto-proceed override `[on|off]`
 - `/swarm concurrency` — manage runtime concurrency override `[set|status|reset]`
 
+**Harness evolution**
+
+- `/swarm blueprint validate` — validate a declarative harness blueprint or atomic blueprint patch
+- `/swarm blueprint current` — show the ledger-derived current harness blueprint projection
+- `/swarm blueprint history` — show bounded hash-verified harness version history
+- `/swarm blueprint diff` — compare two stored harness blueprint versions
+- `/swarm blueprint export` — export a canonical stored harness blueprint
+- `/swarm harness candidate validate` — validate an inert harness candidate manifest
+- `/swarm harness candidate show` — show bounded harness candidate metadata without raw patch content
+- `/swarm harness candidate diff` — show candidate file and blueprint-change metadata without raw patch content
+
 **Diagnostics / health**
 
 - `/swarm diagnose` / `/swarm diagnosis` — run health check on swarm state (`diagnosis` is a deprecated alias)
