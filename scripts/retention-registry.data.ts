@@ -3019,7 +3019,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/config/project-init.ts:10 writeSwarmConfigExampleIfNew (first-run .swarm/config.example.json write; errors non-fatal)',
 			'src/cli/index.ts:284 saveJson — CLI-managed global/plugin config saves (outside .swarm)',
 		],
-		readerCitations: ['config loader; CLI loadJsonc (:270)'],
+		readerCitations: ['config loader; CLI loadJson (:268)'],
 		schemaVersion: 'config schema',
 		stateClass: 'governed-content',
 		privacyClass: 'metadata',
