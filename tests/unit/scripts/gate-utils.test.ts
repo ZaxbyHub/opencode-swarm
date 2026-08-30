@@ -4,19 +4,7 @@ import * as path from 'node:path';
 import { spawnUtf8 } from '../../../scripts/gate-utils';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
-function timeoutProbe(markerPath: string): string[] {
-	const startedPath = `${markerPath}.started`;
-	if (process.platform === 'win32') {
-		const escapePowerShellLiteral = (value: string) =>
-			`'${value.replace(/'/g, "''")}'`;
-		return [
-			'powershell',
-			'-NoProfile',
-			'-Command',
-			`[System.IO.File]::WriteAllText(${escapePowerShellLiteral(startedPath)}, 'started'); Start-Sleep -Milliseconds 8000; [System.IO.File]::WriteAllText(${escapePowerShellLiteral(markerPath)}, 'alive'); while ($true) { Start-Sleep -Seconds 1 }`,
-		];
-	}
-
+function timeoutProbe(markerPath: string, aliveDelayMs: number): string[] {
 	return [
 		Bun.which('node') ?? process.execPath,
 		'-e',
@@ -24,7 +12,7 @@ function timeoutProbe(markerPath: string): string[] {
 			"const fs = require('node:fs');",
 			'const marker = process.argv[process.argv.length - 1];',
 			'fs.writeFileSync(marker + ".started", "started");',
-			'setTimeout(() => fs.writeFileSync(marker, "alive"), 250);',
+			`setTimeout(() => fs.writeFileSync(marker, "alive"), ${aliveDelayMs});`,
 			'setInterval(() => {}, 1000);',
 		].join(' '),
 		markerPath,
@@ -37,24 +25,26 @@ describe('gate-utils subprocess ownership', () => {
 		const markerPath = path.join(markerDir, 'child-alive.txt');
 		try {
 			const started = performance.now();
-			// PowerShell startup on a cold/loaded Windows runner can exceed
-			// 2.5 s (observed twice in the merge queue); keep enough margin to
-			// observe the startup marker before timing out, and widen the
-			// bounded-return ceiling to stay above the timeout plus kill
-			// overhead. The child's pre-kill lifetime (8 s on win32) still
-			// exceeds the timeout, so the kill lands before the 'alive' write.
+			// Use the same Node probe on every platform. PowerShell cold-start
+			// latency used to race the timeout on Windows before the child had
+			// executed its first statement, testing shell startup rather than
+			// spawnUtf8's timeout/termination contract.
 			const isWindows = process.platform === 'win32';
-			const timeoutMs = isWindows ? 4_000 : 200;
-			const maxElapsedMs = isWindows ? 8_000 : 4_000;
+			const timeoutMs = isWindows ? 2_000 : 200;
+			const aliveDelayMs = timeoutMs + 250;
+			const maxElapsedMs = isWindows ? 5_000 : 4_000;
 			const result = await spawnUtf8(
-				timeoutProbe(markerPath),
+				timeoutProbe(markerPath, aliveDelayMs),
 				process.cwd(),
 				timeoutMs,
 			);
 
 			expect(result.exitCode).toBe(1);
 			expect(performance.now() - started).toBeLessThan(maxElapsedMs);
-			await new Promise((resolve) => setTimeout(resolve, 350));
+			// The marker is deliberately scheduled after the timeout. Waiting past
+			// its deadline makes the assertion falsify a child that survived the
+			// timeout instead of merely proving that spawnUtf8 returned promptly.
+			await new Promise((resolve) => setTimeout(resolve, aliveDelayMs + 250));
 			expect(fs.existsSync(`${markerPath}.started`)).toBe(true);
 			expect(fs.existsSync(markerPath)).toBe(false);
 		} finally {

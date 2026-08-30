@@ -140,18 +140,21 @@ describe('pr-subscriptions health + recovery', () => {
 
 	test('checkpoint + pending legacy tail reports checkpoint+legacy', async () => {
 		const cp = baseCheckpoint(dir);
-		cp.records['sess_1::o/r::1'] = record('sess_1', 1);
+		const prefix = record('sess_1', 1);
+		cp.records[prefix.correlationId] = prefix;
+		fs.writeFileSync(legacyPath(dir), `${JSON.stringify(prefix)}\n`, 'utf-8');
+		const prefixStat = fs.statSync(legacyPath(dir));
 		cp.migration = {
-			scannedBytes: 0,
-			sourceBytes: 100,
-			sourceMtimeMs: Date.now(),
+			scannedBytes: prefixStat.size,
+			sourceBytes: prefixStat.size,
+			sourceMtimeMs: prefixStat.mtimeMs,
 			corruptLines: 0,
 			done: false,
 			archived: false,
 			startedAt: Date.now(),
 		};
 		fs.writeFileSync(checkpointPath(dir), `${JSON.stringify(cp)}\n`, 'utf-8');
-		fs.writeFileSync(
+		fs.appendFileSync(
 			legacyPath(dir),
 			`${JSON.stringify(record('sess_2', 2))}\n`,
 			'utf-8',
