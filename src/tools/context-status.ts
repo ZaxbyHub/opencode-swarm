@@ -220,7 +220,7 @@ export const context_status: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		allowWorkingDirectoryOverride: true,
 		description:
-			'Report current context-window headroom for the active session. Returns tokens-used, usageSource (provider|estimated), model-limit, usage-percent, threshold-state (none/warn/critical), model name, and provider. Pure read-only — no state mutation, no warning injection. Works whether context_budget.enabled is true or false.',
+			'Report current context-window headroom for the active session. Returns tokens-used, usageSource (provider|estimated), model-limit with provenance (modelLimitSource: host|override|provider_cap|native|fallback; modelLimitResolution: the exact resolution rung; fallbackActive: true when the denominator came from a static table or the flat 128k default — treat headroom as uncertain), usage-percent, threshold-state (none|warn|critical), model name, and provider. Pure read-only — no state mutation, no warning injection. Works whether context_budget.enabled is true or false.',
 		args: {},
 		async execute(
 			_args: unknown,

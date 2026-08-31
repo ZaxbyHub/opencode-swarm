@@ -405,11 +405,13 @@ export function addTelemetryListener(callback: TelemetryListener): void {
 }
 
 /**
- * Remove a previously registered telemetry listener (issue #2044). The
- * heartbeat teardown at the top of this file splices `_listeners` directly
- * because no disposer existed; this export gives the learning-health registry
- * the same teardown capability without private-state access. Removing a
- * listener that was never registered is a no-op.
+ * Remove a previously registered telemetry listener (issue #2044).
+ * Currently unused in-tree: the learning-health registry no longer attaches a
+ * listener (its six store feeds call the observer directly), and the heartbeat
+ * teardown splices `_listeners` inline by design. Kept as the public disposer
+ * complement to `addTelemetryListener` — push-only registration with no
+ * removal path was an API gap. Removing a listener that was never registered
+ * is a no-op.
  */
 export function removeTelemetryListener(callback: TelemetryListener): void {
 	const idx = _listeners.indexOf(callback);

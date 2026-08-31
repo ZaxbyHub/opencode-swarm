@@ -173,7 +173,7 @@ const HEALTH_SOURCES_TABLE: Record<HealthSourceId, HealthSourceRegistration> = {
 	},
 	store_health_events: {
 		producer:
-			'src/events/core-events.ts:1615 (direct observeStoreHealth; one per audited store)',
+			'src/events/core-events.ts:1616 (direct observeStoreHealth; one per audited store)',
 		readers: [
 			'src/services/status-service.ts',
 			'src/services/diagnose-service.ts',
