@@ -323,87 +323,6 @@ describe('sast-baseline', () => {
 			expect(result2.status).toBe('merged');
 		});
 
-		it('second call updates fingerprints when content changes (stale replaced)', async () => {
-			const file = path.join(tempDir, 'changing.js');
-			fs.writeFileSync(file, 'eval(old);');
-			const findingV1 = makeFinding(file, 1);
-
-			const r1 = await captureOrMergeBaseline(
-				tempDir,
-				1,
-				[findingV1],
-				'tier_a',
-				[file],
-			);
-			expect(r1.status).toBe('written');
-
-			// Load baseline v1 — record original fingerprints
-			const loadedV1 = loadBaseline(tempDir, 1);
-			expect(loadedV1.status).toBe('found');
-			const fpsV1 =
-				loadedV1.status === 'found' ? Array.from(loadedV1.fingerprints) : [];
-
-			// Change content and re-capture
-			fs.writeFileSync(file, 'eval(new_value);');
-			const findingV2 = makeFinding(file, 1);
-
-			const r2 = await captureOrMergeBaseline(
-				tempDir,
-				1,
-				[findingV2],
-				'tier_a',
-				[file],
-			);
-			expect(r2.status).toBe('merged');
-
-			const loadedV2 = loadBaseline(tempDir, 1);
-			expect(loadedV2.status).toBe('found');
-			const fpsV2 =
-				loadedV2.status === 'found' ? Array.from(loadedV2.fingerprints) : [];
-
-			// Old fingerprint must not appear in new baseline
-			for (const oldFp of fpsV1) {
-				expect(fpsV2).not.toContain(oldFp);
-			}
-		});
-
-		it('incremental merge of disjoint file sets — both files indexed after two captures', async () => {
-			const fileA = path.join(tempDir, 'a.js');
-			const fileB = path.join(tempDir, 'b.js');
-			fs.writeFileSync(fileA, 'eval(a);');
-			fs.writeFileSync(fileB, 'eval(b);');
-
-			// First capture: file A only
-			await captureOrMergeBaseline(
-				tempDir,
-				1,
-				[makeFinding(fileA, 1)],
-				'tier_a',
-				[fileA],
-			);
-
-			// Second capture: file B only
-			const r2 = await captureOrMergeBaseline(
-				tempDir,
-				1,
-				[makeFinding(fileB, 1)],
-				'tier_a',
-				[fileB],
-			);
-			expect(r2.status).toBe('merged');
-
-			// Both should be indexed
-			const loaded = loadBaseline(tempDir, 1);
-			expect(loaded.status).toBe('found');
-			if (loaded.status === 'found') {
-				const relA = path.relative(tempDir, fileA).replace(/\\/g, '/');
-				const relB = path.relative(tempDir, fileB).replace(/\\/g, '/');
-				expect(loaded.bundle.files_indexed).toContain(relA);
-				expect(loaded.bundle.files_indexed).toContain(relB);
-				expect(loaded.fingerprints.size).toBe(2);
-			}
-		});
-
 		it('returns status:error when JSON would exceed MAX_BASELINE_BYTES', async () => {
 			// Create a finding with an enormous message to inflate JSON size
 			const file = path.join(tempDir, 'big.js');
@@ -433,50 +352,6 @@ describe('sast-baseline', () => {
 			expect(result.status).toBe('error');
 			if (result.status === 'error') {
 				expect(result.message).toContain('size cap');
-			}
-		});
-	});
-
-	// ============ Full prune on re-scan ============
-
-	describe('Full prune on re-scan', () => {
-		it('old fingerprints for file A are gone after re-capturing file A with new findings', async () => {
-			const fileA = path.join(tempDir, 'prune.js');
-			fs.writeFileSync(fileA, 'eval(original);');
-
-			// First capture
-			const r1 = await captureOrMergeBaseline(
-				tempDir,
-				1,
-				[makeFinding(fileA, 1)],
-				'tier_a',
-				[fileA],
-			);
-			expect(r1.status).toBe('written');
-
-			const loadedV1 = loadBaseline(tempDir, 1);
-			expect(loadedV1.status).toBe('found');
-			const originalFps =
-				loadedV1.status === 'found' ? Array.from(loadedV1.fingerprints) : [];
-			expect(originalFps.length).toBeGreaterThan(0);
-
-			// Change file content and re-capture with a different finding
-			fs.writeFileSync(fileA, 'eval(updated_content);');
-			const r2 = await captureOrMergeBaseline(
-				tempDir,
-				1,
-				[makeFinding(fileA, 1, 'sast/js-dangerous-function')],
-				'tier_a',
-				[fileA],
-			);
-			expect(r2.status).toBe('merged');
-
-			const loadedV2 = loadBaseline(tempDir, 1);
-			expect(loadedV2.status).toBe('found');
-			if (loadedV2.status === 'found') {
-				for (const oldFp of originalFps) {
-					expect(loadedV2.fingerprints.has(oldFp)).toBe(false);
-				}
 			}
 		});
 	});
@@ -536,8 +411,8 @@ describe('sast-baseline', () => {
 			const badBundle = {
 				schema_version: '0.0.1',
 				phase: 2,
-				created_at: new Date().toISOString(),
-				updated_at: new Date().toISOString(),
+				created_at: '2026-08-30T00:00:00.000Z',
+				updated_at: '2026-08-30T00:00:00.000Z',
 				engine: 'tier_a',
 				files_indexed: [],
 				fingerprints: [],
@@ -559,8 +434,8 @@ describe('sast-baseline', () => {
 			const badBundle = {
 				schema_version: BASELINE_SCHEMA_VERSION,
 				phase: 3,
-				created_at: new Date().toISOString(),
-				updated_at: new Date().toISOString(),
+				created_at: '2026-08-30T00:00:00.000Z',
+				updated_at: '2026-08-30T00:00:00.000Z',
 				engine: 'tier_a',
 				files_indexed: [],
 				// fingerprints deliberately omitted

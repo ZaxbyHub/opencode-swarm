@@ -1530,19 +1530,22 @@ export async function runPreCheckBatch(
 			}
 		} else if (sastResult.baseline_used) {
 			// Baseline diff mode: verdict is driven ONLY by new_findings in sastScan.
-			// Populate reviewer triage with pre_existing_findings (if any), regardless of verdict.
-			// Use sast_threshold as triage filter so mediums are not silently dropped when
-			// threshold is 'medium' or lower.
-			if (
-				sastResult.pre_existing_findings &&
-				sastResult.pre_existing_findings.length > 0
-			) {
-				sastPreexistingFindings = sastResult.pre_existing_findings.filter((f) =>
+			// Populate reviewer triage with pre_existing_findings and moved findings
+			// (reflow-matched: same finding at a new position/window, #2302) — both
+			// are known pre-existing debt and never gate. Use sast_threshold as
+			// triage filter so mediums are not silently dropped when threshold is
+			// 'medium' or lower.
+			const sastCarryFindings = [
+				...(sastResult.pre_existing_findings ?? []),
+				...(sastResult.moved_findings ?? []),
+			];
+			if (sastCarryFindings.length > 0) {
+				sastPreexistingFindings = sastCarryFindings.filter((f) =>
 					meetsThresholdForTriage(f.severity, sast_threshold),
 				);
 				if (sastPreexistingFindings.length > 0) {
 					warn(
-						`pre_check_batch: SAST baseline diff found ${sastPreexistingFindings.length} pre-existing finding(s) - passing to reviewer for triage`,
+						`pre_check_batch: SAST baseline diff found ${sastPreexistingFindings.length} pre-existing/moved finding(s) - passing to reviewer for triage`,
 					);
 				}
 			}

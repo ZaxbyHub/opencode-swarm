@@ -25,7 +25,11 @@ import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { resetSemgrepCache } from '../../../src/sast/semgrep';
 import type { LoadBaselineResult } from '../../../src/tools/sast-baseline';
-import { type SastScanInput, sastScan } from '../../../src/tools/sast-scan';
+import {
+	type SastScanFinding,
+	type SastScanInput,
+	sastScan,
+} from '../../../src/tools/sast-scan';
 
 // Mock the saveEvidence function
 vi.mock('../../../src/evidence/manager', () => ({
@@ -47,11 +51,16 @@ vi.mock('../../../src/sast/semgrep', () => ({
 }));
 
 // Mock sast-baseline I/O functions so tests don't write real files.
-const mockCaptureOrMergeBaseline = mock(async () => ({
-	status: 'written' as const,
-	path: '/fake/sast-baseline.json',
-	fingerprint_count: 1,
-}));
+// Derive fingerprint_count from the captured findings (not a canned constant)
+// so the module mock stays truthful if Bun's shared-process mock.module leak
+// reaches a sibling test file performing a real capture (#2302 hardening).
+const mockCaptureOrMergeBaseline = mock(
+	async (_directory: string, _phase: number, findings: SastScanFinding[]) => ({
+		status: 'written' as const,
+		path: '/fake/sast-baseline.json',
+		fingerprint_count: findings.length,
+	}),
+);
 const mockLoadBaseline = mock(
 	(): LoadBaselineResult => ({ status: 'not_found' }),
 );

@@ -48,11 +48,15 @@ vi.mock('../../../src/sast/semgrep', () => ({
 // to the mock functions (vi.mocked() is not available in bun:test).
 // The real helpers (assignOccurrenceIndices, fingerprintFinding, etc.) are
 // re-exported from the actual module so sast-scan.ts logic stays intact.
-const mockCaptureOrMergeBaseline = mock(async () => ({
-	status: 'written' as const,
-	path: '/fake/sast-baseline.json',
-	fingerprint_count: 1,
-}));
+// #2302: fingerprint_count derives from the findings so a leaked mock
+// cannot fake counts in sibling files.
+const mockCaptureOrMergeBaseline = mock(
+	async (_directory: string, _phase: number, findings: unknown[]) => ({
+		status: 'written' as const,
+		path: '/fake/sast-baseline.json',
+		fingerprint_count: findings.length,
+	}),
+);
 const mockLoadBaseline = mock(
 	(): LoadBaselineResult => ({ status: 'not_found' }),
 );
@@ -759,6 +763,28 @@ const key = "sk-1234567890";`,
 	});
 });
 
+// Shared "found baseline" mock payload (#2302: includes reflowKeys).
+function mockFoundBaseline(
+	fingerprints: Set<string>,
+): Extract<LoadBaselineResult, { status: 'found' }> {
+	return {
+		status: 'found',
+		reflowKeys: [],
+		fingerprints,
+		bundle: {
+			schema_version: '1.0.0',
+			phase: 1,
+			created_at: '2026-08-30T00:00:00.000Z',
+			updated_at: '2026-08-30T00:00:00.000Z',
+			engine: 'tier_a',
+			files_indexed: [],
+			fingerprints: [],
+			findings_snapshot: [],
+			truncated: false,
+		},
+	};
+}
+
 describe('Baseline diffing', () => {
 	let tempDir: string;
 
@@ -767,12 +793,8 @@ describe('Baseline diffing', () => {
 		mockSemgrepAvailable = false;
 		vi.clearAllMocks();
 		// Reset defaults after clearAllMocks — use direct mock references
-		// (vi.mocked() is not available in bun:test).
-		mockCaptureOrMergeBaseline.mockResolvedValue({
-			status: 'written',
-			path: '/fake/sast-baseline.json',
-			fingerprint_count: 1,
-		});
+		// (vi.mocked() is not available in bun:test). The capture mock keeps
+		// its base deriving implementation; only loadBaseline needs a reset.
 		mockLoadBaseline.mockReturnValue({ status: 'not_found' });
 	});
 
@@ -830,21 +852,7 @@ describe('Baseline diffing', () => {
 			},
 		});
 
-		mockLoadBaseline.mockReturnValueOnce({
-			status: 'found',
-			fingerprints: alwaysFoundSet,
-			bundle: {
-				schema_version: '1.0.0',
-				phase: 1,
-				created_at: new Date().toISOString(),
-				updated_at: new Date().toISOString(),
-				engine: 'tier_a',
-				files_indexed: [testFile],
-				fingerprints: [],
-				findings_snapshot: [],
-				truncated: false,
-			},
-		});
+		mockLoadBaseline.mockReturnValueOnce(mockFoundBaseline(alwaysFoundSet));
 
 		const input: SastScanInput = {
 			changed_files: [testFile],
@@ -861,21 +869,8 @@ describe('Baseline diffing', () => {
 
 	it('diff mode: new finding → verdict fail', async () => {
 		// Baseline is empty (no known fingerprints) but file has eval() → new finding
-		mockLoadBaseline.mockReturnValueOnce({
-			status: 'found',
-			fingerprints: new Set<string>(), // empty — nothing pre-existing
-			bundle: {
-				schema_version: '1.0.0',
-				phase: 1,
-				created_at: new Date().toISOString(),
-				updated_at: new Date().toISOString(),
-				engine: 'tier_a',
-				files_indexed: [],
-				fingerprints: [],
-				findings_snapshot: [],
-				truncated: false,
-			},
-		});
+		// Baseline is empty (no known fingerprints)
+		mockLoadBaseline.mockReturnValueOnce(mockFoundBaseline(new Set<string>()));
 
 		const testFile = path.join(tempDir, 'new_vuln.js');
 		fs.writeFileSync(testFile, 'eval("x");');
@@ -894,21 +889,7 @@ describe('Baseline diffing', () => {
 
 	it('zero-coverage-fail is preserved under baseline mode', async () => {
 		// Even with a phase, scanning zero files should still fail
-		mockLoadBaseline.mockReturnValueOnce({
-			status: 'found',
-			fingerprints: new Set<string>(),
-			bundle: {
-				schema_version: '1.0.0',
-				phase: 1,
-				created_at: new Date().toISOString(),
-				updated_at: new Date().toISOString(),
-				engine: 'tier_a',
-				files_indexed: [],
-				fingerprints: [],
-				findings_snapshot: [],
-				truncated: false,
-			},
-		});
+		mockLoadBaseline.mockReturnValueOnce(mockFoundBaseline(new Set<string>()));
 
 		const input: SastScanInput = {
 			changed_files: [],
