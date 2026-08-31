@@ -1,10 +1,7 @@
 /**
- * Unit tests for skill-usage feedback bridge functions:
- * - bumpKnowledgeConfidenceBatch (knowledge-store.ts)
- * - resolveSourceKnowledgeIds (skill-usage-log.ts)
- * - applySkillUsageFeedback (skill-usage-log.ts)
- *
- * Tests use _internals DI seams for isolation (no mock.module).
+ * Unit tests for skill-usage feedback bridge functions: bumpKnowledgeConfidenceBatch
+ * (knowledge-store.ts), resolveSourceKnowledgeIds and applySkillUsageFeedback
+ * (skill-usage-log.ts). Uses _internals DI seams for isolation (no mock.module).
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
@@ -29,7 +26,10 @@ import {
 	type SkillUsageEntry,
 	_internals as sul_internals,
 } from '../../../src/hooks/skill-usage-log.js';
-import { loadPendingDocument } from '../../../src/hooks/skill-usage-pending.js';
+import {
+	_resetSkillUsagePendingState,
+	loadPendingDocument,
+} from '../../../src/hooks/skill-usage-pending.js';
 
 // =============================================================================
 // Helpers
@@ -103,6 +103,7 @@ describe('bumpKnowledgeConfidenceBatch', () => {
 
 	afterEach(() => {
 		mock.restore();
+		_resetSkillUsagePendingState();
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
@@ -253,6 +254,7 @@ describe('resolveSourceKnowledgeIds', () => {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 		sul_internals.readFileSync = fs.readFileSync.bind(fs);
 		sul_internals.existsSync = fs.existsSync.bind(fs);
+		_resetSkillUsagePendingState();
 	});
 
 	test('happy path: SKILL.md with generated_from_knowledge UUIDs → returns UUIDs', async () => {
@@ -471,6 +473,7 @@ describe('applySkillUsageFeedback', () => {
 
 	afterEach(() => {
 		mock.restore();
+		_resetSkillUsagePendingState();
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
@@ -1104,6 +1107,7 @@ describe('read-path normalization (legacy backward-compat)', () => {
 	});
 
 	afterEach(() => {
+		_resetSkillUsagePendingState();
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
