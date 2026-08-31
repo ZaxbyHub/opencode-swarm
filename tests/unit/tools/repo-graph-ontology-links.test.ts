@@ -3,6 +3,7 @@ import {
 	extractFileOntology,
 	type FileOntology,
 	normalizeRoutePathInput,
+	validateGraphNode,
 } from '../../../src/tools/repo-graph';
 
 function ontologyFor(moduleName: string, content: string): FileOntology {
@@ -169,6 +170,37 @@ describe('extractFileOntology links (KG-15, issue #1536)', () => {
 			'DENO_KEY',
 		]);
 		expect(configures[0]).toMatchObject({ line: 1, confidence: 'medium' });
+	});
+
+	test('regex-constrained router paths yield backslash subjects that validate', () => {
+		// F-002 pairing: extraction keeps the backslash escape in the subject,
+		// and validation must accept it — otherwise the whole graph node drops.
+		const ontology = ontologyFor(
+			'src/regex-route.ts',
+			[
+				'export function getUser(req) { return null; }',
+				"router.get('/user/:id(\\d+)', getUser);",
+			].join('\n'),
+		);
+		const link = ontology.links?.find((l) => l.kind === 'HANDLES_ROUTE');
+		expect(String(link?.subject)).toBe('GET /user/:id(\\d+)');
+		// The parentheses inside the regex-constrained path defeat the
+		// last-argument handler scan, so the symbol binding stays conservative
+		// null (documented "named handler arg when present").
+		expect(link?.symbol).toBeUndefined();
+		expect(link?.confidence).toBe('medium');
+		// The extracted subject must round-trip through node validation.
+		expect(() =>
+			validateGraphNode({
+				filePath: '/repo/src/regex-route.ts',
+				moduleName: 'src/regex-route.ts',
+				exports: [],
+				imports: [],
+				language: 'typescript',
+				mtime: '1',
+				ontology,
+			}),
+		).not.toThrow();
 	});
 
 	test('links are not extracted from comments', () => {

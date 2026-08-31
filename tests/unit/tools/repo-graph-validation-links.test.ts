@@ -199,13 +199,42 @@ describe('validateGraphNode: ontology.links (KG-15, issue #1536)', () => {
 				),
 			).not.toThrow();
 		}
-		// Quotes and backslashes stay excluded.
+		// Quotes stay excluded. Backslashes are LEGAL: regex-constrained
+		// Express paths (`/user/:id(\d+)`) contain them, and rejecting the
+		// subject drops the whole node (F-002 regression class).
+		expect(() =>
+			validateGraphNode(
+				baseNode(
+					ontologyWith({
+						kind: 'HANDLES_ROUTE',
+						subject: 'GET /user/:id(\\d+)',
+						confidence: 'medium',
+					}),
+				),
+			),
+		).not.toThrow();
 		expect(() =>
 			validateGraphNode(
 				baseNode(
 					ontologyWith({
 						kind: 'HANDLES_ROUTE',
 						subject: 'GET /"x"',
+						confidence: 'low',
+					}),
+				),
+			),
+		).toThrow(/ontology\.links\.subject/);
+	});
+
+	test('rejects backslash-separated traversal segments in subjects', () => {
+		// F-002 hardening: the segment check normalizes backslashes, so
+		// Windows-style ..\ traversal is still caught.
+		expect(() =>
+			validateGraphNode(
+				baseNode(
+					ontologyWith({
+						kind: 'READS',
+						subject: 'GET /a\\..\\..\\b',
 						confidence: 'low',
 					}),
 				),

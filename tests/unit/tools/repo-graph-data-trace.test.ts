@@ -284,6 +284,17 @@ describe('traceData (KG-15, issue #1536)', () => {
 		expect(result.warnings.join('\n')).toContain('DataOperationFact fallback');
 	});
 
+	test('pre-1.7.0 schema with RETAINED links answers fact-only (no contradiction)', () => {
+		// F-005b: keep the links in place but downgrade the schema — the gate
+		// must suppress link rows so linksSupported:false is never contradicted.
+		const result = traceData(makeGraph('1.6.0', true), { entity: 'user' });
+		expect(result.linksSupported).toBe(false);
+		expect(result.readers.length).toBe(1);
+		expect(result.readers[0].via).toBe('fact');
+		expect(result.readers[0].confidence).toBeNull();
+		expect(result.writers.every((w) => w.via === 'fact')).toBe(true);
+	});
+
 	test('untested entities get the no-tests risk note', () => {
 		const result = traceData(makeGraph(), { entity: 'user' });
 		// readers.test.ts only imports readers.ts; writers/deleters/routes are untested,

@@ -762,6 +762,14 @@ Fixture patterns (module path, lowercase): a `fixtures?` / `__fixtures__` /
   claim security proofs, and mirror the ontology extractor's conservative
   posture. `impact_cone` is unchanged; deeper route/data/test views are these
   dedicated actions.
+- The unguarded-route advisory is a FILE-level heuristic: the auth/validation
+  sweep covers the whole handler file, so a guarded sibling route suppresses
+  the advisory for every route in that file — and absence of the advisory is
+  NOT evidence that an individual route is guarded. Regex-constrained router
+  paths (`router.get('/user/:id(\d+)', h)`) are captured verbatim, backslash
+  escapes included. `CONFIGURES` evidence lines may capture secret-bearing
+  source (e.g. a hardcoded fallback next to `process.env.X`); graph files stay
+  workspace-local as with all evidence fields.
 
 ## Limitations (by design)
 

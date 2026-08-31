@@ -263,7 +263,7 @@ describe('traceRoute (KG-15, issue #1536)', () => {
 				code: 'api_route_without_detected_auth',
 				severity: 'medium',
 				message:
-					'No authentication, authorization, or CSRF guard was detected near this route.',
+					'No authentication, authorization, or CSRF guard was detected anywhere in this file; absence of this finding does not prove an individual route is guarded.',
 				line: 5,
 			},
 		];
@@ -296,6 +296,28 @@ describe('traceRoute (KG-15, issue #1536)', () => {
 		});
 		expect(byPathSymbol.routes.length).toBe(1);
 		expect(byPathSymbol.routes[0].route.method).toBe('POST');
+	});
+
+	test('section-cap drops are disclosed in truncated/warnings, never silent', () => {
+		// F-005a: 30 handler facts + capped 20 must report dropped > 0.
+		const graph = makeGraph();
+		graph.nodes[abs('app/api/users/route.ts')].ontology!.security = Array.from(
+			{ length: 30 },
+			(_, i) => ({
+				kind: 'authentication' as const,
+				line: i + 1,
+				evidence: `guard ${i}`,
+				confidence: 'high' as const,
+			}),
+		);
+		const result = traceRoute(graph, {
+			routePath: '/api/users',
+			method: 'POST',
+		});
+		expect(result.routes[0].security.length).toBe(20);
+		expect(result.truncated).toBe(true);
+		expect(result.budget.dropped).toBeGreaterThanOrEqual(10);
+		expect(result.warnings.join('\n')).toContain('-item section cap');
 	});
 
 	test('method-only input filters across the whole graph at the query layer', () => {

@@ -45,25 +45,21 @@ const GRAPH_SYMBOL_KIND_SET = new Set<string>(GRAPH_SYMBOL_KIND_VALUES);
 const ONTOLOGY_NAME_PATTERN = /^[a-z][a-z0-9_]*$/;
 const ONTOLOGY_LINK_SUBJECT_MAX_LENGTH = 200;
 /**
- * Link subjects are route ids (`GET /api/users/:id*`; router-call paths may
- * legally carry query strings and regex fragments) and — because the route
- * extractor runs on every language — FastAPI `{param}` and Flask `<int:id>`
- * path syntax too, entity/table names, or config/env keys. All start with an
- * identifier char; the security-relevant bounds are length, no `..`
- * traversal, no control characters (enforced by the string loop below), and
- * no quote/backslash characters that could make a subject confusable with
- * code. A stricter character whitelist is deliberately NOT imposed: it
- * rejected legal route paths from three common frameworks and, because a
- * `validateGraphNode` failure drops the whole node, silently removed those
- * route files from the graph entirely (KG-15 regression caught in review).
+ * Link subjects are route ids; router-call paths legally carry query strings,
+ * regex fragments, AND backslash escapes (`router.get('/user/:id(\d+)', h)`) —
+ * excluding backslash re-created the node-drop regression for exactly that
+ * textbook syntax. Subjects remain identifier-first, quote-free, and
+ * length-bounded; every runtime consumer treats a subject as an inert
+ * comparison/display string, never a filesystem operand.
  */
-const ONTOLOGY_LINK_SUBJECT_PATTERN = /^[A-Za-z_$][^\\'"`]*$/;
+const ONTOLOGY_LINK_SUBJECT_PATTERN = /^[A-Za-z_$][^'"`]*$/;
 /** `..` as a path SEGMENT is traversal; `[...slug]` catch-alls are not. */
-const hasTraversalSegment = (subject: string): boolean =>
-	subject === '..' ||
-	subject.startsWith('../') ||
-	subject.endsWith('/..') ||
-	subject.includes('/../');
+const hasTraversalSegment = (subject: string): boolean => {
+	const t = subject.replace(/\\/g, '/');
+	return (
+		t === '..' || t.startsWith('../') || t.endsWith('/..') || t.includes('/../')
+	);
+};
 
 // ============ Validation ============
 

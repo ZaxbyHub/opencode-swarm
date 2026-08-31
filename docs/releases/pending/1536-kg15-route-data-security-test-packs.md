@@ -75,3 +75,8 @@ questions from the graph, advisory and evidence-backed.
 - Colocated-test association (`widget.ts` ↔ `widget.spec.ts` without an
   import) is a naming heuristic reported at medium confidence with an
   explicit risk note; fixture detection is path/basename-pattern based.
+- The unguarded-route advisory is file-level: one auth/validation sweep per
+  handler file, so a guarded sibling route suppresses it for the whole file,
+  and absence of the finding does not prove an individual route is guarded.
+- Regex-constrained router paths (`/user/:id(\d+)`) are captured verbatim
+  (backslash escapes included) in route subjects.

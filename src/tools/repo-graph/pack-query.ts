@@ -23,6 +23,7 @@ import type {
 	DataTraceAccess,
 	DataTraceResult,
 	DerivedAssociation,
+	GraphEdge,
 	GraphNode,
 	OntologyFinding,
 	OntologyLink,
@@ -177,20 +178,31 @@ function handlerBindingFor(
 	return { symbol: null, confidence: null, evidence: null };
 }
 
+/**
+ * `(source\0target) -> edges` index over graph.edges. Built once per query
+ * call: per-pair full-edge rescans were O(pairs × edges) and measured 9-70s
+ * on real graphs with hundreds of test importers (PR-comment F-004). Both
+ * coordinates are normalized the same way as the edges themselves.
+ */
+function buildEdgePairIndex(edges: GraphEdge[]): Map<string, GraphEdge[]> {
+	const index = new Map<string, GraphEdge[]>();
+	for (const edge of edges) {
+		const key = `${normalizeGraphPath(edge.source)}\0${normalizeGraphPath(edge.target)}`;
+		const list = index.get(key);
+		if (list) list.push(edge);
+		else index.set(key, [edge]);
+	}
+	return index;
+}
+
 /** Import specifier of the first edge from `sourceNode` to `targetNode`, or ''. */
 function importSpecifierFor(
-	graph: RepoGraph,
+	edgePairs: Map<string, GraphEdge[]>,
 	sourceNode: GraphNode,
 	targetNode: GraphNode,
 ): string {
-	const sourceKey = normalizeGraphPath(sourceNode.filePath);
-	const targetKey = normalizeGraphPath(targetNode.filePath);
-	for (const edge of graph.edges) {
-		if (normalizeGraphPath(edge.source) !== sourceKey) continue;
-		if (normalizeGraphPath(edge.target) !== targetKey) continue;
-		return edge.importSpecifier;
-	}
-	return '';
+	const key = `${normalizeGraphPath(sourceNode.filePath)}\0${normalizeGraphPath(targetNode.filePath)}`;
+	return edgePairs.get(key)?.[0]?.importSpecifier ?? '';
 }
 
 // ============ route_trace ============
@@ -270,6 +282,7 @@ export function traceRoute(
 		if (matches.length > topN * 10) break; // defensive scan bound
 	}
 
+	let totalSectionCapDropped = 0;
 	const routesOut: RouteTraceRoute[] = matches
 		.slice(0, topN)
 		.map(({ node, fact }) => {
@@ -284,17 +297,32 @@ export function traceRoute(
 			const dataOperations: Array<{ file: string; fact: DataOperationFact }> =
 				[];
 			const security: Array<{ file: string; fact: SecurityFact }> = [];
+			let sectionCapDropped = 0;
 			for (const fileKey of packFiles) {
 				const packNode = getGraphNode(graph, fileKey);
 				const fileRel = rel(graph, packNode?.filePath ?? fileKey);
 				for (const dataFact of packNode?.ontology?.dataOperations ?? []) {
-					if (dataOperations.length >= PACK_ONTOLOGY_CAP) break;
+					if (dataOperations.length >= PACK_ONTOLOGY_CAP) {
+						// Cap drops are counted, not silent: truncated/budget must
+						// reflect them (PR-comment F-005).
+						sectionCapDropped += 1;
+						continue;
+					}
 					dataOperations.push({ file: fileRel, fact: dataFact });
 				}
 				for (const securityFact of packNode?.ontology?.security ?? []) {
-					if (security.length >= PACK_ONTOLOGY_CAP) break;
+					if (security.length >= PACK_ONTOLOGY_CAP) {
+						sectionCapDropped += 1;
+						continue;
+					}
 					security.push({ file: fileRel, fact: securityFact });
 				}
+			}
+			if (sectionCapDropped > 0) {
+				totalSectionCapDropped += sectionCapDropped;
+				warnings.push(
+					`${sectionCapDropped} data/security fact(s) omitted by the ${PACK_ONTOLOGY_CAP}-item section cap`,
+				);
 			}
 			const findings: Array<{ file: string; finding: OntologyFinding }> = (
 				node.ontology?.findings ?? []
@@ -329,9 +357,10 @@ export function traceRoute(
 				: 'no routes matched the given target',
 		);
 	}
-	const dropped = Math.max(0, matches.length - routesOut.length);
-	if (dropped > 0) {
-		warnings.push(`${dropped} route(s) omitted by top_n=${topN}`);
+	const routeDropped = Math.max(0, matches.length - routesOut.length);
+	const dropped = routeDropped + totalSectionCapDropped;
+	if (routeDropped > 0) {
+		warnings.push(`${routeDropped} route(s) omitted by top_n=${topN}`);
 	}
 
 	return {
@@ -398,8 +427,11 @@ export function traceData(
 
 	for (const node of scopeNodes) {
 		const fileRel = rel(graph, node.filePath);
-		// Link-backed matches (schema >= 1.7.0).
-		for (const link of linksOf(node)) {
+		// Link-backed matches (schema >= 1.7.0 only). Gate on the capability
+		// flag, not mere presence: a pre-1.7.0 graph with retained stale links
+		// must answer fact-only, or the response contradicts its own
+		// linksSupported: false (PR-comment F-005).
+		for (const link of linksSupported ? linksOf(node) : []) {
 			if (!isDataKind(link.kind)) continue;
 			if (entityLower !== undefined) {
 				if (!link.subject || link.subject.toLowerCase() !== entityLower) {
@@ -590,16 +622,13 @@ function colocatedTestFor(
 }
 
 function coveredSymbolsFor(
-	graph: RepoGraph,
+	edgePairs: Map<string, GraphEdge[]>,
 	testNode: GraphNode,
 	targetNode: GraphNode,
 ): string[] {
-	const testKey = normalizeGraphPath(testNode.filePath);
-	const targetKey = normalizeGraphPath(targetNode.filePath);
+	const key = `${normalizeGraphPath(testNode.filePath)}\0${normalizeGraphPath(targetNode.filePath)}`;
 	const referenced = new Set<string>();
-	for (const edge of graph.edges) {
-		if (normalizeGraphPath(edge.source) !== testKey) continue;
-		if (normalizeGraphPath(edge.target) !== targetKey) continue;
+	for (const edge of edgePairs.get(key) ?? []) {
 		for (const symbol of edge.importedSymbols ?? []) referenced.add(symbol);
 		for (const symbol of edge.usedSymbols ?? []) referenced.add(symbol);
 	}
@@ -620,6 +649,7 @@ export function buildTestPack(
 ): TestPackResult {
 	const topN = options.topN ?? PACK_DEFAULT_TOP_N;
 	const warnings: string[] = [];
+	const edgePairs = buildEdgePairIndex(graph.edges);
 
 	// Resolve target files: files > file > symbol-owning files > diff-derived.
 	// The 50-file cap is disclosed via a warning (silent truncation was a
@@ -699,9 +729,9 @@ export function buildTestPack(
 			const testNode = getGraphNode(graph, ref.file);
 			if (!testNode || !isTestNode(testNode)) continue;
 			const testRel = rel(graph, testNode.filePath);
-			const covered = coveredSymbolsFor(graph, testNode, targetNode);
+			const covered = coveredSymbolsFor(edgePairs, testNode, targetNode);
 			noteCovered(targetRel, covered);
-			const specifier = importSpecifierFor(graph, testNode, targetNode);
+			const specifier = importSpecifierFor(edgePairs, testNode, targetNode);
 			noteAssociation({
 				kind: 'TESTS',
 				fromFile: testRel,
@@ -728,7 +758,7 @@ export function buildTestPack(
 		const colocated = colocatedTestFor(graph, targetNode);
 		if (colocated && !testsByFile.has(rel(graph, colocated.filePath))) {
 			const colocatedRel = rel(graph, colocated.filePath);
-			const covered = coveredSymbolsFor(graph, colocated, targetNode);
+			const covered = coveredSymbolsFor(edgePairs, colocated, targetNode);
 			noteCovered(targetRel, covered);
 			const evidence = `colocated sibling of ${targetNode.moduleName
 				.split('/')
@@ -772,7 +802,7 @@ export function buildTestPack(
 			if (!depNode || isTestNode(depNode)) continue;
 			const depRel = rel(graph, depNode.filePath);
 			if (isFixtureModule(depNode.moduleName)) {
-				const specifier = importSpecifierFor(graph, testNode, depNode);
+				const specifier = importSpecifierFor(edgePairs, testNode, depNode);
 				const entry = fixtureUsedBy.get(depRel) ?? {
 					users: new Set<string>(),
 					evidence: specifier,

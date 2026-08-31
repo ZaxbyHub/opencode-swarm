@@ -78,6 +78,51 @@ describe('repo_map: route_trace (KG-15, issue #1536)', () => {
 		expect(route.tests).toEqual(['src/services/user-service.test.ts']);
 	});
 
+	test('unguarded sibling route: the advisory is a documented file-level heuristic', async () => {
+		// F-003: users/route.ts has a guarded POST (session check) and an
+		// unguarded GET. The file-level auth sweep sees the POST's guard, so
+		// the GET route gets NO advisory — pinned here as documented heuristic
+		// behavior (docs: absence of the finding is not proof of guarding).
+		await call({ action: 'build' });
+		const r = parse(
+			await call({
+				action: 'route_trace',
+				route_path: '/api/users',
+				method: 'GET',
+			}),
+		);
+		expect(r.success).toBe(true);
+		const routes = r.routes as Array<Record<string, unknown>>;
+		expect(routes.length).toBe(1);
+		expect(routes[0].findings).toEqual([]);
+	});
+
+	test('regex-constrained route path survives the build (F-002 node-drop regression)', async () => {
+		// F-002: a backslash-containing route path (`:id(\d+)`) must not get the
+		// whole file dropped from the graph via link-subject validation.
+		fs.mkdirSync(path.join(tmp, 'app/api/regex'), { recursive: true });
+		fs.writeFileSync(
+			path.join(tmp, 'app/api/regex/route.ts'),
+			[
+				'export function getRegexUser(req: Request) {',
+				'\treturn Response.json({});',
+				'}',
+				"router.get('/regex/:id(\\d+)', getRegexUser);",
+			].join('\n'),
+		);
+		await call({ action: 'build' });
+		const r = parse(
+			await call({ action: 'route_trace', file: 'app/api/regex/route.ts' }),
+		);
+		expect(r.success).toBe(true);
+		const routes = r.routes as Array<Record<string, unknown>>;
+		expect(routes.length).toBe(1);
+		expect(routes[0].file).toBe('app/api/regex/route.ts');
+		expect(String((routes[0].route as Record<string, unknown>).path)).toContain(
+			':id(\\d+)',
+		);
+	});
+
 	test('surfaces the unguarded mutating route warning (named fixture)', async () => {
 		await call({ action: 'build' });
 		const r = parse(

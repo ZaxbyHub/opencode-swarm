@@ -740,8 +740,12 @@ function buildFindings(
 		findings.push({
 			code: 'api_route_without_detected_auth',
 			severity: 'medium',
+			// File-level heuristic: the auth sweep covers the whole file, so a
+			// guarded sibling route suppresses this advisory for every route in
+			// the file. Absence of this finding is NOT evidence that an
+			// individual route is guarded (PR-comment F-003).
 			message:
-				'No authentication, authorization, or CSRF guard was detected near this route.',
+				'No authentication, authorization, or CSRF guard was detected anywhere in this file; absence of this finding does not prove an individual route is guarded.',
 			line: routes[0]?.line,
 		});
 	}
