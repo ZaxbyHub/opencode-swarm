@@ -70,6 +70,24 @@ describe('context_status tool surface', () => {
 		);
 	});
 
+	it('should document the #2044 provenance fields with their vocabularies', () => {
+		expect(TOOL_METADATA.context_status.description).toContain(
+			'modelLimitSource',
+		);
+		expect(TOOL_METADATA.context_status.description).toContain(
+			'host|override|provider_cap|native|fallback',
+		);
+		expect(TOOL_METADATA.context_status.description).toContain(
+			'modelLimitResolution',
+		);
+		expect(TOOL_METADATA.context_status.description).toContain(
+			'static_provider_cap',
+		);
+		expect(TOOL_METADATA.context_status.description).toContain(
+			'fallbackActive',
+		);
+	});
+
 	it('should have an args schema with no required fields', () => {
 		expect(context_status.args).toBeDefined();
 		expect(Object.keys(context_status.args)).toEqual(['working_directory']);

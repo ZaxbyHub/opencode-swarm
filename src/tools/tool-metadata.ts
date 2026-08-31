@@ -608,7 +608,7 @@ export const TOOL_METADATA = {
 	},
 	context_status: {
 		description:
-			'report current context-window headroom for the active session — returns tokens-used, usageSource (provider|estimated), model-limit, usage-percent, threshold-state (none/warn/critical), model name, and provider. Pure read-only: no state mutation, no warning injection. Works whether context_budget.enabled is true or false.',
+			'report current context-window headroom for the active session — returns tokens-used, usageSource (provider|estimated), model-limit with provenance (modelLimitSource: host|override|provider_cap|native|fallback; modelLimitResolution: user_provider_model|user_model|user_default|live_model_limit|static_provider_cap|static_native|static_default; fallbackActive: true when the denominator came from a static table or the flat 128k default — treat headroom as uncertain), usage-percent, threshold-state (none/warn/critical), model name, and provider. Pure read-only: no state mutation, no warning injection. Works whether context_budget.enabled is true or false.',
 		agents: ['architect'],
 	},
 	search: {
