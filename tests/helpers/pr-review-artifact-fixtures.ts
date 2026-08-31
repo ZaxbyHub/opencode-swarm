@@ -3,9 +3,11 @@ import * as path from 'node:path';
 import { storeLaneOutput } from '../../src/background/lane-output-store.js';
 import {
 	appendDelegationTransition,
+	type BackgroundDelegationResult,
 	claimTerminalResult,
 	recordPendingDelegation,
 } from '../../src/background/pending-delegations.js';
+import type { PrReviewResultReceipt } from '../../src/background/pr-review-contract.js';
 import {
 	activatePrWorkflow,
 	enforcePrReviewBaseDimensions,
@@ -52,7 +54,11 @@ export async function persistPrReviewBatch(
 	directory: string,
 	batchId: string,
 	mode: string,
-	lanes: ReadonlyArray<{ laneId: string; workflowLane: string }>,
+	lanes: ReadonlyArray<{
+		laneId: string;
+		workflowLane: string;
+		ownedWorkflowLanes?: string[];
+	}>,
 	options: {
 		status?: 'pending' | 'running' | 'completed' | 'error';
 		head?: string;
@@ -76,8 +82,15 @@ export async function persistPrReviewBatch(
 		 */
 		firstCandidateId?: string;
 		workflowLaneFailureClass?: 'contract' | 'resource' | 'deadline';
+		prReviewLegacyTranscriptCompatibility?: boolean;
+		prReviewResultReceipt?: PrReviewResultReceipt;
 	} = {},
 ): Promise<void> {
+	const legacyTranscriptCompatibility =
+		options.prReviewLegacyTranscriptCompatibility ??
+		(mode === 'swarm-pr-review:base' || mode === 'swarm-pr-review:micro'
+			? true
+			: undefined);
 	for (const [index, lane] of lanes.entries()) {
 		const correlationId = `${batchId}-${index}`;
 		const subagentSessionId = options.subagentSessionId ?? correlationId;
@@ -95,6 +108,9 @@ export async function persistPrReviewBatch(
 			laneId: lane.laneId,
 			mode,
 			workflowLane: lane.workflowLane,
+			...(lane.ownedWorkflowLanes?.length
+				? { ownedWorkflowLanes: lane.ownedWorkflowLanes }
+				: {}),
 			workspace: {
 				directory,
 				gitHead: PR_ARTIFACT_HEAD_SHA,
@@ -102,6 +118,12 @@ export async function persistPrReviewBatch(
 				prHeadSha: options.head ?? PR_ARTIFACT_HEAD_SHA,
 				scope: null,
 			},
+			...(legacyTranscriptCompatibility !== undefined
+				? {
+						prReviewLegacyTranscriptCompatibility:
+							legacyTranscriptCompatibility,
+					}
+				: {}),
 		});
 		const text =
 			options.textOverride ??
@@ -133,13 +155,16 @@ export async function persistPrReviewBatch(
 			text,
 			transcriptIncomplete: options.transcriptIncomplete,
 		});
-		const result = {
+		const result: BackgroundDelegationResult = {
 			text,
 			chars: stored.chars,
 			truncated: false,
 			digest: stored.digest,
 			...(stored.ref ? { outputRef: stored.ref } : {}),
 			...(options.transcriptIncomplete ? { transcriptIncomplete: true } : {}),
+			...(options.prReviewResultReceipt
+				? { prReviewResultReceipt: options.prReviewResultReceipt }
+				: {}),
 			...(options.workflowLaneFailureClass
 				? {
 						workflowLaneFailureClass: options.workflowLaneFailureClass,

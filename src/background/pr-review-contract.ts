@@ -128,6 +128,12 @@ export type PrReviewResultFindingSeverity =
 export type PrReviewResultUnresolvedReason =
 	(typeof PR_REVIEW_RESULT_UNRESOLVED_REASONS)[number];
 
+export function prReviewLegacyTranscriptCompatibilityEnabled(
+	value: boolean | undefined,
+): boolean {
+	return value === true;
+}
+
 const PrReviewResultLaneIdSchema = z.string().trim().min(1).max(120);
 const PrReviewResultChildSessionSchema = z.string().trim().min(1).max(256);
 const PrReviewResultShaSchema = z

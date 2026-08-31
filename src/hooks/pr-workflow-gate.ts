@@ -43,6 +43,9 @@ import {
 	PrReviewCriticVerdictFieldsSchema,
 	type PrReviewLaneResultEnvelope,
 	PrReviewLaneResultEnvelopeSchema,
+	type PrReviewResultReceipt,
+	PrReviewResultReceiptSchema,
+	type PrReviewResultUnresolvedReason,
 	PrReviewReviewerVerdictFieldsSchema,
 	type PrReviewRiskImpact,
 	type PrReviewRiskTag,
@@ -51,6 +54,7 @@ import {
 	parsePrReviewVerdictRow,
 	prReviewFindingRequiresCritic,
 	prReviewLaneResultEnvelopeDigest,
+	prReviewLegacyTranscriptCompatibilityEnabled,
 } from '../background/pr-review-contract.js';
 import {
 	PR_REVIEW_REQUIRED_TRIGGER_IDS,
@@ -612,6 +616,8 @@ const MAX_PUBLICATION_ATTEMPTS = 8;
 const MAX_PUSH_ATTEMPT_DIAGNOSTIC_CHARS = 500;
 /** Version of the publication-generation + attempt schemas. */
 const PUBLICATION_SCHEMA_VERSION = 1 as const;
+const PUBLICATION_URL_CREDENTIALS_PATTERN =
+	/\b([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/g;
 
 export type PrWorkflowCompletionStatus =
 	| 'completed'
@@ -1959,17 +1965,10 @@ export async function submitPrReviewResult(
 		if (ctx.revisionDigest !== input.revisionDigest) {
 			return { status: 'rejected', reason: 'stale dispatch revision digest' };
 		}
-		const currentMatches = readDelegations(directory).filter(
-			(record) =>
-				record.parentSessionId === parentSessionId &&
-				record.subagentSessionId === child &&
-				record.batchId === input.batchId &&
-				record.laneId === input.laneId,
-		);
-		if (currentMatches.length !== 1) {
-			return { status: 'rejected', reason: 'delegation identity changed' };
-		}
-		const record = currentMatches[0];
+		// Publication performs the authoritative exact-identity/state recheck while
+		// holding the delegation-evidence lock. Reuse the discovery snapshot here
+		// instead of scanning the durable ledger a third time.
+		const record = preliminary[0];
 		if (
 			(record.mode !== 'swarm-pr-review:base' &&
 				record.mode !== 'swarm-pr-review:micro') ||
@@ -5499,7 +5498,7 @@ function summarizePrReviewBaseDimensionAttempts(
 				batch.validatedAt,
 			)
 				.filter((qualified) =>
-					hasRevisionIndependentDiscoverySemantics(directory, qualified),
+					hasRevisionIndependentDiscoverySemantics(directory, qualified, state),
 				)
 				.map((qualified) => qualified.record.laneId),
 		);
@@ -5554,6 +5553,7 @@ function summarizePrReviewBaseDimensionAttempts(
 function hasRevisionIndependentDiscoverySemantics(
 	directory: string,
 	qualified: QualifiedBatchRecord,
+	state: PrWorkflowGateState,
 ): boolean {
 	const ref = qualified.record.result?.outputRef?.trim();
 	if (!ref) return false;
@@ -5567,15 +5567,16 @@ function hasRevisionIndependentDiscoverySemantics(
 			mode: 'swarm-pr-review:base',
 			workflowLane: qualified.expectedWorkflowLane,
 			ownedWorkflowLanes: qualified.expectedOwnedLanes,
-			prHeadSha: qualified.record.workspace?.prHeadSha ?? '',
-			gitHead: qualified.record.workspace?.gitHead ?? '',
+			prHeadSha: state.prHeadSha ?? '',
+			gitHead: state.prHeadSha ?? '',
 			revisionDigest: artifact.revisionDigest,
-			workflowInstanceId:
-				qualified.record.result?.prReviewResultReceipt?.workflowInstanceId,
-			workflowRevision:
-				qualified.record.result?.prReviewResultReceipt?.workflowRevision,
-			baseSha: qualified.record.result?.prReviewResultReceipt?.baseSha,
-			reviewScope: qualified.record.workspace?.scope ?? undefined,
+			workflowInstanceId: state.workflowInstanceId,
+			workflowRevision: state.revision,
+			baseSha: state.prReviewBaseSha,
+			reviewScope:
+				state.prReviewBaseSha && state.prHeadSha
+					? `complete PR diff ${state.prReviewBaseSha}...${state.prHeadSha}`
+					: undefined,
 		},
 	}).ok;
 }
@@ -5621,6 +5622,122 @@ function latestTypedFailureForBaseDimension(
 					candidate.recordedAt > latest.recordedAt ||
 					(candidate.recordedAt === latest.recordedAt &&
 						candidate.terminalEventId.localeCompare(latest.terminalEventId) > 0)
+				) {
+					latest = candidate;
+				}
+			}
+		}
+	}
+	return latest;
+}
+
+interface PrReviewLatestStructuredUnresolved {
+	failureClass: BackgroundDelegationWorkflowLaneFailureClass;
+	recordedAt: number;
+	batchId: string;
+	laneId: string;
+	safeDetail: string;
+}
+
+function failureClassFromStructuredUnresolvedReason(
+	reason: PrReviewResultUnresolvedReason,
+): BackgroundDelegationWorkflowLaneFailureClass {
+	switch (reason) {
+		case 'RESOURCE_LIMIT':
+			return 'resource';
+		case 'DEADLINE_EXCEEDED':
+			return 'deadline';
+		default:
+			return 'contract';
+	}
+}
+
+function safeDetailFromStructuredUnresolvedReason(
+	reason: PrReviewResultUnresolvedReason,
+): string {
+	switch (reason) {
+		case 'NOT_EXECUTED':
+			return 'structured receipt reported this lane was never executed';
+		case 'PARTIAL_OUTPUT':
+			return 'structured receipt reported partial output that could not settle this lane';
+		case 'CONTRACT_FAILURE':
+			return 'structured receipt reported contract-invalid output for this lane';
+		case 'RESOURCE_LIMIT':
+			return 'structured receipt reported the lane exhausted its resource budget';
+		case 'DEADLINE_EXCEEDED':
+			return 'structured receipt reported the lane exceeded its collection deadline';
+		case 'STALE_BINDING':
+			return 'structured receipt reported stale workflow binding for this lane';
+		case 'PARENT_CANCELLED':
+			return 'structured receipt reported parent-side cancellation before settlement';
+	}
+}
+
+function latestStructuredReceiptUnresolvedForBaseDimension(
+	directory: string,
+	state: PrWorkflowGateState,
+	revisionDigest: string,
+	dimension: PrReviewBaseDimensionId,
+): PrReviewLatestStructuredUnresolved | null {
+	let latest: PrReviewLatestStructuredUnresolved | null = null;
+	const reviewScope =
+		state.prReviewBaseSha && state.prHeadSha
+			? `complete PR diff ${state.prReviewBaseSha}...${state.prHeadSha}`
+			: undefined;
+	for (const batch of state.prReviewBaseDispatches ?? []) {
+		const records = findByBatchId(directory, batch.batchId, {
+			parentSessionId: state.sessionID,
+		});
+		for (const lane of batch.lanes) {
+			const ownedWorkflowLanes = lane.ownedWorkflowLanes?.length
+				? lane.ownedWorkflowLanes
+				: [lane.workflowLane];
+			if (!ownedWorkflowLanes.includes(dimension)) continue;
+			for (const record of records.filter(
+				(candidate) => candidate.laneId === lane.laneId,
+			)) {
+				const result = record.result;
+				if (!result) continue;
+				const structured = validateExactStructuredReceiptCoverage({
+					record,
+					result,
+					artifact: null,
+					expected: {
+						mode: 'swarm-pr-review:base',
+						workflowLane: lane.workflowLane,
+						ownedWorkflowLanes,
+						prHeadSha: state.prHeadSha ?? '',
+						gitHead: state.prHeadSha ?? '',
+						revisionDigest,
+						workflowInstanceId: state.workflowInstanceId,
+						workflowRevision: state.revision,
+						baseSha: state.prReviewBaseSha,
+						reviewScope,
+					},
+				});
+				if (structured.status !== 'accepted') continue;
+				const unresolved = structured.receipt.envelope.unresolved.find(
+					(entry) => entry.workflowLane === dimension,
+				);
+				if (!unresolved) continue;
+				const candidate = {
+					failureClass: failureClassFromStructuredUnresolvedReason(
+						unresolved.reason,
+					),
+					recordedAt: record.updatedAt,
+					batchId: batch.batchId,
+					laneId: lane.laneId,
+					safeDetail: safeDetailFromStructuredUnresolvedReason(
+						unresolved.reason,
+					),
+				};
+				if (
+					latest === null ||
+					candidate.recordedAt > latest.recordedAt ||
+					(candidate.recordedAt === latest.recordedAt &&
+						`${candidate.batchId}\0${candidate.laneId}`.localeCompare(
+							`${latest.batchId}\0${latest.laneId}`,
+						) > 0)
 				) {
 					latest = candidate;
 				}
@@ -6241,18 +6358,42 @@ function derivePrReviewDimensionSettlement(
 			state,
 			dimension,
 		);
-		if (attempts.terminallyFailed.has(dimension)) {
+		const latestStructuredUnresolved =
+			latestStructuredReceiptUnresolvedForBaseDimension(
+				directory,
+				state,
+				revisionDigest,
+				dimension,
+			);
+		if (
+			attempts.terminallyFailed.has(dimension) ||
+			latestStructuredUnresolved
+		) {
+			const unresolvedFailure =
+				latestStructuredUnresolved &&
+				(!latestFailure ||
+					latestStructuredUnresolved.recordedAt >= latestFailure.recordedAt)
+					? latestStructuredUnresolved
+					: latestFailure;
 			unresolvedDimensions.push({
 				dimension,
 				terminalState: 'FAILED',
 				reasonKind: 'lane_failure',
-				failureClass: latestFailure?.failureClass,
-				terminalEventId: latestFailure?.terminalEventId,
-				batchId: latestFailure?.batchId,
-				laneId: latestFailure?.laneId,
-				safeDetail: latestFailure
-					? PR_REVIEW_FAILURE_CLASS_SAFE_DETAILS[latestFailure.failureClass]
-					: 'lane terminated without a typed failure class',
+				failureClass: unresolvedFailure?.failureClass,
+				terminalEventId:
+					unresolvedFailure && 'terminalEventId' in unresolvedFailure
+						? unresolvedFailure.terminalEventId
+						: undefined,
+				batchId: unresolvedFailure?.batchId,
+				laneId: unresolvedFailure?.laneId,
+				safeDetail:
+					unresolvedFailure && 'safeDetail' in unresolvedFailure
+						? unresolvedFailure.safeDetail
+						: unresolvedFailure
+							? PR_REVIEW_FAILURE_CLASS_SAFE_DETAILS[
+									unresolvedFailure.failureClass
+								]
+							: 'lane terminated without a typed failure class',
 			});
 			continue;
 		}
@@ -6423,10 +6564,7 @@ export async function admitPrReviewPartialBaseCoverage(
 			);
 		}
 		for (const entry of settlement.unresolvedDimensions) {
-			if (
-				entry.terminalState === 'FAILED' &&
-				(!entry.failureClass || !entry.terminalEventId)
-			) {
+			if (entry.terminalState === 'FAILED' && !entry.failureClass) {
 				throw new Error(
 					`BLOCKED: partial base coverage dimension "${entry.dimension}" lacks a typed terminal failure`,
 				);
@@ -8099,7 +8237,10 @@ function appendPublicationEvent(
 }
 
 function boundPublicationDiagnostic(text: string): string {
-	const redacted = redactSecrets(text);
+	const redacted = redactSecrets(text).replace(
+		PUBLICATION_URL_CREDENTIALS_PATTERN,
+		'$1[REDACTED:url_credentials]@',
+	);
 	return redacted.length > MAX_PUSH_ATTEMPT_DIAGNOSTIC_CHARS
 		? `${redacted.slice(0, MAX_PUSH_ATTEMPT_DIAGNOSTIC_CHARS - 3)}...`
 		: redacted;
@@ -12273,6 +12414,7 @@ export const _test_exports = {
 	// capped merge is content-preserving only when the extra pipes sit in the
 	// trailing (free-text) field.
 	pipeFieldsCapped,
+	boundPublicationDiagnostic,
 	// Exposed so tests exercise the production indexing path and pin the
 	// observable classification of legacy overflow recovery.
 	indexVerdictRows,
@@ -13980,11 +14122,13 @@ function derivePrReviewCandidateInventory(
 					? lane.ownedWorkflowLanes
 					: [lane.workflowLane];
 				if (!laneIsInClass(ownedDimensions.length)) continue;
-				if (!ownedDimensions.every((dimension) => successful.has(dimension)))
-					continue;
+				const creditedDimensions = ownedDimensions.filter((dimension) =>
+					successful.has(dimension),
+				);
+				if (creditedDimensions.length === 0) continue;
 				const key = `${batch.batchId}\0${lane.laneId}`;
 				baseSourceFullOwnershipCount.set(key, ownedDimensions.length);
-				for (const dimension of ownedDimensions) {
+				for (const dimension of creditedDimensions) {
 					if (!baseDimensionSources.has(dimension)) {
 						baseDimensionSources.set(dimension, {
 							batchId: batch.batchId,
@@ -15500,6 +15644,47 @@ function successfulObligationsFromExactBatch(
 		forbiddenSubagentSessionIds,
 		diagnostics,
 	)) {
+		const structuredCoverage = validateExactStructuredReceiptCoverage({
+			record: qualified.record,
+			result: qualified.record.result!,
+			artifact: null,
+			expected: {
+				mode:
+					expectedMode === 'swarm-pr-review:base' ||
+					expectedMode === 'swarm-pr-review:micro'
+						? expectedMode
+						: 'swarm-pr-review:base',
+				workflowLane: qualified.expectedWorkflowLane,
+				ownedWorkflowLanes: qualified.expectedOwnedLanes,
+				prHeadSha: state.prHeadSha ?? '',
+				gitHead: state.prHeadSha ?? '',
+				revisionDigest: expectedRevisionDigest ?? '',
+				workflowInstanceId: state.workflowInstanceId,
+				workflowRevision: state.revision,
+				baseSha: state.prReviewBaseSha,
+				reviewScope:
+					state.mode === 'PR_REVIEW' && state.prReviewBaseSha && state.prHeadSha
+						? `complete PR diff ${state.prReviewBaseSha}...${state.prHeadSha}`
+						: undefined,
+			},
+		});
+		if (structuredCoverage.status === 'accepted') {
+			for (const obligation of structuredCoverage.creditedWorkflowLanes) {
+				successful.add(obligation);
+			}
+			continue;
+		}
+		if (structuredCoverage.status === 'rejected') {
+			if (diagnostics && diagnostics.length < MAX_BASE_COVERAGE_DIAGNOSTICS) {
+				diagnostics.push(
+					`batch=${batchId} lane=${qualified.expectedLane.laneId} workflow_lane=${qualified.expectedWorkflowLane}: ${formatPrReviewLaneValidationFailure(structuredCoverage.failure)}`.slice(
+						0,
+						MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS,
+					),
+				);
+			}
+			continue;
+		}
 		if (
 			workflowArtifactHasContractMarker(
 				directory,
@@ -15548,6 +15733,86 @@ function ownedLaneSetsEqual(
 		return false;
 	}
 	return recordOwned.every((owned) => expectedSet.has(owned));
+}
+
+type ExactStructuredReceiptCoverageValidation =
+	| { status: 'absent' }
+	| {
+			status: 'accepted';
+			creditedWorkflowLanes: string[];
+			receipt: PrReviewResultReceipt;
+	  }
+	| { status: 'rejected'; failure: PrReviewLaneValidationFailure };
+
+function validateExactStructuredReceiptCoverage(
+	input: PrReviewDiscoveryLaneValidationInput,
+): ExactStructuredReceiptCoverageValidation {
+	if (
+		input.expected.mode !== 'swarm-pr-review:base' &&
+		input.expected.mode !== 'swarm-pr-review:micro'
+	) {
+		return { status: 'absent' };
+	}
+	const rawReceipt = input.result.prReviewResultReceipt;
+	if (!rawReceipt) return { status: 'absent' };
+	const parsedReceipt = PrReviewResultReceiptSchema.safeParse(rawReceipt);
+	if (!parsedReceipt.success) {
+		return {
+			status: 'rejected',
+			failure: failedLaneValidation(
+				'discovery.coverage',
+				'schema-valid exact child/workflow/revision-bound structured receipt',
+				'invalid structured receipt',
+			).failure,
+		};
+	}
+	if (
+		input.expected.workflowInstanceId === undefined ||
+		input.expected.workflowRevision === undefined ||
+		input.expected.baseSha === undefined
+	) {
+		return {
+			status: 'rejected',
+			failure: failedLaneValidation(
+				'discovery.coverage',
+				'live workflow instance/revision/base identity',
+				'missing live workflow instance/revision/base identity',
+			).failure,
+		};
+	}
+	const receipt = parsedReceipt.data;
+	const ownedWorkflowLanes = input.expected.ownedWorkflowLanes?.length
+		? [...input.expected.ownedWorkflowLanes]
+		: [input.expected.workflowLane];
+	if (
+		receipt.mode !== input.expected.mode ||
+		receipt.workflowInstanceId !== input.expected.workflowInstanceId ||
+		receipt.workflowRevision !== input.expected.workflowRevision ||
+		receipt.baseSha !== input.expected.baseSha ||
+		receipt.batchId !== input.record.batchId ||
+		receipt.laneId !== input.record.laneId ||
+		receipt.childSessionId !== input.record.subagentSessionId ||
+		receipt.workflowLane !== input.expected.workflowLane ||
+		!ownedLaneSetsEqual(receipt.ownedWorkflowLanes, ownedWorkflowLanes) ||
+		receipt.headSha !== input.expected.prHeadSha ||
+		receipt.dispatchRevisionDigest !== input.expected.revisionDigest
+	) {
+		return {
+			status: 'rejected',
+			failure: failedLaneValidation(
+				'discovery.coverage',
+				'exact child/workflow/revision-bound structured receipt',
+				'mismatched structured receipt',
+			).failure,
+		};
+	}
+	return {
+		status: 'accepted',
+		creditedWorkflowLanes: receipt.envelope.creditedLanes.filter((lane) =>
+			ownedWorkflowLanes.includes(lane),
+		),
+		receipt,
+	};
 }
 
 interface LaneArtifactExpected {
@@ -16145,49 +16410,6 @@ export function validatePrReviewDiscoveryLaneCompletion(
 	const ownedWorkflowLanes = input.expected.ownedWorkflowLanes?.length
 		? [...input.expected.ownedWorkflowLanes]
 		: [input.expected.workflowLane];
-	const receipt = input.result.prReviewResultReceipt;
-	if (
-		receipt &&
-		(input.expected.mode === 'swarm-pr-review:base' ||
-			input.expected.mode === 'swarm-pr-review:micro')
-	) {
-		const sameOwned =
-			receipt.ownedWorkflowLanes.length === ownedWorkflowLanes.length &&
-			ownedWorkflowLanes.every((lane) =>
-				receipt.ownedWorkflowLanes.includes(lane),
-			);
-		if (
-			receipt.mode !== input.expected.mode ||
-			receipt.workflowInstanceId !== input.expected.workflowInstanceId ||
-			receipt.workflowRevision !== input.expected.workflowRevision ||
-			receipt.baseSha !== input.expected.baseSha ||
-			receipt.batchId !== input.record.batchId ||
-			receipt.laneId !== input.record.laneId ||
-			receipt.childSessionId !== input.record.subagentSessionId ||
-			receipt.workflowLane !== input.expected.workflowLane ||
-			!sameOwned ||
-			receipt.headSha !== input.expected.prHeadSha ||
-			receipt.dispatchRevisionDigest !== input.expected.revisionDigest
-		) {
-			return failedLaneValidation(
-				'discovery.coverage',
-				'exact child/workflow/revision-bound structured receipt',
-				'mismatched structured receipt',
-			);
-		}
-		return { ok: true };
-	}
-	if (
-		(input.expected.mode === 'swarm-pr-review:base' ||
-			input.expected.mode === 'swarm-pr-review:micro') &&
-		input.record.prReviewLegacyTranscriptCompatibility === false
-	) {
-		return failedLaneValidation(
-			'discovery.coverage',
-			'child-bound structured receipt',
-			'missing structured receipt (legacy transcript adapter disabled)',
-		);
-	}
 	const recordIntegrity = analyzeLaneRecordResultIntegrity({
 		record: input.record,
 		result: input.result,
@@ -16205,6 +16427,26 @@ export function validatePrReviewDiscoveryLaneCompletion(
 			input.expected.mode === 'swarm-pr-review:micro',
 	});
 	if (!recordIntegrity.ok) return recordIntegrity;
+	const structuredCoverage = validateExactStructuredReceiptCoverage(input);
+	if (structuredCoverage.status === 'accepted') {
+		return { ok: true };
+	}
+	if (structuredCoverage.status === 'rejected') {
+		return { ok: false, failure: structuredCoverage.failure };
+	}
+	if (
+		(input.expected.mode === 'swarm-pr-review:base' ||
+			input.expected.mode === 'swarm-pr-review:micro') &&
+		!prReviewLegacyTranscriptCompatibilityEnabled(
+			input.record.prReviewLegacyTranscriptCompatibility,
+		)
+	) {
+		return failedLaneValidation(
+			'discovery.coverage',
+			'child-bound structured receipt',
+			'missing structured receipt (legacy transcript adapter disabled)',
+		);
+	}
 	const artifactIntegrity = analyzeLaneArtifactIntegrity({
 		record: input.record,
 		result: input.result,

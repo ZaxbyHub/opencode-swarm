@@ -92,6 +92,8 @@ export { MAX_RECOVERY_LEDGER_BYTES } from './delegation-health.js';
 import { MAX_RECOVERY_LEDGER_BYTES } from './delegation-health.js';
 
 const MAX_RECOVERY_FALLBACK_BYTES = 1024 * 1024;
+const MAX_TRACKED_LENIENT_LEDGER_SIGNALS = 32;
+const LENIENT_LEDGER_SIGNAL_SOURCE = 'lenient-read';
 
 /**
  * Compaction watermarks (issue #2034). Auto-compaction fires above the high
@@ -1234,6 +1236,14 @@ const CHECKPOINT_RESET_HINT =
 
 type LedgerLoadMode = 'legacy' | 'checkpoint+tail' | 'checkpoint+ledger-suffix';
 
+interface LenientLedgerSkipCounts {
+	malformedJson: number;
+	invalidRecord: number;
+}
+
+const lenientLedgerSignalByRoot = new Map<string, string>();
+const lenientLedgerSignalOrder: string[] = [];
+
 type LedgerLoad =
 	| {
 			status: 'ok';
@@ -1391,8 +1401,18 @@ function loadFoldedState(
 	for (const summary of checkpoint.closed) {
 		records.set(summary.correlationId, summary);
 	}
-	const foldError = foldLedgerTail(records, tail, options.strict, checkpoint);
+	const lenientSkips = emptyLenientLedgerSkipCounts();
+	const foldError = foldLedgerTail(
+		records,
+		tail,
+		options.strict,
+		checkpoint,
+		lenientSkips,
+	);
 	if (foldError) return { status: 'uncertain', reason: foldError };
+	if (!options.strict) {
+		recordLenientLedgerSkips(directory, mode, lenientSkips);
+	}
 	return {
 		status: 'ok',
 		mode,
@@ -1462,6 +1482,7 @@ function foldLedgerTail(
 	tail: Buffer,
 	strict: boolean,
 	checkpoint?: BackgroundDelegationCheckpoint,
+	lenientSkips?: LenientLedgerSkipCounts,
 ): string | null {
 	let lineNumber = 0;
 	for (const line of tail.toString('utf-8').split('\n')) {
@@ -1475,6 +1496,7 @@ function foldLedgerTail(
 			if (strict) {
 				return `background delegation ledger has malformed JSON at line ${lineNumber}`;
 			}
+			if (lenientSkips) lenientSkips.malformedJson += 1;
 			continue;
 		}
 		const parsed = RecordSchema.safeParse(parsedJson);
@@ -1482,6 +1504,7 @@ function foldLedgerTail(
 			if (strict) {
 				return `background delegation ledger has an invalid record at line ${lineNumber}`;
 			}
+			if (lenientSkips) lenientSkips.invalidRecord += 1;
 			continue;
 		}
 		const existing = checkpoint
@@ -1528,8 +1551,16 @@ function loadLegacyLedger(directory: string, strict: boolean): LedgerLoad {
 			};
 		}
 		const records = new Map<string, BackgroundDelegationRecord>();
-		const foldError = foldLedgerTail(records, Buffer.from(raw, 'utf-8'), false);
+		const lenientSkips = emptyLenientLedgerSkipCounts();
+		const foldError = foldLedgerTail(
+			records,
+			Buffer.from(raw, 'utf-8'),
+			false,
+			undefined,
+			lenientSkips,
+		);
 		void foldError; // lenient never fails
+		recordLenientLedgerSkips(directory, 'legacy-ledger', lenientSkips);
 		return {
 			status: 'ok',
 			mode: 'legacy',
@@ -1649,6 +1680,62 @@ function recordLedgerUncertainty(
 	}
 }
 
+function emptyLenientLedgerSkipCounts(): LenientLedgerSkipCounts {
+	return { malformedJson: 0, invalidRecord: 0 };
+}
+
+function shouldEmitLenientLedgerSignal(
+	directory: string,
+	signature: string,
+): boolean {
+	const key = canonicalRootKeyFresh(directory);
+	const existing = lenientLedgerSignalByRoot.get(key);
+	if (existing === signature) return false;
+	if (!existing) {
+		if (lenientLedgerSignalOrder.length >= MAX_TRACKED_LENIENT_LEDGER_SIGNALS) {
+			const evicted = lenientLedgerSignalOrder.shift();
+			if (evicted) lenientLedgerSignalByRoot.delete(evicted);
+		}
+		lenientLedgerSignalOrder.push(key);
+	}
+	lenientLedgerSignalByRoot.set(key, signature);
+	return true;
+}
+
+function recordLenientLedgerSkips(
+	directory: string,
+	source: LedgerLoadMode | 'legacy-ledger',
+	counts: LenientLedgerSkipCounts,
+): void {
+	const skipped = counts.malformedJson + counts.invalidRecord;
+	if (skipped <= 0) return;
+	const reason =
+		`background delegation ledger skipped ${skipped} malformed/invalid row${skipped === 1 ? '' : 's'} ` +
+		`during lenient ${source} read (${counts.malformedJson} malformed JSON, ${counts.invalidRecord} invalid records)`;
+	const signature = `${source}:${counts.malformedJson}:${counts.invalidRecord}`;
+	if (shouldEmitLenientLedgerSignal(directory, signature)) {
+		logger.criticalWarn(`[background] ${reason}`);
+	}
+	try {
+		const current = readDelegationHealthArtifact(directory);
+		if (
+			current?.lastUncertainty &&
+			current.lastUncertainty.source !== LENIENT_LEDGER_SIGNAL_SOURCE
+		) {
+			return;
+		}
+		writeDelegationHealthArtifact(directory, {
+			lastUncertainty: {
+				reason,
+				at: Date.now(),
+				source: LENIENT_LEDGER_SIGNAL_SOURCE,
+			},
+		});
+	} catch {
+		// The observation sink must never break the store.
+	}
+}
+
 /**
  * True when a record still owns an unsettled worktree (mirrors
  * init-orphan-recovery's protection predicate — exported so both sites share
@@ -1697,11 +1784,16 @@ function isCheckpointLiveRecord(record: BackgroundDelegationRecord): boolean {
  * result bodies (their sha256 `digest` is retained and covers the dropped
  * content). An authenticated, bounded final-line PR-review collection receipt is retained
  * because collection projects accepted/rejected retry IDs from that durable
- * metadata after compaction. `coderSettlement.observedFiles` is retained: only SETTLED
- * settlements reach summaries (see isCheckpointLiveRecord), and the settled
- * observed-file list is the executed-contract audit artifact — final and never
- * recomputed. Returns null when the summary would not validate; the caller
- * then keeps the full record instead (safety over size).
+ * metadata after compaction. Structured PR-review result receipts remain
+ * authoritative on `result.prReviewResultReceipt`; closed summaries strip the
+ * duplicate `terminalResult.result.prReviewResultReceipt` copy to keep the
+ * closed-set byte cost bounded, while live records retain the full terminal
+ * payload and are already capped by `MAX_CHECKPOINT_RECORDS`.
+ * `coderSettlement.observedFiles` is retained: only SETTLED settlements reach
+ * summaries (see isCheckpointLiveRecord), and the settled observed-file list is
+ * the executed-contract audit artifact — final and never recomputed. Returns
+ * null when the summary would not validate; the caller then keeps the full
+ * record instead (safety over size).
  */
 function buildClosedSummary(
 	record: BackgroundDelegationRecord,
@@ -1715,9 +1807,10 @@ function buildClosedSummary(
 	if (summary.terminalResult) {
 		summary.terminalResult = {
 			...summary.terminalResult,
-			// `record.result` is the collection projection source. Retaining the same
-			// authenticated footer in terminalResult would double checkpoint cost.
-			result: dropResultBody(summary.terminalResult.result),
+			// `record.result` is the collection projection source and the
+			// structured-receipt authority. Retaining the same projection on the
+			// nested terminal copy would double the closed-summary checkpoint cost.
+			result: dropTerminalResultBody(summary.terminalResult.result),
 		};
 	}
 	const parsed = RecordSchema.safeParse(summary);
@@ -1755,6 +1848,13 @@ function dropResultBody(
 	return rest;
 }
 
+function dropTerminalResultBody(
+	result: BackgroundDelegationResult,
+): BackgroundDelegationResult {
+	const { prReviewResultReceipt: _receipt, ...rest } = dropResultBody(result);
+	return rest;
+}
+
 function dropRetainedPrReviewReceipt(
 	record: BackgroundDelegationRecord,
 ): BackgroundDelegationRecord {
@@ -1784,7 +1884,7 @@ function dropRetainedPrReviewReceipt(
 			? {
 					terminalResult: {
 						...record.terminalResult,
-						result: dropResultBody(record.terminalResult.result),
+						result: dropTerminalResultBody(record.terminalResult.result),
 					},
 				}
 			: {}),
@@ -2710,24 +2810,18 @@ export async function publishPrReviewResultReceipt(
 					};
 					return;
 				}
-				const matches = records.filter(
-					(record) =>
-						record.parentSessionId === input.parentSessionId &&
-						record.subagentSessionId === input.childSessionId &&
-						record.batchId === input.batchId &&
-						record.laneId === input.laneId,
-				);
-				if (matches.length !== 1) {
+				const target = findReceiptPublicationTarget(records, input);
+				if (target.count !== 1 || !target.record) {
 					outcome = {
 						status: 'not_found',
-						reason: `expected one exact delegation record, found ${matches.length}`,
+						reason: `expected one exact delegation record, found ${target.count}`,
 					};
 					return;
 				}
-				const current = matches[0];
+				const current = target.record;
 				if (current.result?.prReviewResultReceipt) {
 					const existing = current.result.prReviewResultReceipt;
-					if (sameCanonicalJson(existing, parsed.data)) {
+					if (samePrReviewReceiptSemantics(existing, parsed.data)) {
 						outcome = { status: 'duplicate', record: current };
 					} else {
 						outcome = {
@@ -2821,7 +2915,13 @@ function sameJson(left: unknown, right: unknown): boolean {
 }
 
 function canonicalJson(value: unknown): unknown {
-	if (Array.isArray(value)) return value.map(canonicalJson);
+	if (Array.isArray(value)) {
+		return value.map(canonicalJson).sort((left, right) => {
+			const leftJson = JSON.stringify(left);
+			const rightJson = JSON.stringify(right);
+			return leftJson < rightJson ? -1 : leftJson > rightJson ? 1 : 0;
+		});
+	}
 	if (value && typeof value === 'object') {
 		return Object.fromEntries(
 			Object.entries(value as Record<string, unknown>)
@@ -2836,6 +2936,18 @@ function sameCanonicalJson(left: unknown, right: unknown): boolean {
 	return (
 		JSON.stringify(canonicalJson(left)) === JSON.stringify(canonicalJson(right))
 	);
+}
+
+function samePrReviewReceiptSemantics(
+	left: PrReviewResultReceipt,
+	right: PrReviewResultReceipt,
+): boolean {
+	// The digest is derived from the serialized envelope, so a semantically
+	// equivalent replay with set-like arrays in another order has a different
+	// digest. Compare the validated receipt content without that derived field.
+	const { semanticEnvelopeDigest: _leftDigest, ...leftSemantic } = left;
+	const { semanticEnvelopeDigest: _rightDigest, ...rightSemantic } = right;
+	return sameCanonicalJson(leftSemantic, rightSemantic);
 }
 
 /**
@@ -2877,6 +2989,50 @@ function sameRetainedResult(
 			right.salvagedWorkflowLaneRecoveries,
 		)
 	);
+}
+
+function recordedPrReviewResultReceipt(
+	record: BackgroundDelegationRecord,
+): PrReviewResultReceipt | undefined {
+	return (
+		record.result?.prReviewResultReceipt ??
+		record.terminalResult?.result.prReviewResultReceipt
+	);
+}
+
+function mergeRecordedPrReviewResultReceipt(
+	record: BackgroundDelegationRecord,
+	result: BackgroundDelegationResult,
+): BackgroundDelegationResult {
+	const existing = recordedPrReviewResultReceipt(record);
+	if (!existing || result.prReviewResultReceipt) return result;
+	return { ...result, prReviewResultReceipt: existing };
+}
+
+function findReceiptPublicationTarget(
+	records: readonly BackgroundDelegationRecord[],
+	input: {
+		parentSessionId: string;
+		childSessionId: string;
+		batchId: string;
+		laneId: string;
+	},
+): { count: number; record: BackgroundDelegationRecord | null } {
+	let count = 0;
+	let record: BackgroundDelegationRecord | null = null;
+	for (const candidate of records) {
+		if (
+			candidate.parentSessionId !== input.parentSessionId ||
+			candidate.subagentSessionId !== input.childSessionId ||
+			candidate.batchId !== input.batchId ||
+			candidate.laneId !== input.laneId
+		) {
+			continue;
+		}
+		count += 1;
+		if (count === 1) record = candidate;
+	}
+	return { count, record: count === 1 ? record : null };
 }
 
 function settlementProvenanceFor(
@@ -2942,13 +3098,21 @@ export async function claimTerminalResult(
 				if (records === null) return;
 				const current = findRecordForWrite(records, correlationId);
 				if (!current) return;
+				const normalizedResult = mergeRecordedPrReviewResultReceipt(
+					current,
+					parsedTerminal.data.result,
+				);
+				const normalizedTerminal =
+					normalizedResult === parsedTerminal.data.result
+						? parsedTerminal.data
+						: { ...parsedTerminal.data, result: normalizedResult };
 				if (current.terminalResult) {
-					if (!sameTerminalEvent(current.terminalResult, parsedTerminal.data)) {
+					if (!sameTerminalEvent(current.terminalResult, normalizedTerminal)) {
 						logger.warn(
 							`[background] claimTerminalResult: different terminal event for ` +
 								`correlationId=${correlationId}; ` +
 								`existing={status: ${current.terminalResult.status}, eventId: ${current.terminalResult.eventId}} ` +
-								`incoming={status: ${parsedTerminal.data.status}, eventId: ${parsedTerminal.data.eventId}}; ` +
+								`incoming={status: ${normalizedTerminal.status}, eventId: ${normalizedTerminal.eventId}}; ` +
 								`rejected`,
 						);
 						incrementLateTerminalCount(directory);
@@ -2972,7 +3136,7 @@ export async function claimTerminalResult(
 							state: 'pending',
 							provenance,
 							observedFiles: null,
-							updatedAt: parsedTerminal.data.recordedAt,
+							updatedAt: normalizedTerminal.recordedAt,
 						};
 					}
 				}
@@ -2981,20 +3145,20 @@ export async function claimTerminalResult(
 				// merge would then drop this terminal against a later checkpoint
 				// entry. Clamp updatedAt to at least the current snapshot's.
 				const foldUpdatedAt = Math.max(
-					parsedTerminal.data.recordedAt,
+					normalizedTerminal.recordedAt,
 					current.updatedAt,
 				);
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: parsedTerminal.data.result.prReviewResultReceipt
+					schemaVersion: normalizedTerminal.result.prReviewResultReceipt
 						? 4
 						: current.schemaVersion === 4
 							? 4
 							: 3,
-					status: parsedTerminal.data.status,
-					terminalResult: parsedTerminal.data,
-					result: parsedTerminal.data.result,
-					completedAt: parsedTerminal.data.recordedAt,
+					status: normalizedTerminal.status,
+					terminalResult: normalizedTerminal,
+					result: normalizedTerminal.result,
+					completedAt: normalizedTerminal.recordedAt,
 					updatedAt: foldUpdatedAt,
 					...(coderSettlement ? { coderSettlement } : {}),
 				};

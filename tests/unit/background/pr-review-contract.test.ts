@@ -8,6 +8,7 @@ import {
 	PR_REVIEW_REVIEWER_CLASSIFICATIONS,
 	PR_REVIEW_REVIEWER_EVIDENCE_TYPES,
 	PR_REVIEW_SEVERITIES,
+	PrReviewLaneResultEnvelopeSchema,
 	parsePrReviewVerdictRow,
 	serializedPrReviewArtifactInputBytes,
 	WritePrReviewArtifactArgsSchema,
@@ -133,5 +134,177 @@ describe('PR-review executable contract (#2333)', () => {
 		expect(card.startsWith('[PR-REVIEW CONTRACT CARD]')).toBe(true);
 		expect(card).not.toContain('\n[REVIEWED] | discarded-id |');
 		expect(card).not.toContain('\n[CRITIC] | discarded-id |');
+	});
+
+	test('FB-009 accepts a CLEAN envelope only when every credited lane has a clean attestation', () => {
+		const result = PrReviewLaneResultEnvelopeSchema.safeParse({
+			schemaVersion: 1,
+			outcome: 'CLEAN',
+			creditedLanes: ['correctness-state'],
+			findings: [],
+			cleanAttestations: [
+				{
+					workflowLane: 'correctness-state',
+					coverageScope: 'complete PR diff base...head',
+					evidence:
+						'Reviewed the exact owned lane and found no actionable issue.',
+				},
+			],
+			unresolved: [],
+		});
+		expect(result.success).toBe(true);
+	});
+
+	test('FB-009 rejects CLEAN envelopes that mix findings or unresolved lanes', () => {
+		expect(
+			PrReviewLaneResultEnvelopeSchema.safeParse({
+				schemaVersion: 1,
+				outcome: 'CLEAN',
+				creditedLanes: ['correctness-state'],
+				findings: [
+					{
+						id: 'C-1',
+						workflowLane: 'correctness-state',
+						severity: 'HIGH',
+						riskImpact: 'ORDINARY',
+						riskTags: [],
+						title: 'title',
+						body: 'body',
+						evidence: 'evidence',
+						location: { kind: 'non_local', label: 'label', detail: 'detail' },
+					},
+				],
+				cleanAttestations: [
+					{
+						workflowLane: 'correctness-state',
+						coverageScope: 'complete PR diff base...head',
+						evidence:
+							'Reviewed the exact owned lane and found no actionable issue.',
+					},
+				],
+				unresolved: [],
+			}).success,
+		).toBe(false);
+		expect(
+			PrReviewLaneResultEnvelopeSchema.safeParse({
+				schemaVersion: 1,
+				outcome: 'CLEAN',
+				creditedLanes: ['correctness-state'],
+				findings: [],
+				cleanAttestations: [
+					{
+						workflowLane: 'correctness-state',
+						coverageScope: 'complete PR diff base...head',
+						evidence:
+							'Reviewed the exact owned lane and found no actionable issue.',
+					},
+				],
+				unresolved: [
+					{
+						workflowLane: 'tests-falsifiability',
+						reason: 'PARTIAL_OUTPUT',
+						detail: 'partial transcript',
+					},
+				],
+			}).success,
+		).toBe(false);
+	});
+
+	test('FB-009 rejects FINDINGS envelopes without findings or with unresolved lanes', () => {
+		expect(
+			PrReviewLaneResultEnvelopeSchema.safeParse({
+				schemaVersion: 1,
+				outcome: 'FINDINGS',
+				creditedLanes: ['correctness-state'],
+				findings: [],
+				cleanAttestations: [],
+				unresolved: [],
+			}).success,
+		).toBe(false);
+		expect(
+			PrReviewLaneResultEnvelopeSchema.safeParse({
+				schemaVersion: 1,
+				outcome: 'FINDINGS',
+				creditedLanes: ['correctness-state'],
+				findings: [
+					{
+						id: 'C-1',
+						workflowLane: 'correctness-state',
+						severity: 'HIGH',
+						riskImpact: 'ORDINARY',
+						riskTags: [],
+						title: 'title',
+						body: 'body',
+						evidence: 'evidence',
+						location: { kind: 'non_local', label: 'label', detail: 'detail' },
+					},
+				],
+				cleanAttestations: [],
+				unresolved: [
+					{
+						workflowLane: 'tests-falsifiability',
+						reason: 'PARTIAL_OUTPUT',
+						detail: 'partial transcript',
+					},
+				],
+			}).success,
+		).toBe(false);
+	});
+
+	test('FB-009 rejects INCOMPLETE envelopes without unresolved lanes or with cross-field partition defects', () => {
+		expect(
+			PrReviewLaneResultEnvelopeSchema.safeParse({
+				schemaVersion: 1,
+				outcome: 'INCOMPLETE',
+				creditedLanes: ['correctness-state'],
+				findings: [
+					{
+						id: 'C-1',
+						workflowLane: 'correctness-state',
+						severity: 'HIGH',
+						riskImpact: 'ORDINARY',
+						riskTags: [],
+						title: 'title',
+						body: 'body',
+						evidence: 'evidence',
+						location: { kind: 'non_local', label: 'label', detail: 'detail' },
+					},
+				],
+				cleanAttestations: [],
+				unresolved: [],
+			}).success,
+		).toBe(false);
+		expect(
+			PrReviewLaneResultEnvelopeSchema.safeParse({
+				schemaVersion: 1,
+				outcome: 'INCOMPLETE',
+				creditedLanes: ['correctness-state'],
+				findings: [],
+				cleanAttestations: [],
+				unresolved: [
+					{
+						workflowLane: 'correctness-state',
+						reason: 'PARTIAL_OUTPUT',
+						detail: 'partial transcript',
+					},
+				],
+			}).success,
+		).toBe(false);
+		expect(
+			PrReviewLaneResultEnvelopeSchema.safeParse({
+				schemaVersion: 1,
+				outcome: 'INCOMPLETE',
+				creditedLanes: ['correctness-state'],
+				findings: [],
+				cleanAttestations: [],
+				unresolved: [
+					{
+						workflowLane: 'tests-falsifiability',
+						reason: 'PARTIAL_OUTPUT',
+						detail: 'partial transcript',
+					},
+				],
+			}).success,
+		).toBe(false);
 	});
 });

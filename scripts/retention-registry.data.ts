@@ -458,12 +458,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/pr-workflow-gate.ts',
 		],
 		writerCitations: [
-			'src/background/pending-delegations.ts:2341 appendRecord — appendFileSync :2346 (20 mutation entry points :2500-4544)',
-			'src/background/pending-delegations.ts:1088 writeDurableFileSync — fsync+rename-with-retry for checkpoint/manifest/rolled-tail (:2146-2187)',
+			'src/background/pending-delegations.ts:2441 appendRecord — appendFileSync :2446 (20 mutation entry points :2600-4690)',
+			'src/background/pending-delegations.ts:1090 writeDurableFileSync — fsync+rename-with-retry for checkpoint/manifest/rolled-tail (:2240-2280)',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:2284 readDelegations — checkpoint+tail fold (lenient), sync',
-			'src/background/pending-delegations.ts:2305 scanDelegationsForRecovery — strict, fails closed',
+			'src/background/pending-delegations.ts:2384 readDelegations — checkpoint+tail fold (lenient), sync',
+			'src/background/pending-delegations.ts:2405 scanDelegationsForRecovery — strict, fails closed',
 			'pr-workflow-session-resolver / pr-workflow-gate / init-orphan-recovery / delegation-gate worktree-collision-ownership — via readDelegations',
 		],
 		schemaVersion:
@@ -536,7 +536,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/background/pending-delegations.ts:4163 writeBackgroundCoderReservations',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:4260 readDelegationFallback / listDelegationFallbacks / scanDelegationFallbacksForRecovery',
+			'src/background/pending-delegations.ts:4424 readDelegationFallback / listDelegationFallbacks / scanDelegationFallbacksForRecovery',
 			'src/background/pending-delegations.ts:4107 scanBackgroundCoderReservationsForAdmission',
 		],
 		schemaVersion: 'fallback schemaVersion 1 (:837)',

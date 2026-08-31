@@ -39,7 +39,10 @@ import {
 	projectPrReviewCollectionReceipt,
 	projectPrReviewCollectionReceiptShedMarker,
 } from '../background/pr-review-collection-receipt.js';
-import { buildPrReviewContractCard } from '../background/pr-review-contract.js';
+import {
+	buildPrReviewContractCard,
+	PrReviewLaneResultEnvelopeSchema,
+} from '../background/pr-review-contract.js';
 import {
 	PrReviewInlineTriggerRowSchema,
 	validatePrReviewInlineTriggerLedger,
@@ -986,6 +989,7 @@ export const _test_exports = {
 	resolvePrReviewReceiptFallbacks,
 	resolvePrReviewReceiptFallbacksFromState,
 	consumePrReviewReceiptAppendFailureLog,
+	startAsyncLanePrompt,
 	// #2276: pure per-lane-kind budget derivation, exported beside the prompt
 	// contract builder so budget scaling can be asserted without prompt-text
 	// parsing (file precedent: prompt-construction internals live here).
@@ -1006,15 +1010,22 @@ export interface DispatchLanesExecutionContext {
 }
 
 export interface PrReviewStructuredPromptAdapter {
-	dispatch(args: {
-		directory: string;
-		childSessionId: string;
-		lane: DispatchLaneSpec;
-		mode: 'swarm-pr-review:base' | 'swarm-pr-review:micro';
-	}): Promise<
-		| { status: 'unsupported' }
-		| { status: 'executed'; outcome: 'submitted' | 'failed'; error?: string }
-	>;
+	promptJsonSchema(args: {
+		sessionId: string;
+		agent: string;
+		schema: unknown;
+		parts: unknown[];
+	}): Promise<unknown>;
+}
+
+/** Explicit pre-execution capability miss; the only adapter error that falls back. */
+export class PrReviewStructuredPromptUnsupportedError extends Error {
+	constructor(
+		message = 'structured PR-review prompt transport is unsupported',
+	) {
+		super(message);
+		this.name = 'PrReviewStructuredPromptUnsupportedError';
+	}
 }
 
 /**
@@ -3280,22 +3291,28 @@ async function startAsyncLanePrompt(args: {
 		(args.mode === 'swarm-pr-review:base' ||
 			args.mode === 'swarm-pr-review:micro')
 	) {
-		const structured = await args.structuredAdapter.dispatch({
-			directory: args.directory,
-			childSessionId: args.sessionId,
-			lane: args.lane,
-			mode: args.mode,
-		});
-		if (structured.status === 'executed') {
-			if (structured.outcome === 'failed') {
+		try {
+			await withTimeout(
+				args.structuredAdapter.promptJsonSchema({
+					sessionId: args.sessionId,
+					agent: args.lane.agent,
+					schema: z.toJSONSchema(PrReviewLaneResultEnvelopeSchema),
+					parts: [{ type: 'text', text: args.lane.prompt }],
+				}),
+				args.timeoutMs,
+				`Lane "${args.lane.id}" structured PR-review launch timed out after ${args.timeoutMs}ms`,
+			);
+			return;
+		} catch (error) {
+			if (!(error instanceof PrReviewStructuredPromptUnsupportedError)) {
 				await appendAsyncLaneLaunchError(
 					args.directory,
 					args.session,
 					args.sessionId,
-					structured.error ?? 'structured PR-review transport failed',
+					formatError(error),
 				);
+				return;
 			}
-			return;
 		}
 	}
 	const promptController = new AbortController();

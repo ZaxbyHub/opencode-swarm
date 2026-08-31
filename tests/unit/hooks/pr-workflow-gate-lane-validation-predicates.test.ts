@@ -4,7 +4,6 @@ import type {
 	BackgroundDelegationRecord,
 	BackgroundDelegationResult,
 } from '../../../src/background/pending-delegations.js';
-import { prReviewLaneResultEnvelopeDigest } from '../../../src/background/pr-review-contract.js';
 import {
 	formatPrReviewLaneValidationFailure,
 	type PrReviewDiscoveryLaneValidationInput,
@@ -37,6 +36,7 @@ function validInput(): PrReviewDiscoveryLaneValidationInput {
 		batchId: 'batch-1',
 		laneId: 'lane-1',
 		mode: 'swarm-pr-review:base',
+		prReviewLegacyTranscriptCompatibility: true,
 		workflowLane: LANE,
 		workspace: {
 			directory: '/project',
@@ -268,80 +268,6 @@ describe('PR review lane-local validation predicates', () => {
 				},
 			],
 		});
-	});
-
-	test('gives an exact structured receipt precedence over transcript transport defects', () => {
-		const input = validInput();
-		const envelope = {
-			schemaVersion: 1 as const,
-			outcome: 'CLEAN' as const,
-			creditedLanes: [LANE],
-			findings: [],
-			cleanAttestations: [
-				{
-					workflowLane: LANE,
-					coverageScope: 'complete PR diff base-1...head-1',
-					evidence: 'Reviewed the complete assigned lane without a finding.',
-				},
-			],
-			unresolved: [],
-		};
-		input.record.schemaVersion = 4;
-		input.record.prReviewLegacyTranscriptCompatibility = false;
-		input.record.ownedWorkflowLanes = [LANE];
-		input.expected.workflowInstanceId = 'workflow-1';
-		input.expected.workflowRevision = 1;
-		input.expected.baseSha = 'base-1';
-		input.result.transcriptIncomplete = true;
-		input.result.text = 'ordinary prose that is not a machine row';
-		input.artifact = null;
-		input.result.prReviewResultReceipt = {
-			schemaVersion: 1,
-			mode: 'swarm-pr-review:base',
-			workflowInstanceId: 'workflow-1',
-			workflowRevision: 1,
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			workflowLane: LANE,
-			ownedWorkflowLanes: [LANE],
-			baseSha: 'base-1',
-			headSha: 'head-1',
-			dispatchRevisionDigest: 'revision-1',
-			childSessionId: 'child-1',
-			generation: 1,
-			semanticEnvelopeDigest: prReviewLaneResultEnvelopeDigest(envelope),
-			envelope,
-		};
-		expect(validatePrReviewDiscoveryLaneCompletion(input)).toEqual({
-			ok: true,
-		});
-		for (const mutate of [
-			() => {
-				input.result.prReviewResultReceipt!.workflowInstanceId =
-					'wrong-workflow';
-			},
-			() => {
-				input.result.prReviewResultReceipt!.workflowRevision = 2;
-			},
-			() => {
-				input.result.prReviewResultReceipt!.baseSha = 'wrong-base';
-			},
-		]) {
-			const original = structuredClone(input.result.prReviewResultReceipt);
-			mutate();
-			const mismatch = validatePrReviewDiscoveryLaneCompletion(input);
-			expect(mismatch.ok).toBe(false);
-			input.result.prReviewResultReceipt = original;
-		}
-
-		delete input.result.prReviewResultReceipt;
-		const missing = validatePrReviewDiscoveryLaneCompletion(input);
-		expect(missing.ok).toBe(false);
-		if (!missing.ok) {
-			expect(missing.failure.actual).toContain(
-				'legacy transcript adapter disabled',
-			);
-		}
 	});
 
 	test('accepts recoverable incomplete transcripts when the durable artifact is valid', () => {

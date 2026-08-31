@@ -9,6 +9,8 @@
 - Structured `CLEAN`, `FINDINGS`, and `INCOMPLETE` envelopes now take precedence
   over transcript text, so prose, truncation, and malformed transcript rows
   cannot corrupt a successfully submitted result.
+- Preserve an accepted receipt across the child's ordinary completion event,
+  and keep `INCOMPLETE` lanes unresolved instead of crediting them as covered.
 - Added `pr_review_legacy_transcript_compatibility` as an explicit migration
   opt-in. It defaults to `false`; newly dispatched lanes fail closed when their
   required structured receipt is absent.
@@ -31,7 +33,8 @@ and C are unchanged.
 
 Structured receipts upgrade affected background-delegation records to schema
 version 4. Downgrading to a binary that cannot read schema v4 requires first
-draining those reviews or using a compatible migration/reader.
+draining those reviews or using a compatible migration/reader. A lenient older
+reader skips the unknown record; strict recovery rejects the incompatible store.
 
 ## Breaking changes and caveats
 

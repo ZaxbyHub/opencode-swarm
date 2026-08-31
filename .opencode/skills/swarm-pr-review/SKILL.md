@@ -101,6 +101,14 @@ harness name, and never guess:
 | OpenAI Codex | B | parallel subagents (fresh context) | ledger files in working notes | Pre-Synthesis Gate checklist |
 | ZCode | B | parallel subagents (fresh context) | ledger files in working notes | Pre-Synthesis Gate checklist |
 
+Host-native JSON-schema transport is optional and currently unregistered on the
+tested OpenCode, Claude Code, Codex, and ZCode host matrix. Profile A therefore
+uses the child-bound `submit_pr_review_result` tool as its supported baseline.
+Any future native integration must implement the fixed internal
+`promptJsonSchema({ sessionId, agent, schema, parts })` seam and pass the
+adapter-present, unsupported-before-execution, provider-failure, timeout, and
+per-session capability tests before registration.
+
 **Completion-gate assurance is NOT equivalent across profiles.** Only Profile A
 enforces completion MECHANICALLY: the controller's `complete_pr_workflow` receipt
 gate refuses synthesis unless base coverage, the 11-family trigger ledger, and the

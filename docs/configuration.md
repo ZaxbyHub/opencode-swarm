@@ -88,6 +88,7 @@ Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit insid
 | `inject_phase_reminders` | boolean | true | Inject phase reminder directives during execution. |
 | `hooks` | object | — | Hook subsystem toggles and settings. |
 | `pr_review_resilience` | object (strict) | — | PR review base-wave staged canary/fanout resilience settings. |
+| `pr_review_legacy_transcript_compatibility` | boolean | — |  |
 | `gates` | object | — | Quality gate configuration (v6.9 anti-slop features). |
 | `context_budget` | object | — | Context budget thresholds. |
 | `pricing` | object | — | Token/cost estimation fallback table. Provider-reported cost wins when present; entries only estimate from usage tokens when reports omit cost. |
@@ -798,8 +799,10 @@ their lane transcripts remain the native exchange surface.
 
 Structured submissions persist background-delegation schema v4 records. Before
 downgrading to a binary without schema v4 support, drain active structured
-reviews or apply a compatible migration/reader; older binaries cannot safely
-interpret the new receipt field.
+reviews or apply a compatible migration/reader. An older lenient reader skips
+the entire unknown v4 record, so the lane appears absent and later mutations
+become no-ops; strict recovery rejects the store as incompatible and fails
+closed. Neither outcome preserves an active structured review.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
