@@ -5,6 +5,7 @@ import {
 	PrReviewStructuredPromptUnsupportedError,
 	type SessionOps,
 } from '../../../src/tools/dispatch-lanes';
+import { withFrozenClockAsync } from '../../helpers/test-clock.js';
 
 const lane: DispatchLaneSpec = {
 	id: 'base-correctness',
@@ -89,22 +90,24 @@ describe('structured PR-review adapter transport (PRR-002/PRR-003)', () => {
 	});
 
 	test('bounds a structured adapter that never settles (PRR-003)', async () => {
-		const startedAt = Date.now();
-		const promptAsync = mock(async () => ({}));
+		await withFrozenClockAsync(async () => {
+			const startedAt = Date.now();
+			const promptAsync = mock(async () => ({}));
 
-		await _test_exports.startAsyncLanePrompt({
-			session: sessionOps(promptAsync),
-			directory: process.cwd(),
-			sessionId: 'child-1',
-			lane,
-			timeoutMs: 10,
-			mode: 'swarm-pr-review:base',
-			structuredAdapter: {
-				promptJsonSchema: () => new Promise(() => {}),
-			},
+			await _test_exports.startAsyncLanePrompt({
+				session: sessionOps(promptAsync),
+				directory: process.cwd(),
+				sessionId: 'child-1',
+				lane,
+				timeoutMs: 10,
+				mode: 'swarm-pr-review:base',
+				structuredAdapter: {
+					promptJsonSchema: () => new Promise(() => {}),
+				},
+			});
+
+			expect(Date.now() - startedAt).toBeLessThan(1_000);
+			expect(promptAsync).not.toHaveBeenCalled();
 		});
-
-		expect(Date.now() - startedAt).toBeLessThan(1_000);
-		expect(promptAsync).not.toHaveBeenCalled();
 	});
 });
