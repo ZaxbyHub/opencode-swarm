@@ -675,6 +675,14 @@ repo_map { "action": "impact_cone", "file": "src/foo.ts", "symbol": "doThing", "
 repo_map { "action": "diff_context", "diff": "--- a/src/foo.ts\n+++ b/src/foo.ts\n@@ -1,3 +1,4 @@ ..." }
 repo_map { "action": "diff_context", "files": ["src/foo.ts", "src/bar.ts"] }
 repo_map { "action": "graph_explain", "file": "src/foo.ts", "line": 42 }
+
+# KG-15 change-risk packs (issue #1536)
+repo_map { "action": "route_trace", "route_path": "/api/users", "method": "POST" }
+repo_map { "action": "route_trace", "file": "app/api/users/route.ts" }
+repo_map { "action": "data_trace", "entity": "user" }
+repo_map { "action": "data_trace", "entity": "API_BASE_URL" }
+repo_map { "action": "test_pack", "file": "src/foo.ts" }
+repo_map { "action": "test_pack", "diff": "--- a/src/foo.ts\n+++ b/src/foo.ts\n@@ ..." }
 ```
 
 ## KG-14 expanded graph query actions (issue #1535)
@@ -699,6 +707,61 @@ result, zero-valued when data is absent): `symbolEdgeSummary`, `resolutionBreakd
 (includes `unrecorded` for legacy edges), `staleSummary` (`null` without a
 probe; `probeTruncated` is the freshness walk, distinct from build-time
 `walkTruncated`), `extractionFailureSummary`, and `kindCoverage`.
+
+## KG-15 change-risk packs: routes, data, security, tests (issue #1536)
+
+Implemented in `src/tools/repo-graph/pack-query.ts` (stateless, read-only,
+same conventions as `symbol-query.ts`). Packs join the file-level ontology
+facts to their subjects via the additive schema 1.7.0
+`GraphNode.ontology.links` array:
+
+| Link kind | Extracted from | Subject | Symbol-bound | Confidence |
+| --- | --- | --- | --- | --- |
+| `HANDLES_ROUTE` | each `RouteFact` | `'<METHOD> <path>'` | `handler_export` → the method-named export; `router_call` → named handler arg when present | high / medium / low by source |
+| `READS` / `WRITES` / `DELETES` | entity-bearing `DataOperationFact`s | entity/table name | file-level | medium (low for transaction/migration → WRITES) |
+| `VALIDATES` / `AUTHORIZES` | `input_validation` / `authorization` security facts | — (file-level) | file-level | inherits fact confidence |
+| `CONFIGURES` | `process.env.X`, `process.env['X']`, `import.meta.env.X`, `Deno.env.get('X')` | env/config key | file-level | medium; ≤20 keys/file, deduped |
+| `TESTS` / `USES_FIXTURE` | **derived at query time** (never persisted) from import edges + colocated-name heuristics; materialized in `test_pack` output as association records (`kind`/`fromFile`/`toFile`/`evidence`/`confidence`, ≤200) | — | — | high (explicit import) / medium (colocated) |
+
+Link extraction runs inside `extractFileOntology` on comment-stripped source,
+after the fact arrays are capped (order invariant: roles → routes → data →
+security → conventions → findings → links; ≤200 links/file). Validation:
+`subject` is bounded (≤200 chars, identifier-first, no `..` path segment, no quotes/
+backslash — but deliberately NOT character-whitelisted, because router-call
+paths legally carry `{param}`/`<int:id>`/query-string punctuation and a
+validation failure would drop the whole node); `kind`/`confidence` are
+enum-checked; `line` must be a positive integer; `evidence`/`symbol` are
+control-character-checked (bounded at extraction time).
+
+| Action | Input | Output (bounded) |
+| --- | --- | --- |
+| `route_trace` | `route_path` (normalized: `[id]`→`:id`, `[...slug]`→`:slug*`) OR `file` OR `symbol` (HTTP method or link-bound handler; symbol-only search is restricted to `api_route`-role files), optional `method` and `symbol` filters (they compose with every target form; routes stored as `ALL` match any method), `top_n` (25) | per matched route: `route` fact, handler file, `handlerSymbol`+`handlerConfidence` (from the HANDLES_ROUTE link — the last-argument named handler for router calls; `handler_export` falls back to the method-named export at `confidence: null` on old graphs), depth-1 `services` (non-test nodes, deduped/sorted), `dataOperations`/`security` from handler+services (≤20 each), `handlerEvidence` (the link's evidence line; null without a link), handler-file `findings` (e.g. `api_route_without_detected_auth` — the unguarded-mutating-route surface), `tests` (test-file importers) |
+| `data_trace` | `entity` (entity/table/config/env key; case-insensitive) OR `file` OR `symbol`, optional `top_n` (25) | `readers`/`writers`/`deleters`/`configurers` (each entry carries kind/line/evidence/confidence and `via: 'link' \| 'fact'`), touching `routes` (≤20), `tests`, fixed-vocabulary `riskNotes` (no tests detected; delete-ops coverage; cross-boundary writes) |
+| `test_pack` | `file` OR `files` OR `symbol` OR `diff` (unified diff; parsed via `getDiffContext`), optional `top_n` (25) | `tests` (`basis: 'import'` high / `'colocated'` medium, `evidence` = import specifier or colocated rationale, `coveredSymbols` = edge imported∪used ∩ target exports), `fixtures` (fixture-pattern files imported by ≥1 discovered test, with `usedBy` + `confidence`/`evidence`), `helpers` (non-fixture deps shared by ≥2 discovered tests), `uncoveredExports`, `riskNotes`, `associations` (materialized TESTS/USES_FIXTURE records, ≤200) |
+
+Fixture patterns (module path, lowercase): a `fixtures?` / `__fixtures__` /
+`mocks?` / `factories` path segment, or a basename containing `fixture` /
+`mock` / `factory` / `test-utils` / `test-helpers` / `testing-utils`.
+
+### Degradation and caveats
+
+- Pre-1.7.0 graphs still answer: facts/edges-derived sections populate, and
+  route/data packs carry `linksSupported: false` plus an explicit rebuild
+  warning; `data_trace` entity matching falls back to `DataOperationFact`
+  entities (`via: 'fact'`, `confidence: null`). `test_pack` derives everything
+  from edges and works on every schema (no flag).
+- The schema bump invalidates freshness fingerprints (`EXTRACTOR_STAMP`
+  includes `GRAPH_SCHEMA_VERSION`), so the first probe after upgrade reports
+  drift until a rebuild.
+- Entity extraction is limited to `prisma.`/`db.`/`database.` receivers
+  (`repository.X`/`model.X` are not seen); entity-less data facts remain
+  per-file facts and are not linked.
+- Derived TESTS/USES_FIXTURE associations age exactly with the graph's edges:
+  a stale snapshot misses them just as it misses the edges themselves.
+- Packs are advisory and heuristic. They never execute test frameworks, never
+  claim security proofs, and mirror the ontology extractor's conservative
+  posture. `impact_cone` is unchanged; deeper route/data/test views are these
+  dedicated actions.
 
 ## Limitations (by design)
 

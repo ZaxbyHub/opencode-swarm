@@ -134,7 +134,7 @@ describe('repo_map: symbol_search (KG-14)', () => {
 
 	it('degrades kind filters on a pre-1.6.0 graph with an explicit warning', async () => {
 		await call({ action: 'build' });
-		expect(GRAPH_SCHEMA_VERSION).toBe('1.6.0');
+		expect(GRAPH_SCHEMA_VERSION).toBe('1.7.0');
 		const graphPath = path.join(tmp, '.swarm/repo-graph.json');
 		const graph = JSON.parse(fs.readFileSync(graphPath, 'utf-8')) as {
 			schema_version: string;

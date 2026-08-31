@@ -18,6 +18,8 @@ import {
 	type GraphNode,
 	IMPORT_TYPE_VALUES,
 	ONTOLOGY_FINDING_SEVERITY_VALUES,
+	ONTOLOGY_LINK_CONFIDENCE_VALUES,
+	ONTOLOGY_LINK_KIND_VALUES,
 	ROUTE_METHOD_VALUES,
 	ROUTE_SOURCE_VALUES,
 	SECURITY_CONFIDENCE_VALUES,
@@ -34,9 +36,34 @@ const SECURITY_CONFIDENCE_SET = new Set<string>(SECURITY_CONFIDENCE_VALUES);
 const ONTOLOGY_FINDING_SEVERITY_SET = new Set<string>(
 	ONTOLOGY_FINDING_SEVERITY_VALUES,
 );
+const ONTOLOGY_LINK_KIND_SET = new Set<string>(ONTOLOGY_LINK_KIND_VALUES);
+const ONTOLOGY_LINK_CONFIDENCE_SET = new Set<string>(
+	ONTOLOGY_LINK_CONFIDENCE_VALUES,
+);
 const IMPORT_TYPE_SET = new Set<string>(IMPORT_TYPE_VALUES);
 const GRAPH_SYMBOL_KIND_SET = new Set<string>(GRAPH_SYMBOL_KIND_VALUES);
 const ONTOLOGY_NAME_PATTERN = /^[a-z][a-z0-9_]*$/;
+const ONTOLOGY_LINK_SUBJECT_MAX_LENGTH = 200;
+/**
+ * Link subjects are route ids (`GET /api/users/:id*`; router-call paths may
+ * legally carry query strings and regex fragments) and — because the route
+ * extractor runs on every language — FastAPI `{param}` and Flask `<int:id>`
+ * path syntax too, entity/table names, or config/env keys. All start with an
+ * identifier char; the security-relevant bounds are length, no `..`
+ * traversal, no control characters (enforced by the string loop below), and
+ * no quote/backslash characters that could make a subject confusable with
+ * code. A stricter character whitelist is deliberately NOT imposed: it
+ * rejected legal route paths from three common frameworks and, because a
+ * `validateGraphNode` failure drops the whole node, silently removed those
+ * route files from the graph entirely (KG-15 regression caught in review).
+ */
+const ONTOLOGY_LINK_SUBJECT_PATTERN = /^[A-Za-z_$][^\\'"`]*$/;
+/** `..` as a path SEGMENT is traversal; `[...slug]` catch-alls are not. */
+const hasTraversalSegment = (subject: string): boolean =>
+	subject === '..' ||
+	subject.startsWith('../') ||
+	subject.endsWith('/..') ||
+	subject.includes('/../');
 
 // ============ Validation ============
 
@@ -295,6 +322,13 @@ function validateOntologyStrings(node: GraphNode): void {
 			finding.severity,
 			finding.message,
 		]),
+		...(ontology.links ?? []).flatMap((link) => [
+			link.kind,
+			link.confidence,
+			...(link.subject !== undefined ? [link.subject] : []),
+			...(link.evidence !== undefined ? [link.evidence] : []),
+			...(link.symbol !== undefined ? [link.symbol] : []),
+		]),
 	];
 	for (const value of values) {
 		if (typeof value !== 'string') {
@@ -360,6 +394,39 @@ function validateOntologyStrings(node: GraphNode): void {
 			finding.severity,
 			ONTOLOGY_FINDING_SEVERITY_SET,
 		);
+	}
+	for (const link of ontology.links ?? []) {
+		validateAllowedOntologyValue(
+			node,
+			'ontology.links.kind',
+			link.kind,
+			ONTOLOGY_LINK_KIND_SET,
+		);
+		validateAllowedOntologyValue(
+			node,
+			'ontology.links.confidence',
+			link.confidence,
+			ONTOLOGY_LINK_CONFIDENCE_SET,
+		);
+		if (link.subject !== undefined) {
+			if (
+				link.subject.length > ONTOLOGY_LINK_SUBJECT_MAX_LENGTH ||
+				!ONTOLOGY_LINK_SUBJECT_PATTERN.test(link.subject) ||
+				hasTraversalSegment(link.subject)
+			) {
+				const preview = link.subject.slice(0, 120);
+				throw new Error(
+					`Invalid node: ontology.links.subject is malformed (file=${node.filePath}, value="${preview}")`,
+				);
+			}
+		}
+		if (link.line !== undefined) {
+			if (!Number.isInteger(link.line) || link.line < 1) {
+				throw new Error(
+					`Invalid node: ontology.links.line must be a positive integer (file=${node.filePath})`,
+				);
+			}
+		}
 	}
 }
 

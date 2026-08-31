@@ -12,6 +12,7 @@
  *   builder.ts     — workspace scanning and full-graph construction
  *   incremental.ts — incremental updates for changed files
  *   symbol-query.ts — KG-14 symbol/impact/diff/explain queries (issue #1535)
+ *   pack-query.ts  — KG-15 route/data/test change-risk packs (issue #1536)
  *
  * All existing imports of this module continue to work unchanged.
  */
@@ -55,7 +56,11 @@ export {
 } from './repo-graph/freshness';
 export { updateGraphForFiles } from './repo-graph/incremental';
 export type { ExtractFileOntologyInput } from './repo-graph/ontology';
-export { extractFileOntology } from './repo-graph/ontology';
+export {
+	extractFileOntology,
+	normalizeRoutePathInput,
+} from './repo-graph/ontology';
+export { buildTestPack, traceData, traceRoute } from './repo-graph/pack-query';
 export type { DeadExportsOptions } from './repo-graph/query';
 export {
 	buildOntologyPreflightPacket,
@@ -105,7 +110,10 @@ export type {
 	ContextPackSpan,
 	ConventionFact,
 	DataOperationFact,
+	DataTraceAccess,
+	DataTraceResult,
 	DeadExportCandidate,
+	DerivedAssociation,
 	DeadExportsResult,
 	DiffContextResult,
 	DiffFileSummary,
@@ -127,11 +135,16 @@ export type {
 	ImpactConeResult,
 	LocalizationBlock,
 	OntologyFinding,
+	OntologyLink,
+	OntologyLinkConfidence,
+	OntologyLinkKind,
 	PackageBoundarySummary,
 	RepoGraph,
 	RepoGraphDiagnostics,
 	RouteFact,
 	RouteMethod,
+	RouteTraceResult,
+	RouteTraceRoute,
 	SecurityFact,
 	SymbolContextResult,
 	SymbolEdge,
@@ -142,6 +155,9 @@ export type {
 	SymbolIdentityKind,
 	SymbolReference,
 	SymbolSearchResult,
+	TestPackFixture,
+	TestPackResult,
+	TestPackTestEntry,
 } from './repo-graph/types';
 export {
 	createEmptyGraph,
@@ -150,6 +166,8 @@ export {
 	inferPackageBoundary,
 	isSchemaVersionAtLeast,
 	normalizeGraphPath,
+	ONTOLOGY_LINK_CONFIDENCE_VALUES,
+	ONTOLOGY_LINK_KIND_VALUES,
 	REPO_GRAPH_FILENAME,
 	updateGraphMetadata,
 } from './repo-graph/types';

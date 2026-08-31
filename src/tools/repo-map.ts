@@ -11,6 +11,7 @@ import { createSwarmTool } from './create-tool';
 import {
 	askGraph,
 	buildOntologyPreflightPacket,
+	buildTestPack,
 	buildWorkspaceGraphAsync,
 	explainGraphEntry,
 	type FreshnessOptions,
@@ -36,8 +37,11 @@ import {
 	normalizeGraphPath,
 	probeFreshness,
 	type RepoGraph,
+	type RouteMethod,
 	saveGraph,
 	searchSymbols,
+	traceData,
+	traceRoute,
 	updateGraphForFiles,
 	writeFingerprint,
 } from './repo-graph';
@@ -80,6 +84,9 @@ const VALID_ACTIONS = [
 	'impact_cone',
 	'diff_context',
 	'graph_explain',
+	'route_trace',
+	'data_trace',
+	'test_pack',
 	'graph_health',
 	'ask',
 ] as const;
@@ -91,6 +98,17 @@ const MAX_SYMBOL_LENGTH = 256;
 const MAX_QUESTION_LENGTH = 500;
 const MAX_LANGUAGE_LENGTH = 64;
 const MAX_DIFF_LENGTH = 50_000;
+const MAX_ROUTE_PATH_LENGTH = 500;
+const ROUTE_METHODS: readonly RouteMethod[] = [
+	'GET',
+	'POST',
+	'PUT',
+	'PATCH',
+	'DELETE',
+	'OPTIONS',
+	'HEAD',
+	'ALL',
+];
 const REPO_GRAPH_DISABLED_NOTICE =
 	'Repository graph is disabled by configuration (repo_graph.enabled=false).';
 
@@ -125,6 +143,9 @@ interface RepoMapArgs {
 	language?: string;
 	diff?: string;
 	line?: number;
+	route_path?: string;
+	method?: RouteMethod;
+	entity?: string;
 }
 
 function validateFile(p: string): string | null {
@@ -177,6 +198,44 @@ function validateLanguage(language: string): string | null {
 	if (containsControlChars(language)) {
 		return 'language contains control characters';
 	}
+	return null;
+}
+
+/**
+ * Route paths may contain dynamic segments (`/api/users/[id]`, `:id`) so the
+ * file-path rules do not apply; the security-relevant checks are bounded
+ * length, no control characters, no `..` traversal, and a leading slash.
+ */
+function validateRoutePath(p: string): string | null {
+	if (p.length === 0) return 'route_path is empty';
+	if (p.length > MAX_ROUTE_PATH_LENGTH) {
+		return `route_path exceeds maximum length of ${MAX_ROUTE_PATH_LENGTH}`;
+	}
+	if (containsControlChars(p)) return 'route_path contains control characters';
+	if (containsPathTraversal(p)) return 'route_path contains path traversal';
+	if (!p.startsWith('/')) return 'route_path must start with "/"';
+	return null;
+}
+
+function validateMethod(method: string): string | null {
+	if (!(ROUTE_METHODS as readonly string[]).includes(method)) {
+		return `method must be one of: ${ROUTE_METHODS.join(', ')}`;
+	}
+	return null;
+}
+
+/**
+ * Entities are entity/table names, config/env keys, or Prisma-style model
+ * names (e.g. `user`, `userAccount`, `API_BASE_URL`) — the same bound as
+ * symbols: non-empty, <=256 chars, no control characters.
+ */
+function validateEntity(entity: string): string | null {
+	if (entity.length === 0) return 'entity is empty';
+	if (entity.length > MAX_SYMBOL_LENGTH) {
+		return `entity exceeds maximum length of ${MAX_SYMBOL_LENGTH}`;
+	}
+	if (containsControlChars(entity)) return 'entity contains control characters';
+	if (containsPathTraversal(entity)) return 'entity contains path traversal';
 	return null;
 }
 
@@ -317,7 +376,10 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 		'"symbol_context" (focused definition-first context for one symbol — identity, stable symbol_id, signature, optional source, and direct callers/callees; needs file+symbol or symbol_id), ' +
 		'"impact_cone" (structured impact of changing a file or symbol — symbol-level callers/callees by depth with confidence, file-level blast radius and risk, affected tests, routes, data/security facts, package boundaries; needs file, optional symbol), ' +
 		'"diff_context" (map changed files or a unified diff to changed symbols and per-file impact cones; needs files or diff; diff paths must be workspace-relative and safe), ' +
-		'"graph_explain" (explain why a file/symbol/span is graph-relevant — definition, incoming/outgoing symbol edges with provenance evidence, file-level importers; needs file, optional symbol or line), ' +
+			'"graph_explain" (explain why a file/symbol/span is graph-relevant — definition, incoming/outgoing symbol edges with provenance evidence, file-level importers; needs file, optional symbol or line), ' +
+			'"route_trace" (change-risk pack for a route — handler + symbol binding with confidence, depth-1 services, data operations, auth/validation facts, unguarded-route findings, covering tests; needs route_path, file, or symbol; advisory, regex-based), ' +
+			'"data_trace" (change-risk pack for an entity/table/config/env key — readers, writers, deleters, configurers, touching routes, tests, and risk notes; needs entity, file, or symbol; advisory), ' +
+			'"test_pack" (tests, fixtures, helpers, and coverage hints for a file/symbol/changed files — explicit imports and colocated-name heuristics, missing-test warnings; needs file, files, symbol, or diff; never executes tests), ' +
 		'"graph_health" (freshness and bounded extraction diagnostics; no file required), ' +
 		'"ask" (zero-LLM file localization: pass a natural-language question to rank files by relevance via vocabulary expansion + IDF + PageRank; orientation only — read the located files before asserting anything about them). ' +
 		'Use this before refactoring shared modules to avoid breaking unseen consumers. ' +
@@ -343,11 +405,14 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				'impact_cone',
 				'diff_context',
 				'graph_explain',
+				'route_trace',
+				'data_trace',
+				'test_pack',
 				'graph_health',
 				'ask',
 			])
 			.describe(
-				'Query action: "build" | "importers" | "dependencies" | "blast_radius" | "localization" | "key_files" | "ontology" | "package_boundaries" | "preflight_packet" | "callers" | "dead_exports" | "context_pack" | "symbol_search" | "symbol_context" | "impact_cone" | "diff_context" | "graph_explain" | "graph_health" | "ask"',
+				'Query action: "build" | "importers" | "dependencies" | "blast_radius" | "localization" | "key_files" | "ontology" | "package_boundaries" | "preflight_packet" | "callers" | "dead_exports" | "context_pack" | "symbol_search" | "symbol_context" | "impact_cone" | "diff_context" | "graph_explain" | "route_trace" | "data_trace" | "test_pack" | "graph_health" | "ask"',
 			),
 		file: z
 			.string()
@@ -381,7 +446,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			.max(100)
 			.optional()
 			.describe(
-				'For action="key_files"/"package_boundaries": entries to return (default 10). For action="dead_exports": max candidates (default 100). For action="context_pack": max spans returned (default ~40 via token budget). For action="symbol_search": max hits (default 25). For action="symbol_context": max callers and max callees (default 25 each). For action="impact_cone": max cone entries (default 50). For action="diff_context": max changed symbols per file and max impacted files (default 25). For action="graph_explain": max reasons (default 20).',
+				'For action="key_files"/"package_boundaries": entries to return (default 10). For action="dead_exports": max candidates (default 100). For action="context_pack": max spans returned (default ~40 via token budget). For action="symbol_search": max hits (default 25). For action="symbol_context": max callers and max callees (default 25 each). For action="impact_cone": max cone entries (default 50). For action="diff_context": max changed symbols per file and max impacted files (default 25). For action="graph_explain": max reasons (default 20). For action="route_trace": max routes and per-list section size (default 25). For action="data_trace": max readers/writers/deleters/configurers/tests entries (default 25). For action="test_pack": max tests, fixtures, and helpers (default 25; uncovered-export hints use a per-target cap of 20).',
 			),
 		max_depth: z
 			.number()
@@ -460,6 +525,35 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			.optional()
 			.describe(
 				'For action="graph_explain": 1-based line in the target file; resolves to the enclosing symbol (smallest containing span wins) before explaining.',
+			),
+		route_path: z
+			.string()
+			.max(500)
+			.optional()
+			.describe(
+				'For action="route_trace": route path to match, e.g. "/api/users" or "/api/users/[id]" (dynamic segments normalize to :param / :param*). Requires a leading slash; combined with the optional method filter.',
+			),
+		method: z
+			.enum([
+				'GET',
+				'POST',
+				'PUT',
+				'PATCH',
+				'DELETE',
+				'OPTIONS',
+				'HEAD',
+				'ALL',
+			])
+			.optional()
+			.describe(
+				'For action="route_trace": filter matched routes by HTTP method (routes stored as ALL match any filter).',
+			),
+		entity: z
+			.string()
+			.max(256)
+			.optional()
+			.describe(
+				'For action="data_trace": entity/table name, config/env key, or Prisma-style model name to trace readers/writers/deleters for (e.g. "user", "API_BASE_URL").',
 			),
 	},
 	async execute(
@@ -777,6 +871,132 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 					...(a.diff !== undefined ? { diff: a.diff } : {}),
 					maxDepth: a.max_depth ?? 2,
 					topN: a.top_n ?? 25,
+				});
+				return ok(action, { ...result, ...freshness });
+			} catch (e) {
+				return err(action, failureMessage(e));
+			}
+		}
+
+		if (action === 'route_trace') {
+			if (
+				a.route_path === undefined &&
+				a.file === undefined &&
+				a.symbol === undefined
+			) {
+				return err(
+					action,
+					'route_trace requires `route_path`, `file`, or `symbol`',
+				);
+			}
+			if (a.route_path !== undefined) {
+				const rpErr = validateRoutePath(a.route_path);
+				if (rpErr) return err(action, `invalid route_path: ${rpErr}`);
+			}
+			if (a.method !== undefined) {
+				const mErr = validateMethod(a.method);
+				if (mErr) return err(action, `invalid method: ${mErr}`);
+			}
+			if (a.symbol !== undefined) {
+				const sErr = validateSymbol(a.symbol);
+				if (sErr) return err(action, `invalid symbol: ${sErr}`);
+			}
+			let fileTarget: string | undefined;
+			if (a.file !== undefined) {
+				const fErr = validateFile(a.file);
+				if (fErr) return err(action, `invalid file: ${fErr}`);
+				fileTarget = toRelativeGraphPath(a.file, directory);
+			}
+			try {
+				const result = traceRoute(graph, {
+					...(a.route_path !== undefined
+						? { routePath: a.route_path }
+						: {}),
+					...(a.method !== undefined ? { method: a.method } : {}),
+					...(fileTarget !== undefined ? { file: fileTarget } : {}),
+					...(a.symbol !== undefined ? { symbol: a.symbol } : {}),
+					...(a.top_n !== undefined ? { topN: a.top_n } : {}),
+				});
+				return ok(action, { ...result, ...freshness });
+			} catch (e) {
+				return err(action, failureMessage(e));
+			}
+		}
+
+		if (action === 'data_trace') {
+			if (
+				a.entity === undefined &&
+				a.file === undefined &&
+				a.symbol === undefined
+			) {
+				return err(
+					action,
+					'data_trace requires `entity`, `file`, or `symbol`',
+				);
+			}
+			if (a.entity !== undefined) {
+				const eErr = validateEntity(a.entity);
+				if (eErr) return err(action, `invalid entity: ${eErr}`);
+			}
+			if (a.symbol !== undefined) {
+				const sErr = validateSymbol(a.symbol);
+				if (sErr) return err(action, `invalid symbol: ${sErr}`);
+			}
+			let fileTarget: string | undefined;
+			if (a.file !== undefined) {
+				const fErr = validateFile(a.file);
+				if (fErr) return err(action, `invalid file: ${fErr}`);
+				fileTarget = toRelativeGraphPath(a.file, directory);
+			}
+			try {
+				const result = traceData(graph, {
+					...(a.entity !== undefined ? { entity: a.entity } : {}),
+					...(fileTarget !== undefined ? { file: fileTarget } : {}),
+					...(a.symbol !== undefined ? { symbol: a.symbol } : {}),
+					...(a.top_n !== undefined ? { topN: a.top_n } : {}),
+				});
+				return ok(action, { ...result, ...freshness });
+			} catch (e) {
+				return err(action, failureMessage(e));
+			}
+		}
+
+		if (action === 'test_pack') {
+			const inputFiles =
+				a.files && a.files.length > 0 ? a.files : a.file ? [a.file] : [];
+			if (
+				inputFiles.length === 0 &&
+				a.symbol === undefined &&
+				a.diff === undefined
+			) {
+				return err(
+					action,
+					'test_pack requires `file`, `files`, `symbol`, or `diff`',
+				);
+			}
+			let fileTargets: string[] | undefined;
+			if (inputFiles.length > 0) {
+				fileTargets = [];
+				for (const f of inputFiles) {
+					const v = validateFile(f);
+					if (v) return err(action, `invalid file: ${v}`);
+					fileTargets.push(toRelativeGraphPath(f, directory));
+				}
+			}
+			if (a.symbol !== undefined) {
+				const sErr = validateSymbol(a.symbol);
+				if (sErr) return err(action, `invalid symbol: ${sErr}`);
+			}
+			if (a.diff !== undefined) {
+				const dErr = validateDiffText(a.diff);
+				if (dErr) return err(action, `invalid diff: ${dErr}`);
+			}
+			try {
+				const result = buildTestPack(graph, {
+					...(fileTargets !== undefined ? { files: fileTargets } : {}),
+					...(a.symbol !== undefined ? { symbol: a.symbol } : {}),
+					...(a.diff !== undefined ? { diff: a.diff } : {}),
+					...(a.top_n !== undefined ? { topN: a.top_n } : {}),
 				});
 				return ok(action, { ...result, ...freshness });
 			} catch (e) {
