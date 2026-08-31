@@ -2785,6 +2785,7 @@ export async function publishPrReviewResultReceipt(
 		expectedWorkflowRevision: number;
 		expectedBaseSha: string;
 		receipt: PrReviewResultReceipt;
+		targetRecord?: BackgroundDelegationRecord;
 	},
 ): Promise<PublishPrReviewResultReceiptOutcome> {
 	const parsed = PrReviewResultReceiptSchema.safeParse(input.receipt);
@@ -2810,15 +2811,43 @@ export async function publishPrReviewResultReceipt(
 					};
 					return;
 				}
-				const target = findReceiptPublicationTarget(records, input);
-				if (target.count !== 1 || !target.record) {
+				let current: BackgroundDelegationRecord | null = null;
+				if (input.targetRecord) {
+					current = findRecordForWrite(
+						records,
+						input.targetRecord.correlationId,
+					);
+					if (
+						!current ||
+						current.parentSessionId !== input.parentSessionId ||
+						current.subagentSessionId !== input.childSessionId ||
+						current.batchId !== input.batchId ||
+						current.laneId !== input.laneId
+					) {
+						outcome = {
+							status: 'not_found',
+							reason: 'expected one exact delegation record, found 0',
+						};
+						return;
+					}
+				} else {
+					const target = findReceiptPublicationTarget(records, input);
+					if (target.count !== 1 || !target.record) {
+						outcome = {
+							status: 'not_found',
+							reason: `expected one exact delegation record, found ${target.count}`,
+						};
+						return;
+					}
+					current = target.record;
+				}
+				if (!current) {
 					outcome = {
 						status: 'not_found',
-						reason: `expected one exact delegation record, found ${target.count}`,
+						reason: 'expected one exact delegation record, found 0',
 					};
 					return;
 				}
-				const current = target.record;
 				if (current.result?.prReviewResultReceipt) {
 					const existing = current.result.prReviewResultReceipt;
 					if (samePrReviewReceiptSemantics(existing, parsed.data)) {

@@ -1999,6 +1999,7 @@ export async function submitPrReviewResult(
 			expectedWorkflowInstanceId: state.workflowInstanceId,
 			expectedWorkflowRevision: state.revision,
 			expectedBaseSha: state.prReviewBaseSha,
+			targetRecord: record,
 			receipt: {
 				schemaVersion: 1,
 				mode: record.mode,
