@@ -240,6 +240,26 @@ successfully scanned. Omitted, empty, or entirely unscannable `changed_files`
 returns `capture_baseline requires changed_files to produce a non-empty baseline`
 instead of reporting a successful no-op capture.
 
+### Moved findings and audited absorption (#2302)
+
+Every baseline fingerprint carries a position-independent reflow identity
+(file + rule + flagged-line content). A pre-existing finding whose neighbor
+lines were edited, or that moved to a new line, is reported as a
+`moved_findings` entry on the next diff scan — it never gates. Only findings
+matching neither the baseline fingerprints nor its reflow identities are NEW.
+
+Re-capturing into an existing baseline with findings that were not in it is
+**BLOCKED** unless the capture passes `baseline_refresh_rationale` — for
+already-indexed AND first-time-indexed files alike, because the tool cannot
+distinguish a pre-delegation capture from a failure-response recapture; every
+absorbed finding then records a who/when/rationale entry in the baseline
+triage log. This is the audited path for genuinely pre-existing findings
+(routine per-task captures of first-time files, or findings discovered late
+after a file rename) — it is NOT a way to make a failed gate go green:
+recapturing with a rationale after a gate failure means accepting findings
+that may be coder-introduced. First writes (baseline creation) are snapshots,
+not absorptions, and stay free.
+
 ### How to use it
 
 1. Identify the files to scan. In a phase, use the union of declared task-scope

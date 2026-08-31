@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.159.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.159.1...v7.159.2) (2026-08-31)
+
+
+### Bug Fixes
+
+* **sast:** reflow-match moved baseline findings and gate absorption behind audited triage ([#2302](https://github.com/ZaxbyHub/opencode-swarm/issues/2302)) ([5da92f5](https://github.com/ZaxbyHub/opencode-swarm/commit/5da92f5de1f2759b45b9d2bf6f0edfad6050b31d))
+* **sast:** reflow-match moved baseline findings and gate absorption behind audited triage ([#2302](https://github.com/ZaxbyHub/opencode-swarm/issues/2302)) ([f3ceedb](https://github.com/ZaxbyHub/opencode-swarm/commit/f3ceedbca2f4912494d9227fcbaef6603602029a))
+
 ## [7.159.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.159.0...v7.159.1) (2026-08-30)
 
 

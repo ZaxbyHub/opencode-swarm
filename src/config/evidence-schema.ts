@@ -238,7 +238,11 @@ export const SastEvidenceSchema = BaseEvidenceSchema.extend({
 	// Baseline-diffing fields (optional — present when baseline diff was active)
 	new_findings: z.array(SastFindingSchema).optional(),
 	pre_existing_findings: z.array(SastFindingSchema).optional(),
+	// #2302: findings matched via reflow identity (same finding, new
+	// position/window) — reported separately, never gating.
+	moved_findings: z.array(SastFindingSchema).optional(),
 	baseline_used: z.boolean().optional(),
+	truncated_moved_findings: z.boolean().optional(),
 });
 export type SastEvidence = z.infer<typeof SastEvidenceSchema>;
 
