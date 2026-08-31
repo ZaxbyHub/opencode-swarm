@@ -189,6 +189,63 @@ describe('skill-usage bounds (issue #2038)', () => {
 		});
 	});
 
+	describe('poisoned-newestMs mass-eviction (PR #2347 review round 2)', () => {
+		test('one far-future-timestamped entry does not evict every legitimately-recent entry', () => {
+			markMigrated(dir);
+			// Ten entries at real, RELATIVE-to-now recent timestamps — not
+			// hardcoded absolute dates. Round-2 closeout review: a hardcoded
+			// "recent" cohort is recent only while the suite happens to run near
+			// that date; once wall-clock passes maxAgeMs (90d) past it, these
+			// same fixed dates fall below the 90-day cutoff and the assertion
+			// flips from 10 to 0 — a calendar time-bomb in the exact test meant
+			// to guard this invariant. Deriving from Date.now() keeps the
+			// fixture permanently "recent" regardless of when the suite runs.
+			const lines = Array.from({ length: 10 }, (_, i) =>
+				rawEntry({
+					id: `recent-${i}`,
+					skillPath: 'skill-recent',
+					timestamp: new Date(Date.now() - i * 86_400_000).toISOString(),
+				}),
+			);
+			// One entry with a bogus far-future timestamp — a broken system clock
+			// at write time, not attacker-reachable, but the single input the
+			// unclamped `newestMs - maxAgeMs` cutoff was vulnerable to. This one
+			// legitimately stays an absolute literal: it must be far enough in
+			// the future to still be "the future" no matter when this test runs.
+			lines.push(
+				rawEntry({
+					id: 'poisoned-future',
+					skillPath: 'skill-poisoned',
+					timestamp: '3000-01-01T00:00:00.000Z',
+				}),
+			);
+			writeRawLog(dir, `${lines.join('\n')}\n`);
+
+			pruneSkillUsageLog(dir, 500);
+
+			const surviving = readSkillUsageEntries(dir);
+			// Un-clamped: cutoff = year-3000 minus 90 days is still year 3000, so
+			// every real recent entry falls below it and is mass-evicted in one
+			// pass — only the poisoned entry itself would survive. Clamped: the
+			// cutoff anchors to min(newestMs, Date.now()), so the ten legitimate
+			// entries survive regardless of the poisoned one's timestamp.
+			const recentSurvivors = surviving.filter(
+				(e) => e.skillPath === 'skill-recent',
+			);
+			expect(recentSurvivors.length).toBe(10);
+			// Pin the residual this fix does NOT close, deliberately: the
+			// poisoned entry's own timestamp is always >= the clamped cutoff, so
+			// it survives every pass too. Harmless (one record out of
+			// maxEntries=5,000) and asserting it here means a future change that
+			// decides to also age out poisoned-looking entries makes that choice
+			// consciously, instead of this test silently starting to fail.
+			const poisonedSurvivors = surviving.filter(
+				(e) => e.skillPath === 'skill-poisoned',
+			);
+			expect(poisonedSurvivors.length).toBe(1);
+		});
+	});
+
 	describe('floorPerSkill retention', () => {
 		test("retains each surviving skill's most-recent floorPerSkill entries", () => {
 			markMigrated(dir);
