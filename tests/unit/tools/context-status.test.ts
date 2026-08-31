@@ -70,22 +70,20 @@ describe('context_status tool surface', () => {
 		);
 	});
 
-	it('should document the #2044 provenance fields with their vocabularies', () => {
-		expect(TOOL_METADATA.context_status.description).toContain(
-			'modelLimitSource',
-		);
-		expect(TOOL_METADATA.context_status.description).toContain(
-			'host|override|provider_cap|native|fallback',
-		);
-		expect(TOOL_METADATA.context_status.description).toContain(
-			'modelLimitResolution',
-		);
-		expect(TOOL_METADATA.context_status.description).toContain(
-			'static_provider_cap',
-		);
-		expect(TOOL_METADATA.context_status.description).toContain(
-			'fallbackActive',
-		);
+	it('should document the #2044 provenance fields with their vocabularies on BOTH surfaces', () => {
+		const SOURCE_VOCAB = 'host|override|provider_cap|native|fallback';
+		const RESOLUTION_VOCAB =
+			'user_provider_model|user_model|user_default|live_model_limit|static_provider_cap|static_native|static_default';
+		for (const [surface, description] of [
+			['tool-metadata', TOOL_METADATA.context_status.description],
+			['runtime tool', context_status.description],
+		] as const) {
+			expect(description).toContain('modelLimitSource');
+			expect(description).toContain(SOURCE_VOCAB);
+			expect(description).toContain('modelLimitResolution');
+			expect(description).toContain(RESOLUTION_VOCAB);
+			expect(description).toContain('fallbackActive');
+		}
 	});
 
 	it('should have an args schema with no required fields', () => {
