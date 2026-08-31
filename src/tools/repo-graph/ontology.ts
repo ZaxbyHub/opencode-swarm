@@ -906,14 +906,14 @@ function extractLinks(
 	// CONFIGURES — env/config key access, deduped by key (first occurrence).
 	const seenKeys = new Set<string>();
 	const configureLinks: OntologyLink[] = [];
-	for (let i = 0; i < lines.length && configureLinks.length < MAX_CONFIGURES_PER_FILE; i++) {
+	for (
+		let i = 0;
+		i < lines.length && configureLinks.length < MAX_CONFIGURES_PER_FILE;
+		i++
+	) {
 		const line = lines[i];
-		CONFIG_KEY_PATTERN.lastIndex = 0;
-		let match: RegExpExecArray | null;
-		while (
-			(match = CONFIG_KEY_PATTERN.exec(line)) !== null &&
-			configureLinks.length < MAX_CONFIGURES_PER_FILE
-		) {
+		for (const match of line.matchAll(CONFIG_KEY_PATTERN)) {
+			if (configureLinks.length >= MAX_CONFIGURES_PER_FILE) break;
 			const key = match[1] ?? match[2] ?? match[3] ?? match[4];
 			if (!key || seenKeys.has(key)) continue;
 			seenKeys.add(key);

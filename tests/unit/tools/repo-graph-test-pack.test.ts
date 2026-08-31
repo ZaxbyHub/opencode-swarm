@@ -104,25 +104,42 @@ function makeGraph(): RepoGraph {
 				usedSymbols: ['add'],
 			}),
 			// widget.spec.ts does NOT import widget.ts (colocated-only heuristic).
-			fileEdge('src/services/user-service.test.ts', 'src/services/user-service.ts', {
-				importedSymbols: ['createUser'],
-				usedSymbols: ['createUser'],
-			}),
-			fileEdge('src/services/user-service.test.ts', 'src/test-fixtures/users.fixture.ts', {
-				importedSymbols: ['userFixture'],
-			}),
+			fileEdge(
+				'src/services/user-service.test.ts',
+				'src/services/user-service.ts',
+				{
+					importedSymbols: ['createUser'],
+					usedSymbols: ['createUser'],
+				},
+			),
+			fileEdge(
+				'src/services/user-service.test.ts',
+				'src/test-fixtures/users.fixture.ts',
+				{
+					importedSymbols: ['userFixture'],
+				},
+			),
 			// Both service tests import calc.ts: a shared non-fixture helper.
 			fileEdge('src/services/user-service.test.ts', 'src/lib/calc.ts', {
 				importedSymbols: ['add'],
 			}),
-			fileEdge('src/services/user-service.extra.test.ts', 'src/services/user-service.ts', {
-				importedSymbols: ['createUser'],
-			}),
+			fileEdge(
+				'src/services/user-service.extra.test.ts',
+				'src/services/user-service.ts',
+				{
+					importedSymbols: ['createUser'],
+				},
+			),
 			fileEdge('src/services/user-service.extra.test.ts', 'src/lib/calc.ts', {
 				importedSymbols: ['add'],
 			}),
 		],
-		metadata: { generatedAt: '1', generator: 'test', nodeCount: 9, edgeCount: 5 },
+		metadata: {
+			generatedAt: '1',
+			generator: 'test',
+			nodeCount: 9,
+			edgeCount: 5,
+		},
 	};
 }
 
@@ -192,7 +209,9 @@ describe('buildTestPack (KG-15, issue #1536)', () => {
 
 	test('fixtures are imported-by-test files matching fixture patterns; unimported fixtures absent', () => {
 		const graph = makeGraph();
-		const result = buildTestPack(graph, { file: 'src/services/user-service.ts' });
+		const result = buildTestPack(graph, {
+			file: 'src/services/user-service.ts',
+		});
 		expect(result.fixtures).toEqual([
 			{
 				file: 'src/test-fixtures/users.fixture.ts',
@@ -220,7 +239,9 @@ describe('buildTestPack (KG-15, issue #1536)', () => {
 	});
 
 	test('helpers are non-fixture deps shared by >= 2 discovered tests', () => {
-		const result = buildTestPack(makeGraph(), { file: 'src/services/user-service.ts' });
+		const result = buildTestPack(makeGraph(), {
+			file: 'src/services/user-service.ts',
+		});
 		// calc.ts is imported by calc.test.ts AND user-service.extra.test.ts.
 		expect(result.helpers).toContain('src/lib/calc.ts');
 		// The fixture matches the fixture pattern, so it is not a helper.
@@ -229,12 +250,17 @@ describe('buildTestPack (KG-15, issue #1536)', () => {
 
 	test('symbol targets resolve to owning files', () => {
 		const result = buildTestPack(makeGraph(), { symbol: 'add' });
-		expect(result.target).toEqual({ files: ['src/lib/calc.ts'], symbol: 'add' });
+		expect(result.target).toEqual({
+			files: ['src/lib/calc.ts'],
+			symbol: 'add',
+		});
 		expect(result.tests.length).toBe(3);
 
 		const unknown = buildTestPack(makeGraph(), { symbol: 'ghost' });
 		expect(unknown.target.files).toEqual([]);
-		expect(unknown.warnings.join('\n')).toContain('no graph file exports symbol');
+		expect(unknown.warnings.join('\n')).toContain(
+			'no graph file exports symbol',
+		);
 	});
 
 	test('diff input resolves changed files through getDiffContext', () => {
@@ -254,12 +280,26 @@ describe('buildTestPack (KG-15, issue #1536)', () => {
 	test('missing tests produce the no-tests risk note; unknown files warn softly', () => {
 		const result = buildTestPack(makeGraph(), { file: 'src/lib/other.ts' });
 		expect(result.tests).toEqual([]);
-		expect(result.riskNotes).toContain('no tests detected for src/lib/other.ts');
+		expect(result.riskNotes).toContain(
+			'no tests detected for src/lib/other.ts',
+		);
 
 		const unknown = buildTestPack(makeGraph(), { file: 'src/ghost.ts' });
 		expect(unknown.target.files).toEqual([]);
 		expect(unknown.warnings.join('\n')).toContain('not found in graph');
-		expect(() => unknown).toBeDefined();
+	});
+
+	test('duplicate files[] entries are deduped (no double-counted output)', () => {
+		// PRR-004: a repeated path must not duplicate associations/uncovered
+		// exports or inflate the budget.
+		const single = buildTestPack(makeGraph(), { files: ['src/lib/widget.ts'] });
+		const duplicated = buildTestPack(makeGraph(), {
+			files: ['src/lib/widget.ts', 'src/lib/widget.ts'],
+		});
+		expect(duplicated.target.files).toEqual(single.target.files);
+		expect(duplicated.associations).toEqual(single.associations);
+		expect(duplicated.uncoveredExports).toEqual(single.uncoveredExports);
+		expect(duplicated.budget).toEqual(single.budget);
 	});
 
 	test('per-target coverage: a same-named export covered on one target does not mask another', () => {
@@ -284,6 +324,24 @@ describe('buildTestPack (KG-15, issue #1536)', () => {
 		});
 		// (calc.ts's `unusedHelper` stays legitimately uncovered.)
 		expect(uncoveredFiles).toContain('src/lib/calc.ts');
+	});
+
+	test('files take precedence over symbol when both are given', () => {
+		// PRR-012: repo-map forwards both; files win. Current contract echoes
+		// the ignored symbol in target.symbol — pinned so a change is deliberate.
+		const result = buildTestPack(makeGraph(), {
+			files: ['src/lib/calc.ts'],
+			symbol: 'makeWidget',
+		});
+		expect(result.target).toEqual({
+			files: ['src/lib/calc.ts'],
+			symbol: 'makeWidget',
+		});
+		expect(result.tests.map((t) => t.file)).toEqual([
+			'src/lib/calc.test.ts',
+			'src/services/user-service.extra.test.ts',
+			'src/services/user-service.test.ts',
+		]);
 	});
 
 	test('associations cap at 200 with reconcilable budget accounting', () => {

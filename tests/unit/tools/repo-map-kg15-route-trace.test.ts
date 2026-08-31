@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { repo_map } from '../../../src/tools/repo-map';
-import { writeKg15Workspace } from './repo-map-kg15.fixture';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import { writeKg15Workspace } from './repo-map-kg15.fixture';
 
 let tmp = '';
 
@@ -34,7 +34,11 @@ describe('repo_map: route_trace (KG-15, issue #1536)', () => {
 	test('traces a guarded route by path + method with handler binding and services', async () => {
 		await call({ action: 'build' });
 		const r = parse(
-			await call({ action: 'route_trace', route_path: '/api/users', method: 'POST' }),
+			await call({
+				action: 'route_trace',
+				route_path: '/api/users',
+				method: 'POST',
+			}),
 		);
 		expect(r.success).toBe(true);
 		expect(r.linksSupported).toBe(true);
@@ -61,12 +65,14 @@ describe('repo_map: route_trace (KG-15, issue #1536)', () => {
 		const security = route.security as Array<Record<string, unknown>>;
 		expect(
 			security.some(
-				(entry) => (entry.fact as Record<string, unknown>).kind === 'authentication',
+				(entry) =>
+					(entry.fact as Record<string, unknown>).kind === 'authentication',
 			),
 		).toBe(true);
 		expect(
 			security.some(
-				(entry) => (entry.fact as Record<string, unknown>).kind === 'input_validation',
+				(entry) =>
+					(entry.fact as Record<string, unknown>).kind === 'input_validation',
 			),
 		).toBe(true);
 		expect(route.tests).toEqual(['src/services/user-service.test.ts']);
@@ -95,7 +101,9 @@ describe('repo_map: route_trace (KG-15, issue #1536)', () => {
 		);
 		expect((byFile.routes as unknown[]).length).toBe(2);
 
-		const bySymbol = parse(await call({ action: 'route_trace', symbol: 'GET' }));
+		const bySymbol = parse(
+			await call({ action: 'route_trace', symbol: 'GET' }),
+		);
 		const symbolRoutes = bySymbol.routes as Array<Record<string, unknown>>;
 		expect(symbolRoutes.length).toBe(1);
 		expect(symbolRoutes[0].route).toMatchObject({
@@ -117,22 +125,60 @@ describe('repo_map: route_trace (KG-15, issue #1536)', () => {
 		expect(traversal.error).toContain('traversal');
 
 		const absolute = parse(
-			await call({ action: 'route_trace', file: path.resolve(tmp, 'app/api/users/route.ts') }),
+			await call({
+				action: 'route_trace',
+				file: path.resolve(tmp, 'app/api/users/route.ts'),
+			}),
 		);
 		expect(absolute.success).toBe(false);
 		expect(absolute.error).toContain('workspace-relative');
 
 		const badMethod = parse(
-			await call({ action: 'route_trace', route_path: '/api/users', method: 'FETCH' }),
+			await call({
+				action: 'route_trace',
+				route_path: '/api/users',
+				method: 'FETCH',
+			}),
 		);
 		expect(badMethod.success).toBe(false);
 		expect(badMethod.error).toContain('method');
 	});
 
 	test('errors when the graph is missing', async () => {
-		const r = parse(await call({ action: 'route_trace', route_path: '/api/users' }));
+		const r = parse(
+			await call({ action: 'route_trace', route_path: '/api/users' }),
+		);
 		expect(r.success).toBe(false);
 		expect(r.error).toContain('No repo graph found');
+	});
+
+	test('async builder persists ontology.links on built graph nodes (direct assertion)', async () => {
+		await call({ action: 'build' });
+		// PRR-020: the action tests prove links indirectly via pack output; this
+		// asserts the persisted node shape directly.
+		const graphPath = path.join(tmp, '.swarm/repo-graph.json');
+		const graph = JSON.parse(fs.readFileSync(graphPath, 'utf-8')) as {
+			nodes: Record<
+				string,
+				{
+					moduleName: string;
+					ontology?: { links?: Array<Record<string, unknown>> };
+				}
+			>;
+		};
+		const routeNode = Object.values(graph.nodes).find((n) =>
+			n.moduleName.replace(/\\/g, '/').endsWith('app/api/users/route.ts'),
+		);
+		expect(routeNode).toBeDefined();
+		const handles = (routeNode?.ontology?.links ?? []).filter(
+			(l) => l.kind === 'HANDLES_ROUTE',
+		);
+		expect(handles.length).toBe(2);
+		expect(handles.map((l) => l.subject)).toEqual(
+			expect.arrayContaining(['POST /api/users', 'GET /api/users']),
+		);
+		expect(handles.every((l) => l.confidence === 'high')).toBe(true);
+		expect(handles.every((l) => typeof l.symbol === 'string')).toBe(true);
 	});
 
 	test('degrades handler binding on a pre-1.7.0 graph but still returns the pack', async () => {
@@ -164,9 +210,6 @@ describe('repo_map: route_trace (KG-15, issue #1536)', () => {
 		// Edges/facts sections still populate on old graphs.
 		expect(routes[0].services).toEqual(['src/services/user-service.ts']);
 		expect((routes[0].dataOperations as unknown[]).length).toBeGreaterThan(0);
-		expect(
-			((routes[0].warnings as string[]) ?? (r.warnings as string[])).join?.('\n'),
-		).toBeDefined();
 		expect((r.warnings as string[]).join('\n')).toContain(
 			'graph predates ontology links',
 		);

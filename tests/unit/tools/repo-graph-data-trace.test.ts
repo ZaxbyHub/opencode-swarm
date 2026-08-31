@@ -59,48 +59,119 @@ function makeGraph(schemaVersion = '1.7.0', withLinks = true): RepoGraph {
 	const reader = node('src/readers.ts', {
 		ontology: ontology(['data_module'], {
 			dataOperations: [
-				{ operation: 'read', access: 'orm', entity: 'user', line: 3, evidence: 'prisma.user.findMany' },
+				{
+					operation: 'read',
+					access: 'orm',
+					entity: 'user',
+					line: 3,
+					evidence: 'prisma.user.findMany',
+				},
 			],
 			links: withLinks
-				? [{ kind: 'READS', subject: 'user', line: 3, evidence: 'prisma.user.findMany', confidence: 'medium' }]
+				? [
+						{
+							kind: 'READS',
+							subject: 'user',
+							line: 3,
+							evidence: 'prisma.user.findMany',
+							confidence: 'medium',
+						},
+					]
 				: [],
 		}),
 	});
 	const writer = node('src/writers.ts', {
 		ontology: ontology(['data_module'], {
 			dataOperations: [
-				{ operation: 'write', access: 'orm', entity: 'user', line: 2, evidence: 'prisma.user.create' },
+				{
+					operation: 'write',
+					access: 'orm',
+					entity: 'user',
+					line: 2,
+					evidence: 'prisma.user.create',
+				},
 			],
 			links: withLinks
-				? [{ kind: 'WRITES', subject: 'user', line: 2, evidence: 'prisma.user.create', confidence: 'medium' }]
+				? [
+						{
+							kind: 'WRITES',
+							subject: 'user',
+							line: 2,
+							evidence: 'prisma.user.create',
+							confidence: 'medium',
+						},
+					]
 				: [],
 		}),
 	});
 	const deleter = node('src/deleters.ts', {
 		ontology: ontology(['data_module'], {
 			dataOperations: [
-				{ operation: 'delete', access: 'orm', entity: 'user', line: 4, evidence: 'prisma.user.delete' },
+				{
+					operation: 'delete',
+					access: 'orm',
+					entity: 'user',
+					line: 4,
+					evidence: 'prisma.user.delete',
+				},
 			],
 			links: withLinks
-				? [{ kind: 'DELETES', subject: 'user', line: 4, evidence: 'prisma.user.delete', confidence: 'medium' }]
+				? [
+						{
+							kind: 'DELETES',
+							subject: 'user',
+							line: 4,
+							evidence: 'prisma.user.delete',
+							confidence: 'medium',
+						},
+					]
 				: [],
 		}),
 	});
 	const route = node('app/api/users/route.ts', {
 		ontology: ontology(['api_route'], {
-			routes: [{ method: 'DELETE', path: '/api/users', line: 1, source: 'handler_export' }],
+			routes: [
+				{
+					method: 'DELETE',
+					path: '/api/users',
+					line: 1,
+					source: 'handler_export',
+				},
+			],
 			dataOperations: [
-				{ operation: 'delete', access: 'orm', entity: 'user', line: 2, evidence: 'prisma.user.delete' },
+				{
+					operation: 'delete',
+					access: 'orm',
+					entity: 'user',
+					line: 2,
+					evidence: 'prisma.user.delete',
+				},
 			],
 			links: withLinks
-				? [{ kind: 'DELETES', subject: 'user', line: 2, evidence: 'prisma.user.delete', confidence: 'medium' }]
+				? [
+						{
+							kind: 'DELETES',
+							subject: 'user',
+							line: 2,
+							evidence: 'prisma.user.delete',
+							confidence: 'medium',
+						},
+					]
 				: [],
 		}),
 	});
 	const config = node('src/config.ts', {
 		ontology: ontology(['config'], {
 			links: withLinks
-				? [{ kind: 'CONFIGURES', subject: 'USERS_TABLE', line: 1, evidence: 'process.env.USERS_TABLE', confidence: 'medium' }]
+				? [
+						{
+							kind: 'CONFIGURES',
+							subject: 'USERS_TABLE',
+							line: 1,
+							evidence: 'process.env.USERS_TABLE',
+							confidence: 'medium',
+						},
+					]
 				: [],
 		}),
 	});
@@ -122,7 +193,12 @@ function makeGraph(schemaVersion = '1.7.0', withLinks = true): RepoGraph {
 			fileEdge('src/readers.test.ts', 'src/readers.ts'),
 			fileEdge('src/deleters.ts', 'app/api/users/route.ts'),
 		],
-		metadata: { generatedAt: '1', generator: 'test', nodeCount: 6, edgeCount: 2 },
+		metadata: {
+			generatedAt: '1',
+			generator: 'test',
+			nodeCount: 6,
+			edgeCount: 2,
+		},
 	};
 }
 
@@ -179,7 +255,25 @@ describe('traceData (KG-15, issue #1536)', () => {
 
 		const bySymbol = traceData(makeGraph(), { symbol: 'createUser' });
 		expect(bySymbol.writers).toEqual([]);
-		expect(bySymbol.warnings.join('\n')).toContain('no graph file exports symbol');
+		expect(bySymbol.warnings.join('\n')).toContain(
+			'no graph file exports symbol',
+		);
+	});
+
+	test('entity+file combine: entity filters within the file-scoped nodes', () => {
+		// PRR-013: file anchors scope; entity then filters.
+		const result = traceData(makeGraph(), {
+			entity: 'user',
+			file: 'src/writers.ts',
+		});
+		expect(result.writers.length).toBe(1);
+		expect(result.readers).toEqual([]);
+		// An entity the scoped file does not touch yields empty, not other files.
+		const miss = traceData(makeGraph(), {
+			entity: 'user',
+			file: 'src/config.ts',
+		});
+		expect(miss.writers).toEqual([]);
 	});
 
 	test('pre-1.7.0 graphs fall back to DataOperationFact matches', () => {
@@ -194,13 +288,17 @@ describe('traceData (KG-15, issue #1536)', () => {
 		const result = traceData(makeGraph(), { entity: 'user' });
 		// readers.test.ts only imports readers.ts; writers/deleters/routes are untested,
 		// but tests exist for a touching file, so the note must NOT fire.
-		expect(result.riskNotes.join('\n').includes('no tests detected')).toBe(false);
+		expect(result.riskNotes.join('\n').includes('no tests detected')).toBe(
+			false,
+		);
 
 		const graph = makeGraph();
 		delete graph.nodes[abs('src/readers.test.ts')];
 		resetQueryCache();
 		const untested = traceData(graph, { entity: 'user' });
-		expect(untested.riskNotes.join('\n')).toContain('no tests detected for user');
+		expect(untested.riskNotes.join('\n')).toContain(
+			'no tests detected for user',
+		);
 	});
 
 	test('unknown entities report softly with budget accounting', () => {
@@ -208,7 +306,9 @@ describe('traceData (KG-15, issue #1536)', () => {
 		expect(result.readers).toEqual([]);
 		expect(result.writers).toEqual([]);
 		expect(result.subject).toBeNull();
-		expect(result.warnings.join('\n')).toContain('no data access matched entity');
+		expect(result.warnings.join('\n')).toContain(
+			'no data access matched entity',
+		);
 		expect(result.budget).toEqual({ returned: 0, dropped: 0 });
 	});
 
@@ -217,11 +317,29 @@ describe('traceData (KG-15, issue #1536)', () => {
 		const mixed = node('src/mixed.ts', {
 			ontology: ontology(['data_module'], {
 				dataOperations: [
-					{ operation: 'write', access: 'orm', entity: 'user', line: 7, evidence: 'tx.user.create(a); tx.order.create(b);' },
-					{ operation: 'write', access: 'orm', entity: 'order', line: 7, evidence: 'tx.user.create(a); tx.order.create(b);' },
+					{
+						operation: 'write',
+						access: 'orm',
+						entity: 'user',
+						line: 7,
+						evidence: 'tx.user.create(a); tx.order.create(b);',
+					},
+					{
+						operation: 'write',
+						access: 'orm',
+						entity: 'order',
+						line: 7,
+						evidence: 'tx.user.create(a); tx.order.create(b);',
+					},
 				],
 				links: [
-					{ kind: 'WRITES', subject: 'user', line: 7, evidence: 'tx.user.create(a);', confidence: 'medium' },
+					{
+						kind: 'WRITES',
+						subject: 'user',
+						line: 7,
+						evidence: 'tx.user.create(a);',
+						confidence: 'medium',
+					},
 				],
 			}),
 		});
@@ -243,10 +361,22 @@ describe('traceData (KG-15, issue #1536)', () => {
 			ontology: ontology(['data_module'], {
 				packageBoundary: 'app',
 				dataOperations: [
-					{ operation: 'write', access: 'orm', entity: 'user', line: 1, evidence: 'db.user.create({})' },
+					{
+						operation: 'write',
+						access: 'orm',
+						entity: 'user',
+						line: 1,
+						evidence: 'db.user.create({})',
+					},
 				],
 				links: [
-					{ kind: 'WRITES', subject: 'user', line: 1, evidence: 'db.user.create({})', confidence: 'medium' },
+					{
+						kind: 'WRITES',
+						subject: 'user',
+						line: 1,
+						evidence: 'db.user.create({})',
+						confidence: 'medium',
+					},
 				],
 			}),
 		});

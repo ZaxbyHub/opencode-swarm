@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import { repo_map } from '../../../src/tools/repo-map';
-import { writeKg15Workspace } from './repo-map-kg15.fixture';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import { writeKg15Workspace } from './repo-map-kg15.fixture';
 
 let tmp = '';
 
@@ -59,7 +59,9 @@ describe('repo_map: data_trace (KG-15, issue #1536)', () => {
 
 	test('traces a config/env key via CONFIGURES', async () => {
 		await call({ action: 'build' });
-		const r = parse(await call({ action: 'data_trace', entity: 'USERS_TABLE' }));
+		const r = parse(
+			await call({ action: 'data_trace', entity: 'USERS_TABLE' }),
+		);
 		expect(r.success).toBe(true);
 		const configurers = r.configurers as Array<Record<string, unknown>>;
 		expect(configurers.length).toBe(1);
@@ -80,7 +82,9 @@ describe('repo_map: data_trace (KG-15, issue #1536)', () => {
 		expect(writers[0].file).toBe('app/api/orders/route.ts');
 		const routes = r.routes as Array<Record<string, unknown>>;
 		expect(routes.length).toBe(1);
-		expect((routes[0].fact as Record<string, unknown>).path).toBe('/api/orders');
+		expect((routes[0].fact as Record<string, unknown>).path).toBe(
+			'/api/orders',
+		);
 		expect((r.riskNotes as string[]).join('\n')).toContain(
 			'no tests detected for order',
 		);
@@ -89,7 +93,10 @@ describe('repo_map: data_trace (KG-15, issue #1536)', () => {
 	test('scopes by file and by symbol', async () => {
 		await call({ action: 'build' });
 		const byFile = parse(
-			await call({ action: 'data_trace', file: 'src/services/user-service.ts' }),
+			await call({
+				action: 'data_trace',
+				file: 'src/services/user-service.ts',
+			}),
 		);
 		expect((byFile.writers as unknown[]).length).toBeGreaterThan(0);
 
@@ -129,7 +136,9 @@ describe('repo_map: data_trace (KG-15, issue #1536)', () => {
 		expect(noTarget.success).toBe(false);
 		expect(noTarget.error).toContain('entity');
 
-		const badEntity = parse(await call({ action: 'data_trace', entity: '../../*' }));
+		const badEntity = parse(
+			await call({ action: 'data_trace', entity: '../../*' }),
+		);
 		expect(badEntity.success).toBe(false);
 		expect(badEntity.error).toContain('entity');
 

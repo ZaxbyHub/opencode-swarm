@@ -2,8 +2,8 @@ import { describe, expect, test } from 'bun:test';
 import * as path from 'node:path';
 import {
 	type FileOntology,
-	type GraphNode,
 	GRAPH_SCHEMA_VERSION,
+	type GraphNode,
 	normalizeGraphPath,
 	type OntologyLink,
 	validateGraphNode,
@@ -72,20 +72,32 @@ describe('validateGraphNode: ontology.links (KG-15, issue #1536)', () => {
 	test('accepts links without optional fields and rejects malformed lines', () => {
 		expect(() =>
 			validateGraphNode(
-				baseNode(ontologyWith({ kind: 'READS', subject: 'user', confidence: 'low' })),
+				baseNode(
+					ontologyWith({ kind: 'READS', subject: 'user', confidence: 'low' }),
+				),
 			),
 		).not.toThrow();
 		expect(() =>
 			validateGraphNode(
 				baseNode(
-					ontologyWith({ kind: 'READS', subject: 'user', confidence: 'low', line: 0 }),
+					ontologyWith({
+						kind: 'READS',
+						subject: 'user',
+						confidence: 'low',
+						line: 0,
+					}),
 				),
 			),
 		).toThrow(/ontology\.links\.line/);
 		expect(() =>
 			validateGraphNode(
 				baseNode(
-					ontologyWith({ kind: 'READS', subject: 'user', confidence: 'low', line: 1.5 }),
+					ontologyWith({
+						kind: 'READS',
+						subject: 'user',
+						confidence: 'low',
+						line: 1.5,
+					}),
 				),
 			),
 		).toThrow(/ontology\.links\.line/);
@@ -108,20 +120,30 @@ describe('validateGraphNode: ontology.links (KG-15, issue #1536)', () => {
 		expect(() =>
 			validateGraphNode(
 				baseNode(
-					ontologyWith({ kind: 'CONFIGURES', subject: 'KEY\n', confidence: 'low' }),
+					ontologyWith({
+						kind: 'CONFIGURES',
+						subject: 'KEY\n',
+						confidence: 'low',
+					}),
 				),
 			),
 		).toThrow(/control characters/);
 		expect(() =>
 			validateGraphNode(
 				baseNode(
-					ontologyWith({ kind: 'CONFIGURES', subject: '../../etc', confidence: 'low' }),
+					ontologyWith({
+						kind: 'CONFIGURES',
+						subject: '../../etc',
+						confidence: 'low',
+					}),
 				),
 			),
 		).toThrow(/ontology\.links\.subject/);
 		expect(() =>
 			validateGraphNode(
-				baseNode(ontologyWith({ kind: 'READS', subject: ' user', confidence: 'low' })),
+				baseNode(
+					ontologyWith({ kind: 'READS', subject: ' user', confidence: 'low' }),
+				),
 			),
 		).toThrow(/ontology\.links\.subject/);
 		expect(() =>
@@ -135,6 +157,20 @@ describe('validateGraphNode: ontology.links (KG-15, issue #1536)', () => {
 				),
 			),
 		).toThrow(/ontology\.links\.subject/);
+	});
+
+	test('rejects traversal as a path segment, isolating hasTraversalSegment branches', () => {
+		// PRR-010: these subjects PASS the identifier-first character pattern
+		// (unlike '../../etc'), so hasTraversalSegment is the sole rejector.
+		for (const subject of ['GET /a/../b', 'GET /user/..']) {
+			expect(() =>
+				validateGraphNode(
+					baseNode(
+						ontologyWith({ kind: 'HANDLES_ROUTE', subject, confidence: 'low' }),
+					),
+				),
+			).toThrow(/ontology\.links\.subject/);
+		}
 	});
 
 	test('accepts router-call route subjects with query strings and regex fragments (regression)', () => {
@@ -167,7 +203,11 @@ describe('validateGraphNode: ontology.links (KG-15, issue #1536)', () => {
 		expect(() =>
 			validateGraphNode(
 				baseNode(
-					ontologyWith({ kind: 'HANDLES_ROUTE', subject: 'GET /"x"', confidence: 'low' }),
+					ontologyWith({
+						kind: 'HANDLES_ROUTE',
+						subject: 'GET /"x"',
+						confidence: 'low',
+					}),
 				),
 			),
 		).toThrow(/ontology\.links\.subject/);

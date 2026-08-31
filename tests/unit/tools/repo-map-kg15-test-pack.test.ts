@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import { repo_map } from '../../../src/tools/repo-map';
-import { writeKg15Workspace } from './repo-map-kg15.fixture';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import { writeKg15Workspace } from './repo-map-kg15.fixture';
 
 let tmp = '';
 
@@ -32,7 +32,9 @@ describe('repo_map: test_pack (KG-15, issue #1536)', () => {
 
 	test('packs tests for an implementation file with explicit-import coverage (colocated fixture)', async () => {
 		await call({ action: 'build' });
-		const r = parse(await call({ action: 'test_pack', file: 'src/lib/calc.ts' }));
+		const r = parse(
+			await call({ action: 'test_pack', file: 'src/lib/calc.ts' }),
+		);
 		expect(r.success).toBe(true);
 		expect(r.target).toEqual({
 			files: ['src/lib/calc.ts'],
@@ -49,7 +51,9 @@ describe('repo_map: test_pack (KG-15, issue #1536)', () => {
 		expect(tests[0].coveredSymbols).toEqual(['add']);
 		// unusedHelper has no detected coverage → uncovered + risk note hint.
 		const uncovered = r.uncoveredExports as Array<Record<string, unknown>>;
-		expect(uncovered).toEqual([{ file: 'src/lib/calc.ts', symbol: 'unusedHelper' }]);
+		expect(uncovered).toEqual([
+			{ file: 'src/lib/calc.ts', symbol: 'unusedHelper' },
+		]);
 		expect((r.riskNotes as string[]).join('\n')).toContain(
 			'1 exported symbol(s) without detected test coverage in src/lib/calc.ts',
 		);
@@ -57,7 +61,9 @@ describe('repo_map: test_pack (KG-15, issue #1536)', () => {
 
 	test('associates a non-importing colocated spec via the name heuristic', async () => {
 		await call({ action: 'build' });
-		const r = parse(await call({ action: 'test_pack', file: 'src/lib/widget.ts' }));
+		const r = parse(
+			await call({ action: 'test_pack', file: 'src/lib/widget.ts' }),
+		);
 		const tests = r.tests as Array<Record<string, unknown>>;
 		expect(tests.length).toBe(1);
 		expect(tests[0]).toMatchObject({
@@ -153,7 +159,9 @@ describe('repo_map: test_pack (KG-15, issue #1536)', () => {
 
 	test('warns when no tests exist for the target', async () => {
 		await call({ action: 'build' });
-		const r = parse(await call({ action: 'test_pack', file: 'app/api/orders/route.ts' }));
+		const r = parse(
+			await call({ action: 'test_pack', file: 'app/api/orders/route.ts' }),
+		);
 		expect(r.success).toBe(true);
 		expect(r.tests).toEqual([]);
 		expect((r.riskNotes as string[]).join('\n')).toContain(
@@ -167,7 +175,9 @@ describe('repo_map: test_pack (KG-15, issue #1536)', () => {
 		expect(noTarget.success).toBe(false);
 		expect(noTarget.error).toContain('test_pack requires');
 
-		const traversal = parse(await call({ action: 'test_pack', file: '../outside.ts' }));
+		const traversal = parse(
+			await call({ action: 'test_pack', file: '../outside.ts' }),
+		);
 		expect(traversal.success).toBe(false);
 		expect(traversal.error).toContain('traversal');
 
@@ -181,7 +191,9 @@ describe('repo_map: test_pack (KG-15, issue #1536)', () => {
 	});
 
 	test('errors when the graph is missing', async () => {
-		const r = parse(await call({ action: 'test_pack', file: 'src/lib/calc.ts' }));
+		const r = parse(
+			await call({ action: 'test_pack', file: 'src/lib/calc.ts' }),
+		);
 		expect(r.success).toBe(false);
 		expect(r.error).toContain('No repo graph found');
 	});

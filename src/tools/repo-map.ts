@@ -376,10 +376,10 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 		'"symbol_context" (focused definition-first context for one symbol — identity, stable symbol_id, signature, optional source, and direct callers/callees; needs file+symbol or symbol_id), ' +
 		'"impact_cone" (structured impact of changing a file or symbol — symbol-level callers/callees by depth with confidence, file-level blast radius and risk, affected tests, routes, data/security facts, package boundaries; needs file, optional symbol), ' +
 		'"diff_context" (map changed files or a unified diff to changed symbols and per-file impact cones; needs files or diff; diff paths must be workspace-relative and safe), ' +
-			'"graph_explain" (explain why a file/symbol/span is graph-relevant — definition, incoming/outgoing symbol edges with provenance evidence, file-level importers; needs file, optional symbol or line), ' +
-			'"route_trace" (change-risk pack for a route — handler + symbol binding with confidence, depth-1 services, data operations, auth/validation facts, unguarded-route findings, covering tests; needs route_path, file, or symbol; advisory, regex-based), ' +
-			'"data_trace" (change-risk pack for an entity/table/config/env key — readers, writers, deleters, configurers, touching routes, tests, and risk notes; needs entity, file, or symbol; advisory), ' +
-			'"test_pack" (tests, fixtures, helpers, and coverage hints for a file/symbol/changed files — explicit imports and colocated-name heuristics, missing-test warnings; needs file, files, symbol, or diff; never executes tests), ' +
+		'"graph_explain" (explain why a file/symbol/span is graph-relevant — definition, incoming/outgoing symbol edges with provenance evidence, file-level importers; needs file, optional symbol or line), ' +
+		'"route_trace" (change-risk pack for a route — handler + symbol binding with confidence, depth-1 services, data operations, auth/validation facts, unguarded-route findings, covering tests; needs route_path, file, or symbol; advisory, regex-based), ' +
+		'"data_trace" (change-risk pack for an entity/table/config/env key — readers, writers, deleters, configurers, touching routes, tests, and risk notes; needs entity, file, or symbol; advisory), ' +
+		'"test_pack" (tests, fixtures, helpers, and coverage hints for a file/symbol/changed files — explicit imports and colocated-name heuristics, missing-test warnings; needs file, files, symbol, or diff; never executes tests), ' +
 		'"graph_health" (freshness and bounded extraction diagnostics; no file required), ' +
 		'"ask" (zero-LLM file localization: pass a natural-language question to rank files by relevance via vocabulary expansion + IDF + PageRank; orientation only — read the located files before asserting anything about them). ' +
 		'Use this before refactoring shared modules to avoid breaking unseen consumers. ' +
@@ -534,16 +534,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				'For action="route_trace": route path to match, e.g. "/api/users" or "/api/users/[id]" (dynamic segments normalize to :param / :param*). Requires a leading slash; combined with the optional method filter.',
 			),
 		method: z
-			.enum([
-				'GET',
-				'POST',
-				'PUT',
-				'PATCH',
-				'DELETE',
-				'OPTIONS',
-				'HEAD',
-				'ALL',
-			])
+			.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD', 'ALL'])
 			.optional()
 			.describe(
 				'For action="route_trace": filter matched routes by HTTP method (routes stored as ALL match any filter).',
@@ -909,9 +900,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			}
 			try {
 				const result = traceRoute(graph, {
-					...(a.route_path !== undefined
-						? { routePath: a.route_path }
-						: {}),
+					...(a.route_path !== undefined ? { routePath: a.route_path } : {}),
 					...(a.method !== undefined ? { method: a.method } : {}),
 					...(fileTarget !== undefined ? { file: fileTarget } : {}),
 					...(a.symbol !== undefined ? { symbol: a.symbol } : {}),
@@ -929,10 +918,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				a.file === undefined &&
 				a.symbol === undefined
 			) {
-				return err(
-					action,
-					'data_trace requires `entity`, `file`, or `symbol`',
-				);
+				return err(action, 'data_trace requires `entity`, `file`, or `symbol`');
 			}
 			if (a.entity !== undefined) {
 				const eErr = validateEntity(a.entity);

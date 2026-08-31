@@ -270,51 +270,54 @@ export function traceRoute(
 		if (matches.length > topN * 10) break; // defensive scan bound
 	}
 
-	const routesOut: RouteTraceRoute[] = matches.slice(0, topN).map(({ node, fact }) => {
-		const handlerFile = rel(graph, node.filePath);
-		const binding = handlerBindingFor(node, fact, linksSupported);
-		const services = servicesOf(graph, node, topN);
-		const packFiles = [node.filePath];
-		for (const service of services) {
-			const serviceNode = getGraphNode(graph, service);
-			if (serviceNode) packFiles.push(serviceNode.filePath);
-		}
-		const dataOperations: Array<{ file: string; fact: DataOperationFact }> = [];
-		const security: Array<{ file: string; fact: SecurityFact }> = [];
-		for (const fileKey of packFiles) {
-			const packNode = getGraphNode(graph, fileKey);
-			const fileRel = rel(graph, packNode?.filePath ?? fileKey);
-			for (const dataFact of packNode?.ontology?.dataOperations ?? []) {
-				if (dataOperations.length >= PACK_ONTOLOGY_CAP) break;
-				dataOperations.push({ file: fileRel, fact: dataFact });
+	const routesOut: RouteTraceRoute[] = matches
+		.slice(0, topN)
+		.map(({ node, fact }) => {
+			const handlerFile = rel(graph, node.filePath);
+			const binding = handlerBindingFor(node, fact, linksSupported);
+			const services = servicesOf(graph, node, topN);
+			const packFiles = [node.filePath];
+			for (const service of services) {
+				const serviceNode = getGraphNode(graph, service);
+				if (serviceNode) packFiles.push(serviceNode.filePath);
 			}
-			for (const securityFact of packNode?.ontology?.security ?? []) {
-				if (security.length >= PACK_ONTOLOGY_CAP) break;
-				security.push({ file: fileRel, fact: securityFact });
+			const dataOperations: Array<{ file: string; fact: DataOperationFact }> =
+				[];
+			const security: Array<{ file: string; fact: SecurityFact }> = [];
+			for (const fileKey of packFiles) {
+				const packNode = getGraphNode(graph, fileKey);
+				const fileRel = rel(graph, packNode?.filePath ?? fileKey);
+				for (const dataFact of packNode?.ontology?.dataOperations ?? []) {
+					if (dataOperations.length >= PACK_ONTOLOGY_CAP) break;
+					dataOperations.push({ file: fileRel, fact: dataFact });
+				}
+				for (const securityFact of packNode?.ontology?.security ?? []) {
+					if (security.length >= PACK_ONTOLOGY_CAP) break;
+					security.push({ file: fileRel, fact: securityFact });
+				}
 			}
-		}
-		const findings: Array<{ file: string; finding: OntologyFinding }> = (
-			node.ontology?.findings ?? []
-		).map((finding) => ({ file: handlerFile, finding }));
-		const tests = testImportersOf(graph, packFiles, topN);
-		return {
-			route: {
-				method: fact.method,
-				path: fact.path,
-				line: fact.line ?? null,
-				source: fact.source,
-			},
-			file: handlerFile,
-			handlerSymbol: binding.symbol,
-			handlerConfidence: binding.confidence,
-			handlerEvidence: binding.evidence,
-			services,
-			dataOperations,
-			security,
-			findings,
-			tests,
-		};
-	});
+			const findings: Array<{ file: string; finding: OntologyFinding }> = (
+				node.ontology?.findings ?? []
+			).map((finding) => ({ file: handlerFile, finding }));
+			const tests = testImportersOf(graph, packFiles, topN);
+			return {
+				route: {
+					method: fact.method,
+					path: fact.path,
+					line: fact.line ?? null,
+					source: fact.source,
+				},
+				file: handlerFile,
+				handlerSymbol: binding.symbol,
+				handlerConfidence: binding.confidence,
+				handlerEvidence: binding.evidence,
+				services,
+				dataOperations,
+				security,
+				findings,
+				tests,
+			};
+		});
 
 	if (!linksSupported) {
 		warnings.push(linksRebuildWarning());
@@ -399,10 +402,7 @@ export function traceData(
 		for (const link of linksOf(node)) {
 			if (!isDataKind(link.kind)) continue;
 			if (entityLower !== undefined) {
-				if (
-					!link.subject ||
-					link.subject.toLowerCase() !== entityLower
-				) {
+				if (!link.subject || link.subject.toLowerCase() !== entityLower) {
 					continue;
 				}
 			} else if (!link.subject) {
@@ -430,7 +430,10 @@ export function traceData(
 		// same-line fact for a different entity always survives.
 		for (const fact of node.ontology?.dataOperations ?? []) {
 			if (!fact.entity) continue;
-			if (entityLower !== undefined && fact.entity.toLowerCase() !== entityLower) {
+			if (
+				entityLower !== undefined &&
+				fact.entity.toLowerCase() !== entityLower
+			) {
 				continue;
 			}
 			const kind = OPERATION_KIND[fact.operation];
@@ -457,9 +460,16 @@ export function traceData(
 		}
 	}
 
-	const cap = (list: DataTraceAccess[]): { kept: DataTraceAccess[]; dropped: number } => {
-		const sorted = [...list].sort((a, b) => a.file.localeCompare(b.file) || (a.line ?? 0) - (b.line ?? 0));
-		return { kept: sorted.slice(0, topN), dropped: Math.max(0, sorted.length - topN) };
+	const cap = (
+		list: DataTraceAccess[],
+	): { kept: DataTraceAccess[]; dropped: number } => {
+		const sorted = [...list].sort(
+			(a, b) => a.file.localeCompare(b.file) || (a.line ?? 0) - (b.line ?? 0),
+		);
+		return {
+			kept: sorted.slice(0, topN),
+			dropped: Math.max(0, sorted.length - topN),
+		};
 	};
 	const readers = cap(matches.filter((m) => m.kind === 'READS'));
 	const writers = cap(matches.filter((m) => m.kind === 'WRITES'));
@@ -553,7 +563,10 @@ function isFixtureModule(moduleName: string): boolean {
 	return FIXTURE_BASENAME_PATTERN.test(basename.replace(/\.[^.]+$/, ''));
 }
 
-function colocatedTestFor(graph: RepoGraph, target: GraphNode): GraphNode | undefined {
+function colocatedTestFor(
+	graph: RepoGraph,
+	target: GraphNode,
+): GraphNode | undefined {
 	const normalized = target.moduleName.replace(/\\/g, '/');
 	const dir = normalized.slice(0, normalized.lastIndexOf('/') + 1);
 	const base = (normalized.split('/').pop() ?? '').replace(/\.[^.]+$/, '');
@@ -621,7 +634,11 @@ export function buildTestPack(
 			);
 		}
 	};
-	const inputFiles = options.files?.length ? options.files : options.file ? [options.file] : [];
+	const inputFiles = options.files?.length
+		? [...new Set(options.files)]
+		: options.file
+			? [options.file]
+			: [];
 	if (inputFiles.length > 0) {
 		noteTargetCap(inputFiles.length);
 		for (const input of inputFiles.slice(0, PACK_MAX_TARGET_FILES)) {

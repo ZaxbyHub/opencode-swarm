@@ -65,14 +65,45 @@ function makeGraph(schemaVersion = '1.7.0'): RepoGraph {
 		exports: ['POST', 'GET'],
 		ontology: ontology(['api_route'], {
 			routes: [
-				{ method: 'POST', path: '/api/users', line: 5, source: 'handler_export' },
-				{ method: 'GET', path: '/api/users', line: 9, source: 'handler_export' },
+				{
+					method: 'POST',
+					path: '/api/users',
+					line: 5,
+					source: 'handler_export',
+				},
+				{
+					method: 'GET',
+					path: '/api/users',
+					line: 9,
+					source: 'handler_export',
+				},
 			],
-			security: [{ kind: 'authentication', line: 6, evidence: 'getServerSession()', confidence: 'high' }],
+			security: [
+				{
+					kind: 'authentication',
+					line: 6,
+					evidence: 'getServerSession()',
+					confidence: 'high',
+				},
+			],
 			findings: [],
 			links: [
-				{ kind: 'HANDLES_ROUTE', subject: 'POST /api/users', line: 5, evidence: 'export async function POST', confidence: 'high', symbol: 'POST' },
-				{ kind: 'HANDLES_ROUTE', subject: 'GET /api/users', line: 9, evidence: 'export async function GET', confidence: 'high', symbol: 'GET' },
+				{
+					kind: 'HANDLES_ROUTE',
+					subject: 'POST /api/users',
+					line: 5,
+					evidence: 'export async function POST',
+					confidence: 'high',
+					symbol: 'POST',
+				},
+				{
+					kind: 'HANDLES_ROUTE',
+					subject: 'GET /api/users',
+					line: 9,
+					evidence: 'export async function GET',
+					confidence: 'high',
+					symbol: 'GET',
+				},
 			],
 		}),
 	});
@@ -80,10 +111,22 @@ function makeGraph(schemaVersion = '1.7.0'): RepoGraph {
 		exports: ['createUser'],
 		ontology: ontology(['service_module', 'data_module'], {
 			dataOperations: [
-				{ operation: 'write', access: 'orm', entity: 'user', line: 2, evidence: 'prisma.user.create' },
+				{
+					operation: 'write',
+					access: 'orm',
+					entity: 'user',
+					line: 2,
+					evidence: 'prisma.user.create',
+				},
 			],
 			links: [
-				{ kind: 'WRITES', subject: 'user', line: 2, evidence: 'prisma.user.create', confidence: 'medium' },
+				{
+					kind: 'WRITES',
+					subject: 'user',
+					line: 2,
+					evidence: 'prisma.user.create',
+					confidence: 'medium',
+				},
 			],
 		}),
 	});
@@ -105,12 +148,21 @@ function makeGraph(schemaVersion = '1.7.0'): RepoGraph {
 				importedSymbols: ['createUser'],
 				usedSymbols: ['createUser'],
 			}),
-			fileEdge('src/services/user-service.test.ts', 'src/services/user-service.ts', {
-				importedSymbols: ['createUser'],
-				usedSymbols: ['createUser'],
-			}),
+			fileEdge(
+				'src/services/user-service.test.ts',
+				'src/services/user-service.ts',
+				{
+					importedSymbols: ['createUser'],
+					usedSymbols: ['createUser'],
+				},
+			),
 		],
-		metadata: { generatedAt: '1', generator: 'test', nodeCount: 3, edgeCount: 2 },
+		metadata: {
+			generatedAt: '1',
+			generator: 'test',
+			nodeCount: 3,
+			edgeCount: 2,
+		},
 	};
 }
 
@@ -121,7 +173,10 @@ beforeEach(() => {
 describe('traceRoute (KG-15, issue #1536)', () => {
 	test('matches by normalized path + method and binds the handler via links', () => {
 		const graph = makeGraph();
-		const result = traceRoute(graph, { routePath: '/api/users', method: 'POST' });
+		const result = traceRoute(graph, {
+			routePath: '/api/users',
+			method: 'POST',
+		});
 		expect(result.routes.length).toBe(1);
 		const route = result.routes[0];
 		expect(route.file).toBe('app/api/users/route.ts');
@@ -138,7 +193,12 @@ describe('traceRoute (KG-15, issue #1536)', () => {
 	test('dynamic-segment input normalizes to the stored :param form', () => {
 		const graph = makeGraph();
 		graph.nodes[abs('app/api/users/route.ts')].ontology!.routes = [
-			{ method: 'GET', path: '/api/users/:id', line: 1, source: 'handler_export' },
+			{
+				method: 'GET',
+				path: '/api/users/:id',
+				line: 1,
+				source: 'handler_export',
+			},
 		];
 		const result = traceRoute(graph, { routePath: '/api/users/[id]' });
 		expect(result.routes.length).toBe(1);
@@ -158,7 +218,10 @@ describe('traceRoute (KG-15, issue #1536)', () => {
 
 	test('top_n bounds routes with budget + truncated accounting', () => {
 		const graph = makeGraph();
-		const result = traceRoute(graph, { file: 'app/api/users/route.ts', topN: 1 });
+		const result = traceRoute(graph, {
+			file: 'app/api/users/route.ts',
+			topN: 1,
+		});
 		expect(result.routes.length).toBe(1);
 		expect(result.budget).toEqual({ returned: 1, dropped: 1 });
 		expect(result.truncated).toBe(true);
@@ -179,12 +242,17 @@ describe('traceRoute (KG-15, issue #1536)', () => {
 	test('pre-1.7.0 graphs degrade handler confidence but keep the pack', () => {
 		const graph = makeGraph('1.6.0');
 		for (const node of Object.values(graph.nodes)) node.ontology!.links = [];
-		const result = traceRoute(graph, { routePath: '/api/users', method: 'POST' });
+		const result = traceRoute(graph, {
+			routePath: '/api/users',
+			method: 'POST',
+		});
 		expect(result.linksSupported).toBe(false);
 		expect(result.routes[0].handlerSymbol).toBe('POST');
 		expect(result.routes[0].handlerConfidence).toBeNull();
 		expect(result.routes[0].services).toEqual(['src/services/user-service.ts']);
-		expect(result.warnings.join('\n')).toContain('graph predates ontology links');
+		expect(result.warnings.join('\n')).toContain(
+			'graph predates ontology links',
+		);
 	});
 
 	test('handler-file findings surface (unguarded mutating route)', () => {
@@ -194,11 +262,15 @@ describe('traceRoute (KG-15, issue #1536)', () => {
 			{
 				code: 'api_route_without_detected_auth',
 				severity: 'medium',
-				message: 'No authentication, authorization, or CSRF guard was detected near this route.',
+				message:
+					'No authentication, authorization, or CSRF guard was detected near this route.',
 				line: 5,
 			},
 		];
-		const result = traceRoute(graph, { routePath: '/api/users', method: 'POST' });
+		const result = traceRoute(graph, {
+			routePath: '/api/users',
+			method: 'POST',
+		});
 		expect(result.routes[0].findings.length).toBe(1);
 		expect(result.routes[0].findings[0].finding.code).toBe(
 			'api_route_without_detected_auth',
@@ -208,16 +280,59 @@ describe('traceRoute (KG-15, issue #1536)', () => {
 	test('method and symbol filters compose with file targets (review regression)', () => {
 		const graph = makeGraph();
 		// file + method: only that method's routes (was silently ignored).
-		const byFileGet = traceRoute(graph, { file: 'app/api/users/route.ts', method: 'GET' });
+		const byFileGet = traceRoute(graph, {
+			file: 'app/api/users/route.ts',
+			method: 'GET',
+		});
 		expect(byFileGet.routes.length).toBe(1);
 		expect(byFileGet.routes[0].route.method).toBe('GET');
 		// symbol + method: both filters apply.
 		const bySymbolPost = traceRoute(graph, { symbol: 'POST', method: 'GET' });
 		expect(bySymbolPost.routes).toEqual([]);
 		// route_path + symbol: both filters apply (AND).
-		const byPathSymbol = traceRoute(graph, { routePath: '/api/users', symbol: 'POST' });
+		const byPathSymbol = traceRoute(graph, {
+			routePath: '/api/users',
+			symbol: 'POST',
+		});
 		expect(byPathSymbol.routes.length).toBe(1);
 		expect(byPathSymbol.routes[0].route.method).toBe('POST');
+	});
+
+	test('method-only input filters across the whole graph at the query layer', () => {
+		// PRR-011: reachable only via direct query-layer calls (the tool layer
+		// requires a target), but the filter composes with the node-wide scope.
+		const graph = makeGraph();
+		const result = traceRoute(graph, { method: 'GET' });
+		expect(result.routes.length).toBe(1);
+		expect(result.routes[0].route.method).toBe('GET');
+	});
+
+	test('dataOperations and security sections cap at 20 (PACK_ONTOLOGY_CAP)', () => {
+		// PRR-024: 30 facts in must yield exactly 20 out, per section.
+		const graph = makeGraph();
+		graph.nodes[abs('app/api/users/route.ts')].ontology!.dataOperations =
+			Array.from({ length: 30 }, (_, i) => ({
+				operation: 'read' as const,
+				access: 'orm' as const,
+				entity: `t${i}`,
+				line: i + 1,
+				evidence: `prisma.t${i}.findMany`,
+			}));
+		graph.nodes[abs('app/api/users/route.ts')].ontology!.security = Array.from(
+			{ length: 30 },
+			(_, i) => ({
+				kind: 'authentication' as const,
+				line: i + 1,
+				evidence: `guard ${i}`,
+				confidence: 'high' as const,
+			}),
+		);
+		const result = traceRoute(graph, {
+			routePath: '/api/users',
+			method: 'POST',
+		});
+		expect(result.routes[0].dataOperations.length).toBe(20);
+		expect(result.routes[0].security.length).toBe(20);
 	});
 
 	test('a route stored as ALL matches any method filter', () => {
@@ -225,7 +340,10 @@ describe('traceRoute (KG-15, issue #1536)', () => {
 		graph.nodes[abs('app/api/users/route.ts')].ontology!.routes = [
 			{ method: 'ALL', path: '/api/anything', source: 'file_path' },
 		];
-		const result = traceRoute(graph, { routePath: '/api/anything', method: 'DELETE' });
+		const result = traceRoute(graph, {
+			routePath: '/api/anything',
+			method: 'DELETE',
+		});
 		expect(result.routes.length).toBe(1);
 		expect(result.routes[0].route.method).toBe('ALL');
 		expect(result.routes[0].handlerSymbol).toBeNull();
