@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import * as os from 'node:os';
 import { executeSubmitPrReviewResult } from '../../../src/tools/submit-pr-review-result.js';
+import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 function validArgs(): Record<string, unknown> {
 	return {
@@ -32,17 +32,19 @@ function parseResult(value: string): { success: boolean; message?: string } {
 
 describe('submit_pr_review_result public validation boundary (#2384 FB-004)', () => {
 	test('rejects a missing authenticated child session', async () => {
+		const directory = canonicalTmpDir();
 		const result = parseResult(
-			await executeSubmitPrReviewResult(validArgs(), os.tmpdir()),
+			await executeSubmitPrReviewResult(validArgs(), directory),
 		);
 		expect(result.success).toBeFalse();
 		expect(result.message).toContain('authenticated child session');
 	});
 
 	test('rejects malformed top-level arguments before durable submission', async () => {
+		const directory = canonicalTmpDir();
 		const args = { ...validArgs(), unexpected: true };
 		const result = parseResult(
-			await executeSubmitPrReviewResult(args, os.tmpdir(), {
+			await executeSubmitPrReviewResult(args, directory, {
 				sessionID: 'child-2384',
 			}),
 		);
@@ -51,13 +53,14 @@ describe('submit_pr_review_result public validation boundary (#2384 FB-004)', ()
 	});
 
 	test('rejects invalid lane dimensions before durable submission', async () => {
+		const directory = canonicalTmpDir();
 		const args = validArgs();
 		args.result = {
 			...(args.result as Record<string, unknown>),
 			creditedLanes: ['security-trust'],
 		};
 		const result = parseResult(
-			await executeSubmitPrReviewResult(args, os.tmpdir(), {
+			await executeSubmitPrReviewResult(args, directory, {
 				sessionID: 'child-2384',
 			}),
 		);
@@ -66,6 +69,7 @@ describe('submit_pr_review_result public validation boundary (#2384 FB-004)', ()
 	});
 
 	test('rejects findings with missing or unknown risk metadata', async () => {
+		const directory = canonicalTmpDir();
 		for (const finding of [
 			{
 				id: 'finding-missing-risk',
@@ -99,7 +103,7 @@ describe('submit_pr_review_result public validation boundary (#2384 FB-004)', ()
 				unresolved: [],
 			};
 			const result = parseResult(
-				await executeSubmitPrReviewResult(args, os.tmpdir(), {
+				await executeSubmitPrReviewResult(args, directory, {
 					sessionID: 'child-2384',
 				}),
 			);
