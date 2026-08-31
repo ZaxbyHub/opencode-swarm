@@ -1351,7 +1351,7 @@ function buildTestCommand(
 			return args;
 		}
 		case 'vitest': {
-			const args = resolveLocalNodeTool(
+			const args = _internals.resolveLocalNodeTool(
 				'vitest',
 				[
 					'run',
@@ -1370,7 +1370,7 @@ function buildTestCommand(
 			return args;
 		}
 		case 'jest': {
-			const args = resolveLocalNodeTool('jest', ['--json'], baseDir);
+			const args = _internals.resolveLocalNodeTool('jest', ['--json'], baseDir);
 			if (!args) return null;
 			if (coverage) args.push('--coverage');
 			if (bail) args.push('--bail');
@@ -1380,7 +1380,7 @@ function buildTestCommand(
 			return args;
 		}
 		case 'mocha': {
-			const args = resolveLocalNodeTool('mocha', [], baseDir);
+			const args = _internals.resolveLocalNodeTool('mocha', [], baseDir);
 			if (!args) return null;
 			// Mocha doesn't have built-in coverage, skip if coverage requested
 			if (bail) args.push('--bail');
@@ -3371,6 +3371,7 @@ export const _internals: {
 	existsSync: typeof fs.existsSync;
 	readdirSync: typeof fs.readdirSync;
 	readFileSync: typeof fs.readFileSync;
+	resolveLocalNodeTool: typeof resolveLocalNodeTool;
 	bunSpawn: typeof bunSpawn;
 	buildNativeTargetCommand: typeof buildNativeTargetCommand;
 	formatNativeHistoryTestFile: typeof formatNativeHistoryTestFile;
@@ -3383,6 +3384,7 @@ export const _internals: {
 	existsSync: fs.existsSync,
 	readdirSync: fs.readdirSync,
 	readFileSync: fs.readFileSync,
+	resolveLocalNodeTool,
 	bunSpawn,
 	buildNativeTargetCommand,
 	formatNativeHistoryTestFile,

@@ -70,9 +70,7 @@ describe('local-only command resolution (#2303)', () => {
 			(binary) => binary === 'node',
 			'win32',
 		);
-		expect(result?.shellCommand).toBe(
-			'node_modules\\.bin\\tsc.cmd --noEmit',
-		);
+		expect(result?.shellCommand).toBe('node_modules\\.bin\\tsc.cmd --noEmit');
 		expect(result?.shellCommand).not.toContain(dir);
 	});
 
