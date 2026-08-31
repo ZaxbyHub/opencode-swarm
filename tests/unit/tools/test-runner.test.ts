@@ -36,14 +36,7 @@ const {
 	runTests,
 } = testRunnerModule;
 
-/**
- * Build a Bun.spawn stub that emits vitest-style JSON on stdout, so the
- * test-runner's full execute -> buildTestCommand -> runTests -> parseTestOutput
- * vitest path can be exercised deterministically without spawning a real
- * `npx vitest` (which would require a network fetch when node_modules/vitest is
- * absent — the source of intermittent coverage-gate timeouts). Mirrors the
- * rspec Bun.spawn stub pattern used later in this file.
- */
+/** Emit deterministic vitest-style JSON without spawning a subprocess. */
 function makeVitestSpawnStub(result: {
 	passed: number;
 	failed: number;
@@ -79,6 +72,15 @@ function makeVitestSpawnStub(result: {
 			exitCode: result.failed > 0 ? 1 : 0,
 			kill: () => {},
 		}) as ReturnType<typeof Bun.spawn>) as typeof Bun.spawn;
+}
+
+function installLocalNodeTool(baseDir: string, tool: string): void {
+	const binDir = path.join(baseDir, 'node_modules', '.bin');
+	fs.mkdirSync(binDir, { recursive: true });
+	fs.writeFileSync(
+		path.join(binDir, process.platform === 'win32' ? `${tool}.cmd` : tool),
+		'',
+	);
 }
 
 describe('test-runner.ts - Constants and Types', () => {
@@ -714,13 +716,6 @@ describe('test-runner.ts - Interactive Bulk-Execution Guards', () => {
 		expect(parsed.message).toContain('scope "graph"');
 	});
 
-	// Previously spawned `npx vitest` in a temp dir without node_modules installed,
-	// which made the test depend on an npx network fetch and intermittently time
-	// out under the per-file coverage gate. The execution path is now exercised
-	// deterministically by stubbing Bun.spawn to emit vitest-style JSON (mirrors
-	// the rspec stub pattern below), so the test still validates the full
-	// execute -> buildTestCommand -> runTests -> parseTestOutput vitest path
-	// without any subprocess or network dependency.
 	test('allows Narrow scope requests to execute normally', async () => {
 		const tempDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-narrow-')),
@@ -737,6 +732,7 @@ describe('test-runner.ts - Interactive Bulk-Execution Guards', () => {
 				devDependencies: { vitest: '^1.0.0' },
 			}),
 		);
+		installLocalNodeTool(tempDir, 'vitest');
 		fs.mkdirSync('src', { recursive: true });
 		fs.writeFileSync(
 			'src/utils.ts',
@@ -1062,9 +1058,6 @@ describe('test-runner.ts - scope:"all" gated access (env-only)', () => {
 			})();
 		}, 30000);
 
-		// Previously spawned `npx vitest` in a temp dir without node_modules
-		// installed (network fetch → intermittent coverage-gate timeout). Now
-		// stubbed to emit a failing vitest JSON result deterministically.
 		test('returns outcome "regression" when tests fail', async () => {
 			const tempDir = fs.realpathSync(
 				fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-fail-')),
@@ -1079,6 +1072,7 @@ describe('test-runner.ts - scope:"all" gated access (env-only)', () => {
 					devDependencies: { vitest: '^1.0.0' },
 				}),
 			);
+			installLocalNodeTool(tempDir, 'vitest');
 			fs.mkdirSync('src', { recursive: true });
 			fs.writeFileSync(
 				'src/utils.ts',
