@@ -481,8 +481,8 @@ describe('discoverBuildCommands - Attack: Scope with Empty changedFiles', () => 
 		// Note: When no profiles detected, fallback ecosystem detection runs and adds skipped entries
 		expect(result.commands).toEqual([]);
 		expect(Array.isArray(result.skipped)).toBe(true);
-		// Should have skipped entries from ecosystem fallback
-		expect(result.skipped.length).toBeGreaterThan(0);
+		// No build files exist, so unrelated ecosystems must not be reported unavailable.
+		expect(result.skipped).toEqual([]);
 	});
 });
 

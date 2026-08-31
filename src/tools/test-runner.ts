@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
+import { resolveLocalNodeTool } from '../build/command-resolution';
 import { isCommandAvailable } from '../build/discovery';
 import type { NativeTestTarget, TestScope } from '../lang/backend';
 import { buildNativeTargetCommand } from '../lang/default-backend';
@@ -1350,14 +1351,17 @@ function buildTestCommand(
 			return args;
 		}
 		case 'vitest': {
-			const args: string[] = [
-				'npx',
+			const args = resolveLocalNodeTool(
 				'vitest',
-				'run',
-				'--reporter=json',
-				'--outputFile',
-				VITEST_JSON_OUTPUT_RELATIVE_PATH,
-			];
+				[
+					'run',
+					'--reporter=json',
+					'--outputFile',
+					VITEST_JSON_OUTPUT_RELATIVE_PATH,
+				],
+				baseDir,
+			);
+			if (!args) return null;
 			if (coverage) args.push('--coverage');
 			if (bail) args.push('--bail=1');
 			if (scope !== 'all' && files.length > 0) {
@@ -1366,7 +1370,8 @@ function buildTestCommand(
 			return args;
 		}
 		case 'jest': {
-			const args: string[] = ['npx', 'jest', '--json'];
+			const args = resolveLocalNodeTool('jest', ['--json'], baseDir);
+			if (!args) return null;
 			if (coverage) args.push('--coverage');
 			if (bail) args.push('--bail');
 			if (scope !== 'all' && files.length > 0) {
@@ -1375,7 +1380,8 @@ function buildTestCommand(
 			return args;
 		}
 		case 'mocha': {
-			const args: string[] = ['npx', 'mocha'];
+			const args = resolveLocalNodeTool('mocha', [], baseDir);
+			if (!args) return null;
 			// Mocha doesn't have built-in coverage, skip if coverage requested
 			if (bail) args.push('--bail');
 			if (scope !== 'all' && files.length > 0) {

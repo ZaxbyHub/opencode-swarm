@@ -312,9 +312,10 @@ describe('discoverBuildCommands - Profile vs ECOSYSTEMS Priority', () => {
 		// Multiple ecosystems should have been processed (not just one)
 		expect(skippedEcosystems.length).toBeGreaterThan(0);
 
-		// At least some non-python ecosystems were processed (ECOSYSTEMS fallback)
+		// Ecosystem fallback now reports only ecosystems whose build files exist;
+		// an empty fixture must not claim unrelated runtime failures.
 		const nonPythonSkipped = skippedEcosystems.filter((e) => e !== 'python');
-		expect(nonPythonSkipped.length).toBeGreaterThan(0);
+		expect(nonPythonSkipped).toEqual([]);
 
 		// This demonstrates that:
 		// 1. Profile-driven detection ran (python was in the mix)
@@ -383,7 +384,7 @@ describe('discoverBuildCommands - Ecosystem Deduplication', () => {
 		// Verify PROFILE_TO_ECOSYSTEM_NAMES mapping by checking that
 		// Node ecosystem was in the ECOSYSTEMS list for processing
 		const nodeSkipped = result.skipped.find((s) => s.ecosystem === 'node');
-		expect(nodeSkipped).toBeDefined();
+		expect(nodeSkipped).toBeUndefined();
 
 		// The deduplication logic exists (we can verify this indirectly):
 		// - typescript maps to 'node' in PROFILE_TO_ECOSYSTEM_NAMES
@@ -464,7 +465,7 @@ describe('discoverBuildCommands - Ruby Profile Behavior', () => {
 
 		// At least one other ecosystem should have been processed
 		// (not skipped because ruby "covered" it)
-		expect(otherEcosystemsProcessed.length).toBeGreaterThan(0);
+		expect(otherEcosystemsProcessed).toEqual([]);
 
 		// Verify that the reason for skipping is NOT "covered by profile"
 		// (there's no such reason in the code, this is just to ensure we understand the behavior)

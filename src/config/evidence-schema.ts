@@ -285,6 +285,16 @@ export const BuildEvidenceSchema = BaseEvidenceSchema.extend({
 	runs_count: z.number().int(),
 	failed_count: z.number().int(),
 	skipped_reason: z.string().optional(),
+	environment_unavailable: z
+		.array(
+			z.object({
+				ecosystem: z.string(),
+				reason: z.string(),
+				code: z.literal('environment_unavailable'),
+				required_commands: z.array(z.string()).optional(),
+			}),
+		)
+		.optional(),
 });
 export type BuildEvidence = z.infer<typeof BuildEvidenceSchema>;
 

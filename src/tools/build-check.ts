@@ -6,7 +6,11 @@
 
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
-import { type BuildCommand, discoverBuildCommands } from '../build/discovery';
+import {
+	type BuildCommand,
+	type BuildDiscoverySkip,
+	discoverBuildCommands,
+} from '../build/discovery';
 import type { BuildEvidence, EvidenceVerdict } from '../config/evidence-schema';
 import { saveEvidence } from '../evidence/manager';
 import { bunSpawn } from '../utils/bun-compat';
@@ -48,6 +52,9 @@ export interface BuildCheckResult {
 		runs_count: number;
 		failed_count: number;
 		skipped_reason?: string;
+		environment_unavailable?: Array<
+			BuildDiscoverySkip & { code: 'environment_unavailable' }
+		>;
 	};
 }
 
@@ -236,9 +243,13 @@ export async function runBuildCheck(
 	// Determine verdict
 	let verdict: EvidenceVerdict;
 	let skipped_reason: string | undefined;
+	const environmentUnavailable = discoveryResult.skipped.filter(
+		(skip): skip is BuildDiscoverySkip & { code: 'environment_unavailable' } =>
+			skip.code === 'environment_unavailable',
+	);
 
 	if (runs.length === 0) {
-		verdict = 'info';
+		verdict = environmentUnavailable.length > 0 ? 'skip' : 'info';
 		// Generate skipped reason
 		if (discoveryResult.skipped.length > 0) {
 			skipped_reason = discoveryResult.skipped
@@ -261,6 +272,8 @@ export async function runBuildCheck(
 			runs_count: runs.length,
 			failed_count: failedCount,
 			skipped_reason,
+			environment_unavailable:
+				environmentUnavailable.length > 0 ? environmentUnavailable : undefined,
 		},
 	};
 }
@@ -318,6 +331,7 @@ export const build_check: ReturnType<typeof tool> = createSwarmTool({
 			runs_count: result.summary.runs_count,
 			failed_count: result.summary.failed_count,
 			skipped_reason: result.summary.skipped_reason,
+			environment_unavailable: result.summary.environment_unavailable,
 		};
 
 		// Save evidence

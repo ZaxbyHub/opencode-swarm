@@ -428,9 +428,7 @@ describe('detectTypecheckCommand adversarial tests', () => {
 		);
 		fs.writeFileSync(path.join(tmpDir, 'tsconfig.json'), '{}', 'utf8');
 		const result = detectTypecheckCommand(tmpDir);
-		expect(result).not.toBeNull();
-		expect(result!.command).toEqual(['npx', 'tsc', '--noEmit']);
-		expect(result!.language).toBe('typescript');
+		expect(result).toEqual({ command: null, language: 'typescript' });
 	});
 
 	// 11. Go when package.json exists but has no TypeScript markers
