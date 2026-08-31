@@ -120,12 +120,15 @@ export async function persistBaseLane(options: {
 		: [options.workflowLane];
 	const candidateIds =
 		options.candidateIds ?? owned.map((dimension) => `C-${dimension}`);
-	const text = artifactText(
-		owned.map((dimension, index) => ({
-			candidateId: candidateIds[index] ?? `C-${dimension}`,
-			dimension,
-		})),
-	);
+	const text =
+		options.status === 'error'
+			? ''
+			: artifactText(
+					owned.map((dimension, index) => ({
+						candidateId: candidateIds[index] ?? `C-${dimension}`,
+						dimension,
+					})),
+				);
 	await recordPendingDelegation(directory, {
 		correlationId,
 		jobId: null,
@@ -140,6 +143,7 @@ export async function persistBaseLane(options: {
 		laneId: options.laneId,
 		mode: 'swarm-pr-review:base',
 		workflowLane: options.workflowLane,
+		prReviewLegacyTranscriptCompatibility: true,
 		...(options.ownedWorkflowLanes
 			? { ownedWorkflowLanes: options.ownedWorkflowLanes }
 			: {}),

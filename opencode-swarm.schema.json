@@ -348,6 +348,7 @@
       "additionalProperties": false
     },
     "pr_review_legacy_transcript_compatibility": {
+      "description": "Deprecated migration-only opt-in for transcript-row PR-review base and micro discovery lanes.",
       "type": "boolean"
     },
     "gates": {

@@ -3513,7 +3513,12 @@ export const PluginConfigSchema = z.object({
 	// Deprecated transcript-row settlement compatibility for Profile A
 	// PR_REVIEW base/micro discovery lanes. Structured submission is the
 	// default authority; this flag is a migration-only opt-in.
-	pr_review_legacy_transcript_compatibility: z.boolean().optional(),
+	pr_review_legacy_transcript_compatibility: z
+		.boolean()
+		.optional()
+		.describe(
+			'Deprecated migration-only opt-in for transcript-row PR-review base and micro discovery lanes.',
+		),
 
 	// Quality gate configuration (v6.9 anti-slop features)
 	gates: GateConfigSchema.optional().describe(

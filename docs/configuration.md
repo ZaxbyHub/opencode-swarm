@@ -88,7 +88,7 @@ Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit insid
 | `inject_phase_reminders` | boolean | true | Inject phase reminder directives during execution. |
 | `hooks` | object | — | Hook subsystem toggles and settings. |
 | `pr_review_resilience` | object (strict) | — | PR review base-wave staged canary/fanout resilience settings. |
-| `pr_review_legacy_transcript_compatibility` | boolean | — |  |
+| `pr_review_legacy_transcript_compatibility` | boolean | — | Deprecated migration-only opt-in for transcript-row PR-review base and micro discovery lanes. |
 | `gates` | object | — | Quality gate configuration (v6.9 anti-slop features). |
 | `context_budget` | object | — | Context budget thresholds. |
 | `pricing` | object | — | Token/cost estimation fallback table. Provider-reported cost wins when present; entries only estimate from usage tokens when reports omit cost. |

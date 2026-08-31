@@ -139,6 +139,7 @@ export async function persistBatch(
 		artifactRole?: string;
 		subagentSessionId?: string;
 		scope?: string;
+		prReviewLegacyTranscriptCompatibility?: boolean;
 	} = {},
 ): Promise<void> {
 	for (const [index, lane] of lanes.entries()) {
@@ -162,6 +163,14 @@ export async function persistBatch(
 			mode,
 			workflowLane: lane.workflowLane,
 			ownedWorkflowLanes: lane.ownedWorkflowLanes,
+			...(options.prReviewLegacyTranscriptCompatibility !== undefined
+				? {
+						prReviewLegacyTranscriptCompatibility:
+							options.prReviewLegacyTranscriptCompatibility,
+					}
+				: mode === 'swarm-pr-review:base' || mode === 'swarm-pr-review:micro'
+					? { prReviewLegacyTranscriptCompatibility: true }
+					: {}),
 			workspace: {
 				directory: tempDir,
 				gitHead: HEAD_SHA,

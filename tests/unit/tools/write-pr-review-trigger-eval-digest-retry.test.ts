@@ -88,6 +88,7 @@ async function recordCompletedBaseLane(
 		laneId,
 		mode: 'swarm-pr-review:base',
 		workflowLane: laneId,
+		prReviewLegacyTranscriptCompatibility: true,
 		workspace: {
 			directory: root,
 			gitHead: HEAD_SHA,

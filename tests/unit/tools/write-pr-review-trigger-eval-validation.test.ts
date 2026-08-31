@@ -105,6 +105,7 @@ async function recordCompletedLane(
 		mode: input.mode,
 		workflowLane: input.workflowLane,
 		ownedWorkflowLanes: input.ownedWorkflowLanes,
+		prReviewLegacyTranscriptCompatibility: true,
 		workspace: {
 			directory: root,
 			gitHead: HEAD_SHA,
