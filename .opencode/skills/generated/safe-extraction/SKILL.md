@@ -214,9 +214,9 @@ LEGACY_EXEMPTS=(
 
 File-path moves alter SAST finding fingerprints, making pre-existing findings appear new. After extraction:
 
-1. Run `sast_scan` with `capture_baseline: true` and the current phase number
-2. Compare against the previous baseline to identify findings that moved (same rule, different file path)
-3. Merge the updated baseline so pre-existing findings don't fail the gate
+1. Run `sast_scan` with `capture_baseline: true` and the current phase number, including BOTH the old and new file paths in `changed_files`
+2. Pass `baseline_refresh_rationale` (e.g. "file relocation only — content unchanged"): a rename always changes the finding's file identity by design, so post-rename recaptures carry novel findings that must satisfy the absorption gate with an audited rationale — this is intended behavior, not a bug
+3. The merge records a who/when/rationale triage entry for every absorbed finding, so relocated pre-existing findings stop failing the gate without silent acceptance
 
 **Verify:** SAST scan on the new file paths shows only genuinely new findings, not relocated pre-existing ones.
 
