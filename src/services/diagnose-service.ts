@@ -15,6 +15,7 @@ import { getDurableGateEvidenceStatusForTask } from '../evidence/gate-bridge.js'
 import { listEvidenceTaskIds } from '../evidence/manager';
 import { listBlockingActionCircuitsForInvocation } from '../failures/action-circuit.js';
 import { loadFullAutoRunState } from '../full-auto/state.js';
+import { readLearningHealth } from '../health/learning-health';
 import { readSwarmFileAsync } from '../hooks/utils';
 import { getTaskModelRoutingStateSnapshot } from '../models/task-model-routing.js';
 import { loadPlanJsonOnly } from '../plan/manager';
@@ -764,6 +765,44 @@ async function checkSteeringDirectives(
 }
 
 /**
+ * Check (#2044): Learning/operations health — bounded-window alarm families
+ * from the learning-health registry. Warns when any alarm is active; the
+ * detail lines carry the same redacted form as the telemetry payload (16-hex
+ * refs, counts, enums — never raw session ids, paths, or content).
+ */
+export async function checkLearningHealth(
+	directory: string,
+): Promise<HealthCheck> {
+	try {
+		const snapshot = await readLearningHealth(directory);
+		if (snapshot.activeAlarms.length === 0) {
+			return {
+				name: 'Learning health',
+				status: '✅',
+				detail: `No active alarms (${snapshot.totalTransitions} transitions recorded)`,
+			};
+		}
+		const detail = snapshot.activeAlarms
+			.map((alarm) => {
+				const ageMinutes = Math.floor(alarm.ageMs / 60_000);
+				return `${alarm.severity} ${alarm.alarm} [${alarm.scopeClass} ${alarm.scopeRef}] age ${ageMinutes}m coverage ${alarm.coverageFacts}`;
+			})
+			.join('; ');
+		return {
+			name: 'Learning health',
+			status: '⚠️',
+			detail: `${snapshot.activeAlarms.length} active alarm(s): ${detail}`,
+		};
+	} catch {
+		return {
+			name: 'Learning health',
+			status: '⬜',
+			detail: 'Learning-health artifact unreadable (fail-open)',
+		};
+	}
+}
+
+/**
  * Check F: Curator Health - verifies curator.enabled and curator-summary.json state
  */
 async function checkCurator(directory: string): Promise<HealthCheck> {
@@ -1205,6 +1244,7 @@ export async function getDiagnoseData(
 	// Check: Knowledge health (entry status breakdown, event volume, schema
 	// drift, stale-cache warning).
 	checks.push(await checkKnowledgeHealth(directory));
+	checks.push(await checkLearningHealth(directory));
 
 	// Check: Atomic-write residue (issue #2035) — bounded summary derived from
 	// the SAME shared inventory as the close clean stage and config doctor.

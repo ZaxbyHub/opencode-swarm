@@ -138,6 +138,13 @@ export type TelemetryEvent =
 	// lock-skip counts, byte figures. Counts only; no session IDs, no paths,
 	// no trajectory content.
 	| 'trajectory_health'
+	// Learning/operations health alarms (issue #2044): bounded-window alarm
+	// transitions raised/sustained/recovered by the learning-health registry
+	// (`src/observability/learning-health.ts`) for the eight PR-16 alarm
+	// families. Payload is counts, closed-vocabulary enums, millisecond
+	// timestamps, model/provider identity, and 16-hex salted session refs —
+	// no raw session IDs, paths, queries, prompts, or content.
+	| 'learning_health_alarm'
 	// PR-monitor subscription store health (issue #2042): bounded counts
 	// emitted on terminal compaction, legacy migration completion, legacy
 	// archive, and foreign/corrupt checkpoint recovery for the bounded
@@ -395,6 +402,18 @@ export function emit(
  */
 export function addTelemetryListener(callback: TelemetryListener): void {
 	_listeners.push(callback);
+}
+
+/**
+ * Remove a previously registered telemetry listener (issue #2044). The
+ * heartbeat teardown at the top of this file splices `_listeners` directly
+ * because no disposer existed; this export gives the learning-health registry
+ * the same teardown capability without private-state access. Removing a
+ * listener that was never registered is a no-op.
+ */
+export function removeTelemetryListener(callback: TelemetryListener): void {
+	const idx = _listeners.indexOf(callback);
+	if (idx >= 0) _listeners.splice(idx, 1);
 }
 
 /**
@@ -1104,6 +1123,50 @@ export const telemetry = {
 		limit_bytes: number;
 	}): void {
 		_internals.emit('pr_subscription_health', data);
+	},
+
+	/**
+	 * Learning/operations health alarm transition (issue #2044): emitted by the
+	 * learning-health registry (`src/observability/learning-health.ts`) when an
+	 * alarm family raises, re-emits past its cooldown (`sustained`), or
+	 * recovers. Payload is counts, closed-vocabulary enums (`alarm` from the
+	 * eight-family closed set, `transition`, `severity`, `scope_class`),
+	 * millisecond timestamps, model/provider identity, and 16-hex salted
+	 * `session_ref` values — no raw session IDs, paths, queries, prompts, or
+	 * content — matching the observability contract's no-content rule. Live
+	 * readers: the `/swarm status` Learning Health section and the
+	 * `/swarm diagnose` learning-health check.
+	 */
+	learningHealthAlarm(data: {
+		alarm: string;
+		transition: 'raised' | 'sustained' | 'recovered';
+		severity: 'warning' | 'critical';
+		scope_class: 'session' | 'identity' | 'project';
+		session_ref?: string;
+		model?: string;
+		provider?: string;
+		window_ms: number;
+		coverage_facts: number;
+		raise_facts: number;
+		age_ms: number;
+		limit_source?: string;
+		denominator_fallback?: boolean;
+		pressure_pct?: number;
+		band?: string;
+		share_pct?: number;
+		field_count?: number;
+		non_field_count?: number;
+		store?: string;
+		dropped?: number;
+		corrupt?: number;
+		retained?: number;
+		accepted?: number;
+		gap_type?: 'membership_to_terminal' | 'terminal_to_application';
+		role?: string;
+		phase?: number;
+		reason?: string;
+	}): void {
+		_internals.emit('learning_health_alarm', data);
 	},
 
 	/**

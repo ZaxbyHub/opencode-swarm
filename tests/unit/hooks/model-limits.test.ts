@@ -32,10 +32,13 @@ describe('model-limits.ts - resolveModelLimit', () => {
 			const result = resolveModelLimit('claude-sonnet-4-6', 'anthropic', {});
 
 			// Expected: 200000 (native for claude-sonnet-4)
-			expect(result).toBe(200000);
+			expect(result.limit).toBe(200000);
+			// #2044: provenance — the native static table produced the limit.
+			expect(result.source).toBe('native');
+			expect(result.resolution).toBe('static_native');
 
 			// Verify: Prefix matching works for versioned model ID
-			expect(result).toBe(NATIVE_MODEL_LIMITS['claude-sonnet-4']);
+			expect(result.limit).toBe(NATIVE_MODEL_LIMITS['claude-sonnet-4']);
 		});
 	});
 
@@ -45,11 +48,14 @@ describe('model-limits.ts - resolveModelLimit', () => {
 			const result = resolveModelLimit('claude-sonnet-4-6', 'copilot', {});
 
 			// Expected: 128000 (Copilot cap, not 200k native)
-			expect(result).toBe(128000);
+			expect(result.limit).toBe(128000);
+			// #2044: the provider-cap table is distinguishable from the native table.
+			expect(result.source).toBe('provider_cap');
+			expect(result.resolution).toBe('static_provider_cap');
 
 			// Verify: Provider cap overrides native limit
-			expect(result).toBeLessThan(NATIVE_MODEL_LIMITS['claude-sonnet-4']);
-			expect(result).toBe(PROVIDER_CAPS.copilot);
+			expect(result.limit).toBeLessThan(NATIVE_MODEL_LIMITS['claude-sonnet-4']);
+			expect(result.limit).toBe(PROVIDER_CAPS.copilot);
 		});
 
 		test('Test 3: resolveModelLimit with GPT-5 on Copilot returns 128k (not 400k native)', () => {
@@ -57,11 +63,12 @@ describe('model-limits.ts - resolveModelLimit', () => {
 			const result = resolveModelLimit('gpt-5', 'copilot', {});
 
 			// Expected: 128000 (Copilot cap)
-			expect(result).toBe(128000);
+			expect(result.limit).toBe(128000);
+			expect(result.source).toBe('provider_cap');
 
 			// Verify: Copilot cap applies to ALL models including expensive ones
-			expect(result).toBeLessThan(NATIVE_MODEL_LIMITS['gpt-5']);
-			expect(result).toBe(PROVIDER_CAPS.copilot);
+			expect(result.limit).toBeLessThan(NATIVE_MODEL_LIMITS['gpt-5']);
+			expect(result.limit).toBe(PROVIDER_CAPS.copilot);
 		});
 	});
 
@@ -72,11 +79,15 @@ describe('model-limits.ts - resolveModelLimit', () => {
 			const result = resolveModelLimit('claude-sonnet-4-6', 'copilot', config);
 
 			// Expected: 200000 (user override)
-			expect(result).toBe(200000);
+			expect(result.limit).toBe(200000);
+			// #2044: a user-authored entry is the 'override' class, with the
+			// compound key as the fine-grained rung.
+			expect(result.source).toBe('override');
+			expect(result.resolution).toBe('user_provider_model');
 
 			// Verify: User config has highest priority
-			expect(result).toBeGreaterThan(PROVIDER_CAPS.copilot);
-			expect(result).toBe(config['copilot/claude-sonnet-4-6']);
+			expect(result.limit).toBeGreaterThan(PROVIDER_CAPS.copilot);
+			expect(result.limit).toBe(config['copilot/claude-sonnet-4-6']);
 		});
 
 		test('Test 5: Model-only config override beats native default', () => {
@@ -85,10 +96,12 @@ describe('model-limits.ts - resolveModelLimit', () => {
 			const result = resolveModelLimit('claude-sonnet-4-6', 'openai', config);
 
 			// Expected: 180000 (model override)
-			expect(result).toBe(180000);
+			expect(result.limit).toBe(180000);
+			expect(result.source).toBe('override');
+			expect(result.resolution).toBe('user_model');
 
 			// Verify: Model key in config works
-			expect(result).toBe(config['claude-sonnet-4-6']);
+			expect(result.limit).toBe(config['claude-sonnet-4-6']);
 		});
 
 		test('Test 11: Compound key config (copilot/gpt-5) takes priority over model-only key (gpt-5)', () => {
@@ -100,11 +113,12 @@ describe('model-limits.ts - resolveModelLimit', () => {
 			const result = resolveModelLimit('gpt-5', 'copilot', config);
 
 			// Expected: 150000 (compound key takes priority)
-			expect(result).toBe(150000);
+			expect(result.limit).toBe(150000);
+			expect(result.resolution).toBe('user_provider_model');
 
 			// Verify: Compound key takes priority over model-only key
-			expect(result).toBe(config['copilot/gpt-5']);
-			expect(result).not.toBe(config['gpt-5']);
+			expect(result.limit).toBe(config['copilot/gpt-5']);
+			expect(result.limit).not.toBe(config['gpt-5']);
 		});
 	});
 
@@ -118,10 +132,11 @@ describe('model-limits.ts - resolveModelLimit', () => {
 			);
 
 			// Expected: 200000 (matches 'claude-sonnet-4' prefix in NATIVE_MODEL_LIMITS)
-			expect(result).toBe(200000);
+			expect(result.limit).toBe(200000);
+			expect(result.source).toBe('native');
 
 			// Verify: Longest prefix match works correctly
-			expect(result).toBe(NATIVE_MODEL_LIMITS['claude-sonnet-4']);
+			expect(result.limit).toBe(NATIVE_MODEL_LIMITS['claude-sonnet-4']);
 		});
 
 		test('Prefix matching selects longest match', () => {
@@ -133,7 +148,7 @@ describe('model-limits.ts - resolveModelLimit', () => {
 			);
 
 			// Should match 'gpt-5.1-codex' (longest prefix), not 'gpt-5.1'
-			expect(result).toBe(NATIVE_MODEL_LIMITS['gpt-5.1-codex']);
+			expect(result.limit).toBe(NATIVE_MODEL_LIMITS['gpt-5.1-codex']);
 		});
 	});
 
@@ -143,11 +158,13 @@ describe('model-limits.ts - resolveModelLimit', () => {
 			const result = resolveModelLimit(undefined, undefined, {});
 
 			// Expected: 128000 (safe default)
-			expect(result).toBe(128000);
+			expect(result.limit).toBe(128000);
+			// #2044: the flat default is the 'fallback' class — visible, not hidden.
+			expect(result.source).toBe('fallback');
+			expect(result.resolution).toBe('static_default');
 
-			// Verify: No crashes, returns fallback
-			expect(result).toBeDefined();
-			expect(typeof result).toBe('number');
+			// Verify: No crashes, returns a usable limit
+			expect(typeof result.limit).toBe('number');
 		});
 
 		test('Fallback when modelID not in NATIVE_MODEL_LIMITS', () => {
@@ -157,7 +174,8 @@ describe('model-limits.ts - resolveModelLimit', () => {
 				{},
 			);
 
-			expect(result).toBe(128000);
+			expect(result.limit).toBe(128000);
+			expect(result.source).toBe('fallback');
 		});
 
 		test('Config.default override takes precedence before fallback', () => {
@@ -168,7 +186,9 @@ describe('model-limits.ts - resolveModelLimit', () => {
 				config,
 			);
 
-			expect(result).toBe(64000);
+			expect(result.limit).toBe(64000);
+			expect(result.source).toBe('override');
+			expect(result.resolution).toBe('user_default');
 		});
 	});
 
@@ -176,33 +196,91 @@ describe('model-limits.ts - resolveModelLimit', () => {
 		test('OpenAI provider returns native GPT-5 limit', () => {
 			const result = resolveModelLimit('gpt-5', 'openai', {});
 
-			expect(result).toBe(NATIVE_MODEL_LIMITS['gpt-5']);
+			expect(result.limit).toBe(NATIVE_MODEL_LIMITS['gpt-5']);
+			expect(result.source).toBe('native');
 		});
 
 		test('Google provider returns native Gemini limit', () => {
 			const result = resolveModelLimit('gemini-2.5-pro', 'google', {});
 
-			expect(result).toBe(NATIVE_MODEL_LIMITS['gemini-2.5-pro']);
+			expect(result.limit).toBe(NATIVE_MODEL_LIMITS['gemini-2.5-pro']);
+			expect(result.source).toBe('native');
 		});
 
 		test('MiniMax-M3 returns its native 1,000,000-token limit', () => {
 			const result = resolveModelLimit('MiniMax-M3', 'minimax', {});
 
-			expect(result).toBe(NATIVE_MODEL_LIMITS['MiniMax-M3']);
-			expect(result).toBe(1000000);
+			expect(result.limit).toBe(NATIVE_MODEL_LIMITS['MiniMax-M3']);
+			expect(result.limit).toBe(1000000);
+			expect(result.source).toBe('native');
 		});
 
 		test('MiniMax-M2.7 returns its native 204,800-token limit', () => {
 			const result = resolveModelLimit('MiniMax-M2.7', 'minimax', {});
 
-			expect(result).toBe(NATIVE_MODEL_LIMITS['MiniMax-M2.7']);
-			expect(result).toBe(204800);
+			expect(result.limit).toBe(NATIVE_MODEL_LIMITS['MiniMax-M2.7']);
+			expect(result.limit).toBe(204800);
+			expect(result.source).toBe('native');
 		});
 
 		test('Prefix matching resolves a versioned MiniMax-M3 variant', () => {
 			const result = resolveModelLimit('MiniMax-M3-20260701', 'minimax', {});
 
-			expect(result).toBe(NATIVE_MODEL_LIMITS['MiniMax-M3']);
+			expect(result.limit).toBe(NATIVE_MODEL_LIMITS['MiniMax-M3']);
+		});
+	});
+
+	describe('#2044 — provenance: host precedence and visibility', () => {
+		test('the live host window resolves as the host class and beats every static rung', () => {
+			const result = resolveModelLimit(
+				'claude-sonnet-4-6',
+				'github-copilot',
+				{},
+				1_000_000,
+			);
+			expect(result).toEqual({
+				limit: 1_000_000,
+				source: 'host',
+				resolution: 'live_model_limit',
+			});
+		});
+
+		test('an override beats the host value (explicit user intent wins)', () => {
+			const result = resolveModelLimit(
+				'claude-sonnet-4-6',
+				'github-copilot',
+				{ 'github-copilot/claude-sonnet-4-6': 60000 },
+				1_000_000,
+			);
+			expect(result.source).toBe('override');
+			expect(result.resolution).toBe('user_provider_model');
+			expect(result.limit).toBe(60000);
+		});
+
+		test('unknown model + no live value is visible as fallback, never coerced', () => {
+			const result = resolveModelLimit('model-nobody-knows', 'provider-x', {});
+			expect(result.source).toBe('fallback');
+			expect(result.resolution).toBe('static_default');
+			expect(result.limit).toBe(128000);
+		});
+
+		test('normalized aliases: case/whitespace differences in override keys still match', () => {
+			const result = resolveModelLimit('GPT-5', 'GitHub-Copilot', {
+				'  github-copilot/gpt-5  ': 90000,
+			});
+			expect(result.source).toBe('override');
+			expect(result.resolution).toBe('user_provider_model');
+			expect(result.limit).toBe(90000);
+		});
+
+		test('invalid override values are skipped and surfaced, not coerced', () => {
+			const result = resolveModelLimit('gpt-5', 'copilot', {
+				'copilot/gpt-5': Number.NaN as number,
+				default: 0 as number,
+			});
+			// Neither unusable value is used; resolution falls to the provider cap.
+			expect(result.source).toBe('provider_cap');
+			expect(result.limit).toBe(128000);
 		});
 	});
 });
@@ -368,7 +446,8 @@ describe('model-limits.ts - Integration scenarios', () => {
 			const info = extractModelInfo(messages);
 			const limit = resolveModelLimit(info.modelID, info.providerID, {});
 
-			expect(limit).toBe(128000);
+			expect(limit.limit).toBe(128000);
+			expect(limit.source).toBe('provider_cap');
 		});
 
 		test('Typical Anthropic workflow', () => {
@@ -380,7 +459,8 @@ describe('model-limits.ts - Integration scenarios', () => {
 			const info = extractModelInfo(messages);
 			const limit = resolveModelLimit(info.modelID, info.providerID, {});
 
-			expect(limit).toBe(200000);
+			expect(limit.limit).toBe(200000);
+			expect(limit.source).toBe('native');
 		});
 
 		test('Custom override workflow', () => {
@@ -397,7 +477,8 @@ describe('model-limits.ts - Integration scenarios', () => {
 			const info = extractModelInfo(messages);
 			const limit = resolveModelLimit(info.modelID, info.providerID, config);
 
-			expect(limit).toBe(200000);
+			expect(limit.limit).toBe(200000);
+			expect(limit.source).toBe('override');
 		});
 	});
 });

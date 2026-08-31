@@ -38,8 +38,9 @@
 import type { FileHandle } from 'node:fs/promises';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { observeStoreHealth } from '../health/learning-health.js';
 import { validateSwarmPath } from '../hooks/utils';
-import { telemetry } from '../telemetry';
+import { telemetry } from '../telemetry.js';
 import { atomicWriteSwarmFileSync } from '../utils/atomic-write';
 import { compositeSessionKey, sessionKeySuffix } from '../utils/canonical-root';
 import * as logger from '../utils/logger.js';
@@ -106,18 +107,28 @@ export const _internals: {
 let skippedLockAppends = 0;
 let lastAppendSkipEventAtMs = 0;
 
-function emitTrajectoryHealth(data: {
-	trigger: 'compaction' | 'cleanup' | 'append_skip';
-	retained_count: number;
-	dropped_count: number;
-	corrupt_count: number;
-	bytes: number;
-	limit_bytes: number;
-}): void {
+function emitTrajectoryHealth(
+	directory: string,
+	data: {
+		trigger: 'compaction' | 'cleanup' | 'append_skip';
+		retained_count: number;
+		dropped_count: number;
+		corrupt_count: number;
+		bytes: number;
+		limit_bytes: number;
+	},
+): void {
 	try {
-		_internals.telemetry.trajectoryHealth({
+		const healthPayload = {
 			...data,
 			skipped_lock_count: skippedLockAppends,
+		};
+		_internals.telemetry.trajectoryHealth(healthPayload);
+		// #2044: direct learning-health feed from the FIRST store event.
+		observeStoreHealth({
+			directory,
+			kind: 'trajectory_health',
+			payload: healthPayload,
 		});
 	} catch {
 		/* telemetry must never break the store */
@@ -510,6 +521,7 @@ interface CompactionOutcome {
 async function compactTrajectoryFile(
 	trajectoryPath: string,
 	maxLines: number,
+	directory: string,
 ): Promise<CompactionOutcome | null> {
 	const tail = await readTailBytes(
 		trajectoryPath,
@@ -574,7 +586,7 @@ async function compactTrajectoryFile(
 		`${JSON.stringify(checkpoint)}\n`,
 	);
 
-	emitTrajectoryHealth({
+	emitTrajectoryHealth(directory, {
 		trigger: 'compaction',
 		retained_count: keptLines.length,
 		dropped_count: Math.max(0, dropped),
@@ -642,7 +654,7 @@ export async function appendTrajectoryEntry(
 				// Byte ceiling enforced at append time (shell-audit RC-4 lesson):
 				// compaction runs BEFORE the append so the new entry is retained.
 				if (tail !== null && tail.totalBytes > sessionMaxBytesFor(maxLines)) {
-					await compactTrajectoryFile(trajectoryPath, maxLines);
+					await compactTrajectoryFile(trajectoryPath, maxLines, directory);
 				}
 
 				await fs.appendFile(
@@ -664,7 +676,7 @@ export async function appendTrajectoryEntry(
 					if (window !== null && window.totalBytes > 0) {
 						const windowParsed = parseWindow(window.content, window.offset > 0);
 						if (window.offset > 0 || windowParsed.entries.length > maxLines) {
-							await compactTrajectoryFile(trajectoryPath, maxLines);
+							await compactTrajectoryFile(trajectoryPath, maxLines, directory);
 						}
 					}
 				} else {
@@ -691,7 +703,7 @@ export async function appendTrajectoryEntry(
 				TRAJECTORY_LIMITS.appendSkipEventCooldownMs
 			) {
 				lastAppendSkipEventAtMs = now;
-				emitTrajectoryHealth({
+				emitTrajectoryHealth(directory, {
 					trigger: 'append_skip',
 					retained_count: 0,
 					dropped_count: 0,
@@ -996,7 +1008,7 @@ export async function cleanupOldTrajectoryFiles(
 	}
 
 	if (removed > 0) {
-		emitTrajectoryHealth({
+		emitTrajectoryHealth(directory, {
 			trigger: 'cleanup',
 			retained_count: retained,
 			dropped_count: removed,

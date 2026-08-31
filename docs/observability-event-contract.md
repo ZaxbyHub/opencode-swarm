@@ -182,9 +182,9 @@ those inputs before this change.
 
 ---
 
-## 5. The 54-entry catalog
+## 5. The 55-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 54 entries = the 38 pre-existing members of
+Source: `src/observability/catalog.ts`. Exactly 55 entries = the 38 pre-existing members of
 `TelemetryEvent` (`src/telemetry.ts:15-144`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
@@ -203,7 +203,9 @@ the counts-only bounded storage health aggregate for the
 aggregate for the `.swarm/trajectories/` PRM session-trajectory store) plus
 `pr_subscription_health` (issue #2042 — the counts-only bounded storage health
 aggregate for the `.swarm/pr-monitor/` PR-monitor subscription checkpoint
-store).
+store) plus `learning_health_alarm` (issue #2044 — the counts-and-refs-only
+bounded-window alarm transitions raised/sustained/recovered by the
+learning-health registry in `src/health/learning-health.ts`).
 
 Legend: **Owner** is `futureOwnerIssue` when `consumers` is empty (permitted
 only together with an owner — an empty consumer list with no owner is a CI
@@ -688,7 +690,7 @@ per-type folded counts disclose.
 
 #### trajectory_health
 Category `lifecycle`, severity `notice`, privacy `operational`. Producer
-`src/telemetry.ts:1073` (`trajectoryHealth`, called by the bounded
+`src/telemetry.ts:1096` (`trajectoryHealth`, called by the bounded
 `.swarm/trajectories/` PRM session-trajectory store in
 `src/prm/trajectory-store.ts` after a compaction pass or cleanup sweep, and —
 cooldown-bounded to one event per minute — when an append is skipped because
@@ -708,7 +710,7 @@ corruption in this store).
 
 #### pr_subscription_health
 Category `lifecycle`, severity `notice`, privacy `operational`. Producer
-`src/telemetry.ts:1102` (`prSubscriptionHealth`, called by the bounded
+`src/telemetry.ts:1125` (`prSubscriptionHealth`, called by the bounded
 `.swarm/pr-monitor/` PR-monitor subscription checkpoint store in
 `src/background/pr-subscriptions.ts` after a terminal-record compaction, a
 legacy-JSONL migration completion (including the one-time read-bootstrap), a
@@ -727,9 +729,41 @@ bounded fold; `dropped_audit_count` discloses audit-tail transitions dropped
 by the high/low-water rewrite; the `/swarm pr status` storage footer surfaces
 the same figures synchronously.
 
+#### learning_health_alarm
+Category `lifecycle`, severity `warning`, privacy `operational`. Producer
+`src/telemetry.ts:1169` (`learningHealthAlarm`, called by the learning-health
+registry in `src/health/learning-health.ts` when one of the eight issue-#2044
+alarm families — `headroom_dead_streak`, `model_limit_fallback`,
+`retrieval_outcome_liveness`, `role_participation`, `promoted_fixture_share`,
+`archive_activity_mismatch`, `recovery_ledger_pressure`,
+`compaction_drop_coverage` — raises, re-emits past its per-family cooldown
+(`sustained`), or recovers; issue #2044). Consumers: none — stream owner
+**#2047**; the `/swarm status` Learning Health section and the `/swarm
+diagnose` learning-health check surface the same state synchronously from the
+`.swarm/learning-health.json` artifact. Retention: **#2044**. No workflow ID
+is required: the aggregate is alarm-level and counts-only. The payload is
+bounded counts, closed-vocabulary enums, and ms timestamps: `alarm` (the
+closed eight-family set), `transition` (`raised`/`sustained`/`recovered`),
+`severity` (`warning`/`critical`), `scope_class`
+(`session`/`identity`/`project`), `session_ref` (16-hex salted pseudonym),
+`model`, `provider`, `window_ms`, `coverage_facts`, `raise_facts`, `age_ms`,
+plus per-family detail: `limit_source` + `denominator_fallback`
+(headroom-dead-streak attribution), `pressure_pct` + `band`
+(recovery-ledger), `share_pct` + `field_count` + `non_field_count`
+(fixture-share), `store` + `dropped` + `corrupt` + `retained` + `accepted`
+(store-drop coverage), `gap_type` (receipt liveness), `role`/`phase`
+(participation), `reason` (closed reason codes). Raw session IDs, filesystem
+paths, queries, prompts, and responses are never emitted (redaction by
+pseudonymous reference and by omission). The registry persists ONLY alarm
+transitions and compact per-scope counters to
+`.swarm/learning-health.json` — never invocation-owned transient-retry or
+`nonTransientCircuit` state (issue #2044 item 9). There is deliberately no
+`sink` health-source and no "sink loss" value: #2047 / PR 19 must register
+its own real producer and reader.
+
 ---
 
-## 6. The exhaustive producer/consumer matrix (17 rows)
+## 6. The exhaustive producer/consumer matrix (18 rows)
 
 > **Retention columns are owned by the retention registry** —
 > `docs/observability-retention-registry.md` + the machine-readable
@@ -788,6 +822,7 @@ row 17 records the authoritative knowledge-receipt partition added by #2031.
 | 15 | SQLite `memory_reward_events` | `src/memory/sqlite-provider.ts:286` | memory-provider internal readers | `verdict` column | `timestamp` column, ISO string | none | `memory_id`, `run_id`, `unit_id` | no `session_id`/`task_id` column | **no** | derived | **#2036**, #2048 |
 | 16 | `.swarm/pr-monitor/subscriptions.checkpoint.json` (+ bounded `subscriptions.audit.jsonl` transition tail; legacy `subscriptions.jsonl` absorbed then archived; issue #2042) | `src/background/pr-subscriptions.ts` (checkpoint writes serialized under `withEvidenceLock` on the unchanged v1 lock key; atomic tmp+rename) | background PR-monitor poller, `/swarm pr status`, session rehydration (bounded checkpoint read; lock-free; latest validated record per `correlationId` with identity re-validation) | versioned checkpoint `schemaVersion` 1 (records map + migration cursor + maintenance counters); audit line per transition `kind` | epoch-ms number | checkpoint `schemaVersion` 1 (issue #2042) | `correlationId` | no explicit `sessionID`/`taskId` columns beyond `correlationId` | not itemized as archived by `/swarm close` in the localization sweep | operational | **#2042** |
 | 17 | canonical project `.swarm/knowledge-receipts-v2.jsonl` + rebuildable snapshot + closed-summary archive | `src/hooks/knowledge-receipt-ledger.ts` (`commitDisplayedMembership`, `validateAndCommitTerminalBatch`, phase-close/cutover transitions) | receipt validator/tool, architect/delegate/reviewer acknowledgment paths, application and phase gates, promotion, escalation/quarantine, verdict feedback, and destructive-policy checks | versioned transition `kind` | ISO lifecycle clocks plus monotonic sequence | V2 schema + explicit cutover version | exact `trace_id` + `entry_id`, session/phase/task IDs, criticality, terminal event/source/reason, truthful promotion correlation | absent legacy membership is explicitly `legacy_unverifiable`; no synthesized join | `/swarm close` may copy for forensics but never deletes live or within-grace authority; eligible closed summaries compact separately | authoritative | **#2031** |
+| 18 | `.swarm/learning-health.json` (issue #2044) | `src/health/learning-health.ts` `persistLearningHealth` (fire-and-forget, debounced; `atomicWriteSwarmFile`) | `readLearningHealth` → `/swarm status` Learning Health section (`src/services/status-service.ts`) and `/swarm diagnose` learning-health check (`src/services/diagnose-service.ts`) — both also lazily evaluate windowed alarms | `alarm` (closed 8-family set) + `transition` | epoch-ms numbers | `schemaVersion` 1 | 16-hex salted session refs (`pseudonymousSessionRef`), model/provider identity, project refs | raw session IDs, paths, queries, prompts — deliberately never persisted (redaction by pseudonymous reference) | not itemized as archived by `/swarm close`; health artifact follows the delegation-health precedent | derived-rebuildable | **#2044** |
 
 State classification legend: **authoritative** (the record IS the domain fact —
 plan, evidence, background-delegation ownership, council verdict);

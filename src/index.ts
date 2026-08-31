@@ -1607,11 +1607,16 @@ async function initializeOpenCodeSwarm(
 	const contextBudgetHandler = createContextBudgetHandler(
 		config,
 		resolveIncomingAgentModel,
+		// #2044: scopes + persists the headroom health observation under the
+		// owning project (the chat-transform hook input carries no directory).
+		ctx.directory,
 	);
 	// #2107 §3: the ONE final accounting step (registered after
 	// consolidation in the messages.transform chain).
 	const finalContextAccountingStep = createFinalContextAccountingStep({
 		config,
+		// #2044: scopes the model-limit health observation to this project.
+		directory: ctx.directory,
 		// Same seam createContextBudgetHandler consumes: keeps the final
 		// accounting step's model-identity ladder identical to physical
 		// pruning's (agent handoffs included).

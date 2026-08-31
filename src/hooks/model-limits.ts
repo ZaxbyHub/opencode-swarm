@@ -28,9 +28,12 @@
 
 import {
 	type ContextWindowInputs,
+	type ContextWindowSource,
+	isUsableConfiguredWindow,
 	isUsableContextWindow,
 	resolveContextWindow,
 } from '../config/context-window';
+import { observeModelLimitResolution } from '../health/learning-health';
 import { log, warn } from '../utils';
 
 /**
@@ -175,32 +178,79 @@ function rememberBoundedModelIdentity(set: Set<string>, key: string): boolean {
 }
 
 /**
+ * Coarse provenance class for a resolved model limit (issue #2044 item 1).
+ * Maps the fine-grained {@link ContextWindowSource} rung onto the five classes
+ * the issue names: `host` (the live `model.limit.context`), `override` (any
+ * user-authored `model_limits` entry), `provider_cap` / `native` (the two
+ * known-stale static tables), and `fallback` (the flat 128k default).
+ */
+export type ModelLimitSource =
+	| 'host'
+	| 'override'
+	| 'provider_cap'
+	| 'native'
+	| 'fallback';
+
+/** Provenance-bearing result of {@link resolveModelLimit} (issue #2044). */
+export interface ModelLimitResolution {
+	/** The resolved context limit in tokens. */
+	limit: number;
+	/** Coarse provenance class — the issue's enum. */
+	source: ModelLimitSource;
+	/** Which fine-grained resolution rung produced the limit. */
+	resolution: ContextWindowSource;
+}
+
+const SOURCE_CLASS_BY_RESOLUTION: Readonly<
+	Record<ContextWindowSource, ModelLimitSource>
+> = {
+	user_provider_model: 'override',
+	user_model: 'override',
+	user_default: 'override',
+	live_model_limit: 'host',
+	static_provider_cap: 'provider_cap',
+	static_native: 'native',
+	static_default: 'fallback',
+};
+
+export function classifyModelLimitSource(
+	resolution: ContextWindowSource,
+): ModelLimitSource {
+	return SOURCE_CLASS_BY_RESOLUTION[resolution];
+}
+
+/**
  * Static-table lookup used as `fallbackLookup` for
- * {@link resolveContextWindow}. Preserves the historical precedence of
- * the two tables relative to each other (provider cap first, then a
- * longest-prefix native match), and is reachable only when no live
- * `model.limit.context` was available.
+ * {@link resolveContextWindow}. Preserves the historical precedence of the two
+ * tables relative to each other (provider cap first, then a longest-prefix
+ * native match), and says WHICH table matched so the resolution source can
+ * distinguish `static_provider_cap` from `static_native` (issue #2044).
+ * Reachable only when no live `model.limit.context` was available.
  */
 export function lookupStaticModelLimit(
 	modelID?: string,
 	providerID?: string,
-): number | undefined {
+): { tokens: number; table: 'provider_cap' | 'native' } | undefined {
 	if (providerID && PROVIDER_CAPS[providerID] !== undefined) {
-		return PROVIDER_CAPS[providerID];
+		return { tokens: PROVIDER_CAPS[providerID], table: 'provider_cap' };
 	}
 	if (modelID) {
-		return findNativeLimit(modelID);
+		const native = findNativeLimit(modelID);
+		if (native !== undefined) return { tokens: native, table: 'native' };
 	}
 	return undefined;
 }
 
 /**
- * Resolves the context limit for a given model/provider combination.
+ * Resolves the context limit for a given model/provider combination WITH
+ * provenance (issue #2044).
  *
  * Thin adapter over the single derivation in `src/config/context-window.ts` —
  * this function exists so the `experimental.chat.messages.transform` consumers
- * (`context-budget.ts`, `knowledge-injector.ts`, `tools/context-status.ts`)
- * keep their existing `(modelID, providerID, overrides)` call shape. All
+ * (`context-budget.ts`, `knowledge-injector.ts`, `tools/context-status.ts`,
+ * `final-context-accounting.ts`) keep their existing
+ * `(modelID, providerID, overrides)` call shape while receiving the typed
+ * `{ limit, source }` provenance the observability series requires. All
  * ordering logic lives in the shared resolver; see its module header.
  *
  * Resolution order (first usable value wins):
@@ -212,51 +262,52 @@ export function lookupStaticModelLimit(
  *    match (both known-stale; see the module header)
  * 6. `DEFAULT_MODEL_CONTEXT_TOKENS` (128000)
  *
- * Two ordering changes vs. the pre-#1619 implementation, both deliberate:
- * - `configOverrides.default` moved from below the static tables to above
- *   them. An explicitly authored user value losing to a hardcoded table was a
- *   defect; it is now consistent with the compound and model-only keys, which
- *   already outranked the tables.
- * - The live `model.limit.context` was inserted above both tables, which is
- *   the entire point of this change.
- *
- * Any value that is not a finite number ≥ 1000 is skipped rather than used, so
- * a malformed override or a catalog entry with `limit.context: 0` can never
- * produce a `NaN` / `Infinity` percentage.
+ * Any value that is not a finite number ≥ 1000 (untrusted rungs) / ≥ 1 (user
+ * rungs) is SKIPPED, never coerced; skipped user overrides are surfaced via a
+ * bounded `invalid_override_skipped` observation instead of silently
+ * disappearing (issue #2044 item 2).
  *
  * @param modelID - The model identifier (e.g., "claude-sonnet-4-6", "gpt-5")
  * @param providerID - The provider identifier (e.g., "github-copilot", "anthropic")
  * @param configOverrides - User configuration overrides (`context_budget.model_limits`)
  * @param liveContextLimit - The live `model.limit.context` recorded for this
  *   session by the `system.transform` hook, when one has been seen
- * @returns The resolved context limit in tokens
+ * @returns The resolved limit with coarse source class and fine-grained rung
  *
  * @example
  * // Live value wins over the stale static tables
  * resolveModelLimit("claude-sonnet-4-6", "github-copilot", {}, 200000)
- * // Returns: 200000
+ * // Returns: { limit: 200000, source: 'host', resolution: 'live_model_limit' }
  *
  * @example
  * // Explicit user override beats the live value
  * resolveModelLimit("gpt-5", "github-copilot", { "github-copilot/gpt-5": 60000 }, 400000)
- * // Returns: 60000
+ * // Returns: { limit: 60000, source: 'override', resolution: 'user_provider_model' }
  *
  * @example
  * // No live value: falls back to the static table (prefix match)
  * resolveModelLimit("claude-sonnet-4-6-20260301", "anthropic", {})
- * // Returns: 200000
+ * // Returns: { limit: 200000, source: 'native', resolution: 'static_native' }
  *
  * @example
  * // Malformed live value is ignored, not divided by
  * resolveModelLimit(undefined, undefined, {}, 0)
- * // Returns: 128000
+ * // Returns: { limit: 128000, source: 'fallback', resolution: 'static_default' }
  */
 export function resolveModelLimit(
 	modelID?: string,
 	providerID?: string,
 	configOverrides: Record<string, number> = {},
 	liveContextLimit?: unknown,
-): number {
+	/** Project directory (threaded from the consumers) — scopes the #2044
+	 * fallback-health observation to the owning project. */
+	directory?: string,
+): ModelLimitResolution {
+	const invalidOverride = recordInvalidOverrides(
+		modelID,
+		providerID,
+		configOverrides,
+	);
 	const inputs: ContextWindowInputs = {
 		userLimits: configOverrides,
 		modelID,
@@ -278,8 +329,74 @@ export function resolveModelLimit(
 		resolution.tokens,
 		liveContextLimit,
 	);
-	return resolution.tokens;
+	_internals.observeResolution({
+		modelID,
+		providerID,
+		directory,
+		resolution: resolution.source,
+		// Alias provenance (#2044 item 2): which override key class matched.
+		aliasKeyClass:
+			resolution.source === 'user_provider_model'
+				? 'compound'
+				: resolution.source === 'user_model'
+					? 'model'
+					: resolution.source === 'user_default'
+						? 'default'
+						: undefined,
+		invalidOverride,
+	});
+	return {
+		limit: resolution.tokens,
+		source: classifyModelLimitSource(resolution.source),
+		resolution: resolution.source,
+	};
 }
+
+/**
+ * Bounded observation seam (invariant-7 DI): routes the model-limit fallback
+ * fact into the learning-health registry. Tests replace this to avoid touching
+ * global health state; production uses the real observer.
+ */
+export const _internals: {
+	observeResolution: typeof observeModelLimitResolution;
+} = {
+	observeResolution: observeModelLimitResolution,
+};
+
+/**
+ * Surface user-authored override values that fail usability validation
+ * (issue #2044 item 2): the invalid entry is skipped — never coerced — and the
+ * skip is observed once per model/provider identity so operators can see why a
+ * configured limit had no effect. Keys are reported by class (compound /
+ * model / default), values as the raw number; neither is content.
+ *
+ * @returns true when at least one invalid override was newly reported (bounded
+ * once per identity), so the durable health observation fires without storms.
+ */
+function recordInvalidOverrides(
+	modelID: string | undefined,
+	providerID: string | undefined,
+	configOverrides: Record<string, number>,
+): boolean {
+	if (!configOverrides || typeof configOverrides !== 'object') return false;
+	let newlyReported = false;
+	for (const [key, value] of Object.entries(configOverrides)) {
+		if (isUsableConfiguredWindow(value)) continue;
+		const keyClass =
+			key === 'default' ? 'default' : key.includes('/') ? 'compound' : 'model';
+		const identity = `${modelID || 'unknown'}::${providerID || 'unknown'}::${keyClass}::${String(value)}`;
+		if (rememberBoundedModelIdentity(invalidOverrideReports, identity)) {
+			newlyReported = true;
+			warn(
+				`[model-limits] context_budget.model_limits.${key}=${String(value)} for ${modelID || '(no model)'}@${providerID || '(no provider)'} is not a usable limit (finite number ≥ 1); skipping it — not coercing.`,
+				{ modelID, providerID, keyClass, value },
+			);
+		}
+	}
+	return newlyReported;
+}
+
+const invalidOverrideReports = new Set<string>();
 
 /**
  * Finds a native limit by prefix matching the modelID.

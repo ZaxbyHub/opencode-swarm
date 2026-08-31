@@ -26,6 +26,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { observeStoreHealth } from '../health/learning-health.js';
 import { telemetry } from '../telemetry.js';
 import * as logger from '../utils/logger.js';
 import { validateSwarmPath } from './utils.js';
@@ -1389,9 +1390,19 @@ export function emitSkillUsageHealth(
 	doc: SkillUsagePendingDocument,
 	trigger: SkillUsageHealthPayload['trigger'],
 	gauges: { bytes: number; limitBytes: number },
+	directory?: string,
 ): void {
 	try {
-		_internals.emitHealth(buildSkillUsageHealthPayload(doc, trigger, gauges));
+		const healthPayload = buildSkillUsageHealthPayload(doc, trigger, gauges);
+		_internals.emitHealth(healthPayload);
+		// #2044: direct learning-health feed from the FIRST store event.
+		if (directory) {
+			observeStoreHealth({
+				directory,
+				kind: 'skill_usage_health',
+				payload: healthPayload as unknown as Record<string, unknown>,
+			});
+		}
 	} catch (err) {
 		logger.log(
 			'[skill-usage-pending] health emit failed (best-effort):',

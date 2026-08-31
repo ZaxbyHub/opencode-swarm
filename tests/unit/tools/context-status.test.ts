@@ -10,11 +10,17 @@
  */
 
 import { describe, expect, it } from 'bun:test';
+import { rmSync } from 'node:fs';
+import {
+	readLearningHealth,
+	resetLearningHealthForTest,
+} from '../../../src/health/learning-health';
 import {
 	computeContextHeadroom,
 	context_status,
 } from '../../../src/tools/context-status';
 import { TOOL_METADATA } from '../../../src/tools/tool-metadata';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -348,5 +354,43 @@ describe('computeContextHeadroom', () => {
 		expect(result.tokensUsed).toBeGreaterThan(160);
 		expect(result.modelId).toBe('gpt-5');
 		expect(result.provider).toBe('openai');
+	});
+});
+
+describe('context_status model-limit health scoping (#2044)', () => {
+	it('a fallback resolution through the tool path is visible in the owning project snapshot only', async () => {
+		const directory = canonicalMkdtemp('swarm-ctx-status-lh-');
+		try {
+			resetLearningHealthForTest();
+			// The exact call execute() makes: no live window, no overrides,
+			// unknown model -> static_default fallback, directory threaded.
+			computeContextHeadroom(
+				[makeMessage({ role: 'assistant', modelID: 'mystery-model' })],
+				0.7,
+				0.9,
+				{},
+				undefined,
+				{ modelID: 'mystery-model', providerID: 'provider' },
+				directory,
+			);
+			const snapshot = await readLearningHealth(directory);
+			expect(
+				snapshot.activeAlarms.some((a) => a.alarm === 'model_limit_fallback'),
+			).toBe(true);
+			const other = canonicalMkdtemp('swarm-ctx-status-lh-');
+			try {
+				const otherSnapshot = await readLearningHealth(other);
+				expect(
+					otherSnapshot.activeAlarms.some(
+						(a) => a.alarm === 'model_limit_fallback',
+					),
+				).toBe(false);
+			} finally {
+				rmSync(other, { recursive: true, force: true });
+			}
+		} finally {
+			resetLearningHealthForTest();
+			rmSync(directory, { recursive: true, force: true });
+		}
 	});
 });

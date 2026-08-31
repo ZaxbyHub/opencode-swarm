@@ -52,6 +52,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 
+import { observeStoreHealth } from '../../health/learning-health.js';
 import { telemetry } from '../../telemetry.js';
 import { warn } from '../../utils/logger.js';
 
@@ -1263,9 +1264,8 @@ function emitShellAuditHealth(
 		limitBytes: number;
 	},
 ): void {
-	void directory; // counts-only payload is store-level; no path content
 	try {
-		telemetry.shellAuditHealth({
+		const healthPayload = {
 			trigger: payload.trigger,
 			accepted_count: payload.accepted,
 			compacted_count: payload.compacted,
@@ -1276,6 +1276,13 @@ function emitShellAuditHealth(
 			newest_timestamp: payload.newest,
 			bytes: payload.bytes,
 			limit_bytes: payload.limitBytes,
+		};
+		telemetry.shellAuditHealth(healthPayload);
+		// #2044: direct learning-health feed from the FIRST store event.
+		observeStoreHealth({
+			directory,
+			kind: 'shell_audit_health',
+			payload: healthPayload,
 		});
 	} catch {
 		// Health telemetry must never break the store.

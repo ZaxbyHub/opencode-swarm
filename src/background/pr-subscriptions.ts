@@ -49,6 +49,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
 import { withEvidenceLock } from '../evidence/lock.js';
+import { observeStoreHealth } from '../health/learning-health.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { telemetry } from '../telemetry.js';
 import { log } from '../utils';
@@ -1465,6 +1466,7 @@ function cleanupStaleLegacyArchive(directory: string): void {
 }
 
 function emitHealthTelemetry(
+	directory: string,
 	trigger:
 		| 'compact'
 		| 'migrate-complete'
@@ -1474,7 +1476,7 @@ function emitHealthTelemetry(
 	checkpoint: PrSubscriptionCheckpoint,
 ): void {
 	const records = Object.values(checkpoint.records);
-	telemetry.prSubscriptionHealth({
+	const healthPayload = {
 		trigger,
 		active_count: records.filter((r) => r.status === 'active').length,
 		terminal_count: records.filter((r) => r.status !== 'active').length,
@@ -1487,6 +1489,13 @@ function emitHealthTelemetry(
 		),
 		limit_bytes: PR_SUBSCRIPTION_LIMITS.maxCheckpointBytes,
 		recovery_resets: checkpoint.maintenance.resets,
+	};
+	telemetry.prSubscriptionHealth(healthPayload);
+	// #2044: direct learning-health feed from the FIRST store event.
+	observeStoreHealth({
+		directory,
+		kind: 'pr_subscription_health',
+		payload: healthPayload,
 	});
 }
 
@@ -1828,8 +1837,8 @@ async function bootstrapCheckpointFromLegacy(directory: string): Promise<void> {
 					checkpoint.sequence,
 					checkpoint.maintenance,
 				);
-				emitHealthTelemetry('migrate-complete', checkpoint);
-				if (archiveEvent) emitHealthTelemetry('archive', checkpoint);
+				emitHealthTelemetry(directory, 'migrate-complete', checkpoint);
+				if (archiveEvent) emitHealthTelemetry(directory, 'archive', checkpoint);
 			},
 			PR_SUBSCRIPTION_LIMITS.bootstrapLockTimeoutMs,
 		);
@@ -2182,7 +2191,7 @@ function finalizeWrite(
 			checkpoint.maintenance,
 		);
 		cleanupStaleLegacyArchive(directory);
-		emitHealthTelemetry('archive', checkpoint);
+		emitHealthTelemetry(directory, 'archive', checkpoint);
 		return;
 	}
 
@@ -2230,7 +2239,7 @@ function finalizeWrite(
 		'corrupt-quarantine',
 	] as const) {
 		if (events.some((event) => event.kind === kind)) {
-			emitHealthTelemetry(kind, checkpoint);
+			emitHealthTelemetry(directory, kind, checkpoint);
 		}
 	}
 }

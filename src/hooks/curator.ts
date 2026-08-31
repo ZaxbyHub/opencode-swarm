@@ -39,6 +39,7 @@ import {
 	appendCoreEventsSync,
 	readCoreEvents,
 } from '../events/core-events.js';
+import { observeCuratorCompliance } from '../health/learning-health';
 import { authorizeCuration } from '../knowledge/curation-policy.js';
 import { alreadyCuratedThisGeneration } from '../knowledge/scan-cursor.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
@@ -157,6 +158,7 @@ export const _internals = {
 	checkPhaseCompliance,
 	normalizeAgentName,
 	autoRetireSkills,
+	observeCuratorCompliance,
 	/**
 	 * Retained deliberately (issue #2038 §7). The three curator decision sites
 	 * now read through `readSkillUsageEntriesWithCoverage` because a coverage
@@ -1895,6 +1897,20 @@ export async function runCuratorPhase(
 		// 7. Update and write curator summary
 		const sessionId = `session-${Date.now()}`;
 		const now = new Date().toISOString();
+
+		// Learning-health participation feed (#2044): once per CURATOR_PHASE run,
+		// with the complete compliance observations and the agents that DID
+		// participate in hand. The alarm's structural-zero guard requires two
+		// gap facts in the window before raising, so a single review window can
+		// never raise on absence of eligible opportunity alone.
+		_internals.observeCuratorCompliance({
+			directory,
+			phase,
+			gapTypes: complianceObservations.map((observation) => observation.type),
+			agentsUsed: Array.isArray(phaseDigest.agents_used)
+				? phaseDigest.agents_used.map(String)
+				: [],
+		});
 
 		const summaryUpdated = await _internals.mergeCuratorPhaseSummary(
 			directory,

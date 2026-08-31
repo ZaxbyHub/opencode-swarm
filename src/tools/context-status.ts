@@ -16,11 +16,16 @@
 
 import type { ToolContext } from '@opencode-ai/plugin';
 import { loadPluginConfig } from '../config';
+import type { ContextWindowSource } from '../config/context-window';
 import {
 	type ContextUsageSource,
 	computeContextUsage,
 } from '../hooks/context-usage';
-import { extractModelInfo, resolveModelLimit } from '../hooks/model-limits';
+import {
+	extractModelInfo,
+	type ModelLimitSource,
+	resolveModelLimit,
+} from '../hooks/model-limits';
 import {
 	getLiveContextModelIdentity,
 	getLiveContextWindow,
@@ -71,6 +76,16 @@ export interface ContextStatusResult {
 	usageSource: ContextUsageSource;
 	/** Resolved model context limit in tokens */
 	modelLimit: number;
+	/** Coarse provenance class of the resolved limit (issue #2044): where the
+	 * denominator came from — host live window, user override, one of the two
+	 * static tables, or the flat 128k fallback. */
+	modelLimitSource: ModelLimitSource;
+	/** Fine-grained resolution rung that produced the limit (which key/table). */
+	modelLimitResolution: ContextWindowSource;
+	/** True when the limit came from a static table or the flat default — i.e.
+	 * the denominator is NOT the host's live window and headroom figures carry
+	 * that uncertainty (issue #2044: "fallback can hide dead-headroom loops"). */
+	fallbackActive: boolean;
 	/** Ratio of tokens-used to model-limit (0.0 – 1.0+) */
 	usagePercent: number;
 	/** Threshold state: 'none' | 'warn' | 'critical' */
@@ -130,6 +145,8 @@ function computeContextHeadroom(
 	modelLimitsConfig: Record<string, number> = {},
 	liveContextLimit?: unknown,
 	modelIdentity?: { modelID?: string; providerID?: string },
+	/** Project directory (#2044): scopes the model-limit health observation. */
+	directory?: string,
 ): ContextStatusResult {
 	// The current live identity outranks historical assistant metadata during a
 	// first-turn handoff. Direct callers that do not have session state retain
@@ -142,12 +159,14 @@ function computeContextHeadroom(
 	// DEFAULT_MODEL_CONTEXT_TOKENS. This tool must agree with the live
 	// context-budget hook; reporting headroom against a different denominator
 	// than the one that actually prunes messages is worse than not reporting it.
-	const modelLimit = resolveModelLimit(
+	const modelLimitResolution = resolveModelLimit(
 		modelID,
 		providerID,
 		modelLimitsConfig,
 		liveContextLimit,
+		directory,
 	);
+	const modelLimit = modelLimitResolution.limit;
 
 	const usage = computeContextUsage(messages);
 
@@ -166,6 +185,12 @@ function computeContextHeadroom(
 		tokensUsed: usage.tokensUsed,
 		usageSource: usage.source,
 		modelLimit,
+		modelLimitSource: modelLimitResolution.source,
+		modelLimitResolution: modelLimitResolution.resolution,
+		fallbackActive:
+			modelLimitResolution.source === 'provider_cap' ||
+			modelLimitResolution.source === 'native' ||
+			modelLimitResolution.source === 'fallback',
 		usagePercent,
 		thresholdCrossed,
 		modelId: modelID ?? null,
@@ -232,6 +257,8 @@ export const context_status: ReturnType<typeof createSwarmTool> =
 				// system.transform of the session.
 				getLiveContextWindow(ctx?.sessionID, { modelID, providerID }),
 				{ modelID, providerID },
+				// #2044: scopes the model-limit health observation to this project.
+				directory,
 			);
 
 			return JSON.stringify(headroom, null, 2);

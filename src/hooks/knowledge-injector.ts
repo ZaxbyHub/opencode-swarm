@@ -105,6 +105,12 @@ function phaseNumberOf(label: string | undefined): number | undefined {
  * `.swarm/knowledge-events.jsonl` (issue #1768). Fire-and-forget + fail-open:
  * telemetry must never break injection. Every silent early-return in the
  * architect path calls this instead of (or alongside) a bare `warn`.
+ *
+ * Issue #2044 item 4 — common-context stamping: every skip observation records
+ * what context WAS available at the early return (message count, model
+ * identity, store availability, phase) plus an explicit `missing` reason list,
+ * so a skip is diagnosable without re-running the turn. No raw query text is
+ * ever stamped — counts, ids, and closed-vocabulary reason codes only.
  */
 function recordInjectionSkip(
 	directory: string,
@@ -113,9 +119,25 @@ function recordInjectionSkip(
 		agent?: string;
 		sessionId?: string;
 		phase?: number;
+		/** Integer message count at the early return (`messages.length`). */
+		messageCount?: number;
+		modelId?: string;
+		providerId?: string;
+		storeAvailable?: boolean;
+		/** Explicit missing-reason list (closed vocabulary per call site). */
+		missing?: string[];
 		extra?: Record<string, unknown>;
 	},
 ): void {
+	const context: Record<string, unknown> = {};
+	if (detail?.messageCount !== undefined)
+		context.message_count = detail.messageCount;
+	if (detail?.modelId !== undefined) context.model_id = detail.modelId;
+	if (detail?.providerId !== undefined) context.provider_id = detail.providerId;
+	if (detail?.storeAvailable !== undefined)
+		context.store_available = detail.storeAvailable;
+	if (detail?.missing !== undefined && detail.missing.length > 0)
+		context.missing = detail.missing;
 	_internals
 		.recordKnowledgeEvent(directory, {
 			type: 'injection_skip',
@@ -123,7 +145,10 @@ function recordInjectionSkip(
 			agent: detail?.agent,
 			session_id: detail?.sessionId,
 			phase: detail?.phase,
-			detail: detail?.extra,
+			detail: {
+				...detail?.extra,
+				...(Object.keys(context).length > 0 ? { context } : {}),
+			},
 		})
 		.catch(() => {
 			// swallow — diagnostic telemetry must never propagate
@@ -569,6 +594,7 @@ export async function injectForDelegate(
 					{
 						agent,
 						sessionId,
+						missing: membership.ok ? ['reusable_trace'] : ['valid_membership'],
 						extra: { trace_id: search.trace_id },
 					},
 				);
@@ -930,7 +956,14 @@ export function createKnowledgeInjectorHook(
 			_input: Record<string, never>,
 			output: { messages?: MessageWithParts[] },
 		) => {
-			if (!output.messages || output.messages.length === 0) return;
+			if (!output.messages || output.messages.length === 0) {
+				// (#2044 item 4) No silent early returns: an empty message surface
+				// is a diagnosable skip with an explicit missing reason.
+				recordInjectionSkip(directory, 'no_messages', {
+					missing: ['messages'],
+				});
+				return;
+			}
 
 			// Load plan — proceed with default context if no plan exists
 			const plan = await loadPlan(directory);
@@ -948,6 +981,8 @@ export function createKnowledgeInjectorHook(
 			if (!sessionId) {
 				recordInjectionSkip(directory, 'missing_session_id', {
 					agent: agentName,
+					messageCount: output.messages.length,
+					missing: ['session_id'],
 				});
 				return;
 			}
@@ -974,7 +1009,8 @@ export function createKnowledgeInjectorHook(
 				providerID,
 				modelLimitOverrides,
 				liveContextLimit,
-			);
+				directory,
+			).limit;
 			const MODEL_LIMIT_CHARS = estimateCharsForTokens(modelLimitTokens);
 			const existingChars = output.messages.reduce((sum, msg) => {
 				return (
@@ -994,6 +1030,10 @@ export function createKnowledgeInjectorHook(
 				recordInjectionSkip(directory, 'headroom_budget', {
 					agent: agentName,
 					sessionId,
+					messageCount: output.messages.length,
+					modelId: modelID,
+					providerId: providerID,
+					missing: ['headroom'],
 					extra: {
 						headroomChars,
 						existingChars,
@@ -1026,7 +1066,11 @@ export function createKnowledgeInjectorHook(
 			if (!agentName) {
 				// (#1768/#1849) Genuine empty case: no swarmState entry AND no user
 				// message carrying info.agent. Diagnostic tombstone only.
-				recordInjectionSkip(directory, 'no_agent_name', { sessionId });
+				recordInjectionSkip(directory, 'no_agent_name', {
+					sessionId,
+					messageCount: output.messages.length,
+					missing: ['agent_name'],
+				});
 				return;
 			}
 
@@ -1073,6 +1117,8 @@ export function createKnowledgeInjectorHook(
 				recordInjectionSkip(directory, 'not_architect', {
 					agent: agentName,
 					sessionId,
+					messageCount: output.messages.length,
+					missing: ['architect_agent'],
 				});
 				return;
 			}
@@ -1226,6 +1272,8 @@ export function createKnowledgeInjectorHook(
 					agent: agentName,
 					sessionId: sessionID,
 					phase: currentPhase,
+					messageCount: output.messages.length,
+					missing: ['matching_entries'],
 				});
 				const empty = await _internals.commitEmptyRetrieval(directory, {
 					trace_id: search.trace_id,
@@ -1349,6 +1397,8 @@ export function createKnowledgeInjectorHook(
 					agent: agentName,
 					sessionId: sessionId,
 					phase: currentPhase,
+					messageCount: output.messages.length,
+					missing: ['rendered_entries'],
 					extra: {
 						filteredCount: filteredEntries.length,
 						directiveCount: directiveEntries.length,

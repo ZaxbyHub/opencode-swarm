@@ -1395,10 +1395,15 @@ function migrateLegacyLog(
 		rewriteWithoutMarkers(resolved);
 	}
 
-	emitSkillUsageHealth(doc, 'migration', {
-		bytes: queueByteSize(doc),
-		limitBytes: SKILL_USAGE_LIMITS.queueMaxBytes,
-	});
+	emitSkillUsageHealth(
+		doc,
+		'migration',
+		{
+			bytes: queueByteSize(doc),
+			limitBytes: SKILL_USAGE_LIMITS.queueMaxBytes,
+		},
+		directory,
+	);
 }
 
 /**
@@ -1722,10 +1727,15 @@ export function pruneSkillUsageLog(
 		// would reset to zero every pass.
 		adoptStagedDocument(doc, stagedManifest);
 
-		emitSkillUsageHealth(doc, 'compaction', {
-			bytes: content.length + (surviving.length > 0 ? 1 : 0),
-			limitBytes: SKILL_USAGE_LIMITS.maxBytes,
-		});
+		emitSkillUsageHealth(
+			doc,
+			'compaction',
+			{
+				bytes: content.length + (surviving.length > 0 ? 1 : 0),
+				limitBytes: SKILL_USAGE_LIMITS.maxBytes,
+			},
+			directory,
+		);
 
 		return { pruned: dropped, remaining: surviving.length };
 	} finally {
@@ -2028,10 +2038,15 @@ function commitFeedbackOutcomes(
 
 		enforceQueueBounds(doc);
 		savePendingDocument(directory, doc);
-		emitSkillUsageHealth(doc, 'consumption', {
-			bytes: queueByteSize(doc),
-			limitBytes: SKILL_USAGE_LIMITS.queueMaxBytes,
-		});
+		emitSkillUsageHealth(
+			doc,
+			'consumption',
+			{
+				bytes: queueByteSize(doc),
+				limitBytes: SKILL_USAGE_LIMITS.queueMaxBytes,
+			},
+			directory,
+		);
 	} finally {
 		releaseSkillUsageLock(handle);
 	}
