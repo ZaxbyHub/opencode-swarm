@@ -1003,12 +1003,20 @@ interface RetentionOutcome {
  * distinct skills > `maxEntries`, keeping >= 1 entry per skill is
  * arithmetically impossible, and requirement 1 (hard ceiling) wins.
  *
- * **Age reference point.** The window is anchored to the newest entry in the
- * log, not to wall-clock `Date.now()`. The approved plan says "drop everything
- * older than `maxAgeMs`" without naming a reference; anchoring to the data
- * makes compaction deterministic and idempotent (needed for the repeated-cycle
- * `{processed: 0, bumps: 0}` contract) and keeps the retained window genuinely
- * bounded either way. Entries whose timestamp does not parse are kept, never
+ * **Age reference point.** The window is anchored to `min(newest entry in the
+ * log, wall-clock Date.now())`, not to the newest entry alone (PR #2347 review
+ * round 2 — a future-dated entry, e.g. a broken system clock at write time,
+ * would otherwise become the anchor and mass-evict every legitimately-recent
+ * entry in one pass, since their real timestamps then fall below the inflated
+ * cutoff). The approved plan says "drop everything older than `maxAgeMs`"
+ * without naming a reference; anchoring to the data (when the data is not
+ * future-dated) makes compaction deterministic and idempotent — needed for the
+ * repeated-cycle `{processed: 0, bumps: 0}` contract — and keeps the retained
+ * window genuinely bounded either way. That determinism guarantee holds
+ * unqualified only when the log's newest entry is not ahead of wall-clock
+ * `now`; under a backwards clock correction between two passes the cutoff can
+ * legitimately differ pass-to-pass, but only in the direction of retaining
+ * more, never less. Entries whose timestamp does not parse are kept, never
  * silently discarded on a formatting technicality.
  */
 function applyRetention(
@@ -1026,7 +1034,19 @@ function applyRetention(
 	}
 	let aged = entries;
 	if (newestMs !== Number.NEGATIVE_INFINITY) {
-		const cutoff = newestMs - SKILL_USAGE_LIMITS.maxAgeMs;
+		// PR #2347 review round 2: clamp the anchor to wall-clock `now` before
+		// subtracting `maxAgeMs`. A single poisoned future-dated entry (a broken
+		// system clock at write time, not attacker-reachable — every production
+		// writer stamps `new Date().toISOString()`) would otherwise become
+		// `newestMs`, pushing `cutoff` forward and mass-evicting every
+		// legitimately-timestamped entry in one pass, since their real
+		// timestamps then fall below the inflated cutoff. `Math.min` is a no-op
+		// for the legitimate case (newestMs is not ahead of Date.now() when
+		// every write is wall-clock-stamped), so it does not reintroduce
+		// wall-clock dependence into the anchor-to-data idempotency contract —
+		// it only engages on the anomalous poisoned-timestamp path (benign
+		// clock skew, e.g. an NTP correction, engages it harmlessly too).
+		const cutoff = Math.min(newestMs, Date.now()) - SKILL_USAGE_LIMITS.maxAgeMs;
 		aged = entries.filter((entry) => {
 			const ms = Date.parse(entry.timestamp);
 			return Number.isNaN(ms) ? true : ms >= cutoff;

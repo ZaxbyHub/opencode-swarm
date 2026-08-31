@@ -353,14 +353,14 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		],
 		writerCitations: [
 			'src/hooks/skill-usage-log.ts:535 appendSkillUsageEntry — appendFileSync :624-628; enqueues into the sidecar FIRST (:614-621) before the JSONL append',
-			'src/hooks/skill-usage-log.ts:1556 pruneSkillUsageLog — atomic temp+rename rewrite :1697-1703, applies applyRetention (:1014) and the marker-drop rewrite',
+			'src/hooks/skill-usage-log.ts:1576 pruneSkillUsageLog — atomic temp+rename rewrite :1718-1723, applies applyRetention (:1022) and the marker-drop rewrite',
 			'src/hooks/skill-usage-log.ts:326 appendFeedbackAppliedMarker — appendFileSync :341 (legacy pre-migration acknowledgment writer, retained for round-trip)',
 		],
 		readerCitations: [
 			'src/hooks/skill-usage-log.ts:770 readSkillUsageEntries — bounded via readLogSlice :651-691, readMaxBytes=1,677,722 B, sync',
 			'src/hooks/skill-usage-log.ts:745 readSkillUsageEntriesWithCoverage — same bound, additionally reports SkillUsageReadCoverage (truncatedRead + sidecar manifest coverage), sync',
 			"src/hooks/skill-usage-log.ts:302 parseFeedbackMarker — parses feedback_applied markers during the migration's streaming acknowledgment pass (migrateLegacyLog pass 2, :1352-1371); legacy pre-migration reader only, sync",
-			'src/hooks/skill-usage-log.ts:2060 applySkillUsageFeedback — reads the AUTHORITATIVE sidecar queue only (never the JSONL), async',
+			'src/hooks/skill-usage-log.ts:2080 applySkillUsageFeedback — reads the AUTHORITATIVE sidecar queue only (never the JSONL), async',
 			'src/hooks/skill-usage-log.ts:808 readSkillUsageEntriesTail — TAIL 64 KiB (TAIL_BYTES_DEFAULT :782), sync',
 			'src/services/session-reflection.ts:530 gatherSkillViolations — via tail reader',
 		],
@@ -368,7 +368,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		stateClass: 'derived-rebuildable',
 		privacyClass: 'metadata',
 		writeLimits: {
-			bound: 'HARD GLOBAL ceiling across all skills and marker types (issue #2038): maxEntries=5,000 / maxBytes=1.5 MiB / maxAgeMs=90d, with a per-skill floorPerSkill=20 guaranteed retained window; enforced by applyRetention (skill-usage-log.ts:1014-1103) on every compaction pass',
+			bound: 'HARD GLOBAL ceiling across all skills and marker types (issue #2038): maxEntries=5,000 / maxBytes=1.5 MiB / maxAgeMs=90d, with a per-skill floorPerSkill=20 guaranteed retained window; enforced by applyRetention (skill-usage-log.ts:1022-1123) on every compaction pass',
 			scope: 'global',
 			citation: 'src/hooks/skill-usage-pending.ts:85-101 SKILL_USAGE_LIMITS',
 		},
@@ -379,20 +379,20 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			citation: 'src/hooks/skill-usage-log.ts:651-691 readLogSlice; :782 TAIL_BYTES_DEFAULT',
 		},
 		lockModel: 'single shared .swarm/skill-usage.lock (openSync wx-create, stale-broken after SKILL_USAGE_LOCK_STALE_MS=5min); guards the sidecar and every migration/compaction touch of the JSONL; the enqueue path is exempt from skip-not-force and retries up to 5x/10ms, throwing (and aborting the append) on failure',
-		crashBehavior: 'malformed JSONL lines skipped by JSON.parse try/catch (parseEntriesFromText :693-706); an overlong unassemblable line in the streaming reader is dropped and counted, not buffered without bound (streamLogLines :359-393); prune/compaction rewrite is atomic temp+rename (pruneSkillUsageLog :1556, rewrite :1697-1703); sidecar save is atomic temp+rename (savePendingDocument :795 -> savePendingDocumentAt, skill-usage-pending.ts:803-853, writeFileSync :820 + renameSync :821)',
+		crashBehavior: 'malformed JSONL lines skipped by JSON.parse try/catch (parseEntriesFromText :693-706); an overlong unassemblable line in the streaming reader is dropped and counted, not buffered without bound (streamLogLines :359-393); prune/compaction rewrite is atomic temp+rename (pruneSkillUsageLog :1576, rewrite :1718-1723); sidecar save is atomic temp+rename (savePendingDocument :795 -> savePendingDocumentAt, skill-usage-pending.ts:803-853, writeFileSync :820 + renameSync :821)',
 		closePolicy: 'untouched — persists across sessions',
 		closeArrayMembership: {
 			'skill-usage.jsonl': 'neither',
 			'verdict-feedback-last-processed.json': 'neither',
 		},
 		resetPolicy: 'not reset',
-		legacyCompatibility: 'normalizeComplianceVerdict maps legacy violation→violated (skill-usage-log.ts:151-153); legacySkillUsageId mints a deterministic content-hash id for pre-id entries (:270-281); one-time migrateLegacyLog (:1271-1402) folds legacy actionable entries minus any feedback_applied-acknowledged ids into the sidecar; the whole migration runs on a staged copy that is published to the in-memory document only after savePendingDocument returns (stagePendingDocument :1189-1201 / adoptStagedDocument :1204-1213), so a failed sidecar write leaves the JSONL marker lines intact instead of dropping them ahead of a queue that was never written',
+		legacyCompatibility: 'normalizeComplianceVerdict maps legacy violation→violated (skill-usage-log.ts:151-153); legacySkillUsageId mints a deterministic content-hash id for pre-id entries (:270-281); one-time migrateLegacyLog (:1291-1422) folds legacy actionable entries minus any feedback_applied-acknowledged ids into the sidecar; the whole migration runs on a staged copy that is published to the in-memory document only after savePendingDocument returns (stagePendingDocument :1209-1221 / adoptStagedDocument :1224-1233), so a failed sidecar write leaves the JSONL marker lines intact instead of dropping them ahead of a queue that was never written',
 		healthSignal: 'skill_usage_health — counts-only (accepted/compacted/dropped/skills_dropped/corrupt/pending_retained/uncertain_retained/uncertain_expired/pending_evicted/no_source_knowledge/no_matching_knowledge/bump_retry/bump_unrecoverable/bump_applied_zero/pressure/curator_skipped/bytes/limit_bytes/oldest_timestamp/newest_timestamp/coverage), emitted on compaction/migration/consumption/pressure',
 		owner: '#2038 (implemented)',
 		disposition: {
 			kind: 'retain-by-design',
 			citation:
-				'Issue #2038 landed a hard global byte/age/count bound (SKILL_USAGE_LIMITS: maxEntries=5,000/maxBytes=1.5MiB/maxAgeMs=90d/floorPerSkill=20, src/hooks/skill-usage-pending.ts:85-101) enforced by applyRetention (src/hooks/skill-usage-log.ts:1014-1103), a bounded deterministic full reader (readLogSlice, :651-691, readMaxBytes=1,677,722 B) that reports truncatedRead rather than silently degrading, a shared stale-breakable lock (.swarm/skill-usage.lock, stale window SKILL_USAGE_LOCK_STALE_MS skill-usage-pending.ts:109), atomic temp+rename writes on both the JSONL compaction path (:1697-1703) and the new authoritative sidecar (skill-usage-pending.ts:803-853), and the skill_usage_health counts-only observability signal (skill-usage-pending.ts:1350-1385). The correctness gap the bound creates — an evicted-from-JSONL actionable verdict losing its feedback signal — is closed by enqueueSkillUsageFeedback (skill-usage-pending.ts:1170-1195), called BEFORE the JSONL append (skill-usage-log.ts:614-621) so eviction from the operational stream can never lose an un-consumed compliant/violated verdict; see the new skill-usage-pending row for that authoritative store\'s own bound. Enforcement is covered by tests/unit/hooks/skill-usage-bounds.test.ts (global ceiling, retention order, corrupt-line durability, migration) and tests/unit/hooks/skill-usage-pending.test.ts (queue budgets, terminal outcomes, quarantine), alongside tests/unit/hooks/skill-usage-log.test.ts and skill-usage-feedback.test.ts.',
+				'Issue #2038 landed a hard global byte/age/count bound (SKILL_USAGE_LIMITS: maxEntries=5,000/maxBytes=1.5MiB/maxAgeMs=90d/floorPerSkill=20, src/hooks/skill-usage-pending.ts:85-101) enforced by applyRetention (src/hooks/skill-usage-log.ts:1022-1123), a bounded deterministic full reader (readLogSlice, :651-691, readMaxBytes=1,677,722 B) that reports truncatedRead rather than silently degrading, a shared stale-breakable lock (.swarm/skill-usage.lock, stale window SKILL_USAGE_LOCK_STALE_MS skill-usage-pending.ts:109), atomic temp+rename writes on both the JSONL compaction path (:1718-1723) and the new authoritative sidecar (skill-usage-pending.ts:803-853), and the skill_usage_health counts-only observability signal (skill-usage-pending.ts:1350-1385). The correctness gap the bound creates — an evicted-from-JSONL actionable verdict losing its feedback signal — is closed by enqueueSkillUsageFeedback (skill-usage-pending.ts:1170-1195), called BEFORE the JSONL append (skill-usage-log.ts:614-621) so eviction from the operational stream can never lose an un-consumed compliant/violated verdict; see the new skill-usage-pending row for that authoritative store\'s own bound. Enforcement is covered by tests/unit/hooks/skill-usage-bounds.test.ts (global ceiling, retention order, corrupt-line durability, migration) and tests/unit/hooks/skill-usage-pending.test.ts (queue budgets, terminal outcomes, quarantine), alongside tests/unit/hooks/skill-usage-log.test.ts and skill-usage-feedback.test.ts.',
 		},
 	},
 	{
@@ -409,7 +409,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/skill-usage-pending.ts:728 loadPendingDocument — via loadPendingDocumentAt :739, bounded by readMaxBytes=1,677,722 B (:757); oversized/corrupt documents are quarantined, never silently reset to empty (:781)',
 			'src/hooks/skill-usage-pending.ts:863 readPendingManifest — cheap manifest-only read, statSync-mtime-keyed cache (:883-888), no records array materialized',
 			'src/hooks/skill-usage-log.ts:745 readSkillUsageEntriesWithCoverage — folds readPendingManifest coverage into the JSONL read window',
-			'src/hooks/skill-usage-log.ts:2060 applySkillUsageFeedback — sole consumer of the records array (via claimFeedbackRecords :1864-1901), computes compliant/violated deltas from queue records only, never from JSONL entries',
+			'src/hooks/skill-usage-log.ts:2080 applySkillUsageFeedback — sole consumer of the records array (via claimFeedbackRecords :1884-1921), computes compliant/violated deltas from queue records only, never from JSONL entries',
 		],
 		schemaVersion: '1 (SKILL_USAGE_LIMITS.version, skill-usage-pending.ts:86)',
 		stateClass: 'authoritative',
@@ -433,13 +433,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'skill-usage-pending.json': 'neither',
 		},
 		resetPolicy: 'not reset',
-		legacyCompatibility: 'migrated: false on a fresh/absent document signals the one-time legacy migration has not run; migrateLegacyLog (skill-usage-log.ts:1271-1402) folds pre-existing JSONL actionable entries (minus feedback_applied-acknowledged ids) into this store on first lock-taking touch, then sets migrated: true',
+		legacyCompatibility: 'migrated: false on a fresh/absent document signals the one-time legacy migration has not run; migrateLegacyLog (skill-usage-log.ts:1291-1422) folds pre-existing JSONL actionable entries (minus feedback_applied-acknowledged ids) into this store on first lock-taking touch, then sets migrated: true',
 		healthSignal: 'skill_usage_health — same counts-only payload as the skill-usage row (buildSkillUsageHealthPayload, skill-usage-pending.ts:1350-1385), emitted via emitSkillUsageHealth (:1388-1401)',
 		owner: '#2038 (implemented)',
 		disposition: {
 			kind: 'retain-by-design',
 			citation:
-				'This store is deliberately AUTHORITATIVE, not derived-rebuildable: it is the sole durable record of which actionable (compliant/violated) skill-usage verdicts have not yet been folded into knowledge confidence via bumpKnowledgeConfidenceBatchResult (src/hooks/knowledge-store.ts:1293), driven by applySkillUsageFeedback (src/hooks/skill-usage-log.ts:2060-2163). Nothing else on disk records that fact once an entry is evicted from the bounded JSONL operational stream (issue #2038 requirement: eviction from skill-usage.jsonl must lose no correctness signal). It carries its own hard global bound (queueMaxRecords=5,000/queueMaxBytes=512KiB, src/hooks/skill-usage-pending.ts:85-101) enforced by enforceQueueBounds (:1023-1080, oldest-uncertain-first eviction; an actionable record evicted by the budget is counted as pending_evicted + pressure rather than dropped, a deliberate divergence from approved plan section 4 recorded in evictionRank docblock :980-1012 — every discard counted via the durable counters, never silent), atomic temp+rename writes (savePendingDocument :795 via savePendingDocumentAt :803-853), a shared stale-breakable lock, and the skill_usage_health signal. Enforcement is covered by tests/unit/hooks/skill-usage-pending.test.ts and tests/unit/hooks/skill-usage-bounds.test.ts.',
+				'This store is deliberately AUTHORITATIVE, not derived-rebuildable: it is the sole durable record of which actionable (compliant/violated) skill-usage verdicts have not yet been folded into knowledge confidence via bumpKnowledgeConfidenceBatchResult (src/hooks/knowledge-store.ts:1293), driven by applySkillUsageFeedback (src/hooks/skill-usage-log.ts:2080-2183). Nothing else on disk records that fact once an entry is evicted from the bounded JSONL operational stream (issue #2038 requirement: eviction from skill-usage.jsonl must lose no correctness signal). It carries its own hard global bound (queueMaxRecords=5,000/queueMaxBytes=512KiB, src/hooks/skill-usage-pending.ts:85-101) enforced by enforceQueueBounds (:1023-1080, oldest-uncertain-first eviction; an actionable record evicted by the budget is counted as pending_evicted + pressure rather than dropped, a deliberate divergence from approved plan section 4 recorded in evictionRank docblock :980-1012 — every discard counted via the durable counters, never silent), atomic temp+rename writes (savePendingDocument :795 via savePendingDocumentAt :803-853), a shared stale-breakable lock, and the skill_usage_health signal. Enforcement is covered by tests/unit/hooks/skill-usage-pending.test.ts and tests/unit/hooks/skill-usage-bounds.test.ts.',
 		},
 	},
 
