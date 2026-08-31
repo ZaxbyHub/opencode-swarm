@@ -211,3 +211,19 @@ describe('lineage ref domain separation (FB-006, PR #2056 Stage-B)', () => {
 		expect(ref).not.toContain('my-branch');
 	});
 });
+
+// PR #2446 (PRR-014): pseudonymousSessionRef must equal pseudonymousRef for
+// the same inputs — cross-module redaction parity depends on the identical
+// construction.
+describe('pseudonymousSessionRef equivalence (PR #2446)', () => {
+	test('delegates to the exact same digest construction as pseudonymousRef', async () => {
+		const { pseudonymousRef, pseudonymousSessionRef } = await import(
+			'../../../src/observability/ids'
+		);
+		for (const id of ['sess-1', 'SAME-SESSION-ID', 'üñïçø∂é id', '']) {
+			expect(pseudonymousSessionRef(id, 'salt')).toBe(
+				pseudonymousRef(id, 'salt'),
+			);
+		}
+	});
+});

@@ -236,7 +236,7 @@ describe('model-limits: adversarial/attack-vector tests', () => {
 });
 
 describe('#2044 — invalid-override + alias provenance flows to the health seam', () => {
-	it('an invalid override is reported durably with its key class, once per identity', () => {
+	it('an invalid override is STICKY while the bad config persists, and clears when fixed (PR-comment C8)', () => {
 		const observed: unknown[] = [];
 		const original = _internals.observeResolution;
 		_internals.observeResolution = (input) => {
@@ -249,17 +249,74 @@ describe('#2044 — invalid-override + alias provenance flows to the health seam
 			const invalid = observed.filter(
 				(o) => (o as { invalidOverride?: boolean }).invalidOverride === true,
 			);
-			// Bounded once per identity: the second call reports nothing new.
-			expect(invalid).toHaveLength(1);
+			// Sticky (C8): the health flag must stay true on EVERY resolve while
+			// the invalid key remains in the config — a once-only flag would let
+			// the alarm self-recover on the very next resolve of an unchanged,
+			// still-broken config.
+			expect(invalid).toHaveLength(2);
 			resolveModelLimit('prov-model', 'prov-provider', {
 				'prov-provider/prov-model': 50000,
 			});
 			const last = observed[observed.length - 1] as {
 				aliasKeyClass?: string;
 				resolution?: string;
+				invalidOverride?: boolean;
 			};
 			expect(last.aliasKeyClass).toBe('compound');
 			expect(last.resolution).toBe('user_provider_model');
+			// Config fixed → flag clears.
+			expect(last.invalidOverride).toBe(false);
+		} finally {
+			_internals.observeResolution = original;
+		}
+	});
+
+	it('an invalid override key for an UNRELATED model never flags this identity (PR-comment C9)', () => {
+		const observed: unknown[] = [];
+		const original = _internals.observeResolution;
+		_internals.observeResolution = (input) => {
+			observed.push(input);
+		};
+		try {
+			resolveModelLimit('healthy-model', 'healthy-provider', {
+				// Invalid value, but the key belongs to a different model.
+				'other-provider/other-model': Number.NaN as number,
+			});
+			for (const o of observed) {
+				expect((o as { invalidOverride?: boolean }).invalidOverride).toBe(
+					false,
+				);
+			}
+			// ...while a relevant model-only key DOES flag.
+			resolveModelLimit('healthy-model', 'healthy-provider', {
+				'healthy-model': 0 as number,
+			});
+			expect(
+				(observed[observed.length - 1] as { invalidOverride?: boolean })
+					.invalidOverride,
+			).toBe(true);
+		} finally {
+			_internals.observeResolution = original;
+		}
+	});
+});
+
+describe('#2044 — normalized-key collision warning (PR-comment C10)', () => {
+	it('case-variant duplicate override keys warn once without changing resolution', () => {
+		const observed: string[] = [];
+		const original = _internals.observeResolution;
+		_internals.observeResolution = (input) => {
+			observed.push(String((input as { resolution?: string }).resolution));
+		};
+		try {
+			const config = { 'gpt-5': 90000, 'GPT-5': 91000 };
+			const first = resolveModelLimit('gpt-5', 'openai', config);
+			resolveModelLimit('gpt-5', 'openai', config);
+			// One of the colliding keys wins under normalized matching — the
+			// resolution is deterministic and remains an override.
+			expect(first.source).toBe('override');
+			expect([90000, 91000]).toContain(first.limit);
+			expect(observed.every((r) => r === 'user_model')).toBe(true);
 		} finally {
 			_internals.observeResolution = original;
 		}

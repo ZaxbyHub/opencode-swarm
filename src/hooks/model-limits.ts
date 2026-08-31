@@ -308,6 +308,7 @@ export function resolveModelLimit(
 		providerID,
 		configOverrides,
 	);
+	warnNormalizedKeyCollisions(configOverrides);
 	const inputs: ContextWindowInputs = {
 		userLimits: configOverrides,
 		modelID,
@@ -366,12 +367,17 @@ export const _internals: {
 /**
  * Surface user-authored override values that fail usability validation
  * (issue #2044 item 2): the invalid entry is skipped — never coerced — and the
- * skip is observed once per model/provider identity so operators can see why a
+ * skip is warned once per model/provider identity so operators can see why a
  * configured limit had no effect. Keys are reported by class (compound /
  * model / default), values as the raw number; neither is content.
  *
- * @returns true when at least one invalid override was newly reported (bounded
- * once per identity), so the durable health observation fires without storms.
+ * Health-observation scoping (PR-comment C8/C9): the returned flag is TRUE on
+ * EVERY resolve while an invalid key RELEVANT TO THIS IDENTITY remains in the
+ * config (sticky — the alarm must not self-recover while the bad config is
+ * unchanged), and only keys that could apply to this identity count
+ * ('default', a matching model-only key, or a matching compound key) so an
+ * unrelated-model typo never raises a fallback alarm against an otherwise
+ * healthy host-sourced identity. The warn log stays bounded once-per-identity.
  */
 function recordInvalidOverrides(
 	modelID: string | undefined,
@@ -379,24 +385,69 @@ function recordInvalidOverrides(
 	configOverrides: Record<string, number>,
 ): boolean {
 	if (!configOverrides || typeof configOverrides !== 'object') return false;
-	let newlyReported = false;
+	const normalizedModel = modelID?.trim().toLowerCase();
+	const normalizedCompound = `${providerID ?? ''}/${modelID ?? ''}`
+		.trim()
+		.toLowerCase();
+	let relevantInvalid = false;
 	for (const [key, value] of Object.entries(configOverrides)) {
 		if (isUsableConfiguredWindow(value)) continue;
 		const keyClass =
 			key === 'default' ? 'default' : key.includes('/') ? 'compound' : 'model';
+		const normalizedKey = key.trim().toLowerCase();
+		const relevant =
+			keyClass === 'default' ||
+			(keyClass === 'model' &&
+				normalizedModel !== undefined &&
+				normalizedKey === normalizedModel) ||
+			(keyClass === 'compound' && normalizedKey === normalizedCompound);
+		if (relevant) relevantInvalid = true;
 		const identity = `${modelID || 'unknown'}::${providerID || 'unknown'}::${keyClass}::${String(value)}`;
 		if (rememberBoundedModelIdentity(invalidOverrideReports, identity)) {
-			newlyReported = true;
 			warn(
 				`[model-limits] context_budget.model_limits.${key}=${String(value)} for ${modelID || '(no model)'}@${providerID || '(no provider)'} is not a usable limit (finite number ≥ 1); skipping it — not coercing.`,
 				{ modelID, providerID, keyClass, value },
 			);
 		}
 	}
-	return newlyReported;
+	return relevantInvalid;
 }
 
 const invalidOverrideReports = new Set<string>();
+
+/**
+ * Warn (bounded once per collision pair) when two distinct override keys
+ * normalize to the same lookup key (PR-comment C10): case/whitespace variants
+ * like `gpt-5` and `GPT-5` silently collapse last-wins under normalized
+ * matching — the user should hear about the ambiguity once.
+ */
+function warnNormalizedKeyCollisions(
+	configOverrides: Record<string, number>,
+): void {
+	const byNormalized = new Map<string, string[]>();
+	for (const key of Object.keys(configOverrides)) {
+		const normalized = key.trim().toLowerCase();
+		byNormalized.set(normalized, [
+			...(byNormalized.get(normalized) ?? []),
+			key,
+		]);
+	}
+	for (const [normalized, keys] of byNormalized) {
+		if (keys.length < 2) continue;
+		const identity = `collision::${normalized}`;
+		if (!rememberBoundedModelIdentity(invalidOverrideReports, identity)) {
+			continue;
+		}
+		warn(
+			`[model-limits] context_budget.model_limits has ${keys.length} keys that normalize identically (${keys
+				.map((k) => `\`${k}\``)
+				.join(
+					', ',
+				)}); only the last one in config order takes effect under normalized matching.`,
+			{ keys },
+		);
+	}
+}
 
 /**
  * Finds a native limit by prefix matching the modelID.

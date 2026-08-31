@@ -3,9 +3,9 @@
 Companion to `docs/evidence-and-telemetry.md` (evidence bundles + the legacy
 telemetry stream from a user's point of view) and `docs/engineering-invariants.md`
 (the invariant this PR establishes). This document is the contract definition for
-`src/observability/`: the canonical event envelope, the 50-entry event catalog,
+`src/observability/`: the canonical event envelope, the 55-entry event catalog,
 the legacy adapter, sampling/cardinality rules, the OTel mapping pin, and the
-exhaustive producer/consumer matrix across all seventeen known observability
+exhaustive producer/consumer matrix across all eighteen known observability
 stores in the repository.
 
 Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
@@ -16,7 +16,7 @@ Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
 
 **What this PR defines.** A single canonical `ObservabilityEvent` envelope
 (`src/observability/envelope.ts`), a discriminated catalog of every event kind
-the codebase emits today (`src/observability/catalog.ts`, 54 entries), a
+the codebase emits today (`src/observability/catalog.ts`, 55 entries), a
 relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. It wires the envelope into the one live production
@@ -751,8 +751,9 @@ plus per-family detail: `limit_source` + `denominator_fallback`
 (headroom-dead-streak attribution), `pressure_pct` + `band`
 (recovery-ledger), `share_pct` + `field_count` + `non_field_count`
 (fixture-share), `store` + `dropped` + `corrupt` + `retained` + `accepted`
-(store-drop coverage), `gap_type` (receipt liveness), `role`/`phase`
-(participation), `reason` (closed reason codes). Raw session IDs, filesystem
+(store-drop coverage), `gap_type` (receipt liveness), `phase`
+(participation), `role` (workflow role for participation; override key
+class for the model-limit fallback alarm), `reason` (closed reason codes). Raw session IDs, filesystem
 paths, queries, prompts, and responses are never emitted (redaction by
 pseudonymous reference and by omission). The registry persists ONLY alarm
 transitions and compact per-scope counters to

@@ -370,7 +370,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writeLimits: {
 			bound: 'HARD GLOBAL ceiling across all skills and marker types (issue #2038): maxEntries=5,000 / maxBytes=1.5 MiB / maxAgeMs=90d, with a per-skill floorPerSkill=20 guaranteed retained window; enforced by applyRetention (skill-usage-log.ts:1014-1103) on every compaction pass',
 			scope: 'global',
-			citation: 'src/hooks/skill-usage-pending.ts:85-101 SKILL_USAGE_LIMITS',
+			citation: 'src/hooks/skill-usage-pending.ts:86-101 SKILL_USAGE_LIMITS',
 		},
 		readBound: {
 			pattern: 'mixed full-file + tail',
@@ -379,7 +379,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			citation: 'src/hooks/skill-usage-log.ts:651-691 readLogSlice; :782 TAIL_BYTES_DEFAULT',
 		},
 		lockModel: 'single shared .swarm/skill-usage.lock (openSync wx-create, stale-broken after SKILL_USAGE_LOCK_STALE_MS=5min); guards the sidecar and every migration/compaction touch of the JSONL; the enqueue path is exempt from skip-not-force and retries up to 5x/10ms, throwing (and aborting the append) on failure',
-		crashBehavior: 'malformed JSONL lines skipped by JSON.parse try/catch (parseEntriesFromText :693-706); an overlong unassemblable line in the streaming reader is dropped and counted, not buffered without bound (streamLogLines :359-393); prune/compaction rewrite is atomic temp+rename (pruneSkillUsageLog :1556, rewrite :1697-1703); sidecar save is atomic temp+rename (savePendingDocument :795 -> savePendingDocumentAt, skill-usage-pending.ts:803-853, writeFileSync :820 + renameSync :821)',
+		crashBehavior: 'malformed JSONL lines skipped by JSON.parse try/catch (parseEntriesFromText :693-706); an overlong unassemblable line in the streaming reader is dropped and counted, not buffered without bound (streamLogLines :359-393); prune/compaction rewrite is atomic temp+rename (pruneSkillUsageLog :1561, rewrite :1697-1703); sidecar save is atomic temp+rename (savePendingDocument :796 -> savePendingDocumentAt, skill-usage-pending.ts:804-853, writeFileSync :821 + renameSync :822)',
 		closePolicy: 'untouched — persists across sessions',
 		closeArrayMembership: {
 			'skill-usage.jsonl': 'neither',
@@ -392,7 +392,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		disposition: {
 			kind: 'retain-by-design',
 			citation:
-				'Issue #2038 landed a hard global byte/age/count bound (SKILL_USAGE_LIMITS: maxEntries=5,000/maxBytes=1.5MiB/maxAgeMs=90d/floorPerSkill=20, src/hooks/skill-usage-pending.ts:85-101) enforced by applyRetention (src/hooks/skill-usage-log.ts:1014-1103), a bounded deterministic full reader (readLogSlice, :651-691, readMaxBytes=1,677,722 B) that reports truncatedRead rather than silently degrading, a shared stale-breakable lock (.swarm/skill-usage.lock, stale window SKILL_USAGE_LOCK_STALE_MS skill-usage-pending.ts:109), atomic temp+rename writes on both the JSONL compaction path (:1697-1703) and the new authoritative sidecar (skill-usage-pending.ts:803-853), and the skill_usage_health counts-only observability signal (skill-usage-pending.ts:1350-1385). The correctness gap the bound creates — an evicted-from-JSONL actionable verdict losing its feedback signal — is closed by enqueueSkillUsageFeedback (skill-usage-pending.ts:1170-1195), called BEFORE the JSONL append (skill-usage-log.ts:614-621) so eviction from the operational stream can never lose an un-consumed compliant/violated verdict; see the new skill-usage-pending row for that authoritative store\'s own bound. Enforcement is covered by tests/unit/hooks/skill-usage-bounds.test.ts (global ceiling, retention order, corrupt-line durability, migration) and tests/unit/hooks/skill-usage-pending.test.ts (queue budgets, terminal outcomes, quarantine), alongside tests/unit/hooks/skill-usage-log.test.ts and skill-usage-feedback.test.ts.',
+				'Issue #2038 landed a hard global byte/age/count bound (SKILL_USAGE_LIMITS: maxEntries=5,000/maxBytes=1.5MiB/maxAgeMs=90d/floorPerSkill=20, src/hooks/skill-usage-pending.ts:85-101) enforced by applyRetention (src/hooks/skill-usage-log.ts:1014-1103), a bounded deterministic full reader (readLogSlice, :651-691, readMaxBytes=1,677,722 B) that reports truncatedRead rather than silently degrading, a shared stale-breakable lock (.swarm/skill-usage.lock, stale window SKILL_USAGE_LOCK_STALE_MS skill-usage-pending.ts:110), atomic temp+rename writes on both the JSONL compaction path (:1697-1703) and the new authoritative sidecar (skill-usage-pending.ts:803-853), and the skill_usage_health counts-only observability signal (skill-usage-pending.ts:1351-1385). The correctness gap the bound creates — an evicted-from-JSONL actionable verdict losing its feedback signal — is closed by enqueueSkillUsageFeedback (skill-usage-pending.ts:1171-1195), called BEFORE the JSONL append (skill-usage-log.ts:614-621) so eviction from the operational stream can never lose an un-consumed compliant/violated verdict; see the new skill-usage-pending row for that authoritative store\'s own bound. Enforcement is covered by tests/unit/hooks/skill-usage-bounds.test.ts (global ceiling, retention order, corrupt-line durability, migration) and tests/unit/hooks/skill-usage-pending.test.ts (queue budgets, terminal outcomes, quarantine), alongside tests/unit/hooks/skill-usage-log.test.ts and skill-usage-feedback.test.ts.',
 		},
 	},
 	{
@@ -402,7 +402,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/hooks/skill-usage-pending.ts'],
 		writerCitations: [
-			'src/hooks/skill-usage-pending.ts:796 savePendingDocument — delegates to savePendingDocumentAt :803, writeFileSync tmp :820, renameSync :821 (atomic replace)',
+			'src/hooks/skill-usage-pending.ts:796 savePendingDocument — delegates to savePendingDocumentAt :804, writeFileSync tmp :820, renameSync :822 (atomic replace)',
 			'src/hooks/skill-usage-pending.ts:1171 enqueueSkillUsageFeedback — under the lock, merges + bounds + saves (:1189-1191); the ONLY path exempt from skip-not-force (throws on lock failure)',
 		],
 		readerCitations: [
@@ -417,29 +417,29 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writeLimits: {
 			bound: 'queueMaxRecords=5,000 / queueMaxBytes=512 KiB / maxAgeMs=90d (shared with the JSONL age budget) / maxAttempts=5 transient-retry ceiling, enforced by enforceQueueBounds on every enqueue, migration, and consumption pass',
 			scope: 'global',
-			citation: 'src/hooks/skill-usage-pending.ts:85-101 SKILL_USAGE_LIMITS',
+			citation: 'src/hooks/skill-usage-pending.ts:86-101 SKILL_USAGE_LIMITS',
 		},
 		readBound: {
 			pattern: 'indexed',
 			bound: 'single JSON document bounded at readMaxBytes=1,677,722 B (~1.6 MiB); oversized reads are quarantined (renamed aside) and counted, never truncated in place',
 			sync: true,
 			citation:
-				'src/hooks/skill-usage-pending.ts:729 loadPendingDocument, via loadPendingDocumentAt :739-789',
+				'src/hooks/skill-usage-pending.ts:729 loadPendingDocument, via loadPendingDocumentAt :740-789',
 		},
-		lockModel: 'single shared .swarm/skill-usage.lock (openSync wx-create, stale-broken after SKILL_USAGE_LOCK_STALE_MS=5min, skill-usage-pending.ts:109); enqueue is exempt from skip-not-force (acquireSkillUsageLockOrThrow :534-546, 5 attempts/10ms, throws and aborts the caller\'s append on failure); maintenance/consumption skip on lock failure, never force',
-		crashBehavior: 'atomic temp+rename replace (savePendingDocument :795 -> savePendingDocumentAt :803-853, writeFileSync :820 + renameSync :821); a corrupt or oversized document is quarantined (renamed to a timestamped .corrupt- file) rather than silently discarded (quarantinePendingDocument :699-718, invoked from loadPendingDocumentAt :781); an in_flight record whose claim outlives the lock stale-break window is resolved to uncertain — survives, stays visible, never replayed (resolveStaleInFlight :1206-1228)',
+		lockModel: 'single shared .swarm/skill-usage.lock (openSync wx-create, stale-broken after SKILL_USAGE_LOCK_STALE_MS=5min, skill-usage-pending.ts:110); enqueue is exempt from skip-not-force (acquireSkillUsageLockOrThrow :535-546, 5 attempts/10ms, throws and aborts the caller\'s append on failure); maintenance/consumption skip on lock failure, never force',
+		crashBehavior: 'atomic temp+rename replace (savePendingDocument :796 -> savePendingDocumentAt :804-853, writeFileSync :821 + renameSync :822); a corrupt or oversized document is quarantined (renamed to a timestamped .corrupt- file) rather than silently discarded (quarantinePendingDocument :700-718, invoked from loadPendingDocumentAt :782); an in_flight record whose claim outlives the lock stale-break window is resolved to uncertain — survives, stays visible, never replayed (resolveStaleInFlight :1207-1228)',
 		closePolicy: 'untouched — persists across sessions (same lifecycle as .swarm/skill-usage.jsonl, which it backs)',
 		closeArrayMembership: {
 			'skill-usage-pending.json': 'neither',
 		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'migrated: false on a fresh/absent document signals the one-time legacy migration has not run; migrateLegacyLog (skill-usage-log.ts:1271-1402) folds pre-existing JSONL actionable entries (minus feedback_applied-acknowledged ids) into this store on first lock-taking touch, then sets migrated: true',
-		healthSignal: 'skill_usage_health — same counts-only payload as the skill-usage row (buildSkillUsageHealthPayload, skill-usage-pending.ts:1350-1385), emitted via emitSkillUsageHealth (:1388-1401)',
+		healthSignal: 'skill_usage_health — same counts-only payload as the skill-usage row (buildSkillUsageHealthPayload, skill-usage-pending.ts:1351-1385), emitted via emitSkillUsageHealth (:1389-1401)',
 		owner: '#2038 (implemented)',
 		disposition: {
 			kind: 'retain-by-design',
 			citation:
-				'This store is deliberately AUTHORITATIVE, not derived-rebuildable: it is the sole durable record of which actionable (compliant/violated) skill-usage verdicts have not yet been folded into knowledge confidence via bumpKnowledgeConfidenceBatchResult (src/hooks/knowledge-store.ts:1293), driven by applySkillUsageFeedback (src/hooks/skill-usage-log.ts:2060-2163). Nothing else on disk records that fact once an entry is evicted from the bounded JSONL operational stream (issue #2038 requirement: eviction from skill-usage.jsonl must lose no correctness signal). It carries its own hard global bound (queueMaxRecords=5,000/queueMaxBytes=512KiB, src/hooks/skill-usage-pending.ts:85-101) enforced by enforceQueueBounds (:1023-1080, oldest-uncertain-first eviction; an actionable record evicted by the budget is counted as pending_evicted + pressure rather than dropped, a deliberate divergence from approved plan section 4 recorded in evictionRank docblock :980-1012 — every discard counted via the durable counters, never silent), atomic temp+rename writes (savePendingDocument :795 via savePendingDocumentAt :803-853), a shared stale-breakable lock, and the skill_usage_health signal. Enforcement is covered by tests/unit/hooks/skill-usage-pending.test.ts and tests/unit/hooks/skill-usage-bounds.test.ts.',
+				'This store is deliberately AUTHORITATIVE, not derived-rebuildable: it is the sole durable record of which actionable (compliant/violated) skill-usage verdicts have not yet been folded into knowledge confidence via bumpKnowledgeConfidenceBatchResult (src/hooks/knowledge-store.ts:1293), driven by applySkillUsageFeedback (src/hooks/skill-usage-log.ts:2075-2163). Nothing else on disk records that fact once an entry is evicted from the bounded JSONL operational stream (issue #2038 requirement: eviction from skill-usage.jsonl must lose no correctness signal). It carries its own hard global bound (queueMaxRecords=5,000/queueMaxBytes=512KiB, src/hooks/skill-usage-pending.ts:85-101) enforced by enforceQueueBounds (:1024-1080, oldest-uncertain-first eviction; an actionable record evicted by the budget is counted as pending_evicted + pressure rather than dropped, a deliberate divergence from approved plan section 4 recorded in evictionRank docblock :981-1012 — every discard counted via the durable counters, never silent), atomic temp+rename writes (savePendingDocument :796 via savePendingDocumentAt :804-853), a shared stale-breakable lock, and the skill_usage_health signal. Enforcement is covered by tests/unit/hooks/skill-usage-pending.test.ts and tests/unit/hooks/skill-usage-bounds.test.ts.',
 		},
 	},
 

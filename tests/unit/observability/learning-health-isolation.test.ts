@@ -214,3 +214,159 @@ describe('learning-health — model-limit fallback visibility (critic round 2)',
 		);
 	});
 });
+
+// ── PR-feedback round: validation, negative paths, restart history ──
+
+describe('learning-health — artifact field validation (PRR-005)', () => {
+	test('hostile scope keys and severity values are rejected at rehydrate, never rendered', async () => {
+		artifactContents = JSON.stringify({
+			schemaVersion: 1,
+			updatedAtMs: clock,
+			alarms: {
+				model_limit_fallback: {
+					scopes: {
+						'x/<img src=x onerror=alert(1)>': {
+							status: 'active',
+							severity: "critical'; DROP",
+							windowStartMs: clock,
+							factCount: 1,
+							lastFactAtMs: clock,
+							raisedAtMs: clock,
+							transitionCount: 1,
+						},
+						'ok/ref-with-ansi-\u001b[31m': {
+							status: 'active',
+							severity: 'warning',
+							windowStartMs: clock,
+							factCount: 1,
+							lastFactAtMs: clock,
+							raisedAtMs: clock,
+							transitionCount: 1,
+						},
+						'u/0123456789abcdef': {
+							status: 'active',
+							severity: 'critical',
+							windowStartMs: clock,
+							factCount: 1,
+							lastFactAtMs: clock,
+							raisedAtMs: clock,
+							transitionCount: 1,
+						},
+					},
+				},
+			},
+			transitions: [],
+		});
+		resetLearningHealthForTest();
+		const snapshot = await readLearningHealth(artifactDir);
+		// Only the well-formed key is adopted; both hostile keys are dropped.
+		expect(snapshot.activeAlarms).toHaveLength(1);
+		const rendered = JSON.stringify(snapshot.activeAlarms);
+		expect(rendered).not.toContain('<img');
+		expect(rendered).not.toContain('DROP');
+		expect(rendered).not.toContain('\u001b');
+	});
+});
+
+describe('learning-health — malformed-but-parseable artifact (PRR-011)', () => {
+	test('wrong-typed scope fields are ignored without crashing', async () => {
+		artifactContents = JSON.stringify({
+			schemaVersion: 1,
+			updatedAtMs: clock,
+			alarms: {
+				headroom_dead_streak: {
+					scopes: {
+						'u/bad': {
+							status: 'active',
+							severity: 'warning',
+							windowStartMs: 'not-a-number',
+							factCount: -5,
+							lastFactAtMs: clock,
+							raisedAtMs: clock,
+							transitionCount: 1,
+						},
+					},
+				},
+			},
+			transitions: 'not-an-array',
+		});
+		resetLearningHealthForTest();
+		const snapshot = await readLearningHealth(artifactDir);
+		expect(snapshot.activeAlarms).toHaveLength(0);
+	});
+});
+
+describe('learning-health — negative paths (PRR-011)', () => {
+	test('a throwing writeArtifact never escapes persistLearningHealth', async () => {
+		const realWrite = _internals.writeArtifact;
+		_internals.writeArtifact = async () => {
+			throw new Error('disk full');
+		};
+		try {
+			await persistLearningHealth(artifactDir);
+			expect(true).toBe(true); // reached without throwing
+		} finally {
+			_internals.writeArtifact = realWrite;
+		}
+	});
+
+	test('a throwing emitTelemetry never escapes an observation', () => {
+		const realEmit = _internals.emitTelemetry;
+		_internals.emitTelemetry = () => {
+			throw new Error('telemetry stream broken');
+		};
+		try {
+			expect(() =>
+				observeCloseArchive({
+					directory: artifactDir,
+					archiveValid: true,
+					archiveEmpty: true,
+					activityPredictsContent: true,
+				}),
+			).not.toThrow();
+		} finally {
+			_internals.emitTelemetry = realEmit;
+		}
+	});
+});
+
+describe('learning-health — all six store kinds feed family 8 (PRR-011)', () => {
+	test.each([
+		['context_telemetry_health', 'context_telemetry'],
+		['skill_usage_health', 'skill_usage'],
+		['core_events_health', 'core_events'],
+		['shell_audit_health', 'shell_audit'],
+		['trajectory_health', 'trajectory'],
+		['pr_subscription_health', 'pr_subscription'],
+	])('%s maps to store %s and raises on corruption', (kind, store) => {
+		resetLearningHealthForTest();
+		emissions.length = 0;
+		observeStoreHealth({
+			directory: artifactDir,
+			kind,
+			payload: { corrupt_count: 1, dropped_count: 0 },
+		});
+		const raised = raisedPayloads('compaction_drop_coverage');
+		expect(raised).toHaveLength(1);
+		expect(raised[0]['store']).toBe(store);
+	});
+});
+
+describe('learning-health — restart seeds the transition ring (PRR-012)', () => {
+	test('transitions recorded before a restart remain in the count after it', async () => {
+		observeCloseArchive({
+			directory: artifactDir,
+			archiveValid: true,
+			archiveEmpty: true,
+			activityPredictsContent: true,
+		});
+		await persistLearningHealth(artifactDir);
+		const persisted = JSON.parse(artifactContents) as {
+			transitions: unknown[];
+		};
+		expect(persisted.transitions.length).toBeGreaterThan(0);
+		resetLearningHealthForTest();
+		const snapshot = await readLearningHealth(artifactDir);
+		expect(snapshot.totalTransitions).toBe(persisted.transitions.length);
+	});
+});

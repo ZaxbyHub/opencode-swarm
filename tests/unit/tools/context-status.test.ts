@@ -9,7 +9,7 @@
  * - SC-002: no warning injection side effects
  */
 
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, test } from 'bun:test';
 import { rmSync } from 'node:fs';
 import {
 	readLearningHealth,
@@ -392,5 +392,50 @@ describe('context_status model-limit health scoping (#2044)', () => {
 			resetLearningHealthForTest();
 			rmSync(directory, { recursive: true, force: true });
 		}
+	});
+});
+
+describe('computeContextHeadroom provenance fields (#2044)', () => {
+	test('reports host source and fallbackActive=false for a live window', () => {
+		const result = computeContextHeadroom(
+			[makeMessage({ role: 'assistant', modelID: 'm1', providerID: 'p1' })],
+			0.7,
+			0.9,
+			{},
+			1_000_000,
+			{ modelID: 'm1', providerID: 'p1' },
+		);
+		expect(result.modelLimitSource).toBe('host');
+		expect(result.modelLimitResolution).toBe('live_model_limit');
+		expect(result.fallbackActive).toBe(false);
+	});
+
+	test('reports fallback provenance when no live window and unknown model', () => {
+		const result = computeContextHeadroom(
+			[makeMessage({ role: 'assistant', modelID: 'mystery' })],
+			0.7,
+			0.9,
+			{},
+			undefined,
+			{ modelID: 'mystery', providerID: 'p' },
+		);
+		expect(result.modelLimitSource).toBe('fallback');
+		expect(result.modelLimitResolution).toBe('static_default');
+		expect(result.fallbackActive).toBe(true);
+	});
+
+	test('reports override provenance when a user limit matches', () => {
+		const result = computeContextHeadroom(
+			[makeMessage({ role: 'assistant', modelID: 'ov-model' })],
+			0.7,
+			0.9,
+			{ 'p/ov-model': 60000 },
+			1_000_000,
+			{ modelID: 'ov-model', providerID: 'p' },
+		);
+		expect(result.modelLimitSource).toBe('override');
+		expect(result.modelLimitResolution).toBe('user_provider_model');
+		expect(result.fallbackActive).toBe(false);
+		expect(result.modelLimit).toBe(60000);
 	});
 });

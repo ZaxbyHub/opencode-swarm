@@ -68,12 +68,8 @@ import {
 	pseudonymousSessionRef,
 	resolveLineageSalt,
 } from '../observability/ids';
-import {
-	addTelemetryListener,
-	removeTelemetryListener,
-	type TelemetryEvent,
-	telemetry,
-} from '../telemetry';
+import type { TelemetryEvent } from '../telemetry';
+import { telemetry } from '../telemetry';
 import { atomicWriteSwarmFile } from '../utils/atomic-write';
 
 /** The eight alarm families owned by this module. */
@@ -119,7 +115,7 @@ export interface HealthSourceRegistration {
  */
 const HEALTH_SOURCES_TABLE: Record<HealthSourceId, HealthSourceRegistration> = {
 	context_budget: {
-		producer: 'src/hooks/context-budget.ts:190',
+		producer: 'src/hooks/context-budget.ts:199',
 		readers: [
 			'src/services/status-service.ts',
 			'src/services/diagnose-service.ts',
@@ -127,7 +123,7 @@ const HEALTH_SOURCES_TABLE: Record<HealthSourceId, HealthSourceRegistration> = {
 		alarms: ['headroom_dead_streak'],
 	},
 	model_limits: {
-		producer: 'src/hooks/model-limits.ts:325',
+		producer: 'src/hooks/model-limits.ts:333',
 		readers: [
 			'src/tools/context-status.ts',
 			'src/services/status-service.ts',
@@ -200,7 +196,6 @@ export const LEARNING_HEALTH_ALARM_CONFIG = Object.freeze({
 	}),
 	model_limit_fallback: Object.freeze({
 		windowMs: 1_800_000,
-		raiseFacts: 1,
 		cooldownMs: 3_600_000,
 		severity: 'warning' as LearningHealthSeverity,
 	}),
@@ -247,7 +242,6 @@ export const LEARNING_HEALTH_ALARM_CONFIG = Object.freeze({
 		windowMs: 3_600_000,
 		corruptRaise: 1,
 		droppedRaise: 100,
-		droppedClear: 50,
 		cooldownMs: 3_600_000,
 		severity: 'warning' as LearningHealthSeverity,
 	}),
@@ -370,15 +364,12 @@ const transitionRing: PersistedTransition[] = [];
 const lastPersistAtByDirectory = new Map<string, number>();
 /**
  * Bounded fallback persistence target (final-critic finding 2): facts observed
- * without a directory (model-limit resolutions, listener-fed store events)
+ * without a directory (model-limit resolutions)
  * persist under the most recent directory a directory-bearing producer or
  * reader used — the plugin host process serves one project, so this is the
  * owning project in practice. Bounded like every other map here.
  */
 const recentPersistDirectories: string[] = [];
-let _telemetryListener:
-	| ((event: TelemetryEvent, data: Record<string, unknown>) => void)
-	| null = null;
 
 const MAX_TRACKED_DIRECTORIES = 16;
 
@@ -434,8 +425,23 @@ export const _internals: {
 	},
 };
 
+const projectRefCache = new Map<string, string>();
 function projectRef(directory: string): string {
-	return pseudonymousRef(directory, resolveLineageSalt());
+	// Memoized (PRR-013): the chat-transform hot path re-derives the same
+	// directory ref on every observation; a bounded memo removes the repeated
+	// sha256 per transform while staying within the directory-tracking cap.
+	const cached = projectRefCache.get(directory);
+	if (cached !== undefined) return cached;
+	const ref = pseudonymousRef(directory, resolveLineageSalt());
+	if (!projectRefCache.has(directory)) {
+		while (projectRefCache.size >= MAX_TRACKED_DIRECTORIES) {
+			const oldest = projectRefCache.keys().next().value;
+			if (oldest === undefined) break;
+			projectRefCache.delete(oldest);
+		}
+	}
+	projectRefCache.set(directory, ref);
+	return ref;
 }
 
 function sessionScopeKey(
@@ -692,7 +698,7 @@ function schedulePersist(
 	force: boolean,
 ): void {
 	// Facts observed without a directory (model-limit identity scopes,
-	// listener-fed store events) still persist — under the most recent
+	// store-health events) still persist — under the most recent
 	// directory a directory-bearing producer or reader used (final-critic
 	// finding 2). With no known directory at all, persistence waits for a
 	// reader; correctness never depends on the artifact.
@@ -728,7 +734,15 @@ export async function persistLearningHealth(directory: string): Promise<void> {
 		}
 		artifact.alarms[alarm] = { scopes: serialized };
 	}
-	await _internals.writeArtifact(directory, `${JSON.stringify(artifact)}\n`);
+	// Never-throw at the write boundary: the artifact is best-effort
+	// visibility; a failed write must not propagate to direct awaiters
+	// (the fire-and-forget callers already .catch, but the exported
+	// function's contract is fail-open on its own too).
+	try {
+		await _internals.writeArtifact(directory, `${JSON.stringify(artifact)}\n`);
+	} catch {
+		// a lost write loses only visibility, never alarm truth
+	}
 }
 
 async function rehydrateFromArtifact(directory: string): Promise<void> {
@@ -742,16 +756,67 @@ async function rehydrateFromArtifact(directory: string): Promise<void> {
 	}
 	if (parsed.schemaVersion !== ARTIFACT_SCHEMA_VERSION) return;
 	const now = _internals.now();
+	// Seed the transition ring from persisted history (PRR-012/C6): without
+	// this, the first post-restart persist overwrites the artifact's
+	// transitions with a fresh short ring and status reports 0 transitions
+	// despite durable history. Bounded by the ring cap as always.
+	if (transitionRing.length === 0 && Array.isArray(parsed.transitions)) {
+		for (const tr of parsed.transitions) {
+			if (
+				!tr ||
+				typeof tr.alarm !== 'string' ||
+				!Object.hasOwn(LEARNING_HEALTH_ALARM_CONFIG, tr.alarm) ||
+				typeof tr.atMs !== 'number' ||
+				!Number.isFinite(tr.atMs)
+			) {
+				continue;
+			}
+			transitionRing.push({
+				alarm: tr.alarm as LearningHealthAlarmId,
+				transition:
+					tr.transition === 'raised' ||
+					tr.transition === 'sustained' ||
+					tr.transition === 'recovered'
+						? tr.transition
+						: 'raised',
+				severity: tr.severity === 'critical' ? 'critical' : 'warning',
+				atMs: tr.atMs,
+				coverageFacts:
+					typeof tr.coverageFacts === 'number' &&
+					Number.isFinite(tr.coverageFacts)
+						? tr.coverageFacts
+						: 0,
+			});
+		}
+		while (transitionRing.length > MAX_TRANSITION_RING) transitionRing.shift();
+	}
 	// Adopt persisted scope counters that the in-process state does not have
 	// (restart case). In-memory state always wins within a live process.
 	for (const [alarm, section] of Object.entries(parsed.alarms ?? {})) {
 		// A tampered/foreign artifact must not inject unknown alarm families
-		// into the in-memory registry (review blind-spot 8).
+		// into the in-memory registry (review blind-spot 8), and every adopted
+		// FIELD is shape-validated so hostile strings can never reach the
+		// rendered status/diagnose output (PRR-005: scope keys and severity
+		// flow verbatim into user-visible markdown otherwise).
 		if (!Object.hasOwn(LEARNING_HEALTH_ALARM_CONFIG, alarm)) continue;
 		if (!section?.scopes) continue;
 		const map = getScopeMap(alarm as LearningHealthAlarmId);
 		for (const [key, persisted] of Object.entries(section.scopes)) {
 			if (map.has(key)) continue;
+			if (!isAdoptableScopeKey(key)) continue;
+			if (
+				!persisted ||
+				(persisted.status !== 'idle' && persisted.status !== 'active') ||
+				(persisted.severity !== 'warning' &&
+					persisted.severity !== 'critical') ||
+				!isFiniteCounter(persisted.windowStartMs) ||
+				!isFiniteCounter(persisted.factCount) ||
+				!isFiniteCounter(persisted.lastFactAtMs) ||
+				!isFiniteCounter(persisted.raisedAtMs) ||
+				!isFiniteCounter(persisted.transitionCount)
+			) {
+				continue;
+			}
 			map.set(key, {
 				status: persisted.status,
 				severity: persisted.severity,
@@ -771,6 +836,23 @@ async function rehydrateFromArtifact(directory: string): Promise<void> {
 			});
 		}
 	}
+}
+
+/**
+ * Shape gate for scope keys adopted from the artifact (PRR-005): real keys
+ * are hex refs, u/store/identity namespace segments, and model::provider
+ * identities — all within a conservative safe alphabet. Anything else
+ * (markup, ANSI escapes, quotes, over-long) is rejected rather than rendered.
+ */
+function isAdoptableScopeKey(key: string): boolean {
+	if (typeof key !== 'string' || key.length === 0 || key.length > 200) {
+		return false;
+	}
+	return /^[0-9a-zA-Z:_.-/]+$/.test(key);
+}
+
+function isFiniteCounter(value: unknown): value is number {
+	return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
 // ── Producer feed 1: headroom dead streak ──────────────────────────────────
@@ -859,10 +941,10 @@ export function observeModelLimitResolution(input: {
 	/** Project directory when the producer knows it (threaded through
 	 * resolveModelLimit); identity scopes key project-prefixed when present. */
 	directory?: string;
-	resolution: ContextWindowSource | string;
+	resolution: ContextWindowSource;
 	/** Which override key class matched (compound/model/default) — the alias
 	 * provenance for user-authored limits (issue #2044 item 2). */
-	aliasKeyClass?: string;
+	aliasKeyClass?: 'compound' | 'model' | 'default';
 	/** True when a user-authored override failed usability validation and was
 	 * skipped (never coerced) — surfaced durably, not just as a warning. */
 	invalidOverride?: boolean;
@@ -930,7 +1012,22 @@ export function observeModelLimitResolution(input: {
 function livenessMap(directory: string): Map<string, LivenessGap> {
 	let map = livenessGaps.get(directory);
 	if (!map) {
-		boundedDirectoryMap(livenessGaps, directory);
+		// Evict the directory carrying the LEAST gap evidence (PRR-006):
+		// prefer empty maps; among non-empty ones, the fewest open gaps.
+		// Evicting a map that holds unresolved gaps loses liveness
+		// obligations and could let the next evaluation report a false
+		// recovery — so it is the last resort, and bounded.
+		if (livenessGaps.size >= MAX_TRACKED_DIRECTORIES) {
+			let victim: string | undefined;
+			let victimSize = Number.POSITIVE_INFINITY;
+			for (const [dir, entry] of livenessGaps) {
+				if (entry.size < victimSize) {
+					victim = dir;
+					victimSize = entry.size;
+				}
+			}
+			if (victim !== undefined) livenessGaps.delete(victim);
+		}
 		map = new Map();
 		livenessGaps.set(directory, map);
 	}
@@ -978,7 +1075,12 @@ function evaluateLiveness(directory: string, now: number): void {
 			directory,
 			now,
 		);
-	} else if (gaps.size === 0) {
+	} else if (stalled === 0 && _scope.status === 'active') {
+		// Recovery mirrors the raise condition exactly (`stalled > 0` ↔
+		// `stalled === 0`): an open-but-INELIGIBLE gap (inside the gate's
+		// staleness grace) must not pin a previously raised alarm active —
+		// it is not stall evidence. If such a gap later becomes stalled, the
+		// next evaluation re-raises, cooldown-bounded (PR-comment C5).
 		applyAlarmState(
 			'retrieval_outcome_liveness',
 			'project',
@@ -1007,6 +1109,15 @@ export function observeReceiptTransition(input: {
 	traceId: string;
 	receiptOutcome?: string;
 	receiptSource?: string;
+	/**
+	 * OPTIONAL membership commit time for gap-2 staleness anchoring. Intentionally
+	 * not populated by the current ledger drain (PRR-008): anchoring gap-2
+	 * eligibility to the TERMINAL time (the fallback when absent) is the
+	 * conservative bound — it can only delay eligibility, never fire the alarm
+	 * before the application gate's own staleness escalation has had its
+	 * window. Kept as an explicit input so a future ledger observation can
+	 * tighten the anchor without an API change.
+	 */
 	membershipCommittedAtMs?: number;
 	atMs?: number;
 }): void {
@@ -1185,7 +1296,7 @@ export function observeCuratorCompliance(input: {
 				scopeKey,
 				'active',
 				config.severity,
-				{ reason: 'eligible_role_gap' },
+				{ reason: 'eligible_role_gap', phase: input.phase },
 				input.directory,
 				now,
 			);
@@ -1382,14 +1493,13 @@ export function observeDelegationLedgerPressure(input: {
 	}
 }
 
-// ── Producer feed 8: compaction drop coverage (telemetry listener) ────────
+// ── Producer feed 8: compaction drop coverage (direct store feeds) ──────
 
 /**
  * Direct, directory-bearing store-health observation (final-critic finding 3):
  * the six audited stores call this at their health-event emit sites, so family
  * 8 is fed from its real producers from the FIRST event — not only after an
- * operator opens a status surface. The telemetry listener remains as
- * defense-in-depth for any site not yet wired.
+ * operator opens a status surface.
  */
 export function observeStoreHealth(input: {
 	directory: string;
@@ -1450,28 +1560,18 @@ function observeStoreHealthEvent(
 		retained,
 		accepted,
 	};
-	// Severity bands with windowed hysteresis: `corrupt` facts raise at
-	// warning, mass-drop facts escalate to critical, and recovery happens only
-	// when the window contains ONLY clean facts — an in-window corrupt/drop
-	// fact keeps the alarm active regardless of the current event (review F6).
-	if (corruptFacts >= config.corruptRaise) {
+	// Severity bands with windowed hysteresis (PR-comment C7): the raise
+	// severity NEVER regresses while evidence persists — any in-window
+	// mass-drop fact keeps the alarm at `critical` even when a newer corrupt
+	// fact arrives (corruption is not a downgrade). Recovery happens only
+	// when the window contains ONLY clean facts.
+	if (corruptFacts >= config.corruptRaise || droppedFacts > 0) {
 		applyAlarmState(
 			'compaction_drop_coverage',
 			'project',
 			scopeKey,
 			'active',
-			'warning',
-			detail,
-			directory,
-			now,
-		);
-	} else if (droppedFacts > 0) {
-		applyAlarmState(
-			'compaction_drop_coverage',
-			'project',
-			scopeKey,
-			'active',
-			'critical',
+			droppedFacts > 0 ? 'critical' : 'warning',
 			detail,
 			directory,
 			now,
@@ -1497,40 +1597,29 @@ function toCount(value: unknown): number {
 }
 
 /**
- * Idempotently attach the store-health telemetry listener. Called from each
- * producer entry point and from {@link readLearningHealth} — deliberately NOT
- * from the plugin init path (AGENTS.md invariant 1). A listener attached after
- * some early store-health emissions simply lags until the next attach; alarms
- * are advisory and fail-open.
+ * Idempotent no-op registration point (PR #2446 review): family 8 is fed
+ * DIRECTLY by all six audited stores via {@link observeStoreHealth}, so no
+ * telemetry listener is attached. The historical listener double-fed every
+ * store event (direct + listener observed the same emission into two scope
+ * namespaces); it was removed. This function remains as the documented
+ * registration seam so future feeds have one call site to wire — it performs
+ * no work today and never touches the plugin init path.
  */
 export function ensureLearningHealth(): void {
-	if (_telemetryListener) return;
-	_telemetryListener = (event, data) => {
-		try {
-			observeStoreHealthEvent(event, data);
-		} catch {
-			// listener errors are already swallowed by the telemetry fan-out;
-			// double protection costs nothing here
-		}
-	};
-	addTelemetryListener(_telemetryListener);
+	// Intentionally empty — see the doc comment above.
 }
 
 /**
- * Test teardown: remove the telemetry listener (mirrors the heartbeat teardown
- * precedent at src/telemetry.ts:228-238 — `addTelemetryListener` is push-only
- * with no disposer) and clear all in-memory health state. Never used in
- * production code paths.
+ * Test teardown: clear all in-memory health state. Never used in production
+ * code paths.
  */
 export function resetLearningHealthForTest(): void {
-	if (_telemetryListener) {
-		removeTelemetryListener(_telemetryListener);
-		_telemetryListener = null;
-	}
 	alarmScopes.clear();
 	livenessGaps.clear();
 	transitionRing.length = 0;
 	lastPersistAtByDirectory.clear();
+	recentPersistDirectories.length = 0;
+	projectRefCache.clear();
 }
 
 // ── Read API for operator surfaces ────────────────────────────────────────
@@ -1569,7 +1658,7 @@ export async function readLearningHealth(
 		// scopes attributable to THIS project (`<projectRef>/…`) plus the two
 		// deliberately process-global namespaces — `u/…` (chat-transform session
 		// facts whose hook input carries no directory) and `store/…` (store
-		// events observed via the telemetry listener, which has no directory).
+		// store events observed without a directory — tests and future feeds).
 		// A single host process serves one project, so the global namespaces are
 		// the reading project's own facts in practice, and the filter prevents a
 		// multi-project process from rendering another project's prefixed scopes.
@@ -1623,9 +1712,9 @@ export function getLearningHealthTransitions(): readonly PersistedTransition[] {
 
 /**
  * Tier-0 test exports (writing-tests skill): pure-or-near-pure internals that
- * tests exercise directly. `observeStoreHealthEvent` is otherwise reachable
- * only through the telemetry listener, which does not fire when the telemetry
- * stream is disabled in unit tests.
+ * tests exercise directly. `observeStoreHealthEvent` is the shared core the
+ * public `observeStoreHealth` wraps; tests use it to drive family-8 logic
+ * without constructing a directory scope.
  */
 export const _test_exports = {
 	observeStoreHealthEvent,
