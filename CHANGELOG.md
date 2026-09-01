@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.160.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.160.1...v7.160.2) (2026-09-01)
+
+
+### Bug Fixes
+
+* **build:** prefer repository-safe build commands ([53cb39c](https://github.com/ZaxbyHub/opencode-swarm/commit/53cb39ce8e6426d8ee6eac42d7037bb6029465b1))
+
 ## [7.160.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.160.0...v7.160.1) (2026-09-01)
 
 
