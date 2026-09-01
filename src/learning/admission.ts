@@ -17,8 +17,8 @@
  *
  * - the `transactKnowledge` call is NEVER raced or timed out;
  * - only genuinely cancellable work (the optional LLM screening call) is
- *   bounded, via a manual `AbortController` + `setTimeout` (see
- *   `timeoutSignal` below) + `isAbortError`. This deliberately does NOT use
+ *   bounded by the shared `withTimeoutSignal` helper, which uses a manual
+ *   `AbortController` + `setTimeout` + `isAbortError`. This deliberately does NOT use
  *   the host's built-in timeout signal: Bun on Windows
  *   has a native bug where that signal's `abort` event never fires when
  *   awaited by a plain JS Promise (oven-sh/bun#29546) — exactly the shape
