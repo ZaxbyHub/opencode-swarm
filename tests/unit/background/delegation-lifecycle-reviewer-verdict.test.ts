@@ -4,6 +4,13 @@
  * under the FR-006 500-line cap). Seeding follows the phase-directives test
  * precedent: a real knowledge-store entry + a session-bound delegate_directive
  * membership, so readPhaseDirectivesToVerify resolves the verify set.
+ *
+ * Grammar note (implementation review): `VERIFIED:<trace>:<entry>` is the
+ * reviewer compliance grammar, NOT a KNOWLEDGE_* ack — parseAcknowledgments
+ * does not consume it, so the shown-but-unacked non-critical directive also
+ * produces the neutral `unacknowledged` delegate observation alongside the
+ * reviewer `applied` verdict. Broadening parseAcknowledgments to also parse
+ * VERIFIED would change this dual-event expectation.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
