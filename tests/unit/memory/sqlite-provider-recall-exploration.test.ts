@@ -99,7 +99,12 @@ function patchDbForKnn(
 					return originalQuery(sql, ...args);
 				};
 			}
-			return (target as Record<string, unknown>)[prop as string];
+			const value = Reflect.get(target, prop, target) as unknown;
+			// bun:sqlite methods use private native receiver state. Returning a method
+			// through the Proxy without rebinding it makes calls such as prepare()
+			// throw "Cannot access invalid private field" even though production uses
+			// a real Database. Preserve the receiver for every non-intercepted method.
+			return typeof value === 'function' ? value.bind(target) : value;
 		},
 	});
 	priv.db = patchedDb as Database;
