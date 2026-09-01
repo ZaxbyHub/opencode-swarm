@@ -2294,7 +2294,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		pathGrammar: '.swarm/memory/{memories,proposals,audit,reward-events,outcome-events}.jsonl (+ cohort roots)',
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/memory/local-jsonl-provider.ts'],
-		writerCitations: ['src/memory/local-jsonl-provider.ts:207 upsert / :290 appendOutcome / :540 applyCuratorDecision / :817 rewriteMemoryFamilyUnlocked — dir lock + torn-tail repair (:1179) + atomic rewrites (:1166-1177)'],
+		writerCitations: ['src/memory/local-jsonl-provider.ts:207 upsert / :300 appendOutcome / :567 applyCuratorDecision / :872 rewriteMemoryFamilyUnlocked — dir lock + torn-tail repair (:1234) + atomic rewrites (:1221-1232)'],
 		readerCitations: ['initialize/refreshMemoriesUnlocked (:158-205) — full-file loads; listRecallUsage/listRewardEvents — full-file filtered'],
 		schemaVersion: 'legacy provider (migration source for SQLite)',
 		stateClass: 'derived-rebuildable',

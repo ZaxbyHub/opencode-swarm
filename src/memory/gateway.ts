@@ -27,6 +27,7 @@ import type {
 } from './provider';
 import { getOrCreateProviderForRoot } from './provider-pool';
 import { computeRedactionPolicyVersion, redactSecrets } from './redaction';
+import { canonicalMemoryIds } from './relations';
 import {
 	computeMemoryContentHash,
 	createBundleId,
@@ -308,10 +309,17 @@ export class MemoryGateway {
 						'targetMemoryId',
 						normalizeMemoryText(input.targetMemoryId),
 					);
-		const relatedMemoryIds = input.relatedMemoryIds?.map((id) =>
-			redactProposalField('relatedMemoryIds', normalizeMemoryText(id)),
-		);
+		const relatedMemoryIds = input.relatedMemoryIds
+			? canonicalMemoryIds(
+					input.relatedMemoryIds.map((id) =>
+						redactProposalField('relatedMemoryIds', normalizeMemoryText(id)),
+					),
+				)
+			: undefined;
 		let proposalText = `${input.operation}:${targetMemoryId ?? ''}`;
+		if (input.operation === 'merge') {
+			proposalText = `merge:${(relatedMemoryIds ?? []).join(',')}`;
+		}
 		// #1466: detect-only PII summary attached to proposal metadata (never
 		// matched text) when memory.redaction.detectPii is enabled.
 		let piiSummary:
@@ -367,9 +375,13 @@ export class MemoryGateway {
 				`${input.operation} proposals require targetMemoryId`,
 			);
 		}
-		if (input.operation === 'merge' && (relatedMemoryIds ?? []).length < 2) {
+		if (
+			input.operation === 'merge' &&
+			((relatedMemoryIds ?? []).length < 2 ||
+				(relatedMemoryIds ?? []).length > 8)
+		) {
 			throw new MemoryValidationError(
-				'merge proposals require relatedMemoryIds',
+				'merge proposals require 2-8 distinct relatedMemoryIds',
 			);
 		}
 
@@ -821,6 +833,13 @@ export class MemoryGateway {
 					proposalId: decision.proposalId,
 					oldMemoryId: decision.oldMemoryId,
 					replacement: this.createRecordFromNew(decision.replacement),
+					reason: normalizeMemoryText(decision.reason),
+				};
+			case 'merge':
+				return {
+					action: 'merge' as const,
+					proposalId: decision.proposalId,
+					relatedMemoryIds: canonicalMemoryIds(decision.relatedMemoryIds),
 					reason: normalizeMemoryText(decision.reason),
 				};
 			case 'update': {

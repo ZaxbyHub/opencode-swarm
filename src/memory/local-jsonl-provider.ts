@@ -48,6 +48,12 @@ import {
 	classifyStoredFingerprintAlgorithmVersion,
 	computeMemoryCohortFingerprint,
 } from './redaction';
+import {
+	expandRelatedRecallItems,
+	projectMemoryRelations,
+	stripDerivedRelations,
+	validateMergeParticipants,
+} from './relations';
 import { validateMemoryProposal, validateMemoryRecordRules } from './schema';
 import type { RecallScoringDiagnostics } from './scoring';
 import {
@@ -216,7 +222,7 @@ export class LocalJsonlMemoryProvider
 			}
 			let parsed = validateMemoryRecordRules(
 				{
-					...record,
+					...stripDerivedRelations(record),
 					createdAt: existing?.createdAt ?? record.createdAt,
 					metadata: {
 						...record.metadata,
@@ -283,7 +289,11 @@ export class LocalJsonlMemoryProvider
 		await this.initialize();
 		return this.withOutcomeStoreLock(async () => {
 			await this.refreshMemoriesUnlocked();
-			return this.memories.get(id) ?? null;
+			await this.refreshProposalsUnlocked();
+			const record = this.memories.get(id);
+			return record
+				? projectMemoryRelations([record], this.proposals.values())[0]
+				: null;
 		});
 	}
 
@@ -416,15 +426,23 @@ export class LocalJsonlMemoryProvider
 			result.items,
 			request.maxItems,
 		);
+		const expanded = expandRelatedRecallItems(
+			sliced,
+			projectMemoryRelations(
+				Array.from(this.memories.values()),
+				this.proposals.values(),
+			),
+			request,
+		);
 		return {
-			items: sliced,
+			items: expanded,
 			diagnostics: {
 				...result.diagnostics,
 				// Fix 3: derive exploredCount from what actually survived
 				// slicing, not the pre-slice diagnostics, so the count always
 				// matches an item present in the returned bundle.
-				exploredCount: sliced.some((item) => item.explored) ? 1 : 0,
-				returnedCount: sliced.length,
+				exploredCount: expanded.some((item) => item.explored) ? 1 : 0,
+				returnedCount: expanded.length,
 			},
 		};
 	}
@@ -483,8 +501,12 @@ export class LocalJsonlMemoryProvider
 		await this.initialize();
 		await this.withOutcomeStoreLock(async () => {
 			await this.refreshMemoriesUnlocked();
+			await this.refreshProposalsUnlocked();
 		});
-		let records = Array.from(this.memories.values());
+		let records = projectMemoryRelations(
+			Array.from(this.memories.values()),
+			this.proposals.values(),
+		);
 		if (filter.scopes && filter.scopes.length > 0) {
 			records = records.filter((record) =>
 				scopeAllowed(record.scope, filter.scopes ?? []),
@@ -516,8 +538,13 @@ export class LocalJsonlMemoryProvider
 	async createProposal(proposal: MemoryProposal): Promise<MemoryProposal> {
 		await this.initialize();
 		const next = validateMemoryProposal(proposal);
-		this.proposals.set(next.id, next);
-		await appendJsonl(this.pathFor('proposals'), next);
+		await this.withOutcomeStoreLock(async () => {
+			await this.refreshProposalsUnlocked();
+			const filePath = this.pathFor('proposals');
+			await repairIncompleteJsonlTail(filePath);
+			await appendJsonl(filePath, next);
+			this.proposals.set(next.id, next);
+		});
 		await this.audit('proposal', next.id);
 		this.bumpCohortGeneration();
 		return next;
@@ -629,6 +656,16 @@ export class LocalJsonlMemoryProvider
 			oldMemoryId = oldMemory.id;
 			replacementMemoryId = replacement.id;
 			memoryId = replacement.id;
+		} else if (decision.action === 'merge') {
+			decision = {
+				...decision,
+				relatedMemoryIds: validateMergeParticipants(
+					decision.relatedMemoryIds,
+					this.memories.values(),
+					this.proposals.values(),
+					new Date(appliedAt),
+				),
+			};
 		}
 
 		const proposalStatus =
@@ -638,10 +675,19 @@ export class LocalJsonlMemoryProvider
 			decision,
 			proposalStatus,
 			appliedAt,
-			{ memoryId, targetMemoryId, oldMemoryId, replacementMemoryId },
+			{
+				memoryId,
+				targetMemoryId,
+				oldMemoryId,
+				replacementMemoryId,
+				relatedMemoryIds:
+					decision.action === 'merge' ? decision.relatedMemoryIds : undefined,
+			},
 		);
+		const proposalsPath = this.pathFor('proposals');
+		await repairIncompleteJsonlTail(proposalsPath);
+		await appendJsonl(proposalsPath, reviewedProposal);
 		this.proposals.set(reviewedProposal.id, reviewedProposal);
-		await appendJsonl(this.pathFor('proposals'), reviewedProposal);
 		const change: AppliedMemoryChange = {
 			action: decision.action,
 			proposalId: decision.proposalId,
@@ -651,14 +697,22 @@ export class LocalJsonlMemoryProvider
 			targetMemoryId,
 			oldMemoryId,
 			replacementMemoryId,
+			relatedMemoryIds:
+				decision.action === 'merge' ? decision.relatedMemoryIds : undefined,
 			reason: curatorDecisionReason(decision),
 		};
-		await this.audit(
-			'curator_decision',
-			decision.proposalId,
-			change.reason,
-			buildCuratorDecisionEvent(change, proposal),
-		);
+		try {
+			await this.audit(
+				'curator_decision',
+				decision.proposalId,
+				change.reason,
+				buildCuratorDecisionEvent(change, proposal),
+			);
+		} catch (error) {
+			warn('[memory] failed to persist curator decision audit event', {
+				reason: error instanceof Error ? error.message : String(error),
+			});
+		}
 		return change;
 	}
 
@@ -769,6 +823,7 @@ export class LocalJsonlMemoryProvider
 	}
 
 	private async refreshProposalsUnlocked(): Promise<void> {
+		await repairIncompleteJsonlTail(this.pathFor('proposals'));
 		const loaded = validateLoadedProposals(
 			await readJsonl(this.pathFor('proposals')),
 			this.config,

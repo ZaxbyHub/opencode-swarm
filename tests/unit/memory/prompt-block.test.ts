@@ -61,4 +61,20 @@ describe('memory prompt block', () => {
 		expect(block.promptBlock).toContain('Use bun for tests.');
 		expect(block.promptBlock).not.toContain('Large note.');
 	});
+
+	test('renders relation provenance for expanded recall items', () => {
+		const source = makeItem('Use bun for tests.');
+		const related = {
+			...makeItem('Use the Windows command shim.'),
+			relation: {
+				type: 'merged_with' as const,
+				sourceMemoryId: source.record.id,
+			},
+		};
+		const block = buildRecallPromptBlock([source, related], 1000);
+
+		expect(block.promptBlock).toContain(
+			`Related via merged_with from ${source.record.id}`,
+		);
+	});
 });

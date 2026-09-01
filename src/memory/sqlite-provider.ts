@@ -79,6 +79,12 @@ import {
 	computeMemoryCohortFingerprint,
 } from './redaction';
 import {
+	canonicalMemoryIds,
+	expandRelatedRecallItems,
+	stripDerivedRelations,
+	validateMergeParticipants,
+} from './relations';
+import {
 	normalizeMemoryText,
 	stableScopeKey,
 	validateMemoryProposal,
@@ -510,6 +516,24 @@ export const MIGRATIONS: Migration[] = [
 			ALTER TABLE memory_events ADD COLUMN prev_hash TEXT;
 		`,
 	},
+	{
+		version: 14,
+		name: 'create_memory_relations',
+		sql: `
+			CREATE TABLE IF NOT EXISTS memory_relations (
+				source_id TEXT NOT NULL,
+				target_id TEXT NOT NULL,
+				proposal_id TEXT NOT NULL,
+				created_at TEXT NOT NULL,
+				PRIMARY KEY (source_id, target_id),
+				FOREIGN KEY (source_id) REFERENCES memory_items(id) ON DELETE CASCADE,
+				FOREIGN KEY (target_id) REFERENCES memory_items(id) ON DELETE CASCADE,
+				FOREIGN KEY (proposal_id) REFERENCES memory_proposals(id)
+			);
+			CREATE INDEX IF NOT EXISTS idx_memory_relations_source
+				ON memory_relations(source_id, target_id);
+		`,
+	},
 ];
 
 /** #1466: name of the migration that introduces memory_events.prev_hash. */
@@ -816,6 +840,11 @@ export class SQLiteMemoryProvider
 			await this.migrateLegacyJsonlIfNeeded();
 			const memoryLoad = this.loadMemories();
 			const proposalLoad = this.loadProposals();
+			for (const proposal of proposalLoad.records) {
+				if (proposal.operation === 'merge' && proposal.status === 'applied') {
+					this.writeProposal(proposal);
+				}
+			}
 			this.memories = new Map(
 				memoryLoad.records.map((record) => [record.id, record]),
 			);
@@ -879,9 +908,10 @@ export class SQLiteMemoryProvider
 			// source_task_id/agent_role to the ALTER TABLE defaults.
 			// mergeProvenanceColumns only fills fields the record LACKS, so a
 			// caller-provided (gateway-stamped) value still wins.
+			const storedRecord = stripDerivedRelations(record);
 			const merged = existingRow
-				? mergeProvenanceColumns(record, existingRow)
-				: record;
+				? mergeProvenanceColumns(storedRecord, existingRow)
+				: storedRecord;
 			next = validateMemoryRecordRules(
 				{
 					...merged,
@@ -947,7 +977,7 @@ export class SQLiteMemoryProvider
 		await this.initialize();
 		const record = this.readMemoryById(id);
 		if (record) this.memories.set(id, record);
-		return record;
+		return record ? this.projectRelationsFromStorage([record])[0] : null;
 	}
 
 	async appendOutcome(
@@ -1129,17 +1159,16 @@ export class SQLiteMemoryProvider
 				reranked,
 				request.maxItems,
 			);
+			const expanded = this.expandRelated(disabledPathSliced, request);
 			return {
-				items: disabledPathSliced,
+				items: expanded,
 				diagnostics: {
 					...result.diagnostics,
 					// Fix 3: derive exploredCount from what actually survived
 					// slicing so the count always matches an item present in the
 					// returned bundle.
-					exploredCount: disabledPathSliced.some((item) => item.explored)
-						? 1
-						: 0,
-					returnedCount: disabledPathSliced.length,
+					exploredCount: expanded.some((item) => item.explored) ? 1 : 0,
+					returnedCount: expanded.length,
 				},
 			};
 		}
@@ -1209,16 +1238,15 @@ export class SQLiteMemoryProvider
 				lexicalReranked,
 				request.maxItems,
 			);
+			const expanded = this.expandRelated(denseFailedSliced, request);
 			return {
-				items: denseFailedSliced,
+				items: expanded,
 				diagnostics: {
 					...lexicalResult.diagnostics,
 					// Fix 3: derive exploredCount from what actually survived
 					// slicing.
-					exploredCount: denseFailedSliced.some((item) => item.explored)
-						? 1
-						: 0,
-					returnedCount: denseFailedSliced.length,
+					exploredCount: expanded.some((item) => item.explored) ? 1 : 0,
+					returnedCount: expanded.length,
 				},
 			};
 		}
@@ -1344,8 +1372,9 @@ export class SQLiteMemoryProvider
 			rerankedItems,
 			request.maxItems,
 		);
+		const expanded = this.expandRelated(fusionSliced, request);
 		return {
-			items: fusionSliced,
+			items: expanded,
 			diagnostics: {
 				...lexicalResult.diagnostics,
 				// Fix 3: derive exploredCount from what actually survived fusion
@@ -1354,11 +1383,36 @@ export class SQLiteMemoryProvider
 				// explored item on its own normalised-score scale, so
 				// `lexicalResult.diagnostics.exploredCount` alone is not a
 				// reliable signal of what is actually present here.
-				exploredCount: fusionSliced.some((item) => item.explored) ? 1 : 0,
-				returnedCount: fusionSliced.length,
+				exploredCount: expanded.some((item) => item.explored) ? 1 : 0,
+				returnedCount: expanded.length,
 				fusionActive: true,
 			},
 		};
+	}
+
+	private expandRelated(
+		items: readonly RecallResultItem[],
+		request: RecallRequest,
+	): RecallResultItem[] {
+		const sources = this.projectRelationsFromStorage(
+			items.map((item) => item.record),
+		);
+		const sourceById = new Map(sources.map((record) => [record.id, record]));
+		const relatedRecords: MemoryRecord[] = [];
+		for (const source of sources) {
+			for (const relation of source.relations ?? []) {
+				const record = this.readMemoryById(relation.memoryId);
+				if (record) relatedRecords.push(record);
+			}
+		}
+		return expandRelatedRecallItems(
+			items.map((item) => ({
+				...item,
+				record: sourceById.get(item.record.id) ?? item.record,
+			})),
+			[...sources, ...relatedRecords],
+			request,
+		);
 	}
 
 	async recordRecallUsage(event: MemoryRecallUsageEvent): Promise<void> {
@@ -1627,7 +1681,7 @@ export class SQLiteMemoryProvider
 			});
 		}
 
-		return records;
+		return this.projectRelationsFromStorage(records);
 	}
 
 	async createProposal(proposal: MemoryProposal): Promise<MemoryProposal> {
@@ -1648,7 +1702,7 @@ export class SQLiteMemoryProvider
 		filter: { status?: MemoryProposal['status']; limit?: number } = {},
 	): Promise<MemoryProposal[]> {
 		await this.initialize();
-		let proposals = Array.from(this.proposals.values());
+		let proposals = this.refreshProposalsFromStorage();
 		if (filter.status) {
 			proposals = proposals.filter(
 				(proposal) => proposal.status === filter.status,
@@ -1893,7 +1947,8 @@ export class SQLiteMemoryProvider
 		);
 		const enriched = memories.map((memory) => {
 			const row = provenanceById.get(memory.id);
-			return row ? mergeProvenanceColumns(memory, row) : memory;
+			const stored = stripDerivedRelations(memory);
+			return row ? mergeProvenanceColumns(stored, row) : stored;
 		});
 		const proposals = await this.listProposals();
 		const outcomeEvents = this.readOutcomeEvents();
@@ -2627,6 +2682,31 @@ export class SQLiteMemoryProvider
 		return { records, invalidCount };
 	}
 
+	private refreshProposalsFromStorage(): MemoryProposal[] {
+		const records = this.loadProposals().records;
+		this.proposals.clear();
+		for (const proposal of records) this.proposals.set(proposal.id, proposal);
+		return records;
+	}
+
+	private projectRelationsFromStorage(
+		records: readonly MemoryRecord[],
+	): MemoryRecord[] {
+		const query = this.requireDb().query<
+			{ target_id: string },
+			[string, number]
+		>(
+			' SELECT target_id FROM memory_relations WHERE source_id = ? ORDER BY target_id ASC LIMIT ?',
+		);
+		return records.map(({ relations: _derived, ...record }) => {
+			const relations = query.all(record.id, 32).map((row) => ({
+				memoryId: row.target_id,
+				type: 'merged_with' as const,
+			}));
+			return relations.length ? { ...record, relations } : record;
+		});
+	}
+
 	private writeMemory(record: MemoryRecord): void {
 		const stored = stripMaterializedOutcomes(record);
 		this.requireDb().run(
@@ -2999,6 +3079,40 @@ export class SQLiteMemoryProvider
 				JSON.stringify(proposal),
 			],
 		);
+		if (proposal.operation === 'merge' && proposal.status === 'applied') {
+			const ids = canonicalMemoryIds(proposal.relatedMemoryIds ?? []);
+			const existingIds = new Set(
+				ids.filter((id) =>
+					Boolean(
+						this.requireDb()
+							.query<{ id: string }, [string]>(
+								'SELECT id FROM memory_items WHERE id = ? LIMIT 1',
+							)
+							.get(id),
+					),
+				),
+			);
+			for (const sourceId of ids) {
+				for (const targetId of ids) {
+					if (
+						sourceId === targetId ||
+						!existingIds.has(sourceId) ||
+						!existingIds.has(targetId)
+					) {
+						continue;
+					}
+					this.requireDb().run(
+						'INSERT OR IGNORE INTO memory_relations (source_id, target_id, proposal_id, created_at) VALUES (?, ?, ?, ?)',
+						[
+							sourceId,
+							targetId,
+							proposal.id,
+							proposal.reviewedAt ?? proposal.createdAt,
+						],
+					);
+				}
+			}
+		}
 	}
 
 	private applyDecisionToStorage(
@@ -3079,6 +3193,18 @@ export class SQLiteMemoryProvider
 			oldMemoryId = oldMemory.id;
 			replacementMemoryId = replacement.id;
 			memoryId = replacement.id;
+		} else if (decision.action === 'merge') {
+			const currentMemories = this.loadMemories().records;
+			const currentProposals = this.loadProposals().records;
+			decision = {
+				...decision,
+				relatedMemoryIds: validateMergeParticipants(
+					decision.relatedMemoryIds,
+					currentMemories,
+					currentProposals,
+					new Date(appliedAt),
+				),
+			};
 		}
 
 		const proposalStatus =
@@ -3093,6 +3219,8 @@ export class SQLiteMemoryProvider
 				targetMemoryId,
 				oldMemoryId,
 				replacementMemoryId,
+				relatedMemoryIds:
+					decision.action === 'merge' ? decision.relatedMemoryIds : undefined,
 			},
 		);
 		const change: Omit<AppliedMemoryChange, 'eventId'> = {
@@ -3104,6 +3232,8 @@ export class SQLiteMemoryProvider
 			targetMemoryId,
 			oldMemoryId,
 			replacementMemoryId,
+			relatedMemoryIds:
+				decision.action === 'merge' ? decision.relatedMemoryIds : undefined,
 			reason: curatorDecisionReason(decision),
 		};
 		return {
@@ -3225,7 +3355,9 @@ export class SQLiteMemoryProvider
 				(rawRecord.outcomes?.length ?? 0) > 0
 					? ensureOutcomeGeneration(rawRecord)
 					: rawRecord;
-			this.writeMemory(stripMaterializedOutcomes(record));
+			this.writeMemory(
+				stripDerivedRelations(stripMaterializedOutcomes(record)),
+			);
 			if (typeof record.metadata.outcomeGeneration === 'string') {
 				try {
 					materializedRows.push({

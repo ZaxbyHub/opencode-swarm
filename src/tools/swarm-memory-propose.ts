@@ -60,7 +60,9 @@ export const swarm_memory_propose: ReturnType<typeof createSwarmTool> =
 			relatedMemoryIds: z
 				.array(z.string())
 				.optional()
-				.describe('Related memory IDs for merge/supersede proposals'),
+				.describe(
+					'For merge, 2-8 distinct memory IDs in one scope; also accepted as provenance for supersede proposals',
+				),
 			rationale: z
 				.string()
 				.min(1)
