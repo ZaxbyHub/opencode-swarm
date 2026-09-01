@@ -423,7 +423,9 @@ If proposal text contains a likely secret, Swarm stores the proposal only with t
 
 Agents may also return an optional JSON `memoryProposals` array in Task output. The controller validates those proposals through `MemoryGateway.propose`; invalid proposals are logged and dropped without crashing the run. This path still creates pending proposals only.
 
-Curator agents may return an optional JSON `curatorMemoryDecisions` array in Task output. The controller accepts that key only from curator roles, schema-validates each decision, and applies it through `MemoryGateway.applyCuratorDecision`. Supported decisions are `add`, `update`, `supersede`, `reject`, and `noop`.
+Curator agents may return an optional JSON `curatorMemoryDecisions` array in Task output. The controller accepts that key only from curator roles, schema-validates each decision, and applies it through `MemoryGateway.applyCuratorDecision`. Supported decisions are `add`, `update`, `merge`, `supersede`, `reject`, and `noop`.
+
+A `merge` is non-destructive: it approves a proposal containing 2-8 distinct, active memory IDs from the same scope and records a durable `merged_with` relationship. The relationship is reconstructed from the applied proposal ledger after JSONL or SQLite reload; callers cannot forge it through memory create or patch inputs. Recall keeps ordinary relevance ordering, then may use otherwise-unused result slots for at most two active related memories per direct result. Related items carry their source memory ID and relation type in both structured output and the injected prompt, while missing, deleted, expired, superseded, out-of-scope, low-quality, and over-budget candidates remain excluded.
 
 In SQLite, decision application is transactional: Swarm loads the pending proposal, validates the decision and resulting memory record, applies the memory change, updates proposal status, and appends a `curator_decision` event in one transaction. Superseded memories are marked with `supersededBy` and stop appearing in recall.
 

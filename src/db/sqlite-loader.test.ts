@@ -230,6 +230,21 @@ describe('createNodeDatabaseCtor — adapter translation', () => {
 		expect(calls.stmtIterate).toEqual([{ sql, params: ['c'] }]);
 	});
 
+	test('prepare(sql) creates an uncached short-lived statement', () => {
+		const { FakeDatabaseSync, calls } = makeFake();
+		const db = new (createNodeDatabaseCtor(FakeDatabaseSync))(
+			':x:',
+		) as unknown as AdapterDb;
+		const sql = 'SELECT * FROM t WHERE id = ?';
+		const first = db.prepare(sql);
+		expect(first.all('a')).toEqual([{ sql, op: 'all' }]);
+		first.finalize();
+		const second = db.prepare(sql);
+		expect(second.get('b')).toEqual({ sql, op: 'get' });
+		second.finalize();
+		expect(calls.prepared.filter((s) => s === sql)).toHaveLength(2);
+	});
+
 	test('transaction(fn) wraps BEGIN/COMMIT and returns the callback value', () => {
 		const { FakeDatabaseSync, calls } = makeFake();
 		const db = new (createNodeDatabaseCtor(FakeDatabaseSync))(

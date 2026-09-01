@@ -73,6 +73,11 @@ export interface MemoryOutcome {
 	correction?: string;
 }
 
+export interface MemoryRelation {
+	memoryId: string;
+	type: 'merged_with';
+}
+
 export interface MemoryRecord {
 	id: string;
 	scope: MemoryScopeRef;
@@ -86,6 +91,8 @@ export interface MemoryRecord {
 	updatedAt: string;
 	lastAccessedAt?: string;
 	expiresAt?: string;
+	/** Provider-derived from applied curator proposals; never user-writable. */
+	relations?: MemoryRelation[];
 	supersedes?: string[];
 	supersededBy?: string;
 	contentHash: string;
@@ -196,6 +203,12 @@ export type CuratorMemoryDecision =
 			replacement: NewMemoryRecord;
 			reason: string;
 	  }
+	| {
+			action: 'merge';
+			proposalId: string;
+			relatedMemoryIds: string[];
+			reason: string;
+	  }
 	| { action: 'reject'; proposalId: string; reason: string }
 	| { action: 'noop'; proposalId: string; reason: string };
 
@@ -215,6 +228,12 @@ export type ResolvedCuratorMemoryDecision =
 			replacement: MemoryRecord;
 			reason: string;
 	  }
+	| {
+			action: 'merge';
+			proposalId: string;
+			relatedMemoryIds: string[];
+			reason: string;
+	  }
 	| { action: 'reject'; proposalId: string; reason: string }
 	| { action: 'noop'; proposalId: string; reason: string };
 
@@ -228,6 +247,7 @@ export interface AppliedMemoryChange {
 	targetMemoryId?: string;
 	oldMemoryId?: string;
 	replacementMemoryId?: string;
+	relatedMemoryIds?: string[];
 	reason?: string;
 }
 
@@ -263,6 +283,7 @@ export interface RecallResultItem {
 	record: MemoryRecord;
 	score: number;
 	reason: string;
+	relation?: { type: MemoryRelation['type']; sourceMemoryId: string };
 	signals: {
 		textOverlap: number;
 		tagOverlap: number;

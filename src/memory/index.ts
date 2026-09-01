@@ -157,6 +157,7 @@ export type {
 	MemoryPatch,
 	MemoryProposal,
 	MemoryRecord,
+	MemoryRelation,
 	MemoryScopeRef,
 	MemoryScopeType,
 	NewMemoryRecord,

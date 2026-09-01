@@ -19,6 +19,11 @@ function formatItem(item: RecallResultItem, generatedAt: string): string {
 		`- [${record.id}] kind=${record.kind} scope=${record.scope.type} confidence=${record.confidence.toFixed(2)} age=${age} score=${item.score.toFixed(2)}`,
 		`  ${redactSecrets(record.text)}`,
 		`  Source: ${sourceText(item)}`,
+		...(item.relation
+			? [
+					`  Related via ${item.relation.type} from ${item.relation.sourceMemoryId}`,
+				]
+			: []),
 	].join('\n');
 }
 

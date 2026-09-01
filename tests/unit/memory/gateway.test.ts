@@ -711,7 +711,7 @@ describe('MemoryGateway', () => {
 				relatedMemoryIds: ['mem_1111111111111111'],
 				rationale: 'A merge needs at least two records.',
 			}),
-		).rejects.toThrow('merge proposals require relatedMemoryIds');
+		).rejects.toThrow('merge proposals require 2-8 distinct relatedMemoryIds');
 	});
 
 	test('repository-scoped local memories survive checkout directory renames', async () => {

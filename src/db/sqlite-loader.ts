@@ -21,6 +21,7 @@
  *      behind `--experimental-sqlite` in 22.5; shipped by Electron 42+) in a small
  *      adapter that presents the exact `Database` subset the
  *      codebase uses — `run(sql, params?)`, `query(sql).{get,all,iterate}`,
+ *      `prepare(sql).{get,all,iterate,finalize}`,
  *      `transaction(fn)`, `inTransaction`, `loadExtension(path)`, `close()`. A bare
  *      constructor swap is NOT enough: `DatabaseSync` has none of
  *      `run/query/transaction/inTransaction`.
@@ -133,6 +134,25 @@ export function createNodeDatabaseCtor(
 				get: (...params: unknown[]) => stmt.get(...params),
 				all: (...params: unknown[]) => stmt.all(...params),
 				iterate: (...params: unknown[]) => stmt.iterate(...params),
+			};
+		}
+
+		prepare(sql: string): {
+			get(...params: unknown[]): unknown;
+			all(...params: unknown[]): unknown[];
+			iterate(...params: unknown[]): IterableIterator<unknown>;
+			finalize(): void;
+		} {
+			// Unlike query(), prepare() is intentionally uncached. Callers use it for
+			// short-lived statements whose native resources must be released explicitly
+			// under Bun. node:sqlite owns statements at the DatabaseSync level and releases
+			// them on close(), so finalize is a portable no-op on this adapter.
+			const stmt = this.raw.prepare(sql);
+			return {
+				get: (...params: unknown[]) => stmt.get(...params),
+				all: (...params: unknown[]) => stmt.all(...params),
+				iterate: (...params: unknown[]) => stmt.iterate(...params),
+				finalize: () => {},
 			};
 		}
 

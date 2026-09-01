@@ -1,0 +1,3 @@
+export const MAX_MERGE_PARTICIPANTS = 8;
+export const MAX_RELATIONS_PER_MEMORY = 32;
+export const RELATED_RECALL_FANOUT = 2;

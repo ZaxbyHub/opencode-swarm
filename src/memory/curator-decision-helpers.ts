@@ -1,5 +1,6 @@
 import { DURABLE_MEMORY_KINDS } from './config';
 import { MemoryValidationError } from './errors';
+import { canonicalMemoryIds } from './relations';
 import {
 	computeMemoryContentHash,
 	createMemoryId,
@@ -23,7 +24,8 @@ export function validateDecisionMatchesProposal(
 	if (
 		(decision.action === 'add' && proposal.operation !== 'add') ||
 		(decision.action === 'update' && proposal.operation !== 'update') ||
-		(decision.action === 'supersede' && proposal.operation !== 'supersede')
+		(decision.action === 'supersede' && proposal.operation !== 'supersede') ||
+		(decision.action === 'merge' && proposal.operation !== 'merge')
 	) {
 		throw new MemoryValidationError(
 			`curator ${decision.action} decision does not match ${proposal.operation} proposal`,
@@ -45,6 +47,15 @@ export function validateDecisionMatchesProposal(
 	) {
 		throw new MemoryValidationError(
 			'curator supersede decision target does not match proposal target',
+		);
+	}
+	if (
+		decision.action === 'merge' &&
+		canonicalMemoryIds(proposal.relatedMemoryIds ?? []).join('\0') !==
+			canonicalMemoryIds(decision.relatedMemoryIds).join('\0')
+	) {
+		throw new MemoryValidationError(
+			'curator merge decision related memories do not match proposal',
 		);
 	}
 }
@@ -110,6 +121,7 @@ export function markProposalReviewed(
 		targetMemoryId?: string;
 		oldMemoryId?: string;
 		replacementMemoryId?: string;
+		relatedMemoryIds?: string[];
 	},
 ): MemoryProposal {
 	const reason = curatorDecisionReason(decision);
@@ -139,6 +151,7 @@ export function curatorDecisionReason(
 			return undefined;
 		case 'update':
 		case 'supersede':
+		case 'merge':
 		case 'reject':
 		case 'noop':
 			return decision.reason;
