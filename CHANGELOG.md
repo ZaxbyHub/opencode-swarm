@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.160.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.160.0...v7.160.1) (2026-09-01)
+
+
+### Bug Fixes
+
+* **pr-review:** make temp roots project roots ([a32d72b](https://github.com/ZaxbyHub/opencode-swarm/commit/a32d72b1a8dd476403d4f9f878131e4c2e5b48ee))
+* **sast:** close PR [#2443](https://github.com/ZaxbyHub/opencode-swarm/issues/2443) review findings — evidence truncation flags, test hardening, citation precision ([2e57cb6](https://github.com/ZaxbyHub/opencode-swarm/commit/2e57cb6e24602090b5e150c51701f9a9b70452d8))
+
 ## [7.160.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.159.3...v7.160.0) (2026-09-01)
 
 
