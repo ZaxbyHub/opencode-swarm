@@ -564,8 +564,8 @@ export const PrReviewFindingSchema = z
 // Re-exported here so every existing consumer keeps one import path; there is
 // still exactly ONE definition.
 export {
-	prReviewFindingRequiresCritic,
 	type PrReviewCriticRoutingInput,
+	prReviewFindingRequiresCritic,
 } from '../pr-review/critic-routing.js';
 
 export const PrReviewHandoffSchema = z

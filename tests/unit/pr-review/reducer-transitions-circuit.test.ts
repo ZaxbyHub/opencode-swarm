@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test';
+import type { PrReviewResiliencePolicyRecord } from '../../../src/pr-review/circuit.js';
 import { reducePrReviewEvent } from '../../../src/pr-review/reducer.js';
 import type {
-	PrReviewWorkflowState,
 	PrReviewEvent,
+	PrReviewWorkflowState,
 } from '../../../src/pr-review/types.js';
-import type { PrReviewResiliencePolicyRecord } from '../../../src/pr-review/circuit.js';
 
 const POLICY: PrReviewResiliencePolicyRecord = {
 	enabled: true,
@@ -242,7 +242,9 @@ describe('reducer: resilience config transitions (live disable / clean re-enable
 		});
 		expect(
 			circuit && 'version' in circuit ? circuit.evidenceWaterline : null,
-		).toBe('1970-01-01T00:00:10.000Z');
+			// The waterline is derived from the event's nowMs (10_000), so
+			// assert the computed form rather than a literal epoch ISO.
+		).toBe(new Date(10_000).toISOString());
 		expect(resilience?.attempts).toEqual([]);
 		// The waterlined reset record IS the evidence clear (no separate
 		// effect kind — Phase 8b review).

@@ -39,14 +39,13 @@
  */
 
 import {
-	advancePrReviewCircuit,
 	adoptPrReviewCircuit,
+	advancePrReviewCircuit,
 	type PrReviewCircuitRecordV2,
 	resetPrReviewResilienceForReEnable,
 	resolvePrReviewResiliencePolicy,
 	rollbackPrReviewCircuitProbe,
 } from './circuit.js';
-import { presumedStaleLaneEligible } from './lifecycle.js';
 import type {
 	PrReviewEffect,
 	PrReviewEvent,
@@ -297,32 +296,6 @@ export function reducePrReviewEvent(
 					batchId: event.batchId,
 					laneId: event.laneId,
 					status: 'cancelled',
-				},
-			]);
-		}
-
-		case 'presumed_stale_swept': {
-			const eligible = presumedStaleLaneEligible(
-				{
-					status: event.status,
-					ageMs: event.ageMs,
-					liveness: event.liveness,
-				},
-				event.staleTimeoutMs,
-			);
-			if (!eligible) {
-				return rejected(
-					state,
-					'lane_not_stale_eligible',
-					`lane ${event.laneId} does not meet the presumed-stale eligibility rule`,
-				);
-			}
-			return applied(state, [
-				{
-					kind: 'settle_delegation',
-					batchId: event.batchId,
-					laneId: event.laneId,
-					status: 'stale',
 				},
 			]);
 		}

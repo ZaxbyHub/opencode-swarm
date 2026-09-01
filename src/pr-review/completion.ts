@@ -54,10 +54,11 @@ import {
 import {
 	PR_REVIEW_BASE_DIMENSION_IDS,
 	type PrReviewBaseDimensionId,
-	PrReviewRunIdSchema,
 	type PrReviewResultReceipt,
 	type PrReviewResultUnresolvedReason,
+	PrReviewRunIdSchema,
 } from '../background/pr-review-contract.js';
+import { validateSwarmPath } from '../hooks/utils.js';
 import { CIRCUIT_TERMINAL_DELEGATION_STATUSES } from './circuit.js';
 import {
 	isoNow,
@@ -66,7 +67,6 @@ import {
 	writeAtomicJson,
 	writeStateWhileLocked,
 } from './persistence.js';
-import { validateSwarmPath } from '../hooks/utils.js';
 
 // ---------------------------------------------------------------------------
 // Structural state slice + gate-helper binding seam

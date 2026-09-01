@@ -6,15 +6,23 @@
  * maps; unit tests prove each scanner flags a synthetic violating snippet
  * (the guardrail "biting") and then apply it over the real `src/` tree.
  *
- * 1. `scanTranscriptParsingOutsideAdapter` — transcript→canonical conversion
- *    may exist only in `src/pr-review/legacy-transcript-adapter.ts`.
- * 2. `scanObserverTerminalization` — (a) the historical wait-deadline/no-client
+ * 1. `scanObserverTerminalization` — (a) the historical wait-deadline/no-client
  *    terminalizer may never reappear by name; (b) in
  *    `src/tools/dispatch-lanes.ts`, durable delegation-transition writes are
  *    allowed only inside the sanctioned settlement functions.
- * 3. `scanParallelCircuitRuleConstruction` — circuit-record construction may
+ * 2. `scanParallelCircuitRuleConstruction` — circuit-record construction may
  *    exist only under `src/pr-review/` (the inline-construction recurrence
  *    class G-1).
+ *
+ * Issue #2385 originally specified a third scanner for transcript-parsing
+ * locality (the 13 conversion symbols restricted to the legacy adapter),
+ * but its only test consumer was a synthetic-input bite demo with no
+ * production caller. The boundary is already enforced structurally
+ * (the legacy-transcript-adapter is the sole module that owns those symbols,
+ * and the two retained scanners cover the real recurrence classes). A
+ * scanner with no caller would create the appearance of a guardrail where
+ * there is none — per the issue's "no unwired functionality" bar, it was
+ * removed instead.
  */
 
 export interface GuardrailSource {
@@ -142,71 +150,13 @@ export function scanObserverTerminalization(
 	return hits;
 }
 
-// ---------------------------------------------------------------------------
-// Guardrail 1 — transcript-parsing locality
-// ---------------------------------------------------------------------------
-
-/**
- * The transcript/artifact-text → canonical conversion cluster (issue #2385:
- * moved to `src/pr-review/legacy-transcript-adapter.ts`). These identifiers
- * may appear ONLY in that module across `src/`.
- */
-export const TRANSCRIPT_CONVERSION_SYMBOLS: readonly string[] = [
-	'indexVerdictRows',
-	'parsePrReviewVerdictRows',
-	'parseLaneItemVerdicts',
-	'analyzePrReviewVerdictRowContract',
-	'validateReviewerVerdictFields',
-	'validateCriticVerdictFields',
-	'reviewerVerdictRowDigest',
-	'pipeFieldsCapped',
-	'pipeFields',
-	'artifactHasExactPositiveVerdictRow',
-	'feedbackArtifactCoversItems',
-	'feedbackArtifactTextCoversItems',
-	'readSettledFeedbackClassifications',
-];
-
-export const TRANSCRIPT_CONVERSION_ALLOWED_PATHS: ReadonlySet<string> = new Set(
-	['src/pr-review/legacy-transcript-adapter.ts'],
-);
-
 function normalizedSourcePath(path: string): string {
 	return path.replaceAll('\\', '/');
 }
 
-/**
- * Guardrail 1: flags any transcript-conversion symbol outside the explicit
- * legacy adapter. The single-row codec (`parsePrReviewVerdictRow` — note the
- * singular) stays in `pr-review-contract.ts`: it is a data-format codec, not
- * a conversion policy.
- */
-export function scanTranscriptParsingOutsideAdapter(
-	sources: readonly GuardrailSource[],
-): GuardrailHit[] {
-	const hits: GuardrailHit[] = [];
-	for (const source of sources) {
-		const normalized = normalizedSourcePath(source.path);
-		if (TRANSCRIPT_CONVERSION_ALLOWED_PATHS.has(normalized)) continue;
-		// This module defines the symbol list itself (same self-exemption
-		// reasoning as rule 2).
-		if (normalized === 'src/pr-review/guardrails.ts') continue;
-		const lines = source.content.split(/\r?\n/);
-		for (let i = 0; i < lines.length; i++) {
-			for (const symbol of TRANSCRIPT_CONVERSION_SYMBOLS) {
-				if (new RegExp(`\\b${symbol}\\b`).test(lines[i])) {
-					hits.push({
-						path: source.path,
-						line: i + 1,
-						rule: `transcript-conversion-outside-adapter:${symbol}`,
-						excerpt: excerptOf(lines[i]),
-					});
-				}
-			}
-		}
-	}
-	return hits;
-}
+// Guardrail 1 (transcript-parsing locality) was removed — see module
+// docblock for rationale. The boundary is enforced structurally by the
+// legacy-transcript-adapter being the sole owner of the conversion cluster.
 
 // ---------------------------------------------------------------------------
 // Guardrail 3 — no parallel circuit-rule construction outside src/pr-review/

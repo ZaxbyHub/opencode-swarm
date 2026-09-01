@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test';
+import { PR_REVIEW_CIRCUIT_CONTRIBUTOR_LIMIT } from '../../../src/pr-review/circuit.js';
 import { reducePrReviewEvent } from '../../../src/pr-review/reducer.js';
 import type {
 	PrReviewEvent,
 	PrReviewWorkflowState,
 } from '../../../src/pr-review/types.js';
-import { PR_REVIEW_CIRCUIT_CONTRIBUTOR_LIMIT } from '../../../src/pr-review/circuit.js';
 
 /** Deterministic PRNG (mulberry32) so sequence failures reproduce exactly. */
 function mulberry32(seed: number): () => number {
@@ -40,7 +40,7 @@ function generatorEvent(rand: () => number, step: number): PrReviewEvent {
 		items[Math.floor(rand() * items.length)]!;
 	const batch = `b${1 + Math.floor(rand() * 3)}`;
 	const lane = `l${1 + Math.floor(rand() * 3)}`;
-	switch (Math.floor(rand() * 10)) {
+	switch (Math.floor(rand() * 11)) {
 		case 0:
 			return {
 				type: 'collection_observed',
@@ -84,12 +84,10 @@ function generatorEvent(rand: () => number, step: number): PrReviewEvent {
 			};
 		case 4:
 			return {
-				type: 'presumed_stale_swept',
+				type: 'transcript_evidence_presented',
 				batchId: batch,
 				laneId: lane,
-				status: pick(['pending', 'running', 'completed'] as const),
-				ageMs: Math.floor(rand() * 2) * 30 * 60_000,
-				liveness: pick(['alive', 'unresponsive', 'unknown'] as const),
+				laneHasStructuredReceipt: rand() < 0.5,
 			};
 		case 5:
 			return {
@@ -128,6 +126,22 @@ function generatorEvent(rand: () => number, step: number): PrReviewEvent {
 				type: 'publication_armed',
 				coverageKind: pick(['COMPLETE', 'PARTIAL', 'NO_COVERAGE'] as const),
 				verdict: pick(['APPROVE', 'INCOMPLETE', 'REQUEST_CHANGES'] as const),
+			};
+		case 9:
+			return {
+				type: 'critic_result_recorded',
+				criticRequiredFindingIds: [lane],
+				criticConfirmedFindingIds: [lane],
+			};
+		case 10:
+			return {
+				type: 'lane_structured_result_submitted',
+				batchId: batch,
+				laneId: lane,
+				generation: 1,
+				semanticEnvelopeDigest: `d${Math.floor(rand() * 3)}`,
+				outcome: 'INCOMPLETE',
+				existingReceiptDigest: `d${Math.floor(rand() * 3)}`,
 			};
 		default:
 			return {

@@ -101,7 +101,6 @@ import { redactSecrets } from '../memory/redaction.js';
 import { bindPrReviewReentryBindingReader } from '../pr-review/authorization.js';
 import {
 	adoptPrReviewCircuit,
-	advancePrReviewCircuit,
 	CIRCUIT_TERMINAL_DELEGATION_STATUSES,
 	classifyPrReviewCircuitSignal,
 	type PrReviewCircuitAdoptionDiagnostic,
@@ -178,7 +177,6 @@ import {
 	workflowGateStatePath,
 	workflowGateStateRelativePath,
 	writeAtomicJson,
-	writePrWorkflowAtomicJson,
 	writeStateWhileLocked,
 } from '../pr-review/persistence.js';
 import { reducePrReviewEvent } from '../pr-review/reducer.js';
@@ -4398,7 +4396,7 @@ async function advanceResilienceCircuitWhileLocked(args: {
 		// pre-transition view rather than blocking the workflow.
 		return { state, snapshot };
 	}
-	let nextState = advanceOutcome.state as PrWorkflowGateState;
+	const nextState = advanceOutcome.state as PrWorkflowGateState;
 	const blockedReason = advanceOutcome.effects.find(
 		(effect): effect is Extract<PrReviewEffect, { kind: 'block_dispatch' }> =>
 			effect.kind === 'block_dispatch',
@@ -4443,7 +4441,7 @@ async function preflightPrReviewResilienceCircuitBeforePrune(
 	state: PrWorkflowGateState;
 	previous: PrReviewBaseDispatchRecord[];
 }> {
-	let nextState = state;
+	let nextState: PrWorkflowGateState = state;
 	let nextPrevious = previous;
 	let snapshot = nextState.prReviewResilience;
 	if (!snapshot) {

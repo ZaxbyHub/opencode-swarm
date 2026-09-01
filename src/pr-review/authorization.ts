@@ -30,8 +30,8 @@ import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { z } from 'zod';
 import { PrReviewRunIdSchema } from '../background/pr-review-contract.js';
-import { prWorkflowSessionFileStem } from './persistence.js';
 import { validateSwarmPath } from '../hooks/utils.js';
+import { prWorkflowSessionFileStem } from './persistence.js';
 
 export type PrReviewReentryRole = 'reviewer' | 'test_engineer';
 

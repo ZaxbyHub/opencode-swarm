@@ -18,7 +18,6 @@ import type {
 	PrReviewCircuitSignal,
 	PrReviewResiliencePolicyRecord,
 } from './circuit.js';
-import type { PrReviewObserverDiagnosticKind } from './lifecycle.js';
 
 // ---------------------------------------------------------------------------
 // State slice
@@ -158,7 +157,13 @@ export type PrReviewEvent =
 	  }
 	| {
 			type: 'collection_observed';
-			diagnostic: PrReviewObserverDiagnosticKind;
+			diagnostic:
+				| 'busy'
+				| 'retry'
+				| 'idle_unknown'
+				| 'host_unavailable'
+				| 'probe_error'
+				| 'wait_expired';
 			pendingLaneIds: readonly string[];
 			boundedDetail?: string | undefined;
 	  }
@@ -198,15 +203,6 @@ export type PrReviewEvent =
 			batchId: string;
 			laneId: string;
 			generation: number;
-	  }
-	| {
-			type: 'presumed_stale_swept';
-			batchId: string;
-			laneId: string;
-			status: string;
-			ageMs: number;
-			liveness: 'alive' | 'unresponsive' | 'unknown';
-			staleTimeoutMs?: number | undefined;
 	  }
 	// --- circuit ------------------------------------------------------------
 	| {

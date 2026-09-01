@@ -41,11 +41,9 @@ import {
 } from '../background/pr-review-collection-receipt.js';
 import {
 	buildPrReviewContractCard,
-	prReviewLegacyTranscriptCompatibilityEnabled,
 	PrReviewLaneResultEnvelopeSchema,
+	prReviewLegacyTranscriptCompatibilityEnabled,
 } from '../background/pr-review-contract.js';
-import { reducePrReviewEvent } from '../pr-review/reducer.js';
-import { CIRCUIT_TERMINAL_DELEGATION_STATUSES } from '../pr-review/circuit.js';
 import {
 	PrReviewInlineTriggerRowSchema,
 	validatePrReviewInlineTriggerLedger,
@@ -102,6 +100,8 @@ import {
 import { buildLaneOrientationBlock } from '../hooks/repo-graph-injection.js';
 import type { ParallelDispatcher } from '../parallel/dispatcher/parallel-dispatcher.js';
 import { createParallelDispatcher } from '../parallel/dispatcher/parallel-dispatcher.js';
+import { CIRCUIT_TERMINAL_DELEGATION_STATUSES } from '../pr-review/circuit.js';
+import { reducePrReviewEvent } from '../pr-review/reducer.js';
 import { swarmState } from '../state.js';
 import { teardownEphemeralSession } from '../utils/ephemeral-session-teardown.js';
 import * as logger from '../utils/logger.js';

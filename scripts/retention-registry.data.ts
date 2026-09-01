@@ -3544,7 +3544,7 @@ export const PROJECT_SWARM_ROWS_WITH_INDIRECT_ROOT: readonly string[] =
  */
 export const EXEMPT_WRITER_MODULES: Readonly<Record<string, string>> = Object.freeze({
 	'src/utils/atomic-write.ts': 'canonical atomic-write helper — callers own the streams (issue #2035)',
-	'src/pr-review/persistence.ts': 'atomic-write + lock/CAS adapter for PR-review workflow state (issue #2385) — the owning caller (src/hooks/pr-workflow-gate.ts, registered under background-delegations-ledger) owns the streams',
+	'src/pr-review/persistence.ts': 'PR-review workflow-state persistence plumbing (issue #2385) — the only durable stream this module writes is the gate-state file .swarm/pr-workflow-gates/*.json via writeStateWhileLocked; that stream is currently UNREGISTERED in this data set (F-PRR-013 — separate follow-up row needed); until then the gate-state writes are exempt plumbing',
 	'src/utils/bun-compat.ts': 'bunWrite Node-fallback helper — callers own the streams',
 	'src/evidence/task-file.ts': 'atomic-write adapter for evidence/{taskId}.json — rows task-workflow-evidence/council-evidence-files own the stream',
 	'src/evidence/immutable-store.ts': 'writeImmutableArtifact executes on behalf of the evaluation-store row owners',

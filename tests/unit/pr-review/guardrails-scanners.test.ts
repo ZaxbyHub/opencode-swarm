@@ -2,10 +2,9 @@ import { describe, expect, test } from 'bun:test';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import {
+	type GuardrailSource,
 	scanObserverTerminalization,
 	scanParallelCircuitRuleConstruction,
-	scanTranscriptParsingOutsideAdapter,
-	type GuardrailSource,
 } from '../../../src/pr-review/guardrails.js';
 
 const ROOT = process.cwd();
@@ -29,29 +28,6 @@ function collectSources(dir = join(ROOT, 'src')): GuardrailSource[] {
 }
 
 describe('guardrail scanners bite on synthetic anti-patterns (issue #2385)', () => {
-	test('transcript-conversion scanner flags parsing outside the adapter', () => {
-		const hits = scanTranscriptParsingOutsideAdapter([
-			{
-				path: 'src/hooks/some-gate.ts',
-				content: 'const rows = parsePrReviewVerdictRows(text);',
-			},
-		]);
-		expect(hits).toHaveLength(1);
-		expect(hits[0]?.rule).toContain(
-			'transcript-conversion-outside-adapter:parsePrReviewVerdictRows',
-		);
-	});
-
-	test('transcript-conversion scanner allows the adapter itself', () => {
-		const hits = scanTranscriptParsingOutsideAdapter([
-			{
-				path: 'src/pr-review/legacy-transcript-adapter.ts',
-				content: 'export function parsePrReviewVerdictRows(text: string) {}',
-			},
-		]);
-		expect(hits).toHaveLength(0);
-	});
-
 	test('observer-terminalizer scanner flags the historical symbols', () => {
 		const hits = scanObserverTerminalization([
 			{

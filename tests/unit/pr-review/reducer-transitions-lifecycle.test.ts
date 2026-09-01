@@ -339,31 +339,18 @@ describe('reducer: cancellation and presumed-stale sweep', () => {
 		expect(result.status).toBe('rejected');
 	});
 
-	test('an eligible stale sweep settles stale', () => {
+	test('a non-PER-recovery cancellation preserves the dimension (event-driven, no autonomous sweep)', () => {
+		// Issue #2385 closeout: the `presumed_stale_swept` reducer event was
+		// removed because no production adapter dispatched it; the two real
+		// stale-sweep paths (dispatch-lanes.ts sweepStaleAsyncLaneRecords,
+		// pr-workflow-gate.ts settlePresumedStalePrWorkflowLanes) retain
+		// their own inline rules. A regression here would be a reintroduction.
 		const result = reducePrReviewEvent(BASE, {
-			type: 'presumed_stale_swept',
+			type: 'lane_cancelled',
 			batchId: 'batch-1',
 			laneId: 'lane-1',
-			status: 'running',
-			ageMs: 30 * 60_000,
-			liveness: 'unknown',
+			generation: 4,
 		});
 		expect(result.status).toBe('applied');
-		if (result.status !== 'applied') return;
-		expect(result.effects[0]).toMatchObject({ status: 'stale' });
-	});
-
-	test('an alive lane is never swept', () => {
-		const result = reducePrReviewEvent(BASE, {
-			type: 'presumed_stale_swept',
-			batchId: 'batch-1',
-			laneId: 'lane-1',
-			status: 'running',
-			ageMs: 30 * 60_000,
-			liveness: 'alive',
-		});
-		expect(result.status).toBe('rejected');
-		if (result.status !== 'rejected') return;
-		expect(result.rejection.code).toBe('lane_not_stale_eligible');
 	});
 });

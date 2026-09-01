@@ -10,10 +10,10 @@ import {
 	bindPrReviewBase,
 	enforcePrReviewBaseDimensions,
 } from '../../../src/hooks/pr-workflow-gate.js';
-import { LEGACY_PR_REVIEW_RESILIENCE_POLICY } from '../pr-review-test-policy.js';
 import { executeSubmitPrReviewResult } from '../../../src/tools/submit-pr-review-result.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { initializeGitRepository } from '../helpers/git-repository.js';
+import { LEGACY_PR_REVIEW_RESILIENCE_POLICY } from '../pr-review-test-policy.js';
 
 /**
  * Issue #2385 replay corpus — historical failure shapes 5-6 from tracker

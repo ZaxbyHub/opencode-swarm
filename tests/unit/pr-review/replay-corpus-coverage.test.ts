@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
-import { _test_exports } from '../../../src/hooks/pr-workflow-gate.js';
+import {
+	_test_exports,
+	activatePrWorkflow,
+	enforcePrReviewBaseDimensions,
+	PR_REVIEW_BASE_DIMENSION_IDS,
+} from '../../../src/hooks/pr-workflow-gate.js';
 import { executeCompletePrWorkflow } from '../../../src/tools/complete-pr-workflow.js';
 import {
 	PR_ARTIFACT_HEAD_SHA,
@@ -9,11 +14,6 @@ import {
 	persistPrReviewBatch,
 } from '../../helpers/pr-review-artifact-fixtures.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
-import {
-	activatePrWorkflow,
-	enforcePrReviewBaseDimensions,
-	PR_REVIEW_BASE_DIMENSION_IDS,
-} from '../../../src/hooks/pr-workflow-gate.js';
 import { LEGACY_PR_REVIEW_RESILIENCE_POLICY } from '../pr-review-test-policy.js';
 
 /**

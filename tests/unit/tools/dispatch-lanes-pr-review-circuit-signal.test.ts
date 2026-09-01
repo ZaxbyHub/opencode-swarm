@@ -18,11 +18,11 @@
  *     records fail open with a bounded hash-only diagnostic.
  */
 import { describe, expect, test } from 'bun:test';
+import { _test_exports } from '../../../src/hooks/pr-workflow-gate.js';
 import {
 	adoptPrReviewCircuit,
 	type PrReviewCircuitSignal,
 } from '../../../src/pr-review/circuit.js';
-import { _test_exports } from '../../../src/hooks/pr-workflow-gate.js';
 
 const classify = _test_exports.classifyPrReviewCircuitSignal;
 
