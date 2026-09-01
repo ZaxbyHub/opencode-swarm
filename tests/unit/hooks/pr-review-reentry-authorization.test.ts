@@ -5,7 +5,7 @@ import {
 	consumePrReviewReentryAuthorization,
 	issuePrReviewReentryAuthorization,
 	_internals as reentryInternals,
-} from '../../../src/hooks/pr-review-reentry-authorization.js';
+} from '../../../src/pr-review/authorization.js';
 import {
 	_test_exports,
 	activatePrWorkflow,

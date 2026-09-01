@@ -115,13 +115,73 @@ import {
 	adoptPrReviewCircuit,
 	advancePrReviewCircuit,
 	classifyPrReviewCircuitSignal,
+	CIRCUIT_TERMINAL_DELEGATION_STATUSES,
 	type PrReviewCircuitAdoptionDiagnostic,
 	type PrReviewCircuitLegacyRecord,
 	PrReviewCircuitRecordSchema,
 	type PrReviewCircuitRecordV2,
 	type PrReviewCircuitSignal,
-} from './pr-review-resilience-circuit.js';
+	type PrReviewResiliencePolicyRecord,
+	resolvePrReviewResiliencePolicy,
+	resetPrReviewResilienceForReEnable,
+	rollbackPrReviewCircuitProbe,
+} from '../pr-review/circuit.js';
+// Issue #2385: the atomic persistence boundary. The gate binds its
+// `_test_exports` object and its full state codec at module init below; all
+// seam properties are read at call time through the bound reference.
+import {
+	bindPrReviewPersistenceHooks,
+	bindPrReviewStateCodec,
+	CHECKOUT_MUTATION_ACTION_TIMEOUT_MS,
+	defaultPersistenceHooks,
+	delay,
+	forgetTrackedPrWorkflowState,
+	isoNow,
+	MAX_TRACKED_SESSIONS,
+	normalizeComparableFsPath,
+	normalizeSessionID,
+	prWorkflowSessionFileStem,
+	readPrWorkflowGateStateFileFromDisk,
+	readPrWorkflowGateStateFromDisk as readPrWorkflowStateFromDiskBound,
+	rememberState,
+	resetPrReviewPersistenceCaches,
+	sameBigIntFileIdentity,
+	stateCacheKey,
+	trackedStatesByProjectSession,
+	withPrWorkflowCheckoutMutationLock,
+	withSessionStateMutation,
+	WORKFLOW_GATE_DIR,
+	writeAtomicJson,
+	writePrWorkflowAtomicJson,
+	writeStateWhileLocked,
+	workflowCheckoutMutationLockRelativePath,
+	workflowGateStateLockRelativePath,
+	workflowGateStatePath,
+	workflowGateStateRelativePath,
+} from '../pr-review/persistence.js';
+import { bindPrReviewReentryBindingReader } from '../pr-review/authorization.js';
 import { validateSwarmPath } from './utils.js';
+
+// Issue #2385: persistence-owned surfaces re-exported for existing importers
+// (pr-feedback-event-queue.ts, prepare-pr-workflow-checkout.ts, tests).
+export {
+	ensurePrWorkflowSafeParentDirectory,
+	PrWorkflowCheckoutMutationTimeoutError,
+	prWorkflowSessionFileStem,
+	withPrWorkflowCheckoutMutationLock,
+	writePrWorkflowAtomicJson,
+} from '../pr-review/persistence.js';
+
+/** Typed disk read over the bound codec (gate callers want the full state). */
+function readPrWorkflowGateStateFromDisk(
+	directory: string,
+	sessionID: string,
+): Promise<PrWorkflowGateState | null> {
+	return readPrWorkflowStateFromDiskBound<PrWorkflowGateState>(
+		directory,
+		sessionID,
+	);
+}
 
 /**
  * Re-exported for compatibility: the canonical six-dimension list is owned by
@@ -399,16 +459,6 @@ interface PrReviewBaseDispatchRecord {
 		ownedWorkflowLanes?: PrReviewBaseDimensionId[];
 	}>;
 	validatedAt: string;
-}
-
-interface PrReviewResiliencePolicyRecord {
-	enabled: boolean;
-	canaryProbeMs: number;
-	statusProbeTimeoutMs: number;
-	correlatedFailureThreshold: number;
-	maxRetryAttemptsAfterInitial: number;
-	/** Issue #2382. Optional: policies persisted before the field existed parse unchanged. */
-	circuitOpenDurationMs?: number;
 }
 
 interface PrReviewResilienceAttemptRecord {
@@ -948,14 +998,8 @@ export interface PrReviewDimensionCancellationRecord {
 	source: 'armed_recovery';
 }
 
-interface SessionStateMutationLock {
-	ownerToken: string;
-	pid: number;
-	createdAtMs: number;
-}
 
 const GATE_SCHEMA_VERSION = 1 as const;
-const MAX_TRACKED_SESSIONS = 200;
 const MAX_WORKFLOW_BATCHES = 128;
 /**
  * Every valid PR_REVIEW base batch partitions the fixed six-dimension base
@@ -1018,13 +1062,6 @@ const MAX_RETIRED_FEEDBACK_ITEM_OWNERS = 4096;
  * instead.
  */
 export const MAX_PR_FEEDBACK_INVENTORY_AMENDMENTS = 128;
-const WINDOWS_RENAME_MAX_RETRIES = 3;
-const RENAME_RETRY_DELAY_MS = 10;
-const STATE_MUTATION_LOCK_MAX_ATTEMPTS = 50;
-const STATE_MUTATION_LOCK_RETRY_DELAY_MS = 10;
-const STATE_MUTATION_LOCK_UNINITIALIZED_STALE_MS = 30_000;
-const MAX_COMPLETED_CHECKOUT_LOCK_OWNERS = 64;
-const CHECKOUT_MUTATION_ACTION_TIMEOUT_MS = 5 * 60_000;
 const MAX_PR_WORKFLOW_GATE_DIRECTORY_ENTRIES = MAX_TRACKED_SESSIONS * 2 + 1;
 const MAX_CANDIDATE_ISSUES_PER_ARTIFACT = 8;
 const MAX_BASE_COVERAGE_DIAGNOSTICS = 8;
@@ -1032,11 +1069,6 @@ const MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS = 1_000;
 const MAX_LANE_VALIDATION_VALUE_CHARS = 240;
 const DISPATCH_TOOL_NAME = 'dispatch_lanes_async';
 const BLOCKING_DISPATCH_TOOL_NAME = 'dispatch_lanes';
-const WORKFLOW_GATE_DIR = 'pr-workflow-gates';
-const trackedStatesByProjectSession = new Map<string, PrWorkflowGateState>();
-const pendingStateMutationsByProjectSession = new Map<string, Promise<void>>();
-const pendingCheckoutMutationsByProject = new Map<string, Promise<void>>();
-const completedCheckoutLockOwners = new Map<string, string>();
 
 const PrReviewBaseDimensionIdSchema = z.enum(PR_REVIEW_BASE_DIMENSION_IDS);
 
@@ -1896,9 +1928,7 @@ export async function readPrWorkflowGateState(
 	if (state) {
 		rememberState(directory, state);
 	} else {
-		trackedStatesByProjectSession.delete(
-			stateCacheKey(directory, normalizedSessionID),
-		);
+		forgetTrackedPrWorkflowState(directory, normalizedSessionID);
 	}
 	return state;
 }
@@ -2161,7 +2191,7 @@ async function assertNoActivePrWorkflowGateForCheckoutRestore(
 				directory,
 				path.join(WORKFLOW_GATE_DIR, entry.name),
 			);
-			const state = await readPrWorkflowGateStateFileFromDisk(
+			const state = await readPrWorkflowGateStateFileFromDisk<PrWorkflowGateState>(
 				statePath,
 				entry.name,
 			);
@@ -2236,9 +2266,7 @@ export async function clearPrWorkflowGateState(
 				throw error;
 			}
 		}
-		trackedStatesByProjectSession.delete(
-			stateCacheKey(directory, normalizedSessionID),
-		);
+		forgetTrackedPrWorkflowState(directory, normalizedSessionID);
 	});
 }
 
@@ -4236,25 +4264,13 @@ export class PrReviewResilienceRetryExhaustedError extends Error {
 	}
 }
 
-function snapshotPrReviewResiliencePolicy(
-	policy?: PrReviewResilienceConfig,
-): PrReviewResiliencePolicyRecord {
-	return {
-		// Issue #2381: must track DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.enabled. A
-		// hardcoded `?? true` here would force staged admission on for any caller
-		// that omits the policy, which then hard-BLOCKs tier M/L base dispatch —
-		// while the architect prompt now (correctly) tells the controller not to
-		// emit stage metadata by default.
-		enabled: policy?.enabled ?? DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.enabled,
-		canaryProbeMs: policy?.canary_probe_ms ?? 300_000,
-		statusProbeTimeoutMs: policy?.status_probe_timeout_ms ?? 2_000,
-		correlatedFailureThreshold: policy?.correlated_failure_threshold ?? 2,
-		maxRetryAttemptsAfterInitial: policy?.max_retry_attempts_after_initial ?? 2,
-		circuitOpenDurationMs:
-			policy?.circuit_open_duration_ms ??
-			DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.circuit_open_duration_ms,
-	};
-}
+/**
+ * Issue #2385: the policy snapshot lives in `src/pr-review/circuit.ts`
+ * (`resolvePrReviewResiliencePolicy`) with every default sourced from
+ * `DEFAULT_PR_REVIEW_RESILIENCE_CONFIG`. This local name is kept (callers and
+ * the `_test_exports` seam) and delegates to the single authority.
+ */
+const snapshotPrReviewResiliencePolicy = resolvePrReviewResiliencePolicy;
 
 function declaredBaseDimensions(
 	lanes: readonly PrWorkflowLaneSpec[],
@@ -4331,7 +4347,7 @@ function effectivePrReviewResiliencePolicy(
 // ---------------------------------------------------------------------------
 // PR-review resilience circuit (issue #2382) — typed, recoverable, versioned.
 // Classification, adoption/migration, and the CLOSED/OPEN/HALF_OPEN machine
-// live in `./pr-review-resilience-circuit.ts` (pure, unit-tested); this file
+// live in `src/pr-review/circuit.ts` (pure, unit-tested); this file
 // owns the durable reads (delegation ledger), the CAS persistence, and the
 // enforcement wiring.
 // ---------------------------------------------------------------------------
@@ -4914,22 +4930,19 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 			previous = state.prReviewBaseDispatches ?? [];
 		}
 	} else if (nextResilience && nextResilience.policy.enabled === false) {
-		const previousGeneration =
-			nextResilience.circuit && 'version' in nextResilience.circuit
-				? nextResilience.circuit.generation
-				: 1;
 		nextResilience = {
 			policy: snapshotPrReviewResiliencePolicy(
 				options.prReviewResiliencePolicy,
 			),
 			attempts: [],
-			circuit: {
-				version: 2,
-				state: 'CLOSED',
-				generation: previousGeneration + 1,
-				contributors: [],
-				evidenceWaterline: isoNow(),
-			},
+			// Issue #2385: the re-enable reset is a sanctioned machine
+			// transition (src/pr-review/circuit.ts) — no inline record
+			// construction here.
+			circuit: resetPrReviewResilienceForReEnable({
+				previousCircuit: nextResilience.circuit,
+				policy: nextResilience.policy,
+				nowMs: _test_exports.nowMs(),
+			}),
 		};
 		state = await writeStateWhileLocked(directory, {
 			...state,
@@ -5348,9 +5361,9 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 			// never produce a terminal record — this rollback's own precondition
 			// is that the batch has zero delegation records — so leaving the
 			// probe in place would wedge the circuit on probe_in_flight forever.
-			// End the probe lifecycle exactly the way an ignored outcome does:
-			// state stays OPEN with a restarted recovery cooldown, and no
-			// contributor, generation, or waterline changes.
+			// Issue #2385: the transition itself is a sanctioned machine
+			// function (src/pr-review/circuit.ts `rollbackPrReviewCircuitProbe`)
+			// — no inline record construction here.
 			const rolledBackCircuit = nextResilience?.circuit;
 			if (
 				rolledBackCircuit &&
@@ -5360,15 +5373,11 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 			) {
 				nextResilience = {
 					...nextResilience!,
-					circuit: {
-						...rolledBackCircuit,
-						state: 'OPEN',
-						openUntil: new Date(
-							_test_exports.nowMs() +
-								circuitOpenDurationMs(nextResilience!.policy),
-						).toISOString(),
-						probe: undefined,
-					},
+					circuit: rollbackPrReviewCircuitProbe(
+						rolledBackCircuit,
+						_test_exports.nowMs(),
+						circuitOpenDurationMs(nextResilience!.policy),
+					),
 				};
 			}
 			const shouldKeepResilience =
@@ -5411,13 +5420,11 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
  * exception exists for. Preview truncation alone is recoverable when the durable
  * artifact validates. This set is therefore only consulted after both identity
  * and revision-independent semantic validation.
+ *
+ * Issue #2385: the set itself is owned by `src/pr-review/circuit.ts`
+ * (`CIRCUIT_TERMINAL_DELEGATION_STATUSES`) — one vocabulary, no mirror.
  */
-const TERMINAL_FAILED_DELEGATION_STATUSES: ReadonlySet<string> = new Set([
-	'completed',
-	'error',
-	'cancelled',
-	'stale',
-]);
+const TERMINAL_FAILED_DELEGATION_STATUSES = CIRCUIT_TERMINAL_DELEGATION_STATUSES;
 
 interface PrReviewBaseDimensionAttempts {
 	/** Dimensions with a currently authoritative successful artifact. */
@@ -10530,17 +10537,6 @@ async function readBoundedSwarmRegularFile(
 	}
 }
 
-function sameBigIntFileIdentity(
-	left: Pick<BigIntStats, 'dev' | 'ino'>,
-	right: Pick<BigIntStats, 'dev' | 'ino'>,
-): boolean {
-	return left.dev === right.dev && left.ino === right.ino;
-}
-
-function normalizeComparableFsPath(value: string): string {
-	const normalized = path.normalize(path.resolve(value));
-	return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
-}
 
 function prReviewRunReservationRelativePath(runId: string): string {
 	return `pr-review/${runId}/run-reservation.json`;
@@ -11915,16 +11911,22 @@ export async function readPrReviewReentryBindingContext(
 		...(state.workflowInstanceId
 			? { workflowInstanceId: state.workflowInstanceId }
 			: {}),
-		...((state.prReviewArtifactRunId ?? state.prReviewReservedRunId)
-			? {
-					runId:
-						state.prReviewArtifactRunId ??
-						state.prReviewReservedRunId ??
-						undefined,
-				}
-			: {}),
+			...((state.prReviewArtifactRunId ?? state.prReviewReservedRunId)
+				? {
+						runId:
+							state.prReviewArtifactRunId ??
+							state.prReviewReservedRunId ??
+							undefined,
+					}
+				: {}),
 	};
 }
+
+// Issue #2385: the reentry authorization boundary (src/pr-review/
+// authorization.ts) reads the CURRENT workflow binding through this gate
+// reader — bound once at module init so the boundary never imports the gate
+// back. Function declarations hoist, so the reference is available here.
+bindPrReviewReentryBindingReader(readPrReviewReentryBindingContext);
 
 export async function completePrWorkflow(
 	directory: string,
@@ -12426,10 +12428,9 @@ export const _test_exports = {
 	workflowCheckoutMutationLockRelativePath,
 	withPrWorkflowCheckoutMutationLock,
 	resetTrackedStateCache: () => {
-		trackedStatesByProjectSession.clear();
-		pendingStateMutationsByProjectSession.clear();
-		pendingCheckoutMutationsByProject.clear();
-		completedCheckoutLockOwners.clear();
+		// Issue #2385: the four persistence caches/queues now live in
+		// src/pr-review/persistence.ts; reset them through its API.
+		resetPrReviewPersistenceCaches();
 		// Issue #2382 review (PRR-005): the malformed-circuit diagnostic dedup is
 		// process-level by design in production, but a shared test process must
 		// not carry dedup state between suites — otherwise suite order changes
@@ -12447,8 +12448,9 @@ export const _test_exports = {
 		_test_exports.beforeSafeDirectoryCreate = undefined;
 		_test_exports.beforeAtomicTempWrite = undefined;
 		_test_exports.beforeAtomicRename = undefined;
-		_test_exports.openCheckoutLock = openCheckoutLockFile;
-		_test_exports.removeCheckoutLock = removeCheckoutLockFile;
+		_test_exports.openCheckoutLock = defaultPersistenceHooks.openCheckoutLock;
+		_test_exports.removeCheckoutLock =
+			defaultPersistenceHooks.removeCheckoutLock;
 		_test_exports.checkoutMutationActionTimeoutMs =
 			CHECKOUT_MUTATION_ACTION_TIMEOUT_MS;
 		_test_exports.classifyPrWorkflowGitStateAsync = classifyPrWorkflowGitState;
@@ -12488,8 +12490,8 @@ export const _test_exports = {
 		| undefined,
 	beforeAtomicTempWrite: undefined as (() => Promise<void>) | undefined,
 	beforeAtomicRename: undefined as (() => Promise<void>) | undefined,
-	openCheckoutLock: openCheckoutLockFile,
-	removeCheckoutLock: removeCheckoutLockFile,
+	openCheckoutLock: defaultPersistenceHooks.openCheckoutLock,
+	removeCheckoutLock: defaultPersistenceHooks.removeCheckoutLock,
 	checkoutMutationActionTimeoutMs: CHECKOUT_MUTATION_ACTION_TIMEOUT_MS,
 	classifyPrWorkflowGitStateAsync: classifyPrWorkflowGitState,
 	/**
@@ -12661,7 +12663,7 @@ export const _test_exports = {
 		const ctx = await createPrReviewGateContext(directory, state);
 		return derivePrReviewCandidateInventory(directory, state, ctx);
 	},
-	isProcessAlive,
+	isProcessAlive: defaultPersistenceHooks.isProcessAlive,
 	// Exposed for the `-c` config-injection regression test. The publication
 	// path that calls this needs a fully-armed ready-to-publish state, so the
 	// classifier is not otherwise reachable from a focused unit test.
@@ -12669,6 +12671,16 @@ export const _test_exports = {
 	rename: fsp.rename,
 	nowMs: () => Date.now(),
 };
+
+// Issue #2385: bind the persistence boundary to this gate's seams and full
+// state codec. Properties are read at CALL time through the bound reference,
+// so test-time mutation of `_test_exports.<prop>` and `resetTrackedStateCache`
+// remain fully visible inside src/pr-review/persistence.ts.
+bindPrReviewPersistenceHooks(_test_exports);
+bindPrReviewStateCodec<PrWorkflowGateState>({
+	safeParse: (data) => PrWorkflowGateStateSchema.safeParse(data),
+	parse: (data) => PrWorkflowGateStateSchema.parse(data),
+});
 
 /**
  * Issue #1931: surface the activation path so callers don't go hunting for a
@@ -17386,614 +17398,9 @@ async function persistState(
 }
 
 /** Persist one CAS-checked state replacement while the session lock is held. */
-async function writeStateWhileLocked(
-	directory: string,
-	state: PrWorkflowGateState,
-	options: { replaceWorkflowInstanceId?: string } = {},
-): Promise<PrWorkflowGateState> {
-	const validated = PrWorkflowGateStateSchema.parse(state);
-	const current = await readPrWorkflowGateStateFromDisk(
-		directory,
-		validated.sessionID,
-	);
-	if (
-		current ? current.revision !== validated.revision : validated.revision !== 0
-	) {
-		throw new Error(
-			'BLOCKED: PR workflow gate state changed concurrently; reload the active session state before retrying',
-		);
-	}
-	if (
-		current?.workflowInstanceId &&
-		validated.workflowInstanceId !== current.workflowInstanceId &&
-		options.replaceWorkflowInstanceId !== current.workflowInstanceId
-	) {
-		throw new Error(
-			'BLOCKED: PR workflow gate state changed concurrently; reload the active session state before retrying',
-		);
-	}
-	const nextState = PrWorkflowGateStateSchema.parse({
-		...validated,
-		revision: validated.revision + 1,
-	});
-	const filePath = workflowGateStatePath(directory, validated.sessionID);
-	await writeAtomicJson(directory, filePath, nextState);
-	rememberState(directory, nextState);
-	return nextState;
-}
 
-function workflowCheckoutMutationLockRelativePath(): string {
-	return path.join(WORKFLOW_GATE_DIR, 'checkout.lock');
-}
 
-function workflowCheckoutMutationLockPath(directory: string): string {
-	return validateSwarmPath(
-		directory,
-		workflowCheckoutMutationLockRelativePath(),
-	);
-}
 
-function openCheckoutLockFile(lockPath: string) {
-	return fsp.open(lockPath, 'wx');
-}
-
-function removeCheckoutLockFile(lockPath: string): Promise<void> {
-	return fsp.rm(lockPath);
-}
-
-function checkoutMutationProjectKey(directory: string): string {
-	return normalizeComparableFsPath(directory);
-}
-
-/** A bounded checkout-mutation refusal that never permits unsafe late overlap. */
-export class PrWorkflowCheckoutMutationTimeoutError extends Error {
-	readonly code = 'PR_WORKFLOW_CHECKOUT_MUTATION_TIMEOUT' as const;
-	readonly retryable = false as const;
-
-	constructor(readonly phase: 'queue' | 'action') {
-		super(
-			phase === 'queue'
-				? 'BLOCKED: timed out waiting for the active PR workflow checkout mutation; the existing owner still holds serialization and must settle before retrying'
-				: 'BLOCKED: PR workflow checkout mutation exceeded its execution deadline; serialization remains held until the in-flight action actually settles',
-		);
-		this.name = 'PrWorkflowCheckoutMutationTimeoutError';
-	}
-}
-
-type CheckoutActionOutcome<T> =
-	| { status: 'fulfilled'; value: T }
-	| { status: 'rejected'; error: unknown };
-
-async function withCheckoutMutationDeadline<T>(
-	promise: Promise<T>,
-	phase: 'queue' | 'action',
-): Promise<
-	T | { status: 'timeout'; error: PrWorkflowCheckoutMutationTimeoutError }
-> {
-	let timeout: ReturnType<typeof setTimeout> | undefined;
-	try {
-		return await Promise.race([
-			promise,
-			new Promise<{
-				status: 'timeout';
-				error: PrWorkflowCheckoutMutationTimeoutError;
-			}>((resolve) => {
-				timeout = setTimeout(() => {
-					resolve({
-						status: 'timeout',
-						error: new PrWorkflowCheckoutMutationTimeoutError(phase),
-					});
-				}, _test_exports.checkoutMutationActionTimeoutMs);
-			}),
-		]);
-	} finally {
-		if (timeout) clearTimeout(timeout);
-	}
-}
-
-/** Serialize project-wide checkout mutations before any session state lock. */
-export async function withPrWorkflowCheckoutMutationLock<T>(
-	directory: string,
-	action: () => Promise<T>,
-): Promise<T> {
-	const key = checkoutMutationProjectKey(directory);
-	const previous =
-		pendingCheckoutMutationsByProject.get(key) ?? Promise.resolve();
-	let release!: () => void;
-	const current = new Promise<void>((resolve) => {
-		release = resolve;
-	});
-	const queued = previous.then(() => current);
-	pendingCheckoutMutationsByProject.set(key, queued);
-	const previousResult = await withCheckoutMutationDeadline(
-		previous.then(() => ({ status: 'ready' as const })),
-		'queue',
-	);
-	if (previousResult.status === 'timeout') {
-		release();
-		// Keep this resolved tail chained to the still-running owner so later
-		// in-process waiters receive the same bounded typed refusal instead of
-		// bypassing to the durable lock. Remove it only after the owner settles.
-		void queued.then(() => {
-			if (pendingCheckoutMutationsByProject.get(key) === queued) {
-				pendingCheckoutMutationsByProject.delete(key);
-			}
-		});
-		throw previousResult.error;
-	}
-
-	let lock: Awaited<ReturnType<typeof acquireCheckoutMutationLock>>;
-	try {
-		lock = await acquireCheckoutMutationLock(directory);
-	} catch (error) {
-		release();
-		if (pendingCheckoutMutationsByProject.get(key) === queued) {
-			pendingCheckoutMutationsByProject.delete(key);
-		}
-		throw error;
-	}
-	const actionOutcome: Promise<CheckoutActionOutcome<T>> = Promise.resolve()
-		.then(action)
-		.then(
-			(value) => ({ status: 'fulfilled' as const, value }),
-			(error: unknown) => ({ status: 'rejected' as const, error }),
-		);
-	const outcome = await withCheckoutMutationDeadline(actionOutcome, 'action');
-	if (outcome.status === 'timeout') {
-		// Promises are not cancellable. Returning the lock here would let a late
-		// action mutate concurrently, so a retained owner task performs cleanup
-		// only after the action truly settles.
-		void actionOutcome.then(async () => {
-			try {
-				await releaseCheckoutMutationLock(lock);
-			} catch {
-				// Completed-owner recovery reclaims a persistently busy Windows lock.
-			} finally {
-				release();
-				if (pendingCheckoutMutationsByProject.get(key) === queued) {
-					pendingCheckoutMutationsByProject.delete(key);
-				}
-			}
-		});
-		throw outcome.error;
-	}
-	try {
-		if (outcome.status === 'rejected') throw outcome.error;
-		return outcome.value;
-	} finally {
-		try {
-			await releaseCheckoutMutationLock(lock);
-		} finally {
-			release();
-			if (pendingCheckoutMutationsByProject.get(key) === queued) {
-				pendingCheckoutMutationsByProject.delete(key);
-			}
-		}
-	}
-}
-
-async function acquireCheckoutMutationLock(
-	directory: string,
-): Promise<{ path: string; ownerToken: string }> {
-	const lockPath = workflowCheckoutMutationLockPath(directory);
-	const verifiedParent = await ensurePrWorkflowSafeParentDirectory(
-		directory,
-		lockPath,
-	);
-	for (let attempt = 0; attempt < STATE_MUTATION_LOCK_MAX_ATTEMPTS; attempt++) {
-		try {
-			const handle = await _test_exports.openCheckoutLock(lockPath);
-			const lock = {
-				ownerToken: randomUUID(),
-				pid: process.pid,
-				createdAtMs: _test_exports.nowMs(),
-			};
-			let lockIdentity: Pick<BigIntStats, 'dev' | 'ino'> | undefined;
-			let writeError: unknown;
-			try {
-				const openedStat = await handle.stat({ bigint: true });
-				lockIdentity = { dev: openedStat.dev, ino: openedStat.ino };
-				lockIdentity = await assertOpenedSwarmFileIdentity(
-					directory,
-					lockPath,
-					handle,
-					verifiedParent,
-					'PR workflow checkout mutation lock',
-				);
-				await _test_exports.beforeCheckoutLockWrite?.();
-				await handle.writeFile(JSON.stringify(lock), 'utf-8');
-			} catch (error) {
-				writeError = error;
-			} finally {
-				await handle.close().catch(() => undefined);
-			}
-			if (writeError) {
-				if (lockIdentity) {
-					await removeCheckoutMutationLockByIdentity(
-						directory,
-						lockPath,
-						lockIdentity,
-						verifiedParent,
-					);
-				}
-				throw writeError;
-			}
-			return { path: lockPath, ownerToken: lock.ownerToken };
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-			if (await reclaimAbandonedCheckoutMutationLock(lockPath)) continue;
-			if (attempt < STATE_MUTATION_LOCK_MAX_ATTEMPTS - 1) {
-				await delay(STATE_MUTATION_LOCK_RETRY_DELAY_MS);
-			}
-		}
-	}
-	throw new Error(
-		'BLOCKED: PR workflow checkout mutation is being handled by another process; retry after that checkout settles',
-	);
-}
-
-async function releaseCheckoutMutationLock(lock: {
-	path: string;
-	ownerToken: string;
-}): Promise<void> {
-	let lastError: unknown;
-	for (let attempt = 0; attempt < WINDOWS_RENAME_MAX_RETRIES; attempt++) {
-		try {
-			if (await removeCheckoutMutationLockIfOwned(lock.path, lock.ownerToken)) {
-				completedCheckoutLockOwners.delete(lock.path);
-				return;
-			}
-			lastError = new Error(
-				'PR workflow checkout mutation lock ownership changed before release',
-			);
-		} catch (error) {
-			lastError = error;
-		}
-		if (attempt < WINDOWS_RENAME_MAX_RETRIES - 1) {
-			await delay(RENAME_RETRY_DELAY_MS);
-		}
-	}
-	rememberCompletedCheckoutLockOwner(lock.path, lock.ownerToken);
-	throw lastError instanceof Error
-		? lastError
-		: new Error('PR workflow checkout mutation lock release failed');
-}
-
-async function reclaimAbandonedCheckoutMutationLock(
-	lockPath: string,
-): Promise<boolean> {
-	const lock = await readCheckoutMutationLock(lockPath);
-	if (lock) {
-		if (
-			lock.pid === process.pid &&
-			completedCheckoutLockOwners.get(lockPath) === lock.ownerToken
-		) {
-			const removed = await removeCheckoutMutationLockIfOwned(
-				lockPath,
-				lock.ownerToken,
-			);
-			if (removed) completedCheckoutLockOwners.delete(lockPath);
-			return removed;
-		}
-		if (_test_exports.isProcessAlive(lock.pid)) return false;
-		return removeCheckoutMutationLockIfOwned(lockPath, lock.ownerToken);
-	}
-	try {
-		const stat = await fsp.stat(lockPath);
-		if (
-			_test_exports.nowMs() - stat.mtimeMs <
-			STATE_MUTATION_LOCK_UNINITIALIZED_STALE_MS
-		) {
-			return false;
-		}
-		await fsp.rm(lockPath, { force: true });
-		return true;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
-		throw error;
-	}
-}
-
-async function readCheckoutMutationLock(
-	lockPath: string,
-): Promise<{ ownerToken: string; pid: number; createdAtMs: number } | null> {
-	let raw: string;
-	try {
-		raw = await fsp.readFile(lockPath, 'utf-8');
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-		throw error;
-	}
-	try {
-		const parsed: unknown = JSON.parse(raw);
-		if (
-			typeof parsed === 'object' &&
-			parsed !== null &&
-			typeof (parsed as { ownerToken?: unknown }).ownerToken === 'string' &&
-			(parsed as { ownerToken: string }).ownerToken.length > 0 &&
-			typeof (parsed as { pid?: unknown }).pid === 'number' &&
-			Number.isInteger((parsed as { pid: number }).pid) &&
-			(parsed as { pid: number }).pid > 0 &&
-			typeof (parsed as { createdAtMs?: unknown }).createdAtMs === 'number' &&
-			Number.isFinite((parsed as { createdAtMs: number }).createdAtMs)
-		) {
-			return parsed as { ownerToken: string; pid: number; createdAtMs: number };
-		}
-	} catch {
-		// A crash between exclusive create and metadata write is recovered below.
-	}
-	return null;
-}
-
-async function removeCheckoutMutationLockIfOwned(
-	lockPath: string,
-	ownerToken: string,
-): Promise<boolean> {
-	const lock = await readCheckoutMutationLock(lockPath);
-	if (!lock || lock.ownerToken !== ownerToken) return false;
-	try {
-		await _test_exports.removeCheckoutLock(lockPath);
-		return true;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-		throw error;
-	}
-}
-
-async function removeCheckoutMutationLockByIdentity(
-	directory: string,
-	lockPath: string,
-	identity: Pick<BigIntStats, 'dev' | 'ino'>,
-	verifiedParent: string,
-): Promise<void> {
-	let lastError: unknown;
-	for (let attempt = 0; attempt < WINDOWS_RENAME_MAX_RETRIES; attempt++) {
-		try {
-			await assertClosedSwarmFileIdentity(
-				directory,
-				lockPath,
-				identity,
-				verifiedParent,
-				'PR workflow checkout mutation lock',
-			);
-			await _test_exports.removeCheckoutLock(lockPath);
-			return;
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-			lastError = error;
-			if (attempt < WINDOWS_RENAME_MAX_RETRIES - 1) {
-				await delay(RENAME_RETRY_DELAY_MS);
-			}
-		}
-	}
-	throw lastError instanceof Error
-		? lastError
-		: new Error('PR workflow checkout mutation lock cleanup failed');
-}
-
-function rememberCompletedCheckoutLockOwner(
-	lockPath: string,
-	ownerToken: string,
-): void {
-	completedCheckoutLockOwners.delete(lockPath);
-	completedCheckoutLockOwners.set(lockPath, ownerToken);
-	while (
-		completedCheckoutLockOwners.size > MAX_COMPLETED_CHECKOUT_LOCK_OWNERS
-	) {
-		const oldest = completedCheckoutLockOwners.keys().next().value;
-		if (oldest === undefined) break;
-		completedCheckoutLockOwners.delete(oldest);
-	}
-}
-
-/** Serialize in-process mutations; the durable revision rejects stale callers. */
-async function withSessionStateMutation<T>(
-	directory: string,
-	sessionID: string,
-	action: () => Promise<T>,
-): Promise<T> {
-	const key = stateCacheKey(directory, sessionID);
-	const previous =
-		pendingStateMutationsByProjectSession.get(key) ?? Promise.resolve();
-	let release!: () => void;
-	const current = new Promise<void>((resolve) => {
-		release = resolve;
-	});
-	const queued = previous.then(() => current);
-	pendingStateMutationsByProjectSession.set(key, queued);
-	await previous;
-	try {
-		const lock = await acquireSessionStateMutationLock(directory, sessionID);
-		try {
-			return await action();
-		} finally {
-			await releaseSessionStateMutationLock(lock);
-		}
-	} finally {
-		release();
-		if (pendingStateMutationsByProjectSession.get(key) === queued) {
-			pendingStateMutationsByProjectSession.delete(key);
-		}
-	}
-}
-
-async function acquireSessionStateMutationLock(
-	directory: string,
-	sessionID: string,
-): Promise<{ path: string; ownerToken: string }> {
-	const lockPath = workflowGateStateLockPath(directory, sessionID);
-	const verifiedParent = await ensurePrWorkflowSafeParentDirectory(
-		directory,
-		lockPath,
-	);
-	for (let attempt = 0; attempt < STATE_MUTATION_LOCK_MAX_ATTEMPTS; attempt++) {
-		try {
-			const handle = await fsp.open(lockPath, 'wx');
-			const lock: SessionStateMutationLock = {
-				ownerToken: randomUUID(),
-				pid: process.pid,
-				createdAtMs: _test_exports.nowMs(),
-			};
-			let writeError: unknown;
-			try {
-				await _test_exports.beforeSessionStateLockWrite?.();
-				await assertOpenedSwarmFileIdentity(
-					directory,
-					lockPath,
-					handle,
-					verifiedParent,
-					'PR workflow state mutation lock',
-				);
-				await handle.writeFile(JSON.stringify(lock), 'utf-8');
-			} catch (error) {
-				writeError = error;
-			} finally {
-				await handle.close().catch(() => undefined);
-			}
-			if (writeError) {
-				await removeSessionStateMutationLockIfOwned(lockPath, lock.ownerToken);
-				throw writeError;
-			}
-			return { path: lockPath, ownerToken: lock.ownerToken };
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-			if (await reclaimAbandonedSessionStateMutationLock(lockPath)) continue;
-			if (attempt < STATE_MUTATION_LOCK_MAX_ATTEMPTS - 1) {
-				await delay(STATE_MUTATION_LOCK_RETRY_DELAY_MS);
-			}
-		}
-	}
-	throw new Error(
-		'BLOCKED: PR workflow gate state is being mutated by another process; retry after that session transition finishes',
-	);
-}
-
-async function releaseSessionStateMutationLock(lock: {
-	path: string;
-	ownerToken: string;
-}): Promise<void> {
-	try {
-		await removeSessionStateMutationLockIfOwned(lock.path, lock.ownerToken);
-	} catch {
-		// Best-effort cleanup; a crash-recovered lock is reclaimed by the next mutation.
-	}
-}
-
-async function reclaimAbandonedSessionStateMutationLock(
-	lockPath: string,
-): Promise<boolean> {
-	const lock = await readSessionStateMutationLock(lockPath);
-	if (lock) {
-		if (_test_exports.isProcessAlive(lock.pid)) return false;
-		return removeSessionStateMutationLockIfOwned(lockPath, lock.ownerToken);
-	}
-	try {
-		const stat = await fsp.stat(lockPath);
-		if (
-			_test_exports.nowMs() - stat.mtimeMs <
-			STATE_MUTATION_LOCK_UNINITIALIZED_STALE_MS
-		) {
-			return false;
-		}
-		await fsp.rm(lockPath, { force: true });
-		return true;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
-		throw error;
-	}
-}
-
-async function readSessionStateMutationLock(
-	lockPath: string,
-): Promise<SessionStateMutationLock | null> {
-	let raw: string;
-	try {
-		raw = await fsp.readFile(lockPath, 'utf-8');
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-		throw error;
-	}
-	try {
-		const parsed: unknown = JSON.parse(raw);
-		if (
-			typeof parsed === 'object' &&
-			parsed !== null &&
-			typeof (parsed as SessionStateMutationLock).ownerToken === 'string' &&
-			(parsed as SessionStateMutationLock).ownerToken.length > 0 &&
-			typeof (parsed as SessionStateMutationLock).pid === 'number' &&
-			Number.isInteger((parsed as SessionStateMutationLock).pid) &&
-			(parsed as SessionStateMutationLock).pid > 0 &&
-			typeof (parsed as SessionStateMutationLock).createdAtMs === 'number' &&
-			Number.isFinite((parsed as SessionStateMutationLock).createdAtMs)
-		) {
-			return parsed as SessionStateMutationLock;
-		}
-	} catch {
-		// A crash between exclusive create and metadata write is recovered below.
-	}
-	return null;
-}
-
-async function removeSessionStateMutationLockIfOwned(
-	lockPath: string,
-	ownerToken: string,
-): Promise<boolean> {
-	const lock = await readSessionStateMutationLock(lockPath);
-	if (!lock || lock.ownerToken !== ownerToken) return false;
-	try {
-		await fsp.rm(lockPath);
-		return true;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-		throw error;
-	}
-}
-
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		// Permission errors prove the process exists. Unknown errors fail closed.
-		return (error as NodeJS.ErrnoException).code !== 'ESRCH';
-	}
-}
-
-async function readPrWorkflowGateStateFromDisk(
-	directory: string,
-	sessionID: string,
-): Promise<PrWorkflowGateState | null> {
-	const filePath = workflowGateStatePath(directory, sessionID);
-	return readPrWorkflowGateStateFileFromDisk(filePath, sessionID);
-}
-
-async function readPrWorkflowGateStateFileFromDisk(
-	filePath: string,
-	stateLabel: string,
-): Promise<PrWorkflowGateState | null> {
-	let raw: string;
-	try {
-		raw = await fsp.readFile(filePath, 'utf-8');
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-		throw error;
-	}
-	let parsedJson: unknown;
-	try {
-		parsedJson = JSON.parse(raw);
-	} catch {
-		throw new Error(
-			`BLOCKED: PR workflow gate state for session "${stateLabel}" is not valid JSON`,
-		);
-	}
-	const parsed = PrWorkflowGateStateSchema.safeParse(parsedJson);
-	if (!parsed.success) {
-		throw new Error(
-			`BLOCKED: PR workflow gate state for session "${stateLabel}" is invalid`,
-		);
-	}
-	return parsed.data;
-}
 
 /** Upper bound on schema issues quoted in one salvage disclosure. */
 const MAX_SALVAGED_SCHEMA_ERRORS = 10;
@@ -18194,285 +17601,6 @@ export async function readPrWorkflowGateStateForRecovery(
 	};
 }
 
-function rememberState(directory: string, state: PrWorkflowGateState): void {
-	const cacheKey = stateCacheKey(directory, state.sessionID);
-	trackedStatesByProjectSession.delete(cacheKey);
-	trackedStatesByProjectSession.set(cacheKey, state);
-	while (trackedStatesByProjectSession.size > MAX_TRACKED_SESSIONS) {
-		const oldestKey = trackedStatesByProjectSession.keys().next().value;
-		if (!oldestKey) break;
-		trackedStatesByProjectSession.delete(oldestKey);
-	}
-}
 
-function stateCacheKey(directory: string, sessionID: string): string {
-	const resolved = path.normalize(path.resolve(directory));
-	const canonicalDirectory =
-		process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-	return `${canonicalDirectory}\u0000${normalizeSessionID(sessionID)}`;
-}
 
-function workflowGateStatePath(directory: string, sessionID: string): string {
-	return validateSwarmPath(directory, workflowGateStateRelativePath(sessionID));
-}
 
-function workflowGateStateLockPath(
-	directory: string,
-	sessionID: string,
-): string {
-	return validateSwarmPath(
-		directory,
-		workflowGateStateLockRelativePath(sessionID),
-	);
-}
-
-function workflowGateStateLockRelativePath(sessionID: string): string {
-	return path.join(
-		WORKFLOW_GATE_DIR,
-		`${prWorkflowSessionFileStem(sessionID)}.lock`,
-	);
-}
-
-function workflowGateStateRelativePath(sessionID: string): string {
-	return path.join(
-		WORKFLOW_GATE_DIR,
-		`${prWorkflowSessionFileStem(sessionID)}.json`,
-	);
-}
-
-export function prWorkflowSessionFileStem(sessionID: string): string {
-	const normalized = normalizeSessionID(sessionID);
-	const slug =
-		normalized.replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 80) || 'session';
-	const digest = createHash('sha256')
-		.update(normalized)
-		.digest('hex')
-		.slice(0, 12);
-	return `${slug}-${digest}`;
-}
-
-function normalizeSessionID(sessionID: string): string {
-	const normalized = sessionID.trim();
-	if (!normalized) {
-		throw new Error('BLOCKED: PR workflow gate requires a non-empty sessionID');
-	}
-	return normalized;
-}
-
-export async function ensurePrWorkflowSafeParentDirectory(
-	directory: string,
-	filePath: string,
-): Promise<string> {
-	const swarmRoot = path.resolve(directory, '.swarm');
-	const parentPath = path.dirname(path.resolve(filePath));
-	const relativeParent = path.relative(swarmRoot, parentPath);
-	if (
-		relativeParent === '..' ||
-		relativeParent.startsWith(`..${path.sep}`) ||
-		path.isAbsolute(relativeParent)
-	) {
-		throw new Error(
-			'BLOCKED: PR workflow atomic destination escapes the project .swarm directory',
-		);
-	}
-	await fsp.mkdir(swarmRoot, { recursive: true });
-	let currentPath = swarmRoot;
-	let currentIdentity = await assertSafeDirectory(currentPath, undefined);
-	for (const segment of relativeParent.split(path.sep).filter(Boolean)) {
-		const nextPath = path.join(currentPath, segment);
-		await _test_exports.beforeSafeDirectoryCreate?.(currentPath, nextPath);
-		await assertSafeDirectory(currentPath, currentIdentity);
-		try {
-			await fsp.mkdir(nextPath);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-		}
-		await assertSafeDirectory(currentPath, currentIdentity);
-		const nextIdentity = await assertSafeDirectory(nextPath, undefined);
-		const [realCurrent, realNext] = await Promise.all([
-			fsp.realpath(currentPath),
-			fsp.realpath(nextPath),
-		]);
-		if (
-			normalizeComparableFsPath(path.dirname(realNext)) !==
-			normalizeComparableFsPath(realCurrent)
-		) {
-			throw new Error(
-				'BLOCKED: PR workflow directory creation escaped the project .swarm tree',
-			);
-		}
-		currentPath = nextPath;
-		currentIdentity = nextIdentity;
-	}
-	const realRoot = await fsp.realpath(swarmRoot);
-	const realParent = await fsp.realpath(parentPath);
-	const relativeRealParent = path.relative(realRoot, realParent);
-	if (
-		relativeRealParent === '..' ||
-		relativeRealParent.startsWith(`..${path.sep}`) ||
-		path.isAbsolute(relativeRealParent)
-	) {
-		throw new Error(
-			'BLOCKED: PR workflow atomic parent escapes the project .swarm directory',
-		);
-	}
-	return realParent;
-}
-
-async function assertSafeDirectory(
-	directoryPath: string,
-	expectedIdentity: Pick<BigIntStats, 'dev' | 'ino'> | undefined,
-): Promise<Pick<BigIntStats, 'dev' | 'ino'>> {
-	const stat = await fsp.lstat(directoryPath, { bigint: true });
-	if (
-		stat.isSymbolicLink() ||
-		!stat.isDirectory() ||
-		(expectedIdentity && !sameBigIntFileIdentity(stat, expectedIdentity))
-	) {
-		throw new Error(
-			'BLOCKED: PR workflow .swarm path must be a real directory and must not change during the operation',
-		);
-	}
-	return { dev: stat.dev, ino: stat.ino };
-}
-
-async function assertOpenedSwarmFileIdentity(
-	directory: string,
-	filePath: string,
-	handle: Awaited<ReturnType<typeof fsp.open>>,
-	expectedParent: string,
-	label: string,
-): Promise<Pick<BigIntStats, 'dev' | 'ino'>> {
-	const openedStat = await handle.stat({ bigint: true });
-	if (!openedStat.isFile()) throw new Error(`BLOCKED: ${label} is not a file`);
-	await assertClosedSwarmFileIdentity(
-		directory,
-		filePath,
-		openedStat,
-		expectedParent,
-		label,
-	);
-	return { dev: openedStat.dev, ino: openedStat.ino };
-}
-
-async function assertClosedSwarmFileIdentity(
-	directory: string,
-	filePath: string,
-	expectedIdentity: Pick<BigIntStats, 'dev' | 'ino'> | undefined,
-	expectedParent: string,
-	label: string,
-): Promise<void> {
-	if (!expectedIdentity) throw new Error(`BLOCKED: ${label} has no identity`);
-	const [stat, realRoot, realFile, realParent] = await Promise.all([
-		fsp.lstat(filePath, { bigint: true }),
-		fsp.realpath(path.resolve(directory, '.swarm')),
-		fsp.realpath(filePath),
-		fsp.realpath(path.dirname(filePath)),
-	]);
-	const relativeFile = path.relative(realRoot, realFile);
-	if (
-		stat.isSymbolicLink() ||
-		!stat.isFile() ||
-		!sameBigIntFileIdentity(stat, expectedIdentity) ||
-		normalizeComparableFsPath(realParent) !==
-			normalizeComparableFsPath(expectedParent) ||
-		relativeFile === '' ||
-		relativeFile === '..' ||
-		relativeFile.startsWith(`..${path.sep}`) ||
-		path.isAbsolute(relativeFile)
-	) {
-		throw new Error(`BLOCKED: ${label} changed or escaped .swarm`);
-	}
-}
-
-async function writeAtomicJson(
-	directory: string,
-	filePath: string,
-	value: unknown,
-): Promise<void> {
-	const safeParent = await ensurePrWorkflowSafeParentDirectory(
-		directory,
-		filePath,
-	);
-	const tempPath = `${filePath}.tmp.${process.pid}.${randomUUID()}`;
-	let tempIdentity: Pick<BigIntStats, 'dev' | 'ino'> | undefined;
-	let lastError: unknown;
-	try {
-		const handle = await fsp.open(tempPath, 'wx');
-		try {
-			await _test_exports.beforeAtomicTempWrite?.();
-			tempIdentity = await assertOpenedSwarmFileIdentity(
-				directory,
-				tempPath,
-				handle,
-				safeParent,
-				'PR workflow atomic temporary file',
-			);
-			await handle.writeFile(JSON.stringify(value, null, 2), 'utf-8');
-			await handle.sync();
-		} finally {
-			await handle.close();
-		}
-		await _test_exports.beforeAtomicRename?.();
-		await assertClosedSwarmFileIdentity(
-			directory,
-			tempPath,
-			tempIdentity,
-			safeParent,
-			'PR workflow atomic temporary file',
-		);
-		for (let attempt = 0; attempt < WINDOWS_RENAME_MAX_RETRIES; attempt++) {
-			try {
-				await _test_exports.rename(tempPath, filePath);
-				lastError = undefined;
-				break;
-			} catch (error) {
-				lastError = error;
-				const code = (error as NodeJS.ErrnoException).code;
-				if (code !== 'EEXIST' && code !== 'EPERM' && code !== 'EBUSY') {
-					break;
-				}
-				if (attempt < WINDOWS_RENAME_MAX_RETRIES - 1) {
-					await delay(RENAME_RETRY_DELAY_MS);
-				}
-			}
-		}
-		if (lastError) {
-			throw lastError;
-		}
-		await assertClosedSwarmFileIdentity(
-			directory,
-			filePath,
-			tempIdentity,
-			safeParent,
-			'PR workflow atomic destination file',
-		);
-	} finally {
-		try {
-			await fsp.rm(tempPath, { force: true });
-		} catch {
-			// best-effort temp cleanup
-		}
-	}
-}
-
-/**
- * Write a PR-workflow artifact with the gate's Windows-safe atomic persistence
- * contract. Checkout-preparation receipts must survive the same transient
- * rename contention as canonical gate state.
- */
-export async function writePrWorkflowAtomicJson(
-	directory: string,
-	filePath: string,
-	value: unknown,
-): Promise<void> {
-	await writeAtomicJson(directory, filePath, value);
-}
-
-function isoNow(): string {
-	return new Date().toISOString();
-}
-
-function delay(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms));
-}

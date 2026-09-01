@@ -21,7 +21,7 @@ import { describe, expect, test } from 'bun:test';
 import {
 	adoptPrReviewCircuit,
 	type PrReviewCircuitSignal,
-} from '../../../src/hooks/pr-review-resilience-circuit.js';
+} from '../../../src/pr-review/circuit.js';
 import { _test_exports } from '../../../src/hooks/pr-workflow-gate.js';
 
 const classify = _test_exports.classifyPrReviewCircuitSignal;

@@ -7,7 +7,7 @@ import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import {
 	issuePrReviewReentryAuthorization,
 	_internals as reentryInternals,
-} from '../../../src/hooks/pr-review-reentry-authorization';
+} from '../../../src/pr-review/authorization';
 import {
 	activatePrWorkflow,
 	_test_exports as gateInternals,

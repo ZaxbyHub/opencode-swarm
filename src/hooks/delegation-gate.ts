@@ -3867,7 +3867,7 @@ export function createDelegationGateHook(
 					// block, acceptance-criteria enforcement, and every other
 					// check in this hook remain fully authoritative.
 					const { consumePrReviewReentryAuthorization } = await import(
-						'./pr-review-reentry-authorization.js'
+						'../pr-review/authorization.js'
 					);
 					const consumed = await consumePrReviewReentryAuthorization(
 						directory,

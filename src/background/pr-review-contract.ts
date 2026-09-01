@@ -559,44 +559,14 @@ export const PrReviewFindingSchema = z
 		}
 	});
 
-export interface PrReviewCriticRoutingInput {
-	classification?: string;
-	severity?: string;
-	risk_impact?: PrReviewRiskImpact;
-	risk_tags?: readonly PrReviewRiskTag[];
-}
-
-/**
- * THE shared production critic-routing predicate (issue #2383).
- *
- * Exactly one definition, imported by every production consumer (critic
- * inventory derivation, artifact-record validation, coverage admission).
- * Inline severity triples are forbidden — a parity/centralization guard test
- * enforces it. Accepts only the normalized canonical shape:
- *
- * - non-CONFIRMED classifications are never critic-routed;
- * - UNKNOWN/missing/invalid risk metadata routes to critic (fail-safe);
- * - CRITICAL/HIGH always route to critic;
- * - MEDIUM routes iff HIGH_IMPACT or at least one risk tag;
- * - LOW/INFO/NONE follow the existing no-critic policy once metadata is known.
- *
- * Paths, dimensions, keywords, and prompt prose may suggest risk to the model
- * but can never override this typed result.
- */
-export function prReviewFindingRequiresCritic(
-	input: PrReviewCriticRoutingInput,
-): boolean {
-	if (input.classification !== 'CONFIRMED') return false;
-	const impact = input.risk_impact ?? 'UNKNOWN';
-	const tags = input.risk_tags ?? [];
-	if (impact === 'UNKNOWN') return true;
-	if (input.severity === undefined) return true;
-	if (input.severity === 'CRITICAL' || input.severity === 'HIGH') return true;
-	if (input.severity === 'MEDIUM') {
-		return impact === 'HIGH_IMPACT' || tags.length > 0;
-	}
-	return false;
-}
+// Issue #2385: the predicate and its input type moved canonically to
+// `src/pr-review/critic-routing.ts` (the single-routing-authority boundary).
+// Re-exported here so every existing consumer keeps one import path; there is
+// still exactly ONE definition.
+export {
+	prReviewFindingRequiresCritic,
+	type PrReviewCriticRoutingInput,
+} from '../pr-review/critic-routing.js';
 
 export const PrReviewHandoffSchema = z
 	.object({
