@@ -313,6 +313,38 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
   8 (restart-safe session separation), 9 (fail-closed transition semantics),
   10 (membership before chat exposure), and 12 (pending release fragment).
 
+### Issue #1994 — post-mortem fabricated an FR-009 precedent; corrective PR closed unmerged
+
+- **Symptom:** a `/swarm finalize` post-mortem claimed FR-009 ("schema permitted
+  `pending >= general` multipliers") was "closed correctly" via a "schema `.refine`
+  + runtime defensive clamp pattern" that never existed — commit `b7e12d36`
+  explicitly recorded FR-009 as deferred. The corrective PR (#2001) was closed
+  unmerged, so every skill disposition it carried (S1/S4/P1/P2) was silently absent
+  from `main` while the issue tracker recorded "fixed".
+- **Root cause:** post-mortems are LLM-generated narratives that can fabricate
+  precedent; their corrections lived only in `.swarm/` runtime state (post-mortem
+  archive, spec.md, knowledge entries) and an unmerged PR — none of which future
+  sessions read. Treat "What Went Right" sections as claims, not records.
+- **Fix surface:** skill-guidance corrections — `placeholder_scan` diff scoping via
+  `added_lines` wired into the Stage A callers (execute skill step 5e + architect
+  prompt, with the fail-closed omit-from-map fallback), the smallest-justified-scope
+  `SCOPE_CONFLICT` rule in swarm-implement (never widen to a plan-inferred
+  superset), the plan-freeze-after-approval rule in critic-gate (material change →
+  exactly one re-critic), docs-attestation integrity in phase-wrap, and a qa-sweep
+  staleness fix (the tool has been diff-aware since `added_lines` landed).
+- **FR-009 disposition: DESCOPE.** The runtime 3× idle-poll cap shipped
+  hard-coded (`shouldSkipIdlePoll`, PRs #1691 and #1978); the schema-configurable
+  multipliers FR-009 guarded were never added (FR-003 configurability remains
+  deferred), so there is no `.refine` target. Do not cite FR-009 as a closed
+  schema+runtime precedent.
+- **Proposed pattern (NOT an established precedent):** for safety-critical
+  invariants, schema-level rejection (Zod `.refine`/`superRefine`) is primary and
+  authoritative; any runtime fallback must be OBSERVABLE (emit a structured
+  advisory/telemetry event naming the rejected or coerced value) and reserved for
+  safety-critical invariants only. A silent blanket runtime clamp conceals invalid
+  configuration and schema/runtime drift. Adopt only with a concrete case; when
+  adopted, cite this entry as its origin.
+
 ## Invariants — anti-pattern, required pattern, verification
 
 ### Skill ownership and audience routing

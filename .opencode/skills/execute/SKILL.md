@@ -73,8 +73,9 @@ All other gates: failure → return to coder. No self-fixes. No workarounds.
     → REQUIRED: Print "diff: [PASS | CONTRACT CHANGE — details]"
     5d. Run `syntax_check` tool. SYNTACTIC ERRORS → return to coder. NO ERRORS → proceed to placeholder_scan.
     → REQUIRED: Print "syntaxcheck: [PASS | FAIL — N errors]"
-    5e. Run `placeholder_scan` tool. PLACEHOLDER FINDINGS → return to coder. NO FINDINGS → proceed to imports.
-    → REQUIRED: Print "placeholderscan: [PASS | FAIL — N findings]"
+    5e. Run `placeholder_scan` tool WITH DIFF SCOPING: pass `added_lines` — a map of workspace-relative file path → the line numbers ADDED by this task's uncommitted work (from `git diff -U0 HEAD -- <task files>` for tracked files; the coder's edits are not committed yet, so a commit-range diff like `<base>...HEAD` returns zero added lines here) — so only task-added lines drive the verdict. PLACEHOLDER FINDINGS (on added lines) → return to coder. NO FINDINGS → proceed to imports.
+    → Diff-scope fallback: for a file whose added lines you cannot map (new/untracked file, no diff available) or whose computed added-line set is EMPTY, OMIT that file from `added_lines` entirely — the tool then scans it unfiltered (fail-closed) — and manually cross-check that file's findings against the changed lines before returning to coder. NEVER pass an empty line array for a file (an empty array suppresses every finding in it) and NEVER hand-enumerate guessed line numbers (a wrong map silently suppresses findings). A pre-existing TODO/FIXME on an unchanged line is existing debt to surface to the reviewer, not a coder bounce.
+    → REQUIRED: Print "placeholderscan: [PASS | FAIL — N findings (diff-scoped) | FAIL — N findings (unscoped — cross-checked against changed lines)]"
     5f. Run `imports` tool for dependency audit. ISSUES → return to coder.
     → REQUIRED: Print "imports: [PASS | ISSUES — details]"
     5g. Run `lint` tool with fix mode for auto-fixes. If issues remain → run `lint` tool with check mode. FAIL → return to coder.
@@ -193,7 +194,7 @@ This step supplements (not replaces) the existing regression-sweep and test-drif
 5o. ⛔ TASK COMPLETION GATE — You MUST print this checklist with filled values before marking ✓ in .swarm/plan.md:
   [TOOL] diff: PASS / SKIP — value: ___
   [TOOL] syntax_check: PASS — value: ___
-  [TOOL] placeholder_scan: PASS — value: ___
+  [TOOL] placeholder_scan: PASS — value: ___ (diff-scoped | unscoped — cross-checked)
   [TOOL] imports: PASS — value: ___
   [TOOL] lint: PASS — value: ___
   [TOOL] build_check: PASS / SKIPPED — value: ___
