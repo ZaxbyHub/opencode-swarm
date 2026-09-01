@@ -458,7 +458,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/pr-workflow-gate.ts',
 		],
 		writerCitations: [
-			'src/background/pending-delegations.ts:2441 appendRecord — appendFileSync :2446 (20 mutation entry points :2600-4708)',
+			'src/background/pending-delegations.ts:2441 appendRecord — appendFileSync :2446 (20 mutation entry points :2600-4719)',
 			'src/background/pending-delegations.ts:1090 writeDurableFileSync — fsync+rename-with-retry for checkpoint/manifest/rolled-tail (:2246-2287)',
 		],
 		readerCitations: [
@@ -572,7 +572,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/background/pending-delegations.ts:4163 writeBackgroundCoderReservations',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:4424 readDelegationFallback / listDelegationFallbacks / scanDelegationFallbacksForRecovery',
+			'src/background/pending-delegations.ts:4435 readDelegationFallback / listDelegationFallbacks / scanDelegationFallbacksForRecovery',
 			'src/background/pending-delegations.ts:4107 scanBackgroundCoderReservationsForAdmission',
 		],
 		schemaVersion: 'fallback schemaVersion 1 (:837)',
@@ -728,6 +728,39 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		healthSignal: 'n/a',
 		owner: 'this-gate',
 		disposition: { kind: 'not-a-defect', proof: 'Hard bounds 1024 keys / 16 sessions / 16 directories with eviction (src/background/lane-delivery-store.ts:35-40,165-204).' },
+	},
+	{
+		id: 'lane-receipt-recovery-cursor',
+		category: 2,
+		pathGrammar: '.swarm/lane-receipt-recovery-cursor.json',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/background/delegation-lifecycle.ts'],
+		writerCitations: [
+			'src/background/delegation-lifecycle.ts writeRecoveryCursor — JSON.stringify of {updatedAt, correlationId} via fs.writeFileSync; reset via fs.rmSync force (issue #2045 terminal-lane receipt recovery)',
+		],
+		readerCitations: [
+			'src/background/delegation-lifecycle.ts readRecoveryCursor — single file, sync, validated manual guards (fail-open to null)',
+		],
+		schemaVersion: 'none',
+		stateClass: 'operational',
+		privacyClass: 'metadata',
+		writeLimits: {
+			bound: 'one fixed-shape object ({updatedAt: number, correlationId: string ≤256}); overwritten in place each advancing pass; no accumulation',
+			scope: 'global',
+			citation: 'src/background/delegation-lifecycle.ts RecoveryCursor + writeRecoveryCursor',
+		},
+		readBound: { pattern: 'indexed', bound: 'single bounded JSON', sync: true, citation: 'src/background/delegation-lifecycle.ts readRecoveryCursor' },
+		lockModel: 'in-process bound enforcement (invariant 8 pattern); cross-process cursor races degrade to ledger-idempotent rework only',
+		crashBehavior: 'rewrite; a lost/stale cursor only causes idempotent replay rework (receipt ledger dedupes), never corruption',
+		closePolicy: 'untouched',
+		closeArrayMembership: {
+			'lane-receipt-recovery-cursor.json': 'neither',
+		},
+		resetPolicy: 'not reset',
+		legacyCompatibility: 'n/a',
+		healthSignal: 'n/a',
+		owner: 'this-gate',
+		disposition: { kind: 'not-a-defect', proof: 'Fixed two-field shape rewritten per recovery pass (src/background/delegation-lifecycle.ts readRecoveryCursor/writeRecoveryCursor); loss is fail-open to idempotent rework, bounded by MAX_TERMINAL_LANE_RECEIPT_RECOVERY + admission deadline.' },
 	},
 	{
 		id: 'pr-review-reentry-authorizations',
@@ -2830,7 +2863,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		pathGrammar: '.swarm/unacknowledged-criticals.jsonl',
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/hooks/delegate-ack-collector.ts'],
-		writerCitations: ['src/hooks/delegate-ack-collector.ts:76 appendUnacknowledgedCritical — appendFile :85, best-effort'],
+		writerCitations: ['src/hooks/delegate-ack-collector.ts:85 appendUnacknowledgedCritical — appendFile :85, best-effort'],
 		readerCitations: ['write-only in production (escalator reads knowledge events, not this file — verified)'],
 		schemaVersion: 'none',
 		stateClass: 'governed-content',

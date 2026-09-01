@@ -1733,8 +1733,8 @@ async function initializeOpenCodeSwarm(
 	> | null = null;
 	const maintainBackgroundDelegationsOnSessionEvent =
 		async (): Promise<void> => {
-			// A rejected import must not poison the memo: reset the promise so
-			// the next session-close event retries instead of skipping
+			// A rejected import must not poison the memo: reset the promise so the
+			// next session-close event retries instead of skipping
 			// maintenance for the rest of the process lifetime. The local
 			// binding is required — after a rejection resets the memo, a fresh
 			// call may have replaced it while this call still awaits (and
@@ -2738,6 +2738,20 @@ async function initializeOpenCodeSwarm(
 							} catch {
 								// observation only; the facts ring records it
 							}
+						}
+						// Issue #2045 crash recovery (blocking lanes): NOT gated
+						// on backgroundSubagentsEnabled — blocking dispatch_lanes
+						// runs regardless of that flag, so its only terminal-receipt
+						// recovery path must too. Bounded (64-record cap + 5s
+						// admission budget), fail-open, near-zero cost on an empty
+						// or fully-recovered ledger.
+						try {
+							const { recoverTerminalLaneReceipts } = await import(
+								'./background/delegation-lifecycle.js'
+							);
+							await recoverTerminalLaneReceipts(ctx.directory);
+						} catch {
+							// fail-open — recovery must never break the event hook
 						}
 					}
 				}

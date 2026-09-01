@@ -9,6 +9,12 @@ import {
 	CLEAN_TEMPLATES,
 } from '../background/candidate-contract.js';
 import {
+	emitDelegationBegin,
+	isBenignSettleOutcome,
+	recoverTerminalLaneReceipts,
+	settleDelegationTerminal,
+} from '../background/delegation-lifecycle.js';
+import {
 	hasLaneOutputBeenDelivered,
 	markLaneOutputDelivered,
 	resetLaneDeliveryStoreForTests,
@@ -1953,6 +1959,13 @@ export async function executeCollectLaneResults(
 			message: `No async lane batch found for ${parsed.data.batch_id}`,
 		});
 	}
+	// Issue #2045 crash recovery, once per invocation: terminal lane records are
+	// invisible to the active-record settle loop below, so a lane whose terminal
+	// claim landed but whose observation pass died would never reconcile its
+	// authoritative receipts again. Replaying here (from the durable
+	// terminalResult transcript) is the async-lane restart recovery path —
+	// ledger-idempotent, fail-open, and never re-emits diagnostics.
+	await recoverTerminalLaneReceipts(directory, records);
 	// Issue #2381: one bounded revision context per unique (project root, PR head)
 	// for THIS invocation only. Deliberately NOT keyed by any `generation`: the
 	// record's `generation` is `createLaneSession`'s session-create RETRY counter
@@ -2491,6 +2504,10 @@ async function launchAsyncLane(args: {
 			);
 		}
 
+		// Issue #2045: begin/end cost-event parity with Task delegations — the
+		// terminal claim in the collect path emits the pairing delegation_end.
+		emitDelegationBegin(pendingOutcome.record);
+
 		scheduleAsyncLanePrompt({
 			session: args.session,
 			directory: args.directory,
@@ -2594,9 +2611,25 @@ async function collectOnce(
 					if (hostTimeouts.size > timeoutCount) continue;
 				}
 			}
-			await appendDelegationTransition(directory, record.correlationId, {
-				status: 'cancelled',
-			});
+			// Issue #2045: cancellation settles through the shared exactly-once
+			// terminal claim (Task parity) instead of a bare status write. The
+			// synthetic result carries a stable identity — empty body digest — and
+			// a bounded reason so the record states why it was cancelled.
+			await settleDelegationTerminal(
+				directory,
+				record,
+				{
+					status: 'cancelled',
+					result: {
+						error: 'lane cancelled via collect_lane_results cancel_pending',
+						chars: 0,
+						truncated: false,
+						digest: digestText(''),
+					},
+				},
+				{},
+				_internals.now(),
+			);
 			continue;
 		}
 		const readiness = await getLaneCollectionReadiness(
@@ -2720,9 +2753,9 @@ async function collectOnce(
 			const settledStatus =
 				transcript.terminalError.kind === 'aborted' ? 'cancelled' : 'error';
 			const reason = laneTerminalErrorReason(transcript.terminalError);
-			const settled = await appendDelegationTransition(
+			const settled = await settleDelegationTerminal(
 				directory,
-				record.correlationId,
+				record,
 				{
 					status: settledStatus,
 					result: {
@@ -2739,32 +2772,31 @@ async function collectOnce(
 							transcript.terminalError,
 						),
 					},
-					expectedCurrentStatuses: ['pending', 'running'],
 				},
+				// No transcript observation: this branch requires !transcript.text,
+				// so there is no output to reconcile.
+				{},
+				_internals.now(),
 			);
-			if (settled?.status === settledStatus) {
+			if (settled.kind === 'claimed') {
 				// Only tear down once the terminal write is CONFIRMED.
-				// `appendDelegationTransition` returns null on an exception path and
-				// the UNCHANGED record when its CAS/first-terminal guard rejects;
-				// deleting the host session in those cases would leave the record
-				// open with no readable session — a permanent wedge strictly worse
-				// than the bug being fixed.
+				// `settleDelegationTerminal` returns not_open/missing when the
+				// claim did not land; deleting the host session in those cases would
+				// leave the record open with no readable session — a permanent wedge
+				// strictly worse than the bug being fixed.
 				clearLaneDiagnostics(settleFailureLogs, laneLabel);
 				cleanupAsyncLaunchSession(session, record.subagentSessionId);
-			} else if (
-				settled !== null &&
-				ASYNC_LANE_TERMINAL_STATUSES.has(settled.status)
-			) {
+			} else if (isBenignSettleOutcome(settled.kind)) {
 				// Benign: the record was ALREADY terminal, so a concurrent writer
 				// (the 30-minute stale sweep, an abort, an earlier pass) settled it
-				// first and the first-terminal-wins guard correctly rejected ours.
-				// The lane is settled either way, so this is not a failure — logging
-				// it would cry wolf on every routine race. Teardown belongs to
-				// whoever landed the write, so we do not perform it here.
+				// first and the exactly-once claim correctly rejected ours. The lane
+				// is settled either way, so this is not a failure — logging it would
+				// cry wolf on every routine race. Teardown belongs to whoever landed
+				// the write, so we do not perform it here.
 				clearLaneDiagnostics(settleFailureLogs, laneLabel);
 			} else {
-				// Genuine failure: the write threw (null) or the record is STILL
-				// open, so nothing settled it and the reason would otherwise vanish.
+				// Genuine failure: the claim did not land and nothing settled it, so
+				// the reason would otherwise vanish.
 				addLaneDiagnostic(
 					settleFailureLogs,
 					laneLabel,
@@ -3167,10 +3199,13 @@ async function settleCollectedLane(args: {
 				`PR_WORKFLOW_CONTRACT_INVALID: batch=${record.batchId ?? '(missing)'} lane=${record.laneId ?? '(missing)'} workflow_lane=${record.workflowLane ?? '(missing)'} ` +
 				formatError(error);
 			prospectiveResult.error = prospectiveResult.error.slice(0, 1_024);
-			await appendDelegationTransition(directory, record.correlationId, {
-				status: terminalStatus,
-				result: prospectiveResult,
-			});
+			await settleDelegationTerminal(
+				directory,
+				record,
+				{ status: terminalStatus, result: prospectiveResult },
+				{},
+				_internals.now(),
+			);
 			return;
 		}
 		if (validation.receipt) {
@@ -3219,10 +3254,43 @@ async function settleCollectedLane(args: {
 			];
 		}
 	}
-	await appendDelegationTransition(directory, record.correlationId, {
-		status: terminalStatus,
-		result: prospectiveResult,
-	});
+	// Issue #2045: the normal settle routes through the shared exactly-once
+	// terminal claim (Task parity) with the full observation bundle — the lane
+	// transcript feeds knowledge ACK/verdict reconciliation, and the claimed
+	// record emits the cost + trajectory observations the Task path produces
+	// through its tool.execute hooks.
+	await settleDelegationTerminal(
+		directory,
+		record,
+		{ status: terminalStatus, result: prospectiveResult },
+		{
+			transcript: transcript.text,
+			startedAt: record.createdAt,
+			model: laneConfiguredModel(record),
+		},
+		_internals.now(),
+	);
+}
+
+/**
+ * Configured model for a lane's cost attribution — resolved from the swarm
+ * agent map exactly as the dispatch path resolves it (prefixed agent → role →
+ * model). Model-only: lane transcripts carry no usage evidence, so the cost
+ * projection stays honestly `missing_cost` rather than pricing a zero.
+ */
+function laneConfiguredModel(
+	record: Pick<
+		BackgroundDelegationRecord,
+		'swarmPrefixedAgent' | 'normalizedAgent'
+	>,
+): string | undefined {
+	const prefixed = record.swarmPrefixedAgent;
+	const baseRole = stripKnownSwarmPrefix(prefixed);
+	const swarmID =
+		baseRole !== prefixed
+			? prefixed.slice(0, prefixed.length - baseRole.length - 1)
+			: undefined;
+	return getSwarmAgents(swarmID)?.[baseRole]?.model;
 }
 
 // Issue #2381: the PR-review wait-deadline terminalizer and its entire helper
@@ -3398,18 +3466,34 @@ async function appendAsyncLaneLaunchError(
 ): Promise<void> {
 	const record = findByCorrelationId(directory, sessionId);
 	const isPrReviewLane = record?.mode?.startsWith('swarm-pr-review:') === true;
-	await appendDelegationTransition(directory, sessionId, {
-		status: 'error',
-		result: {
-			error: message,
-			chars: message.length,
-			truncated: false,
-			digest: digestText(message),
-			...(isPrReviewLane
-				? { workflowLaneFailureClass: 'resource' as const }
-				: {}),
-		},
-	});
+	const launchErrorResult = {
+		error: message,
+		chars: message.length,
+		truncated: false,
+		digest: digestText(message),
+		...(isPrReviewLane
+			? { workflowLaneFailureClass: 'resource' as const }
+			: {}),
+	};
+	if (record) {
+		// Issue #2045: launch failures are terminal events on the shared
+		// lifecycle — the claim gives them the same exactly-once identity as any
+		// other lane terminal. No transcript observation: nothing ran.
+		await settleDelegationTerminal(
+			directory,
+			record,
+			{ status: 'error', result: launchErrorResult },
+			{},
+			_internals.now(),
+		);
+	} else {
+		// Record never landed (start write failed): keep the legacy bare
+		// transition so the failure is still durably visible.
+		await appendDelegationTransition(directory, sessionId, {
+			status: 'error',
+			result: launchErrorResult,
+		});
+	}
 	cleanupAsyncLaunchSession(session, sessionId);
 }
 
@@ -3548,21 +3632,6 @@ interface LaneTerminalError {
  * collapse genuinely different failures into one correlated-failure signature.
  */
 const LANE_TERMINAL_REASON_MESSAGE_BUDGET = 100;
-
-/**
- * Mirrors `isTerminal` in `src/background/pending-delegations.ts` — the statuses
- * whose presence makes the first-terminal-wins guard reject a further
- * transition. Used to tell a BENIGN settle race (someone else terminalized the
- * record first) apart from a genuine settle-write failure (the write threw, or
- * the record is still open), so the #2349 diagnostic does not cry wolf.
- */
-const ASYNC_LANE_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
-	'completed',
-	'error',
-	'cancelled',
-	'stale',
-	'consumed',
-]);
 
 function laneTerminalErrorReason(error: LaneTerminalError): string {
 	const message = error.message.slice(0, LANE_TERMINAL_REASON_MESSAGE_BUDGET);
@@ -3848,6 +3917,11 @@ async function runLane(
 		context,
 	});
 	let sessionId: string | undefined = create.ok ? create.sessionId : undefined;
+	// Issue #2045: blocking-lane start record. Declared outside the try so the
+	// catch path can always await it; a session that was never created keeps
+	// the resolved-null sentinel.
+	let lifecycleRecordPromise: Promise<BackgroundDelegationRecord | null> =
+		Promise.resolve(null);
 	try {
 		if (!create.ok) {
 			return failedLane(
@@ -3863,6 +3937,54 @@ async function runLane(
 		}
 		sessionId = create.sessionId;
 		const createdSessionId = sessionId;
+		// The start record is written WITHOUT gating the prompt — the delegation
+		// ledger's evidence lock must never serialize concurrent blocking lanes'
+		// prompt starts (the dispatch concurrency contract is owned by the
+		// dispatcher slots, not by the ledger). The promise is awaited before the
+		// terminal settle, so the record always precedes its claim; a failed
+		// write degrades to the fail-open path below.
+		//
+		// `callID` uses the `blocking:` + sessionId convention already used by
+		// the lane-output store's batchId. NO `batchId` field: async-only
+		// surfaces (findOpenAsyncLaneBatches, collect, liveness advisories)
+		// filter on batchId presence and must stay async-only.
+		const lifecycleRecordPromiseInner: Promise<BackgroundDelegationRecord | null> =
+			recordPendingDelegationDetailed(directory, {
+				correlationId: createdSessionId,
+				jobId: null,
+				subagentSessionId: createdSessionId,
+				parentSessionId:
+					context.sessionID?.trim() || `dispatch_lanes:${createdSessionId}`,
+				callID: `blocking:${createdSessionId}`,
+				normalizedAgent: role,
+				swarmPrefixedAgent: lane.agent,
+				planTaskId: null,
+				evidenceTaskId: null,
+				laneId: lane.id,
+				mode: 'blocking',
+				promptHash: promptHash(lane, directory, `blocking:${createdSessionId}`),
+				workspace: {
+					directory,
+					gitHead: null,
+					dirtyHash: null,
+					prHeadSha: null,
+					scope: null,
+				},
+				generation: create.generation,
+			}).then((pendingOutcome) => {
+				if (pendingOutcome.status === 'recorded') {
+					emitDelegationBegin(pendingOutcome.record);
+					return pendingOutcome.record;
+				}
+				// duplicate/conflict are impossible for a fresh session id; a
+				// failed write is the fail-open path. State it so the gap is
+				// visible rather than silent.
+				logger.log(
+					`[dispatch-lanes] blocking lane start record did not land (status ${pendingOutcome.status}); lane ${lane.id} proceeds without durable lifecycle`,
+				);
+				return null;
+			});
+		lifecycleRecordPromise = lifecycleRecordPromiseInner;
 		const baseRole = stripKnownSwarmPrefix(lane.agent);
 		const swarmID =
 			baseRole !== lane.agent
@@ -3967,6 +4089,36 @@ async function runLane(
 			source: 'dispatch_lanes',
 			text: extractText(promptResult.data.parts),
 		});
+		// Issue #2045: settle the blocking lane's terminal BEFORE the result is
+		// returned (this is the only place the durable lifecycle can close), with
+		// the full observation bundle — transcript feeds ACK/verdict
+		// reconciliation, exactly like an async collect settle. The start record
+		// is awaited here so it always precedes its terminal claim.
+		const lifecycleRecord = await lifecycleRecordPromise;
+		if (lifecycleRecord) {
+			await settleDelegationTerminal(
+				directory,
+				lifecycleRecord,
+				{
+					status: 'completed',
+					result: {
+						text: laneOutput.output,
+						chars: laneOutput.output_chars,
+						truncated: laneOutput.output_truncated,
+						digest: laneOutput.output_digest,
+						...(laneOutput.output_ref
+							? { outputRef: laneOutput.output_ref }
+							: {}),
+					},
+				},
+				{
+					transcript: laneOutput.output,
+					startedAt: Date.parse(startedAt) || undefined,
+					model: swarmAgents?.[baseRole]?.model,
+				},
+				_internals.now(),
+			);
+		}
 		return {
 			id: lane.id,
 			agent: lane.agent,
@@ -3981,6 +4133,31 @@ async function runLane(
 			...laneOutput,
 		};
 	} catch (error) {
+		// Issue #2045: timeout-shaped and provider failures settle as an `error`
+		// terminal (Task has no separate timeout status; parity keeps the same
+		// mapping) BEFORE failedLane returns — the classified reason carried the
+		// #2349 contract is preserved verbatim in the result. The start-record
+		// promise is awaited (and its failure swallowed) so a record that never
+		// landed cannot leave an unhandled rejection.
+		const lifecycleRecord = await lifecycleRecordPromise.catch(() => null);
+		if (lifecycleRecord) {
+			const failureReason = syncClassifiedReason ?? formatError(error);
+			await settleDelegationTerminal(
+				directory,
+				lifecycleRecord,
+				{
+					status: 'error',
+					result: {
+						error: failureReason.slice(0, MAX_ERROR_CHARS),
+						chars: failureReason.length,
+						truncated: failureReason.length > MAX_ERROR_CHARS,
+						digest: digestText(failureReason),
+					},
+				},
+				{ startedAt: Date.parse(startedAt) || undefined },
+				_internals.now(),
+			);
+		}
 		return failedLane(
 			lane,
 			role,

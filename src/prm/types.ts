@@ -50,6 +50,15 @@ export interface TrajectoryEntry {
 	args_summary?: string;
 	/** Optional: elapsed time in milliseconds */
 	elapsed_ms?: number;
+	/**
+	 * Issue #2045 canonical join keys for delegation-terminal observations: a
+	 * lane terminal entry correlates to its background-delegation record by
+	 * these exact IDs, never by agent-name matching. Optional + additive; the
+	 * bounded store serializes entries as JSON with no strict field validation.
+	 */
+	batchId?: string;
+	laneId?: string;
+	taskId?: string;
 }
 
 /**

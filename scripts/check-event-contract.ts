@@ -562,6 +562,12 @@ const LIFECYCLE_PAIR_INVENTORY: readonly LifecyclePairSpec[] = [
 				ends: 1,
 				why: 'Stage-B validation attempt replay, both halves through the _internals seam.',
 			},
+			{
+				file: 'src/background/delegation-lifecycle.ts',
+				begins: 1,
+				ends: 1,
+				why: 'Lane/delegation terminal observations (issue #2045): begin at the lane start record, end at the shared exactly-once terminal claim; paired by canonical record identity, never agent-name matching.',
+			},
 		],
 	},
 	{

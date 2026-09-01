@@ -50,6 +50,10 @@ function writeCanonicalProducers(): void {
 		'src/hooks/review-receipt-collector.ts',
 		'_internals.delegationBegin(a, b, c);\n_internals.delegationEnd(a, b, c, d, e);\n',
 	);
+	writeSource(
+		'src/background/delegation-lifecycle.ts',
+		'_internals.telemetry.delegationBegin(a, b, c);\n_internals.telemetry.delegationEnd(a, b, c, d, e);\n',
+	);
 }
 
 beforeEach(() => {

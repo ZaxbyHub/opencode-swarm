@@ -169,6 +169,7 @@ describe('allowlist integrity (the repo contract)', () => {
 	test('the production caller set is exactly the documented seam', () => {
 		// Growing this list is a visible review-time action (issue #2041).
 		expect(Object.keys(TRAJECTORY_STORE_IMPORT_ALLOWLIST).sort()).toEqual([
+			'src/background/delegation-lifecycle.ts',
 			'src/consensus/corpus.ts',
 			'src/hooks/trajectory-logger.ts',
 			'src/index.ts',

@@ -30,6 +30,7 @@ import { extractCurrentPhaseFromPlan } from './extractors.js';
 import { recordKnowledgeEvent } from './knowledge-events.js';
 import {
 	buildDelegateDirectiveBlock,
+	DELEGATE_INJECT_HARD_CHAR_CAP,
 	defaultExpectedToolsForAgent,
 	injectForDelegate,
 	isDelegatedAgent,
@@ -211,10 +212,16 @@ export async function injectDelegateDirectivesBefore(
 		const prefixParts: string[] = [];
 		// (#1849 RC-4) Thread the retrieval trace_id into the rendered block so the
 		// delegate can cite it and the ack-collector recovers the original trace.
+		// Issue #2045: the block obeys the configured injection ceiling with the
+		// same hard cap the transform path applies (Task/lane parity).
 		const delegateBlock = buildDelegateDirectiveBlock(
 			entries,
 			config,
 			trace_id,
+			Math.min(
+				config.inject_char_budget ?? 2_000,
+				DELEGATE_INJECT_HARD_CHAR_CAP,
+			),
 		);
 		if (delegateBlock) prefixParts.push(delegateBlock);
 
