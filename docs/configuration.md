@@ -88,6 +88,7 @@ Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit insid
 | `inject_phase_reminders` | boolean | true | Inject phase reminder directives during execution. |
 | `hooks` | object | — | Hook subsystem toggles and settings. |
 | `pr_review_resilience` | object (strict) | — | PR review base-wave staged canary/fanout resilience settings. |
+| `pr_review_legacy_transcript_compatibility` | boolean | — | Deprecated migration-only opt-in for transcript-row PR-review base and micro discovery lanes. |
 | `gates` | object | — | Quality gate configuration (v6.9 anti-slop features). |
 | `context_budget` | object | — | Context budget thresholds. |
 | `pricing` | object | — | Token/cost estimation fallback table. Provider-reported cost wins when present; entries only estimate from usage tokens when reports omit cost. |
@@ -773,6 +774,45 @@ clean reset.
   "pr_review_resilience": {
     "enabled": false
   }
+}
+```
+
+### pr_review_legacy_transcript_compatibility
+
+Controls the deprecated transcript-row fallback for Profile A `PR_REVIEW`
+base and micro discovery lanes.
+
+Default: `false`. When omitted or `false`, newly dispatched Profile A
+discovery lanes are structured-only: they must settle through exactly one
+`submit_pr_review_result` receipt, and later prose, truncation, or transcript
+incompleteness cannot replace that receipt. The legacy `[CANDIDATE]` and
+`[CLEAN]` transcript rows remain a migration-only compatibility path.
+
+Enable this only to collect legacy in-flight lanes or to interoperate with an
+older host during the migration window. The compatibility decision is snapped
+into each dispatched lane, so toggling the config later does not silently widen
+or strand an already-running review. A present-but-invalid structured result
+still fails closed and never falls back to transcript parsing.
+
+Profiles B/C are unchanged by this setting: without the Profile A controller,
+their lane transcripts remain the native exchange surface.
+
+Structured submissions persist background-delegation schema v4 records. Before
+downgrading to a binary without schema v4 support, drain active structured
+reviews or apply a compatible migration/reader. An older lenient reader skips
+the entire unknown v4 record, so the lane appears absent and later mutations
+become no-ops; strict recovery rejects the store as incompatible and fails
+closed. Neither outcome preserves an active structured review.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `pr_review_legacy_transcript_compatibility` | boolean | `false` | Opt in to the deprecated transcript-row fallback for Profile A PR-review base/micro discovery lanes during migration. |
+
+**Example** — temporarily enable the legacy transcript fallback:
+
+```json
+{
+  "pr_review_legacy_transcript_compatibility": true
 }
 ```
 

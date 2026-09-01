@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
 	existsSync,
+	mkdirSync,
 	mkdtempSync,
 	readFileSync,
 	realpathSync,
@@ -57,6 +58,7 @@ const originalMarkTriggerEvaluationComplete =
 
 function tempRoot(): string {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), 'trigger-eval-bind-')));
+	mkdirSync(join(root, '.git'), { recursive: true });
 	tempDirs.push(root);
 	return root;
 }
@@ -130,6 +132,7 @@ async function recordCompletedLane(
 		batchId: input.batchId,
 		laneId: input.laneId,
 		mode: input.mode,
+		prReviewLegacyTranscriptCompatibility: true,
 		workflowLane: input.workflowLane,
 		ownedWorkflowLanes: input.ownedWorkflowLanes,
 		workspace: {

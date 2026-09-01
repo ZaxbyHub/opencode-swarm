@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import { mkdtempSync, realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -59,6 +59,7 @@ beforeEach(() => {
 	directory = realpathSync(
 		mkdtempSync(path.join(os.tmpdir(), 'dispatch-review-council-')),
 	);
+	mkdirSync(path.join(directory, '.git'), { recursive: true });
 	createdSessions = 0;
 	deliveredPrompts = [];
 	gateInternals.resetTrackedStateCache();
@@ -144,6 +145,7 @@ async function establishReviewPrerequisites(): Promise<void> {
 			laneId: lane.laneId,
 			mode: 'swarm-pr-review:base',
 			workflowLane: lane.workflowLane,
+			prReviewLegacyTranscriptCompatibility: true,
 			workspace: {
 				directory,
 				gitHead: HEAD_SHA,
@@ -202,6 +204,7 @@ async function establishReviewPrerequisites(): Promise<void> {
 			laneId,
 			mode: 'swarm-pr-review:micro',
 			workflowLane,
+			prReviewLegacyTranscriptCompatibility: true,
 			workspace: {
 				directory,
 				gitHead: HEAD_SHA,

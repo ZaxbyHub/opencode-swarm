@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -69,6 +69,7 @@ export function setupPrWorkflowGateFixtures(): void {
 	tempDir = realpathSync(
 		mkdtempSync(path.join(os.tmpdir(), 'pr-workflow-gate-')),
 	);
+	mkdirSync(path.join(tempDir, '.git'), { recursive: true });
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
 	_test_exports.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
@@ -139,6 +140,7 @@ export async function persistBatch(
 		artifactRole?: string;
 		subagentSessionId?: string;
 		scope?: string;
+		prReviewLegacyTranscriptCompatibility?: boolean;
 	} = {},
 ): Promise<void> {
 	for (const [index, lane] of lanes.entries()) {
@@ -162,6 +164,14 @@ export async function persistBatch(
 			mode,
 			workflowLane: lane.workflowLane,
 			ownedWorkflowLanes: lane.ownedWorkflowLanes,
+			...(options.prReviewLegacyTranscriptCompatibility !== undefined
+				? {
+						prReviewLegacyTranscriptCompatibility:
+							options.prReviewLegacyTranscriptCompatibility,
+					}
+				: mode === 'swarm-pr-review:base' || mode === 'swarm-pr-review:micro'
+					? { prReviewLegacyTranscriptCompatibility: true }
+					: {}),
 			workspace: {
 				directory: tempDir,
 				gitHead: HEAD_SHA,
@@ -291,6 +301,7 @@ export async function establishReviewPrerequisitesWithConsolidatedMicroLane(
 		mode: 'swarm-pr-review:micro',
 		workflowLane: familyA,
 		ownedWorkflowLanes: [...ownedFamilies],
+		prReviewLegacyTranscriptCompatibility: true,
 		workspace: {
 			directory: tempDir,
 			gitHead: HEAD_SHA,
@@ -633,6 +644,7 @@ export async function establishReviewPrerequisitesWithMislabeledSingletonLane():
 		batchId: 'base-all',
 		laneId: mislabeledLane.laneId,
 		mode: 'swarm-pr-review:base',
+		prReviewLegacyTranscriptCompatibility: true,
 		workflowLane: mislabeledLane.workflowLane,
 		workspace: {
 			directory: tempDir,

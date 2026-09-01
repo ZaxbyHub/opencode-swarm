@@ -238,6 +238,12 @@ export const TOOL_METADATA = {
 			'issue a one-use, identity-bound reviewer/test_engineer re-entry authorization for the active PR_REVIEW workflow (issue #2383)',
 		agents: ['architect'],
 	},
+	submit_pr_review_result: {
+		description:
+			'submit one child-bound typed result for an active PR-review base or micro discovery lane',
+		agents: [],
+		prWorkflow: { modes: ['PR_REVIEW'], capability: 'validate' },
+	},
 	approve_plan_critic: {
 		description:
 			'record a MANUAL plan_critic_gate approval snapshot to unblock the ratchet-tighter critic_pre_plan execution gate when the critic already returned APPROVED but the mechanical recorder failed to persist it (issue #2012)',

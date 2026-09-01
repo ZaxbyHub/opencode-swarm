@@ -458,32 +458,32 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/pr-workflow-gate.ts',
 		],
 		writerCitations: [
-			'src/background/pending-delegations.ts:2322 appendRecord — appendFileSync :2327 (19 mutation entry points :2474-4356)',
-			'src/background/pending-delegations.ts:1069 writeDurableFileSync — fsync+rename-with-retry for checkpoint/manifest/rolled-tail (:2127-2168)',
+			'src/background/pending-delegations.ts:2441 appendRecord — appendFileSync :2446 (20 mutation entry points :2600-4708)',
+			'src/background/pending-delegations.ts:1090 writeDurableFileSync — fsync+rename-with-retry for checkpoint/manifest/rolled-tail (:2246-2287)',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:2265 readDelegations — checkpoint+tail fold (lenient), sync',
-			'src/background/pending-delegations.ts:2286 scanDelegationsForRecovery — strict, fails closed',
+			'src/background/pending-delegations.ts:2384 readDelegations — checkpoint+tail fold (lenient), sync',
+			'src/background/pending-delegations.ts:2405 scanDelegationsForRecovery — strict, fails closed',
 			'pr-workflow-session-resolver / pr-workflow-gate / init-orphan-recovery / delegation-gate worktree-collision-ownership — via readDelegations',
 		],
 		schemaVersion:
-			'RecordSchema schemaVersion 1|2|3; checkpoint/manifest literal 1 (:963,:984,:994)',
+			'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:984,:1005,:1015)',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
 		writeLimits: {
-			bound: 'compaction high-water 1 MiB / low 256 KiB (:97-98); MAX_RECOVERY_LEDGER_BYTES 4 MiB (delegation-health.ts:35); MAX_CHECKPOINT_BYTES 2 MiB / 2048 records (:100,:104); TOMBSTONE_MIN_AGE 72 h (:111)',
+			bound: 'compaction high-water 1 MiB / low 256 KiB (:103-104); MAX_RECOVERY_LEDGER_BYTES 4 MiB (delegation-health.ts:35); MAX_CHECKPOINT_BYTES 2 MiB / 2048 records (:106,:110); TOMBSTONE_MIN_AGE 72 h (:117)',
 			scope: 'global',
-			citation: 'src/background/pending-delegations.ts:97-111; src/background/delegation-health.ts:35 (#2034)',
+			citation: 'src/background/pending-delegations.ts:103-117; src/background/delegation-health.ts:35 (#2034)',
 		},
 		readBound: {
 			pattern: 'indexed (checkpoint+tail) with full-fold fallback',
 			bound: 'legacy/tail reads hard-bounded at 4 MiB (MAX_RECOVERY_LEDGER_BYTES)',
 			sync: true,
-			citation: 'src/background/pending-delegations.ts:85-90,1492',
+			citation: 'src/background/pending-delegations.ts:89-94,1534',
 		},
-		lockModel: 'withEvidenceLock agent=background on every mutation (:137-140); reads lock-free',
+		lockModel: 'withEvidenceLock agent=background on every mutation (:143-146); reads lock-free',
 		crashBehavior:
-			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1233-1245)',
+			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1262-1274)',
 		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (close.ts:453-455); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, close.ts:448-456 docblock)',
 		closeArrayMembership: {
 			'background-delegations.jsonl': 'archive-only',
@@ -492,12 +492,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 		resetPolicy: 'reset/reset-session do not delete',
 		legacyCompatibility:
-			'loadLegacyLedger pre-checkpoint fold (:1492); mixed-version lines safeParse individually',
+			'loadLegacyLedger pre-checkpoint fold (:1534); mixed-version lines safeParse individually',
 		healthSignal: 'delegation-health artifact + #2034 recovery observations',
 		owner: '#2034 (merged)',
 		disposition: {
 			kind: 'not-a-defect',
-			proof: 'Bounded by the #2034 checkpoint/tail compaction contract: 1 MiB high-water global trigger, 4 MiB hard recovery bound, 2 MiB/2048-record checkpoint validation, 72 h tombstone floor (src/background/pending-delegations.ts:97-111; src/background/delegation-health.ts:35).',
+			proof: 'Bounded by the #2034 checkpoint/tail compaction contract: 1 MiB high-water global trigger, 4 MiB hard recovery bound, 2 MiB/2048-record checkpoint validation, 72 h tombstone floor (src/background/pending-delegations.ts:103-117; src/background/delegation-health.ts:35).',
 		},
 	},
 	{
@@ -572,7 +572,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/background/pending-delegations.ts:4163 writeBackgroundCoderReservations',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:4072-4083 readDelegationFallback / listDelegationFallbacks / scanDelegationFallbacksForRecovery',
+			'src/background/pending-delegations.ts:4424 readDelegationFallback / listDelegationFallbacks / scanDelegationFallbacksForRecovery',
 			'src/background/pending-delegations.ts:4107 scanBackgroundCoderReservationsForAdmission',
 		],
 		schemaVersion: 'fallback schemaVersion 1 (:837)',

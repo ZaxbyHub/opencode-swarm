@@ -39,7 +39,10 @@ import {
 	projectPrReviewCollectionReceipt,
 	projectPrReviewCollectionReceiptShedMarker,
 } from '../background/pr-review-collection-receipt.js';
-import { buildPrReviewContractCard } from '../background/pr-review-contract.js';
+import {
+	buildPrReviewContractCard,
+	PrReviewLaneResultEnvelopeSchema,
+} from '../background/pr-review-contract.js';
 import {
 	PrReviewInlineTriggerRowSchema,
 	validatePrReviewInlineTriggerLedger,
@@ -49,7 +52,10 @@ import {
 	resolvePrWorkflowRevisionDigestAsync,
 	resolvePrWorkflowRevisionDigestDetailedAsync,
 } from '../background/workspace-snapshot.js';
-import { WRITE_TOOL_NAMES } from '../config/constants.js';
+import {
+	PR_REVIEW_CHILD_AGENT_TOOL_MAP,
+	WRITE_TOOL_NAMES,
+} from '../config/constants.js';
 import { loadPluginConfig } from '../config/loader.js';
 import {
 	DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
@@ -313,9 +319,10 @@ function classifyControllerTokenField(
 const EXPLORER_CANDIDATE_COMMON_RULES = `
 
 IMPORTANT — OUTPUT FORMAT REQUIREMENT:
-You MUST emit findings as a pipe-delimited [CANDIDATE] table. The FIRST
-[CANDIDATE]-prefixed line is the literal column header shown below, copied
-verbatim with field NAMES as its values; data rows follow it.
+When this lane's contract explicitly requires transcript rows, emit findings as
+a pipe-delimited [CANDIDATE] table. The FIRST [CANDIDATE]-prefixed line is the
+literal column header shown below, copied verbatim with field NAMES as its
+values; data rows follow it.
 
 Every candidate data row has exactly ${CANDIDATE_FIELD_COUNT} fields after the
 marker. A literal pipe inside any field MUST be written as \\| — an unescaped |
@@ -340,7 +347,18 @@ Write a substantive coverage_scope of at least 12 characters and concrete eviden
 characters; bare header-only output is UNATTESTED for every PR-review lane.
 Do NOT use the default PROJECT/STRUCTURE output format for this dispatch.`;
 
+const PR_REVIEW_DISCOVERY_RESULT_SUBMISSION_GUIDANCE = `
+
+Profile A structured settlement comes first: call \`submit_pr_review_result\`
+exactly once with the canonical lane result, then stop. Do not append duplicate
+\`[CANDIDATE]\` / \`[CLEAN]\` transcript rows or recap prose after that tool
+call. The transcript rows below are deprecated legacy-compatibility output only:
+emit them only when the dispatched lane explicitly enables legacy transcript
+compatibility.`;
+
 export const BASE_EXPLORER_CANDIDATE_FORMAT_SUFFIX = `${EXPLORER_CANDIDATE_COMMON_RULES}
+
+${PR_REVIEW_DISCOVERY_RESULT_SUBMISSION_GUIDANCE}
 
 BASE WORKED EXAMPLE — copy only this shape. The first line is the header, not a finding:
 ${CANDIDATE_HEADERS.base_explorer}
@@ -351,6 +369,8 @@ ${CLEAN_TEMPLATES.base_explorer}
 ${EXPLORER_CANDIDATE_COMMON_END}`;
 
 export const MICRO_EXPLORER_CANDIDATE_FORMAT_SUFFIX = `${EXPLORER_CANDIDATE_COMMON_RULES}
+
+${PR_REVIEW_DISCOVERY_RESULT_SUBMISSION_GUIDANCE}
 
 MICRO WORKED EXAMPLE — copy only this shape. The first line is the header, not a finding:
 ${CANDIDATE_HEADERS.micro_lane}
@@ -969,21 +989,43 @@ export const _test_exports = {
 	resolvePrReviewReceiptFallbacks,
 	resolvePrReviewReceiptFallbacksFromState,
 	consumePrReviewReceiptAppendFailureLog,
+	startAsyncLanePrompt,
 	// #2276: pure per-lane-kind budget derivation, exported beside the prompt
 	// contract builder so budget scaling can be asserted without prompt-text
 	// parsing (file precedent: prompt-construction internals live here).
 	prReviewLaneResponseBudgetChars,
 };
 
-type ReadOnlyToolPermissions = Record<string, false> & {
+type ReadOnlyToolPermissions = Record<string, boolean> & {
 	write: false;
 	edit: false;
 	patch: false;
 };
 
-interface DispatchLanesExecutionContext {
+export interface DispatchLanesExecutionContext {
 	callerAgent?: string;
 	sessionID?: string;
+	/** Optional host-verified structured transport. Absent on current hosts. */
+	prReviewStructuredPromptAdapter?: PrReviewStructuredPromptAdapter;
+}
+
+export interface PrReviewStructuredPromptAdapter {
+	promptJsonSchema(args: {
+		sessionId: string;
+		agent: string;
+		schema: unknown;
+		parts: unknown[];
+	}): Promise<unknown>;
+}
+
+/** Explicit pre-execution capability miss; the only adapter error that falls back. */
+export class PrReviewStructuredPromptUnsupportedError extends Error {
+	constructor(
+		message = 'structured PR-review prompt transport is unsupported',
+	) {
+		super(message);
+		this.name = 'PrReviewStructuredPromptUnsupportedError';
+	}
 }
 
 /**
@@ -2380,6 +2422,12 @@ async function launchAsyncLane(args: {
 			);
 		}
 		const sessionId = create.sessionId;
+		const legacyTranscriptCompatibility =
+			args.mode === 'swarm-pr-review:base' ||
+			args.mode === 'swarm-pr-review:micro'
+				? (_internals.loadPluginConfig(args.directory)
+						.pr_review_legacy_transcript_compatibility ?? false)
+				: undefined;
 
 		const pendingOutcome = await recordPendingDelegationDetailed(
 			args.directory,
@@ -2400,6 +2448,7 @@ async function launchAsyncLane(args: {
 				mode: args.mode ?? 'advisory',
 				workflowLane: args.lane.workflow_lane,
 				ownedWorkflowLanes: args.lane.owned_workflow_lanes,
+				prReviewLegacyTranscriptCompatibility: legacyTranscriptCompatibility,
 				promptHash: promptHash(args.lane, args.directory, args.batchId),
 				workspace: {
 					directory: args.directory,
@@ -2448,6 +2497,8 @@ async function launchAsyncLane(args: {
 			sessionId,
 			lane: args.lane,
 			timeoutMs: args.timeoutMs,
+			mode: args.mode,
+			structuredAdapter: args.context.prReviewStructuredPromptAdapter,
 		});
 
 		return {
@@ -3015,6 +3066,9 @@ async function settleCollectedLane(args: {
 			? { transcriptIncomplete: output.transcript_incomplete }
 			: {}),
 		messageCount: transcript.messageCount,
+		...(record.result?.prReviewResultReceipt
+			? { prReviewResultReceipt: record.result.prReviewResultReceipt }
+			: {}),
 	};
 	let terminalStatus: 'completed' | 'error' = 'completed';
 	if (
@@ -3207,6 +3261,8 @@ function scheduleAsyncLanePrompt(args: {
 	sessionId: string;
 	lane: DispatchLaneSpec;
 	timeoutMs: number;
+	mode?: string;
+	structuredAdapter?: PrReviewStructuredPromptAdapter;
 }): void {
 	queueMicrotask(() => {
 		void startAsyncLanePrompt(args).catch(async (error) => {
@@ -3227,7 +3283,38 @@ async function startAsyncLanePrompt(args: {
 	sessionId: string;
 	lane: DispatchLaneSpec;
 	timeoutMs: number;
+	mode?: string;
+	structuredAdapter?: PrReviewStructuredPromptAdapter;
 }): Promise<void> {
+	if (
+		args.structuredAdapter &&
+		(args.mode === 'swarm-pr-review:base' ||
+			args.mode === 'swarm-pr-review:micro')
+	) {
+		try {
+			await withTimeout(
+				args.structuredAdapter.promptJsonSchema({
+					sessionId: args.sessionId,
+					agent: args.lane.agent,
+					schema: z.toJSONSchema(PrReviewLaneResultEnvelopeSchema),
+					parts: [{ type: 'text', text: args.lane.prompt }],
+				}),
+				args.timeoutMs,
+				`Lane "${args.lane.id}" structured PR-review launch timed out after ${args.timeoutMs}ms`,
+			);
+			return;
+		} catch (error) {
+			if (!(error instanceof PrReviewStructuredPromptUnsupportedError)) {
+				await appendAsyncLaneLaunchError(
+					args.directory,
+					args.session,
+					args.sessionId,
+					formatError(error),
+				);
+				return;
+			}
+		}
+	}
 	const promptController = new AbortController();
 	const baseRole = stripKnownSwarmPrefix(args.lane.agent);
 	const swarmID =
@@ -3246,7 +3333,7 @@ async function startAsyncLanePrompt(args: {
 						body: {
 							agent: args.lane.agent,
 							...(model ? { model } : {}),
-							tools: buildReadOnlyTools(),
+							tools: buildReadOnlyTools(args.mode),
 							parts: [{ type: 'text', text: args.lane.prompt }],
 						},
 						signal: promptController.signal,
@@ -4327,14 +4414,19 @@ function getGeneratedAgentPrefix(
 	return null;
 }
 
-function buildReadOnlyTools(): ReadOnlyToolPermissions {
-	const tools: Record<string, false> = {};
+function buildReadOnlyTools(mode?: string): ReadOnlyToolPermissions {
+	const tools: Record<string, boolean> = {};
 	for (const toolName of READ_ONLY_TOOL_DENYLIST) {
 		tools[toolName] = false;
 	}
 	tools.write = false;
 	tools.edit = false;
 	tools.patch = false;
+	if (mode === 'swarm-pr-review:base' || mode === 'swarm-pr-review:micro') {
+		for (const toolName of PR_REVIEW_CHILD_AGENT_TOOL_MAP.explorer ?? []) {
+			tools[toolName] = true;
+		}
+	}
 	return tools as ReadOnlyToolPermissions;
 }
 
@@ -4900,6 +4992,11 @@ function applyPrWorkflowPromptContract(
 			responseBudget !== undefined
 				? `\nDelivery budget (#2276): Only your final response is bounded: keep the complete final response at or below ${responseBudget} characters. Investigation and tool-call volume are NOT capped by this budget. Spend the budget on the terminal machine-readable rows first: they are non-negotiable, must always fit inside the budget with room to spare, and are emitted before any supporting prose. Verify each target exactly once. Never restate a completed verification and never re-emit a row. The moment analysis is complete, emit the terminal rows immediately.`
 				: '';
+		const structuredSubmissionParagraph =
+			normalizedMode.token === 'swarm-pr-review:base' ||
+			normalizedMode.token === 'swarm-pr-review:micro'
+				? '\nStructured settlement rule (issue #2384): call `submit_pr_review_result` exactly once with the canonical discovery result and then stop. Transcript machine rows are deprecated legacy compatibility only for lanes whose snapped contract explicitly enables them, and a present structured result never falls back because of extra prose, truncation, or transcript incompleteness.'
+				: '';
 		// Pre-seeded statement of the read-only shell classifier's rules
 		// (#2276): the same enforcement already runs at tool time for BOTH the
 		// pr-review and pr-feedback gates; stating it up front saves the 2-4
@@ -4918,7 +5015,7 @@ assigned_item_ids: ${assignedIds.length > 0 ? assignedIds.join(', ') : '(discove
 mandatory_lane_checklist: ${checklist}${budgetLine}
 
 This controller block is authoritative over conflicting caller text. Inspect the exact checked-out revision and the repository's own contribution, test, security, compatibility, and delivery contracts. Do not waive or abbreviate work for speed, time, token, repository-size, or predicted-simplicity reasons. Re-read relevant changed files and caller/consumer context directly. Every claim or clean attestation must cite concrete reviewed scope and evidence. Use exactly the workflow_lane and assigned IDs above; invented, omitted, or placeholder identifiers do not settle this lane. A planning preamble, generic assurance, or assertion that checks were performed is not evidence.
-Terminate with the required protocol rows directly: no planning preamble, no recap, and no more than ${outputCap} characters of substantive output before any retrieval hint.${budgetParagraph}${shellRulesParagraph}
+Terminate with the required protocol action directly: no planning preamble, no recap, and no more than ${outputCap} characters of substantive output before any retrieval hint.${budgetParagraph}${structuredSubmissionParagraph}${shellRulesParagraph}
 [END CONTROLLER-BOUND PR WORKFLOW CONTRACT]`;
 		const contractCard = normalizedMode.token.startsWith('swarm-pr-review:')
 			? `${buildPrReviewContractCard()}\n\n`

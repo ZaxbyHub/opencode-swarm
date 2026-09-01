@@ -13,6 +13,7 @@ import {
 	MEMORY_AGENT_TOOL_MAP,
 	ORCHESTRATOR_NAME,
 	PIPELINE_AGENTS,
+	PR_REVIEW_CHILD_AGENT_TOOL_MAP,
 	QA_AGENTS,
 	SKILL_AGENT_TOOL_MAP,
 	TOOL_DESCRIPTIONS,
@@ -212,6 +213,9 @@ describe('constants.ts', () => {
 				for (const tool of tools) assignedTools.add(tool);
 			}
 			for (const tools of Object.values(SKILL_AGENT_TOOL_MAP)) {
+				for (const tool of tools) assignedTools.add(tool);
+			}
+			for (const tools of Object.values(PR_REVIEW_CHILD_AGENT_TOOL_MAP)) {
 				for (const tool of tools) assignedTools.add(tool);
 			}
 			for (const tool of TOOL_NAMES) {

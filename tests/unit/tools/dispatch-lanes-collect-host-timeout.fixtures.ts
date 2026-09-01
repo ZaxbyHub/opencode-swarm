@@ -45,6 +45,7 @@ export function createCollectLaneTimeoutFixture() {
 		correlationId?: string;
 		mode?: string;
 		workflowLane?: string;
+		prReviewLegacyTranscriptCompatibility?: boolean;
 		workspace?: {
 			directory: string;
 			gitHead: string;
@@ -68,6 +69,15 @@ export function createCollectLaneTimeoutFixture() {
 			laneId: args.laneId ?? `${args.batchId}-lane`,
 			mode: args.mode ?? 'advisory',
 			...(args.workflowLane ? { workflowLane: args.workflowLane } : {}),
+			...(args.prReviewLegacyTranscriptCompatibility !== undefined
+				? {
+						prReviewLegacyTranscriptCompatibility:
+							args.prReviewLegacyTranscriptCompatibility,
+					}
+				: args.mode === 'swarm-pr-review:base' ||
+						args.mode === 'swarm-pr-review:micro'
+					? { prReviewLegacyTranscriptCompatibility: true }
+					: {}),
 			...(args.workspace ? { workspace: args.workspace } : {}),
 			promptHash: `${args.batchId}-hash`,
 			generation: 1,

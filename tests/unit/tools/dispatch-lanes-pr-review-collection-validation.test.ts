@@ -34,9 +34,9 @@ const MICRO_HEADER =
 const originalInternals = { ..._internals };
 let directory = '';
 let outputs = new Map<string, string>();
-
 beforeEach(() => {
 	directory = canonicalMkdtemp('pr-review-collect-');
+	fs.mkdirSync(path.join(directory, '.git'), { recursive: true });
 	outputs = new Map();
 	_test_exports.resetDeliveredLaneOutputs();
 	_internals.resolvePrWorkflowRevisionDigestAsync = async () => REVISION;
@@ -61,13 +61,11 @@ beforeEach(() => {
 	};
 	_internals.getSessionOps = () => ops;
 });
-
 afterEach(() => {
 	Object.assign(_internals, originalInternals);
 	_test_exports.resetDeliveredLaneOutputs();
 	fs.rmSync(directory, { recursive: true, force: true });
 });
-
 async function recordLane(args: {
 	batch: string;
 	lane: string;
@@ -93,6 +91,10 @@ async function recordLane(args: {
 		laneId: args.lane,
 		...(args.mode ? { mode: args.mode } : {}),
 		...(args.workflowLane ? { workflowLane: args.workflowLane } : {}),
+		...(args.mode === 'swarm-pr-review:base' ||
+		args.mode === 'swarm-pr-review:micro'
+			? { prReviewLegacyTranscriptCompatibility: true }
+			: {}),
 		...(args.ownedWorkflowLanes
 			? { ownedWorkflowLanes: args.ownedWorkflowLanes }
 			: {}),
@@ -108,7 +110,6 @@ async function recordLane(args: {
 	});
 	expect(recorded).not.toBeNull();
 }
-
 async function collect(batch: string) {
 	return executeCollectLaneResults(
 		{ batch_id: batch, wait: false },
@@ -116,7 +117,6 @@ async function collect(batch: string) {
 		{ sessionID: PARENT },
 	);
 }
-
 describe('PR-review discovery validation during collection', () => {
 	test('fails malformed base output immediately while retaining retrievable evidence', async () => {
 		await recordLane({

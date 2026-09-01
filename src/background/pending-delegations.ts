@@ -64,6 +64,10 @@ import {
 	parsePrReviewCollectionReceiptFooter,
 	parsePrReviewCollectionReceiptShedMarker,
 } from './pr-review-collection-receipt.js';
+import {
+	type PrReviewResultReceipt,
+	PrReviewResultReceiptSchema,
+} from './pr-review-contract.js';
 
 export const BACKGROUND_DELEGATIONS_FILE = 'background-delegations.jsonl';
 export const BACKGROUND_DELEGATION_FALLBACK_DIR =
@@ -88,6 +92,8 @@ export { MAX_RECOVERY_LEDGER_BYTES } from './delegation-health.js';
 import { MAX_RECOVERY_LEDGER_BYTES } from './delegation-health.js';
 
 const MAX_RECOVERY_FALLBACK_BYTES = 1024 * 1024;
+const MAX_TRACKED_LENIENT_LEDGER_SIGNALS = 32;
+const LENIENT_LEDGER_SIGNAL_SOURCE = 'lenient-read';
 
 /**
  * Compaction watermarks (issue #2034). Auto-compaction fires above the high
@@ -225,7 +231,7 @@ export const DEFAULT_SWEEPABLE_DELEGATION_STATUSES: ReadonlySet<SweepableDelegat
 	new Set<SweepableDelegationStatus>(['pending', 'running', 'ingestion_error']);
 
 export interface BackgroundDelegationRecord {
-	schemaVersion: 1 | 2 | 3;
+	schemaVersion: 1 | 2 | 3 | 4;
 	/** Subagent session id from the dispatch envelope — the correlation key. */
 	correlationId: string;
 	/** Structured jobId from dispatch metadata when available, else null. */
@@ -260,6 +266,8 @@ export interface BackgroundDelegationRecord {
 	 * singleton lanes (legacy and tier-L dispatches).
 	 */
 	ownedWorkflowLanes?: string[];
+	/** Dispatch-time snapshot; absent legacy records keep transcript compatibility. */
+	prReviewLegacyTranscriptCompatibility?: boolean;
 	/** Canonical hash of prompt/provenance inputs captured at dispatch time. */
 	promptHash?: string;
 	/** Project/root provenance captured at dispatch time. */
@@ -394,6 +402,12 @@ export interface BackgroundDelegationResult {
 	outputArtifactError?: string;
 	transcriptIncomplete?: boolean;
 	messageCount?: number;
+	/**
+	 * Issue #2384: authoritative structured PR-review result receipt. Persisted
+	 * separately from transcript text so compaction and preview truncation can
+	 * never promote presentation-layer text into machine authority.
+	 */
+	prReviewResultReceipt?: import('./pr-review-contract.js').PrReviewResultReceipt;
 	/**
 	 * Durable failure provenance for a lane-atomic PR-workflow terminalization.
 	 * Optional because successful lanes and legacy terminal results have none.
@@ -548,6 +562,7 @@ const ResultSchema = z
 		outputArtifactError: z.string().optional(),
 		transcriptIncomplete: z.boolean().optional(),
 		messageCount: z.number().optional(),
+		prReviewResultReceipt: PrReviewResultReceiptSchema.optional(),
 		workflowLaneFailureClass: z
 			.enum(['contract', 'resource', 'deadline'])
 			.optional(),
@@ -861,7 +876,12 @@ const PromptSchema = z
 
 const RecordSchema = z
 	.object({
-		schemaVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+		schemaVersion: z.union([
+			z.literal(1),
+			z.literal(2),
+			z.literal(3),
+			z.literal(4),
+		]),
 		correlationId: z.string().min(1),
 		jobId: z.string().nullable(),
 		subagentSessionId: z.string().min(1),
@@ -892,6 +912,7 @@ const RecordSchema = z
 			.min(1)
 			.max(11)
 			.optional(),
+		prReviewLegacyTranscriptCompatibility: z.boolean().optional(),
 		promptHash: z.string().optional(),
 		workspace: WorkspaceSchema.optional(),
 		taskChangeContext: TaskChangeContextSchema.optional(),
@@ -1215,6 +1236,14 @@ const CHECKPOINT_RESET_HINT =
 
 type LedgerLoadMode = 'legacy' | 'checkpoint+tail' | 'checkpoint+ledger-suffix';
 
+interface LenientLedgerSkipCounts {
+	malformedJson: number;
+	invalidRecord: number;
+}
+
+const lenientLedgerSignalByRoot = new Map<string, string>();
+const lenientLedgerSignalOrder: string[] = [];
+
 type LedgerLoad =
 	| {
 			status: 'ok';
@@ -1372,8 +1401,18 @@ function loadFoldedState(
 	for (const summary of checkpoint.closed) {
 		records.set(summary.correlationId, summary);
 	}
-	const foldError = foldLedgerTail(records, tail, options.strict, checkpoint);
+	const lenientSkips = emptyLenientLedgerSkipCounts();
+	const foldError = foldLedgerTail(
+		records,
+		tail,
+		options.strict,
+		checkpoint,
+		lenientSkips,
+	);
 	if (foldError) return { status: 'uncertain', reason: foldError };
+	if (!options.strict) {
+		recordLenientLedgerSkips(directory, mode, lenientSkips);
+	}
 	return {
 		status: 'ok',
 		mode,
@@ -1443,6 +1482,7 @@ function foldLedgerTail(
 	tail: Buffer,
 	strict: boolean,
 	checkpoint?: BackgroundDelegationCheckpoint,
+	lenientSkips?: LenientLedgerSkipCounts,
 ): string | null {
 	let lineNumber = 0;
 	for (const line of tail.toString('utf-8').split('\n')) {
@@ -1456,6 +1496,7 @@ function foldLedgerTail(
 			if (strict) {
 				return `background delegation ledger has malformed JSON at line ${lineNumber}`;
 			}
+			if (lenientSkips) lenientSkips.malformedJson += 1;
 			continue;
 		}
 		const parsed = RecordSchema.safeParse(parsedJson);
@@ -1463,6 +1504,7 @@ function foldLedgerTail(
 			if (strict) {
 				return `background delegation ledger has an invalid record at line ${lineNumber}`;
 			}
+			if (lenientSkips) lenientSkips.invalidRecord += 1;
 			continue;
 		}
 		const existing = checkpoint
@@ -1509,8 +1551,16 @@ function loadLegacyLedger(directory: string, strict: boolean): LedgerLoad {
 			};
 		}
 		const records = new Map<string, BackgroundDelegationRecord>();
-		const foldError = foldLedgerTail(records, Buffer.from(raw, 'utf-8'), false);
+		const lenientSkips = emptyLenientLedgerSkipCounts();
+		const foldError = foldLedgerTail(
+			records,
+			Buffer.from(raw, 'utf-8'),
+			false,
+			undefined,
+			lenientSkips,
+		);
 		void foldError; // lenient never fails
+		recordLenientLedgerSkips(directory, 'legacy-ledger', lenientSkips);
 		return {
 			status: 'ok',
 			mode: 'legacy',
@@ -1630,6 +1680,62 @@ function recordLedgerUncertainty(
 	}
 }
 
+function emptyLenientLedgerSkipCounts(): LenientLedgerSkipCounts {
+	return { malformedJson: 0, invalidRecord: 0 };
+}
+
+function shouldEmitLenientLedgerSignal(
+	directory: string,
+	signature: string,
+): boolean {
+	const key = canonicalRootKeyFresh(directory);
+	const existing = lenientLedgerSignalByRoot.get(key);
+	if (existing === signature) return false;
+	if (!existing) {
+		if (lenientLedgerSignalOrder.length >= MAX_TRACKED_LENIENT_LEDGER_SIGNALS) {
+			const evicted = lenientLedgerSignalOrder.shift();
+			if (evicted) lenientLedgerSignalByRoot.delete(evicted);
+		}
+		lenientLedgerSignalOrder.push(key);
+	}
+	lenientLedgerSignalByRoot.set(key, signature);
+	return true;
+}
+
+function recordLenientLedgerSkips(
+	directory: string,
+	source: LedgerLoadMode | 'legacy-ledger',
+	counts: LenientLedgerSkipCounts,
+): void {
+	const skipped = counts.malformedJson + counts.invalidRecord;
+	if (skipped <= 0) return;
+	const reason =
+		`background delegation ledger skipped ${skipped} malformed/invalid row${skipped === 1 ? '' : 's'} ` +
+		`during lenient ${source} read (${counts.malformedJson} malformed JSON, ${counts.invalidRecord} invalid records)`;
+	const signature = `${source}:${counts.malformedJson}:${counts.invalidRecord}`;
+	if (shouldEmitLenientLedgerSignal(directory, signature)) {
+		logger.criticalWarn(`[background] ${reason}`);
+	}
+	try {
+		const current = readDelegationHealthArtifact(directory);
+		if (
+			current?.lastUncertainty &&
+			current.lastUncertainty.source !== LENIENT_LEDGER_SIGNAL_SOURCE
+		) {
+			return;
+		}
+		writeDelegationHealthArtifact(directory, {
+			lastUncertainty: {
+				reason,
+				at: Date.now(),
+				source: LENIENT_LEDGER_SIGNAL_SOURCE,
+			},
+		});
+	} catch {
+		// The observation sink must never break the store.
+	}
+}
+
 /**
  * True when a record still owns an unsettled worktree (mirrors
  * init-orphan-recovery's protection predicate — exported so both sites share
@@ -1678,11 +1784,16 @@ function isCheckpointLiveRecord(record: BackgroundDelegationRecord): boolean {
  * result bodies (their sha256 `digest` is retained and covers the dropped
  * content). An authenticated, bounded final-line PR-review collection receipt is retained
  * because collection projects accepted/rejected retry IDs from that durable
- * metadata after compaction. `coderSettlement.observedFiles` is retained: only SETTLED
- * settlements reach summaries (see isCheckpointLiveRecord), and the settled
- * observed-file list is the executed-contract audit artifact — final and never
- * recomputed. Returns null when the summary would not validate; the caller
- * then keeps the full record instead (safety over size).
+ * metadata after compaction. Structured PR-review result receipts remain
+ * authoritative on `result.prReviewResultReceipt`; closed summaries strip the
+ * duplicate `terminalResult.result.prReviewResultReceipt` copy to keep the
+ * closed-set byte cost bounded, while live records retain the full terminal
+ * payload and are already capped by `MAX_CHECKPOINT_RECORDS`.
+ * `coderSettlement.observedFiles` is retained: only SETTLED settlements reach
+ * summaries (see isCheckpointLiveRecord), and the settled observed-file list is
+ * the executed-contract audit artifact — final and never recomputed. Returns
+ * null when the summary would not validate; the caller then keeps the full
+ * record instead (safety over size).
  */
 function buildClosedSummary(
 	record: BackgroundDelegationRecord,
@@ -1696,9 +1807,10 @@ function buildClosedSummary(
 	if (summary.terminalResult) {
 		summary.terminalResult = {
 			...summary.terminalResult,
-			// `record.result` is the collection projection source. Retaining the same
-			// authenticated footer in terminalResult would double checkpoint cost.
-			result: dropResultBody(summary.terminalResult.result),
+			// `record.result` is the collection projection source and the
+			// structured-receipt authority. Retaining the same projection on the
+			// nested terminal copy would double the closed-summary checkpoint cost.
+			result: dropTerminalResultBody(summary.terminalResult.result),
 		};
 	}
 	const parsed = RecordSchema.safeParse(summary);
@@ -1736,6 +1848,13 @@ function dropResultBody(
 	return rest;
 }
 
+function dropTerminalResultBody(
+	result: BackgroundDelegationResult,
+): BackgroundDelegationResult {
+	const { prReviewResultReceipt: _receipt, ...rest } = dropResultBody(result);
+	return rest;
+}
+
 function dropRetainedPrReviewReceipt(
 	record: BackgroundDelegationRecord,
 ): BackgroundDelegationRecord {
@@ -1765,7 +1884,7 @@ function dropRetainedPrReviewReceipt(
 			? {
 					terminalResult: {
 						...record.terminalResult,
-						result: dropResultBody(record.terminalResult.result),
+						result: dropTerminalResultBody(record.terminalResult.result),
 					},
 				}
 			: {}),
@@ -2346,6 +2465,7 @@ export interface RecordPendingInput {
 	mode?: string;
 	workflowLane?: string;
 	ownedWorkflowLanes?: string[];
+	prReviewLegacyTranscriptCompatibility?: boolean;
 	promptHash?: string;
 	workspace?: BackgroundWorkspaceSnapshot;
 	taskChangeContext?: BackgroundTaskChangeContext;
@@ -2380,6 +2500,12 @@ function buildPendingRecord(
 		...(input.workflowLane ? { workflowLane: input.workflowLane } : {}),
 		...(input.ownedWorkflowLanes?.length
 			? { ownedWorkflowLanes: [...input.ownedWorkflowLanes] }
+			: {}),
+		...(input.prReviewLegacyTranscriptCompatibility !== undefined
+			? {
+					prReviewLegacyTranscriptCompatibility:
+						input.prReviewLegacyTranscriptCompatibility,
+				}
 			: {}),
 		...(input.promptHash ? { promptHash: input.promptHash } : {}),
 		...(input.workspace ? { workspace: input.workspace } : {}),
@@ -2607,8 +2733,11 @@ export async function appendDelegationTransition(
 				}
 				next = {
 					...current,
-					schemaVersion:
-						current.schemaVersion === 1 ? 2 : current.schemaVersion,
+					schemaVersion: transition.result?.prReviewResultReceipt
+						? 4
+						: current.schemaVersion === 1
+							? 2
+							: current.schemaVersion,
 					status: transition.status,
 					updatedAt: now,
 					...(transition.completedAt !== undefined
@@ -2628,6 +2757,136 @@ export async function appendDelegationTransition(
 			`[background] appendDelegationTransition failed: ${err instanceof Error ? err.message : String(err)}`,
 		);
 		return null;
+	}
+}
+
+export type PublishPrReviewResultReceiptOutcome =
+	| { status: 'recorded'; record: BackgroundDelegationRecord }
+	| { status: 'duplicate'; record: BackgroundDelegationRecord }
+	| { status: 'conflict'; reason: string }
+	| { status: 'not_found'; reason: string }
+	| { status: 'terminal'; reason: string }
+	| { status: 'uncertain'; reason: string };
+
+/**
+ * Atomically publish the child-bound PR-review receipt while its delegation is
+ * still live. The workflow gate performs the outer session-state validation;
+ * this inner transaction rechecks immutable delegation identity under the
+ * evidence lock and provides semantic exactly-once behavior.
+ */
+export async function publishPrReviewResultReceipt(
+	directory: string,
+	input: {
+		parentSessionId: string;
+		childSessionId: string;
+		batchId: string;
+		laneId: string;
+		expectedWorkflowInstanceId: string;
+		expectedWorkflowRevision: number;
+		expectedBaseSha: string;
+		receipt: PrReviewResultReceipt;
+	},
+): Promise<PublishPrReviewResultReceiptOutcome> {
+	const parsed = PrReviewResultReceiptSchema.safeParse(input.receipt);
+	if (!parsed.success) {
+		return { status: 'conflict', reason: 'receipt schema validation failed' };
+	}
+	let outcome: PublishPrReviewResultReceiptOutcome = {
+		status: 'uncertain',
+		reason: 'receipt publication did not complete',
+	};
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				const records = loadRecordsForWrite(directory);
+				if (records === null) {
+					outcome = {
+						status: 'uncertain',
+						reason: 'delegation state is uncertain',
+					};
+					return;
+				}
+				const target = findReceiptPublicationTarget(records, input);
+				if (target.count !== 1 || !target.record) {
+					outcome = {
+						status: 'not_found',
+						reason: `expected one exact delegation record, found ${target.count}`,
+					};
+					return;
+				}
+				const current = target.record;
+				if (current.result?.prReviewResultReceipt) {
+					const existing = current.result.prReviewResultReceipt;
+					if (samePrReviewReceiptSemantics(existing, parsed.data)) {
+						outcome = { status: 'duplicate', record: current };
+					} else {
+						outcome = {
+							status: 'conflict',
+							reason: 'a different bound receipt is already recorded',
+						};
+					}
+					return;
+				}
+				if (current.status !== 'pending' && current.status !== 'running') {
+					outcome = {
+						status: 'terminal',
+						reason: `delegation is already ${current.status}`,
+					};
+					return;
+				}
+				const owned = current.ownedWorkflowLanes?.length
+					? current.ownedWorkflowLanes
+					: current.workflowLane
+						? [current.workflowLane]
+						: [];
+				const sameOwned =
+					owned.length === parsed.data.ownedWorkflowLanes.length &&
+					owned.every((lane) => parsed.data.ownedWorkflowLanes.includes(lane));
+				if (
+					parsed.data.workflowInstanceId !== input.expectedWorkflowInstanceId ||
+					parsed.data.workflowRevision !== input.expectedWorkflowRevision ||
+					parsed.data.baseSha !== input.expectedBaseSha ||
+					current.mode !== parsed.data.mode ||
+					current.workflowLane !== parsed.data.workflowLane ||
+					!sameOwned ||
+					current.workspace?.prHeadSha !== parsed.data.headSha ||
+					current.workspace?.gitHead !== parsed.data.headSha ||
+					(current.generation ?? 1) !== parsed.data.generation
+				) {
+					outcome = {
+						status: 'conflict',
+						reason: 'receipt does not match immutable delegation identity',
+					};
+					return;
+				}
+				const next: BackgroundDelegationRecord = {
+					...current,
+					schemaVersion: 4,
+					updatedAt: Date.now(),
+					result: {
+						...(current.result ?? {
+							chars: 0,
+							truncated: false,
+							digest: createHash('sha256').update('').digest('hex'),
+						}),
+						prReviewResultReceipt: parsed.data,
+					},
+				};
+				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
+				outcome = { status: 'recorded', record: next };
+			},
+		);
+		return outcome;
+	} catch (error) {
+		return {
+			status: 'uncertain',
+			reason: error instanceof Error ? error.message : String(error),
+		};
 	}
 }
 
@@ -2653,6 +2912,42 @@ export function buildBackgroundCompletionEventId(
 
 function sameJson(left: unknown, right: unknown): boolean {
 	return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function canonicalJson(value: unknown): unknown {
+	if (Array.isArray(value)) {
+		return value.map(canonicalJson).sort((left, right) => {
+			const leftJson = JSON.stringify(left);
+			const rightJson = JSON.stringify(right);
+			return leftJson < rightJson ? -1 : leftJson > rightJson ? 1 : 0;
+		});
+	}
+	if (value && typeof value === 'object') {
+		return Object.fromEntries(
+			Object.entries(value as Record<string, unknown>)
+				.sort(([left], [right]) => left.localeCompare(right))
+				.map(([key, entry]) => [key, canonicalJson(entry)]),
+		);
+	}
+	return value;
+}
+
+function sameCanonicalJson(left: unknown, right: unknown): boolean {
+	return (
+		JSON.stringify(canonicalJson(left)) === JSON.stringify(canonicalJson(right))
+	);
+}
+
+function samePrReviewReceiptSemantics(
+	left: PrReviewResultReceipt,
+	right: PrReviewResultReceipt,
+): boolean {
+	// The digest is derived from the serialized envelope, so a semantically
+	// equivalent replay with set-like arrays in another order has a different
+	// digest. Compare the validated receipt content without that derived field.
+	const { semanticEnvelopeDigest: _leftDigest, ...leftSemantic } = left;
+	const { semanticEnvelopeDigest: _rightDigest, ...rightSemantic } = right;
+	return sameCanonicalJson(leftSemantic, rightSemantic);
 }
 
 /**
@@ -2686,6 +2981,7 @@ function sameRetainedResult(
 		left.outputArtifactError === right.outputArtifactError &&
 		left.transcriptIncomplete === right.transcriptIncomplete &&
 		left.messageCount === right.messageCount &&
+		sameJson(left.prReviewResultReceipt, right.prReviewResultReceipt) &&
 		left.workflowLaneFailureClass === right.workflowLaneFailureClass &&
 		sameJson(left.salvagedWorkflowLanes, right.salvagedWorkflowLanes) &&
 		sameJson(
@@ -2693,6 +2989,50 @@ function sameRetainedResult(
 			right.salvagedWorkflowLaneRecoveries,
 		)
 	);
+}
+
+function recordedPrReviewResultReceipt(
+	record: BackgroundDelegationRecord,
+): PrReviewResultReceipt | undefined {
+	return (
+		record.result?.prReviewResultReceipt ??
+		record.terminalResult?.result.prReviewResultReceipt
+	);
+}
+
+function mergeRecordedPrReviewResultReceipt(
+	record: BackgroundDelegationRecord,
+	result: BackgroundDelegationResult,
+): BackgroundDelegationResult {
+	const existing = recordedPrReviewResultReceipt(record);
+	if (!existing || result.prReviewResultReceipt) return result;
+	return { ...result, prReviewResultReceipt: existing };
+}
+
+function findReceiptPublicationTarget(
+	records: readonly BackgroundDelegationRecord[],
+	input: {
+		parentSessionId: string;
+		childSessionId: string;
+		batchId: string;
+		laneId: string;
+	},
+): { count: number; record: BackgroundDelegationRecord | null } {
+	let count = 0;
+	let record: BackgroundDelegationRecord | null = null;
+	for (const candidate of records) {
+		if (
+			candidate.parentSessionId !== input.parentSessionId ||
+			candidate.subagentSessionId !== input.childSessionId ||
+			candidate.batchId !== input.batchId ||
+			candidate.laneId !== input.laneId
+		) {
+			continue;
+		}
+		count += 1;
+		if (count === 1) record = candidate;
+	}
+	return { count, record: count === 1 ? record : null };
 }
 
 function settlementProvenanceFor(
@@ -2758,13 +3098,21 @@ export async function claimTerminalResult(
 				if (records === null) return;
 				const current = findRecordForWrite(records, correlationId);
 				if (!current) return;
+				const normalizedResult = mergeRecordedPrReviewResultReceipt(
+					current,
+					parsedTerminal.data.result,
+				);
+				const normalizedTerminal =
+					normalizedResult === parsedTerminal.data.result
+						? parsedTerminal.data
+						: { ...parsedTerminal.data, result: normalizedResult };
 				if (current.terminalResult) {
-					if (!sameTerminalEvent(current.terminalResult, parsedTerminal.data)) {
+					if (!sameTerminalEvent(current.terminalResult, normalizedTerminal)) {
 						logger.warn(
 							`[background] claimTerminalResult: different terminal event for ` +
 								`correlationId=${correlationId}; ` +
 								`existing={status: ${current.terminalResult.status}, eventId: ${current.terminalResult.eventId}} ` +
-								`incoming={status: ${parsedTerminal.data.status}, eventId: ${parsedTerminal.data.eventId}}; ` +
+								`incoming={status: ${normalizedTerminal.status}, eventId: ${normalizedTerminal.eventId}}; ` +
 								`rejected`,
 						);
 						incrementLateTerminalCount(directory);
@@ -2788,7 +3136,7 @@ export async function claimTerminalResult(
 							state: 'pending',
 							provenance,
 							observedFiles: null,
-							updatedAt: parsedTerminal.data.recordedAt,
+							updatedAt: normalizedTerminal.recordedAt,
 						};
 					}
 				}
@@ -2797,16 +3145,20 @@ export async function claimTerminalResult(
 				// merge would then drop this terminal against a later checkpoint
 				// entry. Clamp updatedAt to at least the current snapshot's.
 				const foldUpdatedAt = Math.max(
-					parsedTerminal.data.recordedAt,
+					normalizedTerminal.recordedAt,
 					current.updatedAt,
 				);
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: 3,
-					status: parsedTerminal.data.status,
-					terminalResult: parsedTerminal.data,
-					result: parsedTerminal.data.result,
-					completedAt: parsedTerminal.data.recordedAt,
+					schemaVersion: normalizedTerminal.result.prReviewResultReceipt
+						? 4
+						: current.schemaVersion === 4
+							? 4
+							: 3,
+					status: normalizedTerminal.status,
+					terminalResult: normalizedTerminal,
+					result: normalizedTerminal.result,
+					completedAt: normalizedTerminal.recordedAt,
 					updatedAt: foldUpdatedAt,
 					...(coderSettlement ? { coderSettlement } : {}),
 				};
@@ -2935,7 +3287,7 @@ export async function claimCoderSettlement(
 				};
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: 3,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 					coderSettlement: settlement,
 					updatedAt: settlement.updatedAt,
 				};
@@ -3113,7 +3465,7 @@ export async function updateCoderSettlement(
 				};
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: 3,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 					coderSettlement: settlement,
 					updatedAt,
 				};
@@ -3268,7 +3620,7 @@ async function updateLegacyCoderSettlementTransfer(
 				const next: BackgroundDelegationRecord = transfer
 					? {
 							...current,
-							schemaVersion: 3,
+							schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 							legacyCoderSettlementTransfer: {
 								...transfer,
 								updatedAt,
@@ -3390,7 +3742,7 @@ export async function claimDelegationIngestion(
 					.digest('hex');
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: 3,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 					ingestion: {
 						state: 'claimed',
 						attempt,
@@ -3457,7 +3809,7 @@ export async function recordDelegationIngestionResult(
 				const updatedAt = options.now ?? Date.now();
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: 3,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 					status: success ? 'consumed' : 'ingestion_error',
 					ingestion: {
 						state: success ? 'consumed' : 'retryable',
@@ -3534,7 +3886,7 @@ export async function putPendingBackgroundAdvisory(
 				}
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: 3,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 					advisoryInbox: parsed.data,
 					updatedAt: createdAt,
 				};
@@ -3608,7 +3960,7 @@ export async function replacePendingBackgroundAdvisory(
 				}
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: 3,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 					advisoryInbox: parsed.data,
 					updatedAt: createdAt,
 				};
@@ -3690,7 +4042,7 @@ export async function preparePendingBackgroundAdvisories(
 					};
 					const next: BackgroundDelegationRecord = {
 						...current,
-						schemaVersion: 3,
+						schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 						advisoryInbox: nextAdvisory,
 						updatedAt: now,
 					};
@@ -3754,7 +4106,7 @@ async function releaseBackgroundAdvisoryPreparation(
 					const now = Date.now();
 					const next: BackgroundDelegationRecord = {
 						...current,
-						schemaVersion: 3,
+						schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 						advisoryInbox: {
 							...current.advisoryInbox,
 							preparation: undefined,
@@ -3825,7 +4177,7 @@ export async function acknowledgeObservedBackgroundAdvisories(
 					}
 					const next: BackgroundDelegationRecord = {
 						...current,
-						schemaVersion: 3,
+						schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 						advisoryInbox: {
 							...advisory,
 							state: 'delivered',

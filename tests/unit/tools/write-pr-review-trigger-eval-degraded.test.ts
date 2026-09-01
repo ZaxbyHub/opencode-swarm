@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { storeLaneOutput } from '../../../src/background/lane-output-store';
 import {
@@ -52,6 +52,7 @@ const originalResolveDiffStatsAsync =
 
 function tempRoot(): string {
 	const root = canonicalMkdtemp('trigger-eval-degraded-');
+	mkdirSync(join(root, '.git'), { recursive: true });
 	tempDirs.push(root);
 	return root;
 }
@@ -100,6 +101,7 @@ async function recordLane(
 		batchId: input.batchId,
 		laneId: input.laneId,
 		mode: input.mode,
+		prReviewLegacyTranscriptCompatibility: true,
 		workflowLane: input.workflowLane,
 		workspace: {
 			directory: root,
@@ -199,6 +201,7 @@ async function establishBoundReviewGate(
 			laneId: `lane-${index}`,
 			workflowLane,
 			mode: 'swarm-pr-review:micro',
+			prReviewLegacyTranscriptCompatibility: true,
 		});
 	}
 }

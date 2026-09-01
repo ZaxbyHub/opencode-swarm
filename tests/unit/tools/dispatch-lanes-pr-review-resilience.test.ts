@@ -104,6 +104,7 @@ beforeEach(async () => {
 		dispatchInternals.resolveExactMergeBase(...args);
 	dispatchInternals.loadPluginConfig = () =>
 		({
+			pr_review_legacy_transcript_compatibility: true,
 			pr_review_resilience: {
 				...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
 				enabled: true,
