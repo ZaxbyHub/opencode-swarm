@@ -107,6 +107,7 @@ async function persistAuthoritativeBaseLane(args: {
 		mode: 'swarm-pr-review:base',
 		workflowLane: args.workflowLane,
 		ownedWorkflowLanes: args.ownedWorkflowLanes,
+		prReviewLegacyTranscriptCompatibility: true,
 		workspace: {
 			directory,
 			gitHead: HEAD_SHA,
@@ -261,6 +262,7 @@ describe('dispatch_lanes PR review resilience singleton and concurrency', () => 
 			laneId: `fanout-${DIM_F}`,
 			mode: 'swarm-pr-review:base',
 			workflowLane: DIM_F,
+			prReviewLegacyTranscriptCompatibility: true,
 			workspace: {
 				directory,
 				gitHead: HEAD_SHA,

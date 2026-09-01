@@ -93,6 +93,10 @@ async function recordLane(args: {
 		laneId: args.lane,
 		...(args.mode ? { mode: args.mode } : {}),
 		...(args.workflowLane ? { workflowLane: args.workflowLane } : {}),
+		...(args.mode === 'swarm-pr-review:base' ||
+		args.mode === 'swarm-pr-review:micro'
+			? { prReviewLegacyTranscriptCompatibility: true }
+			: {}),
 		...(args.ownedWorkflowLanes
 			? { ownedWorkflowLanes: args.ownedWorkflowLanes }
 			: {}),

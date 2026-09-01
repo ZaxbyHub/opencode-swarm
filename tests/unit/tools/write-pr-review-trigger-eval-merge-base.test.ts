@@ -113,6 +113,7 @@ async function recordCompletedLane(
 		batchId: input.batchId,
 		laneId: input.laneId,
 		mode: input.mode as 'swarm-pr-review:base' | 'swarm-pr-review:micro',
+		prReviewLegacyTranscriptCompatibility: true,
 		workflowLane: input.workflowLane,
 		workspace: {
 			directory: root,

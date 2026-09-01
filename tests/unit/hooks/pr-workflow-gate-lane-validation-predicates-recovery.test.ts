@@ -35,6 +35,7 @@ function validInput(): PrReviewDiscoveryLaneValidationInput {
 		batchId: 'batch-1',
 		laneId: 'lane-1',
 		mode: 'swarm-pr-review:base',
+		prReviewLegacyTranscriptCompatibility: true,
 		workflowLane: LANE,
 		workspace: {
 			directory: '/project',

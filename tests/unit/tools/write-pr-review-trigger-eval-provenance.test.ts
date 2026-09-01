@@ -110,6 +110,7 @@ async function recordCompletedLane(
 		batchId: input.batchId,
 		laneId: input.laneId,
 		mode: input.mode,
+		prReviewLegacyTranscriptCompatibility: true,
 		workflowLane: input.workflowLane,
 		ownedWorkflowLanes: input.ownedWorkflowLanes,
 		workspace: {

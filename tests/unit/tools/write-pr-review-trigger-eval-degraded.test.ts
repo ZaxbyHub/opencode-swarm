@@ -100,6 +100,7 @@ async function recordLane(
 		batchId: input.batchId,
 		laneId: input.laneId,
 		mode: input.mode,
+		prReviewLegacyTranscriptCompatibility: true,
 		workflowLane: input.workflowLane,
 		workspace: {
 			directory: root,
@@ -199,6 +200,7 @@ async function establishBoundReviewGate(
 			laneId: `lane-${index}`,
 			workflowLane,
 			mode: 'swarm-pr-review:micro',
+			prReviewLegacyTranscriptCompatibility: true,
 		});
 	}
 }

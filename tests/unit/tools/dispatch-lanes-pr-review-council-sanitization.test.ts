@@ -93,6 +93,7 @@ async function establishReviewPrerequisites(): Promise<void> {
 			laneId: lane.laneId,
 			mode: 'swarm-pr-review:base',
 			workflowLane: lane.workflowLane,
+			prReviewLegacyTranscriptCompatibility: true,
 			workspace: {
 				directory,
 				gitHead: HEAD_SHA,
@@ -151,6 +152,7 @@ async function establishReviewPrerequisites(): Promise<void> {
 			laneId,
 			mode: 'swarm-pr-review:micro',
 			workflowLane,
+			prReviewLegacyTranscriptCompatibility: true,
 			workspace: {
 				directory,
 				gitHead: HEAD_SHA,

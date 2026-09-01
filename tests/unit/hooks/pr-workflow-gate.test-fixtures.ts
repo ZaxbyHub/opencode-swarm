@@ -300,6 +300,7 @@ export async function establishReviewPrerequisitesWithConsolidatedMicroLane(
 		mode: 'swarm-pr-review:micro',
 		workflowLane: familyA,
 		ownedWorkflowLanes: [...ownedFamilies],
+		prReviewLegacyTranscriptCompatibility: true,
 		workspace: {
 			directory: tempDir,
 			gitHead: HEAD_SHA,
