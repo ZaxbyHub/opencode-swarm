@@ -1733,8 +1733,8 @@ async function initializeOpenCodeSwarm(
 	> | null = null;
 	const maintainBackgroundDelegationsOnSessionEvent =
 		async (): Promise<void> => {
-			// A rejected import must not poison the memo: reset the promise so
-			// the next session-close event retries instead of skipping
+			// A rejected import must not poison the memo: reset the promise so the
+			// next session-close event retries instead of skipping
 			// maintenance for the rest of the process lifetime. The local
 			// binding is required — after a rejection resets the memo, a fresh
 			// call may have replaced it while this call still awaits (and
@@ -1758,6 +1758,15 @@ async function initializeOpenCodeSwarm(
 				onLegacyCoderSettlementAdvisoryReplaced:
 					backgroundCompletionObserver.notifyLegacyCoderSettlementAdvisoryReplaced,
 			});
+			// Issue #2045 crash recovery (blocking lanes): a session close is a
+			// listed runtime maintenance trigger, and terminal lane records —
+			// including BLOCKING lanes that have no collector — replay their
+			// authoritative receipt reconciliation here from the durable
+			// terminalResult transcript. Bounded and fail-open inside.
+			const { recoverTerminalLaneReceipts } = await import(
+				'./background/delegation-lifecycle.js'
+			);
+			await recoverTerminalLaneReceipts(ctx.directory);
 		};
 	const delegationSanitizerHook = createDelegationSanitizerHook(ctx.directory);
 	const memoryLifecycleHooks = createMemoryLifecycleHooks({

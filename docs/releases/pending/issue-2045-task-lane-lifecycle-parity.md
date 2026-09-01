@@ -16,10 +16,14 @@ Exactly-once terminals:
   and the observation pass: the AUTHORITATIVE receipts (ledger-committed ACK
   terminals, unacknowledged-critical violations, reviewer verdicts) re-run on
   settle replays — the receipt ledger is idempotent, so they close exactly
-  once — while the DIAGNOSTIC observations (cost telemetry, trajectory, and
-  the audit-only non-critical `unacknowledged` knowledge observation, which
-  bypasses the ledger) are exactly-once-at-emit: the same crash window the
-  Task transport's hook emissions have always had. Lane records gain the immutable
+  once — and the replay is reached through two production recovery entries
+  (collect_lane_results recovers the batch's terminal records per invocation;
+  the session-close maintenance pass recovers directory-wide, covering
+  blocking lanes that have no collector), replaying from the durable
+  terminalResult transcript. The DIAGNOSTIC observations (cost telemetry,
+  trajectory, and the audit-only non-critical `unacknowledged` knowledge
+  observation, which bypasses the ledger) are exactly-once-at-emit: the same
+  crash window the Task transport's hook emissions have always had. Lane records gain the immutable
   `terminalResult` (eventId identity), duplicate replays return a benign
   `duplicate` disposition without re-running observations, and a conflicting
   event (e.g. a success arriving after a terminal cancel) is rejected and

@@ -46,6 +46,7 @@ import {
 	claimTerminalResult,
 	findByCorrelationId,
 	isTerminalDelegationStatus,
+	readDelegations,
 } from './pending-delegations.js';
 
 /** Terminal statuses a shared settle may establish (mirrors Task semantics). */
@@ -404,6 +405,71 @@ async function runDelegationTerminalObservations(
 		now,
 	);
 	await reconcileLaneKnowledgeReceipts(directory, record, observations);
+}
+
+/** Bounded per-pass cap for terminal-lane receipt recovery (crash window). */
+export const MAX_TERMINAL_LANE_RECEIPT_RECOVERY = 64;
+
+/** A terminal lane record whose durable transcript can still reconcile receipts. */
+function isRecoverableTerminalLaneRecord(
+	record: BackgroundDelegationRecord,
+): boolean {
+	return Boolean(
+		record.laneId &&
+			record.terminalResult &&
+			typeof record.terminalResult.result.text === 'string' &&
+			record.terminalResult.result.text.length > 0,
+	);
+}
+
+export interface TerminalLaneReceiptRecoveryResult {
+	/** Terminal lane records whose receipt reconciliation replay was attempted. */
+	recovered: number;
+}
+
+/**
+ * Durable crash-recovery pass for terminal lane records (final-critic
+ * challenge): a lane whose terminal claim landed but whose observation pass
+ * died is TERMINAL, so the collector's active-record filter skips it forever —
+ * the duplicate-replay path in {@link settleDelegationTerminal} would never be
+ * entered again on its own. This pass re-enters it: the durable transcript
+ * (`terminalResult.result.text`, persisted by the claim) is replayed through
+ * the ledger-idempotent receipt reconciliation in replay mode — authoritative
+ * receipts close exactly once; diagnostics never re-emit.
+ *
+ * Production wiring: (a) `collect_lane_results` runs it once per invocation
+ * over the batch's terminal records (the async-lane restart path), and (b) the
+ * session-close maintenance trigger runs it directory-wide, bounded
+ * (`MAX_TERMINAL_LANE_RECEIPT_RECOVERY`), which is what recovers BLOCKING lane
+ * records that have no collector. Fail-open per record; never throws.
+ */
+export async function recoverTerminalLaneReceipts(
+	directory: string,
+	records?: readonly BackgroundDelegationRecord[],
+): Promise<TerminalLaneReceiptRecoveryResult> {
+	const candidates = (records ?? readDelegations(directory)).filter(
+		isRecoverableTerminalLaneRecord,
+	);
+	let recovered = 0;
+	for (const record of candidates.slice(
+		0,
+		MAX_TERMINAL_LANE_RECEIPT_RECOVERY,
+	)) {
+		const transcript = record.terminalResult?.result.text;
+		if (!transcript) continue;
+		try {
+			await reconcileLaneKnowledgeReceipts(
+				directory,
+				record,
+				{ transcript },
+				true,
+			);
+			recovered += 1;
+		} catch {
+			// fail-open per record — one bad record never blocks the rest
+		}
+	}
+	return { recovered };
 }
 
 /**

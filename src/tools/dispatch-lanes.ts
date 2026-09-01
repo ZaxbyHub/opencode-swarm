@@ -11,6 +11,7 @@ import {
 import {
 	emitDelegationBegin,
 	isBenignSettleOutcome,
+	recoverTerminalLaneReceipts,
 	settleDelegationTerminal,
 } from '../background/delegation-lifecycle.js';
 import {
@@ -1958,6 +1959,13 @@ export async function executeCollectLaneResults(
 			message: `No async lane batch found for ${parsed.data.batch_id}`,
 		});
 	}
+	// Issue #2045 crash recovery, once per invocation: terminal lane records are
+	// invisible to the active-record settle loop below, so a lane whose terminal
+	// claim landed but whose observation pass died would never reconcile its
+	// authoritative receipts again. Replaying here (from the durable
+	// terminalResult transcript) is the async-lane restart recovery path —
+	// ledger-idempotent, fail-open, and never re-emits diagnostics.
+	await recoverTerminalLaneReceipts(directory, records);
 	// Issue #2381: one bounded revision context per unique (project root, PR head)
 	// for THIS invocation only. Deliberately NOT keyed by any `generation`: the
 	// record's `generation` is `createLaneSession`'s session-create RETRY counter
