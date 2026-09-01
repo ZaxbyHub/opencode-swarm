@@ -644,6 +644,7 @@ export async function establishReviewPrerequisitesWithMislabeledSingletonLane():
 		batchId: 'base-all',
 		laneId: mislabeledLane.laneId,
 		mode: 'swarm-pr-review:base',
+		prReviewLegacyTranscriptCompatibility: true,
 		workflowLane: mislabeledLane.workflowLane,
 		workspace: {
 			directory: tempDir,
