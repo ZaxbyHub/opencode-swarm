@@ -46,8 +46,8 @@ afterEach(() => {
 describe('exportKinds persistence (schema 1.6.0)', () => {
 	test('builder persists declaration kinds for exported symbols', async () => {
 		const graph = await buildWorkspaceGraphAsync(tmp);
-		expect(graph.schema_version).toBe('1.6.0');
-		expect(GRAPH_SCHEMA_VERSION).toBe('1.6.0');
+		expect(graph.schema_version).toBe(GRAPH_SCHEMA_VERSION);
+		expect(GRAPH_SCHEMA_VERSION).toBe('1.7.0');
 		const node = Object.values(graph.nodes).find((n) =>
 			n.moduleName.endsWith('util.ts'),
 		);
