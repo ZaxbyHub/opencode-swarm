@@ -161,6 +161,13 @@ describe('local-only command resolution (#2303)', () => {
 		).toEqual([path.join(dir, 'node_modules', '.bin', 'eslint'), '.']);
 	});
 
+	test('FB-001 rejects a Windows node shim when node is unavailable', () => {
+		const { dir } = fixtureWithExecutables(['tsc.cmd']);
+		expect(
+			resolveLocalNodeTool('tsc', ['--noEmit'], dir, 'win32', () => false),
+		).toBeNull();
+	});
+
 	test('FB-001 falls back to PATH for node tools only when the caller explicitly allows it', () => {
 		// Previous code had no PATH fallback at all for the node-tool helper, so
 		// default-backend/test-runner callers could not honor existing PATH tools.
