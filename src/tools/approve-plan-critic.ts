@@ -70,7 +70,7 @@ export async function executeApprovePlanCritic(
 export const approve_plan_critic: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Record a MANUAL plan_critic_gate approval snapshot to unblock the ratchet-tighter critic_pre_plan execution gate when the critic already returned APPROVED but the mechanical snapshot recorder failed to persist it (verdict-format mismatch, dispatch-signal miss, or a plan.json read race — issue #2012). The snapshot carries a distinct method: "manual_override" audit marker. Architect-only: the active session must be the architect. Prefer re-running MODE: CRITIC-GATE first; use this only as an escape hatch when a legitimate APPROVED was lost. A reason is required and audited to .swarm/events.jsonl. The human-confirmed variant is /swarm approve-plan-critic.',
+			'Record a MANUAL plan_critic_gate approval snapshot to unblock the ratchet-tighter critic_pre_plan execution gate when the critic already returned APPROVED but the mechanical snapshot recorder failed to persist it (verdict-format mismatch, dispatch-signal miss, or a plan.json read race — issue #2012). The snapshot carries a distinct method: "manual_override" audit marker. Architect-only: the active session must be the architect. Prefer re-running MODE: CRITIC-GATE first; use this only as an escape hatch when a legitimate APPROVED was lost, or as the sanctioned recovery for a bookkeeping-grade hashed-field repair under the critic-gate PLAN FREEZE rule (e.g. a files_touched-only scope reconciliation) — the reason must state which case applies. A reason is required and audited to .swarm/events.jsonl. The human-confirmed variant is /swarm approve-plan-critic.',
 		args: {
 			reason: ApprovePlanCriticArgsSchema.shape.reason,
 		},

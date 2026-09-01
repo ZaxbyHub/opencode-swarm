@@ -15,6 +15,8 @@ import { describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createArchitectAgent } from '../../../src/agents/architect';
+import type { Plan } from '../../../src/config/plan-schema';
+import { computePlanStructureHash } from '../../../src/plan/ledger';
 
 const readSkill = (relativePath: string): string =>
 	readFileSync(join(process.cwd(), relativePath), 'utf-8');
@@ -173,7 +175,7 @@ describe('issue #1994 P1 — plan freeze after approval (critic-gate)', () => {
 		expect(criticGateOpenCode).toContain('MATERIAL (invalidates the approval)');
 	});
 
-	it('material fields match the actual Task schema fields (plan-schema.ts)', () => {
+	it('material bullet names the structural task fields it claims (hash behavior proven below)', () => {
 		// `name` is deliberately absent — TaskSchema has no name field
 		// (src/config/plan-schema.ts); see the plan-critic review in the
 		// issue-1994 trace.
@@ -187,15 +189,53 @@ describe('issue #1994 P1 — plan freeze after approval (critic-gate)', () => {
 			'`description`',
 			'`acceptance`',
 			'`depends`',
-			'`removed_task_ids`',
 		]) {
 			expect(materialLine).toContain(field);
 		}
+		// `removed_task_ids` is a save_plan ARGUMENT, not a hashed field: task
+		// removal changes the hash through the task array itself (post-hoc
+		// audit of PR #2457, finding 3).
+		expect(materialLine).toContain('`removed_task_ids` `save_plan` argument');
+		expect(materialLine).toContain('never the argument itself');
 		// fr_refs is NOT in the hashed MATERIAL list (computePlanStructureHash
 		// deliberately excludes it — src/plan/ledger.ts) and `name` does not
 		// exist on tasks at all.
 		expect(materialLine).not.toContain('`fr_refs`');
 		expect(materialLine).not.toContain('`name`');
+	});
+
+	it('default-MATERIAL catch-all names every hashed field the specific bullets omit', () => {
+		// Post-hoc audit of PR #2457, finding 1: computePlanStructureHash also
+		// hashes schema_version, swarm, migration_status, execution_profile,
+		// phase id/name/required_agents — none of which the MATERIAL or
+		// BOOKKEEPING-GRADE bullets named. The catch-all bullet must close that
+		// gap so the approve_plan_critic bookkeeping recovery cannot be
+		// rationalized for those genuinely material fields.
+		const catchAllLine = criticGateOpenCode
+			.split('\n')
+			.find((line) => line.startsWith('- DEFAULT-MATERIAL CATCH-ALL'));
+		expect(catchAllLine).toBeDefined();
+		expect(catchAllLine).toContain('MATERIAL by default');
+		// Position-agnostic classification (PR #2463 review fix C1): the
+		// BOOKKEEPING-GRADE bullet sits BELOW this one, so a directional
+		// "not listed above" would wrongly pull bookkeeping fields into
+		// MATERIAL-by-default.
+		expect(catchAllLine).toContain(
+			'not classified by the other bullets in this list',
+		);
+		expect(catchAllLine).not.toContain('not listed above');
+		for (const field of [
+			'`schema_version`',
+			'`swarm`',
+			'`migration_status`',
+			'`execution_profile`',
+			'`id`',
+			'`name`',
+			'`required_agents`',
+		]) {
+			expect(catchAllLine).toContain(field);
+		}
+		expect(catchAllLine).toContain('never the bookkeeping recovery');
 	});
 
 	it('fr_refs is material on process grounds with an honest hash caveat', () => {
@@ -226,6 +266,175 @@ describe('issue #1994 P1 — plan freeze after approval (critic-gate)', () => {
 		expect(criticGateOpenCode).toContain(
 			'never split material changes across separate calls to dodge the re-critic',
 		);
+	});
+
+	describe('schema-bound hash differential (computePlanStructureHash)', () => {
+		// Post-hoc audit of PR #2457, finding 4: the previous version of this
+		// suite asserted the plan-freeze taxonomy against hardcoded strings
+		// only. These tests derive the hashed-field behavior from the REAL
+		// computePlanStructureHash so the critic-gate skill text cannot drift
+		// from the runtime hash semantics.
+		const baseTask = {
+			id: '1.1',
+			phase: 1,
+			status: 'pending',
+			size: 'small',
+			description: 'do the thing',
+			depends: [],
+			acceptance: 'it is done',
+			files_touched: ['src/a.ts'],
+			evidence_path: undefined,
+			blocked_reason: undefined,
+			fr_refs: ['FR-001'],
+		};
+		const basePlan = {
+			schema_version: '1.0.0',
+			title: 'T',
+			swarm: 'S',
+			current_phase: 1,
+			migration_status: undefined,
+			execution_profile: undefined,
+			phases: [
+				{
+					id: 1,
+					name: 'P1',
+					status: 'pending',
+					tasks: [baseTask],
+					type: undefined,
+					required_agents: undefined,
+				},
+			],
+		} as unknown as Plan;
+
+		const hashAfter = (mutate: (plan: Plan) => void): string => {
+			const clone = structuredClone(basePlan);
+			mutate(clone);
+			return computePlanStructureHash(clone);
+		};
+		const baseHash = computePlanStructureHash(basePlan);
+		const firstTask = (plan: Plan): Record<string, unknown> =>
+			(plan.phases[0] as unknown as Record<string, unknown>).tasks[0] as Record<
+				string,
+				unknown
+			>;
+		const firstPhase = (plan: Plan): Record<string, unknown> =>
+			plan.phases[0] as unknown as Record<string, unknown>;
+
+		it('excludes status fields and fr_refs from the hash (skill: STATUS-ONLY + fr_refs caveat)', () => {
+			expect(
+				hashAfter((plan) => {
+					firstTask(plan).status = 'in_progress';
+				}),
+			).toBe(baseHash);
+			expect(
+				hashAfter((plan) => {
+					firstPhase(plan).status = 'in_progress';
+				}),
+			).toBe(baseHash);
+			expect(
+				hashAfter((plan) => {
+					firstTask(plan).fr_refs = ['FR-001', 'FR-002'];
+				}),
+			).toBe(baseHash);
+		});
+
+		it('hashes the MATERIAL task fields named by the skill', () => {
+			for (const [field, value] of [
+				['id', '1.2'],
+				['phase', 2],
+				['description', 'other thing'],
+				['acceptance', 'it is really done'],
+				['depends', ['1.0']],
+			] as const) {
+				expect(
+					hashAfter((plan) => {
+						firstTask(plan)[field] = value;
+					}),
+				).not.toBe(baseHash);
+			}
+		});
+
+		it('hashes task addition and removal (removed_task_ids framing)', () => {
+			expect(
+				hashAfter((plan) => {
+					(firstPhase(plan).tasks as unknown[]).push({
+						...baseTask,
+						id: '1.2',
+					});
+				}),
+			).not.toBe(baseHash);
+			expect(
+				hashAfter((plan) => {
+					(firstPhase(plan).tasks as unknown[]).pop();
+				}),
+			).not.toBe(baseHash);
+		});
+
+		it('hashes the BOOKKEEPING-GRADE fields named by the skill', () => {
+			for (const [field, value] of [
+				['size', 'medium'],
+				['evidence_path', '.swarm/evidence/x'],
+				['blocked_reason', 'waiting'],
+				['files_touched', ['src/b.ts']],
+			] as const) {
+				expect(
+					hashAfter((plan) => {
+						firstTask(plan)[field] = value;
+					}),
+				).not.toBe(baseHash);
+			}
+			expect(
+				hashAfter((plan) => {
+					plan.title = 'Other';
+				}),
+			).not.toBe(baseHash);
+			expect(
+				hashAfter((plan) => {
+					plan.current_phase = 2;
+				}),
+			).not.toBe(baseHash);
+		});
+
+		it('hashes the DEFAULT-MATERIAL CATCH-ALL fields named by the skill', () => {
+			expect(
+				hashAfter((plan) => {
+					(plan as unknown as Record<string, unknown>).schema_version = '9.9.9';
+				}),
+			).not.toBe(baseHash);
+			expect(
+				hashAfter((plan) => {
+					plan.swarm = 'Other';
+				}),
+			).not.toBe(baseHash);
+			expect(
+				hashAfter((plan) => {
+					(plan as unknown as Record<string, unknown>).migration_status =
+						'migrated';
+				}),
+			).not.toBe(baseHash);
+			expect(
+				hashAfter((plan) => {
+					(plan as unknown as Record<string, unknown>).execution_profile = {
+						max_concurrent_tasks: 2,
+					};
+				}),
+			).not.toBe(baseHash);
+			expect(
+				hashAfter((plan) => {
+					firstPhase(plan).id = 2;
+				}),
+			).not.toBe(baseHash);
+			expect(
+				hashAfter((plan) => {
+					firstPhase(plan).name = 'P2';
+				}),
+			).not.toBe(baseHash);
+			expect(
+				hashAfter((plan) => {
+					firstPhase(plan).required_agents = ['coder', 'reviewer'];
+				}),
+			).not.toBe(baseHash);
+		});
 	});
 });
 
@@ -261,7 +470,11 @@ describe('issue #1994 record — FR-009 descope + proposed dual-validation patte
 			.replace(/\s+/g, ' ');
 		expect(flat).toContain('FR-009 disposition: DESCOPE');
 		expect(flat).toContain('b7e12d36');
-		expect(flat).toContain('#1691');
+		// Durability pairing (post-hoc audit of PR #2457, finding 2): the
+		// canonical hash is paired with its post-rewrite local twin so a fresh
+		// clone can always resolve the provenance.
+		expect(flat).toContain('d82c7172');
+		expect(flat).toContain('issue-#1691 investigation');
 		expect(flat).toContain('#1978');
 		expect(flat).toContain(
 			'Do not cite FR-009 as a closed schema+runtime precedent',

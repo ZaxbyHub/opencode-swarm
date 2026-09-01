@@ -208,6 +208,13 @@ export const PlaceholderEvidenceSchema = BaseEvidenceSchema.extend({
 	files_scanned: z.number().int(),
 	files_with_findings: z.number().int(),
 	findings_count: z.number().int(),
+	// Scoping-mode audit metadata (PR #2457 review follow-up): present only
+	// when the caller supplied an added_lines map. Bounded counts — never the
+	// map itself — so auditors can tell a diff-scoped verdict from an
+	// unfiltered one without growing the evidence bundle.
+	diff_scoped: z.boolean().optional(),
+	added_lines_files: z.number().int().min(0).optional(),
+	added_lines_total: z.number().int().min(0).optional(),
 });
 export type PlaceholderEvidence = z.infer<typeof PlaceholderEvidenceSchema>;
 
