@@ -6,7 +6,11 @@
 
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
-import { type BuildCommand, discoverBuildCommands } from '../build/discovery';
+import {
+	type BuildCommand,
+	type BuildDiscoverySkip,
+	discoverBuildCommands,
+} from '../build/discovery';
 import type { BuildEvidence, EvidenceVerdict } from '../config/evidence-schema';
 import { saveEvidence } from '../evidence/manager';
 import { bunSpawn } from '../utils/bun-compat';
@@ -18,6 +22,8 @@ import { createSwarmTool } from './create-tool';
 export const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes
 export const MAX_OUTPUT_BYTES = 10 * 1024; // 10KB
 export const MAX_OUTPUT_LINES = 100;
+const NO_BUILD_FILES_DISCOVERED_REASON =
+	'No build commands discovered (no supported build files found)';
 
 // ============ Types ============
 
@@ -48,6 +54,9 @@ export interface BuildCheckResult {
 		runs_count: number;
 		failed_count: number;
 		skipped_reason?: string;
+		environment_unavailable?: Array<
+			BuildDiscoverySkip & { code: 'environment_unavailable' }
+		>;
 	};
 }
 
@@ -236,16 +245,20 @@ export async function runBuildCheck(
 	// Determine verdict
 	let verdict: EvidenceVerdict;
 	let skipped_reason: string | undefined;
+	const environmentUnavailable = discoveryResult.skipped.filter(
+		(skip): skip is BuildDiscoverySkip & { code: 'environment_unavailable' } =>
+			skip.code === 'environment_unavailable',
+	);
 
 	if (runs.length === 0) {
-		verdict = 'info';
+		verdict = environmentUnavailable.length > 0 ? 'skip' : 'info';
 		// Generate skipped reason
 		if (discoveryResult.skipped.length > 0) {
 			skipped_reason = discoveryResult.skipped
 				.map((s) => `${s.ecosystem}: ${s.reason}`)
 				.join('; ');
 		} else {
-			skipped_reason = 'No build commands discovered (no toolchains found)';
+			skipped_reason = NO_BUILD_FILES_DISCOVERED_REASON;
 		}
 	} else if (failedCount > 0) {
 		verdict = 'fail';
@@ -261,6 +274,8 @@ export async function runBuildCheck(
 			runs_count: runs.length,
 			failed_count: failedCount,
 			skipped_reason,
+			environment_unavailable:
+				environmentUnavailable.length > 0 ? environmentUnavailable : undefined,
 		},
 	};
 }
@@ -318,6 +333,7 @@ export const build_check: ReturnType<typeof tool> = createSwarmTool({
 			runs_count: result.summary.runs_count,
 			failed_count: result.summary.failed_count,
 			skipped_reason: result.summary.skipped_reason,
+			environment_unavailable: result.summary.environment_unavailable,
 		};
 
 		// Save evidence

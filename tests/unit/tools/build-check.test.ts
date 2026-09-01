@@ -204,7 +204,6 @@ describe('build-check.ts - runBuildCheck', () => {
 		expect(result.runs).toHaveLength(0);
 		expect(result.summary.skipped_reason).toBeDefined();
 	});
-
 	test('discovers npm build command when package.json exists', async () => {
 		// Create a package.json with a build script
 		await fs.promises.writeFile(

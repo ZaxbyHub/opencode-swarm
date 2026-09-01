@@ -130,7 +130,6 @@ describe('discoverBuildCommandsFromProfiles - Attack: Malformed workingDir', () 
 
 describe('discoverBuildCommandsFromProfiles - Attack: Empty Commands Array', () => {
 	it('should skip profile when build.commands is empty array', async () => {
-		// Arrange: Profile with no commands
 		const emptyCommandsProfile: MockLanguageProfile = {
 			id: 'empty-lang',
 			displayName: 'Empty Language',
@@ -159,12 +158,12 @@ describe('discoverBuildCommandsFromProfiles - Attack: Empty Commands Array', () 
 		// Act
 		const result = await module.discoverBuildCommandsFromProfiles(TEST_DIR);
 
-		// Assert: Should skip the profile (no commands, but no crash)
 		expect(result.commands).toEqual([]);
 		expect(result.skipped).toHaveLength(1);
 		expect(result.skipped[0].ecosystem).toBe('empty-lang');
-		expect(result.skipped[0].reason).toContain('No binary available');
-		expect(result.skipped[0].reason).toContain('tried'); // Should mention tried binaries
+		expect(result.skipped[0].reason).toBe(
+			'No matching build files for profile empty-lang',
+		);
 	});
 });
 
@@ -481,8 +480,8 @@ describe('discoverBuildCommands - Attack: Scope with Empty changedFiles', () => 
 		// Note: When no profiles detected, fallback ecosystem detection runs and adds skipped entries
 		expect(result.commands).toEqual([]);
 		expect(Array.isArray(result.skipped)).toBe(true);
-		// Should have skipped entries from ecosystem fallback
-		expect(result.skipped.length).toBeGreaterThan(0);
+		// No build files exist, so unrelated ecosystems must not be reported unavailable.
+		expect(result.skipped).toEqual([]);
 	});
 });
 

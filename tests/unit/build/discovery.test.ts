@@ -566,7 +566,7 @@ describe('build/discovery.ts - Discovery Function', () => {
 			// If there are multiple commands, they should be sorted
 			if (result.commands.length > 1) {
 				for (let i = 0; i < result.commands.length - 1; i++) {
-					expect(result.commands[i].priority).toBeLessThanOrEqual(
+					expect(result.commands[i].priority).toBeGreaterThanOrEqual(
 						result.commands[i + 1].priority,
 					);
 				}

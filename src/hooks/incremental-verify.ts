@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { resolveLocalNodeTool } from '../build/command-resolution';
 import type { IncrementalVerifyConfig } from '../config/schema';
 import { getStoredInputArgs } from './guardrails/stored-input-args';
 import { spawnAsync } from './spawn-helper';
@@ -99,7 +100,10 @@ function detectTypecheckCommand(
 				deps?.typescript ||
 				fs.existsSync(path.join(projectDir, 'tsconfig.json'));
 			if (hasTSMarkers) {
-				return { command: ['npx', 'tsc', '--noEmit'], language: 'typescript' };
+				return {
+					command: resolveLocalNodeTool('tsc', ['--noEmit'], projectDir),
+					language: 'typescript',
+				};
 			}
 			// No TS markers — fall through to Go/Rust/Python/C# detection below
 		} catch {
