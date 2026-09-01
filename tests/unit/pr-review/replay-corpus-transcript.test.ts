@@ -8,7 +8,9 @@ import {
 	_test_exports,
 	activatePrWorkflow,
 	bindPrReviewBase,
+	enforcePrReviewBaseDimensions,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import { LEGACY_PR_REVIEW_RESILIENCE_POLICY } from '../pr-review-test-policy.js';
 import { executeSubmitPrReviewResult } from '../../../src/tools/submit-pr-review-result.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { initializeGitRepository } from '../helpers/git-repository.js';
@@ -42,6 +44,9 @@ const originalResolveRevisionDigest =
 const originalResolveWorkingTreeClean = _test_exports.resolveIsWorkingTreeClean;
 const originalResolveWorkingTreeCleanAsync =
 	_test_exports.resolveIsWorkingTreeCleanAsync;
+const originalResolveDiffStats = _test_exports.resolvePrReviewDiffStats;
+const originalResolveDiffStatsAsync =
+	_test_exports.resolvePrReviewDiffStatsAsync;
 
 beforeEach(async () => {
 	directory = canonicalMkdtemp('pr-review-corpus-transcript-');
@@ -52,6 +57,15 @@ beforeEach(async () => {
 	_test_exports.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
 	_test_exports.resolveIsWorkingTreeClean = () => true;
 	_test_exports.resolveIsWorkingTreeCleanAsync = async () => true;
+	// Tier-M sized diff so a consolidated two-dimension lane may be admitted
+	// (tier L forbids consolidation on the initial base wave).
+	_test_exports.resolvePrReviewDiffStats = () => ({
+		changedLines: 400,
+		changedFiles: 12,
+		hasSubmoduleChange: false,
+	});
+	_test_exports.resolvePrReviewDiffStatsAsync = async (...args) =>
+		_test_exports.resolvePrReviewDiffStats(...args);
 });
 
 afterEach(async () => {
@@ -62,6 +76,8 @@ afterEach(async () => {
 	_test_exports.resolveIsWorkingTreeClean = originalResolveWorkingTreeClean;
 	_test_exports.resolveIsWorkingTreeCleanAsync =
 		originalResolveWorkingTreeCleanAsync;
+	_test_exports.resolvePrReviewDiffStats = originalResolveDiffStats;
+	_test_exports.resolvePrReviewDiffStatsAsync = originalResolveDiffStatsAsync;
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -96,6 +112,27 @@ async function establishWorkflowAndLane(
 	});
 	const batchId = 'corpus-transcript-batch';
 	const laneId = 'corpus-transcript-lane';
+	// Admit the base batch through the registered enforcement path so the
+	// gate state carries the live workflow instance/revision/base identity
+	// the discovery settlement validates against (final-critic finding 3:
+	// the corpus must prove the lane settles COMPLETED, not merely that the
+	// receipt bytes survive).
+	await enforcePrReviewBaseDimensions(
+		directory,
+		SESSION_ID,
+		[
+			{
+				laneId,
+				workflowLane: ownedLanes[0] as never,
+				ownedWorkflowLanes: ownedLanes as never,
+			},
+		],
+		{
+			batchId,
+			prHeadSha: HEAD_SHA,
+			prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
+		},
+	);
 	await recordPendingDelegation(directory, {
 		correlationId: CHILD_SESSION,
 		jobId: null,
@@ -151,73 +188,32 @@ async function submitClean(args: {
 }
 
 /**
- * Drive the LATER transcript evidence through the REGISTERED collect path
- * (`executeCollectLaneResults`): the host reports the lane idle and the
- * transcript carries ordinary prose (optionally truncated) — exactly the
- * shapes that pre-#2384 parsing converted into untrusted-attestation
- * failures. The collect settlement must preserve the accepted receipt.
+ * Replay the LATER transcript evidence as the CHILD'S ORDINARY COMPLETION
+ * EVENT (the production transport that settles a receipted lane):
+ * `claimTerminalResult` carries the transcript-shaped result — prose after
+ * CLEAN, or a truncated transcript — and must settle the lane COMPLETED
+ * with the accepted receipt preserved (issue #2384 contract; final-critic
+ * finding 3: the corpus asserts `completed`, not merely receipt survival).
  */
-async function collectWithTranscript(
-	batchId: string,
-	transcript: string,
-): Promise<void> {
-	const dispatchInternals = (
-		await import('../../../src/tools/dispatch-lanes.js')
-	)._internals;
-	const originalGetSessionOps = dispatchInternals.getSessionOps;
-	const originalNow = dispatchInternals.now;
-	const originalResolveRevision =
-		dispatchInternals.resolvePrWorkflowRevisionDigest;
-	const originalResolveRevisionAsync =
-		dispatchInternals.resolvePrWorkflowRevisionDigestAsync;
-	try {
-		dispatchInternals.now = () => 2_000_000_000_000;
-		dispatchInternals.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
-		dispatchInternals.resolvePrWorkflowRevisionDigestAsync = async () =>
-			REVISION_DIGEST;
-		dispatchInternals.getSessionOps = () =>
-			({
-				create: async () => ({ data: { id: 'unused' } }),
-				prompt: async () => ({ data: null }),
-				delete: async () => undefined,
-				status: async () => ({
-					data: { [CHILD_SESSION]: { type: 'idle' } },
-					error: undefined,
-				}),
-				messages: async () => ({
-					data: [
-						{
-							info: {
-								role: 'assistant',
-								time: { completed: 2 },
-								finish: 'stop',
-							},
-							parts: [{ type: 'text', text: transcript }],
-						},
-					],
-					error: undefined,
-				}),
-				abort: async () => undefined,
-			}) as never;
-		const { executeCollectLaneResults } = await import(
-			'../../../src/tools/dispatch-lanes.js'
-		);
-		const result = await executeCollectLaneResults(
-			{ batch_id: batchId, wait: false, include_pending: true },
-			directory,
-			{ sessionID: SESSION_ID },
-		);
-		// The collect call settled the lane from the transcript; whether the
-		// transcript ALONE would justify completion is not this shape's
-		// question — the receipt's survival is (see assertions below).
-		expect(result.total).toBe(1);
-	} finally {
-		dispatchInternals.getSessionOps = originalGetSessionOps;
-		dispatchInternals.now = originalNow;
-		dispatchInternals.resolvePrWorkflowRevisionDigest = originalResolveRevision;
-		dispatchInternals.resolvePrWorkflowRevisionDigestAsync =
-			originalResolveRevisionAsync;
-	}
+async function settleViaCompletionEvent(transcript: {
+	text: string;
+	truncated: boolean;
+}): Promise<void> {
+	const { claimTerminalResult } = await import(
+		'../../../src/background/pending-delegations.js'
+	);
+	const claimed = await claimTerminalResult(directory, CHILD_SESSION, {
+		eventId: `corpus-completion-${transcript.truncated ? 'trunc' : 'prose'}`,
+		status: 'completed',
+		recordedAt: 42,
+		result: {
+			text: transcript.text,
+			chars: transcript.text.length,
+			truncated: transcript.truncated,
+			digest: 'f'.repeat(64),
+		},
+	});
+	expect(claimed?.disposition).toBe('claimed');
 }
 
 const PROSE_AFTER_CLEAN = [
@@ -245,13 +241,17 @@ describe('replay corpus: structured receipts cannot be downgraded by later trans
 		expect(submitted.status).toBe('recorded');
 
 		// Later transcript-shaped evidence arrives (prose after CLEAN).
-		await collectWithTranscript(batchId, PROSE_AFTER_CLEAN);
+		await settleViaCompletionEvent({
+			text: PROSE_AFTER_CLEAN,
+			truncated: false,
+		});
 
 		const record = findByCorrelationId(directory, CHILD_SESSION);
-		// The structured receipt remains attached to the settled record —
-		// the later prose can neither erase nor downgrade it. (Pre-#2384,
-		// prose parsing invalidated an accepted CLEAN result.)
-		expect(['completed', 'error']).toContain(record?.status);
+		// The lane settles COMPLETED and the structured receipt remains the
+		// authoritative result — the later prose can neither erase, downgrade,
+		// nor terminalize it (pre-#2384, prose parsing invalidated an
+		// accepted CLEAN result).
+		expect(record?.status).toBe('completed');
 		expect(record?.result?.prReviewResultReceipt).toBeDefined();
 		expect(record?.result?.prReviewResultReceipt?.envelope?.outcome).toBe(
 			'CLEAN',
@@ -273,10 +273,13 @@ describe('replay corpus: structured receipts cannot be downgraded by later trans
 		});
 		expect(submitted.status).toBe('recorded');
 
-		await collectWithTranscript(batchId, `${PROSE_AFTER_CLEAN.slice(0, 40)}…`);
+		await settleViaCompletionEvent({
+			text: PROSE_AFTER_CLEAN.slice(0, 40),
+			truncated: true,
+		});
 
 		const record = findByCorrelationId(directory, CHILD_SESSION);
-		expect(['completed', 'error']).toContain(record?.status);
+		expect(record?.status).toBe('completed');
 		expect(record?.result?.prReviewResultReceipt).toBeDefined();
 		expect(record?.result?.prReviewResultReceipt?.envelope?.outcome).toBe(
 			'CLEAN',

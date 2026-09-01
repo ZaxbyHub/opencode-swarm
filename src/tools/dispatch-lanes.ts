@@ -44,6 +44,8 @@ import {
 	prReviewLegacyTranscriptCompatibilityEnabled,
 	PrReviewLaneResultEnvelopeSchema,
 } from '../background/pr-review-contract.js';
+import { reducePrReviewEvent } from '../pr-review/reducer.js';
+import { CIRCUIT_TERMINAL_DELEGATION_STATUSES } from '../pr-review/circuit.js';
 import {
 	PrReviewInlineTriggerRowSchema,
 	validatePrReviewInlineTriggerLedger,
@@ -126,6 +128,13 @@ const MAX_BATCH_ID_CHARS = 120;
 // lifecycle.ts); this local name is kept for the collect-timeout default
 // below and reads the canonical constant directly.
 const DEFAULT_ASYNC_STALE_TIMEOUT_MS = DEFAULT_STALE_DELEGATION_TIMEOUT_MS;
+function isTerminalDelegationStatus(status: string): boolean {
+	// Issue #2385: the single shared terminal-status vocabulary.
+	return (
+		CIRCUIT_TERMINAL_DELEGATION_STATUSES.has(status) || status === 'consumed'
+	);
+}
+
 const DEFAULT_COLLECT_TIMEOUT_MS = DEFAULT_ASYNC_STALE_TIMEOUT_MS;
 const MAX_COLLECT_TIMEOUT_MS = 60 * 60_000;
 const COLLECT_POLL_INTERVAL_MS = 500;
@@ -2000,10 +2009,35 @@ export async function executeCollectLaneResults(
 				reviewReceipts: reviewReceiptFallbacks,
 			},
 		);
+		// Issue #2385 (final-critic finding 2): the observation transition is
+		// reducer-owned — the adapter emits `collection_observed`, and the
+		// reducer's emit_diagnostic effect is the bounded diagnostic this
+		// branch reports (state is unchanged by construction; the reducer
+		// rejects any attempt to treat observer evidence as terminal).
+		const observed = reducePrReviewEvent(
+			{
+				sessionID: context.sessionID ?? '',
+				revision: 0,
+			},
+			{
+				type: 'collection_observed',
+				diagnostic: 'host_unavailable',
+				pendingLaneIds: records
+					.filter((record) => !isTerminalDelegationStatus(record.status))
+					.map((record) => record.laneId ?? record.correlationId),
+			},
+		);
+		const diagnosticCode =
+			observed.status === 'applied'
+				? (observed.effects.find((effect) => effect.kind === 'emit_diagnostic')
+						?.code ?? 'collection_host_unavailable')
+				: 'collection_host_unavailable';
 		result.failure_class = 'no_client';
 		result.message =
 			'OpenCode session messages client is not available; lane state is reported as stored and no lane was cancelled or terminalized. Poll again once the host client is available, cancel explicitly, or rely on the presumed-stale backstop.';
-		result.errors = ['OpenCode session messages client is not available'];
+		result.errors = [
+			`OpenCode session messages client is not available (${diagnosticCode})`,
+		];
 		await attachPendingLaneLiveness(result, directory, records, deadline);
 		return result;
 	}

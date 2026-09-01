@@ -183,6 +183,7 @@ import {
 } from '../pr-review/persistence.js';
 import { reducePrReviewEvent } from '../pr-review/reducer.js';
 import type {
+	PrReviewEffect,
 	PrReviewEvent,
 	PrReviewWorkflowState,
 } from '../pr-review/types.js';
@@ -1838,6 +1839,32 @@ export async function submitPrReviewResult(
 		const semanticEnvelopeDigest = prReviewLaneResultEnvelopeDigest(
 			parsedResult.data,
 		);
+		// Issue #2385 (final-critic finding 2): the submission TRANSITION is
+		// reducer-owned. The reducer decides recorded / replay / conflict; a
+		// conflicting second submission is rejected BEFORE any durable write
+		// with the publisher's own reason; every accepted transition executes
+		// its settle_delegation effect through the atomic receipt publisher
+		// below (which remains the exactly-once durable authority).
+		const existingReceiptDigest =
+			record.result?.prReviewResultReceipt?.semanticEnvelopeDigest;
+		const submission = reducePrReviewEvent(state, {
+			type: 'lane_structured_result_submitted',
+			batchId: input.batchId,
+			laneId: input.laneId,
+			generation: state.revision,
+			semanticEnvelopeDigest,
+			outcome: parsedResult.data.outcome,
+			...(existingReceiptDigest !== undefined ? { existingReceiptDigest } : {}),
+		});
+		if (submission.status === 'rejected') {
+			return {
+				status: 'rejected',
+				reason:
+					submission.rejection.code === 'duplicate_conflicting_result'
+						? 'a different bound receipt is already recorded'
+						: `structured result submission rejected: ${submission.rejection.code}`,
+			};
+		}
 		const published = await publishPrReviewResultReceipt(directory, {
 			parentSessionId,
 			childSessionId: child,
@@ -4347,42 +4374,61 @@ async function advanceResilienceCircuitWhileLocked(args: {
 		reportCircuitAdoptionDiagnostic(adoption.diagnostic);
 	}
 
-	const decision = advancePrReviewCircuit(circuit, {
+	// Issue #2385 (final-critic finding 1): the circuit TRANSITION is
+	// reducer-owned. This adapter emits `circuit_advance_requested` (the
+	// reducer re-adopts the already-migrated circuit idempotently and runs
+	// the machine), applies the returned state, and executes the returned
+	// effects: `persist_state` writes now; `block_dispatch` maps to the
+	// typed admission refusal; an admitted HALF_OPEN probe carries NO
+	// persist effect (mark-on-success: the admission's own write persists
+	// it, so a validation failure never leaves a phantom probe).
+	const advanceOutcome = reducePrReviewEvent(state, {
+		type: 'circuit_advance_requested',
 		nowMs,
-		threshold: snapshot.policy.correlatedFailureThreshold,
-		openDurationMs: circuitOpenDurationMs(snapshot.policy),
-		admission: args.admission,
 		laneSignals: laneSignalsForCircuitReview(directory, state),
 		probeObservation:
 			circuit?.state === 'HALF_OPEN'
 				? probeObservationForCircuit(directory, state, circuit)
 				: undefined,
+		admission: args.admission,
+		policy: snapshot.policy,
 	});
-
-	if (decision.action === 'block') {
-		if (decision.changed && decision.record) {
-			snapshot = { ...snapshot, circuit: decision.record };
-			state = await writeStateWhileLocked(directory, {
-				...state,
-				updatedAt: isoNow(),
-				prReviewResilience: snapshot,
-			});
-		}
-		return { state, snapshot, blocked: { reason: decision.reason } };
-	}
-	if (decision.action === 'admit_as_probe') {
-		if (decision.changed && decision.record) {
-			return { state, snapshot, pendingProbeCircuit: decision.record };
-		}
+	if (advanceOutcome.status === 'rejected') {
+		// circuit_advance_requested has no rejection path; fail soft to the
+		// pre-transition view rather than blocking the workflow.
 		return { state, snapshot };
 	}
-	if (decision.changed && decision.record) {
-		snapshot = { ...snapshot, circuit: decision.record };
+	let nextState = advanceOutcome.state as PrWorkflowGateState;
+	const blockedReason = advanceOutcome.effects.find(
+		(effect): effect is Extract<PrReviewEffect, { kind: 'block_dispatch' }> =>
+			effect.kind === 'block_dispatch',
+	)?.reason;
+	if (
+		advanceOutcome.effects.some((effect) => effect.kind === 'persist_state')
+	) {
+		snapshot = {
+			...snapshot,
+			circuit: nextState.prReviewResilience?.circuit,
+		};
 		state = await writeStateWhileLocked(directory, {
-			...state,
+			...nextState,
 			updatedAt: isoNow(),
 			prReviewResilience: snapshot,
 		});
+	} else {
+		state = nextState;
+	}
+	if (blockedReason !== undefined) {
+		return { state, snapshot, blocked: { reason: blockedReason } };
+	}
+	const pendingProbe = nextState.prReviewResilience?.circuit;
+	if (
+		pendingProbe &&
+		'version' in pendingProbe &&
+		pendingProbe.state === 'HALF_OPEN' &&
+		pendingProbe.probe
+	) {
+		return { state, snapshot, pendingProbeCircuit: pendingProbe };
 	}
 	return { state, snapshot };
 }
