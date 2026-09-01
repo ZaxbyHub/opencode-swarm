@@ -3,6 +3,7 @@ import type { ToolContext } from '@opencode-ai/plugin';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config/loader';
 import { type RepoGraphConfig, RepoGraphConfigSchema } from '../config/schema';
+import { telemetry } from '../telemetry';
 import {
 	containsControlChars,
 	containsPathTraversal,
@@ -38,6 +39,7 @@ import {
 	probeFreshness,
 	type RepoGraph,
 	type RouteMethod,
+	routeRetrieval,
 	saveGraph,
 	searchSymbols,
 	traceData,
@@ -45,6 +47,7 @@ import {
 	updateGraphForFiles,
 	writeFingerprint,
 } from './repo-graph';
+import { searchWorkspaceLiteral } from './search';
 
 /**
  * repo_map: structural codebase awareness for swarm agents.
@@ -89,6 +92,7 @@ const VALID_ACTIONS = [
 	'test_pack',
 	'graph_health',
 	'ask',
+	'retrieve',
 ] as const;
 
 type RepoMapAction = (typeof VALID_ACTIONS)[number];
@@ -117,6 +121,7 @@ export const _internals = {
 	probeFreshness,
 	updateGraphForFiles,
 	writeFingerprint,
+	telemetry,
 };
 
 interface RepoMapArgs {
@@ -361,6 +366,67 @@ async function loadOrError(
 	}
 }
 
+async function prepareGraphQuery(
+	directory: string,
+	action: string,
+	config: RepoGraphConfig,
+): Promise<
+	| { ok: true; graph: RepoGraph; freshness: RepoMapFreshnessMetadata }
+	| { ok: false; response: string }
+> {
+	const loaded = await loadOrError(directory, action);
+	if (!loaded.ok) return loaded;
+	let graph = loaded.graph;
+	const options = freshnessOptions(config);
+	let probe = await _internals.probeFreshness(directory, options);
+	const driftPaths = uniqueDriftPaths(probe);
+	const detectedFiles = driftPaths.length;
+	let refreshedFiles = 0;
+	let freshnessNote: string | undefined;
+	if (probe.state === 'drifted' && detectedFiles > 0) {
+		if (driftPaths.some(isGraphWideInputPath)) {
+			freshnessNote =
+				'Graph-wide package manifest drift requires a full repo_map build; the stale graph was served without mutation.';
+		} else if (config.refresh_cap > 0 && detectedFiles <= config.refresh_cap) {
+			try {
+				graph = await _internals.updateGraphForFiles(directory, driftPaths, {
+					buildOptions: options,
+				});
+				refreshedFiles = detectedFiles;
+				probe = await _internals.probeFreshness(directory, options);
+				if (probe.state !== 'clean')
+					freshnessNote =
+						'Incremental refresh completed, but the follow-up probe did not certify a clean graph.';
+			} catch (error) {
+				freshnessNote = `Incremental refresh failed; serving the stale graph: ${
+					error instanceof Error ? error.message : String(error)
+				}`;
+			}
+		} else {
+			freshnessNote =
+				config.refresh_cap === 0
+					? 'Automatic read-time refresh is disabled by repo_graph.refresh_cap=0; serving the stale graph.'
+					: `Detected ${detectedFiles} changed files, above repo_graph.refresh_cap=${config.refresh_cap}; serving the stale graph.`;
+		}
+	} else if (probe.state === 'no-fingerprint') {
+		freshnessNote =
+			'No matching repository-graph fingerprint is available; run repo_map action="build" to certify the graph.';
+	} else if (probe.state === 'inconclusive') {
+		freshnessNote =
+			'Workspace freshness is unknown because the bounded probe did not complete; the existing graph was served without refresh or deletion.';
+	}
+	return {
+		ok: true,
+		graph,
+		freshness: metadataForProbe(
+			probe,
+			detectedFiles,
+			refreshedFiles,
+			freshnessNote,
+		),
+	};
+}
+
 export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 	description:
 		'Query the repository code graph for structural awareness before editing. ' +
@@ -382,6 +448,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 		'"test_pack" (tests, fixtures, helpers, and coverage hints for a file/symbol/changed files — explicit imports and colocated-name heuristics, missing-test warnings; needs file, files, symbol, or diff; never executes tests), ' +
 		'"graph_health" (freshness and bounded extraction diagnostics; no file required), ' +
 		'"ask" (zero-LLM file localization: pass a natural-language question to rank files by relevance via vocabulary expansion + IDF + PageRank; orientation only — read the located files before asserting anything about them). ' +
+		'"retrieve" (deterministic graph/lexical/semantic/security/test/hybrid context routing with explicit explanation, fallback, budgets, and content-free telemetry; needs question). ' +
 		'Use this before refactoring shared modules to avoid breaking unseen consumers. ' +
 		'Note: "callers"/"dead_exports"/"context_pack" use conservative regex analysis (TS/JS/Python) and cannot see ' +
 		'dynamic dispatch or namespace/barrel re-export usage; "dead_exports" results are review candidates, not delete directives.',
@@ -410,9 +477,10 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				'test_pack',
 				'graph_health',
 				'ask',
+				'retrieve',
 			])
 			.describe(
-				'Query action: "build" | "importers" | "dependencies" | "blast_radius" | "localization" | "key_files" | "ontology" | "package_boundaries" | "preflight_packet" | "callers" | "dead_exports" | "context_pack" | "symbol_search" | "symbol_context" | "impact_cone" | "diff_context" | "graph_explain" | "route_trace" | "data_trace" | "test_pack" | "graph_health" | "ask"',
+				'Query action: "build" | "importers" | "dependencies" | "blast_radius" | "localization" | "key_files" | "ontology" | "package_boundaries" | "preflight_packet" | "callers" | "dead_exports" | "context_pack" | "symbol_search" | "symbol_context" | "impact_cone" | "diff_context" | "graph_explain" | "route_trace" | "data_trace" | "test_pack" | "graph_health" | "ask" | "retrieve"',
 			),
 		file: z
 			.string()
@@ -461,7 +529,7 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			.string()
 			.optional()
 			.describe(
-				'Natural-language question for action="ask". Orientation only — read the located files before asserting anything about them.',
+				'Natural-language question for action="ask" or action="retrieve". Ask is orientation only; retrieve deterministically selects and explains a bounded strategy.',
 			),
 		include_source: z
 			.boolean()
@@ -563,6 +631,131 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 		}
 
 		const repoGraphConfig = resolveRepoGraphConfig(directory);
+		if (action === 'retrieve') {
+			if (!a.question) return err(action, 'retrieve requires `question`');
+			const questionError = validateQuestion(a.question);
+			if (questionError) return err(action, questionError);
+			if (a.file !== undefined) {
+				const fileError = validateFile(a.file);
+				if (fileError) return err(action, fileError);
+			}
+			for (const file of a.files ?? []) {
+				const fileError = validateFile(file);
+				if (fileError) return err(action, `files entry: ${fileError}`);
+			}
+			if (a.symbol !== undefined) {
+				const symbolError = validateSymbol(a.symbol);
+				if (symbolError) return err(action, symbolError);
+			}
+			if (a.route_path !== undefined) {
+				const routeError = validateRoutePath(a.route_path);
+				if (routeError) return err(action, routeError);
+			}
+			if (a.method !== undefined) {
+				const methodError = validateMethod(a.method);
+				if (methodError) return err(action, methodError);
+			}
+			if (a.entity !== undefined) {
+				const entityError = validateEntity(a.entity);
+				if (entityError) return err(action, entityError);
+			}
+			if (a.diff !== undefined) {
+				const diffError = validateDiffText(a.diff);
+				if (diffError) return err(action, diffError);
+			}
+			const hasRouteHint = a.route_path !== undefined || a.method !== undefined;
+			const hasFiles = a.files !== undefined && a.files.length > 0;
+			if (
+				a.method !== undefined &&
+				a.route_path === undefined &&
+				a.file === undefined &&
+				a.symbol === undefined
+			) {
+				return err(action, 'method requires route_path, file, or symbol');
+			}
+			if (
+				a.entity !== undefined &&
+				(hasRouteHint ||
+					a.file !== undefined ||
+					hasFiles ||
+					a.symbol !== undefined ||
+					a.diff !== undefined)
+			) {
+				return err(
+					action,
+					'entity cannot be combined with route or code-scope hints',
+				);
+			}
+			if (hasRouteHint && (hasFiles || a.diff !== undefined)) {
+				return err(action, 'route hints cannot be combined with files or diff');
+			}
+			const routedFile =
+				a.file !== undefined
+					? toRelativeGraphPath(a.file, directory)
+					: undefined;
+			const routedFiles =
+				a.files !== undefined && a.files.length > 0
+					? a.files.map((file) => toRelativeGraphPath(file, directory))
+					: undefined;
+			let graph: RepoGraph | null = null;
+			let unavailable: string | undefined;
+			let retrievalFreshness: RepoMapFreshnessMetadata | undefined;
+			if (!repoGraphConfig.enabled) unavailable = 'graph_disabled';
+			else {
+				const prepared = await prepareGraphQuery(
+					directory,
+					action,
+					repoGraphConfig,
+				);
+				if (prepared.ok) {
+					graph = prepared.graph;
+					retrievalFreshness = prepared.freshness;
+				} else {
+					unavailable = prepared.response.includes('No repo graph')
+						? 'graph_missing'
+						: 'graph_load_error';
+				}
+			}
+			const result = await routeRetrieval(
+				graph,
+				{
+					question: a.question,
+					file: routedFile,
+					files: routedFiles,
+					symbol: a.symbol,
+					diff: a.diff,
+					entity: a.entity,
+					routePath: a.route_path,
+					method: a.method,
+					maxTokens: a.max_tokens,
+					topN: a.top_n,
+				},
+				async (query) => {
+					const searchResult = await searchWorkspaceLiteral({
+						query,
+						mode: 'literal',
+						maxResults: Math.min(a.top_n ?? 25, 100),
+						maxLines: 200,
+						workspace: directory,
+					});
+					return searchResult;
+				},
+				unavailable,
+			);
+			try {
+				_internals.telemetry.retrievalRouted(_ctx?.sessionID ?? 'unknown', {
+					mode: result.mode,
+					graph_hit: result.graphHit,
+					fallback_reason: result.fallbackReason,
+					token_budget_requested: result.budget.requestedTokens,
+					token_budget_used: result.budget.usedTokens,
+					omitted_context_count: result.budget.omittedContextCount,
+				});
+			} catch {
+				// Telemetry is diagnostic and must never make retrieval fail.
+			}
+			return ok(action, { ...result, ...(retrievalFreshness ?? {}) });
+		}
 		if (!repoGraphConfig.enabled) {
 			return err(action, REPO_GRAPH_DISABLED_NOTICE);
 		}
@@ -612,60 +805,14 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			}
 		}
 
-		// All other actions need a loaded graph.
-		const loaded = await loadOrError(directory, action);
-		if (!loaded.ok) return loaded.response;
-		let graph = loaded.graph;
-		let probe = await _internals.probeFreshness(directory, probeOptions);
-		const driftPaths = uniqueDriftPaths(probe);
-		const detectedFiles = driftPaths.length;
-		let refreshedFiles = 0;
-		let freshnessNote: string | undefined;
-
-		if (probe.state === 'drifted' && detectedFiles > 0) {
-			const graphWideDrift = driftPaths.some(isGraphWideInputPath);
-			if (graphWideDrift) {
-				freshnessNote =
-					'Graph-wide package manifest drift requires a full repo_map build; the stale graph was served without mutation.';
-			} else if (
-				repoGraphConfig.refresh_cap > 0 &&
-				detectedFiles <= repoGraphConfig.refresh_cap
-			) {
-				try {
-					graph = await _internals.updateGraphForFiles(directory, driftPaths, {
-						buildOptions: probeOptions,
-					});
-					refreshedFiles = detectedFiles;
-					probe = await _internals.probeFreshness(directory, probeOptions);
-					if (probe.state !== 'clean') {
-						freshnessNote =
-							'Incremental refresh completed, but the follow-up probe did not certify a clean graph.';
-					}
-				} catch (error) {
-					freshnessNote = `Incremental refresh failed; serving the stale graph: ${
-						error instanceof Error ? error.message : String(error)
-					}`;
-				}
-			} else {
-				freshnessNote =
-					repoGraphConfig.refresh_cap === 0
-						? 'Automatic read-time refresh is disabled by repo_graph.refresh_cap=0; serving the stale graph.'
-						: `Detected ${detectedFiles} changed files, above repo_graph.refresh_cap=${repoGraphConfig.refresh_cap}; serving the stale graph.`;
-			}
-		} else if (probe.state === 'no-fingerprint') {
-			freshnessNote =
-				'No matching repository-graph fingerprint is available; run repo_map action="build" to certify the graph.';
-		} else if (probe.state === 'inconclusive') {
-			freshnessNote =
-				'Workspace freshness is unknown because the bounded probe did not complete; the existing graph was served without refresh or deletion.';
-		}
-
-		const freshness = metadataForProbe(
-			probe,
-			detectedFiles,
-			refreshedFiles,
-			freshnessNote,
+		// All other actions share the same load/probe/refresh lifecycle as retrieve.
+		const prepared = await prepareGraphQuery(
+			directory,
+			action,
+			repoGraphConfig,
 		);
+		if (!prepared.ok) return prepared.response;
+		const { graph, freshness } = prepared;
 
 		// ----- key_files -----
 		if (action === 'key_files') {
@@ -1117,8 +1264,11 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 			) {
 				warnings.push('source_mode ignored: include_source is not true');
 			}
-			if (freshnessNote && !warnings.includes(freshnessNote)) {
-				warnings.push(freshnessNote);
+			if (
+				freshness.freshnessNote &&
+				!warnings.includes(freshness.freshnessNote)
+			) {
+				warnings.push(freshness.freshnessNote);
 			}
 			// Snippets mirror the returned spans exactly: the top_n slice that
 			// shaped `cappedSpans` must also bound `snippets`, or the response

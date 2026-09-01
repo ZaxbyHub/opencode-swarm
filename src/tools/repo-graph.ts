@@ -80,6 +80,18 @@ export {
 	isGraphFresh,
 	resetQueryCache,
 } from './repo-graph/query';
+export type {
+	LexicalResult,
+	RetrievalMode,
+	RetrievalRequest,
+	RetrievalResult,
+} from './repo-graph/retrieval-router';
+export {
+	classifyRetrieval,
+	RETRIEVAL_MODES,
+	ROUTER_METADATA_OVERHEAD_TOKENS,
+	routeRetrieval,
+} from './repo-graph/retrieval-router';
 export {
 	getGraphPath,
 	loadGraph,

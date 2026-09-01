@@ -683,6 +683,8 @@ repo_map { "action": "data_trace", "entity": "user" }
 repo_map { "action": "data_trace", "entity": "API_BASE_URL" }
 repo_map { "action": "test_pack", "file": "src/foo.ts" }
 repo_map { "action": "test_pack", "diff": "--- a/src/foo.ts\n+++ b/src/foo.ts\n@@ ..." }
+repo_map { "action": "retrieve", "question": "Who calls createSession?", "symbol": "createSession" }
+repo_map { "action": "retrieve", "question": "Find exact string SWARM_FOO" }
 ```
 
 ## KG-14 expanded graph query actions (issue #1535)
@@ -738,6 +740,16 @@ control-character-checked (bounded at extraction time).
 | `route_trace` | `route_path` (normalized: `[id]`→`:id`, `[...slug]`→`:slug*`) OR `file` OR `symbol` (HTTP method or link-bound handler; symbol-only search is restricted to `api_route`-role files), optional `method` and `symbol` filters (they compose with every target form; routes stored as `ALL` match any method), `top_n` (25) | per matched route: `route` fact, handler file, `handlerSymbol`+`handlerConfidence` (from the HANDLES_ROUTE link — the last-argument named handler for router calls; `handler_export` falls back to the method-named export at `confidence: null` on old graphs), depth-1 `services` (non-test nodes, deduped/sorted), `dataOperations`/`security` from handler+services (≤20 each), `handlerEvidence` (the link's evidence line; null without a link), handler-file `findings` (e.g. `api_route_without_detected_auth` — the unguarded-mutating-route surface), `tests` (test-file importers) |
 | `data_trace` | `entity` (entity/table/config/env key; case-insensitive) OR `file` OR `symbol`, optional `top_n` (25) | `readers`/`writers`/`deleters`/`configurers` (each entry carries kind/line/evidence/confidence and `via: 'link' \| 'fact'`), touching `routes` (≤20), `tests`, fixed-vocabulary `riskNotes` (no tests detected; delete-ops coverage; cross-boundary writes) |
 | `test_pack` | `file` OR `files` OR `symbol` OR `diff` (unified diff; parsed via `getDiffContext`), optional `top_n` (25) | `tests` (`basis: 'import'` high / `'colocated'` medium, `evidence` = import specifier or colocated rationale, `coveredSymbols` = edge imported∪used ∩ target exports), `fixtures` (fixture-pattern files imported by ≥1 discovered test, with `usedBy` + `confidence`/`evidence`), `helpers` (non-fixture deps shared by ≥2 discovered tests), `uncoveredExports`, `riskNotes`, `associations` (materialized TESTS/USES_FIXTURE records, ≤200) |
+
+## KG-16 hybrid retrieval router (issue #1537)
+
+`retrieve` requires `question` and accepts the existing optional target fields
+(`file`, `files`, `symbol`, `diff`, `route_path`, `method`, `entity`), `top_n`,
+and `max_tokens`. It returns the deterministic mode, executed actions, bounded
+context, explanations, graph hit/miss, explicit fallback reason, warnings, and
+requested/used/omitted budget counters. The `semantic` mode is an intent class
+implemented by the zero-embedding `fuzzy_graph` algorithm (vocabulary expansion,
+IDF, and PageRank); it never claims embedding similarity.
 
 Fixture patterns (module path, lowercase): a `fixtures?` / `__fixtures__` /
 `mocks?` / `factories` path segment, or a basename containing `fixture` /

@@ -132,6 +132,12 @@ actions include:
   `linksSupported: false` degradation note, with TESTS / USES_FIXTURE
   associations derived at query time from persisted edges. See
   `docs/repo-graph-symbol-graph.md`.
+- KG-16 retrieval routing (issue #1537): `repo_map action="retrieve"`
+  classifies natural-language context requests into graph, exact lexical,
+  semantic-intent/fuzzy, security, test, or hybrid strategies. It invokes the
+  graph packs programmatically, falls back explicitly to bounded literal
+  workspace search, explains every action, enforces a context budget, and emits
+  content-free routing counters.
 
 The ontology extractor is intentionally conservative. It records detected facts
 and "detected missing guard" findings; it does not claim formal security proofs.

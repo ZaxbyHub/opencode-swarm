@@ -3,7 +3,7 @@
 Companion to `docs/evidence-and-telemetry.md` (evidence bundles + the legacy
 telemetry stream from a user's point of view) and `docs/engineering-invariants.md`
 (the invariant this PR establishes). This document is the contract definition for
-`src/observability/`: the canonical event envelope, the 55-entry event catalog,
+`src/observability/`: the canonical event envelope, the 56-entry event catalog,
 the legacy adapter, sampling/cardinality rules, the OTel mapping pin, and the
 exhaustive producer/consumer matrix across all eighteen known observability
 stores in the repository.
@@ -16,7 +16,7 @@ Issue: #2029. This is PR 01 of 23 in the observability sequence (#2029–#2051).
 
 **What this PR defines.** A single canonical `ObservabilityEvent` envelope
 (`src/observability/envelope.ts`), a discriminated catalog of every event kind
-the codebase emits today (`src/observability/catalog.ts`, 55 entries), a
+the codebase emits today (`src/observability/catalog.ts`, 56 entries), a
 relationship-validation function, a legacy-payload adapter, deterministic
 sampling and bounded-cardinality helpers, and a versioned OTel/OpenInference
 attribute-mapping table. It wires the envelope into the one live production
@@ -182,9 +182,9 @@ those inputs before this change.
 
 ---
 
-## 5. The 55-entry catalog
+## 5. The 56-entry catalog
 
-Source: `src/observability/catalog.ts`. Exactly 55 entries = the 38 pre-existing members of
+Source: `src/observability/catalog.ts`. Exactly 56 entries = the 38 pre-existing members of
 `TelemetryEvent` (`src/telemetry.ts:15-144`) plus `agent_conflict_detected`
 (emitted in production via a force-cast past the type system before #2029)
 plus `close_archive_result` (issue #2030 — the structured close/archive
@@ -380,6 +380,18 @@ actually happens. Payload fields are counts and token totals only:
 `maskedMessages`, `maskedToolParts`, `maskedTokensFreed`, `prunedMessages`,
 `prunedTextParts`, `prunedToolParts`, and `prunedTokensFreed`. No prompt
 content, tool output, path, or fabricated session identifier is written.
+
+#### retrieval_routed
+
+Category `guardrail`, severity `info`, privacy `pseudonymous`. Producer
+`src/telemetry.ts:1206`. Consumers: none — owner **#2047**. Retention:
+**#2047**. Required workflow IDs: `hostSessionId`.
+
+Emitted once after a retrieval request is routed successfully. Its payload is
+bounded routing metadata only: selected mode, graph-hit boolean, closed-set
+fallback reason, requested and used token counts, and omitted-context count.
+It never includes the question, symbol names, paths, snippets, or result
+content.
 
 #### hard_limit_hit
 Category `guardrail`, severity `error`, privacy `pseudonymous`. Producer

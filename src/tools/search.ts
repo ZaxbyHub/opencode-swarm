@@ -589,7 +589,7 @@ function collectFiles(
 /**
  * Execute search using Node.js fallback (when ripgrep not available).
  */
-async function fallbackSearch(
+export async function searchWorkspaceLiteral(
 	opts: FallbackSearchOptions,
 ): Promise<SearchResult | SearchError> {
 	// Parse include/exclude glob patterns
@@ -670,7 +670,11 @@ async function fallbackSearch(
 		// Read and search file
 		let content: string;
 		try {
-			content = fs.readFileSync(fullPath, 'utf-8');
+			const bytes = fs.readFileSync(fullPath);
+			// Match ripgrep's default binary-file behavior on the bounded Node fallback.
+			// A NUL byte is the stable, cheap binary signal used by common search tools.
+			if (bytes.includes(0)) continue;
+			content = bytes.toString('utf-8');
 		} catch {
 			continue;
 		}
@@ -936,7 +940,7 @@ export const search: ToolDefinition = createSwarmTool({
 				workspace: directory,
 			});
 		} else {
-			result = await fallbackSearch({
+			result = await searchWorkspaceLiteral({
 				query,
 				mode,
 				include,
@@ -961,11 +965,11 @@ export const _internals: {
 	resolveExecutableFromPath: typeof resolveExecutableFromPath;
 	resolveRipgrepBinary: typeof resolveRipgrepBinary;
 	runExternalTool: typeof runExternalTool;
-	fallbackSearch: typeof fallbackSearch;
+	fallbackSearch: typeof searchWorkspaceLiteral;
 } = {
 	resolvePackagedRipgrep,
 	resolveExecutableFromPath,
 	resolveRipgrepBinary,
 	runExternalTool,
-	fallbackSearch,
+	fallbackSearch: searchWorkspaceLiteral,
 };
