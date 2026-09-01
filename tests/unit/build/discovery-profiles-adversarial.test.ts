@@ -163,8 +163,9 @@ describe('discoverBuildCommandsFromProfiles - Attack: Empty Commands Array', () 
 		expect(result.commands).toEqual([]);
 		expect(result.skipped).toHaveLength(1);
 		expect(result.skipped[0].ecosystem).toBe('empty-lang');
-		expect(result.skipped[0].reason).toContain('No binary available');
-		expect(result.skipped[0].reason).toContain('tried'); // Should mention tried binaries
+		expect(result.skipped[0].reason).toBe(
+			'No matching build files for profile empty-lang',
+		);
 	});
 });
 
