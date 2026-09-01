@@ -23,6 +23,7 @@ import {
 	type FullAutoRunState,
 	loadFullAutoRunState,
 } from '../full-auto/state';
+import { readLearningHealth } from '../health/learning-health';
 import {
 	extractCurrentPhase,
 	extractCurrentPhaseFromPlan,
@@ -219,6 +220,24 @@ export interface StatusData {
 	 * report id.
 	 */
 	consensusReports?: number;
+	/**
+	 * Learning/operations health (issue #2044): the bounded-window alarm
+	 * snapshot from the learning-health registry (active alarms + transition
+	 * count). `undefined` when the read failed (fail-open) — never blocks
+	 * status rendering.
+	 */
+	learningHealth?: {
+		activeAlarms: readonly {
+			alarm: string;
+			severity: string;
+			scopeClass: string;
+			scopeRef: string;
+			ageMs: number;
+			coverageFacts: number;
+			transitionCount: number;
+		}[];
+		totalTransitions: number;
+	};
 	/**
 	 * Cohort/link status (issue #1846). Makes the linked knowledge store and its
 	 * health obvious in `/swarm status`. `undefined` when link state is absent.
@@ -616,6 +635,27 @@ export async function getStatusData(
 			}) ?? undefined;
 	} catch {
 		status.delegationLedgerHealth = undefined;
+	}
+
+	// #2044: learning/operations health — bounded-window alarm snapshot from the
+	// learning-health registry. Fail-open: an unreadable artifact yields no
+	// section rather than a failed status command.
+	try {
+		const snapshot = await readLearningHealth(directory);
+		status.learningHealth = {
+			activeAlarms: snapshot.activeAlarms.map((alarm) => ({
+				alarm: alarm.alarm,
+				severity: alarm.severity,
+				scopeClass: alarm.scopeClass,
+				scopeRef: alarm.scopeRef,
+				ageMs: alarm.ageMs,
+				coverageFacts: alarm.coverageFacts,
+				transitionCount: alarm.transitionCount,
+			})),
+			totalTransitions: snapshot.totalTransitions,
+		};
+	} catch {
+		status.learningHealth = undefined;
 	}
 
 	// Issue #2104: opt-in background-work section. Gated on
@@ -1091,6 +1131,29 @@ export function formatStatusMarkdown(status: StatusData): string {
 			lines.push(
 				`  - Consensus reports: ${consensusReports} (read under \`.swarm/evolution/consensus/\`; each holds proposals-only recommendations)`,
 			);
+	}
+
+	// #2044: learning/operations health — bounded-window alarm families. Only
+	// rendered when the snapshot is available; redaction discipline matches the
+	// telemetry payload (16-hex refs, counts, enums — never raw session ids).
+	if (status.learningHealth) {
+		lines.push('', '**Learning Health**:');
+		const active = status.learningHealth.activeAlarms;
+		if (active.length === 0) {
+			lines.push(
+				`  - ✅ no active learning-health alarms (${status.learningHealth.totalTransitions} transitions recorded)`,
+			);
+		} else {
+			for (const alarm of active) {
+				const ageMinutes = Math.floor(alarm.ageMs / 60_000);
+				lines.push(
+					`  - ⚠ ${alarm.severity}: ${alarm.alarm} [${alarm.scopeClass} ${alarm.scopeRef}] age ${ageMinutes}m, coverage ${alarm.coverageFacts} facts (${alarm.transitionCount} transitions)`,
+				);
+			}
+			lines.push(
+				`  - run \`/swarm diagnose\` for the learning-health check detail`,
+			);
+		}
 	}
 
 	// Issue #1846: cohort/link status — make the shared knowledge store visible.

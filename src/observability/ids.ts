@@ -224,3 +224,26 @@ export function pseudonymousRef(absolutePath: string, salt: string): string {
 		.digest('hex')
 		.slice(0, PSEUDONYMOUS_REF_LENGTH);
 }
+
+/**
+ * Produce a pseudonymous reference for a session id (#2044).
+ *
+ * Same construction and salt handling as {@link pseudonymousRef}, applied to the
+ * opaque session id string: `sha256(salt + NUL + sessionId)`, truncated to
+ * {@link PSEUDONYMOUS_REF_LENGTH} hex chars. Used by the learning-health alarm
+ * registry so persisted health state and telemetry payloads never carry raw
+ * session ids (issue #2044 item 10).
+ *
+ * Contract note: session ids are operator-known opaque strings, not secrets;
+ * the pseudonym prevents cross-install linkage exactly as `pseudonymousRef`
+ * does for paths. With the public default salt a holder of a payload can
+ * CONFIRM a guessed session id by re-hashing; a private
+ * {@link LINEAGE_SALT_ENV} restores guess-resistance. This module stays pure —
+ * no I/O; the salt is read at call time.
+ */
+export function pseudonymousSessionRef(
+	sessionId: string,
+	salt: string = resolveLineageSalt(),
+): string {
+	return pseudonymousRef(sessionId, salt);
+}

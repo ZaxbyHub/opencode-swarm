@@ -50,6 +50,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+import { observeStoreHealth } from '../health/learning-health.js';
 import { telemetry } from '../telemetry.js';
 import { warn } from '../utils/logger.js';
 
@@ -1594,20 +1595,28 @@ function emitCoreEventsHealth(
 		authorityCount = Object.keys(state.index.entries).length;
 		authorityEvicted = state.index.evicted;
 	}
+	const healthPayload = {
+		trigger: payload.trigger,
+		accepted_count: payload.accepted,
+		compacted_count: payload.compacted,
+		retained_count: payload.retained,
+		dropped_count: payload.dropped,
+		corrupt_count: payload.corrupt,
+		authority_index_count: authorityCount,
+		authority_evicted_count: authorityEvicted,
+		oldest_timestamp: payload.oldest,
+		newest_timestamp: payload.newest,
+		bytes: payload.bytes,
+		limit_bytes: payload.limitBytes,
+	};
 	try {
-		telemetry.coreEventsHealth({
-			trigger: payload.trigger,
-			accepted_count: payload.accepted,
-			compacted_count: payload.compacted,
-			retained_count: payload.retained,
-			dropped_count: payload.dropped,
-			corrupt_count: payload.corrupt,
-			authority_index_count: authorityCount,
-			authority_evicted_count: authorityEvicted,
-			oldest_timestamp: payload.oldest,
-			newest_timestamp: payload.newest,
-			bytes: payload.bytes,
-			limit_bytes: payload.limitBytes,
+		telemetry.coreEventsHealth(healthPayload);
+		// #2044: direct learning-health feed — the alarm is fed from the FIRST
+		// store event, not only after an operator opens a health surface.
+		observeStoreHealth({
+			directory,
+			kind: 'core_events_health',
+			payload: healthPayload,
 		});
 	} catch {
 		// Health telemetry must never break the store.

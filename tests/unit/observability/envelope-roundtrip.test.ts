@@ -379,7 +379,6 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		bytes: 204800,
 		limit_bytes: 524288,
 	},
-
 	// Issue #2042 PR-monitor subscription store health (counts only).
 	pr_subscription_health: {
 		trigger: 'compact',
@@ -391,6 +390,10 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		dropped_audit_count: 260,
 		checkpoint_bytes: 16384,
 		limit_bytes: 262144,
+	},
+	learning_health_alarm: {
+		alarm: 'model_limit_fallback',
+		transition: 'raised',
 	},
 };
 

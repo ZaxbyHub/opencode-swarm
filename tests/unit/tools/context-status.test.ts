@@ -9,12 +9,18 @@
  * - SC-002: no warning injection side effects
  */
 
-import { describe, expect, it } from 'bun:test';
+import { describe, expect, it, test } from 'bun:test';
+import { rmSync } from 'node:fs';
+import {
+	readLearningHealth,
+	resetLearningHealthForTest,
+} from '../../../src/health/learning-health';
 import {
 	computeContextHeadroom,
 	context_status,
 } from '../../../src/tools/context-status';
 import { TOOL_METADATA } from '../../../src/tools/tool-metadata';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -62,6 +68,22 @@ describe('context_status tool surface', () => {
 		expect(TOOL_METADATA.context_status.description).toContain(
 			'provider|estimated',
 		);
+	});
+
+	it('should document the #2044 provenance fields with their vocabularies on BOTH surfaces', () => {
+		const SOURCE_VOCAB = 'host|override|provider_cap|native|fallback';
+		const RESOLUTION_VOCAB =
+			'user_provider_model|user_model|user_default|live_model_limit|static_provider_cap|static_native|static_default';
+		for (const [surface, description] of [
+			['tool-metadata', TOOL_METADATA.context_status.description],
+			['runtime tool', context_status.description],
+		] as const) {
+			expect(description).toContain('modelLimitSource');
+			expect(description).toContain(SOURCE_VOCAB);
+			expect(description).toContain('modelLimitResolution');
+			expect(description).toContain(RESOLUTION_VOCAB);
+			expect(description).toContain('fallbackActive');
+		}
 	});
 
 	it('should have an args schema with no required fields', () => {
@@ -348,5 +370,88 @@ describe('computeContextHeadroom', () => {
 		expect(result.tokensUsed).toBeGreaterThan(160);
 		expect(result.modelId).toBe('gpt-5');
 		expect(result.provider).toBe('openai');
+	});
+});
+
+describe('context_status model-limit health scoping (#2044)', () => {
+	it('a fallback resolution through the tool path is visible in the owning project snapshot only', async () => {
+		const directory = canonicalMkdtemp('swarm-ctx-status-lh-');
+		try {
+			resetLearningHealthForTest();
+			// The exact call execute() makes: no live window, no overrides,
+			// unknown model -> static_default fallback, directory threaded.
+			computeContextHeadroom(
+				[makeMessage({ role: 'assistant', modelID: 'mystery-model' })],
+				0.7,
+				0.9,
+				{},
+				undefined,
+				{ modelID: 'mystery-model', providerID: 'provider' },
+				directory,
+			);
+			const snapshot = await readLearningHealth(directory);
+			expect(
+				snapshot.activeAlarms.some((a) => a.alarm === 'model_limit_fallback'),
+			).toBe(true);
+			const other = canonicalMkdtemp('swarm-ctx-status-lh-');
+			try {
+				const otherSnapshot = await readLearningHealth(other);
+				expect(
+					otherSnapshot.activeAlarms.some(
+						(a) => a.alarm === 'model_limit_fallback',
+					),
+				).toBe(false);
+			} finally {
+				rmSync(other, { recursive: true, force: true });
+			}
+		} finally {
+			resetLearningHealthForTest();
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+});
+
+describe('computeContextHeadroom provenance fields (#2044)', () => {
+	test('reports host source and fallbackActive=false for a live window', () => {
+		const result = computeContextHeadroom(
+			[makeMessage({ role: 'assistant', modelID: 'm1', providerID: 'p1' })],
+			0.7,
+			0.9,
+			{},
+			1_000_000,
+			{ modelID: 'm1', providerID: 'p1' },
+		);
+		expect(result.modelLimitSource).toBe('host');
+		expect(result.modelLimitResolution).toBe('live_model_limit');
+		expect(result.fallbackActive).toBe(false);
+	});
+
+	test('reports fallback provenance when no live window and unknown model', () => {
+		const result = computeContextHeadroom(
+			[makeMessage({ role: 'assistant', modelID: 'mystery' })],
+			0.7,
+			0.9,
+			{},
+			undefined,
+			{ modelID: 'mystery', providerID: 'p' },
+		);
+		expect(result.modelLimitSource).toBe('fallback');
+		expect(result.modelLimitResolution).toBe('static_default');
+		expect(result.fallbackActive).toBe(true);
+	});
+
+	test('reports override provenance when a user limit matches', () => {
+		const result = computeContextHeadroom(
+			[makeMessage({ role: 'assistant', modelID: 'ov-model' })],
+			0.7,
+			0.9,
+			{ 'p/ov-model': 60000 },
+			1_000_000,
+			{ modelID: 'ov-model', providerID: 'p' },
+		);
+		expect(result.modelLimitSource).toBe('override');
+		expect(result.modelLimitResolution).toBe('user_provider_model');
+		expect(result.fallbackActive).toBe(false);
+		expect(result.modelLimit).toBe(60000);
 	});
 });

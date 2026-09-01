@@ -353,3 +353,22 @@ describe('knowledge injector injection_skip telemetry (#1768/#1849)', () => {
 		expect(parsed.timestamp).toBeDefined();
 	});
 });
+
+describe('knowledge injector no_messages skip (#2044 item 4)', () => {
+	test('an empty message surface emits a skip with an explicit missing reason', async () => {
+		const { events } = captureEvents();
+		const hook = createKnowledgeInjectorHook(tempDir, {
+			...baseConfig,
+			enabled: true,
+		});
+		await hook({}, output([]));
+		await new Promise((r) => setTimeout(r, 5));
+
+		const skips = skipEvents(events);
+		expect(skips.length).toBe(1);
+		expect(skips[0].reason).toBe('no_messages');
+		expect(skips[0].detail).toMatchObject({
+			context: { missing: ['messages'] },
+		});
+	});
+});

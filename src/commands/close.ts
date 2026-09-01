@@ -17,6 +17,7 @@ import {
 	resetToMainAfterMerge,
 	resetToRemoteBranch,
 } from '../git/branch';
+import { observeCloseArchive } from '../health/learning-health';
 import { createCuratorLLMDelegate } from '../hooks/curator-llm-factory';
 import { runCuratorPostMortem } from '../hooks/curator-postmortem';
 import { extractCurrentPhaseFromPlan } from '../hooks/extractors.js';
@@ -744,6 +745,44 @@ export function emitCloseArchiveResult(
 			'[close-command] close_archive_result telemetry emit failed:',
 			telemetryErr,
 		);
+	}
+
+	// Learning-health archive-mismatch feed (#2044): raise when the archive is
+	// empty/invalid while recorded activity predicted content. The bounded
+	// activity probe reads existence + size only (no parsing). Late-arriving
+	// activity never retro-raises — the alarm records what was known now.
+	observeCloseArchive({
+		directory: ctx.directory,
+		archiveValid,
+		archiveEmpty,
+		activityPredictsContent: archiveActivityPredictsContent(ctx.directory),
+	});
+}
+
+/**
+ * Bounded activity probe for the archive-mismatch alarm (#2044): does recorded
+ * project activity predict archive content? Existence + size only — no reads
+ * of record content, no unbounded scans.
+ */
+function archiveActivityPredictsContent(directory: string): boolean {
+	try {
+		for (const name of [
+			'knowledge-events.jsonl',
+			'telemetry.jsonl',
+			'evidence',
+		]) {
+			const target = path.join(directory, '.swarm', name);
+			const stat = fsSync.statSync(target);
+			if (target.endsWith('evidence')) {
+				const entries = fsSync.readdirSync(target);
+				if (entries.length > 0) return true;
+			} else if (stat.size > 0) {
+				return true;
+			}
+		}
+		return false;
+	} catch {
+		return false;
 	}
 }
 

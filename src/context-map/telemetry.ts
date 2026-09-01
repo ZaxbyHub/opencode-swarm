@@ -45,6 +45,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+import { observeStoreHealth } from '../health/learning-health.js';
 import { telemetry } from '../telemetry.js';
 import { warn } from '../utils/logger';
 
@@ -1228,7 +1229,7 @@ export function finalizeContextTelemetry(directory: string): void {
 // ---------------------------------------------------------------------------
 
 function emitContextTelemetryHealth(
-	_directory: string,
+	directory: string,
 	payload: {
 		trigger: 'compaction' | 'close';
 		accepted: number;
@@ -1243,7 +1244,7 @@ function emitContextTelemetryHealth(
 	},
 ): void {
 	try {
-		telemetry.contextTelemetryHealth({
+		const healthPayload = {
 			trigger: payload.trigger,
 			accepted_count: payload.accepted,
 			compacted_count: payload.compacted,
@@ -1254,6 +1255,13 @@ function emitContextTelemetryHealth(
 			newest_timestamp: payload.newest,
 			bytes: payload.bytes,
 			limit_bytes: payload.limitBytes,
+		};
+		telemetry.contextTelemetryHealth(healthPayload);
+		// #2044: direct learning-health feed from the FIRST store event.
+		observeStoreHealth({
+			directory,
+			kind: 'context_telemetry_health',
+			payload: healthPayload,
 		});
 	} catch {
 		// Health telemetry must never break the store.

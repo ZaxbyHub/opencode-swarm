@@ -20,6 +20,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
+import { observeDelegationLedgerPressure } from '../health/learning-health';
 import { validateSwarmPath } from '../hooks/utils.js';
 
 export const BACKGROUND_DELEGATIONS_HEALTH_FILE =
@@ -572,6 +573,17 @@ export function collectDelegationLedgerHealth(
 				: ledgerBytes > options.lowWaterBytes
 					? 'nominal'
 					: 'ok';
+
+	// Learning-health recovery-ledger pressure feed (#2044): raise near the 4 MiB
+	// recovery bound (pressure ≥ 0.8 or compact-overdue/fail-closed bands),
+	// clear below 0.7 (hysteresis). Recovery-observation uncertainty surfaces as
+	// a closed reason code. Never throws; this collector stays synchronous.
+	observeDelegationLedgerPressure({
+		directory,
+		pressurePct: pressurePct / 100,
+		band,
+		uncertain: artifact?.lastUncertainty != null,
+	});
 
 	return {
 		schemaVersion: 1,
