@@ -887,9 +887,12 @@ export class SQLiteMemoryProvider
 						),
 					);
 				} catch (error) {
-					warn('[memory] failed to persist invalid SQLite proposal load event', {
-						reason: error instanceof Error ? error.message : String(error),
-					});
+					warn(
+						'[memory] failed to persist invalid SQLite proposal load event',
+						{
+							reason: error instanceof Error ? error.message : String(error),
+						},
+					);
 				}
 			}
 		} catch (err) {

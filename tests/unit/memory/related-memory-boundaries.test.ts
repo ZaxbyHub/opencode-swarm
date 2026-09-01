@@ -100,10 +100,7 @@ describe('related-memory bounds and expansion', () => {
 		const existing = neighbors
 			.slice(0, MAX_RELATIONS_PER_MEMORY - 1)
 			.map((neighbor, index) =>
-				proposal(
-					[anchor.id, neighbor.id],
-					String(index + 1).padStart(16, '0'),
-				),
+				proposal([anchor.id, neighbor.id], String(index + 1).padStart(16, '0')),
 			);
 		const next = proposal(
 			[anchor.id, neighbors[MAX_RELATIONS_PER_MEMORY - 1].id],
