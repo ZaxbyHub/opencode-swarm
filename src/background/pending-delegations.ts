@@ -4250,6 +4250,17 @@ function isTerminal(status: BackgroundDelegationStatus): boolean {
 }
 
 /**
+ * Public alias of the internal terminal predicate so shared lifecycle callers
+ * (issue #2045: `delegation-lifecycle.ts`) classify post-claim re-reads with
+ * the exact same status set as the store's own guards — never a second copy.
+ */
+export function isTerminalDelegationStatus(
+	status: BackgroundDelegationStatus,
+): boolean {
+	return isTerminal(status);
+}
+
+/**
  * Mark all overdue records in `statuses` as `stale` (status-only; no gate
  * effect). Called within an already-held store lock.
  *

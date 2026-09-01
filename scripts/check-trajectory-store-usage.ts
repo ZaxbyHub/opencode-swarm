@@ -55,6 +55,10 @@ export const TRAJECTORY_STORE_IMPORT_ALLOWLIST: Readonly<
 		reason: 'production append caller — routes every session-trajectory write through appendTrajectoryEntry and seeds steps via getCurrentStep (issue #2041)',
 		cls: 'caller',
 	},
+	'src/background/delegation-lifecycle.ts': {
+		reason: 'delegation-terminal observation caller — lane terminals append one bounded trajectory entry carrying the canonical batchId/laneId join keys via appendTrajectoryEntry and seed steps via getCurrentStep (issue #2045)',
+		cls: 'caller',
+	},
 	'src/state.ts': {
 		reason: 'reset lifecycle — clears the composite-keyed in-memory cache (issue #2041)',
 		cls: 'lifecycle',

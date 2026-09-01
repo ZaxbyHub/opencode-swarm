@@ -572,7 +572,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/background/pending-delegations.ts:4163 writeBackgroundCoderReservations',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:4424 readDelegationFallback / listDelegationFallbacks / scanDelegationFallbacksForRecovery',
+			'src/background/pending-delegations.ts:4435 readDelegationFallback / listDelegationFallbacks / scanDelegationFallbacksForRecovery',
 			'src/background/pending-delegations.ts:4107 scanBackgroundCoderReservationsForAdmission',
 		],
 		schemaVersion: 'fallback schemaVersion 1 (:837)',
@@ -2830,7 +2830,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		pathGrammar: '.swarm/unacknowledged-criticals.jsonl',
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/hooks/delegate-ack-collector.ts'],
-		writerCitations: ['src/hooks/delegate-ack-collector.ts:76 appendUnacknowledgedCritical — appendFile :85, best-effort'],
+		writerCitations: ['src/hooks/delegate-ack-collector.ts:85 appendUnacknowledgedCritical — appendFile :85, best-effort'],
 		readerCitations: ['write-only in production (escalator reads knowledge events, not this file — verified)'],
 		schemaVersion: 'none',
 		stateClass: 'governed-content',
