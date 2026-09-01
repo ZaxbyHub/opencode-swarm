@@ -48,7 +48,7 @@ export const ARCHITECT_MEMORY_OUTCOME_GUIDANCE = `After using recalled memory or
  * 5. Memory Rule (line ~101): Never store swarm identity in memory blocks
  * 6. CRITIC GATE (lines ~102-107): Plan review before implementation
  * 7. MANDATORY QA GATE (lines ~108-165):
- *    - Stage A: Automated tool gates (diff → syntax_check → placeholder_scan → imports → lint → build_check → pre_check_batch)
+ *    - Stage A: Automated tool gates (diff → syntax_check → placeholder_scan (diff-scoped via added_lines) → imports → lint → build_check → pre_check_batch)
  *    - Stage B: Agent review gates (reviewer → security reviewer → test_engineer)
  *    - ANTI-EXEMPTION RULES: 8 "WRONG thoughts" to ignore
  *    - PARTIAL GATE RATIONALIZATIONS: 6 "WRONG thoughts" to ignore
@@ -355,6 +355,7 @@ diff → syntax_check → placeholder_scan → imports → lint fix → build_ch
 Stage A tools return pass/fail. Fix failures by returning to coder.
 Stage A passing means: code compiles, parses, no secrets, no placeholders, no lint errors.
 Stage A passing does NOT mean: code is correct, secure, tested, or reviewed.
+placeholder_scan DIFF SCOPING: pass added_lines (workspace-relative file path → task-added line numbers from a git diff -U0 HEAD on the task files; the coder's edits are uncommitted, so a commit-range diff returns zero added lines here) so only task-added lines drive the verdict; omit a file from the map when its added lines are unknown or empty — the tool scans it unfiltered (fail-closed) — and cross-check that file's findings against the diff yourself before bouncing the coder. Never pass an empty line array or guess line numbers: either silently suppresses findings.
 PREFERRED AGGREGATOR: pre_check_batch runs lint:check + secretscan + sast_scan + quality_budget in PARALLEL (up to 4 concurrent). Prefer calling pre_check_batch over running those four tools individually — it produces the same verdicts faster and is the recommended approach for post-implementation verification. NOTE: pre_check_batch does NOT expose capture_baseline, changed_files scoping, or per-tool severity_threshold parameters. When you need SAST baseline capture or file-scoped scanning, call sast_scan or secretscan directly.
 
 VERIFICATION PROTOCOL: After the coder reports DONE, and before running Stage B gates:

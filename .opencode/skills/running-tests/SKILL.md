@@ -232,6 +232,12 @@ git worktree remove "$env:TEMP\repro-check"
 
 ---
 
+## Placeholder Scans Without Diff Line Numbers
+
+`placeholder_scan` is diff-aware: when you can supply `added_lines` (a map of workspace-relative file path → added line numbers from the task/PR diff), its verdict covers only the added lines, so a pre-existing TODO/FIXME on an unchanged line inside a changed file no longer fails the gate. When you CANNOT map a file's added lines (new/untracked file, no diff access) — or the computed added-line set is EMPTY — omit that file from `added_lines` entirely: the tool scans it unfiltered, fail-closed, and you manually cross-check that file's findings against the changed lines before treating a finding as introduced by the change. NEVER pass an empty line array for a file (an empty array suppresses every finding in it) and NEVER hand-enumerate guessed line numbers: a wrong `added_lines` map silently suppresses findings.
+
+---
+
 ## Failure Classification
 
 Not all failures are equal. Before deciding what to do, classify the failure:

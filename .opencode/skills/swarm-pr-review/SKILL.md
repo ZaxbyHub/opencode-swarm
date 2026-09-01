@@ -832,6 +832,7 @@ Tool candidate rules:
 
 - Confirm reachability before reporting.
 - Confirm PR-introducedness before reporting as a PR blocker.
+- When `placeholder_scan` output is used as a signal, pass `added_lines` (file path → PR-added line numbers from the merge-base diff) so only added lines drive the scan; a placeholder finding on an unchanged line is a pre-existing-debt candidate, not a PR blocker. If added-line mapping is unavailable, treat the findings as unscoped and cross-check them against the PR diff before recording the row.
 - Confirm that a framework, schema, middleware, caller guard, or test isolation rule does not already mitigate it.
 - Do not report scanner output verbatim without reviewer validation.
 - Redact secrets; never paste raw credentials into the final output.

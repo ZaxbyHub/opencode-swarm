@@ -105,6 +105,8 @@ If any required agent is missing, `phase_complete` returns `{ success: false, st
 
 The `docs` agent requirement is controlled by `phase_complete.require_docs` in plugin configuration, not by the QA gate profile returned by `get_qa_gate_profile`. It defaults to `true`. Set it to `false` only when the phase genuinely has no documentation obligation. A successful docs completion is persisted as plan- and phase-bound participation proof so `phase_complete` can recover it after a session restart; unrelated task-gate evidence does not count as docs participation.
 
+Docs-attestation integrity (issue #1994 P2): when the docs agent concludes that a phase — especially a doc-only phase — needs no further documentation edits, that attestation is valid ONLY if the docs agent actually inspected the phase's changed files and recorded what it checked (files read, per-file verdict) in its completion report. A mechanical "no edits needed" reply dispatched only to satisfy `agentsDispatched` — without inspecting the phase's changes — is a process violation: the gate exists to catch documentation drift, not to be acknowledged past.
+
 The `coder` and `test_engineer` agents are required because every phase that modifies source code or tests must have at least one implementation and one test-verification delegation. For pure documentation or retrospective phases, these may be waived by the user explicitly.
 
 This is a hard enforcement mechanism, not a suggestion. `phase_complete` will not return `status: success` if any required agent is missing from `agentsDispatched`.
