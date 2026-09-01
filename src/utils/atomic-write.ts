@@ -94,7 +94,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		producers: [
 			'src/commands/handoff.ts:48 (pre-#2035)',
 			'src/commands/handoff.ts:79 (pre-#2035)',
-			'src/memory/local-jsonl-provider.ts:1226',
+			'src/memory/local-jsonl-provider.ts:1288',
 			'src/config/bundled-skills.ts:250',
 		],
 	},
@@ -154,7 +154,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/turbo/epic/state.ts:177',
 			'src/turbo/epic/calibration.ts:197',
 			'src/commands/archive-sqlite.ts:318',
-			'src/memory/jsonl-migration.ts:157',
+			'src/memory/jsonl-migration.ts:161',
 		],
 		note: 'fsync-discipline / lock-scoped fd writers whose temp naming is pinned by their own durability test suites (plan-durability invariant 5, #2034 crash matrix); grammars registered here so their residue stays discoverable',
 	},
