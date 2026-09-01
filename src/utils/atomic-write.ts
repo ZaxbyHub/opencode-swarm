@@ -105,7 +105,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		token: 'instance',
 		quarantineEligible: true,
 		parsesTarget: true,
-		producers: ['src/hooks/pr-workflow-gate.ts:18397'],
+		producers: ['src/hooks/pr-workflow-gate.ts (pre-#2385; migration extracted to src/pr-review/persistence.ts)'],
 		note: 'pre/post-rename file-identity verification (assertOpened/ClosedSwarmFileIdentity, pr-workflow-gate.ts:17880-17980) is writer-specific and load-bearing',
 	},
 	{
@@ -409,6 +409,11 @@ export const WRITER_CLASSIFICATION: Readonly<
 	// PR-review re-entry authorization store (issues #2383/#2385; moved to the
 	// src/pr-review/ boundary); UUID-scoped `.${basename}.${uuid}.tmp`
 	'src/pr-review/authorization.ts': 'registered-bespoke',
+	// bespoke atomic single-file rewrite (write tmp + rename) for the PR-review
+	// gate-state and salvage reads (issue #2385; the only durable stream is
+	// `.swarm/pr-workflow-gates/*.json`, currently UNREGISTERED in the retention
+	// data set — F-PRR-013 follow-up); UUID-scoped `.tmp.<pid>.<uuid>`
+	'src/pr-review/persistence.ts': 'registered-bespoke',
 	'src/hooks/promotion-evidence-store.ts': 'registered-bespoke',
 	'src/hooks/review-receipt.ts': 'registered-bespoke',
 	'src/hooks/skill-usage-log.ts': 'registered-bespoke',
