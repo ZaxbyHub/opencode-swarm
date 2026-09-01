@@ -24,7 +24,6 @@ import {
 import {
 	type BackgroundDelegationRecord,
 	type BackgroundDelegationResult,
-	type BackgroundDelegationWorkflowLaneFailureClass,
 	type BackgroundDelegationWorkflowLaneRecovery,
 	DEFAULT_STALE_DELEGATION_TIMEOUT_MS,
 	findByBatchId,
@@ -43,7 +42,6 @@ import {
 	PrReviewLaneResultEnvelopeSchema,
 	type PrReviewResultReceipt,
 	PrReviewResultReceiptSchema,
-	type PrReviewResultUnresolvedReason,
 	type PrReviewRiskImpact,
 	type PrReviewRiskTag,
 	PrReviewRunIdSchema,
@@ -100,17 +98,12 @@ import {
 	type PrWorkflowGitState,
 } from '../git/pr-workflow-state.js';
 import { redactSecrets } from '../memory/redaction.js';
-import { canonicalWorkspaceIdentity } from '../scope/scope-binding.js';
-import { swarmState } from '../state.js';
-import { getPrWorkflowToolCapability } from '../tools/tool-metadata.js';
-import { log, warn } from '../utils/logger.js';
-import { withTimeout } from '../utils/timeout.js';
-import { normalizeToolName } from './normalize-tool-name.js';
+import { bindPrReviewReentryBindingReader } from '../pr-review/authorization.js';
 import {
 	adoptPrReviewCircuit,
 	advancePrReviewCircuit,
-	classifyPrReviewCircuitSignal,
 	CIRCUIT_TERMINAL_DELEGATION_STATUSES,
+	classifyPrReviewCircuitSignal,
 	type PrReviewCircuitAdoptionDiagnostic,
 	type PrReviewCircuitLegacyRecord,
 	PrReviewCircuitRecordSchema,
@@ -119,39 +112,6 @@ import {
 	type PrReviewResiliencePolicyRecord,
 	resolvePrReviewResiliencePolicy,
 } from '../pr-review/circuit.js';
-// Issue #2385: the atomic persistence boundary. The gate binds its
-// `_test_exports` object and its full state codec at module init below; all
-// seam properties are read at call time through the bound reference.
-import {
-	bindPrReviewPersistenceHooks,
-	bindPrReviewStateCodec,
-	CHECKOUT_MUTATION_ACTION_TIMEOUT_MS,
-	defaultPersistenceHooks,
-	delay,
-	forgetTrackedPrWorkflowState,
-	isoNow,
-	MAX_TRACKED_SESSIONS,
-	normalizeComparableFsPath,
-	normalizeSessionID,
-	prWorkflowSessionFileStem,
-	readPrWorkflowGateStateFileFromDisk,
-	readPrWorkflowGateStateFromDisk as readPrWorkflowStateFromDiskBound,
-	rememberState,
-	resetPrReviewPersistenceCaches,
-	sameBigIntFileIdentity,
-	stateCacheKey,
-	trackedStatesByProjectSession,
-	withPrWorkflowCheckoutMutationLock,
-	withSessionStateMutation,
-	WORKFLOW_GATE_DIR,
-	writeAtomicJson,
-	writePrWorkflowAtomicJson,
-	writeStateWhileLocked,
-	workflowCheckoutMutationLockRelativePath,
-	workflowGateStateLockRelativePath,
-	workflowGateStatePath,
-	workflowGateStateRelativePath,
-} from '../pr-review/persistence.js';
 // Issue #2385: the coverage/completion settlement boundary. The gate binds
 // its derivation helpers into the boundary at module init below; the two
 // state-returning entry points are re-exposed locally with their original
@@ -162,21 +122,15 @@ import {
 	assertPrReviewBaseCoverageSettled as assertPrReviewBaseCoverageSettledFromCompletion,
 	bindPrReviewCompletionHelpers,
 	derivePrReviewDimensionSettlement,
-	PrReviewDimensionCancellationRecordSchema,
-	PrReviewPartialBaseCoverageRecordSchema,
-	summarizePrReviewBaseDimensionAttempts,
 	type PrReviewBaseDimensionAttempts,
 	type PrReviewDimensionCancellationRecord,
+	PrReviewDimensionCancellationRecordSchema,
 	type PrReviewPartialBaseCoverageRecord,
+	PrReviewPartialBaseCoverageRecordSchema,
 	type PrReviewReportVerdict,
 	type PrReviewTerminalCoverageSettlement,
+	summarizePrReviewBaseDimensionAttempts,
 } from '../pr-review/completion.js';
-import { bindPrReviewReentryBindingReader } from '../pr-review/authorization.js';
-import { reducePrReviewEvent } from '../pr-review/reducer.js';
-import type {
-	PrReviewEvent,
-	PrReviewWorkflowState,
-} from '../pr-review/types.js';
 // Issue #2385: the legacy transcript adapter boundary. Raw transcript /
 // artifact-text -> canonical conversion exists only in
 // src/pr-review/legacy-transcript-adapter.ts; the guardrail scanner
@@ -191,34 +145,55 @@ import {
 	legacyFeedbackArtifactCoversItems,
 	legacyFeedbackArtifactTextCoversItems,
 	legacyTranscriptAdapterTestSurface,
-	parseCriticVerdict,
 	type PrReviewComposablePhase,
 	type PrReviewItemClaim,
 	type PrReviewPhaseComposition,
+	parseCriticVerdict,
 	readLegacySettledFeedbackClassifications,
 	reviewerItemBindingKey,
 } from '../pr-review/legacy-transcript-adapter.js';
+// Issue #2385: the atomic persistence boundary. The gate binds its
+// `_test_exports` object and its full state codec at module init below; all
+// seam properties are read at call time through the bound reference.
+import {
+	bindPrReviewPersistenceHooks,
+	bindPrReviewStateCodec,
+	CHECKOUT_MUTATION_ACTION_TIMEOUT_MS,
+	defaultPersistenceHooks,
+	forgetTrackedPrWorkflowState,
+	isoNow,
+	MAX_TRACKED_SESSIONS,
+	normalizeComparableFsPath,
+	normalizeSessionID,
+	readPrWorkflowGateStateFileFromDisk,
+	readPrWorkflowGateStateFromDisk as readPrWorkflowStateFromDiskBound,
+	rememberState,
+	resetPrReviewPersistenceCaches,
+	sameBigIntFileIdentity,
+	WORKFLOW_GATE_DIR,
+	withPrWorkflowCheckoutMutationLock,
+	withSessionStateMutation,
+	workflowCheckoutMutationLockRelativePath,
+	workflowGateStateLockRelativePath,
+	workflowGateStatePath,
+	workflowGateStateRelativePath,
+	writeAtomicJson,
+	writePrWorkflowAtomicJson,
+	writeStateWhileLocked,
+} from '../pr-review/persistence.js';
+import { reducePrReviewEvent } from '../pr-review/reducer.js';
+import type {
+	PrReviewEvent,
+	PrReviewWorkflowState,
+} from '../pr-review/types.js';
+import { canonicalWorkspaceIdentity } from '../scope/scope-binding.js';
+import { swarmState } from '../state.js';
+import { getPrWorkflowToolCapability } from '../tools/tool-metadata.js';
+import { log, warn } from '../utils/logger.js';
+import { withTimeout } from '../utils/timeout.js';
+import { normalizeToolName } from './normalize-tool-name.js';
 import { validateSwarmPath } from './utils.js';
 
-// Issue #2385: persistence-owned surfaces re-exported for existing importers
-// (pr-feedback-event-queue.ts, prepare-pr-workflow-checkout.ts, tests).
-export {
-	ensurePrWorkflowSafeParentDirectory,
-	PrWorkflowCheckoutMutationTimeoutError,
-	prWorkflowSessionFileStem,
-	withPrWorkflowCheckoutMutationLock,
-	writePrWorkflowAtomicJson,
-} from '../pr-review/persistence.js';
-
-// Issue #2385: completion-owned surfaces re-exported for existing importers
-// (tools, tests) — the gate remains the public import surface.
-export {
-	allowedPrReviewReportVerdicts,
-	normalizePrReviewPartialBaseCoverageRecord,
-	PR_REVIEW_REPORT_VERDICTS,
-	readPrReviewTerminalCoverageForReport,
-	rollbackPrReviewPartialBaseCoverageAdmission,
-} from '../pr-review/completion.js';
 export type {
 	PrReviewDimensionCancellationRecord,
 	PrReviewDimensionTerminalState,
@@ -230,6 +205,25 @@ export type {
 	PrReviewTerminalCoverageSettlement,
 	PrReviewUnresolvedDimensionRecord,
 } from '../pr-review/completion.js';
+
+// Issue #2385: completion-owned surfaces re-exported for existing importers
+// (tools, tests) — the gate remains the public import surface.
+export {
+	allowedPrReviewReportVerdicts,
+	normalizePrReviewPartialBaseCoverageRecord,
+	PR_REVIEW_REPORT_VERDICTS,
+	readPrReviewTerminalCoverageForReport,
+	rollbackPrReviewPartialBaseCoverageAdmission,
+} from '../pr-review/completion.js';
+// Issue #2385: persistence-owned surfaces re-exported for existing importers
+// (pr-feedback-event-queue.ts, prepare-pr-workflow-checkout.ts, tests).
+export {
+	ensurePrWorkflowSafeParentDirectory,
+	PrWorkflowCheckoutMutationTimeoutError,
+	prWorkflowSessionFileStem,
+	withPrWorkflowCheckoutMutationLock,
+	writePrWorkflowAtomicJson,
+} from '../pr-review/persistence.js';
 
 // Issue #2385 compile-time guarantee: the gate's full state structurally
 // satisfies the PR-review slice the reducer governs (one field definition;
@@ -2014,10 +2008,11 @@ async function assertNoActivePrWorkflowGateForCheckoutRestore(
 				directory,
 				path.join(WORKFLOW_GATE_DIR, entry.name),
 			);
-			const state = await readPrWorkflowGateStateFileFromDisk<PrWorkflowGateState>(
-				statePath,
-				entry.name,
-			);
+			const state =
+				await readPrWorkflowGateStateFileFromDisk<PrWorkflowGateState>(
+					statePath,
+					entry.name,
+				);
 			if (!state) continue;
 			const expectedName = path.basename(
 				workflowGateStateRelativePath(state.sessionID),
@@ -4430,9 +4425,7 @@ async function preflightPrReviewResilienceCircuitBeforePrune(
 	});
 	if (outcome.blocked) {
 		throw new PrReviewResilienceCircuitOpenError(
-			formatPrReviewResilienceCircuitOpenMessage(
-				outcome.snapshot.circuit,
-			),
+			formatPrReviewResilienceCircuitOpenMessage(outcome.snapshot.circuit),
 		);
 	}
 	return {
@@ -4748,7 +4741,10 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 	// Issue #2385: both transitions are REDUCER-OWNED — this adapter emits
 	// `resilience_config_changed`, applies the returned state, and executes
 	// the `persist_state` effect. No inline resilience-field mutation remains.
-	if (nextResilience && (!liveResilienceEnabled || nextResilience.policy.enabled === false)) {
+	if (
+		nextResilience &&
+		(!liveResilienceEnabled || nextResilience.policy.enabled === false)
+	) {
 		const configEvent: PrReviewEvent = {
 			type: 'resilience_config_changed',
 			enabled: liveResilienceEnabled,
@@ -4818,9 +4814,7 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 			pendingProbeCircuit = outcome.pendingProbeCircuit;
 			if (outcome.blocked) {
 				throw new PrReviewResilienceCircuitOpenError(
-					formatPrReviewResilienceCircuitOpenMessage(
-						outcome.snapshot.circuit,
-					),
+					formatPrReviewResilienceCircuitOpenMessage(outcome.snapshot.circuit),
 				);
 			}
 		}
@@ -5199,19 +5193,17 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 						outcome: { result: 'rolled_back_admission' },
 						nowMs: _test_exports.nowMs(),
 						policy: {
-							...(nextResilience?.policy ??
-								snapshotPrReviewResiliencePolicy()),
+							...(nextResilience?.policy ?? snapshotPrReviewResiliencePolicy()),
 							circuitOpenDurationMs: circuitOpenDurationMs(
-								nextResilience?.policy ??
-									snapshotPrReviewResiliencePolicy(),
+								nextResilience?.policy ?? snapshotPrReviewResiliencePolicy(),
 							),
 						},
 					},
 				);
 				if (probeOutcome.status === 'applied') {
 					nextResilience =
-						(probeOutcome.state as PrWorkflowGateState)
-							.prReviewResilience ?? nextResilience;
+						(probeOutcome.state as PrWorkflowGateState).prReviewResilience ??
+						nextResilience;
 				}
 			}
 			const shouldKeepResilience =
@@ -5258,7 +5250,8 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
  * Issue #2385: the set itself is owned by `src/pr-review/circuit.ts`
  * (`CIRCUIT_TERMINAL_DELEGATION_STATUSES`) — one vocabulary, no mirror.
  */
-const TERMINAL_FAILED_DELEGATION_STATUSES = CIRCUIT_TERMINAL_DELEGATION_STATUSES;
+const TERMINAL_FAILED_DELEGATION_STATUSES =
+	CIRCUIT_TERMINAL_DELEGATION_STATUSES;
 
 /**
  * Fewest of these consolidated lane sets that together cover their own union.
@@ -9584,7 +9577,6 @@ async function readBoundedSwarmRegularFile(
 	}
 }
 
-
 function prReviewRunReservationRelativePath(runId: string): string {
 	return `pr-review/${runId}/run-reservation.json`;
 }
@@ -10912,14 +10904,14 @@ export async function readPrReviewReentryBindingContext(
 		...(state.workflowInstanceId
 			? { workflowInstanceId: state.workflowInstanceId }
 			: {}),
-			...((state.prReviewArtifactRunId ?? state.prReviewReservedRunId)
-				? {
-						runId:
-							state.prReviewArtifactRunId ??
-							state.prReviewReservedRunId ??
-							undefined,
-					}
-				: {}),
+		...((state.prReviewArtifactRunId ?? state.prReviewReservedRunId)
+			? {
+					runId:
+						state.prReviewArtifactRunId ??
+						state.prReviewReservedRunId ??
+						undefined,
+				}
+			: {}),
 	};
 }
 
@@ -15729,9 +15721,6 @@ async function persistState(
 
 /** Persist one CAS-checked state replacement while the session lock is held. */
 
-
-
-
 /** Upper bound on schema issues quoted in one salvage disclosure. */
 const MAX_SALVAGED_SCHEMA_ERRORS = 10;
 
@@ -15930,7 +15919,3 @@ export async function readPrWorkflowGateStateForRecovery(
 		armedShapeUnreadable,
 	};
 }
-
-
-
-

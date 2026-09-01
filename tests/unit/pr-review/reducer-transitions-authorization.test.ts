@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { reducePrReviewEvent } from '../../../src/pr-review/reducer.js';
-import type { PrReviewAuthorizationBinding, PrReviewWorkflowState } from '../../../src/pr-review/types.js';
+import type {
+	PrReviewAuthorizationBinding,
+	PrReviewWorkflowState,
+} from '../../../src/pr-review/types.js';
 
 const BASE: PrReviewWorkflowState = {
 	sessionID: 'ses_auth_1',

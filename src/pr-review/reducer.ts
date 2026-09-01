@@ -199,8 +199,7 @@ export function reducePrReviewEvent(
 					`lane ${event.laneId} already carries a different structured receipt`,
 				);
 			}
-			const status =
-				event.outcome === 'INCOMPLETE' ? 'error' : 'completed';
+			const status = event.outcome === 'INCOMPLETE' ? 'error' : 'completed';
 			return applied(state, [
 				{
 					kind: 'settle_delegation',
@@ -417,10 +416,7 @@ export function reducePrReviewEvent(
 						}),
 					},
 				},
-				[
-					{ kind: 'persist_state' },
-					{ kind: 'clear_resilience_evidence' },
-				],
+				[{ kind: 'persist_state' }, { kind: 'clear_resilience_evidence' }],
 			);
 		}
 
@@ -483,10 +479,7 @@ export function reducePrReviewEvent(
 		// Publication / recovery / authorization
 		// -----------------------------------------------------------------
 		case 'publication_armed': {
-			if (
-				event.verdict === 'APPROVE' &&
-				event.coverageKind !== 'COMPLETE'
-			) {
+			if (event.verdict === 'APPROVE' && event.coverageKind !== 'COMPLETE') {
 				return rejected(
 					state,
 					event.coverageKind === 'NO_COVERAGE'
@@ -503,11 +496,7 @@ export function reducePrReviewEvent(
 		case 'reviewer_authorization_consumed': {
 			const reason = bindingRejection(state, event);
 			if (reason) {
-				return rejected(
-					state,
-					'stale_foreign_authorization',
-					reason.detail,
-				);
+				return rejected(state, 'stale_foreign_authorization', reason.detail);
 			}
 			if (
 				event.type === 'reviewer_authorization_consumed' &&
@@ -566,7 +555,9 @@ function bindingRejection(
 ): { detail: string } | null {
 	const binding = event.binding;
 	if (binding.sessionID !== state.sessionID) {
-		return { detail: `authorization session ${binding.sessionID} is foreign to the active workflow session` };
+		return {
+			detail: `authorization session ${binding.sessionID} is foreign to the active workflow session`,
+		};
 	}
 	if (
 		binding.workflowInstanceId !== undefined &&
@@ -576,10 +567,14 @@ function bindingRejection(
 		return { detail: 'authorization belongs to a different workflow instance' };
 	}
 	if (!state.prHeadSha || binding.prHeadSha !== state.prHeadSha) {
-		return { detail: `authorization head ${binding.prHeadSha} does not match the bound head` };
+		return {
+			detail: `authorization head ${binding.prHeadSha} does not match the bound head`,
+		};
 	}
 	if (binding.generation !== currentGeneration(state)) {
-		return { detail: `authorization generation ${binding.generation} is stale (active: ${currentGeneration(state)})` };
+		return {
+			detail: `authorization generation ${binding.generation} is stale (active: ${currentGeneration(state)})`,
+		};
 	}
 	return null;
 }

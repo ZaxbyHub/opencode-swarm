@@ -57,16 +57,16 @@ export const FORBIDDEN_OBSERVER_TERMINALIZER_SYMBOLS: readonly string[] = [
  * - `sweepStaleAsyncLaneRecords`: the presumed-stale `stale` backstop.
  * Additions must document their evidence source here.
  */
-export const DELEGATION_WRITE_ALLOWED_FUNCTIONS: ReadonlySet<string> =
-	new Set([
-		'startAsyncLanePrompt',
-		'appendAsyncLaneLaunchError',
-		'collectOnce',
-		'settleCollectedLane',
-		'sweepStaleAsyncLaneRecords',
-	]);
+export const DELEGATION_WRITE_ALLOWED_FUNCTIONS: ReadonlySet<string> = new Set([
+	'startAsyncLanePrompt',
+	'appendAsyncLaneLaunchError',
+	'collectOnce',
+	'settleCollectedLane',
+	'sweepStaleAsyncLaneRecords',
+]);
 
-const DELEGATION_WRITE_CALL = /\b(?:appendDelegationTransition|claimTerminalResult)\s*\(/;
+const DELEGATION_WRITE_CALL =
+	/\b(?:appendDelegationTransition|claimTerminalResult)\s*\(/;
 
 const FUNCTION_DECLARATION =
 	/^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z0-9_$]+)/;
@@ -102,8 +102,7 @@ export function scanObserverTerminalization(
 	const hits: GuardrailHit[] = [];
 	for (const source of sources) {
 		const normalized = normalizedSourcePath(source.path);
-		const isGuardrailDefinition =
-			normalized === 'src/pr-review/guardrails.ts';
+		const isGuardrailDefinition = normalized === 'src/pr-review/guardrails.ts';
 		const lines = source.content.split(/\r?\n/);
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
@@ -120,9 +119,9 @@ export function scanObserverTerminalization(
 				}
 			}
 			if (
-				source.path.replaceAll('\\', '/').endsWith(
-					'src/tools/dispatch-lanes.ts',
-				) &&
+				source.path
+					.replaceAll('\\', '/')
+					.endsWith('src/tools/dispatch-lanes.ts') &&
 				DELEGATION_WRITE_CALL.test(line)
 			) {
 				const enclosing = enclosingFunctionOf(lines, i);
@@ -213,8 +212,7 @@ export function scanTranscriptParsingOutsideAdapter(
 // Guardrail 3 — no parallel circuit-rule construction outside src/pr-review/
 // ---------------------------------------------------------------------------
 
-const CIRCUIT_STATE_LITERAL =
-	/state:\s*'(?:OPEN|HALF_OPEN|CLOSED)'/;
+const CIRCUIT_STATE_LITERAL = /state:\s*'(?:OPEN|HALF_OPEN|CLOSED)'/;
 const CIRCUIT_FIELD_LITERAL =
 	/(?:contributors\s*:|openUntil\s*:|version\s*:\s*2\b|evidenceWaterline\s*:)/;
 

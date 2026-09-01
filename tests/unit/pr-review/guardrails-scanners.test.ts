@@ -107,20 +107,20 @@ describe('guardrail scanners bite on synthetic anti-patterns (issue #2385)', () 
 					'\tpolicy: snapshot,',
 					'\tattempts: [],',
 					'\tcircuit: {',
-					"\t\tversion: 2,",
+					'\t\tversion: 2,',
 					"\t\tstate: 'CLOSED',",
 					'\t\tgeneration: previousGeneration + 1,',
 					'\t\tcontributors: [],',
-					"\t\tevidenceWaterline: isoNow(),",
+					'\t\tevidenceWaterline: isoNow(),',
 					'\t},',
 					'};',
 				].join('\n'),
 			},
 		]);
 		expect(hits.length).toBeGreaterThan(0);
-		expect(hits.some((h) => h.rule === 'parallel-circuit-record-construction')).toBe(
-			true,
-		);
+		expect(
+			hits.some((h) => h.rule === 'parallel-circuit-record-construction'),
+		).toBe(true);
 	});
 
 	test('parallel-rule scanner ignores read-only circuit references', () => {

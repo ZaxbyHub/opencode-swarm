@@ -15,7 +15,6 @@
 
 import type { PrReviewBaseDimensionId } from '../background/pr-review-contract.js';
 import type {
-	PrReviewCircuitRecordV2,
 	PrReviewCircuitSignal,
 	PrReviewResiliencePolicyRecord,
 } from './circuit.js';
@@ -67,7 +66,9 @@ export interface PrReviewWorkflowState {
 	prReviewResilience?: PrReviewResilienceSlice | undefined;
 	prReviewContractRetryDimensions?: PrReviewBaseDimensionId[] | undefined;
 	prReviewDimensionCancellations?:
-		| Partial<Record<PrReviewBaseDimensionId, PrReviewDimensionCancellationLite>>
+		| Partial<
+				Record<PrReviewBaseDimensionId, PrReviewDimensionCancellationLite>
+		  >
 		| undefined;
 	/** Coverage disclosure fields are carried opaquely (owned by completion.ts). */
 	prReviewPartialBaseCoverage?: unknown | undefined;
@@ -77,7 +78,10 @@ export interface PrReviewWorkflowState {
 // Terminal coverage (values computed by completion.ts)
 // ---------------------------------------------------------------------------
 
-export type PrReviewTerminalCoverageKind = 'COMPLETE' | 'PARTIAL' | 'NO_COVERAGE';
+export type PrReviewTerminalCoverageKind =
+	| 'COMPLETE'
+	| 'PARTIAL'
+	| 'NO_COVERAGE';
 
 export type PrReviewReportVerdict =
 	| 'APPROVE'
@@ -115,7 +119,11 @@ export type PrReviewEffect =
 			code: string;
 			boundedDetail?: string | undefined;
 	  }
-	| { kind: 'append_audit_event'; code: string; boundedDetail?: string | undefined }
+	| {
+			kind: 'append_audit_event';
+			code: string;
+			boundedDetail?: string | undefined;
+	  }
 	| { kind: 'block_dispatch'; reason: 'circuit_open' | 'probe_in_flight' }
 	| { kind: 'invalidate_publication_authorization' }
 	| { kind: 'clear_resilience_evidence' };
@@ -172,7 +180,11 @@ export type PrReviewEvent =
 			laneId: string;
 			generation: number;
 			evidence:
-				| { source: 'typed_terminal_error_class'; category: string; kind: string }
+				| {
+						source: 'typed_terminal_error_class';
+						category: string;
+						kind: string;
+				  }
 				| { source: 'observer_deadline' }
 				| { source: 'client_unavailable' }
 				| { source: 'parser_or_transcript' }
@@ -198,11 +210,13 @@ export type PrReviewEvent =
 			type: 'circuit_advance_requested';
 			nowMs: number;
 			laneSignals: readonly PrReviewCircuitSignal[];
-			probeObservation?: {
-				terminalStatus: string;
-				signal: PrReviewCircuitSignal | null;
-				terminalAtMs: number;
-			} | undefined;
+			probeObservation?:
+				| {
+						terminalStatus: string;
+						signal: PrReviewCircuitSignal | null;
+						terminalAtMs: number;
+				  }
+				| undefined;
 			admission?: { batchId: string; laneId: string } | undefined;
 			policy: PrReviewResiliencePolicyRecord;
 	  }
@@ -215,7 +229,9 @@ export type PrReviewEvent =
 	| {
 			type: 'resilience_config_changed';
 			enabled: boolean;
-			policy?: import('../config/schema.js').PrReviewResilienceConfig | undefined;
+			policy?:
+				| import('../config/schema.js').PrReviewResilienceConfig
+				| undefined;
 			nowMs: number;
 	  }
 	// --- coverage / completion ----------------------------------------------

@@ -60,9 +60,7 @@ afterEach(async () => {
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
-async function establishMixedCoverage(
-	successCount: number,
-): Promise<string[]> {
+async function establishMixedCoverage(successCount: number): Promise<string[]> {
 	await activatePrWorkflow(directory, PR_ARTIFACT_SESSION_ID, 'PR_REVIEW', {
 		prHeadSha: PR_ARTIFACT_HEAD_SHA,
 	});

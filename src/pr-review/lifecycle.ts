@@ -45,9 +45,7 @@ export const PR_REVIEW_LANE_MODES: ReadonlySet<string> = new Set([
 ]);
 
 export function isPrReviewLaneMode(mode: string | undefined): boolean {
-	return (
-		mode !== undefined && mode.startsWith(PR_REVIEW_LANE_MODE_PREFIX)
-	);
+	return mode?.startsWith(PR_REVIEW_LANE_MODE_PREFIX) ?? false;
 }
 
 export function isPrReviewDiscoveryLaneMode(mode: string | undefined): boolean {

@@ -36,11 +36,13 @@ const originalGateGetSessionOps = gateInternals.getSessionOps;
 const originalResolveCurrentGitHead = gateInternals.resolveCurrentGitHead;
 const originalResolveCurrentGitHeadAsync =
 	gateInternals.resolveCurrentGitHeadAsync;
-const originalResolveIsWorkingTreeClean = gateInternals.resolveIsWorkingTreeClean;
+const originalResolveIsWorkingTreeClean =
+	gateInternals.resolveIsWorkingTreeClean;
 const originalResolveIsWorkingTreeCleanAsync =
 	gateInternals.resolveIsWorkingTreeCleanAsync;
 const originalResolveDiffStats = gateInternals.resolvePrReviewDiffStats;
-const originalResolveDiffStatsAsync = gateInternals.resolvePrReviewDiffStatsAsync;
+const originalResolveDiffStatsAsync =
+	gateInternals.resolvePrReviewDiffStatsAsync;
 
 function providerResult() {
 	return {
@@ -204,7 +206,12 @@ async function attemptStagedCanary(sessionID: string, batchId: string) {
 	return enforcePrReviewBaseDimensions(
 		directory,
 		sessionID,
-		[{ laneId: `${batchId}-canary`, workflowLane: PR_REVIEW_BASE_DIMENSION_IDS[0]! }],
+		[
+			{
+				laneId: `${batchId}-canary`,
+				workflowLane: PR_REVIEW_BASE_DIMENSION_IDS[0]!,
+			},
+		],
 		{
 			batchId,
 			revisionDigest: 'revision-1',
@@ -222,9 +229,12 @@ async function attemptStagedCanary(sessionID: string, batchId: string) {
 describe('replay corpus: consolidated-lane circuit shape (#2380 shape 3)', () => {
 	test('one provider-failed lane owning ALL SIX dimensions cannot open the circuit', async () => {
 		const sessionID = 'corpus-circuit-single';
-		await writeWorkflowGateState(sessionID, baseGateState(sessionID, [
-			consolidatedSix('corpus-batch-1', 'corpus-lane-1'),
-		]));
+		await writeWorkflowGateState(
+			sessionID,
+			baseGateState(sessionID, [
+				consolidatedSix('corpus-batch-1', 'corpus-lane-1'),
+			]),
+		);
 		await seedRecords(sessionID, [
 			providerRecord({
 				sessionID,
@@ -242,10 +252,13 @@ describe('replay corpus: consolidated-lane circuit shape (#2380 shape 3)', () =>
 
 	test('two DISTINCT provider-failed lanes open the circuit; diagnostics remain reachable', async () => {
 		const sessionID = 'corpus-circuit-open';
-		await writeWorkflowGateState(sessionID, baseGateState(sessionID, [
-			consolidatedSix('corpus-batch-1', 'corpus-lane-1'),
-			consolidatedSix('corpus-batch-2', 'corpus-lane-2'),
-		]));
+		await writeWorkflowGateState(
+			sessionID,
+			baseGateState(sessionID, [
+				consolidatedSix('corpus-batch-1', 'corpus-lane-1'),
+				consolidatedSix('corpus-batch-2', 'corpus-lane-2'),
+			]),
+		);
 		await seedRecords(sessionID, [
 			providerRecord({
 				sessionID,

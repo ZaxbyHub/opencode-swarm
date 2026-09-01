@@ -10,15 +10,36 @@ const BASE: PrReviewWorkflowState = {
 };
 
 function settlement(overrides: {
-	covered?: Array<'correctness-state' | 'security' | 'tests' | 'intent' | 'reliability-performance' | 'compatibility-delivery'>;
-	live?: Array<'correctness-state' | 'security' | 'tests' | 'intent' | 'reliability-performance' | 'compatibility-delivery'>;
-	unresolved?: Array<{ dimension: 'correctness-state' | 'security' | 'tests' | 'intent' | 'reliability-performance' | 'compatibility-delivery'; terminalState: 'FAILED' | 'CANCELLED' | 'NOT_LAUNCHED' }> ;
+	covered?: Array<
+		| 'correctness-state'
+		| 'security'
+		| 'tests'
+		| 'intent'
+		| 'reliability-performance'
+		| 'compatibility-delivery'
+	>;
+	live?: Array<
+		| 'correctness-state'
+		| 'security'
+		| 'tests'
+		| 'intent'
+		| 'reliability-performance'
+		| 'compatibility-delivery'
+	>;
+	unresolved?: Array<{
+		dimension:
+			| 'correctness-state'
+			| 'security'
+			| 'tests'
+			| 'intent'
+			| 'reliability-performance'
+			| 'compatibility-delivery';
+		terminalState: 'FAILED' | 'CANCELLED' | 'NOT_LAUNCHED';
+	}>;
 }) {
 	const covered = overrides.covered ?? [];
 	const live = overrides.live ?? [];
-	const unresolved =
-		overrides.unresolved ??
-		([]);
+	const unresolved = overrides.unresolved ?? [];
 	return {
 		kind: (covered.length === 6
 			? 'COMPLETE'
@@ -72,9 +93,7 @@ describe('reducer: coverage finalization (N-of-6 truthfulness)', () => {
 			type: 'coverage_finalization_requested',
 			settlement: settlement({
 				covered: ['correctness-state', 'security'],
-				unresolved: [
-					{ dimension: 'tests', terminalState: 'FAILED' },
-				],
+				unresolved: [{ dimension: 'tests', terminalState: 'FAILED' }],
 			}),
 			requestedVerdict: 'APPROVE',
 		});

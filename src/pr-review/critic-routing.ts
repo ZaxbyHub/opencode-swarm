@@ -11,7 +11,10 @@
  * centralization guard test enforces it.
  */
 
-import type { PrReviewRiskImpact, PrReviewRiskTag } from '../background/pr-review-contract.js';
+import type {
+	PrReviewRiskImpact,
+	PrReviewRiskTag,
+} from '../background/pr-review-contract.js';
 
 export interface PrReviewCriticRoutingInput {
 	classification?: string;

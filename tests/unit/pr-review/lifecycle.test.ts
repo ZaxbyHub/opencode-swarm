@@ -70,7 +70,13 @@ describe('presumed-stale eligibility (single authority, recurrence class G-5)', 
 	});
 
 	test('terminal or non-sweepable statuses are never stale-eligible', () => {
-		for (const status of ['completed', 'error', 'cancelled', 'stale', 'consumed']) {
+		for (const status of [
+			'completed',
+			'error',
+			'cancelled',
+			'stale',
+			'consumed',
+		]) {
 			expect(
 				presumedStaleLaneEligible({
 					status,

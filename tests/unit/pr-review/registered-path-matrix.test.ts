@@ -84,7 +84,8 @@ function validSubmitArgs(): Record<string, unknown> {
 				{
 					workflowLane: 'intent-architecture',
 					coverageScope: 'Reviewed the complete changed architecture surface.',
-					evidence: 'No reachable architecture defect remains in the bound diff.',
+					evidence:
+						'No reachable architecture defect remains in the bound diff.',
 				},
 			],
 			unresolved: [],
@@ -101,7 +102,10 @@ describe('registered-path matrix: submit baseline (submit_pr_review_result)', ()
 		) as { success: boolean; reason?: string };
 		expect(result.success).toBe(false);
 		expect(result.reason).toContain('exact child delegation');
-		const state = await readPrWorkflowGateState(directory, 'matrix-child-session');
+		const state = await readPrWorkflowGateState(
+			directory,
+			'matrix-child-session',
+		);
 		expect(state).toBeNull();
 	});
 
@@ -182,11 +186,9 @@ describe('registered-path matrix: re-entry authorization (authorize_pr_review_re
 describe('registered-path matrix: abort path (abort_pr_workflow)', () => {
 	test('abort of an inactive session reports no active workflow without inventing state', async () => {
 		const result = JSON.parse(
-			await executeAbortPrWorkflow(
-				{ mode: 'PR_REVIEW' },
-				directory,
-				{ sessionID: 'matrix-no-active' },
-			),
+			await executeAbortPrWorkflow({ mode: 'PR_REVIEW' }, directory, {
+				sessionID: 'matrix-no-active',
+			}),
 		) as { success: boolean; message?: string };
 		expect(result.success).toBe(false);
 		const state = await readPrWorkflowGateState(directory, 'matrix-no-active');

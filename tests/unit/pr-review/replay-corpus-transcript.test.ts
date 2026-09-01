@@ -65,11 +65,14 @@ afterEach(async () => {
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
-function cleanEnvelope(credited: string[], attestations: Array<{
-	workflowLane: string;
-	coverageScope: string;
-	evidence: string;
-}>) {
+function cleanEnvelope(
+	credited: string[],
+	attestations: Array<{
+		workflowLane: string;
+		coverageScope: string;
+		evidence: string;
+	}>,
+) {
 	return {
 		schemaVersion: 1,
 		outcome: 'CLEAN',
@@ -163,7 +166,8 @@ async function collectWithTranscript(
 	)._internals;
 	const originalGetSessionOps = dispatchInternals.getSessionOps;
 	const originalNow = dispatchInternals.now;
-	const originalResolveRevision = dispatchInternals.resolvePrWorkflowRevisionDigest;
+	const originalResolveRevision =
+		dispatchInternals.resolvePrWorkflowRevisionDigest;
 	const originalResolveRevisionAsync =
 		dispatchInternals.resolvePrWorkflowRevisionDigestAsync;
 	try {

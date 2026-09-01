@@ -246,7 +246,11 @@ function requireBoundState(
 	sessionID: string,
 	expectedMode: string,
 ): Promise<PrReviewCompletionState> {
-	return requireBoundHelpers().requireBoundState(directory, sessionID, expectedMode);
+	return requireBoundHelpers().requireBoundState(
+		directory,
+		sessionID,
+		expectedMode,
+	);
 }
 
 function readPrWorkflowGateStateFromDisk(
@@ -613,7 +617,8 @@ export function normalizePrReviewPartialBaseCoverageRecord(
  * Issue #2385: the set itself is owned by `src/pr-review/circuit.ts`
  * (`CIRCUIT_TERMINAL_DELEGATION_STATUSES`) — one vocabulary, no mirror.
  */
-const TERMINAL_FAILED_DELEGATION_STATUSES = CIRCUIT_TERMINAL_DELEGATION_STATUSES;
+const TERMINAL_FAILED_DELEGATION_STATUSES =
+	CIRCUIT_TERMINAL_DELEGATION_STATUSES;
 
 export interface PrReviewBaseDimensionAttempts {
 	/** Dimensions with a currently authoritative successful artifact. */

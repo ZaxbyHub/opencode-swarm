@@ -71,7 +71,10 @@ export function workflowCheckoutMutationLockRelativePath(): string {
 	return path.join(WORKFLOW_GATE_DIR, 'checkout.lock');
 }
 
-export function workflowGateStatePath(directory: string, sessionID: string): string {
+export function workflowGateStatePath(
+	directory: string,
+	sessionID: string,
+): string {
 	return validateSwarmPath(directory, workflowGateStateRelativePath(sessionID));
 }
 
@@ -250,9 +253,9 @@ export interface PrReviewStateCodec<S extends PrWorkflowPersistedStateBase> {
 
 let codec: PrReviewStateCodec<PrWorkflowPersistedStateBase> | undefined;
 
-export function bindPrReviewStateCodec<
-	S extends PrWorkflowPersistedStateBase,
->(nextCodec: PrReviewStateCodec<S>): void {
+export function bindPrReviewStateCodec<S extends PrWorkflowPersistedStateBase>(
+	nextCodec: PrReviewStateCodec<S>,
+): void {
 	codec = nextCodec as PrReviewStateCodec<PrWorkflowPersistedStateBase>;
 }
 
@@ -529,7 +532,11 @@ export async function readPrWorkflowGateStateFileFromDisk<
 /** Persist one CAS-checked state replacement while the session lock is held. */
 export async function writeStateWhileLocked<
 	S extends PrWorkflowPersistedStateBase,
->(directory: string, state: S, options: { replaceWorkflowInstanceId?: string } = {}): Promise<S> {
+>(
+	directory: string,
+	state: S,
+	options: { replaceWorkflowInstanceId?: string } = {},
+): Promise<S> {
 	const bound = requireCodec() as PrReviewStateCodec<S>;
 	const validated = bound.parse(state);
 	const current = await readPrWorkflowGateStateFromDisk<S>(
@@ -565,14 +572,6 @@ export async function writeStateWhileLocked<
 // ---------------------------------------------------------------------------
 // Checkout mutation lock
 // ---------------------------------------------------------------------------
-
-function openCheckoutLockFile(lockPath: string) {
-	return fsp.open(lockPath, 'wx');
-}
-
-function removeCheckoutLockFile(lockPath: string): Promise<void> {
-	return fsp.rm(lockPath);
-}
 
 function checkoutMutationProjectKey(directory: string): string {
 	return normalizeComparableFsPath(directory);
@@ -988,10 +987,7 @@ async function acquireSessionStateMutationLock(
 				await handle.close().catch(() => undefined);
 			}
 			if (writeError) {
-				await removeSessionStateMutationLockIfOwned(
-					lockPath,
-					lock.ownerToken,
-				);
+				await removeSessionStateMutationLockIfOwned(lockPath, lock.ownerToken);
 				throw writeError;
 			}
 			return { path: lockPath, ownerToken: lock.ownerToken };

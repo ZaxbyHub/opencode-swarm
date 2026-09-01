@@ -15,7 +15,11 @@ const POLICY: PrReviewResiliencePolicyRecord = {
 	circuitOpenDurationMs: 60_000,
 };
 
-function providerTerminal(batchId: string, laneId: string, terminalAtMs = 1_000) {
+function providerTerminal(
+	batchId: string,
+	laneId: string,
+	terminalAtMs = 1_000,
+) {
 	return {
 		kind: 'provider_terminal' as const,
 		providerClass: 'anthropic',
@@ -35,10 +39,7 @@ describe('reducer: circuit advance (delegates to the pure machine)', () => {
 		const result = reducePrReviewEvent(state, {
 			type: 'circuit_advance_requested',
 			nowMs: 5_000,
-			laneSignals: [
-				providerTerminal('b1', 'l1'),
-				providerTerminal('b2', 'l2'),
-			],
+			laneSignals: [providerTerminal('b1', 'l1'), providerTerminal('b2', 'l2')],
 			policy: POLICY,
 		});
 		expect(result.status).toBe('applied');
@@ -91,7 +92,10 @@ describe('reducer: circuit advance (delegates to the pure machine)', () => {
 		});
 		expect(result.status).toBe('applied');
 		if (result.status !== 'applied') return;
-		expect(result.effects).not.toContainEqual({ kind: 'block_dispatch', reason: 'circuit_open' });
+		expect(result.effects).not.toContainEqual({
+			kind: 'block_dispatch',
+			reason: 'circuit_open',
+		});
 	});
 
 	test('ignored signals never open the circuit', () => {
@@ -113,7 +117,10 @@ describe('reducer: circuit advance (delegates to the pure machine)', () => {
 		});
 		expect(result.status).toBe('applied');
 		if (result.status !== 'applied') return;
-		expect(result.effects).not.toContainEqual({ kind: 'block_dispatch', reason: 'circuit_open' });
+		expect(result.effects).not.toContainEqual({
+			kind: 'block_dispatch',
+			reason: 'circuit_open',
+		});
 	});
 
 	test('an expired OPEN circuit admits exactly one HALF_OPEN probe', () => {
@@ -209,7 +216,11 @@ describe('reducer: resilience config transitions (live disable / clean re-enable
 					state: 'OPEN',
 					generation: 3,
 					contributors: [
-						{ batchId: 'b1', laneId: 'l1', terminalAt: '2026-09-01T00:00:00.000Z' },
+						{
+							batchId: 'b1',
+							laneId: 'l1',
+							terminalAt: '2026-09-01T00:00:00.000Z',
+						},
 					],
 					openedAt: '2026-09-01T00:00:00.000Z',
 				},
@@ -270,9 +281,7 @@ describe('reducer: probe settlement', () => {
 		expect(result.status).toBe('applied');
 		if (result.status !== 'applied') return;
 		const circuit = result.state.prReviewResilience?.circuit;
-		expect(
-			circuit && 'version' in circuit ? circuit : null,
-		).toMatchObject({
+		expect(circuit && 'version' in circuit ? circuit : null).toMatchObject({
 			state: 'OPEN',
 			generation: 2,
 			openUntil: '2026-09-01T00:01:30.000Z',

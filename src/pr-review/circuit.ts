@@ -402,11 +402,13 @@ export interface PrReviewCircuitAdvanceInput {
 	 * The gate supplies it only when it read the recorded probe's batch/lane,
 	 * which structurally drops late results from older generations.
 	 */
-	probeObservation?: {
-		terminalStatus: string;
-		signal: PrReviewCircuitSignal | null;
-		terminalAtMs: number;
-	} | undefined;
+	probeObservation?:
+		| {
+				terminalStatus: string;
+				signal: PrReviewCircuitSignal | null;
+				terminalAtMs: number;
+		  }
+		| undefined;
 }
 
 export type PrReviewCircuitAdvanceResult =
@@ -618,8 +620,7 @@ export function resolvePrReviewResiliencePolicy(
 			policy?.max_retry_attempts_after_initial ??
 			defaults.max_retry_attempts_after_initial,
 		circuitOpenDurationMs:
-			policy?.circuit_open_duration_ms ??
-			defaults.circuit_open_duration_ms,
+			policy?.circuit_open_duration_ms ?? defaults.circuit_open_duration_ms,
 	};
 }
 

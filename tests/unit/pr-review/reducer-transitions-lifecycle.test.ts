@@ -251,9 +251,7 @@ describe('reducer: provider-terminal evidence classification', () => {
 		});
 		expect(result.status).toBe('rejected');
 		if (result.status !== 'rejected') return;
-		expect(result.rejection.code).toBe(
-			'client_absence_not_terminal_evidence',
-		);
+		expect(result.rejection.code).toBe('client_absence_not_terminal_evidence');
 	});
 
 	test('parser/transcript rejection is never a provider signal', () => {
@@ -279,9 +277,7 @@ describe('reducer: provider-terminal evidence classification', () => {
 		});
 		expect(result.status).toBe('rejected');
 		if (result.status !== 'rejected') return;
-		expect(result.rejection.code).toBe(
-			'stale_observation_not_provider_signal',
-		);
+		expect(result.rejection.code).toBe('stale_observation_not_provider_signal');
 	});
 
 	test('a typed terminal error class of the current generation is admitted', () => {
