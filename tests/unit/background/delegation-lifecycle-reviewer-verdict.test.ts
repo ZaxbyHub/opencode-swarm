@@ -88,6 +88,7 @@ describe('reviewer-lane verdict reconciliation (issue #2045 end-to-end)', () => 
 	let prevXdgDataHome: string | undefined;
 	let restoreClock: () => void;
 	let realTelemetry: typeof lifecycleInternals.telemetry;
+	let telemetryEnds: string[];
 
 	beforeEach(() => {
 		dir = fs.realpathSync(
@@ -104,11 +105,20 @@ describe('reviewer-lane verdict reconciliation (issue #2045 end-to-end)', () => 
 		process.env.LOCALAPPDATA = path.join(dir, 'localappdata');
 		process.env.XDG_DATA_HOME = path.join(dir, 'xdg-data');
 		restoreClock = freezeClock({ fixedNow: NOW });
-		// Silence telemetry: this suite asserts knowledge events, not cost.
+		// Stub telemetry: silent for the ledger assertions, counted where the
+		// crash-recovery test must prove diagnostics do NOT re-emit.
+		telemetryEnds = [];
 		realTelemetry = lifecycleInternals.telemetry;
 		lifecycleInternals.telemetry = {
 			delegationBegin: () => {},
-			delegationEnd: () => {},
+			delegationEnd: (
+				_sessionId: string,
+				_agent: string,
+				_taskId: string,
+				result: string,
+			) => {
+				telemetryEnds.push(result);
+			},
 		} as never;
 	});
 
@@ -228,5 +238,114 @@ describe('reviewer-lane verdict reconciliation (issue #2045 end-to-end)', () => 
 		expect(
 			events.filter((e) => (e as { source?: string }).source === 'reviewer'),
 		).toHaveLength(0);
+	});
+
+	it('a crash between claim and observations recovers receipts on replay, without re-emitting diagnostics', async () => {
+		// Final-critic crash window: the terminal claim is durable but the
+		// process died before any observation ran. Model the on-disk state by
+		// claiming DIRECTLY (exactly what the crash leaves behind), then replay
+		// the settle — the duplicate disposition must close the authoritative
+		// knowledge receipts (ledger-idempotent) while NOT re-emitting the
+		// exactly-once-at-emit diagnostics (cost/trajectory).
+		const { appendKnowledge, resolveSwarmKnowledgePath } = await import(
+			'../../../src/hooks/knowledge-store.js'
+		);
+		const { commitDisplayedMembership } = await import(
+			'../../../src/hooks/knowledge-receipt-ledger.js'
+		);
+		const { readKnowledgeEvents } = await import(
+			'../../../src/hooks/knowledge-events.js'
+		);
+		const { claimTerminalResult } = await import(
+			'../../../src/background/pending-delegations.js'
+		);
+		const entryId = 'entry-crash-2045';
+		await appendKnowledge(resolveSwarmKnowledgePath(dir), {
+			id: entryId,
+			tier: 'swarm',
+			lesson: 'Cite evidence',
+			category: 'process',
+			tags: [],
+			scope: 'global',
+			confidence: 0.85,
+			status: 'established',
+			confirmed_by: [],
+			project_name: 'test-project',
+			retrieval_outcomes: {
+				applied_count: 0,
+				succeeded_after_count: 0,
+				failed_after_count: 0,
+			},
+			schema_version: 2,
+			created_at: '2026-01-01T00:00:00.000Z',
+			updated_at: '2026-01-01T00:00:00.000Z',
+			directive_priority: 'medium',
+		} as never);
+		await commitDisplayedMembership(dir, {
+			trace_id: 'trace-crash-2045',
+			session_id: 'sess-lane-1',
+			phase: 'Phase 1',
+			agent: 'sme',
+			exposure_kind: 'delegate_directive',
+			entries: [{ entry_id: entryId, critical: false }],
+		});
+
+		const record = await recordToLedger(dir, makeRecord());
+		// Crash state: the claim landed, no observations ran.
+		const crashedTerminal = {
+			text: COMPLETED_RESULT_TEXT,
+			chars: COMPLETED_RESULT_TEXT.length,
+			truncated: false,
+			digest: COMPLETED_RESULT.digest,
+		};
+		const directClaim = await claimTerminalResult(dir, record.correlationId, {
+			eventId: (
+				await import('../../../src/background/pending-delegations.js')
+			).buildBackgroundCompletionEventId({
+				correlationId: record.correlationId,
+				jobId: record.jobId,
+				status: 'completed',
+				resultDigest: crashedTerminal.digest,
+			}),
+			status: 'completed' as const,
+			recordedAt: NOW,
+			result: crashedTerminal,
+		});
+		expect(directClaim?.disposition).toBe('claimed');
+		// Nothing reconciled yet (crash):
+		expect(
+			(await readKnowledgeEvents(dir)).filter(
+				(e) => (e as { knowledge_id?: string }).knowledge_id === entryId,
+			),
+		).toHaveLength(0);
+
+		// Replay (a later collector / restart path settles the same event):
+		const replay = await settleDelegationTerminal(
+			dir,
+			record,
+			{ status: 'completed', result: crashedTerminal },
+			{
+				transcript: `KNOWLEDGE_APPLIED:trace-crash-2045:${entryId}`,
+			},
+			NOW + 1_000,
+		);
+		expect(replay.kind).toBe('duplicate');
+		const events = await readKnowledgeEvents(dir);
+		const applied = events.filter(
+			(e) =>
+				e.type === 'applied' &&
+				(e as { knowledge_id?: string }).knowledge_id === entryId,
+		);
+		// Receipts recovered EXACTLY once.
+		expect(applied).toHaveLength(1);
+		// Diagnostics were NOT re-emitted on the replay.
+		expect(telemetryEnds).toHaveLength(0);
+		const trajectoryPath = path.join(
+			dir,
+			'.swarm',
+			'trajectories',
+			'parent-1.jsonl',
+		);
+		expect(fs.existsSync(trajectoryPath)).toBe(false);
 	});
 });

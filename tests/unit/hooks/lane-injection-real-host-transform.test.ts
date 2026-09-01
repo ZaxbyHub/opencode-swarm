@@ -273,6 +273,43 @@ describe('lane injection via the real messages.transform hook (issue #2045)', ()
 		}
 	});
 
+	it('role matrix: test_engineer and sme get the ACK self-report grammar, never reviewer compliance', async () => {
+		// Issue #2045 role contract: reviewer = structured per-directive
+		// compliance adjudication; test_engineer = structured verification
+		// evidence (the ACK grammar's verification markers — NOT final semantic
+		// compliance); other delegated roles = ACK | IGNORED | N_A self-report.
+		// Structurally: every delegated role EXCEPT reviewer receives the ACK
+		// block only; the compliance grammar is reviewer-exclusive.
+		await seedKnowledgeEntry(dir, 'entry-role-1');
+		await commitDisplayedMembership(dir, {
+			trace_id: 'trace-transform-2045',
+			session_id: SESSION_ID,
+			phase: 'Phase 1',
+			agent: 'reviewer',
+			exposure_kind: 'delegate_directive',
+			entries: [{ entry_id: 'entry-role-1', critical: false }],
+		});
+		for (const agent of ['test_engineer', 'mega_test_engineer', 'sme']) {
+			const sessionId = `sess-role-${agent.replace(/[^a-z]/gi, '')}`;
+			swarmState.activeAgent.set(sessionId, agent);
+			injectorInternals.searchKnowledge = (async () => ({
+				results: [delegatedEntry('entry-role-1')],
+				trace_id: `trace-role-${sessionId}`,
+			})) as typeof realSearch;
+			const hook = createKnowledgeInjectorHook(dir, config());
+			const output = laneMessages(agent, sessionId);
+			await hook({}, output);
+			const text = injectedText(output);
+			expect(text).toContain(DELEGATE_DIRECTIVE_BLOCK_TAG);
+			// Verification-evidence grammar present (KNOWLEDGE_* markers), final
+			// compliance grammar ABSENT.
+			expect(text).toContain('KNOWLEDGE_APPLIED:');
+			expect(text).not.toContain(DIRECTIVES_TO_VERIFY_TAG);
+			expect(text).not.toContain('DIRECTIVE_COMPLIANCE:');
+			swarmState.activeAgent.delete(sessionId);
+		}
+	});
+
 	it('does not double-deliver the compliance block when the prompt already carries one', async () => {
 		await seedKnowledgeEntry(dir, 'entry-review-1');
 		await commitDisplayedMembership(dir, {

@@ -262,3 +262,91 @@ describe('Task/lane lifecycle parity matrix (issue #2045)', () => {
 		}
 	});
 });
+
+describe('Task production-path convergence (final-critic challenge)', () => {
+	let dir: string;
+	let restoreClock: () => void;
+
+	beforeEach(() => {
+		dir = fs.realpathSync(
+			fs.mkdtempSync(path.join(os.tmpdir(), 'lane-parity-observer-')),
+		);
+		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
+		restoreClock = freezeClock({ fixedNow: NOW });
+	});
+
+	afterEach(() => {
+		restoreClock();
+		fs.rmSync(dir, { recursive: true, force: true });
+	});
+
+	it('the REAL completion observer settles a Task terminal through the same shared claim as a lane settle', async () => {
+		const { createBackgroundCompletionObserver } = await import(
+			'../../../src/background/completion-observer.js'
+		);
+		// Task-side record shaped exactly as delegation-gate records it; the
+		// observer resolves the owner from the task envelope's session id.
+		const taskRecord = await recordOutcome(dir, 'task-observer', false);
+		const observer = createBackgroundCompletionObserver({
+			config: { enabled: true },
+			directory: dir,
+		});
+		const envelope = `<task id="${taskRecord.subagentSessionId}" state="completed">\n<task_result>shared output</task_result>\n</task>`;
+		await observer.event({
+			event: {
+				type: 'message.part.updated',
+				properties: {
+					part: {
+						type: 'text',
+						text: envelope,
+						synthetic: true,
+						sessionID: taskRecord.parentSessionId,
+					},
+				},
+			},
+		});
+
+		const taskSettled = findByCorrelationId(dir, taskRecord.correlationId);
+		expect(taskSettled?.status).toBe('completed');
+		expect(taskSettled?.terminalResult).toBeDefined();
+
+		// Lane side through the shared settle wrapper, same result body.
+		const laneRecord = await recordOutcome(dir, 'lane-observer', true);
+		const laneOutcome = await settleDelegationTerminal(
+			dir,
+			laneRecord,
+			{ status: 'completed', result: resultFor('completed') },
+			{},
+			NOW,
+		);
+		expect(laneOutcome.kind).toBe('claimed');
+		const laneSettled = findByCorrelationId(dir, laneRecord.correlationId);
+
+		// THE CONVERGENCE FACTS — the production Task observer and the lane
+		// settle leave identical terminal facts on the shared ledger, because
+		// both derive their eventId from the same
+		// buildBackgroundCompletionEventId over the same trusted inputs.
+		expect(laneSettled?.status).toBe(taskSettled?.status);
+		expect(laneSettled?.terminalResult?.status).toBe(
+			taskSettled?.terminalResult?.status,
+		);
+		expect(laneSettled?.terminalResult?.eventId).toBe(
+			buildBackgroundCompletionEventId({
+				correlationId: laneSettled!.correlationId,
+				jobId: laneSettled!.jobId,
+				status: 'completed',
+				resultDigest: resultFor('completed').digest,
+			}),
+		);
+		expect(taskSettled?.terminalResult?.eventId).toBe(
+			buildBackgroundCompletionEventId({
+				correlationId: taskSettled!.correlationId,
+				jobId: taskSettled!.jobId,
+				status: 'completed',
+				resultDigest: taskSettled?.terminalResult?.result.digest,
+			}),
+		);
+		expect(laneSettled?.completedAt).toBeDefined();
+		expect(taskSettled?.completedAt).toBeDefined();
+	});
+});

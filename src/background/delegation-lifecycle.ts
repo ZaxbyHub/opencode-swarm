@@ -132,6 +132,20 @@ export function buildDelegationTerminal(
  * Settle a delegation terminal exactly once through the shared claim, then —
  * only on a fresh `claimed` disposition — run the terminal observations.
  *
+ * Durability model (final-critic challenge, crash between claim and
+ * observations):
+ * - The AUTHORITATIVE observations (knowledge receipts: delegate ACK terminals
+ *   and reviewer verdicts) are re-run on `duplicate` replays. Their sink is the
+ *   receipt ledger, whose terminal authority is idempotent (same-outcome
+ *   replays are `idempotent_skips`), so a replay after a crash closes the
+ *   receipts exactly once — a lane whose observation pass died mid-flight
+ *   recovers on any later settle replay (restart, concurrent collector).
+ * - The DIAGNOSTIC observations (cost telemetry, trajectory) are
+ *   exactly-once-at-emit on `claimed` only — they have no deduplicating sink,
+ *   and re-emitting them on replay would duplicate cost events. This is the
+ *   same crash window the Task transport's `tool.execute.*` hook emissions
+ *   have always had (documented transport parity, not a regression).
+ *
  * See {@link DelegationSettleKind} for the non-claim outcomes; callers map
  * `duplicate`/`conflict`/`already_terminal_without_event` to their benign
  * already-terminal handling and `missing`/`not_open`/`failed` to their
@@ -161,7 +175,16 @@ export async function settleDelegationTerminal(
 			return { kind: 'claimed', record: claim.record };
 		}
 		// duplicate | resume_settlement | retry_ingestion | preserved | consumed —
-		// the terminal already exists; replays never re-run observations.
+		// the terminal already exists. Replay the AUTHORITATIVE knowledge
+		// reconciliation only (ledger-idempotent, crash-recovery path); never the
+		// exactly-once-at-emit diagnostics.
+		if (claim.disposition === 'duplicate' && observations.transcript) {
+			await reconcileLaneKnowledgeReceipts(
+				directory,
+				claim.record,
+				observations,
+			);
+		}
 		return { kind: 'duplicate', record: claim.record };
 	}
 	// claimTerminalResult returns null for four distinct cases: unparseable

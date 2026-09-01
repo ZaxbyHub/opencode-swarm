@@ -12,7 +12,12 @@ Exactly-once terminals:
   transport's success/failure/timeout) now settles through the shared
   `claimTerminalResult` operation via the new
   `src/background/delegation-lifecycle.ts` — the same exactly-once claim the
-  Task completion observer uses. Lane records gain the immutable
+  Task completion observer uses. Durability across a crash between the claim
+  and the observation pass: the AUTHORITATIVE knowledge receipts re-run on
+  settle replays (the receipt ledger is idempotent, so they close exactly
+  once), while the DIAGNOSTIC cost/trajectory observations are
+  exactly-once-at-emit — the same crash window the Task transport's hook
+  emissions have always had. Lane records gain the immutable
   `terminalResult` (eventId identity), duplicate replays return a benign
   `duplicate` disposition without re-running observations, and a conflicting
   event (e.g. a success arriving after a terminal cancel) is rejected and
