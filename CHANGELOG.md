@@ -1,5 +1,19 @@
 # Changelog
 
+## [7.161.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.160.2...v7.161.0) (2026-09-01)
+
+
+### Features
+
+* **repo-graph:** add hybrid retrieval router ([25c06cc](https://github.com/ZaxbyHub/opencode-swarm/commit/25c06cc08bf177088e833dc768b40cb5c7129864))
+
+
+### Bug Fixes
+
+* **observability:** unify task and lane lifecycle with exactly-once terminals ([dc374ca](https://github.com/ZaxbyHub/opencode-swarm/commit/dc374ca652543ca312644be8075aa2f63c2a635f))
+* **repo-graph:** close retrieval router feedback ([c2c43a3](https://github.com/ZaxbyHub/opencode-swarm/commit/c2c43a30c43c62f8603a19a397986e62320be478))
+* **timeout:** harden abort timeout recurrence guard ([a418b9b](https://github.com/ZaxbyHub/opencode-swarm/commit/a418b9b747a84572e155d476414f20947b45cb7e))
+
 ## [7.160.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.160.1...v7.160.2) (2026-09-01)
 
 
