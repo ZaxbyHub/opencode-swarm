@@ -246,11 +246,15 @@ describe('SWARM_LANG_BACKEND env var routing', () => {
 describe('Phase 3b: buildTestCommandViaDispatch parity', () => {
 	beforeEach(() => clearDispatchCache());
 
-	test('vitest with coverage produces npx vitest run --coverage <files>', async () => {
+	test('vitest with coverage resolves the repository-local binary', async () => {
 		fs.writeFileSync(
 			path.join(tempDir, 'package.json'),
 			JSON.stringify({ scripts: { test: 'vitest run' } }),
 		);
+		const binDir = path.join(tempDir, 'node_modules', '.bin');
+		fs.mkdirSync(binDir, { recursive: true });
+		const vitestName = process.platform === 'win32' ? 'vitest.cmd' : 'vitest';
+		fs.writeFileSync(path.join(binDir, vitestName), '');
 		const cmd = await buildTestCommandViaDispatch(
 			'vitest',
 			'graph',
@@ -259,8 +263,7 @@ describe('Phase 3b: buildTestCommandViaDispatch parity', () => {
 			tempDir,
 		);
 		expect(cmd).toEqual([
-			'npx',
-			'vitest',
+			path.join(binDir, vitestName),
 			'run',
 			'--reporter=json',
 			'--outputFile',

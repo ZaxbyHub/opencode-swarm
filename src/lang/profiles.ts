@@ -190,13 +190,13 @@ LANGUAGE_REGISTRY.register({
 			},
 			{
 				name: 'tsc',
-				cmd: 'npx tsc --noEmit',
+				cmd: 'tsc --noEmit',
 				detectFile: 'tsconfig.json',
 				priority: 9,
 			},
 			{
 				name: 'vite build',
-				cmd: 'npx vite build',
+				cmd: 'vite build',
 				detectFile: 'vite.config.ts',
 				priority: 8,
 			},
@@ -217,7 +217,7 @@ LANGUAGE_REGISTRY.register({
 				cmd: 'bun test',
 				priority: 10,
 			},
-			{ name: 'jest', detect: 'jest.config.js', cmd: 'npx jest', priority: 9 },
+			{ name: 'jest', detect: 'jest.config.js', cmd: 'jest', priority: 9 },
 			{
 				// Bun lockfile is the unambiguous signal for a Bun-managed
 				// project — the dispatch path requires this to avoid the
@@ -231,7 +231,7 @@ LANGUAGE_REGISTRY.register({
 			{
 				name: 'mocha',
 				detect: '.mocharc.json',
-				cmd: 'npx mocha',
+				cmd: 'mocha',
 				priority: 7,
 			},
 		],
@@ -253,7 +253,7 @@ LANGUAGE_REGISTRY.register({
 			{
 				name: 'eslint',
 				detect: '.eslintrc.js',
-				cmd: 'npx eslint --fix .',
+				cmd: 'eslint --fix .',
 				priority: 9,
 			},
 		],
@@ -303,13 +303,13 @@ LANGUAGE_REGISTRY.register({
 			},
 			{
 				name: 'tsc',
-				cmd: 'npx tsc --noEmit',
+				cmd: 'tsc --noEmit',
 				detectFile: 'tsconfig.json',
 				priority: 9,
 			},
 			{
 				name: 'vite build',
-				cmd: 'npx vite build',
+				cmd: 'vite build',
 				detectFile: 'vite.config.ts',
 				priority: 8,
 			},
@@ -330,7 +330,7 @@ LANGUAGE_REGISTRY.register({
 				cmd: 'bun test',
 				priority: 10,
 			},
-			{ name: 'jest', detect: 'jest.config.js', cmd: 'npx jest', priority: 9 },
+			{ name: 'jest', detect: 'jest.config.js', cmd: 'jest', priority: 9 },
 			{
 				name: 'bun:test',
 				detect: 'bun.lock',
@@ -340,7 +340,7 @@ LANGUAGE_REGISTRY.register({
 			{
 				name: 'mocha',
 				detect: '.mocharc.json',
-				cmd: 'npx mocha',
+				cmd: 'mocha',
 				priority: 7,
 			},
 		],
@@ -362,7 +362,7 @@ LANGUAGE_REGISTRY.register({
 			{
 				name: 'eslint',
 				detect: '.eslintrc.js',
-				cmd: 'npx eslint --fix .',
+				cmd: 'eslint --fix .',
 				priority: 9,
 			},
 		],
