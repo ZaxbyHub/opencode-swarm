@@ -152,7 +152,17 @@ export type TelemetryEvent =
 	// `.swarm/pr-monitor/` checkpoint store — active/terminal counts,
 	// compaction and corrupt/drop counters, byte figures. Counts only; no
 	// correlationIds, no paths, no repo identities.
-	| 'pr_subscription_health';
+	| 'pr_subscription_health'
+	// Council attempt / accepted-transition observations (issue #2046 item 9):
+	// every durably-appended task/phase/final council audit record and every
+	// accepted-projection move, joined to the lifecycle correlation system via
+	// `hostSessionId`/`taskId`/`phaseId` plus the server-derived round identity
+	// `councilRoundId`. Payloads are identifiers, enums, counts, and hashes
+	// only (privacy class `pseudonymous`); observability is not the
+	// authoritative gate store.
+	| 'council_attempt'
+	| 'council_round_transition'
+	| 'council_attempt_unscoped';
 
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =

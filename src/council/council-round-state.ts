@@ -13,6 +13,10 @@ import {
 import { dirname, join } from 'node:path';
 import { withEvidenceLock } from '../evidence/lock.js';
 import { atomicWriteFile } from '../evidence/task-file.js';
+import {
+	emitUnscopedCouncilAttemptObservation,
+	observeCouncilAuditAppend,
+} from './council-observability.js';
 import { isIdentityDigest } from './council-review-identity.js';
 
 const VERSION = 2 as const;
@@ -621,6 +625,29 @@ function appendAudit(path: string, record: AttemptRecord): void {
 	}
 }
 
+/**
+ * Append one audit record durably, then observe it (issue #2046 item 9).
+ * Every scoped append site in {@link runCouncilAttempt} routes through here so
+ * no attempt path — including the early returns (round mismatch, duplicate /
+ * closed scope, pending-state-write failure) and the recovery path — can evade
+ * observability. The observation fires only AFTER the durable append succeeds
+ * and is best-effort (never throws, never changes the durable outcome).
+ */
+function appendAuditAndObserve(
+	input: CouncilAttemptInput,
+	paths: ReturnType<typeof councilRoundStatePaths>,
+	councilRoundId: string,
+	record: AttemptRecord,
+): void {
+	_internals.appendAudit(paths.audit, record);
+	observeCouncilAuditAppend(
+		input.scope,
+		input.sessionID,
+		councilRoundId,
+		record,
+	);
+}
+
 interface AuditTail {
 	records: AttemptRecord[];
 	truncated: boolean;
@@ -960,13 +987,14 @@ export async function runCouncilAttempt(
 	input: CouncilAttemptInput,
 ): Promise<string> {
 	const paths = councilRoundStatePaths(input.directory, input.scope);
+	const councilRoundId = scopeToken(input.scope);
 	let authoritativeRound = 1;
 	try {
 		return await _internals.withLock(
 			input.directory,
 			paths.lock,
 			STATE_AGENT,
-			scopeToken(input.scope),
+			councilRoundId,
 			async () => {
 				let state = await loadState(paths, input.scope);
 				if (state.pending) {
@@ -1008,7 +1036,7 @@ export async function runCouncilAttempt(
 									lastAttemptId: state.pending.attemptId,
 									lastDigest: state.pending.digest,
 								};
-						_internals.appendAudit(paths.audit, {
+						appendAuditAndObserve(input, paths, councilRoundId, {
 							...baseRecord(
 								input,
 								state.pending.attemptId,
@@ -1060,7 +1088,10 @@ export async function runCouncilAttempt(
 					authoritativeRound,
 					'received',
 				);
-				_internals.appendAudit(paths.audit, { ...received, event: 'received' });
+				appendAuditAndObserve(input, paths, councilRoundId, {
+					...received,
+					event: 'received',
+				});
 
 				if (
 					input.clientRound !== undefined &&
@@ -1071,7 +1102,7 @@ export async function runCouncilAttempt(
 						lastAttemptId: attemptId,
 						lastDigest: digest,
 					};
-					_internals.appendAudit(paths.audit, {
+					appendAuditAndObserve(input, paths, councilRoundId, {
 						...received,
 						event: 'finalized',
 						disposition: 'council_round_mismatch',
@@ -1102,7 +1133,7 @@ export async function runCouncilAttempt(
 						lastAttemptId: attemptId,
 						lastDigest: digest,
 					};
-					_internals.appendAudit(paths.audit, {
+					appendAuditAndObserve(input, paths, councilRoundId, {
 						...received,
 						event: 'finalized',
 						disposition,
@@ -1164,7 +1195,7 @@ export async function runCouncilAttempt(
 					// Pair the already-durable received record before surfacing the
 					// persistence failure. This prevents a later attempt from creating
 					// overlapping audit history if the snapshot is subsequently lost.
-					_internals.appendAudit(paths.audit, {
+					appendAuditAndObserve(input, paths, councilRoundId, {
 						...received,
 						event: 'finalized',
 						disposition: 'council_pending_state_write_failed',
@@ -1180,7 +1211,7 @@ export async function runCouncilAttempt(
 					throw error;
 				}
 				await evaluation.evidence?.commit(attemptId);
-				_internals.appendAudit(paths.audit, {
+				appendAuditAndObserve(input, paths, councilRoundId, {
 					...received,
 					event: 'finalized',
 					disposition: evaluation.disposition.slice(0, 80),
@@ -1291,6 +1322,7 @@ export async function recordUnscopedCouncilAttempt(
 			'unscoped',
 			async () => {
 				mkdirSync(dirname(path), { recursive: true });
+				const attemptId = _internals.uuid();
 				const descriptor = openSync(path, 'a');
 				try {
 					writeSync(
@@ -1298,7 +1330,7 @@ export async function recordUnscopedCouncilAttempt(
 						`${JSON.stringify({
 							version: VERSION,
 							event: 'unscoped',
-							attemptId: _internals.uuid(),
+							attemptId,
 							timestamp: _internals.now(),
 							level,
 							disposition: disposition.slice(0, 80),
@@ -1312,6 +1344,16 @@ export async function recordUnscopedCouncilAttempt(
 				} finally {
 					closeSync(descriptor);
 				}
+				// Observe only after the durable write succeeded (issue #2046
+				// item 9): a durability failure emits nothing — the JSON
+				// failure response below stays the operator signal.
+				emitUnscopedCouncilAttemptObservation(
+					sessionID,
+					level,
+					disposition.slice(0, 80),
+					fingerprint,
+					attemptId,
+				);
 			},
 		);
 		return null;

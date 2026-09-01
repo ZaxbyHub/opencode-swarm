@@ -8,7 +8,7 @@
  *
  * Two hard constraints govern every function here:
  *   1. **Never throw.** `emit()` documents a never-throw guarantee
- *      (`src/telemetry.ts:266,294`) and `src/telemetry.test.ts:137-162`
+ *      (`src/telemetry.ts:276,304`) and `src/telemetry.test.ts:137-162`
  *      exercises circular objects, functions, `Symbol`s and `BigInt`s.
  *   2. **Never deep-traverse, clone, or serialize the payload.** Only
  *      `Object.keys` (shallow) and own-key reads. See `LegacyProjectionSchema`
@@ -60,7 +60,7 @@ export const LEGACY_ADAPTER_RULES: readonly string[] = Object.freeze([
  */
 export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 	Object.freeze({
-		// src/telemetry.ts:397-759 — the 26 convenience helpers.
+		// src/telemetry.ts:548-1218 — the convenience helpers.
 		session_started: Object.freeze(['sessionId', 'agentName']),
 		session_ended: Object.freeze(['sessionId', 'reason']),
 		agent_activated: Object.freeze(['sessionId', 'agentName', 'oldName']),
@@ -424,6 +424,52 @@ export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 			'bytes',
 			'limit_bytes',
 		]),
+		// Issue #2046 item 9 council observability: identifiers, closed-vocabulary
+		// enums, counts, and hashes only — no member names, no evidence paths,
+		// no raw request content.
+		council_attempt: Object.freeze([
+			'sessionId',
+			'councilRoundId',
+			'level',
+			'stage',
+			'attemptId',
+			'disposition',
+			'taskId',
+			'phase',
+			'identityDigest',
+			'authoritativeRound',
+			'clientRound',
+			'verdictCount',
+			'memberCount',
+			'quorumSize',
+			'verdict',
+			'transition',
+			'gateEffect',
+		]),
+		council_round_transition: Object.freeze([
+			'sessionId',
+			'councilRoundId',
+			'level',
+			'attemptId',
+			'transition',
+			'gateEffect',
+			'taskId',
+			'phase',
+			'identityDigest',
+			'round',
+			'nextRound',
+			'roundStatus',
+			'maxRoundsExhausted',
+			'verdict',
+			'quorumSize',
+		]),
+		council_attempt_unscoped: Object.freeze([
+			'sessionId',
+			'level',
+			'disposition',
+			'fingerprint',
+			'attemptId',
+		]),
 	});
 
 const EMPTY_EXTRA: Record<string, unknown> = Object.freeze({});
@@ -501,7 +547,7 @@ export function adaptLegacyTelemetryPayload(
 		// array identity is stable per kind and the derived Set can be memoized.
 		// Rebuilding it per emit was the single largest cost on the `emit()` hot
 		// path (~2.3us p50); AGENTS.md invariant 1 and the frugality contract at
-		// src/telemetry.ts:315-317 make that worth avoiding.
+		// src/telemetry.ts:393-396 make that worth avoiding.
 		const known = knownKeySetFor(knownKeys);
 		const ownKeys = Object.keys(record);
 
@@ -571,9 +617,11 @@ function nonEmptyString(value: unknown): string | undefined {
  * of the wrong type stays `undefined`. Only the mappings a producer actually
  * populates are implemented — `sessionId` to `hostSessionId`, `taskId`, `phase`
  * to `phaseId`, `laneId`, `batchId`, plus the canonical receipt payload keys
- * `knowledgeTraceId` and `knowledgeEntryId`. Unmapped IDs stay absent; inventing
- * an extraction for them would manufacture exactly the joins issue #2029 item 2
- * forbids.
+ * `knowledgeTraceId` and `knowledgeEntryId`, and the council round identity
+ * `councilRoundId` (producer: `src/council/council-observability.ts`, issue
+ * #2046 — the server-derived scope token, never a client-supplied label).
+ * Unmapped IDs stay absent; inventing an extraction for them would manufacture
+ * exactly the joins issue #2029 item 2 forbids.
  */
 export function extractWorkflowIds(data: unknown): WorkflowIds {
 	const ids: WorkflowIds = {};
@@ -592,6 +640,11 @@ export function extractWorkflowIds(data: unknown): WorkflowIds {
 
 		const batchId = nonEmptyString(record.batchId);
 		if (batchId !== undefined) ids.batchId = batchId;
+
+		const councilRoundId = nonEmptyString(record.councilRoundId);
+		if (councilRoundId !== undefined) {
+			ids.councilRoundId = councilRoundId;
+		}
 
 		const knowledgeTraceId = nonEmptyString(record.knowledgeTraceId);
 		if (knowledgeTraceId !== undefined) {

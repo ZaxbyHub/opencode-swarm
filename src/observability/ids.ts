@@ -129,7 +129,7 @@ export function newEventId(): string {
  *
  * `randomBytes` has meaningful per-call overhead, and `newTraceAndSpanId` runs on
  * the `emit()` hot path, whose frugality contract is documented at
- * src/telemetry.ts:315-317. Drawing one larger buffer and consuming it in slices
+ * src/telemetry.ts:393-396. Drawing one larger buffer and consuming it in slices
  * amortizes that overhead across {@link POOL_DRAWS} id pairs.
  *
  * This is strictly a batching change, NOT a weakening: every byte still comes
@@ -157,7 +157,7 @@ function takeIdBytes(): Buffer {
  * Derive a correlated trace/span pair, consuming 24 bytes from the pool above.
  *
  * This exists for the hot path: `createObservation` runs on every `emit()`, and
- * src/telemetry.ts:315-317 documents that path as deliberately frugal.
+ * src/telemetry.ts:393-396 documents that path as deliberately frugal.
  */
 export function newTraceAndSpanId(): TraceAndSpanId {
 	const buffer = takeIdBytes();
