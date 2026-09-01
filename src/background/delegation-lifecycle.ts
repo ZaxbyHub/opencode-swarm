@@ -20,6 +20,8 @@
  */
 
 import { createHash } from 'node:crypto';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { collectLaneDelegateAcks } from '../hooks/delegate-ack-collector.js';
 import { readPhaseDirectivesToVerify } from '../hooks/phase-directives.js';
 import { reconcileReviewerVerdicts } from '../hooks/reviewer-verdict-parser.js';
@@ -410,6 +412,70 @@ async function runDelegationTerminalObservations(
 /** Bounded per-pass cap for terminal-lane receipt recovery (crash window). */
 export const MAX_TERMINAL_LANE_RECEIPT_RECOVERY = 64;
 
+/** Whole-pass deadline for the directory-wide recovery (session-close hook). */
+export const TERMINAL_LANE_RECEIPT_RECOVERY_DEADLINE_MS = 5_000;
+
+const RECOVERY_CURSOR_FILE = 'lane-receipt-recovery-cursor.json';
+
+interface RecoveryCursor {
+	/** Ordering key of the last processed record (fold `updatedAt`). */
+	updatedAt: number;
+	correlationId: string;
+}
+
+function candidateAfter(
+	record: BackgroundDelegationRecord,
+	cursor: RecoveryCursor,
+): boolean {
+	if (record.updatedAt !== cursor.updatedAt) {
+		return record.updatedAt > cursor.updatedAt;
+	}
+	return record.correlationId > cursor.correlationId;
+}
+
+function readRecoveryCursor(directory: string): RecoveryCursor | null {
+	try {
+		const filePath = path.join(directory, '.swarm', RECOVERY_CURSOR_FILE);
+		if (!fs.existsSync(filePath)) return null;
+		const parsed = JSON.parse(
+			fs.readFileSync(filePath, 'utf-8'),
+		) as Partial<RecoveryCursor>;
+		if (
+			typeof parsed.updatedAt === 'number' &&
+			Number.isFinite(parsed.updatedAt) &&
+			typeof parsed.correlationId === 'string' &&
+			parsed.correlationId.length > 0
+		) {
+			return {
+				updatedAt: parsed.updatedAt,
+				correlationId: parsed.correlationId,
+			};
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+/** Best-effort cursor persistence; a lost cursor only causes idempotent rework. */
+function writeRecoveryCursor(
+	directory: string,
+	cursor: RecoveryCursor | null,
+): void {
+	try {
+		const swarmDir = path.join(directory, '.swarm');
+		fs.mkdirSync(swarmDir, { recursive: true });
+		const filePath = path.join(swarmDir, RECOVERY_CURSOR_FILE);
+		if (cursor === null) {
+			fs.rmSync(filePath, { force: true });
+		} else {
+			fs.writeFileSync(filePath, JSON.stringify(cursor), 'utf-8');
+		}
+	} catch {
+		// fail-open — recovery stays correct without the cursor
+	}
+}
+
 /** A terminal lane record whose durable transcript can still reconcile receipts. */
 function isRecoverableTerminalLaneRecord(
 	record: BackgroundDelegationRecord,
@@ -425,6 +491,15 @@ function isRecoverableTerminalLaneRecord(
 export interface TerminalLaneReceiptRecoveryResult {
 	/** Terminal lane records whose receipt reconciliation replay was attempted. */
 	recovered: number;
+	/** True when the pass ended before every candidate was attempted. */
+	exhaustedBudget: boolean;
+}
+
+export interface RecoverTerminalLaneReceiptsOptions {
+	/** Whole-pass wall-clock budget. Default 5s; the pass stops cleanly. */
+	deadlineMs?: number;
+	/** Test seam for the clock. */
+	now?: () => number;
 }
 
 /**
@@ -438,23 +513,82 @@ export interface TerminalLaneReceiptRecoveryResult {
  * receipts close exactly once; diagnostics never re-emit.
  *
  * Production wiring: (a) `collect_lane_results` runs it once per invocation
- * over the batch's terminal records (the async-lane restart path), and (b) the
- * session-close maintenance trigger runs it directory-wide, bounded
- * (`MAX_TERMINAL_LANE_RECEIPT_RECOVERY`), which is what recovers BLOCKING lane
- * records that have no collector. Fail-open per record; never throws.
+ * over the batch's terminal records (the async-lane restart path — a batch is
+ * at most MAX_LANES records, so batch mode needs no cursor), and (b) the
+ * session-close maintenance trigger runs it directory-wide, which is what
+ * recovers BLOCKING lane records that have no collector.
+ *
+ * Forward progress (final-critic round 3): the directory-wide pass is bounded
+ * by BOTH a record cap and a whole-pass deadline, and it persists an advancing
+ * cursor (`.swarm/lane-receipt-recovery-cursor.json`, ordered by
+ * `(updatedAt, correlationId)`), so each pass resumes after the last processed
+ * record and wraps to the oldest once the end is reached — every candidate is
+ * eventually attempted; the same page can never be re-scanned ahead of
+ * starved records. Replays are ledger-idempotent, so a lost or wrapped cursor
+ * only causes harmless rework. Fail-open per record; never throws.
  */
 export async function recoverTerminalLaneReceipts(
 	directory: string,
 	records?: readonly BackgroundDelegationRecord[],
+	options: RecoverTerminalLaneReceiptsOptions = {},
 ): Promise<TerminalLaneReceiptRecoveryResult> {
-	const candidates = (records ?? readDelegations(directory)).filter(
-		isRecoverableTerminalLaneRecord,
-	);
+	const now = options.now ?? Date.now;
+	const deadlineMs =
+		options.deadlineMs ?? TERMINAL_LANE_RECEIPT_RECOVERY_DEADLINE_MS;
+	const deadline = now() + deadlineMs;
+	if (records !== undefined) {
+		// Batch mode (collect path): the slice is already small (≤ MAX_LANES);
+		// no cursor, no cap interplay — every terminal record is attempted.
+		let recovered = 0;
+		for (const record of records) {
+			if (!isRecoverableTerminalLaneRecord(record)) continue;
+			const transcript = record.terminalResult?.result.text;
+			if (!transcript) continue;
+			if (now() >= deadline) {
+				return { recovered, exhaustedBudget: true };
+			}
+			try {
+				await reconcileLaneKnowledgeReceipts(
+					directory,
+					record,
+					{ transcript },
+					true,
+				);
+				recovered += 1;
+			} catch {
+				// fail-open per record
+			}
+		}
+		return { recovered, exhaustedBudget: false };
+	}
+	const candidates = readDelegations(directory)
+		.filter(isRecoverableTerminalLaneRecord)
+		.sort((left, right) => {
+			if (left.updatedAt !== right.updatedAt) {
+				return left.updatedAt - right.updatedAt;
+			}
+			return left.correlationId < right.correlationId
+				? -1
+				: left.correlationId > right.correlationId
+					? 1
+					: 0;
+		});
+	if (candidates.length === 0) return { recovered: 0, exhaustedBudget: false };
+	const cursor = readRecoveryCursor(directory);
+	let selected = cursor
+		? candidates.filter((record) => candidateAfter(record, cursor))
+		: candidates;
+	let wrapped = false;
+	if (selected.length === 0) {
+		// Everything is behind the cursor: wrap to the oldest for this pass.
+		selected = candidates;
+		wrapped = true;
+	}
 	let recovered = 0;
-	for (const record of candidates.slice(
-		0,
-		MAX_TERMINAL_LANE_RECEIPT_RECOVERY,
-	)) {
+	let lastProcessed: RecoveryCursor | null = null;
+	for (const record of selected) {
+		if (recovered >= MAX_TERMINAL_LANE_RECEIPT_RECOVERY) break;
+		if (now() >= deadline) break;
 		const transcript = record.terminalResult?.result.text;
 		if (!transcript) continue;
 		try {
@@ -465,11 +599,35 @@ export async function recoverTerminalLaneReceipts(
 				true,
 			);
 			recovered += 1;
+			lastProcessed = {
+				updatedAt: record.updatedAt,
+				correlationId: record.correlationId,
+			};
 		} catch {
-			// fail-open per record — one bad record never blocks the rest
+			// fail-open per record — one bad record never blocks the rest.
+			// Still advance past it so a persistently failing record cannot
+			// starve everything behind it.
+			lastProcessed = {
+				updatedAt: record.updatedAt,
+				correlationId: record.correlationId,
+			};
 		}
 	}
-	return { recovered };
+	const processedAll =
+		selected.length > 0 && lastProcessed === selected[selected.length - 1];
+	// Persist the advance; wrapping to the very end resets so the next pass
+	// starts from the oldest record again.
+	const nextCursor =
+		wrapped && processedAll ? null : lastProcessed ?? cursor ?? null;
+	if (nextCursor?.correlationId !== cursor?.correlationId) {
+		writeRecoveryCursor(directory, nextCursor);
+	}
+	return {
+		recovered,
+		exhaustedBudget:
+			recovered < selected.length &&
+			(now() >= deadline || recovered >= MAX_TERMINAL_LANE_RECEIPT_RECOVERY),
+	};
 }
 
 /**

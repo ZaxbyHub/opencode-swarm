@@ -250,4 +250,106 @@ describe('terminal lane receipt recovery (issue #2045)', () => {
 		expect(await appliedCount(dir)).toBe(1);
 		expect(telemetryEnds).toHaveLength(0);
 	});
+
+	it('the directory-wide pass makes forward progress past the 64-record cap', async () => {
+		// Final-critic round-3: the cap must never permanently starve records
+		// beyond the first page. Build 70 crash-state records (70 > cap 64) and
+		// prove the LAST record is eventually reconciled across passes, exactly
+		// once, with no duplicate diagnostics.
+		const { recordPendingDelegation } = await import(
+			'../../../src/background/pending-delegations.js'
+		);
+		const total = 70;
+		for (let i = 0; i < total; i++) {
+			// correlation == subagentSessionId == the membership session: the
+			// recovery queries memberships by subagentSessionId, so all three must
+			// agree for record 0 (which owns the shared membership).
+			const correlation = `sess-starve-${String(i).padStart(3, '0')}`;
+			await recordPendingDelegation(dir, {
+				correlationId: correlation,
+				jobId: null,
+				subagentSessionId: correlation,
+				parentSessionId: PARENT_SESSION,
+				callID: `call-starve-${i}`,
+				normalizedAgent: 'sme',
+				swarmPrefixedAgent: 'mega_sme',
+				planTaskId: null,
+				evidenceTaskId: null,
+				batchId: `batch-starve-${i}`,
+				laneId: `lane-starve-${i}`,
+			});
+			const crashText = `KNOWLEDGE_APPLIED:${TRACE_ID}:${ENTRY_ID}`;
+			await claimTerminalResult(dir, correlation, {
+				eventId: buildBackgroundCompletionEventId({
+					correlationId: correlation,
+					jobId: null,
+					status: 'completed',
+					resultDigest: createHash('sha256').update(crashText).digest('hex'),
+				}),
+				status: 'completed',
+				recordedAt: NOW + i,
+				result: {
+					text: crashText,
+					chars: crashText.length,
+					truncated: false,
+					digest: createHash('sha256').update(crashText).digest('hex'),
+				},
+			});
+		}
+		// One shared membership on the shared trace: every replay reconciles
+		// against it (the validator idempotently skips after the first accept).
+		await commitDisplayedMembership(dir, {
+			trace_id: TRACE_ID,
+			session_id: 'sess-starve-000',
+			phase: 'Phase 1',
+			agent: 'sme',
+			exposure_kind: 'delegate_directive',
+			entries: [{ entry_id: ENTRY_ID, critical: false }],
+		});
+
+		const first = await recoverTerminalLaneReceipts(dir);
+		expect(first.recovered).toBe(64);
+		expect(first.exhaustedBudget).toBe(true);
+		const second = await recoverTerminalLaneReceipts(dir);
+		// Forward progress: the second pass resumes AFTER the cursor, reaching
+		// the tail the first pass could not.
+		expect(second.recovered).toBe(6);
+		expect(second.exhaustedBudget).toBe(false);
+		// The authoritative receipt exists exactly once, and diagnostics were
+		// never re-emitted.
+		expect(await appliedCount(dir)).toBe(1);
+		expect(telemetryEnds).toHaveLength(0);
+	});
+
+	it('a zero deadline processes nothing and leaves the cursor untouched', async () => {
+		const { recordPendingDelegation } = await import(
+			'../../../src/background/pending-delegations.js'
+		);
+		await recordPendingDelegation(dir, {
+			correlationId: LANE_SESSION_ID,
+			jobId: null,
+			subagentSessionId: LANE_SESSION_ID,
+			parentSessionId: PARENT_SESSION,
+			callID: 'batch-deadline-0',
+			normalizedAgent: 'sme',
+			swarmPrefixedAgent: 'mega_sme',
+			planTaskId: null,
+			evidenceTaskId: null,
+			batchId: 'batch-deadline-0',
+			laneId: 'lane-deadline-0',
+		});
+		await seedCrashState(dir);
+		const result = await recoverTerminalLaneReceipts(dir, undefined, {
+			deadlineMs: 0,
+		});
+		expect(result.recovered).toBe(0);
+		expect(result.exhaustedBudget).toBe(true);
+		// The record was never attempted: no receipt, cursor still absent.
+		expect(await appliedCount(dir)).toBe(0);
+		expect(
+			fs.existsSync(
+				path.join(dir, '.swarm', 'lane-receipt-recovery-cursor.json'),
+			),
+		).toBe(false);
+	});
 });

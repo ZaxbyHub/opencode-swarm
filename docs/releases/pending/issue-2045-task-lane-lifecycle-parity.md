@@ -18,7 +18,9 @@ Exactly-once terminals:
   settle replays — the receipt ledger is idempotent, so they close exactly
   once — and the replay is reached through two production recovery entries
   (collect_lane_results recovers the batch's terminal records per invocation;
-  the session-close maintenance pass recovers directory-wide, covering
+  the session-close maintenance pass runs an incremental directory-wide sweep
+  — at most 64 records or 5 s per pass behind a durable advancing cursor that
+  wraps at the end, so every crashed lane is eventually recovered, including
   blocking lanes that have no collector), replaying from the durable
   terminalResult transcript. The DIAGNOSTIC observations (cost telemetry,
   trajectory, and the audit-only non-critical `unacknowledged` knowledge
