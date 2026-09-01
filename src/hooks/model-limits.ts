@@ -439,11 +439,9 @@ function warnNormalizedKeyCollisions(
 			continue;
 		}
 		warn(
-			`[model-limits] context_budget.model_limits has ${keys.length} keys that normalize identically (${keys
-				.map((k) => `\`${k}\``)
-				.join(
-					', ',
-				)}); only the last one in config order takes effect under normalized matching.`,
+			`[model-limits] context_budget.model_limits has ${keys.length} keys that normalize identically (${keys.join(
+				', ',
+			)}); only the last one in config order takes effect under normalized matching.`,
 			{ keys },
 		);
 	}
