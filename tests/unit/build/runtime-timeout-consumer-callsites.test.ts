@@ -55,6 +55,7 @@ describe('runtime timeout consumer callsites', () => {
 			'function screenCandidate({ withTimeoutSignal }) { withTimeoutSignal(); }',
 			'function screenCandidate(...[withTimeoutSignal]) { withTimeoutSignal(); }',
 			'function screenCandidate() { const { withTimeoutSignal } = deps; withTimeoutSignal(); }',
+			'function screenCandidate() { try {} catch (withTimeoutSignal) { withTimeoutSignal(); } }',
 			'const screenCandidate = function withTimeoutSignal() { withTimeoutSignal(); }',
 		]) {
 			const source = `
