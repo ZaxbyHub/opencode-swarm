@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.160.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.159.3...v7.160.0) (2026-09-01)
+
+
+### Features
+
+* **observability:** expose model-limit provenance and wire learning-health alarms ([e090cb0](https://github.com/ZaxbyHub/opencode-swarm/commit/e090cb0c3e1dfe104b9676034d8c63854d3b57e7))
+* **repo-map:** KG-15 route, data, security, and test graph packs (route_trace, data_trace, test_pack) ([3d220ef](https://github.com/ZaxbyHub/opencode-swarm/commit/3d220ef1c2f4dcf7e3f2315928f3c0a251a2d9d0))
+
 ## [7.159.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.159.2...v7.159.3) (2026-09-01)
 
 
