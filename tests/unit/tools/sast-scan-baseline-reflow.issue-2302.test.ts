@@ -13,7 +13,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { sastScan } from '../../../src/tools/sast-scan';
+import { sast_scan, sastScan } from '../../../src/tools/sast-scan';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let tempDir = '';
@@ -194,7 +194,9 @@ describe('sastScan audited absorption (#2302)', () => {
 			'finding verified pre-existing before this task',
 		);
 		expect(triage[0]?.actor).toBe('session-2302-e2e');
-		expect(typeof triage[0]?.absorbed_at).toBe('string');
+		expect(triage[0]?.absorbed_at).toMatch(
+			/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/,
+		);
 
 		const after = await sastScan({ changed_files: [file], phase: 1 }, tempDir);
 		expect(after.verdict).toBe('pass');
@@ -253,5 +255,94 @@ describe('sastScan audited absorption (#2302)', () => {
 		);
 		expect(after.verdict).toBe('pass');
 		expect(after.new_findings ?? []).toHaveLength(0);
+	});
+
+	it('truncation cascade: new -> pre-existing -> moved budget with flags on result and evidence', async () => {
+		// 190 findings vs MAX_FINDINGS=100: 60 exact pre-existing (fileB
+		// untouched), 40 moved (fileA neighbors edited), 90 new (fileC).
+		// Expected: new=90 (fits), pre-existing budget 100-90=10 (truncated),
+		// moved budget 10-10=0 (truncated to zero).
+		const fileA = path.join(tempDir, 'cascade-moved.js');
+		const fileB = path.join(tempDir, 'cascade-pre.js');
+		const linesA: string[] = [];
+		for (let i = 0; i < 40; i++) linesA.push(`eval(mv${i});`);
+		const linesB: string[] = [];
+		for (let i = 0; i < 60; i++) linesB.push(`eval(pb${i});`);
+		fs.writeFileSync(fileA, `${linesA.join('\n')}\n`);
+		fs.writeFileSync(fileB, `${linesB.join('\n')}\n`);
+
+		const cap = await sastScan(
+			{ changed_files: [fileA, fileB], capture_baseline: true, phase: 1 },
+			tempDir,
+		);
+		expect(cap.finding_count).toBe(100);
+
+		const movedLines: string[] = [];
+		for (let i = 0; i < 40; i++)
+			movedLines.push(`let t${i} = ${i};`, `eval(mv${i});`);
+		fs.writeFileSync(fileA, `${movedLines.join('\n')}\n`);
+		const linesC: string[] = [];
+		for (let i = 0; i < 90; i++) linesC.push(`eval(nc${i});`);
+		const fileC = path.join(tempDir, 'cascade-new.js');
+		fs.writeFileSync(fileC, `${linesC.join('\n')}\n`);
+
+		const scan = await sastScan(
+			{ changed_files: [fileA, fileB, fileC], phase: 1 },
+			tempDir,
+		);
+		expect(scan.verdict).toBe('fail');
+		expect(scan.new_findings ?? []).toHaveLength(90);
+		expect(scan.pre_existing_findings ?? []).toHaveLength(10);
+		expect(scan.moved_findings ?? []).toHaveLength(0);
+		expect(scan.truncated_pre_existing).toBe(true);
+		expect(scan.truncated_moved_findings).toBe(true);
+
+		// Both flags round-trip into the evidence payload (#2443 review PRR-001).
+		const entry = latestEvidenceEntry();
+		expect(entry.truncated_pre_existing).toBe(true);
+		expect(entry.truncated_moved_findings).toBe(true);
+		expect(entry.moved_findings).toEqual([]);
+	});
+
+	it('baseline_refresh_rationale boundaries: over-length or whitespace-only is treated as absent -> blocked', async () => {
+		const file = path.join(tempDir, 'rationale-bounds.js');
+		fs.writeFileSync(file, 'const a = 1;\n');
+		await sastScan(
+			{ changed_files: [file], capture_baseline: true, phase: 1 },
+			tempDir,
+		);
+		// Introduce a novel finding so the recapture becomes an absorption.
+		fs.writeFileSync(
+			file,
+			'const a = 1;\nfunction late() {\n  eval(userInput);\n}\n',
+		);
+
+		// Over the 500-char contract limit: the tool drops the invalid
+		// rationale (treated as absent), so the absorption gate blocks —
+		// it must NOT silently truncate and absorb.
+		const toolArgs = {
+			directory: tempDir,
+			changed_files: [file],
+			capture_baseline: true,
+			phase: 1,
+		};
+		const tooLong = JSON.parse(
+			(await sast_scan.execute(
+				{ ...toolArgs, baseline_refresh_rationale: 'r'.repeat(501) },
+				{ directory: tempDir } as unknown as never,
+			)) as string,
+		) as { status?: string };
+		expect(tooLong.status).toBe('baseline_absorption_blocked');
+
+		const whitespaceOnly = JSON.parse(
+			(await sast_scan.execute(
+				{ ...toolArgs, baseline_refresh_rationale: '   ' },
+				{ directory: tempDir } as unknown as never,
+			)) as string,
+		) as { status?: string };
+		expect(whitespaceOnly.status).toBe('baseline_absorption_blocked');
+
+		// Baseline still untouched by both blocked captures.
+		expect(fs.existsSync(baselinePath())).toBe(true);
 	});
 });

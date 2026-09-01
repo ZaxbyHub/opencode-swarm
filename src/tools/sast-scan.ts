@@ -130,8 +130,8 @@ export interface SastScanResult {
 	truncated_pre_existing?: boolean;
 	/**
 	 * True when moved_findings were truncated to fit result limits. Advisory
-	 * telemetry only (no in-tree consumer) — kept for parity with
-	 * truncated_pre_existing and for future audit consumers.
+	 * telemetry: emitted into the sast_scan evidence payload when set (as is
+	 * truncated_pre_existing) and mirrored on the result for callers.
 	 */
 	truncated_moved_findings?: boolean;
 }
@@ -714,15 +714,25 @@ export async function sastScan(
 			warn(`SAST Baseline: capture failed — ${captureResult.message}`);
 		} else if (captureResult.status === 'absorption_blocked') {
 			warn(`SAST Baseline: ${captureResult.message}`);
-		} else if (
-			captureResult.status === 'merged' &&
-			captureResult.absorbed_finding_count > 0
-		) {
-			warn(
-				`SAST Baseline: merged and absorbed ${captureResult.absorbed_finding_count} novel finding(s) ` +
-					'under the supplied refresh rationale. If this capture ran after a gate failure, ' +
-					'those findings may be coder-introduced — verify before proceeding.',
-			);
+		} else if (captureResult.status === 'merged') {
+			const notes: string[] = [];
+			if (captureResult.absorbed_finding_count > 0) {
+				notes.push(
+					`absorbed ${captureResult.absorbed_finding_count} novel finding(s) ` +
+						'under the supplied refresh rationale. If this capture ran after a ' +
+						'gate failure, those findings may be coder-introduced — verify ' +
+						'before proceeding.',
+				);
+			}
+			if (captureResult.dropped_triage_count > 0) {
+				notes.push(
+					`dropped ${captureResult.dropped_triage_count} stale triage ` +
+						'entr(y/ies) whose fingerprints no longer survive this merge',
+				);
+			}
+			if (notes.length > 0) {
+				warn(`SAST Baseline: merged and ${notes.join('; ')}.`);
+			}
 		}
 
 		const finalFindings = allFindings.slice(0, MAX_FINDINGS);
@@ -909,6 +919,8 @@ export async function sastScan(
 				new_findings: newFindings,
 				pre_existing_findings: preExistingFindings,
 				moved_findings: movedFindings,
+				...(truncatedPreExisting ? { truncated_pre_existing: true } : {}),
+				...(truncatedMoved ? { truncated_moved_findings: true } : {}),
 				baseline_used: true,
 			}),
 		},
@@ -948,7 +960,7 @@ export async function sastScan(
 export const sast_scan: ToolDefinition = createSwarmTool({
 	allowWorkingDirectoryOverride: true,
 	description:
-		'Static Application Security Testing (SAST) scan. Scans files for security vulnerabilities using built-in rules (Tier A) and optional Semgrep (Tier B). Supports phase-scoped baseline diffing: set capture_baseline:true before first coder delegation to snapshot pre-existing findings; subsequent scans with the same phase only fail on NEW findings.',
+		'Static Application Security Testing (SAST) scan. Scans files for security vulnerabilities using built-in rules (Tier A) and optional Semgrep (Tier B). Supports phase-scoped baseline diffing: set capture_baseline:true before first coder delegation to snapshot pre-existing findings; subsequent scans with the same phase only fail on NEW findings. Baseline diff results partition into new_findings (gating), pre_existing_findings, and moved_findings (reflow-matched relocations of pre-existing findings — reported, never gating). A blocked baseline capture returns status baseline_absorption_blocked with the recovery hint.',
 	args: {
 		directory: z
 			.string()
@@ -966,7 +978,7 @@ export const sast_scan: ToolDefinition = createSwarmTool({
 			.boolean()
 			.optional()
 			.describe(
-				'When true, capture/merge a phase-scoped baseline of pre-existing findings. Requires phase. Subsequent scans with phase only fail on NEW findings. Merging findings not previously in the baseline (any file) is BLOCKED unless baseline_refresh_rationale is provided.',
+				'When true, capture/merge a phase-scoped baseline of pre-existing findings. Requires phase. Subsequent scans with phase only fail on NEW findings. Merging findings not previously in the baseline (any file) is BLOCKED unless baseline_refresh_rationale is provided; blocked captures return status baseline_absorption_blocked.',
 			),
 		phase: z
 			.number()

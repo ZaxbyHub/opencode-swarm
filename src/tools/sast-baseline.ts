@@ -164,6 +164,8 @@ export type CaptureResult =
 			fingerprint_count: number;
 			/** Novel absorptions recorded in triage_log by this capture. */
 			absorbed_finding_count: number;
+			/** Prior triage entries whose fingerprints no longer survive this merge. */
+			dropped_triage_count: number;
 	  }
 	| {
 			status: 'absorption_blocked';
@@ -364,7 +366,8 @@ export function partitionAgainstBaseline(
 				if (count > 0) reflowCounts.set(reflowKey, count - 1);
 			}
 		} else if (stable && reflowKey && (reflowCounts.get(reflowKey) ?? 0) > 0) {
-			reflowCounts.set(reflowKey, (reflowCounts.get(reflowKey) ?? 1) - 1);
+			const matchedCount = reflowCounts.get(reflowKey) ?? 0;
+			reflowCounts.set(reflowKey, matchedCount - 1);
 			moved.push(finding);
 		} else {
 			newFindings.push(finding);
@@ -615,10 +618,8 @@ export async function captureOrMergeBaseline(
 					reflowKey &&
 					(priorReflowCounts.get(reflowKey) ?? 0) > 0
 				) {
-					priorReflowCounts.set(
-						reflowKey,
-						(priorReflowCounts.get(reflowKey) ?? 1) - 1,
-					);
+					const matchedCount = priorReflowCounts.get(reflowKey) ?? 0;
+					priorReflowCounts.set(reflowKey, matchedCount - 1);
 					continue; // reflow match — moved / index-shifted, mechanical
 				}
 				// Novel absorption relative to the prior baseline. EVERY novel
@@ -713,11 +714,14 @@ export async function captureOrMergeBaseline(
 
 			// Retain triage entries whose fingerprint still survives the merge
 			// (non-scanned files' entries and still-present fingerprints); drop
-			// dangling history for re-fingerprinted/moved findings.
+			// dangling history for re-fingerprinted/moved findings. The drop is
+			// disclosed to the caller via dropped_triage_count.
+			const priorTriage = existing.triage_log ?? [];
 			const cappedFingerprintSet = new Set(cappedFingerprints);
-			const retainedTriage = (existing.triage_log ?? []).filter((e) =>
+			const retainedTriage = priorTriage.filter((e) =>
 				cappedFingerprintSet.has(e.fingerprint),
 			);
+			const droppedTriageCount = priorTriage.length - retainedTriage.length;
 			const mergedTriageLog = [...retainedTriage, ...triageEntries].slice(
 				-MAX_BASELINE_FINDINGS,
 			);
@@ -760,6 +764,7 @@ export async function captureOrMergeBaseline(
 				path: baselinePath,
 				fingerprint_count: cappedFingerprints.length,
 				absorbed_finding_count: triageEntries.length,
+				dropped_triage_count: droppedTriageCount,
 			};
 		}
 
@@ -877,9 +882,11 @@ export function loadBaseline(
 		}
 		let reflowKeys: string[] = [];
 		if (parsed.schema_version === BASELINE_SCHEMA_VERSION) {
-			if (parsed.reflow_keys === undefined) {
-				// Absent reflow_keys on a 1.1.0 file: tolerate as exact-only
-				// (fail-closed) rather than rejecting the whole baseline.
+			if (parsed.reflow_keys === undefined || parsed.reflow_keys === null) {
+				// Absent (or explicit null) reflow_keys on a 1.1.0 file:
+				// tolerate as exact-only (fail-closed) rather than rejecting
+				// the whole baseline — semantically equivalent inputs must not
+				// diverge on the storage encoding alone.
 				reflowKeys = [];
 			} else if (
 				!Array.isArray(parsed.reflow_keys) ||
