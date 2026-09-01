@@ -36,14 +36,7 @@ const {
 	runTests,
 } = testRunnerModule;
 
-/**
- * Build a Bun.spawn stub that emits vitest-style JSON on stdout, so the
- * test-runner's full execute -> buildTestCommand -> runTests -> parseTestOutput
- * vitest path can be exercised deterministically without spawning a real
- * `npx vitest` (which would require a network fetch when node_modules/vitest is
- * absent — the source of intermittent coverage-gate timeouts). Mirrors the
- * rspec Bun.spawn stub pattern used later in this file.
- */
+/** Deterministic Bun.spawn stub exercises the full vitest path without network-dependent npx resolution (historical coverage-gate timeout source). */
 function makeVitestSpawnStub(result: {
 	passed: number;
 	failed: number;

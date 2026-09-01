@@ -172,7 +172,11 @@ export function resolveLocalNodeTool(
 	platform: NodeJS.Platform = process.platform,
 	isAvailable?: (binary: string) => boolean,
 ): string[] | null {
-	const local = resolveLocalCandidate(tool, workingDir, platform, isAvailable);
+	// A repository-local node tool is already the caller's explicit execution
+	// target; do not probe the ambient PATH for `node` before returning it.
+	// This preserves the local-tool contract and avoids resolution depending on
+	// a concurrently changing process CWD in test hosts.
+	const local = resolveLocalCandidate(tool, workingDir, platform);
 	if (local) return [local.absolute, ...args];
 	// FB-001: PATH fallback is allowed only for callers that already own an
 	// explicit availability probe; repository-local shims still win first.
