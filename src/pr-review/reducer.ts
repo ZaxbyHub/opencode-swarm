@@ -210,13 +210,21 @@ export function reducePrReviewEvent(
 					`lane ${event.laneId} already carries a different structured receipt`,
 				);
 			}
-			const status = event.outcome === 'INCOMPLETE' ? 'error' : 'completed';
+			// CLEAN / FINDINGS settle completed when the child's ordinary
+			// completion event transports the receipt (claimTerminalResult).
+			// INCOMPLETE publishes the receipt and leaves the lane UNRESOLVED
+			// by design (issue #2384: an incomplete lane is never credited as
+			// covered) — no settle effect is emitted for it; coverage treats
+			// the unresolved receipt as an unresolved dimension.
+			if (event.outcome === 'INCOMPLETE') {
+				return applied(state);
+			}
 			return applied(state, [
 				{
 					kind: 'settle_delegation',
 					batchId: event.batchId,
 					laneId: event.laneId,
-					status,
+					status: 'completed',
 				},
 			]);
 		}

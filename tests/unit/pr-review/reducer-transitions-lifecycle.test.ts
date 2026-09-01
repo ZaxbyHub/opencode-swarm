@@ -142,7 +142,7 @@ describe('reducer: structured result submission (exactly-once)', () => {
 		]);
 	});
 
-	test('INCOMPLETE settles as error (never covered)', () => {
+	test('INCOMPLETE publishes the receipt and leaves the lane UNRESOLVED (never covered, never errored)', () => {
 		const result = reducePrReviewEvent(BASE, {
 			type: 'lane_structured_result_submitted',
 			batchId: 'batch-1',
@@ -153,7 +153,10 @@ describe('reducer: structured result submission (exactly-once)', () => {
 		});
 		expect(result.status).toBe('applied');
 		if (result.status !== 'applied') return;
-		expect(result.effects[0]).toMatchObject({ status: 'error' });
+		// No settle effect: issue #2384 keeps an INCOMPLETE lane unresolved
+		// (the receipt publishes; coverage treats it as an unresolved
+		// dimension — never covered, never a terminal error).
+		expect(result.effects).toEqual([]);
 	});
 
 	test('semantic-equivalent replay is exactly-once', () => {
