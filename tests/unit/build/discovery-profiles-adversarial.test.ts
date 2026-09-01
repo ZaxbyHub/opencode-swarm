@@ -130,7 +130,6 @@ describe('discoverBuildCommandsFromProfiles - Attack: Malformed workingDir', () 
 
 describe('discoverBuildCommandsFromProfiles - Attack: Empty Commands Array', () => {
 	it('should skip profile when build.commands is empty array', async () => {
-		// Arrange: Profile with no commands
 		const emptyCommandsProfile: MockLanguageProfile = {
 			id: 'empty-lang',
 			displayName: 'Empty Language',
@@ -159,7 +158,6 @@ describe('discoverBuildCommandsFromProfiles - Attack: Empty Commands Array', () 
 		// Act
 		const result = await module.discoverBuildCommandsFromProfiles(TEST_DIR);
 
-		// Assert: Should skip the profile (no commands, but no crash)
 		expect(result.commands).toEqual([]);
 		expect(result.skipped).toHaveLength(1);
 		expect(result.skipped[0].ecosystem).toBe('empty-lang');
