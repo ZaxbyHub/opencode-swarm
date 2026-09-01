@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import { mkdtempSync, realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -59,6 +59,7 @@ beforeEach(() => {
 	directory = realpathSync(
 		mkdtempSync(path.join(os.tmpdir(), 'dispatch-review-council-')),
 	);
+	mkdirSync(path.join(directory, '.git'), { recursive: true });
 	createdSessions = 0;
 	deliveredPrompts = [];
 	gateInternals.resetTrackedStateCache();

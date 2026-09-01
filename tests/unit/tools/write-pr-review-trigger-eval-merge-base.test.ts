@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 import {
 	existsSync,
+	mkdirSync,
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
@@ -59,6 +60,7 @@ const originalResolveMergeBaseAsync = writerInternals.resolveMergeBaseAsync;
 
 function tempRoot(): string {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), 'trigger-eval-mb-')));
+	mkdirSync(join(root, '.git'), { recursive: true });
 	tempDirs.push(root);
 	return root;
 }

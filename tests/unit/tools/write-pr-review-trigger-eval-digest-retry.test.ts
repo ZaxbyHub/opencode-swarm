@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { storeLaneOutput } from '../../../src/background/lane-output-store';
@@ -44,6 +44,7 @@ const originals = {
 
 function tempRoot(): string {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), 'trigger-eval-dr-')));
+	mkdirSync(join(root, '.git'), { recursive: true });
 	tempDirs.push(root);
 	return root;
 }

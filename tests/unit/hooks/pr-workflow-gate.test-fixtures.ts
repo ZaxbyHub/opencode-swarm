@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -69,6 +69,7 @@ export function setupPrWorkflowGateFixtures(): void {
 	tempDir = realpathSync(
 		mkdtempSync(path.join(os.tmpdir(), 'pr-workflow-gate-')),
 	);
+	mkdirSync(path.join(tempDir, '.git'), { recursive: true });
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
 	_test_exports.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
