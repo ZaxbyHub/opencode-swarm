@@ -81,6 +81,7 @@ export {
 	resetQueryCache,
 } from './repo-graph/query';
 export type {
+	LexicalRequest,
 	LexicalResult,
 	RetrievalMode,
 	RetrievalRequest,

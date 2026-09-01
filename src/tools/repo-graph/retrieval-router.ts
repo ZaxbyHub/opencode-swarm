@@ -42,6 +42,15 @@ export interface LexicalResult {
 	error?: boolean;
 }
 
+/** Structured fallback request so lexical retrieval preserves validated scope
+ * and security hints instead of reducing everything to a bare string. */
+export interface LexicalRequest {
+	query: string;
+	files?: string[];
+	routePath?: string;
+	method?: RouteMethod;
+}
+
 export interface RetrievalResult {
 	mode: RetrievalMode;
 	algorithm: 'literal' | 'graph' | 'fuzzy_graph' | 'graph_packs' | 'mixed';
@@ -79,7 +88,7 @@ export function classifyRetrieval(question: string): {
 	const q = question.toLowerCase();
 	if (
 		/\b(exact|literal|find\s+(?:the\s+)?string)\b/.test(q) ||
-		/[`"'][^`"']+[`"']/.test(question)
+		findQuotedLiteral(question) !== null
 	)
 		return { mode: 'lexical', reason: 'exact_string_cue' };
 	if (/\b(review|diff|patch|pull request|pr)\b/.test(q))
@@ -89,7 +98,7 @@ export function classifyRetrieval(question: string): {
 	if (/\b(auth|security|permission|authorize|validation|risk)\b/.test(q))
 		return { mode: 'security', reason: 'security_cue' };
 	if (
-		/\b(who calls|caller|dependency|dependencies|impact|breaks? if|structural)\b/.test(
+		/\b(who calls|callers?|invoke[sd]?|invoked by|references?|referenced by|uses?|used by|dependents?|dependency|dependencies|impact|breaks? if|structural)\b/.test(
 			q,
 		)
 	)
@@ -99,11 +108,43 @@ export function classifyRetrieval(question: string): {
 	return { mode: 'semantic', reason: 'vague_discovery_default' };
 }
 
+function findQuotedLiteral(question: string): string | null {
+	for (let i = 0; i < question.length; i++) {
+		const delimiter = question[i];
+		if (delimiter !== '`' && delimiter !== '"' && delimiter !== "'") continue;
+		if (
+			delimiter === "'" &&
+			i > 0 &&
+			/[A-Za-z0-9_$]/.test(question[i - 1] ?? '')
+		)
+			continue;
+		const end = question.indexOf(delimiter, i + 1);
+		if (end <= i + 1) continue;
+		const value = question.slice(i + 1, end).trim();
+		if (value) return value;
+	}
+	return null;
+}
+
+function inferCallerSymbol(question: string): string | undefined {
+	const match = question.match(
+		/\b(?:calls?|callers?|invoke[sd]?|invoked by|references?|referenced by|uses?|used by|dependents?)(?:\s+of)?\s+([A-Za-z_$][\w$]*)/i,
+	);
+	return match?.[1];
+}
+
 function literalFrom(question: string, req: RetrievalRequest): string {
-	const match = question.match(/[`"']([^`"']+)[`"']/);
-	return (match?.[1] || req.symbol || req.entity || req.file || question)
-		.trim()
-		.slice(0, 500);
+	const quoted = findQuotedLiteral(question);
+	const hints = [req.routePath, req.method].filter((value): value is string =>
+		Boolean(value),
+	);
+	const primary =
+		quoted ||
+		req.symbol ||
+		req.entity ||
+		req.file ||
+		(hints.length > 0 ? '' : question);
+	return [primary, ...hints].filter(Boolean).join(' ').trim().slice(0, 500);
 }
 
 function hasArray(value: unknown, key: string): boolean {
@@ -176,35 +217,51 @@ function packContext(
 ) {
 	const context: Array<{ action: string; data: unknown }> = [];
 	let used = 0;
+	let warning: string | undefined;
 	for (const item of items) {
 		const cost = tokenEstimate(item);
-		if (used + cost > maxTokens) continue;
+		if (used + cost > maxTokens) {
+			if (context.length === 0) {
+				const compact = { action: item.action, data: { truncated: true } };
+				const compactCost = tokenEstimate(compact);
+				if (compactCost <= maxTokens) {
+					context.push(compact);
+					used += compactCost;
+					warning = 'context_truncated_to_fit_budget';
+					continue;
+				}
+				warning = 'context_budget_too_small';
+			}
+			continue;
+		}
 		context.push(item);
 		used += cost;
 	}
-	return { context, used, omitted: items.length - context.length };
+	return { context, used, omitted: items.length - context.length, warning };
 }
 
 export async function routeRetrieval(
 	graph: RepoGraph | null,
 	request: RetrievalRequest,
-	lexical: (query: string) => Promise<LexicalResult>,
+	lexical: (request: LexicalRequest) => Promise<LexicalResult>,
 	graphUnavailableReason?: string,
 ): Promise<RetrievalResult> {
 	const classified = classifyRetrieval(request.question);
 	const requestedFiles = request.files?.length ? request.files : undefined;
 	const mode: RetrievalMode =
-		request.routePath || request.method || request.entity
-			? 'security'
-			: request.diff || requestedFiles
-				? classified.mode === 'test'
-					? 'test'
-					: 'hybrid'
-				: request.file || request.symbol
-					? classified.mode === 'security' || classified.mode === 'test'
-						? classified.mode
-						: 'graph'
-					: classified.mode;
+		classified.mode === 'lexical'
+			? 'lexical'
+			: request.routePath || request.method || request.entity
+				? 'security'
+				: request.diff || requestedFiles
+					? classified.mode === 'test'
+						? 'test'
+						: 'hybrid'
+					: request.file || request.symbol
+						? classified.mode === 'security' || classified.mode === 'test'
+							? classified.mode
+							: 'graph'
+						: classified.mode;
 	const reason =
 		mode === classified.mode
 			? classified.reason
@@ -226,16 +283,32 @@ export async function routeRetrieval(
 	if (mode !== 'lexical' && graph) {
 		switch (mode) {
 			case 'graph': {
-				if (
-					request.symbol &&
-					/\b(who calls|caller)\b/i.test(request.question)
-				) {
-					const hits = searchSymbols(graph, { query: request.symbol, topN: 1 });
-					const hit = hits.hits[0];
-					const data = hit ? getCallers(graph, hit.file, hit.symbol) : [];
+				const callerIntent =
+					/\b(who calls?|callers?|invoke[sd]?|invoked by|references?|referenced by|uses?|used by|dependents?)\b/i.test(
+						request.question,
+					);
+				const callerSymbol = callerIntent
+					? (request.symbol ?? inferCallerSymbol(request.question))
+					: undefined;
+				if (callerSymbol) {
+					const hits = searchSymbols(graph, {
+						query: callerSymbol,
+						topN: Math.max(topN, 25),
+						file: request.file,
+					});
+					const exactHits = hits.hits.filter(
+						(hit) => hit.symbol === callerSymbol,
+					);
+					const data = exactHits.flatMap((hit) =>
+						getCallers(graph, hit.file, hit.symbol),
+					);
 					actions.push('symbol_search', 'callers');
 					candidates.push({ action: 'callers', data });
 					graphHit = hasActionContext('callers', data);
+					if (exactHits.length > 1 && !request.file)
+						warnings.push(
+							`ambiguous symbol ${callerSymbol}: ${exactHits.length} definitions considered`,
+						);
 				} else if (request.file) {
 					const data = getImpactCone(graph, {
 						file: request.file,
@@ -364,13 +437,19 @@ export async function routeRetrieval(
 	if (mode === 'lexical' || !graphHit) {
 		fallbackReason =
 			mode === 'lexical' ? null : (graphUnavailableReason ?? 'graph_miss');
-		const data = await lexical(literalFrom(request.question, request));
+		const data = await lexical({
+			query: literalFrom(request.question, request),
+			files: requestedFiles ?? (request.file ? [request.file] : undefined),
+			routePath: request.routePath,
+			method: request.method,
+		});
 		actions.push('lexical_search');
 		candidates.push({ action: 'lexical_search', data });
 		if (data.warning) warnings.push(data.warning);
 	}
 	const maxTokens = request.maxTokens ?? 4000;
 	const packed = packContext(candidates, maxTokens);
+	if (packed.warning) warnings.push(packed.warning);
 	return {
 		mode,
 		algorithm: MODE_METADATA[mode].algorithm,

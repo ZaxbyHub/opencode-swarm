@@ -395,6 +395,15 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		alarm: 'model_limit_fallback',
 		transition: 'raised',
 	},
+	retrieval_routed: {
+		sessionId: 'sess-1',
+		mode: 'lexical',
+		graph_hit: false,
+		fallback_reason: null,
+		token_budget_requested: 4000,
+		token_budget_used: 12,
+		omitted_context_count: 0,
+	},
 };
 
 describe('envelope roundtrip — AC1 positive', () => {

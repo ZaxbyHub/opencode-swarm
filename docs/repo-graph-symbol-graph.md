@@ -751,6 +751,13 @@ requested/used/omitted budget counters. The `semantic` mode is an intent class
 implemented by the zero-embedding `fuzzy_graph` algorithm (vocabulary expansion,
 IDF, and PageRank); it never claims embedding similarity.
 
+Explicit target hints intentionally take precedence over natural-language cues,
+except for an exact-string cue, which always selects literal verification. Route/entity
+hints otherwise select security packs, change/file scope selects hybrid or test packs,
+and file/symbol targets select graph queries. This keeps a caller's concrete scope
+deterministic while ensuring exact-string requests cannot be satisfied by unrelated
+graph evidence.
+
 Fixture patterns (module path, lowercase): a `fixtures?` / `__fixtures__` /
 `mocks?` / `factories` path segment, or a basename containing `fixture` /
 `mock` / `factory` / `test-utils` / `test-helpers` / `testing-utils`.
@@ -774,6 +781,11 @@ Fixture patterns (module path, lowercase): a `fixtures?` / `__fixtures__` /
   claim security proofs, and mirror the ontology extractor's conservative
   posture. `impact_cone` is unchanged; deeper route/data/test views are these
   dedicated actions.
+- `max_tokens` bounds packed retrieval context only. Router metadata is returned
+  alongside that context and is accounted for separately by
+  `metadataOverheadTokens`; when the requested context budget is too small to
+  carry even a compact action marker, the response is intentionally empty and
+  includes `context_budget_too_small` rather than silently implying coverage.
 - The unguarded-route advisory is a FILE-level heuristic: the auth/validation
   sweep covers the whole handler file, so a guarded sibling route suppresses
   the advisory for every route in that file — and absence of the advisory is

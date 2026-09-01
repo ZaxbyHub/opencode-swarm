@@ -940,7 +940,7 @@ export const search: ToolDefinition = createSwarmTool({
 				workspace: directory,
 			});
 		} else {
-			result = await searchWorkspaceLiteral({
+			result = await _internals.fallbackSearch({
 				query,
 				mode,
 				include,

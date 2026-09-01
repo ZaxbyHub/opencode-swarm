@@ -730,10 +730,11 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 					maxTokens: a.max_tokens,
 					topN: a.top_n,
 				},
-				async (query) => {
+				async ({ query, files }) => {
 					const searchResult = await searchWorkspaceLiteral({
 						query,
 						mode: 'literal',
+						include: files?.join(','),
 						maxResults: Math.min(a.top_n ?? 25, 100),
 						maxLines: 200,
 						workspace: directory,
@@ -743,14 +744,17 @@ export const repo_map: ReturnType<typeof createSwarmTool> = createSwarmTool({
 				unavailable,
 			);
 			try {
-				_internals.telemetry.retrievalRouted(_ctx?.sessionID ?? 'unknown', {
-					mode: result.mode,
-					graph_hit: result.graphHit,
-					fallback_reason: result.fallbackReason,
-					token_budget_requested: result.budget.requestedTokens,
-					token_budget_used: result.budget.usedTokens,
-					omitted_context_count: result.budget.omittedContextCount,
-				});
+				const sessionID = _ctx?.sessionID?.trim();
+				if (sessionID) {
+					_internals.telemetry.retrievalRouted(sessionID, {
+						mode: result.mode,
+						graph_hit: result.graphHit,
+						fallback_reason: result.fallbackReason,
+						token_budget_requested: result.budget.requestedTokens,
+						token_budget_used: result.budget.usedTokens,
+						omitted_context_count: result.budget.omittedContextCount,
+					});
+				}
 			} catch {
 				// Telemetry is diagnostic and must never make retrieval fail.
 			}

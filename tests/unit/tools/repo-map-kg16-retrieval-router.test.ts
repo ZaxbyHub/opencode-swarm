@@ -79,12 +79,24 @@ describe('repo_map retrieve production path', () => {
 		expect(parse(await call({ action: 'build' })).success).toBe(true);
 
 		const requests = [
-			{ question: 'Find exact string `SWARM_FOO`' },
-			{ question: 'Who calls createSession?', symbol: 'createSession' },
-			{ question: 'Find code related to onboarding' },
-			{ question: 'Check auth risk', file: 'src/login.ts' },
-			{ question: 'Add tests for this change', file: 'src/login.ts' },
-			{ question: 'Where is login implemented?' },
+			{ question: 'Find exact string `SWARM_FOO`', expected: 'lexical' },
+			{
+				question: 'Who calls createSession?',
+				symbol: 'createSession',
+				expected: 'graph',
+			},
+			{ question: 'Find code related to onboarding', expected: 'semantic' },
+			{
+				question: 'Check auth risk',
+				file: 'src/login.ts',
+				expected: 'security',
+			},
+			{
+				question: 'Add tests for this change',
+				file: 'src/login.ts',
+				expected: 'test',
+			},
+			{ question: 'Where is login implemented?', expected: 'hybrid' },
 		];
 		const seen = new Set<string>();
 		for (const request of requests) {
@@ -92,6 +104,17 @@ describe('repo_map retrieve production path', () => {
 				await call({ action: 'retrieve', max_tokens: 800, ...request }, 'kg16'),
 			);
 			expect(result.success).toBe(true);
+			expect(result.mode).toBe(request.expected);
+			expect(result.algorithm).toBe(
+				{
+					lexical: 'literal',
+					graph: 'graph',
+					semantic: 'fuzzy_graph',
+					security: 'graph_packs',
+					test: 'graph_packs',
+					hybrid: 'mixed',
+				}[request.expected],
+			);
 			seen.add(result.mode);
 			expect(result.actions.length).toBeGreaterThan(0);
 			expect(result.explanation.length).toBeGreaterThan(0);
@@ -102,6 +125,18 @@ describe('repo_map retrieve production path', () => {
 			).toBeLessThanOrEqual(800 + result.budget.metadataOverheadTokens);
 		}
 		expect(seen).toEqual(new Set(RETRIEVAL_MODES));
+		const noHintSecurity = parse(
+			await call({ action: 'retrieve', question: 'Check auth risk' }),
+		);
+		expect(noHintSecurity.actions).toContain('preflight_packet');
+		const genericHybrid = parse(
+			await call({
+				action: 'retrieve',
+				question: 'Where is login implemented?',
+			}),
+		);
+		expect(genericHybrid.actions).toContain('ask');
+		expect(genericHybrid.actions).toContain('graph_explain');
 
 		const bounded = parse(
 			await call({
@@ -333,8 +368,16 @@ describe('repo_map retrieve production path', () => {
 			await call({ action: 'retrieve', question: 'Find exact string `TOKEN`' }),
 		);
 		expect(result.success).toBe(true);
+		expect(events).toHaveLength(0);
+		const sessionResult = parse(
+			await call(
+				{ action: 'retrieve', question: 'Find exact string `TOKEN`' },
+				'kg16-telemetry',
+			),
+		);
+		expect(sessionResult.success).toBe(true);
 		expect(events).toHaveLength(1);
-		expect(events[0]?.sessionId).toBe('unknown');
+		expect(events[0]?.sessionId).toBe('kg16-telemetry');
 		const serialized = JSON.stringify(events[0]);
 		for (const forbidden of [
 			'TOKEN',
@@ -346,6 +389,28 @@ describe('repo_map retrieve production path', () => {
 		])
 			expect(serialized).not.toContain(forbidden);
 
+		events.length = 0;
+		expect(parse(await call({ action: 'build' })).success).toBe(true);
+		for (const question of [
+			'Find exact string `TOKEN`',
+			'Who calls TOKEN?',
+			'Find code related to TOKEN',
+			'Check auth risk',
+			'Add tests for TOKEN',
+			'Where is TOKEN implemented?',
+		]) {
+			const routed = parse(
+				await call({ action: 'retrieve', question }, 'kg16-telemetry'),
+			);
+			expect(routed.success).toBe(true);
+		}
+		expect(events).toHaveLength(6);
+		for (const event of events) {
+			const serializedEvent = JSON.stringify(event);
+			for (const forbidden of ['TOKEN', 'source.ts', 'question', 'result'])
+				expect(serializedEvent).not.toContain(forbidden);
+		}
+
 		repoMapInternals.telemetry.retrievalRouted = mock(() => {
 			throw new Error('telemetry unavailable');
 		});
@@ -353,5 +418,73 @@ describe('repo_map retrieve production path', () => {
 			await call({ action: 'retrieve', question: 'Find exact string `TOKEN`' }),
 		);
 		expect(failOpen.success).toBe(true);
+	});
+
+	test('preserves fallback file scope and mixed quote delimiters', async () => {
+		tmp = canonicalMkdtemp('repo-map-kg16-hints-');
+		fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+		fs.writeFileSync(
+			path.join(tmp, 'src', 'target.ts'),
+			"export const target = 'needle';\n",
+		);
+		fs.writeFileSync(
+			path.join(tmp, 'src', 'other.ts'),
+			"export const target = 'needle';\n",
+		);
+		const scoped = parse(
+			await call({
+				action: 'retrieve',
+				question: 'Find exact string `needle`',
+				files: ['src/target.ts'],
+			}),
+		);
+		expect(scoped.success).toBe(true);
+		const lexical = scoped.context.find(
+			(entry: Record<string, unknown>) => entry.action === 'lexical_search',
+		);
+		expect(
+			lexical.data.matches.every(
+				(match: Record<string, unknown>) => match.file === 'src/target.ts',
+			),
+		).toBe(true);
+		expect(classifyRetrieval('Find user\'s value in "needle"').mode).toBe(
+			'lexical',
+		);
+	});
+
+	test('infers caller symbols and considers duplicate definitions', async () => {
+		tmp = canonicalMkdtemp('repo-map-kg16-callers-');
+		fs.mkdirSync(path.join(tmp, 'src'), { recursive: true });
+		fs.writeFileSync(
+			path.join(tmp, 'src', 'a.ts'),
+			'export function target() {}\n',
+		);
+		fs.writeFileSync(
+			path.join(tmp, 'src', 'b.ts'),
+			'export function target() {}\n',
+		);
+		fs.writeFileSync(
+			path.join(tmp, 'src', 'caller-a.ts'),
+			"import { target } from './a'; target();\n",
+		);
+		fs.writeFileSync(
+			path.join(tmp, 'src', 'caller-b.ts'),
+			"import { target } from './b'; target();\n",
+		);
+		expect(parse(await call({ action: 'build' })).success).toBe(true);
+		const result = parse(
+			await call({
+				action: 'retrieve',
+				question: 'Which functions invoke target?',
+			}),
+		);
+		expect(result.success).toBe(true);
+		expect(result.actions).toContain('callers');
+		expect(result.graphHit).toBe(true);
+		expect(
+			result.warnings.some((warning: string) =>
+				warning.includes('ambiguous symbol'),
+			),
+		).toBe(true);
 	});
 });

@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { searchWorkspaceLiteral } from '../../../src/tools/search';
+import {
+	_internals,
+	search,
+	searchWorkspaceLiteral,
+} from '../../../src/tools/search';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let tmp = '';
@@ -28,5 +32,35 @@ describe('bounded Node literal-search fallback', () => {
 		expect(result.total).toBe(1);
 		expect(result.matches).toHaveLength(1);
 		expect(result.matches?.[0]?.file).toBe('source.ts');
+	});
+
+	test('routes the tool fallback through the injectable seam', async () => {
+		tmp = canonicalMkdtemp('search-fallback-seam-');
+		const original = _internals.fallbackSearch;
+		const originalResolve = _internals.resolveRipgrepBinary;
+		let called = false;
+		_internals.resolveRipgrepBinary = () => null;
+		_internals.fallbackSearch = async (opts) => {
+			called = true;
+			return original(opts);
+		};
+		try {
+			const result = await (
+				search as unknown as {
+					execute: (
+						args: Record<string, unknown>,
+						directory: string,
+					) => Promise<string>;
+				}
+			).execute(
+				{ query: 'SECRET', mode: 'literal', max_results: 10, max_lines: 100 },
+				tmp,
+			);
+			expect(JSON.parse(result).engine).toBe('fallback');
+			expect(called).toBe(true);
+		} finally {
+			_internals.fallbackSearch = original;
+			_internals.resolveRipgrepBinary = originalResolve;
+		}
 	});
 });
