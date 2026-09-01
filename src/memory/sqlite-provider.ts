@@ -62,6 +62,13 @@ import {
 	validateOutcomeEvent,
 	validateOutcomeEventForMemory,
 } from './outcome-events';
+import {
+	asStoredProposalValidationError,
+	buildProposalLoadDiagnostics,
+	type ProposalLoadIssue,
+	parseLoadedProposal,
+	proposalLoadIssueFromId,
+} from './proposal-load';
 import type {
 	MemoryCompactOptions,
 	MemoryCompactResult,
@@ -79,7 +86,10 @@ import {
 	computeMemoryCohortFingerprint,
 } from './redaction';
 import {
-	canonicalMemoryIds,
+	MAX_RELATIONS_PER_MEMORY,
+	RELATED_RECALL_FANOUT,
+} from './relation-constants';
+import {
 	expandRelatedRecallItems,
 	stripDerivedRelations,
 	validateMergeParticipants,
@@ -840,9 +850,16 @@ export class SQLiteMemoryProvider
 			await this.migrateLegacyJsonlIfNeeded();
 			const memoryLoad = this.loadMemories();
 			const proposalLoad = this.loadProposals();
+			// Replay is intentionally idempotent self-healing: rebuild
+			// `memory_relations` from the canonical proposal rows on every fresh open.
+			// `writeProposal` revalidates merge participants and skips invalid stored
+			// merges, so replay/import fail closed without deleting proposal rows.
 			for (const proposal of proposalLoad.records) {
 				if (proposal.operation === 'merge' && proposal.status === 'applied') {
-					this.writeProposal(proposal);
+					this.writeProposal(proposal, {
+						records: memoryLoad.records,
+						proposals: proposalLoad.records,
+					});
 				}
 			}
 			this.memories = new Map(
@@ -860,11 +877,20 @@ export class SQLiteMemoryProvider
 				);
 			}
 			if (proposalLoad.invalidCount > 0) {
-				await this.event(
-					'invalid_load',
-					'memory_proposals',
-					`${proposalLoad.invalidCount} invalid SQLite proposal row(s) skipped`,
-				);
+				try {
+					this.insertEvent(
+						'invalid_load',
+						'memory_proposals',
+						`${proposalLoad.invalidCount} invalid SQLite proposal row(s) skipped`,
+						JSON.stringify(
+							buildProposalLoadDiagnostics(proposalLoad.invalidRows),
+						),
+					);
+				} catch (error) {
+					warn('[memory] failed to persist invalid SQLite proposal load event', {
+						reason: error instanceof Error ? error.message : String(error),
+					});
+				}
 			}
 		} catch (err) {
 			try {
@@ -1400,7 +1426,10 @@ export class SQLiteMemoryProvider
 		const sourceById = new Map(sources.map((record) => [record.id, record]));
 		const relatedRecords: MemoryRecord[] = [];
 		for (const source of sources) {
-			for (const relation of source.relations ?? []) {
+			for (const relation of (source.relations ?? []).slice(
+				0,
+				RELATED_RECALL_FANOUT,
+			)) {
 				const record = this.readMemoryById(relation.memoryId);
 				if (record) relatedRecords.push(record);
 			}
@@ -2658,6 +2687,7 @@ export class SQLiteMemoryProvider
 	private loadProposals(): {
 		records: MemoryProposal[];
 		invalidCount: number;
+		invalidRows: ProposalLoadIssue[];
 	} {
 		const rows = this.requireDb()
 			.query<ProposalRow, []>(
@@ -2665,21 +2695,21 @@ export class SQLiteMemoryProvider
 			)
 			.all();
 		const records: MemoryProposal[] = [];
+		const invalidRows: ProposalLoadIssue[] = [];
 		let invalidCount = 0;
 		for (const row of rows) {
 			try {
-				const proposal = validateMemoryProposal(JSON.parse(row.proposal_json));
-				if (proposal.proposedRecord) {
-					validateMemoryRecordRules(proposal.proposedRecord, {
-						rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
-					});
-				}
+				const proposal = parseLoadedProposal(
+					JSON.parse(row.proposal_json),
+					this.config.redaction.rejectDurableSecrets,
+				);
 				records.push(proposal);
-			} catch {
+			} catch (error) {
 				invalidCount++;
+				invalidRows.push(proposalLoadIssueFromId(row.id, error));
 			}
 		}
-		return { records, invalidCount };
+		return { records, invalidCount, invalidRows };
 	}
 
 	private refreshProposalsFromStorage(): MemoryProposal[] {
@@ -2705,10 +2735,12 @@ export class SQLiteMemoryProvider
 		);
 		try {
 			return records.map(({ relations: _derived, ...record }) => {
-				const relations = query.all(record.id, 32).map((row) => ({
-					memoryId: row.target_id,
-					type: 'merged_with' as const,
-				}));
+				const relations = query
+					.all(record.id, MAX_RELATIONS_PER_MEMORY)
+					.map((row) => ({
+						memoryId: row.target_id,
+						type: 'merged_with' as const,
+					}));
 				return relations.length ? { ...record, relations } : record;
 			});
 		} finally {
@@ -3073,7 +3105,13 @@ export class SQLiteMemoryProvider
 		}
 	}
 
-	private writeProposal(proposal: MemoryProposal): void {
+	private writeProposal(
+		proposal: MemoryProposal,
+		validationContext?: {
+			records: readonly MemoryRecord[];
+			proposals: readonly MemoryProposal[];
+		},
+	): void {
 		this.requireDb().run(
 			`INSERT OR REPLACE INTO memory_proposals (
 				id,
@@ -3089,7 +3127,25 @@ export class SQLiteMemoryProvider
 			],
 		);
 		if (proposal.operation === 'merge' && proposal.status === 'applied') {
-			const ids = canonicalMemoryIds(proposal.relatedMemoryIds ?? []);
+			this.requireDb().run(
+				'DELETE FROM memory_relations WHERE proposal_id = ?',
+				[proposal.id],
+			);
+			let ids: string[];
+			try {
+				ids = validateMergeParticipants(
+					proposal.relatedMemoryIds ?? [],
+					validationContext?.records ?? this.loadMemories().records,
+					validationContext?.proposals ?? this.loadProposals().records,
+					proposal.reviewedAt ? new Date(proposal.reviewedAt) : new Date(),
+				);
+			} catch (error) {
+				warn('Skipping invalid applied merge during relation materialization', {
+					proposalId: proposal.id,
+					reason: error instanceof Error ? error.message : String(error),
+				});
+				return;
+			}
 			const existingIds = new Set(
 				ids.filter((id) =>
 					Boolean(
@@ -3262,14 +3318,17 @@ export class SQLiteMemoryProvider
 		if (!row) {
 			throw new MemoryValidationError('memory proposal was not found');
 		}
-		const proposal = validateMemoryProposal(JSON.parse(row.proposal_json));
+		let proposal: MemoryProposal;
+		try {
+			proposal = parseLoadedProposal(
+				JSON.parse(row.proposal_json),
+				this.config.redaction.rejectDurableSecrets,
+			);
+		} catch (error) {
+			throw asStoredProposalValidationError(row.id, error);
+		}
 		if (proposal.status !== 'pending') {
 			throw new MemoryValidationError('memory proposal is not pending');
-		}
-		if (proposal.proposedRecord) {
-			validateMemoryRecordRules(proposal.proposedRecord, {
-				rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
-			});
 		}
 		return proposal;
 	}

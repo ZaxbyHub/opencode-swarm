@@ -1,4 +1,16 @@
 import { MemoryValidationError } from './errors';
+
+export {
+	MAX_MERGE_PARTICIPANTS,
+	MAX_RELATIONS_PER_MEMORY,
+	RELATED_RECALL_FANOUT,
+} from './relation-constants';
+
+import {
+	MAX_MERGE_PARTICIPANTS,
+	MAX_RELATIONS_PER_MEMORY,
+	RELATED_RECALL_FANOUT,
+} from './relation-constants';
 import { isExpired, stableScopeKey } from './schema';
 import { scoreMemoryRecord } from './scoring';
 import type {
@@ -8,10 +20,6 @@ import type {
 	RecallRequest,
 	RecallResultItem,
 } from './types';
-
-export const MAX_MERGE_PARTICIPANTS = 8;
-export const MAX_RELATIONS_PER_MEMORY = 32;
-export const RELATED_RECALL_FANOUT = 2;
 
 export function canonicalMemoryIds(ids: readonly string[]): string[] {
 	return Array.from(new Set(ids)).sort();
@@ -121,35 +129,47 @@ export function expandRelatedRecallItems(
 		.filter((item) => !item.explored)
 		.slice(0, request.maxItems);
 	const explored = items.filter((item) => item.explored);
-	if (normal.length >= request.maxItems) return [...normal, ...explored];
-	const byId = new Map(allRecords.map((record) => [record.id, record]));
-	const selected = new Set(normal.map((item) => item.record.id));
-	for (const source of normal) {
-		const sourceRecord = byId.get(source.record.id) ?? source.record;
-		let addedForSource = 0;
-		for (const relation of sourceRecord.relations ?? []) {
-			if (
-				normal.length >= request.maxItems ||
-				addedForSource >= RELATED_RECALL_FANOUT
-			) {
-				break;
+	if (normal.length < request.maxItems) {
+		const byId = new Map(allRecords.map((record) => [record.id, record]));
+		// Expansion is intentionally one hop from the direct recall set. Keep the
+		// source list immutable so relation hits cannot recursively become sources,
+		// and reserve explored IDs so exploration never produces duplicate results.
+		const selected = new Set(
+			[...normal, ...explored].map((item) => item.record.id),
+		);
+		const directSources = [...normal];
+		for (const source of directSources) {
+			const sourceRecord = byId.get(source.record.id) ?? source.record;
+			let addedForSource = 0;
+			for (const relation of sourceRecord.relations ?? []) {
+				if (
+					normal.length >= request.maxItems ||
+					addedForSource >= RELATED_RECALL_FANOUT
+				) {
+					break;
+				}
+				if (selected.has(relation.memoryId)) continue;
+				const record = byId.get(relation.memoryId);
+				if (!record) continue;
+				const scored = scoreMemoryRecord(record, {
+					...request,
+					requireQuerySignal: false,
+				});
+				if (!scored) continue;
+				normal.push({
+					...scored,
+					reason: `${scored.reason}, relation=${relation.type}, related_from=${source.record.id}`,
+					relation: { type: relation.type, sourceMemoryId: source.record.id },
+				});
+				selected.add(record.id);
+				addedForSource++;
 			}
-			if (selected.has(relation.memoryId)) continue;
-			const record = byId.get(relation.memoryId);
-			if (!record) continue;
-			const scored = scoreMemoryRecord(record, {
-				...request,
-				requireQuerySignal: false,
-			});
-			if (!scored) continue;
-			normal.push({
-				...scored,
-				reason: `${scored.reason}, relation=${relation.type}, related_from=${source.record.id}`,
-				relation: { type: relation.type, sourceMemoryId: source.record.id },
-			});
-			selected.add(record.id);
-			addedForSource++;
 		}
 	}
-	return [...normal, ...explored];
+	const seen = new Set<string>();
+	return [...normal, ...explored].filter((item) => {
+		if (seen.has(item.record.id)) return false;
+		seen.add(item.record.id);
+		return true;
+	});
 }

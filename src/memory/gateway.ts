@@ -27,6 +27,7 @@ import type {
 } from './provider';
 import { getOrCreateProviderForRoot } from './provider-pool';
 import { computeRedactionPolicyVersion, redactSecrets } from './redaction';
+import { MAX_MERGE_PARTICIPANTS } from './relation-constants';
 import { canonicalMemoryIds } from './relations';
 import {
 	computeMemoryContentHash,
@@ -378,10 +379,10 @@ export class MemoryGateway {
 		if (
 			input.operation === 'merge' &&
 			((relatedMemoryIds ?? []).length < 2 ||
-				(relatedMemoryIds ?? []).length > 8)
+				(relatedMemoryIds ?? []).length > MAX_MERGE_PARTICIPANTS)
 		) {
 			throw new MemoryValidationError(
-				'merge proposals require 2-8 distinct relatedMemoryIds',
+				`merge proposals require 2-${MAX_MERGE_PARTICIPANTS} distinct relatedMemoryIds`,
 			);
 		}
 

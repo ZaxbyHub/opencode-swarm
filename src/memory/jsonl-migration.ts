@@ -7,7 +7,11 @@ import {
 	type MemoryOutcomeEvent,
 	validateOutcomeEvent,
 } from './outcome-events';
-import { validateMemoryProposal, validateMemoryRecordRules } from './schema';
+import {
+	parseLoadedProposal,
+	proposalLoadIssueFromValue,
+} from './proposal-load';
+import { validateMemoryRecordRules } from './schema';
 import type { MemoryProposal, MemoryRecord } from './types';
 
 export const LEGACY_JSONL_MIGRATION_VERSION = 2;
@@ -394,18 +398,17 @@ async function readProposalJsonl(
 	const invalidRows: JsonlInvalidRow[] = [];
 	for (const row of rows.rows) {
 		try {
-			const proposal = validateMemoryProposal(row.value as MemoryProposal);
-			if (proposal.proposedRecord) {
-				validateMemoryRecordRules(proposal.proposedRecord, {
-					rejectDurableSecrets: config.redaction.rejectDurableSecrets,
-				});
-			}
+			const proposal = parseLoadedProposal(
+				row.value,
+				config.redaction.rejectDurableSecrets,
+			);
 			records.push(proposal);
 		} catch (err) {
+			const issue = proposalLoadIssueFromValue(row.value, err);
 			invalidRows.push({
 				file: 'proposals.jsonl',
 				line: row.line,
-				error: err instanceof Error ? err.message : String(err),
+				error: issue.reason,
 			});
 		}
 	}
