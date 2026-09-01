@@ -66,7 +66,7 @@ describe('reducer: authorization bindings fail closed', () => {
 });
 
 describe('reducer: armed recovery', () => {
-	test('an exact-binding recovery cancels dimensions, audits, and invalidates authorization', () => {
+	test('an exact-binding recovery cancels dimensions and persists', () => {
 		const result = reducePrReviewEvent(BASE, {
 			type: 'armed_recovery_requested',
 			binding: VALID,
@@ -81,13 +81,10 @@ describe('reducer: armed recovery', () => {
 			source: 'armed_recovery',
 		});
 		expect(result.state.prReviewDimensionCancellations?.security).toBeDefined();
-		expect(result.effects).toContainEqual({
-			kind: 'append_audit_event',
-			code: 'armed_recovery_executed',
-		});
-		expect(result.effects).toContainEqual({
-			kind: 'invalidate_publication_authorization',
-		});
+		// Phase 8b review: the audited executor (recoverArmedPrWorkflow) owns
+		// the audit event and the publication-authorization invalidation;
+		// this transition owns the cancellations + persistence.
+		expect(result.effects).toEqual([{ kind: 'persist_state' }]);
 	});
 
 	test('a stale-binding recovery is rejected without any cancellation', () => {

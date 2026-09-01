@@ -119,14 +119,17 @@ export type PrReviewEffect =
 			code: string;
 			boundedDetail?: string | undefined;
 	  }
-	| {
-			kind: 'append_audit_event';
-			code: string;
-			boundedDetail?: string | undefined;
-	  }
-	| { kind: 'block_dispatch'; reason: 'circuit_open' | 'probe_in_flight' }
-	| { kind: 'invalidate_publication_authorization' }
-	| { kind: 'clear_resilience_evidence' };
+	| { kind: 'block_dispatch'; reason: 'circuit_open' | 'probe_in_flight' };
+
+/**
+ * Effect kinds map to executors that exist in production (issue #2385
+ * Phase 8b review): `persist_state` is executed by the gate through the
+ * persistence CAS write; `settle_delegation` describes the settlement the
+ * dispatch/collect adapters perform via `pending-delegations.ts`;
+ * `emit_diagnostic` describes the collect observer's bounded diagnostics
+ * channel; `block_dispatch` describes the circuit-open admission refusal.
+ * A kind with no executor is not emitted and not declared.
+ */
 
 // ---------------------------------------------------------------------------
 // Events (closed union)
@@ -290,7 +293,6 @@ export type PrReviewTransitionRejectionCode =
 	| 'client_absence_not_terminal_evidence'
 	| 'parser_failure_not_provider_signal'
 	| 'stale_observation_not_provider_signal'
-	| 'lane_already_sampled'
 	| 'live_lane_blocks_coverage'
 	| 'partial_coverage_cannot_approve'
 	| 'no_coverage_cannot_approve'

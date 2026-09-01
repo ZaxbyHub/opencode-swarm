@@ -179,10 +179,9 @@ describe('reducer: resilience config transitions (live disable / clean re-enable
 		expect(result.status).toBe('applied');
 		if (result.status !== 'applied') return;
 		expect(result.state.prReviewResilience?.policy.enabled).toBe(false);
-		expect(result.effects).toContainEqual({
-			kind: 'append_audit_event',
-			code: 'resilience_disabled',
-		});
+		// Phase 8b review: the persisted policy-disabled marker IS the
+		// detection anchor; no separate audit-event effect exists.
+		expect(result.effects).toEqual([{ kind: 'persist_state' }]);
 	});
 
 	test('disable is idempotent (already disabled = no new write)', () => {
@@ -245,9 +244,9 @@ describe('reducer: resilience config transitions (live disable / clean re-enable
 			circuit && 'version' in circuit ? circuit.evidenceWaterline : null,
 		).toBe('1970-01-01T00:00:10.000Z');
 		expect(resilience?.attempts).toEqual([]);
-		expect(result.effects).toContainEqual({
-			kind: 'clear_resilience_evidence',
-		});
+		// The waterlined reset record IS the evidence clear (no separate
+		// effect kind — Phase 8b review).
+		expect(result.effects).toEqual([{ kind: 'persist_state' }]);
 	});
 });
 

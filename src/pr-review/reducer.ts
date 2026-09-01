@@ -21,10 +21,21 @@
  * - structured receipt → downgrade by later transcript parsing
  *
  * The owning gate and `dispatch-lanes` are orchestration adapters: they build
- * events from real I/O, apply the returned state, execute the returned
- * effects (persistence through `persistence.ts`, delegation settlement
- * through `pending-delegations.ts`), and map typed rejections to the
- * operator-facing BLOCKED messages.
+ * events from real I/O, apply the returned state, and map typed rejections to
+ * the operator-facing BLOCKED messages. Effects are the transition's OUTPUT
+ * CONTRACT — every effect kind maps to an executor that exists in production
+ * (see `PrReviewEffect` in types.ts): the gate executes `persist_state`
+ * through the persistence CAS write; `settle_delegation` describes the
+ * delegation settlement the dispatch/collect adapters perform through
+ * `pending-delegations.ts`; `emit_diagnostic` describes the collect
+ * observer's bounded diagnostics channel; `block_dispatch` describes the
+ * circuit-open admission refusal. No effect kind is emitted without a real
+ * executor (reviewer finding 1, issue #2385 Phase 8b).
+ *
+ * Probe outcomes other than an admission rollback are processed by the
+ * machine on the NEXT staged admission: the gate feeds the recorded probe's
+ * observation into `advancePrReviewCircuit` (`probeObservationForCircuit`),
+ * which is the design's single advance-per-admission cadence.
  */
 
 import {
@@ -394,10 +405,10 @@ export function reducePrReviewEvent(
 							},
 						},
 					},
-					[
-						{ kind: 'persist_state' },
-						{ kind: 'append_audit_event', code: 'resilience_disabled' },
-					],
+					// The persisted policy-disabled marker IS the #2382
+					// detection anchor (the pre-reducer code emitted no core
+					// event here).
+					[{ kind: 'persist_state' }],
 				);
 			}
 			// Re-enable: fresh v2 CLOSED generation with an evidence waterline
@@ -416,7 +427,10 @@ export function reducePrReviewEvent(
 						}),
 					},
 				},
-				[{ kind: 'persist_state' }, { kind: 'clear_resilience_evidence' }],
+				// The reset record itself (fresh generation + evidence
+				// waterline) IS the evidence clear — there is no separate
+				// evidence store.
+				[{ kind: 'persist_state' }],
 			);
 		}
 
@@ -449,16 +463,7 @@ export function reducePrReviewEvent(
 					);
 				}
 			}
-			return applied(state, [
-				{ kind: 'persist_state' },
-				{
-					kind: 'append_audit_event',
-					code: `coverage_${settlement.kind.toLowerCase()}`,
-					boundedDetail: settlement.unresolvedDimensions
-						.map((entry) => `${entry.dimension}:${entry.terminalState}`)
-						.join(','),
-				},
-			]);
+			return applied(state, [{ kind: 'persist_state' }]);
 		}
 
 		case 'critic_result_recorded': {
@@ -519,13 +524,13 @@ export function reducePrReviewEvent(
 						source: 'armed_recovery',
 					};
 				}
+				// The audited armed-recovery executor (recoverArmedPrWorkflow)
+				// owns the audit event and the publication-authorization
+				// invalidation; this transition owns the dimension
+				// cancellations and their persistence.
 				return applied(
 					{ ...state, prReviewDimensionCancellations: cancellations },
-					[
-						{ kind: 'persist_state' },
-						{ kind: 'append_audit_event', code: 'armed_recovery_executed' },
-						{ kind: 'invalidate_publication_authorization' },
-					],
+					[{ kind: 'persist_state' }],
 				);
 			}
 			return applied(state, [{ kind: 'persist_state' }]);

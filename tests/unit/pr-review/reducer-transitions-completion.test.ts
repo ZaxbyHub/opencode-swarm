@@ -127,7 +127,7 @@ describe('reducer: coverage finalization (N-of-6 truthfulness)', () => {
 		expect(result.rejection.code).toBe('no_coverage_cannot_approve');
 	});
 
-	test('finalization emits a bounded audit event naming unresolved dimensions', () => {
+	test('finalization persists; the durable disclosure carries the unresolved list', () => {
 		const result = reducePrReviewEvent(BASE, {
 			type: 'coverage_finalization_requested',
 			settlement: settlement({
@@ -137,11 +137,11 @@ describe('reducer: coverage finalization (N-of-6 truthfulness)', () => {
 		});
 		expect(result.status).toBe('applied');
 		if (result.status !== 'applied') return;
-		const audit = result.effects.find((e) => e.kind === 'append_audit_event');
-		expect(audit).toMatchObject({
-			code: 'coverage_partial',
-			boundedDetail: 'tests:FAILED',
-		});
+		// Phase 8b review: the unresolved-dimension disclosure is the
+		// completion module's durable artifact (coverage-disclosure.json),
+		// written by the gate when it executes persist_state — not an
+		// audit-event effect.
+		expect(result.effects).toEqual([{ kind: 'persist_state' }]);
 	});
 });
 
