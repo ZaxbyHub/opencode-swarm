@@ -458,7 +458,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/pr-workflow-gate.ts',
 		],
 		writerCitations: [
-			'src/background/pending-delegations.ts:2441 appendRecord — appendFileSync :2446 (20 mutation entry points :2600-4708)',
+			'src/background/pending-delegations.ts:2441 appendRecord — appendFileSync :2446 (20 mutation entry points :2600-4719)',
 			'src/background/pending-delegations.ts:1090 writeDurableFileSync — fsync+rename-with-retry for checkpoint/manifest/rolled-tail (:2246-2287)',
 		],
 		readerCitations: [
