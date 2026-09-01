@@ -43,11 +43,14 @@ interface EcosystemConfig {
 	repoDefinedScripts?: string[]; // Scripts that can be defined in repo config
 }
 
+const SUPPORTED_NODE_PACKAGE_MANAGERS = ['bun', 'npm', 'pnpm', 'yarn'] as const;
+const MAX_PACKAGE_MANAGER_EVIDENCE_CHARS = 120;
+
 const ECOSYSTEMS: EcosystemConfig[] = [
 	{
 		ecosystem: 'node',
 		buildFiles: ['package.json'],
-		toolchainCommands: ['bun', 'npm', 'pnpm', 'yarn'],
+		toolchainCommands: [...SUPPORTED_NODE_PACKAGE_MANAGERS],
 		commands: [
 			{ command: 'npm run build', priority: 30 },
 			{ command: 'npm run typecheck', priority: 20 },
@@ -257,6 +260,58 @@ function findBuildFiles(workingDir: string, patterns: string[]): string | null {
 	return null;
 }
 
+function sanitizeEvidenceText(raw: string, maxChars: number): string {
+	let withoutControls = '';
+	for (const char of raw) {
+		const code = char.charCodeAt(0);
+		withoutControls += code < 32 || code === 127 ? ' ' : char;
+	}
+	const normalized = withoutControls.replace(/\s+/g, ' ').trim();
+	if (!normalized) return '(empty)';
+	if (normalized.length <= maxChars) return normalized;
+	if (maxChars <= 3) return normalized.slice(0, maxChars);
+	return `${normalized.slice(0, maxChars - 3)}...`;
+}
+
+function sanitizeRequiredCommand(command: string): string | null {
+	const sanitized = sanitizeEvidenceText(command, 40);
+	return sanitized === '(empty)' ? null : sanitized;
+}
+
+function getBinaryFromCommand(command: string): string {
+	return command.trim().split(/\s+/)[0] ?? '';
+}
+
+function getProfileRequiredCommands(
+	commands: Array<{ cmd: string }>,
+): string[] {
+	const uniqueCommands = new Set<string>();
+	for (const command of commands) {
+		const binary = sanitizeRequiredCommand(getBinaryFromCommand(command.cmd));
+		if (binary) uniqueCommands.add(binary);
+	}
+	return Array.from(uniqueCommands);
+}
+
+function getNoMatchingBuildFilesReason(
+	profileId: string,
+	commands: Array<{ detectFile?: string }>,
+): string {
+	const detectFiles = Array.from(
+		new Set(
+			commands
+				.map((command) => command.detectFile?.trim())
+				.filter((detectFile): detectFile is string => Boolean(detectFile)),
+		),
+	);
+	if (detectFiles.length === 0) {
+		return `No matching build files for profile ${profileId}`;
+	}
+	return `No matching build files for profile ${profileId}: expected ${detectFiles.join(
+		' or ',
+	)}`;
+}
+
 /**
  * Get repo-defined build scripts from package.json
  */
@@ -293,7 +348,10 @@ function getRepoDefinedScripts(
 				? pkg.packageManager.trim()
 				: undefined;
 		const declared = rawPackageManager?.split('@')[0]?.trim();
-		const supported = ['bun', 'npm', 'pnpm', 'yarn'];
+		const supported = [...SUPPORTED_NODE_PACKAGE_MANAGERS];
+		const sanitizedDeclared = declared
+			? sanitizeRequiredCommand(declared)
+			: null;
 		const candidates = declared ? [declared] : supported;
 		if (
 			rawPackageManager !== undefined &&
@@ -305,8 +363,11 @@ function getRepoDefinedScripts(
 				skip: {
 					ecosystem: 'node',
 					code: 'environment_unavailable',
-					required_commands: declared ? [declared] : [],
-					reason: `Unsupported packageManager: ${rawPackageManager || '(empty)'}`,
+					required_commands: sanitizedDeclared ? [sanitizedDeclared] : [],
+					reason: `Unsupported packageManager: ${sanitizeEvidenceText(
+						rawPackageManager,
+						MAX_PACKAGE_MANAGER_EVIDENCE_CHARS,
+					)}`,
 				},
 			};
 		}
@@ -431,6 +492,8 @@ export const _internals: {
 	discoverBuildCommands: typeof discoverBuildCommands;
 	clearToolchainCache: typeof clearToolchainCache;
 	getEcosystems: typeof getEcosystems;
+	detectProjectLanguagesImpl: typeof detectProjectLanguages;
+	getLanguageProfileImpl: typeof LANGUAGE_REGISTRY.get;
 	spawnSyncImpl: typeof bunSpawnSync;
 } = {
 	isCommandAvailable,
@@ -438,6 +501,8 @@ export const _internals: {
 	discoverBuildCommands,
 	clearToolchainCache,
 	getEcosystems,
+	detectProjectLanguagesImpl: detectProjectLanguages,
+	getLanguageProfileImpl: LANGUAGE_REGISTRY.get.bind(LANGUAGE_REGISTRY),
 	spawnSyncImpl: bunSpawnSync,
 };
 
@@ -448,11 +513,12 @@ export async function discoverBuildCommandsFromProfiles(
 	const skipped: BuildDiscoverySkip[] = [];
 
 	// Get detected profiles sorted by tier (lower tier = higher confidence)
-	const detectedProfiles = await detectProjectLanguages(workingDir);
+	const detectedProfiles =
+		await _internals.detectProjectLanguagesImpl(workingDir);
 
 	for (const profile of detectedProfiles) {
 		// Get the full profile from registry
-		const fullProfile = LANGUAGE_REGISTRY.get(profile.id);
+		const fullProfile = _internals.getLanguageProfileImpl(profile.id);
 		if (!fullProfile) {
 			warn(
 				`[build-discovery] profile ${profile.id} not found in registry, skipping`,
@@ -465,16 +531,23 @@ export async function discoverBuildCommandsFromProfiles(
 			(a, b) => b.priority - a.priority,
 		);
 
+		const applicableCommands = sortedCommands.filter((cmd) => {
+			if (!cmd.detectFile) return true;
+			const detectFilePath = path.join(workingDir, cmd.detectFile);
+			return fs.existsSync(detectFilePath);
+		});
+
+		if (applicableCommands.length === 0) {
+			skipped.push({
+				ecosystem: fullProfile.id,
+				reason: getNoMatchingBuildFilesReason(fullProfile.id, sortedCommands),
+			});
+			continue;
+		}
+
 		// Find first available binary
 		let foundCommand = false;
-		for (const cmd of sortedCommands) {
-			// Skip command if its detectFile is specified but not present
-			if (cmd.detectFile) {
-				const detectFilePath = path.join(workingDir, cmd.detectFile);
-				if (!fs.existsSync(detectFilePath)) {
-					continue;
-				}
-			}
+		for (const cmd of applicableCommands) {
 			// Check if binary is available on PATH
 			// Derive binary name from first word of command string
 			const resolved = resolveLocalCommand(
@@ -495,12 +568,13 @@ export async function discoverBuildCommandsFromProfiles(
 		}
 
 		if (!foundCommand) {
-			const triedBinaries = sortedCommands
-				.map((c) => c.name || c.cmd.split(' ')[0])
-				.join(', ');
+			const requiredCommands = getProfileRequiredCommands(applicableCommands);
+			const triedBinaries = requiredCommands.join(', ');
 			const reason = `No binary available for profile ${fullProfile.id}: tried ${triedBinaries}`;
 			skipped.push({
 				ecosystem: fullProfile.id,
+				code: 'environment_unavailable',
+				required_commands: requiredCommands,
 				reason,
 			});
 			warn(

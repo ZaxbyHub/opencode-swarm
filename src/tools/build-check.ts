@@ -22,6 +22,8 @@ import { createSwarmTool } from './create-tool';
 export const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes
 export const MAX_OUTPUT_BYTES = 10 * 1024; // 10KB
 export const MAX_OUTPUT_LINES = 100;
+const NO_BUILD_FILES_DISCOVERED_REASON =
+	'No build commands discovered (no supported build files found)';
 
 // ============ Types ============
 
@@ -256,7 +258,7 @@ export async function runBuildCheck(
 				.map((s) => `${s.ecosystem}: ${s.reason}`)
 				.join('; ');
 		} else {
-			skipped_reason = 'No build commands discovered (no toolchains found)';
+			skipped_reason = NO_BUILD_FILES_DISCOVERED_REASON;
 		}
 	} else if (failedCount > 0) {
 		verdict = 'fail';

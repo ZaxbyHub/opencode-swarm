@@ -15,6 +15,7 @@ import * as path from 'node:path';
 import {
 	resolveLocalCommand,
 	resolveLocalNodeTool,
+	tokenizeCommand,
 } from '../build/command-resolution';
 import { isCommandAvailable } from '../build/discovery';
 import type {
@@ -54,47 +55,7 @@ function detectFileExists(dir: string, pattern: string): boolean {
 	}
 }
 
-/**
- * Tokenize a string command into an array. Splits on whitespace; respects
- * single and double quotes for argument grouping. Used to convert profile
- * profile `cmd` strings into
- * the array form `bunSpawn` expects.
- *
- * This deliberately does NOT support shell metacharacters (`;`, `&`, `|`,
- * `>`, `<`, backticks, `$()`) — backends with non-trivial commands must
- * override `buildTestCommand`/`selectBuildCommand` to return a custom
- * `cmd: string[]`. Splitting a profile string into words is a 90% case;
- * the 10% override their backend.
- */
-export function tokenizeCommand(cmd: string): string[] {
-	const out: string[] = [];
-	let buf = '';
-	let quote: '"' | "'" | null = null;
-	for (const ch of cmd) {
-		if (quote) {
-			if (ch === quote) {
-				quote = null;
-			} else {
-				buf += ch;
-			}
-			continue;
-		}
-		if (ch === '"' || ch === "'") {
-			quote = ch as '"' | "'";
-			continue;
-		}
-		if (ch === ' ' || ch === '\t') {
-			if (buf.length > 0) {
-				out.push(buf);
-				buf = '';
-			}
-			continue;
-		}
-		buf += ch;
-	}
-	if (buf.length > 0) out.push(buf);
-	return out;
-}
+export { tokenizeCommand } from '../build/command-resolution';
 
 /**
  * Default selectTestFramework: highest-priority framework whose detect
@@ -178,6 +139,8 @@ export function defaultBuildTestCommand(
 					'.swarm/cache/test-runner-vitest.json',
 				],
 				dir,
+				process.platform,
+				isCommandAvailable,
 			);
 			if (!args) return null;
 			if (coverage) args.push('--coverage');
@@ -186,7 +149,13 @@ export function defaultBuildTestCommand(
 			return args;
 		}
 		case 'jest': {
-			const args = resolveLocalNodeTool('jest', ['--json'], dir);
+			const args = resolveLocalNodeTool(
+				'jest',
+				['--json'],
+				dir,
+				process.platform,
+				isCommandAvailable,
+			);
 			if (!args) return null;
 			if (coverage) args.push('--coverage');
 			if (bail) args.push('--bail');
@@ -194,7 +163,13 @@ export function defaultBuildTestCommand(
 			return args;
 		}
 		case 'mocha': {
-			const args = resolveLocalNodeTool('mocha', [], dir);
+			const args = resolveLocalNodeTool(
+				'mocha',
+				[],
+				dir,
+				process.platform,
+				isCommandAvailable,
+			);
 			if (!args) return null;
 			if (bail) args.push('--bail');
 			if (scope !== 'all' && files.length > 0) args.push(...files);

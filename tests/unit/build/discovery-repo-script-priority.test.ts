@@ -71,18 +71,24 @@ describe('repository build-script priority (#2303)', () => {
 	});
 
 	test('preserves Bun as the preferred runner when it is available', async () => {
-		_internals.spawnSyncImpl = ((argv: string[]) => ({
-			stdout: new Uint8Array(),
-			stderr: new Uint8Array(),
-			exitCode: argv.at(-1) === 'bun' ? 0 : 1,
-			success: argv.at(-1) === 'bun',
-		})) as typeof realSpawnSync;
+		const attempts: string[] = [];
+		_internals.spawnSyncImpl = ((argv: string[]) => {
+			const command = argv.at(-1) ?? '';
+			attempts.push(command);
+			return {
+				stdout: new Uint8Array(),
+				stderr: new Uint8Array(),
+				exitCode: command === 'bun' || command === 'npm' ? 0 : 1,
+				success: command === 'bun' || command === 'npm',
+			};
+		}) as typeof realSpawnSync;
 		clearToolchainCache();
 
 		const result = await discoverBuildCommands(tempDir);
 
 		expect(result.commands[0]?.command).toBe('bun run build');
 		expect(result.commands[0]?.priority).toBe(100);
+		expect(attempts).toEqual(['bun']);
 	});
 
 	for (const manager of ['npm', 'pnpm', 'yarn'] as const) {
@@ -157,6 +163,28 @@ describe('repository build-script priority (#2303)', () => {
 			required_commands: [],
 			reason: 'Unsupported packageManager: @1.0.0',
 		});
+	});
+
+	test('bounds unsupported packageManager evidence before surfacing it in skips', async () => {
+		const rawPackageManager = `unsupported-\u0000${'x'.repeat(180)}@1.0.0`;
+		await fs.writeFile(
+			path.join(tempDir, 'package.json'),
+			JSON.stringify({
+				name: 'build-discovery-fixture',
+				packageManager: rawPackageManager,
+				scripts: { build: 'tsc --emitDeclarationOnly' },
+			}),
+		);
+
+		const result = await discoverBuildCommands(tempDir);
+		const skip = result.skipped.find((entry) => entry.ecosystem === 'node');
+
+		expect(skip).toBeDefined();
+		expect(skip?.reason.length).toBeLessThan(rawPackageManager.length + 32);
+		expect(skip?.reason.includes('\u0000')).toBe(false);
+		expect(skip?.reason.endsWith('...')).toBe(true);
+		expect(skip?.required_commands?.[0]).toMatch(/^unsupported- x+\.\.\.$/);
+		expect(skip?.required_commands?.[0]?.length).toBeLessThanOrEqual(40);
 	});
 
 	test('reports a structured environment skip when no package manager exists', async () => {

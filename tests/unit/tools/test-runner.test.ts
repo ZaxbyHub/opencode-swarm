@@ -36,7 +36,14 @@ const {
 	runTests,
 } = testRunnerModule;
 
-/** Emit deterministic vitest-style JSON without spawning a subprocess. */
+/**
+ * Build a Bun.spawn stub that emits vitest-style JSON on stdout, so the
+ * test-runner's full execute -> buildTestCommand -> runTests -> parseTestOutput
+ * vitest path can be exercised deterministically without spawning a real
+ * `npx vitest` (which would require a network fetch when node_modules/vitest is
+ * absent — the source of intermittent coverage-gate timeouts). Mirrors the
+ * rspec Bun.spawn stub pattern used later in this file.
+ */
 function makeVitestSpawnStub(result: {
 	passed: number;
 	failed: number;
@@ -717,6 +724,10 @@ describe('test-runner.ts - Interactive Bulk-Execution Guards', () => {
 	});
 
 	test('allows Narrow scope requests to execute normally', async () => {
+		// The historical regression used `npx vitest` in a temp dir without
+		// dependencies, making the test depend on a network fetch and causing
+		// intermittent coverage-gate timeouts. Keep the full execution path
+		// deterministic with a local-tool fixture and a Bun.spawn JSON stub.
 		const tempDir = fs.realpathSync(
 			fs.mkdtempSync(path.join(os.tmpdir(), 'test-runner-narrow-')),
 		);
@@ -1084,7 +1095,8 @@ describe('test-runner.ts - scope:"all" gated access (env-only)', () => {
 				'import { describe, test, expect } from "vitest"; import { add } from "./utils"; describe("add", () => { test("adds incorrectly", () => { expect(add(1, 2)).toBe(999); }); });',
 			);
 
-			// Stub the spawn with a FAILING vitest result (1 failed test).
+			// Previously this path also depended on `npx vitest` network resolution;
+			// local fixtures plus a deterministic failing result keep it offline.
 			const originalSpawn = Bun.spawn;
 			Bun.spawn = makeVitestSpawnStub({ passed: 0, failed: 1, skipped: 0 });
 			try {

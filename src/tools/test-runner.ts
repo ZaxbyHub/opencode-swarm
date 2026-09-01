@@ -1360,6 +1360,8 @@ function buildTestCommand(
 					VITEST_JSON_OUTPUT_RELATIVE_PATH,
 				],
 				baseDir,
+				process.platform,
+				_internals.isCommandAvailable,
 			);
 			if (!args) return null;
 			if (coverage) args.push('--coverage');
@@ -1370,7 +1372,13 @@ function buildTestCommand(
 			return args;
 		}
 		case 'jest': {
-			const args = _internals.resolveLocalNodeTool('jest', ['--json'], baseDir);
+			const args = _internals.resolveLocalNodeTool(
+				'jest',
+				['--json'],
+				baseDir,
+				process.platform,
+				_internals.isCommandAvailable,
+			);
 			if (!args) return null;
 			if (coverage) args.push('--coverage');
 			if (bail) args.push('--bail');
@@ -1380,7 +1388,13 @@ function buildTestCommand(
 			return args;
 		}
 		case 'mocha': {
-			const args = _internals.resolveLocalNodeTool('mocha', [], baseDir);
+			const args = _internals.resolveLocalNodeTool(
+				'mocha',
+				[],
+				baseDir,
+				process.platform,
+				_internals.isCommandAvailable,
+			);
 			if (!args) return null;
 			// Mocha doesn't have built-in coverage, skip if coverage requested
 			if (bail) args.push('--bail');
