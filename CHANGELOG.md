@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.161.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.161.0...v7.161.1) (2026-09-01)
+
+
+### Bug Fixes
+
+* **plan-critic:** resolve inherited critic model preflight ([58d4da7](https://github.com/ZaxbyHub/opencode-swarm/commit/58d4da7d7d4f164921d9ccdc2bfcff1cb32e3b1e))
+* **skills:** close PR [#2457](https://github.com/ZaxbyHub/opencode-swarm/issues/2457) post-merge review follow-ups (plan-freeze catch-all, evidence scoping audit trail) ([a76b93a](https://github.com/ZaxbyHub/opencode-swarm/commit/a76b93ad4d2db901a8a7c81afbf66ec850835a05))
+
 ## [7.161.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.160.2...v7.161.0) (2026-09-01)
 
 
