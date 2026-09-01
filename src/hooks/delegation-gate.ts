@@ -21,6 +21,10 @@ import {
 	changedFilesSinceSnapshot,
 } from '../background/workspace-snapshot.js';
 import type { PluginConfig } from '../config';
+import {
+	resolveRegisteredAgentModel,
+	resolveRuntimeAgentModel,
+} from '../config/agent-model.js';
 import { ALL_AGENT_NAMES } from '../config/agent-names.js';
 import { DEFAULT_MODELS } from '../config/constants';
 import type { Phase, Plan, Task } from '../config/plan-schema';
@@ -2993,6 +2997,7 @@ export const _internals = {
 export function createDelegationGateHook(
 	config: PluginConfig,
 	directory: string,
+	registeredAgents?: Record<string, { model?: unknown; mode?: unknown }>,
 ): {
 	messagesTransform: (
 		input: Record<string, never>,
@@ -3432,12 +3437,22 @@ export function createDelegationGateHook(
 			preflightArgs &&
 			typeof preflightArgs.subagent_type === 'string'
 		) {
-			const preflightAgent = stripKnownSwarmPrefix(preflightArgs.subagent_type);
+			const exactPreflightAgent = preflightArgs.subagent_type;
+			const preflightAgent = stripKnownSwarmPrefix(exactPreflightAgent);
 			if (preflightAgent.startsWith('critic')) {
-				const criticModel =
+				const legacyCriticModel =
 					config.agents?.[preflightAgent]?.model ??
 					DEFAULT_MODELS[preflightAgent] ??
 					DEFAULT_MODELS.default;
+				const criticModel = registeredAgents
+					? (resolveRuntimeAgentModel(
+							config,
+							registeredAgents,
+							exactPreflightAgent,
+						) ??
+						resolveRegisteredAgentModel(config, exactPreflightAgent) ??
+						legacyCriticModel)
+					: legacyCriticModel;
 				try {
 					const { checkSingleModelResolution } = await import(
 						'../services/model-preflight'
@@ -3453,8 +3468,8 @@ export function createDelegationGateHook(
 							'plan-critic dispatch preflight',
 						);
 						throw new Error(
-							`PLAN_CRITIC_MODEL_UNRESOLVED: the ${preflightAgent} agent's model "${criticModel}" does not resolve against the provider catalog — the critic can never run, so the plan-critic gate cannot produce VERDICT: APPROVED. ` +
-								`Fix agents.${preflightAgent}.model in opencode-swarm.json (or remove the override to fall back to the default model), then re-run MODE: CRITIC-GATE.`,
+							`PLAN_CRITIC_MODEL_UNRESOLVED: the ${exactPreflightAgent} agent's effective model "${criticModel}" does not resolve against the provider catalog — the critic can never run, so the plan-critic gate cannot produce VERDICT: APPROVED. ` +
+								`Fix the effective model configuration for "${exactPreflightAgent}" in opencode-swarm.json (including any matching swarm override or inherited critic model), then re-run MODE: CRITIC-GATE.`,
 						);
 					}
 				} catch (error) {

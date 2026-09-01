@@ -1689,6 +1689,7 @@ async function initializeOpenCodeSwarm(
 	const delegationGateHooks = createDelegationGateHook(
 		configWithResolvedAutoReview,
 		ctx.directory,
+		agents,
 	);
 	const advisoryInjector = (sessionId: string, message: string) => {
 		const session = swarmState.agentSessions.get(sessionId);
