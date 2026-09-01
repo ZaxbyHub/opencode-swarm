@@ -46,7 +46,8 @@ export interface PrReviewDimensionCancellationLite {
 
 export interface PrReviewResilienceSlice {
 	policy: PrReviewResiliencePolicyRecord;
-	attempts: Array<Record<string, unknown>>;
+	/** Attempt bookkeeping is adapter-owned; the reducer carries it opaquely. */
+	attempts: readonly unknown[];
 	circuit?: import('./circuit.js').PrReviewCircuitRecord | undefined;
 }
 

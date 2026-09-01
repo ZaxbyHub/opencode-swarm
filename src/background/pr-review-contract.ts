@@ -993,7 +993,7 @@ export function buildPrReviewContractCard(): string {
 		'- malformed, duplicate, missing, or discarded rows -> contract failure and bounded retry; never acceptance.',
 		'Retry and deadline semantics:',
 		'- Malformed live rows fail closed and may be retried only within the controller retry bound.',
-		'- A waited collection deadline terminalizes active lanes as error after bounded partial salvage.',
+		'- A waited collection deadline is an OBSERVER deadline: it bounds the collect call only, never cancels or terminalizes child work (issue #2381); poll, explicitly cancel, or rely on the presumed-stale sweep.',
 		'- Partial discovery salvage never turns an incomplete REVIEWED or CRITIC verdict into acceptance.',
 	].join('\n');
 }

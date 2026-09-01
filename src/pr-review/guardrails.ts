@@ -189,6 +189,9 @@ export function scanTranscriptParsingOutsideAdapter(
 	for (const source of sources) {
 		const normalized = normalizedSourcePath(source.path);
 		if (TRANSCRIPT_CONVERSION_ALLOWED_PATHS.has(normalized)) continue;
+		// This module defines the symbol list itself (same self-exemption
+		// reasoning as rule 2).
+		if (normalized === 'src/pr-review/guardrails.ts') continue;
 		const lines = source.content.split(/\r?\n/);
 		for (let i = 0; i < lines.length; i++) {
 			for (const symbol of TRANSCRIPT_CONVERSION_SYMBOLS) {

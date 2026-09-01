@@ -406,9 +406,9 @@ export const WRITER_CLASSIFICATION: Readonly<
 	'src/hooks/knowledge-receipt-ledger-storage.ts': 'registered-bespoke',
 	'src/hooks/pr-workflow-gate.ts': 'registered-bespoke',
 	// bespoke atomic single-file rewrite (write tmp + rename) for the bounded
-	// PR-review re-entry authorization store (issue #2383); UUID-scoped
-	// `.${basename}.${uuid}.tmp`
-	'src/hooks/pr-review-reentry-authorization.ts': 'registered-bespoke',
+	// PR-review re-entry authorization store (issues #2383/#2385; moved to the
+	// src/pr-review/ boundary); UUID-scoped `.${basename}.${uuid}.tmp`
+	'src/pr-review/authorization.ts': 'registered-bespoke',
 	'src/hooks/promotion-evidence-store.ts': 'registered-bespoke',
 	'src/hooks/review-receipt.ts': 'registered-bespoke',
 	'src/hooks/skill-usage-log.ts': 'registered-bespoke',

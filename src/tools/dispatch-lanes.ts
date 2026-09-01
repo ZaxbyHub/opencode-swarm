@@ -41,6 +41,7 @@ import {
 } from '../background/pr-review-collection-receipt.js';
 import {
 	buildPrReviewContractCard,
+	prReviewLegacyTranscriptCompatibilityEnabled,
 	PrReviewLaneResultEnvelopeSchema,
 } from '../background/pr-review-contract.js';
 import {
@@ -120,6 +121,10 @@ const MAX_BATCH_ID_CHARS = 120;
 // One canonical staleness horizon across the delegation subsystem (issue #2242
 // R2): the gate's presumed-stale lane settlement and this collector must not
 // disagree about when a lane counts as abandoned.
+// Issue #2385 (recurrence class G-7): one canonical stale horizon
+// (DEFAULT_STALE_DELEGATION_TIMEOUT_MS, re-exported by src/pr-review/
+// lifecycle.ts); this local name is kept for the collect-timeout default
+// below and reads the canonical constant directly.
 const DEFAULT_ASYNC_STALE_TIMEOUT_MS = DEFAULT_STALE_DELEGATION_TIMEOUT_MS;
 const DEFAULT_COLLECT_TIMEOUT_MS = DEFAULT_ASYNC_STALE_TIMEOUT_MS;
 const MAX_COLLECT_TIMEOUT_MS = 60 * 60_000;
@@ -2422,11 +2427,16 @@ async function launchAsyncLane(args: {
 			);
 		}
 		const sessionId = create.sessionId;
+		// Issue #2385 (recurrence class G-3): the raw config read resolves
+		// through the contract module's strict boolean resolver — one
+		// definition of what the flag means.
 		const legacyTranscriptCompatibility =
 			args.mode === 'swarm-pr-review:base' ||
 			args.mode === 'swarm-pr-review:micro'
-				? (_internals.loadPluginConfig(args.directory)
-						.pr_review_legacy_transcript_compatibility ?? false)
+				? prReviewLegacyTranscriptCompatibilityEnabled(
+						_internals.loadPluginConfig(args.directory)
+							.pr_review_legacy_transcript_compatibility,
+					)
 				: undefined;
 
 		const pendingOutcome = await recordPendingDelegationDetailed(

@@ -37,21 +37,16 @@ import { MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS } from '../background/pr-revi
 import {
 	generatePrReviewRunId,
 	PR_REVIEW_BASE_DIMENSION_IDS,
-	PR_REVIEW_DISCARDED_EXAMPLE_ITEM_ID,
 	PR_REVIEW_FINDINGS_MAX_BYTES,
 	PR_REVIEW_HANDOFF_MAX_BYTES,
-	PrReviewCriticVerdictFieldsSchema,
 	type PrReviewLaneResultEnvelope,
 	PrReviewLaneResultEnvelopeSchema,
 	type PrReviewResultReceipt,
 	PrReviewResultReceiptSchema,
 	type PrReviewResultUnresolvedReason,
-	PrReviewReviewerVerdictFieldsSchema,
 	type PrReviewRiskImpact,
 	type PrReviewRiskTag,
 	PrReviewRunIdSchema,
-	parsePrReviewRiskTagsField,
-	parsePrReviewVerdictRow,
 	prReviewFindingRequiresCritic,
 	prReviewLaneResultEnvelopeDigest,
 	prReviewLegacyTranscriptCompatibilityEnabled,
@@ -123,8 +118,6 @@ import {
 	type PrReviewCircuitSignal,
 	type PrReviewResiliencePolicyRecord,
 	resolvePrReviewResiliencePolicy,
-	resetPrReviewResilienceForReEnable,
-	rollbackPrReviewCircuitProbe,
 } from '../pr-review/circuit.js';
 // Issue #2385: the atomic persistence boundary. The gate binds its
 // `_test_exports` object and its full state codec at module init below; all
@@ -179,6 +172,32 @@ import {
 	type PrReviewTerminalCoverageSettlement,
 } from '../pr-review/completion.js';
 import { bindPrReviewReentryBindingReader } from '../pr-review/authorization.js';
+import { reducePrReviewEvent } from '../pr-review/reducer.js';
+import type {
+	PrReviewEvent,
+	PrReviewWorkflowState,
+} from '../pr-review/types.js';
+// Issue #2385: the legacy transcript adapter boundary. Raw transcript /
+// artifact-text -> canonical conversion exists only in
+// src/pr-review/legacy-transcript-adapter.ts; the guardrail scanner
+// (src/pr-review/guardrails.ts) allows the conversion identifiers only there,
+// so this gate consumes the adapter through the `legacy*` aliases, the test
+// surface, and the shared composition types below.
+import {
+	analyzeLegacyVerdictRowContract,
+	bindPrReviewTranscriptAdapterHelpers,
+	composePrReviewPhaseVerdicts,
+	legacyArtifactHasExactPositiveVerdictRow,
+	legacyFeedbackArtifactCoversItems,
+	legacyFeedbackArtifactTextCoversItems,
+	legacyTranscriptAdapterTestSurface,
+	parseCriticVerdict,
+	type PrReviewComposablePhase,
+	type PrReviewItemClaim,
+	type PrReviewPhaseComposition,
+	readLegacySettledFeedbackClassifications,
+	reviewerItemBindingKey,
+} from '../pr-review/legacy-transcript-adapter.js';
 import { validateSwarmPath } from './utils.js';
 
 // Issue #2385: persistence-owned surfaces re-exported for existing importers
@@ -211,6 +230,15 @@ export type {
 	PrReviewTerminalCoverageSettlement,
 	PrReviewUnresolvedDimensionRecord,
 } from '../pr-review/completion.js';
+
+// Issue #2385 compile-time guarantee: the gate's full state structurally
+// satisfies the PR-review slice the reducer governs (one field definition;
+// the gate only ADDS non-PR-review fields). If this assertion fails, the
+// slice in src/pr-review/types.ts drifted from the gate state.
+type _GateStateSatisfiesPrReviewSlice =
+	PrWorkflowGateState extends PrReviewWorkflowState ? true : never;
+const _gateStateSliceAssertion: _GateStateSatisfiesPrReviewSlice = true;
+void _gateStateSliceAssertion;
 
 /** Typed disk read over the bound codec (gate callers want the full state). */
 function readPrWorkflowGateStateFromDisk(
@@ -4246,9 +4274,15 @@ function probeObservationForCircuit(
 }
 
 function formatPrReviewResilienceCircuitOpenMessage(
-	circuit: PrReviewResilienceCircuitRecord,
+	circuit: PrReviewResilienceCircuitRecord | undefined,
 	nowMs: number = Date.now(),
 ): string {
+	// Issue #2385: an absent circuit record must not be replaced by a
+	// synthetic inline construction here (parallel-rule guardrail); the
+	// message degrades truthfully instead.
+	if (!circuit) {
+		return 'BLOCKED: PR_REVIEW resilience retry circuit is open; collect, diagnose, cancel, abort, gap reporting, and config disable remain available';
+	}
 	if ('version' in circuit) {
 		const openUntilMs = circuit.openUntil ? Date.parse(circuit.openUntil) : 0;
 		const remainingMs = Math.max(0, openUntilMs - nowMs);
@@ -4258,7 +4292,11 @@ function formatPrReviewResilienceCircuitOpenMessage(
 				: 'the next staged dispatch is admitted as the recovery canary probe';
 		return `BLOCKED: PR_REVIEW resilience retry circuit is ${circuit.state} after ${circuit.contributors.length} distinct terminal provider failures (${circuit.providerClass ?? 'provider'}); ${retryNote}; collect, diagnose, cancel, abort, gap reporting, and config disable remain available`;
 	}
-	return `BLOCKED: PR_REVIEW base dispatch circuit is open after ${circuit.count} correlated terminal failures (${circuit.signature}); collect every launched lane, abort_pr_workflow, and stop without partial findings`;
+	// Issue #2385 recurrence sweep (class G): the legacy-record branch must
+	// carry the SAME guidance as the v2 branch — collect every launched lane
+	// and settle N-of-6 truthfully; "stop without partial findings" discarded
+	// validated work and contradicts the current policy.
+	return `BLOCKED: PR_REVIEW base dispatch circuit is open after ${circuit.count} correlated terminal failures (${circuit.signature}); collect every launched lane, then settle coverage truthfully (COMPLETE/PARTIAL/NO_COVERAGE) via complete_pr_workflow`;
 }
 
 interface PrReviewResilienceCircuitAdvanceOutcome {
@@ -4393,12 +4431,7 @@ async function preflightPrReviewResilienceCircuitBeforePrune(
 	if (outcome.blocked) {
 		throw new PrReviewResilienceCircuitOpenError(
 			formatPrReviewResilienceCircuitOpenMessage(
-				outcome.snapshot.circuit ?? {
-					version: 2,
-					state: 'OPEN',
-					generation: 1,
-					contributors: [],
-				},
+				outcome.snapshot.circuit,
 			),
 		);
 	}
@@ -4711,40 +4744,31 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 	// v2 CLOSED generation, evidence waterline at now, attempts cleared, policy
 	// refreshed from the current config — so pre-disable evidence can never
 	// resurrect.
-	if (nextResilience && !liveResilienceEnabled) {
-		if (nextResilience.policy.enabled !== false) {
-			nextResilience = {
-				...nextResilience,
-				policy: { ...nextResilience.policy, enabled: false },
-			};
+	//
+	// Issue #2385: both transitions are REDUCER-OWNED — this adapter emits
+	// `resilience_config_changed`, applies the returned state, and executes
+	// the `persist_state` effect. No inline resilience-field mutation remains.
+	if (nextResilience && (!liveResilienceEnabled || nextResilience.policy.enabled === false)) {
+		const configEvent: PrReviewEvent = {
+			type: 'resilience_config_changed',
+			enabled: liveResilienceEnabled,
+			policy: liveResilienceEnabled
+				? options.prReviewResiliencePolicy
+				: undefined,
+			nowMs: _test_exports.nowMs(),
+		};
+		const outcome = reducePrReviewEvent(state, configEvent);
+		if (
+			outcome.status === 'applied' &&
+			outcome.effects.some((effect) => effect.kind === 'persist_state')
+		) {
 			state = await writeStateWhileLocked(directory, {
-				...state,
+				...(outcome.state as PrWorkflowGateState),
 				updatedAt: isoNow(),
-				prReviewResilience: nextResilience,
 			});
 			previous = state.prReviewBaseDispatches ?? [];
+			nextResilience = state.prReviewResilience ?? nextResilience;
 		}
-	} else if (nextResilience && nextResilience.policy.enabled === false) {
-		nextResilience = {
-			policy: snapshotPrReviewResiliencePolicy(
-				options.prReviewResiliencePolicy,
-			),
-			attempts: [],
-			// Issue #2385: the re-enable reset is a sanctioned machine
-			// transition (src/pr-review/circuit.ts) — no inline record
-			// construction here.
-			circuit: resetPrReviewResilienceForReEnable({
-				previousCircuit: nextResilience.circuit,
-				policy: nextResilience.policy,
-				nowMs: _test_exports.nowMs(),
-			}),
-		};
-		state = await writeStateWhileLocked(directory, {
-			...state,
-			updatedAt: isoNow(),
-			prReviewResilience: nextResilience,
-		});
-		previous = state.prReviewBaseDispatches ?? [];
 	}
 	if (
 		liveResilienceEnabled &&
@@ -4795,12 +4819,7 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 			if (outcome.blocked) {
 				throw new PrReviewResilienceCircuitOpenError(
 					formatPrReviewResilienceCircuitOpenMessage(
-						outcome.snapshot.circuit ?? {
-							version: 2,
-							state: 'OPEN',
-							generation: 1,
-							contributors: [],
-						},
+						outcome.snapshot.circuit,
 					),
 				);
 			}
@@ -5109,15 +5128,22 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 				normalizedSessionID,
 			);
 			if (!state || state.mode !== 'PR_REVIEW') return false;
-			const currentBaseDispatches = state.prReviewBaseDispatches ?? [];
-			if (currentBaseDispatches.at(-1)?.batchId !== normalizedBatchId) {
-				return false;
-			}
 			const batchRecords = findByBatchId(directory, normalizedBatchId, {
 				parentSessionId: normalizedSessionID,
 			});
-			if (batchRecords.length > 0) return false;
-			const nextBaseDispatches = currentBaseDispatches.slice(0, -1);
+			// Issue #2385: the rollback transition is REDUCER-OWNED — the
+			// adapter emits `base_admission_rolled_back`, and a typed rejection
+			// (not-last batch / already-launched batch) maps to the same silent
+			// false the pre-reducer guard produced.
+			const rollbackOutcome = reducePrReviewEvent(state, {
+				type: 'base_admission_rolled_back',
+				batchId: normalizedBatchId,
+				batchDelegationRecordsExist: batchRecords.length > 0,
+			});
+			if (rollbackOutcome.status === 'rejected') return false;
+			const rollbackState = rollbackOutcome.state as PrWorkflowGateState;
+			const currentBaseDispatches = state.prReviewBaseDispatches ?? [];
+			const nextBaseDispatches = rollbackState.prReviewBaseDispatches ?? [];
 			const rolledBackDimensions = new Set(
 				currentBaseDispatches
 					.at(-1)
@@ -5133,7 +5159,7 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 					)
 				: state.prReviewContractRetryDimensions;
 			const lastAttempt = state.prReviewResilience?.attempts.at(-1);
-			let nextResilience = state.prReviewResilience;
+			let nextResilience = rollbackState.prReviewResilience;
 			if (lastAttempt?.canaryBatchId === normalizedBatchId) {
 				nextResilience = nextResilience
 					? {
@@ -5156,9 +5182,9 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 			// never produce a terminal record — this rollback's own precondition
 			// is that the batch has zero delegation records — so leaving the
 			// probe in place would wedge the circuit on probe_in_flight forever.
-			// Issue #2385: the transition itself is a sanctioned machine
-			// function (src/pr-review/circuit.ts `rollbackPrReviewCircuitProbe`)
-			// — no inline record construction here.
+			// Issue #2385: the probe-end transition is REDUCER-OWNED
+			// (`circuit_probe_settled` -> the machine's rolled-back-admission
+			// path); the adapter applies the returned state.
 			const rolledBackCircuit = nextResilience?.circuit;
 			if (
 				rolledBackCircuit &&
@@ -5166,14 +5192,27 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 				rolledBackCircuit.state === 'HALF_OPEN' &&
 				rolledBackCircuit.probe?.batchId === normalizedBatchId
 			) {
-				nextResilience = {
-					...nextResilience!,
-					circuit: rollbackPrReviewCircuitProbe(
-						rolledBackCircuit,
-						_test_exports.nowMs(),
-						circuitOpenDurationMs(nextResilience!.policy),
-					),
-				};
+				const probeOutcome = reducePrReviewEvent(
+					{ ...rollbackState, prReviewResilience: nextResilience },
+					{
+						type: 'circuit_probe_settled',
+						outcome: { result: 'rolled_back_admission' },
+						nowMs: _test_exports.nowMs(),
+						policy: {
+							...(nextResilience?.policy ??
+								snapshotPrReviewResiliencePolicy()),
+							circuitOpenDurationMs: circuitOpenDurationMs(
+								nextResilience?.policy ??
+									snapshotPrReviewResiliencePolicy(),
+							),
+						},
+					},
+				);
+				if (probeOutcome.status === 'applied') {
+					nextResilience =
+						(probeOutcome.state as PrWorkflowGateState)
+							.prReviewResilience ?? nextResilience;
+				}
 			}
 			const shouldKeepResilience =
 				(nextBaseDispatches.length > 0 && Boolean(nextResilience?.policy)) ||
@@ -6397,7 +6436,7 @@ function prFeedbackBatchCoveredItems(
 	for (const lane of batch.ownership) {
 		if (!successfulLaneIds.has(lane.laneId)) continue;
 		if (
-			!feedbackArtifactCoversItems(
+			!legacyFeedbackArtifactCoversItems(
 				directory,
 				state,
 				batch.batchId,
@@ -11098,7 +11137,7 @@ export async function completePrWorkflow(
 						'BLOCKED: PR_FEEDBACK zero-descendant completion requires a clean index and working tree',
 					);
 				}
-				const classifications = readSettledFeedbackClassifications(
+				const classifications = readLegacySettledFeedbackClassifications(
 					directory,
 					readyState,
 				);
@@ -11374,17 +11413,7 @@ export const _test_exports = {
 	extractCandidateIds,
 	parseCanonicalCandidateRows,
 	resolvePrReviewRowFamily,
-	// Exposed to pin the verdict-row pipe tolerance's fidelity boundary: the
-	// capped merge is content-preserving only when the extra pipes sit in the
-	// trailing (free-text) field.
-	pipeFieldsCapped,
 	boundPublicationDiagnostic,
-	// Exposed so tests exercise the production indexing path and pin the
-	// observable classification of legacy overflow recovery.
-	indexVerdictRows,
-	// Exposed so the digest-stability test can hash the same canonical field
-	// view the critic-claim binding hashes.
-	reviewerVerdictRowDigest,
 	workflowGateStateRelativePath,
 	workflowGateStateLockRelativePath,
 	workflowCheckoutMutationLockRelativePath,
@@ -11558,12 +11587,6 @@ export const _test_exports = {
 	resolveRemoteRefsContainingHeadAsync,
 	parseCriticVerdict,
 	/**
-	 * Exact production verdict-row analysis and item composition parsers. Exposed
-	 * so the assignment-boundary regression can prove both paths remain linear.
-	 */
-	analyzePrReviewVerdictRowContract,
-	parseLaneItemVerdicts,
-	/**
 	 * Read-only view of the item-keyed composition for one session, including
 	 * the diagnostics that settlement only logs (abandoned declared lanes,
 	 * batches skipped for inventory incoherence). Production callers reach the
@@ -11634,6 +11657,18 @@ export const _test_exports = {
 	nowMs: () => Date.now(),
 };
 
+// Issue #2385: the transcript-conversion test surface (the verdict-row pipe
+// tolerance's fidelity boundary, the production indexing path for legacy
+// overflow recovery, the digest-stability view the critic-claim binding hashes,
+// and the exact verdict-row analysis / item composition parsers used by the
+// assignment-boundary regression) now lives in
+// src/pr-review/legacy-transcript-adapter.ts. The guardrail scanner
+// (src/pr-review/guardrails.ts) allows those identifiers only in that module,
+// so the historical `_test_exports` properties are re-exposed here by spreading
+// the adapter's surface — same property names, same bindings, no gate-side
+// conversion identifiers.
+Object.assign(_test_exports, legacyTranscriptAdapterTestSurface);
+
 // Issue #2385: bind the persistence boundary to this gate's seams and full
 // state codec. Properties are read at CALL time through the bound reference,
 // so test-time mutation of `_test_exports.<prop>` and `resetTrackedStateCache`
@@ -11657,6 +11692,21 @@ bindPrReviewCompletionHelpers({
 	recordsPassingBatchIntegrity,
 	validatePrReviewDiscoveryLaneCompletion,
 	validateExactStructuredReceiptCoverage,
+});
+
+// Issue #2385: bind the legacy transcript adapter's gate-owned composition
+// helpers (src/pr-review/legacy-transcript-adapter.ts reads them through this
+// binding and never imports the gate back). Function declarations hoist, so
+// the references are available here.
+bindPrReviewTranscriptAdapterHelpers({
+	derivePrReviewCandidateInventory,
+	derivePrReviewCriticInventory,
+	authoritativeReviewerClaims,
+	reviewerSubagentSessionIds,
+	prReviewPhaseWindow,
+	batchMayContributeClaims,
+	recordsPassingBatchIntegrity,
+	loadArtifactPassingLaneIntegrity,
 });
 
 /**
@@ -13553,49 +13603,12 @@ function derivePrReviewCandidateSeverities(
 	return ctx.candidateSeverities;
 }
 
-type PrReviewComposablePhase = 'reviewer' | 'critic';
+// Issue #2385: `PrReviewComposablePhase`, `PrReviewItemClaim`,
+// `PrReviewPhaseComposition`, and `appendCompositionDiagnostic` moved to
+// src/pr-review/legacy-transcript-adapter.ts (imported above).
 
-/** One item's admitted verdict plus the lane provenance that admitted it. */
-interface PrReviewItemClaim {
-	batchId: string;
-	laneId: string;
-	workflowLane: string;
-	/** Reviewer classification, or critic status. */
-	classification: string;
-	severity: string;
-	/**
-	 * Typed risk metadata from the reviewer row (issue #2383). Reviewer claims
-	 * only; absent on critic claims, which never re-assess routing risk.
-	 */
-	riskImpact?: PrReviewRiskImpact;
-	riskTags?: PrReviewRiskTag[];
-	/**
-	 * sha256 of the full canonical `[REVIEWED]` row this claim was parsed from.
-	 * Reviewer claims only — this is what a critic batch binds to per item.
-	 */
-	rowDigest?: string;
-}
-
-interface PrReviewPhaseComposition {
-	/** Item id -> winning claim. Most recent successful lane per item wins. */
-	claims: Map<string, PrReviewItemClaim>;
-	requiredInventory: string[];
-	unclaimed: string[];
-	contributingBatchIds: string[];
-	diagnostics: string[];
-}
-
-const MAX_COMPOSITION_DIAGNOSTICS = 16;
 /** Item ids named in one BLOCKED message before it degrades to a count. */
 const MAX_UNCLAIMED_ITEMS_IN_MESSAGE = 50;
-
-function appendCompositionDiagnostic(
-	diagnostics: string[],
-	message: string,
-): void {
-	if (diagnostics.length >= MAX_COMPOSITION_DIAGNOSTICS) return;
-	diagnostics.push(message.slice(0, MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS));
-}
 
 /**
  * The batches a phase composes over.
@@ -13707,258 +13720,6 @@ function batchMayContributeClaims(
 		successful.size === batch.lanes.length &&
 		batch.lanes.every((lane) => successful.has(lane.workflowLane))
 	);
-}
-
-/**
- * The single item-keyed computation behind reviewer/critic settlement AND every
- * reviewer/critic verdict derivation.
- *
- * Settlement *is* `unclaimed.length === 0` over this map, so settlement can never
- * pass while derivation returns nothing — the failure mode that would let
- * CONFIRMED CRITICAL/HIGH findings ship without critic coverage.
- *
- * Scanning the window reverse-chronologically and claiming only *unclaimed*
- * items makes first-write-wins equal "most recent successful lane per item wins",
- * which is the explicit conflict rule for the case where two batches both carry a
- * parseable verdict for one item. Memoized per gate context so two passes never
- * hold two different verdict maps.
- *
- * The scan stops as soon as every required item is claimed (issue #1968 FIX 5).
- * `readLaneOutput` is a synchronous `readFileSync` per lane per batch, and the
- * window can hold up to `MAX_WORKFLOW_BATCHES` batches, so scanning past a
- * complete claim set is unbounded blocking I/O for no verdict change — first
- * write wins, and every required item has already been written.
- *
- * `exhaustive` turns the exit off for the batch GC, which prunes a reviewer
- * batch on "it contributed no claim". Being precise about what that buys: with
- * *this* exit condition the two scans yield the same `contributingBatchIds`,
- * because the exit fires only when every required item is claimed and a batch
- * reached after that point could never have claimed anything anyway. The flag is
- * therefore not fixing a live divergence — it decouples a durable-state decision
- * from a performance heuristic, so that weakening the exit condition later
- * cannot silently turn "not examined" into "proven inert". It also keeps the
- * whole-window abandoned-lane diagnostics intact for the GC's scan.
- */
-function composePrReviewPhaseVerdicts(
-	directory: string,
-	state: PrWorkflowGateState,
-	phase: PrReviewComposablePhase,
-	ctx: PrReviewGateContext,
-	exhaustive = false,
-): PrReviewPhaseComposition {
-	const memoized = phase === 'reviewer' ? ctx.reviewer : ctx.critic;
-	if (memoized && !exhaustive) return memoized;
-
-	const requiredInventory =
-		phase === 'reviewer'
-			? derivePrReviewCandidateInventory(directory, state, ctx)
-			: derivePrReviewCriticInventory(directory, state, ctx);
-	const reviewerClaims =
-		phase === 'critic'
-			? authoritativeReviewerClaims(directory, state, ctx)
-			: undefined;
-	const forbiddenSubagentSessionIds =
-		phase === 'critic'
-			? reviewerSubagentSessionIds(directory, state)
-			: new Set<string>();
-	const expectedMode = `swarm-pr-review:${phase}`;
-	const window = prReviewPhaseWindow(state, phase);
-	const requiredSet = new Set(requiredInventory);
-	const claims = new Map<string, PrReviewItemClaim>();
-	const contributingBatchIds: string[] = [];
-	const diagnostics: string[] = [];
-	const satisfiedObligations = new Set<string>();
-	const scannedBatches: PrReviewValidationBatchRecord[] = [];
-
-	for (const batch of [...window].reverse()) {
-		scannedBatches.push(batch);
-		if (
-			!batchMayContributeClaims(
-				directory,
-				state,
-				batch,
-				phase,
-				requiredInventory,
-				forbiddenSubagentSessionIds,
-				reviewerClaims,
-				ctx,
-			)
-		) {
-			appendCompositionDiagnostic(
-				diagnostics,
-				`${phase} batch "${batch.batchId}" was validated against a different inventory or is not wholly successful legacy state; it contributes no claims`,
-			);
-			continue;
-		}
-		const coherence = state.prReviewBatchCoherence?.[batch.batchId];
-		let contributed = false;
-		for (const qualified of recordsPassingBatchIntegrity(
-			directory,
-			state,
-			batch.batchId,
-			batch.lanes,
-			expectedMode,
-			batch.validatedAt,
-			true,
-			forbiddenSubagentSessionIds,
-		)) {
-			const artifact = loadArtifactPassingLaneIntegrity(
-				directory,
-				state,
-				qualified.record,
-				expectedMode,
-				qualified.expectedWorkflowLane,
-				ctx.revisionDigest,
-			);
-			if (!artifact) continue;
-			const declaredItems = qualified.expectedLane.reviewItemIds ?? [];
-			const { markerRows, parsed } = parsePrReviewVerdictRows(
-				artifact.text,
-				declaredItems,
-				phase,
-				reviewerClaims,
-			);
-			if (!verdictRowsContainOnlyAssignedIds(markerRows, declaredItems)) {
-				appendCompositionDiagnostic(
-					diagnostics,
-					`${phase} lane "${qualified.expectedLane.laneId}" contains an unassigned verdict row; it contributes no claims`,
-				);
-				continue;
-			}
-			if (declaredItems.length > 0 && parsed.size === declaredItems.length) {
-				satisfiedObligations.add(qualified.expectedWorkflowLane);
-			}
-			for (const [itemId, verdict] of parsed) {
-				if (!requiredSet.has(itemId) || claims.has(itemId)) continue;
-				// Defense in depth: the persisted inventory this batch was
-				// validated against must still list the item. Declaration time
-				// already makes the lane item set equal to it, so a mismatch here
-				// means the persisted state was mutated out of band.
-				if (coherence && !coherence.validatedInventory.includes(itemId)) {
-					continue;
-				}
-				if (
-					phase === 'critic' &&
-					coherence &&
-					!criticClaimIsBoundToCurrentReviewerRow(
-						coherence,
-						itemId,
-						reviewerClaims,
-					)
-				) {
-					continue;
-				}
-				claims.set(itemId, {
-					batchId: batch.batchId,
-					laneId: qualified.expectedLane.laneId,
-					workflowLane: qualified.expectedWorkflowLane,
-					...verdict,
-				});
-				contributed = true;
-			}
-		}
-		if (contributed) contributingBatchIds.push(batch.batchId);
-		if (!exhaustive && claims.size === requiredSet.size) break;
-	}
-
-	// The lane-level "every declared obligation across every batch in the window
-	// must be settled" requirement was deliberately dropped: it is part of the
-	// all-or-nothing accounting that forces a full re-run for one failed lane,
-	// and it re-blocks exactly the composed-retry case. Item completeness
-	// (`unclaimed.length === 0`) is the stronger property for what actually
-	// ships — verdicts are per item; lane ids are bookkeeping. An abandoned
-	// declared lane is now a named diagnostic, not a block.
-	//
-	// Scoped to the batches actually scanned: an unscanned batch's lanes were
-	// never examined, so reporting them as "produced no successful exact
-	// artifact" would be an unevidenced claim. Nothing is lost — the early exit
-	// only fires once every required item is claimed, and the diagnostic exists
-	// to explain a settlement that succeeded despite abandoned lanes.
-	for (const obligation of new Set(
-		scannedBatches.flatMap((batch) =>
-			batch.lanes.map((lane) => lane.workflowLane),
-		),
-	)) {
-		if (satisfiedObligations.has(obligation)) continue;
-		appendCompositionDiagnostic(
-			diagnostics,
-			`declared ${phase} lane "${obligation}" produced no successful exact artifact`,
-		);
-	}
-
-	const composition: PrReviewPhaseComposition = {
-		claims,
-		requiredInventory,
-		unclaimed: requiredInventory.filter((itemId) => !claims.has(itemId)),
-		contributingBatchIds,
-		diagnostics,
-	};
-	// An exhaustive pass is a superset of the memoizable one, but it is computed
-	// for a different question (which batches are inert) and its diagnostics
-	// cover a wider window; never let it become the map the gates read.
-	if (!exhaustive) {
-		if (phase === 'reviewer') ctx.reviewer = composition;
-		else ctx.critic = composition;
-	}
-	return composition;
-}
-
-/**
- * A critic claim survives only while the reviewer row it challenged is
- * byte-identical.
- *
- * What this guarantees: the critic verdict was produced against reviewer row
- * *content* identical to the content authoritative now. A reviewer verdict keeps
- * only 2 of the 12 required row fields, so a classification/severity tuple would
- * still match after the evidence and root cause changed entirely; the full-row
- * digest does not. That also closes the `DOWNGRADED` hole in
- * `parseCriticVerdict`, where a reviewer severity *increase* leaves a stale
- * DOWNGRADED row still parseable.
- *
- * What this does NOT guarantee (issue #1968 FIX 8; the fix plan's claim that it
- * "closes the leave-and-return readmission path" is retracted as false):
- * `reviewerVerdictRowDigest` hashes the twelve parsed `[REVIEWED]` fields and
- * nothing else — no lane, session, or batch identity. (Legacy ten-field rows
- * are normalized to twelve with UNKNOWN / no tags at the parse boundary, so
- * both the critic-batch binder and claim admission hash a uniform view.) So a byte-identical row
- * emitted by a *different* lane or session re-admits the bound critic claim, and
- * an item that leaves the critic inventory and later returns with an identical
- * row re-admits the original critic verdict rather than requiring a fresh one.
- * Both are content-equivalent by construction, and the artifact behind the claim
- * is still pinned to the current revision digest and to its own lane identity by
- * `loadArtifactPassingLaneIntegrity`, so neither admits a verdict about
- * different content — but neither is prevented, and the binding is not the thing
- * that prevents them.
- */
-function criticClaimIsBoundToCurrentReviewerRow(
-	coherence: PrReviewBatchCoherenceRecord,
-	itemId: string,
-	reviewerClaims: ReadonlyMap<string, PrReviewItemClaim> | undefined,
-): boolean {
-	// A coherent critic batch always carries bindings; absent bindings on a
-	// coherent entry means out-of-band mutation, so fail closed.
-	const bindings = coherence.reviewerItemBindings;
-	const bindingKey =
-		coherence.reviewerItemBindingKeyEncoding === 'prefixed-v1'
-			? reviewerItemBindingKey(itemId)
-			: itemId;
-	const bound =
-		bindings && Object.hasOwn(bindings, bindingKey)
-			? bindings[bindingKey]
-			: undefined;
-	const current = reviewerClaims?.get(itemId)?.rowDigest;
-	return Boolean(bound && current && bound === current);
-}
-
-const REVIEWER_ITEM_BINDING_KEY_PREFIX = 'item:';
-
-/**
- * Prefix item IDs before using them as persisted object keys. In particular,
- * assigning a raw `__proto__` key to an ordinary object invokes JavaScript's
- * prototype setter instead of creating an own property.
- */
-function reviewerItemBindingKey(itemId: string): string {
-	return `${REVIEWER_ITEM_BINDING_KEY_PREFIX}${itemId}`;
 }
 
 /**
@@ -15059,7 +14820,7 @@ function workflowArtifactHasContractMarker(
 	) {
 		const phase: PrReviewComposablePhase =
 			expectedMode === 'swarm-pr-review:reviewer' ? 'reviewer' : 'critic';
-		return analyzePrReviewVerdictRowContract(
+		return analyzeLegacyVerdictRowContract(
 			artifact.text,
 			reviewItemIds ?? [],
 			phase,
@@ -15079,7 +14840,7 @@ function workflowArtifactHasContractMarker(
 		return Boolean(
 			reviewItemIds?.length &&
 				reviewItemIds.every((itemId) =>
-					artifactHasExactPositiveVerdictRow(
+					legacyArtifactHasExactPositiveVerdictRow(
 						artifact.text,
 						feedbackVerdict[0],
 						itemId,
@@ -15740,7 +15501,7 @@ export async function validatePrWorkflowTransportRecovery(
 				...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
 			};
 		}
-		const analysis = analyzePrReviewVerdictRowContract(
+		const analysis = analyzeLegacyVerdictRowContract(
 			artifactText,
 			itemIds,
 			phase,
@@ -15812,7 +15573,7 @@ export async function validatePrWorkflowTransportRecovery(
 		const itemIds = lane?.ownedItemIds ?? [];
 		if (
 			itemIds.length === 0 ||
-			!feedbackArtifactTextCoversItems(artifactText, itemIds)
+			!legacyFeedbackArtifactTextCoversItems(artifactText, itemIds)
 		) {
 			return {
 				ok: false,
@@ -15866,7 +15627,7 @@ export async function validatePrWorkflowTransportRecovery(
 		if (
 			itemIds.length === 0 ||
 			!itemIds.every((itemId) =>
-				artifactHasExactPositiveVerdictRow(
+				legacyArtifactHasExactPositiveVerdictRow(
 					artifactText,
 					feedbackPhase.marker,
 					itemId,
@@ -15925,22 +15686,10 @@ function extractLaneCoverageEvidenceText(
 	).evidence;
 }
 
-const REVIEW_SEVERITY_RANK = new Map([
-	['NONE', 0],
-	['INFO', 1],
-	['LOW', 2],
-	['MEDIUM', 3],
-	['HIGH', 4],
-	['CRITICAL', 5],
-]);
-const FEEDBACK_CLASSIFICATIONS = new Set([
-	'CONFIRMED',
-	'PARTIAL',
-	'DISPROVED',
-	'PRE_EXISTING',
-	'NEEDS_MORE_EVIDENCE',
-	'NEEDS_USER_DECISION',
-]);
+// Issue #2385: `REVIEW_SEVERITY_RANK` and `FEEDBACK_CLASSIFICATIONS` moved to
+// src/pr-review/legacy-transcript-adapter.ts, which owns the severity-rank /
+// classification vocabulary used in transcript-text conversion.
+
 /**
  * Issue #2131 criterion C1: a fully verified no-change inventory is one where
  * EVERY item's settled verification classification is a no-change outcome.
@@ -15962,406 +15711,10 @@ interface ReviewerVerdict {
 	riskTags?: PrReviewRiskTag[];
 }
 
-interface IndexedVerdictRows {
-	markerRows: string[][];
-	rowsByItemId: Map<string, string[][]>;
-	recoveries: Array<{
-		marker: '[REVIEWED]' | '[CRITIC]';
-		itemId: string;
-		recovery: 'legacy-fidelity-safe' | 'legacy-lossy';
-	}>;
-}
-
-function indexVerdictRows(
-	text: string,
-	marker: '[REVIEWED]' | '[CRITIC]',
-): IndexedVerdictRows {
-	const markerRows: string[][] = [];
-	const rowsByItemId = new Map<string, string[][]>();
-	const recoveries: IndexedVerdictRows['recoveries'] = [];
-	for (const line of text.split(/\r?\n/)) {
-		const row = parsePrReviewVerdictRow(
-			line,
-			marker === '[REVIEWED]' ? 'reviewer' : 'critic',
-		);
-		if (!row) continue;
-		const fields = row.fields;
-		if (row.recoveredOverflow) {
-			const recovery = row.overflowClass as
-				| 'legacy-fidelity-safe'
-				| 'legacy-lossy';
-			const itemId = fields[1] ?? '(missing)';
-			recoveries.push({ marker, itemId, recovery });
-			warn(
-				'PR_REVIEW recovered a legacy verdict row with unescaped pipe overflow',
-				{
-					marker,
-					itemId,
-					recovery,
-				},
-			);
-		}
-		markerRows.push(fields);
-		const itemId = fields[1] ?? '';
-		const rows = rowsByItemId.get(itemId);
-		if (rows) rows.push(fields);
-		else rowsByItemId.set(itemId, [fields]);
-	}
-	return { markerRows, rowsByItemId, recoveries };
-}
-
-function validateReviewerVerdictFields(fields: string[]): string[] | null {
-	const parsed = PrReviewReviewerVerdictFieldsSchema.safeParse(fields);
-	return parsed.success ? [...parsed.data] : null;
-}
-
-/**
- * Digest of the FULL canonical reviewer row, not the classification/severity
- * pair a reviewer verdict projects to. Only 2 of the 12 required fields survive
- * that projection, so a tuple binding would still match a row whose evidence,
- * file:line and root cause all changed. Fields are joined on NUL, which
- * `pipeFields` can never produce, so no field boundary is forgeable.
- */
-function reviewerVerdictRowDigest(fields: readonly string[]): string {
-	return createHash('sha256').update(fields.join('\0')).digest('hex');
-}
-
-/**
- * Per-item verdicts an artifact actually carries, as a map rather than a
- * boolean. This is the granularity the composition needs: one unparseable item
- * must not discard its healthy siblings in the same lane.
- */
-function parseLaneItemVerdicts(
-	text: string,
-	itemIds: readonly string[],
-	phase: PrReviewComposablePhase,
-	reviewerClaims?: ReadonlyMap<string, PrReviewItemClaim>,
-): Map<
-	string,
-	{
-		classification: string;
-		severity: string;
-		riskImpact?: PrReviewRiskImpact;
-		riskTags?: PrReviewRiskTag[];
-		rowDigest?: string;
-	}
-> {
-	return parsePrReviewVerdictRows(text, itemIds, phase, reviewerClaims).parsed;
-}
-
-function parsePrReviewVerdictRows(
-	text: string,
-	itemIds: readonly string[],
-	phase: PrReviewComposablePhase,
-	reviewerClaims?: ReadonlyMap<string, PrReviewItemClaim>,
-): {
-	markerRows: string[][];
-	parsed: Map<
-		string,
-		{
-			classification: string;
-			severity: string;
-			riskImpact?: PrReviewRiskImpact;
-			riskTags?: PrReviewRiskTag[];
-			rowDigest?: string;
-		}
-	>;
-	recoveries: IndexedVerdictRows['recoveries'];
-} {
-	const parsed = new Map<
-		string,
-		{
-			classification: string;
-			severity: string;
-			riskImpact?: PrReviewRiskImpact;
-			riskTags?: PrReviewRiskTag[];
-			rowDigest?: string;
-		}
-	>();
-	const marker = phase === 'reviewer' ? '[REVIEWED]' : '[CRITIC]';
-	const { markerRows, rowsByItemId, recoveries } = indexVerdictRows(
-		text,
-		marker,
-	);
-	for (const itemId of itemIds) {
-		if (itemId === PR_REVIEW_DISCARDED_EXAMPLE_ITEM_ID) continue;
-		if (phase === 'reviewer') {
-			const rows = rowsByItemId.get(itemId);
-			const fields =
-				rows?.length === 1 ? validateReviewerVerdictFields(rows[0]) : null;
-			if (!fields) continue;
-			parsed.set(itemId, {
-				classification: fields[2],
-				severity: fields[4],
-				// Fields 10/11 are the typed risk metadata (issue #2383); the
-				// parse boundary guarantees they exist (legacy ten-field rows
-				// were normalized to UNKNOWN / no tags there).
-				riskImpact: fields[10] as PrReviewRiskImpact,
-				riskTags: parsePrReviewRiskTagsField(fields[11] ?? ''),
-				rowDigest: reviewerVerdictRowDigest(fields),
-			});
-			continue;
-		}
-		const rows = rowsByItemId.get(itemId);
-		const verdict =
-			rows?.length === 1
-				? validateCriticVerdictFields(
-						rows[0],
-						reviewerClaims?.get(itemId)?.severity,
-					)
-				: null;
-		if (!verdict) continue;
-		parsed.set(itemId, {
-			classification: verdict.status,
-			severity: verdict.severity,
-		});
-	}
-	return { markerRows, parsed, recoveries };
-}
-
-/** Exact assigned-row contract used by both normal and recovered collection. */
-function analyzePrReviewVerdictRowContract(
-	text: string,
-	itemIds: readonly string[],
-	phase: PrReviewComposablePhase,
-	reviewerClaims?: ReadonlyMap<string, PrReviewItemClaim>,
-): {
-	ok: boolean;
-	expected: string;
-	actual: string;
-	recoveries: IndexedVerdictRows['recoveries'];
-} {
-	const marker = phase === 'reviewer' ? '[REVIEWED]' : '[CRITIC]';
-	const assigned = new Set(itemIds);
-	const { markerRows, parsed, recoveries } = parsePrReviewVerdictRows(
-		text,
-		itemIds,
-		phase,
-		reviewerClaims,
-	);
-	const observedIds = markerRows.map((fields) => fields[1] || '(missing)');
-	const unexpectedIds = [
-		...new Set(observedIds.filter((itemId) => !assigned.has(itemId))),
-	];
-	const invalidOrMissingIds = itemIds.filter((itemId) => !parsed.has(itemId));
-	return {
-		ok:
-			verdictRowIdsMatchExactly(markerRows, itemIds) &&
-			invalidOrMissingIds.length === 0,
-		expected: `exactly one parseable ${marker} row for assigned IDs ${JSON.stringify(itemIds)} and no other ${marker} IDs`,
-		actual: JSON.stringify({
-			rowCount: markerRows.length,
-			observedIds,
-			invalidOrMissingIds,
-			unexpectedIds,
-		}),
-		recoveries,
-	};
-}
-
-/** Exact one-row-per-assigned-ID identity check, independent of row semantics. */
-function verdictRowIdsMatchExactly(
-	markerRows: readonly string[][],
-	itemIds: readonly string[],
-): boolean {
-	if (itemIds.length === 0 || markerRows.length !== itemIds.length)
-		return false;
-	const assigned = new Set(itemIds);
-	if (assigned.size !== itemIds.length) return false;
-	const observed = new Set<string>();
-	for (const fields of markerRows) {
-		const itemId = fields[1] ?? '';
-		if (!assigned.has(itemId) || observed.has(itemId)) return false;
-		observed.add(itemId);
-	}
-	return observed.size === assigned.size;
-}
-
-/**
- * Settlement composes valid assigned siblings item-by-item, but an invented ID
- * invalidates the entire artifact because no declared ownership can authorize
- * that row. Missing or duplicate assigned rows remain per-item parse failures.
- */
-function verdictRowsContainOnlyAssignedIds(
-	markerRows: readonly string[][],
-	itemIds: readonly string[],
-): boolean {
-	if (itemIds.length === 0) return false;
-	const assigned = new Set(itemIds);
-	return markerRows.every((fields) => assigned.has(fields[1] ?? ''));
-}
-
-function parseCriticVerdict(
-	text: string,
-	itemId: string,
-	reviewerSeverity?: string,
-): { status: string; severity: string } | null {
-	const rows = indexVerdictRows(text, '[CRITIC]').rowsByItemId.get(itemId);
-	if (!rows || rows.length !== 1) return null;
-	return validateCriticVerdictFields(rows[0], reviewerSeverity);
-}
-
-function validateCriticVerdictFields(
-	fields: string[],
-	reviewerSeverity?: string,
-): { status: string; severity: string } | null {
-	const parsed = PrReviewCriticVerdictFieldsSchema.safeParse(fields);
-	if (!parsed.success) return null;
-	const verdict = parsed.data;
-	if (reviewerSeverity) {
-		const reviewerRank = REVIEW_SEVERITY_RANK.get(reviewerSeverity);
-		const criticRank = REVIEW_SEVERITY_RANK.get(verdict[3]);
-		if (reviewerRank === undefined || criticRank === undefined) return null;
-		if (verdict[2] === 'UPHELD' && criticRank !== reviewerRank) return null;
-		if (verdict[2] === 'DOWNGRADED' && criticRank >= reviewerRank) return null;
-	}
-	return { status: verdict[2], severity: verdict[3] };
-}
-
-function artifactHasExactPositiveVerdictRow(
-	text: string,
-	marker: string,
-	itemId: string,
-	positiveVerdict: string,
-): boolean {
-	// Same trailing-field pipe tolerance as feedbackArtifactCoversItems: the
-	// fourth field is free-text and may legitimately contain literal pipes.
-	const rows = text
-		.split(/\r?\n/)
-		.map((line) => pipeFieldsCapped(line, 4))
-		.filter((fields) => fields[0] === marker && fields[1] === itemId);
-	return (
-		rows.length === 1 &&
-		rows[0].length >= 4 &&
-		rows[0][2] === positiveVerdict &&
-		rows[0].slice(1, 4).every(Boolean)
-	);
-}
-
-function pipeFields(line: string): string[] {
-	if (!line.includes('|')) return [];
-	return line.split('|').map((field) => field.trim());
-}
-
-/**
- * `pipeFields` capped at the row's canonical field count: separators beyond the
- * expected count merge back into the trailing (free-text) field. Verdict rows
- * ([REVIEWED], [CRITIC], [FEEDBACK-VERIFIED]) carry prose evidence in their
- * last field, and prose containing literal pipes (regex text, `,;|`, shell
- * snippets) otherwise splits the row past its strict field-count check and the
- * whole verdict becomes unparseable. Deterministic: the enumerated leading
- * fields are never merged.
- */
-function pipeFieldsCapped(line: string, expectedFieldCount: number): string[] {
-	const fields = pipeFields(line);
-	if (fields.length <= expectedFieldCount) return fields;
-	const capped = [
-		...fields.slice(0, expectedFieldCount - 1),
-		fields.slice(expectedFieldCount - 1).join('|'),
-	];
-	// The enumerated leading fields are untouched, so machine-checked positions
-	// (classification, severity, file:line) stay correct. But the pipe may have
-	// originated in a NON-trailing prose field, in which case the trailing prose
-	// fields are re-arranged rather than preserved. Fidelity-safe only for
-	// trailing-field pipes; this warn (debug-gated) is the only trace.
-	warn(
-		`[pr-workflow-gate] verdict row pipe tail-merge applied (expected ${expectedFieldCount} fields, received ${fields.length}); leading machine fields preserved, trailing prose fields merged: ${line.slice(0, 120)}`,
-	);
-	return capped;
-}
-
-function feedbackArtifactCoversItems(
-	directory: string,
-	state: PrWorkflowGateState,
-	batchId: string,
-	laneId: string,
-	itemIds: readonly string[],
-): boolean {
-	const record = findByBatchId(directory, batchId, {
-		parentSessionId: state.sessionID,
-	}).find((candidate) => candidate.laneId === laneId);
-	const ref = record?.result?.outputRef?.trim();
-	const loaded = ref ? readLaneOutput(directory, ref) : null;
-	if (!loaded) return false;
-	const rows = loaded.artifact.text
-		.split(/\r?\n/)
-		.map((line) => pipeFieldsCapped(line, 4))
-		.filter((fields) => fields[0] === '[FEEDBACK-VERIFIED]');
-	if (rows.length !== itemIds.length) return false;
-	return itemIds.every((itemId) => {
-		const matches = rows.filter((fields) => fields[1] === itemId);
-		return (
-			matches.length === 1 &&
-			matches[0].length === 4 &&
-			matches[0].slice(1, 4).every(Boolean) &&
-			FEEDBACK_CLASSIFICATIONS.has(matches[0][2])
-		);
-	});
-}
-
-function feedbackArtifactTextCoversItems(
-	text: string,
-	itemIds: readonly string[],
-): boolean {
-	const rows = text
-		.split(/\r?\n/)
-		.map((line) => pipeFieldsCapped(line, 4))
-		.filter((fields) => fields[0] === '[FEEDBACK-VERIFIED]');
-	if (rows.length !== itemIds.length) return false;
-	return itemIds.every((itemId) => {
-		const matches = rows.filter((fields) => fields[1] === itemId);
-		return (
-			matches.length === 1 &&
-			matches[0].length === 4 &&
-			matches[0].slice(1, 4).every(Boolean) &&
-			FEEDBACK_CLASSIFICATIONS.has(matches[0][2])
-		);
-	});
-}
-
-/**
- * Read the settled verification classification of every inventory item from the
- * settled verification batches' lane outputs (issue #2131 criterion C1). An
- * item missing from the map has no settled verified classification.
- */
-function readSettledFeedbackClassifications(
-	directory: string,
-	state: PrWorkflowGateState,
-): Map<string, string> {
-	const classifications = new Map<string, string>();
-	for (const record of state.prFeedbackVerifications ?? []) {
-		for (const ownership of record.ownership) {
-			const delegation = findByBatchId(directory, record.batchId, {
-				parentSessionId: state.sessionID,
-			}).find((candidate) => candidate.laneId === ownership.laneId);
-			const ref = delegation?.result?.outputRef?.trim();
-			const loaded = ref ? readLaneOutput(directory, ref) : null;
-			if (!loaded) continue;
-			for (const line of loaded.artifact.text.split(/\r?\n/)) {
-				// Same trailing-field pipe tolerance as feedbackArtifactCoversItems:
-				// the fourth field is free-text and may legitimately contain literal
-				// pipes. Parsing it raw here let coverage accept a row the settled
-				// read then skipped, blocking a verified no-change item (PR #2182
-				// review finding UIB-002).
-				const fields = pipeFieldsCapped(line, 4);
-				if (
-					fields[0] !== '[FEEDBACK-VERIFIED]' ||
-					fields.length !== 4 ||
-					!fields.slice(1, 4).every(Boolean) ||
-					!FEEDBACK_CLASSIFICATIONS.has(fields[2])
-				) {
-					continue;
-				}
-				// A duplicate conflicting classification for one item is a
-				// contract violation; keep the first occurrence deterministic.
-				if (!classifications.has(fields[1])) {
-					classifications.set(fields[1], fields[2]);
-				}
-			}
-		}
-	}
-	return classifications;
-}
+// Issue #2385: the entire transcript/artifact-text -> canonical conversion
+// cluster (IndexedVerdictRows, the row parsers/validators/digest, the pipe
+// field codec, the feedback-artifact coverage readers, and the critic
+// single-row parser) moved verbatim to src/pr-review/legacy-transcript-adapter.ts.
 
 async function persistState(
 	directory: string,
