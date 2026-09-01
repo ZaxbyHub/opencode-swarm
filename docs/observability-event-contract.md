@@ -267,22 +267,28 @@ fact, not a unit of work.
 ### Delegation category
 
 #### delegation_begin
-Category `delegation`, severity `info`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:479`. Consumers: none — owner **#2047**. Retention: **#2045**.
+Category `delegation`, severity `info`, privacy `pseudonymous`. Producers
+`src/telemetry.ts:479` and `src/background/delegation-lifecycle.ts`
+(`emitDelegationBegin`, lane dispatch — issue #2045). Consumers: none — owner
+**#2047**. Retention: **#2045**.
 Required workflow IDs: `hostSessionId`, `taskId`. OTel mapping: `genai`.
 Lifecycle pair with `delegation_end`: the Task boundary emits the begin in
 `tool.execute.before` and the Task handoff emits the matching end (identical
 `sessionId`/`agentName`, paired by `callID`); the review engine emits an
-adjacent begin/end per dispatch attempt. `taskId` is `''` when no task is
-current at dispatch — the paired end may then carry the taskId resolved at
-completion (deliberate: triple equality holds only for the review-engine
-paths). Known gap: background (deferred) delegations emit a begin whose end has
-no producer yet — the trusted terminal completion event that would emit it does
-not exist, so background flows appear as begin-without-end.
+adjacent begin/end per dispatch attempt; lane dispatch emits the begin at its
+start record and the shared terminal claim emits the matching end. `taskId` is
+`''` when no task is current at dispatch — the paired end may then carry the
+taskId resolved at completion (deliberate: triple equality holds only for the
+review-engine paths). Known gap: a lane begin can remain orphaned when its
+settle resolves non-claimed (duplicate/conflict — the winner's own begin/end
+pair already exists) or when a lane is stale-swept before any terminal;
+cost rollups are unaffected (they key on `delegation_end.record_id`).
 
 #### delegation_end
-Category `delegation`, severity `info`, privacy `pseudonymous`. Producer
-`src/telemetry.ts:489`. Consumer: `src/services/cost-accounting.ts:127`
+Category `delegation`, severity `info`, privacy `pseudonymous`. Producers
+`src/telemetry.ts:489` and `src/background/delegation-lifecycle.ts`
+(`emitDelegationCostObservation`, claimed lane terminals — issue #2045).
+Consumer: `src/services/cost-accounting.ts:127`
 (`readTelemetryEvents` → `summarizeTelemetryCosts` → `/swarm costs`). Retention:
 **#2043**. Required workflow IDs: `hostSessionId`, `taskId`. OTel mapping:
 `genai`. `agentName` is the delegated agent's `subagent_type` as dispatched

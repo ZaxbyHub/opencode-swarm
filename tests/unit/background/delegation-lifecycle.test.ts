@@ -95,6 +95,7 @@ describe('delegation-lifecycle', () => {
 	let restoreClock: () => void;
 	let ends: Array<{ sessionId: string; agent: string; result: string }>;
 	let begins: string[];
+	let costFields: Array<Record<string, unknown>>;
 	let realTelemetry: typeof lifecycleInternals.telemetry;
 
 	beforeEach(() => {
@@ -102,6 +103,7 @@ describe('delegation-lifecycle', () => {
 		restoreClock = freezeClock({ fixedNow: NOW });
 		ends = [];
 		begins = [];
+		costFields = [];
 		realTelemetry = lifecycleInternals.telemetry;
 		lifecycleInternals.telemetry = {
 			delegationBegin: (sessionId: string) => {
@@ -112,8 +114,10 @@ describe('delegation-lifecycle', () => {
 				agent: string,
 				_taskId: string,
 				result: string,
+				emittedCostFields: Record<string, unknown>,
 			) => {
 				ends.push({ sessionId, agent, result });
+				costFields.push(emittedCostFields);
 			},
 		} as never;
 	});
@@ -313,6 +317,64 @@ describe('delegation-lifecycle', () => {
 		expect(() =>
 			delegationCostRecordMaterial(makeRecord({ laneId: undefined })),
 		).toThrow(/laneId/);
+	});
+
+	it('emitted cost identity fields are deterministic and join by canonical record fields', async () => {
+		// PRR-006: pin the actual hash inputs, not just the emission count — a
+		// regression in the domain strings, material, or slice length must fail.
+		const { createHash } = await import('node:crypto');
+		const record = await recordToLedger(dir, makeRecord());
+		await settleDelegationTerminal(
+			dir,
+			record,
+			{ status: 'completed', result: COMPLETED_RESULT },
+			{ model: 'test-model' },
+			NOW,
+		);
+		expect(costFields).toHaveLength(1);
+		const emitted = costFields[0];
+		const material = 'parent-1\0batch-1\0lane:lane-a';
+		const short = (input: string) =>
+			createHash('sha256').update(input).digest('hex').slice(0, 32);
+		// record_id: sha256 over the v1 domain + canonical record-field material.
+		expect(emitted.record_id).toBe(short(`delegation-cost-id-v1\0${material}`));
+		// identity_fingerprint: material + prefixed agent + model.
+		expect(emitted.identity_fingerprint).toBe(
+			short(`delegation-cost-identity-v1\0${material}\0mega_sme\0test-model`),
+		);
+		expect(emitted.parent_session_digest).toBe(
+			short('delegation-cost-parent-v1\0parent-1'),
+		);
+		expect(emitted.child_session_digest).toBe(
+			short('delegation-cost-child-v1\0sess-lane-1'),
+		);
+		expect(emitted.version).toBe(1);
+		// Re-settle a fresh identical lane: the identity fields are identical
+		// (deterministic join), and distinct from the Task-side material scheme.
+		const second = await recordToLedger(
+			dir,
+			makeRecord({
+				correlationId: 'sess-lane-2',
+				subagentSessionId: 'sess-lane-2',
+			}),
+		);
+		await settleDelegationTerminal(
+			dir,
+			second,
+			{ status: 'completed', result: COMPLETED_RESULT },
+			{ model: 'test-model' },
+			NOW,
+		);
+		expect(costFields).toHaveLength(2);
+		// Same laneId + parent + callID → same record_id (same unit of work
+		// identity scheme); child digest differs (different lane session).
+		expect(costFields[1].record_id).toBe(emitted.record_id);
+		expect(costFields[1].identity_fingerprint).toBe(
+			emitted.identity_fingerprint,
+		);
+		expect(costFields[1].child_session_digest).not.toBe(
+			emitted.child_session_digest,
+		);
 	});
 
 	it('cost record ids are deterministic and distinct from the Task scheme', async () => {

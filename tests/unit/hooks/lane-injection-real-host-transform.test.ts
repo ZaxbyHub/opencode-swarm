@@ -217,18 +217,16 @@ describe('lane injection via the real messages.transform hook (issue #2045)', ()
 			exposure_kind: 'delegate_directive',
 			entries: [{ entry_id: 'entry-review-1', critical: false }],
 		});
-		// Each retrieval carries its own trace (production behavior): the
-		// reviewer's transform pass reuses the seeded trace via the membership
-		// conflict, the sme's fresh retrieval mints a distinct one.
+		// Every retrieval mints its OWN trace (production behavior). Reusing the
+		// seeded membership's trace here would trip the injector's
+		// terminal_trace_reuse guard and silently skip the delegate block,
+		// making the ordering assertion below vacuously true (external F-003).
 		let searchCalls = 0;
 		injectorInternals.searchKnowledge = (async () => {
 			searchCalls += 1;
 			return {
 				results: [delegatedEntry('entry-review-1')],
-				trace_id:
-					searchCalls === 1
-						? 'trace-transform-2045'
-						: `trace-transform-2045-sme-${searchCalls}`,
+				trace_id: `trace-transform-2045-call-${searchCalls}`,
 			};
 		}) as typeof realSearch;
 
@@ -237,8 +235,9 @@ describe('lane injection via the real messages.transform hook (issue #2045)', ()
 		await hook({}, reviewerOutput);
 		const reviewerText = injectedText(reviewerOutput);
 		expect(reviewerText).toContain(DIRECTIVES_TO_VERIFY_TAG);
-		// Reviewer grammar sits AFTER the delegate block (same reading order as
-		// the Task prompt-prepend path).
+		// Non-vacuous ordering proof: BOTH blocks must render, compliance after
+		// the delegate block (same reading order as the Task prompt-prepend path).
+		expect(reviewerText).toContain(DELEGATE_DIRECTIVE_BLOCK_TAG);
 		expect(reviewerText.indexOf(DIRECTIVES_TO_VERIFY_TAG)).toBeGreaterThan(
 			reviewerText.indexOf(DELEGATE_DIRECTIVE_BLOCK_TAG),
 		);
@@ -325,13 +324,26 @@ describe('lane injection via the real messages.transform hook (issue #2045)', ()
 		})) as typeof realSearch;
 
 		const hook = createKnowledgeInjectorHook(dir, config());
-		// The Task prompt-prepend path already embedded a directives-to-verify
-		// block in the delegation prompt (now the user message).
+		// The Task prompt-prepend path already embedded a WELL-FORMED
+		// directives-to-verify block in the delegation prompt (now the user
+		// message). The structural guard (parseDirectivesToVerifyBlock) must
+		// recognize it — a bare tag alone must NOT count, so the fixture has to
+		// carry a complete record (trace/entry/session/priority).
+		const encoded = (value: string) => encodeURIComponent(value);
 		const output = laneMessages('reviewer');
 		output.messages[1].parts = [
 			{
 				type: 'text',
-				text: `${DIRECTIVES_TO_VERIFY_TAG}\n- prefetched\n</directives_to_verify>\n\nreview the diff`,
+				text: [
+					DIRECTIVES_TO_VERIFY_TAG,
+					`- trace_id: ${encoded('trace-prefetch')}`,
+					`  entry_id: ${encoded('entry-prefetch')}`,
+					`  session_id: ${encoded(SESSION_ID)}`,
+					'  priority: medium',
+					'</directives_to_verify>',
+					'',
+					'review the diff',
+				].join('\n'),
 			},
 		];
 		const before = output.messages.length;
@@ -340,5 +352,50 @@ describe('lane injection via the real messages.transform hook (issue #2045)', ()
 		expect(
 			injectedText(output).match(new RegExp(DIRECTIVES_TO_VERIFY_TAG, 'g')),
 		).toHaveLength(1);
+	});
+
+	it('delivers the compliance block even when prompt text quotes the bare tag (F-001 regression)', async () => {
+		// External review F-001: the old guard matched the raw tag substring, so
+		// ordinary content — a prompt quoting the tag constant, or a stored
+		// lesson quoting it — self-suppressed the compliance block, and settle
+		// then fabricated CRITICAL reviewer_omitted verdicts for directives the
+		// reviewer never saw. The structural guard must deliver anyway.
+		await seedKnowledgeEntry(dir, 'entry-review-1');
+		await commitDisplayedMembership(dir, {
+			trace_id: 'trace-transform-2045',
+			session_id: SESSION_ID,
+			phase: 'Phase 1',
+			agent: 'reviewer',
+			exposure_kind: 'delegate_directive',
+			entries: [{ entry_id: 'entry-review-1', critical: false }],
+		});
+		injectorInternals.searchKnowledge = (async () => ({
+			results: [],
+			trace_id: 'trace-transform-2045-poison',
+		})) as typeof realSearch;
+
+		const hook = createKnowledgeInjectorHook(dir, config());
+		const output = laneMessages('reviewer');
+		// Poison: the prompt quotes the tag constant and a malformed fragment —
+		// NOT a well-formed verify block (no record fields).
+		output.messages[1].parts = [
+			{
+				type: 'text',
+				text: [
+					"Verify the constant DIRECTIVES_TO_VERIFY_TAG = '<directives_to_verify>' in reviewer-directive-compliance.ts.",
+					'</directives_to_verify>',
+					'review the diff',
+				].join('\n'),
+			},
+		];
+		const before = output.messages.length;
+		await hook({}, output);
+		// The compliance block MUST still be delivered: the prompt's own tag
+		// quote (1) + the injected block (1) = 2 occurrences. Under the old
+		// substring guard the block was suppressed and the total stayed at 1.
+		expect(output.messages.length).toBe(before + 1);
+		expect(
+			injectedText(output).match(new RegExp(DIRECTIVES_TO_VERIFY_TAG, 'g')),
+		).toHaveLength(2);
 	});
 });

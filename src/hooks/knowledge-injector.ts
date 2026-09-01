@@ -9,7 +9,7 @@
 import { createHash } from 'node:crypto';
 import {
 	buildDirectiveComplianceBlock,
-	DIRECTIVES_TO_VERIFY_TAG,
+	parseDirectivesToVerifyBlock,
 } from '../agents/reviewer-directive-compliance.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { getCurrentTaskId, loadPlan } from '../plan/manager.js';
@@ -789,23 +789,33 @@ async function injectForDelegateIntoMessages(
 		trace_id,
 		charBudget,
 	);
-	if (block) injectKnowledgeMessage(output, block, sessionId);
-
 	// Issue #2045 reviewer-grammar parity: reviewer-role delegations receive the
 	// per-phase "directives to verify" block on the transform path too, exactly
 	// as the Task prompt-prepend path provides it — never for any other role.
-	// Guarded against double delivery when the Task path already prepended it
-	// into the prompt (the block would then be present in the user message).
-	if (stripKnownSwarmPrefix(agentName).toLowerCase() === 'reviewer') {
-		const alreadyVerified = output.messages.some((m) =>
-			m.parts?.some((p) => p.text?.includes(DIRECTIVES_TO_VERIFY_TAG)),
+	// Double-delivery guard: STRUCTURAL parse (mirror of the Task path's
+	// hasDirectiveComplianceBlock), computed BEFORE the delegate splice below so
+	// the scan only sees pre-existing transcript content. A naive tag-substring
+	// match self-suppresses on ordinary content — a reviewer lane whose prompt
+	// quotes the tag constant, or a stored lesson quoting it — and a suppressed
+	// compliance block fabricates CRITICAL `reviewer_omitted` verdicts at settle
+	// for directives the reviewer never saw.
+	const isReviewer =
+		stripKnownSwarmPrefix(agentName).toLowerCase() === 'reviewer';
+	const alreadyVerified =
+		isReviewer &&
+		output.messages.some((m) =>
+			m.parts?.some(
+				(p) =>
+					typeof p.text === 'string' &&
+					parseDirectivesToVerifyBlock(p.text).length > 0,
+			),
 		);
-		if (!alreadyVerified) {
-			const toVerify = await readPhaseDirectivesToVerify(directory, phaseLabel);
-			const complianceBlock = buildDirectiveComplianceBlock(toVerify);
-			if (complianceBlock) {
-				injectReviewerComplianceMessage(output, complianceBlock, sessionId);
-			}
+	if (block) injectKnowledgeMessage(output, block, sessionId);
+	if (isReviewer && !alreadyVerified) {
+		const toVerify = await readPhaseDirectivesToVerify(directory, phaseLabel);
+		const complianceBlock = buildDirectiveComplianceBlock(toVerify);
+		if (complianceBlock) {
+			injectReviewerComplianceMessage(output, complianceBlock, sessionId);
 		}
 	}
 }

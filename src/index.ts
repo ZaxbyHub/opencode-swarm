@@ -1758,15 +1758,6 @@ async function initializeOpenCodeSwarm(
 				onLegacyCoderSettlementAdvisoryReplaced:
 					backgroundCompletionObserver.notifyLegacyCoderSettlementAdvisoryReplaced,
 			});
-			// Issue #2045 crash recovery (blocking lanes): a session close is a
-			// listed runtime maintenance trigger, and terminal lane records —
-			// including BLOCKING lanes that have no collector — replay their
-			// authoritative receipt reconciliation here from the durable
-			// terminalResult transcript. Bounded and fail-open inside.
-			const { recoverTerminalLaneReceipts } = await import(
-				'./background/delegation-lifecycle.js'
-			);
-			await recoverTerminalLaneReceipts(ctx.directory);
 		};
 	const delegationSanitizerHook = createDelegationSanitizerHook(ctx.directory);
 	const memoryLifecycleHooks = createMemoryLifecycleHooks({
@@ -2747,6 +2738,20 @@ async function initializeOpenCodeSwarm(
 							} catch {
 								// observation only; the facts ring records it
 							}
+						}
+						// Issue #2045 crash recovery (blocking lanes): NOT gated
+						// on backgroundSubagentsEnabled — blocking dispatch_lanes
+						// runs regardless of that flag, so its only terminal-receipt
+						// recovery path must too. Bounded (64-record cap + 5s
+						// admission budget), fail-open, near-zero cost on an empty
+						// or fully-recovered ledger.
+						try {
+							const { recoverTerminalLaneReceipts } = await import(
+								'./background/delegation-lifecycle.js'
+							);
+							await recoverTerminalLaneReceipts(ctx.directory);
+						} catch {
+							// fail-open — recovery must never break the event hook
 						}
 					}
 				}

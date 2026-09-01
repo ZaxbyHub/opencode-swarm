@@ -5,12 +5,13 @@
  * the background-delegations ledger and both record their start through
  * `recordPendingDelegationDetailed`; before issue #2045 only the Task side
  * settled terminals through `claimTerminalResult`, leaving lanes with the
- * weaker status-only `appendDelegationTransition` write. This module is the
- * single shared settle operation both transports converge on: it wraps the
- * existing exactly-once terminal claim (no second lifecycle implementation)
- * and emits the terminal observations the Task side already produces through
- * its `tool.execute.*` hooks — cost telemetry, trajectory, and knowledge
- * receipt reconciliation — so equivalent Task and lane dispatches leave
+ * weaker status-only `appendDelegationTransition` write. This module gives
+ * lanes the same exactly-once terminal semantics — `settleDelegationTerminal`
+ * wraps the SAME `claimTerminalResult` primitive the Task completion observer
+ * calls directly (one claim implementation, no second lifecycle state machine)
+ * — and emits the lane-side terminal observations the Task side produces
+ * through its `tool.execute.*` hooks (cost telemetry, trajectory, knowledge
+ * receipt reconciliation), so equivalent Task and lane dispatches leave
  * equivalent lifecycle facts behind.
  *
  * Every observation is fail-open and split into two durability classes — see
@@ -69,8 +70,7 @@ export type DelegationSettleKind =
 	| 'conflict'
 	| 'already_terminal_without_event'
 	| 'not_open'
-	| 'missing'
-	| 'failed';
+	| 'missing';
 
 export interface DelegationSettleOutcome {
 	kind: DelegationSettleKind;
@@ -155,7 +155,7 @@ export function buildDelegationTerminal(
  *
  * See {@link DelegationSettleKind} for the non-claim outcomes; callers map
  * `duplicate`/`conflict`/`already_terminal_without_event` to their benign
- * already-terminal handling and `missing`/`not_open`/`failed` to their
+ * already-terminal handling and `missing`/`not_open` to their
  * settle-failure diagnostics.
  */
 export async function settleDelegationTerminal(
@@ -534,10 +534,13 @@ export interface RecoverTerminalLaneReceiptsOptions {
  * the cap), and it persists an advancing
  * cursor (`.swarm/lane-receipt-recovery-cursor.json`, ordered by
  * `(updatedAt, correlationId)`), so each pass resumes after the last processed
- * record and wraps to the oldest once the end is reached — every candidate is
- * eventually attempted; the same page can never be re-scanned ahead of
- * starved records. Replays are ledger-idempotent, so a lost or wrapped cursor
- * only causes harmless rework. Fail-open per record; never throws.
+ * record and wraps to the oldest once the end is reached. Guarantees, stated
+ * exactly: under steady arrivals a candidate whose terminal commits with an
+ * ordering key OLDER than the cursor's position (a lock-contention straggler)
+ * is skipped until the next wrap — so a straggler is deferred, not lost, and
+ * an idle drain (a pass with nothing after the cursor) wraps immediately.
+ * Replays are ledger-idempotent, so a lost, stale, or wrapped cursor only
+ * causes harmless rework. Fail-open per record; never throws.
  */
 export async function recoverTerminalLaneReceipts(
 	directory: string,

@@ -2780,7 +2780,7 @@ async function collectOnce(
 			);
 			if (settled.kind === 'claimed') {
 				// Only tear down once the terminal write is CONFIRMED.
-				// `settleDelegationTerminal` returns not_open/missing/failed when the
+				// `settleDelegationTerminal` returns not_open/missing when the
 				// claim did not land; deleting the host session in those cases would
 				// leave the record open with no readable session — a permanent wedge
 				// strictly worse than the bug being fixed.

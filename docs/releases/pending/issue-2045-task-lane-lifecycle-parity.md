@@ -21,8 +21,10 @@ Exactly-once terminals:
   the session-close maintenance pass runs an incremental directory-wide sweep
   — at most 64 reconciliation starts per pass behind a 5 s pre-record
   admission budget and a durable advancing cursor that wraps at the end, so
-  every crashed lane is eventually recovered, including blocking lanes that
-  have no collector), replaying from the durable terminalResult transcript. The DIAGNOSTIC observations (cost telemetry,
+  crashed lanes are recovered by successive passes (a straggler terminal that
+  commits with an older ordering key than the cursor is deferred to the next
+  wrap rather than attempted immediately), including blocking lanes that have
+  no collector), replaying from the durable terminalResult transcript. The DIAGNOSTIC observations (cost telemetry,
   trajectory, and the audit-only non-critical `unacknowledged` knowledge
   observation, which bypasses the ledger) are exactly-once-at-emit: the same
   crash window the Task transport's hook emissions have always had. Lane records gain the immutable
