@@ -60,6 +60,8 @@ describe('dispatch-lanes blocking lifecycle (issue #2045)', () => {
 	const realGetSessionOps = _internals.getSessionOps;
 	let ends: string[];
 	let begins: string[];
+	/** Ordered begin/end event log — proves the begin-before-end invariant. */
+	let orderedEvents: string[];
 	let realTelemetry: typeof lifecycleInternals.telemetry;
 
 	beforeEach(() => {
@@ -67,10 +69,12 @@ describe('dispatch-lanes blocking lifecycle (issue #2045)', () => {
 		restoreClock = freezeClock({ fixedNow: NOW });
 		ends = [];
 		begins = [];
+		orderedEvents = [];
 		realTelemetry = lifecycleInternals.telemetry;
 		lifecycleInternals.telemetry = {
 			delegationBegin: () => {
 				begins.push('begin');
+				orderedEvents.push('begin');
 			},
 			delegationEnd: (
 				_sessionId: string,
@@ -79,6 +83,7 @@ describe('dispatch-lanes blocking lifecycle (issue #2045)', () => {
 				result: string,
 			) => {
 				ends.push(result);
+				orderedEvents.push(`end:${result}`);
 			},
 		} as never;
 	});
@@ -237,5 +242,30 @@ describe('dispatch-lanes blocking lifecycle (issue #2045)', () => {
 		// No begin/end pair was emitted for the unrecorded lane.
 		expect(begins).toHaveLength(0);
 		expect(ends).toHaveLength(0);
+	});
+
+	it('begin always precedes end even when the prompt resolves before the start record', async () => {
+		// The start-record promise is fired unawaited and awaited only before
+		// the settle, so a prompt that resolves INSTANTLY cannot let the
+		// delegation_end observation overtake the begin emitted inside the
+		// record chain's .then (implementation-review hardening case).
+		_internals.getSessionOps = () =>
+			blockingHost({
+				sessionId: 'sess-bl-6',
+				promptBehavior: async () => ({
+					data: { parts: [{ type: 'text' as const, text: 'instant' }] },
+					error: undefined,
+				}),
+			});
+		const result = await executeDispatchLanes(
+			{
+				timeout_ms: 5_000,
+				lanes: [{ id: 'runtime', agent: 'explorer', prompt: 'inspect' }],
+			},
+			dir,
+			{ sessionID: 'parent-bl-6' },
+		);
+		expect(result.success).toBe(true);
+		expect(orderedEvents).toEqual(['begin', 'end:completed']);
 	});
 });

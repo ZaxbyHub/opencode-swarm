@@ -168,6 +168,10 @@ export async function settleDelegationTerminal(
 	// terminal, unreadable store, missing record, or a record whose status is
 	// not open (terminal WITHOUT an event, or an event conflict it already
 	// audited). Re-read to classify; the fresh read is the truth.
+	// Edge note: a re-read of a `consumed` record (Task-only post-terminal
+	// machinery) would classify a replay as `conflict` rather than `duplicate`;
+	// lane records never reach `consumed`, and the claim-side duplicate check
+	// (terminalResult identity) fires first in every reachable lane path.
 	const reread = _internals.findByCorrelationId(
 		directory,
 		record.correlationId,
