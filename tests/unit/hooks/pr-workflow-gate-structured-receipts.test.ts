@@ -38,8 +38,9 @@ const originalResolveIsWorkingTreeCleanAsync =
 const originalResolvePrReviewDiffStatsAsync =
 	_test_exports.resolvePrReviewDiffStatsAsync;
 
-beforeEach(() => {
+beforeEach(async () => {
 	directory = canonicalMkdtemp('pr-structured-receipts-');
+	await fs.mkdir(path.join(directory, '.git'), { recursive: true });
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = () => PR_ARTIFACT_HEAD_SHA;
 	_test_exports.resolveCurrentGitHeadAsync = async () => PR_ARTIFACT_HEAD_SHA;

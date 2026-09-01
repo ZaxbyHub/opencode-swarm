@@ -37,6 +37,7 @@ describe('pending delegations lenient corruption visibility (#2384)', () => {
 		const safe = createSafeTestDir('swarm-bg-lenient-corrupt-');
 		const warnSpy = spyOn(logger, 'criticalWarn').mockImplementation(() => {});
 		try {
+			fs.mkdirSync(path.join(safe.dir, '.git'), { recursive: true });
 			await seedValidRecord(safe.dir);
 			const ledgerPath = path.join(
 				safe.dir,
@@ -71,6 +72,7 @@ describe('pending delegations lenient corruption visibility (#2384)', () => {
 		const safe = createSafeTestDir('swarm-bg-lenient-preserve-');
 		const warnSpy = spyOn(logger, 'criticalWarn').mockImplementation(() => {});
 		try {
+			fs.mkdirSync(path.join(safe.dir, '.git'), { recursive: true });
 			await seedValidRecord(safe.dir);
 			writeDelegationHealthArtifact(safe.dir, {
 				uncertainty: {
