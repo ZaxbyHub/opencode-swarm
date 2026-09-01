@@ -19,6 +19,7 @@ import * as path from 'node:path';
 import type { OpencodeClient } from '@opencode-ai/sdk';
 import { getAgentConfigs } from '../../../src/agents';
 import type { PluginConfig } from '../../../src/config';
+import { ALL_AGENT_NAMES } from '../../../src/config/agent-names';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { dispatchCriticAndWriteEvent } from '../../../src/hooks/full-auto-intercept';
 import { invalidateProviderCatalogCache } from '../../../src/services/model-preflight';
@@ -27,14 +28,9 @@ import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 const CATALOG_MODELS = { 'big-pickle': { id: 'big-pickle' } };
 
-const CRITIC_VARIANTS = [
-	'critic_sounding_board',
-	'critic_drift_verifier',
-	'critic_hallucination_verifier',
-	'critic_architecture_supervisor',
-	'critic_finding_validator',
-	'critic_oversight',
-] as const;
+const CRITIC_VARIANTS = ALL_AGENT_NAMES.filter((name) =>
+	name.startsWith('critic_'),
+);
 
 function catalogClient(fail = false): OpencodeClient {
 	return {
@@ -80,16 +76,12 @@ async function expectNoUnresolvedModelError(
 		tempDir,
 		registeredAgents,
 	);
-	const outcome = await hook
-		.toolBefore(
+	await expect(
+		hook.toolBefore(
 			{ tool: 'Task', sessionID: 'architect-1', callID: `call-${target}` },
 			{ args: { subagent_type: target, prompt: 'review the plan' } },
-		)
-		.catch((error: unknown) => error as Error);
-	expect(
-		outcome instanceof Error &&
-			outcome.message.includes('PLAN_CRITIC_MODEL_UNRESOLVED'),
-	).toBe(false);
+		),
+	).resolves.toBeUndefined();
 }
 
 const config = {
@@ -238,38 +230,65 @@ describe('issue #2271 bug 4 — critic-gate model preflight wiring', () => {
 		await expect(outcome).rejects.toThrow('effective model configuration');
 	});
 
-	test('composition root injects agents and the hook never rebuilds them', () => {
-		const hookSource = fs.readFileSync(
-			path.join(process.cwd(), 'src', 'hooks', 'delegation-gate.ts'),
-			'utf8',
+	test('injected agents resolve inherited critics while legacy callers use fallback (FB-004)', async () => {
+		swarmState.opencodeClient = catalogClientFor('custom', 'injected-model');
+		const inheritedConfig = {
+			...config,
+			agents: { critic: { model: 'custom/injected-model' } },
+		} as unknown as PluginConfig;
+		const registeredAgents = getAgentConfigs(inheritedConfig, tempDir);
+		const injectedHook = createDelegationGateHook(
+			inheritedConfig,
+			tempDir,
+			registeredAgents,
 		);
-		const indexSource = fs.readFileSync(
-			path.join(process.cwd(), 'src', 'index.ts'),
-			'utf8',
-		);
-		expect(hookSource).not.toContain('getAgentConfigs');
-		expect(indexSource).toMatch(
-			/createDelegationGateHook\(\s*configWithResolvedAutoReview,\s*ctx\.directory,\s*agents,\s*\)/,
-		);
+		await expect(
+			injectedHook.toolBefore(
+				{ tool: 'Task', sessionID: 'architect-1', callID: 'injected-critic' },
+				{
+					args: {
+						subagent_type: 'critic_sounding_board',
+						prompt: 'review the plan',
+					},
+				},
+			),
+		).resolves.toBeUndefined();
+
+		const legacyHook = createDelegationGateHook(inheritedConfig, tempDir);
+		await expect(
+			legacyHook.toolBefore(
+				{ tool: 'Task', sessionID: 'architect-1', callID: 'legacy-critic' },
+				{
+					args: {
+						subagent_type: 'critic_sounding_board',
+						prompt: 'review the plan',
+					},
+				},
+			),
+		).rejects.toThrow('PLAN_CRITIC_MODEL_UNRESOLVED');
 	});
 
 	test('delegation gate preflight fails open when the catalog is unreachable', async () => {
 		swarmState.opencodeClient = catalogClient(true);
 		const registeredAgents = getAgentConfigs(config, tempDir);
 		const hook = createDelegationGateHook(config, tempDir, registeredAgents);
-		const outcome = await hook
-			.toolBefore(
+		await expect(
+			hook.toolBefore(
 				{ tool: 'Task', sessionID: 'architect-1', callID: 'critic-call-2' },
 				{ args: { subagent_type: 'critic', prompt: 'review the plan' } },
-			)
-			.catch((error: unknown) => error as Error);
-		// The dispatch must not be denied by the preflight itself. Downstream
-		// gate stages may still reject for unrelated reasons — only the
-		// sentinel matters here.
-		expect(
-			outcome instanceof Error &&
-				outcome.message.includes('PLAN_CRITIC_MODEL_UNRESOLVED'),
-		).toBe(false);
+			),
+		).resolves.toBeUndefined();
+	});
+
+	test('legacy two-argument callers fail open when the catalog is unreachable (FB-006)', async () => {
+		swarmState.opencodeClient = catalogClient(true);
+		const hook = createDelegationGateHook(config, tempDir);
+		await expect(
+			hook.toolBefore(
+				{ tool: 'Task', sessionID: 'architect-1', callID: 'legacy-fail-open' },
+				{ args: { subagent_type: 'critic', prompt: 'review the plan' } },
+			),
+		).resolves.toBeUndefined();
 	});
 
 	test('non-critic Task dispatches are never blocked by the critic preflight', async () => {
