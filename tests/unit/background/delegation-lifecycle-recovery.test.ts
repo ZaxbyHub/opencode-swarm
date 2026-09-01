@@ -37,6 +37,7 @@ import {
 	type SessionOps,
 } from '../../../src/tools/dispatch-lanes.js';
 import { freezeClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const NOW = 1_750_000_000_000;
 const ENTRY_ID = 'entry-recovery-2045';
@@ -142,9 +143,7 @@ describe('terminal lane receipt recovery (issue #2045)', () => {
 	let telemetryEnds: string[];
 
 	beforeEach(() => {
-		dir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'lane-receipt-recovery-')),
-		);
+		dir = canonicalMkdtemp('lane-receipt-recovery-');
 		fs.writeFileSync(path.join(dir, '.git'), 'gitdir: fixture');
 		const isolatedHome = path.join(dir, 'home');
 		fs.mkdirSync(isolatedHome, { recursive: true });

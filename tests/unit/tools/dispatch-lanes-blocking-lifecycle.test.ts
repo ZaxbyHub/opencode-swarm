@@ -26,13 +26,12 @@ import {
 	type SessionOps,
 } from '../../../src/tools/dispatch-lanes.js';
 import { freezeClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const NOW = 1_750_000_000_000;
 
 function makeTempDir(): string {
-	return fs.realpathSync(
-		fs.mkdtempSync(path.join(os.tmpdir(), 'lane-blocking-lifecycle-')),
-	);
+	return canonicalMkdtemp('lane-blocking-lifecycle-');
 }
 
 function blockingHost(options: {

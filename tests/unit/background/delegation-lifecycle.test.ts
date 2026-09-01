@@ -29,6 +29,7 @@ import {
 	recordPendingDelegationDetailed,
 } from '../../../src/background/pending-delegations.js';
 import { freezeClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const NOW = 1_750_000_000_000;
 
@@ -97,9 +98,7 @@ describe('delegation-lifecycle', () => {
 	let realTelemetry: typeof lifecycleInternals.telemetry;
 
 	beforeEach(() => {
-		dir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'delegation-lifecycle-')),
-		);
+		dir = canonicalMkdtemp('delegation-lifecycle-');
 		restoreClock = freezeClock({ fixedNow: NOW });
 		ends = [];
 		begins = [];

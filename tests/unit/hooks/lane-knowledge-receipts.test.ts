@@ -22,6 +22,7 @@ import {
 	commitDisplayedMembership,
 	queryLiveMemberships,
 } from '../../../src/hooks/knowledge-receipt-ledger.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const LANE_SESSION_ID = 'sess-lane-child-1';
 const PARENT_SESSION_ID = 'sess-lane-parent-1';
@@ -65,9 +66,7 @@ describe('collectLaneDelegateAcks (issue #2045)', () => {
 	let dir: string;
 
 	beforeEach(() => {
-		dir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'lane-knowledge-receipts-')),
-		);
+		dir = canonicalMkdtemp('lane-knowledge-receipts-');
 	});
 
 	afterEach(() => {

@@ -36,6 +36,7 @@ import type {
 	SwarmKnowledgeEntry,
 } from '../../../src/hooks/knowledge-types.js';
 import { swarmState } from '../../../src/state.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const SESSION_ID = 'sess-transform-2045';
 
@@ -149,9 +150,7 @@ describe('lane injection via the real messages.transform hook (issue #2045)', ()
 	const realSearch = injectorInternals.searchKnowledge;
 
 	beforeEach(() => {
-		dir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'lane-injection-transform-')),
-		);
+		dir = canonicalMkdtemp('lane-injection-transform-');
 		fs.writeFileSync(path.join(dir, '.git'), 'gitdir: fixture');
 		// Isolate hive/home resolution (phase-directives test precedent).
 		prevHome = process.env.HOME;

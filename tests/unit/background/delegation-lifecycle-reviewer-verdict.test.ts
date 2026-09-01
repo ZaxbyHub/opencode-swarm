@@ -24,6 +24,7 @@ import {
 } from '../../../src/background/delegation-lifecycle.js';
 import type { BackgroundDelegationRecord } from '../../../src/background/pending-delegations.js';
 import { freezeClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const NOW = 1_750_000_000_000;
 const COMPLETED_RESULT_TEXT = 'lane output';
@@ -91,9 +92,7 @@ describe('reviewer-lane verdict reconciliation (issue #2045 end-to-end)', () => 
 	let telemetryEnds: string[];
 
 	beforeEach(() => {
-		dir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'delegation-lifecycle-rev-')),
-		);
+		dir = canonicalMkdtemp('delegation-lifecycle-rev-');
 		fs.writeFileSync(path.join(dir, '.git'), 'gitdir: fixture');
 		// Isolate hive/home resolution (phase-directives test precedent).
 		prevHome = process.env.HOME;

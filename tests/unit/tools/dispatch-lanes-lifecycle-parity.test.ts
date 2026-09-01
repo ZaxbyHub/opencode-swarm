@@ -35,6 +35,7 @@ import {
 	recordPendingDelegationDetailed,
 } from '../../../src/background/pending-delegations.js';
 import { freezeClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const NOW = 1_750_000_000_000;
 
@@ -97,9 +98,7 @@ describe('Task/lane lifecycle parity matrix (issue #2045)', () => {
 	let restoreClock: () => void;
 
 	beforeEach(() => {
-		dir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'lane-parity-')),
-		);
+		dir = canonicalMkdtemp('lane-parity-');
 		restoreClock = freezeClock({ fixedNow: NOW });
 	});
 
@@ -268,9 +267,7 @@ describe('Task production-path convergence (final-critic challenge)', () => {
 	let restoreClock: () => void;
 
 	beforeEach(() => {
-		dir = fs.realpathSync(
-			fs.mkdtempSync(path.join(os.tmpdir(), 'lane-parity-observer-')),
-		);
+		dir = canonicalMkdtemp('lane-parity-observer-');
 		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		restoreClock = freezeClock({ fixedNow: NOW });
 	});
