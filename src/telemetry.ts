@@ -29,6 +29,7 @@ export type TelemetryEvent =
 	| 'phase_changed'
 	| 'budget_updated'
 	| 'context_pruned'
+	| 'retrieval_routed'
 	| 'model_fallback'
 	/**
 	 * Issue #2271 bug 4 — a configured agent model id was POSITIVELY confirmed
@@ -534,7 +535,6 @@ export async function flushAndDrainTelemetry(): Promise<void> {
 // ============================================================================
 // Telemetry Convenience Object
 // ============================================================================
-
 export const telemetry = {
 	sessionStarted(sessionId: string, agentName: string): void {
 		_internals.emit('session_started', { sessionId, agentName });
@@ -1190,6 +1190,20 @@ export const telemetry = {
 			level,
 			occurrenceCount,
 		});
+	},
+
+	retrievalRouted(
+		sessionId: string,
+		data: {
+			mode: 'graph' | 'lexical' | 'semantic' | 'security' | 'test' | 'hybrid';
+			graph_hit: boolean;
+			fallback_reason: string | null;
+			token_budget_requested: number;
+			token_budget_used: number;
+			omitted_context_count: number;
+		},
+	): void {
+		_internals.emit('retrieval_routed', { sessionId, ...data });
 	},
 };
 

@@ -683,6 +683,8 @@ repo_map { "action": "data_trace", "entity": "user" }
 repo_map { "action": "data_trace", "entity": "API_BASE_URL" }
 repo_map { "action": "test_pack", "file": "src/foo.ts" }
 repo_map { "action": "test_pack", "diff": "--- a/src/foo.ts\n+++ b/src/foo.ts\n@@ ..." }
+repo_map { "action": "retrieve", "question": "Who calls createSession?", "symbol": "createSession" }
+repo_map { "action": "retrieve", "question": "Find exact string SWARM_FOO" }
 ```
 
 ## KG-14 expanded graph query actions (issue #1535)
@@ -739,6 +741,23 @@ control-character-checked (bounded at extraction time).
 | `data_trace` | `entity` (entity/table/config/env key; case-insensitive) OR `file` OR `symbol`, optional `top_n` (25) | `readers`/`writers`/`deleters`/`configurers` (each entry carries kind/line/evidence/confidence and `via: 'link' \| 'fact'`), touching `routes` (≤20), `tests`, fixed-vocabulary `riskNotes` (no tests detected; delete-ops coverage; cross-boundary writes) |
 | `test_pack` | `file` OR `files` OR `symbol` OR `diff` (unified diff; parsed via `getDiffContext`), optional `top_n` (25) | `tests` (`basis: 'import'` high / `'colocated'` medium, `evidence` = import specifier or colocated rationale, `coveredSymbols` = edge imported∪used ∩ target exports), `fixtures` (fixture-pattern files imported by ≥1 discovered test, with `usedBy` + `confidence`/`evidence`), `helpers` (non-fixture deps shared by ≥2 discovered tests), `uncoveredExports`, `riskNotes`, `associations` (materialized TESTS/USES_FIXTURE records, ≤200) |
 
+## KG-16 hybrid retrieval router (issue #1537)
+
+`retrieve` requires `question` and accepts the existing optional target fields
+(`file`, `files`, `symbol`, `diff`, `route_path`, `method`, `entity`), `top_n`,
+and `max_tokens`. It returns the deterministic mode, executed actions, bounded
+context, explanations, graph hit/miss, explicit fallback reason, warnings, and
+requested/used/omitted budget counters. The `semantic` mode is an intent class
+implemented by the zero-embedding `fuzzy_graph` algorithm (vocabulary expansion,
+IDF, and PageRank); it never claims embedding similarity.
+
+Explicit target hints intentionally take precedence over natural-language cues,
+except for an exact-string cue, which always selects literal verification. Route/entity
+hints otherwise select security packs, change/file scope selects hybrid or test packs,
+and file/symbol targets select graph queries. This keeps a caller's concrete scope
+deterministic while ensuring exact-string requests cannot be satisfied by unrelated
+graph evidence.
+
 Fixture patterns (module path, lowercase): a `fixtures?` / `__fixtures__` /
 `mocks?` / `factories` path segment, or a basename containing `fixture` /
 `mock` / `factory` / `test-utils` / `test-helpers` / `testing-utils`.
@@ -762,6 +781,11 @@ Fixture patterns (module path, lowercase): a `fixtures?` / `__fixtures__` /
   claim security proofs, and mirror the ontology extractor's conservative
   posture. `impact_cone` is unchanged; deeper route/data/test views are these
   dedicated actions.
+- `max_tokens` bounds packed retrieval context only. Router metadata is returned
+  alongside that context and is accounted for separately by
+  `metadataOverheadTokens`; when the requested context budget is too small to
+  carry even a compact action marker, the response is intentionally empty and
+  includes `context_budget_too_small` rather than silently implying coverage.
 - The unguarded-route advisory is a FILE-level heuristic: the auth/validation
   sweep covers the whole handler file, so a guarded sibling route suppresses
   the advisory for every route in that file — and absence of the advisory is

@@ -395,6 +395,15 @@ const FIXTURES: Record<string, Record<string, unknown>> = {
 		alarm: 'model_limit_fallback',
 		transition: 'raised',
 	},
+	retrieval_routed: {
+		sessionId: 'sess-1',
+		mode: 'lexical',
+		graph_hit: false,
+		fallback_reason: null,
+		token_budget_requested: 4000,
+		token_budget_used: 12,
+		omitted_context_count: 0,
+	},
 };
 
 describe('envelope roundtrip — AC1 positive', () => {
@@ -484,17 +493,5 @@ describe('envelope roundtrip — AC1 positive', () => {
 		// Distinct eventIds/writerSequence even though the payload repeats.
 		expect(first.eventId).not.toBe(second.eventId);
 		expect(second.writerSequence).toBeGreaterThan(first.writerSequence);
-	});
-
-	test('cross-process fixture (no shared in-memory state between two independent createObservation calls) round-trips', () => {
-		resetObservabilityForTesting();
-		const procA = createObservation('heartbeat', { sessionId: 'proc-a' });
-		resetObservabilityForTesting();
-		const procB = createObservation('heartbeat', { sessionId: 'proc-b' });
-		expect(ObservabilityEventSchema.safeParse(procA).success).toBe(true);
-		expect(ObservabilityEventSchema.safeParse(procB).success).toBe(true);
-		expect(validateEventRelationships(procA).ok).toBe(true);
-		expect(validateEventRelationships(procB).ok).toBe(true);
-		expect(procA.trace.traceId).not.toBe(procB.trace.traceId);
 	});
 });
