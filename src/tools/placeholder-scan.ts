@@ -1180,8 +1180,22 @@ export async function placeholderScan(
 
 	const verdict: EvidenceVerdict = findings.length > 0 ? 'fail' : 'pass';
 
+	// Scoping-mode audit metadata: an added_lines-filtered run suppresses
+	// pre-existing-line findings by design, so the evidence must record that a
+	// scoping map was in force and how large it was — without duplicating the
+	// (potentially large) map itself into the evidence bundle.
+	const addedLinesValues = Object.values(added_lines ?? {});
+	const diffScoped = addedLinesValues.length > 0;
+	const addedLinesFiles = addedLinesValues.filter(
+		(lines) => (lines instanceof Set ? lines.size : lines.length) > 0,
+	).length;
+	const addedLinesTotal = addedLinesValues.reduce(
+		(sum, lines) => sum + (lines instanceof Set ? lines.size : lines.length),
+		0,
+	);
+
 	// Save evidence
-	await saveEvidence(directory, 'placeholder_scan', {
+	await _internals.saveEvidence(directory, 'placeholder_scan', {
 		task_id: 'placeholder_scan',
 		type: 'placeholder',
 		timestamp: new Date().toISOString(),
@@ -1192,6 +1206,11 @@ export async function placeholderScan(
 		findings_count: findings.length,
 		files_with_findings: filesWithFindings.size,
 		findings,
+		...(diffScoped && {
+			diff_scoped: true,
+			added_lines_files: addedLinesFiles,
+			added_lines_total: addedLinesTotal,
+		}),
 	});
 
 	return {
@@ -1253,4 +1272,5 @@ export const _internals = {
 	collectNonStubBodyLines,
 	isStubSkeletonFunction,
 	isConstantLiteralNode,
-} as const;
+	saveEvidence,
+};

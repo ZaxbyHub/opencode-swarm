@@ -246,7 +246,7 @@ export const TOOL_METADATA = {
 	},
 	approve_plan_critic: {
 		description:
-			'record a MANUAL plan_critic_gate approval snapshot to unblock the ratchet-tighter critic_pre_plan execution gate when the critic already returned APPROVED but the mechanical recorder failed to persist it (issue #2012)',
+			'record a MANUAL plan_critic_gate approval snapshot to unblock the ratchet-tighter critic_pre_plan execution gate when the critic already returned APPROVED but the mechanical recorder failed to persist it (issue #2012), or as the sanctioned recovery for a bookkeeping-grade hashed-field repair under the critic-gate PLAN FREEZE rule (the reason must state which case applies)',
 		agents: ['architect'],
 	},
 	prepare_pr_workflow_checkout: {

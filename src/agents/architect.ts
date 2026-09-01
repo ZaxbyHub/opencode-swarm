@@ -351,7 +351,7 @@ CLASSIFICATION RULES:
 - Misclassification = GATE_DELEGATION_BYPASS.
 
 ── STAGE A: AUTOMATED TOOL GATES ──
-diff → syntax_check → placeholder_scan → imports → lint fix → build_check → pre_check_batch
+diff → syntax_check → placeholder_scan (diff-scoped) → imports → lint fix → build_check → pre_check_batch
 Stage A tools return pass/fail. Fix failures by returning to coder.
 Stage A passing means: code compiles, parses, no secrets, no placeholders, no lint errors.
 Stage A passing does NOT mean: code is correct, secure, tested, or reviewed.

@@ -318,7 +318,8 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
 - **Symptom:** a `/swarm finalize` post-mortem claimed FR-009 ("schema permitted
   `pending >= general` multipliers") was "closed correctly" via a "schema `.refine`
   + runtime defensive clamp pattern" that never existed — commit `b7e12d36`
-  explicitly recorded FR-009 as deferred. The corrective PR (#2001) was closed
+  (canonical; post-rewrite local twin `d82c7172`, merged via #1978) explicitly
+  recorded FR-009 as deferred. The corrective PR (#2001) was closed
   unmerged, so every skill disposition it carried (S1/S4/P1/P2) was silently absent
   from `main` while the issue tracker recorded "fixed".
 - **Root cause:** post-mortems are LLM-generated narratives that can fabricate
@@ -333,7 +334,8 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
   exactly one re-critic), docs-attestation integrity in phase-wrap, and a qa-sweep
   staleness fix (the tool has been diff-aware since `added_lines` landed).
 - **FR-009 disposition: DESCOPE.** The runtime 3× idle-poll cap shipped
-  hard-coded (`shouldSkipIdlePoll`, PRs #1691 and #1978); the schema-configurable
+  hard-coded (`shouldSkipIdlePoll`, merged via PR #1978 from the branch
+  integrating the issue-#1691 investigation); the schema-configurable
   multipliers FR-009 guarded were never added (FR-003 configurability remains
   deferred), so there is no `.refine` target. Do not cite FR-009 as a closed
   schema+runtime precedent.

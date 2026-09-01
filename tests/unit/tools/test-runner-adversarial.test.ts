@@ -115,6 +115,9 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 	// ATTACK VECTOR 1: PATH TRAVERSAL VIA ToolContext.directory
 	// ============================================================
 	describe('ATTACK VECTOR 1: Path Traversal via ToolContext.directory', () => {
+		// Which layer rejects a traversal is ambient-state dependent; both are fail-closed.
+		const secureRejection =
+			/Cannot verify project root|Invalid working directory/;
 		test('SECURE: ../../etc is REJECTED with validation error', async () => {
 			// Attack: Pass path traversal as directory
 			const traversalPath = '../../etc';
@@ -125,14 +128,12 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			} as any);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('Cannot verify project root');
-
+			expect(parsed.error).toMatch(secureRejection);
 			// Verify nothing was passed to spawn
 			expect(spawnCalls.length).toBe(0);
 
 			// STATUS: SECURE - Path traversal is rejected before any spawn
 		});
-
 		test('SECURE: ../../../root is REJECTED with validation error', async () => {
 			const traversalPath = '../../../root';
 
@@ -141,8 +142,7 @@ describe('test-runner.ts - ADVERSARIAL CWD SECURITY TESTS', () => {
 			} as any);
 			const parsed = JSON.parse(result);
 			expect(parsed.success).toBe(false);
-			expect(parsed.error).toContain('Cannot verify project root');
-
+			expect(parsed.error).toMatch(secureRejection);
 			expect(spawnCalls.length).toBe(0);
 
 			// STATUS: SECURE - Path traversal blocked
