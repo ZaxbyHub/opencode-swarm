@@ -2692,19 +2692,28 @@ export class SQLiteMemoryProvider
 	private projectRelationsFromStorage(
 		records: readonly MemoryRecord[],
 	): MemoryRecord[] {
-		const query = this.requireDb().query<
+		if (records.length === 0) return [];
+		// Do not add this read to bun:sqlite's small per-Database query cache. Once
+		// that cache evicts a compiled statement, Bun can retain its Windows file
+		// handle until GC even after db.close() (see backfillProvenanceColumns).
+		// prepare()+finalize() gives this bounded projection an explicit lifetime.
+		const query = this.requireDb().prepare<
 			{ target_id: string },
 			[string, number]
 		>(
 			' SELECT target_id FROM memory_relations WHERE source_id = ? ORDER BY target_id ASC LIMIT ?',
 		);
-		return records.map(({ relations: _derived, ...record }) => {
-			const relations = query.all(record.id, 32).map((row) => ({
-				memoryId: row.target_id,
-				type: 'merged_with' as const,
-			}));
-			return relations.length ? { ...record, relations } : record;
-		});
+		try {
+			return records.map(({ relations: _derived, ...record }) => {
+				const relations = query.all(record.id, 32).map((row) => ({
+					memoryId: row.target_id,
+					type: 'merged_with' as const,
+				}));
+				return relations.length ? { ...record, relations } : record;
+			});
+		} finally {
+			query.finalize();
+		}
 	}
 
 	private writeMemory(record: MemoryRecord): void {
