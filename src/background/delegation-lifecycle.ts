@@ -13,9 +13,10 @@
  * receipt reconciliation — so equivalent Task and lane dispatches leave
  * equivalent lifecycle facts behind.
  *
- * Every observation is fail-open and runs only when the claim disposition is
- * `claimed`: replays (duplicate polls, concurrent collectors, cross-process
- * resume) never re-emit observations.
+ * Every observation is fail-open and split into two durability classes — see
+ * the `settleDelegationTerminal` docstring for the contract: AUTHORITATIVE
+ * ledger-committed receipts re-run on `duplicate` replays (crash recovery),
+ * while DIAGNOSTIC observations run only on `claimed` (exactly-once-at-emit).
  */
 
 import { createHash } from 'node:crypto';
