@@ -28,6 +28,7 @@ import {
 	captureOrMergeBaseline,
 	loadBaseline,
 	MAX_BASELINE_FINDINGS,
+	partitionAgainstBaseline,
 } from './sast-baseline';
 
 // ============ Types ============
@@ -58,6 +59,16 @@ export interface SastScanInput {
 	 * baseline diff mode: only findings absent from the phase baseline fail.
 	 */
 	phase?: number;
+	/**
+	 * Audited refresh rationale (issue #2302). Required when a capture would
+	 * absorb findings that match neither the exact fingerprints nor the
+	 * reflow identities of the prior baseline for already-indexed files —
+	 * without it that capture is BLOCKED and the baseline is left untouched.
+	 * Only meaningful together with capture_baseline: true.
+	 */
+	baseline_refresh_rationale?: string;
+	/** Session id of the calling agent, recorded as the triage actor. */
+	session_id?: string;
 	/** Host/tool cancellation propagated to optional external scanners. */
 	abort_signal?: AbortSignal;
 }
@@ -95,17 +106,34 @@ export interface SastScanResult {
 	};
 	// Baseline-diffing fields — present when capture_baseline is true or a baseline was loaded
 	/** 'baseline_captured' when capture_baseline:true succeeded */
-	status?: 'baseline_captured' | 'baseline_merged';
+	status?:
+		| 'baseline_captured'
+		| 'baseline_merged'
+		| 'baseline_absorption_blocked';
 	/** Number of findings recorded in the baseline (capture mode only) */
 	finding_count?: number;
+	/** Novel findings absorbed into the baseline under a refresh rationale (capture mode only) */
+	absorbed_finding_count?: number;
 	/** Findings NOT present in the baseline (diff mode only) */
 	new_findings?: SastScanFinding[];
 	/** Findings that match the baseline (diff mode only) */
 	pre_existing_findings?: SastScanFinding[];
+	/**
+	 * Findings that match the baseline via reflow identity — same finding,
+	 * new position/window (diff mode only, issue #2302). Reported separately;
+	 * never gate the verdict.
+	 */
+	moved_findings?: SastScanFinding[];
 	/** True when a baseline was loaded and diff mode was active */
 	baseline_used?: boolean;
 	/** True when pre_existing_findings were truncated to fit result limits */
 	truncated_pre_existing?: boolean;
+	/**
+	 * True when moved_findings were truncated to fit result limits. Advisory
+	 * telemetry only (no in-tree consumer) — kept for parity with
+	 * truncated_pre_existing and for future audit consumers.
+	 */
+	truncated_moved_findings?: boolean;
 }
 
 export type SastFailureKind =
@@ -664,7 +692,11 @@ export async function sastScan(
 			captureFindings,
 			engine,
 			scannedFilePaths,
-			{ abortSignal: abort_signal },
+			{
+				abortSignal: abort_signal,
+				refreshRationale: input.baseline_refresh_rationale,
+				actor: input.session_id,
+			},
 		);
 
 		// Even on capture error, return a pass so the architect flow continues —
@@ -674,10 +706,23 @@ export async function sastScan(
 				? 'baseline_captured'
 				: captureResult.status === 'merged'
 					? 'baseline_merged'
-					: undefined;
+					: captureResult.status === 'absorption_blocked'
+						? 'baseline_absorption_blocked'
+						: undefined;
 
 		if (captureResult.status === 'error') {
 			warn(`SAST Baseline: capture failed — ${captureResult.message}`);
+		} else if (captureResult.status === 'absorption_blocked') {
+			warn(`SAST Baseline: ${captureResult.message}`);
+		} else if (
+			captureResult.status === 'merged' &&
+			captureResult.absorbed_finding_count > 0
+		) {
+			warn(
+				`SAST Baseline: merged and absorbed ${captureResult.absorbed_finding_count} novel finding(s) ` +
+					'under the supplied refresh rationale. If this capture ran after a gate failure, ' +
+					'those findings may be coder-introduced — verify before proceeding.',
+			);
 		}
 
 		const finalFindings = allFindings.slice(0, MAX_FINDINGS);
@@ -714,21 +759,29 @@ export async function sastScan(
 			summary,
 			status: captureStatus,
 			finding_count:
-				captureResult.status !== 'error'
+				captureResult.status === 'written' || captureResult.status === 'merged'
 					? captureResult.fingerprint_count
 					: undefined,
+			...(captureResult.status === 'merged' &&
+			captureResult.absorbed_finding_count > 0
+				? { absorbed_finding_count: captureResult.absorbed_finding_count }
+				: {}),
 			baseline_used: false,
 		};
 	}
 
 	// ── Diff mode (baseline-aware) ────────────────────────────────────────────
 	// When a phase is provided and a baseline exists, partition findings into
-	// new (not in baseline) vs pre_existing (in baseline). Only new findings
-	// drive the fail verdict. Severity threshold applied post-partition.
+	// new (matches neither the baseline nor its reflow set) vs pre_existing
+	// (exact fingerprint match) vs moved (reflow match — same finding at a new
+	// position/window, issue #2302). Only new findings drive the fail verdict.
+	// Severity threshold applied post-partition.
 	let newFindings: SastScanFinding[] | undefined;
 	let preExistingFindings: SastScanFinding[] | undefined;
+	let movedFindings: SastScanFinding[] | undefined;
 	let baselineUsed = false;
 	let truncatedPreExisting = false;
+	let truncatedMoved = false;
 
 	if (phase !== undefined && Number.isInteger(phase) && phase >= 1) {
 		const baselineResult = loadBaseline(directory, phase);
@@ -740,24 +793,24 @@ export async function sastScan(
 			// Partition ALL raw findings (pre-truncation) — avoids false passes
 			// from new findings that would have been truncated before partitioning.
 			const indexed = assignOccurrenceIndices(allFindings, directory);
+			const partition = partitionAgainstBaseline(
+				indexed,
+				baselineSet,
+				baselineResult.reflowKeys ?? [],
+			);
 
-			const rawNew: SastScanFinding[] = [];
-			const rawPreExisting: SastScanFinding[] = [];
-
-			for (const { finding, stable, fingerprint } of indexed) {
-				if (!stable || !baselineSet.has(fingerprint)) {
-					// Unstable fingerprint or not in baseline → treat as NEW (fail-closed)
-					rawNew.push(finding);
-				} else {
-					rawPreExisting.push(finding);
-				}
-			}
-
-			// Truncate per-bucket (new_findings take priority)
-			newFindings = rawNew.slice(0, MAX_FINDINGS);
+			// Truncate per-bucket (new_findings take priority, then
+			// pre_existing, then moved)
+			newFindings = partition.newFindings.slice(0, MAX_FINDINGS);
 			const preExistingBudget = Math.max(0, MAX_FINDINGS - newFindings.length);
-			preExistingFindings = rawPreExisting.slice(0, preExistingBudget);
-			truncatedPreExisting = rawPreExisting.length > preExistingBudget;
+			preExistingFindings = partition.preExisting.slice(0, preExistingBudget);
+			truncatedPreExisting = partition.preExisting.length > preExistingBudget;
+			const movedBudget = Math.max(
+				0,
+				preExistingBudget - preExistingFindings.length,
+			);
+			movedFindings = partition.moved.slice(0, movedBudget);
+			truncatedMoved = partition.moved.length > movedBudget;
 		} else if (baselineResult.status === 'invalid_schema') {
 			warn(
 				`SAST Baseline: could not load baseline for phase ${phase} — ${baselineResult.errors.join(', ')}. Falling back to legacy behavior.`,
@@ -777,10 +830,11 @@ export async function sastScan(
 			);
 		}
 	} else {
-		// findings[] = all findings (new + pre_existing) for backward compat with callers
+		// findings[] = all findings (new + pre_existing + moved) for backward compat with callers
 		finalFindings = [
 			...(newFindings ?? []),
 			...(preExistingFindings ?? []),
+			...(movedFindings ?? []),
 		].slice(0, MAX_FINDINGS);
 	}
 
@@ -854,6 +908,7 @@ export async function sastScan(
 			...(baselineUsed && {
 				new_findings: newFindings,
 				pre_existing_findings: preExistingFindings,
+				moved_findings: movedFindings,
 				baseline_used: true,
 			}),
 		},
@@ -873,8 +928,10 @@ export async function sastScan(
 	if (baselineUsed) {
 		result.new_findings = newFindings;
 		result.pre_existing_findings = preExistingFindings;
+		result.moved_findings = movedFindings;
 		result.baseline_used = true;
 		if (truncatedPreExisting) result.truncated_pre_existing = true;
+		if (truncatedMoved) result.truncated_moved_findings = true;
 	}
 
 	return result;
@@ -909,7 +966,7 @@ export const sast_scan: ToolDefinition = createSwarmTool({
 			.boolean()
 			.optional()
 			.describe(
-				'When true, capture/merge a phase-scoped baseline of pre-existing findings. Requires phase. Subsequent scans with phase only fail on NEW findings.',
+				'When true, capture/merge a phase-scoped baseline of pre-existing findings. Requires phase. Subsequent scans with phase only fail on NEW findings. Merging findings not previously in the baseline (any file) is BLOCKED unless baseline_refresh_rationale is provided.',
 			),
 		phase: z
 			.number()
@@ -918,6 +975,15 @@ export const sast_scan: ToolDefinition = createSwarmTool({
 			.optional()
 			.describe(
 				'Current phase number (positive integer >= 1). Required with capture_baseline. Enables baseline diff when provided on non-capture scans.',
+			),
+		baseline_refresh_rationale: z
+			.string()
+			.trim()
+			.min(1)
+			.max(500)
+			.optional()
+			.describe(
+				'Audited rationale required when capture_baseline would absorb findings not previously in the baseline — for already-indexed AND first-time files (e.g. "pre-delegation capture for task 2.1; findings verified pre-existing"). Recorded per finding in the baseline triage log. Only meaningful with capture_baseline: true.',
 			),
 	},
 	execute: async (args, directory, ctx) => {
@@ -928,12 +994,15 @@ export const sast_scan: ToolDefinition = createSwarmTool({
 			severity_threshold: 'low' | 'medium' | 'high' | 'critical' | undefined;
 			capture_baseline: boolean | undefined;
 			phase: number | undefined;
+			baseline_refresh_rationale: string | undefined;
 		};
 
 		try {
 			if (args && typeof args === 'object') {
 				const rawPhase = (args as Record<string, unknown>).phase;
 				const rawCapture = (args as Record<string, unknown>).capture_baseline;
+				const rawRationale = (args as Record<string, unknown>)
+					.baseline_refresh_rationale;
 				safeArgs = {
 					directory: args.directory as unknown as string | undefined,
 					changed_files: args.changed_files as unknown as string[] | undefined,
@@ -952,6 +1021,12 @@ export const sast_scan: ToolDefinition = createSwarmTool({
 							: undefined,
 					capture_baseline:
 						typeof rawCapture === 'boolean' ? rawCapture : undefined,
+					baseline_refresh_rationale:
+						typeof rawRationale === 'string' &&
+						rawRationale.trim().length >= 1 &&
+						rawRationale.trim().length <= 500
+							? rawRationale.trim()
+							: undefined,
 				};
 			} else {
 				safeArgs = {
@@ -960,6 +1035,7 @@ export const sast_scan: ToolDefinition = createSwarmTool({
 					severity_threshold: undefined,
 					capture_baseline: undefined,
 					phase: undefined,
+					baseline_refresh_rationale: undefined,
 				};
 			}
 		} catch {
@@ -970,6 +1046,7 @@ export const sast_scan: ToolDefinition = createSwarmTool({
 				severity_threshold: undefined,
 				capture_baseline: undefined,
 				phase: undefined,
+				baseline_refresh_rationale: undefined,
 			};
 		}
 
@@ -998,6 +1075,8 @@ export const sast_scan: ToolDefinition = createSwarmTool({
 			severity_threshold: safeArgs.severity_threshold ?? 'medium',
 			capture_baseline: safeArgs.capture_baseline,
 			phase: safeArgs.phase,
+			baseline_refresh_rationale: safeArgs.baseline_refresh_rationale,
+			session_id: ctx?.sessionID,
 			abort_signal: ctx?.abort,
 		};
 
