@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.159.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.159.2...v7.159.3) (2026-09-01)
+
+
+### Bug Fixes
+
+* **skill-usage:** clamp retention cutoff against poisoned future timestamps ([4a94432](https://github.com/ZaxbyHub/opencode-swarm/commit/4a9443233593841873afb848ead53fa4364d60a5))
+* **skill-usage:** clamp retention cutoff against poisoned future timestamps ([0dae736](https://github.com/ZaxbyHub/opencode-swarm/commit/0dae7360056ebbc95d15206c02047fdb02c1a544))
+
 ## [7.159.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.159.1...v7.159.2) (2026-08-31)
 
 
