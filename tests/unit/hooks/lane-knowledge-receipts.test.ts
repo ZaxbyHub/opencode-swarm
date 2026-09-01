@@ -212,6 +212,39 @@ describe('collectLaneDelegateAcks (issue #2045)', () => {
 		expect(appliedCount).toHaveLength(1);
 	});
 
+	it('replay mode recovers authoritative receipts without double-emitting the unacknowledged observation', async () => {
+		// Issue #2045 crash-recovery contract: the ledger-committed receipts are
+		// replay-safe; the audit-only non-critical `unacknowledged` observation is
+		// NOT (it bypasses the ledger), so replay mode suppresses it.
+		await seedMemberships(dir, [{ entry_id: ID_APPLIED, critical: false }]);
+		// First pass: no ACK marker for the shown non-critical -> one
+		// unacknowledged observation.
+		const first = await collectLaneDelegateAcks({
+			directory: dir,
+			sessionId: LANE_SESSION_ID,
+			agent: 'mega_sme',
+			transcript: 'lane finished without acking anything',
+		});
+		expect(first.emitted).toEqual([{ id: ID_APPLIED, type: 'unacknowledged' }]);
+		// Replay (duplicate settle path): the same reconciliation must not
+		// append a second unacknowledged event.
+		const replay = await collectLaneDelegateAcks({
+			directory: dir,
+			sessionId: LANE_SESSION_ID,
+			agent: 'mega_sme',
+			transcript: 'lane finished without acking anything',
+			replay: true,
+		});
+		expect(replay.emitted).toHaveLength(0);
+		const events = await readKnowledgeEvents(dir);
+		const unacknowledged = events.filter(
+			(e) =>
+				e.type === 'unacknowledged' &&
+				(e as { knowledge_id?: string }).knowledge_id === ID_APPLIED,
+		);
+		expect(unacknowledged).toHaveLength(1);
+	});
+
 	it('reports membership phases for reviewer verdict windowing', async () => {
 		await seedMemberships(dir, [{ entry_id: ID_APPLIED, critical: false }], {
 			phase: 'Phase 2',

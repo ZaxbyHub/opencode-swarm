@@ -348,4 +348,93 @@ describe('reviewer-lane verdict reconciliation (issue #2045 end-to-end)', () => 
 		);
 		expect(fs.existsSync(trajectoryPath)).toBe(false);
 	});
+	it('a crash before observations does not double-emit the audit-only unacknowledged observation on replay', async () => {
+		const { appendKnowledge, resolveSwarmKnowledgePath } = await import(
+			'../../../src/hooks/knowledge-store.js'
+		);
+		const { commitDisplayedMembership } = await import(
+			'../../../src/hooks/knowledge-receipt-ledger.js'
+		);
+		const { readKnowledgeEvents } = await import(
+			'../../../src/hooks/knowledge-events.js'
+		);
+		const { claimTerminalResult, buildBackgroundCompletionEventId } =
+			await import('../../../src/background/pending-delegations.js');
+		const entryId = 'entry-crash-noack';
+		await appendKnowledge(resolveSwarmKnowledgePath(dir), {
+			id: entryId,
+			tier: 'swarm',
+			lesson: 'Cite evidence',
+			category: 'process',
+			tags: [],
+			scope: 'global',
+			confidence: 0.85,
+			status: 'established',
+			confirmed_by: [],
+			project_name: 'test-project',
+			retrieval_outcomes: {
+				applied_count: 0,
+				succeeded_after_count: 0,
+				failed_after_count: 0,
+			},
+			schema_version: 2,
+			created_at: '2026-01-01T00:00:00.000Z',
+			updated_at: '2026-01-01T00:00:00.000Z',
+			directive_priority: 'medium',
+		} as never);
+		await commitDisplayedMembership(dir, {
+			trace_id: 'trace-crash-noack',
+			session_id: 'sess-lane-1',
+			phase: 'Phase 1',
+			agent: 'sme',
+			exposure_kind: 'delegate_directive',
+			entries: [{ entry_id: entryId, critical: false }],
+		});
+		const record = await recordToLedger(dir, makeRecord());
+		const crashedTerminal = {
+			text: COMPLETED_RESULT_TEXT,
+			chars: COMPLETED_RESULT_TEXT.length,
+			truncated: false,
+			digest: COMPLETED_RESULT.digest,
+		};
+		const directClaim = await claimTerminalResult(dir, record.correlationId, {
+			eventId: buildBackgroundCompletionEventId({
+				correlationId: record.correlationId,
+				jobId: record.jobId,
+				status: 'completed',
+				resultDigest: crashedTerminal.digest,
+			}),
+			status: 'completed' as const,
+			recordedAt: NOW,
+			result: crashedTerminal,
+		});
+		expect(directClaim?.disposition).toBe('claimed');
+		// Replay with a transcript that acks NOTHING for the shown non-critical:
+		// the first (crash-lost) pass would have emitted one `unacknowledged`
+		// observation; the replay must NOT append another.
+		const transcript = 'lane finished without acking anything';
+		const replay1 = await settleDelegationTerminal(
+			dir,
+			record,
+			{ status: 'completed', result: crashedTerminal },
+			{ transcript },
+			NOW + 1_000,
+		);
+		expect(replay1.kind).toBe('duplicate');
+		const replay2 = await settleDelegationTerminal(
+			dir,
+			record,
+			{ status: 'completed', result: crashedTerminal },
+			{ transcript },
+			NOW + 2_000,
+		);
+		expect(replay2.kind).toBe('duplicate');
+		const events = await readKnowledgeEvents(dir);
+		const unacknowledged = events.filter(
+			(e) =>
+				e.type === 'unacknowledged' &&
+				(e as { knowledge_id?: string }).knowledge_id === entryId,
+		);
+		expect(unacknowledged).toHaveLength(0);
+	});
 });

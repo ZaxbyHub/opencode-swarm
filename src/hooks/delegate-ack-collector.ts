@@ -141,6 +141,14 @@ export interface ReconcileShownDirectivesParams {
 	/** Host session the shown-set membership is bound to (V2 authority). */
 	sessionId: string;
 	taskId?: string;
+	/**
+	 * Replay mode (issue #2045 crash recovery): the AUTHORITATIVE receipts
+	 * (validator/ledger-committed ACK terminals, unacknowledged-critical
+	 * violations) still run — the ledger dedupes them — but the audit-only
+	 * `unacknowledged` NON-critical observation is exactly-once-at-emit (it
+	 * bypasses the ledger and would double-append on replay).
+	 */
+	replay?: boolean;
 }
 
 /**
@@ -424,6 +432,7 @@ export async function reconcileShownDirectives(
 		for (const [id, directive] of shownById) {
 			if (directive.priority === 'critical') continue;
 			if (ackedIds.has(id)) continue;
+			if (params.replay === true) continue;
 			result.unacknowledgedNonCritical.push(id);
 			silentEvents.push({
 				type: 'unacknowledged',
@@ -527,6 +536,12 @@ export async function collectLaneDelegateAcks(params: {
 	sessionId: string;
 	agent: string;
 	transcript: string;
+	/**
+	 * Replay mode (issue #2045 crash recovery): set by the lifecycle module's
+	 * duplicate-settle path so the ledger-committed receipts still close while
+	 * the audit-only non-critical observation stays exactly-once-at-emit.
+	 */
+	replay?: boolean;
 }): Promise<CollectLaneDelegateAcksResult> {
 	const empty: CollectLaneDelegateAcksResult = {
 		emitted: [],
@@ -570,6 +585,7 @@ export async function collectLaneDelegateAcks(params: {
 				agent: params.agent,
 				sessionId: params.sessionId,
 				taskId,
+				replay: params.replay,
 			});
 			combined.emitted.push(...outcome.emitted);
 			combined.unacknowledgedCriticals.push(...outcome.unacknowledgedCriticals);

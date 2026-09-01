@@ -134,17 +134,20 @@ export function buildDelegationTerminal(
  *
  * Durability model (final-critic challenge, crash between claim and
  * observations):
- * - The AUTHORITATIVE observations (knowledge receipts: delegate ACK terminals
- *   and reviewer verdicts) are re-run on `duplicate` replays. Their sink is the
- *   receipt ledger, whose terminal authority is idempotent (same-outcome
- *   replays are `idempotent_skips`), so a replay after a crash closes the
- *   receipts exactly once — a lane whose observation pass died mid-flight
- *   recovers on any later settle replay (restart, concurrent collector).
- * - The DIAGNOSTIC observations (cost telemetry, trajectory) are
- *   exactly-once-at-emit on `claimed` only — they have no deduplicating sink,
- *   and re-emitting them on replay would duplicate cost events. This is the
- *   same crash window the Task transport's `tool.execute.*` hook emissions
- *   have always had (documented transport parity, not a regression).
+ * - The AUTHORITATIVE receipts (validator/ledger-committed delegate ACK
+ *   terminals, unacknowledged-critical violations, and reviewer verdicts) are
+ *   re-run on `duplicate` replays: the receipt ledger's terminal authority is
+ *   idempotent (same-outcome replays are `idempotent_skips`), so a replay
+ *   after a crash closes the receipts exactly once — a lane whose observation
+ *   pass died mid-flight recovers on any later settle replay (restart,
+ *   concurrent collector).
+ * - The DIAGNOSTIC observations are exactly-once-at-emit on `claimed` only —
+ *   they have no deduplicating sink, and re-emitting them on replay would
+ *   duplicate records. This covers cost telemetry, trajectory, AND the
+ *   audit-only non-critical `unacknowledged` knowledge observation (which
+ *   bypasses the receipt ledger). It is the same crash window the Task
+ *   transport's `tool.execute.*` hook emissions have always had (documented
+ *   transport parity, not a regression).
  *
  * See {@link DelegationSettleKind} for the non-claim outcomes; callers map
  * `duplicate`/`conflict`/`already_terminal_without_event` to their benign
@@ -177,12 +180,15 @@ export async function settleDelegationTerminal(
 		// duplicate | resume_settlement | retry_ingestion | preserved | consumed —
 		// the terminal already exists. Replay the AUTHORITATIVE knowledge
 		// reconciliation only (ledger-idempotent, crash-recovery path); never the
-		// exactly-once-at-emit diagnostics.
+		// exactly-once-at-emit diagnostics — including the audit-only
+		// non-critical `unacknowledged` observation, which bypasses the ledger
+		// and would double-append on replay.
 		if (claim.disposition === 'duplicate' && observations.transcript) {
 			await reconcileLaneKnowledgeReceipts(
 				directory,
 				claim.record,
 				observations,
+				true,
 			);
 		}
 		return { kind: 'duplicate', record: claim.record };
@@ -337,11 +343,17 @@ async function appendDelegationTrajectoryObservation(
  * transcript against the directives actually shown to the lane session
  * (receipt-ledger memberships bound to the subagent session), plus — for
  * reviewer-role lanes — per-directive compliance adjudication.
+ *
+ * `replay: true` (the duplicate-settle crash-recovery path) keeps the
+ * ledger-committed receipts closing while suppressing the audit-only
+ * non-critical `unacknowledged` observation, which bypasses the ledger and
+ * must stay exactly-once-at-emit.
  */
 async function reconcileLaneKnowledgeReceipts(
 	directory: string,
 	record: BackgroundDelegationRecord,
 	observations: DelegationObservationInput,
+	replay = false,
 ): Promise<void> {
 	if (!observations.transcript) return;
 	try {
@@ -353,6 +365,7 @@ async function reconcileLaneKnowledgeReceipts(
 			sessionId: record.subagentSessionId,
 			agent: record.swarmPrefixedAgent,
 			transcript: observations.transcript,
+			replay,
 		});
 		if (record.normalizedAgent !== 'reviewer') return;
 		const phase = ack.phases.find((value) => Boolean(value));
