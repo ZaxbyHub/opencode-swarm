@@ -394,7 +394,7 @@ export interface PrReviewCircuitAdvanceInput {
 	threshold: number;
 	openDurationMs: number;
 	/** The staged dispatch requesting admission, when this advance guards one. */
-	admission?: { batchId: string; laneId: string };
+	admission?: { batchId: string; laneId: string } | undefined;
 	/** Latest-record signals for every dispatch lane of the current workflow. */
 	laneSignals: readonly PrReviewCircuitSignal[];
 	/**
@@ -406,7 +406,7 @@ export interface PrReviewCircuitAdvanceInput {
 		terminalStatus: string;
 		signal: PrReviewCircuitSignal | null;
 		terminalAtMs: number;
-	};
+	} | undefined;
 }
 
 export type PrReviewCircuitAdvanceResult =
