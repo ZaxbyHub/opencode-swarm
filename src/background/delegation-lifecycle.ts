@@ -618,7 +618,7 @@ export async function recoverTerminalLaneReceipts(
 	// Persist the advance; wrapping to the very end resets so the next pass
 	// starts from the oldest record again.
 	const nextCursor =
-		wrapped && processedAll ? null : lastProcessed ?? cursor ?? null;
+		wrapped && processedAll ? null : (lastProcessed ?? cursor ?? null);
 	if (nextCursor?.correlationId !== cursor?.correlationId) {
 		writeRecoveryCursor(directory, nextCursor);
 	}
