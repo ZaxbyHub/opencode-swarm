@@ -412,7 +412,12 @@ async function runDelegationTerminalObservations(
 /** Bounded per-pass cap for terminal-lane receipt recovery (crash window). */
 export const MAX_TERMINAL_LANE_RECEIPT_RECOVERY = 64;
 
-/** Whole-pass deadline for the directory-wide recovery (session-close hook). */
+/**
+ * Pre-record admission deadline for the directory-wide recovery pass
+ * (session-close hook): checked before EACH reconciliation, bounding how many
+ * records a pass may START — not the enumeration read/sort or an
+ * already-started reconciliation.
+ */
 export const TERMINAL_LANE_RECEIPT_RECOVERY_DEADLINE_MS = 5_000;
 
 const RECOVERY_CURSOR_FILE = 'lane-receipt-recovery-cursor.json';
@@ -496,7 +501,11 @@ export interface TerminalLaneReceiptRecoveryResult {
 }
 
 export interface RecoverTerminalLaneReceiptsOptions {
-	/** Whole-pass wall-clock budget. Default 5s; the pass stops cleanly. */
+	/**
+	 * Admission budget for STARTING a reconciliation. Default 5s; the pass
+	 * stops cleanly before the next record when exhausted. Does not bound the
+	 * enumeration or an in-flight reconciliation.
+	 */
 	deadlineMs?: number;
 	/** Test seam for the clock. */
 	now?: () => number;
@@ -519,7 +528,10 @@ export interface RecoverTerminalLaneReceiptsOptions {
  * recovers BLOCKING lane records that have no collector.
  *
  * Forward progress (final-critic round 3): the directory-wide pass is bounded
- * by BOTH a record cap and a whole-pass deadline, and it persists an advancing
+ * by a record cap and a pre-record admission deadline (checked before EACH
+ * reconciliation; it does not bound the candidate enumeration read/sort or an
+ * already-started reconciliation — those are bounded by the ledger read and
+ * the cap), and it persists an advancing
  * cursor (`.swarm/lane-receipt-recovery-cursor.json`, ordered by
  * `(updatedAt, correlationId)`), so each pass resumes after the last processed
  * record and wraps to the oldest once the end is reached — every candidate is

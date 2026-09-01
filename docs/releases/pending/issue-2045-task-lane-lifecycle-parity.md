@@ -19,10 +19,10 @@ Exactly-once terminals:
   once — and the replay is reached through two production recovery entries
   (collect_lane_results recovers the batch's terminal records per invocation;
   the session-close maintenance pass runs an incremental directory-wide sweep
-  — at most 64 records or 5 s per pass behind a durable advancing cursor that
-  wraps at the end, so every crashed lane is eventually recovered, including
-  blocking lanes that have no collector), replaying from the durable
-  terminalResult transcript. The DIAGNOSTIC observations (cost telemetry,
+  — at most 64 reconciliation starts per pass behind a 5 s pre-record
+  admission budget and a durable advancing cursor that wraps at the end, so
+  every crashed lane is eventually recovered, including blocking lanes that
+  have no collector), replaying from the durable terminalResult transcript. The DIAGNOSTIC observations (cost telemetry,
   trajectory, and the audit-only non-critical `unacknowledged` knowledge
   observation, which bypasses the ledger) are exactly-once-at-emit: the same
   crash window the Task transport's hook emissions have always had. Lane records gain the immutable
