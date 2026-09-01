@@ -24,12 +24,7 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import { resetSemgrepCache } from '../../../src/sast/semgrep';
-import type { LoadBaselineResult } from '../../../src/tools/sast-baseline';
-import {
-	type SastScanFinding,
-	type SastScanInput,
-	sastScan,
-} from '../../../src/tools/sast-scan';
+import { type SastScanInput, sastScan } from '../../../src/tools/sast-scan';
 
 // Mock the saveEvidence function
 vi.mock('../../../src/evidence/manager', () => ({
@@ -50,29 +45,34 @@ vi.mock('../../../src/sast/semgrep', () => ({
 	resetSemgrepCache: vi.fn(),
 }));
 
-// Mock sast-baseline I/O functions so tests don't write real files.
-// Derive fingerprint_count from the captured findings (not a canned constant)
-// so the module mock stays truthful if Bun's shared-process mock.module leak
-// reaches a sibling test file performing a real capture (#2302 hardening).
-const mockCaptureOrMergeBaseline = mock(
-	async (_directory: string, _phase: number, findings: SastScanFinding[]) => ({
-		status: 'written' as const,
-		path: '/fake/sast-baseline.json',
-		fingerprint_count: findings.length,
-	}),
+// Mock sast-baseline I/O functions so tests control baseline state. The
+// mock.module registration leaks process-wide in Bun's shared test runner
+// (AGENTS.md invariant 7), so the DEFAULT behavior of each mock DELEGATES to
+// the real implementation — a sibling file sharing this worker then observes
+// genuine baseline semantics in its own tempDir (#2443 review). Per-test
+// overrides still take precedence.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const actualBaseline =
+	require('../../../src/tools/sast-baseline') as typeof import('../../../src/tools/sast-baseline');
+// Snapshot the REAL functions before mock.module registers: bun mutates the
+// cached module namespace in place, so delegating through `actualBaseline.x`
+// at call time would recurse into the mock itself (RangeError: Maximum call
+// stack size exceeded).
+const realCaptureOrMergeBaseline = actualBaseline.captureOrMergeBaseline;
+const realLoadBaseline = actualBaseline.loadBaseline;
+type CaptureArgs = Parameters<typeof realCaptureOrMergeBaseline>;
+const mockCaptureOrMergeBaseline = mock(async (...args: CaptureArgs) =>
+	realCaptureOrMergeBaseline(...args),
 );
-const mockLoadBaseline = mock(
-	(): LoadBaselineResult => ({ status: 'not_found' }),
+const mockLoadBaseline = mock((directory: string, phase: number) =>
+	realLoadBaseline(directory, phase),
 );
 
 mock.module('../../../src/tools/sast-baseline', () => {
 	// Spread the real module so non-I/O exports (assignOccurrenceIndices,
 	// MAX_BASELINE_FINDINGS, etc.) remain functional.
-	// eslint-disable-next-line @typescript-eslint/no-require-imports
-	const actual =
-		require('../../../src/tools/sast-baseline') as typeof import('../../../src/tools/sast-baseline');
 	return {
-		...actual,
+		...actualBaseline,
 		captureOrMergeBaseline: mockCaptureOrMergeBaseline,
 		loadBaseline: mockLoadBaseline,
 	};

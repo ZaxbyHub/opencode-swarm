@@ -242,6 +242,8 @@ export const SastEvidenceSchema = BaseEvidenceSchema.extend({
 	// position/window) — reported separately, never gating.
 	moved_findings: z.array(SastFindingSchema).optional(),
 	baseline_used: z.boolean().optional(),
+	// Result-bucket truncation flags (emitted when a bucket exceeded the cap).
+	truncated_pre_existing: z.boolean().optional(),
 	truncated_moved_findings: z.boolean().optional(),
 });
 export type SastEvidence = z.infer<typeof SastEvidenceSchema>;

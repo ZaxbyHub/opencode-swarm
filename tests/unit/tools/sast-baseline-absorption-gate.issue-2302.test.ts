@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
+	BASELINE_SCHEMA_VERSION,
 	captureOrMergeBaseline,
 	loadBaseline,
 } from '../../../src/tools/sast-baseline';
@@ -120,7 +121,9 @@ describe('captureOrMergeBaseline absorption gate (#2302)', () => {
 				'finding verified pre-existing (content rename)',
 			);
 			expect(entry?.actor).toBe('session-test-1');
-			expect(entry?.absorbed_at).toBeTruthy();
+			expect(entry?.absorbed_at).toMatch(
+				/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/,
+			);
 			expect(fpsV2).toContain(entry?.fingerprint);
 		}
 	});
@@ -186,7 +189,9 @@ describe('captureOrMergeBaseline absorption gate (#2302)', () => {
 				'pre-delegation capture; finding verified pre-existing',
 			);
 			expect(entry?.actor).toBe('session-task2');
-			expect(entry?.absorbed_at).toBeTruthy();
+			expect(entry?.absorbed_at).toMatch(
+				/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/,
+			);
 		}
 	});
 
@@ -244,6 +249,80 @@ describe('captureOrMergeBaseline absorption gate (#2302)', () => {
 			expect(loadedV2.bundle.triage_log?.[0]?.rationale).toBe(
 				'audited refresh: rule changed',
 			);
+		}
+	});
+
+	it('surfaces dropped_triage_count when a merge orphans prior triage entries', async () => {
+		const file = path.join(tempDir, 'gen.js');
+		fs.writeFileSync(file, 'eval(v1);');
+		await captureOrMergeBaseline(tempDir, 1, [makeFinding(file, 1)], 'tier_a', [
+			file,
+		]);
+
+		fs.writeFileSync(file, 'eval(v2);');
+		await captureOrMergeBaseline(
+			tempDir,
+			1,
+			[makeFinding(file, 1)],
+			'tier_a',
+			[file],
+			{ refreshRationale: 'generation 2', actor: 's-gen' },
+		);
+
+		// Generation 3 orphans the generation-2 triage entry (its fingerprint
+		// no longer survives the merge) — the drop must be disclosed.
+		fs.writeFileSync(file, 'eval(v3);');
+		const r3 = await captureOrMergeBaseline(
+			tempDir,
+			1,
+			[makeFinding(file, 1)],
+			'tier_a',
+			[file],
+			{ refreshRationale: 'generation 3', actor: 's-gen' },
+		);
+		expect(r3.status).toBe('merged');
+		if (r3.status === 'merged') {
+			expect(r3.dropped_triage_count).toBe(1);
+			expect(r3.absorbed_finding_count).toBe(1);
+		}
+
+		const loaded = loadBaseline(tempDir, 1);
+		expect(loaded.status).toBe('found');
+		if (loaded.status === 'found') {
+			expect(loaded.bundle.triage_log).toHaveLength(1);
+			expect(loaded.bundle.triage_log?.[0]?.rationale).toBe('generation 3');
+		}
+	});
+});
+
+describe('loadBaseline schema tolerance (#2443 review PRR-005)', () => {
+	const writeBaselineFile = (bundle: Record<string, unknown>) => {
+		const dir = path.join(tempDir, '.swarm', 'evidence', String(bundle.phase));
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, 'sast-baseline.json'),
+			JSON.stringify(bundle, null, 2),
+		);
+	};
+
+	it('tolerates an explicit null reflow_keys the same as absent (exact-only)', () => {
+		writeBaselineFile({
+			schema_version: BASELINE_SCHEMA_VERSION,
+			phase: 5,
+			created_at: '2026-08-30T00:00:00.000Z',
+			updated_at: '2026-08-30T00:00:00.000Z',
+			engine: 'tier_a',
+			files_indexed: [],
+			fingerprints: [],
+			reflow_keys: null,
+			findings_snapshot: [],
+			truncated: false,
+		});
+
+		const loaded = loadBaseline(tempDir, 5);
+		expect(loaded.status).toBe('found');
+		if (loaded.status === 'found') {
+			expect(loaded.reflowKeys).toEqual([]);
 		}
 	});
 });
