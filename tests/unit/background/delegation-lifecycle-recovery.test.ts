@@ -321,6 +321,66 @@ describe('terminal lane receipt recovery (issue #2045)', () => {
 		expect(telemetryEnds).toHaveLength(0);
 	});
 
+	it('a wrapped pass that reaches the end resets the cursor to the oldest', async () => {
+		// Review finding regression: `processedAll` was a reference comparison
+		// and never fired, so the wrap reset was dead. Pin the actual cycle:
+		// with a small record set (cap 64 not hit), pass 1 leaves a cursor at
+		// the newest record; pass 2 wraps, processes everything, and RESETS
+		// (cursor file removed); pass 3 starts from the oldest again.
+		const { recordPendingDelegation } = await import(
+			'../../../src/background/pending-delegations.js'
+		);
+		for (let i = 0; i < 3; i++) {
+			const correlation = `sess-wrap-${String(i).padStart(3, '0')}`;
+			await recordPendingDelegation(dir, {
+				correlationId: correlation,
+				jobId: null,
+				subagentSessionId: correlation,
+				parentSessionId: PARENT_SESSION,
+				callID: `call-wrap-${i}`,
+				normalizedAgent: 'sme',
+				swarmPrefixedAgent: 'mega_sme',
+				planTaskId: null,
+				evidenceTaskId: null,
+				batchId: `batch-wrap-${i}`,
+				laneId: `lane-wrap-${i}`,
+			});
+			const crashText = 'wrapped lane transcript';
+			await claimTerminalResult(dir, correlation, {
+				eventId: buildBackgroundCompletionEventId({
+					correlationId: correlation,
+					jobId: null,
+					status: 'completed',
+					resultDigest: createHash('sha256').update(crashText).digest('hex'),
+				}),
+				status: 'completed',
+				recordedAt: NOW + i,
+				result: {
+					text: crashText,
+					chars: crashText.length,
+					truncated: false,
+					digest: createHash('sha256').update(crashText).digest('hex'),
+				},
+			});
+		}
+		const cursorPath = path.join(
+			dir,
+			'.swarm',
+			'lane-receipt-recovery-cursor.json',
+		);
+		const first = await recoverTerminalLaneReceipts(dir);
+		expect(first.recovered).toBe(3);
+		expect(fs.existsSync(cursorPath)).toBe(true);
+		const second = await recoverTerminalLaneReceipts(dir);
+		expect(second.recovered).toBe(3);
+		// The wrapped pass reached the end: the cursor RESET (file removed) so
+		// the next pass begins from the oldest record again.
+		expect(fs.existsSync(cursorPath)).toBe(false);
+		const third = await recoverTerminalLaneReceipts(dir);
+		expect(third.recovered).toBe(3);
+		expect(fs.existsSync(cursorPath)).toBe(true);
+	});
+
 	it('a zero deadline processes nothing and leaves the cursor untouched', async () => {
 		const { recordPendingDelegation } = await import(
 			'../../../src/background/pending-delegations.js'

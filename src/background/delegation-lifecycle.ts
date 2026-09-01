@@ -613,10 +613,18 @@ export async function recoverTerminalLaneReceipts(
 			};
 		}
 	}
+	// Value comparison on the ordering key — `lastProcessed` is a fresh cursor
+	// literal, never the same reference as the record (review finding: the
+	// previous `===` was always false, so the wrap reset never fired).
+	const lastCandidate = selected[selected.length - 1];
 	const processedAll =
-		selected.length > 0 && lastProcessed === selected[selected.length - 1];
-	// Persist the advance; wrapping to the very end resets so the next pass
-	// starts from the oldest record again.
+		selected.length > 0 &&
+		lastProcessed !== null &&
+		lastCandidate !== undefined &&
+		lastProcessed.updatedAt === lastCandidate.updatedAt &&
+		lastProcessed.correlationId === lastCandidate.correlationId;
+	// Persist the advance; a WRAPPED pass that reached the very end resets the
+	// cursor so the next pass starts from the oldest record again.
 	const nextCursor =
 		wrapped && processedAll ? null : (lastProcessed ?? cursor ?? null);
 	if (nextCursor?.correlationId !== cursor?.correlationId) {
