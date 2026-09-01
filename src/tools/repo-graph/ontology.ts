@@ -5,6 +5,8 @@ import type {
 	FileOntology,
 	FileRole,
 	OntologyFinding,
+	OntologyLink,
+	OntologyLinkConfidence,
 	RouteFact,
 	RouteMethod,
 	SecurityFact,
@@ -39,6 +41,8 @@ const HTTP_METHODS: RouteMethod[] = [
 ];
 
 const MAX_FACTS_PER_KIND = 50;
+const MAX_LINKS_PER_FILE = 200;
+const MAX_CONFIGURES_PER_FILE = 20;
 
 function stripComments(content: string): string {
 	let out = '';
@@ -493,6 +497,20 @@ function routeSegment(segment: string): string {
 		.replace(/\.[^.]+$/, '');
 }
 
+/**
+ * Normalize one segment of a user-supplied route path so `route_trace` inputs
+ * like `/api/users/[...slug]` match the normalized form RouteFacts store
+ * (`/api/users/:slug*`). Exported for the query layer (KG-15, issue #1536).
+ */
+export function normalizeRoutePathInput(input: string): string {
+	const segments = input
+		.replace(/\\/g, '/')
+		.split('/')
+		.filter((segment) => segment.length > 0)
+		.map((segment) => routeSegment(segment));
+	return `/${segments.join('/')}`.replace(/\/+/g, '/');
+}
+
 function extractRoutes(moduleName: string, content: string): RouteFact[] {
 	const routes: RouteFact[] = [];
 	const pathRoute = pathRouteFromModule(moduleName);
@@ -722,8 +740,12 @@ function buildFindings(
 		findings.push({
 			code: 'api_route_without_detected_auth',
 			severity: 'medium',
+			// File-level heuristic: the auth sweep covers the whole file, so a
+			// guarded sibling route suppresses this advisory for every route in
+			// the file. Absence of this finding is NOT evidence that an
+			// individual route is guarded (PR-comment F-003).
 			message:
-				'No authentication, authorization, or CSRF guard was detected near this route.',
+				'No authentication, authorization, or CSRF guard was detected anywhere in this file; absence of this finding does not prove an individual route is guarded.',
 			line: routes[0]?.line,
 		});
 	}
@@ -750,6 +772,169 @@ function buildFindings(
 	return findings;
 }
 
+/**
+ * Extract the route-handler symbol for a router-call route line, when the
+ * FINAL argument is a named identifier (e.g. `router.get('/x', getUser)` or
+ * `app.post('/x', authMw, validate, createUser)`). Anchoring on the last
+ * argument matters: capturing "the identifier after the path" bound the WRONG
+ * symbol (a middleware) on 3+-argument calls. Inline arrow/function handlers
+ * and trailing option objects return null — the binding is file-level.
+ *
+ * The length bail keeps the lazy-scan regex away from quadratic backtracking:
+ * a pathological-but-legal multi-hundred-KB argument (giant inline string)
+ * would otherwise stall the synchronous build loop for tens of seconds.
+ */
+function routerCallHandlerSymbol(line: string): string | null {
+	if (line.length > 500) return null;
+	const match = line.match(
+		/\b(?:router|app|server)\s*\.\s*(?:get|post|put|patch|delete|options|head|all)\s*\([^(]*?([A-Za-z_$][\w$]*)\s*\)\s*[;,)]?\s*$/,
+	);
+	return match?.[1] ?? null;
+}
+
+const CONFIG_KEY_PATTERN =
+	/\bprocess\.env\.([A-Za-z_$][A-Za-z0-9_$]*)\b|\bprocess\.env\[\s*['"]([A-Za-z_$][A-Za-z0-9_$]*)['"]\s*\]|\bimport\.meta\.env\.([A-Za-z_$][A-Za-z0-9_$]*)\b|\bDeno\.env\.get\(\s*['"]([A-Za-z_$][A-Za-z0-9_$]*)['"]\s*\)/g;
+
+/**
+ * Extract change-risk links (KG-15, issue #1536): symbol/fact bindings that
+ * connect routes, data operations, security facts, and config keys to their
+ * subject so reviewers, test engineers, and security agents can query them
+ * without broad file exploration.
+ *
+ * Runs on the comment-stripped content and the ALREADY-CAPPED fact arrays.
+ * Deterministic order: HANDLES_ROUTE (route array order) → READS/WRITES/
+ * DELETES (line asc) → VALIDATES/AUTHORIZES (line asc) → CONFIGURES (line
+ * asc, deduped by key, <= MAX_CONFIGURES_PER_FILE). TESTS and USES_FIXTURE
+ * are derived at query time (see `buildTestPack`), never extracted here.
+ */
+function extractLinks(
+	content: string,
+	routes: RouteFact[],
+	dataOperations: DataOperationFact[],
+	security: SecurityFact[],
+): OntologyLink[] {
+	const lines = content.split(/\r?\n/);
+	const links: OntologyLink[] = [];
+
+	// HANDLES_ROUTE — bind each route fact to its handler when evidence exists.
+	for (const route of routes) {
+		if (route.source === 'handler_export') {
+			links.push({
+				kind: 'HANDLES_ROUTE',
+				subject: `${route.method} ${route.path}`,
+				...(route.line !== undefined ? { line: route.line } : {}),
+				...(route.line !== undefined
+					? { evidence: (lines[route.line - 1] ?? '').trim().slice(0, 160) }
+					: {}),
+				confidence: 'high',
+				symbol: route.method,
+			});
+		} else if (route.source === 'router_call') {
+			const handler =
+				route.line !== undefined
+					? routerCallHandlerSymbol(lines[route.line - 1] ?? '')
+					: null;
+			links.push({
+				kind: 'HANDLES_ROUTE',
+				subject: `${route.method} ${route.path}`,
+				...(route.line !== undefined ? { line: route.line } : {}),
+				...(route.line !== undefined
+					? { evidence: (lines[route.line - 1] ?? '').trim().slice(0, 160) }
+					: {}),
+				confidence: 'medium',
+				...(handler ? { symbol: handler } : {}),
+			});
+		} else {
+			links.push({
+				kind: 'HANDLES_ROUTE',
+				subject: `${route.method} ${route.path}`,
+				confidence: 'low',
+			});
+		}
+	}
+
+	// READS / WRITES / DELETES — entity-keyed data access. Only facts with a
+	// known entity produce a link; entity-less facts remain queryable facts.
+	const operationKind: Record<
+		DataOperationFact['operation'],
+		'READS' | 'WRITES' | 'DELETES' | null
+	> = {
+		read: 'READS',
+		write: 'WRITES',
+		delete: 'DELETES',
+		transaction: 'WRITES',
+		migration: 'WRITES',
+	};
+	const dataLinks: OntologyLink[] = [];
+	for (const fact of dataOperations) {
+		if (!fact.entity) continue;
+		const kind = operationKind[fact.operation];
+		if (!kind) continue;
+		const confidence: OntologyLinkConfidence =
+			fact.operation === 'transaction' || fact.operation === 'migration'
+				? 'low'
+				: 'medium';
+		dataLinks.push({
+			kind,
+			subject: fact.entity,
+			line: fact.line,
+			evidence: fact.evidence,
+			confidence,
+		});
+	}
+	dataLinks.sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
+	links.push(...dataLinks);
+
+	// VALIDATES / AUTHORIZES — security fact binding (file-level).
+	const securityLinks: OntologyLink[] = [];
+	for (const fact of security) {
+		if (fact.kind === 'input_validation') {
+			securityLinks.push({
+				kind: 'VALIDATES',
+				line: fact.line,
+				evidence: fact.evidence,
+				confidence: fact.confidence,
+			});
+		} else if (fact.kind === 'authorization') {
+			securityLinks.push({
+				kind: 'AUTHORIZES',
+				line: fact.line,
+				evidence: fact.evidence,
+				confidence: fact.confidence,
+			});
+		}
+	}
+	securityLinks.sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
+	links.push(...securityLinks);
+
+	// CONFIGURES — env/config key access, deduped by key (first occurrence).
+	const seenKeys = new Set<string>();
+	const configureLinks: OntologyLink[] = [];
+	for (
+		let i = 0;
+		i < lines.length && configureLinks.length < MAX_CONFIGURES_PER_FILE;
+		i++
+	) {
+		const line = lines[i];
+		for (const match of line.matchAll(CONFIG_KEY_PATTERN)) {
+			if (configureLinks.length >= MAX_CONFIGURES_PER_FILE) break;
+			const key = match[1] ?? match[2] ?? match[3] ?? match[4];
+			if (!key || seenKeys.has(key)) continue;
+			seenKeys.add(key);
+			configureLinks.push({
+				kind: 'CONFIGURES',
+				subject: key,
+				line: i + 1,
+				evidence: line.trim().slice(0, 160),
+				confidence: 'medium',
+			});
+		}
+	}
+	links.push(...configureLinks);
+
+	return links.slice(0, MAX_LINKS_PER_FILE);
+}
+
 export function extractFileOntology(
 	input: ExtractFileOntologyInput,
 ): FileOntology {
@@ -761,6 +946,9 @@ export function extractFileOntology(
 	const security = extractSecurityFacts(content);
 	const conventions = extractConventions(moduleName, roles, routes);
 	const findings = buildFindings(roles, routes, dataOperations, security);
+	// Order invariant: links are computed LAST from the final (already-capped)
+	// fact arrays; reordering breaks the deterministic link contract.
+	const links = extractLinks(content, routes, dataOperations, security);
 
 	return {
 		roles,
@@ -772,5 +960,6 @@ export function extractFileOntology(
 		security,
 		conventions,
 		findings,
+		links,
 	};
 }

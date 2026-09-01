@@ -108,7 +108,8 @@ export type ContextWindowSource =
 	| 'user_model'
 	| 'user_default'
 	| 'live_model_limit'
-	| 'static_table'
+	| 'static_provider_cap'
+	| 'static_native'
 	| 'static_default';
 
 export interface ContextWindowResolution {
@@ -146,12 +147,31 @@ export interface ContextWindowInputs {
 	liveContextLimit?: unknown;
 	/**
 	 * Last-resort static lookup. Injected rather than imported so this module
-	 * stays free of any dependency on `src/hooks/`. Returning `undefined` means
-	 * "no opinion" and falls through to `DEFAULT_MODEL_CONTEXT_TOKENS`.
+	 * stays free of any dependency on `src/hooks/`. The lookup must say WHICH
+	 * static table matched (`provider_cap` vs `native`) so the resolution source
+	 * stays honest (#2044): the two tables have different staleness profiles and
+	 * downstream provenance consumers (the `context_status` tool, the
+	 * model-limit-fallback health alarm) distinguish them. Returning `undefined`
+	 * means "no opinion" and falls through to `DEFAULT_MODEL_CONTEXT_TOKENS`.
 	 */
 	fallbackLookup?:
-		| ((modelID?: string, providerID?: string) => number | undefined)
+		| ((
+				modelID?: string,
+				providerID?: string,
+		  ) => { tokens: number; table: 'provider_cap' | 'native' } | undefined)
 		| undefined;
+}
+
+/**
+ * Normalize a `model_limits` lookup key (#2044 alias handling): trim + lowercase
+ * on BOTH sides of the lookup so `Anthropic/Claude-Sonnet-4-6` and
+ * `anthropic/claude-sonnet-4-6` hit the same entry. Lookup-side only — stored
+ * config is never rewritten, and this deliberately does NOT introduce a
+ * hand-maintained model-alias table (see the `src/hooks/model-limits.ts` module
+ * header for why that is a maintenance treadmill).
+ */
+function normalizeLimitKey(key: string): string {
+	return key.trim().toLowerCase();
 }
 
 /**
@@ -246,21 +266,34 @@ export function resolveContextWindow(
 	const { userLimits, modelID, providerID, liveContextLimit, fallbackLookup } =
 		inputs;
 
-	// 1–3: explicit user intent, most specific key first.
+	// 1–3: explicit user intent, most specific key first. Keys are matched
+	// normalized (trim + lowercase) on both sides so provider/model casing or
+	// stray whitespace never silently disables a user-authored limit (#2044).
 	if (userLimits) {
+		let normalized: Record<string, number> | undefined;
+		const normalizedLimits = (): Record<string, number> => {
+			if (normalized === undefined) {
+				normalized = {};
+				for (const [key, value] of Object.entries(userLimits)) {
+					normalized[normalizeLimitKey(key)] = value;
+				}
+			}
+			return normalized;
+		};
 		if (modelID && providerID) {
-			const compound = userLimits[`${providerID}/${modelID}`];
+			const compound =
+				normalizedLimits()[normalizeLimitKey(`${providerID}/${modelID}`)];
 			if (isUsableConfiguredWindow(compound)) {
 				return { tokens: Math.floor(compound), source: 'user_provider_model' };
 			}
 		}
 		if (modelID) {
-			const byModel = userLimits[modelID];
+			const byModel = normalizedLimits()[normalizeLimitKey(modelID)];
 			if (isUsableConfiguredWindow(byModel)) {
 				return { tokens: Math.floor(byModel), source: 'user_model' };
 			}
 		}
-		const byDefault = userLimits.default;
+		const byDefault = normalizedLimits().default;
 		if (isUsableConfiguredWindow(byDefault)) {
 			return { tokens: Math.floor(byDefault), source: 'user_default' };
 		}
@@ -271,11 +304,20 @@ export function resolveContextWindow(
 		return { tokens: Math.floor(liveContextLimit), source: 'live_model_limit' };
 	}
 
-	// 5: stale static table — only when no live value arrived.
+	// 5: stale static table — only when no live value arrived. The lookup says
+	// which table matched so the source distinguishes `static_provider_cap`
+	// (PROVIDER_CAPS, known-stale in the downward direction) from
+	// `static_native` (NATIVE_MODEL_LIMITS, stale independently) — #2044.
 	if (fallbackLookup) {
 		const fromTable = fallbackLookup(modelID, providerID);
-		if (isUsableContextWindow(fromTable)) {
-			return { tokens: Math.floor(fromTable), source: 'static_table' };
+		if (fromTable !== undefined && isUsableContextWindow(fromTable.tokens)) {
+			return {
+				tokens: Math.floor(fromTable.tokens),
+				source:
+					fromTable.table === 'provider_cap'
+						? 'static_provider_cap'
+						: 'static_native',
+			};
 		}
 	}
 

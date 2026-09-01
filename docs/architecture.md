@@ -117,6 +117,21 @@ actions include:
   the additive schema 1.6.0 `GraphNode.exportKinds` map (older graphs degrade
   with `kind: null` and an explicit warning). See
   `docs/repo-graph-symbol-graph.md`.
+- KG-15 change-risk pack actions (issue #1536): `route_trace` returns the full
+  risk pack for a route (handler + symbol binding with confidence, depth-1
+  services, data operations, auth/validation facts, unguarded-route findings,
+  covering tests) from `route_path`/`method`, `file`, or `symbol`;
+  `data_trace` returns readers/writers/deleters/configurers for an
+  entity/table/config/env key plus touching routes, tests, and risk notes;
+  `test_pack` returns tests, fixtures, helpers, covered/uncovered exports, and
+  missing-test warnings for a file, files list, symbol, or unified diff (test
+  association uses explicit imports plus colocated-name heuristics and never
+  executes tests). Packs read the additive schema 1.7.0
+  `GraphNode.ontology.links` (HANDLES_ROUTE / READS / WRITES / DELETES /
+  VALIDATES / AUTHORIZES / CONFIGURES); older graphs still answer with a
+  `linksSupported: false` degradation note, with TESTS / USES_FIXTURE
+  associations derived at query time from persisted edges. See
+  `docs/repo-graph-symbol-graph.md`.
 
 The ontology extractor is intentionally conservative. It records detected facts
 and "detected missing guard" findings; it does not claim formal security proofs.

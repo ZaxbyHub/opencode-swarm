@@ -1,9 +1,15 @@
 /** Integration tests for context_status.execute. */
 
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, test } from 'bun:test';
+import { rmSync } from 'node:fs';
 import type { ToolContext } from '@opencode-ai/plugin';
+import {
+	readLearningHealth,
+	resetLearningHealthForTest,
+} from '../../../src/health/learning-health';
 import { setLiveContextWindow, swarmState } from '../../../src/state';
 import { _internals, context_status } from '../../../src/tools/context-status';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const originalLoadPluginConfig = _internals.loadPluginConfig;
 const originalFetchSessionMessages = _internals.fetchSessionMessages;
@@ -318,5 +324,44 @@ describe('context_status.execute', () => {
 		) as Record<string, unknown>;
 		expect(parsed.usageSource).toBe('provider');
 		expect(Number(parsed.tokensUsed)).toBeGreaterThan(130);
+	});
+});
+
+describe('context_status.execute learning-health scoping (#2044)', () => {
+	test('a fallback resolution through execute is visible in the owning project snapshot only', async () => {
+		const ownerDir = canonicalMkdtemp('swarm-ctx-exec-lh-');
+		const otherDir = canonicalMkdtemp('swarm-ctx-exec-lh-');
+		try {
+			resetLearningHealthForTest();
+			swarmState.liveContextWindows.clear();
+			_internals.fetchSessionMessages = (async () => [
+				makeMessage({ role: 'assistant', modelID: 'mystery-model' }),
+			]) as typeof _internals.fetchSessionMessages;
+			// The tool's public signature is execute(args, ctx) — the directory
+			// rides on ctx.directory (createSwarmTool's fallback is cwd).
+			const raw = await context_status.execute(
+				{},
+				makeCtx({ directory: ownerDir, sessionID: 'sess-exec-scope' }),
+			);
+			// The tool itself must report the fallback provenance.
+			const parsed = JSON.parse(raw) as { fallbackActive?: boolean };
+			expect(parsed.fallbackActive).toBe(true);
+			const ownerSnapshot = await readLearningHealth(ownerDir);
+			expect(
+				ownerSnapshot.activeAlarms.some(
+					(a) => a.alarm === 'model_limit_fallback',
+				),
+			).toBe(true);
+			const otherSnapshot = await readLearningHealth(otherDir);
+			expect(
+				otherSnapshot.activeAlarms.some(
+					(a) => a.alarm === 'model_limit_fallback',
+				),
+			).toBe(false);
+		} finally {
+			resetLearningHealthForTest();
+			rmSync(ownerDir, { recursive: true, force: true });
+			rmSync(otherDir, { recursive: true, force: true });
+		}
 	});
 });

@@ -397,3 +397,73 @@ describe('Heartbeat staleness (FR-010/FR-011) integration', () => {
 		expect(md).toContain('**Agents**: 1 registered');
 	});
 });
+
+describe('formatStatusMarkdown Learning Health section (#2044)', () => {
+	test('renders active alarms with redacted scope refs', () => {
+		const md = formatStatusMarkdown({
+			hasPlan: true,
+			currentPhase: 'Phase 1',
+			completedTasks: 0,
+			totalTasks: 1,
+			agentCount: 1,
+			isLegacy: false,
+			turboMode: false,
+			contextBudgetPct: null,
+			compactionCount: 0,
+			lastSnapshotAt: null,
+			learningHealth: {
+				activeAlarms: [
+					{
+						alarm: 'headroom_dead_streak',
+						severity: 'warning',
+						scopeClass: 'session',
+						scopeRef: 'a1b2c3d4e5f60718',
+						ageMs: 120_000,
+						coverageFacts: 3,
+						transitionCount: 1,
+					},
+				],
+				totalTransitions: 2,
+			},
+		} as Parameters<typeof formatStatusMarkdown>[0]);
+		expect(md).toContain('**Learning Health**');
+		expect(md).toContain('headroom_dead_streak');
+		expect(md).toContain('a1b2c3d4e5f60718');
+		expect(md).toContain('age 2m');
+		expect(md).toContain('/swarm diagnose');
+	});
+
+	test('renders the healthy line when no alarms are active', () => {
+		const md = formatStatusMarkdown({
+			hasPlan: true,
+			currentPhase: 'Phase 1',
+			completedTasks: 0,
+			totalTasks: 1,
+			agentCount: 1,
+			isLegacy: false,
+			turboMode: false,
+			contextBudgetPct: null,
+			compactionCount: 0,
+			lastSnapshotAt: null,
+			learningHealth: { activeAlarms: [], totalTransitions: 4 },
+		} as Parameters<typeof formatStatusMarkdown>[0]);
+		expect(md).toContain('no active learning-health alarms');
+		expect(md).toContain('4 transitions recorded');
+	});
+
+	test('renders no section when the snapshot is unavailable (fail-open)', () => {
+		const md = formatStatusMarkdown({
+			hasPlan: true,
+			currentPhase: 'Phase 1',
+			completedTasks: 0,
+			totalTasks: 1,
+			agentCount: 1,
+			isLegacy: false,
+			turboMode: false,
+			contextBudgetPct: null,
+			compactionCount: 0,
+			lastSnapshotAt: null,
+		} as Parameters<typeof formatStatusMarkdown>[0]);
+		expect(md).not.toContain('**Learning Health**');
+	});
+});

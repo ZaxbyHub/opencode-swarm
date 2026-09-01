@@ -13,6 +13,7 @@ import {
 } from '../config/agent-model';
 import { SUMMARIZER_EXEMPT_TOOL_NAMES } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
+import { observeContextHeadroom } from '../health/learning-health';
 import { getLiveContextModelIdentity, getLiveContextWindow } from '../state';
 import { telemetry } from '../telemetry';
 import { log, warn } from '../utils';
@@ -70,8 +71,10 @@ type ContextPrunedTrigger = 'agent_switch' | 'critical_threshold';
 
 export const _internals: {
 	telemetryContextPruned: typeof telemetry.contextPruned;
+	observeContextHeadroom: typeof observeContextHeadroom;
 } = {
 	telemetryContextPruned: telemetry.contextPruned,
+	observeContextHeadroom,
 };
 
 /**
@@ -83,6 +86,13 @@ export function createContextBudgetHandler(
 	config: PluginConfig,
 	resolveAgentModel: (agentName: string) => string | undefined = (agentName) =>
 		resolveConfiguredAgentModel(config, agentName),
+	/**
+	 * Project directory (threaded from the plugin wiring at handler
+	 * construction — the chat-transform hook input itself carries none). Used
+	 * ONLY to scope + persist the #2044 headroom health observation; every
+	 * budget behavior is identical without it.
+	 */
+	directory?: string,
 ) {
 	const enabled = config.context_budget?.enabled !== false;
 
@@ -156,12 +166,14 @@ export function createContextBudgetHandler(
 			modelID,
 			providerID,
 		});
-		const modelLimit = resolveModelLimit(
+		const modelLimitResolution = resolveModelLimit(
 			modelID,
 			providerID,
 			modelLimitsConfig,
 			liveContextLimit,
+			directory,
 		);
+		const modelLimit = modelLimitResolution.limit;
 
 		// Log on first use of each model/provider combination
 		const cacheKey = `${modelID || 'unknown'}::${providerID || 'unknown'}`;
@@ -177,6 +189,21 @@ export function createContextBudgetHandler(
 		let totalTokens = usage.tokensUsed;
 
 		const usagePercent = totalTokens / modelLimit;
+
+		// Learning-health headroom observation (#2044): records zero/negative
+		// effective headroom (usagePercent ≥ 1) and healthy observations for the
+		// bounded-window dead-streak alarm. Never throws; never blocks the
+		// transform. The chat-transform input carries no project directory, so
+		// the factory-threaded directory scopes (and persists) the observation;
+		// without it the observation lands in the registry's unscoped bucket.
+		_internals.observeContextHeadroom({
+			sessionID: sessionID ?? 'unknown',
+			directory,
+			usagePercent,
+			limit: modelLimit,
+			limitSource: modelLimitResolution.source,
+			warnThreshold,
+		});
 
 		// Agent-switch detection (Task 4.1)
 		let ratio = usagePercent; // Declare early for agent-switch override

@@ -59,8 +59,17 @@ export const REPO_GRAPH_FILENAME = 'repo-graph.json';
  * The field is optional, so 1.0.0–1.5.0 graphs still load; queries surface
  * `kind: null` hits and a `kindSupported: false` degradation note instead of
  * failing (issue #1535).
+ *
+ * 1.7.0 adds the optional per-node `ontology.links` array (KG-15):
+ * `HANDLES_ROUTE` handler-symbol binding, entity-keyed `READS`/`WRITES`/
+ * `DELETES` data access, `VALIDATES`/`AUTHORIZES` security binding, and
+ * `CONFIGURES` env/config-key facts. `TESTS` and `USES_FIXTURE` associations
+ * are derived at query time from persisted edges plus colocated-name
+ * heuristics and are never stored. The field is optional, so 1.0.0–1.6.0
+ * graphs still load; queries surface `linksSupported: false` degradation
+ * notes instead of failing (issue #1536).
  */
-export const GRAPH_SCHEMA_VERSION = '1.6.0';
+export const GRAPH_SCHEMA_VERSION = '1.7.0';
 
 /**
  * Default per-file source-size ceiling shared by graph construction and
@@ -212,6 +221,57 @@ export interface OntologyFinding {
 	line?: number;
 }
 
+export const ONTOLOGY_LINK_KIND_VALUES = [
+	'HANDLES_ROUTE',
+	'READS',
+	'WRITES',
+	'DELETES',
+	'VALIDATES',
+	'AUTHORIZES',
+	'TESTS',
+	'USES_FIXTURE',
+	'CONFIGURES',
+] as const;
+export type OntologyLinkKind = (typeof ONTOLOGY_LINK_KIND_VALUES)[number];
+
+export const ONTOLOGY_LINK_CONFIDENCE_VALUES = [
+	'low',
+	'medium',
+	'high',
+] as const;
+export type OntologyLinkConfidence =
+	(typeof ONTOLOGY_LINK_CONFIDENCE_VALUES)[number];
+
+/**
+ * A change-risk link binding one ontology fact to its subject and — when the
+ * evidence ties it to a declaration — to a symbol (KG-15, issue #1536).
+ *
+ * Persisted links are file-local (they live on the node whose source produced
+ * them): `HANDLES_ROUTE` (subject `'<METHOD> <path>'`, symbol = the handler
+ * export or named router callback), `READS`/`WRITES`/`DELETES` (subject = the
+ * entity/table name, file-level), `VALIDATES`/`AUTHORIZES` (from security
+ * facts, file-level), and `CONFIGURES` (subject = an env/config key).
+ *
+ * `TESTS` and `USES_FIXTURE` are part of the kind union for output shaping
+ * but are derived at query time from persisted edges + colocated-name
+ * heuristics (`buildTestPack`), never persisted here.
+ *
+ * Advisory and evidence-backed: `confidence` records heuristic strength, and
+ * every field is bounded by `validateOntologyStrings`.
+ */
+export interface OntologyLink {
+	kind: OntologyLinkKind;
+	/** Route (`'GET /api/users'`), entity/table name, or config/env key. */
+	subject?: string;
+	/** 1-based line of the producing evidence (absent for file-level-only facts). */
+	line?: number;
+	/** Raw comment-stripped source line slice (<=160 chars). */
+	evidence?: string;
+	confidence: OntologyLinkConfidence;
+	/** Declaration the link is bound to, when evidence ties it to one symbol. */
+	symbol?: string;
+}
+
 export interface FileOntology {
 	roles: FileRole[];
 	packageBoundary: string;
@@ -220,6 +280,8 @@ export interface FileOntology {
 	security: SecurityFact[];
 	conventions: ConventionFact[];
 	findings: OntologyFinding[];
+	/** Change-risk links (schema >= 1.7.0; optional so older graphs load unchanged). */
+	links?: OntologyLink[];
 }
 
 /**
@@ -791,6 +853,142 @@ export interface GraphExplainResult {
 	};
 	reasons: ExplainReason[];
 	budget: { returned: number; dropped: number };
+	warnings: string[];
+}
+
+// ============ KG-15 change-risk pack results (issue #1536) ============
+
+/** One matched route with its full change-risk pack (route_trace). */
+export interface RouteTraceRoute {
+	route: {
+		method: RouteMethod;
+		path: string;
+		line: number | null;
+		source: RouteSource;
+	};
+	/** Workspace-relative handler file. */
+	file: string;
+	/** Handler symbol from a HANDLES_ROUTE link; null on pre-1.7.0 graphs. */
+	handlerSymbol: string | null;
+	handlerConfidence: OntologyLinkConfidence | null;
+	/** The link's evidence line (handler declaration); null without a link. */
+	handlerEvidence: string | null;
+	/** Depth-1 non-test node dependencies of the handler file, deduped + sorted. */
+	services: string[];
+	/** Facts from the handler file and its services (each list <= 20). */
+	dataOperations: Array<{ file: string; fact: DataOperationFact }>;
+	security: Array<{ file: string; fact: SecurityFact }>;
+	/** Handler-file ontology findings (the unguarded-mutating-route surface). */
+	findings: Array<{ file: string; finding: OntologyFinding }>;
+	/** test_file-role importers of the handler/services files. */
+	tests: string[];
+}
+
+export interface RouteTraceResult {
+	target: {
+		routePath: string | null;
+		method: RouteMethod | null;
+		file: string | null;
+		symbol: string | null;
+	};
+	routes: RouteTraceRoute[];
+	/**
+	 * False on graphs predating schema 1.7.0: handler-symbol binding degrades
+	 * to null while the facts/edges-derived sections still populate.
+	 */
+	linksSupported: boolean;
+	budget: { returned: number; dropped: number };
+	truncated: boolean;
+	warnings: string[];
+}
+
+/** One reader/writer/deleter/configurer match for a traced subject (data_trace). */
+export interface DataTraceAccess {
+	file: string;
+	kind: 'READS' | 'WRITES' | 'DELETES' | 'CONFIGURES';
+	symbol: string | null;
+	line: number | null;
+	evidence: string | null;
+	confidence: OntologyLinkConfidence | null;
+	/** 'link' = schema 1.7.0 ontology link; 'fact' = DataOperationFact fallback (works on all schemas). */
+	via: 'link' | 'fact';
+}
+
+export interface DataTraceResult {
+	target: {
+		entity: string | null;
+		file: string | null;
+		symbol: string | null;
+	};
+	/** Resolved subject when `entity` was given (matched link subject or fact entity). */
+	subject: string | null;
+	readers: DataTraceAccess[];
+	writers: DataTraceAccess[];
+	deleters: DataTraceAccess[];
+	configurers: DataTraceAccess[];
+	/** Routes declared in files that touch the subject (<= 20). */
+	routes: Array<{ file: string; fact: RouteFact }>;
+	tests: string[];
+	/** Fixed-vocabulary advisory notes with counts. */
+	riskNotes: string[];
+	linksSupported: boolean;
+	budget: { returned: number; dropped: number };
+	truncated: boolean;
+	warnings: string[];
+}
+
+/** One test file associated with a target (test_pack). */
+export interface TestPackTestEntry {
+	file: string;
+	confidence: OntologyLinkConfidence;
+	/** 'import' = explicit import edge (high); 'colocated' = sibling-name heuristic (medium). */
+	basis: 'import' | 'colocated';
+	/** Why this association exists: the import specifier, or the colocated-name rationale. */
+	evidence: string;
+	/** Target exports referenced by the test (edge imported/used symbols ∩ target exports). */
+	coveredSymbols: string[];
+}
+
+/** A fixture-pattern file imported by at least one discovered test. */
+export interface TestPackFixture {
+	file: string;
+	usedBy: string[];
+	/** Derivation is a path-pattern heuristic — always medium. */
+	confidence: OntologyLinkConfidence;
+	/** The import specifier a test used to pull the fixture in. */
+	evidence: string;
+}
+
+/**
+ * A query-time-derived TESTS / USES_FIXTURE association, materialized with
+ * its evidence and confidence so the two derived link kinds are
+ * consumer-visible (they are never persisted on the graph).
+ */
+export interface DerivedAssociation {
+	kind: 'TESTS' | 'USES_FIXTURE';
+	/** Workspace-relative test file. */
+	fromFile: string;
+	/** Workspace-relative implementation or fixture file. */
+	toFile: string;
+	evidence: string;
+	confidence: OntologyLinkConfidence;
+}
+
+export interface TestPackResult {
+	target: { files: string[]; symbol: string | null };
+	tests: TestPackTestEntry[];
+	fixtures: TestPackFixture[];
+	/** Non-fixture node deps shared by >= 2 discovered tests or under test-support directories. */
+	helpers: string[];
+	/** Target exports with no detected test coverage (coverage hints). */
+	uncoveredExports: Array<{ file: string; symbol: string }>;
+	/** Fixed-vocabulary advisory notes (missing tests, uncovered exports, heuristic-only association). */
+	riskNotes: string[];
+	/** Derived TESTS / USES_FIXTURE associations (bounded, evidence + confidence). */
+	associations: DerivedAssociation[];
+	/** Aggregate across every bounded section: tests + fixtures + helpers + associations. */
+	budget: { returned: number; dropped: number };
+	truncated: boolean;
 	warnings: string[];
 }
 

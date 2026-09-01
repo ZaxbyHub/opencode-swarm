@@ -67,6 +67,8 @@ interface FinalAccountingOptions {
 	/** Same seam createContextBudgetHandler uses: resolves the
 	 * configured target model for an agent name. */
 	resolveAgentModelFn?: (agentName: string) => string | undefined;
+	/** Project directory (#2044): scopes the model-limit health observation. */
+	directory?: string;
 }
 
 /**
@@ -142,7 +144,8 @@ export function createFinalContextAccountingStep(
 				providerID,
 				config.context_budget?.model_limits ?? {},
 				liveContextLimit,
-			);
+				options.directory,
+			).limit;
 			if (modelLimit <= 0) return;
 
 			// NOTE: context-budget.ts (earlier in this chain) also runs

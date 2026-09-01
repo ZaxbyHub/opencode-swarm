@@ -376,6 +376,38 @@ export const KNOWN_TELEMETRY_KEYS: Readonly<Record<string, readonly string[]>> =
 			'newest_timestamp',
 			'coverage',
 		]),
+		// Issue #2044 learning-health alarm transitions: counts, closed-vocab
+		// enums, ms timestamps, model/provider identity, and 16-hex salted
+		// session refs only — no raw session IDs, no paths, no content.
+		learning_health_alarm: Object.freeze([
+			'alarm',
+			'transition',
+			'severity',
+			'scope_class',
+			'session_ref',
+			'model',
+			'provider',
+			'window_ms',
+			'coverage_facts',
+			'raise_facts',
+			'age_ms',
+			'limit_source',
+			'denominator_fallback',
+			'pressure_pct',
+			'band',
+			'share_pct',
+			'field_count',
+			'non_field_count',
+			'store',
+			'dropped',
+			'corrupt',
+			'retained',
+			'accepted',
+			'gap_type',
+			'role',
+			'phase',
+			'reason',
+		]),
 		// Issue #2039 core event store health: bounded counts and timestamps
 		// only — no event content, no paths.
 		core_events_health: Object.freeze([

@@ -183,9 +183,11 @@ describe('resolveContextWindow — resolution order', () => {
 			fallbackLookup: lookupStaticModelLimit,
 		});
 		expect(resolution).toEqual({ tokens: 200000, source: 'live_model_limit' });
-		expect(lookupStaticModelLimit('claude-sonnet-4.5', 'github-copilot')).toBe(
-			128000,
-		);
+		// #2044: the static lookup now says WHICH table matched, so the source can
+		// distinguish the provider-cap table from the native table.
+		expect(
+			lookupStaticModelLimit('claude-sonnet-4.5', 'github-copilot'),
+		).toEqual({ tokens: 128000, table: 'provider_cap' });
 	});
 
 	test('a genuinely 128k-capped provider entry still resolves to 128k', () => {
@@ -257,14 +259,66 @@ describe('resolveContextWindow — resolution order', () => {
 		).toBe(40000);
 	});
 
-	test('falls back to the static table when NO model info is available', () => {
+	test('falls back to the native static table when NO model info is available', () => {
 		expect(
 			resolveContextWindow({
 				modelID: 'claude-sonnet-4-6-20260301',
 				providerID: 'anthropic',
 				fallbackLookup: lookupStaticModelLimit,
 			}),
-		).toEqual({ tokens: 200000, source: 'static_table' });
+		).toEqual({ tokens: 200000, source: 'static_native' });
+	});
+
+	test('#2044 — the provider-cap static table is distinguishable from the native table', () => {
+		// Same rung, different table: the static fallback for a Copilot provider
+		// comes from PROVIDER_CAPS and must report static_provider_cap, not the
+		// conflated old static_table value.
+		expect(
+			resolveContextWindow({
+				modelID: 'gpt-5',
+				providerID: 'github-copilot',
+				fallbackLookup: lookupStaticModelLimit,
+			}),
+		).toEqual({ tokens: 128000, source: 'static_provider_cap' });
+		expect(
+			resolveContextWindow({
+				modelID: 'gpt-5',
+				providerID: 'openai',
+				fallbackLookup: lookupStaticModelLimit,
+			}),
+		).toEqual({ tokens: 400000, source: 'static_native' });
+	});
+
+	test('#2044 — override keys match normalized (trim + lowercase) on both sides', () => {
+		// Lookup-side alias normalization: a user who writes mixed-case or padded
+		// keys still gets their override honored; the stored config is never
+		// rewritten and no hand-maintained alias table is introduced.
+		expect(
+			resolveContextWindow({
+				userLimits: { 'GitHub-Copilot/gpt-5': 60000 },
+				modelID: 'GPT-5',
+				providerID: 'github-copilot',
+				liveContextLimit: 400000,
+			}),
+		).toEqual({ tokens: 60000, source: 'user_provider_model' });
+		expect(
+			resolveContextWindow({
+				userLimits: { '  Claude-Sonnet-4  ': 70000 },
+				modelID: 'claude-sonnet-4',
+				providerID: 'anthropic',
+				liveContextLimit: 1_000_000,
+			}).tokens,
+		).toBe(70000);
+	});
+
+	test('#2044 — an alias-style case difference in a compound key does not silently disable the override', () => {
+		const resolution = resolveContextWindow({
+			userLimits: { 'ANTHROPIC/Claude-Sonnet-4-5': 30000 },
+			modelID: 'claude-sonnet-4-5',
+			providerID: 'Anthropic',
+			liveContextLimit: 1_000_000,
+		});
+		expect(resolution.source).toBe('user_provider_model');
 	});
 
 	test('falls back to the static default when nothing at all is known', () => {
