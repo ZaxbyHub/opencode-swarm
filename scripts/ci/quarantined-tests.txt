@@ -4,3 +4,24 @@
 # starting with # are ignored.
 #
 # No active global test quarantines. Issue #1908 retired the tracked backlog.
+#
+# tests/unit/tools/dispatch-lanes.test.ts (issue #2368)
+# ---------------------------------------------------------------------------
+# Tests the dispatch-lanes tool's fan-out/settle lifecycle: lane creation,
+# batch record status polling (waitForBatchRecordStatus), async session
+# timeout/cleanup, and shared _internals mutation across concurrent lanes.
+#
+# Why flaky: the merge-group coverage job (coverage-shard 3, ubuntu-latest,
+# CI run 32984771338, attempt 1, 2026-08-26T15:31:27Z) failed attempt 1 and
+# passed on retry 1 under `bun test --isolate --coverage` — the elapsed-timeout
+# tests assert literal milliseconds in the timeout message (see issue #2362:
+# 'timed out after 10ms'), so measurement/load variance under the
+# coverage/isolate environment trips them. Pre-existing, unrelated to any
+# specific PR.
+#
+# Quarantined per issue #2368; tracked under #1737 (test quarantine debt)
+# pending a dedicated test-stability sprint (#1782).
+#
+# This entry also suppresses sibling auto-detected issue #2386 (same file).
+#
+tests/unit/tools/dispatch-lanes.test.ts

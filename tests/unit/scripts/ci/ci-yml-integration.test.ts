@@ -358,3 +358,61 @@ describe('ci.yml integration — windows quarantine ledger entry for win32-wrapp
 		expect(declared).toBe(activeEntries(WINDOWS_LEDGER_PATH).length);
 	});
 });
+
+describe('ci.yml integration — general quarantine ledger entry for dispatch-lanes (issue #2368)', () => {
+	// Repo root is four levels up from tests/unit/scripts/ci/.
+	const REPO_ROOT = join(import.meta.dir, '../../../..');
+	const GENERAL_LEDGER_PATH = join(
+		REPO_ROOT,
+		'scripts/ci/quarantined-tests.txt',
+	);
+	const WINDOWS_LEDGER_PATH = join(
+		REPO_ROOT,
+		'scripts/ci/quarantined-tests-windows.txt',
+	);
+	const MACOS_LEDGER_PATH = join(
+		REPO_ROOT,
+		'scripts/ci/quarantined-tests-macos.txt',
+	);
+	const QUARANTINED_PATH = 'tests/unit/tools/dispatch-lanes.test.ts';
+
+	// Mirror ci.yml's active-entry extraction exactly:
+	//   grep -vE '^\s*#|^\s*$' scripts/ci/quarantined-tests-<os>.txt
+	// (CRLF is normalized first so the assertion holds on any checkout config.)
+	function activeEntries(ledgerPath: string): string[] {
+		const raw = readFileSync(ledgerPath, 'utf8').replace(/\r\n/g, '\n');
+		return raw
+			.split('\n')
+			.filter((line: string) => !/^\s*#/.test(line) && !/^\s*$/.test(line))
+			.map((line: string) => line.trim());
+	}
+
+	test('dispatch-lanes.test.ts is an active entry in the general ledger', () => {
+		// Regression guard for issue #2368: the merge-group coverage job
+		// (coverage-shard 3, ubuntu-latest) flagged a retry-flake for this file.
+		// Coverage shards run ubuntu-only and honor ONLY the general ledger
+		// (run-coverage-gate.sh never consults per-OS lists), so the entry must
+		// live in the general ledger. Without it, the flake-detection workflow
+		// keeps re-filing duplicates (rule A only drops already-quarantined
+		// candidates).
+		expect(existsSync(GENERAL_LEDGER_PATH)).toBe(true);
+		expect(activeEntries(GENERAL_LEDGER_PATH)).toContain(QUARANTINED_PATH);
+	});
+
+	test('the general-ledger entry is not duplicated in the per-OS ledgers', () => {
+		// Cross-OS duplicates would be harmless but confusing: the general
+		// ledger already applies on every RUNNER_OS, so re-listing the file in
+		// the windows/macos ledgers would imply OS-specific evidence.
+		expect(activeEntries(WINDOWS_LEDGER_PATH)).not.toContain(QUARANTINED_PATH);
+		expect(activeEntries(MACOS_LEDGER_PATH)).not.toContain(QUARANTINED_PATH);
+	});
+
+	test('the quarantined path exists and is discovered by the ci.yml find chain', () => {
+		// A typo'd ledger path would be a silent no-op: CI's comm -23 gated set
+		// would never exclude it (the path never appears in all-tests.txt) and
+		// the flake would keep re-filing. The discovery chain globs
+		// tests/unit/**/*.test.ts, so the on-disk file must exist at exactly
+		// the ledger path relative to the repo root.
+		expect(existsSync(join(REPO_ROOT, QUARANTINED_PATH))).toBe(true);
+	});
+});
