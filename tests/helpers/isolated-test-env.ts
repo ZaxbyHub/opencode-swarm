@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeProjectDb } from '../../src/db/project-db.js';
 
 /**
  * Environment variables redirected into the isolated temp dir.
@@ -67,7 +68,10 @@ export function createIsolatedTestEnv(): {
 			}
 		}
 
-		// Remove temp directory
+		// Remove temp directory. #2480: release the cached swarm.db handle
+		// first — a held WAL lock makes Windows rmSync fail EBUSY regardless
+		// of retries (closeProjectDb never throws; no-op without a handle).
+		closeProjectDb(configDir);
 		fs.rmSync(configDir, {
 			recursive: true,
 			force: true,

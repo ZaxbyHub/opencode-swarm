@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeGroupCommitWriter } from '../../src/db/group-commit-writer.js';
+import { _resetPhaseReportImportGuards } from '../../src/db/phase-report-store.js';
+import { closeProjectDb } from '../../src/db/project-db.js';
 import {
 	applyCuratorKnowledgeUpdates,
 	runCuratorPhase,
@@ -26,6 +29,14 @@ describe('curator pipeline health — integration', () => {
 	});
 
 	afterEach(() => {
+		// #2480: the drift-report reader opens swarm.db — release before cleanup.
+		try {
+			closeGroupCommitWriter(tempDir);
+			closeProjectDb(tempDir);
+		} catch {
+			// already closed
+		}
+		_resetPhaseReportImportGuards();
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
@@ -311,6 +322,14 @@ describe('curator pipeline health — integration', () => {
 				const reports = await readPriorDriftReports(emptyDir);
 				expect(reports).toHaveLength(0);
 			} finally {
+				// #2480: the read may open (and create) a fresh swarm.db —
+				// release the handle before the temp cleanup or Windows EBUSY.
+				try {
+					closeGroupCommitWriter(emptyDir);
+					closeProjectDb(emptyDir);
+				} catch {
+					// already closed
+				}
 				fs.rmSync(emptyDir, { recursive: true, force: true });
 			}
 		});

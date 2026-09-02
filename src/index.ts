@@ -67,6 +67,8 @@ import {
 } from './config/schema';
 import { createRoleFilterSystemHook } from './context/role-filter.js';
 import { updateContextMapAfterAgent } from './context-map/post-agent-update.js';
+import { closeGroupCommitWriter } from './db/group-commit-writer.js';
+import { closeProjectDb } from './db/project-db.js';
 import { createEvaluationModelDispatcher } from './evaluation/model-dispatcher.js';
 import {
 	observePhaseParticipationToolResult,
@@ -2421,6 +2423,15 @@ async function initializeOpenCodeSwarm(
 		planSyncWorker?.stop();
 		prEventCleanup?.();
 		prEventDelivery?.unregisterPrEventDelivery();
+		// #2480: durable-state close: flush queued group-commit writes, then
+		// closeProjectDb (its own best-effort TRUNCATE→PASSIVE checkpoint is
+		// contention-reporting and stays fast, so it is safe on the exit path).
+		try {
+			closeGroupCommitWriter(ctx.directory);
+			closeProjectDb(ctx.directory);
+		} catch {
+			// best-effort by contract
+		}
 	};
 	process.on('exit', cleanupAutomation);
 
@@ -2538,6 +2549,23 @@ async function initializeOpenCodeSwarm(
 
 	return {
 		name: 'opencode-swarm',
+
+		// #2480: durable-state close hook. The Hooks type declares
+		// `dispose?` (@opencode-ai/plugin dist/index.d.ts); whether the host
+		// invokes it is not verifiable from this repo, so it is best-effort
+		// with the process-exit close in `cleanupAutomation` as the backstop.
+		// Inert if never called, correct if called: flush queued group-commit
+		// writes, TRUNCATE→PASSIVE checkpoint, close the canonical handle.
+		dispose: async (): Promise<void> => {
+			try {
+				closeGroupCommitWriter(ctx.directory);
+				closeProjectDb(ctx.directory);
+			} catch (err) {
+				log('dispose durable-state close failed (non-fatal)', {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		},
 
 		// Register all agents
 		agent: agents,

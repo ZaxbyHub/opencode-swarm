@@ -22,7 +22,7 @@ OpenCode Swarm is a plugin for [OpenCode](https://opencode.ai) that turns a sing
 bunx opencode-swarm install
 ```
 
-> This single command installs the package, registers it as an OpenCode plugin, disables conflicting default agents, and creates a ready-to-edit config at `~/.config/opencode/opencode-swarm.json`. Requires [Bun](https://bun.sh) (`bun --version` to check). If you must use npm: `npm install -g opencode-swarm && opencode-swarm install`.
+> This single command installs the package, registers it as an OpenCode plugin, disables conflicting default agents, and creates a ready-to-edit config at `~/.config/opencode/opencode-swarm.json`. Requires [Bun](https://bun.sh) >= 1.3.13 (`bun --version` to check), or Node.js >= 22.13 for npm installs (the Node-hosted sidecar uses the built-in `node:sqlite`). If you must use npm: `npm install -g opencode-swarm && opencode-swarm install`.
 
 > **First-run note:** the installer registers the plugin, writes the global plugin config, creates a project override when missing, and disables the native `explore` and `general` agents in `opencode.json`. If you are not using a Swarm architect, the Swarm gates, reviewers, and test agents are bypassed. Open the OpenCode agent or mode picker and choose the Swarm architect when needed.
 

@@ -21,6 +21,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import { curateAndStoreSwarm } from '../../../src/hooks/knowledge-curator.js';
 import { resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store.js';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types.js';
@@ -46,7 +47,8 @@ beforeEach(() => {
 
 afterEach(() => {
 	resetSessionQueue();
-	fs.rmSync(dir, { recursive: true, force: true });
+	closeProjectDb(dir);
+	fs.rmSync(dir, { recursive: true, force: true }); // #2480
 });
 
 const storedEntries = () => readStored(dir);

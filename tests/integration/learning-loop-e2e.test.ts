@@ -15,6 +15,9 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { KnowledgeConfigSchema } from '../../src/config/schema';
+import { closeGroupCommitWriter } from '../../src/db/group-commit-writer.js';
+import { appendInsightCandidatesDb } from '../../src/db/insight-candidate-store.js';
+import { closeProjectDb } from '../../src/db/project-db.js';
 import {
 	curateAndStoreSwarm,
 	runAutoPromotion,
@@ -25,7 +28,6 @@ import {
 	resolveSwarmKnowledgePath,
 } from '../../src/hooks/knowledge-store';
 import type { InsightCandidate } from '../../src/hooks/micro-reflector';
-import { resolveInsightCandidatesPath } from '../../src/hooks/micro-reflector';
 import { searchKnowledge } from '../../src/hooks/search-knowledge';
 import { computeKnowledgeDebug } from '../../src/services/knowledge-diagnostics';
 
@@ -75,20 +77,32 @@ describe('learning loop end-to-end (capture -> curate -> retrieve -> outcome)', 
 		else process.env.LOCALAPPDATA = prevLocalAppData;
 		if (prevXdg === undefined) delete process.env.XDG_DATA_HOME;
 		else process.env.XDG_DATA_HOME = prevXdg;
+		// #2480: the loop now persists into swarm.db — release before cleanup.
+		try {
+			closeGroupCommitWriter(dir);
+			closeProjectDb(dir);
+		} catch {
+			// already closed
+		}
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
-	function seedInsights(cands: InsightCandidate[]): void {
-		fs.writeFileSync(
-			resolveInsightCandidatesPath(dir),
-			`${cands.map((c) => JSON.stringify(c)).join('\n')}\n`,
+	async function seedInsights(cands: InsightCandidate[]): Promise<void> {
+		// #2480: seed the durable swarm.db stream directly (per-phase seeding;
+		// the legacy-file import is a one-shot migration, not a re-seed path).
+		await appendInsightCandidatesDb(
+			dir,
+			cands.map((c) => ({
+				payload: JSON.stringify(c),
+				createdAt: c.created_at,
+			})),
 		);
 	}
 
 	it('captures reflections, curates them into directives, retrieves a match, and records its outcome', async () => {
 		// 1. CAPTURE — three already-actionable micro-reflection candidates
 		//    (distinct lessons) that share the {mocks, seams} tag pair.
-		seedInsights([
+		await seedInsights([
 			candidate(
 				'prefer dependency seams over module mocks when isolating tests',
 			),
@@ -174,7 +188,7 @@ describe('learning loop end-to-end (capture -> curate -> retrieve -> outcome)', 
 			'prefer dependency seams over module mocks when isolating tests';
 
 		for (const phase of [1, 2, 3]) {
-			seedInsights([
+			await seedInsights([
 				candidate(lesson, {
 					source: {
 						kind: 'micro_reflection',

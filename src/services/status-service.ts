@@ -19,6 +19,8 @@ import {
 import { loadPluginConfig } from '../config/loader';
 import { MemoryConfigSchema } from '../config/schema';
 import { countConsensusReportFiles } from '../consensus/store';
+import { countPendingInsightCandidatesDb } from '../db/insight-candidate-store';
+import { projectDbExists } from '../db/project-db';
 import {
 	type FullAutoRunState,
 	loadFullAutoRunState,
@@ -611,9 +613,12 @@ export async function getStatusData(
 	status.unactionableQueueDepth = await safeLineCount(
 		resolveUnactionablePath(directory),
 	);
-	status.insightCandidatesPending = await safeLineCount(
-		validateSwarmPath(directory, 'insight-candidates.jsonl'),
-	);
+	// #2480: the durable insight queue is the `insight_candidate` stream in
+	// `.swarm/swarm.db`; the legacy `.jsonl` is only a pre-migration fallback
+	// (never opened-for-create from a status read). Best-effort like every
+	// other counter in this block.
+	status.insightCandidatesPending =
+		await countInsightCandidatesPending(directory);
 	// #1821 AC22: make the consensus store reachable. Best-effort like every
 	// other counter in this block — a status command must never fail because an
 	// optional artifact directory is unreadable.
@@ -1457,6 +1462,27 @@ async function safeLineCount(filePath: string): Promise<number> {
 			if (line.trim()) n++;
 		}
 		return n;
+	} catch {
+		return 0;
+	}
+}
+
+/**
+ * Pending insight-candidate count (#2480): reads the durable stream from
+ * `.swarm/swarm.db` when it exists; before the first DB-mediated write the
+ * legacy `.jsonl` is counted instead (a status read must never create the
+ * DB). Best-effort, fail-open to 0.
+ */
+async function countInsightCandidatesPending(
+	directory: string,
+): Promise<number> {
+	try {
+		if (projectDbExists(directory)) {
+			return countPendingInsightCandidatesDb(directory);
+		}
+		return await safeLineCount(
+			validateSwarmPath(directory, 'insight-candidates.jsonl'),
+		);
 	} catch {
 		return 0;
 	}

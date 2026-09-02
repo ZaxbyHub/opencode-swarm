@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { DURABILITY_CLASSES, withDurabilityClass } from './durability.js';
 import { getProjectDb, projectDbExists } from './project-db.js';
 
 export type TaskCheckpointReceiptState = 'pending' | 'committed' | 'logged';
@@ -99,72 +100,76 @@ export function ensureTaskCheckpointReceipt(
 	}
 	const db = getProjectDb(directory);
 	const initial = buildTaskCompletionDescriptor(planIdentityHash, taskId, 1);
-	db.transaction(() => {
-		db.run(
-			`INSERT OR IGNORE INTO task_checkpoint_receipt
-				(plan_identity_hash, task_id, label, state, sha, generation,
-				 completion_active, completion_ledger_seq)
-			 VALUES (?, ?, ?, 'pending', NULL, 1, 1, ?)`,
-			[planIdentityHash, taskId, initial.label, completionLedgerSeq],
-		);
-		const row = db
-			.query<TaskCheckpointReceiptRow, [string, string]>(
-				'SELECT * FROM task_checkpoint_receipt WHERE plan_identity_hash = ? AND task_id = ?',
-			)
-			.get(planIdentityHash, taskId);
-		if (!row) return;
-
-		if (row.completion_ledger_seq === null) {
-			// v12 receipts and lifecycle-advanced pending receipts have no durable
-			// epoch binding. Bind them in place: a migrated logged receipt must stay
-			// idempotent, while a pending reopened receipt already owns its generation.
+	// #2480 obligation 4: task checkpoint receipts are terminal-state rows —
+	// the write transaction runs at synchronous=FULL (durability classes).
+	withDurabilityClass(db, DURABILITY_CLASSES.task_checkpoint_receipt, () => {
+		db.transaction(() => {
 			db.run(
-				`UPDATE task_checkpoint_receipt
-				 SET completion_ledger_seq = ?, completion_active = 1,
-					updated_at = datetime('now')
-				 WHERE plan_identity_hash = ? AND task_id = ?
-					AND completion_ledger_seq IS NULL`,
-				[completionLedgerSeq, planIdentityHash, taskId],
+				`INSERT OR IGNORE INTO task_checkpoint_receipt
+					(plan_identity_hash, task_id, label, state, sha, generation,
+					 completion_active, completion_ledger_seq)
+				 VALUES (?, ?, ?, 'pending', NULL, 1, 1, ?)`,
+				[planIdentityHash, taskId, initial.label, completionLedgerSeq],
 			);
-			return;
-		}
+			const row = db
+				.query<TaskCheckpointReceiptRow, [string, string]>(
+					'SELECT * FROM task_checkpoint_receipt WHERE plan_identity_hash = ? AND task_id = ?',
+				)
+				.get(planIdentityHash, taskId);
+			if (!row) return;
 
-		if (row.completion_ledger_seq !== completionLedgerSeq) {
-			const nextGeneration = row.generation + 1;
-			const descriptor = buildTaskCompletionDescriptor(
-				planIdentityHash,
-				taskId,
-				nextGeneration,
-			);
-			db.run(
-				`UPDATE task_checkpoint_receipt
-				 SET label = ?, state = 'pending', sha = NULL, generation = ?,
-					completion_active = 1, completion_ledger_seq = ?,
-					updated_at = datetime('now')
-				 WHERE plan_identity_hash = ? AND task_id = ?
-					AND completion_ledger_seq = ?`,
-				[
-					descriptor.label,
-					nextGeneration,
-					completionLedgerSeq,
+			if (row.completion_ledger_seq === null) {
+				// v12 receipts and lifecycle-advanced pending receipts have no durable
+				// epoch binding. Bind them in place: a migrated logged receipt must stay
+				// idempotent, while a pending reopened receipt already owns its generation.
+				db.run(
+					`UPDATE task_checkpoint_receipt
+					 SET completion_ledger_seq = ?, completion_active = 1,
+						updated_at = datetime('now')
+					 WHERE plan_identity_hash = ? AND task_id = ?
+						AND completion_ledger_seq IS NULL`,
+					[completionLedgerSeq, planIdentityHash, taskId],
+				);
+				return;
+			}
+
+			if (row.completion_ledger_seq !== completionLedgerSeq) {
+				const nextGeneration = row.generation + 1;
+				const descriptor = buildTaskCompletionDescriptor(
 					planIdentityHash,
 					taskId,
-					row.completion_ledger_seq,
-				],
-			);
-			return;
-		}
+					nextGeneration,
+				);
+				db.run(
+					`UPDATE task_checkpoint_receipt
+					 SET label = ?, state = 'pending', sha = NULL, generation = ?,
+						completion_active = 1, completion_ledger_seq = ?,
+						updated_at = datetime('now')
+					 WHERE plan_identity_hash = ? AND task_id = ?
+						AND completion_ledger_seq = ?`,
+					[
+						descriptor.label,
+						nextGeneration,
+						completionLedgerSeq,
+						planIdentityHash,
+						taskId,
+						row.completion_ledger_seq,
+					],
+				);
+				return;
+			}
 
-		if (row.completion_active === 0) {
-			db.run(
-				`UPDATE task_checkpoint_receipt
-				 SET completion_active = 1, updated_at = datetime('now')
-				 WHERE plan_identity_hash = ? AND task_id = ?
-					AND completion_ledger_seq = ? AND completion_active = 0`,
-				[planIdentityHash, taskId, completionLedgerSeq],
-			);
-		}
-	})();
+			if (row.completion_active === 0) {
+				db.run(
+					`UPDATE task_checkpoint_receipt
+					 SET completion_active = 1, updated_at = datetime('now')
+					 WHERE plan_identity_hash = ? AND task_id = ?
+						AND completion_ledger_seq = ? AND completion_active = 0`,
+					[planIdentityHash, taskId, completionLedgerSeq],
+				);
+			}
+		})();
+	});
 	const row = readTaskCheckpointReceipt(directory, planIdentityHash, taskId);
 	if (!row) {
 		throw new Error(
@@ -181,26 +186,29 @@ export function activateTaskCheckpointReceipt(
 ): TaskCheckpointReceiptRow | null {
 	if (!projectDbExists(directory)) return null;
 	const db = getProjectDb(directory);
-	db.transaction(() => {
-		const row = db
-			.query<TaskCheckpointReceiptRow, [string, string]>(
-				'SELECT * FROM task_checkpoint_receipt WHERE plan_identity_hash = ? AND task_id = ?',
-			)
-			.get(planIdentityHash, taskId);
-		if (!row || row.completion_active === 1) return;
-		const descriptor = buildTaskCompletionDescriptor(
-			planIdentityHash,
-			taskId,
-			row.generation,
-		);
-		db.run(
-			`UPDATE task_checkpoint_receipt
-			 SET label = ?, state = 'pending', sha = NULL, completion_active = 1,
-				updated_at = datetime('now')
-			 WHERE plan_identity_hash = ? AND task_id = ? AND completion_active = 0`,
-			[descriptor.label, planIdentityHash, taskId],
-		);
-	})();
+	// #2480: terminal-state table — write at synchronous=FULL.
+	withDurabilityClass(db, DURABILITY_CLASSES.task_checkpoint_receipt, () => {
+		db.transaction(() => {
+			const row = db
+				.query<TaskCheckpointReceiptRow, [string, string]>(
+					'SELECT * FROM task_checkpoint_receipt WHERE plan_identity_hash = ? AND task_id = ?',
+				)
+				.get(planIdentityHash, taskId);
+			if (!row || row.completion_active === 1) return;
+			const descriptor = buildTaskCompletionDescriptor(
+				planIdentityHash,
+				taskId,
+				row.generation,
+			);
+			db.run(
+				`UPDATE task_checkpoint_receipt
+				 SET label = ?, state = 'pending', sha = NULL, completion_active = 1,
+					updated_at = datetime('now')
+				 WHERE plan_identity_hash = ? AND task_id = ? AND completion_active = 0`,
+				[descriptor.label, planIdentityHash, taskId],
+			);
+		})();
+	});
 	return readTaskCheckpointReceipt(directory, planIdentityHash, taskId);
 }
 
@@ -211,28 +219,31 @@ export function advanceTaskCheckpointReceiptGeneration(
 ): TaskCheckpointReceiptRow | null {
 	if (!projectDbExists(directory)) return null;
 	const db = getProjectDb(directory);
-	db.transaction(() => {
-		const row = db
-			.query<TaskCheckpointReceiptRow, [string, string]>(
-				'SELECT * FROM task_checkpoint_receipt WHERE plan_identity_hash = ? AND task_id = ?',
-			)
-			.get(planIdentityHash, taskId);
-		if (!row || row.completion_active === 0) return;
-		const nextGeneration = row.generation + 1;
-		const descriptor = buildTaskCompletionDescriptor(
-			planIdentityHash,
-			taskId,
-			nextGeneration,
-		);
-		db.run(
-			`UPDATE task_checkpoint_receipt
-			 SET label = ?, state = 'pending', sha = NULL, generation = ?,
-				completion_active = 0, completion_ledger_seq = NULL,
-				updated_at = datetime('now')
-			 WHERE plan_identity_hash = ? AND task_id = ? AND completion_active = 1`,
-			[descriptor.label, nextGeneration, planIdentityHash, taskId],
-		);
-	})();
+	// #2480: terminal-state table — write at synchronous=FULL.
+	withDurabilityClass(db, DURABILITY_CLASSES.task_checkpoint_receipt, () => {
+		db.transaction(() => {
+			const row = db
+				.query<TaskCheckpointReceiptRow, [string, string]>(
+					'SELECT * FROM task_checkpoint_receipt WHERE plan_identity_hash = ? AND task_id = ?',
+				)
+				.get(planIdentityHash, taskId);
+			if (!row || row.completion_active === 0) return;
+			const nextGeneration = row.generation + 1;
+			const descriptor = buildTaskCompletionDescriptor(
+				planIdentityHash,
+				taskId,
+				nextGeneration,
+			);
+			db.run(
+				`UPDATE task_checkpoint_receipt
+				 SET label = ?, state = 'pending', sha = NULL, generation = ?,
+					completion_active = 0, completion_ledger_seq = NULL,
+					updated_at = datetime('now')
+				 WHERE plan_identity_hash = ? AND task_id = ? AND completion_active = 1`,
+				[descriptor.label, nextGeneration, planIdentityHash, taskId],
+			);
+		})();
+	});
 	return readTaskCheckpointReceipt(directory, planIdentityHash, taskId);
 }
 
@@ -265,32 +276,44 @@ export function updateTaskCheckpointReceipt(
 	sha: string | null,
 ): TaskCheckpointReceiptRow {
 	const db = getProjectDb(directory);
-	db.run(
-		`UPDATE task_checkpoint_receipt
-		 SET state = ?, sha = ?, updated_at = datetime('now')
-		 WHERE plan_identity_hash = ? AND task_id = ?
-			AND generation = ? AND completion_active = 1`,
-		[
-			state,
-			sha,
-			descriptor.planIdentityHash,
-			descriptor.taskId,
-			descriptor.generation,
-		],
-	);
-	const row = readTaskCheckpointReceipt(
-		directory,
-		descriptor.planIdentityHash,
-		descriptor.taskId,
+	// #2480: terminal-state table — the UPDATE + verification read run in one
+	// transaction at synchronous=FULL.
+	const rowAfter = withDurabilityClass<TaskCheckpointReceiptRow | null>(
+		db,
+		DURABILITY_CLASSES.task_checkpoint_receipt,
+		() => {
+			db.transaction(() => {
+				db.run(
+					`UPDATE task_checkpoint_receipt
+					 SET state = ?, sha = ?, updated_at = datetime('now')
+					 WHERE plan_identity_hash = ? AND task_id = ?
+						AND generation = ? AND completion_active = 1`,
+					[
+						state,
+						sha,
+						descriptor.planIdentityHash,
+						descriptor.taskId,
+						descriptor.generation,
+					],
+				);
+			})();
+			return (
+				db
+					.query<TaskCheckpointReceiptRow, [string, string]>(
+						'SELECT * FROM task_checkpoint_receipt WHERE plan_identity_hash = ? AND task_id = ?',
+					)
+					.get(descriptor.planIdentityHash, descriptor.taskId) ?? null
+			);
+		},
 	);
 	if (
-		!row ||
-		row.generation !== descriptor.generation ||
-		row.completion_active !== 1
+		!rowAfter ||
+		rowAfter.generation !== descriptor.generation ||
+		rowAfter.completion_active !== 1
 	) {
 		throw new Error(
 			`Task checkpoint receipt generation changed for ${descriptor.taskId}`,
 		);
 	}
-	return row;
+	return rowAfter;
 }

@@ -186,6 +186,7 @@ export interface SkillCandidate {
 export interface CriticDriftResult {
 	phase: number;
 	report: DriftReport;
-	report_path: string; // .swarm/drift-report-phase-N.json
+	/** #2480: DB-backed locator, e.g. `swarm.db:phase_report(curator_drift,3)`. */
+	report_path: string;
 	injection_text: string; // truncated summary for architect context
 }

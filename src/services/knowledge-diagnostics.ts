@@ -12,6 +12,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import packageJson from '../../package.json' with { type: 'json' };
+import { countPendingInsightCandidatesDb } from '../db/insight-candidate-store';
+import { projectDbExists } from '../db/project-db';
 import {
 	readKnowledgeEvents,
 	resolveKnowledgeEventsPath,
@@ -329,9 +331,11 @@ export async function computeKnowledgeDebug(
 	const unactionableQueueDepth = await safeJsonlCount(
 		resolveUnactionablePathSafe(directory),
 	);
-	const insightCandidatesPending = await safeJsonlCount(
-		resolveInsightCandidatesPathSafe(directory),
-	);
+	// #2480: the durable insight queue is the `insight_candidate` stream in
+	// `.swarm/swarm.db`; the legacy `.jsonl` is only a pre-migration fallback
+	// (diagnostics must never create the DB). Best-effort, degrades to 0.
+	const insightCandidatesPending =
+		await countInsightCandidatesPendingDiagnostic(directory);
 	let synonymPairs = 0;
 	try {
 		synonymPairs = Object.keys((await readSynonymMap(directory)).pairs).length;
@@ -732,6 +736,23 @@ function resolveInsightCandidatesPathSafe(directory: string): string | null {
 		return resolveInsightCandidatesPath(directory);
 	} catch {
 		return null;
+	}
+}
+
+/**
+ * Pending insight-candidate count (#2480): durable stream from `.swarm/swarm.db`
+ * when present, legacy `.jsonl` line count otherwise. Never opens-for-create.
+ */
+async function countInsightCandidatesPendingDiagnostic(
+	directory: string,
+): Promise<number> {
+	try {
+		if (projectDbExists(directory)) {
+			return countPendingInsightCandidatesDb(directory);
+		}
+		return await safeJsonlCount(resolveInsightCandidatesPathSafe(directory));
+	} catch {
+		return 0;
 	}
 }
 

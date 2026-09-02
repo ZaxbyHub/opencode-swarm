@@ -15,6 +15,7 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 
 import {
 	_internals,
@@ -104,6 +105,9 @@ describe('FR-009 — concurrent-run protection', () => {
 		// release must not be called when lock was not acquired
 		expect(releaseSpy).not.toHaveBeenCalled();
 
+		try {
+			closeProjectDb(dir);
+		} catch {} // #2480: release swarm.db (EBUSY)
 		rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -131,6 +135,9 @@ describe('FR-009 — concurrent-run protection', () => {
 		expect(content).toContain('Post-Mortem Report');
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
 
+		try {
+			closeProjectDb(dir);
+		} catch {} // #2480: release swarm.db (EBUSY)
 		rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -167,6 +174,9 @@ describe('FR-009 — concurrent-run protection', () => {
 			expect(releaseSpy).toHaveBeenCalledTimes(1);
 		} finally {
 			_internals.buildDataOnlyReport = originalBuild;
+			try {
+				closeProjectDb(dir);
+			} catch {} // #2480: release swarm.db (EBUSY)
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
@@ -189,6 +199,9 @@ describe('FR-009 — concurrent-run protection', () => {
 
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
 
+		try {
+			closeProjectDb(dir);
+		} catch {} // #2480: release swarm.db (EBUSY)
 		rmSync(dir, { recursive: true, force: true });
 	});
 });

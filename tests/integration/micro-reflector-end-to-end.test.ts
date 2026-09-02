@@ -10,6 +10,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeGroupCommitWriter } from '../../src/db/group-commit-writer.js';
+import {
+	_resetInsightImportGuards,
+	listPendingInsightCandidatesDb,
+} from '../../src/db/insight-candidate-store.js';
+import { closeProjectDb } from '../../src/db/project-db.js';
 import {
 	resolveInsightCandidatesPath,
 	runMicroReflection,
@@ -58,13 +64,10 @@ function failingTrajectory(): TrajectoryEntry[] {
 }
 
 function readCandidates(dir: string): Array<Record<string, unknown>> {
-	const p = resolveInsightCandidatesPath(dir);
-	if (!fs.existsSync(p)) return [];
-	return fs
-		.readFileSync(p, 'utf-8')
-		.split('\n')
-		.filter((l) => l.trim())
-		.map((l) => JSON.parse(l));
+	// #2480: the durable queue is the swarm.db insight stream.
+	return listPendingInsightCandidatesDb(dir, 100).map(
+		(l) => JSON.parse(l) as Record<string, unknown>,
+	);
 }
 
 describe('runMicroReflection (e2e)', () => {
@@ -73,9 +76,17 @@ describe('runMicroReflection (e2e)', () => {
 	beforeEach(() => {
 		dir = fs.mkdtempSync(path.join(os.tmpdir(), 'micro-reflect-'));
 		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
+		_resetInsightImportGuards();
 	});
 
 	afterEach(() => {
+		// #2480: durable queue is swarm.db — release the handle before cleanup.
+		try {
+			closeGroupCommitWriter(dir);
+			closeProjectDb(dir);
+		} catch {
+			// already closed
+		}
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 

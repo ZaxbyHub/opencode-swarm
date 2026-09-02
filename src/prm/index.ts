@@ -242,7 +242,9 @@ export interface PrmPatternPersistenceOptions {
 	 *
 	 * It must never gate the durable append (issue #1821 F3): AC8 says disabled
 	 * or crashed real-time work loses nothing, and the phase-boundary backstop
-	 * can only see candidates that reached `.swarm/insight-candidates.jsonl`.
+	 * can only see candidates that reached the durable insight stream
+	 * (`insight_candidate` in `.swarm/swarm.db` since #2480; previously
+	 * `.swarm/insight-candidates.jsonl`).
 	 * ANDing the two flags at the call site made `realtime_admission.enabled=false`
 	 * silently discard every PRM candidate. Mirrors `micro-reflector.ts`, which
 	 * appends unconditionally and gates only its enqueue.
@@ -500,9 +502,10 @@ export function createPrmHook(
 						// not turn durable persistence off with it.
 						//
 						// Its own try/catch, NOT the shared outer one (issue #1821 F3):
-						// `appendInsightCandidates` deliberately rethrows a non-ENOENT
-						// failure under its `transactFile` lock, and the outer catch is the
-						// last statement's — an EACCES/ELOCKED there would skip the course
+						// `appendInsightCandidates` (a swarm.db store write since
+						// #2480) deliberately rethrows durable-persist failures, and
+						// the outer catch is the last statement's — a storage
+						// failure there would skip the course
 						// correction push, the hard-stop recording, and the trajectory-cursor
 						// advance below, all while `recordPatternObservation` has already
 						// started the 15-minute cooldown. Warn and continue instead, exactly

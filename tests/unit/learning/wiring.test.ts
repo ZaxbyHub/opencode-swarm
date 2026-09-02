@@ -15,10 +15,36 @@ import {
 	LearningConfigSchema,
 	PluginConfigSchema,
 } from '../../../src/config/schema.js';
+import { closeGroupCommitWriter } from '../../../src/db/group-commit-writer.js';
+import {
+	_resetInsightImportGuards,
+	listPendingInsightCandidatesDb,
+} from '../../../src/db/insight-candidate-store.js';
+import { closeProjectDb, getProjectDb } from '../../../src/db/project-db.js';
 import {
 	resolveInsightCandidatesPath,
 	runMicroReflection,
 } from '../../../src/hooks/micro-reflector.js';
+
+/** #2480: durable queue now lives in swarm.db — reset + release helpers. */
+function resetInsightStream(directory: string): void {
+	_resetInsightImportGuards();
+	try {
+		getProjectDb(directory).run('DELETE FROM insight_candidate');
+	} catch {
+		// DB not opened yet — first append creates a clean stream.
+	}
+}
+
+function closeDbHandles(directory: string): void {
+	try {
+		closeGroupCommitWriter(directory);
+		closeProjectDb(directory);
+	} catch {
+		// already closed
+	}
+}
+
 import {
 	recordRealtimeLearningToolCall,
 	resetRealtimeLearningNudgeState,
@@ -194,6 +220,7 @@ describe('createPrmHook — pattern persistence placement', () => {
 		resetSessionQueue();
 		resetPrmPatternSupport();
 		fs.rmSync(resolveInsightCandidatesPath(prmDir), { force: true });
+		resetInsightStream(prmDir);
 		_internals.getAgentSession = (() => fakeSession()) as never;
 		_internals.getInMemoryTrajectory = (() => [{ step: 1 }]) as never;
 		_internals.readTrajectory = (async () => []) as never;
@@ -257,11 +284,10 @@ describe('createPrmHook — pattern persistence placement', () => {
 		// gone for good — and `recordPatternObservation` starts the cooldown at
 		// hand-over, so the same pattern is suppressed for 15 minutes afterwards.
 		// The micro-reflector producer has had this backstop from the start.
-		const durable = fs
-			.readFileSync(resolveInsightCandidatesPath(prmDir), 'utf-8')
-			.split('\n')
-			.filter((l) => l.trim())
-			.map((l) => JSON.parse(l) as { source: { kind: string } });
+		// #2480: the durable queue is the swarm.db insight stream.
+		const durable = listPendingInsightCandidatesDb(prmDir, 10).map(
+			(l) => JSON.parse(l) as { source: { kind: string } },
+		);
 		expect(durable).toHaveLength(1);
 		expect(durable[0].source.kind).toBe('prm_pattern');
 
@@ -326,10 +352,12 @@ describe('runMicroReflection — enqueue alongside the durable append', () => {
 		dir = canonicalMkdtemp('micro-enqueue-');
 		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		resetSessionQueue();
+		resetInsightStream(dir);
 	});
 
 	afterEach(() => {
 		resetSessionQueue();
+		closeDbHandles(dir);
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -354,13 +382,8 @@ describe('runMicroReflection — enqueue alongside the durable append', () => {
 	}
 
 	function durableLines(): unknown[] {
-		const p = resolveInsightCandidatesPath(dir);
-		if (!fs.existsSync(p)) return [];
-		return fs
-			.readFileSync(p, 'utf-8')
-			.split('\n')
-			.filter((l) => l.trim())
-			.map((l) => JSON.parse(l));
+		// #2480: the durable queue is the swarm.db insight stream.
+		return listPendingInsightCandidatesDb(dir, 100).map((l) => JSON.parse(l));
 	}
 
 	it('writes the durable backstop AND enqueues for same-session admission', async () => {

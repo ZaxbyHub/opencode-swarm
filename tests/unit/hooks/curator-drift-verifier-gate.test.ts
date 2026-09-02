@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeGroupCommitWriter } from '../../../src/db/group-commit-writer.js';
+import { readPhaseReportsDb } from '../../../src/db/phase-report-store.js';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import {
 	readPriorDriftReports,
 	runDeterministicDriftCheck,
@@ -106,11 +109,13 @@ describe('runDeterministicDriftCheck — gate invariants', () => {
 		expect(result.report_path).toBeTruthy();
 		expect(result.report_path.length).toBeGreaterThan(0);
 
-		// The advisory drift report must exist at that path
-		expect(fs.existsSync(result.report_path)).toBe(true);
+		// #2480: the report persists in swarm.db behind the locator.
+		expect(result.report_path).toBe('swarm.db:phase_report(curator_drift,1)');
+		const persisted = readPhaseReportsDb(tempDir, 'curator_drift');
+		expect(persisted.length).toBe(1);
 
 		// It must be valid JSON with a DriftReport shape
-		const content = fs.readFileSync(result.report_path, 'utf-8');
+		const content = persisted[0].payload;
 		expect(() => JSON.parse(content)).not.toThrow();
 
 		const report = JSON.parse(content);
@@ -171,12 +176,13 @@ describe('runDeterministicDriftCheck — gate invariants', () => {
 			injection_summary: 'Phase 99: ALIGNED',
 		};
 
-		const filePath = await writeDriftReport(tempDir, report);
+		const locator = await writeDriftReport(tempDir, report);
 
-		expect(filePath).toContain('drift-report-phase-99.json');
-		expect(fs.existsSync(filePath)).toBe(true);
+		expect(locator).toBe('swarm.db:phase_report(curator_drift,99)');
+		const rows = readPhaseReportsDb(tempDir, 'curator_drift');
+		expect(rows.length).toBe(1);
 
-		const content = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+		const content = JSON.parse(rows[0].payload);
 		expect(content.phase).toBe(99);
 		expect(content.alignment).toBe('ALIGNED');
 	});
