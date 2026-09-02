@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.163.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.162.1...v7.163.0) (2026-09-02)
+
+
+### Features
+
+* **council:** emit observability events for every council attempt and accepted transition ([9360f3b](https://github.com/ZaxbyHub/opencode-swarm/commit/9360f3b87885defa14e950a31111f434cef336ce))
+
 ## [7.162.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.162.0...v7.162.1) (2026-09-02)
 
 
