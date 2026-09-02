@@ -61,7 +61,6 @@ describe('diagnose swarm-db check', () => {
 		expect(check?.detail.length).toBeGreaterThan(0);
 	});
 
-
 	test('#2480 review F-07: staleMarker is visible through the canonical key (win32 case variant)', async () => {
 		mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		getProjectDb(dir); // creates DB under the canonical key
