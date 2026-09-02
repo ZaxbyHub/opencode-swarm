@@ -1,5 +1,27 @@
 # Changelog
 
+## [7.164.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.163.1...v7.164.0) (2026-09-02)
+
+
+### Features
+
+* **db:** establish the sqlite durable-state foundation and migrate low-risk stores ([7e7cfa5](https://github.com/ZaxbyHub/opencode-swarm/commit/7e7cfa5fe6be857e8b1b398416577a3981455657))
+
+## [7.163.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.163.0...v7.163.1) (2026-09-02)
+
+
+### Bug Fixes
+
+* **ci:** root-fix filesystem, process, and test-isolation flakes (issue [#2477](https://github.com/ZaxbyHub/opencode-swarm/issues/2477)) ([2d36049](https://github.com/ZaxbyHub/opencode-swarm/commit/2d36049fa760dc5959452463e66f2ace32430679))
+* **test:** close pr-review findings on [#2514](https://github.com/ZaxbyHub/opencode-swarm/issues/2514) — seam fidelity, teardown isolation, gate hardening ([f20e104](https://github.com/ZaxbyHub/opencode-swarm/commit/f20e10423afa398fe847c9cc8bbe9b38ee93d628))
+
+## [7.163.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.162.1...v7.163.0) (2026-09-02)
+
+
+### Features
+
+* **council:** emit observability events for every council attempt and accepted transition ([9360f3b](https://github.com/ZaxbyHub/opencode-swarm/commit/9360f3b87885defa14e950a31111f434cef336ce))
+
 ## [7.162.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.162.0...v7.162.1) (2026-09-02)
 
 

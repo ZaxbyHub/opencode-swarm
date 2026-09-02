@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import { derivePlanId, derivePlanIdentityHash } from '../plan/utils.js';
 import { formatLegacyQaBindingRecovery } from '../qa-gate/recovery.js';
 import { warn } from '../utils/logger.js';
+import { applySynchronousForClass, DURABILITY_CLASSES } from './durability.js';
 import { getProjectDb, projectDbExists } from './project-db.js';
 
 /**
@@ -40,6 +41,8 @@ export const _internals: {
 				storagePlanId: string;
 		  }) => void)
 		| undefined;
+	/** #2480 test probe: synchronous level observed during the last write txn. */
+	lastTxnSynchronous: number;
 } = {
 	getProfile,
 	getProfileLookupForIdentity,
@@ -53,6 +56,7 @@ export const _internals: {
 	computeProfileHash,
 	hasAnyProfileWithEnabledGate,
 	afterSetGatesRead: () => {},
+	lastTxnSynchronous: -1,
 };
 
 /**
@@ -187,8 +191,25 @@ function withImmediateTransaction<T>(
 	db: ReturnType<typeof getProjectDb>,
 	fn: () => T,
 ): T {
+	// #2480 obligation 4: qa_gate_profile is a terminal-state table (locked
+	// profiles are immutable) — every write transaction through this shared
+	// path runs at synchronous=FULL and restores the NORMAL default after.
+	applySynchronousForClass(db, DURABILITY_CLASSES.qa_gate_profile);
+	// Test-only observability: the synchronous level observed DURING the most
+	// recent transaction through this helper, so tests can pin the escalation
+	// on the public write paths (implementation-review finding).
+	_internals.lastTxnSynchronous =
+		db.query<{ synchronous: number }, []>('PRAGMA synchronous').get()
+			?.synchronous ?? -1;
+	const restoreSynchronous = (): void => {
+		applySynchronousForClass(db, 'normal');
+	};
 	if (db.inTransaction) {
-		return db.transaction(fn)();
+		try {
+			return db.transaction(fn)();
+		} finally {
+			restoreSynchronous();
+		}
 	}
 	db.run('BEGIN IMMEDIATE');
 	try {
@@ -202,10 +223,10 @@ function withImmediateTransaction<T>(
 			// Ignore rollback failures; surface the original error below.
 		}
 		throw err;
+	} finally {
+		restoreSynchronous();
 	}
 }
-
-let qaGateProfileSavepointCounter = 0;
 
 function rowToProfile(row: QaGateProfileRow): QaGateProfile {
 	return rowToProfileWithBinding(row);
@@ -572,14 +593,15 @@ export function getOrCreateProfile(
 		}
 	}
 	const gatesJson = JSON.stringify(seededGates);
-	const insert = db.transaction(() => {
-		db.run(
-			'INSERT INTO qa_gate_profile (plan_id, project_type, gates) VALUES (?, ?, ?)',
-			[planId, projectType ?? null, gatesJson],
-		);
-	});
+	// #2480 obligation 4: qa_gate_profile is a full-class table — the insert
+	// runs through the shared immediate-transaction helper (synchronous=FULL).
 	try {
-		insert();
+		withImmediateTransaction(db, () => {
+			db.run(
+				'INSERT INTO qa_gate_profile (plan_id, project_type, gates) VALUES (?, ?, ?)',
+				[planId, projectType ?? null, gatesJson],
+			);
+		});
 	} catch (err) {
 		// UNIQUE race: another caller created the row — fall through to re-query
 		const msg = err instanceof Error ? err.message : String(err);
@@ -617,11 +639,11 @@ export function getOrCreateProfileForIdentity(
 
 	return withImmediateTransaction(db, () => {
 		const lookup = lookupProfileForIdentityTx(db, exact);
+		// 'unbound_legacy' and 'missing' both create exact-profile rows here:
+		// an unbound legacy row cannot prove which raw identity owned its
+		// readable plan_id, so adoption is left to setGatesForIdentity.
 		if (lookup.kind === 'bound') {
 			return lookup.profile;
-		}
-		if (lookup.kind === 'unbound_legacy') {
-			return createExactProfileTx(db, exact, projectType, initialGates);
 		}
 		return createExactProfileTx(db, exact, projectType, initialGates);
 	});
@@ -638,10 +660,10 @@ export function setGates(
 	gates: Partial<QaGates>,
 ): QaGateProfile {
 	const db = getProjectDb(directory);
-	const savepointName = `qa_gate_profile_set_${qaGateProfileSavepointCounter++}`;
-	const startedTransaction = !db.inTransaction;
-	db.run(startedTransaction ? 'BEGIN IMMEDIATE' : `SAVEPOINT ${savepointName}`);
-	try {
+	// #2480 obligation 4: every write transaction goes through the shared
+	// immediate-transaction helper (BEGIN IMMEDIATE / SAVEPOINT nesting +
+	// synchronous=FULL for this full-class table).
+	return withImmediateTransaction(db, () => {
 		// Acquire the write lock before reading so concurrent writers cannot
 		// observe the same stale snapshot and later clobber one another.
 		const currentRow = db
@@ -692,19 +714,8 @@ export function setGates(
 			);
 		}
 
-		db.run(startedTransaction ? 'COMMIT' : `RELEASE ${savepointName}`);
 		return rowToProfile(updatedRow);
-	} catch (err) {
-		try {
-			db.run(startedTransaction ? 'ROLLBACK' : `ROLLBACK TO ${savepointName}`);
-			if (!startedTransaction) {
-				db.run(`RELEASE ${savepointName}`);
-			}
-		} catch {
-			// Ignore rollback cleanup failures; surface the original error below.
-		}
-		throw err;
-	}
+	});
 }
 
 export function setGatesForIdentity(
@@ -715,30 +726,12 @@ export function setGatesForIdentity(
 ): QaGateProfile {
 	const db = getProjectDb(directory);
 	const exact = buildProfileIdentity(identity);
-	const savepointName = `qa_gate_profile_set_identity_${qaGateProfileSavepointCounter++}`;
-	const startedTransaction = !db.inTransaction;
-	const finishTransaction = (): void => {
-		db.run(startedTransaction ? 'COMMIT' : `RELEASE ${savepointName}`);
-	};
-	const rollbackTransaction = (): void => {
-		db.run(startedTransaction ? 'ROLLBACK' : `ROLLBACK TO ${savepointName}`);
-		if (!startedTransaction) {
-			db.run(`RELEASE ${savepointName}`);
-		}
-	};
-
-	db.run(startedTransaction ? 'BEGIN IMMEDIATE' : `SAVEPOINT ${savepointName}`);
-	try {
+	// #2480 obligation 4: shared immediate-transaction helper (BEGIN IMMEDIATE
+	// / SAVEPOINT nesting + synchronous=FULL for this full-class table).
+	return withImmediateTransaction(db, () => {
 		let lookup = lookupProfileForIdentityTx(db, exact);
 		if (lookup.kind === 'missing') {
-			const created = createExactProfileTx(
-				db,
-				exact,
-				options.projectType,
-				gates,
-			);
-			finishTransaction();
-			return created;
+			return createExactProfileTx(db, exact, options.projectType, gates);
 		}
 
 		if (lookup.kind === 'unbound_legacy') {
@@ -751,14 +744,7 @@ export function setGatesForIdentity(
 					);
 				}
 			} else if (options.allowLegacyCollisionCreate === true) {
-				const created = createExactProfileTx(
-					db,
-					exact,
-					options.projectType,
-					gates,
-				);
-				finishTransaction();
-				return created;
+				return createExactProfileTx(db, exact, options.projectType, gates);
 			} else {
 				throw new QaGateProfileIdentityUnboundError(lookup.identity);
 			}
@@ -780,7 +766,6 @@ export function setGatesForIdentity(
 
 		if (current.locked_at !== null) {
 			if (!hasAnyGatePatch(gates)) {
-				finishTransaction();
 				return current;
 			}
 			throw new Error(
@@ -815,16 +800,8 @@ export function setGatesForIdentity(
 			);
 		}
 
-		finishTransaction();
 		return rowToProfileWithBinding(updatedRow, binding);
-	} catch (err) {
-		try {
-			rollbackTransaction();
-		} catch {
-			// Ignore rollback cleanup failures; surface the original error below.
-		}
-		throw err;
-	}
+	});
 }
 
 /**
@@ -846,10 +823,15 @@ export function lockProfile(
 		return current;
 	}
 	const db = getProjectDb(directory);
-	db.run(
-		"UPDATE qa_gate_profile SET locked_at = datetime('now'), locked_by_snapshot_seq = ? WHERE plan_id = ?",
-		[snapshotSeq, planId],
-	);
+	// #2480 obligation 4: the lock transition is terminal state — it runs in
+	// one immediate transaction at synchronous=FULL (previously a bare
+	// autocommit UPDATE that also let two concurrent lockers race).
+	withImmediateTransaction(db, () => {
+		db.run(
+			"UPDATE qa_gate_profile SET locked_at = datetime('now'), locked_by_snapshot_seq = ? WHERE plan_id = ?",
+			[snapshotSeq, planId],
+		);
+	});
 	const locked = _internals.getProfile(directory, planId);
 	if (!locked) {
 		throw new Error(

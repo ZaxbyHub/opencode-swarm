@@ -3,10 +3,21 @@
 # Format: one repo-relative test file path per line. Blank lines and lines
 # starting with # are ignored.
 #
-# No active integration quarantines. Issue #1908 requires merge-group proof.
+# METADATA REQUIREMENT (issue #2477): every active path entry must carry,
+# in the comment block directly above it:
+#   # OWNER: <owner> — <issue ref / context>
+#   # EXPIRY: YYYY-MM-DD — <retirement criterion>
+# Enforced by `bun run check:invariants` Check 7: missing metadata fails the
+# gate; an EXPIRY more than 14 days in the past also fails (inside the grace
+# window it only warns).
+#
+# Issue #1908 requires merge-group proof for any entry here.
 
 # Refs #2396: skill_improver quota tests refuse to run inside the merge_group
 # integration batch (r.ran false); pass standalone. Merge-group proof: PR #2377
 # run 33109018048 and PR #2387 run 33110714121 failed identically on
 # 2026-08-27 while the standalone file passed on both branches.
+# OWNER: @zaxbysauce — issue #2396
+# EXPIRY: 2026-09-30 — root-fix the merge-group integration-batch refusal
+# (r.ran false) or renew with updated diagnosis under #2396/#2477
 tests/integration/issue-629-skill-improver.test.ts

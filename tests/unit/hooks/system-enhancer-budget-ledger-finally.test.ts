@@ -44,6 +44,15 @@ import { resetSwarmState } from '../../../src/state.js';
 
 const FORCE_THROW_MARKER = '__FR004_FORCE_LEDGER_THROW__';
 
+// Captured as a VALUE before the mock.module registration below. Bun's
+// mock.module retroactively patches the original module's export slots, so a
+// later `realExtractors.extractPlanCursor(...)` property read resolves to the
+// wrapper itself — the passthrough would be infinite tail recursion and hang
+// the shared test process for any co-located suite calling the export with
+// non-marker content (the issue #2260/#2477 class; proven by scratch probe).
+// A captured function reference stays the real implementation.
+const realExtractPlanCursor = realExtractors.extractPlanCursor;
+
 // Mocked BEFORE system-enhancer.ts is (lazily) required below, so the hook
 // body's `extractPlanCursor` import resolves to this wrapper. Every real
 // export is passed through untouched; only `extractPlanCursor` is wrapped,
@@ -63,7 +72,7 @@ mock.module('../../../src/hooks/extractors.js', () => ({
 				'Simulated mid-turn exception after injection (FR-004 repro)',
 			);
 		}
-		return realExtractors.extractPlanCursor(planContent, options);
+		return realExtractPlanCursor(planContent, options);
 	},
 }));
 

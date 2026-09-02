@@ -347,6 +347,52 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
   configuration and schema/runtime drift. Adopt only with a concrete case; when
   adopted, cite this entry as its origin.
 
+### Issue #2480 — the SQLite durable-state foundation (Workstream D1)
+
+- **What shipped:** `.swarm/swarm.db` became the durable-state substrate with
+  canonical connection identity (`src/db/canonical-project.ts` — one handle
+  per canonical project root: realpath-collapsed, case-folded on win32 only),
+  single-statement versioned migrations v14–v17 with failed-migration
+  recovery (`migration_failures` + `.swarm/db-migration-failure.json` marker
+  fallback, retry on next open), per-table durability classes
+  (`src/db/durability.ts` — terminal-state tables write at
+  `synchronous=FULL`, production-wired through `qa-gate-profile`'s shared
+  immediate-transaction helper and every task-checkpoint-receipt writer), a
+  group-commit writer (queue → one `BEGIN IMMEDIATE` txn per flush — plain
+  `db.transaction()` issues a deferred BEGIN that deadlocks into SQLITE_BUSY
+  under two-windows contention), an idempotent one-txn legacy import with
+  `.imported` cold-archive rename, `quick_check` in diagnose, a typed
+  disk-full/read-only/corrupt error surface, and the first low-risk store
+  migrations (insight candidates + both drift-report families) through the
+  four documented table patterns. Full policy:
+  `docs/sqlite-durable-state.md`.
+- **Invariant(s) established:**
+  - **Migrations are single-statement.** A partial application can never hide
+    inside a multi-statement string split differently across drivers.
+  - **Authoritative state never inherits the rebuildable-index durability
+    setting:** any transaction touching a `full`-class table runs at
+    `synchronous=FULL`.
+  - **The store-op seam is the registry boundary for DB-mediated writes** (see
+    the #2036 entry): every durable swarm.db mutation goes through a NAMED,
+    enumerated store function; raw `Database`-handle usage outside `src/db/**`
+    is confined to `RAW_DB_HANDLE_MODULES`; `src/db` foundation writers are
+    reverse-staleness checked.
+  - **Legacy files are never silently destroyed:** the import renames to
+    `.imported` after commit; a non-empty table with the file still present
+    (crash-after-commit window, or an older plugin version rewriting it)
+    leaves the file inert with a once-per-process warning.
+  - **The canonical-key close semantic:** closing the handle invalidates every
+    spelling-alias of that root — those aliases were previously silent
+    duplicate WAL writers on one file, which was the bug.
+  - **Node floor is enforced, not just declared:** the loader probes
+    `process.versions.node` on the node fallback and throws the floor
+    diagnostic (`engines` declares `node >= 22.13`).
+- **Maps to AGENTS.md:** invariants 2 (runtime portability — parity contract
+  + strict fake), 4 (`.swarm` containment), 7 (driver-parity and
+  registry-seam tests), 8 (bounded session state — degradation cooldowns,
+  once-per-process warnings), and 11 (registration-completeness extended to
+  DB-mediated writes).
+
 ## Invariants — anti-pattern, required pattern, verification
 
 ### Skill ownership and audience routing

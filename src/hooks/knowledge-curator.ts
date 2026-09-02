@@ -1,8 +1,8 @@
 /** Knowledge curator hook for opencode-swarm v6.17 two-tier knowledge system. */
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { readFile, realpath, writeFile } from 'node:fs/promises';
+import { realpath } from 'node:fs/promises';
 import * as path from 'node:path';
+import { consumeInsightCandidatesDb } from '../db/insight-candidate-store.js';
 import { appendCoreEventSync } from '../events/core-events.js';
 import type { CurationContext } from '../knowledge/curation-policy.js';
 import { redactSecrets } from '../memory/redaction.js';
@@ -34,7 +34,6 @@ import {
 	resolveHiveKnowledgePath,
 	resolveSwarmKnowledgePath,
 	rewriteKnowledge,
-	transactFile,
 	transactKnowledge,
 } from './knowledge-store.js';
 import type {
@@ -58,7 +57,6 @@ import {
 	type InsightCandidate,
 	insightAdmissionMarker,
 	resolveInsightCandidateId,
-	resolveInsightCandidatesPath,
 	unionInsightMarker,
 } from './micro-reflector.js';
 import { readSwarmFileAsync, safeHook } from './utils.js';
@@ -909,50 +907,27 @@ const KNOWLEDGE_CATEGORIES: ReadonlySet<string> = new Set<KnowledgeCategory>([
 	'todo',
 	'other',
 ]);
-function readInsightJsonl(content: string): InsightCandidate[] {
-	const out: InsightCandidate[] = [];
-	for (const line of content.split('\n')) {
-		const t = line.trim();
-		if (!t) continue;
-		try {
-			out.push(JSON.parse(t) as InsightCandidate);
-		} catch {
-			// skip corrupt line
-		}
-	}
-	return out;
-}
 /**
- * Atomically consume up to `batchLimit` insight candidates from
- * `.swarm/insight-candidates.jsonl`, writing back the unconsumed tail under the
- * same lock so concurrent micro-reflection appends are never lost. Fail-open.
+ * Atomically consume up to `batchLimit` insight candidates from the durable
+ * `insight_candidate` stream in `.swarm/swarm.db` (issue #2480). The SELECT
+ * and the consumed_at UPDATE happen in ONE immediate transaction, so
+ * concurrent appends are never lost and a batch is never double-taken.
+ * Fail-open: returns [] on any DB error.
  */
 export async function consumeInsightCandidates(
 	directory: string,
 	batchLimit = MESO_INSIGHT_BATCH_LIMIT,
 ): Promise<InsightCandidate[]> {
 	try {
-		const filePath = resolveInsightCandidatesPath(directory);
-		if (!existsSync(filePath)) return [];
+		const payloads = consumeInsightCandidatesDb(directory, batchLimit);
 		const consumed: InsightCandidate[] = [];
-		await transactFile<InsightCandidate[]>(
-			filePath,
-			async (p) => readInsightJsonl(await readFile(p, 'utf-8').catch(() => '')),
-			async (p, data) => {
-				// transactFile already mkdir'd the directory under the lock.
-				const body =
-					data.length === 0
-						? ''
-						: `${data.map((c) => JSON.stringify(c)).join('\n')}\n`;
-				await writeFile(p, body, 'utf-8');
-			},
-			(all) => {
-				if (all.length === 0) return null;
-				const batch = all.slice(0, batchLimit);
-				consumed.push(...batch);
-				return all.slice(batch.length); // unconsumed tail (possibly empty)
-			},
-		);
+		for (const payload of payloads) {
+			try {
+				consumed.push(JSON.parse(payload) as InsightCandidate);
+			} catch {
+				// skip corrupt payload (the legacy reader's skip-corrupt behavior)
+			}
+		}
 		return consumed;
 	} catch {
 		return [];

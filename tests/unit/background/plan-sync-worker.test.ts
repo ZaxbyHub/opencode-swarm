@@ -16,11 +16,16 @@ import {
 	type PlanSyncWorkerStatus,
 } from '../../../src/background/plan-sync-worker';
 import { _internals as planManagerInternals } from '../../../src/plan/manager';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
+import { waitFor } from '../../helpers/wait-for';
 
 // Within-module DI seam: mock functions are assigned to _internals
 const mockLoadPlan = mock(async () => null);
 const mockLoadPlanJsonOnly = mock(async () => null);
 const mockRegeneratePlanMarkdown = mock(async () => {});
+
+// RC-3/#2305: seam-originals snapshot for the afterEach restore (§7).
+const seamSnapshot = { ...planManagerInternals };
 
 // File watcher timing varies significantly across platforms (macOS FSEvents,
 // Windows ReadDirectoryChangesW). Dozens of timing-sensitive assertions fail
@@ -66,10 +71,11 @@ describe.skipIf(process.platform !== 'linux')('PlanSyncWorker', () => {
 	// Helper to clean up temp directory
 	async function cleanupTempDir(): Promise<void> {
 		if (tempDir) {
+			// safeRmRecursive: retried EBUSY/EPERM removal (#2305 watcher release).
 			try {
-				fs.rmSync(tempDir, { recursive: true, force: true });
+				safeRmRecursive(tempDir);
 			} catch {
-				// Ignore cleanup errors (e.g. Windows FSWatcher handle still releasing)
+				/* exhausted */
 			}
 		}
 	}
@@ -91,10 +97,7 @@ describe.skipIf(process.platform !== 'linux')('PlanSyncWorker', () => {
 	});
 
 	afterEach(async () => {
-		// Restore original functions to _internals seam
-		planManagerInternals.loadPlan = mockLoadPlan;
-		planManagerInternals.loadPlanJsonOnly = mockLoadPlanJsonOnly;
-		planManagerInternals.regeneratePlanMarkdown = mockRegeneratePlanMarkdown;
+		Object.assign(planManagerInternals, seamSnapshot); // restore originals
 		// Clean up worker
 		if (worker) {
 			worker.dispose();
@@ -479,12 +482,7 @@ describe.skipIf(process.platform !== 'linux')('PlanSyncWorker', () => {
 			// macOS FSEvents has higher latency than Linux inotify
 			await new Promise((resolve) => setTimeout(resolve, 150));
 
-			// Wait until first sync has started (it's blocking)
-			let attempts = 0;
-			while (!firstSyncStarted && attempts < 50) {
-				await new Promise((resolve) => setTimeout(resolve, 20));
-				attempts++;
-			}
+			await waitFor(() => firstSyncStarted, 2000, 'first sync start'); // #2305
 
 			// Verify we're in the first sync
 			expect(syncCount).toBe(1);

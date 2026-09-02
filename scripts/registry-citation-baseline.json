@@ -205,20 +205,6 @@
 			"note": "Pre-existing debt, not approved drift: \"writePersisted\" exists in src/full-auto/state.ts but not inside src/full-auto/state.ts:437 (full-auto-state.writerCitations[0])."
 		},
 		{
-			"rowId": "insight-candidates",
-			"file": "src/hooks/knowledge-curator.ts",
-			"identifier": "consumeInsightCandidates",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"consumeInsightCandidates\" exists in src/hooks/knowledge-curator.ts but not inside src/hooks/knowledge-curator.ts:925 (insight-candidates.readerCitations[0])."
-		},
-		{
-			"rowId": "insight-candidates",
-			"file": "src/hooks/micro-reflector.ts",
-			"identifier": "appendInsightCandidates",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"appendInsightCandidates\" exists in src/hooks/micro-reflector.ts but not inside src/hooks/micro-reflector.ts:301 (insight-candidates.writerCitations[0])."
-		},
-		{
 			"rowId": "knowledge-application-legacy",
 			"file": "src/hooks/knowledge-application-gate.ts",
 			"identifier": "knowledgeApplicationTransformScan",

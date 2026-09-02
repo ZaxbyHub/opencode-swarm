@@ -10,6 +10,7 @@ import { execSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 
@@ -68,7 +69,8 @@ describe('phase_complete auto-checkpoint trigger', () => {
 	afterEach(() => {
 		process.chdir(originalCwd);
 		try {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			closeProjectDb(tempDir);
+			fs.rmSync(tempDir, { recursive: true, force: true }); // #2480
 		} catch {
 			// Ignore cleanup errors
 		}
@@ -380,7 +382,8 @@ describe('phase_complete auto-checkpoint trigger', () => {
 			} finally {
 				// Cleanup - change back to original dir first
 				process.chdir(originalCwd);
-				fs.rmSync(nonGitDir, { recursive: true, force: true });
+				closeProjectDb(nonGitDir);
+				fs.rmSync(nonGitDir, { recursive: true, force: true }); // #2480
 			}
 		});
 	});

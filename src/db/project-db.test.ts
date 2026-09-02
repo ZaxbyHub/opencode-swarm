@@ -94,7 +94,9 @@ describe('project-db', () => {
 			)
 			.all()
 			.map((r) => r.version);
-		expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+		expect(versions).toEqual([
+			1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+		]);
 		db.close();
 	});
 
@@ -153,7 +155,9 @@ describe('project-db', () => {
 	test('v13 preserves populated v12 receipts and leaves epoch binding nullable', () => {
 		const db = new Database(':memory:');
 		runProjectMigrations(db);
-		db.run('DELETE FROM schema_migrations WHERE version = 13');
+		// #2480: simulate a pre-v13 database (v14+ now exist above v13, so the
+		// simulation must delete every later version too — MAX-based versioning).
+		db.run('DELETE FROM schema_migrations WHERE version >= 13');
 		db.run(`CREATE TABLE task_checkpoint_receipt_v12 (
 			plan_identity_hash TEXT NOT NULL,
 			task_id TEXT NOT NULL,
@@ -264,7 +268,9 @@ describe('project-db', () => {
 			)
 			.all()
 			.map((row) => row.version);
-		expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+		expect(versions).toEqual([
+			1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+		]);
 		const rows = db
 			.query<
 				{

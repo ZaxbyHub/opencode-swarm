@@ -8,6 +8,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 
 import {
 	_internals,
@@ -84,7 +85,8 @@ describe('curator post-mortem executable actions', () => {
 	afterEach(() => {
 		_internals.checkHivePromotions = originalCheckHivePromotions;
 		_internals.applyProposalTriage = originalApplyProposalTriage;
-		rmSync(dir, { recursive: true, force: true });
+		closeProjectDb(dir);
+		rmSync(dir, { recursive: true, force: true }); // #2480
 	});
 
 	test('executes parsed LLM actions and returns the LLM summary', async () => {

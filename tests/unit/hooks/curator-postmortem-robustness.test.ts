@@ -17,6 +17,7 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 
 import {
 	_internals,
@@ -29,6 +30,12 @@ import {
 
 function makeTempDir(): string {
 	return mkdtempSync(path.join(os.tmpdir(), 'postmortem-robustness-test-'));
+}
+
+/** #2480: release the cached swarm.db handle, then remove the temp dir. */
+function closeAndRm(dir: string): void {
+	closeProjectDb(dir); // never throws
+	rmSync(dir, { recursive: true, force: true });
 }
 
 function ensureSwarmDir(dir: string): string {
@@ -304,7 +311,7 @@ describe('FR-008 — isReportValid verifies report integrity', () => {
 		try {
 			expect(_internals.isReportValid(reportPath)).toBe(false);
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			closeAndRm(dir);
 		}
 	});
 
@@ -315,7 +322,7 @@ describe('FR-008 — isReportValid verifies report integrity', () => {
 		try {
 			expect(_internals.isReportValid(reportPath)).toBe(false);
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			closeAndRm(dir);
 		}
 	});
 
@@ -329,7 +336,7 @@ describe('FR-008 — isReportValid verifies report integrity', () => {
 		try {
 			expect(_internals.isReportValid(reportPath)).toBe(false);
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			closeAndRm(dir);
 		}
 	});
 
@@ -340,7 +347,7 @@ describe('FR-008 — isReportValid verifies report integrity', () => {
 		try {
 			expect(_internals.isReportValid(reportPath)).toBe(false);
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			closeAndRm(dir);
 		}
 	});
 
@@ -354,7 +361,7 @@ describe('FR-008 — isReportValid verifies report integrity', () => {
 		try {
 			expect(_internals.isReportValid(reportPath)).toBe(true);
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			closeAndRm(dir);
 		}
 	});
 
@@ -365,7 +372,7 @@ describe('FR-008 — isReportValid verifies report integrity', () => {
 		try {
 			expect(_internals.isReportValid(reportPath)).toBe(true);
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			closeAndRm(dir);
 		}
 	});
 });
@@ -387,7 +394,7 @@ describe('FR-008 — runCuratorPostMortem regenerates invalid reports', () => {
 		expect(content.length).toBeGreaterThan(0);
 		expect(content).toContain('Post-Mortem Report');
 
-		rmSync(dir, { recursive: true, force: true });
+		closeAndRm(dir);
 	});
 
 	test('regenerates when existing report is corrupted (no header)', async () => {
@@ -404,7 +411,7 @@ describe('FR-008 — runCuratorPostMortem regenerates invalid reports', () => {
 		const content = readFileSync(reportPath, 'utf-8');
 		expect(content).toContain('Post-Mortem Report');
 
-		rmSync(dir, { recursive: true, force: true });
+		closeAndRm(dir);
 	});
 
 	test('skips regeneration when a valid report already exists (idempotent)', async () => {
@@ -429,7 +436,7 @@ describe('FR-008 — runCuratorPostMortem regenerates invalid reports', () => {
 		const stat2 = (await import('node:fs')).statSync(reportPath);
 		expect(stat2.mtimeMs).toBe(stat1.mtimeMs);
 
-		rmSync(dir, { recursive: true, force: true });
+		closeAndRm(dir);
 	});
 
 	test('--force always regenerates even with valid existing report', async () => {
@@ -445,7 +452,7 @@ describe('FR-008 — runCuratorPostMortem regenerates invalid reports', () => {
 		expect(result.success).toBe(true);
 		expect(result.summary).not.toContain('already exists');
 
-		rmSync(dir, { recursive: true, force: true });
+		closeAndRm(dir);
 	});
 });
 
@@ -462,7 +469,7 @@ describe('FR-010 — atomic report write', () => {
 		const content = readFileSync(reportPath, 'utf-8');
 		expect(content.length).toBeGreaterThan(0);
 
-		rmSync(dir, { recursive: true, force: true });
+		closeAndRm(dir);
 	});
 
 	test('no leftover .tmp. file at the report path after successful run', async () => {
@@ -486,6 +493,6 @@ describe('FR-010 — atomic report write', () => {
 		);
 		expect(tmpFiles.length).toBe(0);
 
-		rmSync(dir, { recursive: true, force: true });
+		closeAndRm(dir);
 	});
 });

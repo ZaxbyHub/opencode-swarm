@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import { resetSwarmState } from '../../../src/state';
 import {
 	executePhaseComplete,
@@ -79,7 +80,8 @@ describe('phase_complete aggregate observational preflight', () => {
 		Object.assign(phaseCompleteReceiptInternals, originalReceipts);
 		Object.assign(phaseCompleteCommitInternals, originalCommit);
 		resetSwarmState();
-		fs.rmSync(directory, { recursive: true, force: true });
+		closeProjectDb(directory);
+		fs.rmSync(directory, { recursive: true, force: true }); // #2480
 	});
 
 	test('public tool returns all blockers and performs no writes or review dispatch', async () => {

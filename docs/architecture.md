@@ -1232,7 +1232,7 @@ The hooks system is the foundation of v5.1.x+, extended in v6.0.0 with config-aw
 - **`safeHook(handler)`** — Wraps any hook handler in a try/catch. Errors are logged at warning level; the original payload is returned unchanged. This ensures no hook can crash the plugin.
 - **`composeHandlers<I,O>(...handlers)`** — Composes multiple handlers for the same hook type into a single handler. Runs handlers sequentially on shared mutable output. Each handler is individually wrapped in `safeHook`.
 - **`readSwarmFileAsync(directory, filename)`** — Reads `.swarm/` files using `Bun.file().text()`. Returns empty string on missing files.
-- **`estimateTokens(text)`** — the CANONICAL char→token heuristic (`Math.ceil(len × 0.33)`), plus `estimateTokensFromCharCount` / `estimateCharsForTokens`. Every char/token conversion in the plugin routes through this one module (issue #1616/#2107); provider-reported token usage is authoritative when available. Enforced by the inline-formula check in `scripts/check-invariants.ts` (Check 7).
+- **`estimateTokens(text)`** — the CANONICAL char→token heuristic (`Math.ceil(len × 0.33)`), plus `estimateTokensFromCharCount` / `estimateCharsForTokens`. Every char/token conversion in the plugin routes through this one module (issue #1616/#2107); provider-reported token usage is authoritative when available. Enforced by the standalone inline-formula gate `bun run check:token-formula` (`scripts/check-token-formula.ts`, issue #1616/#2107).
 
 ### Hook Registration Table
 

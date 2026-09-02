@@ -10,6 +10,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { KnowledgeConfigSchema } from '../../../src/config/schema.js';
+import { closeGroupCommitWriter } from '../../../src/db/group-commit-writer.js';
+import {
+	_resetInsightImportGuards,
+	listPendingInsightCandidatesDb,
+} from '../../../src/db/insight-candidate-store.js';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import {
 	consumeInsightCandidates,
 	curateAndStoreSwarm,
@@ -112,20 +118,24 @@ describe('consumeInsightCandidates', () => {
 	}
 
 	function remaining(): InsightCandidate[] {
-		const p = resolveInsightCandidatesPath(dir);
-		if (!fs.existsSync(p)) return [];
-		return fs
-			.readFileSync(p, 'utf-8')
-			.split('\n')
-			.filter((l) => l.trim())
-			.map((l) => JSON.parse(l));
+		// #2480: the queue is the swarm.db insight stream (pending = unconsumed).
+		return listPendingInsightCandidatesDb(dir, 100).map(
+			(l) => JSON.parse(l) as InsightCandidate,
+		);
 	}
 
 	beforeEach(() => {
 		dir = fs.mkdtempSync(path.join(os.tmpdir(), 'insight-consume-'));
+		_resetInsightImportGuards();
 	});
 
 	afterEach(() => {
+		try {
+			closeGroupCommitWriter(dir);
+			closeProjectDb(dir);
+		} catch {
+			// already closed
+		}
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -164,9 +174,16 @@ describe('curateAndStoreSwarm folds insight candidates (Task 5.2)', () => {
 	beforeEach(() => {
 		dir = fs.mkdtempSync(path.join(os.tmpdir(), 'meso-fold-'));
 		fs.mkdirSync(path.join(dir, '.swarm'), { recursive: true });
+		_resetInsightImportGuards();
 	});
 
 	afterEach(() => {
+		try {
+			closeGroupCommitWriter(dir);
+			closeProjectDb(dir);
+		} catch {
+			// already closed
+		}
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -202,10 +219,8 @@ describe('curateAndStoreSwarm folds insight candidates (Task 5.2)', () => {
 
 		const stored = await readKnowledge(resolveSwarmKnowledgePath(dir));
 		expect(stored).toHaveLength(2);
-		// The queue is emptied after consumption.
-		expect(
-			fs.readFileSync(resolveInsightCandidatesPath(dir), 'utf-8').trim(),
-		).toBe('');
+		// The queue is emptied after consumption (#2480: pending stream).
+		expect(listPendingInsightCandidatesDb(dir, 100)).toHaveLength(0);
 	});
 
 	it('rebuilds the tag co-occurrence synonym map from the post-store corpus (Task 6.2 write wiring)', async () => {

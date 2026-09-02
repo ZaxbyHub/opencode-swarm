@@ -1,14 +1,22 @@
 /**
  * Per-project SQLite database for opencode-swarm.
  *
- * Owns `.swarm/swarm.db` in each project directory. Stores per-project
- * constraints and QA gate profiles. One cached instance per normalized
- * directory path.
+ * Owns `.swarm/swarm.db` in each project directory: the single durable
+ * substrate of Workstream D (issue #2480). One cached instance per CANONICAL
+ * project identity (`canonical-project.ts`): case-varied Windows spellings,
+ * trailing separators, and symlinked roots of the same project share one
+ * connection. Open failures are typed (`db-errors.ts`), failed migrations are
+ * recorded for diagnosis and retried on the next open, and close runs a
+ * best-effort WAL checkpoint. The durability-class policy for every table
+ * lives in `durability.ts`.
  */
 
 import type { Database } from 'bun:sqlite';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { atomicWriteSwarmFileSync } from '../utils/atomic-write.js';
+import { canonicalProjectKey } from './canonical-project.js';
+import { ProjectDbError } from './db-errors.js';
 import { loadDatabaseCtor } from './sqlite-loader.js';
 
 // The `import type { Database }` above is erased at build. The runtime driver is
@@ -22,6 +30,17 @@ interface Migration {
 	name: string;
 	sql: string;
 }
+
+/** Cap on the recorded migration error text (bounded rows, bounded columns). */
+const MIGRATION_FAILURE_ERROR_MAX_CHARS = 500;
+
+/**
+ * Name of the side-channel marker used when a migration fails before the
+ * `migration_failures` table exists (i.e. a failure inside v14 itself) or when
+ * the DB refuses the insert (disk full / read only). Removed on the next
+ * successful migration run.
+ */
+const MIGRATION_FAILURE_MARKER = 'db-migration-failure.json';
 
 const MIGRATIONS: Migration[] = [
 	{
@@ -152,15 +171,157 @@ const MIGRATIONS: Migration[] = [
 			ADD COLUMN completion_ledger_seq INTEGER
 			CHECK(completion_ledger_seq IS NULL OR completion_ledger_seq >= 0)`,
 	},
+	// Issue #2480 (Workstream D1): the durable-state foundation tables. Each
+	// migration is a SINGLE statement so a partial application can never hide
+	// behind a multi-statement string split across drivers.
+	{
+		version: 14,
+		name: 'create_migration_failures',
+		sql: `CREATE TABLE IF NOT EXISTS migration_failures (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			version INTEGER NOT NULL,
+			name TEXT NOT NULL,
+			error TEXT NOT NULL,
+			failed_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)`,
+	},
+	// Append-only event-stream pattern (issue #2480 table pattern 1):
+	// PK (stream_id, version) is the UNIQUE(stream_id, version) contract; the
+	// version is assigned MAX(version)+1 inside the appending transaction.
+	{
+		version: 15,
+		name: 'create_insight_candidate_stream',
+		sql: `CREATE TABLE IF NOT EXISTS insight_candidate (
+			stream_id TEXT NOT NULL,
+			version INTEGER NOT NULL,
+			payload TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			consumed_at TEXT,
+			PRIMARY KEY(stream_id, version)
+		)`,
+	},
+	// Partial index over the pending (unconsumed) half of the stream: the
+	// consume transaction's SELECT stays O(pending) instead of O(history).
+	{
+		version: 16,
+		name: 'create_insight_candidate_pending_index',
+		sql: `CREATE INDEX IF NOT EXISTS idx_insight_candidate_pending
+			ON insight_candidate(stream_id, version)
+			WHERE consumed_at IS NULL`,
+	},
+	// Entity/KV pattern (issue #2480 table pattern 3): one row per
+	// (kind, phase) with last-write-wins semantics.
+	{
+		version: 17,
+		name: 'create_phase_report',
+		sql: `CREATE TABLE IF NOT EXISTS phase_report (
+			kind TEXT NOT NULL CHECK(kind IN ('curator_drift', 'design_doc_drift')),
+			phase INTEGER NOT NULL,
+			payload TEXT NOT NULL,
+			updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+			PRIMARY KEY(kind, phase)
+		)`,
+	},
 ];
 
 const _projectDbs: Map<string, Database> = new Map();
 
+/** Number of currently cached project DB handles (tests / observability). */
+export function getOpenProjectDbCount(): number {
+	return _projectDbs.size;
+}
+
+/**
+ * Record a failed migration attempt for diagnosis. The failed migration's own
+ * transaction has already rolled back, so this insert runs (and commits) on
+ * its own. If the `migration_failures` table does not exist yet (a failure
+ * inside v14 itself) or the DB refuses the write, fall back to a bounded
+ * atomic marker file next to the DB; the marker is removed on the next
+ * successful migration run.
+ */
+function recordMigrationFailure(
+	db: Database,
+	migration: Migration,
+	err: unknown,
+	markerDir: string | undefined,
+): void {
+	const errorText = String(err instanceof Error ? err.message : err).slice(
+		0,
+		MIGRATION_FAILURE_ERROR_MAX_CHARS,
+	);
+	try {
+		db.run(
+			'INSERT INTO migration_failures (version, name, error) VALUES (?, ?, ?)',
+			[migration.version, migration.name, errorText],
+		);
+		return;
+	} catch {
+		// Table absent (v14 itself failed) or DB unwritable — marker fallback.
+	}
+	if (!markerDir) return;
+	try {
+		atomicWriteSwarmFileSync(
+			join(markerDir, MIGRATION_FAILURE_MARKER),
+			JSON.stringify(
+				{
+					schema_version: 1,
+					version: migration.version,
+					name: migration.name,
+					error: errorText,
+					failed_at: new Date().toISOString(),
+				},
+				null,
+				2,
+			),
+		);
+	} catch {
+		// Best-effort: the typed `migration_failed` error rethrown by the
+		// runner still carries the version and name for diagnosis.
+	}
+}
+
+function removeMigrationFailureMarker(markerDir: string): void {
+	const marker = join(markerDir, MIGRATION_FAILURE_MARKER);
+	if (!existsSync(marker)) return;
+	try {
+		unlinkSync(marker);
+	} catch {
+		// Best-effort cleanup; a stale marker only re-surfaces in diagnose.
+	}
+}
+
+/**
+ * Detect "another process applied this migration concurrently" failures:
+ * a UNIQUE constraint violation on schema_migrations.version, or an
+ * "already exists" DDL error (table/index/trigger created by the winner).
+ */
+export function isConcurrentMigrationApply(err: unknown): boolean {
+	const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+	if (msg.includes('unique constraint failed: schema_migrations')) return true;
+	return (
+		msg.includes('already exists') &&
+		(msg.includes('table') || msg.includes('index') || msg.includes('trigger'))
+	);
+}
+
+/** True when the recorded schema version has reached `version`. */
+function currentVersionNowCovers(db: Database, version: number): boolean {
+	const row = db
+		.query<{ version: number | null }, []>(
+			'SELECT MAX(version) as version FROM schema_migrations',
+		)
+		.get();
+	return (row?.version ?? 0) >= version;
+}
+
 /**
  * Run all pending migrations on the provided database.
- * Idempotent: existing migrations are not re-applied.
+ * Idempotent: existing migrations are not re-applied. Each migration applies
+ * in its own transaction; a failure rolls back, is recorded for diagnosis
+ * (table row, or the marker fallback), and leaves the version un-bumped so
+ * the next open retries it.
  */
-export function runProjectMigrations(db: Database): void {
+export function runProjectMigrations(db: Database, markerDir?: string): void {
 	db.run(`CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INTEGER PRIMARY KEY,
 		name TEXT NOT NULL,
@@ -183,8 +344,32 @@ export function runProjectMigrations(db: Database): void {
 				migration.name,
 			]);
 		});
-		apply();
+		try {
+			apply();
+		} catch (err) {
+			// #2480 review F-03: another process may have applied this same
+			// migration concurrently (both read the same MAX(version); the
+			// loser hits the schema_migrations PK or an "already exists" on
+			// the DDL). That is not a failure of THIS database — the
+			// migration IS applied; continue the loop instead of recording a
+			// spurious failure (which previously also skipped marker cleanup).
+			if (
+				isConcurrentMigrationApply(err) &&
+				currentVersionNowCovers(db, migration.version)
+			) {
+				continue;
+			}
+			recordMigrationFailure(db, migration, err, markerDir);
+			throw new ProjectDbError(
+				'migration_failed',
+				`swarm.db migration v${migration.version} (${migration.name}) failed: ${
+					err instanceof Error ? err.message : String(err)
+				}`,
+			);
+		}
 	}
+
+	if (markerDir) removeMigrationFailureMarker(markerDir);
 }
 
 /**
@@ -202,43 +387,128 @@ export function projectDbPath(directory: string): string {
  * workspace just to check for a missing record.
  */
 export function projectDbExists(directory: string): boolean {
-	return existsSync(projectDbPath(directory));
+	// Canonical identity (#2480 review F-04): match getProjectDb's keying so
+	// a case-variant/symlinked spelling of the root still sees the DB that a
+	// prior canonical-keyed open created.
+	return existsSync(join(canonicalProjectKey(directory), '.swarm', 'swarm.db'));
+}
+
+/**
+ * Best-effort WAL checkpoint before close (issue #2480 checkpoint policy).
+ *
+ * `wal_checkpoint(TRUNCATE)` reports contention through its result row
+ * (`busy = 1`) rather than blocking, so a contended checkpoint degrades to
+ * PASSIVE and then gives up — close must never hang or throw. The WAL
+ * sidecars surviving a contended checkpoint is safe: SQLite recovers them
+ * on the next open.
+ */
+function checkpointWalBestEffort(db: Database): void {
+	try {
+		const row = db
+			.query<{ busy: number }, []>('PRAGMA wal_checkpoint(TRUNCATE)')
+			.get();
+		if (row && row.busy === 1) {
+			db.run('PRAGMA wal_checkpoint(PASSIVE);');
+		}
+	} catch {
+		try {
+			db.run('PRAGMA wal_checkpoint(PASSIVE);');
+		} catch {
+			// Best-effort by contract.
+		}
+	}
 }
 
 /**
  * Return the cached project database for the given directory, opening it
  * if needed. Creates `.swarm/` if absent and enables WAL + foreign keys.
+ * The cache is keyed by canonical project identity, so case-varied Windows
+ * spellings, trailing separators, and symlinked roots share ONE handle.
+ * Open failures throw a typed `ProjectDbError` and never leave a
+ * half-open handle cached.
  */
 export function getProjectDb(directory: string): Database {
-	const key = resolve(directory);
+	const key = canonicalProjectKey(directory);
 	const existing = _projectDbs.get(key);
 	if (existing) return existing;
 
 	const swarmDir = join(key, '.swarm');
-	mkdirSync(swarmDir, { recursive: true });
-	const Db = loadDatabaseCtor();
-	const db = new Db(join(swarmDir, 'swarm.db'));
-	db.run('PRAGMA journal_mode = WAL;');
-	db.run('PRAGMA synchronous = NORMAL;');
-	db.run('PRAGMA busy_timeout = 5000;');
-	db.run('PRAGMA foreign_keys = ON;');
-	runProjectMigrations(db);
+	try {
+		mkdirSync(swarmDir, { recursive: true });
+	} catch (err) {
+		throw new ProjectDbError(
+			'mkdir_failed',
+			`Failed to create .swarm/ for project ${key}: ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+	}
+
+	let db: Database | undefined;
+	try {
+		let Db: ReturnType<typeof loadDatabaseCtor>;
+		try {
+			Db = loadDatabaseCtor();
+		} catch (err) {
+			throw new ProjectDbError(
+				'driver_unavailable',
+				`Failed to resolve a SQLite driver for project ${key}: ${
+					err instanceof Error ? err.message : String(err)
+				}`,
+			);
+		}
+		db = new Db(join(swarmDir, 'swarm.db'));
+		db.run('PRAGMA journal_mode = WAL;');
+		db.run('PRAGMA synchronous = NORMAL;');
+		db.run('PRAGMA busy_timeout = 5000;');
+		db.run('PRAGMA foreign_keys = ON;');
+		runProjectMigrations(db, swarmDir);
+	} catch (err) {
+		// Close the half-opened handle so a failed open never leaks a WAL
+		// lock (the sqlite-provider open-failure precedent).
+		if (db) {
+			try {
+				db.close();
+			} catch {
+				// already closed or unwritable — nothing further to do
+			}
+		}
+		if (err instanceof ProjectDbError) throw err;
+		throw new ProjectDbError(
+			'open_failed',
+			`Failed to open .swarm/swarm.db for project ${key}: ${
+				err instanceof Error ? err.message : String(err)
+			}`,
+		);
+	}
+
 	_projectDbs.set(key, db);
 	return db;
 }
 
 /**
  * Close and remove the cached project database for the given directory.
- * Called by the `/swarm close` clean stage before unlinking `swarm.db` (so a
- * long-lived WAL-mode connection releases its file lock and Windows `unlink`
- * does not fail with EBUSY), and from tests.
+ * Runs a best-effort WAL checkpoint (TRUNCATE, PASSIVE fallback) first so the
+ * close leaves a self-contained DB file where possible. Called by the
+ * `/swarm close` clean stage before unlinking `swarm.db` (so a long-lived
+ * WAL-mode connection releases its file lock and Windows `unlink` does not
+ * fail with EBUSY), by the plugin dispose/exit close paths, and from tests.
+ *
+ * Callers that passed a different spelling of the same root (case variant on
+ * Windows, symlink) share the canonical handle: closing it invalidates every
+ * alias — which is the point (those aliases were previously silent duplicate
+ * writers on one file). Reopening via `getProjectDb` always works.
  */
 export function closeProjectDb(directory: string): void {
-	const key = resolve(directory);
+	const key = canonicalProjectKey(directory);
 	const db = _projectDbs.get(key);
 	if (db) {
-		db.close();
-		_projectDbs.delete(key);
+		checkpointWalBestEffort(db);
+		try {
+			db.close();
+		} finally {
+			_projectDbs.delete(key);
+		}
 	}
 }
 
@@ -249,6 +519,7 @@ export function closeProjectDb(directory: string): void {
 export function closeAllProjectDbs(): void {
 	for (const db of _projectDbs.values()) {
 		try {
+			checkpointWalBestEffort(db);
 			db.close();
 		} catch {
 			// ignore close errors during cleanup

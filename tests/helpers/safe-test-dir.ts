@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeProjectDb } from '../../src/db/project-db.js';
 
 /**
  * Creates a unique subdirectory under os.tmpdir() and returns
@@ -91,6 +92,12 @@ export function safeRmRecursive(targetPath: string): void {
 			);
 		}
 	}
+
+	// #2480: production code may have opened .swarm/swarm.db under this dir
+	// (cached canonical handle); a held WAL lock makes rmSync fail EBUSY on
+	// Windows no matter how long we retry. Release it first, best-effort
+	// (closeProjectDb never throws and is a no-op without a cached handle).
+	closeProjectDb(lexicalTarget);
 
 	// Bun does not consistently honor fs.rmSync's maxRetries on Windows. Retry
 	// transient handle-release failures explicitly, bounded to two seconds.

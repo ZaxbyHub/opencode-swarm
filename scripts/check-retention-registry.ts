@@ -12,10 +12,23 @@
  * data. Mirrors `scripts/check-event-contract.ts` (issue #2029): pure TS,
  * repo-wide, hard-fail, exported collectors for tests, injectable root.
  *
- * Known limitation (documented in docs/observability-retention-registry.md
- * Appendix A): a module that only mutates an existing SQLite handle passed in
- * from elsewhere (no getProjectDb/getGlobalDb/Database construction of its
- * own) is not flagged; the DB-opening seam is the enforced boundary.
+ * DB-mediated boundary (issue #2480 redesign — the fs-write scan could not
+ * see writes through an acquired SQLite handle):
+ *   1. The swarm.db STORE-OP seam is enumerated: every durable store
+ *      mutation (appendInsightCandidatesDb / consumeInsightCandidatesDb /
+ *      upsertPhaseReportDb / importLegacyJsonl / importLegacyJsonFiles) is a
+ *      WRITER_PATTERN, so a module calling one needs a registry row.
+ *   2. RAW-handle confinement: the `Database` type may only be referenced
+ *      outside `src/db/**` by modules in RAW_DB_HANDLE_MODULES (each already
+ *      covered by a registry row) — new handle-mediated writers outside the
+ *      store seam fail the gate instead of silently bypassing it.
+ *   3. Reverse-staleness for `src/db/**`: a foundation module declared as a
+ *      writer that no longer calls ANY enumerated seam is flagged (it has
+ *      moved to an un-enumerated raw seam).
+ * Honest boundary: this is an enumerated-seam ratchet, not a type-system
+ * guarantee — a hypothetical `db.run(INSERT…)` on a handle smuggled past the
+ * confinement list is still invisible. The confinement list is the enforced
+ * surface; growing it requires a reviewed registry change.
  *
  * Usage: bun run scripts/check-retention-registry.ts
  */
@@ -57,7 +70,8 @@ const REGISTRY_DOC = path.join(
  * word boundary immediately followed by `(`, so `atomicWriteFile(` (capital W)
  * and `appendFileSync(` (trailing S) do not satisfy the bare patterns — they
  * have their own explicit entries. SQLite handles are caught at the
- * open/acquire seam.
+ * open/acquire seam, and — since issue #2480 — at the swarm.db STORE-OP seam
+ * (every durable store mutation goes through a named, enumerated function).
  */
 const WRITER_PATTERNS: readonly RegExp[] = [
 	/\bwriteFileSync\s*\(/,
@@ -78,7 +92,44 @@ const WRITER_PATTERNS: readonly RegExp[] = [
 	/\bloadDatabaseCtor\s*\(/,
 	/\bgetProjectDb\s*\(/,
 	/\bgetGlobalDb\s*\(/,
+	// issue #2480: the swarm.db durable-store seam. Mutations AND the legacy
+	// import (which renames legacy artifacts on disk) are durable-state
+	// changes and must be row-owned.
+	/\bappendInsightCandidatesDb\s*\(/,
+	/\bconsumeInsightCandidatesDb\s*\(/,
+	/\bupsertPhaseReportDb\s*\(/,
+	/\bimportLegacyJsonl\s*\(/,
+	/\bimportLegacyJsonFiles\s*\(/,
 ];
+
+/**
+ * Raw SQLite-handle confinement (issue #2480). Patterns that indicate a
+ * module holds or types a raw `Database` handle (as opposed to going through
+ * an enumerated store-op or open seam). Outside `src/db/**`, only
+ * RAW_DB_HANDLE_MODULES members may do this.
+ */
+const RAW_HANDLE_PATTERNS: readonly RegExp[] = [
+	/\bfrom 'bun:sqlite'/,
+	/\bfrom "bun:sqlite"/,
+	/:\s*Database\b/,
+	/ReturnType<typeof getProjectDb>/,
+	/ReturnType<typeof getGlobalDb>/,
+];
+
+/** Modules outside `src/db/**` permitted to hold raw Database handles. */
+const RAW_DB_HANDLE_MODULES: Readonly<Record<string, string>> = {
+	'src/commands/archive-sqlite.ts':
+		'VACUUM INTO snapshot/verify connections — owned by the swarm.db / repo-memory registry rows',
+	'src/memory/sqlite-provider.ts':
+		'memory.db provider (own DB file) — owned by the memory-sqlite registry row',
+	'src/tools/repo-graph/indexed-storage.ts':
+		'repo-memory.sqlite store — owned by the repo-memory-index registry row',
+};
+
+export function moduleReferencesRawDbHandle(source: string): boolean {
+	const executable = stripLineComments(source);
+	return RAW_HANDLE_PATTERNS.some((pattern) => pattern.test(executable));
+}
 
 /** Strip `//` line comments (same approach as check-event-contract.ts). */
 function stripLineComments(source: string): string {
@@ -498,6 +549,77 @@ export function collectCoverageRatchetErrors(
 const CLOSE_MODULE_REL = 'src/commands/close.ts';
 
 /**
+ * Issue #2480: raw-handle confinement. Every non-test module under `src/`
+ * (outside `src/db/**`) that references the `Database` type must be a
+ * RAW_DB_HANDLE_MODULES member — otherwise a new module can acquire a raw
+ * handle and mediate writes invisibly to the fs-write scan. Injectable root
+ * for fixture tests.
+ */
+export function collectDbHandleConfinementErrors(
+	root: string = REPO_ROOT,
+	allowlist: Readonly<Record<string, string>> = RAW_DB_HANDLE_MODULES,
+): string[] {
+	const errors: string[] = [];
+	for (const rel of listSourceModules(root)) {
+		if (rel === 'src/db' || rel.startsWith('src/db/')) continue;
+		let source: string;
+		try {
+			source = fs.readFileSync(path.join(root, rel), 'utf-8');
+		} catch {
+			continue;
+		}
+		if (!moduleReferencesRawDbHandle(stripLineComments(source))) continue;
+		if (!Object.prototype.hasOwnProperty.call(allowlist, rel)) {
+			errors.push(
+				`${rel} references a raw SQLite Database handle outside src/db/ and is not in RAW_DB_HANDLE_MODULES (scripts/check-retention-registry.ts, issue #2480). Raw handles bypass the enumerated durable-store seam: route the writes through a swarm.db store module (src/db/*-store.ts) or add the module to the confinement allowlist with a registry-backed reason.`,
+			);
+		}
+	}
+	for (const rel of Object.keys(allowlist)) {
+		if (!fs.existsSync(path.join(root, rel))) {
+			errors.push(
+				`RAW_DB_HANDLE_MODULES entry "${rel}" no longer exists — remove the stale entry.`,
+			);
+		}
+	}
+	return errors;
+}
+
+/**
+ * Issue #2480: reverse-staleness for the DB foundation. A `src/db/**` module
+ * declared as a registry writer that no longer calls ANY enumerated write seam
+ * has moved to an un-enumerated raw seam — the gate fails instead of passing
+ * vacuously. (General reverse-staleness for ALL rows is deliberately out of
+ * scope: rows outside src/db legitimately use bespoke durable seams that are
+ * not enumerated, e.g. appendFsynced.)
+ */
+export function collectDbFoundationStalenessErrors(
+	root: string = REPO_ROOT,
+	registryRows: readonly { writerModules: readonly string[] }[] = RETENTION_REGISTRY,
+): string[] {
+	const errors: string[] = [];
+	for (const row of registryRows) {
+		for (const rel of row.writerModules) {
+			if (rel !== 'src/db' && !rel.startsWith('src/db/')) continue;
+			const abs = path.join(root, rel);
+			if (!fs.existsSync(abs)) continue;
+			let source: string;
+			try {
+				source = fs.readFileSync(abs, 'utf-8');
+			} catch {
+				continue;
+			}
+			if (!moduleWritesDurableState(source)) {
+				errors.push(
+					`Registry row "${row.id}" declares src/db module "${rel}" as a writer, but it no longer calls any enumerated write seam (issue #2480 reverse-staleness). It has moved to an un-enumerated raw seam — either enumerate the new seam in WRITER_PATTERNS or remove the stale writer entry.`,
+				);
+			}
+		}
+	}
+	return errors;
+}
+
+/**
  * Resolve a bare identifier used inside close.ts (e.g. `REPO_MEMORY_FILENAME`)
  * to its string literal, by following close.ts's own import statements to the
  * exporting module. Fail-closed: an unresolvable identifier yields undefined,
@@ -821,6 +943,10 @@ export function collectRetentionRegistryErrors(root: string = REPO_ROOT): string
 	errors.push(
 		...collectCoverageRatchetErrors(root, RETENTION_REGISTRY, EXEMPT_WRITER_MODULES),
 	);
+
+	// 3a) Issue #2480: raw-handle confinement + src/db reverse-staleness.
+	errors.push(...collectDbHandleConfinementErrors(root));
+	errors.push(...collectDbFoundationStalenessErrors(root, RETENTION_REGISTRY));
 
 	// 3b) Issue #1534: close-lifecycle coherence between each row's declared
 	// closeArrayMembership and what src/commands/close.ts actually does.

@@ -11,12 +11,18 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
+import {
+	clearToolchainCache,
+	_internals as discoveryInternals,
+} from '../../../src/build/discovery.js';
 
-// Mock isCommandAvailable so all ecosystem commands are treated as available
-mock.module('../../../src/build/discovery.js', () => ({
-	isCommandAvailable: (_cmd: string) => true,
-	clearToolchainCache: () => {},
-}));
+// Tool availability is controlled through the discovery module's
+// `_internals.spawnSyncImpl` DI seam (all-commands-available, per this
+// suite's intent) instead of a file-scope `mock.module` of
+// `src/build/discovery(.js)` — the mock.module form replaced the module
+// namespace process-wide and could mask the composer suite's seam control
+// in multi-file runs (issue #2477 review F-003/PRR-004).
+const originalDiscoverySpawnSync = discoveryInternals.spawnSyncImpl;
 
 import { pkg_audit } from '../../../src/tools/pkg-audit';
 
@@ -103,6 +109,16 @@ describe('pkg-audit tool - cwd fix tests', () => {
 		mockStdout = '';
 		mockStderr = '';
 
+		// All-commands-available via the discovery DI seam (see the note at the
+		// top of this file); cleared so no stale availability entry survives.
+		clearToolchainCache();
+		discoveryInternals.spawnSyncImpl = () => ({
+			stdout: new Uint8Array(),
+			stderr: new Uint8Array(),
+			exitCode: 0,
+			success: true,
+		});
+
 		// Save current directory and create temp dir
 		originalCwd = process.cwd();
 		tempDir = fs.realpathSync(
@@ -119,6 +135,8 @@ describe('pkg-audit tool - cwd fix tests', () => {
 	});
 
 	afterEach(() => {
+		discoveryInternals.spawnSyncImpl = originalDiscoverySpawnSync;
+		clearToolchainCache();
 		mock.restore();
 		BunSpawnSpy.mockRestore();
 		fsExistsSyncSpy.mockRestore();

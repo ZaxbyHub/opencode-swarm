@@ -48,15 +48,35 @@ function makeFake() {
 
 	class FakeStatement {
 		constructor(private readonly sql: string) {}
+		/**
+		 * #2480: model the REAL node:sqlite strictness the adapter must not
+		 * paper over — a bound parameter with NO matching placeholder throws
+		 * SQLITE_RANGE ("column index out of range"), while bun:sqlite tolerates
+		 * the lax form. (The inverse — zero values for existing placeholders —
+		 * is tolerated by both drivers and deliberately not modeled.)
+		 */
+		private checkStrictParamCount(params: unknown[]): void {
+			const placeholders = (this.sql.match(/\?/g) ?? []).length;
+			if (params.length > placeholders) {
+				const err = new RangeError('column index out of range') as Error & {
+					code?: string;
+				};
+				err.code = 'SQLITE_RANGE';
+				throw err;
+			}
+		}
 		get(...params: unknown[]): unknown {
+			this.checkStrictParamCount(params);
 			calls.stmtGet.push({ sql: this.sql, params });
 			return { sql: this.sql, op: 'get' };
 		}
 		all(...params: unknown[]): unknown[] {
+			this.checkStrictParamCount(params);
 			calls.stmtAll.push({ sql: this.sql, params });
 			return [{ sql: this.sql, op: 'all' }];
 		}
 		*iterate(...params: unknown[]): IterableIterator<unknown> {
+			this.checkStrictParamCount(params);
 			calls.stmtIterate.push({ sql: this.sql, params });
 			yield { sql: this.sql, op: 'iterate' };
 		}
@@ -64,6 +84,7 @@ function makeFake() {
 			changes: number | bigint;
 			lastInsertRowid: number | bigint;
 		} {
+			this.checkStrictParamCount(params);
 			calls.stmtRun.push({ sql: this.sql, params });
 			return { changes: 1, lastInsertRowid: 1 };
 		}
@@ -212,6 +233,21 @@ describe('createNodeDatabaseCtor — adapter translation', () => {
 		expect(calls.stmtRun).toEqual([
 			{ sql: 'INSERT INTO t (id, n) VALUES (?, ?)', params: ['b', 2] },
 		]);
+	});
+
+	test('#2480 strictness model: a bound param with no placeholder throws SQLITE_RANGE through the adapter', () => {
+		const { FakeDatabaseSync } = makeFake();
+		const db = new (createNodeDatabaseCtor(FakeDatabaseSync))(
+			':x:',
+		) as unknown as AdapterDb;
+		// The #1873 delta: node:sqlite rejects this; bun:sqlite tolerates it.
+		// Portable code never issues it — the fake now models the strict side
+		// so adapter-level parity is PR-tested under Bun (the real node driver
+		// leg runs in the merge-queue smoke job).
+		expect(() => db.run('SELECT 1', ['extra'])).toThrow(/out of range/);
+		expect(() => db.query('SELECT 2').get('extra')).toThrow(/out of range/);
+		// Exact-count calls still succeed on the strict fake.
+		expect(db.run('SELECT ? , 1', ['ok'])).toBeDefined();
 	});
 
 	test('query(sql).get/all/iterate delegate and reuse one prepared statement', () => {

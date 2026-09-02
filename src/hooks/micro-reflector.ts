@@ -18,9 +18,10 @@
  */
 
 import { existsSync } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
+import { appendInsightCandidatesDb } from '../db/insight-candidate-store.js';
 import { canonicalHash } from '../evaluation/hashing.js';
 import { sanitizeTaskId } from '../evidence/manager.js';
 import { enqueueCandidate } from '../learning/candidate-queue.js';
@@ -30,7 +31,7 @@ import { withTimeoutSignal } from '../utils/timeout.js';
 import type { CuratorLLMDelegate } from './curator.js';
 import { getStoredInputArgs } from './guardrails/stored-input-args.js';
 import type { EnrichmentQuotaOptions } from './knowledge-curator.js';
-import { dedupeCapped, transactFile } from './knowledge-store.js';
+import { dedupeCapped } from './knowledge-store.js';
 import type { ActionableDirectiveFields } from './knowledge-types.js';
 import {
 	validateActionability,
@@ -296,66 +297,31 @@ export async function readTaskTrajectory(
 
 export const INSIGHT_CANDIDATES_MAX_ENTRIES = 500;
 
-/** Append validated candidates to the insight queue (best-effort, fail-open).
- *  Uses transactFile for consistency with consumeInsightCandidates and enforces
- *  a FIFO cap to prevent unbounded growth between phase completions.
+/**
+ * Append validated candidates to the insight queue (best-effort, fail-open).
  *
- *  EXPORTED (#1821) so the PRM pattern producer can write the SAME durable
- *  crash backstop the micro-reflector writes. Any producer that only enqueues
- *  in memory loses its candidate on process death, on queue overflow, and on a
- *  drain failure — with no phase-boundary fold-in to recover it. */
+ * #2480: the durable queue is the `insight_candidate` stream table in
+ * `.swarm/swarm.db` (group-commit writer, one txn per flush; FIFO cap 500 on
+ * the pending queue — same bound as before). The legacy
+ * `.swarm/insight-candidates.jsonl` is imported once (idempotent, one-txn)
+ * and cold-archived `.jsonl.imported`.
+ *
+ * EXPORTED (#1821) so the PRM pattern producer can write the SAME durable
+ * crash backstop the micro-reflector writes. Any producer that only enqueues
+ * in memory loses its candidate on process death, on queue overflow, and on a
+ * drain failure — with no phase-boundary fold-in to recover it. */
 export async function appendInsightCandidates(
 	directory: string,
 	candidates: InsightCandidate[],
 ): Promise<void> {
 	if (candidates.length === 0) return;
-	const filePath = resolveInsightCandidatesPath(directory);
-	await transactFile<InsightCandidate[]>(
-		filePath,
-		async (p) => {
-			try {
-				const content = await readFile(p, 'utf-8');
-				return readInsightJsonl(content);
-			} catch (err) {
-				// First write: the file simply doesn't exist yet → empty is the
-				// correct base. Any OTHER read error (EACCES, EIO, …) must abort
-				// the transaction by rethrowing: returning [] here would, under
-				// the write-back half of transactFile, clobber an existing queue
-				// with only the new candidates (silent data loss).
-				if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return [];
-				throw err;
-			}
-		},
-		async (p, data) => {
-			const body =
-				data.length === 0
-					? ''
-					: `${data.map((c) => JSON.stringify(c)).join('\n')}\n`;
-			await writeFile(p, body, 'utf-8');
-		},
-		(all) => {
-			const merged = [...all, ...candidates];
-			const capped =
-				merged.length > INSIGHT_CANDIDATES_MAX_ENTRIES
-					? merged.slice(-INSIGHT_CANDIDATES_MAX_ENTRIES)
-					: merged;
-			return capped;
-		},
+	await appendInsightCandidatesDb(
+		directory,
+		candidates.map((candidate) => ({
+			payload: JSON.stringify(candidate),
+			createdAt: candidate.created_at,
+		})),
 	);
-}
-
-function readInsightJsonl(content: string): InsightCandidate[] {
-	const out: InsightCandidate[] = [];
-	for (const line of content.split('\n')) {
-		const t = line.trim();
-		if (!t) continue;
-		try {
-			out.push(JSON.parse(t) as InsightCandidate);
-		} catch {
-			// skip corrupt line
-		}
-	}
-	return out;
 }
 
 // ============================================================================

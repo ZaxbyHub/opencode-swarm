@@ -306,15 +306,15 @@ decision is *missing today* (they are untouched, never deleted-and-needed).
 | `task-evidence-trajectory` | .swarm/evidence/{taskId}/trajectory.jsonl | derived-rebuildable | max_lines (now prm-coupled, default 1000) PER-FILE enforced at write time; truncation keeps newest floor(max_lines/2) (:114-… (per-key) | full-file: ≤max_lines lines per file by write-side truncation | cleaned — evidence/ dir archived+cleaned (ACTIVE_STATE… | not a defect — this-gate |
 | `prm-session-trajectories` | .swarm/trajectories/{sessionId}.jsonl (+ .meta.json checkpoint; transient .lock/*.tmp) | derived-rebuildable | ONE knob prm.max_trajectory_lines (default 1000) governs cache AND disk compaction (newest floor(maxLines/2)); sovereign byte ceiling max(64 KiB… (per-key) | tail-bounded-window: readMaxBytes 1 MiB (steps 64 KiB), coverage disclosed; never whole-file | untouched (bounded at write; age 7 d + count 200/dir sweep reaps) | retain by design — #2041 (shipped PR) |
 | `prm-replays` | .swarm/replays/{sessionId}-{timestamp}.jsonl | operational | per-artifact 1 MiB byte cap at write (REPLAY_LIMITS; skip + one-time warn at cap); shared age 7 d + count 200/dir sweep (per-key) | write-only: n/a | untouched (age/count sweep only) | retain by design — #2041 (shipped PR) |
-| `insight-candidates` | .swarm/insight-candidates.jsonl | operational | INSIGHT_CANDIDATES_MAX_ENTRIES 500 GLOBAL FIFO (micro-reflector.ts:291,333-335) (global) | full-file: ≤500 lines by the global FIFO cap | untouched (bounded queue) | not a defect — this-gate |
+| `insight-candidates` | swarm.db table insight_candidate (#2480; legacy .swarm/insight-candidates.jsonl cold-archived .jsonl.imported) | operational | INSIGHT_PENDING_CAP 500 GLOBAL FIFO on pending rows + 7-day consumed-row DELETE retention (insight-candidate-store.ts) (global) | indexed: pending partial index, batch ≤20/trigger | untouched (bounded queue inside swarm.db; DB itself archived+cleaned by `project-db`) | not a defect — this-gate |
 | `postmortems` | .swarm/post-mortem-{planId}.md | governed-content | one bounded-input report per plan (inputs capped :38-43); idempotent dedup (per-key) | full-file: single report per plan | archived+cleaned — dynamic artifacts (close.ts:1418-14… | not a defect — this-gate |
 | `epic-promotions-evidence` | .swarm/evidence/epic-promotions.jsonl | operational | no per-file cap; bounded by session — evidence/ dir archived+cleaned at close (close.ts:5… (session-scoped) | full-file: session-scoped file (close-cleaned) | cleaned — evidence/ dir lifecycle | not a defect — this-gate |
 | `knowledge-promotion-evidence` | .swarm/knowledge-promotion-evidence.jsonl | derived-rebuildable | MAX_PROMOTION_EVIDENCE_ENTRIES 2000 GLOBAL FIFO (:41,92-105) (global) | indexed: authoritative reader queries the receipt ledger (bound… | untouched (derived, bounded) | not a defect — this-gate |
 | `epic-turbo-state` | .swarm/epic-state.json + .swarm/epic/{calibration.json,divergence.jso… | operational | calibration map monotonic; divergence.jsonl no write cap; session maps uncapped; epic/ + … (none) | mixed full-file + tail: divergence reader tail-bounded 16 MiB; state readers f… | untouched — epic/, recovery/, turbo-state.json, epic-s… | **fix in #2309** — #2309 |
 | `lean-turbo-evidence` | .swarm/evidence/{phase}/lean-turbo/{laneId}.json + lean-turbo-phase.j… | governed-content | per-phase/per-lane artifacts; evidence/ dir archived+cleaned at close (session-scoped) | indexed: session-scoped evidence dir | cleaned — evidence/ dir lifecycle | not a defect — this-gate |
 | `evidence-gate-artifacts` | .swarm/evidence/{phase}/{drift-verifier,hallucination-guard,mutation-… | governed-content | per-phase overwrite or bounded per-run artifacts; whole tree archived+cleaned at close (session-scoped) | indexed: single small JSON per gate | cleaned — evidence/ dir lifecycle | not a defect — this-gate |
-| `drift-reports` | .swarm/drift-report-phase-{N}.json | governed-content | one report per phase; archived+cleaned as close dynamic artifacts (session-scoped) | indexed: per-phase files | archived+cleaned — dynamic artifact regex at close.ts:… | not a defect — this-gate |
-| `doc-drift-signals` | .swarm/doc-drift-phase-{N}.json | operational | one signal per phase; NOT in close clean lists — accumulates across phases/plans (none) | indexed: per-phase small JSON | untouched — accumulates | **fix in #2309** — #2309 |
+| `drift-reports` | swarm.db table phase_report kind=curator_drift (#2480; legacy .swarm/drift-report-phase-{N}.json cold-archived .json.imported) | governed-content | one row per phase, PK(kind,phase) last-write-wins (session-scoped) | indexed: ordered per-phase rows via PK | rows archived+cleaned with swarm.db (`project-db` row); legacy files still archived+cleaned by the close dynamic regex | not a defect — this-gate |
+| `doc-drift-signals` | swarm.db table phase_report kind=design_doc_drift (#2480; legacy .swarm/doc-drift-phase-{N}.json cold-archived .json.imported) | operational | one row per phase, PK(kind,phase); NOT in close clean lists — accumulates inside swarm.db (none) | indexed: per-phase rows via PK | untouched — accumulates in swarm.db | **fix in #2309** — #2309 |
 
 ### Category 4 — Guardrail audit, attestations, scope evidence (9 rows)
 
@@ -453,12 +453,19 @@ bun run scripts/check-retention-registry.ts
 ```
 
 The enumerator's pattern set (write APIs + atomic-write helper calls + SQLite
-open/acquire seams) and the complete writer-module-to-row mapping live in
-`scripts/retention-registry.data.ts` (`writerModules` per row plus
-`EXEMPT_WRITER_MODULES`, 7 plumbing entries). **Known limitation:** a module
-that only mutates a SQLite handle acquired elsewhere is not flagged; the DB
-open/acquire seam (`getProjectDb`/`getGlobalDb`/`Database` construction) is
-the enforced boundary. Further, deliberately documented seams: (a)
+open/acquire seams +, since issue #2480, the swarm.db **store-op seam** —
+every durable store mutation is a named, enumerated function) and the complete
+writer-module-to-row mapping live in `scripts/retention-registry.data.ts`
+(`writerModules` per row plus `EXEMPT_WRITER_MODULES`, 7 plumbing entries).
+**DB-mediated boundary (#2480 redesign):** raw `Database`-handle references
+outside `src/db/**` are confined to `RAW_DB_HANDLE_MODULES` (each member owned
+by a registry row), and `src/db` foundation writers are reverse-staleness
+checked (a registered foundation module that stops calling any enumerated seam
+fails the gate). Honest boundary: this is an enumerated-seam ratchet, not a
+type-system guarantee — a `db.run(INSERT…)` on a handle smuggled past the
+confinement list would still be invisible; the confinement list is the
+enforced surface, and growing it requires a reviewed registry change.
+Further, deliberately documented seams: (a)
 **helper indirection** — a handful of modules write only through shared
 transaction helpers (`transactKnowledge`/`transactFile` and friends) and are
 registered by OWNERSHIP in `writerModules` rather than by a literal write-call

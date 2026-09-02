@@ -157,12 +157,14 @@ describe('swarm.db cleanup (swarm.db, swarm.db-shm, swarm.db-wal)', () => {
 		await handleCloseCommand(testDir, []);
 
 		// WAL sidecar files are transient SQLite internals: SQLite recreates
-		// them on next open, and deleting them risks losing uncheckpointed
-		// WAL pages. They are deliberately skipped during archiving and
-		// preserved (not cleaned) in the source .swarm/ dir.
+		// them on next open. They are deliberately skipped during archiving
+		// and never listed in close's clean arrays. NOTE (#2480): close now
+		// closes the canonical WAL connection with a TRUNCATE checkpoint, and
+		// SQLite itself removes -shm/-wal on the LAST clean connection close —
+		// so absence in .swarm/ is ALSO correct; only ARCHIVING them (or close
+		// unlinking them by name) would violate this contract.
 		const archivePath = getLatestArchivePath();
 		expect(existsSync(path.join(archivePath, 'swarm.db-shm'))).toBe(false);
-		expect(existsSync(path.join(swarmDir(), 'swarm.db-shm'))).toBe(true);
 	});
 
 	it('preserves swarm.db-wal (not archived, not cleaned)', async () => {
@@ -174,9 +176,11 @@ describe('swarm.db cleanup (swarm.db, swarm.db-shm, swarm.db-wal)', () => {
 
 		await handleCloseCommand(testDir, []);
 
+		// Same #2480 note as the -shm case: SQLite may remove the sidecars on
+		// the last clean connection close; close itself must never archive or
+		// unlink them by name.
 		const archivePath = getLatestArchivePath();
 		expect(existsSync(path.join(archivePath, 'swarm.db-wal'))).toBe(false);
-		expect(existsSync(path.join(swarmDir(), 'swarm.db-wal'))).toBe(true);
 	});
 
 	it('swarm.db is archived with correct content; -shm/-wal sidecars are not archived', async () => {

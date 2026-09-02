@@ -154,6 +154,125 @@ describe('check-mock-cleanup — pure decision coverage', () => {
 		);
 		expect(result.spreadViolations).toEqual([]);
 	});
+
+	// Issue #2260 class: mock.module retroactively patches the original
+	// module's export slots, so a factory that spreads a captured namespace
+	// and delegates an overridden export back into that namespace is infinite
+	// tail recursion — an unkillable hang, not a stack overflow.
+	test('flags delegation back into the spread namespace (issue #2260 class)', () => {
+		const result = assessMockFile(
+			[
+				"import * as realDiscovery from './discovery';",
+				makeMockModuleCall(
+					'./discovery',
+					`() => ({
+	...realDiscovery,
+	isCommandAvailable: (cmd: string) => {
+		if (cmd === 'composer') return mockIsCommandAvailable;
+		return realDiscovery.isCommandAvailable(cmd);
+	},
+})`,
+				),
+			].join('\n'),
+		);
+		expect(result.delegationViolations).toEqual([
+			{ line: 6, spreadVar: 'realDiscovery', property: 'isCommandAvailable' },
+		]);
+	});
+
+	test('accepts a captured-function delegation taken before registration', () => {
+		const result = assessMockFile(
+			[
+				"import * as realExtractors from './extractors.js';",
+				'const realExtractPlanCursor = realExtractors.extractPlanCursor;',
+				makeMockModuleCall(
+					'./extractors.js',
+					`() => ({
+	...realExtractors,
+	extractPlanCursor: (planContent: string) => {
+		return realExtractPlanCursor(planContent);
+	},
+})`,
+				),
+			].join('\n'),
+		);
+		expect(result.delegationViolations).toEqual([]);
+	});
+
+	test('array spreads of non-namespace identifiers are not delegation', () => {
+		const result = assessMockFile(
+			[
+				"import { mock } from 'bun:test';",
+				makeMockModuleCall(
+					'./dep',
+					`() => ({
+	cmd: [...parts],
+	join: 'literal',
+})`,
+				),
+				'const joined = parts.join(",");',
+			].join('\n'),
+		);
+		expect(result.delegationViolations).toEqual([]);
+	});
+
+	test('block comments mentioning the delegation shape are not flagged', () => {
+		const result = assessMockFile(
+			[
+				"import * as realDiscovery from './discovery';",
+				makeMockModuleCall(
+					'./discovery',
+					`() => ({
+	...realDiscovery,
+	isCommandAvailable: (cmd: string) => capturedReal(cmd),
+})`,
+				),
+				'/* historical note: this factory used to call',
+				' * realDiscovery.isCommandAvailable(cmd) before the #2260 fix',
+				' */',
+			].join('\n'),
+		);
+		expect(result.delegationViolations).toEqual([]);
+	});
+
+	test('namespace re-alias delegation is a documented accepted false negative', () => {
+		// Known limitation (review F-004/PRR-009): the gate's namespace set
+		// only covers `import * as X`, `await import()`, and `require()` — a
+		// re-aliased binding (`const alias = realDiscovery`) delegating
+		// through the alias is NOT flagged. Pinned here so the limitation is
+		// a documented decision, not an accident.
+		const result = assessMockFile(
+			[
+				"import * as realDiscovery from './discovery';",
+				'const alias = realDiscovery;',
+				makeMockModuleCall(
+					'./discovery',
+					`() => ({
+	...realDiscovery,
+	isCommandAvailable: (cmd: string) => alias.isCommandAvailable(cmd),
+})`,
+				),
+			].join('\n'),
+		);
+		expect(result.delegationViolations).toEqual([]);
+	});
+
+	test('comment lines mentioning the delegation shape are not flagged', () => {
+		const result = assessMockFile(
+			[
+				"import * as realDiscovery from './discovery';",
+				makeMockModuleCall(
+					'./discovery',
+					`() => ({
+	...realDiscovery,
+	isCommandAvailable: (cmd: string) => capturedReal(cmd),
+})`,
+				),
+				'// fixed: used to call realDiscovery.isCommandAvailable(cmd) here',
+			].join('\n'),
+		);
+		expect(result.delegationViolations).toEqual([]);
+	});
 });
 
 describe('check-mock-cleanup — end to end', () => {
@@ -213,6 +332,37 @@ describe('check-mock-cleanup — end to end', () => {
 		expect(result.exitCode).toBe(1);
 		expect(result.stdout).toContain('without spreading real exports');
 		expect(result.stdout).toContain('...realFs');
+	});
+
+	test('new delegation back into the spread namespace is blocking (issue #2260)', () => {
+		const repo = makeRepo();
+		write(
+			repo,
+			'tests/delegation-mock.test.ts',
+			[
+				"import { afterEach, mock } from 'bun:test';",
+				"import * as realDiscovery from '../src/discovery';",
+				makeMockModuleCall(
+					'../src/discovery',
+					`() => ({
+	...realDiscovery,
+	isCommandAvailable: (cmd: string) => {
+		if (cmd === 'composer') return true;
+		return realDiscovery.isCommandAvailable(cmd);
+	},
+})`,
+				),
+				'afterEach(() => mock.restore());',
+			].join('\n'),
+		);
+		commit(repo, 'add delegation violation');
+
+		const result = runScript(repo);
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout).toContain(
+			"delegates 'realDiscovery.isCommandAvailable(...)'",
+		);
+		expect(result.stdout).toContain('infinite tail recursion');
 	});
 
 	test('repo-root resolution makes subdirectory runs match root runs', () => {

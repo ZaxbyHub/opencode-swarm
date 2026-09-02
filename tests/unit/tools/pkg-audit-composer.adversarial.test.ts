@@ -1,33 +1,27 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
-import * as realDiscovery from '../../../src/build/discovery';
 import { pkg_audit } from '../../../src/tools/pkg-audit';
+import {
+	installComposerProbeSeam,
+	restoreDiscoverySeam,
+} from '../../helpers/discovery-seam';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
-// Mock isCommandAvailable - default to true (composer available)
+// Composer availability follows `mockIsCommandAvailable` through the shared
+// discovery seam helper (never a file-scope mock.module — issue #2260/#2477).
 let mockIsCommandAvailable = true;
-
-mock.module('../../../src/build/discovery', () => ({
-	...realDiscovery,
-	isCommandAvailable: (cmd: string) => {
-		if (cmd === 'composer') return mockIsCommandAvailable;
-		return realDiscovery.isCommandAvailable(cmd);
-	},
-}));
 
 // Mock for Bun.spawn
 let originalSpawn: typeof Bun.spawn;
-let spawnCalls: Array<{ cmd: string[]; opts: unknown }> = [];
 let mockExitCode: number = 0;
 let mockStdout: string = '';
 let mockStderr: string = '';
 let mockSpawnError: Error | null = null;
 
 function mockSpawn(cmd: string[], opts: unknown) {
-	spawnCalls.push({ cmd, opts });
-
 	if (mockSpawnError) {
 		throw mockSpawnError;
 	}
@@ -74,8 +68,10 @@ function getMockContext(): ToolContext {
 
 describe('pkg-audit composer audit adversarial', () => {
 	beforeEach(() => {
+		mockIsCommandAvailable = true; // composer probe follows this flag
+		installComposerProbeSeam(() => mockIsCommandAvailable);
+
 		originalSpawn = Bun.spawn;
-		spawnCalls = [];
 		mockExitCode = 0;
 		mockStdout = '';
 		mockStderr = '';
@@ -90,11 +86,15 @@ describe('pkg-audit composer audit adversarial', () => {
 	});
 
 	afterEach(() => {
+		// Unthrowable restores first (review F-002); teardown is best-effort.
+		restoreDiscoverySeam();
 		Bun.spawn = originalSpawn;
-		process.chdir(originalCwd);
-		fs.rmSync(tempDir, { recursive: true, force: true });
-		mockIsCommandAvailable = true;
-		mock.restore();
+		try {
+			process.chdir(originalCwd);
+			safeRmRecursive(tempDir); // retried EBUSY/EPERM (#2017/#2028 class)
+		} catch {
+			/* dir left to the OS after exhausted retries */
+		}
 	});
 
 	// ===== 1. Oversized advisory title (10,000+ chars) =====

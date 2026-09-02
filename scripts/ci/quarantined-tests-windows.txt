@@ -4,6 +4,14 @@
 # Format: one repo-relative test file path per line. Blank lines and lines
 # starting with # are ignored.
 #
+# METADATA REQUIREMENT (issue #2477): every active path entry must carry,
+# in the comment block directly above it:
+#   # OWNER: <owner> — <issue ref / context>
+#   # EXPIRY: YYYY-MM-DD — <retirement criterion>
+# Enforced by `bun run check:invariants` Check 7: missing metadata fails the
+# gate; an EXPIRY more than 14 days in the past also fails (inside the grace
+# window it only warns).
+#
 # STATUS: 2 active entries (pr-monitor-status.test.ts per issue #1982 and
 # win32-wrapper-runtime.test.ts per issue #2185 — the issue #1729 debt itself
 # remains paid down; see the entries below).
@@ -59,6 +67,9 @@
 # retire it under #1737 once green streak confirms (see also #1782).
 # Quarantined per issue #1982; tracked under #1737 (test quarantine debt)
 # pending a dedicated test-stability sprint (#1782).
+# OWNER: @zaxbysauce — issue #1982 (root-fixed by PR #2190)
+# EXPIRY: 2026-10-15 — retire once a merge-group windows-latest green streak
+# confirms the PR #2190 root fix (#1737/#1782/#2477)
 tests/unit/commands/pr-monitor-status.test.ts
 #
 # win32-wrapper-runtime.test.ts: covers the WindowsSandboxExecutor fallback
@@ -79,4 +90,7 @@ tests/unit/commands/pr-monitor-status.test.ts
 # Pre-existing, unrelated to any specific PR. Quarantined per issue #2185;
 # tracked under #1737 (test quarantine debt) pending a dedicated
 # test-stability sprint (#1782).
+# OWNER: @zaxbysauce — issue #2185
+# EXPIRY: 2026-10-01 — root-fix the PowerShell cold-spawn flake or renew with
+# an updated diagnosis under #1737/#2477
 tests/unit/sandbox/win32-wrapper-runtime.test.ts

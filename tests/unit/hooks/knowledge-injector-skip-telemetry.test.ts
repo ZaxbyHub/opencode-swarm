@@ -21,10 +21,12 @@ import {
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	statSync,
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { KnowledgeConfigSchema } from '../../../src/config/schema';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import type { KnowledgeEventInput } from '../../../src/hooks/knowledge-events';
 import {
 	_internals,
@@ -33,6 +35,7 @@ import {
 import type { MessageWithParts } from '../../../src/hooks/knowledge-types';
 import { setLiveContextWindow, swarmState } from '../../../src/state';
 import { installKnowledgeReceiptAuthorityStub } from '../../helpers/knowledge-receipt-authority.js';
+import { waitFor } from '../../helpers/wait-for';
 
 const baseConfig = KnowledgeConfigSchema.parse({});
 let tempDir: string;
@@ -74,7 +77,8 @@ afterEach(() => {
 	swarmState.currentCriticalShownIds.clear();
 	swarmState.activeAgent.delete(SESSION);
 	swarmState.liveContextWindows.delete(SESSION);
-	rmSync(tempDir, { recursive: true, force: true });
+	closeProjectDb(tempDir);
+	rmSync(tempDir, { recursive: true, force: true }); // #2480
 });
 
 /** Captures all events emitted via _internals.recordKnowledgeEvent. */
@@ -338,7 +342,14 @@ describe('knowledge injector injection_skip telemetry (#1768/#1849)', () => {
 				},
 			]),
 		);
-		await new Promise((r) => setTimeout(r, 20));
+		// The record is fire-and-forget: poll for the flush instead of a
+		// fixed sleep (a 20ms sleep raced the write and failed attempt-1 on
+		// cold windows-latest runners — issue #2477 flake family).
+		await waitFor(
+			() => existsSync(eventsPath) && statSync(eventsPath).size > 0,
+			2000,
+			'injection_skip event to flush to disk',
+		);
 
 		expect(existsSync(eventsPath)).toBe(true);
 		const lines = readFileSync(eventsPath, 'utf-8')

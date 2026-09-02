@@ -2,10 +2,13 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { getGlobalEventBus } from '../background/event-bus.js';
+import {
+	phaseReportLocator,
+	upsertPhaseReportDb,
+} from '../db/phase-report-store.js';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import * as logger from '../utils/logger';
 import type { DocDriftReport } from './curator-types.js';
-import { validateSwarmPath } from './utils.js';
 
 /**
  * Design-doc drift detection (issue #1080).
@@ -13,14 +16,16 @@ import { validateSwarmPath } from './utils.js';
  * Deterministic, fail-open check that compares the generated design docs
  * (domain/technical-spec/behavior-spec/reference) against the current code and
  * spec via the traceability registry written by the docs_design agent. It runs
- * at PHASE-WRAP (advisory only) and writes `.swarm/doc-drift-phase-N.json`.
+ * at PHASE-WRAP (advisory only) and persists the per-phase signal into the
+ * `phase_report` table of `.swarm/swarm.db` (kind `design_doc_drift`,
+ * issue #2480 — previously a bare non-atomic write of
+ * `.swarm/doc-drift-phase-N.json`, whose legacy files are imported once and
+ * cold-archived `.json.imported`).
  *
  * This is NOT the spec-drift gate (that is evidence-based, produced by
  * critic_drift_verifier). It is purely mtime + traceability based: no LLM call,
  * no subprocess. It never throws — design-doc lag must not block a phase.
  */
-
-const DOC_DRIFT_REPORT_PREFIX = 'doc-drift-phase-';
 
 /** Cap on the traceability.json read to avoid memory exhaustion (1 MiB). */
 const MAX_TRACEABILITY_BYTES = 1024 * 1024;
@@ -214,22 +219,25 @@ export async function runDesignDocDriftCheck(
 			checked_docs: checkedDocs,
 		};
 
-		// 5. Persist the signal under .swarm/.
-		const filename = `${DOC_DRIFT_REPORT_PREFIX}${phase}.json`;
-		const filePath = validateSwarmPath(directory, filename);
-		await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-		await fs.promises.writeFile(
-			// drift-test:exempt — DOC_DRIFT_REPORT_PREFIX is in PRESERVED_SWARM_PATHS, context window misses the variable definition
-			filePath,
+		// 5. Persist the signal (#2480: into the `phase_report` entity table in
+		//    `.swarm/swarm.db` via the group-commit writer — atomic one-txn
+		//    upsert, replacing the legacy bare non-atomic writeFile of
+		//    `.swarm/doc-drift-phase-N.json`; the legacy files are imported once
+		//    and cold-archived `.json.imported`). Fail-open: a DB failure must
+		//    still never block the phase — the outer catch handles it.
+		const locator = phaseReportLocator('design_doc_drift', phase);
+		await upsertPhaseReportDb(
+			directory,
+			'design_doc_drift',
+			phase,
 			JSON.stringify(report, null, 2),
-			'utf-8',
 		);
 
 		getGlobalEventBus().publish('curator.docdrift.completed', {
 			phase,
 			verdict,
 			stale_count: staleSections.length,
-			report_path: filePath,
+			report_path: locator,
 		});
 
 		return report;

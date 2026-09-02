@@ -1,21 +1,25 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
-import * as realDiscovery from '../../../src/build/discovery';
 import { pkg_audit } from '../../../src/tools/pkg-audit';
+import {
+	installComposerProbeSeam,
+	restoreDiscoverySeam,
+} from '../../helpers/discovery-seam';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
-// Mock isCommandAvailable - default to true (composer available)
+// Composer availability is controlled through the discovery module's
+// `_internals.spawnSyncImpl` DI seam (with `clearToolchainCache` before/after)
+// instead of a file-scope `mock.module`. The mock.module form delegated to a
+// captured pre-mock namespace import — but Bun retroactively patches the
+// original module's export slots on `mock.module`, so `realDiscovery.
+// isCommandAvailable` resolved to the wrapper itself: the delegation branch
+// was infinite tail recursion (an unkillable loop under JSC proper tail
+// calls), hanging any later file in the shared process that called
+// `isCommandAvailable` for a non-composer command (issue #2260/#2477).
 let mockIsCommandAvailable = true;
-
-mock.module('../../../src/build/discovery', () => ({
-	...realDiscovery,
-	isCommandAvailable: (cmd: string) => {
-		if (cmd === 'composer') return mockIsCommandAvailable;
-		return realDiscovery.isCommandAvailable(cmd);
-	},
-}));
 
 // Mock for Bun.spawn
 let originalSpawn: typeof Bun.spawn;
@@ -75,6 +79,10 @@ function getMockContext(): ToolContext {
 
 describe('pkg-audit composer audit', () => {
 	beforeEach(() => {
+		// Only the composer probe is faked (follows `mockIsCommandAvailable`).
+		mockIsCommandAvailable = true;
+		installComposerProbeSeam(() => mockIsCommandAvailable);
+
 		originalSpawn = Bun.spawn;
 		spawnCalls = [];
 		mockExitCode = 0;
@@ -92,13 +100,15 @@ describe('pkg-audit composer audit', () => {
 	});
 
 	afterEach(() => {
+		// Unthrowable restores first (review F-002); teardown is best-effort.
+		restoreDiscoverySeam();
 		Bun.spawn = originalSpawn;
-		process.chdir(originalCwd);
-		// Clean up temp directory
-		fs.rmSync(tempDir, { recursive: true, force: true });
-		// Reset mock state
-		mockIsCommandAvailable = true;
-		mock.restore();
+		try {
+			process.chdir(originalCwd);
+			safeRmRecursive(tempDir); // retried EBUSY/EPERM (#2017/#2028 class)
+		} catch {
+			/* dir left to the OS after exhausted retries */
+		}
 	});
 
 	// ============ Exit Code 0: Clean ============

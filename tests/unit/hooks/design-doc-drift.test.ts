@@ -9,6 +9,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeGroupCommitWriter } from '../../../src/db/group-commit-writer.js';
+import {
+	_resetPhaseReportImportGuards,
+	readPhaseReportsDb,
+} from '../../../src/db/phase-report-store.js';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import { runDesignDocDriftCheck } from '../../../src/hooks/design-doc-drift';
 
 const OLD = new Date('2024-01-01T00:00:00Z');
@@ -58,6 +64,15 @@ describe('runDesignDocDriftCheck', () => {
 	});
 
 	afterEach(() => {
+		// #2480: the report now persists into swarm.db — release the handle
+		// before the temp-dir cleanup or Windows rmSync fails with EBUSY.
+		try {
+			closeGroupCommitWriter(dir);
+			closeProjectDb(dir);
+		} catch {
+			// already closed
+		}
+		_resetPhaseReportImportGuards();
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -93,13 +108,14 @@ describe('runDesignDocDriftCheck', () => {
 		expect(report!.missing_docs.length).toBeGreaterThan(0);
 	});
 
-	it('persists the report under .swarm/doc-drift-phase-N.json', async () => {
+	it('persists the report into the swarm.db phase_report table (#2480)', async () => {
 		scaffold(dir);
 		write(path.join(dir, 'src', 'foo.ts'), 'x', OLD);
 		await runDesignDocDriftCheck(dir, 7, 'docs');
-		const reportPath = path.join(dir, '.swarm', 'doc-drift-phase-7.json');
-		expect(fs.existsSync(reportPath)).toBe(true);
-		const parsed = JSON.parse(fs.readFileSync(reportPath, 'utf-8'));
+		const rows = readPhaseReportsDb(dir, 'design_doc_drift');
+		expect(rows.length).toBe(1);
+		expect(rows[0].phase).toBe(7);
+		const parsed = JSON.parse(rows[0].payload);
 		expect(parsed.phase).toBe(7);
 		expect(parsed.schema_version).toBe(1);
 	});
@@ -131,6 +147,14 @@ describe('runDesignDocDriftCheck', () => {
 		const report = await runDesignDocDriftCheck(ghost, 9, 'docs');
 		// Either a NO_DOCS report or null (fail-open) — but no throw.
 		expect(report === null || report.verdict === 'NO_DOCS').toBe(true);
+		// The fail-open path may still have created + cached a DB handle for
+		// the (auto-created) ghost root — release it before temp cleanup.
+		try {
+			closeGroupCommitWriter(ghost);
+			closeProjectDb(ghost);
+		} catch {
+			// already closed
+		}
 	});
 
 	it('does NOT flag a section whose doc name is unknown (registry error, not drift)', async () => {
