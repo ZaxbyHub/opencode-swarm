@@ -6,6 +6,13 @@ import {
 	councilRoundStatePaths,
 	runCouncilAttempt,
 } from '../../../src/council/council-round-state.js';
+import {
+	addTelemetryListener,
+	initTelemetry,
+	removeTelemetryListener,
+	resetTelemetryForTesting,
+	type TelemetryListener,
+} from '../../../src/telemetry.js';
 import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 const TOOL_DISPOSITIONS = [
@@ -105,6 +112,18 @@ describe('council attempt disposition finalization matrix', () => {
 		const directory = realpathSync(
 			mkdtempSync(join(canonicalTmpDir(), 'council-dispositions-')),
 		);
+		// Observability-layer capture (PR #2466 review follow-up): every
+		// disposition must also emit a finalized `council_attempt`, proving the
+		// every-append-emits contract across the full tool disposition set —
+		// not only the durable audit side.
+		const captured: Array<{ event: string; data: Record<string, unknown> }> =
+			[];
+		const listener: TelemetryListener = (event, data) => {
+			captured.push({ event, data: data as Record<string, unknown> });
+		};
+		resetTelemetryForTesting();
+		initTelemetry(directory);
+		addTelemetryListener(listener);
 		try {
 			for (const [index, disposition] of TOOL_DISPOSITIONS.entries()) {
 				const phaseNumber = index + 1;
@@ -126,7 +145,30 @@ describe('council attempt disposition finalization matrix', () => {
 					disposition,
 				);
 			}
+
+			// Each attempt emits exactly received + finalized (all dispositions
+			// here are 'stay', so no transition events may appear). Other
+			// catalogued kinds (e.g. evidence_lock_acquired from the evidence
+			// lock itself) may share the capture — count council events only.
+			const councilAttemptEvents = captured.filter(
+				(entry) => entry.event === 'council_attempt',
+			);
+			expect(councilAttemptEvents.length).toBe(TOOL_DISPOSITIONS.length * 2);
+			expect(
+				captured.some((entry) => entry.event === 'council_round_transition'),
+			).toBe(false);
+			for (const disposition of TOOL_DISPOSITIONS) {
+				expect(
+					councilAttemptEvents.some(
+						(entry) =>
+							entry.data.stage === 'finalized' &&
+							entry.data.disposition === disposition,
+					),
+				).toBe(true);
+			}
 		} finally {
+			removeTelemetryListener(listener);
+			resetTelemetryForTesting();
 			rmSync(directory, { recursive: true, force: true });
 		}
 	});

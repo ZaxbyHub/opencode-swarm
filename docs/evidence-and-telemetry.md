@@ -133,7 +133,7 @@ before/after. The prune is:
 .swarm/telemetry.jsonl
 ```
 
-Line-delimited JSON. Auto-rotated at 10 MB (`src/telemetry.ts:161`).
+Line-delimited JSON. Auto-rotated at 10 MB (`src/telemetry.ts:438`).
 
 ### Event Schema
 
@@ -207,7 +207,7 @@ Provider-reported cost wins only when its currency is explicitly known and compa
 
 Telemetry never blocks the caller. Emit errors are silently swallowed — a failed append won't break a phase. This is deliberate: a broken telemetry write must not fail a phase.
 
-For in-process hooks, register a listener with `addTelemetryListener()` (`src/telemetry.ts:151`).
+For in-process hooks, register a listener with `addTelemetryListener()` (`src/telemetry.ts:414`).
 
 ---
 
