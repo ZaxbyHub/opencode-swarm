@@ -11,6 +11,10 @@ effort: medium
 
 # Commit & PR Protocol
 
+## Graph-first evidence contract
+
+Before publication, use `repo_map` `diff_context` and `impact_cone` as a final drift check, then verify the direct source, Git diff, and tests. Graph evidence is advisory only. If freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or an action fails, publication decisions rely on the direct evidence.
+
 Follow every step in order. Do not skip steps.
 
 ## Step -1 - Mandatory invariant audit

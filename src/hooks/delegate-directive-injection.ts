@@ -38,7 +38,12 @@ import {
 } from './knowledge-injector.js';
 import type { KnowledgeConfig } from './knowledge-types.js';
 import { readPhaseDirectivesToVerify } from './phase-directives.js';
+import {
+	collectPlanTaskIdContextFromPhases,
+	toTaskIdPlanContextOptions,
+} from './plan-task-id-context.js';
 import { parseDelegationArgs } from './skill-propagation-gate.js';
+import { resolveTaskId } from './task-id-resolver.js';
 
 /**
  * Emits a structured `injection_skip` diagnostic event so the reason a
@@ -194,9 +199,19 @@ export async function injectDelegateDirectivesBefore(
 			? (extractCurrentPhaseFromPlan(plan) ??
 				`Phase ${plan.current_phase ?? 1}`)
 			: undefined;
-		const taskId = /\btask[_-]?id\s*[:=]\s*([A-Za-z0-9._-]{1,80})/i.exec(
-			promptRaw,
-		)?.[1];
+		const planTaskIdOptions = plan
+			? toTaskIdPlanContextOptions(
+					collectPlanTaskIdContextFromPhases(plan.phases),
+				)
+			: {};
+		const taskIdResolution = resolveTaskId(argsRecord, {
+			policy: 'attribution',
+			...planTaskIdOptions,
+		});
+		const taskId =
+			taskIdResolution.status === 'resolved'
+				? taskIdResolution.taskId
+				: undefined;
 
 		const { entries, trace_id } = await injectForDelegate({
 			directory,

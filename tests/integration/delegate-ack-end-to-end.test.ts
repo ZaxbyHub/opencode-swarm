@@ -10,7 +10,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { collectDelegateAcksAfter } from '../../src/hooks/delegate-ack-collector.js';
+import {
+	collectDelegateAcksAfter,
+	resolveDelegateAckTaskId,
+} from '../../src/hooks/delegate-ack-collector.js';
 import { injectDelegateDirectivesBefore } from '../../src/hooks/delegate-directive-injection.js';
 import { readKnowledgeEvents } from '../../src/hooks/knowledge-events.js';
 import { DELEGATE_DIRECTIVE_BLOCK_TAG } from '../../src/hooks/knowledge-injector.js';
@@ -90,6 +93,34 @@ function traceIdFromPrompt(prompt: string): string {
 	const traceId = /trace_id:\s*(\S+)/.exec(prompt)?.[1];
 	if (!traceId) throw new Error('injected directive lacks trace_id');
 	return traceId;
+}
+
+function writePlan(directory: string, taskIds: string[]): void {
+	fs.writeFileSync(
+		path.join(directory, '.swarm', 'plan.json'),
+		JSON.stringify({
+			schema_version: '1.0.0',
+			title: 'Known task filter',
+			swarm: 'test-swarm',
+			current_phase: 1,
+			phases: [
+				{
+					id: 1,
+					name: 'Phase 1',
+					status: 'in_progress',
+					tasks: taskIds.map((id) => ({
+						id,
+						phase: 1,
+						status: 'in_progress',
+						size: 'small',
+						description: `Known task ${id}`,
+						depends: [],
+						files_touched: [],
+					})),
+				},
+			],
+		}),
+	);
 }
 
 describe('Change 1 end-to-end: inject → ack → events', () => {
@@ -201,5 +232,73 @@ describe('Change 1 end-to-end: inject → ack → events', () => {
 			'unacknowledged-criticals.jsonl',
 		);
 		expect(fs.existsSync(auditPath)).toBe(false);
+	});
+
+	it('keeps parallel plan-task acknowledgements attributed to their exact prompts', async () => {
+		const knownPlanTaskIds = new Set(['1.1', '1.2']);
+		const taskIds = await Promise.all(
+			['1.1', '1.2'].map(async (taskId) =>
+				resolveDelegateAckTaskId(
+					{
+						task_id: taskId,
+						prompt: `TASK: ${taskId}\nImplement only this task`,
+					},
+					knownPlanTaskIds,
+				),
+			),
+		);
+		expect(taskIds).toEqual(['1.1', '1.2']);
+	});
+
+	it('does not guess an unknown numeric task when a valid plan is present', async () => {
+		writePlan(dir, ['1.1']);
+		const input = {
+			tool: 'Task',
+			agent: 'architect',
+			sessionID: 'session-unknown-task',
+			args: { subagent_type: 'coder', prompt: 'TASK: 9.9\nImplement' },
+		};
+		await injectDelegateDirectivesBefore(dir, input, CONFIG);
+		const traceId = traceIdFromPrompt(input.args.prompt);
+		await collectDelegateAcksAfter(dir, input, {
+			output: `KNOWLEDGE_APPLIED:${encodeURIComponent(traceId)}:${encodeURIComponent(CRIT_A)}`,
+		});
+		const applied = (await readKnowledgeEvents(dir)).find(
+			(event) => event.type === 'applied' && event.knowledge_id === CRIT_A,
+		);
+		expect(applied).toBeDefined();
+		expect(applied?.task_id).toBeUndefined();
+	});
+
+	it('an oversized plan rejects numeric task attribution but keeps named legacy attribution', async () => {
+		writePlan(
+			dir,
+			Array.from({ length: 1025 }, (_, index) => `1.${index + 1}`),
+		);
+
+		for (const [sessionID, marker, expectedTaskId] of [
+			['session-over-limit-numeric', '9.9', undefined],
+			['session-over-limit-named', 'legacy-task', 'legacy-task'],
+		] as const) {
+			const input = {
+				tool: 'Task',
+				agent: 'architect',
+				sessionID,
+				args: { subagent_type: 'coder', prompt: `TASK: ${marker}\nImplement` },
+			};
+			await injectDelegateDirectivesBefore(dir, input, CONFIG);
+			const traceId = traceIdFromPrompt(input.args.prompt);
+			await collectDelegateAcksAfter(dir, input, {
+				output: `KNOWLEDGE_APPLIED:${encodeURIComponent(traceId)}:${encodeURIComponent(CRIT_A)}`,
+			});
+			const applied = (await readKnowledgeEvents(dir)).find(
+				(event) =>
+					event.type === 'applied' &&
+					event.knowledge_id === CRIT_A &&
+					event.session_id === sessionID,
+			);
+			expect(applied).toBeDefined();
+			expect(applied?.task_id).toBe(expectedTaskId);
+		}
 	});
 });

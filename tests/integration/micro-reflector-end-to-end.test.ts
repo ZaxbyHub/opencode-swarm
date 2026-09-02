@@ -11,6 +11,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+	microReflectorAfter,
 	resolveInsightCandidatesPath,
 	runMicroReflection,
 } from '../../src/hooks/micro-reflector.js';
@@ -196,5 +197,169 @@ describe('runMicroReflection (e2e)', () => {
 		expect(result.reflected).toBe(true);
 		expect(result.candidates).toBe(0);
 		expect(readCandidates(dir)).toHaveLength(0);
+	});
+
+	it('resolves a plan-aware TASK marker before reading the trajectory', async () => {
+		const plan = {
+			schema_version: '1.0.0',
+			title: 'Micro-reflector task resolution',
+			swarm: 'test-swarm',
+			current_phase: 1,
+			phases: [
+				{
+					id: 1,
+					name: 'Phase 1',
+					status: 'in_progress',
+					tasks: [
+						{
+							id: '1.2',
+							phase: 1,
+							status: 'in_progress',
+							size: 'small',
+							description: 'Resolve task IDs consistently',
+							depends: [],
+							files_touched: ['src/hooks/micro-reflector.ts'],
+						},
+					],
+				},
+			],
+		};
+		fs.writeFileSync(
+			path.join(dir, '.swarm', 'plan.json'),
+			JSON.stringify(plan),
+		);
+		const evidenceDir = path.join(dir, '.swarm', 'evidence', '1.2');
+		fs.mkdirSync(evidenceDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(evidenceDir, 'trajectory.jsonl'),
+			`${failingTrajectory()
+				.map((entry) => JSON.stringify(entry))
+				.join('\n')}\n`,
+		);
+
+		await microReflectorAfter(
+			dir,
+			{
+				tool: 'Task',
+				args: {
+					subagent_type: 'coder',
+					prompt: 'TASK: 1.2\nReturn the completed implementation.',
+				},
+			},
+			{ output: 'The tests are failing after my edit.' },
+			async () => VALID_CANDIDATES,
+		);
+
+		const queued = readCandidates(dir);
+		expect(queued).toHaveLength(1);
+		const source = queued[0].source as {
+			task_id?: string;
+			trajectory_steps: number;
+		};
+		expect(source.task_id).toBe('1.2');
+		expect(source.trajectory_steps).toBe(2);
+	});
+
+	it('keeps parallel Task calls bound to their own plan trajectories', async () => {
+		fs.writeFileSync(
+			path.join(dir, '.swarm', 'plan.json'),
+			JSON.stringify({
+				schema_version: '1.0.0',
+				title: 'Parallel micro-reflection',
+				swarm: 'test-swarm',
+				current_phase: 1,
+				phases: [
+					{
+						id: 1,
+						name: 'Phase 1',
+						status: 'in_progress',
+						tasks: ['1.1', '1.2'].map((id) => ({
+							id,
+							phase: 1,
+							status: 'in_progress',
+							size: 'small',
+							description: `Task ${id}`,
+							depends: [],
+							files_touched: [`src/${id}.ts`],
+						})),
+					},
+				],
+			}),
+		);
+		for (const taskId of ['1.1', '1.2']) {
+			const evidenceDir = path.join(dir, '.swarm', 'evidence', taskId);
+			fs.mkdirSync(evidenceDir, { recursive: true });
+			const trajectory = failingTrajectory().map((entry) => ({
+				...entry,
+				target: `src/${taskId}.ts`,
+			}));
+			fs.writeFileSync(
+				path.join(evidenceDir, 'trajectory.jsonl'),
+				`${trajectory.map((entry) => JSON.stringify(entry)).join('\n')}\n`,
+			);
+		}
+
+		await Promise.all(
+			['1.1', '1.2'].map((taskId) =>
+				microReflectorAfter(
+					dir,
+					{
+						tool: 'Task',
+						sessionID: `session-${taskId}`,
+						args: {
+							subagent_type: 'coder',
+							prompt: `TASK: ${taskId}\nReturn only this task`,
+						},
+					},
+					{ output: `Tests failed for ${taskId}` },
+					async (prompt) =>
+						JSON.stringify([
+							{
+								lesson: prompt.includes('src/1.1.ts')
+									? 'Verify the first isolated task before returning'
+									: 'Verify the second isolated task before returning',
+								applies_to_agents: ['coder'],
+								required_actions: ['run the focused task test'],
+							},
+						]),
+				),
+			),
+		);
+
+		const taskIds = readCandidates(dir)
+			.map(
+				(candidate) =>
+					(candidate.source as { task_id?: string } | undefined)?.task_id,
+			)
+			.filter((taskId): taskId is string => typeof taskId === 'string')
+			.sort();
+		expect(taskIds).toEqual(['1.1', '1.2']);
+	});
+
+	it('falls back to named generic attribution when plan.json is corrupt', async () => {
+		fs.writeFileSync(path.join(dir, '.swarm', 'plan.json'), '{broken');
+		const evidenceDir = path.join(dir, '.swarm', 'evidence', '2.3');
+		fs.mkdirSync(evidenceDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(evidenceDir, 'trajectory.jsonl'),
+			`${failingTrajectory()
+				.map((entry) => JSON.stringify(entry))
+				.join('\n')}\n`,
+		);
+		await microReflectorAfter(
+			dir,
+			{
+				tool: 'Task',
+				args: {
+					subagent_type: 'coder',
+					prompt: 'task_id: 2.3\nReturn the completed implementation',
+				},
+			},
+			{ output: 'The focused test is failing.' },
+			async () => VALID_CANDIDATES,
+		);
+		expect(
+			(readCandidates(dir)[0].source as { task_id?: string }).task_id,
+		).toBe('2.3');
 	});
 });

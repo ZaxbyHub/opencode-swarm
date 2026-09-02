@@ -11,6 +11,10 @@ effort: medium
 
 # Commit & PR Protocol (portable)
 
+## Graph-first evidence contract
+
+Before publication, use `repo_map` `diff_context` and `impact_cone` as a final drift check, then verify the direct source, Git diff, and tests. Graph evidence is advisory only. If freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or an action fails, publication decisions rely on the direct evidence.
+
 A project-agnostic workflow for landing a change safely. It makes no assumptions
 about the language, build tool, or hosting provider — discover each project's
 own conventions and follow them. Do every step in order.
@@ -96,4 +100,3 @@ If this session is running an issue trace (`/swarm issue --trace`), call
 right after the PR is opened so the issue-trace workflow can reach its terminal
 `published` state — without it the trace stays at `publication_handoff` and is NOT
 considered resolved.
-

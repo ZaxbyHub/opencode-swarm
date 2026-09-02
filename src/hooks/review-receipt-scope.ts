@@ -23,13 +23,17 @@ import { loadPlanJsonOnly } from '../plan/manager.js';
 import { canonicalWorkspaceIdentity } from '../scope/scope-binding.js';
 import { peekReviewerScopeGenerationClaim, swarmState } from '../state.js';
 import { resolveGitExecutable } from '../utils/git-executable.js';
-import { resolveDelegatedPlanTaskId } from './delegation-gate.js';
+import {
+	collectPlanTaskIdContextFromPhases,
+	toTaskIdPlanContextOptions,
+} from './plan-task-id-context.js';
 import { computeScopeFingerprint } from './review-receipt.js';
 import {
 	captureReviewerScopeFileFingerprint,
 	REVIEWER_SCOPE_CAPTURE_BATCH_DEADLINE_MS,
 	type ReviewerScopeCaptureFailureCode,
 } from './reviewer-scope-file-fingerprint.js';
+import { resolveTaskId } from './task-id-resolver.js';
 
 const MAX_SCOPE_FILES = 256;
 const DEFAULT_MAX_SCOPE_BYTES = 256 * 1024;
@@ -123,12 +127,18 @@ export async function resolveReviewerScopeTaskId(
 	try {
 		const plan = await loadPlanJsonOnly(directory);
 		if (!plan) return null;
-		const knownPlanTaskIds = new Set<string>();
-		for (const phase of plan.phases) {
-			for (const task of phase.tasks) knownPlanTaskIds.add(task.id);
+		const planTaskIdContext = collectPlanTaskIdContextFromPhases(plan.phases);
+		if (
+			planTaskIdContext.status === 'available' &&
+			planTaskIdContext.taskIds.size === 0
+		) {
+			return null;
 		}
-		if (knownPlanTaskIds.size === 0) return null;
-		return resolveDelegatedPlanTaskId(record, knownPlanTaskIds);
+		const resolution = resolveTaskId(record, {
+			policy: 'plan',
+			...toTaskIdPlanContextOptions(planTaskIdContext),
+		});
+		return resolution.status === 'resolved' ? resolution.taskId : null;
 	} catch {
 		return null;
 	}

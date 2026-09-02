@@ -99,6 +99,10 @@ import type {
 } from '../types/delegation.js';
 import * as logger from '../utils/logger';
 import { isStrictTaskId } from '../validation/task-id';
+import { resolveDelegatedPlanTaskId } from './task-id-resolver.js';
+
+export { resolveDelegatedPlanTaskId } from './task-id-resolver.js';
+
 import {
 	abortCoderSettlement,
 	abortCoderSettlementIfDoomed,
@@ -1992,82 +1996,6 @@ function getPlanTaskDeclaredFiles(
 		const task = phase.tasks.find((candidate) => candidate.id === taskId);
 		if (task) return [...task.files_touched];
 	}
-	return null;
-}
-
-export function resolveDelegatedPlanTaskId(
-	args: Record<string, unknown>,
-	knownPlanTaskIds?: ReadonlySet<string>,
-): string | null {
-	// Prefer plan-task-shaped explicit task_id/taskId fields. The arg name is
-	// generic and is overloaded by newer OpenCode runtimes (and by our own
-	// worktree-isolation pre-create at delegation-gate/worktree-isolation.ts:836)
-	// to carry a child SESSION id (e.g. `ses_…`), not a plan-task id. A
-	// non-plan-shaped value means "this field is not ours" — fall through to
-	// TASK: line / prompt-text extraction instead of fail-closing on what is
-	// really a runtime-injected session reuse handle. (Issue #1914 Defect 1.)
-	//
-	// This reverts the PR #961 bypass-guard for the non-plan-shaped case only.
-	// Plan-task-shaped values still win over prompt text (preserves PR #961's
-	// "explicit id takes precedence" intent). Plan-task-shaped-but-unknown ids
-	// are rejected by the membership gate in prepareCoderScope (typo protection,
-	// acceptance criterion 2).
-	//
-	// The guard is general (not `ses_`-prefix-specific) so future runtime
-	// session-id shapes don't silently re-break dispatches.
-	const rawTaskId = args.task_id ?? args.taskId;
-	if (typeof rawTaskId === 'string') {
-		const trimmed = rawTaskId.trim();
-		if (trimmed.length <= 20 && isStrictTaskId(trimmed)) return trimmed;
-		// Non-plan-shaped explicit value (e.g. `ses_…`) — fall through to text
-		// extraction below. Do NOT return null here.
-	}
-
-	// Text field extraction: collect ALL distinct task IDs to detect ambiguity.
-	// Uses direct regex rather than extractPlanTaskId because that helper returns
-	// only the first match per field, which misses multi-ID prompts.
-	const candidateTextFields = [
-		args.prompt,
-		args.description,
-		args.task,
-		args.input,
-	];
-
-	// Strong signal: when delegation text includes a TASK: line, prefer IDs from
-	// that line even if other task IDs appear elsewhere in the same prompt.
-	const taskLineMatches = new Set<string>();
-	for (const field of candidateTextFields) {
-		if (typeof field !== 'string') continue;
-		const taskLine = extractTaskLine(field);
-		if (!taskLine) continue;
-		for (const m of taskLine.matchAll(/\b(\d+\.\d+(?:\.\d+)*)\b/g)) {
-			const candidate = m[1];
-			if (!isStrictTaskId(candidate)) continue;
-			if (knownPlanTaskIds && !knownPlanTaskIds.has(candidate)) continue;
-			taskLineMatches.add(candidate);
-		}
-	}
-	if (taskLineMatches.size === 1) {
-		return taskLineMatches.values().next().value as string;
-	}
-	if (taskLineMatches.size > 1) return null;
-
-	const seen = new Set<string>();
-	for (const field of candidateTextFields) {
-		if (typeof field !== 'string') continue;
-		for (const m of field.matchAll(/\b(\d+\.\d+(?:\.\d+)*)\b/g)) {
-			const candidate = m[1];
-			if (isStrictTaskId(candidate)) {
-				// Filter against known plan task IDs when available — excludes
-				// version numbers and other numeric-dot patterns that aren't tasks.
-				if (knownPlanTaskIds && !knownPlanTaskIds.has(candidate)) continue;
-				seen.add(candidate);
-			}
-		}
-	}
-
-	// Fail closed on ambiguity — multiple distinct IDs means we can't determine intent.
-	if (seen.size === 1) return seen.values().next().value as string;
 	return null;
 }
 

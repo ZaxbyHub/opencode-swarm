@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { readCoreEvents } from '../../../src/events/core-events.js';
 // Static import of the module under test
@@ -15,6 +14,8 @@ import {
 	skillPropagationTransformScan,
 	writeWarnEvent,
 } from '../../../src/hooks/skill-propagation-gate';
+import { withFrozenClock } from '../../helpers/test-clock.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 // This legacy suite focuses on propagation warnings, scoring, usage recording,
 // and transform dedup with shorthand/nonexistent skill fixtures. Real explicit
@@ -47,7 +48,7 @@ import {
 // ============================================================================
 
 function tmpDir(): string {
-	return fs.mkdtempSync(path.join(os.tmpdir(), 'skill-gate-test-'));
+	return canonicalMkdtemp('skill-gate-test-');
 }
 
 // Normalize paths to use forward slashes for cross-platform comparison
@@ -3184,11 +3185,11 @@ describe('COMPLIANCE_PATTERN edge cases', () => {
 
 describe('skillPropagationTransformScan — dedup on repeated calls', () => {
 	test('transform scan continues gracefully when readSkillUsageEntries throws', async () => {
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dedup-err-'));
+		const tempDir = canonicalMkdtemp('dedup-err-');
 		const swarmDir = path.join(tempDir, '.swarm');
 		fs.mkdirSync(swarmDir, { recursive: true });
 
-		const sessionID = `dedup-err-${Date.now()}`;
+		const sessionID = `dedup-err-${withFrozenClock(() => Date.now())}`;
 
 		// Override readSkillUsageEntries to throw
 		const origRead = _internals.readSkillUsageEntries;
@@ -3216,7 +3217,7 @@ describe('skillPropagationTransformScan — dedup on repeated calls', () => {
 	});
 
 	test('repeated transform scan calls with same messages do not produce duplicates', async () => {
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dedup-test-'));
+		const tempDir = canonicalMkdtemp('dedup-test-');
 		const swarmDir = path.join(tempDir, '.swarm');
 		fs.mkdirSync(swarmDir, { recursive: true });
 
@@ -3312,155 +3313,9 @@ describe('skillPropagationTransformScan — dedup on repeated calls', () => {
 		}
 	});
 
-	test('compliance attribution uses only latest delegation task, not all session entries', async () => {
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'attribution-'));
-		const swarmDir = path.join(tempDir, '.swarm');
-		fs.mkdirSync(swarmDir, { recursive: true });
-
-		const sessionID = `attr-${Date.now()}`;
-		const skillA = 'file:.claude/skills/writing-tests/SKILL.md';
-		const skillB = 'file:.claude/skills/engineering-conventions/SKILL.md';
-
-		// Create mock skill files
-		for (const sp of [skillA, skillB]) {
-			const absPath = path.join(tempDir, sp.replace('file:', ''));
-			fs.mkdirSync(path.dirname(absPath), { recursive: true });
-			fs.writeFileSync(absPath, '# Skill\n');
-		}
-
-		// Pre-record two delegation entries for DIFFERENT tasks
-		appendSkillUsageEntry(tempDir, {
-			skillPath: skillA,
-			agentName: 'coder',
-			taskID: 'task-earlier',
-			complianceVerdict: 'not_checked',
-			sessionID,
-			timestamp: new Date().toISOString(),
-		});
-		appendSkillUsageEntry(tempDir, {
-			skillPath: skillB,
-			agentName: 'coder',
-			taskID: 'task-latest',
-			complianceVerdict: 'not_checked',
-			sessionID,
-			timestamp: new Date().toISOString(),
-		});
-
-		// Reviewer message WITHOUT SKILLS_USED_BY_CODER
-		const messages = [
-			{
-				info: { role: 'assistant', agent: 'reviewer', sessionID },
-				parts: [
-					{
-						type: 'text',
-						text: 'SKILL_COMPLIANCE: COMPLIANT — all guidelines followed',
-					},
-				],
-			},
-		];
-
-		try {
-			await _internals.skillPropagationTransformScan(
-				tempDir,
-				{
-					messages: messages as Parameters<
-						typeof _internals.skillPropagationTransformScan
-					>[1]['messages'],
-				},
-				sessionID,
-			);
-
-			const entries = readSkillUsageEntries(tempDir, { sessionID });
-			const complianceEntries = entries.filter(
-				(e) => e.agentName === 'reviewer',
-			);
-
-			// Compliance should be attributed to skillB (latest delegation) ONLY,
-			// NOT to skillA (earlier unrelated task)
-			expect(complianceEntries.length).toBeGreaterThanOrEqual(1);
-			const compliancePaths = complianceEntries.map((e) => e.skillPath);
-			expect(compliancePaths).toContain(skillB.replace('file:', '')); // #2038: canonicalized
-			expect(compliancePaths).not.toContain(skillA);
-
-			// Compliance entries should carry the latest delegation's taskID,
-			// not 'unknown'
-			for (const entry of complianceEntries) {
-				expect(entry.taskID).toBe('task-latest');
-			}
-		} finally {
-			fs.rmSync(tempDir, { recursive: true, force: true });
-		}
-	});
-
-	test('explicit reviewer TASK attribution overrides latest delegation fallback', async () => {
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'attribution-task-'));
-		const swarmDir = path.join(tempDir, '.swarm');
-		fs.mkdirSync(swarmDir, { recursive: true });
-
-		const sessionID = `attr-task-${Date.now()}`;
-		const skillA = 'file:.claude/skills/writing-tests/SKILL.md';
-		const skillB = 'file:.claude/skills/engineering-conventions/SKILL.md';
-
-		for (const sp of [skillA, skillB]) {
-			const absPath = path.join(tempDir, sp.replace('file:', ''));
-			fs.mkdirSync(path.dirname(absPath), { recursive: true });
-			fs.writeFileSync(absPath, '# Skill\n');
-		}
-
-		appendSkillUsageEntry(tempDir, {
-			skillPath: skillA,
-			agentName: 'coder',
-			taskID: 'task-earlier',
-			complianceVerdict: 'not_checked',
-			sessionID,
-			timestamp: new Date().toISOString(),
-		});
-		appendSkillUsageEntry(tempDir, {
-			skillPath: skillB,
-			agentName: 'coder',
-			taskID: 'task-latest',
-			complianceVerdict: 'not_checked',
-			sessionID,
-			timestamp: new Date().toISOString(),
-		});
-
-		const messages = [
-			{
-				info: { role: 'assistant', agent: 'reviewer', sessionID },
-				parts: [
-					{
-						type: 'text',
-						text: 'TASK: task-earlier\nSKILL_COMPLIANCE: COMPLIANT — all guidelines followed',
-					},
-				],
-			},
-		];
-
-		try {
-			await _internals.skillPropagationTransformScan(
-				tempDir,
-				{
-					messages: messages as Parameters<
-						typeof _internals.skillPropagationTransformScan
-					>[1]['messages'],
-				},
-				sessionID,
-			);
-
-			const complianceEntries = readSkillUsageEntries(tempDir, {
-				sessionID,
-			}).filter((e) => e.agentName === 'reviewer');
-			expect(complianceEntries).toHaveLength(1);
-			expect(complianceEntries[0].skillPath).toBe(skillA.replace('file:', '')); // #2038: canonicalized
-			expect(complianceEntries[0].taskID).toBe('task-earlier');
-		} finally {
-			fs.rmSync(tempDir, { recursive: true, force: true });
-		}
-	});
-
 	test('compliance uses resolved taskID even when SKILLS_USED_BY_CODER is present', async () => {
 		const sessionID = 'test-skills-with-taskid';
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spg-taskid-'));
+		const tempDir = canonicalMkdtemp('spg-taskid-');
 
 		const skillPath = 'file:.claude/skills/writing-tests/SKILL.md';
 
@@ -3475,8 +3330,8 @@ describe('skillPropagationTransformScan — dedup on repeated calls', () => {
 		});
 
 		// Reviewer message WITH SKILLS_USED_BY_CODER — skillPaths are populated
-		// from the reviewer text, NOT from the fallback. But taskID should still
-		// be resolved from the latest delegation, not 'unknown'.
+		// from the reviewer text, NOT from the fallback. The single distinct
+		// delegation task is a caller-proven safe fallback for task identity.
 		const messages = [
 			{
 				info: { role: 'assistant', agent: 'reviewer', sessionID },
@@ -3506,8 +3361,8 @@ describe('skillPropagationTransformScan — dedup on repeated calls', () => {
 			);
 
 			expect(complianceEntries.length).toBeGreaterThanOrEqual(1);
-			// Even though SKILLS_USED_BY_CODER provided the skill paths,
-			// the taskID must come from the latest delegation, not 'unknown'
+			// Even though SKILLS_USED_BY_CODER provided the skill paths, the
+			// unique delegation task remains a safe attribution fallback.
 			for (const entry of complianceEntries) {
 				expect(entry.taskID).toBe('task-5.2');
 			}
@@ -3519,11 +3374,10 @@ describe('skillPropagationTransformScan — dedup on repeated calls', () => {
 	test('interleaved delegations: reviewer TASK: attribution ensures correct task association', async () => {
 		// This test verifies Gap 2 fix: when there are multiple interleaved delegations,
 		// the reviewer must use TASK: to explicitly attribute compliance to the correct task.
-		// Without explicit TASK:, the fallback would use "latest delegation" which could
-		// be wrong in parallel/interleaved scenarios.
+		// Without explicit TASK:, multiple candidates must remain unattributed.
 
 		const sessionID = 'test-interleaved-delegations';
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spg-interleaved-'));
+		const tempDir = canonicalMkdtemp('spg-interleaved-');
 
 		const skillA = 'file:.claude/skills/writing-tests/SKILL.md';
 		const skillB = 'file:.claude/skills/engineering-conventions/SKILL.md';
@@ -3555,8 +3409,8 @@ describe('skillPropagationTransformScan — dedup on repeated calls', () => {
 			timestamp: new Date().toISOString(),
 		});
 
-		// Reviewer verdict for Task A (needs explicit TASK: to override
-		// the "latest delegation" which is task-b)
+		// Reviewer verdict for Task A needs explicit TASK: because the session
+		// contains more than one eligible delegation task.
 		const messages = [
 			{
 				info: { role: 'assistant', agent: 'reviewer', sessionID },
@@ -3590,8 +3444,8 @@ SKILL_COMPLIANCE: COMPLIANT — skill A rules followed`,
 			expect(complianceEntries).toHaveLength(1);
 			const entry = complianceEntries[0];
 
-			// Compliance must be attributed to task-a (via explicit TASK: line)
-			// NOT to task-b (which would be the latest delegation without TASK:)
+			// Compliance must be attributed to task-a via the explicit TASK: line,
+			// not guessed from the interleaved delegation history.
 			expect(entry.taskID).toBe('task-a');
 			expect(entry.complianceVerdict).toBe('compliant');
 			expect(entry.skillPath).toBe(skillA.replace('file:', '')); // #2038: canonicalized
@@ -3600,12 +3454,9 @@ SKILL_COMPLIANCE: COMPLIANT — skill A rules followed`,
 		}
 	});
 
-	test('interleaved delegations: missing TASK: falls back to latest delegation (negative control)', async () => {
-		// Negative control: when the reviewer omits TASK:, the fallback
-		// "latest delegation" picks the most recent delegation (task-b),
-		// demonstrating why explicit TASK: is required in interleaved scenarios.
+	test('interleaved delegations: missing TASK remains unknown instead of guessing the latest task', async () => {
 		const sessionID = 'test-interleaved-delegations-negative';
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spg-interleaved-'));
+		const tempDir = canonicalMkdtemp('spg-interleaved-');
 
 		const skillA = 'file:.claude/skills/writing-tests/SKILL.md';
 		const skillB = 'file:.claude/skills/engineering-conventions/SKILL.md';
@@ -3664,8 +3515,8 @@ SKILL_COMPLIANCE: COMPLIANT — skill A rules followed`,
 
 			expect(complianceEntries).toHaveLength(1);
 			const entry = complianceEntries[0];
-			expect(entry.taskID).toBe('task-b');
-			expect(entry.skillPath).toBe(skillB.replace('file:', '')); // #2038: canonicalized
+			expect(entry.taskID).toBe('unknown');
+			expect(entry.skillPath).toBe('__overall__');
 			expect(entry.complianceVerdict).toBe('compliant');
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });

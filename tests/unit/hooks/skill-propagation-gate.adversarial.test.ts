@@ -547,10 +547,10 @@ describe('3 — Prompt injection: extractTaskIdFromPrompt', () => {
 		expect(result).toBe('from-taskid');
 	});
 
-	test('handles very long taskId value (10KB)', () => {
+	test('rejects very long taskId value instead of recording unbounded attribution', () => {
 		const longId = 'taskId: ' + 'x'.repeat(10_000);
 		const result = extractTaskIdFromPrompt(longId);
-		expect(result.length).toBe(10_000);
+		expect(result).toBe('unknown');
 	});
 
 	test('returns "unknown" when only whitespace surrounding taskId', () => {
@@ -590,11 +590,11 @@ describe('3 — Prompt injection: extractTaskIdFromPrompt', () => {
 		expect(result).toBe('mixed-case');
 	});
 
-	test('handles taskId with Unicode digits (fullwidth)', () => {
+	test('rejects taskId with Unicode digits outside the safe attribution alphabet', () => {
 		// U+FF10 "０" is a fullwidth digit zero — not matched by \S or \d in basic regex
 		const result = extractTaskIdFromPrompt('taskId: \uff10\uff11\uff12');
 		// \S+ will capture the fullwidth digits as non-whitespace characters
-		expect(result).toBe('\uff10\uff11\uff12');
+		expect(result).toBe('unknown');
 	});
 
 	test('handles very short taskId (single char)', () => {

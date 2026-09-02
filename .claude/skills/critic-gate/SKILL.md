@@ -9,6 +9,10 @@ description: >
 
 This protocol is loaded on demand by the architect runtime. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
 
+## Graph-first evidence contract
+
+Before judging plan coverage, use `repo_map` `graph_health` and targeted `impact_cone` evidence for proposed shared surfaces. Graph evidence is advisory only. If freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or an action fails, inspect the direct source and searches before the verdict.
+
 ### MODE: CRITIC-GATE
 Delegate plan to the active swarm's critic agent for review BEFORE any implementation begins.
 - Send the full plan.md content and codebase context summary

@@ -87,16 +87,15 @@ describe('resolveDelegatedPlanTaskId — issue #1914 Defect 1', () => {
 			).toBe('1.1');
 		});
 
-		test('plan-task-shaped-but-unknown explicit task_id is returned (membership gate is downstream)', () => {
-			// The resolver does NOT validate plan membership for explicit plan-task-shaped
-			// values — prepareCoderScope's membership gate handles that. This preserves
-			// PR #961's "explicit id takes precedence" intent for plan-task-shaped values.
+		test('plan-task-shaped-but-unknown explicit task_id falls through to a known prompt ID', () => {
+			// Membership is enforced in the shared resolver so scope lifecycle callers
+			// cannot accidentally authorize an unknown explicit numeric task.
 			expect(
 				resolveDelegatedPlanTaskId(
 					{ task_id: '9.9', prompt: 'TASK: 1.1 — other' },
 					PLAN_TASK_IDS,
 				),
-			).toBe('9.9');
+			).toBe('1.1');
 		});
 
 		test('explicit plan-task-shaped value > 20 chars falls through (length guard)', () => {

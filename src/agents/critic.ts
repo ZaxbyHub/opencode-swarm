@@ -3,6 +3,9 @@ import type { AgentDefinition } from './architect';
 export const CRITIC_MEMORY_OUTCOME_GUIDANCE =
 	'Use `swarm_memory_outcome` after evaluating recalled memory or a graph answer. When overturning a memory-backed claim, record `corrected` and include the correction text and relevant file/symbol anchors.';
 
+const GRAPH_FIRST_CRITIC_GUIDANCE = `## GRAPH-FIRST EVIDENCE
+Use \`repo_map action="graph_health"\` before graph-backed review and a targeted \`repo_map action="impact_cone"\` for changed or proposed shared symbols. Treat graph evidence as advisory, never as approval or denial. Require source anchors; if freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or an action fails, inspect the direct source and searches before deciding.`;
+
 import { READ_ONLY_LANE_GUIDANCE } from './read-only-lane-guidance';
 
 /**
@@ -780,9 +783,10 @@ export function createCriticAgent(
 							: role === 'architecture_supervisor'
 								? ARCHITECTURE_SUPERVISOR_PROMPT
 								: HALLUCINATION_VERIFIER_PROMPT;
+		const graphAwareRolePrompt = `${rolePrompt}\n\n${GRAPH_FIRST_CRITIC_GUIDANCE}`;
 		prompt = customAppendPrompt
-			? `${rolePrompt}\n\n${customAppendPrompt}`
-			: rolePrompt;
+			? `${graphAwareRolePrompt}\n\n${customAppendPrompt}`
+			: graphAwareRolePrompt;
 	}
 
 	const roleConfig = {

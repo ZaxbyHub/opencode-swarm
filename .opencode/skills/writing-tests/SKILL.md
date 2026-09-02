@@ -10,6 +10,10 @@ description: >
 
 # Writing Tests for opencode-swarm
 
+## Graph-first evidence contract
+
+Use `repo_map` `test_pack` to discover focused tests for the changed source, then read the selected source and tests directly. Graph evidence is advisory only. If freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or the action fails, use direct source and repository test conventions to select coverage.
+
 > **⚠️ Do NOT use the OpenCode `test_runner` tool to validate the full repo.** It is for targeted agent validation with explicit `files: [...]` or small targeted scopes. `scope: 'all'` is gated behind the `SWARM_ALLOW_FULL_SUITE=1` env var (intended for opt-in CI mirrors only; there is no `allow_full_suite` arg). Broad scopes can stall or kill OpenCode before the `MAX_SAFE_TEST_FILES = 50` guard in `src/tools/test-runner.ts` fires. For repo validation, use the shell commands in this file — per-file isolation loops match CI behavior. See [`AGENTS.md`](../../../AGENTS.md) invariant 6 for the full contract.
 
 ## ⛔ STOP — Read Before Running Any Tests

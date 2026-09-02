@@ -16,6 +16,8 @@ effort: medium
 
 ## When to load this skill
 
+Before changing shared/exported or runtime-contract code, use `repo_map` `impact_cone` to identify likely consumers, then verify them in direct source. Graph evidence is advisory only. If freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or the action fails, rely on direct source, searches, and executable evidence.
+
 Load this skill **before** beginning implementation work that touches any of:
 
 - `src/index.ts` (plugin entry / `initializeOpenCodeSwarm`)

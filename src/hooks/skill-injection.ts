@@ -52,6 +52,10 @@ export interface RecommendedSkill {
 export interface SkillInjectionOptions {
 	/** When true, suppresses console.warn output (does not affect event emission). */
 	quiet?: boolean;
+	/** Caller-loaded finite plan IDs for plan-aware attribution. */
+	knownPlanTaskIds?: ReadonlySet<string>;
+	/** The caller observed a valid plan whose task-ID cardinality exceeded the bound. */
+	planContextOverLimit?: boolean;
 }
 
 /** Result of an injection attempt. */
@@ -177,7 +181,11 @@ export function injectSkillsIntoDelegation(
 	// from the prompt; fall back to 'auto-injected' (NOT 'unknown') so the
 	// compliance resolver's `resolvedTaskID !== 'unknown'` guard continues to
 	// fire and populate fallback skill paths for reviewer verdicts.
-	const extractedTaskId = extractTaskIdFromPrompt(promptRaw);
+	const extractedTaskId = extractTaskIdFromPrompt(
+		promptRaw,
+		options.knownPlanTaskIds,
+		options.planContextOverLimit,
+	);
 	const taskID =
 		extractedTaskId !== 'unknown' ? extractedTaskId : 'auto-injected';
 
