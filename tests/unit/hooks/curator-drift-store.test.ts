@@ -7,6 +7,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -43,7 +44,7 @@ describe('writeDriftReport (swarm.db store, #2480)', () => {
 	let tmpDir: string;
 
 	beforeEach(async () => {
-		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'curator-drift-store-'));
+		tmpDir = canonicalMkdtemp('curator-drift-store-');
 	});
 
 	afterEach(async () => {

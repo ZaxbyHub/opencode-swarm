@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import {
 	existsSync,
 	mkdirSync,
@@ -41,7 +42,7 @@ function pendingVersions(): number[] {
 }
 
 beforeEach(() => {
-	dir = mkdtempSync(path.join(os.tmpdir(), 'insight-store-'));
+	dir = canonicalMkdtemp('insight-store-');
 	mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 	_resetInsightImportGuards();
 });

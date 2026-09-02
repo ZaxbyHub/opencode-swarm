@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -19,7 +20,7 @@ let dir: string;
 let db: ReturnType<typeof getProjectDb>;
 
 beforeEach(() => {
-	dir = mkdtempSync(path.join(os.tmpdir(), 'gcw-'));
+	dir = canonicalMkdtemp('gcw-');
 	mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 	db = getProjectDb(dir);
 	db.run(

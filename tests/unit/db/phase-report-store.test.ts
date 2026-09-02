@@ -4,6 +4,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import {
 	existsSync,
 	mkdirSync,
@@ -24,7 +25,7 @@ import { closeProjectDb } from '../../../src/db/project-db.js';
 let dir: string;
 
 beforeEach(() => {
-	dir = mkdtempSync(path.join(os.tmpdir(), 'phase-report-'));
+	dir = canonicalMkdtemp('phase-report-');
 	mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 	_resetPhaseReportImportGuards();
 });

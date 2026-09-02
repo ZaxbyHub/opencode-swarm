@@ -8,6 +8,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import { spawnSync } from 'node:child_process';
 import {
 	existsSync,
@@ -37,7 +38,7 @@ function freezeClockAndRestore(): void {
 
 describe('two-windows concurrency', () => {
 	test('two simultaneous opens converge on one canonical swarm.db', async () => {
-		const dir = mkdtempSync(path.join(os.tmpdir(), 'conc-open-'));
+		const dir = canonicalMkdtemp('conc-open-');
 		mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		try {
 			const [a, b] = await Promise.all([
@@ -61,7 +62,7 @@ describe('two-windows concurrency', () => {
 		'cross-process BEGIN IMMEDIATE writes serialize (busy_timeout budget)',
 		{ timeout: 30_000 },
 		async () => {
-			const dir = mkdtempSync(path.join(os.tmpdir(), 'conc-write-'));
+			const dir = canonicalMkdtemp('conc-write-');
 			mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 			const repoRoot = path.resolve(import.meta.dir, '..', '..', '..');
 			const projectDbUrl = pathToFileURL(
@@ -134,7 +135,7 @@ describe('insight stream cross-process lock overlap', () => {
 		'consume waits on busy_timeout behind a live foreign write transaction',
 		{ timeout: 30_000 },
 		async () => {
-			const dir = mkdtempSync(path.join(os.tmpdir(), 'conc-insight-'));
+			const dir = canonicalMkdtemp('conc-insight-');
 			mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 			const repoRoot = path.resolve(import.meta.dir, '..', '..', '..');
 			const projectDbUrl = pathToFileURL(

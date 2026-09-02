@@ -4,6 +4,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import {
 	existsSync,
 	mkdirSync,
@@ -23,7 +24,7 @@ let dir: string;
 const realRename = _internals.renameSync;
 
 beforeEach(() => {
-	dir = mkdtempSync(path.join(os.tmpdir(), 'legacy-import-'));
+	dir = canonicalMkdtemp('legacy-import-');
 	mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 });
 

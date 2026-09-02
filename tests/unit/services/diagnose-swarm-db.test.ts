@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -14,7 +15,7 @@ import { getDiagnoseData } from '../../../src/services/diagnose-service.js';
 let dir: string;
 
 beforeEach(() => {
-	dir = mkdtempSync(path.join(os.tmpdir(), 'diagnose-db-'));
+	dir = canonicalMkdtemp('diagnose-db-');
 });
 
 afterEach(() => {

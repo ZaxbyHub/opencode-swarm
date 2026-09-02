@@ -6,6 +6,7 @@
 
 import { Database } from 'bun:sqlite';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import { mkdtempSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -127,7 +128,7 @@ describe('qa-gate-profile public write paths escalate to FULL', () => {
 	let dir: string;
 
 	beforeEach(() => {
-		dir = mkdtempSync(path.join(os.tmpdir(), 'durability-wiring-'));
+		dir = canonicalMkdtemp('durability-wiring-');
 	});
 
 	afterEach(() => {

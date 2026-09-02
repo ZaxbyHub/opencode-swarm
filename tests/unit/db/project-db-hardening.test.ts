@@ -6,6 +6,7 @@
 
 import { Database } from 'bun:sqlite';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import {
 	existsSync,
 	mkdirSync,
@@ -29,7 +30,7 @@ import {
 let dir: string;
 
 beforeEach(() => {
-	dir = mkdtempSync(path.join(os.tmpdir(), 'projdb-hard-'));
+	dir = canonicalMkdtemp('projdb-hard-');
 	mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 });
 
@@ -70,7 +71,7 @@ describe('typed open failures', () => {
 	test('read-only project root yields a typed ProjectDbError', () => {
 		// Simulate an unwritable .swarm by making it a FILE (mkdir then EEXIST /
 		// ENOTDIR surfaces as mkdir_failed).
-		const roDir = mkdtempSync(path.join(os.tmpdir(), 'projdb-ro-'));
+		const roDir = canonicalMkdtemp('projdb-ro-');
 		mkdirSync(path.join(roDir, '.swarm'));
 		rmSync(path.join(roDir, '.swarm'), { recursive: true, force: true });
 		mkdirSync(path.join(roDir, '.swarm')); // placeholder replaced below
@@ -261,7 +262,7 @@ describe('close-path WAL checkpoint', () => {
 });
 
 test('projectDbExists does not create the DB', () => {
-	const fresh = mkdtempSync(path.join(os.tmpdir(), 'projdb-exists-'));
+	const fresh = canonicalMkdtemp('projdb-exists-');
 	expect(projectDbExists(fresh)).toBe(false);
 	expect(existsSync(path.join(fresh, '.swarm'))).toBe(false);
 	rmSync(fresh, { recursive: true, force: true });

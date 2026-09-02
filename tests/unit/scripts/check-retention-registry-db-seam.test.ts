@@ -7,6 +7,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -25,7 +26,7 @@ function srcModule(rel: string, source: string): void {
 }
 
 beforeEach(() => {
-	root = mkdtempSync(path.join(os.tmpdir(), 'retention-db-seam-'));
+	root = canonicalMkdtemp('retention-db-seam-');
 });
 
 afterEach(() => {

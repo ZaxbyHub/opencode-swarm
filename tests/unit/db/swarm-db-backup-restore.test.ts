@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -16,7 +17,7 @@ import { closeProjectDb, getProjectDb } from '../../../src/db/project-db.js';
 let dir: string;
 
 beforeEach(() => {
-	dir = mkdtempSync(path.join(os.tmpdir(), 'backup-restore-'));
+	dir = canonicalMkdtemp('backup-restore-');
 	mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 });
 

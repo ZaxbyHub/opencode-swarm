@@ -8,6 +8,7 @@
 
 import { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
+import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import * as os from 'node:os';
@@ -40,7 +41,7 @@ describe('runDriverParityContract', () => {
 			// the merge-queue smoke job (repro-1873). This skip is expected here.
 			return;
 		}
-		const tmp = mkdtempSync(path.join(os.tmpdir(), 'parity-node-'));
+		const tmp = canonicalMkdtemp('parity-node-');
 		try {
 			const db = loadDatabaseCtor()(path.join(tmp, 'parity.db'));
 			expect(() =>

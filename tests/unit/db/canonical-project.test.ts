@@ -6,7 +6,8 @@
  */
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { canonicalMkdtemp } from '../../../helpers/tmpdir';
+import {mkdirSync, mkdtempSync, rmSync, symlinkSync, realpathSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
@@ -18,7 +19,7 @@ import { withFrozenClock } from '../../helpers/test-clock';
 const IS_WIN = process.platform === 'win32';
 
 function tmp(name: string): string {
-	return mkdtempSync(path.join(os.tmpdir(), `canonical-${name}-`));
+	return mkdtempSync(realpathSync(path.join(os.tmpdir(), `canonical-${name}-`)));
 }
 
 describe('canonicalProjectKey', () => {
@@ -51,7 +52,7 @@ describe('canonicalProjectKey', () => {
 	test('a symlink to the same directory maps to one key', () => {
 		withFrozenClock(() => {});
 		const dir = tmp('link');
-		const linkPath = path.join(os.tmpdir(), `canonical-link-${Date.now()}`);
+		const linkPath = realpathSync(path.join(os.tmpdir(), `canonical-link-${Date.now()}`));
 		let linked = false;
 		try {
 			try {
@@ -100,7 +101,7 @@ describe('canonicalProjectKey', () => {
 
 	test('a nonexistent path still yields a stable lexical key', () => {
 		withFrozenClock(() => {});
-		const ghost = path.join(os.tmpdir(), `canonical-ghost-${Date.now()}`);
+		const ghost = realpathSync(path.join(os.tmpdir(), `canonical-ghost-${Date.now()}`));
 		const key = canonicalProjectKey(ghost);
 		expect(key.length).toBeGreaterThan(0);
 		expect(canonicalProjectKey(ghost)).toBe(key);
