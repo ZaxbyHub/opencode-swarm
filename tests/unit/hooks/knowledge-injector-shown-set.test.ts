@@ -22,6 +22,7 @@ import {
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { KnowledgeConfigSchema } from '../../../src/config/schema';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import {
 	_internals,
 	createKnowledgeInjectorHook,
@@ -88,7 +89,8 @@ afterEach(() => {
 	_internals.confirmEntriesPhase = originalConfirmEntriesPhase;
 	swarmState.currentCriticalShownIds.clear();
 	swarmState.activeAgent.delete(SESSION);
-	rmSync(tempDir, { recursive: true, force: true });
+	closeProjectDb(tempDir);
+	rmSync(tempDir, { recursive: true, force: true }); // #2480
 });
 
 function architectOutput(userText = 'please continue'): {

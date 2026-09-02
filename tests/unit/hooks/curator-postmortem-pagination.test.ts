@@ -17,6 +17,7 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import {
 	_internals as postmortemInternals,
 	runCuratorPostMortem,
@@ -122,7 +123,8 @@ describe('FR-011 — post-mortem knowledge data pagination caps', () => {
 			const report = readFileSync(reportPath, 'utf-8');
 			expect(report).toContain('Total entries: 500');
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			closeProjectDb(dir);
+			rmSync(dir, { recursive: true, force: true }); // #2480
 		}
 	});
 
@@ -148,7 +150,8 @@ describe('FR-011 — post-mortem knowledge data pagination caps', () => {
 			const report = readFileSync(reportPath, 'utf-8');
 			expect(report).toContain('Total entries: 40');
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			closeProjectDb(dir);
+			rmSync(dir, { recursive: true, force: true }); // #2480
 		}
 	});
 
@@ -169,7 +172,8 @@ describe('FR-011 — post-mortem knowledge data pagination caps', () => {
 			expect(summary.length).toBeLessThanOrEqual(500);
 			expect(summary.length).toBe(500); // exactly 500, not 510
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			closeProjectDb(dir);
+			rmSync(dir, { recursive: true, force: true }); // #2480
 		}
 	});
 
@@ -189,7 +193,8 @@ describe('FR-011 — post-mortem knowledge data pagination caps', () => {
 			const result = await readKnowledge(knowledgePath, 500);
 			expect(result.length).toBe(500);
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			closeProjectDb(dir);
+			rmSync(dir, { recursive: true, force: true }); // #2480
 		}
 	});
 
@@ -216,7 +221,8 @@ describe('FR-011 — post-mortem knowledge data pagination caps', () => {
 			const report = readFileSync(reportPath, 'utf-8');
 			expect(report).toContain('Total entries: 500');
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			closeProjectDb(dir);
+			rmSync(dir, { recursive: true, force: true }); // #2480
 		}
 	});
 
@@ -244,7 +250,8 @@ describe('FR-011 — post-mortem knowledge data pagination caps', () => {
 			const report = readFileSync(reportPath, 'utf-8');
 			expect(report).toContain('Pending proposals: 50');
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			closeProjectDb(dir);
+			rmSync(dir, { recursive: true, force: true }); // #2480
 		}
 	});
 });
