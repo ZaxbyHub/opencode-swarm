@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { KnowledgeConfigSchema } from '../../../src/config/schema';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import type { KnowledgeEventInput } from '../../../src/hooks/knowledge-events';
 import {
 	_internals,
@@ -86,7 +87,8 @@ afterEach(() => {
 	swarmState.currentCriticalShownIds.clear();
 	swarmState.activeAgent.delete(SESSION);
 	swarmState.agentSessions.delete(SESSION);
-	rmSync(tempDir, { recursive: true, force: true });
+	closeProjectDb(tempDir);
+	rmSync(tempDir, { recursive: true, force: true }); // #2480
 });
 
 describe('knowledge injector retrieved events', () => {
