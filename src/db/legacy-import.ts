@@ -156,7 +156,12 @@ export function importLegacyJsonl(
 			return { imported, skipped, archived: false };
 		}
 	}
-	_internals.warnStaleLegacyOnce(root, opts.fileName);
+	// Warn only when the file held VALID content that was not imported (the
+	// table was non-empty — a stale leftover). A file of only blank/corrupt
+	// lines imported nothing legitimately; it is inert, not stale.
+	if (payloads.length > 0) {
+		_internals.warnStaleLegacyOnce(root, opts.fileName);
+	}
 	return { imported: 0, skipped, archived: false };
 }
 

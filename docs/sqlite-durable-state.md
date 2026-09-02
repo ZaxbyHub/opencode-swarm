@@ -41,7 +41,8 @@ one `ctx.directory`, tests close via `closeProjectDb`/`closeAllProjectDbs`, and
   fast close only — SQLite's last-connection close checkpoints the WAL
   implicitly; exit handlers must stay synchronous and fast.
 - `/swarm close` closes per-root handles before unlinking (Windows EBUSY
-  guard, unchanged).
+  guard; since #2480 it also closes the group-commit writer first — see
+  §Group-commit writer).
 
 ## Support floors and driver parity
 
@@ -178,6 +179,20 @@ legacy awaited file appends; concurrent callers' ops coalesce into one
 transaction. Backpressure: the queue is bounded (1024); overflow forces a
 synchronous flush rather than dropping writes. Nothing here runs at plugin
 init.
+
+**Self-healing against a closed handle.** A close site that evicts the DB
+handle without closing the writer (the pre-#2480-fix `/swarm close` shape)
+would leave the writer flushing against a dead handle. Every production
+close site now closes the writer BEFORE the handle (`/swarm close`, plugin
+`dispose`, process exit), and as defense-in-depth `flushSync` detects a
+closed-handle failure on EITHER driver (bun:sqlite "database has closed";
+node:sqlite `ERR_INVALID_STATE` "database is not open"), rebinds to a fresh
+handle via `_internals.getProjectDb(registryKey)`, and retries the SAME
+batch exactly once — so post-close writes complete transparently. Only if
+the retry also fails closed does the writer close itself and evict from the
+registry (the next store call then gets a fresh writer); FOREIGN errors
+(e.g. a corrupt reopen) never evict. Pinned by sabotage-verified tests and
+by the real-node:sqlite leg of the merge-queue smoke repro.
 
 ## Migration roadmap boundaries (what is NOT in D1)
 

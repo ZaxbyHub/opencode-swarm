@@ -14,11 +14,13 @@
  * (skip-corrupt on read, mirroring the legacy readers).
  */
 
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { canonicalProjectKey } from './canonical-project.js';
 import { DURABILITY_CLASSES } from './durability.js';
 import { getGroupCommitWriter } from './group-commit-writer.js';
 import { importLegacyJsonFiles } from './legacy-import.js';
-import { getProjectDb } from './project-db.js';
+import { getProjectDb, projectDbExists } from './project-db.js';
 
 export type PhaseReportKind = 'curator_drift' | 'design_doc_drift';
 
@@ -31,6 +33,37 @@ export const PHASE_REPORT_LEGACY_PREFIXES: Readonly<
 };
 
 const importedRoots = new Set<string>();
+
+/**
+ * #2480 never-opens-for-create guard for read-shaped entry points (mirrors
+ * hasAnyInsightState): a project with neither a swarm.db NOR a legacy report
+ * file has nothing to read, and reading it must not materialize a DB. When a
+ * legacy file IS present the read proceeds (the lazy import then creates the
+ * DB — the sanctioned migration path).
+ */
+function hasAnyPhaseReportState(directory: string): boolean {
+	if (projectDbExists(directory)) return true;
+	const root = canonicalProjectKey(directory);
+	let entries: string[];
+	try {
+		entries = readdirSync(join(root, '.swarm'));
+	} catch {
+		return false; // no .swarm dir — nothing to read
+	}
+	for (const prefix of Object.values(PHASE_REPORT_LEGACY_PREFIXES)) {
+		if (
+			entries.some(
+				(name) =>
+					name.startsWith(prefix) &&
+					name.endsWith('.json') &&
+					!name.includes('.imported'),
+			)
+		) {
+			return true;
+		}
+	}
+	return false;
+}
 
 interface PhaseReportRow {
 	phase: number;
@@ -119,6 +152,7 @@ export function readPhaseReportsDb(
 	directory: string,
 	kind: PhaseReportKind,
 ): Array<{ phase: number; payload: string }> {
+	if (!hasAnyPhaseReportState(directory)) return [];
 	ensurePhaseReportsImported(directory);
 	const db = getProjectDb(directory);
 	return db
