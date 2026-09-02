@@ -4,8 +4,6 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import {
 	collectDelegateAcks,
 	collectDelegateAcksAfter,
@@ -19,6 +17,7 @@ import {
 import { buildDelegateDirectiveBlock } from '../../../src/hooks/knowledge-injector.js';
 import type { RankedEntry } from '../../../src/hooks/knowledge-reader.js';
 import type { KnowledgeConfig } from '../../../src/hooks/knowledge-types.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const ID_CRITICAL = '33333333-3333-4333-8333-333333333333';
 
@@ -115,7 +114,7 @@ describe('delegate-ack-collector timeout and early-return paths', () => {
 	let dir: string;
 
 	beforeEach(() => {
-		dir = fs.mkdtempSync(path.join(os.tmpdir(), 'delegate-ack-collector-'));
+		dir = canonicalMkdtemp('delegate-ack-collector-');
 	});
 
 	afterEach(() => {
