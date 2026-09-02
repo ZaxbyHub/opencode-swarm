@@ -345,14 +345,14 @@
  *         cached.
  *   - RULE T itself only resolves a write callback passed as an IDENTIFIER
  *     (`writeCuratorSummaryState`, `_internals.writeCuratorSummaryState`). A
- *     callback written as an inline arrow is skipped. Audited 2026-08-10: of
- *     the seven `transactFile` matches in src/, one is the function definition
- *     itself, one (`src/hooks/curator.ts:877`) passes an identifier and is
- *     covered, and the remaining five pass inline arrows — but every one of
- *     those five targets a file that is NOT in the cached set, so nothing is
- *     currently hidden:
- *       `src/hooks/knowledge-curator.ts:933`, `src/hooks/micro-reflector.ts:307`
- *          -> insight-candidates.jsonl (resolveInsightCandidatesPath)
+ *     callback written as an inline arrow is skipped. Audited 2026-09-02
+ *     (#2480 re-audit): the insight-candidates.jsonl transactFile writers in
+ *     knowledge-curator/micro-reflector were REMOVED (the durable queue is
+ *     now the swarm.db insight_candidate stream); of the remaining matches,
+ *     one is the function definition itself, one (`src/hooks/curator.ts:877`)
+ *     passes an identifier and is covered, and the remaining three pass
+ *     inline arrows — every one targets a file that is NOT in the cached set,
+ *     so nothing is currently hidden:
  *       `src/hooks/knowledge-reader.ts:295`   -> .knowledge-shown.json
  *       `src/hooks/knowledge-store.ts:644`    -> knowledge*.jsonl via
  *          transactKnowledge; its callback also routes through atomicWriteFile
@@ -3194,27 +3194,6 @@ export const EVIDENCE_WRITE_BLIND_SPOTS: readonly EvidenceWriteBlindSpot[] = [
 			'-> .swarm/background-delegation-fallback/<digest>.json. The file is a ' +
 			'candidate only because it imports ../evidence/lock.js, which the ' +
 			'deliberately generous mentionsEvidencePath() filter also matches.',
-	},
-	{
-		file: 'src/hooks/knowledge-curator.ts',
-		rule: 'W',
-		target: 'p',
-		status: 'not-an-evidence-artifact',
-		reason:
-			'`p` is the path parameter of an INLINE transactFile write callback over ' +
-			'resolveInsightCandidatesPath(directory) -> insight-candidates.jsonl, ' +
-			'which is not a cached artifact. This is the RULE T inline-arrow ' +
-			'limitation, audited in the KNOWN LIMITATIONS section above.',
-	},
-	{
-		file: 'src/hooks/micro-reflector.ts',
-		rule: 'W',
-		target: 'p',
-		status: 'not-an-evidence-artifact',
-		reason:
-			'Identical shape to the knowledge-curator entry: the inline transactFile ' +
-			'write callback for insight-candidates.jsonl, which is not a cached ' +
-			'artifact.',
 	},
 	{
 		file: 'src/test-impact/history-store.ts',
