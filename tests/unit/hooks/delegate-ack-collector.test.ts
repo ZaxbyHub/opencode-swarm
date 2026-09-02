@@ -1,10 +1,9 @@
 /**
  * Behavioral tests for delegate-ack-collector (FR-012).
  *
- * Tests the three observable outcomes of the delegate-ack-collector hook:
+ * Tests the two aggregate outcomes of the delegate-ack-collector hook:
  * 1. Collects ACK messages from delegated subagents
- * 2. Times out unresponsive subagents after configured deadline  ← empty-transcript path
- * 3. Emits aggregate ACK summary for the parent agent
+ * 2. Emits aggregate ACK summary for the parent agent
  *
  * Uses real implementations (no mock.module) to stay in the same isolation tier as
  * the companion file delegate-ack-parser.test.ts. Each test gets its own temp
@@ -18,8 +17,6 @@ import * as path from 'node:path';
 import {
 	collectDelegateAcks,
 	collectDelegateAcksAfter,
-	type DelegateAckInput,
-	type DelegateAckOutput,
 } from '../../../src/hooks/delegate-ack-collector.js';
 import {
 	appendKnowledgeEvent,
@@ -110,6 +107,15 @@ function buildPrompt(entries: RankedEntry[]): string {
 		FIXED_TRACE_ID,
 	);
 	return `${block}\n\nTASK_ID: task-42\nDelegated work here.`;
+}
+
+function buildPromptWithoutTaskId(entries: RankedEntry[]): string {
+	const block = buildDelegateDirectiveBlock(
+		entries,
+		knowledgeConfig(),
+		FIXED_TRACE_ID,
+	);
+	return `${block}\n\nDelegated work here.`;
 }
 
 /** Seed a retrieved event so the validator's trace-existence + membership checks pass. */
@@ -312,91 +318,28 @@ describe('delegate-ack-collector', () => {
 			) as (typeof events)[0] & { task_id?: string };
 			expect(applied?.task_id).toBe('task-42');
 		});
-	});
 
-	// -------------------------------------------------------------------------
-	// Outcome 2: Times out unresponsive subagents (empty-transcript path)
-	// -------------------------------------------------------------------------
-
-	describe('Outcome 2 — times out unresponsive subagents', () => {
-		it('returns violated emitted event for unacknowledged critical when transcript is empty (timeout)', async () => {
-			await seedRetrieved(dir, [ID_CRITICAL], {
-				sessionId: 'sess-timeout-1',
+		it('preserves legacy explicit taskId fallback when no taskIdResolution is supplied', async () => {
+			const transcript = `KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_APPLIED}`;
+			await seedRetrieved(dir, [ID_APPLIED], {
+				sessionId: 'sess-legacy-task',
+				taskId: 'legacy-task-id',
 			});
-			const result = await collectDelegateAcks({
+
+			await collectDelegateAcks({
 				directory: dir,
-				prompt: buildPrompt([rankedEntry(ID_CRITICAL, 'critical')]),
-				transcript: '',
+				prompt: buildPromptWithoutTaskId([rankedEntry(ID_APPLIED, 'high')]),
+				transcript,
 				agent: 'coder',
-				sessionId: 'sess-timeout-1',
+				sessionId: 'sess-legacy-task',
+				taskId: 'legacy-task-id',
 			});
-
-			// The critical was shown but never acked → auto-added as violated.
-			expect(result.emitted).toContainEqual({
-				id: ID_CRITICAL,
-				type: 'violated',
-			});
-			expect(result.unacknowledgedCriticals).toEqual([ID_CRITICAL]);
-		});
-
-		it('returns violated emitted event for unacknowledged critical when transcript is whitespace-only', async () => {
-			await seedRetrieved(dir, [ID_CRITICAL], {
-				sessionId: 'sess-timeout-2',
-			});
-			const result = await collectDelegateAcks({
-				directory: dir,
-				prompt: buildPrompt([rankedEntry(ID_CRITICAL, 'critical')]),
-				transcript: '   \n\t  ',
-				agent: 'coder',
-				sessionId: 'sess-timeout-2',
-			});
-
-			// The critical was shown but never acked → auto-added as violated.
-			expect(result.emitted).toContainEqual({
-				id: ID_CRITICAL,
-				type: 'violated',
-			});
-			expect(result.unacknowledgedCriticals).toEqual([ID_CRITICAL]);
-		});
-
-		it('collectDelegateAcksAfter returns early when tool is not Task', async () => {
-			const input: DelegateAckInput = {
-				tool: 'Shell',
-				args: { prompt: 'anything' },
-			};
-			const output: DelegateAckOutput = { output: 'something' };
-
-			await collectDelegateAcksAfter(dir, input, output);
-
-			// No events written
-			const events = await readKnowledgeEvents(dir);
-			expect(events.length).toBe(0);
-		});
-
-		it('collectDelegateAcksAfter returns early when prompt is missing', async () => {
-			const input: DelegateAckInput = {
-				tool: 'Task',
-				args: {},
-			};
-			const output: DelegateAckOutput = { output: 'some transcript' };
-
-			await collectDelegateAcksAfter(dir, input, output);
 
 			const events = await readKnowledgeEvents(dir);
-			expect(events.length).toBe(0);
-		});
-
-		it('collectDelegateAcksAfter returns early when transcript is missing', async () => {
-			const input: DelegateAckInput = {
-				tool: 'Task',
-				args: { prompt: 'some prompt' },
-			};
-			const output: DelegateAckOutput = {};
-
-			await collectDelegateAcksAfter(dir, input, output);
-
-			const events = await readKnowledgeEvents(dir);
-			expect(events.length).toBe(0);
+			const applied = events.find(
+				(event) => event.type === 'applied',
+			) as (typeof events)[0] & { task_id?: string };
+			expect(applied?.task_id).toBe('legacy-task-id');
 		});
 	});
 

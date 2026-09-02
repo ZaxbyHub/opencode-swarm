@@ -1235,15 +1235,34 @@ export async function skillPropagationTransformScan(
 	let dedupKeys = new Set<string>();
 	let existingEntries: ReturnType<typeof _internals.readSkillUsageEntriesTail> =
 		[];
+	const buildDedupKey = ({
+		skillPath,
+		agentName,
+		taskID,
+		complianceVerdict,
+		reviewerNotes,
+	}: {
+		skillPath: string;
+		agentName: string;
+		taskID: string;
+		complianceVerdict?: string;
+		reviewerNotes?: string;
+	}): string =>
+		taskID === 'unknown'
+			? [
+					skillPath,
+					agentName,
+					taskID,
+					complianceVerdict ?? '',
+					reviewerNotes ?? '',
+				].join('|')
+			: [skillPath, agentName, taskID].join('|');
 	try {
 		existingEntries = _internals.readSkillUsageEntriesTail(directory, {
 			sessionID,
 		});
 		dedupKeys = new Set<string>(
-			existingEntries.map((e, i) => {
-				const taskKey = e.taskID === 'unknown' ? `unknown-${i}` : e.taskID;
-				return `${e.skillPath}|${e.agentName}|${taskKey}`;
-			}),
+			existingEntries.map((entry) => buildDedupKey(entry)),
 		);
 	} catch (err) {
 		warn(
@@ -1260,8 +1279,16 @@ export async function skillPropagationTransformScan(
 		skillPath: string,
 		agentName: string,
 		taskID: string,
+		complianceVerdict?: string,
+		reviewerNotes?: string,
 	): boolean {
-		const key = `${skillPath}|${agentName}|${taskID}`;
+		const key = buildDedupKey({
+			skillPath,
+			agentName,
+			taskID,
+			complianceVerdict,
+			reviewerNotes,
+		});
 		if (dedupKeys.has(key)) return true;
 		dedupKeys.add(key);
 		return false;
@@ -1294,30 +1321,11 @@ export async function skillPropagationTransformScan(
 			}
 		}
 
-		// A fallback is safe only when this session has exactly one distinct
-		// eligible delegation task. Parallel/interleaved tasks therefore remain
-		// unattributed unless the reviewer names the task explicitly.
-		const fallbackTaskIds = new Set(
-			existingEntries
-				.filter(
-					(entry) =>
-						entry.agentName !== 'reviewer' &&
-						entry.skillPath !== '__overall__' &&
-						entry.taskID !== 'unknown',
-				)
-				.map((entry) => entry.taskID),
-		);
-		const uniqueFallbackTaskId =
-			fallbackTaskIds.size === 1
-				? fallbackTaskIds.values().next().value
-				: undefined;
 		const taskResolution = resolveTaskId(
 			{ prompt: text },
 			{
 				policy: 'attribution',
 				...planTaskIdOptions,
-				fallback: uniqueFallbackTaskId,
-				fallbackProvenUnique: uniqueFallbackTaskId !== undefined,
 			},
 		);
 		const resolvedTaskID =
@@ -1367,7 +1375,17 @@ export async function skillPropagationTransformScan(
 			// failed, instead of the old `break`'s single silent-batch-loss.
 			let recordingFailureCount = 0;
 			for (const skillPath of paths) {
-				if (isDuplicate(skillPath, 'reviewer', resolvedTaskID)) continue;
+				if (
+					isDuplicate(
+						skillPath,
+						'reviewer',
+						resolvedTaskID,
+						verdict,
+						notes || undefined,
+					)
+				) {
+					continue;
+				}
 				try {
 					_internals.appendSkillUsageEntry(directory, {
 						skillPath,

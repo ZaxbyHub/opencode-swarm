@@ -138,7 +138,14 @@ export async function resolveReviewerScopeTaskId(
 			policy: 'plan',
 			...toTaskIdPlanContextOptions(planTaskIdContext),
 		});
-		return resolution.status === 'resolved' ? resolution.taskId : null;
+		if (resolution.status !== 'resolved') return null;
+		if (planTaskIdContext.status === 'over_limit') {
+			const isKnown = plan.phases.some((phase) =>
+				phase?.tasks?.some((task) => task?.id === resolution.taskId),
+			);
+			if (!isKnown) return null;
+		}
+		return resolution.taskId;
 	} catch {
 		return null;
 	}

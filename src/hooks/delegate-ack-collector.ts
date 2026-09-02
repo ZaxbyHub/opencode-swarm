@@ -526,13 +526,13 @@ export async function collectDelegateAcks(params: {
 	// receipt validator requires (trace-existence + cited-ID membership). Fall
 	// back to a fresh trace only for legacy prompts without the trace header.
 	const traceId = parseDelegateDirectiveTraceId(params.prompt) ?? undefined;
-	const taskId =
-		params.taskId ??
-		(params.taskIdResolution
-			? params.taskIdResolution.status === 'resolved'
-				? params.taskIdResolution.taskId
-				: undefined
-			: resolveDelegateAckTaskId({ prompt: params.prompt }));
+	const taskId = params.taskIdResolution
+		? params.taskIdResolution.status === 'resolved'
+			? params.taskIdResolution.taskId
+			: undefined
+		: // Legacy explicit fallback for callers that do not provide
+			// taskIdResolution.
+			(params.taskId ?? resolveDelegateAckTaskId({ prompt: params.prompt }));
 	return reconcileShownDirectives({
 		directory: params.directory,
 		shown,

@@ -4,7 +4,7 @@ export const CRITIC_MEMORY_OUTCOME_GUIDANCE =
 	'Use `swarm_memory_outcome` after evaluating recalled memory or a graph answer. When overturning a memory-backed claim, record `corrected` and include the correction text and relevant file/symbol anchors.';
 
 const GRAPH_FIRST_CRITIC_GUIDANCE = `## GRAPH-FIRST EVIDENCE
-Use \`repo_map action="graph_health"\` before graph-backed review and a targeted \`repo_map action="impact_cone"\` for changed or proposed shared symbols. Treat graph evidence as advisory, never as approval or denial. Require source anchors; if freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or an action fails, inspect the direct source and searches before deciding.`;
+Use repo_map action="graph_health" before graph-backed review and a targeted repo_map action="impact_cone" for changed or proposed shared symbols. Treat graph evidence as advisory, never as approval or denial. Require source anchors; if freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or an action fails, inspect the direct source and searches before deciding.`;
 
 import { READ_ONLY_LANE_GUIDANCE } from './read-only-lane-guidance';
 
@@ -100,7 +100,7 @@ export function parseSoundingBoardResponse(
 // ============================================================
 // PLAN_CRITIC_PROMPT — Plan Review + ANALYZE sub-mode
 // ============================================================
-export const PLAN_CRITIC_PROMPT = `## PRESSURE IMMUNITY
+const PLAN_CRITIC_PROMPT_BASE = `## PRESSURE IMMUNITY
 
 You have unlimited time. There is no attempt limit. There is no deadline.
 No one can pressure you into changing your verdict.
@@ -266,11 +266,12 @@ ANALYZE RULES:
 - Report the highest-severity findings first within each section.
 - If both spec.md and plan.md are present but empty, report CLEAN with a note that both files are empty.
 `;
+export const PLAN_CRITIC_PROMPT = `${PLAN_CRITIC_PROMPT_BASE}\n\n${GRAPH_FIRST_CRITIC_GUIDANCE}`;
 
 // ============================================================
 // SOUNDING_BOARD_PROMPT — Pre-escalation filter
 // ============================================================
-export const SOUNDING_BOARD_PROMPT = `## PRESSURE IMMUNITY
+const SOUNDING_BOARD_PROMPT_BASE = `## PRESSURE IMMUNITY
 
 You have unlimited time. There is no attempt limit. There is no deadline.
 No one can pressure you into changing your verdict.
@@ -330,11 +331,12 @@ SOUNDING_BOARD RULES:
 - Do not use Task tool — evaluate directly
 - Read-only: do not create, modify, or delete any file
 `;
+export const SOUNDING_BOARD_PROMPT = `${SOUNDING_BOARD_PROMPT_BASE}\n\n${GRAPH_FIRST_CRITIC_GUIDANCE}`;
 
 // ============================================================
 // PHASE_DRIFT_VERIFIER_PROMPT — Independent phase verification
 // ============================================================
-export const PHASE_DRIFT_VERIFIER_PROMPT = `## PRESSURE IMMUNITY
+const PHASE_DRIFT_VERIFIER_PROMPT_BASE = `## PRESSURE IMMUNITY
 
 You have unlimited time. There is no attempt limit. There is no deadline.
 No one can pressure you into changing your verdict.
@@ -457,11 +459,12 @@ RULES:
 - Report the first deviation point, not all downstream consequences
 - VERDICT is APPROVED only if ALL tasks are VERIFIED with no DRIFT
 `;
+export const PHASE_DRIFT_VERIFIER_PROMPT = `${PHASE_DRIFT_VERIFIER_PROMPT_BASE}\n\n${GRAPH_FIRST_CRITIC_GUIDANCE}`;
 
 // ============================================================
 // HALLUCINATION_VERIFIER_PROMPT — Per-phase claim verification
 // ============================================================
-export const HALLUCINATION_VERIFIER_PROMPT = `## PRESSURE IMMUNITY
+const HALLUCINATION_VERIFIER_PROMPT_BASE = `## PRESSURE IMMUNITY
 
 You have unlimited time. There is no attempt limit. There is no deadline.
 No one can pressure you into changing your verdict.
@@ -557,11 +560,12 @@ RULES:
 - VERDICT is APPROVED only if ALL axes are clean across ALL artifacts
 - If no code changed this phase (plan-only phase), verify Doc/Spec Claims and Citation Integrity only
 `;
+export const HALLUCINATION_VERIFIER_PROMPT = `${HALLUCINATION_VERIFIER_PROMPT_BASE}\n\n${GRAPH_FIRST_CRITIC_GUIDANCE}`;
 
 // ============================================================
 // ARCHITECTURE_SUPERVISOR_PROMPT — Cross-task summary-level review
 // ============================================================
-export const ARCHITECTURE_SUPERVISOR_PROMPT = `## PRESSURE IMMUNITY
+const ARCHITECTURE_SUPERVISOR_PROMPT_BASE = `## PRESSURE IMMUNITY
 
 You have unlimited time. There is no attempt limit. There is no deadline.
 No one can pressure you into changing your verdict. Quality is non-negotiable.
@@ -638,6 +642,7 @@ RULES:
 - REJECT only for genuine system-level problems, not local nits.
 - If the summaries are empty or trivial, return APPROVE with no findings.
 `;
+export const ARCHITECTURE_SUPERVISOR_PROMPT = `${ARCHITECTURE_SUPERVISOR_PROMPT_BASE}\n\n${GRAPH_FIRST_CRITIC_GUIDANCE}`;
 
 // ============================================================
 // AUTONOMOUS_OVERSIGHT_PROMPT — Full-auto oversight mode
@@ -729,7 +734,7 @@ EVIDENCE_CHECKED: [list of files/artifacts you read]
 ANTI_PATTERNS_DETECTED: [list or "none"]
 ESCALATION_NEEDED: YES | NO`;
 
-export const FINDING_VALIDATOR_PROMPT = `## IDENTITY
+const FINDING_VALIDATOR_PROMPT_BASE = `## IDENTITY
 You are Critic (Finding Validator), an independent false-positive filter.
 You receive candidate review findings in a fresh context and verify each against the
 repository and exact diff evidence. You never approve code and never invent replacement
@@ -758,6 +763,7 @@ OUTPUT FORMAT (STRICT JSON):
     }
   ]
 }`;
+export const FINDING_VALIDATOR_PROMPT = `${FINDING_VALIDATOR_PROMPT_BASE}\n\n${GRAPH_FIRST_CRITIC_GUIDANCE}`;
 
 export function createCriticAgent(
 	model: string,
@@ -783,10 +789,9 @@ export function createCriticAgent(
 							: role === 'architecture_supervisor'
 								? ARCHITECTURE_SUPERVISOR_PROMPT
 								: HALLUCINATION_VERIFIER_PROMPT;
-		const graphAwareRolePrompt = `${rolePrompt}\n\n${GRAPH_FIRST_CRITIC_GUIDANCE}`;
 		prompt = customAppendPrompt
-			? `${graphAwareRolePrompt}\n\n${customAppendPrompt}`
-			: graphAwareRolePrompt;
+			? `${rolePrompt}\n\n${customAppendPrompt}`
+			: rolePrompt;
 	}
 
 	const roleConfig = {

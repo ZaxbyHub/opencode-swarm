@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { collectPlanTaskIdContextFromPhases } from '../../../src/hooks/plan-task-id-context.js';
 import { resolveReviewerScopeTaskId } from '../../../src/hooks/review-receipt-scope.js';
 import { skillPropagationTransformScan } from '../../../src/hooks/skill-propagation-gate.js';
 import {
 	appendSkillUsageEntry,
 	readSkillUsageEntries,
 } from '../../../src/hooks/skill-usage-log.js';
+import { TASK_ID_RESOLUTION_LIMITS } from '../../../src/hooks/task-id-resolver.js';
 import { withFrozenClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
@@ -124,7 +126,10 @@ describe('production task-ID consumers fail closed', () => {
 		const directory = makeDirectory('reviewer-oversized-plan-');
 		writePlan(
 			directory,
-			Array.from({ length: 1025 }, (_, index) => `1.${index + 1}`),
+			Array.from(
+				{ length: TASK_ID_RESOLUTION_LIMITS.maxKnownIds + 1 },
+				(_, index) => `1.${index + 1}`,
+			),
 		);
 
 		recordUniqueFallback(directory, 'numeric-over-limit', '1.1');
@@ -145,5 +150,45 @@ describe('production task-ID consumers fail closed', () => {
 		);
 		expect(namedEntries).toHaveLength(1);
 		expect(namedEntries[0].taskID).toBe('legacy-task');
+	});
+
+	test('an oversized plan still accepts a known explicit numeric reviewer task', async () => {
+		const directory = makeDirectory('reviewer-oversized-explicit-');
+		writePlan(
+			directory,
+			Array.from(
+				{ length: TASK_ID_RESOLUTION_LIMITS.maxKnownIds + 1 },
+				(_, index) => `1.${index + 1}`,
+			),
+		);
+
+		expect(
+			await resolveReviewerScopeTaskId(directory, { task_id: '1.1025' }),
+		).toBe('1.1025');
+		expect(
+			await resolveReviewerScopeTaskId(directory, { task_id: '9.9' }),
+		).toBeNull();
+	});
+
+	test('sparse phases ignore missing task arrays and malformed task slots', () => {
+		expect(
+			collectPlanTaskIdContextFromPhases([
+				null,
+				undefined,
+				{ tasks: null },
+				{
+					tasks: [
+						null,
+						undefined,
+						{} as { id?: string },
+						{ id: '1.1' },
+						{ id: '1.2' },
+					],
+				},
+			]),
+		).toEqual({
+			status: 'available',
+			taskIds: new Set(['1.1', '1.2']),
+		});
 	});
 });

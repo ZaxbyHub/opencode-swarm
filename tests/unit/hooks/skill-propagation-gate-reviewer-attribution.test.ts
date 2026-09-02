@@ -74,7 +74,17 @@ function writePlan(directory: string, taskIds: string[]): void {
 
 function seedSkillFiles(directory: string, skillPaths: string[]): void {
 	for (const skillPath of skillPaths) {
-		const absolutePath = path.join(directory, skillPath.replace('file:', ''));
+		const relativePath = skillPath.replace('file:', '');
+		const absolutePath = path.resolve(directory, relativePath);
+		const relativeToDirectory = path.relative(directory, absolutePath);
+		if (
+			relativeToDirectory.startsWith('..') ||
+			path.isAbsolute(relativeToDirectory)
+		) {
+			throw new Error(
+				`Skill fixture path must stay within the test directory: ${skillPath}`,
+			);
+		}
 		fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
 		fs.writeFileSync(absolutePath, '# Skill\n');
 	}
@@ -178,5 +188,29 @@ describe('reviewer task attribution', () => {
 		expect(entries).toHaveLength(1);
 		expect(entries[0].taskID).toBe('unknown');
 		expect(entries[0].skillPath).toBe('__overall__');
+	});
+
+	test('history alone does not infer reviewer task identity', async () => {
+		const directory = makeDirectory('reviewer-history-alone-');
+		const sessionID = 'reviewer-history-alone';
+		const skillPath = 'file:.claude/skills/writing-tests/SKILL.md';
+		seedSkillFiles(directory, [skillPath]);
+		seedDelegation(directory, sessionID, skillPath, 'task-1.1');
+
+		const entries = await scanReviewer(
+			directory,
+			sessionID,
+			'SKILL_COMPLIANCE: COMPLIANT',
+		);
+		expect(entries).toHaveLength(1);
+		expect(entries[0].taskID).toBe('unknown');
+		expect(entries[0].skillPath).toBe('__overall__');
+	});
+
+	test('seedSkillFiles rejects traversal outside the test directory', () => {
+		const directory = makeDirectory('reviewer-seed-guard-');
+		expect(() =>
+			seedSkillFiles(directory, ['file:../../outside/SKILL.md']),
+		).toThrow(/within the test directory/);
 	});
 });

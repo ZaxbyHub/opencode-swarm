@@ -57,11 +57,16 @@ const PLAN_CANDIDATE = /\b(\d+\.\d+(?:\.\d+)*)\b/g;
 const TASK_LINE = /^\s*TASK\s*[:=]\s*(.*)$/gim;
 const ATTRIBUTION_ID_MARKER =
 	/\b(?:task_id|task-id|taskId)\s*[:=]\s*([A-Za-z0-9][A-Za-z0-9._-]*)/gi;
+// TASK: is also used as a natural-language heading (for example,
+// "TASK: implement the hot loop"). Only treat it as an attribution marker
+// when the value is the complete token on that line; plan-policy extraction
+// separately handles numeric IDs embedded in prose.
 const ATTRIBUTION_TASK_MARKER =
-	/\bTASK\s*[:=]\s*([A-Za-z0-9][A-Za-z0-9._-]*)/gi;
+	/\bTASK\s*[:=]\s*([A-Za-z0-9][A-Za-z0-9._-]*)[ \t]*(?=\r?$)/gim;
 const ATTRIBUTION_ID_MARKER_RAW =
 	/\b(?:task_id|task-id|taskId)\s*[:=][ \t]*([^\s]*)/gi;
-const ATTRIBUTION_TASK_MARKER_RAW = /\bTASK\s*[:=][ \t]*([^\s]*)/gi;
+const ATTRIBUTION_TASK_MARKER_RAW =
+	/\bTASK\s*[:=][ \t]*([^\s]+)[ \t]*(?=\r?$)/gim;
 
 function isSafeAttributionId(value: string): boolean {
 	return (
@@ -132,6 +137,17 @@ function validateKnownIds(
 	return null;
 }
 
+function isStrictExplicitPlanField(
+	value: string,
+	knownPlanTaskIds: ReadonlySet<string> | undefined,
+	planContextOverLimit = false,
+): boolean {
+	return (
+		STRICT_PLAN_ID.test(value) &&
+		(planContextOverLimit || knownPlanTaskIds !== undefined)
+	);
+}
+
 /** Resolve a task identity without I/O or mutable session state. */
 export function resolveTaskId(
 	input: Record<string, unknown>,
@@ -140,9 +156,6 @@ export function resolveTaskId(
 	try {
 		if (options.planContextOverLimit && options.knownPlanTaskIds) {
 			return { status: 'invalid', input: 'planContext' };
-		}
-		if (options.planContextOverLimit && options.policy === 'plan') {
-			return { status: 'over_limit', input: 'knownPlanTaskIds' };
 		}
 		const knownValidation = validateKnownIds(options.knownPlanTaskIds);
 		if (knownValidation) return knownValidation;
@@ -176,20 +189,48 @@ export function resolveTaskId(
 				options.policy === 'plan'
 					? value.length <= 20 &&
 						STRICT_PLAN_ID.test(value) &&
-						(!options.knownPlanTaskIds || options.knownPlanTaskIds.has(value))
+						(!options.knownPlanTaskIds ||
+							options.knownPlanTaskIds.has(value) ||
+							options.planContextOverLimit)
 					: isAllowedAttributionId(
 							value,
 							options.knownPlanTaskIds,
 							options.planContextOverLimit,
 						);
-			if (!valid) continue;
+			if (!valid) {
+				if (
+					options.policy === 'plan' &&
+					value.length <= 20 &&
+					STRICT_PLAN_ID.test(value) &&
+					options.knownPlanTaskIds
+				) {
+					return { status: 'invalid', input: field };
+				}
+				if (
+					options.policy === 'attribution' &&
+					isStrictExplicitPlanField(
+						value,
+						options.knownPlanTaskIds,
+						options.planContextOverLimit,
+					)
+				) {
+					return { status: 'invalid', input: field };
+				}
+				continue;
+			}
 			const overflow = addCandidate(explicit, value);
 			if (overflow) return overflow;
 		}
-		const explicitSelection = select(explicit, 'explicit');
-		if (explicitSelection) return explicitSelection;
 
 		if (options.policy === 'plan') {
+			const explicitSelection = select(explicit, 'explicit');
+			if (explicitSelection) return explicitSelection;
+			// A plan that exceeds the bounded context can still authorize an
+			// explicit candidate; callers must perform their own full-plan
+			// membership check before constructing a scope or evidence binding.
+			if (options.planContextOverLimit) {
+				return { status: 'over_limit', input: 'knownPlanTaskIds' };
+			}
 			const taskLineCandidates = new Set<string>();
 			for (const text of textFields) {
 				TASK_LINE.lastIndex = 0;
@@ -252,8 +293,8 @@ export function resolveTaskId(
 					}
 				}
 			}
+			const marked = new Set<string>();
 			for (const marker of [ATTRIBUTION_ID_MARKER, ATTRIBUTION_TASK_MARKER]) {
-				const marked = new Set<string>();
 				for (const text of textFields) {
 					marker.lastIndex = 0;
 					for (const match of text.matchAll(marker)) {
@@ -274,9 +315,11 @@ export function resolveTaskId(
 						if (overflow) return overflow;
 					}
 				}
-				const markerSelection = select(marked, 'marker');
-				if (markerSelection) return markerSelection;
 			}
+			const explicitSelection = select(explicit, 'explicit');
+			if (explicitSelection) return explicitSelection;
+			const markerSelection = select(marked, 'marker');
+			if (markerSelection) return markerSelection;
 		}
 
 		if (options.fallback !== undefined) {
@@ -311,11 +354,15 @@ export function resolveTaskId(
 /** Backward-compatible delegation API backed by the bounded plan policy. */
 export function resolveDelegatedPlanTaskId(
 	args: Record<string, unknown>,
-	knownPlanTaskIds?: ReadonlySet<string>,
+	planContext?: ReadonlySet<string> | TaskIdPlanContextOptions,
 ): string | null {
+	const options =
+		planContext instanceof Set
+			? { knownPlanTaskIds: planContext }
+			: planContext;
 	const result = resolveTaskId(args, {
 		policy: 'plan',
-		knownPlanTaskIds,
+		...options,
 	});
 	return result.status === 'resolved' ? result.taskId : null;
 }

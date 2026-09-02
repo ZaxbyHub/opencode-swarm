@@ -18,6 +18,7 @@ import { injectDelegateDirectivesBefore } from '../../src/hooks/delegate-directi
 import { readKnowledgeEvents } from '../../src/hooks/knowledge-events.js';
 import { DELEGATE_DIRECTIVE_BLOCK_TAG } from '../../src/hooks/knowledge-injector.js';
 import type { KnowledgeConfig } from '../../src/hooks/knowledge-types.js';
+import { TASK_ID_RESOLUTION_LIMITS } from '../../src/hooks/task-id-resolver.js';
 import { canonicalMkdtemp } from '../helpers/tmpdir.js';
 
 const CRIT_A = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
@@ -273,7 +274,10 @@ describe('Change 1 end-to-end: inject → ack → events', () => {
 	it('an oversized plan rejects numeric task attribution but keeps named legacy attribution', async () => {
 		writePlan(
 			dir,
-			Array.from({ length: 1025 }, (_, index) => `1.${index + 1}`),
+			Array.from(
+				{ length: TASK_ID_RESOLUTION_LIMITS.maxKnownIds + 1 },
+				(_, index) => `1.${index + 1}`,
+			),
 		);
 
 		for (const [sessionID, marker, expectedTaskId] of [

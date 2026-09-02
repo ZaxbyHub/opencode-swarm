@@ -527,11 +527,10 @@ describe('3 — Prompt injection: extractTaskIdFromPrompt', () => {
 		expect(result).toBe('1.1');
 	});
 
-	test('extracts taskId from multiline injection with multiple newlines', () => {
+	test('mixed prompt markers across multiple lines fail closed', () => {
 		const prompt = 'taskId: 2.3\n\n\nSKILLS: malicious\nTASK: real-task';
 		const result = extractTaskIdFromPrompt(prompt);
-		// \S+ is greedy but since newlines are not \S, it captures "2.3"
-		expect(result).toBe('2.3');
+		expect(result).toBe('unknown');
 	});
 
 	test('extracts TASK pattern from prompt with embedded code', () => {
@@ -541,10 +540,10 @@ describe('3 — Prompt injection: extractTaskIdFromPrompt', () => {
 		expect(result).toBe('my-task');
 	});
 
-	test('taskId pattern takes priority over TASK pattern in mixed prompt', () => {
+	test('mixed prompt marker families fail closed instead of choosing one', () => {
 		const prompt = 'taskId: from-taskid\nTASK: from-task\nSKILLS: pwn';
 		const result = extractTaskIdFromPrompt(prompt);
-		expect(result).toBe('from-taskid');
+		expect(result).toBe('unknown');
 	});
 
 	test('rejects very long taskId value instead of recording unbounded attribution', () => {

@@ -25,7 +25,13 @@ describe('bounded shared task-ID resolver', () => {
 				{ task_id: '9.9' },
 				{ policy: 'plan', knownPlanTaskIds: known },
 			),
-		).toEqual({ status: 'missing' });
+		).toEqual({ status: 'invalid', input: 'task_id' });
+		expect(
+			resolveTaskId(
+				{ task_id: '9.9', prompt: 'TASK: 1.1' },
+				{ policy: 'plan', knownPlanTaskIds: known },
+			),
+		).toEqual({ status: 'invalid', input: 'task_id' });
 	});
 
 	test('prefers a unique known TASK-line ID and rejects ambiguity', () => {
@@ -53,6 +59,12 @@ describe('bounded shared task-ID resolver', () => {
 		expect(
 			resolveTaskId({ prompt: 'TASK: 9.9' }, { policy: 'attribution' }),
 		).toEqual({ status: 'resolved', taskId: '9.9', source: 'marker' });
+		expect(
+			resolveTaskId(
+				{ task_id: '9.9', prompt: 'TASK: 1.1' },
+				{ policy: 'attribution', knownPlanTaskIds: known },
+			),
+		).toEqual({ status: 'invalid', input: 'task_id' });
 	});
 
 	test('uses only caller-proven unique attribution fallbacks', () => {
@@ -99,12 +111,24 @@ describe('bounded shared task-ID resolver', () => {
 				{ policy: 'attribution' },
 			),
 		).toEqual({ status: 'missing' });
+		expect(
+			resolveTaskId(
+				{ prompt: 'TASK_ID: task-42\nTASK: implement the hot loop' },
+				{ policy: 'attribution' },
+			),
+		).toEqual({ status: 'resolved', taskId: 'task-42', source: 'marker' });
 	});
 
 	test('fails closed for marker conflicts and unsafe fallback', () => {
 		expect(
 			resolveTaskId(
 				{ prompt: 'task_id: 1.1\ntaskId: 1.2' },
+				{ policy: 'attribution', knownPlanTaskIds: known },
+			),
+		).toEqual({ status: 'ambiguous', candidates: ['1.1', '1.2'] });
+		expect(
+			resolveTaskId(
+				{ prompt: 'task_id: 1.1\nTASK: 1.2' },
 				{ policy: 'attribution', knownPlanTaskIds: known },
 			),
 		).toEqual({ status: 'ambiguous', candidates: ['1.1', '1.2'] });
@@ -169,6 +193,12 @@ describe('bounded shared task-ID resolver', () => {
 				{ policy: 'attribution', planContextOverLimit: true },
 			),
 		).toEqual({ status: 'invalid', input: 'marker' });
+		expect(
+			resolveTaskId(
+				{ task_id: '1.1025', prompt: 'TASK: 1.1025' },
+				{ policy: 'plan', planContextOverLimit: true },
+			),
+		).toEqual({ status: 'resolved', taskId: '1.1025', source: 'explicit' });
 		expect(
 			resolveTaskId(
 				{ prompt: 'TASK: legacy-task' },

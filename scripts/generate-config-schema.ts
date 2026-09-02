@@ -76,6 +76,35 @@ type JsonSchemaProperty = {
 	[key: string]: unknown;
 };
 
+function asSchemaRecord(value: unknown): Record<string, unknown> | undefined {
+	return typeof value === 'object' && value !== null
+		? (value as Record<string, unknown>)
+		: undefined;
+}
+
+/**
+ * Zod's JSON-schema emitter currently omits the closing tuple bounds for
+ * `z.tuple([z.string(), z.string()])`. Restore those bounds in the shipped
+ * authoring schema so editor validation remains aligned with runtime Zod.
+ */
+function restoreAdversarialPairTupleBounds(schema: JsonSchemaObject): void {
+	const adversarial = asSchemaRecord(
+		schema.properties?.adversarial_detection,
+	);
+	const properties = asSchemaRecord(adversarial?.properties);
+	const pairs = asSchemaRecord(properties?.pairs);
+	const pairItems = asSchemaRecord(pairs?.items);
+	if (
+		pairItems &&
+		Array.isArray(pairItems.prefixItems) &&
+		pairItems.prefixItems.length === 2
+	) {
+		pairItems.items = false;
+		pairItems.minItems = 2;
+		pairItems.maxItems = 2;
+	}
+}
+
 /**
  * Build the JSON Schema document for `opencode-swarm.json`.
  *
@@ -92,6 +121,7 @@ export function buildConfigJsonSchema(): JsonSchemaObject {
 	const generated = z.toJSONSchema(PluginConfigSchema, {
 		io: 'input',
 	}) as JsonSchemaObject;
+	restoreAdversarialPairTupleBounds(generated);
 	generated.additionalProperties = false;
 	return {
 		$schema: 'https://json-schema.org/draft/2020-12/schema',
