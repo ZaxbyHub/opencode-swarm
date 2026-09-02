@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.164.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.163.1...v7.164.0) (2026-09-02)
+
+
+### Features
+
+* **db:** establish the sqlite durable-state foundation and migrate low-risk stores ([7e7cfa5](https://github.com/ZaxbyHub/opencode-swarm/commit/7e7cfa5fe6be857e8b1b398416577a3981455657))
+
 ## [7.163.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.163.0...v7.163.1) (2026-09-02)
 
 
