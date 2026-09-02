@@ -12,6 +12,7 @@ import { newestEventLine } from '../../helpers/event-lines.js';
 import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { freezeClock } from '../../helpers/test-clock';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+
 vi.mock('../../../src/parallel/file-locks', () => ({
 	tryAcquireLock: vi.fn(),
 }));
@@ -204,7 +205,6 @@ function writeRetroBundle(directory: string, phaseNumber: number): void {
 // #2039: line 1 is the swarm-events-manifest header — newest EVENT line.
 const newestEvent = (p: string): Record<string, unknown> =>
 	JSON.parse(newestEventLine(fs.readFileSync(p, 'utf-8')));
-
 describe('phase_complete adversarial trailing groups', () => {
 	let tempDir: string;
 	let originalCwd: string;
