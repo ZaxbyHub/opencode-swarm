@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
 	abortPrWorkflow,
 	type PrWorkflowMode,
+	recoverArmedPrWorkflow,
 } from '../hooks/pr-workflow-gate.js';
 import { createSwarmTool } from './create-tool.js';
 import { listPendingPrWorkflowCheckoutRestores } from './prepare-pr-workflow-checkout.js';
@@ -13,19 +14,56 @@ const AbortPrWorkflowArgsSchema = z
 		 * The architect's bounded recovery abort for an unrecoverable unbound or
 		 * bound workflow after every PR lane has settled. The `force` variant is
 		 * restricted to the human-only `/swarm abort-pr-workflow` command and is
-		 * not agent-callable.
+		 * not agent-callable. `cancel-publication` (issue #2108) is the audited
+		 * cancellation-without-publication exit for an armed PR_FEEDBACK
+		 * publication generation: it requires `cancel_publication: true` and
+		 * records a terminal no-publish state — it never grants push authority.
 		 */
-		kind: z.literal('recovery'),
+		kind: z.literal('recovery').or(z.literal('cancel-publication')),
 		reason: z.string().trim().min(1).max(500),
+		cancel_publication: z.boolean().optional(),
 	})
 	.strict();
+
+const ArmedRecoveryArgsSchema = z
+	.object({
+		mode: z.enum(['PR_REVIEW', 'PR_FEEDBACK']).optional(),
+		/**
+		 * Issue #2383 audited armed recovery: the explicit, identity-correlated
+		 * escape for a publication-armed workflow whose exact publication cannot
+		 * proceed. Requires the exact bound head SHA, the staged authorization's
+		 * revision digest, and the current gate-state generation; every mismatch
+		 * fails closed and no `force` variant exists. Settles lanes first,
+		 * appends one bounded audit event, invalidates the staged publication
+		 * authorization, and leaves a recoverable terminal state that preserves
+		 * validated work.
+		 */
+		kind: z.literal('armed_recovery'),
+		reason: z.string().trim().min(1).max(500),
+		armed_recovery: z
+			.object({
+				pr_head_sha: z.string().trim().min(6).max(64),
+				/** Exact merge-base SHA; required by the gate when the workflow carries one. */
+				base_sha: z.string().trim().min(6).max(64).optional(),
+				revision_digest: z.string().trim().min(1).max(256),
+				generation: z.number().int().nonnegative(),
+				workflow_instance_id: z.string().trim().min(1).max(128).optional(),
+			})
+			.strict(),
+	})
+	.strict();
+
+const AbortOrRecoverArgsSchema = z.union([
+	AbortPrWorkflowArgsSchema,
+	ArmedRecoveryArgsSchema,
+]);
 
 export async function executeAbortPrWorkflow(
 	args: unknown,
 	directory: string,
 	context: { sessionID?: string } = {},
 ): Promise<string> {
-	const parsed = AbortPrWorkflowArgsSchema.safeParse(args);
+	const parsed = AbortOrRecoverArgsSchema.safeParse(args);
 	if (!parsed.success) {
 		return JSON.stringify({
 			success: false,
@@ -40,10 +78,65 @@ export async function executeAbortPrWorkflow(
 			message: 'PR workflow abort requires an active sessionID',
 		});
 	}
+	if (parsed.data.kind === 'armed_recovery') {
+		try {
+			const summary = await recoverArmedPrWorkflow(
+				directory,
+				context.sessionID,
+				{
+					...(parsed.data.mode
+						? { expectedMode: parsed.data.mode as PrWorkflowMode }
+						: {}),
+					prHeadSha: parsed.data.armed_recovery.pr_head_sha,
+					...(parsed.data.armed_recovery.base_sha
+						? { baseSha: parsed.data.armed_recovery.base_sha }
+						: {}),
+					revisionDigest: parsed.data.armed_recovery.revision_digest,
+					generation: parsed.data.armed_recovery.generation,
+					...(parsed.data.armed_recovery.workflow_instance_id
+						? {
+								workflowInstanceId:
+									parsed.data.armed_recovery.workflow_instance_id,
+							}
+						: {}),
+					reason: parsed.data.reason,
+				},
+			);
+			return JSON.stringify({
+				success: true,
+				mode: summary.mode,
+				pr_head_sha: summary.prHeadSha,
+				open_lanes: summary.openLanes,
+				settled_lanes: summary.settledLanes,
+				cancelled_dimensions: summary.cancelledDimensions,
+				recovered_at: summary.recoveredAt,
+				armed_recovery: true,
+				publication_authorization_invalidated: true,
+				gate_preserved: true,
+			});
+		} catch (error) {
+			return JSON.stringify({
+				success: false,
+				message: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
 	try {
+		if (parsed.data.kind === 'cancel-publication') {
+			if (parsed.data.cancel_publication !== true) {
+				return JSON.stringify({
+					success: false,
+					message:
+						'Invalid PR workflow abort: kind "cancel-publication" requires cancel_publication: true',
+				});
+			}
+		}
 		const summary = await abortPrWorkflow(directory, context.sessionID, {
 			kind: parsed.data.kind,
 			reason: parsed.data.reason,
+			...(parsed.data.cancel_publication !== undefined
+				? { cancelPublication: parsed.data.cancel_publication }
+				: {}),
 			...(parsed.data.mode
 				? { expectedMode: parsed.data.mode as PrWorkflowMode }
 				: {}),
@@ -125,11 +218,13 @@ export async function executeAbortPrWorkflow(
 export const abort_pr_workflow: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Abort an active PR_REVIEW or PR_FEEDBACK mechanical gate and clear its durable session state, stopping the auto-resume loop. Requires kind: "recovery" and a one-line `reason`. Use after bounded recovery is exhausted, including a bound review or feedback workflow; do NOT use as a shortcut while useful recovery work remains. Refuses to abort while the workflow is armed for publication (call complete_pr_workflow instead) or while PR workflow lanes are still in flight (collect their results first). A lane past the staleness horizon whose session a liveness probe still reports as running also refuses the abort, and only the human-only /swarm abort-pr-workflow force path can override that retention; probe_status reports when a lane was instead settled without re-verification because the probe itself could not run. Reports checkout_restore_required when preserved pre-workflow changes remain. Reports state_salvaged with state_salvage_disclosure when the durable gate state was schema-invalid and had to be salvaged to clear it, and cas_escape_disclosure when the state revision was unsalvageable and the gate was therefore cleared without its compare-and-swap guard — treat either as a signal to re-verify the workflow before proceeding. Records a best-effort audit event to .swarm/events.jsonl.',
+			'Abort an active PR_REVIEW or PR_FEEDBACK mechanical gate and clear its durable session state, stopping the auto-resume loop. Requires kind: "recovery" and a one-line `reason`. Use after bounded recovery is exhausted, including a bound review or feedback workflow; do NOT use as a shortcut while useful recovery work remains. Refuses to abort while the workflow is armed for publication (call complete_pr_workflow instead) or while PR workflow lanes are still in flight (collect their results first). To change approved content after arming, use invalidate_pr_feedback_publication (audited invalidation; the full ladder re-runs). To cancel an armed PR_FEEDBACK workflow WITHOUT publication, use kind: "cancel-publication" with cancel_publication: true and a reason: the publication generation is recorded as cancelled_without_publication (terminal, never grants push authority, observed remote head disclosed) before the gate clears. kind "armed_recovery" (issue #2383) is the audited, identity-correlated escape for a publication-armed workflow whose exact publication cannot proceed: pass armed_recovery {pr_head_sha, revision_digest, generation, workflow_instance_id?} plus a reason; it settles lanes first, appends one bounded audit event, invalidates the staged publication authorization, and leaves a recoverable terminal state that preserves validated work (exact approved publication via complete_pr_workflow remains available and preferred). Identity/revision mismatches fail closed and no force variant exists. A lane past the staleness horizon whose session a liveness probe still reports as running also refuses the abort, and only the human-only /swarm abort-pr-workflow force path can override that retention; probe_status reports when a lane was instead settled without re-verification because the probe itself could not run. Reports checkout_restore_required when preserved pre-workflow changes remain. Reports state_salvaged with state_salvage_disclosure when the durable gate state was schema-invalid and had to be salvaged to clear it, and cas_escape_disclosure when the state revision was unsalvageable and the gate was therefore cleared without its compare-and-swap guard — treat either as a signal to re-verify the workflow before proceeding. Records a best-effort audit event to .swarm/events.jsonl.',
 		args: {
 			mode: AbortPrWorkflowArgsSchema.shape.mode,
-			kind: AbortPrWorkflowArgsSchema.shape.kind,
+			kind: z.enum(['recovery', 'armed_recovery']),
 			reason: AbortPrWorkflowArgsSchema.shape.reason,
+			cancel_publication: AbortPrWorkflowArgsSchema.shape.cancel_publication,
+			armed_recovery: ArmedRecoveryArgsSchema.shape.armed_recovery.optional(),
 		},
 		execute: executeAbortPrWorkflow,
 	});

@@ -1,8 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { appendFile, mkdir, readdir } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { readdir } from 'node:fs/promises';
 import type {
 	BackgroundTaskChangeContext,
 	BackgroundWorktreeDescriptor,
@@ -11,16 +10,19 @@ import {
 	captureWorkspaceSnapshot,
 	changedFilesSinceSnapshot,
 } from '../background/workspace-snapshot.js';
+import { appendCoreEventSync } from '../events/core-events.js';
 import {
 	getTaskWorkflowSnapshot,
 	type TaskEvidence,
 	withTaskEvidenceTransaction,
 } from '../gate-evidence.js';
 import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
+import { removeWorktreeProvisioningOwner } from '../hooks/delegation-gate/worktree-provisioning-owner.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { isPathWithinDeclaredScope } from '../scope/path-identity.js';
 import { advisoryWarn } from '../services/warning-buffer.js';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import { resolveGitExecutable } from '../utils/git-executable.js';
 import * as logger from '../utils/logger.js';
 import type { MergeOperationProvenance } from '../worktree/merge.js';
@@ -58,7 +60,7 @@ function dispatchKey(
 	taskId: string,
 	transitionId: string,
 ): string {
-	return `${directory}\u0000${taskId}\u0000${transitionId}`;
+	return `${canonicalRootKeyFresh(directory)}\u0000${taskId}\u0000${transitionId}`;
 }
 
 function walPath(directory: string, taskId: string): string {
@@ -107,8 +109,9 @@ async function writeWal(
  * settlement dispatch/settle/abort must be observable in events.jsonl). Never
  * throws — the WAL and evidence files remain the authoritative state; this is
  * the human-readable trail, matching the plan-critic audit-event precedent.
- * The parent directory is created (future call sites may append before any WAL
- * write) and a transient Windows EBUSY/EPERM gets one retry (PRR-003). Final
+ * Appends go through the canonical `appendCoreEventSync` seam, which owns
+ * `.swarm` creation, lock retry, and torn-tail framing (its single atomic
+ * append replaces the former Windows EBUSY/EPERM one-retry, PRR-003). Final
  * failure surfaces via criticalWarn — always visible, not debug-gated — because
  * a silently missing lifecycle event voids the observability claim.
  */
@@ -123,37 +126,17 @@ async function appendSettlementEvent(
 	wal: Pick<CoderSettlementWal, 'taskId' | 'transitionId' | 'actor'>,
 	extra?: Record<string, unknown>,
 ): Promise<void> {
-	const line = `${JSON.stringify({
-		type: 'coder_settlement',
-		action,
-		timestamp: new Date().toISOString(),
-		taskId: wal.taskId,
-		transitionId: wal.transitionId,
-		actor: wal.actor,
-		...(extra ?? {}),
-	})}\n`;
 	try {
-		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		await mkdir(dirname(eventsPath), { recursive: true });
-		await appendFile(eventsPath, line, 'utf-8');
+		appendCoreEventSync(directory, {
+			type: 'coder_settlement',
+			action,
+			timestamp: new Date().toISOString(),
+			taskId: wal.taskId,
+			transitionId: wal.transitionId,
+			actor: wal.actor,
+			...(extra ?? {}),
+		});
 	} catch (error) {
-		const code = (error as NodeJS.ErrnoException).code;
-		if (code === 'EBUSY' || code === 'EPERM') {
-			try {
-				const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-				await appendFile(eventsPath, line, 'utf-8');
-				return;
-			} catch (retryError) {
-				logger.criticalWarn(
-					`[coder-settlement] lifecycle event write failed after retry (${action} ${wal.taskId}): ${
-						retryError instanceof Error
-							? retryError.message
-							: String(retryError)
-					}`,
-				);
-				return;
-			}
-		}
 		logger.criticalWarn(
 			`[coder-settlement] lifecycle event write failed (${action} ${wal.taskId}): ${
 				error instanceof Error ? error.message : String(error)
@@ -551,6 +534,63 @@ export async function abortCoderSettlement(options: {
 	return outcome;
 }
 
+/**
+ * Retire a foreground coder-settlement WAL after the host has durably
+ * reclassified the same Task call as background work.
+ *
+ * The background delegation record becomes the sole mutation and physical
+ * worktree owner. `cleanupComplete: true` therefore means this legacy WAL has
+ * no remaining cleanup responsibility; this function deliberately performs
+ * no merge, deletion, or worktree cleanup itself.
+ */
+export async function transferCoderSettlementToBackground(options: {
+	directory: string;
+	taskId: string;
+	transitionId: string;
+}): Promise<'transferred' | 'missing' | 'already-terminal'> {
+	return withSettlementLock(
+		options.directory,
+		options.taskId,
+		'coder-background-transfer',
+		async () => {
+			const filePath = walPath(options.directory, options.taskId);
+			const wal = await readWal(filePath, options.taskId);
+			if (wal === null) return 'missing';
+			if (
+				wal.taskId !== options.taskId ||
+				wal.transitionId !== options.transitionId
+			) {
+				throw new Error('CODER_SETTLEMENT_WAL_REPLACED');
+			}
+			if (wal.state === 'PREPARED') {
+				throw new Error('CODER_SETTLEMENT_IN_PROGRESS');
+			}
+			if (wal.state !== 'DISPATCHED') {
+				liveDispatches.delete(
+					dispatchKey(options.directory, options.taskId, options.transitionId),
+				);
+				return 'already-terminal';
+			}
+
+			const reason = 'ownership transferred to durable background completion';
+			await writeWal(filePath, {
+				...wal,
+				state: 'ABORTED',
+				abortReason: reason,
+				cleanupComplete: true,
+			});
+			liveDispatches.delete(
+				dispatchKey(options.directory, options.taskId, options.transitionId),
+			);
+			await appendSettlementEvent(options.directory, 'aborted', wal, {
+				reason,
+				ownership: 'background-delegation',
+			});
+			return 'transferred';
+		},
+	);
+}
+
 async function abortDispatchedWalUnderLock(
 	directory: string,
 	taskId: string,
@@ -735,10 +775,23 @@ async function cleanupRecoveredWorktree(
 	if (existsSync(descriptor.worktreePath) || branchExists()) {
 		throw new Error('CODER_SETTLEMENT_WORKTREE_CLEANUP_UNVERIFIED');
 	}
-	const { removeWorktreeProvisioningOwner } = await import(
-		'../hooks/delegation-gate/worktree-provisioning-owner.js'
-	);
-	if (!removeWorktreeProvisioningOwner(directory, descriptor.callID)) {
+	const provisioningOwner =
+		descriptor.provisioningOwner ??
+		(descriptor.reservationId !== undefined &&
+		descriptor.generation !== undefined
+			? {
+					reservationId: descriptor.reservationId,
+					generation: descriptor.generation,
+					branchName: descriptor.branchName,
+				}
+			: undefined);
+	if (
+		!_internals.removeWorktreeProvisioningOwner(
+			directory,
+			descriptor.callID,
+			provisioningOwner,
+		)
+	) {
 		throw new Error('CODER_SETTLEMENT_OWNER_CLEANUP_FAILED');
 	}
 }
@@ -1386,6 +1439,9 @@ export async function recoverStaleCoderSettlements(
 
 export const _internals = {
 	liveDispatches,
+	// Test seam: owner cleanup is a mutation boundary whose failure must leave
+	// the settlement recoverable rather than being reported as successful.
+	removeWorktreeProvisioningOwner,
 	/**
 	 * Test seam for the lane-branch existence probe. Production reads it here,
 	 * so the #2236 fail-closed invariants — never mark a WAL terminal while the

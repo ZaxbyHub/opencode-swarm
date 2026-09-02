@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { loadPluginConfigWithMeta } from '../config/index.js';
 import { KnowledgeConfigSchema } from '../config/schema.js';
+import { observeReceiptTransition } from '../health/learning-health';
 import {
 	appendFsynced,
 	atomicWriteFsynced,
@@ -71,6 +72,7 @@ export type ReceiptSourceCode =
 	| 'phase_override'
 	| 'application_gate_staleness_release'
 	| 'application_gate_denial_limit_release'
+	| 'application_gate_session_reset_release'
 	| 'manual'
 	| 'migration'
 	| 'unknown';
@@ -85,6 +87,7 @@ export const CANONICAL_RECEIPT_SOURCES: ReadonlySet<string> = new Set([
 	'phase_override',
 	'application_gate_staleness_release',
 	'application_gate_denial_limit_release',
+	'application_gate_session_reset_release',
 	'manual',
 	'migration',
 	'unknown',
@@ -2210,11 +2213,28 @@ async function runLocked<T>(
 		});
 		for (const observation of observations) {
 			emitKnowledgeReceiptTransition(observation);
+			// Learning-health liveness feed (#2044): fresh commit transitions only
+			// (never journal replay — `queueRecordObservations` runs on append).
+			// Never-throw; no I/O; keeps the ledger drain on its hot path.
+			observeReceiptTransition({
+				directory,
+				kind: observation.transition,
+				traceId: observation.knowledgeTraceId ?? '',
+				receiptOutcome: observation.receiptOutcome,
+				receiptSource: observation.receiptSource,
+			});
 		}
 		return result;
 	} catch (error) {
 		for (const observation of observations) {
 			emitKnowledgeReceiptTransition(observation);
+			observeReceiptTransition({
+				directory,
+				kind: observation.transition,
+				traceId: observation.knowledgeTraceId ?? '',
+				receiptOutcome: observation.receiptOutcome,
+				receiptSource: observation.receiptSource,
+			});
 		}
 		return unavailable(error);
 	}

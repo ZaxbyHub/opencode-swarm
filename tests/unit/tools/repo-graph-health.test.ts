@@ -306,4 +306,119 @@ describe('repo graph health diagnostics', () => {
 		expect(health.walkTruncationReason).toBeNull();
 		expect(health.incrementalFallbacks).toBe(0);
 	});
+
+	test('KG-14: symbolEdgeSummary and resolutionBreakdown count v2 and legacy edges', () => {
+		const graph = createEmptyGraph(tmp);
+		graph.symbolEdges = [
+			{
+				fromFile: 'src/a.ts',
+				fromSymbol: 'x',
+				toFile: 'src/b.ts',
+				toSymbol: 'y',
+				id: '1',
+				fromId: '2',
+				toId: '3',
+				kind: 'REFERENCES',
+				confidence: 0.9,
+				resolution: 'import_binding',
+				evidence: [],
+			},
+			{
+				fromFile: 'src/a.ts',
+				fromSymbol: 'x',
+				toFile: 'src/b.ts',
+				toSymbol: 'z',
+				id: '4',
+				fromId: '2',
+				toId: '5',
+				kind: 'REFERENCES',
+				confidence: 0.2,
+				resolution: 'unresolved',
+				evidence: [],
+			},
+			// Legacy pre-1.5.0 edge: no v2 fields at all.
+			{
+				fromFile: 'src/c.ts',
+				fromSymbol: 'p',
+				toFile: 'src/b.ts',
+				toSymbol: 'y',
+			},
+		];
+		const health = getGraphHealth(graph);
+		expect(health.symbolEdgeSummary).toEqual({
+			total: 3,
+			withV2Fields: 2,
+			lowConfidence: 1,
+			unresolved: 1,
+		});
+		expect(health.resolutionBreakdown).toEqual({
+			import_binding: 1,
+			unresolved: 1,
+			unrecorded: 1,
+		});
+	});
+
+	test('KG-14: staleSummary is null without a probe and populated with one', () => {
+		const graph = createEmptyGraph(tmp);
+		const noProbe = getGraphHealth(graph);
+		expect(noProbe.staleSummary).toBeNull();
+		const probe: FreshnessProbe = {
+			state: 'drifted',
+			changed: ['src/a.ts', 'src/b.ts'],
+			removed: ['src/gone.ts'],
+			truncated: true,
+			probedFiles: 3,
+			elapsedMs: 5,
+		};
+		const withProbe = getGraphHealth(graph, tmp, probe);
+		expect(withProbe.staleSummary).toEqual({
+			changed: 2,
+			removed: 1,
+			probeTruncated: true,
+		});
+	});
+
+	test('KG-14: extractionFailureSummary counts by reason and kindCoverage counts nodes', () => {
+		const graph = createEmptyGraph(tmp);
+		graph.diagnostics = {
+			extractionFailures: [
+				{
+					file: 'src/a.ts',
+					language: 'typescript',
+					reason: 'symbol_extraction_failed',
+				},
+				{
+					file: 'src/b.ts',
+					language: 'python',
+					reason: 'symbol_extraction_failed',
+				},
+				{ file: 'src/c.ts', language: 'go', reason: 'timeout' },
+			],
+		};
+		const withKinds = {
+			filePath: path.join(tmp, 'src/a.ts'),
+			moduleName: 'src/a.ts',
+			exports: ['a'],
+			imports: [],
+			language: 'typescript',
+			mtime: '1',
+			exportKinds: { a: 'function' },
+		};
+		const withoutKinds = {
+			filePath: path.join(tmp, 'src/b.ts'),
+			moduleName: 'src/b.ts',
+			exports: [],
+			imports: [],
+			language: 'typescript',
+			mtime: '1',
+		};
+		graph.nodes[withKinds.filePath] = withKinds;
+		graph.nodes[withoutKinds.filePath] = withoutKinds;
+		const health = getGraphHealth(graph);
+		expect(health.extractionFailureSummary).toEqual({
+			symbol_extraction_failed: 2,
+			timeout: 1,
+		});
+		expect(health.kindCoverage).toEqual({ nodesWithKinds: 1, nodesTotal: 2 });
+	});
 });

@@ -17,8 +17,10 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { OpencodeClient } from '@opencode-ai/sdk';
 import { ORCHESTRATOR_NAME } from './config/constants';
+import { loadPluginConfig } from './config/loader';
 import { type Plan, PlanSchema, type TaskStatus } from './config/plan-schema';
 import { stripKnownSwarmPrefix } from './config/schema';
+import { computeCouncilReviewIdentity } from './council/council-review-identity';
 import type { CouncilAgent } from './council/types';
 import {
 	getEffectiveGates,
@@ -29,6 +31,10 @@ import {
 	detectEnvironmentProfile,
 	type EnvironmentProfile,
 } from './environment/profile.js';
+import {
+	clearAllActionCircuits,
+	clearInvocationActionCircuits,
+} from './failures/action-circuit.js';
 import {
 	compareTaskWorkflowStateRank,
 	getTaskWorkflowSnapshot,
@@ -47,6 +53,10 @@ import {
 import { clearTrajectoryStepCounters } from './hooks/trajectory-step-state.js';
 import { resetSessionQueue } from './learning/candidate-queue.js';
 import { resetPrmPatternSupport } from './learning/prm-pattern-support.js';
+import {
+	clearAllTaskModelRoutingState,
+	clearPendingTaskModelRoutesForSession,
+} from './models/task-model-routing.js';
 import { loadPlanJsonOnly } from './plan/manager.js';
 import { derivePlanId } from './plan/utils.js';
 import type { EscalationTracker } from './prm/escalation.js';
@@ -54,6 +64,7 @@ import { clearTrajectoryCache } from './prm/trajectory-store.js';
 import type { PatternMatch } from './prm/types.js';
 import { clearScopeBindings } from './scope/scope-binding.js';
 import { clearScopeBindingFromDisk } from './scope/scope-persistence.js';
+import { clearAllTurnLedgers } from './services/injection-budget';
 import { recordSessionStart } from './session/session-start-store.js';
 import { maybeSuggestWorktreeLink } from './session/worktree-link-suggestion.js';
 import { AgentRunContext } from './state/agent-run-context.js';
@@ -70,6 +81,11 @@ export { AgentRunContext } from './state/agent-run-context.js';
 interface RehydrationCache {
 	planTaskStates: Map<string, TaskWorkflowState>;
 	evidenceMap: Map<string, TaskEvidence>;
+	/** Inputs for validating rehydrated task-council review identity (#2102). */
+	taskIdentityContext: {
+		plan: Plan | null;
+		councilConfig: import('./council/types').CouncilConfig | undefined;
+	};
 }
 let _rehydrationCache: RehydrationCache | null = null;
 
@@ -98,6 +114,16 @@ export interface ToolAggregate {
 	successCount: number;
 	failureCount: number;
 	totalDuration: number;
+	/**
+	 * A small, bounded, deduplicated sample of WHY this tool failed (issue
+	 * #2349 follow-up: agent-activity.ts previously collapsed `output.error`
+	 * into a pure boolean and discarded the value). Capped at
+	 * MAX_TOOL_FAILURE_REASONS distinct entries, each truncated to
+	 * MAX_TOOL_FAILURE_REASON_LENGTH chars, so a tool that fails thousands of
+	 * times with the same or varying reasons cannot grow this unboundedly.
+	 * Omitted (absent, not an empty array) when no reason was ever recorded.
+	 */
+	failureReasons?: string[];
 }
 
 /**
@@ -963,6 +989,39 @@ export const swarmState = {
 	lastBudgetBySession: new Map<string, { pct: number; tokens: number }>(),
 
 	/**
+	 * Final model-visible prompt pressure per session (#2107 §3) — the ONE
+	 * truthful measurement taken after every injector has run and the system
+	 * messages have been consolidated. Unlike `lastBudgetBySession` (the swarm
+	 * INJECTION FOOTPRINT pct measured from an intermediate file surface),
+	 * this is estimated total prompt tokens vs the same model limit physical
+	 * pruning uses. Written by the final-context-accounting step; read by the
+	 * compaction tiers, the CONTEXT PRESSURE advisory, and `/swarm status`.
+	 * Bounded via {@link setFinalPromptPressure} (AGENTS.md invariant 8).
+	 */
+	finalPromptPressureBySession: new Map<
+		string,
+		{
+			pct: number;
+			usedTokens: number;
+			limitTokens: number;
+			estimatorSource: string;
+			providerReported: boolean;
+		}
+	>(),
+
+	/**
+	 * Per-session final-accounting warning-band latch (#2107 §3): one bounded
+	 * advisory per session per band (warn / critical). Kept here — not in the
+	 * hook module — so `resetSwarmState` covers it like every other
+	 * session-keyed map (AGENTS.md invariant 8). Bounded via
+	 * {@link setFinalAccountingWarningBand}.
+	 */
+	finalAccountingWarningBandsBySession: new Map<
+		string,
+		{ warn: boolean; critical: boolean }
+	>(),
+
+	/**
 	 * Live `model.limit.context` per session — keyed by sessionID and bound to
 	 * the reporting model/provider identity. Recorded by the
 	 * `experimental.chat.system.transform` hook (the only hook the host
@@ -999,6 +1058,9 @@ export function resetSwarmState(): void {
 	swarmState.delegationChains.clear();
 	swarmState.pendingEvents = 0;
 	swarmState.lastBudgetBySession.clear();
+	swarmState.finalPromptPressureBySession.clear();
+	clearAllTurnLedgers();
+	swarmState.finalAccountingWarningBandsBySession.clear();
 	swarmState.liveContextWindows.clear();
 	swarmState.agentSessions.clear();
 	// Reset the opportunistic idle-sweep cooldown so a fresh process / test run
@@ -1023,6 +1085,8 @@ export function resetSwarmState(): void {
 	// Full Auto Mode (Phase 4)
 	swarmState.fullAutoEnabledInConfig = false;
 	swarmState.environmentProfiles.clear();
+	clearAllActionCircuits();
+	clearAllTaskModelRoutingState();
 	// v6.70.0 gap-closure (#496): clear the module-scoped pending coder-scope
 	// map so a /swarm close + new session with a colliding taskId (e.g. "1.1")
 	// cannot inherit stale scope from the previous swarm.
@@ -2595,6 +2659,10 @@ export function beginInvocation(
 	// budget window, but non-transient STOP state and before/after correlation
 	// must never leak into a corrected follow-up turn.
 	const lastId = session.lastInvocationIdByAgent[stripped] || 0;
+	if (lastId > 0) {
+		clearInvocationActionCircuits(sessionId, lastId);
+		clearPendingTaskModelRoutesForSession(sessionId);
+	}
 	const newId = lastId + 1;
 	session.lastInvocationIdByAgent[stripped] = newId;
 	session.activeInvocationId = newId;
@@ -3357,7 +3425,21 @@ export async function buildRehydrationCache(directory: string): Promise<void> {
 	}
 
 	const evidenceMap = await readGateEvidenceFromDisk(directory);
-	_rehydrationCache = { planTaskStates, evidenceMap };
+	// Council review identity context (issue #2102): rehydrated task-council
+	// approvals must be bound to the CURRENT review-relevant plan content and
+	// council policy. The plan is already loaded above; the config read is a
+	// small bounded JSON load.
+	let councilConfig: import('./council/types').CouncilConfig | undefined;
+	try {
+		councilConfig = loadPluginConfig(directory).council;
+	} catch {
+		councilConfig = undefined;
+	}
+	_rehydrationCache = {
+		planTaskStates,
+		evidenceMap,
+		taskIdentityContext: { plan, councilConfig },
+	};
 }
 
 /**
@@ -3382,7 +3464,8 @@ export function applyRehydrationCache(session: AgentSessionState): void {
 		session.taskCouncilApproved = new Map();
 	}
 
-	const { planTaskStates, evidenceMap } = _rehydrationCache;
+	const { planTaskStates, evidenceMap, taskIdentityContext } =
+		_rehydrationCache;
 
 	for (const [taskId, planState] of planTaskStates) {
 		const existingState = session.taskWorkflowStates.get(taskId);
@@ -3435,9 +3518,34 @@ export function applyRehydrationCache(session: AgentSessionState): void {
 					roundNumber?: number;
 					quorumSize?: number;
 					workflowGeneration?: number;
+					identity_digest?: unknown;
 			  }
 			| undefined;
 		if (!council) {
+			session.taskCouncilApproved.delete(taskId);
+			continue;
+		}
+		// Council review identity cutover (issue #2102): evidence must carry the
+		// identity digest of the review-relevant plan + council policy it was
+		// approved under, and that digest must still match the CURRENT identity.
+		// Legacy evidence without identity proof fails closed (fresh council run),
+		// mirroring the pre-quorum cutover precedent above. A status-only plan
+		// change keeps the identity stable, so ordinary progress never trips this.
+		const rawIdentityDigest = council.identity_digest;
+		if (
+			typeof rawIdentityDigest !== 'string' ||
+			!/^[a-f0-9]{64}$/.test(rawIdentityDigest)
+		) {
+			session.taskCouncilApproved.delete(taskId);
+			continue;
+		}
+		const expectedIdentity = computeCouncilReviewIdentity({
+			level: 'task',
+			scope: { kind: 'task', taskId },
+			plan: taskIdentityContext.plan,
+			config: taskIdentityContext.councilConfig,
+		});
+		if (rawIdentityDigest !== expectedIdentity.identityDigest) {
 			session.taskCouncilApproved.delete(taskId);
 			continue;
 		}
@@ -3810,6 +3918,83 @@ export function setSessionBudget(
 	}
 }
 
+/**
+ * Record this session's final prompt pressure (#2107 §3), FIFO-evicting the
+ *  oldest entry past {@link MAX_TRACKED_BUDGET_SESSIONS}. Written once per request
+ *  composition by the final-context-accounting step.
+ */
+export function setFinalPromptPressure(
+	sessionID: string,
+	snapshot: {
+		pct: number;
+		usedTokens: number;
+		limitTokens: number;
+		estimatorSource: string;
+		providerReported: boolean;
+	},
+): void {
+	const map = swarmState.finalPromptPressureBySession;
+	if (map.has(sessionID)) map.delete(sessionID);
+	map.set(sessionID, snapshot);
+	if (map.size > MAX_TRACKED_BUDGET_SESSIONS) {
+		const oldest = map.keys().next().value;
+		if (oldest !== undefined && oldest !== sessionID) {
+			map.delete(oldest);
+		}
+	}
+}
+
+/** The session's final prompt pressure snapshot, or undefined when the final
+ *  accounting step has not run for it (e.g. native-agent sessions). */
+export function getFinalPromptPressure(sessionID: string | undefined):
+	| {
+			pct: number;
+			usedTokens: number;
+			limitTokens: number;
+			estimatorSource: string;
+			providerReported: boolean;
+	  }
+	| undefined {
+	if (!sessionID) return undefined;
+	return swarmState.finalPromptPressureBySession.get(sessionID);
+}
+
+/** Record that this session's #2107 §3 advisory already fired for a band
+ *  (one advisory per session per band), FIFO-evicting past the cap. */
+export function setFinalAccountingWarningBand(
+	sessionID: string,
+	band: 'warn' | 'critical',
+): void {
+	const map = swarmState.finalAccountingWarningBandsBySession;
+	const entry = map.get(sessionID) ?? { warn: false, critical: false };
+	if (map.has(sessionID)) map.delete(sessionID);
+	if (band === 'critical') entry.critical = true;
+	else entry.warn = true;
+	map.set(sessionID, entry);
+	if (map.size > MAX_TRACKED_BUDGET_SESSIONS) {
+		const oldest = map.keys().next().value;
+		if (oldest !== undefined && oldest !== sessionID) {
+			map.delete(oldest);
+		}
+	}
+}
+
+/** Whether this session already received the band's advisory. */
+export function getFinalAccountingWarningBand(
+	sessionID: string | undefined,
+	band: 'warn' | 'critical',
+): boolean {
+	if (!sessionID) return false;
+	const entry = swarmState.finalAccountingWarningBandsBySession.get(sessionID);
+	if (!entry) return false;
+	return band === 'critical' ? entry.critical : entry.warn;
+}
+
+/** Clear all band latches (used by resetSwarmState and tests). */
+export function clearFinalAccountingWarningBands(): void {
+	swarmState.finalAccountingWarningBandsBySession.clear();
+}
+
 /** This session's last budget percentage, or 0 if it has not been measured.
  *  Consumers that ACT on a session (compaction, the context-pressure advisory)
  *  MUST use this rather than any cross-session aggregate. */
@@ -3832,6 +4017,34 @@ export function getSessionBudgetTokens(sessionID: string | undefined): number {
 export function getDisplayBudget(): { pct: number; tokens: number } | null {
 	let best: { pct: number; tokens: number } | null = null;
 	for (const entry of swarmState.lastBudgetBySession.values()) {
+		if (entry.pct > 0 && (best === null || entry.pct > best.pct)) {
+			best = entry;
+		}
+	}
+	return best;
+}
+
+/**
+ * The most-pressured session's FINAL prompt pressure snapshot, for
+ * process-wide DISPLAY only (`/swarm status` has no single session in scope).
+ * The snapshot is returned whole so the pct, used tokens, limit, and estimator
+ * source shown together always come from one measurement (#2107 §3).
+ */
+export function getDisplayFinalPromptPressure(): {
+	pct: number;
+	usedTokens: number;
+	limitTokens: number;
+	estimatorSource: string;
+	providerReported: boolean;
+} | null {
+	let best: {
+		pct: number;
+		usedTokens: number;
+		limitTokens: number;
+		estimatorSource: string;
+		providerReported: boolean;
+	} | null = null;
+	for (const entry of swarmState.finalPromptPressureBySession.values()) {
 		if (entry.pct > 0 && (best === null || entry.pct > best.pct)) {
 			best = entry;
 		}
@@ -3870,10 +4083,12 @@ export function clearCriticalShownIds(sessionID: string): boolean {
 }
 
 /** Build the directive-identity fingerprint used to key the gate denial
- *  counter — a sorted, joined snapshot of a critical-directive-id set. Two
- *  calls with the same id set (regardless of order) produce the same key,
- *  so re-injecting the identical directive on a later turn does not reset
- *  the counter, but swapping to a genuinely different directive set does. */
+ *  counter — a sorted, joined snapshot of a critical-directive ENTRY-id set.
+ *  Two calls with the same entry-id set (regardless of order, and regardless
+ *  of which trace ids re-displayed those entries — issue #2398) produce the
+ *  same key, so re-injecting the same directive on a later turn does not
+ *  reset the counter, but swapping to a genuinely different directive set
+ *  does. */
 export function buildGateDenialDirectiveKey(ids: string[]): string {
 	return [...ids].sort().join(',');
 }

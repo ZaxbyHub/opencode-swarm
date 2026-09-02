@@ -1,3 +1,4 @@
+import { parseFullAutoCommandArgs } from '../full-auto/recovery.js';
 import { parseReviewDiffSelector } from '../review/diff-source.js';
 import type {
 	ResolvedSwarmCommand,
@@ -370,6 +371,17 @@ export function classifySwarmCommandToolUse(
 			message:
 				'Usage through swarm_command: `/swarm help` or `/swarm help <command>`.',
 		};
+	}
+
+	if (canonicalKey === 'full-auto') {
+		const parsed = parseFullAutoCommandArgs(args, { allowToggle: false });
+		if (parsed.kind === 'invalid' || parsed.kind === 'toggle') {
+			return {
+				allowed: false,
+				message:
+					'Usage through swarm_command: `/swarm full-auto status`, `/swarm full-auto on [assisted|supervised|strict]`, `/swarm full-auto off`, `/swarm full-auto exit`, `/swarm full-auto retry-oversight`, `/swarm full-auto resume`, or `/swarm full-auto abort`.',
+			};
+		}
 	}
 
 	return { allowed: true };

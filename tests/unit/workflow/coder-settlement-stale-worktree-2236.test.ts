@@ -30,13 +30,17 @@ import {
 	awaitingMergeByCallID,
 	standardWorktreeByCallID,
 } from '../../../src/hooks/delegation-gate/worktree-isolation';
-import { scanWorktreeProvisioningOwnersForRecovery } from '../../../src/hooks/delegation-gate/worktree-provisioning-owner';
+import {
+	recordWorktreeProvisioningOwner,
+	scanWorktreeProvisioningOwnersForRecovery,
+} from '../../../src/hooks/delegation-gate/worktree-provisioning-owner';
 import {
 	clearDeferredWarnings,
 	getDeferredWarnings,
 } from '../../../src/services/warning-buffer';
 import {
 	_internals,
+	completeCoderSettlementCleanup,
 	recordCoderMergeProvenance,
 	recoverCoderSettlement,
 } from '../../../src/workflow/coder-settlement';
@@ -51,9 +55,11 @@ import {
 } from '../../helpers/stale-worktree-2236';
 
 const roots: string[] = [];
+const defaultOwnerCleanup = _internals.removeWorktreeProvisioningOwner;
 
 beforeEach(() => {
 	clearDeferredWarnings();
+	_internals.removeWorktreeProvisioningOwner = defaultOwnerCleanup;
 	_internals.liveDispatches.clear();
 	standardWorktreeByCallID.clear();
 	awaitingMergeByCallID.clear();
@@ -61,6 +67,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	clearDeferredWarnings();
+	_internals.removeWorktreeProvisioningOwner = defaultOwnerCleanup;
 	_internals.liveDispatches.clear();
 	standardWorktreeByCallID.clear();
 	awaitingMergeByCallID.clear();
@@ -203,6 +210,64 @@ describe('issue #2236 stale lane worktree recovery', () => {
 		// stays recoverable rather than terminal.
 		expect(branchExists(fixture)).toBe(true);
 		expect(readWal(fixture)).toMatchObject({ state: 'DISPATCHED' });
+	});
+
+	test('owner cleanup failure leaves committed cleanup debt recoverable', async () => {
+		const fixture = await interruptedAfterOnBeforeMerge(
+			'owner-cleanup-failure',
+		);
+		recordWorktreeProvisioningOwner(fixture.repo, {
+			callID: fixture.callID,
+			parentSessionId: fixture.descriptor.parentSessionId,
+			worktreeSessionId: fixture.descriptor.worktreeSessionId,
+			taskId: TASK_ID,
+			reservationId: 'reservation-owner',
+			generation: 1,
+			branchName: fixture.branch,
+		});
+		const wal = readWal(fixture);
+		const worktree = wal.worktree as Record<string, unknown>;
+		fs.writeFileSync(
+			walPath(fixture),
+			`${JSON.stringify(
+				{
+					...wal,
+					state: 'COMMITTED',
+					accepted: true,
+					testEngineerExempt: false,
+					settlementFailed: false,
+					cleanupComplete: false,
+					worktree: {
+						...worktree,
+						provisioningOwner: {
+							reservationId: 'forged-owner',
+							generation: 1,
+							branchName: fixture.branch,
+						},
+					},
+				},
+				null,
+				2,
+			)}\n`,
+		);
+		_internals.removeWorktreeProvisioningOwner = () => false;
+
+		await expect(
+			completeCoderSettlementCleanup(
+				fixture.repo,
+				TASK_ID,
+				fixture.transitionId,
+			),
+		).rejects.toThrow('CODER_SETTLEMENT_OWNER_CLEANUP_FAILED');
+		expect(readWal(fixture)).toMatchObject({
+			state: 'COMMITTED',
+			cleanupComplete: false,
+		});
+		expect(
+			scanWorktreeProvisioningOwnersForRecovery(fixture.repo),
+		).toMatchObject({
+			status: 'ok',
+		});
 	});
 });
 

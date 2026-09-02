@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared normalization library for mock.module allowlist checks.
-# Used by scripts/generate-mock-allowlist.sh and scripts/check-invariants.sh.
+# Used by scripts/generate-mock-allowlist.sh and bun run check:invariants.
 # POSIX-bash compatible.
 
 normalize_mock_target() {

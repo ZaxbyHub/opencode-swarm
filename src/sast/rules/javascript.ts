@@ -4,6 +4,19 @@
  */
 
 import type { SastRule } from './index';
+import {
+	classifyJavascriptCall,
+	type JavascriptCallDisposition,
+	type JavascriptCallFamily,
+} from './javascript-call-classifier';
+
+function hasDisposition(
+	family: JavascriptCallFamily,
+	disposition: JavascriptCallDisposition,
+): NonNullable<SastRule['validate']> {
+	return (match, context) =>
+		classifyJavascriptCall(match, context, family) === disposition;
+}
 
 /**
  * JavaScript/TypeScript security rules
@@ -18,7 +31,18 @@ export const javascriptRules: SastRule[] = [
 			'Dangerous use of eval() detected - allows arbitrary code execution',
 		remediation:
 			'Avoid using eval(). If you must parse dynamic content, use JSON.parse() or a proper parser instead.',
-		pattern: /\beval\s*\(/,
+		pattern: /\beval\b/,
+		validate: hasDisposition('eval', 'confirmed'),
+	},
+	{
+		id: 'sast/js-eval-review',
+		name: 'Unresolved eval-like call',
+		severity: 'low',
+		languages: ['javascript', 'typescript'],
+		description: 'Unresolved eval-like call requires manual review',
+		remediation: 'Verify the callee binding and avoid dynamic code evaluation.',
+		pattern: /\beval\b/,
+		validate: hasDisposition('eval', 'ambiguous'),
 	},
 	{
 		id: 'sast/js-dangerous-function',
@@ -29,7 +53,19 @@ export const javascriptRules: SastRule[] = [
 			'Dangerous use of new Function() detected - allows arbitrary code execution',
 		remediation:
 			'Avoid using new Function(). Use a safer alternative like JSON.parse() or a proper expression parser.',
-		pattern: /\bnew\s+Function\s*\(/,
+		pattern: /\bFunction\b/,
+		validate: hasDisposition('function-constructor', 'confirmed'),
+	},
+	{
+		id: 'sast/js-function-constructor-review',
+		name: 'Unresolved Function-like constructor',
+		severity: 'low',
+		languages: ['javascript', 'typescript'],
+		description: 'Unresolved Function-like constructor requires manual review',
+		remediation:
+			'Verify the constructor binding and avoid dynamic code construction.',
+		pattern: /\bFunction\b/,
+		validate: hasDisposition('function-constructor', 'ambiguous'),
 	},
 	{
 		id: 'sast/js-command-injection',
@@ -40,11 +76,22 @@ export const javascriptRules: SastRule[] = [
 			'Potential command injection via child_process.exec() with unsanitized input',
 		remediation:
 			'Never pass user input directly to exec(). Use execFile() with arguments array or sanitize input thoroughly.',
-		pattern: /exec\s*\(\s*(?:[`'"]|\w)/,
-		validate: (_match, _context) => {
-			// Skip validation for now - we detect the pattern first
-			return true;
-		},
+		// Binding aliases can have any identifier name, so candidate discovery is
+		// intentionally broad; the context-aware classifier admits only calls
+		// proven to be exec-like.
+		pattern: /[A-Za-z_$][\w$]*/,
+		validate: hasDisposition('exec', 'confirmed'),
+	},
+	{
+		id: 'sast/js-command-exec-review',
+		name: 'Unresolved exec-like call',
+		severity: 'low',
+		languages: ['javascript', 'typescript'],
+		description: 'Unresolved exec-like call requires manual review',
+		remediation:
+			'Verify whether the callee reaches child_process; prefer execFile() with an arguments array.',
+		pattern: /[A-Za-z_$][\w$]*/,
+		validate: hasDisposition('exec', 'ambiguous'),
 	},
 	{
 		id: 'sast/js-set-timeout-string',
@@ -55,7 +102,19 @@ export const javascriptRules: SastRule[] = [
 			'setTimeout/setInterval called with string argument - similar to eval()',
 		remediation:
 			'Use function references instead of strings: setTimeout(() => ..., 1000) instead of setTimeout("...", 1000)',
-		pattern: /(?:setTimeout|setInterval)\s*\(\s*['"`]/,
+		pattern: /\b(?:setTimeout|setInterval)\b/,
+		validate: hasDisposition('timer-string', 'confirmed'),
+	},
+	{
+		id: 'sast/js-timer-string-review',
+		name: 'Unresolved string timer call',
+		severity: 'low',
+		languages: ['javascript', 'typescript'],
+		description: 'Unresolved string timer call requires manual review',
+		remediation:
+			'Verify the timer binding and replace string callbacks with functions.',
+		pattern: /\b(?:setTimeout|setInterval)\b/,
+		validate: hasDisposition('timer-string', 'ambiguous'),
 	},
 	{
 		id: 'sast/js-innerhtml',
@@ -76,7 +135,18 @@ export const javascriptRules: SastRule[] = [
 		description: 'document.write() can introduce XSS vulnerabilities',
 		remediation:
 			'Use DOM manipulation methods (createElement, appendChild, textContent) instead.',
-		pattern: /document\.write\s*\(/,
+		pattern: /\bwrite\b/,
+		validate: hasDisposition('document-write', 'confirmed'),
+	},
+	{
+		id: 'sast/js-document-write-review',
+		name: 'Unresolved document.write-like call',
+		severity: 'low',
+		languages: ['javascript', 'typescript'],
+		description: 'Unresolved document.write-like call requires manual review',
+		remediation: 'Verify the document binding and use safe DOM construction.',
+		pattern: /\bwrite\b/,
+		validate: hasDisposition('document-write', 'ambiguous'),
 	},
 	{
 		id: 'sast/js-postmessage',
@@ -86,7 +156,19 @@ export const javascriptRules: SastRule[] = [
 		description: 'postMessage event listener without origin validation',
 		remediation:
 			'Always validate the origin in postMessage event handlers: event.origin === expectedOrigin',
-		pattern: /addEventListener\s*\(\s*['"]message['"]/,
+		pattern: /\baddEventListener\b/,
+		validate: hasDisposition('postmessage', 'confirmed'),
+	},
+	{
+		id: 'sast/js-postmessage-review',
+		name: 'Unresolved message-listener call',
+		severity: 'low',
+		languages: ['javascript', 'typescript'],
+		description: 'Unresolved message-listener call requires manual review',
+		remediation:
+			'Verify the event target and validate message origins where applicable.',
+		pattern: /\baddEventListener\b/,
+		validate: hasDisposition('postmessage', 'ambiguous'),
 	},
 	{
 		id: 'sast/js-hardcoded-secret',

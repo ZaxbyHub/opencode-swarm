@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
 	assertPrReviewValidationSettled,
+	enforcePrReviewBaseDimensions,
 	_test_exports as gateInternals,
 	PR_REVIEW_BASE_DIMENSION_IDS,
 	prWorkflowSessionFileStem,
@@ -156,12 +157,12 @@ describe('pr-workflow-gate critic batch eligibility', () => {
 	test('a critic batch survives an item leaving the critic inventory', async () => {
 		await settleSixThenCritic();
 
-		// Re-review: C-0 drops to DISPROVED/LOW and therefore leaves the critic
+		// Re-review: C-0 drops to DISPROVED/NONE and therefore leaves the critic
 		// inventory; C-1..C-5 rows are re-emitted BYTE-IDENTICALLY, so their row
 		// digests still match the critic batch's bindings.
 		await reviewerBatch(
 			'rv-2',
-			`${reviewed([BASE_IDS[0]], 'DISPROVED', 'LOW')}\n${reviewed(BASE_IDS.slice(1))}`,
+			`${reviewed([BASE_IDS[0]], 'DISPROVED', 'NONE')}\n${reviewed(BASE_IDS.slice(1))}`,
 		);
 		// The critic batch was validated against all six, so its recorded
 		// `validatedInventory` is now a strict superset of the live inventory.
@@ -191,7 +192,7 @@ describe('pr-workflow-gate critic batch eligibility', () => {
 		await reviewerBatch(
 			'rv-2',
 			[
-				reviewed([BASE_IDS[0]], 'DISPROVED', 'LOW'),
+				reviewed([BASE_IDS[0]], 'DISPROVED', 'NONE'),
 				reviewed([BASE_IDS[1]], 'CONFIRMED', 'HIGH', 'revised root cause'),
 				reviewed(BASE_IDS.slice(2)),
 			].join('\n'),
@@ -275,5 +276,93 @@ describe('pr-workflow-gate critic batch eligibility', () => {
 			'BLOCKED: PR_REVIEW requires at least one critic batch',
 		);
 		expect(await validationBatchIds()).not.toContain('critic-legacy');
+	});
+
+	test('released raw-key critic bindings remain readable', async () => {
+		await settleSixThenCritic();
+		const persisted = JSON.parse(await fs.readFile(gateStatePath(), 'utf-8'));
+		const coherence = persisted.prReviewBatchCoherence['critic-all'];
+		coherence.reviewerItemBindings = Object.fromEntries(
+			Object.entries(coherence.reviewerItemBindings).map(([key, digest]) => [
+				key.replace(/^item:/, ''),
+				digest,
+			]),
+		);
+		delete coherence.reviewerItemBindingKeyEncoding;
+		await fs.writeFile(gateStatePath(), JSON.stringify(persisted), 'utf-8');
+		gateInternals.resetTrackedStateCache();
+
+		await expect(
+			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'critic'),
+		).resolves.toMatchObject({ mode: 'PR_REVIEW' });
+	});
+
+	test('a __proto__ candidate remains bound through reviewer and critic settlement', async () => {
+		await establishReviewPrerequisites();
+		const workflowLane = PR_REVIEW_BASE_DIMENSION_IDS[0];
+		const baseLane = { laneId: 'reserved-id-base', workflowLane };
+		await enforcePrReviewBaseDimensions(tempDir, SESSION_ID, [baseLane], {
+			batchId: 'reserved-id-base',
+			prHeadSha: HEAD_SHA,
+		});
+		await persistBatch('reserved-id-base', 'swarm-pr-review:base', [baseLane], {
+			textOverride: [
+				'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags',
+				`__proto__ | ${workflowLane} | HIGH | correctness | file.ts:1 | reserved key claim | concrete evidence | runtime impact | HIGH | ORDINARY | `,
+			].join('\n'),
+		});
+		const itemIds = ['__proto__', ...BASE_IDS.slice(1)];
+		const reviewerLane = 'reserved-id-reviewer';
+		await recordPrReviewValidationBatch(
+			tempDir,
+			SESSION_ID,
+			'reviewer',
+			[
+				{
+					laneId: reviewerLane,
+					workflowLane: reviewerLane,
+					reviewItemIds: itemIds,
+				},
+			],
+			{ batchId: reviewerLane, prHeadSha: HEAD_SHA },
+		);
+		await persistBatch(
+			reviewerLane,
+			'swarm-pr-review:reviewer',
+			[{ laneId: reviewerLane, workflowLane: reviewerLane }],
+			{ textOverride: reviewed(itemIds) },
+		);
+		await assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer');
+
+		const criticLane = 'reserved-id-critic';
+		await recordPrReviewValidationBatch(
+			tempDir,
+			SESSION_ID,
+			'critic',
+			[
+				{
+					laneId: criticLane,
+					workflowLane: criticLane,
+					reviewItemIds: itemIds,
+				},
+			],
+			{ batchId: criticLane, prHeadSha: HEAD_SHA },
+		);
+		await persistBatch(
+			criticLane,
+			'swarm-pr-review:critic',
+			[{ laneId: criticLane, workflowLane: criticLane }],
+			{ textOverride: criticised(itemIds) },
+		);
+		await expect(
+			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'critic'),
+		).resolves.toMatchObject({ mode: 'PR_REVIEW' });
+		const state = await readPrWorkflowGateState(tempDir, SESSION_ID);
+		const coherence = state?.prReviewBatchCoherence?.[criticLane];
+		expect(coherence?.reviewerItemBindingKeyEncoding).toBe('prefixed-v1');
+		expect(coherence?.reviewerItemBindings).toHaveProperty('item:__proto__');
+		expect(
+			Object.hasOwn(coherence?.reviewerItemBindings ?? {}, '__proto__'),
+		).toBe(false);
 	});
 });

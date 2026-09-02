@@ -31,22 +31,27 @@ const CI_WORKFLOW_PATH = join(
 const CI_COMMAND_TO_SKILL_STRING: Record<string, string> = {
 	'bun run typecheck': 'bun run typecheck',
 	'bunx biome ci .': 'bun run lint:ci',
-	'bash scripts/check-mock-cleanup.sh': 'bash scripts/check-mock-cleanup.sh',
-	'bash scripts/check-invariants.sh': 'bash scripts/check-invariants.sh',
 	'bun run scripts/check-tool-registration.ts':
 		'bun run scripts/check-tool-registration.ts',
 	'bun run check:runtime-src-refs': 'bun run check:runtime-src-refs',
 	'bun run check:events': 'bun run check:events',
 	'bun run check:retention': 'bun run check:retention',
-	'bash scripts/check-cross-contamination.sh':
-		'bash scripts/check-cross-contamination.sh',
-	'bash scripts/check-test-clock.sh': 'bash scripts/check-test-clock.sh',
+	'bun run check:registry-citations': 'bun run check:registry-citations',
+	'bun run check:core-events': 'bun run check:core-events',
+	'bun run check:shell-audit': 'bun run check:shell-audit',
+	'bun run check:trajectory-store': 'bun run check:trajectory-store',
+	'bun run check:mock-cleanup': 'bun run check:mock-cleanup',
+	'bun run check:invariants': 'bun run check:invariants',
+	'bun run check:cross-contamination': 'bun run check:cross-contamination',
+	'bun run check:test-clock': 'bun run check:test-clock',
+	'bun run check:test-tmpdir': 'bun run check:test-tmpdir',
+	'bun run check:bash-portability': 'bun run check:bash-portability',
 	'bun run check:test-file-cap': 'bun run check:test-file-cap',
+	'bun run check:pending-fragment': 'bun run check:pending-fragment',
 	'bun run check:gate-portability': 'bun run check:gate-portability',
 	'bun run check:bare-spawn': 'bun run check:bare-spawn',
-	'bash scripts/check-test-tmpdir.sh': 'bash scripts/check-test-tmpdir.sh',
-	'bash scripts/check-bash-portability.sh':
-		'bash scripts/check-bash-portability.sh',
+	'bun run check:error-channel-discard': 'bun run check:error-channel-discard',
+	'bun run check:token-formula': 'bun run check:token-formula',
 	'cd scripts/swarm-model && node --test':
 		'(cd scripts/swarm-model && node --test)',
 };

@@ -13,10 +13,13 @@ import {
 	DATA_ACCESS_VALUES,
 	DATA_OPERATION_VALUES,
 	FILE_ROLE_VALUES,
+	GRAPH_SYMBOL_KIND_VALUES,
 	type GraphEdge,
 	type GraphNode,
 	IMPORT_TYPE_VALUES,
 	ONTOLOGY_FINDING_SEVERITY_VALUES,
+	ONTOLOGY_LINK_CONFIDENCE_VALUES,
+	ONTOLOGY_LINK_KIND_VALUES,
 	ROUTE_METHOD_VALUES,
 	ROUTE_SOURCE_VALUES,
 	SECURITY_CONFIDENCE_VALUES,
@@ -33,8 +36,30 @@ const SECURITY_CONFIDENCE_SET = new Set<string>(SECURITY_CONFIDENCE_VALUES);
 const ONTOLOGY_FINDING_SEVERITY_SET = new Set<string>(
 	ONTOLOGY_FINDING_SEVERITY_VALUES,
 );
+const ONTOLOGY_LINK_KIND_SET = new Set<string>(ONTOLOGY_LINK_KIND_VALUES);
+const ONTOLOGY_LINK_CONFIDENCE_SET = new Set<string>(
+	ONTOLOGY_LINK_CONFIDENCE_VALUES,
+);
 const IMPORT_TYPE_SET = new Set<string>(IMPORT_TYPE_VALUES);
+const GRAPH_SYMBOL_KIND_SET = new Set<string>(GRAPH_SYMBOL_KIND_VALUES);
 const ONTOLOGY_NAME_PATTERN = /^[a-z][a-z0-9_]*$/;
+const ONTOLOGY_LINK_SUBJECT_MAX_LENGTH = 200;
+/**
+ * Link subjects are route ids; router-call paths legally carry query strings,
+ * regex fragments, AND backslash escapes (`router.get('/user/:id(\d+)', h)`) —
+ * excluding backslash re-created the node-drop regression for exactly that
+ * textbook syntax. Subjects remain identifier-first, quote-free, and
+ * length-bounded; every runtime consumer treats a subject as an inert
+ * comparison/display string, never a filesystem operand.
+ */
+const ONTOLOGY_LINK_SUBJECT_PATTERN = /^[A-Za-z_$][^'"`]*$/;
+/** `..` as a path SEGMENT is traversal; `[...slug]` catch-alls are not. */
+const hasTraversalSegment = (subject: string): boolean => {
+	const t = subject.replace(/\\/g, '/');
+	return (
+		t === '..' || t.startsWith('../') || t.endsWith('/..') || t.includes('/../')
+	);
+};
 
 // ============ Validation ============
 
@@ -218,6 +243,43 @@ export function validateGraphNode(node: GraphNode): void {
 			}
 		}
 	}
+	if (node.exportKinds !== undefined) {
+		if (
+			typeof node.exportKinds !== 'object' ||
+			node.exportKinds === null ||
+			Array.isArray(node.exportKinds)
+		) {
+			throw new Error('Invalid node: exportKinds must be an object');
+		}
+		for (const [name, kind] of Object.entries(node.exportKinds)) {
+			if (containsControlChars(name)) {
+				throw new Error(
+					'Invalid node: exportKinds key contains control characters',
+				);
+			}
+			if (typeof kind !== 'string' || !GRAPH_SYMBOL_KIND_SET.has(kind)) {
+				throw new Error(
+					`Invalid node: exportKinds value must be one of ${GRAPH_SYMBOL_KIND_VALUES.join(', ')} (got ${typeof kind})`,
+				);
+			}
+			// Subset invariant (OW-5, schema 1.6.0): a declaration kind exists
+			// only at real definition sites, and every definition site also
+			// writes an exportRanges entry — so a kind without a range is
+			// corruption, not a legitimate shape. Re-export bindings add ranges
+			// WITHOUT kinds (subset, never superset), so this check never fires
+			// on builder output.
+			const ranges = node.exportRanges;
+			if (
+				ranges === undefined ||
+				!Object.hasOwn(ranges, name) ||
+				ranges[name] === undefined
+			) {
+				throw new Error(
+					`Invalid node: exportKinds key "${name.slice(0, 80)}" has no matching exportRanges entry`,
+				);
+			}
+		}
+	}
 	if (node.ontology !== undefined) {
 		validateOntologyStrings(node);
 	}
@@ -255,6 +317,13 @@ function validateOntologyStrings(node: GraphNode): void {
 			finding.code,
 			finding.severity,
 			finding.message,
+		]),
+		...(ontology.links ?? []).flatMap((link) => [
+			link.kind,
+			link.confidence,
+			...(link.subject !== undefined ? [link.subject] : []),
+			...(link.evidence !== undefined ? [link.evidence] : []),
+			...(link.symbol !== undefined ? [link.symbol] : []),
 		]),
 	];
 	for (const value of values) {
@@ -321,6 +390,39 @@ function validateOntologyStrings(node: GraphNode): void {
 			finding.severity,
 			ONTOLOGY_FINDING_SEVERITY_SET,
 		);
+	}
+	for (const link of ontology.links ?? []) {
+		validateAllowedOntologyValue(
+			node,
+			'ontology.links.kind',
+			link.kind,
+			ONTOLOGY_LINK_KIND_SET,
+		);
+		validateAllowedOntologyValue(
+			node,
+			'ontology.links.confidence',
+			link.confidence,
+			ONTOLOGY_LINK_CONFIDENCE_SET,
+		);
+		if (link.subject !== undefined) {
+			if (
+				link.subject.length > ONTOLOGY_LINK_SUBJECT_MAX_LENGTH ||
+				!ONTOLOGY_LINK_SUBJECT_PATTERN.test(link.subject) ||
+				hasTraversalSegment(link.subject)
+			) {
+				const preview = link.subject.slice(0, 120);
+				throw new Error(
+					`Invalid node: ontology.links.subject is malformed (file=${node.filePath}, value="${preview}")`,
+				);
+			}
+		}
+		if (link.line !== undefined) {
+			if (!Number.isInteger(link.line) || link.line < 1) {
+				throw new Error(
+					`Invalid node: ontology.links.line must be a positive integer (file=${node.filePath})`,
+				);
+			}
+		}
 	}
 }
 

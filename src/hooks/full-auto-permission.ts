@@ -36,6 +36,8 @@ import {
 	type FullAutoDecision,
 	isReadOnlyTool,
 } from '../full-auto/policy';
+import { isAllowedPausedSwarmCommand } from '../full-auto/recovery';
+import { recordFullAutoSevereEvidenceEvent } from '../full-auto/severe-result.js';
 import {
 	isFullAutoStateUnreadable,
 	loadFullAutoRunState,
@@ -47,6 +49,14 @@ import {
 	terminateFullAutoRun,
 } from '../full-auto/state';
 import {
+	assessSandboxEnforcement,
+	normalizeSandboxMechanism,
+} from '../sandbox/executor';
+import {
+	clearSandboxWrapOutcome,
+	readSandboxWrapOutcome,
+} from '../sandbox/skip-state';
+import {
 	resolveAuthorizedScopeBinding,
 	resolveAuthorizedScopeBindingForSession,
 } from '../scope/scope-persistence';
@@ -55,7 +65,14 @@ import {
 	consumePendingInputWarning,
 	peekPendingInputWarning,
 } from './full-auto-input-probe';
+import { hashArgs } from './guardrails/file-authority';
 import { normalizeToolName } from './normalize-tool-name';
+
+export const _internals = {
+	assessSandboxEnforcement,
+	readSandboxWrapOutcome,
+	clearSandboxWrapOutcome,
+};
 
 export interface FullAutoPermissionHookOptions {
 	config: PluginConfig;
@@ -106,6 +123,25 @@ export function createFullAutoPermissionHook(
 			}
 
 			if (runState.status === 'paused' || runState.status === 'terminated') {
+				if (
+					toolName === 'swarm_command' &&
+					output.args &&
+					typeof output.args === 'object' &&
+					typeof (output.args as Record<string, unknown>).command === 'string'
+				) {
+					const raw = output.args as Record<string, unknown>;
+					const command = String(raw.command);
+					const commandArgs = Array.isArray(raw.args)
+						? raw.args.filter(
+								(item): item is string => typeof item === 'string',
+							)
+						: [];
+					if (
+						isAllowedPausedSwarmCommand(command, commandArgs, runState.status)
+					) {
+						return;
+					}
+				}
 				// Fail-closed: while paused/terminated, only deterministically
 				// read-only tools are allowed. Anything else (write, shell, network,
 				// delegation, plan/phase mutation, *and any unknown tool*) must
@@ -197,13 +233,23 @@ export function createFullAutoPermissionHook(
 			const effectiveFullAutoConfig = fullAutoConfig
 				? { ...fullAutoConfig, mode: safeMode }
 				: { mode: safeMode };
+			const rawCommand =
+				typeof argsObj?.command === 'string' ? argsObj.command.trim() : '';
+			const sandboxOutcome =
+				(toolName === 'bash' || toolName === 'shell') && input.callID
+					? _internals.readSandboxWrapOutcome(sessionID, input.callID)
+					: null;
+			const classifierArgs = sandboxOutcome
+				? { ...argsObj, command: sandboxOutcome.originalCommand }
+				: argsObj;
 
 			const classifierInput: FullAutoClassifierInput = {
 				sessionID,
 				agentName: activeAgent,
 				normalizedAgentName,
+				generatedAgentNames: swarmState.generatedAgentNames,
 				toolName,
-				args: argsObj,
+				args: classifierArgs,
 				directory,
 				declaredScope,
 				currentTaskID: taskId,
@@ -214,9 +260,85 @@ export function createFullAutoPermissionHook(
 						? getModifiedFilesForTask(session, taskId)
 						: undefined,
 				fullAutoConfig: effectiveFullAutoConfig,
+				pluginConfig: config,
 			};
 
 			let decision = classifyFullAutoToolAction(classifierInput);
+			if (
+				safeMode === 'strict' &&
+				(toolName === 'bash' || toolName === 'shell') &&
+				rawCommand
+			) {
+				try {
+					const commandIdentity = `cmd=${hashArgs({ command: rawCommand })}`;
+					const wrapOutcome = sandboxOutcome;
+					const sandboxConfig = config.guardrails?.sandbox;
+					const identityAssessment = await _internals.assessSandboxEnforcement({
+						mode: sandboxConfig?.mode ?? 'advisory',
+						require_filesystem: sandboxConfig?.require_filesystem ?? false,
+						require_network: sandboxConfig?.require_network ?? false,
+						require_process: sandboxConfig?.require_process ?? false,
+						network_mode: sandboxConfig?.network_mode ?? 'off',
+						network_allowlist: sandboxConfig?.network_allowlist ?? [],
+						writable_roots: sandboxConfig?.writable_roots ?? [],
+					});
+					const assessmentSupported = identityAssessment.supported !== false;
+					const assessmentUnsupported = identityAssessment.unsupported ?? [];
+					const capabilityIdentity = `cap=${identityAssessment.capability.identity}`;
+					if (!wrapOutcome) {
+						decision = {
+							action: 'deny',
+							code: 'sandbox_unverified',
+							recoverable: true,
+							reason:
+								`strict mode shell command was not verified by the guardrails sandbox wrapper ` +
+								`[${commandIdentity} ${capabilityIdentity}]`,
+						};
+					} else if (
+						!wrapOutcome.wrapped ||
+						wrapOutcome.originalCommandHash !==
+							hashArgs({ command: wrapOutcome.originalCommand }) ||
+						wrapOutcome.originalCommandHash === wrapOutcome.finalCommandHash ||
+						wrapOutcome.finalCommandHash !==
+							hashArgs({ command: rawCommand }) ||
+						normalizeSandboxMechanism(wrapOutcome.executorMechanism) !==
+							normalizeSandboxMechanism(wrapOutcome.capabilityMechanism) ||
+						wrapOutcome.capabilityIdentity !==
+							identityAssessment.capability.identity ||
+						wrapOutcome.assessmentCacheKey !== identityAssessment.cacheKey
+					) {
+						decision = {
+							action: 'deny',
+							code: 'sandbox_unverified',
+							recoverable: true,
+							reason:
+								`strict mode shell command lost sandbox binding (${wrapOutcome.reason}) ` +
+								`[${commandIdentity} ${capabilityIdentity}]`,
+						};
+					} else if (!assessmentSupported) {
+						decision = {
+							action: 'deny',
+							code: 'sandbox_required',
+							recoverable: true,
+							reason:
+								`strict mode shell command requested unsupported sandbox policy (${assessmentUnsupported.join(', ')}) ` +
+								`[${commandIdentity} ${capabilityIdentity}]`,
+						};
+					} else if (!identityAssessment.satisfied) {
+						decision = {
+							action: 'deny',
+							code: 'sandbox_required',
+							recoverable: true,
+							reason:
+								`strict mode shell command requires independently verified sandbox containment; ` +
+								`missing ${identityAssessment.missing.join(', ')} ` +
+								`[${commandIdentity} ${capabilityIdentity}]`,
+						};
+					}
+				} finally {
+					_internals.clearSandboxWrapOutcome(sessionID, input.callID);
+				}
+			}
 
 			// Input-probe override: if a pending prompt-injection warning was
 			// captured by the previous tool output, force escalation when the
@@ -229,9 +351,16 @@ export function createFullAutoPermissionHook(
 					(typeof argsObj?.url === 'string' && argsObj.url) ||
 					undefined;
 				if (shouldEscalateAfterWarning(toolName, commandOrUrl)) {
+					const evidenceEventID = recordFullAutoSevereEvidenceEvent({
+						sessionID,
+						childSessionID: sessionID,
+						category: 'external_instructions',
+						callID: input.callID,
+						generation: runState.runGeneration,
+					});
 					decision = {
 						action: 'escalate_critic',
-						reason: `risky follow-up after prompt-injection warning (${pendingWarning.categories.join(',')})`,
+						reason: `risky follow-up after prompt-injection warning (${pendingWarning.categories.join(',')}); evidence event ${evidenceEventID}`,
 						risk: 'high',
 						context: {
 							tool: toolName,
@@ -364,6 +493,10 @@ export function createFullAutoPermissionHook(
 							fullAutoConfig?.oversight?.max_dispatch_retries ?? 2,
 						max_consecutive_dispatch_failures:
 							fullAutoConfig?.oversight?.max_consecutive_dispatch_failures ?? 3,
+						total_timeout_ms:
+							fullAutoConfig?.oversight?.total_timeout_ms ?? 120000,
+						cleanup_timeout_ms:
+							fullAutoConfig?.oversight?.cleanup_timeout_ms ?? 2000,
 					},
 				});
 			} catch (error) {

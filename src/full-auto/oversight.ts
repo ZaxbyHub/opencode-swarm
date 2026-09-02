@@ -26,8 +26,12 @@ import * as path from 'node:path';
 import { createCriticAutonomousOversightAgent } from '../agents/critic';
 import { getSwarmAgents, resolveFallbackModel } from '../agents/index';
 import { stripKnownSwarmPrefix } from '../config/schema';
+import { appendCoreEventSync } from '../events/core-events.js';
+import {
+	classifyProviderFailure,
+	isRetryableProviderFailure,
+} from '../failures/invocation-failure';
 import { validateSwarmPath } from '../hooks/utils';
-import { tryAcquireLock } from '../parallel/file-locks.js';
 import { _internals as stateInternals } from '../state.js';
 import { telemetry } from '../telemetry';
 import { sleep } from '../utils/bun-compat';
@@ -35,7 +39,6 @@ import { teardownEphemeralSession } from '../utils/ephemeral-session-teardown';
 import { advanceInlineFallback } from '../utils/inline-fallback-advancer';
 import * as logger from '../utils/logger';
 import type { ModelOverride } from '../utils/model-dispatch-fallback';
-import { isTransientProviderError } from '../utils/provider-error-classification';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import {
 	type ParsedCriticResponse,
@@ -116,6 +119,10 @@ export interface DispatchFullAutoOversightInput {
 		max_dispatch_retries?: number;
 		/** Override for max consecutive dispatch failures (default from schema: 3). */
 		max_consecutive_dispatch_failures?: number;
+		/** Total wall-clock deadline across create, prompt, backoff, parse, and cleanup. */
+		total_timeout_ms?: number;
+		/** Cleanup sub-budget for ephemeral-session teardown. */
+		cleanup_timeout_ms?: number;
 	};
 }
 
@@ -186,11 +193,62 @@ function decisionFromVerdict(
 }
 
 function isTransientDispatchError(error: unknown): boolean {
-	// #1896: single-sourced classifier — now also recognizes quota/usage-limit
-	// exhaustion (a distinct, retry + fallback-eligible class) on top of the
-	// transient provider/network set.
-	const text = error instanceof Error ? error.message : String(error);
-	return isTransientProviderError(text);
+	return isRetryableProviderFailure(classifyProviderFailure(error));
+}
+
+const DEFAULT_TOTAL_TIMEOUT_MS = 120_000;
+const DEFAULT_CLEANUP_TIMEOUT_MS = 2_000;
+
+function remainingMs(deadlineMs: number): number {
+	return Math.max(0, deadlineMs - _internals.now());
+}
+
+function timeoutError(label: string, budgetMs: number): Error {
+	return new Error(`${label} deadline expired after ${budgetMs}ms`);
+}
+
+async function runWithinBudget<T>(
+	promise: Promise<T>,
+	budgetMs: number,
+	label: string,
+): Promise<T> {
+	if (budgetMs <= 0) throw timeoutError(label, 0);
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await new Promise<T>((resolve, reject) => {
+			timer = _internals.setTimer(
+				() => reject(timeoutError(label, budgetMs)),
+				budgetMs,
+			);
+			// This awaited timer must remain ref'ed under Bun or the deadline may
+			// never settle an abort-ignoring SDK promise. It is cleared in finally.
+			void promise.then(resolve, reject);
+		});
+	} finally {
+		if (timer !== undefined) _internals.clearTimer(timer);
+	}
+}
+
+async function cleanupEphemeralSessionWithinBudget(
+	client: NonNullable<typeof stateInternals.swarmState.opencodeClient>,
+	sessionId: string | undefined,
+	deadlineMs: number,
+	cleanupTimeoutMs: number,
+): Promise<void> {
+	if (!sessionId) return;
+	const budget = Math.min(cleanupTimeoutMs, remainingMs(deadlineMs));
+	if (budget <= 0) return;
+	try {
+		await runWithinBudget(
+			_internals.teardownEphemeralSession(client.session, sessionId),
+			budget,
+			'oversight cleanup',
+		);
+	} catch (error) {
+		logger.warn(
+			`[full-auto/oversight] cleanup timed out or failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
 }
 
 /**
@@ -201,52 +259,23 @@ function isTransientDispatchError(error: unknown): boolean {
  * durably audited is not a real verdict — the dispatcher converts the
  * thrown error into a BLOCKED/pause outcome.
  *
- * The lock acquisition is best-effort (some platforms / test sandboxes
- * cannot acquire the cross-process lock); the actual append is the
- * mandatory step and any failure throws.
+ * The append goes through the canonical store seam (`appendCoreEventSync`),
+ * which holds the exclusive store lock for the write and throws a typed
+ * error when the store stays contended. The seam releases its lock before
+ * any throw, so the mandatory rethrow below preserves the original
+ * rethrow-after-lock-release contract.
  */
 export async function writeFullAutoOversightEvent(
 	directory: string,
 	event: FullAutoOversightEvent,
 ): Promise<void> {
-	const lockTaskId = `full-auto-oversight-${Date.now()}`;
-	let lockResult: Awaited<ReturnType<typeof tryAcquireLock>> | undefined;
 	try {
-		lockResult = await tryAcquireLock(
-			directory,
-			'events.jsonl',
-			'full-auto-oversight',
-			lockTaskId,
-		);
+		appendCoreEventSync(directory, { ...event });
 	} catch (error) {
-		logger.warn(
-			`[full-auto/oversight] failed to acquire lock for events.jsonl: ${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
-	let writeError: unknown;
-	try {
-		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		fs.appendFileSync(eventsPath, `${JSON.stringify(event)}\n`, 'utf-8');
-	} catch (error) {
-		writeError = error;
 		logger.error(
 			`[full-auto/oversight] Failed to write event: ${error instanceof Error ? error.message : String(error)}`,
 		);
-	} finally {
-		if (lockResult?.acquired && lockResult.lock._release) {
-			try {
-				await lockResult.lock._release();
-			} catch (releaseError) {
-				logger.error(
-					'[full-auto/oversight] Lock release failed:',
-					releaseError,
-				);
-			}
-		}
-	}
-	if (writeError) {
-		const msg =
-			writeError instanceof Error ? writeError.message : String(writeError);
+		const msg = error instanceof Error ? error.message : String(error);
 		throw new Error(`Full-Auto oversight event persistence failed: ${msg}`);
 	}
 }
@@ -386,15 +415,30 @@ export async function dispatchFullAutoOversight(
 
 	let ephemeralSessionId: string | undefined;
 	const promptController = new AbortController();
-	const cleanup = () => {
-		promptController.abort();
-		if (ephemeralSessionId) {
-			const id = ephemeralSessionId;
-			ephemeralSessionId = undefined;
-			// #2123: teardown awaits a graceful abort (flush) before delete.
-			void teardownEphemeralSession(client.session, id);
+	const totalTimeoutMs =
+		input.fullAutoConfig?.total_timeout_ms ?? DEFAULT_TOTAL_TIMEOUT_MS;
+	const cleanupTimeoutMs =
+		input.fullAutoConfig?.cleanup_timeout_ms ?? DEFAULT_CLEANUP_TIMEOUT_MS;
+	const deadlineMs = _internals.now() + totalTimeoutMs;
+	let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		deadlineTimer = _internals.setTimer(
+			() =>
+				promptController.abort(timeoutError('oversight total', totalTimeoutMs)),
+			totalTimeoutMs,
+		);
+		if (typeof (deadlineTimer as { unref?: () => void }).unref === 'function') {
+			(deadlineTimer as { unref: () => void }).unref();
 		}
-	};
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		pauseFullAutoRun(
+			input.directory,
+			input.sessionID,
+			`oversight dispatcher exception: failed to arm total deadline timer (${reason})`,
+		);
+		throw new Error(`failed to arm total oversight deadline timer: ${reason}`);
+	}
 
 	let criticResponse = '';
 	let dispatchError: unknown;
@@ -453,7 +497,15 @@ export async function dispatchFullAutoOversight(
 		// On retry attempts, wait before retrying (1s, 2s, 4s, …).
 		if (attempt > 0) {
 			const delay = 2 ** (attempt - 1) * 1000;
-			await sleep(delay);
+			const backoffBudget = Math.min(delay, remainingMs(deadlineMs));
+			if (backoffBudget <= 0) {
+				return {
+					ok: false,
+					response: '',
+					error: timeoutError('oversight backoff', totalTimeoutMs),
+				};
+			}
+			await _internals.sleep(backoffBudget);
 		}
 
 		// Reset any stale session id from a previous attempt.
@@ -467,17 +519,21 @@ export async function dispatchFullAutoOversight(
 		try {
 			// Bind to the calling session as parent so OpenCode treats this as
 			// a child session and does not persist it as a new root in the TUI.
-			const createResult = await client.session.create({
-				...(input.sessionID
-					? {
-							body: {
-								parentID: input.sessionID,
-								title: 'full_auto_oversight background',
-							},
-						}
-					: {}),
-				query: { directory: input.directory },
-			});
+			const createResult = await runWithinBudget(
+				client.session.create({
+					...(input.sessionID
+						? {
+								body: {
+									parentID: input.sessionID,
+									title: 'full_auto_oversight background',
+								},
+							}
+						: {}),
+					query: { directory: input.directory },
+				}),
+				remainingMs(deadlineMs),
+				'oversight session.create',
+			);
 			if (!createResult.data) {
 				// Treat missing data as a transient server error — retry.
 				lastError = new Error(
@@ -485,18 +541,22 @@ export async function dispatchFullAutoOversight(
 				);
 			} else {
 				ephemeralSessionId = createResult.data.id;
-				const promptResult = await client.session.prompt({
-					path: { id: ephemeralSessionId },
-					body: {
-						agent: input.oversightAgentName,
-						// #1896: per-call model override on a fallback attempt; omitted
-						// (undefined) means the registered critic_oversight agent model.
-						...(modelOverride ? { model: modelOverride } : {}),
-						tools: { write: false, edit: false, patch: false },
-						parts: [{ type: 'text', text: buildOversightPrompt(input) }],
-					},
-					signal: promptController.signal,
-				});
+				const promptResult = await runWithinBudget(
+					client.session.prompt({
+						path: { id: ephemeralSessionId },
+						body: {
+							agent: input.oversightAgentName,
+							// #1896: per-call model override on a fallback attempt; omitted
+							// (undefined) means the registered critic_oversight agent model.
+							...(modelOverride ? { model: modelOverride } : {}),
+							tools: { write: false, edit: false, patch: false },
+							parts: [{ type: 'text', text: buildOversightPrompt(input) }],
+						},
+						signal: promptController.signal,
+					}),
+					remainingMs(deadlineMs),
+					'oversight session.prompt',
+				);
 
 				if (!promptResult.data) {
 					lastError = new Error(
@@ -527,6 +587,12 @@ export async function dispatchFullAutoOversight(
 
 	let lastError: unknown;
 	for (let attempt = 0; attempt <= maxRetries; attempt++) {
+		if (remainingMs(deadlineMs) <= 0) {
+			lastError = timeoutError('oversight total', totalTimeoutMs);
+			dispatchFailureWasTransient = false;
+			dispatchError = lastError;
+			break;
+		}
 		// eslint-disable-next-line no-await-in-loop
 		const result = await attemptDispatch(attempt, modelOverride);
 		if (result.ok) {
@@ -578,7 +644,15 @@ export async function dispatchFullAutoOversight(
 		}
 	}
 
-	cleanup();
+	promptController.abort();
+	await cleanupEphemeralSessionWithinBudget(
+		client,
+		ephemeralSessionId,
+		deadlineMs,
+		cleanupTimeoutMs,
+	);
+	ephemeralSessionId = undefined;
+	if (deadlineTimer !== undefined) _internals.clearTimer(deadlineTimer);
 
 	// #1896: reflect the ACTUAL model used — a fallback may have replaced the
 	// configured criticModel — so the event audit trail is not stale.
@@ -674,7 +748,8 @@ export async function dispatchFullAutoOversight(
 
 	// Success — reset consecutive failure counter.
 	resetOversightFailureCounter(input.directory, input.sessionID);
-
+	// A response received within the dispatch budget remains authoritative even
+	// if the wall-clock budget elapses immediately before this synchronous parse.
 	const parsed = parseFullAutoCriticResponse(criticResponse);
 	const decision = decisionFromVerdict(parsed.verdict, parsed.escalationNeeded);
 	let afterStatus = beforeStatus;
@@ -800,8 +875,81 @@ export async function dispatchFullAutoOversight(
  */
 export const _internals: {
 	resetSequence: () => void;
+	now: () => number;
+	sleep: typeof sleep;
+	setTimer: typeof setTimeout;
+	clearTimer: typeof clearTimeout;
+	teardownEphemeralSession: typeof teardownEphemeralSession;
 } = {
 	resetSequence: () => {
 		oversightSequenceCounter = 0;
 	},
+	now: () => performance.now(),
+	sleep,
+	setTimer: setTimeout,
+	clearTimer: clearTimeout,
+	teardownEphemeralSession,
 };
+
+export async function probeFullAutoOversightHealth(input: {
+	directory: string;
+	sessionID: string;
+	totalTimeoutMs?: number;
+	cleanupTimeoutMs?: number;
+}): Promise<{ healthy: boolean; attempts: number; reason: string }> {
+	const client = stateInternals.swarmState.opencodeClient;
+	if (!client) {
+		return {
+			healthy: false,
+			attempts: 0,
+			reason: 'opencodeClient unavailable',
+		};
+	}
+	const totalTimeoutMs = input.totalTimeoutMs ?? 15_000;
+	const cleanupTimeoutMs = input.cleanupTimeoutMs ?? 1_000;
+	const deadlineMs = _internals.now() + totalTimeoutMs;
+	let sessionId: string | undefined;
+	try {
+		const created = await runWithinBudget(
+			client.session.create({
+				...(input.sessionID
+					? {
+							body: {
+								parentID: input.sessionID,
+								title: 'full_auto_oversight health probe',
+							},
+						}
+					: {}),
+				query: { directory: input.directory },
+			}),
+			totalTimeoutMs,
+			'oversight health probe',
+		);
+		if (!created.data?.id) {
+			return {
+				healthy: false,
+				attempts: 1,
+				reason: `health probe create failed: ${JSON.stringify(created.error)}`,
+			};
+		}
+		sessionId = created.data.id;
+		return {
+			healthy: true,
+			attempts: 1,
+			reason: 'session create/delete succeeded',
+		};
+	} catch (error) {
+		return {
+			healthy: false,
+			attempts: 1,
+			reason: error instanceof Error ? error.message : String(error),
+		};
+	} finally {
+		await cleanupEphemeralSessionWithinBudget(
+			client,
+			sessionId,
+			deadlineMs,
+			cleanupTimeoutMs,
+		);
+	}
+}

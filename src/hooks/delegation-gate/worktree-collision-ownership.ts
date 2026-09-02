@@ -149,6 +149,13 @@ export async function inspectStandardWorktreeCollisionOwnership(
 						!_internals.removeWorktreeProvisioningOwner(
 							identity.directory,
 							owner.callID,
+							owner.schemaVersion === 3
+								? {
+										reservationId: owner.reservationId,
+										generation: owner.generation,
+										branchName: owner.branchName,
+									}
+								: undefined,
 						)
 					) {
 						return {

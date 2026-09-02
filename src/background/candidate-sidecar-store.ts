@@ -13,6 +13,8 @@ import {
 	CANDIDATE_SEVERITIES,
 	CLEAN_COVERAGE_SCOPE_MIN_CHARS,
 	CLEAN_EVIDENCE_MIN_CHARS,
+	PR_REVIEW_RISK_IMPACTS,
+	PR_REVIEW_RISK_TAGS,
 } from './candidate-contract';
 
 // ---------------------------------------------------------------------------
@@ -137,6 +139,10 @@ const SidecarCandidateCommon = {
 	claim: z.string().min(1),
 	evidence_summary: z.string().min(1),
 	confidence: z.enum(CANDIDATE_CONFIDENCES),
+	// Typed risk metadata (issue #2383). Optional here so hand-built legacy
+	// records still validate; the parser always provides them.
+	risk_impact: z.enum(PR_REVIEW_RISK_IMPACTS).optional(),
+	risk_tags: z.array(z.enum(PR_REVIEW_RISK_TAGS)).optional(),
 } as const;
 
 const SidecarCandidateSchema = z.discriminatedUnion('row_format_family', [

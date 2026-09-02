@@ -4,6 +4,7 @@ import { DURABLE_MEMORY_KINDS, EVIDENCE_REQUIRED_KINDS } from './config';
 import { MemoryValidationError } from './errors';
 import { computePiiScore, type PiiFinding, summarizePiiFindings } from './pii';
 import { containsSecret } from './redaction';
+import { MAX_MERGE_PARTICIPANTS } from './relation-constants';
 import { MEMORY_RECALL_SENTINEL } from './sentinel';
 import type {
 	CuratorMemoryDecision,
@@ -187,6 +188,17 @@ export const MemoryRecordSchema = z
 		updatedAt: z.string().datetime(),
 		lastAccessedAt: z.string().datetime().optional(),
 		expiresAt: z.string().datetime().optional(),
+		relations: z
+			.array(
+				z
+					.object({
+						memoryId: z.string().regex(/^mem_[a-f0-9]{16}$/),
+						type: z.literal('merged_with'),
+					})
+					.strict(),
+			)
+			.max(32)
+			.optional(),
 		qValue: z.number().min(0).max(1).optional(),
 		supersedes: z.array(z.string()).optional(),
 		supersededBy: z.string().optional(),
@@ -224,7 +236,10 @@ export const MemoryProposalSchema = z
 		]),
 		proposedRecord: MemoryRecordSchema.optional(),
 		targetMemoryId: z.string().optional(),
-		relatedMemoryIds: z.array(z.string()).optional(),
+		relatedMemoryIds: z
+			.array(z.string().regex(/^mem_[a-f0-9]{16}$/))
+			.max(MAX_MERGE_PARTICIPANTS)
+			.optional(),
 		proposedBy: z
 			.object({
 				agentRole: z.string().optional(),
@@ -249,7 +264,18 @@ export const MemoryProposalSchema = z
 		createdAt: z.string().datetime(),
 		metadata: z.record(z.string(), z.unknown()),
 	})
-	.strict();
+	.strict()
+	.superRefine((proposal, context) => {
+		if (proposal.operation !== 'merge') return;
+		const ids = proposal.relatedMemoryIds ?? [];
+		if (ids.length < 2 || new Set(ids).size !== ids.length) {
+			context.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ['relatedMemoryIds'],
+				message: `merge proposals require 2-${MAX_MERGE_PARTICIPANTS} distinct relatedMemoryIds`,
+			});
+		}
+	});
 
 export const NewMemoryRecordSchema: z.ZodType<NewMemoryRecord> = z
 	.object({
@@ -314,6 +340,20 @@ export const CuratorMemoryDecisionSchema: z.ZodType<CuratorMemoryDecision> =
 				proposalId: ProposalIdSchema,
 				oldMemoryId: MemoryIdSchema,
 				replacement: NewMemoryRecordSchema,
+				reason: CuratorDecisionReasonSchema,
+			})
+			.strict(),
+		z
+			.object({
+				action: z.literal('merge'),
+				proposalId: ProposalIdSchema,
+				relatedMemoryIds: z
+					.array(MemoryIdSchema)
+					.min(2)
+					.max(MAX_MERGE_PARTICIPANTS)
+					.refine((ids) => new Set(ids).size === ids.length, {
+						message: 'merge decisions require distinct relatedMemoryIds',
+					}),
 				reason: CuratorDecisionReasonSchema,
 			})
 			.strict(),

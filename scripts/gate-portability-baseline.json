@@ -2,36 +2,6 @@
 	"$comment": "Issue #2078 recurrence guardrail. Every scripts/**/*.sh referenced from a .github/workflows file — or, recursively, from a local composite action under .github/actions — must be listed here. New Bash-only gates are BLOCKED — implement them as scripts/<name>.ts wired through a package.json script (see scripts/check-test-file-cap.ts). Porting a legacy gate must REMOVE its entry; a stale entry fails the check. Enforced by scripts/check-gate-portability.ts (bun run check:gate-portability).",
 	"entries": [
 		{
-			"script": "scripts/check-bash-portability.sh",
-			"category": "legacy-bash-gate",
-			"reason": "FR-012 bash3.2-compatibility lint (issue #1737). Predates issue #2078. Self-referentially Bash-flavored — it scans Bash sources — but its scan is pure text and is portable in principle; not yet ported."
-		},
-		{
-			"script": "scripts/check-cross-contamination.sh",
-			"category": "legacy-bash-gate",
-			"reason": "mock.module / vi.mock leak co-run check. Predates issue #2078. Executes live test co-runs and compares pass counts; porting requires reworking the co-run driver, out of scope for issue #2078."
-		},
-		{
-			"script": "scripts/check-invariants.sh",
-			"category": "legacy-bash-gate",
-			"reason": "AGENTS.md invariant + mock-allowlist growth ratchet (issues #1666, #1781). Predates issue #2078."
-		},
-		{
-			"script": "scripts/check-mock-cleanup.sh",
-			"category": "legacy-bash-gate",
-			"reason": "FB-001 mock-cleanup ratchet. Predates issue #2078."
-		},
-		{
-			"script": "scripts/check-test-clock.sh",
-			"category": "legacy-bash-gate",
-			"reason": "freezeClock adoption line-scoped lint (issue #1782). Predates issue #2078."
-		},
-		{
-			"script": "scripts/check-test-tmpdir.sh",
-			"category": "legacy-bash-gate",
-			"reason": "FR-011 tmpdir canonicalization line-scoped lint (issue #1737). Predates issue #2078."
-		},
-		{
 			"script": "scripts/ci/detect-and-quarantine-flakes.sh",
 			"category": "ci-infrastructure",
 			"reason": "Runs only in the scheduled flake-detection workflow and writes quarantine annotations from runner artifacts. Never a pre-push local gate, so a Windows contributor is not expected to run it."

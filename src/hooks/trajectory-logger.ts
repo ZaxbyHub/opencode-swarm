@@ -12,8 +12,9 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { sanitizeTaskId } from '../evidence/manager';
 import { redactSecrets } from '../memory/redaction';
-import { appendTrajectoryEntry } from '../prm/trajectory-store';
+import { appendTrajectoryEntry, getCurrentStep } from '../prm/trajectory-store';
 import { swarmState } from '../state';
+import { compositeSessionKey, sessionKeySuffix } from '../utils/canonical-root';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { deriveGateDenialCode } from './gate-denial-tracker';
 import { normalizeToolNameLowerCase } from './normalize-tool-name';
@@ -21,11 +22,20 @@ import {
 	clearTrajectoryStepCounters,
 	nextTrajectoryStep,
 	resetTrajectoryStepCounter,
+	seedTrajectoryStepCounter,
+	trajectoryStepGeneration,
 } from './trajectory-step-state.js';
 import { validateSwarmPath } from './utils';
 
 export interface TrajectoryConfig {
 	enabled: boolean;
+	/**
+	 * Line budget for BOTH the session store's in-memory cache trim AND its
+	 * on-disk compaction (issue #2041): over budget, the newest
+	 * floor(max_lines/2) entries are retained on disk and in cache, and the
+	 * derived byte ceiling is sovereign. The task-evidence copy below uses the
+	 * same value for its own write-side truncation.
+	 */
 	max_lines: number;
 }
 
@@ -441,11 +451,105 @@ function mapResult(verdict: string): 'success' | 'failure' | 'pending' {
 	return 'pending';
 }
 
+// ─── Restart step seeding (issue #2041 Required 3) ──────────────────────────
+
+/**
+ * Sessions whose restart-seed gate has run in this process. `true` even when
+ * the store reported step 0 (a genuinely new session) so the bounded disk
+ * read happens at most once per session per process, not per tool call.
+ * Insertion-ordered for FIFO eviction (Invariant 8).
+ */
+const stepSeedGate = new Map<string, true>();
+
+/** Bound on tracked seed-gate entries — matches the step-counter bound. */
+const MAX_STEP_SEED_GATE_SESSIONS = 500;
+
+/** In-flight seed promises, deduping concurrent first toolAfters per session. */
+const stepSeedPromises = new Map<string, Promise<void>>();
+
+function stepSeedKey(sessionId: string, directory: string): string {
+	// Canonical (not literal) directory, matching the step counters and the
+	// trajectory store: two aliases of one root share one seed gate, so the
+	// counter cannot be seeded twice with divergent views. The step-counter
+	// generation prefixes the key: ANY counter clear/reset anywhere (e.g.
+	// resetSwarmState's direct clearTrajectoryStepCounters, which bypasses
+	// this module's gate-invalidating entry points) structurally invalidates
+	// every stale gate, so the next mint re-seeds from disk instead of
+	// duplicating step 1s (maintainer review #2395 / PRR-013).
+	return `${trajectoryStepGeneration()}:${compositeSessionKey(directory, sessionId)}`;
+}
+
+function markStepSeedGate(gateKey: string): void {
+	if (stepSeedGate.has(gateKey)) return;
+	while (stepSeedGate.size >= MAX_STEP_SEED_GATE_SESSIONS) {
+		const oldest = stepSeedGate.keys().next().value;
+		if (oldest === undefined) break;
+		stepSeedGate.delete(oldest);
+	}
+	stepSeedGate.set(gateKey, true);
+}
+
+/**
+ * Seeds the process-local step counter from the session's persisted
+ * trajectory high-water mark before the first mint of a session, so a process
+ * restart continues minting monotonically (steps N+1, N+2, …) instead of
+ * restarting at 1 and duplicating step numbers against the file
+ * (`getCurrentStep` is the bounded read + atomic checkpoint — no history
+ * scan). Best-effort: a read failure marks the gate as attempted and mints
+ * from the counter as-is rather than retrying on every tool call.
+ */
+async function ensureSessionStepSeeded(
+	sessionId: string,
+	directory: string,
+): Promise<void> {
+	const gateKey = stepSeedKey(sessionId, directory);
+	if (stepSeedGate.has(gateKey)) return;
+
+	const inFlight = stepSeedPromises.get(gateKey);
+	if (inFlight !== undefined) {
+		await inFlight;
+		return;
+	}
+
+	const promise = (async () => {
+		const lastStep = await getCurrentStep(sessionId, directory);
+		if (lastStep > 0) {
+			seedTrajectoryStepCounter(sessionId, directory, lastStep);
+		}
+		markStepSeedGate(gateKey);
+	})()
+		.catch(() => {
+			markStepSeedGate(gateKey);
+		})
+		.finally(() => {
+			stepSeedPromises.delete(gateKey);
+		});
+	stepSeedPromises.set(gateKey, promise);
+	await promise;
+}
+
+/**
+ * Invalidates the restart-seed gate for one session (or every session), so a
+ * reset session re-seeds from disk on its next mint. Without this, a mid-flow
+ * `/swarm reset` would leave the gate marked and the counter at 0 — the next
+ * mint would duplicate step numbers against the persisted trajectory.
+ */
+function invalidateStepSeedGate(sessionId?: string): void {
+	if (sessionId === undefined) {
+		stepSeedGate.clear();
+		return;
+	}
+	const suffix = sessionKeySuffix(sessionId);
+	for (const gateKey of stepSeedGate.keys()) {
+		if (gateKey.endsWith(suffix)) stepSeedGate.delete(gateKey);
+	}
+}
+
 /**
  * Creates the trajectory logger hook pair.
  *
- * @param config - TrajectoryConfig { enabled: boolean (default true), max_lines: number (default 500) }
- * @param _directory - Reserved for future use (evidence path derived from session taskId)
+ * @param config - TrajectoryConfig { enabled: boolean (default true), max_lines: number (default 500) — bounds the session store's cache AND disk compaction plus the task-evidence truncation }
+ * @param _directory - Workspace root (session store + evidence paths derive from it)
  * @returns Object with toolAfter handler
  */
 export function createTrajectoryLoggerHook(
@@ -512,8 +616,11 @@ export function createTrajectoryLoggerHook(
 			// Derive verdict from output metadata or default to success/failure
 			const verdict = deriveVerdict(output);
 
-			// Derive step counter for this session
-			const step = nextTrajectoryStep(sessionId);
+			// Derive step counter for this session. Seeding first (once per
+			// session per process) keeps step numbers monotonic across
+			// restarts (issue #2041 Required 3).
+			await ensureSessionStepSeeded(sessionId, _directory);
+			const step = nextTrajectoryStep(sessionId, _directory);
 
 			// Derive action type from tool name
 			const action = deriveAction(input.tool);
@@ -625,8 +732,9 @@ function consumeDeniedCallMarker(
  * the record of it.
  *
  * Contract:
- *   - The step is minted with the SHARED `nextTrajectoryStep(sessionId)`. Any
- *     private counter would desynchronise the `prmTrajectoryStep` window and
+ *   - The step is minted with the SHARED `nextTrajectoryStep(sessionId, directory)`
+ *     (seeded from the persisted high-water mark — see ensureSessionStepSeeded).
+ *     Any private counter would desynchronise the `prmTrajectoryStep` window and
  *     silently break PRM's step-range filtering.
  *   - `session.delegationActive` gates recording at all (the architect session
  *     is deliberately out of scope); the task-evidence copy additionally
@@ -668,8 +776,11 @@ export async function recordDeniedToolCall(
 
 		const code = deriveGateDenialCode(errorMessage);
 
+		// Same restart-seed gate as the successful-call path: the shared
+		// counter must reflect the persisted high-water mark before minting.
+		await ensureSessionStepSeeded(sessionID, directory);
 		const entry: TrajectoryEntry = {
-			step: nextTrajectoryStep(sessionID),
+			step: nextTrajectoryStep(sessionID, directory),
 			agent: agentName,
 			action: deriveAction(input.tool),
 			target: extractTarget(input.tool, input.args),
@@ -730,21 +841,37 @@ export function clearDeniedCallMarkers(): void {
 
 /**
  * Resets the step counter for a session. Called when a new session starts
- * or when trajectory tracking should restart from step 1.
+ * or when trajectory tracking should restart from step 1. The restart-seed
+ * gate is invalidated so the next mint re-seeds from the persisted
+ * high-water mark (issue #2041 monotonicity).
  *
  * @param sessionId - Session identifier
+ * @param directory - Workspace root owning the session's trajectory store
  */
-export function resetTrajectoryStep(sessionId: string): void {
-	resetTrajectoryStepCounter(sessionId);
+export function resetTrajectoryStep(
+	sessionId: string,
+	directory?: string,
+): void {
+	if (directory !== undefined) {
+		resetTrajectoryStepCounter(sessionId, directory);
+	} else {
+		// No root: reset every root's counter for this session (module-level
+		// legacy semantics preserved for callers without a directory).
+		clearTrajectoryStepCounters(sessionId);
+	}
+	invalidateStepSeedGate(sessionId);
 }
 
 /**
  * Clears trajectory step counters for one session, or all sessions when omitted.
+ * The restart-seed gate is invalidated alongside so a cleared session re-seeds
+ * from disk on its next mint (issue #2041 monotonicity).
  *
  * @param sessionId - Optional session identifier
  */
 export function clearTrajectoryStep(sessionId?: string): void {
 	clearTrajectoryStepCounters(sessionId);
+	invalidateStepSeedGate(sessionId);
 }
 
 /**
@@ -887,6 +1014,7 @@ function deriveVerdict(output: {
 /**
  * Tier-0 pure-function test seam (writing-tests skill). These helpers take no
  * external dependencies, so testing them directly needs no mocks at all.
+ * The seed-gate accessors cover the restart-seeding state machine (issue #2041).
  */
 export const _test_exports = {
 	deriveAction,
@@ -894,4 +1022,9 @@ export const _test_exports = {
 	MAX_DENIED_CALL_MARKERS,
 	DENIED_CALL_TTL_MS,
 	deniedCallMarkerCount: (): number => deniedCallMarkers.size,
+	stepSeedGateSize: (): number => stepSeedGate.size,
+	clearStepSeedGate: (): void => {
+		stepSeedGate.clear();
+		stepSeedPromises.clear();
+	},
 } as const;

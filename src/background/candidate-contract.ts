@@ -1,3 +1,18 @@
+import {
+	PR_REVIEW_RISK_IMPACTS,
+	PR_REVIEW_RISK_TAGS,
+	type PrReviewRiskImpact,
+	type PrReviewRiskTag,
+	parsePrReviewRiskTagsField,
+} from './pr-review-contract.js';
+
+export type { PrReviewRiskImpact, PrReviewRiskTag };
+export {
+	PR_REVIEW_RISK_IMPACTS,
+	PR_REVIEW_RISK_TAGS,
+	parsePrReviewRiskTagsField,
+} from './pr-review-contract.js';
+
 export const CANDIDATE_SEVERITIES = [
 	'INFO',
 	'LOW',
@@ -8,13 +23,43 @@ export const CANDIDATE_SEVERITIES = [
 
 export type CandidateSeverity = (typeof CANDIDATE_SEVERITIES)[number];
 
+/**
+ * Severity vocabulary of the PR-review FINDINGS artifact.
+ *
+ * A findings record is a projection of an authenticated `[REVIEWED]`/`[CRITIC]`
+ * verdict row, never of a `[CANDIDATE]` row — so it must speak the VERDICT
+ * dialect. That dialect is `REVIEW_SEVERITIES` in `src/hooks/pr-workflow-gate.ts`,
+ * which is exactly `CANDIDATE_SEVERITIES` plus `NONE` (a DISPROVED critic verdict
+ * is *required* to carry `NONE`, and a CONFIRMED-but-cosmetic reviewer verdict
+ * legitimately does). Reusing `CANDIDATE_SEVERITIES` for findings made `NONE`
+ * unrepresentable and forced field omission as its only encoding — which in turn
+ * disabled the gate's severity comparison (issue #2279).
+ *
+ * Deliberately a SEPARATE constant rather than a widened `CANDIDATE_SEVERITIES`:
+ * that one still governs explorer/micro-lane `[CANDIDATE]` rows
+ * (`isCandidateSeverity` → `analyzeCandidateFields`) and the required sidecar
+ * field (`candidate-sidecar-store.ts`), where `NONE` is never legitimate — a
+ * candidate row asserting "no severity" is a contradiction, not a finding.
+ */
+export const FINDINGS_SEVERITIES = [...CANDIDATE_SEVERITIES, 'NONE'] as const;
+
+export type FindingsSeverity = (typeof FINDINGS_SEVERITIES)[number];
+
 export const CANDIDATE_CONFIDENCES = ['HIGH', 'MEDIUM', 'LOW'] as const;
 
 export type CandidateConfidence = (typeof CANDIDATE_CONFIDENCES)[number];
 
 export type RowFormatFamily = 'base_explorer' | 'micro_lane';
 
-export const CANDIDATE_FIELD_COUNT = 9;
+/**
+ * Canonical candidate row width (issue #2383): the legacy nine fields plus the
+ * two typed risk fields. Lanes emit eleven fields; legacy nine-field rows are
+ * normalized to `UNKNOWN` / no tags at the single parse boundary.
+ */
+export const CANDIDATE_FIELD_COUNT = 11;
+
+/** Row width of pre-#2383 candidate rows, which lack the two risk fields. */
+export const CANDIDATE_LEGACY_FIELD_COUNT = 9;
 export const CLEAN_FIELD_COUNT = 4;
 export const CLEAN_COVERAGE_SCOPE_MIN_CHARS = 12;
 export const CLEAN_EVIDENCE_MIN_CHARS = 20;
@@ -31,6 +76,8 @@ export const CANDIDATE_FIELDS = {
 		'evidence_summary',
 		'impact_context',
 		'confidence',
+		'risk_impact',
+		'risk_tags',
 	],
 	micro_lane: [
 		'candidate_id',
@@ -42,8 +89,28 @@ export const CANDIDATE_FIELDS = {
 		'invariant_violated',
 		'evidence_summary',
 		'confidence',
+		'risk_impact',
+		'risk_tags',
 	],
 } as const;
+
+/**
+ * Fields whose presence is enforced by the parser's required-field check.
+ * The two trailing risk fields are deliberately excluded: `risk_tags` may be
+ * legitimately empty, and legacy nine-field rows are normalized to
+ * `UNKNOWN` / no tags before the check runs (issue #2383).
+ */
+export const CANDIDATE_REQUIRED_FIELDS: Record<
+	RowFormatFamily,
+	readonly string[]
+> = {
+	base_explorer: CANDIDATE_FIELDS.base_explorer.filter(
+		(field) => field !== 'risk_impact' && field !== 'risk_tags',
+	),
+	micro_lane: CANDIDATE_FIELDS.micro_lane.filter(
+		(field) => field !== 'risk_impact' && field !== 'risk_tags',
+	),
+};
 
 export const CANDIDATE_MARKER = '[CANDIDATE]' as const;
 export const CLEAN_MARKER = '[CLEAN]' as const;
@@ -155,7 +222,10 @@ export type CandidateArtifactRepairKind =
 	| 'terminal-protocol-fence'
 	| 'redundant-clean-confidence'
 	| 'clean-evidence-pipe-tail-merge'
-	| 'summary-row-dropped';
+	| 'candidate-evidence-pipe-recovery-lossy'
+	| 'late-canonical-header-resynchronized'
+	| 'summary-row-dropped'
+	| 'duplicate-header-row-dropped';
 
 interface MarkdownFenceBlock {
 	openingLine: number;
@@ -269,6 +339,80 @@ function repairRedundantCleanConfidence(
 const NON_CONTRACT_MARKER_LINE =
 	/^\[(?!(?:CANDIDATE|CLEAN)\])[A-Z][A-Z0-9_-]*\]/;
 
+/**
+ * True when a line is shaped exactly like a canonical candidate header — either
+ * marker-bearing (`[CANDIDATE] | candidate_id | lane | …`) or the bare field-name
+ * list re-emitted without its marker.
+ */
+function canonicalHeaderShape(line: string): { markerBearing: boolean } | null {
+	const fields = splitPipeFields(line.trim()).map((field) => field.trim());
+	if (fields.length === 0) return null;
+	if (candidateHeaderFamily(fields)) return { markerBearing: true };
+	for (const family of ['base_explorer', 'micro_lane'] as const) {
+		const canonical = CANDIDATE_FIELDS[family].map((name) =>
+			name === 'file_line' ? 'file:line' : name,
+		);
+		if (
+			fields.length === canonical.length &&
+			canonical.every((name, index) => fields[index] === name)
+		) {
+			return { markerBearing: false };
+		}
+	}
+	return null;
+}
+
+/**
+ * A lane that re-emits its header as a data row (a "placeholder" row — literal
+ * template text pasted where a finding belonged) previously had that row reach
+ * `analyzeCandidateFields`, fail, and increment `malformedRows` — which trips the
+ * zero-malformed-rows rule and destroys an otherwise-valid `[CLEAN]` attestation,
+ * possibly for a DIFFERENT lane. An echoed header carries no *parsed* information
+ * — the strict parser rejects it as a data row either way — so dropping it is
+ * parse-equivalent salvage (issue #2279).
+ *
+ * Known narrow case: a consolidated artifact carrying canonical headers for BOTH
+ * row families loses the second family's header, which is a structural marker
+ * rather than an echo. No parsed candidate value changes as a result — the rows
+ * under that header were already being read against the first header's family
+ * before this repair existed — so the only delta is the suppressed
+ * `malformed_rows` increment. That suppression is the point: it is what stops a
+ * placeholder row from voiding an unrelated lane's valid `[CLEAN]`.
+ *
+ * The survivor is the MARKER-BEARING canonical header, never merely the first
+ * such line: `selectCandidateHeader` treats the first marker-bearing line as
+ * authoritative and only falls back to a markerless one, so keeping a markerless
+ * field-name list that happened to precede the real header would delete the real
+ * header and manufacture a header failure that does not exist today.
+ *
+ * A legitimate candidate row can never be dropped here: the match demands exact
+ * equality against all nine canonical field NAMES, and `analyzeCandidateFields`
+ * independently rejects the literal `"severity"` as a severity value — a
+ * header-shaped row is definitionally not a valid candidate.
+ */
+function dropDuplicateHeaderRows(text: string): {
+	text: string;
+	dropped: boolean;
+} {
+	const lines = text.split(/\r?\n/);
+	const shapes = lines.map((line) =>
+		line.includes('|') ? canonicalHeaderShape(line) : null,
+	);
+	const keepIndex = (() => {
+		const markerBearing = shapes.findIndex((shape) => shape?.markerBearing);
+		if (markerBearing !== -1) return markerBearing;
+		return shapes.findIndex((shape) => shape !== null);
+	})();
+	if (keepIndex === -1) return { text, dropped: false };
+	const kept = lines.filter(
+		(_line, index) => shapes[index] === null || index === keepIndex,
+	);
+	return {
+		text: kept.join('\n'),
+		dropped: kept.length !== lines.length,
+	};
+}
+
 function dropNonContractMarkerRows(text: string): {
 	text: string;
 	dropped: boolean;
@@ -332,6 +476,107 @@ function repairCleanEvidencePipes(text: string): {
 		return result.line;
 	});
 	return { text: lines.join('\n'), repaired };
+}
+
+function escapeCandidateField(value: string): string {
+	return value.trim().replace(/\|/g, '\\|');
+}
+
+function repairCandidateEvidencePipes(
+	text: string,
+	family: RowFormatFamily,
+): { text: string; repaired: boolean } {
+	let repaired = false;
+	const lines = text.split(/\r?\n/).map((line) => {
+		const fields = splitPipeFields(line);
+		// Layout (marker-inclusive, issue #2383 eleven-field grammar):
+		//   base:  [marker, id, lane, severity, category, file, claim,
+		//           evidence…, impact_context, confidence, risk_impact, risk_tags]
+		//   micro: [marker, id, micro_lane, severity, category, file, claim,
+		//           invariant_violated, evidence…, confidence, risk_impact, risk_tags]
+		// A canonical row is CANDIDATE_FIELD_COUNT + 1 split fields (with the
+		// marker); a pipe-broken evidence field adds more. The tail is anchored
+		// on the four (base) / three (micro) fields after the evidence run, and
+		// confidence sits third-from-last for both families. Legacy nine-field
+		// pipe-broken rows are deliberately NOT repaired: they predate the
+		// typed risk grammar and fail closed at the parser instead.
+		const tailLength = family === 'base_explorer' ? 4 : 3;
+		if (
+			fields[0]?.trim() !== CANDIDATE_MARKER ||
+			fields.length <= CANDIDATE_FIELD_COUNT + 1 ||
+			fields.length > CANDIDATE_FIELD_COUNT + 17 ||
+			// Confidence is third-from-last for both families tails:
+			// base […, impact_context, confidence, risk_impact, risk_tags],
+			// micro […, confidence, risk_impact, risk_tags].
+			!isCandidateConfidence(fields.at(-3)?.trim())
+		) {
+			return line;
+		}
+		const normalized = fields.map(escapeCandidateField);
+		const overflowEvidence = normalized.slice(
+			family === 'base_explorer' ? 7 : 8,
+			-tailLength,
+		);
+		// Two overflow fields are indistinguishable from a base/micro hybrid row.
+		// Require three substantial prose fragments so recovery remains narrow and
+		// explicitly lossy instead of silently retyping a shifted schema column.
+		if (
+			overflowEvidence.length < 3 ||
+			overflowEvidence.some((fragment) => fragment.length < 4)
+		) {
+			return line;
+		}
+		const rebuilt = [
+			...normalized.slice(0, family === 'base_explorer' ? 7 : 8),
+			overflowEvidence.join(' \\| '),
+			...normalized.slice(-tailLength),
+		];
+		if (rebuilt.length !== CANDIDATE_FIELD_COUNT + 1) return line;
+		repaired = true;
+		return rebuilt.join(' | ');
+	});
+	return { text: lines.join('\n'), repaired };
+}
+
+function resynchronizeLateCanonicalHeader(
+	text: string,
+	family: RowFormatFamily,
+): { text: string; repaired: boolean } {
+	const lines = text.split(/\r?\n/);
+	const firstMarker = lines.findIndex((line) => {
+		const marker = splitPipeFields(line)[0]?.trim();
+		return marker === CANDIDATE_MARKER || marker === CLEAN_MARKER;
+	});
+	if (
+		firstMarker < 0 ||
+		!analyzeCandidateLine(lines[firstMarker]!, family)?.valid
+	) {
+		return { text, repaired: false };
+	}
+	const headerIndexes = lines.flatMap((line, index) =>
+		line.trim() === CANDIDATE_HEADERS[family] ? [index] : [],
+	);
+	if (!headerIndexes.some((index) => index > firstMarker)) {
+		return { text, repaired: false };
+	}
+	if (declaredCanonicalFamilies(text).some((declared) => declared !== family)) {
+		return { text, repaired: false };
+	}
+	const withoutHeaders = lines.filter(
+		(_line, index) => !headerIndexes.includes(index),
+	);
+	const insertion = withoutHeaders.findIndex((line) => {
+		const marker = splitPipeFields(line)[0]?.trim();
+		return marker === CANDIDATE_MARKER || marker === CLEAN_MARKER;
+	});
+	return {
+		text: [
+			...withoutHeaders.slice(0, insertion),
+			CANDIDATE_HEADERS[family],
+			...withoutHeaders.slice(insertion),
+		].join('\n'),
+		repaired: true,
+	};
 }
 
 function isStrictProtocolDataLine(
@@ -453,7 +698,29 @@ export function normalizeCandidateArtifact(
 	if (cleanRepair.repaired) repairKinds.push('redundant-clean-confidence');
 	const pipeRepair = repairCleanEvidencePipes(cleanRepair.text);
 	if (pipeRepair.repaired) repairKinds.push('clean-evidence-pipe-tail-merge');
-	const text = pipeRepair.text;
+	const candidatePipeRepair = repairCandidateEvidencePipes(
+		pipeRepair.text,
+		fallbackFamily,
+	);
+	if (candidatePipeRepair.repaired) {
+		repairKinds.push('candidate-evidence-pipe-recovery-lossy');
+	}
+	const lateHeaderRepair = resynchronizeLateCanonicalHeader(
+		candidatePipeRepair.text,
+		fallbackFamily,
+	);
+	if (lateHeaderRepair.repaired) {
+		repairKinds.push('late-canonical-header-resynchronized');
+	}
+	// Runs LAST of the line-set repairs, so the duplicate-header scan sees the
+	// final line set: both the marker-row drop and the terminal-fence recovery
+	// above add or remove lines that header selection would otherwise disagree
+	// about.
+	const duplicateHeaderDrop = dropDuplicateHeaderRows(lateHeaderRepair.text);
+	if (duplicateHeaderDrop.dropped) {
+		repairKinds.push('duplicate-header-row-dropped');
+	}
+	const text = duplicateHeaderDrop.text;
 	const header = selectCandidateHeader(text.split(/\r?\n/));
 	if (header?.markerBearing && header.family !== null) {
 		return { text, synthesizedHeader: false, repairKinds };
@@ -795,7 +1062,11 @@ export function analyzeCandidateFields(
 		const name = names[index];
 		const value = trimmed[index]?.trim() || null;
 		values[name] = value;
-		if (value === null) {
+		// The two trailing risk fields are optional-with-defaults: an empty
+		// risk_tags means "no tags", and a missing risk_impact is normalized
+		// to UNKNOWN at the parse boundary (issue #2383). Neither is a
+		// missing-required-field defect.
+		if (value === null && name !== 'risk_impact' && name !== 'risk_tags') {
 			issues.push({
 				field: name,
 				message: `Missing required field: ${name}`,
@@ -815,6 +1086,33 @@ export function analyzeCandidateFields(
 			field: 'confidence',
 			message: `Invalid confidence: ${candidateDiagnosticPreview(confidence)}; expected ${CANDIDATE_CONFIDENCES.join('|')}`,
 		});
+	}
+	// Typed risk metadata (issue #2383). Invalid values fail the row rather
+	// than being silently dropped — authority is never inferred from file
+	// path, dimension, or keywords.
+	const riskImpact = values.risk_impact;
+	if (
+		riskImpact !== null &&
+		!(PR_REVIEW_RISK_IMPACTS as readonly string[]).includes(riskImpact)
+	) {
+		issues.push({
+			field: 'risk_impact',
+			message: `Invalid risk_impact: ${candidateDiagnosticPreview(riskImpact)}; expected ${PR_REVIEW_RISK_IMPACTS.join('|')}`,
+		});
+	}
+	const riskTags = values.risk_tags;
+	if (riskTags !== null) {
+		const parsedTags = parsePrReviewRiskTagsField(riskTags);
+		const known = new Set<string>(PR_REVIEW_RISK_TAGS);
+		if (
+			riskTags !== '' &&
+			(parsedTags.length === 0 || parsedTags.some((tag) => !known.has(tag)))
+		) {
+			issues.push({
+				field: 'risk_tags',
+				message: `Invalid risk_tags: ${candidateDiagnosticPreview(riskTags)}; expected a comma-separated subset of ${PR_REVIEW_RISK_TAGS.join('|')}, or empty`,
+			});
+		}
 	}
 	return {
 		valid: issues.length === 0,

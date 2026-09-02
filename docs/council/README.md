@@ -45,11 +45,13 @@ fields fall back to the defaults documented below.
 | ---------------------- | -------- | --------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | `enabled`              | boolean  | `false`   | Master switch. When `false` the council is completely inert and no gate is enforced.                                         |
 | `maxRounds`            | number   | `3`       | Integer in `[1, 10]`. Maximum REJECT-retry rounds before the architect must escalate to the user.                            |
-| `parallelTimeoutMs`    | number   | `30000`   | Integer in `[5000, 120000]`. Per-member dispatch timeout.                                                                    |
+| `parallelTimeoutMs`    | number   | `30000`   | **DEPRECATED — inert.** Accepted for parse compatibility only; no runtime consumer exists and no timeout is enforced. Config doctor warns when it is explicitly set. Remove the key — dispatch timeouts are governed by the agent host. Scheduled for removal. |
 | `vetoPriority`         | boolean  | `true`    | When `true`, any single REJECT blocks advancement. When `false`, a lone REJECT downgrades to CONCERNS.                       |
 | `requireAllMembers`    | boolean  | `false`   | When `true`, `submit_council_verdicts` rejects with a structured error if fewer than five member verdicts are supplied. Equivalent to `minimumMembers: 5`. |
-| `minimumMembers`       | number   | `3`       | Integer in `[1, 5]`. Minimum distinct council members required for quorum. Default 3. Set to 1 to disable quorum enforcement. `requireAllMembers: true` overrides this to 5 (stricter constraint wins). |
-| `escalateOnMaxRounds`  | string?  | undefined | Optional webhook URL or handler name invoked on max-rounds escalation. Reserved for a follow-up; no runtime behavior today.  |
+| `minimumMembers`       | number   | `3`       | Integer in `[1, 5]`. Minimum distinct council members required for quorum (**task/phase councils only** — the final council is governed by `finalCompletionPolicy`). Default 3. Set to 1 to disable quorum enforcement. `requireAllMembers: true` overrides this to 5 (stricter constraint wins). |
+| `finalCompletionPolicy` | object   | `{ "mode": "all_required" }` | Final-council completion policy (separate from the task/phase quorum knobs above). Default/missing `all_required` preserves the exact legacy requirement: all five canonical roles, five distinct members, zero absentees. `quorum` is an explicit bounded weakening requiring `minimumMembers` (3–5) distinct canonical members — unknown, duplicate, and cross-swarm identities never count, and config doctor flags quorum mode as weaker. Any change invalidates prior final-council evidence (see §9b). |
+| `freshnessMaxAgeHours` | number   | `24`      | Maximum evidence age in hours (1–720) for phase-council, architecture-supervisor, and final-council evidence. One shared evaluator and one captured preflight clock govern all three gates (see §9b). Part of the council policy digest. |
+| `escalateOnMaxRounds`  | string?  | undefined | **Inert.** Declared for escalation, but no handler/webhook execution exists or runs (#1650). Config doctor warns when it is set. Max-rounds exhaustion instead emits a durable structured event (`.swarm/council/events/max-rounds-exhaustion.jsonl`) and a user escalation message; the run stays fail-closed. |
 
 Schema is strict — unknown keys under `council` are rejected at config load.
 
@@ -206,6 +208,63 @@ council directory so a later swarm in the same project starts at round one.
   architect must escalate to the user rather than auto-advancing. This is
   a hard rule — `update_task_status` will continue to block. The final round
   remains corrigible and never advances beyond the configured limit.
+- On the moment rounds are exhausted, the server also appends one bounded
+  structured event to `.swarm/council/events/max-rounds-exhaustion.jsonl`
+  (level, scope, identity digest, round, verdict, and whether
+  `escalateOnMaxRounds` was configured). The configured handler/webhook
+  string itself is never persisted or executed — it remains inert, and
+  config doctor warns when it is set (#1650).
+
+## 9b. Council review identity, completion policy, and freshness
+
+Since the #2102 remediation, every council review (task, phase, and final) is
+bound to one canonical, versioned **review identity** computed by a single
+shared implementation used by both the evidence writers and the completion
+gates:
+
+- a **status-stable review hash** over every review-relevant plan field
+  (descriptions, acceptance, dependencies, `files_touched`,
+  `required_agents`, size, execution requirements, `fr_refs`, phase type,
+  migration status, title, swarm, schema version). Pure execution progress —
+  task/phase statuses, the current-phase pointer, transient
+  `blocked_reason`, and spec timestamps — is excluded. Ordinary progress
+  (e.g. flipping a task to `complete` after the final council approved)
+  therefore **no longer invalidates a completed review**; any
+  review-relevant plan change does.
+- a **council policy digest** over the normalized policy that shaped the
+  review (quorum knobs, veto/concerns behavior, `maxRounds`, the freshness
+  window, and for the final council `finalCompletionPolicy`). Any policy
+  change opens a fresh authoritative round generation and invalidates
+  previously accepted evidence.
+- the identity is the scope/generation key of the server-owned round state
+  (`#2085` semantics unchanged: append-only attempt audit, idempotency,
+  crash recovery, fail-closed parsing).
+
+**Final completion policy.** The final council is governed by
+`council.finalCompletionPolicy`, which is deliberately separate from the
+task/phase `minimumMembers`/`requireAllMembers` knobs:
+
+- Missing/default `all_required` preserves the exact legacy requirement:
+  all five canonical roles (`critic`, `reviewer`, `sme`, `test_engineer`,
+  `explorer`), five distinct members, zero absentees.
+- `quorum` is an explicit weakening: `{ "mode": "quorum", "minimumMembers": 4 }`
+  accepts four distinct canonical members. `minimumMembers` must be 3–5.
+  Unknown, duplicate, and cross-swarm identities never count (two prefixed
+  names resolving to the same canonical role are one member), and config
+  doctor visibly flags quorum mode as weaker than the strict default.
+
+**Freshness.** One evaluator and one config field
+(`council.freshnessMaxAgeHours`, default 24, bounded 1–720) govern the phase
+council, architecture supervisor, and final council. All gates in one
+phase-complete preflight share a single captured clock. Invalid and future
+timestamps fail closed, and council evidence must postdate the phase
+retrospective when one exists.
+
+**Upgrade / migration.** Evidence written before this remediation carries no
+identity proof. It is not backfilled or trusted: the completion gates and
+the session-rehydration fast path fail closed and require one fresh council
+run per affected scope after upgrading. Legacy round-state and attempt files
+remain on disk, unchanged and auditable.
 
 ## 10. Minimal working example
 
@@ -242,8 +301,10 @@ refuse synthesis when any member context fails to produce a verdict.
   of 5 verdicts provided`."** You have `requireAllMembers: true` and one
   or more members failed to return a verdict. Either set
   `requireAllMembers: false` to synthesize on partial councils, or
-  investigate why the missing member(s) did not dispatch — check
-  `parallelTimeoutMs` and the member-specific context for dispatch errors.
+  investigate why the missing member(s) did not dispatch — inspect the
+  member-specific dispatch context and errors. (Do not tune
+  `parallelTimeoutMs`: it is deprecated and inert — dispatch timeouts are
+  governed by the agent host.)
 
 ---
 

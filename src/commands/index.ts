@@ -4,7 +4,7 @@ import {
 	type AgentName,
 	ORCHESTRATOR_NAME,
 } from '../config/constants.js';
-import type { AutoReviewConfig } from '../config/schema.js';
+import type { AutoReviewConfig, PluginConfig } from '../config/schema.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
 import type { ReviewModelDispatcher } from '../review/contracts.js';
@@ -32,6 +32,7 @@ export { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift';
 // Re-export individual handlers
 export { handleAgentsCommand } from './agents';
 export { handleAnalyzeCommand } from './analyze';
+export { handleApproveWriteCommand } from './approve-write';
 export { handleArchiveCommand } from './archive';
 export { handleAutoProceedCommand } from './auto-proceed';
 export { handleBenchmarkCommand } from './benchmark';
@@ -70,6 +71,16 @@ export { handleGateStatsCommand } from './gate-stats';
 export { handleGuardrailExplain } from './guardrail-explain';
 export { handleGuardrailLog } from './guardrail-log';
 export { handleHandoffCommand } from './handoff';
+export {
+	handleBlueprintCurrentCommand,
+	handleBlueprintDiffCommand,
+	handleBlueprintExportCommand,
+	handleBlueprintHistoryCommand,
+	handleBlueprintValidateCommand,
+	handleHarnessCandidateDiffCommand,
+	handleHarnessCandidateShowCommand,
+	handleHarnessCandidateValidateCommand,
+} from './harness';
 export { handleHistoryCommand } from './history';
 export {
 	handleKnowledgeListCommand,
@@ -291,6 +302,7 @@ export function createSwarmCommandHandler(
 	agents: Record<string, AgentDefinition>,
 	options: {
 		getActiveAgentName?: (sessionID: string) => string | undefined;
+		config?: PluginConfig;
 		packageRoot?: string;
 		registeredAgents?: Record<string, { tools?: Record<string, boolean> }>;
 		evaluationModelDispatcher?: EvaluationModelDispatcher;
@@ -318,6 +330,7 @@ export function createSwarmCommandHandler(
 				sessionID: input.sessionID,
 				tokens: normalized.tokens,
 				activeAgentName: options.getActiveAgentName?.(input.sessionID),
+				config: options.config,
 				packageRoot: options.packageRoot,
 				registeredAgents: options.registeredAgents,
 				evaluationModelDispatcher: options.evaluationModelDispatcher,
@@ -336,6 +349,7 @@ async function buildSwarmCommandPrompt(args: {
 	sessionID: string;
 	tokens: string[];
 	activeAgentName?: string;
+	config?: PluginConfig;
 	packageRoot?: string;
 	registeredAgents?: Record<string, { tools?: Record<string, boolean> }>;
 	evaluationModelDispatcher?: EvaluationModelDispatcher;
@@ -349,6 +363,7 @@ async function buildSwarmCommandPrompt(args: {
 		sessionID,
 		tokens,
 		activeAgentName,
+		config,
 		packageRoot,
 		registeredAgents,
 		evaluationModelDispatcher,
@@ -403,6 +418,7 @@ async function buildSwarmCommandPrompt(args: {
 		agents,
 		sessionID,
 		tokens,
+		config,
 		packageRoot,
 		evaluationModelDispatcher,
 		reviewModelDispatcher,

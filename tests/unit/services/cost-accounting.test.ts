@@ -5,6 +5,9 @@ import * as path from 'node:path';
 import {
 	buildDelegationCostFields,
 	estimateCostUsd,
+	extractCostEvidence,
+	foldTelemetryEvents,
+	isCostEvidenceComplete,
 	summarizeTelemetryCosts,
 } from '../../../src/services/cost-accounting';
 
@@ -33,7 +36,7 @@ describe('buildDelegationCostFields', () => {
 						reasoning_tokens: 100,
 						cached_input_tokens: 200,
 					},
-					cost_usd: '0.1234567',
+					cost_usd: 0.1234567,
 					model: 'provider/model',
 				},
 			},
@@ -71,6 +74,7 @@ describe('buildDelegationCostFields', () => {
 					},
 				},
 			},
+			reported_cost_currency: 'USD',
 		});
 
 		expect(fields).toMatchObject({
@@ -282,10 +286,211 @@ describe('summarizeTelemetryCosts', () => {
 		expect(summary.total_cost_usd).toBe(0.13);
 		expect(summary.total_input_tokens).toBe(125);
 		expect(summary.total_output_tokens).toBe(65);
+		expect(summary.evidence_status).toBe('inconclusive');
+		expect(summary.telemetry_error_count).toBe(1);
 		expect(summary.by_agent.map((r) => r.name).sort()).toEqual([
 			'coder',
 			'reviewer',
 			'tester',
 		]);
+	});
+});
+
+describe('typed cost evidence', () => {
+	it('uses the pinned assistant report instead of an outer wrapper cost', () => {
+		const fields = buildDelegationCostFields({
+			raw: {
+				cost: 0,
+				assistant: {
+					role: 'assistant',
+					modelID: 'm',
+					providerID: 'p',
+					cost: 0.25,
+					tokens: { input: 10, output: 2 },
+				},
+			},
+			reported_cost_currency: 'USD',
+		});
+		expect(fields.cost_usd).toBe(0.25);
+		expect(fields.cost_source).toBe('reported');
+		expect(fields.evidence_status).toBe('complete');
+	});
+
+	it('keeps an unknown-currency provider report unavailable', () => {
+		const fields = buildDelegationCostFields({
+			raw: { role: 'assistant', cost: 0, tokens: { input: 4 } },
+		});
+		expect(fields.cost_usd).toBeNull();
+		expect(fields.cost_source).toBe('unavailable');
+		expect(fields.currency).toBe('unknown');
+		expect(isCostEvidenceComplete(fields.cost_evidence)).toBe(false);
+	});
+
+	it('rejects numeric strings and malformed negative provider values', () => {
+		const evidence = extractCostEvidence({
+			role: 'assistant',
+			cost: '0.2',
+			tokens: { input: -1 },
+		});
+		expect(evidence[0]).toMatchObject({
+			amount_usd: null,
+			reason: 'invalid_number',
+		});
+	});
+
+	it('records a report/estimate pair without letting the estimate conflict', () => {
+		const fields = buildDelegationCostFields({
+			raw: { role: 'assistant', cost: 0.2, tokens: { input: 1_000_000 } },
+			reported_cost_currency: 'USD',
+			pricing: {
+				version: 'prices-v1',
+				effective_at: '2026-08-29T00:00:00.000Z',
+				billing_basis: 'token',
+				models: { m: { input_per_million: 0.1, output_per_million: 0 } },
+			},
+			model: 'm',
+		});
+		expect(fields.cost_source).toBe('reported');
+		expect(fields.cost_usd).toBe(0.2);
+		expect(fields.cost_evidence?.length).toBe(2);
+		expect(fields.cost_evidence?.[1]).toMatchObject({
+			pricing_version: 'prices-v1',
+			pricing_effective_at: '2026-08-29T00:00:00.000Z',
+			billing_basis: 'token',
+		});
+	});
+
+	it('uses configured pricing when pinned SDK tokens have no monetary report', () => {
+		const fields = buildDelegationCostFields({
+			raw: { role: 'assistant', tokens: { input: 1_000_000, output: 0 } },
+			model: 'provider/model',
+			pricing: {
+				models: {
+					'provider/model': { input_per_million: 1, output_per_million: 0 },
+				},
+			},
+		});
+		expect(fields).toMatchObject({
+			cost_usd: 1,
+			cost_source: 'estimated',
+			evidence_status: 'complete',
+		});
+	});
+});
+
+describe('append-only correction folding', () => {
+	const initial = {
+		event: 'delegation_end',
+		record_id: 'record-1',
+		identity_fingerprint: 'a'.repeat(32),
+		version: 1,
+		cost_usd: null,
+		cost_source: 'unavailable',
+		tokens_input: 10,
+		tokens_output: 1,
+	};
+
+	it('replaces the effective snapshot once without adding a delegation', () => {
+		const folded = foldTelemetryEvents([
+			initial,
+			{
+				event: 'delegation_cost_correction',
+				record_id: 'record-1',
+				identity_fingerprint: 'a'.repeat(32),
+				version: 2,
+				cost_usd: 0.3,
+				cost_source: 'reported',
+				tokens_input: 20,
+				tokens_output: 4,
+			},
+		]);
+		expect(folded.events).toHaveLength(1);
+		expect(folded.events[0]).toMatchObject({ cost_usd: 0.3, tokens_input: 20 });
+		expect(folded.stats.accepted_corrections).toBe(1);
+	});
+
+	it('rejects stale and orphan corrections', () => {
+		const folded = foldTelemetryEvents([
+			{ event: 'delegation_cost_correction', record_id: 'missing', version: 2 },
+			initial,
+			{
+				...initial,
+				event: 'delegation_cost_correction',
+				version: 3,
+				cost_usd: 1,
+			},
+		]);
+		expect(folded.events).toHaveLength(1);
+		expect(folded.stats.rejected_corrections).toBe(2);
+	});
+
+	it('rejects malformed modern initials and preserves row identity on correction', () => {
+		const malformed = foldTelemetryEvents([
+			{ ...initial, version: 2 },
+			{ ...initial, record_id: 'record-2', identity_fingerprint: undefined },
+		]);
+		expect(malformed.events).toHaveLength(2);
+		expect(malformed.events.map((event) => event.record_id)).toEqual([
+			'record-1',
+			'record-2',
+		]);
+		expect(malformed.stats.rejected_corrections).toBe(2);
+
+		const folded = foldTelemetryEvents([
+			{ ...initial, agentName: 'coder', taskId: '1.1', model: 'provider/a' },
+			{
+				event: 'delegation_cost_correction',
+				record_id: 'record-1',
+				identity_fingerprint: 'a'.repeat(32),
+				version: 2,
+				agentName: 'attacker',
+				taskId: 'other',
+				model: 'provider/other',
+				cost_usd: 0.3,
+				cost_source: 'reported',
+				tokens_input: 20,
+				tokens_output: 4,
+			},
+		]);
+		expect(folded.events[0]).toMatchObject({
+			agentName: 'coder',
+			taskId: '1.1',
+			model: 'provider/a',
+		});
+	});
+
+	it('accepts a reported correction even when its diagnostic estimate differs', () => {
+		const folded = foldTelemetryEvents([
+			initial,
+			{
+				event: 'delegation_cost_correction',
+				record_id: 'record-1',
+				identity_fingerprint: 'a'.repeat(32),
+				version: 2,
+				cost_usd: 0.2,
+				cost_source: 'reported',
+				cost_evidence: [
+					{
+						kind: 'provider_reported',
+						amount_usd: 0.2,
+						currency: 'USD',
+						source_path: 'assistant.cost',
+						reason: 'authoritative',
+						usage: {},
+					},
+					{
+						kind: 'normalized_estimate',
+						amount_usd: 0.1,
+						currency: 'USD',
+						source_path: 'pricing.model',
+						reason: 'authoritative',
+						usage: {},
+					},
+				],
+			},
+		]);
+		expect(folded.stats.accepted_corrections).toBe(1);
+		expect(folded.stats.conflict_count).toBe(0);
+		expect(folded.events[0]?.cost_usd).toBe(0.2);
 	});
 });

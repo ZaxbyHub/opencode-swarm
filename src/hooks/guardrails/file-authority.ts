@@ -21,6 +21,7 @@ import {
 	stripKnownSwarmPrefix,
 } from '../../config/schema';
 import { classifyFile, type FileZone } from '../../context/zone-classifier';
+import { appendCoreEventSync } from '../../events/core-events.js';
 import {
 	getPathFlavor,
 	isOnDifferentPathRoot,
@@ -31,6 +32,7 @@ import {
 	sanitizeDiagnosticText,
 	unsafePathTextReason,
 } from '../../scope/path-identity';
+import { isPolicyProtectedPath } from '../../security/protected-path-policy.js';
 import { log, warn } from '../../utils';
 import {
 	boundedBunHash,
@@ -142,9 +144,6 @@ export async function validateAndRecordAttestation(
 ): Promise<{ valid: true } | { valid: false; reason: string }> {
 	const result = validateAttestation(attestation, findingId, agent, action);
 	if (!result.valid) {
-		const swarmDir = path.join(dir, '.swarm');
-		await fs.mkdir(swarmDir, { recursive: true });
-		const eventsPath = path.join(swarmDir, 'events.jsonl');
 		const event = {
 			event: 'attestation_rejected',
 			findingId,
@@ -153,7 +152,7 @@ export async function validateAndRecordAttestation(
 			reason: result.reason,
 			timestamp: new Date().toISOString(),
 		};
-		await fs.appendFile(eventsPath, `${JSON.stringify(event)}\n`);
+		appendCoreEventSync(dir, event);
 		return result;
 	}
 	const record: AttestationRecord = {
@@ -882,12 +881,19 @@ export function checkFileAuthorityWithRules(
 	}
 
 	const isCoderAgent = normalizedAgent === 'coder' || strippedAgent === 'coder';
-	if (isCoderAgent && matchesPathPrefix(normalizedPath, '.swarm')) {
+	if (
+		isCoderAgent &&
+		isPolicyProtectedPath(normalizedPath, {
+			includeDefaults: false,
+			additional: ['.git', '.swarm'],
+		})
+	) {
 		return denyAuthority(agentName, normalizedPath, {
 			code: 'AUTHORITY_PROTECTED_PATH',
 			layer: 'protected-path',
-			rule: 'coder-swarm-state-protection',
-			detail: 'coder writes to .swarm are always protected',
+			rule: 'coder-control-state-protection',
+			detail:
+				'coder writes to repository control state (.git/.swarm) are always protected',
 		});
 	}
 	const isSwarmRole = Object.hasOwn(AUTHORITY_ROLE_CAPABILITIES, strippedAgent);

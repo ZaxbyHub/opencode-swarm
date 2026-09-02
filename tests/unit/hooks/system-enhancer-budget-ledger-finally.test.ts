@@ -36,13 +36,22 @@ import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import * as realExtractors from '../../../src/hooks/extractors.js';
 import {
-	clearUnifiedBudget,
-	getSystemEnhancerDemand,
-	getUnifiedBudgetTotal,
+	clearTurnLedger,
+	getProducerEmission,
+	getTurnLedgerSummary,
 } from '../../../src/services/injection-budget.js';
 import { resetSwarmState } from '../../../src/state.js';
 
 const FORCE_THROW_MARKER = '__FR004_FORCE_LEDGER_THROW__';
+
+// Captured as a VALUE before the mock.module registration below. Bun's
+// mock.module retroactively patches the original module's export slots, so a
+// later `realExtractors.extractPlanCursor(...)` property read resolves to the
+// wrapper itself — the passthrough would be infinite tail recursion and hang
+// the shared test process for any co-located suite calling the export with
+// non-marker content (the issue #2260/#2477 class; proven by scratch probe).
+// A captured function reference stays the real implementation.
+const realExtractPlanCursor = realExtractors.extractPlanCursor;
 
 // Mocked BEFORE system-enhancer.ts is (lazily) required below, so the hook
 // body's `extractPlanCursor` import resolves to this wrapper. Every real
@@ -63,7 +72,7 @@ mock.module('../../../src/hooks/extractors.js', () => ({
 				'Simulated mid-turn exception after injection (FR-004 repro)',
 			);
 		}
-		return realExtractors.extractPlanCursor(planContent, options);
+		return realExtractPlanCursor(planContent, options);
 	},
 }));
 
@@ -110,12 +119,16 @@ describe('system-enhancer budget ledger — unconditional write on mid-turn thro
 		);
 		fs.writeFileSync(path.join(swarmDir, 'context.md'), '# Context\n');
 		resetSwarmState();
-		clearUnifiedBudget(sessionID);
+		clearTurnLedger(sessionID);
 	});
 
 	afterEach(() => {
+		// Best-effort module-mock cleanup (check:mock-cleanup requires it).
+		// Note: Bun's mock.restore does not reliably undo mock.module; this
+		// file stays isolated for that reason (see the header comment).
+		mock.restore();
 		fs.rmSync(tempDir, { recursive: true, force: true });
-		clearUnifiedBudget(sessionID);
+		clearTurnLedger(sessionID);
 	});
 
 	it('writes the actual injected demand to the ledger even when the hook throws after injection', async () => {
@@ -156,16 +169,16 @@ describe('system-enhancer budget ledger — unconditional write on mid-turn thro
 			false,
 		);
 
-		// FR-004 assertion: despite the mid-turn throw, the ledger reflects
-		// the REAL demand accumulated up to the throw point — not the
-		// fail-open-to-0 default getSystemEnhancerDemand() returns for a
+		// FR-004/#2107 §2 assertion: despite the mid-turn throw, the ledger
+		// reflects the REAL demand accumulated up to the throw point — not the
+		// fail-open-to-0 default getProducerEmission() returns for a
 		// missing/stale entry.
-		const recordedDemand = getSystemEnhancerDemand(sessionID);
+		const recordedDemand = getProducerEmission(sessionID, 'system-enhancer');
 		expect(recordedDemand).toBeGreaterThan(0);
 
-		// And resetUnifiedBudget() actually ran with the configured ceiling —
+		// And beginTurnLedger() actually ran with the configured ceiling —
 		// proving a ledger entry exists at all, not merely that
-		// getSystemEnhancerDemand's default happens to be non-zero.
-		expect(getUnifiedBudgetTotal(sessionID)).toBe(unifiedBudget);
+		// getProducerEmission's default happens to be non-zero.
+		expect(getTurnLedgerSummary(sessionID)?.totalBudget).toBe(unifiedBudget);
 	});
 });

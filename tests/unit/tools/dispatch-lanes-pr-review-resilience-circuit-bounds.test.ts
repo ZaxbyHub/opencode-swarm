@@ -156,7 +156,7 @@ afterEach(async () => {
 });
 
 describe('dispatch_lanes PR review resilience circuit bounds', () => {
-	test('migrated legacy state opens a typed durable circuit from six repeated failed dimensions, not 132 repeated lane launches', async () => {
+	test('migrates a persisted legacy circuit once to a nonblocking v2 CLOSED record; pre-upgrade evidence never reopens it (issue #2382)', async () => {
 		let created = 0;
 		dispatchInternals.getSessionOps = () => ({
 			create: mock(async () => ({ data: { id: `lane-session-${created++}` } })),
@@ -236,7 +236,30 @@ describe('dispatch_lanes PR review resilience circuit bounds', () => {
 			updatedAt: '2026-08-23T01:00:00.000Z',
 			prReviewBaseDispatches: seededBatches,
 			prReviewBaseDispatch: seededBatches.at(-1),
-			prReviewResilience: undefined,
+			// A persisted UNVERSIONED (pre-#2382) circuit: blocked forever under
+			// the old shape; must migrate once to a nonblocking v2 CLOSED record.
+			prReviewResilience: {
+				policy: {
+					enabled: true,
+					canaryProbeMs: DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.canary_probe_ms,
+					statusProbeTimeoutMs:
+						DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.status_probe_timeout_ms,
+					correlatedFailureThreshold:
+						DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.correlated_failure_threshold,
+					maxRetryAttemptsAfterInitial:
+						DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.max_retry_attempts_after_initial,
+				},
+				attempts: [],
+				circuit: {
+					signature: 'terminal-error-output:error:http 503 upstream overloaded',
+					count: 6,
+					contributors: seededBatches.slice(0, 6).map((batch, index) => ({
+						batchId: batch.batchId,
+						laneId: batch.lanes[index]!.laneId,
+					})),
+					openedAt: '2026-08-23T00:30:00.000Z',
+				},
+			},
 		});
 		await clearDelegationCheckpointArtifacts(directory);
 		await fs.writeFile(
@@ -247,10 +270,13 @@ describe('dispatch_lanes PR review resilience circuit bounds', () => {
 		gateInternals.resetTrackedStateCache();
 		dispatchInternals.loadPluginConfig = () =>
 			({
-				pr_review_resilience: DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+				pr_review_resilience: {
+					...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+					enabled: true,
+				},
 			}) as ReturnType<typeof originalDispatchLoadPluginConfig>;
 
-		const blocked = await executeDispatchLanesAsync(
+		const admitted = await executeDispatchLanesAsync(
 			{
 				mode: 'swarm-pr-review:base',
 				pr_head_sha: 'abc123',
@@ -266,50 +292,29 @@ describe('dispatch_lanes PR review resilience circuit bounds', () => {
 			directory,
 			{ sessionID },
 		);
-		expect(blocked.success).toBe(false);
-		expect(blocked.failure_class).toBe('circuit_open');
+		expect(admitted.success).toBe(true);
 
 		const state = await readPrWorkflowGateState(directory, sessionID);
-		expect(state?.prReviewResilience?.circuit?.count).toBe(
-			PR_REVIEW_BASE_DIMENSION_IDS.length,
-		);
-		expect(state?.prReviewResilience?.circuit?.contributors).toHaveLength(
-			PR_REVIEW_BASE_DIMENSION_IDS.length,
-		);
-		expect(created).toBe(6);
+		const circuit = state?.prReviewResilience?.circuit;
+		expect(circuit?.version).toBe(2);
+		expect(circuit?.state).toBe('CLOSED');
+		expect(circuit?.contributors).toHaveLength(0);
+		expect(circuit?.evidenceWaterline).toBeDefined();
+		expect(state?.prReviewResilience?.attempts).toHaveLength(1);
+		expect(created).toBe(7);
 
 		await removeDelegationStore(directory);
 		gateInternals.resetTrackedStateCache();
 		const reloaded = await readPrWorkflowGateState(directory, sessionID);
-		expect(reloaded?.prReviewResilience?.circuit?.count).toBe(
-			PR_REVIEW_BASE_DIMENSION_IDS.length,
-		);
-		expect(reloaded?.prReviewResilience?.circuit?.contributors).toHaveLength(
-			PR_REVIEW_BASE_DIMENSION_IDS.length,
-		);
+		const reloadedCircuit = reloaded?.prReviewResilience?.circuit;
+		expect(reloadedCircuit?.version).toBe(2);
+		expect(reloadedCircuit?.state).toBe('CLOSED');
+		expect(reloadedCircuit?.evidenceWaterline).toBeDefined();
 
-		const stillBlocked = await executeDispatchLanesAsync(
-			{
-				mode: 'swarm-pr-review:base',
-				pr_head_sha: 'abc123',
-				base_sha: 'def456',
-				base_ref: 'origin/main',
-				pr_review_wave_stage: 'canary',
-				pr_review_wave_attempt: 0,
-				max_concurrent: 1,
-				lanes: [
-					lane(
-						'circuit-migration-canary-retry',
-						PR_REVIEW_BASE_DIMENSION_IDS[1]!,
-					),
-				],
-			},
-			directory,
-			{ sessionID },
-		);
-		expect(stillBlocked.success).toBe(false);
-		expect(stillBlocked.failure_class).toBe('circuit_open');
-		expect(created).toBe(6);
+		// The canary admission above IS the no-immediate-reopen proof: the
+		// machine evaluated the full legacy evidence set (132 records, none
+		// typed) against the migrated CLOSED record and did not open. The
+		// migration is durable across a state reload, as asserted above.
 	});
 
 	test('reloads a persisted circuit at the exact contributor bound', async () => {
@@ -362,22 +367,26 @@ describe('dispatch_lanes PR review resilience circuit bounds', () => {
 			},
 			attempts: [],
 			circuit: {
-				signature: 'terminal-error-output:error:http 503 upstream overloaded',
-				count: maxContributors,
+				version: 2,
+				state: 'OPEN',
+				generation: 1,
+				providerClass: 'provider.rate_limit',
 				contributors: Array.from({ length: maxContributors }, (_, index) => ({
 					batchId: `batch-${Math.floor(index / PR_REVIEW_BASE_DIMENSION_IDS.length)}`,
 					laneId: `lane-${index}`,
+					terminalAt: '2026-08-23T00:00:00.000Z',
 				})),
 				openedAt: '2026-08-23T00:00:00.000Z',
+				openUntil: '2026-08-23T00:01:00.000Z',
 			},
 		};
 		await fs.writeFile(statePath, JSON.stringify(persisted, null, 2), 'utf-8');
 		gateInternals.resetTrackedStateCache();
 
 		const reloaded = await readPrWorkflowGateState(directory, sessionID);
-		expect(reloaded?.prReviewResilience?.circuit?.count).toBe(maxContributors);
-		expect(reloaded?.prReviewResilience?.circuit?.contributors).toHaveLength(
-			maxContributors,
-		);
+		const circuit = reloaded?.prReviewResilience?.circuit;
+		expect(circuit?.version).toBe(2);
+		expect(circuit?.state).toBe('OPEN');
+		expect(circuit?.contributors).toHaveLength(maxContributors);
 	});
 });

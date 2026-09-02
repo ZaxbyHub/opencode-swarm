@@ -21,6 +21,7 @@ import {
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	statSync,
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -33,6 +34,7 @@ import {
 import type { MessageWithParts } from '../../../src/hooks/knowledge-types';
 import { setLiveContextWindow, swarmState } from '../../../src/state';
 import { installKnowledgeReceiptAuthorityStub } from '../../helpers/knowledge-receipt-authority.js';
+import { waitFor } from '../../helpers/wait-for';
 
 const baseConfig = KnowledgeConfigSchema.parse({});
 let tempDir: string;
@@ -338,7 +340,14 @@ describe('knowledge injector injection_skip telemetry (#1768/#1849)', () => {
 				},
 			]),
 		);
-		await new Promise((r) => setTimeout(r, 20));
+		// The record is fire-and-forget: poll for the flush instead of a
+		// fixed sleep (a 20ms sleep raced the write and failed attempt-1 on
+		// cold windows-latest runners — issue #2477 flake family).
+		await waitFor(
+			() => existsSync(eventsPath) && statSync(eventsPath).size > 0,
+			2000,
+			'injection_skip event to flush to disk',
+		);
 
 		expect(existsSync(eventsPath)).toBe(true);
 		const lines = readFileSync(eventsPath, 'utf-8')
@@ -351,5 +360,24 @@ describe('knowledge injector injection_skip telemetry (#1768/#1849)', () => {
 		expect(parsed.reason).toBe('no_agent_name');
 		expect(parsed.event_id).toBeDefined();
 		expect(parsed.timestamp).toBeDefined();
+	});
+});
+
+describe('knowledge injector no_messages skip (#2044 item 4)', () => {
+	test('an empty message surface emits a skip with an explicit missing reason', async () => {
+		const { events } = captureEvents();
+		const hook = createKnowledgeInjectorHook(tempDir, {
+			...baseConfig,
+			enabled: true,
+		});
+		await hook({}, output([]));
+		await new Promise((r) => setTimeout(r, 5));
+
+		const skips = skipEvents(events);
+		expect(skips.length).toBe(1);
+		expect(skips[0].reason).toBe('no_messages');
+		expect(skips[0].detail).toMatchObject({
+			context: { missing: ['messages'] },
+		});
 	});
 });

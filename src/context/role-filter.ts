@@ -3,10 +3,11 @@
  * Filters context entries based on [FOR: ...] tags for role-based context delivery.
  */
 
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
+import { appendCoreEventSync } from '../events/core-events.js';
 import { parseDelegationEnvelope } from '../hooks/delegation-gate.js';
+import { estimateTokens } from '../hooks/utils';
+import { deductProducerEmission } from '../services/injection-budget';
 import { log } from '../utils';
 
 /**
@@ -147,8 +148,7 @@ function logFilteringMetrics(
 	includedEntries: number,
 ): void {
 	try {
-		const eventsPath = path.join(directory, '.swarm', 'events.jsonl');
-		const event = {
+		appendCoreEventSync(directory, {
 			event: 'context_filtered',
 			timestamp: new Date().toISOString(),
 			agentName: targetRole,
@@ -156,15 +156,7 @@ function logFilteringMetrics(
 			includedEntries,
 			filteredEntries: totalEntries - includedEntries,
 			estimatedTokensSaved: (totalEntries - includedEntries) * 100,
-		};
-
-		// Ensure .swarm directory exists
-		const swarmDir = path.dirname(eventsPath);
-		if (!fs.existsSync(swarmDir)) {
-			fs.mkdirSync(swarmDir, { recursive: true });
-		}
-
-		fs.appendFileSync(eventsPath, `${JSON.stringify(event)}\n`, 'utf-8');
+		});
 	} catch (error) {
 		log('[RoleFilter] event append failed', {
 			error: error instanceof Error ? error.message : String(error),
@@ -275,6 +267,35 @@ export function createRoleFilterSystemHook(
 			// filtering would silently never happen. Enforced by
 			// tests/unit/hooks/chat-transform-rebind-guard.test.ts.
 			const kept = filtered.map(({ content }) => content);
+			// #2107 §3 reconciliation: the system-enhancer already recorded
+			// every pushed string as a ledger emission; strings this filter
+			// removes ([FOR: role] tagged fragments for a nonmatching active
+			// agent) never reach the model, so their tokens are deducted from
+			// the system-enhancer producer before the final accounting sums
+			// system-surface emissions.
+			const keptRemaining = new Map<string, number>();
+			for (const content of kept) {
+				keptRemaining.set(content, (keptRemaining.get(content) ?? 0) + 1);
+			}
+			let removedTokens = 0;
+			for (const { content } of entries) {
+				const remaining = keptRemaining.get(content) ?? 0;
+				if (remaining > 0) {
+					keptRemaining.set(content, remaining - 1);
+				} else {
+					removedTokens += estimateTokens(content);
+				}
+			}
+			// Assumption: only the system-enhancer pushes [FOR: role] fragments
+			// into output.system today (verified by grep); if another producer
+			// ever does, the deduction must be attributed per-producer.
+			if (removedTokens > 0) {
+				deductProducerEmission(
+					input.sessionID,
+					'system-enhancer',
+					removedTokens,
+				);
+			}
 			output.system.length = 0;
 			// Loop rather than `push(...kept)`: the injected-fragment count is
 			// unbounded and spreading it can exceed the engine's argument limit.

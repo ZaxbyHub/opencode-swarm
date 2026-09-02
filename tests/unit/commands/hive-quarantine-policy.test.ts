@@ -76,10 +76,10 @@ describe('knowledge hive-quarantine policy (issue #2033)', () => {
 		expect(r.remainingArgs).toEqual(['preview', 'id-1']);
 	});
 
-	test('registry human-only bucket still contains exactly the expected 10 commands', () => {
+	test('registry human-only bucket still contains exactly the expected 12 commands', () => {
 		// Mirrors the no-regression bucket snapshot in tool-policy.human-only.test.ts
 		// (moved out of the FR-006 over-capped registry.tool-policy.test.ts) —
-		// #2033's entry made it 9; #2268's /swarm recover made it 10.
+		// #2033 and #2268 expanded the bucket; #1824 adds approve-write.
 		const actual = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
 			if ((entry as { toolPolicy?: string }).toolPolicy === 'human-only') {
@@ -88,6 +88,7 @@ describe('knowledge hive-quarantine policy (issue #2033)', () => {
 		}
 		expect([...actual].sort()).toEqual(
 			[
+				'full-auto',
 				'review',
 				'memory compact',
 				'memory import',
@@ -98,6 +99,7 @@ describe('knowledge hive-quarantine policy (issue #2033)', () => {
 				'skill-opt rollback',
 				'knowledge hive-quarantine',
 				'recover',
+				'approve-write',
 			].sort(),
 		);
 	});

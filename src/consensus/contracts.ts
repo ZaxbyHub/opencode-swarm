@@ -13,6 +13,7 @@
  */
 
 import { z } from 'zod';
+import type { WriteAuthorityOrigin } from '../security/write-authority.js';
 
 /**
  * Deliberately looser than `EvaluationIdentifierSchema`: consensus references
@@ -307,6 +308,7 @@ export interface ProposedSkillChangeProvenance {
 	writeOrigin: {
 		sessionId?: string;
 		agentRole?: string;
+		authority?: WriteAuthorityOrigin;
 		producedAt: string;
 	};
 }
@@ -324,6 +326,14 @@ const ProposedSkillChangeProvenanceSchema = z
 			.object({
 				sessionId: ReferenceSchema.optional(),
 				agentRole: ReferenceSchema.optional(),
+				authority: z
+					.enum([
+						'autonomous',
+						'optimizer_proposed',
+						'critic_approved',
+						'human_approved',
+					])
+					.optional(),
 				producedAt: IsoDateSchema,
 			})
 			.strict(),
@@ -392,7 +402,11 @@ const ConsensusCorpusHashSchema = z
  * the difference between an incomplete report and a misleading one.
  */
 export interface ConsensusTruncationV1 {
-	/** `maxEvidenceItems` cut the corpus before tallying. */
+	/**
+	 * `maxEvidenceItems` cut the corpus before tallying, OR skill-usage
+	 * compaction evicted history the corpus would otherwise have covered
+	 * (issue #2038).
+	 */
 	corpus: boolean;
 	/** Observations actually tallied, after filtering and after the corpus cut. */
 	observations: number;

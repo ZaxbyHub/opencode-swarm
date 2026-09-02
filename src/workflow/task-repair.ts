@@ -1,4 +1,8 @@
-import { appendFile, readFile } from 'node:fs/promises';
+import {
+	appendCoreEventSync,
+	CORE_EVENT_LOCKED,
+	hasTaskRepairAuditEvent,
+} from '../events/core-events.js';
 import {
 	getTaskWorkflowSnapshot,
 	type TaskEvidence,
@@ -31,7 +35,6 @@ async function recoverPreparedTaskRepairWithPlanLock(
 	NonNullable<Awaited<ReturnType<typeof loadPlanJsonOnly>>>
 > | null> {
 	const walPath = validateSwarmPath(directory, `task-repairs/${taskId}.json`);
-	const eventsPath = validateSwarmPath(directory, 'events.jsonl');
 	// Single read: this helper always runs with plan.json already locked by the
 	// caller, so the pre-lock observe half of the observe-then-reread idiom
 	// (see recoverPreparedTaskRepair) has no meaning here.
@@ -39,7 +42,7 @@ async function recoverPreparedTaskRepairWithPlanLock(
 	if (wal === null) return null;
 	if (wal.state === 'ABORTED') return null;
 	if (wal.state === 'COMMITTED') {
-		await ensureAuditEvent(directory, eventsPath, wal);
+		await ensureAuditEvent(directory, wal);
 		return null;
 	}
 	const task = currentPlan.phases
@@ -98,11 +101,7 @@ export async function recoverPreparedTaskRepair(
 	const observedWal = await readWal(walPath, taskId);
 	if (observedWal === null || observedWal.state === 'ABORTED') return null;
 	if (observedWal.state === 'COMMITTED') {
-		await ensureAuditEvent(
-			directory,
-			validateSwarmPath(directory, 'events.jsonl'),
-			observedWal,
-		);
+		await ensureAuditEvent(directory, observedWal);
 		return null;
 	}
 	const lock = await tryAcquireLock(
@@ -155,89 +154,29 @@ async function readWal(
 	return readWorkflowWalFile('task-repair', filePath, taskId);
 }
 
-async function readText(filePath: string): Promise<string | null> {
-	try {
-		return await readFile(filePath, 'utf-8');
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-		throw error;
-	}
-}
-
 async function writeWal(filePath: string, wal: TaskRepairWal): Promise<void> {
 	await writeWorkflowWalFile('task-repair', filePath, wal);
 }
 
-function parseAuditEventLine(line: string): Record<string, unknown> | null {
-	try {
-		return JSON.parse(line) as Record<string, unknown>;
-	} catch {
-		// A malformed/truncated line elsewhere in the shared events.jsonl file
-		// must never block audit-event dedup or verification for this task.
-		return null;
-	}
-}
-
-function findRepairEvent(
-	content: string | null,
-	taskId: string,
-	transitionId: string,
-): boolean {
-	if (!content) return false;
-	// Cheap pre-filter: this function runs on every lazy-recovery call for a
-	// COMMITTED-but-unaudited-checked task (the WAL is never deleted), so avoid
-	// paying a full JSON.parse per line of a growing, unrotated events.jsonl
-	// when the transitionId cannot possibly be present. Search for the
-	// JSON-string-escaped form (matching how it is serialized by
-	// JSON.stringify below) so a transitionId containing a quote, backslash,
-	// or control character can't produce a false negative here.
-	const transitionNeedle = JSON.stringify(transitionId).slice(1, -1);
-	const taskNeedle = JSON.stringify(taskId).slice(1, -1);
-	if (!content.includes(transitionNeedle) || !content.includes(taskNeedle))
-		return false;
-	for (const line of content.split('\n')) {
-		if (!line.trim()) continue;
-		const event = parseAuditEventLine(line);
-		if (!event) continue;
-		if (
-			event.type === 'task_workflow_repaired' &&
-			event.taskId === taskId &&
-			event.transitionId === transitionId
-		) {
-			return true;
-		}
-	}
-	return false;
-}
-
 async function ensureAuditEvent(
 	directory: string,
-	eventsPath: string,
 	wal: TaskRepairWal,
 ): Promise<void> {
-	// Steady-state check: once the audit event is durably present, every later
-	// lazy-recovery call for this task (the COMMITTED WAL is never deleted)
-	// must be able to confirm that cheaply and lock-free, rather than paying
-	// the shared events.jsonl lock on every subsequent, unrelated tool call.
-	if (findRepairEvent(await readText(eventsPath), wal.taskId, wal.transitionId))
+	// Steady-state check (issue #2039): once the audit event is durably
+	// present, every later lazy-recovery call for this task (the COMMITTED
+	// WAL is never deleted) confirms it from the authoritative core event
+	// index instead of scanning the file.
+	if (hasTaskRepairAuditEvent(directory, wal.taskId, wal.transitionId)) {
 		return;
-
-	const lock = await tryAcquireLock(
-		directory,
-		'events.jsonl',
-		'task-repair-audit',
-		`task-repair:${wal.taskId}:${wal.transitionId}`,
-	);
-	if (!lock.acquired) {
-		throw new Error('TASK_REPAIR_AUDIT_LOCKED');
 	}
-	try {
-		const existing = await readText(eventsPath);
-		if (findRepairEvent(existing, wal.taskId, wal.transitionId)) return;
 
-		await appendFile(
-			eventsPath,
-			`${JSON.stringify({
+	// Issue #2039: the store's exclusive lock replaces the former
+	// tryAcquireLock/proper-lockfile sentinel, and dedupeOnAuthorityKey
+	// restores the lock-scoped re-check. The hard-fail contract is preserved.
+	try {
+		appendCoreEventSync(
+			directory,
+			{
 				type: 'task_workflow_repaired',
 				timestamp: new Date().toISOString(),
 				taskId: wal.taskId,
@@ -249,16 +188,18 @@ async function ensureAuditEvent(
 				oldWorkflowState: wal.oldWorkflowState,
 				newWorkflowState: wal.newWorkflowState,
 				generation: wal.generation,
-			})}\n`,
-			'utf-8',
+			},
+			{ dedupeOnAuthorityKey: true },
 		);
-
-		const verified = await readText(eventsPath);
-		if (!findRepairEvent(verified, wal.taskId, wal.transitionId)) {
-			throw new Error('TASK_REPAIR_AUDIT_UNVERIFIED');
+	} catch (error) {
+		if (error instanceof Error && error.message === CORE_EVENT_LOCKED) {
+			throw new Error('TASK_REPAIR_AUDIT_LOCKED');
 		}
-	} finally {
-		if (lock.lock._release) await lock.lock._release().catch(() => {});
+		throw error;
+	}
+
+	if (!hasTaskRepairAuditEvent(directory, wal.taskId, wal.transitionId)) {
+		throw new Error('TASK_REPAIR_AUDIT_UNVERIFIED');
 	}
 }
 
@@ -296,7 +237,6 @@ export async function repairTaskWorkflowUnderPlanLock<TPlan>(options: {
 		options.directory,
 		`task-repairs/${options.taskId}.json`,
 	);
-	const eventsPath = validateSwarmPath(options.directory, 'events.jsonl');
 
 	return withTaskEvidenceTransaction(
 		options.directory,
@@ -334,7 +274,7 @@ export async function repairTaskWorkflowUnderPlanLock<TPlan>(options: {
 				options.currentPlanStatus === 'in_progress' &&
 				workflowMatchesCommittedRepair(evidence, existingWal)
 			) {
-				await ensureAuditEvent(options.directory, eventsPath, existingWal);
+				await ensureAuditEvent(options.directory, existingWal);
 				return {
 					plan: options.currentPlan,
 					alreadyApplied: true,
@@ -420,7 +360,7 @@ export async function repairTaskWorkflowUnderPlanLock<TPlan>(options: {
 			// alreadyApplied fast path above and only needs to re-attempt the
 			// audit event, which is itself idempotent per exact task and transition ID.
 			await writeWal(walPath, { ...wal, state: 'COMMITTED' });
-			await ensureAuditEvent(options.directory, eventsPath, wal);
+			await ensureAuditEvent(options.directory, wal);
 
 			return {
 				plan,

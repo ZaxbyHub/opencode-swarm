@@ -1,20 +1,23 @@
 import { loadPluginConfigWithMeta } from '../config';
+import { probeFullAutoOversightHealth } from '../full-auto/oversight';
+import {
+	canResumeFromProbe,
+	canRetryOversight,
+	type FullAutoMode,
+	getFullAutoRecoveryBlockers,
+	isInfrastructurePauseReason,
+	parseFullAutoCommandArgs,
+} from '../full-auto/recovery';
 import {
 	disarmFullAutoRun,
 	isFullAutoStateUnreadable,
 	loadFullAutoRunState,
+	recordFullAutoRecoveryProbe,
 	startFullAutoRun,
 	terminateFullAutoRun,
 } from '../full-auto/state';
 import { getAgentSession } from '../state';
 import * as logger from '../utils/logger';
-
-const VALID_MODES = ['assisted', 'supervised', 'strict'] as const;
-type FullAutoMode = (typeof VALID_MODES)[number];
-
-function isValidMode(value: string): value is FullAutoMode {
-	return (VALID_MODES as readonly string[]).includes(value);
-}
 
 /**
  * Handles the /swarm full-auto command.
@@ -64,35 +67,75 @@ export async function handleFullAutoCommand(
 		return 'Error: No active session. Full-Auto Mode requires an active session to operate.';
 	}
 
-	// Parse the argument
-	const arg = args[0]?.toLowerCase();
-
-	if (arg === 'status') {
+	const parsedCommand = parseFullAutoCommandArgs(args, { allowToggle: true });
+	if (parsedCommand.kind === 'invalid') {
+		return `Error: ${parsedCommand.message}`;
+	}
+	if (parsedCommand.kind === 'status') {
 		return buildStatusReport(directory, sessionID, session.fullAutoMode);
 	}
 
 	let newFullAutoMode: boolean;
 	let modeOverride: FullAutoMode | undefined;
-
-	if (arg === 'on') {
-		newFullAutoMode = true;
-		const modeArg = args[1]?.toLowerCase();
-		if (modeArg) {
-			if (!isValidMode(modeArg)) {
-				return `Error: invalid Full-Auto mode '${args[1]}'. Valid modes: ${VALID_MODES.join(', ')}.`;
-			}
-			modeOverride = modeArg;
+	if (parsedCommand.kind === 'retry_oversight') {
+		const runState = loadFullAutoRunState(directory, sessionID);
+		if (!canRetryOversight(runState)) {
+			return 'Error: retry-oversight is only valid for a paused Full-Auto run whose pause reason is oversight infrastructure or deadline failure.';
 		}
-	} else if (arg === 'off') {
-		newFullAutoMode = false;
-	} else if (arg && isValidMode(arg)) {
-		// A bare mode token (`/swarm full-auto strict`) means "turn on in that
-		// mode" — treating it as a toggle could silently turn Full-Auto OFF
-		// when the user meant to switch modes.
+		const { config } = loadPluginConfigWithMeta(directory);
+		const totalTimeoutMs =
+			config.full_auto?.oversight?.total_timeout_ms ?? 15_000;
+		const cleanupTimeoutMs =
+			config.full_auto?.oversight?.cleanup_timeout_ms ?? 1_000;
+		const probe = await probeFullAutoOversightHealth({
+			directory,
+			sessionID,
+			totalTimeoutMs: Math.min(totalTimeoutMs, 15_000),
+			cleanupTimeoutMs: Math.min(cleanupTimeoutMs, 1_000),
+		});
+		const checkedAt = new Date().toISOString();
+		const expiresAt = new Date(Date.now() + 5 * 60_000).toISOString();
+		recordFullAutoRecoveryProbe(directory, sessionID, {
+			pauseGeneration: runState.pauseGeneration ?? 0,
+			checkedAt,
+			expiresAt,
+			attempts: probe.attempts,
+			outcome: probe.healthy ? 'healthy' : 'unhealthy',
+			reason: probe.reason,
+		});
+		return probe.healthy
+			? `Full-Auto oversight recovery probe succeeded for pause generation ${runState.pauseGeneration ?? 0}. The transport path is healthy, but no denied action was replayed. Use \`/swarm full-auto resume\` within 5 minutes to create a new run generation and re-issue the original action for fresh review.`
+			: `Full-Auto oversight recovery probe failed: ${probe.reason}`;
+	}
+	if (parsedCommand.kind === 'resume') {
+		const runState = loadFullAutoRunState(directory, sessionID);
+		if (!canResumeFromProbe(runState)) {
+			return 'Error: resume requires a paused infrastructure/deadline run with a recent successful matching retry-oversight probe. Policy, containment, sandbox, or severe-evidence pauses cannot be resumed by probe.';
+		}
+		const blockers = getFullAutoRecoveryBlockers({ directory, sessionID });
+		if (blockers.length > 0) {
+			return `Error: resume refused because active policy/sandbox/action blockers remain for the paused action: ${blockers.join(', ')}. Clear the exact blocker, then retry.`;
+		}
+		startFullAutoRun(directory, sessionID, { mode: runState.mode });
+		session.fullAutoMode = true;
+		return `Full-Auto Mode resumed (new run generation=${loadFullAutoRunState(directory, sessionID)?.runGeneration ?? 'unknown'}, prior pause generation=${runState.pauseGeneration ?? 0}). Re-issue the blocked action so it can be re-reviewed.`;
+	}
+	if (parsedCommand.kind === 'abort') {
+		terminateFullAutoRun(
+			directory,
+			sessionID,
+			'manual abort via /swarm full-auto abort',
+		);
+		session.fullAutoMode = false;
+		return 'Full-Auto Mode aborted. Durable run-state is terminated; risky actions remain blocked until you explicitly re-enable with `/swarm full-auto on`.';
+	}
+
+	if (parsedCommand.kind === 'enable') {
 		newFullAutoMode = true;
-		modeOverride = arg;
+		modeOverride = parsedCommand.mode;
+	} else if (parsedCommand.kind === 'disable') {
+		newFullAutoMode = false;
 	} else {
-		// Toggle behavior when no argument provided
 		newFullAutoMode = !session.fullAutoMode;
 	}
 
@@ -123,7 +166,6 @@ export async function handleFullAutoCommand(
 		if (newFullAutoMode && fullAutoConfig?.locked === true) {
 			return 'Error: Full-Auto Mode is locked for this project (full_auto.locked is true in the swarm plugin config). Runtime activation is disabled by configuration; remove the lock to use /swarm full-auto on.';
 		}
-
 		const effectiveMode = modeOverride ?? fullAutoConfig?.mode ?? 'supervised';
 		modeLabel = effectiveMode;
 		denialMaxConsecutive = fullAutoConfig?.denials?.max_consecutive ?? 3;
@@ -260,6 +302,14 @@ function buildStatusReport(
 			);
 			if (runState.pauseReason) {
 				lines.push(`Pause reason: ${runState.pauseReason}`);
+				if (
+					runState.pauseReason &&
+					isInfrastructurePauseReason(runState.pauseReason)
+				) {
+					lines.push(
+						'Pause category: oversight infrastructure/deadline — `retry-oversight` and `resume` may be available.',
+					);
+				}
 			}
 			if (runState.terminateReason) {
 				lines.push(`Terminate reason: ${runState.terminateReason}`);
@@ -273,6 +323,11 @@ function buildStatusReport(
 			if (runState.lastOversightVerdict) {
 				lines.push(
 					`Last oversight verdict: ${runState.lastOversightVerdict}${runState.lastOversightAt ? ` at ${runState.lastOversightAt}` : ''}`,
+				);
+			}
+			if (runState.lastRecoveryProbe) {
+				lines.push(
+					`Last recovery probe: ${runState.lastRecoveryProbe.outcome} at ${runState.lastRecoveryProbe.checkedAt} (expires ${runState.lastRecoveryProbe.expiresAt}; pause_generation=${runState.lastRecoveryProbe.pauseGeneration}; attempts=${runState.lastRecoveryProbe.attempts})`,
 				);
 			}
 		}

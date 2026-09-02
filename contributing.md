@@ -225,8 +225,8 @@ All of these must be green. They run automatically on every PR.
 |---|---|
 | `quality` | TypeScript compiles (`tsc --noEmit`), Biome lint + format clean |
 | `unit` (Ubuntu, macOS, Windows) | Unit tests pass on all platforms |
-| `coverage` (merge queue only) | Code coverage ≥ 41.48% (enforced via `bun test --coverage`) |
-| `dist-check` | Committed `dist/` matches a fresh build |
+| `unit-passed` | Aggregate of every `unit` matrix cell (fails fast in the merge queue when any cell fails, instead of leaving the queue to time out on skipped downstream checks) |
+| `coverage` (merge queue only) | Code coverage ≥ 65.00% over the merged union of the 6-way `coverage-shard` matrix (issue #2341; fail-closed if any shard report is missing) |
 | `package-check` | Package metadata and publishable artifact checks pass |
 | `integration` (Ubuntu) | Integration tests pass (circuit breakers, gate workflows, state machines) |
 | `security` (Ubuntu) | Security and adversarial tests pass |
@@ -235,14 +235,15 @@ All of these must be green. They run automatically on every PR.
 | `smoke` (Ubuntu, macOS, Windows) | Package builds successfully and smoke tests pass on all platforms |
 | `pr-standards` | PR title is a valid conventional commit |
 | `check-duplicates` | PR title does not match an already-open PR |
+| `quality` → pending release fragment | Every user-visible PR (`src/`, `package.json`, workflows, shipped skills) adds a `docs/releases/pending/<slug>.md` fragment — release-please aggregates fragments into the release notes, so a missing fragment means the PR ships with no notes. Escape hatch: `FRAGMENT_CHECK_ENFORCE=0` (soft-warn). Release-please branches are exempt |
 
 **Do not ask for a merge if any check is red.** Fix the issue first.
 
-The `quality` job also runs `scripts/check-mock-cleanup.sh` which enforces:
+The `quality` job also runs `bun run check:mock-cleanup` which enforces:
 - All `mock.module` calls have proper cleanup (`afterEach(mock.restore())` or file-scoped `mockClear`/`mockReset`)
 - All `mock.module('node:*', ...)` calls spread real exports (e.g., `...realFs`) to prevent test pollution
 
-The same job runs `scripts/check-invariants.sh` Check 4 (issue #1666): the `scripts/mock-allowlist.txt` allowlist is closed against unapproved growth. Adding a new `mock.module` target requires a matching standalone marker line `# APPROVED-NEW: <normalized-target>` in `scripts/mock-allowlist.txt` (preserved across regen by `scripts/generate-mock-allowlist.sh`). `MOCK_ALLOWLIST_ENFORCE=0` soft-warns for a deliberate growth PR. Prefer the `_internals` DI seam for new code — the allowlist is legacy debt, not a bypass.
+The same job runs `bun run check:invariants` Check 4 (issue #1666): the `scripts/mock-allowlist.txt` allowlist is closed against unapproved growth. Adding a new `mock.module` target requires a matching standalone marker line `# APPROVED-NEW: <normalized-target>` in `scripts/mock-allowlist.txt` (preserved across regen by `scripts/generate-mock-allowlist.sh`). `MOCK_ALLOWLIST_ENFORCE=0` soft-warns for a deliberate growth PR. Prefer the `_internals` DI seam for new code — the allowlist is legacy debt, not a bypass.
 
 ---
 
@@ -388,5 +389,5 @@ gh api repos/{owner}/{repo}/git/ref/tags/{tag} --jq '.object.sha'
 - [ ] New tests are in the correct `tests/` subdirectory
 - [ ] Tests updated for any changed behavior (defaults, validation, error messages)
 - [ ] If adding/modifying a workflow, all `uses:` references are SHA-pinned
-- [ ] All CI checks pass locally or remotely as appropriate (`typecheck`, `biome ci`, `unit`, `integration`, `security`, `dist-check`, `package-check`, `php-validation`, `rust-sandbox-runner`, `smoke`)
+- [ ] All CI checks pass locally or remotely as appropriate (`typecheck`, `biome ci`, `unit`, `integration`, `security`, `package-check`, `php-validation`, `rust-sandbox-runner`, `smoke`)
 - [ ] PR description includes a summary and test plan

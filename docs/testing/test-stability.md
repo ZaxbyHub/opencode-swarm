@@ -68,11 +68,36 @@ describe('plan.md sync', () => {
 `spyOn(Date, 'now')` and `spyOn(Date.prototype, 'toISOString')`, which is what
 the helper uses internally.
 
-**Enforcement:** `scripts/check-test-clock.sh` (diff-scoped — runs in the
+**Enforcement:** `bun run check:test-clock` (diff-scoped — runs in the
 `quality` CI job). Any NEW test file that touches `Date.now()` / `new Date()` /
 `spyOn(Date` without referencing `freezeClock` / `withFrozenClock` /
 `withIsolatedState` fails the build. Pre-existing files are non-blocking
 warnings.
+
+### Deadline/polling waits — use attempt counting, not wall-clock deadlines
+
+Polling helpers of the form "wait until `predicate()` or a budget expires"
+must NOT read `Date.now()` for the deadline. Two reasons:
+
+1. The test-clock gate above flags any added raw-clock line (a deadline read
+   is a real-clock read; `freezeClock` is not an escape hatch here — a frozen
+   clock would never advance the deadline and the wait would deadlock).
+2. Attempt counting is deterministic under coverage instrumentation and
+   event-loop saturation: the budget degrades to "at least N polls", which is
+   exactly the guarantee such waits need.
+
+```typescript
+const maxAttempts = Math.ceil(budgetMs / 20);
+for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+  if (predicate()) return;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+throw new Error(`[label] budget exhausted after ${budgetMs}ms`);
+```
+
+See `tests/unit/background/plan-sync-worker.test.ts` (`waitFor`) for the
+in-repo example, including its labeled timeout message and unit coverage of
+the exhaustion path.
 
 ### Class 2 — Coverage-instrumentation sensitivity
 
@@ -158,8 +183,9 @@ Do NOT un-quarantine without a merge-group validation run confirming the fix.
 
 When a merge-group CI run fails, `.github/workflows/flake-detection.yml`
 (`workflow_run` trigger) downloads every `flake-annotations-*` artifact
-ci.yml uploads — the per-shard unit annotations AND the coverage job's
-`flake-annotations-coverage` artifact (both jobs run a bounded retry, two
+ci.yml uploads — the per-shard unit annotations AND the coverage shards'
+`flake-annotations-coverage-shard-N` artifacts (the unit shards and the
+coverage shards both run a bounded retry, two
 retries / three attempts total, before treating a failure as real) —
 concatenates them, and runs `scripts/ci/detect-and-quarantine-flakes.sh`.
 The script:
@@ -184,7 +210,7 @@ merge-group run failed, the run goes green and detection never fires — the
 retry is logged in that job's own step output but is not auto-surfaced as a
 quarantine suggestion. This is a property of the trigger, not of any one job:
 it applies to the **unit shards' annotations exactly as much as the coverage
-job's**. Detection only ever sees annotations from runs that failed for some
+shards'**. Detection only ever sees annotations from runs that failed for some
 reason; a run that self-heals everywhere is invisible to it.
 
 ## Known limitations
@@ -206,7 +232,7 @@ reason; a run that self-heals everywhere is invisible to it.
 ## Reference
 
 - Helpers: `tests/helpers/test-clock.ts`, `tests/helpers/test-isolation.ts`
-- Lint: `scripts/check-test-clock.sh`
+- Lint: `bun run check:test-clock`
 - Detection: `scripts/ci/detect-and-quarantine-flakes.sh`,
   `.github/workflows/flake-detection.yml`
 - Coverage gate (per-file isolation): `scripts/ci/run-coverage-gate.sh`

@@ -18,7 +18,7 @@ const requiredProjectSkillSlugs = [
 	'brainstorm',
 	'specify',
 	'clarify-spec',
-	'resume',
+	'swarm-resume',
 	'clarify',
 	'discover',
 	'consult',
@@ -75,6 +75,7 @@ const baseFiles = [
 	'README.md',
 	'LICENSE',
 	'package.json',
+	'opencode-swarm.schema.json',
 	...expectedGrammars,
 	...REQUIRED_EVALUATION_FIXTURE_IDS.flatMap((id: string) => [
 		`evaluation-fixtures/tier1/${id}/manifest.json`,

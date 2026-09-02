@@ -48,10 +48,13 @@ their exact owned workflow lanes are marked salvaged. Council, reviewer, and
 critic outputs remain fail-closed and require retry when incomplete. `[CLEAN]`
 is absence evidence and therefore requires a complete transcript. One positive
 row in a consolidated lane never salvages a sibling dimension whose only
-evidence is `[CLEAN]` or missing. Recovery reasons are lane-scoped and use four
-kinds: `parser-normalization`, `parser-row-recovery`,
-`truncated-preview-durable-artifact`, and
-`transcript-incomplete-terminal-candidate`.
+evidence is `[CLEAN]` or missing. Recovery reasons are lane-scoped and use six
+kinds: `legacy-verdict-row-recovery`, `parser-normalization`, `parser-row-recovery`,
+`truncated-preview-durable-artifact`,
+`transcript-incomplete-terminal-candidate`, and
+`clean-attestation-salvaged` (a `[CLEAN]` attestation conflicting with a
+same-lane `[CANDIDATE]` row was discredited while the candidate rows were
+retained — the attestation contributes no coverage).
 
 ## Verdict-row pipe tolerance and its fidelity boundary
 

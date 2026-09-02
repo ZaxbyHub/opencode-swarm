@@ -12,6 +12,7 @@
 import * as path from 'node:path';
 import { ORCHESTRATOR_NAME, WRITE_TOOL_NAMES } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
+import { recordFullAutoSevereEvidenceEvent } from '../full-auto/severe-result.js';
 import {
 	isPathIdentityWithin,
 	sanitizeDiagnosticText,
@@ -29,10 +30,19 @@ import {
 } from '../scope/scope-persistence';
 import { formatScopeResolutionDiagnostic } from '../scope/scope-resolution-diagnostic';
 import {
+	DEFAULT_PROTECTED_PATH_PREFIXES,
+	isPolicyProtectedPath,
+	normalizeProtectedPath,
+} from '../security/protected-path-policy.js';
+import {
 	type AgentSessionState,
 	resolveSessionWorkspaceDirectory,
 	swarmState,
 } from '../state';
+import {
+	checkFileAuthorityWithRules,
+	DEFAULT_AGENT_AUTHORITY_RULES,
+} from './guardrails/file-authority';
 import { normalizeToolName } from './normalize-tool-name';
 import { validatePrFeedbackScopeBinding } from './pr-workflow-gate';
 import { resolveWriteTargets } from './write-target-resolver';
@@ -51,13 +61,11 @@ const WRITE_TOOLS = new Set<string>(WRITE_TOOL_NAMES);
 export interface ScopeGuardConfig {
 	/** Whether scope guard is enabled (default: true) */
 	enabled: boolean;
-	/** Whether to skip in turbo mode (default: false — NOT skippable by design) */
-	skip_in_turbo: boolean;
 }
 
 /**
  * Creates the scope-guard hook that blocks out-of-scope writes.
- * @param config - ScopeGuardConfig (enabled, skip_in_turbo)
+ * @param config - ScopeGuardConfig. Scope enforcement is never skipped in Turbo.
  * @param fallbackDirectory - The plugin-root directory (`ctx.directory`). Used
  *   ONLY as the fallback for sessions with no recorded workspace root. Issue
  *   #2002: this hook is constructed once per plugin instance and serves every
@@ -77,7 +85,6 @@ export function createScopeGuardHook(
 	) => Promise<void>;
 } {
 	const enabled = config.enabled ?? true;
-	const _skipInTurbo = config.skip_in_turbo ?? false; // NOT skippable by default (reserved for future turbo detection)
 
 	return {
 		toolBefore: async (input, output) => {
@@ -240,11 +247,21 @@ export function createScopeGuardHook(
 						swarmState,
 					);
 				}
+				enforceProtectedPathAuthority(
+					agentName,
+					filePath,
+					directory,
+					sessionId,
+					session,
+					injectAdvisory,
+					declaredScope,
+				);
 				if (!isFileInScope(filePath, declaredScope, directory)) {
 					reportScopeViolation(
 						agentName,
 						filePath,
 						taskId,
+						input.sessionID,
 						session,
 						injectAdvisory,
 						swarmState,
@@ -333,6 +350,61 @@ export const _internals = {
 		session?.currentTaskId ?? null,
 };
 
+function enforceProtectedPathAuthority(
+	agentName: string,
+	filePath: string,
+	directory: string,
+	sessionID: string,
+	session: AgentSessionState | undefined,
+	injectAdvisory: ((sessionId: string, message: string) => void) | undefined,
+	declaredScope: string[],
+): void {
+	const normalizedPath = normalizeProtectedPath(
+		path.relative(directory, path.resolve(directory, filePath)),
+	);
+	const protectedPrefix = DEFAULT_PROTECTED_PATH_PREFIXES.find((candidate) =>
+		isPolicyProtectedPath(normalizedPath, {
+			includeDefaults: false,
+			additional: [candidate],
+		}),
+	);
+	if (protectedPrefix) {
+		const evidenceEventID = recordFullAutoSevereEvidenceEvent({
+			sessionID,
+			childSessionID: sessionID,
+			category: 'protected_state_mutation',
+			paths: [normalizedPath],
+		});
+		denyWithArchitectAdvisory(
+			`WRITE BLOCKED: Agent "${sanitizeDiagnosticText(agentName, 96)}" is not authorised to write "${sanitizeDiagnosticText(normalizedPath, 256)}". Reason: AUTHORITY_PROTECTED_PATH: Path blocked: target is under central protected prefix ${sanitizeDiagnosticText(protectedPrefix, 160)} [agent=${sanitizeDiagnosticText(agentName, 96)}; path=${sanitizeDiagnosticText(normalizedPath, 256)}]${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
+			session,
+			injectAdvisory,
+			swarmState,
+		);
+	}
+	const authorityCheck = checkFileAuthorityWithRules(
+		agentName,
+		filePath,
+		directory,
+		DEFAULT_AGENT_AUTHORITY_RULES,
+		{ declaredScope },
+	);
+	if (authorityCheck.allowed || authorityCheck.layer !== 'protected-path')
+		return;
+	const evidenceEventID = recordFullAutoSevereEvidenceEvent({
+		sessionID,
+		childSessionID: sessionID,
+		category: 'protected_state_mutation',
+		paths: [filePath],
+	});
+	denyWithArchitectAdvisory(
+		`WRITE BLOCKED: Agent "${sanitizeDiagnosticText(agentName, 96)}" is not authorised to write "${authorityCheck.path}". Reason: ${authorityCheck.reason}${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''}`,
+		session,
+		injectAdvisory,
+		swarmState,
+	);
+}
+
 function denyWithArchitectAdvisory(
 	message: string,
 	session: AgentSessionState | undefined,
@@ -377,6 +449,7 @@ function reportScopeViolation(
 	agentName: string,
 	filePath: string,
 	taskId: string | null,
+	sessionID: string,
 	session: AgentSessionState | undefined,
 	injectAdvisory: ((sessionId: string, message: string) => void) | undefined,
 	state: typeof swarmState,
@@ -389,7 +462,15 @@ function reportScopeViolation(
 		.slice(0, 3)
 		.map((entry) => sanitizeDiagnosticText(entry, 128))
 		.join(', ');
-	const violationMessage = `SCOPE_VIOLATION: SCOPE VIOLATION: ${safeAgentName} attempted to modify '${safeFilePath}' which is not in declared scope for task ${taskLabel}. Declared scope: [${safeScope}${scopeEntries.length > 3 ? '...' : ''}]. Coder: correct a mistaken target; otherwise stop and ask the architect to expand declare_scope and dispatch a new Task call.`;
+	const evidenceEventID = session
+		? recordFullAutoSevereEvidenceEvent({
+				sessionID,
+				childSessionID: sessionID,
+				category: 'out_of_scope_files',
+				paths: [filePath],
+			})
+		: undefined;
+	const violationMessage = `SCOPE_VIOLATION: SCOPE VIOLATION: ${safeAgentName} attempted to modify '${safeFilePath}' which is not in declared scope for task ${taskLabel}. Declared scope: [${safeScope}${scopeEntries.length > 3 ? '...' : ''}].${evidenceEventID ? ` Evidence event: ${evidenceEventID}.` : ''} Coder: correct a mistaken target; otherwise stop and ask the architect to expand declare_scope and dispatch a new Task call.`;
 
 	denyWithArchitectAdvisory(violationMessage, session, injectAdvisory, state);
 }

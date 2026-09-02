@@ -150,7 +150,7 @@ describe('collect_lane_results host-call deadline', () => {
 		expect(result.lane_results[0]?.status).toBe('pending');
 	});
 
-	test('keeps PR-review contract violations pending when session.status is absent', async () => {
+	test('settles terminal PR-review contract violations when session.status is absent', async () => {
 		const directory = makeTempDir();
 		const batchId = 'missing-status-invalid-pr-review';
 		await recordPending({
@@ -185,9 +185,12 @@ describe('collect_lane_results host-call deadline', () => {
 		);
 
 		expect(result.completed).toBe(0);
-		expect(result.failed).toBe(0);
-		expect(result.pending).toBe(1);
-		expect(result.lane_results[0]?.status).toBe('pending');
+		expect(result.failed).toBe(1);
+		expect(result.pending).toBe(0);
+		expect(result.lane_results[0]?.status).toBe('failed');
+		expect(result.lane_results[0]?.error).toContain(
+			'PR_REVIEW_DISCOVERY_CONTRACT_INVALID',
+		);
 	});
 
 	test.each([
@@ -226,7 +229,7 @@ describe('collect_lane_results host-call deadline', () => {
 		expect(result.lane_results[0]?.status).toBe('pending');
 	});
 
-	test('keeps PR-review contract violations pending when status is unknown', async () => {
+	test('settles terminal PR-review contract violations when status times out', async () => {
 		const directory = makeTempDir();
 		const batchId = 'hung-status-invalid-pr-review';
 		await recordPending({
@@ -262,9 +265,12 @@ describe('collect_lane_results host-call deadline', () => {
 		);
 
 		expect(result.completed).toBe(0);
-		expect(result.failed).toBe(0);
-		expect(result.pending).toBe(1);
-		expect(result.lane_results[0]?.status).toBe('pending');
+		expect(result.failed).toBe(1);
+		expect(result.pending).toBe(0);
+		expect(result.lane_results[0]?.status).toBe('failed');
+		expect(result.lane_results[0]?.error).toContain(
+			'PR_REVIEW_DISCOVERY_CONTRACT_INVALID',
+		);
 	});
 
 	test('continues collecting later lanes after an earlier status timeout', async () => {

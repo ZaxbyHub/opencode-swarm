@@ -4,6 +4,14 @@
 
 ## Why this document exists
 
+### Integrity boundary (issue #1824)
+
+Shell classification is a shared bounded tripwire, never a sandbox. Explicit
+required sandbox dimensions fail closed unless behaviorally reported `real`.
+Governed evaluation inputs are hashed before and after candidate execution, and
+human-required writes consume an exact one-shot session/action/content-bound
+approval fact. Turbo never bypasses scope enforcement.
+
 opencode-swarm is an OpenCode plugin that ships as a single ESM bundle and runs across at least:
 
 - Windows 11, macOS, Linux
@@ -104,7 +112,7 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
 ### Issue #1875 — non-transient retry loops + unbound write scope
 
 - **Symptom:** proven parser, command-not-found, sandbox-wrapper, and repeated permanent failures could be retried indefinitely, while a coder delegation with empty, stale, v1, or identity-mismatched scope could reach child-state publication without an exact active authorization binding.
-- **Invariants established:** non-transient circuit state is owned by the active agent invocation and never persisted. `shell_parse_error`, `command_not_found`, and `sandbox_wrapper_failure` hard-stop on the first classified failure; only `general_permanent` uses the three-consecutive-same-category threshold. Successful, neutral, degraded, or transient outcomes may clear an open streak but never a hard stop. The false-to-true transition emits `telemetry.loopDetected` and exactly one `NON-TRANSIENT STOP` advisory; after that transition, agents must stop tool calls and report the blocker until a verified new invocation or session reset. Write-capable coder delegation requires an exact active v2 scope binding correlated to the current session and Task call; empty scope, v1 fallback, stale plan/task identity, or another session's declaration fails closed with `SCOPE_NOT_DECLARED`, before child state is published.
+- **Invariant superseded by #2103:** the original invocation-wide irreversible hard stop was safe but over-broad. Circuit authority remains invocation-owned and non-durable, but is now keyed by exact semantic action and failure category. Structured parser/command-unavailable/sandbox failures may open immediately; repeated permanent failures use their category threshold. Only the matching action is blocked, sandbox failure remains fail-closed, and exact read/diagnose/rescope/repair/handoff/abort controls remain reachable. Corrected success clears only that action; external repair uses an audited exact-session/invocation/action reset; late or foreign results cannot clear current state. Classification is source-aware so provider patterns never consume arbitrary shell output. Write-capable coder delegation still requires an exact active v2 scope binding correlated to the current session and Task call; empty scope, v1 fallback, stale plan/task identity, or another session's declaration fails closed with `SCOPE_NOT_DECLARED`, before child state is published.
 - **Maps to AGENTS.md:** invariants 5 (plan durability), 8 (session state), and 9 (guardrails / retry semantics).
 
 ### v7.0.1 — `SWARM_PLAN` relocation + cache eviction completeness
@@ -304,6 +312,40 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
   (canonical `.swarm/` containment), 7 (cross-platform crash/concurrency tests),
   8 (restart-safe session separation), 9 (fail-closed transition semantics),
   10 (membership before chat exposure), and 12 (pending release fragment).
+
+### Issue #1994 — post-mortem fabricated an FR-009 precedent; corrective PR closed unmerged
+
+- **Symptom:** a `/swarm finalize` post-mortem claimed FR-009 ("schema permitted
+  `pending >= general` multipliers") was "closed correctly" via a "schema `.refine`
+  + runtime defensive clamp pattern" that never existed — commit `b7e12d36`
+  (canonical; post-rewrite local twin `d82c7172`, merged via #1978) explicitly
+  recorded FR-009 as deferred. The corrective PR (#2001) was closed
+  unmerged, so every skill disposition it carried (S1/S4/P1/P2) was silently absent
+  from `main` while the issue tracker recorded "fixed".
+- **Root cause:** post-mortems are LLM-generated narratives that can fabricate
+  precedent; their corrections lived only in `.swarm/` runtime state (post-mortem
+  archive, spec.md, knowledge entries) and an unmerged PR — none of which future
+  sessions read. Treat "What Went Right" sections as claims, not records.
+- **Fix surface:** skill-guidance corrections — `placeholder_scan` diff scoping via
+  `added_lines` wired into the Stage A callers (execute skill step 5e + architect
+  prompt, with the fail-closed omit-from-map fallback), the smallest-justified-scope
+  `SCOPE_CONFLICT` rule in swarm-implement (never widen to a plan-inferred
+  superset), the plan-freeze-after-approval rule in critic-gate (material change →
+  exactly one re-critic), docs-attestation integrity in phase-wrap, and a qa-sweep
+  staleness fix (the tool has been diff-aware since `added_lines` landed).
+- **FR-009 disposition: DESCOPE.** The runtime 3× idle-poll cap shipped
+  hard-coded (`shouldSkipIdlePoll`, merged via PR #1978 from the branch
+  integrating the issue-#1691 investigation); the schema-configurable
+  multipliers FR-009 guarded were never added (FR-003 configurability remains
+  deferred), so there is no `.refine` target. Do not cite FR-009 as a closed
+  schema+runtime precedent.
+- **Proposed pattern (NOT an established precedent):** for safety-critical
+  invariants, schema-level rejection (Zod `.refine`/`superRefine`) is primary and
+  authoritative; any runtime fallback must be OBSERVABLE (emit a structured
+  advisory/telemetry event naming the rejected or coerced value) and reserved for
+  safety-critical invariants only. A silent blanket runtime clamp conceals invalid
+  configuration and schema/runtime drift. Adopt only with a concrete case; when
+  adopted, cite this entry as its origin.
 
 ## Invariants — anti-pattern, required pattern, verification
 
@@ -513,7 +555,7 @@ evidence as trustworthy only within that cooperative-agent threat model. Strong
 integrity against a same-user adversarial process would require a protected
 trust root outside the workspace.
 
-**Session-reset worktree resilience (FR-004):** `.swarm-worktrees/` directories created by parallel lanes must be reconciled on session resume/reset. `provisionWorktree` in `src/worktree/core.ts` implements idempotent provisioning: if a branch exists but is not checked out in any active worktree, it is adopted; if it is active elsewhere, an error is returned. `reset-session.ts` wipes `.swarm-worktrees/` and orphan branches. The resume skill explicitly calls out reconciliation as the first step. This prevents stale worktrees from causing provisioning failures or silent git state corruption when a session resumes after reset.
+**Session-reset worktree resilience (FR-004):** `.swarm-worktrees/` directories created by parallel lanes must be reconciled on session resume/reset. `provisionWorktree` in `src/worktree/core.ts` implements idempotent provisioning: if a branch exists but is not checked out in any active worktree, it is adopted; if it is active elsewhere, an error is returned. `reset-session.ts` wipes `.swarm-worktrees/` and orphan branches. The swarm-resume skill (slug `resume` before the #2379 rename) explicitly calls out reconciliation as the first step. This prevents stale worktrees from causing provisioning failures or silent git state corruption when a session resumes after reset.
 
 **Anti-pattern:**
 
@@ -655,8 +697,8 @@ Split criteria: one behavioral aspect per file, shared test utilities extracted 
 
 **Verification:**
 
-- Run `scripts/check-mock-cleanup.sh` — it enforces Check 2: every `mock.module('node:*', ...)` must spread real exports (e.g., `...realFs`, `...realChildProcess`).
-- Run `scripts/check-invariants.sh` — Check 3 enforces the `scripts/mock-allowlist.txt` membership, and Check 4 (issue #1666) ratchets the allowlist closed against unapproved growth. Adding a new `mock.module` target requires a matching `# APPROVED-NEW: <normalized-target>` marker line in `scripts/mock-allowlist.txt`; `MOCK_ALLOWLIST_ENFORCE=0` soft-warns for a deliberate growth PR.
+- Run `bun run check:mock-cleanup` — it enforces Check 2: every `mock.module('node:*', ...)` must spread real exports (e.g., `...realFs`, `...realChildProcess`).
+- Run `bun run check:invariants` — Check 3 enforces the `scripts/mock-allowlist.txt` membership, and Check 4 (issue #1666) ratchets the allowlist closed against unapproved growth. Adding a new `mock.module` target requires a matching `# APPROVED-NEW: <normalized-target>` marker line in `scripts/mock-allowlist.txt`; `MOCK_ALLOWLIST_ENFORCE=0` soft-warns for a deliberate growth PR.
 - Run the new bounded tests alongside the existing real-git tests; no cross-file pollution.
 - New test files must be under 500 lines — `delegation-gate.test.ts` split is the exemplar pattern.
 - FR-009 Lean Turbo tests cover: acquire-locks, plan-lanes, review, runner-status, generate-mutants, set-qa-gates, get-qa-gate-profile.

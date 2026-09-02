@@ -17,6 +17,7 @@
 
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
+import { readCoreEvents } from '../events/core-events.js';
 import {
 	jaccardBigram,
 	readKnowledge,
@@ -47,6 +48,13 @@ export interface ToolProblem {
 	totalCalls: number;
 	failureRate: number;
 	avgDurationMs: number;
+	/**
+	 * Issue #2349 sweep: a bounded, deduplicated sample of WHY this tool failed.
+	 * Reporting only that a tool failed N times is the same defect class the
+	 * sweep set out to close — the reason has to reach a surface a human or
+	 * agent actually reads, which is this one.
+	 */
+	failureReasons?: string[];
 }
 
 export interface AgentDispatchSummary {
@@ -188,6 +196,9 @@ function gatherToolProblems(toolAggregates: Map<string, ToolAggregate>): {
 					totalCalls: agg.count,
 					failureRate: Math.round(failureRate * 100) / 100,
 					avgDurationMs: Math.round(agg.totalDuration / agg.count),
+					...(agg.failureReasons && agg.failureReasons.length > 0
+						? { failureReasons: agg.failureReasons }
+						: {}),
 				});
 			}
 		}
@@ -405,9 +416,14 @@ async function gatherLedgerRejections(
 		return readLedger(target);
 	};
 
-	let content = await readLedger(
-		path.join(directory, '.swarm', 'events.jsonl'),
-	);
+	// Live read goes through the bounded core event window (issue #2039):
+	// manifest-stripped, hard read bound — strictly tighter than the previous
+	// 16 MiB tail cap. The archive fallback keeps its own bounded read
+	// (archived copies are immutable validated cuts).
+	let content: string | null = readCoreEvents(directory).text;
+	if (content === '') {
+		content = null;
+	}
 	if (content === null) {
 		try {
 			const archiveRoot = path.join(directory, '.swarm', 'archive');
@@ -441,6 +457,9 @@ async function gatherLedgerRejections(
 				sessionId?: unknown;
 				sessionID?: unknown;
 			};
+			// Archived post-#2039 cuts carry the store manifest as line 1;
+			// it is not a rejection event, skip it defensively (R2-4).
+			if (parsed.type === 'swarm-events-manifest') continue;
 			if (
 				typeof parsed.type === 'string' &&
 				REJECTION_LEDGER_EVENT_TYPES.has(parsed.type)
@@ -711,6 +730,10 @@ function buildReflectionDataSummary(data: SessionReflectionData): string {
 			lines.push(
 				`  - ${p.tool}: ${p.failureCount}/${p.totalCalls} failures (${Math.round(p.failureRate * 100)}%), avg ${p.avgDurationMs}ms`,
 			);
+			// Issue #2349 sweep: surface WHY, not just how often.
+			if (p.failureReasons && p.failureReasons.length > 0) {
+				lines.push(`      reasons: ${p.failureReasons.join('; ')}`);
+			}
 		}
 		lines.push('');
 	}
@@ -761,7 +784,7 @@ function buildReflectionDataSummary(data: SessionReflectionData): string {
 		);
 		if (kd.curation) {
 			lines.push(
-				`  - Curation (finalize batch): ${kd.curation.stored} stored, ${kd.curation.reinforced} reinforced, ${kd.curation.skipped} skipped, ${kd.curation.rejected} rejected, ${kd.curation.quarantined} quarantined.`,
+				`  - Curation (finalize batch): ${kd.curation.stored} stored, ${kd.curation.reinforced} reinforced, ${kd.curation.skipped} skipped (dedup/already-admitted; audit: .swarm/events.jsonl curator_skipped), ${kd.curation.rejected} rejected (validator-refused; ledger: .swarm/knowledge-rejected.jsonl), ${kd.curation.quarantined} quarantined (actionability-gated; queue: .swarm/knowledge-unactionable.jsonl; audit: .swarm/events.jsonl curator_skipped).`,
 			);
 		}
 		if (
@@ -829,7 +852,7 @@ export function buildSignalsBlock(data: SessionReflectionData): string {
 		);
 		if (kd.curation) {
 			lines.push(
-				`- Curation (finalize batch): ${kd.curation.stored} stored, ${kd.curation.reinforced} reinforced, ${kd.curation.skipped} skipped, ${kd.curation.rejected} rejected, ${kd.curation.quarantined} quarantined.`,
+				`- Curation (finalize batch): ${kd.curation.stored} stored, ${kd.curation.reinforced} reinforced, ${kd.curation.skipped} skipped (dedup/already-admitted; audit: .swarm/events.jsonl curator_skipped), ${kd.curation.rejected} rejected (validator-refused; ledger: .swarm/knowledge-rejected.jsonl), ${kd.curation.quarantined} quarantined (actionability-gated; queue: .swarm/knowledge-unactionable.jsonl; audit: .swarm/events.jsonl curator_skipped).`,
 			);
 		}
 		if (
@@ -898,7 +921,14 @@ export function buildSignalsBlock(data: SessionReflectionData): string {
 		if (p.failureCount > 0) {
 			reproBacked.push({
 				title: `Tool ${p.tool} failing (${p.failureCount}/${p.totalCalls}, ${Math.round(p.failureRate * 100)}%)`,
-				evidence: `tool failure rate ${Math.round(p.failureRate * 100)}% (${p.failureCount}/${p.totalCalls})`,
+				// Issue #2349 sweep: `close.ts` renders the signals block
+				// UNCONDITIONALLY, so this is the one tool-problem surface a human
+				// always sees. Carry the reason into the evidence string.
+				evidence: `tool failure rate ${Math.round(p.failureRate * 100)}% (${p.failureCount}/${p.totalCalls})${
+					p.failureReasons && p.failureReasons.length > 0
+						? `; reasons: ${p.failureReasons.join('; ')}`
+						: ''
+				}`,
 			});
 		}
 	}
@@ -1091,6 +1121,13 @@ function buildDeterministicReport(data: SessionReflectionData): string {
 			lines.push(
 				`- **${p.tool}**: ${p.failureCount}/${p.totalCalls} failures (${Math.round(p.failureRate * 100)}%), avg ${p.avgDurationMs}ms per call`,
 			);
+			// Issue #2349 sweep: the DETERMINISTIC report is what a reader sees when
+			// no LLM delegate is configured, the signal aborts, or the delegate
+			// throws. Rendering the reason only in the delegate prompt would drop it
+			// on exactly the paths where there is no model to infer it.
+			if (p.failureReasons && p.failureReasons.length > 0) {
+				lines.push(`  - reasons: ${p.failureReasons.join('; ')}`);
+			}
 		}
 		lines.push('');
 	}

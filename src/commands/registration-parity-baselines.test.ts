@@ -111,6 +111,7 @@ describe('Command registration parity — classification baselines', () => {
 			'ci-simulate',
 			'costs',
 			'guardrail explain',
+			'guardrail reset',
 			'guardrail-log',
 			'lanes',
 			'memory consolidation-log',
@@ -147,11 +148,14 @@ describe('Command registration parity — classification baselines', () => {
 			// `approve-plan-critic` is a restricted human-only escape hatch for
 			// the ratchet-tighter critic_pre_plan execution gate (issue #2012).
 			humanOnly: new Set([
+				'full-auto',
 				'memory-import',
 				'memory-migrate',
 				'clear',
 				'abort-pr-workflow',
 				'approve-plan-critic',
+				// #1824: exact one-shot write approvals are operator-issued only.
+				'approve-write',
 				'review',
 				// #1822: governed skill optimizer — mutating commands (human-gated)
 				'skill-opt run',
@@ -163,6 +167,7 @@ describe('Command registration parity — classification baselines', () => {
 				'recover',
 			]),
 			toolCommands: new Set([
+				'full-auto',
 				'pr subscribe',
 				'pr unsubscribe',
 				'pr status',
@@ -185,6 +190,7 @@ describe('Command registration parity — classification baselines', () => {
 				// #2268: human-only commands stay in the swarm_command z.enum —
 				// agent attempts are refused with a surface-to-user message.
 				'recover',
+				'approve-write',
 			]),
 			noArgs: new Set(['pr status', 'lanes', 'context-map stats']),
 		};

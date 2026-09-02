@@ -4,11 +4,19 @@ import type { ToolContext, ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import { loadPluginConfig } from '../config/loader';
 import {
+	computeCouncilReviewHash,
+	computeCouncilReviewIdentity,
+	councilIdentityEvidenceFields,
+	resolveCouncilMemberRole,
+	resolveFinalCompletionPolicy,
+} from '../council/council-review-identity';
+import {
 	recordUnscopedCouncilAttempt,
 	runCouncilAttempt,
 } from '../council/council-round-state';
 import { synthesizeFinalCouncilAdvisory } from '../council/council-service';
 import type { CouncilMemberVerdict } from '../council/types';
+import { COUNCIL_MEMBER_ROLES } from '../council/types';
 import { withEvidenceLock } from '../evidence/lock.js';
 import { validateSwarmPath } from '../hooks/utils';
 import { COUNCIL_VERDICT_REWARDS } from '../memory/config';
@@ -21,16 +29,12 @@ import * as logger from '../utils/logger';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { createSwarmTool } from './create-tool';
 
-const FINAL_COUNCIL_MEMBERS = [
-	'critic',
-	'reviewer',
-	'sme',
-	'test_engineer',
-	'explorer',
-] as const;
+const FINAL_COUNCIL_MEMBERS = COUNCIL_MEMBER_ROLES;
 
 const VerdictSchema = z.object({
-	agent: z.enum(FINAL_COUNCIL_MEMBERS),
+	// Accepts exact canonical roles and multi-swarm prefixed names
+	// (e.g. `local_critic`); unresolvable names never count toward quorum.
+	agent: z.string().min(1).max(64),
 	verdict: z.enum(['APPROVE', 'CONCERNS', 'REJECT']),
 	confidence: z.number().min(0).max(1),
 	findings: z.array(
@@ -72,6 +76,47 @@ function normalizeFinalVerdict(
 		return 'rejected';
 	}
 	return requiredFixesCount > 0 ? 'rejected' : 'concerns';
+}
+
+/**
+ * Resolve submitted verdict agents to canonical council roles. Unknown
+ * names are excluded (never count); duplicate identities collapse to the
+ * first occurrence (deterministic). Returns the canonicalized verdicts,
+ * the distinct canonical roles that voted, and diagnostics.
+ */
+function resolveFinalCouncilVerdicts(
+	verdicts: Array<{ agent: string } & Record<string, unknown>>,
+): {
+	resolved: CouncilMemberVerdict[];
+	distinctRoles: string[];
+	unknownAgents: string[];
+	duplicateAgents: string[];
+} {
+	const resolved: CouncilMemberVerdict[] = [];
+	const distinctRoles: string[] = [];
+	const unknownAgents: string[] = [];
+	const duplicateAgents: string[] = [];
+	for (const verdict of verdicts) {
+		const role = resolveCouncilMemberRole(verdict.agent);
+		if (!role) {
+			if (!unknownAgents.includes(verdict.agent)) {
+				unknownAgents.push(verdict.agent);
+			}
+			continue;
+		}
+		if (distinctRoles.includes(role)) {
+			if (!duplicateAgents.includes(verdict.agent)) {
+				duplicateAgents.push(verdict.agent);
+			}
+			continue;
+		}
+		distinctRoles.push(role);
+		resolved.push({
+			...(verdict as unknown as CouncilMemberVerdict),
+			agent: role,
+		});
+	}
+	return { resolved, distinctRoles, unknownAgents, duplicateAgents };
 }
 
 function invalidResponse(issues: z.ZodIssue[]): string {
@@ -121,39 +166,66 @@ export async function executeWriteFinalCouncilEvidence(
 	const planHash = plan ? computePlanHash(plan) : undefined;
 	const planId = plan ? derivePlanId(plan) : undefined;
 	const planIdentityHash = plan ? derivePlanIdentityHash(plan) : undefined;
-	const membersVoted = [...new Set(input.verdicts.map((v) => v.agent))];
+	const reviewHash = plan ? computeCouncilReviewHash(plan) : null;
+	const identity = computeCouncilReviewIdentity({
+		level: 'final',
+		scope: { kind: 'final', final: true },
+		plan,
+		config: config.council,
+	});
+	const completionPolicy = resolveFinalCompletionPolicy(config.council);
+	const { resolved, distinctRoles, unknownAgents, duplicateAgents } =
+		resolveFinalCouncilVerdicts(input.verdicts);
+	const membersVoted = distinctRoles;
 	const membersAbsent = FINAL_COUNCIL_MEMBERS.filter(
-		(member) => !membersVoted.includes(member),
+		(member) => !distinctRoles.includes(member),
 	);
+	const requiredMembers =
+		completionPolicy.mode === 'quorum'
+			? completionPolicy.minimumMembers
+			: FINAL_COUNCIL_MEMBERS.length;
 
 	return runCouncilAttempt({
 		directory,
-		// Final approval is closed only for this exact plan generation. A later
-		// plan mutation gets a fresh authoritative round state and can be reviewed.
-		scope: { kind: 'final', generation: planHash ?? 'missing-plan' },
+		// Final approval is closed only for this exact review identity (the
+		// status-stable review hash + council policy digest). A later
+		// review-relevant plan/policy change gets a fresh authoritative round
+		// and can be reviewed; ordinary status-only progress does not.
+		scope: { kind: 'final', identityDigest: identity.identityDigest },
 		clientRound: input.roundNumber,
 		maxRounds: config.council?.maxRounds ?? 3,
 		sessionID: ctx?.sessionID,
+		escalationConfigured: config.council?.escalateOnMaxRounds !== undefined,
 		request: input,
 		verdictCount: input.verdicts.length,
-		members: membersVoted,
+		members: [...new Set(input.verdicts.map((v) => v.agent))].slice(0, 5),
 		probePendingEvidence: async (attemptId, round) =>
 			hasFinalEvidenceAttempt(directory, attemptId, round),
 		evaluate: async (authoritativeRound) => {
-			if (membersVoted.length < FINAL_COUNCIL_MEMBERS.length) {
+			if (membersVoted.length < requiredMembers) {
 				return {
 					disposition: 'insufficient_quorum',
 					response: {
 						success: false,
 						reason: 'insufficient_quorum',
 						message:
-							`Final council quorum not met: ${membersVoted.length} of ${FINAL_COUNCIL_MEMBERS.length} required members provided verdicts. ` +
+							`Final council quorum not met: ${membersVoted.length} of ${requiredMembers} required distinct canonical members provided verdicts ` +
+							`(policy: ${completionPolicy.mode}${completionPolicy.mode === 'quorum' ? `, minimumMembers: ${completionPolicy.minimumMembers}` : ''}). ` +
 							`Members voted: [${membersVoted.join(', ')}]. ` +
-							`Members absent: [${membersAbsent.join(', ')}]. ` +
-							'Dispatch the absent council members with project-scoped context and collect their verdicts before calling write_final_council_evidence.',
+							`Members absent: [${membersAbsent.join(', ')}].` +
+							(unknownAgents.length > 0
+								? ` Unknown identities (never counted): [${unknownAgents.join(', ')}].`
+								: '') +
+							(duplicateAgents.length > 0
+								? ` Duplicate identities (collapsed): [${duplicateAgents.join(', ')}].`
+								: '') +
+							' Dispatch the absent council members with project-scoped context and collect their verdicts before calling write_final_council_evidence.',
 						membersVoted,
 						membersAbsent,
-						quorumRequired: FINAL_COUNCIL_MEMBERS.length,
+						quorumRequired: requiredMembers,
+						completionPolicy,
+						...(unknownAgents.length > 0 ? { unknownAgents } : {}),
+						...(duplicateAgents.length > 0 ? { duplicateAgents } : {}),
 					},
 					transition: 'stay',
 					gateEffect: 'none',
@@ -162,7 +234,7 @@ export async function executeWriteFinalCouncilEvidence(
 
 			const synthesis = synthesizeFinalCouncilAdvisory(
 				input.projectSummary.trim(),
-				input.verdicts as CouncilMemberVerdict[],
+				resolved,
 				authoritativeRound,
 				config.council,
 			);
@@ -213,8 +285,21 @@ export async function executeWriteFinalCouncilEvidence(
 				type: 'final-council',
 				phase: input.phase,
 				plan_id: planId!,
+				// Status-sensitive ledger hash, recorded for audit only. The
+				// completion gate binds to identity_digest/review_hash/policy_digest
+				// (below) so ordinary task-status progress cannot invalidate the
+				// review; the gate must never enforce equality on plan_hash.
 				plan_hash: planHash!,
 				plan_identity_hash: planIdentityHash!,
+				...councilIdentityEvidenceFields(identity),
+				// Audit-only human-readable mirrors of what the policy_digest
+				// already binds cryptographically: the gate re-derives the
+				// completion policy and freshness window from the CURRENT config
+				// and compares policy_digest byte-for-byte — it never reads these
+				// two fields. They make the evidence self-describing for incident
+				// reconstruction (same convention as plan_hash above).
+				final_completion_policy: completionPolicy,
+				freshness_max_age_hours: config.council?.freshnessMaxAgeHours ?? 24,
 				verdict: normalizedVerdict,
 				rawCouncilVerdict: synthesis.overallVerdict,
 				quorumSize: synthesis.quorumSize,
@@ -278,6 +363,7 @@ export async function executeWriteFinalCouncilEvidence(
 					membersAbsent,
 					quorumSize: synthesis.quorumSize,
 					quorumMet: true,
+					completionPolicy,
 					evidencePath: synthesis.evidencePath,
 					unifiedFeedbackMd: synthesis.unifiedFeedbackMd,
 					message:
@@ -299,8 +385,14 @@ export async function executeWriteFinalCouncilEvidence(
 								// Generation locks are intentionally distinct. Re-check the
 								// current plan while holding this shared publication lock so an
 								// older generation can never overwrite newer final evidence.
+								// The comparison uses the status-stable review hash: a
+								// concurrent task-status change is legitimate progress, not a
+								// plan mutation (issue #2102).
 								const currentPlan = await loadPlan(directory);
-								if (!currentPlan || computePlanHash(currentPlan) !== planHash) {
+								if (
+									!currentPlan ||
+									computeCouncilReviewHash(currentPlan) !== reviewHash
+								) {
 									throw new Error(
 										'final council plan changed before evidence publication',
 									);
@@ -378,7 +470,7 @@ export async function executeWriteFinalCouncilEvidence(
 export const write_final_council_evidence: ToolDefinition = createSwarmTool({
 	allowWorkingDirectoryOverride: true,
 	description:
-		'Write final council evidence for a completed project. This is not General Council mode and does not use convene_general_council. PREREQUISITE: dispatch critic, reviewer, sme, test_engineer, and explorer as project-scoped Agent tasks, collect their CouncilMemberVerdict JSON, then call this tool to synthesize and persist .swarm/evidence/final-council.json.',
+		'Write final council evidence for a completed project. This is not General Council mode and does not use convene_general_council. PREREQUISITE: dispatch critic, reviewer, sme, test_engineer, and explorer as project-scoped Agent tasks, collect their CouncilMemberVerdict JSON, then call this tool to synthesize and persist .swarm/evidence/final-council.json. Quorum follows council.finalCompletionPolicy: default requires all five canonical roles with zero absentees; an explicit quorum policy accepts a bounded minimum of distinct canonical members. Member names may be exact canonical roles or multi-swarm prefixed names (e.g. local_critic); unknown and duplicate identities never count.',
 	args: {
 		phase: z
 			.number()
@@ -404,7 +496,7 @@ export const write_final_council_evidence: ToolDefinition = createSwarmTool({
 			.min(1)
 			.max(5)
 			.describe(
-				'Collected CouncilMemberVerdict objects from critic, reviewer, sme, test_engineer, and explorer.',
+				'Collected CouncilMemberVerdict objects from critic, reviewer, sme, test_engineer, and explorer (canonical or multi-swarm prefixed names).',
 			),
 	},
 	execute: async (args, directory, ctx) =>

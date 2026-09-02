@@ -16,6 +16,31 @@
  *   `${relFile}|${rule_id}|L${line}|UNSTABLE|#${occurrenceIndex}`
  *   Unstable fingerprints are ALWAYS treated as NEW findings (fail-closed).
  *
+ * Reflow identity (schema 1.1.0, issue #2302):
+ *   The 3-line window hash is sensitive to adjacent-line edits and the
+ *   occurrence index shifts when an identical same-rule line is inserted
+ *   above a baselined one — both reclassify an unchanged pre-existing
+ *   finding as NEW. Every stable entry therefore also records a
+ *   position-independent reflow key
+ *   `${relFile}|${rule_id}|${sha256(trimmed flagged line).slice(0,16)}`
+ *   (aligned 1:1 with fingerprints[] in reflow_keys[]). Diff scans match
+ *   current findings against the baseline as a multiset of reflow keys
+ *   BEFORE classifying NEW; matches are reported as `moved` (never gating).
+ *   A 1.0.0 baseline has no reflow keys (they cannot be reconstructed after
+ *   the fact — findings_snapshot stores no line content) and degrades to
+ *   exact matching only until its next capture rewrites it as 1.1.0.
+ *
+ * Absorption triage (schema 1.1.0, issue #2302):
+ *   Merging a finding that matches neither the exact fingerprints nor the
+ *   reflow multiset of the prior baseline is a NOVEL ABSORPTION. EVERY novel
+ *   absorption — in already-indexed OR first-time-indexed files — requires an
+ *   explicit refreshRationale; without it the capture is BLOCKED and the
+ *   baseline is left untouched (fail-closed: a bare failure-response
+ *   recapture can never silently accept a coder-introduced vulnerability).
+ *   With a rationale, every absorbed finding records who/when/rationale in
+ *   triage_log[]. First writes (`status:'written'`) are snapshots, not
+ *   absorptions, and stay free.
+ *
  * Merge semantics:
  *   On every capture for a set of files, ALL prior fingerprints for those files
  *   are removed (full prune, engine-agnostic) before inserting current findings.
@@ -31,7 +56,10 @@ import type { SastScanFinding } from './sast-scan';
 
 // ============ Constants ============
 
-export const BASELINE_SCHEMA_VERSION = '1.0.0' as const;
+export const BASELINE_SCHEMA_VERSION = '1.1.0' as const;
+
+/** Baselines written before issue #2302 — loaded read-only, exact matching only. */
+export const LEGACY_BASELINE_SCHEMA_VERSION = '1.0.0' as const;
 
 /** Maximum findings to store in baseline (heuristic — open for tuning). */
 export const MAX_BASELINE_FINDINGS = 2000;
@@ -39,13 +67,16 @@ export const MAX_BASELINE_FINDINGS = 2000;
 /** Maximum bytes for the baseline JSON file (heuristic). */
 const MAX_BASELINE_BYTES = 2 * 1_048_576; // 2 MB
 
+/** Maximum novel findings listed in an absorption_blocked result (heuristic). */
+const MAX_BLOCKED_LIST = 20;
+
 /** Retry delays for advisory file-lock acquisition (ms). */
 const LOCK_RETRY_DELAYS_MS = [50, 100, 200, 400, 800];
 
 // ============ Types ============
 
 export interface SastBaselineFile {
-	schema_version: '1.0.0';
+	schema_version: '1.0.0' | '1.1.0';
 	phase: number;
 	created_at: string;
 	updated_at: string;
@@ -54,14 +85,47 @@ export interface SastBaselineFile {
 	files_indexed: string[];
 	/** Fingerprint strings for all indexed findings. */
 	fingerprints: string[];
+	/**
+	 * Position-independent reflow identities aligned 1:1 with fingerprints[]
+	 * (`${relFile}|${rule_id}|${sha256(trimmed flagged line).slice(0,16)}`,
+	 * '' for unstable entries). Absent in 1.0.0 files — exact matching only.
+	 */
+	reflow_keys?: string[];
 	/** Full findings snapshot (for auditing / debugging). */
 	findings_snapshot: SastScanFinding[];
+	/**
+	 * Audit trail for every novel absorption into an existing baseline
+	 * (issue #2302). First writes record no entries — a snapshot is not an
+	 * acceptance. Entries are dropped when their fingerprint no longer
+	 * survives in fingerprints[].
+	 */
+	triage_log?: BaselineTriageEntry[];
 	/** True if the snapshot was truncated at MAX_BASELINE_FINDINGS. */
 	truncated: boolean;
 }
 
+export interface BaselineTriageEntry {
+	/** Fingerprint of the absorbed finding (post-capture form). */
+	fingerprint: string;
+	/** Canonical relative path of the file containing the absorbed finding. */
+	rel_file: string;
+	rule_id: string;
+	/** Caller-supplied refresh rationale, or the first-time-index auto-rationale. */
+	rationale: string;
+	/** Session id of the capturing caller, or 'unknown-session'. */
+	actor: string;
+	/** ISO timestamp of the absorption. */
+	absorbed_at: string;
+}
+
 export type LoadBaselineResult =
-	| { status: 'found'; fingerprints: Set<string>; bundle: SastBaselineFile }
+	| {
+			status: 'found';
+			fingerprints: Set<string>;
+			/** Reflow keys aligned with the loaded fingerprints (empty for 1.0.0 files). */
+			reflowKeys: string[];
+			bundle: SastBaselineFile;
+	  }
 	| { status: 'not_found' }
 	| { status: 'invalid_schema'; errors: string[] };
 
@@ -76,11 +140,40 @@ export interface IndexedFinding {
 	index: number;
 	stable: boolean;
 	fingerprint: string;
+	/** Position-independent reflow identity ('' when unstable — never reflow-matched). */
+	reflowKey: string;
+}
+
+export interface BaselinePartition {
+	preExisting: SastScanFinding[];
+	moved: SastScanFinding[];
+	newFindings: SastScanFinding[];
+}
+
+export interface BlockedAbsorptionFinding {
+	fingerprint: string;
+	rel_file: string;
+	rule_id: string;
 }
 
 export type CaptureResult =
 	| { status: 'written'; path: string; fingerprint_count: number }
-	| { status: 'merged'; path: string; fingerprint_count: number }
+	| {
+			status: 'merged';
+			path: string;
+			fingerprint_count: number;
+			/** Novel absorptions recorded in triage_log by this capture. */
+			absorbed_finding_count: number;
+			/** Prior triage entries whose fingerprints no longer survive this merge. */
+			dropped_triage_count: number;
+	  }
+	| {
+			status: 'absorption_blocked';
+			path: string;
+			/** Novel findings in already-indexed files (bounded to MAX_BLOCKED_LIST). */
+			blocked: BlockedAbsorptionFinding[];
+			message: string;
+	  }
 	| { status: 'error'; message: string };
 
 // ============ Path Utilities ============
@@ -170,11 +263,16 @@ export function fingerprintFinding(
 }
 
 /**
- * Assign occurrence indices to a batch of findings.
+ * Assign occurrence indices and reflow identities to a batch of findings.
  *
  * Two findings that produce the same (relFile, rule_id, contentHash) tuple
  * — e.g., copy-pasted vulnerable lines — receive different indices so they
  * get distinct fingerprints and can be individually classified.
+ *
+ * The reflow key hashes only the flagged line's own (trimmed) content, so it
+ * survives adjacent-line edits, pure line moves, and occurrence-index shifts
+ * — the three fingerprint instabilities fixed by issue #2302. It is '' when
+ * the fingerprint is unstable; unstable findings never reflow-match.
  */
 export function assignOccurrenceIndices(
 	findings: SastScanFinding[],
@@ -187,6 +285,7 @@ export function assignOccurrenceIndices(
 		const lineNum = finding.location.line;
 
 		let baseKey: string;
+		let reflowKey = '';
 		try {
 			if (relFile.startsWith('..')) throw new Error('escapes workspace');
 			const content = fs.readFileSync(finding.location.file, 'utf-8');
@@ -203,6 +302,12 @@ export function assignOccurrenceIndices(
 				.digest('hex')
 				.slice(0, 16);
 			baseKey = `${relFile}|${finding.rule_id}|${hash}`;
+			const lineHash = crypto
+				.createHash('sha256')
+				.update(getLine(lines, idx))
+				.digest('hex')
+				.slice(0, 16);
+			reflowKey = `${relFile}|${finding.rule_id}|${lineHash}`;
 		} catch {
 			baseKey = `${relFile}|${finding.rule_id}|L${lineNum}|UNSTABLE`;
 		}
@@ -216,8 +321,60 @@ export function assignOccurrenceIndices(
 			index: occIdx,
 			stable: fp.stable,
 			fingerprint: fp.fingerprint,
+			reflowKey,
 		};
 	});
+}
+
+// ============ Reflow Partition ============
+
+/**
+ * Partition current findings against a loaded baseline (issue #2302).
+ *
+ * 1. Exact: stable fingerprint present in baselineFingerprints → pre-existing.
+ *    Each exact match consumes one count of its reflow key — an exact
+ *    fingerprint match implies the same flagged-line content, so a baseline
+ *    entry can never absorb both an exact and a reflow match.
+ * 2. Reflow: stable finding whose reflow key still has unconsumed baseline
+ *    counts → moved (same finding, new position/window; never gating).
+ * 3. Anything else — including every unstable finding — is NEW (fail-closed).
+ *
+ * Multiset counting keeps duplicate content honest: a baseline with one
+ * `exec(cmd)` line absorbs exactly one current `exec(cmd)` line; a second
+ * identical line stays NEW.
+ */
+export function partitionAgainstBaseline(
+	indexed: IndexedFinding[],
+	baselineFingerprints: Set<string>,
+	baselineReflowKeys: readonly string[],
+): BaselinePartition {
+	const reflowCounts = new Map<string, number>();
+	for (const key of baselineReflowKeys) {
+		if (!key) continue;
+		reflowCounts.set(key, (reflowCounts.get(key) ?? 0) + 1);
+	}
+
+	const preExisting: SastScanFinding[] = [];
+	const moved: SastScanFinding[] = [];
+	const newFindings: SastScanFinding[] = [];
+
+	for (const { finding, stable, fingerprint, reflowKey } of indexed) {
+		if (stable && baselineFingerprints.has(fingerprint)) {
+			preExisting.push(finding);
+			if (reflowKey) {
+				const count = reflowCounts.get(reflowKey) ?? 0;
+				if (count > 0) reflowCounts.set(reflowKey, count - 1);
+			}
+		} else if (stable && reflowKey && (reflowCounts.get(reflowKey) ?? 0) > 0) {
+			const matchedCount = reflowCounts.get(reflowKey) ?? 0;
+			reflowCounts.set(reflowKey, matchedCount - 1);
+			moved.push(finding);
+		} else {
+			newFindings.push(finding);
+		}
+	}
+
+	return { preExisting, moved, newFindings };
 }
 
 // ============ File Lock ============
@@ -305,6 +462,15 @@ function validatePhase(phase: number): string | null {
  *   This full-prune (engine-agnostic) prevents stale cross-engine entries from
  *   causing false-pass verdicts on later full-engine diff scans.
  *
+ * Absorption triage (issue #2302):
+ *   Current findings that match the prior baseline (exact fingerprint or
+ *   reflow key) are re-fingerprinted mechanically. A finding that matches
+ *   neither is a NOVEL ABSORPTION: the capture is BLOCKED unless
+ *   `refreshRationale` is supplied (the baseline is left untouched —
+ *   fail-closed), for already-indexed AND first-time-indexed files alike.
+ *   With a rationale, every absorbed finding records who (`actor`)/when/
+ *   rationale in `triage_log`.
+ *
  * Severity threshold:
  *   Callers MUST pass ALL findings regardless of severity threshold so the
  *   baseline captures the full pre-existing surface. Threshold filtering is
@@ -320,7 +486,14 @@ export async function captureOrMergeBaseline(
 	findings: SastScanFinding[],
 	engine: 'tier_a' | 'tier_a+tier_b',
 	scannedFiles: string[],
-	opts?: { force?: boolean; abortSignal?: AbortSignal },
+	opts?: {
+		force?: boolean;
+		abortSignal?: AbortSignal;
+		/** Audited rationale required to absorb novel findings in already-indexed files. */
+		refreshRationale?: string;
+		/** Identity recorded in triage_log entries (session id of the caller). */
+		actor?: string;
+	},
 ): Promise<CaptureResult> {
 	const phaseError = validatePhase(phase);
 	if (phaseError) return { status: 'error', message: phaseError };
@@ -361,12 +534,19 @@ export async function captureOrMergeBaseline(
 		return { status: 'error', message: 'SAST baseline capture cancelled' };
 	}
 	try {
-		// Load existing baseline
+		// Load existing baseline. A legacy 1.0.0 baseline is also accepted so
+		// its next capture MERGES (preserving non-scanned entries) and rewrites
+		// it as 1.1.0 — rejecting it here would silently downgrade the capture
+		// to a full replace. Legacy files carry no reflow keys, so their
+		// findings can only exact-match until the rewrite (fail-closed).
 		let existing: SastBaselineFile | null = null;
 		try {
 			const raw = fs.readFileSync(baselinePath, 'utf-8');
 			const parsed = JSON.parse(raw) as SastBaselineFile;
-			if (parsed.schema_version === BASELINE_SCHEMA_VERSION) {
+			if (
+				parsed.schema_version === BASELINE_SCHEMA_VERSION ||
+				parsed.schema_version === LEGACY_BASELINE_SCHEMA_VERSION
+			) {
 				existing = parsed;
 			}
 		} catch {
@@ -384,9 +564,15 @@ export async function captureOrMergeBaseline(
 		if (existing && !opts?.force) {
 			// Full prune: drop ALL prior fingerprints for rescanned files (engine-agnostic).
 			// Fingerprint format: `${relFile}|...` — relFile is the first `|`-delimited segment.
-			const prunedFingerprints = existing.fingerprints.filter((fp) => {
+			// reflow_keys[] is index-aligned with fingerprints[], so both arrays
+			// are pruned and truncated by the SAME index discipline.
+			const prunedFingerprints: string[] = [];
+			const prunedReflowKeys: string[] = [];
+			existing.fingerprints.forEach((fp, i) => {
 				const relFile = fp.slice(0, fp.indexOf('|'));
-				return !scannedRelFiles.has(relFile);
+				if (scannedRelFiles.has(relFile)) return;
+				prunedFingerprints.push(fp);
+				prunedReflowKeys.push(existing.reflow_keys?.[i] ?? '');
 			});
 			const prunedSnapshot = existing.findings_snapshot.filter((f) => {
 				return !scannedRelFiles.has(
@@ -397,9 +583,100 @@ export async function captureOrMergeBaseline(
 				(f) => !scannedRelFiles.has(f),
 			);
 
+			// ── #2302 absorption triage ──────────────────────────────────────
+			// Match current findings against the prior entries of the rescanned
+			// files (exact fingerprint set + reflow multiset). Matching findings
+			// are mechanical re-fingerprints; the rest are novel absorptions.
+			const priorFingerprintSet = new Set<string>();
+			const priorReflowCounts = new Map<string, number>();
+			existing.fingerprints.forEach((fp, i) => {
+				const relFile = fp.slice(0, fp.indexOf('|'));
+				if (!scannedRelFiles.has(relFile)) return;
+				priorFingerprintSet.add(fp);
+				const key = existing.reflow_keys?.[i] ?? '';
+				if (key) {
+					priorReflowCounts.set(key, (priorReflowCounts.get(key) ?? 0) + 1);
+				}
+			});
+
+			let blockedCount = 0;
+			const blockedList: BlockedAbsorptionFinding[] = [];
+			const triageEntries: BaselineTriageEntry[] = [];
+			const absorbedAt = new Date().toISOString();
+			const actor = opts?.actor?.trim() ? opts.actor.trim() : 'unknown-session';
+
+			for (const { finding, stable, fingerprint, reflowKey } of indexed) {
+				if (stable && priorFingerprintSet.has(fingerprint)) {
+					if (reflowKey) {
+						const count = priorReflowCounts.get(reflowKey) ?? 0;
+						if (count > 0) priorReflowCounts.set(reflowKey, count - 1);
+					}
+					continue; // exact match — mechanical re-fingerprint
+				}
+				if (
+					stable &&
+					reflowKey &&
+					(priorReflowCounts.get(reflowKey) ?? 0) > 0
+				) {
+					const matchedCount = priorReflowCounts.get(reflowKey) ?? 0;
+					priorReflowCounts.set(reflowKey, matchedCount - 1);
+					continue; // reflow match — moved / index-shifted, mechanical
+				}
+				// Novel absorption relative to the prior baseline. EVERY novel
+				// finding requires an explicit audited rationale — including
+				// files not previously indexed (#2302 final-critic revision:
+				// the tool cannot distinguish a pre-delegation capture from a
+				// failure-response recapture, so first-time files must not be
+				// an implicit free-absorption path).
+				const relFile = normalizeFindingPath(directory, finding.location.file);
+				if (!opts?.refreshRationale) {
+					blockedCount++;
+					if (blockedList.length < MAX_BLOCKED_LIST) {
+						blockedList.push({
+							fingerprint,
+							rel_file: relFile,
+							rule_id: finding.rule_id,
+						});
+					}
+					continue;
+				}
+				triageEntries.push({
+					fingerprint,
+					rel_file: relFile,
+					rule_id: finding.rule_id,
+					rationale: opts.refreshRationale,
+					actor,
+					absorbed_at: absorbedAt,
+				});
+			}
+
+			if (blockedCount > 0) {
+				const sample = blockedList.slice(0, 5);
+				const sampleText = sample
+					.map((b) => `${b.rel_file} (${b.rule_id})`)
+					.join(', ');
+				// Ellipsis when the sample shows fewer than the total blocked —
+				// compare against the sample size, not the (capped) list length,
+				// so a count of exactly MAX_BLOCKED_LIST still reads as truncated.
+				const ellipsis = blockedCount > sample.length ? ', …' : '';
+				return {
+					status: 'absorption_blocked',
+					path: baselinePath,
+					blocked: blockedList,
+					message:
+						`capture_baseline would absorb ${blockedCount} finding(s) not present in the prior baseline ` +
+						`(${sampleText}${ellipsis}). ` +
+						`Pass baseline_refresh_rationale to record an audited refresh — the baseline was left unchanged (fail-closed).`,
+				};
+			}
+
 			const mergedFingerprints = [
 				...prunedFingerprints,
 				...indexed.map((i) => i.fingerprint),
+			];
+			const mergedReflowKeys = [
+				...prunedReflowKeys,
+				...indexed.map((i) => i.reflowKey),
 			];
 			const mergedSnapshot = [
 				...prunedSnapshot,
@@ -417,6 +694,9 @@ export async function captureOrMergeBaseline(
 			const cappedFingerprints = truncated
 				? mergedFingerprints.slice(-MAX_BASELINE_FINDINGS)
 				: mergedFingerprints;
+			const cappedReflowKeys = truncated
+				? mergedReflowKeys.slice(-MAX_BASELINE_FINDINGS)
+				: mergedReflowKeys;
 
 			// When truncating, rebuild files_indexed to only include files with surviving fingerprints
 			let cappedFilesIndexed = mergedFilesIndexed;
@@ -432,6 +712,20 @@ export async function captureOrMergeBaseline(
 				cappedFilesIndexed = Array.from(survivingFiles);
 			}
 
+			// Retain triage entries whose fingerprint still survives the merge
+			// (non-scanned files' entries and still-present fingerprints); drop
+			// dangling history for re-fingerprinted/moved findings. The drop is
+			// disclosed to the caller via dropped_triage_count.
+			const priorTriage = existing.triage_log ?? [];
+			const cappedFingerprintSet = new Set(cappedFingerprints);
+			const retainedTriage = priorTriage.filter((e) =>
+				cappedFingerprintSet.has(e.fingerprint),
+			);
+			const droppedTriageCount = priorTriage.length - retainedTriage.length;
+			const mergedTriageLog = [...retainedTriage, ...triageEntries].slice(
+				-MAX_BASELINE_FINDINGS,
+			);
+
 			const now = new Date().toISOString();
 			const bundle: SastBaselineFile = {
 				schema_version: BASELINE_SCHEMA_VERSION,
@@ -441,7 +735,9 @@ export async function captureOrMergeBaseline(
 				engine,
 				files_indexed: cappedFilesIndexed,
 				fingerprints: cappedFingerprints,
+				reflow_keys: cappedReflowKeys,
 				findings_snapshot: cappedSnapshot,
+				triage_log: mergedTriageLog,
 				truncated,
 			};
 
@@ -449,7 +745,7 @@ export async function captureOrMergeBaseline(
 			if (json.length > MAX_BASELINE_BYTES) {
 				return {
 					status: 'error',
-					message: `Baseline would exceed size cap (${json.length} bytes > ${MAX_BASELINE_BYTES})`,
+					message: `Baseline would exceed size cap (${json.length} bytes > ${MAX_BASELINE_BYTES} bytes)`,
 				};
 			}
 			if (opts?.abortSignal?.aborted) {
@@ -467,11 +763,16 @@ export async function captureOrMergeBaseline(
 				status: 'merged',
 				path: baselinePath,
 				fingerprint_count: cappedFingerprints.length,
+				absorbed_finding_count: triageEntries.length,
+				dropped_triage_count: droppedTriageCount,
 			};
 		}
 
-		// First write (or force)
+		// First write (or force). A first write is a snapshot, not an
+		// acceptance — no triage entries. force replaces the whole baseline
+		// (destructive by design; unreachable from the sast_scan tool).
 		const newFingerprints = indexed.map((i) => i.fingerprint);
+		const newReflowKeys = indexed.map((i) => i.reflowKey);
 		const newSnapshot = indexed.map((i) => i.finding);
 		const truncated = newSnapshot.length > MAX_BASELINE_FINDINGS;
 		const cappedSnapshot = truncated
@@ -480,6 +781,9 @@ export async function captureOrMergeBaseline(
 		const cappedFingerprints = truncated
 			? newFingerprints.slice(0, MAX_BASELINE_FINDINGS)
 			: newFingerprints;
+		const cappedReflowKeys = truncated
+			? newReflowKeys.slice(0, MAX_BASELINE_FINDINGS)
+			: newReflowKeys;
 
 		const now = new Date().toISOString();
 		const bundle: SastBaselineFile = {
@@ -490,7 +794,9 @@ export async function captureOrMergeBaseline(
 			engine,
 			files_indexed: Array.from(scannedRelFiles),
 			fingerprints: cappedFingerprints,
+			reflow_keys: cappedReflowKeys,
 			findings_snapshot: cappedSnapshot,
+			triage_log: [],
 			truncated,
 		};
 
@@ -529,6 +835,13 @@ export async function captureOrMergeBaseline(
  *
  * Returns 'not_found' when no baseline file exists (first run for phase).
  * Returns 'invalid_schema' when the file is present but unparseable.
+ *
+ * Schema versions: 1.1.0 files carry reflow_keys (reflow matching active);
+ * legacy 1.0.0 files load read-only with an empty reflowKeys array — exact
+ * matching only until the next capture rewrites them as 1.1.0 (reflow keys
+ * cannot be reconstructed retroactively; findings_snapshot stores no line
+ * content). A present-but-misaligned reflow_keys array is corruption and
+ * fails closed to invalid_schema (legacy gating; recoverable by recapture).
  */
 export function loadBaseline(
 	directory: string,
@@ -552,7 +865,10 @@ export function loadBaseline(
 	try {
 		const raw = fs.readFileSync(baselinePath, 'utf-8');
 		const parsed = JSON.parse(raw) as SastBaselineFile;
-		if (parsed.schema_version !== BASELINE_SCHEMA_VERSION) {
+		if (
+			parsed.schema_version !== BASELINE_SCHEMA_VERSION &&
+			parsed.schema_version !== LEGACY_BASELINE_SCHEMA_VERSION
+		) {
 			return {
 				status: 'invalid_schema',
 				errors: [`Unknown schema version: ${String(parsed.schema_version)}`],
@@ -564,9 +880,33 @@ export function loadBaseline(
 				errors: ['Missing or invalid fingerprints array'],
 			};
 		}
+		let reflowKeys: string[] = [];
+		if (parsed.schema_version === BASELINE_SCHEMA_VERSION) {
+			if (parsed.reflow_keys === undefined || parsed.reflow_keys === null) {
+				// Absent (or explicit null) reflow_keys on a 1.1.0 file:
+				// tolerate as exact-only (fail-closed) rather than rejecting
+				// the whole baseline — semantically equivalent inputs must not
+				// diverge on the storage encoding alone.
+				reflowKeys = [];
+			} else if (
+				!Array.isArray(parsed.reflow_keys) ||
+				parsed.reflow_keys.some((k) => typeof k !== 'string') ||
+				parsed.reflow_keys.length !== parsed.fingerprints.length
+			) {
+				return {
+					status: 'invalid_schema',
+					errors: [
+						'reflow_keys must be a string array aligned 1:1 with fingerprints',
+					],
+				};
+			} else {
+				reflowKeys = parsed.reflow_keys;
+			}
+		}
 		return {
 			status: 'found',
 			fingerprints: new Set(parsed.fingerprints),
+			reflowKeys,
 			bundle: parsed,
 		};
 	} catch (e) {
@@ -587,11 +927,13 @@ export function loadBaseline(
 export const _internals: {
 	fingerprintFinding: typeof fingerprintFinding;
 	assignOccurrenceIndices: typeof assignOccurrenceIndices;
+	partitionAgainstBaseline: typeof partitionAgainstBaseline;
 	captureOrMergeBaseline: typeof captureOrMergeBaseline;
 	loadBaseline: typeof loadBaseline;
 } = {
 	fingerprintFinding,
 	assignOccurrenceIndices,
+	partitionAgainstBaseline,
 	captureOrMergeBaseline,
 	loadBaseline,
 } as const;

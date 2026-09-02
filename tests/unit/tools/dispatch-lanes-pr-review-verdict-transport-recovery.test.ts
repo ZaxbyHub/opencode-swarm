@@ -387,14 +387,12 @@ describe('collect_lane_results — regression: PR-review verdict transport recov
 		{
 			name: 'UPHELD changed severity',
 			row: '[CRITIC] | C-0 | UPHELD | MEDIUM | reason | required change ',
-			expected:
-				'every assigned reviewer/critic item requires one parseable verdict row',
+			expected: 'predicate=critic.verdict_rows',
 		},
 		{
 			name: 'DOWNGRADED no-op severity',
 			row: '[CRITIC] | C-0 | DOWNGRADED | HIGH | reason | required change ',
-			expected:
-				'every assigned reviewer/critic item requires one parseable verdict row',
+			expected: 'predicate=critic.verdict_rows',
 		},
 	])('fails closed for critic transport recovery with $name', async ({
 		row,
@@ -469,7 +467,7 @@ describe('collect_lane_results — regression: PR-review verdict transport recov
 		expect(result.failed).toBe(1);
 		expect(result.lane_results[0]?.status).toBe('failed');
 		expect(result.lane_results[0]?.error).toContain(
-			'PR_WORKFLOW_CONTRACT_INVALID',
+			'PR_REVIEW_VERDICT_CONTRACT_INVALID',
 		);
 		expect(result.lane_results[0]?.error).toContain(expected);
 		expect(

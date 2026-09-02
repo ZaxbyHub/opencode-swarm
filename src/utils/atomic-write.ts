@@ -94,8 +94,8 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		producers: [
 			'src/commands/handoff.ts:48 (pre-#2035)',
 			'src/commands/handoff.ts:79 (pre-#2035)',
-			'src/memory/local-jsonl-provider.ts:1171',
-			'src/config/bundled-skills.ts:241',
+			'src/memory/local-jsonl-provider.ts:1288',
+			'src/config/bundled-skills.ts:250',
 		],
 	},
 	{
@@ -105,8 +105,10 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		token: 'instance',
 		quarantineEligible: true,
 		parsesTarget: true,
-		producers: ['src/hooks/pr-workflow-gate.ts:12961'],
-		note: 'pre/post-rename file-identity verification (assertOpened/ClosedSwarmFileIdentity, pr-workflow-gate.ts:11844-11889) is writer-specific and load-bearing',
+		producers: [
+			'src/hooks/pr-workflow-gate.ts (pre-#2385; migration extracted to src/pr-review/persistence.ts)',
+		],
+		note: 'pre/post-rename file-identity verification (assertOpened/ClosedSwarmFileIdentity, pr-workflow-gate.ts:17880-17980) is writer-specific and load-bearing',
 	},
 	{
 		id: 'target-suffix-tmp-num-num-json',
@@ -129,16 +131,16 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/evidence/task-file.ts:67 (pre-#2035)',
 			'src/scope/scope-persistence.ts:2304 (pre-#2035)',
 			'src/scope/scope-persistence.ts:2318 (pre-#2035)',
-			'src/plan/manager.ts:628',
-			'src/plan/manager.ts:1793',
-			'src/plan/manager.ts:1839',
-			'src/review/evidence.ts:160',
+			'src/plan/manager.ts:629',
+			'src/plan/manager.ts:1785',
+			'src/plan/manager.ts:1831',
+			'src/review/evidence.ts:175',
 			'src/turbo/lean/evidence.ts:182',
 			'src/summaries/manager.ts:122',
 			'src/evidence/manager.ts:288',
 			'src/evidence/manager.ts:456',
-			'src/tools/sast-baseline.ts:106',
-			'src/tools/repo-graph/storage.ts:397',
+			'src/tools/sast-baseline.ts:199',
+			'src/tools/repo-graph/storage.ts:493',
 			'src/memory/reflection-service.ts:547 (pre-#2035)',
 			'src/hooks/review-receipt.ts:608',
 			'src/hooks/review-receipt.ts:674',
@@ -154,7 +156,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/turbo/epic/state.ts:177',
 			'src/turbo/epic/calibration.ts:197',
 			'src/commands/archive-sqlite.ts:318',
-			'src/memory/jsonl-migration.ts:157',
+			'src/memory/jsonl-migration.ts:161',
 		],
 		note: 'fsync-discipline / lock-scoped fd writers whose temp naming is pinned by their own durability test suites (plan-durability invariant 5, #2034 crash matrix); grammars registered here so their residue stays discoverable',
 	},
@@ -186,10 +188,9 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/tools/spec-write.ts:98',
 			'src/sdd/effective-spec.ts:1149',
 			'src/background/lane-output-store.ts:353',
-			'src/background/pending-delegations.ts:905',
-			'src/background/delegation-health.ts:300',
-			'src/hooks/delegation-gate/worktree-provisioning-owner.ts:100',
-			'src/tools/submit-phase-council-verdicts.ts:437',
+			'src/background/pending-delegations.ts:1091',
+			'src/background/delegation-health.ts:391',
+			'src/tools/submit-phase-council-verdicts.ts:458',
 			'src/summaries/store.ts:46 (pre-#2035)',
 		],
 		note: 'background lane/delegation stores keep bounded-retry rename semantics wired into their callers (#2034/#2276 delivery contracts); migration candidates for a follow-up but grammars registered',
@@ -234,8 +235,9 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		quarantineEligible: true,
 		parsesTarget: true,
 		producers: [
-			'src/tools/write-pr-review-artifact.ts:107',
-			'src/tools/write-pr-review-trigger-eval.ts:574',
+			'src/tools/write-pr-review-artifact.ts:140',
+			'src/tools/write-pr-review-artifact.ts:160',
+			'src/tools/write-pr-review-trigger-eval.ts:96',
 		],
 		note: 'bundled-skills writes outside .swarm (project skill roots) and keeps its own contained-directory logic (invariant 4 bundled-skill ownership)',
 	},
@@ -256,7 +258,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		token: 'instance',
 		quarantineEligible: true,
 		parsesTarget: true,
-		producers: ['src/plan/manager.ts:1979', 'src/plan/manager.ts:2168'],
+		producers: ['src/plan/manager.ts:1971', 'src/plan/manager.ts:2160'],
 		note: 'plan-durability (invariant 5) fd-write paths; grammars registered, writers unchanged in this PR',
 	},
 	{
@@ -295,7 +297,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/tools/record-recurrence-sweep.ts:125',
 			'src/tools/record-issue-reproduction.ts:85',
 			'src/tools/record-issue-publication.ts:74',
-			'src/tools/write-final-council-evidence.ts:311',
+			'src/tools/write-final-council-evidence.ts:403',
 		],
 		note: 'constant-name temps: no per-invocation token — reported when stale, never auto-quarantined (may be an in-flight writer of any process)',
 	},
@@ -307,15 +309,16 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 		quarantineEligible: false,
 		parsesTarget: false,
 		producers: [
-			'src/tools/checkpoint.ts:194',
-			'src/full-auto/state.ts:448',
+			'src/tools/checkpoint.ts:195',
+			'src/full-auto/state.ts:460',
 			'src/context-map/persistence.ts:119',
-			'src/context-map/capsule-persistence.ts:107',
+			'src/context-map/capsule-persistence.ts:109',
 			'src/test-impact/history-store.ts:225',
 			'src/test-impact/history-store.ts:353',
-			'src/hooks/promotion-evidence-store.ts:102',
-			'src/hooks/skill-usage-log.ts:554',
-			'src/hooks/skill-usage-log.ts:608',
+			'src/hooks/promotion-evidence-store.ts:112',
+			'src/hooks/skill-usage-log.ts:1165',
+			'src/hooks/skill-usage-log.ts:1675',
+			'src/hooks/skill-usage-pending.ts:817',
 			'src/parallel/file-locks.ts:113',
 			'src/plan/ledger.ts:1302',
 			'src/plan/ledger.ts:1303',
@@ -374,6 +377,10 @@ export const WRITER_CLASSIFICATION: Readonly<
 	'src/services/skill-generator.ts': 'migrated',
 	'src/services/skill-improver.ts': 'migrated',
 	'src/summaries/store.ts': 'migrated',
+	// delegates every atomic rewrite to the canonical helper (trajectory data
+	// file + checkpoint, issue #2041); its `.tmp` mention is the cleanup
+	// READER reaping stale atomic-write leftovers, not a constructor
+	'src/prm/trajectory-store.ts': 'migrated',
 	// registered-bespoke: grammar registered, writer kept (see grammar notes)
 	'src/background/delegation-health.ts': 'registered-bespoke',
 	'src/background/lane-output-store.ts': 'registered-bespoke',
@@ -381,18 +388,38 @@ export const WRITER_CLASSIFICATION: Readonly<
 	'src/commands/archive-sqlite.ts': 'registered-bespoke',
 	'src/context-map/capsule-persistence.ts': 'registered-bespoke',
 	'src/context-map/persistence.ts': 'registered-bespoke',
+	// bespoke atomic single-file rewrite (write tmp + rename) for the bounded
+	// context-map telemetry store; PID-scoped `.context-telemetry.jsonl.<pid>.tmp`
+	'src/context-map/telemetry.ts': 'registered-bespoke',
+	// bespoke atomic single-file rewrites (write tmp + rename) for the bounded
+	// core event store and its authority index (issue #2039); PID-scoped
+	// `.events.jsonl.<pid>.tmp` / `.events-authority-index.json.<pid>.tmp`
+	'src/events/core-events.ts': 'registered-bespoke',
+	// bespoke atomic single-file rewrites (write tmp + rename) for the bounded
+	// shell-audit security store (issue #2040); PID-scoped
+	// `.shell-audit.jsonl.<pid>.tmp`
+	'src/hooks/guardrails/shell-audit-store.ts': 'registered-bespoke',
 	'src/evidence/documents-retention.ts': 'registered-bespoke',
 	'src/evidence/manager.ts': 'registered-bespoke',
 	'src/full-auto/state.ts': 'registered-bespoke',
 	'src/hooks/delegation-gate/worktree-merge-status.ts': 'registered-bespoke',
-	'src/hooks/delegation-gate/worktree-provisioning-owner.ts':
-		'registered-bespoke',
+	'src/hooks/delegation-gate/worktree-provisioning-owner.ts': 'migrated',
 	'src/hooks/issue-trace-state.ts': 'registered-bespoke',
 	'src/hooks/knowledge-receipt-ledger-storage.ts': 'registered-bespoke',
 	'src/hooks/pr-workflow-gate.ts': 'registered-bespoke',
+	// bespoke atomic single-file rewrite (write tmp + rename) for the bounded
+	// PR-review re-entry authorization store (issues #2383/#2385; moved to the
+	// src/pr-review/ boundary); UUID-scoped `.${basename}.${uuid}.tmp`
+	'src/pr-review/authorization.ts': 'registered-bespoke',
+	// bespoke atomic single-file rewrite (write tmp + rename) for the PR-review
+	// gate-state and salvage reads (issue #2385; the only durable stream is
+	// `.swarm/pr-workflow-gates/*.json`, currently UNREGISTERED in the retention
+	// data set — F-PRR-013 follow-up); UUID-scoped `.tmp.<pid>.<uuid>`
+	'src/pr-review/persistence.ts': 'registered-bespoke',
 	'src/hooks/promotion-evidence-store.ts': 'registered-bespoke',
 	'src/hooks/review-receipt.ts': 'registered-bespoke',
 	'src/hooks/skill-usage-log.ts': 'registered-bespoke',
+	'src/hooks/skill-usage-pending.ts': 'registered-bespoke',
 	'src/knowledge/identity.ts': 'registered-bespoke',
 	'src/memory/jsonl-migration.ts': 'external',
 	'src/memory/local-jsonl-provider.ts': 'registered-bespoke',
@@ -599,6 +626,8 @@ const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES', 'EEXIST']);
 export interface AtomicWriteOptions {
 	/** Skip the pre-rename fsync (tests / truly ephemeral data). */
 	readonly skipFsync?: boolean;
+	/** File mode for the per-write temporary file before rename. */
+	readonly mode?: number;
 	/**
 	 * Override the bounded-write cap (default MAX_ATOMIC_WRITE_BYTES). Exposed
 	 * so the bound itself is testable without allocating 256 MiB.
@@ -703,7 +732,7 @@ function writeAtomicSync(
 	// acceptance: "failed writes clean only their own temp and preserve the
 	// previous target").
 	try {
-		const fd = fs.openSync(tempPath, 'wx');
+		const fd = fs.openSync(tempPath, 'wx', options?.mode);
 		try {
 			let written = 0;
 			while (written < buffer.byteLength) {

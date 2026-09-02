@@ -27,6 +27,7 @@ import {
 	isAssetEdge,
 	isScannableSourcePath,
 	MAX_EXTRACTOR_INPUT_WITNESSES,
+	reconcileEdgeTargetKinds,
 	scanFileAsync,
 	upsertNode,
 } from './builder';
@@ -34,6 +35,12 @@ import { clearCache, getCachedMtime } from './cache';
 import { writeFingerprint } from './freshness';
 import { resetQueryCache } from './query';
 import { getGraphPath, loadGraph, saveGraph } from './storage';
+import {
+	deriveRepoRootId,
+	isCompleteSymbolEdge,
+	mergeSymbolEdges,
+	normalizeSymbolEdge,
+} from './symbol-edge';
 import type {
 	BuildWorkspaceGraphOptions,
 	GraphEdge,
@@ -42,7 +49,11 @@ import type {
 	RepoGraphDiagnostics,
 	SymbolEdge,
 } from './types';
-import { normalizeGraphPath, updateGraphMetadata } from './types';
+import {
+	DEFAULT_MAX_SOURCE_BYTES,
+	normalizeGraphPath,
+	updateGraphMetadata,
+} from './types';
 
 /** Public options shared by hook, read-repair, and direct callers. */
 export interface IncrementalUpdateOptions {
@@ -275,6 +286,27 @@ function scanDiagnostics(
 	};
 }
 
+function appendExtractionFailure(
+	diagnostics: RepoGraphDiagnostics | undefined,
+	failure: { file: string; language: string; reason: string },
+): RepoGraphDiagnostics {
+	const extractionFailures = diagnostics?.extractionFailures ?? [];
+	if (
+		extractionFailures.some(
+			(entry) =>
+				entry.file === failure.file &&
+				entry.language === failure.language &&
+				entry.reason === failure.reason,
+		)
+	) {
+		return diagnostics ?? {};
+	}
+	return {
+		...(diagnostics ?? {}),
+		extractionFailures: [...extractionFailures, failure],
+	};
+}
+
 function isEnoent(error: unknown): boolean {
 	return (
 		error instanceof Error &&
@@ -346,7 +378,8 @@ export async function updateGraphForFiles(
 
 	const graph = existingGraph;
 	const absoluteRoot = path.resolve(workspaceRoot);
-	const maxFileSize = options?.buildOptions?.maxFileSizeBytes ?? 1024 * 1024;
+	const maxFileSize =
+		options?.buildOptions?.maxFileSizeBytes ?? DEFAULT_MAX_SOURCE_BYTES;
 
 	// Manifest-aware package boundaries must stay consistent with the initial
 	// build across incremental edits (defect A8). Re-derive a bounded
@@ -499,11 +532,33 @@ async function applyAsyncFileUpdates(
 			continue;
 		}
 
-		const result = await _internals.scanFileAsync(
-			rawFilePath,
-			absoluteRoot,
-			maxFileSize,
-			hasManifest,
+		const repoRootId =
+			graph.repoRootId ?? deriveRepoRootId(graph.workspaceRoot);
+		graph.repoRootId = repoRootId;
+		let result: Awaited<ReturnType<typeof _internals.scanFileAsync>>;
+		try {
+			result = await _internals.scanFileAsync(
+				rawFilePath,
+				absoluteRoot,
+				maxFileSize,
+				hasManifest,
+				repoRootId,
+			);
+		} catch {
+			replaceFileDiagnostics(graph, fileDiagnosticName, {
+				extractionFailures: [
+					{
+						file: fileDiagnosticName,
+						language: path.extname(rawFilePath).slice(1) || 'unknown',
+						reason: 'symbol_edge_validation_failed',
+					},
+				],
+			});
+			continue;
+		}
+		let replacementDiagnostics = scanDiagnostics(
+			result.diagnostics,
+			result.inputWitness,
 		);
 
 		if (result.node) {
@@ -573,25 +628,58 @@ async function applyAsyncFileUpdates(
 				if (!graph.symbolEdges) {
 					graph.symbolEdges = [];
 				}
-				const existingKeys = new Set(
-					graph.symbolEdges.map(
-						(se) =>
-							`${se.fromFile}\u0000${se.fromSymbol}\u0000${se.toFile}\u0000${se.toSymbol}`,
-					),
-				);
+				const existingById = new Map<string, number>();
+				graph.symbolEdges.forEach((edge, index) => {
+					if (isCompleteSymbolEdge(edge)) {
+						existingById.set(edge.id, index);
+					}
+				});
 				for (const symbolEdge of result.symbolEdges) {
-					const key = `${symbolEdge.fromFile}\u0000${symbolEdge.fromSymbol}\u0000${symbolEdge.toFile}\u0000${symbolEdge.toSymbol}`;
-					if (!existingKeys.has(key)) {
-						graph.symbolEdges.push(symbolEdge);
-						existingKeys.add(key);
+					let normalized: ReturnType<typeof normalizeSymbolEdge>;
+					try {
+						normalized = normalizeSymbolEdge(
+							symbolEdge,
+							graph.workspaceRoot,
+							repoRootId,
+						);
+					} catch {
+						replacementDiagnostics = appendExtractionFailure(
+							replacementDiagnostics,
+							{
+								file: fileDiagnosticName,
+								language: result.node.language,
+								reason: 'symbol_edge_validation_failed',
+							},
+						);
+						continue;
+					}
+					const normalizedId = normalized.id;
+					const existingIndex = existingById.get(normalizedId);
+					if (existingIndex === undefined) {
+						graph.symbolEdges.push(normalized);
+						existingById.set(normalizedId, graph.symbolEdges.length - 1);
+					} else {
+						try {
+							graph.symbolEdges[existingIndex] = mergeSymbolEdges(
+								graph.symbolEdges[existingIndex] as SymbolEdge,
+								normalized,
+								graph.workspaceRoot,
+								repoRootId,
+							);
+						} catch {
+							replacementDiagnostics = appendExtractionFailure(
+								replacementDiagnostics,
+								{
+									file: fileDiagnosticName,
+									language: result.node.language,
+									reason: 'symbol_edge_validation_failed',
+								},
+							);
+						}
 					}
 				}
 			}
-			replaceFileDiagnostics(
-				graph,
-				fileDiagnosticName,
-				scanDiagnostics(result.diagnostics, result.inputWitness),
-			);
+			replaceFileDiagnostics(graph, fileDiagnosticName, replacementDiagnostics);
 		} else {
 			const definitelyUnindexable =
 				(result.diagnostics?.oversizedFiles?.length ?? 0) > 0 ||
@@ -648,6 +736,13 @@ async function finalizeAndSave(
 	if (graph.symbolEdges && graph.symbolEdges.length === 0) {
 		delete graph.symbolEdges;
 	}
+	// The "a `'node'` target is a file that became a node" invariant has to hold
+	// on EVERY path that mutates edges, not just full builds. An incremental
+	// update rescans a file and re-adds its edges through `scanFileAsync`, which
+	// resolves imports without consulting the walker's skip rules — so without
+	// this, an incremental update silently re-introduces exactly the dangling
+	// edges a full build had just reconciled away.
+	reconcileEdgeTargetKinds(graph);
 	updateGraphMetadata(graph);
 	resetQueryCache();
 	await persistGraph(workspaceRoot, graph, buildOptions);

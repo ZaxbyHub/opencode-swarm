@@ -9,6 +9,7 @@ import {
 	ensureTaskCheckpointReceipt,
 	updateTaskCheckpointReceipt,
 } from '../db/task-checkpoint-receipt.js';
+import { appendCoreEventSync } from '../events/core-events.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
 import { readLedgerEvents } from '../plan/ledger.js';
 import { loadPlan } from '../plan/manager.js';
@@ -198,12 +199,10 @@ function writeCheckpointLog(log: CheckpointLog, directory: string): void {
 
 function appendRetentionEvent(directory: string, event: RetentionEvent): void {
 	try {
-		const eventsPath = path.join(directory, '.swarm', 'events.jsonl');
-		const line = `${JSON.stringify({
+		appendCoreEventSync(directory, {
 			...event,
 			timestamp: new Date().toISOString(),
-		})}\n`;
-		fs.appendFileSync(eventsPath, line);
+		});
 	} catch {
 		// Best-effort event logging only.
 	}

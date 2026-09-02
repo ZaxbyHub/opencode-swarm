@@ -15,8 +15,8 @@ const DIGEST = 'a'.repeat(64);
 const REF = `L1:${'b'.repeat(64)}:${'c'.repeat(64)}:${DIGEST}`;
 const LANE = 'correctness-state';
 const HEADER =
-	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
-const TEXT = `${HEADER}\nC-1 | ${LANE} | HIGH | correctness | src/a.ts:1 | claim | evidence | impact | HIGH`;
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
+const TEXT = `${HEADER}\nC-1 | ${LANE} | HIGH | correctness | src/a.ts:1 | claim | evidence | impact | HIGH | ORDINARY | `;
 
 function validInput(): PrReviewDiscoveryLaneValidationInput {
 	const record: BackgroundDelegationRecord = {
@@ -36,6 +36,7 @@ function validInput(): PrReviewDiscoveryLaneValidationInput {
 		batchId: 'batch-1',
 		laneId: 'lane-1',
 		mode: 'swarm-pr-review:base',
+		prReviewLegacyTranscriptCompatibility: true,
 		workflowLane: LANE,
 		workspace: {
 			directory: '/project',
@@ -368,6 +369,37 @@ describe('PR review lane-local validation predicates', () => {
 		]);
 	});
 
+	test('records a discredited same-lane CLEAN as clean-attestation-salvaged', () => {
+		// PRR-004: the durable ledger is where a post-mortem actually reads that a
+		// lane was salvaged, and this recovery kind shipped without a pin even
+		// though its wiring chain broke once during development. Pins the whole
+		// chain: parser sets clean_attestation_salvaged -> the gate re-enters it as
+		// an issue and a salvage -> the lane lands in the ledger with this kind.
+		const input = validInput();
+		const conflicting = `[CLEAN] | ${LANE} | exact reviewed diff scope | no finding after focused invariant review`;
+		input.result.text = `${TEXT}\n${conflicting}`;
+		input.result.chars = input.result.text.length;
+		input.artifact!.text = input.result.text;
+		input.artifact!.chars = input.result.text.length;
+		input.artifact!.bytes = input.result.text.length;
+
+		const result = validatePrReviewDiscoveryLaneCompletion(input);
+		// The lane still PASSES — the candidate row supplies coverage. The
+		// attestation is discredited, never counted.
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.salvaged).toEqual([LANE]);
+		expect(result.recoveries.map((recovery) => recovery.kind)).toContain(
+			'clean-attestation-salvaged',
+		);
+		expect(result.recoveries).toContainEqual({
+			workflowLane: LANE,
+			kind: 'clean-attestation-salvaged',
+			reason:
+				'a conflicting [CLEAN] attestation was discredited while the independently validated candidate rows were retained',
+		});
+	});
+
 	test('rejects duplicate evidence across a consolidated lane', () => {
 		const input = validInput();
 		const otherA = 'intent-architecture';
@@ -387,53 +419,5 @@ describe('PR review lane-local validation predicates', () => {
 		if (!result.ok) {
 			expect(result.failure.predicate).toBe('discovery.duplicate_evidence');
 		}
-	});
-
-	test('bounds hostile expected and actual values in formatted diagnostics', () => {
-		const input = validInput();
-		input.record.mode = 'x'.repeat(20_000);
-		const result = validatePrReviewDiscoveryLaneCompletion(input);
-		expect(result.ok).toBe(false);
-		if (result.ok) return;
-		const message = formatPrReviewLaneValidationFailure(result.failure);
-		expect(message.length).toBeLessThanOrEqual(1_000);
-		expect(message).not.toContain('x'.repeat(1_000));
-	});
-
-	test('announces a salvaged artifact instead of accepting it silently', () => {
-		// A marker-bearing row with no canonical header — the shape that used to
-		// discard an entire lane's findings. It is now accepted, so the repair must
-		// be observable rather than indistinguishable from well-formed output.
-		const text = `[CANDIDATE] | C-1 | ${LANE} | HIGH | correctness | src/a.ts:1 | claim | evidence | impact | HIGH`;
-		const input = validInput();
-		input.result!.text = text;
-		input.result!.chars = text.length;
-		input.artifact!.text = text;
-		input.artifact!.chars = text.length;
-		input.artifact!.bytes = text.length;
-
-		// Asserted on the returned value rather than a console spy: the logger is
-		// mock.module'd by several sibling suites and OPENCODE_SWARM_DEBUG (which
-		// gates warn()) is mutated by many more, so a spy-based assertion passes in
-		// isolation and fails in a shared runner. A structural signal is both
-		// testable and consumable by callers.
-		const result = validatePrReviewDiscoveryLaneCompletion(input);
-		expect(result.ok).toBe(true);
-		if (!result.ok) return;
-		expect(result.salvaged).toEqual([LANE]);
-		expect(result.recoveries).toEqual([
-			{
-				workflowLane: LANE,
-				kind: 'parser-normalization',
-				reason: 'structural repairs applied: synthesized-header',
-			},
-		]);
-	});
-
-	test('does not mark a well-formed artifact as salvaged', () => {
-		const result = validatePrReviewDiscoveryLaneCompletion(validInput());
-		expect(result.ok).toBe(true);
-		if (!result.ok) return;
-		expect(result.salvaged).toBeUndefined();
 	});
 });

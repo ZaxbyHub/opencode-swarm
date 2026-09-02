@@ -1,12 +1,4 @@
-/**
- * Tests for cwd threading fix in test-runner.ts
- *
- * These tests verify that the cwd (current working directory) parameter
- * is correctly threaded through:
- * 1. detectTestFramework(cwd) - uses cwd for all path joins
- * 2. runTests(..., cwd) - passes cwd to Bun.spawn
- * 3. execute() - extracts workingDir from ToolContext and passes it correctly
- */
+/** CWD threading regression coverage for test-runner.ts. */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -15,8 +7,9 @@ import * as path from 'node:path';
 // Import the module under test
 const testRunnerModule = await import('../../../src/tools/test-runner');
 
-// Extract the exports we need
-const { test_runner, detectTestFramework, runTests } = testRunnerModule;
+const { test_runner, detectTestFramework, runTests, _internals } =
+	testRunnerModule;
+const originalResolveLocalNodeTool = _internals.resolveLocalNodeTool;
 
 // Helper to create temp test directories
 function createTempDir(): string {
@@ -94,11 +87,16 @@ describe('test-runner.ts - CWD Threading', () => {
 		mockExitCode = 0;
 		mockStdout = '';
 		mockStderr = '';
+		_internals.resolveLocalNodeTool = (tool, args, baseDir) => [
+			path.join(baseDir, 'node_modules', '.bin', tool),
+			...args,
+		];
 	});
 
 	afterEach(() => {
 		process.chdir(originalCwd);
 		Bun.spawn = originalSpawn;
+		_internals.resolveLocalNodeTool = originalResolveLocalNodeTool;
 		// Cleanup temp dir
 		try {
 			fs.rmSync(tempDir, { recursive: true, force: true });

@@ -61,8 +61,11 @@ export interface FileSymbolFacts {
 const AST_TIMEOUT_MS = 500;
 
 /**
- * Per-grammar query sets. Task 1.1 defines only 'typescript' as the exemplar;
- * additional grammars are added in task 1.2.
+ * Per-grammar query sets — one defs/imports/refs triple per registered
+ * grammar id. Patterns must be verified against the shipped grammar WASMs
+ * (s-expression dumps) before being added: node types and field names differ
+ * from what source syntax suggests (e.g. C++ method names live in
+ * field_identifier declarators; Swift structs parse as class_declaration).
  */
 const QUERIES: Record<
 	string,
@@ -103,6 +106,7 @@ const QUERIES: Record<
 			(lexical_declaration
 				(variable_declarator name: (identifier) @const.name)
 			) @const.def
+			(method_definition name: (property_identifier) @method.name) @method.def
 		`,
 		imports: `
 			(import_statement) @import
@@ -210,12 +214,21 @@ const QUERIES: Record<
 			(method_declaration
 				(identifier) @func.name
 			) @func.def
+			(constructor_declaration
+				(identifier) @ctor.name
+			) @ctor.def
 			(class_declaration
 				(identifier) @class.name
 			) @class.def
 			(interface_declaration
 				(identifier) @interface.name
 			) @interface.def
+			(enum_declaration
+				(identifier) @enum.name
+			) @enum.def
+			(record_declaration
+				(identifier) @record.name
+			) @record.def
 		`,
 		imports: `
 			(import_declaration) @import
@@ -251,9 +264,12 @@ const QUERIES: Record<
 	csharp: {
 		defs: `
 			(method_declaration name: (identifier) @func.name) @func.def
+			(constructor_declaration name: (identifier) @ctor.name) @ctor.def
 			(class_declaration name: (identifier) @class.name) @class.def
 			(interface_declaration name: (identifier) @interface.name) @interface.def
 			(struct_declaration name: (identifier) @struct.name) @struct.def
+			(enum_declaration name: (identifier) @enum.name) @enum.def
+			(record_declaration name: (identifier) @record.name) @record.def
 		`,
 		imports: `
 			(using_directive) @import
@@ -270,8 +286,44 @@ const QUERIES: Record<
 					declarator: (identifier) @func.name
 				)
 			) @func.def
+			(function_definition
+				declarator: (pointer_declarator
+					declarator: (function_declarator
+						declarator: (identifier) @func.name
+					)
+				)
+			) @func.def
+			(function_definition
+				(function_declarator
+					declarator: (qualified_identifier (identifier) @func.name)
+				)
+			) @func.def
+			(declaration
+				declarator: (function_declarator
+					declarator: (identifier) @func.name
+				)
+			) @func.def
+			(declaration
+				declarator: (pointer_declarator
+					declarator: (function_declarator
+						declarator: (identifier) @func.name
+					)
+				)
+			) @func.def
+			(function_definition
+				(function_declarator
+					declarator: (field_identifier) @method.name
+				)
+			) @method.def
+			(field_declaration
+				(function_declarator
+					declarator: (field_identifier) @method.name
+				)
+			) @method.def
 			(class_specifier name: (type_identifier) @class.name) @class.def
 			(struct_specifier name: (type_identifier) @struct.name) @struct.def
+			(enum_specifier name: (type_identifier) @enum.name) @enum.def
+			(type_definition declarator: (type_identifier) @type.name) @type.def
 		`,
 		imports: `
 			(preproc_include) @import
@@ -280,14 +332,20 @@ const QUERIES: Record<
 		refs: `
 			(identifier) @ref.identifier
 			(namespace_identifier) @ref.identifier
+			(type_identifier) @ref.identifier
 		`,
 		exports: ``,
 	},
 	swift: {
 		defs: `
 			(function_declaration name: (simple_identifier) @func.name) @func.def
+			(protocol_function_declaration name: (simple_identifier) @func.name) @func.def
 			(class_declaration name: (type_identifier) @class.name) @class.def
+			(class_declaration
+				name: (user_type (type_identifier) @extension.name)
+			) @extension.def
 			(protocol_declaration name: (type_identifier) @protocol.name) @protocol.def
+			(typealias_declaration name: (type_identifier) @type.name) @type.def
 		`,
 		imports: `
 			(import_declaration) @import
@@ -295,6 +353,7 @@ const QUERIES: Record<
 		refs: `
 			(identifier) @ref.identifier
 			(simple_identifier) @ref.identifier
+			(type_identifier) @ref.identifier
 		`,
 		exports: ``,
 	},
@@ -338,6 +397,8 @@ const QUERIES: Record<
 			) @func.def
 			(class_declaration name: (name) @class.name) @class.def
 			(interface_declaration name: (name) @interface.name) @interface.def
+			(trait_declaration name: (name) @trait.name) @trait.def
+			(enum_declaration name: (name) @enum.name) @enum.def
 		`,
 		imports: `
 			(namespace_use_declaration) @import
@@ -363,6 +424,17 @@ const CAPTURE_KIND: Record<string, FileSymbolFacts['defs'][0]['kind']> = {
 	object: 'class',
 	mixin: 'type',
 	protocol: 'interface',
+	record: 'class',
+	// Deliberately `ctor`, not `constructor`: `CAPTURE_KIND['constructor']`
+	// would resolve to `Object.prototype.constructor` through the prototype
+	// chain, and `??` would not fire because a function is not nullish.
+	// The `Object.hasOwn` guard at the lookup site closes the class for any
+	// future prefix; this name keeps the query readable regardless.
+	ctor: 'method',
+	// Swift extension blocks parse as `class_declaration` with a `user_type`
+	// name; the extended type is already declared elsewhere, so the extension
+	// contributes a type-level augmentation rather than a new type.
+	extension: 'type',
 };
 
 const DEF_TYPES = new Set([
@@ -379,6 +451,8 @@ const DEF_TYPES = new Set([
 	'struct_specifier',
 	'struct_item',
 	'struct_declaration',
+	'record_declaration',
+	'constructor_declaration',
 	'method_declaration',
 	'type_declaration',
 	'object_declaration',
@@ -398,6 +472,42 @@ const DEF_TYPES = new Set([
 	'class',
 ]);
 
+/** Grammars whose members live inside an explicit type container. */
+const JVM_GRAMMARS = new Set(['java', 'kotlin', 'csharp']);
+
+/**
+ * Type-container node types for java/kotlin/csharp. A `func`/`ctor` capture
+ * with one of these as an ancestor is a *member*, not a free function, and the
+ * matched container's node type also decides the member's implicit visibility
+ * (see `containerScopedDefaultVisibility` in `symbol-visibility.ts`).
+ */
+const JVM_CONTAINER_TYPES = new Set([
+	'class_declaration',
+	'interface_declaration',
+	'struct_declaration',
+	'object_declaration',
+	'enum_declaration',
+	'record_declaration',
+]);
+
+/**
+ * Type-container node types for the cpp/swift member re-typing and container
+ * defaults. Only the SPECIFIER/DECLARATION nodes are listed, never the body
+ * (`field_declaration_list`): the ancestor walk passes through the body to the
+ * specifier, and the specifier kind is what the cpp container default needs
+ * (class members default private, struct/union members public).
+ */
+const NATIVE_CONTAINER_TYPES = new Set([
+	// cpp: class/struct/union (an in-class constructor prototype parses as a
+	// plain `declaration` inside the specifier's field_declaration_list).
+	'class_specifier',
+	'struct_specifier',
+	'union_specifier',
+	// swift: class/struct/enum/extension all parse as class_declaration.
+	'class_declaration',
+	'protocol_declaration',
+]);
+
 const PARAM_TYPES = new Set([
 	'formal_parameters',
 	'required_parameter',
@@ -406,6 +516,18 @@ const PARAM_TYPES = new Set([
 	'array_pattern',
 	'object_pattern',
 ]);
+
+/**
+ * Swift-only addition to {@link PARAM_TYPES}. The swift grammar's `parameter`
+ * node wraps each parameter's names and type, and without this skip the
+ * parameter NAMES (`func f(_ input: Int)`) leak into refs. The skip is
+ * deliberately grammar-scoped rather than added to PARAM_TYPES: the same node
+ * type name exists in the csharp, kotlin, and rust grammars, where a
+ * parameter-position TYPE is a genuine reference signal — most notably for
+ * Kotlin named imports, whose bindings are marked used by body/parameter
+ * refs (final-critic finding on issue #1530).
+ */
+const SWIFT_REF_PARAM_TYPES = new Set([...PARAM_TYPES, 'parameter']);
 
 /**
  * Extract symbol, import, and reference facts from a source string using
@@ -528,7 +650,16 @@ function buildFacts(
 		const kindKey = defCap.name.replace(/\.def$/, '');
 		const originalDefNode = asTs(defCap.node);
 		let defNode = originalDefNode;
-		let kind = CAPTURE_KIND[kindKey] ?? 'function';
+		// `Object.hasOwn`, not `?? `: a capture prefix that collides with an
+		// `Object.prototype` member (`constructor`, `toString`, `valueOf`, …)
+		// would otherwise resolve to the inherited value, which is not nullish
+		// and so silently survives the `??` fallback.
+		let kind: FileSymbolFacts['defs'][0]['kind'] = Object.hasOwn(
+			CAPTURE_KIND,
+			kindKey,
+		)
+			? CAPTURE_KIND[kindKey]
+			: 'function';
 		if (
 			grammarId === 'python' &&
 			kindKey === 'func' &&
@@ -543,6 +674,35 @@ function buildFacts(
 		) {
 			kind = 'method';
 		}
+		// java/kotlin/csharp: one ancestor walk serves both the member re-typing
+		// (F1) and the container-kind visibility default (F2). Only `func`/`ctor`
+		// captures are re-typed — a *nested type* stays a type.
+		let parentContainerType: string | undefined;
+		if (JVM_GRAMMARS.has(grammarId)) {
+			parentContainerType = nearestAncestorType(
+				originalDefNode,
+				JVM_CONTAINER_TYPES,
+			);
+			if (
+				parentContainerType !== undefined &&
+				(kindKey === 'func' || kindKey === 'ctor')
+			) {
+				kind = 'method';
+			}
+		}
+		// cpp/swift: members are re-typed the same way, and the container type
+		// feeds the container-scoped implicit-visibility default (Swift members
+		// default `internal`; C++ class members default private, struct/union
+		// members public — see containerScopedDefaultVisibility).
+		if (grammarId === 'cpp' || grammarId === 'swift') {
+			parentContainerType = nearestAncestorType(
+				originalDefNode,
+				NATIVE_CONTAINER_TYPES,
+			);
+			if (parentContainerType !== undefined && kindKey === 'func') {
+				kind = 'method';
+			}
+		}
 		const explicitExported = exportNodes.some((en) =>
 			isNodeInside(en, defNode),
 		);
@@ -550,10 +710,18 @@ function buildFacts(
 		// For ESM default exports, normalize the exported name to 'default'
 		// so it matches the 'default' sentinel used by parseEsmImport and
 		// the sync builder's export naming.
+		//
+		// The def must be the statement's OWN declaration, not merely nested
+		// inside it. `isNodeInside` is a pure span-containment test, so for
+		// `export default class Foo { bar() {} }` it is true for the class AND
+		// for every method, getter and static inside it — each of which was then
+		// renamed to `default` and marked exported, destroying the real name
+		// `Foo`. Ask the grammar which node the statement actually declares.
 		let isDefaultExport = false;
 		if (explicitExported && isEsMGrammar(grammarId)) {
 			isDefaultExport = exportNodes.some(
-				(en) => isNodeInside(en, defNode) && isDefaultExportStatement(en),
+				(en) =>
+					isDefaultExportStatement(en) && isOwnExportDeclaration(en, defNode),
 			);
 		}
 
@@ -605,7 +773,7 @@ function buildFacts(
 			const nameNode = asTs(nc.node);
 			const localName = nameNode.text;
 			const commonJsExport = commonJsExports.get(localName);
-			const visibilityInfo = getSymbolVisibilityInfo({
+			let visibilityInfo = getSymbolVisibilityInfo({
 				grammarId,
 				localName,
 				kind,
@@ -616,7 +784,20 @@ function buildFacts(
 				commonJsExport,
 				pythonAllNames,
 				pythonParentClassExported,
+				parentContainerType,
 			});
+			// A Swift extension block augments an already-declared type — it is
+			// not itself a new file-level export. Keeping the extension def
+			// non-exported lets the builder's exported-outranks-non-exported
+			// policy keep the type's OWN declaration span in exportRanges, and
+			// keeps `exports[]` free of the duplicated name (PR #2351 review,
+			// F-001/PRR-002: an exported extension def carries the same name as
+			// the type it extends and displaced that type's span under the
+			// duplicate-name policy — order-independently, since an exported
+			// def outranks a non-exported one in both document orders).
+			if (grammarId === 'swift' && kindKey === 'extension') {
+				visibilityInfo = { ...visibilityInfo, exported: false };
+			}
 			const exportedName = isDefaultExport
 				? 'default'
 				: (commonJsExport?.exportedName ?? localName);
@@ -629,10 +810,15 @@ function buildFacts(
 				startLine: defNode.startPosition.row + 1,
 				endLine: defNode.endPosition.row + 1,
 			});
+			// Keep `defNodes` in step with `defs[].name` so `enclosingDecl` on a
+			// ref inside an extension function reports the same symbol name the
+			// def was emitted under.
 			defNodes.push({ node: defNode, name: localName });
 			defNameKeys.add(nodeKey(nameNode));
 		}
 	}
+
+	augmentNativeDynamicDefs(grammarId, root.text, defs);
 
 	const importsWithIndex: Array<{
 		index: number;
@@ -739,20 +925,41 @@ function buildFacts(
 			}
 		}
 	}
-	if (isEsMGrammar(grammarId)) {
+	if (isEsMGrammar(grammarId) || grammarId === 'dart') {
 		for (const exportNode of exportNodes) {
 			addImport(parseImport(grammarId, exportNode.text.trim()), exportNode);
 		}
 	}
+	for (const fallback of fallbackImportsForSource(grammarId, root.text)) {
+		importsWithIndex.push(fallback);
+	}
+	// The tree-sitter import captures and the line-based fallback above both
+	// parse the same statement for dart/ruby/php; keep one entry per semantic
+	// import (same specifier/type/bindings/re-export shape).
+	const seenImports = new Set<string>();
 	const imports = importsWithIndex
 		.sort((a, b) => a.index - b.index)
-		.map((item) => item.entry);
+		.map((item) => item.entry)
+		.filter((entry) => {
+			const key = JSON.stringify([
+				entry.specifier,
+				entry.importType,
+				entry.bindings,
+				entry.reExport ?? false,
+				entry.exportedBindings ?? [],
+			]);
+			if (seenImports.has(key)) return false;
+			seenImports.add(key);
+			return true;
+		});
 
 	const topLevelDefs = defNodes
 		.filter((d) => isTopLevelDef(d.node, root))
 		.map((d) => ({ name: d.name, node: d.node }));
 
 	const refs: FileSymbolFacts['refs'] = [];
+	const refParamTypes =
+		grammarId === 'swift' ? SWIFT_REF_PARAM_TYPES : PARAM_TYPES;
 	for (const m of refMatches) {
 		const cap = m.captures.find((c) => c.name === 'ref.identifier');
 		if (!cap) continue;
@@ -761,7 +968,7 @@ function buildFacts(
 		if (defNameKeys.has(nodeKey(refNode))) continue;
 		if (hasAncestorOfType(refNode, 'import_statement')) continue;
 		if (isInsideImportStatement(refNode)) continue;
-		if (hasAncestorOfType(refNode, PARAM_TYPES)) continue;
+		if (hasAncestorOfType(refNode, refParamTypes)) continue;
 		if (refNode.text === 'require' && isInsideRequireCall(refNode)) continue;
 
 		refs.push({
@@ -771,7 +978,683 @@ function buildFacts(
 		});
 	}
 
-	return { defs, imports, refs };
+	// An ANONYMOUS default export (`export default class { ... }`) has no name
+	// capture, so the loop above produced no def for the declaration itself.
+	// Before default-export scoping was fixed, a member inside it was renamed to
+	// `default` and stood in for the module default; scoping that correctly to
+	// the owning declaration removed the stand-in and left the file with NO
+	// `default` entry at all, so `import X from './m'` could no longer match.
+	// Emit the real thing: one `default` def spanning the declaration.
+	if (isEsMGrammar(grammarId)) {
+		for (const en of exportNodes) {
+			if (!isDefaultExportStatement(en)) continue;
+			const owner =
+				en.childForFieldName?.('declaration') ??
+				en.childForFieldName?.('value');
+			if (!owner) continue;
+			const alreadyNamed = defs.some(
+				(d) =>
+					d.startLine === owner.startPosition.row + 1 && d.name === 'default',
+			);
+			if (alreadyNamed) continue;
+			const kind = owner.type.includes('class') ? 'class' : 'function';
+			defs.push({
+				name: 'default',
+				kind,
+				exported: true,
+				startLine: owner.startPosition.row + 1,
+				endLine: owner.endPosition.row + 1,
+			});
+		}
+	}
+
+	// Regex-augmented defs can yield an endLine that trails the startLine when
+	// a declaration has no braces/semicolon to scan to (unterminated input);
+	// widened-grammar range validation rejects inverted ranges, so clamp.
+	const normalizedDefs = defs.map((def) => ({
+		...def,
+		endLine: Math.max(def.endLine, def.startLine),
+	}));
+	return { defs: normalizedDefs, imports, refs };
+}
+
+/**
+ * Regex-based augmentation for the dynamic-language grammars (dart, ruby,
+ * php). Tree-sitter queries stay the primary source; these layers add facts
+ * the queries cannot express (Ruby visibility sections and constants, PHP
+ * method visibility and namespaces, Dart mixin/enum/extension) and re-type
+ * query defs that need it (Ruby `def` → method). Augmented defs upsert into
+ * query defs by (name, startLine) so spans from the AST win.
+ */
+function augmentNativeDynamicDefs(
+	grammarId: string,
+	source: string,
+	defs: FileSymbolFacts['defs'],
+): void {
+	switch (grammarId) {
+		case 'dart':
+			augmentDartDefs(source, defs);
+			return;
+		case 'ruby':
+			augmentRubyDefs(source, defs);
+			return;
+		case 'php':
+			augmentPhpDefs(source, defs);
+			return;
+	}
+}
+
+function upsertAugmentedDef(
+	defs: FileSymbolFacts['defs'],
+	def: FileSymbolFacts['defs'][0],
+): void {
+	const existing = defs.find(
+		(item) => item.name === def.name && item.startLine === def.startLine,
+	);
+	if (existing) {
+		existing.kind = def.kind;
+		existing.exported = def.exported;
+		existing.visibilityInfo = def.visibilityInfo;
+		existing.endLine = Math.max(existing.endLine, def.endLine);
+		return;
+	}
+	defs.push(def);
+}
+
+function symbolVisibilityInfo(
+	visibility: SymbolVisibilityInfo['visibility'],
+	exported: boolean,
+	exportedReason: SymbolVisibilityInfo['exportedReason'],
+): SymbolVisibilityInfo {
+	// Augmented defs carry a binary apiSurfaceKind approximation: there is no
+	// AST node to re-run getSymbolVisibilityInfo against, and nothing in
+	// production consumes apiSurfaceKind today. `visibility` below remains
+	// precise (protected/private/public from modifiers or sections).
+	return {
+		exported,
+		visibility,
+		exportedReason,
+		apiSurfaceKind: exported ? 'public' : 'private',
+	};
+}
+
+function addRegexDef(
+	defs: FileSymbolFacts['defs'],
+	source: string,
+	name: string,
+	kind: FileSymbolFacts['defs'][0]['kind'],
+	start: number,
+	end: number,
+	visibility: SymbolVisibilityInfo['visibility'],
+	exported: boolean,
+	exportedReason: SymbolVisibilityInfo['exportedReason'],
+): void {
+	upsertAugmentedDef(defs, {
+		name,
+		kind,
+		exported,
+		visibilityInfo: symbolVisibilityInfo(visibility, exported, exportedReason),
+		startLine: lineNumberAt(source, start),
+		endLine: lineNumberAt(source, end),
+	});
+}
+
+function findMatchingBrace(source: string, openIndex: number): number | null {
+	if (source[openIndex] !== '{') return null;
+	let depth = 0;
+	for (let i = openIndex; i < source.length; i++) {
+		const ch = source[i];
+		if (ch === '{') depth++;
+		else if (ch === '}') {
+			depth--;
+			if (depth === 0) return i;
+		}
+	}
+	return null;
+}
+
+/** 1-based line number of the character at `index` (matches tree-sitter row+1). */
+function lineNumberAt(text: string, index: number): number {
+	let line = 1;
+	for (let i = 0; i < index && i < text.length; i++) {
+		if (text[i] === '\n') line++;
+	}
+	return line;
+}
+
+/**
+ * Byte offset just past the line that starts at `offset` and is
+ * `lineLength` long, accounting for the ACTUAL separator width. CRLF sources
+ * consume two bytes per separator; advancing by `lineLength + 1` after
+ * `split(/\r?\n/)` drifts one byte per line, corrupting startLines and
+ * breaking (name, startLine) upsert matching (issue #1526 bug class,
+ * recurred as PR #2361 PRR-001).
+ */
+function advanceLineOffset(
+	source: string,
+	offset: number,
+	lineLength: number,
+): number {
+	const after = offset + lineLength;
+	if (source[after] === '\r' && source[after + 1] === '\n') return after + 2;
+	if (source[after] === '\n' || source[after] === '\r') return after + 1;
+	return after; // final line with no trailing separator
+}
+
+function declarationEnd(source: string, start: number): number {
+	const open = source.indexOf('{', start);
+	const semi = source.indexOf(';', start);
+	if (open !== -1 && (semi === -1 || open < semi)) {
+		return findMatchingBrace(source, open) ?? open;
+	}
+	return semi === -1 ? start : semi;
+}
+
+/**
+ * Dart type declarations. `extension type` (Dart 3 extension types) must be
+ * matched BEFORE bare `extension` so the type's real name is captured instead
+ * of the literal word `type`. The `(?!on\b)` lookahead skips unnamed
+ * extensions (`extension on String { ... }`) — they carry no name to record.
+ * `typedef` aliases are included as `type` defs.
+ */
+const dartTypeRe =
+	/\b(extension\s+type|class|mixin|enum|extension|typedef)\s+(?!on\b)([A-Za-z_][A-Za-z0-9_]*)/g;
+
+/**
+ * Length-preserving lexical mask for the regex augmenters: commented-out or
+ * string-embedded text must not become graph facts, and structural brace/
+ * semicolon scans must not see braces inside literals. `//`, `#` (php), and
+ * block comments become spaces; single/double-quoted string CONTENTS become
+ * spaces (delimiters are kept). Newlines survive so offsets and line numbers
+ * are unchanged. Best-effort, conservative in the safe direction — it can
+ * only suppress, never invent, a declaration or a brace. Heredocs/nowdocs
+ * are not masked here (the ruby augmenter tracks them separately).
+ */
+function maskCommentsForAugment(source: string): string {
+	let out = '';
+	let inBlock = false;
+	let quote: '"' | "'" | null = null;
+	for (let i = 0; i < source.length; i++) {
+		const ch = source[i];
+		const two = source.substring(i, i + 2);
+		if (quote !== null) {
+			if (ch === '\\') {
+				// escaped char: blank both
+				out += '  ';
+				i++;
+				continue;
+			}
+			if (ch === quote) {
+				quote = null;
+				out += ch;
+			} else {
+				out += ch === '\n' ? '\n' : ' ';
+			}
+			continue;
+		}
+		if (!inBlock && two === '/*') {
+			inBlock = true;
+			out += '  ';
+			i++;
+			continue;
+		}
+		if (inBlock) {
+			if (two === '*/') {
+				inBlock = false;
+				out += '  ';
+				i++;
+			} else {
+				out += source[i] === '\n' ? '\n' : ' ';
+			}
+			continue;
+		}
+		if (two === '//' || source[i] === '#') {
+			// Line comment: mask the marker and everything to end of line.
+			out += two === '//' ? '  ' : ' ';
+			if (two === '//') i++;
+			while (i + 1 < source.length && source[i + 1] !== '\n') {
+				out += ' ';
+				i++;
+			}
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			// Triple-quoted multiline strings (Dart '''...''' / """..."""):
+			// a run of 3 opens a string that only a matching run of 3 closes.
+			// Treating each quote singly leaves the state machine's parity at
+			// the mercy of the CONTENT (an apostrophe inside the body flipped
+			// it and masked the next real declaration line).
+			if (source[i + 1] === ch && source[i + 2] === ch) {
+				out += ch + ch + ch;
+				i += 2;
+				while (i + 1 < source.length) {
+					if (
+						source[i + 1] === ch &&
+						source[i + 2] === ch &&
+						source[i + 3] === ch
+					) {
+						out += ch + ch + ch;
+						i += 3;
+						break;
+					}
+					out += source[i + 1] === '\n' ? '\n' : ' ';
+					i++;
+				}
+				continue;
+			}
+			quote = ch;
+			out += ch;
+			continue;
+		}
+		out += ch;
+	}
+	return out;
+}
+
+function augmentDartDefs(source: string, defs: FileSymbolFacts['defs']): void {
+	const masked = maskCommentsForAugment(source);
+	dartTypeRe.lastIndex = 0;
+	for (
+		let m = dartTypeRe.exec(masked);
+		m !== null;
+		m = dartTypeRe.exec(masked)
+	) {
+		const exported = !m[2].startsWith('_');
+		const kindWord = m[1].trim().split(/\s+/).pop() ?? m[1];
+		addRegexDef(
+			defs,
+			source,
+			m[2],
+			kindWord === 'enum' ? 'enum' : kindWord === 'class' ? 'class' : 'type',
+			m.index,
+			declarationEnd(masked, m.index),
+			exported ? 'public' : 'private',
+			exported,
+			exported ? 'naming_convention' : 'unknown',
+		);
+	}
+	// Dart function declarations are already captured by tree-sitter's
+	// (function_signature name: (identifier) @func.name) query — no regex
+	// fallback here (a `Type name(` pattern also matches calls and control
+	// flow; see the #1681 review round-3 finding).
+}
+
+const rubyMethodDefNameRe = /^def\s+(?:(self)\.)?([A-Za-z_][A-Za-z0-9_?!]*)/;
+/** Targeted visibility: `private :a, :b` / `protected :sym`. */
+const rubyTargetedVisibilityRe =
+	/^(private|protected)\s+((?::[A-Za-z_][A-Za-z0-9_?!]*\s*,\s*)*:[A-Za-z_][A-Za-z0-9_?!]*)$/;
+const rubyEndWordRe = /\bend\b/g;
+/**
+ * Heredoc opener: `<<~ID`, `<<-ID`, `<<ID`, `<<"ID"`, `<<'ID'`. Context-
+ * anchored so the binary shift operator can never open a heredoc: a real
+ * opener sits at line start or after `=`, `(`, `,`, `[`, or a value-position
+ * keyword (`puts`/`print`/`raise`/`return`/`p`) — `arr <<item` and `x << y`
+ * have an identifier (operand) before the `<<` and do not match.
+ */
+const rubyHeredocOpenRe =
+	/(?:^|[=(,[]\s*|(?:puts|print|raise|return|p)\s+)<<[~-]?['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/;
+
+interface RubyAugmentState {
+	visibility: SymbolVisibilityInfo['visibility'];
+	/** Saved outer-section per enclosing class/module, with the `end` level at entry. */
+	stack: Array<{
+		visibility: SymbolVisibilityInfo['visibility'];
+		atEndLevel: number;
+	}>;
+	/** Unclosed `class`/`module`/`def` bodies (approximated by `end` counting). */
+	endLevel: number;
+	heredocId: string | null;
+}
+
+/**
+ * Line-scoped Ruby augmentation. Heredoc BODY lines are skipped (a literal
+ * `private` there must not flip the section; `def`/`class` text there is
+ * string data). Bare `private`/`protected` switch the section until the
+ * enclosing class/module closes — the nesting is restored via an approximate
+ * `end`-keyword balance (imprecise for exotic constructs like modifier-`if`
+ * blocks; conservative direction, documented). Targeted `private :sym` marks
+ * the named method in place and does not switch the section.
+ */
+function augmentRubyDefs(source: string, defs: FileSymbolFacts['defs']): void {
+	const lines = source.split(/\r?\n/);
+	const state: RubyAugmentState = {
+		visibility: 'public',
+		stack: [],
+		endLevel: 0,
+		heredocId: null,
+	};
+	let offset = 0;
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (state.heredocId !== null) {
+			if (trimmed === state.heredocId) state.heredocId = null;
+		} else {
+			// The opener line itself still carries code (e.g. `QUERY = <<~SQL`
+			// declares a constant) — only the body lines are skipped.
+			const open = trimmed.match(rubyHeredocOpenRe);
+			if (open) state.heredocId = open[1];
+			augmentRubyLine(trimmed, line, offset, source, defs, state);
+		}
+		offset = advanceLineOffset(source, offset, line.length);
+	}
+}
+
+function augmentRubyLine(
+	trimmed: string,
+	line: string,
+	offset: number,
+	source: string,
+	defs: FileSymbolFacts['defs'],
+	state: RubyAugmentState,
+): void {
+	if (trimmed === 'private' || trimmed === 'protected') {
+		state.visibility = trimmed;
+	}
+	// `private :a, :b` retro-marks the named methods without switching the
+	// section for later declarations.
+	const targeted = trimmed.match(rubyTargetedVisibilityRe);
+	if (targeted) {
+		const visibility = targeted[1] as SymbolVisibilityInfo['visibility'];
+		for (const name of targeted[2].split(',').map((part) => part.trim())) {
+			const sym = name.replace(/^:/, '');
+			for (let i = defs.length - 1; i >= 0; i--) {
+				const d = defs[i];
+				if (d.name === sym && d.startLine <= lineNumberAt(source, offset)) {
+					d.exported = false;
+					d.visibilityInfo = symbolVisibilityInfo(visibility, false, 'unknown');
+					break;
+				}
+			}
+		}
+	}
+	const moduleMatch = trimmed.match(/^module\s+([A-Z][A-Za-z0-9_:]*)/);
+	const classMatch = trimmed.match(/^class\s+([A-Z][A-Za-z0-9_:]*)/);
+	if (moduleMatch || classMatch) {
+		state.stack.push({
+			visibility: state.visibility,
+			atEndLevel: state.endLevel,
+		});
+		state.visibility = 'public';
+		state.endLevel++;
+		const name = (moduleMatch ?? classMatch)![1];
+		addRegexDef(
+			defs,
+			source,
+			name,
+			moduleMatch ? 'type' : 'class',
+			offset + line.indexOf((moduleMatch ?? classMatch)![0]),
+			offset + line.length,
+			'public',
+			true,
+			'module_public',
+		);
+	}
+	const constMatch = trimmed.match(/^([A-Z][A-Za-z0-9_]*)\s*=/);
+	if (constMatch) {
+		addRegexDef(
+			defs,
+			source,
+			constMatch[1],
+			'const',
+			offset + line.indexOf(constMatch[1]),
+			offset + line.length,
+			'public',
+			true,
+			'module_public',
+		);
+	}
+	const methodMatch = trimmed.match(rubyMethodDefNameRe);
+	if (methodMatch) {
+		state.endLevel++;
+		const isSingleton = Boolean(methodMatch[1]);
+		const shortName = methodMatch[2];
+		const name = isSingleton ? `self.${shortName}` : shortName;
+		const visibility = isSingleton ? 'public' : state.visibility;
+		const exported = visibility !== 'private' && !shortName.startsWith('_');
+		addRegexDef(
+			defs,
+			source,
+			name,
+			'method',
+			offset + line.indexOf('def'),
+			offset + line.length,
+			visibility,
+			exported,
+			exported ? 'module_public' : 'unknown',
+		);
+	}
+	// Approximate `end` balance: when the count falls back to a frame's entry
+	// level, that class/module has closed — restore its outer section.
+	rubyEndWordRe.lastIndex = 0;
+	const ends = trimmed.match(rubyEndWordRe)?.length ?? 0;
+	if (ends > 0) {
+		state.endLevel -= ends;
+		while (
+			state.stack.length > 0 &&
+			state.endLevel <= state.stack[state.stack.length - 1].atEndLevel
+		) {
+			state.visibility = state.stack.pop()!.visibility;
+		}
+	}
+}
+
+const phpNamespaceRe = /\bnamespace\s+([^;{]+)\s*[;{]/g;
+const phpTypeRe = /\b(trait|class|interface|enum)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+// The modifier group is bounded {0,6}: an unbounded star here is quadratic on
+// adversarial modifier runs (measured ~8s at 1MB — PR #2361 PRR-012).
+const phpFunctionRe =
+	/\b(?:(public|protected|private|static|final|abstract)\s+){0,6}function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+
+function augmentPhpDefs(source: string, defs: FileSymbolFacts['defs']): void {
+	const masked = maskCommentsForAugment(source);
+	phpNamespaceRe.lastIndex = 0;
+	for (
+		let m = phpNamespaceRe.exec(masked);
+		m !== null;
+		m = phpNamespaceRe.exec(masked)
+	) {
+		addRegexDef(
+			defs,
+			source,
+			m[1].trim(),
+			'type',
+			m.index,
+			m.index + m[0].length,
+			'public',
+			true,
+			'namespace_public',
+		);
+	}
+	const typeRanges: Array<{ start: number; end: number }> = [];
+	phpTypeRe.lastIndex = 0;
+	for (let m = phpTypeRe.exec(masked); m !== null; m = phpTypeRe.exec(masked)) {
+		const bodyStart = masked.indexOf('{', m.index);
+		const bodyEnd =
+			bodyStart === -1 ? null : findMatchingBrace(masked, bodyStart);
+		if (bodyStart !== -1 && bodyEnd !== null) {
+			typeRanges.push({ start: bodyStart, end: bodyEnd });
+		}
+		addRegexDef(
+			defs,
+			source,
+			m[2],
+			m[1] === 'class' ? 'class' : m[1] === 'enum' ? 'enum' : 'interface',
+			m.index,
+			declarationEnd(masked, m.index),
+			'public',
+			true,
+			'module_public',
+		);
+	}
+	phpFunctionRe.lastIndex = 0;
+	for (
+		let m = phpFunctionRe.exec(masked);
+		m !== null;
+		m = phpFunctionRe.exec(masked)
+	) {
+		const modifiers = m[0].slice(0, m[0].indexOf('function'));
+		const visibility =
+			(modifiers.match(/\b(public|protected|private)\b/)?.[1] as
+				| SymbolVisibilityInfo['visibility']
+				| undefined) ??
+			// PHP class members default to public; top-level functions are public.
+			'public';
+		const exported = visibility !== 'private' && !m[2].startsWith('_');
+		const effectiveVisibility = m[2].startsWith('_') ? 'private' : visibility;
+		const kind = typeRanges.some(
+			(range) => m.index >= range.start && m.index <= range.end,
+		)
+			? 'method'
+			: 'function';
+		addRegexDef(
+			defs,
+			source,
+			m[2],
+			kind,
+			m.index,
+			declarationEnd(masked, m.index),
+			effectiveVisibility,
+			exported,
+			exported ? 'module_public' : 'unknown',
+		);
+	}
+}
+
+/**
+ * Line-based import fallback for grammars whose import statements the
+ * tree-sitter capture can miss (multi-directive lines, unusual node shapes).
+ * Lexical-context aware: detection runs against a comment+string-masked copy
+ * so import-shaped text inside literals cannot match (ruby heredoc bodies are
+ * skipped with the same tracker the augmenter uses; php `use` lines inside a
+ * brace depth > 0 are class-body trait inclusions, not imports). Dart/php
+ * statements are ';'-terminated, so unterminated lines are joined with their
+ * continuations before parsing — a multiline `show` clause yields the same
+ * entry the query path produces and collapses in the semantic dedup.
+ * Entries carry startLine/endLine and are deduplicated against query-captured
+ * imports by the semantic key in buildFacts.
+ */
+function fallbackImportsForSource(
+	grammarId: string,
+	source: string,
+): Array<{ index: number; entry: FileSymbolFacts['imports'][0] }> {
+	const entries: Array<{
+		index: number;
+		entry: FileSymbolFacts['imports'][0];
+	}> = [];
+	if (grammarId !== 'dart' && grammarId !== 'ruby' && grammarId !== 'php') {
+		return entries;
+	}
+	const masked = maskCommentsForAugment(source);
+	const lines = source.split(/\r?\n/);
+	const maskedLines = masked.split(/\r?\n/);
+	let offset = 0;
+	let heredocId: string | null = null;
+	let braceDepth = 0;
+	let pending: {
+		startOffset: number;
+		startLine: number;
+		text: string;
+		lines: number;
+	} | null = null;
+	const flushPending = (endLine: number) => {
+		if (!pending) return;
+		let parsed:
+			| FileSymbolFacts['imports'][0]
+			| FileSymbolFacts['imports']
+			| null = null;
+		if (grammarId === 'dart') parsed = parseDartImport(pending.text);
+		else if (grammarId === 'php') parsed = parsePhpUse(pending.text);
+		for (const entry of parsed
+			? Array.isArray(parsed)
+				? parsed
+				: [parsed]
+			: []) {
+			entries.push({
+				index: pending.startOffset,
+				entry: { ...entry, startLine: pending.startLine, endLine },
+			});
+		}
+		pending = null;
+	};
+	for (let li = 0; li < lines.length; li++) {
+		const line = lines[li];
+		const trimmed = line.trim();
+		const maskedTrimmed = maskedLines[li]?.trim() ?? '';
+		const startLine = lineNumberAt(source, offset);
+
+		if (grammarId === 'ruby') {
+			if (heredocId !== null) {
+				if (maskedTrimmed === heredocId) heredocId = null;
+			} else {
+				const open = maskedTrimmed.match(rubyHeredocOpenRe);
+				if (open) heredocId = open[1];
+				else {
+					const parsed = parseRubyRequire(trimmed);
+					if (parsed) {
+						entries.push({
+							index: offset,
+							entry: { ...parsed, startLine, endLine: startLine },
+						});
+					}
+				}
+			}
+			offset = advanceLineOffset(source, offset, line.length);
+			continue;
+		}
+
+		// dart/php: track brace depth on the MASKED line so braces inside
+		// strings cannot skew it.
+		if (grammarId === 'php') {
+			for (const ch of maskedLines[li] ?? '') {
+				if (ch === '{') braceDepth++;
+				else if (ch === '}') braceDepth = Math.max(0, braceDepth - 1);
+			}
+		}
+
+		if (pending) {
+			pending.text += ` ${trimmed}`;
+			pending.lines++;
+			if (trimmed.includes(';') || pending.lines > 10) {
+				flushPending(startLine);
+			} else if (trimmed === '') {
+				pending = null; // blank line aborts an unterminated buffer
+			}
+			offset = advanceLineOffset(source, offset, line.length);
+			continue;
+		}
+
+		const startsStatement =
+			grammarId === 'dart'
+				? /^(import|export)\s/.test(maskedTrimmed)
+				: /^use\s/.test(maskedTrimmed);
+		// php `use` inside a class/trait body is a trait inclusion, not an import
+		const inClassBody = grammarId === 'php' && braceDepth > 0;
+		if (startsStatement && !inClassBody) {
+			if (trimmed.includes(';')) {
+				let parsed:
+					| FileSymbolFacts['imports'][0]
+					| FileSymbolFacts['imports']
+					| null = null;
+				if (grammarId === 'dart') parsed = parseDartImport(trimmed);
+				else if (grammarId === 'php') parsed = parsePhpUse(trimmed);
+				for (const entry of parsed
+					? Array.isArray(parsed)
+						? parsed
+						: [parsed]
+					: []) {
+					entries.push({
+						index: offset,
+						entry: { ...entry, startLine, endLine: startLine },
+					});
+				}
+			} else {
+				pending = { startOffset: offset, startLine, text: trimmed, lines: 1 };
+			}
+		}
+		offset = advanceLineOffset(source, offset, line.length);
+	}
+	flushPending(lineNumberAt(source, offset));
+	return entries;
 }
 
 function safeMatches(
@@ -1244,8 +2127,13 @@ function parseGoImportHardened(
 	const t = text.trim();
 	if (t.startsWith('import (')) return null;
 
+	// The `(?!import\b)` guard matters: without it, a SINGLE-LINE bare import
+	// (`import "fmt"`) matched the bare-alias pattern with the literal keyword
+	// `import` captured as the alias, yielding `{imported:'fmt', local:'import'}`.
+	// Block-form bare imports were unaffected, so the two forms disagreed. A bare
+	// import has no alias in either form and must fall through to `simple` below.
 	const aliased =
-		t.match(/^([\w._]+)\s+["`]([^"`]+)["`]$/) ??
+		t.match(/^(?!import\b)([\w._]+)\s+["`]([^"`]+)["`]$/) ??
 		t.match(/^import\s+([\w._]+)\s+["`]([^"`]+)["`]/);
 	if (aliased) {
 		if (aliased[1] === '_') {
@@ -1274,20 +2162,58 @@ function parseGoImportHardened(
 	};
 }
 
+/**
+ * Final segment of a dotted path (`java.util.List` -> `List`).
+ *
+ * `bindings[].imported` is consumed as the `toSymbol` of a graph edge
+ * (the `toSymbol:` assignments in `buildSymbolEdges` /
+ * `src/tools/repo-graph/builder.ts`), so it must be the *declaration
+ * name* found in the target file — never the fully-qualified path, which
+ * matches no def anywhere.
+ */
+function finalDottedSegment(path: string): string {
+	// Strip a generic argument list first. A C# alias RHS may be a constructed
+	// type (`using L = System.Collections.Generic.List<int>;`), and splitting on
+	// the last dot alone produced `List<int>` as the `imported` name — which can
+	// never match a declaration in the target file, silently creating a wrong
+	// binding instead of cleanly omitting one. That violates this module's own
+	// contract that `bindings[].imported` is the declaration name found in the
+	// target file. A dot inside the generic arguments is also not a namespace
+	// separator, so the argument list must go before `lastIndexOf('.')` runs.
+	const withoutGenerics = path.replace(/<.*>$/s, '');
+	const lastDot = withoutGenerics.lastIndexOf('.');
+	return lastDot === -1 ? withoutGenerics : withoutGenerics.slice(lastDot + 1);
+}
+
 function parseJavaImport(text: string): FileSymbolFacts['imports'][0] | null {
 	const t = text.trim();
 	// import foo.Bar;
 	// import static foo.Bar.baz;
-	const m = t.match(/^import\s+(?:static\s+)?([^;\s]+)\s*;?\s*$/);
-	if (m) {
-		return { specifier: m[1], importType: 'namespace', bindings: [] };
+	// import foo.*;  /  import static foo.Bar.*;
+	const m = t.match(/^import\s+(static\s+)?([^;\s]+)\s*;?\s*$/);
+	if (!m) return null;
+	const isStatic = Boolean(m[1]);
+	const path = m[2];
+	const last = finalDottedSegment(path);
+	// On-demand import: no single symbol is bound.
+	if (last === '*') {
+		return { specifier: path, importType: 'namespace', bindings: [] };
 	}
-	return null;
+	// `import static foo.Bar.baz` binds the member `baz` declared by the type
+	// `foo.Bar`, so the module specifier is the type, not the member.
+	const lastDot = path.lastIndexOf('.');
+	const specifier = isStatic && lastDot !== -1 ? path.slice(0, lastDot) : path;
+	return {
+		specifier,
+		importType: 'named',
+		bindings: [{ imported: last, local: last }],
+	};
 }
 
 function parseKotlinImport(text: string): FileSymbolFacts['imports'][0] | null {
 	// import foo.Bar
 	// import foo.Bar as baz
+	// import foo.*
 	// Multiple per import_header — each line is captured
 	const t = text.trim();
 	const aliased = t.match(/^import\s+([^;\s]+)\s+as\s+(\w+)/);
@@ -1295,14 +2221,25 @@ function parseKotlinImport(text: string): FileSymbolFacts['imports'][0] | null {
 		return {
 			specifier: aliased[1],
 			importType: 'named',
-			bindings: [{ imported: aliased[1], local: aliased[2] }],
+			bindings: [
+				{ imported: finalDottedSegment(aliased[1]), local: aliased[2] },
+			],
 		};
 	}
 	const simple = t.match(/^import\s+([^;\s]+)/);
-	if (simple) {
-		return { specifier: simple[1], importType: 'namespace', bindings: [] };
+	if (!simple) return null;
+	const path = simple[1];
+	const last = finalDottedSegment(path);
+	// Kotlin has no namespace-import form other than `a.b.*`; a plain import
+	// always names one declaration.
+	if (last === '*') {
+		return { specifier: path, importType: 'namespace', bindings: [] };
 	}
-	return null;
+	return {
+		specifier: path,
+		importType: 'named',
+		bindings: [{ imported: last, local: last }],
+	};
 }
 
 function parseCSharpUsing(text: string): FileSymbolFacts['imports'][0] | null {
@@ -1310,32 +2247,54 @@ function parseCSharpUsing(text: string): FileSymbolFacts['imports'][0] | null {
 	// using foo;
 	// using foo = foo.Bar;
 	// using static foo.Bar;
+	// global using foo;           (C# 10+; the default shape of a .NET 6+
+	//                              GlobalUsings.cs, so omitting it silently
+	//                              drops every import in modern projects)
 	const m = t.match(
-		/^using\s+(?:static\s+)?([^=;\s]+)\s*(?:=\s*(.+?))?\s*;?\s*$/,
+		/^(?:global\s+)?using\s+(?:static\s+)?([^=;\s]+)\s*(?:=\s*(.+?))?\s*;?\s*$/,
 	);
-	if (m) {
-		const specifier = m[2] ? m[2].trim() : m[1].trim();
-		if (m[2]) {
-			return {
-				specifier,
-				importType: 'named',
-				bindings: [{ imported: specifier, local: m[1].trim() }],
-			};
-		}
-		return { specifier: m[1].trim(), importType: 'namespace', bindings: [] };
+	if (!m) return null;
+	if (m[2]) {
+		// Alias: `using Alias = System.Text.StringBuilder;`. The specifier stays
+		// the full dotted right-hand side (parallel to a Java single-type
+		// import); only the bound symbol becomes the final segment.
+		const target = m[2].trim();
+		return {
+			specifier: target,
+			importType: 'named',
+			bindings: [{ imported: finalDottedSegment(target), local: m[1].trim() }],
+		};
 	}
-	return null;
+	// A plain `using System.Text;` imports a namespace, not a declaration.
+	return { specifier: m[1].trim(), importType: 'namespace', bindings: [] };
 }
 
 function parseCppInclude(text: string): FileSymbolFacts['imports'][0] | null {
 	const t = text.trim();
-	// #include <foo>
-	// #include "foo"
-	// using foo::bar;
-	const include = t.match(/^#\s*include\s+[<"]([^>"]+)[>"]/);
-	if (include) {
-		return { specifier: include[1], importType: 'namespace', bindings: [] };
+	// Quoted include: #include "foo.h" / #include "sub/foo.h" / #include "../x.h".
+	// Local includes resolve relative to the including file, so the specifier is
+	// normalized to a './'-prefixed form that resolveModuleSpecifier can turn
+	// into a file edge. The import TYPE is 'namespace': an include binds the
+	// whole header with no per-symbol binding, and the graph consumers
+	// (getCallers/getSymbolConsumers/getDeadExports) treat namespace imports
+	// as whole-file — a 'default' edge with empty usedSymbols made callers
+	// vanish and flagged every header export as a dead candidate (PR #2351
+	// review, PRR-001).
+	const quoted = t.match(/^#\s*include\s+"([^"]+)"/);
+	if (quoted) {
+		const raw = quoted[1];
+		const specifier = raw.startsWith('.') ? raw : `./${raw}`;
+		return { specifier, importType: 'namespace', bindings: [] };
 	}
+	// Angle include: #include <foo.h>. Without build-system include paths these
+	// stay external/unresolved (bare specifier; resolveModuleSpecifier returns
+	// null and they are not reported as unresolved relative imports).
+	const angle = t.match(/^#\s*include\s+<([^>]+)>/);
+	if (angle) {
+		return { specifier: angle[1], importType: 'namespace', bindings: [] };
+	}
+	// using foo::bar;
+	// using namespace foo;
 	const using = t.match(/^using\s+(?:namespace\s+)?(.+?)\s*;?\s*$/);
 	if (using) {
 		return {
@@ -1349,32 +2308,101 @@ function parseCppInclude(text: string): FileSymbolFacts['imports'][0] | null {
 
 function parseSwiftImport(text: string): FileSymbolFacts['imports'][0] | null {
 	const t = text.trim();
-	// import foo
-	// import class foo.Bar
-	const m = t.match(/^import\s+(?:class\s+)?([^;\s]+)/);
-	if (m) {
-		return { specifier: m[1], importType: 'namespace', bindings: [] };
-	}
-	return null;
-}
-
-function parseDartImport(text: string): FileSymbolFacts['imports'][0] | null {
-	const t = text.trim();
-	// import 'foo';
-	// import 'foo' as bar;
-	// import 'foo' show A, B;
-	// import 'foo' hide A;
-	const m = t.match(/^import\s+['"]([^'"]+)['"]\s+as\s+(\w+)/);
-	if (m) {
+	// Optional leading attributes: @_testable import Foo / @_exported import Foo
+	const attrs = /^(?:@\w+(?:\([^)\n]*\))?\s+)*/.source;
+	// import Foo                        → namespace import of module Foo
+	// import Foo.Bar                    → namespace import of submodule Foo.Bar
+	// import class Foo.Bar              → named import: module Foo, symbol Bar
+	// import class Foo.Bar.Baz          → named import: module Foo, symbol Baz
+	//   (middle components are a nested module path; the LAST component is the
+	//   imported symbol — conservative, matches how the symbol is referenced)
+	// The kind group requires its own trailing whitespace, so a module that
+	// merely starts with a keyword (`import classFoo`) is not split.
+	const m = t.match(
+		new RegExp(
+			`${attrs}import\\s+((?:class|struct|enum|protocol|typealias|func|var|let)\\s+)?([A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)*)\\s*$`,
+		),
+	);
+	if (!m) return null;
+	const path = m[2]!.split('.');
+	if (m[1] !== undefined && path.length >= 2) {
+		const imported = path[path.length - 1]!;
 		return {
-			specifier: m[1],
+			specifier: path[0]!,
 			importType: 'named',
-			bindings: [{ imported: m[1], local: m[2] }],
+			bindings: [{ imported, local: imported }],
 		};
 	}
-	const simple = t.match(/^import\s+['"]([^'"]+)['"]/);
-	if (simple) {
-		return { specifier: simple[1], importType: 'namespace', bindings: [] };
+	// No kind keyword, or a kind with no dotted path (not valid Swift — keep
+	// the whole specifier rather than dropping the import).
+	return { specifier: m[2]!, importType: 'namespace', bindings: [] };
+}
+
+function parseDartImport(
+	text: string,
+): FileSymbolFacts['imports'][0] | FileSymbolFacts['imports'] | null {
+	const t = text.trim();
+	// import 'foo';
+	// import 'foo' as bar;   — namespace-prefix access, not a named binding
+	// import 'foo' show A, B;
+	// import 'foo' hide A;   — hide clause intentionally unhandled: recorded as
+	//                          a namespace import (all symbols minus hidden),
+	//                          which is correct for graph purposes
+	// export 'foo' show A, B;
+	const exportMatch = t.match(
+		/^export\s+['"]([^'"]+)['"](?:\s+show\s+([^;]+))?/,
+	);
+	if (exportMatch) {
+		const shown = exportMatch[2]
+			?.split(',')
+			.map((part) => part.trim())
+			.filter(Boolean);
+		const bindings =
+			shown && shown.length > 0
+				? shown.map((name) => ({ imported: name, local: name }))
+				: [{ imported: '*', local: '*' }];
+		return {
+			specifier: exportMatch[1],
+			importType: shown && shown.length > 0 ? 'named' : 'namespace',
+			bindings,
+			reExport: true,
+			exportedBindings: bindings.map((binding) => ({
+				imported: binding.imported,
+				exported: binding.local,
+			})),
+		};
+	}
+	const importMatch = t.match(/^import\s+['"]([^'"]+)['"]([^;]*)/);
+	if (importMatch) {
+		// A prefix (`as p`) makes all access prefix-qualified — even when a
+		// show/hide clause follows (`import 'x' as p show A;`), the import is
+		// classified as namespace with no named binding.
+		const clause = importMatch[2];
+		const alias = clause?.match(/\bas\s+\w+/);
+		const shown = clause
+			?.match(/\bshow\s+([^;]+)/)?.[1]
+			.split(',')
+			.map((part) => part.trim())
+			.filter(Boolean);
+		const primary: FileSymbolFacts['imports'][0] = {
+			specifier: importMatch[1],
+			importType: !alias && shown && shown.length > 0 ? 'named' : 'namespace',
+			bindings:
+				!alias && shown && shown.length > 0
+					? shown.map((name) => ({ imported: name, local: name }))
+					: [],
+		};
+		// Conditional imports (`import 'a' if (cond) 'b';`) resolve to the
+		// configured URI at RUNTIME; both URIs are recorded so either target
+		// can carry an edge (PR #2361 PRR-007).
+		const conditional = clause?.match(/\bif\s*\([^)]*\)\s*['"]([^'"]+)['"]/);
+		if (conditional) {
+			return [
+				primary,
+				{ specifier: conditional[1], importType: 'namespace', bindings: [] },
+			];
+		}
+		return primary;
 	}
 	return null;
 }
@@ -1385,13 +2413,19 @@ function parseRubyRequire(text: string): FileSymbolFacts['imports'][0] | null {
 	// e.g. "json" for require 'json'
 	// e.g. "./foo" for require_relative './foo'
 	// When the require keyword is included (full call text), strip it.
+	// require_relative resolves against the requiring file's directory — the
+	// specifier is normalized to './name' so downstream relative resolution
+	// can find the target file.
+	const isRequireRelative = /^require_relative\b/.test(t);
 	const stripped = t
 		.replace(/^(?:require(?:_relative)?)\s+['"]?/, '')
 		.replace(/['"]$/, '');
 	if (!stripped || stripped === t) return null;
-	const isRelative = stripped.startsWith('./') || stripped.startsWith('../');
+	const specifier =
+		isRequireRelative && !stripped.startsWith('.') ? `./${stripped}` : stripped;
+	const isRelative = specifier.startsWith('./') || specifier.startsWith('../');
 	return {
-		specifier: stripped,
+		specifier,
 		importType: isRelative ? 'default' : 'namespace',
 		bindings: [],
 	};
@@ -1410,7 +2444,9 @@ function parsePhpUse(text: string): FileSymbolFacts['imports'][0] | null {
 		return {
 			specifier: m[1],
 			importType: 'named',
-			bindings: [{ imported: m[1], local: m[2] }],
+			// Bindings match on the short name (what a referencing expression
+			// in the body actually spells), mirroring builder.ts semantics.
+			bindings: [{ imported: m[1].split('\\').pop() ?? m[1], local: m[2] }],
 		};
 	}
 	const simple = t.match(
@@ -1457,6 +2493,23 @@ function isNodeInside(outer: TsNode, inner: TsNode): boolean {
 	);
 }
 
+/**
+ * Node type of the nearest ancestor whose type is in `types`, or `undefined`.
+ * Unlike `hasAncestorOfType` this reports *which* container matched, which the
+ * container-kind visibility matrix needs.
+ */
+function nearestAncestorType(
+	node: TsNode,
+	types: Set<string>,
+): string | undefined {
+	let current: TsNode | null = node.parent;
+	while (current) {
+		if (types.has(current.type)) return current.type;
+		current = current.parent;
+	}
+	return undefined;
+}
+
 function hasAncestorOfType(node: TsNode, types: Set<string> | string): boolean {
 	const typeSet = typeof types === 'string' ? new Set([types]) : types;
 	let current: TsNode | null = node.parent;
@@ -1495,7 +2548,10 @@ const IMPORT_ANCESTOR_TYPES = new Set([
 	'use_declaration',
 	'using_directive',
 	'namespace_use_declaration',
+	'namespace_use_clause', // php use clause under a grouped declaration
 	'library_import', // dart
+	'library_export', // dart
+	'export_directive', // dart
 ]);
 
 function isInsideImportStatement(node: TsNode): boolean {
@@ -1504,6 +2560,35 @@ function isInsideImportStatement(node: TsNode): boolean {
 
 function nodeKey(node: TsNode): string {
 	return `${node.startPosition.row},${node.startPosition.column}-${node.endPosition.row},${node.endPosition.column}`;
+}
+
+/**
+ * True when `defNode` is the declaration an export statement itself declares,
+ * rather than something nested deeper inside it.
+ *
+ * Uses the grammar's own `declaration` / `value` field accessors instead of
+ * enumerating child node types: the field is defined by the grammar for every
+ * legal shape, so this stays correct for `export default class`,
+ * `export default function`, `export default <expression>` and anything a
+ * future grammar bump adds, without a skip-list to keep in sync.
+ *
+ * Members of an `export default` declaration are still `exported` (matching the
+ * named-export path, where `export class Foo { bar() {} }` marks `bar`
+ * exported). They simply keep their real names instead of all becoming
+ * `default`.
+ */
+function isOwnExportDeclaration(en: TsNode, defNode: TsNode): boolean {
+	const owner =
+		en.childForFieldName?.('declaration') ?? en.childForFieldName?.('value');
+	if (owner) {
+		return (
+			owner.startIndex === defNode.startIndex &&
+			owner.endIndex === defNode.endIndex
+		);
+	}
+	// No declaration/value field (unusual grammar shape): fall back to the old
+	// containment test rather than silently dropping the default marking.
+	return isNodeInside(en, defNode);
 }
 
 function isDefaultExportStatement(en: TsNode): boolean {
@@ -1522,3 +2607,15 @@ function isEsMGrammar(grammarId: string): boolean {
 		grammarId === 'javascript'
 	);
 }
+
+/**
+ * DI seam for direct parser tests — the import parsers are module-private by
+ * design; tests exercise them through this seam instead of `mock.module`,
+ * which leaks across Bun's shared test-runner process (@see AGENTS.md
+ * invariant #7; PR #2361 review R10/PRR-017).
+ */
+export const _internals = {
+	parseDartImport,
+	parseRubyRequire,
+	parsePhpUse,
+};

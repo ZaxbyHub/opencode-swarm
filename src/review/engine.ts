@@ -3,6 +3,10 @@ import * as path from 'node:path';
 import type { AutoReviewConfig } from '../config/schema.js';
 import { MAX_EPHEMERAL_PROMPT_BYTE_LIMIT } from '../evaluation/ephemeral-agent-dispatcher.js';
 import {
+	classifyProviderFailure,
+	isRetryableProviderFailure,
+} from '../failures/invocation-failure.js';
+import {
 	buildApprovedReceipt,
 	buildRejectedReceipt,
 	persistReviewReceipt,
@@ -13,10 +17,7 @@ import {
 import { parseReviewerOutput } from '../hooks/review-receipt-collector.js';
 import { telemetry } from '../telemetry.js';
 import type { ModelOverride } from '../utils/model-dispatch-fallback.js';
-import {
-	isQuotaError,
-	isTransientProviderError,
-} from '../utils/provider-error-classification.js';
+import { isQuotaError } from '../utils/provider-error-classification.js';
 import type {
 	ReviewDispatchResult,
 	ReviewModelDispatcher,
@@ -601,8 +602,17 @@ async function dispatchReviewerWithFallback(
 		const taskCompletionTimeout =
 			input.trigger === 'task_completion' &&
 			(result.status === 'timeout' || /auto-review timed out/i.test(detail));
-		const transient =
-			result.status === 'timeout' || isTransientProviderError(detail);
+		const transient = isRetryableProviderFailure(
+			classifyProviderFailure(
+				result.status === 'timeout'
+					? {
+							name: 'TimeoutError',
+							code: 'ETIMEDOUT',
+							message: detail || 'provider timeout',
+						}
+					: detail,
+			),
+		);
 		if (taskCompletionTimeout || !transient || index === models.length - 1) {
 			return { result, attempts };
 		}
@@ -629,6 +639,7 @@ function addCost(
 	evidence: AutoReviewEvidence,
 	dispatches: ReviewDispatchResult[],
 ): void {
+	const MAX_REVIEW_COST_EVIDENCE = 32;
 	evidence.cost.model_calls = dispatches.length;
 	evidence.cost.prompt_bytes = dispatches.reduce(
 		(sum, dispatch) => sum + dispatch.promptBytes,
@@ -636,6 +647,14 @@ function addCost(
 	);
 	for (const dispatch of dispatches) {
 		const fields = dispatch.costFields;
+		for (const item of fields?.cost_evidence ?? []) {
+			if (evidence.cost.cost_evidence.length >= MAX_REVIEW_COST_EVIDENCE) break;
+			evidence.cost.cost_evidence.push(item);
+		}
+		if (fields?.evidence_status !== 'complete') {
+			evidence.cost.evidence_status = 'inconclusive';
+			evidence.cost.evidence_reason = fields?.evidence_reason ?? 'missing_cost';
+		}
 		evidence.cost.tokens_input += fields?.tokens_input ?? 0;
 		evidence.cost.tokens_output += fields?.tokens_output ?? 0;
 		evidence.cost.tokens_reasoning += fields?.tokens_reasoning ?? 0;
@@ -695,6 +714,8 @@ function baseEvidence(
 			tokens_cache: 0,
 			cost_usd: null,
 			cost_source: 'unavailable',
+			cost_evidence: [],
+			evidence_status: 'complete',
 		},
 	};
 }

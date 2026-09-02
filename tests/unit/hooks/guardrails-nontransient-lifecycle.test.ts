@@ -47,10 +47,21 @@ describe('guardrails non-transient lifecycle — issue #1875 follow-up', () => {
 			tool: 'bash',
 			sessionID,
 			callID,
-			args: { command: `failing-${callID}` },
+			args: { command: 'failing-command' },
 		});
+		const run = async (
+			callID: string,
+			result: ReturnType<typeof shellResult>,
+		) => {
+			const call = input(callID);
+			await hooks.toolBefore(
+				{ tool: call.tool, sessionID: call.sessionID, callID: call.callID },
+				{ args: call.args },
+			);
+			await hooks.toolAfter(call, result);
+		};
 
-		await hooks.toolAfter(input('first'), shellResult('permission denied', 2));
+		await run('first', shellResult('permission denied', 2));
 		expect(getAgentSession(sessionID)?.nonTransientCircuit).toMatchObject({
 			sameCategoryCount: 1,
 			hardStop: false,
@@ -59,7 +70,7 @@ describe('guardrails non-transient lifecycle — issue #1875 follow-up', () => {
 			[],
 		);
 
-		await hooks.toolAfter(input('success'), shellResult('ok', 0));
+		await run('success', shellResult('ok', 0));
 		expect(getAgentSession(sessionID)?.nonTransientCircuit).toMatchObject({
 			sameCategoryCount: 0,
 			hardStop: false,
@@ -68,11 +79,8 @@ describe('guardrails non-transient lifecycle — issue #1875 follow-up', () => {
 			[],
 		);
 
-		for (let attempt = 1; attempt <= 4; attempt++) {
-			await hooks.toolAfter(
-				input(`threshold-${attempt}`),
-				shellResult('permission denied', 2),
-			);
+		for (let attempt = 1; attempt <= 3; attempt++) {
+			await run(`threshold-${attempt}`, shellResult('permission denied', 2));
 		}
 		const advisories =
 			getAgentSession(sessionID)?.pendingAdvisoryMessages ?? [];

@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -28,9 +28,9 @@ export const PR_REVIEW_BASE_SHA = 'def456';
 /** Scope every persisted artifact must carry once a fixture binds a base. */
 export const PR_REVIEW_SCOPE = `complete PR diff ${PR_REVIEW_BASE_SHA}...${HEAD_SHA}`;
 const BASE_CANDIDATE_HEADER =
-	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 const MICRO_CANDIDATE_HEADER =
-	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence';
+	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags';
 
 export let tempDir = '';
 const originalResolveCurrentGitHead = _test_exports.resolveCurrentGitHead;
@@ -69,6 +69,7 @@ export function setupPrWorkflowGateFixtures(): void {
 	tempDir = realpathSync(
 		mkdtempSync(path.join(os.tmpdir(), 'pr-workflow-gate-')),
 	);
+	mkdirSync(path.join(tempDir, '.git'), { recursive: true });
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
 	_test_exports.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
@@ -139,6 +140,7 @@ export async function persistBatch(
 		artifactRole?: string;
 		subagentSessionId?: string;
 		scope?: string;
+		prReviewLegacyTranscriptCompatibility?: boolean;
 	} = {},
 ): Promise<void> {
 	for (const [index, lane] of lanes.entries()) {
@@ -162,6 +164,14 @@ export async function persistBatch(
 			mode,
 			workflowLane: lane.workflowLane,
 			ownedWorkflowLanes: lane.ownedWorkflowLanes,
+			...(options.prReviewLegacyTranscriptCompatibility !== undefined
+				? {
+						prReviewLegacyTranscriptCompatibility:
+							options.prReviewLegacyTranscriptCompatibility,
+					}
+				: mode === 'swarm-pr-review:base' || mode === 'swarm-pr-review:micro'
+					? { prReviewLegacyTranscriptCompatibility: true }
+					: {}),
 			workspace: {
 				directory: tempDir,
 				gitHead: HEAD_SHA,
@@ -178,7 +188,7 @@ export async function persistBatch(
 			(options.empty
 				? ''
 				: mode === 'swarm-pr-review:reviewer'
-					? '[REVIEWED] | C-001 | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer'
+					? '[REVIEWED] | C-001 | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer | ORDINARY | '
 					: mode === 'swarm-pr-review:critic'
 						? '[CRITIC] | C-001 | UPHELD | HIGH | reason | no change'
 						: mode === 'swarm-pr-feedback:verification'
@@ -187,7 +197,7 @@ export async function persistBatch(
 									mode === 'swarm-pr-review:micro'
 										? MICRO_CANDIDATE_HEADER
 										: BASE_CANDIDATE_HEADER,
-									`C-${index} | ${ownedLanes[0]} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH`,
+									`C-${index} | ${ownedLanes[0]} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH | ORDINARY | `,
 									...ownedLanes
 										.slice(1)
 										.map(
@@ -264,8 +274,8 @@ export async function establishReviewPrerequisitesWithConsolidatedMicroLane(
 	const [familyA, ...cleanFamilies] = ownedFamilies;
 	const consolidatedCandidateId = 'C-CONSOLIDATED';
 	const consolidatedText = [
-		'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence',
-		`${consolidatedCandidateId} | ${familyA} | HIGH | secrets | src/consolidated.ts:1 | leaked credential | LEAST_PRIVILEGE | observed in log output | HIGH`,
+		'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags',
+		`${consolidatedCandidateId} | ${familyA} | HIGH | secrets | src/consolidated.ts:1 | leaked credential | LEAST_PRIVILEGE | observed in log output | HIGH | ORDINARY | `,
 		// Each clean family's evidence text must be genuinely distinct (not a
 		// copy-pasted template) to satisfy the multi-lane anti-templating check
 		// in workflowArtifactHasContractMarker.
@@ -291,6 +301,7 @@ export async function establishReviewPrerequisitesWithConsolidatedMicroLane(
 		mode: 'swarm-pr-review:micro',
 		workflowLane: familyA,
 		ownedWorkflowLanes: [...ownedFamilies],
+		prReviewLegacyTranscriptCompatibility: true,
 		workspace: {
 			directory: tempDir,
 			gitHead: HEAD_SHA,
@@ -471,7 +482,7 @@ export async function establishReviewPrerequisitesWithOverlappingBaseRetry(): Pr
 	const staleDimBCandidateId = 'STALE-DIMB';
 	const freshDimBCandidateId = 'FRESH-DIMB';
 	const candidateHeader =
-		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 
 	const consolidatedLane = {
 		laneId: 'sweep-ab',
@@ -490,8 +501,8 @@ export async function establishReviewPrerequisitesWithOverlappingBaseRetry(): Pr
 		{
 			textOverride: [
 				candidateHeader,
-				`${onlyDimACandidateId} | ${dimA} | HIGH | correctness | file.ts:1 | claim-a | evidence-a | impact-a | HIGH`,
-				`${staleDimBCandidateId} | ${dimB} | HIGH | correctness | file.ts:2 | claim-b-stale | evidence-b-stale | impact-b-stale | HIGH`,
+				`${onlyDimACandidateId} | ${dimA} | HIGH | correctness | file.ts:1 | claim-a | evidence-a | impact-a | HIGH | ORDINARY | `,
+				`${staleDimBCandidateId} | ${dimB} | HIGH | correctness | file.ts:2 | claim-b-stale | evidence-b-stale | impact-b-stale | HIGH | ORDINARY | `,
 			].join('\n'),
 			scope: PR_REVIEW_SCOPE,
 		},
@@ -506,7 +517,7 @@ export async function establishReviewPrerequisitesWithOverlappingBaseRetry(): Pr
 	await persistBatch('base-retry-dimb', 'swarm-pr-review:base', [retryLane], {
 		textOverride: [
 			candidateHeader,
-			`${freshDimBCandidateId} | ${dimB} | HIGH | correctness | file.ts:3 | claim-b-fresh | evidence-b-fresh | impact-b-fresh | HIGH`,
+			`${freshDimBCandidateId} | ${dimB} | HIGH | correctness | file.ts:3 | claim-b-fresh | evidence-b-fresh | impact-b-fresh | HIGH | ORDINARY | `,
 		].join('\n'),
 		scope: PR_REVIEW_SCOPE,
 	});
@@ -615,9 +626,9 @@ export async function establishReviewPrerequisitesWithMislabeledSingletonLane():
 	const coveringCandidateId = 'C-COVERING';
 	const mislabeledCandidateId = 'C-MISLABELED';
 	const mislabeledText = [
-		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence',
-		`${coveringCandidateId} | ${mislabeledLane.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH`,
-		`${mislabeledCandidateId} | ${mislabeledLane.workflowLane}-typo | HIGH | correctness | file.ts:2 | claim | evidence | impact | HIGH`,
+		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags',
+		`${coveringCandidateId} | ${mislabeledLane.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH | ORDINARY | `,
+		`${mislabeledCandidateId} | ${mislabeledLane.workflowLane}-typo | HIGH | correctness | file.ts:2 | claim | evidence | impact | HIGH | ORDINARY | `,
 	].join('\n');
 	const mislabeledCorrelationId = 'base-all-mislabeled';
 	await recordPendingDelegation(tempDir, {
@@ -633,6 +644,7 @@ export async function establishReviewPrerequisitesWithMislabeledSingletonLane():
 		batchId: 'base-all',
 		laneId: mislabeledLane.laneId,
 		mode: 'swarm-pr-review:base',
+		prReviewLegacyTranscriptCompatibility: true,
 		workflowLane: mislabeledLane.workflowLane,
 		workspace: {
 			directory: tempDir,

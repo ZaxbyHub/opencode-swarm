@@ -66,7 +66,7 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 			directory,
 			'order-run',
 			[
-				reviewedRow('C-0', 'DISPROVED', 'LOW'),
+				reviewedRow('C-0', 'DISPROVED', 'NONE'),
 				...candidateIds
 					.slice(1)
 					.map((id) => reviewedRow(id, 'CONFIRMED', 'LOW')),
@@ -81,7 +81,9 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 					.map((id) => artifactRecord(id, 'CONFIRMED', 'report')),
 			]),
 		);
-		expect(message).toBe(
+		expect(message.startsWith('field boundary: expected')).toBe(true);
+		expect(message).toContain(', got "BLOCKED:');
+		expect(message).toContain(
 			'BLOCKED: PR_REVIEW post_reviewer findings require the prior post_explorer checkpoint',
 		);
 	});
@@ -94,17 +96,21 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 			HEAD_SHA,
 			{ skipTriggerEvaluation: true },
 		);
+		// `post_explorer` is the one boundary EXEMPT from this prerequisite once
+		// base coverage has settled (issue #2280 Part A — pinned in
+		// pr-workflow-gate-base-only-checkpoint.test.ts), so this message is
+		// pinned here on `post_reviewer`, where the rule still applies.
 		const message = await rejectionMessage(
 			writePrReviewFindings(
 				directory,
 				'no-trigger',
-				'post_explorer',
+				'post_reviewer',
 				candidateIds.map((id) =>
 					artifactRecord(id, 'PENDING', 'route_to_reviewer'),
 				),
 			),
 		);
-		expect(message).toBe(
+		expect(message).toContain(
 			'BLOCKED: PR_REVIEW findings persistence requires the trigger evaluation artifact (write_pr_review_trigger_eval must complete first)',
 		);
 	});
@@ -121,7 +127,7 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 					.map((id) => artifactRecord(id, 'PENDING', 'route_to_reviewer')),
 			),
 		);
-		expect(missingMessage).toBe(
+		expect(missingMessage).toContain(
 			'BLOCKED: PR_REVIEW post_explorer findings must exactly cover the discovered candidate inventory; missing: C-5; extra: (none); duplicates: (none)',
 		);
 		const duplicateMessage = await rejectionMessage(
@@ -133,7 +139,7 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 					.map((id) => artifactRecord(id, 'PENDING', 'route_to_reviewer')),
 			]),
 		);
-		expect(duplicateMessage).toBe(
+		expect(duplicateMessage).toContain(
 			'BLOCKED: PR_REVIEW post_explorer findings must exactly cover the discovered candidate inventory; missing: C-5; extra: (none); duplicates: C-0',
 		);
 		const nonConsecutiveDuplicateMessage = await rejectionMessage(
@@ -146,7 +152,7 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 					.map((id) => artifactRecord(id, 'PENDING', 'route_to_reviewer')),
 			]),
 		);
-		expect(nonConsecutiveDuplicateMessage).toBe(
+		expect(nonConsecutiveDuplicateMessage).toContain(
 			'BLOCKED: PR_REVIEW post_explorer findings must exactly cover the discovered candidate inventory; missing: C-5; extra: (none); duplicates: C-0',
 		);
 		const extraIdMessage = await rejectionMessage(
@@ -159,7 +165,7 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 					.concat(artifactRecord('C-9', 'PENDING', 'route_to_reviewer')),
 			),
 		);
-		expect(extraIdMessage).toBe(
+		expect(extraIdMessage).toContain(
 			'BLOCKED: PR_REVIEW post_explorer findings must exactly cover the discovered candidate inventory; missing: (none); extra: C-9; duplicates: (none)',
 		);
 	});
@@ -188,7 +194,7 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 			directory,
 			'clean-run',
 			[
-				reviewedRow('C-0', 'DISPROVED', 'LOW'),
+				reviewedRow('C-0', 'DISPROVED', 'NONE'),
 				reviewedRow('C-1', 'CONFIRMED', 'MEDIUM'),
 				reviewedRow('C-2', 'CONFIRMED', 'LOW'),
 				reviewedRow('C-3', 'CONFIRMED', 'LOW'),
@@ -209,28 +215,28 @@ describe('write_pr_review_artifact boundary and coverage errors (issue #2277)', 
 				'clean-run',
 				'post_explorer',
 				candidateIds.map((id) =>
-					artifactRecord(id, 'PENDING', 'route_to_reviewer'),
+					artifactRecord(id, 'PENDING', 'route_to_reviewer', 'HIGH'),
 				),
 			),
 		).resolves.toContain('"success": true');
 		await expect(
 			writePrReviewFindings(directory, 'clean-run', 'post_reviewer', [
-				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason'),
-				artifactRecord('C-1', 'CONFIRMED', 'route_to_critic'),
-				artifactRecord('C-2', 'CONFIRMED', 'report'),
-				artifactRecord('C-3', 'CONFIRMED', 'report'),
-				artifactRecord('C-4', 'CONFIRMED', 'report'),
-				artifactRecord('C-5', 'CONFIRMED', 'report'),
+				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason', 'NONE'),
+				artifactRecord('C-1', 'CONFIRMED', 'route_to_critic', 'MEDIUM'),
+				artifactRecord('C-2', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-3', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-4', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-5', 'CONFIRMED', 'report', 'LOW'),
 			]),
 		).resolves.toContain('"success": true');
 		await expect(
 			writePrReviewFindings(directory, 'clean-run', 'post_critic', [
-				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason'),
-				artifactRecord('C-1', 'CONFIRMED', 'report'),
-				artifactRecord('C-2', 'CONFIRMED', 'report'),
-				artifactRecord('C-3', 'CONFIRMED', 'report'),
-				artifactRecord('C-4', 'CONFIRMED', 'report'),
-				artifactRecord('C-5', 'CONFIRMED', 'report'),
+				artifactRecord('C-0', 'DISPROVED', 'suppress_with_reason', 'NONE'),
+				artifactRecord('C-1', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-2', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-3', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-4', 'CONFIRMED', 'report', 'LOW'),
+				artifactRecord('C-5', 'CONFIRMED', 'report', 'LOW'),
 			]),
 		).resolves.toContain('"success": true');
 	});

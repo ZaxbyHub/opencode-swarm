@@ -66,14 +66,16 @@ describe('repo-graph build O(N) equivalence — issue #1144', () => {
 		const sync = buildWorkspaceGraph(workspacePath);
 		const asyncGraph = await buildWorkspaceGraphAsync(workspacePath);
 
-		// Build file-level projections: strip async-exclusive exportRanges before
-		// comparing node content. Sync never produces exportRanges (3.2 contract).
+		// Build file-level projections: strip async-exclusive symbol fields
+		// (exportRanges, and exportKinds since schema 1.6.0 / KG-14) before
+		// comparing node content. Sync never produces either (3.2 contract).
 		const fileLevelNodes = <Record<string, object>>{};
 		for (const [key, asyncNode] of Object.entries(asyncGraph.nodes)) {
-			const { exportRanges: _er, ...fileLevel } = asyncNode as Record<
-				string,
-				unknown
-			>;
+			const {
+				exportRanges: _er,
+				exportKinds: _ek,
+				...fileLevel
+			} = asyncNode as Record<string, unknown>;
 			fileLevelNodes[key] = fileLevel;
 		}
 		expect(fileLevelNodes).toEqual(sync.nodes);
@@ -108,6 +110,17 @@ describe('repo-graph build O(N) equivalence — issue #1144', () => {
 			(n) => (n as Record<string, unknown>).exportRanges !== undefined,
 		);
 		expect(anyAsyncHasExportRanges).toBe(true);
+
+		// Same contract for the schema 1.6.0 declaration-kind map (KG-14,
+		// issue #1535): sync never produces exportKinds; async does wherever
+		// tree-sitter extracted defs.
+		for (const node of Object.values(sync.nodes)) {
+			expect((node as Record<string, unknown>).exportKinds).toBeUndefined();
+		}
+		const anyAsyncHasExportKinds = Object.values(asyncGraph.nodes).some(
+			(n) => (n as Record<string, unknown>).exportKinds !== undefined,
+		);
+		expect(anyAsyncHasExportKinds).toBe(true);
 
 		// Async-exclusive contract: sync graph never has symbolEdges (the key is
 		// absent entirely). Async graph may or may not populate it depending on
@@ -171,13 +184,15 @@ describe('repo-graph build O(N) equivalence — issue #1144', () => {
 		const sync = buildWorkspaceGraph(workspacePath);
 		const asyncGraph = await buildWorkspaceGraphAsync(workspacePath);
 
-		// File-level parity: strip async-exclusive exportRanges before comparing nodes.
+		// File-level parity: strip async-exclusive symbol fields (exportRanges,
+		// exportKinds) before comparing nodes.
 		const fileLevelNodes = <Record<string, object>>{};
 		for (const [key, asyncNode] of Object.entries(asyncGraph.nodes)) {
-			const { exportRanges: _er, ...fileLevel } = asyncNode as Record<
-				string,
-				unknown
-			>;
+			const {
+				exportRanges: _er,
+				exportKinds: _ek,
+				...fileLevel
+			} = asyncNode as Record<string, unknown>;
 			fileLevelNodes[key] = fileLevel;
 		}
 		expect(fileLevelNodes).toEqual(sync.nodes);

@@ -79,8 +79,8 @@ async function appendSuccessfulBaseTransition(
 	record: NonNullable<ReturnType<typeof findByBatchId>[number]>,
 ) {
 	const text = [
-		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence',
-		`${record.laneId}-candidate | ${record.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH`,
+		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags',
+		`${record.laneId}-candidate | ${record.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH | ORDINARY | `,
 	].join('\n');
 	const stored = storeLaneOutput(directory, {
 		batchId: record.batchId,
@@ -226,7 +226,10 @@ describe('dispatch_lanes PR review resilience upgrade rollback', () => {
 		await removePersistedResilienceSnapshot(sessionID);
 		dispatchInternals.loadPluginConfig = () =>
 			({
-				pr_review_resilience: DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+				pr_review_resilience: {
+					...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+					enabled: true,
+				},
 			}) as ReturnType<typeof originalDispatchLoadPluginConfig>;
 		dispatchInternals.getSessionOps = () => ({
 			create: mock(async () => {
@@ -282,6 +285,11 @@ describe('dispatch_lanes PR review resilience upgrade rollback', () => {
 			delete: mock(async () => undefined),
 		});
 
+		// Issue #2382: the CURRENT config's enabled flag is authoritative. A
+		// staged canary retry under a disabled config is invalid (the persisted
+		// enabled snapshot no longer keeps staged admission alive), and the
+		// enforcement's guarded audit write marks the persisted policy disabled
+		// while preserving the record for audit.
 		const retried = await executeDispatchLanesAsync(
 			{
 				mode: 'swarm-pr-review:base',
@@ -301,17 +309,88 @@ describe('dispatch_lanes PR review resilience upgrade rollback', () => {
 			directory,
 			{ sessionID },
 		);
-		expect(retried.success).toBe(true);
-		expect(created).toBe(8);
+		expect(retried.success).toBe(false);
+		expect(retried.failure_class).toBe('invalid_args');
+		expect(String(retried.message)).toContain(
+			'staged PR_REVIEW base dispatch is valid only when pr_review_resilience is enabled',
+		);
+		expect(created).toBe(7);
 
-		const retriedState = await readPrWorkflowGateState(directory, sessionID);
-		expect(retriedState?.prReviewResilience?.policy.enabled).toBe(true);
+		// The rejection happens at the dispatch layer, before any gate
+		// enforcement — the record is unchanged (still enabled, empty attempts).
+		const unchangedState = await readPrWorkflowGateState(directory, sessionID);
+		expect(unchangedState?.prReviewResilience?.policy.enabled).toBe(true);
+		expect(unchangedState?.prReviewResilience?.attempts).toEqual([]);
+	});
+
+	test('contract retry admission rolls back when launch fails without staged markers', async () => {
+		let created = 0;
+		dispatchInternals.getSessionOps = () => ({
+			create: mock(async () => ({ data: { id: `lane-session-${created++}` } })),
+			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			delete: mock(async () => undefined),
+		});
+
+		const sessionID = 'contract-retry-rollback';
+		const initial = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-review:base',
+				pr_head_sha: HEAD_SHA,
+				base_sha: BASE_SHA,
+				base_ref: 'origin/main',
+				max_concurrent: 6,
+				lanes: fullWave('contract-seed'),
+			},
+			directory,
+			{ sessionID },
+		);
+		expect(initial.success).toBe(true);
+		const initialRecords = findByBatchId(directory, String(initial.batch_id), {
+			parentSessionId: sessionID,
+		});
+		expect(initialRecords).toHaveLength(PR_REVIEW_BASE_DIMENSION_IDS.length);
+		for (const record of initialRecords) {
+			if (record.workflowLane === PR_REVIEW_BASE_DIMENSION_IDS[5]) {
+				await appendDelegationTransition(directory, record.correlationId, {
+					status: 'error',
+					result: {
+						...terminalErrorResult(`contract failure ${record.laneId}`),
+						workflowLaneFailureClass: 'contract',
+					},
+					expectedCurrentStatuses: ['pending', 'running'],
+				});
+				continue;
+			}
+			await appendSuccessfulBaseTransition(sessionID, record);
+		}
+
+		dispatchInternals.getSessionOps = () => ({
+			create: mock(async () => ({ error: 'upstream create unavailable' })),
+			promptAsync: mock(async () => ({ data: undefined, error: undefined })),
+			delete: mock(async () => undefined),
+		});
+		const failed = await executeDispatchLanesAsync(
+			{
+				mode: 'swarm-pr-review:base',
+				pr_head_sha: HEAD_SHA,
+				base_sha: BASE_SHA,
+				base_ref: 'origin/main',
+				pr_review_contract_retry: true,
+				max_concurrent: 1,
+				lanes: [
+					lane('contract-retry-unlaunched', PR_REVIEW_BASE_DIMENSION_IDS[5]!),
+				],
+			},
+			directory,
+			{ sessionID },
+		);
+		expect(failed.success).toBe(false);
+		const state = await readPrWorkflowGateState(directory, sessionID);
+		expect(state?.prReviewContractRetryDimensions).toBeUndefined();
 		expect(
-			retriedState?.prReviewResilience?.attempts[0]?.targetDimensions,
-		).toEqual([
-			PR_REVIEW_BASE_DIMENSION_IDS[2],
-			PR_REVIEW_BASE_DIMENSION_IDS[3],
-			PR_REVIEW_BASE_DIMENSION_IDS[5],
-		]);
+			findByBatchId(directory, String(failed.batch_id), {
+				parentSessionId: sessionID,
+			}),
+		).toHaveLength(0);
 	});
 });

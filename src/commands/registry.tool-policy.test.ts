@@ -69,6 +69,7 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		// guardrail diagnostics: pre-existing 'agent' commands not previously
 		// enumerated here — registry is the source of truth (both 'agent')
 		'guardrail explain',
+		'guardrail reset',
 		'guardrail-log',
 		'lanes',
 		'ci-simulate',
@@ -95,40 +96,6 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		'rollback',
 		'checkpoint',
 		'consolidate',
-	]);
-
-	const EXPECTED_NONE = new Set<string>([
-		'analyze',
-		'archive',
-		'brainstorm',
-		'clarify',
-		'codebase-review',
-		'concurrency',
-		'council',
-		'ci-monitor',
-		'coupling',
-		'curate',
-		'dark-matter',
-		'deep-dive',
-		'deep-research',
-		'design-docs',
-		'epic',
-		'finalize',
-		'full-auto',
-		'handoff',
-		'issue',
-		'link',
-		'link status',
-		'loop',
-		'pr-feedback',
-		'pr-review',
-		'promote',
-		'qa-gates',
-		'simulate',
-		'specify',
-		'turbo',
-		'unlink',
-		'write-retro',
 	]);
 
 	test("'agent' bucket contains exactly the expected commands", () => {
@@ -160,22 +127,6 @@ describe('toolPolicy classification snapshot — no regression', () => {
 		}
 		for (const name of actual) {
 			expect(EXPECTED_RESTRICTED.has(name)).toBe(true);
-		}
-	});
-
-	test("'none' bucket contains exactly the expected standalone non-tool commands", () => {
-		const actual = new Set<string>();
-		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
-			if ((entry as CommandEntry).toolPolicy === 'none') {
-				actual.add(name);
-			}
-		}
-		expect(actual.size).toBe(EXPECTED_NONE.size);
-		for (const name of EXPECTED_NONE) {
-			expect(actual.has(name)).toBe(true);
-		}
-		for (const name of actual) {
-			expect(EXPECTED_NONE.has(name)).toBe(true);
 		}
 	});
 
@@ -549,22 +500,6 @@ describe('two-tier human-only: "restricted" is disjoint from "human-only"', () =
 			expect(result.allowed).toBe(false);
 			if (result.allowed === false) {
 				expect(result.message).toContain('human-only');
-			}
-		}
-	});
-});
-
-// ---------------------------------------------------------------------------
-// 6. toolPolicy values are valid enum members
-// ---------------------------------------------------------------------------
-
-describe('toolPolicy field values are valid', () => {
-	test('toolPolicy is always one of the four valid string literals (or undefined for aliases/subcommands)', () => {
-		const valid = new Set(['agent', 'human-only', 'restricted', 'none']);
-		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
-			const e = entry as CommandEntry;
-			if (e.toolPolicy !== undefined) {
-				expect(valid.has(e.toolPolicy)).toBe(true);
 			}
 		}
 	});

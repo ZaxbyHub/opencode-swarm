@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { handleBenchmarkCommand } from '../../../src/commands/benchmark';
@@ -32,15 +32,108 @@ function writeCostTelemetry(costUsd: number): void {
 		path.join(testDir, '.swarm', 'telemetry.jsonl'),
 		JSON.stringify({
 			event: 'delegation_end',
+			record_id: 'record-11-1',
+			version: 1,
+			identity_fingerprint: 'a'.repeat(32),
 			agentName: 'coder',
 			taskId: '11.1',
 			cost_usd: costUsd,
 			cost_source: 'reported',
+			cost_evidence: [
+				{
+					kind: 'provider_reported',
+					amount_usd: costUsd,
+					currency: 'USD',
+					source_path: 'assistant.cost',
+					reason: 'authoritative',
+					usage: {
+						tokens_input: 0,
+						tokens_output: 0,
+						tokens_reasoning: 0,
+						tokens_cache: 0,
+					},
+				},
+			],
 		}),
 	);
 }
 
 describe('benchmark cost threshold', () => {
+	it('marks the monetary gate inconclusive when delegation cost is unavailable', async () => {
+		writeFileSync(
+			path.join(testDir, '.swarm', 'telemetry.jsonl'),
+			JSON.stringify({
+				event: 'delegation_end',
+				agentName: 'coder',
+				taskId: '11.0',
+				cost_usd: null,
+				cost_source: 'unavailable',
+			}),
+		);
+
+		const result = await handleBenchmarkCommand(testDir, [
+			'--ci-gate',
+			'--max-cost-usd',
+			'0',
+		]);
+		const jsonMatch = result.match(
+			/\[BENCHMARK_JSON\]\n([\s\S]*?)\n\[\/BENCHMARK_JSON\]/,
+		);
+		const parsed = JSON.parse(jsonMatch![1]);
+		const costGate = parsed.ci_gate.checks.find(
+			(check: { name: string }) => check.name === 'Total cost',
+		);
+
+		expect(result).toContain('Total cost: inconclusive');
+		expect(costGate.passed).toBe(false);
+		expect(costGate.evidence_status).toBe('inconclusive');
+		expect(costGate.reason).toBe('budgetInconclusive');
+	});
+
+	it('marks the monetary gate inconclusive after a durable join miss', async () => {
+		writeCostTelemetry(0.25);
+		writeFileSync(
+			path.join(testDir, '.swarm', 'telemetry.jsonl'),
+			`${readFileSync(path.join(testDir, '.swarm', 'telemetry.jsonl'), 'utf8')}\n${JSON.stringify({ event: 'delegation_cost_join', reason: 'join_miss' })}`,
+		);
+		const result = await handleBenchmarkCommand(testDir, [
+			'--ci-gate',
+			'--max-cost-usd',
+			'1',
+		]);
+		expect(result).toContain('Total cost: inconclusive');
+	});
+
+	it('uses authoritative modern evidence instead of a contradictory scalar', async () => {
+		writeCostTelemetry(5);
+		const telemetryPath = path.join(testDir, '.swarm', 'telemetry.jsonl');
+		const row = JSON.parse(readFileSync(telemetryPath, 'utf8'));
+		row.cost_usd = 0;
+		row.tokens_input = 0;
+		row.cost_evidence[0].usage = {
+			tokens_input: 1_000_000,
+			tokens_output: 3,
+			tokens_reasoning: 4,
+			tokens_cache: 5,
+		};
+		writeFileSync(telemetryPath, JSON.stringify(row));
+
+		const result = await handleBenchmarkCommand(testDir, [
+			'--ci-gate',
+			'--max-cost-usd',
+			'1',
+		]);
+		const jsonMatch = result.match(
+			/\[BENCHMARK_JSON\]\n([\s\S]*?)\n\[\/BENCHMARK_JSON\]/,
+		);
+		const parsed = JSON.parse(jsonMatch![1]);
+		expect(parsed.costs.total_cost_usd).toBe(5);
+		expect(parsed.costs.total_input_tokens).toBe(1_000_000);
+		expect(parsed.costs.total_reasoning_tokens).toBe(4);
+		expect(parsed.costs.total_cache_tokens).toBe(5);
+		expect(result).toContain('Total cost: $5.000000 <= $1.000000');
+	});
+
 	it('passes when cumulative delegation cost is at or below threshold', async () => {
 		writeCostTelemetry(0.25);
 

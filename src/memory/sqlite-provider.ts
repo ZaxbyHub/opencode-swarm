@@ -62,6 +62,13 @@ import {
 	validateOutcomeEvent,
 	validateOutcomeEventForMemory,
 } from './outcome-events';
+import {
+	asStoredProposalValidationError,
+	buildProposalLoadDiagnostics,
+	type ProposalLoadIssue,
+	parseLoadedProposal,
+	proposalLoadIssueFromId,
+} from './proposal-load';
 import type {
 	MemoryCompactOptions,
 	MemoryCompactResult,
@@ -78,6 +85,15 @@ import {
 	classifyStoredFingerprintAlgorithmVersion,
 	computeMemoryCohortFingerprint,
 } from './redaction';
+import {
+	MAX_RELATIONS_PER_MEMORY,
+	RELATED_RECALL_FANOUT,
+} from './relation-constants';
+import {
+	expandRelatedRecallItems,
+	stripDerivedRelations,
+	validateMergeParticipants,
+} from './relations';
 import {
 	normalizeMemoryText,
 	stableScopeKey,
@@ -510,6 +526,24 @@ export const MIGRATIONS: Migration[] = [
 			ALTER TABLE memory_events ADD COLUMN prev_hash TEXT;
 		`,
 	},
+	{
+		version: 14,
+		name: 'create_memory_relations',
+		sql: `
+			CREATE TABLE IF NOT EXISTS memory_relations (
+				source_id TEXT NOT NULL,
+				target_id TEXT NOT NULL,
+				proposal_id TEXT NOT NULL,
+				created_at TEXT NOT NULL,
+				PRIMARY KEY (source_id, target_id),
+				FOREIGN KEY (source_id) REFERENCES memory_items(id) ON DELETE CASCADE,
+				FOREIGN KEY (target_id) REFERENCES memory_items(id) ON DELETE CASCADE,
+				FOREIGN KEY (proposal_id) REFERENCES memory_proposals(id)
+			);
+			CREATE INDEX IF NOT EXISTS idx_memory_relations_source
+				ON memory_relations(source_id, target_id);
+		`,
+	},
 ];
 
 /** #1466: name of the migration that introduces memory_events.prev_hash. */
@@ -816,6 +850,18 @@ export class SQLiteMemoryProvider
 			await this.migrateLegacyJsonlIfNeeded();
 			const memoryLoad = this.loadMemories();
 			const proposalLoad = this.loadProposals();
+			// Replay is intentionally idempotent self-healing: rebuild
+			// `memory_relations` from the canonical proposal rows on every fresh open.
+			// `writeProposal` revalidates merge participants and skips invalid stored
+			// merges, so replay/import fail closed without deleting proposal rows.
+			for (const proposal of proposalLoad.records) {
+				if (proposal.operation === 'merge' && proposal.status === 'applied') {
+					this.writeProposal(proposal, {
+						records: memoryLoad.records,
+						proposals: proposalLoad.records,
+					});
+				}
+			}
 			this.memories = new Map(
 				memoryLoad.records.map((record) => [record.id, record]),
 			);
@@ -831,11 +877,23 @@ export class SQLiteMemoryProvider
 				);
 			}
 			if (proposalLoad.invalidCount > 0) {
-				await this.event(
-					'invalid_load',
-					'memory_proposals',
-					`${proposalLoad.invalidCount} invalid SQLite proposal row(s) skipped`,
-				);
+				try {
+					this.insertEvent(
+						'invalid_load',
+						'memory_proposals',
+						`${proposalLoad.invalidCount} invalid SQLite proposal row(s) skipped`,
+						JSON.stringify(
+							buildProposalLoadDiagnostics(proposalLoad.invalidRows),
+						),
+					);
+				} catch (error) {
+					warn(
+						'[memory] failed to persist invalid SQLite proposal load event',
+						{
+							reason: error instanceof Error ? error.message : String(error),
+						},
+					);
+				}
 			}
 		} catch (err) {
 			try {
@@ -879,9 +937,10 @@ export class SQLiteMemoryProvider
 			// source_task_id/agent_role to the ALTER TABLE defaults.
 			// mergeProvenanceColumns only fills fields the record LACKS, so a
 			// caller-provided (gateway-stamped) value still wins.
+			const storedRecord = stripDerivedRelations(record);
 			const merged = existingRow
-				? mergeProvenanceColumns(record, existingRow)
-				: record;
+				? mergeProvenanceColumns(storedRecord, existingRow)
+				: storedRecord;
 			next = validateMemoryRecordRules(
 				{
 					...merged,
@@ -947,7 +1006,7 @@ export class SQLiteMemoryProvider
 		await this.initialize();
 		const record = this.readMemoryById(id);
 		if (record) this.memories.set(id, record);
-		return record;
+		return record ? this.projectRelationsFromStorage([record])[0] : null;
 	}
 
 	async appendOutcome(
@@ -1129,17 +1188,16 @@ export class SQLiteMemoryProvider
 				reranked,
 				request.maxItems,
 			);
+			const expanded = this.expandRelated(disabledPathSliced, request);
 			return {
-				items: disabledPathSliced,
+				items: expanded,
 				diagnostics: {
 					...result.diagnostics,
 					// Fix 3: derive exploredCount from what actually survived
 					// slicing so the count always matches an item present in the
 					// returned bundle.
-					exploredCount: disabledPathSliced.some((item) => item.explored)
-						? 1
-						: 0,
-					returnedCount: disabledPathSliced.length,
+					exploredCount: expanded.some((item) => item.explored) ? 1 : 0,
+					returnedCount: expanded.length,
 				},
 			};
 		}
@@ -1209,16 +1267,15 @@ export class SQLiteMemoryProvider
 				lexicalReranked,
 				request.maxItems,
 			);
+			const expanded = this.expandRelated(denseFailedSliced, request);
 			return {
-				items: denseFailedSliced,
+				items: expanded,
 				diagnostics: {
 					...lexicalResult.diagnostics,
 					// Fix 3: derive exploredCount from what actually survived
 					// slicing.
-					exploredCount: denseFailedSliced.some((item) => item.explored)
-						? 1
-						: 0,
-					returnedCount: denseFailedSliced.length,
+					exploredCount: expanded.some((item) => item.explored) ? 1 : 0,
+					returnedCount: expanded.length,
 				},
 			};
 		}
@@ -1344,8 +1401,9 @@ export class SQLiteMemoryProvider
 			rerankedItems,
 			request.maxItems,
 		);
+		const expanded = this.expandRelated(fusionSliced, request);
 		return {
-			items: fusionSliced,
+			items: expanded,
 			diagnostics: {
 				...lexicalResult.diagnostics,
 				// Fix 3: derive exploredCount from what actually survived fusion
@@ -1354,11 +1412,39 @@ export class SQLiteMemoryProvider
 				// explored item on its own normalised-score scale, so
 				// `lexicalResult.diagnostics.exploredCount` alone is not a
 				// reliable signal of what is actually present here.
-				exploredCount: fusionSliced.some((item) => item.explored) ? 1 : 0,
-				returnedCount: fusionSliced.length,
+				exploredCount: expanded.some((item) => item.explored) ? 1 : 0,
+				returnedCount: expanded.length,
 				fusionActive: true,
 			},
 		};
+	}
+
+	private expandRelated(
+		items: readonly RecallResultItem[],
+		request: RecallRequest,
+	): RecallResultItem[] {
+		const sources = this.projectRelationsFromStorage(
+			items.map((item) => item.record),
+		);
+		const sourceById = new Map(sources.map((record) => [record.id, record]));
+		const relatedRecords: MemoryRecord[] = [];
+		for (const source of sources) {
+			for (const relation of (source.relations ?? []).slice(
+				0,
+				RELATED_RECALL_FANOUT,
+			)) {
+				const record = this.readMemoryById(relation.memoryId);
+				if (record) relatedRecords.push(record);
+			}
+		}
+		return expandRelatedRecallItems(
+			items.map((item) => ({
+				...item,
+				record: sourceById.get(item.record.id) ?? item.record,
+			})),
+			[...sources, ...relatedRecords],
+			request,
+		);
 	}
 
 	async recordRecallUsage(event: MemoryRecallUsageEvent): Promise<void> {
@@ -1627,7 +1713,7 @@ export class SQLiteMemoryProvider
 			});
 		}
 
-		return records;
+		return this.projectRelationsFromStorage(records);
 	}
 
 	async createProposal(proposal: MemoryProposal): Promise<MemoryProposal> {
@@ -1648,7 +1734,7 @@ export class SQLiteMemoryProvider
 		filter: { status?: MemoryProposal['status']; limit?: number } = {},
 	): Promise<MemoryProposal[]> {
 		await this.initialize();
-		let proposals = Array.from(this.proposals.values());
+		let proposals = this.refreshProposalsFromStorage();
 		if (filter.status) {
 			proposals = proposals.filter(
 				(proposal) => proposal.status === filter.status,
@@ -1893,7 +1979,8 @@ export class SQLiteMemoryProvider
 		);
 		const enriched = memories.map((memory) => {
 			const row = provenanceById.get(memory.id);
-			return row ? mergeProvenanceColumns(memory, row) : memory;
+			const stored = stripDerivedRelations(memory);
+			return row ? mergeProvenanceColumns(stored, row) : stored;
 		});
 		const proposals = await this.listProposals();
 		const outcomeEvents = this.readOutcomeEvents();
@@ -2603,6 +2690,7 @@ export class SQLiteMemoryProvider
 	private loadProposals(): {
 		records: MemoryProposal[];
 		invalidCount: number;
+		invalidRows: ProposalLoadIssue[];
 	} {
 		const rows = this.requireDb()
 			.query<ProposalRow, []>(
@@ -2610,21 +2698,57 @@ export class SQLiteMemoryProvider
 			)
 			.all();
 		const records: MemoryProposal[] = [];
+		const invalidRows: ProposalLoadIssue[] = [];
 		let invalidCount = 0;
 		for (const row of rows) {
 			try {
-				const proposal = validateMemoryProposal(JSON.parse(row.proposal_json));
-				if (proposal.proposedRecord) {
-					validateMemoryRecordRules(proposal.proposedRecord, {
-						rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
-					});
-				}
+				const proposal = parseLoadedProposal(
+					JSON.parse(row.proposal_json),
+					this.config.redaction.rejectDurableSecrets,
+				);
 				records.push(proposal);
-			} catch {
+			} catch (error) {
 				invalidCount++;
+				invalidRows.push(proposalLoadIssueFromId(row.id, error));
 			}
 		}
-		return { records, invalidCount };
+		return { records, invalidCount, invalidRows };
+	}
+
+	private refreshProposalsFromStorage(): MemoryProposal[] {
+		const records = this.loadProposals().records;
+		this.proposals.clear();
+		for (const proposal of records) this.proposals.set(proposal.id, proposal);
+		return records;
+	}
+
+	private projectRelationsFromStorage(
+		records: readonly MemoryRecord[],
+	): MemoryRecord[] {
+		if (records.length === 0) return [];
+		// Do not add this read to bun:sqlite's small per-Database query cache. Once
+		// that cache evicts a compiled statement, Bun can retain its Windows file
+		// handle until GC even after db.close() (see backfillProvenanceColumns).
+		// prepare()+finalize() gives this bounded projection an explicit lifetime.
+		const query = this.requireDb().prepare<
+			{ target_id: string },
+			[string, number]
+		>(
+			' SELECT target_id FROM memory_relations WHERE source_id = ? ORDER BY target_id ASC LIMIT ?',
+		);
+		try {
+			return records.map(({ relations: _derived, ...record }) => {
+				const relations = query
+					.all(record.id, MAX_RELATIONS_PER_MEMORY)
+					.map((row) => ({
+						memoryId: row.target_id,
+						type: 'merged_with' as const,
+					}));
+				return relations.length ? { ...record, relations } : record;
+			});
+		} finally {
+			query.finalize();
+		}
 	}
 
 	private writeMemory(record: MemoryRecord): void {
@@ -2984,7 +3108,13 @@ export class SQLiteMemoryProvider
 		}
 	}
 
-	private writeProposal(proposal: MemoryProposal): void {
+	private writeProposal(
+		proposal: MemoryProposal,
+		validationContext?: {
+			records: readonly MemoryRecord[];
+			proposals: readonly MemoryProposal[];
+		},
+	): void {
 		this.requireDb().run(
 			`INSERT OR REPLACE INTO memory_proposals (
 				id,
@@ -2999,6 +3129,58 @@ export class SQLiteMemoryProvider
 				JSON.stringify(proposal),
 			],
 		);
+		if (proposal.operation === 'merge' && proposal.status === 'applied') {
+			this.requireDb().run(
+				'DELETE FROM memory_relations WHERE proposal_id = ?',
+				[proposal.id],
+			);
+			let ids: string[];
+			try {
+				ids = validateMergeParticipants(
+					proposal.relatedMemoryIds ?? [],
+					validationContext?.records ?? this.loadMemories().records,
+					validationContext?.proposals ?? this.loadProposals().records,
+					proposal.reviewedAt ? new Date(proposal.reviewedAt) : new Date(),
+				);
+			} catch (error) {
+				warn('Skipping invalid applied merge during relation materialization', {
+					proposalId: proposal.id,
+					reason: error instanceof Error ? error.message : String(error),
+				});
+				return;
+			}
+			const existingIds = new Set(
+				ids.filter((id) =>
+					Boolean(
+						this.requireDb()
+							.query<{ id: string }, [string]>(
+								'SELECT id FROM memory_items WHERE id = ? LIMIT 1',
+							)
+							.get(id),
+					),
+				),
+			);
+			for (const sourceId of ids) {
+				for (const targetId of ids) {
+					if (
+						sourceId === targetId ||
+						!existingIds.has(sourceId) ||
+						!existingIds.has(targetId)
+					) {
+						continue;
+					}
+					this.requireDb().run(
+						'INSERT OR IGNORE INTO memory_relations (source_id, target_id, proposal_id, created_at) VALUES (?, ?, ?, ?)',
+						[
+							sourceId,
+							targetId,
+							proposal.id,
+							proposal.reviewedAt ?? proposal.createdAt,
+						],
+					);
+				}
+			}
+		}
 	}
 
 	private applyDecisionToStorage(
@@ -3079,6 +3261,18 @@ export class SQLiteMemoryProvider
 			oldMemoryId = oldMemory.id;
 			replacementMemoryId = replacement.id;
 			memoryId = replacement.id;
+		} else if (decision.action === 'merge') {
+			const currentMemories = this.loadMemories().records;
+			const currentProposals = this.loadProposals().records;
+			decision = {
+				...decision,
+				relatedMemoryIds: validateMergeParticipants(
+					decision.relatedMemoryIds,
+					currentMemories,
+					currentProposals,
+					new Date(appliedAt),
+				),
+			};
 		}
 
 		const proposalStatus =
@@ -3093,6 +3287,8 @@ export class SQLiteMemoryProvider
 				targetMemoryId,
 				oldMemoryId,
 				replacementMemoryId,
+				relatedMemoryIds:
+					decision.action === 'merge' ? decision.relatedMemoryIds : undefined,
 			},
 		);
 		const change: Omit<AppliedMemoryChange, 'eventId'> = {
@@ -3104,6 +3300,8 @@ export class SQLiteMemoryProvider
 			targetMemoryId,
 			oldMemoryId,
 			replacementMemoryId,
+			relatedMemoryIds:
+				decision.action === 'merge' ? decision.relatedMemoryIds : undefined,
 			reason: curatorDecisionReason(decision),
 		};
 		return {
@@ -3123,14 +3321,17 @@ export class SQLiteMemoryProvider
 		if (!row) {
 			throw new MemoryValidationError('memory proposal was not found');
 		}
-		const proposal = validateMemoryProposal(JSON.parse(row.proposal_json));
+		let proposal: MemoryProposal;
+		try {
+			proposal = parseLoadedProposal(
+				JSON.parse(row.proposal_json),
+				this.config.redaction.rejectDurableSecrets,
+			);
+		} catch (error) {
+			throw asStoredProposalValidationError(row.id, error);
+		}
 		if (proposal.status !== 'pending') {
 			throw new MemoryValidationError('memory proposal is not pending');
-		}
-		if (proposal.proposedRecord) {
-			validateMemoryRecordRules(proposal.proposedRecord, {
-				rejectDurableSecrets: this.config.redaction.rejectDurableSecrets,
-			});
 		}
 		return proposal;
 	}
@@ -3225,7 +3426,9 @@ export class SQLiteMemoryProvider
 				(rawRecord.outcomes?.length ?? 0) > 0
 					? ensureOutcomeGeneration(rawRecord)
 					: rawRecord;
-			this.writeMemory(stripMaterializedOutcomes(record));
+			this.writeMemory(
+				stripDerivedRelations(stripMaterializedOutcomes(record)),
+			);
 			if (typeof record.metadata.outcomeGeneration === 'string') {
 				try {
 					materializedRows.push({

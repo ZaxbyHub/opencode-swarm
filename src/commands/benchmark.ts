@@ -288,6 +288,8 @@ export async function handleBenchmarkCommand(
 					threshold: number;
 					operator: string;
 					passed: boolean;
+					evidence_status?: 'complete' | 'inconclusive';
+					reason?: 'budgetInconclusive' | 'thresholdExceeded';
 				}[];
 		  }
 		| undefined;
@@ -312,7 +314,7 @@ export async function handleBenchmarkCommand(
 		const duplicationRatio = qualityMetrics?.duplicationRatio ?? 0;
 		const testToCodeRatio = qualityMetrics?.testToCodeRatio ?? 0;
 
-		const checks = [
+		const checks: NonNullable<typeof ciGate>['checks'] = [
 			{
 				name: 'Review pass rate',
 				value: quality?.reviewPassRate ?? 0,
@@ -376,12 +378,24 @@ export async function handleBenchmarkCommand(
 			},
 		];
 		if (maxCostUsd !== null) {
+			const costEvidenceComplete =
+				costSummary !== undefined &&
+				costSummary.delegations > 0 &&
+				costSummary.evidence_status === 'complete';
 			checks.push({
 				name: 'Total cost',
 				value: costSummary?.total_cost_usd ?? 0,
 				threshold: maxCostUsd,
 				operator: '<=',
-				passed: (costSummary?.total_cost_usd ?? 0) <= maxCostUsd,
+				passed:
+					costEvidenceComplete &&
+					(costSummary?.total_cost_usd ?? 0) <= maxCostUsd,
+				evidence_status: costEvidenceComplete ? 'complete' : 'inconclusive',
+				reason: costEvidenceComplete
+					? (costSummary?.total_cost_usd ?? 0) <= maxCostUsd
+						? undefined
+						: 'thresholdExceeded'
+					: 'budgetInconclusive',
 			});
 		}
 		if (gateAudit && gateAuditSummary) {
@@ -527,6 +541,12 @@ export async function handleBenchmarkCommand(
 	if (ciGate) {
 		lines.push('### CI Gate', ciGate.passed ? '✅ PASSED' : '❌ FAILED');
 		for (const c of ciGate.checks) {
+			if (c.name === 'Total cost' && c.evidence_status === 'inconclusive') {
+				lines.push(
+					`- Total cost: inconclusive (budget evidence unavailable) <= $${c.threshold.toFixed(6)} ❌`,
+				);
+				continue;
+			}
 			// Format value based on check type
 			let valueStr: string;
 			if (c.name === 'Complexity Delta' || c.name === 'Public API Delta') {
@@ -625,6 +645,8 @@ export async function handleBenchmarkCommand(
 				threshold: c.threshold,
 				operator: c.operator as '>=' | '<=',
 				passed: c.passed,
+				...(c.evidence_status ? { evidence_status: c.evidence_status } : {}),
+				...(c.reason ? { reason: c.reason } : {}),
 			})),
 		};
 	lines.push(

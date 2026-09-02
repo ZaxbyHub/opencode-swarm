@@ -12,9 +12,13 @@ import { mkdir } from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfileImport from 'proper-lockfile';
 import { validateSwarmPath } from '../hooks/utils';
+import {
+	queryNodeByFile,
+	resolveGraphStorageMode,
+} from '../tools/repo-graph/indexed-storage';
 import { getGraphNode } from '../tools/repo-graph/query';
 import { getGraphPath } from '../tools/repo-graph/storage';
-import type { RepoGraph } from '../tools/repo-graph/types';
+import type { GraphNode, RepoGraph } from '../tools/repo-graph/types';
 import { atomicWriteSwarmFile } from '../utils/atomic-write';
 import { type MemoryConfig, resolveMemoryConfig } from './config';
 import {
@@ -324,12 +328,19 @@ export const _test_exports = {
 	isReflectionEligible,
 	prepareWriteThroughEntry,
 	sanitizeReflectionRecord,
+	// Exposed so anchor resolution can be exercised directly instead of through
+	// a full regeneration (which needs a live gateway and SQLite store).
+	createAnchorResolver,
 };
 
 export const _internals = {
 	withReflectionLock,
 	serializeDigestArtifacts,
 	boundDigest,
+	// issue #1534 seams (invariant 7: DI over mock.module). Both are consulted
+	// only when the bounded JSON graph could not be loaded at all.
+	resolveGraphStorageMode,
+	queryNodeByFile,
 };
 
 function assertBoundedMemoryStore(
@@ -394,11 +405,37 @@ function loadBoundedGraph(directory: string): RepoGraph | null {
 	}
 }
 
+/**
+ * Decide, ONCE per regeneration, whether the SQLite index may answer anchor
+ * lookups (issue #1534).
+ *
+ * Only consulted when `loadBoundedGraph` returned null — the >16 MB
+ * `MAX_GRAPH_BYTES` case this feature exists to serve, plus the missing /
+ * unparseable cases, all of which leave `resolveAnchor` with nothing but bare
+ * file existence today. Resolved once because `MAX_ANCHOR_PROBES` is 4000 and
+ * a per-anchor config read would be 4000 reads.
+ *
+ * Fail-closed to `false` on any error: the index is a pure widening and must
+ * never turn a working reflection run into a failed one.
+ */
+function indexedAnchorLookupsEnabled(
+	directory: string,
+	graph: RepoGraph | null,
+): boolean {
+	if (graph !== null) return false;
+	try {
+		return _internals.resolveGraphStorageMode(directory) === 'indexed';
+	} catch {
+		return false;
+	}
+}
+
 function createAnchorResolver(
 	directory: string,
 	graph: RepoGraph | null,
 ): (anchor: MemoryAnchor) => ReflectionAnchorStatus {
 	const cache = new Map<string, ReflectionAnchorStatus>();
+	const indexed = indexedAnchorLookupsEnabled(directory, graph);
 	let probes = 0;
 	return (anchor) => {
 		const key = `${anchor.file}\0${anchor.symbol ?? ''}`;
@@ -409,7 +446,7 @@ function createAnchorResolver(
 			return { alive: true };
 		}
 		probes++;
-		const resolved = resolveAnchor(directory, graph, anchor);
+		const resolved = resolveAnchor(directory, graph, anchor, indexed);
 		cache.set(key, resolved);
 		return resolved;
 	};
@@ -419,8 +456,24 @@ function resolveAnchor(
 	directory: string,
 	graph: RepoGraph | null,
 	anchor: MemoryAnchor,
+	indexed = false,
 ): ReflectionAnchorStatus {
-	const node = graph ? getGraphNode(graph, anchor.file) : undefined;
+	let node: GraphNode | null | undefined = graph
+		? getGraphNode(graph, anchor.file)
+		: undefined;
+	if (!node && indexed) {
+		// PURE WIDENING (issue #1534). Reached only when the JSON graph could
+		// not be loaded, i.e. where the code below would already fall through to
+		// bare file existence. It can therefore only ADD `packageBoundary` to an
+		// anchor that was going to be reported alive anyway; it can never mark
+		// an anchor dead, because a null/throwing lookup leaves the
+		// containedFileExists fallback exactly as it was.
+		try {
+			node = _internals.queryNodeByFile(directory, anchor.file);
+		} catch {
+			node = null;
+		}
+	}
 	if (node) {
 		return {
 			alive: true,

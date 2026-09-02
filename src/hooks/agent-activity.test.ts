@@ -67,7 +67,35 @@ describe('agent-activity hook', () => {
 			successCount: 0,
 			failureCount: 1,
 			totalDuration: expect.any(Number),
+			failureReasons: ['boom'],
 		});
+	});
+
+	// PR #2363 review (FB-005/FB-010): a raw tool `error` can be colored shell
+	// stderr (cargo/npm/tsc/git/pytest) or contain a secret; the stored reason
+	// is later rendered unescaped in three session-reflection.ts surfaces.
+	test('sanitizes control chars/ANSI and redacts secrets in the stored failure reason', async () => {
+		const hooks = createAgentActivityHooks(makeConfig(), tempDir);
+
+		await hooks.toolBefore(
+			{ tool: 'bash', sessionID: 's1', callID: 'c-sanitize' },
+			{ args: {} },
+		);
+		await hooks.toolAfter(
+			{ tool: 'bash', sessionID: 's1', callID: 'c-sanitize' },
+			{
+				output: undefined,
+				error: new Error(
+					'\x1b[31mFAKE\x1b[0m auth failed: authorization=Bearer top-secret-token',
+				),
+			},
+		);
+
+		const reason = swarmState.toolAggregates.get('bash')?.failureReasons?.[0];
+		expect(reason).toBeDefined();
+		expect(reason).not.toMatch(/[\x00-\x1f\x7f]/);
+		expect(reason).toContain('authorization=<redacted>');
+		expect(reason).not.toContain('top-secret-token');
 	});
 
 	test('does NOT count falsy error value (0) as failure', async () => {

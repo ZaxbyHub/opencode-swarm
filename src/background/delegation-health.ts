@@ -20,6 +20,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
+import { observeDelegationLedgerPressure } from '../health/learning-health';
 import { validateSwarmPath } from '../hooks/utils.js';
 
 export const BACKGROUND_DELEGATIONS_HEALTH_FILE =
@@ -85,6 +86,43 @@ export interface DelegationHealthUncertaintySection {
 	repairHint?: string;
 }
 
+/**
+ * One durable operator fact emitted by the shared background maintenance
+ * service (issue #2104): every release, retained ambiguity, lease renewal,
+ * contention, and maintenance failure is recorded here so operators can see
+ * why a coder reservation disappeared or stayed. Bounded ring (latest
+ * MAX_MAINTENANCE_FACTS); an observation copy, never ownership state.
+ */
+export interface DelegationMaintenanceFact {
+	at: number;
+	kind:
+		| 'release'
+		| 'retained-ambiguity'
+		| 'retained-protected-legacy'
+		| 'lease-renewed'
+		| 'maintenance-failure'
+		| 'lock-contention';
+	reservationId?: string;
+	correlationId?: string;
+	generation?: number;
+	reason: string;
+}
+
+export interface DelegationHealthMaintenanceSection {
+	lastRunAt: number;
+	lastOkAt: number | null;
+	lastFailure: { reason: string; at: number } | null;
+	lastContentionAt: number | null;
+	/** Summary counters of the last completed run (not cumulative). */
+	lastSummary: {
+		sweptStale: number;
+		released: number;
+		renewed: number;
+		retained: number;
+	};
+	facts: DelegationMaintenanceFact[];
+}
+
 export interface DelegationLedgerHealth {
 	schemaVersion: 1;
 	updatedAt: number;
@@ -103,6 +141,7 @@ export interface DelegationLedgerHealth {
 		lateTerminals: number;
 		orphanWorktreeOwners: number;
 	};
+	maintenance?: DelegationHealthMaintenanceSection | null;
 }
 
 export const DelegationCheckpointAuditSchema = z
@@ -162,6 +201,51 @@ const UncertaintySectionSchema = z
 	})
 	.strict();
 
+/** Bound for the maintenance facts ring (latest facts kept). */
+export const MAX_MAINTENANCE_FACTS = 20;
+
+export const DelegationMaintenanceFactSchema = z
+	.object({
+		at: z.number().int().nonnegative(),
+		kind: z.enum([
+			'release',
+			'retained-ambiguity',
+			'retained-protected-legacy',
+			'lease-renewed',
+			'maintenance-failure',
+			'lock-contention',
+		]),
+		reservationId: z.string().min(1).max(256).optional(),
+		correlationId: z.string().min(1).max(256).optional(),
+		generation: z.number().int().positive().optional(),
+		reason: z.string().min(1).max(2_000),
+	})
+	.strict();
+
+const MaintenanceSectionSchema = z
+	.object({
+		lastRunAt: z.number().int().nonnegative(),
+		lastOkAt: z.number().int().nonnegative().nullable(),
+		lastFailure: z
+			.object({
+				reason: z.string().min(1).max(2_000),
+				at: z.number().int().nonnegative(),
+			})
+			.strict()
+			.nullable(),
+		lastContentionAt: z.number().int().nonnegative().nullable(),
+		lastSummary: z
+			.object({
+				sweptStale: z.number().int().nonnegative(),
+				released: z.number().int().nonnegative(),
+				renewed: z.number().int().nonnegative(),
+				retained: z.number().int().nonnegative(),
+			})
+			.strict(),
+		facts: z.array(DelegationMaintenanceFactSchema).max(MAX_MAINTENANCE_FACTS),
+	})
+	.strict();
+
 export const DelegationLedgerHealthSchema = z
 	.object({
 		schemaVersion: z.literal(1),
@@ -185,6 +269,7 @@ export const DelegationLedgerHealthSchema = z
 				orphanWorktreeOwners: z.number().int().nonnegative(),
 			})
 			.strict(),
+		maintenance: MaintenanceSectionSchema.nullable().optional(),
 	})
 	.strict();
 
@@ -253,6 +338,7 @@ export function writeDelegationHealthArtifact(
 		lastUncertainty?: DelegationLedgerHealth['lastUncertainty'] | null;
 		counts?: DelegationLedgerHealth['counts'];
 		uncertainty?: DelegationHealthUncertaintySection;
+		maintenance?: DelegationLedgerHealth['maintenance'];
 	},
 ): DelegationLedgerHealth | null {
 	const existing = readDelegationHealthArtifact(directory);
@@ -276,6 +362,7 @@ export function writeDelegationHealthArtifact(
 				lateTerminals: 0,
 				orphanWorktreeOwners: 0,
 			},
+			maintenance: null,
 		} satisfies DelegationLedgerHealth);
 	const next: DelegationLedgerHealth = {
 		schemaVersion: 1,
@@ -286,6 +373,10 @@ export function writeDelegationHealthArtifact(
 		recovery: update.recovery === undefined ? base.recovery : update.recovery,
 		lastUncertainty: update.lastUncertainty ?? base.lastUncertainty,
 		counts: update.counts ?? base.counts,
+		maintenance:
+			update.maintenance === undefined
+				? (base.maintenance ?? null)
+				: update.maintenance,
 	};
 	// A fresh uncertainty always becomes the durable lastUncertainty (issue #1659:
 	// the incident must remain visible after the in-memory failure is gone).
@@ -384,6 +475,62 @@ export function recordDelegationRecoveryObservation(
 }
 
 /**
+ * Append a background-maintenance observation (issue #2104): updates the
+ * run/failure/contention stamps and merges the run's operator facts into the
+ * bounded ring. Called by the shared maintenance service after it has
+ * released its locks — the artifact write itself is lock-free and atomic
+ * (observation copy). Best-effort: never throws.
+ */
+export function appendDelegationMaintenanceObservation(
+	directory: string,
+	observation: {
+		at: number;
+		status: 'ok' | 'contention' | 'failure';
+		reason?: string;
+		summary?: {
+			sweptStale: number;
+			released: number;
+			renewed: number;
+			retained: number;
+		};
+		facts: DelegationMaintenanceFact[];
+	},
+): void {
+	try {
+		const existing = readDelegationHealthArtifact(directory);
+		const current = existing?.maintenance ?? null;
+		const section: DelegationHealthMaintenanceSection = {
+			lastRunAt: observation.at,
+			lastOkAt:
+				observation.status === 'ok'
+					? observation.at
+					: (current?.lastOkAt ?? null),
+			lastFailure:
+				observation.status === 'failure' && observation.reason
+					? { reason: observation.reason, at: observation.at }
+					: (current?.lastFailure ?? null),
+			lastContentionAt:
+				observation.status === 'contention'
+					? observation.at
+					: (current?.lastContentionAt ?? null),
+			lastSummary: observation.summary ??
+				current?.lastSummary ?? {
+					sweptStale: 0,
+					released: 0,
+					renewed: 0,
+					retained: 0,
+				},
+			facts: [...(current?.facts ?? []), ...observation.facts].slice(
+				-MAX_MAINTENANCE_FACTS,
+			),
+		};
+		writeDelegationHealthArtifact(directory, { maintenance: section });
+	} catch {
+		// observation only
+	}
+}
+
+/**
  * Fold-free health collection for `/swarm status`: statSync of the ledger and
  * checkpoint, a display-tolerant manifest peek (sequence/tailRolled only), and
  * the durable artifact. Never reads or folds the ledger contents, so the status
@@ -427,6 +574,17 @@ export function collectDelegationLedgerHealth(
 					? 'nominal'
 					: 'ok';
 
+	// Learning-health recovery-ledger pressure feed (#2044): raise near the 4 MiB
+	// recovery bound (pressure ≥ 0.8 or compact-overdue/fail-closed bands),
+	// clear below 0.7 (hysteresis). Recovery-observation uncertainty surfaces as
+	// a closed reason code. Never throws; this collector stays synchronous.
+	observeDelegationLedgerPressure({
+		directory,
+		pressurePct: pressurePct / 100,
+		band,
+		uncertain: artifact?.lastUncertainty != null,
+	});
+
 	return {
 		schemaVersion: 1,
 		updatedAt: artifact?.updatedAt ?? 0,
@@ -440,5 +598,6 @@ export function collectDelegationLedgerHealth(
 			lateTerminals: 0,
 			orphanWorktreeOwners: 0,
 		},
+		maintenance: artifact?.maintenance ?? null,
 	};
 }

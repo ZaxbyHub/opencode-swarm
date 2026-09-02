@@ -395,6 +395,7 @@ export class MacOSSandboxExecutor implements SandboxExecutor {
 		scopePaths: string[],
 		tempDir?: string,
 		envOverrides?: Record<string, string | null>,
+		_policy?: { network_mode?: 'off' | 'on' },
 	): string {
 		// Re-check availability before each wrap
 		if (!this._available) {

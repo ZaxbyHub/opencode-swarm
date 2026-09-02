@@ -6,15 +6,19 @@ import { ensureAgentSession, getAgentSession } from '../../../src/state';
 import { installActiveScopeBinding } from '../../helpers/active-scope-binding';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
+const equivalentMechanism = 'bubblewrap';
+
 const failingExecutor = () => ({
 	isAvailable: () => true,
-	mechanism: 'test-wrapper',
+	mechanism: equivalentMechanism,
 	wrapCommand: () => {
 		throw new Error('wrapper construction failed');
 	},
 	getEnvOverrides: () => ({}),
 });
 const originalGetSandboxExecutor = guardrailsInternals.getSandboxExecutor;
+const originalAssessSandboxEnforcement =
+	guardrailsInternals.assessSandboxEnforcement;
 
 const { createGuardrailsHooks } = await import('../../../src/hooks/guardrails');
 const { resetSwarmState, startAgentSession, swarmState } = await import(
@@ -27,6 +31,15 @@ let cleanup: () => void;
 describe('guardrails sandbox-before circuit — regression: issue #1875', () => {
 	beforeEach(() => {
 		guardrailsInternals.getSandboxExecutor = async () => failingExecutor();
+		guardrailsInternals.assessSandboxEnforcement = async () =>
+			({
+				satisfied: true,
+				capability: {
+					identity: 'linux:bubblewrap:test',
+					mechanism: 'bubblewrap',
+				},
+				cacheKey: 'linux:bubblewrap:test',
+			}) as Awaited<ReturnType<typeof originalAssessSandboxEnforcement>>;
 		resetSwarmState();
 		const created = createSafeTestDir('sandbox-circuit-');
 		directory = created.dir;
@@ -47,6 +60,8 @@ describe('guardrails sandbox-before circuit — regression: issue #1875', () => 
 
 	afterEach(() => {
 		guardrailsInternals.getSandboxExecutor = originalGetSandboxExecutor;
+		guardrailsInternals.assessSandboxEnforcement =
+			originalAssessSandboxEnforcement;
 		resetSwarmState();
 		cleanup();
 	});
@@ -94,7 +109,7 @@ describe('guardrails sandbox-before circuit — regression: issue #1875', () => 
 	it('correlates a wrapped command result back to the sandbox failure category', async () => {
 		guardrailsInternals.getSandboxExecutor = async () => ({
 			isAvailable: () => true,
-			mechanism: 'test-wrapper',
+			mechanism: equivalentMechanism,
 			wrapCommand: () => 'wrapped-command',
 			getEnvOverrides: () => ({}),
 		});
@@ -151,7 +166,7 @@ describe('guardrails sandbox-before circuit — regression: issue #1875', () => 
 	it('leaves unsupported shell args.env untouched because the wrapper owns its environment', async () => {
 		guardrailsInternals.getSandboxExecutor = async () => ({
 			isAvailable: () => true,
-			mechanism: 'test-wrapper',
+			mechanism: equivalentMechanism,
 			wrapCommand: () => 'wrapped-command',
 			getEnvOverrides: () => {
 				throw new Error('unsupported host args.env path must not be queried');

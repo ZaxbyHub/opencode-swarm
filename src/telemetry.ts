@@ -18,6 +18,9 @@ export type TelemetryEvent =
 	| 'agent_activated'
 	| 'delegation_begin'
 	| 'delegation_end'
+	| 'delegation_cost_correction'
+	| 'delegation_cost_binding'
+	| 'delegation_cost_join'
 	| 'task_state_changed'
 	| 'gate_passed'
 	| 'gate_failed'
@@ -26,6 +29,7 @@ export type TelemetryEvent =
 	| 'phase_changed'
 	| 'budget_updated'
 	| 'context_pruned'
+	| 'retrieval_routed'
 	| 'model_fallback'
 	/**
 	 * Issue #2271 bug 4 — a configured agent model id was POSITIVELY confirmed
@@ -104,7 +108,61 @@ export type TelemetryEvent =
 	// quarantine run moves verified stale temp files (close clean stage or
 	// `/swarm config doctor --quarantine-residue`). Counts and registered
 	// grammar ids only — no file names, no paths, no content.
-	| 'residue_health';
+	| 'residue_health'
+	// Context-map telemetry storage health (issue #2037): bounded counts emitted
+	// on compaction and close for the bounded `.swarm/context-telemetry.jsonl`
+	// store — accepted/compacted/retained/dropped/corrupt counts, oldest/newest
+	// timestamps, and byte figures. Counts only; no capsule/query content, no
+	// paths.
+	| 'context_telemetry_health'
+	// Skill-usage health (issue #2038): bounded counts emitted on compaction,
+	// migration, consumption, and pressure events for skill-usage tracking.
+	// Counts only, no per-skill identifiers or filesystem paths — the
+	// adversarial case is thousands of distinct skill IDs, so a per-skill
+	// label would be an unbounded label set.
+	| 'skill_usage_health'
+	// Core event store health (issue #2039): bounded counts emitted on
+	// compaction and close for the bounded `.swarm/events.jsonl` store —
+	// accepted/compacted/retained/dropped/corrupt counts, authority-index
+	// size and eviction counts, oldest/newest timestamps, byte figures.
+	// Counts only; no event content, no paths.
+	| 'core_events_health'
+	// Shell-audit store health (issue #2040): bounded counts emitted on
+	// compaction and close for the bounded `.swarm/session/shell-audit.jsonl`
+	// security-audit store — accepted/compacted/retained/dropped/corrupt
+	// counts, oldest/newest timestamps, byte figures. Counts only; no
+	// commands, no paths, no agents, no session IDs.
+	| 'shell_audit_health'
+	// PRM session-trajectory store health (issue #2041): bounded counts
+	// emitted on compaction, cleanup sweeps, and lock-skipped appends for the
+	// bounded `.swarm/trajectories/` store — retained/dropped/corrupt counts,
+	// lock-skip counts, byte figures. Counts only; no session IDs, no paths,
+	// no trajectory content.
+	| 'trajectory_health'
+	// Learning/operations health alarms (issue #2044): bounded-window alarm
+	// transitions raised/sustained/recovered by the learning-health registry
+	// (`src/observability/learning-health.ts`) for the eight PR-16 alarm
+	// families. Payload is counts, closed-vocabulary enums, millisecond
+	// timestamps, model/provider identity, and 16-hex salted session refs —
+	// no raw session IDs, paths, queries, prompts, or content.
+	| 'learning_health_alarm'
+	// PR-monitor subscription store health (issue #2042): bounded counts
+	// emitted on terminal compaction, legacy migration completion, legacy
+	// archive, and foreign/corrupt checkpoint recovery for the bounded
+	// `.swarm/pr-monitor/` checkpoint store — active/terminal counts,
+	// compaction and corrupt/drop counters, byte figures. Counts only; no
+	// correlationIds, no paths, no repo identities.
+	| 'pr_subscription_health'
+	// Council attempt / accepted-transition observations (issue #2046 item 9):
+	// every durably-appended task/phase/final council audit record and every
+	// accepted-projection move, joined to the lifecycle correlation system via
+	// `hostSessionId`/`taskId`/`phaseId` plus the server-derived round identity
+	// `councilRoundId`. Payloads are identifiers, enums, counts, and hashes
+	// only (privacy class `pseudonymous`); observability is not the
+	// authoritative gate store.
+	| 'council_attempt'
+	| 'council_round_transition'
+	| 'council_attempt_unscoped';
 
 /** Stable classification for how a reviewer-gate decision was established. */
 export type ReviewerGateEvidenceKind =
@@ -358,6 +416,20 @@ export function addTelemetryListener(callback: TelemetryListener): void {
 }
 
 /**
+ * Remove a previously registered telemetry listener (issue #2044).
+ * Currently unused in-tree: the learning-health registry no longer attaches a
+ * listener (its six store feeds call the observer directly), and the heartbeat
+ * teardown splices `_listeners` inline by design. Kept as the public disposer
+ * complement to `addTelemetryListener` — push-only registration with no
+ * removal path was an API gap. Removing a listener that was never registered
+ * is a no-op.
+ */
+export function removeTelemetryListener(callback: TelemetryListener): void {
+	const idx = _listeners.indexOf(callback);
+	if (idx >= 0) _listeners.splice(idx, 1);
+}
+
+/**
  * Rotate telemetry file if it exceeds maxBytes.
  * Renames `telemetry.jsonl` → `telemetry.jsonl.1` and reopens a fresh stream.
  * Errors are silently swallowed.
@@ -473,7 +545,6 @@ export async function flushAndDrainTelemetry(): Promise<void> {
 // ============================================================================
 // Telemetry Convenience Object
 // ============================================================================
-
 export const telemetry = {
 	sessionStarted(sessionId: string, agentName: string): void {
 		_internals.emit('session_started', { sessionId, agentName });
@@ -508,6 +579,7 @@ export const telemetry = {
 			tokens_reasoning: costFields?.tokens_reasoning ?? 0,
 			tokens_cache: costFields?.tokens_cache ?? 0,
 			cost_usd: costFields?.cost_usd ?? null,
+			...costFields,
 			cost_source: costFields?.cost_source ?? 'unavailable',
 			model: costFields?.model,
 			gate: costFields?.gate,
@@ -903,6 +975,213 @@ export const telemetry = {
 	},
 
 	/**
+	 * Context-map telemetry storage health (issue #2037). Emitted after a
+	 * compaction or close cut for the bounded `.swarm/context-telemetry.jsonl`
+	 * store. Bounded payload: accepted/compacted/retained/dropped/corrupt
+	 * counts, oldest/newest timestamps, and byte figures. Counts ONLY — no
+	 * capsule/query content and no filesystem paths, matching the observability
+	 * contract's no-content-in-metrics rule. Enables PR 16 to alarm and PR 20 to
+	 * report without leaking workspace layout or capsule contents.
+	 */
+	contextTelemetryHealth(data: {
+		trigger: 'compaction' | 'close';
+		accepted_count: number;
+		compacted_count: number;
+		retained_count: number;
+		dropped_count: number;
+		corrupt_count: number;
+		oldest_timestamp: string | null;
+		newest_timestamp: string | null;
+		bytes: number;
+		limit_bytes: number;
+	}): void {
+		_internals.emit('context_telemetry_health', data);
+	},
+
+	/**
+	 * Skill-usage health (issue #2038). Emitted on compaction, migration,
+	 * consumption, and pressure events for skill-usage tracking. Bounded
+	 * payload: accepted/compacted/dropped/corrupt/retained counts, retry and
+	 * curator figures, oldest/newest timestamps, and byte figures. Counts
+	 * ONLY — no skill path, no per-skill identifier, no content, matching the
+	 * observability contract's no-content-in-metrics rule. The adversarial
+	 * case is thousands of distinct skill IDs, so a per-skill label would be
+	 * an unbounded label set.
+	 */
+	skillUsageHealth(data: {
+		trigger: 'compaction' | 'migration' | 'consumption' | 'pressure';
+		accepted: number;
+		compacted: number;
+		dropped: number;
+		skills_dropped: number;
+		corrupt: number;
+		pending_retained: number;
+		uncertain_retained: number;
+		uncertain_expired: number;
+		pending_evicted: number;
+		no_source_knowledge: number;
+		no_matching_knowledge: number;
+		bump_retry: number;
+		bump_unrecoverable: number;
+		bump_applied_zero: number;
+		pressure: number;
+		curator_skipped: number;
+		bytes: number;
+		limit_bytes: number;
+		oldest_timestamp: string | null;
+		newest_timestamp: string | null;
+		coverage: boolean;
+	}): void {
+		_internals.emit('skill_usage_health', data);
+	},
+
+	/**
+	 * Core event store health (issue #2039): emitted on compaction and close
+	 * for the bounded `.swarm/events.jsonl` store. Counts ONLY — no event
+	 * content and no filesystem paths, matching the observability contract's
+	 * no-content-in-metrics rule. `authority_index_count` /
+	 * `authority_evicted_count` disclose the authoritative partition's size
+	 * and FIFO-eviction total (eviction is the only reachable
+	 * absent-after-compaction case for authority lookups).
+	 */
+	coreEventsHealth(data: {
+		trigger: 'compaction' | 'close';
+		accepted_count: number;
+		compacted_count: number;
+		retained_count: number;
+		dropped_count: number;
+		corrupt_count: number;
+		authority_index_count: number;
+		authority_evicted_count: number;
+		oldest_timestamp: string | null;
+		newest_timestamp: string | null;
+		bytes: number;
+		limit_bytes: number;
+	}): void {
+		_internals.emit('core_events_health', data);
+	},
+
+	/**
+	 * Shell-audit store health (issue #2040): emitted on compaction and close
+	 * for the bounded `.swarm/session/shell-audit.jsonl` security-audit
+	 * store. Counts ONLY — no command content, no filesystem paths, no agent
+	 * or session identifiers, matching the observability contract's
+	 * no-content-in-metrics rule (issue #2040 requirement 5). `dropped_count`
+	 * discloses allowed-class decisions folded by the age ceiling;
+	 * `compacted_count` budget folds (byte/count caps).
+	 */
+	shellAuditHealth(data: {
+		trigger: 'compaction' | 'close';
+		accepted_count: number;
+		compacted_count: number;
+		retained_count: number;
+		dropped_count: number;
+		corrupt_count: number;
+		oldest_timestamp: string | null;
+		newest_timestamp: string | null;
+		bytes: number;
+		limit_bytes: number;
+	}): void {
+		_internals.emit('shell_audit_health', data);
+	},
+
+	/**
+	 * PRM session-trajectory store health (issue #2041): emitted on
+	 * compaction, cleanup sweeps, and (cooldown-bounded) lock-skipped appends
+	 * for the bounded `.swarm/trajectories/` store. Counts ONLY — no session
+	 * identifiers, no filesystem paths, no trajectory content — matching the
+	 * observability contract's no-content-in-metrics rule.
+	 * `dropped_count` discloses entries folded by compaction (line budget or
+	 * the sovereign byte ceiling) and files removed by cleanup; `skipped_lock_count`
+	 * discloses appends skipped because the per-file cross-process lock stayed
+	 * busy (best-effort store: telemetry loss is preferred over corruption).
+	 */
+	trajectoryHealth(data: {
+		trigger: 'compaction' | 'cleanup' | 'append_skip';
+		retained_count: number;
+		dropped_count: number;
+		corrupt_count: number;
+		skipped_lock_count: number;
+		bytes: number;
+		limit_bytes: number;
+	}): void {
+		_internals.emit('trajectory_health', data);
+	},
+
+	/**
+	 * PR-monitor subscription store health (issue #2042): emitted on terminal
+	 * compaction, legacy migration completion, legacy archive, and
+	 * foreign/corrupt checkpoint recovery for the bounded `.swarm/pr-monitor/`
+	 * checkpoint store. Counts ONLY — no correlationIds, no filesystem paths,
+	 * no repo identities — matching the observability contract's
+	 * no-content-in-metrics rule. `corrupt_count` discloses legacy lines
+	 * skipped by the bounded fold; `dropped_audit_count` discloses audit-tail
+	 * transitions dropped by the high/low-water rewrite.
+	 */
+	prSubscriptionHealth(data: {
+		trigger:
+			| 'compact'
+			| 'migrate-complete'
+			| 'archive'
+			| 'foreign-rebind'
+			| 'corrupt-quarantine';
+		active_count: number;
+		terminal_count: number;
+		compactions: number;
+		corrupt_count: number;
+		dropped_audit_count: number;
+		recovery_resets: number;
+		checkpoint_bytes: number;
+		limit_bytes: number;
+	}): void {
+		_internals.emit('pr_subscription_health', data);
+	},
+
+	/**
+	 * Learning/operations health alarm transition (issue #2044): emitted by the
+	 * learning-health registry (`src/observability/learning-health.ts`) when an
+	 * alarm family raises, re-emits past its cooldown (`sustained`), or
+	 * recovers. Payload is counts, closed-vocabulary enums (`alarm` from the
+	 * eight-family closed set, `transition`, `severity`, `scope_class`),
+	 * millisecond timestamps, model/provider identity, and 16-hex salted
+	 * `session_ref` values — no raw session IDs, paths, queries, prompts, or
+	 * content — matching the observability contract's no-content rule. Live
+	 * readers: the `/swarm status` Learning Health section and the
+	 * `/swarm diagnose` learning-health check.
+	 */
+	learningHealthAlarm(data: {
+		alarm: string;
+		transition: 'raised' | 'sustained' | 'recovered';
+		severity: 'warning' | 'critical';
+		scope_class: 'session' | 'identity' | 'project';
+		session_ref?: string;
+		model?: string;
+		provider?: string;
+		window_ms: number;
+		coverage_facts: number;
+		raise_facts: number;
+		age_ms: number;
+		limit_source?: string;
+		denominator_fallback?: boolean;
+		pressure_pct?: number;
+		band?: string;
+		share_pct?: number;
+		field_count?: number;
+		non_field_count?: number;
+		store?: string;
+		dropped?: number;
+		corrupt?: number;
+		retained?: number;
+		accepted?: number;
+		gap_type?: 'membership_to_terminal' | 'terminal_to_application';
+		role?: string;
+		phase?: number;
+		reason?: string;
+	}): void {
+		_internals.emit('learning_health_alarm', data);
+	},
+
+	/**
 	 * Issue #2063 C2 — the PRM hard-stop DENIAL was actually delivered to the
 	 * agent (thrown by the guardrails `toolBefore` consumer). `prm_hard_stop`
 	 * above records the TRIGGER and is emitted solely by
@@ -921,6 +1200,20 @@ export const telemetry = {
 			level,
 			occurrenceCount,
 		});
+	},
+
+	retrievalRouted(
+		sessionId: string,
+		data: {
+			mode: 'graph' | 'lexical' | 'semantic' | 'security' | 'test' | 'hybrid';
+			graph_hit: boolean;
+			fallback_reason: string | null;
+			token_budget_requested: number;
+			token_budget_used: number;
+			omitted_context_count: number;
+		},
+	): void {
+		_internals.emit('retrieval_routed', { sessionId, ...data });
 	},
 };
 

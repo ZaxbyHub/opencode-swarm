@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
 	existsSync,
+	mkdirSync,
 	mkdtempSync,
 	readFileSync,
 	realpathSync,
@@ -59,6 +60,7 @@ const originalResolveMergeBase = writerInternals.resolveMergeBase;
 
 function tempRoot(): string {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), 'trigger-eval-')));
+	mkdirSync(join(root, '.git'), { recursive: true });
 	tempDirs.push(root);
 	return root;
 }
@@ -100,8 +102,8 @@ async function recordCompletedLane(
 	const correlationId = `${input.batchId}-${input.laneId}-session`;
 	const header =
 		input.mode === 'swarm-pr-review:base'
-			? '[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence'
-			: '[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence';
+			? '[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags'
+			: '[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags';
 	const cleanRows = (input.ownedWorkflowLanes ?? [input.workflowLane])
 		.map(
 			(family) =>
@@ -122,6 +124,7 @@ async function recordCompletedLane(
 		batchId: input.batchId,
 		laneId: input.laneId,
 		mode: input.mode,
+		prReviewLegacyTranscriptCompatibility: true,
 		workflowLane: input.workflowLane,
 		ownedWorkflowLanes: input.ownedWorkflowLanes,
 		workspace: {

@@ -12,7 +12,6 @@ import {
 // Mock console methods BEFORE importing
 const mockConsoleLog = spyOn(console, 'log').mockImplementation(() => {});
 const mockConsoleError = spyOn(console, 'error').mockImplementation(() => {});
-
 // Mock process.argv to prevent default 'install' command
 const originalArgv = process.argv;
 process.argv = ['node', 'cli.js', '--help'];
@@ -343,6 +342,7 @@ describe('run() - CLI entry point', () => {
 		expect(mockHandleDiagnoseCommand).toHaveBeenCalledWith(
 			expect.any(String),
 			[],
+			'',
 		);
 		expect(mockConsoleLog).toHaveBeenCalledWith('diagnose mock output');
 	});

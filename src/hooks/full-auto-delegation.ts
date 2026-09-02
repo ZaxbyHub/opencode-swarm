@@ -22,7 +22,6 @@
  *     event and increment a per-session counter so the cadence/escalation
  *     layer can react.
  */
-import * as fs from 'node:fs';
 import type { PluginConfig } from '../config';
 import { ALL_AGENT_NAMES } from '../config/constants';
 import {
@@ -30,17 +29,22 @@ import {
 	isKnownCanonicalRole,
 	resolveGeneratedAgentRole,
 } from '../config/schema';
+import { appendCoreEventSync } from '../events/core-events.js';
 import { isProtectedPath } from '../full-auto/policy';
+import {
+	clearFullAutoSevereCorrelation,
+	extractFullAutoSevereEnvelope,
+	registerFullAutoSevereCorrelation,
+	validateFullAutoSevereEnvelope,
+} from '../full-auto/severe-result';
 import {
 	incrementFullAutoCounter,
 	loadFullAutoRunState,
 	saveFullAutoRunState,
 } from '../full-auto/state';
-import { tryAcquireLock } from '../parallel/file-locks.js';
 import { swarmState } from '../state';
 import * as logger from '../utils/logger';
 import { normalizeToolName } from './normalize-tool-name';
-import { validateSwarmPath } from './utils';
 
 /**
  * The plugin recognises canonical agent ROLES, not full generated agent
@@ -100,15 +104,21 @@ const RETURN_WARNING_PATTERNS: Array<{
 	},
 ];
 
-// Severity classification — these categories are severe and pause Full-Auto.
-const SEVERE_CATEGORIES = new Set<string>([
-	'external_instructions',
-	'out_of_scope_files',
-]);
-
 const CANONICAL_ROLES_LOWER = new Set<string>(
 	(ALL_AGENT_NAMES as readonly string[]).map((s) => s.toLowerCase()),
 );
+
+const PROTECTED_PATH_SCAN =
+	/(?:^|\s)([A-Za-z0-9._/-]+(?:\.[A-Za-z0-9_-]+|\/(?:CODEOWNERS|package\.json|bun\.lock|CHANGELOG\.md)))/g;
+const BARE_PROTECTED_PATH_SCAN = [
+	'.git',
+	'.opencode',
+	'.swarm',
+	'.github/workflows',
+	'docs/releases',
+	'src/security',
+	'src/hooks/guardrails',
+].map((entry) => entry.toLowerCase());
 
 function isExactCanonicalRole(name: string): boolean {
 	return CANONICAL_ROLES_LOWER.has(name.toLowerCase());
@@ -135,6 +145,63 @@ function extractText(value: unknown): string {
 	return '';
 }
 
+function collectStrings(
+	value: unknown,
+	out: string[],
+	seen = new WeakSet<object>(),
+): boolean {
+	if (typeof value === 'string') {
+		if (out.length >= 64) return false;
+		out.push(value);
+		return true;
+	}
+	if (!value || typeof value !== 'object') return true;
+	if (seen.has(value)) return true;
+	seen.add(value);
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			if (!collectStrings(item, out, seen)) return false;
+		}
+		return true;
+	}
+	for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+		if (!collectStrings(key, out, seen)) return false;
+		if (!collectStrings(item, out, seen)) return false;
+	}
+	return true;
+}
+
+function scanForProtectedPaths(
+	args: unknown,
+	config: PluginConfig['full_auto'],
+): { complete: boolean; hits: string[] } {
+	const strings: string[] = [];
+	const complete = collectStrings(args, strings);
+	const candidatePaths = new Set<string>();
+	for (const text of strings) {
+		for (const match of text.matchAll(PROTECTED_PATH_SCAN)) {
+			const candidate = match[1]?.trim();
+			if (candidate) candidatePaths.add(candidate);
+		}
+		const normalized = text.replace(/\\/g, '/').toLowerCase();
+		for (const candidate of BARE_PROTECTED_PATH_SCAN) {
+			const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+			const match = normalized.match(
+				new RegExp(
+					`(?:^|[^A-Za-z0-9._/-])(${escaped})(?=$|[^A-Za-z0-9._/-])`,
+					'i',
+				),
+			);
+			if (match?.[1]) candidatePaths.add(match[1]);
+		}
+	}
+	const hits: string[] = [];
+	for (const candidate of candidatePaths) {
+		if (isProtectedPath(candidate, config)) hits.push(candidate);
+	}
+	return { complete, hits };
+}
+
 function detectReturnWarnings(text: string): Array<{
 	category: string;
 	matched: string;
@@ -157,39 +224,13 @@ async function writeDelegationEvent(
 	directory: string,
 	event: Record<string, unknown>,
 ): Promise<void> {
-	const lockTaskId = `full-auto-delegation-${Date.now()}`;
-	let lockResult: Awaited<ReturnType<typeof tryAcquireLock>> | undefined;
 	try {
-		lockResult = await tryAcquireLock(
-			directory,
-			'events.jsonl',
-			'full-auto-delegation',
-			lockTaskId,
-		);
-	} catch (error) {
-		logger.warn(
-			`[full-auto/delegation] failed to acquire lock: ${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
-	try {
-		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		fs.appendFileSync(eventsPath, `${JSON.stringify(event)}\n`, 'utf-8');
+		appendCoreEventSync(directory, event);
 	} catch (error) {
 		logger.error(
 			`[full-auto/delegation] failed to write event: ${error instanceof Error ? error.message : String(error)}`,
 		);
 		throw error;
-	} finally {
-		if (lockResult?.acquired && lockResult.lock._release) {
-			try {
-				await lockResult.lock._release();
-			} catch (releaseError) {
-				logger.error(
-					'[full-auto/delegation] lock release failed:',
-					releaseError,
-				);
-			}
-		}
 	}
 }
 
@@ -286,11 +327,21 @@ export function createFullAutoDelegationHook(
 					);
 				}
 			}
-			const promptText =
-				(typeof args.prompt === 'string' && args.prompt) ||
-				(typeof args.message === 'string' && args.message) ||
-				(typeof args.task === 'string' && args.task) ||
-				'';
+			if (input.callID && subagentRaw) {
+				const { instruction } = registerFullAutoSevereCorrelation({
+					sessionID,
+					callID: input.callID,
+					generation: runState.runGeneration ?? 0,
+					subagent: subagentRaw,
+				});
+				if (typeof args.prompt === 'string') {
+					args.prompt = `${args.prompt}\n\n${instruction}`;
+				} else if (typeof args.message === 'string') {
+					args.message = `${args.message}\n\n${instruction}`;
+				} else if (typeof args.task === 'string') {
+					args.task = `${args.task}\n\n${instruction}`;
+				}
+			}
 
 			incrementFullAutoCounter(directory, sessionID, 'coderDelegations');
 
@@ -311,32 +362,41 @@ export function createFullAutoDelegationHook(
 			// The shared delegation gate performs the identity-aware coder scope
 			// preflight for standard and prefixed Full-Auto agents alike.
 
-			// Outbound check 3: protected paths in delegation prompt.
-			if (promptText && typeof promptText === 'string') {
-				// Heuristic: look for explicit file paths in the prompt and check
-				// whether any of them are protected.
-				const candidatePaths = promptText.match(
-					/\b[A-Za-z0-9._/-]+\.(?:ts|tsx|js|jsx|json|md|yml|yaml|toml|lock|sh|env)\b/g,
-				);
-				if (candidatePaths) {
-					for (const p of candidatePaths) {
-						if (isProtectedPath(p, config.full_auto)) {
-							// Record advisory, then return — let the permission hook's
-							// escalate_critic path handle the actual decision when the
-							// subagent's first write fires.
-							await writeDelegationEvent(directory, {
-								type: 'full_auto_subagent_warning',
-								timestamp: new Date().toISOString(),
-								session_id: sessionID,
-								// Log both the original generated name (dispatch identity)
-								// and the canonical role (policy attribution).
-								subagent: subagentRaw,
-								canonical_role: canonicalRole,
-								phase: 'outbound',
-								category: 'protected_path_in_prompt',
-								matched: p,
-							});
-						}
+			// Outbound check 3: coder work may not target centrally protected paths.
+			if (canonicalRole === 'coder') {
+				const protectedPathScan = scanForProtectedPaths(args, config.full_auto);
+				if (!protectedPathScan.complete) {
+					await writeDelegationEvent(directory, {
+						type: 'full_auto_subagent_warning',
+						timestamp: new Date().toISOString(),
+						session_id: sessionID,
+						subagent: subagentRaw,
+						canonical_role: canonicalRole,
+						phase: 'outbound',
+						category: 'protected_path_scan_incomplete',
+						matched: 'scan-budget-exceeded',
+					});
+					throw new Error(
+						'FULL_AUTO_DELEGATION_DENY: coder delegation payload exceeds the protected-path scan budget',
+					);
+				}
+				for (const p of protectedPathScan.hits) {
+					if (isProtectedPath(p, config.full_auto)) {
+						await writeDelegationEvent(directory, {
+							type: 'full_auto_subagent_warning',
+							timestamp: new Date().toISOString(),
+							session_id: sessionID,
+							// Log both the original generated name (dispatch identity)
+							// and the canonical role (policy attribution).
+							subagent: subagentRaw,
+							canonical_role: canonicalRole,
+							phase: 'outbound',
+							category: 'protected_path_in_prompt',
+							matched: p,
+						});
+						throw new Error(
+							`FULL_AUTO_DELEGATION_DENY: coder delegation targets protected path '${p}'`,
+						);
 					}
 				}
 			}
@@ -355,10 +415,24 @@ export function createFullAutoDelegationHook(
 			if (!runState || runState.status !== 'running') return;
 
 			const text = extractText(output.output);
+			const envelope = extractFullAutoSevereEnvelope(text);
 			const warnings = detectReturnWarnings(text);
-			if (warnings.length === 0) return;
-
-			const severe = warnings.some((w) => SEVERE_CATEGORIES.has(w.category));
+			const session = swarmState.agentSessions.get(sessionID);
+			const severeValidation =
+				input.callID && runState
+					? validateFullAutoSevereEnvelope({
+							envelope,
+							sessionID,
+							callID: input.callID,
+							generation: runState.runGeneration ?? 0,
+							declaredScope: session?.declaredCoderScope ?? null,
+							currentTaskID: session?.currentTaskId ?? null,
+							session,
+							projectDirectory: directory,
+						})
+					: { accepted: false, reason: 'missing-call-id' };
+			const severe = severeValidation.accepted;
+			if (warnings.length === 0 && !envelope) return;
 
 			await writeDelegationEvent(directory, {
 				type: 'full_auto_subagent_warning',
@@ -366,6 +440,8 @@ export function createFullAutoDelegationHook(
 				session_id: sessionID,
 				phase: 'return',
 				warnings,
+				envelope_category: envelope?.category,
+				envelope_validation: severeValidation.reason,
 				severe,
 			});
 
@@ -379,13 +455,11 @@ export function createFullAutoDelegationHook(
 				const updated = loadFullAutoRunState(directory, sessionID);
 				if (updated && updated.status === 'running') {
 					updated.status = 'paused';
-					updated.pauseReason = `severe subagent return warning: ${warnings
-						.filter((w) => SEVERE_CATEGORIES.has(w.category))
-						.map((w) => w.category)
-						.join(',')}`;
+					updated.pauseReason = `severe subagent return envelope: ${envelope?.category ?? 'unknown'}`;
 					saveFullAutoRunState(directory, updated);
 				}
 			}
+			if (input.callID) clearFullAutoSevereCorrelation(sessionID, input.callID);
 		},
 	};
 }

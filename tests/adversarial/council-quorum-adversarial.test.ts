@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { startAgentSession } from '../../src/state';
+import { createSafeTestDir } from '../helpers/safe-test-dir';
 
 const writeConfig = (dir: string): void => {
 	mkdirSync(join(dir, '.opencode'), { recursive: true });
@@ -26,7 +26,14 @@ const verdict = (
 
 describe('submit_council_verdicts adversarial quorum checks', () => {
 	test('fails cherry-pick retry that omits previously-required absentees', async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), 'adversarial-council-cherry-'));
+		// createSafeTestDir canonicalizes the path (realpath) and its cleanup
+		// retries EBUSY/EPERM/ENOTEMPTY with bounded backoff — the raw
+		// mkdtempSync + one-shot rmSync previously raced Windows AV-held
+		// handles and flaked attempt 1 on cold windows-latest merge-group
+		// runners (issue #2017/#2477).
+		const { dir: tempDir, cleanup } = createSafeTestDir(
+			'adversarial-council-cherry-',
+		);
 		const sessionID = `adversarial-${Date.now()}`;
 		try {
 			writeConfig(tempDir);
@@ -59,7 +66,7 @@ describe('submit_council_verdicts adversarial quorum checks', () => {
 			expect(parsed.reason).toBe('cherry_pick_detected');
 			expect(parsed.stillMissingMembers).toEqual(['test_engineer', 'explorer']);
 		} finally {
-			rmSync(tempDir, { recursive: true, force: true });
+			cleanup();
 		}
 	});
 });

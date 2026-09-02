@@ -19,6 +19,7 @@ import {
 	SkillImproverConfigSchema,
 	stripKnownSwarmPrefix,
 } from '../config/schema';
+import { appendCoreEventSync } from '../events/core-events.js';
 import { listEvidenceTaskIds, loadEvidence } from '../evidence/manager';
 import {
 	type ParticipationReadResult,
@@ -631,6 +632,10 @@ export async function executePhaseComplete(
 		gate_pass: false,
 	};
 	const primaryRetroTaskId = `retro-${phase}`;
+	// One captured clock for the whole aggregate preflight (issue #2102
+	// contract D): every freshness-sensitive gate evaluates against this
+	// single timestamp so gates cannot disagree across an age boundary mid-run.
+	const preflightNowMs = Date.now();
 	const gateCtx: GateContext = {
 		phase,
 		dir,
@@ -640,6 +645,7 @@ export async function executePhaseComplete(
 		safeWarn,
 		loadedRetroBundle,
 		loadedRetroTaskId,
+		preflightNowMs,
 	};
 	const passGate = (extra: Record<string, unknown> = {}) => ({
 		blocked: false,
@@ -1685,7 +1691,14 @@ export async function executePhaseComplete(
 	};
 
 	// Skill usage feedback + pruning: close the learning loop at phase boundaries.
-	// Idempotency is provided by feedback_applied markers in the skill-usage log itself.
+	// Idempotency is provided by the authoritative sidecar queue in
+	// `.swarm/skill-usage-pending.json` (issue #2038), NOT by `feedback_applied`
+	// marker lines in the JSONL — those were the unbounded accumulation the issue
+	// is about, and the one-time migration drops them. Each actionable verdict is
+	// enqueued as a record before it is appended to the stream; consumption claims
+	// records under a lock, marks them `in_flight`, and dequeues them once the
+	// confidence bump returns, so a record is applied at most once and a crash
+	// mid-cycle leaves it visible rather than replayed.
 	// Errors never block phase_complete.
 	try {
 		const feedbackResult = await applySkillUsageFeedback(dir, { floorOptions });
@@ -1921,47 +1934,12 @@ export async function executePhaseComplete(
 		summary: safeSummary ?? null,
 	};
 
-	const lockTaskId = `phase-complete-${Date.now()}`;
-	const eventsFilePath = 'events.jsonl';
-	let lockResult: Awaited<ReturnType<typeof tryAcquireLock>> | undefined;
 	try {
-		lockResult = await tryAcquireLock(
-			dir,
-			eventsFilePath,
-			phaseCommitAgent,
-			lockTaskId,
-		);
-	} catch (error) {
-		warnings.push(
-			`Warning: failed to acquire lock for phase complete event: ${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
-	if (!lockResult?.acquired) {
-		warnings.push(
-			`Warning: could not acquire lock for events.jsonl write — proceeding without lock`,
-		);
-	}
-	// Write happens unconditionally (with or without lock protection)
-	try {
-		const eventsPath = validateSwarmPath(dir, 'events.jsonl');
-		fs.appendFileSync(eventsPath, `${JSON.stringify(event)}\n`, 'utf-8');
+		appendCoreEventSync(dir, { ...event });
 	} catch (writeError) {
 		warnings.push(
 			`Warning: failed to write phase complete event: ${writeError instanceof Error ? writeError.message : String(writeError)}`,
 		);
-	} finally {
-		if (lockResult?.acquired && lockResult.lock._release) {
-			try {
-				await lockResult.lock._release();
-			} catch (releaseError) {
-				logger.warn(
-					'[phase_complete] Lock release failed (non-blocking):',
-					releaseError instanceof Error
-						? releaseError.message
-						: String(releaseError),
-				);
-			}
-		}
 	}
 
 	// Reset phase state on success

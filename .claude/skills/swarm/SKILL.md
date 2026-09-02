@@ -46,6 +46,17 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm auto-proceed` — toggle or set auto-proceed override `[on|off]`
 - `/swarm concurrency` — manage runtime concurrency override `[set|status|reset]`
 
+**Harness evolution**
+
+- `/swarm blueprint validate` — validate a declarative harness blueprint or atomic blueprint patch
+- `/swarm blueprint current` — show the ledger-derived current harness blueprint projection
+- `/swarm blueprint history` — show bounded hash-verified harness version history
+- `/swarm blueprint diff` — compare two stored harness blueprint versions
+- `/swarm blueprint export` — export a canonical stored harness blueprint
+- `/swarm harness candidate validate` — validate an inert harness candidate manifest
+- `/swarm harness candidate show` — show bounded harness candidate metadata without raw patch content
+- `/swarm harness candidate diff` — show candidate file and blueprint-change metadata without raw patch content
+
 **Diagnostics / health**
 
 - `/swarm diagnose` / `/swarm diagnosis` — run health check on swarm state (`diagnosis` is a deprecated alias)
@@ -127,7 +138,8 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm sdd project` — materialize the effective spec into `.swarm/spec.md`
 - `/swarm epic` — toggle Epic Mode (autonomous coupling-aware parallel activation)
 - `/swarm turbo` — toggle Turbo Mode strategy `[on|off|lean|standard|epic|status]`
-- `/swarm full-auto` — toggle Full-Auto Mode `[on [mode]|off|status]`
+- `/swarm full-auto` — toggle Full-Auto Mode; accepts `on [mode]`, `off`, or `status`
+- `/swarm guardrail reset` — reset an action-local guardrail circuit after external repair
 - `/swarm post-mortem` — run the post-mortem agent (project-end synthesis)
 
 **Read-only audits / research**
@@ -144,6 +156,7 @@ These are invoked as `/swarm <subcommand>`, NOT as bare `/subcommand`. The list 
 - `/swarm pr-feedback` — ingest and close known PR feedback (review comments, CI failures, conflicts)
 - `/swarm abort-pr-workflow` — clear a stuck PR_REVIEW/PR_FEEDBACK mechanical gate and stop the auto-resume loop (human-only escape hatch)
 - `/swarm approve-plan-critic` — record a MANUAL plan-critic approval to unblock the ratchet-tighter critic_pre_plan execution gate when the critic already returned APPROVED but the snapshot was not recorded (human-only escape hatch)
+- `/swarm approve-write` — issue one exact, session-bound, one-shot write approval for a candidate action and content hash (human-only)
 - `/swarm ci-monitor` — drive an already-reviewed, approved PR to green and merged (monitor CI, fix, merge; max 5 fix cycles)
 - `/swarm pr subscribe` / `/swarm pr-subscribe` — subscribe session to PR state-change notifications
 - `/swarm pr unsubscribe` / `/swarm pr-unsubscribe` — unsubscribe session from PR notifications

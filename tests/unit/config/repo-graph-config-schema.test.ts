@@ -59,6 +59,9 @@ describe('RepoGraphConfigSchema freshness policy (issue #1986)', () => {
 			walk_budget_ms: 5_000,
 			max_files: 10_000,
 			exclude_dirs: [],
+			// Issue #1534: storage mode defaults to json; repo-graph.json stays
+			// authoritative and the SQLite index is strictly opt-in.
+			storage: 'json',
 		});
 	});
 

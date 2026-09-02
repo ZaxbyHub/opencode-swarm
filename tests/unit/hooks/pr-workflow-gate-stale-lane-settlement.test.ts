@@ -400,7 +400,11 @@ describe('completePrWorkflow — regression: stale lanes must not block completi
 
 		const parsed = JSON.parse(
 			await executeCompletePrWorkflow(
-				{ mode: 'PR_REVIEW', pr_head_sha: 'abc123' },
+				{
+					mode: 'PR_REVIEW',
+					pr_head_sha: 'abc123',
+					report_verdict: 'INCOMPLETE',
+				},
 				directory,
 				{ sessionID: 'stale-complete-tool' },
 			),

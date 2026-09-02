@@ -288,11 +288,18 @@ describe('system-enhancer: budget denominator derives from model.limit.context',
 				providerID: 'minimax',
 			}),
 		).toBe(1_000_000);
-		expect(
-			resolveModelLimit(identity?.modelID, identity?.providerID, {
+		// #2044: resolveModelLimit returns {limit, source, resolution} — the
+		// override must win AND report its provenance.
+		const resolution = resolveModelLimit(
+			identity?.modelID,
+			identity?.providerID,
+			{
 				'MiniMax/MiniMax-M3': 1_000_000,
-			}),
-		).toBe(1_000_000);
+			},
+		);
+		expect(resolution.limit).toBe(1_000_000);
+		expect(resolution.source).toBe('override');
+		expect(resolution.resolution).toBe('user_provider_model');
 	});
 
 	it('does not let an identity-less window clobber an exact model binding', async () => {

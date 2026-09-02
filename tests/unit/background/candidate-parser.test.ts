@@ -32,9 +32,9 @@ const BASE_FLAGS: ParseFlags = {
 };
 
 const BASE_EXPLORER_HEADER =
-	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 const MICRO_LANE_HEADER =
-	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence';
+	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags';
 
 // base_explorer row: position mapping
 // 0=candidate_id, 1=lane, 2=severity, 3=category, 4=file:line, 5=claim, 6=evidence_summary, 7=impact_context, 8=confidence
@@ -606,13 +606,13 @@ describe('SC-007 — markdown code fence isolation', () => {
 		const text = `Some intro text.
 
 \`\`\`
-[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
+[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags
 c1 | lane-A | HIGH | security | src/foo.ts:10 | fake claim | fake evidence | fake impact | HIGH
 \`\`\`
 
 More text after fence.
 
-[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
+[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags
 c2 | lane-B | MEDIUM | style | src/bar.ts:20 | real claim | real evidence | real impact | HIGH`;
 
 		const input: ArtifactInput = { ...BASE_INPUT, text };

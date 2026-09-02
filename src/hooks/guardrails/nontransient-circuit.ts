@@ -1,5 +1,18 @@
 import { stripKnownSwarmPrefix } from '../../config/schema';
 import {
+	armActionCircuitAttempt,
+	clearActionCircuit,
+	getBlockingActionCircuit,
+	listBlockingActionCircuitsForInvocation,
+	noteActionCircuitFailure,
+} from '../../failures/action-circuit.js';
+import { createActionIdentity } from '../../failures/action-identity.js';
+import {
+	classifyToolInvocationFailure,
+	type InvocationFailureRecordV1,
+	sanitizeFailureEvidenceDisplay,
+} from '../../failures/invocation-failure.js';
+import {
 	ensureAgentSession,
 	getAgentSession,
 	type NonTransientCircuitState,
@@ -9,6 +22,7 @@ import {
 } from '../../state';
 import { telemetry } from '../../telemetry';
 import { pushAdvisory } from '../../utils/advisory-queue';
+import { normalizeToolNameLowerCase } from '../normalize-tool-name';
 
 const SAME_CATEGORY_HARD_STOP_THRESHOLD = 3;
 const IMMEDIATE_HARD_STOP_CATEGORIES = new Set<NonTransientErrorCategory>([
@@ -17,8 +31,6 @@ const IMMEDIATE_HARD_STOP_CATEGORIES = new Set<NonTransientErrorCategory>([
 	'sandbox_wrapper_failure',
 ]);
 const MAX_PENDING_EXECUTIONS_PER_SESSION = 100;
-const MAX_SIGNAL_LENGTH = 1_000;
-
 export type ToolOutcome =
 	| { kind: 'success'; signal: string }
 	| { kind: 'neutral'; signal: string }
@@ -114,34 +126,19 @@ function isNeutralExitOne(command: string): boolean {
 	);
 }
 
-function classifyFatalSignal(
-	signal: string,
-	sandboxWrapped: boolean,
+function mapFailureRecordToFatalCategory(
+	record: InvocationFailureRecordV1 | null,
 ): NonTransientErrorCategory | null {
-	if (/\[sandbox\]\s+BLOCKED:/i.test(signal)) {
-		return 'sandbox_wrapper_failure';
+	switch (record?.category) {
+		case 'shell.sandbox_wrapper':
+			return 'sandbox_wrapper_failure';
+		case 'shell.parser':
+			return 'shell_parse_error';
+		case 'shell.command_unavailable':
+			return 'command_not_found';
+		default:
+			return null;
 	}
-	if (
-		/\b(?:MissingEndCurlyBrace|ParserError|ParseError|IncompleteParseException)\b/i.test(
-			signal,
-		)
-	) {
-		return sandboxWrapped ? 'sandbox_wrapper_failure' : 'shell_parse_error';
-	}
-	if (
-		/\bCommandNotFoundException\b/i.test(signal) ||
-		/\bis not recognized as (?:the name of a cmdlet|an internal or external command)\b/i.test(
-			signal,
-		) ||
-		/\bcommand not found\b/i.test(signal) ||
-		/(?:^|\n)(?:\/bin\/)?(?:ba|da|z|k)?sh(?:\.exe)?:\s+(?:(?:line\s+)?\d+:\s+)?[^:\r\n]+:\s+not found\b/im.test(
-			signal,
-		) ||
-		/\b(?:spawn|execFile)\s+\S+\s+ENOENT\b/i.test(signal)
-	) {
-		return 'command_not_found';
-	}
-	return null;
 }
 
 export function classifyToolOutcome(
@@ -170,13 +167,30 @@ export function classifyToolOutcome(
 	const neutralExitOne = exit === 1 && isNeutralExitOne(originalCommand);
 	const outputSignal = typeof output.output === 'string' ? output.output : '';
 	const signal = [explicitError, outputSignal].filter(Boolean).join('\n');
-
 	const rawShellFailure =
 		exitPresent &&
 		(exit === null ||
 			typeof exit !== 'number' ||
 			!Number.isFinite(exit) ||
 			exit !== 0);
+	const record =
+		explicitFailure || rawShellFailure
+			? classifyToolInvocationFailure({
+					tool: input.tool,
+					args: input.args,
+					output: outputSignal,
+					error: explicitError,
+					metadata,
+					correlation: correlation
+						? {
+								sandboxWrapped:
+									correlation.sandboxWrapped === true ||
+									correlatedWrappedCommand,
+								originalCommand,
+							}
+						: { originalCommand },
+				})
+			: null;
 	// Fatal, structured signatures outrank expected-exit adapters. Otherwise a
 	// missing `rg` or `git` executable that happens to return exit 1 would be
 	// misclassified as a legitimate no-match/clean-diff result.
@@ -190,15 +204,12 @@ export function classifyToolOutcome(
 	// non-shell tool with explicitFailure falls through to 'failure' below (no
 	// hard-stop), preserving diagnostics without the false-positive hard-stop.
 	if ((explicitFailure || rawShellFailure) && shell) {
-		const category = classifyFatalSignal(
-			signal,
-			correlation?.sandboxWrapped === true || correlatedWrappedCommand,
-		);
+		const category = mapFailureRecordToFatalCategory(record);
 		if (category) return { kind: 'fatal', category, signal };
 	}
 	const provenFailure = explicitFailure || (rawShellFailure && !neutralExitOne);
 	if (provenFailure) {
-		return { kind: 'failure', signal };
+		return { kind: 'failure', signal: record?.evidence.display ?? signal };
 	}
 
 	if (neutralExitOne) return { kind: 'neutral', signal };
@@ -216,6 +227,88 @@ function currentOwner(sessionID: string): {
 	return {
 		agent: stripKnownSwarmPrefix(session.agentName),
 		invocationId: session.activeInvocationId ?? 0,
+	};
+}
+
+type ActionContext = {
+	tool: string;
+	args?: unknown;
+	/**
+	 * A synchronous failure can occur after toolBefore armed an attempt but before
+	 * the host can return its result. Re-arm that exact attempt only at this
+	 * trusted call site; toolAfter results must remain unable to revive a stale
+	 * generation.
+	 */
+	armAttempt?: boolean;
+};
+
+const RECOVERY_READ_ONLY_TOOLS = new Set(['read', 'grep', 'glob', 'ls']);
+
+function parseSwarmCommandVerb(args: unknown): string[] {
+	const record =
+		typeof args === 'object' && args !== null && !Array.isArray(args)
+			? (args as Record<string, unknown>)
+			: undefined;
+	const raw =
+		typeof record?.command === 'string'
+			? record.command
+			: typeof record?.subcommand === 'string'
+				? record.subcommand
+				: '';
+	return raw.trim().toLowerCase().split(/\s+/).filter(Boolean).slice(0, 3);
+}
+
+function isAllowedRecoverySwarmCommand(args: unknown): boolean {
+	const parts = parseSwarmCommandVerb(args);
+	if (parts.length === 0) return false;
+	if (parts[0] === 'diagnose' || parts[0] === 'diagnosis') return true;
+	if (parts[0] === 'handoff') return true;
+	if (parts[0] === 'guardrail' && parts[1] === 'reset') return true;
+	if (parts[0] !== 'full-auto' || parts.length < 2) return false;
+	return new Set([
+		'status',
+		'retry-oversight',
+		'abort',
+		'resume',
+		'on',
+		'off',
+		'exit',
+	]).has(parts[1]);
+}
+
+function isRecoveryAllowedTool(tool: string, args: unknown): boolean {
+	const normalized = normalizeToolNameLowerCase(tool);
+	if (RECOVERY_READ_ONLY_TOOLS.has(normalized)) return true;
+	if (
+		normalized === 'swarm' ||
+		normalized === 'swarm_command' ||
+		normalized === 'swarm-command'
+	) {
+		return isAllowedRecoverySwarmCommand(args);
+	}
+	return false;
+}
+
+function resolveActionIdentity(
+	sessionID: string,
+	context?: ActionContext,
+): {
+	ownerAgent: string;
+	ownerInvocationId: number;
+	actionDigest: string;
+	actionPattern: string;
+} | null {
+	const owner = currentOwner(sessionID);
+	if (!owner) return null;
+	const action = createActionIdentity({
+		tool: context?.tool ?? 'unknown-tool',
+		args: context?.args,
+	});
+	return {
+		ownerAgent: owner.agent,
+		ownerInvocationId: owner.invocationId,
+		actionDigest: action.digest,
+		actionPattern: action.pattern,
 	};
 }
 
@@ -259,30 +352,44 @@ export function recordNonTransientFailure(
 	sessionID: string,
 	category: NonTransientErrorCategory,
 	signal: string,
+	context?: ActionContext,
 ): NonTransientCircuitState | null {
+	const safeSignal = sanitizeFailureEvidenceDisplay(signal);
 	ensureCircuitSession(sessionID);
+	const actionIdentity = resolveActionIdentity(sessionID, context);
 	const circuit = ensureCircuit(sessionID);
 	const session = getAgentSession(sessionID);
-	if (!circuit || !session) return null;
-	const wasHardStopped = circuit.hardStop;
-
-	if (circuit.category === category) {
-		circuit.sameCategoryCount++;
-	} else {
-		circuit.category = category;
-		circuit.sameCategoryCount = 1;
-	}
-	circuit.lastSignal = signal.slice(0, MAX_SIGNAL_LENGTH);
+	if (!circuit || !session || !actionIdentity) return null;
 	const threshold = IMMEDIATE_HARD_STOP_CATEGORIES.has(category)
 		? 1
 		: SAME_CATEGORY_HARD_STOP_THRESHOLD;
-	circuit.hardStop = circuit.sameCategoryCount >= threshold;
-	const enteredHardStop = !wasHardStopped && circuit.hardStop;
+	if (context?.armAttempt === true) {
+		armActionCircuitAttempt(
+			sessionID,
+			actionIdentity.ownerInvocationId,
+			actionIdentity.actionDigest,
+		);
+	}
+	const { entry, enteredHardStop, ignoredLateEvent } = noteActionCircuitFailure(
+		{
+			sessionID,
+			invocationID: actionIdentity.ownerInvocationId,
+			actionDigest: actionIdentity.actionDigest,
+			circuitKind: category,
+			signal: safeSignal,
+			hardStopThreshold: threshold,
+		},
+	);
+	if (!entry || ignoredLateEvent) return circuit;
+	circuit.category = category;
+	circuit.sameCategoryCount = entry.count;
+	circuit.hardStop = entry.hardStop;
+	circuit.lastSignal = safeSignal.slice(0, 1_000);
 	if (enteredHardStop) {
 		telemetry.loopDetected(
 			sessionID,
 			circuit.ownerAgent,
-			`nontransient:${category}`,
+			`nontransient:${category}:${actionIdentity.actionPattern}`,
 		);
 		pushAdvisory(
 			session,
@@ -298,11 +405,22 @@ export function recordNonTransientFailure(
 	return circuit;
 }
 
-export function clearNonTransientCircuit(sessionID: string): void {
+export function clearNonTransientCircuit(
+	sessionID: string,
+	context?: ActionContext,
+): void {
 	const circuit = ensureCircuit(sessionID);
-	if (!circuit || circuit.hardStop) return;
+	const actionIdentity = resolveActionIdentity(sessionID, context);
+	if (!circuit || !actionIdentity) return;
+	clearActionCircuit(
+		sessionID,
+		actionIdentity.ownerInvocationId,
+		actionIdentity.actionDigest,
+		{ reason: 'success' },
+	);
 	circuit.category = null;
 	circuit.sameCategoryCount = 0;
+	circuit.hardStop = false;
 	circuit.lastSignal = null;
 }
 
@@ -353,11 +471,81 @@ export function nonTransientHardStopMessage(
 	);
 }
 
-export function assertNonTransientCircuitAllowsTool(sessionID: string): void {
-	const circuit = ensureCircuit(sessionID);
-	if (circuit?.hardStop) {
-		throw new Error(nonTransientHardStopMessage(circuit));
+function toCompatCircuit(entry: {
+	circuitKind: string;
+	count: number;
+	hardStop: boolean;
+}): NonTransientCircuitState {
+	return {
+		ownerAgent: 'unknown',
+		ownerInvocationId: 0,
+		category: entry.circuitKind as NonTransientErrorCategory,
+		sameCategoryCount: entry.count,
+		hardStop: entry.hardStop,
+		lastSignal: null,
+	};
+}
+
+export function assertNonTransientCircuitAllowsTool(
+	sessionID: string,
+	context?: ActionContext,
+): void {
+	const actionIdentity = resolveActionIdentity(sessionID, context);
+	if (!actionIdentity) return;
+	const exactCircuit = getBlockingActionCircuit(
+		sessionID,
+		actionIdentity.ownerInvocationId,
+		actionIdentity.actionDigest,
+	);
+	if (exactCircuit?.hardStop) {
+		const compat = toCompatCircuit(exactCircuit);
+		compat.lastSignal =
+			getAgentSession(sessionID)?.nonTransientCircuit?.lastSignal ?? null;
+		throw new Error(nonTransientHardStopMessage(compat));
 	}
+	const activeHardStops = listBlockingActionCircuitsForInvocation(
+		sessionID,
+		actionIdentity.ownerInvocationId,
+	);
+	const normalizedTool = normalizeToolNameLowerCase(context?.tool ?? '');
+	if (
+		activeHardStops.some(
+			(entry) => entry.circuitKind === 'sandbox_wrapper_failure',
+		) &&
+		isShellTool(normalizedTool)
+	) {
+		const firstHardStop = activeHardStops[0];
+		if (!firstHardStop) return;
+		const compat = toCompatCircuit(firstHardStop);
+		compat.lastSignal =
+			getAgentSession(sessionID)?.nonTransientCircuit?.lastSignal ?? null;
+		throw new Error(nonTransientHardStopMessage(compat));
+	}
+	if (
+		activeHardStops.length > 0 &&
+		(normalizedTool === 'swarm' ||
+			normalizedTool === 'swarm_command' ||
+			normalizedTool === 'swarm-command') &&
+		!isAllowedRecoverySwarmCommand(context?.args)
+	) {
+		const firstHardStop = activeHardStops[0];
+		if (!firstHardStop) return;
+		const compat = toCompatCircuit(firstHardStop);
+		compat.lastSignal =
+			getAgentSession(sessionID)?.nonTransientCircuit?.lastSignal ?? null;
+		throw new Error(nonTransientHardStopMessage(compat));
+	}
+	if (
+		activeHardStops.length > 0 &&
+		isRecoveryAllowedTool(normalizedTool, context?.args)
+	) {
+		return;
+	}
+	armActionCircuitAttempt(
+		sessionID,
+		actionIdentity.ownerInvocationId,
+		actionIdentity.actionDigest,
+	);
 }
 
 export function rememberToolExecution(
@@ -427,5 +615,19 @@ export function forgetToolExecution(sessionID: string, callID: string): void {
 
 export const _test_exports = {
 	isNeutralExitOne,
-	classifyFatalSignal,
+	classifyFatalSignal: (
+		signal: string,
+		sandboxWrapped: boolean,
+		tool = 'bash',
+	) =>
+		mapFailureRecordToFatalCategory(
+			classifyToolInvocationFailure({
+				tool,
+				output: signal,
+				error: signal,
+				correlation: { sandboxWrapped },
+			}),
+		),
+	isAllowedRecoverySwarmCommand,
+	isRecoveryAllowedTool,
 };

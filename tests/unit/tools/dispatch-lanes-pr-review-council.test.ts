@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import { mkdtempSync, realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -59,6 +59,7 @@ beforeEach(() => {
 	directory = realpathSync(
 		mkdtempSync(path.join(os.tmpdir(), 'dispatch-review-council-')),
 	);
+	mkdirSync(path.join(directory, '.git'), { recursive: true });
 	createdSessions = 0;
 	deliveredPrompts = [];
 	gateInternals.resetTrackedStateCache();
@@ -129,7 +130,7 @@ async function establishReviewPrerequisites(): Promise<void> {
 	});
 	for (const [index, lane] of lanes.entries()) {
 		const correlationId = `base-${index}`;
-		const text = `[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence\nC-${index} | ${lane.workflowLane} | LOW | correctness | file.ts:1 | claim | evidence | impact | LOW`;
+		const text = `[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags\nC-${index} | ${lane.workflowLane} | LOW | correctness | file.ts:1 | claim | evidence | impact | LOW | ORDINARY | `;
 		await recordPendingDelegation(directory, {
 			correlationId,
 			jobId: null,
@@ -144,6 +145,7 @@ async function establishReviewPrerequisites(): Promise<void> {
 			laneId: lane.laneId,
 			mode: 'swarm-pr-review:base',
 			workflowLane: lane.workflowLane,
+			prReviewLegacyTranscriptCompatibility: true,
 			workspace: {
 				directory,
 				gitHead: HEAD_SHA,
@@ -187,7 +189,7 @@ async function establishReviewPrerequisites(): Promise<void> {
 		const batchId = `micro-${index}`;
 		const laneId = `micro-lane-${index}`;
 		const correlationId = `micro-session-${index}`;
-		const text = `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence\n[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`;
+		const text = `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags\n[CLEAN] | ${workflowLane} | exact reviewed diff | no finding after focused invariant review`;
 		await recordPendingDelegation(directory, {
 			correlationId,
 			jobId: null,
@@ -202,6 +204,7 @@ async function establishReviewPrerequisites(): Promise<void> {
 			laneId,
 			mode: 'swarm-pr-review:micro',
 			workflowLane,
+			prReviewLegacyTranscriptCompatibility: true,
 			workspace: {
 				directory,
 				gitHead: HEAD_SHA,
@@ -297,7 +300,7 @@ describe('PR review council mechanical dispatch', () => {
 	test('rejects a marker header with no attestation but accepts a headerless CLEAN', () => {
 		expect(
 			prReviewDiscoveryArtifactCoversLane(
-				'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence | impact | confidence',
+				'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence | impact | confidence | risk_impact | risk_tags',
 				'intent-architecture',
 			),
 		).toBe(false);
@@ -320,7 +323,7 @@ describe('PR review council mechanical dispatch', () => {
 		);
 		expect(
 			prReviewDiscoveryArtifactCoversLane(
-				`[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence\n${clean}`,
+				`[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags\n${clean}`,
 				'intent-architecture',
 			),
 		).toBe(true);
@@ -366,7 +369,7 @@ describe('PR review council mechanical dispatch', () => {
 		);
 		const correlationId = 'review-two-session';
 		const text =
-			'[REVIEWED] | C-001 | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer';
+			'[REVIEWED] | C-001 | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer | ORDINARY | ';
 		await recordPendingDelegation(directory, {
 			correlationId,
 			jobId: null,

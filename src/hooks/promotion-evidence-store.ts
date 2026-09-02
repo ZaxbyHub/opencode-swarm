@@ -24,6 +24,7 @@ import {
 	writeFile,
 } from 'node:fs/promises';
 import * as path from 'node:path';
+import { observePromotionEvidence } from '../health/learning-health';
 import { log } from '../utils/logger.js';
 import {
 	queryHistoricalOutcomes,
@@ -84,6 +85,15 @@ export async function appendPromotionEvidence(
 		log('[promotion-evidence] append failed (fail-open)', {
 			error: err instanceof Error ? err.message : String(err),
 			count: records.length,
+		});
+	}
+	// Learning-health fixture-share feed (#2044): one fact per appended record,
+	// classified field vs non-field by closed receipt-source taxonomy. Never
+	// throws; the promotion write is already durable at this point.
+	for (const record of records) {
+		observePromotionEvidence({
+			directory,
+			receiptSource: record.receipt_source,
 		});
 	}
 }

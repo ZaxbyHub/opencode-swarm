@@ -60,4 +60,30 @@ describe('repo graph freshness production wiring', () => {
 		expect(semanticDiff).toContain('await _internals.getCachedGraph(');
 		expect(semanticDiff).toContain('repoGraphOptions');
 	});
+
+	test('the resolved repo_graph.storage mode reaches the injection options (#1534)', () => {
+		// repo-graph-injection.ts must never read config synchronously on the
+		// system-prompt path (issue #704/#1900), so `storage` can only reach the
+		// block builders by riding in the options object system-enhancer.ts
+		// parses ONCE at hook creation. Without this line the indexed path is
+		// unreachable in production no matter what the user configures.
+		const systemEnhancer = readFileSync(
+			path.join(SRC_ROOT, 'hooks/system-enhancer.ts'),
+			'utf8',
+		);
+		const optionsLiteral = systemEnhancer.match(
+			/const repoGraphInjectionOptions = \{([\s\S]*?)\n\t\};/,
+		);
+		expect(optionsLiteral).not.toBeNull();
+		expect(optionsLiteral?.[1]).toContain('storage: repoGraphConfig.storage');
+
+		// And the block builders must consume it rather than resolving it
+		// themselves.
+		const injection = readFileSync(
+			path.join(SRC_ROOT, 'hooks/repo-graph-injection.ts'),
+			'utf8',
+		);
+		expect(injection).toContain("options?.storage === 'indexed'");
+		expect(injection).not.toContain('resolveGraphStorageMode');
+	});
 });

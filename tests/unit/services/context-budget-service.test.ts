@@ -23,6 +23,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { DEFAULT_MODEL_CONTEXT_TOKENS } from '../../../src/config/schema';
+import { estimateTokens as canonicalEstimateTokens } from '../../../src/hooks/utils';
 import {
 	type ContextBudgetConfig,
 	type ContextBudgetReport,
@@ -85,10 +86,17 @@ describe('context-budget-service', () => {
 	};
 
 	describe('estimateTokens', () => {
-		test('uses the chars/3.5 formula', () => {
-			expect(estimateTokens('hello')).toBe(2); // ceil(5 / 3.5)
-			expect(estimateTokens('abcdefghij')).toBe(3); // ceil(10 / 3.5)
-			expect(estimateTokens('abcdefg')).toBe(2); // 7 / 3.5 exactly
+		test('delegates to the canonical estimator (#2107/#1616 migration: was /3.5)', () => {
+			// Canonical 0.33 tok/char: this service previously used an
+			// independent length/3.5 formula, so the user-facing budget report
+			// disagreed ~15% with injection admission on the same text.
+			expect(estimateTokens('hello')).toBe(2); // ceil(5 * 0.33)
+			expect(estimateTokens('abcdefghij')).toBe(4); // ceil(10 * 0.33)
+			expect(estimateTokens('')).toBe(0);
+			// Agreement with the canonical implementation itself:
+			expect(estimateTokens('hello world foo bar')).toBe(
+				canonicalEstimateTokens('hello world foo bar'),
+			);
 		});
 
 		test('returns 0 for empty and non-string input', () => {

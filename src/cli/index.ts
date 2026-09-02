@@ -18,6 +18,7 @@ import {
 	VERSION_PINNED_LEAF,
 } from '../config/cache-paths.js';
 import { DEFAULT_AGENT_CONFIGS } from '../config/constants.js';
+import { CONFIG_SCHEMA_REF } from '../config/project-init.js';
 import { safeRealpathSync } from '../tools/repo-graph/safe-realpath.js';
 
 const { version } = packageJson;
@@ -285,29 +286,6 @@ function saveJson(filepath: string, data: unknown): void {
 	fs.writeFileSync(filepath, `${JSON.stringify(data, null, 2)}\n`, 'utf-8');
 }
 
-function writeProjectConfigIfMissing(cwd: string): void {
-	try {
-		const opencodeDir = path.join(cwd, '.opencode');
-		const projectConfigPath = path.join(opencodeDir, 'opencode-swarm.json');
-
-		// Only write if file doesn't already exist
-		if (fs.existsSync(projectConfigPath)) {
-			return;
-		}
-
-		// Create .opencode/ directory if it doesn't exist
-		ensureDir(opencodeDir);
-
-		saveJson(projectConfigPath, { agents: {} });
-		console.log('✓ Created project config at:', projectConfigPath);
-	} catch (error) {
-		console.warn(
-			'⚠ Could not create project config — installation will continue:',
-		);
-		console.warn(`  ${error instanceof Error ? error.message : String(error)}`);
-	}
-}
-
 async function install(): Promise<number> {
 	console.log('🐝 Installing OpenCode Swarm...\n');
 
@@ -404,6 +382,7 @@ async function install(): Promise<number> {
 	// Create default plugin config if not exists
 	if (!fs.existsSync(PLUGIN_CONFIG_PATH)) {
 		const defaultConfig = {
+			$schema: CONFIG_SCHEMA_REF,
 			// Must match PluginConfigSchema in src/config/schema.ts
 			// v6.14: free OpenCode Zen models; v6.73+ switched to big-pickle with gpt-5-nano fallback; architect inherits OpenCode UI selection
 			// v6.85+: Multi-level fallback chains - only big-pickle and gpt-5-nano are consistently available in free tier
@@ -419,9 +398,6 @@ async function install(): Promise<number> {
 	} else {
 		console.log('✓ Plugin config already exists at:', PLUGIN_CONFIG_PATH);
 	}
-
-	// Create project-level config if not exists
-	writeProjectConfigIfMissing(process.cwd());
 
 	console.log('\n📁 Configuration files:');
 	console.log(`   OpenCode config: ${OPENCODE_CONFIG_PATH}`);

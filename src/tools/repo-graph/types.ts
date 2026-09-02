@@ -22,8 +22,10 @@ export const REPO_GRAPH_FILENAME = 'repo-graph.json';
  * self-gates via {@link isSchemaVersionAtLeast} rather than relying on the
  * loader (which only checks that a version string is present, not its value).
  *
- * 1.2.0 adds per-node `exportRanges` (1-based inclusive line spans for each
- * exported symbol) and the top-level `symbolEdges` array (direct symbol-to-
+ * 1.2.0 adds per-node `exportRanges` (1-based inclusive line spans keyed by
+ * symbol name — exported symbols for every grammar, plus non-exported member
+ * defs for java/kotlin/csharp/cpp/swift; see the field docs) and the top-level
+ * `symbolEdges` array (direct symbol-to-
  * symbol reference edges). Both fields are optional, so 1.0.0 and 1.1.0 graphs
  * still load without corruption. New queries may use these fields to provide
  * more precise context-packing and symbol-level navigation.
@@ -46,8 +48,38 @@ export const REPO_GRAPH_FILENAME = 'repo-graph.json';
  * source read. The content-freshness sidecar requires both witnesses before
  * it will certify a graph; older graphs remain readable but are intentionally
  * treated as needing a rebuild before certification.
+ *
+ * 1.5.0 adds an optional graph-level `repoRootId` plus additive SymbolEdge v2
+ * identity, kind, confidence, resolution, and evidence fields. Legacy 1.2.0
+ * four-coordinate symbol edges remain readable and are normalized in memory.
+ *
+ * 1.6.0 adds the optional per-node `exportKinds` map (declaration kind per
+ * symbol, keyed exactly like `exportRanges`), powering the KG-14 declaration-
+ * kind query axis (`symbol_search` kind filter, `symbol_context` identity).
+ * The field is optional, so 1.0.0–1.5.0 graphs still load; queries surface
+ * `kind: null` hits and a `kindSupported: false` degradation note instead of
+ * failing (issue #1535).
+ *
+ * 1.7.0 adds the optional per-node `ontology.links` array (KG-15):
+ * `HANDLES_ROUTE` handler-symbol binding, entity-keyed `READS`/`WRITES`/
+ * `DELETES` data access, `VALIDATES`/`AUTHORIZES` security binding, and
+ * `CONFIGURES` env/config-key facts. `TESTS` and `USES_FIXTURE` associations
+ * are derived at query time from persisted edges plus colocated-name
+ * heuristics and are never stored. The field is optional, so 1.0.0–1.6.0
+ * graphs still load; queries surface `linksSupported: false` degradation
+ * notes instead of failing (issue #1536).
  */
-export const GRAPH_SCHEMA_VERSION = '1.4.0';
+export const GRAPH_SCHEMA_VERSION = '1.7.0';
+
+/**
+ * Default per-file source-size ceiling shared by graph construction and
+ * query-time source reads. The builder treats this as the default value of
+ * its `maxFileSizeBytes` option (which may be raised per build);
+ * `getContextPack` always enforces this constant at read time regardless of
+ * any build-time override, so a file built into the graph above this size
+ * yields a `source too large` span instead of source text.
+ */
+export const DEFAULT_MAX_SOURCE_BYTES = 1024 * 1024;
 
 /**
  * Compare dotted numeric version strings (e.g. '1.1.0' >= '1.1.0').
@@ -189,6 +221,57 @@ export interface OntologyFinding {
 	line?: number;
 }
 
+export const ONTOLOGY_LINK_KIND_VALUES = [
+	'HANDLES_ROUTE',
+	'READS',
+	'WRITES',
+	'DELETES',
+	'VALIDATES',
+	'AUTHORIZES',
+	'TESTS',
+	'USES_FIXTURE',
+	'CONFIGURES',
+] as const;
+export type OntologyLinkKind = (typeof ONTOLOGY_LINK_KIND_VALUES)[number];
+
+export const ONTOLOGY_LINK_CONFIDENCE_VALUES = [
+	'low',
+	'medium',
+	'high',
+] as const;
+export type OntologyLinkConfidence =
+	(typeof ONTOLOGY_LINK_CONFIDENCE_VALUES)[number];
+
+/**
+ * A change-risk link binding one ontology fact to its subject and — when the
+ * evidence ties it to a declaration — to a symbol (KG-15, issue #1536).
+ *
+ * Persisted links are file-local (they live on the node whose source produced
+ * them): `HANDLES_ROUTE` (subject `'<METHOD> <path>'`, symbol = the handler
+ * export or named router callback), `READS`/`WRITES`/`DELETES` (subject = the
+ * entity/table name, file-level), `VALIDATES`/`AUTHORIZES` (from security
+ * facts, file-level), and `CONFIGURES` (subject = an env/config key).
+ *
+ * `TESTS` and `USES_FIXTURE` are part of the kind union for output shaping
+ * but are derived at query time from persisted edges + colocated-name
+ * heuristics (`buildTestPack`), never persisted here.
+ *
+ * Advisory and evidence-backed: `confidence` records heuristic strength, and
+ * every field is bounded by `validateOntologyStrings`.
+ */
+export interface OntologyLink {
+	kind: OntologyLinkKind;
+	/** Route (`'GET /api/users'`), entity/table name, or config/env key. */
+	subject?: string;
+	/** 1-based line of the producing evidence (absent for file-level-only facts). */
+	line?: number;
+	/** Raw comment-stripped source line slice (<=160 chars). */
+	evidence?: string;
+	confidence: OntologyLinkConfidence;
+	/** Declaration the link is bound to, when evidence ties it to one symbol. */
+	symbol?: string;
+}
+
 export interface FileOntology {
 	roles: FileRole[];
 	packageBoundary: string;
@@ -197,6 +280,8 @@ export interface FileOntology {
 	security: SecurityFact[];
 	conventions: ConventionFact[];
 	findings: OntologyFinding[];
+	/** Change-risk links (schema >= 1.7.0; optional so older graphs load unchanged). */
+	links?: OntologyLink[];
 }
 
 /**
@@ -217,13 +302,37 @@ export interface GraphNode {
 	 */
 	exportLines?: Record<string, number>;
 	/**
-	 * 1-based inclusive line span for each exported symbol, keyed by symbol
-	 * name. Present on graphs built at schema >= 1.2.0; absent on older
-	 * graphs. Used for precise context-packing around a symbol.
+	 * 1-based inclusive line span per symbol, keyed by symbol name. Present on
+	 * graphs built at schema >= 1.2.0; absent on older graphs. Used for precise
+	 * context-packing around a symbol.
 	 * Each span value uses `startLine` / `endLine` to match the codebase
 	 * convention (see `ContextPackSpan` and `FileSymbolFacts`).
+	 *
+	 * SCOPE (issues #1529 and #1530): exported symbols for every grammar,
+	 * PLUS non-exported member defs for java/kotlin/csharp/cpp/swift. A
+	 * JVM/.NET or native-language member (or a Swift extension block) is
+	 * deliberately never a file-level export, so without that widening
+	 * `context_pack` could return no span at all for a Java method or a
+	 * private C++ helper.
+	 * `exports` and `exportLines` stay exported-only in every language.
+	 *
+	 * Duplicate names resolve so this map cannot disagree with `exportLines`:
+	 * an exported def outranks a non-exported one; two exported defs take the
+	 * last (as `exportLines` does); two non-exported defs take the first, and
+	 * never appear in `exportLines` at all.
 	 */
 	exportRanges?: Record<string, { startLine: number; endLine: number }>;
+	/**
+	 * Declaration kind per symbol, keyed by symbol name (schema >= 1.6.0;
+	 * optional, so older graphs load unchanged). Keys are assigned in the same
+	 * builder loop and under the same widening + duplicate-name policies as
+	 * `exportRanges`, but ONLY at real declaration sites — re-export bindings
+	 * add an `exportRanges` entry without a kind (the symbol is declared
+	 * elsewhere), so `exportKinds` is a subset of `exportRanges` keys.
+	 * Absent entries read as `kind: null` (old graph, regex-fallback scan, or
+	 * re-exported binding).
+	 */
+	exportKinds?: Record<string, GraphSymbolKind>;
 	/** Imported module specifiers */
 	imports: string[];
 	/** Language/extension of the file */
@@ -273,7 +382,22 @@ export interface GraphEdge {
 	/**
 	 * Whether the resolved target is a graph node or an asset. `'node'` targets
 	 * are scannable source files that become graph nodes; `'asset'` targets are
-	 * real files (JSON/CSS/etc.) that never become nodes (schema >= 1.3.0).
+	 * real files that never become nodes (schema >= 1.3.0).
+	 *
+	 * `'asset'` covers TWO cases, and the second is easy to miss:
+	 * 1. a non-source file (JSON/CSS/etc.), which was never scannable; and
+	 * 2. a file that IS scannable but the walker never indexed — it sits under a
+	 *    `SKIP_DIRECTORIES` entry (`node_modules`, `dist`, `vendor`, …) or behind
+	 *    an unfollowed symlink. Import resolution does not consult those rules,
+	 *    so it can resolve a real `.ts`/`.java` file the graph has no node for.
+	 *    Such edges are demoted to `'asset'` at graph assembly (see
+	 *    `reconcileEdgeTargetKinds`) so that `'node'` always means "a node exists
+	 *    for this target". The demotion is language-agnostic: it applies to any
+	 *    source file the walker skipped, not only to JVM/.NET ones.
+	 *
+	 * Consequence for consumers: `targetKind: 'asset'` no longer implies "not
+	 * source code". Use `isScannableSourcePath(edge.target)` if that is what you
+	 * actually need to know.
 	 * Absent on older graphs — callers fall back to `isScannableSourcePath` on
 	 * the target path. Asset edges only require their source node to exist
 	 * during incremental validation, and are excluded from in-degree ranking /
@@ -302,6 +426,75 @@ export interface SymbolReference {
  * than {@link GraphEdge} (which tracks file-level imports) and enable
  * precise context-packing and symbol navigation queries.
  */
+export const SYMBOL_EDGE_KIND_VALUES = [
+	'CALLS',
+	'REFERENCES',
+	'USES_TYPE',
+	'INSTANTIATES',
+	'IMPLEMENTS',
+	'OVERRIDES',
+] as const;
+export type SymbolEdgeKind = (typeof SYMBOL_EDGE_KIND_VALUES)[number];
+
+export const SYMBOL_EDGE_RESOLUTION_VALUES = [
+	'exact',
+	'import_binding',
+	'same_file_scope',
+	'unique_name',
+	'type_resolved',
+	'lsp',
+	'scip',
+	'heuristic',
+	'unresolved',
+] as const;
+export type SymbolEdgeResolution =
+	(typeof SYMBOL_EDGE_RESOLUTION_VALUES)[number];
+
+export type SymbolIdentityKind = 'symbol' | 'module';
+
+/**
+ * Declaration kind of a symbol — WHAT the symbol is (function, class, …).
+ * Mirrors `FileSymbolFacts['defs'][number]['kind']` from
+ * `src/lang/symbol-graph.ts` and is persisted per node via
+ * `GraphNode.exportKinds` (schema >= 1.6.0).
+ *
+ * This is the DECLARATION axis and is deliberately distinct from
+ * {@link SymbolEdgeKind}, the RELATIONSHIP axis (CALLS/REFERENCES/…) that
+ * describes how two symbols connect. A symbol never referenced cross-file has
+ * no symbol edge but still has a declaration kind.
+ */
+export const GRAPH_SYMBOL_KIND_VALUES = [
+	'function',
+	'class',
+	'const',
+	'type',
+	'interface',
+	'enum',
+	'method',
+] as const;
+export type GraphSymbolKind = (typeof GRAPH_SYMBOL_KIND_VALUES)[number];
+
+/**
+ * Visibility tier derived at query time from persisted fields: a symbol in
+ * `GraphNode.exports` is `exported` (public module surface); a symbol that
+ * only exists in `exportRanges` (widened-grammar member defs) is
+ * `module-local`.
+ */
+export type GraphSymbolVisibility = 'exported' | 'module-local';
+
+export interface SymbolEdgeEvidence {
+	/** Workspace-relative source path; source text itself is never persisted. */
+	file: string;
+	/** 1-based source line. */
+	line: number;
+	/** Optional 1-based source column. */
+	column?: number;
+	/** SHA-256 of the NFC-normalized logical source line. */
+	snippetHash: string;
+	/** Extractor that produced the fact, for example `tree-sitter/typescript`. */
+	extractor: string;
+}
+
 export interface SymbolEdge {
 	/** Resolved absolute path of the source file (matches `GraphNode.filePath` keys). */
 	fromFile: string;
@@ -311,6 +504,20 @@ export interface SymbolEdge {
 	toFile: string;
 	/** Exported symbol referenced in the target file. */
 	toSymbol: string;
+	/** Stable SHA-256 identity of this edge (schema >= 1.5.0). */
+	id?: string;
+	/** Stable SHA-256 identity of the source symbol. */
+	fromId?: string;
+	/** Stable SHA-256 identity of the target symbol. */
+	toId?: string;
+	/** Relationship kind. Current tree-sitter extraction emits REFERENCES. */
+	kind?: SymbolEdgeKind;
+	/** Advisory confidence in the inclusive range 0..1. */
+	confidence?: number;
+	/** How the relationship was resolved. */
+	resolution?: SymbolEdgeResolution;
+	/** Bounded provenance records. Empty only when no honest location exists. */
+	evidence?: SymbolEdgeEvidence[];
 }
 
 /**
@@ -325,6 +532,67 @@ export interface ContextPackSpan {
 	mode: 'full' | 'signature';
 	text?: string;
 	note?: string;
+}
+
+/**
+ * Source-text extraction mode for source-bearing context packs (issue #1533).
+ * `include_source` remains the sole gate; `source_mode` only refines what is
+ * extracted once source was requested.
+ *
+ * - `mixed` (default): body text for near spans (span mode 'full'), signature
+ *   text for periphery spans (span mode 'signature').
+ * - `body`: body text for every span with an export range.
+ * - `signature`: signature text for every span with an export range.
+ */
+export type ContextPackSourceMode = 'signature' | 'body' | 'mixed';
+
+/**
+ * A bounded source snippet with provenance (issue #1533). Emitted one per
+ * returned span that actually had text extracted; internal-symbol fallback
+ * spans produce no snippet.
+ *
+ * `mode` describes the returned text, independent of the owning span's
+ * traversal mode: 'full' = whole range text; 'signature' = signature-only
+ * extraction; 'summary' = body text line-capped at 80 lines.
+ *
+ * `hash` is the sha256 hex of the returned `text` — a content fingerprint.
+ * It is stable for a given source mode and file content; summary-mode hashes
+ * are cap-dependent by design because the text itself is truncated.
+ *
+ * `confidence` is a deterministic resolution-quality score in [0, 1]:
+ * 1.0 = the exact requested target symbol, 0.8 = a resolved neighbor with
+ * extracted text. Spans whose read failed or which lack an export range
+ * produce no snippet at all (their state surfaces via span.note, coverage,
+ * and warnings). It is NOT language grammar quality; issue #1532 (KG-11
+ * SymbolEdge v2) will replace this derivation with real edge confidence.
+ */
+export interface ContextPackSnippet {
+	file: string;
+	symbol: string;
+	startLine: number;
+	endLine: number;
+	mode: 'full' | 'signature' | 'summary';
+	text: string;
+	hash: string;
+	confidence: number;
+}
+
+/**
+ * Coverage accounting for a context pack (issue #1533).
+ *
+ * `unresolvedEdges` and `lowConfidenceEdges` count distinct destination
+ * SYMBOLS (keyed `file\0symbol`, collected at BFS first discovery), not edge
+ * instances — duplicate edges toward the same unresolved symbol count once.
+ * `lowConfidenceEdges` uses exactly the same predicate as the internal-symbol
+ * span fallback (destination file present, no own-property export range for
+ * the symbol), so coverage and spans can never disagree.
+ */
+export interface ContextPackCoverage {
+	reachedSymbols: number;
+	returnedSymbols: number;
+	omittedByBudget: number;
+	unresolvedEdges: number;
+	lowConfidenceEdges: number;
 }
 
 /**
@@ -346,6 +614,12 @@ export interface ContextPackResult {
 	note?: string;
 	/** Whether source text was embedded in spans (only present when include_source was requested). */
 	sourceIncluded?: boolean;
+	/** Source snippets with provenance; only present when include_source was requested. */
+	snippets?: ContextPackSnippet[];
+	/** Reach/omission and edge-resolution accounting; present on every result. */
+	coverage?: ContextPackCoverage;
+	/** Bounded, deduplicated non-fatal warnings (budget omissions, read failures, containment). */
+	warnings?: string[];
 }
 
 export interface AskHit {
@@ -409,6 +683,313 @@ export interface DeadExportsResult {
 	candidates: DeadExportCandidate[];
 	/** Human-readable note describing scope and limitations of the result. */
 	note: string;
+}
+
+// ============ KG-14 expanded graph query results (issue #1535) ============
+
+/** One symbol hit from `symbol_search`, with declaration metadata. */
+export interface SymbolHit {
+	/** Workspace-relative file path. */
+	file: string;
+	symbol: string;
+	/** Declaration kind; `null` on graphs predating schema 1.6.0 (no exportKinds). */
+	kind: GraphSymbolKind | null;
+	visibility: GraphSymbolVisibility;
+	language: string;
+	/** 1-based definition line; 0 when no line is known. */
+	line: number;
+	exported: boolean;
+	/** Which match tier produced this hit (results are tier-ordered). */
+	match: 'exact' | 'prefix' | 'substring' | 'subsequence';
+}
+
+export interface SymbolSearchResult {
+	query: string;
+	hits: SymbolHit[];
+	count: number;
+	budget: { returned: number; dropped: number };
+	/** False when the graph predates schema 1.6.0, so `kind` filters/hits degrade. */
+	kindSupported: boolean;
+	/** Present (non-empty) only when a filter or scan could not be fully applied. */
+	warnings: string[];
+}
+
+/**
+ * One symbol-level edge inside an impact cone. `relationshipKind`,
+ * `confidence`, and `resolution` come from the underlying `SymbolEdge` and
+ * are `null` for legacy (pre-1.5.0) edges.
+ */
+export interface ConeEntry {
+	/** Workspace-relative file path. */
+	file: string;
+	symbol: string;
+	direction: 'caller' | 'callee';
+	/** 1 = direct neighbor of the target. */
+	depth: number;
+	relationshipKind: SymbolEdgeKind | null;
+	confidence: number | null;
+	resolution: SymbolEdgeResolution | null;
+}
+
+/** Focused definition-first context for one symbol. */
+export interface SymbolContextResult {
+	found: boolean;
+	identity: {
+		file: string;
+		symbol: string;
+		symbolId: string | null;
+		kind: GraphSymbolKind | null;
+		visibility: GraphSymbolVisibility;
+		language: string;
+		startLine: number;
+		endLine: number | null;
+	} | null;
+	signature?: string;
+	source?: {
+		text: string;
+		mode: 'full' | 'signature' | 'summary';
+		hash: string;
+		startLine: number;
+		endLine: number;
+	};
+	callers: ConeEntry[];
+	callees: ConeEntry[];
+	/** Present only when resolution scanned stable IDs to match `symbolId`. */
+	symbolIdScan?: { computed: number; capped: boolean };
+	budget: { callersReturned: number; calleesReturned: number; dropped: number };
+	warnings: string[];
+	note?: string;
+}
+
+/** Structured impact cone for a file or file+symbol target. */
+export interface ImpactConeResult {
+	target: { file: string; symbol: string | null };
+	/** Symbol-level entries (empty when no symbol was given or the graph has no symbolEdges). */
+	entries: ConeEntry[];
+	/** File-level blast radius for the same target and depth — risk semantics identical to `blast_radius`. */
+	fileImpact: BlastRadiusResult;
+	risk: BlastRadiusResult['riskLevel'];
+	/** Fixed-vocabulary notes with counts (transitive spread, hubs, low-confidence edges, tests, boundaries). */
+	riskNotes: string[];
+	/** Cone files carrying the `test_file` role. */
+	tests: string[];
+	routes: Array<{ file: string; fact: RouteFact }>;
+	dataFacts: Array<{ file: string; fact: DataOperationFact }>;
+	securityFacts: Array<{ file: string; fact: SecurityFact }>;
+	boundaries: Array<{ name: string; files: string[] }>;
+	budget: { entriesReturned: number; dropped: number };
+	truncated: boolean;
+	warnings: string[];
+}
+
+/** One changed symbol mapped from a diff hunk (or listed file-level). */
+export interface DiffSymbolChange {
+	symbol: string;
+	kind: GraphSymbolKind | null;
+	startLine: number;
+	endLine: number;
+	/** Hunk-mode: changed graph lines that intersect the symbol span (bounded). */
+	changedLines: number[];
+}
+
+export interface DiffFileSummary {
+	/** Workspace-relative file path. */
+	file: string;
+	/** False when the changed file is not present in the graph (e.g. deleted or unscanned). */
+	known: boolean;
+	symbols: DiffSymbolChange[];
+	note?: string;
+}
+
+export interface DiffContextResult {
+	/** `hunk` when a diff text was parsed with line ranges; `file` when only file names were given. */
+	granularity: 'hunk' | 'file';
+	files: DiffFileSummary[];
+	impact: {
+		files: string[];
+		tests: string[];
+		risk: BlastRadiusResult['riskLevel'];
+		notes: string[];
+	};
+	budget: { returned: number; dropped: number };
+	truncated: boolean;
+	warnings: string[];
+}
+
+/**
+ * One reason a file/symbol/span is graph-relevant: its definition, the
+ * symbol edges that connect it, or file-level import relationships.
+ */
+export interface ExplainReason {
+	type:
+		| 'definition'
+		| 'referenced_by'
+		| 'references'
+		| 'imported_by'
+		| 'imports';
+	/** Workspace-relative file path of the OTHER side of the relationship (or the definition file). */
+	file: string;
+	symbol?: string;
+	kind: GraphSymbolKind | null;
+	relationshipKind?: SymbolEdgeKind;
+	/** Undefined for definition/import reasons; `null`-able inside evidence-bearing edges is avoided by omitting. */
+	confidence?: number;
+	resolution?: SymbolEdgeResolution;
+	evidence?: SymbolEdgeEvidence[];
+}
+
+export interface GraphExplainResult {
+	target: { file: string; symbol: string | null; line: number | null };
+	fileKnown: boolean;
+	/** When `line` was given: the symbol whose span contains it (smallest span wins). */
+	resolvedSpan?: { symbol: string; startLine: number; endLine: number };
+	definition?: {
+		file: string;
+		symbol: string;
+		kind: GraphSymbolKind | null;
+		visibility: GraphSymbolVisibility;
+		startLine: number;
+		endLine: number | null;
+	};
+	reasons: ExplainReason[];
+	budget: { returned: number; dropped: number };
+	warnings: string[];
+}
+
+// ============ KG-15 change-risk pack results (issue #1536) ============
+
+/** One matched route with its full change-risk pack (route_trace). */
+export interface RouteTraceRoute {
+	route: {
+		method: RouteMethod;
+		path: string;
+		line: number | null;
+		source: RouteSource;
+	};
+	/** Workspace-relative handler file. */
+	file: string;
+	/** Handler symbol from a HANDLES_ROUTE link; null on pre-1.7.0 graphs. */
+	handlerSymbol: string | null;
+	handlerConfidence: OntologyLinkConfidence | null;
+	/** The link's evidence line (handler declaration); null without a link. */
+	handlerEvidence: string | null;
+	/** Depth-1 non-test node dependencies of the handler file, deduped + sorted. */
+	services: string[];
+	/** Facts from the handler file and its services (each list <= 20). */
+	dataOperations: Array<{ file: string; fact: DataOperationFact }>;
+	security: Array<{ file: string; fact: SecurityFact }>;
+	/** Handler-file ontology findings (the unguarded-mutating-route surface). */
+	findings: Array<{ file: string; finding: OntologyFinding }>;
+	/** test_file-role importers of the handler/services files. */
+	tests: string[];
+}
+
+export interface RouteTraceResult {
+	target: {
+		routePath: string | null;
+		method: RouteMethod | null;
+		file: string | null;
+		symbol: string | null;
+	};
+	routes: RouteTraceRoute[];
+	/**
+	 * False on graphs predating schema 1.7.0: handler-symbol binding degrades
+	 * to null while the facts/edges-derived sections still populate.
+	 */
+	linksSupported: boolean;
+	budget: { returned: number; dropped: number };
+	truncated: boolean;
+	warnings: string[];
+}
+
+/** One reader/writer/deleter/configurer match for a traced subject (data_trace). */
+export interface DataTraceAccess {
+	file: string;
+	kind: 'READS' | 'WRITES' | 'DELETES' | 'CONFIGURES';
+	symbol: string | null;
+	line: number | null;
+	evidence: string | null;
+	confidence: OntologyLinkConfidence | null;
+	/** 'link' = schema 1.7.0 ontology link; 'fact' = DataOperationFact fallback (works on all schemas). */
+	via: 'link' | 'fact';
+}
+
+export interface DataTraceResult {
+	target: {
+		entity: string | null;
+		file: string | null;
+		symbol: string | null;
+	};
+	/** Resolved subject when `entity` was given (matched link subject or fact entity). */
+	subject: string | null;
+	readers: DataTraceAccess[];
+	writers: DataTraceAccess[];
+	deleters: DataTraceAccess[];
+	configurers: DataTraceAccess[];
+	/** Routes declared in files that touch the subject (<= 20). */
+	routes: Array<{ file: string; fact: RouteFact }>;
+	tests: string[];
+	/** Fixed-vocabulary advisory notes with counts. */
+	riskNotes: string[];
+	linksSupported: boolean;
+	budget: { returned: number; dropped: number };
+	truncated: boolean;
+	warnings: string[];
+}
+
+/** One test file associated with a target (test_pack). */
+export interface TestPackTestEntry {
+	file: string;
+	confidence: OntologyLinkConfidence;
+	/** 'import' = explicit import edge (high); 'colocated' = sibling-name heuristic (medium). */
+	basis: 'import' | 'colocated';
+	/** Why this association exists: the import specifier, or the colocated-name rationale. */
+	evidence: string;
+	/** Target exports referenced by the test (edge imported/used symbols ∩ target exports). */
+	coveredSymbols: string[];
+}
+
+/** A fixture-pattern file imported by at least one discovered test. */
+export interface TestPackFixture {
+	file: string;
+	usedBy: string[];
+	/** Derivation is a path-pattern heuristic — always medium. */
+	confidence: OntologyLinkConfidence;
+	/** The import specifier a test used to pull the fixture in. */
+	evidence: string;
+}
+
+/**
+ * A query-time-derived TESTS / USES_FIXTURE association, materialized with
+ * its evidence and confidence so the two derived link kinds are
+ * consumer-visible (they are never persisted on the graph).
+ */
+export interface DerivedAssociation {
+	kind: 'TESTS' | 'USES_FIXTURE';
+	/** Workspace-relative test file. */
+	fromFile: string;
+	/** Workspace-relative implementation or fixture file. */
+	toFile: string;
+	evidence: string;
+	confidence: OntologyLinkConfidence;
+}
+
+export interface TestPackResult {
+	target: { files: string[]; symbol: string | null };
+	tests: TestPackTestEntry[];
+	fixtures: TestPackFixture[];
+	/** Non-fixture node deps shared by >= 2 discovered tests or under test-support directories. */
+	helpers: string[];
+	/** Target exports with no detected test coverage (coverage hints). */
+	uncoveredExports: Array<{ file: string; symbol: string }>;
+	/** Fixed-vocabulary advisory notes (missing tests, uncovered exports, heuristic-only association). */
+	riskNotes: string[];
+	/** Derived TESTS / USES_FIXTURE associations (bounded, evidence + confidence). */
+	associations: DerivedAssociation[];
+	/** Aggregate across every bounded section: tests + fixtures + helpers + associations. */
+	budget: { returned: number; dropped: number };
+	truncated: boolean;
+	warnings: string[];
 }
 
 export interface GraphExtractionFailure {
@@ -476,10 +1057,40 @@ export interface GraphHealthResult {
 	unreadableFiles: string[];
 	validationSkippedFiles: string[];
 	lowConfidenceEdgeCount: number;
+	unresolvedSymbolEdgeCount: number;
 	walkTruncated: boolean;
 	walkTruncationReason: 'budget' | 'cap' | null;
 	incrementalFallbacks: number;
 	notes: string[];
+	/**
+	 * KG-14 additive summaries (issue #1535). Optional on the interface so
+	 * external constructors stay source-compatible; `getGraphHealth` always
+	 * populates them (zero-valued when the underlying data is absent).
+	 */
+	/** Symbol-edge population summary (legacy edges counted under `withV2Fields: false`). */
+	symbolEdgeSummary?: {
+		total: number;
+		withV2Fields: number;
+		lowConfidence: number;
+		unresolved: number;
+	};
+	/** Resolution-attribution histogram over symbol edges (includes `unrecorded`). */
+	resolutionBreakdown?: Record<string, number>;
+	/**
+	 * Stale composition from the freshness probe; `null` when no probe was
+	 * supplied. `probeTruncated` is `FreshnessProbe.truncated` — the freshness
+	 * WALK hitting its budget — and is deliberately a different signal from
+	 * build-time `walkTruncated` above (the graph BUILD walk).
+	 */
+	staleSummary?: {
+		changed: number;
+		removed: number;
+		probeTruncated: boolean;
+	} | null;
+	/** Extraction-failure histogram keyed by failure reason. */
+	extractionFailureSummary?: Record<string, number>;
+	/** How many nodes carry schema 1.6.0 `exportKinds` data. */
+	kindCoverage?: { nodesWithKinds: number; nodesTotal: number };
 }
 
 /** Authoritative states returned by the bounded repository freshness probe. */
@@ -530,6 +1141,8 @@ export interface RepoGraph {
 	schema_version: string;
 	/** Workspace root directory */
 	workspaceRoot: string;
+	/** Root-independent repository label used to scope stable symbol IDs. */
+	repoRootId?: string;
 	/** Graph nodes keyed by resolved file path */
 	nodes: Record<string, GraphNode>;
 	/** Graph edges representing dependencies */

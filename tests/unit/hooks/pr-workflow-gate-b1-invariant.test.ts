@@ -305,7 +305,9 @@ describe('pr-workflow-gate B1 invariant: no false positives on the settled path'
 		// The critic-coverage gate is never reached silently: completion blocks on
 		// reviewer settlement first, so critic coverage cannot be skipped.
 		const completion = await errorFrom(
-			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA),
+			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
+				reportVerdict: 'APPROVE',
+			}),
 		);
 		expect(completion?.message).toContain(
 			'reviewer items lack an authenticated verdict',
@@ -358,17 +360,19 @@ describe('pr-workflow-gate B1 invariant: no false positives on the settled path'
 describe('pr-workflow-gate B1 invariant: a legitimately empty critic inventory', () => {
 	test('no CONFIRMED CRITICAL/HIGH/MEDIUM verdict means critic coverage is genuinely not required', async () => {
 		await establishReviewPrerequisites();
-		// Every item is DISPROVED/LOW: the reviewer map is fully populated, and
+		// Every item is DISPROVED/NONE: the reviewer map is fully populated, and
 		// the critic inventory is empty because the *filter* excluded everything.
 		await settleReviewerPhase(
 			'rv-clean',
-			reviewed(BASE_IDS, 'DISPROVED', 'LOW'),
+			reviewed(BASE_IDS, 'DISPROVED', 'NONE'),
 		);
 		await expect(
 			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer'),
 		).resolves.toMatchObject({ mode: 'PR_REVIEW' });
 		const error = await errorFrom(
-			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA),
+			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
+				reportVerdict: 'APPROVE',
+			}),
 		);
 		// It passed the critic-coverage gate (no critic-related block, no
 		// invariant violation) and stopped at the next unrelated obligation.
@@ -387,7 +391,7 @@ describe('pr-workflow-gate B1 invariant: a legitimately empty critic inventory',
 					finding_id: findingId,
 					status: 'DISPROVED',
 					next_action: 'suppress_with_reason',
-					severity: 'LOW',
+					severity: 'NONE',
 				})),
 			),
 		).resolves.toBeUndefined();
@@ -399,10 +403,12 @@ describe('pr-workflow-gate B1 invariant: a legitimately empty critic inventory',
 		const suppressed = BASE_IDS.slice(2);
 		await settleReviewerPhase(
 			'rv-mixed',
-			`${reviewed(challenged)}\n${reviewed(suppressed, 'DISPROVED', 'LOW')}`,
+			`${reviewed(challenged)}\n${reviewed(suppressed, 'DISPROVED', 'NONE')}`,
 		);
 		const error = await errorFrom(
-			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA),
+			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
+				reportVerdict: 'APPROVE',
+			}),
 		);
 		// Non-empty critic inventory: coverage is demanded for exactly the two
 		// CONFIRMED/HIGH items and nothing else.
@@ -411,7 +417,9 @@ describe('pr-workflow-gate B1 invariant: a legitimately empty critic inventory',
 		);
 		await settleCriticPhase('critic-two', challenged);
 		const next = await errorFrom(
-			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA),
+			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
+				reportVerdict: 'APPROVE',
+			}),
 		);
 		expect(next?.message).toContain('requires durable findings checkpoints');
 		expect(next?.message).not.toContain('internal invariant violated');

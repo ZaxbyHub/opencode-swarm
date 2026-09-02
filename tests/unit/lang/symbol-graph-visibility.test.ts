@@ -84,6 +84,15 @@ describe('extractFileSymbols visibility metadata and exported semantics', () => 
 				privateName: 'private_fn',
 			},
 			{
+				// Anonymous namespaces give their contents internal linkage
+				// (issue #1530): the contained fn must not be exported.
+				grammarId: 'cpp',
+				source:
+					'int public_fn() { return 1; }\nnamespace {\nint anon_fn() { return 3; }\n}\n',
+				publicName: 'public_fn',
+				privateName: 'anon_fn',
+			},
+			{
 				grammarId: 'swift',
 				source: 'public class PublicS {}\nfileprivate class PrivateS {}',
 				publicName: 'PublicS',

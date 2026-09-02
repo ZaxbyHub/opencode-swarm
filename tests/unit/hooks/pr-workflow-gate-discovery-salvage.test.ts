@@ -30,9 +30,9 @@ const BASE_LANE = 'correctness-state';
 const MICRO_LANE = 'concurrency-state';
 
 const baseRow = (id: string, lane = BASE_LANE) =>
-	`[CANDIDATE] | ${id} | ${lane} | HIGH | correctness | src/a.ts:1 | claim | evidence | impact | HIGH`;
+	`[CANDIDATE] | ${id} | ${lane} | HIGH | correctness | src/a.ts:1 | claim | evidence | impact | HIGH | ORDINARY | `;
 const microRow = (id: string, lane = MICRO_LANE) =>
-	`[CANDIDATE] | ${id} | ${lane} | HIGH | concurrency | src/a.ts:1 | claim | invariant | evidence | HIGH`;
+	`[CANDIDATE] | ${id} | ${lane} | HIGH | concurrency | src/a.ts:1 | claim | invariant | evidence | HIGH | ORDINARY | `;
 
 describe('discovery artifact salvage', () => {
 	test('repairs an absent header and reports the repair', () => {

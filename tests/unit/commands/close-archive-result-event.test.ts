@@ -5,7 +5,13 @@
  * disagree (issue #2030 items 6, 9).
  */
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import path from 'node:path';
 import type { CloseStageContext } from '../../../src/commands/close.js';
 import { KnowledgeConfigSchema } from '../../../src/config/schema.js';

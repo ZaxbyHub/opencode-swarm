@@ -32,6 +32,8 @@ import type { MergeOperationProvenance } from '../../../src/worktree/merge';
 import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 const TASK_ID = '1.1';
+const realRemoveWorktreeProvisioningOwner =
+	_internals.removeWorktreeProvisioningOwner;
 
 function git(directory: string, args: string[]): string {
 	const result = spawnSync('git', ['-C', directory, ...args], {
@@ -226,6 +228,8 @@ describe('issue #2098 coder settlement isolated-worktree recovery', () => {
 	});
 
 	afterEach(() => {
+		_internals.removeWorktreeProvisioningOwner =
+			realRemoveWorktreeProvisioningOwner;
 		_internals.liveDispatches.clear();
 		standardWorktreeByCallID.clear();
 		awaitingMergeByCallID.clear();
@@ -298,6 +302,38 @@ describe('issue #2098 coder settlement isolated-worktree recovery', () => {
 		const walAfter = fs.readFileSync(walPath(fixture), 'utf8');
 		expect(await recoverCoderSettlement(fixture.repo, TASK_ID)).toBeNull();
 		expect(fs.readFileSync(walPath(fixture), 'utf8')).toBe(walAfter);
+	});
+
+	test('COMMITTED cleanup failure leaves the owner debt recoverable', async () => {
+		const fixture = createFixture('owner-cleanup-failure');
+		await begin(fixture);
+		commitAndLand(fixture);
+		await settleCoderDispatch({
+			directory: fixture.repo,
+			taskId: TASK_ID,
+			transitionId: fixture.transitionId,
+			accepted: true,
+			testEngineerExempt: false,
+		});
+		_internals.removeWorktreeProvisioningOwner = (() =>
+			false) as typeof _internals.removeWorktreeProvisioningOwner;
+
+		await expect(recoverCoderSettlement(fixture.repo, TASK_ID)).rejects.toThrow(
+			'CODER_SETTLEMENT_OWNER_CLEANUP_FAILED',
+		);
+		expect(fs.existsSync(fixture.worktree)).toBe(false);
+		expect(branchExists(fixture)).toBe(false);
+		expect(readWal(fixture)).toMatchObject({
+			state: 'COMMITTED',
+			cleanupComplete: false,
+		});
+		const ownerScan = scanWorktreeProvisioningOwnersForRecovery(fixture.repo);
+		expect(ownerScan.status).toBe('ok');
+		if (ownerScan.status === 'ok') {
+			expect(ownerScan.owners.map((owner) => owner.callID)).toEqual([
+				fixture.callID,
+			]);
+		}
 	});
 
 	test('canonical directory scope accepts an observed descendant during landed recovery', async () => {

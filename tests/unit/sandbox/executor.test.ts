@@ -4,8 +4,12 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
+	_internals,
 	_resetExecutorCache,
+	_resetSandboxAssessmentCache,
+	assessSandboxEnforcement,
 	getExecutor,
+	normalizeSandboxMechanism,
 	SandboxError,
 	type SandboxExecutor,
 } from '../../../src/sandbox/executor';
@@ -40,6 +44,7 @@ describe('getExecutor()', () => {
 	afterEach(() => {
 		// Reset after each test so module state doesn't pollute other tests
 		_resetExecutorCache();
+		_resetSandboxAssessmentCache();
 	});
 
 	test('getExecutor() returns a Promise', () => {
@@ -87,6 +92,7 @@ describe('_resetExecutorCache()', () => {
 
 	afterEach(() => {
 		_resetExecutorCache();
+		_resetSandboxAssessmentCache();
 	});
 
 	test('calling _resetExecutorCache() allows getExecutor() to run again', async () => {
@@ -110,5 +116,65 @@ describe('_resetExecutorCache()', () => {
 	test('_resetExecutorCache() is callable multiple times without error', () => {
 		expect(() => _resetExecutorCache()).not.toThrow();
 		expect(() => _resetExecutorCache()).not.toThrow();
+	});
+});
+
+describe('assessSandboxEnforcement()', () => {
+	const originalDetectSandboxCapability = _internals.detectSandboxCapability;
+
+	afterEach(() => {
+		_internals.detectSandboxCapability = originalDetectSandboxCapability;
+		_resetSandboxAssessmentCache();
+	});
+
+	test('returns a stable cache key for identical requirements', async () => {
+		const first = await assessSandboxEnforcement({
+			mode: 'required',
+			require_filesystem: true,
+			require_network: true,
+		});
+		const second = await assessSandboxEnforcement({
+			mode: 'required',
+			require_filesystem: true,
+			require_network: true,
+		});
+
+		expect(first.cacheKey).toBe(second.cacheKey);
+		expect(first.capability.identity).toBe(second.capability.identity);
+	});
+
+	test('regression FB-001: required mode canonicalizes the advisory PowerShell wrapper before checking strict policy support', async () => {
+		_internals.detectSandboxCapability = async () =>
+			({
+				v: 1,
+				status: 'enabled',
+				strength: 'advisory',
+				mechanism: 'PowerShell wrapper',
+				platform: 'win32',
+				filesystem: 'none',
+				network: 'none',
+				process: 'none',
+				effective: 'none',
+				reasons: ['advisory only'],
+				identity: 'win32:powershell-wrapper',
+			}) as Awaited<ReturnType<typeof originalDetectSandboxCapability>>;
+
+		const assessment = await assessSandboxEnforcement({ mode: 'required' });
+
+		expect(assessment.supported).toBe(false);
+		expect(assessment.satisfied).toBe(false);
+		expect(assessment.unsupported).toEqual(['network_mode']);
+	});
+
+	test('normalizeSandboxMechanism folds whitespace and punctuation to one stable identity', () => {
+		expect(normalizeSandboxMechanism('PowerShell wrapper')).toBe(
+			'powershellwrapper',
+		);
+		expect(normalizeSandboxMechanism('powershell-wrapper')).toBe(
+			'powershellwrapper',
+		);
+		expect(normalizeSandboxMechanism('native-runner/app-container')).toBe(
+			'nativerunnerappcontainer',
+		);
 	});
 });

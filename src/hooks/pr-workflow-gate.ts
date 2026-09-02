@@ -1,16 +1,16 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { type BigIntStats, readFileSync } from 'node:fs';
+import { type BigIntStats, type Dirent, readFileSync, statSync } from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import type { SessionStatus } from '@opencode-ai/sdk';
 import { z } from 'zod';
 import {
 	analyzeCandidateFields,
-	CANDIDATE_HEADERS,
 	type CandidateArtifactRepairKind,
 	type CandidateSeverity,
-	CLEAN_TEMPLATES,
 	candidateHeaderFamily,
+	type FindingsSeverity,
+	isCandidateSeverity,
 	normalizeCandidateArtifact,
 	type RowFormatFamily,
 	selectCandidateHeader,
@@ -27,12 +27,31 @@ import {
 	type BackgroundDelegationWorkflowLaneRecovery,
 	DEFAULT_STALE_DELEGATION_TIMEOUT_MS,
 	findByBatchId,
+	publishPrReviewResultReceipt,
 	readDelegations,
 	type SweepableDelegationStatus,
 	sweepStaleDelegations,
 } from '../background/pending-delegations.js';
+import { MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS } from '../background/pr-review-collection-receipt.js';
+import {
+	generatePrReviewRunId,
+	PR_REVIEW_BASE_DIMENSION_IDS,
+	PR_REVIEW_FINDINGS_MAX_BYTES,
+	PR_REVIEW_HANDOFF_MAX_BYTES,
+	type PrReviewLaneResultEnvelope,
+	PrReviewLaneResultEnvelopeSchema,
+	type PrReviewResultReceipt,
+	PrReviewResultReceiptSchema,
+	type PrReviewRiskImpact,
+	type PrReviewRiskTag,
+	PrReviewRunIdSchema,
+	prReviewFindingRequiresCritic,
+	prReviewLaneResultEnvelopeDigest,
+	prReviewLegacyTranscriptCompatibilityEnabled,
+} from '../background/pr-review-contract.js';
 import {
 	PR_REVIEW_REQUIRED_TRIGGER_IDS,
+	PR_REVIEW_TRIGGER_RECEIPT_MAX_BYTES,
 	type PrReviewInlineTriggerRow,
 	PrReviewInlineTriggerRowSchema,
 	parsePrReviewTriggerReceipt,
@@ -45,6 +64,7 @@ import {
 	resolveCommitCountSinceAsync,
 	resolveCurrentGitHead,
 	resolveCurrentGitHeadAsync,
+	resolveCurrentLocalHeadRefAsync,
 	resolveCurrentUpstreamPushTarget,
 	resolveCurrentUpstreamPushTargetAsync,
 	resolveCurrentUpstreamRemoteRef,
@@ -62,31 +82,174 @@ import {
 	resolvePrWorkflowRevisionDigestDetailedAsync,
 	resolveRemoteRefsContainingHead,
 	resolveRemoteRefsContainingHeadAsync,
+	resolveRemoteUrlIdentity,
+	resolveRemoteUrlIdentityAsync,
 	switchPrFeedbackTrackingCandidateAsync,
 } from '../background/workspace-snapshot.js';
 import { WRITE_TOOL_NAMES } from '../config/constants.js';
 import {
+	DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
 	type PrReviewResilienceConfig,
 	resolveGeneratedAgentRole,
 } from '../config/schema.js';
+import { appendCoreEventSync, readCoreEvents } from '../events/core-events.js';
 import {
 	classifyPrWorkflowGitState,
 	type PrWorkflowGitState,
 } from '../git/pr-workflow-state.js';
+import { redactSecrets } from '../memory/redaction.js';
+import { bindPrReviewReentryBindingReader } from '../pr-review/authorization.js';
+import {
+	adoptPrReviewCircuit,
+	CIRCUIT_TERMINAL_DELEGATION_STATUSES,
+	classifyPrReviewCircuitSignal,
+	type PrReviewCircuitAdoptionDiagnostic,
+	type PrReviewCircuitLegacyRecord,
+	PrReviewCircuitRecordSchema,
+	type PrReviewCircuitRecordV2,
+	type PrReviewCircuitSignal,
+	type PrReviewResiliencePolicyRecord,
+	resolvePrReviewResiliencePolicy,
+} from '../pr-review/circuit.js';
+// Issue #2385: the coverage/completion settlement boundary. The gate binds
+// its derivation helpers into the boundary at module init below; the two
+// state-returning entry points are re-exposed locally with their original
+// full-state signatures.
+import {
+	admitPrReviewPartialBaseCoverage as admitPrReviewPartialBaseCoverageFromCompletion,
+	allowedPrReviewReportVerdicts,
+	assertPrReviewBaseCoverageSettled as assertPrReviewBaseCoverageSettledFromCompletion,
+	bindPrReviewCompletionHelpers,
+	derivePrReviewDimensionSettlement,
+	type PrReviewBaseDimensionAttempts,
+	type PrReviewDimensionCancellationRecord,
+	PrReviewDimensionCancellationRecordSchema,
+	type PrReviewPartialBaseCoverageRecord,
+	PrReviewPartialBaseCoverageRecordSchema,
+	type PrReviewReportVerdict,
+	type PrReviewTerminalCoverageSettlement,
+	summarizePrReviewBaseDimensionAttempts,
+} from '../pr-review/completion.js';
+// Issue #2385: the legacy transcript adapter boundary. Raw transcript /
+// artifact-text -> canonical conversion exists only in
+// src/pr-review/legacy-transcript-adapter.ts; the guardrail scanner
+// (src/pr-review/guardrails.ts) allows the conversion identifiers only there,
+// so this gate consumes the adapter through the `legacy*` aliases, the test
+// surface, and the shared composition types below.
+import {
+	analyzeLegacyVerdictRowContract,
+	bindPrReviewTranscriptAdapterHelpers,
+	composePrReviewPhaseVerdicts,
+	legacyArtifactHasExactPositiveVerdictRow,
+	legacyFeedbackArtifactCoversItems,
+	legacyFeedbackArtifactTextCoversItems,
+	legacyTranscriptAdapterTestSurface,
+	type PrReviewComposablePhase,
+	type PrReviewItemClaim,
+	type PrReviewPhaseComposition,
+	parseCriticVerdict,
+	readLegacySettledFeedbackClassifications,
+	reviewerItemBindingKey,
+} from '../pr-review/legacy-transcript-adapter.js';
+// Issue #2385: the atomic persistence boundary. The gate binds its
+// `_test_exports` object and its full state codec at module init below; all
+// seam properties are read at call time through the bound reference.
+import {
+	bindPrReviewPersistenceHooks,
+	bindPrReviewStateCodec,
+	CHECKOUT_MUTATION_ACTION_TIMEOUT_MS,
+	defaultPersistenceHooks,
+	forgetTrackedPrWorkflowState,
+	isoNow,
+	MAX_TRACKED_SESSIONS,
+	normalizeComparableFsPath,
+	normalizeSessionID,
+	readPrWorkflowGateStateFileFromDisk,
+	readPrWorkflowGateStateFromDisk as readPrWorkflowStateFromDiskBound,
+	rememberState,
+	resetPrReviewPersistenceCaches,
+	sameBigIntFileIdentity,
+	WORKFLOW_GATE_DIR,
+	withPrWorkflowCheckoutMutationLock,
+	withSessionStateMutation,
+	workflowCheckoutMutationLockRelativePath,
+	workflowGateStateLockRelativePath,
+	workflowGateStatePath,
+	workflowGateStateRelativePath,
+	writeAtomicJson,
+	writeStateWhileLocked,
+} from '../pr-review/persistence.js';
+import { reducePrReviewEvent } from '../pr-review/reducer.js';
+import type {
+	PrReviewEffect,
+	PrReviewEvent,
+	PrReviewWorkflowState,
+} from '../pr-review/types.js';
+import { canonicalWorkspaceIdentity } from '../scope/scope-binding.js';
 import { swarmState } from '../state.js';
 import { getPrWorkflowToolCapability } from '../tools/tool-metadata.js';
-import { warn } from '../utils/logger.js';
+import { log, warn } from '../utils/logger.js';
 import { withTimeout } from '../utils/timeout.js';
+import { normalizeToolName } from './normalize-tool-name.js';
 import { validateSwarmPath } from './utils.js';
 
-export const PR_REVIEW_BASE_DIMENSION_IDS = [
-	'intent-architecture',
-	'correctness-state',
-	'tests-falsifiability',
-	'security-trust',
-	'reliability-performance',
-	'compatibility-delivery',
-] as const;
+export type {
+	PrReviewDimensionCancellationRecord,
+	PrReviewDimensionTerminalState,
+	PrReviewPartialBaseCoverageRecord,
+	PrReviewPartialBaseCoverageRecordV1,
+	PrReviewPartialBaseCoverageRecordV2,
+	PrReviewReportVerdict,
+	PrReviewTerminalCoverageKind,
+	PrReviewTerminalCoverageSettlement,
+	PrReviewUnresolvedDimensionRecord,
+} from '../pr-review/completion.js';
+
+// Issue #2385: completion-owned surfaces re-exported for existing importers
+// (tools, tests) — the gate remains the public import surface.
+export {
+	allowedPrReviewReportVerdicts,
+	normalizePrReviewPartialBaseCoverageRecord,
+	PR_REVIEW_REPORT_VERDICTS,
+	readPrReviewTerminalCoverageForReport,
+	rollbackPrReviewPartialBaseCoverageAdmission,
+} from '../pr-review/completion.js';
+// Issue #2385: persistence-owned surfaces re-exported for existing importers
+// (pr-feedback-event-queue.ts, prepare-pr-workflow-checkout.ts, tests).
+export {
+	ensurePrWorkflowSafeParentDirectory,
+	PrWorkflowCheckoutMutationTimeoutError,
+	prWorkflowSessionFileStem,
+	withPrWorkflowCheckoutMutationLock,
+	writePrWorkflowAtomicJson,
+} from '../pr-review/persistence.js';
+
+// Issue #2385 compile-time guarantee: the gate's full state structurally
+// satisfies the PR-review slice the reducer governs (one field definition;
+// the gate only ADDS non-PR-review fields). If this assertion fails, the
+// slice in src/pr-review/types.ts drifted from the gate state.
+type _GateStateSatisfiesPrReviewSlice =
+	PrWorkflowGateState extends PrReviewWorkflowState ? true : never;
+const _gateStateSliceAssertion: _GateStateSatisfiesPrReviewSlice = true;
+void _gateStateSliceAssertion;
+
+/** Typed disk read over the bound codec (gate callers want the full state). */
+function readPrWorkflowGateStateFromDisk(
+	directory: string,
+	sessionID: string,
+): Promise<PrWorkflowGateState | null> {
+	return readPrWorkflowStateFromDiskBound<PrWorkflowGateState>(
+		directory,
+		sessionID,
+	);
+}
+
+/**
+ * Re-exported for compatibility: the canonical six-dimension list is owned by
+ * the PR-review contract module (issue #2383 single-source rule; a
+ * source-scan guard test enforces it).
+ */
+export { PR_REVIEW_BASE_DIMENSION_IDS };
 
 export const PR_REVIEW_REQUIRED_MICRO_LANE_IDS = PR_REVIEW_REQUIRED_TRIGGER_IDS;
 
@@ -136,7 +299,9 @@ export type PrReviewLaneValidationPredicate =
 	| 'discovery.header'
 	| 'discovery.row'
 	| 'discovery.coverage'
-	| 'discovery.duplicate_evidence';
+	| 'discovery.duplicate_evidence'
+	| 'reviewer.verdict_rows'
+	| 'critic.verdict_rows';
 
 export interface PrReviewLaneValidationFailure {
 	predicate: PrReviewLaneValidationPredicate;
@@ -173,6 +338,9 @@ export interface PrReviewDiscoveryLaneValidationInput {
 		prHeadSha: string;
 		gitHead: string;
 		revisionDigest: string;
+		workflowInstanceId?: string;
+		workflowRevision?: number;
+		baseSha?: string;
 		reviewScope?: string;
 		checkWorkflowLane?: boolean;
 	};
@@ -186,12 +354,24 @@ export interface PrWorkflowTransportRecoveryValidationInput {
 	revisionDigest: string;
 }
 
+export interface PrReviewVerdictCollectionReceipt {
+	assignedReviewItemIds: string[];
+	acceptedReviewItemIds: string[];
+	rejectedReviewItemIds: string[];
+}
+
 export type PrWorkflowTransportRecoveryValidationResult =
 	| {
 			ok: true;
 			recoveries?: readonly BackgroundDelegationWorkflowLaneRecovery[];
+			receipt?: PrReviewVerdictCollectionReceipt;
 	  }
-	| { ok: false; reason: string };
+	| {
+			ok: false;
+			reason: string;
+			failure?: PrReviewLaneValidationFailure;
+			receipt?: PrReviewVerdictCollectionReceipt;
+	  };
 
 export interface PrWorkflowCheckoutRecoveryRecord {
 	code:
@@ -342,14 +522,6 @@ interface PrReviewBaseDispatchRecord {
 	validatedAt: string;
 }
 
-interface PrReviewResiliencePolicyRecord {
-	enabled: boolean;
-	canaryProbeMs: number;
-	statusProbeTimeoutMs: number;
-	correlatedFailureThreshold: number;
-	maxRetryAttemptsAfterInitial: number;
-}
-
 interface PrReviewResilienceAttemptRecord {
 	attempt: 0 | 1 | 2;
 	targetDimensions: PrReviewBaseDimensionId[];
@@ -360,12 +532,14 @@ interface PrReviewResilienceAttemptRecord {
 	fanoutBatchId?: string;
 }
 
-interface PrReviewResilienceCircuitRecord {
-	signature: string;
-	count: number;
-	contributors: Array<{ batchId: string; laneId: string }>;
-	openedAt: string;
-}
+/**
+ * Issue #2382: the persisted circuit is a versioned union. The unversioned
+ * pre-#2382 shape migrates once to a nonblocking v2 record on first adoption
+ * (see `adoptPrReviewCircuit`); malformed records fail open.
+ */
+type PrReviewResilienceCircuitRecord =
+	| PrReviewCircuitLegacyRecord
+	| PrReviewCircuitRecordV2;
 
 interface PrReviewResilienceStateRecord {
 	policy: PrReviewResiliencePolicyRecord;
@@ -442,6 +616,120 @@ interface PrFeedbackReadyToPublishRecord {
 	validatedAt: string;
 }
 
+/**
+ * Issue #2108: durable publication-generation state machine. The legacy
+ * {@link PrFeedbackReadyToPublishRecord} above becomes a derived mirror that
+ * is present exactly while the active generation is `{armed, push_in_flight}`
+ * (or a legacy record awaits migration), so a rolled-back binary keeps
+ * enforcing the armed window instead of turning permissive.
+ */
+export type PrFeedbackPublicationGenerationState =
+	// `reviewing` is RESERVED (issue #2108 §1 requires it in the schema; the
+	// pre-arming ladder lives in the ordinary workflow fields, so no
+	// generation record is created until `complete_pr_workflow` arms — a
+	// generation never persists in this state today, and parsing it back
+	// stays fail-closed for hand-edited state).
+	| 'reviewing'
+	| 'armed'
+	| 'invalidated'
+	| 'push_in_flight'
+	| 'published'
+	| 'cancelled_without_publication';
+export interface PrFeedbackPublicationEvidenceJoin {
+	stageAValidatedAt: string;
+	batches: Array<{
+		phase: PrFeedbackGatePhase;
+		batchId: string;
+		laneId: string;
+	}>;
+}
+
+export interface PrFeedbackPublicationGeneration {
+	schemaVersion: 1;
+	generation: number;
+	state: PrFeedbackPublicationGenerationState;
+	/** Canonical workspace identity at arming (`canonicalWorkspaceIdentity`). */
+	workspaceIdentity: string;
+	sessionID: string;
+	/** HTTPS PR URL bound at arming (PR identity disclosure), when present. */
+	prTargetUrl?: string;
+	/** Immutable intake head the approved commit descends from. */
+	intakeHeadSha: string;
+	/** Local branch ref resolved at arming. */
+	localHeadRef: string;
+	/** Exact approved local head commit. */
+	localHead: string;
+	remoteName: string;
+	/** Credential-redacted remote URL identity (`git remote get-url`). */
+	remoteUrlIdentity?: string;
+	remoteBranchRef: string;
+	remoteRef: string;
+	revisionDigest: string;
+	/** The exact receipt set that authorized this generation. */
+	evidence: PrFeedbackPublicationEvidenceJoin;
+	invalidationReason?: string;
+	supersededByGeneration?: number;
+	createdAt: string;
+	armedAt?: string;
+	invalidatedAt?: string;
+	publishedAt?: string;
+	cancelledAt?: string;
+}
+
+export type PrFeedbackPushAttemptOutcome =
+	| 'completed'
+	| 'rejected'
+	| 'uncertain'
+	| 'cancelled';
+
+export interface PrFeedbackPushAttempt {
+	attemptId: string;
+	generation: number;
+	sessionID: string;
+	callID?: string;
+	/** SHA-256 over the canonical intent JSON. */
+	intentDigest: string;
+	intent: { remote: string; sourceSha: string; destRef: string };
+	prePush: {
+		localHead: string;
+		worktreeClean: boolean;
+		remoteName: string;
+		remoteBranchRef: string;
+		observedRemoteHead: string | null;
+	};
+	startedAt: string;
+	result?: {
+		outcome: PrFeedbackPushAttemptOutcome;
+		exitStatus: number | 'not-observed';
+		/** Bounded (<=500 chars) and secret-redacted. */
+		diagnostic: string;
+		postPush: {
+			localHead: string | null;
+			observedRemoteHead: string | null;
+		};
+		completedAt: string;
+	};
+}
+
+export interface PrFeedbackPublicationState {
+	schemaVersion: 1;
+	active?: PrFeedbackPublicationGeneration;
+	/** Bounded superseded-generation summaries (last 4). */
+	history: PrFeedbackPublicationGeneration[];
+	/** Bounded attempt records for the active generation (last 8). */
+	attempts: PrFeedbackPushAttempt[];
+}
+
+/** Bounded history retention (issue #2108: bounded, authoritative summaries). */
+const MAX_PUBLICATION_HISTORY_GENERATIONS = 4;
+const MAX_PUBLICATION_ATTEMPTS = 8;
+/** Bounded length for any persisted attempt diagnostic. */
+const MAX_PUSH_ATTEMPT_DIAGNOSTIC_CHARS = 500;
+/** Version of the publication-generation + attempt schemas. */
+const PUBLICATION_SCHEMA_VERSION = 1 as const;
+const PUBLICATION_URL_CREDENTIALS_PATTERN =
+	/\b([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/g;
+
 export type PrWorkflowCompletionStatus =
 	| 'completed'
 	| 'ready-to-publish'
@@ -462,7 +750,22 @@ type PrReviewArtifactRecord = {
 		| 'report'
 		| 'suppress_with_reason'
 		| 'handoff_to_feedback';
-	severity?: CandidateSeverity;
+	/**
+	 * Optional in the TYPE only so a legacy findings row persisted before
+	 * required-severity landed still loads (`readFindings` JSON-parses without
+	 * re-validating). Presence is REQUIRED by
+	 * `assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts`, which treats an
+	 * omitted severity as a mismatch rather than skipping the check (issue #2279).
+	 */
+	severity?: FindingsSeverity;
+	/**
+	 * Typed risk metadata (issue #2383). Optional in the TYPE for the same
+	 * legacy-read reason as `severity`; the WRITE boundary requires both on
+	 * every CONFIRMED record, and this validator compares CONFIRMED records
+	 * against the authoritative reviewer verdict's typed values.
+	 */
+	risk_impact?: PrReviewRiskImpact;
+	risk_tags?: PrReviewRiskTag[];
 };
 
 interface PrFeedbackScopeDeclarationRecord {
@@ -499,8 +802,9 @@ interface PrReviewValidationBatchRecord {
 interface PrReviewBatchCoherenceRecord {
 	/**
 	 * The exact candidate/critic inventory this batch's ownership was validated
-	 * against at record time (the same set `assertExactStringSet` compared the
-	 * declared lane items to).
+	 * against at record time. A batch may own a subset of this inventory; retaining
+	 * the full set here prevents stale partial batches from contributing after the
+	 * mechanically derived inventory changes.
 	 */
 	validatedInventory: string[];
 	/**
@@ -512,6 +816,8 @@ interface PrReviewBatchCoherenceRecord {
 	 * claims it invalidated and leaves its siblings intact.
 	 */
 	reviewerItemBindings?: Record<string, string>;
+	/** Key encoding for reviewerItemBindings; absent means legacy raw item IDs. */
+	reviewerItemBindingKeyEncoding?: 'prefixed-v1';
 }
 
 export interface PrWorkflowGateState {
@@ -539,6 +845,8 @@ export interface PrWorkflowGateState {
 	/** @deprecated Compatibility projection of the most recent base dispatch. */
 	prReviewBaseDispatch?: PrReviewBaseDispatchRecord;
 	prReviewResilience?: PrReviewResilienceStateRecord;
+	/** Dimensions that consumed their one contract-only retry; top-level for rollback readability. */
+	prReviewContractRetryDimensions?: PrReviewBaseDimensionId[];
 	/** Canonical ordered semantic ledger frozen by the first micro dispatch. */
 	prReviewTriggerLedger?: PrReviewInlineTriggerRow[];
 	prReviewTriggerEvalPath?: string;
@@ -573,9 +881,28 @@ export interface PrWorkflowGateState {
 	 * already spent.
 	 */
 	prReviewRetiredConsolidatedLanes?: string[];
+	/**
+	 * Durably reserved run_id for the current PR_REVIEW workflow before either
+	 * writer has successfully committed its artifact. This lets omitted run_id
+	 * calls infer the same run across retries/restarts and keeps the reservation
+	 * separate from the trigger/findings completion receipts.
+	 */
+	prReviewReservedRunId?: string;
 	prReviewArtifactRunId?: string;
 	prReviewFindingsPath?: string;
 	prReviewArtifactBoundaries?: PrReviewArtifactBoundary[];
+	prReviewPartialBaseCoverage?: PrReviewPartialBaseCoverageRecord;
+	prReviewCoverageDisclosurePath?: string;
+	prReviewCoverageDisclosureDigest?: string;
+	/**
+	 * Explicit per-dimension cancellations (issue #2383), written only by the
+	 * audited armed-recovery operation. A cancelled dimension is terminal for
+	 * settlement purposes and never counts as covered. Bounded to the six
+	 * canonical dimensions by key.
+	 */
+	prReviewDimensionCancellations?: Partial<
+		Record<PrReviewBaseDimensionId, PrReviewDimensionCancellationRecord>
+	>;
 	prReviewHandoffPath?: string;
 	prReviewHandoffRequired?: boolean;
 	checkoutRecovery?: PrWorkflowCheckoutRecoveryRecord;
@@ -606,6 +933,20 @@ export interface PrWorkflowGateState {
 	prFeedbackGateBatches?: PrFeedbackGateBatchRecord[];
 	prFeedbackReadyToPublish?: PrFeedbackReadyToPublishRecord;
 	/**
+	 * Issue #2108: audited publication generations + push attempts. The
+	 * authoritative publication state machine; `prFeedbackReadyToPublish`
+	 * above is its derived rollback mirror. Optional so pre-#2108 state (and
+	 * older binaries, via the root `.passthrough()`) loads unchanged.
+	 */
+	prFeedbackPublication?: PrFeedbackPublicationState;
+	/**
+	 * Issue #2383: audited armed-recovery marker. Present only after an armed
+	 * workflow was explicitly recovered — lanes settled, one bounded audit
+	 * event appended, staged publication authorization invalidated — leaving a
+	 * recoverable terminal state that preserves validated work.
+	 */
+	prFeedbackArmedRecovery?: PrFeedbackArmedRecoveryRecord;
+	/**
 	 * Issue #2131 criterion C2: count of controlled base-sync/rebind transitions.
 	 * Each rebind moves the immutable intake head to a new verified remote PR
 	 * head after merge/rebase/conflict repair and invalidates every
@@ -616,14 +957,7 @@ export interface PrWorkflowGateState {
 	prFeedbackScopes?: PrFeedbackScopeDeclarationRecord[];
 }
 
-interface SessionStateMutationLock {
-	ownerToken: string;
-	pid: number;
-	createdAtMs: number;
-}
-
 const GATE_SCHEMA_VERSION = 1 as const;
-const MAX_TRACKED_SESSIONS = 200;
 const MAX_WORKFLOW_BATCHES = 128;
 /**
  * Every valid PR_REVIEW base batch partitions the fixed six-dimension base
@@ -686,13 +1020,6 @@ const MAX_RETIRED_FEEDBACK_ITEM_OWNERS = 4096;
  * instead.
  */
 export const MAX_PR_FEEDBACK_INVENTORY_AMENDMENTS = 128;
-const WINDOWS_RENAME_MAX_RETRIES = 3;
-const RENAME_RETRY_DELAY_MS = 10;
-const STATE_MUTATION_LOCK_MAX_ATTEMPTS = 50;
-const STATE_MUTATION_LOCK_RETRY_DELAY_MS = 10;
-const STATE_MUTATION_LOCK_UNINITIALIZED_STALE_MS = 30_000;
-const MAX_COMPLETED_CHECKOUT_LOCK_OWNERS = 64;
-const CHECKOUT_MUTATION_ACTION_TIMEOUT_MS = 5 * 60_000;
 const MAX_PR_WORKFLOW_GATE_DIRECTORY_ENTRIES = MAX_TRACKED_SESSIONS * 2 + 1;
 const MAX_CANDIDATE_ISSUES_PER_ARTIFACT = 8;
 const MAX_BASE_COVERAGE_DIAGNOSTICS = 8;
@@ -700,20 +1027,8 @@ const MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS = 1_000;
 const MAX_LANE_VALIDATION_VALUE_CHARS = 240;
 const DISPATCH_TOOL_NAME = 'dispatch_lanes_async';
 const BLOCKING_DISPATCH_TOOL_NAME = 'dispatch_lanes';
-const WORKFLOW_GATE_DIR = 'pr-workflow-gates';
-const trackedStatesByProjectSession = new Map<string, PrWorkflowGateState>();
-const pendingStateMutationsByProjectSession = new Map<string, Promise<void>>();
-const pendingCheckoutMutationsByProject = new Map<string, Promise<void>>();
-const completedCheckoutLockOwners = new Map<string, string>();
 
-const PrReviewBaseDimensionIdSchema = z.enum([
-	'intent-architecture',
-	'correctness-state',
-	'tests-falsifiability',
-	'security-trust',
-	'reliability-performance',
-	'compatibility-delivery',
-]);
+const PrReviewBaseDimensionIdSchema = z.enum(PR_REVIEW_BASE_DIMENSION_IDS);
 
 const PrReviewBaseDispatchRecordSchema = z
 	.object({
@@ -745,6 +1060,12 @@ const PrReviewResiliencePolicyRecordSchema = z
 		statusProbeTimeoutMs: z.number().int().positive(),
 		correlatedFailureThreshold: z.number().int().min(2).max(8),
 		maxRetryAttemptsAfterInitial: z.number().int().min(0).max(2),
+		circuitOpenDurationMs: z
+			.number()
+			.int()
+			.min(1_000)
+			.max(1_800_000)
+			.optional(),
 	})
 	.strict();
 
@@ -763,34 +1084,11 @@ const PrReviewResilienceAttemptRecordSchema = z
 	})
 	.strict();
 
-const PrReviewResilienceCircuitRecordSchema = z
-	.object({
-		signature: z.string().min(1).max(512),
-		count: z
-			.number()
-			.int()
-			.min(2)
-			.max(MAX_PR_REVIEW_RESILIENCE_CIRCUIT_CONTRIBUTORS),
-		contributors: z
-			.array(
-				z
-					.object({
-						batchId: z.string().min(1),
-						laneId: z.string().min(1),
-					})
-					.strict(),
-			)
-			.min(2)
-			.max(MAX_PR_REVIEW_RESILIENCE_CIRCUIT_CONTRIBUTORS),
-		openedAt: z.string().min(1),
-	})
-	.strict();
-
 const PrReviewResilienceStateRecordSchema = z
 	.object({
 		policy: PrReviewResiliencePolicyRecordSchema,
 		attempts: z.array(PrReviewResilienceAttemptRecordSchema).max(3),
-		circuit: PrReviewResilienceCircuitRecordSchema.optional(),
+		circuit: PrReviewCircuitRecordSchema.optional(),
 	})
 	.strict();
 
@@ -909,6 +1207,121 @@ const PrFeedbackReadyToPublishRecordSchema = z
 	})
 	.strict();
 
+const PrFeedbackPublicationEvidenceJoinSchema = z
+	.object({
+		stageAValidatedAt: z.string().min(1),
+		// May be empty ONLY on conservatively-invalidated legacy migrations
+		// where no batch could be resolved; arming a live generation always
+		// requires the full one-batch-per-phase join (buildPublicationEvidenceJoin).
+		batches: z.array(
+			z
+				.object({
+					phase: z.enum([
+						'stage-b-reviewer',
+						'stage-b-test',
+						'closeout-reviewer',
+						'closeout-critic',
+					]),
+					batchId: z.string().min(1),
+					laneId: z.string().min(1),
+				})
+				.strict(),
+		),
+	})
+	.strict();
+
+const PrFeedbackPublicationGenerationSchema = z
+	.object({
+		schemaVersion: z.literal(PUBLICATION_SCHEMA_VERSION),
+		generation: z.number().int().positive(),
+		state: z.enum([
+			'reviewing',
+			'armed',
+			'invalidated',
+			'push_in_flight',
+			'published',
+			'cancelled_without_publication',
+		]),
+		workspaceIdentity: z.string().min(1),
+		sessionID: z.string().min(1),
+		prTargetUrl: z.string().min(1).optional(),
+		intakeHeadSha: z.string().min(1),
+		localHeadRef: z.string().min(1),
+		localHead: z.string().min(1),
+		remoteName: z.string().min(1),
+		remoteUrlIdentity: z.string().min(1).optional(),
+		remoteBranchRef: z.string().startsWith('refs/heads/'),
+		remoteRef: z.string().startsWith('refs/remotes/'),
+		revisionDigest: z.string().min(1),
+		evidence: PrFeedbackPublicationEvidenceJoinSchema,
+		invalidationReason: z.string().min(1).optional(),
+		supersededByGeneration: z.number().int().positive().optional(),
+		createdAt: z.string().min(1),
+		armedAt: z.string().min(1).optional(),
+		invalidatedAt: z.string().min(1).optional(),
+		publishedAt: z.string().min(1).optional(),
+		cancelledAt: z.string().min(1).optional(),
+	})
+	.strict();
+
+const PrFeedbackPushAttemptSchema = z
+	.object({
+		attemptId: z.string().min(1),
+		generation: z.number().int().positive(),
+		sessionID: z.string().min(1),
+		callID: z.string().min(1).optional(),
+		intentDigest: z.string().regex(/^[0-9a-f]{64}$/),
+		intent: z
+			.object({
+				remote: z.string().min(1),
+				sourceSha: z.string().min(1),
+				destRef: z.string().startsWith('refs/heads/'),
+			})
+			.strict(),
+		prePush: z
+			.object({
+				localHead: z.string().min(1),
+				worktreeClean: z.boolean(),
+				remoteName: z.string().min(1),
+				remoteBranchRef: z.string().startsWith('refs/heads/'),
+				// Observed remote heads flow through the injectable resolver
+				// seam; test seams legitimately return non-hex sentinels, and the
+				// resolver's own bounded-subprocess discipline governs production.
+				observedRemoteHead: z.string().min(1).nullable(),
+			})
+			.strict(),
+		startedAt: z.string().min(1),
+		result: z
+			.object({
+				outcome: z.enum(['completed', 'rejected', 'uncertain', 'cancelled']),
+				exitStatus: z.union([z.number().int(), z.literal('not-observed')]),
+				diagnostic: z.string().max(MAX_PUSH_ATTEMPT_DIAGNOSTIC_CHARS),
+				postPush: z
+					.object({
+						localHead: z.string().min(1).nullable(),
+						observedRemoteHead: z.string().min(1).nullable(),
+					})
+					.strict(),
+				completedAt: z.string().min(1),
+			})
+			.strict()
+			.optional(),
+	})
+	.strict();
+
+const PrFeedbackPublicationStateSchema = z
+	.object({
+		schemaVersion: z.literal(PUBLICATION_SCHEMA_VERSION),
+		active: PrFeedbackPublicationGenerationSchema.optional(),
+		history: z
+			.array(PrFeedbackPublicationGenerationSchema)
+			.max(MAX_PUBLICATION_HISTORY_GENERATIONS),
+		attempts: z
+			.array(PrFeedbackPushAttemptSchema)
+			.max(MAX_PUBLICATION_ATTEMPTS),
+	})
+	.strict();
+
 /**
  * One appended PR_FEEDBACK inventory entry (issue #2242 R3). `batch` groups the
  * entries appended by a single `declarePrFeedbackInventory` call so an auditor
@@ -936,7 +1349,11 @@ const PrReviewValidationBatchRecordSchema = z
 					.object({
 						laneId: z.string().min(1),
 						workflowLane: z.string().min(1),
-						reviewItemIds: z.array(z.string().min(1)).min(1).optional(),
+						reviewItemIds: z
+							.array(z.string().min(1))
+							.min(1)
+							.max(MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS)
+							.optional(),
 					})
 					.strict(),
 			)
@@ -954,6 +1371,7 @@ const PrReviewBatchCoherenceRecordSchema = z
 		reviewerItemBindings: z
 			.record(z.string().min(1), z.string().regex(/^[0-9a-f]{64}$/))
 			.optional(),
+		reviewerItemBindingKeyEncoding: z.literal('prefixed-v1').optional(),
 	})
 	.passthrough();
 
@@ -1040,6 +1458,10 @@ const PrWorkflowGateStateSchema = z
 			.optional(),
 		prReviewBaseDispatch: PrReviewBaseDispatchRecordSchema.optional(),
 		prReviewResilience: PrReviewResilienceStateRecordSchema.optional(),
+		prReviewContractRetryDimensions: z
+			.array(PrReviewBaseDimensionIdSchema)
+			.max(PR_REVIEW_BASE_DIMENSION_IDS.length)
+			.optional(),
 		prReviewTriggerLedger: z
 			.array(PrReviewInlineTriggerRowSchema)
 			.length(PR_REVIEW_REQUIRED_TRIGGER_IDS.length)
@@ -1065,8 +1487,22 @@ const PrWorkflowGateStateSchema = z
 			.array(z.string().min(1))
 			.max(MAX_RETIRED_CONSOLIDATED_LANES)
 			.optional(),
+		prReviewReservedRunId: z.string().min(1).optional(),
 		prReviewArtifactRunId: z.string().min(1).optional(),
 		prReviewFindingsPath: z.string().min(1).optional(),
+		prReviewPartialBaseCoverage:
+			PrReviewPartialBaseCoverageRecordSchema.optional(),
+		prReviewCoverageDisclosurePath: z.string().min(1).max(512).optional(),
+		prReviewCoverageDisclosureDigest: z
+			.string()
+			.regex(/^[0-9a-f]{64}$/)
+			.optional(),
+		prReviewDimensionCancellations: z
+			.record(
+				z.enum(PR_REVIEW_BASE_DIMENSION_IDS),
+				PrReviewDimensionCancellationRecordSchema,
+			)
+			.optional(),
 		prReviewArtifactBoundaries: z
 			.array(z.enum(['post_explorer', 'post_reviewer', 'post_critic']))
 			.max(3)
@@ -1103,6 +1539,21 @@ const PrWorkflowGateStateSchema = z
 			.max(MAX_WORKFLOW_BATCHES)
 			.optional(),
 		prFeedbackReadyToPublish: PrFeedbackReadyToPublishRecordSchema.optional(),
+		// Issue #2108 publication-generation state machine. Optional both ways:
+		// pre-#2108 state omits it, and older binaries carry it through the
+		// root `.passthrough()` below without deleting it.
+		prFeedbackPublication: PrFeedbackPublicationStateSchema.optional(),
+		// Issue #2383 armed-recovery recoverable-terminal marker.
+		prFeedbackArmedRecovery: z
+			.object({
+				recoveredAt: z.string().datetime(),
+				prHeadSha: z.string().regex(/^[0-9a-f]{6,64}$/i),
+				revisionDigest: z.string().min(1).max(256),
+				generation: z.number().int().nonnegative(),
+				reason: z.string().min(1).max(500),
+			})
+			.strict()
+			.optional(),
 		prFeedbackRebindCount: z.number().int().nonnegative().optional(),
 		prFeedbackScopes: z
 			.array(PrFeedbackScopeDeclarationRecordSchema)
@@ -1293,11 +1744,159 @@ export async function readPrWorkflowGateState(
 	if (state) {
 		rememberState(directory, state);
 	} else {
-		trackedStatesByProjectSession.delete(
-			stateCacheKey(directory, normalizedSessionID),
-		);
+		forgetTrackedPrWorkflowState(directory, normalizedSessionID);
 	}
 	return state;
+}
+
+export type SubmitPrReviewResultOutcome =
+	| { status: 'recorded' | 'duplicate'; receiptDigest: string }
+	| { status: 'rejected'; reason: string };
+
+/**
+ * Publish one structured base/micro discovery result from the exact child
+ * session that owns the live delegation. Lock order is deliberately
+ * workflow-session -> delegation-evidence; clear/abort takes the same outer
+ * lock and terminalization takes the same inner lock.
+ */
+export async function submitPrReviewResult(
+	directory: string,
+	childSessionId: string,
+	input: {
+		batchId: string;
+		laneId: string;
+		revisionDigest: string;
+		result: PrReviewLaneResultEnvelope;
+	},
+): Promise<SubmitPrReviewResultOutcome> {
+	const child = childSessionId.trim();
+	const parsedResult = PrReviewLaneResultEnvelopeSchema.safeParse(input.result);
+	if (!child || !parsedResult.success) {
+		return {
+			status: 'rejected',
+			reason: 'invalid child session or result envelope',
+		};
+	}
+	const preliminary = readDelegations(directory).filter(
+		(record) =>
+			record.subagentSessionId === child &&
+			record.batchId === input.batchId &&
+			record.laneId === input.laneId,
+	);
+	if (preliminary.length !== 1) {
+		return {
+			status: 'rejected',
+			reason: `expected one exact child delegation, found ${preliminary.length}`,
+		};
+	}
+	const parentSessionId = preliminary[0].parentSessionId;
+	return withSessionStateMutation(directory, parentSessionId, async () => {
+		const state = await readPrWorkflowGateStateFromDisk(
+			directory,
+			parentSessionId,
+		);
+		if (
+			!state ||
+			state.mode !== 'PR_REVIEW' ||
+			!state.workflowInstanceId ||
+			!state.prHeadSha ||
+			!state.prReviewBaseSha
+		) {
+			return {
+				status: 'rejected',
+				reason: 'no active bound PR_REVIEW workflow',
+			};
+		}
+		const ctx = await createPrReviewGateContext(directory, state);
+		if (ctx.revisionDigest !== input.revisionDigest) {
+			return { status: 'rejected', reason: 'stale dispatch revision digest' };
+		}
+		// Publication performs the authoritative exact-identity/state recheck while
+		// holding the delegation-evidence lock. Reuse the discovery snapshot here
+		// instead of scanning the durable ledger a third time.
+		const record = preliminary[0];
+		if (
+			(record.mode !== 'swarm-pr-review:base' &&
+				record.mode !== 'swarm-pr-review:micro') ||
+			path.resolve(record.workspace?.directory ?? '') !==
+				path.resolve(directory)
+		) {
+			return {
+				status: 'rejected',
+				reason: 'delegation mode or workspace mismatch',
+			};
+		}
+		const ownedWorkflowLanes = record.ownedWorkflowLanes?.length
+			? record.ownedWorkflowLanes
+			: record.workflowLane
+				? [record.workflowLane]
+				: [];
+		if (!record.workflowLane || ownedWorkflowLanes.length === 0) {
+			return { status: 'rejected', reason: 'delegation ownership is missing' };
+		}
+		const semanticEnvelopeDigest = prReviewLaneResultEnvelopeDigest(
+			parsedResult.data,
+		);
+		// Issue #2385 (final-critic finding 2): the submission TRANSITION is
+		// reducer-owned. The reducer decides recorded / replay / conflict; a
+		// conflicting second submission is rejected BEFORE any durable write
+		// with the publisher's own reason; every accepted transition executes
+		// its settle_delegation effect through the atomic receipt publisher
+		// below (which remains the exactly-once durable authority).
+		const existingReceiptDigest =
+			record.result?.prReviewResultReceipt?.semanticEnvelopeDigest;
+		const submission = reducePrReviewEvent(state, {
+			type: 'lane_structured_result_submitted',
+			batchId: input.batchId,
+			laneId: input.laneId,
+			generation: state.revision,
+			semanticEnvelopeDigest,
+			outcome: parsedResult.data.outcome,
+			...(existingReceiptDigest !== undefined ? { existingReceiptDigest } : {}),
+		});
+		if (submission.status === 'rejected') {
+			return {
+				status: 'rejected',
+				reason:
+					submission.rejection.code === 'duplicate_conflicting_result'
+						? 'a different bound receipt is already recorded'
+						: `structured result submission rejected: ${submission.rejection.code}`,
+			};
+		}
+		const published = await publishPrReviewResultReceipt(directory, {
+			parentSessionId,
+			childSessionId: child,
+			batchId: input.batchId,
+			laneId: input.laneId,
+			expectedWorkflowInstanceId: state.workflowInstanceId,
+			expectedWorkflowRevision: state.revision,
+			expectedBaseSha: state.prReviewBaseSha,
+			receipt: {
+				schemaVersion: 1,
+				mode: record.mode,
+				workflowInstanceId: state.workflowInstanceId,
+				workflowRevision: state.revision,
+				batchId: input.batchId,
+				laneId: input.laneId,
+				workflowLane: record.workflowLane,
+				ownedWorkflowLanes,
+				baseSha: state.prReviewBaseSha,
+				headSha: state.prHeadSha,
+				dispatchRevisionDigest: input.revisionDigest,
+				childSessionId: child,
+				generation: record.generation ?? 1,
+				semanticEnvelopeDigest,
+				envelope: parsedResult.data,
+			},
+		});
+		if (published.status === 'recorded' || published.status === 'duplicate') {
+			return {
+				status: published.status,
+				receiptDigest: semanticEnvelopeDigest,
+			};
+		}
+		return { status: 'rejected', reason: published.reason };
+	});
 }
 
 /**
@@ -1434,10 +2033,11 @@ async function assertNoActivePrWorkflowGateForCheckoutRestore(
 				directory,
 				path.join(WORKFLOW_GATE_DIR, entry.name),
 			);
-			const state = await readPrWorkflowGateStateFileFromDisk(
-				statePath,
-				entry.name,
-			);
+			const state =
+				await readPrWorkflowGateStateFileFromDisk<PrWorkflowGateState>(
+					statePath,
+					entry.name,
+				);
 			if (!state) continue;
 			const expectedName = path.basename(
 				workflowGateStateRelativePath(state.sessionID),
@@ -1509,9 +2109,7 @@ export async function clearPrWorkflowGateState(
 				throw error;
 			}
 		}
-		trackedStatesByProjectSession.delete(
-			stateCacheKey(directory, normalizedSessionID),
-		);
+		forgetTrackedPrWorkflowState(directory, normalizedSessionID);
 	});
 }
 
@@ -1568,6 +2166,32 @@ const CAS_ESCAPE_DISCLOSURE =
  * wall-clock test or theater.
  */
 const PR_WORKFLOW_LANE_LIVENESS_PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * How long an async lane may sit pending before `collect_lane_results`
+ * starts probing its host session for a liveness advisory (issue #2280 Part B).
+ * Order-of-minutes by design: far below the 30-minute presumed-stale horizon,
+ * above normal dispatch jitter. Exposed through
+ * `_test_exports.pendingLaneLivenessThresholdMs` and read at CALL time for the
+ * same reason as the probe deadline above — the test clock patches `Date.now()`
+ * without touching timers, so the seam is how a test reaches the boundary
+ * without a wall-clock wait.
+ */
+const PR_WORKFLOW_PENDING_LIVENESS_THRESHOLD_MS = 3 * 60_000;
+
+/**
+ * The pending-liveness advisory applies to EVERY long-pending async lane.
+ *
+ * It originally covered only the five `swarm-pr-review:*` modes (issue #2280),
+ * which left a plain `dispatch_lanes_async` lane with no liveness signal at all
+ * — the same silent-wedge exposure the pr-review modes were given the advisory
+ * to close. Issue #2349 widened it: a generic lane stalls exactly as silently,
+ * and the advisory is alert-only by construction (it never cancels, retries,
+ * replaces, or settles anything), so widening adds diagnosis without changing
+ * any lane's lifecycle. The probe stays bounded — at most one host
+ * session-status call per collection, none below the threshold, none beyond the
+ * caller's remaining budget.
+ */
 
 /**
  * The session-status types that count as "provably still running".
@@ -1646,6 +2270,71 @@ export type PrWorkflowLaneProbeDegradedReason =
 	| 'probe-no-data';
 
 /**
+ * Core session-status probe shared by the fail-open liveness probe below and
+ * the pending-lane liveness advisory (issue #2280 Part B). Same host call,
+ * deadline, and failure taxonomy as the probe; instead of collapsing each
+ * session to allowlist membership it records the status TYPE the host reported
+ * for every record that has one, so a caller can distinguish "live" from
+ * "affirmatively non-live" from "session absent". Failure modes return the
+ * empty map plus a `degradedReason` — a probe that did not fully read its
+ * response never yields a partial map.
+ */
+async function probePrWorkflowLaneSessionStatusTypes(
+	directory: string,
+	records: readonly BackgroundDelegationRecord[],
+	timeoutMs?: number,
+): Promise<{
+	statuses: Map<string, string>;
+	degradedReason?: PrWorkflowLaneProbeDegradedReason;
+}> {
+	const session = _test_exports.getSessionOps();
+	const statusOp = session?.status;
+	if (!session || typeof statusOp !== 'function') {
+		return { statuses: new Map(), degradedReason: 'probe-unavailable' };
+	}
+	// Identity-compared sentinel: the ONLY way to tell "the host took too long"
+	// apart from "the host threw", since withTimeout rejects with this exact
+	// object.
+	const timeoutError = new Error(
+		'PR workflow lane liveness probe exceeded its deadline',
+	);
+	let response: Awaited<ReturnType<NonNullable<typeof statusOp>>> | undefined;
+	try {
+		response = await withTimeout(
+			(async () => statusOp.call(session, { query: { directory } }))(),
+			timeoutMs ?? _test_exports.laneLivenessProbeTimeoutMs,
+			timeoutError,
+		);
+	} catch (error) {
+		return {
+			statuses: new Map(),
+			degradedReason: error === timeoutError ? 'probe-timeout' : 'probe-error',
+		};
+	}
+	try {
+		if (response?.error) {
+			return { statuses: new Map(), degradedReason: 'probe-error' };
+		}
+		const data = response?.data;
+		if (data === null || data === undefined) {
+			return { statuses: new Map(), degradedReason: 'probe-no-data' };
+		}
+		const statuses = new Map<string, string>();
+		for (const record of records) {
+			const subagentSessionId = record.subagentSessionId;
+			if (!subagentSessionId) continue;
+			const type = data[subagentSessionId]?.type;
+			if (typeof type === 'string') {
+				statuses.set(subagentSessionId, type);
+			}
+		}
+		return { statuses };
+	} catch {
+		return { statuses: new Map(), degradedReason: 'probe-error' };
+	}
+}
+
+/**
  * Probe which of `records` have a session the host affirmatively reports as
  * still running (issue #2251).
  *
@@ -1679,50 +2368,163 @@ async function probeAlivePrWorkflowLaneSessions(
 	alive: Set<string>;
 	degradedReason?: PrWorkflowLaneProbeDegradedReason;
 }> {
-	const session = _test_exports.getSessionOps();
-	const statusOp = session?.status;
-	if (!session || typeof statusOp !== 'function') {
-		return { alive: new Set<string>(), degradedReason: 'probe-unavailable' };
+	const probe = await probePrWorkflowLaneSessionStatusTypes(directory, records);
+	if (probe.degradedReason) {
+		return { alive: new Set<string>(), degradedReason: probe.degradedReason };
 	}
-	// Identity-compared sentinel: the ONLY way to tell "the host took too long"
-	// apart from "the host threw", since withTimeout rejects with this exact
-	// object.
-	const timeoutError = new Error(
-		'PR workflow lane liveness probe exceeded its deadline',
-	);
-	let response: Awaited<ReturnType<NonNullable<typeof statusOp>>> | undefined;
+	const alive = new Set<string>();
+	for (const [sessionId, type] of probe.statuses) {
+		if (isLiveSessionStatusType(type)) alive.add(sessionId);
+	}
+	return { alive };
+}
+
+/** One still-pending lane's host liveness reading (issue #2280 Part B). */
+export interface PrWorkflowPendingLaneLiveness {
+	laneId: string;
+	/**
+	 * Milliseconds since the lane record last changed — the same aging field
+	 * (`updatedAt`) the 30-minute presumed-stale sweep measures age by, so the
+	 * advisory and the terminal sweep can never disagree about how old a lane is.
+	 */
+	pendingMs: number;
+	/**
+	 * Host session status when known: `'busy'`/`'retry'` are live; any other
+	 * reported type is an affirmative non-live reading; `'absent'` means the host
+	 * enumerated sessions without ours; `'unknown'` means the probe degraded (or
+	 * the record has no session id to probe at all).
+	 */
+	hostStatus: string;
+	/**
+	 * Past threshold AND the host did not affirmatively report the session live
+	 * (non-live status, session absent, or probe degraded). DIAGNOSTIC ONLY — a
+	 * `true` value never cancels, retries, replaces, or settles the lane.
+	 */
+	stalledSuspect: boolean;
+	/**
+	 * Why the reading is not a real host status: the probe's own failure reasons,
+	 * plus `'advisory-unavailable'` when the advisory's surrounding accounting
+	 * failed unexpectedly after the past-threshold set was already known — so an
+	 * emitted entry always distinguishes "degraded" from a missing probe, and an
+	 * ABSENT `pending_liveness` keeps meaning "no lane was past the threshold".
+	 */
+	degradedReason?: PrWorkflowLaneProbeDegradedReason | 'advisory-unavailable';
+}
+
+/**
+ * Bounded, fail-open liveness advisory for still-pending async lanes
+ * (issue #2280 Part B).
+ *
+ * ALERT-ONLY, by design: this reads host session status and reports it; it
+ * never cancels, retries, replaces, or settles anything. A stalled-suspect
+ * critic may still be thinking — automatic replacement would risk duplicate
+ * long-running critics racing on the same items — and the 30-minute
+ * presumed-stale sweep (issue #2251) remains the only terminal backstop.
+ *
+ * Cost model: below the threshold there is NO host round-trip at all; past it,
+ * exactly ONE session-status call regardless of how many lanes are pending,
+ * deadline-bounded through the same `_test_exports` seams as the #2251 probe
+ * and additionally clamped to the caller's remaining collection budget
+ * (`probeBudgetMs`) — the diagnostic must never add wait beyond the budget the
+ * caller already granted the collection itself. Any failure mode degrades
+ * (`hostStatus: 'unknown'`, `stalledSuspect: true`, reason named) instead of
+ * throwing — collection must never block or fail on this advisory.
+ */
+export async function collectPrWorkflowPendingLaneLiveness(
+	directory: string,
+	records: readonly BackgroundDelegationRecord[],
+	options: { probeBudgetMs?: number } = {},
+): Promise<PrWorkflowPendingLaneLiveness[]> {
+	let now = 0;
+	let pastThreshold: BackgroundDelegationRecord[] = [];
+	const degraded = (
+		record: BackgroundDelegationRecord,
+		reason: PrWorkflowPendingLaneLiveness['degradedReason'],
+	): PrWorkflowPendingLaneLiveness => ({
+		laneId: record.laneId ?? record.correlationId,
+		pendingMs: Math.max(0, now - record.updatedAt),
+		hostStatus: 'unknown',
+		stalledSuspect: true,
+		degradedReason: reason,
+	});
 	try {
-		response = await withTimeout(
-			(async () => statusOp.call(session, { query: { directory } }))(),
-			_test_exports.laneLivenessProbeTimeoutMs,
-			timeoutError,
+		now = _test_exports.nowMs();
+		const threshold = _test_exports.pendingLaneLivenessThresholdMs;
+		pastThreshold = records.filter(
+			(record) =>
+				(record.status === 'pending' ||
+					record.status === 'running' ||
+					record.status === 'ingesting') &&
+				now - record.updatedAt > threshold,
 		);
-	} catch (error) {
-		return {
-			alive: new Set<string>(),
-			degradedReason: error === timeoutError ? 'probe-timeout' : 'probe-error',
-		};
-	}
-	try {
-		if (response?.error) {
-			return { alive: new Set<string>(), degradedReason: 'probe-error' };
+		if (pastThreshold.length === 0) return [];
+		const budgetMs = Math.max(
+			0,
+			Math.min(
+				_test_exports.laneLivenessProbeTimeoutMs,
+				options.probeBudgetMs ?? Number.POSITIVE_INFINITY,
+			),
+		);
+		if (budgetMs <= 0) {
+			// No caller budget left to spend on the diagnostic: report the
+			// degradation per lane instead of spending host time the caller
+			// did not grant (the same budgeting `getLaneCollectionReadiness`
+			// applies to its status calls).
+			return pastThreshold.map((record) => degraded(record, 'probe-timeout'));
 		}
-		const data = response?.data;
-		if (data === null || data === undefined) {
-			return { alive: new Set<string>(), degradedReason: 'probe-no-data' };
-		}
-		const accumulated = new Set<string>();
-		for (const record of records) {
-			const subagentSessionId = record.subagentSessionId;
-			if (!subagentSessionId) continue;
-			const type = data[subagentSessionId]?.type;
-			if (typeof type === 'string' && isLiveSessionStatusType(type)) {
-				accumulated.add(subagentSessionId);
+		const probe = await probePrWorkflowLaneSessionStatusTypes(
+			directory,
+			pastThreshold,
+			budgetMs,
+		);
+		const advisories: PrWorkflowPendingLaneLiveness[] = [];
+		for (const record of pastThreshold) {
+			const pendingMs = now - record.updatedAt;
+			const laneId = record.laneId ?? record.correlationId;
+			if (probe.degradedReason) {
+				advisories.push({
+					laneId,
+					pendingMs,
+					hostStatus: 'unknown',
+					stalledSuspect: true,
+					degradedReason: probe.degradedReason,
+				});
+				continue;
 			}
+			// A record without a session id never reached the host at all, so
+			// 'absent' ("the host enumerated sessions without ours") would
+			// overclaim — 'unknown' is the honest reading for that shape too.
+			const subagentSessionId = record.subagentSessionId;
+			const type = subagentSessionId
+				? probe.statuses.get(subagentSessionId)
+				: undefined;
+			if (type === undefined) {
+				advisories.push({
+					laneId,
+					pendingMs,
+					hostStatus: subagentSessionId ? 'absent' : 'unknown',
+					stalledSuspect: true,
+				});
+				continue;
+			}
+			advisories.push({
+				laneId,
+				pendingMs,
+				hostStatus: type,
+				stalledSuspect: !isLiveSessionStatusType(type),
+			});
 		}
-		return { alive: accumulated };
+		return advisories;
 	} catch {
-		return { alive: new Set<string>(), degradedReason: 'probe-error' };
+		// The advisory is a diagnostic, never a gate: an unexpected failure in
+		// the surrounding accounting still emits per-lane 'advisory-unavailable'
+		// entries whenever the past-threshold set is already known, so an absent
+		// `pending_liveness` stays unambiguous ("nothing was past the
+		// threshold") instead of silently conflating the two — and the
+		// collection call that hosted the advisory still never fails.
+		return pastThreshold.map((record) =>
+			degraded(record, 'advisory-unavailable'),
+		);
 	}
 }
 
@@ -1833,9 +2635,11 @@ function isOpenPrWorkflowLane(
  * Issue #2251 adds the second, stronger contradiction: a lane PAST the horizon
  * whose session the host affirmatively reports as `busy`/`retry` is genuinely
  * running (nothing heartbeats `updatedAt`, so age alone cannot see this) and is
- * retained instead of discarded. The probe is fail-open — see
- * {@link probeAlivePrWorkflowLaneSessions} — so an unavailable, erroring or
- * empty probe leaves the age-only behaviour exactly as it was.
+ * retained instead of discarded. The probe is fail-open — the settlement
+ * consumes it through the alive-set wrapper {@link
+ * probeAlivePrWorkflowLaneSessions}; the fail-open taxonomy itself lives in
+ * {@link probePrWorkflowLaneSessionStatusTypes} — so an unavailable, erroring
+ * or empty probe leaves the age-only behaviour exactly as it was.
  */
 export async function settlePresumedStalePrWorkflowLanes(
 	directory: string,
@@ -1973,23 +2777,16 @@ export async function settlePresumedStalePrWorkflowLanes(
 		// Durability is best-effort; the in-memory decision above already stands.
 	}
 	try {
-		await fsp.appendFile(
-			validateSwarmPath(directory, 'events.jsonl'),
-			`${JSON.stringify({
-				type: 'pr_workflow_lanes_presumed_stale',
-				timestamp: isoNow(),
-				sessionID,
-				presumedStaleLanes: presumedStaleLaneIds.slice(
-					0,
-					MAX_DISCLOSED_LANE_IDS,
-				),
-				staleTimeoutMs: PR_WORKFLOW_STALE_LANE_TIMEOUT_MS,
-				probeStatus: probe.degradedReason ?? 'ok',
-				probedAliveLanes: probedAliveLaneIds.slice(0, MAX_DISCLOSED_LANE_IDS),
-				disclosure,
-			})}\n`,
-			'utf-8',
-		);
+		appendCoreEventSync(directory, {
+			type: 'pr_workflow_lanes_presumed_stale',
+			timestamp: isoNow(),
+			sessionID,
+			presumedStaleLanes: presumedStaleLaneIds.slice(0, MAX_DISCLOSED_LANE_IDS),
+			staleTimeoutMs: PR_WORKFLOW_STALE_LANE_TIMEOUT_MS,
+			probeStatus: probe.degradedReason ?? 'ok',
+			probedAliveLanes: probedAliveLaneIds.slice(0, MAX_DISCLOSED_LANE_IDS),
+			disclosure,
+		});
 	} catch {
 		// The audit trail is best-effort; settlement must not depend on it.
 	}
@@ -2208,8 +3005,18 @@ export async function abortPrWorkflow(
 	sessionID: string,
 	options: {
 		expectedMode?: PrWorkflowMode;
-		kind: 'recovery' | 'force';
+		kind: 'recovery' | 'force' | 'cancel-publication';
 		reason: string;
+		/**
+		 * Issue #2108: the explicit cancellation-without-publication arm. While
+		 * an armed/push_in_flight/invalidated publication generation exists,
+		 * this arm (and ONLY this arm — mutually exclusive with `force`) may
+		 * clear the workflow: it records the generation as
+		 * `cancelled_without_publication` with the observed remote head and a
+		 * REQUIRED reason, and never manufactures push authority. Plain
+		 * `recovery`/`force` aborts remain refused while armed.
+		 */
+		cancelPublication?: boolean;
 	} = { kind: 'recovery', reason: '' },
 ): Promise<{
 	mode: PrWorkflowMode;
@@ -2238,17 +3045,92 @@ export async function abortPrWorkflow(
 		directory,
 		sessionID,
 	);
-	if (!recovery) throw noActiveGateError(sessionID);
+	if (!recovery) {
+		// Issue #2108: the audited cancellation remains reachable even when
+		// the gate state was deleted by hand while a generation was live —
+		// the dangling-generation guard blocks publication commands until a
+		// terminal lands, and THIS arm is the terminal: append the
+		// `cancelled_without_publication` event (the events trail is the
+		// authority the state-file deletion cannot touch) and disclose that
+		// there was no gate state to clear.
+		if (options.cancelPublication) {
+			if (!options.reason.trim()) {
+				throw new Error(
+					'BLOCKED: cancel_publication requires a non-empty reason; the cancellation reason is part of the durable audit trail',
+				);
+			}
+			const dangling = findDanglingLivePublicationGeneration(
+				directory,
+				sessionID,
+			);
+			if (!dangling) throw noActiveGateError(sessionID);
+			appendPublicationEvent(directory, {
+				type: 'pr_feedback_publication_cancelled',
+				sessionID: normalizeSessionID(sessionID),
+				generation: dangling.generation,
+				reason: options.reason.trim(),
+				stateFileAbsent: true,
+			});
+			return {
+				mode: 'PR_FEEDBACK',
+				openLanes: 0,
+				stateSalvaged: false,
+				stateSalvageDisclosure:
+					'The gate state file was already absent; the live publication generation in the audit trail was recorded as cancelled_without_publication (event-only terminal).',
+			};
+		}
+		throw noActiveGateError(sessionID);
+	}
 	const state = recovery.state;
+	// Issue #2108: when the cancel-publication arm writes a cancellation
+	// transition, the CAS clear below must compare against the NEW revision.
+	let cancelRevision: number | null = null;
 	if (options.expectedMode && state.mode !== options.expectedMode) {
 		throw wrongModeError(state, options.expectedMode);
 	}
+	// Issue #2108: the cancel-publication arm runs BEFORE the armed-state
+	// refusal below — it is the one audited exit from an armed window, and it
+	// terminates the workflow WITHOUT publication (never grants push
+	// authority). It requires a non-empty reason and is mutually exclusive
+	// with the human-only `force` kind.
+	if (options.cancelPublication) {
+		if (options.kind === 'force') {
+			throw new Error(
+				'BLOCKED: cancel_publication cannot be combined with kind "force"; use kind "cancel-publication" with a reason',
+			);
+		}
+		if (!options.reason.trim()) {
+			throw new Error(
+				'BLOCKED: cancel_publication requires a non-empty reason; the cancellation reason is part of the durable audit trail',
+			);
+		}
+		if (
+			state.mode !== 'PR_FEEDBACK' ||
+			(!state.prFeedbackReadyToPublish &&
+				!recovery.armedShapeUnreadable &&
+				!state.prFeedbackPublication?.active)
+		) {
+			throw new Error(
+				'BLOCKED: cancel_publication applies only to a PR_FEEDBACK workflow with a publication generation (armed, push_in_flight, or invalidated)',
+			);
+		}
+		cancelRevision = await cancelPrFeedbackPublication(
+			directory,
+			sessionID,
+			options.reason.trim(),
+		);
+	}
 	// An armed marker that is PRESENT but unreadable is treated as armed. Any
 	// other reading would make "corrupt this one record" a bypass of the
-	// armed-abort refusal.
-	if (state.prFeedbackReadyToPublish || recovery.armedShapeUnreadable) {
+	// armed-abort refusal. The cancel-publication arm above already completed
+	// (it marked the generation cancelled_without_publication and cleared the
+	// mirror), so a plain abort here still fails closed on a live armed window.
+	if (
+		(state.prFeedbackReadyToPublish || recovery.armedShapeUnreadable) &&
+		!options.cancelPublication
+	) {
 		throw new Error(
-			`BLOCKED: ${state.mode} is armed for publication; abort is blocked. Complete the workflow with complete_pr_workflow (or push the bound commit first) before aborting.` +
+			`BLOCKED: ${state.mode} is armed for publication; abort is blocked. Complete the workflow with complete_pr_workflow (or push the bound commit first) before aborting, or use the audited cancellation (abort_pr_workflow with cancel_publication and a reason).` +
 				(recovery.armedShapeUnreadable
 					? ' The publication-arming record is itself unreadable, so it is treated as armed (fail-closed).'
 					: ''),
@@ -2385,12 +3267,7 @@ export async function abortPrWorkflow(
 		reason: sanitizedReason,
 	};
 	try {
-		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		await fsp.appendFile(
-			eventsPath,
-			`${JSON.stringify(abortEvent)}\n`,
-			'utf-8',
-		);
+		appendCoreEventSync(directory, abortEvent);
 	} catch {
 		// Non-fatal: the audit trail is best-effort. The gate must clear
 		// regardless so the deadlock does not persist because of a write error.
@@ -2413,7 +3290,7 @@ export async function abortPrWorkflow(
 		await clearPrWorkflowGateState(
 			directory,
 			sessionID,
-			casEscape ? undefined : state.revision,
+			casEscape ? undefined : (cancelRevision ?? state.revision),
 			{ allowSalvagedRead: recovery.salvaged },
 		);
 	} catch (error) {
@@ -2426,60 +3303,56 @@ export async function abortPrWorkflow(
 		// discipline as the abort event — carrying sessionID/mode/prHeadSha so it
 		// correlates with the record it retracts, then re-throw unchanged.
 		try {
-			await fsp.appendFile(
-				validateSwarmPath(directory, 'events.jsonl'),
-				`${JSON.stringify({
-					type: 'pr_workflow_abort_not_completed',
-					timestamp: isoNow(),
-					sessionID: state.sessionID,
-					mode: state.mode,
-					...(state.prHeadSha ? { prHeadSha: state.prHeadSha } : {}),
-					reason: sanitizedReason,
-					// Issue #2251 closeout F1: the override's irreversible finalization is
-					// ordered AFTER the clear, so reaching here means the OVERRIDE never
-					// ran and touched no retained lane. Scoped to the override on purpose
-					// — two broader readings are false and were shipped and retracted
-					// once each. "This abort touched nothing" is false because settlement
-					// durably sweeps the batch's probe-dead lanes before the clear; "the
-					// retained lanes are untouched" is false because a concurrent force
-					// abort can clear and finalize them, which is itself one of the ways
-					// this CAS loses. The disclosure below is hedged to match.
-					...(overridesProbeRetention
-						? {
-								probeRetentionOverrideLanes: overrideTargetedLaneIds.slice(
-									0,
-									MAX_DISCLOSED_LANE_IDS,
-								),
-								probeRetentionOverrideFinalized: false,
-							}
-						: {}),
-					// Reuses the generic diagnostic char cap rather than declaring a
-					// third one-off bound; the value is a plain length ceiling on an
-					// operator-facing string, not a coverage-specific quantity.
-					failure: (error instanceof Error
-						? error.message
-						: String(error)
-					).slice(0, MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS),
-					// Claims only what this catch can actually observe. Every throw
-					// reachable from `clearPrWorkflowGateState` today precedes the
-					// unlink (CAS mismatch, lock acquisition, non-ENOENT rm), so the
-					// gate is in fact still active — but asserting that here would
-					// depend on a swallow in `releaseSessionStateMutationLock` ~8,500
-					// lines away. Making a DURABLE audit record depend on that is the
-					// same defect class this record exists to retract, so it stays
-					// hedged and the operator revalidates.
-					disclosure:
-						'RETRACTION: the pr_workflow_aborted record for this session did NOT complete — ' +
-						'the clear failed and the gate state may still be active. Revalidate the current ' +
-						'session state before retrying the abort.' +
-						(overridesProbeRetention
-							? ' The probe-retention override finalized no record: it runs only after the ' +
-								'clear succeeds, and this clear failed. Other lanes in the same settlement ' +
-								'batch may already have been finalized as presumed-stale, and a concurrent abort for this session may have finalized more — revalidate the lane records rather than assuming they are untouched.'
-							: ''),
-				})}\n`,
-				'utf-8',
-			);
+			appendCoreEventSync(directory, {
+				type: 'pr_workflow_abort_not_completed',
+				timestamp: isoNow(),
+				sessionID: state.sessionID,
+				mode: state.mode,
+				...(state.prHeadSha ? { prHeadSha: state.prHeadSha } : {}),
+				reason: sanitizedReason,
+				// Issue #2251 closeout F1: the override's irreversible finalization is
+				// ordered AFTER the clear, so reaching here means the OVERRIDE never
+				// ran and touched no retained lane. Scoped to the override on purpose
+				// — two broader readings are false and were shipped and retracted
+				// once each. "This abort touched nothing" is false because settlement
+				// durably sweeps the batch's probe-dead lanes before the clear; "the
+				// retained lanes are untouched" is false because a concurrent force
+				// abort can clear and finalize them, which is itself one of the ways
+				// this CAS loses. The disclosure below is hedged to match.
+				...(overridesProbeRetention
+					? {
+							probeRetentionOverrideLanes: overrideTargetedLaneIds.slice(
+								0,
+								MAX_DISCLOSED_LANE_IDS,
+							),
+							probeRetentionOverrideFinalized: false,
+						}
+					: {}),
+				// Reuses the generic diagnostic char cap rather than declaring a
+				// third one-off bound; the value is a plain length ceiling on an
+				// operator-facing string, not a coverage-specific quantity.
+				failure: (error instanceof Error ? error.message : String(error)).slice(
+					0,
+					MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS,
+				),
+				// Claims only what this catch can actually observe. Every throw
+				// reachable from `clearPrWorkflowGateState` today precedes the
+				// unlink (CAS mismatch, lock acquisition, non-ENOENT rm), so the
+				// gate is in fact still active — but asserting that here would
+				// depend on a swallow in `releaseSessionStateMutationLock` ~8,500
+				// lines away. Making a DURABLE audit record depend on that is the
+				// same defect class this record exists to retract, so it stays
+				// hedged and the operator revalidates.
+				disclosure:
+					'RETRACTION: the pr_workflow_aborted record for this session did NOT complete — ' +
+					'the clear failed and the gate state may still be active. Revalidate the current ' +
+					'session state before retrying the abort.' +
+					(overridesProbeRetention
+						? ' The probe-retention override finalized no record: it runs only after the ' +
+							'clear succeeds, and this clear failed. Other lanes in the same settlement ' +
+							'batch may already have been finalized as presumed-stale, and a concurrent abort for this session may have finalized more — revalidate the lane records rather than assuming they are untouched.'
+						: ''),
+			});
 		} catch {
 			// Non-fatal, exactly like the abort event: a failed correction append
 			// must not mask the clear failure the caller has to see.
@@ -2588,6 +3461,245 @@ export async function abortPrWorkflow(
 			: {}),
 		...(casEscape ? { casEscapeDisclosure: CAS_ESCAPE_DISCLOSURE } : {}),
 	};
+}
+
+/** Marker record left by an audited armed recovery (issue #2383). */
+export interface PrFeedbackArmedRecoveryRecord {
+	recoveredAt: string;
+	prHeadSha: string;
+	/** Revision digest of the invalidated staged publication authorization. */
+	revisionDigest: string;
+	/** Gate state revision (CAS generation) at recovery time. */
+	generation: number;
+	reason: string;
+}
+
+/**
+ * Audited armed recovery (issue #2383): the explicit, identity-correlated
+ * escape for a publication-armed workflow whose exact publication cannot
+ * proceed.
+ *
+ * Requires the exact active session (state is session-keyed; a foreign session
+ * finds no armed state), workflow identity, base/head SHA, the staged
+ * authorization's revision digest, and the CURRENT gate-state generation.
+ * Every mismatch fails closed. There is deliberately NO `force` parameter —
+ * force never bypasses identity or revision checks. Exact approved publication
+ * remains available and preferred: this operation never runs when publication
+ * can still proceed by the normal path.
+ *
+ * Order of effects, all under the session-state mutation lock with CAS:
+ *   1. settle/cancel remaining lanes FIRST (fresh open lanes refuse recovery);
+ *   2. append exactly ONE bounded audit event (`pr_workflow_armed_recovery`);
+ *   3. invalidate the staged publication authorization;
+ *   4. transition to a recoverable terminal state — the state is PRESERVED
+ *      (not cleared) with a `prFeedbackArmedRecovery` marker, so validated
+ *      work survives and the controller can re-arm after repair or abort
+ *      cleanly.
+ */
+export async function recoverArmedPrWorkflow(
+	directory: string,
+	sessionID: string,
+	request: {
+		expectedMode?: PrWorkflowMode;
+		prHeadSha: string;
+		/** Exact merge-base SHA; REQUIRED when the active state carries one. */
+		baseSha?: string;
+		revisionDigest: string;
+		generation: number;
+		workflowInstanceId?: string;
+		reason: string;
+	},
+): Promise<{
+	mode: PrWorkflowMode;
+	prHeadSha: string;
+	openLanes: number;
+	settledLanes: number;
+	cancelledDimensions: PrReviewBaseDimensionId[];
+	recoveredAt: string;
+}> {
+	const sanitizedReason =
+		typeof request.reason === 'string' && request.reason.trim().length > 0
+			? request.reason.trim().slice(0, 500)
+			: undefined;
+	if (sanitizedReason === undefined) {
+		throw new Error(
+			'BLOCKED: armed recovery requires a non-empty reason (recorded to the audit trail).',
+		);
+	}
+	return withSessionStateMutation(
+		directory,
+		normalizeSessionID(sessionID),
+		async () => {
+			// Deliberately NOT the salvage-tolerant recovery reader: an armed
+			// recovery must verify the armed record's exact revision digest, and a
+			// state too malformed to load that record fails closed here. The human
+			// `/swarm abort-pr-workflow` force path remains the only exit for a
+			// corrupt armed record.
+			const state = await readPrWorkflowGateStateFromDisk(
+				directory,
+				normalizeSessionID(sessionID),
+			);
+			if (!state) throw noActiveGateError(sessionID);
+			if (request.expectedMode && state.mode !== request.expectedMode) {
+				throw wrongModeError(state, request.expectedMode);
+			}
+			const armed = state.prFeedbackReadyToPublish;
+			if (!armed) {
+				throw new Error(
+					`BLOCKED: ${state.mode} is not armed for publication; armed recovery applies only to an active staged publication authorization (complete or abort normally instead).`,
+				);
+			}
+			if (request.prHeadSha !== state.prHeadSha) {
+				throw new Error(
+					`BLOCKED: armed recovery head mismatch: workflow is bound to "${state.prHeadSha ?? '(none)'}", request declared "${request.prHeadSha}".`,
+				);
+			}
+			// Exact base/head SHA binding (issue #2383): when the active state
+			// carries a merge-base binding (PR_REVIEW-origin workflows), the
+			// request MUST declare the exact same base SHA; a workflow without
+			// one accepts only an omitted value. Either mismatch fails closed.
+			if (
+				(state.prReviewBaseSha === undefined) !==
+				(request.baseSha === undefined)
+			) {
+				throw new Error(
+					`BLOCKED: armed recovery base mismatch: ${
+						state.prReviewBaseSha === undefined
+							? 'the active workflow has no merge-base binding but the request declared one'
+							: 'the active workflow is merge-base bound but the request omitted base_sha'
+					}; fail closed.`,
+				);
+			}
+			if (
+				request.baseSha !== undefined &&
+				state.prReviewBaseSha !== undefined &&
+				request.baseSha !== state.prReviewBaseSha
+			) {
+				throw new Error(
+					`BLOCKED: armed recovery base mismatch: workflow is merge-base bound to "${state.prReviewBaseSha}", request declared "${request.baseSha}".`,
+				);
+			}
+			if (request.revisionDigest !== armed.revisionDigest) {
+				throw new Error(
+					'BLOCKED: armed recovery revision digest does not match the staged publication authorization; fail closed.',
+				);
+			}
+			if (request.generation !== state.revision) {
+				throw new Error(
+					`BLOCKED: armed recovery generation mismatch: current gate generation is ${state.revision}, request declared ${request.generation}. Stale requests fail closed; re-read the workflow state and retry.`,
+				);
+			}
+			if (
+				(request.workflowInstanceId === undefined) !==
+				(state.workflowInstanceId === undefined)
+			) {
+				throw new Error(
+					'BLOCKED: armed recovery workflow identity mismatch: request and active state disagree on workflowInstanceId presence; fail closed.',
+				);
+			}
+			if (
+				request.workflowInstanceId !== undefined &&
+				state.workflowInstanceId !== undefined &&
+				request.workflowInstanceId !== state.workflowInstanceId
+			) {
+				throw new Error(
+					`BLOCKED: armed recovery workflow identity mismatch: active workflow is "${state.workflowInstanceId}", request declared "${request.workflowInstanceId}".`,
+				);
+			}
+			// 1. Cancel/settle remaining lanes FIRST — before any mutation. Fresh
+			// open lanes refuse recovery (collect or settle them first); presumed
+			// stale lanes settle with disclosure, exactly like abort.
+			const laneSettlement = await settlePresumedStalePrWorkflowLanes(
+				directory,
+				state.sessionID,
+			);
+			if (laneSettlement.openLanes > 0) {
+				const laneIds = laneSettlement.openLaneIds
+					.filter(Boolean)
+					.slice(0, MAX_DISCLOSED_LANE_IDS)
+					.join(', ');
+				throw new Error(
+					`BLOCKED: armed recovery refused while ${laneSettlement.openLanes} PR workflow lane(s) are still in flight (lane ids: ${laneIds}). Collect their results or let them settle before recovering.` +
+						describePrWorkflowLaneProbe(laneSettlement),
+				);
+			}
+			// PR_REVIEW-origin dimensions still unresolved after settlement are
+			// explicitly cancelled so a later N-of-6 settlement can truthfully
+			// report them as CANCELLED (issue #2383).
+			const cancelledDimensions: PrReviewBaseDimensionId[] = [];
+			let cancellations:
+				| Partial<
+						Record<PrReviewBaseDimensionId, PrReviewDimensionCancellationRecord>
+				  >
+				| undefined = state.prReviewDimensionCancellations;
+			if (state.mode === 'PR_REVIEW' && state.prHeadSha) {
+				const ctx = await createPrReviewGateContext(directory, state);
+				const settlement = derivePrReviewDimensionSettlement(
+					directory,
+					state,
+					ctx.revisionDigest,
+				);
+				for (const entry of settlement.unresolvedDimensions) {
+					if (entry.terminalState !== 'NOT_LAUNCHED') continue;
+					cancelledDimensions.push(entry.dimension);
+					cancellations = {
+						...cancellations,
+						[entry.dimension]: {
+							reason: sanitizedReason,
+							cancelledAt: isoNow(),
+							source: 'armed_recovery' as const,
+						},
+					};
+				}
+			}
+			const recoveredAt = isoNow();
+			// 2. Exactly ONE bounded audit event, appended BEFORE the state
+			// mutation: no lane output, prompts, or secrets — bounded identity and
+			// outcome fields only. Best-effort (non-fatal), same discipline as abort.
+			try {
+				appendCoreEventSync(directory, {
+					type: 'pr_workflow_armed_recovery',
+					timestamp: recoveredAt,
+					sessionID: state.sessionID,
+					mode: state.mode,
+					prHeadSha: state.prHeadSha,
+					revisionDigest: armed.revisionDigest,
+					generation: state.revision,
+					settledLanes: laneSettlement.presumedStaleLaneIds?.length ?? 0,
+					cancelledDimensions,
+					reason: sanitizedReason,
+				});
+			} catch {
+				// Non-fatal audit trail; the recovery itself must proceed.
+			}
+			// 3 + 4. Invalidate the staged publication authorization and transition
+			// to the recoverable terminal state, CAS-guarded: a concurrent state
+			// change rejects this write and the caller revalidates.
+			await writeStateWhileLocked(directory, {
+				...state,
+				updatedAt: recoveredAt,
+				prFeedbackReadyToPublish: undefined,
+				prFeedbackArmedRecovery: {
+					recoveredAt,
+					prHeadSha: state.prHeadSha!,
+					revisionDigest: armed.revisionDigest,
+					generation: state.revision,
+					reason: sanitizedReason,
+				},
+				...(cancellations
+					? { prReviewDimensionCancellations: cancellations }
+					: {}),
+			});
+			return {
+				mode: state.mode,
+				prHeadSha: state.prHeadSha!,
+				openLanes: laneSettlement.openLanes,
+				settledLanes: laneSettlement.presumedStaleLaneIds?.length ?? 0,
+				cancelledDimensions,
+				recoveredAt,
+			};
+		},
+	);
 }
 
 /** Bind an active PR workflow to one immutable PR head. */
@@ -2718,19 +3830,14 @@ export async function rebindPrFeedbackHead(
 		updatedAt: isoNow(),
 	};
 	try {
-		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		await fsp.appendFile(
-			eventsPath,
-			`${JSON.stringify({
-				type: 'pr_feedback_rebound',
-				timestamp: isoNow(),
-				sessionID: state.sessionID,
-				previousPrHeadSha: state.prHeadSha,
-				prHeadSha: normalizedHead,
-				rebindCount: nextState.prFeedbackRebindCount,
-			})}\n`,
-			'utf-8',
-		);
+		appendCoreEventSync(directory, {
+			type: 'pr_feedback_rebound',
+			timestamp: isoNow(),
+			sessionID: state.sessionID,
+			previousPrHeadSha: state.prHeadSha,
+			prHeadSha: normalizedHead,
+			rebindCount: nextState.prFeedbackRebindCount,
+		});
 	} catch {
 		// Non-fatal audit trail.
 	}
@@ -3000,17 +4107,13 @@ export class PrReviewResilienceRetryExhaustedError extends Error {
 	}
 }
 
-function snapshotPrReviewResiliencePolicy(
-	policy?: PrReviewResilienceConfig,
-): PrReviewResiliencePolicyRecord {
-	return {
-		enabled: policy?.enabled ?? true,
-		canaryProbeMs: policy?.canary_probe_ms ?? 300_000,
-		statusProbeTimeoutMs: policy?.status_probe_timeout_ms ?? 2_000,
-		correlatedFailureThreshold: policy?.correlated_failure_threshold ?? 2,
-		maxRetryAttemptsAfterInitial: policy?.max_retry_attempts_after_initial ?? 2,
-	};
-}
+/**
+ * Issue #2385: the policy snapshot lives in `src/pr-review/circuit.ts`
+ * (`resolvePrReviewResiliencePolicy`) with every default sourced from
+ * `DEFAULT_PR_REVIEW_RESILIENCE_CONFIG`. This local name is kept (callers and
+ * the `_test_exports` seam) and delegates to the single authority.
+ */
+const snapshotPrReviewResiliencePolicy = resolvePrReviewResiliencePolicy;
 
 function declaredBaseDimensions(
 	lanes: readonly PrWorkflowLaneSpec[],
@@ -3056,15 +4159,6 @@ function batchLaneRecords(
 	}).filter((record) => record.laneId === laneId);
 }
 
-function baseLaneDimensions(lane: {
-	workflowLane: PrReviewBaseDimensionId;
-	ownedWorkflowLanes?: readonly PrReviewBaseDimensionId[];
-}): readonly PrReviewBaseDimensionId[] {
-	return lane.ownedWorkflowLanes?.length
-		? lane.ownedWorkflowLanes
-		: [lane.workflowLane];
-}
-
 function batchIsTerminal(
 	directory: string,
 	state: PrWorkflowGateState,
@@ -3093,114 +4187,248 @@ function effectivePrReviewResiliencePolicy(
 	);
 }
 
-function normalizeFailureSignatureText(value: string): string {
-	return value
-		.toLowerCase()
-		.replace(
-			/\b\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:z|[+-]\d{2}:\d{2})\b/g,
-			'<iso-timestamp>',
-		)
-		.replace(/\b\d{10,16}\b/g, '<epoch>')
-		.replace(
-			/\b((?:session|request|trace|correlation|run)(?:[_-]?id)?)\s*[:=]\s*([a-z0-9._:-]*[0-9_-][a-z0-9._:-]*)\b/g,
-			'$1=<id>',
-		)
-		.replace(
-			/\b((?:session|sess|request|req|trace|correlation|corr|run)(?:[_-]?id)?)\s+((?:(?:sess?|req|trace|corr|run)[_-][a-z0-9._:-]+|[a-z][a-z0-9._:-]*\d[a-z0-9._:-]*))\b/g,
-			'$1 <id>',
-		)
-		.replace(
-			/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/g,
-			'<uuid>',
-		)
-		.replace(/\b[0-9a-f]{16,64}\b/g, '<hex>')
-		.replace(/[a-z]:\\[^\s)]+/gi, '<path>')
-		.replace(/(?:\/[\w.@:-]+)+/g, '<path>')
-		.replace(/\s+/g, ' ')
-		.trim()
-		.slice(0, 160);
+// ---------------------------------------------------------------------------
+// PR-review resilience circuit (issue #2382) — typed, recoverable, versioned.
+// Classification, adoption/migration, and the CLOSED/OPEN/HALF_OPEN machine
+// live in `src/pr-review/circuit.ts` (pure, unit-tested); this file
+// owns the durable reads (delegation ledger), the CAS persistence, and the
+// enforcement wiring.
+// ---------------------------------------------------------------------------
+
+/** Bounded malformed-circuit diagnostic dedup: hash-keyed, FIFO-evicted. */
+const MALFORMED_CIRCUIT_DIAGNOSTIC_LIMIT = 64;
+const malformedCircuitDiagnosticsSeen = new Set<string>();
+
+function reportCircuitAdoptionDiagnostic(
+	diagnostic: PrReviewCircuitAdoptionDiagnostic,
+): void {
+	if (diagnostic.code === 'migrated_legacy_circuit') {
+		log(
+			'PR review resilience circuit: migrated unversioned legacy circuit record to v2 CLOSED (nonblocking, evidence waterlined)',
+			{ legacyContributors: diagnostic.legacySignatureCount },
+		);
+		return;
+	}
+	if (malformedCircuitDiagnosticsSeen.has(diagnostic.bodyHash8)) return;
+	if (
+		malformedCircuitDiagnosticsSeen.size >= MALFORMED_CIRCUIT_DIAGNOSTIC_LIMIT
+	) {
+		const oldest = malformedCircuitDiagnosticsSeen.values().next().value;
+		if (oldest !== undefined) {
+			malformedCircuitDiagnosticsSeen.delete(oldest);
+		}
+	}
+	malformedCircuitDiagnosticsSeen.add(diagnostic.bodyHash8);
+	log(
+		'PR review resilience circuit: malformed circuit record dropped (fail-open)',
+		{
+			bodyHash8: diagnostic.bodyHash8,
+			byteLength: diagnostic.byteLength,
+		},
+	);
 }
 
-function classifyTerminalFailureSignature(
-	record: BackgroundDelegationRecord,
-): string | null {
-	if (!TERMINAL_FAILED_DELEGATION_STATUSES.has(record.status)) return null;
-	const result = record.terminalResult?.result ?? record.result;
-	if (!result) return `terminal-zero-output:${record.status}`;
-	const outputRef = result.outputRef?.trim();
-	const text = result.text?.trim() ?? '';
-	if (!outputRef && text.length === 0 && (result.chars ?? 0) === 0) {
-		return `terminal-zero-output:${record.status}`;
-	}
-	const errorText = result.error?.trim();
-	if (errorText) {
-		return `terminal-error-output:${record.status}:${normalizeFailureSignatureText(errorText)}`;
-	}
-	// `completed` means the child produced a result that has not necessarily been
-	// ingested yet. Non-empty, error-free output is therefore not authoritative
-	// evidence of failure; counting it would let two healthy, pending-ingestion
-	// lanes open the circuit. Empty/error completion remains classifiable above.
-	if (record.status === 'completed') return null;
-	return `terminal-nonzero-output:${record.status}`;
+function circuitOpenDurationMs(policy: PrReviewResiliencePolicyRecord): number {
+	return (
+		policy.circuitOpenDurationMs ??
+		DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.circuit_open_duration_ms
+	);
 }
 
-function computePrReviewResilienceCircuit(
+/** Latest-record typed signal for every recorded dispatch lane. */
+function laneSignalsForCircuitReview(
 	directory: string,
 	state: PrWorkflowGateState,
-	policy: PrReviewResiliencePolicyRecord,
-): PrReviewResilienceCircuitRecord | null {
-	const signatures = new Map<
-		string,
-		{
-			dimensions: Set<PrReviewBaseDimensionId>;
-			contributors: Array<{ batchId: string; laneId: string }>;
-		}
-	>();
+): PrReviewCircuitSignal[] {
+	const signals: PrReviewCircuitSignal[] = [];
 	for (const batch of state.prReviewBaseDispatches ?? []) {
 		for (const lane of batch.lanes) {
 			const latest = latestDelegationRecord(
 				batchLaneRecords(directory, state, batch.batchId, lane.laneId),
 			);
 			if (!latest) continue;
-			const signature = classifyTerminalFailureSignature(latest);
-			if (!signature) continue;
-			const current = signatures.get(signature) ?? {
-				dimensions: new Set<PrReviewBaseDimensionId>(),
-				contributors: [],
-			};
-			for (const dimension of baseLaneDimensions(lane)) {
-				if (current.dimensions.has(dimension)) continue;
-				current.dimensions.add(dimension);
-				current.contributors.push({
-					batchId: batch.batchId,
-					laneId: lane.laneId,
-				});
-			}
-			signatures.set(signature, current);
+			const signal = classifyPrReviewCircuitSignal(latest);
+			if (signal) signals.push(signal);
 		}
 	}
-	const opened = [...signatures.entries()]
-		.filter(
-			([, entry]) => entry.dimensions.size >= policy.correlatedFailureThreshold,
-		)
-		.sort(
-			(left, right) =>
-				right[1].dimensions.size - left[1].dimensions.size ||
-				left[0].localeCompare(right[0]),
-		)[0];
-	if (!opened) return null;
+	return signals;
+}
+
+/**
+ * Observation of the CURRENT probe lane's latest record. Supplied only for a
+ * HALF_OPEN circuit whose recorded probe matches the lane actually read, which
+ * structurally drops late results from older generations.
+ */
+function probeObservationForCircuit(
+	directory: string,
+	state: PrWorkflowGateState,
+	circuit: PrReviewCircuitRecordV2,
+):
+	| {
+			terminalStatus: string;
+			signal: PrReviewCircuitSignal | null;
+			terminalAtMs: number;
+	  }
+	| undefined {
+	if (circuit.state !== 'HALF_OPEN' || !circuit.probe) return undefined;
+	const latest = latestDelegationRecord(
+		batchLaneRecords(
+			directory,
+			state,
+			circuit.probe.batchId,
+			circuit.probe.laneId,
+		),
+	);
+	if (!latest) return undefined;
+	if (!TERMINAL_FAILED_DELEGATION_STATUSES.has(latest.status)) return undefined;
 	return {
-		signature: opened[0],
-		count: opened[1].dimensions.size,
-		contributors: opened[1].contributors,
-		openedAt: state.prReviewResilience?.circuit?.openedAt ?? isoNow(),
+		terminalStatus: latest.status,
+		signal: classifyPrReviewCircuitSignal(latest),
+		terminalAtMs:
+			latest.terminalResult?.recordedAt ??
+			latest.completedAt ??
+			latest.updatedAt ??
+			latest.createdAt ??
+			0,
 	};
 }
 
 function formatPrReviewResilienceCircuitOpenMessage(
-	circuit: PrReviewResilienceCircuitRecord,
+	circuit: PrReviewResilienceCircuitRecord | undefined,
+	nowMs: number = Date.now(),
 ): string {
-	return `BLOCKED: PR_REVIEW base dispatch circuit is open after ${circuit.count} correlated terminal failures (${circuit.signature}); collect every launched lane, abort_pr_workflow, and stop without partial findings`;
+	// Issue #2385: an absent circuit record must not be replaced by a
+	// synthetic inline construction here (parallel-rule guardrail); the
+	// message degrades truthfully instead.
+	if (!circuit) {
+		return 'BLOCKED: PR_REVIEW resilience retry circuit is open; collect, diagnose, cancel, abort, gap reporting, and config disable remain available';
+	}
+	if ('version' in circuit) {
+		const openUntilMs = circuit.openUntil ? Date.parse(circuit.openUntil) : 0;
+		const remainingMs = Math.max(0, openUntilMs - nowMs);
+		const retryNote =
+			remainingMs > 0
+				? `the recovery canary probe is admitted in about ${Math.ceil(remainingMs / 1000)}s`
+				: 'the next staged dispatch is admitted as the recovery canary probe';
+		return `BLOCKED: PR_REVIEW resilience retry circuit is ${circuit.state} after ${circuit.contributors.length} distinct terminal provider failures (${circuit.providerClass ?? 'provider'}); ${retryNote}; collect, diagnose, cancel, abort, gap reporting, and config disable remain available`;
+	}
+	// Issue #2385 recurrence sweep (class G): the legacy-record branch must
+	// carry the SAME guidance as the v2 branch — collect every launched lane
+	// and settle N-of-6 truthfully; "stop without partial findings" discarded
+	// validated work and contradicts the current policy.
+	return `BLOCKED: PR_REVIEW base dispatch circuit is open after ${circuit.count} correlated terminal failures (${circuit.signature}); collect every launched lane, then settle coverage truthfully (COMPLETE/PARTIAL/NO_COVERAGE) via complete_pr_workflow`;
+}
+
+interface PrReviewResilienceCircuitAdvanceOutcome {
+	state: PrWorkflowGateState;
+	snapshot: PrReviewResilienceStateRecord;
+	/**
+	 * Set ONLY for an admitted HALF_OPEN probe transition: the circuit record is
+	 * persisted together with the successful admission's state write
+	 * (mark-on-success), so a validation failure never leaves a phantom probe.
+	 */
+	pendingProbeCircuit?: PrReviewCircuitRecordV2;
+	blocked?: { reason: 'circuit_open' | 'probe_in_flight' };
+}
+
+/**
+ * Adopt the persisted circuit (v2 pass-through, legacy migration with a
+ * bounded diagnostic, malformed fail-open), advance the machine one step, and
+ * persist evidence-driven transitions under the enforcement lock. Runs inside
+ * `withSessionStateMutation` only.
+ */
+async function advanceResilienceCircuitWhileLocked(args: {
+	directory: string;
+	state: PrWorkflowGateState;
+	snapshot: PrReviewResilienceStateRecord;
+	admission?: { batchId: string; laneId: string };
+}): Promise<PrReviewResilienceCircuitAdvanceOutcome> {
+	const { directory } = args;
+	let state = args.state;
+	let snapshot = args.snapshot;
+
+	// Adoption. A malformed record is dropped IN MEMORY only — the broken bytes
+	// stay on disk for forensics until a legitimate full-state write replaces
+	// them. A legacy record migrates once to a nonblocking v2 CLOSED record and
+	// that migration persists immediately (it must never stay blocking).
+	const nowMs = _test_exports.nowMs();
+	const adoption = adoptPrReviewCircuit(snapshot.circuit, nowMs);
+	let circuit: PrReviewCircuitRecordV2 | null = null;
+	if (adoption.kind === 'v2') {
+		circuit = adoption.record;
+	} else if (adoption.kind === 'migrated') {
+		circuit = adoption.record;
+		snapshot = { ...snapshot, circuit: adoption.record };
+		state = await writeStateWhileLocked(directory, {
+			...state,
+			updatedAt: isoNow(),
+			prReviewResilience: snapshot,
+		});
+		reportCircuitAdoptionDiagnostic(adoption.diagnostic);
+	} else if (adoption.kind === 'malformed') {
+		const withoutCircuit: PrReviewResilienceStateRecord = { ...snapshot };
+		withoutCircuit.circuit = undefined;
+		snapshot = withoutCircuit;
+		reportCircuitAdoptionDiagnostic(adoption.diagnostic);
+	}
+
+	// Issue #2385 (final-critic finding 1): the circuit TRANSITION is
+	// reducer-owned. This adapter emits `circuit_advance_requested` (the
+	// reducer re-adopts the already-migrated circuit idempotently and runs
+	// the machine), applies the returned state, and executes the returned
+	// effects: `persist_state` writes now; `block_dispatch` maps to the
+	// typed admission refusal; an admitted HALF_OPEN probe carries NO
+	// persist effect (mark-on-success: the admission's own write persists
+	// it, so a validation failure never leaves a phantom probe).
+	const advanceOutcome = reducePrReviewEvent(state, {
+		type: 'circuit_advance_requested',
+		nowMs,
+		laneSignals: laneSignalsForCircuitReview(directory, state),
+		probeObservation:
+			circuit?.state === 'HALF_OPEN'
+				? probeObservationForCircuit(directory, state, circuit)
+				: undefined,
+		admission: args.admission,
+		policy: snapshot.policy,
+	});
+	if (advanceOutcome.status === 'rejected') {
+		// circuit_advance_requested has no rejection path; fail soft to the
+		// pre-transition view rather than blocking the workflow.
+		return { state, snapshot };
+	}
+	const nextState = advanceOutcome.state as PrWorkflowGateState;
+	const blockedReason = advanceOutcome.effects.find(
+		(effect): effect is Extract<PrReviewEffect, { kind: 'block_dispatch' }> =>
+			effect.kind === 'block_dispatch',
+	)?.reason;
+	if (
+		advanceOutcome.effects.some((effect) => effect.kind === 'persist_state')
+	) {
+		snapshot = {
+			...snapshot,
+			circuit: nextState.prReviewResilience?.circuit,
+		};
+		state = await writeStateWhileLocked(directory, {
+			...nextState,
+			updatedAt: isoNow(),
+			prReviewResilience: snapshot,
+		});
+	} else {
+		state = nextState;
+	}
+	if (blockedReason !== undefined) {
+		return { state, snapshot, blocked: { reason: blockedReason } };
+	}
+	const pendingProbe = nextState.prReviewResilience?.circuit;
+	if (
+		pendingProbe &&
+		'version' in pendingProbe &&
+		pendingProbe.state === 'HALF_OPEN' &&
+		pendingProbe.probe
+	) {
+		return { state, snapshot, pendingProbeCircuit: pendingProbe };
+	}
+	return { state, snapshot };
 }
 
 async function preflightPrReviewResilienceCircuitBeforePrune(
@@ -3208,11 +4436,12 @@ async function preflightPrReviewResilienceCircuitBeforePrune(
 	state: PrWorkflowGateState,
 	previous: PrReviewBaseDispatchRecord[],
 	policy: PrReviewResiliencePolicyRecord,
+	liveResilienceEnabled: boolean,
 ): Promise<{
 	state: PrWorkflowGateState;
 	previous: PrReviewBaseDispatchRecord[];
 }> {
-	let nextState = state;
+	let nextState: PrWorkflowGateState = state;
 	let nextPrevious = previous;
 	let snapshot = nextState.prReviewResilience;
 	if (!snapshot) {
@@ -3227,35 +4456,26 @@ async function preflightPrReviewResilienceCircuitBeforePrune(
 			snapshot = nextState.prReviewResilience ?? snapshot;
 		}
 	}
-	if (snapshot.circuit) {
-		throw new PrReviewResilienceCircuitOpenError(
-			formatPrReviewResilienceCircuitOpenMessage(snapshot.circuit),
-		);
-	}
-	const circuit = computePrReviewResilienceCircuit(
-		directory,
-		nextState,
-		policy,
-	);
-	if (!circuit) {
+	// Issue #2382: the CURRENT config's `enabled` flag is authoritative. While
+	// disabled the circuit is fully inert — no transition, no block, no prune
+	// gating — and the persisted record (if any) is preserved for audit.
+	if (!liveResilienceEnabled) {
 		return { state: nextState, previous: nextPrevious };
 	}
-	const nextResilience = { ...snapshot, circuit };
-	if (
-		!nextState.prReviewResilience ||
-		nextState.prReviewResilience.circuit?.signature !== circuit.signature ||
-		nextState.prReviewResilience.circuit?.count !== circuit.count
-	) {
-		nextState = await writeStateWhileLocked(directory, {
-			...nextState,
-			updatedAt: isoNow(),
-			prReviewResilience: nextResilience,
-		});
-		nextPrevious = nextState.prReviewBaseDispatches ?? [];
+	const outcome = await advanceResilienceCircuitWhileLocked({
+		directory,
+		state: nextState,
+		snapshot,
+	});
+	if (outcome.blocked) {
+		throw new PrReviewResilienceCircuitOpenError(
+			formatPrReviewResilienceCircuitOpenMessage(outcome.snapshot.circuit),
+		);
 	}
-	throw new PrReviewResilienceCircuitOpenError(
-		formatPrReviewResilienceCircuitOpenMessage(circuit),
-	);
+	return {
+		state: outcome.state,
+		previous: outcome.state.prReviewBaseDispatches ?? nextPrevious,
+	};
 }
 
 async function probeResilienceCanaryLiveness(
@@ -3397,6 +4617,7 @@ interface EnforcePrReviewBaseDimensionsOptions {
 	batchId: string;
 	prHeadSha: string;
 	revisionDigest?: string;
+	prReviewContractRetry?: boolean;
 	prReviewWaveStage?: 'canary' | 'fanout';
 	prReviewWaveAttempt?: 0 | 1 | 2;
 	prReviewResiliencePolicy?: PrReviewResilienceConfig;
@@ -3486,8 +4707,17 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 		);
 	}
 	const depthTier = state.prReviewDepthTier ?? 'L';
+	const requestedContractRetry = options.prReviewContractRetry === true;
 	const requestedWaveStage = options.prReviewWaveStage;
 	const requestedWaveAttempt = options.prReviewWaveAttempt;
+	if (
+		requestedContractRetry &&
+		(requestedWaveStage !== undefined || requestedWaveAttempt !== undefined)
+	) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW contract retry is mutually exclusive with pr_review_wave_stage and pr_review_wave_attempt',
+		);
+	}
 	if (
 		(requestedWaveStage === undefined) !==
 		(requestedWaveAttempt === undefined)
@@ -3500,18 +4730,24 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 		state,
 		options.prReviewResiliencePolicy,
 	);
+	// Issue #2382: the CURRENT config's `enabled` flag is authoritative for
+	// gating decisions; the persisted snapshot only carries numeric knobs.
+	const liveResilienceEnabled =
+		options.prReviewResiliencePolicy?.enabled ??
+		DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.enabled;
 	if (
 		previous.length >= MAX_WORKFLOW_BATCHES &&
 		requestedWaveStage !== undefined &&
 		requestedWaveAttempt !== undefined &&
 		depthTier !== 'S' &&
-		resiliencePolicy.enabled
+		liveResilienceEnabled
 	) {
 		({ state, previous } = await preflightPrReviewResilienceCircuitBeforePrune(
 			directory,
 			state,
 			previous,
 			resiliencePolicy,
+			liveResilienceEnabled,
 		));
 	}
 	if (previous.length >= MAX_WORKFLOW_BATCHES) {
@@ -3537,17 +4773,55 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 			previous = state.prReviewBaseDispatches ?? [];
 		}
 	}
+	// Issue #2382 live-disable semantics. While the CURRENT config disables
+	// resilience, the circuit is inert: nothing blocks, nothing transitions, and
+	// one guarded audit write marks the persisted policy disabled (detection
+	// anchor; the record itself stays for audit). On the next enforcement with
+	// resilience re-enabled, the whole record resets in ONE CAS write — fresh
+	// v2 CLOSED generation, evidence waterline at now, attempts cleared, policy
+	// refreshed from the current config — so pre-disable evidence can never
+	// resurrect.
+	//
+	// Issue #2385: both transitions are REDUCER-OWNED — this adapter emits
+	// `resilience_config_changed`, applies the returned state, and executes
+	// the `persist_state` effect. No inline resilience-field mutation remains.
 	if (
-		resiliencePolicy.enabled &&
+		nextResilience &&
+		(!liveResilienceEnabled || nextResilience.policy.enabled === false)
+	) {
+		const configEvent: PrReviewEvent = {
+			type: 'resilience_config_changed',
+			enabled: liveResilienceEnabled,
+			policy: liveResilienceEnabled
+				? options.prReviewResiliencePolicy
+				: undefined,
+			nowMs: _test_exports.nowMs(),
+		};
+		const outcome = reducePrReviewEvent(state, configEvent);
+		if (
+			outcome.status === 'applied' &&
+			outcome.effects.some((effect) => effect.kind === 'persist_state')
+		) {
+			state = await writeStateWhileLocked(directory, {
+				...(outcome.state as PrWorkflowGateState),
+				updatedAt: isoNow(),
+			});
+			previous = state.prReviewBaseDispatches ?? [];
+			nextResilience = state.prReviewResilience ?? nextResilience;
+		}
+	}
+	if (
+		liveResilienceEnabled &&
 		depthTier !== 'S' &&
-		requestedWaveStage === undefined
+		requestedWaveStage === undefined &&
+		!requestedContractRetry
 	) {
 		throw new Error(
 			'BLOCKED: PR_REVIEW base dispatch at depth tier M or L requires canary-first staged admission while pr_review_resilience is enabled',
 		);
 	}
 	if (requestedWaveStage !== undefined && requestedWaveAttempt !== undefined) {
-		if (depthTier === 'S' || !resiliencePolicy.enabled) {
+		if (depthTier === 'S' || !liveResilienceEnabled) {
 			throw new Error(
 				'BLOCKED: staged PR_REVIEW base dispatch is valid only when pr_review_resilience is enabled at depth tier M or L',
 			);
@@ -3557,36 +4831,36 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 			revisionDigest = (await createPrReviewGateContext(directory, state))
 				.revisionDigest;
 		}
-		const snapshot = nextResilience ?? {
+		let snapshot = nextResilience ?? {
 			policy: resiliencePolicy,
 			attempts: [],
 		};
-		if (snapshot.circuit) {
-			throw new PrReviewResilienceCircuitOpenError(
-				formatPrReviewResilienceCircuitOpenMessage(snapshot.circuit),
-			);
-		}
-		const circuit = computePrReviewResilienceCircuit(
-			directory,
-			state,
-			snapshot.policy,
-		);
-		if (circuit) {
-			nextResilience = { ...snapshot, circuit };
-			if (
-				!state.prReviewResilience ||
-				state.prReviewResilience.circuit?.signature !== circuit.signature ||
-				state.prReviewResilience.circuit?.count !== circuit.count
-			) {
-				await writeStateWhileLocked(directory, {
-					...state,
-					updatedAt: isoNow(),
-					prReviewResilience: nextResilience,
-				});
+		// Issue #2382: one machine advance per staged admission. Evidence-driven
+		// transitions persist immediately (inside the advance helper); an admitted
+		// HALF_OPEN probe defers its persist to this admission's success write
+		// (mark-on-success), so a validation failure below never leaves a phantom
+		// probe. `snapshot` is refreshed to the post-advance record so the
+		// attempt bookkeeping below reads the same state the machine left.
+		let pendingProbeCircuit: PrReviewCircuitRecordV2 | undefined;
+		if (liveResilienceEnabled) {
+			const outcome = await advanceResilienceCircuitWhileLocked({
+				directory,
+				state,
+				snapshot,
+				admission: {
+					batchId,
+					laneId: normalizedLanes[0]?.laneId ?? '',
+				},
+			});
+			state = outcome.state;
+			snapshot = outcome.snapshot;
+			nextResilience = outcome.snapshot;
+			pendingProbeCircuit = outcome.pendingProbeCircuit;
+			if (outcome.blocked) {
+				throw new PrReviewResilienceCircuitOpenError(
+					formatPrReviewResilienceCircuitOpenMessage(outcome.snapshot.circuit),
+				);
 			}
-			throw new PrReviewResilienceCircuitOpenError(
-				formatPrReviewResilienceCircuitOpenMessage(circuit),
-			);
 		}
 		const lastAttempt = snapshot.attempts.at(-1);
 		if (requestedWaveStage === 'canary') {
@@ -3706,6 +4980,12 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 						admittedAt: isoNow(),
 					},
 				],
+				// Issue #2382: an admitted HALF_OPEN probe persists with this very
+				// success write (mark-on-success); any other surviving circuit
+				// record carries forward unchanged.
+				...((pendingProbeCircuit ?? snapshot.circuit)
+					? { circuit: pendingProbeCircuit ?? snapshot.circuit }
+					: {}),
 			};
 		} else {
 			if (
@@ -3798,6 +5078,47 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 			};
 		}
 	}
+	if (requestedContractRetry) {
+		const revisionDigest =
+			options.revisionDigest ??
+			(await createPrReviewGateContext(directory, state)).revisionDigest;
+		const attempts = summarizePrReviewBaseDimensionAttempts(
+			directory,
+			state,
+			revisionDigest,
+		);
+		if (
+			normalizedLanes.length !== 1 ||
+			(normalizedLanes[0]?.ownedWorkflowLanes?.length ?? 1) !== 1
+		) {
+			throw new Error(
+				'BLOCKED: PR_REVIEW contract retry requires exactly one singleton lane',
+			);
+		}
+		const contractedDimension =
+			declaredBaseDimensions(normalizedLanes)[0] ??
+			normalizedLanes[0]!.workflowLane;
+		if (attempts.successful.has(contractedDimension)) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW contract retry cannot target already-successful dimension "${contractedDimension}"`,
+			);
+		}
+		if (attempts.inFlight.has(contractedDimension)) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW contract retry cannot target in-flight dimension "${contractedDimension}"`,
+			);
+		}
+		if (!attempts.contractFailed.has(contractedDimension)) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW contract retry requires a recorded terminal contract failure for dimension "${contractedDimension}"`,
+			);
+		}
+		if (attempts.contractRetried.has(contractedDimension)) {
+			throw new Error(
+				`BLOCKED: PR_REVIEW contract retry for dimension "${contractedDimension}" was already admitted`,
+			);
+		}
+	}
 	const record: PrReviewBaseDispatchRecord = {
 		batchId,
 		lanes: normalizedLanes.map((lane) => ({
@@ -3817,6 +5138,14 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 		updatedAt: isoNow(),
 		prReviewBaseDispatches: [...previous, record],
 		prReviewBaseDispatch: record,
+		...(requestedContractRetry
+			? {
+					prReviewContractRetryDimensions: [
+						...(state.prReviewContractRetryDimensions ?? []),
+						declaredBaseDimensions(normalizedLanes)[0]!,
+					],
+				}
+			: {}),
 		...(nextResilience ? { prReviewResilience: nextResilience } : {}),
 	};
 	return writeStateWhileLocked(directory, nextState);
@@ -3826,6 +5155,7 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 	directory: string,
 	sessionID: string,
 	batchId: string,
+	contractRetry = false,
 ): Promise<boolean> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
 	const normalizedBatchId = normalizeBatchId(batchId);
@@ -3836,17 +5166,38 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 				normalizedSessionID,
 			);
 			if (!state || state.mode !== 'PR_REVIEW') return false;
-			const currentBaseDispatches = state.prReviewBaseDispatches ?? [];
-			if (currentBaseDispatches.at(-1)?.batchId !== normalizedBatchId) {
-				return false;
-			}
 			const batchRecords = findByBatchId(directory, normalizedBatchId, {
 				parentSessionId: normalizedSessionID,
 			});
-			if (batchRecords.length > 0) return false;
-			const nextBaseDispatches = currentBaseDispatches.slice(0, -1);
+			// Issue #2385: the rollback transition is REDUCER-OWNED — the
+			// adapter emits `base_admission_rolled_back`, and a typed rejection
+			// (not-last batch / already-launched batch) maps to the same silent
+			// false the pre-reducer guard produced.
+			const rollbackOutcome = reducePrReviewEvent(state, {
+				type: 'base_admission_rolled_back',
+				batchId: normalizedBatchId,
+				batchDelegationRecordsExist: batchRecords.length > 0,
+			});
+			if (rollbackOutcome.status === 'rejected') return false;
+			const rollbackState = rollbackOutcome.state as PrWorkflowGateState;
+			const currentBaseDispatches = state.prReviewBaseDispatches ?? [];
+			const nextBaseDispatches = rollbackState.prReviewBaseDispatches ?? [];
+			const rolledBackDimensions = new Set(
+				currentBaseDispatches
+					.at(-1)
+					?.lanes.flatMap((lane) =>
+						lane.ownedWorkflowLanes?.length
+							? lane.ownedWorkflowLanes
+							: [lane.workflowLane],
+					) ?? [],
+			);
+			const nextContractRetryDimensions = contractRetry
+				? (state.prReviewContractRetryDimensions ?? []).filter(
+						(dimension) => !rolledBackDimensions.has(dimension),
+					)
+				: state.prReviewContractRetryDimensions;
 			const lastAttempt = state.prReviewResilience?.attempts.at(-1);
-			let nextResilience = state.prReviewResilience;
+			let nextResilience = rollbackState.prReviewResilience;
 			if (lastAttempt?.canaryBatchId === normalizedBatchId) {
 				nextResilience = nextResilience
 					? {
@@ -3865,6 +5216,40 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 						}
 					: nextResilience;
 			}
+			// Issue #2382 review (PRR-002): a rolled-back HALF_OPEN probe can
+			// never produce a terminal record — this rollback's own precondition
+			// is that the batch has zero delegation records — so leaving the
+			// probe in place would wedge the circuit on probe_in_flight forever.
+			// Issue #2385: the probe-end transition is REDUCER-OWNED
+			// (`circuit_probe_settled` -> the machine's rolled-back-admission
+			// path); the adapter applies the returned state.
+			const rolledBackCircuit = nextResilience?.circuit;
+			if (
+				rolledBackCircuit &&
+				'version' in rolledBackCircuit &&
+				rolledBackCircuit.state === 'HALF_OPEN' &&
+				rolledBackCircuit.probe?.batchId === normalizedBatchId
+			) {
+				const probeOutcome = reducePrReviewEvent(
+					{ ...rollbackState, prReviewResilience: nextResilience },
+					{
+						type: 'circuit_probe_settled',
+						outcome: { result: 'rolled_back_admission' },
+						nowMs: _test_exports.nowMs(),
+						policy: {
+							...(nextResilience?.policy ?? snapshotPrReviewResiliencePolicy()),
+							circuitOpenDurationMs: circuitOpenDurationMs(
+								nextResilience?.policy ?? snapshotPrReviewResiliencePolicy(),
+							),
+						},
+					},
+				);
+				if (probeOutcome.status === 'applied') {
+					nextResilience =
+						(probeOutcome.state as PrWorkflowGateState).prReviewResilience ??
+						nextResilience;
+				}
+			}
 			const shouldKeepResilience =
 				(nextBaseDispatches.length > 0 && Boolean(nextResilience?.policy)) ||
 				Boolean(nextResilience?.circuit) ||
@@ -3879,6 +5264,9 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 				...(shouldKeepResilience
 					? { prReviewResilience: nextResilience }
 					: { prReviewResilience: undefined }),
+				...(nextContractRetryDimensions?.length
+					? { prReviewContractRetryDimensions: nextContractRetryDimensions }
+					: { prReviewContractRetryDimensions: undefined }),
 			});
 			return true;
 		}),
@@ -3889,7 +5277,7 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
  * Delegation statuses that prove a lane will produce nothing further.
  *
  * Enumerated here rather than reusing `isTerminal`
- * (`src/background/pending-delegations.ts:1829`) because that helper is private
+ * (`src/background/pending-delegations.ts:3555`) because that helper is private
  * to its module and because the two sets deliberately differ: `consumed` is a
  * *successfully ingested* terminal state, so treating it as a failure would let
  * a healthy lane be consolidated over. `pending` / `running` / `ingesting` /
@@ -3902,148 +5290,12 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
  * exception exists for. Preview truncation alone is recoverable when the durable
  * artifact validates. This set is therefore only consulted after both identity
  * and revision-independent semantic validation.
- */
-const TERMINAL_FAILED_DELEGATION_STATUSES: ReadonlySet<string> = new Set([
-	'completed',
-	'error',
-	'cancelled',
-	'stale',
-]);
-
-interface PrReviewBaseDimensionAttempts {
-	/** Dimensions with a currently authoritative successful artifact. */
-	successful: Set<string>;
-	/** Dimensions with a currently in-flight or retryable recorded lane. */
-	inFlight: Set<string>;
-	/**
-	 * The subset of `successful` supplied by a lane that owns that dimension
-	 * alone. Used by the cumulative tier-L lane floor to decide when an earlier
-	 * consolidated lane has been superseded and no longer spends lane budget.
-	 */
-	dedicatedSuccessful: Set<string>;
-	/** Dimensions whose recorded lane ran to a terminal, non-successful end. */
-	terminallyFailed: Set<string>;
-}
-
-/**
- * Per-dimension success/failure across every recorded base batch.
  *
- * The two halves deliberately use different evidence:
- *
- * - **successful** is revision-aware (`successfulObligationsFromExactBatch`
- *   compares each artifact's `revisionDigest` against the current worktree), so
- *   a stale artifact is correctly not a current source.
- * - **terminallyFailed** is revision-INdependent on purpose.
- *   `recordsPassingBatchIntegrity` plus
- *   `hasRevisionIndependentDiscoverySemantics` use the artifact's recorded
- *   revision rather than the current worktree digest. If failure were
- *   derived from the revision-aware set instead, any working-tree edit would
- *   make all six dimensions read as "failed" at once and a caller could then
- *   consolidate the whole base wave into two lanes — re-opening the tier-L lane
- *   floor by a second route (issue #1968 BL-4).
+ * Issue #2385: the set itself is owned by `src/pr-review/circuit.ts`
+ * (`CIRCUIT_TERMINAL_DELEGATION_STATUSES`) — one vocabulary, no mirror.
  */
-function summarizePrReviewBaseDimensionAttempts(
-	directory: string,
-	state: PrWorkflowGateState,
-	revisionDigest: string,
-): PrReviewBaseDimensionAttempts {
-	const successful = new Set<string>();
-	const inFlight = new Set<string>();
-	const dedicatedSuccessful = new Set<string>();
-	const terminallyFailed = new Set<string>();
-	for (const batch of state.prReviewBaseDispatches ?? []) {
-		const batchSuccessful = successfulObligationsFromExactBatch(
-			directory,
-			state,
-			batch.batchId,
-			batch.lanes,
-			'swarm-pr-review:base',
-			batch.validatedAt,
-			true,
-			new Set(),
-			revisionDigest,
-		);
-		for (const obligation of batchSuccessful) {
-			successful.add(obligation);
-		}
-		for (const lane of batch.lanes) {
-			if ((lane.ownedWorkflowLanes?.length ?? 1) !== 1) continue;
-			const dimension = lane.ownedWorkflowLanes?.[0] ?? lane.workflowLane;
-			if (batchSuccessful.has(dimension)) dedicatedSuccessful.add(dimension);
-		}
-		const semanticallyValidLaneIds = new Set(
-			recordsPassingBatchIntegrity(
-				directory,
-				state,
-				batch.batchId,
-				batch.lanes,
-				'swarm-pr-review:base',
-				batch.validatedAt,
-			)
-				.filter((qualified) =>
-					hasRevisionIndependentDiscoverySemantics(directory, qualified),
-				)
-				.map((qualified) => qualified.record.laneId),
-		);
-		const records = findByBatchId(directory, batch.batchId, {
-			parentSessionId: state.sessionID,
-		});
-		for (const lane of batch.lanes) {
-			if (semanticallyValidLaneIds.has(lane.laneId)) continue;
-			const laneRecords = records.filter(
-				(record) => record.laneId === lane.laneId,
-			);
-			// No record at all: never dispatched. Any recorded lane not wholly in
-			// the terminal failure set is still in flight or retryable; it is not a
-			// failed obligation yet, but it must stay out of retry targets.
-			if (laneRecords.length === 0) {
-				continue;
-			}
-			if (
-				!laneRecords.every((record) =>
-					TERMINAL_FAILED_DELEGATION_STATUSES.has(record.status),
-				)
-			) {
-				for (const dimension of lane.ownedWorkflowLanes?.length
-					? lane.ownedWorkflowLanes
-					: [lane.workflowLane]) {
-					inFlight.add(dimension);
-				}
-				continue;
-			}
-			for (const dimension of lane.ownedWorkflowLanes?.length
-				? lane.ownedWorkflowLanes
-				: [lane.workflowLane]) {
-				terminallyFailed.add(dimension);
-			}
-		}
-	}
-	return { successful, inFlight, dedicatedSuccessful, terminallyFailed };
-}
-
-function hasRevisionIndependentDiscoverySemantics(
-	directory: string,
-	qualified: QualifiedBatchRecord,
-): boolean {
-	const ref = qualified.record.result?.outputRef?.trim();
-	if (!ref) return false;
-	const artifact = readLaneOutput(directory, ref)?.artifact ?? null;
-	if (!artifact?.revisionDigest?.trim()) return false;
-	return validatePrReviewDiscoveryLaneCompletion({
-		record: qualified.record,
-		result: qualified.record.result!,
-		artifact,
-		expected: {
-			mode: 'swarm-pr-review:base',
-			workflowLane: qualified.expectedWorkflowLane,
-			ownedWorkflowLanes: qualified.expectedOwnedLanes,
-			prHeadSha: qualified.record.workspace?.prHeadSha ?? '',
-			gitHead: qualified.record.workspace?.gitHead ?? '',
-			revisionDigest: artifact.revisionDigest,
-			reviewScope: qualified.record.workspace?.scope ?? undefined,
-		},
-	}).ok;
-}
+const TERMINAL_FAILED_DELEGATION_STATUSES =
+	CIRCUIT_TERMINAL_DELEGATION_STATUSES;
 
 /**
  * Fewest of these consolidated lane sets that together cover their own union.
@@ -4577,54 +5829,48 @@ function pruneWorkflowBatches(
 	};
 }
 
-/** Validate durable exact-six PR review evidence across all base and retry batches. */
+/**
+ * Issue #2385: the coverage-disclosure admission/settlement state machine now
+ * lives in `src/pr-review/completion.ts`, which the gate feeds through the
+ * bound completion-helper seam (bound at module init below). The gate
+ * re-exposes the two state-returning entry points with their original
+ * full-state signatures: every state object the boundary returns was read and
+ * written through this gate's own bound readers and codec, so the widening
+ * cast is representation-preserving.
+ */
+export async function admitPrReviewPartialBaseCoverage(
+	directory: string,
+	sessionID: string,
+	runId: string,
+	unresolvedDimensions: readonly PrReviewBaseDimensionId[],
+): Promise<PrWorkflowGateState> {
+	return (await admitPrReviewPartialBaseCoverageFromCompletion(
+		directory,
+		sessionID,
+		runId,
+		unresolvedDimensions,
+	)) as PrWorkflowGateState;
+}
+
 export async function assertPrReviewBaseCoverageSettled(
 	directory: string,
 	sessionID: string,
 	gateContext?: PrReviewGateContext,
-): Promise<PrWorkflowGateState> {
-	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
-	const batches = state.prReviewBaseDispatches ?? [];
-	if (batches.length === 0) {
-		throw new Error('BLOCKED: PR_REVIEW requires at least one base batch');
-	}
-	const ctx =
-		gateContext ?? (await createPrReviewGateContext(directory, state));
-	const covered = new Set<PrReviewBaseDimensionId>();
-	const malformedDiagnostics: string[] = [];
-	for (const batch of batches) {
-		const successful = successfulObligationsFromExactBatch(
-			directory,
-			state,
-			batch.batchId,
-			batch.lanes,
-			'swarm-pr-review:base',
-			batch.validatedAt,
-			true,
-			new Set(),
-			ctx.revisionDigest,
-			malformedDiagnostics,
-		);
-		for (const obligation of successful) {
-			covered.add(obligation as PrReviewBaseDimensionId);
-		}
-	}
-	const missing = PR_REVIEW_BASE_DIMENSION_IDS.filter(
-		(dimension) => !covered.has(dimension),
+): Promise<{
+	state: PrWorkflowGateState;
+	settlement: PrReviewTerminalCoverageSettlement & {
+		liveDimensions: PrReviewBaseDimensionId[];
+	};
+}> {
+	const settled = await assertPrReviewBaseCoverageSettledFromCompletion(
+		directory,
+		sessionID,
+		gateContext,
 	);
-	if (
-		missing.length > 0 ||
-		covered.size !== PR_REVIEW_BASE_DIMENSION_IDS.length
-	) {
-		throw new Error(
-			`BLOCKED: PR_REVIEW base coverage is incomplete; missing dimensions: ${missing.join(', ') || '(none)'}${
-				malformedDiagnostics.length > 0
-					? `; first failed lane predicates: ${malformedDiagnostics.join(' | ')}`
-					: ''
-			}; valid dimensions: ${PR_REVIEW_BASE_DIMENSION_IDS.join(', ')}; expected candidate row: ${CANDIDATE_HEADERS.base_explorer}; expected clean row: ${CLEAN_TEMPLATES.base_explorer}`,
-		);
-	}
-	return state;
+	return {
+		state: settled.state as PrWorkflowGateState,
+		settlement: settled.settlement,
+	};
 }
 
 /** Persist a council/reviewer/critic validation batch before launch. */
@@ -4690,7 +5936,7 @@ export async function recordPrReviewValidationBatch(
 			phase === 'reviewer'
 				? derivePrReviewCandidateInventory(directory, state, ctx)
 				: derivePrReviewCriticInventory(directory, state, ctx);
-		assertExactStringSet(
+		assertStringSetSubset(
 			assigned,
 			validatedInventory,
 			`PR_REVIEW ${phase} ownership`,
@@ -4756,7 +6002,12 @@ export async function recordPrReviewValidationBatch(
 	if (validatedInventory) {
 		coherence[batchId] = {
 			validatedInventory,
-			...(reviewerItemBindings ? { reviewerItemBindings } : {}),
+			...(reviewerItemBindings
+				? {
+						reviewerItemBindings,
+						reviewerItemBindingKeyEncoding: 'prefixed-v1' as const,
+					}
+				: {}),
 		};
 	}
 	const nextState: PrWorkflowGateState = {
@@ -4972,15 +6223,23 @@ export async function declarePrFeedbackInventory(
 				...appendedIds.map((entry) => ({ entry, amendedAt, batch })),
 			],
 			// The armed record attests coverage of the PRE-amendment inventory,
-			// so adding an item invalidates exactly what it attested. Disarming on
-			// a coverage-affecting change is the existing convention here — see
-			// `recordPrFeedbackStageA`, which disarms unconditionally for the same
-			// reason. Re-arming is one `complete_pr_workflow` call that re-verifies
-			// every phase against the amended inventory.
+			// so adding an item invalidates exactly what it attested. Issue
+			// #2108: when a live publication generation exists this disarm is an
+			// AUDITED invalidation (generation -> invalidated, receipts
+			// superseded, event appended) folded into this same atomic write;
+			// re-arming then re-verifies every phase against the amended
+			// inventory.
 			prFeedbackReadyToPublish: undefined,
 		};
-		await persistState(directory, amendedState);
-		return amendedState;
+		const superseded = supersedeLivePublicationInPendingState(
+			amendedState,
+			'inventory-amended',
+		);
+		await persistState(directory, superseded.state);
+		if (superseded.invalidationEvent) {
+			appendPublicationEvent(directory, superseded.invalidationEvent);
+		}
+		return superseded.state;
 	}
 	const nextState: PrWorkflowGateState = {
 		...state,
@@ -5214,7 +6473,7 @@ function prFeedbackBatchCoveredItems(
 	for (const lane of batch.ownership) {
 		if (!successfulLaneIds.has(lane.laneId)) continue;
 		if (
-			!feedbackArtifactCoversItems(
+			!legacyFeedbackArtifactCoversItems(
 				directory,
 				state,
 				batch.batchId,
@@ -5491,11 +6750,20 @@ export async function recordPrFeedbackStageA(
 		// Always disarmed, even when the gate batches are retained: re-arming is
 		// one `complete_pr_workflow` call that re-verifies every retained phase,
 		// so keeping an armed publication alive across a Stage A re-record would
-		// widen the publication window for no saving worth having.
+		// widen the publication window for no saving worth having. Issue #2108:
+		// when a live publication generation exists this disarm is an AUDITED
+		// invalidation folded into this same atomic write.
 		prFeedbackReadyToPublish: undefined,
 	};
-	await persistState(directory, nextState);
-	return nextState;
+	const superseded = supersedeLivePublicationInPendingState(
+		nextState,
+		'stage-a-rerun',
+	);
+	await persistState(directory, superseded.state);
+	if (superseded.invalidationEvent) {
+		appendPublicationEvent(directory, superseded.invalidationEvent);
+	}
+	return superseded.state;
 }
 
 /**
@@ -5780,51 +7048,1754 @@ export async function assertPrFeedbackReadyToPublish(
 	return state;
 }
 
+// ===== Publication-generation state machine (issue #2108) =====
+//
+// States: reviewing → armed → push_in_flight → published (terminal) with
+// invalidated (recoverable via fresh Stage A + independent gates arming N+1)
+// and cancelled_without_publication (terminal) reachable from the live
+// states. The legacy `prFeedbackReadyToPublish` record is a derived mirror
+// present exactly while `{armed, push_in_flight}` so a rolled-back binary
+// keeps enforcing the armed window instead of turning permissive.
+
+/**
+ * Derive the legacy rollback mirror from the active generation. Present iff
+ * the active generation is `{armed, push_in_flight}` — the mirror and the
+ * generation record are fields of ONE state document written by ONE atomic
+ * `writeAtomicJson` call, so there is no interleaved-write divergence window.
+ */
+function deriveReadyToPublishMirror(
+	active: PrFeedbackPublicationGeneration | undefined,
+): PrFeedbackReadyToPublishRecord | undefined {
+	if (
+		!active ||
+		(active.state !== 'armed' && active.state !== 'push_in_flight')
+	)
+		return undefined;
+	return {
+		revisionDigest: active.revisionDigest,
+		localHead: active.localHead,
+		remoteName: active.remoteName,
+		remoteBranchRef: active.remoteBranchRef,
+		remoteRef: active.remoteRef,
+		validatedAt: active.armedAt ?? active.createdAt,
+	};
+}
+
+/** Which publication component drifted, or could not be verified. */
+type PublicationIdentityCheck =
+	| { kind: 'intact' }
+	| { kind: 'drift'; component: string; detail: string }
+	| { kind: 'unresolvable'; component: string; detail: string };
+
+/** Recompute one identity component and compare it against the armed value. */
+async function verifyPublicationIdentityComponent(
+	directory: string,
+	state: PrWorkflowGateState,
+	active: PrFeedbackPublicationGeneration,
+	component: string,
+): Promise<PublicationIdentityCheck> {
+	switch (component) {
+		case 'digest': {
+			try {
+				const digest = await currentPrFeedbackRevisionDigest(directory, state);
+				return digest === active.revisionDigest
+					? { kind: 'intact' }
+					: {
+							kind: 'drift',
+							component,
+							detail: `approved revision digest ${active.revisionDigest} vs current ${digest}`,
+						};
+			} catch (error) {
+				return {
+					kind: 'unresolvable',
+					component,
+					detail: String((error as Error)?.message ?? error),
+				};
+			}
+		}
+		case 'head': {
+			const head = (
+				await _test_exports.resolveCurrentGitHeadAsync(directory)
+			)?.trim();
+			if (!head)
+				return {
+					kind: 'unresolvable',
+					component,
+					detail: 'HEAD resolution returned empty',
+				};
+			return head === active.localHead
+				? { kind: 'intact' }
+				: {
+						kind: 'drift',
+						component,
+						detail: `approved head ${active.localHead} vs current ${head}`,
+					};
+		}
+		case 'worktree': {
+			const clean =
+				await _test_exports.resolveIsWorkingTreeCleanAsync(directory);
+			if (clean !== true && clean !== false)
+				return {
+					kind: 'unresolvable',
+					component,
+					detail: 'clean-status resolution failed',
+				};
+			return clean === true
+				? { kind: 'intact' }
+				: {
+						kind: 'drift',
+						component,
+						detail: 'working tree or index is dirty',
+					};
+		}
+		case 'upstream': {
+			const target =
+				await _test_exports.resolveCurrentUpstreamPushTargetAsync(directory);
+			if (!target)
+				return {
+					kind: 'unresolvable',
+					component,
+					detail: 'upstream target resolution returned empty',
+				};
+			return target.remoteName === active.remoteName &&
+				target.remoteBranchRef === active.remoteBranchRef &&
+				target.remoteTrackingRef === active.remoteRef
+				? { kind: 'intact' }
+				: {
+						kind: 'drift',
+						component,
+						detail: `approved target ${active.remoteName}/${active.remoteBranchRef}/${active.remoteRef} vs current ${target.remoteName}/${target.remoteBranchRef}/${target.remoteTrackingRef}`,
+					};
+		}
+		case 'remote-url': {
+			// Every LIVE armed generation carries a push-URL identity (arming
+			// and migration both hard-require it), so absence here means a
+			// corrupt/hand-edited record — fail closed as unverifiable, never
+			// silently intact.
+			if (!active.remoteUrlIdentity) {
+				return {
+					kind: 'unresolvable',
+					component,
+					detail: 'armed generation carries no remote URL identity',
+				};
+			}
+			const url = await _test_exports.resolveRemoteUrlIdentityAsync(
+				directory,
+				active.remoteName,
+			);
+			if (!url)
+				return {
+					kind: 'unresolvable',
+					component,
+					detail: `remote "${active.remoteName}" URL could not be resolved`,
+				};
+			return url === active.remoteUrlIdentity
+				? { kind: 'intact' }
+				: {
+						kind: 'drift',
+						component,
+						detail: `approved remote URL identity ${active.remoteUrlIdentity} vs current ${url}`,
+					};
+		}
+		case 'workspace-identity': {
+			const identity = canonicalWorkspaceIdentity(directory);
+			if (!identity)
+				return {
+					kind: 'unresolvable',
+					component,
+					detail: 'canonical workspace identity could not be resolved',
+				};
+			return identity === active.workspaceIdentity
+				? { kind: 'intact' }
+				: {
+						kind: 'drift',
+						component,
+						detail: `generation is bound to a different workspace`,
+					};
+		}
+		case 'evidence-join': {
+			// First-class for locked re-verification (PR #2422 review PRR-009):
+			// the receipt-set join drifts when the ACTIVE receipts no longer
+			// match what armed the generation — a pure state comparison, so it
+			// is always resolvable.
+			return publicationEvidenceJoinIntact(state, active)
+				? { kind: 'intact' }
+				: {
+						kind: 'drift',
+						component,
+						detail:
+							'the receipt set recorded at arming is no longer the active one',
+					};
+		}
+		default:
+			return { kind: 'unresolvable', component, detail: 'unknown component' };
+	}
+}
+
+const PUBLICATION_IDENTITY_COMPONENTS = [
+	'digest',
+	'head',
+	'worktree',
+	'upstream',
+	'remote-url',
+	'workspace-identity',
+] as const;
+
+/**
+ * Verify every armed identity component outside any lock (the common intact
+ * path takes no extra lock traffic). Proven mismatch → drift; resolver
+ * failure → unresolvable (fail closed, NO state change — unverifiable is not
+ * invalidation evidence).
+ */
+async function checkPublicationIdentity(
+	directory: string,
+	state: PrWorkflowGateState,
+	active: PrFeedbackPublicationGeneration,
+): Promise<PublicationIdentityCheck> {
+	for (const component of PUBLICATION_IDENTITY_COMPONENTS) {
+		const check = await verifyPublicationIdentityComponent(
+			directory,
+			state,
+			active,
+			component,
+		);
+		if (check.kind !== 'intact') return check;
+	}
+	if (!publicationEvidenceJoinIntact(state, active)) {
+		return {
+			kind: 'drift',
+			component: 'evidence-join',
+			detail: 'the receipt set recorded at arming is no longer the active one',
+		};
+	}
+	return { kind: 'intact' };
+}
+
+/** Defense-in-depth: the active receipts still match the arming join. */
+function publicationEvidenceJoinIntact(
+	state: PrWorkflowGateState,
+	active: PrFeedbackPublicationGeneration,
+): boolean {
+	if (state.prFeedbackStageA?.validatedAt !== active.evidence.stageAValidatedAt)
+		return false;
+	for (const join of active.evidence.batches) {
+		const batch = [...(state.prFeedbackGateBatches ?? [])]
+			.reverse()
+			.find((candidate) => candidate.phase === join.phase);
+		if (
+			!batch ||
+			batch.batchId !== join.batchId ||
+			batch.laneId !== join.laneId
+		)
+			return false;
+	}
+	return true;
+}
+
+/** Build the evidence join for a freshly armed generation. */
+function buildPublicationEvidenceJoin(
+	state: PrWorkflowGateState,
+	currentDigest: string,
+): PrFeedbackPublicationEvidenceJoin | null {
+	const stageA = state.prFeedbackStageA;
+	if (!stageA || stageA.revisionDigest !== currentDigest || !stageA.validatedAt)
+		return null;
+	const batches: PrFeedbackPublicationEvidenceJoin['batches'] = [];
+	for (const phase of PR_FEEDBACK_PHASE_ORDER) {
+		const batch = [...(state.prFeedbackGateBatches ?? [])]
+			.reverse()
+			.find(
+				(candidate) =>
+					candidate.phase === phase &&
+					candidate.revisionDigest === currentDigest,
+			);
+		if (!batch) return null;
+		batches.push({ phase, batchId: batch.batchId, laneId: batch.laneId });
+	}
+	return { stageAValidatedAt: stageA.validatedAt, batches };
+}
+
+/** Append a publication core event; audit is non-fatal by house discipline. */
+function appendPublicationEvent(
+	directory: string,
+	event: Record<string, unknown>,
+): void {
+	try {
+		appendCoreEventSync(directory, { ...event, timestamp: isoNow() });
+	} catch {
+		// Non-fatal audit trail (same discipline as abort / no-change / rebind).
+	}
+}
+
+function boundPublicationDiagnostic(text: string): string {
+	const redacted = redactSecrets(text).replace(
+		PUBLICATION_URL_CREDENTIALS_PATTERN,
+		'$1[REDACTED:url_credentials]@',
+	);
+	return redacted.length > MAX_PUSH_ATTEMPT_DIAGNOSTIC_CHARS
+		? `${redacted.slice(0, MAX_PUSH_ATTEMPT_DIAGNOSTIC_CHARS - 3)}...`
+		: redacted;
+}
+
+/**
+ * Snapshot of the publication container with bounded history trimming.
+ * History keeps the last {@link MAX_PUBLICATION_HISTORY_GENERATIONS}
+ * superseded generations; attempts belong to the active generation only.
+ */
+function nextPublicationContainer(
+	previous: PrFeedbackPublicationState | undefined,
+	active: PrFeedbackPublicationGeneration | undefined,
+	historyAppends: PrFeedbackPublicationGeneration[] = [],
+	attempts: PrFeedbackPushAttempt[] = [],
+): PrFeedbackPublicationState {
+	const history = [...(previous?.history ?? []), ...historyAppends].slice(
+		-MAX_PUBLICATION_HISTORY_GENERATIONS,
+	);
+	return {
+		schemaVersion: PUBLICATION_SCHEMA_VERSION,
+		active,
+		history,
+		attempts: attempts.slice(-MAX_PUBLICATION_ATTEMPTS),
+	};
+}
+
+/**
+ * The audited invalidation transition (issue #2108 §4/§5). Supersedes every
+ * content-dependent approval of the active generation — Stage A result,
+ * verification batches, ordered-gate batches, scope declarations — by
+ * removing them from ACTIVE state (the underlying lane artifacts remain in
+ * their own stores; the superseded join is pinned in the generation record),
+ * marks the generation `invalidated`, clears the rollback mirror, and appends
+ * the audit event. Never deletes the generation itself or its history.
+ *
+ * `driftReverification` (auto-detected drift) re-proves the drifted component
+ * under the session lock before writing, so a TOCTOU between the unlocked
+ * snapshot and this write cannot invalidate on stale evidence.
+ */
+async function invalidatePublicationGeneration(
+	directory: string,
+	sessionID: string,
+	reason: string,
+	options: {
+		drift?: { component: string; detail: string };
+		driftReverification?: boolean;
+		finalizeInFlightAs?: PrFeedbackPushAttemptOutcome;
+	} = {},
+): Promise<PrWorkflowPublicationTransitionResult> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	return withSessionStateMutation(directory, normalizedSessionID, async () => {
+		const state = await readPrWorkflowGateStateFromDisk(
+			directory,
+			normalizedSessionID,
+		);
+		if (!state || state.mode !== 'PR_FEEDBACK') {
+			throw new Error(
+				'BLOCKED: PR_FEEDBACK publication invalidation requires an active PR_FEEDBACK gate',
+			);
+		}
+		return applyPublicationInvalidationWhileLocked(
+			directory,
+			state,
+			reason,
+			options,
+		);
+	});
+}
+
+/**
+ * Invalidation core for callers that ALREADY hold the session state lock
+ * (push admission re-verifies identity under its own lock). Performs no lock
+ * acquisition of its own; the single atomic write and the audit event land
+ * before it returns.
+ */
+async function applyPublicationInvalidationWhileLocked(
+	directory: string,
+	state: PrWorkflowGateState,
+	reason: string,
+	options: {
+		drift?: { component: string; detail: string };
+		driftReverification?: boolean;
+		finalizeInFlightAs?: PrFeedbackPushAttemptOutcome;
+	} = {},
+): Promise<PrWorkflowPublicationTransitionResult> {
+	{
+		const active = state.prFeedbackPublication?.active;
+		const legacyRecord = active ? undefined : state.prFeedbackReadyToPublish;
+		if (!active && !legacyRecord) {
+			throw new Error('BLOCKED: no armed publication generation to invalidate');
+		}
+		if (
+			active &&
+			active.state !== 'armed' &&
+			active.state !== 'push_in_flight'
+		) {
+			throw new Error(
+				`BLOCKED: publication generation ${active.generation} is already ${active.state}`,
+			);
+		}
+		if (options.driftReverification && options.drift && active) {
+			const recheck = await verifyPublicationIdentityComponent(
+				directory,
+				state,
+				active,
+				options.drift.component,
+			);
+			if (recheck.kind !== 'drift') {
+				throw new Error(
+					`BLOCKED: PR_FEEDBACK publication drift on ${options.drift.component} did not re-confirm under the state lock (${recheck.kind}); no invalidation was recorded — retry from current state`,
+				);
+			}
+			options.drift = { component: recheck.component, detail: recheck.detail };
+		}
+		const now = isoNow();
+		let attempts = (state.prFeedbackPublication?.attempts ?? []).map(
+			(attempt) =>
+				attempt.result
+					? attempt
+					: {
+							...attempt,
+							result: {
+								outcome: options.finalizeInFlightAs ?? 'uncertain',
+								exitStatus: 'not-observed' as const,
+								diagnostic: `finalized by publication invalidation (${reason})`,
+								postPush: { localHead: null, observedRemoteHead: null },
+								completedAt: now,
+							},
+						},
+		);
+		let invalidated: PrFeedbackPublicationGeneration;
+		if (active) {
+			invalidated = {
+				...active,
+				state: 'invalidated',
+				invalidatedAt: now,
+				invalidationReason: reason,
+			};
+		} else if (legacyRecord) {
+			// Legacy armed record that could not be proven equivalent to a
+			// full generation identity: conservatively invalidated.
+			invalidated = {
+				schemaVersion: PUBLICATION_SCHEMA_VERSION,
+				generation: 1,
+				state: 'invalidated',
+				workspaceIdentity:
+					canonicalWorkspaceIdentity(directory) ?? 'unresolvable',
+				sessionID: state.sessionID,
+				intakeHeadSha: state.prHeadSha ?? 'unknown',
+				localHeadRef: 'unknown',
+				localHead: legacyRecord.localHead,
+				remoteName: legacyRecord.remoteName,
+				remoteUrlIdentity: undefined,
+				remoteBranchRef: legacyRecord.remoteBranchRef,
+				remoteRef: legacyRecord.remoteRef,
+				revisionDigest: legacyRecord.revisionDigest,
+				evidence: {
+					stageAValidatedAt: state.prFeedbackStageA?.validatedAt ?? 'unknown',
+					batches: (state.prFeedbackGateBatches ?? []).map((batch) => ({
+						phase: batch.phase,
+						batchId: batch.batchId,
+						laneId: batch.laneId,
+					})),
+				},
+				invalidationReason: reason,
+				createdAt: legacyRecord.validatedAt,
+				armedAt: legacyRecord.validatedAt,
+				invalidatedAt: now,
+			};
+		} else {
+			throw new Error('BLOCKED: no armed publication generation to invalidate');
+		}
+		if (!active) {
+			// A legacy migration-invalidated generation never had attempts.
+			attempts = [];
+		}
+		const nextState: PrWorkflowGateState = {
+			...state,
+			updatedAt: now,
+			// Supersede every content-dependent approval of this generation:
+			// arming N+1 requires freshly recorded evidence (rebind precedent).
+			prFeedbackStageA: undefined,
+			prFeedbackVerifications: undefined,
+			prFeedbackGateBatches: undefined,
+			prFeedbackScopes: undefined,
+			prFeedbackReadyToPublish: undefined,
+			prFeedbackPublication: nextPublicationContainer(
+				state.prFeedbackPublication,
+				invalidated,
+				[],
+				attempts,
+			),
+		};
+		await writeStateWhileLocked(directory, nextState);
+		appendPublicationEvent(directory, {
+			type: 'pr_feedback_publication_invalidated',
+			sessionID: state.sessionID,
+			generation: invalidated.generation,
+			reason,
+			previousState: active?.state ?? 'armed',
+			drift: options.drift ?? null,
+			revisionDigest: invalidated.revisionDigest,
+			localHead: invalidated.localHead,
+			remoteName: invalidated.remoteName,
+			remoteBranchRef: invalidated.remoteBranchRef,
+			supersededBatchIds: invalidated.evidence.batches.map((b) => b.batchId),
+		});
+		return { generation: invalidated, state: nextState };
+	}
+}
+
+interface PrWorkflowPublicationTransitionResult {
+	generation: PrFeedbackPublicationGeneration;
+	state: PrWorkflowGateState;
+}
+
+/**
+ * Migrate a legacy armed record (pre-#2108 state) into the generation state
+ * machine, conservatively: every identity component must recompute and match
+ * under the session lock, and the active receipts must be present and bound
+ * to the mirror's digest. Any mismatch or failure persists generation 1 as
+ * `invalidated` with a `legacy-migration-*` reason — never silently armed.
+ * No-op when no legacy record exists (returns the current state unchanged).
+ */
+async function ensurePublicationGenerationCurrent(
+	directory: string,
+	sessionID: string,
+): Promise<PrWorkflowGateState | null> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	const state = await readPrWorkflowGateState(directory, normalizedSessionID);
+	if (!state || state.mode !== 'PR_FEEDBACK') return state;
+	if (state.prFeedbackPublication || !state.prFeedbackReadyToPublish) {
+		return state;
+	}
+	const legacy = state.prFeedbackReadyToPublish;
+	// Mirror/generation disagreement is treated as a legacy record awaiting
+	// this migration; the checks below decide armed-vs-invalidated.
+	return withSessionStateMutation(directory, normalizedSessionID, async () => {
+		const locked = await readPrWorkflowGateStateFromDisk(
+			directory,
+			normalizedSessionID,
+		);
+		if (!locked || locked.mode !== 'PR_FEEDBACK') return locked ?? state;
+		if (locked.prFeedbackPublication || !locked.prFeedbackReadyToPublish) {
+			return locked;
+		}
+		const now = isoNow();
+		const base = {
+			schemaVersion: PUBLICATION_SCHEMA_VERSION,
+			generation: 1,
+			sessionID: locked.sessionID,
+			prTargetUrl: locked.prFeedbackTargetUrl,
+			intakeHeadSha: locked.prHeadSha ?? 'unknown',
+			revisionDigest: legacy.revisionDigest,
+			evidence:
+				buildPublicationEvidenceJoin(locked, legacy.revisionDigest) ??
+				({
+					stageAValidatedAt: 'unknown',
+					batches: [],
+				} as PrFeedbackPublicationEvidenceJoin),
+			createdAt: legacy.validatedAt,
+			armedAt: legacy.validatedAt,
+		};
+		const mismatch = async (reason: string): Promise<PrWorkflowGateState> => {
+			const invalidated: PrFeedbackPublicationGeneration = {
+				...base,
+				evidence:
+					base.evidence.batches.length > 0
+						? base.evidence
+						: {
+								stageAValidatedAt:
+									locked.prFeedbackStageA?.validatedAt ?? 'unknown',
+								batches: (locked.prFeedbackGateBatches ?? []).map((batch) => ({
+									phase: batch.phase,
+									batchId: batch.batchId,
+									laneId: batch.laneId,
+								})),
+							},
+				state: 'invalidated',
+				workspaceIdentity:
+					canonicalWorkspaceIdentity(directory) ?? 'unresolvable',
+				localHeadRef: 'unknown',
+				localHead: legacy.localHead,
+				remoteName: legacy.remoteName,
+				remoteUrlIdentity: undefined,
+				remoteBranchRef: legacy.remoteBranchRef,
+				remoteRef: legacy.remoteRef,
+				invalidationReason: reason,
+				invalidatedAt: now,
+			};
+			const nextState: PrWorkflowGateState = {
+				...locked,
+				updatedAt: now,
+				// Same conservative receipt supersession as any invalidation: the
+				// legacy approvals are historical-only until the ladder re-runs.
+				prFeedbackStageA: undefined,
+				prFeedbackVerifications: undefined,
+				prFeedbackGateBatches: undefined,
+				prFeedbackScopes: undefined,
+				prFeedbackReadyToPublish: undefined,
+				prFeedbackPublication: nextPublicationContainer(
+					locked.prFeedbackPublication,
+					invalidated,
+				),
+			};
+			await writeStateWhileLocked(directory, nextState);
+			appendPublicationEvent(directory, {
+				type: 'pr_feedback_publication_migrated',
+				sessionID: locked.sessionID,
+				generation: 1,
+				outcome: 'invalidated',
+				reason,
+			});
+			return nextState;
+		};
+		// Receipt consistency first (issue critic #7): the armed record must be
+		// backed by the receipts that authorized it.
+		if (
+			locked.prFeedbackStageA?.revisionDigest !== legacy.revisionDigest ||
+			!(locked.prFeedbackGateBatches ?? []).some(
+				(batch) => batch.revisionDigest === legacy.revisionDigest,
+			)
+		) {
+			return mismatch('legacy-migration-receipt-mismatch');
+		}
+		const workspaceIdentity = canonicalWorkspaceIdentity(directory);
+		if (!workspaceIdentity) return mismatch('legacy-migration-unresolvable');
+		let digest: string;
+		try {
+			digest = await currentPrFeedbackRevisionDigest(directory, locked);
+		} catch {
+			return mismatch('legacy-migration-unresolvable');
+		}
+		const head = (
+			await _test_exports.resolveCurrentGitHeadAsync(directory)
+		)?.trim();
+		const target =
+			await _test_exports.resolveCurrentUpstreamPushTargetAsync(directory);
+		const localHeadRef = await resolveCurrentLocalHeadRefAsync(directory);
+		const remoteUrlIdentity = await _test_exports.resolveRemoteUrlIdentityAsync(
+			directory,
+			legacy.remoteName,
+		);
+		if (
+			digest !== legacy.revisionDigest ||
+			head !== legacy.localHead ||
+			!target ||
+			target.remoteName !== legacy.remoteName ||
+			target.remoteBranchRef !== legacy.remoteBranchRef ||
+			target.remoteTrackingRef !== legacy.remoteRef ||
+			!localHeadRef ||
+			!remoteUrlIdentity
+		) {
+			return mismatch('legacy-migration-identity-mismatch');
+		}
+		// Migration-to-armed must meet the SAME evidence strictness as a fresh
+		// arm: the full one-batch-per-phase join (review L4). A partial join
+		// means the legacy record cannot prove every ordered gate settled —
+		// conservatively invalidated, never partially armed.
+		const evidenceJoin = buildPublicationEvidenceJoin(
+			locked,
+			legacy.revisionDigest,
+		);
+		if (!evidenceJoin) {
+			return mismatch('legacy-migration-receipt-mismatch');
+		}
+		const upgraded: PrFeedbackPublicationGeneration = {
+			...base,
+			evidence: evidenceJoin,
+			state: 'armed',
+			workspaceIdentity,
+			localHeadRef,
+			localHead: legacy.localHead,
+			remoteName: legacy.remoteName,
+			remoteUrlIdentity,
+			remoteBranchRef: legacy.remoteBranchRef,
+			remoteRef: legacy.remoteRef,
+		};
+		const nextState: PrWorkflowGateState = {
+			...locked,
+			updatedAt: now,
+			prFeedbackPublication: nextPublicationContainer(
+				locked.prFeedbackPublication,
+				upgraded,
+			),
+		};
+		await writeStateWhileLocked(directory, nextState);
+		appendPublicationEvent(directory, {
+			type: 'pr_feedback_publication_migrated',
+			sessionID: locked.sessionID,
+			generation: 1,
+			outcome: 'armed',
+			reason: 'legacy-record-proven-equivalent',
+		});
+		return nextState;
+	});
+}
+
+/**
+ * The reaper (issue #2108 §3): finalize any result-less push attempt before
+ * another armed-window interaction proceeds. Recovers restarts and missed
+ * `tool.execute.after` observations as `uncertain` and re-observes the remote
+ * head, so `push_in_flight` can never wedge a generation.
+ */
+async function reconcileForeignInFlightAttempt(
+	directory: string,
+	sessionID: string,
+	currentCallId?: string,
+): Promise<PrWorkflowGateState | null> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	return withSessionStateMutation(directory, normalizedSessionID, async () => {
+		const state = await readPrWorkflowGateStateFromDisk(
+			directory,
+			normalizedSessionID,
+		);
+		const publication = state?.prFeedbackPublication;
+		const active = publication?.active;
+		if (
+			!state ||
+			!publication ||
+			!active ||
+			active.state !== 'push_in_flight' ||
+			!publication.attempts.some((attempt) => !attempt.result)
+		) {
+			return state;
+		}
+		const now = isoNow();
+		const localHead = (
+			await _test_exports.resolveCurrentGitHeadAsync(directory)
+		)?.trim();
+		const observedRemoteHead =
+			await _test_exports.resolveExactRemoteBranchHeadAsync(
+				directory,
+				active.remoteName,
+				active.remoteBranchRef,
+			);
+		const attempts = publication.attempts.map((attempt) =>
+			attempt.result
+				? attempt
+				: {
+						...attempt,
+						result: {
+							outcome: 'uncertain' as const,
+							exitStatus: 'not-observed' as const,
+							diagnostic: boundPublicationDiagnostic(
+								`recovered without an observed result${
+									currentCallId && attempt.callID === currentCallId
+										? ' (same call)'
+										: ''
+								}`,
+							),
+							postPush: { localHead: localHead ?? null, observedRemoteHead },
+							completedAt: now,
+						},
+					},
+		);
+		const nextState: PrWorkflowGateState = {
+			...state,
+			updatedAt: now,
+			prFeedbackPublication: nextPublicationContainer(
+				publication,
+				{ ...active, state: 'armed' },
+				[],
+				attempts,
+			),
+		};
+		await writeStateWhileLocked(directory, nextState);
+		appendPublicationEvent(directory, {
+			type: 'pr_feedback_push_attempt_result',
+			sessionID: state.sessionID,
+			generation: active.generation,
+			outcome: 'uncertain',
+			by: 'reaper',
+			observedRemoteHead,
+		});
+		return nextState;
+	});
+}
+
+/**
+ * Controller-facing invalidation/rework transition (issue #2108 §4): the
+ * explicit declaration that approved content must change, which opens the
+ * mutation path by superseding every content-dependent approval of the
+ * current armed generation. Requires a non-empty reason. Refuses when no
+ * live window exists and reports already-invalidated as an informative
+ * diagnostic (idempotent no-op is NOT silently accepted — the caller should
+ * see the current state).
+ */
+export async function invalidatePrFeedbackPublication(
+	directory: string,
+	sessionID: string,
+	reason: string,
+): Promise<PrFeedbackPublicationGeneration> {
+	const trimmed = reason.trim();
+	if (!trimmed) {
+		throw new Error(
+			'BLOCKED: invalidate_pr_feedback_publication requires a non-empty reason; the reason is part of the durable audit trail',
+		);
+	}
+	// Migrate a legacy armed record first so the transition targets a
+	// generation, and reap any foreign in-flight attempt (R3.3).
+	await ensurePublicationGenerationCurrent(directory, sessionID);
+	await reconcileForeignInFlightAttempt(directory, sessionID);
+	const result = await invalidatePublicationGeneration(
+		directory,
+		sessionID,
+		`controller-rework:${trimmed}`,
+	);
+	return result.generation;
+}
+
+/**
+ * Operator-facing publication summary for `pr_workflow_status` (issue #2108):
+ * generation, state, target, attempts, invalidation reason, and the
+ * state-appropriate recovery instruction. Returns null when the workflow has
+ * no publication state to describe.
+ */
+export function describePrWorkflowPublicationSection(
+	state: PrWorkflowGateState,
+): string | null {
+	const active = state.prFeedbackPublication?.active;
+	const history = state.prFeedbackPublication?.history ?? [];
+	const attempts = state.prFeedbackPublication?.attempts ?? [];
+	if (!active && !state.prFeedbackReadyToPublish && history.length === 0) {
+		return null;
+	}
+	const lines: string[] = [];
+	if (state.prFeedbackReadyToPublish && !active) {
+		lines.push(
+			'publication: legacy armed record awaiting generation migration (fail-closed until the next gated interaction migrates it)',
+		);
+	}
+	if (active) {
+		lines.push(
+			`publication: generation ${active.generation} state=${active.state}`,
+		);
+		lines.push(
+			`  approved: ${active.localHead} -> ${active.remoteName} ${active.remoteBranchRef} (digest ${active.revisionDigest.slice(0, 12)}…)`,
+		);
+		if (active.remoteUrlIdentity) {
+			lines.push(`  remote url identity: ${active.remoteUrlIdentity}`);
+		}
+		if (active.state === 'invalidated' && active.invalidationReason) {
+			lines.push(`  invalidated because: ${active.invalidationReason}`);
+		}
+		if (active.supersededByGeneration) {
+			lines.push(`  superseded by generation ${active.supersededByGeneration}`);
+		}
+		const generationAttempts = attempts.filter(
+			(attempt) => attempt.generation === active.generation,
+		);
+		if (generationAttempts.length > 0) {
+			const outcomes = generationAttempts.map(
+				(attempt) => attempt.result?.outcome ?? 'in-flight',
+			);
+			lines.push(
+				`  push attempts: ${generationAttempts.length} (${outcomes.join(', ')})`,
+			);
+		}
+		switch (active.state) {
+			case 'armed':
+				lines.push(
+					'  next: run the exact approved push, then complete_pr_workflow',
+				);
+				break;
+			case 'push_in_flight':
+				lines.push(
+					'  next: a push attempt is in flight; the next gated interaction reconciles it (uncertain) and re-verifies the remote before any retry',
+				);
+				break;
+			case 'invalidated':
+				lines.push(
+					'  next: rerun Stage A and every independent gate on the corrected content, then arm a fresh generation with complete_pr_workflow; the exact scoped rework path reopens via prepare_pr_feedback_scope',
+				);
+				break;
+			case 'published':
+				lines.push('  terminal: published (verified remote head)');
+				break;
+			case 'cancelled_without_publication':
+				lines.push('  terminal: cancelled without publication');
+				break;
+			default:
+				lines.push('  next: continue the ordered gates');
+		}
+	}
+	if (history.length > 0) {
+		const summary = history
+			.map(
+				(generation) =>
+					`gen ${generation.generation}: ${generation.state}${
+						generation.supersededByGeneration
+							? ` -> ${generation.supersededByGeneration}`
+							: ''
+					}`,
+			)
+			.join('; ');
+		lines.push(`  superseded generations: ${summary}`);
+	}
+	lines.push(
+		'  audit: full publication trail in the .swarm events store (pr_feedback_publication_*, pr_feedback_push_attempt_*, pr_feedback_published)',
+	);
+	return lines.join('\n');
+}
+
+// ===== Dangling-live-generation guard (issue #2108 safety boundary) =====
+
+const PUBLICATION_EVENT_TYPES = new Set([
+	'pr_feedback_publication_armed',
+	'pr_feedback_publication_migrated',
+	'pr_feedback_push_attempt_started',
+	'pr_feedback_publication_invalidated',
+	'pr_feedback_published',
+	'pr_feedback_publication_cancelled',
+]);
+
+/**
+ * Issue #2108 safety boundary — "fail closed on corrupt, MISSING, ambiguous,
+ * copied, cross-workspace, or conflicting generation state" and "a manual
+ * state-file edit … cannot clear the authorization requirement": when the
+ * gate state file for a session is absent (e.g. deleted by hand while a
+ * generation was live) but the retained events window shows a LIVE
+ * publication generation for that session — an `armed` or
+ * `push_attempt_started` event with no later terminal (`published`,
+ * `cancelled`, `invalidated`) — publication-capable commands fail closed
+ * until an audited terminal lands. The events store is the append-only audit
+ * authority the state-file deletion cannot touch; when the trail is empty or
+ * compacted past the event the guard is silent (it never invents a dangling
+ * generation from absent evidence).
+ */
+export function findDanglingLivePublicationGeneration(
+	directory: string,
+	sessionID: string,
+): { generation: number } | null {
+	let text: string;
+	try {
+		text = readCoreEvents(directory).text;
+	} catch {
+		return null;
+	}
+	if (!text.trim()) return null;
+	let dangling: { generation: number } | null = null;
+	for (const line of text.split('\n')) {
+		if (!line.trim()) continue;
+		let event: Record<string, unknown>;
+		try {
+			event = JSON.parse(line) as Record<string, unknown>;
+		} catch {
+			continue;
+		}
+		if (
+			typeof event.type !== 'string' ||
+			!PUBLICATION_EVENT_TYPES.has(event.type) ||
+			event.sessionID !== sessionID
+		) {
+			continue;
+		}
+		const generation =
+			typeof event.generation === 'number' ? event.generation : null;
+		switch (event.type) {
+			case 'pr_feedback_publication_armed':
+			case 'pr_feedback_push_attempt_started':
+				dangling = generation ? { generation } : dangling;
+				break;
+			case 'pr_feedback_publication_migrated':
+				// A successful legacy migration upgraded the record to an
+				// ARMED generation 1 — live until a terminal lands. A
+				// migration that invalidated is terminal for the window.
+				if (event.outcome === 'armed') {
+					dangling = generation ? { generation } : dangling;
+				} else {
+					dangling = null;
+				}
+				break;
+			default:
+				// published / cancelled / invalidated are terminal or
+				// non-authorizing outcomes for the window.
+				dangling = null;
+				break;
+		}
+	}
+	// NOTE: a truncated retained window is deliberately NOT treated as
+	// ambiguous. Returning null on truncation would turn "grow the events
+	// trail past the read bound, then delete the gate file" into a bypass;
+	// a false block here is operator-resolvable via the audited cancel arm,
+	// a false silence is not. (Reviewer nit deliberately declined.)
+	return dangling;
+}
+
+// ===== Structural exact-push intent parsing (issue #2108 §2) =====
+
+/** Typed rejection taxonomy for a standalone `git push` command. */
+export type ExactPushIntentRejection =
+	| 'shell-syntax'
+	| 'token-shape'
+	| 'flag-or-option'
+	| 'credential-bearing-remote'
+	| 'invalid-source-sha'
+	| 'invalid-dest-ref'
+	| 'delete-refspec'
+	| 'wildcard-refspec'
+	| 'remote-mismatch'
+	| 'branch-mismatch'
+	| 'source-mismatch'
+	| 'unbound-target';
+
+export interface ExactPushIntent {
+	remote: string;
+	sourceSha: string;
+	destRef: string;
+}
+
+export interface ExactPushIntentParseResult {
+	ok: boolean;
+	intent?: ExactPushIntent;
+	/** SHA-256 over the canonical intent JSON (persisted in attempt records). */
+	digest?: string;
+	reason?: ExactPushIntentRejection;
+}
+
+/**
+ * Fold an audited invalidation into a PENDING single-write state transition
+ * (the Stage A re-record and inventory-amendment disarm sites, issue #2108
+ * R3.3): when the pending state still carries a live publication window, the
+ * generation is marked `invalidated` with the given reason, the rollback
+ * mirror and the remaining ancestry-bound receipts (verifications, gate
+ * batches, scope declarations) are superseded in the SAME atomic write, and
+ * any result-less attempt is finalized `uncertain`. A fresh `prFeedbackStageA`
+ * the pending write itself is recording survives — it is evidence recorded
+ * after the invalidation moment. No-op when no live window exists (the
+ * normal unarmed flow keeps its existing behavior).
+ *
+ * Returns the pending state plus the audit-event payload; the CALLER appends
+ * the event only AFTER its persistState succeeds (PR #2422 review PRR-023:
+ * an event must never claim an invalidation whose state write failed — the
+ * abort path's retraction discipline, applied here at the source).
+ */
+function supersedeLivePublicationInPendingState(
+	pending: PrWorkflowGateState,
+	reason: string,
+): {
+	state: PrWorkflowGateState;
+	invalidationEvent: Record<string, unknown> | null;
+} {
+	const publication = pending.prFeedbackPublication;
+	const active = publication?.active;
+	const live =
+		pending.prFeedbackReadyToPublish != null ||
+		active?.state === 'armed' ||
+		active?.state === 'push_in_flight';
+	if (!live) return { state: pending, invalidationEvent: null };
+	const now = isoNow();
+	const attempts = (publication?.attempts ?? []).map((attempt) =>
+		attempt.result
+			? attempt
+			: {
+					...attempt,
+					result: {
+						outcome: 'uncertain' as const,
+						exitStatus: 'not-observed' as const,
+						diagnostic: `finalized by publication invalidation (${reason})`,
+						postPush: { localHead: null, observedRemoteHead: null },
+						completedAt: now,
+					},
+				},
+	);
+	const invalidatedActive: PrFeedbackPublicationGeneration | undefined = active
+		? {
+				...active,
+				state: 'invalidated',
+				invalidatedAt: now,
+				invalidationReason: reason,
+			}
+		: undefined;
+	const nextState: PrWorkflowGateState = {
+		...pending,
+		updatedAt: now,
+		prFeedbackReadyToPublish: undefined,
+		prFeedbackVerifications: undefined,
+		prFeedbackGateBatches: undefined,
+		prFeedbackScopes: undefined,
+		prFeedbackPublication: active
+			? nextPublicationContainer(publication, invalidatedActive, [], attempts)
+			: pending.prFeedbackPublication,
+	};
+	const invalidationEvent = active
+		? {
+				type: 'pr_feedback_publication_invalidated',
+				sessionID: pending.sessionID,
+				generation: active.generation,
+				reason,
+				previousState: active.state,
+				drift: null,
+				revisionDigest: active.revisionDigest,
+				localHead: active.localHead,
+				remoteName: active.remoteName,
+				remoteBranchRef: active.remoteBranchRef,
+				supersededBatchIds: active.evidence.batches.map((b) => b.batchId),
+			}
+		: null;
+	return { state: nextState, invalidationEvent };
+}
+
+/**
+ * Parse a standalone push command into a typed intent BEFORE any shell
+ * execution. The only publish-capable intent is the exact armed tuple —
+ * `git push <remote> <localHead>:refs/heads/<branch>` — with NO flags, NO
+ * extra refspecs, NO wildcard/delete/mirror/tag forms, and NO
+ * credential-bearing remote token. This is a structural refactor of the
+ * previous single-regex defense with the SAME accepted grammar (nothing that
+ * the regex rejected is accepted here); every rejection is now explicit,
+ * typed, and auditable. Remote and branch compare case-SENSITIVELY (git ref
+ * semantics); the source SHA compares exactly, as before.
+ */
+function parseExactBoundPushIntent(
+	command: string,
+	armed: {
+		remoteName: string;
+		remoteBranchRef: string;
+		localHead: string;
+	},
+): ExactPushIntentParseResult {
+	if (hasUnsafeShellControlSyntax(command)) {
+		return { ok: false, reason: 'shell-syntax' };
+	}
+	if (!armed.remoteBranchRef.startsWith('refs/heads/')) {
+		return { ok: false, reason: 'unbound-target' };
+	}
+	const tokens = command.trim().split(/\s+/);
+	if (
+		tokens.length !== 4 ||
+		tokens[0].toLowerCase() !== 'git' ||
+		tokens[1].toLowerCase() !== 'push' ||
+		tokens.some((token) => /["'\\]/.test(token))
+	) {
+		return { ok: false, reason: 'token-shape' };
+	}
+	const [remoteToken, refspecToken] = [tokens[2], tokens[3]];
+	if (remoteToken.startsWith('-') || refspecToken.startsWith('-')) {
+		return { ok: false, reason: 'flag-or-option' };
+	}
+	if (/[:@]/.test(remoteToken) || remoteToken.includes('://')) {
+		// A remote NAME never carries userinfo, a colon, or a URL scheme; any
+		// such token is a credential-bearing or URL remote form.
+		return { ok: false, reason: 'credential-bearing-remote' };
+	}
+	const refspecParts = refspecToken.split(':');
+	if (refspecParts.length !== 2) {
+		// Zero colons is a bare ref/tag name; two or more is multiple colon
+		// forms. Both fall outside the one exact `sha:refs/heads/...` refspec.
+		return {
+			ok: false,
+			reason: refspecParts.length > 2 ? 'token-shape' : 'invalid-dest-ref',
+		};
+	}
+	const [sourceToken, destToken] = refspecParts;
+	if (!destToken.startsWith('refs/heads/') || destToken === 'refs/heads/') {
+		return { ok: false, reason: 'invalid-dest-ref' };
+	}
+	if (sourceToken === '') {
+		return { ok: false, reason: 'delete-refspec' };
+	}
+	if (sourceToken.includes('*') || destToken.includes('*')) {
+		return { ok: false, reason: 'wildcard-refspec' };
+	}
+	// The source must equal the armed local head EXACTLY — that equality (to a
+	// value produced by `git rev-parse` in production) binds the push to the
+	// approved commit; no separate length heuristic is needed or wanted (the
+	// pre-#2108 regex accepted whatever equaled the armed head).
+	if (remoteToken !== armed.remoteName) {
+		return { ok: false, reason: 'remote-mismatch' };
+	}
+	if (sourceToken !== armed.localHead) {
+		return { ok: false, reason: 'source-mismatch' };
+	}
+	if (destToken !== armed.remoteBranchRef) {
+		return { ok: false, reason: 'branch-mismatch' };
+	}
+	const intent: ExactPushIntent = {
+		remote: remoteToken,
+		sourceSha: sourceToken,
+		destRef: destToken,
+	};
+	return {
+		ok: true,
+		intent,
+		digest: createHash('sha256')
+			.update(JSON.stringify(intent), 'utf8')
+			.digest('hex'),
+	};
+}
+
+// ===== Push attempt admission, result recording, cancellation =====
+
+/**
+ * Durable attempt-start before the exact bound push is permitted to execute
+ * (issue #2108 §3), all under ONE session-lock acquisition: re-verify the
+ * armed identity, observe the remote head, and either (a) record an
+ * attempt whose result is already `completed` because the remote is observed
+ * at the approved head (no-op push; the observation — not an exit code — is
+ * the truth), or (b) persist the attempt-start and move the generation to
+ * `push_in_flight` BEFORE the push can run.
+ */
+async function admitPrFeedbackPushAttempt(
+	directory: string,
+	sessionID: string,
+	callID: string | undefined,
+	intent: ExactPushIntent,
+	intentDigest: string,
+): Promise<{ kind: 'started' | 'already-published-remotely' }> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	await withSessionStateMutation(directory, normalizedSessionID, async () => {
+		const state = await readPrWorkflowGateStateFromDisk(
+			directory,
+			normalizedSessionID,
+		);
+		const active = state?.prFeedbackPublication?.active;
+		if (!state || state.mode !== 'PR_FEEDBACK' || !active) {
+			throw new Error(
+				'BLOCKED: PR_FEEDBACK push admission requires an armed publication generation',
+			);
+		}
+		if (active.state !== 'armed') {
+			throw new Error(
+				`BLOCKED: PR_FEEDBACK push admission requires the armed state, not ${active.state}`,
+			);
+		}
+		const check = await checkPublicationIdentity(directory, state, active);
+		if (check.kind === 'unresolvable') {
+			throw new Error(
+				`BLOCKED: PR_FEEDBACK could not verify the armed publication identity component "${check.component}" (${check.detail}); the push was not admitted`,
+			);
+		}
+		if (check.kind === 'drift') {
+			const invalidation = await applyPublicationInvalidationWhileLocked(
+				directory,
+				state,
+				`drift:${check.component}`,
+				{ drift: check },
+			);
+			throw new Error(
+				`BLOCKED: PR_FEEDBACK publication generation ${invalidation.generation.generation} was INVALIDATED because approved content identity drifted (${check.component}: ${check.detail}). Rerun Stage A and every independent gate, then arm a fresh generation with complete_pr_workflow.`,
+			);
+		}
+		const now = isoNow();
+		// Defense-in-depth (PR #2422 review L1/L3): re-bind the parsed intent
+		// to the freshly-locked generation snapshot. The intent was parsed
+		// against the mirror before this lock; the mirror and `active` are
+		// written atomically together, but asserting equality here makes the
+		// binding explicit and refuses any future divergence path.
+		if (
+			intent.remote !== active.remoteName ||
+			intent.sourceSha !== active.localHead ||
+			intent.destRef !== active.remoteBranchRef
+		) {
+			throw new Error(
+				'BLOCKED: PR_FEEDBACK push intent does not match the armed publication generation under the state lock; the push was not admitted',
+			);
+		}
+		const observedRemoteHead =
+			await _test_exports.resolveExactRemoteBranchHeadAsync(
+				directory,
+				active.remoteName,
+				active.remoteBranchRef,
+			);
+		const localHead = (
+			await _test_exports.resolveCurrentGitHeadAsync(directory)
+		)?.trim();
+		const worktreeClean =
+			await _test_exports.resolveIsWorkingTreeCleanAsync(directory);
+		const baseAttempt: PrFeedbackPushAttempt = {
+			attemptId: randomUUID(),
+			generation: active.generation,
+			sessionID: state.sessionID,
+			callID,
+			intentDigest,
+			intent: {
+				remote: intent.remote,
+				sourceSha: intent.sourceSha,
+				destRef: intent.destRef,
+			},
+			prePush: {
+				localHead: active.localHead,
+				worktreeClean: worktreeClean === true,
+				remoteName: active.remoteName,
+				remoteBranchRef: active.remoteBranchRef,
+				observedRemoteHead,
+			},
+			startedAt: now,
+		};
+		const remoteAlreadyAtApprovedHead =
+			observedRemoteHead?.toLowerCase() === active.localHead.toLowerCase();
+		if (remoteAlreadyAtApprovedHead) {
+			// The remote branch is already observed at the approved head: record
+			// the attempt with an immediate observation-backed `completed`
+			// result. This is a no-op push; completion still requires
+			// complete_pr_workflow's own remote verification.
+			const attempt: PrFeedbackPushAttempt = {
+				...baseAttempt,
+				result: {
+					outcome: 'completed',
+					exitStatus: 'not-observed',
+					diagnostic:
+						'remote branch already observed at the approved head (no-op push)',
+					postPush: {
+						localHead: localHead ?? null,
+						observedRemoteHead: observedRemoteHead ?? null,
+					},
+					completedAt: now,
+				},
+			};
+			const nextState: PrWorkflowGateState = {
+				...state,
+				updatedAt: now,
+				prFeedbackPublication: nextPublicationContainer(
+					state.prFeedbackPublication,
+					active,
+					[],
+					[...(state.prFeedbackPublication?.attempts ?? []), attempt],
+				),
+			};
+			await writeStateWhileLocked(directory, nextState);
+			appendPublicationEvent(directory, {
+				type: 'pr_feedback_push_attempt_result',
+				sessionID: state.sessionID,
+				generation: active.generation,
+				outcome: 'completed',
+				by: 'no-op-observation',
+				observedRemoteHead,
+			});
+			return;
+		}
+		const nextState: PrWorkflowGateState = {
+			...state,
+			updatedAt: now,
+			prFeedbackPublication: nextPublicationContainer(
+				state.prFeedbackPublication,
+				{ ...active, state: 'push_in_flight' },
+				[],
+				[...(state.prFeedbackPublication?.attempts ?? []), baseAttempt],
+			),
+		};
+		await writeStateWhileLocked(directory, nextState);
+		appendPublicationEvent(directory, {
+			type: 'pr_feedback_push_attempt_started',
+			sessionID: state.sessionID,
+			generation: active.generation,
+			intentDigest,
+			intent,
+			observedRemoteHead,
+		});
+	});
+	const publication = await readPrWorkflowGateState(
+		directory,
+		normalizedSessionID,
+	);
+	const attempts = publication?.prFeedbackPublication?.attempts ?? [];
+	const last = attempts[attempts.length - 1];
+	return last?.result?.outcome === 'completed'
+		? { kind: 'already-published-remotely' }
+		: { kind: 'started' };
+}
+
+function describeToolOutputText(output: unknown): string {
+	if (typeof output === 'string') return output;
+	if (
+		output &&
+		typeof output === 'object' &&
+		'output' in output &&
+		typeof (output as { output?: unknown }).output === 'string'
+	) {
+		return (output as { output: string }).output;
+	}
+	try {
+		return JSON.stringify(output) ?? '';
+	} catch {
+		return '';
+	}
+}
+
+/**
+ * Record the result of an admitted push from the `tool.execute.after` chain
+ * (issue #2108 §3). Fail-open by design: a missed observation is recovered by
+ * the reaper as `uncertain`; publication truth always comes from
+ * complete_pr_workflow's direct remote verification, never from an exit code
+ * alone. Exported for the single `tool.execute.after` guard in `src/index.ts`.
+ */
+export async function recordPrFeedbackPushAttemptResult(
+	directory: string,
+	input: { sessionID: string; callID?: string; tool: string },
+	command: string,
+	output: unknown,
+): Promise<void> {
+	// Lowercase defensively: `normalizeToolName` strips namespace prefixes
+	// but does NOT lowercase, and harnesses disagree on casing (the tool
+	// gate's own classifier lowercases the same way).
+	const normalizedTool = (
+		normalizeToolName(input.tool) ?? input.tool
+	).toLowerCase();
+	if (normalizedTool !== 'bash' && normalizedTool !== 'shell') return;
+	// NBSP-safe: \s matches \u00A0 where a literal-space startsWith does not,
+	// keeping the recorder's shape check aligned with the admission tokenizer.
+	if (!/^\s*git\s+push/i.test(command)) return;
+	const normalizedSessionID = normalizeSessionID(input.sessionID);
+	await withSessionStateMutation(directory, normalizedSessionID, async () => {
+		const state = await readPrWorkflowGateStateFromDisk(
+			directory,
+			normalizedSessionID,
+		);
+		const publication = state?.prFeedbackPublication;
+		const active = publication?.active;
+		if (
+			!state ||
+			!publication ||
+			!active ||
+			active.state !== 'push_in_flight' ||
+			!input.callID
+		) {
+			return;
+		}
+		const attemptIndex = publication.attempts.findIndex(
+			(attempt) => !attempt.result && attempt.callID === input.callID,
+		);
+		if (attemptIndex < 0) return;
+		const now = isoNow();
+		const localHead = (
+			await _test_exports.resolveCurrentGitHeadAsync(directory)
+		)?.trim();
+		const observedRemoteHead =
+			await _test_exports.resolveExactRemoteBranchHeadAsync(
+				directory,
+				active.remoteName,
+				active.remoteBranchRef,
+			);
+		const remoteVerifiedAtApprovedHead =
+			observedRemoteHead?.toLowerCase() === active.localHead.toLowerCase();
+		// Exit status (issue #2108 §3): the plugin SDK's tool.execute.after
+		// contract exposes only { title, output, metadata } — no structured
+		// exit code. When the host DOES populate one on metadata (finite
+		// number) it is persisted and drives the `rejected` classification;
+		// otherwise the record is honest (`not-observed`) and publication
+		// truth remains the remote observation, never the exit code.
+		const metadataExit = (
+			output as { metadata?: { exitCode?: unknown } } | null | undefined
+		)?.metadata?.exitCode;
+		const exitStatus: number | 'not-observed' =
+			typeof metadataExit === 'number' && Number.isInteger(metadataExit)
+				? metadataExit
+				: 'not-observed';
+		let outcome: PrFeedbackPushAttemptOutcome;
+		if (remoteVerifiedAtApprovedHead) {
+			outcome = 'completed';
+		} else if (exitStatus !== 'not-observed' && exitStatus !== 0) {
+			outcome = 'rejected';
+		} else {
+			outcome = 'uncertain';
+		}
+		const diagnostic = boundPublicationDiagnostic(
+			remoteVerifiedAtApprovedHead
+				? `push result observed; remote branch verified at the approved head${
+						exitStatus !== 'not-observed' && exitStatus !== 0
+							? ` (shell reported nonzero exit ${exitStatus}; the verified remote head is the publication truth)`
+							: ''
+					}`
+				: `push result observed without remote verification at the approved head; exit status ${
+						exitStatus === 'not-observed' ? 'not observed' : exitStatus
+					}; output: ${describeToolOutputText(output)}`,
+		);
+		const attempts = publication.attempts.map((attempt, index) =>
+			index === attemptIndex
+				? {
+						...attempt,
+						result: {
+							outcome,
+							exitStatus,
+							diagnostic,
+							postPush: {
+								localHead: localHead ?? null,
+								observedRemoteHead: observedRemoteHead ?? null,
+							},
+							completedAt: now,
+						},
+					}
+				: attempt,
+		);
+		const nextState: PrWorkflowGateState = {
+			...state,
+			updatedAt: now,
+			prFeedbackPublication: nextPublicationContainer(
+				publication,
+				{ ...active, state: 'armed' },
+				[],
+				attempts,
+			),
+		};
+		await writeStateWhileLocked(directory, nextState);
+		appendPublicationEvent(directory, {
+			type: 'pr_feedback_push_attempt_result',
+			sessionID: state.sessionID,
+			generation: active.generation,
+			outcome,
+			exitStatus,
+			by: 'tool-after',
+			observedRemoteHead,
+		});
+	});
+}
+
+/**
+ * Cancellation without publication (issue #2108 §6): a terminal no-publish
+ * transition. Finalizes any in-flight attempt as `cancelled`, discloses the
+ * observed remote head, marks the generation `cancelled_without_publication`,
+ * appends the audit event, and NEVER manufactures push authority. Used only
+ * by `abortPrWorkflow`'s explicit `cancelPublication` arm. Returns the NEW
+ * state revision when a state write landed (the abort clear must CAS against
+ * it), or null when the generation state was absent/unreadable.
+ */
+async function cancelPrFeedbackPublication(
+	directory: string,
+	sessionID: string,
+	reason: string,
+): Promise<number | null> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	let nextRevision: number | null = null;
+	let cancelledGeneration: number | null = null;
+	let cancelledAttemptsFinalized = 0;
+	try {
+		await withSessionStateMutation(directory, normalizedSessionID, async () => {
+			const state = await readPrWorkflowGateStateFromDisk(
+				directory,
+				normalizedSessionID,
+			);
+			const publication = state?.prFeedbackPublication;
+			const active = publication?.active;
+			if (!state || !publication || !active) {
+				// Unreadable or absent generation state (e.g. salvage path): the
+				// audit event below is still appended so the cancellation is
+				// durable; the abort clearing that follows removes the gate.
+				return;
+			}
+			if (
+				active.state !== 'armed' &&
+				active.state !== 'push_in_flight' &&
+				active.state !== 'invalidated'
+			) {
+				return;
+			}
+			const now = isoNow();
+			const observedRemoteHead =
+				await _test_exports.resolveExactRemoteBranchHeadAsync(
+					directory,
+					active.remoteName,
+					active.remoteBranchRef,
+				);
+			const attempts = publication.attempts.map((attempt) =>
+				attempt.result
+					? attempt
+					: {
+							...attempt,
+							result: {
+								outcome: 'cancelled' as const,
+								exitStatus: 'not-observed' as const,
+								diagnostic: 'finalized by publication cancellation',
+								postPush: { localHead: null, observedRemoteHead },
+								completedAt: now,
+							},
+						},
+			);
+			const cancelled: PrFeedbackPublicationGeneration = {
+				...active,
+				state: 'cancelled_without_publication',
+				cancelledAt: now,
+				invalidationReason: active.invalidationReason ?? `cancelled:${reason}`,
+			};
+			const nextState: PrWorkflowGateState = {
+				...state,
+				updatedAt: now,
+				prFeedbackReadyToPublish: undefined,
+				prFeedbackPublication: nextPublicationContainer(
+					publication,
+					cancelled,
+					[],
+					attempts,
+				),
+			};
+			const written = await writeStateWhileLocked(directory, nextState);
+			nextRevision = written.revision;
+			cancelledGeneration = active.generation;
+			cancelledAttemptsFinalized = attempts.filter(
+				(attempt) => attempt.result?.outcome === 'cancelled',
+			).length;
+		});
+	} catch {
+		// The cancellation event below is the durable floor; a failed
+		// state write here must not block the audited abort clearing.
+	}
+	appendPublicationEvent(directory, {
+		type: 'pr_feedback_publication_cancelled',
+		sessionID: normalizedSessionID,
+		...(cancelledGeneration !== null
+			? { generation: cancelledGeneration }
+			: {}),
+		reason,
+		...(cancelledAttemptsFinalized > 0
+			? { attemptsFinalized: cancelledAttemptsFinalized }
+			: {}),
+	});
+	return nextRevision;
+}
+
 async function assertPrFeedbackPublicationArmed(
 	directory: string,
 	sessionID: string,
+	options: { currentCallId?: string } = {},
 ): Promise<PrWorkflowGateState> {
-	const state = await requireBoundState(directory, sessionID, 'PR_FEEDBACK');
-	const armed = state.prFeedbackReadyToPublish;
-	if (!armed) {
+	// Issue #2108: a legacy armed record first migrates (conservatively) into
+	// the generation state machine, and any foreign in-flight push attempt is
+	// reconciled (`uncertain`) before the window is judged.
+	let state =
+		(await ensurePublicationGenerationCurrent(directory, sessionID)) ??
+		(await requireBoundState(directory, sessionID, 'PR_FEEDBACK'));
+	state =
+		(await reconcileForeignInFlightAttempt(
+			directory,
+			sessionID,
+			options.currentCallId,
+		)) ??
+		state ??
+		(await requireBoundState(directory, sessionID, 'PR_FEEDBACK'));
+	const active = state.prFeedbackPublication?.active;
+	if (
+		!active ||
+		(active.state !== 'armed' && active.state !== 'push_in_flight')
+	) {
+		if (active?.state === 'invalidated') {
+			throw new Error(
+				`BLOCKED: PR_FEEDBACK publication generation ${active.generation} was invalidated${
+					active.invalidationReason ? ` (${active.invalidationReason})` : ''
+				}; rerun Stage A and every independent gate, then arm a fresh generation with complete_pr_workflow`,
+			);
+		}
 		throw new Error(
 			'BLOCKED: PR_FEEDBACK publication is not armed; call complete_pr_workflow once after every ordered gate passes',
 		);
 	}
-	const currentDigest = await currentPrFeedbackRevisionDigest(directory, state);
-	if (armed.revisionDigest !== currentDigest) {
+	// Identity check outside the lock (issue #2108 §4): the intact path adds no
+	// lock traffic. Proven drift invalidates durably under the lock with the
+	// drifted component re-verified there; unverifiable stays armed + fails
+	// closed (no evidence, no transition).
+	const check = await checkPublicationIdentity(directory, state, active);
+	if (check.kind === 'unresolvable') {
 		throw new Error(
-			'BLOCKED: PR_FEEDBACK changed after publication was armed; rerun Stage A and every independent gate',
+			`BLOCKED: PR_FEEDBACK could not verify the armed publication identity component "${check.component}" (${check.detail}); the armed window is unchanged and fails closed. Resolve the verification failure and retry.`,
 		);
 	}
-	if (
-		(await _test_exports.resolveCurrentGitHeadAsync(directory))?.trim() !==
-		armed.localHead
-	) {
-		throw new Error(
-			'BLOCKED: PR_FEEDBACK current Git HEAD changed after publication was armed',
+	if (check.kind === 'drift') {
+		const invalidation = await invalidatePublicationGeneration(
+			directory,
+			sessionID,
+			`drift:${check.component}`,
+			{ drift: check, driftReverification: true },
 		);
-	}
-	if (
-		(await _test_exports.resolveIsWorkingTreeCleanAsync(directory)) !== true
-	) {
 		throw new Error(
-			'BLOCKED: PR_FEEDBACK working tree changed after publication was armed',
-		);
-	}
-	const currentTarget =
-		await _test_exports.resolveCurrentUpstreamPushTargetAsync(directory);
-	if (
-		!currentTarget ||
-		currentTarget.remoteName !== armed.remoteName ||
-		currentTarget.remoteBranchRef !== armed.remoteBranchRef ||
-		currentTarget.remoteTrackingRef !== armed.remoteRef
-	) {
-		throw new Error(
-			'BLOCKED: PR_FEEDBACK upstream publication target changed after publication was armed',
+			`BLOCKED: PR_FEEDBACK publication generation ${invalidation.generation.generation} was INVALIDATED because approved content identity drifted (${check.component}: ${check.detail}). Every approval of that generation is now superseded. Rerun Stage A and every independent gate, then arm a fresh generation with complete_pr_workflow.`,
 		);
 	}
 	return state;
+}
+
+export async function resolvePrReviewWriterRunId(
+	directory: string,
+	sessionID: string,
+	requestedRunId?: string,
+): Promise<string> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	return withPrWorkflowCheckoutMutationLock(directory, () =>
+		withSessionStateMutation(directory, normalizedSessionID, async () => {
+			const state = await requireBoundState(
+				directory,
+				normalizedSessionID,
+				'PR_REVIEW',
+			);
+			const workflowInstanceId = workflowIdentity(state);
+			const normalizedRequested = requestedRunId?.trim() || undefined;
+			const stateBoundValues = [
+				state.prReviewReservedRunId,
+				state.prReviewTriggerEvalRunId,
+				state.prReviewArtifactRunId,
+			].filter((value): value is string => Boolean(value?.trim()));
+			const stateDistinct = [...new Set(stateBoundValues)];
+			if (
+				normalizedRequested &&
+				stateDistinct.some((value) => value !== normalizedRequested)
+			) {
+				if (stateDistinct.length === 1) {
+					throw new Error(
+						`BLOCKED: field run_id expected "${stateDistinct[0]}", got "${normalizedRequested}"`,
+					);
+				}
+				throw new Error(
+					`BLOCKED: field run_id expected one unambiguous active value, got "${normalizedRequested}" while active bindings are ${stateDistinct.join(', ')}`,
+				);
+			}
+			const recoveredReservations = normalizedRequested
+				? []
+				: await findOwnedPrReviewRunReservations(
+						directory,
+						normalizedSessionID,
+						workflowInstanceId,
+					);
+			const distinct = [
+				...new Set([...stateBoundValues, ...recoveredReservations]),
+			];
+			if (!normalizedRequested && distinct.length > 1) {
+				throw new Error(
+					`BLOCKED: field run_id expected one unambiguous active value, got (omitted) while active bindings are ${distinct.join(', ')}`,
+				);
+			}
+
+			const reserve = async (runId: string): Promise<string | null> => {
+				const outcome = await tryCreatePrReviewRunReservation(
+					directory,
+					normalizedSessionID,
+					workflowInstanceId,
+					runId,
+				);
+				return outcome === 'occupied' ? null : runId;
+			};
+
+			let resolvedRunId = normalizedRequested ?? distinct[0];
+			if (!resolvedRunId) {
+				const base = generatePrReviewRunId();
+				for (
+					let suffix = 0;
+					suffix < MAX_PR_REVIEW_RUN_ID_SUFFIX_ATTEMPTS && !resolvedRunId;
+					suffix += 1
+				) {
+					const candidate = suffix === 0 ? base : `${base}-${suffix}`;
+					const reserved = await reserve(candidate);
+					if (reserved) resolvedRunId = reserved;
+				}
+				if (!resolvedRunId) {
+					throw new Error(
+						`BLOCKED: PR_REVIEW run_id generation exhausted ${MAX_PR_REVIEW_RUN_ID_SUFFIX_ATTEMPTS} reservation attempts for base "${base}"`,
+					);
+				}
+			} else if ((await reserve(resolvedRunId)) === null) {
+				throw new Error(
+					`BLOCKED: field run_id expected an unused active reservation, got "${resolvedRunId}" which is already occupied by another workflow`,
+				);
+			}
+
+			if (state.prReviewReservedRunId === resolvedRunId) return resolvedRunId;
+			const nextState: PrWorkflowGateState = {
+				...state,
+				updatedAt: isoNow(),
+				prReviewReservedRunId: resolvedRunId,
+			};
+			const persisted = await writeStateWhileLocked(directory, nextState, {
+				replaceWorkflowInstanceId: state.workflowInstanceId,
+			});
+			return persisted.prReviewReservedRunId ?? resolvedRunId;
+		}),
+	);
 }
 
 export async function markPrReviewTriggerEvaluationComplete(
@@ -5833,7 +8804,8 @@ export async function markPrReviewTriggerEvaluationComplete(
 	runId: string,
 	artifactPath: string,
 ): Promise<PrWorkflowGateState> {
-	const state = await assertPrReviewBaseCoverageSettled(directory, sessionID);
+	const state = (await assertPrReviewBaseCoverageSettled(directory, sessionID))
+		.state;
 	const normalizedRunId = runId.trim();
 	if (!normalizedRunId) {
 		throw new Error('BLOCKED: PR_REVIEW trigger artifact run_id is required');
@@ -5890,7 +8862,8 @@ export async function bindPrReviewTriggerLedger(
 			}`,
 		);
 	}
-	const state = await assertPrReviewBaseCoverageSettled(directory, sessionID);
+	const state = (await assertPrReviewBaseCoverageSettled(directory, sessionID))
+		.state;
 	if (state.prReviewTriggerLedger) {
 		let frozen: ReturnType<typeof validatePrReviewInlineTriggerLedger>;
 		try {
@@ -5927,12 +8900,29 @@ export async function assertPrReviewArtifactBoundary(
 	runId: string,
 	boundary: PrReviewArtifactBoundary,
 	findingIds: string[],
+	options: { skipBaseCoverage?: boolean } = {},
 ): Promise<PrWorkflowGateState> {
 	let state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
-	if (!state.prReviewTriggerEvalPath) {
+	// Issue #2280 Part A: the one exception to trigger-eval-before-findings is
+	// the base-only `post_explorer` checkpoint, admissible after base settlement
+	// and before the micro wave. The inventory check below then validates
+	// against exactly the base-derived candidates: micro sources exist only on
+	// the trigger-eval receipt and council sources are gated on the same field,
+	// so with no receipt the derivation is structurally base-only. Every other
+	// boundary keeps the hard trigger-eval prerequisite, message unchanged.
+	const baseOnlyExplorerCheckpoint =
+		boundary === 'post_explorer' && !state.prReviewTriggerEvalPath;
+	if (!state.prReviewTriggerEvalPath && !baseOnlyExplorerCheckpoint) {
 		throw new Error(
 			'BLOCKED: PR_REVIEW findings persistence requires the trigger evaluation artifact (write_pr_review_trigger_eval must complete first)',
 		);
+	}
+	if (baseOnlyExplorerCheckpoint && !options.skipBaseCoverage) {
+		// The returned state is the freshest snapshot; the assignment threads it
+		// through every downstream check here (boundary order, run binding,
+		// candidate inventory) rather than mixing two reads of the gate state.
+		state = (await assertPrReviewBaseCoverageSettled(directory, sessionID))
+			.state;
 	}
 	const persistedBoundaries = state.prReviewArtifactBoundaries ?? [];
 	const boundaryOrder: readonly PrReviewArtifactBoundary[] = [
@@ -6065,7 +9055,78 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 			detail: `${field} expected ${expected}, got ${actual}`,
 		});
 	};
+	/**
+	 * The severity comparison, unconditional by design. An OMITTED severity is a
+	 * mismatch, never a skip: presence-guarding this check (`if (record.severity
+	 * && …)`) is what let a caller bypass verification against BOTH the reviewer
+	 * and the critic simply by leaving the field out (issue #2279). The message
+	 * names the required value, so a caller repairs the payload in one round trip.
+	 */
+	const reportSeverity = (
+		record: PrReviewArtifactRecord,
+		expected: string,
+	): void => {
+		if (record.severity === expected) return;
+		// A corrupted artifact must not be misdiagnosed as merely missing the
+		// field: an absent key, `null`, and `""` are distinct defects and all
+		// previously rendered as `(omitted)` (PRR-008). Widened deliberately —
+		// the field is typed to the enum, but the schema leaves it optional and
+		// `readFindings` reloads legacy rows without re-validating, so `null` and
+		// `""` are reachable at runtime.
+		const raw = record.severity as string | null | undefined;
+		const actual =
+			raw === undefined
+				? '(omitted)'
+				: raw === null
+					? '(null)'
+					: raw === ''
+						? '(empty)'
+						: `"${raw}"`;
+		report(record.finding_id, 'severity', `"${expected}"`, actual);
+	};
+	/**
+	 * Typed risk metadata comparison (issue #2383): a CONFIRMED record is a
+	 * projection of the authoritative reviewer row, so its risk_impact and
+	 * risk_tags must equal that row's typed values — the metadata that decides
+	 * critic routing may never drift between the verdict and the artifact.
+	 */
+	const reportRiskMetadata = (
+		record: PrReviewArtifactRecord,
+		reviewer: { riskImpact?: PrReviewRiskImpact; riskTags?: PrReviewRiskTag[] },
+	): void => {
+		if (record.status !== 'CONFIRMED') return;
+		const expectedImpact = reviewer.riskImpact ?? 'UNKNOWN';
+		const expectedTags = reviewer.riskTags ?? [];
+		const actualImpact = record.risk_impact ?? 'UNKNOWN';
+		const actualTags = record.risk_tags ?? [];
+		if (actualImpact !== expectedImpact) {
+			report(
+				record.finding_id,
+				'risk_impact',
+				`"${expectedImpact}"`,
+				record.risk_impact === undefined ? '(omitted)' : `"${actualImpact}"`,
+			);
+		}
+		if (actualTags.join(',') !== expectedTags.join(',')) {
+			report(
+				record.finding_id,
+				'risk_tags',
+				JSON.stringify(expectedTags),
+				record.risk_tags === undefined
+					? '(omitted)'
+					: JSON.stringify(actualTags),
+			);
+		}
+	};
 	if (boundary === 'post_explorer') {
+		// The candidate rows the inventory was derived from ARE the authority for
+		// this boundary: a post_explorer record is a projection of one
+		// `[CANDIDATE]` row, so its severity must equal that row's (issue #2320).
+		const candidateSeverities = derivePrReviewCandidateSeverities(
+			directory,
+			state,
+			await createPrReviewGateContext(directory, state),
+		);
 		for (const record of records) {
 			if (record.status !== 'PENDING') {
 				report(record.finding_id, 'status', '"PENDING"', `"${record.status}"`);
@@ -6078,6 +9139,41 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 					`"${record.next_action}"`,
 				);
 			}
+			// A DERIVED AUTHORITY ALWAYS WINS. This ordering is load-bearing:
+			// `candidate_id` is unconstrained free text (`analyzeCandidateFields`
+			// requires only non-empty), so a lane can legitimately — or
+			// maliciously — name a real finding `CLEAN-REVIEW`. Testing the id
+			// first let such a record be compared against `NONE` instead of the row
+			// it projects, which both accepted a fabricated `NONE` for a CRITICAL
+			// row and rejected the truthful value. Consulting the map first makes
+			// the sentinel branch reachable only when there is genuinely no row.
+			const candidateSeverity = candidateSeverities.get(record.finding_id);
+			if (candidateSeverity) {
+				// Exact-value comparison against the row that produced this record.
+				reportSeverity(record, candidateSeverity);
+				continue;
+			}
+			if (record.finding_id === PR_REVIEW_CLEAN_SENTINEL_ID) {
+				// The zero-candidate sentinel, reached only with no row of its own.
+				// Its mandated reviewer row carries `NONE` and `post_reviewer`
+				// compares against exactly that, so `NONE` is correct here too —
+				// requiring anything else would force a clean review to invent a
+				// value and then flip it one boundary later.
+				reportSeverity(record, 'NONE');
+				continue;
+			}
+			// Unreachable by construction: `assertPrReviewArtifactBoundary` has
+			// already forced every id to be in the inventory, and every
+			// non-sentinel inventory id is appended from the same row that
+			// contributed its severity (a row only enters the inventory once
+			// `analyzeCandidateFields` validated its severity). Reported as a
+			// violation rather than silently tolerated, so an invariant break
+			// fails closed instead of quietly disabling the comparison.
+			violations.push({
+				findingId: record.finding_id,
+				detail:
+					'no authoritative candidate severity (absent from the derived candidate inventory)',
+			});
 		}
 	} else {
 		const ctx = await createPrReviewGateContext(directory, state);
@@ -6109,9 +9205,12 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 				});
 				continue;
 			}
-			const requiresCritic =
-				reviewer.classification === 'CONFIRMED' &&
-				['CRITICAL', 'HIGH', 'MEDIUM'].includes(reviewer.severity);
+			const requiresCritic = prReviewFindingRequiresCritic({
+				classification: reviewer.classification,
+				severity: reviewer.severity,
+				risk_impact: reviewer.riskImpact,
+				risk_tags: reviewer.riskTags,
+			});
 			const expectedStatus =
 				reviewer.classification === 'UNVERIFIED'
 					? 'PENDING'
@@ -6141,14 +9240,8 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 						`"${record.next_action}"`,
 					);
 				}
-				if (record.severity && record.severity !== reviewer.severity) {
-					report(
-						record.finding_id,
-						'severity',
-						`"${reviewer.severity}"`,
-						`"${record.severity}"`,
-					);
-				}
+				reportSeverity(record, reviewer.severity);
+				reportRiskMetadata(record, reviewer);
 				continue;
 			}
 
@@ -6177,28 +9270,19 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 						`"${record.next_action}"`,
 					);
 				}
-				if (record.severity && record.severity !== reviewer.severity) {
-					report(
-						record.finding_id,
-						'severity',
-						`"${reviewer.severity}"`,
-						`"${record.severity}"`,
-					);
-				}
+				reportSeverity(record, reviewer.severity);
+				reportRiskMetadata(record, reviewer);
 				continue;
 			}
 
 			// post_critic, critic-routed: the critic verdict is authoritative.
 			const critic = criticVerdicts?.get(record.finding_id);
 			if (!critic) {
-				if (record.severity && record.severity !== reviewer.severity) {
-					report(
-						record.finding_id,
-						'severity',
-						`"${reviewer.severity}"`,
-						`"${record.severity}"`,
-					);
-				}
+				// No critic verdict settled: the reviewer severity is the best
+				// available authority, and the missing-critic violation below is
+				// reported alongside it.
+				reportSeverity(record, reviewer.severity);
+				reportRiskMetadata(record, reviewer);
 				violations.push({
 					findingId: record.finding_id,
 					detail:
@@ -6241,28 +9325,14 @@ export async function assertPrReviewArtifactRecordsMatchAuthoritativeVerdicts(
 					);
 				}
 			}
-			if (record.severity) {
-				if (reviewer.severity === critic.severity) {
-					if (record.severity !== reviewer.severity) {
-						report(
-							record.finding_id,
-							'severity',
-							`"${reviewer.severity}"`,
-							`"${record.severity}"`,
-						);
-					}
-				} else {
-					// The reviewer and critic severities disagree, so no present
-					// value satisfies both presence-guarded checks; omitting the
-					// optional field is the only passing option.
-					report(
-						record.finding_id,
-						'severity',
-						`NONE (omit field; reviewer "${reviewer.severity}" and critic "${critic.severity}" disagree)`,
-						`"${record.severity}"`,
-					);
-				}
-			}
+			// The critic is the FINAL word for a critic-routed item, so its severity
+			// is the single authority here — including when it downgrades the
+			// reviewer (reviewer MEDIUM -> critic LOW), which is now encodable
+			// verbatim as `severity: "LOW"`. The previous code compared against the
+			// reviewer when the two agreed and, when they disagreed, instructed the
+			// caller to omit the field — which disabled the check entirely
+			// (issue #2279).
+			reportSeverity(record, critic.severity);
 		}
 	}
 	if (violations.length > 0) {
@@ -6317,29 +9387,78 @@ export async function markPrReviewHandoffComplete(
 	sessionID: string,
 	runId: string,
 	artifactPath: string,
-): Promise<PrWorkflowGateState> {
-	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
-	if (
-		state.prReviewArtifactRunId !== runId ||
-		!(state.prReviewArtifactBoundaries ?? []).includes('post_critic')
-	) {
-		throw new Error(
-			'BLOCKED: PR_REVIEW handoff requires the final findings boundary for the same run',
-		);
-	}
-	const nextState: PrWorkflowGateState = {
-		...state,
-		updatedAt: isoNow(),
-		prReviewHandoffPath: artifactPath,
-	};
-	await persistState(directory, nextState);
-	return nextState;
+): Promise<{ state: PrWorkflowGateState; alreadyOffered: boolean }> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	return withPrWorkflowCheckoutMutationLock(directory, () =>
+		withSessionStateMutation(directory, normalizedSessionID, async () => {
+			const state = await requireBoundState(
+				directory,
+				normalizedSessionID,
+				'PR_REVIEW',
+			);
+			if (
+				state.prReviewArtifactRunId !== runId ||
+				!(state.prReviewArtifactBoundaries ?? []).includes('post_critic')
+			) {
+				throw new Error(
+					'BLOCKED: PR_REVIEW handoff requires the final findings boundary for the same run',
+				);
+			}
+			const read = await readPrReviewFeedbackHandoffArtifact(
+				directory,
+				artifactPath,
+			);
+			const command = `/swarm pr-feedback ${read.artifact.pr_url} continue from .swarm/${artifactPath}`;
+			const consentInput = {
+				sessionID: normalizedSessionID,
+				runId,
+				handoffPath: artifactPath,
+				handoffDigest: read.digest,
+				prUrl: read.artifact.pr_url,
+				prHeadSha: read.artifact.pr_head_sha,
+				findingIdsDigest: hashPrReviewFindingIds(read.artifact.finding_ids),
+				sourceWorkflowInstanceId: workflowIdentity(state),
+			};
+			const existing = await readPrReviewFeedbackConsent(directory, runId);
+			const alreadyOffered = existing !== null;
+			if (existing) {
+				assertMatchingPrReviewFeedbackConsent(existing, consentInput);
+			} else {
+				await writePrReviewFeedbackConsent(directory, {
+					schema_version: 1,
+					state: 'offered',
+					session_id: normalizedSessionID,
+					source_workflow_instance_id: workflowIdentity(state),
+					run_id: runId,
+					handoff_path: artifactPath,
+					handoff_digest: read.digest,
+					pr_url: read.artifact.pr_url,
+					pr_head_sha: read.artifact.pr_head_sha.toLowerCase(),
+					finding_ids_digest: consentInput.findingIdsDigest,
+					confirmation_command: command,
+					offered_at: isoNow(),
+				});
+			}
+			if (alreadyOffered && state.prReviewHandoffPath === artifactPath) {
+				return { state, alreadyOffered: true };
+			}
+			const nextState: PrWorkflowGateState = {
+				...state,
+				updatedAt: isoNow(),
+				prReviewHandoffPath: artifactPath,
+			};
+			return {
+				state: await writeStateWhileLocked(directory, nextState),
+				alreadyOffered,
+			};
+		}),
+	);
 }
 
 const PR_REVIEW_HANDOFF_RELATIVE_PATH_PATTERN =
 	/^pr-review\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/feedback-handoff\.json$/;
-const PR_REVIEW_HANDOFF_MAX_BYTES = 128 * 1024;
-const PR_REVIEW_FINDINGS_MAX_BYTES = 10 * 1024 * 1024;
+const PR_REVIEW_FEEDBACK_CONSENT_MAX_BYTES = 64 * 1024;
+const PR_REVIEW_RUN_RESERVATION_MAX_BYTES = 16 * 1024;
 
 const PrReviewFeedbackHandoffArtifactSchema = z
 	.object({
@@ -6354,6 +9473,34 @@ const PrReviewFeedbackHandoffArtifactSchema = z
 	})
 	.strict();
 
+const PrReviewRunReservationSchema = z
+	.object({
+		schema_version: z.literal(1),
+		session_id: z.string().min(1),
+		workflow_instance_id: z.string().min(1),
+		run_id: z.string().min(1).max(128),
+		reserved_at: z.string().datetime(),
+	})
+	.strict();
+
+const PrReviewFeedbackConsentSchema = z
+	.object({
+		schema_version: z.literal(1),
+		state: z.enum(['offered', 'confirmed']),
+		session_id: z.string().min(1),
+		source_workflow_instance_id: z.string().min(1),
+		run_id: z.string().min(1).max(128),
+		handoff_path: z.string().min(1).max(512),
+		handoff_digest: z.string().regex(/^[a-f0-9]{64}$/),
+		pr_url: z.string().url().max(2000),
+		pr_head_sha: z.string().regex(/^[0-9a-f]{6,64}$/i),
+		finding_ids_digest: z.string().regex(/^[a-f0-9]{64}$/),
+		confirmation_command: z.string().min(1).max(4000),
+		offered_at: z.string().datetime(),
+		confirmed_at: z.string().datetime().optional(),
+	})
+	.strict();
+
 function normalizePrReviewFeedbackHandoffPath(
 	handoffPath: string,
 ): { runId: string; relativePath: string } | null {
@@ -6364,6 +9511,20 @@ function normalizePrReviewFeedbackHandoffPath(
 	const matched = relative.match(PR_REVIEW_HANDOFF_RELATIVE_PATH_PATTERN);
 	if (!matched) return null;
 	return { runId: matched[1], relativePath: relative };
+}
+
+function buildAcceptedPrFeedbackContinuationCommands(
+	confirmationCommand: string,
+	relativeHandoffPath: string,
+	requestedPrUrl?: string,
+): Set<string> {
+	const commands = new Set([confirmationCommand]);
+	if (!requestedPrUrl) {
+		commands.add(
+			`/swarm pr-feedback continue from .swarm/${relativeHandoffPath}`,
+		);
+	}
+	return commands;
 }
 
 async function readBoundedSwarmRegularFile(
@@ -6460,16 +9621,200 @@ async function readBoundedSwarmRegularFile(
 	}
 }
 
-function sameBigIntFileIdentity(
-	left: Pick<BigIntStats, 'dev' | 'ino'>,
-	right: Pick<BigIntStats, 'dev' | 'ino'>,
-): boolean {
-	return left.dev === right.dev && left.ino === right.ino;
+function prReviewRunReservationRelativePath(runId: string): string {
+	return `pr-review/${runId}/run-reservation.json`;
 }
 
-function normalizeComparableFsPath(value: string): string {
-	const normalized = path.normalize(path.resolve(value));
-	return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+function prReviewFeedbackConsentRelativePath(runId: string): string {
+	return `pr-review/${runId}/feedback-consent.json`;
+}
+
+const MAX_PR_REVIEW_RESERVATION_SCAN_ENTRIES = 1024;
+const MAX_PR_REVIEW_RUN_ID_SUFFIX_ATTEMPTS = 64;
+
+/**
+ * Recover a reservation that reached disk before its gate-state binding did.
+ * The scan is bounded and runs only in the explicit writer path while the
+ * project checkout lock is held; it is never plugin-initialization work.
+ */
+async function findOwnedPrReviewRunReservations(
+	directory: string,
+	sessionID: string,
+	workflowInstanceId: string,
+): Promise<string[]> {
+	const reviewRoot = validateSwarmPath(directory, 'pr-review');
+	let entries: Dirent<string>[];
+	try {
+		entries = await fsp.readdir(reviewRoot, { withFileTypes: true });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+		throw error;
+	}
+	if (entries.length > MAX_PR_REVIEW_RESERVATION_SCAN_ENTRIES) {
+		throw new Error(
+			`BLOCKED: PR_REVIEW reservation recovery expected at most ${MAX_PR_REVIEW_RESERVATION_SCAN_ENTRIES} run entries, got ${entries.length}`,
+		);
+	}
+
+	const owned: string[] = [];
+	for (const entry of entries) {
+		if (
+			!entry.isDirectory() ||
+			!PrReviewRunIdSchema.safeParse(entry.name).success
+		)
+			continue;
+		let reservation: Awaited<ReturnType<typeof readPrReviewRunReservation>>;
+		try {
+			reservation = await readPrReviewRunReservation(directory, entry.name);
+		} catch {
+			// An unrelated corrupt reservation is occupied but cannot establish
+			// ownership for this workflow. Explicit reuse still fails in `reserve`.
+			continue;
+		}
+		if (
+			reservation?.session_id === sessionID &&
+			reservation.workflow_instance_id === workflowInstanceId &&
+			reservation.run_id === entry.name
+		) {
+			owned.push(entry.name);
+		}
+	}
+	return owned.sort();
+}
+
+function hashPrReviewFindingIds(ids: readonly string[]): string {
+	return createHash('sha256')
+		.update([...new Set(ids)].sort().join('\0'), 'utf8')
+		.digest('hex');
+}
+
+async function readPrReviewRunReservation(
+	directory: string,
+	runId: string,
+): Promise<z.infer<typeof PrReviewRunReservationSchema> | null> {
+	try {
+		const raw = await readBoundedSwarmRegularFile(
+			directory,
+			prReviewRunReservationRelativePath(runId),
+			PR_REVIEW_RUN_RESERVATION_MAX_BYTES,
+			'PR_REVIEW run reservation',
+		);
+		const parsed = PrReviewRunReservationSchema.safeParse(JSON.parse(raw));
+		if (!parsed.success) {
+			throw new Error('BLOCKED: PR_REVIEW run reservation is invalid');
+		}
+		return parsed.data;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		if (message.includes('does not exist')) return null;
+		throw error;
+	}
+}
+
+async function tryCreatePrReviewRunReservation(
+	directory: string,
+	sessionID: string,
+	workflowInstanceId: string,
+	runId: string,
+): Promise<'created' | 'owned' | 'occupied'> {
+	const relativePath = prReviewRunReservationRelativePath(runId);
+	const absolutePath = validateSwarmPath(directory, relativePath);
+	const runDirectory = path.dirname(absolutePath);
+	const payload = `${JSON.stringify(
+		{
+			schema_version: 1,
+			session_id: sessionID,
+			workflow_instance_id: workflowInstanceId,
+			run_id: runId,
+			reserved_at: isoNow(),
+		},
+		null,
+		2,
+	)}\n`;
+	await fsp.mkdir(runDirectory, { recursive: true });
+	try {
+		await fsp.writeFile(absolutePath, payload, {
+			encoding: 'utf8',
+			flag: 'wx',
+		});
+		return 'created';
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+	}
+	const existing = await readPrReviewRunReservation(directory, runId);
+	if (
+		existing?.session_id === sessionID &&
+		existing.workflow_instance_id === workflowInstanceId &&
+		existing.run_id === runId
+	) {
+		return 'owned';
+	}
+	const occupiedNames = new Set([
+		'trigger-eval.json',
+		'findings.jsonl',
+		'feedback-handoff.json',
+		'feedback-consent.json',
+	]);
+	try {
+		const entries = await fsp.readdir(runDirectory);
+		if (entries.some((entry) => occupiedNames.has(entry))) return 'occupied';
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+	}
+	return 'occupied';
+}
+
+async function readPrReviewFeedbackConsent(
+	directory: string,
+	runId: string,
+): Promise<z.infer<typeof PrReviewFeedbackConsentSchema> | null> {
+	try {
+		const raw = await readBoundedSwarmRegularFile(
+			directory,
+			prReviewFeedbackConsentRelativePath(runId),
+			PR_REVIEW_FEEDBACK_CONSENT_MAX_BYTES,
+			'PR_REVIEW feedback consent artifact',
+		);
+		const parsed = PrReviewFeedbackConsentSchema.safeParse(JSON.parse(raw));
+		if (!parsed.success) {
+			throw new Error(
+				'BLOCKED: PR_REVIEW feedback consent artifact is invalid',
+			);
+		}
+		return parsed.data;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		if (message.includes('does not exist')) return null;
+		throw error;
+	}
+}
+
+async function writePrReviewFeedbackConsent(
+	directory: string,
+	record: z.infer<typeof PrReviewFeedbackConsentSchema>,
+): Promise<void> {
+	const relativePath = prReviewFeedbackConsentRelativePath(record.run_id);
+	const absolutePath = validateSwarmPath(directory, relativePath);
+	if (record.state === 'confirmed') {
+		// The existing offer must be replaced portably. The shared atomic writer
+		// provides containment checks, fsync, and bounded Windows rename retries.
+		await writeAtomicJson(directory, absolutePath, record);
+		return;
+	}
+	const parent = path.dirname(absolutePath);
+	const tempPath = path.join(parent, `.feedback-consent.${randomUUID()}.tmp`);
+	await fsp.mkdir(parent, { recursive: true });
+	try {
+		await fsp.writeFile(tempPath, `${JSON.stringify(record, null, 2)}\n`, {
+			encoding: 'utf8',
+			flag: 'wx',
+		});
+		// Link publishes the offer as an atomic create-only commit marker. A
+		// concurrent or stale offer can never be silently overwritten.
+		await fsp.link(tempPath, absolutePath);
+	} finally {
+		await fsp.rm(tempPath, { force: true }).catch(() => undefined);
+	}
 }
 
 async function readPrReviewFeedbackHandoffArtifact(
@@ -6592,6 +9937,35 @@ function canonicalGitHubPrUrl(value: string): string | null {
 	}
 }
 
+function assertMatchingPrReviewFeedbackConsent(
+	record: z.infer<typeof PrReviewFeedbackConsentSchema>,
+	input: {
+		sessionID: string;
+		runId: string;
+		handoffPath: string;
+		handoffDigest: string;
+		prUrl: string;
+		prHeadSha: string;
+		findingIdsDigest: string;
+		sourceWorkflowInstanceId: string;
+	},
+): void {
+	if (
+		record.session_id !== input.sessionID ||
+		record.run_id !== input.runId ||
+		record.handoff_path !== input.handoffPath ||
+		record.handoff_digest !== input.handoffDigest ||
+		canonicalGitHubPrUrl(record.pr_url) !== canonicalGitHubPrUrl(input.prUrl) ||
+		record.pr_head_sha.toLowerCase() !== input.prHeadSha.toLowerCase() ||
+		record.finding_ids_digest !== input.findingIdsDigest ||
+		record.source_workflow_instance_id !== input.sourceWorkflowInstanceId
+	) {
+		throw new Error(
+			'BLOCKED: PR_REVIEW feedback consent artifact does not match the requested handoff; remove the stale sidecar or repeat the exact continuation offer',
+		);
+	}
+}
+
 function workflowIdentity(state: PrWorkflowGateState): string {
 	return (
 		state.workflowInstanceId ??
@@ -6650,7 +10024,12 @@ function assertSamePrFeedbackHandoff(
 async function assertPrReviewTerminalReady(
 	directory: string,
 	sessionID: string,
-): Promise<PrWorkflowGateState> {
+): Promise<{
+	state: PrWorkflowGateState;
+	settlement: PrReviewTerminalCoverageSettlement & {
+		liveDimensions: PrReviewBaseDimensionId[];
+	};
+}> {
 	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
 	await assertPrReviewCleanCheckout(directory, 'PR_REVIEW');
 	// W-4 (issue #2242 R2): stale lanes settle with disclosure; fresh ones block.
@@ -6666,7 +10045,11 @@ async function assertPrReviewTerminalReady(
 	}
 	// One digest + one composed verdict map for the entire terminal check.
 	const ctx = await createPrReviewGateContext(directory, state);
-	await assertPrReviewBaseCoverageSettled(directory, sessionID, ctx);
+	const { settlement } = await assertPrReviewBaseCoverageSettled(
+		directory,
+		sessionID,
+		ctx,
+	);
 	if (!state.prReviewTriggerEvalPath) {
 		throw new Error(
 			'BLOCKED: PR_REVIEW transition requires a persisted trigger evaluation artifact',
@@ -6721,7 +10104,7 @@ async function assertPrReviewTerminalReady(
 			'BLOCKED: PR_REVIEW actionable findings require a persisted feedback handoff artifact',
 		);
 	}
-	return state;
+	return { state, settlement };
 }
 
 export async function transitionPrReviewToFeedback(
@@ -6731,6 +10114,8 @@ export async function transitionPrReviewToFeedback(
 		runId: string;
 		handoffPath: string;
 		prUrl?: string;
+		exactCommand?: string;
+		confirmedByUser?: boolean;
 	},
 ): Promise<PrWorkflowGateState> {
 	const normalizedSessionID = normalizeSessionID(sessionID);
@@ -6776,16 +10161,16 @@ export async function transitionPrReviewToFeedback(
 	}
 
 	let sourceIdentity: string;
+	let expectedConsentSourceIdentity: string;
 	let sourceRevision = 0;
 	let provenance: PrFeedbackReviewHandoffRecord['provenance'];
 	if (preliminary) {
 		if (preliminary.mode !== 'PR_REVIEW') {
 			throw wrongModeError(preliminary, 'PR_REVIEW');
 		}
-		const ready = await assertPrReviewTerminalReady(
-			directory,
-			normalizedSessionID,
-		);
+		const ready = (
+			await assertPrReviewTerminalReady(directory, normalizedSessionID)
+		).state;
 		if (
 			workflowIdentity(ready) !== workflowIdentity(preliminary) ||
 			ready.revision !== preliminary.revision ||
@@ -6812,101 +10197,201 @@ export async function transitionPrReviewToFeedback(
 			);
 		}
 		sourceIdentity = workflowIdentity(ready);
+		expectedConsentSourceIdentity = sourceIdentity;
 		sourceRevision = ready.revision;
 		provenance = 'active-review-v1';
 	} else {
-		if (!request.prUrl) {
+		const reservation = await readPrReviewRunReservation(
+			directory,
+			request.runId,
+		);
+		if (
+			!reservation ||
+			reservation.session_id !== normalizedSessionID ||
+			reservation.run_id !== request.runId
+		) {
 			throw new Error(
-				'BLOCKED: continuing a completed PR_REVIEW requires an explicit GitHub PR URL',
+				'BLOCKED: completed PR_REVIEW continuation requires the matching durable run reservation for this session',
 			);
 		}
-		sourceIdentity = `external-${preliminaryRead.digest.slice(0, 32)}`;
+		expectedConsentSourceIdentity = reservation.workflow_instance_id;
+		sourceIdentity = expectedConsentSourceIdentity;
 		provenance = 'external-v1';
 	}
 
-	await _test_exports.beforePrFeedbackTransitionLock?.();
-	return withSessionStateMutation(directory, normalizedSessionID, async () => {
-		const current = await readPrWorkflowGateStateFromDisk(
-			directory,
-			normalizedSessionID,
+	const consent = await readPrReviewFeedbackConsent(directory, request.runId);
+	if (!consent) {
+		throw new Error(
+			'BLOCKED: PR_FEEDBACK continuation requires explicit confirmation; repeat the exact continuation command first',
 		);
-		if (current?.mode === 'PR_FEEDBACK') {
-			assertSamePrFeedbackHandoff(
-				current,
-				normalizedHandoff.relativePath,
-				preliminaryRead,
-				request.prUrl,
+	}
+	assertMatchingPrReviewFeedbackConsent(consent, {
+		sessionID: normalizedSessionID,
+		runId: request.runId,
+		handoffPath: normalizedHandoff.relativePath,
+		handoffDigest: preliminaryRead.digest,
+		prUrl: artifact.pr_url,
+		prHeadSha: artifact.pr_head_sha,
+		findingIdsDigest: hashPrReviewFindingIds(artifact.finding_ids),
+		sourceWorkflowInstanceId: expectedConsentSourceIdentity,
+	});
+	const exactCommand = request.exactCommand?.trim();
+	const acceptedContinuationCommands =
+		buildAcceptedPrFeedbackContinuationCommands(
+			consent.confirmation_command,
+			normalizedHandoff.relativePath,
+			request.prUrl,
+		);
+	if (
+		request.confirmedByUser !== true ||
+		!exactCommand ||
+		!acceptedContinuationCommands.has(exactCommand)
+	) {
+		throw new Error(
+			`BLOCKED: PR_FEEDBACK continuation requires explicit confirmation with the offered command: ${consent.confirmation_command}`,
+		);
+	}
+
+	await _test_exports.beforePrFeedbackTransitionLock?.();
+	return withPrWorkflowCheckoutMutationLock(directory, () =>
+		withSessionStateMutation(directory, normalizedSessionID, async () => {
+			const current = await readPrWorkflowGateStateFromDisk(
+				directory,
+				normalizedSessionID,
 			);
-			return current;
-		}
-		if (provenance === 'active-review-v1') {
-			if (
-				!current ||
-				current.mode !== 'PR_REVIEW' ||
-				workflowIdentity(current) !== sourceIdentity ||
-				current.revision !== sourceRevision ||
-				current.prHeadSha?.toLowerCase() !==
-					artifact.pr_head_sha.toLowerCase() ||
-				current.prReviewArtifactRunId !== request.runId ||
-				current.prReviewHandoffPath !== normalizedHandoff.relativePath
-			) {
+			if (current?.mode === 'PR_FEEDBACK') {
+				assertSamePrFeedbackHandoff(
+					current,
+					normalizedHandoff.relativePath,
+					preliminaryRead,
+					request.prUrl,
+				);
+				return current;
+			}
+			if (provenance === 'active-review-v1') {
+				if (
+					!current ||
+					current.mode !== 'PR_REVIEW' ||
+					workflowIdentity(current) !== sourceIdentity ||
+					current.revision !== sourceRevision ||
+					current.prHeadSha?.toLowerCase() !==
+						artifact.pr_head_sha.toLowerCase() ||
+					current.prReviewArtifactRunId !== request.runId ||
+					current.prReviewHandoffPath !== normalizedHandoff.relativePath
+				) {
+					throw new Error(
+						'BLOCKED: PR_REVIEW state changed while validating the feedback handoff; retry from current state',
+					);
+				}
+			} else if (current) {
 				throw new Error(
-					'BLOCKED: PR_REVIEW state changed while validating the feedback handoff; retry from current state',
+					'BLOCKED: another PR workflow became active while validating the external handoff',
 				);
 			}
-		} else if (current) {
-			throw new Error(
-				'BLOCKED: another PR workflow became active while validating the external handoff',
+			if (provenance === 'external-v1') {
+				const lockedReservation = await readPrReviewRunReservation(
+					directory,
+					request.runId,
+				);
+				if (
+					!lockedReservation ||
+					lockedReservation.session_id !== normalizedSessionID ||
+					lockedReservation.workflow_instance_id !==
+						expectedConsentSourceIdentity
+				) {
+					throw new Error(
+						'BLOCKED: PR_REVIEW run reservation changed during external feedback transition',
+					);
+				}
+			}
+			const lockedRead = await readPrReviewFeedbackHandoffArtifact(
+				directory,
+				normalizedHandoff.relativePath,
 			);
-		}
-		const lockedRead = await readPrReviewFeedbackHandoffArtifact(
-			directory,
-			normalizedHandoff.relativePath,
-		);
-		if (lockedRead.digest !== preliminaryRead.digest) {
-			throw new Error(
-				'BLOCKED: PR_REVIEW feedback handoff artifact changed during transition',
+			if (lockedRead.digest !== preliminaryRead.digest) {
+				throw new Error(
+					'BLOCKED: PR_REVIEW feedback handoff artifact changed during transition',
+				);
+			}
+			if (
+				artifactPr !== canonicalGitHubPrUrl(lockedRead.artifact.pr_url) ||
+				lockedRead.artifact.run_id !== request.runId ||
+				lockedRead.artifact.pr_head_sha.toLowerCase() !==
+					artifact.pr_head_sha.toLowerCase() ||
+				!sameHandoffIds(lockedRead.artifact.finding_ids, artifact.finding_ids)
+			) {
+				throw new Error(
+					'BLOCKED: PR_REVIEW feedback handoff artifact changed during transition',
+				);
+			}
+			const lockedConsent = await readPrReviewFeedbackConsent(
+				directory,
+				request.runId,
 			);
-		}
-		if (
-			artifactPr !== canonicalGitHubPrUrl(lockedRead.artifact.pr_url) ||
-			lockedRead.artifact.run_id !== request.runId ||
-			lockedRead.artifact.pr_head_sha.toLowerCase() !==
-				artifact.pr_head_sha.toLowerCase() ||
-			!sameHandoffIds(lockedRead.artifact.finding_ids, artifact.finding_ids)
-		) {
-			throw new Error(
-				'BLOCKED: PR_REVIEW feedback handoff artifact changed during transition',
-			);
-		}
-		const timestamp = isoNow();
-		const nextState: PrWorkflowGateState = {
-			schemaVersion: GATE_SCHEMA_VERSION,
-			revision: sourceRevision,
-			workflowInstanceId: randomUUID(),
-			sessionID: normalizedSessionID,
-			mode: 'PR_FEEDBACK',
-			activatedAt: timestamp,
-			updatedAt: timestamp,
-			prFeedbackReviewHandoff: {
-				path: normalizedHandoff.relativePath,
-				runId: lockedRead.artifact.run_id,
-				sourcePrHeadSha: lockedRead.artifact.pr_head_sha.toLowerCase(),
+			if (!lockedConsent) {
+				throw new Error(
+					'BLOCKED: PR_REVIEW feedback consent artifact disappeared during transition',
+				);
+			}
+			assertMatchingPrReviewFeedbackConsent(lockedConsent, {
+				sessionID: normalizedSessionID,
+				runId: request.runId,
+				handoffPath: normalizedHandoff.relativePath,
+				handoffDigest: lockedRead.digest,
 				prUrl: lockedRead.artifact.pr_url,
-				findingIds: [...new Set(lockedRead.artifact.finding_ids)].sort(),
-				digest: preliminaryRead.digest,
-				sourceWorkflowInstanceId: sourceIdentity,
-				provenance,
-			},
-			prFeedbackTargetUrl: artifact.pr_url,
-		};
-		return writeStateWhileLocked(directory, nextState, {
-			replaceWorkflowInstanceId:
-				provenance === 'active-review-v1'
-					? current?.workflowInstanceId
-					: undefined,
-		});
-	});
+				prHeadSha: lockedRead.artifact.pr_head_sha,
+				findingIdsDigest: hashPrReviewFindingIds(
+					lockedRead.artifact.finding_ids,
+				),
+				sourceWorkflowInstanceId: expectedConsentSourceIdentity,
+			});
+			if (
+				!buildAcceptedPrFeedbackContinuationCommands(
+					lockedConsent.confirmation_command,
+					normalizedHandoff.relativePath,
+					request.prUrl,
+				).has(exactCommand)
+			) {
+				throw new Error(
+					'BLOCKED: PR_FEEDBACK continuation command changed during transition',
+				);
+			}
+			if (lockedConsent.state === 'offered') {
+				await writePrReviewFeedbackConsent(directory, {
+					...lockedConsent,
+					state: 'confirmed',
+					confirmed_at: isoNow(),
+				});
+			}
+			const timestamp = isoNow();
+			const nextState: PrWorkflowGateState = {
+				schemaVersion: GATE_SCHEMA_VERSION,
+				revision: sourceRevision,
+				workflowInstanceId: randomUUID(),
+				sessionID: normalizedSessionID,
+				mode: 'PR_FEEDBACK',
+				activatedAt: timestamp,
+				updatedAt: timestamp,
+				prFeedbackReviewHandoff: {
+					path: normalizedHandoff.relativePath,
+					runId: lockedRead.artifact.run_id,
+					sourcePrHeadSha: lockedRead.artifact.pr_head_sha.toLowerCase(),
+					prUrl: lockedRead.artifact.pr_url,
+					findingIds: [...new Set(lockedRead.artifact.finding_ids)].sort(),
+					digest: preliminaryRead.digest,
+					sourceWorkflowInstanceId: sourceIdentity,
+					provenance,
+				},
+				prFeedbackTargetUrl: artifact.pr_url,
+			};
+			return writeStateWhileLocked(directory, nextState, {
+				replaceWorkflowInstanceId:
+					provenance === 'active-review-v1'
+						? current?.workflowInstanceId
+						: undefined,
+			});
+		}),
+	);
 }
 
 export async function declarePrFeedbackScope(
@@ -7022,9 +10507,62 @@ export async function enforcePrWorkflowToolBefore(
 	toolName: string,
 	args: Record<string, unknown> | undefined,
 	generatedAgentNames: readonly string[] = [],
+	callID?: string,
 ): Promise<void> {
-	const state = await readPrWorkflowGateState(directory, sessionID);
-	if (!state) return;
+	let state = await readPrWorkflowGateState(directory, sessionID);
+	if (!state) {
+		// Issue #2108 safety boundary: a hand-DELETED gate state file must not
+		// silently reopen arbitrary pushes for a session whose events trail
+		// still shows a LIVE publication generation. Publication-capable
+		// commands fail closed until an audited terminal (the cancel arm in
+		// abortPrWorkflow appends one even without gate state); every other
+		// command proceeds — the guard never blocks on absent/compacted
+		// evidence.
+		const normalizedEarlyTool = toolName.toLowerCase();
+		if (normalizedEarlyTool === 'bash' || normalizedEarlyTool === 'shell') {
+			const earlyCommand =
+				typeof args?.command === 'string' ? args.command.trim() : '';
+			// ANY git-push-shaped invocation holds, however it is wrapped —
+			// `git -c/-C … push`, env assignments, `env [-i] …`, nohup/nice/
+			// timeout wrappers, compound `git status && git push`. Also held:
+			// `git send-pack` (the plumbing command `git push` itself invokes,
+			// force-update capable) and `gh api` calls touching `refs/heads/`
+			// (the refs PATCH path). This is the last line of defense for the
+			// state-absent case with a LIVE generation in the audit trail, so
+			// it deliberately over-matches rather than under-matching any
+			// wrapper form; the over-block is operator-resolvable via the
+			// audited cancel arm.
+			const publicationShaped =
+				(/\bgit\b/.test(earlyCommand) &&
+					(/\bpush\b/.test(earlyCommand) ||
+						/\bsend-pack\b/.test(earlyCommand))) ||
+				(/\bgh\s+api\b/i.test(earlyCommand) &&
+					/refs\/heads\//.test(earlyCommand));
+			if (publicationShaped) {
+				const dangling = findDanglingLivePublicationGeneration(
+					directory,
+					sessionID,
+				);
+				if (dangling) {
+					throw new Error(
+						`BLOCKED: PR_FEEDBACK publication generation ${dangling.generation} for this session is live in the audit trail but its gate state is missing (deleted or moved by hand). Publication commands fail closed until the window is resolved: use abort_pr_workflow with kind "cancel-publication", cancel_publication: true, and a reason to record the audited no-publish terminal, or restore the gate state from backup.`,
+					);
+				}
+			}
+		}
+		return;
+	}
+	// Issue #2108: a legacy armed record migrates (conservatively, under the
+	// session lock) into the publication-generation state machine before any
+	// armed-window decision is made below.
+	if (
+		state.mode === 'PR_FEEDBACK' &&
+		state.prFeedbackReadyToPublish &&
+		!state.prFeedbackPublication
+	) {
+		state =
+			(await ensurePublicationGenerationCurrent(directory, sessionID)) ?? state;
+	}
 	const normalizedTool = toolName.toLowerCase();
 	const isDirectAgentTask =
 		normalizedTool === 'task' || normalizedTool === 'run_agent';
@@ -7270,15 +10808,25 @@ export async function enforcePrWorkflowToolBefore(
 		);
 	}
 	if (state.prFeedbackReadyToPublish) {
-		// NOTE: abort_pr_workflow is deliberately NOT allowed in the armed
-		// state. Clearing an armed gate would drop the immutable-commit /
-		// upstream binding and leave a half-published commit; once state is
-		// null, enforcePrWorkflowToolBefore returns early and arbitrary
-		// pushes would become allowed. abortPrWorkflow also refuses armed
-		// state at the hook level (defense in depth). The armed workflow
-		// must be completed (or explicitly un-armed by a human) before any
-		// abort path opens.
+		// NOTE (issue #2108): plain abort remains deliberately NOT allowed in
+		// the armed state — clearing an armed gate would drop the
+		// immutable-commit / upstream binding and leave a half-published
+		// commit; once state is null, enforcePrWorkflowToolBefore returns
+		// early and arbitrary pushes would become allowed. abortPrWorkflow
+		// also refuses armed state at the hook level (defense in depth). Two
+		// audited exits now exist: the explicit invalidation/rework transition
+		// (`invalidate_pr_feedback_publication`, which supersedes every
+		// approval and reopens the full ladder) and the terminal no-publish
+		// cancellation (`abort_pr_workflow` with `cancel_publication: true`,
+		// enforced at the hook level to require a reason and to never
+		// manufacture push authority).
 		if (normalizedTool === 'complete_pr_workflow') return;
+		if (normalizedTool === 'invalidate_pr_feedback_publication') return;
+		if (
+			normalizedTool === 'abort_pr_workflow' &&
+			args?.cancel_publication === true
+		)
+			return;
 		if (isNamedReadOnlyTool) return;
 		if (
 			(normalizedTool === 'bash' || normalizedTool === 'shell') &&
@@ -7294,15 +10842,28 @@ export async function enforcePrWorkflowToolBefore(
 			const armedState = await assertPrFeedbackPublicationArmed(
 				directory,
 				sessionID,
+				{ currentCallId: callID },
 			);
 			const armed = armedState.prFeedbackReadyToPublish!;
-			if (isSafeExactBoundPush(command, armed)) return;
+			const intent = parseExactBoundPushIntent(command, armed);
+			if (intent.ok && intent.intent && intent.digest) {
+				// Durable attempt-start (or observation-backed no-op completion)
+				// lands BEFORE the shell may execute the push (issue #2108 §3).
+				await admitPrFeedbackPushAttempt(
+					directory,
+					sessionID,
+					callID,
+					intent.intent,
+					intent.digest,
+				);
+				return;
+			}
 			throw new Error(
-				`BLOCKED: PR_FEEDBACK is armed for publication; only the exact approved push is allowed: ${expectedBoundPushCommand(armed)}`,
+				`BLOCKED: PR_FEEDBACK is armed for publication; only the exact approved push is allowed: ${expectedBoundPushCommand(armed)}${intent.reason ? ` (rejected form: ${intent.reason})` : ''}`,
 			);
 		}
 		throw new Error(
-			'BLOCKED: PR_FEEDBACK is armed for publication; only read-only inspection, the exact approved push, and complete_pr_workflow are allowed',
+			'BLOCKED: PR_FEEDBACK is armed for publication; only read-only inspection, the exact approved push, and complete_pr_workflow are allowed. To change approved content, use invalidate_pr_feedback_publication (audited invalidation; the full ladder re-runs) or abort_pr_workflow with cancel_publication for a terminal no-publish cancellation',
 		);
 	}
 	if (!state.prHeadSha && normalizedTool === 'prepare_pr_workflow_checkout') {
@@ -7356,11 +10917,60 @@ export async function enforcePrWorkflowToolBefore(
 }
 
 /** Validate the terminal PR workflow contract before removing its durable gate. */
+/**
+ * Read-only identity binding for reviewer re-entry authorization (issue
+ * #2383). Returns the exact active-session PR_REVIEW identity a one-use
+ * authorization must be issued against and re-verified under at consume time:
+ * bound head SHA, current worktree revision digest, gate generation (CAS
+ * revision), workflow instance id, and the active run id. Null when no active
+ * head-bound PR_REVIEW gate exists for the session.
+ */
+export async function readPrReviewReentryBindingContext(
+	directory: string,
+	sessionID: string,
+): Promise<{
+	prHeadSha: string;
+	revisionDigest: string;
+	generation: number;
+	workflowInstanceId?: string;
+	runId?: string;
+} | null> {
+	const state = await readPrWorkflowGateStateFromDisk(
+		directory,
+		normalizeSessionID(sessionID),
+	);
+	if (!state || state.mode !== 'PR_REVIEW' || !state.prHeadSha) return null;
+	const ctx = await createPrReviewGateContext(directory, state);
+	return {
+		prHeadSha: state.prHeadSha,
+		revisionDigest: ctx.revisionDigest,
+		generation: state.revision,
+		...(state.workflowInstanceId
+			? { workflowInstanceId: state.workflowInstanceId }
+			: {}),
+		...((state.prReviewArtifactRunId ?? state.prReviewReservedRunId)
+			? {
+					runId:
+						state.prReviewArtifactRunId ??
+						state.prReviewReservedRunId ??
+						undefined,
+				}
+			: {}),
+	};
+}
+
+// Issue #2385: the reentry authorization boundary (src/pr-review/
+// authorization.ts) reads the CURRENT workflow binding through this gate
+// reader — bound once at module init so the boundary never imports the gate
+// back. Function declarations hoist, so the reference is available here.
+bindPrReviewReentryBindingReader(readPrReviewReentryBindingContext);
+
 export async function completePrWorkflow(
 	directory: string,
 	sessionID: string,
 	expectedMode: PrWorkflowMode,
 	prHeadSha: string,
+	options?: { reportVerdict?: PrReviewReportVerdict },
 ): Promise<PrWorkflowCompletionStatus> {
 	const state = await requireBoundState(directory, sessionID, expectedMode);
 	const normalizedHead = normalizePrHeadSha(prHeadSha);
@@ -7380,27 +10990,155 @@ export async function completePrWorkflow(
 				describePrWorkflowLaneProbe(laneSettlement),
 		);
 	}
+	// Issue #2383: a NO_COVERAGE completion admits the settlement disclosure
+	// mid-completion, bumping the durable revision; the terminal clear must
+	// CAS against that post-admission revision. Undefined otherwise.
+	let terminalClearRevision: number | undefined;
 	if (expectedMode === 'PR_REVIEW') {
-		const readyState = await assertPrReviewTerminalReady(directory, sessionID);
-		if (
-			workflowIdentity(readyState) !== workflowIdentity(state) ||
-			readyState.revision !== state.revision
-		) {
+		// Issue #2383: the controller must declare its terminal verdict and the
+		// gate validates it against the settlement-derived coverage kind, so a
+		// partial or zero-coverage review can never APPROVE.
+		const verdict = options?.reportVerdict;
+		if (verdict === undefined) {
 			throw new Error(
-				'BLOCKED: PR_REVIEW state changed while checking terminal readiness; retry from current state',
+				'BLOCKED: PR_REVIEW completion requires a terminal report_verdict (APPROVE, REQUEST_CHANGES, or INCOMPLETE)',
 			);
 		}
-	} else {
-		const readyState = await assertPrFeedbackReadyToPublish(
+		const ctx = await createPrReviewGateContext(directory, state);
+		const settlement = derivePrReviewDimensionSettlement(
 			directory,
-			sessionID,
+			state,
+			ctx.revisionDigest,
 		);
+		if (settlement.kind === 'NO_COVERAGE') {
+			// NO_COVERAGE settles at completion (issue #2383): zero covered
+			// dimensions means no candidate inventory, no findings ladder, and
+			// nothing for trigger evaluation to cover — the normal
+			// terminal-ready ladder would (correctly) reject a run with
+			// nothing to validate. The run completes as a forced-INCOMPLETE
+			// operational report with explicit reasons; it never claims any
+			// code-quality approval.
+			if (settlement.liveDimensions.length > 0) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW completion has zero covered dimensions and still-live lanes for: ${settlement.liveDimensions.join(', ')}. Collect or settle them, then complete with report_verdict INCOMPLETE.`,
+				);
+			}
+			if (verdict !== 'INCOMPLETE') {
+				throw new Error(
+					`BLOCKED: PR_REVIEW NO_COVERAGE completion must report verdict INCOMPLETE; got "${verdict}". A zero-coverage report never approves and never claims a code-quality review.`,
+				);
+			}
+			// Persist the durable v2 settlement disclosure BEFORE the audit
+			// event and the terminal clear, exactly like a PARTIAL settlement
+			// (plan WS1-8): an external auditor must be able to prove the
+			// NO_COVERAGE kind from the immutable artifact, not only from the
+			// audit line. A run with zero artifacts may have no reserved run
+			// id, so one is generated in that case.
+			const noCoverageRunId =
+				state.prReviewArtifactRunId ??
+				state.prReviewReservedRunId ??
+				generatePrReviewRunId();
+			const admittedState = await admitPrReviewPartialBaseCoverage(
+				directory,
+				sessionID,
+				noCoverageRunId,
+				settlement.unresolvedDimensions.map((entry) => entry.dimension),
+			);
+			// The admission bumped the durable revision; the terminal clear below
+			// must CAS against the post-admission revision. If that clear itself
+			// fails, the gate keeps the admitted (immutable) disclosure and a
+			// retry re-admission throws — a deliberate fail-closed wedge; the
+			// operator re-reads state and recovers via armed recovery rather
+			// than silently re-crediting a zero-coverage settlement.
+			terminalClearRevision = admittedState.revision;
+			try {
+				appendCoreEventSync(directory, {
+					type: 'pr_review_no_coverage_terminal',
+					timestamp: isoNow(),
+					sessionID: state.sessionID,
+					prHeadSha: state.prHeadSha,
+					revisionDigest: ctx.revisionDigest,
+					coveredDimensions: settlement.coveredDimensions.length,
+					unresolvedDimensions: settlement.unresolvedDimensions.map(
+						(entry) => `${entry.dimension}:${entry.terminalState}`,
+					),
+					disclosureRunId: noCoverageRunId,
+					reportVerdict: verdict,
+				});
+			} catch {
+				// Non-fatal audit trail (same discipline as abort).
+			}
+			// Fall through to the shared terminal clear below.
+		} else {
+			// Fail fast on an illegal verdict BEFORE the expensive terminal
+			// ladder, then re-validate against the post-ladder settlement in
+			// case state changed underneath the checks.
+			const preAllowed = allowedPrReviewReportVerdicts(settlement.kind);
+			if (!preAllowed.includes(verdict)) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW ${settlement.kind} completion allows report_verdict ${preAllowed.join(' | ')}; got "${verdict}". Partial coverage never approves and never claims a full review.`,
+				);
+			}
+			const ready = await assertPrReviewTerminalReady(directory, sessionID);
+			const readyState = ready.state;
+			if (
+				workflowIdentity(readyState) !== workflowIdentity(state) ||
+				readyState.revision !== state.revision
+			) {
+				throw new Error(
+					'BLOCKED: PR_REVIEW state changed while checking terminal readiness; retry from current state',
+				);
+			}
+			const allowed = allowedPrReviewReportVerdicts(ready.settlement.kind);
+			if (!allowed.includes(verdict)) {
+				throw new Error(
+					`BLOCKED: PR_REVIEW ${ready.settlement.kind} completion allows report_verdict ${allowed.join(' | ')}; got "${verdict}". Partial coverage never approves and never claims a full review.`,
+				);
+			}
+		}
+	} else {
+		// Issue #2108: legacy armed records migrate (conservatively) before this
+		// branch decides arming vs completion, and any in-flight push attempt
+		// is reconciled (`uncertain`) before the window is judged.
+		await ensurePublicationGenerationCurrent(directory, sessionID);
+		let readyState = await assertPrFeedbackReadyToPublish(directory, sessionID);
+		readyState =
+			(await reconcileForeignInFlightAttempt(directory, sessionID)) ??
+			readyState;
 		const currentDigest = await currentPrFeedbackRevisionDigest(
 			directory,
 			readyState,
 		);
 		const armed = readyState.prFeedbackReadyToPublish;
 		if (!armed) {
+			const previousActive = readyState.prFeedbackPublication?.active;
+			if (previousActive?.state === 'published') {
+				// Crash-recovery idempotence: the generation was already marked
+				// published but the gate clear never landed. Re-verify the remote
+				// and finish the terminal clear instead of arming N+1 for
+				// already-published content.
+				const remoteHeadAtPublish =
+					await _test_exports.resolveExactRemoteBranchHeadAsync(
+						directory,
+						previousActive.remoteName,
+						previousActive.remoteBranchRef,
+					);
+				if (
+					remoteHeadAtPublish?.toLowerCase() !==
+					previousActive.localHead.toLowerCase()
+				) {
+					throw new Error(
+						`BLOCKED: PR_FEEDBACK generation ${previousActive.generation} is marked published but the remote verification no longer holds; inspect pr_workflow_status`,
+					);
+				}
+				await _test_exports.beforeTerminalClear?.();
+				await clearPrWorkflowGateState(
+					directory,
+					sessionID,
+					readyState.revision,
+				);
+				return 'completed';
+			}
 			const localHead = (
 				await _test_exports.resolveCurrentGitHeadAsync(directory)
 			)?.trim();
@@ -7435,7 +11173,7 @@ export async function completePrWorkflow(
 						'BLOCKED: PR_FEEDBACK zero-descendant completion requires a clean index and working tree',
 					);
 				}
-				const classifications = readSettledFeedbackClassifications(
+				const classifications = readLegacySettledFeedbackClassifications(
 					directory,
 					readyState,
 				);
@@ -7453,20 +11191,25 @@ export async function completePrWorkflow(
 					);
 				}
 				try {
-					const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-					await fsp.appendFile(
-						eventsPath,
-						`${JSON.stringify({
-							type: 'pr_feedback_verified_no_change',
-							timestamp: isoNow(),
-							sessionID: state.sessionID,
-							prHeadSha: state.prHeadSha,
-							items: inventory.length,
-						})}\n`,
-						'utf-8',
-					);
+					appendCoreEventSync(directory, {
+						type: 'pr_feedback_verified_no_change',
+						timestamp: isoNow(),
+						sessionID: state.sessionID,
+						prHeadSha: state.prHeadSha,
+						items: inventory.length,
+					});
 				} catch {
 					// Non-fatal audit trail (same discipline as abort).
+				}
+				if (previousActive && previousActive.state === 'invalidated') {
+					// Issue #2108: the invalidated generation ends without
+					// publication — record the authoritative terminal summary.
+					appendPublicationEvent(directory, {
+						type: 'pr_feedback_publication_cancelled',
+						sessionID: state.sessionID,
+						generation: previousActive.generation,
+						reason: 'verified-no-change-terminal',
+					});
 				}
 				await clearPrWorkflowGateState(
 					directory,
@@ -7505,19 +11248,120 @@ export async function completePrWorkflow(
 					'BLOCKED: PR_FEEDBACK cannot arm publication without a current branch bound to an exact remote name, remote branch ref, and remote-tracking ref',
 				);
 			}
+			// Issue #2108: capture the FULL generation identity before arming.
+			// Every component must resolve — an unresolvable identity refuses to
+			// arm (fail closed), never arms partially.
+			if (previousActive && previousActive.state !== 'invalidated') {
+				throw new Error(
+					`BLOCKED: PR_FEEDBACK cannot arm a new publication generation while generation ${previousActive.generation} is ${previousActive.state}`,
+				);
+			}
+			const workspaceIdentity = canonicalWorkspaceIdentity(directory);
+			if (!workspaceIdentity) {
+				throw new Error(
+					'BLOCKED: PR_FEEDBACK cannot arm publication without a canonical workspace identity',
+				);
+			}
+			const localHeadRef =
+				await _test_exports.resolveCurrentLocalHeadRefAsync(directory);
+			if (!localHeadRef) {
+				throw new Error(
+					'BLOCKED: PR_FEEDBACK cannot arm publication without the current branch ref (HEAD appears detached)',
+				);
+			}
+			const remoteUrlIdentity =
+				await _test_exports.resolveRemoteUrlIdentityAsync(
+					directory,
+					upstreamTarget.remoteName,
+				);
+			if (!remoteUrlIdentity) {
+				throw new Error(
+					`BLOCKED: PR_FEEDBACK cannot arm publication without a credential-redacted remote URL identity for "${upstreamTarget.remoteName}"`,
+				);
+			}
+			const evidenceJoin = buildPublicationEvidenceJoin(
+				readyState,
+				currentDigest,
+			);
+			if (!evidenceJoin) {
+				throw new Error(
+					'BLOCKED: PR_FEEDBACK cannot arm publication without the exact settled receipt set (Stage A plus one batch per ordered phase)',
+				);
+			}
+			const armedAt = isoNow();
+			const generation: PrFeedbackPublicationGeneration = {
+				schemaVersion: PUBLICATION_SCHEMA_VERSION,
+				generation: (previousActive?.generation ?? 0) + 1,
+				state: 'armed',
+				workspaceIdentity,
+				sessionID: readyState.sessionID,
+				prTargetUrl: readyState.prFeedbackTargetUrl,
+				intakeHeadSha: readyState.prHeadSha ?? 'unknown',
+				localHeadRef,
+				localHead,
+				remoteName: upstreamTarget.remoteName,
+				remoteUrlIdentity,
+				remoteBranchRef: upstreamTarget.remoteBranchRef,
+				remoteRef: upstreamTarget.remoteTrackingRef,
+				revisionDigest: currentDigest,
+				evidence: evidenceJoin,
+				createdAt: armedAt,
+				armedAt,
+			};
 			await persistState(directory, {
 				...readyState,
-				updatedAt: isoNow(),
-				prFeedbackReadyToPublish: {
-					revisionDigest: currentDigest,
-					localHead,
-					remoteName: upstreamTarget.remoteName,
-					remoteBranchRef: upstreamTarget.remoteBranchRef,
-					remoteRef: upstreamTarget.remoteTrackingRef,
-					validatedAt: isoNow(),
-				},
+				updatedAt: armedAt,
+				// Derived rollback mirror — present iff armed/push_in_flight, so a
+				// rolled-back binary keeps enforcing the armed window.
+				prFeedbackReadyToPublish: deriveReadyToPublishMirror(generation),
+				prFeedbackPublication: nextPublicationContainer(
+					readyState.prFeedbackPublication,
+					generation,
+					previousActive
+						? [
+								{
+									...previousActive,
+									supersededByGeneration: generation.generation,
+								},
+							]
+						: [],
+					[],
+				),
+			});
+			appendPublicationEvent(directory, {
+				type: 'pr_feedback_publication_armed',
+				sessionID: readyState.sessionID,
+				generation: generation.generation,
+				supersedes: previousActive?.generation ?? null,
+				revisionDigest: currentDigest,
+				localHead,
+				remoteName: upstreamTarget.remoteName,
+				remoteUrlIdentity,
+				remoteBranchRef: upstreamTarget.remoteBranchRef,
 			});
 			return 'ready-to-publish';
+		}
+		// Armed completion: the full identity check (digest, HEAD, worktree,
+		// upstream triple, remote URL, workspace identity, evidence join) runs
+		// in assertPrFeedbackPublicationArmed, which durably invalidates the
+		// generation on proven drift before throwing.
+		const armedState = await assertPrFeedbackPublicationArmed(
+			directory,
+			sessionID,
+		);
+		const active = armedState.prFeedbackPublication?.active;
+		if (!active) {
+			throw new Error(
+				'BLOCKED: PR_FEEDBACK publication is not armed; call complete_pr_workflow once after every ordered gate passes',
+			);
+		}
+		const attemptsForGeneration = (
+			armedState.prFeedbackPublication?.attempts ?? []
+		).filter((attempt) => attempt.generation === active.generation);
+		if (!attemptsForGeneration.some((attempt) => attempt.result)) {
+			throw new Error(
+				`BLOCKED: PR_FEEDBACK completion requires the exact approved push to have been admitted and observed for generation ${active.generation}; run the exact push first: ${expectedBoundPushCommand(armed)}`,
+			);
 		}
 		if (armed.revisionDigest !== currentDigest) {
 			throw new Error(
@@ -7548,13 +11392,54 @@ export async function completePrWorkflow(
 				`BLOCKED: PR_FEEDBACK completion requires approved commit ${armed.localHead} at current Git HEAD and intended remote-tracking ref ${armed.remoteRef} at that exact commit`,
 			);
 		}
+		// Verified publication: mark the generation terminal (`published`) with
+		// an authoritative summary event, then run the existing terminal clear.
+		const publishedAt = isoNow();
+		const published: PrFeedbackPublicationGeneration = {
+			...active,
+			state: 'published',
+			publishedAt,
+		};
+		const publishState: PrWorkflowGateState = {
+			...armedState,
+			updatedAt: publishedAt,
+			prFeedbackReadyToPublish: undefined,
+			prFeedbackPublication: nextPublicationContainer(
+				armedState.prFeedbackPublication,
+				published,
+			),
+		};
+		await persistState(directory, publishState);
+		appendPublicationEvent(directory, {
+			type: 'pr_feedback_published',
+			sessionID: armedState.sessionID,
+			generation: published.generation,
+			localHead: published.localHead,
+			remoteName: published.remoteName,
+			remoteBranchRef: published.remoteBranchRef,
+			remoteUrlIdentity: published.remoteUrlIdentity ?? null,
+			revisionDigest: published.revisionDigest,
+			attempts: attemptsForGeneration.length,
+		});
+		await _test_exports.beforeTerminalClear?.();
+		await clearPrWorkflowGateState(directory, sessionID, publishState.revision);
+		return 'completed';
 	}
 	await _test_exports.beforeTerminalClear?.();
-	await clearPrWorkflowGateState(directory, sessionID, state.revision);
+	await clearPrWorkflowGateState(
+		directory,
+		sessionID,
+		terminalClearRevision ?? state.revision,
+	);
 	return 'completed';
 }
 
 export const _test_exports = {
+	// Issue #2382: the text-signature classifier was replaced by the typed
+	// circuit-signal classifier (durable structured evidence only). Exposed so
+	// the provider-terminal / ignored-reason classification can be asserted
+	// directly.
+	classifyPrReviewCircuitSignal,
 	minimumConsolidatedLaneCover,
 	analyzePrReviewBatchRecordIntegrity,
 	MAX_COVER_UNIVERSE_BITS,
@@ -7564,22 +11449,20 @@ export const _test_exports = {
 	extractCandidateIds,
 	parseCanonicalCandidateRows,
 	resolvePrReviewRowFamily,
-	// Exposed to pin the verdict-row pipe tolerance's fidelity boundary: the
-	// capped merge is content-preserving only when the extra pipes sit in the
-	// trailing (free-text) field.
-	pipeFieldsCapped,
-	// Exposed so the digest-stability test can hash the same canonical field
-	// view the critic-claim binding hashes.
-	reviewerVerdictRowDigest,
+	boundPublicationDiagnostic,
 	workflowGateStateRelativePath,
 	workflowGateStateLockRelativePath,
 	workflowCheckoutMutationLockRelativePath,
 	withPrWorkflowCheckoutMutationLock,
 	resetTrackedStateCache: () => {
-		trackedStatesByProjectSession.clear();
-		pendingStateMutationsByProjectSession.clear();
-		pendingCheckoutMutationsByProject.clear();
-		completedCheckoutLockOwners.clear();
+		// Issue #2385: the four persistence caches/queues now live in
+		// src/pr-review/persistence.ts; reset them through its API.
+		resetPrReviewPersistenceCaches();
+		// Issue #2382 review (PRR-005): the malformed-circuit diagnostic dedup is
+		// process-level by design in production, but a shared test process must
+		// not carry dedup state between suites — otherwise suite order changes
+		// which diagnostics fire.
+		malformedCircuitDiagnosticsSeen.clear();
 		_test_exports.beforeTerminalClear = undefined;
 		_test_exports.beforeAbortClear = undefined;
 		_test_exports.beforePrFeedbackTransitionLock = undefined;
@@ -7592,8 +11475,9 @@ export const _test_exports = {
 		_test_exports.beforeSafeDirectoryCreate = undefined;
 		_test_exports.beforeAtomicTempWrite = undefined;
 		_test_exports.beforeAtomicRename = undefined;
-		_test_exports.openCheckoutLock = openCheckoutLockFile;
-		_test_exports.removeCheckoutLock = removeCheckoutLockFile;
+		_test_exports.openCheckoutLock = defaultPersistenceHooks.openCheckoutLock;
+		_test_exports.removeCheckoutLock =
+			defaultPersistenceHooks.removeCheckoutLock;
 		_test_exports.checkoutMutationActionTimeoutMs =
 			CHECKOUT_MUTATION_ACTION_TIMEOUT_MS;
 		_test_exports.classifyPrWorkflowGitStateAsync = classifyPrWorkflowGitState;
@@ -7605,6 +11489,8 @@ export const _test_exports = {
 		_test_exports.getSessionOps = defaultGetSessionOps;
 		_test_exports.laneLivenessProbeTimeoutMs =
 			PR_WORKFLOW_LANE_LIVENESS_PROBE_TIMEOUT_MS;
+		_test_exports.pendingLaneLivenessThresholdMs =
+			PR_WORKFLOW_PENDING_LIVENESS_THRESHOLD_MS;
 	},
 	beforeTerminalClear: undefined as (() => Promise<void>) | undefined,
 	/**
@@ -7631,8 +11517,8 @@ export const _test_exports = {
 		| undefined,
 	beforeAtomicTempWrite: undefined as (() => Promise<void>) | undefined,
 	beforeAtomicRename: undefined as (() => Promise<void>) | undefined,
-	openCheckoutLock: openCheckoutLockFile,
-	removeCheckoutLock: removeCheckoutLockFile,
+	openCheckoutLock: defaultPersistenceHooks.openCheckoutLock,
+	removeCheckoutLock: defaultPersistenceHooks.removeCheckoutLock,
 	checkoutMutationActionTimeoutMs: CHECKOUT_MUTATION_ACTION_TIMEOUT_MS,
 	classifyPrWorkflowGitStateAsync: classifyPrWorkflowGitState,
 	/**
@@ -7661,11 +11547,43 @@ export const _test_exports = {
 	 * `checkoutMutationActionTimeoutMs` above.
 	 */
 	laneLivenessProbeTimeoutMs: PR_WORKFLOW_LANE_LIVENESS_PROBE_TIMEOUT_MS,
+	/**
+	 * Pending-liveness advisory threshold (issue #2280 Part B), seam-read at
+	 * call time for the same clock reason — a test drives the boundary by
+	 * shortening the threshold, not by waiting minutes.
+	 */
+	pendingLaneLivenessThresholdMs: PR_WORKFLOW_PENDING_LIVENESS_THRESHOLD_MS,
+	/**
+	 * Issue #2381: exposed so the staged-resilience DEFAULT can be pinned
+	 * directly. This resolution path is reached whenever a gate state carries no
+	 * recorded policy and no policy is supplied, and it previously hardcoded
+	 * `enabled: true`; the default flip is only real if this agrees with
+	 * `DEFAULT_PR_REVIEW_RESILIENCE_CONFIG`. Pure functions of their arguments,
+	 * so `_test_exports` is the right seam (no `mock.module` needed).
+	 */
+	effectivePrReviewResiliencePolicy,
+	snapshotPrReviewResiliencePolicy,
 	resolveCurrentGitHead,
 	resolveCurrentGitHeadAsync,
 	resolveCurrentUpstreamPushTarget,
 	resolveCurrentUpstreamPushTargetAsync,
 	resolveCurrentUpstreamRemoteRef,
+	resolveCurrentLocalHeadRefAsync,
+	resolveRemoteUrlIdentity,
+	resolveRemoteUrlIdentityAsync,
+	// Issue #2108 publication-generation machinery.
+	parseExactBoundPushIntent,
+	admitPrFeedbackPushAttempt,
+	recordPrFeedbackPushAttemptResult,
+	reconcileForeignInFlightAttempt,
+	ensurePublicationGenerationCurrent,
+	invalidatePublicationGeneration,
+	invalidatePrFeedbackPublication,
+	cancelPrFeedbackPublication,
+	buildPublicationEvidenceJoin,
+	nextPublicationContainer,
+	supersedeLivePublicationInPendingState,
+	describePrWorkflowPublicationSection,
 	resolveExactRemoteBranchHead,
 	resolveExactRemoteBranchHeadAsync,
 	resolveCommitCountSince,
@@ -7766,7 +11684,7 @@ export const _test_exports = {
 		const ctx = await createPrReviewGateContext(directory, state);
 		return derivePrReviewCandidateInventory(directory, state, ctx);
 	},
-	isProcessAlive,
+	isProcessAlive: defaultPersistenceHooks.isProcessAlive,
 	// Exposed for the `-c` config-injection regression test. The publication
 	// path that calls this needs a fully-armed ready-to-publish state, so the
 	// classifier is not otherwise reachable from a focused unit test.
@@ -7774,6 +11692,58 @@ export const _test_exports = {
 	rename: fsp.rename,
 	nowMs: () => Date.now(),
 };
+
+// Issue #2385: the transcript-conversion test surface (the verdict-row pipe
+// tolerance's fidelity boundary, the production indexing path for legacy
+// overflow recovery, the digest-stability view the critic-claim binding hashes,
+// and the exact verdict-row analysis / item composition parsers used by the
+// assignment-boundary regression) now lives in
+// src/pr-review/legacy-transcript-adapter.ts. The guardrail scanner
+// (src/pr-review/guardrails.ts) allows those identifiers only in that module,
+// so the historical `_test_exports` properties are re-exposed here by spreading
+// the adapter's surface — same property names, same bindings, no gate-side
+// conversion identifiers.
+Object.assign(_test_exports, legacyTranscriptAdapterTestSurface);
+
+// Issue #2385: bind the persistence boundary to this gate's seams and full
+// state codec. Properties are read at CALL time through the bound reference,
+// so test-time mutation of `_test_exports.<prop>` and `resetTrackedStateCache`
+// remain fully visible inside src/pr-review/persistence.ts.
+bindPrReviewPersistenceHooks(_test_exports);
+bindPrReviewStateCodec<PrWorkflowGateState>({
+	safeParse: (data) => PrWorkflowGateStateSchema.safeParse(data),
+	parse: (data) => PrWorkflowGateStateSchema.parse(data),
+});
+
+// Issue #2385: bind the completion boundary's gate-owned derivation helpers
+// (src/pr-review/completion.ts reads them through this binding and never
+// imports the gate back). Function declarations hoist, so the references are
+// available here.
+bindPrReviewCompletionHelpers({
+	createPrReviewGateContext,
+	requireBoundState,
+	readPrWorkflowGateStateFromDisk,
+	readBoundedSwarmRegularFile,
+	successfulObligationsFromExactBatch,
+	recordsPassingBatchIntegrity,
+	validatePrReviewDiscoveryLaneCompletion,
+	validateExactStructuredReceiptCoverage,
+});
+
+// Issue #2385: bind the legacy transcript adapter's gate-owned composition
+// helpers (src/pr-review/legacy-transcript-adapter.ts reads them through this
+// binding and never imports the gate back). Function declarations hoist, so
+// the references are available here.
+bindPrReviewTranscriptAdapterHelpers({
+	derivePrReviewCandidateInventory,
+	derivePrReviewCriticInventory,
+	authoritativeReviewerClaims,
+	reviewerSubagentSessionIds,
+	prReviewPhaseWindow,
+	batchMayContributeClaims,
+	recordsPassingBatchIntegrity,
+	loadArtifactPassingLaneIntegrity,
+});
 
 /**
  * Issue #1931: surface the activation path so callers don't go hunting for a
@@ -7856,6 +11826,11 @@ function normalizeWorkflowLanes(lanes: readonly PrWorkflowLaneSpec[]): Array<{
 			);
 		}
 		if (reviewItemIds) {
+			if (reviewItemIds.length > MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS) {
+				throw new Error(
+					`BLOCKED: PR workflow review_item_ids may not exceed ${MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS} entries`,
+				);
+			}
 			assertNoDuplicates(reviewItemIds, 'review item ids within one lane');
 		}
 		const ownedWorkflowLanes = lane.ownedWorkflowLanes?.map((owned: string) =>
@@ -7976,6 +11951,7 @@ const PR_REVIEW_CONTROLLER_TOOLS = new Set([
 ]);
 
 const PR_FEEDBACK_CONTROLLER_TOOLS = new Set([
+	'invalidate_pr_feedback_publication',
 	'prepare_pr_feedback_scope',
 	'run_pr_feedback_stage_a',
 ]);
@@ -8610,24 +12586,6 @@ function expectedBoundPushCommand(
 		: '(invalid bound remote-tracking ref; restart the workflow)';
 }
 
-/** Permit one non-force, single-ref push of only the content-bound commit. */
-function isSafeExactBoundPush(
-	command: string,
-	armed: PrFeedbackReadyToPublishRecord,
-): boolean {
-	if (hasUnsafeShellControlSyntax(command)) return false;
-	const target = boundPushTarget(armed);
-	if (!target) return false;
-	const match = command
-		.trim()
-		.match(/^git\s+push\s+([^\s;&|<>`]+)\s+([^\s;&|<>`]+)\s*$/i);
-	if (!match) return false;
-	return (
-		match[1] === target.remote &&
-		match[2] === `${armed.localHead}:refs/heads/${target.branch}`
-	);
-}
-
 function isAllowedPrWorkflowGitIntake(
 	gitArgs: string,
 	options: {
@@ -9060,6 +13018,12 @@ interface PrReviewGateContext {
 	reviewer?: PrReviewPhaseComposition;
 	critic?: PrReviewPhaseComposition;
 	candidateInventory?: string[];
+	/**
+	 * candidate_id -> the severity its `[CANDIDATE]` row declared. Populated
+	 * as a by-product of deriving the inventory, so it is exactly as
+	 * authoritative and as scoped as the inventory itself (issue #2320).
+	 */
+	candidateSeverities?: Map<string, CandidateSeverity>;
 }
 
 /**
@@ -9122,26 +13086,34 @@ function sameStringSet(
 	);
 }
 
-function assertExactStringSet(
+/** Require a duplicate-free, non-empty subset of the mechanically derived IDs. */
+function assertStringSetSubset(
 	actual: readonly string[],
 	expected: readonly string[],
 	label: string,
 ): void {
 	const actualSet = new Set(actual);
 	const expectedSet = new Set(expected);
-	const missing = [...expectedSet].filter((value) => !actualSet.has(value));
 	const extra = [...actualSet].filter((value) => !expectedSet.has(value));
 	if (
+		actual.length === 0 ||
 		actual.length !== actualSet.size ||
-		actualSet.size !== expectedSet.size ||
-		missing.length > 0 ||
 		extra.length > 0
 	) {
 		throw new Error(
-			`BLOCKED: ${label} must exactly cover the mechanically derived inventory; missing: ${missing.join(', ') || '(none)'}; extra: ${extra.join(', ') || '(none)'}`,
+			`BLOCKED: ${label} must be a non-empty subset of the mechanically derived inventory; extra: ${extra.join(', ') || '(none)'}`,
 		);
 	}
 }
+
+/**
+ * The single synthetic inventory id used when discovery found no candidates at
+ * all. Its reviewer row is mandated to carry `final_severity: NONE`
+ * (swarm-pr-review SKILL.md), so `NONE` is the CORRECT severity for it at every
+ * boundary — including `post_explorer`, which has no `[CANDIDATE]` row to
+ * compare against because there are none.
+ */
+const PR_REVIEW_CLEAN_SENTINEL_ID = 'CLEAN-REVIEW';
 
 function derivePrReviewCandidateInventory(
 	directory: string,
@@ -9225,11 +13197,13 @@ function derivePrReviewCandidateInventory(
 					? lane.ownedWorkflowLanes
 					: [lane.workflowLane];
 				if (!laneIsInClass(ownedDimensions.length)) continue;
-				if (!ownedDimensions.every((dimension) => successful.has(dimension)))
-					continue;
+				const creditedDimensions = ownedDimensions.filter((dimension) =>
+					successful.has(dimension),
+				);
+				if (creditedDimensions.length === 0) continue;
 				const key = `${batch.batchId}\0${lane.laneId}`;
 				baseSourceFullOwnershipCount.set(key, ownedDimensions.length);
-				for (const dimension of ownedDimensions) {
+				for (const dimension of creditedDimensions) {
 					if (!baseDimensionSources.has(dimension)) {
 						baseDimensionSources.set(dimension, {
 							batchId: batch.batchId,
@@ -9271,30 +13245,42 @@ function derivePrReviewCandidateInventory(
 		});
 	}
 	const selectedCouncilLanes = new Set<string>();
-	for (const batch of [...(state.prReviewValidationBatches ?? [])].reverse()) {
-		if (batch.phase !== 'council') continue;
-		const successful = successfulObligationsFromExactBatch(
-			directory,
-			state,
-			batch.batchId,
-			batch.lanes,
-			'swarm-pr-review:council',
-			batch.validatedAt,
-			true,
-			new Set(),
-			ctx.revisionDigest,
-		);
-		for (const lane of batch.lanes) {
-			if (
-				successful.has(lane.workflowLane) &&
-				!selectedCouncilLanes.has(lane.workflowLane)
-			) {
-				sources.push({
-					batchId: batch.batchId,
-					laneId: lane.laneId,
-					mode: 'swarm-pr-review:council',
-				});
-				selectedCouncilLanes.add(lane.workflowLane);
+	// Council batches are unrecordable before the trigger evaluation completes
+	// (`recordPrReviewValidationBatch` refuses every validation phase without a
+	// receipt), so under normal flow this loop only ever runs with the receipt
+	// present. Gating it on the same field as the micro-source block below keeps
+	// the base-only `post_explorer` checkpoint (issue #2280 Part A) STRUCTURALLY
+	// base-only: a reconstructed or hand-modified state that carries council
+	// batches without a receipt must never widen the inventory an early
+	// checkpoint is validated against.
+	if (state.prReviewTriggerEvalPath) {
+		for (const batch of [
+			...(state.prReviewValidationBatches ?? []),
+		].reverse()) {
+			if (batch.phase !== 'council') continue;
+			const successful = successfulObligationsFromExactBatch(
+				directory,
+				state,
+				batch.batchId,
+				batch.lanes,
+				'swarm-pr-review:council',
+				batch.validatedAt,
+				true,
+				new Set(),
+				ctx.revisionDigest,
+			);
+			for (const lane of batch.lanes) {
+				if (
+					successful.has(lane.workflowLane) &&
+					!selectedCouncilLanes.has(lane.workflowLane)
+				) {
+					sources.push({
+						batchId: batch.batchId,
+						laneId: lane.laneId,
+						mode: 'swarm-pr-review:council',
+					});
+					selectedCouncilLanes.add(lane.workflowLane);
+				}
 			}
 		}
 	}
@@ -9306,6 +13292,13 @@ function derivePrReviewCandidateInventory(
 		);
 		let triggerArtifact: unknown;
 		try {
+			const triggerStat = statSync(triggerPath);
+			if (
+				!triggerStat.isFile() ||
+				triggerStat.size > PR_REVIEW_TRIGGER_RECEIPT_MAX_BYTES
+			) {
+				throw new Error('trigger evaluation artifact exceeds its read bound');
+			}
 			triggerArtifact = JSON.parse(readFileSync(triggerPath, 'utf-8'));
 		} catch {
 			throw new Error(
@@ -9342,6 +13335,7 @@ function derivePrReviewCandidateInventory(
 		}
 	}
 	const candidateIds: string[] = [];
+	const candidateSeverities = new Map<string, CandidateSeverity>();
 	// A consolidated lane can be the provenance source for several sources
 	// (one base lane owning several dimensions collapses to one source
 	// already, but micro trigger rows are per-family: several rows may cite
@@ -9368,6 +13362,30 @@ function derivePrReviewCandidateInventory(
 				record.workspace?.gitHead !== state.prHeadSha
 			)
 				continue;
+			const structured = record.result?.prReviewResultReceipt;
+			if (structured) {
+				const credited = source.creditedLanes?.length
+					? structured.envelope.creditedLanes.filter((lane) =>
+							source.creditedLanes?.includes(lane),
+						)
+					: structured.envelope.creditedLanes;
+				if (source.workflowLane && !credited.includes(source.workflowLane)) {
+					continue;
+				}
+				resolvedArtifact = true;
+				const laneKey = `${source.batchId}\0${source.laneId}`;
+				if (!extractedLaneKeys.has(laneKey)) {
+					extractedLaneKeys.add(laneKey);
+					for (const finding of structured.envelope.findings) {
+						if (!credited.includes(finding.workflowLane)) continue;
+						candidateIds.push(finding.id);
+						if (!candidateSeverities.has(finding.id)) {
+							candidateSeverities.set(finding.id, finding.severity);
+						}
+					}
+				}
+				continue;
+			}
 			const ref = record.result?.outputRef?.trim();
 			const artifact = ref
 				? readLaneOutput(directory, ref)?.artifact
@@ -9406,13 +13424,20 @@ function derivePrReviewCandidateInventory(
 			const laneKey = `${source.batchId}\0${source.laneId}`;
 			if (!extractedLaneKeys.has(laneKey)) {
 				extractedLaneKeys.add(laneKey);
-				candidateIds.push(
-					...extractCandidateIds(
-						artifact.text,
-						resolvePrReviewRowFamily(source.workflowLane, source.mode),
-						source.creditedLanes,
-					),
+				const extracted = extractCandidateRows(
+					artifact.text,
+					resolvePrReviewRowFamily(source.workflowLane, source.mode),
+					source.creditedLanes,
 				);
+				for (const row of extracted) {
+					candidateIds.push(row.candidateId);
+					// Duplicate ids are rejected by assertNoDuplicates below, so a
+					// first-write here is also the only write; recording it
+					// unconditionally would mask that check rather than defer to it.
+					if (row.severity && !candidateSeverities.has(row.candidateId)) {
+						candidateSeverities.set(row.candidateId, row.severity);
+					}
+				}
 			}
 		}
 		if (source.mode === 'swarm-pr-review:micro' && !resolvedArtifact) {
@@ -9428,8 +13453,11 @@ function derivePrReviewCandidateInventory(
 		}
 	}
 	assertNoDuplicates(candidateIds, 'PR_REVIEW discovery candidate ids');
+	ctx.candidateSeverities = candidateSeverities;
 	ctx.candidateInventory =
-		candidateIds.length > 0 ? candidateIds.sort() : ['CLEAN-REVIEW'];
+		candidateIds.length > 0
+			? candidateIds.sort()
+			: [PR_REVIEW_CLEAN_SENTINEL_ID];
 	return ctx.candidateInventory;
 }
 
@@ -9444,6 +13472,13 @@ function derivePrReviewCandidateInventory(
 interface CanonicalCandidateArtifactRow {
 	candidateId: string;
 	workflowLane: string;
+	/**
+	 * The row's declared severity, already validated against
+	 * `CANDIDATE_SEVERITIES` by `analyzeCandidateFields` (so never `NONE`).
+	 * Carried so the `post_explorer` findings boundary can compare a record's
+	 * severity against the candidate row that produced it (issue #2320).
+	 */
+	severity: CandidateSeverity | null;
 	evidence: string;
 	lineNumber: number;
 }
@@ -9539,6 +13574,9 @@ function parseCanonicalCandidateRows(
 		rows.push({
 			candidateId: analysis.candidateId,
 			workflowLane: analysis.workflowLane,
+			severity: isCandidateSeverity(analysis.values.severity)
+				? analysis.values.severity
+				: null,
 			evidence: candidateFields.slice(2).join('\0'),
 			lineNumber: index + 1,
 		});
@@ -9546,55 +13584,67 @@ function parseCanonicalCandidateRows(
 	return { rows, issues };
 }
 
+function extractCandidateRows(
+	text: string,
+	fallbackFamily: RowFormatFamily,
+	scopeToLanes?: readonly string[],
+): CanonicalCandidateArtifactRow[] {
+	const inScope = (lane: string | undefined) =>
+		!scopeToLanes || (lane !== undefined && scopeToLanes.includes(lane));
+	return parseCanonicalCandidateRows(text, fallbackFamily).rows.filter((row) =>
+		inScope(row.workflowLane),
+	);
+}
+
 function extractCandidateIds(
 	text: string,
 	fallbackFamily: RowFormatFamily,
 	scopeToLanes?: readonly string[],
 ): string[] {
-	const inScope = (lane: string | undefined) =>
-		!scopeToLanes || (lane !== undefined && scopeToLanes.includes(lane));
-	return parseCanonicalCandidateRows(text, fallbackFamily)
-		.rows.filter((row) => inScope(row.workflowLane))
-		.map((row) => row.candidateId);
+	return extractCandidateRows(text, fallbackFamily, scopeToLanes).map(
+		(row) => row.candidateId,
+	);
 }
 
-type PrReviewComposablePhase = 'reviewer' | 'critic';
-
-/** One item's admitted verdict plus the lane provenance that admitted it. */
-interface PrReviewItemClaim {
-	batchId: string;
-	laneId: string;
-	workflowLane: string;
-	/** Reviewer classification, or critic status. */
-	classification: string;
-	severity: string;
-	/**
-	 * sha256 of the full canonical `[REVIEWED]` row this claim was parsed from.
-	 * Reviewer claims only — this is what a critic batch binds to per item.
-	 */
-	rowDigest?: string;
+/**
+ * candidate_id -> declared severity, for the SAME authoritative rows the
+ * candidate inventory is derived from. Deriving the inventory populates this as
+ * a by-product, so the two can never disagree about which rows are credited.
+ *
+ * Every non-sentinel inventory id is guaranteed present: an id and its severity
+ * are appended from the same validated row, and a lane that cannot contribute a
+ * row contributes no id either. The `CLEAN-REVIEW` sentinel is the one id with
+ * no `[CANDIDATE]` row, and the gate handles it explicitly rather than through a
+ * lenient fallback (issue #2320).
+ */
+function derivePrReviewCandidateSeverities(
+	directory: string,
+	state: PrWorkflowGateState,
+	ctx: PrReviewGateContext,
+): Map<string, CandidateSeverity> {
+	if (!ctx.candidateSeverities) {
+		derivePrReviewCandidateInventory(directory, state, ctx);
+	}
+	if (!ctx.candidateSeverities) {
+		// Fail closed. `derivePrReviewCandidateInventory` early-returns on a
+		// memoized `ctx.candidateInventory` WITHOUT populating the severity map, so
+		// a caller threading in a context that already derived the inventory would
+		// otherwise silently receive an empty map — every record would fall through
+		// to the no-authority branch and exact comparison would disappear with no
+		// test failing. An empty map is never a legitimate result here.
+		throw new Error(
+			'BLOCKED: PR_REVIEW candidate severity authority is unavailable for this gate context',
+		);
+	}
+	return ctx.candidateSeverities;
 }
 
-interface PrReviewPhaseComposition {
-	/** Item id -> winning claim. Most recent successful lane per item wins. */
-	claims: Map<string, PrReviewItemClaim>;
-	requiredInventory: string[];
-	unclaimed: string[];
-	contributingBatchIds: string[];
-	diagnostics: string[];
-}
+// Issue #2385: `PrReviewComposablePhase`, `PrReviewItemClaim`,
+// `PrReviewPhaseComposition`, and `appendCompositionDiagnostic` moved to
+// src/pr-review/legacy-transcript-adapter.ts (imported above).
 
-const MAX_COMPOSITION_DIAGNOSTICS = 16;
 /** Item ids named in one BLOCKED message before it degrades to a count. */
 const MAX_UNCLAIMED_ITEMS_IN_MESSAGE = 50;
-
-function appendCompositionDiagnostic(
-	diagnostics: string[],
-	message: string,
-): void {
-	if (diagnostics.length >= MAX_COMPOSITION_DIAGNOSTICS) return;
-	diagnostics.push(message.slice(0, MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS));
-}
 
 /**
  * The batches a phase composes over.
@@ -9709,230 +13759,6 @@ function batchMayContributeClaims(
 }
 
 /**
- * The single item-keyed computation behind reviewer/critic settlement AND every
- * reviewer/critic verdict derivation.
- *
- * Settlement *is* `unclaimed.length === 0` over this map, so settlement can never
- * pass while derivation returns nothing — the failure mode that would let
- * CONFIRMED CRITICAL/HIGH findings ship without critic coverage.
- *
- * Scanning the window reverse-chronologically and claiming only *unclaimed*
- * items makes first-write-wins equal "most recent successful lane per item wins",
- * which is the explicit conflict rule for the case where two batches both carry a
- * parseable verdict for one item. Memoized per gate context so two passes never
- * hold two different verdict maps.
- *
- * The scan stops as soon as every required item is claimed (issue #1968 FIX 5).
- * `readLaneOutput` is a synchronous `readFileSync` per lane per batch, and the
- * window can hold up to `MAX_WORKFLOW_BATCHES` batches, so scanning past a
- * complete claim set is unbounded blocking I/O for no verdict change — first
- * write wins, and every required item has already been written.
- *
- * `exhaustive` turns the exit off for the batch GC, which prunes a reviewer
- * batch on "it contributed no claim". Being precise about what that buys: with
- * *this* exit condition the two scans yield the same `contributingBatchIds`,
- * because the exit fires only when every required item is claimed and a batch
- * reached after that point could never have claimed anything anyway. The flag is
- * therefore not fixing a live divergence — it decouples a durable-state decision
- * from a performance heuristic, so that weakening the exit condition later
- * cannot silently turn "not examined" into "proven inert". It also keeps the
- * whole-window abandoned-lane diagnostics intact for the GC's scan.
- */
-function composePrReviewPhaseVerdicts(
-	directory: string,
-	state: PrWorkflowGateState,
-	phase: PrReviewComposablePhase,
-	ctx: PrReviewGateContext,
-	exhaustive = false,
-): PrReviewPhaseComposition {
-	const memoized = phase === 'reviewer' ? ctx.reviewer : ctx.critic;
-	if (memoized && !exhaustive) return memoized;
-
-	const requiredInventory =
-		phase === 'reviewer'
-			? derivePrReviewCandidateInventory(directory, state, ctx)
-			: derivePrReviewCriticInventory(directory, state, ctx);
-	const reviewerClaims =
-		phase === 'critic'
-			? authoritativeReviewerClaims(directory, state, ctx)
-			: undefined;
-	const forbiddenSubagentSessionIds =
-		phase === 'critic'
-			? reviewerSubagentSessionIds(directory, state)
-			: new Set<string>();
-	const expectedMode = `swarm-pr-review:${phase}`;
-	const window = prReviewPhaseWindow(state, phase);
-	const requiredSet = new Set(requiredInventory);
-	const claims = new Map<string, PrReviewItemClaim>();
-	const contributingBatchIds: string[] = [];
-	const diagnostics: string[] = [];
-	const satisfiedObligations = new Set<string>();
-	const scannedBatches: PrReviewValidationBatchRecord[] = [];
-
-	for (const batch of [...window].reverse()) {
-		scannedBatches.push(batch);
-		if (
-			!batchMayContributeClaims(
-				directory,
-				state,
-				batch,
-				phase,
-				requiredInventory,
-				forbiddenSubagentSessionIds,
-				reviewerClaims,
-				ctx,
-			)
-		) {
-			appendCompositionDiagnostic(
-				diagnostics,
-				`${phase} batch "${batch.batchId}" was validated against a different inventory or is not wholly successful legacy state; it contributes no claims`,
-			);
-			continue;
-		}
-		const coherence = state.prReviewBatchCoherence?.[batch.batchId];
-		let contributed = false;
-		for (const qualified of recordsPassingBatchIntegrity(
-			directory,
-			state,
-			batch.batchId,
-			batch.lanes,
-			expectedMode,
-			batch.validatedAt,
-			true,
-			forbiddenSubagentSessionIds,
-		)) {
-			const artifact = loadArtifactPassingLaneIntegrity(
-				directory,
-				state,
-				qualified.record,
-				expectedMode,
-				qualified.expectedWorkflowLane,
-				ctx.revisionDigest,
-			);
-			if (!artifact) continue;
-			const declaredItems = qualified.expectedLane.reviewItemIds ?? [];
-			const parsed = parseLaneItemVerdicts(
-				artifact.text,
-				declaredItems,
-				phase,
-				reviewerClaims,
-			);
-			if (declaredItems.length > 0 && parsed.size === declaredItems.length) {
-				satisfiedObligations.add(qualified.expectedWorkflowLane);
-			}
-			for (const [itemId, verdict] of parsed) {
-				if (!requiredSet.has(itemId) || claims.has(itemId)) continue;
-				// Defense in depth: the persisted inventory this batch was
-				// validated against must still list the item. Declaration time
-				// already makes the lane item set equal to it, so a mismatch here
-				// means the persisted state was mutated out of band.
-				if (coherence && !coherence.validatedInventory.includes(itemId)) {
-					continue;
-				}
-				if (
-					phase === 'critic' &&
-					coherence &&
-					!criticClaimIsBoundToCurrentReviewerRow(
-						coherence,
-						itemId,
-						reviewerClaims,
-					)
-				) {
-					continue;
-				}
-				claims.set(itemId, {
-					batchId: batch.batchId,
-					laneId: qualified.expectedLane.laneId,
-					workflowLane: qualified.expectedWorkflowLane,
-					...verdict,
-				});
-				contributed = true;
-			}
-		}
-		if (contributed) contributingBatchIds.push(batch.batchId);
-		if (!exhaustive && claims.size === requiredSet.size) break;
-	}
-
-	// The lane-level "every declared obligation across every batch in the window
-	// must be settled" requirement was deliberately dropped: it is part of the
-	// all-or-nothing accounting that forces a full re-run for one failed lane,
-	// and it re-blocks exactly the composed-retry case. Item completeness
-	// (`unclaimed.length === 0`) is the stronger property for what actually
-	// ships — verdicts are per item; lane ids are bookkeeping. An abandoned
-	// declared lane is now a named diagnostic, not a block.
-	//
-	// Scoped to the batches actually scanned: an unscanned batch's lanes were
-	// never examined, so reporting them as "produced no successful exact
-	// artifact" would be an unevidenced claim. Nothing is lost — the early exit
-	// only fires once every required item is claimed, and the diagnostic exists
-	// to explain a settlement that succeeded despite abandoned lanes.
-	for (const obligation of new Set(
-		scannedBatches.flatMap((batch) =>
-			batch.lanes.map((lane) => lane.workflowLane),
-		),
-	)) {
-		if (satisfiedObligations.has(obligation)) continue;
-		appendCompositionDiagnostic(
-			diagnostics,
-			`declared ${phase} lane "${obligation}" produced no successful exact artifact`,
-		);
-	}
-
-	const composition: PrReviewPhaseComposition = {
-		claims,
-		requiredInventory,
-		unclaimed: requiredInventory.filter((itemId) => !claims.has(itemId)),
-		contributingBatchIds,
-		diagnostics,
-	};
-	// An exhaustive pass is a superset of the memoizable one, but it is computed
-	// for a different question (which batches are inert) and its diagnostics
-	// cover a wider window; never let it become the map the gates read.
-	if (!exhaustive) {
-		if (phase === 'reviewer') ctx.reviewer = composition;
-		else ctx.critic = composition;
-	}
-	return composition;
-}
-
-/**
- * A critic claim survives only while the reviewer row it challenged is
- * byte-identical.
- *
- * What this guarantees: the critic verdict was produced against reviewer row
- * *content* identical to the content authoritative now. A reviewer verdict keeps
- * only 2 of the 10 required row fields, so a classification/severity tuple would
- * still match after the evidence and root cause changed entirely; the full-row
- * digest does not. That also closes the `DOWNGRADED` hole in
- * `parseCriticVerdict`, where a reviewer severity *increase* leaves a stale
- * DOWNGRADED row still parseable.
- *
- * What this does NOT guarantee (issue #1968 FIX 8; the fix plan's claim that it
- * "closes the leave-and-return readmission path" is retracted as false):
- * `reviewerVerdictRowDigest` hashes the ten parsed `[REVIEWED]` fields and
- * nothing else — no lane, session, or batch identity. So a byte-identical row
- * emitted by a *different* lane or session re-admits the bound critic claim, and
- * an item that leaves the critic inventory and later returns with an identical
- * row re-admits the original critic verdict rather than requiring a fresh one.
- * Both are content-equivalent by construction, and the artifact behind the claim
- * is still pinned to the current revision digest and to its own lane identity by
- * `loadArtifactPassingLaneIntegrity`, so neither admits a verdict about
- * different content — but neither is prevented, and the binding is not the thing
- * that prevents them.
- */
-function criticClaimIsBoundToCurrentReviewerRow(
-	coherence: PrReviewBatchCoherenceRecord,
-	itemId: string,
-	reviewerClaims: ReadonlyMap<string, PrReviewItemClaim> | undefined,
-): boolean {
-	// A coherent critic batch always carries bindings; absent bindings on a
-	// coherent entry means out-of-band mutation, so fail closed.
-	const bound = coherence.reviewerItemBindings?.[itemId];
-	const current = reviewerClaims?.get(itemId)?.rowDigest;
-	return Boolean(bound && current && bound === current);
-}
-
-/**
  * Reviewer claims only when the reviewer phase is item-complete. Preserves the
  * pre-existing fail-closed "empty map" semantics for an unsettled reviewer
  * phase, now derived from the same computation settlement uses.
@@ -9985,7 +13811,7 @@ function criticReviewerItemBindings(
 				`BLOCKED: PR_REVIEW critic dispatch cannot bind item "${itemId}" to an authoritative reviewer verdict row`,
 			);
 		}
-		bindings[itemId] = rowDigest;
+		bindings[reviewerItemBindingKey(itemId)] = rowDigest;
 	}
 	return bindings;
 }
@@ -10011,11 +13837,16 @@ function derivePrReviewCriticInventory(
 		ctx,
 		'derivePrReviewCriticInventory',
 	);
+	// Issue #2383: the ONE shared production routing predicate. Never inline a
+	// severity triple here — the centralization guard test enforces it.
 	return [...verdicts.entries()]
-		.filter(
-			([, verdict]) =>
-				verdict.classification === 'CONFIRMED' &&
-				['CRITICAL', 'HIGH', 'MEDIUM'].includes(verdict.severity),
+		.filter(([, verdict]) =>
+			prReviewFindingRequiresCritic({
+				classification: verdict.classification,
+				severity: verdict.severity,
+				risk_impact: verdict.riskImpact,
+				risk_tags: verdict.riskTags,
+			}),
 		)
 		.map(([itemId]) => itemId)
 		.sort();
@@ -10052,7 +13883,12 @@ function deriveLatestPrReviewReviewerVerdicts(
 		[...authoritativeReviewerClaims(directory, state, ctx)].map(
 			([itemId, claim]) => [
 				itemId,
-				{ classification: claim.classification, severity: claim.severity },
+				{
+					classification: claim.classification,
+					severity: claim.severity,
+					riskImpact: claim.riskImpact,
+					riskTags: claim.riskTags,
+				},
 			],
 		),
 	);
@@ -10594,6 +14430,47 @@ function successfulObligationsFromExactBatch(
 		forbiddenSubagentSessionIds,
 		diagnostics,
 	)) {
+		const structuredCoverage = validateExactStructuredReceiptCoverage({
+			record: qualified.record,
+			result: qualified.record.result!,
+			artifact: null,
+			expected: {
+				mode:
+					expectedMode === 'swarm-pr-review:base' ||
+					expectedMode === 'swarm-pr-review:micro'
+						? expectedMode
+						: 'swarm-pr-review:base',
+				workflowLane: qualified.expectedWorkflowLane,
+				ownedWorkflowLanes: qualified.expectedOwnedLanes,
+				prHeadSha: state.prHeadSha ?? '',
+				gitHead: state.prHeadSha ?? '',
+				revisionDigest: expectedRevisionDigest ?? '',
+				workflowInstanceId: state.workflowInstanceId,
+				workflowRevision: state.revision,
+				baseSha: state.prReviewBaseSha,
+				reviewScope:
+					state.mode === 'PR_REVIEW' && state.prReviewBaseSha && state.prHeadSha
+						? `complete PR diff ${state.prReviewBaseSha}...${state.prHeadSha}`
+						: undefined,
+			},
+		});
+		if (structuredCoverage.status === 'accepted') {
+			for (const obligation of structuredCoverage.creditedWorkflowLanes) {
+				successful.add(obligation);
+			}
+			continue;
+		}
+		if (structuredCoverage.status === 'rejected') {
+			if (diagnostics && diagnostics.length < MAX_BASE_COVERAGE_DIAGNOSTICS) {
+				diagnostics.push(
+					`batch=${batchId} lane=${qualified.expectedLane.laneId} workflow_lane=${qualified.expectedWorkflowLane}: ${formatPrReviewLaneValidationFailure(structuredCoverage.failure)}`.slice(
+						0,
+						MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS,
+					),
+				);
+			}
+			continue;
+		}
 		if (
 			workflowArtifactHasContractMarker(
 				directory,
@@ -10642,6 +14519,86 @@ function ownedLaneSetsEqual(
 		return false;
 	}
 	return recordOwned.every((owned) => expectedSet.has(owned));
+}
+
+type ExactStructuredReceiptCoverageValidation =
+	| { status: 'absent' }
+	| {
+			status: 'accepted';
+			creditedWorkflowLanes: string[];
+			receipt: PrReviewResultReceipt;
+	  }
+	| { status: 'rejected'; failure: PrReviewLaneValidationFailure };
+
+function validateExactStructuredReceiptCoverage(
+	input: PrReviewDiscoveryLaneValidationInput,
+): ExactStructuredReceiptCoverageValidation {
+	if (
+		input.expected.mode !== 'swarm-pr-review:base' &&
+		input.expected.mode !== 'swarm-pr-review:micro'
+	) {
+		return { status: 'absent' };
+	}
+	const rawReceipt = input.result.prReviewResultReceipt;
+	if (!rawReceipt) return { status: 'absent' };
+	const parsedReceipt = PrReviewResultReceiptSchema.safeParse(rawReceipt);
+	if (!parsedReceipt.success) {
+		return {
+			status: 'rejected',
+			failure: failedLaneValidation(
+				'discovery.coverage',
+				'schema-valid exact child/workflow/revision-bound structured receipt',
+				'invalid structured receipt',
+			).failure,
+		};
+	}
+	if (
+		input.expected.workflowInstanceId === undefined ||
+		input.expected.workflowRevision === undefined ||
+		input.expected.baseSha === undefined
+	) {
+		return {
+			status: 'rejected',
+			failure: failedLaneValidation(
+				'discovery.coverage',
+				'live workflow instance/revision/base identity',
+				'missing live workflow instance/revision/base identity',
+			).failure,
+		};
+	}
+	const receipt = parsedReceipt.data;
+	const ownedWorkflowLanes = input.expected.ownedWorkflowLanes?.length
+		? [...input.expected.ownedWorkflowLanes]
+		: [input.expected.workflowLane];
+	if (
+		receipt.mode !== input.expected.mode ||
+		receipt.workflowInstanceId !== input.expected.workflowInstanceId ||
+		receipt.workflowRevision !== input.expected.workflowRevision ||
+		receipt.baseSha !== input.expected.baseSha ||
+		receipt.batchId !== input.record.batchId ||
+		receipt.laneId !== input.record.laneId ||
+		receipt.childSessionId !== input.record.subagentSessionId ||
+		receipt.workflowLane !== input.expected.workflowLane ||
+		!ownedLaneSetsEqual(receipt.ownedWorkflowLanes, ownedWorkflowLanes) ||
+		receipt.headSha !== input.expected.prHeadSha ||
+		receipt.dispatchRevisionDigest !== input.expected.revisionDigest
+	) {
+		return {
+			status: 'rejected',
+			failure: failedLaneValidation(
+				'discovery.coverage',
+				'exact child/workflow/revision-bound structured receipt',
+				'mismatched structured receipt',
+			).failure,
+		};
+	}
+	return {
+		status: 'accepted',
+		creditedWorkflowLanes: receipt.envelope.creditedLanes.filter((lane) =>
+			ownedWorkflowLanes.includes(lane),
+		),
+		receipt,
+	};
 }
 
 interface LaneArtifactExpected {
@@ -10899,16 +14856,12 @@ function workflowArtifactHasContractMarker(
 	) {
 		const phase: PrReviewComposablePhase =
 			expectedMode === 'swarm-pr-review:reviewer' ? 'reviewer' : 'critic';
-		const parsed = parseLaneItemVerdicts(
+		return analyzeLegacyVerdictRowContract(
 			artifact.text,
 			reviewItemIds ?? [],
 			phase,
 			reviewerClaims,
-		);
-		return Boolean(
-			reviewItemIds?.length &&
-				reviewItemIds.every((itemId) => parsed.has(itemId)),
-		);
+		).ok;
 	}
 	if (expectedMode === 'swarm-pr-feedback:verification') {
 		return /^\[FEEDBACK-VERIFIED\]\s*\|/m.test(artifact.text);
@@ -10923,7 +14876,7 @@ function workflowArtifactHasContractMarker(
 		return Boolean(
 			reviewItemIds?.length &&
 				reviewItemIds.every((itemId) =>
-					artifactHasExactPositiveVerdictRow(
+					legacyArtifactHasExactPositiveVerdictRow(
 						artifact.text,
 						feedbackVerdict[0],
 						itemId,
@@ -10951,6 +14904,9 @@ function workflowArtifactHasContractMarker(
 				prHeadSha: state.prHeadSha ?? '',
 				gitHead: state.prHeadSha ?? '',
 				revisionDigest: expectedRevisionDigest ?? '',
+				workflowInstanceId: state.workflowInstanceId,
+				workflowRevision: state.revision,
+				baseSha: state.prReviewBaseSha,
 				reviewScope,
 			},
 		});
@@ -11030,6 +14986,12 @@ interface PrReviewDiscoveryCoverageAnalysis {
 	 */
 	salvaged: boolean;
 	repairKinds: readonly CandidateArtifactRepairKind[];
+	/**
+	 * The parse retained this lane's candidate rows but discredited a conflicting
+	 * `[CLEAN]` attestation. Tracked separately from `repairKinds` because nothing
+	 * was repaired — an assertion was dropped (issue #2279).
+	 */
+	cleanAttestationSalvaged: boolean;
 	failurePredicate?: Extract<
 		PrReviewLaneValidationPredicate,
 		'discovery.header' | 'discovery.row' | 'discovery.coverage'
@@ -11041,6 +15003,7 @@ function analyzePrReviewDiscoveryArtifact(
 	expectedWorkflowLane: string,
 	ownedWorkflowLanes: readonly string[] = [expectedWorkflowLane],
 	mode?: string,
+	acceptPartial = false,
 ): PrReviewDiscoveryCoverageAnalysis {
 	// `mode` is threaded in so this site and the extraction site
 	// (derivePrReviewCandidateInventory) resolve the row family from the SAME
@@ -11052,7 +15015,8 @@ function analyzePrReviewDiscoveryArtifact(
 	const normalized = normalizeCandidateArtifact(text, fallbackFamily);
 	const canonicalText = normalized.text;
 	const repairKinds = normalized.repairKinds;
-	const salvaged = repairKinds.length > 0;
+	let salvaged = repairKinds.length > 0;
+	let cleanAttestationSalvaged = false;
 	const header = selectCandidateHeader(canonicalText.split(/\r?\n/));
 	if (
 		header === null ||
@@ -11070,6 +15034,7 @@ function analyzePrReviewDiscoveryArtifact(
 			coverageKind: null,
 			salvaged,
 			repairKinds,
+			cleanAttestationSalvaged,
 			failurePredicate: 'discovery.header',
 		};
 	}
@@ -11088,7 +15053,7 @@ function analyzePrReviewDiscoveryArtifact(
 			produced_at: '1970-01-01T00:00:00.000Z',
 		},
 		{
-			accept_partial: false,
+			accept_partial: acceptPartial,
 			accept_degraded: false,
 			degraded: false,
 			row_format_version: 1,
@@ -11106,6 +15071,20 @@ function analyzePrReviewDiscoveryArtifact(
 		},
 	);
 	if (parsed.error) appendBoundedCandidateIssue(issues, parsed.error);
+	// A discredited-but-salvaged CLEAN no longer arrives as `parsed.error`, so it
+	// is re-entered here as BOTH an issue and a salvage signal. The two are
+	// redundant on purpose — `salvaged = true` alone already keeps the lane in
+	// the durable salvagedLanes/recoveries ledger — but the issue entry is what
+	// carries the human-readable reason into the post-mortem diagnostics.
+	if (parsed.clean_attestation_salvaged) {
+		cleanAttestationSalvaged = true;
+		salvaged = true;
+		appendBoundedCandidateIssue(
+			issues,
+			parsed.clean_attestation_salvage_reason ??
+				'CLEAN attestation discredited; candidate rows retained',
+		);
+	}
 	for (const detail of parsed.diagnostics.parse_error_details) {
 		appendBoundedCandidateIssue(
 			issues,
@@ -11113,7 +15092,12 @@ function analyzePrReviewDiscoveryArtifact(
 		);
 	}
 	const hasParseFailure =
-		Boolean(parsed.error) || parsed.diagnostics.parse_error_details.length > 0;
+		Boolean(parsed.error) ||
+		// Keeps the predicate identical to pre-#2279 behaviour: this shape used to
+		// surface as `parsed.error`, so a lane that ends up uncovered must still
+		// report `discovery.row` rather than silently becoming `discovery.coverage`.
+		Boolean(parsed.clean_attestation_salvaged) ||
+		parsed.diagnostics.parse_error_details.length > 0;
 	// Duplicate candidate ids are the one row defect that is never salvaged: the
 	// inventory they feed is asserted globally unique, so admitting them would
 	// convert a recoverable lane defect into a late workflow-wide failure.
@@ -11139,6 +15123,7 @@ function analyzePrReviewDiscoveryArtifact(
 			coverageKind: null,
 			salvaged,
 			repairKinds,
+			cleanAttestationSalvaged,
 			failurePredicate: 'discovery.row',
 		};
 	}
@@ -11165,6 +15150,7 @@ function analyzePrReviewDiscoveryArtifact(
 			coverageKind: 'candidate',
 			salvaged,
 			repairKinds,
+			cleanAttestationSalvaged,
 		};
 	}
 	const clean = parsed.clean_attestation;
@@ -11181,6 +15167,7 @@ function analyzePrReviewDiscoveryArtifact(
 			coverageKind: 'clean',
 			salvaged,
 			repairKinds,
+			cleanAttestationSalvaged,
 		};
 	}
 	return {
@@ -11190,6 +15177,7 @@ function analyzePrReviewDiscoveryArtifact(
 		coverageKind: null,
 		salvaged,
 		repairKinds,
+		cleanAttestationSalvaged,
 		// Preserve today's predicate: a row-level defect is still reported as
 		// such once it turns out no valid row could establish coverage.
 		failurePredicate: hasParseFailure ? 'discovery.row' : 'discovery.coverage',
@@ -11225,6 +15213,26 @@ export function validatePrReviewDiscoveryLaneCompletion(
 			input.expected.mode === 'swarm-pr-review:micro',
 	});
 	if (!recordIntegrity.ok) return recordIntegrity;
+	const structuredCoverage = validateExactStructuredReceiptCoverage(input);
+	if (structuredCoverage.status === 'accepted') {
+		return { ok: true };
+	}
+	if (structuredCoverage.status === 'rejected') {
+		return { ok: false, failure: structuredCoverage.failure };
+	}
+	if (
+		(input.expected.mode === 'swarm-pr-review:base' ||
+			input.expected.mode === 'swarm-pr-review:micro') &&
+		!prReviewLegacyTranscriptCompatibilityEnabled(
+			input.record.prReviewLegacyTranscriptCompatibility,
+		)
+	) {
+		return failedLaneValidation(
+			'discovery.coverage',
+			'child-bound structured receipt',
+			'missing structured receipt (legacy transcript adapter disabled)',
+		);
+	}
 	const artifactIntegrity = analyzeLaneArtifactIntegrity({
 		record: input.record,
 		result: input.result,
@@ -11248,6 +15256,7 @@ export function validatePrReviewDiscoveryLaneCompletion(
 			workflowLane,
 			ownedWorkflowLanes,
 			input.expected.mode,
+			input.result.transcriptIncomplete === true,
 		),
 	}));
 	// A lane that is covered but carried defects is the whole point of salvage —
@@ -11309,6 +15318,14 @@ export function validatePrReviewDiscoveryLaneCompletion(
 				reason: `structural repairs applied: ${analysis.repairKinds.join(', ')}`,
 			});
 		}
+		if (analysis.cleanAttestationSalvaged) {
+			laneRecoveries.push({
+				workflowLane,
+				kind: 'clean-attestation-salvaged',
+				reason:
+					'a conflicting [CLEAN] attestation was discredited while the independently validated candidate rows were retained',
+			});
+		}
 		if (analysis.issues.length > 0) {
 			laneRecoveries.push({
 				workflowLane,
@@ -11364,13 +15381,16 @@ export function validatePrReviewDiscoveryLaneCompletion(
 export async function validatePrWorkflowTransportRecovery(
 	input: PrWorkflowTransportRecoveryValidationInput,
 ): Promise<PrWorkflowTransportRecoveryValidationResult> {
+	const mode = input.record.mode?.trim();
+	const isPrReviewVerdictMode =
+		mode === 'swarm-pr-review:reviewer' || mode === 'swarm-pr-review:critic';
 	if (
+		!isPrReviewVerdictMode &&
 		input.result.truncated !== true &&
 		input.result.transcriptIncomplete !== true
 	) {
 		return { ok: true };
 	}
-	const mode = input.record.mode?.trim();
 	const workflowLane = input.record.workflowLane?.trim();
 	if (!mode || !workflowLane) {
 		return {
@@ -11379,6 +15399,35 @@ export async function validatePrWorkflowTransportRecovery(
 				'structured workflow transport recovery requires non-empty mode and workflow_lane provenance',
 		};
 	}
+	const state = await requireAnyActiveState(
+		input.directory,
+		input.record.parentSessionId,
+	);
+	const batchId = input.record.batchId?.trim();
+	const laneId = input.record.laneId?.trim();
+	const verdictPhase: PrReviewComposablePhase | null =
+		mode === 'swarm-pr-review:reviewer'
+			? 'reviewer'
+			: mode === 'swarm-pr-review:critic'
+				? 'critic'
+				: null;
+	const declaredVerdictLane = verdictPhase
+		? (state.prReviewValidationBatches ?? [])
+				.find(
+					(candidate) =>
+						candidate.batchId === batchId && candidate.phase === verdictPhase,
+				)
+				?.lanes.find((candidate) => candidate.laneId === laneId)
+		: undefined;
+	const declaredItemIds = declaredVerdictLane?.reviewItemIds ?? [];
+	const rejectedReceipt: PrReviewVerdictCollectionReceipt | undefined =
+		declaredItemIds.length > 0
+			? {
+					assignedReviewItemIds: [...declaredItemIds],
+					acceptedReviewItemIds: [],
+					rejectedReviewItemIds: [...declaredItemIds],
+				}
+			: undefined;
 	const recordIntegrity = analyzeLaneRecordResultIntegrity({
 		record: input.record,
 		result: input.result,
@@ -11397,6 +15446,8 @@ export async function validatePrWorkflowTransportRecovery(
 		return {
 			ok: false,
 			reason: formatPrReviewLaneValidationFailure(recordIntegrity.failure),
+			failure: recordIntegrity.failure,
+			...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
 		};
 	}
 	const artifactIntegrity = analyzeLaneArtifactIntegrity({
@@ -11416,12 +15467,10 @@ export async function validatePrWorkflowTransportRecovery(
 		return {
 			ok: false,
 			reason: formatPrReviewLaneValidationFailure(artifactIntegrity.failure),
+			failure: artifactIntegrity.failure,
+			...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
 		};
 	}
-	const state = await requireAnyActiveState(
-		input.directory,
-		input.record.parentSessionId,
-	);
 	const expectedMode = mode.startsWith('swarm-pr-review:')
 		? 'PR_REVIEW'
 		: mode.startsWith('swarm-pr-feedback:')
@@ -11431,17 +15480,17 @@ export async function validatePrWorkflowTransportRecovery(
 		return {
 			ok: false,
 			reason: `structured workflow transport recovery does not support mode "${mode}"`,
+			...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
 		};
 	}
 	if (state.mode !== expectedMode) {
 		return {
 			ok: false,
 			reason: `active workflow mode mismatch; expected ${expectedMode}, got ${state.mode}`,
+			...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
 		};
 	}
 	const artifactText = input.artifact?.text ?? '';
-	const batchId = input.record.batchId?.trim();
-	const laneId = input.record.laneId?.trim();
 	const prReviewGateContext: PrReviewGateContext | undefined =
 		state.mode === 'PR_REVIEW'
 			? { revisionDigest: input.revisionDigest }
@@ -11451,14 +15500,14 @@ export async function validatePrWorkflowTransportRecovery(
 			ok: false,
 			reason:
 				'structured workflow transport recovery requires non-empty batch_id and lane_id provenance',
+			...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
 		};
 	}
 	if (
 		mode === 'swarm-pr-review:reviewer' ||
 		mode === 'swarm-pr-review:critic'
 	) {
-		const phase: PrReviewComposablePhase =
-			mode === 'swarm-pr-review:reviewer' ? 'reviewer' : 'critic';
+		const phase = verdictPhase ?? 'reviewer';
 		const batch = (state.prReviewValidationBatches ?? []).find(
 			(candidate) => candidate.batchId === batchId && candidate.phase === phase,
 		);
@@ -11468,6 +15517,7 @@ export async function validatePrWorkflowTransportRecovery(
 				ok: false,
 				reason:
 					'no matching declared reviewer/critic lane ownership was found for this transport recovery',
+				...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
 			};
 		}
 		const itemIds = lane.reviewItemIds ?? [];
@@ -11484,24 +15534,64 @@ export async function validatePrWorkflowTransportRecovery(
 				ok: false,
 				reason:
 					'critic transport recovery requires authoritative settled reviewer claims for every assigned item',
+				...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
 			};
 		}
-		const parsed = parseLaneItemVerdicts(
+		const analysis = analyzeLegacyVerdictRowContract(
 			artifactText,
 			itemIds,
 			phase,
 			reviewerClaims,
 		);
-		if (
-			itemIds.length === 0 ||
-			!itemIds.every((itemId) => parsed.has(itemId))
-		) {
+		if (!analysis.ok) {
+			const failure = failedLaneValidation(
+				phase === 'reviewer' ? 'reviewer.verdict_rows' : 'critic.verdict_rows',
+				analysis.expected,
+				analysis.actual,
+			).failure;
 			return {
 				ok: false,
-				reason:
-					'every assigned reviewer/critic item requires one parseable verdict row in the durable artifact',
+				reason: formatPrReviewLaneValidationFailure(failure),
+				failure,
+				receipt: {
+					assignedReviewItemIds: [...itemIds],
+					acceptedReviewItemIds: [],
+					rejectedReviewItemIds: [...itemIds],
+				},
 			};
 		}
+		const receipt: PrReviewVerdictCollectionReceipt = {
+			assignedReviewItemIds: [...itemIds],
+			acceptedReviewItemIds: [...itemIds],
+			rejectedReviewItemIds: [],
+		};
+		const recoveries = [
+			...(analysis.recoveries ?? []).map(({ recovery, itemId }) => ({
+				workflowLane,
+				kind: 'legacy-verdict-row-recovery' as const,
+				reason:
+					recovery === 'legacy-fidelity-safe'
+						? `legacy verdict row ${itemId} used trailing-field pipe recovery with full field fidelity`
+						: `legacy verdict row ${itemId} used trailing-field pipe recovery with lossy prose normalization`,
+			})),
+			...(input.result.truncated === true
+				? [
+						{
+							workflowLane,
+							kind: 'truncated-preview-durable-artifact' as const,
+							reason:
+								'inline preview truncated; durable artifact retained exact coverage',
+						},
+					]
+				: []),
+		];
+		return recoveries.length > 0
+			? {
+					ok: true,
+					receipt,
+					recoveries,
+				}
+			: { ok: true, receipt };
 	} else if (mode === 'swarm-pr-feedback:verification') {
 		const batch = (state.prFeedbackVerifications ?? []).find(
 			(candidate) => candidate.batchId === batchId,
@@ -11519,7 +15609,7 @@ export async function validatePrWorkflowTransportRecovery(
 		const itemIds = lane?.ownedItemIds ?? [];
 		if (
 			itemIds.length === 0 ||
-			!feedbackArtifactTextCoversItems(artifactText, itemIds)
+			!legacyFeedbackArtifactTextCoversItems(artifactText, itemIds)
 		) {
 			return {
 				ok: false,
@@ -11573,7 +15663,7 @@ export async function validatePrWorkflowTransportRecovery(
 		if (
 			itemIds.length === 0 ||
 			!itemIds.every((itemId) =>
-				artifactHasExactPositiveVerdictRow(
+				legacyArtifactHasExactPositiveVerdictRow(
 					artifactText,
 					feedbackPhase.marker,
 					itemId,
@@ -11632,40 +15722,10 @@ function extractLaneCoverageEvidenceText(
 	).evidence;
 }
 
-const REVIEWER_CLASSIFICATIONS = new Set([
-	'CONFIRMED',
-	'DISPROVED',
-	'UNVERIFIED',
-	'PRE_EXISTING',
-]);
-const REVIEWER_EVIDENCE_TYPES = new Set([
-	'STRUCTURALLY_PROVEN',
-	'EXECUTION_PROVEN',
-	'STATIC_TRACE_PROVEN',
-	'PLAUSIBLE_BUT_UNVERIFIED',
-]);
-const REVIEW_SEVERITIES = new Set([
-	'CRITICAL',
-	'HIGH',
-	'MEDIUM',
-	'LOW',
-	'INFO',
-	'NONE',
-]);
-const CRITIC_STATUSES = new Set([
-	'UPHELD',
-	'DOWNGRADED',
-	'DISPROVED',
-	'NEEDS_MORE_EVIDENCE',
-]);
-const FEEDBACK_CLASSIFICATIONS = new Set([
-	'CONFIRMED',
-	'PARTIAL',
-	'DISPROVED',
-	'PRE_EXISTING',
-	'NEEDS_MORE_EVIDENCE',
-	'NEEDS_USER_DECISION',
-]);
+// Issue #2385: `REVIEW_SEVERITY_RANK` and `FEEDBACK_CLASSIFICATIONS` moved to
+// src/pr-review/legacy-transcript-adapter.ts, which owns the severity-rank /
+// classification vocabulary used in transcript-text conversion.
+
 /**
  * Issue #2131 criterion C1: a fully verified no-change inventory is one where
  * EVERY item's settled verification classification is a no-change outcome.
@@ -11682,278 +15742,15 @@ const FEEDBACK_NO_CHANGE_CLASSIFICATIONS = new Set([
 interface ReviewerVerdict {
 	classification: string;
 	severity: string;
+	/** Typed risk metadata projected from the reviewer row (issue #2383). */
+	riskImpact?: PrReviewRiskImpact;
+	riskTags?: PrReviewRiskTag[];
 }
 
-/** The validated 10 canonical fields of the single `[REVIEWED]` row for an item. */
-function parseReviewerVerdictFields(
-	text: string,
-	itemId: string,
-): string[] | null {
-	const rows = text
-		.split(/\r?\n/)
-		.map((line) => pipeFieldsCapped(line, 10))
-		.filter((fields) => fields[0] === '[REVIEWED]' && fields[1] === itemId);
-	if (rows.length !== 1) return null;
-	const fields = rows[0];
-	if (fields.length !== 10 || !fields.slice(1).every(Boolean)) return null;
-	const introduced = fields[5]
-		.replace(/^introduced_by_pr\s*:\s*/i, '')
-		.toUpperCase();
-	if (
-		!REVIEWER_CLASSIFICATIONS.has(fields[2]) ||
-		!REVIEWER_EVIDENCE_TYPES.has(fields[3]) ||
-		!REVIEW_SEVERITIES.has(fields[4]) ||
-		!['YES', 'NO', 'UNKNOWN'].includes(introduced)
-	)
-		return null;
-	if (fields[7].length < 8 || fields[8].length < 5 || fields[9].length < 3)
-		return null;
-	return fields;
-}
-
-/**
- * Digest of the FULL canonical reviewer row, not the classification/severity
- * pair a reviewer verdict projects to. Only 2 of the 10 required fields survive
- * that projection, so a tuple binding would still match a row whose evidence,
- * file:line and root cause all changed. Fields are joined on NUL, which
- * `pipeFields` can never produce, so no field boundary is forgeable.
- */
-function reviewerVerdictRowDigest(fields: readonly string[]): string {
-	return createHash('sha256').update(fields.join('\0')).digest('hex');
-}
-
-/**
- * Per-item verdicts an artifact actually carries, as a map rather than a
- * boolean. This is the granularity the composition needs: one unparseable item
- * must not discard its healthy siblings in the same lane.
- */
-function parseLaneItemVerdicts(
-	text: string,
-	itemIds: readonly string[],
-	phase: PrReviewComposablePhase,
-	reviewerClaims?: ReadonlyMap<string, PrReviewItemClaim>,
-): Map<
-	string,
-	{ classification: string; severity: string; rowDigest?: string }
-> {
-	const parsed = new Map<
-		string,
-		{ classification: string; severity: string; rowDigest?: string }
-	>();
-	for (const itemId of itemIds) {
-		if (phase === 'reviewer') {
-			const fields = parseReviewerVerdictFields(text, itemId);
-			if (!fields) continue;
-			parsed.set(itemId, {
-				classification: fields[2],
-				severity: fields[4],
-				rowDigest: reviewerVerdictRowDigest(fields),
-			});
-			continue;
-		}
-		const verdict = parseCriticVerdict(
-			text,
-			itemId,
-			reviewerClaims?.get(itemId)?.severity,
-		);
-		if (!verdict) continue;
-		parsed.set(itemId, {
-			classification: verdict.status,
-			severity: verdict.severity,
-		});
-	}
-	return parsed;
-}
-
-function parseCriticVerdict(
-	text: string,
-	itemId: string,
-	reviewerSeverity?: string,
-): { status: string; severity: string } | null {
-	const rows = text
-		.split(/\r?\n/)
-		.map((line) => pipeFieldsCapped(line, 6))
-		.filter((fields) => fields[0] === '[CRITIC]' && fields[1] === itemId);
-	if (rows.length !== 1) return null;
-	const fields = rows[0];
-	if (
-		fields.length !== 6 ||
-		!fields.slice(1).every(Boolean) ||
-		!CRITIC_STATUSES.has(fields[2]) ||
-		!REVIEW_SEVERITIES.has(fields[3])
-	)
-		return null;
-	if (fields[2] === 'NEEDS_MORE_EVIDENCE') return null;
-	if (fields[2] === 'DISPROVED' && fields[3] !== 'NONE') return null;
-	if (
-		fields[2] === 'UPHELD' &&
-		!['CRITICAL', 'HIGH', 'MEDIUM'].includes(fields[3])
-	)
-		return null;
-	if (fields[2] === 'DOWNGRADED' && fields[3] === 'CRITICAL') return null;
-	if (reviewerSeverity) {
-		const severityRank = new Map([
-			['NONE', 0],
-			['INFO', 1],
-			['LOW', 2],
-			['MEDIUM', 3],
-			['HIGH', 4],
-			['CRITICAL', 5],
-		]);
-		const reviewerRank = severityRank.get(reviewerSeverity);
-		const criticRank = severityRank.get(fields[3]);
-		if (reviewerRank === undefined || criticRank === undefined) return null;
-		if (fields[2] === 'UPHELD' && criticRank !== reviewerRank) return null;
-		if (fields[2] === 'DOWNGRADED' && criticRank >= reviewerRank) return null;
-	}
-	if (fields[4].length < 6 || fields[5].length < 6) return null;
-	return { status: fields[2], severity: fields[3] };
-}
-
-function artifactHasExactPositiveVerdictRow(
-	text: string,
-	marker: string,
-	itemId: string,
-	positiveVerdict: string,
-): boolean {
-	// Same trailing-field pipe tolerance as feedbackArtifactCoversItems: the
-	// fourth field is free-text and may legitimately contain literal pipes.
-	const rows = text
-		.split(/\r?\n/)
-		.map((line) => pipeFieldsCapped(line, 4))
-		.filter((fields) => fields[0] === marker && fields[1] === itemId);
-	return (
-		rows.length === 1 &&
-		rows[0].length >= 4 &&
-		rows[0][2] === positiveVerdict &&
-		rows[0].slice(1, 4).every(Boolean)
-	);
-}
-
-function pipeFields(line: string): string[] {
-	if (!line.includes('|')) return [];
-	return line.split('|').map((field) => field.trim());
-}
-
-/**
- * `pipeFields` capped at the row's canonical field count: separators beyond the
- * expected count merge back into the trailing (free-text) field. Verdict rows
- * ([REVIEWED], [CRITIC], [FEEDBACK-VERIFIED]) carry prose evidence in their
- * last field, and prose containing literal pipes (regex text, `,;|`, shell
- * snippets) otherwise splits the row past its strict field-count check and the
- * whole verdict becomes unparseable. Deterministic: the enumerated leading
- * fields are never merged.
- */
-function pipeFieldsCapped(line: string, expectedFieldCount: number): string[] {
-	const fields = pipeFields(line);
-	if (fields.length <= expectedFieldCount) return fields;
-	const capped = [
-		...fields.slice(0, expectedFieldCount - 1),
-		fields.slice(expectedFieldCount - 1).join('|'),
-	];
-	// The enumerated leading fields are untouched, so machine-checked positions
-	// (classification, severity, file:line) stay correct. But the pipe may have
-	// originated in a NON-trailing prose field, in which case the trailing prose
-	// fields are re-arranged rather than preserved. Fidelity-safe only for
-	// trailing-field pipes; this warn (debug-gated) is the only trace.
-	warn(
-		`[pr-workflow-gate] verdict row pipe tail-merge applied (expected ${expectedFieldCount} fields, received ${fields.length}); leading machine fields preserved, trailing prose fields merged: ${line.slice(0, 120)}`,
-	);
-	return capped;
-}
-
-function feedbackArtifactCoversItems(
-	directory: string,
-	state: PrWorkflowGateState,
-	batchId: string,
-	laneId: string,
-	itemIds: readonly string[],
-): boolean {
-	const record = findByBatchId(directory, batchId, {
-		parentSessionId: state.sessionID,
-	}).find((candidate) => candidate.laneId === laneId);
-	const ref = record?.result?.outputRef?.trim();
-	const loaded = ref ? readLaneOutput(directory, ref) : null;
-	if (!loaded) return false;
-	const rows = loaded.artifact.text
-		.split(/\r?\n/)
-		.map((line) => pipeFieldsCapped(line, 4))
-		.filter((fields) => fields[0] === '[FEEDBACK-VERIFIED]');
-	if (rows.length !== itemIds.length) return false;
-	return itemIds.every((itemId) => {
-		const matches = rows.filter((fields) => fields[1] === itemId);
-		return (
-			matches.length === 1 &&
-			matches[0].length === 4 &&
-			matches[0].slice(1, 4).every(Boolean) &&
-			FEEDBACK_CLASSIFICATIONS.has(matches[0][2])
-		);
-	});
-}
-
-function feedbackArtifactTextCoversItems(
-	text: string,
-	itemIds: readonly string[],
-): boolean {
-	const rows = text
-		.split(/\r?\n/)
-		.map((line) => pipeFieldsCapped(line, 4))
-		.filter((fields) => fields[0] === '[FEEDBACK-VERIFIED]');
-	if (rows.length !== itemIds.length) return false;
-	return itemIds.every((itemId) => {
-		const matches = rows.filter((fields) => fields[1] === itemId);
-		return (
-			matches.length === 1 &&
-			matches[0].length === 4 &&
-			matches[0].slice(1, 4).every(Boolean) &&
-			FEEDBACK_CLASSIFICATIONS.has(matches[0][2])
-		);
-	});
-}
-
-/**
- * Read the settled verification classification of every inventory item from the
- * settled verification batches' lane outputs (issue #2131 criterion C1). An
- * item missing from the map has no settled verified classification.
- */
-function readSettledFeedbackClassifications(
-	directory: string,
-	state: PrWorkflowGateState,
-): Map<string, string> {
-	const classifications = new Map<string, string>();
-	for (const record of state.prFeedbackVerifications ?? []) {
-		for (const ownership of record.ownership) {
-			const delegation = findByBatchId(directory, record.batchId, {
-				parentSessionId: state.sessionID,
-			}).find((candidate) => candidate.laneId === ownership.laneId);
-			const ref = delegation?.result?.outputRef?.trim();
-			const loaded = ref ? readLaneOutput(directory, ref) : null;
-			if (!loaded) continue;
-			for (const line of loaded.artifact.text.split(/\r?\n/)) {
-				// Same trailing-field pipe tolerance as feedbackArtifactCoversItems:
-				// the fourth field is free-text and may legitimately contain literal
-				// pipes. Parsing it raw here let coverage accept a row the settled
-				// read then skipped, blocking a verified no-change item (PR #2182
-				// review finding UIB-002).
-				const fields = pipeFieldsCapped(line, 4);
-				if (
-					fields[0] !== '[FEEDBACK-VERIFIED]' ||
-					fields.length !== 4 ||
-					!fields.slice(1, 4).every(Boolean) ||
-					!FEEDBACK_CLASSIFICATIONS.has(fields[2])
-				) {
-					continue;
-				}
-				// A duplicate conflicting classification for one item is a
-				// contract violation; keep the first occurrence deterministic.
-				if (!classifications.has(fields[1])) {
-					classifications.set(fields[1], fields[2]);
-				}
-			}
-		}
-	}
-	return classifications;
-}
+// Issue #2385: the entire transcript/artifact-text -> canonical conversion
+// cluster (IndexedVerdictRows, the row parsers/validators/digest, the pipe
+// field codec, the feedback-artifact coverage readers, and the critic
+// single-row parser) moved verbatim to src/pr-review/legacy-transcript-adapter.ts.
 
 async function persistState(
 	directory: string,
@@ -11967,614 +15764,6 @@ async function persistState(
 }
 
 /** Persist one CAS-checked state replacement while the session lock is held. */
-async function writeStateWhileLocked(
-	directory: string,
-	state: PrWorkflowGateState,
-	options: { replaceWorkflowInstanceId?: string } = {},
-): Promise<PrWorkflowGateState> {
-	const validated = PrWorkflowGateStateSchema.parse(state);
-	const current = await readPrWorkflowGateStateFromDisk(
-		directory,
-		validated.sessionID,
-	);
-	if (
-		current ? current.revision !== validated.revision : validated.revision !== 0
-	) {
-		throw new Error(
-			'BLOCKED: PR workflow gate state changed concurrently; reload the active session state before retrying',
-		);
-	}
-	if (
-		current?.workflowInstanceId &&
-		validated.workflowInstanceId !== current.workflowInstanceId &&
-		options.replaceWorkflowInstanceId !== current.workflowInstanceId
-	) {
-		throw new Error(
-			'BLOCKED: PR workflow gate state changed concurrently; reload the active session state before retrying',
-		);
-	}
-	const nextState = PrWorkflowGateStateSchema.parse({
-		...validated,
-		revision: validated.revision + 1,
-	});
-	const filePath = workflowGateStatePath(directory, validated.sessionID);
-	await writeAtomicJson(directory, filePath, nextState);
-	rememberState(directory, nextState);
-	return nextState;
-}
-
-function workflowCheckoutMutationLockRelativePath(): string {
-	return path.join(WORKFLOW_GATE_DIR, 'checkout.lock');
-}
-
-function workflowCheckoutMutationLockPath(directory: string): string {
-	return validateSwarmPath(
-		directory,
-		workflowCheckoutMutationLockRelativePath(),
-	);
-}
-
-function openCheckoutLockFile(lockPath: string) {
-	return fsp.open(lockPath, 'wx');
-}
-
-function removeCheckoutLockFile(lockPath: string): Promise<void> {
-	return fsp.rm(lockPath);
-}
-
-function checkoutMutationProjectKey(directory: string): string {
-	return normalizeComparableFsPath(directory);
-}
-
-/** A bounded checkout-mutation refusal that never permits unsafe late overlap. */
-export class PrWorkflowCheckoutMutationTimeoutError extends Error {
-	readonly code = 'PR_WORKFLOW_CHECKOUT_MUTATION_TIMEOUT' as const;
-	readonly retryable = false as const;
-
-	constructor(readonly phase: 'queue' | 'action') {
-		super(
-			phase === 'queue'
-				? 'BLOCKED: timed out waiting for the active PR workflow checkout mutation; the existing owner still holds serialization and must settle before retrying'
-				: 'BLOCKED: PR workflow checkout mutation exceeded its execution deadline; serialization remains held until the in-flight action actually settles',
-		);
-		this.name = 'PrWorkflowCheckoutMutationTimeoutError';
-	}
-}
-
-type CheckoutActionOutcome<T> =
-	| { status: 'fulfilled'; value: T }
-	| { status: 'rejected'; error: unknown };
-
-async function withCheckoutMutationDeadline<T>(
-	promise: Promise<T>,
-	phase: 'queue' | 'action',
-): Promise<
-	T | { status: 'timeout'; error: PrWorkflowCheckoutMutationTimeoutError }
-> {
-	let timeout: ReturnType<typeof setTimeout> | undefined;
-	try {
-		return await Promise.race([
-			promise,
-			new Promise<{
-				status: 'timeout';
-				error: PrWorkflowCheckoutMutationTimeoutError;
-			}>((resolve) => {
-				timeout = setTimeout(() => {
-					resolve({
-						status: 'timeout',
-						error: new PrWorkflowCheckoutMutationTimeoutError(phase),
-					});
-				}, _test_exports.checkoutMutationActionTimeoutMs);
-			}),
-		]);
-	} finally {
-		if (timeout) clearTimeout(timeout);
-	}
-}
-
-/** Serialize project-wide checkout mutations before any session state lock. */
-export async function withPrWorkflowCheckoutMutationLock<T>(
-	directory: string,
-	action: () => Promise<T>,
-): Promise<T> {
-	const key = checkoutMutationProjectKey(directory);
-	const previous =
-		pendingCheckoutMutationsByProject.get(key) ?? Promise.resolve();
-	let release!: () => void;
-	const current = new Promise<void>((resolve) => {
-		release = resolve;
-	});
-	const queued = previous.then(() => current);
-	pendingCheckoutMutationsByProject.set(key, queued);
-	const previousResult = await withCheckoutMutationDeadline(
-		previous.then(() => ({ status: 'ready' as const })),
-		'queue',
-	);
-	if (previousResult.status === 'timeout') {
-		release();
-		// Keep this resolved tail chained to the still-running owner so later
-		// in-process waiters receive the same bounded typed refusal instead of
-		// bypassing to the durable lock. Remove it only after the owner settles.
-		void queued.then(() => {
-			if (pendingCheckoutMutationsByProject.get(key) === queued) {
-				pendingCheckoutMutationsByProject.delete(key);
-			}
-		});
-		throw previousResult.error;
-	}
-
-	let lock: Awaited<ReturnType<typeof acquireCheckoutMutationLock>>;
-	try {
-		lock = await acquireCheckoutMutationLock(directory);
-	} catch (error) {
-		release();
-		if (pendingCheckoutMutationsByProject.get(key) === queued) {
-			pendingCheckoutMutationsByProject.delete(key);
-		}
-		throw error;
-	}
-	const actionOutcome: Promise<CheckoutActionOutcome<T>> = Promise.resolve()
-		.then(action)
-		.then(
-			(value) => ({ status: 'fulfilled' as const, value }),
-			(error: unknown) => ({ status: 'rejected' as const, error }),
-		);
-	const outcome = await withCheckoutMutationDeadline(actionOutcome, 'action');
-	if (outcome.status === 'timeout') {
-		// Promises are not cancellable. Returning the lock here would let a late
-		// action mutate concurrently, so a retained owner task performs cleanup
-		// only after the action truly settles.
-		void actionOutcome.then(async () => {
-			try {
-				await releaseCheckoutMutationLock(lock);
-			} catch {
-				// Completed-owner recovery reclaims a persistently busy Windows lock.
-			} finally {
-				release();
-				if (pendingCheckoutMutationsByProject.get(key) === queued) {
-					pendingCheckoutMutationsByProject.delete(key);
-				}
-			}
-		});
-		throw outcome.error;
-	}
-	try {
-		if (outcome.status === 'rejected') throw outcome.error;
-		return outcome.value;
-	} finally {
-		try {
-			await releaseCheckoutMutationLock(lock);
-		} finally {
-			release();
-			if (pendingCheckoutMutationsByProject.get(key) === queued) {
-				pendingCheckoutMutationsByProject.delete(key);
-			}
-		}
-	}
-}
-
-async function acquireCheckoutMutationLock(
-	directory: string,
-): Promise<{ path: string; ownerToken: string }> {
-	const lockPath = workflowCheckoutMutationLockPath(directory);
-	const verifiedParent = await ensurePrWorkflowSafeParentDirectory(
-		directory,
-		lockPath,
-	);
-	for (let attempt = 0; attempt < STATE_MUTATION_LOCK_MAX_ATTEMPTS; attempt++) {
-		try {
-			const handle = await _test_exports.openCheckoutLock(lockPath);
-			const lock = {
-				ownerToken: randomUUID(),
-				pid: process.pid,
-				createdAtMs: _test_exports.nowMs(),
-			};
-			let lockIdentity: Pick<BigIntStats, 'dev' | 'ino'> | undefined;
-			let writeError: unknown;
-			try {
-				const openedStat = await handle.stat({ bigint: true });
-				lockIdentity = { dev: openedStat.dev, ino: openedStat.ino };
-				lockIdentity = await assertOpenedSwarmFileIdentity(
-					directory,
-					lockPath,
-					handle,
-					verifiedParent,
-					'PR workflow checkout mutation lock',
-				);
-				await _test_exports.beforeCheckoutLockWrite?.();
-				await handle.writeFile(JSON.stringify(lock), 'utf-8');
-			} catch (error) {
-				writeError = error;
-			} finally {
-				await handle.close().catch(() => undefined);
-			}
-			if (writeError) {
-				if (lockIdentity) {
-					await removeCheckoutMutationLockByIdentity(
-						directory,
-						lockPath,
-						lockIdentity,
-						verifiedParent,
-					);
-				}
-				throw writeError;
-			}
-			return { path: lockPath, ownerToken: lock.ownerToken };
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-			if (await reclaimAbandonedCheckoutMutationLock(lockPath)) continue;
-			if (attempt < STATE_MUTATION_LOCK_MAX_ATTEMPTS - 1) {
-				await delay(STATE_MUTATION_LOCK_RETRY_DELAY_MS);
-			}
-		}
-	}
-	throw new Error(
-		'BLOCKED: PR workflow checkout mutation is being handled by another process; retry after that checkout settles',
-	);
-}
-
-async function releaseCheckoutMutationLock(lock: {
-	path: string;
-	ownerToken: string;
-}): Promise<void> {
-	let lastError: unknown;
-	for (let attempt = 0; attempt < WINDOWS_RENAME_MAX_RETRIES; attempt++) {
-		try {
-			if (await removeCheckoutMutationLockIfOwned(lock.path, lock.ownerToken)) {
-				completedCheckoutLockOwners.delete(lock.path);
-				return;
-			}
-			lastError = new Error(
-				'PR workflow checkout mutation lock ownership changed before release',
-			);
-		} catch (error) {
-			lastError = error;
-		}
-		if (attempt < WINDOWS_RENAME_MAX_RETRIES - 1) {
-			await delay(RENAME_RETRY_DELAY_MS);
-		}
-	}
-	rememberCompletedCheckoutLockOwner(lock.path, lock.ownerToken);
-	throw lastError instanceof Error
-		? lastError
-		: new Error('PR workflow checkout mutation lock release failed');
-}
-
-async function reclaimAbandonedCheckoutMutationLock(
-	lockPath: string,
-): Promise<boolean> {
-	const lock = await readCheckoutMutationLock(lockPath);
-	if (lock) {
-		if (
-			lock.pid === process.pid &&
-			completedCheckoutLockOwners.get(lockPath) === lock.ownerToken
-		) {
-			const removed = await removeCheckoutMutationLockIfOwned(
-				lockPath,
-				lock.ownerToken,
-			);
-			if (removed) completedCheckoutLockOwners.delete(lockPath);
-			return removed;
-		}
-		if (_test_exports.isProcessAlive(lock.pid)) return false;
-		return removeCheckoutMutationLockIfOwned(lockPath, lock.ownerToken);
-	}
-	try {
-		const stat = await fsp.stat(lockPath);
-		if (
-			_test_exports.nowMs() - stat.mtimeMs <
-			STATE_MUTATION_LOCK_UNINITIALIZED_STALE_MS
-		) {
-			return false;
-		}
-		await fsp.rm(lockPath, { force: true });
-		return true;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
-		throw error;
-	}
-}
-
-async function readCheckoutMutationLock(
-	lockPath: string,
-): Promise<{ ownerToken: string; pid: number; createdAtMs: number } | null> {
-	let raw: string;
-	try {
-		raw = await fsp.readFile(lockPath, 'utf-8');
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-		throw error;
-	}
-	try {
-		const parsed: unknown = JSON.parse(raw);
-		if (
-			typeof parsed === 'object' &&
-			parsed !== null &&
-			typeof (parsed as { ownerToken?: unknown }).ownerToken === 'string' &&
-			(parsed as { ownerToken: string }).ownerToken.length > 0 &&
-			typeof (parsed as { pid?: unknown }).pid === 'number' &&
-			Number.isInteger((parsed as { pid: number }).pid) &&
-			(parsed as { pid: number }).pid > 0 &&
-			typeof (parsed as { createdAtMs?: unknown }).createdAtMs === 'number' &&
-			Number.isFinite((parsed as { createdAtMs: number }).createdAtMs)
-		) {
-			return parsed as { ownerToken: string; pid: number; createdAtMs: number };
-		}
-	} catch {
-		// A crash between exclusive create and metadata write is recovered below.
-	}
-	return null;
-}
-
-async function removeCheckoutMutationLockIfOwned(
-	lockPath: string,
-	ownerToken: string,
-): Promise<boolean> {
-	const lock = await readCheckoutMutationLock(lockPath);
-	if (!lock || lock.ownerToken !== ownerToken) return false;
-	try {
-		await _test_exports.removeCheckoutLock(lockPath);
-		return true;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-		throw error;
-	}
-}
-
-async function removeCheckoutMutationLockByIdentity(
-	directory: string,
-	lockPath: string,
-	identity: Pick<BigIntStats, 'dev' | 'ino'>,
-	verifiedParent: string,
-): Promise<void> {
-	let lastError: unknown;
-	for (let attempt = 0; attempt < WINDOWS_RENAME_MAX_RETRIES; attempt++) {
-		try {
-			await assertClosedSwarmFileIdentity(
-				directory,
-				lockPath,
-				identity,
-				verifiedParent,
-				'PR workflow checkout mutation lock',
-			);
-			await _test_exports.removeCheckoutLock(lockPath);
-			return;
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-			lastError = error;
-			if (attempt < WINDOWS_RENAME_MAX_RETRIES - 1) {
-				await delay(RENAME_RETRY_DELAY_MS);
-			}
-		}
-	}
-	throw lastError instanceof Error
-		? lastError
-		: new Error('PR workflow checkout mutation lock cleanup failed');
-}
-
-function rememberCompletedCheckoutLockOwner(
-	lockPath: string,
-	ownerToken: string,
-): void {
-	completedCheckoutLockOwners.delete(lockPath);
-	completedCheckoutLockOwners.set(lockPath, ownerToken);
-	while (
-		completedCheckoutLockOwners.size > MAX_COMPLETED_CHECKOUT_LOCK_OWNERS
-	) {
-		const oldest = completedCheckoutLockOwners.keys().next().value;
-		if (oldest === undefined) break;
-		completedCheckoutLockOwners.delete(oldest);
-	}
-}
-
-/** Serialize in-process mutations; the durable revision rejects stale callers. */
-async function withSessionStateMutation<T>(
-	directory: string,
-	sessionID: string,
-	action: () => Promise<T>,
-): Promise<T> {
-	const key = stateCacheKey(directory, sessionID);
-	const previous =
-		pendingStateMutationsByProjectSession.get(key) ?? Promise.resolve();
-	let release!: () => void;
-	const current = new Promise<void>((resolve) => {
-		release = resolve;
-	});
-	const queued = previous.then(() => current);
-	pendingStateMutationsByProjectSession.set(key, queued);
-	await previous;
-	try {
-		const lock = await acquireSessionStateMutationLock(directory, sessionID);
-		try {
-			return await action();
-		} finally {
-			await releaseSessionStateMutationLock(lock);
-		}
-	} finally {
-		release();
-		if (pendingStateMutationsByProjectSession.get(key) === queued) {
-			pendingStateMutationsByProjectSession.delete(key);
-		}
-	}
-}
-
-async function acquireSessionStateMutationLock(
-	directory: string,
-	sessionID: string,
-): Promise<{ path: string; ownerToken: string }> {
-	const lockPath = workflowGateStateLockPath(directory, sessionID);
-	const verifiedParent = await ensurePrWorkflowSafeParentDirectory(
-		directory,
-		lockPath,
-	);
-	for (let attempt = 0; attempt < STATE_MUTATION_LOCK_MAX_ATTEMPTS; attempt++) {
-		try {
-			const handle = await fsp.open(lockPath, 'wx');
-			const lock: SessionStateMutationLock = {
-				ownerToken: randomUUID(),
-				pid: process.pid,
-				createdAtMs: _test_exports.nowMs(),
-			};
-			let writeError: unknown;
-			try {
-				await _test_exports.beforeSessionStateLockWrite?.();
-				await assertOpenedSwarmFileIdentity(
-					directory,
-					lockPath,
-					handle,
-					verifiedParent,
-					'PR workflow state mutation lock',
-				);
-				await handle.writeFile(JSON.stringify(lock), 'utf-8');
-			} catch (error) {
-				writeError = error;
-			} finally {
-				await handle.close().catch(() => undefined);
-			}
-			if (writeError) {
-				await removeSessionStateMutationLockIfOwned(lockPath, lock.ownerToken);
-				throw writeError;
-			}
-			return { path: lockPath, ownerToken: lock.ownerToken };
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-			if (await reclaimAbandonedSessionStateMutationLock(lockPath)) continue;
-			if (attempt < STATE_MUTATION_LOCK_MAX_ATTEMPTS - 1) {
-				await delay(STATE_MUTATION_LOCK_RETRY_DELAY_MS);
-			}
-		}
-	}
-	throw new Error(
-		'BLOCKED: PR workflow gate state is being mutated by another process; retry after that session transition finishes',
-	);
-}
-
-async function releaseSessionStateMutationLock(lock: {
-	path: string;
-	ownerToken: string;
-}): Promise<void> {
-	try {
-		await removeSessionStateMutationLockIfOwned(lock.path, lock.ownerToken);
-	} catch {
-		// Best-effort cleanup; a crash-recovered lock is reclaimed by the next mutation.
-	}
-}
-
-async function reclaimAbandonedSessionStateMutationLock(
-	lockPath: string,
-): Promise<boolean> {
-	const lock = await readSessionStateMutationLock(lockPath);
-	if (lock) {
-		if (_test_exports.isProcessAlive(lock.pid)) return false;
-		return removeSessionStateMutationLockIfOwned(lockPath, lock.ownerToken);
-	}
-	try {
-		const stat = await fsp.stat(lockPath);
-		if (
-			_test_exports.nowMs() - stat.mtimeMs <
-			STATE_MUTATION_LOCK_UNINITIALIZED_STALE_MS
-		) {
-			return false;
-		}
-		await fsp.rm(lockPath, { force: true });
-		return true;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
-		throw error;
-	}
-}
-
-async function readSessionStateMutationLock(
-	lockPath: string,
-): Promise<SessionStateMutationLock | null> {
-	let raw: string;
-	try {
-		raw = await fsp.readFile(lockPath, 'utf-8');
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-		throw error;
-	}
-	try {
-		const parsed: unknown = JSON.parse(raw);
-		if (
-			typeof parsed === 'object' &&
-			parsed !== null &&
-			typeof (parsed as SessionStateMutationLock).ownerToken === 'string' &&
-			(parsed as SessionStateMutationLock).ownerToken.length > 0 &&
-			typeof (parsed as SessionStateMutationLock).pid === 'number' &&
-			Number.isInteger((parsed as SessionStateMutationLock).pid) &&
-			(parsed as SessionStateMutationLock).pid > 0 &&
-			typeof (parsed as SessionStateMutationLock).createdAtMs === 'number' &&
-			Number.isFinite((parsed as SessionStateMutationLock).createdAtMs)
-		) {
-			return parsed as SessionStateMutationLock;
-		}
-	} catch {
-		// A crash between exclusive create and metadata write is recovered below.
-	}
-	return null;
-}
-
-async function removeSessionStateMutationLockIfOwned(
-	lockPath: string,
-	ownerToken: string,
-): Promise<boolean> {
-	const lock = await readSessionStateMutationLock(lockPath);
-	if (!lock || lock.ownerToken !== ownerToken) return false;
-	try {
-		await fsp.rm(lockPath);
-		return true;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-		throw error;
-	}
-}
-
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		// Permission errors prove the process exists. Unknown errors fail closed.
-		return (error as NodeJS.ErrnoException).code !== 'ESRCH';
-	}
-}
-
-async function readPrWorkflowGateStateFromDisk(
-	directory: string,
-	sessionID: string,
-): Promise<PrWorkflowGateState | null> {
-	const filePath = workflowGateStatePath(directory, sessionID);
-	return readPrWorkflowGateStateFileFromDisk(filePath, sessionID);
-}
-
-async function readPrWorkflowGateStateFileFromDisk(
-	filePath: string,
-	stateLabel: string,
-): Promise<PrWorkflowGateState | null> {
-	let raw: string;
-	try {
-		raw = await fsp.readFile(filePath, 'utf-8');
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-		throw error;
-	}
-	let parsedJson: unknown;
-	try {
-		parsedJson = JSON.parse(raw);
-	} catch {
-		throw new Error(
-			`BLOCKED: PR workflow gate state for session "${stateLabel}" is not valid JSON`,
-		);
-	}
-	const parsed = PrWorkflowGateStateSchema.safeParse(parsedJson);
-	if (!parsed.success) {
-		throw new Error(
-			`BLOCKED: PR workflow gate state for session "${stateLabel}" is invalid`,
-		);
-	}
-	return parsed.data;
-}
 
 /** Upper bound on schema issues quoted in one salvage disclosure. */
 const MAX_SALVAGED_SCHEMA_ERRORS = 10;
@@ -12712,11 +15901,22 @@ export async function readPrWorkflowGateStateForRecovery(
 	const salvagedArmed = PrFeedbackReadyToPublishRecordSchema.safeParse(
 		rawRecord.prFeedbackReadyToPublish,
 	);
+	// Issue #2108: a present-but-unreadable publication-generation record gets
+	// the same fail-closed armed treatment — a corrupt active generation must
+	// never downgrade into "no publication window". A well-formed record is
+	// salvaged so the abort cancel arm can reason about it.
+	const publicationKeyPresent = rawRecord.prFeedbackPublication !== undefined;
+	const salvagedPublication = PrFeedbackPublicationStateSchema.safeParse(
+		rawRecord.prFeedbackPublication,
+	);
+	const publicationShapeUnreadable =
+		publicationKeyPresent && !salvagedPublication.success;
 	const salvagedCheckoutRecovery =
 		PrWorkflowCheckoutRecoveryRecordSchema.safeParse(
 			rawRecord.checkoutRecovery,
 		);
-	const armedShapeUnreadable = armedKeyPresent && !salvagedArmed.success;
+	const armedShapeUnreadable =
+		(armedKeyPresent && !salvagedArmed.success) || publicationShapeUnreadable;
 	const schemaErrors = parsed.error.issues
 		.slice(0, MAX_SALVAGED_SCHEMA_ERRORS)
 		.map((issue) =>
@@ -12731,6 +15931,9 @@ export async function readPrWorkflowGateStateForRecovery(
 		(salvagedRevision.success ? '' : ' state revision unsalvageable.') +
 		(armedShapeUnreadable
 			? ' prFeedbackReadyToPublish is present but unreadable; treated as ARMED (fail-closed).'
+			: '') +
+		(publicationShapeUnreadable
+			? ' prFeedbackPublication is present but unreadable; treated as ARMED (fail-closed).'
 			: '');
 	return {
 		state: {
@@ -12746,6 +15949,9 @@ export async function readPrWorkflowGateStateForRecovery(
 			...(salvagedArmed.success
 				? { prFeedbackReadyToPublish: salvagedArmed.data }
 				: {}),
+			...(salvagedPublication.success
+				? { prFeedbackPublication: salvagedPublication.data }
+				: {}),
 			...(salvagedCheckoutRecovery.success
 				? { checkoutRecovery: salvagedCheckoutRecovery.data }
 				: {}),
@@ -12756,287 +15962,4 @@ export async function readPrWorkflowGateStateForRecovery(
 		revisionSalvageable: salvagedRevision.success,
 		armedShapeUnreadable,
 	};
-}
-
-function rememberState(directory: string, state: PrWorkflowGateState): void {
-	const cacheKey = stateCacheKey(directory, state.sessionID);
-	trackedStatesByProjectSession.delete(cacheKey);
-	trackedStatesByProjectSession.set(cacheKey, state);
-	while (trackedStatesByProjectSession.size > MAX_TRACKED_SESSIONS) {
-		const oldestKey = trackedStatesByProjectSession.keys().next().value;
-		if (!oldestKey) break;
-		trackedStatesByProjectSession.delete(oldestKey);
-	}
-}
-
-function stateCacheKey(directory: string, sessionID: string): string {
-	const resolved = path.normalize(path.resolve(directory));
-	const canonicalDirectory =
-		process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-	return `${canonicalDirectory}\u0000${normalizeSessionID(sessionID)}`;
-}
-
-function workflowGateStatePath(directory: string, sessionID: string): string {
-	return validateSwarmPath(directory, workflowGateStateRelativePath(sessionID));
-}
-
-function workflowGateStateLockPath(
-	directory: string,
-	sessionID: string,
-): string {
-	return validateSwarmPath(
-		directory,
-		workflowGateStateLockRelativePath(sessionID),
-	);
-}
-
-function workflowGateStateLockRelativePath(sessionID: string): string {
-	return path.join(
-		WORKFLOW_GATE_DIR,
-		`${prWorkflowSessionFileStem(sessionID)}.lock`,
-	);
-}
-
-function workflowGateStateRelativePath(sessionID: string): string {
-	return path.join(
-		WORKFLOW_GATE_DIR,
-		`${prWorkflowSessionFileStem(sessionID)}.json`,
-	);
-}
-
-export function prWorkflowSessionFileStem(sessionID: string): string {
-	const normalized = normalizeSessionID(sessionID);
-	const slug =
-		normalized.replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 80) || 'session';
-	const digest = createHash('sha256')
-		.update(normalized)
-		.digest('hex')
-		.slice(0, 12);
-	return `${slug}-${digest}`;
-}
-
-function normalizeSessionID(sessionID: string): string {
-	const normalized = sessionID.trim();
-	if (!normalized) {
-		throw new Error('BLOCKED: PR workflow gate requires a non-empty sessionID');
-	}
-	return normalized;
-}
-
-export async function ensurePrWorkflowSafeParentDirectory(
-	directory: string,
-	filePath: string,
-): Promise<string> {
-	const swarmRoot = path.resolve(directory, '.swarm');
-	const parentPath = path.dirname(path.resolve(filePath));
-	const relativeParent = path.relative(swarmRoot, parentPath);
-	if (
-		relativeParent === '..' ||
-		relativeParent.startsWith(`..${path.sep}`) ||
-		path.isAbsolute(relativeParent)
-	) {
-		throw new Error(
-			'BLOCKED: PR workflow atomic destination escapes the project .swarm directory',
-		);
-	}
-	await fsp.mkdir(swarmRoot, { recursive: true });
-	let currentPath = swarmRoot;
-	let currentIdentity = await assertSafeDirectory(currentPath, undefined);
-	for (const segment of relativeParent.split(path.sep).filter(Boolean)) {
-		const nextPath = path.join(currentPath, segment);
-		await _test_exports.beforeSafeDirectoryCreate?.(currentPath, nextPath);
-		await assertSafeDirectory(currentPath, currentIdentity);
-		try {
-			await fsp.mkdir(nextPath);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-		}
-		await assertSafeDirectory(currentPath, currentIdentity);
-		const nextIdentity = await assertSafeDirectory(nextPath, undefined);
-		const [realCurrent, realNext] = await Promise.all([
-			fsp.realpath(currentPath),
-			fsp.realpath(nextPath),
-		]);
-		if (
-			normalizeComparableFsPath(path.dirname(realNext)) !==
-			normalizeComparableFsPath(realCurrent)
-		) {
-			throw new Error(
-				'BLOCKED: PR workflow directory creation escaped the project .swarm tree',
-			);
-		}
-		currentPath = nextPath;
-		currentIdentity = nextIdentity;
-	}
-	const realRoot = await fsp.realpath(swarmRoot);
-	const realParent = await fsp.realpath(parentPath);
-	const relativeRealParent = path.relative(realRoot, realParent);
-	if (
-		relativeRealParent === '..' ||
-		relativeRealParent.startsWith(`..${path.sep}`) ||
-		path.isAbsolute(relativeRealParent)
-	) {
-		throw new Error(
-			'BLOCKED: PR workflow atomic parent escapes the project .swarm directory',
-		);
-	}
-	return realParent;
-}
-
-async function assertSafeDirectory(
-	directoryPath: string,
-	expectedIdentity: Pick<BigIntStats, 'dev' | 'ino'> | undefined,
-): Promise<Pick<BigIntStats, 'dev' | 'ino'>> {
-	const stat = await fsp.lstat(directoryPath, { bigint: true });
-	if (
-		stat.isSymbolicLink() ||
-		!stat.isDirectory() ||
-		(expectedIdentity && !sameBigIntFileIdentity(stat, expectedIdentity))
-	) {
-		throw new Error(
-			'BLOCKED: PR workflow .swarm path must be a real directory and must not change during the operation',
-		);
-	}
-	return { dev: stat.dev, ino: stat.ino };
-}
-
-async function assertOpenedSwarmFileIdentity(
-	directory: string,
-	filePath: string,
-	handle: Awaited<ReturnType<typeof fsp.open>>,
-	expectedParent: string,
-	label: string,
-): Promise<Pick<BigIntStats, 'dev' | 'ino'>> {
-	const openedStat = await handle.stat({ bigint: true });
-	if (!openedStat.isFile()) throw new Error(`BLOCKED: ${label} is not a file`);
-	await assertClosedSwarmFileIdentity(
-		directory,
-		filePath,
-		openedStat,
-		expectedParent,
-		label,
-	);
-	return { dev: openedStat.dev, ino: openedStat.ino };
-}
-
-async function assertClosedSwarmFileIdentity(
-	directory: string,
-	filePath: string,
-	expectedIdentity: Pick<BigIntStats, 'dev' | 'ino'> | undefined,
-	expectedParent: string,
-	label: string,
-): Promise<void> {
-	if (!expectedIdentity) throw new Error(`BLOCKED: ${label} has no identity`);
-	const [stat, realRoot, realFile, realParent] = await Promise.all([
-		fsp.lstat(filePath, { bigint: true }),
-		fsp.realpath(path.resolve(directory, '.swarm')),
-		fsp.realpath(filePath),
-		fsp.realpath(path.dirname(filePath)),
-	]);
-	const relativeFile = path.relative(realRoot, realFile);
-	if (
-		stat.isSymbolicLink() ||
-		!stat.isFile() ||
-		!sameBigIntFileIdentity(stat, expectedIdentity) ||
-		normalizeComparableFsPath(realParent) !==
-			normalizeComparableFsPath(expectedParent) ||
-		relativeFile === '' ||
-		relativeFile === '..' ||
-		relativeFile.startsWith(`..${path.sep}`) ||
-		path.isAbsolute(relativeFile)
-	) {
-		throw new Error(`BLOCKED: ${label} changed or escaped .swarm`);
-	}
-}
-
-async function writeAtomicJson(
-	directory: string,
-	filePath: string,
-	value: unknown,
-): Promise<void> {
-	const safeParent = await ensurePrWorkflowSafeParentDirectory(
-		directory,
-		filePath,
-	);
-	const tempPath = `${filePath}.tmp.${process.pid}.${randomUUID()}`;
-	let tempIdentity: Pick<BigIntStats, 'dev' | 'ino'> | undefined;
-	let lastError: unknown;
-	try {
-		const handle = await fsp.open(tempPath, 'wx');
-		try {
-			await _test_exports.beforeAtomicTempWrite?.();
-			tempIdentity = await assertOpenedSwarmFileIdentity(
-				directory,
-				tempPath,
-				handle,
-				safeParent,
-				'PR workflow atomic temporary file',
-			);
-			await handle.writeFile(JSON.stringify(value, null, 2), 'utf-8');
-			await handle.sync();
-		} finally {
-			await handle.close();
-		}
-		await _test_exports.beforeAtomicRename?.();
-		await assertClosedSwarmFileIdentity(
-			directory,
-			tempPath,
-			tempIdentity,
-			safeParent,
-			'PR workflow atomic temporary file',
-		);
-		for (let attempt = 0; attempt < WINDOWS_RENAME_MAX_RETRIES; attempt++) {
-			try {
-				await _test_exports.rename(tempPath, filePath);
-				lastError = undefined;
-				break;
-			} catch (error) {
-				lastError = error;
-				const code = (error as NodeJS.ErrnoException).code;
-				if (code !== 'EEXIST' && code !== 'EPERM' && code !== 'EBUSY') {
-					break;
-				}
-				if (attempt < WINDOWS_RENAME_MAX_RETRIES - 1) {
-					await delay(RENAME_RETRY_DELAY_MS);
-				}
-			}
-		}
-		if (lastError) {
-			throw lastError;
-		}
-		await assertClosedSwarmFileIdentity(
-			directory,
-			filePath,
-			tempIdentity,
-			safeParent,
-			'PR workflow atomic destination file',
-		);
-	} finally {
-		try {
-			await fsp.rm(tempPath, { force: true });
-		} catch {
-			// best-effort temp cleanup
-		}
-	}
-}
-
-/**
- * Write a PR-workflow artifact with the gate's Windows-safe atomic persistence
- * contract. Checkout-preparation receipts must survive the same transient
- * rename contention as canonical gate state.
- */
-export async function writePrWorkflowAtomicJson(
-	directory: string,
-	filePath: string,
-	value: unknown,
-): Promise<void> {
-	await writeAtomicJson(directory, filePath, value);
-}
-
-function isoNow(): string {
-	return new Date().toISOString();
-}
-
-function delay(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms));
 }

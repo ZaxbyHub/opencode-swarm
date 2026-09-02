@@ -13,25 +13,43 @@ import {
 import { dirname, join } from 'node:path';
 import { withEvidenceLock } from '../evidence/lock.js';
 import { atomicWriteFile } from '../evidence/task-file.js';
+import {
+	emitUnscopedCouncilAttemptObservation,
+	observeCouncilAuditAppend,
+} from './council-observability.js';
+import { isIdentityDigest } from './council-review-identity.js';
 
-const VERSION = 1 as const;
+const VERSION = 2 as const;
 const MAX_ROUND = 10;
 const MAX_AUDIT_TAIL = 256 * 1024;
 const STATE_AGENT = 'council-round-state';
+const EXHAUSTION_EVENT_RELATIVE_PATH =
+	'council/events/max-rounds-exhaustion.jsonl';
 
+/**
+ * Council round scope, keyed by the canonical council review identity
+ * (issue #2102 contract B). `identityDigest` binds every round to the exact
+ * review-relevant plan content and council policy it was convened under:
+ * a status-only progress change keeps the identity (and therefore the
+ * accepted round), while any review-relevant plan or policy change opens a
+ * fresh authoritative generation under a new token. Legacy v1 files (whose
+ * tokens predate identity binding) are never read — they remain on disk,
+ * auditable, and are never rewritten as if they carried identity proof.
+ */
 export type CouncilRoundScope =
-	| { kind: 'task'; taskId: string }
-	| { kind: 'phase'; phaseNumber: number }
-	| { kind: 'final'; generation: string };
+	| { kind: 'task'; taskId: string; identityDigest: string }
+	| { kind: 'phase'; phaseNumber: number; identityDigest: string }
+	| { kind: 'final'; identityDigest: string };
 export type CouncilRoundTransition = 'stay' | 'advance' | 'close';
 
 type AuditScope =
-	| { kind: 'task'; scopeHash: string }
-	| { kind: 'phase'; phaseNumber: number }
-	| { kind: 'final'; scopeHash: string };
+	| { kind: 'task'; scopeHash: string; identityDigest: string }
+	| { kind: 'phase'; phaseNumber: number; identityDigest: string }
+	| { kind: 'final'; scopeHash: string; identityDigest: string };
 
 interface StateSnapshot {
-	version: 1;
+	version: 2;
+	identityDigest: string;
 	currentRound: number;
 	status: 'open' | 'closed';
 	maxRoundsExhausted: boolean;
@@ -58,7 +76,7 @@ interface CouncilRoundState extends StateSnapshot {
 }
 
 interface AttemptRecord {
-	version: 1;
+	version: 2;
 	event: 'received' | 'finalized' | 'recovered';
 	attemptId: string;
 	timestamp: string;
@@ -105,6 +123,14 @@ export interface CouncilAttemptInput {
 	request: unknown;
 	verdictCount: number;
 	members: string[];
+	/**
+	 * True when the user explicitly configured `council.escalateOnMaxRounds`.
+	 * Only this boolean reaches the durable max-rounds exhaustion event —
+	 * the configured handler/webhook string itself is never persisted or
+	 * logged (URL/query redaction, issue #2102 contract F). No outbound
+	 * execution ever happens.
+	 */
+	escalationConfigured?: boolean;
 	probePendingEvidence?: (
 		attemptId: string,
 		round: number,
@@ -161,7 +187,16 @@ function scopeToken(scope: CouncilRoundScope): string {
 		if (!/^\d+\.\d+(\.\d+)*$/.test(scope.taskId)) {
 			throw new Error('invalid task council scope');
 		}
-		return `task-${sha256(scope.taskId)}`;
+		if (!isIdentityDigest(scope.identityDigest)) {
+			throw new Error('invalid task council scope identity');
+		}
+		return `task-${sha256(
+			JSON.stringify({
+				k: 'task',
+				taskId: scope.taskId,
+				id: scope.identityDigest,
+			}),
+		)}`;
 	}
 	if (scope.kind === 'phase') {
 		if (
@@ -171,32 +206,50 @@ function scopeToken(scope: CouncilRoundScope): string {
 		) {
 			throw new Error('invalid phase council scope');
 		}
-		return `phase-${scope.phaseNumber}`;
+		if (!isIdentityDigest(scope.identityDigest)) {
+			throw new Error('invalid phase council scope identity');
+		}
+		return `phase-${sha256(
+			JSON.stringify({
+				k: 'phase',
+				phaseNumber: scope.phaseNumber,
+				id: scope.identityDigest,
+			}),
+		)}`;
 	}
-	if (
-		typeof scope.generation !== 'string' ||
-		scope.generation.length === 0 ||
-		scope.generation.length > 256
-	) {
-		throw new Error('invalid final council scope');
+	if (!isIdentityDigest(scope.identityDigest)) {
+		throw new Error('invalid final council scope identity');
 	}
-	return `final-${sha256(scope.generation)}`;
+	return `final-${sha256(JSON.stringify({ k: 'final', id: scope.identityDigest }))}`;
 }
 
 function auditScope(scope: CouncilRoundScope): AuditScope {
 	// Validate before deriving the bounded representation.
 	scopeToken(scope);
 	if (scope.kind === 'task') {
-		return { kind: 'task', scopeHash: sha256(scope.taskId) };
+		return {
+			kind: 'task',
+			scopeHash: sha256(scope.taskId),
+			identityDigest: scope.identityDigest,
+		};
 	}
 	if (scope.kind === 'phase') {
-		return { kind: 'phase', phaseNumber: scope.phaseNumber };
+		return {
+			kind: 'phase',
+			phaseNumber: scope.phaseNumber,
+			identityDigest: scope.identityDigest,
+		};
 	}
-	return { kind: 'final', scopeHash: sha256(scope.generation) };
+	return {
+		kind: 'final',
+		scopeHash: sha256(scope.identityDigest),
+		identityDigest: scope.identityDigest,
+	};
 }
 
 function sameAuditScope(left: AuditScope, right: AuditScope): boolean {
 	if (left.kind !== right.kind) return false;
+	if (left.identityDigest !== right.identityDigest) return false;
 	if (left.kind === 'phase' && right.kind === 'phase') {
 		return left.phaseNumber === right.phaseNumber;
 	}
@@ -247,6 +300,7 @@ function isSnapshot(value: unknown): value is StateSnapshot {
 	const state = value as Partial<StateSnapshot>;
 	return (
 		state.version === VERSION &&
+		isIdentityDigest(state.identityDigest) &&
 		isRound(state.currentRound) &&
 		(state.status === 'open' || state.status === 'closed') &&
 		typeof state.maxRoundsExhausted === 'boolean' &&
@@ -302,10 +356,13 @@ function auditTransitionIsConsistent(record: AttemptRecord): boolean {
 	);
 }
 
-function recoverAuditHistory(tail: AuditTail): StateSnapshot | undefined {
+function recoverAuditHistory(
+	tail: AuditTail,
+	identityDigest: string,
+): StateSnapshot | undefined {
 	let current: StateSnapshot | undefined = tail.truncated
 		? undefined
-		: initialState();
+		: initialState(identityDigest);
 	let awaiting: AttemptRecord | undefined;
 	let sawTransition = false;
 	for (const record of tail.records) {
@@ -426,7 +483,10 @@ function pendingMatchesParent(
 	);
 }
 
-function parseState(raw: string): CouncilRoundState {
+function parseState(
+	raw: string,
+	expectedIdentityDigest: string,
+): CouncilRoundState {
 	let value: unknown;
 	try {
 		value = JSON.parse(raw);
@@ -437,6 +497,11 @@ function parseState(raw: string): CouncilRoundState {
 		throw new CouncilRoundStateUncertainError('council round state is invalid');
 	}
 	const state = value as CouncilRoundState;
+	if (state.identityDigest !== expectedIdentityDigest) {
+		throw new CouncilRoundStateUncertainError(
+			'council round state identity does not match the request scope',
+		);
+	}
 	if (state.pending) {
 		const pending = state.pending;
 		if (
@@ -560,6 +625,38 @@ function appendAudit(path: string, record: AttemptRecord): void {
 	}
 }
 
+/**
+ * Append one audit record durably, then observe it (issue #2046 item 9).
+ * Every scoped append site in {@link runCouncilAttempt} routes through here so
+ * no attempt path — including the early returns (round mismatch, duplicate /
+ * closed scope, pending-state-write failure) and the recovery path — can evade
+ * observability. The observation fires only AFTER the durable append succeeds
+ * and is best-effort (never throws, never changes the durable outcome).
+ *
+ * The observation deliberately runs INSIDE the evidence lock (PR #2466 review
+ * note acknowledged as design): emit() is CPU-only with a buffered stream
+ * write (no I/O syscall of its own; the rotation statSync is throttled to
+ * every 50th emit) and is negligible next to the fsync the append just paid
+ * under the same lock. Deferring it until after lock release would reopen a
+ * crash window where a durable append outlives its observation — exactly the
+ * gap the every-append-emits contract forbids. Same placement as the evidence
+ * lock's own `evidence_lock_acquired` emission (`src/evidence/lock.ts`).
+ */
+function appendAuditAndObserve(
+	input: CouncilAttemptInput,
+	paths: ReturnType<typeof councilRoundStatePaths>,
+	councilRoundId: string,
+	record: AttemptRecord,
+): void {
+	_internals.appendAudit(paths.audit, record);
+	observeCouncilAuditAppend(
+		input.scope,
+		input.sessionID,
+		councilRoundId,
+		record,
+	);
+}
+
 interface AuditTail {
 	records: AttemptRecord[];
 	truncated: boolean;
@@ -603,9 +700,10 @@ function readAuditTail(path: string, scope: CouncilRoundScope): AuditTail {
 	};
 }
 
-function initialState(): CouncilRoundState {
+function initialState(identityDigest: string): CouncilRoundState {
 	return {
 		version: VERSION,
+		identityDigest,
 		currentRound: 1,
 		status: 'open',
 		maxRoundsExhausted: false,
@@ -615,6 +713,7 @@ function initialState(): CouncilRoundState {
 function snapshot(state: CouncilRoundState): StateSnapshot {
 	return {
 		version: VERSION,
+		identityDigest: state.identityDigest,
 		currentRound: state.currentRound,
 		status: state.status,
 		maxRoundsExhausted: state.maxRoundsExhausted,
@@ -710,6 +809,7 @@ function transitionState(
 	}
 	return {
 		version: VERSION,
+		identityDigest: state.identityDigest,
 		currentRound,
 		status,
 		maxRoundsExhausted,
@@ -763,10 +863,10 @@ async function loadState(
 	scope: CouncilRoundScope,
 ): Promise<CouncilRoundState> {
 	if (existsSync(paths.state))
-		return parseState(readFileSync(paths.state, 'utf8'));
+		return parseState(readFileSync(paths.state, 'utf8'), scope.identityDigest);
 	const tail = _internals.readAuditTail(paths.audit, scope);
 	const records = tail.records;
-	const recovered = recoverAuditHistory(tail);
+	const recovered = recoverAuditHistory(tail, scope.identityDigest);
 	if (tail.truncated && !recovered) {
 		throw new CouncilRoundStateUncertainError(
 			'council state is missing and the bounded audit tail has no recoverable transition',
@@ -777,7 +877,7 @@ async function loadState(
 			'council state is missing and the audit has no complete transition',
 		);
 	}
-	const state = recovered ?? initialState();
+	const state = recovered ?? initialState(scope.identityDigest);
 	await writeState(paths.state, state);
 	return state;
 }
@@ -807,17 +907,103 @@ function uncertainFailure(error: unknown): string {
 	);
 }
 
+/**
+ * Append one bounded, durable max-rounds exhaustion event (issue #2102
+ * contract F / #1650). Emitted only on the false→true exhaustion transition
+ * so repeated submissions cannot flood the log. The configured
+ * `escalateOnMaxRounds` handler/webhook string is NEVER persisted or logged —
+ * only this boolean is recorded — and no outbound execution ever happens.
+ * Best-effort: failures are logged non-fatally and never change the verdict.
+ */
+async function recordMaxRoundsExhaustionEvent(
+	directory: string,
+	input: CouncilAttemptInput,
+	round: number,
+	verdict: 'APPROVE' | 'CONCERNS' | 'REJECT' | undefined,
+	options?: { onlyIfMissing?: boolean },
+): Promise<void> {
+	await _internals.withLock(
+		directory,
+		EXHAUSTION_EVENT_RELATIVE_PATH,
+		STATE_AGENT,
+		'exhaustion-event',
+		async () => {
+			const path = join(directory, '.swarm', EXHAUSTION_EVENT_RELATIVE_PATH);
+			const record = {
+				version: VERSION,
+				type: 'max_rounds_exhausted',
+				timestamp: _internals.now(),
+				level: input.scope.kind,
+				scopeToken: scopeToken(input.scope),
+				identityDigest: input.scope.identityDigest,
+				round,
+				...(verdict !== undefined ? { verdict } : {}),
+				escalationConfigured: input.escalationConfigured === true,
+			};
+			mkdirSync(dirname(path), { recursive: true });
+			if (options?.onlyIfMissing && hasExhaustionEvent(path, record)) {
+				return;
+			}
+			const descriptor = openSync(path, 'a');
+			try {
+				writeSync(descriptor, `${JSON.stringify(record)}\n`, undefined, 'utf8');
+				fsyncSync(descriptor);
+			} finally {
+				closeSync(descriptor);
+			}
+		},
+	);
+}
+
+/**
+ * Reader-side check used by the recovery path: does the events file already
+ * carry an exhaustion event for this scope token + round? Tolerates a torn
+ * trailing line (diagnostics-grade artifact): unparseable lines are skipped,
+ * never fatal.
+ */
+function hasExhaustionEvent(
+	path: string,
+	record: { scopeToken: string; round: number },
+): boolean {
+	try {
+		const lines = readFileSync(path, 'utf8').split('\n');
+		for (const line of lines) {
+			if (!line.trim()) continue;
+			try {
+				const parsed = JSON.parse(line) as {
+					type?: unknown;
+					scopeToken?: unknown;
+					round?: unknown;
+				};
+				if (
+					parsed.type === 'max_rounds_exhausted' &&
+					parsed.scopeToken === record.scopeToken &&
+					parsed.round === record.round
+				) {
+					return true;
+				}
+			} catch {
+				// Torn/partial line — skip; diagnostics-grade tolerance.
+			}
+		}
+		return false;
+	} catch {
+		return false;
+	}
+}
+
 export async function runCouncilAttempt(
 	input: CouncilAttemptInput,
 ): Promise<string> {
 	const paths = councilRoundStatePaths(input.directory, input.scope);
+	const councilRoundId = scopeToken(input.scope);
 	let authoritativeRound = 1;
 	try {
 		return await _internals.withLock(
 			input.directory,
 			paths.lock,
 			STATE_AGENT,
-			scopeToken(input.scope),
+			councilRoundId,
 			async () => {
 				let state = await loadState(paths, input.scope);
 				if (state.pending) {
@@ -859,7 +1045,7 @@ export async function runCouncilAttempt(
 									lastAttemptId: state.pending.attemptId,
 									lastDigest: state.pending.digest,
 								};
-						_internals.appendAudit(paths.audit, {
+						appendAuditAndObserve(input, paths, councilRoundId, {
 							...baseRecord(
 								input,
 								state.pending.attemptId,
@@ -880,6 +1066,27 @@ export async function runCouncilAttempt(
 					await writeState(paths.state, state);
 				}
 
+				// Recovery-side exhaustion-event closure (PRR-020): if the
+				// authoritative state is already exhausted, make sure the
+				// durable event exists — a crash between writeState(next) and
+				// the original best-effort event write would otherwise lose it
+				// forever (the false→true transition cannot re-fire). The
+				// reader-side check dedupes, so this is idempotent. Best-effort
+				// and non-fatal, like the original emission.
+				if (state.maxRoundsExhausted) {
+					try {
+						await recordMaxRoundsExhaustionEvent(
+							input.directory,
+							input,
+							state.currentRound,
+							undefined,
+							{ onlyIfMissing: true },
+						);
+					} catch {
+						// Diagnostics-grade: never changes the verdict.
+					}
+				}
+
 				authoritativeRound = state.currentRound;
 				const digest = councilRequestDigest(input.request, authoritativeRound);
 				const attemptId = _internals.uuid();
@@ -890,7 +1097,10 @@ export async function runCouncilAttempt(
 					authoritativeRound,
 					'received',
 				);
-				_internals.appendAudit(paths.audit, { ...received, event: 'received' });
+				appendAuditAndObserve(input, paths, councilRoundId, {
+					...received,
+					event: 'received',
+				});
 
 				if (
 					input.clientRound !== undefined &&
@@ -901,7 +1111,7 @@ export async function runCouncilAttempt(
 						lastAttemptId: attemptId,
 						lastDigest: digest,
 					};
-					_internals.appendAudit(paths.audit, {
+					appendAuditAndObserve(input, paths, councilRoundId, {
 						...received,
 						event: 'finalized',
 						disposition: 'council_round_mismatch',
@@ -932,7 +1142,7 @@ export async function runCouncilAttempt(
 						lastAttemptId: attemptId,
 						lastDigest: digest,
 					};
-					_internals.appendAudit(paths.audit, {
+					appendAuditAndObserve(input, paths, councilRoundId, {
 						...received,
 						event: 'finalized',
 						disposition,
@@ -994,7 +1204,7 @@ export async function runCouncilAttempt(
 					// Pair the already-durable received record before surfacing the
 					// persistence failure. This prevents a later attempt from creating
 					// overlapping audit history if the snapshot is subsequently lost.
-					_internals.appendAudit(paths.audit, {
+					appendAuditAndObserve(input, paths, councilRoundId, {
 						...received,
 						event: 'finalized',
 						disposition: 'council_pending_state_write_failed',
@@ -1010,7 +1220,7 @@ export async function runCouncilAttempt(
 					throw error;
 				}
 				await evaluation.evidence?.commit(attemptId);
-				_internals.appendAudit(paths.audit, {
+				appendAuditAndObserve(input, paths, councilRoundId, {
 					...received,
 					event: 'finalized',
 					disposition: evaluation.disposition.slice(0, 80),
@@ -1022,6 +1232,23 @@ export async function runCouncilAttempt(
 					nextState: next,
 				});
 				await writeState(paths.state, next);
+				if (!state.maxRoundsExhausted && next.maxRoundsExhausted) {
+					// Durable exhaustion signal (#2102 contract F): best-effort,
+					// never changes the verdict, never executes anything outbound.
+					try {
+						await recordMaxRoundsExhaustionEvent(
+							input.directory,
+							input,
+							authoritativeRound,
+							evaluation.verdict,
+						);
+					} catch (eventError) {
+						// Non-fatal: the verdict, audit, and state are already durable.
+						// Intentionally no payload logging — the event record is what
+						// would carry escalation hints, and it simply was not written.
+						void eventError;
+					}
+				}
 				try {
 					await evaluation.afterCommit?.();
 				} catch {
@@ -1033,6 +1260,13 @@ export async function runCouncilAttempt(
 						authoritativeRound,
 						nextRound: next.currentRound,
 						maxRoundsExhausted: next.maxRoundsExhausted,
+						...(next.maxRoundsExhausted
+							? {
+									escalationRequired: true,
+									escalationMessage:
+										'Max council rounds exhausted without an accepting verdict — surface the unified feedback to the user and escalate; do not auto-advance.',
+								}
+							: {}),
 					},
 					null,
 					2,
@@ -1097,6 +1331,7 @@ export async function recordUnscopedCouncilAttempt(
 			'unscoped',
 			async () => {
 				mkdirSync(dirname(path), { recursive: true });
+				const attemptId = _internals.uuid();
 				const descriptor = openSync(path, 'a');
 				try {
 					writeSync(
@@ -1104,7 +1339,7 @@ export async function recordUnscopedCouncilAttempt(
 						`${JSON.stringify({
 							version: VERSION,
 							event: 'unscoped',
-							attemptId: _internals.uuid(),
+							attemptId,
 							timestamp: _internals.now(),
 							level,
 							disposition: disposition.slice(0, 80),
@@ -1118,6 +1353,16 @@ export async function recordUnscopedCouncilAttempt(
 				} finally {
 					closeSync(descriptor);
 				}
+				// Observe only after the durable write succeeded (issue #2046
+				// item 9): a durability failure emits nothing — the JSON
+				// failure response below stays the operator signal.
+				emitUnscopedCouncilAttemptObservation(
+					sessionID,
+					level,
+					disposition.slice(0, 80),
+					fingerprint,
+					attemptId,
+				);
 			},
 		);
 		return null;

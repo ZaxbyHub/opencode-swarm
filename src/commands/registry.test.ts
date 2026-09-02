@@ -383,7 +383,9 @@ describe('resolveCommand works with aliased commands', () => {
 	test('resolveCommand resolves primary command', () => {
 		const result = resolveCommand(['status']);
 		expect(result).not.toBeNull();
-		expect(result!.entry.description).toBe('Show current swarm state');
+		expect(result!.entry.description).toBe(
+			'Show current swarm state (plus background-work health when hooks.background_subagents is enabled)',
+		);
 	});
 
 	test('resolveCommand resolves compound command', () => {

@@ -3,7 +3,7 @@ import {
 	BUNDLED_PROJECT_SKILL_ROOT,
 	syncBundledProjectSkillsIfMissingAsync,
 } from '../config/bundled-skills.js';
-import type { AutoReviewConfig } from '../config/schema.js';
+import type { AutoReviewConfig, PluginConfig } from '../config/schema.js';
 import type { EvaluationModelDispatcher } from '../evaluation/model-dispatcher.js';
 import {
 	activatePrWorkflow,
@@ -18,6 +18,7 @@ import { handleAcknowledgeSpecDriftCommand } from './acknowledge-spec-drift.js';
 import { handleAgentsCommand } from './agents.js';
 import { handleAnalyzeCommand } from './analyze.js';
 import { handleApprovePlanCriticCommand } from './approve-plan-critic.js';
+import { handleApproveWriteCommand } from './approve-write.js';
 import { handleArchiveCommand } from './archive.js';
 import { handleAutoProceedCommand } from './auto-proceed.js';
 import { handleBenchmarkCommand } from './benchmark.js';
@@ -52,6 +53,16 @@ import { handleFullAutoCommand } from './full-auto.js';
 import { handleGateAuditCommand } from './gate-audit.js';
 import { handleGateStatsCommand } from './gate-stats.js';
 import { handleHandoffCommand } from './handoff.js';
+import {
+	handleBlueprintCurrentCommand,
+	handleBlueprintDiffCommand,
+	handleBlueprintExportCommand,
+	handleBlueprintHistoryCommand,
+	handleBlueprintValidateCommand,
+	handleHarnessCandidateDiffCommand,
+	handleHarnessCandidateShowCommand,
+	handleHarnessCandidateValidateCommand,
+} from './harness.js';
 import { handleHistoryCommand } from './history.js';
 import { handleKnowledgeHiveQuarantineCommand } from './hive-quarantine.js';
 import { handleIssueCommand } from './issue.js';
@@ -282,6 +293,7 @@ export type CommandContext = {
 	args: string[];
 	sessionID: string;
 	agents: Record<string, AgentDefinition>;
+	config?: PluginConfig;
 	packageRoot?: string;
 	/**
 	 * Dispatch path identifier. Issue #890: forensic audit trail for
@@ -350,10 +362,15 @@ async function handlePrFeedbackCommandWithTransition(
 		return handlePrFeedbackCommand(ctx.directory, ctx.args);
 	}
 	if (parsed.continuation) {
+		const exactCommand = parsed.prUrl
+			? `/swarm pr-feedback ${parsed.prUrl} continue from ${parsed.continuation.handoffPath}`
+			: `/swarm pr-feedback continue from ${parsed.continuation.handoffPath}`;
 		await transitionPrReviewToFeedback(ctx.directory, ctx.sessionID, {
 			runId: parsed.continuation.runId,
 			handoffPath: parsed.continuation.handoffPath,
 			prUrl: parsed.prUrl,
+			exactCommand,
+			confirmedByUser: true,
 		});
 	} else {
 		await activatePrWorkflow(ctx.directory, ctx.sessionID, 'PR_FEEDBACK', {
@@ -417,6 +434,169 @@ export type CommandEntry = {
 // Adding a command here automatically makes it available in both
 // the in-session hook AND the standalone CLI run() entry point.
 export const COMMAND_REGISTRY = {
+	'blueprint validate': {
+		handler: (ctx) =>
+			handleBlueprintValidateCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description:
+			'Validate a declarative harness blueprint or atomic blueprint patch',
+		args: '<project-relative-json>',
+		category: 'utility',
+		toolPolicy: 'none',
+	},
+	'blueprint current': {
+		handler: (ctx) =>
+			handleBlueprintCurrentCommand(ctx.directory, ctx.agents, {
+				config: ctx.config,
+			}),
+		description: 'Show the ledger-derived current harness blueprint projection',
+		args: '',
+		category: 'utility',
+		toolPolicy: 'none',
+	},
+	'blueprint history': {
+		handler: (ctx) =>
+			handleBlueprintHistoryCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'Show bounded hash-verified harness version history',
+		args: '[--limit <1..100>]',
+		category: 'utility',
+		toolPolicy: 'none',
+	},
+	'blueprint diff': {
+		handler: (ctx) =>
+			handleBlueprintDiffCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'Compare two stored harness blueprint versions',
+		args: '<from-version> <to-version>',
+		category: 'utility',
+		toolPolicy: 'none',
+	},
+	'blueprint export': {
+		handler: (ctx) =>
+			handleBlueprintExportCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'Export a canonical stored harness blueprint',
+		args: '[version]',
+		category: 'utility',
+		toolPolicy: 'none',
+	},
+	'harness candidate validate': {
+		handler: (ctx) =>
+			handleHarnessCandidateValidateCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'Validate an inert harness candidate manifest',
+		args: '<project-relative-json>',
+		category: 'utility',
+		toolPolicy: 'none',
+	},
+	'harness candidate show': {
+		handler: (ctx) =>
+			handleHarnessCandidateShowCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description:
+			'Show bounded harness candidate metadata without raw patch content',
+		args: '<candidate-id>',
+		category: 'utility',
+		toolPolicy: 'none',
+	},
+	'harness candidate diff': {
+		handler: (ctx) =>
+			handleHarnessCandidateDiffCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description:
+			'Show candidate file and blueprint-change metadata without raw patch content',
+		args: '<candidate-id>',
+		category: 'utility',
+		toolPolicy: 'none',
+	},
+	'blueprint-validate': {
+		handler: (ctx) =>
+			handleBlueprintValidateCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'TUI shortcut alias for blueprint validate',
+		category: 'utility',
+		aliasOf: 'blueprint validate',
+		deprecated: true,
+	},
+	'blueprint-current': {
+		handler: (ctx) =>
+			handleBlueprintCurrentCommand(ctx.directory, ctx.agents, {
+				config: ctx.config,
+			}),
+		description: 'TUI shortcut alias for blueprint current',
+		category: 'utility',
+		aliasOf: 'blueprint current',
+		deprecated: true,
+	},
+	'blueprint-history': {
+		handler: (ctx) =>
+			handleBlueprintHistoryCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'TUI shortcut alias for blueprint history',
+		category: 'utility',
+		aliasOf: 'blueprint history',
+		deprecated: true,
+	},
+	'blueprint-diff': {
+		handler: (ctx) =>
+			handleBlueprintDiffCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'TUI shortcut alias for blueprint diff',
+		category: 'utility',
+		aliasOf: 'blueprint diff',
+		deprecated: true,
+	},
+	'blueprint-export': {
+		handler: (ctx) =>
+			handleBlueprintExportCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'TUI shortcut alias for blueprint export',
+		category: 'utility',
+		aliasOf: 'blueprint export',
+		deprecated: true,
+	},
+	'harness-candidate-validate': {
+		handler: (ctx) =>
+			handleHarnessCandidateValidateCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'TUI shortcut alias for harness candidate validate',
+		category: 'utility',
+		aliasOf: 'harness candidate validate',
+		deprecated: true,
+	},
+	'harness-candidate-show': {
+		handler: (ctx) =>
+			handleHarnessCandidateShowCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'TUI shortcut alias for harness candidate show',
+		category: 'utility',
+		aliasOf: 'harness candidate show',
+		deprecated: true,
+	},
+	'harness-candidate-diff': {
+		handler: (ctx) =>
+			handleHarnessCandidateDiffCommand(ctx.directory, ctx.args, {
+				config: ctx.config,
+			}),
+		description: 'TUI shortcut alias for harness candidate diff',
+		category: 'utility',
+		aliasOf: 'harness candidate diff',
+		deprecated: true,
+	},
 	'acknowledge-spec-drift': {
 		handler: (ctx) =>
 			handleAcknowledgeSpecDriftCommand(
@@ -434,10 +614,20 @@ export const COMMAND_REGISTRY = {
 		category: 'diagnostics',
 		toolPolicy: 'restricted',
 	},
+	'approve-write': {
+		handler: (ctx) =>
+			handleApproveWriteCommand(ctx.directory, ctx.args, ctx.sessionID),
+		description:
+			'Issue a one-shot session/action/candidate/hash-bound write approval',
+		args: '<target-session-id> skill_improve <candidate-id> <candidate-content-hash> [--generation <n>] [--allowed-path-digest <sha256>]',
+		category: 'utility',
+		toolPolicy: 'human-only',
+	},
 	status: {
 		handler: async (ctx) =>
 			handleStatusCommand(ctx.directory, ctx.agents, ctx.sessionID),
-		description: 'Show current swarm state',
+		description:
+			'Show current swarm state (plus background-work health when hooks.background_subagents is enabled)',
 		category: 'core',
 		clashesWithNativeCcCommand: '/status',
 		toolPolicy: 'agent',
@@ -548,7 +738,8 @@ export const COMMAND_REGISTRY = {
 		deprecated: true,
 	},
 	diagnose: {
-		handler: (ctx) => handleDiagnoseCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleDiagnoseCommand(ctx.directory, ctx.args, ctx.sessionID),
 		description: 'Run health check on swarm state',
 		category: 'diagnostics',
 		toolPolicy: 'agent',
@@ -556,7 +747,8 @@ export const COMMAND_REGISTRY = {
 	},
 	// Alias: users commonly type 'diagnosis' — route to the same handler as 'diagnose'.
 	diagnosis: {
-		handler: (ctx) => handleDiagnoseCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleDiagnoseCommand(ctx.directory, ctx.args, ctx.sessionID),
 		description: 'Run health check on swarm state',
 		category: 'diagnostics',
 		aliasOf: 'diagnose',
@@ -573,6 +765,16 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'agent',
 		toolNoArgs: false,
 	},
+	'guardrail reset': {
+		handler: async (ctx) => {
+			const { handleGuardrailReset } = await import('./guardrail-reset.js');
+			return handleGuardrailReset(ctx.args, ctx.sessionID);
+		},
+		description:
+			'Reset one exact active invocation/action circuit after repair',
+		category: 'diagnostics',
+		toolPolicy: 'agent',
+	},
 	// Alias for TUI shortcut 'swarm-guardrail-explain' which extracts the
 	// subcommand as the single dash token 'guardrail-explain'. Without this alias
 	// resolveCommand(['guardrail-explain']) returns null and the TUI shows
@@ -588,6 +790,20 @@ export const COMMAND_REGISTRY = {
 			'Dry-run: show what the guardrails would do to a command or write target (executes nothing)',
 		category: 'diagnostics',
 		aliasOf: 'guardrail explain',
+		deprecated: true,
+	},
+	// Alias for the TUI shortcut 'swarm-guardrail-reset'. The dash-joined
+	// shortcut resolves to this one-token form, while the canonical command is
+	// the two-token 'guardrail reset' entry above.
+	'guardrail-reset': {
+		handler: async (ctx) => {
+			const { handleGuardrailReset } = await import('./guardrail-reset.js');
+			return handleGuardrailReset(ctx.args, ctx.sessionID);
+		},
+		description:
+			'Reset one exact active invocation/action circuit after repair',
+		category: 'diagnostics',
+		aliasOf: 'guardrail reset',
 		deprecated: true,
 	},
 	'guardrail-log': {
@@ -827,7 +1043,8 @@ export const COMMAND_REGISTRY = {
 	info: {
 		handler: async (ctx) =>
 			handleStatusCommand(ctx.directory, ctx.agents, ctx.sessionID),
-		description: 'Show current swarm state',
+		description:
+			'Show current swarm state (plus background-work health when hooks.background_subagents is enabled)',
 		category: 'core',
 		aliasOf: 'status',
 		deprecated: true,
@@ -841,7 +1058,8 @@ export const COMMAND_REGISTRY = {
 		deprecated: true,
 	},
 	health: {
-		handler: (ctx) => handleDiagnoseCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleDiagnoseCommand(ctx.directory, ctx.args, ctx.sessionID),
 		description: 'Run health check on swarm state',
 		category: 'diagnostics',
 		aliasOf: 'diagnose',
@@ -855,7 +1073,8 @@ export const COMMAND_REGISTRY = {
 		deprecated: true,
 	},
 	clear: {
-		handler: (ctx) => handleResetSessionCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleResetSessionCommand(ctx.directory, ctx.args, ctx.sessionID),
 		description:
 			'Clear session state while preserving plan, evidence, and knowledge',
 		category: 'utility',
@@ -1124,7 +1343,7 @@ export const COMMAND_REGISTRY = {
 			'Clear a stuck PR_REVIEW/PR_FEEDBACK mechanical gate and stop the auto-resume loop [mode] [reason]',
 		args: '[PR_REVIEW|PR_FEEDBACK] [reason...]',
 		details:
-			'Human-only escape hatch for an unrecoverable PR_REVIEW or PR_FEEDBACK mechanical gate. When the architect cannot reach complete_pr_workflow — for example a compound `git fetch && git checkout` was rejected as read-only shell syntax, the PR head cannot be fetched, or the working tree is on the wrong branch — running this clears the durable gate state for the current session and stops the auto-resume loop without depending on the trapped model. The agent itself cannot run this command; it must call the abort_pr_workflow tool (or ask you to run this command). Both paths funnel into the same fail-closed abortPrWorkflow hook, which refuses while the workflow is armed for publication or while PR workflow lanes are still in flight. This human-only force path has exactly one exception to that second refusal (issue #2251): when the ONLY lanes still blocking are ones past the 30-minute staleness horizon that the liveness probe reports as still running — a lane nothing will ever settle on a schedule — it clears the gate anyway, names exactly which lanes it overrode, and finalizes their delegation records so the session can start a new PR workflow. Those sessions are NOT stopped and their output is NOT collected. A lane with a fresh updatedAt still blocks even under force, and any delegation record that still keeps the session blocked is named in the warning. When checkout preparation preserved a stash, the result instructs the caller to run prepare_pr_workflow_checkout operation=restore after the clear. An audit event is appended to .swarm/events.jsonl.',
+			'Human-only escape hatch for an unrecoverable PR_REVIEW or PR_FEEDBACK mechanical gate. When the architect cannot reach complete_pr_workflow — for example a compound `git fetch && git checkout` was rejected as read-only shell syntax, the PR head cannot be fetched, or the working tree is on the wrong branch — running this clears the durable gate state for the current session and stops the auto-resume loop without depending on the trapped model. The agent itself cannot run this command; it must call the abort_pr_workflow tool (or ask you to run this command). Both paths funnel into the same fail-closed abortPrWorkflow hook, which refuses while the workflow is armed for publication or while PR workflow lanes are still in flight. Issue #2108 adds the two audited exits from an armed publication window: the invalidate_pr_feedback_publication tool (change approved content — every approval of the generation is superseded and the full ladder re-runs) and the abort_pr_workflow tool kind "cancel-publication" with cancel_publication: true and a reason (terminal no-publish cancellation; never grants push authority). A plain recovery or force abort never clears an armed window. This human-only force path has exactly one exception to the lane refusal (issue #2251): when the ONLY lanes still blocking are ones past the 30-minute staleness horizon that the liveness probe reports as still running — a lane nothing will ever settle on a schedule — it clears the gate anyway, names exactly which lanes it overrode, and finalizes their delegation records so the session can start a new PR workflow. Those sessions are NOT stopped and their output is NOT collected. A lane with a fresh updatedAt still blocks even under force, and any delegation record that still keeps the session blocked is named in the warning. When checkout preparation preserved a stash, the result instructs the caller to run prepare_pr_workflow_checkout operation=restore after the clear. An audit event is appended to .swarm/events.jsonl.',
 		category: 'utility',
 		toolPolicy: 'restricted',
 	},
@@ -1407,11 +1626,12 @@ export const COMMAND_REGISTRY = {
 		toolPolicy: 'restricted',
 	},
 	'reset-session': {
-		handler: (ctx) => handleResetSessionCommand(ctx.directory, ctx.args),
+		handler: (ctx) =>
+			handleResetSessionCommand(ctx.directory, ctx.args, ctx.sessionID),
 		description:
 			'Clear session state while preserving plan, evidence, and knowledge',
 		details:
-			'Deletes only .swarm/session/state.json and any other session files. Clears in-memory agent sessions, delegation chains, and active-agent mappings. Preserves plan, evidence, and knowledge for cross-session continuity. Also recovers stale coder settlements, releasing in-flight ownership held by this process, so dispatches cannot stay wedged on CODER_DISPATCH_IN_PROGRESS (issue #2268). Before deleting, auto-backs up the session files it removes to .swarm/reset-backups/<timestamp>/ (newest 5 kept).',
+			"Deletes only .swarm/session/state.json and other session files. Clears in-memory agent sessions, delegation chains, and active-agent mappings. Preserves plan, evidence, and knowledge. Also releases this session's pending knowledge-gate obligations (#2398) and recovers stale coder settlements so dispatches cannot wedge on CODER_DISPATCH_IN_PROGRESS (#2268). Auto-backs up removed files to .swarm/reset-backups/ (newest 5 kept).",
 		args: '',
 		category: 'utility',
 		toolPolicy: 'restricted',
@@ -1487,15 +1707,18 @@ export const COMMAND_REGISTRY = {
 		handler: (ctx) =>
 			handleFullAutoCommand(ctx.directory, ctx.args, ctx.sessionID),
 		description:
-			'Toggle Full-Auto Mode for the active session [on [mode]|off|status]',
-		args: 'on [assisted|supervised|strict], off, status',
+			'Control Full-Auto Mode for the active session [on [mode]|off|exit|status|retry-oversight|resume|abort]',
+		args: 'on [assisted|supervised|strict], off|exit, status, retry-oversight, resume, abort',
 		details:
 			'First-class toggle for Full-Auto Mode — a critic gate reviewing escalations on your behalf (the architect still plans and delegates; full-auto never executes tasks itself). No config-level enablement is required: "on" activates immediately (unless full_auto.locked is true in config), "off" disarms the run and returns the session to normal interactive operation, "status" reports the durable run state. ' +
 			'An optional mode after "on" overrides full_auto.mode for this run: assisted (critic consulted only on policy escalations), supervised (default — risky/high-impact actions reviewed by the critic), strict (ALL plan mutations reviewed by the critic). ' +
 			'While active, the critic answers architect questions and reviews phase boundaries, delegations, and risky actions on your behalf; only ESCALATE_TO_HUMAN verdicts halt the run for your input. ' +
+			'`retry-oversight` performs a transport-only health probe for an infrastructure/deadline pause and never replays the denied action. `resume` requires a recent successful matching probe and no active recovery blockers. `abort` terminates the durable run immediately. ' +
 			'The run state is durable (.swarm/full-auto-state.json) and survives restarts; toggle with no argument flips the current state.',
 		category: 'utility',
-		toolPolicy: 'none',
+		// An agent running under Full-Auto must not be able to disable its own
+		// oversight with `/swarm full-auto off`.
+		toolPolicy: 'human-only',
 	},
 	'auto-proceed': {
 		handler: (ctx: CommandContext) =>
@@ -1922,8 +2145,20 @@ export function resolveCommand(tokens: string[]): {
 } | null {
 	if (tokens.length === 0) return null;
 
-	// Try two-token compound key first (e.g. "evidence summary")
+	// Try the longest supported compound key first.
 	// Use Object.hasOwn to avoid prototype pollution via keys like "__proto__"
+	if (tokens.length >= 3) {
+		const compound =
+			`${tokens[0]} ${tokens[1]} ${tokens[2]}` as RegisteredCommand;
+		if (Object.hasOwn(COMMAND_REGISTRY, compound)) {
+			return {
+				entry: COMMAND_REGISTRY[compound] as CommandEntry,
+				remainingArgs: tokens.slice(3),
+				key: compound,
+			};
+		}
+	}
+	// Try two-token compound key (e.g. "evidence summary")
 	if (tokens.length >= 2) {
 		const compound = `${tokens[0]} ${tokens[1]}` as RegisteredCommand;
 		if (Object.hasOwn(COMMAND_REGISTRY, compound)) {

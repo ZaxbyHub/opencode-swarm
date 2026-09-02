@@ -11,7 +11,6 @@ import {
 	enforcePrReviewBaseDimensions,
 	_test_exports as gateInternals,
 	PR_REVIEW_BASE_DIMENSION_IDS,
-	PrReviewResilienceCircuitOpenError,
 	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
@@ -71,16 +70,6 @@ async function clearDelegationCheckpointArtifacts(root: string) {
 	}
 }
 
-async function removeDelegationStore(root: string) {
-	for (const filename of [
-		BACKGROUND_DELEGATIONS_FILE,
-		BACKGROUND_DELEGATIONS_CHECKPOINT_FILE,
-		BACKGROUND_DELEGATIONS_MANIFEST_FILE,
-	]) {
-		await fs.rm(path.join(root, '.swarm', filename), { force: true });
-	}
-}
-
 beforeEach(async () => {
 	directory = canonicalMkdtemp('dispatch-pr-resilience-circuit-prune-');
 	await initializeGitRepository(directory);
@@ -116,7 +105,7 @@ afterEach(async () => {
 });
 
 describe('dispatch_lanes PR review resilience circuit prune ordering', () => {
-	test('pre-prune staged migration preserves an older open circuit at exactly 128 legacy batches', async () => {
+	test('admits a staged dispatch at capacity and prunes without opening a circuit from untyped legacy evidence (issue #2382)', async () => {
 		const sessionID = 'review-session-circuit-prune';
 		const maxBatches = gateInternals.MAX_WORKFLOW_BATCHES;
 		const seededBatches = Array.from(
@@ -202,7 +191,13 @@ describe('dispatch_lanes PR review resilience circuit prune ordering', () => {
 			'utf-8',
 		);
 		gateInternals.resetTrackedStateCache();
-		let blockedError: unknown = null;
+
+		// Issue #2382: the seeded records carry NO typed provider
+		// classification, so they are ignored evidence — the capacity preflight
+		// does NOT open a circuit. The dispatch then surfaces the pre-existing
+		// capacity outcome (the GC's inventory-equality guard keeps every
+		// batch, so the batch limit is reached) instead of a circuit block.
+		let limitError: unknown = null;
 		try {
 			await enforcePrReviewBaseDimensions(
 				directory,
@@ -213,43 +208,47 @@ describe('dispatch_lanes PR review resilience circuit prune ordering', () => {
 					prHeadSha: 'abc123',
 					prReviewWaveStage: 'canary',
 					prReviewWaveAttempt: 0,
-					prReviewResiliencePolicy: DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+					prReviewResiliencePolicy: {
+						...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+						enabled: true,
+					},
 				},
 			);
 		} catch (error) {
-			blockedError = error;
+			limitError = error;
 		}
-		expect(blockedError).toBeInstanceOf(PrReviewResilienceCircuitOpenError);
-
+		expect(limitError).toBeInstanceOf(Error);
+		expect(String(limitError)).toContain('PR_REVIEW base batch limit reached');
 		const state = await readPrWorkflowGateState(directory, sessionID);
 		expect(state?.prReviewBaseDispatches).toHaveLength(maxBatches);
-		expect(state?.prReviewResilience?.circuit?.count).toBe(
-			PR_REVIEW_BASE_DIMENSION_IDS.length,
-		);
-		expect(state?.prReviewResilience?.circuit?.contributors).toHaveLength(
-			PR_REVIEW_BASE_DIMENSION_IDS.length,
-		);
+		expect(state.prReviewResilience?.circuit).toBeUndefined();
 
-		await removeDelegationStore(directory);
-		gateInternals.resetTrackedStateCache();
-		const reloaded = await readPrWorkflowGateState(directory, sessionID);
-		expect(reloaded?.prReviewResilience?.circuit?.count).toBe(
-			PR_REVIEW_BASE_DIMENSION_IDS.length,
-		);
-
-		await expect(
-			enforcePrReviewBaseDimensions(
+		// The same holds for a follow-up admission: still the capacity limit,
+		// never a circuit block built from untyped legacy evidence.
+		let followupError: unknown = null;
+		try {
+			await enforcePrReviewBaseDimensions(
 				directory,
 				sessionID,
 				[lane('circuit-prune-canary-retry', PR_REVIEW_BASE_DIMENSION_IDS[1]!)],
 				{
-					batchId: 'circuit-prune-attempt-0-retry',
+					batchId: 'circuit-prune-attempt-1',
 					prHeadSha: 'abc123',
 					prReviewWaveStage: 'canary',
-					prReviewWaveAttempt: 0,
-					prReviewResiliencePolicy: DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+					prReviewWaveAttempt: 1,
+					prReviewResiliencePolicy: {
+						...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+						enabled: true,
+					},
 				},
-			),
-		).rejects.toBeInstanceOf(PrReviewResilienceCircuitOpenError);
+			);
+		} catch (error) {
+			followupError = error;
+		}
+		expect(String(followupError)).toContain(
+			'PR_REVIEW base batch limit reached',
+		);
+		const reloaded = await readPrWorkflowGateState(directory, sessionID);
+		expect(reloaded?.prReviewResilience?.circuit).toBeUndefined();
 	});
 });

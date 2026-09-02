@@ -1,5 +1,7 @@
 # OpenCode Swarm Architecture
 
+Failure classification, retry, action-local circuits, scoped model fallback, and Full-Auto supervised recovery are documented in [Invocation failures, retry, and recovery](invocation-failures.md).
+
 ## Design Philosophy
 
 OpenCode Swarm is built on a simple premise: **multi-agent systems fail when they're unstructured**.
@@ -89,12 +91,53 @@ actions include:
   at graph schema 1.1.0; see `docs/repo-graph-call-graph.md` for scope and
   limitations.
 - `context_pack` returns a token-budgeted, symbol-level source slice (definition
-  + transitive callers/callees) built on tree-sitter extraction across all **12**
-  first-class languages (schema 1.2.0). See `docs/repo-graph-symbol-graph.md` for
-  design and limitations.
+  + transitive callers/callees) built on tree-sitter extraction across all **13**
+  first-class languages. Schema 1.5.0 adds stable IDs, relationship kind,
+  confidence, resolution provenance, and hashed source evidence while retaining
+  schema 1.2.0 edge compatibility. See `docs/repo-graph-symbol-graph.md`.
 - `graph_health` returns graph freshness plus bounded extraction diagnostics,
   including stale files, symbol-extraction failures, unresolved relative imports,
-  oversized files, unsupported files, binary skips, and unreadable skips.
+  oversized files, unsupported files, binary skips, unreadable skips, and
+  advisory low-confidence/unresolved SymbolEdge v2 counts. KG-14 (issue #1535)
+  adds confidence/resolution histograms, stale composition (changed vs removed
+  vs probe truncation), extraction-failure summaries by reason, and
+  `exportKinds` coverage.
+- KG-14 graph query actions (issue #1535): `symbol_search` finds symbols by
+  name with tiered, case-insensitive matching (exact/prefix/substring/subsequence) filterable by
+  declaration kind, language, file, and visibility; `symbol_context` returns a
+  focused definition-first context (stable symbol id, signature, optional
+  source, direct callers/callees) for a symbol id or file+symbol;
+  `impact_cone` returns a structured impact cone (symbol-level callers/callees
+  by depth with confidence, file-level blast-radius risk, affected tests,
+  routes, data/security facts, package boundaries, risk notes); `diff_context`
+  maps changed files or a unified diff to changed symbols and per-file impact;
+  `graph_explain` explains why a file/symbol/span is graph-relevant with
+  definition, symbol-edge provenance evidence, and file-level import reasons.
+  All are bounded (`top_n`) and workspace-relative; declaration kinds come from
+  the additive schema 1.6.0 `GraphNode.exportKinds` map (older graphs degrade
+  with `kind: null` and an explicit warning). See
+  `docs/repo-graph-symbol-graph.md`.
+- KG-15 change-risk pack actions (issue #1536): `route_trace` returns the full
+  risk pack for a route (handler + symbol binding with confidence, depth-1
+  services, data operations, auth/validation facts, unguarded-route findings,
+  covering tests) from `route_path`/`method`, `file`, or `symbol`;
+  `data_trace` returns readers/writers/deleters/configurers for an
+  entity/table/config/env key plus touching routes, tests, and risk notes;
+  `test_pack` returns tests, fixtures, helpers, covered/uncovered exports, and
+  missing-test warnings for a file, files list, symbol, or unified diff (test
+  association uses explicit imports plus colocated-name heuristics and never
+  executes tests). Packs read the additive schema 1.7.0
+  `GraphNode.ontology.links` (HANDLES_ROUTE / READS / WRITES / DELETES /
+  VALIDATES / AUTHORIZES / CONFIGURES); older graphs still answer with a
+  `linksSupported: false` degradation note, with TESTS / USES_FIXTURE
+  associations derived at query time from persisted edges. See
+  `docs/repo-graph-symbol-graph.md`.
+- KG-16 retrieval routing (issue #1537): `repo_map action="retrieve"`
+  classifies natural-language context requests into graph, exact lexical,
+  semantic-intent/fuzzy, security, test, or hybrid strategies. It invokes the
+  graph packs programmatically, falls back explicitly to bounded literal
+  workspace search, explains every action, enforces a context budget, and emits
+  content-free routing counters.
 
 The ontology extractor is intentionally conservative. It records detected facts
 and "detected missing guard" findings; it does not claim formal security proofs.
@@ -946,7 +989,7 @@ Swarm uses file locking to prevent concurrent writes from corrupting shared stat
 | File | Tool | Lock Behavior |
 |------|------|---------------|
 | `.swarm/plan.json` | `update_task_status` | Exclusive lock acquired before calling `updateTaskStatus()`. Lock losers return `success: false` with `recovery_guidance: "retry"`. |
-| `.swarm/events.jsonl` | `phase_complete` | Lock acquired before `appendFileSync`. If lock is unavailable, logs a warning and proceeds without lock protection (non-blocking). |
+| `.swarm/events.jsonl` | `phase_complete` (and every other core event producer) | Appends go through the core event store seam (`src/events/core-events.ts`), which holds the exclusive `.swarm/events.lock` (`wx` create, 5-min stale-break, bounded ~100 ms retry) for EVERY write — appends, compaction, and the authority-index update. On sustained contention the seam throws a typed `CORE_EVENT_STORE_LOCKED` that producers map onto their own contracts (operational producers catch+warn; the retry-escalation and repair-audit producers hard-fail with their pre-existing audit-locked codes). No producer ever appends without the store lock (issue #2039). |
 
 ### `update_task_status` Lock Semantics
 
@@ -1189,7 +1232,7 @@ The hooks system is the foundation of v5.1.x+, extended in v6.0.0 with config-aw
 - **`safeHook(handler)`** — Wraps any hook handler in a try/catch. Errors are logged at warning level; the original payload is returned unchanged. This ensures no hook can crash the plugin.
 - **`composeHandlers<I,O>(...handlers)`** — Composes multiple handlers for the same hook type into a single handler. Runs handlers sequentially on shared mutable output. Each handler is individually wrapped in `safeHook`.
 - **`readSwarmFileAsync(directory, filename)`** — Reads `.swarm/` files using `Bun.file().text()`. Returns empty string on missing files.
-- **`estimateTokens(text)`** — Conservative token estimation: `Math.ceil(text.length * 0.33)`.
+- **`estimateTokens(text)`** — the CANONICAL char→token heuristic (`Math.ceil(len × 0.33)`), plus `estimateTokensFromCharCount` / `estimateCharsForTokens`. Every char/token conversion in the plugin routes through this one module (issue #1616/#2107); provider-reported token usage is authoritative when available. Enforced by the standalone inline-formula gate `bun run check:token-formula` (`scripts/check-token-formula.ts`, issue #1616/#2107).
 
 ### Hook Registration Table
 
@@ -1423,6 +1466,7 @@ Registered on `experimental.chat.system.transform`:
 - Priority ordering: phase → task → decisions → agent context
 - Lower-priority items dropped when budget is exhausted
 - **FR-002 (unified budget):** when `context_budget.unified_injection_tokens` is set, the system-enhancer and knowledge-injector share a single ceiling with proportional split; if one component alone exceeds the ceiling, the other gets zero
+- **#2107 (per-turn producer ledger + final accounting):** the system-enhancer begins a per-session/per-turn producer ledger at composition start; every budget producer (knowledge-injector, context capsule, memory recall, advisory queue, banners, the linked-cohort and spec-drift advisories, the final warning) claims from it or records its emission; other messages-surface handlers earlier in the chain are covered by the final accounting's direct measurement of `output.messages` (requested/granted/emitted/truncated per producer, FIFO-bounded at 256 sessions). Ceiling enforcement activates only when `unified_injection_tokens` is configured; otherwise the ledger records accounting only and default behavior is unchanged (#1617 fail-open when the ledger is absent). A final context-accounting step runs after `consolidateSystemMessagesInPlace` in `messages.transform`: it measures the final surface once (messages via provider-preferring usage + system-chain emissions from the ledger; messages-surface producers are attribution-only; the role filter's later removal of `[FOR: role]` fragments is deducted from the ledger so removed bytes are never counted), resolves the same model limit physical pruning uses, records a `finalPromptPressure` snapshot in session state, and may prepend ONE bounded advisory warning whose own cost is included in the accounting.
 - **v6.0.0**: Injects config override hints for `always_security_review` and `integration_analysis.enabled` when non-default values are detected
 
 ---
@@ -1979,7 +2023,7 @@ Validates project state before agent execution:
 #### Config Doctor
 
 Startup service that validates and fixes configuration:
-- **Extended validation coverage** — validates all 62+ top-level schema keys with type checks for strings, booleans, numbers, and objects
+- **Extended validation coverage** — validates all 71 top-level schema keys with type checks for strings, booleans, numbers, and objects
 - **Unknown key detection** — warns on typos with Levenshtein-based suggestions (edit distance ≤ 2)
 - **Swarms hardening** — warns on empty `swarms` configuration (INFO), rejects path-traversal characters in swarm IDs (`..`, `/`, `\`, `\0`) as HIGH/ERROR
 - **Deprecated field flagging** — emits INFO findings for legacy `skill_improver.model`, `skill_improver.fallback_models`, `spec_writer.model`, `spec_writer.fallback_models` with replacement guidance

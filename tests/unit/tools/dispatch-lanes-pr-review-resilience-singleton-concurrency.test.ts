@@ -52,7 +52,10 @@ const HEAD_SHA = 'abc123';
 const BASE_SHA = 'def456';
 const REVISION_DIGEST = 'revision-1';
 const BASE_SCOPE = `complete PR diff ${BASE_SHA}...${HEAD_SHA}`;
-const RESILIENCE_POLICY = DEFAULT_PR_REVIEW_RESILIENCE_CONFIG;
+const RESILIENCE_POLICY = {
+	...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+	enabled: true,
+};
 const [DIM_A, DIM_B, DIM_C, DIM_D, DIM_E, DIM_F] = PR_REVIEW_BASE_DIMENSION_IDS;
 
 function lane(id: string, workflowLane: string, ownedWorkflowLanes?: string[]) {
@@ -86,8 +89,8 @@ async function persistAuthoritativeBaseLane(args: {
 }) {
 	const correlationId = `${args.batchId}--${args.laneId}`;
 	const text = [
-		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence',
-		`${args.candidateId} | ${args.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH`,
+		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags',
+		`${args.candidateId} | ${args.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH | ORDINARY | `,
 	].join('\n');
 	await recordPendingDelegation(directory, {
 		correlationId,
@@ -104,6 +107,7 @@ async function persistAuthoritativeBaseLane(args: {
 		mode: 'swarm-pr-review:base',
 		workflowLane: args.workflowLane,
 		ownedWorkflowLanes: args.ownedWorkflowLanes,
+		prReviewLegacyTranscriptCompatibility: true,
 		workspace: {
 			directory,
 			gitHead: HEAD_SHA,
@@ -258,6 +262,7 @@ describe('dispatch_lanes PR review resilience singleton and concurrency', () => 
 			laneId: `fanout-${DIM_F}`,
 			mode: 'swarm-pr-review:base',
 			workflowLane: DIM_F,
+			prReviewLegacyTranscriptCompatibility: true,
 			workspace: {
 				directory,
 				gitHead: HEAD_SHA,
@@ -297,7 +302,7 @@ describe('dispatch_lanes PR review resilience singleton and concurrency', () => 
 
 		await expect(
 			assertPrReviewBaseCoverageSettled(directory, sessionID),
-		).resolves.toMatchObject({ prHeadSha: HEAD_SHA });
+		).resolves.toMatchObject({ state: { prHeadSha: HEAD_SHA } });
 
 		await expect(
 			enforcePrReviewBaseDimensions(

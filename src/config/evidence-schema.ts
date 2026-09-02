@@ -208,6 +208,13 @@ export const PlaceholderEvidenceSchema = BaseEvidenceSchema.extend({
 	files_scanned: z.number().int(),
 	files_with_findings: z.number().int(),
 	findings_count: z.number().int(),
+	// Scoping-mode audit metadata (PR #2457 review follow-up): present only
+	// when the caller supplied an added_lines map. Bounded counts — never the
+	// map itself — so auditors can tell a diff-scoped verdict from an
+	// unfiltered one without growing the evidence bundle.
+	diff_scoped: z.boolean().optional(),
+	added_lines_files: z.number().int().min(0).optional(),
+	added_lines_total: z.number().int().min(0).optional(),
 });
 export type PlaceholderEvidence = z.infer<typeof PlaceholderEvidenceSchema>;
 
@@ -238,7 +245,13 @@ export const SastEvidenceSchema = BaseEvidenceSchema.extend({
 	// Baseline-diffing fields (optional — present when baseline diff was active)
 	new_findings: z.array(SastFindingSchema).optional(),
 	pre_existing_findings: z.array(SastFindingSchema).optional(),
+	// #2302: findings matched via reflow identity (same finding, new
+	// position/window) — reported separately, never gating.
+	moved_findings: z.array(SastFindingSchema).optional(),
 	baseline_used: z.boolean().optional(),
+	// Result-bucket truncation flags (emitted when a bucket exceeded the cap).
+	truncated_pre_existing: z.boolean().optional(),
+	truncated_moved_findings: z.boolean().optional(),
 });
 export type SastEvidence = z.infer<typeof SastEvidenceSchema>;
 
@@ -285,6 +298,16 @@ export const BuildEvidenceSchema = BaseEvidenceSchema.extend({
 	runs_count: z.number().int(),
 	failed_count: z.number().int(),
 	skipped_reason: z.string().optional(),
+	environment_unavailable: z
+		.array(
+			z.object({
+				ecosystem: z.string(),
+				reason: z.string(),
+				code: z.literal('environment_unavailable'),
+				required_commands: z.array(z.string()).optional(),
+			}),
+		)
+		.optional(),
 });
 export type BuildEvidence = z.infer<typeof BuildEvidenceSchema>;
 

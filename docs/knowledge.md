@@ -131,11 +131,11 @@ Every entry is a JSON line with these fields (see `src/hooks/knowledge-types.ts`
   "id": "lesson-abc123",
   "tier": "swarm",
   "lesson": "Prefer stream.Readable.from(generator) over async iterators for backpressure.",
-  "category": "pattern",
+  "category": "architecture",
   "tags": ["node", "streams"],
   "scope": "global",
   "confidence": 0.9,
-  "status": "active",
+  "status": "established",
   "confirmed_by": ["..."],
   "retrieval_outcomes": [],
   "phases_alive": 0,
@@ -285,12 +285,13 @@ from counters or inferred from cohort data. V2 is read first throughout cutover,
 and legacy access is restricted to the explicit imported pre-cutover trace set
 until that set drains to zero.
 
-Legacy sections mapped into the new schema:
+Legacy sections imported (each bullet's category is inferred from its text into a current
+`KnowledgeCategory` — see `inferCategoryFromText` in `src/hooks/knowledge-migrator.ts`):
 
-- `lessons-learned` → category `lesson`
-- `patterns` → category `pattern`
-- `sme-cache` → category `domain`
-- `decisions` → category `decision`
+- `lessons-learned`
+- `patterns`
+- `sme-cache`
+- `decisions`
 
 Entries that fail schema validation are dropped. Near-duplicates are collapsed via the dedup threshold.
 
@@ -603,17 +604,22 @@ critical directive was shown but received no terminal acknowledgment
 two escape hatches so the gate cannot deadlock a session forever:
 
 - **`max_gate_denials`** (default `5`) — after this many consecutive denials
-  against the same unacknowledged critical-directive set, the gate
+  against the same unacknowledged critical-directive set (keyed by the
+  stable entry-id set, so re-injecting the same directive under a fresh
+  trace does not reset the count — #2398), the gate
   records a nonterminal gate release for the pending directives and lets the
   action through without claiming they were applied.
 - **`gate_staleness_ms`** (default `600000`, 10 minutes) — a critical
   directive shown longer ago than this receives the same nonterminal release,
-  regardless of denial count.
+  regardless of denial count. A release does not reset the denial budget: a
+  fresh re-display of the same entry continues the accumulated count (#2398).
 
 Both auto-clears write an audit event to `.swarm/events.jsonl`
 (`knowledge_application_gate_denial_limit_clear` or
 `knowledge_application_gate_staleness_clear`) before the action proceeds — the
-bypass is never silent. These are safety nets against a broken acknowledgment
+bypass is never silent (the `/swarm reset-session` escape writes
+`knowledge_application_gate_session_reset_clear` the same way). These are
+safety nets against a broken acknowledgment
 pipeline (e.g. an ack marker that failed to parse), not a routine escape path:
 enforcement still applies for the first `max_gate_denials` attempts or the
 full `gate_staleness_ms` window. A release is not a terminal outcome, does not

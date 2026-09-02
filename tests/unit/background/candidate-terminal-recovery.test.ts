@@ -62,8 +62,8 @@ describe('candidate artifact terminal protocol recovery', () => {
 			'Completed the requested security and reliability review.',
 			'```',
 			BASE_HEADER,
-			'[CANDIDATE] | R-1 | reliability-performance | LOW | cleanup | tests/a.test.ts:1 | child cleanup can leak | observed teardown path | repeated runs retain handles | MEDIUM',
-			'[CANDIDATE] | R-2 | reliability-performance | INFO | diagnostics | src/a.ts:2 | git error loses context | inspected failure path | debugging becomes slower | LOW',
+			'[CANDIDATE] | R-1 | reliability-performance | LOW | cleanup | tests/a.test.ts:1 | child cleanup can leak | observed teardown path | repeated runs retain handles | MEDIUM | ORDINARY | ',
+			'[CANDIDATE] | R-2 | reliability-performance | INFO | diagnostics | src/a.ts:2 | git error loses context | inspected failure path | debugging becomes slower | LOW | ORDINARY | ',
 			`[CLEAN] | security-trust | ${SCOPE} | ${EVIDENCE} | HIGH`,
 			'```',
 		].join('\n');
@@ -152,7 +152,7 @@ describe('candidate artifact terminal protocol recovery', () => {
 			'Final findings:',
 			'```text',
 			MICRO_HEADER,
-			'[CANDIDATE] | M-1 | auth-identity-secrets | HIGH | security | src/auth.ts:4 | missing authorization | authorization invariant | request reaches protected state | HIGH',
+			'[CANDIDATE] | M-1 | auth-identity-secrets | HIGH | security | src/auth.ts:4 | missing authorization | authorization invariant | request reaches protected state | HIGH | ORDINARY | ',
 			'```',
 		].join('\n');
 		const parsed = parseNormalized(text, 'micro_lane', 'auth-identity-secrets');

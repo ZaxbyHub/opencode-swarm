@@ -42,6 +42,12 @@ const SYMBOL_EXTENSIONS = new Set([
 	'.pyw',
 	'.rs',
 	'.go',
+	'.dart',
+	'.rb',
+	'.rake',
+	'.gemspec',
+	'.php',
+	'.phtml',
 ]);
 
 // Directories to skip during workspace scanning
@@ -630,6 +636,454 @@ export function extractGoSymbols(filePath: string, cwd: string): SymbolInfo[] {
 	});
 }
 
+// ============ Dart / Ruby / PHP Extraction (issue #1531) ============
+
+/**
+ * Single-slot memo of line-start offsets for the most recent source:
+ * `lineNumberAt` is called once or more per extracted def; a naive forward
+ * scan is O(file) per call and O(defs × bytes) per file (PR #2361 PRR-018).
+ * Extractors process one file per call, so a one-entry cache is sufficient
+ * and trivially bounded. Binary search over the cached offsets makes each
+ * lookup O(log lines).
+ */
+let memoSource: string | null = null;
+let memoStarts: number[] = [0];
+
+function lineStartsOf(content: string): number[] {
+	if (memoSource !== content) {
+		const starts = [0];
+		for (let i = 0; i < content.length; i++) {
+			if (content[i] === '\n') starts.push(i + 1);
+		}
+		memoSource = content;
+		memoStarts = starts;
+	}
+	return memoStarts;
+}
+
+/** 1-based line number of the character at `index`. */
+function lineNumberAt(content: string, index: number): number {
+	const starts = lineStartsOf(content);
+	let lo = 0;
+	let hi = starts.length - 1;
+	while (lo < hi) {
+		const mid = (lo + hi + 1) >> 1;
+		if (starts[mid] <= index) lo = mid;
+		else hi = mid - 1;
+	}
+	return lo + 1;
+}
+
+/**
+ * Byte offset just past the line starting at `offset` of `lineLength`,
+ * accounting for the ACTUAL separator width (CRLF consumes two bytes —
+ * issue #1526 bug class, PR #2361 PRR-001).
+ */
+function advanceLineOffset(
+	source: string,
+	offset: number,
+	lineLength: number,
+): number {
+	const after = offset + lineLength;
+	if (source[after] === '\r' && source[after + 1] === '\n') return after + 2;
+	if (source[after] === '\n' || source[after] === '\r') return after + 1;
+	return after;
+}
+
+function lineTextAt(content: string, index: number): string {
+	const lineStart = content.lastIndexOf('\n', Math.max(0, index - 1)) + 1;
+	const lineEnd = content.indexOf('\n', lineStart);
+	return content
+		.substring(lineStart, lineEnd === -1 ? content.length : lineEnd)
+		.trim()
+		.substring(0, 120);
+}
+
+function findMatchingBrace(content: string, openIndex: number): number | null {
+	if (content[openIndex] !== '{') return null;
+	let depth = 0;
+	for (let i = openIndex; i < content.length; i++) {
+		const ch = content[i];
+		if (ch === '{') depth++;
+		else if (ch === '}') {
+			depth--;
+			if (depth === 0) return i;
+		}
+	}
+	return null;
+}
+
+/**
+ * Conservative lexical mask for regex scanning: replaces `//`, `#`, and
+ * block comments with spaces AND blanks single/double-quoted string CONTENTS
+ * (delimiters kept), preserving newlines (and thus offsets/line structure)
+ * so `lineNumberAt`/`lineTextAt` stay accurate against the original text.
+ * Braces/semicolons inside literals therefore never reach the structural
+ * scans. Best-effort filter, not a lexer; heredocs are handled separately.
+ */
+function stripLineCommentsForScan(content: string): string {
+	let out = '';
+	let inBlock = false;
+	let quote: '"' | "'" | null = null;
+	for (let i = 0; i < content.length; i++) {
+		const ch = content[i];
+		const two = content.substring(i, i + 2);
+		if (quote !== null) {
+			if (ch === '\\') {
+				out += '  ';
+				i++;
+				continue;
+			}
+			if (ch === quote) {
+				quote = null;
+				out += ch;
+			} else {
+				out += ch === '\n' ? '\n' : ' ';
+			}
+			continue;
+		}
+		if (!inBlock && two === '/*') {
+			inBlock = true;
+			out += '  ';
+			i++;
+			continue;
+		}
+		if (inBlock) {
+			if (two === '*/') {
+				inBlock = false;
+				out += '  ';
+				i++;
+			} else {
+				out += ch === '\n' ? '\n' : ' ';
+			}
+			continue;
+		}
+		if (two === '//' || ch === '#') {
+			// Line comment: mask the marker and everything to end of line.
+			out += two === '//' ? '  ' : ' ';
+			if (two === '//') i++;
+			while (i + 1 < content.length && content[i + 1] !== '\n') {
+				out += ' ';
+				i++;
+			}
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			// Triple-quoted multiline strings (Dart '''...''' / """..."""):
+			// a run of 3 opens a string that only a matching run of 3 closes.
+			if (ch === content[i + 1] && ch === content[i + 2]) {
+				out += ch + ch + ch;
+				i += 2;
+				while (i + 1 < content.length) {
+					if (
+						content[i + 1] === ch &&
+						content[i + 2] === ch &&
+						content[i + 3] === ch
+					) {
+						out += ch + ch + ch;
+						i += 3;
+						break;
+					}
+					out += content[i + 1] === '\n' ? '\n' : ' ';
+					i++;
+				}
+				continue;
+			}
+			quote = ch;
+			out += ch;
+			continue;
+		}
+		out += ch;
+	}
+	return out;
+}
+
+function addUniqueSymbol(
+	symbols: SymbolInfo[],
+	seen: Set<string>,
+	candidate: SymbolInfo,
+): void {
+	const key = `${candidate.name}:${candidate.kind}`;
+	if (seen.has(key)) return;
+	seen.add(key);
+	symbols.push(candidate);
+}
+
+function sortSymbols(symbols: SymbolInfo[]): SymbolInfo[] {
+	return symbols.sort((a, b) => {
+		if (a.line !== b.line) return a.line - b.line;
+		return a.name.localeCompare(b.name);
+	});
+}
+
+/**
+ * Dart symbols: classes/mixins/enums/extensions and functions. Visibility is
+ * the `_`-prefix convention. Functions declared INSIDE a type body are
+ * emitted as qualified `TypeName.member` method symbols (mirroring the Swift
+ * extractor's naming) instead of being mislabeled as top-level functions;
+ * the qualification also keeps same-named members of different classes from
+ * collapsing in the name:kind dedup.
+ */
+export function extractDartSymbols(
+	filePath: string,
+	cwd: string,
+): SymbolInfo[] {
+	const raw = readValidatedSourceFile(filePath, cwd);
+	if (raw === null) return [];
+	const content = stripLineCommentsForScan(raw);
+	const symbols: SymbolInfo[] = [];
+	const seen = new Set<string>();
+	const typeBodies: Array<{ start: number; end: number; name: string }> = [];
+	// `extension type` (Dart 3) must match before bare `extension`; the
+	// `(?!on\b)` lookahead skips unnamed extensions; `typedef` is a type def.
+	for (const match of content.matchAll(
+		/\b(extension\s+type|class|mixin|enum|extension|typedef)\s+(?!on\b)([A-Za-z_][A-Za-z0-9_]*)/g,
+	)) {
+		const kindWord = match[1].trim().split(/\s+/).pop() ?? match[1];
+		const kind: SymbolInfo['kind'] =
+			kindWord === 'enum' ? 'enum' : kindWord === 'class' ? 'class' : 'type';
+		const bodyStart = content.indexOf('{', match.index);
+		const bodyEnd =
+			bodyStart === -1 ? null : findMatchingBrace(content, bodyStart);
+		if (bodyStart !== -1 && bodyEnd !== null) {
+			typeBodies.push({ start: bodyStart, end: bodyEnd, name: match[2] });
+		}
+		addUniqueSymbol(symbols, seen, {
+			name: match[2],
+			kind,
+			exported: !match[2].startsWith('_'),
+			signature: lineTextAt(raw, match.index),
+			line: lineNumberAt(raw, match.index),
+		});
+	}
+	const dartFunctionRe =
+		/\b(?:void|[A-Za-z_][A-Za-z0-9_<>,?]*)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+	const KEYWORD_NAME_SKIP = new Set([
+		'if',
+		'for',
+		'while',
+		'switch',
+		'return',
+		'else',
+		'throw',
+		'new',
+		'await',
+		'yield',
+		'case',
+		'catch',
+		// `void Function(int)` is a function-TYPE reference, not a declaration
+		'Function',
+	]);
+	const KEYWORD_TYPE_SKIP = new Set([
+		'return',
+		'else',
+		'throw',
+		'new',
+		'await',
+		'yield',
+		'case',
+		'catch',
+		'final',
+		'const',
+	]);
+	for (const match of content.matchAll(dartFunctionRe)) {
+		if (KEYWORD_NAME_SKIP.has(match[1])) continue;
+		if (KEYWORD_TYPE_SKIP.has(match[0].split(/\s+/)[0])) continue;
+		const enclosing = typeBodies.find(
+			(body) => match.index >= body.start && match.index <= body.end,
+		);
+		addUniqueSymbol(symbols, seen, {
+			name: enclosing ? `${enclosing.name}.${match[1]}` : match[1],
+			kind: enclosing ? 'method' : 'function',
+			exported: !match[1].startsWith('_'),
+			signature: lineTextAt(raw, match.index),
+			line: lineNumberAt(raw, match.index),
+		});
+	}
+	return sortSymbols(symbols);
+}
+
+/**
+ * Ruby symbols: modules, classes, constants, and `def` methods with
+ * `private`/`protected` section tracking. A nested class/module saves and
+ * restores the outer section (approximate `end`-balance tracking); targeted
+ * `private :sym` marks the named method. Singleton methods keep their `self.`
+ * qualification in the name. Dynamic constructs (`define_method`, `send`,
+ * metaprogramming) are invisible to this scanner by design.
+ */
+export function extractRubySymbols(
+	filePath: string,
+	cwd: string,
+): SymbolInfo[] {
+	const raw = readValidatedSourceFile(filePath, cwd);
+	if (raw === null) return [];
+	const symbols: SymbolInfo[] = [];
+	const seen = new Set<string>();
+	const byName = new Map<string, SymbolInfo>();
+	let offset = 0;
+	let currentVisibility: 'public' | 'protected' | 'private' = 'public';
+	const visibilityStack: Array<{
+		visibility: 'public' | 'protected' | 'private';
+		atEndLevel: number;
+	}> = [];
+	let endLevel = 0;
+	let heredocId: string | null = null;
+	for (const line of raw.split(/\r?\n/)) {
+		const trimmed = line.trim();
+		if (heredocId !== null) {
+			// Heredoc body: string data, not code — a literal `private` here
+			// must not flip the visibility section.
+			if (trimmed === heredocId) heredocId = null;
+		} else {
+			// The opener line itself still carries code (`QUERY = <<~SQL`).
+			// Context-anchored: binary shift (`arr <<item`, `x << y`) never
+			// opens a heredoc — only line start, `=`/`(`/`,`/`[`, or a
+			// value-position keyword (puts/print/raise/return/p) does.
+			const open = trimmed.match(
+				/(?:^|[=(,[]\s*|(?:puts|print|raise|return|p)\s+)<<[~-]?['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/,
+			);
+			if (open) heredocId = open[1];
+			if (trimmed === 'private' || trimmed === 'protected') {
+				currentVisibility = trimmed;
+			}
+			// `private :a, :b` marks the named methods without switching the section.
+			const targeted = trimmed.match(
+				/^(private|protected)\s+((?::[A-Za-z_][A-Za-z0-9_?!]*\s*,\s*)*:[A-Za-z_][A-Za-z0-9_?!]*)$/,
+			);
+			if (targeted) {
+				for (const part of targeted[2].split(',')) {
+					const sym = byName.get(part.trim().replace(/^:/, ''));
+					if (sym) {
+						sym.exported = false;
+					}
+				}
+			}
+			const moduleMatch = trimmed.match(/^module\s+([A-Z][A-Za-z0-9_:]*)/);
+			const classMatch = trimmed.match(/^class\s+([A-Z][A-Za-z0-9_:]*)/);
+			if (moduleMatch || classMatch) {
+				visibilityStack.push({
+					visibility: currentVisibility,
+					atEndLevel: endLevel,
+				});
+				currentVisibility = 'public';
+				endLevel++;
+			}
+			const constMatch = trimmed.match(/^([A-Z][A-Za-z0-9_]*)\s*=/);
+			const methodMatch = trimmed.match(
+				/^def\s+(?:(self)\.)?([A-Za-z_][A-Za-z0-9_?!]*)/,
+			);
+			if (methodMatch) endLevel++;
+			const lineIndex = offset + Math.max(0, line.indexOf(trimmed));
+			if (moduleMatch || classMatch || constMatch || methodMatch) {
+				const singleton = Boolean(methodMatch?.[1]);
+				const shortName = methodMatch?.[2];
+				const name =
+					moduleMatch?.[1] ??
+					classMatch?.[1] ??
+					constMatch?.[1] ??
+					(singleton && shortName ? `self.${shortName}` : shortName!);
+				const visibility = singleton ? 'public' : currentVisibility;
+				const candidate: SymbolInfo = {
+					name,
+					kind: moduleMatch
+						? 'type'
+						: classMatch
+							? 'class'
+							: constMatch
+								? 'const'
+								: 'method',
+					exported: methodMatch
+						? visibility !== 'private' && !(shortName ?? '').startsWith('_')
+						: true,
+					signature: trimmed.substring(0, 100),
+					line: lineNumberAt(raw, lineIndex),
+				};
+				addUniqueSymbol(symbols, seen, candidate);
+				byName.set(name, candidate);
+			}
+			const ends = trimmed.match(/\bend\b/g)?.length ?? 0;
+			if (ends > 0) {
+				endLevel -= ends;
+				while (
+					visibilityStack.length > 0 &&
+					endLevel <= visibilityStack[visibilityStack.length - 1].atEndLevel
+				) {
+					currentVisibility = visibilityStack.pop()!.visibility;
+				}
+			}
+		}
+		offset = advanceLineOffset(raw, offset, line.length);
+	}
+	return sortSymbols(symbols);
+}
+
+/**
+ * PHP symbols: namespaces, traits/interfaces/classes, functions and methods
+ * with visibility modifiers. Dynamic constructs (variable functions/classes,
+ * variable variables, Blade directives in `.blade.php`) are best-effort
+ * only — see docs/php-laravel.md.
+ */
+export function extractPhpSymbols(filePath: string, cwd: string): SymbolInfo[] {
+	const raw = readValidatedSourceFile(filePath, cwd);
+	if (raw === null) return [];
+	const content = stripLineCommentsForScan(raw);
+	const symbols: SymbolInfo[] = [];
+	const seen = new Set<string>();
+	const typeRanges: Array<{ start: number; end: number }> = [];
+	for (const match of content.matchAll(
+		/\bnamespace\s+([A-Za-z_\\][A-Za-z0-9_\\]*)\s*[;{]/g,
+	)) {
+		addUniqueSymbol(symbols, seen, {
+			name: match[1],
+			kind: 'type',
+			exported: true,
+			signature: lineTextAt(raw, match.index),
+			line: lineNumberAt(raw, match.index),
+		});
+	}
+	for (const match of content.matchAll(
+		/\b(?:final\s+|abstract\s+|readonly\s+)?(class|interface|trait|enum)\s+([A-Za-z_][A-Za-z0-9_]*)/g,
+	)) {
+		const bodyStart = content.indexOf('{', match.index);
+		const bodyEnd =
+			bodyStart === -1 ? null : findMatchingBrace(content, bodyStart);
+		if (bodyStart !== -1 && bodyEnd !== null) {
+			typeRanges.push({ start: bodyStart, end: bodyEnd });
+		}
+		addUniqueSymbol(symbols, seen, {
+			name: match[2],
+			kind:
+				match[1] === 'class'
+					? 'class'
+					: match[1] === 'enum'
+						? 'enum'
+						: 'interface',
+			exported: !match[2].startsWith('_'),
+			signature: lineTextAt(raw, match.index),
+			line: lineNumberAt(raw, match.index),
+		});
+	}
+	// Modifier group bounded {0,6}: an unbounded star is quadratic on
+	// adversarial modifier runs (PR #2361 PRR-012).
+	for (const match of content.matchAll(
+		/\b(?:(public|protected|private|static|final|abstract)\s+){0,6}function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/g,
+	)) {
+		const insideType = typeRanges.some(
+			(range) => match.index >= range.start && match.index <= range.end,
+		);
+		const modifiers = match[0].slice(0, match[0].indexOf('function'));
+		const visibility = modifiers.match(/\b(public|protected|private)\b/)?.[1];
+		addUniqueSymbol(symbols, seen, {
+			name: match[2],
+			kind: insideType ? 'method' : 'function',
+			exported: visibility !== 'private' && !match[2].startsWith('_'),
+			signature: lineTextAt(raw, match.index),
+			line: lineNumberAt(raw, match.index),
+		});
+	}
+	return sortSymbols(symbols);
+}
+
 // ============ Workspace File Discovery ============
 
 /**
@@ -722,6 +1176,18 @@ function searchWorkspaceSymbols(
 			case '.go':
 				syms = extractGoSymbols(relFile, cwd);
 				break;
+			case '.dart':
+				syms = _internals.extractDartSymbols(relFile, cwd);
+				break;
+			case '.rb':
+			case '.rake':
+			case '.gemspec':
+				syms = _internals.extractRubySymbols(relFile, cwd);
+				break;
+			case '.php':
+			case '.phtml':
+				syms = _internals.extractPhpSymbols(relFile, cwd);
+				break;
 			default:
 				continue;
 		}
@@ -774,8 +1240,9 @@ export const symbols: ToolDefinition = createSwarmTool({
 	description:
 		'Extract all exported symbols from a source file: functions with signatures, ' +
 		'classes with public members, interfaces, types, enums, constants. ' +
-		'Supports TypeScript/JavaScript, Python, Rust, and Go. Use for architect planning, ' +
-		'designer scaffolding, and understanding module public API surface.',
+		'Supports TypeScript/JavaScript, Python, Rust, Go, Dart, Ruby, and PHP. ' +
+		'Use for architect planning, designer scaffolding, and understanding module ' +
+		'public API surface.',
 	args: {
 		file: z
 			.string()
@@ -925,11 +1392,23 @@ export const symbols: ToolDefinition = createSwarmTool({
 			case '.go':
 				syms = extractGoSymbols(file, cwd);
 				break;
+			case '.dart':
+				syms = _internals.extractDartSymbols(file, cwd);
+				break;
+			case '.rb':
+			case '.rake':
+			case '.gemspec':
+				syms = _internals.extractRubySymbols(file, cwd);
+				break;
+			case '.php':
+			case '.phtml':
+				syms = _internals.extractPhpSymbols(file, cwd);
+				break;
 			default:
 				return JSON.stringify(
 					{
 						file,
-						error: `Unsupported file extension: ${ext}. Supported: .ts, .tsx, .js, .jsx, .mjs, .cjs, .py, .pyw, .rs, .go`,
+						error: `Unsupported file extension: ${ext}. Supported: .ts, .tsx, .js, .jsx, .mjs, .cjs, .py, .pyw, .rs, .go, .dart, .rb, .rake, .gemspec, .php, .phtml`,
 						symbols: [],
 					},
 					null,
@@ -957,3 +1436,14 @@ export const symbols: ToolDefinition = createSwarmTool({
 		);
 	},
 });
+
+/**
+ * DI seam for testability — tests substitute via `_internals.fn` rather than
+ * `mock.module`, which leaks across Bun's shared test-runner process.
+ * @see AGENTS.md invariant #7
+ */
+export const _internals = {
+	extractDartSymbols,
+	extractRubySymbols,
+	extractPhpSymbols,
+};

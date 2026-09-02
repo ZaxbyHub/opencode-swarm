@@ -71,8 +71,8 @@ async function appendSuccessfulBaseTransition(
 	record: NonNullable<ReturnType<typeof findByBatchId>[number]>,
 ) {
 	const text = [
-		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence',
-		`${record.laneId}-candidate | ${record.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH`,
+		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags',
+		`${record.laneId}-candidate | ${record.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH | ORDINARY | `,
 	].join('\n');
 	const stored = storeLaneOutput(directory, {
 		batchId: record.batchId,
@@ -151,7 +151,11 @@ beforeEach(async () => {
 		dispatchInternals.resolveExactMergeBase(...args);
 	dispatchInternals.loadPluginConfig = () =>
 		({
-			pr_review_resilience: DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+			pr_review_legacy_transcript_compatibility: true,
+			pr_review_resilience: {
+				...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+				enabled: true,
+			},
 		}) as ReturnType<typeof originalDispatchLoadPluginConfig>;
 });
 

@@ -126,3 +126,23 @@ When the `test_engineer` agent works on Laravel projects, it receives these cons
 ## Issue #308
 
 This release closes [GitHub Issue #308](https://github.com/zaxbysauce/opencode-swarm/issues/308) — PHP/Laravel Support? — with verified, CI-tested first-class PHP support and a meaningful Laravel baseline.
+
+## Symbol-graph and `symbols` coverage for PHP (issue #1531)
+
+`.php`, `.phtml`, and `.blade.php` files are now part of the repo-graph symbol
+layer and the `symbols` tool. Extraction is regex-based in the `symbols` tool
+and tree-sitter + conservative regex augmentation in the repo-graph symbol
+layer — no PHP runtime or Composer execution is involved.
+
+Blade caveats:
+
+- Blade directives (`@foreach`, `@include`, `@component`, `{{ }}` echo blocks)
+  are opaque to the extractor and produce no symbol facts.
+- `@php ... @endphp` blocks are scanned as ordinary PHP on a best-effort basis;
+  declarations inside them are extracted like any other PHP.
+- Component/tag syntax (`<x-alert />`) is not resolved; Laravel view
+  composition happens at runtime and stays out of the static graph.
+
+See `docs/repo-graph-symbol-graph.md` → "Dynamic language limitations" for the
+full PHP/Dart/Ruby extraction contract (visibility modifiers, `use` binding
+semantics, dynamic-construct limitations).

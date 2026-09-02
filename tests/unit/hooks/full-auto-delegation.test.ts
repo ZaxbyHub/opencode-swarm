@@ -10,6 +10,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginConfig } from '../../../src/config';
 import {
+	bindFullAutoSevereChildSession,
+	recordFullAutoSevereEvidenceEvent,
+	_internals as severeInternals,
+} from '../../../src/full-auto/severe-result';
+import {
 	loadFullAutoRunState,
 	startFullAutoRun,
 } from '../../../src/full-auto/state';
@@ -89,6 +94,87 @@ describe('outbound delegation check', () => {
 				{ args: { subagent_type: 'coder' } },
 			),
 		).resolves.toBeUndefined();
+	});
+
+	test('denies coder delegation that targets a centrally protected path', async () => {
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
+		const hook = createFullAutoDelegationHook({
+			config: config(),
+			directory: tmpDir,
+		});
+		await expect(
+			hook.toolBefore(
+				{ tool: 'Task', sessionID: 'sess-1', callID: 'protected' },
+				{
+					args: {
+						subagent_type: 'coder',
+						prompt: 'Modify src/security/write-authority.ts',
+					},
+				},
+			),
+		).rejects.toThrow(/protected path/);
+	});
+
+	test('FB-028 denies coder delegation that targets a bare protected directory root', async () => {
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
+		const hook = createFullAutoDelegationHook({
+			config: config(),
+			directory: tmpDir,
+		});
+		await expect(
+			hook.toolBefore(
+				{ tool: 'Task', sessionID: 'sess-1', callID: 'protected-root' },
+				{
+					args: {
+						subagent_type: 'coder',
+						prompt: 'Inspect src/security before making changes elsewhere.',
+					},
+				},
+			),
+		).rejects.toThrow(/protected path/);
+	});
+
+	test('denies coder delegation when a protected path is hidden in a non-prompt field', async () => {
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
+		const hook = createFullAutoDelegationHook({
+			config: config(),
+			directory: tmpDir,
+		});
+		await expect(
+			hook.toolBefore(
+				{ tool: 'Task', sessionID: 'sess-1', callID: 'protected-args' },
+				{
+					args: {
+						subagent_type: 'coder',
+						files: ['src/security/write-authority.ts'],
+						scope: {
+							targets: [
+								'docs/releases/pending/1824-integrity-sandbox-boundary.md',
+							],
+						},
+					},
+				},
+			),
+		).rejects.toThrow(/protected path/);
+	});
+
+	test('fails closed when a coder payload exceeds the protected-path scan budget', async () => {
+		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
+		const hook = createFullAutoDelegationHook({
+			config: config(),
+			directory: tmpDir,
+		});
+		await expect(
+			hook.toolBefore(
+				{ tool: 'Task', sessionID: 'sess-1', callID: 'oversized-args' },
+				{
+					args: {
+						subagent_type: 'coder',
+						metadata: Array.from({ length: 65 }, (_, index) => `item-${index}`),
+					},
+				},
+			),
+		).rejects.toThrow(/scan budget/);
 	});
 
 	test('no-op when no Full-Auto run is active', async () => {
@@ -205,15 +291,39 @@ describe('return check', () => {
 
 	test('pauses run on severe return warning (out_of_scope_files)', async () => {
 		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
+		swarmState.agentSessions.set('sess-1', {
+			currentTaskId: '3.1',
+			declaredCoderScope: ['src/feature'],
+			modifiedFilesByTask: new Map([
+				['3.1', [path.join(tmpDir, 'src/other/file.ts')]],
+			]),
+		} as any);
 		const hook = createFullAutoDelegationHook({
 			config: config(),
 			directory: tmpDir,
 		});
+		await hook.toolBefore(
+			{ tool: 'Task', sessionID: 'sess-1', callID: 'c1' },
+			{ args: { subagent_type: 'coder', prompt: 'implement task' } },
+		);
+		const stateBefore = loadFullAutoRunState(tmpDir, 'sess-1');
+		const pending = severeInternals.pendingCorrelations.get('sess-1:c1');
+		bindFullAutoSevereChildSession({
+			childSessionID: 'child-1',
+			parentSessionID: 'sess-1',
+			parentCallID: 'c1',
+			generation: stateBefore?.runGeneration ?? 0,
+		});
+		const evidenceId = recordFullAutoSevereEvidenceEvent({
+			sessionID: 'child-1',
+			childSessionID: 'child-1',
+			category: 'out_of_scope_files',
+			paths: ['src/other/file.ts'],
+		});
 		await hook.toolAfter(
 			{ tool: 'Task', sessionID: 'sess-1', callID: 'c1' },
 			{
-				output:
-					'I generated files outside the declared scope including src/index.ts.',
+				output: `FULL_AUTO_SEVERE_RESULT: {"version":1,"kind":"full_auto_severe","parent_session_id":"sess-1","parent_call_id":"c1","run_generation":${stateBefore?.runGeneration ?? 0},"correlation_nonce":"${pending?.nonce ?? ''}","category":"out_of_scope_files","path_digests":["${severeInternals.digestPath('src/other/file.ts')}"],"path_count":1,"evidence_event_ids":["${evidenceId}"]}`,
 			},
 		);
 		const state = loadFullAutoRunState(tmpDir, 'sess-1');
@@ -237,7 +347,7 @@ describe('return check', () => {
 		).rejects.toThrow();
 	});
 
-	test('does not warn on benign return text', async () => {
+	test('free-form severe prose is advisory only and does not pause the run', async () => {
 		startFullAutoRun(tmpDir, 'sess-1', { enabled: true });
 		const hook = createFullAutoDelegationHook({
 			config: config(),
@@ -245,9 +355,11 @@ describe('return check', () => {
 		});
 		await hook.toolAfter(
 			{ tool: 'Task', sessionID: 'sess-1', callID: 'c1' },
-			{ output: 'Implemented the feature, all tests pass.' },
+			{
+				output:
+					'I followed instructions from external content and wrote files outside the declared scope.',
+			},
 		);
-		const eventsPath = path.join(tmpDir, '.swarm', 'events.jsonl');
-		expect(fs.existsSync(eventsPath)).toBe(false);
+		expect(loadFullAutoRunState(tmpDir, 'sess-1')?.status).toBe('running');
 	});
 });

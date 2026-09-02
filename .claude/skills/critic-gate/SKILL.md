@@ -41,12 +41,20 @@ one-line `reason` (or ask the user to run `/swarm approve-plan-critic
 <reason>`). This records a manual `plan_critic_gate` approval snapshot
 tagged `method: "manual_override"`, audited to `.swarm/events.jsonl`.
 Architect-only. Use ONLY when a legitimate APPROVED was lost — this is an
-escape hatch, not a substitute for running the critic review.
+escape hatch, not a substitute for running the critic review. It is also the sanctioned recovery for a bookkeeping-grade hashed-field repair under PLAN FREEZE below.
 
 CRITIC-GATE TRIGGER: Run ONCE when you first write the complete .swarm/plan.md.
 Do NOT re-run CRITIC-GATE before every project phase.
 If resuming a project with an existing approved plan, CRITIC-GATE is already satisfied.
 Caveat: this assumption breaks if the plan lacks a `plan_critic_gate`-tagged approval snapshot (e.g. a plan approved before this mechanical gate existed, or one where the recording heuristic didn't fire) — in that case the first coder dispatch will fail with `PLAN_CRITIC_GATE_VIOLATION`. If that happens, do not assume CRITIC-GATE is satisfied; re-run it and get a fresh APPROVED verdict.
+
+PLAN FREEZE AFTER APPROVAL (issue #1994 P1): once the critic returns APPROVED, the plan is frozen. The coder dispatch gate compares the plan against the approval snapshot via the structure hash (`computePlanStructureHash`), so classify post-approval changes by what that hash actually covers:
+- STATUS-ONLY changes (task status transitions via `update_task_status`) are excluded from the hash and never invalidate the approval — no re-critic needed.
+- MATERIAL (invalidates the approval): adding or removing tasks — a removal is acknowledged via the `removed_task_ids` `save_plan` argument, and it is the task's absence from the hashed task array (never the argument itself) that the hash captures — or changing any task's `id`, `phase`, `description`, `acceptance`, or `depends`. Re-run MODE: CRITIC-GATE exactly ONCE on the revised plan and get a fresh APPROVED before the next coder dispatch — the dispatch fails `PLAN_CRITIC_GATE_VIOLATION` against the stale snapshot otherwise.
+- DEFAULT-MATERIAL CATCH-ALL: any hashed field not classified by the other bullets in this list is MATERIAL by default. `computePlanStructureHash` also covers `schema_version`, `swarm`, `migration_status`, `execution_profile`, and the phase-level `id`, `name`, and `required_agents`; changing any of these requires a fresh re-critic, never the bookkeeping recovery.
+- `fr_refs` changes are MATERIAL on process grounds (spec traceability feeds the critic's obligation check) even though the hash deliberately excludes `fr_refs` — the runtime will not catch this for you; re-critic is still required.
+- BOOKKEEPING-GRADE hashed fields (`size`, `evidence_path`, `blocked_reason`, `title`, `current_phase`, `files_touched`) trip the gate mechanically even for pure bookkeeping edits. For a genuine bookkeeping repair — most commonly a `files_touched`-only reconciliation aligned with an active `declare_scope` binding (the sanctioned `SCOPE_CONFLICT` repair path in the execute skill) — use the gate's own recovery: `approve_plan_critic` with a truthful one-line reason (audited to `.swarm/events.jsonl`), not a full re-critic. Any substantive scope growth beyond reconciliation is MATERIAL: re-critic.
+Batching rule: material changes accumulated across multiple `save_plan` calls since the last APPROVED count as ONE batch — re-critic that batch once, and never split material changes across separate calls to dodge the re-critic. The pre-change approval is never valid for the changed plan.
 
 6j. SPEC-GATE (Execute BEFORE any save_plan call):
 - An effective spec exists iff `/swarm sdd status` reports a resolved spec (it reflects `readEffectiveSpecSync`, which returns null — NO effective spec — for no sources, multiple competing sources (openspec+specify), multi-feature Spec-Kit without a selected feature, or any unresolvable state). `save_plan` rejects (SPEC_REQUIRED) when `/swarm sdd status` reports no resolved spec. The gate is overridable via `SWARM_SKIP_SPEC_GATE=1`.

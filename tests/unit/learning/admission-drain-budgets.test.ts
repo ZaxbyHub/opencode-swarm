@@ -368,7 +368,7 @@ describe('drainSessionQueue — wall-clock budget bounds the LLM deadline (C1)',
 		// DELIBERATELY NOT frozen (issue #1782 class 1 does not apply): this is
 		// the one case whose assertion IS real elapsed wall time. `deps.now` is
 		// left unset so the drain's deadline arithmetic runs on the same live
-		// clock as the `AbortSignal.timeout` that actually cancels the hung call.
+		// clock as the shared deadline signal that actually cancels the hung call.
 		// Freezing `Date.now()` would pin `elapsed` to 0 and make the
 		// order-of-magnitude assertion below vacuously true while also stopping
 		// `budgetExhausted()` from ever firing — i.e. it would delete the test.

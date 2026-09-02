@@ -77,6 +77,9 @@ No migration required.
   intentional, deferred to a follow-up change once this branch lands on `main`
   (adding it now would break the merge queue for every other open PR, since the
   check doesn't exist on `main` yet).
+  (Superseded: `unit-passed` became a required check in the issue #2341
+  merge-queue fix, together with raising `check_response_timeout_minutes`
+  60 → 90.)
 - Several plan items from issue #1737 require live CI signal (a CI-only injection
   budget test failure, remaining quarantined integration tests, and macOS
   `provisionWorktree` root-cause diagnosis) and are intentionally left for

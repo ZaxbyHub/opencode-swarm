@@ -15,11 +15,16 @@ import type {
 	BackgroundWorktreeDescriptor,
 	RecordPendingInput,
 } from '../background/pending-delegations.js';
+import { buildBackgroundCoderReservationId } from '../background/pending-delegations.js';
 import {
 	captureWorkspaceSnapshot,
 	changedFilesSinceSnapshot,
 } from '../background/workspace-snapshot.js';
 import type { PluginConfig } from '../config';
+import {
+	resolveRegisteredAgentModel,
+	resolveRuntimeAgentModel,
+} from '../config/agent-model.js';
 import { ALL_AGENT_NAMES } from '../config/agent-names.js';
 import { DEFAULT_MODELS } from '../config/constants';
 import type { Phase, Plan, Task } from '../config/plan-schema';
@@ -30,9 +35,13 @@ import {
 	getProfileForIdentity,
 	type QaGates,
 } from '../db/qa-gate-profile.js';
+import {
+	appendCoreEventSync,
+	CORE_EVENT_LOCKED,
+	getCoderRetryEscalationActions,
+} from '../events/core-events.js';
 import { isReadOnlyTool } from '../full-auto/policy';
 import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
-import { tryAcquireLock } from '../parallel/file-locks.js';
 import {
 	routeReviewForChanges,
 	shouldParallelizeReview,
@@ -111,6 +120,7 @@ import {
 	precreateStandardWorktreeSession,
 	resetStandardWorktreeIsolationState,
 	resolveWorktreeIsolationConfig,
+	type StandardWorktreeDispatch,
 	sanitizeWorktreeTaskId,
 	standardWorktreeByCallID,
 	standardWorktreeSerializationSessions,
@@ -205,6 +215,23 @@ export const pendingCoderScopeByTaskId = new BoundedPendingScopeMap();
 function pendingScopeKey(directory: string, taskId: string): string | null {
 	const workspace = canonicalWorkspaceIdentity(directory);
 	return workspace ? `${workspace}\0${taskId}` : null;
+}
+
+function exactProvisioningOwnerForBackgroundDescriptor(
+	owner: StandardWorktreeDispatch['provisioningOwner'],
+): BackgroundWorktreeDescriptor['provisioningOwner'] | undefined {
+	if (
+		owner?.reservationId === undefined ||
+		owner.generation === undefined ||
+		owner.branchName === undefined
+	) {
+		return undefined;
+	}
+	return {
+		reservationId: owner.reservationId,
+		generation: owner.generation,
+		branchName: owner.branchName,
+	};
 }
 
 export function setPendingCoderScope(
@@ -1919,21 +1946,17 @@ export async function forceRecordPlanCriticApproval(
 
 	// Best-effort non-fatal audit event (matches abortPrWorkflow / knowledge-gate
 	// precedent). The snapshot is authoritative for the gate; the audit event is
-	// the human-readable trail.
+	// the human-readable trail. Issue #2039: appended through the core event
+	// seam.
 	try {
-		const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-		await fs.promises.appendFile(
-			eventsPath,
-			`${JSON.stringify({
-				type: 'plan_critic_gate_manual_approval',
-				timestamp: recordedAt,
-				sessionID,
-				plan_id: planId,
-				user_confirmed: userConfirmed,
-				...(sanitizedReason ? { reason: sanitizedReason } : {}),
-			})}\n`,
-			'utf-8',
-		);
+		appendCoreEventSync(directory, {
+			type: 'plan_critic_gate_manual_approval',
+			timestamp: recordedAt,
+			sessionID,
+			plan_id: planId,
+			user_confirmed: userConfirmed,
+			...(sanitizedReason ? { reason: sanitizedReason } : {}),
+		});
 	} catch (err) {
 		logger.warn(
 			`[delegation-gate] plan_critic_gate_manual_approval audit event write failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -2316,39 +2339,20 @@ type CoderRetryEscalationAction =
 	| 'simplification'
 	| 'user_escalation';
 
+/**
+ * Issue #2039: escalation audit state moved off raw events.jsonl scans to
+ * the authoritative core event index (index answer UNION the bounded
+ * retained-window scan). Verdict semantics are identical to the previous
+ * whole-file scan for everything within the window, and complete after
+ * compaction via the index (the fold pass indexes authority lines before
+ * removing them).
+ */
 function readCoderRetryEscalations(
 	directory: string,
 	taskId: string,
 	retryEpoch: number,
 ): Set<CoderRetryEscalationAction> {
-	const actions = new Set<CoderRetryEscalationAction>();
-	try {
-		const raw = fs.readFileSync(
-			validateSwarmPath(directory, 'events.jsonl'),
-			'utf-8',
-		);
-		for (const line of raw.split('\n')) {
-			if (!line.trim()) continue;
-			try {
-				const event = JSON.parse(line) as Record<string, unknown>;
-				if (
-					event.type === 'coder_retry_circuit_breaker' &&
-					event.taskId === taskId &&
-					event.retryEpoch === retryEpoch &&
-					(event.action === 'sounding_board_consultation' ||
-						event.action === 'simplification' ||
-						event.action === 'user_escalation')
-				) {
-					actions.add(event.action);
-				}
-			} catch {
-				// A malformed unrelated audit line does not erase exact workflow state.
-			}
-		}
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-	}
-	return actions;
+	return getCoderRetryEscalationActions(directory, taskId, retryEpoch);
 }
 
 async function emitCoderRetryEscalation(
@@ -2362,27 +2366,15 @@ async function emitCoderRetryEscalation(
 		action: CoderRetryEscalationAction;
 	},
 ): Promise<void> {
-	const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-	const lock = await tryAcquireLock(
-		directory,
-		'events.jsonl',
-		'workflow-retry-escalation',
-		`coder-retry:${input.taskId}:${input.generation}:${input.action}`,
-	);
-	if (!lock.acquired) {
-		throw new Error('TASK_RETRY_AUDIT_LOCKED');
-	}
+	// Issue #2039: the store's exclusive lock replaces the former
+	// tryAcquireLock/proper-lockfile sentinel on this file, and
+	// dedupeOnAuthorityKey restores the at-most-once contract the old
+	// lock-then-recheck read enforced. The hard-fail contract is preserved —
+	// sustained contention still throws TASK_RETRY_AUDIT_LOCKED.
 	try {
-		const prior = readCoderRetryEscalations(
+		appendCoreEventSync(
 			directory,
-			input.taskId,
-			input.retryEpoch,
-		);
-		if (prior.has(input.action)) return;
-		await fs.promises.mkdir(path.dirname(eventsPath), { recursive: true });
-		await fs.promises.appendFile(
-			eventsPath,
-			`${JSON.stringify({
+			{
 				type: 'coder_retry_circuit_breaker',
 				timestamp: new Date().toISOString(),
 				taskId: input.taskId,
@@ -2392,11 +2384,14 @@ async function emitCoderRetryEscalation(
 				rejectionHistory: input.rejectionHistory,
 				phase: Number(input.taskId.split('.')[0]) || 0,
 				action: input.action,
-			})}\n`,
-			'utf-8',
+			},
+			{ dedupeOnAuthorityKey: true },
 		);
-	} finally {
-		if (lock.lock._release) await lock.lock._release().catch(() => {});
+	} catch (error) {
+		if (error instanceof Error && error.message === CORE_EVENT_LOCKED) {
+			throw new Error('TASK_RETRY_AUDIT_LOCKED');
+		}
+		throw error;
 	}
 }
 
@@ -2410,11 +2405,24 @@ async function enforceCoderRetryEscalation(input: {
 	criticSatisfied: boolean;
 }): Promise<void> {
 	if (input.retryCount < 3) return;
-	const prior = readCoderRetryEscalations(
-		input.directory,
-		input.taskId,
-		input.retryEpoch,
-	);
+	let prior: Set<CoderRetryEscalationAction>;
+	try {
+		prior = readCoderRetryEscalations(
+			input.directory,
+			input.taskId,
+			input.retryEpoch,
+		);
+	} catch (error) {
+		// A corrupt authority index fails closed (the pre-#2039 malformed-JSONL
+		// throw had the same effect) — surface a typed, diagnosable code.
+		if (
+			error instanceof Error &&
+			error.message === 'CORE_EVENT_AUTHORITY_INDEX_UNREADABLE'
+		) {
+			throw new Error('TASK_RETRY_AUDIT_INDEX_UNREADABLE');
+		}
+		throw error;
+	}
 	if (!prior.has('sounding_board_consultation')) {
 		await emitCoderRetryEscalation(input.directory, {
 			...input,
@@ -2917,6 +2925,12 @@ const releaseBackgroundCoderReservationForDispatch: typeof import('../background
 			await import('../background/pending-delegations.js')
 		).releaseBackgroundCoderReservation(...args);
 
+const maintainBackgroundDelegationsForDispatch: typeof import('../background/pending-delegations.js').maintainBackgroundDelegations =
+	async (...args) =>
+		(
+			await import('../background/pending-delegations.js')
+		).maintainBackgroundDelegations(...args);
+
 /**
  * _internals export for testing — do not use in production code.
  * Exposes resolveEvidenceTaskId, resolveDelegatedPlanTaskId,
@@ -2939,6 +2953,7 @@ export const _internals = {
 	reserveBackgroundCoderSlotForDispatch,
 	bindBackgroundCoderReservationForDispatch,
 	releaseBackgroundCoderReservationForDispatch,
+	maintainBackgroundDelegationsForDispatch,
 	resetStandardWorktreeIsolationState,
 	PLAN_CRITIC_TASK_SIGNALS,
 	extractPlanCriticVerdict,
@@ -2982,6 +2997,7 @@ export const _internals = {
 export function createDelegationGateHook(
 	config: PluginConfig,
 	directory: string,
+	registeredAgents?: Record<string, { model?: unknown; mode?: unknown }>,
 ): {
 	messagesTransform: (
 		input: Record<string, never>,
@@ -3421,12 +3437,22 @@ export function createDelegationGateHook(
 			preflightArgs &&
 			typeof preflightArgs.subagent_type === 'string'
 		) {
-			const preflightAgent = stripKnownSwarmPrefix(preflightArgs.subagent_type);
+			const exactPreflightAgent = preflightArgs.subagent_type;
+			const preflightAgent = stripKnownSwarmPrefix(exactPreflightAgent);
 			if (preflightAgent.startsWith('critic')) {
-				const criticModel =
+				const legacyCriticModel =
 					config.agents?.[preflightAgent]?.model ??
 					DEFAULT_MODELS[preflightAgent] ??
 					DEFAULT_MODELS.default;
+				const criticModel = registeredAgents
+					? (resolveRuntimeAgentModel(
+							config,
+							registeredAgents,
+							exactPreflightAgent,
+						) ??
+						resolveRegisteredAgentModel(config, exactPreflightAgent) ??
+						legacyCriticModel)
+					: legacyCriticModel;
 				try {
 					const { checkSingleModelResolution } = await import(
 						'../services/model-preflight'
@@ -3442,8 +3468,8 @@ export function createDelegationGateHook(
 							'plan-critic dispatch preflight',
 						);
 						throw new Error(
-							`PLAN_CRITIC_MODEL_UNRESOLVED: the ${preflightAgent} agent's model "${criticModel}" does not resolve against the provider catalog — the critic can never run, so the plan-critic gate cannot produce VERDICT: APPROVED. ` +
-								`Fix agents.${preflightAgent}.model in opencode-swarm.json (or remove the override to fall back to the default model), then re-run MODE: CRITIC-GATE.`,
+							`PLAN_CRITIC_MODEL_UNRESOLVED: the ${exactPreflightAgent} agent's effective model "${criticModel}" does not resolve against the provider catalog — the critic can never run, so the plan-critic gate cannot produce VERDICT: APPROVED. ` +
+								`Fix the effective model configuration for "${exactPreflightAgent}" in opencode-swarm.json (including any matching swarm override or inherited critic model), then re-run MODE: CRITIC-GATE.`,
 						);
 					}
 				} catch (error) {
@@ -3843,10 +3869,47 @@ export function createDelegationGateHook(
 					continue;
 				}
 				if (taskId === resolvedTaskId) {
+					// Issue #2383 correlated reviewer re-entry: a direct Task
+					// dispatch of reviewer/test_engineer may bypass the GENERIC
+					// Stage-A task-workflow requirement ONLY through a persisted
+					// one-use authorization issued by the PR workflow controller
+					// and still bound to the exact active session, role, head,
+					// revision digest, and gate generation. No prompt-text
+					// inspection is involved; a missing/expired/replayed/stale
+					// authorization consumes to null and falls through to the
+					// normal Stage-A error below. This is a Stage-A-ONLY
+					// exemption: the council gate above, the background-task
+					// block, acceptance-criteria enforcement, and every other
+					// check in this hook remain fully authoritative.
+					const { consumePrReviewReentryAuthorization } = await import(
+						'../pr-review/authorization.js'
+					);
+					const consumed = await consumePrReviewReentryAuthorization(
+						directory,
+						input.sessionID,
+						{
+							role:
+								targetAgent === 'test_engineer' ? 'test_engineer' : 'reviewer',
+							callID: input.callID,
+						},
+					);
+					if (consumed) {
+						rememberStageBDispatchGenerations(input.callID, generations);
+						gateDispatchPrimaryTaskByCallID.set(input.callID, resolvedTaskId);
+						stageBDispatchContextByCallID.set(input.callID, {
+							taskIds: new Set(generations.keys()),
+							expectedVerdictKind:
+								targetAgent === 'test_engineer' ? 'TESTED' : 'REVIEWED',
+						});
+						return;
+					}
 					throw new Error(
 						`TASK_WORKFLOW_STAGE_A_REQUIRED: cannot dispatch ${targetAgent} for task ${taskId} from ${workflow.state}. ` +
 							`Stage B (${targetAgent}) requires the task to be at pre_check_passed (or later) — a state written only by the stage_a_passed transition, which is emitted when pre_check_batch completes with the task correctly attributed. ` +
-							`Remediation: run pre_check_batch on the task's changed files first. If pre_check_batch passes but the task remains coder_delegated (typical after /swarm reset-session), run /swarm recover ${taskId} to repair Stage A attribution, then re-dispatch.`,
+							`Remediation: run pre_check_batch on the task's changed files first. If pre_check_batch passes but the task remains coder_delegated (typical after /swarm reset-session), run /swarm recover ${taskId} to repair Stage A attribution, then re-dispatch.` +
+							(targetAgent === 'reviewer' || targetAgent === 'test_engineer'
+								? ` For PR-review re-entry outside the task workflow, issue a one-use authorization with authorize_pr_review_reentry immediately before the Task dispatch.`
+								: ''),
 					);
 				}
 			}
@@ -3979,6 +4042,22 @@ export function createDelegationGateHook(
 			if (!backgroundSubagentsEnabled || !isBackgroundTrue(args.background)) {
 				return;
 			}
+			// Maintenance point P1 (issue #2104): reconcile stale delegations and
+			// expired reservation leases right before admission. Best-effort with a
+			// tight 1 s lock bound — on contention or failure the inline
+			// proven-terminal reconciliation inside reserveBackgroundCoderSlot
+			// still guards admission, and another maintenance point will finish
+			// the wider reclaim later.
+			try {
+				await _internals.maintainBackgroundDelegationsForDispatch(directory, {
+					lockTimeoutMs: 1_000,
+					reason: 'admission',
+				});
+			} catch (error) {
+				logger.warn(
+					`[delegation-gate] pre-admission background maintenance skipped: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
 			const occupiedTaskIds = [...session.taskWorkflowStates.entries()]
 				.filter(([, state]) => state === 'coder_delegated')
 				.map(([taskId]) => taskId);
@@ -3990,6 +4069,13 @@ export function createDelegationGateHook(
 					callID: input.callID,
 					maxConcurrent,
 					occupiedTaskIds,
+					// The reservation seeds generation 1 (the first launch attempt)
+					// regardless of the task's WORKFLOW retry generation: the lease
+					// generation tracks only launch attempts (PR #2091 semantics),
+					// and the bind site couples it to the record's actual launch
+					// generation. Seeding the workflow generation here would make a
+					// retry dispatch (workflow generation >= 2) refuse its own bind
+					// (generation may only move forward), leaking the reservation.
 				},
 			);
 			if (!claim.ok) {
@@ -4243,6 +4329,14 @@ export function createDelegationGateHook(
 				callID: input.callID,
 				taskId: resolvedTaskId ?? sanitizeWorktreeTaskId(input.callID),
 				planTaskId: resolvedTaskId ?? undefined,
+				reservationId:
+					backgroundCoderReservationByCallID.get(input.callID)?.reservationId ??
+					buildBackgroundCoderReservationId({
+						parentSessionId: input.sessionID,
+						planTaskId: resolvedTaskId,
+						callID: input.callID,
+					}),
+				generation: coderDispatchGeneration,
 				description:
 					typeof args.description === 'string' ? args.description : undefined,
 				outputArgs: args,
@@ -4336,29 +4430,21 @@ export function createDelegationGateHook(
 				);
 				if (degradation) {
 					try {
-						const eventsPath = validateSwarmPath(directory, 'events.jsonl');
-						await fs.promises.mkdir(path.dirname(eventsPath), {
-							recursive: true,
+						appendCoreEventSync(directory, {
+							type: 'worktree_isolation_degraded',
+							timestamp: new Date().toISOString(),
+							sessionId: input.sessionID,
+							callId: input.callID,
+							taskId: incomingCoderTaskId,
+							// PR-review PRR-014: the reason embeds git stderr /
+							// session-create error text whose producers are not
+							// all length-bounded — cap the durable ledger copy.
+							reason:
+								degradation.reason.length > 500
+									? `${degradation.reason.slice(0, 500)}… (truncated)`
+									: degradation.reason,
+							degradedAt: new Date(degradation.at).toISOString(),
 						});
-						await fs.promises.appendFile(
-							eventsPath,
-							`${JSON.stringify({
-								type: 'worktree_isolation_degraded',
-								timestamp: new Date().toISOString(),
-								sessionId: input.sessionID,
-								callId: input.callID,
-								taskId: incomingCoderTaskId,
-								// PR-review PRR-014: the reason embeds git stderr /
-								// session-create error text whose producers are not
-								// all length-bounded — cap the durable ledger copy.
-								reason:
-									degradation.reason.length > 500
-										? `${degradation.reason.slice(0, 500)}… (truncated)`
-										: degradation.reason,
-								degradedAt: new Date(degradation.at).toISOString(),
-							})}\n`,
-							'utf-8',
-						);
 					} catch (eventError) {
 						logger.log(
 							`[delegation-gate] worktree_isolation_degraded event write failed: ${
@@ -4388,6 +4474,9 @@ export function createDelegationGateHook(
 							mergeStrategy: standardDispatch.mergeStrategy,
 							laneIndex: standardDispatch.laneIndex,
 							worktreeDir: standardDispatch.worktree_dir ?? null,
+							provisioningOwner: exactProvisioningOwnerForBackgroundDescriptor(
+								standardDispatch.provisioningOwner,
+							),
 						}
 					: undefined,
 			);
@@ -4683,6 +4772,12 @@ export function createDelegationGateHook(
 											mergeStrategy: standardDispatch.mergeStrategy,
 											laneIndex: standardDispatch.laneIndex,
 											worktreeDir: standardDispatch.worktree_dir ?? null,
+											provisioningOwner:
+												exactProvisioningOwnerForBackgroundDescriptor(
+													standardDispatch.provisioningOwner,
+												),
+											reservationId: standardDispatch.reservationId,
+											generation: standardDispatch.generation,
 										}
 									: undefined,
 								coderReservationId: coderReservation?.reservationId,
@@ -4769,6 +4864,10 @@ export function createDelegationGateHook(
 											{
 												...coderReservation,
 												correlationId: subagentSessionId,
+												// Bind to the record's launch generation (issue
+												// #2104): the reservation tracks exactly the
+												// generation that owns the durable correlation.
+												generation: pendingInput.generation ?? 1,
 											},
 										);
 									if (!bound) {
@@ -4812,9 +4911,20 @@ export function createDelegationGateHook(
 					}
 				}
 				if (backgroundOwnershipDurable) {
+					const provisioningOwner =
+						standardDispatch?.provisioningOwner ??
+						(standardDispatch?.reservationId !== undefined &&
+						standardDispatch?.generation !== undefined
+							? {
+									reservationId: standardDispatch.reservationId,
+									generation: standardDispatch.generation,
+									branchName: standardDispatch.handle.branchName,
+								}
+							: undefined);
 					_wtiInternals.removeWorktreeProvisioningOwner(
 						directory,
 						input.callID,
+						provisioningOwner,
 					);
 				}
 				if (backgroundRecordDurable) {

@@ -7,11 +7,17 @@
  */
 
 import { createHash } from 'node:crypto';
+import {
+	buildDirectiveComplianceBlock,
+	parseDirectivesToVerifyBlock,
+} from '../agents/reviewer-directive-compliance.js';
 import { stripKnownSwarmPrefix } from '../config/schema.js';
 import { getCurrentTaskId, loadPlan } from '../plan/manager.js';
 import {
 	allocateInjectionBudget,
-	getSystemEnhancerDemand,
+	getProducerEmission,
+	recordProducerEmission,
+	recordProducerGrant,
 } from '../services/injection-budget.js';
 import { getRunMemorySummary } from '../services/run-memory.js';
 import {
@@ -52,8 +58,15 @@ import type {
 } from './knowledge-types.js';
 import { isActiveStatus } from './knowledge-types.js';
 import { extractModelInfo, resolveModelLimit } from './model-limits.js';
+import { readPhaseDirectivesToVerify } from './phase-directives.js';
 import { searchKnowledge } from './search-knowledge.js';
-import { readSwarmFileAsync, safeHook } from './utils.js';
+import {
+	estimateCharsForTokens,
+	estimateTokens,
+	estimateTokensFromCharCount,
+	readSwarmFileAsync,
+	safeHook,
+} from './utils.js';
 
 // ============================================================================
 // Internal Helpers (NOT exported)
@@ -97,6 +110,12 @@ function phaseNumberOf(label: string | undefined): number | undefined {
  * `.swarm/knowledge-events.jsonl` (issue #1768). Fire-and-forget + fail-open:
  * telemetry must never break injection. Every silent early-return in the
  * architect path calls this instead of (or alongside) a bare `warn`.
+ *
+ * Issue #2044 item 4 — common-context stamping: every skip observation records
+ * what context WAS available at the early return (message count, model
+ * identity, store availability, phase) plus an explicit `missing` reason list,
+ * so a skip is diagnosable without re-running the turn. No raw query text is
+ * ever stamped — counts, ids, and closed-vocabulary reason codes only.
  */
 function recordInjectionSkip(
 	directory: string,
@@ -105,9 +124,25 @@ function recordInjectionSkip(
 		agent?: string;
 		sessionId?: string;
 		phase?: number;
+		/** Integer message count at the early return (`messages.length`). */
+		messageCount?: number;
+		modelId?: string;
+		providerId?: string;
+		storeAvailable?: boolean;
+		/** Explicit missing-reason list (closed vocabulary per call site). */
+		missing?: string[];
 		extra?: Record<string, unknown>;
 	},
 ): void {
+	const context: Record<string, unknown> = {};
+	if (detail?.messageCount !== undefined)
+		context.message_count = detail.messageCount;
+	if (detail?.modelId !== undefined) context.model_id = detail.modelId;
+	if (detail?.providerId !== undefined) context.provider_id = detail.providerId;
+	if (detail?.storeAvailable !== undefined)
+		context.store_available = detail.storeAvailable;
+	if (detail?.missing !== undefined && detail.missing.length > 0)
+		context.missing = detail.missing;
 	_internals
 		.recordKnowledgeEvent(directory, {
 			type: 'injection_skip',
@@ -115,7 +150,10 @@ function recordInjectionSkip(
 			agent: detail?.agent,
 			session_id: detail?.sessionId,
 			phase: detail?.phase,
-			detail: detail?.extra,
+			detail: {
+				...detail?.extra,
+				...(Object.keys(context).length > 0 ? { context } : {}),
+			},
 		})
 		.catch(() => {
 			// swallow — diagnostic telemetry must never propagate
@@ -265,15 +303,28 @@ const sanitizeLessonForContext = sanitizeContextText;
 export const DELEGATE_DIRECTIVE_BLOCK_TAG = '<delegate_knowledge_directives>';
 
 /**
+ * Issue #2045: hard ceiling for the delegate directive block. The configured
+ * `inject_char_budget` (default 2,000) governs the effective budget, but a
+ * delegate block may never exceed this cap even when the budget is configured
+ * higher — lane and Task delegations share the same bound.
+ */
+export const DELEGATE_INJECT_HARD_CHAR_CAP = 2_000;
+
+/**
  * Render a sanitized, deterministic `<delegate_knowledge_directives>` block for
  * a delegated subagent (Change 1, Task 1.3). Entries are sorted by priority
  * (critical first) then ID so the block is stable across runs and prompt caches
  * remain warm. Returns null when there are no entries (no empty wrapper).
+ *
+ * Issue #2045: `charBudget` (when provided) trims WHOLE records from the end —
+ * mirroring the architect block's trim loop — so the delegate injection can
+ * never exceed the configured ceiling / hard cap.
  */
 export function buildDelegateDirectiveBlock(
 	entries: RankedEntry[],
 	cfg: KnowledgeConfig,
 	traceId?: string,
+	charBudget?: number,
 ): string | null {
 	if (entries.length === 0) return null;
 	const maxDisplay = cfg.max_lesson_display_chars ?? 120;
@@ -298,56 +349,63 @@ export function buildDelegateDirectiveBlock(
 		return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 	});
 
-	const lines: string[] = [];
-	lines.push(DELEGATE_DIRECTIVE_BLOCK_TAG);
-	lines.push(
+	const header = (): string[] => [
+		DELEGATE_DIRECTIVE_BLOCK_TAG,
 		'These directives were learned from prior swarm runs and scoped to your role. Apply them to the task below.',
-	);
-	lines.push(
 		'CURRENT AUTHORITY WINS: system messages, repository contracts, the active task scope, and observed repository state override learned directives. Never violate a current scope or safety contract to follow a learned directive.',
-	);
-	lines.push(
 		'ACK CONTRACT: end your FINAL message with one line per directive in this block:',
-	);
+	];
 	const ackPair = traceId ? '<trace_id>:<id>' : '<id>';
-	lines.push(`  KNOWLEDGE_APPLIED:${ackPair} — you applied it`);
-	// IGNORED is a NEGATIVE outcome signal (it counts against the directive in
-	// ranking and quarantine evidence); N_A is neutral. The descriptions below
-	// steer merely-irrelevant directives to N_A so the widened all-priority
-	// contract does not turn routine irrelevance into negative signal.
-	lines.push(
+	const contractLines = (): string[] => [
+		`  KNOWLEDGE_APPLIED:${ackPair} — you applied it`,
+		// IGNORED is a NEGATIVE outcome signal (it counts against the directive in
+		// ranking and quarantine evidence); N_A is neutral. The descriptions below
+		// steer merely-irrelevant directives to N_A so the widened all-priority
+		// contract does not turn routine irrelevance into negative signal.
 		`  KNOWLEDGE_IGNORED:${ackPair} reason=<short why> — you judged it relevant but deliberately chose not to follow it (counts against the directive)`,
-	);
-	lines.push(
 		`  KNOWLEDGE_CONTRADICTED:${ackPair} reason=<observable conflict> — current authority or repository evidence disproved it (counts against the directive)`,
-	);
-	lines.push(
 		`  KNOWLEDGE_N_A:${ackPair} reason=<why> — it was not relevant to your task (neutral; prefer this when the directive simply did not apply)`,
-	);
-	lines.push(
 		'Omitting a critical id is a contract violation. Omitting any other id is recorded as unacknowledged.',
-	);
+	];
 	// (#1849 RC-4) Carry the retrieval trace_id into the block so a delegate can
 	// cite it in a knowledge_receipt and the delegate-ack-collector can recover
 	// the ORIGINAL retrieval trace (rather than minting an untied one).
-	if (traceId) {
-		lines.push(`trace_id: ${traceId}`);
-	}
+	const footer = (): string[] => [...(traceId ? [`trace_id: ${traceId}`] : [])];
+	const records: { id: string; lines: string[] }[] = [];
 	for (const e of sorted) {
 		const priority = e.directive_priority ?? 'medium';
 		const lesson = sanitizeLessonForContext(e.lesson).slice(0, maxDisplay);
-		lines.push(`- id: ${e.id}`);
-		lines.push(`  priority: ${priority}`);
-		lines.push(`  lesson: ${lesson}`);
+		const lines: string[] = [
+			`- id: ${e.id}`,
+			`  priority: ${priority}`,
+			`  lesson: ${lesson}`,
+		];
 		const forbidden = renderList(e.forbidden_actions);
 		if (forbidden) lines.push(`  forbidden: ${forbidden}`);
 		const required = renderList(e.required_actions);
 		if (required) lines.push(`  required: ${required}`);
 		const verification = renderList(e.verification_checks);
 		if (verification) lines.push(`  verification: ${verification}`);
+		records.push({ id: e.id, lines });
 	}
-	lines.push('</delegate_knowledge_directives>');
-	return lines.join('\n');
+	const assemble = (): string =>
+		[
+			...header(),
+			...contractLines(),
+			...footer(),
+			...records.flatMap((r) => r.lines),
+			'</delegate_knowledge_directives>',
+		].join('\n');
+	if (charBudget !== undefined) {
+		let block = assemble();
+		while (block.length > charBudget && records.length > 0) {
+			records.pop();
+			block = assemble();
+		}
+		if (records.length === 0) return null;
+		return block;
+	}
+	return assemble();
 }
 
 /** A directive that was rendered into a delegate block, recovered by parsing. */
@@ -561,6 +619,7 @@ export async function injectForDelegate(
 					{
 						agent,
 						sessionId,
+						missing: membership.ok ? ['reusable_trace'] : ['valid_membership'],
 						extra: { trace_id: search.trace_id },
 					},
 				);
@@ -670,6 +729,7 @@ async function injectForDelegateIntoMessages(
 	output: { messages?: MessageWithParts[] },
 	agentName: string,
 	sessionId: string | undefined,
+	charBudget: number,
 ): Promise<void> {
 	if (!output.messages || output.messages.length === 0) return;
 	// Idempotency: if a delegate directive block is already present (delivered by
@@ -708,6 +768,10 @@ async function injectForDelegateIntoMessages(
 		? (extractCurrentPhaseFromPlan(plan) ?? `Phase ${plan.current_phase ?? 1}`)
 		: undefined;
 
+	// Issue #2045: the delegate block obeys the caller-supplied effective budget
+	// (three-regime headroom split + unified allocator, hard-capped at
+	// DELEGATE_INJECT_HARD_CHAR_CAP) — the same bound the Task prompt-prepend
+	// path applies — instead of rendering every capped entry regardless of size.
 	const { entries, trace_id } = await injectForDelegate({
 		directory,
 		agent: agentName,
@@ -719,9 +783,80 @@ async function injectForDelegateIntoMessages(
 	});
 	// (#1849 RC-4) Thread the retrieval trace_id into the rendered block so the
 	// delegate can cite it and the ack-collector recovers the original trace.
-	const block = buildDelegateDirectiveBlock(entries, config, trace_id);
-	if (!block) return;
-	injectKnowledgeMessage(output, block);
+	const block = buildDelegateDirectiveBlock(
+		entries,
+		config,
+		trace_id,
+		charBudget,
+	);
+	// Issue #2045 reviewer-grammar parity: reviewer-role delegations receive the
+	// per-phase "directives to verify" block on the transform path too, exactly
+	// as the Task prompt-prepend path provides it — never for any other role.
+	// Double-delivery guard: STRUCTURAL parse (mirror of the Task path's
+	// hasDirectiveComplianceBlock), computed BEFORE the delegate splice below so
+	// the scan only sees pre-existing transcript content. A naive tag-substring
+	// match self-suppresses on ordinary content — a reviewer lane whose prompt
+	// quotes the tag constant, or a stored lesson quoting it — and a suppressed
+	// compliance block fabricates CRITICAL `reviewer_omitted` verdicts at settle
+	// for directives the reviewer never saw.
+	const isReviewer =
+		stripKnownSwarmPrefix(agentName).toLowerCase() === 'reviewer';
+	const alreadyVerified =
+		isReviewer &&
+		output.messages.some((m) =>
+			m.parts?.some(
+				(p) =>
+					typeof p.text === 'string' &&
+					parseDirectivesToVerifyBlock(p.text).length > 0,
+			),
+		);
+	if (block) injectKnowledgeMessage(output, block, sessionId);
+	if (isReviewer && !alreadyVerified) {
+		const toVerify = await readPhaseDirectivesToVerify(directory, phaseLabel);
+		const complianceBlock = buildDirectiveComplianceBlock(toVerify);
+		if (complianceBlock) {
+			injectReviewerComplianceMessage(output, complianceBlock, sessionId);
+		}
+	}
+}
+
+/**
+ * Splice the reviewer compliance block as an in-place system message
+ * (AGENTS.md invariant 10: transform chains read their own local array —
+ * assign-through is a silent no-op, splice is not). Sits directly after the
+ * delegate directive block so the verify contract reads last.
+ */
+function injectReviewerComplianceMessage(
+	output: { messages?: MessageWithParts[] },
+	text: string,
+	sessionId?: string,
+): void {
+	if (!output.messages) return;
+	// Recency position, mirroring injectKnowledgeMessage: just before the last
+	// user message. The delegate block (if any) was already spliced there, so
+	// inserting at the same index places this AFTER the delegate block.
+	let insertIdx = output.messages.length - 1;
+	for (let i = output.messages.length - 1; i >= 0; i--) {
+		if (output.messages[i].info?.role === 'user') {
+			insertIdx = i;
+			break;
+		}
+	}
+	const message: MessageWithParts = {
+		info: { role: 'system' },
+		parts: [{ type: 'text', text: `${text}` }],
+	};
+	output.messages.splice(insertIdx, 0, message);
+	// #2107 §2: account for the model-visible emission (attribution-only).
+	if (sessionId) {
+		recordProducerEmission(
+			sessionId,
+			'knowledge-injector',
+			estimateTokens(message.parts[0]?.text ?? ''),
+			0,
+			'messages',
+		);
+	}
 }
 
 /** Returns true if this agent is the architect (the sole intended recipient of orchestrator-tier knowledge injection). */
@@ -822,6 +957,7 @@ export function matchesDelegateScope(
 function injectKnowledgeMessage(
 	output: { messages?: MessageWithParts[] },
 	text: string,
+	sessionId?: string,
 ): void {
 	if (!output.messages) return;
 
@@ -847,6 +983,19 @@ function injectKnowledgeMessage(
 	};
 
 	output.messages.splice(insertIdx, 0, knowledgeMessage);
+
+	// #2107 §2: record what actually reached the model-visible surface (this is
+	// a messages-surface producer — final accounting measures it directly, so
+	// this entry is attribution-only and is never added to the measured total).
+	if (sessionId) {
+		recordProducerEmission(
+			sessionId,
+			'knowledge-injector',
+			estimateTokens(knowledgeMessage.parts[0]?.text ?? ''),
+			0,
+			'messages',
+		);
+	}
 }
 
 // ============================================================================
@@ -908,7 +1057,14 @@ export function createKnowledgeInjectorHook(
 			_input: Record<string, never>,
 			output: { messages?: MessageWithParts[] },
 		) => {
-			if (!output.messages || output.messages.length === 0) return;
+			if (!output.messages || output.messages.length === 0) {
+				// (#2044 item 4) No silent early returns: an empty message surface
+				// is a diagnosable skip with an explicit missing reason.
+				recordInjectionSkip(directory, 'no_messages', {
+					missing: ['messages'],
+				});
+				return;
+			}
 
 			// Load plan — proceed with default context if no plan exists
 			const plan = await loadPlan(directory);
@@ -926,13 +1082,15 @@ export function createKnowledgeInjectorHook(
 			if (!sessionId) {
 				recordInjectionSkip(directory, 'missing_session_id', {
 					agent: agentName,
+					messageCount: output.messages.length,
+					missing: ['session_id'],
 				});
 				return;
 			}
 
 			// Budget-residual check (BACM-style: evaluate headroom before appending)
-			// Uses the same 0.33 tok/char ratio as estimateTokens() in context-budget.ts
-			const CHARS_PER_TOKEN = 1 / 0.33;
+			// Uses the canonical estimator's inverse (estimateCharsForTokens) — the
+			// single sanctioned char/token conversion (issue #1616/#2107).
 			const liveModelInfo = getLiveContextModelIdentity(sessionId);
 			const { modelID, providerID } =
 				liveModelInfo ?? extractModelInfo(output.messages);
@@ -952,8 +1110,9 @@ export function createKnowledgeInjectorHook(
 				providerID,
 				modelLimitOverrides,
 				liveContextLimit,
-			);
-			const MODEL_LIMIT_CHARS = Math.floor(modelLimitTokens * CHARS_PER_TOKEN);
+				directory,
+			).limit;
+			const MODEL_LIMIT_CHARS = estimateCharsForTokens(modelLimitTokens);
 			const existingChars = output.messages.reduce((sum, msg) => {
 				return (
 					sum + (msg.parts?.reduce((s, p) => s + (p.text?.length ?? 0), 0) ?? 0)
@@ -972,6 +1131,10 @@ export function createKnowledgeInjectorHook(
 				recordInjectionSkip(directory, 'headroom_budget', {
 					agent: agentName,
 					sessionId,
+					messageCount: output.messages.length,
+					modelId: modelID,
+					providerId: providerID,
+					missing: ['headroom'],
 					extra: {
 						headroomChars,
 						existingChars,
@@ -1004,19 +1167,38 @@ export function createKnowledgeInjectorHook(
 			if (!agentName) {
 				// (#1768/#1849) Genuine empty case: no swarmState entry AND no user
 				// message carrying info.agent. Diagnostic tombstone only.
-				recordInjectionSkip(directory, 'no_agent_name', { sessionId });
+				recordInjectionSkip(directory, 'no_agent_name', {
+					sessionId,
+					messageCount: output.messages.length,
+					missing: ['agent_name'],
+				});
 				return;
 			}
 
-			// FR-002: unified injection budget — draw from shared ceiling so
-			// system-enhancer + knowledge-injector combined stay within budget.
+			// FR-002 / #2107 §2: unified injection budget — draw from shared ceiling so
+			// system-enhancer + knowledge-injector combined stay within budget, and
+			// book the allocator-derived grant + actual emission into the turn ledger.
 			if (unifiedInjectionTokens !== undefined) {
 				const sessionID = sessionId;
-				const seDemand = sessionID ? getSystemEnhancerDemand(sessionID) : 0;
+				const seDemand = sessionID
+					? getProducerEmission(sessionID, 'system-enhancer')
+					: 0;
+				const requestedTokens = estimateTokensFromCharCount(effectiveBudget);
 				const allocation = allocateInjectionBudget(seDemand, effectiveBudget, {
 					totalBudgetTokens: unifiedInjectionTokens,
 				});
-				effectiveBudget = Math.floor(allocation.knowledgeInjectorTokens / 0.33);
+				effectiveBudget = estimateCharsForTokens(
+					allocation.knowledgeInjectorTokens,
+				);
+				if (sessionID) {
+					recordProducerGrant(
+						sessionID,
+						'knowledge-injector',
+						requestedTokens,
+						allocation.knowledgeInjectorTokens,
+						'messages',
+					);
+				}
 			}
 
 			if (isDelegatedAgent(agentName)) {
@@ -1026,6 +1208,10 @@ export function createKnowledgeInjectorHook(
 					output,
 					agentName,
 					sessionId,
+					// Issue #2045: the delegate block draws from the SAME effective
+					// budget (three-regime headroom split + unified allocator grant)
+					// as the architect path, clamped to the hard cap.
+					Math.min(effectiveBudget, DELEGATE_INJECT_HARD_CHAR_CAP),
 				);
 				return;
 			}
@@ -1036,6 +1222,8 @@ export function createKnowledgeInjectorHook(
 				recordInjectionSkip(directory, 'not_architect', {
 					agent: agentName,
 					sessionId,
+					messageCount: output.messages.length,
+					missing: ['architect_agent'],
 				});
 				return;
 			}
@@ -1089,7 +1277,7 @@ export function createKnowledgeInjectorHook(
 					}
 				}
 				if (cacheVerifiable)
-					injectKnowledgeMessage(output, cachedInjectionText);
+					injectKnowledgeMessage(output, cachedInjectionText, sessionId);
 				const sessionID = sessionId;
 				if (sessionID && cacheVerifiable) {
 					if (cachedCriticalIds.length > 0) {
@@ -1189,6 +1377,8 @@ export function createKnowledgeInjectorHook(
 					agent: agentName,
 					sessionId: sessionID,
 					phase: currentPhase,
+					messageCount: output.messages.length,
+					missing: ['matching_entries'],
 				});
 				const empty = await _internals.commitEmptyRetrieval(directory, {
 					trace_id: search.trace_id,
@@ -1245,7 +1435,7 @@ export function createKnowledgeInjectorHook(
 				}
 				// Drift or briefing exists — cache and inject it directly
 				cachedInjectionText = freshPreamble;
-				injectKnowledgeMessage(output, cachedInjectionText);
+				injectKnowledgeMessage(output, cachedInjectionText, sessionId);
 				return;
 			}
 
@@ -1312,6 +1502,8 @@ export function createKnowledgeInjectorHook(
 					agent: agentName,
 					sessionId: sessionId,
 					phase: currentPhase,
+					messageCount: output.messages.length,
+					missing: ['rendered_entries'],
 					extra: {
 						filteredCount: filteredEntries.length,
 						directiveCount: directiveEntries.length,
@@ -1468,7 +1660,7 @@ export function createKnowledgeInjectorHook(
 					return;
 				}
 			}
-			injectKnowledgeMessage(output, cachedInjectionText);
+			injectKnowledgeMessage(output, cachedInjectionText, sessionId);
 
 			// v2: Populate in-memory currentCriticalShownIds so the toolBefore
 			// enforcement gate can read O(1) without re-scanning JSONL.

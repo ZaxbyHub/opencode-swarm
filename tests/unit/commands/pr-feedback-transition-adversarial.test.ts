@@ -168,9 +168,9 @@ describe('external PR feedback continuation hardening', () => {
 		expect(await readPrWorkflowGateState(directory, SESSION_ID)).toBeNull();
 	});
 
-	test('same-artifact concurrent transitions converge on one workflow instance', async () => {
+	test('same-artifact external transitions fail closed without a durable review consent offer', async () => {
 		const handoffPath = await writeHandoff('same-run');
-		const requests = await Promise.all([
+		const requests = await Promise.allSettled([
 			transitionPrReviewToFeedback(directory, SESSION_ID, {
 				runId: 'same-run',
 				handoffPath,
@@ -182,10 +182,13 @@ describe('external PR feedback continuation hardening', () => {
 				prUrl: PR_URL,
 			}),
 		]);
-		expect(requests[0].workflowInstanceId).toBe(requests[1].workflowInstanceId);
+		expect(requests.every((request) => request.status === 'rejected')).toBe(
+			true,
+		);
+		expect(await readPrWorkflowGateState(directory, SESSION_ID)).toBeNull();
 	});
 
-	test('different concurrent handoffs have exactly one winner', async () => {
+	test('different external handoffs cannot race around the durable consent requirement', async () => {
 		const firstPath = await writeHandoff('first-run');
 		const secondPath = await writeHandoff('second-run');
 		const results = await Promise.allSettled([
@@ -201,20 +204,20 @@ describe('external PR feedback continuation hardening', () => {
 			}),
 		]);
 		expect(
-			results.filter((result) => result.status === 'fulfilled'),
-		).toHaveLength(1);
-		expect(
 			results.filter((result) => result.status === 'rejected'),
-		).toHaveLength(1);
+		).toHaveLength(2);
+		expect(await readPrWorkflowGateState(directory, SESSION_ID)).toBeNull();
 	});
 
-	test('artifact tampering after transition invalidates an idempotent retry', async () => {
+	test('artifact tampering never creates consent for a detached external handoff', async () => {
 		const handoffPath = await writeHandoff('tamper-run');
-		await transitionPrReviewToFeedback(directory, SESSION_ID, {
-			runId: 'tamper-run',
-			handoffPath,
-			prUrl: PR_URL,
-		});
+		await expect(
+			transitionPrReviewToFeedback(directory, SESSION_ID, {
+				runId: 'tamper-run',
+				handoffPath,
+				prUrl: PR_URL,
+			}),
+		).rejects.toThrow(/confirmation|consent|reservation/i);
 		await writeHandoff('tamper-run', { summary: 'changed after transition' });
 
 		await expect(
@@ -223,6 +226,6 @@ describe('external PR feedback continuation hardening', () => {
 				handoffPath,
 				prUrl: PR_URL,
 			}),
-		).rejects.toThrow(/different handoff or PR/i);
+		).rejects.toThrow(/confirmation|consent|reservation/i);
 	});
 });

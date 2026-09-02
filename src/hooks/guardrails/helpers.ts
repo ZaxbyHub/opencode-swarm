@@ -137,18 +137,76 @@ export function isInDeclaredScope(
 
 /**
  * Redacts sensitive values from a shell command string before audit logging.
- * Covers env-var assignments, CLI flags, Bearer/Basic auth, and -H header flags.
+ *
+ * Covers env-var assignments (POSIX/PowerShell `$env:`/cmd `set`), CLI flags
+ * (sensitive names, both `=`-joined and space-separated), Bearer/Basic auth,
+ * `-H` header flags, URL credentials (`scheme://user:pass@host`), well-known
+ * token VALUE shapes (OpenAI/GitHub/AWS/Slack/Google — content-based, so they
+ * fire regardless of the surrounding flag name), and long base64-like payload
+ * runs (≥80 chars with mixed case + digit — the encoded-wrapper/heredoc
+ * minimization class from issue #2040; plain hex SHAs and short payloads are
+ * deliberately NOT matched). Sensitive values are consumed through closing
+ * quotes when quoted (`KEY="two words"` redacts the whole value, not just the
+ * first word). UNC profile material (`\\server\share\user\…`) is minimized
+ * like the other home-profile families.
+ *
+ * Deterministic: identical inputs always redact identically (correlation via
+ * the audit `commandHash` relies on it). No pattern retains any reversible
+ * secret material.
  */
 export function redactShellCommand(cmd: string): string {
 	if (typeof cmd !== 'string') return '';
 	let out = cmd
 		.replace(/\/home\/[^/\s"']+/g, '~')
-		.replace(/[A-Za-z]:\\Users\\[^\\\s"']+/g, '~')
-		.replace(/\/Users\/[^/\s"']+/g, '~');
+		.replace(/[A-Za-z]:\\Users\\[^\\\s"']+/gi, '~')
+		.replace(/\/Users\/[^/\s"']+/g, '~')
+		// UNC profile/share material inside command strings: \\server\share\user\… -> ~
+		.replace(/\\\\[^\\\s"']+\\[^\\\s"']+\\[^\\\s"']+(?:\\[^\s"']*)?/g, '~');
 
+	// URL credentials: scheme://user:password@host -> scheme://user:[REDACTED]@host
+	// The scheme prefix is bounded ({0,32}) so a long non-URL token cannot make
+	// the class scan quadratic before the `://` anchor fails (review round:
+	// unbounded scheme + lookahead forms benchmarked 6.5-14 s/100 KB).
 	out = out.replace(
-		/\b([A-Z_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_]?KEY|APIKEY|AUTH|CREDENTIAL|PRIVATE[_]?KEY|ACCESS[_]?KEY|_KEY)[A-Z_0-9]*)\s*=\s*(\S+)/gi,
+		/([a-zA-Z][a-zA-Z0-9+.-]{0,32}:\/\/[^\s"'@/]+):([^@\s"'/]+)@/g,
+		'$1:[REDACTED]@',
+	);
+
+	// Quoted values are consumed through the closing quote so multiword
+	// secrets (`KEY="two words"`) are fully minimized, not just their first
+	// word (non-capturing so `$1` stays the variable name).
+	const VALUE = String.raw`(?:"[^"]*"|'[^']*'|\S+)`;
+
+	// Name prefixes are bounded ({0,64}) to keep the case-insensitive class
+	// scan from going quadratic on long non-matching runs (same review round).
+	out = out.replace(
+		new RegExp(
+			String.raw`\b([A-Z_]{0,64}(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_]?KEY|APIKEY|AUTH|CREDENTIAL|PRIVATE[_]?KEY|ACCESS[_]?KEY|_KEY)[A-Z_0-9]{0,64})\s*=\s*` +
+				VALUE,
+			'gi',
+		),
 		'$1=[REDACTED]',
+	);
+
+	// PowerShell env assignment (sensitive names only — matches the POSIX
+	// pattern's scope): $env:KEY="value" / $env:KEY='v' / $env:KEY=v
+	out = out.replace(
+		new RegExp(
+			String.raw`(\$env:[A-Za-z_][A-Za-z_0-9]{0,64}(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_]?KEY|APIKEY|AUTH|CREDENTIAL|PRIVATE[_]?KEY|ACCESS[_]?KEY|_KEY)[A-Za-z_0-9]{0,64})(\s*=\s*)` +
+				VALUE,
+			'gi',
+		),
+		'$1=[REDACTED]',
+	);
+
+	// cmd.exe / command.com env assignment: set KEY=value (sensitive names only)
+	out = out.replace(
+		new RegExp(
+			String.raw`\b(set|SET)(\s+"?)([A-Za-z_][A-Za-z_0-9]{0,64}(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_]?KEY|APIKEY|AUTH|CREDENTIAL|PRIVATE[_]?KEY|ACCESS[_]?KEY|_KEY)[A-Za-z_0-9]{0,64})(=?)(\s+)` +
+				VALUE,
+			'gi',
+		),
+		'$1$2$3=[REDACTED]',
 	);
 
 	out = out.replace(
@@ -169,6 +227,31 @@ export function redactShellCommand(cmd: string): string {
 	out = out.replace(
 		/(-H\s+['"]?(?:Authorization|X-API-Key|X-Auth-Token|[A-Za-z][A-Za-z-]*-(?:key|token|secret|auth|credential)):\s*)([^'">\s][^'">\n]*)(['"]?)/gi,
 		'$1[REDACTED]$3',
+	);
+
+	// Well-known token VALUE shapes (content-based; fires regardless of the
+	// flag/variable name carrying them). GitHub suffix bound is 20+: real PATs
+	// are 36+, and shorter truncated/pasted fragments stay minimized too.
+	out = out
+		.replace(/\bsk-[A-Za-z0-9_-]{20,}/g, '[REDACTED:openai]')
+		.replace(/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g, '[REDACTED:github]')
+		.replace(/\bgithub_pat_[A-Za-z0-9_]{22,}/g, '[REDACTED:github]')
+		.replace(/\bAKIA[0-9A-Z]{16}\b/g, '[REDACTED:aws]')
+		.replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}/g, '[REDACTED:slack]')
+		.replace(/\bAIza[A-Za-z0-9_-]{30,}/g, '[REDACTED:google]');
+
+	// Long base64-like payload runs (encoded wrappers, heredoc payloads).
+	// Requires ≥80 chars of base64 charset AND at least one uppercase, one
+	// lowercase, and one digit — hex-only SHAs (lowercase+digit) and short
+	// payloads stay visible (no-over-redaction guards pin them).
+	// Two-stage on purpose: a single /g match consumes each candidate run
+	// linearly (no per-position lookaheads — the previous three-lookahead form
+	// was O(n²) on long non-matching runs, 7.6 s/100 KB), and the class check
+	// runs only on the matched span.
+	out = out.replace(/[A-Za-z0-9+/]{80,}={0,2}/g, (run) =>
+		/[A-Z]/.test(run) && /[a-z]/.test(run) && /[0-9]/.test(run)
+			? '[REDACTED:base64]'
+			: run,
 	);
 
 	return out;

@@ -263,7 +263,7 @@ function buildFallbackObservation(
  * `BigInt` payload, not on an unknown kind, not on `null` or `undefined` data.
  * It never calls `JSON.stringify`, never clones, and never deep-traverses
  * `data` — `src/telemetry.test.ts:137-162` emits exactly those payloads and
- * asserts `emit()` does not throw, and `src/telemetry.ts:266` documents the
+ * asserts `emit()` does not throw, and `src/telemetry.ts:276` documents the
  * never-throw guarantee. If anything inside fails, a minimal valid event is
  * returned carrying `relationshipViolations: ['observation_build_failed']`.
  *

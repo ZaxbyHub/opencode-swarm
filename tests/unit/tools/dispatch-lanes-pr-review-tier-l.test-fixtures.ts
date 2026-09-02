@@ -32,7 +32,7 @@ export const REVISION_DIGEST = 'tier-l-revision';
 export const TIER_L_MESSAGE =
 	'depth tier L requires one dedicated lane per dimension';
 const CANDIDATE_HEADER =
-	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 
 let directory = '';
 let currentRevisionDigest = REVISION_DIGEST;
@@ -95,7 +95,7 @@ function artifactText(
 		CANDIDATE_HEADER,
 		...rows.map(
 			({ candidateId, dimension }) =>
-				`${candidateId} | ${dimension} | HIGH | correctness | src/${dimension}.ts:1 | claim about ${dimension} | evidence for ${dimension} | impact on ${dimension} | HIGH`,
+				`${candidateId} | ${dimension} | HIGH | correctness | src/${dimension}.ts:1 | claim about ${dimension} | evidence for ${dimension} | impact on ${dimension} | HIGH | ORDINARY | `,
 		),
 	].join('\n');
 }
@@ -120,12 +120,15 @@ export async function persistBaseLane(options: {
 		: [options.workflowLane];
 	const candidateIds =
 		options.candidateIds ?? owned.map((dimension) => `C-${dimension}`);
-	const text = artifactText(
-		owned.map((dimension, index) => ({
-			candidateId: candidateIds[index] ?? `C-${dimension}`,
-			dimension,
-		})),
-	);
+	const text =
+		options.status === 'error'
+			? ''
+			: artifactText(
+					owned.map((dimension, index) => ({
+						candidateId: candidateIds[index] ?? `C-${dimension}`,
+						dimension,
+					})),
+				);
 	await recordPendingDelegation(directory, {
 		correlationId,
 		jobId: null,
@@ -140,6 +143,7 @@ export async function persistBaseLane(options: {
 		laneId: options.laneId,
 		mode: 'swarm-pr-review:base',
 		workflowLane: options.workflowLane,
+		prReviewLegacyTranscriptCompatibility: true,
 		...(options.ownedWorkflowLanes
 			? { ownedWorkflowLanes: options.ownedWorkflowLanes }
 			: {}),

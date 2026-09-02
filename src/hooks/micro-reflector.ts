@@ -26,6 +26,7 @@ import { sanitizeTaskId } from '../evidence/manager.js';
 import { enqueueCandidate } from '../learning/candidate-queue.js';
 import { reserveQuota } from '../services/skill-improver-quota.js';
 import { warn } from '../utils/logger.js';
+import { withTimeoutSignal } from '../utils/timeout.js';
 import type { CuratorLLMDelegate } from './curator.js';
 import { getStoredInputArgs } from './guardrails/stored-input-args.js';
 import type { EnrichmentQuotaOptions } from './knowledge-curator.js';
@@ -518,6 +519,7 @@ export async function runMicroReflection(params: {
 	try {
 		if (!REFLECT_OUTCOMES.has(outcome)) return result; // success → no LLM call
 		if (!params.llmDelegate) return result;
+		const llmDelegate = params.llmDelegate;
 
 		const quota = params.quota ?? { maxCalls: 10, window: 'utc' as const };
 		const reservation = await reserveQuota(params.directory, {
@@ -534,10 +536,12 @@ export async function runMicroReflection(params: {
 			transcript: params.transcript,
 			trajectory: params.trajectory,
 		});
-		const response = await params.llmDelegate(
-			'',
-			prompt,
-			AbortSignal.timeout(MICRO_LLM_TIMEOUT_MS),
+		const response = await withTimeoutSignal(
+			(signal) => llmDelegate('', prompt, signal),
+			MICRO_LLM_TIMEOUT_MS,
+			new Error(
+				`Micro-reflector LLM call timed out after ${MICRO_LLM_TIMEOUT_MS}ms`,
+			),
 		);
 		result.reflected = true;
 		const candidates = parseMicroCandidates(response, {

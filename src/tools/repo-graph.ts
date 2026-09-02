@@ -11,6 +11,8 @@
  *   storage.ts     — safe load and save to .swarm/repo-graph.json
  *   builder.ts     — workspace scanning and full-graph construction
  *   incremental.ts — incremental updates for changed files
+ *   symbol-query.ts — KG-14 symbol/impact/diff/explain queries (issue #1535)
+ *   pack-query.ts  — KG-15 route/data/test change-risk packs (issue #1536)
  *
  * All existing imports of this module continue to work unchanged.
  */
@@ -54,7 +56,11 @@ export {
 } from './repo-graph/freshness';
 export { updateGraphForFiles } from './repo-graph/incremental';
 export type { ExtractFileOntologyInput } from './repo-graph/ontology';
-export { extractFileOntology } from './repo-graph/ontology';
+export {
+	extractFileOntology,
+	normalizeRoutePathInput,
+} from './repo-graph/ontology';
+export { buildTestPack, traceData, traceRoute } from './repo-graph/pack-query';
 export type { DeadExportsOptions } from './repo-graph/query';
 export {
 	buildOntologyPreflightPacket,
@@ -74,6 +80,19 @@ export {
 	isGraphFresh,
 	resetQueryCache,
 } from './repo-graph/query';
+export type {
+	LexicalRequest,
+	LexicalResult,
+	RetrievalMode,
+	RetrievalRequest,
+	RetrievalResult,
+} from './repo-graph/retrieval-router';
+export {
+	classifyRetrieval,
+	RETRIEVAL_MODES,
+	ROUTER_METADATA_OVERHEAD_TOKENS,
+	routeRetrieval,
+} from './repo-graph/retrieval-router';
 export {
 	getGraphPath,
 	loadGraph,
@@ -82,6 +101,13 @@ export {
 	saveGraph,
 	saveIfDirty,
 } from './repo-graph/storage';
+export {
+	explainGraphEntry,
+	getDiffContext,
+	getImpactCone,
+	getSymbolContext,
+	searchSymbols,
+} from './repo-graph/symbol-query';
 export type {
 	AskHit,
 	AskOptions,
@@ -89,39 +115,72 @@ export type {
 	BlastRadiusResult,
 	BuildWorkspaceGraphOptions,
 	CallerReference,
+	ConeEntry,
+	ContextPackCoverage,
 	ContextPackResult,
+	ContextPackSnippet,
+	ContextPackSourceMode,
 	ContextPackSpan,
 	ConventionFact,
 	DataOperationFact,
+	DataTraceAccess,
+	DataTraceResult,
 	DeadExportCandidate,
 	DeadExportsResult,
+	DerivedAssociation,
+	DiffContextResult,
+	DiffFileSummary,
+	DiffSymbolChange,
+	ExplainReason,
 	FileOntology,
 	FileReference,
 	FileRole,
 	FreshnessProbeState,
 	GraphEdge,
+	GraphExplainResult,
 	GraphExtractionFailure,
 	GraphExtractorInputWitness,
 	GraphHealthResult,
 	GraphNode,
+	GraphSymbolKind,
+	GraphSymbolVisibility,
 	GraphUnresolvedImport,
+	ImpactConeResult,
 	LocalizationBlock,
 	OntologyFinding,
+	OntologyLink,
+	OntologyLinkConfidence,
+	OntologyLinkKind,
 	PackageBoundarySummary,
 	RepoGraph,
 	RepoGraphDiagnostics,
 	RouteFact,
 	RouteMethod,
+	RouteTraceResult,
+	RouteTraceRoute,
 	SecurityFact,
+	SymbolContextResult,
 	SymbolEdge,
+	SymbolEdgeEvidence,
+	SymbolEdgeKind,
+	SymbolEdgeResolution,
+	SymbolHit,
+	SymbolIdentityKind,
 	SymbolReference,
+	SymbolSearchResult,
+	TestPackFixture,
+	TestPackResult,
+	TestPackTestEntry,
 } from './repo-graph/types';
 export {
 	createEmptyGraph,
+	DEFAULT_MAX_SOURCE_BYTES,
 	GRAPH_SCHEMA_VERSION,
 	inferPackageBoundary,
 	isSchemaVersionAtLeast,
 	normalizeGraphPath,
+	ONTOLOGY_LINK_CONFIDENCE_VALUES,
+	ONTOLOGY_LINK_KIND_VALUES,
 	REPO_GRAPH_FILENAME,
 	updateGraphMetadata,
 } from './repo-graph/types';

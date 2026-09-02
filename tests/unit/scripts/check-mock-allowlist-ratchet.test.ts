@@ -18,10 +18,13 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { seedQuarantineListFiles } from '../../helpers/invariant-gate-fixtures';
 
 const isWindows = process.platform === 'win32';
 const REPO_ROOT = path.resolve(__dirname, '../../../');
 const SCRIPT = path.join(REPO_ROOT, 'scripts', 'check-invariants.sh');
+const SCRIPT_TS = path.join(REPO_ROOT, 'scripts', 'check-invariants.ts');
+const GATE_UTILS = path.join(REPO_ROOT, 'scripts', 'gate-utils.ts');
 const LIB = path.join(REPO_ROOT, 'scripts', 'lib', 'normalize-mock-target.sh');
 // Check 6 (issue #1976) delegates to this sibling script. Every fixture copies
 // check-invariants.sh; without this file Check 6's `bash <missing>` fails and
@@ -113,6 +116,8 @@ function copyScripts(repoDir: string): void {
 	fs.mkdirSync(scriptsDir, { recursive: true });
 	fs.mkdirSync(path.join(scriptsDir, 'lib'), { recursive: true });
 	fs.copyFileSync(SCRIPT, path.join(scriptsDir, 'check-invariants.sh'));
+	fs.copyFileSync(SCRIPT_TS, path.join(scriptsDir, 'check-invariants.ts'));
+	fs.copyFileSync(GATE_UTILS, path.join(scriptsDir, 'gate-utils.ts'));
 	fs.copyFileSync(
 		LIB,
 		path.join(scriptsDir, 'lib', 'normalize-mock-target.sh'),
@@ -139,6 +144,9 @@ function makeRepo(baseEntries: string[]): string {
 	git(repoDir, 'config', 'user.email', 'test@example.com');
 	git(repoDir, 'config', 'user.name', 'Test');
 	copyScripts(repoDir);
+	// Check 7 (issue #2477) fail-closes on missing quarantine list files; the
+	// .sh shim delegates to the TS owner, so fixtures need the four lists.
+	seedQuarantineListFiles(repoDir);
 	writeAllowlist(repoDir, baseEntries);
 	// scripts/check-invariants.sh Check 1 also greps src/ for spawn — give it
 	// an empty src/ so the scan has no hits (avoids noise in output).

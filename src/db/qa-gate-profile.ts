@@ -10,6 +10,7 @@
 import { createHash } from 'node:crypto';
 import { derivePlanId, derivePlanIdentityHash } from '../plan/utils.js';
 import { formatLegacyQaBindingRecovery } from '../qa-gate/recovery.js';
+import { warn } from '../utils/logger.js';
 import { getProjectDb, projectDbExists } from './project-db.js';
 
 /**
@@ -526,7 +527,19 @@ export function hasAnyProfileWithEnabledGate(
 		try {
 			const parsed = JSON.parse(row.gates) as Partial<QaGates>;
 			if (parsed?.[gate] === true) return true;
-		} catch {}
+		} catch (err) {
+			// Issue #2349 sweep: a corrupt profile row previously vanished in
+			// silence, so "gate not enabled" and "gate row is unparseable" were
+			// indistinguishable — and this function fails CLOSED (returns false),
+			// meaning corruption silently disables a QA gate. Name it under
+			// OPENCODE_SWARM_DEBUG=1 (`warn` is debug-gated; deliberately not
+			// promoted to criticalWarn, which is reserved for must-see signals).
+			warn(
+				`[qa-gate-profile] skipping unparseable qa_gate_profile row while checking gate "${gate}": ${
+					err instanceof Error ? err.message : String(err)
+				}`,
+			);
+		}
 	}
 	return false;
 }

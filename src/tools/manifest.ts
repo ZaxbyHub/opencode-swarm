@@ -28,6 +28,7 @@ import { actionlint_scan } from './actionlint-scan';
 import { swarmApplyPatch } from './apply-patch';
 import { approve_plan_critic } from './approve-plan-critic';
 import { ast_grep } from './ast-grep';
+import { authorize_pr_review_reentry } from './authorize-pr-review-reentry';
 import { batch_symbols } from './batch-symbols';
 import { build_check } from './build-check';
 import { check_gate_status } from './check-gate-status';
@@ -71,6 +72,7 @@ import { gh_evidence } from './gh-evidence';
 import { git_blame } from './git-blame';
 import { gitingest } from './gitingest';
 import { imports } from './imports';
+import { invalidate_pr_feedback_publication } from './invalidate-pr-feedback-publication';
 import { knowledge_add } from './knowledge-add';
 import { knowledge_archive } from './knowledge-archive';
 import { knowledge_query } from './knowledge-query';
@@ -128,6 +130,7 @@ import { skill_retire } from './skill-retire';
 import { spec_write } from './spec-write';
 import { run_stale_reconciliation } from './stale-reconciliation';
 import { submit_phase_council_verdicts } from './submit-phase-council-verdicts';
+import { submit_pr_review_result } from './submit-pr-review-result';
 import { suggestPatch } from './suggest-patch';
 import { summarize_work } from './summarize-work';
 import { swarm_command } from './swarm-command';
@@ -187,12 +190,15 @@ export const TOOL_MANIFEST = defineHandlers({
 	completion_verify: () => completion_verify,
 	complete_pr_workflow: () => complete_pr_workflow,
 	abort_pr_workflow: () => abort_pr_workflow,
+	authorize_pr_review_reentry: () => authorize_pr_review_reentry,
+	submit_pr_review_result: () => submit_pr_review_result,
 	approve_plan_critic: () => approve_plan_critic,
 	prepare_pr_workflow_checkout: () => prepare_pr_workflow_checkout,
 	record_implementation_review: () => record_implementation_review,
 	record_issue_publication: () => record_issue_publication,
 	record_issue_reproduction: () => record_issue_reproduction,
 	record_recurrence_sweep: () => record_recurrence_sweep,
+	invalidate_pr_feedback_publication: () => invalidate_pr_feedback_publication,
 	rebind_pr_feedback_head: () => rebind_pr_feedback_head,
 	run_pr_feedback_stage_a: () => run_pr_feedback_stage_a,
 	submit_council_verdicts: () => submit_council_verdicts,

@@ -12,6 +12,7 @@ import type { Plan } from '../../../src/config/plan-schema';
 import {
 	formatStatusMarkdown,
 	getStatusData,
+	_internals as statusInternals,
 } from '../../../src/services/status-service';
 import {
 	initTelemetry,
@@ -118,6 +119,119 @@ describe('status-service lastActivity (FR-010)', () => {
 		expect(status.completedTasks).toBe(0);
 		expect(status.totalTasks).toBe(1);
 		expect(status.agentCount).toBe(1);
+	});
+
+	test('surfaces cost totals with inconclusive provenance instead of treating missing cost as zero evidence', async () => {
+		resetTelemetryForTesting();
+		fs.writeFileSync(
+			path.join(tempDir, '.swarm', 'telemetry.jsonl'),
+			`${JSON.stringify({
+				event: 'delegation_end',
+				record_id: 'status-cost-1',
+				identity_fingerprint: 'a'.repeat(32),
+				version: 1,
+				agentName: 'coder',
+				taskId: '1.1',
+				cost_usd: null,
+				cost_source: 'unavailable',
+				evidence_status: 'inconclusive',
+			})}\n`,
+		);
+
+		const status = await getStatusData(tempDir, mockAgents);
+		expect(status.costs).toMatchObject({
+			totalCostUsd: 0,
+			delegations: 1,
+			unavailableDelegations: 1,
+			evidenceStatus: 'inconclusive',
+		});
+		expect(formatStatusMarkdown(status)).toContain('inconclusive evidence');
+	});
+
+	test('caches telemetry cost summaries until the telemetry stamp changes', async () => {
+		const original = statusInternals.summarizeTelemetryCosts;
+		let summarizeCalls = 0;
+		statusInternals.summarizeTelemetryCosts = ((directory: string) => {
+			summarizeCalls++;
+			return original(directory);
+		}) as typeof statusInternals.summarizeTelemetryCosts;
+
+		try {
+			fs.writeFileSync(
+				path.join(tempDir, '.swarm', 'telemetry.jsonl'),
+				`${JSON.stringify({
+					event: 'delegation_end',
+					record_id: 'status-cache-1',
+					identity_fingerprint: 'b'.repeat(32),
+					version: 1,
+					agentName: 'coder',
+					taskId: '1.1',
+					cost_usd: 0.1,
+					cost_source: 'reported',
+				})}\n`,
+			);
+
+			const first = await getStatusData(tempDir, mockAgents);
+			const second = await getStatusData(tempDir, mockAgents);
+			expect(summarizeCalls).toBe(1);
+			expect(first.costs).toMatchObject({
+				totalCostUsd: 0.1,
+				delegations: 1,
+			});
+			expect(second.costs).toMatchObject({
+				totalCostUsd: 0.1,
+				delegations: 1,
+			});
+
+			fs.writeFileSync(
+				path.join(tempDir, '.swarm', 'telemetry.jsonl'),
+				[
+					JSON.stringify({
+						event: 'delegation_end',
+						record_id: 'status-cache-1',
+						identity_fingerprint: 'b'.repeat(32),
+						version: 1,
+						agentName: 'coder',
+						taskId: '1.1',
+						cost_usd: 0.1,
+						cost_source: 'reported',
+					}),
+					JSON.stringify({
+						event: 'delegation_end',
+						record_id: 'status-cache-2',
+						identity_fingerprint: 'c'.repeat(32),
+						version: 1,
+						agentName: 'reviewer',
+						taskId: '1.2',
+						cost_usd: 0.2,
+						cost_source: 'reported',
+					}),
+				].join('\n'),
+			);
+
+			const third = await getStatusData(tempDir, mockAgents);
+			expect(summarizeCalls).toBe(2);
+			expect(third.costs).toMatchObject({
+				totalCostUsd: 0.3,
+				delegations: 2,
+			});
+		} finally {
+			statusInternals.summarizeTelemetryCosts = original;
+		}
+	});
+
+	test('fails open when telemetry cost summarization throws', async () => {
+		const original = statusInternals.summarizeTelemetryCosts;
+		statusInternals.summarizeTelemetryCosts = (() => {
+			throw new Error('boom');
+		}) as typeof statusInternals.summarizeTelemetryCosts;
+
+		try {
+			const status = await getStatusData(tempDir, mockAgents);
+			expect(status.costs).toBeUndefined();
+		} finally {
+			statusInternals.summarizeTelemetryCosts = original;
+		}
 	});
 });
 
@@ -281,5 +395,75 @@ describe('Heartbeat staleness (FR-010/FR-011) integration', () => {
 		expect(md).toContain('**Current Phase**: Phase 1');
 		expect(md).toContain('**Tasks**: 0/1 complete');
 		expect(md).toContain('**Agents**: 1 registered');
+	});
+});
+
+describe('formatStatusMarkdown Learning Health section (#2044)', () => {
+	test('renders active alarms with redacted scope refs', () => {
+		const md = formatStatusMarkdown({
+			hasPlan: true,
+			currentPhase: 'Phase 1',
+			completedTasks: 0,
+			totalTasks: 1,
+			agentCount: 1,
+			isLegacy: false,
+			turboMode: false,
+			contextBudgetPct: null,
+			compactionCount: 0,
+			lastSnapshotAt: null,
+			learningHealth: {
+				activeAlarms: [
+					{
+						alarm: 'headroom_dead_streak',
+						severity: 'warning',
+						scopeClass: 'session',
+						scopeRef: 'a1b2c3d4e5f60718',
+						ageMs: 120_000,
+						coverageFacts: 3,
+						transitionCount: 1,
+					},
+				],
+				totalTransitions: 2,
+			},
+		} as Parameters<typeof formatStatusMarkdown>[0]);
+		expect(md).toContain('**Learning Health**');
+		expect(md).toContain('headroom_dead_streak');
+		expect(md).toContain('a1b2c3d4e5f60718');
+		expect(md).toContain('age 2m');
+		expect(md).toContain('/swarm diagnose');
+	});
+
+	test('renders the healthy line when no alarms are active', () => {
+		const md = formatStatusMarkdown({
+			hasPlan: true,
+			currentPhase: 'Phase 1',
+			completedTasks: 0,
+			totalTasks: 1,
+			agentCount: 1,
+			isLegacy: false,
+			turboMode: false,
+			contextBudgetPct: null,
+			compactionCount: 0,
+			lastSnapshotAt: null,
+			learningHealth: { activeAlarms: [], totalTransitions: 4 },
+		} as Parameters<typeof formatStatusMarkdown>[0]);
+		expect(md).toContain('no active learning-health alarms');
+		expect(md).toContain('4 transitions recorded');
+	});
+
+	test('renders no section when the snapshot is unavailable (fail-open)', () => {
+		const md = formatStatusMarkdown({
+			hasPlan: true,
+			currentPhase: 'Phase 1',
+			completedTasks: 0,
+			totalTasks: 1,
+			agentCount: 1,
+			isLegacy: false,
+			turboMode: false,
+			contextBudgetPct: null,
+			compactionCount: 0,
+			lastSnapshotAt: null,
+		} as Parameters<typeof formatStatusMarkdown>[0]);
+		expect(md).not.toContain('**Learning Health**');
 	});
 });

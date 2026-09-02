@@ -150,3 +150,24 @@ describe('approve_plan_critic tool', () => {
 		expect(parsed.message).toContain('active sessionID');
 	});
 });
+
+describe('approve_plan_critic description parity across registration surfaces', () => {
+	// PR #2457 review follow-up: the handler description and the TOOL_METADATA
+	// entry feed different agent-facing surfaces. Both must carry the
+	// bookkeeping-repair case so the sanctioned PLAN FREEZE recovery cannot
+	// silently disappear from one of them.
+	test('handler and TOOL_METADATA descriptions both state the bookkeeping-repair case', async () => {
+		const { approve_plan_critic } = await import(
+			'../../../src/tools/approve-plan-critic.js'
+		);
+		const { TOOL_METADATA } = await import(
+			'../../../src/tools/tool-metadata.js'
+		);
+		const handlerDescription = approve_plan_critic.description ?? '';
+		const metadataDescription = TOOL_METADATA.approve_plan_critic.description;
+		for (const description of [handlerDescription, metadataDescription]) {
+			expect(description).toContain('PLAN FREEZE');
+			expect(description).toContain('bookkeeping-grade hashed-field repair');
+		}
+	});
+});

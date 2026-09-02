@@ -35,7 +35,7 @@ path substituted for `<handoff_artifact_path>`:
 ```
 
 `<run_id>` is a stable identifier for this review run, such as
-`pr-<number>-<YYYYMMDDHHMMSS>` or the existing review artifact run ID when one
+`pr-review-<YYYYMMDDHHMMSSmmm>` or the existing review artifact run ID when one
 was already created. Under Profile A, the exact command is parsed mechanically:
 the controller validates the terminal review, the bounded handoff artifact, and
 its provenance before atomically replacing the review gate with an unbound
@@ -66,12 +66,7 @@ This protocol runs on any agent harness. Before Phase 0, detect which profile
 this session is in by checking the actual tool list — never assume from the
 harness name, and never guess:
 
-- **Profile A — structured PR-workflow controller.** The swarm plugin's
-  controller tools are available in this session: `dispatch_lanes_async`,
-  `collect_lane_results`, `retrieve_lane_output`, `parse_lane_candidates`,
-  `write_pr_review_artifact`, `write_pr_review_trigger_eval`,
-  `complete_pr_workflow`. Typical host: OpenCode with the swarm plugin. The
-  controller mechanically enforces this skill's accounting: it computes the
+- **Profile A — structured PR-workflow controller.** The swarm plugin's controller tools are available in this session: `dispatch_lanes_async`, `collect_lane_results`, `retrieve_lane_output`, `parse_lane_candidates`, `submit_pr_review_result`, `write_pr_review_artifact`, `write_pr_review_trigger_eval`, `complete_pr_workflow`. Typical host: OpenCode with the swarm plugin. The controller mechanically enforces this skill's accounting: it computes the
   depth tier itself from the bound merge-base diff (never from caller
   claims), enforces the tier's lane floors and full dimension/family
   partitions for consolidated dispatch, and gates structured reviewer/critic
@@ -101,10 +96,18 @@ harness name, and never guess:
 
 | Harness (typical) | Profile | Lane dispatch | Ledger persistence | Completion gate |
 |---|---|---|---|---|
-| OpenCode + swarm plugin | A | `dispatch_lanes_async` / `collect_lane_results` | `write_pr_review_artifact`, `write_pr_review_trigger_eval` | `complete_pr_workflow` |
+| OpenCode + swarm plugin | A | `dispatch_lanes_async` / `collect_lane_results` | `submit_pr_review_result`, `write_pr_review_artifact`, `write_pr_review_trigger_eval` | `complete_pr_workflow` |
 | Claude Code | B | parallel `Agent`/`Task` subagents | ledger files in the session task workspace | Pre-Synthesis Gate checklist |
 | OpenAI Codex | B | parallel subagents (fresh context) | ledger files in working notes | Pre-Synthesis Gate checklist |
 | ZCode | B | parallel subagents (fresh context) | ledger files in working notes | Pre-Synthesis Gate checklist |
+
+Host-native JSON-schema transport is optional and currently unregistered on the
+tested OpenCode, Claude Code, Codex, and ZCode host matrix. Profile A therefore
+uses the child-bound `submit_pr_review_result` tool as its supported baseline.
+Any future native integration must implement the fixed internal
+`promptJsonSchema({ sessionId, agent, schema, parts })` seam and pass the
+adapter-present, unsupported-before-execution, provider-failure, timeout, and
+per-session capability tests before registration.
 
 **Completion-gate assurance is NOT equivalent across profiles.** Only Profile A
 enforces completion MECHANICALLY: the controller's `complete_pr_workflow` receipt
@@ -142,11 +145,11 @@ ordering, vocabulary, or schema.
   `test-infrastructure`, `ui-accessibility-i18n`, `privacy-observability`,
   `generated-provenance`, `unclassified-risk`.
 - Base candidate header:
-  `[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence`
+  `[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags`
 - Base clean attestation:
   `[CLEAN] | lane | coverage_scope | evidence`
 - Micro/council candidate header:
-  `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence`
+  `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags`
 - Micro/council clean attestation:
   `[CLEAN] | micro_lane | coverage_scope | evidence`
 - Severity is exactly `INFO | LOW | MEDIUM | HIGH | CRITICAL`; confidence is
@@ -155,10 +158,14 @@ ordering, vocabulary, or schema.
 Controller order is exact: bind the immutable head/base range; dispatch,
 settle, and parse base lanes; evaluate every trigger row; dispatch micro lanes;
 settle and parse every matched micro family; persist the trigger evaluation;
-persist post-explorer findings; run reviewers; run critics; then persist the
-final artifact and complete the workflow. The **initial** micro dispatch MUST
-supply the complete trigger-evaluation ledger; that dispatch freezes it for the
-session.
+submit exactly one `submit_pr_review_result` receipt for each base/micro
+discovery lane and then stop; persist post-explorer findings; run reviewers;
+run critics; then persist the final artifact and complete the workflow. Transcript
+`[CANDIDATE]` / `[CLEAN]` rows are deprecated legacy compatibility only for
+lanes whose snapped `pr_review_legacy_transcript_compatibility` contract
+explicitly enables them.
+The **initial** micro dispatch MUST supply the complete trigger-evaluation
+ledger; that dispatch freezes it for the session.
 Any subsequent micro batch in that same session MAY omit `trigger_evaluation`
 and reuse the frozen ledger. If a subsequent batch explicitly supplies a copy,
 that copy MUST remain exactly identical to the frozen ledger.
@@ -689,7 +696,7 @@ the review head SHA recorded at the top.
 Each persisted finding record must include at least:
 
 ```json
-{"finding_id":"F-001","status":"PENDING","file_line":"src/file.ts:123","evidence":"quote, command output, lane id, or reviewer rationale","next_action":"route_to_reviewer"}
+{"finding_id":"F-001","status":"PENDING","file_line":"src/file.ts:123","evidence":"quote, command output, lane id, or reviewer rationale","next_action":"route_to_reviewer","severity":"HIGH"}
 ```
 
 Minimum field contract:
@@ -697,38 +704,50 @@ Minimum field contract:
 - `finding_id`: stable ID from the candidate/reviewer/critic ledger.
 - `status`: one of `PENDING`, `CONFIRMED`, `DISPROVED`, or `PRE_EXISTING`.
 - `file_line`: exact `file:line`, or `N/A` with reason when cross-file.
-- `evidence`: compact source-backed proof (lane/reviewer/critic IDs or command
-  output references when available).
-- `next_action`: `route_to_reviewer`, `route_to_critic`, `report`,
-  `suppress_with_reason`, or `handoff_to_feedback`.
+- `evidence`: compact source-backed proof (lane/reviewer/critic IDs or command output references when available).
+- `next_action`: `route_to_reviewer`, `route_to_critic`, `report`, `suppress_with_reason`, or `handoff_to_feedback`.
+- `severity`: REQUIRED at every boundary — omitting it is a violation, not a shortcut. Vocabulary is the VERDICT dialect `INFO|LOW|MEDIUM|HIGH|CRITICAL|NONE`. At `post_explorer` it must equal the severity of the `[CANDIDATE]` row the record projects (so never `NONE`, which no candidate row can declare) — except the mechanically derived `CLEAN-REVIEW` sentinel emitted when discovery found nothing, whose severity is `NONE`; at `post_reviewer` the reviewer `final_severity`; at `post_critic` the **critic** `final_severity` for critic-routed records, otherwise the reviewer's (issue #2279).
 
 Persist after every major validation boundary (Profile A via the controller
 calls below; Profiles B/C by appending the same boundary-tagged records to the
 ledger file):
 
-1. **Post-explorer:** after Phase 3/4 candidate parsing and before reviewer
-   dispatch, call `write_pr_review_artifact` with `boundary: "post_explorer"`
-   and all candidates as `PENDING` with their lane provenance.
+1. **Post-explorer:** persist as soon as the base wave settles and its
+   candidates parse — BEFORE micro dispatch — by calling
+   `write_pr_review_artifact` with `boundary: "post_explorer"` and the
+   base-derived candidates as `PENDING` with their lane provenance. This
+   base-only write is the compaction recovery point for everything before
+   trigger evaluation; it must cover exactly the base-derived inventory
+   (micro ids are refused as `extra:` at this point). After trigger
+   evaluation a full-inventory `post_explorer` write (base+micro) is also
+   admissible and supersedes the early checkpoint as the recovery point.
 2. **Post-reviewer:** after Phase 6 reviewer validation, call the controller
    with `boundary: "post_reviewer"` and update each reviewed
    record to `CONFIRMED`, `DISPROVED`, `PRE_EXISTING`, or keep `PENDING` with a
    concrete `next_action` if more evidence is required.
 3. **Post-critic:** after Phase 8 critic challenge, call the controller with
-   `boundary: "post_critic"` and update final status,
-   severity/action notes in `evidence`, and final reporting or handoff action.
+   `boundary: "post_critic"` and update final status, the authoritative
+   `severity`, and final reporting or handoff action.
 
-**Enforced order, dispositions, and error reporting (Profile A).** Checkpoints
-are admitted only after the trigger evaluation completes, then strictly
+**Enforced order, dispositions, and error reporting (Profile A).** The
+trigger evaluation must complete before every findings boundary EXCEPT the
+base-only `post_explorer` write above, which is admissible right after base
+settlement (issue #2280); beyond that exception checkpoints run strictly
 `post_explorer` → `post_reviewer` → `post_critic`, each requiring the prior
-checkpoint persisted; records must match the authoritative reviewer/critic
+checkpoint persisted, and `post_reviewer`/`post_critic` must exactly cover
+the FULL (base+micro) candidate inventory against the persisted trigger-eval
+artifact; records must match the authoritative reviewer/critic
 verdict rows, and an invalid payload is rejected in ONE call listing every
 violation as `finding_id: field expected <value>, got <value>`. Full contract
-(write order, disposition matrix, severity-omission, handoff schema):
+(write order, dispositions, severity authority table, handoff schema):
 references/findings-persistence-contract.md.
 
 Resume/reload procedure: read the latest `findings.jsonl` and reconstruct the
-ledger from disk before dispatching more lanes; surface a missing artifact as a
-coverage gap, never reclassify from memory; append (latest record wins).
+ledger from disk before dispatching more lanes; the base-only `post_explorer`
+checkpoint alone is enough to resume after a compaction between base
+settlement and the micro wave (re-dispatch micro, re-run trigger evaluation,
+then continue with full-inventory boundaries); surface a missing artifact as
+a coverage gap, never reclassify from memory; append (latest record wins).
 
 ---
 
@@ -813,6 +832,7 @@ Tool candidate rules:
 
 - Confirm reachability before reporting.
 - Confirm PR-introducedness before reporting as a PR blocker.
+- When `placeholder_scan` output is used as a signal, pass `added_lines` (file path → PR-added line numbers from the merge-base diff) so only added lines drive the scan; a placeholder finding on an unchanged line is a pre-existing-debt candidate, not a PR blocker. If added-line mapping is unavailable, treat the findings as unscoped and cross-check them against the PR diff before recording the row.
 - Confirm that a framework, schema, middleware, caller guard, or test isolation rule does not already mitigate it.
 - Do not report scanner output verbatim without reviewer validation.
 - Redact secrets; never paste raw credentials into the final output.
@@ -848,8 +868,8 @@ cost, or predicted simplicity — permits fewer lanes than the classified tier,
 and no tier permits skipping a dimension or family. Under Profile A the
 controller computes the tier itself from the bound `base_sha...pr_head_sha`
 diff (`--numstat` totals; an uncomputable diff fails strict to tier L) and
- mechanically enforces the matching floors on every base and micro batch. With
- the default `pr_review_resilience` policy enabled, the initial base wave is
+ mechanically enforces the matching floors on every base and micro batch. When a project explicitly enables the `pr_review_resilience` policy (it is
+ DISABLED by default), the initial base wave is
  staged at tiers M/L: `pr_review_wave_stage: "canary"` / `pr_review_wave_attempt: 0`
  launches one singleton base lane first, then
  `pr_review_wave_stage: "fanout"` carries only the remaining unresolved
@@ -892,8 +912,8 @@ identifier from the table below, bind every batch with the exact current
 merge base and its base ref as `base_sha` and `base_ref`. Use the
 REMOTE-TRACKING form for `base_ref` (`origin/main`, not `main` or
 `refs/heads/main`) and compute `base_sha` against that same ref, so the
-controller's recomputation matches yours. With the default
-`pr_review_resilience` policy enabled, tier-M/L initial base dispatch is
+controller's recomputation matches yours. When a project explicitly enables the
+`pr_review_resilience` policy (DISABLED by default), tier-M/L initial base dispatch is
  staged exactly as a singleton canary batch (`pr_review_wave_stage: "canary"`,
  `pr_review_wave_attempt: 0`) followed by exactly one fanout batch
 (`pr_review_wave_stage: "fanout"`) that include only still-unresolved
@@ -919,17 +939,17 @@ All six dimensions must be covered on every PR — "small PR", "docs-only", and
 "CI-only" change what each dimension examines, never whether it is evaluated.
 Every dimension ends in its own `[CANDIDATE]` rows or a fully populated
 per-dimension `[CLEAN]` attestation. Under Profile A, the top-level
-`pr_review_resilience` config (enabled by default) requires depth tiers M/L to
+`pr_review_resilience` config (DISABLED by default; opt in with `enabled: true`) requires depth tiers M/L to
 stage each base attempt as a singleton `pr_review_wave_stage: "canary"` batch
 followed by its matching `"fanout"` batch. Attempt 0 still has to cover all six
 dimensions exactly once across the combined canary+fanout ownership: tier M
 needs at least three combined lanes, tier L needs six singleton combined lanes,
 and every later retry attempt may carry forward only the still-unresolved
 obligations into its canary/fanout pair. Use one singleton canary lane; attempts
-are numbered with `pr_review_wave_attempt`, and the default
-policy permits attempt 0 plus two retry attempts (1 and 2). If the project sets
-`pr_review_resilience.enabled: false`, or the computed tier is S, Profile A
-falls back to the legacy single-wave base dispatch. Under Profiles B/C, the
+are numbered with `pr_review_wave_attempt`, and the
+policy permits attempt 0 plus two retry attempts (1 and 2). If the project leaves
+`pr_review_resilience` at its default `enabled: false`, or the computed tier is S,
+Profile A uses the legacy single-wave base dispatch. Under Profiles B/C, the
 depth tier governs lane count the same way — a tier-S diff may cover the six
 dimensions in one or two consolidated lanes — while dimension coverage and
 per-dimension attestation remain mandatory.
@@ -945,7 +965,7 @@ sequential candidate-generation passes with the same per-lane ledger records.
 The join barrier is universal: all base lanes settle before Phase 4 completes
 or synthesis begins, whichever layer enforces it.
 
-**Incremental collection (Profile A):** While base lanes are running, poll with `collect_lane_results` (without `wait` (or `wait: false`)) to check progress and process settled lanes as they complete — call `retrieve_lane_output` for full text when `output_ref` is present, then extract candidates via `parse_lane_candidates`, update the candidate ledger, validate output quality — while continuing independent architect work (obligation refinement, micro-lane trigger checks, local reads) between polls. Only use `wait: true` if lanes are still pending and no more independent work remains. Under Profile B, harvest each subagent report as it completes and update the ledger between arrivals; block on stragglers only when no independent work remains.
+**Incremental collection (Profile A):** While base lanes are running, poll with `collect_lane_results` (without `wait` (or `wait: false`)) to check progress and process settled lanes as they complete — call `retrieve_lane_output` for full text when `output_ref` is present, then extract candidates via `parse_lane_candidates`, update the candidate ledger, validate output quality — while continuing independent architect work (obligation refinement, micro-lane trigger checks, local reads) between polls. Only use `wait: true` if lanes are still pending and no more independent work remains. While polling, a `pending_liveness` entry on a still-pending lane is a DIAGNOSTIC only (issue #2280): `stalledSuspect: true` means the lane has been pending for minutes and the host does not report its session live — note the lane id, `pendingMs`, and `hostStatus` and investigate, but never auto-cancel, retry, or replace the lane on this signal; the ~30-minute presumed-stale sweep remains the only terminal backstop. Under Profile B, harvest each subagent report as it completes and update the ledger between arrivals; block on stragglers only when no independent work remains. **`collect_lane_results` is an OBSERVER (issue #2381).** Its wait budget (`timeout_ms`) bounds THAT CALL ONLY. An expired wait budget does not cancel, kill, or fail a lane, and it is not evidence that a lane died; `timeout_ms: 0` is a valid immediate, non-destructive snapshot, and an unavailable host messages client likewise reports stored lane state without terminalizing anything. Whenever lanes remain unsettled the result carries `pending_lanes` (batch id, lane id, stored status, and `output_ref` when one exists) regardless of `include_pending`, so outstanding work is never silently omitted. When a collection returns pending lanes you have exactly three legitimate moves: poll again, cancel explicitly with `cancel_pending`, or let the ~30-minute presumed-stale sweep settle genuinely dead lanes. Do NOT abort the PR workflow, re-dispatch the lane, or report a lane as failed merely because an observer call expired or the host client was briefly unavailable.
 
 Inline `output` is delivered on the first poll that observes a lane settled; subsequent polls carry `output_omitted_repeat: true` with metadata and `output_ref`, and full text is retrieved via `retrieve_lane_output`.
 
@@ -960,14 +980,9 @@ Before Phase 4 or synthesis, all base lanes must be settled. `dispatch_lanes_asy
 For ANY lane that failed (either mode):
 1. **Retry** (max 2 attempts after the initial attempt) with materially different parameters — different session or prompt decomposition, while preserving the required structured async mode and exact head provenance.
 2. If a base lane fails under Profile A, retry only the unresolved `workflow_lane` identifiers with `dispatch_lanes_async`, `mode: "swarm-pr-review:base"`, the same exact `pr_head_sha`, explorer agents, and the staged-resilience fields when that policy is enabled: a singleton `pr_review_wave_stage: "canary"` first, then a matching `"fanout"` batch only for the remaining unresolved obligations. The durable gate joins successful provenance across the initial wave and retry batches, carries unresolved obligations forward attempt by attempt, and rejects typed `retry_exhausted` or `circuit_open` outcomes before any new lane is launched. While that controller is active, blocking `dispatch_lanes` and direct Task dispatch are not equivalent because they cannot satisfy the structured provenance gate. Under Profiles B/C, retry only the failed `workflow_lane` identifiers with a fresh subagent or pass, the same exact `pr_head_sha`, and a materially different prompt decomposition.
-3. If no equivalent alternative can be verified, **STOP and surface the lane failure to the user as BLOCKED** with the lane id, scope, failure mode, retry attempts, and why equivalence could not be proven. Do not present partial findings, do not issue a review verdict, and do not synthesize from successful lanes. A low-quality partial review is worse than no review.
-4. Under Profile A: After the second failed retry, collect every lane to a
-   terminal state, do not probe downstream writers or micro lanes, call
-   `abort_pr_workflow` with `mode: "PR_REVIEW"`, `kind: "recovery"`, and a
-   non-empty one-line `reason` naming the failed lane and exhausted retries.
-   Then call `prepare_pr_workflow_checkout` with `operation: "restore"`.
-   Report the preserved failure only after the gate is cleared and the checkout
-   restoration either succeeds or returns a concrete manual-recovery diagnostic.
+3. If no equivalent alternative can be verified AND every launched lane is terminal or explicitly cancelled, **settle N-of-6 truthfully (issue #2383)** instead of discarding validated work: admit the terminal settlement with `write_pr_review_artifact` (`kind: "findings"`, `boundary: "post_explorer"`, the sentinel `CLEAN-REVIEW` record when no candidates exist, and `partial_base_coverage: { unresolved_dimensions: [<exactly the dimensions that are not covered>] }`), run the remaining phases over the covered dimensions' findings, and complete with `complete_pr_workflow` carrying the verdict the settlement allows. NEVER fabricate coverage, NEVER present an unresolved dimension as reviewed, and NEVER let a partial report approve.
+4. **Terminal report kinds (issue #2383):** all six dimensions covered → `COMPLETE` (verdict may be APPROVE, REQUEST_CHANGES, or INCOMPLETE); at least one covered → `PARTIAL` (verdict must be REQUEST_CHANGES or INCOMPLETE; validated findings from covered dimensions remain publishable); zero covered → `NO_COVERAGE` (skip the findings ladder entirely, call `complete_pr_workflow` with `report_verdict: "INCOMPLETE"` directly — the completion returns a truthful operational report with per-dimension reasons and never claims a code-quality review). A still-live lane blocks settlement: poll, cancel explicitly with `cancel_pending`, or let the presumed-stale sweep settle it first.
+5. Under Profile A, when the bind/checkout path itself is genuinely unreachable or the workflow is publication-armed and exact publication cannot proceed, use the bounded recovery exits: `abort_pr_workflow` with `mode: "PR_REVIEW"`, `kind: "recovery"`, and a non-empty one-line `reason` for an unrecoverable unbound/bound gate, or `kind: "armed_recovery"` (issue #2383) for a publication-armed wedge — then `prepare_pr_workflow_checkout` with `operation: "restore"`. Abort remains a recovery tool for the genuinely unrecoverable, never a shortcut past a settleable coverage obligation.
 
 ### Contract-failure diagnosis and recovery
 
@@ -983,7 +998,7 @@ build a minimal correct single-lane reproduction using the same workflow mode,
 lane identity, exact head, and canonical row. Before retrying, distinguish the
 three independent input layers: the header schema, data-row values, and tool
 argument shape. A correct header does not repair an invalid severity or lane
-value, and correct row data does not repair malformed dispatch JSON. Benign shape defects (evidence pipes, marker rows, verdict-row pipes) are auto-repaired and recorded as salvage — never a retry reason alone (contract and fidelity boundaries: `references/lane-output-recoverability.md`).
+value, and correct row data does not repair malformed dispatch JSON. Benign shape defects (evidence pipes, marker rows, verdict-row pipes, a header re-emitted as a data row) are auto-repaired and recorded as salvage — never a retry reason alone; the `parse_lane_candidates` receipt discloses them as `repair_kinds`, and a `[CLEAN]` attestation discredited beside a same-lane `[CANDIDATE]` row as `clean_attestation_salvaged` + `clean_attestation_salvage_reason` (the parse SUCCEEDS and the attestation still supplies no coverage) (contract and fidelity boundaries: `references/lane-output-recoverability.md`).
 
 Classify the incident from actual user-visible harm and the first failed
 predicate, not from the number of retries or the eventual result. A successful
@@ -1030,8 +1045,10 @@ candidate parser rather than preview-text extraction:
 If a lane has `output_degraded: true`, no usable `output_ref`, or `transcript_incomplete: true` without typed positive-candidate recovery, apply the COVERAGE GATE (Phase 3). An incomplete base or micro discovery lane may proceed only when it is explicitly named by a `salvaged_workflow_lane_recoveries` entry whose `kind` is `transcript-incomplete-terminal-candidate`; that recovery validates the retained positive `[CANDIDATE]` row only. Council, reviewer, and critic lanes never qualify for this incomplete-transcript recovery and must retry. Recovery never validates `[CLEAN]`, candidate absence, an unowned sibling lane, or an incomplete lane with no matching entry. Do not use blocking or direct-Task fallbacks while the controller is active, mark affected candidates UNVERIFIED to proceed, or infer candidate absence from a preview. Under Profiles B/C, which have no typed recovery validation, a truncated, incomplete, empty, or attestation-free subagent report is the same lane-output failure and takes the same COVERAGE GATE.
 
 After candidate parsing and before reviewer dispatch, persist the post-explorer
-candidate ledger; it is admitted only once trigger-eval completes — from then it
-is the durable recovery point for context compaction ahead of Phase 6.
+candidate ledger. The base-only write is admissible immediately after base
+settlement — it is the durable recovery point for context compaction from base
+settlement onward; once trigger evaluation completes, a full-inventory
+(base+micro) `post_explorer` write may refresh it ahead of Phase 6.
 
 **Profiles B/C row convention:** without the parser, the `[CANDIDATE]` row
 format is the extraction contract itself. Explorers emit the rows directly in
@@ -1095,31 +1112,20 @@ The fence below is documentation formatting only. Emit the header and all
 machine-readable rows as unfenced plain text; do not emit the backticks.
 
 ```text
-[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence
+[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags
 ```
 
-Profile A stores the full assistant transcript, so earlier unmarked progress
-turns may precede the machine-readable section. The parser locates that section
-at the first pipe-delimited line whose first field is exactly `[CANDIDATE]` and
-ignores unmarked preamble, including incidental pipe-delimited text. That first
-marker is authoritative and must be the exact canonical base or micro header;
-a malformed marker or marker-prefixed data row without a header fails closed.
-The Profile A controller coverage gate also refuses a missing marker. The pure
-parser retains markerless positional fallback only for legacy callers outside
-that controller trust boundary. Explorers should continue to make the canonical
-header the first line of their final machine-readable response.
+Profile A now treats `submit_pr_review_result` as the authoritative settlement path for base and micro discovery lanes. The caller-bound structured receipt dominates later prose, truncation, or transcript incompleteness. Transcript candidate/clean rows remain deprecated compatibility only when `pr_review_legacy_transcript_compatibility` was explicitly enabled for that lane and no structured receipt exists; a present-but-invalid structured result fails closed and never falls back.
+
+When compatibility mode is active, Profile A stores the full assistant transcript. The parser locates the first pipe-delimited line whose first field is exactly `[CANDIDATE]`, ignores unmarked preamble, and requires the exact canonical base/micro header; malformed markers or marker-prefixed rows without a header fail closed. The controller refuses a missing marker. Markerless positional fallback remains only for legacy callers outside that trust boundary; explorers should put the canonical header first.
 
 The confidence data value must be exactly LOW, MEDIUM, or HIGH.
 
-Under Profile A the parser normalizes this into a structured `candidates[]`
-array. On Profiles B/C — and as a Profile A fallback when the parser is
-unavailable — the explorer emits the `[CANDIDATE]` row format directly in the
-lane output as the extraction contract.
+Under Profile A the parser-backed transcript path is compatibility-only; a successful `submit_pr_review_result` receipt is authoritative. On Profiles B/C — and on a Profile A lane whose snapped contract explicitly enables deprecated legacy transcript compatibility and lacks a structured receipt — the explorer emits `[CANDIDATE]` rows directly as the extraction contract.
 
 Explorers must not use `CONFIRMED`, `DISPROVED`, or `PRE_EXISTING`.
 
-A base lane that finds no surviving candidates must emit exactly one fully
-populated clean row:
+A base lane that finds no surviving candidates must submit exactly one structured CLEAN result and then stop. Only a lane in the deprecated transcript-compatibility path may instead emit exactly one fully populated clean row:
 
 The fence below is documentation formatting only. Emit the clean attestation
 as unfenced plain text; do not emit the backticks.
@@ -1216,7 +1222,10 @@ artifact; and the completed ledger is persisted as `trigger-eval.json` in the
 session/task workspace before reviewer dispatch. A matched family with no
 attestation row is an unclosed coverage gap.
 
-For each micro `output_ref` (Profile A), call `parse_lane_candidates` with
+For each micro lane in Profile A, prefer the single structured
+`submit_pr_review_result` receipt over transcript parsing. Only for a lane
+whose snapped contract explicitly enables deprecated transcript compatibility
+and lacks a structured receipt should you fall back to `parse_lane_candidates` against its `output_ref`, with
 `producer: "swarm-pr-review"`, `expected_family: "micro_lane"`, and
 `expected_micro_lane` set to the launch-micro-lane value from the
 provenance-linked trigger row. When the artifact came from a consolidated
@@ -1240,7 +1249,7 @@ errors, zero malformed rows, and a complete, non-degraded source:
 [CLEAN] | micro_lane | coverage_scope | evidence
 ```
 
-Header-only or malformed zero output is `UNATTESTED`; apply the COVERAGE GATE (Phase 3). Under Profile A, the structured async PR-workflow path is required to preserve `L1`, exact-head, batch, and workflow-lane provenance; the active controller rejects blocking and direct-Task substitutes, and Task-derived findings or CLEAN prose cannot satisfy Phase 4's controller ledger. Under Profiles B/C, acceptance is the row contract itself: accept a candidate or clean row only when its `micro_lane` field matches the trigger row it claims, and treat prose-only "clean" claims as `UNATTESTED`.
+Header-only or malformed zero output is `UNATTESTED`; apply the COVERAGE GATE (Phase 3). Under Profile A, the structured async PR-workflow path must preserve `L1`, exact-head, batch, and workflow-lane provenance; the active controller rejects blocking and direct-Task substitutes, and Task-derived findings or CLEAN prose cannot satisfy Phase 4's controller ledger unless the lane explicitly runs deprecated transcript compatibility. Under Profiles B/C, acceptance is the row contract: accept a candidate or clean row only when its `micro_lane` matches the trigger row, and treat prose-only "clean" claims as `UNATTESTED`.
 
 Each micro-lane receives:
 
@@ -1298,7 +1307,7 @@ The fence below is documentation formatting only. Emit the header and all
 machine-readable rows as unfenced plain text; do not emit the backticks.
 
 ```text
-[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence
+[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags
 [CLEAN] | micro_lane | coverage_scope | evidence
 ```
 
@@ -1338,6 +1347,11 @@ file area, category, or count — not the full candidate set. The reviewer must
 re-read the candidate's file:line evidence and relevant context pack entries
 directly.
 
+A reviewer or critic chunk may own any non-empty subset of the current
+inventory. On a retry, that subset may overlap prior successful work; the lane
+contract is the assigned item set for that chunk, not a requirement to re-own
+the full inventory every time.
+
 Under Profile A, dispatch reviewer chunks with `dispatch_lanes_async`,
 `mode: "swarm-pr-review:reviewer"`, a unique non-empty `workflow_lane` per
 chunk, `review_item_ids` containing the exact candidate IDs assigned to that
@@ -1364,8 +1378,10 @@ Reviewer ownership is not accepted as an architect assertion. Under Profile A,
 the controller derives the immutable candidate inventory from the
 integrity-checked base, mandatory micro-lane, and council artifacts; under
 Profiles B/C, the orchestrator derives the same inventory from the persisted
-ledgers. Either way, the union of `review_item_ids` must equal that inventory
-exactly, with no omitted or invented IDs. If discovery produces no candidates,
+ledgers. Either way, successful reviewer batches compose item by item: the
+union of their accepted `review_item_ids` must equal that inventory exactly,
+with the newest successful verdict winning for each item. If discovery produces
+no candidates,
 the derived sentinel is `CLEAN-REVIEW`, which still requires one independent
 semantic reviewer row (a fresh subagent on Profile B; a separate reviewer pass
 on Profile C).
@@ -1422,7 +1438,7 @@ For each candidate, the reviewer must determine:
 Reviewer output format:
 
 ```text
-[REVIEWED] | candidate_id | classification | evidence_type | final_severity | introduced_by_pr: YES/NO/UNKNOWN | file:line | rationale | falsification_probe | reviewer_id
+[REVIEWED] | item_id | classification | evidence_type | severity | introduced_by_pr | file:line | rationale | probe | reviewer_notes | risk_impact | risk_tags
 ```
 
 For the mechanically derived `CLEAN-REVIEW` sentinel, use the same exact row
@@ -1436,7 +1452,8 @@ assigned candidate. A malformed `[REVIEWED]` row is not a verdict: re-dispatch
 with the exact contract (max 2), then mark the reviewer dimension BLOCKED if no
 valid row returns.
 
-`DISPROVED` findings must include the reason. `PRE_EXISTING` findings must include the base-branch evidence if available.
+`DISPROVED` reviewer rows must use `NONE` for `final_severity`. `PRE_EXISTING`
+findings must include the base-branch evidence if available.
 
 After reviewer lanes settle, persist the post-reviewer finding ledger before
 critic routing or synthesis. The artifact must preserve `CONFIRMED`,
@@ -1464,47 +1481,18 @@ A finding may still be reported without a runnable command if it is structurally
 
 ## Phase 8: Critic Challenge
 
-Route every reviewer-confirmed HIGH or CRITICAL finding to a critic. Also route borderline MEDIUM findings when they involve security, state machines, write authority, evidence integrity, model/tool permissions, git safety, or config ratchets.
+Route reviewer-confirmed CRITICAL and HIGH findings to a critic always. Route a MEDIUM finding only when its typed risk metadata says so (issue #2383): `risk_impact: "HIGH_IMPACT"`, or any `risk_tags` entry (`SECURITY`, `AUTH_PERMISSIONS`, `STATE_INTEGRITY`, `WRITE_PATH`, `EVIDENCE_INTEGRITY`, `GIT`, `CONFIGURATION`). An ordinary MEDIUM (`risk_impact: "ORDINARY"`, no tags) is NOT critic-routed. `risk_impact: "UNKNOWN"` always routes to critic — never guess impact you could not assess, and never let file paths, dimension names, or prose override the typed `risk_impact`/`risk_tags` the reviewer row carries.
 
-The controller conservatively derives critic ownership from semantic reviewer
-rows: every reviewer-confirmed CRITICAL, HIGH, or MEDIUM item is mandatory
-critic inventory. This intentionally over-routes ordinary MEDIUM items because
-machine enforcement cannot safely infer every repository-specific trust
-boundary from prose. Completion is blocked until that exact derived inventory
-has valid critic rows.
+The controller derives critic ownership from the typed reviewer rows through the one shared production predicate; every newly written CONFIRMED finding must supply `risk_impact` and `risk_tags` (the write boundary rejects a CONFIRMED record without them, and unknown tag values fail the row). Completion is blocked until that exact derived inventory has valid critic rows.
 
-Reviewer and critic settlement compose across batches, item by item: a phase
-settles once every review item in the current mechanically assigned inventory
-holds a successful verdict, whether that coverage comes from one batch or from
-several complementary partial retries. A later degraded, truncated, stale,
-wrong-identity, or malformed batch never supplies a verdict for the items it
-touches, but it does not discard verdicts other batches already supplied for
-different items.
-
-When more than one successful batch covers the same item, the most recent
-successful batch wins that item. This conflict rule is one shared computation,
-so settlement and every downstream verdict use (candidate inventory, critic
-routing, final synthesis) never disagree about which claim is authoritative
-for an item. A batch contributes only when it was validated against the exact
-candidate inventory current at validation time; a batch recorded before that
-binding existed contributes only if it is wholly successful and its item set
-exactly matches the current inventory — the historical all-or-nothing rule,
-preserved unchanged for state that predates composition.
-
-A critic claim is bound per item to the exact reviewer row it was validated
-against, not to the reviewer batch as a whole. A reviewer retry that
-reproduces a byte-identical row for an item retains that item's critic work;
-a reviewer row that changed at all — even one field — invalidates only that
-item's critic claim, not the whole critic wave. Critic batches recorded
-before per-item binding existed keep the old behavior: any newer reviewer
-batch invalidates them wholesale. Dispatch a fresh critic wave to cover
-whatever items composition leaves unclaimed; critic evidence can never
-predate the reviewer evidence it purports to challenge.
-
-Settlement is item completeness, not lane completeness: a declared lane that
-never completes produces a diagnostic naming the abandoned lane, not an
-automatic block, as long as every item in the inventory already holds a
-successful verdict from some lane.
+Reviewer and critic settlement MUST compose successful verdicts item by item
+across complementary partial batches. The newest successful claim wins each
+item; malformed or stale batches contribute nothing without erasing healthy
+sibling claims. Collection MUST validate exact lane ownership atomically, and
+critic claims MUST bind to the exact reviewer row for their item. Settlement is
+item completeness, not lane completeness. Follow the full retry, legacy,
+binding, and diagnostic contract in
+[`references/verdict-settlement-contract.md`](references/verdict-settlement-contract.md).
 
 Under Profile A, dispatch critic chunks with `dispatch_lanes_async`,
 `mode: "swarm-pr-review:critic"`, a unique non-empty `workflow_lane` per
@@ -1537,14 +1525,14 @@ The critic must challenge:
 Critic output format:
 
 ```text
-[CRITIC] | finding_id | UPHELD/DOWNGRADED/DISPROVED/NEEDS_MORE_EVIDENCE | final_severity | reason | required_report_change
+[CRITIC] | item_id | status | severity | rationale | required_change
 ```
 
 ## Verdict row contract
 
 The `[CRITIC]` row in the format above is **mandatory contract**, not advisory output. A critic response that does not end with that exact row format is treated as a planning preamble, not a verdict, and must be re-dispatched. Do not proceed past Phase 8 join barrier until each dispatched critic lane has produced a parseable `[CRITIC]` row.
 
-**Re-dispatch trigger:** when a critic lane response is missing the verdict row, the orchestrator must automatically re-dispatch that lane with the explicit instruction: "Your final line MUST be exactly the Phase 8 contract row: `[CRITIC] | finding_id | UPHELD/DOWNGRADED/DISPROVED/NEEDS_MORE_EVIDENCE | final_severity | reason | required_report_change`. A response without that exact row will be treated as a planning message and re-dispatched." Do not synthesize findings from the planning preamble; only from the re-dispatched verdict.
+**Re-dispatch trigger:** when a critic lane response is missing the verdict row, the orchestrator must automatically re-dispatch that lane with the explicit instruction: "Your final line MUST be exactly the Phase 8 contract row: `[CRITIC] | item_id | status | severity | rationale | required_change`. Use only enum values from `references/findings-persistence-contract.md`. A response without that exact row will be treated as a planning message and re-dispatched." Do not synthesize findings from the planning preamble; only from the re-dispatched verdict.
 
 `NEEDS_MORE_EVIDENCE` is deliberately non-terminal and never satisfies critic
 settlement. Re-dispatch a narrower critic/probe lane or report the dimension
@@ -1696,7 +1684,7 @@ When triggered:
 2. After the default base-dimension and risk-family coverage is complete, launch all supplementary council agents. Under Profile A, use one `dispatch_lanes_async` call with `mode: "swarm-pr-review:council"`, the same exact `pr_head_sha`, and one unique `workflow_lane` per council member; continue independent context preparation while they run, polling with `collect_lane_results` (without `wait`) to process settled agents incrementally, and use `wait: true` only when no independent work remains. All agents must be settled and their candidates added to the ledger before reviewer classification; under Profile A the runtime enforces this join barrier, and blocking, sequential, or direct-Task fallback is not equivalent to the structured council dispatch — bypassing the active controller is `BLOCKED`. Under Profile B, dispatch council members as parallel subagents with the same marker contract and settle them all before reviewer classification; under Profile C, run each council lens as a separate sequential pass.
 3. Each council agent assumes all work is wrong until code evidence proves otherwise.
 4. Each agent hunts within its lane only.
-5. Council uses the micro-lane row family: `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence`. Emit one row per `EVIDENCE_FOUND` or `SUSPICIOUS` claim, or a fully populated `[CLEAN] | micro_lane | coverage_scope | evidence` row when no candidate survives. Put the exact council `workflow_lane` value in the `micro_lane` data field. Council prose without one of those markers does not settle the lane.
+5. Council uses the micro-lane row family: `[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags`. Emit one row per `EVIDENCE_FOUND` or `SUSPICIOUS` claim, or a fully populated `[CLEAN] | micro_lane | coverage_scope | evidence` row when no candidate survives. Put the exact council `workflow_lane` value in the `micro_lane` data field. Council prose without one of those markers does not settle the lane.
 6. Agents must not return `CONFIRMED`, `DISPROVED`, or final severity; candidate severity remains provisional until reviewer classification.
 7. The independent reviewer then classifies every council candidate as `CONFIRMED`, `DISPROVED`, `UNVERIFIED`, or `PRE_EXISTING`.
 8. Apply critic challenge to reviewer-confirmed HIGH/CRITICAL or borderline findings.
@@ -1772,7 +1760,7 @@ Before writing the final output, print this checklist with filled values. Every 
 [VALIDATION] repo graph / impact cone source: ___
 [VALIDATION] deterministic signals ingested: ___
 [VALIDATION] lane dispatch mechanism: controller / native subagents / sequential passes — ___
-[VALIDATION] base dimensions covered with attestation: ___ / 6 (lanes dispatched: ___)
+[VALIDATION] terminal coverage: COMPLETE (6/6) OR PARTIAL (___/6 + unresolved dimensions settled) OR NO_COVERAGE (0/6) (issue #2383; lanes dispatched: ___)
 [VALIDATION] base explorer lanes returned: ___ / ___
 [VALIDATION] micro risk families evaluated and attested: ___ / 11 OR BLOCKED — <missing rows> (micro lanes dispatched: ___)
 [VALIDATION] Swarm verifier routing used: ___
@@ -1785,7 +1773,7 @@ Before writing the final output, print this checklist with filled values. Every 
 [VALIDATION] findings marked PRE_EXISTING: ___
 [VALIDATION] findings left UNVERIFIED: ___
 [VALIDATION] findings escalated to critic: ___
-[VALIDATION] critic dispatched: ___ OR "SKIPPED — no reviewer-confirmed HIGH/CRITICAL or borderline findings"
+[VALIDATION] critic dispatched: ___ OR "SKIPPED — no typed critic-routed finding (CRITICAL/HIGH, MEDIUM+HIGH_IMPACT, MEDIUM+risk_tags, or UNKNOWN)"
 [VALIDATION] critic returned: ___ OR "N/A"
 [VALIDATION] findings upheld by critic: ___
 [VALIDATION] findings downgraded by critic: ___
@@ -1916,14 +1904,16 @@ mix the two):
 /swarm pr-feedback <PR_URL> continue from <handoff_artifact_path>
 ```
 
+Writing the validated handoff durably records one consent offer bound to the exact workflow instance, handoff digest, PR head/URL, and actionable finding set; the first exact continuation confirms it and transitions modes. Internal creation never auto-routes, and malformed, non-actionable, or detached records cannot start PR_FEEDBACK.
+
 ---
 
 For reviewer, critic, and explorer prompt templates, read `references/prompt-templates.md`.
 
 Under Profile A, after metrics and durable review artifacts are complete, but
 before emitting the user-facing final report, call `complete_pr_workflow` with
-mode `PR_REVIEW` and the same exact
-`pr_head_sha`. The tool refuses to clear the session gate while required base,
+mode `PR_REVIEW`, the same exact
+`pr_head_sha`, and the terminal `report_verdict` the coverage kind allows (issue #2383). The tool refuses to clear the session gate while required base,
 trigger, declared reviewer/critic, or open-lane obligations remain incomplete.
 While the gate remains active, the runtime prepends a workflow-active banner
 to the first substantive text part of each architect message (the model's text
@@ -2015,7 +2005,15 @@ the frozen ledger before re-binding.
 Abort is a recovery tool, not a coverage shortcut. Use it only when the
 bind/checkout path is genuinely unreachable or bounded structural recovery or
 retries are genuinely exhausted; never use it to skip a coverage obligation
-that is still recoverable, merely expensive, or inconvenient.
+that is still recoverable, merely expensive, or inconvenient. When lanes have
+settled short of full coverage, the terminal N-of-6 settlement (issue #2383)
+is the truthful exit — not abort. For a publication-armed workflow whose exact
+publication cannot proceed, `abort_pr_workflow` with `kind: "armed_recovery"`
+(plus the armed recovery identity fields from `pr_workflow_status`) is the
+audited escape: it settles lanes, invalidates the staged publication
+authorization, preserves validated work, and leaves a recoverable terminal
+state; exact approved publication via `complete_pr_workflow` remains available
+and preferred whenever it can proceed.
 
 On Profiles B/C there is no durable gate or auto-resume loop to clear: if the
 head bind is genuinely unreachable or bounded lane recovery is exhausted,

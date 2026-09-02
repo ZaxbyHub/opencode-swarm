@@ -16,7 +16,24 @@ Project config:
 .opencode/opencode-swarm.json
 ```
 
-Project config merges over global config.
+Project config merges over global config. The project config file is **opt-in** — the installer and plugin startup never create it. Add it manually only when a project needs to override the global config.
+
+Both locations support a `"$schema"` key pointing at the JSON Schema shipped with the
+plugin, which gives supporting editors validation and autocomplete for every
+configuration key:
+
+```json
+{
+  "$schema": "https://unpkg.com/opencode-swarm/opencode-swarm.schema.json"
+}
+```
+
+The URL above is the canonical always-latest form. Config files created by the plugin
+(project init, CLI install) write the same URL pinned to the plugin version that authored
+the file (e.g. `https://unpkg.com/opencode-swarm@7.158.1/opencode-swarm.schema.json`) so
+validation matches the installed version; both forms resolve to the same published file.
+To adopt the reference in an existing config, add the `$schema` line shown above as the
+first key. `"$schema"` is pure metadata and is ignored at runtime.
 
 ## Environment variables
 
@@ -49,6 +66,91 @@ You only need to define the agents you want to override.
 
 > If `architect` is not set explicitly, it inherits the currently selected OpenCode UI model.
 
+<!-- opencode-swarm: begin generated top-level-config-keys (regenerate: bun run scripts/generate-config-schema.ts) -->
+
+## Top-level configuration keys
+
+Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit inside the markers. Regenerate with `bun run scripts/generate-config-schema.ts`. See also the topic sections below and the shipped JSON Schema (`opencode-swarm.schema.json`, referenced via `$schema` for editor validation).
+
+| Key | Type | Default | Description |
+| --- | ---- | ------- | ----------- |
+| `$schema` | string | — | JSON Schema URL for editor validation/autocomplete of this file (issue #1663). Ignored at runtime; malformed values are ignored too. |
+| `config_format_version` | integer | 1 | Config format version for the migration table. Increment when fields are deprecated. Distinct from knowledge.schema_version. |
+| `agents` | record<string, object> | — | Per-agent overrides keyed by agent name for the default swarm (e.g. "architect", "coder"). Multi-swarm setups configure agents under swarms.<id>.agents instead. |
+| `default_agent` | string | — | Agent set as the primary mode. Omitted: every generated *_architect is primary. Exact generated name (e.g. "local_architect"): only that agent. Base role name (e.g. "coder"): every generated agent with that base role. Unknown strings warn once and fall back to architect primaries. |
+| `auto_select_architect` | boolean \| string | — | Auto-select the swarm architect for new sessions instead of OpenCode built-ins. Omitted or false: manual selection (omitted behaves as false). true: enable auto-select and disable built-in build/plan agents. "<architect_name>" (e.g. "mega_architect"): enable targeting one architect in multi-swarm setups. |
+| `swarms` | record<string, object> | — | Multiple swarms keyed by swarm ID (no underscores allowed). The first swarm, or one named "default", provides the primary architect. |
+| `max_iterations` | number | 5 | Maximum pipeline iterations per task (1-10). |
+| `pipeline` | object | — | Pipeline stage/model settings. |
+| `phase_complete` | object | — | Phase-completion gate settings. |
+| `qa_retry_limit` | number | 3 | Maximum QA retry rounds per task (1-10). |
+| `execution_mode` | enum(strict \| balanced \| fast) | "balanced" | Performance mode controlling optional hook execution overhead: "strict", "balanced", or "fast". |
+| `inject_phase_reminders` | boolean | true | Inject phase reminder directives during execution. |
+| `hooks` | object | — | Hook subsystem toggles and settings. |
+| `pr_review_resilience` | object (strict) | — | PR review base-wave staged canary/fanout resilience settings. |
+| `pr_review_legacy_transcript_compatibility` | boolean | — | Deprecated migration-only opt-in for transcript-row PR-review base and micro discovery lanes. |
+| `gates` | object | — | Quality gate configuration (v6.9 anti-slop features). |
+| `context_budget` | object | — | Context budget thresholds. |
+| `pricing` | object | — | Token/cost estimation fallback table. Provider-reported cost wins when present; entries only estimate from usage tokens when reports omit cost. |
+| `guardrails` | object | — | Loop containment and safety guardrails: tool-call caps, denial tracking, destructive-command blocking, shell audit. |
+| `watchdog` | object | — | Scope-guard and delegation-ledger watchdog settings. |
+| `self_review` | object | — | Advisory self-review after coder delegation. |
+| `auto_review` | object | — | Opt-in execution-diff review by the reviewer model in a fresh ephemeral session at task/phase boundaries. |
+| `tool_filter` | object | — | Controls which tools each agent is allowed to use. |
+| `authority` | object | — | Per-agent file write authority rules. |
+| `plan_cursor` | object | — | Compressed plan summary injection settings. |
+| `context_map` | object | — | Context Map (issue #1104, FR-006) — opt-in. |
+| `repo_graph` | object | {} | Repository dependency-graph settings (builder excludes, incremental refresh). Nested defaults materialize when the whole section is omitted. |
+| `evidence` | object | — | Evidence retention and storage settings. |
+| `summaries` | object | — | Summary generation settings. |
+| `review_passes` | object | — | Dual-pass security review settings. |
+| `adversarial_detection` | object | — | Same-model adversarial checker detection settings. |
+| `adversarial_testing` | object | { … } | Cross-model adversarial testing settings. |
+| `integration_analysis` | object | — | Integration analysis settings. |
+| `docs` | object | — | Documentation synthesizer (docs agent) settings. |
+| `design_docs` | object | — | Structured design-doc generation (issue #1080, docs_design agent) — opt-in. |
+| `git` | object | — | Git executable resolution override (issue #2236 hardening). |
+| `ui_review` | object | — | UI/UX review (designer agent) settings. |
+| `compaction_advisory` | object | — | Compaction advisory settings. |
+| `lint` | object | — | Lint gate settings. |
+| `secretscan` | object | — | Secret scanning settings. |
+| `checkpoint` | object (strict) | — | Checkpoint settings. |
+| `apply_patch` | object (strict) | — | Apply-patch opt-in fuzzy matching fallback (issue #1718). |
+| `automation` | object | — | Background automation mode and per-feature toggles (v6.7 background-first rollout). |
+| `knowledge` | object | — | Two-tier cross-project knowledge base (v6.17). |
+| `memory` | object | — | Swarm memory substrate — disabled by default so existing flows are unchanged. |
+| `learning` | object | — | Learning subsystem: real-time admission, PRM persistence, dedup sweep (issue #1821). |
+| `consensus` | object | — | Consensus mining over completed run evidence (issue #1821). |
+| `curator` | object | — | Phase context consolidation and drift detection. |
+| `architectural_supervision` | object | — | Hierarchical summary review (issue #893). |
+| `knowledge_application` | object | — | Knowledge-application contract (v2): warn or enforce modes, ack tracking. |
+| `skillPropagation` | object | — | Skill propagation gate/injection settings. |
+| `skill_improver` | object | — | Low-frequency, expensive-model skill improvement loop (issue #629, v2). |
+| `harness_evolution` | object (strict) | — | Declarative, non-executing HarnessOpt mutation policy (issue #1825). |
+| `spec_writer` | object | — | Spec writer agent (v2) — independent model for .swarm/spec.md authorship. |
+| `tool_output` | object | — | Tool output truncation settings (enable/disable, max lines, per-tool overrides). |
+| `slop_detector` | object | — | Slop detector settings (v6.29). |
+| `todo_gate` | object | — | TODO gate (v6.32): warn or block on new high-priority TODOs (FIXME/HACK/XXX). |
+| `incremental_verify` | object | — | Incremental verification settings (v6.29). |
+| `compaction_service` | object | — | Compaction service settings (v6.29). |
+| `prm` | object | — | PRM (Process Remediation Manager) settings. |
+| `council` | object (strict) | — | Work Complete Council — parallel four-member verification gate, off by default. |
+| `parallelization` | object | — | Parallelization (PR 1 dark foundation) — disabled by default; no production code path branches on enabled=true yet. |
+| `worktree` | object | — | Worktree isolation policy for parallel coder dispatch lanes (general surface; Lean Turbo keeps its legacy per-mode fields). |
+| `turbo` | object | — | Turbo execution strategy block (Phase 1). Absent means current behavior unchanged. |
+| `turbo_mode` | boolean | false | Bypass reviewer/test gates for rapid iteration (v6.40). |
+| `quiet` | boolean | true | Suppress non-critical startup warnings (default true keeps the TUI clean). Set false to restore verbose warnings for debugging. |
+| `version_check` | boolean | true | Background staleness check against npm, throttled to once per 24h (issue #675). Set false to fully disable the network call. |
+| `full_auto` | object | { … } | Full-auto autonomous orchestration with critic oversight: permission policy, denial accounting, oversight cadence triggers (v2 preserves v1 fields so existing configs load unchanged). |
+| `pr_monitor` | object (strict) | — | GitHub PR subscription and polling (FR-001) — disabled by default; opt-in for real-time PR status updates. |
+| `external_skills` | object | — | External skills: candidate model, discovery, and quarantine store (FR-001) — all subsystems opt-in. |
+| `skills` | object | — | Opt-in gate for the 7 skill_* management tools (FR-004). Default false: the tools are absent from the architect tool surface. |
+| `skill_opt` | object (strict) | — | Governed skill optimizer (issue #1822). Disabled by default; /swarm skill-opt run requires enabled: true. All other subcommands are proposal-only/read-only by default. |
+
+Sections marked `(strict)` reject unknown nested keys at config load time - a typo there makes the loader fall back to safe defaults with a startup warning. All other sections silently ignore unknown nested keys.
+
+<!-- opencode-swarm: end generated top-level-config-keys -->
+
 ## Pricing fallback estimates
 
 Provider-reported cost metadata wins when it is available. When a provider returns token usage but no cost, Swarm can estimate delegation cost from an optional top-level `pricing.models` table:
@@ -56,6 +158,11 @@ Provider-reported cost metadata wins when it is available. When a provider retur
 ```json
 {
   "pricing": {
+    "currency": "USD",
+    "version": "2026-08-29",
+    "effective_at": "2026-08-29T00:00:00.000Z",
+    "billing_basis": "token",
+    "reported_cost_currency": { "provider": "USD" },
     "models": {
       "provider/custom-model": {
         "input_per_million": 1,
@@ -74,6 +181,8 @@ Provider-reported cost metadata wins when it is available. When a provider retur
 | `output_per_million` | yes | USD per 1M output tokens |
 | `reasoning_per_million` | no | USD per 1M reasoning tokens; defaults to output pricing when omitted |
 | `cache_per_million` | no | USD per 1M cache-read tokens; defaults to input pricing when omitted |
+
+Table provenance is optional and bounded: `currency` is currently `USD`, `version` identifies the price table, `effective_at` is an ISO timestamp, and `billing_basis` is `token`, `request`, or `subscription`. Provider-reported amounts have unknown currency unless `reported_cost_currency` explicitly declares that provider as USD; unknown or conflicting currency remains evidence-inconclusive and is never treated as zero.
 
 Missing usage or missing pricing degrades to `cost_source: "unavailable"` in telemetry and `/swarm costs`.
 
@@ -260,10 +369,14 @@ Full-Auto v2 — opencode-swarm's autonomy control plane. Reduces approval frict
 | `denials.max_consecutive` | number | `3` | Pause after N consecutive denials. |
 | `denials.max_total` | number | `20` | Pause after N total denials in the session. |
 | `protected_paths` | string[] | `['.git', '.github/workflows', '.opencode', '.swarm', 'package.json', 'package-lock.json']` | Paths the Full-Auto agent is forbidden from writing. `.opencode` is in the default list to prevent the agent from editing the plugin config that governs it. |
+| `oversight.max_dispatch_retries` | number | `2` | Same-operation retry cap for transient critic infrastructure failures. |
+| `oversight.max_consecutive_dispatch_failures` | number | `3` | Consecutive infrastructure failures before Full-Auto terminates to manual control. |
+| `oversight.total_timeout_ms` | number | `120000` | Total wall-clock budget (1,000–300,000 ms) shared by critic session creation, prompt, retry/fallback, backoff, parse, and cleanup. |
+| `oversight.cleanup_timeout_ms` | number | `2000` | Short cleanup bound (100–10,000 ms) that cannot extend the total oversight deadline. |
 
 **Fail-closed semantics:**
 - Activation refuses if a config file exists but cannot be loaded (corrupt JSON, oversized, permission error) — `locked` is treated as "unknown", not "false".
-- A `paused` or `terminated` run state blocks every non-read-only tool for the session until `/swarm full-auto on` (resume) or `/swarm full-auto off` (disarm).
+- A `paused` or `terminated` run blocks non-read-only work but keeps narrowly parsed diagnosis, oversight probe, repair, handoff, abort, resume, and exit controls reachable. `/swarm full-auto retry-oversight` is an infrastructure health probe only; it cannot clear a policy, containment, sandbox, or action circuit.
 - A corrupt `.swarm/full-auto-state.json` fail-closed-blocks non-read-only tools project-wide; `/swarm full-auto status` reports this as `UNREADABLE` with the restore instructions.
 
 **Example — refuse runtime activation entirely:**
@@ -520,7 +633,7 @@ GitHub PR subscription and background polling infrastructure (FR-001). When enab
 
 **Auto-subscribe**: when `pr_monitor.enabled: true` is set, PR monitoring is available without an additional feature flag — sessions can subscribe to PRs immediately via `/swarm pr subscribe`. In addition, when `auto_subscribe_on_pr_create` (default `true`) is set, a successful `gh pr create` run through the bash tool automatically subscribes the current session to the created PR — no manual command needed.
 
-**Durable store**: subscription state is persisted to `.swarm/pr-monitor/subscriptions.jsonl` (append-only JSONL), folded by `correlationId` (sessionID + repoFullName + prNumber). Multiple sessions may independently subscribe to the same PR using a composite key.
+**Durable store**: subscription state is persisted to a bounded, crash-safe checkpoint at `.swarm/pr-monitor/subscriptions.checkpoint.json` (latest record per `correlationId` = sessionID + repoFullName + prNumber), with a bounded transition-audit tail at `.swarm/pr-monitor/subscriptions.audit.jsonl` (issue #2042). Reads are bounded by the live set — never by history. Pre-#2042 append-only `subscriptions.jsonl` logs migrate in crash-resumable 1 MiB chunks with an 8 MiB mutation budget plus at most one valid-record boundary (64 KiB); oversized corrupt lines are discarded incrementally, a larger in-budget source returns a retryable migration-in-progress error after the cursor is persisted, and sources above the 64 MiB admission ceiling refuse mutations before checkpoint publication and surface a repair hint. The cursor carries a bounded pre-migration baseline so a replaced legacy generation can restart cleanly without retaining stale folded records or dropping native subscriptions that existed before migration began. Archive replacement keeps the prior archive in a bounded rollback slot until the new candidate is verified and installed. Multiple sessions may independently subscribe to the same PR using a composite key. `/swarm pr status` surfaces storage health (checkpoint age, counts, bytes/pressure, corrupt/dropped counters, recovery resets, recovery source). A copied or moved store rebinds only after quarantining the foreign checkpoint and any co-copied legacy log to bounded slots; if quarantine cannot complete, the mutation fails closed and the existing state is preserved.
 
 **Event types**: all PR events flow through the AutomationEventBus with types:
 - `pr.subscribed`, `pr.unsubscribed`, `pr.status.updated`
@@ -604,20 +717,47 @@ After a successful delivery the subscription's `hasUnaddressedEvents` flag is cl
 ### pr_review_resilience
 
 Controls staged canary/fanout resilience for Profile A `PR_REVIEW` base waves.
-When enabled, depth tiers M and L must run each base attempt as a singleton
-canary batch followed by a fanout batch for the remaining unresolved
-obligations. Attempt 0 plus at most two retry attempts are allowed. Tier S, or
-an explicit `enabled: false`, keeps the legacy single-wave base dispatch.
+**Disabled by default** (issue #2381): the legacy single-wave base dispatch is
+the default path at every depth tier while the #2380 PR-review repair program is
+incomplete. When explicitly enabled, depth tiers M and L must run each base
+attempt as a singleton canary batch followed by a fanout batch for the remaining
+unresolved obligations. Attempt 0 plus at most two retry attempts are allowed.
+Tier S always keeps the legacy single-wave base dispatch.
+
+The resilience circuit (issue #2382) counts only durable, typed terminal
+provider failures: a lane settled as an error with a structured provider
+classification. Observer deadlines, missing host clients, parser rejections,
+policy gates, filesystem/Git errors, cancellations, and presumed-stale
+observations never open, reopen, or close it. The threshold counts distinct
+failed lanes per provider class — never owned dimensions, never repeated
+collections of the same lane. An opened circuit blocks only new resilience
+retry dispatch; collect, diagnose, cancel, abort, gap reporting, and disabling
+this config block all remain available. After `circuit_open_duration_ms` the
+circuit admits exactly one recovery canary probe: a typed provider failure
+reopens it with a fresh interval, a success closes it and clears the evidence,
+and an inconclusive outcome restarts the cooldown without changing any state.
+Circuits that were persisted by older, unversioned plugin builds migrate once
+to a closed, non-blocking record whose historical evidence is waterlined. The
+current `enabled` value is always authoritative: flipping it to `false`
+disarms an already-admitted workflow immediately (the persisted circuit stays
+on disk for audit only), and re-enabling later starts from a clean closed
+generation that cannot resurrect pre-disable evidence. Residual caveat: if the
+process crashes in the instant between the config flip and the next dispatch,
+the disable marker write can be lost; the circuit is inert the whole time
+resilience stays disabled, and after a later re-enable an already-open
+circuit recovers through the normal probe cycle instead of receiving the
+clean reset.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enabled` | boolean | `true` | Enable staged canary/fanout base-wave resilience for Profile A PR review. `false` preserves the legacy one-wave base dispatch. |
+| `enabled` | boolean | `false` | Enable staged canary/fanout base-wave resilience for Profile A PR review. The default `false` uses the legacy one-wave base dispatch; set `true` to opt in. |
 | `canary_probe_ms` | number | `300000` | Milliseconds to wait before probing whether an unresolved canary lane is still live (1–3600000). |
 | `status_probe_timeout_ms` | number | `2000` | Deadline for the bounded status probe that decides whether a canary is still live before admitting a later retry (1–60000). |
-| `correlated_failure_threshold` | number | `2` | Number of normalized matching terminal failures that opens the shared base-wave circuit and blocks further staged attempts (2–8). |
+| `correlated_failure_threshold` | number | `2` | Number of distinct terminal provider-failed lanes of the same provider class that opens the resilience circuit and blocks further staged attempts (2–8). One consolidated lane counts once regardless of how many dimensions it owns, and repeated collections of one lane count once. |
 | `max_retry_attempts_after_initial` | number | `2` | Maximum retry attempts after attempt 0. The controller therefore allows attempts 0, 1, and 2 by default (0–2). |
+| `circuit_open_duration_ms` | number | `60000` | How long an opened resilience circuit stays open before it admits exactly one recovery canary probe (1000–1800000). Applies to the initial open and to every provider-failure reopen. |
 
-**Example** — keep staged resilience enabled with defaults:
+**Example** — opt in to staged canary/fanout resilience (off by default):
 
 ```json
 {
@@ -627,13 +767,52 @@ an explicit `enabled: false`, keeps the legacy single-wave base dispatch.
 }
 ```
 
-**Example** — disable staged canary/fanout and keep the legacy one-wave base dispatch:
+**Example** — the default: staged canary/fanout off, legacy one-wave base dispatch:
 
 ```json
 {
   "pr_review_resilience": {
     "enabled": false
   }
+}
+```
+
+### pr_review_legacy_transcript_compatibility
+
+Controls the deprecated transcript-row fallback for Profile A `PR_REVIEW`
+base and micro discovery lanes.
+
+Default: `false`. When omitted or `false`, newly dispatched Profile A
+discovery lanes are structured-only: they must settle through exactly one
+`submit_pr_review_result` receipt, and later prose, truncation, or transcript
+incompleteness cannot replace that receipt. The legacy `[CANDIDATE]` and
+`[CLEAN]` transcript rows remain a migration-only compatibility path.
+
+Enable this only to collect legacy in-flight lanes or to interoperate with an
+older host during the migration window. The compatibility decision is snapped
+into each dispatched lane, so toggling the config later does not silently widen
+or strand an already-running review. A present-but-invalid structured result
+still fails closed and never falls back to transcript parsing.
+
+Profiles B/C are unchanged by this setting: without the Profile A controller,
+their lane transcripts remain the native exchange surface.
+
+Structured submissions persist background-delegation schema v4 records. Before
+downgrading to a binary without schema v4 support, drain active structured
+reviews or apply a compatible migration/reader. An older lenient reader skips
+the entire unknown v4 record, so the lane appears absent and later mutations
+become no-ops; strict recovery rejects the store as incompatible and fails
+closed. Neither outcome preserves an active structured review.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `pr_review_legacy_transcript_compatibility` | boolean | `false` | Opt in to the deprecated transcript-row fallback for Profile A PR-review base/micro discovery lanes during migration. |
+
+**Example** — temporarily enable the legacy transcript fallback:
+
+```json
+{
+  "pr_review_legacy_transcript_compatibility": true
 }
 ```
 
@@ -802,6 +981,29 @@ An episode disarms — resetting every counter — on **either** of two conditio
 }
 ```
 
+### Sandbox enforcement requirements (`guardrails.sandbox`)
+
+`guardrails.sandbox` makes containment requirements explicit. The default
+`advisory` mode preserves existing fail-open behavior and records a one-time
+warning plus audit event when containment is unavailable. `required` mode
+blocks a shell command before mutation or execution unless every requested
+dimension is reported `real` by the capability probe.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `mode` | `advisory` | `required` fails closed; `advisory` warns and audits. |
+| `require_filesystem` | `false` | Require real filesystem containment. |
+| `require_network` | `false` | Require real network containment. |
+| `require_process` | `false` | Require real process containment. |
+| `network_mode` | `off` | Requested network posture (`off` or `on`). |
+| `network_allowlist` | `[]` | Bounded network allowlist used for capability identity. |
+| `writable_roots` | `[]` | Additional bounded writable roots used for capability identity. |
+
+The status surface reports filesystem, network, process, and effective
+strength separately as `real`, `weak`, or `none`. Linux reports missing
+seccomp explicitly; macOS does not claim network/process containment; Windows
+fallbacks remain weak/none unless independently verified.
+
 ### macOS sandbox activation (`guardrails.sandbox_macos_enabled`)
 
 | Field | Type | Default | Description |
@@ -870,7 +1072,7 @@ guidance to the agent before a hard stop.
 | `pattern_thresholds.stuck_on_test` | number (≥ 1) | `3` | Occurrences before an edit → test-fail → edit-same-file cycle is flagged. |
 | `pattern_thresholds.context_thrash` | number (≥ 1) | `10` | Consecutive steps before a monotonically increasing unique-target set (no plateaus) is flagged. Raised from `3` in #2134: three consecutive new targets is indistinguishable from an agent simply reading three files. |
 | `escalation_enabled` | boolean | `true` | Enable the count-based escalation ladder (advisory → hard stop) once a pattern's threshold is met repeatedly. |
-| `max_trajectory_lines` | number (≥ 10) | `1000` | Maximum trajectory entries retained per session before older entries are evicted. |
+| `max_trajectory_lines` | number (≥ 10, ≤ 10000) | `1000` | Maximum trajectory entries retained per session before older entries are evicted. Upper bound caps the emergent per-project trajectory footprint (#2041). |
 | `detection_timeout_ms` | number (≥ 10) | `100` | Bounded time budget for a single pattern-detection pass; detection is skipped (fail-open) if it would exceed this. |
 
 **Example** — tighten the repetition-loop and ping-pong thresholds:
@@ -976,6 +1178,7 @@ probe, and automatic incremental refresh behavior.
 | `walk_budget_ms` | integer (1000-60000) | `5000` | Wall-clock budget for graph and freshness walks. An incomplete freshness walk is `inconclusive` and never authorizes refresh or deletion. |
 | `max_files` | integer (100-100000) | `10000` | Source-file cap for graph and freshness walks. Hitting the cap is conservative and produces an incomplete result. |
 | `exclude_dirs` | string[] | `[]` | Extra directory **names** to skip when scanning the workspace, in addition to the built-in defaults. |
+| `storage` | `'json' \| 'indexed'` | `'json'` | Storage mode for the persisted graph. `'json'` keeps the single `.swarm/repo-graph.json` document as the sole store. `'indexed'` additionally maintains a derived `.swarm/repo-memory.sqlite` index that accelerates bounded neighbourhood lookups. See "Storage modes" below. |
 
 The graph scanner already skips common generated directories by default:
 `node_modules`, `.git`, `dist`, `build`, `out`, `coverage`, `.next`, `.nuxt`,
@@ -1028,6 +1231,56 @@ above `refresh_cap` are suppressed.
 > minified file can no longer abort the whole graph build — such files are
 > skipped individually (issue #1448).
 
+### Storage modes
+
+`repo_graph.storage` selects how the persisted graph is stored on disk
+(issue #1534):
+
+- **`'json'` (default).** The graph lives solely in `.swarm/repo-graph.json`.
+  Behavior is unchanged from prior releases.
+- **`'indexed'`.** In addition to `.swarm/repo-graph.json`, a derived
+  `.swarm/repo-memory.sqlite` index is maintained. `.swarm/repo-graph.json`
+  is **always written and remains authoritative in both modes** — the index
+  is never a second source of truth, only a read-side accelerator built from
+  it.
+
+> **Enabling `indexed` does not build the index immediately.** The index is
+> created by the next graph save (for example `repo_map action="build"`, a
+> session-start rebuild, or a write-triggered incremental update). There is
+> deliberately no build-on-read path, because that would put a full JSON parse
+> plus a full index build on the synchronous system-prompt path. Until the next
+> save, reads transparently use the JSON path — nothing fails, it is simply not
+> yet accelerated.
+
+What the index accelerates: bounded neighbourhood lookups that today require
+parsing the full JSON document — the coder localization block and reviewer
+blast-radius block (which query a small set of changed files' dependents and
+dependencies), and memory-reflection anchor resolution on repositories whose
+`repo-graph.json` exceeds the 16 MB bounded-read budget the reflection
+service enforces. On a fresh-parse turn, indexed lookups avoid reading and
+parsing the entire document.
+
+Fail-safe behavior: a missing, corrupt, or stale index (for example after a
+`storage` mode flip back to `'json'`, or after manual deletion) is detected
+and the affected read silently falls back to the JSON path — it never
+surfaces an error to the caller. Deleting `.swarm/repo-memory.sqlite` (and
+any `-wal`/`-shm` sidecars) by hand is always safe; it is rebuilt on the next
+graph save.
+
+Honest performance tradeoff — this is not a blanket speedup:
+
+- On repositories where `repo-graph.json` is large, and on turns that call
+  only one of the graph-consuming blocks, indexed mode is a clear win: it
+  avoids a full JSON parse.
+- On a turn where **multiple** injection blocks run against the same
+  directory right after a graph change (a full-graph in-memory cache miss),
+  indexed mode costs slightly **more** than JSON mode. The first block takes
+  the cheaper subgraph branch instead of warming the full-graph cache for the
+  document, so a later whole-graph consumer in the same turn still pays a
+  full parse — on top of the subgraph query the first block already did.
+  Single-block turns, and turns after the full-graph cache is already warm,
+  are unaffected by this.
+
 ## Evidence Retention Configuration
 
 Controls evidence bundle archival for `/swarm finalize` and `/swarm archive`. The two commands use different defaults: finalize uses tighter retention (30 days / 10 bundles) to keep only recent evidence; archive targets long-term retention (90 days / 1000 bundles) for periodic cleanup.
@@ -1074,11 +1327,13 @@ Opt-in verification gate that runs five specialized reviewers in parallel before
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Master switch for the council gate |
 | `maxRounds` | number | `3` | Maximum REJECT-retry rounds before architect must escalate to user (1–10) |
-| `parallelTimeoutMs` | number | `30000` | Per-member dispatch timeout in milliseconds (5000–120000) |
+| `parallelTimeoutMs` | number | `30000` | **DEPRECATED — inert.** No runtime consumer exists and no timeout is enforced; accepted only for parse compatibility. Config doctor warns when it is explicitly set. Remove the key — dispatch timeouts are governed by the agent host. Scheduled for removal. |
 | `vetoPriority` | boolean | `true` | When `true`, any single REJECT blocks advancement |
-| `requireAllMembers` | boolean | `false` | When `true`, reject synthesis if fewer than 5 verdicts provided. Equivalent to `minimumMembers: 5`. |
-| `minimumMembers` | number | `3` | Minimum distinct council members required for quorum (1–5). Set to 1 to disable quorum enforcement. `requireAllMembers: true` overrides this to 5 (stricter constraint wins). |
-| `escalateOnMaxRounds` | string? | undefined | Reserved for future use — no runtime behavior today |
+| `requireAllMembers` | boolean | `false` | When `true`, reject synthesis if fewer than 5 verdicts provided. Equivalent to `minimumMembers: 5`. (Task/phase councils only.) |
+| `minimumMembers` | number | `3` | Minimum distinct council members required for quorum (1–5) at the **task/phase** level. Set to 1 to disable quorum enforcement. `requireAllMembers: true` overrides this to 5 (stricter constraint wins). The **final** council is governed separately by `finalCompletionPolicy`. |
+| `escalateOnMaxRounds` | string? | undefined | **Inert.** Declared for escalation, but no handler/webhook execution exists or runs (#1650). Config doctor warns when it is set. Max-rounds exhaustion instead emits a durable structured event (`.swarm/council/events/max-rounds-exhaustion.jsonl`) and a user escalation message; the run stays fail-closed. Wiring real outbound escalation requires a separate security review. |
+| `finalCompletionPolicy` | object | `{ "mode": "all_required" }` | Final-council completion policy. `all_required` (default) preserves the exact legacy requirement: all five canonical roles, five distinct members, zero absentees. `quorum` is an explicit, bounded weakening requiring `minimumMembers` (3–5) distinct canonical members — unknown, duplicate, and cross-swarm identities never count, and config doctor visibly flags quorum mode as weaker. Member names may be exact canonical roles or multi-swarm prefixed names (e.g. `local_critic`). The normalized policy participates in the council policy digest, so any change invalidates previously accepted final-council evidence. |
+| `freshnessMaxAgeHours` | number | `24` | Maximum age in hours (1–720) for phase-council, architecture-supervisor, and final-council evidence. One shared evaluator and one captured preflight clock govern all three gates; future/invalid timestamps and evidence predating the phase retrospective fail closed. Part of the council policy digest. |
 
 When `enabled: false`, the council gate is completely inert. When enabled, `submit_council_verdicts` must be called before a task can transition to `completed`. See the [Council guide](council/README.md) for the full workflow.
 
@@ -1356,6 +1611,40 @@ path.
 | `max_changed_sections` | number | `6` | Trust region: max distinct frontmatter/body sections changed. |
 | `deadband` | number | `0` | Promotion policy deadband forwarded to the evaluation substrate (`PromotionPolicyV1.deadband`). |
 | `retirement_min_age_days` | number | `60` | Wall-clock retirement: minimum age (days) before a never-used skill is eligible for archival retirement. Real usage signal is still required; this is a floor. |
+
+## Declarative Harness Evolution
+
+`harness_evolution` configures the bounded, non-executing HarnessOpt mutation
+surface. It does not run during plugin initialization, generate candidates,
+apply source patches, or activate a candidate automatically. Blueprint and
+candidate commands are read-only; activation and rollback are package-API
+operations guarded by exact, one-shot `/swarm approve-write` facts.
+
+Source candidates are inert manifests. Their patches are validated against the
+current Git commit, project containment, the explicit source allowlist, the
+shared protected-path policy, text-only limits, and configured size caps. The
+runtime never applies or evaluates the stored patch.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `source_allowlist` | string[] | `[]` | Project-relative prefixes eligible for inert source candidates. Empty means source candidates are denied. |
+| `extra_protected_paths` | string[] | `[]` | Additional project-relative prefixes denied even when allowlisted. Built-in protected paths always remain denied. |
+| `max_patch_bytes` | number | `1048576` | Maximum UTF-8 patch size. |
+| `max_files` | number | `64` | Maximum files represented by one candidate. |
+| `max_file_bytes` | number | `524288` | Maximum before/after size of an individual text file. |
+| `max_total_bytes` | number | `4194304` | Maximum aggregate candidate output size. |
+| `max_changed_lines` | number | `10000` | Maximum aggregate added plus removed lines. |
+| `max_versions` | number | `100` | Maximum active-history projection size; rollback ancestry remains durable. |
+| `max_inactive_candidates` | number | `32` | Maximum additional inactive candidate records retained on disk after compaction. Candidates referenced by retained versions are always kept, and the newest inactive candidate is always retained as the activation handoff even when this is `0`. |
+| `max_replay_records` | number | `10000` | Maximum ledger records replayed by one operation. Replay exhaustion fails closed. |
+| `max_output_bytes` | number | `262144` | Maximum command output size. |
+
+Durable state lives under `.swarm/evolution/harness/`. The segmented,
+hash-chained ledger is authoritative; `current.json` is only a derived
+projection and read commands never repair it implicitly. Once the store has to
+compact, it rewrites the active ledger to a single authenticated snapshot under
+the ledger generation pointer, prunes inactive candidate directories not named
+by that snapshot, and leaves version-linked candidates available for rollback.
 
 ## External Skills Curation Pipeline
 

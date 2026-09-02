@@ -89,6 +89,7 @@ export const swarm_memory_recall: ReturnType<typeof createSwarmTool> =
 						token_estimate: bundle.tokenEstimate,
 						signals: bundle.items.map((item) => ({
 							memory_id: item.record.id,
+							relation: item.relation,
 							...item.signals,
 						})),
 						prompt_block: bundle.promptBlock,

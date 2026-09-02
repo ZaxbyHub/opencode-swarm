@@ -17,6 +17,7 @@ import {
 	resetToMainAfterMerge,
 	resetToRemoteBranch,
 } from '../git/branch';
+import { observeCloseArchive } from '../health/learning-health';
 import { createCuratorLLMDelegate } from '../hooks/curator-llm-factory';
 import { runCuratorPostMortem } from '../hooks/curator-postmortem';
 import { extractCurrentPhaseFromPlan } from '../hooks/extractors.js';
@@ -27,6 +28,10 @@ import {
 	reconcilePhaseClose,
 	recordPhaseCloseIntent,
 } from '../hooks/knowledge-receipt-ledger.js';
+import {
+	closeRepoMemory,
+	REPO_MEMORY_FILENAME,
+} from '../tools/repo-graph/indexed-storage';
 
 /** Narrow seam for receipt/plan ordering tests. */
 export const closeReceiptLifecycleInternals = {
@@ -34,6 +39,10 @@ export const closeReceiptLifecycleInternals = {
 	reconcilePhaseClose,
 };
 
+import { finalizeContextTelemetry as finalizeContextTelemetryImpl } from '../context-map/telemetry.js';
+import { finalizeCoreEventsForClose as finalizeCoreEventsForCloseImpl } from '../events/core-events.js';
+import { redactDecisionLineForArchive } from '../hooks/guardrails/audit-log.js';
+import { finalizeShellAuditForClose as finalizeShellAuditForCloseImpl } from '../hooks/guardrails/shell-audit-store.js';
 import {
 	readKnowledge,
 	resolveSwarmKnowledgePath,
@@ -283,6 +292,27 @@ async function runAbortableSkillReview(
 	}
 }
 
+async function archiveCloseSummary(
+	ctx: Pick<
+		CloseStageContext,
+		'archiveStageFailed' | 'archiveDir' | 'warnings'
+	>,
+	closeSummaryPath: string,
+	summaryWritten: boolean,
+): Promise<void> {
+	if (!summaryWritten || ctx.archiveStageFailed || !ctx.archiveDir) return;
+	try {
+		await fs.copyFile(
+			closeSummaryPath,
+			path.join(ctx.archiveDir, 'close-summary.md'),
+		);
+	} catch (error) {
+		const msg = error instanceof Error ? error.message : String(error);
+		ctx.warnings.push(`Failed to archive close-summary.md: ${msg}`);
+		log('[close-command] Failed to archive close-summary.md:', error);
+	}
+}
+
 function normalizeLessonText(text: string): string {
 	return (text ?? '').trim().toLowerCase();
 }
@@ -373,6 +403,7 @@ const ARCHIVE_ARTIFACTS = [
 	'plan-ledger.jsonl',
 	'context.md',
 	'events.jsonl',
+	'events-authority-index.json',
 	'handoff.md',
 	'handoff-prompt.md',
 	'handoff-consumed.md',
@@ -404,6 +435,11 @@ const ARCHIVE_ARTIFACTS = [
 	// transient SQLite sidecars recreated on next open. They are never archived
 	// and never cleaned (preserved on disk). See the ACTIVE_STATE_TO_CLEAN
 	// docblock below.
+	// repo-memory.sqlite (issue #1534): the derived index maintained when
+	// repo_graph.storage === 'indexed'. Mirrors swarm.db exactly — snapshotted
+	// via archiveSqliteSnapshot (VACUUM INTO), and its -shm/-wal sidecars are
+	// likewise deliberately NOT listed here (transient, recreated on next open).
+	REPO_MEMORY_FILENAME,
 	'close-summary.md',
 	'session-reflection.md',
 	'spec.md',
@@ -418,6 +454,14 @@ const ARCHIVE_ARTIFACTS = [
 	'background-delegations.checkpoint.json',
 	'background-delegations.manifest.json',
 	'background-delegations-health.json',
+	// Context-map telemetry store (issue #2037): the bounded single-file store
+	// (manifest header + retained window) is archived as a defined, validated
+	// cut for forensics. The tail is folded/finalized before archiving via
+	// finalizeContextTelemetry, parallel to flushAndDrainTelemetry. Deliberately
+	// omitted from ACTIVE_STATE_TO_CLEAN — the store is cross-session state and
+	// its bounded-retention mechanism is compaction (not close), so active state
+	// stays usable after close.
+	'context-telemetry.jsonl',
 ];
 
 /**
@@ -476,6 +520,7 @@ const ACTIVE_STATE_TO_CLEAN = [
 	'plan.md',
 	'plan-ledger.jsonl',
 	'events.jsonl',
+	'events-authority-index.json',
 	'handoff.md',
 	'handoff-prompt.md',
 	'handoff-consumed.md',
@@ -500,6 +545,9 @@ const ACTIVE_STATE_TO_CLEAN = [
 	'swarm.db',
 	// swarm.db-shm / swarm.db-wal intentionally omitted — preserved on disk
 	// (transient SQLite sidecars, recreated on next open). See docblock above.
+	// repo-memory.sqlite (issue #1534): same treatment as swarm.db — its
+	// -shm/-wal sidecars are intentionally omitted for the same reason.
+	REPO_MEMORY_FILENAME,
 ];
 
 /**
@@ -697,6 +745,44 @@ export function emitCloseArchiveResult(
 			'[close-command] close_archive_result telemetry emit failed:',
 			telemetryErr,
 		);
+	}
+
+	// Learning-health archive-mismatch feed (#2044): raise when the archive is
+	// empty/invalid while recorded activity predicted content. The bounded
+	// activity probe reads existence + size only (no parsing). Late-arriving
+	// activity never retro-raises — the alarm records what was known now.
+	observeCloseArchive({
+		directory: ctx.directory,
+		archiveValid,
+		archiveEmpty,
+		activityPredictsContent: archiveActivityPredictsContent(ctx.directory),
+	});
+}
+
+/**
+ * Bounded activity probe for the archive-mismatch alarm (#2044): does recorded
+ * project activity predict archive content? Existence + size only — no reads
+ * of record content, no unbounded scans.
+ */
+function archiveActivityPredictsContent(directory: string): boolean {
+	try {
+		for (const name of [
+			'knowledge-events.jsonl',
+			'telemetry.jsonl',
+			'evidence',
+		]) {
+			const target = path.join(directory, '.swarm', name);
+			const stat = fsSync.statSync(target);
+			if (target.endsWith('evidence')) {
+				const entries = fsSync.readdirSync(target);
+				if (entries.length > 0) return true;
+			} else if (stat.size > 0) {
+				return true;
+			}
+		}
+		return false;
+	} catch {
+		return false;
 	}
 }
 
@@ -1280,6 +1366,55 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 			ctx.warnings.push(`Telemetry flush before archive failed: ${msg}`);
 		}
 
+		// Finalize the context-map telemetry store (issue #2037) BEFORE archiving
+		// so the archived `context-telemetry.jsonl` is a defined, validated cut
+		// (tail folded into the durable aggregate, atomic single-file rewrite).
+		// Unlike the core telemetry stream this store is synchronous (no buffered
+		// writer), so no flush is needed — finalization is a fold + atomic rewrite.
+		// Fail-open: a finalize failure only warns; the close pipeline continues.
+		try {
+			_internals.finalizeContextTelemetry(ctx.directory);
+		} catch (finalizeErr) {
+			const msg =
+				finalizeErr instanceof Error
+					? finalizeErr.message
+					: String(finalizeErr);
+			ctx.warnings.push(
+				`Context-map telemetry finalize before archive failed: ${msg}`,
+			);
+		}
+
+		// Finalize the core event store (issue #2039) BEFORE archiving so the
+		// archived `events.jsonl` is a defined, VALIDATED cut (legacy header-less
+		// tail drained to convergence, window compacted, pre-rename validation).
+		// Fail-open: a finalize failure only warns; the close pipeline continues.
+		try {
+			_internals.finalizeCoreEvents(ctx.directory);
+		} catch (finalizeErr) {
+			const msg =
+				finalizeErr instanceof Error
+					? finalizeErr.message
+					: String(finalizeErr);
+			ctx.warnings.push(`Core events finalize before archive failed: ${msg}`);
+		}
+
+		// Finalize the shell-audit security store (issue #2040) BEFORE the
+		// session/ directory archive copy so the archived `shell-audit.jsonl`
+		// is a defined, VALIDATED cut (legacy header-less tail drained to
+		// convergence, window compacted under the decision-class priority
+		// policy, pre-rename validation). Releasing the store lock also
+		// unlinks it, so a stale lock file is never archived. Fail-open: a
+		// finalize failure only warns; the close pipeline continues.
+		try {
+			_internals.finalizeShellAudit(ctx.directory);
+		} catch (finalizeErr) {
+			const msg =
+				finalizeErr instanceof Error
+					? finalizeErr.message
+					: String(finalizeErr);
+			ctx.warnings.push(`Shell audit finalize before archive failed: ${msg}`);
+		}
+
 		// Copy swarm artifacts to archive.
 		// Each artifact produces a structured ArtifactArchiveResult pushed into
 		// ctx.archiveResults — the single source of truth from which the
@@ -1316,13 +1451,16 @@ export async function runArchiveStage(ctx: CloseStageContext): Promise<void> {
 				? 'required'
 				: 'optional';
 
-			if (artifact === 'swarm.db') {
+			if (artifact === 'swarm.db' || artifact === REPO_MEMORY_FILENAME) {
 				// In-process VACUUM INTO snapshot via the shared, runtime-portable
 				// loader (src/db/sqlite-loader.ts). Produces a single self-contained
 				// file (journal_mode=delete, no WAL sidecars) containing ALL committed
 				// rows and EXCLUDING uncommitted writers (spike-proven under Bun + Node).
 				// Sidecar files (-shm/-wal) are transient and intentionally neither
-				// archived nor cleaned — left in place, no warning.
+				// archived nor cleaned — left in place, no warning. repo-memory.sqlite
+				// (issue #1534) is a WAL-mode DB exactly like swarm.db, so a raw copy
+				// would not be a consistent snapshot; it is routed through the same
+				// archiveSqliteSnapshot path.
 				const r = await archiveSqliteSnapshot({
 					sourcePath: srcPath,
 					destDir: ctx.archiveDir,
@@ -1683,6 +1821,17 @@ export async function runCleanStage(
 			if (artifact === 'swarm.db') {
 				try {
 					closeProjectDb(ctx.directory);
+				} catch {
+					// best-effort — the unlink below will surface any real failure
+				}
+			}
+			// For repo-memory.sqlite (issue #1534), close the cached repo-memory
+			// connection for this directory BEFORE unlinking, mirroring the
+			// swarm.db Windows EBUSY guard above. Best-effort and never throws
+			// into the clean stage.
+			if (artifact === REPO_MEMORY_FILENAME) {
+				try {
+					_internals.closeRepoMemory(ctx.directory);
 				} catch {
 					// best-effort — the unlink below will surface any real failure
 				}
@@ -2463,13 +2612,16 @@ export async function handleCloseCommand(
 
 		// Canonical atomic helper (issue #2035): registered temp grammar,
 		// exact own-temp cleanup, and cache invalidation in one place.
+		let closeSummaryWritten = false;
 		try {
 			await atomicWriteSwarmFile(closeSummaryPath, summaryContent);
+			closeSummaryWritten = true;
 		} catch (error) {
 			const msg = error instanceof Error ? error.message : String(error);
 			ctx.warnings.push(`Failed to write close-summary.md: ${msg}`);
 			log('[close-command] Failed to write close-summary.md:', error);
 		}
+		await archiveCloseSummary(ctx, closeSummaryPath, closeSummaryWritten);
 
 		// NOTE: writeCheckpoint is intentionally NOT called here. SWARM_PLAN.json and
 		// SWARM_PLAN.md are redundant copies of plan.json/plan.md (already archived in
@@ -2635,6 +2787,7 @@ function detectFullAuto(directory: string, sessionID: string): boolean {
 }
 
 export const _internals = {
+	closeRepoMemory,
 	ACTIVE_STATE_DIRS_TO_CLEAN,
 	countSessionKnowledgeEntries,
 	CLOSE_SKILL_REVIEW_TIMEOUT_MS,
@@ -2655,6 +2808,7 @@ export const _internals = {
 	runFinalizeRewardSweep,
 	acquireFinalizeLock,
 	runArchiveStage,
+	archiveCloseSummary,
 	runArchiveEvidenceRetention,
 	runCleanStage,
 	runAlignStage,
@@ -2673,5 +2827,26 @@ export const _internals = {
 	flushAndDrainTelemetry: async (): Promise<void> => {
 		const { flushAndDrainTelemetry } = await import('../telemetry.js');
 		return flushAndDrainTelemetry();
+	},
+	// Finalizes the bounded context-map telemetry store before archiving it
+	// (issue #2037): folds the retained tail into the durable aggregate via an
+	// atomic single-file rewrite. Synchronous, fail-open. Seam so close tests
+	// can substitute a no-op / throwing stub.
+	finalizeContextTelemetry: (directory: string): void => {
+		finalizeContextTelemetryImpl(directory);
+	},
+	finalizeCoreEvents: (directory: string): void => {
+		finalizeCoreEventsForCloseImpl(directory);
+	},
+	// Finalizes the bounded shell-audit security store before the session/
+	// directory archive copy (issue #2040). Synchronous, fail-open. Seam so
+	// close tests can substitute a no-op / throwing stub and pin ordering.
+	// The lineTransform re-applies the CURRENT redaction policy to retained
+	// lines so a legacy pre-#2040 record cannot bypass it in the archived
+	// cut (review round F4 — "re-redact at the archive boundary").
+	finalizeShellAudit: (directory: string): void => {
+		finalizeShellAuditForCloseImpl(directory, {
+			lineTransform: redactDecisionLineForArchive,
+		});
 	},
 };

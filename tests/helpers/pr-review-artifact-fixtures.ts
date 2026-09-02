@@ -3,8 +3,11 @@ import * as path from 'node:path';
 import { storeLaneOutput } from '../../src/background/lane-output-store.js';
 import {
 	appendDelegationTransition,
+	type BackgroundDelegationResult,
+	claimTerminalResult,
 	recordPendingDelegation,
 } from '../../src/background/pending-delegations.js';
+import type { PrReviewResultReceipt } from '../../src/background/pr-review-contract.js';
 import {
 	activatePrWorkflow,
 	enforcePrReviewBaseDimensions,
@@ -21,7 +24,25 @@ export const PR_ARTIFACT_HEAD_SHA = 'abc123';
 export const PR_ARTIFACT_REVISION_DIGEST = 'revision-1';
 
 const MICRO_CANDIDATE_HEADER =
-	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence';
+	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags';
+const BASE_CANDIDATE_HEADER =
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
+
+/**
+ * Typed risk metadata for reviewer rows and CONFIRMED records (issue #2383).
+ * CONFIRMED MEDIUM keeps its historical critic-routing intent by declaring
+ * `HIGH_IMPACT` (the old contract routed every CONFIRMED MEDIUM); every other
+ * fixture shape uses `ORDINARY` with no tags — CRITICAL/HIGH still route on
+ * severity alone and LOW/INFO/NONE were never critic-routed.
+ */
+function fixtureRiskImpact(
+	classification: string,
+	severity: string,
+): 'ORDINARY' | 'HIGH_IMPACT' {
+	return classification === 'CONFIRMED' && severity === 'MEDIUM'
+		? 'HIGH_IMPACT'
+		: 'ORDINARY';
+}
 
 /**
  * Shared lane-persistence fixture for `write_pr_review_artifact` tests. These
@@ -33,17 +54,43 @@ export async function persistPrReviewBatch(
 	directory: string,
 	batchId: string,
 	mode: string,
-	lanes: ReadonlyArray<{ laneId: string; workflowLane: string }>,
+	lanes: ReadonlyArray<{
+		laneId: string;
+		workflowLane: string;
+		ownedWorkflowLanes?: string[];
+	}>,
 	options: {
-		status?: 'completed' | 'error';
+		status?: 'pending' | 'running' | 'completed' | 'error';
 		head?: string;
 		empty?: boolean;
 		textOverride?: string;
 		transcriptIncomplete?: boolean;
 		artifactRole?: string;
 		subagentSessionId?: string;
+		/** Severity the generated `[CANDIDATE]` rows declare. Default HIGH. */
+		candidateSeverity?: 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+		/**
+		 * Emit a per-lane `[CLEAN]` attestation instead of a `[CANDIDATE]` row, so
+		 * the lane settles with zero findings.
+		 */
+		cleanPerLane?: boolean;
+		/**
+		 * Override the generated candidate_id of lane 0's row. `candidate_id` is
+		 * unconstrained free text, so a lane can name a real finding after the
+		 * synthetic `CLEAN-REVIEW` sentinel; this lets a test prove the gate still
+		 * compares such a record against ITS OWN row (issue #2320).
+		 */
+		firstCandidateId?: string;
+		workflowLaneFailureClass?: 'contract' | 'resource' | 'deadline';
+		prReviewLegacyTranscriptCompatibility?: boolean;
+		prReviewResultReceipt?: PrReviewResultReceipt;
 	} = {},
 ): Promise<void> {
+	const legacyTranscriptCompatibility =
+		options.prReviewLegacyTranscriptCompatibility ??
+		(mode === 'swarm-pr-review:base' || mode === 'swarm-pr-review:micro'
+			? true
+			: undefined);
 	for (const [index, lane] of lanes.entries()) {
 		const correlationId = `${batchId}-${index}`;
 		const subagentSessionId = options.subagentSessionId ?? correlationId;
@@ -61,6 +108,9 @@ export async function persistPrReviewBatch(
 			laneId: lane.laneId,
 			mode,
 			workflowLane: lane.workflowLane,
+			...(lane.ownedWorkflowLanes?.length
+				? { ownedWorkflowLanes: lane.ownedWorkflowLanes }
+				: {}),
 			workspace: {
 				directory,
 				gitHead: PR_ARTIFACT_HEAD_SHA,
@@ -68,18 +118,27 @@ export async function persistPrReviewBatch(
 				prHeadSha: options.head ?? PR_ARTIFACT_HEAD_SHA,
 				scope: null,
 			},
+			...(legacyTranscriptCompatibility !== undefined
+				? {
+						prReviewLegacyTranscriptCompatibility:
+							legacyTranscriptCompatibility,
+					}
+				: {}),
 		});
 		const text =
 			options.textOverride ??
+			(options.cleanPerLane
+				? `${BASE_CANDIDATE_HEADER}\n[CLEAN] | ${lane.workflowLane} | exact reviewed diff | no actionable finding survived triage`
+				: undefined) ??
 			(options.empty
 				? ''
 				: mode === 'swarm-pr-review:reviewer'
-					? '[REVIEWED] | C-001 | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer'
+					? '[REVIEWED] | C-001 | CONFIRMED | STRUCTURALLY_PROVEN | HIGH | YES | file.ts:1 | rationale | probe | reviewer | ORDINARY | '
 					: mode === 'swarm-pr-review:critic'
 						? '[CRITIC] | C-001 | UPHELD | HIGH | reason | no change'
 						: mode === 'swarm-pr-feedback:verification'
 							? `[FEEDBACK-VERIFIED] | ${lane.workflowLane} | CONFIRMED | evidence`
-							: `${mode === 'swarm-pr-review:micro' ? MICRO_CANDIDATE_HEADER : '[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence'}\nC-${index} | ${lane.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH`);
+							: `${mode === 'swarm-pr-review:micro' ? MICRO_CANDIDATE_HEADER : BASE_CANDIDATE_HEADER}\n${index === 0 && options.firstCandidateId ? options.firstCandidateId : `C-${index}`} | ${lane.workflowLane} | ${options.candidateSeverity ?? 'HIGH'} | correctness | file.ts:1 | claim | evidence | impact | HIGH | UNKNOWN | `);
 		const stored = storeLaneOutput(directory, {
 			batchId,
 			laneId: lane.laneId,
@@ -96,17 +155,35 @@ export async function persistPrReviewBatch(
 			text,
 			transcriptIncomplete: options.transcriptIncomplete,
 		});
-		await appendDelegationTransition(directory, correlationId, {
-			status: options.status ?? 'completed',
-			result: {
-				text,
-				chars: stored.chars,
-				truncated: false,
-				digest: stored.digest,
-				...(stored.ref ? { outputRef: stored.ref } : {}),
-				...(options.transcriptIncomplete ? { transcriptIncomplete: true } : {}),
-			},
-		});
+		const result: BackgroundDelegationResult = {
+			text,
+			chars: stored.chars,
+			truncated: false,
+			digest: stored.digest,
+			...(stored.ref ? { outputRef: stored.ref } : {}),
+			...(options.transcriptIncomplete ? { transcriptIncomplete: true } : {}),
+			...(options.prReviewResultReceipt
+				? { prReviewResultReceipt: options.prReviewResultReceipt }
+				: {}),
+			...(options.workflowLaneFailureClass
+				? {
+						workflowLaneFailureClass: options.workflowLaneFailureClass,
+					}
+				: {}),
+		};
+		if (options.workflowLaneFailureClass) {
+			await claimTerminalResult(directory, correlationId, {
+				eventId: `fixture-terminal-${correlationId}`,
+				status: options.status ?? 'completed',
+				recordedAt: Date.now(),
+				result,
+			});
+		} else {
+			await appendDelegationTransition(directory, correlationId, {
+				status: options.status ?? 'completed',
+				result,
+			});
+		}
 	}
 }
 
@@ -120,7 +197,19 @@ export async function establishPrReviewPrerequisites(
 	runId: string = 'test-run',
 	sessionID: string = PR_ARTIFACT_SESSION_ID,
 	headSha: string = PR_ARTIFACT_HEAD_SHA,
-	options: { skipTriggerEvaluation?: boolean } = {},
+	options: {
+		skipTriggerEvaluation?: boolean;
+		/** Severity the base lanes' `[CANDIDATE]` rows declare. Default HIGH. */
+		candidateSeverity?: 'INFO' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+		/** Override lane 0's generated candidate_id (sentinel-spoofing tests). */
+		firstCandidateId?: string;
+		/**
+		 * Base lanes emit a per-lane `[CLEAN]` attestation instead of a candidate
+		 * row, so discovery finds NOTHING and the inventory collapses to the
+		 * mechanically derived `CLEAN-REVIEW` sentinel.
+		 */
+		zeroCandidates?: boolean;
+	} = {},
 ): Promise<void> {
 	await activatePrWorkflow(directory, sessionID, 'PR_REVIEW', {
 		prHeadSha: headSha,
@@ -139,6 +228,11 @@ export async function establishPrReviewPrerequisites(
 		'base-all',
 		'swarm-pr-review:base',
 		baseLanes,
+		{
+			candidateSeverity: options.candidateSeverity,
+			cleanPerLane: options.zeroCandidates,
+			firstCandidateId: options.firstCandidateId,
+		},
 	);
 	for (const [
 		index,
@@ -191,7 +285,7 @@ export function reviewedRow(
 	classification: string,
 	severity: string,
 ): string {
-	return `[REVIEWED] | ${id} | ${classification} | STRUCTURALLY_PROVEN | ${severity} | YES | file.ts:1 | rationale text | probe output | reviewer`;
+	return `[REVIEWED] | ${id} | ${classification} | STRUCTURALLY_PROVEN | ${severity} | YES | file.ts:1 | rationale text | probe output | reviewer | ${fixtureRiskImpact(classification, severity)} | `;
 }
 
 export async function settleReviewerPhase(
@@ -262,13 +356,15 @@ export type ArtifactRecord = {
 		| 'suppress_with_reason'
 		| 'handoff_to_feedback';
 	severity?: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO' | 'NONE';
+	risk_impact?: 'ORDINARY' | 'HIGH_IMPACT' | 'UNKNOWN';
+	risk_tags?: string[];
 };
 
 export function artifactRecord(
 	id: string,
 	status: ArtifactRecord['status'],
 	nextAction: ArtifactRecord['next_action'],
-	severity?: ArtifactRecord['severity'],
+	severity: NonNullable<ArtifactRecord['severity']>,
 ): ArtifactRecord {
 	return {
 		finding_id: id,
@@ -276,7 +372,42 @@ export function artifactRecord(
 		file_line: 'src/index.ts:1',
 		evidence: 'validator-errors fixture evidence',
 		next_action: nextAction,
-		...(severity ? { severity } : {}),
+		severity,
+		// A CONFIRMED record must carry the typed risk metadata of the reviewer
+		// row it projects (issue #2383 write boundary); the values mirror
+		// `reviewedRow` so records and rows stay coherent.
+		...(status === 'CONFIRMED'
+			? {
+					risk_impact: fixtureRiskImpact('CONFIRMED', severity),
+					risk_tags: [] as string[],
+				}
+			: {}),
+	};
+}
+
+export function artifactRecordWithoutSeverity(
+	id: string,
+	status: ArtifactRecord['status'],
+	nextAction: ArtifactRecord['next_action'],
+	/**
+	 * Severity of the authoritative reviewer row, used ONLY to derive the typed
+	 * risk metadata a CONFIRMED record must carry (issue #2383). The record
+	 * itself still omits `severity` — that is the condition under test.
+	 */
+	severityHint?: NonNullable<ArtifactRecord['severity']>,
+): ArtifactRecord {
+	return {
+		finding_id: id,
+		status,
+		file_line: 'src/index.ts:1',
+		evidence: 'validator-errors fixture evidence',
+		next_action: nextAction,
+		...(status === 'CONFIRMED'
+			? {
+					risk_impact: fixtureRiskImpact('CONFIRMED', severityHint ?? 'LOW'),
+					risk_tags: [] as string[],
+				}
+			: {}),
 	};
 }
 
@@ -303,7 +434,11 @@ export async function rejectionMessage(
 	promise: Promise<string>,
 ): Promise<string> {
 	try {
-		await promise;
+		const result = JSON.parse(await promise) as {
+			success?: boolean;
+			message?: string;
+		};
+		if (result.success === false && result.message) return result.message;
 	} catch (error) {
 		return error instanceof Error ? error.message : String(error);
 	}

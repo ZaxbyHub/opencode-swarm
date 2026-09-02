@@ -29,7 +29,7 @@ const BASE_IDS = PR_REVIEW_BASE_DIMENSION_IDS.map(
 	(_dimension, index) => `C-${index}`,
 );
 const CANDIDATE_HEADER =
-	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 
 const reviewed = (
 	ids: readonly string[],
@@ -112,7 +112,7 @@ async function establishFiftyItemInventory(): Promise<string[]> {
 			CANDIDATE_HEADER,
 			...Array.from({ length: 45 }, (_value, index) => {
 				const id = `I-${String(index + 1).padStart(2, '0')}`;
-				return `${id} | ${dimension} | HIGH | correctness | file.ts:${index + 1} | claim ${id} | evidence ${id} | impact ${id} | HIGH`;
+				return `${id} | ${dimension} | HIGH | correctness | file.ts:${index + 1} | claim ${id} | evidence ${id} | impact ${id} | HIGH | ORDINARY | `;
 			}),
 		].join('\n'),
 	});
@@ -184,7 +184,7 @@ describe('pr-workflow-gate item-keyed reviewer/critic coherence', () => {
 			[
 				{
 					laneId: 'rv-new-a',
-					rows: reviewed([BASE_IDS[0]], 'DISPROVED', 'LOW'),
+					rows: reviewed([BASE_IDS[0]], 'DISPROVED', 'NONE'),
 				},
 			],
 		);
@@ -202,7 +202,7 @@ describe('pr-workflow-gate item-keyed reviewer/critic coherence', () => {
 			laneId: 'rv-new-a',
 			workflowLane: 'rv-new-a',
 			classification: 'DISPROVED',
-			severity: 'LOW',
+			severity: 'NONE',
 		});
 		expect(composed.claims.get(BASE_IDS[1])).toMatchObject({
 			batchId: 'rv-old',
@@ -210,7 +210,7 @@ describe('pr-workflow-gate item-keyed reviewer/critic coherence', () => {
 			workflowLane: 'rv-old-a',
 			classification: 'CONFIRMED',
 		});
-		// Derivation must pick the same winner: C-0 is DISPROVED/LOW, so it is
+		// Derivation must pick the same winner: C-0 is DISPROVED/NONE, so it is
 		// out of the critic inventory while its five siblings stay in.
 		await expect(
 			recordPrReviewValidationBatch(
@@ -270,7 +270,9 @@ describe('pr-workflow-gate item-keyed reviewer/critic coherence', () => {
 			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer'),
 		).resolves.toMatchObject({ mode: 'PR_REVIEW' });
 		await expect(
-			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA),
+			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA, {
+				reportVerdict: 'APPROVE',
+			}),
 		).rejects.toThrow(`require critic coverage for: ${BASE_IDS.join(', ')}`);
 	});
 
@@ -279,7 +281,7 @@ describe('pr-workflow-gate item-keyed reviewer/critic coherence', () => {
 		const challenged = BASE_IDS.slice(0, 3);
 		const suppressed = BASE_IDS.slice(3);
 		const rows = (rationale: string) =>
-			`${reviewed(challenged, 'CONFIRMED', 'HIGH', rationale)}\n${reviewed(suppressed, 'DISPROVED', 'LOW')}`;
+			`${reviewed(challenged, 'CONFIRMED', 'HIGH', rationale)}\n${reviewed(suppressed, 'DISPROVED', 'NONE')}`;
 		await reviewerBatch(
 			'rv-1',
 			[{ laneId: 'rv-1-a', reviewItemIds: BASE_IDS }],
@@ -317,7 +319,7 @@ describe('pr-workflow-gate item-keyed reviewer/critic coherence', () => {
 			[
 				{
 					laneId: 'rv-2-a',
-					rows: `${reviewed([challenged[0]], 'CONFIRMED', 'HIGH', 'revised root cause')}\n${reviewed(challenged.slice(1))}\n${reviewed(suppressed, 'DISPROVED', 'LOW')}`,
+					rows: `${reviewed([challenged[0]], 'CONFIRMED', 'HIGH', 'revised root cause')}\n${reviewed(challenged.slice(1))}\n${reviewed(suppressed, 'DISPROVED', 'NONE')}`,
 				},
 			],
 		);
@@ -416,7 +418,7 @@ describe('pr-workflow-gate item-keyed reviewer/critic coherence', () => {
 			[
 				{
 					laneId: 'rv-modern-a',
-					rows: reviewed(halves[0], 'DISPROVED', 'LOW'),
+					rows: reviewed(halves[0], 'DISPROVED', 'NONE'),
 				},
 			],
 		);

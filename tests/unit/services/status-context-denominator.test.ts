@@ -25,6 +25,7 @@ import {
 } from '../../../src/services/status-service';
 import {
 	resetSwarmState,
+	setFinalPromptPressure,
 	setSessionBudget,
 	swarmState,
 } from '../../../src/state';
@@ -46,9 +47,14 @@ function baseStatus(overrides: Partial<StatusData> = {}): StatusData {
 	};
 }
 
-/** Pulls the `**Context**: …` line out of the rendered markdown. */
+/** Pulls the injection-footprint line out of the rendered markdown.
+ * (#2107 §3 migration: the legacy `**Context**:` label was renamed — it measures the per-turn swarm injection footprint, an intermediate
+ * measurement, not total prompt pressure. The truthful final pressure
+ * gets its own line, tested below.) */
 function contextLine(markdown: string): string | undefined {
-	return markdown.split('\n').find((l) => l.startsWith('**Context**:'));
+	return markdown
+		.split('\n')
+		.find((l) => l.startsWith('**Swarm injection footprint**:'));
 }
 
 describe('formatStatusMarkdown — context denominator', () => {
@@ -59,13 +65,15 @@ describe('formatStatusMarkdown — context denominator', () => {
 			),
 		);
 		expect(line).toBe(
-			'**Context**: 12.5% used (est. 125,000 / 1,000,000 tokens)',
+			'**Swarm injection footprint**: 12.5% of model window (intermediate measurement; est. 125,000 / 1,000,000 tokens)',
 		);
 		// The pre-fix render would have said `5,000 / 40,000` for the same pct —
 		// 40000 was `DEFAULT_CONTEXT_BUDGET_CONFIG.budgetTokens` on main. Pin the
 		// real pre-fix denominator, not the 128000 that was never on this path.
 		expect(line).not.toContain('40,000');
 		expect(line).not.toContain('128,000');
+		// (#2107) the label no longer presents this pct as window usage.
+		expect(line).toContain('intermediate measurement');
 	});
 
 	test('renders the estimate against a 200k Copilot window', () => {
@@ -75,7 +83,9 @@ describe('formatStatusMarkdown — context denominator', () => {
 					baseStatus({ contextBudgetPct: 50, contextBudgetTokens: 200000 }),
 				),
 			),
-		).toBe('**Context**: 50.0% used (est. 100,000 / 200,000 tokens)');
+		).toBe(
+			'**Swarm injection footprint**: 50.0% of model window (intermediate measurement; est. 100,000 / 200,000 tokens)',
+		);
 	});
 
 	test('honours a user-configured working budget smaller than the window', () => {
@@ -85,7 +95,9 @@ describe('formatStatusMarkdown — context denominator', () => {
 					baseStatus({ contextBudgetPct: 80, contextBudgetTokens: 60000 }),
 				),
 			),
-		).toBe('**Context**: 80.0% used (est. 48,000 / 60,000 tokens)');
+		).toBe(
+			'**Swarm injection footprint**: 80.0% of model window (intermediate measurement; est. 48,000 / 60,000 tokens)',
+		);
 	});
 
 	test('omits the token estimate entirely when the denominator is unknown', () => {
@@ -98,7 +110,9 @@ describe('formatStatusMarkdown — context denominator', () => {
 					baseStatus({ contextBudgetPct: 42.5, contextBudgetTokens }),
 				),
 			);
-			expect(line).toBe('**Context**: 42.5% used');
+			expect(line).toBe(
+				'**Swarm injection footprint**: 42.5% of model window (intermediate measurement)',
+			);
 		}
 	});
 
@@ -106,6 +120,27 @@ describe('formatStatusMarkdown — context denominator', () => {
 		expect(
 			contextLine(formatStatusMarkdown(baseStatus({ contextBudgetPct: null }))),
 		).toBeUndefined();
+	});
+});
+
+describe('formatStatusMarkdown — final prompt pressure line (#2107 §3)', () => {
+	test('renders the final-pressure snapshot when one exists', () => {
+		setFinalPromptPressure('s-final', {
+			pct: 41.2,
+			usedTokens: 82_400,
+			limitTokens: 200_000,
+			estimatorSource: 'canonical char→token heuristic (0.33 tok/char)',
+			providerReported: false,
+		});
+		const line = formatStatusMarkdown(
+			baseStatus({ contextBudgetPct: 12.5, contextBudgetTokens: 200_000 }),
+		)
+			.split('\n')
+			.find((l) => l.startsWith('**Prompt pressure (final)**:'));
+		expect(line).toBeDefined();
+		expect(line).toContain('41.2% estimated');
+		expect(line).toContain('82,400 / 200,000');
+		expect(line).toContain('0.33 tok/char');
 	});
 });
 
@@ -129,7 +164,7 @@ describe('getStatusData — denominator is carried from swarmState', () => {
 		expect(status.contextBudgetPct).toBe(37.5);
 		expect(status.contextBudgetTokens).toBe(200000);
 		expect(contextLine(formatStatusMarkdown(status))).toBe(
-			'**Context**: 37.5% used (est. 75,000 / 200,000 tokens)',
+			'**Swarm injection footprint**: 37.5% of model window (intermediate measurement; est. 75,000 / 200,000 tokens)',
 		);
 	});
 

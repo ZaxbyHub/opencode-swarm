@@ -34,6 +34,12 @@ import {
 } from '../agents/explorer.js';
 import { getGlobalEventBus } from '../background/event-bus.js';
 import { getCanonicalAgentRole } from '../config/schema.js';
+import {
+	appendCoreEventSync,
+	appendCoreEventsSync,
+	readCoreEvents,
+} from '../events/core-events.js';
+import { observeCuratorCompliance } from '../health/learning-health';
 import { authorizeCuration } from '../knowledge/curation-policy.js';
 import { alreadyCuratedThisGeneration } from '../knowledge/scan-cursor.js';
 import { loadPlanJsonOnly } from '../plan/manager.js';
@@ -100,7 +106,18 @@ import {
 	validateLesson,
 } from './knowledge-validator.js';
 import { writeArchiveTombstoneAndInvalidateSkills } from './skill-invalidator.js';
-import { readSkillUsageEntries } from './skill-usage-log.js';
+import {
+	isSkillWindowTrustworthy,
+	readSkillUsageEntries,
+	readSkillUsageEntriesWithCoverage,
+	type SkillUsageReadCoverage,
+} from './skill-usage-log.js';
+import {
+	acquireSkillUsageLock,
+	loadPendingDocument,
+	releaseSkillUsageLock,
+	savePendingDocument,
+} from './skill-usage-pending.js';
 import { readSwarmFileAsync, validateSwarmPath } from './utils.js';
 
 /**
@@ -141,7 +158,17 @@ export const _internals = {
 	checkPhaseCompliance,
 	normalizeAgentName,
 	autoRetireSkills,
+	observeCuratorCompliance,
+	/**
+	 * Retained deliberately (issue #2038 §7). The three curator decision sites
+	 * now read through `readSkillUsageEntriesWithCoverage` because a coverage
+	 * verdict and the entries it describes must come from ONE read, but this
+	 * member keeps the `typeof readSkillUsageEntries` seam contract intact for
+	 * existing callers and stubs rather than changing an exported symbol's type.
+	 */
 	readSkillUsageEntries,
+	readSkillUsageEntriesWithCoverage,
+	recordCuratorSkips,
 	listSkills,
 	parseDraftFrontmatter,
 	retireOrMarkStale,
@@ -298,6 +325,109 @@ function buildDigestFromPhaseDigests(digests: PhaseDigestEntry[]): string {
 		.join('\n\n');
 }
 
+// ============================================================================
+// Per-skill usage-window coverage gate (issue #2038 §8 / BLK-8)
+// ============================================================================
+
+/**
+ * Whether a usage-derived retire/revise decision may be taken for one skill.
+ *
+ * **This is per-skill, not a global kill switch.** An earlier draft of the plan
+ * had "coverage truncated ⇒ never retire". That is wrong: compaction runs on a
+ * cadence, so `coverage.complete` flips to false early in a project's life and
+ * stays false forever, which would silently disable skill retirement altogether
+ * and revert #1770 / #1822. The rule that actually holds is:
+ *
+ *   (i)  global coverage is COMPLETE — then the retained window is the whole
+ *        history, the pre-existing #1770/#1822 rule (`violationRate > 0.3`)
+ *        applies unchanged, and this gate adds no condition of its own; OR
+ *   (ii) coverage is incomplete AND the skill's retained sample is at least
+ *        `curatorMinSample` (10) AND is at least the most-recent
+ *        `floorPerSkill` (20) entries that retention guarantees every surviving
+ *        skill — and 20 >= 10, so a floor-sized window is always a usable sample.
+ *
+ * The minimum-sample floor deliberately applies ONLY to the incomplete case
+ * (issue #2038 implementation review, F2): requiring 10 entries on a complete
+ * window would silently narrow shipped retirement behavior for reasons that have
+ * nothing to do with compaction, which is the only thing this gate judges.
+ *
+ * Both clauses live in {@link isSkillWindowTrustworthy} so the curator and the
+ * storage layer cannot drift apart on the constants, and all three curator sites
+ * go through this one helper so they cannot drift apart from each other.
+ *
+ * The hazard is concrete rather than theoretical. `evaluatePromotedExternalStaleness`
+ * (`src/services/skill-optimizer/promoted-external-staleness.ts:160-173`)
+ * retires on `applied === 0 && totalNegative >= 3`, or on
+ * `totalNegative / applied >= 4`. A truncated window that happened to evict the
+ * compliant entries drives `applied` to 0 while three violated entries survive —
+ * a retirement caused by compaction, not by the skill.
+ *
+ * NOTE on the matching asymmetry: the sample counted here comes from the
+ * curator's fuzzy skill-path match (`file:` stripped, separators normalized,
+ * bidirectional suffix match), which is strictly more permissive than the
+ * storage layer's retention key. That is pre-existing — `violationRate` is
+ * computed over the same fuzzy set — so the gate inherits the behavior rather
+ * than introducing it.
+ */
+function isUsageWindowUsable(
+	coverage: SkillUsageReadCoverage,
+	sampleSize: number,
+): boolean {
+	return isSkillWindowTrustworthy(coverage, sampleSize);
+}
+
+/**
+ * Fold one curator pass's skipped decisions into the durable `curator_skipped`
+ * counter in `.swarm/skill-usage-pending.json`.
+ *
+ * Called ONCE per site with the pass total — never inside the per-skill loop,
+ * because it takes the skill-usage lock and a lock per skill would be O(skills)
+ * synchronous I/O on the curator path.
+ *
+ * Two deliberate non-behaviors:
+ *  - **No health emit.** `emitSkillUsageHealth`'s trigger union has no curator
+ *    value. `curator_skipped` is a lifetime counter, so the next compaction or
+ *    consumption emit carries it; inventing a trigger here would widen a
+ *    contract this change does not own.
+ *  - **Lock failure drops the write.** Acquisition is non-blocking by design
+ *    (approved plan §9): maintenance is skipped, never forced. An observability
+ *    counter must never be the thing that blocks a curator pass.
+ *
+ * The `.swarm` guard is not defensiveness: the counter lives inside the store,
+ * and when the store directory does not exist there is no usage log either, so
+ * there is nothing to count into and nothing should be created on the way.
+ *
+ * **Why this lock-taking path does not run the legacy migration.** Approved plan
+ * §6/BLK-13 says `needsMigration` is evaluated on first touch by any path that
+ * takes the lock. This one deliberately does not: `ensureMigrated` is private to
+ * `skill-usage-log.ts`, and it is benign to omit here because the document this
+ * writes keeps whatever `migrated` value it loaded — `false` for an un-migrated
+ * store — so the next `pruneSkillUsageLog` / `applySkillUsageFeedback` still
+ * migrates on its own first touch. This path can advance a counter; it can never
+ * mark a store migrated, and therefore can never strand one.
+ */
+function recordCuratorSkips(directory: string, skipped: number): void {
+	if (skipped <= 0) return;
+	try {
+		if (!fs.existsSync(path.join(directory, '.swarm'))) return;
+	} catch {
+		return;
+	}
+	const handle = acquireSkillUsageLock(directory);
+	if (!handle) return;
+	try {
+		const { doc } = loadPendingDocument(directory);
+		doc.counters.curator_skipped += skipped;
+		savePendingDocument(directory, doc);
+	} catch (err) {
+		logger.warn(
+			`[curator] could not record curator_skipped: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	} finally {
+		releaseSkillUsageLock(handle);
+	}
+}
+
 /**
  * Auto-retire generated skills whose violation rate exceeds 30% or
  * whose source knowledge entries are all archived.
@@ -316,8 +446,13 @@ async function autoRetireSkills(
 	const observations: string[] = [];
 	try {
 		const skillListResult = await _internals.listSkills(directory);
-		const usageEntries = _internals.readSkillUsageEntries(directory);
+		// One read carrying its own coverage verdict (issue #2038 §7): the
+		// window and the statement about the window must not come from two
+		// different reads.
+		const { entries: usageEntries, coverage } =
+			_internals.readSkillUsageEntriesWithCoverage(directory);
 		const allArchivedIds = await _internals.getArchivedKnowledgeIds(directory);
+		let skippedForCoverage = 0;
 
 		for (const active of skillListResult.active) {
 			if (excludeSlugs?.has(active.slug)) continue;
@@ -355,11 +490,27 @@ async function autoRetireSkills(
 			// Skill retirement is therefore a downstream consequence of an
 			// already-authorized knowledge action, never an independent bypass.
 			if (violationRate > 0.3) {
-				const reason = `auto-retire: violation rate ${(violationRate * 100).toFixed(0)}% exceeds 30% threshold`;
-				await _internals.retireSkill(directory, active.slug, reason);
-				observations.push(`Skill '${active.slug}' auto-retired: ${reason}`);
-				logger.warn(`[curator] ${observations[observations.length - 1]}`);
-				continue;
+				// Issue #2038 §8: the retire decision is usage-derived, so it may
+				// only be taken on a window that can support it. The gate is placed
+				// INSIDE the positive branch on purpose — a skill whose window is
+				// untrustworthy but whose rate is under the threshold was never
+				// going to be retired, and counting that as a "skipped decision"
+				// would make `curator_skipped` a per-phase headcount instead of a
+				// measure of suppressed retirements.
+				if (!isUsageWindowUsable(coverage, skillUsage.length)) {
+					skippedForCoverage += 1;
+					logger.warn(
+						`[curator] skill '${active.slug}' auto-retire skipped: retained usage window (${skillUsage.length} entries) cannot support the decision`,
+					);
+					// Deliberately NOT `continue` — the archived-source branch below
+					// reads no usage entries and is unaffected by coverage.
+				} else {
+					const reason = `auto-retire: violation rate ${(violationRate * 100).toFixed(0)}% exceeds 30% threshold`;
+					await _internals.retireSkill(directory, active.slug, reason);
+					observations.push(`Skill '${active.slug}' auto-retired: ${reason}`);
+					logger.warn(`[curator] ${observations[observations.length - 1]}`);
+					continue;
+				}
 			}
 
 			let archivedSourceMatched = false;
@@ -396,6 +547,9 @@ async function autoRetireSkills(
 				}
 			}
 		}
+
+		// One flush for the whole pass, never one per skill.
+		_internals.recordCuratorSkips(directory, skippedForCoverage);
 	} catch (autoRetireErr) {
 		// Non-blocking — log but don't fail curator
 		logger.warn(
@@ -1530,14 +1684,30 @@ export async function runCuratorPhase(
 			};
 		}
 
-		// 2. Read events.jsonl filtered to this phase window
-		const eventsJsonlContent = await readSwarmFileAsync(
-			directory,
-			'events.jsonl',
-		);
-		const phaseEvents = eventsJsonlContent
-			? _internals.filterPhaseEvents(eventsJsonlContent, phase)
-			: [];
+		// 2. Read the bounded core event window filtered to this phase
+		// (issue #2039: no whole-file reads; compacted history beyond the
+		// window is disclosed, never silently treated as the phase record).
+		const eventsWindow = readCoreEvents(directory);
+		const phaseEvents =
+			eventsWindow.text.length > 0
+				? _internals.filterPhaseEvents(eventsWindow.text, phase)
+				: [];
+		if (eventsWindow.coverage === 'truncated') {
+			// Disclosure without a PhaseDigestEntry schema change: a
+			// best-effort curator audit line records that this digest's
+			// phase events came from a truncated window.
+			try {
+				appendCoreEventSync(directory, {
+					timestamp: new Date().toISOString(),
+					event: 'curator_skipped',
+					scope: 'phase_digest',
+					phase,
+					reason: 'events_window_truncated',
+				});
+			} catch {
+				// disclosure is best-effort; the digest itself still builds
+			}
+		}
 
 		// 3. Read context.md decisions
 		const contextMd = await readSwarmFileAsync(directory, 'context.md');
@@ -1728,6 +1898,20 @@ export async function runCuratorPhase(
 		const sessionId = `session-${Date.now()}`;
 		const now = new Date().toISOString();
 
+		// Learning-health participation feed (#2044): once per CURATOR_PHASE run,
+		// with the complete compliance observations and the agents that DID
+		// participate in hand. The alarm's structural-zero guard requires two
+		// gap facts in the window before raising, so a single review window can
+		// never raise on absence of eligible opportunity alone.
+		_internals.observeCuratorCompliance({
+			directory,
+			phase,
+			gapTypes: complianceObservations.map((observation) => observation.type),
+			agentsUsed: Array.isArray(phaseDigest.agents_used)
+				? phaseDigest.agents_used.map(String)
+				: [],
+		});
+
 		const summaryUpdated = await _internals.mergeCuratorPhaseSummary(
 			directory,
 			{
@@ -1763,17 +1947,28 @@ export async function runCuratorPhase(
 			}
 		}
 
-		// 8. Write compliance observations to events.jsonl as curator_compliance events
-		const eventsPath = path.join(directory, '.swarm', 'events.jsonl');
-		for (const obs of complianceObservations) {
-			await appendKnowledge(eventsPath, {
-				type: 'curator_compliance',
-				timestamp: obs.timestamp,
-				phase: obs.phase,
-				observation_type: obs.type,
-				severity: obs.severity,
-				description: obs.description,
-			});
+		// 8. Write compliance observations to the core event store as
+		// curator_compliance events (issue #2039 seam; per-line semantics and
+		// serialized shape preserved — appendKnowledge's proper-lockfile
+		// path remains for the knowledge store only).
+		try {
+			appendCoreEventsSync(
+				directory,
+				complianceObservations.map((obs) => ({
+					type: 'curator_compliance',
+					timestamp: obs.timestamp,
+					phase: obs.phase,
+					observation_type: obs.type,
+					severity: obs.severity,
+					description: obs.description,
+				})),
+			);
+		} catch (err) {
+			logger.warn(
+				`[curator] failed to append compliance events: ${
+					err instanceof Error ? err.message : String(err)
+				}`,
+			);
 		}
 
 		// v2: optional skill generation when curator returns skill_candidates and
@@ -1815,8 +2010,10 @@ export async function runCuratorPhase(
 		const revisedSlugs = new Set<string>();
 		try {
 			const skillListResult = await _internals.listSkills(directory);
-			const usageEntries = _internals.readSkillUsageEntries(directory);
+			const { entries: usageEntries, coverage } =
+				_internals.readSkillUsageEntriesWithCoverage(directory);
 			let revisionCallsThisPhase = 0;
+			let skippedForCoverage = 0;
 
 			for (const active of skillListResult.active) {
 				if (revisionCallsThisPhase >= MAX_REVISION_CALLS_PER_PHASE) break;
@@ -1847,6 +2044,26 @@ export async function runCuratorPhase(
 					const fm = _internals.parseDraftFrontmatter(content);
 					if (fm && fm.skillOrigin === 'promoted_external') continue;
 
+					// Issue #2038 §8, same rule as the auto-retire and
+					// promoted-external sites: a revision is a usage-derived
+					// decision, so the retained window must be able to support it.
+					//
+					// Placed AFTER the `promoted_external` exclusion, not before:
+					// a promoted-external skill was never going to be revised here
+					// (it exits at the line above and is handled by the staleness
+					// pass instead), so gating it first would count a decision that
+					// was never on the table and would let one skill contribute a
+					// phantom skip here on top of a real one at the staleness site.
+					// The cost is the `readFileAsync` above on the skip path, paid
+					// only for skills already inside the 15–30% violation band.
+					if (!isUsageWindowUsable(coverage, skillUsage.length)) {
+						skippedForCoverage += 1;
+						logger.warn(
+							`[curator] skill '${active.slug}' revision skipped: retained usage window (${skillUsage.length} entries) cannot support the decision`,
+						);
+						continue;
+					}
+
 					const currentVersion = fm?.version ?? 1;
 					const violationContexts: ViolationContext[] = skillUsage
 						.filter((e) => e.complianceVerdict === 'violated')
@@ -1875,6 +2092,8 @@ export async function runCuratorPhase(
 					if (result.quotaConsumed) revisionCallsThisPhase++;
 				}
 			}
+
+			_internals.recordCuratorSkips(directory, skippedForCoverage);
 		} catch (revisionErr) {
 			logger.warn(
 				`[curator] skill revision check failed: ${revisionErr instanceof Error ? revisionErr.message : String(revisionErr)}`,
@@ -1891,8 +2110,10 @@ export async function runCuratorPhase(
 		// is unchanged.
 		try {
 			const peSkillList = await _internals.listSkills(directory);
-			const peUsageEntries = _internals.readSkillUsageEntries(directory);
+			const { entries: peUsageEntries, coverage: peCoverage } =
+				_internals.readSkillUsageEntriesWithCoverage(directory);
 			const peRetirementMinAgeDays = 60; // default floor; configurable via skill_opt.retirement_min_age_days
+			let skippedForCoverage = 0;
 			for (const active of peSkillList.active) {
 				const content = await _internals.readFileAsync(active.path, 'utf-8');
 				const fm = _internals.parseDraftFrontmatter(content);
@@ -1959,7 +2180,25 @@ export async function runCuratorPhase(
 					}
 				}
 				const decision = evaluatePromotedExternalStaleness(input);
-				if (decision.action === 'retire') {
+				// Issue #2038 §8. The gate is on the RETIRE action, not on the
+				// evaluation: `evaluatePromotedExternalStaleness` is pure over its
+				// input and its 'regenerate' verdict comes from `sourceChanged`
+				// (knowledge `updated_at` vs skill mtime), which is independent of
+				// the retained usage window. Gating the whole call would suppress
+				// source-drift detection, a regression well beyond this fix.
+				//
+				// This is the site the hazard was verified at: the evaluator retires
+				// on `applied === 0 && totalNegative >= 3`, and a truncated window
+				// that evicted the compliant entries produces exactly that shape.
+				if (
+					decision.action === 'retire' &&
+					!isUsageWindowUsable(peCoverage, skillUsage.length)
+				) {
+					skippedForCoverage += 1;
+					logger.warn(
+						`[curator] promoted-external skill '${active.slug}' retirement skipped: retained usage window (${skillUsage.length} entries) cannot support the decision`,
+					);
+				} else if (decision.action === 'retire') {
 					await retireSkill(
 						directory,
 						active.slug,
@@ -1978,6 +2217,8 @@ export async function runCuratorPhase(
 				// 'regenerate' is advisory here — the curator does not auto-regenerate
 				// promoted-external skills (the user re-runs external discovery). Logged only.
 			}
+
+			_internals.recordCuratorSkips(directory, skippedForCoverage);
 		} catch (peErr) {
 			logger.warn(
 				`[curator] promoted-external staleness check failed: ${peErr instanceof Error ? peErr.message : String(peErr)}`,

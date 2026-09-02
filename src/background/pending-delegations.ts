@@ -41,16 +41,33 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
-import { withEvidenceLock } from '../evidence/lock.js';
+import {
+	EvidenceLockTimeoutError,
+	withEvidenceLock,
+} from '../evidence/lock.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { bunWrite } from '../utils/bun-compat.js';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import * as logger from '../utils/logger.js';
 import {
+	appendDelegationMaintenanceObservation,
 	DelegationCheckpointAuditSchema,
 	type DelegationCheckpointAuditSummary,
+	type DelegationMaintenanceFact,
 	readDelegationHealthArtifact,
 	writeDelegationHealthArtifact,
 } from './delegation-health.js';
+import {
+	encodePrReviewCollectionReceiptShedMarker,
+	PR_REVIEW_COLLECTION_RECEIPT_PREFIX,
+	PR_REVIEW_COLLECTION_RECEIPT_SHED_PREFIX,
+	parsePrReviewCollectionReceiptFooter,
+	parsePrReviewCollectionReceiptShedMarker,
+} from './pr-review-collection-receipt.js';
+import {
+	type PrReviewResultReceipt,
+	PrReviewResultReceiptSchema,
+} from './pr-review-contract.js';
 
 export const BACKGROUND_DELEGATIONS_FILE = 'background-delegations.jsonl';
 export const BACKGROUND_DELEGATION_FALLBACK_DIR =
@@ -65,6 +82,8 @@ export const MAX_LIVE_BACKGROUND_FALLBACKS = 256;
 export const MAX_LIVE_BACKGROUND_CODER_RESERVATIONS = 256;
 export const MAX_BACKGROUND_OBSERVED_FILES = 5_000;
 export const MAX_BACKGROUND_ADVISORY_CHARS = 4_000;
+export const LEGACY_CODER_SETTLEMENT_PENDING_ADVISORY_MARKER =
+	'legacy coder settlement transfer is pending';
 const MAX_BACKGROUND_DELEGATION_GENERATION = 1_000_000;
 
 /** Strict recovery bound for the ledger/tail (issue #2034: unchanged guard). */
@@ -73,6 +92,8 @@ export { MAX_RECOVERY_LEDGER_BYTES } from './delegation-health.js';
 import { MAX_RECOVERY_LEDGER_BYTES } from './delegation-health.js';
 
 const MAX_RECOVERY_FALLBACK_BYTES = 1024 * 1024;
+const MAX_TRACKED_LENIENT_LEDGER_SIGNALS = 32;
+const LENIENT_LEDGER_SIGNAL_SOURCE = 'lenient-read';
 
 /**
  * Compaction watermarks (issue #2034). Auto-compaction fires above the high
@@ -83,6 +104,8 @@ export const DELEGATION_COMPACTION_LOW_WATER_BYTES = 256 * 1024;
 export const DELEGATION_COMPACTION_HIGH_WATER_BYTES = 1024 * 1024;
 /** Hard validation bound for the checkpoint file on every read. */
 export const MAX_CHECKPOINT_BYTES = 2 * 1024 * 1024;
+/** Leave room for final audit/checksum growth beyond the selection estimate. */
+const CHECKPOINT_SELECTION_RESERVE_BYTES = 64 * 1024;
 /** Hard validation bound for live (non-summary) records in a checkpoint. */
 export const MAX_CHECKPOINT_RECORDS = 2_048;
 /**
@@ -127,6 +150,34 @@ const INGESTION_CLAIM_LEASE_MS = 30_000;
 
 /** An abandoned ingestion lease may be reclaimed after this bounded interval. */
 export const BACKGROUND_INGESTION_LEASE_MS = 30_000;
+
+/**
+ * Coder-reservation lease bounds (issue #2104). The lease is a liveness hint,
+ * never release authority: expiry only triggers corroborated reconciliation.
+ * `leaseMs` inputs are clamped into [MIN, MAX]. Documented default 15 min,
+ * hard maximum 60 min, floor 60 s.
+ */
+export const BACKGROUND_CODER_RESERVATION_LEASE_MS = 15 * 60_000;
+export const BACKGROUND_CODER_RESERVATION_LEASE_MAX_MS = 60 * 60_000;
+export const BACKGROUND_CODER_RESERVATION_LEASE_MIN_MS = 60_000;
+
+function clampReservationLeaseMs(leaseMs: number | undefined): number {
+	if (leaseMs === undefined) return BACKGROUND_CODER_RESERVATION_LEASE_MS;
+	if (!Number.isFinite(leaseMs)) return BACKGROUND_CODER_RESERVATION_LEASE_MS;
+	return Math.min(
+		Math.max(Math.round(leaseMs), BACKGROUND_CODER_RESERVATION_LEASE_MIN_MS),
+		BACKGROUND_CODER_RESERVATION_LEASE_MAX_MS,
+	);
+}
+
+function isValidReservationGeneration(generation: number | undefined): boolean {
+	return (
+		generation === undefined ||
+		(Number.isInteger(generation) &&
+			generation >= 1 &&
+			generation <= MAX_BACKGROUND_DELEGATION_GENERATION)
+	);
+}
 
 /**
  * Canonical default staleness horizon for a tracked background delegation: a
@@ -180,7 +231,7 @@ export const DEFAULT_SWEEPABLE_DELEGATION_STATUSES: ReadonlySet<SweepableDelegat
 	new Set<SweepableDelegationStatus>(['pending', 'running', 'ingestion_error']);
 
 export interface BackgroundDelegationRecord {
-	schemaVersion: 1 | 2 | 3;
+	schemaVersion: 1 | 2 | 3 | 4;
 	/** Subagent session id from the dispatch envelope — the correlation key. */
 	correlationId: string;
 	/** Structured jobId from dispatch metadata when available, else null. */
@@ -215,6 +266,8 @@ export interface BackgroundDelegationRecord {
 	 * singleton lanes (legacy and tier-L dispatches).
 	 */
 	ownedWorkflowLanes?: string[];
+	/** Dispatch-time snapshot; absent legacy records keep transcript compatibility. */
+	prReviewLegacyTranscriptCompatibility?: boolean;
 	/** Canonical hash of prompt/provenance inputs captured at dispatch time. */
 	promptHash?: string;
 	/** Project/root provenance captured at dispatch time. */
@@ -235,6 +288,12 @@ export interface BackgroundDelegationRecord {
 	coderSettlement?: BackgroundCoderSettlement;
 	/** Durable parent advisory keyed by terminalResult.eventId. */
 	advisoryInbox?: BackgroundAdvisoryInboxEntry;
+	/** Exact legacy coder WAL transfer that still needs durable reconciliation. */
+	legacyCoderSettlementTransfer?: {
+		taskId: string;
+		transitionId: string;
+		updatedAt: number;
+	};
 	/** CAS marker for exactly one active ingestion attempt. */
 	ingestion?: BackgroundDelegationIngestion;
 	result?: BackgroundDelegationResult;
@@ -269,6 +328,13 @@ export interface BackgroundWorktreeDescriptor {
 	mergeStrategy: 'merge' | 'rebase' | 'cherry-pick';
 	laneIndex: number;
 	worktreeDir: string | null;
+	reservationId?: string;
+	generation?: number;
+	provisioningOwner?: {
+		reservationId: string;
+		generation: number;
+		branchName: string;
+	};
 }
 
 export interface BackgroundPromptSnapshot {
@@ -279,15 +345,49 @@ export interface BackgroundPromptSnapshot {
 }
 
 export type BackgroundDelegationRecoveryKind =
+	| 'legacy-verdict-row-recovery'
 	| 'parser-normalization'
 	| 'parser-row-recovery'
 	| 'truncated-preview-durable-artifact'
-	| 'transcript-incomplete-terminal-candidate';
+	| 'transcript-incomplete-terminal-candidate'
+	/**
+	 * A `[CLEAN]` attestation was discredited while the artifact's candidate rows
+	 * were retained. Distinct from `parser-normalization` (a text-shape repair by
+	 * `normalizeCandidateArtifact`) because nothing was repaired — an assertion
+	 * was dropped (issue #2279).
+	 */
+	| 'clean-attestation-salvaged';
 
 export interface BackgroundDelegationWorkflowLaneRecovery {
 	workflowLane: string;
 	kind: BackgroundDelegationRecoveryKind;
 	reason: string;
+}
+
+export type BackgroundDelegationWorkflowLaneFailureClass =
+	| 'contract'
+	| 'resource'
+	| 'deadline';
+
+/**
+ * Issue #2382: structured, bounded classification of the terminal error that
+ * settled a lane, captured from `classifyLaneTerminalError` at settle time so
+ * downstream consumers (the PR-review resilience circuit) can derive a typed
+ * provider-terminal signal from durable evidence instead of parsing the
+ * bounded display string in `error`.
+ *
+ * Deliberately carries NO message text: `error` remains the display surface.
+ * `kind` mirrors the SDK discriminator semantics (authoritative for the
+ * settled status); `category`/`statusCode`/`hostRetryable` are advisory
+ * provenance from `classifyProviderFailure` / `ApiError.data`.
+ */
+export interface BackgroundDelegationTerminalErrorClass {
+	kind: 'provider' | 'aborted' | 'output_length' | 'unknown';
+	/** Canonical `classifyProviderFailure` category (e.g. `provider.rate_limit`). */
+	category: string;
+	statusCode?: number;
+	/** `ApiError.data.isRetryable` — host-stated, not inferred. */
+	hostRetryable?: boolean;
 }
 
 export interface BackgroundDelegationResult {
@@ -302,6 +402,26 @@ export interface BackgroundDelegationResult {
 	outputArtifactError?: string;
 	transcriptIncomplete?: boolean;
 	messageCount?: number;
+	/**
+	 * Issue #2384: authoritative structured PR-review result receipt. Persisted
+	 * separately from transcript text so compaction and preview truncation can
+	 * never promote presentation-layer text into machine authority.
+	 */
+	prReviewResultReceipt?: import('./pr-review-contract.js').PrReviewResultReceipt;
+	/**
+	 * Durable failure provenance for a lane-atomic PR-workflow terminalization.
+	 * Optional because successful lanes and legacy terminal results have none.
+	 */
+	workflowLaneFailureClass?: BackgroundDelegationWorkflowLaneFailureClass;
+	/**
+	 * Issue #2382: typed terminal-error classification captured at settle time
+	 * (see {@link BackgroundDelegationTerminalErrorClass}). Optional because only
+	 * lanes settled from a real child run with a classified terminal error carry
+	 * it; successful, cancelled, stale, and legacy records have none. Present in
+	 * the `.strict()` ResultSchema below in the same edit — an undeclared field
+	 * here would make whole records invisible to `readDelegations`.
+	 */
+	terminalErrorClass?: BackgroundDelegationTerminalErrorClass;
 	/**
 	 * Workflow lanes whose discovery artifact was accepted only after repair — a
 	 * synthesized canonical header, or valid rows retained beside malformed ones.
@@ -392,6 +512,24 @@ export interface BackgroundCoderReservation {
 	callID: string;
 	state: 'reserved' | 'bound';
 	correlationId: string | null;
+	/**
+	 * Launch generation this reservation currently owns (issue #2104). New in
+	 * this schema revision: absent on legacy records and read as 1. Bind
+	 * couples the reservation to the delegation record's launch generation and
+	 * may only move it forward. No current dispatch path advances a record
+	 * past generation 1 (PR #2091 hydrates replays at the stored generation),
+	 * so the generation fences in bind/release/maintenance are currently
+	 * forward-looking defense-in-depth: they exist so a future
+	 * generation-advancing relaunch caller cannot have its reservation
+	 * released or rebound by an older attempt's terminal.
+	 */
+	generation?: number;
+	/**
+	 * Lease expiry (issue #2104): a liveness hint for maintenance, never
+	 * release authority by itself. Absent on legacy records, which stay
+	 * protected (only proven-terminal reconciliation may release them).
+	 */
+	leaseExpiresAt?: number;
 	createdAt: number;
 	updatedAt: number;
 }
@@ -400,10 +538,12 @@ const WorkflowLaneRecoverySchema = z
 	.object({
 		workflowLane: z.string(),
 		kind: z.enum([
+			'legacy-verdict-row-recovery',
 			'parser-normalization',
 			'parser-row-recovery',
 			'truncated-preview-durable-artifact',
 			'transcript-incomplete-terminal-candidate',
+			'clean-attestation-salvaged',
 		]),
 		reason: z.string(),
 	})
@@ -422,6 +562,21 @@ const ResultSchema = z
 		outputArtifactError: z.string().optional(),
 		transcriptIncomplete: z.boolean().optional(),
 		messageCount: z.number().optional(),
+		prReviewResultReceipt: PrReviewResultReceiptSchema.optional(),
+		workflowLaneFailureClass: z
+			.enum(['contract', 'resource', 'deadline'])
+			.optional(),
+		// Issue #2382: must be declared here (schema is .strict()) — see the
+		// interface comment and the parity guard below this schema.
+		terminalErrorClass: z
+			.object({
+				kind: z.enum(['provider', 'aborted', 'output_length', 'unknown']),
+				category: z.string().min(1).max(128),
+				statusCode: z.number().int().optional(),
+				hostRetryable: z.boolean().optional(),
+			})
+			.strict()
+			.optional(),
 		// Must be declared here: this schema is .strict() and readDelegations
 		// safeParse-skips any record it rejects, so an undeclared field would make
 		// the entire terminal transition invisible to every reader — turning a
@@ -499,6 +654,16 @@ const WorktreeDescriptorSchema = z
 		mergeStrategy: z.enum(['merge', 'rebase', 'cherry-pick']),
 		laneIndex: z.number().int().nonnegative().max(255),
 		worktreeDir: z.string().min(1).max(4_096).nullable(),
+		reservationId: z.string().min(1).max(512).optional(),
+		generation: z.number().int().min(1).optional(),
+		provisioningOwner: z
+			.object({
+				reservationId: z.string().min(1).max(512),
+				generation: z.number().int().min(1),
+				branchName: z.string().min(1).max(1_024),
+			})
+			.strict()
+			.optional(),
 	})
 	.strict();
 
@@ -638,6 +803,13 @@ const BackgroundCoderReservationSchema = z
 		callID: z.string().min(1).max(256),
 		state: z.enum(['reserved', 'bound']),
 		correlationId: z.string().min(1).max(256).nullable(),
+		generation: z
+			.number()
+			.int()
+			.min(1)
+			.max(MAX_BACKGROUND_DELEGATION_GENERATION)
+			.optional(),
+		leaseExpiresAt: z.number().int().nonnegative().optional(),
 		createdAt: z.number().int().nonnegative(),
 		updatedAt: z.number().int().nonnegative(),
 	})
@@ -704,7 +876,12 @@ const PromptSchema = z
 
 const RecordSchema = z
 	.object({
-		schemaVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+		schemaVersion: z.union([
+			z.literal(1),
+			z.literal(2),
+			z.literal(3),
+			z.literal(4),
+		]),
 		correlationId: z.string().min(1),
 		jobId: z.string().nullable(),
 		subagentSessionId: z.string().min(1),
@@ -735,6 +912,7 @@ const RecordSchema = z
 			.min(1)
 			.max(11)
 			.optional(),
+		prReviewLegacyTranscriptCompatibility: z.boolean().optional(),
 		promptHash: z.string().optional(),
 		workspace: WorkspaceSchema.optional(),
 		taskChangeContext: TaskChangeContextSchema.optional(),
@@ -751,6 +929,14 @@ const RecordSchema = z
 		terminalResult: TerminalResultSchema.optional(),
 		coderSettlement: CoderSettlementSchema.optional(),
 		advisoryInbox: AdvisoryInboxSchema.optional(),
+		legacyCoderSettlementTransfer: z
+			.object({
+				taskId: z.string().min(1).max(256),
+				transitionId: z.string().min(1).max(256),
+				updatedAt: z.number().nonnegative(),
+			})
+			.strict()
+			.optional(),
 		ingestion: DelegationIngestionSchema.optional(),
 		result: ResultSchema.optional(),
 		completedAt: z.number().optional(),
@@ -1050,6 +1236,14 @@ const CHECKPOINT_RESET_HINT =
 
 type LedgerLoadMode = 'legacy' | 'checkpoint+tail' | 'checkpoint+ledger-suffix';
 
+interface LenientLedgerSkipCounts {
+	malformedJson: number;
+	invalidRecord: number;
+}
+
+const lenientLedgerSignalByRoot = new Map<string, string>();
+const lenientLedgerSignalOrder: string[] = [];
+
 type LedgerLoad =
 	| {
 			status: 'ok';
@@ -1207,8 +1401,18 @@ function loadFoldedState(
 	for (const summary of checkpoint.closed) {
 		records.set(summary.correlationId, summary);
 	}
-	const foldError = foldLedgerTail(records, tail, options.strict, checkpoint);
+	const lenientSkips = emptyLenientLedgerSkipCounts();
+	const foldError = foldLedgerTail(
+		records,
+		tail,
+		options.strict,
+		checkpoint,
+		lenientSkips,
+	);
 	if (foldError) return { status: 'uncertain', reason: foldError };
+	if (!options.strict) {
+		recordLenientLedgerSkips(directory, mode, lenientSkips);
+	}
 	return {
 		status: 'ok',
 		mode,
@@ -1278,6 +1482,7 @@ function foldLedgerTail(
 	tail: Buffer,
 	strict: boolean,
 	checkpoint?: BackgroundDelegationCheckpoint,
+	lenientSkips?: LenientLedgerSkipCounts,
 ): string | null {
 	let lineNumber = 0;
 	for (const line of tail.toString('utf-8').split('\n')) {
@@ -1291,6 +1496,7 @@ function foldLedgerTail(
 			if (strict) {
 				return `background delegation ledger has malformed JSON at line ${lineNumber}`;
 			}
+			if (lenientSkips) lenientSkips.malformedJson += 1;
 			continue;
 		}
 		const parsed = RecordSchema.safeParse(parsedJson);
@@ -1298,6 +1504,7 @@ function foldLedgerTail(
 			if (strict) {
 				return `background delegation ledger has an invalid record at line ${lineNumber}`;
 			}
+			if (lenientSkips) lenientSkips.invalidRecord += 1;
 			continue;
 		}
 		const existing = checkpoint
@@ -1344,8 +1551,16 @@ function loadLegacyLedger(directory: string, strict: boolean): LedgerLoad {
 			};
 		}
 		const records = new Map<string, BackgroundDelegationRecord>();
-		const foldError = foldLedgerTail(records, Buffer.from(raw, 'utf-8'), false);
+		const lenientSkips = emptyLenientLedgerSkipCounts();
+		const foldError = foldLedgerTail(
+			records,
+			Buffer.from(raw, 'utf-8'),
+			false,
+			undefined,
+			lenientSkips,
+		);
 		void foldError; // lenient never fails
+		recordLenientLedgerSkips(directory, 'legacy-ledger', lenientSkips);
 		return {
 			status: 'ok',
 			mode: 'legacy',
@@ -1465,6 +1680,62 @@ function recordLedgerUncertainty(
 	}
 }
 
+function emptyLenientLedgerSkipCounts(): LenientLedgerSkipCounts {
+	return { malformedJson: 0, invalidRecord: 0 };
+}
+
+function shouldEmitLenientLedgerSignal(
+	directory: string,
+	signature: string,
+): boolean {
+	const key = canonicalRootKeyFresh(directory);
+	const existing = lenientLedgerSignalByRoot.get(key);
+	if (existing === signature) return false;
+	if (!existing) {
+		if (lenientLedgerSignalOrder.length >= MAX_TRACKED_LENIENT_LEDGER_SIGNALS) {
+			const evicted = lenientLedgerSignalOrder.shift();
+			if (evicted) lenientLedgerSignalByRoot.delete(evicted);
+		}
+		lenientLedgerSignalOrder.push(key);
+	}
+	lenientLedgerSignalByRoot.set(key, signature);
+	return true;
+}
+
+function recordLenientLedgerSkips(
+	directory: string,
+	source: LedgerLoadMode | 'legacy-ledger',
+	counts: LenientLedgerSkipCounts,
+): void {
+	const skipped = counts.malformedJson + counts.invalidRecord;
+	if (skipped <= 0) return;
+	const reason =
+		`background delegation ledger skipped ${skipped} malformed/invalid row${skipped === 1 ? '' : 's'} ` +
+		`during lenient ${source} read (${counts.malformedJson} malformed JSON, ${counts.invalidRecord} invalid records)`;
+	const signature = `${source}:${counts.malformedJson}:${counts.invalidRecord}`;
+	if (shouldEmitLenientLedgerSignal(directory, signature)) {
+		logger.criticalWarn(`[background] ${reason}`);
+	}
+	try {
+		const current = readDelegationHealthArtifact(directory);
+		if (
+			current?.lastUncertainty &&
+			current.lastUncertainty.source !== LENIENT_LEDGER_SIGNAL_SOURCE
+		) {
+			return;
+		}
+		writeDelegationHealthArtifact(directory, {
+			lastUncertainty: {
+				reason,
+				at: Date.now(),
+				source: LENIENT_LEDGER_SIGNAL_SOURCE,
+			},
+		});
+	} catch {
+		// The observation sink must never break the store.
+	}
+}
+
 /**
  * True when a record still owns an unsettled worktree (mirrors
  * init-orphan-recovery's protection predicate — exported so both sites share
@@ -1494,6 +1765,9 @@ export function isUnsettledWorktreeOwner(
 function isCheckpointLiveRecord(record: BackgroundDelegationRecord): boolean {
 	if (!isTerminal(record.status)) return true;
 	if (record.advisoryInbox?.state === 'pending') return true;
+	// A pending legacy transfer still needs the terminal result body for the
+	// observer's durable replay after the WAL becomes writable again.
+	if (record.legacyCoderSettlementTransfer) return true;
 	const settlement = record.coderSettlement;
 	if (settlement && settlement.state !== 'settled') return true;
 	if (settlement?.state === 'settled' && isUnsettledWorktreeOwner(record)) {
@@ -1508,11 +1782,18 @@ function isCheckpointLiveRecord(record: BackgroundDelegationRecord): boolean {
  * (identity, lane coordinates, workspace, worktree, result scalars) and drop
  * only the large bodies — prompt text, taskChangeContext, and the text/error
  * result bodies (their sha256 `digest` is retained and covers the dropped
- * content). `coderSettlement.observedFiles` is retained: only SETTLED
- * settlements reach summaries (see isCheckpointLiveRecord), and the settled
- * observed-file list is the executed-contract audit artifact — final and never
- * recomputed. Returns null when the summary would not validate; the caller
- * then keeps the full record instead (safety over size).
+ * content). An authenticated, bounded final-line PR-review collection receipt is retained
+ * because collection projects accepted/rejected retry IDs from that durable
+ * metadata after compaction. Structured PR-review result receipts remain
+ * authoritative on `result.prReviewResultReceipt`; closed summaries strip the
+ * duplicate `terminalResult.result.prReviewResultReceipt` copy to keep the
+ * closed-set byte cost bounded, while live records retain the full terminal
+ * payload and are already capped by `MAX_CHECKPOINT_RECORDS`.
+ * `coderSettlement.observedFiles` is retained: only SETTLED settlements reach
+ * summaries (see isCheckpointLiveRecord), and the settled observed-file list is
+ * the executed-contract audit artifact — final and never recomputed. Returns
+ * null when the summary would not validate; the caller then keeps the full
+ * record instead (safety over size).
  */
 function buildClosedSummary(
 	record: BackgroundDelegationRecord,
@@ -1521,12 +1802,15 @@ function buildClosedSummary(
 	delete summary.prompt;
 	delete summary.taskChangeContext;
 	if (summary.result) {
-		summary.result = stripResultBody(summary.result);
+		summary.result = stripResultBody(record, summary.result);
 	}
 	if (summary.terminalResult) {
 		summary.terminalResult = {
 			...summary.terminalResult,
-			result: stripResultBody(summary.terminalResult.result),
+			// `record.result` is the collection projection source and the
+			// structured-receipt authority. Retaining the same projection on the
+			// nested terminal copy would double the closed-summary checkpoint cost.
+			result: dropTerminalResultBody(summary.terminalResult.result),
 		};
 	}
 	const parsed = RecordSchema.safeParse(summary);
@@ -1534,10 +1818,77 @@ function buildClosedSummary(
 }
 
 function stripResultBody(
+	record: BackgroundDelegationRecord,
 	result: BackgroundDelegationResult,
 ): BackgroundDelegationResult {
 	const { text: _text, error: _error, ...rest } = result;
+	const receipt = parsePrReviewCollectionReceiptFooter(record, result);
+	const shedMarker = receipt
+		? null
+		: parsePrReviewCollectionReceiptShedMarker(record, result);
+	const receiptText = receipt
+		? `${PR_REVIEW_COLLECTION_RECEIPT_PREFIX}${JSON.stringify(receipt)}`
+		: shedMarker
+			? `${PR_REVIEW_COLLECTION_RECEIPT_SHED_PREFIX}${JSON.stringify(shedMarker)}`
+			: undefined;
+	return receiptText
+		? { ...rest, text: receiptText, outputPreviewChars: receiptText.length }
+		: rest;
+}
+
+function dropResultBody(
+	result: BackgroundDelegationResult,
+): BackgroundDelegationResult {
+	const {
+		text: _text,
+		error: _error,
+		outputPreviewChars: _preview,
+		...rest
+	} = result;
 	return rest;
+}
+
+function dropTerminalResultBody(
+	result: BackgroundDelegationResult,
+): BackgroundDelegationResult {
+	const { prReviewResultReceipt: _receipt, ...rest } = dropResultBody(result);
+	return rest;
+}
+
+function dropRetainedPrReviewReceipt(
+	record: BackgroundDelegationRecord,
+): BackgroundDelegationRecord {
+	const compact = (
+		result: BackgroundDelegationResult,
+	): BackgroundDelegationResult => {
+		const payload = parsePrReviewCollectionReceiptFooter(record, result);
+		if (!payload) {
+			const marker = parsePrReviewCollectionReceiptShedMarker(record, result);
+			if (!marker) return dropResultBody(result);
+			const markerText = `${PR_REVIEW_COLLECTION_RECEIPT_SHED_PREFIX}${JSON.stringify(marker)}`;
+			const { text: _text, error: _error, ...rest } = result;
+			return {
+				...rest,
+				text: markerText,
+				outputPreviewChars: markerText.length,
+			};
+		}
+		const marker = encodePrReviewCollectionReceiptShedMarker(payload);
+		const { text: _text, error: _error, ...rest } = result;
+		return { ...rest, text: marker, outputPreviewChars: marker.length };
+	};
+	return {
+		...record,
+		...(record.result ? { result: compact(record.result) } : {}),
+		...(record.terminalResult
+			? {
+					terminalResult: {
+						...record.terminalResult,
+						result: dropTerminalResultBody(record.terminalResult.result),
+					},
+				}
+			: {}),
+	};
 }
 
 function emptyAudit(): DelegationCheckpointAuditSummary {
@@ -1783,12 +2134,22 @@ function compactDelegationsLocked(
 		'utf-8',
 	);
 	let used = baseOverhead;
+	const selectionBudget =
+		MAX_CHECKPOINT_BYTES - CHECKPOINT_SELECTION_RESERVE_BYTES;
 	const keptClosed: BackgroundDelegationRecord[] = [];
 	let evicted = 0;
 	for (const entry of closedCandidates) {
-		const cost = Buffer.byteLength(JSON.stringify(entry), 'utf-8') + 1;
-		if (used + cost > MAX_CHECKPOINT_BYTES) {
+		let retainedEntry = entry;
+		let cost = Buffer.byteLength(JSON.stringify(retainedEntry), 'utf-8') + 1;
+		if (used + cost > selectionBudget) {
 			if (now - entry.updatedAt < TOMBSTONE_MIN_AGE_MS) {
+				retainedEntry = dropRetainedPrReviewReceipt(entry);
+				cost = Buffer.byteLength(JSON.stringify(retainedEntry), 'utf-8') + 1;
+				if (used + cost <= selectionBudget) {
+					used += cost;
+					keptClosed.push(retainedEntry);
+					continue;
+				}
 				recordLedgerUncertainty(
 					directory,
 					'checkpoint byte budget would evict a young closed summary; compaction skipped',
@@ -1803,7 +2164,7 @@ function compactDelegationsLocked(
 			continue;
 		}
 		used += cost;
-		keptClosed.push(entry);
+		keptClosed.push(retainedEntry);
 	}
 
 	const sequence =
@@ -1832,7 +2193,7 @@ function compactDelegationsLocked(
 		now,
 	);
 
-	const checkpoint: BackgroundDelegationCheckpoint = {
+	const checkpointCandidate: BackgroundDelegationCheckpoint = {
 		schemaVersion: 1,
 		sequence,
 		writerId: WRITER_ID,
@@ -1843,8 +2204,25 @@ function compactDelegationsLocked(
 		records: live,
 		closed: keptClosed,
 		audit,
-		payloadChecksum: '',
+		payloadChecksum: '0'.repeat(64),
 	};
+	// Normalize through the same strict schema recovery uses before hashing.
+	// Otherwise an optional `undefined` or future schema projection difference
+	// can serialize successfully but hash differently after reload.
+	const normalizedCheckpoint = CheckpointSchema.safeParse(checkpointCandidate);
+	if (!normalizedCheckpoint.success) {
+		recordLedgerUncertainty(
+			directory,
+			'generated checkpoint failed schema normalization; compaction skipped',
+			'compaction',
+		);
+		return {
+			status: 'skipped',
+			reason: 'generated checkpoint failed schema normalization',
+		};
+	}
+	const checkpoint =
+		normalizedCheckpoint.data as BackgroundDelegationCheckpoint;
 	checkpoint.payloadChecksum = checkpointPayloadChecksum(checkpoint);
 	const checkpointJson = `${JSON.stringify(checkpoint)}\n`;
 	if (Buffer.byteLength(checkpointJson, 'utf-8') > MAX_CHECKPOINT_BYTES) {
@@ -2087,6 +2465,7 @@ export interface RecordPendingInput {
 	mode?: string;
 	workflowLane?: string;
 	ownedWorkflowLanes?: string[];
+	prReviewLegacyTranscriptCompatibility?: boolean;
 	promptHash?: string;
 	workspace?: BackgroundWorkspaceSnapshot;
 	taskChangeContext?: BackgroundTaskChangeContext;
@@ -2121,6 +2500,12 @@ function buildPendingRecord(
 		...(input.workflowLane ? { workflowLane: input.workflowLane } : {}),
 		...(input.ownedWorkflowLanes?.length
 			? { ownedWorkflowLanes: [...input.ownedWorkflowLanes] }
+			: {}),
+		...(input.prReviewLegacyTranscriptCompatibility !== undefined
+			? {
+					prReviewLegacyTranscriptCompatibility:
+						input.prReviewLegacyTranscriptCompatibility,
+				}
 			: {}),
 		...(input.promptHash ? { promptHash: input.promptHash } : {}),
 		...(input.workspace ? { workspace: input.workspace } : {}),
@@ -2348,8 +2733,11 @@ export async function appendDelegationTransition(
 				}
 				next = {
 					...current,
-					schemaVersion:
-						current.schemaVersion === 1 ? 2 : current.schemaVersion,
+					schemaVersion: transition.result?.prReviewResultReceipt
+						? 4
+						: current.schemaVersion === 1
+							? 2
+							: current.schemaVersion,
 					status: transition.status,
 					updatedAt: now,
 					...(transition.completedAt !== undefined
@@ -2369,6 +2757,136 @@ export async function appendDelegationTransition(
 			`[background] appendDelegationTransition failed: ${err instanceof Error ? err.message : String(err)}`,
 		);
 		return null;
+	}
+}
+
+export type PublishPrReviewResultReceiptOutcome =
+	| { status: 'recorded'; record: BackgroundDelegationRecord }
+	| { status: 'duplicate'; record: BackgroundDelegationRecord }
+	| { status: 'conflict'; reason: string }
+	| { status: 'not_found'; reason: string }
+	| { status: 'terminal'; reason: string }
+	| { status: 'uncertain'; reason: string };
+
+/**
+ * Atomically publish the child-bound PR-review receipt while its delegation is
+ * still live. The workflow gate performs the outer session-state validation;
+ * this inner transaction rechecks immutable delegation identity under the
+ * evidence lock and provides semantic exactly-once behavior.
+ */
+export async function publishPrReviewResultReceipt(
+	directory: string,
+	input: {
+		parentSessionId: string;
+		childSessionId: string;
+		batchId: string;
+		laneId: string;
+		expectedWorkflowInstanceId: string;
+		expectedWorkflowRevision: number;
+		expectedBaseSha: string;
+		receipt: PrReviewResultReceipt;
+	},
+): Promise<PublishPrReviewResultReceiptOutcome> {
+	const parsed = PrReviewResultReceiptSchema.safeParse(input.receipt);
+	if (!parsed.success) {
+		return { status: 'conflict', reason: 'receipt schema validation failed' };
+	}
+	let outcome: PublishPrReviewResultReceiptOutcome = {
+		status: 'uncertain',
+		reason: 'receipt publication did not complete',
+	};
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				const records = loadRecordsForWrite(directory);
+				if (records === null) {
+					outcome = {
+						status: 'uncertain',
+						reason: 'delegation state is uncertain',
+					};
+					return;
+				}
+				const target = findReceiptPublicationTarget(records, input);
+				if (target.count !== 1 || !target.record) {
+					outcome = {
+						status: 'not_found',
+						reason: `expected one exact delegation record, found ${target.count}`,
+					};
+					return;
+				}
+				const current = target.record;
+				if (current.result?.prReviewResultReceipt) {
+					const existing = current.result.prReviewResultReceipt;
+					if (samePrReviewReceiptSemantics(existing, parsed.data)) {
+						outcome = { status: 'duplicate', record: current };
+					} else {
+						outcome = {
+							status: 'conflict',
+							reason: 'a different bound receipt is already recorded',
+						};
+					}
+					return;
+				}
+				if (current.status !== 'pending' && current.status !== 'running') {
+					outcome = {
+						status: 'terminal',
+						reason: `delegation is already ${current.status}`,
+					};
+					return;
+				}
+				const owned = current.ownedWorkflowLanes?.length
+					? current.ownedWorkflowLanes
+					: current.workflowLane
+						? [current.workflowLane]
+						: [];
+				const sameOwned =
+					owned.length === parsed.data.ownedWorkflowLanes.length &&
+					owned.every((lane) => parsed.data.ownedWorkflowLanes.includes(lane));
+				if (
+					parsed.data.workflowInstanceId !== input.expectedWorkflowInstanceId ||
+					parsed.data.workflowRevision !== input.expectedWorkflowRevision ||
+					parsed.data.baseSha !== input.expectedBaseSha ||
+					current.mode !== parsed.data.mode ||
+					current.workflowLane !== parsed.data.workflowLane ||
+					!sameOwned ||
+					current.workspace?.prHeadSha !== parsed.data.headSha ||
+					current.workspace?.gitHead !== parsed.data.headSha ||
+					(current.generation ?? 1) !== parsed.data.generation
+				) {
+					outcome = {
+						status: 'conflict',
+						reason: 'receipt does not match immutable delegation identity',
+					};
+					return;
+				}
+				const next: BackgroundDelegationRecord = {
+					...current,
+					schemaVersion: 4,
+					updatedAt: Date.now(),
+					result: {
+						...(current.result ?? {
+							chars: 0,
+							truncated: false,
+							digest: createHash('sha256').update('').digest('hex'),
+						}),
+						prReviewResultReceipt: parsed.data,
+					},
+				};
+				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
+				outcome = { status: 'recorded', record: next };
+			},
+		);
+		return outcome;
+	} catch (error) {
+		return {
+			status: 'uncertain',
+			reason: error instanceof Error ? error.message : String(error),
+		};
 	}
 }
 
@@ -2394,6 +2912,42 @@ export function buildBackgroundCompletionEventId(
 
 function sameJson(left: unknown, right: unknown): boolean {
 	return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function canonicalJson(value: unknown): unknown {
+	if (Array.isArray(value)) {
+		return value.map(canonicalJson).sort((left, right) => {
+			const leftJson = JSON.stringify(left);
+			const rightJson = JSON.stringify(right);
+			return leftJson < rightJson ? -1 : leftJson > rightJson ? 1 : 0;
+		});
+	}
+	if (value && typeof value === 'object') {
+		return Object.fromEntries(
+			Object.entries(value as Record<string, unknown>)
+				.sort(([left], [right]) => left.localeCompare(right))
+				.map(([key, entry]) => [key, canonicalJson(entry)]),
+		);
+	}
+	return value;
+}
+
+function sameCanonicalJson(left: unknown, right: unknown): boolean {
+	return (
+		JSON.stringify(canonicalJson(left)) === JSON.stringify(canonicalJson(right))
+	);
+}
+
+function samePrReviewReceiptSemantics(
+	left: PrReviewResultReceipt,
+	right: PrReviewResultReceipt,
+): boolean {
+	// The digest is derived from the serialized envelope, so a semantically
+	// equivalent replay with set-like arrays in another order has a different
+	// digest. Compare the validated receipt content without that derived field.
+	const { semanticEnvelopeDigest: _leftDigest, ...leftSemantic } = left;
+	const { semanticEnvelopeDigest: _rightDigest, ...rightSemantic } = right;
+	return sameCanonicalJson(leftSemantic, rightSemantic);
 }
 
 /**
@@ -2427,12 +2981,58 @@ function sameRetainedResult(
 		left.outputArtifactError === right.outputArtifactError &&
 		left.transcriptIncomplete === right.transcriptIncomplete &&
 		left.messageCount === right.messageCount &&
+		sameJson(left.prReviewResultReceipt, right.prReviewResultReceipt) &&
+		left.workflowLaneFailureClass === right.workflowLaneFailureClass &&
 		sameJson(left.salvagedWorkflowLanes, right.salvagedWorkflowLanes) &&
 		sameJson(
 			left.salvagedWorkflowLaneRecoveries,
 			right.salvagedWorkflowLaneRecoveries,
 		)
 	);
+}
+
+function recordedPrReviewResultReceipt(
+	record: BackgroundDelegationRecord,
+): PrReviewResultReceipt | undefined {
+	return (
+		record.result?.prReviewResultReceipt ??
+		record.terminalResult?.result.prReviewResultReceipt
+	);
+}
+
+function mergeRecordedPrReviewResultReceipt(
+	record: BackgroundDelegationRecord,
+	result: BackgroundDelegationResult,
+): BackgroundDelegationResult {
+	const existing = recordedPrReviewResultReceipt(record);
+	if (!existing || result.prReviewResultReceipt) return result;
+	return { ...result, prReviewResultReceipt: existing };
+}
+
+function findReceiptPublicationTarget(
+	records: readonly BackgroundDelegationRecord[],
+	input: {
+		parentSessionId: string;
+		childSessionId: string;
+		batchId: string;
+		laneId: string;
+	},
+): { count: number; record: BackgroundDelegationRecord | null } {
+	let count = 0;
+	let record: BackgroundDelegationRecord | null = null;
+	for (const candidate of records) {
+		if (
+			candidate.parentSessionId !== input.parentSessionId ||
+			candidate.subagentSessionId !== input.childSessionId ||
+			candidate.batchId !== input.batchId ||
+			candidate.laneId !== input.laneId
+		) {
+			continue;
+		}
+		count += 1;
+		if (count === 1) record = candidate;
+	}
+	return { count, record: count === 1 ? record : null };
 }
 
 function settlementProvenanceFor(
@@ -2498,13 +3098,21 @@ export async function claimTerminalResult(
 				if (records === null) return;
 				const current = findRecordForWrite(records, correlationId);
 				if (!current) return;
+				const normalizedResult = mergeRecordedPrReviewResultReceipt(
+					current,
+					parsedTerminal.data.result,
+				);
+				const normalizedTerminal =
+					normalizedResult === parsedTerminal.data.result
+						? parsedTerminal.data
+						: { ...parsedTerminal.data, result: normalizedResult };
 				if (current.terminalResult) {
-					if (!sameTerminalEvent(current.terminalResult, parsedTerminal.data)) {
+					if (!sameTerminalEvent(current.terminalResult, normalizedTerminal)) {
 						logger.warn(
 							`[background] claimTerminalResult: different terminal event for ` +
 								`correlationId=${correlationId}; ` +
 								`existing={status: ${current.terminalResult.status}, eventId: ${current.terminalResult.eventId}} ` +
-								`incoming={status: ${parsedTerminal.data.status}, eventId: ${parsedTerminal.data.eventId}}; ` +
+								`incoming={status: ${normalizedTerminal.status}, eventId: ${normalizedTerminal.eventId}}; ` +
 								`rejected`,
 						);
 						incrementLateTerminalCount(directory);
@@ -2528,7 +3136,7 @@ export async function claimTerminalResult(
 							state: 'pending',
 							provenance,
 							observedFiles: null,
-							updatedAt: parsedTerminal.data.recordedAt,
+							updatedAt: normalizedTerminal.recordedAt,
 						};
 					}
 				}
@@ -2537,16 +3145,20 @@ export async function claimTerminalResult(
 				// merge would then drop this terminal against a later checkpoint
 				// entry. Clamp updatedAt to at least the current snapshot's.
 				const foldUpdatedAt = Math.max(
-					parsedTerminal.data.recordedAt,
+					normalizedTerminal.recordedAt,
 					current.updatedAt,
 				);
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: 3,
-					status: parsedTerminal.data.status,
-					terminalResult: parsedTerminal.data,
-					result: parsedTerminal.data.result,
-					completedAt: parsedTerminal.data.recordedAt,
+					schemaVersion: normalizedTerminal.result.prReviewResultReceipt
+						? 4
+						: current.schemaVersion === 4
+							? 4
+							: 3,
+					status: normalizedTerminal.status,
+					terminalResult: normalizedTerminal,
+					result: normalizedTerminal.result,
+					completedAt: normalizedTerminal.recordedAt,
 					updatedAt: foldUpdatedAt,
 					...(coderSettlement ? { coderSettlement } : {}),
 				};
@@ -2675,7 +3287,7 @@ export async function claimCoderSettlement(
 				};
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: 3,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 					coderSettlement: settlement,
 					updatedAt: settlement.updatedAt,
 				};
@@ -2853,7 +3465,7 @@ export async function updateCoderSettlement(
 				};
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: 3,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 					coderSettlement: settlement,
 					updatedAt,
 				};
@@ -2870,6 +3482,172 @@ export async function updateCoderSettlement(
 		);
 		return null;
 	}
+}
+
+export interface LegacyCoderSettlementTransfer {
+	taskId: string;
+	transitionId: string;
+}
+
+export type LegacyCoderSettlementReconciler = (
+	record: BackgroundDelegationRecord,
+) => Promise<boolean>;
+
+export interface ReplacePendingBackgroundAdvisoryResult {
+	advisory: BackgroundAdvisoryInboxEntry;
+	replacedMessage?: string;
+}
+
+const MAX_LEGACY_CODER_SETTLEMENT_RECONCILERS = 32;
+const RETRYABLE_LEGACY_SETTLEMENT_ERROR_CODES = new Set([
+	'CODER_SETTLEMENT_LOCKED',
+	'EACCES',
+	'EBUSY',
+	'EIO',
+	'EPERM',
+	'ETIMEDOUT',
+]);
+const legacyCoderSettlementReconcilers = new Map<
+	string,
+	LegacyCoderSettlementReconciler
+>();
+const legacyCoderSettlementReconcilerOrder: string[] = [];
+
+/**
+ * Register the observer-owned replay callback for a project. Maintenance is
+ * also invoked by admission and status paths that cannot receive the observer
+ * instance directly, so this directory-keyed, bounded registry keeps those
+ * backstops wired without retaining unbounded process state.
+ */
+export function registerLegacyCoderSettlementReconciler(
+	directory: string,
+	reconciler: LegacyCoderSettlementReconciler,
+): void {
+	const key = canonicalRootKeyFresh(directory);
+	if (legacyCoderSettlementReconcilers.has(key)) {
+		const existingIndex = legacyCoderSettlementReconcilerOrder.indexOf(key);
+		if (existingIndex >= 0) {
+			legacyCoderSettlementReconcilerOrder.splice(existingIndex, 1);
+		}
+		legacyCoderSettlementReconcilerOrder.push(key);
+		legacyCoderSettlementReconcilers.set(key, reconciler);
+		return;
+	}
+	if (
+		legacyCoderSettlementReconcilerOrder.length >=
+		MAX_LEGACY_CODER_SETTLEMENT_RECONCILERS
+	) {
+		const evicted = legacyCoderSettlementReconcilerOrder.shift();
+		if (evicted) legacyCoderSettlementReconcilers.delete(evicted);
+	}
+	legacyCoderSettlementReconcilerOrder.push(key);
+	legacyCoderSettlementReconcilers.set(key, reconciler);
+}
+
+function getLegacyCoderSettlementReconciler(
+	directory: string,
+): LegacyCoderSettlementReconciler | undefined {
+	return legacyCoderSettlementReconcilers.get(canonicalRootKeyFresh(directory));
+}
+
+/** Test-only seam for the bounded legacy-settlement reconciler registry. */
+export const _internals = {
+	getLegacyCoderSettlementReconciler,
+	getLegacyCoderSettlementReconcilerOrder: () => [
+		...legacyCoderSettlementReconcilerOrder,
+	],
+	resetLegacyCoderSettlementReconcilers: () => {
+		legacyCoderSettlementReconcilers.clear();
+		legacyCoderSettlementReconcilerOrder.length = 0;
+	},
+};
+
+/** Record an exact legacy-WAL transfer that must be retried after contention. */
+export async function markLegacyCoderSettlementTransferPending(
+	directory: string,
+	correlationId: string,
+	transfer: LegacyCoderSettlementTransfer,
+): Promise<BackgroundDelegationRecord | null> {
+	return updateLegacyCoderSettlementTransfer(
+		directory,
+		correlationId,
+		transfer,
+	);
+}
+
+/** Clear a transfer marker only after the WAL is terminal and any replay succeeds. */
+export async function clearLegacyCoderSettlementTransferPending(
+	directory: string,
+	correlationId: string,
+): Promise<BackgroundDelegationRecord | null> {
+	return updateLegacyCoderSettlementTransfer(directory, correlationId, null);
+}
+
+async function updateLegacyCoderSettlementTransfer(
+	directory: string,
+	correlationId: string,
+	transfer: LegacyCoderSettlementTransfer | null,
+): Promise<BackgroundDelegationRecord | null> {
+	if (!correlationId) return null;
+	let result: BackgroundDelegationRecord | null = null;
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const current = findRecordForWrite(records, correlationId);
+				if (!current) return;
+				if (
+					transfer &&
+					(current.status === 'consumed' ||
+						(current.legacyCoderSettlementTransfer &&
+							(current.legacyCoderSettlementTransfer.taskId !==
+								transfer.taskId ||
+								current.legacyCoderSettlementTransfer.transitionId !==
+									transfer.transitionId)))
+				) {
+					// A racing observer may already have consumed the terminal, or may
+					// own a different exact transfer identity. Never resurrect/overwrite
+					// that durable decision from a late failure report.
+					result = current;
+					return;
+				}
+				const updatedAt = Date.now();
+				const next: BackgroundDelegationRecord = transfer
+					? {
+							...current,
+							schemaVersion: current.schemaVersion === 4 ? 4 : 3,
+							legacyCoderSettlementTransfer: {
+								...transfer,
+								updatedAt,
+							},
+							updatedAt,
+						}
+					: (() => {
+							const { legacyCoderSettlementTransfer: _pending, ...rest } =
+								current;
+							return {
+								...rest,
+								schemaVersion: 3 as const,
+								updatedAt,
+							};
+						})();
+				if (!RecordSchema.safeParse(next).success) return;
+				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
+				result = next;
+			},
+		);
+	} catch (error) {
+		logger.warn(
+			`[background] legacy coder settlement transfer marker update failed: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	return result;
 }
 
 export type DelegationIngestionDisposition =
@@ -2964,7 +3742,7 @@ export async function claimDelegationIngestion(
 					.digest('hex');
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: 3,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 					ingestion: {
 						state: 'claimed',
 						attempt,
@@ -3031,7 +3809,7 @@ export async function recordDelegationIngestionResult(
 				const updatedAt = options.now ?? Date.now();
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: 3,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 					status: success ? 'consumed' : 'ingestion_error',
 					ingestion: {
 						state: success ? 'consumed' : 'retryable',
@@ -3108,7 +3886,7 @@ export async function putPendingBackgroundAdvisory(
 				}
 				const next: BackgroundDelegationRecord = {
 					...current,
-					schemaVersion: 3,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 					advisoryInbox: parsed.data,
 					updatedAt: createdAt,
 				};
@@ -3121,6 +3899,83 @@ export async function putPendingBackgroundAdvisory(
 	} catch (err) {
 		logger.warn(
 			`[background] putPendingBackgroundAdvisory failed: ${err instanceof Error ? err.message : String(err)}`,
+		);
+		return null;
+	}
+}
+
+/**
+ * Replace a pending transfer-warning advisory with the corrected terminal
+ * status after durable legacy-WAL reconciliation. The replacement is narrowly
+ * gated by the exact terminal identity and the warning marker so the ordinary
+ * one-advisory-per-event immutability contract remains intact.
+ */
+export async function replacePendingBackgroundAdvisory(
+	directory: string,
+	correlationId: string,
+	input: PutPendingBackgroundAdvisoryInput,
+): Promise<ReplacePendingBackgroundAdvisoryResult | null> {
+	const createdAt = input.createdAt ?? Date.now();
+	const parsed = AdvisoryInboxSchema.safeParse({
+		eventId: input.eventId,
+		parentSessionId: input.parentSessionId,
+		state: 'pending',
+		message: input.message,
+		createdAt,
+	});
+	if (!correlationId || !parsed.success) return null;
+	let result: ReplacePendingBackgroundAdvisoryResult | null = null;
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () => {
+				const records = loadRecordsForWrite(directory);
+				if (records === null) return;
+				const current = findRecordForWrite(records, correlationId);
+				const existing = current?.advisoryInbox;
+				if (
+					!current?.terminalResult ||
+					current.terminalResult.eventId !== parsed.data.eventId ||
+					current.parentSessionId !== parsed.data.parentSessionId ||
+					!existing ||
+					!existing.message.includes(
+						LEGACY_CODER_SETTLEMENT_PENDING_ADVISORY_MARKER,
+					) ||
+					parsed.data.message.includes(
+						LEGACY_CODER_SETTLEMENT_PENDING_ADVISORY_MARKER,
+					)
+				) {
+					if (
+						existing &&
+						existing.eventId === parsed.data.eventId &&
+						existing.parentSessionId === parsed.data.parentSessionId &&
+						existing.message === parsed.data.message
+					) {
+						result = { advisory: existing };
+					}
+					return;
+				}
+				const next: BackgroundDelegationRecord = {
+					...current,
+					schemaVersion: current.schemaVersion === 4 ? 4 : 3,
+					advisoryInbox: parsed.data,
+					updatedAt: createdAt,
+				};
+				appendRecord(directory, next);
+				maybeCompactDelegationsLocked(directory);
+				result = {
+					advisory: parsed.data,
+					replacedMessage: existing.message,
+				};
+			},
+		);
+		return result;
+	} catch (err) {
+		logger.warn(
+			`[background] replacePendingBackgroundAdvisory failed: ${err instanceof Error ? err.message : String(err)}`,
 		);
 		return null;
 	}
@@ -3187,7 +4042,7 @@ export async function preparePendingBackgroundAdvisories(
 					};
 					const next: BackgroundDelegationRecord = {
 						...current,
-						schemaVersion: 3,
+						schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 						advisoryInbox: nextAdvisory,
 						updatedAt: now,
 					};
@@ -3251,7 +4106,7 @@ async function releaseBackgroundAdvisoryPreparation(
 					const now = Date.now();
 					const next: BackgroundDelegationRecord = {
 						...current,
-						schemaVersion: 3,
+						schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 						advisoryInbox: {
 							...current.advisoryInbox,
 							preparation: undefined,
@@ -3322,7 +4177,7 @@ export async function acknowledgeObservedBackgroundAdvisories(
 					}
 					const next: BackgroundDelegationRecord = {
 						...current,
-						schemaVersion: 3,
+						schemaVersion: current.schemaVersion === 4 ? 4 : 3,
 						advisoryInbox: {
 							...advisory,
 							state: 'delivered',
@@ -3395,6 +4250,17 @@ function isTerminal(status: BackgroundDelegationStatus): boolean {
 }
 
 /**
+ * Public alias of the internal terminal predicate so shared lifecycle callers
+ * (issue #2045: `delegation-lifecycle.ts`) classify post-claim re-reads with
+ * the exact same status set as the store's own guards — never a second copy.
+ */
+export function isTerminalDelegationStatus(
+	status: BackgroundDelegationStatus,
+): boolean {
+	return isTerminal(status);
+}
+
+/**
  * Mark all overdue records in `statuses` as `stale` (status-only; no gate
  * effect). Called within an already-held store lock.
  *
@@ -3424,12 +4290,14 @@ function sweepStaleLocked(
 		excludeCorrelationIds?: ReadonlySet<string>;
 		includeCorrelationIds?: ReadonlySet<string>;
 	} = {},
+	limits: { maxSweep?: number } = {},
 ): number {
 	let swept = 0;
 	const { excludeCorrelationIds, includeCorrelationIds } = filters;
 	const records = loadRecordsForWrite(directory);
 	if (records === null) return 0;
 	for (const record of records) {
+		if (limits.maxSweep !== undefined && swept >= limits.maxSweep) break;
 		if (
 			includeCorrelationIds !== undefined &&
 			!includeCorrelationIds.has(record.correlationId)
@@ -4167,6 +5035,10 @@ export interface ReserveBackgroundCoderSlotInput {
 	callID: string;
 	maxConcurrent: number;
 	occupiedTaskIds?: readonly string[];
+	/** Launch generation to seed the reservation with (default 1, issue #2104). */
+	generation?: number;
+	/** Lease duration; clamped to the documented min/max bounds. */
+	leaseMs?: number;
 	now?: number;
 }
 
@@ -4202,7 +5074,8 @@ export async function reserveBackgroundCoderSlot(
 		!Number.isInteger(input.maxConcurrent) ||
 		input.maxConcurrent < 1 ||
 		input.maxConcurrent > 64 ||
-		(input.occupiedTaskIds?.length ?? 0) > 64
+		(input.occupiedTaskIds?.length ?? 0) > 64 ||
+		!isValidReservationGeneration(input.generation)
 	) {
 		return { ok: false, reason: 'invalid' };
 	}
@@ -4340,6 +5213,9 @@ export async function reserveBackgroundCoderSlot(
 					};
 				}
 				const now = input.now ?? Date.now();
+				// The lease is created only after every admission/capacity check
+				// above has passed (issue #2104): a denied call never mints a lease.
+				const leaseMs = clampReservationLeaseMs(input.leaseMs);
 				const reservation: BackgroundCoderReservation = {
 					reservationId,
 					parentSessionId: input.parentSessionId,
@@ -4347,6 +5223,8 @@ export async function reserveBackgroundCoderSlot(
 					callID: input.callID,
 					state: 'reserved',
 					correlationId: null,
+					generation: input.generation ?? 1,
+					leaseExpiresAt: now + leaseMs,
 					createdAt: now,
 					updatedAt: now,
 				};
@@ -4386,6 +5264,15 @@ export interface BindBackgroundCoderReservationInput {
 	planTaskId: string | null;
 	callID: string;
 	correlationId: string;
+	/**
+	 * Launch generation of the dispatch being bound (issue #2104). May move
+	 * the reservation's generation FORWARD only (a session.create retry after
+	 * PR #2091 relaunches under a newer generation); an older generation can
+	 * never rebind. Absent keeps the current generation.
+	 */
+	generation?: number;
+	/** Lease duration for the renewal implied by this verified launch; clamped. */
+	leaseMs?: number;
 	now?: number;
 }
 
@@ -4400,7 +5287,8 @@ export async function bindBackgroundCoderReservation(
 		!input.correlationId ||
 		input.correlationId.length > 256 ||
 		input.correlationId.trim() !== input.correlationId ||
-		input.reservationId !== buildBackgroundCoderReservationId(input)
+		input.reservationId !== buildBackgroundCoderReservationId(input) ||
+		!isValidReservationGeneration(input.generation)
 	) {
 		return null;
 	}
@@ -4426,13 +5314,52 @@ export async function bindBackgroundCoderReservation(
 					return null;
 				}
 				if (current.state === 'bound') {
-					return current.correlationId === input.correlationId ? current : null;
+					if (current.correlationId !== input.correlationId) return null;
+					// Idempotent rebind of the same correlation is verified activity
+					// for the bound owner (e.g. the completion observer's repair
+					// path): refresh the lease so status never shows a live bound
+					// reservation as 'expired' between terminal events. Generation
+					// never moves on a rebind — only a reserved→bound transition may
+					// couple to a newer launch generation.
+					const now = input.now ?? Date.now();
+					const leaseMs = clampReservationLeaseMs(input.leaseMs);
+					const next: BackgroundCoderReservation = {
+						...current,
+						leaseExpiresAt: now + leaseMs,
+						updatedAt: now,
+					};
+					const reservations = [...scan.reservations];
+					reservations[index] = next;
+					return (await writeBackgroundCoderReservations(
+						directory,
+						reservations,
+					))
+						? next
+						: current;
 				}
+				const currentGeneration = current.generation ?? 1;
+				if (
+					input.generation !== undefined &&
+					input.generation < currentGeneration
+				) {
+					// An older generation must never rebind (issue #2104): the
+					// reservation is owned by a newer launch.
+					return null;
+				}
+				const now = input.now ?? Date.now();
+				// Binding IS verified launch activity: it (re)news the lease. A
+				// legacy reservation without a lease gains one here — protective,
+				// never a reclaim.
+				const leaseMs = clampReservationLeaseMs(input.leaseMs);
 				const next: BackgroundCoderReservation = {
 					...current,
 					state: 'bound',
 					correlationId: input.correlationId,
-					updatedAt: input.now ?? Date.now(),
+					...(input.generation !== undefined || current.generation === undefined
+						? { generation: input.generation ?? currentGeneration }
+						: {}),
+					leaseExpiresAt: now + leaseMs,
+					updatedAt: now,
 				};
 				const reservations = [...scan.reservations];
 				reservations[index] = next;
@@ -4452,6 +5379,13 @@ export interface ReleaseBackgroundCoderReservationInput {
 	planTaskId: string | null;
 	callID: string;
 	correlationId: string | null;
+	/**
+	 * Generation of the terminal claiming this release (issue #2104). When
+	 * both this and the stored generation are present and differ, the release
+	 * is refused: a terminal for generation N must never release the
+	 * generation N+1 reservation.
+	 */
+	generation?: number;
 	reason: 'consumed' | 'recovered';
 }
 
@@ -4470,7 +5404,8 @@ export async function releaseBackgroundCoderReservation(
 		(input.correlationId !== null &&
 			(input.correlationId.length === 0 ||
 				input.correlationId.length > 256 ||
-				input.correlationId.trim() !== input.correlationId))
+				input.correlationId.trim() !== input.correlationId)) ||
+		!isValidReservationGeneration(input.generation)
 	) {
 		return false;
 	}
@@ -4494,6 +5429,18 @@ export async function releaseBackgroundCoderReservation(
 					current.callID !== input.callID ||
 					current.correlationId !== input.correlationId
 				) {
+					return false;
+				}
+				if (
+					input.generation !== undefined &&
+					current.generation !== undefined &&
+					input.generation !== current.generation
+				) {
+					// A terminal for generation N must never release the
+					// reservation currently owned by generation N+1 (issue #2104).
+					logger.warn(
+						`[background] refusing reservation release: terminal generation ${input.generation} does not match owned generation ${current.generation} for ${input.reservationId}`,
+					);
 					return false;
 				}
 				if (input.reason === 'consumed') {
@@ -4522,4 +5469,578 @@ export async function releaseBackgroundCoderReservation(
 	} catch {
 		return false;
 	}
+}
+
+export interface MaintainBackgroundDelegationsOptions {
+	/** Stale-delegation corroboration timeout (default 30 min). */
+	staleTimeoutMs?: number;
+	/** Per-invocation bound on swept records and reconciled reservations. */
+	maxRecords?: number;
+	/** Lock wait bound. Short values let callers (status, admission) proceed. */
+	lockTimeoutMs?: number;
+	/** Typed label of the maintenance point invoking this run. */
+	reason?: string;
+	now?: number;
+	/** Replay a terminal after its exact legacy WAL transfer succeeds. */
+	onLegacyCoderSettlementReconciled?: (
+		record: BackgroundDelegationRecord,
+	) => Promise<boolean>;
+	/** Notify the live observer after replacing a queued transfer advisory. */
+	onLegacyCoderSettlementAdvisoryReplaced?: (
+		record: BackgroundDelegationRecord,
+		replacement: ReplacePendingBackgroundAdvisoryResult,
+	) => void | Promise<void>;
+	/** Skip legacy coder WAL replay when this pass is already handling that path. */
+	skipLegacyCoderSettlementReconciliation?: boolean;
+}
+
+export interface MaintainBackgroundDelegationsResult {
+	status: 'ok' | 'contention' | 'failure';
+	reason?: string;
+	sweptStale: number;
+	released: Array<{
+		reservationId: string;
+		generation: number;
+		reason: string;
+	}>;
+	renewed: Array<{ reservationId: string; generation: number }>;
+	retained: Array<{ reservationId: string; reason: string }>;
+	examinedReservations: number;
+}
+
+const DEFAULT_MAINTENANCE_LOCK_TIMEOUT_MS = 5_000;
+const DEFAULT_MAINTENANCE_BATCH = 256;
+
+/**
+ * Retry retiring legacy foreground coder WALs after a background terminal was
+ * already durably recorded. This runs outside the delegation/reservation locks
+ * so settlement-lock contention cannot deadlock maintenance. Missing or
+ * already-terminal WALs are harmless: pure background launches have no legacy
+ * WAL, and a successful transfer is idempotent.
+ */
+async function reconcileLegacyCoderSettlements(
+	directory: string,
+	maxRecords: number,
+	onReconciled?: MaintainBackgroundDelegationsOptions['onLegacyCoderSettlementReconciled'],
+	onAdvisoryReplaced?: MaintainBackgroundDelegationsOptions['onLegacyCoderSettlementAdvisoryReplaced'],
+): Promise<number> {
+	const reconciler =
+		onReconciled ?? getLegacyCoderSettlementReconciler(directory);
+	const candidates = readDelegations(directory)
+		.filter(
+			(record) =>
+				record.normalizedAgent === 'coder' &&
+				Boolean(record.legacyCoderSettlementTransfer) &&
+				Boolean(record.terminalResult),
+		)
+		.slice(0, maxRecords);
+	if (candidates.length === 0) return 0;
+
+	const { transferCoderSettlementToBackground } = await import(
+		'../workflow/coder-settlement.js'
+	);
+	let transferred = 0;
+	for (const record of candidates) {
+		try {
+			const outcome = await transferCoderSettlementToBackground({
+				directory,
+				taskId: record.legacyCoderSettlementTransfer!.taskId,
+				transitionId: record.legacyCoderSettlementTransfer!.transitionId,
+			});
+			if (
+				(outcome === 'transferred' ||
+					outcome === 'already-terminal' ||
+					outcome === 'missing') &&
+				reconciler
+			) {
+				if (await reconciler(record)) {
+					await clearLegacyCoderSettlementTransferPending(
+						directory,
+						record.correlationId,
+					);
+				}
+			}
+			if (outcome === 'transferred') transferred += 1;
+		} catch (error) {
+			const code = legacySettlementErrorCode(error);
+			if (!RETRYABLE_LEGACY_SETTLEMENT_ERROR_CODES.has(code ?? '')) {
+				const advisory = record.advisoryInbox;
+				const manualMessage =
+					`[BACKGROUND COMPLETION ${record.terminalResult?.eventId ?? record.correlationId}] ` +
+					`coder task ${record.evidenceTaskId ?? record.planTaskId ?? 'unknown'} ` +
+					'legacy coder settlement requires manual recovery; run /swarm recover for this task (or /swarm reset-session).';
+				let advisoryRecorded = false;
+				if (advisory?.state === 'pending') {
+					const replaced = await replacePendingBackgroundAdvisory(
+						directory,
+						record.correlationId,
+						{
+							eventId: advisory.eventId,
+							parentSessionId: advisory.parentSessionId,
+							message: manualMessage,
+						},
+					);
+					advisoryRecorded = replaced !== null;
+					if (replaced) {
+						try {
+							await onAdvisoryReplaced?.(record, replaced);
+						} catch (callbackError) {
+							logger.warn(
+								`[background] legacy coder settlement advisory replacement notification failed for ${record.correlationId}: ${callbackError instanceof Error ? callbackError.message : String(callbackError)}`,
+							);
+						}
+					}
+				} else if (record.terminalResult) {
+					const stored = await putPendingBackgroundAdvisory(
+						directory,
+						record.correlationId,
+						{
+							eventId: record.terminalResult.eventId,
+							parentSessionId: record.parentSessionId,
+							message: manualMessage,
+						},
+					);
+					advisoryRecorded = stored !== null;
+				}
+				if (advisoryRecorded) {
+					await clearLegacyCoderSettlementTransferPending(
+						directory,
+						record.correlationId,
+					);
+				}
+				logger.warn(
+					`[background] legacy coder settlement reconciliation requires manual recovery for ${record.correlationId}: ${code ?? 'unknown transfer failure'}`,
+				);
+				continue;
+			}
+			logger.warn(
+				`[background] legacy coder settlement reconciliation deferred for ${record.correlationId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+	return transferred;
+}
+
+function legacySettlementErrorCode(error: unknown): string | null {
+	if (
+		error &&
+		typeof error === 'object' &&
+		'code' in error &&
+		typeof (error as NodeJS.ErrnoException).code === 'string'
+	) {
+		return (error as NodeJS.ErrnoException).code ?? null;
+	}
+	const detail = error instanceof Error ? error.message : String(error);
+	const match = /^([A-Z][A-Z0-9_]*)(?::|$)/.exec(detail.trim());
+	return match?.[1] ?? null;
+}
+
+/**
+ * Shared background maintenance service (issue #2104): one bounded,
+ * event-driven pass that sweeps stale delegation records and reconciles
+ * expired coder-reservation leases with corroborated owner evidence.
+ *
+ * Lock-ordering invariant: this is the ONLY site that touches both store
+ * locks, and it takes them SEQUENTIALLY — the delegations STORE lock first,
+ * fully released, then the RESERVATION lock. Never nested. No code path may
+ * acquire the RESERVATION lock and then the STORE lock.
+ *
+ * Per invocation the work is bounded (maxRecords sweeps / reconciliations;
+ * the underlying reads are already bounded by the checkpoint machinery and
+ * the 4 MiB recovery window). Every release, retained ambiguity, renewal,
+ * contention, and failure emits a durable operator fact into the health
+ * artifact's bounded maintenance ring. Expiry alone never releases: reclaim
+ * requires corroborated owner absence (stale exact owner record, or no owner
+ * record at all beyond the stale timeout), and any uncertainty retains the
+ * reservation fail-closed.
+ */
+export async function maintainBackgroundDelegations(
+	directory: string,
+	options: MaintainBackgroundDelegationsOptions = {},
+): Promise<MaintainBackgroundDelegationsResult> {
+	const now = options.now ?? Date.now();
+	const staleTimeoutMs =
+		options.staleTimeoutMs ?? DEFAULT_STALE_DELEGATION_TIMEOUT_MS;
+	const maxRecords = options.maxRecords ?? DEFAULT_MAINTENANCE_BATCH;
+	const lockTimeoutMs =
+		options.lockTimeoutMs ?? DEFAULT_MAINTENANCE_LOCK_TIMEOUT_MS;
+	const reason = options.reason ?? 'manual';
+	const result: MaintainBackgroundDelegationsResult = {
+		status: 'ok',
+		sweptStale: 0,
+		released: [],
+		renewed: [],
+		retained: [],
+		examinedReservations: 0,
+	};
+	const facts: DelegationMaintenanceFact[] = [];
+	const emitObservation = (
+		status: 'ok' | 'contention' | 'failure',
+		failureReason?: string,
+	): MaintainBackgroundDelegationsResult => {
+		appendDelegationMaintenanceObservation(directory, {
+			at: now,
+			status,
+			reason: failureReason,
+			summary:
+				status === 'ok'
+					? {
+							sweptStale: result.sweptStale,
+							released: result.released.length,
+							renewed: result.renewed.length,
+							retained: result.retained.length,
+						}
+					: undefined,
+			facts,
+		});
+		return {
+			...result,
+			status,
+			...(failureReason ? { reason: failureReason } : {}),
+		};
+	};
+
+	// Phase A — sweep stale delegation records under the STORE lock.
+	try {
+		result.sweptStale = await withEvidenceLock(
+			directory,
+			BACKGROUND_DELEGATIONS_FILE,
+			STORE_LOCK_AGENT,
+			STORE_LOCK_TASK,
+			async () =>
+				sweepStaleLocked(
+					directory,
+					staleTimeoutMs,
+					now,
+					DEFAULT_SWEEPABLE_DELEGATION_STATUSES,
+					{},
+					{ maxSweep: maxRecords },
+				),
+			lockTimeoutMs,
+		);
+	} catch (error) {
+		if (error instanceof EvidenceLockTimeoutError) {
+			facts.push({
+				at: now,
+				kind: 'lock-contention',
+				reason: `maintenance point '${reason}' skipped: delegations store lock contended`,
+			});
+			return emitObservation('contention', error.message);
+		}
+		facts.push({
+			at: now,
+			kind: 'maintenance-failure',
+			reason: `maintenance point '${reason}' sweep failed: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		});
+		return emitObservation(
+			'failure',
+			error instanceof Error ? error.message : String(error),
+		);
+	}
+
+	// Phase B — reconcile reservation leases under the RESERVATION lock.
+	// The decision is re-derived from a FRESH owner scan here; the phase-A
+	// sweep only durably marks records stale, it is not trusted as evidence.
+	try {
+		await withEvidenceLock(
+			directory,
+			BACKGROUND_CODER_RESERVATIONS_FILE,
+			STORE_LOCK_AGENT,
+			RESERVATION_LOCK_TASK,
+			async () => {
+				const reservationScan =
+					scanBackgroundCoderReservationsForAdmission(directory);
+				if (reservationScan.status === 'uncertain') {
+					result.status = 'failure';
+					result.reason = reservationScan.reason;
+					facts.push({
+						at: now,
+						kind: 'maintenance-failure',
+						reason: `reservation store uncertain: ${reservationScan.reason}`,
+					});
+					return;
+				}
+				const ownerScan = await scanDurableCoderOwners(directory);
+				if (ownerScan.status === 'uncertain') {
+					result.status = 'failure';
+					result.reason = ownerScan.reason;
+					facts.push({
+						at: now,
+						kind: 'maintenance-failure',
+						reason: `owner evidence uncertain; all reservations retained: ${ownerScan.reason}`,
+					});
+					return;
+				}
+				const batch = reservationScan.reservations.slice(0, maxRecords);
+				result.examinedReservations = batch.length;
+				const next: BackgroundCoderReservation[] = [];
+				let mutated = false;
+				for (const reservation of batch) {
+					const generation = reservation.generation ?? 1;
+					const primary = findExactPrimaryReservationOwner(
+						reservation,
+						ownerScan,
+					);
+					if (primary && hasProvenReleasedReservationOwner(primary)) {
+						if ((primary.generation ?? 1) !== generation) {
+							// Proven-terminal owner, but for an OLDER generation: a
+							// newer launch may still own this reservation (issue
+							// #2104 — a terminal for generation N must never release
+							// generation N+1). Retain fail-closed.
+							result.retained.push({
+								reservationId: reservation.reservationId,
+								reason: 'owner-terminal-older-generation',
+							});
+							facts.push({
+								at: now,
+								kind: 'retained-ambiguity',
+								reservationId: reservation.reservationId,
+								correlationId: reservation.correlationId ?? undefined,
+								generation,
+								reason: `proven-terminal owner is generation ${primary.generation ?? 1}, reservation owns ${generation}`,
+							});
+							next.push(reservation);
+							continue;
+						}
+						// Proof-based release (no age involved) — also the only path
+						// that may release a legacy, lease-less reservation.
+						mutated = true;
+						result.released.push({
+							reservationId: reservation.reservationId,
+							generation,
+							reason: 'proven-terminal-owner',
+						});
+						facts.push({
+							at: now,
+							kind: 'release',
+							reservationId: reservation.reservationId,
+							correlationId: reservation.correlationId ?? undefined,
+							generation,
+							reason: 'proven-terminal-owner',
+						});
+						continue;
+					}
+					if (reservation.leaseExpiresAt === undefined) {
+						// Legacy reservation without a lease: protected until
+						// corroborated reconciliation; age never releases it.
+						result.retained.push({
+							reservationId: reservation.reservationId,
+							reason: 'protected-legacy-no-lease',
+						});
+						facts.push({
+							at: now,
+							kind: 'retained-protected-legacy',
+							reservationId: reservation.reservationId,
+							generation,
+							reason: 'legacy reservation without leaseExpiresAt',
+						});
+						next.push(reservation);
+						continue;
+					}
+					const leaseExpired = reservation.leaseExpiresAt <= now;
+					if (!leaseExpired) {
+						next.push(reservation);
+						continue;
+					}
+					if (primary) {
+						if ((primary.generation ?? 1) !== generation) {
+							// Owner evidence from an older generation can neither
+							// release nor renew a newer reservation.
+							result.retained.push({
+								reservationId: reservation.reservationId,
+								reason: 'owner-older-generation',
+							});
+							facts.push({
+								at: now,
+								kind: 'retained-ambiguity',
+								reservationId: reservation.reservationId,
+								correlationId: reservation.correlationId ?? undefined,
+								generation,
+								reason: `owner record is generation ${primary.generation ?? 1}, reservation owns ${generation}`,
+							});
+							next.push(reservation);
+							continue;
+						}
+						if (primary.status === 'stale') {
+							// Corroborated owner verdict: the delegation record itself
+							// was finalized stale (by a sweep under the store lock).
+							mutated = true;
+							result.released.push({
+								reservationId: reservation.reservationId,
+								generation,
+								reason: 'owner-swept-stale',
+							});
+							facts.push({
+								at: now,
+								kind: 'release',
+								reservationId: reservation.reservationId,
+								correlationId: reservation.correlationId ?? undefined,
+								generation,
+								reason: 'owner record durably stale',
+							});
+							continue;
+						}
+						if (isActiveCoderOwner(primary)) {
+							// Fresh durable owner activity: verified evidence of live
+							// work — renew the lease for the same generation only.
+							mutated = true;
+							result.renewed.push({
+								reservationId: reservation.reservationId,
+								generation,
+							});
+							facts.push({
+								at: now,
+								kind: 'lease-renewed',
+								reservationId: reservation.reservationId,
+								correlationId: reservation.correlationId ?? undefined,
+								generation,
+								reason: 'exact owner record still active',
+							});
+							next.push({
+								...reservation,
+								leaseExpiresAt: now + BACKGROUND_CODER_RESERVATION_LEASE_MS,
+								updatedAt: now,
+							});
+							continue;
+						}
+						// Terminal-but-unproven owner (e.g. preserved worktree lane):
+						// ambiguity retains the reservation fail-closed.
+						result.retained.push({
+							reservationId: reservation.reservationId,
+							reason: 'owner-terminal-unproven',
+						});
+						facts.push({
+							at: now,
+							kind: 'retained-ambiguity',
+							reservationId: reservation.reservationId,
+							correlationId: reservation.correlationId ?? undefined,
+							generation,
+							reason: `owner status '${primary.status}' does not prove release`,
+						});
+						next.push(reservation);
+						continue;
+					}
+					// No exact primary owner. A record at this correlation with a
+					// DIFFERENT identity is an ownership ambiguity → retain.
+					if (
+						reservation.correlationId !== null &&
+						ownerScan.recordsByCorrelation.has(reservation.correlationId)
+					) {
+						result.retained.push({
+							reservationId: reservation.reservationId,
+							reason: 'owner-identity-mismatch',
+						});
+						facts.push({
+							at: now,
+							kind: 'retained-ambiguity',
+							reservationId: reservation.reservationId,
+							correlationId: reservation.correlationId ?? undefined,
+							generation,
+							reason: 'correlation exists under a different owner identity',
+						});
+						next.push(reservation);
+						continue;
+					}
+					if (now - reservation.createdAt > staleTimeoutMs) {
+						// Every authoritative owner source available to this
+						// subsystem agrees there is no owner: no primary record, no
+						// fallback record, lease expired, and the pre-launch window
+						// exceeded the stale timeout. Reclaim.
+						mutated = true;
+						result.released.push({
+							reservationId: reservation.reservationId,
+							generation,
+							reason: 'unbound-orphan',
+						});
+						facts.push({
+							at: now,
+							kind: 'release',
+							reservationId: reservation.reservationId,
+							generation,
+							reason:
+								'no durable owner anywhere and pre-launch window exceeded',
+						});
+						continue;
+					}
+					result.retained.push({
+						reservationId: reservation.reservationId,
+						reason: 'unbound-within-stale-window',
+					});
+					facts.push({
+						at: now,
+						kind: 'retained-ambiguity',
+						reservationId: reservation.reservationId,
+						generation,
+						reason:
+							'no owner record yet; still inside the pre-launch stale window',
+					});
+					next.push(reservation);
+				}
+				// Reservations beyond the batch stay untouched.
+				next.push(...reservationScan.reservations.slice(maxRecords));
+				if (mutated) {
+					const written = await writeBackgroundCoderReservations(
+						directory,
+						next,
+					);
+					if (!written) {
+						result.status = 'failure';
+						result.reason = 'reservation reconciliation could not be persisted';
+						facts.push({
+							at: now,
+							kind: 'maintenance-failure',
+							reason: 'reservation store write failed during reconciliation',
+						});
+					}
+				}
+			},
+			lockTimeoutMs,
+		);
+	} catch (error) {
+		if (error instanceof EvidenceLockTimeoutError) {
+			facts.push({
+				at: now,
+				kind: 'lock-contention',
+				reason: `maintenance point '${reason}' skipped: reservation store lock contended`,
+			});
+			return emitObservation('contention', error.message);
+		}
+		facts.push({
+			at: now,
+			kind: 'maintenance-failure',
+			reason: `maintenance point '${reason}' reconciliation failed: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		});
+		return emitObservation(
+			'failure',
+			error instanceof Error ? error.message : String(error),
+		);
+	}
+
+	// A terminal observer may have completed ingestion while legacy WAL transfer
+	// was temporarily unavailable. Reconcile those exact task/call identities at
+	// every successful maintenance point, including admission before the next
+	// coder dispatch. The work is bounded by the same maintenance batch.
+	if (!options.skipLegacyCoderSettlementReconciliation) {
+		try {
+			await reconcileLegacyCoderSettlements(
+				directory,
+				maxRecords,
+				options.onLegacyCoderSettlementReconciled ??
+					getLegacyCoderSettlementReconciler(directory),
+				options.onLegacyCoderSettlementAdvisoryReplaced,
+			);
+		} catch (error) {
+			logger.warn(
+				`[background] legacy coder settlement reconciliation pass failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+	if (result.status === 'failure') {
+		return emitObservation('failure', result.reason);
+	}
+	return emitObservation('ok');
 }

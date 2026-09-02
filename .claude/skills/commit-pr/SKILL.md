@@ -167,18 +167,25 @@ Run both linter AND formatter — e.g., `bunx @biomejs/biome@<version> check --w
 bun run typecheck
 bun run lint:ci
 bun run scripts/check-tool-registration.ts
-bash scripts/check-mock-cleanup.sh
-bash scripts/check-invariants.sh
-bash scripts/check-cross-contamination.sh
-bash scripts/check-test-clock.sh
+bun run check:mock-cleanup
+bun run check:invariants
+bun run check:cross-contamination
+bun run check:test-clock
 bun run check:runtime-src-refs
 bun run check:events
 bun run check:retention
+bun run check:registry-citations
+bun run check:core-events
+bun run check:shell-audit
+bun run check:trajectory-store
 bun run check:test-file-cap
+bun run check:pending-fragment
 bun run check:gate-portability
 bun run check:bare-spawn
-bash scripts/check-test-tmpdir.sh
-bash scripts/check-bash-portability.sh
+bun run check:test-tmpdir
+bun run check:bash-portability
+bun run check:error-channel-discard
+bun run check:token-formula
 (cd scripts/swarm-model && node --test)
 bun run package:smoke
 ```

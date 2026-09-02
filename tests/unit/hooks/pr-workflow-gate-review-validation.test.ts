@@ -37,12 +37,17 @@ const reviewedRows = (
 const unclaimed = (ids: readonly string[]): string =>
 	`items lack an authenticated verdict from any successful lane: ${ids.join(', ')}`;
 
+// PR_REVIEW completion now requires a declared terminal verdict (#2383).
+const RV = { reportVerdict: 'APPROVE' } as const;
+const completeReview = () =>
+	completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA, RV);
+
 describe('pr-workflow-gate review validation', () => {
 	test('PR review completion cannot clear with zero reviewer obligations', async () => {
 		await establishReviewPrerequisites();
-		await expect(
-			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA),
-		).rejects.toThrow('at least one reviewer batch');
+		await expect(completeReview()).rejects.toThrow(
+			'at least one reviewer batch',
+		);
 	});
 
 	test('reviewer dispatch rejects a trigger artifact with any micro-lane waiver', async () => {
@@ -128,7 +133,10 @@ describe('pr-workflow-gate review validation', () => {
 				],
 				{ batchId: 'review-missing', prHeadSha: HEAD_SHA },
 			),
-		).rejects.toThrow('mechanically derived inventory');
+		).resolves.toMatchObject({ mode: 'PR_REVIEW' });
+		await expect(
+			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'reviewer'),
+		).rejects.toThrow(candidateIds.at(-1)!);
 		await expect(
 			recordPrReviewValidationBatch(
 				tempDir,
@@ -184,7 +192,7 @@ describe('pr-workflow-gate review validation', () => {
 		const suppressedCriticRows = candidateIds
 			.map(
 				(id) =>
-					`[REVIEWED] | ${id} | DISPROVED | STRUCTURALLY_PROVEN | LOW | NO | file.ts:1 | rationale | probe | reviewer`,
+					`[REVIEWED] | ${id} | DISPROVED | STRUCTURALLY_PROVEN | NONE | NO | file.ts:1 | rationale | probe | reviewer`,
 			)
 			.join('\n');
 		await persistBatch(
@@ -201,9 +209,7 @@ describe('pr-workflow-gate review validation', () => {
 				transcriptIncomplete: true,
 			},
 		);
-		await expect(
-			completePrWorkflow(tempDir, SESSION_ID, 'PR_REVIEW', HEAD_SHA),
-		).rejects.toThrow('require critic coverage');
+		await expect(completeReview()).rejects.toThrow('require critic coverage');
 		await expect(
 			recordPrReviewValidationBatch(
 				tempDir,
@@ -218,7 +224,10 @@ describe('pr-workflow-gate review validation', () => {
 				],
 				{ batchId: 'critic-partial', prHeadSha: HEAD_SHA },
 			),
-		).rejects.toThrow('mechanically derived inventory');
+		).resolves.toMatchObject({ mode: 'PR_REVIEW' });
+		await expect(
+			assertPrReviewValidationSettled(tempDir, SESSION_ID, 'critic'),
+		).rejects.toThrow(candidateIds.at(-1)!);
 		await recordPrReviewValidationBatch(
 			tempDir,
 			SESSION_ID,
@@ -393,10 +402,8 @@ describe('pr-workflow-gate review validation', () => {
 			],
 			{ batchId: 'review-after-critic', prHeadSha: HEAD_SHA },
 		);
-		// Identical classification AND severity, entirely different rationale: a
-		// CLASSIFICATION|SEVERITY tuple binding would still admit the old critic
-		// rows, and parseCriticVerdict alone still accepts them. Only the
-		// full-row digest drops them.
+		// Identical classification AND severity, different rationale: only the
+		// full-row digest drops the stale critic rows a tuple would admit.
 		await persistBatch(
 			'review-after-critic',
 			'swarm-pr-review:reviewer',

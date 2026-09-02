@@ -129,7 +129,7 @@ export function newEventId(): string {
  *
  * `randomBytes` has meaningful per-call overhead, and `newTraceAndSpanId` runs on
  * the `emit()` hot path, whose frugality contract is documented at
- * src/telemetry.ts:315-317. Drawing one larger buffer and consuming it in slices
+ * src/telemetry.ts:393-396. Drawing one larger buffer and consuming it in slices
  * amortizes that overhead across {@link POOL_DRAWS} id pairs.
  *
  * This is strictly a batching change, NOT a weakening: every byte still comes
@@ -157,7 +157,7 @@ function takeIdBytes(): Buffer {
  * Derive a correlated trace/span pair, consuming 24 bytes from the pool above.
  *
  * This exists for the hot path: `createObservation` runs on every `emit()`, and
- * src/telemetry.ts:315-317 documents that path as deliberately frugal.
+ * src/telemetry.ts:393-396 documents that path as deliberately frugal.
  */
 export function newTraceAndSpanId(): TraceAndSpanId {
 	const buffer = takeIdBytes();
@@ -223,4 +223,27 @@ export function pseudonymousRef(absolutePath: string, salt: string): string {
 		.update(salt + LINEAGE_SEPARATOR + absolutePath, 'utf8')
 		.digest('hex')
 		.slice(0, PSEUDONYMOUS_REF_LENGTH);
+}
+
+/**
+ * Produce a pseudonymous reference for a session id (#2044).
+ *
+ * Same construction and salt handling as {@link pseudonymousRef}, applied to the
+ * opaque session id string: `sha256(salt + NUL + sessionId)`, truncated to
+ * {@link PSEUDONYMOUS_REF_LENGTH} hex chars. Used by the learning-health alarm
+ * registry so persisted health state and telemetry payloads never carry raw
+ * session ids (issue #2044 item 10).
+ *
+ * Contract note: session ids are operator-known opaque strings, not secrets;
+ * the pseudonym prevents cross-install linkage exactly as `pseudonymousRef`
+ * does for paths. With the public default salt a holder of a payload can
+ * CONFIRM a guessed session id by re-hashing; a private
+ * {@link LINEAGE_SALT_ENV} restores guess-resistance. This module stays pure —
+ * no I/O; the salt is read at call time.
+ */
+export function pseudonymousSessionRef(
+	sessionId: string,
+	salt: string = resolveLineageSalt(),
+): string {
+	return pseudonymousRef(sessionId, salt);
 }

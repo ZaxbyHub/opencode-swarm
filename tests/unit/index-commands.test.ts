@@ -57,8 +57,11 @@ describe('Swarm subcommand registration', () => {
 		// Catch-all plus the current command registry entries. This includes the
 		// evaluation gate commands, main's CI-monitor command, the context-map
 		// stats command (issue #1672), the swarm-skill-opt shortcut (issue #1822),
-		// and the swarm-recover shortcut (issue #2268).
-		expect(commandKeys.length).toBe(84);
+		// the swarm-recover shortcut (issue #2268), the human-only exact-write
+		// approval shortcut (issue #1824), and the action-local
+		// guardrail-reset command. Issue #1825 adds five blueprint commands and
+		// three harness-candidate commands.
+		expect(commandKeys.length).toBe(94);
 
 		expect(commands.swarm).toBeDefined();
 	});
@@ -139,6 +142,7 @@ describe('Swarm subcommand registration', () => {
 			'swarm-pr-feedback',
 			'swarm-abort-pr-workflow',
 			'swarm-approve-plan-critic',
+			'swarm-approve-write',
 			'swarm-pr-subscribe',
 			'swarm-pr-unsubscribe',
 			'swarm-pr-status',
@@ -166,6 +170,7 @@ describe('Swarm subcommand registration', () => {
 			'swarm-lanes',
 			'swarm-guardrail-explain',
 			'swarm-guardrail-log',
+			'swarm-guardrail-reset',
 			'swarm-unlink',
 			'swarm-full-auto',
 			'swarm-auto-proceed',
@@ -186,6 +191,14 @@ describe('Swarm subcommand registration', () => {
 			'swarm-ci-monitor',
 			'swarm-context-map-stats',
 			'swarm-skill-opt',
+			'swarm-blueprint-validate',
+			'swarm-blueprint-current',
+			'swarm-blueprint-history',
+			'swarm-blueprint-diff',
+			'swarm-blueprint-export',
+			'swarm-harness-candidate-validate',
+			'swarm-harness-candidate-show',
+			'swarm-harness-candidate-diff',
 		];
 
 		for (const subcommand of expectedSubcommands) {

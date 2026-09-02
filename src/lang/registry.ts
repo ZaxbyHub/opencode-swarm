@@ -32,7 +32,7 @@ export const languageDefinitions: LanguageDefinition[] = [
 	},
 	{
 		id: 'python',
-		extensions: ['.py'],
+		extensions: ['.py', '.pyw'],
 		commentNodes: ['comment'],
 	},
 	{
@@ -67,12 +67,14 @@ export const languageDefinitions: LanguageDefinition[] = [
 	},
 	{
 		id: 'csharp',
-		extensions: ['.cs'],
+		// `.csx` (C# script) mirrors src/lang/profiles.ts:799 — the two
+		// registries must claim the same extensions for csharp.
+		extensions: ['.cs', '.csx'],
 		commentNodes: ['comment'],
 	},
 	{
 		id: 'ruby',
-		extensions: ['.rb'],
+		extensions: ['.rb', '.rake', '.gemspec'],
 		commentNodes: ['comment'],
 	},
 	{

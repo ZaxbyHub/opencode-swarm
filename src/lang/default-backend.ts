@@ -12,6 +12,11 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import {
+	resolveLocalCommand,
+	resolveLocalNodeTool,
+	tokenizeCommand,
+} from '../build/command-resolution';
 import { isCommandAvailable } from '../build/discovery';
 import type {
 	BuildCommandSelection,
@@ -50,47 +55,7 @@ function detectFileExists(dir: string, pattern: string): boolean {
 	}
 }
 
-/**
- * Tokenize a string command into an array. Splits on whitespace; respects
- * single and double quotes for argument grouping. Used to convert profile
- * `cmd` strings (which today are written as "npx tsc --noEmit" etc.) into
- * the array form `bunSpawn` expects.
- *
- * This deliberately does NOT support shell metacharacters (`;`, `&`, `|`,
- * `>`, `<`, backticks, `$()`) — backends with non-trivial commands must
- * override `buildTestCommand`/`selectBuildCommand` to return a custom
- * `cmd: string[]`. Splitting a profile string into words is a 90% case;
- * the 10% override their backend.
- */
-export function tokenizeCommand(cmd: string): string[] {
-	const out: string[] = [];
-	let buf = '';
-	let quote: '"' | "'" | null = null;
-	for (const ch of cmd) {
-		if (quote) {
-			if (ch === quote) {
-				quote = null;
-			} else {
-				buf += ch;
-			}
-			continue;
-		}
-		if (ch === '"' || ch === "'") {
-			quote = ch as '"' | "'";
-			continue;
-		}
-		if (ch === ' ' || ch === '\t') {
-			if (buf.length > 0) {
-				out.push(buf);
-				buf = '';
-			}
-			continue;
-		}
-		buf += ch;
-	}
-	if (buf.length > 0) out.push(buf);
-	return out;
-}
+export { tokenizeCommand } from '../build/command-resolution';
 
 /**
  * Default selectTestFramework: highest-priority framework whose detect
@@ -165,28 +130,47 @@ export function defaultBuildTestCommand(
 			return args;
 		}
 		case 'vitest': {
-			const args: string[] = [
-				'npx',
+			const args = resolveLocalNodeTool(
 				'vitest',
-				'run',
-				'--reporter=json',
-				'--outputFile',
-				'.swarm/cache/test-runner-vitest.json',
-			];
+				[
+					'run',
+					'--reporter=json',
+					'--outputFile',
+					'.swarm/cache/test-runner-vitest.json',
+				],
+				dir,
+				process.platform,
+				isCommandAvailable,
+			);
+			if (!args) return null;
 			if (coverage) args.push('--coverage');
 			if (bail) args.push('--bail');
 			if (scope !== 'all' && files.length > 0) args.push(...files);
 			return args;
 		}
 		case 'jest': {
-			const args: string[] = ['npx', 'jest', '--json'];
+			const args = resolveLocalNodeTool(
+				'jest',
+				['--json'],
+				dir,
+				process.platform,
+				isCommandAvailable,
+			);
+			if (!args) return null;
 			if (coverage) args.push('--coverage');
 			if (bail) args.push('--bail');
 			if (scope !== 'all' && files.length > 0) args.push(...files);
 			return args;
 		}
 		case 'mocha': {
-			const args: string[] = ['npx', 'mocha'];
+			const args = resolveLocalNodeTool(
+				'mocha',
+				[],
+				dir,
+				process.platform,
+				isCommandAvailable,
+			);
+			if (!args) return null;
 			if (bail) args.push('--bail');
 			if (scope !== 'all' && files.length > 0) args.push(...files);
 			return args;
@@ -680,12 +664,11 @@ export async function defaultSelectBuildCommand(
 	);
 	for (const cmd of sorted) {
 		if (cmd.detectFile && !detectFileExists(dir, cmd.detectFile)) continue;
-		const argv = tokenizeCommand(cmd.cmd);
-		if (argv.length === 0) continue;
-		if (!isCommandAvailable(argv[0])) continue;
+		const resolved = resolveLocalCommand(cmd.cmd, dir, isCommandAvailable);
+		if (!resolved) continue;
 		return {
 			name: cmd.name,
-			cmd: argv,
+			cmd: resolved.argv,
 			cwd: dir,
 			detectedVia: cmd.detectFile ?? `${profile.id} default`,
 		};

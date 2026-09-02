@@ -5,6 +5,8 @@ import type {
 	FileOntology,
 	FileRole,
 	OntologyFinding,
+	OntologyLink,
+	OntologyLinkConfidence,
 	RouteFact,
 	RouteMethod,
 	SecurityFact,
@@ -39,6 +41,8 @@ const HTTP_METHODS: RouteMethod[] = [
 ];
 
 const MAX_FACTS_PER_KIND = 50;
+const MAX_LINKS_PER_FILE = 200;
+const MAX_CONFIGURES_PER_FILE = 20;
 
 function stripComments(content: string): string {
 	let out = '';
@@ -123,6 +127,277 @@ function boundaryForModule(
 	hasManifest?: (relDir: string) => boolean,
 ): string {
 	return inferPackageBoundary(moduleName, hasManifest);
+}
+
+const blankKeepingNewlines = (m: string): string => m.replace(/[^\n]/g, ' ');
+
+/**
+ * Blank the CONTENTS of multi-line string literals, preserving newlines and
+ * length so line-anchored matching still lines up.
+ *
+ * `stripComments` removes comments but keeps string literals verbatim, so a
+ * line-initial `package` / `namespace` token inside a C# verbatim string
+ * (`@"…"`), a C# raw string, or a Java/Kotlin text block (`"""…"""`) matched the
+ * anchored regexes below and won the boundary — the real declaration lost,
+ * because `String.match` takes the first hit. That is legal, compilable source
+ * (a `@"…"` block holding SQL or config is ordinary C#), not a crafted spoof.
+ *
+ * Single-line string literals are not masked: their literal TEXT cannot contain
+ * a raw newline, so no interior line can be line-initial. The one exception is a
+ * C# interpolated string, which may span lines inside an interpolation hole —
+ * but a hole contains code, not literal text, so leaving it unmasked is correct.
+ * Only the multi-line forms are masked, which keeps the change narrow.
+ */
+
+/**
+ * @internal Exported only so the scanner's structural invariants (termination,
+ * length preservation, line-count preservation) can be fuzzed directly. Not
+ * re-exported from the package index; call `extractFileOntology` instead.
+ */
+export function maskMultilineStringLiterals(
+	text: string,
+	language: string,
+): string {
+	// SINGLE LEFT-TO-RIGHT SCAN, deliberately not a set of independent regexes.
+	//
+	// Two successive regex-only attempts each over-reached and DELETED a real
+	// declaration, in ways the previous fix did not anticipate:
+	//   - masking `"""` before `@"` let the escaped-quote tail of `@"say ""hi"""`
+	//     open a spurious region running to the next `"""` in the file;
+	//   - a bare `@"` start pattern fired on the `@"` inside an ORDINARY string
+	//     ending in `@` (`"team@"`), running forward to the next quote anywhere.
+	// Both were WORSE than the bug being fixed: the declaration was lost
+	// entirely rather than merely mis-chosen. The root cause is that a regex has
+	// no notion of already being inside a literal. Scanning once — and CONSUMING
+	// ordinary strings and char literals rather than ignoring them — closes those
+	// two specific holes: a quote or `@` inside an ordinary literal can no longer
+	// open a multi-line one.
+	//
+	// It is NOT a proof of total correctness, and this comment has twice been
+	// written as if it were. Known surviving gaps, all documented in
+	// docs/repo-graph-symbol-graph.md: an unterminated multi-line literal leaves
+	// the file remainder unmasked; Kotlin's nesting block comments defeat
+	// `stripComments`; and a C# verbatim path literal (`@"C:\dir\"`) makes
+	// `stripComments` swallow its own terminator, leaving a later block comment
+	// live. This scanner runs downstream of `stripComments` and cannot fix that.
+	const csharp = language === 'csharp';
+	let out = '';
+	let i = 0;
+	while (i < text.length) {
+		const ch = text[i];
+
+		// Raw/text-block literal: Java text block, Kotlin raw string, C# 11 raw
+		// string. The delimiter is NOT always three quotes. A C# raw string opens
+		// with a run of N >= 3, which is the whole point of the form:
+		// `""""…""""` is how you embed a literal `"""`.
+		// Matching a hard-coded `"""` closed such a literal on its own CONTENT,
+		// resuming the scan inside the string and deleting a real declaration
+		// below it. Java and Kotlin only ever open with three.
+		const openLen = quoteRunLength(text, i);
+		if (openLen >= 3) {
+			const delim = csharp ? openLen : 3;
+			const end = findClosingQuoteRun(
+				text,
+				i + delim,
+				delim,
+				language === 'java',
+			);
+			if (end === -1) {
+				// Unterminated: emit the remainder untouched rather than blanking
+				// the rest of the file.
+				out += text.slice(i);
+				break;
+			}
+			const fence = '"'.repeat(delim);
+			out += `${fence}${blankKeepingNewlines(text.slice(i + delim, end))}${fence}`;
+			i = end + delim;
+			continue;
+		}
+
+		// C# verbatim, in all three legal prefix orderings: @"…", $@"…", @$"…".
+		//
+		// The `csharp` gate is DEFENSIVE and deliberately has no test: widening it
+		// to every language is an equivalent mutation on valid source, because in
+		// Java and Kotlin `@` must be followed by an identifier, so `@"` adjacency
+		// in a code position is not parseable input at all. It is kept because the
+		// masker runs over arbitrary workspace files, including truncated and
+		// generated ones, where that guarantee does not hold.
+		const prefixLen = csharp ? matchVerbatimPrefix(text, i) : 0;
+		if (prefixLen > 0) {
+			const bodyStart = i + prefixLen;
+			let j = bodyStart;
+			let closed = -1;
+			while (j < text.length) {
+				if (text[j] === '"') {
+					// A doubled "" is an escaped quote and continues the literal.
+					if (text[j + 1] === '"') {
+						j += 2;
+						continue;
+					}
+					closed = j;
+					break;
+				}
+				j++;
+			}
+			if (closed === -1) {
+				out += text.slice(i);
+				break;
+			}
+			out += `${text.slice(i, bodyStart)}${blankKeepingNewlines(
+				text.slice(bodyStart, closed),
+			)}"`;
+			i = closed + 1;
+			continue;
+		}
+
+		// Ordinary string / char literal: CONSUMED, never blanked. Consuming is
+		// the whole point — it is what stops a `@` or a quote inside one from
+		// being read as the start of a multi-line literal.
+		//
+		// The consume is bounded to the current LINE. None of java/kotlin/csharp
+		// permits a raw newline in the literal TEXT of an ordinary string or char
+		// literal (a C# interpolation hole may span lines, but it holds code, not
+		// literal text, so leaving it unmasked is correct), so a
+		// quote with no partner on its own line is not a delimiter at all — it is
+		// an odd quote in text this scanner does not tokenize, most commonly a C#
+		// preprocessor directive (`#warning check "`, `#region Customer's data`),
+		// whose message is arbitrary input-characters and is never string-tokenized.
+		// Consuming such a quote to EOF desynchronizes every branch below it:
+		// code is read as literal and literal as code, which both DELETED a real
+		// `namespace` declaration and left the FB-011 spoof winning. An unpaired
+		// quote is therefore emitted as a single ordinary character.
+		if (ch === '"' || ch === "'") {
+			let j = i + 1;
+			while (j < text.length && text[j] !== ch && text[j] !== '\n') {
+				// A backslash escapes the next character, but never a newline.
+				if (text[j] === '\\' && text[j + 1] !== '\n') j++;
+				j++;
+			}
+			if (j >= text.length || text[j] === '\n') {
+				out += ch;
+				i++;
+				continue;
+			}
+			out += text.slice(i, j + 1);
+			i = j + 1;
+			continue;
+		}
+
+		out += ch;
+		i++;
+	}
+	return out;
+}
+
+/** Number of consecutive `"` characters starting at `i`. */
+function quoteRunLength(text: string, i: number): number {
+	let n = 0;
+	while (text[i + n] === '"') n++;
+	return n;
+}
+
+/**
+ * Index of the closing delimiter for a raw literal opened with `delim` quotes,
+ * or -1. Runs are measured maximally, so a longer run is never mistaken for the
+ * shorter delimiter it starts with, and the fence is taken as the LAST `delim`
+ * quotes of the closing run.
+ *
+ * `escapes` is true only for Java. A Java text block is the one raw form with
+ * escape sequences (JLS 3.10.6), and `\"""` is the JEP 378 idiom for embedding a
+ * text block inside a text block — only two of those three quotes are unescaped,
+ * so it must NOT terminate. Ignoring that closed the literal on its own content
+ * and leaked a `package` declaration out of a text block. C# raw strings and
+ * Kotlin raw strings have no escapes at all, so applying this to them would be
+ * wrong in the other direction.
+ *
+ * Taking the last `delim` quotes rather than requiring an exact-length run is
+ * deliberate. On compilable C# the two are indistinguishable — a longer closing
+ * run is CS8998 — but on malformed or generated input, requiring exactness makes
+ * the scan skip the run and hunt forward, blanking real code in between. The
+ * looser rule bounds the damage, and matches Kotlin, which genuinely ends at the
+ * last three quotes of a run.
+ */
+function findClosingQuoteRun(
+	text: string,
+	from: number,
+	delim: number,
+	escapes: boolean,
+): number {
+	let j = from;
+	while (j < text.length) {
+		if (escapes && text[j] === '\\') {
+			j += 2;
+			continue;
+		}
+		if (text[j] !== '"') {
+			j++;
+			continue;
+		}
+		const runLen = quoteRunLength(text, j);
+		if (runLen >= delim) return j + runLen - delim;
+		j += runLen;
+	}
+	return -1;
+}
+
+/**
+ * Length of a C# verbatim-string prefix at `i` (`@"`, `$@"`, `@$"`), or 0.
+ * C# accepts either order of the `$` and `@` sigils; matching only `@"` left
+ * `@$"…"` unmasked, which kept alive the very spoof this masking prevents.
+ */
+function matchVerbatimPrefix(text: string, i: number): number {
+	if (text.startsWith('@"', i)) return 2;
+	if (text.startsWith('$@"', i) || text.startsWith('@$"', i)) return 3;
+	return 0;
+}
+
+/**
+ * Extract the *declared* package / namespace from JVM and .NET source text.
+ *
+ * `boundaryForModule` derives a boundary from the file path, which for a Java
+ * file at `src/main/java/com/example/Foo.java` yields a path prefix rather than
+ * the package the compiler actually sees (issue #1529, RC-8). The declaration
+ * in the source is the authoritative answer, so it wins when present.
+ *
+ * Declaration forms covered. Node names are given for orientation only: this
+ * function is an anchored regex over comment-stripped, string-masked text, NOT a
+ * parse. It never loads a grammar.
+ * - Java `package_declaration` — `package a.b.c;` (trailing `;` required).
+ * - Kotlin `package_header` — `package a.b.c` (no `;`).
+ * - C# `namespace_declaration` — `namespace N { … }` (brace may be on the
+ *   next line).
+ * - C# `file_scoped_namespace_declaration` — `namespace N;` (the .NET 6+
+ *   project-template default).
+ *
+ * Returns `null` for every other language *and* for JVM/.NET files with no
+ * declaration (Java default package, C# top-level statements), so the existing
+ * path-derived fallback still applies.
+ *
+ * @param language - tree-sitter grammar id (`java` | `kotlin` | `csharp` | …)
+ * @param content - file content with comments already stripped, so a
+ *   commented-out declaration cannot win
+ */
+function sourceBoundaryForLanguage(
+	language: string,
+	content: string,
+): string | null {
+	if (language !== 'java' && language !== 'kotlin' && language !== 'csharp') {
+		return null;
+	}
+	const scanned = maskMultilineStringLiterals(content, language);
+	if (language === 'java' || language === 'kotlin') {
+		const pkg = scanned.match(/^[ \t]*package[ \t]+([A-Za-z_][\w.]*)[ \t]*;?/m);
+		if (pkg?.[1]) return pkg[1];
+		return null;
+	}
+	if (language === 'csharp') {
+		// `\s*` (not `[ \t]*`) before the terminator so `namespace N` followed by
+		// a newline and `{` on the next line is still recognised.
+		const ns = scanned.match(/^[ \t]*namespace[ \t]+([A-Za-z_][\w.]*)\s*[;{]/m);
+		if (ns?.[1]) return ns[1];
+		return null;
+	}
+	return null;
 }
 
 function inferRoles(moduleName: string, content: string): FileRole[] {
@@ -220,6 +495,20 @@ function routeSegment(segment: string): string {
 				rest ? `:${name}*` : `:${name}`,
 		)
 		.replace(/\.[^.]+$/, '');
+}
+
+/**
+ * Normalize one segment of a user-supplied route path so `route_trace` inputs
+ * like `/api/users/[...slug]` match the normalized form RouteFacts store
+ * (`/api/users/:slug*`). Exported for the query layer (KG-15, issue #1536).
+ */
+export function normalizeRoutePathInput(input: string): string {
+	const segments = input
+		.replace(/\\/g, '/')
+		.split('/')
+		.filter((segment) => segment.length > 0)
+		.map((segment) => routeSegment(segment));
+	return `/${segments.join('/')}`.replace(/\/+/g, '/');
 }
 
 function extractRoutes(moduleName: string, content: string): RouteFact[] {
@@ -451,8 +740,12 @@ function buildFindings(
 		findings.push({
 			code: 'api_route_without_detected_auth',
 			severity: 'medium',
+			// File-level heuristic: the auth sweep covers the whole file, so a
+			// guarded sibling route suppresses this advisory for every route in
+			// the file. Absence of this finding is NOT evidence that an
+			// individual route is guarded (PR-comment F-003).
 			message:
-				'No authentication, authorization, or CSRF guard was detected near this route.',
+				'No authentication, authorization, or CSRF guard was detected anywhere in this file; absence of this finding does not prove an individual route is guarded.',
 			line: routes[0]?.line,
 		});
 	}
@@ -479,6 +772,169 @@ function buildFindings(
 	return findings;
 }
 
+/**
+ * Extract the route-handler symbol for a router-call route line, when the
+ * FINAL argument is a named identifier (e.g. `router.get('/x', getUser)` or
+ * `app.post('/x', authMw, validate, createUser)`). Anchoring on the last
+ * argument matters: capturing "the identifier after the path" bound the WRONG
+ * symbol (a middleware) on 3+-argument calls. Inline arrow/function handlers
+ * and trailing option objects return null — the binding is file-level.
+ *
+ * The length bail keeps the lazy-scan regex away from quadratic backtracking:
+ * a pathological-but-legal multi-hundred-KB argument (giant inline string)
+ * would otherwise stall the synchronous build loop for tens of seconds.
+ */
+function routerCallHandlerSymbol(line: string): string | null {
+	if (line.length > 500) return null;
+	const match = line.match(
+		/\b(?:router|app|server)\s*\.\s*(?:get|post|put|patch|delete|options|head|all)\s*\([^(]*?([A-Za-z_$][\w$]*)\s*\)\s*[;,)]?\s*$/,
+	);
+	return match?.[1] ?? null;
+}
+
+const CONFIG_KEY_PATTERN =
+	/\bprocess\.env\.([A-Za-z_$][A-Za-z0-9_$]*)\b|\bprocess\.env\[\s*['"]([A-Za-z_$][A-Za-z0-9_$]*)['"]\s*\]|\bimport\.meta\.env\.([A-Za-z_$][A-Za-z0-9_$]*)\b|\bDeno\.env\.get\(\s*['"]([A-Za-z_$][A-Za-z0-9_$]*)['"]\s*\)/g;
+
+/**
+ * Extract change-risk links (KG-15, issue #1536): symbol/fact bindings that
+ * connect routes, data operations, security facts, and config keys to their
+ * subject so reviewers, test engineers, and security agents can query them
+ * without broad file exploration.
+ *
+ * Runs on the comment-stripped content and the ALREADY-CAPPED fact arrays.
+ * Deterministic order: HANDLES_ROUTE (route array order) → READS/WRITES/
+ * DELETES (line asc) → VALIDATES/AUTHORIZES (line asc) → CONFIGURES (line
+ * asc, deduped by key, <= MAX_CONFIGURES_PER_FILE). TESTS and USES_FIXTURE
+ * are derived at query time (see `buildTestPack`), never extracted here.
+ */
+function extractLinks(
+	content: string,
+	routes: RouteFact[],
+	dataOperations: DataOperationFact[],
+	security: SecurityFact[],
+): OntologyLink[] {
+	const lines = content.split(/\r?\n/);
+	const links: OntologyLink[] = [];
+
+	// HANDLES_ROUTE — bind each route fact to its handler when evidence exists.
+	for (const route of routes) {
+		if (route.source === 'handler_export') {
+			links.push({
+				kind: 'HANDLES_ROUTE',
+				subject: `${route.method} ${route.path}`,
+				...(route.line !== undefined ? { line: route.line } : {}),
+				...(route.line !== undefined
+					? { evidence: (lines[route.line - 1] ?? '').trim().slice(0, 160) }
+					: {}),
+				confidence: 'high',
+				symbol: route.method,
+			});
+		} else if (route.source === 'router_call') {
+			const handler =
+				route.line !== undefined
+					? routerCallHandlerSymbol(lines[route.line - 1] ?? '')
+					: null;
+			links.push({
+				kind: 'HANDLES_ROUTE',
+				subject: `${route.method} ${route.path}`,
+				...(route.line !== undefined ? { line: route.line } : {}),
+				...(route.line !== undefined
+					? { evidence: (lines[route.line - 1] ?? '').trim().slice(0, 160) }
+					: {}),
+				confidence: 'medium',
+				...(handler ? { symbol: handler } : {}),
+			});
+		} else {
+			links.push({
+				kind: 'HANDLES_ROUTE',
+				subject: `${route.method} ${route.path}`,
+				confidence: 'low',
+			});
+		}
+	}
+
+	// READS / WRITES / DELETES — entity-keyed data access. Only facts with a
+	// known entity produce a link; entity-less facts remain queryable facts.
+	const operationKind: Record<
+		DataOperationFact['operation'],
+		'READS' | 'WRITES' | 'DELETES' | null
+	> = {
+		read: 'READS',
+		write: 'WRITES',
+		delete: 'DELETES',
+		transaction: 'WRITES',
+		migration: 'WRITES',
+	};
+	const dataLinks: OntologyLink[] = [];
+	for (const fact of dataOperations) {
+		if (!fact.entity) continue;
+		const kind = operationKind[fact.operation];
+		if (!kind) continue;
+		const confidence: OntologyLinkConfidence =
+			fact.operation === 'transaction' || fact.operation === 'migration'
+				? 'low'
+				: 'medium';
+		dataLinks.push({
+			kind,
+			subject: fact.entity,
+			line: fact.line,
+			evidence: fact.evidence,
+			confidence,
+		});
+	}
+	dataLinks.sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
+	links.push(...dataLinks);
+
+	// VALIDATES / AUTHORIZES — security fact binding (file-level).
+	const securityLinks: OntologyLink[] = [];
+	for (const fact of security) {
+		if (fact.kind === 'input_validation') {
+			securityLinks.push({
+				kind: 'VALIDATES',
+				line: fact.line,
+				evidence: fact.evidence,
+				confidence: fact.confidence,
+			});
+		} else if (fact.kind === 'authorization') {
+			securityLinks.push({
+				kind: 'AUTHORIZES',
+				line: fact.line,
+				evidence: fact.evidence,
+				confidence: fact.confidence,
+			});
+		}
+	}
+	securityLinks.sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
+	links.push(...securityLinks);
+
+	// CONFIGURES — env/config key access, deduped by key (first occurrence).
+	const seenKeys = new Set<string>();
+	const configureLinks: OntologyLink[] = [];
+	for (
+		let i = 0;
+		i < lines.length && configureLinks.length < MAX_CONFIGURES_PER_FILE;
+		i++
+	) {
+		const line = lines[i];
+		for (const match of line.matchAll(CONFIG_KEY_PATTERN)) {
+			if (configureLinks.length >= MAX_CONFIGURES_PER_FILE) break;
+			const key = match[1] ?? match[2] ?? match[3] ?? match[4];
+			if (!key || seenKeys.has(key)) continue;
+			seenKeys.add(key);
+			configureLinks.push({
+				kind: 'CONFIGURES',
+				subject: key,
+				line: i + 1,
+				evidence: line.trim().slice(0, 160),
+				confidence: 'medium',
+			});
+		}
+	}
+	links.push(...configureLinks);
+
+	return links.slice(0, MAX_LINKS_PER_FILE);
+}
+
 export function extractFileOntology(
 	input: ExtractFileOntologyInput,
 ): FileOntology {
@@ -490,14 +946,20 @@ export function extractFileOntology(
 	const security = extractSecurityFacts(content);
 	const conventions = extractConventions(moduleName, roles, routes);
 	const findings = buildFindings(roles, routes, dataOperations, security);
+	// Order invariant: links are computed LAST from the final (already-capped)
+	// fact arrays; reordering breaks the deterministic link contract.
+	const links = extractLinks(content, routes, dataOperations, security);
 
 	return {
 		roles,
-		packageBoundary: boundaryForModule(moduleName, input.hasManifest),
+		packageBoundary:
+			sourceBoundaryForLanguage(input.language, content) ??
+			boundaryForModule(moduleName, input.hasManifest),
 		routes,
 		dataOperations,
 		security,
 		conventions,
 		findings,
+		links,
 	};
 }

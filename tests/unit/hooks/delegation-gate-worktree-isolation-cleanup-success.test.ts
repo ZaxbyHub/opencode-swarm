@@ -17,7 +17,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	_internals,
-	abortStandardWorktreeDispatch,
 	awaitingMergeByCallID,
 	cleanupStandardWorktreeForCallId,
 	resetStandardWorktreeIsolationState,
@@ -504,14 +503,11 @@ describe('FR-001a: cleanupStandardWorktreeForCallId — awaiting-merge state (pr
 		expect(awaitingMergeByCallID.has(callID)).toBe(false);
 	});
 
-	// ─── Merge-back-exception catch path (delegation-gate.ts:1784-1798) ─────────
-	// When finishStandardWorktreeDispatch throws, the catch handler calls
-	// abortStandardWorktreeDispatch (reason='denied') via _wtiInternals.
-	// When finishStandardWorktreeDispatch throws (attemptMergeBackFromDirty rejects),
-	// cleanup has NOT yet been called — the dispatch is still in standardWorktreeByCallID.
-	// The catch handler calls abortStandardWorktreeDispatch which finds it there and cleans up.
+	// ─── Merge-back-exception fail-safe path ───────────────────────────────────
+	// A merge-back rejection is converted into a typed failed settlement. The
+	// lane remains available for recovery while both in-memory registries clear.
 
-	it('cleanup fires via catch handler when finishStandardWorktreeDispatch throws (standard state)', async () => {
+	it('failed settlement preserves the lane after merge-back rejection', async () => {
 		const callID = 'call-merge-back-exception';
 		const worktreePath = path.join(tempDir, 'wt-exception');
 		const branchName = 'swarm-lane/test-session/lane-exception';
@@ -524,7 +520,7 @@ describe('FR-001a: cleanupStandardWorktreeForCallId — awaiting-merge state (pr
 			[];
 		const cleanupCalls: Array<{ directory: string; branchName: string }> = [];
 
-		// Mock preserveDirtyWorktreeForCallId to return clean so abort proceeds to removeWorktree
+		// Preserve/remove/cleanup are not called: the lane remains recoverable.
 		_internals.preserveDirtyWorktreeForCallId = mock(async () => ({
 			outcome: 'clean' as const,
 			preserved: false,
@@ -544,7 +540,7 @@ describe('FR-001a: cleanupStandardWorktreeForCallId — awaiting-merge state (pr
 			},
 		);
 
-		// Simulate attemptMergeBackFromDirty throwing (triggers queue rejection)
+		// Simulate attemptMergeBackFromDirty throwing (typed failed settlement)
 		_internals.attemptMergeBackFromDirty = mock(async () => {
 			throw new Error('simulated merge-back failure');
 		});
@@ -553,36 +549,27 @@ describe('FR-001a: cleanupStandardWorktreeForCallId — awaiting-merge state (pr
 			'../../../src/hooks/delegation-gate/worktree-isolation'
 		);
 
-		// Call finishStandardWorktreeDispatch — it throws; the catch handler
-		// at delegation-gate.ts:1790 calls abortStandardWorktreeDispatch
-		await finishStandardWorktreeDispatch(
+		const settlement = await finishStandardWorktreeDispatch(
 			tempDir,
 			dispatch,
 			undefined,
 			callID,
-		).catch(async (_err: unknown) => {
-			await abortStandardWorktreeDispatch(callID, 'denied', tempDir);
-		});
+		);
 
-		// abortStandardWorktreeDispatch found dispatch in standardWorktreeByCallID and cleaned up
-		expect(removeCalls).toHaveLength(1);
-		expect(removeCalls[0].worktreePath).toBe(worktreePath);
-
-		expect(cleanupCalls).toHaveLength(1);
-		expect(cleanupCalls[0].branchName).toBe(branchName);
+		expect(settlement.outcome).toBe('failed');
+		expect(removeCalls).toHaveLength(0);
+		expect(cleanupCalls).toHaveLength(0);
 
 		// Both maps should be cleared
 		expect(standardWorktreeByCallID.has(callID)).toBe(false);
 		expect(awaitingMergeByCallID.has(callID)).toBe(false);
 	});
 
-	// ─── abortStandardWorktreeDispatch wiring in merge-back exception path ─────
-	// Regression test: the catch handler at delegation-gate.ts:1790 must call
-	// abortStandardWorktreeDispatch (via _wtiInternals) with reason='denied' when
-	// merge-back throws. This verifies the abort hook is wired to a real
-	// production failure path (not just exported+unit-tested in isolation).
+	// ─── Awaiting-merge typed failure path ─────────────────────────────────────
+	// A merge-back rejection clears the awaiting registry while preserving the
+	// lane for recovery; no destructive abort is attempted.
 
-	it('abortStandardWorktreeDispatch is called from the merge-back exception path with reason=denied', async () => {
+	it('clears awaiting-merge state on typed merge-back failure', async () => {
 		const callID = 'call-merge-back-abort-wiring';
 		const worktreePath = path.join(tempDir, 'wt-abort-wiring');
 		const branchName = 'swarm-lane/test-session/lane-abort-wiring';
@@ -602,20 +589,6 @@ describe('FR-001a: cleanupStandardWorktreeForCallId — awaiting-merge state (pr
 			queuedAt: Date.now(),
 		});
 
-		let abortCalledWith: {
-			callID: string;
-			reason: string;
-			directory: string;
-		} | null = null;
-		const originalAbort = _internals.abortStandardWorktreeDispatch;
-		_internals.abortStandardWorktreeDispatch = mock(
-			async (cID: string, reason: string, dir: string) => {
-				abortCalledWith = { callID: cID, reason, directory: dir };
-				// Call the real implementation to exercise the full cleanup path
-				await originalAbort(cID, reason as 'denied' | 'cancelled', dir);
-			},
-		);
-
 		_internals.attemptMergeBackFromDirty = mock(async () => {
 			throw new Error('merge-back failure for abort wiring test');
 		});
@@ -624,23 +597,15 @@ describe('FR-001a: cleanupStandardWorktreeForCallId — awaiting-merge state (pr
 			'../../../src/hooks/delegation-gate/worktree-isolation'
 		);
 
-		await finishStandardWorktreeDispatch(
+		const settlement = await finishStandardWorktreeDispatch(
 			tempDir,
 			dispatch,
 			undefined,
 			callID,
-		).catch(async () => {
-			// Production catch block at delegation-gate.ts:1790
-			await _internals.abortStandardWorktreeDispatch(callID, 'denied', tempDir);
-		});
+		);
 
-		// Verify abort was called with the correct arguments
-		expect(abortCalledWith).not.toBeNull();
-		expect(abortCalledWith!.callID).toBe(callID);
-		expect(abortCalledWith!.reason).toBe('denied');
-		expect(abortCalledWith!.directory).toBe(tempDir);
-
-		// Restore
-		_internals.abortStandardWorktreeDispatch = originalAbort;
+		expect(settlement.outcome).toBe('failed');
+		expect(standardWorktreeByCallID.has(callID)).toBe(false);
+		expect(awaitingMergeByCallID.has(callID)).toBe(false);
 	});
 });

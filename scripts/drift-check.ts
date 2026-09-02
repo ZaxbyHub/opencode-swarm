@@ -19,7 +19,11 @@
  *   4. command          — COMMAND_REGISTRY structural integrity.
  *   5. agent            — ALL_AGENT_NAMES vs AGENT_TOOL_MAP and the opt-in maps.
  *   6. docs-claim       — numeric documentation claims vs importable source.
- *   7. dep-freshness    — locked @opencode-ai/* resolution vs npm-latest (issue
+ *   7. config-schema    — checked-in opencode-swarm.schema.json vs
+ *                         regeneration from PluginConfigSchema (issue #1663).
+ *   8. config-docs      — generated top-level-config-keys section of
+ *                         docs/configuration.md vs regeneration (issue #1663).
+ *   9. dep-freshness    — locked @opencode-ai/* resolution vs npm-latest (issue
  *                         #1899). Env-gated (SWARM_DEP_FRESHNESS_CHECK) and
  *                         fail-open: emits advisory `notice` findings only, never
  *                         blocks, so a stale lockfile can't silently age again.
@@ -39,8 +43,19 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { collectToolRegistrationErrors } from './check-tool-registration';
 import { collectEventContractErrors } from './check-event-contract';
+import { collectCoreEventsUsageErrors } from './check-core-events-usage';
+import { collectShellAuditUsageErrors } from './check-shell-audit-usage';
+import { collectTrajectoryStoreUsageErrors } from './check-trajectory-store-usage';
 import { detectDocsClaimDrift } from './drift-check-docs-claims';
 import { checkSkillAssertions, formatBrokenAssertions } from './check-skill-assertions';
+import {
+	CONFIG_DOCS_MARKER_BEGIN,
+	CONFIG_DOCS_MARKER_END,
+	CONFIG_DOCS_RELATIVE_PATH,
+	CONFIG_SCHEMA_RELATIVE_PATH,
+	buildConfigDocsSection,
+	serializeConfigSchema,
+} from './generate-config-schema';
 import { BUNDLED_PROJECT_SKILLS } from '../src/config/bundled-skills';
 import { ALL_AGENT_NAMES } from '../src/config/agent-names';
 import {
@@ -835,6 +850,45 @@ export function detectEventContractDrift(): DriftFinding[] {
 }
 
 // ---------------------------------------------------------------------------
+// 3b) Core event store usage drift (issue #2039 anti-bypass ratchet)
+// ---------------------------------------------------------------------------
+
+export function detectCoreEventsUsageDrift(): DriftFinding[] {
+	return collectCoreEventsUsageErrors().map((message) => ({
+		category: 'core-events-usage',
+		severity: 'error' as const,
+		file: 'src/events/core-events.ts',
+		message,
+	}));
+}
+
+// ---------------------------------------------------------------------------
+// 3c) Shell-audit store usage drift (issue #2040 anti-bypass ratchet)
+// ---------------------------------------------------------------------------
+
+export function detectShellAuditUsageDrift(): DriftFinding[] {
+	return collectShellAuditUsageErrors().map((message) => ({
+		category: 'shell-audit-usage',
+		severity: 'error' as const,
+		file: 'src/hooks/guardrails/shell-audit-store.ts',
+		message,
+	}));
+}
+
+// ---------------------------------------------------------------------------
+// 3d) Trajectory-store usage drift (issue #2041 anti-bypass ratchet)
+// ---------------------------------------------------------------------------
+
+export function detectTrajectoryStoreUsageDrift(): DriftFinding[] {
+	return collectTrajectoryStoreUsageErrors().map((message) => ({
+		category: 'trajectory-store-usage',
+		severity: 'error' as const,
+		file: 'src/prm/trajectory-store.ts',
+		message,
+	}));
+}
+
+// ---------------------------------------------------------------------------
 // 4) Command registry drift
 // ---------------------------------------------------------------------------
 
@@ -1295,10 +1349,122 @@ export async function detectDependencyFreshnessDrift(
 }
 
 // ---------------------------------------------------------------------------
+// Config schema / config docs drift (issue #1663)
+// ---------------------------------------------------------------------------
+
+/**
+ * The checked-in `opencode-swarm.schema.json` must byte-match regeneration
+ * from `PluginConfigSchema`. Someone editing `src/config/schema.ts` without
+ * rerunning `bun run scripts/generate-config-schema.ts` drifts the shipped
+ * editor-validation artifact away from the runtime schema.
+ */
+export function detectConfigSchemaDrift(root: string = REPO_ROOT): DriftFinding[] {
+	const findings: DriftFinding[] = [];
+	const category = 'config-schema';
+	const schemaPath = path.join(root, CONFIG_SCHEMA_RELATIVE_PATH);
+
+	let checkedIn: string;
+	try {
+		checkedIn = fs.readFileSync(schemaPath, 'utf-8');
+	} catch {
+		findings.push({
+			category,
+			severity: 'error',
+			file: CONFIG_SCHEMA_RELATIVE_PATH,
+			message: `${CONFIG_SCHEMA_RELATIVE_PATH} is missing — generate it with \`bun run scripts/generate-config-schema.ts\``,
+		});
+		return findings;
+	}
+
+	const expected = serializeConfigSchema();
+	if (checkedIn !== expected) {
+		const firstDiff = firstDifferingLine(checkedIn, expected);
+		findings.push({
+			category,
+			severity: 'error',
+			file: CONFIG_SCHEMA_RELATIVE_PATH,
+			message:
+				`${CONFIG_SCHEMA_RELATIVE_PATH} is stale (first difference near line ${firstDiff}) — ` +
+				'regenerate with `bun run scripts/generate-config-schema.ts` after editing src/config/schema.ts',
+		});
+	}
+	return findings;
+}
+
+/**
+ * The marker-delimited generated section of `docs/configuration.md` must
+ * match regeneration from `PluginConfigSchema`, so the "all configuration
+ * keys" reference stays complete as the schema evolves.
+ */
+export function detectConfigDocsKeysDrift(root: string = REPO_ROOT): DriftFinding[] {
+	const findings: DriftFinding[] = [];
+	const category = 'config-docs';
+	const docsPath = path.join(root, CONFIG_DOCS_RELATIVE_PATH);
+
+	let doc: string;
+	try {
+		doc = fs.readFileSync(docsPath, 'utf-8');
+	} catch {
+		findings.push({
+			category,
+			severity: 'error',
+			file: CONFIG_DOCS_RELATIVE_PATH,
+			message: `${CONFIG_DOCS_RELATIVE_PATH} not found — cannot verify generated config-keys section`,
+		});
+		return findings;
+	}
+
+	const beginIndex = doc.indexOf(CONFIG_DOCS_MARKER_BEGIN);
+	const endIndex = doc.indexOf(CONFIG_DOCS_MARKER_END);
+	if (beginIndex === -1 || endIndex === -1 || endIndex < beginIndex) {
+		findings.push({
+			category,
+			severity: 'error',
+			file: CONFIG_DOCS_RELATIVE_PATH,
+			message:
+				`generated config-keys markers missing in ${CONFIG_DOCS_RELATIVE_PATH} — ` +
+				'restore them and regenerate with `bun run scripts/generate-config-schema.ts`',
+		});
+		return findings;
+	}
+
+	const embedded = doc.slice(
+		beginIndex,
+		endIndex + CONFIG_DOCS_MARKER_END.length,
+	);
+	const expected = buildConfigDocsSection();
+	if (embedded !== expected) {
+		const firstDiff = firstDifferingLine(embedded, expected);
+		findings.push({
+			category,
+			severity: 'error',
+			file: CONFIG_DOCS_RELATIVE_PATH,
+			message:
+				`generated top-level-config-keys section in ${CONFIG_DOCS_RELATIVE_PATH} is stale ` +
+				`(first difference near line ${firstDiff}) — regenerate with \`bun run scripts/generate-config-schema.ts\``,
+		});
+	}
+	return findings;
+}
+
+function firstDifferingLine(a: string, b: string): number {
+	const aLines = a.split('\n');
+	const bLines = b.split('\n');
+	const max = Math.max(aLines.length, bLines.length);
+	for (let i = 0; i < max; i++) {
+		if (aLines[i] !== bLines[i]) return i + 1;
+	}
+	return 0;
+}
+
+// ---------------------------------------------------------------------------
 // Orchestration
 // ---------------------------------------------------------------------------
 
-const DETECTORS: Array<[string, () => DriftFinding[]]> = [
+// Exported for test introspection: tests assert that every expected category
+// is actually registered, which runSyncDetectors alone cannot prove (a
+// detector dropped from this list simply stops running).
+export const DETECTORS: Array<[string, () => DriftFinding[]]> = [
 	['skill-mirror', detectSkillMirrorDrift],
 	['skill-audience', detectSkillAudienceDrift],
 	['bundled-skill', detectBundledSkillDrift],
@@ -1307,9 +1473,14 @@ const DETECTORS: Array<[string, () => DriftFinding[]]> = [
 	['package-json-files', detectPackageJsonFilesDuplicates],
 	['tool', detectToolRegistrationDrift],
 	['event-contract', detectEventContractDrift],
+	['core-events-usage', detectCoreEventsUsageDrift],
+	['shell-audit-usage', detectShellAuditUsageDrift],
+	['trajectory-store-usage', detectTrajectoryStoreUsageDrift],
 	['command', detectCommandDrift],
 	['agent', detectAgentDrift],
 	['docs-claim', detectDocsClaimDrift],
+	['config-schema', detectConfigSchemaDrift],
+	['config-docs', detectConfigDocsKeysDrift],
 ];
 
 /**

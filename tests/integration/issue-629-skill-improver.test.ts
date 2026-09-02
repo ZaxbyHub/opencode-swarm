@@ -79,6 +79,8 @@ async function seedMatureKnowledge(): Promise<void> {
 describe('issue #629 — low-frequency expensive skill_improver', () => {
 	it('writes proposal markdown and decrements quota under default config', async () => {
 		await seedMatureKnowledge();
+		// This suite exercises quota/proposal behavior. Approval-gated writes are
+		// covered separately by the skill-improver approval-integrity tests.
 		const config = {
 			enabled: true,
 			model: 'openrouter/expensive-model',
@@ -89,7 +91,7 @@ describe('issue #629 — low-frequency expensive skill_improver', () => {
 				'skills' | 'spec' | 'architect_prompt' | 'knowledge'
 			>,
 			write_mode: 'proposal' as const,
-			require_user_approval: true,
+			require_user_approval: false,
 			quota_window: 'utc' as const,
 			allow_deterministic_fallback: true,
 		};
@@ -124,7 +126,7 @@ describe('issue #629 — low-frequency expensive skill_improver', () => {
 				'skills' | 'spec' | 'architect_prompt' | 'knowledge'
 			>,
 			write_mode: 'proposal' as const,
-			require_user_approval: true,
+			require_user_approval: false,
 			quota_window: 'utc' as const,
 			allow_deterministic_fallback: true,
 		};
@@ -155,7 +157,7 @@ describe('issue #629 — low-frequency expensive skill_improver', () => {
 				'skills' | 'spec' | 'architect_prompt' | 'knowledge'
 			>,
 			write_mode: 'draft_skills' as const,
-			require_user_approval: true,
+			require_user_approval: false,
 			quota_window: 'utc' as const,
 			allow_deterministic_fallback: true,
 		};
@@ -188,7 +190,7 @@ describe('issue #629 — low-frequency expensive skill_improver', () => {
 				'skills' | 'spec' | 'architect_prompt' | 'knowledge'
 			>,
 			write_mode: 'proposal' as const,
-			require_user_approval: true,
+			require_user_approval: false,
 			quota_window: 'utc' as const,
 			allow_deterministic_fallback: true,
 		};

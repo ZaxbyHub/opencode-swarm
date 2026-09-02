@@ -2,30 +2,40 @@
  * Unified Guardrail Decision Audit Log
  *
  * Additive JSONL schema for guardrail decisions. Each append writes one
- * validated JSON line to the configured audit path under `.swarm/session/`.
+ * validated, redacted, size-bounded JSON line to the canonical
+ * `.swarm/session/shell-audit.jsonl` store (issue #2040). Persistence itself
+ * — locking, framing, retention, compaction — is owned by
+ * `./shell-audit-store.ts`; this module owns entry validation, write-time
+ * redaction/minimization, and line shaping.
  *
  * The existing shell audit entry shape is preserved byte-for-byte when
  * `type: 'shell'` is used (fields: ts, sessionID, agent, tool, command).
  *
- * Path redaction: there is no cross-cutting path-redaction helper in this
- * module today. Callers MAY pass a pre-redacted path via `redactPath(...)`
- * before constructing the entry; the module itself does not mutate path
- * strings beyond normalizing separators. Future hardening: add a shared
- * path-redaction utility and call it here.
+ * Write-time minimization (issue #2040 requirement 4/5):
+ * - Commands are redacted FIRST via `redactShellCommand` (secrets, home
+ *   paths) — redaction sees the full command — then truncated to
+ *   SHELL_AUDIT_LIMITS.maxCommandChars with an explicit `…[truncated]`
+ *   marker. Callers cannot opt out. Redacting first keeps the correlation
+ *   hash on the persisted form and minimizes secrets anywhere in the
+ *   command before any bytes are selected for persistence.
+ * - Paths are redacted via `redactPath`; free-text reasons embed
+ *   home-profile paths via `redactEmbeddedPaths`.
+ * - Typed command-bearing entries additionally persist `commandHash` (a
+ *   16-hex sha256 digest of the FINAL redacted command) so correlation and
+ *   duplicate detection survive without reversible content. Legacy
+ *   `shell` entries stay EXACTLY five fields (SC-119 pinned contract) and
+ *   never carry the hash.
  */
 
-import * as fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import * as path from 'node:path';
+
 import { log } from '../../utils/logger';
 import { redactShellCommand } from './helpers';
-
-// DI seam for testability — tests mock these function references directly (function mocks
-// restore cleanly in afterEach) instead of mock.module('node:fs/promises'), which leaks
-// across test files in Bun's shared test-runner process (AGENTS.md invariant 7).
-export const _internals = {
-	mkdir: fs.mkdir,
-	appendFile: fs.appendFile,
-};
+import {
+	appendShellAuditLineSync,
+	SHELL_AUDIT_LIMITS,
+} from './shell-audit-store';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -118,6 +128,57 @@ export type GuardrailDecisionEntry =
 	| DestructiveBlockDecision
 	| SandboxWrapDecision
 	| SandboxSkipDecision;
+
+// ---------------------------------------------------------------------------
+// Field content classes (issue #2040 requirement 8)
+// ---------------------------------------------------------------------------
+
+/**
+ * Redaction/content class of every persisted audit field. SINGLE SOURCE OF
+ * TRUTH: the ratchet test (`tests/unit/hooks/shell-audit-field-classes.test.ts`)
+ * enumerates the union's fields against this map — adding a decision field
+ * without declaring its class fails CI. Classes:
+ *
+ * - `timestamp`          — ISO-8601 string, no free content.
+ * - `identifier`         — opaque session/agent/tool identity string.
+ * - `decision-type`      — closed enum discriminator.
+ * - `redacted-command`   — shell command text after truncation + redaction.
+ * - `redacted-path`      — filesystem path after home-profile redaction.
+ * - `enum`               — closed per-type classification string.
+ * - `free-text-redacted` — producer free text after bounded truncation +
+ *                          embedded-path redaction.
+ * - `content-hash`       — one-way digest of redacted content (correlation
+ *                          only; never rendered, never reversible).
+ */
+export type ShellAuditFieldClass =
+	| 'timestamp'
+	| 'identifier'
+	| 'decision-type'
+	| 'redacted-command'
+	| 'redacted-path'
+	| 'enum'
+	| 'free-text-redacted'
+	| 'content-hash';
+
+export const SHELL_AUDIT_FIELD_CLASSES: Readonly<
+	Record<string, ShellAuditFieldClass>
+> = Object.freeze({
+	ts: 'timestamp',
+	sessionID: 'identifier',
+	agent: 'identifier',
+	tool: 'identifier',
+	type: 'decision-type',
+	command: 'redacted-command',
+	commandHash: 'content-hash',
+	path: 'redacted-path',
+	reason: 'free-text-redacted',
+	resolvedScope: 'redacted-path',
+	declaredScope: 'redacted-path',
+	action: 'enum',
+	destructiveCategory: 'enum',
+	executorMechanism: 'enum',
+	skipReason: 'enum',
+});
 
 // ---------------------------------------------------------------------------
 // Validation
@@ -252,17 +313,49 @@ function validateEntry(entry: unknown): entry is GuardrailDecisionEntry {
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// Minimization helpers (issue #2040 requirement 4/5)
+// ---------------------------------------------------------------------------
+
+/** Truncate by code units without leaving a dangling surrogate pair. */
+function truncateUtf8Safe(text: string, maxChars: number): string {
+	if (text.length <= maxChars) return text;
+	const cut = text.slice(0, maxChars);
+	const last = cut.charCodeAt(cut.length - 1);
+	// High surrogate at the cut boundary would orphan its pair — drop it.
+	if (last >= 0xd800 && last <= 0xdbff) {
+		return `${cut.slice(0, -1)}…[truncated]`;
+	}
+	return `${cut}…[truncated]`;
+}
+
+/** 16-hex sha256 digest of the final redacted command — correlation without
+ *  reversible content. Deterministic: identical redacted commands hash
+ *  identically (issue #2040 edge-case: deterministic-enough-for-correlation). */
+export function hashRedactedCommand(redacted: string): string {
+	return createHash('sha256')
+		.update(redacted, 'utf-8')
+		.digest('hex')
+		.slice(0, 16);
+}
+
 /**
  * Best-effort path redaction for audit logs.
  *
  * Replaces leading home/profile segments with a tilde placeholder so
- * absolute paths do not leak user-specific directory names.
+ * absolute paths do not leak user-specific directory names (POSIX
+ * `/home/<name>`, macOS `/Users/<name>`, Windows drive profiles
+ * `C:\Users\<name>` case-insensitive, and UNC profile shares).
  *
- * This is intentionally minimal — callers remain responsible for
- * stripping any domain-specific secrets that may appear in path segments.
+ * This is intentionally minimal on non-home paths — ordinary project paths
+ * are diagnostic content and are preserved (over-redaction guards pin it).
  */
 export function redactPath(filePath: string): string {
-	if (typeof filePath !== 'string' || filePath.length === 0) return filePath;
+	// Non-strings can never be safely redacted — coerce to the empty string
+	// instead of passing them through (issue #2040 reviewer round R2: the old
+	// passthrough let an unredacted non-string value reach disk silently).
+	if (typeof filePath !== 'string') return '';
+	if (filePath.length === 0) return filePath;
 
 	// POSIX home: /home/<name>/... -> ~/...
 	const rawPosixHomeMatch = filePath.match(/^(\/home\/[^/]+)(\/.*)$/);
@@ -278,9 +371,9 @@ export function redactPath(filePath: string): string {
 
 	const normalized = path.normalize(filePath);
 
-	// Windows user profile: C:\Users\<name>\... -> ~\<name>\...
+	// Windows user profile (drive letter case-insensitive): c:\Users\<name>\... -> ~\<rest>\...
 	const windowsHomeMatch = normalized.match(
-		/^([A-Za-z]:\\Users\\[^\\]+)(\\.*)$/,
+		/^([A-Za-z]:\\[Uu][Ss][Ee][Rr][Ss]\\[^\\]+)(\\.*)$/i,
 	);
 	if (windowsHomeMatch) {
 		return `~\\${windowsHomeMatch[2]}`;
@@ -301,7 +394,7 @@ function redactEmbeddedPaths(text: string): string {
 	return text
 		.replace(/\/home\/[^/\s]+(\/[^\s"'`)]*)?/g, (match) => redactPath(match))
 		.replace(/\/Users\/[^/\s]+(\/[^\s"'`)]*)?/g, (match) => redactPath(match))
-		.replace(/[A-Za-z]:\\Users\\[^\\\s]+(\\[^\s"'`)]*)?/g, (match) =>
+		.replace(/[A-Za-z]:\\Users\\[^\\\s]+(\\[^\s"'`)]*)?/gi, (match) =>
 			redactPath(match),
 		)
 		.replace(/\\\\[^\\\s]+\\[^\\\s]+\\[^\\\s]+(\\[^\s"'`)]*)?/g, (match) =>
@@ -309,25 +402,93 @@ function redactEmbeddedPaths(text: string): string {
 		);
 }
 
+// Directly unit-tested (review round MS-gap1): exported for the adversarial
+// embedded-path fixtures in shell-audit-redaction.test.ts.
+export { redactEmbeddedPaths };
+
+/**
+ * Archive-boundary re-redaction (issue #2040 requirement 4 / review round
+ * F4): re-apply the CURRENT redaction policy to one persisted decision line
+ * before the close pipeline archives it. Legacy pre-#2040 lines written with
+ * weaker redaction are normalized here so no legacy record can bypass
+ * current policy in the archived cut. Parse-safe passthrough: an
+ * unparseable line is returned unchanged (the store's corrupt accounting
+ * owns it).
+ */
+export function redactDecisionLineForArchive(line: string): string {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(line);
+	} catch {
+		return line;
+	}
+	if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+		return line;
+	}
+	const record = parsed as Record<string, unknown>;
+	let changed = false;
+	if (typeof record.command === 'string') {
+		const redacted = redactShellCommand(record.command);
+		if (redacted !== record.command) {
+			record.command = redacted;
+			changed = true;
+			// Keep the fingerprint consistent with the re-redacted content.
+			if (typeof record.commandHash === 'string') {
+				record.commandHash = hashRedactedCommand(redacted);
+			}
+		}
+	}
+	if (typeof record.path === 'string') {
+		const redacted = redactPath(record.path);
+		if (redacted !== record.path) {
+			record.path = redacted;
+			changed = true;
+		}
+	}
+	if (typeof record.reason === 'string') {
+		const redacted = redactEmbeddedPaths(record.reason);
+		if (redacted !== record.reason) {
+			record.reason = redacted;
+			changed = true;
+		}
+	}
+	for (const field of ['declaredScope', 'resolvedScope'] as const) {
+		if (typeof record[field] === 'string') {
+			const redacted = redactPath(record[field] as string);
+			if (redacted !== record[field]) {
+				record[field] = redacted;
+				changed = true;
+			}
+		}
+	}
+	return changed ? JSON.stringify(record) : line;
+}
+
 // ---------------------------------------------------------------------------
 // Append
 // ---------------------------------------------------------------------------
 
 export interface AppendGuardrailDecisionOptions {
-	auditPath: string;
+	/** Project root; the store resolves `.swarm/session/shell-audit.jsonl`. */
+	directory: string;
 	enabled: boolean;
 }
 
 /**
- * Append a validated guardrail decision entry to the JSONL audit log.
+ * Append a validated guardrail decision entry to the JSONL audit store.
  *
- * - Writes exactly one JSON line per call (`JSON.stringify(entry) + '\n'`).
  * - Skips silently when `enabled` is false.
  * - Skips malformed entries after debug logging; never throws.
- * - `.swarm/` containment is enforced by the caller-supplied `auditPath`.
+ * - Truncates + redacts content at line-shaping time (caller-independent
+ *   minimization); typed command entries carry a correlation hash.
+ * - Delegates persistence (lock, framing, retention, compaction) to the
+ *   bounded store; store failures (locked, oversize, I/O) are caught and
+ *   logged — audit failures NEVER block tool execution (issue #2040
+ *   requirement 6: a guardrail block still blocks when logging fails).
+ * - `.swarm/` containment is enforced by the store's path resolution.
  *
  * @param entry Decision entry to persist.
- * @param ctx Audit destination and enablement flag.
+ * @param ctx Audit destination (project root) and enablement flag.
  */
 export async function appendGuardrailDecision(
 	entry: GuardrailDecisionEntry,
@@ -336,9 +497,17 @@ export async function appendGuardrailDecision(
 	if (!ctx.enabled) return;
 	if (!validateEntry(entry)) return;
 
+	const maxCommand = SHELL_AUDIT_LIMITS.maxCommandChars;
+	const maxReason = SHELL_AUDIT_LIMITS.maxReasonChars;
+
 	// Legacy shell entries persist as the exact 5-field shape
 	// {ts, sessionID, agent, tool, command} with the `type` discriminator stripped.
 	// Command-bearing variants redact the command; path-bearing variants redact the path.
+	// Redact FIRST, then truncate: the correlation hash must be of the final
+	// stored (redacted + truncated) form consistently across payload sizes,
+	// and redaction must see the full command so secrets anywhere in it are
+	// minimized before any bytes are selected for persistence (issue #2040
+	// requirement 4 — reviewer round R1).
 	let line: string;
 	switch (entry.type) {
 		case 'shell':
@@ -347,22 +516,31 @@ export async function appendGuardrailDecision(
 				sessionID: entry.sessionID,
 				agent: entry.agent,
 				tool: entry.tool,
-				command: redactShellCommand(entry.command),
+				command: truncateUtf8Safe(
+					redactShellCommand(entry.command),
+					maxCommand,
+				),
 			})}\n`;
 			break;
 		case 'destructive_block':
 		case 'sandbox_wrap':
-		case 'sandbox_skip':
+		case 'sandbox_skip': {
+			const command = truncateUtf8Safe(
+				redactShellCommand(entry.command),
+				maxCommand,
+			);
 			line = `${JSON.stringify({
 				...entry,
-				command: redactShellCommand(entry.command),
+				command,
+				commandHash: hashRedactedCommand(command),
 			})}\n`;
 			break;
+		}
 		case 'file_write':
 			line = `${JSON.stringify({
 				...entry,
 				path: redactPath(entry.path),
-				reason: redactEmbeddedPaths(entry.reason),
+				reason: truncateUtf8Safe(redactEmbeddedPaths(entry.reason), maxReason),
 				resolvedScope: redactPath(entry.resolvedScope),
 			})}\n`;
 			break;
@@ -377,12 +555,14 @@ export async function appendGuardrailDecision(
 	}
 
 	try {
-		await _internals.mkdir(path.dirname(ctx.auditPath), { recursive: true });
-		await _internals.appendFile(ctx.auditPath, line, 'utf-8');
+		appendShellAuditLineSync(ctx.directory, line);
 	} catch (error) {
-		// Audit failures must never block tool execution.
+		// Audit failures must never block tool execution. Store-busy
+		// (SHELL_AUDIT_STORE_LOCKED), oversize (SHELL_AUDIT_LINE_TOO_LARGE),
+		// and I/O failures all land here: the guardrail decision itself was
+		// already computed and enforced independently of this write.
 		log('guardrail audit: append failed', {
-			auditPath: ctx.auditPath,
+			directory: ctx.directory,
 			error,
 		});
 	}

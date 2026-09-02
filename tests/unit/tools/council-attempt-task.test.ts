@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import {
 	existsSync,
 	mkdirSync,
@@ -78,13 +79,30 @@ function collectAttemptJsonlFiles(dir: string): string[] {
 }
 
 function finalizedForTask(dir: string, taskId: string): string[] {
-	return readFileSync(
-		councilRoundStatePaths(dir, { kind: 'task', taskId }).audit,
-		'utf8',
-	)
-		.trim()
-		.split('\n')
-		.map((line) => JSON.parse(line) as { event: string; disposition: string })
+	// v2 task scopes are identity-bound (the token embeds the review identity
+	// digest the tool computed from plan + config), so enumerate the audit
+	// files instead of recomputing the token, then filter by the scope's
+	// hashed taskId.
+	const scopeHash = createHash('sha256').update(taskId).digest('hex');
+	return collectAttemptJsonlFiles(dir)
+		.flatMap((file) =>
+			readFileSync(file, 'utf8')
+				.trim()
+				.split('\n')
+				.filter(Boolean)
+				.map(
+					(line) =>
+						JSON.parse(line) as {
+							event: string;
+							disposition: string;
+							scope?: { kind?: string; scopeHash?: string };
+						},
+				),
+		)
+		.filter(
+			(record) =>
+				record.scope?.kind === 'task' && record.scope.scopeHash === scopeHash,
+		)
 		.filter((record) => record.event === 'finalized')
 		.map((record) => record.disposition);
 }

@@ -1,6 +1,9 @@
 import type { OpencodeClient } from '@opencode-ai/sdk';
 import type { DelegationCostFields } from '../services/cost-accounting.js';
-import { buildDelegationCostFields } from '../services/cost-accounting.js';
+import {
+	buildDelegationCostFields,
+	type PricingConfig,
+} from '../services/cost-accounting.js';
 import { TOOL_NAMES } from '../tools/tool-metadata.js';
 import { log } from '../utils/logger.js';
 import type { ModelOverride } from '../utils/model-dispatch-fallback.js';
@@ -77,6 +80,7 @@ export type EphemeralAgentDispatchRequest = {
 	promptByteLimit?: number;
 	responseByteLimit?: number;
 	abortSignal?: AbortSignal;
+	pricing?: PricingConfig;
 };
 
 export type EphemeralAgentDispatchResult = {
@@ -105,8 +109,11 @@ function modelIdentifier(model?: ModelOverride): string | undefined {
 	return model ? `${model.providerID}/${model.modelID}` : undefined;
 }
 
-function unavailableCostFields(model?: string): DelegationCostFields {
-	return buildDelegationCostFields({ model });
+function unavailableCostFields(
+	model?: string,
+	pricing?: PricingConfig,
+): DelegationCostFields {
+	return buildDelegationCostFields({ model, pricing });
 }
 
 async function awaitWithAbort<T>(
@@ -385,6 +392,7 @@ export async function dispatchEphemeralAgent(
 			costFields: buildDelegationCostFields({
 				raw: response.data,
 				model: actualModelId,
+				pricing: request.pricing,
 			}),
 		};
 	} catch (error) {

@@ -40,6 +40,7 @@ import {
 } from '../hooks/knowledge-validator.js';
 import { atomicWriteFileAnyRoot } from '../utils/atomic-write';
 import { warn } from '../utils/logger.js';
+import { withTimeoutSignal } from '../utils/timeout.js';
 import { appendSkillChangelog } from './skill-changelog.js';
 import {
 	appendRejectedSkillEdit,
@@ -615,6 +616,7 @@ export interface GenerateRequest {
 	evaluate?: boolean;
 	minConfidence?: number;
 	minConfirmations?: number;
+	preview?: boolean;
 }
 
 export interface GenerateResult {
@@ -626,6 +628,7 @@ export interface GenerateResult {
 		missingSourceKnowledgeIds?: string[];
 		preserved: boolean;
 		evaluation?: SkillEvaluationResult;
+		content?: string;
 	}>;
 	skipped: Array<{
 		slug: string;
@@ -637,6 +640,7 @@ export interface GenerateResult {
 export async function generateSkills(
 	req: GenerateRequest,
 ): Promise<GenerateResult> {
+	const preview = req.preview === true;
 	const minConfidence = req.minConfidence ?? DEFAULT_SKILL_MIN_CONFIDENCE;
 	const minConfirmations =
 		req.minConfirmations ?? DEFAULT_SKILL_MIN_CONFIRMATIONS;
@@ -751,7 +755,13 @@ export async function generateSkills(
 		let content = renderSkillMarkdown(cluster, req.mode);
 		// G8 (issue #1717): write an auto-derived eval stub so the gate has
 		// something to check. Fail-open. Runs in both modes.
-		await writeEvalStub(req.directory, cluster.slug, generateEvalStub(cluster));
+		if (!preview) {
+			await writeEvalStub(
+				req.directory,
+				cluster.slug,
+				generateEvalStub(cluster),
+			);
+		}
 		if (await isRejectedSkillContent(req.directory, cluster.slug, content)) {
 			result.skipped.push({
 				slug: cluster.slug,
@@ -760,7 +770,7 @@ export async function generateSkills(
 			continue;
 		}
 		let evaluation: SkillEvaluationResult | undefined;
-		if (req.evaluate) {
+		if (req.evaluate && !preview) {
 			let incumbentContent: string | undefined;
 			const existingActivePath = activePath(req.directory, cluster.slug);
 			if (existsSync(existingActivePath)) {
@@ -800,7 +810,7 @@ export async function generateSkills(
 		// BEFORE writing so that any missing IDs can be surfaced in the
 		// frontmatter at compile time.
 		let missingSourceIds: string[] = [];
-		if (req.mode === 'active') {
+		if (!preview && req.mode === 'active') {
 			// Stamp ALL requested source IDs (not just the ones that survived
 			// filtering into the cluster) so that phantom IDs absent from both
 			// swarm and hive are surfaced in missingSourceKnowledgeIds and the
@@ -817,7 +827,7 @@ export async function generateSkills(
 			if (missingSourceIds.length > 0) {
 				content = injectMissingIdsIntoFrontmatter(content, missingSourceIds);
 			}
-		} else if (req.mode === 'draft') {
+		} else if (!preview && req.mode === 'draft') {
 			// G10 (issue #1717): stamp draft markers so selectCandidateEntries
 			// dedups on the next phase.
 			const idsToStamp = req.sourceKnowledgeIds?.length
@@ -831,7 +841,9 @@ export async function generateSkills(
 			);
 		}
 
-		await atomicWrite(targetPath, content);
+		if (!preview) {
+			await atomicWrite(targetPath, content);
+		}
 
 		result.written.push({
 			slug: cluster.slug,
@@ -841,6 +853,7 @@ export async function generateSkills(
 			missingSourceKnowledgeIds: missingSourceIds,
 			preserved,
 			evaluation,
+			...(preview ? { content } : {}),
 		});
 	}
 
@@ -1514,10 +1527,10 @@ export async function autoApplyProposals(
 		].join('\n');
 
 		try {
-			const response = await llmDelegate(
-				'',
-				prompt,
-				AbortSignal.timeout(30_000),
+			const response = await withTimeoutSignal(
+				(signal) => llmDelegate('', prompt, signal),
+				30_000,
+				new Error('Skill proposal evaluation timed out after 30000ms'),
 			);
 			const verdict = response.trim().toUpperCase();
 			if (verdict === 'APPROVE') {

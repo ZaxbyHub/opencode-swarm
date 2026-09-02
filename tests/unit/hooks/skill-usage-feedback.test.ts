@@ -29,6 +29,7 @@ import {
 	type SkillUsageEntry,
 	_internals as sul_internals,
 } from '../../../src/hooks/skill-usage-log.js';
+import { loadPendingDocument } from '../../../src/hooks/skill-usage-pending.js';
 
 // =============================================================================
 // Helpers
@@ -535,11 +536,11 @@ describe('applySkillUsageFeedback', () => {
 		expect(second).toEqual({ processed: 0, bumps: 0 });
 		expect(readSwarmKnowledge(tempDir)[0]!.confidence).toBeCloseTo(0.55);
 		expect(readSkillUsageEntries(tempDir)).toHaveLength(1);
-		const rawLog = fs.readFileSync(
-			path.join(tempDir, '.swarm', 'skill-usage.jsonl'),
-			'utf-8',
-		);
-		expect(rawLog).toContain('"type":"feedback_applied"');
+		// #2038: acked feedback records are dequeued from the authoritative
+		// sidecar (not marked in the JSONL stream) — that dequeue is why the
+		// second call sees nothing left to consume.
+		const { doc } = loadPendingDocument(tempDir);
+		expect(doc.records).toHaveLength(0);
 	});
 
 	test('violation entry → source knowledge confidence decreases', async () => {
@@ -896,7 +897,7 @@ Content
 		expect(knowledge).toHaveLength(1);
 		expect(knowledge[0]!.confidence).toBeCloseTo(0.55);
 	});
-	test('prune preserves feedback_applied markers so reprocessing is idempotent across prune cycles', async () => {
+	test('JSONL compaction preserves the pending queue so reprocessing is idempotent across prune cycles', async () => {
 		writeSwarmKnowledge(tempDir, [
 			{
 				id: 'prune-feedback-uuid',
@@ -930,28 +931,23 @@ Content
 			sessionID: 'session-abc',
 		});
 
-		// First feedback pass — writes a feedback_applied marker covering task-actionable
+		// First feedback pass — dequeues the acked record from the sidecar
 		const first = await applySkillUsageFeedback(tempDir);
 		expect(first).toEqual({ processed: 1, bumps: 1 });
 		expect(readSwarmKnowledge(tempDir)[0]!.confidence).toBeCloseTo(0.55);
+		expect(loadPendingDocument(tempDir).doc.records).toHaveLength(0);
 
 		// Prune with maxEntriesPerSkill=3: keeps the 3 newest entries (the compliant
-		// actionable entry + 2 of the not_checked entries). The marker must survive.
+		// actionable entry + 2 of the not_checked entries). The JSONL stream is a
+		// separate store from the sidecar queue, so pruning it must not resurrect
+		// or duplicate the already-dequeued queue record.
 		const pruneResult = pruneSkillUsageLog(tempDir, 3);
 		expect(pruneResult.pruned).toBeGreaterThan(0);
+		expect(loadPendingDocument(tempDir).doc.records).toHaveLength(0);
 
-		// Verify feedback_applied markers still exist in the raw log after prune
-		const rawLog = fs.readFileSync(
-			path.join(tempDir, '.swarm', 'skill-usage.jsonl'),
-			'utf-8',
-		);
-		const markerLines = rawLog
-			.split('\n')
-			.filter((l) => l.trim().includes('"type":"feedback_applied"'));
-		expect(markerLines.length).toBeGreaterThan(0);
-
-		// Second feedback pass — the actionable entry is still in the log (newest),
-		// but the preserved marker covers its ID, so no reprocessing occurs.
+		// Second feedback pass — the actionable entry is still in the JSONL log
+		// (newest), but with its queue record already dequeued, no reprocessing
+		// occurs.
 		const second = await applySkillUsageFeedback(tempDir);
 		expect(second).toEqual({ processed: 0, bumps: 0 });
 

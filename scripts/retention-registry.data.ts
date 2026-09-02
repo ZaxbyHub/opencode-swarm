@@ -46,6 +46,24 @@ export type CanonicalRoot =
 	| 'outside-swarm'
 	| 'planned';
 
+/**
+ * Membership of a single flat `.swarm/` artifact in the two `/swarm close`
+ * artifact arrays (`ARCHIVE_ARTIFACTS`, `ACTIVE_STATE_TO_CLEAN` in
+ * `src/commands/close.ts`) — issue #1534 recurrence guardrail.
+ *
+ * These values describe ARRAY MEMBERSHIP ONLY, deliberately, because that is
+ * what is mechanically checkable. They are NOT a summary of everything close
+ * does to the file: `context.md` is `archive-only` here AND separately
+ * rewritten to a stub, and `close-summary.md` is `archive-only` here because
+ * it is written after the clean stage. The prose `closePolicy` field remains
+ * the place for that narrative; this field is the machine-checked half.
+ */
+export type CloseArrayMembership =
+	| 'archive+clean'
+	| 'archive-only'
+	| 'clean-only'
+	| 'neither';
+
 export type Disposition =
 	| { kind: 'fix-in-issue'; issue: number; note: string }
 	| { kind: 'retain-by-design'; citation: string }
@@ -76,6 +94,28 @@ export interface RetentionRow {
 		/** Human-readable bound statement (constants + values). */
 		bound: string;
 		scope: LimitScope;
+		/**
+		 * What makes the KEYSPACE finite, with a path:line citation.
+		 *
+		 * Issue #2038 recurrence guardrail. A `scope: 'per-key'` cap bounds each
+		 * KEY's history, not the STORE: steady-state size is
+		 * O(distinct-keys x per-key-cap), so the row is bounded only if the set
+		 * of keys is itself finite. In #2038 the key was `skillPath` and a
+		 * 500-entry-per-skill prune was mistaken for a global bound while the
+		 * set of skill paths was unbounded.
+		 *
+		 * A keyspace is finite iff EITHER the key domain is a closed set (an
+		 * enum/union, or an index bounded by a max-concurrency constant) OR
+		 * something deletes keys on a GLOBAL trigger. A per-key cap is never an
+		 * answer to this field — it is the thing this field exists to qualify.
+		 *
+		 * Optional on the type because it is meaningless for
+		 * global/per-trigger/session-scoped/none rows; `check-retention-registry.ts`
+		 * REQUIRES it for per-key rows whose disposition is not fix-in-issue, and
+		 * rejects a value that declares the keyspace unbounded (such a row is the
+		 * #2038 defect class and must be fix-in-issue, not bounded-by-design).
+		 */
+		keyspaceBound?: string;
 		citation: string;
 	};
 	readBound: {
@@ -92,6 +132,23 @@ export interface RetentionRow {
 	crashBehavior: string;
 	/** What `/swarm close` (finalize) does: archived+cleaned / archived-only / cleaned-only / untouched / rewritten-stub / n-a. */
 	closePolicy: string;
+	/**
+	 * Issue #1534 recurrence guardrail — the machine-checked half of
+	 * `closePolicy`. Maps each flat file this row owns DIRECTLY under `.swarm/`
+	 * to its membership in close.ts's `ARCHIVE_ARTIFACTS` /
+	 * `ACTIVE_STATE_TO_CLEAN` arrays, which
+	 * `collectCloseLifecycleCoherenceErrors` (scripts/check-retention-registry.ts)
+	 * verifies against the real arrays parsed out of close.ts.
+	 *
+	 * Optional on the TYPE because most rows own directories, templated paths,
+	 * or state outside `.swarm/` and have nothing to declare. The gate REQUIRES
+	 * it at check time for every `project-swarm` row whose `pathGrammar` names a
+	 * literal flat `.swarm/<file>`, and requires every close.ts array entry to
+	 * be declared by exactly one row — so an artifact cannot be wired into close
+	 * without a registry row, nor registered without stating what close does
+	 * with it. Keys are bare filenames (no `.swarm/` prefix).
+	 */
+	closeArrayMembership?: Readonly<Record<string, CloseArrayMembership>>;
 	/** What `/swarm reset-session` and `/swarm reset` do. */
 	resetPolicy: string;
 	legacyCompatibility: string;
@@ -138,6 +195,10 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'none — single module-scoped write stream; rotation only from the throttled emit path',
 		crashBehavior: 'append stream; torn trailing line tolerated (both readers JSON.parse try/catch); flushAndDrainTelemetry replaces stream handle before end() (src/telemetry.ts:438-469)',
 		closePolicy: 'archived+cleaned — flush (close.ts:1274), ARCHIVE_ARTIFACTS (close.ts:400-401), ACTIVE_STATE_TO_CLEAN (close.ts:490-495)',
+		closeArrayMembership: {
+			'telemetry.jsonl': 'archive+clean',
+			'telemetry.jsonl.1': 'archive+clean',
+		},
 		resetPolicy: 'reset-session does not touch it; /swarm close is the lifecycle boundary',
 		legacyCompatibility: 'LEGACY_TELEMETRY_SOURCE_STORE (src/observability/legacy.ts:22); toLegacyTelemetryLine byte-identical projection (src/observability/observe.ts:334)',
 		healthSignal: 'rotation events observable via file presence; consumers degrade on malformed lines',
@@ -153,74 +214,97 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		category: 1,
 		pathGrammar: '.swarm/events.jsonl',
 		canonicalRoot: 'project-swarm',
-		writerModules: [
-			'src/hooks/curator.ts',
-			'src/hooks/full-auto-intercept.ts',
-			'src/full-auto/oversight.ts',
-			'src/hooks/full-auto-delegation.ts',
-			'src/hooks/full-auto-input-probe.ts',
-			'src/hooks/delegation-gate.ts',
-			'src/hooks/delegation-sanitizer.ts',
-			'src/hooks/pr-workflow-gate.ts',
-			'src/hooks/pr-workflow-response-gate.ts',
-			'src/hooks/auto-review.ts',
-			'src/hooks/steering-consumed.ts',
-			'src/hooks/knowledge-application-gate.ts',
-			'src/hooks/knowledge-curator.ts',
-			'src/hooks/skill-propagation-gate.ts',
-			'src/hooks/guardrails/file-authority.ts',
-			'src/context/role-filter.ts',
-			'src/tools/phase-complete.ts',
-			'src/hooks/adversarial-detector.ts',
-			'src/scope/scope-persistence.ts',
-			'src/commands/rollback.ts',
-			'src/commands/approve-plan-critic.ts',
-			'src/config/lane-permissions.ts',
-			'src/workflow/coder-settlement.ts',
-			'src/workflow/task-repair.ts',
-			'src/workflow/stage-a-repair.ts',
-			'src/tools/checkpoint.ts',
-			'src/services/spec-drift-recovery.ts',
-			'src/tools/prepare-pr-workflow-checkout.ts',
-		],
+		writerModules: ['src/events/core-events.ts'],
 		writerCitations: [
-			'~26 writer symbols — see docs appendix; representative: curator.ts:1767, full-auto-intercept.ts:304, delegation-gate.ts:1924/2365/4326, phase-complete.ts:1728, role-filter.ts:150, scope-persistence.ts:2079, rollback.ts:103/364, coder-settlement.ts:138, task-repair.ts:238, checkpoint.ts:206, lane-permissions.ts:901, stage-a-repair.ts:44 appendStageARepairEvent — best-effort, one EBUSY/EPERM retry, same appendSettlementEvent contract as coder-settlement.ts',
+			'ONE canonical append seam — appendCoreEventSync (src/events/core-events.ts) — since issue #2039; every former direct writer (29 sites across 24 modules: curator, delegation-gate x3, pr-workflow-gate x5, pr-workflow-response-gate, full-auto intercept/delegation/input-probe, oversight, auto-review, adversarial-detector, delegation-sanitizer, knowledge gates x2, knowledge-curator, skill-propagation-gate, file-authority, role-filter, phase-complete, scope-persistence, rollback x2, lane-permissions, coder-settlement x2, stage-a-repair x2, checkpoint, spec-drift-recovery, prepare-pr-workflow-checkout x2, plan-manager spec_stale_detected, steering-consumed record) now calls the seam; scripts/check-core-events-usage.ts ratchets against new direct mentions',
+			'src/events/core-events.ts appendCoreEventSync — per-write exclusive .swarm/events.lock (wx, 5-min stale-break), torn-tail re-framing, closed-set authority indexing',
 		],
 		readerCitations: [
-			'src/hooks/curator.ts:1534 — FULL-FILE async (readSwarmFileAsync)',
-			'src/services/context-budget-service.ts:219 countEvents — FULL-FILE async (line-count turn proxy)',
-			'src/hooks/delegation-gate.ts:2326 readCoderRetryEscalations — FULL-FILE sync',
-			'src/hooks/steering-consumed.ts:57 — FULL-FILE async',
-			'src/services/diagnose-service.ts:645 — integrity validation',
-			'src/services/spec-drift-recovery.ts:411 — drift recovery',
-			'src/workflow/task-repair.ts:196 findRepairEvent — FULL-FILE with substring pre-filter',
-			'src/services/session-reflection.ts:360 gatherLedgerRejections — TAIL-BOUNDED 16 MiB (MAX_LEDGER_BYTES :370-386)',
+			'src/events/core-events.ts readCoreEvents — tail-bounded (readMaxBytes 3 MiB), manifest-stripped, coverage complete/truncated/empty',
+			'src/events/core-events.ts getCoreEventLifetimeCount — manifest folded.totalEvents + window count (context-budget turn proxy)',
+			'src/events/core-events.ts getCoderRetryEscalationActions / hasSpecDriftAuditEvent / hasTaskRepairAuditEvent — authoritative index + bounded window fallback',
+			'src/hooks/curator.ts runCuratorPhase — bounded window + filterPhaseEvents; truncated coverage disclosed via curator audit line',
+			'src/tools/curator-analyze.ts — bounded window + filterPhaseEvents',
+			'src/hooks/steering-consumed.ts createSteeringConsumedHook — bounded window set-diff',
+			'src/services/diagnose-service.ts checkEventStreamIntegrity + checkSteeringDirectives — bounded window validation + coverage wording',
+			'src/services/session-reflection.ts gatherLedgerRejections — live read via readCoreEvents; archived-copy fallback unchanged',
 		],
-		schemaVersion: 'none — event:/type: discriminator split across writers (docs/observability-event-contract.md §10)',
+		schemaVersion: 'v1 swarm-events-manifest header + retained window (issue #2039); event:/type: producer discriminators preserved unmodified',
 		stateClass: 'operational',
 		privacyClass: 'mixed',
 		writeLimits: {
-			bound: 'NONE — no rotation, no byte/age/count cap',
-			scope: 'none',
-			citation: 'localization sweep (issue trace 2036, lane A); #2039 "Independently verified cause"',
+			bound: 'CORE_EVENT_LIMITS: activeMaxBytes 2 MiB (manifest+window), activeMaxEntries 20k, ageMaxMs 7d (operational entries; the closed authority set is exempt — it is INDEXED instead), compactMaxBytes 512 KiB/pass, checkInterval 25, maxLineBytes 256 KiB',
+			scope: 'global',
+			citation: 'src/events/core-events.ts CORE_EVENT_LIMITS (issue #2039)',
 		},
 		readBound: {
-			pattern: 'full-file',
-			bound: 'unbounded — several readers scale with total history',
+			pattern: 'manifest+retained-window (tail-bounded)',
+			bound: 'readMaxBytes 3 MiB independent of total history; lifetime counts from the manifest header',
 			sync: true,
-			citation: 'curator.ts:1534; context-budget-service.ts:219; delegation-gate.ts:2326',
+			citation: 'src/events/core-events.ts readCoreEvents / getCoreEventLifetimeCount',
 		},
-		lockModel: 'mixed — 1 hard-fail (emitCoderRetryEscalation delegation-gate.ts:2366 throws TASK_RETRY_AUDIT_LOCKED), 5 best-effort tryAcquireLock, rest lockless append',
-		crashBehavior: 'append-only; torn trailing line skipped by all readers (JSON.parse try/catch)',
-		closePolicy: 'archived+cleaned — ARCHIVE_ARTIFACTS (close.ts:375), ACTIVE_STATE_TO_CLEAN (close.ts:478)',
-		resetPolicy: 'reset-session leaves it; close is the boundary',
-		legacyCompatibility: 'event: vs type: keys must both be checked by generic consumers',
-		healthSignal: 'diagnose integrity check (diagnose-service.ts:645)',
+		lockModel: 'exclusive .swarm/events.lock (wx create, 5-min mtime stale-break, bounded brief retry) held by EVERY write — appends, compaction, authority-index updates, finalize; the former per-site tryAcquireLock/proper-lockfile sentinels on this file are all removed (single-lock discipline, no nesting)',
+		crashBehavior: 'atomic single-file rewrites (PID-scoped tmp + byte-verified rename; in-memory manifest/framing validation pre-rename); torn trailing line skipped + counted corrupt, re-framed on next append; legacy header-less files migrate in bounded fold passes',
+		closePolicy: 'finalizeCoreEventsForClose under the store lock (legacy drain to convergence + compaction + validated cut) BEFORE the plain archive copy, then archived (ARCHIVE_ARTIFACTS) and cleaned (ACTIVE_STATE_TO_CLEAN) together with events-authority-index.json',
+		closeArrayMembership: {
+			'events.jsonl': 'archive+clean',
+		},
+		resetPolicy: 'reset-session unlinks events.jsonl + events-authority-index.json',
+		legacyCompatibility: 'header-less files read bounded (newest window); authority lookups fall back to the retained-window scan so pre-store authority events stay answerable until folded; the fold pass indexes authority lines BEFORE removing them',
+		healthSignal: 'core_events_health (counts-only: accepted/compacted/retained/dropped/corrupt/authority_index_count/authority_evicted_count + timestamps + bytes)',
+		owner: '#2051 (legacy-path retirement/migration owner); #2039 shipped the bounded store',
+		disposition: {
+			kind: 'retain-by-design',
+			issue: 2039,
+			citation:
+				'PR 11 shipped the bounded single-file store (src/events/core-events.ts manifest header + retained window under CORE_EVENT_LIMITS) with manifest-stripped bounded reads, the authoritative events-authority-index partition for the 4 correctness event types, per-write exclusive locking, a validated close cut, the core_events_health signal, and the check:core-events usage ratchet; verified by tests/unit/events/*.',
+			note: 'PR 11 converted the formerly unbounded shared bus into the bounded store; the four correctness-relevant event types are answered from the authoritative index, never from the compactable window alone.',
+		},
+	},
+	{
+		id: 'events-authority-index',
+		category: 1,
+		pathGrammar: '.swarm/events-authority-index.json',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/events/core-events.ts'],
+		writerCitations: [
+			'src/events/core-events.ts mergeAuthorityKeys — atomic rewrite (tmp+rename) under the store lock; maintained at append time, fold time (BEFORE an authority line leaves the window), and read time (self-heal, lock-free)',
+		],
+		readerCitations: [
+			'src/events/core-events.ts getCoderRetryEscalationActions — delegation-gate retry escalation verdicts',
+			'src/events/core-events.ts hasSpecDriftAuditEvent — spec-drift WAL COMMITTED idempotency',
+			'src/events/core-events.ts hasTaskRepairAuditEvent — task-repair audit idempotency',
+		],
+		schemaVersion: 'v1 {version, entries: Record<authorityKey, lastSeenTs>, evicted}',
+		stateClass: 'authoritative',
+		privacyClass: 'metadata',
+		writeLimits: {
+			bound: 'authorityIndexMaxEntries 20k FIFO (~2 MiB worst case); eviction counted in the persisted evicted counter and disclosed via core_events_health',
+			scope: 'global',
+			citation: 'src/events/core-events.ts CORE_EVENT_LIMITS.authorityIndexMaxEntries (issue #2039)',
+		},
+		readBound: {
+			pattern: 'indexed',
+			bound: 'whole-file JSON read of the capped index (~2 MiB worst case); misses fall back to the bounded retained-window scan',
+			sync: true,
+			citation: 'src/events/core-events.ts loadAuthorityIndex + the three authority queries',
+		},
+		lockModel: 'writes under the exclusive .swarm/events.lock store lock (append/fold paths); read-time self-heal uses a lock-free atomic rewrite (idempotent last-write-wins)',
+		crashBehavior: 'atomic tmp+rename rewrite; corrupt index => authority consumers fail CLOSED with a typed error (the malformed-JSONL throw contract they replace); append-then-index crash window self-heals at fold/read time (at most one benign duplicate audit line)',
+		closePolicy: 'archived (ARCHIVE_ARTIFACTS) and cleaned (ACTIVE_STATE_TO_CLEAN) together with events.jsonl — the WAL dirs it dedupes for are cleaned at the same boundary; known narrow residual: an asymmetric archive failure (index copy fails while the events copy succeeds) preserves the index while events.jsonl is cleaned, so a future session reusing an exact taskId/retryEpoch could inherit a prior escalation verdict — the index is rebuildable and this requires that exact one-file I/O failure',
+		closeArrayMembership: {
+			'events-authority-index.json': 'archive+clean',
+		},
+		resetPolicy: 'reset-session unlinks it with events.jsonl',
+		legacyCompatibility: 'absent file => empty index; the retained-window scan keeps legacy in-window authority events answerable, and the fold pass indexes them before compaction removes the lines',
+		healthSignal: 'core_events_health authority_index_count / authority_evicted_count',
 		owner: '#2039',
 		disposition: {
-			kind: 'fix-in-issue',
+			kind: 'retain-by-design',
 			issue: 2039,
-			note: 'PR 11 owns bounding this stream, replacing whole-file readers, and separating correctness lookups into authoritative projections (issue #2039 Required implementation 1-5).',
+			citation:
+				'The authoritative partition issue #2039 requirement 2/5 requires: correctness lookups never depend on the compactable operational window; the index is maintained at append, fold, and read time so compaction cannot change a gate verdict (FIFO eviction past 20k is the only reachable absence — disclosed, and its consequence is one benign duplicate audit line).',
+			note: 'Growth mirrors the never-deleted-within-session WAL population (one tiny entry per repair/escalation/drift transition) and resets at close with the WAL dirs.',
 		},
 	},
 	{
@@ -229,66 +313,133 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		pathGrammar: '.swarm/context-telemetry.jsonl',
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/context-map/telemetry.ts'],
-		writerCitations: ['src/context-map/telemetry.ts:154 recordTelemetry — appendFileSync :164'],
+		writerCitations: ['src/context-map/telemetry.ts recordTelemetry — appended into bounded single-file store; compaction/finalize atomic rewrite (issue #2037)'],
 		readerCitations: [
-			'src/context-map/telemetry.ts:181 readTelemetry — FULL-FILE readFileSync :190, sync',
-			'src/context-map/telemetry.ts:225 getTelemetrySummary — FULL-FILE via readTelemetry; sole non-test consumer src/commands/context-map-stats.ts:6,11',
+			'src/context-map/telemetry.ts getTelemetrySummary/readTelemetry — bounded read (manifest header + retained window), capped at CONTEXT_TELEMETRY_LIMITS.readMaxBytes (issue #2037)',
+			'src/commands/context-map-stats.ts:11 — sole non-test consumer of getTelemetrySummary',
 		],
-		schemaVersion: 'none',
+		schemaVersion: '2 (manifest header, issue #2037)',
 		stateClass: 'operational',
 		privacyClass: 'metadata',
-		writeLimits: { bound: 'NONE', scope: 'none', citation: 'src/context-map/telemetry.ts (no cap constants present)' },
-		readBound: { pattern: 'full-file', bound: 'unbounded', sync: true, citation: 'src/context-map/telemetry.ts:190' },
-		lockModel: 'none — bare appendFileSync',
-		crashBehavior: 'torn tail tolerated (JSON.parse try/catch :198)',
-		closePolicy: 'untouched — in neither ARCHIVE_ARTIFACTS nor ACTIVE_STATE_TO_CLEAN; persists across sessions',
+		writeLimits: { bound: 'ACTIVE_MAX_BYTES=256KiB / ACTIVE_MAX_ENTRIES=10k / AGE_MAX_MS=30d (retained raw window); lifetime folded aggregate in manifest header', scope: 'global', citation: 'src/context-map/telemetry.ts CONTEXT_TELEMETRY_LIMITS (issue #2037)' },
+		readBound: { pattern: 'manifest+retained-window', bound: 'READ_MAX_BYTES=280KiB (independent of total history)', sync: true, citation: 'src/context-map/telemetry.ts readBoundedChunk (issue #2037)' },
+		lockModel: 'single-synchronous-writer; exclusive .swarm/context-telemetry.lock (wx, stale-broken) guards compaction/cutover vs a second plugin instance (issue #2037)',
+		crashBehavior: 'atomic single-file rewrite (tmp+rename) — no partial-apply state; torn final tail tolerated (JSON.parse try/catch); legacy migrates incrementally on write path (issue #2037)',
+		closePolicy: 'archived via ARCHIVE_ARTIFACTS as a validated cut (finalizeContextTelemetry folds tail before copy); NOT in ACTIVE_STATE_TO_CLEAN — persists across sessions; compaction is the retention mechanism',
+		closeArrayMembership: {
+			'context-telemetry.jsonl': 'archive-only',
+		},
 		resetPolicy: 'not reset; persists',
-		legacyCompatibility: 'none',
-		healthSignal: 'none',
+		legacyCompatibility: 'pre-#2037 header-less JSONL migrated in bounded passes on the write/close path; retained raw window + lifetime aggregate are backward-compatible with existing field surface',
+		healthSignal: 'context_telemetry_health (counts-only; accepted/compacted/retained/dropped/corrupt/oldest/newest/bytes), emitted on compaction & close (issue #2037)',
 		owner: '#2037',
 		disposition: {
-			kind: 'fix-in-issue',
+			kind: 'retain-by-design',
 			issue: 2037,
-			note: 'PR 09 owns the confirmed unbounded append/full-read path with segmented/checkpoint+tail design (issue #2037 Observed/Required 1-2).',
+			citation:
+				'PR 09 shipped the bounded single-file segmented store (src/context-map/telemetry.ts CONTEXT_TELEMETRY_LIMITS manifest header + retained window) with bounded reads (readBoundedChunk, READ_MAX_BYTES), atomic-rewrite compaction, a close finalize cut (close.ts ARCHIVE_ARTIFACTS), and the context_telemetry_health signal; verified by tests/unit/context-map/telemetry-bounded.test.ts.',
+			note: 'PR 09 shipped the bounded single-file segmented store (manifest header + bounded retained window) with bounded reads, an atomic-rewrite compaction, a close finalize cut, and the context_telemetry_health signal.',
 		},
 	},
 	{
 		id: 'skill-usage',
 		category: 1,
-		pathGrammar: '.swarm/skill-usage.jsonl',
+		pathGrammar:
+			'.swarm/skill-usage.jsonl (+ .swarm/verdict-feedback-last-processed.json cursor)',
 		canonicalRoot: 'project-swarm',
-		writerModules: ['src/hooks/skill-usage-log.ts'],
+		writerModules: [
+			'src/hooks/skill-usage-log.ts',
+			'src/tools/phase-complete.ts',
+		],
 		writerCitations: [
-			'src/hooks/skill-usage-log.ts:233 appendSkillUsageEntry — appendFileSync :292',
-			'src/hooks/skill-usage-log.ts:205 appendFeedbackAppliedMarker — appendFileSync :220',
+			'src/hooks/skill-usage-log.ts:535 appendSkillUsageEntry — appendFileSync :624-628; enqueues into the sidecar FIRST (:614-621) before the JSONL append',
+			'src/hooks/skill-usage-log.ts:1581 pruneSkillUsageLog — atomic temp+rename rewrite :1676-1681, applies applyRetention (:1022) and the marker-drop rewrite',
+			'src/hooks/skill-usage-log.ts:326 appendFeedbackAppliedMarker — appendFileSync :341 (legacy pre-migration acknowledgment writer, retained for round-trip)',
 		],
 		readerCitations: [
-			'src/hooks/skill-usage-log.ts:321 readSkillUsageEntries — FULL-FILE :331, sync',
-			'src/hooks/skill-usage-log.ts:186 readFeedbackAppliedEntryIds — FULL-FILE :190, sync',
-			'src/hooks/skill-usage-log.ts:760 applySkillUsageFeedback — FULL-FILE (both above), async',
-			'src/hooks/skill-usage-log.ts:389 readSkillUsageEntriesTail — TAIL 64 KiB (TAIL_BYTES_DEFAULT :373), sync',
-			'src/services/session-reflection.ts:511 gatherSkillViolations — via tail reader',
+			'src/hooks/skill-usage-log.ts:770 readSkillUsageEntries — bounded via readLogSlice :651-691, readMaxBytes=1,677,722 B, sync',
+			'src/hooks/skill-usage-log.ts:745 readSkillUsageEntriesWithCoverage — same bound, additionally reports SkillUsageReadCoverage (truncatedRead + sidecar manifest coverage), sync',
+			"src/hooks/skill-usage-log.ts:302 parseFeedbackMarker — parses feedback_applied markers during the migration's streaming acknowledgment pass (migrateLegacyLog pass 2, :1352-1371); legacy pre-migration reader only, sync",
+			'src/hooks/skill-usage-log.ts:2095 applySkillUsageFeedback — reads the AUTHORITATIVE sidecar queue only (never the JSONL), async',
+			'src/hooks/skill-usage-log.ts:808 readSkillUsageEntriesTail — TAIL 64 KiB (TAIL_BYTES_DEFAULT :782), sync',
+			'src/services/session-reflection.ts:530 gatherSkillViolations — via tail reader',
 		],
 		schemaVersion: 'none on records (skillVersion versions the skill, not the record)',
 		stateClass: 'derived-rebuildable',
 		privacyClass: 'metadata',
 		writeLimits: {
-			bound: 'prune trigger 1 MiB (SKILL_USAGE_LOG_ROTATE_BYTES :375) with PER-SKILL 500-entry FIFO (:376) — NO hard global ceiling across skills/markers',
-			scope: 'per-key',
-			citation: 'src/hooks/skill-usage-log.ts:375-376',
+			bound: 'HARD GLOBAL ceiling across all skills and marker types (issue #2038): maxEntries=5,000 / maxBytes=1.5 MiB / maxAgeMs=90d, with a per-skill floorPerSkill=20 guaranteed retained window; enforced by applyRetention (skill-usage-log.ts:1022-1123) on every compaction pass',
+			scope: 'global',
+			citation: 'src/hooks/skill-usage-pending.ts:86-101 SKILL_USAGE_LIMITS',
 		},
-		readBound: { pattern: 'mixed full-file + tail', bound: 'full-file readers unbounded in file size; tail reader 64 KiB', sync: true, citation: 'src/hooks/skill-usage-log.ts:331,373-374' },
-		lockModel: 'none — synchronous I/O; prune via temp+rename (:614-615)',
-		crashBehavior: 'torn tail skipped (:338,:424); prune atomic, temp zeroed on failure (:619-625)',
+		readBound: {
+			pattern: 'mixed full-file + tail',
+			bound: 'bounded — full readers capped at readMaxBytes=1,677,722 B (~1.6 MiB) via readLogSlice, which reports truncatedRead when a legacy oversized file is only partially read; tail reader 64 KiB (TAIL_BYTES_DEFAULT)',
+			sync: true,
+			citation: 'src/hooks/skill-usage-log.ts:651-691 readLogSlice; :782 TAIL_BYTES_DEFAULT',
+		},
+		lockModel: 'single shared .swarm/skill-usage.lock (openSync wx-create, stale-broken after SKILL_USAGE_LOCK_STALE_MS=5min); guards the sidecar and every migration/compaction touch of the JSONL; the enqueue path is exempt from skip-not-force and retries up to 5x/10ms, throwing (and aborting the append) on failure',
+		crashBehavior: 'malformed JSONL lines skipped by JSON.parse try/catch (parseEntriesFromText :693-706); an overlong unassemblable line in the streaming reader is dropped and counted, not buffered without bound (streamLogLines :359-393); prune/compaction rewrite is atomic temp+rename (pruneSkillUsageLog :1581, rewrite :1676-1681); sidecar save is atomic temp+rename (savePendingDocument :796 -> savePendingDocumentAt, skill-usage-pending.ts:804-853, writeFileSync :821 + renameSync :822)',
 		closePolicy: 'untouched — persists across sessions',
+		closeArrayMembership: {
+			'skill-usage.jsonl': 'neither',
+			'verdict-feedback-last-processed.json': 'neither',
+		},
 		resetPolicy: 'not reset',
-		legacyCompatibility: 'normalizeComplianceVerdict maps legacy violation→violated (:96); legacySkillUsageId for pre-id entries (:139)',
-		healthSignal: 'none',
-		owner: '#2038',
+		legacyCompatibility: 'normalizeComplianceVerdict maps legacy violation→violated (skill-usage-log.ts:151-153); legacySkillUsageId mints a deterministic content-hash id for pre-id entries (:270-281); one-time migrateLegacyLog (:1291-1421) folds legacy actionable entries minus any feedback_applied-acknowledged ids into the sidecar; the whole migration runs on a staged copy that is published to the in-memory document only after savePendingDocument returns (stagePendingDocument :1209-1221 / adoptStagedDocument :1224-1233), so a failed sidecar write leaves the JSONL marker lines intact instead of dropping them ahead of a queue that was never written',
+		healthSignal: 'skill_usage_health — counts-only (accepted/compacted/dropped/skills_dropped/corrupt/pending_retained/uncertain_retained/uncertain_expired/pending_evicted/no_source_knowledge/no_matching_knowledge/bump_retry/bump_unrecoverable/bump_applied_zero/pressure/curator_skipped/bytes/limit_bytes/oldest_timestamp/newest_timestamp/coverage), emitted on compaction/migration/consumption/pressure',
+		owner: '#2038 (implemented)',
 		disposition: {
-			kind: 'fix-in-issue',
-			issue: 2038,
-			note: 'PR 10 owns the hard global byte/age/count ceiling across all skills and marker types plus bounded deterministic readers (issue #2038 Required 1-4).',
+			kind: 'retain-by-design',
+			citation:
+				'Issue #2038 landed a hard global byte/age/count bound (SKILL_USAGE_LIMITS: maxEntries=5,000/maxBytes=1.5MiB/maxAgeMs=90d/floorPerSkill=20, src/hooks/skill-usage-pending.ts:85-101) enforced by applyRetention (src/hooks/skill-usage-log.ts:1022-1123), a bounded deterministic full reader (readLogSlice, :651-691, readMaxBytes=1,677,722 B) that reports truncatedRead rather than silently degrading, a shared stale-breakable lock (.swarm/skill-usage.lock, stale window SKILL_USAGE_LOCK_STALE_MS skill-usage-pending.ts:110), atomic temp+rename writes on both the JSONL compaction path (:1718-1723) and the new authoritative sidecar (skill-usage-pending.ts:803-853), and the skill_usage_health counts-only observability signal (skill-usage-pending.ts:1351-1385). The correctness gap the bound creates — an evicted-from-JSONL actionable verdict losing its feedback signal — is closed by enqueueSkillUsageFeedback (skill-usage-pending.ts:1171-1195), called BEFORE the JSONL append (skill-usage-log.ts:614-621) so eviction from the operational stream can never lose an un-consumed compliant/violated verdict; see the new skill-usage-pending row for that authoritative store\'s own bound. Enforcement is covered by tests/unit/hooks/skill-usage-bounds.test.ts (global ceiling, retention order, corrupt-line durability, migration) and tests/unit/hooks/skill-usage-pending.test.ts (queue budgets, terminal outcomes, quarantine), alongside tests/unit/hooks/skill-usage-log.test.ts and skill-usage-feedback.test.ts.',
+		},
+	},
+	{
+		id: 'skill-usage-pending',
+		category: 1,
+		pathGrammar: '.swarm/skill-usage-pending.json',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/hooks/skill-usage-pending.ts'],
+		writerCitations: [
+			'src/hooks/skill-usage-pending.ts:796 savePendingDocument — delegates to savePendingDocumentAt :804, writeFileSync tmp :820, renameSync :822 (atomic replace)',
+			'src/hooks/skill-usage-pending.ts:1171 enqueueSkillUsageFeedback — under the lock, merges + bounds + saves (:1189-1191); the ONLY path exempt from skip-not-force (throws on lock failure)',
+		],
+		readerCitations: [
+			'src/hooks/skill-usage-pending.ts:729 loadPendingDocument — via loadPendingDocumentAt :739, bounded by readMaxBytes=1,677,722 B (:757); oversized/corrupt documents are quarantined, never silently reset to empty (:781)',
+			'src/hooks/skill-usage-pending.ts:864 readPendingManifest — cheap manifest-only read, statSync-mtime-keyed cache (:883-888), no records array materialized',
+			'src/hooks/skill-usage-log.ts:745 readSkillUsageEntriesWithCoverage — folds readPendingManifest coverage into the JSONL read window',
+			'src/hooks/skill-usage-log.ts:2095 applySkillUsageFeedback — sole consumer of the records array (via claimFeedbackRecords :-1-36), computes compliant/violated deltas from queue records only, never from JSONL entries',
+		],
+		schemaVersion: '1 (SKILL_USAGE_LIMITS.version, skill-usage-pending.ts:86)',
+		stateClass: 'authoritative',
+		privacyClass: 'metadata',
+		writeLimits: {
+			bound: 'queueMaxRecords=5,000 / queueMaxBytes=512 KiB / maxAgeMs=90d (shared with the JSONL age budget) / maxAttempts=5 transient-retry ceiling, enforced by enforceQueueBounds on every enqueue, migration, and consumption pass',
+			scope: 'global',
+			citation: 'src/hooks/skill-usage-pending.ts:86-101 SKILL_USAGE_LIMITS',
+		},
+		readBound: {
+			pattern: 'indexed',
+			bound: 'single JSON document bounded at readMaxBytes=1,677,722 B (~1.6 MiB); oversized reads are quarantined (renamed aside) and counted, never truncated in place',
+			sync: true,
+			citation:
+				'src/hooks/skill-usage-pending.ts:729 loadPendingDocument, via loadPendingDocumentAt :740-789',
+		},
+		lockModel: 'single shared .swarm/skill-usage.lock (openSync wx-create, stale-broken after SKILL_USAGE_LOCK_STALE_MS=5min, skill-usage-pending.ts:110); enqueue is exempt from skip-not-force (acquireSkillUsageLockOrThrow :535-546, 5 attempts/10ms, throws and aborts the caller\'s append on failure); maintenance/consumption skip on lock failure, never force',
+		crashBehavior: 'atomic temp+rename replace (savePendingDocument :796 -> savePendingDocumentAt :804-853, writeFileSync :821 + renameSync :822); a corrupt or oversized document is quarantined (renamed to a timestamped .corrupt- file) rather than silently discarded (quarantinePendingDocument :700-718, invoked from loadPendingDocumentAt :782); an in_flight record whose claim outlives the lock stale-break window is resolved to uncertain — survives, stays visible, never replayed (resolveStaleInFlight :1207-1228)',
+		closePolicy: 'untouched — persists across sessions (same lifecycle as .swarm/skill-usage.jsonl, which it backs)',
+		closeArrayMembership: {
+			'skill-usage-pending.json': 'neither',
+		},
+		resetPolicy: 'not reset',
+		legacyCompatibility: 'migrated: false on a fresh/absent document signals the one-time legacy migration has not run; migrateLegacyLog (skill-usage-log.ts:1291-1422) folds pre-existing JSONL actionable entries (minus feedback_applied-acknowledged ids) into this store on first lock-taking touch, then sets migrated: true',
+		healthSignal: 'skill_usage_health — same counts-only payload as the skill-usage row (buildSkillUsageHealthPayload, skill-usage-pending.ts:1351-1385), emitted via emitSkillUsageHealth (:1389-1401)',
+		owner: '#2038 (implemented)',
+		disposition: {
+			kind: 'retain-by-design',
+			citation:
+				'This store is deliberately AUTHORITATIVE, not derived-rebuildable: it is the sole durable record of which actionable (compliant/violated) skill-usage verdicts have not yet been folded into knowledge confidence via bumpKnowledgeConfidenceBatchResult (src/hooks/knowledge-store.ts:1293), driven by applySkillUsageFeedback (src/hooks/skill-usage-log.ts:2095-2183). Nothing else on disk records that fact once an entry is evicted from the bounded JSONL operational stream (issue #2038 requirement: eviction from skill-usage.jsonl must lose no correctness signal). It carries its own hard global bound (queueMaxRecords=5,000/queueMaxBytes=512KiB, src/hooks/skill-usage-pending.ts:85-101) enforced by enforceQueueBounds (:1024-1080, oldest-uncertain-first eviction; an actionable record evicted by the budget is counted as pending_evicted + pressure rather than dropped, a deliberate divergence from approved plan section 4 recorded in evictionRank docblock :981-1012 — every discard counted via the durable counters, never silent), atomic temp+rename writes (savePendingDocument :796 via savePendingDocumentAt :804-853), a shared stale-breakable lock, and the skill_usage_health signal. Enforcement is covered by tests/unit/hooks/skill-usage-pending.test.ts and tests/unit/hooks/skill-usage-bounds.test.ts.',
 		},
 	},
 
@@ -304,40 +455,49 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/background/pending-delegations.ts',
 			'src/hooks/init-orphan-recovery.ts',
 			'src/tools/prepare-pr-workflow-checkout.ts',
+			'src/hooks/pr-workflow-gate.ts',
 		],
 		writerCitations: [
-			'src/background/pending-delegations.ts:2063 appendRecord — appendFileSync :2068 (16 mutation entry points :2215-3851)',
-			'src/background/pending-delegations.ts:904 writeDurableFileSync — fsync+rename-with-retry for checkpoint/manifest/rolled-tail (:1868-1909)',
+			'src/background/pending-delegations.ts:2441 appendRecord — appendFileSync :2446 (20 mutation entry points :2600-4719)',
+			'src/background/pending-delegations.ts:1090 writeDurableFileSync — fsync+rename-with-retry for checkpoint/manifest/rolled-tail (:2246-2287)',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:2006 readDelegations — checkpoint+tail fold (lenient), sync',
-			'src/background/pending-delegations.ts:2027 scanDelegationsForRecovery — strict, fails closed',
+			'src/background/pending-delegations.ts:2384 readDelegations — checkpoint+tail fold (lenient), sync',
+			'src/background/pending-delegations.ts:2405 scanDelegationsForRecovery — strict, fails closed',
 			'pr-workflow-session-resolver / pr-workflow-gate / init-orphan-recovery / delegation-gate worktree-collision-ownership — via readDelegations',
 		],
-		schemaVersion: 'RecordSchema schemaVersion 1|2|3; checkpoint/manifest literal 1 (:798,:819,:829)',
+		schemaVersion:
+			'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:984,:1005,:1015)',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
 		writeLimits: {
-			bound: 'compaction high-water 1 MiB / low 256 KiB (:82-83); MAX_RECOVERY_LEDGER_BYTES 4 MiB; MAX_CHECKPOINT_BYTES 2 MiB / 2048 records (:85,:87); TOMBSTONE_MIN_AGE 72 h (:94)',
+			bound: 'compaction high-water 1 MiB / low 256 KiB (:103-104); MAX_RECOVERY_LEDGER_BYTES 4 MiB (delegation-health.ts:35); MAX_CHECKPOINT_BYTES 2 MiB / 2048 records (:106,:110); TOMBSTONE_MIN_AGE 72 h (:117)',
 			scope: 'global',
-			citation: 'src/background/pending-delegations.ts:82-94 (#2034)',
+			citation: 'src/background/pending-delegations.ts:103-117; src/background/delegation-health.ts:35 (#2034)',
 		},
 		readBound: {
 			pattern: 'indexed (checkpoint+tail) with full-fold fallback',
 			bound: 'legacy/tail reads hard-bounded at 4 MiB (MAX_RECOVERY_LEDGER_BYTES)',
 			sync: true,
-			citation: 'src/background/pending-delegations.ts:71-75,1327',
+			citation: 'src/background/pending-delegations.ts:89-94,1534',
 		},
-		lockModel: 'withEvidenceLock agent=background on every mutation (:121-124); reads lock-free',
-		crashBehavior: 'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1070-1080)',
-		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (close.ts:417-419); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, close.ts:412-420 docblock)',
+		lockModel: 'withEvidenceLock agent=background on every mutation (:143-146); reads lock-free',
+		crashBehavior:
+			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1262-1274)',
+		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (close.ts:453-455); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, close.ts:448-456 docblock)',
+		closeArrayMembership: {
+			'background-delegations.jsonl': 'archive-only',
+			'background-delegations.checkpoint.json': 'archive-only',
+			'background-delegations.manifest.json': 'archive-only',
+		},
 		resetPolicy: 'reset/reset-session do not delete',
-		legacyCompatibility: 'loadLegacyLedger pre-checkpoint fold (:1327); mixed-version lines safeParse individually',
+		legacyCompatibility:
+			'loadLegacyLedger pre-checkpoint fold (:1534); mixed-version lines safeParse individually',
 		healthSignal: 'delegation-health artifact + #2034 recovery observations',
 		owner: '#2034 (merged)',
 		disposition: {
 			kind: 'not-a-defect',
-			proof: 'Bounded by the #2034 checkpoint/tail compaction contract: 1 MiB high-water global trigger, 4 MiB hard recovery bound, 2 MiB/2048-record checkpoint validation, 72 h tombstone floor (src/background/pending-delegations.ts:82-94).',
+			proof: 'Bounded by the #2034 checkpoint/tail compaction contract: 1 MiB high-water global trigger, 4 MiB hard recovery bound, 2 MiB/2048-record checkpoint validation, 72 h tombstone floor (src/background/pending-delegations.ts:103-117; src/background/delegation-health.ts:35).',
 		},
 	},
 	{
@@ -346,21 +506,60 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		pathGrammar: '.swarm/background-delegations-health.json',
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/background/delegation-health.ts'],
-		writerCitations: ['src/background/delegation-health.ts:247 writeDelegationHealthArtifact — temp+rename-retry'],
-		readerCitations: ['src/background/delegation-health.ts:224 readDelegationHealthArtifact — single-file, sync; :392 collectDelegationLedgerHealth'],
-		schemaVersion: 'schemaVersion 1 (:89)',
+		writerCitations: ['src/background/delegation-health.ts:332 writeDelegationHealthArtifact — temp+rename-retry'],
+		readerCitations: ['src/background/delegation-health.ts:309 readDelegationHealthArtifact — single-file, sync; :539 collectDelegationLedgerHealth'],
+		schemaVersion: 'schemaVersion 1 (:250)',
 		stateClass: 'derived-rebuildable',
 		privacyClass: 'metadata',
-		writeLimits: { bound: 'bounded by described data (checkpoint/ledger bounds above)', scope: 'global', citation: 'src/background/delegation-health.ts:34' },
-		readBound: { pattern: 'indexed', bound: 'single small JSON artifact', sync: true, citation: 'src/background/delegation-health.ts:224' },
+		writeLimits: { bound: 'bounded by described data (checkpoint/ledger bounds above)', scope: 'global', citation: 'src/background/delegation-health.ts:35' },
+		readBound: { pattern: 'indexed', bound: 'single small JSON artifact', sync: true, citation: 'src/background/delegation-health.ts:309' },
 		lockModel: 'written under the store lock (compaction/recovery) or best-effort',
-		crashBehavior: 'atomic rename with 5×15 ms Windows retry; best-effort, returns null on failure (:332)',
+		crashBehavior: 'atomic rename with 5×15 ms Windows retry; best-effort, returns null on failure (:419)',
 		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (close.ts:420), not cleaned',
+		closeArrayMembership: {
+			'background-delegations-health.json': 'archive-only',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'malformed/missing → null',
 		healthSignal: 'IS the health signal (recovery pressure, late terminals, uncertainty)',
 		owner: '#2034 (merged)',
-		disposition: { kind: 'not-a-defect', proof: 'Single rewritten bounded artifact describing already-bounded stores; atomic + fail-open (src/background/delegation-health.ts:247,332).' },
+		disposition: { kind: 'not-a-defect', proof: 'Single rewritten bounded artifact describing already-bounded stores; atomic + fail-open (src/background/delegation-health.ts:332,420).' },
+	},
+	{
+		id: 'learning-health-artifact',
+		category: 2,
+		pathGrammar: '.swarm/learning-health.json',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/health/learning-health.ts'],
+		writerCitations: [
+			'src/health/learning-health.ts persistLearningHealth — atomicWriteSwarmFile, fire-and-forget, debounced 5 s (transitions force)',
+		],
+		readerCitations: [
+			'src/health/learning-health.ts readLearningHealth — rehydrate + lazy window evaluation; readers: src/services/status-service.ts (Learning Health section) and src/services/diagnose-service.ts (learning-health check)',
+		],
+		schemaVersion: 'schemaVersion 1',
+		stateClass: 'derived-rebuildable',
+		privacyClass: 'metadata',
+		writeLimits: {
+			bound: '≤64 scopes/alarm × 8 alarms compact counters + ≤100-transition ring; no fact lists persisted',
+			scope: 'global',
+			citation: 'src/health/learning-health.ts MAX_HEALTH_SCOPES/MAX_FACTS_PER_SCOPE/MAX_TRANSITION_RING',
+		},
+		readBound: { pattern: 'indexed', bound: 'single small JSON artifact', sync: false, citation: 'src/health/learning-health.ts readLearningHealth' },
+		lockModel: 'lock-free last-writer-wins per project directory (atomic rename)',
+		crashBehavior: 'atomic temp+rename via atomicWriteSwarmFile; best-effort, a lost write loses only visibility, never alarm truth (producers re-observe)',
+		closePolicy: 'not archived or cleaned — operational health artifact; deletion loses visibility only',
+		closeArrayMembership: {
+			'learning-health.json': 'neither',
+		},
+		resetPolicy: 'not reset (health transitions are incident-reconstruction facts)',
+		legacyCompatibility: 'malformed/missing → empty snapshot; schemaVersion mismatch → ignored',
+		healthSignal: 'IS the health signal (learning/operations alarm transitions #2044)',
+		owner: '#2044',
+		disposition: {
+			kind: 'not-a-defect',
+			proof: 'Persisted content is alarm transitions + compact per-scope counters only — explicitly NOT invocation-owned transient-retry or nonTransientCircuit state (issue #2044 item 9); bounded rings, salted session refs, atomic writes (src/health/learning-health.ts).',
+		},
 	},
 	{
 		id: 'background-delegations-fallback',
@@ -369,62 +568,68 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/background/pending-delegations.ts'],
 		writerCitations: [
-			'src/background/pending-delegations.ts:3712 writeDelegationFallback / :3763 removeDelegationFallback',
-			'src/background/pending-delegations.ts:3993 writeBackgroundCoderReservations',
+			'src/background/pending-delegations.ts:3882 writeDelegationFallback / :3933 removeDelegationFallback',
+			'src/background/pending-delegations.ts:4163 writeBackgroundCoderReservations',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:3567-3640 readDelegationFallback / listDelegationFallbacks / scanDelegationFallbacksForRecovery',
-			'src/background/pending-delegations.ts:3937 scanBackgroundCoderReservationsForAdmission',
+			'src/background/pending-delegations.ts:4435 readDelegationFallback / listDelegationFallbacks / scanDelegationFallbacksForRecovery',
+			'src/background/pending-delegations.ts:4107 scanBackgroundCoderReservationsForAdmission',
 		],
-		schemaVersion: 'fallback schemaVersion 1 (:762)',
+		schemaVersion: 'fallback schemaVersion 1 (:837)',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
 		writeLimits: {
-			bound: 'MAX_LIVE_BACKGROUND_FALLBACKS 256 (:64); per-file 1 MiB (:75); reservations ≤256 entries / 2 MiB store (:65, :3910)',
+			bound: 'MAX_LIVE_BACKGROUND_FALLBACKS 256 (:76); per-file 1 MiB (:87); reservations ≤256 entries / 2 MiB store (:77, :4080)',
 			scope: 'global',
-			citation: 'src/background/pending-delegations.ts:64-75,3910',
+			citation: 'src/background/pending-delegations.ts:76-87,4080',
 		},
-		readBound: { pattern: 'directory-scan', bound: '≤256 files × 1 MiB', sync: false, citation: 'src/background/pending-delegations.ts:3579-3640' },
-		lockModel: 'separate lock tasks FALLBACK_LOCK_TASK / RESERVATION_LOCK_TASK (:123-124)',
+		readBound: { pattern: 'directory-scan', bound: '≤256 files × 1 MiB', sync: false, citation: 'src/background/pending-delegations.ts:3749-3784' },
+		lockModel: 'separate lock tasks FALLBACK_LOCK_TASK / RESERVATION_LOCK_TASK (:137-138)',
 		crashBehavior: 'bunWrite single-file artifacts; strict recovery scans fail closed',
 		closePolicy: 'untouched (cross-session recovery state)',
+		closeArrayMembership: {
+			'background-coder-reservations.json': 'neither',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'n/a',
 		healthSignal: 'recovery scans report fallback promotion',
 		owner: '#2034 (merged)',
-		disposition: { kind: 'not-a-defect', proof: 'Hard capacity bounds: 256 fallback artifacts / 1 MiB each, 256 reservations / 2 MiB store, enforced on write and scan (src/background/pending-delegations.ts:64-75,3910).' },
+		disposition: { kind: 'not-a-defect', proof: 'Hard capacity bounds: 256 fallback artifacts / 1 MiB each, 256 reservations / 2 MiB store, enforced on write and scan (src/background/pending-delegations.ts:76-87,4080).' },
 	},
 	{
 		id: 'pr-monitor-subscriptions',
 		category: 2,
-		pathGrammar: '.swarm/pr-monitor/subscriptions.jsonl',
+		pathGrammar:
+			'.swarm/pr-monitor/subscriptions.checkpoint.json (+ bounded subscriptions.audit.jsonl transition tail; transient legacy subscriptions.jsonl → subscriptions.legacy.jsonl archive, TTL-deleted, with bounded .next/.previous replacement slots; single quarantine slots subscriptions.checkpoint.foreign.json / .corrupt.json and subscriptions.legacy.foreign.jsonl)',
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/background/pr-subscriptions.ts'],
-		writerCitations: ['src/background/pr-subscriptions.ts:194 appendRecord — appendFileSync :200 (subscribe/unsubscribe/updateSnapshot/sweepStale under lock)'],
-		readerCitations: [
-			'src/background/pr-subscriptions.ts:165 readAllRecords — FULL-FILE fold to latest per correlationId, sync',
-			'src/background/pr-subscriptions.ts:343 listActive / :352 lookupByPr — via full fold',
+		writerCitations: [
+			'src/background/pr-subscriptions.ts writeCheckpointFile — atomic tmp+rename (atomicWriteSwarmFileSync) under withEvidenceLock on the unchanged v1 lock key; all mutations (subscribe/unsubscribe/updateSnapshot/sweepStale/migration/archive) serialize cross-process (issue #2042)',
+			'src/background/pr-subscriptions.ts flushAuditEvents/planAuditCompaction/applyAuditCompaction — transition-only audit appends; compaction reads at most the 128 KiB high-water tail and rewrites newest ≤250 lines / ≤64 KiB',
 		],
-		schemaVersion: 'none',
+		readerCitations: [
+			'src/background/pr-subscriptions.ts loadViewForRead — bounded checkpoint read (live-set sized); lock-free; legacy overlay only while a legacy source is pending or changed (streaming, bounded memory); one-time read-bootstrap persists the first checkpoint so read-only installs converge (issue #2042)',
+			'src/background/pr-subscriptions.ts getPrSubscriptionHealth — bounded health read (counts/bytes/pressure/recovery-source)',
+		],
+		schemaVersion: 'checkpoint schemaVersion 1 (records map + migration cursor + maintenance counters)',
 		stateClass: 'operational',
 		privacyClass: 'metadata',
 		writeLimits: {
-			bound: 'maxSubscriptions caller parameter on subscribe ONLY (:99,:265-274); NO global byte/count/age bound; stale sweep appends expired snapshots without compaction',
-			scope: 'per-trigger',
-			citation: 'src/background/pr-subscriptions.ts:99,265-274,424',
+			bound: 'live-subscription cap: explicit maxSubscriptions (config default 20, max 100 — src/config/schema.ts) with store-side safety net default 20 when the caller omits it (PR_SUBSCRIPTION_LIMITS.defaultMaxActiveSubscriptions); terminal records compacted 60-high→30-newest + 30-day age into monotone terminalSummary counters; checkpoint pressure-guard 256 KiB (reporting-only — active records never dropped for bytes) with HARD read-side guards (512-record replay guard + 1 MiB UTF-8 byte ceiling → invalid/quarantine/legacy-recovery, never a synchronous over-ceiling load); audit tail 500-line/128 KiB high-water → 250-line/64 KiB low-water rewrite, with compaction reading at most the 128 KiB tail; legacy sources have a 64 MiB admission ceiling and migration folds at most 8 MiB per mutation in 1 MiB crash-resumable progress chunks (larger admitted sources return a retryable progress error; an over-ceiling source is refused before any mutation/checkpoint publication, never folded, never archived, and disclosed via health + the /swarm pr status footer with a repair hint); the replay guards are WRITER-enforced too — terminal compaction runs before every persist and a folded live set that still exceeds the 512-record/1 MiB replay capacity refuses migration and fails writes with a loud capacity error while reads keep folding the legacy source exactly (never persisting a checkpoint the reader would reject, never archiving unabsorbed data); foreign checkpoint plus co-copied legacy pairs are quarantined to bounded single-file slots before local state is published',
+			scope: 'global',
+			citation: 'src/background/pr-subscriptions.ts PR_SUBSCRIPTION_LIMITS (#2042 shipped)',
 		},
-		readBound: { pattern: 'full-file', bound: 'unbounded fold on every poll/update/list/sweep', sync: true, citation: 'src/background/pr-subscriptions.ts:165' },
-		lockModel: 'withEvidenceLock agent=pr-monitor (:29-30); reads lock-free',
-		crashBehavior: 'torn tail skipped by lenient fold (:178-190)',
-		closePolicy: 'untouched',
-		resetPolicy: 'not reset',
-		legacyCompatibility: 'lenient line-skip only',
-		healthSignal: 'none',
+		readBound: { pattern: 'bounded-checkpoint-read', bound: 'checkpoint is live-set sized (≤512-record guard, ~tens typical); legacy tail fold only while a legacy source exists and changed — never lifetime history after migration', sync: true, citation: 'src/background/pr-subscriptions.ts loadViewForRead/foldLegacyRegion' },
+		lockModel: 'withEvidenceLock agent=pr-monitor on the unchanged v1 key (PR_SUBSCRIPTIONS_FILE); reads lock-free except the one-time best-effort read-bootstrap (5 s lock timeout)',
+			crashBehavior: 'atomic tmp+rename checkpoint writes; migration progress persisted per 1 MiB chunk and yields after ≤8 MiB per mutation (resumable cursor); quarantine → checkpoint write → audit append ordering; crash-after-archive repaired idempotently; corrupt checkpoints are quarantined and recovered from the legacy log, while foreign checkpoint plus legacy pairs are quarantined together before a project-local rebind',
+		closePolicy: 'untouched (bounded at write; terminal/audit compaction + archive TTL own reaping)',
+		resetPolicy: 're-subscribe overwrites per correlationId; foreign/corrupt recovery rebinds (maintenance.resets counted, quarantined copy retained); operator may delete the archive/quarantine files',
+		legacyCompatibility: 'pre-#2042 append-only subscriptions.jsonl migrated incrementally under bounded bytes/work; v1 positional last-line-wins preserved (overlay tie → legacy-fold result wins); malformed/oversize lines skipped and counted, never silently dropped',
+		healthSignal: 'pr_subscription_health (trigger compact/migrate-complete/archive/foreign-rebind/corrupt-quarantine; counts only) + /swarm pr status storage footer + getPrSubscriptionHealth',
 		owner: '#2042',
 		disposition: {
-			kind: 'fix-in-issue',
-			issue: 2042,
-			note: 'PR 14 owns checkpoint+bounded-audit-tail compaction and bounded reads (issue #2042 Required 1-3, "no checkpoint/rewrite/rotation path" verified cause).',
+			kind: 'retain-by-design',
+			citation: 'Bounded at write by the #2042 shipped implementation (checkpoint + transition-audit tail + incremental legacy migration + terminal compaction); the retained live set IS the PR-monitor contract, and terminal history reduces to bounded counters + bounded audit summaries.',
 		},
 	},
 	{
@@ -441,6 +646,8 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writeLimits: {
 			bound: 'MAX_PR_FEEDBACK_MONITOR_EVENTS 20 per queue (:14); MAX_QUEUE_BYTES 512 KiB per file (:15); in-memory cache MAX_TRACKED_SESSIONS 200 FIFO (:16)',
 			scope: 'per-key',
+			keyspaceBound:
+				'NOT FINITE — a second newly discovered live instance of the issue #2038 class, found by applying this rule to the existing registry; recorded here as the evidence behind this row\'s fix-in-issue disposition. One file per distinct sessionID, keyed by prWorkflowSessionFileStem(sessionID) — a slug plus a sha256 digest (src/hooks/pr-workflow-gate.ts:13204-13213). All three bounds this row cites are per-key or in-memory: 20 events per queue and 512 KiB per file bound ONE queue, and MAX_TRACKED_SESSIONS=200 (src/background/pr-feedback-event-queue.ts:16) evicts from the in-process Map trackedQueuesByProjectSession (declared :73, eviction :599-602) — it deletes no file on disk. No path removes a queue file: the module\'s only fsp.rm calls target the lock (src/background/pr-feedback-event-queue.ts:377,423), and claimPrFeedbackMonitorEvents stamps events with claimedWorkflowInstanceId and rewrites the record rather than removing them (:124-197), so even a fully drained queue persists at full size. The directory appears in no close or reset list. Disk growth is therefore unbounded at one 512 KiB-capped file per session ever run.',
 			citation: 'src/background/pr-feedback-event-queue.ts:14-19',
 		},
 		readBound: { pattern: 'indexed', bound: '≤512 KiB hard read bound', sync: false, citation: 'src/background/pr-feedback-event-queue.ts:440-470' },
@@ -450,10 +657,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'QueueRecordSchema rejects non-matching shapes',
 		healthSignal: 'lock reclamation counters',
-		owner: 'this-gate',
+		owner: '#2309',
 		disposition: {
-			kind: 'not-a-defect',
-			proof: 'Already bounded: 20 events/queue, 512 KiB/file hard bound, 200-session in-memory FIFO (src/background/pr-feedback-event-queue.ts:14-19) — the issue-directed source citation for retain/not-defect ("PR-feedback queues already have count/byte/session bounds").',
+			kind: 'fix-in-issue',
+			issue: 2309,
+			note: 'RECLASSIFIED from not-a-defect by the issue #2038 keyspace guardrail. The previous proof read "Already bounded: 20 events/queue, 512 KiB/file hard bound, 200-session in-memory FIFO" — every one of those bounds is per-key or in-memory, and none of them bounds the number of queue FILES. See writeLimits.keyspaceBound on this row for the source evidence: the 200-session FIFO evicts from an in-process Map (src/background/pr-feedback-event-queue.ts:73,599-602) and unlinks nothing, claiming an event rewrites the record in place rather than removing it (:124-197), and the directory is in no close or reset list. This is the same shape #2309 already owns for skill-changelogs (per-key cap, no bound on the key population), which is why it is filed here rather than under a new issue.',
 		},
 	},
 	{
@@ -464,7 +672,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writerModules: ['src/background/lane-output-store.ts', 'src/background/candidate-sidecar-store.ts'],
 		writerCitations: [
 			'src/background/lane-output-store.ts:84 storeLaneOutput — atomic temp+rename :355',
-			'src/background/candidate-sidecar-store.ts:452 appendToSidecar — appendFileSync :506 (optional lockfile :509-513)',
+			'src/background/candidate-sidecar-store.ts:458 appendToSidecar — appendFileSync :506 (optional lockfile :509-513)',
 		],
 		readerCitations: [
 			'src/background/lane-output-store.ts:191 readLaneOutput — single-file by ref with digest/bytes validation, sync',
@@ -512,11 +720,81 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'in-process bound enforcement (invariant 8 pattern)',
 		crashBehavior: 'rewrite; stale cache at worst re-delivers',
 		closePolicy: 'untouched',
+		closeArrayMembership: {
+			'lane-delivery-cache.json': 'neither',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'n/a',
 		healthSignal: 'n/a',
 		owner: 'this-gate',
 		disposition: { kind: 'not-a-defect', proof: 'Hard bounds 1024 keys / 16 sessions / 16 directories with eviction (src/background/lane-delivery-store.ts:35-40,165-204).' },
+	},
+	{
+		id: 'lane-receipt-recovery-cursor',
+		category: 2,
+		pathGrammar: '.swarm/lane-receipt-recovery-cursor.json',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/background/delegation-lifecycle.ts'],
+		writerCitations: [
+			'src/background/delegation-lifecycle.ts writeRecoveryCursor — JSON.stringify of {updatedAt, correlationId} via fs.writeFileSync; reset via fs.rmSync force (issue #2045 terminal-lane receipt recovery)',
+		],
+		readerCitations: [
+			'src/background/delegation-lifecycle.ts readRecoveryCursor — single file, sync, validated manual guards (fail-open to null)',
+		],
+		schemaVersion: 'none',
+		stateClass: 'operational',
+		privacyClass: 'metadata',
+		writeLimits: {
+			bound: 'one fixed-shape object ({updatedAt: number, correlationId: string ≤256}); overwritten in place each advancing pass; no accumulation',
+			scope: 'global',
+			citation: 'src/background/delegation-lifecycle.ts RecoveryCursor + writeRecoveryCursor',
+		},
+		readBound: { pattern: 'indexed', bound: 'single bounded JSON', sync: true, citation: 'src/background/delegation-lifecycle.ts readRecoveryCursor' },
+		lockModel: 'in-process bound enforcement (invariant 8 pattern); cross-process cursor races degrade to ledger-idempotent rework only',
+		crashBehavior: 'rewrite; a lost/stale cursor only causes idempotent replay rework (receipt ledger dedupes), never corruption',
+		closePolicy: 'untouched',
+		closeArrayMembership: {
+			'lane-receipt-recovery-cursor.json': 'neither',
+		},
+		resetPolicy: 'not reset',
+		legacyCompatibility: 'n/a',
+		healthSignal: 'n/a',
+		owner: 'this-gate',
+		disposition: { kind: 'not-a-defect', proof: 'Fixed two-field shape rewritten per recovery pass (src/background/delegation-lifecycle.ts readRecoveryCursor/writeRecoveryCursor); loss is fail-open to idempotent rework, bounded by MAX_TERMINAL_LANE_RECEIPT_RECOVERY + admission deadline.' },
+	},
+	{
+		id: 'pr-review-reentry-authorizations',
+		category: 2,
+		pathGrammar: '.swarm/pr-review/reentry-authorizations/{session-stem}.json (+ .lock)',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/pr-review/authorization.ts'],
+		writerCitations: [
+			'src/pr-review/authorization.ts writeAuthorizationFile — atomic temp+rename, proper-lockfile guarded, ≤64 KiB write bound',
+		],
+		readerCitations: [
+			'src/pr-review/authorization.ts readAuthorizationFile — bounded single-file read, ≤64 KiB',
+		],
+		schemaVersion: 'schemaVersion 1 (Zod-validated file + records)',
+		stateClass: 'operational',
+		privacyClass: 'metadata',
+		writeLimits: {
+			bound: 'per-session: ≤8 unconsumed authorizations, ≤32 persisted records (pruned on write), 10-min TTL; store file ≤64 KiB',
+			scope: 'per-key',
+			citation: 'src/pr-review/authorization.ts AUTHORIZATION_TTL_MS/MAX_ACTIVE_AUTHORIZATIONS/MAX_PERSISTED_AUTHORIZATIONS/REENTRY_AUTHORIZATIONS_MAX_BYTES',
+		},
+		readBound: { pattern: 'indexed', bound: 'single session file, 64 KiB hard read bound', sync: false, citation: 'src/pr-review/authorization.ts readAuthorizationFile' },
+		lockModel: 'proper-lockfile (stale 10 s, update 1 s) on the session store file',
+		crashBehavior: 'atomic temp+rename; a torn write loses an unconsumed authorization only (consume fails closed to normal gating)',
+		closePolicy: 'untouched — session-scoped, pruned by TTL/bound on next write',
+		resetPolicy: 'not reset',
+		legacyCompatibility: 'absent store reads as null (fail-closed normal gating)',
+		healthSignal: 'consume-time binding mismatch (stale/expired/replayed) returns null',
+		owner: '#2309',
+		disposition: {
+			kind: 'fix-in-issue',
+			issue: 2309,
+			note: 'Per-session content is bounded (≤8 unconsumed / ≤32 persisted, on-write pruning, 10-min TTL), but one store file per session id is never reaped — the same unbounded-keyspace class as pr-feedback-event-queues. Added to the sequence-amendment issue as a verified accumulation gap.',
+		},
 	},
 	{
 		id: 'pr-review-run-artifacts',
@@ -576,6 +854,10 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'none; fail-open (parse failure → fresh snapshot)',
 		crashBehavior: 'non-atomic writeFileSync; truncated file self-heals to fresh snapshot on next load (:140-149)',
 		closePolicy: 'untouched',
+		closeArrayMembership: {
+			'automation-status.json': 'neither',
+			'evidence-summary.json': 'neither',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'reader returns null on any parse failure',
 		healthSignal: 'n/a',
@@ -621,8 +903,10 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		stateClass: 'derived-rebuildable',
 		privacyClass: 'metadata',
 		writeLimits: {
-			bound: 'max_lines default 500 PER-FILE enforced at write time; truncation keeps newest 250 (:114-133, default at :466)',
+			bound: 'max_lines PER-FILE enforced at write time; truncation keeps newest floor(max_lines/2) (:114-133). NOTE (maintainer review #2395, finding on claim 7): the production knob is now `prm.max_trajectory_lines` (src/index.ts passes it to createTrajectoryLoggerHook and the denied-call path), previously a hardcoded 1000 — the writer CODE is unchanged but the evidence truncation budget is config-coupled; default 1000 is identical, so no default-config regression.',
 			scope: 'per-key',
+			keyspaceBound:
+				'FINITE BY REAPER, not by key domain: one key per taskId directory, and taskId is only shape-validated (src/validation/task-id.ts:69-114 admits any /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/ id, explicitly beyond plan task numbers), so the key domain is open. What bounds it is a GLOBAL deleter: ACTIVE_STATE_DIRS_TO_CLEAN contains "evidence" (src/commands/close.ts:574-583) and the close clean loop runs fs.rm(dirPath, {recursive: true}) over the whole .swarm/evidence/ tree (src/commands/close.ts:1761-1773), dropping every key in one pass on a single session-lifecycle trigger. CAVEAT (verified, do not soften): the trigger is lifecycle-driven rather than size-driven and is archive-first-gated (src/commands/close.ts:1762-1765 skips the delete when the directory was not archived), and neither /swarm reset nor /swarm reset-session touches this tree — so a session that never closes accumulates one directory per distinct taskId.',
 			citation: 'src/hooks/trajectory-logger.ts:114-133,466,558',
 		},
 		readBound: { pattern: 'full-file', bound: '≤500 lines per file by write-side truncation', sync: false, citation: 'src/hooks/trajectory-logger.ts:558 + micro-reflector.ts:262' },
@@ -641,31 +925,44 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 	{
 		id: 'prm-session-trajectories',
 		category: 3,
-		pathGrammar: '.swarm/trajectories/{sessionId}.jsonl',
+		pathGrammar:
+			'.swarm/trajectories/{sessionId}.jsonl (+ {sessionId}.jsonl.meta.json checkpoint; transient {sessionId}.jsonl.lock and atomic-write *.tmp)',
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/prm/trajectory-store.ts'],
-		writerCitations: ['src/prm/trajectory-store.ts:80 appendTrajectoryEntry — appendFile :92; maxLines bounds the IN-MEMORY cache only (:35-39)'],
-		readerCitations: [
-			'src/prm/trajectory-store.ts:109 readTrajectory — FULL-FILE, async',
-			'src/prm/index.ts:275,279 + src/consensus/corpus.ts — full reads per session',
+		writerCitations: [
+			'src/prm/trajectory-store.ts appendTrajectoryEntry — locked appendFile with torn-tail re-framing; per-file .lock (wx existence lock — PID written for diagnostics only, never liveness-checked — 5-min stale-break, 20x5ms retry); append-time byte ceiling + every-25-appends line-count check both run bounded reverse compaction keeping the newest floor(maxLines/2) lines (issue #2041)',
 		],
-		schemaVersion: 'none',
+		readerCitations: [
+			'src/prm/trajectory-store.ts readTrajectoryWithCoverage — TAIL-BOUNDED (readMaxBytes 1 MiB), coverage complete/truncated/empty + droppedByCompaction from the checkpoint (issue #2041)',
+			'src/prm/trajectory-store.ts getCurrentStep — bounded step tail read (64 KiB) merged with the atomic checkpoint; restart-seeding caller src/hooks/trajectory-logger.ts ensureSessionStepSeeded',
+			'src/prm/index.ts toolAfter cold start + src/consensus/corpus.ts loadPrmSessions — via the bounded readers; corpus flips ConsensusCorpus.truncated on partial windows',
+		],
+		schemaVersion: 'trajectory checkpoint v1 ({sessionId}.jsonl.meta.json)',
 		stateClass: 'derived-rebuildable',
 		privacyClass: 'metadata',
 		writeLimits: {
-			bound: 'NO disk cap — truncateTrajectoryIfNeeded (:164) has no production caller; age cleanup 7 days at PRM init only (cleanupOldTrajectoryFiles :237, prm/index.ts:512)',
-			scope: 'none',
-			citation: 'src/prm/trajectory-store.ts:35-39,164,237 (#2041 verified cause)',
+			bound: 'ONE knob prm.max_trajectory_lines (default 1000) governs cache trim AND disk compaction (newest floor(maxLines/2) retained); sovereign byte ceiling max(64 KiB, maxLines*512 B) enforced at APPEND time; oversize lines (>64 KiB) skipped; age sweep 7 d + per-directory count cap 200 .jsonl (256 unlinks/run) via cleanupOldTrajectoryFiles, scheduled once per PRM-active session (debounced 10 min) + one bounded post-resolution init pass',
+			scope: 'per-key',
+			keyspaceBound: 'GLOBAL reaper: cleanupOldTrajectoryFiles enforces maxFilesPerDir=200 .jsonl per directory (oldest-effective-mtime first, 256 unlinks/run, converging across runs — src/prm/trajectory-store.ts TRAJECTORY_LIMITS.maxFilesPerDir/maxDeletionsPerRun), so the session-file keyspace is finite at 200 keys/dir regardless of how many sessions the host mints; the age sweep reapes idle keys on the same global trigger',
+			citation: 'src/prm/trajectory-store.ts TRAJECTORY_LIMITS + sessionMaxBytesFor (#2041 shipped)',
 		},
-		readBound: { pattern: 'full-file', bound: 'unbounded for active long sessions', sync: false, citation: 'src/prm/trajectory-store.ts:109' },
-		lockModel: 'none (documented best-effort single-process assumption :204-206)',
-		crashBehavior: 'torn tail skipped; cache rebuilt from disk',
-		closePolicy: 'untouched',
-		resetPolicy: 'resetPrmSessionState clears pointers, not files',
-		legacyCompatibility: 'reader skips malformed lines',
-		healthSignal: 'n/a',
+		readBound: {
+			pattern: 'tail-bounded-window',
+			bound: 'readMaxBytes 1 MiB (step reads 64 KiB); never a whole-file read',
+			sync: false,
+			citation: 'src/prm/trajectory-store.ts readTrajectoryWithCoverage/getCurrentStep',
+		},
+		lockModel: 'per-file cross-process .lock (wx existence lock, no PID liveness check, stale-break, bounded retry) + in-process per-key promise chain; lock-exhaust skips the append with a warned, counted loss (trajectory_health append_skip)',
+		crashBehavior: 'tmp+rename atomic publish; checkpoint written after the data rewrite under the same lock and ratchets max(prev, observed); the newest window always retains the max step; torn tails re-framed on append; corrupt lines shed and counted at compaction',
+		closePolicy: 'untouched (bounded at write; age/count sweep owns reaping)',
+		resetPolicy: 'resetPrmSessionState clears pointers, not files; step counters reseed from the checkpoint on next mint',
+		legacyCompatibility: 'pre-#2041 unbounded files migrate on first compaction (bounded tail window); readers skip malformed/oversize lines',
+		healthSignal: 'trajectory_health (trigger compaction/cleanup/append_skip; counts only)',
 		owner: '#2041',
-		disposition: { kind: 'fix-in-issue', issue: 2041, note: 'PR 13 owns per-session/per-project disk budgets, production-append enforcement, and bounded reads (issue #2041 Required 1-5).' },
+		disposition: {
+			kind: 'retain-by-design',
+			citation: 'Bounded at write by the #2041 shipped PR (append-time byte ceiling + check-interval line compaction); the retained window IS the PRM pattern-detection contract, mirrored by the in-memory cache trim rule.',
+		},
 	},
 	{
 		id: 'prm-replays',
@@ -673,21 +970,24 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		pathGrammar: '.swarm/replays/{sessionId}-{timestamp}.jsonl',
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/prm/replay.ts'],
-		writerCitations: ['src/prm/replay.ts:143 recordReplayEntry — appendFile :163 (startReplayRecording :99, path-validated :110-120)'],
+		writerCitations: ['src/prm/replay.ts recordReplayEntry — appendFile with a per-artifact 1 MiB byte cap (REPLAY_LIMITS, issue #2041): bytes tracked in memory, stat every 16 entries, skip + one-time warn at cap (startReplayRecording prepares the path, path-validated)'],
 		readerCitations: ['write-only in production (tests/external tooling consume replays)'],
 		schemaVersion: 'none',
 		stateClass: 'operational',
 		privacyClass: 'content',
-		writeLimits: { bound: 'one file per session, no per-file cap; 7-day TTL via cleanupOldTrajectoryFiles', scope: 'per-key', citation: 'src/prm/replay.ts:106,163; trajectory-store.ts:237' },
+		writeLimits: { bound: 'per-artifact 1 MiB byte cap at write (REPLAY_LIMITS, issue #2041): bytes tracked in memory, stat every 16 entries, skip + one-time warn at cap; shared age sweep 7 d + per-directory count cap 200 via cleanupOldTrajectoryFiles', scope: 'per-key', keyspaceBound: 'GLOBAL reaper: the same cleanupOldTrajectoryFiles sweep enforces maxFilesPerDir=200 .jsonl on .swarm/replays/ (oldest-first, 256 unlinks/run — src/prm/trajectory-store.ts TRAJECTORY_LIMITS), so the artifact keyspace is finite at 200 keys/dir regardless of session count', citation: 'src/prm/replay.ts REPLAY_LIMITS; trajectory-store.ts cleanupOldTrajectoryFiles (#2041 shipped)' },
 		readBound: { pattern: 'write-only', bound: 'n/a', sync: false, citation: 'no production reader (verified)' },
-		lockModel: 'none',
+		lockModel: 'none (single writer per artifact: one session instance owns the timestamped path; writes awaited sequentially per call site)',
 		crashBehavior: 'append; torn tail harmless (no reader)',
-		closePolicy: 'untouched (7-day TTL only)',
+		closePolicy: 'untouched (age/count sweep only)',
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'n/a',
-		healthSignal: 'n/a',
+		healthSignal: 'n/a (cap skip is warned in logs; disclosed here)',
 		owner: '#2041',
-		disposition: { kind: 'fix-in-issue', issue: 2041, note: 'PR 13 explicitly scopes replays into the PRM budget set (issue #2041 Required 1: "PRM trajectories/replays").' },
+		disposition: {
+			kind: 'retain-by-design',
+			citation: 'Hard per-artifact byte cap shipped by the #2041 PR (issue #2041 Required 1 scopes replays into the PRM budget set); replays are write-only best-effort diagnostics.',
+		},
 	},
 	{
 		id: 'insight-candidates',
@@ -712,6 +1012,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'knowledge-store directory lock via transactFile (knowledge-store.ts:640-658)',
 		crashBehavior: 'temp+rename atomic; torn tail skipped',
 		closePolicy: 'untouched (bounded queue)',
+		closeArrayMembership: {
+			'insight-candidates.jsonl': 'neither',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'malformed lines skipped; legacy id-less lines handled by id recomputation',
 		healthSignal: 'consumption counts',
@@ -732,7 +1035,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		schemaVersion: 'markdown report (legacy + structured action formats parsed :249,:400)',
 		stateClass: 'governed-content',
 		privacyClass: 'content',
-		writeLimits: { bound: 'one bounded-input report per plan (inputs capped :38-43); idempotent dedup', scope: 'per-key', citation: 'src/hooks/curator-postmortem.ts:38-43,1129-1137' },
+		writeLimits: {
+			bound: 'one bounded-input report per plan (inputs capped :38-43); idempotent dedup',
+			scope: 'per-key',
+			keyspaceBound:
+				'FINITE BY REAPER: one key per planId (.swarm/post-mortem-{planId}.md). The GLOBAL deleter is a directory scan, not a per-plan hook — /swarm close readdirs .swarm/ and matches every /^post-mortem-[^/\\\\]+\\.md$/ name (src/commands/close.ts:1447-1452), copies each into the archive, records it in ctx.archivedActiveStateFiles, and then unlinks each matched artifact from .swarm/ (src/commands/close.ts:1738-1747). Because the sweep is driven by the directory listing rather than by a known set of plan ids, it reclaims keys the writer never told it about. CAVEAT: the unlink runs only for artifacts that archived successfully — src/commands/close.ts:1732-1736 deliberately preserves active state when nothing was archived — and the trigger is session close, so an unclosed session retains one report per plan.',
+			citation: 'src/hooks/curator-postmortem.ts:38-43,1129-1137',
+		},
 		readBound: { pattern: 'full-file', bound: 'single report per plan', sync: true, citation: 'src/hooks/curator-postmortem.ts:819' },
 		lockModel: 'tryAcquireLock non-blocking, skip if held (:836-846,1145-1156)',
 		crashBehavior: 'atomic write; invalid report regenerated next run',
@@ -771,16 +1080,19 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		pathGrammar: '.swarm/knowledge-promotion-evidence.jsonl',
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/hooks/promotion-evidence-store.ts'],
-		writerCitations: ['src/hooks/promotion-evidence-store.ts:72 appendPromotionEvidence — appendFile + trimIfOversized FIFO'],
-		readerCitations: ['src/hooks/promotion-evidence-store.ts:113 loadPromotionEvidenceByEntry — reads the RECEIPT LEDGER, not this file (derived projection)'],
+		writerCitations: ['src/hooks/promotion-evidence-store.ts:73 appendPromotionEvidence — appendFile + trimIfOversized FIFO'],
+		readerCitations: ['src/hooks/promotion-evidence-store.ts:123 loadPromotionEvidenceByEntry — reads the RECEIPT LEDGER, not this file (derived projection)'],
 		schemaVersion: 'none',
 		stateClass: 'derived-rebuildable',
 		privacyClass: 'metadata',
 		writeLimits: { bound: 'MAX_PROMOTION_EVIDENCE_ENTRIES 2000 GLOBAL FIFO (:41,92-105)', scope: 'global', citation: 'src/hooks/promotion-evidence-store.ts:41,92-105' },
-		readBound: { pattern: 'indexed', bound: 'authoritative reader queries the receipt ledger (bounded per receipts-v2 row)', sync: false, citation: 'src/hooks/promotion-evidence-store.ts:113-157' },
+		readBound: { pattern: 'indexed', bound: 'authoritative reader queries the receipt ledger (bounded per receipts-v2 row)', sync: false, citation: 'src/hooks/promotion-evidence-store.ts:123-167' },
 		lockModel: 'none on the projection (authority lives in the locked receipt ledger)',
 		crashBehavior: 'append + atomic FIFO trim (temp+rename :103-104); fail-open',
 		closePolicy: 'untouched (derived, bounded)',
+		closeArrayMembership: {
+			'knowledge-promotion-evidence.jsonl': 'neither',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'n/a',
 		healthSignal: 'n/a',
@@ -828,6 +1140,10 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'none (temp+rename only); recovery records cleared on successful merge-back',
 		crashBehavior: 'atomic rewrites with fail-closed corrupt markers and repair paths',
 		closePolicy: 'untouched — epic/, recovery/, turbo-state.json, epic-state.json survive close',
+		closeArrayMembership: {
+			'epic-state.json': 'neither',
+			'turbo-state.json': 'neither',
+		},
 		resetPolicy: 'per-session reset functions only (resetEpicSession :309, resetLeanTurboRun :340)',
 		legacyCompatibility: 'seed-empty on first read',
 		healthSignal: 'fail-closed unreadable markers',
@@ -903,24 +1219,49 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 	{
 		id: 'shell-audit',
 		category: 4,
-		pathGrammar: '.swarm/session/shell-audit.jsonl',
+		pathGrammar: '.swarm/session/shell-audit.jsonl (+ transient .lock)',
 		canonicalRoot: 'project-swarm',
-		writerModules: ['src/hooks/guardrails/audit-log.ts'],
-		writerCitations: ['src/hooks/guardrails/audit-log.ts:332 appendGuardrailDecision — _internals.appendFile :381 (typed entries, write-time redaction)'],
-		readerCitations: ['src/services/guardrail-log-service.ts:68 — FULL-FILE fs.readFile, async, then filter/sort (/swarm guardrail-log)'],
-		schemaVersion: 'none (type discriminator stripped for shell entries :344-351)',
+		writerModules: [
+			'src/hooks/guardrails/shell-audit-store.ts',
+			'src/hooks/guardrails/audit-log.ts',
+		],
+		writerCitations: [
+			'src/hooks/guardrails/audit-log.ts appendGuardrailDecision — the single validated+redacted decision seam (issue #2040); seven fire-and-forget call sites, all in src/hooks/guardrails/tool-before.ts; line-shaping truncates commands (4,096 chars) and redacts before persisting',
+			'src/hooks/guardrails/shell-audit-store.ts appendShellAuditLineSync — per-write exclusive .swarm/session/shell-audit.lock (wx, 5-min stale-break), torn-tail re-framing, decision-class priority compaction',
+		],
+		readerCitations: [
+			'src/hooks/guardrails/shell-audit-store.ts readShellAuditTail — tail-bounded (readMaxBytes 256 KiB), manifest-stripped, coverage complete/truncated/empty',
+			'src/hooks/guardrails/shell-audit-store.ts getShellAuditFoldedSummary — header-only folded aggregate read',
+			'src/services/guardrail-log-service.ts handleGuardrailLog — /swarm guardrail-log renders the bounded window (≤200 entries) with render-time re-redaction of legacy records through the CURRENT policy',
+		],
+		schemaVersion: 'v1 swarm-shell-audit-manifest header + retained window (issue #2040); legacy 5-field shell lines preserved byte-for-byte; typed command entries carry a 16-hex commandHash (sha256 of the redacted command, never rendered)',
 		stateClass: 'operational',
 		privacyClass: 'mixed',
-		writeLimits: { bound: 'NONE — no rotation/size/count cap', scope: 'none', citation: 'src/hooks/guardrails/audit-log.ts (no cap constants); #2040 Observed' },
-		readBound: { pattern: 'full-file', bound: 'unbounded within a session', sync: false, citation: 'src/services/guardrail-log-service.ts:68' },
-		lockModel: 'none — fire-and-forget append, never blocks tool execution',
-		crashBehavior: 'append failures logged only (:379-388); torn tail skipped by reader (:84-92)',
-		closePolicy: 'cleaned — session/ dir archived+cleaned (close.ts:569); reset-session deletes all but state.json (reset-session.ts:107-133)',
-		resetPolicy: 'reset-session wipes session/ (shell-audit included)',
-		legacyCompatibility: 'reader accepts legacy 5-field shell shape; missing type defaults to shell (guardrail-log-service.ts:49,84-117)',
-		healthSignal: 'n/a',
+		writeLimits: {
+			bound: 'SHELL_AUDIT_LIMITS: activeMaxBytes 1 MiB (manifest+window, sovereign over both classes), securityMaxEntries 4,000 (typed decisions — never age-folded), allowedMaxEntries 2,000 + allowedAgeMaxMs 72 h (legacy allowed shell decisions), compactMaxBytes 256 KiB/pass, checkInterval 25, maxLineBytes 64 KiB (commands truncated to 4,096 chars at line-shaping time)',
+			scope: 'global',
+			citation: 'src/hooks/guardrails/shell-audit-store.ts SHELL_AUDIT_LIMITS (issue #2040)',
+		},
+		readBound: {
+			pattern: 'manifest+retained-window (tail-bounded)',
+			bound: 'readMaxBytes 256 KiB independent of total history; render capped at 200 entries with explicit truncation footer',
+			sync: true,
+			citation: 'src/hooks/guardrails/shell-audit-store.ts readShellAuditTail; src/services/guardrail-log-service.ts MAX_RENDERED_ENTRIES',
+		},
+		lockModel: 'exclusive .swarm/session/shell-audit.lock (wx create, 5-min mtime stale-break, bounded brief retry) held by EVERY write — appends, compaction, finalize',
+		crashBehavior: 'atomic single-file rewrites (PID-scoped tmp + byte-verified rename; in-memory manifest/framing validation pre-rename); torn trailing line skipped + counted corrupt, re-framed on next append; legacy header-less files migrate in bounded fold passes',
+		closePolicy: 'finalizeShellAuditForClose under the store lock (legacy drain to convergence + compaction + validated cut + ARCHIVE-TIME RE-REDACTION of retained lines through the current policy via redactDecisionLineForArchive) BEFORE the plain session/ directory archive copy, then archived (via the session dir copy) and cleaned (session dir lifecycle); the lock file is released (unlinked) by finalize so a stale lock is never archived',
+		resetPolicy: '/swarm reset does not touch .swarm/session (state.json parity); /swarm reset-session deletes shell-audit.jsonl with the other session files (state.json excepted)',
+		legacyCompatibility: 'header-less files read bounded (newest window); legacy records re-redact at BOTH boundaries through the CURRENT policy — render time (redactShellCommand/redactPath in guardrail-log-service) and archive time (redactDecisionLineForArchive in the close finalize) — so no legacy record bypasses current policy; the live fold pass preserves lines byte-for-byte (only the archived cut re-redacts)',
+		healthSignal: 'shell_audit_health (counts-only: accepted/compacted/retained/dropped/corrupt + oldest/newest timestamps + bytes/limit_bytes)',
 		owner: '#2040',
-		disposition: { kind: 'fix-in-issue', issue: 2040, note: 'PR 12 owns security-audit retention ceilings, bounded queries, and defense-in-depth redaction (issue #2040 Required 1-4).' },
+		disposition: {
+			kind: 'retain-by-design',
+			issue: 2040,
+			citation:
+				'PR 12 shipped the bounded single-file security-audit store (src/hooks/guardrails/shell-audit-store.ts manifest header + retained window under SHELL_AUDIT_LIMITS) with decision-class priority (security transitions never age out; allowed decisions 72 h / 2,000-cap), tail-bounded reads replacing the whole-file guardrail-log read, strengthened caller-independent write-time redaction plus render-time re-redaction, a validated close cut, the shell_audit_health counts-only signal, and the check:shell-audit usage ratchet; verified by tests/unit/hooks/shell-audit-*.test.ts and tests/unit/services/guardrail-log-service-bounded.test.ts.',
+			note: 'Guardrail authorization is computed independently of every audit write (fail-open fire-and-forget appends) — retention and sampling can never alter a block/allow decision.',
+		},
 	},
 	{
 		id: 'attestations',
@@ -992,7 +1333,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		schemaVersion: 'workflow WAL states; unrecognized states degrade to null (documented :1048-1052)',
 		stateClass: 'authoritative',
 		privacyClass: 'mixed',
-		writeLimits: { bound: 'retryHistory ≤3 (schema :295); per-task file; evidence/ archived+cleaned at close', scope: 'per-key', citation: 'src/gate-evidence.ts:295; close.ts:568' },
+		writeLimits: {
+			bound: 'retryHistory ≤3 (schema :303); per-task file; evidence/ archived+cleaned at close',
+			scope: 'per-key',
+			keyspaceBound:
+				'FINITE BY REAPER, not by key domain: one key per taskId — a flat .swarm/evidence/{taskId}.json (src/gate-evidence.ts:749 getEvidencePath) whose taskId is only shape-validated (src/validation/task-id.ts:69-114), so the domain is open. The GLOBAL deleter is the same one the task-evidence-trajectory row cites: "evidence" is in ACTIVE_STATE_DIRS_TO_CLEAN (src/commands/close.ts:574-583) and the close clean loop recursively removes the whole tree (src/commands/close.ts:1761-1773), taking every {taskId}.json with it. Note the per-file retryHistory ≤3 cap is NOT the keyspace bound — it caps one key\'s history and says nothing about how many keys exist. CAVEAT: archive-first-gated (src/commands/close.ts:1762-1765) and untouched by /swarm reset and /swarm reset-session, so an unclosed session holds one file per distinct taskId.',
+			citation: 'src/gate-evidence.ts:303; src/commands/close.ts:574 ACTIVE_STATE_DIRS_TO_CLEAN',
+		},
 		readBound: { pattern: 'full-file', bound: 'single per-task JSON', sync: true, citation: 'src/gate-evidence.ts:1054-1089' },
 		lockModel: 'withTaskEvidenceLock (evidence/{taskId}.json key) — proper-lockfile, 60 s timeout, backoff+jitter',
 		crashBehavior: 'atomic write; WAL PREPARED fencing (assertTaskEvidenceWriteAllowed :117)',
@@ -1051,6 +1398,57 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		},
 	},
 	{
+		id: 'harness-evolution-store',
+		category: 4,
+		pathGrammar:
+			'.swarm/evolution/harness/{current.json,candidates/{candidateId}/**,versions/{versionId}.json,ledger/{active-generation.json,generation-*/NNNNNN.jsonl}}',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/harness/store.ts'],
+		writerCitations: [
+			'src/harness/store.ts recordHarnessCandidate / activateHarnessCandidate / rollbackHarnessVersion — locked immutable artifact writes followed by an authenticated ledger commit',
+			'src/harness/store.ts reconcileHarnessPhysicalRetentionUnderLock — generation-switch compaction followed by candidate and inactive-ledger pruning',
+		],
+		readerCitations: [
+			'src/harness/store.ts loadHarnessCurrent — pointer-fast read or replay bounded by max_replay_records',
+			'src/harness/store.ts loadHarnessHistory / auditHarnessLedger — newest-first bounded history and explicit segment/replay-bounded audit',
+		],
+		schemaVersion: 'v1 strict candidate/version/current records + hash-chained ledger records; compacted records authenticate the retained state and candidate bindings',
+		stateClass: 'authoritative',
+		privacyClass: 'mixed',
+		writeLimits: {
+			bound:
+				'max_versions defaults to 100; max_inactive_candidates defaults to 32 (plus the newest activation handoff); candidate records are individually capped at 8 MiB; ledger segments are capped at 256 KiB and compact to one authenticated snapshot generation when max_replay_records is exceeded, with stale generations pruned after the pointer switch',
+			scope: 'global',
+			citation:
+				'src/harness/store.ts MAX_CANDIDATE_ARTIFACT_BYTES, LEDGER_SEGMENT_MAX_BYTES, reconcileHarnessPhysicalRetentionUnderLock; src/config/schema.ts HarnessEvolutionConfigSchema',
+		},
+		readBound: {
+			pattern: 'indexed + line-bounded',
+			bound:
+				'current and immutable artifacts are single-file reads; ledger replay is capped by max_replay_records (default 10,000), history has an explicit result limit, and audit is bounded by both maxSegments and maxReplayRecords',
+			sync: true,
+			citation:
+				'src/harness/store.ts loadCurrentProjectionFast, readVerifiedLedgerRecords, loadHarnessHistory, auditHarnessLedger',
+		},
+		lockModel:
+			'proper-lockfile on the harness root serializes every mutation, recovery, compaction pointer switch, and post-commit prune',
+		crashBehavior:
+			'fsynced append is the ordinary commit point; torn final lines are explicitly recoverable; compaction writes and verifies a new immutable generation before atomically switching active-generation.json, and only then best-effort prunes the old generation',
+		closePolicy:
+			'untouched — harness versions intentionally survive sessions as the durable activation and rollback substrate',
+		resetPolicy: 'not reset',
+		legacyCompatibility:
+			'pre-compaction flat ledger segments remain readable until the first bounded compaction; absent compacted-record fields default to their v1 empty values',
+		healthSignal:
+			'mutation results report projection, artifact-prune, and physical-retention reconciliation failures separately; integrity and replay-bound failures are typed',
+		owner: '#1825',
+		disposition: {
+			kind: 'retain-by-design',
+			citation:
+				'Issue #1825 requires one durable store for activation and rollback. Physical storage is globally bounded by retained version/candidate caps plus generation-switch ledger compaction, while all replay and query paths have independent record/segment/output bounds; adversarial coverage lives in tests/unit/harness/store-retention.test.ts and store-replay-bounds.test.ts.',
+		},
+	},
+	{
 		id: 'task-gate-evidence',
 		category: 4,
 		pathGrammar: '.swarm/evidence/task-gate-requirements/{taskId}.jsonl (+ repaired task-gate evidence files + task-gate-quarantine/ sidecars)',
@@ -1070,6 +1468,8 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writeLimits: {
 			bound: 'MAX_TASK_GATE_REQUIREMENTS_BYTES 256 KiB per task file (:13, hard-fails OVERSIZED); repaired evidence MAX_TASK_GATE_EVIDENCE_BYTES 256 KiB (:33); quarantine caps 32 files / 12 MiB / 128 entries / 768 KiB per record (:34-37)',
 			scope: 'per-key',
+			keyspaceBound:
+				'Two sub-streams, each finite for a different reason. (1) Requirements files, one key per taskId at .swarm/evidence/task-gate-requirements/{taskId}.jsonl (src/evidence/task-gate-requirements.ts:44) — a true SUBPATH of .swarm/evidence/, so the close-time recursive removal of the whole evidence tree (ACTIVE_STATE_DIRS_TO_CLEAN contains "evidence", src/commands/close.ts:574-583; fs.rm recursive at src/commands/close.ts:1761-1773) is a global deleter over this keyspace too. (2) Quarantine sidecars carry a genuine GLOBAL count cap independent of the close lifecycle: TASK_GATE_EVIDENCE_QUARANTINE_DIR is a single shared directory with NO {taskId} path component (src/evidence/task-gate-repair.ts:29-32), and the admission check opendirs it and sums count/bytes across ALL tasks before admitting a write (src/evidence/task-gate-repair.ts:448-480), so total quarantine files can never exceed 32 / 12 MiB however many taskIds appear. CAVEAT: cap (2) bounds by REFUSAL, not eviction — at the ceiling it throws TASK_GATE_EVIDENCE_QUARANTINE_FULL and admits nothing new rather than making room; and sub-stream (1) inherits the evidence-tree caveat (archive-first-gated, untouched by /swarm reset and /swarm reset-session).',
 			citation: 'src/evidence/task-gate-requirements.ts:13,149-175; src/evidence/task-gate-repair.ts:33-37',
 		},
 		readBound: { pattern: 'line-bounded', bound: 'reads reject files over 256 KiB (typed error)', sync: false, citation: 'src/evidence/task-gate-requirements.ts:149-175' },
@@ -1092,21 +1492,28 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		pathGrammar: '.swarm/evidence/{phase}/sast-baseline.json',
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/tools/sast-baseline.ts'],
-		writerCitations: ['src/tools/sast-baseline.ts:317 captureOrMergeBaseline — temp+rename :458-463,507-512; full prune of rescanned fingerprints :384-398'],
-		readerCitations: ['src/tools/sast-baseline.ts:533 loadBaseline — full-file readFileSync, typed result, sync'],
-		schemaVersion: 'baseline schema (truncation-aware)',
+		writerCitations: ['src/tools/sast-baseline.ts:483 captureOrMergeBaseline — temp+rename :754-759,813-818; full prune of rescanned fingerprints :569-585'],
+		readerCitations: ['src/tools/sast-baseline.ts:846 loadBaseline — full-file readFileSync :866, typed result, sync'],
+		schemaVersion:
+			'baseline schema 1.1.0 (truncation-aware; #2302 added reflow_keys[] + triage_log[] audit fields — a 1.0.0 file has no reflow_keys because they cannot be reconstructed after capture, loads exact-only, and upgrades to 1.1.0 at its next capture)',
 		stateClass: 'governed-content',
 		privacyClass: 'metadata',
-		writeLimits: { bound: 'MAX_BASELINE_FINDINGS 2000 (:37); MAX_BASELINE_BYTES 2 MiB (:40) with truncation :413-433', scope: 'per-key', citation: 'src/tools/sast-baseline.ts:37-40' },
-		readBound: { pattern: 'full-file', bound: '≤2 MiB by write-side cap', sync: true, citation: 'src/tools/sast-baseline.ts:40,553' },
-		lockModel: 'O_EXCL advisory lock with backoff, degrades to no-lock after retries (:43,246-285)',
+		writeLimits: {
+			bound: 'MAX_BASELINE_FINDINGS 2000 (:65); MAX_BASELINE_BYTES 2 MiB (:68) with truncation :690-712,777-795',
+			scope: 'per-key',
+			keyspaceBound:
+				'FINITE BY REAPER ONLY — the key domain is open. `phase` is a positive integer with no upper limit: the tool schema is z.number().int().min(1) with no .max() (src/tools/sast-scan.ts:969-976, duplicated at src/tools/pre-check-batch.ts:1677-1684), validatePhase rejects only phase < 1 (src/tools/sast-baseline.ts:447-452), and PlanSchema.phases is z.array(PhaseSchema).min(1) with no cap on phase count (src/config/plan-schema.ts:110) — there is no closed phase enum anywhere on this path. What bounds it is the close-time evidence wipe: baselineRelPath resolves through validateSwarmPath (src/tools/sast-baseline.ts:191,512) to .swarm/evidence/{phase}/sast-baseline.json, a true subpath of the tree that ACTIVE_STATE_DIRS_TO_CLEAN removes recursively at /swarm close (src/commands/close.ts:574-583,1761-1773). CAVEAT (verified): the taskId-keyed archiveEvidence retention does NOT reach these directories — it looks for evidence/{taskId}/evidence.json and silently skips a phase directory that has none (src/evidence/manager.ts:676-738) — so /swarm close is the ONLY reclaim path here, and one directory accumulates per distinct phase number until it runs.',
+			citation: 'src/tools/sast-baseline.ts:65-68',
+		},
+		readBound: { pattern: 'full-file', bound: '≤2 MiB by write-side cap', sync: true, citation: 'src/tools/sast-baseline.ts:68,861' },
+		lockModel: 'O_EXCL advisory lock with backoff, degrades to no-lock after retries (:74,403-443)',
 		crashBehavior: 'temp+rename; lock released in finally',
 		closePolicy: 'cleaned — evidence/ dir lifecycle',
 		resetPolicy: 'not reset',
-		legacyCompatibility: 'typed load results (not_found/invalid_schema/found)',
+		legacyCompatibility: 'typed load results (not_found/invalid_schema/found); 1.0.0 baselines load exact-only (#2302) and upgrade at next capture',
 		healthSignal: 'n/a',
 		owner: 'this-gate',
-		disposition: { kind: 'not-a-defect', proof: 'Hard caps 2000 findings / 2 MiB with write-side truncation (src/tools/sast-baseline.ts:37-40,413-433).' },
+		disposition: { kind: 'not-a-defect', proof: 'Hard caps 2000 findings / 2 MiB with write-side truncation (src/tools/sast-baseline.ts:65-68,690-712).' },
 	},
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -1138,6 +1545,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'withEvidenceLock on the ledger path + optimistic CAS retry (appendLedgerEventWithRetry :1068-1109)',
 		crashBehavior: 'fsync-then-rename append; torn tail quarantined to a side file, prefix-only projection refused (M1 fix)',
 		closePolicy: 'archived + terminal-state REMOVED unconditionally so a closed plan cannot resurrect (close.ts:1893-1910); ledger siblings removed (close.ts:1775-1795)',
+		closeArrayMembership: {
+			'plan-ledger.jsonl': 'archive+clean',
+		},
 		resetPolicy: 'close/finalize is the lifecycle boundary',
 		legacyCompatibility: 'checkpoints read 3 legacy locations with deprecation warnings (plan/checkpoint.ts:95-119)',
 		healthSignal: 'truncated flag + quarantine file presence',
@@ -1164,6 +1574,10 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'tryAcquireLock on plan.json (manager.ts:1244-1248) + plan lock for mutations',
 		crashBehavior: 'atomic writes; torn projection refused overwriting by truncated-ledger guard (:726-754)',
 		closePolicy: 'archived+cleaned (plan.json/plan.md in both close lists; terminal-state removal)',
+		closeArrayMembership: {
+			'plan.json': 'archive+clean',
+			'plan.md': 'archive+clean',
+		},
 		resetPolicy: 'close is the boundary',
 		legacyCompatibility: 'auto-migrate from plan.md when plan.json missing/invalid (:1005-1042)',
 		healthSignal: 'stale-projection reconciliation',
@@ -1210,7 +1624,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		schemaVersion: 'EvidenceBundle schema_version; legacy flat retrospective migrated in place (:319-480)',
 		stateClass: 'governed-content',
 		privacyClass: 'content',
-		writeLimits: { bound: '≤100 entries + ≤500 KiB per bundle; retention 30 d / 10 bundles; evidence/ close-scoped', scope: 'per-key', citation: 'src/evidence/manager.ts:261-280; close.ts:1560-1562' },
+		writeLimits: {
+			bound: '≤100 entries + ≤500 KiB per bundle; retention 30 d / 10 bundles; evidence/ close-scoped',
+			scope: 'per-key',
+			keyspaceBound:
+				'FINITE BY A REAL GLOBAL REAPER: one key per taskId bundle directory, and archiveEvidence enumerates the ENTIRE keyspace via listEvidenceTaskIds(directory) and deletes across it (src/evidence/manager.ts:676-738) — the maxAgeDays/maxBundles retention selects victims by comparing every remaining bundle against a global count (src/evidence/manager.ts:719-730), so unlike the ≤100-entry/≤500-KiB per-bundle cap in this row\'s `bound` field, that retention IS a keyspace bound. Belt-and-braces, "evidence" is also in ACTIVE_STATE_DIRS_TO_CLEAN and the whole tree is recursively removed at close (src/commands/close.ts:574-583,1761-1773). CAVEAT: archiveEvidence has exactly two callers — /swarm close (src/commands/close.ts:1622, 30 d / 10 bundles), where the subsequent full-tree removal makes it largely redundant, and the operator-invoked /swarm archive (src/commands/archive.ts:95, 90 d / 1000 bundles). It is not wired to any automatic interval, so mid-session reclamation requires one of those two commands to run.',
+			citation: 'src/evidence/manager.ts:261-280; close.ts:1560-1562',
+		},
 		readBound: { pattern: 'full-file', bound: '≤500 KiB per bundle by write-side enforcement', sync: false, citation: 'src/evidence/manager.ts:275-280,387-416' },
 		lockModel: 'withEvidenceLock per bundle',
 		crashBehavior: 'atomic write + cache invalidation after rename (:308)',
@@ -1288,7 +1708,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		schemaVersion: 'criteria schema (safeId dots→underscores :71-73)',
 		stateClass: 'governed-content',
 		privacyClass: 'content',
-		writeLimits: { bound: 'one criteria file per task; council/ dir close-scoped', scope: 'per-key', citation: 'close.ts:567' },
+		writeLimits: {
+			bound: 'one criteria file per task; council/ dir close-scoped',
+			scope: 'per-key',
+			keyspaceBound:
+				'FINITE BY REAPER, not by key domain: one key per safeId(taskId) flat file under .swarm/council/ (src/council/criteria-store.ts:39,48), and safeId only sanitizes characters for filesystem safety (:71-73) — it constrains the SHAPE of a key, never how many keys exist. The GLOBAL deleter is the close clean loop: "council" is in ACTIVE_STATE_DIRS_TO_CLEAN (src/commands/close.ts:574-583) and the loop recursively removes .swarm/council/ entire (src/commands/close.ts:1761-1773), taking every criteria file (and the sibling round-state/ and attempts/ subtrees) in one pass. CAVEAT: archive-first-gated (src/commands/close.ts:1762-1765); /swarm reset and /swarm reset-session leave council/ alone, so a session that never closes retains one file per distinct taskId passed to declare_council_criteria.',
+			citation: 'close.ts:567',
+		},
 		readBound: { pattern: 'indexed', bound: 'single JSON per task', sync: true, citation: 'src/council/criteria-store.ts:53' },
 		lockModel: 'atomic write (single writer per task)',
 		crashBehavior: 'temp+rename',
@@ -1382,6 +1808,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'tryAcquireLock on the staleness marker + plan lock via savePlan',
 		crashBehavior: 'WAL atomic; audit append verified by readback',
 		closePolicy: 'archived+cleaned — unconditional removal so next session starts drift-free (close.ts:460-472 docblock)',
+		closeArrayMembership: {
+			'spec.md': 'archive+clean',
+			'spec-staleness.json': 'archive+clean',
+			'spec-snapshot.md': 'archive+clean',
+		},
 		resetPolicy: 'close is the boundary',
 		legacyCompatibility: 'n/a',
 		healthSignal: 'SPEC_DRIFT_BLOCK gate',
@@ -1452,6 +1883,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/commands/dark-matter.ts',
 			'src/hooks/knowledge-migrator.ts',
 			'src/knowledge/scan-cursor.ts',
+			'src/hooks/knowledge-curator.ts',
 		],
 		writerCitations: [
 			'src/hooks/knowledge-store.ts:517 appendKnowledge / :554 rewriteKnowledge / :640 transactKnowledge / :682 transactKnowledgeWithCas — directory proper-lockfile (retries 5, stale 5000 :526-529)',
@@ -1471,11 +1903,14 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'single directory lock serializing all .swarm JSONL knowledge writes (documented trade-off :634-639)',
 		crashBehavior: 'atomic rewrites (temp+rename); append path fsync-free but single-line',
 		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (close.ts:381,452-454), deliberately NOT cleaned (cross-session knowledge)',
+		closeArrayMembership: {
+			'knowledge.jsonl': 'archive-only',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'hive/link resolution via link.json; cohort stores resolved through identity',
 		healthSignal: 'cap eviction + archive sweeps',
 		owner: 'this-gate',
-		disposition: { kind: 'not-a-defect', proof: 'Configured entry cap with priority-aware eviction, in-place archival, and deliberate cross-session retention (src/hooks/knowledge-store.ts:836-966; close.ts:452-454).' },
+		disposition: { kind: 'not-a-defect', proof: 'Configured entry cap with priority-aware eviction, in-place archival, and deliberate cross-session retention (src/hooks/knowledge-store.ts:836-966; close.ts:453-455).' },
 	},
 	{
 		id: 'knowledge-events',
@@ -1502,6 +1937,10 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'directory proper-lockfile retries 200 (batch) / stale 5000 (hive)',
 		crashBehavior: 'trim best-effort after durable append; fail-open hot paths',
 		closePolicy: 'untouched (bounded diagnostic stream)',
+		closeArrayMembership: {
+			'knowledge-events.jsonl': 'neither',
+			'knowledge-counter-baseline.json': 'neither',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'legacy application records folded into recompute (:979-1007)',
 		healthSignal: 'baseline fold counters',
@@ -1531,6 +1970,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'directory proper-lockfile retries 50 / stale 5000',
 		crashBehavior: 'cap best-effort after append; record failures warn only',
 		closePolicy: 'untouched (bounded compatibility stream)',
+		closeArrayMembership: {
+			'knowledge-application.jsonl': 'neither',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'IS the legacy stream — post-#2031 correctness lives in receipts-v2; retirement owned by #2051',
 		healthSignal: 'n/a',
@@ -1563,6 +2005,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'custom receipt lock with stale-owner recovery (LOCK_TIMEOUT 500 ms, uninitialized-lock reclamation 30 s)',
 		crashBehavior: 'fsynced append + identity checks; partial tail quarantined + truncated; snapshot failure never fails the commit',
 		closePolicy: 'close may copy for forensics but NEVER deletes live or within-grace authority (#2031)',
+		closeArrayMembership: {
+			'knowledge-receipts-v2.jsonl': 'archive-only',
+			'knowledge-receipts-v2.snapshot.json': 'archive-only',
+			'knowledge-receipts-v2-archive.jsonl': 'archive-only',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'legacy_unverifiable typed state for missing/evicted/linked membership — never inferred',
 		healthSignal: 'receipt completion metrics (#2044 consumer)',
@@ -1592,6 +2039,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'directory proper-lockfile (retries 5, stale 5000) — same knowledge lock domain',
 		crashBehavior: 'atomic store rewrites under lock; quarantine moves are single-lock two-file operations',
 		closePolicy: 'knowledge-rejected.jsonl archived+cleaned (ACTIVE_STATE_TO_CLEAN close.ts:483); others untouched (bounded)',
+		closeArrayMembership: {
+			'knowledge-rejected.jsonl': 'archive+clean',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'restore/unarchive paths return quarantined/archived entries',
 		healthSignal: 'n/a',
@@ -1614,6 +2064,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'knowledge directory lock (via appendKnowledge path)',
 		crashBehavior: 'single-line append',
 		closePolicy: 'untouched',
+		closeArrayMembership: {
+			'knowledge-retractions.jsonl': 'neither',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'n/a',
 		healthSignal: 'n/a',
@@ -1675,6 +2128,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'directory proper-lockfile',
 		crashBehavior: 'atomic with temp cleanup in finally',
 		closePolicy: 'untouched',
+		closeArrayMembership: {
+			'synonym-map.json': 'neither',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'rebuildable from knowledge',
 		healthSignal: 'n/a',
@@ -1719,6 +2175,10 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'none (atomic writes + stat-based revalidation)',
 		crashBehavior: 'atomic; fail-open reads',
 		closePolicy: 'untouched (cross-session link state)',
+		closeArrayMembership: {
+			'link.json': 'neither',
+			'memory-link.json': 'neither',
+		},
 		resetPolicy: 'explicit unlink commands',
 		legacyCompatibility: 'n/a',
 		healthSignal: 'n/a',
@@ -1753,11 +2213,62 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'SQLite WAL + busy_timeout; single cached connection per directory',
 		crashBehavior: 'WAL auto-recovery on open',
 		closePolicy: 'archived+cleaned — closeProjectDb releases Windows locks first (close.ts:1676)',
+		closeArrayMembership: {
+			'swarm.db': 'archive+clean',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'forward migrations only',
 		healthSignal: 'n/a',
 		owner: '#2030 (merged)',
 		disposition: { kind: 'not-a-defect', proof: 'WAL-mode DB with versioned migrations and the #2030 WAL-consistent close archive+clean lifecycle (src/db/project-db.ts:221-224; close.ts:1676).' },
+	},
+	{
+		id: 'repo-memory-index',
+		category: 7,
+		pathGrammar: '.swarm/repo-memory.sqlite (+ transient -wal/-shm sidecars)',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/tools/repo-graph/indexed-storage.ts'],
+		writerCitations: [
+			'src/tools/repo-graph/indexed-storage.ts:534 syncIndexFromGraph — full-replace transaction: DELETE FROM edges/files/graph_meta (:561-563) then re-INSERT every node/edge (:573-615)',
+			'src/tools/repo-graph/storage.ts:659 syncIndexFromGraph — invoked from saveGraph only when the indexed-mode save lock was acquired, inside the lock span',
+		],
+		readerCitations: [
+			'src/tools/repo-graph/indexed-storage.ts:855 queryNodeByFile — indexed single-row SELECT by path/module_name (resolveTargetRow, :785-804), sync',
+			'src/tools/repo-graph/indexed-storage.ts:903 loadSubgraphForFiles — bounded-neighbourhood closure via idx_edges_source/idx_edges_target (:806-828), sync',
+		],
+		schemaVersion: 'schema_migrations versioned (6, indexed-storage.ts:91-136)',
+		stateClass: 'derived-rebuildable',
+		privacyClass: 'metadata',
+		writeLimits: {
+			bound: 'full replace per save, not append-only (indexed-storage.ts:560-627 DELETE-then-reinsert); row count equals the live graph node/edge count, itself bounded by `repo_graph.max_files` (default 10,000, max 100,000 — src/config/schema.ts:1321)',
+			scope: 'global',
+			citation: 'src/tools/repo-graph/indexed-storage.ts:560-627; src/config/schema.ts:1321',
+		},
+		readBound: {
+			pattern: 'indexed',
+			bound: 'primary-key / indexed-column lookups (idx_files_module_name, idx_edges_source, idx_edges_target) over a bounded neighbourhood closure, never a full scan',
+			sync: true,
+			citation: 'src/tools/repo-graph/indexed-storage.ts:775-794 (resolveTargetRow), :796-818 (distinctSourcesOf/distinctTargetsOf)',
+		},
+		lockModel:
+			'writes serialized by tryAcquireLock/_release on .swarm/locks/ (src/parallel/file-locks.ts), acquired in saveGraph (src/tools/repo-graph/storage.ts:504, released :670; helpers defined at acquireGraphSaveLock storage.ts:377-399, releaseGraphSaveLock :412-419) spanning rename -> stamp -> sync; plus SQLite WAL + busy_timeout=5000 (indexed-storage.ts:347)',
+		crashBehavior:
+			'a crash between the JSON rename and the index sync leaves the persisted stamp mismatched against a live stat of repo-graph.json; every reader falls back to the JSON path (openFreshIndex freshness check, indexed-storage.ts:685-745) and the next successful saveGraph repairs the index in one transaction — nothing is lost because repo-graph.json stays authoritative (indexed-storage.ts:4-19)',
+		closePolicy:
+			'archived+cleaned — same treatment as swarm.db: archived via archiveSqliteSnapshot (VACUUM INTO, close.ts:1394-1408), with closeRepoMemory releasing the cached connection first to avoid Windows EBUSY on unlink (close.ts:1768-1778); -wal/-shm sidecars deliberately neither archived nor cleaned (transient, recreated on next open — close.ts:416-419,526-528)',
+		closeArrayMembership: {
+			'repo-memory.sqlite': 'archive+clean',
+		},
+		resetPolicy:
+			'not reset — grep confirms neither src/commands/reset.ts nor src/commands/reset-session.ts reference repo-memory.sqlite, REPO_MEMORY_FILENAME, repo-graph.json, or repo_graph; the index is left on disk and self-heals via the stamp-mismatch fallback above',
+		legacyCompatibility: 'forward migrations only; a store with a newer schema than this build resets itself (openForWrite, indexed-storage.ts:399-441)',
+		healthSignal: 'n/a',
+		owner: '#1534',
+		disposition: {
+			kind: 'not-a-defect',
+			proof:
+				'a derived, wholesale-rebuilt accelerator over repo-graph.json: every write is a full DELETE+reinsert bounded by the same repo_graph.max_files ceiling that bounds the source graph (indexed-storage.ts:550-617; src/config/schema.ts:1321), never an unbounded append; corruption/staleness/budget-overrun/config-flip-to-json all delete it outright (indexed-storage.ts syncIndexFromGraph catch :618-624, openForRead corruption path :461-505, storage.ts:657) and the next save rebuilds it — there is no unbounded-growth or unreachable-cleanup failure mode.',
+		},
 	},
 	{
 		id: 'global-db',
@@ -1816,7 +2327,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		pathGrammar: '.swarm/memory/{memories,proposals,audit,reward-events,outcome-events}.jsonl (+ cohort roots)',
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/memory/local-jsonl-provider.ts'],
-		writerCitations: ['src/memory/local-jsonl-provider.ts:207 upsert / :290 appendOutcome / :540 applyCuratorDecision / :817 rewriteMemoryFamilyUnlocked — dir lock + torn-tail repair (:1179) + atomic rewrites (:1166-1177)'],
+		writerCitations: ['src/memory/local-jsonl-provider.ts:207 upsert / :308 appendOutcome / :575 applyCuratorDecision / :910 rewriteMemoryFamilyUnlocked — dir lock + torn-tail repair (:1234) + atomic rewrites (:1221-1232)'],
 		readerCitations: ['initialize/refreshMemoriesUnlocked (:158-205) — full-file loads; listRecallUsage/listRewardEvents — full-file filtered'],
 		schemaVersion: 'legacy provider (migration source for SQLite)',
 		stateClass: 'derived-rebuildable',
@@ -1862,7 +2373,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writerModules: ['src/memory/run-log.ts', 'src/memory/injector.ts'],
 		writerCitations: [
 			'src/memory/run-log.ts:43 appendMemoryRunLog — plain appendFile :52-60, no cap',
-			'src/memory/injector.ts:456 maybeWriteUnitIdProbe — env-gated diagnostic (OPENCODE_SWARM_MEMORY_UNITID_PROBE=1)',
+			'src/memory/injector.ts:498 maybeWriteUnitIdProbe — env-gated diagnostic (OPENCODE_SWARM_MEMORY_UNITID_PROBE=1)',
 		],
 		readerCitations: ['consumers read JSONL directly (injector/reflection paths)'],
 		schemaVersion: 'run-log event shapes',
@@ -1885,8 +2396,8 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		pathGrammar: '.swarm/reflections/lessons.{json,md}',
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/memory/reflection-service.ts'],
-		writerCitations: ['src/memory/reflection-service.ts:479 persistDigest — atomicWriteSwarmFile ×2 under reflection lock (:461-477)'],
-		readerCitations: ['src/memory/reflection-service.ts:147 readReflectionDigest — bounded ≤256 KiB (MAX_INJECTION_READ_BYTES :41)'],
+		writerCitations: ['src/memory/reflection-service.ts:532 persistDigest — single atomicWriteSwarmFile under the reflection lock (:609)'],
+		readerCitations: ['src/memory/reflection-service.ts:151 readReflectionDigest — bounded ≤256 KiB (MAX_INJECTION_READ_BYTES :41)'],
 		schemaVersion: 'digest schema',
 		stateClass: 'derived-rebuildable',
 		privacyClass: 'content',
@@ -1907,8 +2418,8 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		pathGrammar: '.swarm/run-memory.jsonl',
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/services/run-memory.ts'],
-		writerCitations: ['src/services/run-memory.ts:95 recordOutcome — appendFile :101-104; recordTaskAttempt :176-232'],
-		readerCitations: ['src/services/run-memory.ts:114 getTaskHistory / :316 getRunMemorySummary — FULL-FILE, line-parsed (summary capped 500 tokens :68)'],
+		writerCitations: ['src/services/run-memory.ts:100 recordOutcome — appendFile :101-104; recordTaskAttempt :176-232'],
+		readerCitations: ['src/services/run-memory.ts:119 getTaskHistory / :321 getRunMemorySummary — FULL-FILE, line-parsed (summary capped 500 tokens :68)'],
 		schemaVersion: 'none',
 		stateClass: 'operational',
 		privacyClass: 'metadata',
@@ -1917,6 +2428,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'none',
 		crashBehavior: 'append; parse failures skipped',
 		closePolicy: 'archived+cleaned',
+		closeArrayMembership: {
+			'run-memory.jsonl': 'archive+clean',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'n/a',
 		healthSignal: 'n/a',
@@ -1959,7 +2473,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		],
 		readerCitations: [
 			'src/tools/repo-graph/storage.ts:204 loadGraph / :293 loadGraphSync — FULL-FILE with validation behind a 16-workspace mtime-invalidated cache (cache.ts:13)',
-			'src/memory/reflection-service.ts:375 loadBoundedGraph — ≤16 MiB',
+			'src/memory/reflection-service.ts:386 loadBoundedGraph — ≤16 MiB',
 		],
 		schemaVersion: 'graph schema with workspaceRoot identity validation (:360-386)',
 		stateClass: 'derived-rebuildable',
@@ -1969,6 +2483,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'no lockfile — atomic rename + mtime cache invalidation',
 		crashBehavior: 'atomic writes; corrupt graph rejected and rebuilt',
 		closePolicy: 'archived+cleaned',
+		closeArrayMembership: {
+			'repo-graph.json': 'archive+clean',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'workspace identity check prevents cross-root reuse',
 		healthSignal: 'cache invalidation on mtime change',
@@ -1994,6 +2511,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'none (atomic rename + probe cache TTL 30 s)',
 		crashBehavior: 'atomic',
 		closePolicy: 'untouched — orphaned after close cleans the graph',
+		closeArrayMembership: {
+			'repo-graph.fingerprint.json': 'neither',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'n/a',
 		healthSignal: 'n/a',
@@ -2011,16 +2531,26 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		schemaVersion: 'run record schema (bounded fields :20-22)',
 		stateClass: 'operational',
 		privacyClass: 'metadata',
-		writeLimits: { bound: 'MAX_HISTORY_PER_TEST 20 FIFO per (file,test) key (:19); bounded error/stack/changed-files fields', scope: 'per-key', citation: 'src/test-impact/history-store.ts:19-25' },
-		readBound: { pattern: 'full-file', bound: 'bounded transitively by 20/test cap × test population', sync: true, citation: 'src/test-impact/history-store.ts:19,468-500' },
+		writeLimits: {
+			bound: 'MAX_HISTORY_PER_TEST 20 FIFO per (file,test) key (:19); bounded error/stack/changed-files fields',
+			scope: 'per-key',
+			keyspaceBound:
+				'NOT FINITE — a newly discovered live instance of the issue #2038 class, found by applying this rule to the existing registry; recorded here as the evidence behind this row\'s fix-in-issue disposition. The key is `${testFile.toLowerCase()}|${testName.toLowerCase()}` (src/test-impact/history-store.ts:198). MAX_HISTORY_PER_TEST=20 (src/test-impact/history-store.ts:19) is a PER-KEY FIFO applied at :212 and :339; there is no global entry cap, no byte cap and no age cap. Decisively, the prune rebuilds its map from the records already in the file and re-emits the newest 20 of EVERY key it finds (src/test-impact/history-store.ts:196-214), so a key is never evicted — history for renamed or deleted tests survives indefinitely. Steady-state size is therefore unbounded in time at O(distinct (file,test) identities ever observed x 20), and nothing reclaims it: .swarm/cache/ is in no close or reset list, and readAllRecords is a whole-file readFileSync (src/test-impact/history-store.ts:434-465). The row cites only the per-key FIFO as its not-a-defect proof — precisely the #2038 reasoning error.',
+			citation: 'src/test-impact/history-store.ts:19-25',
+		},
+		readBound: { pattern: 'full-file', bound: 'NOT bounded — this field previously read "bounded transitively by 20/test cap × test population", which is the issue #2038 fallacy stated verbatim: a per-key cap times an open keyspace is not a ceiling. readAllRecords readFileSync-es the whole file with no byte or line limit (:434-465) and both public readers go through it (:468-500)', sync: true, citation: 'src/test-impact/history-store.ts:19,468-500' },
 		lockModel: 'mkdir-based write lock with 60 s stale recovery (:373-432)',
 		crashBehavior: 'atomic temp+rename rewrite',
 		closePolicy: 'untouched (cache/)',
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'n/a',
 		healthSignal: 'n/a',
-		owner: 'this-gate',
-		disposition: { kind: 'not-a-defect', proof: 'Per-key FIFO 20 with locked atomic rewrites (src/test-impact/history-store.ts:19,373-432).' },
+		owner: '#2309',
+		disposition: {
+			kind: 'fix-in-issue',
+			issue: 2309,
+			note: 'RECLASSIFIED from not-a-defect by the issue #2038 keyspace guardrail. The previous proof read "Per-key FIFO 20 with locked atomic rewrites" — a per-key FIFO is exactly the bound #2038 showed is not a store bound, and this row\'s readBound field stated the fallacy outright ("bounded transitively by 20/test cap × test population"). See writeLimits.keyspaceBound on this row for the source evidence: the prune re-emits the newest 20 of every key it finds (src/test-impact/history-store.ts:196-214) so keys for renamed or deleted tests are never evicted, there is no global count/byte/age cap, and .swarm/cache/ is in no close or reset list. Same shape as the skill-changelogs row #2309 already owns.',
+		},
 	},
 	{
 		id: 'impact-map',
@@ -2057,7 +2587,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writerCitations: ['src/commands/close.ts:1256 runArchiveStage — bundle swarm-{ts}-{suffix} (:677,1262,1524); archive-first guard (:1637-1671)'],
 		readerCitations: [
 			'close.ts:2234 finalize idempotency — readdir + startsWith(swarm-) (filename-only)',
-			'session-reflection.ts:414 — filename-only scan for reflection signals',
+			'session-reflection.ts:424 — filename-only scan for reflection signals',
 			'no production reader of bundle CONTENTS (verified)',
 		],
 		schemaVersion: 'preserves archived bytes verbatim',
@@ -2068,7 +2598,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			scope: 'per-trigger',
 			citation: 'close.ts:1256-1613 (no prune path — verified against source)',
 		},
-		readBound: { pattern: 'directory-scan', bound: 'filename-only scans; contents never re-read', sync: false, citation: 'close.ts:2233-2235; session-reflection.ts:414' },
+		readBound: { pattern: 'directory-scan', bound: 'filename-only scans; contents never re-read', sync: false, citation: 'close.ts:2233-2235; session-reflection.ts:424' },
 		lockModel: 'finalize.lock cross-process (close.ts:2600-2613)',
 		crashBehavior: 'archive-before-clean guard: active files unlinked only if archived (:1637-1671); archiveStageFailed prevents truthful-looking empty results',
 		closePolicy: 'IS the close archive',
@@ -2107,30 +2637,58 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 	{
 		id: 'worktree-status-owners',
 		category: 8,
-		pathGrammar: '.swarm/worktree-merge-status.json + .swarm/worktree-provisioning-owners/{sha256}.json',
+		pathGrammar:
+			'.swarm/worktree-merge-status.json + .swarm/worktree-provisioning-owners/{sha256}.json + .swarm/worktree-provisioning-lifecycle.json + .swarm/worktree-merge-recovery-v2.json + .swarm/worktree-merge-recovery-v2-journal.json + .swarm/worktree-recovery-claims/{sha256}.json',
 		canonicalRoot: 'project-swarm',
-		writerModules: ['src/hooks/delegation-gate/worktree-merge-status.ts', 'src/hooks/delegation-gate/worktree-provisioning-owner.ts'],
+		writerModules: [
+			'src/hooks/delegation-gate/worktree-merge-status.ts',
+			'src/hooks/delegation-gate/worktree-provisioning-owner.ts',
+			'src/hooks/delegation-gate/worktree-recovery-authority.ts',
+		],
 		writerCitations: [
 			'src/hooks/delegation-gate/worktree-merge-status.ts:259 recordWorktreeMergeFailure / :273 clearWorktreeMergeStatus — in-memory authority + atomic durable save (:103-125)',
-			'src/hooks/delegation-gate/worktree-provisioning-owner.ts:83 recordWorktreeProvisioningOwner / :119 remove — atomic per-file',
+			'src/hooks/delegation-gate/worktree-provisioning-owner.ts recordWorktreeProvisioningOwner/removeWorktreeProvisioningOwner — atomic per-owner files plus bounded lifecycle journal',
+			'src/hooks/delegation-gate/worktree-recovery-authority.ts publish/claim/renew/release/finalize/replay — atomic authority, journal, and credential writes under one cross-process lock',
 		],
 		readerCitations: [
 			'worktree-merge-status.ts:166 scanWorktreeMergeFailuresForRecovery — bounded 2 MiB / 512 entries (:59-60)',
-			'worktree-provisioning-owner.ts:135 scanWorktreeProvisioningOwnersForRecovery — ≤512 files / 16 KiB per file (:7-8), fail-closed uncertain',
+			'worktree-provisioning-owner.ts scanWorktreeProvisioningOwnersForRecovery/scanWorktreeProvisioningLifecycleJournalForRecovery — ≤512 files / 16 KiB per file plus ≤256 KiB / 512-entry journal, fail-closed uncertain',
+			'worktree-recovery-authority.ts bounded store/journal/credential readers and recovery scans — ≤2 MiB / 512 authority or journal entries and ≤16 KiB per credential',
 		],
-		schemaVersion: 'typed records',
+		schemaVersion: 'typed merge records; provisioning owners v1-v3/journal v1; recovery authority store v2/journal+credential v1',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
-		writeLimits: { bound: 'merge-status ≤2 MiB / ≤512 entries; owners ≤512 files / ≤16 KiB each', scope: 'global', citation: 'worktree-merge-status.ts:59-60; worktree-provisioning-owner.ts:7-8' },
+		writeLimits: {
+			bound:
+				'merge-status ≤2 MiB / ≤512 entries; owners ≤512 files / ≤16 KiB each; provisioning journal ≤256 KiB / 512 entries; recovery authority store+journal ≤2 MiB / 512 entries each; credentials ≤512 files / ≤16 KiB each',
+			scope: 'global',
+			citation:
+				'worktree-merge-status.ts bounds; worktree-provisioning-owner.ts MAX_* constants; worktree-recovery-authority.ts MAX_* constants',
+		},
 		readBound: { pattern: 'directory-scan', bound: 'hard scan caps above', sync: true, citation: 'scan functions cited' },
-		lockModel: 'in-memory maps + unique-suffix atomic writes (no cross-process lock; races benign)',
-		crashBehavior: 'fail-open load (corrupt → empty map); fail-open save (in-memory still authoritative)',
+		lockModel:
+			'merge-status retains its legacy in-memory/atomic model; provisioning mutations hold the shared lifecycle lock at callers; all recovery-authority mutations use one stale-bounded cross-process lock',
+		crashBehavior:
+			'strict recovery scans fail closed; claim/provisioning journals replay bounded interrupted transitions; terminal recovery state repairs the store-write/journal-append crash window',
 		closePolicy: 'untouched (cross-session recovery state)',
+		closeArrayMembership: {
+			'worktree-merge-status.json': 'neither',
+			// Verified absent from both close.ts arrays (grep: no occurrence of
+			// any of these three filenames in src/commands/close.ts), which is
+			// what this row's `closePolicy: 'untouched'` already asserts.
+			'worktree-provisioning-lifecycle.json': 'neither',
+			'worktree-merge-recovery-v2.json': 'neither',
+			'worktree-merge-recovery-v2-journal.json': 'neither',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'n/a',
 		healthSignal: 'recovery scan results',
 		owner: 'this-gate',
-		disposition: { kind: 'not-a-defect', proof: 'Hard byte/entry/file caps on both stores with fail-closed recovery scans (worktree-merge-status.ts:59-60; worktree-provisioning-owner.ts:7-8).' },
+		disposition: {
+			kind: 'not-a-defect',
+			proof:
+				'Hard byte/entry/file caps on every store, bounded journals, exact teardown, and fail-closed recovery scans prevent unbounded retention or unsafe omission.',
+		},
 	},
 	{
 		id: 'worktree-lane-profiles',
@@ -2143,7 +2701,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		schemaVersion: 'env key=value',
 		stateClass: 'operational',
 		privacyClass: 'metadata',
-		writeLimits: { bound: 'one bounded env file per lane per worktree; removed at lane teardown (:219)', scope: 'per-key', citation: 'src/worktree/core.ts:174-230' },
+		writeLimits: {
+			bound: 'one bounded env file per lane per worktree; removed at lane teardown (:219)',
+			scope: 'per-key',
+			keyspaceBound:
+				'FINITE BY CONCURRENCY PLUS TEARDOWN — but NOT by the constant one would reach for: MAX_LANES=8 (src/tools/dispatch-lanes.ts:92) governs the unrelated dispatch_lanes fan-out tool and is not on this path (its only uses are src/tools/dispatch-lanes.ts:471,491,1045,1678). allocateStandardLaneIndex is monotonic per session with no clamp and no recycling (src/hooks/delegation-gate/worktree-isolation.ts:161-164), so the set of index VALUES ever issued grows with dispatch count — that is not the bound. The bound is that each {laneIndex}.env lives INSIDE its own worktree (src/worktree/core.ts:202-203, provisioned per session/task at :674-678): concurrently live worktrees sit under MAX_TRACKED_STANDARD_WORKTREE_CALLS=256 above a max_concurrent_tasks ceiling clamped to <=64 (src/hooks/delegation-gate/worktree-isolation.ts:166-173), each file is unlinked at lane teardown (src/worktree/core.ts:219-238), and re-dispatching the same taskId removes the prior worktree wholesale before recreating it (src/worktree/core.ts:863-892). Crash-orphaned worktrees are swept by a global reaper, runInitOrphanRecovery (src/hooks/init-orphan-recovery.ts:200-224, wired at src/index.ts:914). CAVEAT (verified, do not soften): that sweep runs only at plugin init, is timeout-wrapped and non-fatal (src/hooks/init-orphan-recovery.ts:54; src/index.ts:914-918), and enumerates only the default .swarm-worktrees base (src/hooks/init-orphan-recovery.ts:206-209) — worktrees provisioned under a custom worktree_dir (src/worktree/core.ts:581-582) fall outside its scan root entirely and are reclaimed only by their own teardown path.',
+			citation: 'src/worktree/core.ts:174-230',
+		},
 		readBound: { pattern: 'write-only', bound: 'n/a', sync: false, citation: 'no plugin reader' },
 		lockModel: 'none',
 		crashBehavior: 'write failures swallowed at provisioning (:1013-1017)',
@@ -2170,6 +2734,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'atomic writes with Windows retry',
 		crashBehavior: 'fail-open write/read',
 		closePolicy: 'doctor artifact untouched; config backups cleaned at close',
+		closeArrayMembership: {
+			'config-doctor.json': 'neither',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'legacy numeric-hash restore support (:811-821)',
 		healthSignal: 'doctor checks themselves',
@@ -2221,11 +2788,52 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'proper-lockfile lockSync with retries + 5 s stale',
 		crashBehavior: '.bak recovery on corrupt canonical; stateUnreadable fail-closed permission hook (:271-301)',
 		closePolicy: 'untouched (cross-session automation state)',
+		closeArrayMembership: {
+			'full-auto-state.json': 'neither',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'n/a',
 		healthSignal: 'fail-closed marker',
 		owner: 'this-gate',
 		disposition: { kind: 'not-a-defect', proof: 'Cross-process locked, .bak-recoverable single state file with capped history (full-auto/state.ts:210-253,385-417).' },
+	},
+	{
+		id: 'write-approval-ledger',
+		category: 8,
+		pathGrammar: '.swarm/authority/write-approvals.jsonl',
+		canonicalRoot: 'project-swarm',
+		writerModules: ['src/security/write-authority.ts'],
+		writerCitations: [
+			'src/security/write-authority.ts issueWriteApprovalFact / consumeWriteApprovalFact — transactFile serializes the read-modify-write cycle; ledgerWrite atomically rewrites the bounded tail',
+		],
+		readerCitations: [
+			'src/security/write-authority.ts ledgerRead — full-file parse followed by a MAX_LEDGER_ENTRIES tail bound; writer keeps the durable file at the same bound',
+		],
+		schemaVersion: 'v1 issued/consumed discriminated JSONL entries',
+		stateClass: 'authoritative',
+		privacyClass: 'metadata',
+		writeLimits: {
+			bound: 'single rewritten ledger capped at MAX_LEDGER_ENTRIES=512',
+			scope: 'global',
+			citation: 'src/security/write-authority.ts MAX_LEDGER_ENTRIES, ledgerWrite',
+		},
+		readBound: {
+			pattern: 'full-file',
+			bound: 'at most 512 bounded-schema JSONL entries by write-side enforcement',
+			sync: true,
+			citation: 'src/security/write-authority.ts ledgerRead/ledgerWrite',
+		},
+		lockModel: 'transactFile per-path cross-process lock with atomic replacement',
+		crashBehavior: 'atomic rewrite; malformed JSONL fails closed and issues no authority',
+		closePolicy: 'untouched (cross-session, short-TTL approval authority; bounded compaction is retention)',
+		resetPolicy: 'not reset; expired facts are ineligible and bounded tail compaction removes old entries',
+		legacyCompatibility: 'absent ledger is an empty authority set',
+		healthSignal: 'approval issue/consume result; malformed ledger surfaces a hard error',
+		owner: '#1824',
+		disposition: {
+			kind: 'not-a-defect',
+			proof: 'The authoritative ledger is atomically rewritten under transactFile, capped to 512 entries, and every grant expires and is one-shot (src/security/write-authority.ts).',
+		},
 	},
 	{
 		id: 'version-check-cache',
@@ -2255,7 +2863,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		pathGrammar: '.swarm/unacknowledged-criticals.jsonl',
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/hooks/delegate-ack-collector.ts'],
-		writerCitations: ['src/hooks/delegate-ack-collector.ts:76 appendUnacknowledgedCritical — appendFile :85, best-effort'],
+		writerCitations: ['src/hooks/delegate-ack-collector.ts:85 appendUnacknowledgedCritical — appendFile :85, best-effort'],
 		readerCitations: ['write-only in production (escalator reads knowledge events, not this file — verified)'],
 		schemaVersion: 'none',
 		stateClass: 'governed-content',
@@ -2265,6 +2873,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'none',
 		crashBehavior: 'failures swallowed',
 		closePolicy: 'untouched',
+		closeArrayMembership: {
+			'unacknowledged-criticals.jsonl': 'neither',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'n/a',
 		healthSignal: 'n/a',
@@ -2311,6 +2922,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'none',
 		crashBehavior: 'append; failures swallowed',
 		closePolicy: 'untouched',
+		closeArrayMembership: {
+			'context-snapshot.md': 'neither',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'n/a',
 		healthSignal: 'n/a',
@@ -2323,12 +2937,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		pathGrammar: '.swarm/capsules/{task_id}.json',
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/context-map/capsule-persistence.ts'],
-		writerCitations: ['src/context-map/capsule-persistence.ts:114 saveCapsule — temp+rename; :190 deleteCapsule (NO production caller — verified)'],
+		writerCitations: ['src/context-map/capsule-persistence.ts:114 saveCapsule — temp+rename; :192 deleteCapsule (NO production caller — verified)'],
 		readerCitations: ['src/context-map/capsule-persistence.ts:165 loadCapsule — per-task full read'],
 		schemaVersion: 'capsule schema (task-id regex validated :48)',
 		stateClass: 'governed-content',
 		privacyClass: 'content',
-		writeLimits: { bound: 'one file per task; NO aggregate prune — capsules/ in no close clean list; deleteCapsule is dead code', scope: 'none', citation: 'src/context-map/capsule-persistence.ts:190 (no caller, verified); close.ts:565-574 (absent)' },
+		writeLimits: { bound: 'one file per task; NO aggregate prune — capsules/ in no close clean list; deleteCapsule is dead code', scope: 'none', citation: 'src/context-map/capsule-persistence.ts:192 (no caller, verified); close.ts:565-574 (absent)' },
 		readBound: { pattern: 'indexed', bound: 'per-task reads; directory accumulates', sync: true, citation: 'src/context-map/capsule-persistence.ts:165' },
 		lockModel: 'none (atomic writes)',
 		crashBehavior: 'temp+rename; previous capsule preserved',
@@ -2355,6 +2969,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'none (atomic rename)',
 		crashBehavior: 'previous map intact; temp orphaned (residue scanner covers)',
 		closePolicy: 'untouched',
+		closeArrayMembership: {
+			'context-map.json': 'neither',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'rebuildable',
 		healthSignal: 'n/a',
@@ -2377,6 +2994,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'transactFile directory lock',
 		crashBehavior: 'atomic (temp+rename+fsync via bunWrite)',
 		closePolicy: 'untouched',
+		closeArrayMembership: {
+			'curator-summary.json': 'neither',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'legacy spam capped in recommendations array',
 		healthSignal: 'n/a',
@@ -2395,10 +3015,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/agent-activity.ts',
 			'src/hooks/phase-monitor.ts',
 			'src/tools/doc-scan.ts',
+			'src/hooks/full-auto-intercept.ts',
+			'src/hooks/skill-propagation-gate.ts',
 		],
 		writerCitations: [
 			'close.ts:2465 close-summary (written AFTER clean, survives into next session); :1918-1939 context.md reset stub',
-			'session-reflection.ts:1271 writeSessionReflection — fs.writeFile',
+			'session-reflection.ts:1299 writeSessionReflection — fs.writeFile',
 			'handoff.ts:53/63 — atomic handoff briefs',
 			'agent-activity.ts:147 doFlush — context.md section rewrite (flush ≥20 events :107)',
 		],
@@ -2411,6 +3033,17 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'atomic writes; snapshot in-flight serialization',
 		crashBehavior: 'atomic rewrites; failures logged',
 		closePolicy: 'archived+cleaned (close-summary.md deliberately written post-clean); context.md archived + rewritten to stub',
+		closeArrayMembership: {
+			'close-summary.md': 'archive-only',
+			'context.md': 'archive-only',
+			'session-reflection.md': 'archive+clean',
+			'handoff.md': 'archive+clean',
+			'handoff-prompt.md': 'archive+clean',
+			'handoff-consumed.md': 'archive+clean',
+			'escalation-report.md': 'archive+clean',
+			'dark-matter.md': 'archive+clean',
+			'doc-manifest.json': 'archive+clean',
+		},
 		resetPolicy: 'reset-session does not touch these; close does',
 		legacyCompatibility: 'n/a',
 		healthSignal: 'n/a',
@@ -2433,6 +3066,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'atomic writes',
 		crashBehavior: 'previous file intact',
 		closePolicy: 'untouched (operator artifacts / continuation pointers)',
+		closeArrayMembership: {
+			'handoff-continuation.json': 'neither',
+		},
 		resetPolicy: 'not reset',
 		legacyCompatibility: 'n/a',
 		healthSignal: 'n/a',
@@ -2442,7 +3078,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 	{
 		id: 'project-init-configs',
 		category: 8,
-		pathGrammar: '.opencode/opencode-swarm.json + .swarm/config.example.json (+ CLI-managed configs)',
+		pathGrammar: '.swarm/config.example.json + operator-authored .opencode/opencode-swarm.json (+ CLI-managed configs)',
 		canonicalRoot: 'outside-swarm',
 		writerModules: [
 			'src/config/project-init.ts',
@@ -2450,23 +3086,23 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/utils/gitignore-warning.ts',
 		],
 		writerCitations: [
-			'src/config/project-init.ts:16 writeProjectConfigIfNew (flag wx — exclusive once); :77 writeSwarmConfigExampleIfNew',
-			'src/cli/index.ts:285 saveJson — CLI project config save (outside .swarm)',
+			'src/config/project-init.ts:25 writeSwarmConfigExampleIfNew (first-run .swarm/config.example.json write incl. $schema ref; errors non-fatal)',
+			'src/cli/index.ts:285 saveJson — CLI-managed global/plugin config saves (outside .swarm)',
 		],
-		readerCitations: ['config loader; CLI loadJsonc (:270)'],
+		readerCitations: ['config loader; CLI loadJson (:269)'],
 		schemaVersion: 'config schema',
 		stateClass: 'governed-content',
 		privacyClass: 'metadata',
-		writeLimits: { bound: 'wx-once init artifacts + operator-edited config', scope: 'global', citation: 'src/config/project-init.ts:63-69,100-103' },
-		readBound: { pattern: 'indexed', bound: 'single config files', sync: true, citation: 'src/cli/index.ts:270' },
-		lockModel: 'O_EXCL (wx) prevents double-write',
+		writeLimits: { bound: 'first-run example artifact + operator-edited config', scope: 'global', citation: 'src/config/project-init.ts:25-52' },
+		readBound: { pattern: 'indexed', bound: 'single config files', sync: true, citation: 'src/cli/index.ts:269' },
+		lockModel: 'exists-check-then-write init writes (single-threaded init; non-atomic, pre-existing)',
 		crashBehavior: 'fail-open init writes',
 		closePolicy: 'unaffected (outside close scope by design)',
 		resetPolicy: 'operator-owned',
 		legacyCompatibility: 'n/a',
 		healthSignal: 'n/a',
 		owner: 'this-gate',
-		disposition: { kind: 'not-a-defect', proof: 'Write-once init artifacts (wx flag) and operator-owned config files outside swarm runtime state (project-init.ts:102).' },
+		disposition: { kind: 'not-a-defect', proof: 'First-run example artifact and operator-owned config files outside swarm runtime state (project-init.ts:25-52).' },
 	},
 	{
 		id: 'bundled-skills',
@@ -2587,6 +3223,9 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'quota dir proper-lockfile (10 s timeout, 30 retries :40-58); consolidation in-memory dedup',
 		crashBehavior: 'atomic writes; proposal failure returns ran:false',
 		closePolicy: 'untouched',
+		closeArrayMembership: {
+			'skill-improver-quota.json': 'neither',
+		},
 		resetPolicy: 'daily quota rollover re-initializes',
 		legacyCompatibility: 'enrichment-quota variant path',
 		healthSignal: 'quota pressure',
@@ -2648,13 +3287,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/mutation/engine.ts:299 — patch file per mutation run (working directory, batch-scoped)',
 			'src/tools/file-extractor.ts:111-126 — O_EXCL user-directed outputs with rollback (:15-51)',
 			'src/services/skill-reviser.ts:246,356 — skill-path temp+rename (external destination, #2035-classified)',
-			'src/tools/apply-patch.ts:757 — temp cleaned in finally (:761-767)',
+			'src/tools/apply-patch.ts:770 — temp cleaned in finally (:774-780)',
 		],
 		readerCitations: ['write-only / consumed by the invoking workflow'],
 		schemaVersion: 'n/a',
 		stateClass: 'governed-content',
 		privacyClass: 'content',
-		writeLimits: { bound: 'batch-scoped or user-directed outputs outside swarm state; apply-patch temps always cleaned', scope: 'per-trigger', citation: 'src/tools/apply-patch.ts:761-767; file-extractor.ts:15-51' },
+		writeLimits: { bound: 'batch-scoped or user-directed outputs outside swarm state; apply-patch temps always cleaned', scope: 'per-trigger', citation: 'src/tools/apply-patch.ts:774-780; file-extractor.ts:15-51' },
 		readBound: { pattern: 'write-only', bound: 'n/a', sync: true, citation: 'as cited' },
 		lockModel: 'O_EXCL where collision matters',
 		crashBehavior: 'rollback paths remove created files',
@@ -2663,7 +3302,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		legacyCompatibility: 'n/a',
 		healthSignal: 'n/a',
 		owner: 'this-gate',
-		disposition: { kind: 'not-a-defect', proof: 'Outputs outside swarm runtime state: batch-scoped patch files, O_EXCL user-directed extractions with rollback, finally-cleaned temps (apply-patch.ts:761-767).' },
+		disposition: { kind: 'not-a-defect', proof: 'Outputs outside swarm runtime state: batch-scoped patch files, O_EXCL user-directed extractions with rollback, finally-cleaned temps (apply-patch.ts:774-780).' },
 	},
 
 	{
@@ -2878,6 +3517,59 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 ];
 
 /**
+ * Issue #1534 guardrail — FROZEN allowlist. Artifacts already wired into
+ * close.ts's `ARCHIVE_ARTIFACTS` / `ACTIVE_STATE_TO_CLEAN` on the day the
+ * close-lifecycle coherence gate landed, for which no registry row names the
+ * file. These are NOT the #1534 defect class: their close lifecycle IS wired
+ * (that is why they appear in the arrays at all) — they are a pre-existing
+ * registry-GRANULARITY gap, recorded rather than silently tolerated.
+ *
+ * This list may only SHRINK. A newly added close.ts artifact must be declared
+ * in some row's `closeArrayMembership`; adding it here instead re-opens
+ * exactly the hole the gate exists to close.
+ * `tests/unit/scripts/check-retention-close-lifecycle.test.ts` pins its
+ * contents so growth is a test failure, not a silent edit.
+ */
+export const CLOSE_ARTIFACTS_WITHOUT_REGISTRY_ROW: readonly string[] =
+	Object.freeze([
+		// Written by src/commands/close.ts itself (close-lessons harvest) and read
+		// back by src/commands/registry.ts; archived, never cleaned. Recommendation:
+		// give it a row under a future observability-registry pass.
+		'close-lessons.md',
+	]);
+
+/**
+ * Issue #1534 guardrail — FROZEN, and EMPTY by design. Flat `.swarm/` SQLite
+ * artifacts permitted to declare a `closeArrayMembership` other than
+ * `archive+clean`.
+ *
+ * Without this rule an author could reintroduce sub-defect (a) verbatim by
+ * declaring a new `.swarm/*.sqlite` as `neither`: the declaration would match
+ * close.ts (which indeed does nothing with it), and the VACUUM-INTO and
+ * handle-close rules would never fire because they key on real array
+ * membership. A WAL-mode database left on disk across `/swarm close` is the
+ * exact orphaning #1534 was about, so the honest way to have one is an entry
+ * here with a reason — reviewed — not a quiet `neither`.
+ *
+ * Empty today: `.swarm/` holds exactly two SQLite artifacts, `swarm.db` and
+ * `repo-memory.sqlite`, and both are `archive+clean`.
+ * (`.swarm/memory/memory.db` is not a flat `.swarm/` file and is out of scope.)
+ */
+export const SQLITE_ARTIFACTS_EXEMPT_FROM_ARCHIVE_CLEAN: Readonly<
+	Record<string, string>
+> = Object.freeze({});
+
+/**
+ * Issue #1534 guardrail. `project-swarm` rows whose `pathGrammar` legitimately
+ * does NOT begin with `.swarm/` because the root is indirected through a
+ * configurable store location. Without this closed list, a future author could
+ * dodge the `closeArrayMembership` requirement by writing a prose-y
+ * `pathGrammar` that names no `.swarm/<file>` token.
+ */
+export const PROJECT_SWARM_ROWS_WITH_INDIRECT_ROOT: readonly string[] =
+	Object.freeze(['recommendation-ledger', 'curation-proposals']);
+
+/**
  * Modules that physically contain write calls but own NO durable stream:
  * they are plumbing executing on behalf of row-owning caller modules. The
  * coverage ratchet accepts a module only here (with a reason) or in some
@@ -2885,6 +3577,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
  */
 export const EXEMPT_WRITER_MODULES: Readonly<Record<string, string>> = Object.freeze({
 	'src/utils/atomic-write.ts': 'canonical atomic-write helper — callers own the streams (issue #2035)',
+	'src/pr-review/persistence.ts': 'PR-review workflow-state persistence plumbing (issue #2385) — the only durable stream this module writes is the gate-state file .swarm/pr-workflow-gates/*.json via writeStateWhileLocked; that stream is currently UNREGISTERED in this data set (F-PRR-013 — separate follow-up row needed); until then the gate-state writes are exempt plumbing',
 	'src/utils/bun-compat.ts': 'bunWrite Node-fallback helper — callers own the streams',
 	'src/evidence/task-file.ts': 'atomic-write adapter for evidence/{taskId}.json — rows task-workflow-evidence/council-evidence-files own the stream',
 	'src/evidence/immutable-store.ts': 'writeImmutableArtifact executes on behalf of the evaluation-store row owners',
@@ -2936,5 +3629,3 @@ export const RETENTION_REGISTRY_SUMMARY = {
 	retainByDesign: RETENTION_REGISTRY.filter((r) => r.disposition.kind === 'retain-by-design').length,
 	notADefect: RETENTION_REGISTRY.filter((r) => r.disposition.kind === 'not-a-defect').length,
 } as const;
-
-

@@ -6,6 +6,10 @@
  * cross-task coherence check.
  */
 
+import {
+	evaluateCouncilFreshness,
+	resolveCouncilFreshnessMaxAgeMs,
+} from '../../../council/council-freshness';
 import { readSupervisorReportRaw } from '../../../summaries/store';
 import type { GateContext, GateResult } from './types';
 
@@ -59,25 +63,31 @@ export async function runArchitectureSupervisorGate(
 		);
 	}
 
-	// Timestamp freshness (within last 24h, not in the future).
-	const now = new Date();
-	const asTime = asEntry.timestamp ? new Date(asEntry.timestamp) : null;
-	if (!asTime || Number.isNaN(asTime.getTime())) {
+	// Centralized freshness (issue #2102 contract D): the same shared
+	// evaluator, captured preflight clock, and council freshness config that
+	// govern the phase and final councils also govern this supervisor check.
+	// The architecture supervisor is intentionally NOT part of the council
+	// review identity/digest scope — it is a single-agent phase review, not a
+	// council, and its evidence file stays identity-less.
+	const freshness = evaluateCouncilFreshness({
+		nowMs: ctx.preflightNowMs,
+		timestampMs: asEntry.timestamp
+			? new Date(asEntry.timestamp).getTime()
+			: null,
+		maxAgeMs: resolveCouncilFreshnessMaxAgeMs(ctx.pluginConfig.council),
+	});
+	if (!freshness.ok) {
+		const reasonByFailure: Record<string, string> = {
+			invalid_timestamp: 'ARCH_SUPERVISOR_INVALID_TIMESTAMP',
+			future_timestamp: 'ARCH_SUPERVISOR_FUTURE_TIMESTAMP',
+			stale_evidence: 'ARCH_SUPERVISOR_STALE_EVIDENCE',
+			predates_required_input: 'ARCH_SUPERVISOR_STALE_EVIDENCE',
+			invalid_required_input: 'ARCH_SUPERVISOR_INVALID_REQUIRED_INPUT',
+		};
 		return asBlocked(
-			'ARCH_SUPERVISOR_INVALID_TIMESTAMP',
-			`Phase ${phase} cannot be completed: architecture supervisor evidence has a missing or invalid timestamp.`,
-		);
-	}
-	if (asTime.getTime() > now.getTime()) {
-		return asBlocked(
-			'ARCH_SUPERVISOR_FUTURE_TIMESTAMP',
-			`Phase ${phase} cannot be completed: architecture supervisor evidence timestamp is in the future.`,
-		);
-	}
-	if (now.getTime() - asTime.getTime() > 24 * 60 * 60 * 1000) {
-		return asBlocked(
-			'ARCH_SUPERVISOR_STALE_EVIDENCE',
-			`Phase ${phase} cannot be completed: architecture supervisor evidence is older than 24 hours. Re-run the supervisor for fresh review.`,
+			reasonByFailure[freshness.reason ?? ''] ??
+				'ARCH_SUPERVISOR_STALE_EVIDENCE',
+			`Phase ${phase} cannot be completed: architecture supervisor ${freshness.message}. ${freshness.recovery}`,
 		);
 	}
 

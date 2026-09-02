@@ -1,18 +1,37 @@
 /**
  * The event catalog (issue #2029).
  *
- * Exactly 45 entries, matching the `TelemetryEvent` union at
- * `src/telemetry.ts:15-92`. Thirty-eight predate the #2029 contract; the 39th is
+ * Exactly 59 entries, matching the `TelemetryEvent` union at
+ * `src/telemetry.ts:15-165`. Thirty-eight predate the #2029 contract; the 39th is
  * `agent_conflict_detected` (previously emitted through a force-cast past the
  * type system), the 40th is `close_archive_result` (issue #2030 — the
  * structured close/archive result event), the 41st is the bounded diagnostic
  * projection of authoritative knowledge-receipt transitions (issue #2031).
  * The 42nd is the human-only `knowledge_maintenance` quarantine audit
  * (issue #2033), the 43rd is the aggregate `context_pruned` transcript
- * mutation audit, and the 44th is the bounded `residue_health` atomic-write
- * residue audit (issue #2035). These late additions are instances of
- * the defect class this contract exists to close: an event kind entering the
- * stream with no registration.
+ * mutation audit, the 44th is the bounded `residue_health` atomic-write
+ * residue audit (issue #2035), the 46th is the bounded
+ * `context_telemetry_health` storage audit for the issue-#2037
+ * `.swarm/context-telemetry.jsonl` store, the 47th is the counts-only
+ * `skill_usage_health` storage audit for the issue-#2038
+ * `.swarm/skill-usage.jsonl` store and its authoritative pending sidecar,
+ * the 48th is the bounded `core_events_health` storage audit for the
+ * issue-#2039 `.swarm/events.jsonl` store, the 49th is the bounded
+ * `shell_audit_health` storage audit for the issue-#2040
+ * `.swarm/session/shell-audit.jsonl` security-audit store, and the 50th is
+ * the bounded `trajectory_health` storage audit for the issue-#2041
+ * `.swarm/trajectories/` PRM session store, and the 51st is the bounded
+ * `pr_subscription_health` storage audit for the issue-#2042
+ * `.swarm/pr-monitor/` subscription checkpoint store. The 52nd is
+ * `delegation_cost_correction`, the 53rd is `delegation_cost_binding`, and the
+ * 54th is `delegation_cost_join`. The 57th is `council_attempt`, the 58th is
+ * `council_round_transition`, and the 59th is `council_attempt_unscoped`
+ * (issue #2046 item 9 — canonical council attempt / accepted-transition
+ * observations joined to the lifecycle correlation system via the
+ * server-derived `councilRoundId`). These late
+ * additions are instances
+ * of the defect class this contract exists to close: an event kind entering
+ * the stream with no registration.
  *
  * Every entry names a real producer `file:line`, a retention owner issue at or
  * above #2030 — every entry today cites the #2030-#2051 programme, but only the
@@ -72,7 +91,7 @@ export interface CatalogEntry {
 	/**
 	 * Whether an event of this kind must carry `trace.parentSpanId`.
 	 *
-	 * `false` for all 45 entries today, and that is a truthful statement about
+	 * `false` for all 59 entries today, and that is a truthful statement about
 	 * the current system rather than a placeholder: no producer supplies a
 	 * parent span, so `createObservation` never sets one. Setting this to `true`
 	 * for a kind whose producer cannot supply a parent would make every
@@ -99,6 +118,10 @@ const ISSUE_LIFECYCLE_RETENTION = 2045;
 const ISSUE_COST_RETENTION = 2043;
 /** Owner of the plan/evidence retention registry. */
 const ISSUE_PLAN_EVIDENCE_RETENTION = 2036;
+/** Owner of the council-attempt observability emissions (issue #2046 item 9). */
+const ISSUE_COUNCIL_OBSERVABILITY = 2046;
+/** Future consumer of council events: the rebuildable index / `/swarm report`. */
+const ISSUE_COUNCIL_REPORT = 2048;
 
 const NO_WORKFLOW_IDS: readonly WorkflowIdKey[] = Object.freeze([]);
 const NO_CONSUMERS: readonly string[] = Object.freeze([]);
@@ -111,11 +134,21 @@ const REQUIRE_SESSION_AND_TASK: readonly WorkflowIdKey[] = Object.freeze([
 	'taskId',
 ]);
 const REQUIRE_TASK: readonly WorkflowIdKey[] = Object.freeze(['taskId']);
+/**
+ * The server-derived council scope token — the durable round identity shared
+ * with `.swarm/council/attempts/{token}.jsonl`. Every scoped council event
+ * genuinely carries it (computed from the authoritative scope, never from
+ * client input), so requiring it is truthful and gives council events a
+ * machine-enforced correlation axis.
+ */
+const REQUIRE_COUNCIL_ROUND: readonly WorkflowIdKey[] = Object.freeze([
+	'councilRoundId',
+]);
 
 /**
  * `hostSessionId` is FORBIDDEN on the kinds whose producer genuinely has no
  * session in scope. Verified against source, not assumed:
- * `gate_parse_error` (`src/telemetry.ts:456-462`) takes only `taskId` and the
+ * `gate_parse_error` (`src/telemetry.ts:608-615`) takes only `taskId` and the
  * error; the three evidence-lock kinds and the three plan kinds are emitted from
  * modules that never receive a session id. If one of these ever arrives with a
  * session id, it was manufactured.
@@ -123,15 +156,32 @@ const REQUIRE_TASK: readonly WorkflowIdKey[] = Object.freeze(['taskId']);
 const FORBID_SESSION: readonly WorkflowIdKey[] = Object.freeze([
 	'hostSessionId',
 ]);
+/**
+ * `councilRoundId` is FORBIDDEN on the unscoped council kind: pre-validation
+ * failures genuinely have no round identity (no resolvable scope), so a
+ * present one was manufactured upstream — the exact anti-pattern issue #2029
+ * item 2 forbids (PR #2466 review follow-up). The scoped council kinds
+ * REQUIRE the axis instead, making round-identity provenance
+ * machine-enforced in both directions.
+ */
+const FORBID_COUNCIL_ROUND: readonly WorkflowIdKey[] = Object.freeze([
+	'councilRoundId',
+]);
 
 /** Live reader of `delegation_end` cost fields. */
 const CONSUMER_COST_ACCOUNTING = Object.freeze([
-	'src/services/cost-accounting.ts:127',
+	'src/services/cost-accounting.ts:429',
+]);
+const CONSUMER_COST_CORRECTION = Object.freeze([
+	'src/services/cost-accounting.ts:426',
+]);
+const CONSUMER_COST_JOIN = Object.freeze([
+	'src/services/cost-accounting.ts:413',
 ]);
 /** Live reader of reviewer-gate decisions. */
 const CONSUMER_GATE_STATS = Object.freeze(['src/evaluation/gate-stats.ts:99']);
 /** In-process listener that tracks last-activity per session. */
-const CONSUMER_HEARTBEAT_LISTENER = Object.freeze(['src/telemetry.ts:174']);
+const CONSUMER_HEARTBEAT_LISTENER = Object.freeze(['src/telemetry.ts:232']);
 
 interface CatalogEntryInput {
 	readonly category: EventCategory;
@@ -180,7 +230,7 @@ function defineEntry(kind: string, input: CatalogEntryInput): CatalogEntry {
  * The catalog source table.
  *
  * Producer lines were derived by reading the emit call sites, not by memory:
- * the 26 convenience helpers live at `src/telemetry.ts:397-759`, the six "dark"
+ * the convenience helpers live at `src/telemetry.ts:548-1218`, the six "dark"
  * kinds (documented at `src/telemetry.ts:39` as "emitted but no live parallel
  * paths") at `src/evidence/lock.ts:86,94,129`, `src/plan/manager.ts:335,1724`
  * and `src/plan/ledger.ts:681`, and the force-cast kind at
@@ -194,7 +244,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:479',
+			producer: 'src/telemetry.ts:550',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -208,7 +258,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:483',
+			producer: 'src/telemetry.ts:554',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -222,7 +272,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:487',
+			producer: 'src/telemetry.ts:558',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -236,7 +286,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:524',
+			producer: 'src/telemetry.ts:596',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -250,7 +300,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:572',
+			producer: 'src/telemetry.ts:644',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -266,7 +316,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'debug',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:754',
+			producer: 'src/telemetry.ts:826',
 			consumers: CONSUMER_HEARTBEAT_LISTENER,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
 			requiredWorkflowIds: REQUIRE_SESSION,
@@ -281,7 +331,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:762',
+			producer: 'src/telemetry.ts:834',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -294,7 +344,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:787',
+			producer: 'src/telemetry.ts:859',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -311,7 +361,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'delegation',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:491',
+			producer: 'src/telemetry.ts:562',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -325,11 +375,51 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'delegation',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:501',
+			producer: 'src/telemetry.ts:572',
 			consumers: CONSUMER_COST_ACCOUNTING,
 			retentionOwnerIssue: ISSUE_COST_RETENTION,
 			requiredWorkflowIds: REQUIRE_SESSION_AND_TASK,
 			otelMapping: 'genai',
+		},
+	],
+	[
+		'delegation_cost_correction',
+		{
+			category: 'delegation',
+			severity: 'info',
+			privacyClass: 'pseudonymous',
+			producer: 'src/index.ts:636',
+			consumers: CONSUMER_COST_CORRECTION,
+			retentionOwnerIssue: ISSUE_COST_RETENTION,
+			requiredWorkflowIds: REQUIRE_SESSION_AND_TASK,
+			otelMapping: 'genai',
+		},
+	],
+	[
+		'delegation_cost_binding',
+		{
+			category: 'delegation',
+			severity: 'info',
+			privacyClass: 'pseudonymous',
+			producer: 'src/index.ts:1561',
+			consumers: NO_CONSUMERS,
+			futureOwnerIssue: ISSUE_SINK,
+			retentionOwnerIssue: ISSUE_COST_RETENTION,
+			requiredWorkflowIds: REQUIRE_SESSION,
+			otelMapping: 'none',
+		},
+	],
+	[
+		'delegation_cost_join',
+		{
+			category: 'delegation',
+			severity: 'notice',
+			privacyClass: 'pseudonymous',
+			producer: 'src/index.ts:1581',
+			consumers: CONSUMER_COST_JOIN,
+			retentionOwnerIssue: ISSUE_COST_RETENTION,
+			requiredWorkflowIds: REQUIRE_SESSION,
+			otelMapping: 'none',
 		},
 	],
 	[
@@ -338,7 +428,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'delegation',
 			severity: 'notice',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:605',
+			producer: 'src/telemetry.ts:677',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -355,7 +445,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'delegation',
 			severity: 'warning',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:619',
+			producer: 'src/telemetry.ts:691',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
@@ -371,7 +461,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'gate',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:533',
+			producer: 'src/telemetry.ts:605',
 			// Verified: `src/evaluation/gate-stats.ts:99` filters for
 			// `reviewer_gate_decision` ONLY. Nothing reads gate_passed.
 			consumers: NO_CONSUMERS,
@@ -386,7 +476,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'gate',
 			severity: 'warning',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:550',
+			producer: 'src/telemetry.ts:622',
 			// Verified: not read by gate-stats — see `gate_passed` above.
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
@@ -401,11 +491,11 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'warning',
 			// Carries a free-text error message that can embed a path.
 			privacyClass: 'sensitive',
-			producer: 'src/telemetry.ts:537',
+			producer: 'src/telemetry.ts:609',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
-			// Verified at src/telemetry.ts:456-462: the producer takes only
+			// Verified at src/telemetry.ts:608-615: the producer takes only
 			// (taskId, error). It has NO sessionId, so requiring hostSessionId
 			// would violate on every event; it is forbidden instead.
 			requiredWorkflowIds: REQUIRE_TASK,
@@ -418,10 +508,52 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'gate',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:560',
+			producer: 'src/telemetry.ts:632',
 			consumers: CONSUMER_GATE_STATS,
 			retentionOwnerIssue: ISSUE_LIFECYCLE_RETENTION,
 			requiredWorkflowIds: REQUIRE_SESSION_AND_TASK,
+		},
+	],
+	[
+		'council_attempt',
+		{
+			category: 'gate',
+			severity: 'info',
+			privacyClass: 'pseudonymous',
+			producer: 'src/council/council-observability.ts:85',
+			consumers: NO_CONSUMERS,
+			futureOwnerIssue: ISSUE_COUNCIL_REPORT,
+			retentionOwnerIssue: ISSUE_COUNCIL_OBSERVABILITY,
+			requiredWorkflowIds: REQUIRE_COUNCIL_ROUND,
+		},
+	],
+	[
+		'council_round_transition',
+		{
+			category: 'gate',
+			severity: 'info',
+			privacyClass: 'pseudonymous',
+			producer: 'src/council/council-observability.ts:115',
+			consumers: NO_CONSUMERS,
+			futureOwnerIssue: ISSUE_COUNCIL_REPORT,
+			retentionOwnerIssue: ISSUE_COUNCIL_OBSERVABILITY,
+			requiredWorkflowIds: REQUIRE_COUNCIL_ROUND,
+		},
+	],
+	[
+		'council_attempt_unscoped',
+		{
+			category: 'gate',
+			severity: 'warning',
+			privacyClass: 'pseudonymous',
+			producer: 'src/council/council-observability.ts:152',
+			consumers: NO_CONSUMERS,
+			futureOwnerIssue: ISSUE_COUNCIL_REPORT,
+			retentionOwnerIssue: ISSUE_COUNCIL_OBSERVABILITY,
+			forbiddenWorkflowIds: FORBID_COUNCIL_ROUND,
+			// Pre-validation failures (invalid arguments, wrong root, round-state
+			// uncertainty/persistence failure) carry no round identity; the
+			// submitter session is optional and joins when present.
 		},
 	],
 
@@ -432,7 +564,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'cost',
 			severity: 'info',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:576',
+			producer: 'src/telemetry.ts:648',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_COST_RETENTION,
@@ -445,7 +577,20 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'guardrail',
 			severity: 'notice',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:595',
+			producer: 'src/telemetry.ts:667',
+			consumers: NO_CONSUMERS,
+			futureOwnerIssue: ISSUE_SINK,
+			retentionOwnerIssue: ISSUE_SINK,
+			requiredWorkflowIds: REQUIRE_SESSION,
+		},
+	],
+	[
+		'retrieval_routed',
+		{
+			category: 'guardrail',
+			severity: 'info',
+			privacyClass: 'pseudonymous',
+			producer: 'src/telemetry.ts:1216',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -460,7 +605,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'guardrail',
 			severity: 'error',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:633',
+			producer: 'src/telemetry.ts:705',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -473,7 +618,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'guardrail',
 			severity: 'warning',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:642',
+			producer: 'src/telemetry.ts:714',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -497,7 +642,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			// passes a clean closed-vocabulary `nontransient:<category>`, but one
 			// clean producer cannot downgrade the kind.
 			privacyClass: 'sensitive',
-			producer: 'src/telemetry.ts:646',
+			producer: 'src/telemetry.ts:718',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -511,7 +656,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'error',
 			// Carries `file`, a repository-relative or absolute path.
 			privacyClass: 'sensitive',
-			producer: 'src/telemetry.ts:742',
+			producer: 'src/telemetry.ts:814',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -524,7 +669,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'guardrail',
 			severity: 'warning',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:750',
+			producer: 'src/telemetry.ts:822',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -537,11 +682,11 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'guardrail',
 			severity: 'warning',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:772',
+			producer: 'src/telemetry.ts:844',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
-			// `phase` is an OPTIONAL parameter here (src/telemetry.ts:658), so
+			// `phase` is an OPTIONAL parameter here (src/telemetry.ts:668), so
 			// phaseId is not required.
 			requiredWorkflowIds: REQUIRE_SESSION,
 		},
@@ -555,7 +700,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'warning',
 			// Repeated no-op agent turns crossed the strong-warning threshold.
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:660',
+			producer: 'src/telemetry.ts:732',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -569,7 +714,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'warning',
 			// The same (session, tool, denial-code) streak reached the hard rung (#2063 B1).
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:681',
+			producer: 'src/telemetry.ts:753',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -583,7 +728,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'warning',
 			// An ARMED execution episode reached the advisory rung (#2063 B5).
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:695',
+			producer: 'src/telemetry.ts:767',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -597,7 +742,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'error',
 			// A non-productive tool was hard-denied at the stop rung (#2063 B5).
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:712',
+			producer: 'src/telemetry.ts:784',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -611,7 +756,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'error',
 			// A read resolved inside the installed opencode-swarm package and was denied (#2063 B4).
 			privacyClass: 'sensitive',
-			producer: 'src/telemetry.ts:729',
+			producer: 'src/telemetry.ts:801',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -625,7 +770,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'error',
 			// DELIVERY of a PRM hard stop, distinct from the `prm_hard_stop` TRIGGER (#2063 C2).
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:918',
+			producer: 'src/telemetry.ts:1197',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -638,7 +783,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'prm',
 			severity: 'notice',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:802',
+			producer: 'src/telemetry.ts:874',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -651,7 +796,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'prm',
 			severity: 'notice',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:816',
+			producer: 'src/telemetry.ts:888',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -664,7 +809,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'prm',
 			severity: 'warning',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:829',
+			producer: 'src/telemetry.ts:901',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -677,7 +822,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'prm',
 			severity: 'critical',
 			privacyClass: 'pseudonymous',
-			producer: 'src/telemetry.ts:843',
+			producer: 'src/telemetry.ts:915',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -738,7 +883,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'notice',
 			// Only an attempt counter, a hash PREFIX and a delay. No identifiers.
 			privacyClass: 'operational',
-			producer: 'src/plan/manager.ts:344',
+			producer: 'src/plan/manager.ts:345',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_PLAN_EVIDENCE_RETENTION,
@@ -752,7 +897,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			severity: 'warning',
 			// Carries `directory` and a free-text filesystem error.
 			privacyClass: 'sensitive',
-			producer: 'src/plan/manager.ts:1861',
+			producer: 'src/plan/manager.ts:1853',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_PLAN_EVIDENCE_RETENTION,
@@ -809,7 +954,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'notice',
 			privacyClass: 'operational',
-			producer: 'src/telemetry.ts:880',
+			producer: 'src/telemetry.ts:952',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
@@ -866,11 +1011,194 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			category: 'lifecycle',
 			severity: 'notice',
 			privacyClass: 'operational',
-			producer: 'src/telemetry.ts:902',
+			producer: 'src/telemetry.ts:974',
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_SINK,
 			retentionOwnerIssue: ISSUE_SINK,
 			// Aggregate-only counts; no workflow correlation applies.
+			requiredWorkflowIds: NO_WORKFLOW_IDS,
+			allowsLinks: false,
+		},
+	],
+
+	// ── context-map telemetry storage (issue #2037) ───────────────────────
+	[
+		'context_telemetry_health',
+		{
+			// Emitted after a compaction or close cut for the bounded
+			// `.swarm/context-telemetry.jsonl` store (issue #2037). Payload is
+			// accepted/compacted/retained/dropped/corrupt counts, oldest/newest
+			// timestamps, and byte figures — counts ONLY, no capsule/query
+			// content and no filesystem paths — so `operational` is the truthful
+			// privacy class. No live consumer yet; PR 16/19 reporting will
+			// consume it.
+			category: 'lifecycle',
+			severity: 'notice',
+			privacyClass: 'operational',
+			producer: 'src/telemetry.ts:998',
+			consumers: NO_CONSUMERS,
+			futureOwnerIssue: ISSUE_SINK,
+			retentionOwnerIssue: ISSUE_SINK,
+			// Aggregate-only counts; no workflow correlation applies.
+			requiredWorkflowIds: NO_WORKFLOW_IDS,
+			allowsLinks: false,
+		},
+	],
+
+	// ── skill-usage tracking storage health (issue #2038) ─────────────────
+	[
+		'skill_usage_health',
+		{
+			// Emitted on compaction, migration, consumption, and pressure
+			// events for skill-usage tracking (issue #2038). Payload is
+			// accepted/compacted/dropped/corrupt/retained counts, retry and
+			// curator figures, oldest/newest timestamps, and byte figures —
+			// counts ONLY, no per-skill identifier and no filesystem paths —
+			// so `operational` is the truthful privacy class. The adversarial
+			// case is thousands of distinct skill IDs, so a per-skill label
+			// would be an unbounded label set; this payload is deliberately
+			// aggregate-only. No live consumer yet; PR 16/19 reporting will
+			// consume it.
+			category: 'lifecycle',
+			severity: 'notice',
+			privacyClass: 'operational',
+			producer: 'src/telemetry.ts:1035',
+			consumers: NO_CONSUMERS,
+			futureOwnerIssue: ISSUE_SINK,
+			retentionOwnerIssue: ISSUE_SINK,
+			// Aggregate-only counts; no workflow correlation applies.
+			requiredWorkflowIds: NO_WORKFLOW_IDS,
+			allowsLinks: false,
+		},
+	],
+
+	// ── core event store (issue #2039) ────────────────────────────────────
+	[
+		'core_events_health',
+		{
+			// Emitted after a compaction or close cut for the bounded
+			// `.swarm/events.jsonl` store (issue #2039). Payload is
+			// accepted/compacted/retained/dropped/corrupt counts,
+			// authority-index size and FIFO-eviction counts, oldest/newest
+			// timestamps, and byte figures — counts ONLY, no event content and
+			// no filesystem paths — so `operational` is the truthful privacy
+			// class. No live consumer yet; PR 16/19 reporting will consume it.
+			category: 'lifecycle',
+			severity: 'notice',
+			privacyClass: 'operational',
+			producer: 'src/telemetry.ts:1061',
+			consumers: NO_CONSUMERS,
+			futureOwnerIssue: ISSUE_SINK,
+			retentionOwnerIssue: ISSUE_SINK,
+			// Aggregate-only counts; no workflow correlation applies.
+			requiredWorkflowIds: NO_WORKFLOW_IDS,
+			allowsLinks: false,
+		},
+	],
+
+	// ── shell-audit store (issue #2040) ───────────────────────────────────
+	[
+		'shell_audit_health',
+		{
+			// Emitted after a compaction or close cut for the bounded
+			// `.swarm/session/shell-audit.jsonl` security-audit store
+			// (issue #2040). Payload is accepted/compacted/retained/dropped/
+			// corrupt counts, oldest/newest timestamps, and byte figures —
+			// counts ONLY, no command content, no filesystem paths, no agent
+			// or session identifiers — so `operational` is the truthful
+			// privacy class. No live consumer yet; PR 16/19 reporting will
+			// consume it.
+			category: 'lifecycle',
+			severity: 'notice',
+			privacyClass: 'operational',
+			producer: 'src/telemetry.ts:1085',
+			consumers: NO_CONSUMERS,
+			futureOwnerIssue: ISSUE_SINK,
+			retentionOwnerIssue: ISSUE_SINK,
+			// Aggregate-only counts; no workflow correlation applies.
+			requiredWorkflowIds: NO_WORKFLOW_IDS,
+			allowsLinks: false,
+		},
+	],
+
+	// ── PRM session-trajectory store (issue #2041) ────────────────────────
+	[
+		'trajectory_health',
+		{
+			// Emitted after a compaction pass or cleanup sweep, and
+			// (cooldown-bounded) when an append is skipped because the
+			// per-file cross-process lock stayed busy, for the bounded
+			// `.swarm/trajectories/` PRM session store (issue #2041). Payload
+			// is retained/dropped/corrupt counts, lock-skip counts, and byte
+			// figures — counts ONLY, no trajectory content, no filesystem
+			// paths, no session identifiers — so `operational` is the truthful
+			// privacy class. No live consumer yet; reporting surfaces will
+			// consume it.
+			category: 'lifecycle',
+			severity: 'notice',
+			privacyClass: 'operational',
+			producer: 'src/telemetry.ts:1108',
+			consumers: NO_CONSUMERS,
+			futureOwnerIssue: ISSUE_SINK,
+			retentionOwnerIssue: ISSUE_SINK,
+			// Aggregate-only counts; no workflow correlation applies.
+			requiredWorkflowIds: NO_WORKFLOW_IDS,
+			allowsLinks: false,
+		},
+	],
+
+	// ── PR-monitor subscription store (issue #2042) ───────────────────────
+	[
+		'pr_subscription_health',
+		{
+			// Emitted after a terminal-record compaction, a legacy-JSONL
+			// migration completion (including the one-time read-bootstrap),
+			// a legacy-log archive, or a foreign/corrupt checkpoint recovery,
+			// for the bounded `.swarm/pr-monitor/` PR-monitor subscription
+			// checkpoint store (issue #2042). Payload is active/terminal
+			// counts, compaction and corrupt/drop counters, and byte figures —
+			// counts ONLY, no correlationIds, no filesystem paths, no repo
+			// identities — so `operational` is the truthful privacy class. No
+			// live consumer yet; the /swarm pr status storage footer surfaces
+			// the same figures synchronously (including recovery_resets).
+			category: 'lifecycle',
+			severity: 'notice',
+			privacyClass: 'operational',
+			producer: 'src/telemetry.ts:1137',
+			consumers: NO_CONSUMERS,
+			futureOwnerIssue: ISSUE_SINK,
+			retentionOwnerIssue: ISSUE_SINK,
+			// Aggregate-only counts; no workflow correlation applies.
+			requiredWorkflowIds: NO_WORKFLOW_IDS,
+			allowsLinks: false,
+		},
+	],
+
+	// ── Learning/operations health alarms (issue #2044) ──────────────────
+	[
+		'learning_health_alarm',
+		{
+			// Emitted by the learning-health registry
+			// (`src/health/learning-health.ts`) when one of the eight PR-16
+			// alarm families raises, re-emits past its cooldown (`sustained`),
+			// or recovers. Payload is counts, closed-vocabulary enums (`alarm`
+			// from the eight-family closed set, `transition`, `severity`,
+			// `scope_class`), millisecond timestamps, model/provider identity,
+			// and 16-hex salted `session_ref` values — counts and refs ONLY,
+			// no raw session IDs, no filesystem paths, no query/prompt/response
+			// content — so `operational` is the truthful privacy class. No
+			// stream consumer yet (the sink is #2047); the `/swarm status`
+			// Learning Health section and the `/swarm diagnose`
+			// learning-health check surface the same state synchronously from
+			// the `.swarm/learning-health.json` artifact.
+			category: 'lifecycle',
+			severity: 'warning',
+			privacyClass: 'operational',
+			producer: 'src/telemetry.ts:1181',
+			consumers: NO_CONSUMERS,
+			futureOwnerIssue: ISSUE_SINK,
+			retentionOwnerIssue: 2044,
+			// Aggregate-only counts and refs; no workflow correlation applies.
 			requiredWorkflowIds: NO_WORKFLOW_IDS,
 			allowsLinks: false,
 		},

@@ -33,9 +33,11 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 	});
 
 	// Moved from registry.tool-policy.test.ts (FR-006 ratchet: that file is
-	// over the 500-line cap and must not grow). #2268 added 'recover'.
-	test("'human-only' registry bucket contains exactly the expected 10 commands", () => {
+	// over the 500-line cap and must not grow). #2268 added 'recover'; #2103
+	// makes Full-Auto direct-human-only so agents cannot stop it mid-run.
+	test("'human-only' registry bucket contains exactly the expected 12 commands", () => {
 		const expectedHumanOnly = new Set<string>([
+			'full-auto',
 			'review',
 			'memory compact',
 			'memory import',
@@ -49,6 +51,8 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 			// #2268: settlement recovery escape hatch — --force releases
 			// in-process dispatch ownership, an operator-only assertion.
 			'recover',
+			// #1824: only a human may issue an exact one-shot write approval.
+			'approve-write',
 		]);
 		const actual = new Set<string>();
 		for (const [name, entry] of Object.entries(COMMAND_REGISTRY)) {
@@ -56,7 +60,7 @@ describe('tool-policy — human-only command refusal (issue #890)', () => {
 				actual.add(name);
 			}
 		}
-		expect(actual.size).toBe(10);
+		expect(actual.size).toBe(12);
 		for (const name of expectedHumanOnly) {
 			expect(actual.has(name)).toBe(true);
 		}

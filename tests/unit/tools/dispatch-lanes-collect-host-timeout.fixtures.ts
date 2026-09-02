@@ -7,7 +7,7 @@ import { recordPendingDelegation } from '../../../src/background/pending-delegat
 import { _internals, type SessionOps } from '../../../src/tools/dispatch-lanes';
 
 export const BASE_HEADER =
-	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 
 export function createCollectLaneTimeoutFixture() {
 	const originalInternals = { ..._internals };
@@ -45,6 +45,7 @@ export function createCollectLaneTimeoutFixture() {
 		correlationId?: string;
 		mode?: string;
 		workflowLane?: string;
+		prReviewLegacyTranscriptCompatibility?: boolean;
 		workspace?: {
 			directory: string;
 			gitHead: string;
@@ -68,6 +69,15 @@ export function createCollectLaneTimeoutFixture() {
 			laneId: args.laneId ?? `${args.batchId}-lane`,
 			mode: args.mode ?? 'advisory',
 			...(args.workflowLane ? { workflowLane: args.workflowLane } : {}),
+			...(args.prReviewLegacyTranscriptCompatibility !== undefined
+				? {
+						prReviewLegacyTranscriptCompatibility:
+							args.prReviewLegacyTranscriptCompatibility,
+					}
+				: args.mode === 'swarm-pr-review:base' ||
+						args.mode === 'swarm-pr-review:micro'
+					? { prReviewLegacyTranscriptCompatibility: true }
+					: {}),
 			...(args.workspace ? { workspace: args.workspace } : {}),
 			promptHash: `${args.batchId}-hash`,
 			generation: 1,

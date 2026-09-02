@@ -40,15 +40,14 @@ bunx opencode-swarm install
 ✓ Added opencode-swarm to OpenCode plugins
 ✓ Disabled default OpenCode agents (explore, general)
 ✓ Created default plugin config at: ~/.config/opencode/opencode-swarm.json
-✓ Created project config at: .opencode/opencode-swarm.json
 ✓ Installation complete
 ```
 
 **What just happened:**
 - The installer registered the swarm plugin with OpenCode
-- Two config files were created:
+- One config file was created:
   - **Global:** `~/.config/opencode/opencode-swarm.json` (applies to all projects)
-  - **Project-local override (if needed):** `.opencode/opencode-swarm.json` (applies only to this project)
+- Project-local overrides are opt-in: the installer never creates `.opencode/opencode-swarm.json` — add one only if this project needs to override global settings
 
 Exact output varies by platform and whether config files already exist. If the command fails:
 - **"bunx not found"** — Bun is not installed. Install it from [bun.sh](https://bun.sh), then retry `bunx opencode-swarm install`.

@@ -43,28 +43,32 @@ vi.mock('../../../src/sast/semgrep', () => ({
 	resetSemgrepCache: vi.fn(),
 }));
 
-// Mock sast-baseline I/O functions so tests don't write real files.
-// Use bun-native mock() + mock.module() so we can hold direct references
-// to the mock functions (vi.mocked() is not available in bun:test).
-// The real helpers (assignOccurrenceIndices, fingerprintFinding, etc.) are
-// re-exported from the actual module so sast-scan.ts logic stays intact.
-const mockCaptureOrMergeBaseline = mock(async () => ({
-	status: 'written' as const,
-	path: '/fake/sast-baseline.json',
-	fingerprint_count: 1,
-}));
-const mockLoadBaseline = mock(
-	(): LoadBaselineResult => ({ status: 'not_found' }),
+// Mock sast-baseline I/O functions so tests control baseline state. The
+// mock.module registration leaks process-wide in Bun's shared test runner
+// (AGENTS.md invariant 7), so the DEFAULT behavior delegates to the real
+// implementation — co-residing siblings observe genuine baseline semantics in
+// their own tempDirs instead of a stale canned default (#2443 review). The
+// real functions are snapshotted BEFORE mock.module registers: bun mutates
+// the cached module namespace in place, so delegating through
+// `actualBaseline.x` at call time would recurse into the mock (RangeError).
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const actualBaseline =
+	require('../../../src/tools/sast-baseline') as typeof import('../../../src/tools/sast-baseline');
+const realCaptureOrMergeBaseline = actualBaseline.captureOrMergeBaseline;
+const realLoadBaseline = actualBaseline.loadBaseline;
+type CaptureArgs = Parameters<typeof realCaptureOrMergeBaseline>;
+const mockCaptureOrMergeBaseline = mock(async (...args: CaptureArgs) =>
+	realCaptureOrMergeBaseline(...args),
+);
+const mockLoadBaseline = mock((directory: string, phase: number) =>
+	realLoadBaseline(directory, phase),
 );
 
 mock.module('../../../src/tools/sast-baseline', () => {
 	// Spread the real module so non-I/O exports (assignOccurrenceIndices,
 	// MAX_BASELINE_FINDINGS, etc.) remain functional.
-	// eslint-disable-next-line @typescript-eslint/no-require-imports
-	const actual =
-		require('../../../src/tools/sast-baseline') as typeof import('../../../src/tools/sast-baseline');
 	return {
-		...actual,
+		...actualBaseline,
 		captureOrMergeBaseline: mockCaptureOrMergeBaseline,
 		loadBaseline: mockLoadBaseline,
 	};
@@ -759,6 +763,28 @@ const key = "sk-1234567890";`,
 	});
 });
 
+// Shared "found baseline" mock payload (#2302: includes reflowKeys).
+function mockFoundBaseline(
+	fingerprints: Set<string>,
+): Extract<LoadBaselineResult, { status: 'found' }> {
+	return {
+		status: 'found',
+		reflowKeys: [],
+		fingerprints,
+		bundle: {
+			schema_version: '1.0.0',
+			phase: 1,
+			created_at: '2026-08-30T00:00:00.000Z',
+			updated_at: '2026-08-30T00:00:00.000Z',
+			engine: 'tier_a',
+			files_indexed: [],
+			fingerprints: [],
+			findings_snapshot: [],
+			truncated: false,
+		},
+	};
+}
+
 describe('Baseline diffing', () => {
 	let tempDir: string;
 
@@ -767,13 +793,9 @@ describe('Baseline diffing', () => {
 		mockSemgrepAvailable = false;
 		vi.clearAllMocks();
 		// Reset defaults after clearAllMocks — use direct mock references
-		// (vi.mocked() is not available in bun:test).
-		mockCaptureOrMergeBaseline.mockResolvedValue({
-			status: 'written',
-			path: '/fake/sast-baseline.json',
-			fingerprint_count: 1,
-		});
-		mockLoadBaseline.mockReturnValue({ status: 'not_found' });
+		// (vi.mocked() is not available in bun:test). Both mocks keep their
+		// real-delegating base implementations, so no explicit reset is
+		// needed; per-test mockReturnValueOnce overrides still apply.
 	});
 
 	it('capture mode returns status:baseline_captured and finding_count', async () => {
@@ -830,21 +852,7 @@ describe('Baseline diffing', () => {
 			},
 		});
 
-		mockLoadBaseline.mockReturnValueOnce({
-			status: 'found',
-			fingerprints: alwaysFoundSet,
-			bundle: {
-				schema_version: '1.0.0',
-				phase: 1,
-				created_at: new Date().toISOString(),
-				updated_at: new Date().toISOString(),
-				engine: 'tier_a',
-				files_indexed: [testFile],
-				fingerprints: [],
-				findings_snapshot: [],
-				truncated: false,
-			},
-		});
+		mockLoadBaseline.mockReturnValueOnce(mockFoundBaseline(alwaysFoundSet));
 
 		const input: SastScanInput = {
 			changed_files: [testFile],
@@ -861,21 +869,8 @@ describe('Baseline diffing', () => {
 
 	it('diff mode: new finding → verdict fail', async () => {
 		// Baseline is empty (no known fingerprints) but file has eval() → new finding
-		mockLoadBaseline.mockReturnValueOnce({
-			status: 'found',
-			fingerprints: new Set<string>(), // empty — nothing pre-existing
-			bundle: {
-				schema_version: '1.0.0',
-				phase: 1,
-				created_at: new Date().toISOString(),
-				updated_at: new Date().toISOString(),
-				engine: 'tier_a',
-				files_indexed: [],
-				fingerprints: [],
-				findings_snapshot: [],
-				truncated: false,
-			},
-		});
+		// Baseline is empty (no known fingerprints)
+		mockLoadBaseline.mockReturnValueOnce(mockFoundBaseline(new Set<string>()));
 
 		const testFile = path.join(tempDir, 'new_vuln.js');
 		fs.writeFileSync(testFile, 'eval("x");');
@@ -894,21 +889,7 @@ describe('Baseline diffing', () => {
 
 	it('zero-coverage-fail is preserved under baseline mode', async () => {
 		// Even with a phase, scanning zero files should still fail
-		mockLoadBaseline.mockReturnValueOnce({
-			status: 'found',
-			fingerprints: new Set<string>(),
-			bundle: {
-				schema_version: '1.0.0',
-				phase: 1,
-				created_at: new Date().toISOString(),
-				updated_at: new Date().toISOString(),
-				engine: 'tier_a',
-				files_indexed: [],
-				fingerprints: [],
-				findings_snapshot: [],
-				truncated: false,
-			},
-		});
+		mockLoadBaseline.mockReturnValueOnce(mockFoundBaseline(new Set<string>()));
 
 		const input: SastScanInput = {
 			changed_files: [],

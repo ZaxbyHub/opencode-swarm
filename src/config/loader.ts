@@ -21,6 +21,22 @@ const PROMPTS_DIR_NAME = 'opencode-swarm';
 export const MAX_CONFIG_FILE_BYTES = 102_400;
 
 /**
+ * Dedup signature for the step-4b unknown-top-level-key warning (issue
+ * #1663): config is loaded dozens of times per session across call sites,
+ * and every load would otherwise buffer a duplicate warning (bounded only by
+ * the deferred-warning cap). Constant-size state — one string slot, overwritten
+ * on each new distinct key set; not session-keyed because the warning is
+ * diagnostic dedup, not session data. Reset via `_internals` in tests.
+ */
+let lastUnknownTopLevelSig: string | null = null;
+
+export const _internals = {
+	resetUnknownTopLevelKeyWarning(): void {
+		lastUnknownTopLevelSig = null;
+	},
+};
+
+/**
  * Get the user's configuration directory (XDG Base Directory spec).
  */
 function getUserConfigDir(): string {
@@ -144,6 +160,26 @@ function migratePresetsConfig(
 			);
 			return migrated;
 		}
+	}
+
+	// Dormant legacy keys: when an `agents` block is already present, the
+	// v6.12 fields lose in every consumer (agents wins). Strip them here with
+	// accurate wording so the loader's unknown-top-level-key warning (added
+	// for issue #1663) does not misreport recognized legacy fields as typos —
+	// this is the ordinary upgrade path where a stale global v6.12 presets
+	// file merges with a project config that already uses `agents`.
+	const dormantLegacyKeys = ['preset', 'presets', 'swarm_mode'].filter(
+		(key) => key in raw,
+	);
+	if (dormantLegacyKeys.length > 0 && raw.agents) {
+		const cleaned = { ...raw };
+		for (const key of dormantLegacyKeys) {
+			delete cleaned[key];
+		}
+		advisoryWarn(
+			`[opencode-swarm] Ignored legacy v6.12 config key(s): ${dormantLegacyKeys.join(', ')}. The agents block takes precedence — consider removing them from your opencode-swarm.json.`,
+		);
+		return cleaned;
 	}
 	return raw;
 }
@@ -587,6 +623,30 @@ function buildConfigWithMeta(
 	const { result: sanitized, strippedKeys: gatesStripped } =
 		sanitizeSectionConfigs(mergedRaw);
 	mergedRaw = sanitized;
+
+	// 4b. Top-level unknown-key visibility (issue #1663): the root config
+	//     object is intentionally not `.strict()` (legacy configs must keep
+	//     loading), so Zod silently strips unknown top-level keys without any
+	//     error for the recovery ladder to report — the step-6 recovery below
+	//     only ever sees Zod-confirmed *nested* unrecognized_keys. Surface the
+	//     top-level strays here — once, regardless of which parse path
+	//     follows — so a typo'd top-level key (e.g. `guardrailz`, `$shcema`)
+	//     is no longer completely silent. Config migrations (presets,
+	//     git-binary provenance) run above this point, so anything still
+	//     unknown here is genuinely absent from PluginConfigSchema.
+	const knownTopLevel = new Set(Object.keys(PluginConfigSchema.shape));
+	const unknownTopLevel = Object.keys(mergedRaw).filter(
+		(key) => !knownTopLevel.has(key),
+	);
+	if (unknownTopLevel.length > 0) {
+		const signature = unknownTopLevel.join('\u0000');
+		if (signature !== lastUnknownTopLevelSig) {
+			lastUnknownTopLevelSig = signature;
+			advisoryWarn(
+				`[opencode-swarm] Ignored ${unknownTopLevel.length} unknown top-level config key(s): ${unknownTopLevel.join(', ')}. These keys have no effect — see docs/configuration.md (Top-level configuration keys) for the valid key list.`,
+			);
+		}
+	}
 
 	// Fail-secure closure: when a config file existed but could not be loaded,
 	// force guardrails ENABLED on any recovered config (issue #1778 H6 F2).

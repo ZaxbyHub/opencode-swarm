@@ -1,0 +1,775 @@
+{
+	"$comment": "Issue #1534 anchor ratchet. Every entry is PRE-EXISTING citation debt in a row owned by another issue, captured so the #1534 gate could be landed without editing rows it does not own. An entry is NOT approved drift: it records a citation whose adjacent identifier does not occur in the cited line range. This baseline may only SHRINK — scripts/check-registry-citations.ts fails when an entry starts passing, which forces its removal. Keyed on (rowId, file, identifier); line numbers are deliberately excluded so line churn cannot invalidate an entry. Regenerate with `bun run scripts/check-registry-citations.ts --write` (review the diff — --write will also happily record NEW drift).",
+	"entries": [
+		{
+			"rowId": "attestations",
+			"file": "src/hooks/guardrails/file-authority.ts",
+			"identifier": "recordAttestation",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"recordAttestation\" exists in src/hooks/guardrails/file-authority.ts but not inside src/hooks/guardrails/file-authority.ts:123 (attestations.writerCitations[0])."
+		},
+		{
+			"rowId": "attestations",
+			"file": "src/hooks/guardrails/file-authority.ts",
+			"identifier": "validateAndRecordAttestation",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"validateAndRecordAttestation\" exists in src/hooks/guardrails/file-authority.ts but not inside :136 (attestations.writerCitations[0])."
+		},
+		{
+			"rowId": "background-delegations-fallback",
+			"file": "src/background/pending-delegations.ts",
+			"identifier": "removeDelegationFallback",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"removeDelegationFallback\" exists in src/background/pending-delegations.ts but not inside :3933 (background-delegations-fallback.writerCitations[0])."
+		},
+		{
+			"rowId": "background-delegations-fallback",
+			"file": "src/background/pending-delegations.ts",
+			"identifier": "scanBackgroundCoderReservationsForAdmission",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"scanBackgroundCoderReservationsForAdmission\" exists in src/background/pending-delegations.ts but not inside src/background/pending-delegations.ts:4107 (background-delegations-fallback.readerCitations[1])."
+		},
+		{
+			"rowId": "background-delegations-fallback",
+			"file": "src/background/pending-delegations.ts",
+			"identifier": "writeBackgroundCoderReservations",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writeBackgroundCoderReservations\" exists in src/background/pending-delegations.ts but not inside src/background/pending-delegations.ts:4163 (background-delegations-fallback.writerCitations[1])."
+		},
+		{
+			"rowId": "background-delegations-fallback",
+			"file": "src/background/pending-delegations.ts",
+			"identifier": "writeDelegationFallback",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writeDelegationFallback\" exists in src/background/pending-delegations.ts but not inside src/background/pending-delegations.ts:3882 (background-delegations-fallback.writerCitations[0])."
+		},
+		{
+			"rowId": "capsules",
+			"file": "src/context-map/capsule-persistence.ts",
+			"identifier": "loadCapsule",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"loadCapsule\" exists in src/context-map/capsule-persistence.ts but not inside src/context-map/capsule-persistence.ts:165 (capsules.readerCitations[0])."
+		},
+		{
+			"rowId": "capsules",
+			"file": "src/context-map/capsule-persistence.ts",
+			"identifier": "saveCapsule",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"saveCapsule\" exists in src/context-map/capsule-persistence.ts but not inside src/context-map/capsule-persistence.ts:114 (capsules.writerCitations[0])."
+		},
+		{
+			"rowId": "close-archive-bundles",
+			"file": "src/commands/close.ts",
+			"identifier": "runArchiveStage",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"runArchiveStage\" exists in src/commands/close.ts but not inside src/commands/close.ts:1256 (close-archive-bundles.writerCitations[0])."
+		},
+		{
+			"rowId": "close-session-outputs",
+			"file": "src/hooks/agent-activity.ts",
+			"identifier": "doFlush",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"doFlush\" exists in src/hooks/agent-activity.ts but not inside agent-activity.ts:147 (close-session-outputs.writerCitations[3])."
+		},
+		{
+			"rowId": "close-session-outputs",
+			"file": "src/services/session-reflection.ts",
+			"identifier": "writeSessionReflection",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writeSessionReflection\" exists in src/services/session-reflection.ts but not inside session-reflection.ts:1299 (close-session-outputs.writerCitations[1])."
+		},
+		{
+			"rowId": "config-doctor-artifacts",
+			"file": "src/services/config-doctor.ts",
+			"identifier": "readDoctorArtifact",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"readDoctorArtifact\" exists in src/services/config-doctor.ts but not inside src/services/config-doctor.ts:2194 (config-doctor-artifacts.readerCitations[0])."
+		},
+		{
+			"rowId": "config-doctor-artifacts",
+			"file": "src/services/config-doctor.ts",
+			"identifier": "writeBackupArtifact",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writeBackupArtifact\" exists in src/services/config-doctor.ts but not inside :737 (config-doctor-artifacts.writerCitations[0])."
+		},
+		{
+			"rowId": "config-doctor-artifacts",
+			"file": "src/services/config-doctor.ts",
+			"identifier": "writeDoctorArtifact",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writeDoctorArtifact\" exists in src/services/config-doctor.ts but not inside src/services/config-doctor.ts:2253 (config-doctor-artifacts.writerCitations[0])."
+		},
+		{
+			"rowId": "context-map",
+			"file": "src/context-map/persistence.ts",
+			"identifier": "loadContextMap",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"loadContextMap\" exists in src/context-map/persistence.ts but not inside src/context-map/persistence.ts:92 (context-map.readerCitations[0])."
+		},
+		{
+			"rowId": "context-map",
+			"file": "src/context-map/persistence.ts",
+			"identifier": "saveContextMap",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"saveContextMap\" exists in src/context-map/persistence.ts but not inside src/context-map/persistence.ts:132 (context-map.writerCitations[0])."
+		},
+		{
+			"rowId": "context-snapshot",
+			"file": "src/services/compaction-service.ts",
+			"identifier": "appendSnapshot",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"appendSnapshot\" exists in src/services/compaction-service.ts but not inside src/services/compaction-service.ts:86 (context-snapshot.writerCitations[0])."
+		},
+		{
+			"rowId": "council-evidence-files",
+			"file": "src/tools/submit-phase-council-verdicts.ts",
+			"identifier": "writePhaseCouncilEvidence",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writePhaseCouncilEvidence\" exists in src/tools/submit-phase-council-verdicts.ts but not inside src/tools/submit-phase-council-verdicts.ts:407 (council-evidence-files.writerCitations[0])."
+		},
+		{
+			"rowId": "council-evidence-files",
+			"file": "src/tools/write-final-council-evidence.ts",
+			"identifier": "writeFinalCouncilEvidence",
+			"kind": "absent-from-file",
+			"note": "Pre-existing debt, not approved drift: \"writeFinalCouncilEvidence\" does not occur anywhere in src/tools/write-final-council-evidence.ts (cited as src/tools/write-final-council-evidence.ts:292 in council-evidence-files.writerCitations[1])."
+		},
+		{
+			"rowId": "council-round-state-attempts",
+			"file": "src/council/council-round-state.ts",
+			"identifier": "loadState",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"loadState\" exists in src/council/council-round-state.ts but not inside :761 (council-round-state-attempts.readerCitations[0])."
+		},
+		{
+			"rowId": "council-round-state-attempts",
+			"file": "src/council/council-round-state.ts",
+			"identifier": "readAuditTail",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"readAuditTail\" exists in src/council/council-round-state.ts but not inside src/council/council-round-state.ts:568 (council-round-state-attempts.readerCitations[0])."
+		},
+		{
+			"rowId": "council-round-state-attempts",
+			"file": "src/council/council-round-state.ts",
+			"identifier": "writeState",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writeState\" exists in src/council/council-round-state.ts but not inside src/council/council-round-state.ts:726 (council-round-state-attempts.writerCitations[0])."
+		},
+		{
+			"rowId": "curator-summary",
+			"file": "src/hooks/curator.ts",
+			"identifier": "readCuratorSummary",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"readCuratorSummary\" exists in src/hooks/curator.ts but not inside src/hooks/curator.ts:907 (curator-summary.readerCitations[0])."
+		},
+		{
+			"rowId": "curator-summary",
+			"file": "src/hooks/curator.ts",
+			"identifier": "writeCuratorSummaryState",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writeCuratorSummaryState\" exists in src/hooks/curator.ts but not inside src/hooks/curator.ts:858 (curator-summary.writerCitations[0])."
+		},
+		{
+			"rowId": "epic-turbo-state",
+			"file": "src/commands/coupling.ts",
+			"identifier": "persistReportJson",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"persistReportJson\" exists in src/commands/coupling.ts but not inside src/commands/coupling.ts:153 (epic-turbo-state.writerCitations[4])."
+		},
+		{
+			"rowId": "evidence-bundles",
+			"file": "src/summaries/manager.ts",
+			"identifier": "storeSummary",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"storeSummary\" exists in src/summaries/manager.ts but not inside src/summaries/manager.ts:132 (evidence-bundles.writerCitations[2])."
+		},
+		{
+			"rowId": "full-auto-state",
+			"file": "src/full-auto/state.ts",
+			"identifier": "loadFullAutoRunState",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"loadFullAutoRunState\" exists in src/full-auto/state.ts but not inside :502 (full-auto-state.readerCitations[0])."
+		},
+		{
+			"rowId": "full-auto-state",
+			"file": "src/full-auto/state.ts",
+			"identifier": "readPersisted",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"readPersisted\" exists in src/full-auto/state.ts but not inside src/full-auto/state.ts:319 (full-auto-state.readerCitations[0])."
+		},
+		{
+			"rowId": "full-auto-state",
+			"file": "src/full-auto/state.ts",
+			"identifier": "writePersisted",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writePersisted\" exists in src/full-auto/state.ts but not inside src/full-auto/state.ts:437 (full-auto-state.writerCitations[0])."
+		},
+		{
+			"rowId": "insight-candidates",
+			"file": "src/hooks/knowledge-curator.ts",
+			"identifier": "consumeInsightCandidates",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"consumeInsightCandidates\" exists in src/hooks/knowledge-curator.ts but not inside src/hooks/knowledge-curator.ts:925 (insight-candidates.readerCitations[0])."
+		},
+		{
+			"rowId": "insight-candidates",
+			"file": "src/hooks/micro-reflector.ts",
+			"identifier": "appendInsightCandidates",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"appendInsightCandidates\" exists in src/hooks/micro-reflector.ts but not inside src/hooks/micro-reflector.ts:301 (insight-candidates.writerCitations[0])."
+		},
+		{
+			"rowId": "knowledge-application-legacy",
+			"file": "src/hooks/knowledge-application-gate.ts",
+			"identifier": "knowledgeApplicationTransformScan",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"knowledgeApplicationTransformScan\" exists in src/hooks/knowledge-application-gate.ts but not inside src/hooks/knowledge-application-gate.ts:418 (knowledge-application-legacy.writerCitations[1])."
+		},
+		{
+			"rowId": "knowledge-receipts-v2",
+			"file": "src/hooks/knowledge-receipt-ledger-storage.ts",
+			"identifier": "appendFsynced",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"appendFsynced\" exists in src/hooks/knowledge-receipt-ledger-storage.ts but not inside src/hooks/knowledge-receipt-ledger-storage.ts:483 (knowledge-receipts-v2.writerCitations[0])."
+		},
+		{
+			"rowId": "knowledge-receipts-v2",
+			"file": "src/hooks/knowledge-receipt-ledger-storage.ts",
+			"identifier": "atomicWriteFsynced",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"atomicWriteFsynced\" exists in src/hooks/knowledge-receipt-ledger-storage.ts but not inside :540 (knowledge-receipts-v2.writerCitations[0])."
+		},
+		{
+			"rowId": "knowledge-receipts-v2",
+			"file": "src/hooks/knowledge-receipt-ledger.ts",
+			"identifier": "commitDisplayedMembership",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"commitDisplayedMembership\" exists in src/hooks/knowledge-receipt-ledger.ts but not inside src/hooks/knowledge-receipt-ledger.ts:1886 (knowledge-receipts-v2.writerCitations[1])."
+		},
+		{
+			"rowId": "knowledge-receipts-v2",
+			"file": "src/hooks/knowledge-receipt-ledger.ts",
+			"identifier": "commitPhaseClosed",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"commitPhaseClosed\" exists in src/hooks/knowledge-receipt-ledger.ts but not inside :2845 (knowledge-receipts-v2.writerCitations[1])."
+		},
+		{
+			"rowId": "knowledge-receipts-v2",
+			"file": "src/hooks/knowledge-receipt-ledger.ts",
+			"identifier": "ensureLegacyCutover",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"ensureLegacyCutover\" exists in src/hooks/knowledge-receipt-ledger.ts but not inside :2993 (knowledge-receipts-v2.writerCitations[1])."
+		},
+		{
+			"rowId": "knowledge-receipts-v2",
+			"file": "src/hooks/knowledge-receipt-ledger.ts",
+			"identifier": "queryHistoricalOutcomes",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"queryHistoricalOutcomes\" exists in src/hooks/knowledge-receipt-ledger.ts but not inside :2709 (knowledge-receipts-v2.readerCitations[0])."
+		},
+		{
+			"rowId": "knowledge-receipts-v2",
+			"file": "src/hooks/knowledge-receipt-ledger.ts",
+			"identifier": "queryLiveMemberships",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"queryLiveMemberships\" exists in src/hooks/knowledge-receipt-ledger.ts but not inside src/hooks/knowledge-receipt-ledger.ts:2673 (knowledge-receipts-v2.readerCitations[0])."
+		},
+		{
+			"rowId": "knowledge-receipts-v2",
+			"file": "src/hooks/knowledge-receipt-ledger.ts",
+			"identifier": "validateAndCommitTerminalBatch",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"validateAndCommitTerminalBatch\" exists in src/hooks/knowledge-receipt-ledger.ts but not inside :2098 (knowledge-receipts-v2.writerCitations[1])."
+		},
+		{
+			"rowId": "memory-sqlite",
+			"file": "src/memory/sqlite-provider.ts",
+			"identifier": "appendOutcome",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"appendOutcome\" exists in src/memory/sqlite-provider.ts but not inside :696 (memory-sqlite.writerCitations[0])."
+		},
+		{
+			"rowId": "memory-sqlite",
+			"file": "src/memory/sqlite-provider.ts",
+			"identifier": "appendRewardEvent",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"appendRewardEvent\" exists in src/memory/sqlite-provider.ts but not inside :1221 (memory-sqlite.writerCitations[0])."
+		},
+		{
+			"rowId": "memory-sqlite",
+			"file": "src/memory/sqlite-provider.ts",
+			"identifier": "recordRecallUsage",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"recordRecallUsage\" exists in src/memory/sqlite-provider.ts but not inside :1106 (memory-sqlite.writerCitations[0])."
+		},
+		{
+			"rowId": "plan-checkpoints-exports",
+			"file": "src/tools/checkpoint.ts",
+			"identifier": "appendRetentionEvent",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"appendRetentionEvent\" exists in src/tools/checkpoint.ts but not inside :206 (plan-checkpoints-exports.writerCitations[1])."
+		},
+		{
+			"rowId": "plan-checkpoints-exports",
+			"file": "src/tools/checkpoint.ts",
+			"identifier": "readCheckpointLog",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"readCheckpointLog\" exists in src/tools/checkpoint.ts but not inside src/tools/checkpoint.ts:175 (plan-checkpoints-exports.readerCitations[0])."
+		},
+		{
+			"rowId": "plan-checkpoints-exports",
+			"file": "src/tools/checkpoint.ts",
+			"identifier": "writeCheckpointLog",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writeCheckpointLog\" exists in src/tools/checkpoint.ts but not inside src/tools/checkpoint.ts:195 (plan-checkpoints-exports.writerCitations[1])."
+		},
+		{
+			"rowId": "plan-projections",
+			"file": "src/plan/manager.ts",
+			"identifier": "closePlanTerminalState",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"closePlanTerminalState\" exists in src/plan/manager.ts but not inside :2074 (plan-projections.writerCitations[0])."
+		},
+		{
+			"rowId": "plan-projections",
+			"file": "src/plan/manager.ts",
+			"identifier": "loadPlan",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"loadPlan\" exists in src/plan/manager.ts but not inside src/plan/manager.ts:656 (plan-projections.readerCitations[0])."
+		},
+		{
+			"rowId": "plan-projections",
+			"file": "src/plan/manager.ts",
+			"identifier": "loadPlanJsonOnly",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"loadPlanJsonOnly\" exists in src/plan/manager.ts but not inside :366 (plan-projections.readerCitations[0])."
+		},
+		{
+			"rowId": "plan-projections",
+			"file": "src/plan/manager.ts",
+			"identifier": "rebuildPlan",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"rebuildPlan\" exists in src/plan/manager.ts but not inside :1931 (plan-projections.writerCitations[0])."
+		},
+		{
+			"rowId": "plan-projections",
+			"file": "src/plan/manager.ts",
+			"identifier": "savePlan",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"savePlan\" exists in src/plan/manager.ts but not inside src/plan/manager.ts:1210 (plan-projections.writerCitations[0])."
+		},
+		{
+			"rowId": "pr-review-run-artifacts",
+			"file": "src/tools/write-pr-review-artifact.ts",
+			"identifier": "readFindings",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"readFindings\" exists in src/tools/write-pr-review-artifact.ts but not inside src/tools/write-pr-review-artifact.ts:86-101 (pr-review-run-artifacts.readerCitations[0])."
+		},
+		{
+			"rowId": "recommendation-ledger",
+			"file": "src/services/recommendation-ledger.ts",
+			"identifier": "checkRecommendations",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"checkRecommendations\" exists in src/services/recommendation-ledger.ts but not inside src/services/recommendation-ledger.ts:523 (recommendation-ledger.readerCitations[0])."
+		},
+		{
+			"rowId": "recommendation-ledger",
+			"file": "src/services/recommendation-ledger.ts",
+			"identifier": "readLedgerStrict",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"readLedgerStrict\" exists in src/services/recommendation-ledger.ts but not inside :383 (recommendation-ledger.readerCitations[0])."
+		},
+		{
+			"rowId": "recommendation-ledger",
+			"file": "src/services/recommendation-ledger.ts",
+			"identifier": "recordEmittedRecommendations",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"recordEmittedRecommendations\" exists in src/services/recommendation-ledger.ts but not inside src/services/recommendation-ledger.ts:623 (recommendation-ledger.writerCitations[0])."
+		},
+		{
+			"rowId": "repo-graph",
+			"file": "src/tools/repo-graph/storage.ts",
+			"identifier": "loadGraph",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"loadGraph\" exists in src/tools/repo-graph/storage.ts but not inside src/tools/repo-graph/storage.ts:204 (repo-graph.readerCitations[0])."
+		},
+		{
+			"rowId": "repo-graph",
+			"file": "src/tools/repo-graph/storage.ts",
+			"identifier": "loadOrCreateGraph",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"loadOrCreateGraph\" exists in src/tools/repo-graph/storage.ts but not inside :506 (repo-graph.writerCitations[0])."
+		},
+		{
+			"rowId": "repo-graph",
+			"file": "src/tools/repo-graph/storage.ts",
+			"identifier": "saveGraph",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"saveGraph\" exists in src/tools/repo-graph/storage.ts but not inside src/tools/repo-graph/storage.ts:339 (repo-graph.writerCitations[0])."
+		},
+		{
+			"rowId": "scopes-family",
+			"file": "src/scope/scope-persistence.ts",
+			"identifier": "readScopeFromDisk",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"readScopeFromDisk\" exists in src/scope/scope-persistence.ts but not inside src/scope/scope-persistence.ts:2511 (scopes-family.readerCitations[0])."
+		},
+		{
+			"rowId": "session-state-snapshot",
+			"file": "src/services/context-budget-service.ts",
+			"identifier": "writeBudgetState",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writeBudgetState\" exists in src/services/context-budget-service.ts but not inside src/services/context-budget-service.ts:196 (session-state-snapshot.writerCitations[2])."
+		},
+		{
+			"rowId": "session-state-snapshot",
+			"file": "src/session/snapshot-reader.ts",
+			"identifier": "readSnapshot",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"readSnapshot\" exists in src/session/snapshot-reader.ts but not inside src/session/snapshot-reader.ts:320 (session-state-snapshot.readerCitations[0])."
+		},
+		{
+			"rowId": "skill-changelogs",
+			"file": "src/services/skill-changelog.ts",
+			"identifier": "appendSkillChangelog",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"appendSkillChangelog\" exists in src/services/skill-changelog.ts but not inside src/services/skill-changelog.ts:36 (skill-changelogs.writerCitations[0])."
+		},
+		{
+			"rowId": "skill-changelogs",
+			"file": "src/services/skill-changelog.ts",
+			"identifier": "readSkillChangelog",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"readSkillChangelog\" exists in src/services/skill-changelog.ts but not inside src/services/skill-changelog.ts:63 (skill-changelogs.readerCitations[0])."
+		},
+		{
+			"rowId": "skill-improver-proposals",
+			"file": "src/services/skill-consolidation.ts",
+			"identifier": "writeState",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writeState\" exists in src/services/skill-consolidation.ts but not inside src/services/skill-consolidation.ts:88 (skill-improver-proposals.writerCitations[2])."
+		},
+		{
+			"rowId": "skill-improver-proposals",
+			"file": "src/services/skill-improver-quota.ts",
+			"identifier": "writeState",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writeState\" exists in src/services/skill-improver-quota.ts but not inside src/services/skill-improver-quota.ts:115 (skill-improver-proposals.writerCitations[1])."
+		},
+		{
+			"rowId": "skill-improver-proposals",
+			"file": "src/services/skill-improver.ts",
+			"identifier": "runSkillImprover",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"runSkillImprover\" exists in src/services/skill-improver.ts but not inside src/services/skill-improver.ts:725 (skill-improver-proposals.writerCitations[0])."
+		},
+		{
+			"rowId": "skill-optimizer-evolution",
+			"file": "src/services/skill-optimizer/controller.ts",
+			"identifier": "writeConvergenceState",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writeConvergenceState\" exists in src/services/skill-optimizer/controller.ts but not inside src/services/skill-optimizer/controller.ts:677 (skill-optimizer-evolution.writerCitations[1])."
+		},
+		{
+			"rowId": "skill-optimizer-evolution",
+			"file": "src/services/skill-optimizer/store.ts",
+			"identifier": "appendEvent",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"appendEvent\" exists in src/services/skill-optimizer/store.ts but not inside src/services/skill-optimizer/store.ts:349 (skill-optimizer-evolution.writerCitations[0])."
+		},
+		{
+			"rowId": "skill-optimizer-evolution",
+			"file": "src/services/skill-optimizer/store.ts",
+			"identifier": "quarantineSuffix",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"quarantineSuffix\" exists in src/services/skill-optimizer/store.ts but not inside :475 (skill-optimizer-evolution.writerCitations[0])."
+		},
+		{
+			"rowId": "skill-optimizer-evolution",
+			"file": "src/services/skill-optimizer/store.ts",
+			"identifier": "replayCandidate",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"replayCandidate\" exists in src/services/skill-optimizer/store.ts but not inside store.ts:411 (skill-optimizer-evolution.readerCitations[0])."
+		},
+		{
+			"rowId": "skill-optimizer-evolution",
+			"file": "src/services/skill-optimizer/store.ts",
+			"identifier": "writeArtifact",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writeArtifact\" exists in src/services/skill-optimizer/store.ts but not inside :523 (skill-optimizer-evolution.writerCitations[0])."
+		},
+		{
+			"rowId": "skill-optimizer-evolution",
+			"file": "src/services/skill-optimizer/store.ts",
+			"identifier": "writeStateProjection",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writeStateProjection\" exists in src/services/skill-optimizer/store.ts but not inside :504 (skill-optimizer-evolution.writerCitations[0])."
+		},
+		{
+			"rowId": "skills-proposals",
+			"file": "src/services/skill-evaluator.ts",
+			"identifier": "loadEvalSet",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"loadEvalSet\" exists in src/services/skill-evaluator.ts but not inside skill-evaluator.ts:190-303 (skills-proposals.readerCitations[0])."
+		},
+		{
+			"rowId": "skills-proposals",
+			"file": "src/services/skill-generator.ts",
+			"identifier": "activateProposal",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"activateProposal\" exists in src/services/skill-generator.ts but not inside skill-generator.ts:1213 (skills-proposals.readerCitations[0])."
+		},
+		{
+			"rowId": "skills-proposals",
+			"file": "src/services/skill-generator.ts",
+			"identifier": "autoApplyProposals",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"autoApplyProposals\" exists in src/services/skill-generator.ts but not inside :1566 (skills-proposals.writerCitations[0])."
+		},
+		{
+			"rowId": "skills-proposals",
+			"file": "src/services/skill-generator.ts",
+			"identifier": "generateSkills",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"generateSkills\" exists in src/services/skill-generator.ts but not inside src/services/skill-generator.ts:834 (skills-proposals.writerCitations[0])."
+		},
+		{
+			"rowId": "skills-proposals",
+			"file": "src/services/skill-generator.ts",
+			"identifier": "writeEvalStub",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writeEvalStub\" exists in src/services/skill-generator.ts but not inside :162 (skills-proposals.writerCitations[0])."
+		},
+		{
+			"rowId": "skills-rejected-edits",
+			"file": "src/services/skill-evaluator.ts",
+			"identifier": "appendRejectedSkillEdit",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"appendRejectedSkillEdit\" exists in src/services/skill-evaluator.ts but not inside src/services/skill-evaluator.ts:537 (skills-rejected-edits.writerCitations[0])."
+		},
+		{
+			"rowId": "skills-rejected-edits",
+			"file": "src/services/skill-evaluator.ts",
+			"identifier": "isRejectedSkillContent",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"isRejectedSkillContent\" exists in src/services/skill-evaluator.ts but not inside src/services/skill-evaluator.ts:549 (skills-rejected-edits.readerCitations[0])."
+		},
+		{
+			"rowId": "spec-drift-artifacts",
+			"file": "src/services/spec-drift-recovery.ts",
+			"identifier": "appendEvent",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"appendEvent\" exists in src/services/spec-drift-recovery.ts but not inside :278 (spec-drift-artifacts.writerCitations[0])."
+		},
+		{
+			"rowId": "spec-drift-artifacts",
+			"file": "src/services/spec-drift-recovery.ts",
+			"identifier": "ensureSnapshotEvent",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"ensureSnapshotEvent\" exists in src/services/spec-drift-recovery.ts but not inside :239 (spec-drift-artifacts.writerCitations[0])."
+		},
+		{
+			"rowId": "spec-drift-artifacts",
+			"file": "src/services/spec-drift-recovery.ts",
+			"identifier": "parseMarker",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"parseMarker\" exists in src/services/spec-drift-recovery.ts but not inside spec-drift-recovery.ts:115 (spec-drift-artifacts.readerCitations[0])."
+		},
+		{
+			"rowId": "spec-drift-artifacts",
+			"file": "src/services/spec-drift-recovery.ts",
+			"identifier": "parseWal",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"parseWal\" exists in src/services/spec-drift-recovery.ts but not inside :152 (spec-drift-artifacts.readerCitations[0])."
+		},
+		{
+			"rowId": "spec-drift-artifacts",
+			"file": "src/services/spec-drift-recovery.ts",
+			"identifier": "verifyEventPresence",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"verifyEventPresence\" exists in src/services/spec-drift-recovery.ts but not inside :303 (spec-drift-artifacts.readerCitations[0])."
+		},
+		{
+			"rowId": "spec-drift-artifacts",
+			"file": "src/services/spec-drift-recovery.ts",
+			"identifier": "writeWal",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writeWal\" exists in src/services/spec-drift-recovery.ts but not inside src/services/spec-drift-recovery.ts:207 (spec-drift-artifacts.writerCitations[0])."
+		},
+		{
+			"rowId": "status-artifacts",
+			"file": "src/background/status-artifact.ts",
+			"identifier": "AutomationStatusArtifact",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"AutomationStatusArtifact\" exists in src/background/status-artifact.ts but not inside src/background/status-artifact.ts:178 (status-artifacts.writerCitations[0])."
+		},
+		{
+			"rowId": "summaries",
+			"file": "src/summaries/manager.ts",
+			"identifier": "storeSummary",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"storeSummary\" exists in src/summaries/manager.ts but not inside src/summaries/manager.ts:132 (summaries.writerCitations[1])."
+		},
+		{
+			"rowId": "summaries",
+			"file": "src/summaries/store.ts",
+			"identifier": "listSummaries",
+			"kind": "absent-from-file",
+			"note": "Pre-existing debt, not approved drift: \"listSummaries\" does not occur anywhere in src/summaries/store.ts (cited as :186 in summaries.readerCitations[0])."
+		},
+		{
+			"rowId": "summaries",
+			"file": "src/summaries/store.ts",
+			"identifier": "loadFullOutput",
+			"kind": "absent-from-file",
+			"note": "Pre-existing debt, not approved drift: \"loadFullOutput\" does not occur anywhere in src/summaries/store.ts (cited as src/summaries/store.ts:148 in summaries.readerCitations[0])."
+		},
+		{
+			"rowId": "summaries",
+			"file": "src/summaries/store.ts",
+			"identifier": "storeSummary",
+			"kind": "absent-from-file",
+			"note": "Pre-existing debt, not approved drift: \"storeSummary\" does not occur anywhere in src/summaries/store.ts (cited as src/summaries/store.ts:70 in summaries.writerCitations[0])."
+		},
+		{
+			"rowId": "task-evidence-trajectory",
+			"file": "src/consensus/corpus.ts",
+			"identifier": "loadTaskTrajectories",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"loadTaskTrajectories\" exists in src/consensus/corpus.ts but not inside src/consensus/corpus.ts:593 (task-evidence-trajectory.readerCitations[1])."
+		},
+		{
+			"rowId": "task-evidence-trajectory",
+			"file": "src/hooks/micro-reflector.ts",
+			"identifier": "readTaskTrajectory",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"readTaskTrajectory\" exists in src/hooks/micro-reflector.ts but not inside src/hooks/micro-reflector.ts:262 (task-evidence-trajectory.readerCitations[0])."
+		},
+		{
+			"rowId": "task-evidence-trajectory",
+			"file": "src/hooks/trajectory-logger.ts",
+			"identifier": "toolAfter",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"toolAfter\" exists in src/hooks/trajectory-logger.ts but not inside src/hooks/trajectory-logger.ts:469 (task-evidence-trajectory.writerCitations[0])."
+		},
+		{
+			"rowId": "task-gate-evidence",
+			"file": "src/evidence/task-gate-requirements.ts",
+			"identifier": "appendTaskGateRequirement",
+			"kind": "absent-from-file",
+			"note": "Pre-existing debt, not approved drift: \"appendTaskGateRequirement\" does not occur anywhere in src/evidence/task-gate-requirements.ts (cited as src/evidence/task-gate-requirements.ts:315 in task-gate-evidence.writerCitations[0])."
+		},
+		{
+			"rowId": "task-workflow-evidence",
+			"file": "src/commands/close.ts",
+			"identifier": "ACTIVE_STATE_DIRS_TO_CLEAN",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"ACTIVE_STATE_DIRS_TO_CLEAN\" exists in src/commands/close.ts but not inside src/commands/close.ts:574 (task-workflow-evidence.writeLimits.citation)."
+		},
+		{
+			"rowId": "task-workflow-evidence",
+			"file": "src/council/council-evidence-writer.ts",
+			"identifier": "hasCouncilEvidenceAttempt",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"hasCouncilEvidenceAttempt\" exists in src/council/council-evidence-writer.ts but not inside src/council/council-evidence-writer.ts:207 (task-workflow-evidence.readerCitations[1])."
+		},
+		{
+			"rowId": "task-workflow-evidence",
+			"file": "src/council/council-evidence-writer.ts",
+			"identifier": "writeCouncilEvidence",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writeCouncilEvidence\" exists in src/council/council-evidence-writer.ts but not inside src/council/council-evidence-writer.ts:96 (task-workflow-evidence.writerCitations[1])."
+		},
+		{
+			"rowId": "task-workflow-evidence",
+			"file": "src/gate-evidence.ts",
+			"identifier": "readTaskEvidence",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"readTaskEvidence\" exists in src/gate-evidence.ts but not inside src/gate-evidence.ts:1054 (task-workflow-evidence.readerCitations[0])."
+		},
+		{
+			"rowId": "task-workflow-evidence",
+			"file": "src/gate-evidence.ts",
+			"identifier": "readTaskEvidenceRaw",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"readTaskEvidenceRaw\" exists in src/gate-evidence.ts but not inside :1071 (task-workflow-evidence.readerCitations[0])."
+		},
+		{
+			"rowId": "task-workflow-evidence",
+			"file": "src/gate-evidence.ts",
+			"identifier": "recordAgentDispatch",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"recordAgentDispatch\" exists in src/gate-evidence.ts but not inside :1010 (task-workflow-evidence.writerCitations[0])."
+		},
+		{
+			"rowId": "task-workflow-evidence",
+			"file": "src/gate-evidence.ts",
+			"identifier": "recordGateEvidence",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"recordGateEvidence\" exists in src/gate-evidence.ts but not inside :956 (task-workflow-evidence.writerCitations[0])."
+		},
+		{
+			"rowId": "task-workflow-evidence",
+			"file": "src/gate-evidence.ts",
+			"identifier": "transitionTaskWorkflowEvidence",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"transitionTaskWorkflowEvidence\" exists in src/gate-evidence.ts but not inside src/gate-evidence.ts:879 (task-workflow-evidence.writerCitations[0])."
+		},
+		{
+			"rowId": "telemetry-jsonl",
+			"file": "src/services/cost-accounting.ts",
+			"identifier": "readTelemetryEvents",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"readTelemetryEvents\" exists in src/services/cost-accounting.ts but not inside src/services/cost-accounting.ts:133 (telemetry-jsonl.readerCitations[0])."
+		},
+		{
+			"rowId": "telemetry-jsonl",
+			"file": "src/telemetry.ts",
+			"identifier": "initTelemetry",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"initTelemetry\" exists in src/telemetry.ts but not inside src/telemetry.ts:250 (telemetry-jsonl.writerCitations[1])."
+		},
+		{
+			"rowId": "telemetry-jsonl",
+			"file": "src/telemetry.ts",
+			"identifier": "rotateTelemetryIfNeeded",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"rotateTelemetryIfNeeded\" exists in src/telemetry.ts but not inside src/telemetry.ts:366 (telemetry-jsonl.writerCitations[2])."
+		},
+		{
+			"rowId": "version-check-cache",
+			"file": "src/services/diagnose-service.ts",
+			"identifier": "Version",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"Version\" exists in src/services/diagnose-service.ts but not inside diagnose-service.ts:939 (version-check-cache.readerCitations[0])."
+		},
+		{
+			"rowId": "workflow-wal-dirs",
+			"file": "src/workflow/coder-settlement.ts",
+			"identifier": "readWal",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"readWal\" exists in src/workflow/coder-settlement.ts but not inside coder-settlement.ts:72 (workflow-wal-dirs.readerCitations[0])."
+		},
+		{
+			"rowId": "workflow-wal-dirs",
+			"file": "src/workflow/coder-settlement.ts",
+			"identifier": "writeWal",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writeWal\" exists in src/workflow/coder-settlement.ts but not inside src/workflow/coder-settlement.ts:102 (workflow-wal-dirs.writerCitations[0])."
+		},
+		{
+			"rowId": "workflow-wal-dirs",
+			"file": "src/workflow/task-repair.ts",
+			"identifier": "readWal",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"readWal\" exists in src/workflow/task-repair.ts but not inside task-repair.ts:155 (workflow-wal-dirs.readerCitations[0])."
+		},
+		{
+			"rowId": "workflow-wal-dirs",
+			"file": "src/workflow/task-repair.ts",
+			"identifier": "writeWal",
+			"kind": "out-of-range",
+			"note": "Pre-existing debt, not approved drift: \"writeWal\" exists in src/workflow/task-repair.ts but not inside src/workflow/task-repair.ts:168 (workflow-wal-dirs.writerCitations[1])."
+		}
+	]
+}

@@ -48,6 +48,15 @@ Tasks: 3/5 complete
 Agents: 11 registered
 ```
 
+When `hooks.background_subagents` is enabled (default `false`), status additionally renders a
+**Background Work** section: delegation counts by status (pending, running,
+completed (unconsumed), consumed, stale, cancelled, error, ingestion_error), active coder
+reservations with their generation and lease state (active / expired / protected-legacy), the
+durable maintenance summary (last ok, last failure, last lock contention), and a
+`Source: validated recovery (bounded scan)` provenance label. Corrupt or over-bound stores
+render a `⚠ State uncertain: …` line instead of partially-trusted counts. Disabled
+configurations see no section and schedule no maintenance.
+
 ### `/swarm learning [--json] [--phase N] [--timeout-ms N]`
 
 Show aggregate learning metrics computed from `.swarm/knowledge-events.jsonl` and the knowledge store:
@@ -108,8 +117,6 @@ Returns: decision (`allow`/`block`), firing rule, resolved scope, and detected w
 /swarm guardrail explain --write src/hooks/guardrails.ts --write .swarm/plan.json
 ```
 
-Returns per-target: decision, firing rule, resolved scope, and zone classification.
-
 **Flags:**
 
 | Flag | Effect |
@@ -121,9 +128,26 @@ Returns per-target: decision, firing rule, resolved scope, and zone classificati
 
 Output is fully advisory and redacted. No side effects, no writes, no process execution.
 
+### `/swarm approve-write`
+
+Issues and persists a short-lived, one-shot human approval bound to an exact
+target session, action, candidate ID, content hash, path digest, and generation.
+The command is used when `skill_improver.require_user_approval` is enabled;
+approval text in a prompt or critic response is not authority.
+
+```text
+/swarm approve-write <target-session-id> <action> <candidate-id> <candidate-content-hash> [--generation <n>] [--allowed-path-digest <sha256>]
+```
+
+On success, returns the approval ID, target session, action, candidate, expiry,
+and exact replay command. Issuing the fact is a state-changing operation; the
+fact can be consumed once only by the matching write and cannot be reused after
+expiry or for a different session, action, candidate, content hash, path digest,
+or generation.
+
 ### `/swarm guardrail-log [--blocks-only]`
 
-Read and print the unified guardrail decision log (`.swarm/session/shell-audit.jsonl`) most-recent-first. Agent-callable via `swarm_command`.
+Read and print the current unified guardrail decision window (`.swarm/session/shell-audit.jsonl`) most-recent-first. Agent-callable via `swarm_command`.
 
 ```text
 /swarm guardrail-log
@@ -136,6 +160,7 @@ Read and print the unified guardrail decision log (`.swarm/session/shell-audit.j
 
 - Entries sorted most-recent-first
 - Commands and paths are redacted
+- The on-disk window is bounded; older legacy allowed-shell rows are age-folded into the manifest aggregate rather than retained inline forever
 - Missing log file → friendly message: "No guardrail decisions recorded yet."
 - On-demand only — no hot-path cost; reads the log only when invoked
 
@@ -532,7 +557,7 @@ Show the current resolved plugin configuration (merged global + project + CLI ov
 
 Run config validation and integrity checks. Alias: `/swarm config-doctor` (hyphenated form for TUI shortcut compatibility).
 
-The doctor validates all 62+ top-level schema keys with type checks (string, boolean, number, object). Unknown keys produce warnings with Levenshtein-based typo suggestions. Swarms configuration is hardened: empty `swarms` emits an INFO finding, and path-traversal characters in swarm IDs (`..`, `/`, `\`, `\0`) emit HIGH/ERROR findings. Deprecated config fields (`skill_improver.model`, `skill_improver.fallback_models`, `spec_writer.model`, `spec_writer.fallback_models`) emit INFO findings with migration guidance.
+The doctor validates all 71 top-level schema keys with type checks (string, boolean, number, object). Unknown keys produce warnings with Levenshtein-based typo suggestions. Swarms configuration is hardened: empty `swarms` emits an INFO finding, and path-traversal characters in swarm IDs (`..`, `/`, `\`, `\0`) emit HIGH/ERROR findings. Deprecated config fields (`skill_improver.model`, `skill_improver.fallback_models`, `spec_writer.model`, `spec_writer.fallback_models`) emit INFO findings with migration guidance.
 
 - `--fix`: auto-repair issues where safe. Creates encrypted backup first. When auto-fixable issues are found, the doctor applies fixes and re-runs to confirm resolution.
 - `--restore <id>`: revert to a previous backup.
@@ -594,7 +619,7 @@ Show performance metrics: tool call rates, delegation chains, evidence pass rate
 
 - `--cumulative`: aggregate across sessions.
 - `--ci-gate`: return non-zero exit if thresholds exceeded (for CI).
-- `--max-cost-usd <n>`: with `--ci-gate`, fail the benchmark when cumulative telemetry cost exceeds the threshold.
+- `--max-cost-usd <n>`: with `--ci-gate`, compare the threshold only when cumulative telemetry has complete compatible USD evidence. Missing, conflicting, legacy, or unknown-currency spend returns `passed: false`, `evidence_status: "inconclusive"`, and `reason: "budgetInconclusive"` instead of passing as zero.
 - `--gate-audit-run <id>`: include a stored gate-audit result. With `--ci-gate`, the audit must be complete; its run-scoped exact joins must be sufficient and free of corrupt, malformed, ambiguous, or unjoined truth; every joined Tier-1 regression must be caught; and no joined clean control may be rejected. Cell-provided labels never substitute for ground truth.
 
 ### `/swarm gate-audit [options]`
@@ -756,7 +781,7 @@ Manage the session-scoped runtime concurrency override for plan execution. This 
 
 ### `/swarm lanes [--json]`
 
-Show the current worktree lane state: active lanes (running), awaiting-merge lanes (completed but not yet merged back), and conflicted lanes (merge failures).
+Show the current worktree lane state: active lanes (running), awaiting-merge lanes (completed but not yet merged back), and conflicted lanes (merge failures). Conflicted lanes also surface the recovery authority state for exact same-task redispatch.
 
 ```text
 /swarm lanes
@@ -769,14 +794,15 @@ Show the current worktree lane state: active lanes (running), awaiting-merge lan
     worktree=<project-root>/.swarm-worktrees/session-abc/lane-1
 
 ## awaiting-merge (1)
-  - lane-2 task=1.2 branch=swarm-lane/session-def/lane-2 [partial @ commit]
+  - lane-2 task=1.2 branch=swarm-lane/session-def/lane-2
     worktree=<project-root>/.swarm-worktrees/session-def/lane-2
     hint: Merge-back in progress; check `/swarm status` for the latest.
 
 ## conflicted (1)
   - lane-3 task=1.3 branch=swarm-lane/session-ghi/lane-3
     worktree=<project-root>/.swarm-worktrees/session-ghi/lane-3
-    hint: Partial merge preserved at <project-root>/.swarm-worktrees/session-ghi/lane-3. Stage and commit, then re-run merge.
+    recovery: generation=4 status=preserved parentSession=session-ghi originalCall=call-A reservation=reservation-A strategy=merge
+    redispatch: Re-dispatch the exact same task in parent session session-ghi to claim generation 4 instead of allocating a new lane.
 
 Total: 3 lanes
 ```
@@ -820,7 +846,21 @@ Total: 3 lanes
         "stage": "commit",
         "message": "merge-back committed with conflicts"
       },
-      "recoveryHint": "Partial merge preserved at <project-root>/.swarm-worktrees/session-ghi/lane-3. Stage and commit, then re-run merge."
+      "recovery": {
+        "authorityStatus": "preserved",
+        "generation": 4,
+        "originalCallID": "call-A",
+        "parentSessionId": "session-ghi",
+        "reservationId": "reservation-A",
+        "canonicalBranch": "main",
+        "canonicalPath": "<project-root>",
+        "laneBranch": "swarm-lane/session-ghi/lane-3",
+        "lanePath": "<project-root>/.swarm-worktrees/session-ghi/lane-3",
+        "strategy": "merge",
+        "redispatchStatus": "available"
+      },
+      "manualRecoveryHint": "Partial merge preserved at <project-root>/.swarm-worktrees/session-ghi/lane-3. Stage and commit, then re-run merge.",
+      "recoveryHint": "Re-dispatch the exact same task in parent session session-ghi to claim generation 4 instead of allocating a new lane."
     }
   ],
   "totalCount": 3
@@ -834,6 +874,13 @@ Total: 3 lanes
 | Active | Lane is currently running with an active session |
 | Awaiting merge | Lane work is complete but the branch has not yet been merged back into the main branch |
 | Conflicted | Merge-back was attempted but encountered conflicts; the worktree and branch are preserved for recovery |
+
+For conflicted lanes, the recovery block shows the immutable v2 recovery identity (`generation`, `originalCallID`, `reservationId`, parent session, and strategy) plus the mutable claimant state when a same-task retry already owns the preserved lane. `redispatch` means:
+
+- `available` — the next exact same-task worktree dispatch will claim the preserved lane instead of provisioning a new one
+- `claimed` — a retry already owns the preserved lane; wait for that claimant to settle or cancel it before retrying again
+- `manual-only` — the recovery authority is finalized; the lane is retained for audit/manual inspection and cannot be claimed again
+- `unsupported-legacy` / `uncertain` — automatic same-task redispatch is unavailable; use the manual merge hint shown for the lane
 
 #### Runtime profile state
 
@@ -851,7 +898,7 @@ The `/swarm diagnose` command reports the detected sandbox mechanism (Linux: `bu
 
 See [Runtime Isolation](modes.md#runtime-isolation-fr-201--fr-206) for the full description, cross-platform parity notes, and configuration examples.
 
-See [Recovery Runbook](troubleshooting/recovery-guide.md) for manual recovery steps when lanes are stuck in conflicted state.
+See [Recovery Runbook](troubleshooting/recovery-guide.md) for manual recovery steps when a conflicted lane reports `unsupported-legacy`, `uncertain`, or otherwise cannot be reclaimed through same-task redispatch.
 
 ---
 
@@ -863,7 +910,7 @@ DELETE active swarm state from `.swarm/`, including `plan.md`, `plan.json`, `SWA
 
 ### `/swarm reset-session`
 
-Clear only session state (`.swarm/session/state.json` and related files). Preserves plan, evidence, and knowledge. Use when starting a new model/session but continuing the same project. Also recovers stale coder settlements (issue #2268): a `DISPATCHED` settlement WAL left behind by a dispatch whose completion never arrived is settled here, so future coder dispatches cannot stay wedged with `CODER_DISPATCH_IN_PROGRESS`. Before deleting, the session state is auto-backed up to `.swarm/reset-backups/<timestamp>/` (newest 5 kept).
+Clear only session state (`.swarm/session/state.json` and related files). Preserves plan, evidence, and knowledge. Use when starting a new model/session but continuing the same project. Also recovers stale coder settlements (issue #2268): a `DISPATCHED` settlement WAL left behind by a dispatch whose completion never arrived is settled here, so future coder dispatches cannot stay wedged with `CODER_DISPATCH_IN_PROGRESS`. Before deleting, the session state is auto-backed up to `.swarm/reset-backups/<timestamp>/` (newest 5 kept). Since #2398 the reset is also a real escape from the `knowledge_application` enforce gate: the invoking session's pending architect-directive obligations are durably released in the receipt ledger (audited as `application_gate_session_reset_release`), and the gate's in-memory denial state is cleared process-wide (like the command's other in-memory clears) — other sessions' ledger obligations and the knowledge store itself are preserved.
 
 ### `/swarm recover [task_id] [--force]`
 
@@ -958,6 +1005,51 @@ Dry-run the dark-matter analysis with configurable thresholds. Does not modify s
 ### `/swarm acknowledge-spec-drift`
 
 Acknowledge that the spec has drifted from the plan and suppress further warnings. Use after you've reviewed the drift and accepted it.
+
+---
+
+## Declarative Harness Inspection
+
+These commands inspect and validate HarnessOpt artifacts. They never activate
+a blueprint, apply a source patch, execute a candidate, or repair durable state.
+
+### `/swarm blueprint validate <project-relative-json>`
+
+Validate a versioned harness blueprint or blueprint patch, including canonical
+content hashes and schema migration rules.
+
+### `/swarm blueprint current`
+
+Show the ledger-derived current blueprint identity and projection status.
+
+### `/swarm blueprint history`
+
+Show bounded, hash-verified activation and rollback history. Use
+`--limit <1..100>` to reduce the number of returned records without relaxing
+the configured replay bound.
+
+### `/swarm blueprint diff <from-version> <to-version>`
+
+Show a structural blueprint diff without executing either version.
+
+### `/swarm blueprint export [version]`
+
+Export a canonical blueprint JSON document. When omitted, `version` defaults to
+the current version.
+
+### `/swarm harness candidate validate <project-relative-json>`
+
+Validate a candidate manifest and its hash bindings. This command does not
+record or activate the candidate.
+
+### `/swarm harness candidate show <candidate-id>`
+
+Show bounded candidate metadata. Raw source patch content is never printed.
+
+### `/swarm harness candidate diff <candidate-id>`
+
+Show bounded candidate file and blueprint-change metadata. Raw source patch
+content is never printed.
 
 ---
 

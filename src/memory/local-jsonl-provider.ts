@@ -33,6 +33,12 @@ import {
 	validateOutcomeEvent,
 	validateOutcomeEventForMemory,
 } from './outcome-events';
+import {
+	buildProposalLoadDiagnostics,
+	type ProposalLoadIssue,
+	parseLoadedProposal,
+	proposalLoadIssueFromValue,
+} from './proposal-load';
 import type {
 	MemoryCompactOptions,
 	MemoryCompactResult,
@@ -48,6 +54,12 @@ import {
 	classifyStoredFingerprintAlgorithmVersion,
 	computeMemoryCohortFingerprint,
 } from './redaction';
+import {
+	expandRelatedRecallItems,
+	projectMemoryRelations,
+	stripDerivedRelations,
+	validateMergeParticipants,
+} from './relations';
 import { validateMemoryProposal, validateMemoryRecordRules } from './schema';
 import type { RecallScoringDiagnostics } from './scoring';
 import {
@@ -111,6 +123,7 @@ export class LocalJsonlMemoryProvider
 	private initialized = false;
 	private memories = new Map<string, MemoryRecord>();
 	private proposals = new Map<string, MemoryProposal>();
+	private lastInvalidProposalLoadSignature: string | null = null;
 
 	constructor(
 		rootDirectory: string,
@@ -169,10 +182,13 @@ export class LocalJsonlMemoryProvider
 			await readJsonl(memoryPath),
 			this.config,
 		);
+		const rawProposalLoad = await readProposalJsonl(proposalPath);
 		const proposalLoad = validateLoadedProposals(
-			await readJsonl(proposalPath),
+			rawProposalLoad.values,
 			this.config,
 		);
+		proposalLoad.invalidCount += rawProposalLoad.invalidRows.length;
+		proposalLoad.invalidRows.unshift(...rawProposalLoad.invalidRows);
 		const outcomeEvents = this.readOutcomeEventsSync();
 		const materializedLoad = validateMaterializedMemories(
 			memoryLoad.records,
@@ -196,11 +212,9 @@ export class LocalJsonlMemoryProvider
 			);
 		}
 		if (proposalLoad.invalidCount > 0) {
-			await this.audit(
-				'invalid_load',
-				'proposals',
-				`${proposalLoad.invalidCount} invalid proposal JSONL row(s) skipped`,
-			);
+			await this.reportInvalidProposalLoad(proposalLoad.invalidRows);
+		} else {
+			this.lastInvalidProposalLoadSignature = null;
 		}
 	}
 
@@ -216,7 +230,7 @@ export class LocalJsonlMemoryProvider
 			}
 			let parsed = validateMemoryRecordRules(
 				{
-					...record,
+					...stripDerivedRelations(record),
 					createdAt: existing?.createdAt ?? record.createdAt,
 					metadata: {
 						...record.metadata,
@@ -283,7 +297,11 @@ export class LocalJsonlMemoryProvider
 		await this.initialize();
 		return this.withOutcomeStoreLock(async () => {
 			await this.refreshMemoriesUnlocked();
-			return this.memories.get(id) ?? null;
+			await this.refreshProposalsUnlocked();
+			const record = this.memories.get(id);
+			return record
+				? projectMemoryRelations([record], this.proposals.values())[0]
+				: null;
 		});
 	}
 
@@ -416,15 +434,23 @@ export class LocalJsonlMemoryProvider
 			result.items,
 			request.maxItems,
 		);
+		const expanded = expandRelatedRecallItems(
+			sliced,
+			projectMemoryRelations(
+				Array.from(this.memories.values()),
+				this.proposals.values(),
+			),
+			request,
+		);
 		return {
-			items: sliced,
+			items: expanded,
 			diagnostics: {
 				...result.diagnostics,
 				// Fix 3: derive exploredCount from what actually survived
 				// slicing, not the pre-slice diagnostics, so the count always
 				// matches an item present in the returned bundle.
-				exploredCount: sliced.some((item) => item.explored) ? 1 : 0,
-				returnedCount: sliced.length,
+				exploredCount: expanded.some((item) => item.explored) ? 1 : 0,
+				returnedCount: expanded.length,
 			},
 		};
 	}
@@ -483,8 +509,12 @@ export class LocalJsonlMemoryProvider
 		await this.initialize();
 		await this.withOutcomeStoreLock(async () => {
 			await this.refreshMemoriesUnlocked();
+			await this.refreshProposalsUnlocked();
 		});
-		let records = Array.from(this.memories.values());
+		let records = projectMemoryRelations(
+			Array.from(this.memories.values()),
+			this.proposals.values(),
+		);
 		if (filter.scopes && filter.scopes.length > 0) {
 			records = records.filter((record) =>
 				scopeAllowed(record.scope, filter.scopes ?? []),
@@ -516,8 +546,13 @@ export class LocalJsonlMemoryProvider
 	async createProposal(proposal: MemoryProposal): Promise<MemoryProposal> {
 		await this.initialize();
 		const next = validateMemoryProposal(proposal);
-		this.proposals.set(next.id, next);
-		await appendJsonl(this.pathFor('proposals'), next);
+		await this.withOutcomeStoreLock(async () => {
+			await this.refreshProposalsUnlocked();
+			const filePath = this.pathFor('proposals');
+			await repairIncompleteJsonlTail(filePath);
+			await appendJsonl(filePath, next);
+			this.proposals.set(next.id, next);
+		});
 		await this.audit('proposal', next.id);
 		this.bumpCohortGeneration();
 		return next;
@@ -629,6 +664,16 @@ export class LocalJsonlMemoryProvider
 			oldMemoryId = oldMemory.id;
 			replacementMemoryId = replacement.id;
 			memoryId = replacement.id;
+		} else if (decision.action === 'merge') {
+			decision = {
+				...decision,
+				relatedMemoryIds: validateMergeParticipants(
+					decision.relatedMemoryIds,
+					this.memories.values(),
+					this.proposals.values(),
+					new Date(appliedAt),
+				),
+			};
 		}
 
 		const proposalStatus =
@@ -638,10 +683,19 @@ export class LocalJsonlMemoryProvider
 			decision,
 			proposalStatus,
 			appliedAt,
-			{ memoryId, targetMemoryId, oldMemoryId, replacementMemoryId },
+			{
+				memoryId,
+				targetMemoryId,
+				oldMemoryId,
+				replacementMemoryId,
+				relatedMemoryIds:
+					decision.action === 'merge' ? decision.relatedMemoryIds : undefined,
+			},
 		);
+		const proposalsPath = this.pathFor('proposals');
+		await repairIncompleteJsonlTail(proposalsPath);
+		await appendJsonl(proposalsPath, reviewedProposal);
 		this.proposals.set(reviewedProposal.id, reviewedProposal);
-		await appendJsonl(this.pathFor('proposals'), reviewedProposal);
 		const change: AppliedMemoryChange = {
 			action: decision.action,
 			proposalId: decision.proposalId,
@@ -651,14 +705,25 @@ export class LocalJsonlMemoryProvider
 			targetMemoryId,
 			oldMemoryId,
 			replacementMemoryId,
+			relatedMemoryIds:
+				decision.action === 'merge' ? decision.relatedMemoryIds : undefined,
 			reason: curatorDecisionReason(decision),
 		};
-		await this.audit(
-			'curator_decision',
-			decision.proposalId,
-			change.reason,
-			buildCuratorDecisionEvent(change, proposal),
-		);
+		// The canonical proposal append is complete before this auxiliary audit
+		// event. Best effort keeps an applied curator decision from being reported
+		// as rejected when forensic audit storage is unavailable.
+		try {
+			await this.audit(
+				'curator_decision',
+				decision.proposalId,
+				change.reason,
+				buildCuratorDecisionEvent(change, proposal),
+			);
+		} catch (error) {
+			warn('[memory] failed to persist curator decision audit event', {
+				reason: error instanceof Error ? error.message : String(error),
+			});
+		}
 		return change;
 	}
 
@@ -769,13 +834,41 @@ export class LocalJsonlMemoryProvider
 	}
 
 	private async refreshProposalsUnlocked(): Promise<void> {
-		const loaded = validateLoadedProposals(
-			await readJsonl(this.pathFor('proposals')),
-			this.config,
-		);
+		const proposalPath = this.pathFor('proposals');
+		await repairIncompleteJsonlTail(proposalPath);
+		const rawProposalLoad = await readProposalJsonl(proposalPath);
+		const loaded = validateLoadedProposals(rawProposalLoad.values, this.config);
+		loaded.invalidCount += rawProposalLoad.invalidRows.length;
+		loaded.invalidRows.unshift(...rawProposalLoad.invalidRows);
 		this.proposals = new Map(
 			loaded.records.map((proposal) => [proposal.id, proposal]),
 		);
+		if (loaded.invalidCount > 0) {
+			await this.reportInvalidProposalLoad(loaded.invalidRows);
+		} else {
+			this.lastInvalidProposalLoadSignature = null;
+		}
+	}
+
+	private async reportInvalidProposalLoad(
+		issues: readonly ProposalLoadIssue[],
+	): Promise<void> {
+		const eventJson = buildProposalLoadDiagnostics(issues);
+		const signature = JSON.stringify(eventJson);
+		if (signature === this.lastInvalidProposalLoadSignature) return;
+		this.lastInvalidProposalLoadSignature = signature;
+		try {
+			await this.audit(
+				'invalid_load',
+				'proposals',
+				`${issues.length} invalid proposal JSONL row(s) skipped`,
+				eventJson,
+			);
+		} catch (error) {
+			warn('[memory] failed to persist invalid proposal load audit event', {
+				reason: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 
 	private readOutcomeEventsSync(): MemoryOutcomeEvent[] {
@@ -1025,23 +1118,24 @@ function validateLoadedProposals(
 ): {
 	records: MemoryProposal[];
 	invalidCount: number;
+	invalidRows: ProposalLoadIssue[];
 } {
 	const records: MemoryProposal[] = [];
+	const invalidRows: ProposalLoadIssue[] = [];
 	let invalidCount = 0;
 	for (const value of values) {
 		try {
-			const proposal = validateMemoryProposal(value as MemoryProposal);
-			if (proposal.proposedRecord) {
-				validateMemoryRecordRules(proposal.proposedRecord, {
-					rejectDurableSecrets: config.redaction.rejectDurableSecrets,
-				});
-			}
+			const proposal = parseLoadedProposal(
+				value,
+				config.redaction.rejectDurableSecrets,
+			);
 			records.push(proposal);
-		} catch {
+		} catch (error) {
 			invalidCount++;
+			invalidRows.push(proposalLoadIssueFromValue(value, error));
 		}
 	}
-	return { records, invalidCount };
+	return { records, invalidCount, invalidRows };
 }
 
 async function readJsonl(filePath: string): Promise<unknown[]> {
@@ -1058,6 +1152,29 @@ async function readJsonl(filePath: string): Promise<unknown[]> {
 		}
 	}
 	return records;
+}
+
+async function readProposalJsonl(filePath: string): Promise<{
+	values: unknown[];
+	invalidRows: ProposalLoadIssue[];
+}> {
+	if (!existsSync(filePath)) return { values: [], invalidRows: [] };
+	const content = await readFile(filePath, 'utf-8');
+	const values: unknown[] = [];
+	const invalidRows: ProposalLoadIssue[] = [];
+	for (const [index, line] of content.split('\n').entries()) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		try {
+			values.push(JSON.parse(trimmed));
+		} catch {
+			invalidRows.push({
+				proposalId: '<unknown>',
+				reason: `invalid JSONL at line ${index + 1}`,
+			});
+		}
+	}
+	return { values, invalidRows };
 }
 
 async function readAuditEvents(filePath: string): Promise<AuditEvent[]> {

@@ -22,18 +22,28 @@ import * as logger from '../../utils/logger';
 import { containsControlChars } from '../../utils/path-security';
 import { yieldToEventLoop } from '../../utils/timeout';
 import {
+	extractDartSymbols,
 	extractGoSymbols,
+	extractPhpSymbols,
 	extractPythonSymbols,
+	extractRubySymbols,
 	extractRustSymbols,
 	extractTSSymbols,
 } from '../symbols';
-import { extractFileOntology } from './ontology';
+import { extractFileOntology, maskMultilineStringLiterals } from './ontology';
 import { safeRealpathSync } from './safe-realpath';
+import {
+	createSymbolEdgeV2,
+	deriveRepoRootId,
+	hashSymbolEdgeSnippet,
+	mergeSymbolEdges,
+} from './symbol-edge';
 import type {
 	BuildWorkspaceGraphOptions,
 	GraphEdge,
 	GraphExtractorInputWitness,
 	GraphNode,
+	GraphSymbolKind,
 	GraphUnresolvedImport,
 	RepoGraph,
 	RepoGraphDiagnostics,
@@ -41,6 +51,7 @@ import type {
 } from './types';
 import {
 	createEmptyGraph,
+	DEFAULT_MAX_SOURCE_BYTES,
 	normalizeGraphPath,
 	updateGraphMetadata,
 } from './types';
@@ -63,7 +74,13 @@ export const _internals: {
 	extractPythonSymbols: typeof extractPythonSymbols;
 	extractRustSymbols: typeof extractRustSymbols;
 	extractGoSymbols: typeof extractGoSymbols;
+	extractDartSymbols: typeof extractDartSymbols;
+	extractRubySymbols: typeof extractRubySymbols;
+	extractPhpSymbols: typeof extractPhpSymbols;
 	parseFileImports: typeof parseFileImports;
+	parseDartFileImports: typeof parseDartFileImports;
+	parseRubyFileImports: typeof parseRubyFileImports;
+	parsePhpFileImports: typeof parsePhpFileImports;
 	extractFileOntology: typeof extractFileOntology;
 	stripComments: typeof stripComments;
 	computeUsedSymbols: typeof computeUsedSymbols;
@@ -75,7 +92,13 @@ export const _internals: {
 	extractPythonSymbols,
 	extractRustSymbols,
 	extractGoSymbols,
+	extractDartSymbols,
+	extractRubySymbols,
+	extractPhpSymbols,
 	parseFileImports,
+	parseDartFileImports,
+	parseRubyFileImports,
+	parsePhpFileImports,
 	extractFileOntology,
 	stripComments,
 	computeUsedSymbols,
@@ -272,6 +295,231 @@ function appendEdgeFast(
 // ============ Path Resolution ============
 
 /**
+ * Workspace-relative source roots probed when mapping a JVM/.NET dotted module
+ * name onto a file.
+ *
+ * `''` covers a package-rooted layout (`com/example/Repo.java` directly under
+ * the workspace root). `'src'` covers both a `src/`-rooted package tree and the
+ * canonical .NET `src/<ProjectName>/` layout, because .NET's convention is
+ * root-namespace == project-directory name, so the dotted path lands on it
+ * directly. `src/main/java` and `src/main/kotlin` cover Maven/Gradle.
+ *
+ * Two shapes are deliberately NOT covered. A dotted project directory
+ * (`src/Contoso.Billing.Api/Svc.cs`) needs a variable split point in the dotted
+ * name and is not expressible as a fixed prefix at all. Maven/Gradle test roots
+ * (`src/test/java`) are omitted on purpose: adding them would let a main source
+ * resolve to a test file whenever no main file exists, via the file and
+ * package-directory passes below — the same fabricated-edge failure this
+ * module works to avoid elsewhere.
+ */
+const JVM_DOTNET_DOTTED_ROOTS = [
+	'',
+	'src',
+	'src/main/java',
+	'src/main/kotlin',
+] as const;
+
+/**
+ * Whether the parent-as-file (nested type) probe applies to this source file.
+ * Java and Kotlin only — see the probe's own comment in
+ * `findDottedModuleCandidate` for why C# is excluded.
+ */
+function isJvmParentProbeLanguage(sourceFile: string): boolean {
+	const ext = path.extname(sourceFile).toLowerCase();
+	return ext === '.java' || ext === '.kt' || ext === '.kts';
+}
+
+/** Candidate file extensions for a dotted import, keyed on the *importing* file. */
+function jvmDotnetSiblingExtensions(sourceFile: string): readonly string[] {
+	switch (path.extname(sourceFile).toLowerCase()) {
+		case '.java':
+			return ['.java'];
+		case '.kt':
+		case '.kts':
+			return ['.kt', '.kts'];
+		case '.cs':
+		case '.csx':
+			return ['.cs', '.csx'];
+		default:
+			return [];
+	}
+}
+
+/**
+ * Conventional JVM/.NET test-file names: `FooTest.java`, `FooTests.cs`,
+ * `FooSpec.kt`. The `Test`/`Tests`/`Spec` suffix must start with a capital, and
+ * must be preceded by another identifier character, so ordinary production
+ * names whose last syllable merely rhymes are not swept up — `Latest.cs`,
+ * `Contest.java`, `Protest.kt` and `Respec.cs` all correctly fail this.
+ */
+const JVM_DOTNET_TEST_FILE_RE = /\w(?:Tests?|Spec)\.[A-Za-z]+$/;
+
+/**
+ * Representative source file for a package/namespace specifier (`import a.b.*;`,
+ * `using App.Data;`), which names a directory rather than a single file.
+ *
+ * This mirrors the convention this module already uses for Go, whose imports
+ * are likewise package-granular: `findDirectoryEntry` prefers
+ * `<dirname>.go` and otherwise takes the first source file in the directory.
+ * The resulting edge is a package-level dependency expressed through a
+ * representative member, not a claim that the source named that exact file.
+ *
+ * A same-named file (`Data/Data.cs`) is preferred so the representative is
+ * stable and meaningful where the convention exists; otherwise the first entry
+ * by code-unit order is used, which is locale-independent and therefore
+ * reproducible across machines.
+ */
+function firstSourceFileIn(
+	directory: string,
+	extensions: readonly string[],
+): string | null {
+	try {
+		if (!fsSync.statSync(directory).isDirectory()) return null;
+		const matching = fsSync
+			.readdirSync(directory)
+			.filter((entry) =>
+				extensions.some((ext) => entry.toLowerCase().endsWith(ext)),
+			)
+			// Code-unit order, NOT localeCompare: ICU collation is host-dependent
+			// and would make graph builds differ across machines.
+			.sort();
+		// Mirror the Go precedent's `!entry.endsWith('_test.go')` filter: a test
+		// class is a poor representative of a package, and alphabetical order
+		// makes `AaaTests.cs` beat the real type. Fall back to the unfiltered
+		// list for a directory that contains nothing but tests, so a
+		// test-only package still yields an edge.
+		const nonTest = matching.filter(
+			(entry) => !JVM_DOTNET_TEST_FILE_RE.test(entry),
+		);
+		const entries = nonTest.length > 0 ? nonTest : matching;
+		const preferred = entries.find(
+			(entry) =>
+				path.basename(entry, path.extname(entry)).toLowerCase() ===
+				path.basename(directory).toLowerCase(),
+		);
+		for (const entry of preferred ? [preferred, ...entries] : entries) {
+			const candidate = path.join(directory, entry);
+			// readdirSync also returns directories; a directory named `Foo.cs`
+			// must never become an import target.
+			try {
+				if (fsSync.statSync(candidate).isFile()) return candidate;
+			} catch {
+				// unreadable entry - try the next one
+			}
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Probe the workspace for the file a JVM/.NET dotted module specifier names.
+ *
+ * THREE probes run as separate passes, each sweeping EVERY conventional source
+ * root before the next probe starts. Probe specificity outranks root
+ * specificity — interleaving them per-root is what let the weakest probe win
+ * from the `''` root before a deeper root was ever considered.
+ * 1. the full dotted path as a FILE — `com.example.Repo` ->
+ *    `com/example/Repo.java` (a type);
+ * 2. the full dotted path as a package/namespace DIRECTORY, resolved to a
+ *    representative member (`com.example.*`, C# `using App.Data;`);
+ * 3. the parent path **as a file only** — `com.example.Outer.Inner` ->
+ *    `com/example/Outer.java` (nested type), and the shape a static member
+ *    import reduces to. **Java and Kotlin only**; see the probe's own comment
+ *    for why C# is excluded and what that costs.
+ *
+ * The parent path is deliberately NOT probed as a directory. Doing so would
+ * make an import of a type that does not exist (`import com.example.Nope;`)
+ * resolve to an arbitrary alphabetically-first sibling in `com/example/`,
+ * fabricating an edge to a file the source never referenced.
+ *
+ * SECURITY: this returns a *candidate path only* and performs no symlink or
+ * containment validation of its own. The caller rewrites the result into a
+ * `./`-relative specifier and falls through to the shared relative-resolution
+ * branch, so `safeRealpathSync` symlink resolution and the workspace
+ * real-path containment check apply to a dotted specifier exactly as they do
+ * to a relative one. Never return a path from here to a caller that skips
+ * that fall-through.
+ *
+ * The `^[A-Za-z_][\w.]*(?:\.\*)?$` shape check also rejects any specifier
+ * carrying `/` or `\`, so a crafted `foo/../../etc` import never reaches the
+ * filesystem probe. It does NOT reject `..` on its own — `a..b` matches the
+ * shape. Empty segments are dropped by the `.split('.').filter(Boolean)` in the
+ * body, and THAT is what prevents a `..` path component from being built. Do
+ * not remove that filter on the assumption the shape check covers it.
+ */
+function findDottedModuleCandidate(
+	workspaceRoot: string,
+	sourceFile: string,
+	specifier: string,
+): string | null {
+	if (!/^[A-Za-z_][\w.]*(?:\.\*)?$/.test(specifier)) return null;
+	const extensions = jvmDotnetSiblingExtensions(sourceFile);
+	if (extensions.length === 0) return null;
+
+	const isWildcard = specifier.endsWith('.*');
+	const parts = specifier.replace(/\.\*$/, '').split('.').filter(Boolean);
+	if (parts.length === 0) return null;
+	const full = parts.join(path.sep);
+	// A wildcard names a package, never a type, so its last segment must not be
+	// re-interpreted as an enclosing type by the nested-type probe below.
+	const parent =
+		!isWildcard && parts.length > 1 ? parts.slice(0, -1).join(path.sep) : null;
+
+	// The three probes run as SEPARATE passes over every root prefix, most
+	// specific first. Interleaving them per-prefix is what let the weakest probe
+	// win: with `''` iterated first, `using App.Models;` reached the
+	// parent-as-file probe and returned an unrelated `App.cs` before the
+	// `src/App/Models/` directory under a later prefix was ever considered.
+
+	// 1. The full dotted path as a FILE — the specifier names a type.
+	for (const rootPrefix of JVM_DOTNET_DOTTED_ROOTS) {
+		const fullBase = path.join(workspaceRoot, rootPrefix, full);
+		for (const ext of extensions) {
+			// existsSync follows symlinks, so a dangling link is skipped here and
+			// a live one is validated by the caller's realpath check.
+			if (existsSync(fullBase + ext)) return fullBase + ext;
+		}
+	}
+
+	// 2. The full dotted path as a package/namespace DIRECTORY — resolve to a
+	//    representative member, matching the Go convention above.
+	for (const rootPrefix of JVM_DOTNET_DOTTED_ROOTS) {
+		const inPackage = firstSourceFileIn(
+			path.join(workspaceRoot, rootPrefix, full),
+			extensions,
+		);
+		if (inPackage) return inPackage;
+	}
+
+	// 3. The PARENT path as a file — a nested type (`a.b.Outer.Inner` ->
+	//    `a/b/Outer.java`), and the shape a static-member import reduces to.
+	//
+	//    Java and Kotlin only. A Java non-wildcard import names a TYPE, so this
+	//    is the normal nested-type syntax there. A C# `using X.Y;` names a
+	//    NAMESPACE — C# reaches a nested type through `using static X.Y.Z;` or a
+	//    using-alias, neither distinguishable from a namespace import by the
+	//    specifier string alone. Running the probe for C# fabricated edges to
+	//    unrelated type files (`using Serilog.Sinks;` -> a local `Serilog.cs`),
+	//    and a missing edge is strictly better than a false one.
+	//
+	//    COST, stated precisely: every C#/.csx specifier `X.Y.Z` where `X/Y/Z`
+	//    is neither a file nor a directory but `X/Y.cs` exists now resolves to
+	//    null. That covers using-aliases AND `using static A.B.C;`, not aliases
+	//    alone — both reach here as a bare dotted specifier. Recorded in
+	//    docs/repo-graph-symbol-graph.md under "Limitations (by design)".
+	if (parent === null || !isJvmParentProbeLanguage(sourceFile)) return null;
+	for (const rootPrefix of JVM_DOTNET_DOTTED_ROOTS) {
+		const parentBase = path.join(workspaceRoot, rootPrefix, parent);
+		for (const ext of extensions) {
+			if (existsSync(parentBase + ext)) return parentBase + ext;
+		}
+	}
+	return null;
+}
+
+/**
  * Resolve a module specifier relative to a source file within a workspace.
  *
  * CONTRACT for bare specifiers:
@@ -341,6 +589,27 @@ export function resolveModuleSpecifier(
 			normalizedSpecifier = `${'../'.repeat(superCount)}${rustParts
 				.slice(superCount)
 				.join('/')}`;
+		} else {
+			// JVM/.NET dotted module (`com.example.Repo`, `com.example.*`). Like
+			// the `crate` branch above, this only REWRITES the specifier into a
+			// `./`-relative form; the resolution, symlink realpath, and workspace
+			// containment checks below are then applied unchanged (issue #1529,
+			// F7). No-ops for every non-JVM/.NET source file.
+			const dottedTarget = findDottedModuleCandidate(
+				workspaceRoot,
+				sourceFile,
+				normalizedSpecifier,
+			);
+			if (dottedTarget !== null) {
+				normalizedSpecifier = path
+					.relative(path.dirname(sourceFile), dottedTarget)
+					.replace(/\\/g, '/');
+				// A same-directory target yields a bare `Repo.java` with no leading
+				// `./`, which would fall through to the bare-specifier `return null`.
+				if (!normalizedSpecifier.startsWith('.')) {
+					normalizedSpecifier = `./${normalizedSpecifier}`;
+				}
+			}
 		}
 
 		// Resolve relative to source file
@@ -413,9 +682,25 @@ export function resolveModuleSpecifier(
 			// Try to resolve the extensionless path to a real file.
 			// TypeScript/JavaScript imports commonly omit extensions: import { foo } from './utils'
 			// We need to find the actual file: ./utils.ts, ./utils.js, etc.
+			// The importer's OWN language family probes first: a Ruby
+			// `require_relative 'foo'` must not resolve to a sibling foo.ts
+			// when foo.rb exists (PR #2361 review R3).
 			if (!existsSync(resolved)) {
-				const EXTENSIONS =
-					path.extname(sourceFile).toLowerCase() === '.pyw'
+				const importerExt = path.extname(sourceFile).toLowerCase();
+				const FAMILY_FIRST: Record<string, readonly string[]> = {
+					'.rb': ['.rb'],
+					'.rake': ['.rb'],
+					'.gemspec': ['.rb'],
+					'.dart': ['.dart'],
+					'.php': ['.php'],
+					'.phtml': ['.php'],
+					'.py': ['.py'],
+					'.pyw': ['.pyw'],
+					'.rs': ['.rs'],
+					'.go': ['.go'],
+				};
+				const BASE =
+					importerExt === '.pyw'
 						? [
 								'.pyw',
 								'.py',
@@ -427,7 +712,6 @@ export function resolveModuleSpecifier(
 								'.jsx',
 								'.mjs',
 								'.cjs',
-								'.json',
 							]
 						: [
 								'.ts',
@@ -440,8 +724,18 @@ export function resolveModuleSpecifier(
 								'.pyw',
 								'.rs',
 								'.go',
-								'.json',
 							];
+				const EXTENSIONS = [
+					...(FAMILY_FIRST[importerExt] ?? []),
+					...BASE,
+					'.rb',
+					'.rake',
+					'.gemspec',
+					'.dart',
+					'.php',
+					'.phtml',
+					'.json',
+				].filter((ext, i, all) => all.indexOf(ext) === i);
 				let found: string | null = null;
 				for (const ext of EXTENSIONS) {
 					const candidate = resolved + ext;
@@ -549,6 +843,21 @@ interface ScanStats {
 	 * because it is build-internal plumbing, not a reported diagnostic.
 	 */
 	_absoluteRoot?: string;
+}
+
+function symbolEdgeValidationFailure(
+	file: string,
+	language: string,
+): RepoGraphDiagnostics {
+	return {
+		extractionFailures: [
+			{
+				file,
+				language,
+				reason: 'symbol_edge_validation_failed',
+			},
+		],
+	};
 }
 
 /**
@@ -868,6 +1177,28 @@ function parseFileImports(
 	if (ext === '.go') {
 		return parseGoFileImports(rawContent);
 	}
+	if (ext === '.java') {
+		return parseJavaFileImports(rawContent);
+	}
+	if (ext === '.kt' || ext === '.kts') {
+		return parseKotlinFileImports(rawContent);
+	}
+	if (ext === '.cs' || ext === '.csx') {
+		return parseCSharpFileImports(rawContent);
+	}
+	if (ext === '.dart') {
+		return parseDartFileImports(rawContent);
+	}
+	if (ext === '.rb' || ext === '.rake' || ext === '.gemspec') {
+		return parseRubyFileImports(rawContent);
+	}
+	if (
+		ext === '.php' ||
+		ext === '.phtml' ||
+		sourceFile?.endsWith('.blade.php')
+	) {
+		return parsePhpFileImports(rawContent);
+	}
 
 	const imports: ParsedImport[] = [];
 	const content = stripComments(rawContent);
@@ -947,6 +1278,204 @@ function makeParsedImport(
 		bindings,
 		reExport,
 	};
+}
+
+/** Final segment of a dotted name: `a.b.C` -> `C`. */
+function finalDottedSegment(value: string): string {
+	const parts = value.split('.').filter(Boolean);
+	return parts[parts.length - 1] ?? value;
+}
+
+/**
+ * Regex import fallback for Java. Used only when tree-sitter extraction fails
+ * (grammar load failure, AST timeout, parse error) and `scanFileAsync` falls
+ * back to `scanFile` — before this branch existed, `.java` fell through to the
+ * TypeScript ESM regex and produced zero imports (issue #1529, RC-10).
+ *
+ * Binding semantics deliberately mirror `parseJavaImport` in
+ * `src/lang/symbol-graph.ts` so the AST path and the fallback path emit the
+ * same shape:
+ * - `import a.b.C;`         -> specifier `a.b.C`, named, binding `C`
+ * - `import static a.b.C.m;` -> specifier `a.b.C`, named, binding `m`
+ * - `import a.b.*;`          -> specifier `a.b.*`, namespace, no named binding
+ */
+function parseJavaFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	// Mask text-block CONTENTS before matching. `stripComments` removes comments
+	// but keeps string literals verbatim, so a line-initial `import ...;` inside
+	// a Java text block matched this line-anchored regex and was fabricated as a
+	// real import. Reachable only when the AST path fails (grammar load failure,
+	// timeout, parse error) and this fallback runs, but real when it does.
+	const content = maskMultilineStringLiterals(
+		stripComments(rawContent),
+		'java',
+	);
+	const re =
+		/^[ \t]*import[ \t]+(static[ \t]+)?([A-Za-z_][\w.]*(?:\.\*)?)[ \t]*;?[ \t]*\r?$/gm;
+	for (let m = re.exec(content); m !== null; m = re.exec(content)) {
+		const isStatic = Boolean(m[1]);
+		const raw = m[2];
+		if (raw.endsWith('.*')) {
+			const parsed = makeParsedImport(raw, 'namespace', []);
+			if (parsed) imports.push(parsed);
+			continue;
+		}
+		// A static single-member import names the member, so the module is the
+		// enclosing type and the binding is the member.
+		const imported = finalDottedSegment(raw);
+		const specifier = isStatic ? raw.split('.').slice(0, -1).join('.') : raw;
+		const parsed = makeParsedImport(specifier, 'named', [
+			{ imported, local: imported },
+		]);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
+}
+
+/**
+ * Regex import fallback for Kotlin (see {@link parseJavaFileImports}).
+ * - `import a.b.C`        -> named, binding `C`
+ * - `import a.b.C as D`   -> named, imported `C`, local `D`
+ * - `import a.b.*`        -> namespace, no named binding
+ * Kotlin has no `static` form; a member import is spelled like a type import.
+ */
+function parseKotlinFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	const content = stripComments(rawContent);
+	const re =
+		/^[ \t]*import[ \t]+([A-Za-z_][\w.]*(?:\.\*)?)(?:[ \t]+as[ \t]+([A-Za-z_]\w*))?[ \t]*;?[ \t]*\r?$/gm;
+	for (let m = re.exec(content); m !== null; m = re.exec(content)) {
+		const raw = m[1];
+		const alias = m[2];
+		if (raw.endsWith('.*')) {
+			const parsed = makeParsedImport(raw, 'namespace', []);
+			if (parsed) imports.push(parsed);
+			continue;
+		}
+		const imported = finalDottedSegment(raw);
+		const parsed = makeParsedImport(raw, 'named', [
+			{ imported, local: alias ?? imported },
+		]);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
+}
+
+/**
+ * Regex import fallback for C# (see {@link parseJavaFileImports}).
+ * - `using A.B;`            -> namespace, no named binding
+ * - `using static A.B;`     -> namespace, no named binding
+ * - `using X = A.B.C;`      -> named, imported `C`, local `X`
+ * - `global using A.B;`     -> same as `using A.B;`
+ *
+ * What actually excludes the non-import forms is the LINE ANCHOR plus the
+ * dotted-name shape, not the `;` alone: the C# 8 using *declaration*
+ * (`using var stream = File.OpenRead(p);`) ends in `);`, which fails the dotted
+ * -name shape, and the using *statement* (`using (var x = …)`) has no
+ * line-terminal `;` at all. The `;` is still required by the pattern; it is just
+ * not the token doing the work. A generic alias
+ * (`using L = System.Collections.Generic.List<int>;`) is intentionally not
+ * matched rather than mis-parsed.
+ */
+function parseCSharpFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	const content = stripComments(rawContent);
+	const re =
+		/^[ \t]*(?:global[ \t]+)?using[ \t]+(static[ \t]+)?(?:([A-Za-z_]\w*)[ \t]*=[ \t]*)?([A-Za-z_][\w.]*)[ \t]*;[ \t]*\r?$/gm;
+	for (let m = re.exec(content); m !== null; m = re.exec(content)) {
+		const alias = m[2];
+		const specifier = m[3];
+		const parsed = alias
+			? makeParsedImport(specifier, 'named', [
+					{ imported: finalDottedSegment(specifier), local: alias },
+				])
+			: makeParsedImport(specifier, 'namespace', []);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
+}
+
+/**
+ * Regex import fallback for Dart (see {@link parseCSharpFileImports}).
+ * `hide` clauses are intentionally unhandled — the import is still recorded
+ * as a namespace import (all symbols minus hidden ones), which is correct
+ * for graph purposes.
+ */
+function parseDartFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	// `[^;]*` (not `[^;\n]*`) so a show list split across lines is captured
+	// whole — matching the symbol-graph parser's clause handling.
+	for (const match of rawContent.matchAll(
+		/^[ \t]*(import|export)[ \t]+['"]([^'"]+)['"]([^;]*)/gm,
+	)) {
+		const clause = match[3];
+		const shown = clause
+			?.match(/\bshow\s+([^;]+)/)?.[1]
+			.split(',')
+			.map((part) => part.trim())
+			.filter(Boolean);
+		const alias = clause?.match(/\bas\s+\w+/);
+		// A prefix (`as p`) makes the import namespace-qualified with no named
+		// binding, even when a show/hide clause follows.
+		const bindings =
+			!alias && shown && shown.length > 0
+				? shown.map((name) => ({ imported: name, local: name }))
+				: [];
+		const parsed = makeParsedImport(
+			match[2],
+			bindings.length > 0 ? 'named' : 'namespace',
+			bindings,
+			match[1] === 'export',
+		);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
+}
+
+/**
+ * Regex import fallback for Ruby require/require_relative. `require_relative`
+ * resolves against the requiring file's directory, so the specifier is
+ * normalized to './name' when no explicit relative prefix is present.
+ */
+function parseRubyFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	for (const match of rawContent.matchAll(
+		/^[ \t]*(require_relative|require)[ \t]+['"]([^'"]+)['"]/gm,
+	)) {
+		const relative = match[1] === 'require_relative';
+		const specifier =
+			relative && !match[2].startsWith('.') ? `./${match[2]}` : match[2];
+		const parsed = makeParsedImport(
+			specifier,
+			relative ? 'default' : 'namespace',
+			[],
+		);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
+}
+
+/**
+ * Regex import fallback for PHP `use` declarations. Grouped `use A\B, C\D;`
+ * forms are a known limitation (the whole group is skipped); FQN specifiers
+ * are recorded as-is — mapping them to workspace files requires composer
+ * PSR-4 awareness, which is out of scope (#1531 "where practical").
+ */
+function parsePhpFileImports(rawContent: string): ParsedImport[] {
+	const imports: ParsedImport[] = [];
+	for (const match of rawContent.matchAll(
+		/^[ \t]*use[ \t]+(?:(?:function|const)[ \t]+)?([^;\s]+)(?:[ \t]+as[ \t]+(\w+))?[ \t]*;?[ \t]*\r?$/gim,
+	)) {
+		const imported = match[1].split('\\').pop() ?? match[1];
+		const bindings = match[2] ? [{ imported, local: match[2] }] : [];
+		const parsed = makeParsedImport(
+			match[1],
+			bindings.length > 0 ? 'named' : 'namespace',
+			bindings,
+		);
+		if (parsed) imports.push(parsed);
+	}
+	return imports;
 }
 
 function parsePythonFileImports(
@@ -1282,7 +1811,13 @@ function collectExports(symbols: ReturnType<typeof extractTSSymbols>): {
 	const exports = exported.map((s) =>
 		s.signature === `default ${s.name}` ? 'default' : s.name,
 	);
-	const exportLines: Record<string, number> = {};
+	// Null-prototype for the same reason as the async path: on a plain object,
+	// `exportLines['toString']` reads the INHERITED Object.prototype.toString,
+	// which is not `undefined`, so the first-wins guard below thought the name
+	// was already recorded and dropped the line entirely. Measured on the sync
+	// builder: `export function toString/valueOf/ok` yielded
+	// `exportLines {"ok":3}` — both prototype-named exports lost their lines.
+	const exportLines: Record<string, number> = Object.create(null);
 	for (let i = 0; i < exported.length; i++) {
 		const s = exported[i];
 		const name = exports[i];
@@ -1744,6 +2279,29 @@ function getLanguage(filePath: string): string {
 }
 
 /**
+ * Grammars whose `exportRanges` map is populated from *all* defs rather than
+ * only exported ones. JVM/.NET and native-language members are intentionally
+ * never `exported` (they are not file-level module exports — a Java method, a
+ * C++ class member, a Swift member inside a type), so without this
+ * `context_pack` could never return a span for them (issue #1529 RC-7 for
+ * JVM/.NET; issue #1530 for C/C++ and Swift, whose static and anonymous-
+ * namespace internals are likewise non-exported).
+ */
+const RANGE_WIDENED_GRAMMARS = new Set([
+	'java',
+	'kotlin',
+	'csharp',
+	'cpp',
+	'swift',
+	// Dynamic-language hardening (#1531): member defs (Ruby methods, PHP
+	// methods) are non-exported at file level but must still carry spans for
+	// context_pack; widening admits them into exportRanges only.
+	'dart',
+	'ruby',
+	'php',
+]);
+
+/**
  * Check if file content appears to be binary.
  *
  * @param content - File content as string
@@ -1843,6 +2401,23 @@ export function scanFile(
 			({ exports, exportLines } = collectExports(
 				_internals.extractGoSymbols(relativePath, absoluteRoot),
 			));
+		} else if (ext === '.dart') {
+			// Dynamic-language hardening (#1531): the AST fail-open path must
+			// not lose export metadata for the new languages (PR #2361 R9).
+			const relativePath = path.relative(absoluteRoot, filePath);
+			({ exports, exportLines } = collectExports(
+				_internals.extractDartSymbols(relativePath, absoluteRoot),
+			));
+		} else if (ext === '.rb' || ext === '.rake' || ext === '.gemspec') {
+			const relativePath = path.relative(absoluteRoot, filePath);
+			({ exports, exportLines } = collectExports(
+				_internals.extractRubySymbols(relativePath, absoluteRoot),
+			));
+		} else if (ext === '.php' || ext === '.phtml') {
+			const relativePath = path.relative(absoluteRoot, filePath);
+			({ exports, exportLines } = collectExports(
+				_internals.extractPhpSymbols(relativePath, absoluteRoot),
+			));
 		}
 
 		// Parse imports to get specifiers with types
@@ -1934,15 +2509,17 @@ export async function scanFileAsync(
 	filePath: string,
 	absoluteRoot: string,
 	maxFileSize: number,
-	hasManifest?: (relDir: string) => boolean,
+	hasManifest: ((relDir: string) => boolean) | undefined,
+	repoRootId: string,
 ): Promise<AsyncScanResult> {
+	const moduleName = toModuleName(filePath, absoluteRoot);
+	const grammarId = getLanguage(filePath);
 	let content: string;
 	let fileStats: fsSync.Stats;
 
 	try {
 		fileStats = await fsPromises.stat(filePath);
 		if (fileStats.size > maxFileSize) {
-			const moduleName = toModuleName(filePath, absoluteRoot);
 			return {
 				node: null,
 				edges: [],
@@ -1968,7 +2545,6 @@ export async function scanFileAsync(
 
 	// Skip binary files
 	if (isBinaryContent(content)) {
-		const moduleName = toModuleName(filePath, absoluteRoot);
 		return {
 			node: null,
 			edges: [],
@@ -1983,7 +2559,6 @@ export async function scanFileAsync(
 		};
 	}
 
-	const grammarId = getLanguage(filePath);
 	const facts = await _internals.extractFileSymbols(grammarId, content);
 
 	// Fail-open: tree-sitter unavailable or timed out → minimal node
@@ -2022,12 +2597,100 @@ export async function scanFileAsync(
 	// Derive exports, exportLines, exportRanges from tree-sitter defs
 	const exportedDefs = facts.defs.filter((d) => d.exported);
 	const exports = exportedDefs.map((d) => d.name);
-	const exportLines: Record<string, number> = {};
+	// NULL-PROTOTYPE maps. A def named after an `Object.prototype` member is
+	// ordinary source — `toString` is one of the most common method names in
+	// Java, Kotlin and C# — and on a plain `{}` the collision read below
+	// (`exportRanges[d.name]`) returns the INHERITED `Object.prototype.toString`,
+	// which is truthy and `!== undefined`. The loop then believed a previous def
+	// already held the slot and silently dropped the real one. Measured: a class
+	// with `toString`/`constructor`/`hasOwnProperty` members lost all of them.
+	// (The `__proto__` setter hazard is also neutralised by a null prototype,
+	// but it was not the cause — the unguarded read was.)
+	const exportLines: Record<string, number> = Object.create(null);
 	const exportRanges: Record<string, { startLine: number; endLine: number }> =
-		{};
+		Object.create(null);
+	// Declaration kind per persisted symbol (schema 1.6.0, KG-14 / issue
+	// #1535). Filled ONLY at real declaration sites below — the same loop and
+	// duplicate-name policy as `exportRanges` — so a key here always refers to
+	// a def that physically exists in this file. Re-export bindings further
+	// down add `exportRanges` entries WITHOUT kinds on purpose: the symbol is
+	// declared elsewhere, so its kind must not be fabricated here (queries
+	// surface those as `kind: null`).
+	const exportKinds: Record<string, GraphSymbolKind> = Object.create(null);
 	for (const d of exportedDefs) {
 		exportLines[d.name] = d.startLine;
-		exportRanges[d.name] = { startLine: d.startLine, endLine: d.endLine };
+	}
+	// `exports` and `exportLines` stay exported-only — the "a member of a type is
+	// not a file-level module export" contract must not change. `exportRanges`
+	// is widened to ALL defs for java/kotlin/csharp/cpp/swift so `context_pack`
+	// can return a real member span instead of the "internal symbol — span
+	// unavailable" placeholder (issue #1529 RC-7; cpp/swift per issue #1530).
+	//
+	// The widening is language-scoped because only member-bearing grammars with
+	// non-exported members are wanted in `exportRanges`: admitting every
+	// non-exported def for other grammars would put private
+	// TypeScript/Python/Rust/Go helpers into a persisted, schema-validated graph
+	// field for no benefit. Non-widened grammars keep the original exported-only,
+	// unconditionally-assigned behavior, so their payloads are unchanged.
+	//
+	// The duplicate-name policy below is likewise scoped, and mirrors
+	// `exportLines` rather than diverging from it: among EXPORTED defs both maps
+	// take the last, so they cannot disagree; among non-exported defs (which
+	// never reach `exportLines`) the first wins, so a constructor or a later
+	// overload cannot displace its enclosing type.
+	const isWidenedGrammar = RANGE_WIDENED_GRAMMARS.has(grammarId);
+	// Tracks whether the def currently holding each `exportRanges` slot was
+	// exported. Widening admits non-exported members, so without this an
+	// unexported member could outrank the exported symbol of the same name.
+	const rangeIsExported: Record<string, boolean> = Object.create(null);
+	for (const d of isWidenedGrammar ? facts.defs : exportedDefs) {
+		// Only the widened path needs this. validateGraphNode THROWS on a
+		// non-positive or inverted range and runs during the scan, so one
+		// malformed def would cost the WHOLE FILE — the async builder catches the
+		// throw and drops that file, so every other def in it is lost too — now
+		// that non-exported defs reach this map. It also rejects non-integer
+		// bounds. Non-widened grammars deliberately keep the
+		// pre-existing throw-on-malformed behavior so their payloads stay
+		// byte-identical.
+		if (
+			isWidenedGrammar &&
+			(!Number.isInteger(d.startLine) ||
+				!Number.isInteger(d.endLine) ||
+				d.startLine < 1 ||
+				d.endLine < d.startLine)
+		) {
+			continue;
+		}
+		const next = { startLine: d.startLine, endLine: d.endLine };
+		const prev = exportRanges[d.name];
+		if (isWidenedGrammar && prev !== undefined) {
+			const prevExported = rangeIsExported[d.name] === true;
+			if (d.exported !== prevExported) {
+				// Exported wins outright. `exportLines` is exported-only, so letting
+				// a non-exported member hold the slot desyncs the two maps and makes
+				// context_pack serve a private member's body under the exported name
+				// (a Kotlin `class A { fun process() }` displacing the top-level
+				// `fun process()`).
+				if (!d.exported) continue;
+			} else if (d.exported) {
+				// Two exported defs of the same name (a C# partial class, or a
+				// re-declared type): fall through and let the LAST one win, exactly
+				// as the exported-only `exportLines` above does. Diverging here is
+				// what made `exportRanges` point at the first partial while
+				// `exportLines` pointed at the second.
+			} else {
+				// Two non-exported defs: keep the first in document order. This is
+				// purely positional and does NOT prefer the type — in
+				// `class X { private void Y() {} private class Y {} }` the key `Y`
+				// holds the METHOD's span and the nested type gets no entry, because
+				// the method is declared first. Measured, not assumed. These never
+				// appear in `exportLines`, so there is nothing to stay in sync with.
+				continue;
+			}
+		}
+		exportRanges[d.name] = next;
+		exportKinds[d.name] = d.kind;
+		rangeIsExported[d.name] = d.exported;
 	}
 	const exportsSet = new Set(exports);
 	const isPythonPackageInit =
@@ -2100,7 +2763,6 @@ export async function scanFileAsync(
 	// Derive imports list from tree-sitter facts
 	const imports = facts.imports.map((i) => i.specifier);
 
-	const moduleName = toModuleName(filePath, absoluteRoot);
 	const language = grammarId;
 
 	const node: GraphNode = {
@@ -2109,6 +2771,7 @@ export async function scanFileAsync(
 		exports,
 		...(Object.keys(exportLines).length > 0 ? { exportLines } : {}),
 		...(Object.keys(exportRanges).length > 0 ? { exportRanges } : {}),
+		...(Object.keys(exportKinds).length > 0 ? { exportKinds } : {}),
 		imports,
 		language,
 		mtime: fileStats.mtime.toISOString(),
@@ -2187,6 +2850,21 @@ export async function scanFileAsync(
 	// binding, resolve that binding's specifier to a target file and emit
 	// a symbol→symbol edge.
 	const symbolEdges: SymbolEdge[] = [];
+	const sourceLines = content.split(/\r?\n/);
+	let symbolEdgeValidationFailed = false;
+	const evidenceForLine = (line: number | undefined) => {
+		if (!Number.isInteger(line) || (line ?? 0) < 1) return [];
+		const snippet = sourceLines[(line as number) - 1];
+		if (snippet === undefined) return [];
+		return [
+			{
+				file: moduleName,
+				line: line as number,
+				snippetHash: hashSymbolEdgeSnippet(snippet),
+				extractor: `tree-sitter/${grammarId}`,
+			},
+		];
+	};
 	const localToImported = new Map<
 		string,
 		{ specifier: string; imported: string }
@@ -2225,12 +2903,28 @@ export async function scanFileAsync(
 		if (seenSymbolEdgeKeys.has(key)) continue;
 		seenSymbolEdgeKeys.add(key);
 
-		symbolEdges.push({
-			fromFile: filePath,
-			fromSymbol,
-			toFile: resolvedTarget,
-			toSymbol: mapping.imported,
-		});
+		const evidence = evidenceForLine(ref.line);
+		try {
+			symbolEdges.push(
+				createSymbolEdgeV2(
+					{
+						fromFile: filePath,
+						fromSymbol,
+						toFile: resolvedTarget,
+						toSymbol: mapping.imported,
+					},
+					absoluteRoot,
+					repoRootId,
+					{
+						confidence: evidence.length > 0 ? 0.9 : 0,
+						resolution: evidence.length > 0 ? 'import_binding' : 'unresolved',
+						evidence,
+					},
+				),
+			);
+		} catch {
+			symbolEdgeValidationFailed = true;
+		}
 	}
 	for (const imp of facts.imports) {
 		const packageInitBindings =
@@ -2266,21 +2960,45 @@ export async function scanFileAsync(
 			if (seenSymbolEdgeKeys.has(key)) continue;
 			seenSymbolEdgeKeys.add(key);
 
-			symbolEdges.push({
-				fromFile: filePath,
-				fromSymbol: binding.exported,
-				toFile: resolvedTarget,
-				toSymbol: binding.imported,
-			});
+			const evidence = evidenceForLine(imp.startLine);
+			try {
+				symbolEdges.push(
+					createSymbolEdgeV2(
+						{
+							fromFile: filePath,
+							fromSymbol: binding.exported,
+							toFile: resolvedTarget,
+							toSymbol: binding.imported,
+						},
+						absoluteRoot,
+						repoRootId,
+						{
+							confidence: evidence.length > 0 ? 0.9 : 0,
+							resolution: evidence.length > 0 ? 'import_binding' : 'unresolved',
+							evidence,
+						},
+					),
+				);
+			} catch {
+				symbolEdgeValidationFailed = true;
+			}
 		}
 	}
+	const diagnostics: RepoGraphDiagnostics | undefined =
+		unresolvedImports.length > 0 || symbolEdgeValidationFailed
+			? {
+					...(unresolvedImports.length > 0 ? { unresolvedImports } : {}),
+					...(symbolEdgeValidationFailed
+						? symbolEdgeValidationFailure(moduleName, language)
+						: {}),
+				}
+			: undefined;
 
 	return {
 		node,
 		edges,
 		symbolEdges,
-		diagnostics:
-			unresolvedImports.length > 0 ? { unresolvedImports } : undefined,
+		diagnostics,
 	};
 }
 
@@ -2298,13 +3016,113 @@ export async function scanFileAsync(
  * @returns Complete RepoGraph with nodes and edges
  * @throws Error if workspace validation fails
  */
+/**
+ * Restore the documented `targetKind` invariant: a `'node'` target is a file
+ * that actually became a graph node.
+ *
+ * Import resolution and the workspace walker apply different filters. The
+ * walker prunes `SKIP_DIRECTORIES` (`node_modules`, `dist`, `vendor`, ...) and
+ * unfollowed symlinks; `resolveModuleSpecifier` consults neither, so a real
+ * file inside a skipped directory resolves happily and produced an edge marked
+ * `targetKind: 'node'` pointing at a node that does not exist. Measured on both
+ * the dotted JVM/.NET path (`import node_modules.com.example.Foo;`) and the
+ * pre-existing relative path (`import '../node_modules/pkg/index'`).
+ *
+ * The edge is a real dependency, so it is kept rather than dropped — it is
+ * reclassified to `'asset'`, which already means "a real file that never
+ * becomes a node" and is correctly excluded from in-degree ranking, importer
+ * and dependent queries, and node-existence checks during incremental
+ * validation. Returns the number of edges reclassified.
+ */
+export function reconcileEdgeTargetKinds(graph: RepoGraph): number {
+	// `graph.nodes` is KEYED with forward slashes while `edge.target` and
+	// `node.filePath` carry the platform separator, so on Windows a direct
+	// `Object.hasOwn(graph.nodes, edge.target)` is false for EVERY edge and
+	// would reclassify the whole graph to 'asset' — silently disabling
+	// dead-export, importer and dependent queries. Compare on a normalised form.
+	const known = new Set<string>();
+	const knownFolded = new Set<string>();
+	for (const key of Object.keys(graph.nodes)) {
+		known.add(toComparablePath(key));
+		knownFolded.add(toComparablePath(key).toLowerCase());
+	}
+	for (const node of Object.values(graph.nodes)) {
+		known.add(toComparablePath(node.filePath));
+		knownFolded.add(toComparablePath(node.filePath).toLowerCase());
+	}
+	// Exact match first, case-folded only as a FALLBACK.
+	//
+	// An earlier cut folded case whenever `process.platform === 'win32'`, which
+	// is wrong in both directions: macOS is case-insensitive by default too (CI
+	// caught this — every case-differing edge was demoted to 'asset' on the
+	// macOS shard), and a case-SENSITIVE volume exists on Windows. Case
+	// sensitivity is a property of the filesystem, not the OS, and probing it
+	// per call would be wasteful in a function that runs over every edge.
+	//
+	// Try-exact-then-fold needs no platform knowledge at all. On a
+	// case-insensitive volume the fallback catches the specifier whose casing
+	// differs from disk. On a case-sensitive one, an exact hit is found whenever
+	// the target really is indexed, so the fallback only fires for a target that
+	// is NOT indexed but whose case-variant is — and there the conservative
+	// outcome (keep 'node') is the same one the pre-existing behaviour had.
+	//
+	// The exact-first ORDERING is defensive and is not separately observable:
+	// this is a boolean membership test, not a node lookup, so folding
+	// unconditionally would return the same answer. Verified by mutation —
+	// removing the fallback fails a test, reordering it does not. Do not add a
+	// test for the ordering; there is nothing to assert.
+	const isKnown = (p: string): boolean => {
+		const normalized = toComparablePath(p);
+		return known.has(normalized) || knownFolded.has(normalized.toLowerCase());
+	};
+	let reclassified = 0;
+	for (const edge of graph.edges) {
+		if (edge.targetKind !== 'node') continue;
+		if (isKnown(edge.target)) continue;
+		edge.targetKind = 'asset';
+		reclassified++;
+	}
+	// `symbolEdges` need the same treatment and have no `targetKind` to demote:
+	// a symbol edge is symbol-to-symbol, so an endpoint with no node is simply
+	// unusable. Closeout review found that fixing only `graph.edges` left the
+	// very invariant this function exists to restore violated one field over —
+	// the same file that produced a reconciled `'asset'` edge also produced a
+	// dangling symbol edge. Drop those, matching what `validateFileUpdates`
+	// already does on the incremental path so full and incremental builds agree.
+	if (graph.symbolEdges) {
+		graph.symbolEdges = graph.symbolEdges.filter(
+			(se) => isKnown(se.fromFile) && isKnown(se.toFile),
+		);
+	}
+	return reclassified;
+}
+
+/**
+ * Path key for cross-map comparison.
+ *
+ * Delegates to `normalizeGraphPath` — the SAME normalizer the incremental
+ * validator uses to look an edge target up in `graph.nodes` — so any edge this
+ * leaves at `'node'` is one that lookup can also resolve. A bespoke normalizer
+ * here would let the two disagree on a `./` segment or a doubled separator, and
+ * that disagreement surfaces as a spurious `missing-target-node` and a full
+ * rebuild.
+ *
+ * Case folding on win32 is additional, and necessary: `resolveModuleSpecifier`
+ * builds the target from the literal specifier text and confirms it with
+ * `existsSync`, which is case-insensitive there, while the walker records the
+ * file's real on-disk casing.
+ */
+function toComparablePath(p: string): string {
+	return normalizeGraphPath(p);
+}
+
 export function buildWorkspaceGraph(
 	workspaceRoot: string,
 	options?: BuildWorkspaceGraphOptions,
 ): RepoGraph {
 	validateWorkspace(workspaceRoot);
 
-	const maxFileSize = options?.maxFileSizeBytes ?? 1024 * 1024; // 1MB default
+	const maxFileSize = options?.maxFileSizeBytes ?? DEFAULT_MAX_SOURCE_BYTES;
 	const maxFiles = options?.maxFiles ?? DEFAULT_WALK_FILE_CAP;
 	const walkBudgetMs = options?.walkBudgetMs ?? DEFAULT_WALK_BUDGET_MS;
 	const followSymlinks = options?.followSymlinks ?? false;
@@ -2326,6 +3144,7 @@ export function buildWorkspaceGraph(
 
 	// Create graph with original workspaceRoot form (not absolute path)
 	const graph = createEmptyGraph(workspaceRoot);
+	graph.repoRootId = deriveRepoRootId(absoluteRoot);
 	const stats: ScanStats = {
 		filesScanned: 0,
 		skippedDirs: 0,
@@ -2445,6 +3264,23 @@ export function buildWorkspaceGraph(
 				({ exports, exportLines } = collectExports(
 					_internals.extractGoSymbols(relativePath, absoluteRoot),
 				));
+			} else if (ext === '.dart') {
+				// Dynamic-language hardening (#1531): the AST fail-open path must
+				// not lose export metadata for the new languages (PR #2361 R9).
+				const relativePath = path.relative(absoluteRoot, filePath);
+				({ exports, exportLines } = collectExports(
+					_internals.extractDartSymbols(relativePath, absoluteRoot),
+				));
+			} else if (ext === '.rb' || ext === '.rake' || ext === '.gemspec') {
+				const relativePath = path.relative(absoluteRoot, filePath);
+				({ exports, exportLines } = collectExports(
+					_internals.extractRubySymbols(relativePath, absoluteRoot),
+				));
+			} else if (ext === '.php' || ext === '.phtml') {
+				const relativePath = path.relative(absoluteRoot, filePath);
+				({ exports, exportLines } = collectExports(
+					_internals.extractPhpSymbols(relativePath, absoluteRoot),
+				));
 			}
 
 			parsedImports = _internals.parseFileImports(
@@ -2537,6 +3373,8 @@ export function buildWorkspaceGraph(
 		}
 	}
 
+	reconcileEdgeTargetKinds(graph);
+
 	// Update final metadata with scan stats
 	graph.metadata = {
 		generatedAt: new Date().toISOString(),
@@ -2580,7 +3418,7 @@ export async function buildWorkspaceGraphAsync(
 ): Promise<RepoGraph> {
 	validateWorkspace(workspaceRoot);
 
-	const maxFileSize = options?.maxFileSizeBytes ?? 1024 * 1024;
+	const maxFileSize = options?.maxFileSizeBytes ?? DEFAULT_MAX_SOURCE_BYTES;
 	const maxFiles = options?.maxFiles ?? DEFAULT_WALK_FILE_CAP;
 	const walkBudgetMs = options?.walkBudgetMs ?? DEFAULT_WALK_BUDGET_MS;
 	const followSymlinks = options?.followSymlinks ?? false;
@@ -2596,7 +3434,9 @@ export async function buildWorkspaceGraphAsync(
 		);
 	}
 
+	const repoRootId = deriveRepoRootId(absoluteRoot);
 	const graph = createEmptyGraph(workspaceRoot);
+	graph.repoRootId = repoRootId;
 	const stats: ScanStats = {
 		filesScanned: 0,
 		skippedDirs: 0,
@@ -2648,16 +3488,33 @@ export async function buildWorkspaceGraphAsync(
 	// scan interval bounds event-loop monopolization even when symbol extraction
 	// or its fail-open fallback resolves synchronously (issues #704 and #1144).
 	const seenEdges = new Set<string>();
-	const seenSymbolEdges = new Set<string>();
-	const allSymbolEdges: SymbolEdge[] = [];
+	const symbolEdgesById = new Map<string, SymbolEdge>();
 	let processedSinceYield = 0;
 	for (const filePath of sourceFiles) {
-		const result = await scanFileAsync(
-			filePath,
-			absoluteRoot,
-			maxFileSize,
-			hasManifest,
-		);
+		let result: AsyncScanResult;
+		try {
+			result = await scanFileAsync(
+				filePath,
+				absoluteRoot,
+				maxFileSize,
+				hasManifest,
+				repoRootId,
+			);
+		} catch {
+			mergeDiagnostics(
+				diagnostics,
+				symbolEdgeValidationFailure(
+					toModuleName(filePath, absoluteRoot),
+					getLanguage(filePath),
+				),
+			);
+			stats.skippedFiles++;
+			processedSinceYield++;
+			if (processedSinceYield % ASYNC_SCAN_YIELD_INTERVAL === 0) {
+				await yieldToEventLoop();
+			}
+			continue;
+		}
 		mergeDiagnostics(diagnostics, result.diagnostics);
 		if (result.inputWitness) {
 			pushInputWitness(
@@ -2695,17 +3552,35 @@ export async function buildWorkspaceGraphAsync(
 				}
 				// Aggregate symbolEdges across all files (dedup)
 				for (const symbolEdge of result.symbolEdges) {
-					const key =
-						symbolEdge.fromFile +
-						'\u0000' +
-						symbolEdge.fromSymbol +
-						'\u0000' +
-						symbolEdge.toFile +
-						'\u0000' +
-						symbolEdge.toSymbol;
-					if (!seenSymbolEdges.has(key)) {
-						seenSymbolEdges.add(key);
-						allSymbolEdges.push(symbolEdge);
+					const key = symbolEdge.id as string | undefined;
+					if (!key) {
+						mergeDiagnostics(
+							diagnostics,
+							symbolEdgeValidationFailure(
+								result.node.moduleName,
+								result.node.language,
+							),
+						);
+						continue;
+					}
+					const existing = symbolEdgesById.get(key);
+					if (!existing) {
+						symbolEdgesById.set(key, symbolEdge);
+						continue;
+					}
+					try {
+						symbolEdgesById.set(
+							key,
+							mergeSymbolEdges(existing, symbolEdge, absoluteRoot, repoRootId),
+						);
+					} catch {
+						mergeDiagnostics(
+							diagnostics,
+							symbolEdgeValidationFailure(
+								result.node.moduleName,
+								result.node.language,
+							),
+						);
 					}
 				}
 				stats.filesScanned++;
@@ -2727,9 +3602,12 @@ export async function buildWorkspaceGraphAsync(
 	};
 
 	// Attach symbolEdges when present (schema >= 1.2.0); keep additive.
-	if (allSymbolEdges.length > 0) {
-		graph.symbolEdges = allSymbolEdges;
+	if (symbolEdgesById.size > 0) {
+		graph.symbolEdges = [...symbolEdgesById.values()];
 	}
+	// AFTER symbolEdges are attached: the reconciler prunes symbol edges whose
+	// endpoints have no node, so it has to run once both edge collections exist.
+	reconcileEdgeTargetKinds(graph);
 	// Surface walk-truncation diagnostics (defect A7) — walk-level fields are
 	// set once after the walk, NOT merged per-file (extraction diagnostics are).
 	diagnostics.walkTruncated = stats.truncated;

@@ -24,6 +24,7 @@ import {
 } from '../../../../src/turbo/lean/merge-back';
 import { _internals as worktreeInternals } from '../../../../src/turbo/lean/worktree';
 import type { BunCompatSubprocess } from '../../../../src/utils/bun-compat';
+import { cleanMergeOverlapSnapshot } from '../../../helpers/merge-overlap-fixture';
 
 // ---------------------------------------------------------------------------
 // Mock helpers
@@ -654,24 +655,23 @@ describe('attemptMergeBackFromDirty', () => {
 	const fakePrimary = 'C:\\project-root';
 
 	let savedWorktreeSpawn: typeof worktreeInternals.bunSpawn;
+	let savedOverlapSnapshot: typeof _internals.captureMergeOverlapSnapshot;
 
 	beforeEach(() => {
 		savedWorktreeSpawn = worktreeInternals.bunSpawn;
+		savedOverlapSnapshot = _internals.captureMergeOverlapSnapshot;
+		_internals.captureMergeOverlapSnapshot = async () =>
+			cleanMergeOverlapSnapshot;
 	});
 
 	afterEach(() => {
 		// Restore both DI seams
 		_internals.bunSpawn = realBunSpawn;
+		_internals.captureMergeOverlapSnapshot = savedOverlapSnapshot;
 		worktreeInternals.bunSpawn = savedWorktreeSpawn;
 	});
 
-	/**
-	 * Helper: configure mock bunSpawn for worktree operations AND merge operations.
-	 *
-	 * The worktree functions (autoCommitDirty, cleanUntrackedFiles) use worktree's _internals.bunSpawn.
-	 * The merge function (mergeLaneBranch) uses merge-back's _internals.bunSpawn.
-	 * Both must be set independently.
-	 */
+	/** Helper: configure worktree + merge git seams for dirty merge-back tests. */
 	function setupMocks(opts: {
 		/** git add exit code (autoCommitDirty step 1) */
 		commitAddExit?: number;
@@ -720,7 +720,6 @@ describe('attemptMergeBackFromDirty', () => {
 			return mockProc(0, '', '');
 		};
 
-		// Configure merge-back's bunSpawn (for mergeLaneBranch)
 		_internals.bunSpawn = (_args: string[]) => {
 			return mockProc(mergeExit, '', mergeStderr);
 		};

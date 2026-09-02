@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { eventLinesOf } from '../../tests/helpers/event-lines.js';
 import { handleAcknowledgeSpecDriftCommand } from '../commands/acknowledge-spec-drift';
 
 describe('handleAcknowledgeSpecDriftCommand smoke', () => {
@@ -63,7 +64,8 @@ describe('handleAcknowledgeSpecDriftCommand smoke', () => {
 		)
 			.trim()
 			.split('\n');
-		const event = JSON.parse(events[0]);
+		// #2039: manifest header excluded via parsed type (PRR-022 helper).
+		const event = JSON.parse(eventLinesOf(events.join('\n'))[0] ?? '{}');
 		expect(event.type).toBe('spec_drift_acknowledged');
 		expect(event.acknowledgedBy).toBe('cli');
 		expect(event.transitionId).toEqual(expect.any(String));

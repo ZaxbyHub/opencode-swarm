@@ -1,7 +1,8 @@
 /**
  * Adversarial locking + path traversal tests for phase_complete tool.
- * Targets: lock contention, working_directory path traversal, events.jsonl write failures,
- * extreme phase/summary boundary values.
+ * Targets: plan-lock contention, working_directory path traversal, and extreme
+ * phase/summary boundary values. Core event-store write failures are covered by
+ * phase-complete-store-write-failures.test.ts.
  *
  * These tests complement phase-complete.adversarial.test.ts (sessionID/summary injection)
  * and phase-complete.locking.test.ts (mocked lock behavior).
@@ -11,9 +12,10 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
+import { eventLinesOf } from '../../helpers/event-lines.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 // -----------------------------------------------------------------------
 // Module-level mocks — MUST be before any import of the mocked module
@@ -187,13 +189,13 @@ function writeRetroBundle(directory: string, phaseNumber: number): void {
 		JSON.stringify({
 			schema_version: '1.0.0',
 			task_id: `retro-${phaseNumber}`,
-			created_at: new Date().toISOString(),
-			updated_at: new Date().toISOString(),
+			created_at: '1970-01-01T00:00:00.000Z',
+			updated_at: '1970-01-01T00:00:00.000Z',
 			entries: [
 				{
 					task_id: `retro-${phaseNumber}`,
 					type: 'retrospective',
-					timestamp: new Date().toISOString(),
+					timestamp: '1970-01-01T00:00:00.000Z',
 					agent: 'architect',
 					verdict: 'pass',
 					summary: 'Phase retrospective',
@@ -214,10 +216,13 @@ function writeRetroBundle(directory: string, phaseNumber: number): void {
 	);
 }
 
-// ---------------------------------------------------------------------------
-// Test suite
-// ---------------------------------------------------------------------------
+// --- Test suite -----------------------------------------------------------
 describe('phase_complete adversarial locking + path tests', () => {
+	// #2039: the events store lock is the seam's wx lock — assert no leak.
+	const storeLockGone = () =>
+		expect(fs.existsSync(path.join(tempDir, '.swarm', 'events.lock'))).toBe(
+			false,
+		);
 	let tempDir: string;
 	let originalCwd: string;
 	let eventsPath: string;
@@ -274,10 +279,11 @@ describe('phase_complete adversarial locking + path tests', () => {
 
 	afterEach(() => {
 		process.chdir(originalCwd);
+		// Retried EBUSY/EPERM removal (#2322 lock-release race class).
 		try {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			safeRmRecursive(tempDir);
 		} catch {
-			// ignore
+			/* retries exhausted — leave the dir to the OS */
 		}
 		resetSwarmState();
 	});
@@ -287,26 +293,11 @@ describe('phase_complete adversarial locking + path tests', () => {
 	// =======================================================================
 	describe('Real lock contention', () => {
 		test('second caller gets acquired=false and returns failure (plan.json contention)', async () => {
-			// First call acquires lock
 			const release1 = vi.fn().mockResolvedValue(undefined);
-			const release2 = vi.fn().mockResolvedValue(undefined);
 			const planLockCalls: string[] = [];
 			mockTryAcquireLock.mockImplementation(
-				(_dir: string, filePath: string) => {
-					if (filePath === 'events.jsonl') {
-						return {
-							acquired: true,
-							lock: {
-								filePath: 'events.jsonl',
-								agent: 'phase-complete',
-								taskId: 'phase-complete-events',
-								timestamp: new Date().toISOString(),
-								expiresAt: Date.now() + 300000,
-								_release: release2,
-							},
-						};
-					}
-					// plan.json: first caller gets lock, second gets contention
+				(_dir: string, _filePath: string) => {
+					// plan.json: first caller gets lock, second gets contention.
 					if (planLockCalls.length === 0) {
 						planLockCalls.push('first');
 						return {
@@ -315,8 +306,8 @@ describe('phase_complete adversarial locking + path tests', () => {
 								filePath: 'plan.json',
 								agent: 'phase-complete',
 								taskId: 'phase-complete-plan-first',
-								timestamp: new Date().toISOString(),
-								expiresAt: Date.now() + 300000,
+								timestamp: '1970-01-01T00:00:00.000Z',
+								expiresAt: 300000,
 								_release: release1,
 							},
 						};
@@ -355,8 +346,8 @@ describe('phase_complete adversarial locking + path tests', () => {
 
 			// Only the successful caller may publish a completion event.
 			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
-			const lines = content.split('\n').filter(Boolean);
-			const phaseEvents = lines
+			// #2039: skip the swarm-events-manifest header line.
+			const phaseEvents = eventLinesOf(content)
 				.map((l) => JSON.parse(l))
 				.filter((e: Record<string, unknown>) => e.event === 'phase_complete');
 			expect(phaseEvents.length).toBe(1);
@@ -387,148 +378,6 @@ describe('phase_complete adversarial locking + path tests', () => {
 			// Fail closed: a lock error cannot publish a completion event.
 			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
 			expect(content).toBe('');
-		});
-	});
-
-	// =======================================================================
-	// EVENTS.JSONL WRITE FAILURES
-	// =======================================================================
-	describe('events.jsonl write failures', () => {
-		test('write to a directory (not a file) adds warning but returns success', async () => {
-			// Lock succeeds but events.jsonl is a directory → write throws
-			const release = vi.fn().mockResolvedValue(undefined);
-			const planRelease = vi.fn().mockResolvedValue(undefined);
-			mockTryAcquireLock.mockImplementation(
-				(_dir: string, filePath: string) => {
-					if (filePath === 'events.jsonl') {
-						return {
-							acquired: true,
-							lock: {
-								filePath: 'events.jsonl',
-								agent: 'phase-complete',
-								taskId: 'phase-complete-test',
-								timestamp: new Date().toISOString(),
-								expiresAt: Date.now() + 300000,
-								_release: release,
-							},
-						};
-					}
-					// plan.json also acquired
-					return {
-						acquired: true,
-						lock: {
-							filePath: 'plan.json',
-							agent: 'phase-complete',
-							taskId: 'phase-complete-plan-test',
-							timestamp: new Date().toISOString(),
-							expiresAt: Date.now() + 300000,
-							_release: planRelease,
-						},
-					};
-				},
-			);
-
-			// Replace file with directory
-			fs.rmSync(eventsPath);
-			fs.mkdirSync(eventsPath);
-
-			const result = await executePhaseComplete(
-				{ phase: 1, sessionID: 'test-session' },
-				tempDir,
-			);
-			const parsed = JSON.parse(result);
-
-			// Phase must still report success (write failure → warning, not error)
-			expect(parsed.success).toBe(true);
-			expect(
-				parsed.warnings.some((w: string) =>
-					w.includes('failed to write phase complete event'),
-				),
-			).toBe(true);
-			// Lock must still be released
-			expect(release).toHaveBeenCalledTimes(1);
-		});
-
-		test('read-only filesystem: appendFileSync throws EPERM, warning is added', async () => {
-			const release = vi.fn().mockResolvedValue(undefined);
-			mockTryAcquireLock.mockResolvedValue({
-				acquired: true,
-				lock: {
-					filePath: 'events.jsonl',
-					agent: 'phase-complete',
-					taskId: 'phase-complete-test',
-					timestamp: new Date().toISOString(),
-					expiresAt: Date.now() + 300000,
-					_release: release,
-				},
-			});
-
-			// Mock appendFileSync to throw EPERM — chmod is unreliable as root in CI
-			vi.spyOn(fs, 'appendFileSync').mockImplementationOnce(() => {
-				const err = Object.assign(new Error('EPERM: operation not permitted'), {
-					code: 'EPERM',
-				});
-				throw err;
-			});
-
-			const result = await executePhaseComplete(
-				{ phase: 1, sessionID: 'test-session' },
-				tempDir,
-			);
-			const parsed = JSON.parse(result);
-
-			// Must not throw
-			expect(parsed.success).toBe(true);
-			// Write failure warning must be present
-			expect(
-				parsed.warnings.some((w: string) =>
-					w.includes('failed to write phase complete event'),
-				),
-			).toBe(true);
-		});
-
-		test('events.jsonl missing (deleted after lock acquired) — appendFileSync creates it', async () => {
-			const release = vi.fn().mockResolvedValue(undefined);
-			mockTryAcquireLock.mockResolvedValue({
-				acquired: true,
-				lock: {
-					filePath: 'events.jsonl',
-					agent: 'phase-complete',
-					taskId: 'phase-complete-test',
-					timestamp: new Date().toISOString(),
-					expiresAt: Date.now() + 300000,
-					_release: release,
-				},
-			});
-
-			// Delete events.jsonl after lock acquired but before write
-			// (simulate race between lock acquisition and write)
-			mockTryAcquireLock.mockResolvedValueOnce({
-				acquired: true,
-				lock: {
-					filePath: 'events.jsonl',
-					agent: 'phase-complete',
-					taskId: 'phase-complete-test',
-					timestamp: new Date().toISOString(),
-					expiresAt: Date.now() + 300000,
-					_release: release,
-				},
-			});
-
-			// Delete file
-			fs.rmSync(eventsPath);
-
-			const result = await executePhaseComplete(
-				{ phase: 1, sessionID: 'test-session' },
-				tempDir,
-			);
-			const parsed = JSON.parse(result);
-
-			// appendFileSync creates missing files — should succeed
-			expect(parsed.success).toBe(true);
-			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
-			const event = JSON.parse(content);
-			expect(event.event).toBe('phase_complete');
 		});
 	});
 

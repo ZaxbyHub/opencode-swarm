@@ -19,7 +19,6 @@ import {
 	getInMemoryTrajectory,
 	getTrajectoryForSession,
 	readTrajectory,
-	truncateTrajectoryIfNeeded,
 } from '../trajectory-store';
 import type { TrajectoryEntry } from '../types';
 
@@ -154,7 +153,7 @@ describe('trajectory-store', () => {
 
 			await appendTrajectoryEntry(sessionId, createEntry(1), '/invalid\0path');
 
-			expect(getInMemoryTrajectory(sessionId)).toEqual([]);
+			expect(getInMemoryTrajectory(sessionId, tempDir)).toEqual([]);
 		});
 
 		test('bounds tracked cached sessions with FIFO eviction', async () => {
@@ -164,9 +163,11 @@ describe('trajectory-store', () => {
 				await appendTrajectoryEntry(`session-${i}`, createEntry(1), tempDir);
 			}
 
-			expect(getInMemoryTrajectory('session-0')).toEqual([]);
-			expect(getInMemoryTrajectory('session-1')).toHaveLength(1);
-			expect(getInMemoryTrajectory(`session-${maxSessions}`)).toHaveLength(1);
+			expect(getInMemoryTrajectory('session-0', tempDir)).toEqual([]);
+			expect(getInMemoryTrajectory('session-1', tempDir)).toHaveLength(1);
+			expect(
+				getInMemoryTrajectory(`session-${maxSessions}`, tempDir),
+			).toHaveLength(1);
 		});
 	});
 
@@ -270,109 +271,27 @@ describe('trajectory-store', () => {
 			const entries = await readTrajectory(sessionId, tempDir);
 
 			expect(entries).toHaveLength(1);
-			expect(getInMemoryTrajectory(sessionId)).toHaveLength(1);
+			expect(getInMemoryTrajectory(sessionId, tempDir)).toHaveLength(1);
 		});
 
 		test('getInMemoryTrajectory returns a defensive array copy', async () => {
 			const sessionId = 'test-session-cache-copy';
 			await appendTrajectoryEntry(sessionId, createEntry(1), tempDir);
 
-			const cached = getInMemoryTrajectory(sessionId);
+			const cached = getInMemoryTrajectory(sessionId, tempDir);
 			cached.push(createEntry(2));
 
-			expect(getInMemoryTrajectory(sessionId)).toHaveLength(1);
+			expect(getInMemoryTrajectory(sessionId, tempDir)).toHaveLength(1);
 		});
 	});
 
 	// =========================================================================
-	// truncateTrajectoryIfNeeded Tests
+	// NOTE (issue #2041): the former `truncateTrajectoryIfNeeded` block was
+	// removed with the dead helper. Disk bounding is now enforced BY THE
+	// PRODUCTION APPEND PATH — covered by trajectory-store-bounds.test.ts
+	// (append-time byte ceiling + check-interval line compaction, newest-
+	// window retention, checkpoint ratchet).
 	// =========================================================================
-
-	describe('truncateTrajectoryIfNeeded', () => {
-		test('does nothing when under limit', async () => {
-			const sessionId = 'test-session-under';
-			const trajectoryPath = getTrajectoryFilePath(sessionId);
-
-			// Write 3 entries (under limit of 5)
-			const dir = path.dirname(trajectoryPath);
-			fs.mkdirSync(dir, { recursive: true });
-			fs.writeFileSync(trajectoryPath, '{"step":1}\n{"step":2}\n{"step":3}\n');
-
-			await truncateTrajectoryIfNeeded(sessionId, tempDir, 5);
-
-			const content = fs.readFileSync(trajectoryPath, 'utf-8');
-			const lines = content.split('\n').filter((l) => l.trim());
-			expect(lines.length).toBe(3);
-		});
-
-		test('truncates oldest entries when over limit', async () => {
-			const sessionId = 'test-session-over';
-			const trajectoryPath = getTrajectoryFilePath(sessionId);
-
-			// Write 10 entries
-			const dir = path.dirname(trajectoryPath);
-			fs.mkdirSync(dir, { recursive: true });
-			const lines: string[] = [];
-			for (let i = 1; i <= 10; i++) {
-				lines.push(`{"step":${i},"agent":"agent${i}"}`);
-			}
-			fs.writeFileSync(trajectoryPath, `${lines.join('\n')}\n`);
-
-			// Truncate to max 6 lines (should keep floor(6/2) = 3 newest)
-			await truncateTrajectoryIfNeeded(sessionId, tempDir, 6);
-
-			const content = fs.readFileSync(trajectoryPath, 'utf-8');
-			const remaining = content
-				.split('\n')
-				.filter((l) => l.trim())
-				.map((l) => JSON.parse(l).step);
-
-			// Should keep the newest 3 entries (steps 8, 9, 10)
-			expect(remaining).toEqual([8, 9, 10]);
-		});
-
-		test('keeps at least 1 entry when truncating', async () => {
-			const sessionId = 'test-session-one';
-			const trajectoryPath = getTrajectoryFilePath(sessionId);
-
-			// Write 5 entries
-			const dir = path.dirname(trajectoryPath);
-			fs.mkdirSync(dir, { recursive: true });
-			fs.writeFileSync(
-				trajectoryPath,
-				'{"step":1}\n{"step":2}\n{"step":3}\n{"step":4}\n{"step":5}\n',
-			);
-
-			// Truncate to max 2 (keepCount = floor(2/2) = 1)
-			await truncateTrajectoryIfNeeded(sessionId, tempDir, 2);
-
-			const content = fs.readFileSync(trajectoryPath, 'utf-8');
-			const remaining = content.split('\n').filter((l) => l.trim());
-			expect(remaining.length).toBe(1);
-			expect(JSON.parse(remaining[0]).step).toBe(5); // newest
-		});
-
-		test('handles missing file gracefully', async () => {
-			// Should not throw
-			await expect(
-				truncateTrajectoryIfNeeded('nonexistent-session', tempDir, 10),
-			).resolves.toBeUndefined();
-		});
-
-		test('handles empty file gracefully', async () => {
-			const sessionId = 'test-session-empty-trunc';
-			const trajectoryPath = getTrajectoryFilePath(sessionId);
-
-			const dir = path.dirname(trajectoryPath);
-			fs.mkdirSync(dir, { recursive: true });
-			fs.writeFileSync(trajectoryPath, '');
-
-			await truncateTrajectoryIfNeeded(sessionId, tempDir, 5);
-
-			const content = fs.readFileSync(trajectoryPath, 'utf-8');
-			expect(content).toBe('');
-		});
-	});
 
 	// =========================================================================
 	// getTrajectoryForSession Tests (alias)
@@ -454,10 +373,6 @@ describe('trajectory-store', () => {
 				readTrajectory('session', '/invalid\x00path'),
 			).resolves.toEqual([]);
 
-			await expect(
-				truncateTrajectoryIfNeeded('session', '/invalid\x00path', 10),
-			).resolves.toBeUndefined();
-
 			await expect(getCurrentStep('session', '/invalid\x00path')).resolves.toBe(
 				0,
 			);
@@ -473,20 +388,12 @@ describe('trajectory-store', () => {
 				[],
 			);
 
-			await expect(
-				truncateTrajectoryIfNeeded('session', '/bad\x00path', 10),
-			).resolves.toBeUndefined();
-
 			await expect(getCurrentStep('session', '/bad\x00path')).resolves.toBe(0);
 		});
 
 		test('path traversal attempts in session ID are handled safely', async () => {
 			// Even if a path traversal were attempted via session ID,
 			// the non-blocking error handling should prevent crashes
-			await expect(
-				truncateTrajectoryIfNeeded('../traversal', tempDir, 10),
-			).resolves.toBeUndefined();
-
 			await expect(readTrajectory('../traversal', tempDir)).resolves.toEqual(
 				[],
 			);
@@ -532,28 +439,35 @@ describe('trajectory-store', () => {
 	// =========================================================================
 
 	describe('integration', () => {
-		test('full workflow: append, read, truncate, read again', async () => {
+		test('full workflow: append beyond the line budget, compact, read again', async () => {
 			const sessionId = 'test-session-integration';
+			const maxLines = 4;
 
-			// Append entries
-			for (let i = 1; i <= 5; i++) {
+			// 26 appends: the 25th trips the check-interval line-count check,
+			// which compacts 25 lines down to the newest floor(4/2) = 2; the
+			// 26th append then lands on the compacted file.
+			for (let i = 1; i <= 26; i++) {
 				await appendTrajectoryEntry(
 					sessionId,
 					createEntry(i, { agent: `agent-${i}` }),
 					tempDir,
+					maxLines,
 				);
 			}
 
-			let entries = await readTrajectory(sessionId, tempDir);
-			expect(entries.length).toBe(5);
+			const trajectoryPath = getTrajectoryFilePath(sessionId);
+			const diskLines = fs
+				.readFileSync(trajectoryPath, 'utf-8')
+				.split('\n')
+				.filter((l) => l.trim().length > 0);
+			expect(diskLines.length).toBe(3); // 2 retained + 1 post-compaction
 
-			// Truncate
-			await truncateTrajectoryIfNeeded(sessionId, tempDir, 3);
+			const entries = await readTrajectory(sessionId, tempDir);
+			expect(entries.map((e) => e.step)).toEqual([24, 25, 26]); // newest
 
-			// Read again
-			entries = await readTrajectory(sessionId, tempDir);
-			expect(entries.length).toBe(1); // floor(3/2) = 1
-			expect(entries[0].step).toBe(5); // newest
+			// The disk bound holds on the FILE, not just the cache.
+			const cached = getInMemoryTrajectory(sessionId, tempDir);
+			expect(cached.length).toBeLessThanOrEqual(maxLines);
 		});
 
 		test('multiple sessions have independent trajectories', async () => {

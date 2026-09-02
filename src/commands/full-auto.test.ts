@@ -162,27 +162,26 @@ describe('handleFullAutoCommand', () => {
 	});
 
 	describe('Edge Cases', () => {
-		it('rejects an invalid mode token after "on"', async () => {
+		it('rejects extra arguments after "on"', async () => {
 			getSession().fullAutoMode = false;
 			const result = await handleFullAutoCommand(
 				tmpDir,
 				['on', 'extra', 'ignored'],
 				testSessionId,
 			);
-			expect(result).toContain('invalid Full-Auto mode');
-			expect(result).toContain('assisted, supervised, strict');
+			expect(result).toContain('Usage: `on [assisted|supervised|strict]`');
 			expect(getSession().fullAutoMode).toBe(false);
 		});
 
-		it('treats unknown arguments as toggle', async () => {
+		it('rejects unknown arguments without toggling', async () => {
 			getSession().fullAutoMode = false;
 			const result = await handleFullAutoCommand(
 				tmpDir,
 				['invalid'],
 				testSessionId,
 			);
-			expect(result).toContain('Full-Auto Mode enabled');
-			expect(getSession().fullAutoMode).toBe(true);
+			expect(result).toContain('Exact grammar');
+			expect(getSession().fullAutoMode).toBe(false);
 		});
 
 		it('does not modify unrelated session properties', async () => {

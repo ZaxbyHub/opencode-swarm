@@ -133,7 +133,7 @@ before/after. The prune is:
 .swarm/telemetry.jsonl
 ```
 
-Line-delimited JSON. Auto-rotated at 10 MB (`src/telemetry.ts:161`).
+Line-delimited JSON. Auto-rotated at 10 MB (`src/telemetry.ts:438`).
 
 ### Event Schema
 
@@ -198,14 +198,16 @@ Every `delegation_end` event includes token and cost fields:
 | `model` | Model id used for attribution when known |
 | `gate` | Delegation gate/reason when known |
 | `retry_index` | Transient retry count for the invocation window when known |
+| `cost_evidence` | Bounded fixed-shape provider reports and normalized estimates, including source path, currency, usage, and reason |
+| `evidence_status` | `complete` only when a compatible USD amount is available; otherwise `inconclusive` |
 
-Provider-reported cost wins. If only usage is available, configure `pricing.models` to enable estimates. Older telemetry lines without these fields are still readable and aggregate as unavailable.
+Provider-reported cost wins only when its currency is explicitly known and compatible. If only usage is available, configure `pricing.models` to enable estimates. Conflicting or unknown-currency reports remain visible in `cost_evidence` while the legacy projection stays unavailable. Append-only `delegation_cost_correction` lines replace the effective monetary and token snapshot by monotonic version; they never add another delegation. Older telemetry lines remain readable as legacy evidence.
 
 ### Fire-and-Forget
 
 Telemetry never blocks the caller. Emit errors are silently swallowed — a failed append won't break a phase. This is deliberate: a broken telemetry write must not fail a phase.
 
-For in-process hooks, register a listener with `addTelemetryListener()` (`src/telemetry.ts:151`).
+For in-process hooks, register a listener with `addTelemetryListener()` (`src/telemetry.ts:414`).
 
 ---
 

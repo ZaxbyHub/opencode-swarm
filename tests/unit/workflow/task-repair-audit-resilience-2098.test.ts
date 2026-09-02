@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin/tool';
-import { tryAcquireLock } from '../../../src/parallel/file-locks';
 import { resetStartupLedgerCheck } from '../../../src/plan/manager';
 import { resetSwarmState } from '../../../src/state';
 import { executeUpdateTaskStatus } from '../../../src/tools/update-task-status';
@@ -14,6 +13,23 @@ import {
 	seedSettledRepairState,
 	TASK_ID,
 } from '../../helpers/task-repair-2098-fixtures';
+
+/**
+ * #2039: the events store lock is now the seam-owned `.swarm/events.lock`
+ * (`openSync` wx create, stale-broken after 5 minutes). The former
+ * `tryAcquireLock(..., 'events.jsonl', ...)` proper-lockfile calls are gone,
+ * so contention is simulated by creating the lock file directly and removing
+ * it to release.
+ */
+function holdStoreLock(dir: string): void {
+	const lockPath = path.join(dir, '.swarm', 'events.lock');
+	const fd = fs.openSync(lockPath, 'wx');
+	fs.closeSync(fd);
+}
+
+function releaseStoreLock(dir: string): void {
+	fs.rmSync(path.join(dir, '.swarm', 'events.lock'), { force: true });
+}
 
 describe('issue #2098 task-repair audit-event resilience (FB-001)', () => {
 	let directory: string;
@@ -95,17 +111,13 @@ describe('issue #2098 task-repair audit-event resilience (FB-001)', () => {
 		fs.mkdirSync(swarmDir, { recursive: true });
 		if (!fs.existsSync(eventsPath)) fs.writeFileSync(eventsPath, '');
 
-		// Externally hold the events.jsonl lock so ensureAuditEvent's internal
-		// tryAcquireLock call fails during the repair's audit-event step. Because
-		// the fix commits the WAL to COMMITTED *before* calling ensureAuditEvent,
-		// the WAL should already be COMMITTED on disk when this throws.
-		const externalLock = await tryAcquireLock(
-			directory,
-			'events.jsonl',
-			'external-holder',
-			'blocking-audit',
-		);
-		expect(externalLock.acquired).toBe(true);
+		// Externally hold the events store lock so the audit event append
+		// through the core event seam fails with CORE_EVENT_STORE_LOCKED
+		// (mapped to TASK_REPAIR_AUDIT_LOCKED) during the repair's audit-event
+		// step. Because the fix commits the WAL to COMMITTED *before* calling
+		// ensureAuditEvent, the WAL should already be COMMITTED on disk when
+		// this throws.
+		holdStoreLock(directory);
 
 		const failed = await executeUpdateTaskStatus(
 			repairArgs(),
@@ -125,9 +137,7 @@ describe('issue #2098 task-repair audit-event resilience (FB-001)', () => {
 		// Release the external lock and retry. The retry must succeed via the
 		// alreadyApplied idempotent path (workflowMatchesCommittedRepair), not be
 		// fenced by a stale PREPARED WAL requiring manual recovery.
-		if (externalLock.acquired) {
-			await externalLock.lock._release?.();
-		}
+		releaseStoreLock(directory);
 
 		const retry = await executeUpdateTaskStatus(
 			repairArgs(),
@@ -161,16 +171,10 @@ describe('issue #2098 task-repair audit-event resilience (FB-001)', () => {
 		fs.mkdirSync(swarmDir, { recursive: true });
 		if (!fs.existsSync(eventsPath)) fs.writeFileSync(eventsPath, '');
 
-		// Externally hold the events.jsonl lock so the initial repair call
+		// Externally hold the events store lock so the initial repair call
 		// commits the WAL but fails to write the audit event (same setup as the
 		// lock-ordering test above).
-		const externalLock = await tryAcquireLock(
-			directory,
-			'events.jsonl',
-			'external-holder',
-			'blocking-audit-lazy',
-		);
-		expect(externalLock.acquired).toBe(true);
+		holdStoreLock(directory);
 
 		const failed = await executeUpdateTaskStatus(
 			repairArgs(),
@@ -189,7 +193,7 @@ describe('issue #2098 task-repair audit-event resilience (FB-001)', () => {
 		const contentBeforeRecovery = fs.readFileSync(eventsPath, 'utf-8');
 		expect(contentBeforeRecovery).not.toContain('task_workflow_repaired');
 
-		await externalLock.lock._release?.();
+		releaseStoreLock(directory);
 
 		// Do NOT go through executeUpdateTaskStatus's own repair/force path here.
 		// Call the lazy-recovery entrypoint directly, exactly as
@@ -253,20 +257,14 @@ describe('issue #2098 task-repair audit-event resilience (FB-001)', () => {
 
 		// Now simulate the steady state: some unrelated tool call touches this
 		// task and triggers lazy recovery (recoverPreparedTaskRepair) while
-		// another process happens to be holding the events.jsonl lock for an
-		// unrelated write. Because the audit event is already durably present,
-		// the fixed ensureAuditEvent must find it via the pre-lock read and
-		// return WITHOUT ever calling tryAcquireLock. The pre-fix
-		// (unconditional-lock-then-check) version would call tryAcquireLock
-		// here, fail because the lock is externally held, and throw
+		// another process happens to be holding the events store lock for an
+		// unrelated write (#2039: `.swarm/events.lock`). Because the audit
+		// event is already durably present, the fixed ensureAuditEvent must
+		// find it via the authority-index-first read and return WITHOUT ever
+		// acquiring the store lock. A version that locked before checking
+		// would fail the acquisition here and throw
 		// TASK_REPAIR_AUDIT_LOCKED.
-		const externalLock = await tryAcquireLock(
-			directory,
-			'events.jsonl',
-			'external-holder',
-			'steady-state-unrelated-write',
-		);
-		expect(externalLock.acquired).toBe(true);
+		holdStoreLock(directory);
 
 		try {
 			const recovered = await recoverPreparedTaskRepair(
@@ -278,7 +276,7 @@ describe('issue #2098 task-repair audit-event resilience (FB-001)', () => {
 			// in plan state, so recovery reports null (not an error).
 			expect(recovered).toBeNull();
 		} finally {
-			if (externalLock.acquired) await externalLock.lock._release?.();
+			releaseStoreLock(directory);
 		}
 	});
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { storeLaneOutput } from '../../../src/background/lane-output-store';
@@ -61,6 +61,7 @@ const DIFF_STATS_BY_TIER = {
 
 function tempRoot(): string {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), 'trigger-eval-')));
+	mkdirSync(join(root, '.git'), { recursive: true });
 	tempDirs.push(root);
 	return root;
 }
@@ -88,8 +89,8 @@ async function recordCompletedLane(
 	const correlationId = `${input.batchId}-${input.laneId}-session`;
 	const header =
 		input.mode === 'swarm-pr-review:base'
-			? '[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence'
-			: '[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence';
+			? '[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags'
+			: '[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags';
 	const cleanRows = (input.ownedWorkflowLanes ?? [input.workflowLane])
 		.map(
 			(family) =>
@@ -110,6 +111,7 @@ async function recordCompletedLane(
 		batchId: input.batchId,
 		laneId: input.laneId,
 		mode: input.mode,
+		prReviewLegacyTranscriptCompatibility: true,
 		workflowLane: input.workflowLane,
 		ownedWorkflowLanes: input.ownedWorkflowLanes,
 		workspace: {

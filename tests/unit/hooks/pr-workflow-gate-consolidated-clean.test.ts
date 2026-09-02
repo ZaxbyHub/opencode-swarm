@@ -17,10 +17,10 @@ import { prReviewDiscoveryArtifactCoversLane } from '../../../src/hooks/pr-workf
  */
 
 const MICRO_HEADER =
-	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence';
+	'[CANDIDATE] | candidate_id | micro_lane | severity | category | file:line | claim | invariant_violated | evidence_summary | confidence | risk_impact | risk_tags';
 
 const BASE_HEADER =
-	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence';
+	'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags';
 
 describe('consolidated lane mixed CANDIDATE + CLEAN (issue #2131 finding 1b)', () => {
 	test('base consolidated lane: CANDIDATE for one obligation + CLEAN for two siblings covers all three', () => {

@@ -6,16 +6,16 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
+import { newestEventLine } from '../../helpers/event-lines.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { freezeClock } from '../../helpers/test-clock';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 vi.mock('../../../src/parallel/file-locks', () => ({
 	tryAcquireLock: vi.fn(),
 }));
-
 vi.mock('../../../src/evidence/manager', () => ({
 	listEvidenceTaskIds: vi.fn().mockResolvedValue([]),
 	loadEvidence: vi.fn().mockImplementation((_dir: string, taskId: string) => {
@@ -202,6 +202,9 @@ function writeRetroBundle(directory: string, phaseNumber: number): void {
 	);
 }
 
+// #2039: line 1 is the swarm-events-manifest header — newest EVENT line.
+const newestEvent = (p: string): Record<string, unknown> =>
+	JSON.parse(newestEventLine(fs.readFileSync(p, 'utf-8')));
 describe('phase_complete adversarial trailing groups', () => {
 	let tempDir: string;
 	let originalCwd: string;
@@ -268,10 +271,11 @@ describe('phase_complete adversarial trailing groups', () => {
 	afterEach(() => {
 		restoreClock();
 		process.chdir(originalCwd);
+		// Retried EBUSY/EPERM removal (#2322 lock-release race class).
 		try {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			safeRmRecursive(tempDir);
 		} catch {
-			// ignore
+			/* retries exhausted — leave the dir to the OS */
 		}
 		resetSwarmState();
 	});
@@ -292,8 +296,7 @@ describe('phase_complete adversarial trailing groups', () => {
 			expect(afterPrefix.length).toBe(500);
 			expect(afterPrefix).toBe('A'.repeat(500));
 
-			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
-			const event = JSON.parse(content);
+			const event = newestEvent(eventsPath);
 			expect(event.event).toBe('phase_complete');
 			expect(event.summary).toBe('A'.repeat(500));
 			expect(event.summary.length).toBe(500);
@@ -310,8 +313,7 @@ describe('phase_complete adversarial trailing groups', () => {
 
 			expect(parsed.success).toBe(true);
 
-			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
-			const event = JSON.parse(content);
+			const event = newestEvent(eventsPath);
 			expect(event.summary).toBe('X'.repeat(500));
 			expect(event.summary.length).toBe(500);
 		});
@@ -327,8 +329,7 @@ describe('phase_complete adversarial trailing groups', () => {
 
 			expect(parsed.success).toBe(true);
 
-			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
-			const event = JSON.parse(content);
+			const event = newestEvent(eventsPath);
 			expect(event.summary).toBe(exactSummary);
 			expect(event.summary.length).toBe(500);
 		});
@@ -360,8 +361,7 @@ describe('phase_complete adversarial trailing groups', () => {
 
 			expect(parsed.success).toBe(true);
 
-			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
-			const event = JSON.parse(content);
+			const event = newestEvent(eventsPath);
 			expect(event.summary).toBe('');
 		});
 
@@ -378,8 +378,7 @@ describe('phase_complete adversarial trailing groups', () => {
 
 			expect(parsed.success).toBe(true);
 
-			const content = fs.readFileSync(eventsPath, 'utf-8').trim();
-			const event = JSON.parse(content);
+			const event = newestEvent(eventsPath);
 			expect(event.summary).toBeNull();
 		});
 	});
@@ -427,7 +426,11 @@ describe('phase_complete adversarial trailing groups', () => {
 			const parsed = JSON.parse(result);
 
 			expect(parsed.success).toBe(true);
-			expect(eventsRelease).toHaveBeenCalledTimes(1);
+			// #2039: the events store lock is the seam's wx lock (released via
+			// unlinkSync-in-finally, no leak); plan.json still uses _release().
+			expect(fs.existsSync(path.join(tempDir, '.swarm', 'events.lock'))).toBe(
+				false,
+			);
 			expect(planRelease).toHaveBeenCalledTimes(1);
 		});
 
@@ -459,7 +462,7 @@ describe('phase_complete adversarial trailing groups', () => {
 	});
 
 	describe('Multi-session phase isolation under adversarial calls', () => {
-		test('two different sessions, same phase — both succeed with correct agent sets', async () => {
+		test('two different sessions, same phase — preserve agent sets across a stale concurrent commit', async () => {
 			const sessionA = ensureAgentSession('session-A', 'architect', tempDir);
 			sessionA.phaseAgentsDispatched = new Set(['coder']);
 			sessionA.lastPhaseCompleteTimestamp = 0;
@@ -476,8 +479,20 @@ describe('phase_complete adversarial trailing groups', () => {
 			const pA = JSON.parse(rA);
 			const pB = JSON.parse(rB);
 
-			expect(pA.success).toBe(true);
-			expect(pB.success).toBe(true);
+			expect(pA.agentsDispatched).toEqual(['coder', 'reviewer']);
+			expect(pB.agentsDispatched).toEqual(['coder', 'reviewer']);
+			const failures = [pA, pB].filter((result) => !result.success);
+			// A concurrent loser must retry after the winner changes the evidence snapshot.
+			// It can also fail closed during initial directive preflight while the
+			// winner briefly owns the receipt-ledger lock.
+			expect(failures.length).toBeLessThan(2);
+			for (const failure of failures) {
+				expect([
+					'PHASE_PREFLIGHT_STALE',
+					'PHASE_COMMIT_LOCKED',
+					'DIRECTIVE_GATE_FAILED_CLOSED',
+				]).toContain(failure.reason);
+			}
 		});
 	});
 });

@@ -21,6 +21,11 @@
  * Stateless by design: it re-parses the prompt rather than relying on
  * cross-hook mutable state, so it is safe under parallel delegations. Fail-open:
  * never throws, never blocks.
+ *
+ * Issue #2045: the reconciliation itself lives in {@link reconcileShownDirectives}
+ * so lane collections (`collectLaneDelegateAcks`, keyed by the lane session's
+ * durable `delegate_directive` memberships) and Task collections share ONE
+ * implementation — not a second lifecycle copy.
  */
 
 import { appendFile, mkdir } from 'node:fs/promises';
@@ -38,7 +43,11 @@ import {
 	parseDelegateDirectiveTraceId,
 } from './knowledge-injector.js';
 import { readLinkPointer } from './knowledge-link.js';
-import { validateAndCommitTerminalBatch } from './knowledge-receipt-ledger.js';
+import {
+	queryLiveMemberships,
+	type ReceiptMembership,
+	validateAndCommitTerminalBatch,
+} from './knowledge-receipt-ledger.js';
 import {
 	type ReceiptItem,
 	validateReceipt,
@@ -111,25 +120,55 @@ export interface CollectDelegateAcksResult {
 	};
 }
 
-/**
- * Core reconciliation used by both the runtime hook and tests. Returns a summary
- * of what was emitted. Never throws.
- */
-export async function collectDelegateAcks(params: {
+/** A directive proven shown to a delegate, with the priority it was shown at. */
+export interface ShownDirective {
+	id: string;
+	priority: string;
+}
+
+export interface ReconcileShownDirectivesParams {
 	directory: string;
-	prompt: string;
+	/** Directives proven shown (anti-spoofing scope); never trust the ack list. */
+	shown: readonly ShownDirective[];
+	/**
+	 * Retrieval trace the directives were shown under. `undefined` marks a
+	 * legacy unverifiable prompt (pre-#1849): no receipt validation, no
+	 * terminals, no fabricated trace.
+	 */
+	traceId?: string;
 	transcript: string;
 	agent: string;
-	sessionId?: string;
+	/** Host session the shown-set membership is bound to (V2 authority). */
+	sessionId: string;
 	taskId?: string;
-}): Promise<CollectDelegateAcksResult> {
+	/**
+	 * Replay mode (issue #2045 crash recovery): the AUTHORITATIVE receipts
+	 * (validator/ledger-committed ACK terminals, unacknowledged-critical
+	 * violations) still run — the ledger dedupes them — but the audit-only
+	 * `unacknowledged` NON-critical observation is exactly-once-at-emit (it
+	 * bypasses the ledger and would double-append on replay).
+	 */
+	replay?: boolean;
+}
+
+/**
+ * Shared reconciliation core (issue #2045): reconcile a proven-shown directive
+ * set against the ack markers in a transcript. Used by the Task
+ * `tool.execute.after` adapter (shown-set parsed from the delegation prompt)
+ * and by lane terminal observations (shown-set from the receipt ledger's
+ * session-bound `delegate_directive` memberships). Returns a summary of what
+ * was emitted. Never throws.
+ */
+export async function reconcileShownDirectives(
+	params: ReconcileShownDirectivesParams,
+): Promise<CollectDelegateAcksResult> {
 	const result: CollectDelegateAcksResult = {
 		emitted: [],
 		unacknowledgedCriticals: [],
 		unacknowledgedNonCritical: [],
 	};
 	try {
-		const shown = parseDelegateDirectiveBlock(params.prompt);
+		const shown = params.shown;
 		if (shown.length === 0) return result;
 
 		const shownById = new Map(shown.map((d) => [d.id, d]));
@@ -141,28 +180,18 @@ export async function collectDelegateAcks(params: {
 		const ackedIds = new Set<string>();
 		const violatedIds = new Set<string>();
 		const sessionId = params.sessionId;
-		if (!sessionId) {
-			result.unverifiable = {
-				code: 'missing_session_id',
-				detail: 'Delegate acknowledgments require a real host session id',
-			};
-			return result;
-		}
-		const taskId = params.taskId ?? extractTaskId(params.prompt);
-		// (#1849 RC-4/R2) Recover the ORIGINAL retrieval trace_id from the
-		// directive block instead of minting an untied one. This links ack events
-		// back to the delegate retrieval's `retrieved` event, which the shared
-		// receipt validator requires (trace-existence + cited-ID membership). Fall
-		// back to a fresh trace only for legacy prompts without the trace header.
-		const recoveredTraceId = parseDelegateDirectiveTraceId(params.prompt);
-		const traceId = recoveredTraceId ?? 'legacy-unverifiable';
+		const taskId = params.taskId;
+		// Original trace identity: the recovered trace, or the legacy-unverifiable
+		// tombstone value legacy prompts have always carried on their (audit-only)
+		// `unacknowledged` events.
+		const traceId = params.traceId ?? 'legacy-unverifiable';
 		// (#PRR-008) Legacy prompts (no trace_id header) have no matching `retrieved`
 		// event, so validateReceipt would ALWAYS return trace_not_found and drop
 		// every ack — then the unacknowledged-critical loop would falsely escalate
 		// criticals the delegate DID ack. For legacy prompts, skip validation and
 		// emit acks directly (the pre-#1849 behavior). Validation only applies when
 		// a real directive-block trace_id was recovered.
-		const isLegacyPrompt = recoveredTraceId === undefined;
+		const isLegacyPrompt = params.traceId === undefined;
 		let cohortId: string | undefined;
 		let linkId: string | undefined;
 		try {
@@ -403,6 +432,7 @@ export async function collectDelegateAcks(params: {
 		for (const [id, directive] of shownById) {
 			if (directive.priority === 'critical') continue;
 			if (ackedIds.has(id)) continue;
+			if (params.replay === true) continue;
 			result.unacknowledgedNonCritical.push(id);
 			silentEvents.push({
 				type: 'unacknowledged',
@@ -429,6 +459,147 @@ export async function collectDelegateAcks(params: {
 		// fail-open
 	}
 	return result;
+}
+
+/**
+ * Core reconciliation used by both the runtime hook and tests. Returns a summary
+ * of what was emitted. Never throws.
+ */
+export async function collectDelegateAcks(params: {
+	directory: string;
+	prompt: string;
+	transcript: string;
+	agent: string;
+	sessionId?: string;
+	taskId?: string;
+}): Promise<CollectDelegateAcksResult> {
+	const shown = parseDelegateDirectiveBlock(params.prompt);
+	if (shown.length === 0) {
+		return {
+			emitted: [],
+			unacknowledgedCriticals: [],
+			unacknowledgedNonCritical: [],
+		};
+	}
+	const sessionId = params.sessionId;
+	if (!sessionId) {
+		return {
+			emitted: [],
+			unacknowledgedCriticals: [],
+			unacknowledgedNonCritical: [],
+			unverifiable: {
+				code: 'missing_session_id',
+				detail: 'Delegate acknowledgments require a real host session id',
+			},
+		};
+	}
+	// (#1849 RC-4/R2) Recover the ORIGINAL retrieval trace_id from the
+	// directive block instead of minting an untied one. This links ack events
+	// back to the delegate retrieval's `retrieved` event, which the shared
+	// receipt validator requires (trace-existence + cited-ID membership). Fall
+	// back to a fresh trace only for legacy prompts without the trace header.
+	const traceId = parseDelegateDirectiveTraceId(params.prompt) ?? undefined;
+	return reconcileShownDirectives({
+		directory: params.directory,
+		shown,
+		traceId,
+		transcript: params.transcript,
+		agent: params.agent,
+		sessionId,
+		taskId: params.taskId ?? extractTaskId(params.prompt),
+	});
+}
+
+export interface CollectLaneDelegateAcksResult
+	extends CollectDelegateAcksResult {
+	/**
+	 * Phases recorded on the lane session's `delegate_directive` memberships
+	 * (issue #2045). The reviewer verdict reconciliation windows by this phase.
+	 */
+	phases: string[];
+}
+
+/**
+ * Lane-side delegate-ack reconciliation (issue #2045). Task delegations are
+ * reconciled by the `tool.execute.after` hook; lane outputs never pass through
+ * that hook, so this variant derives the proven-shown set from the receipt
+ * ledger's session-bound `delegate_directive` memberships — the durable record
+ * of exactly what the transform-path injector displayed to the lane session —
+ * and runs the SAME shared core. Idempotent per trace: replayed settlements
+ * hit the validator's idempotency, never double terminals.
+ *
+ * `sessionId` MUST be the lane SUBAGENT session id (memberships bind to the
+ * child session); a parent-session id queries zero rows by design.
+ */
+export async function collectLaneDelegateAcks(params: {
+	directory: string;
+	sessionId: string;
+	agent: string;
+	transcript: string;
+	/**
+	 * Replay mode (issue #2045 crash recovery): set by the lifecycle module's
+	 * duplicate-settle path so the ledger-committed receipts still close while
+	 * the audit-only non-critical observation stays exactly-once-at-emit.
+	 */
+	replay?: boolean;
+}): Promise<CollectLaneDelegateAcksResult> {
+	const empty: CollectLaneDelegateAcksResult = {
+		emitted: [],
+		unacknowledgedCriticals: [],
+		unacknowledgedNonCritical: [],
+		phases: [],
+	};
+	try {
+		const memberships = await queryLiveMemberships(params.directory, {
+			session_id: params.sessionId,
+			exposure_kind: 'delegate_directive',
+			include_terminal: true,
+		});
+		if (!memberships.ok) return empty;
+		const byTrace = new Map<string, ReceiptMembership[]>();
+		const phases = new Set<string>();
+		for (const membership of memberships.memberships) {
+			const group = byTrace.get(membership.trace_id) ?? [];
+			group.push(membership);
+			byTrace.set(membership.trace_id, group);
+			if (membership.phase) phases.add(membership.phase);
+		}
+		const combined: CollectDelegateAcksResult = {
+			emitted: [],
+			unacknowledgedCriticals: [],
+			unacknowledgedNonCritical: [],
+		};
+		for (const [traceId, group] of byTrace) {
+			const taskId = group.find((m) => m.task_id)?.task_id;
+			const outcome = await reconcileShownDirectives({
+				directory: params.directory,
+				shown: group.map((m) => ({
+					id: m.entry_id,
+					// The membership's `critical` flag is the authoritative
+					// priority the injector computed at display time
+					// (`directive_priority === 'critical' && isActiveStatus`).
+					priority: m.critical ? 'critical' : 'medium',
+				})),
+				traceId,
+				transcript: params.transcript,
+				agent: params.agent,
+				sessionId: params.sessionId,
+				taskId,
+				replay: params.replay,
+			});
+			combined.emitted.push(...outcome.emitted);
+			combined.unacknowledgedCriticals.push(...outcome.unacknowledgedCriticals);
+			combined.unacknowledgedNonCritical.push(
+				...outcome.unacknowledgedNonCritical,
+			);
+			if (outcome.unverifiable) combined.unverifiable = outcome.unverifiable;
+		}
+		return { ...combined, phases: [...phases] };
+	} catch {
+		// fail-open — store unavailable (e.g. repair uncertainty) or worse; the
+		// lane settle path must never break on reconciliation.
+		return empty;
+	}
 }
 
 /**

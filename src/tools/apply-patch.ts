@@ -22,6 +22,7 @@ import * as path from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
 import { loadPluginConfigWithMeta } from '../config';
+import { isPolicyProtectedPath } from '../security/protected-path-policy.js';
 import { findClosestLines, fuzzyFindAndReplace } from '../utils/fuzzy-match';
 import { normalizePatchIndentation } from '../utils/patch-dedent';
 import {
@@ -141,9 +142,7 @@ function containsWindowsAttacks(filePath: string): boolean {
  * Rejects ANY occurrence of .git or .swarm in the path (not just first segment).
  */
 function isProtectedPath(filePath: string): boolean {
-	const normalized = filePath.replace(/\\/g, '/');
-	const segments = normalized.split('/');
-	return segments.some((seg) => seg === '.git' || seg === '.swarm');
+	return isPolicyProtectedPath(filePath);
 }
 
 /**
@@ -172,8 +171,7 @@ function isCanonicalProtectedPath(
 		const relative = path
 			.relative(canonicalWorkspace, canonicalTarget)
 			.replace(/\\/g, '/');
-		const segments = relative.split('/').filter(Boolean);
-		return segments.some((seg) => seg === '.git' || seg === '.swarm');
+		return isPolicyProtectedPath(relative);
 	} catch {
 		// Path doesn't exist — check parent directory's canonical segments
 		const parentDir = path.dirname(targetPath);
@@ -184,8 +182,7 @@ function isCanonicalProtectedPath(
 			const relative = path
 				.relative(canonicalWorkspace, canonicalParent)
 				.replace(/\\/g, '/');
-			const segments = relative.split('/').filter(Boolean);
-			return segments.some((seg) => seg === '.git' || seg === '.swarm');
+			return isPolicyProtectedPath(relative);
 		} catch {
 			return false;
 		}
@@ -212,9 +209,7 @@ function isCanonicalPathWithinWorkspace(
 		const relative = path.relative(canonicalWorkspace, canonicalTarget);
 		if (relative.startsWith('..') || path.isAbsolute(relative)) return false;
 		// Re-apply protected-directory ban on the canonical target (all segments)
-		const segments = relative.replace(/\\/g, '/').split('/').filter(Boolean);
-		if (segments.some((seg) => seg === '.git' || seg === '.swarm'))
-			return false;
+		if (isPolicyProtectedPath(relative)) return false;
 		return true;
 	} catch {
 		// realpathSync failed (path doesn't exist) — validate parent directory instead
@@ -229,9 +224,7 @@ function isCanonicalPathWithinWorkspace(
 			const relative = path.relative(canonicalWorkspace, canonicalParent);
 			if (relative.startsWith('..') || path.isAbsolute(relative)) return false;
 			// Re-apply protected-directory ban on the canonical parent (all segments)
-			const segments = relative.replace(/\\/g, '/').split('/').filter(Boolean);
-			if (segments.some((seg) => seg === '.git' || seg === '.swarm'))
-				return false;
+			if (isPolicyProtectedPath(relative)) return false;
 			return true;
 		} catch {
 			// Parent also doesn't resolve — fall back to lexical check
@@ -620,6 +613,8 @@ function applyHunks(
 		const hunk = fileDiff.hunks[hunkIdx];
 		// Reset per-hunk: true when fuzzy fallback ran and still missed.
 		let fuzzyAttemptedThisHunk = false;
+		/** Issue #2349 sweep: why fuzzy matching failed, forwarded to the caller. */
+		let fuzzyFailureReason: string | undefined;
 
 		// Compute match position: declared position adjusted by accumulated delta from prior hunks
 		const searchStart = Math.max(0, hunk.oldStart - 1 + accumulatedDelta);
@@ -692,7 +687,16 @@ function applyHunks(
 			}
 			// Fuzzy also failed — fall through to the context-mismatch return,
 			// flagging that fuzzy was attempted so the caller can append a hint.
+			// Issue #2349 sweep: `fuzzy.error` was previously read ONLY as
+			// `=== null` and its value discarded, so the caller learned that fuzzy
+			// matching failed but never WHY. Carry the reason to the return below.
 			fuzzyAttemptedThisHunk = true;
+			fuzzyFailureReason =
+				typeof fuzzy.error === 'string' && fuzzy.error.trim().length > 0
+					? fuzzy.error.trim()
+					: fuzzy.matchCount > 1
+						? `fuzzy match was ambiguous (${fuzzy.matchCount} candidates)`
+						: undefined;
 		}
 
 		if (!matchFound) {
@@ -712,7 +716,9 @@ function applyHunks(
 				error: {
 					hunkIndex: hunkIdx,
 					type: 'context-mismatch',
-					message: `Context mismatch in hunk ${hunkIdx + 1} at line ${searchStart + 1}: expected context does not match file content`,
+					message: `Context mismatch in hunk ${hunkIdx + 1} at line ${searchStart + 1}: expected context does not match file content${
+						fuzzyFailureReason ? ` (fuzzy fallback: ${fuzzyFailureReason})` : ''
+					}`,
 					expected:
 						expectedContent.length > 200
 							? `${expectedContent.slice(0, 200)}... (truncated)`

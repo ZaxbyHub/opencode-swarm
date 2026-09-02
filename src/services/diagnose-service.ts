@@ -10,13 +10,20 @@ import {
 } from '../config/cache-paths.js';
 import { loadPluginConfig } from '../config/loader';
 import type { Plan } from '../config/plan-schema';
+import { getCoreEventCoverage, readCoreEvents } from '../events/core-events.js';
 import { getDurableGateEvidenceStatusForTask } from '../evidence/gate-bridge.js';
 import { listEvidenceTaskIds } from '../evidence/manager';
+import { listBlockingActionCircuitsForInvocation } from '../failures/action-circuit.js';
+import { loadFullAutoRunState } from '../full-auto/state.js';
+import { readLearningHealth } from '../health/learning-health';
 import { readSwarmFileAsync } from '../hooks/utils';
+import { getTaskModelRoutingStateSnapshot } from '../models/task-model-routing.js';
 import { loadPlanJsonOnly } from '../plan/manager';
 import { SandboxCapabilityProbe } from '../sandbox/capability-probe.js';
 import { getExecutor } from '../sandbox/executor.js';
+import { getSandboxSkipSummary } from '../sandbox/skip-state.js';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
+import { getAgentSession } from '../state.js';
 import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 import { listCoderSettlementWalStates } from '../workflow/coder-settlement.js';
 import { checkKnowledgeHealth } from './knowledge-diagnostics.js';
@@ -637,14 +644,15 @@ async function checkCheckpointManifest(
 }
 
 /**
- * Check D: Event Stream Integrity - validates .swarm/events.jsonl has no malformed JSON
+ * Check D: Event Stream Integrity - validates the retained window of the
+ * bounded core event store (issue #2039). The read is hard-bounded and
+ * manifest-stripped; corrupt retained tails are still found. Compacted
+ * history is disclosed via coverage rather than re-read.
  */
 async function checkEventStreamIntegrity(
 	directory: string,
 ): Promise<HealthCheck> {
-	const eventsPath = path.join(directory, '.swarm/events.jsonl');
-
-	if (!existsSync(eventsPath)) {
+	if (getCoreEventCoverage(directory) === 'empty') {
 		return {
 			name: 'Event Stream',
 			status: '✅',
@@ -653,8 +661,8 @@ async function checkEventStreamIntegrity(
 	}
 
 	try {
-		const content = readFileSync(eventsPath, 'utf-8');
-		const lines = content.split('\n').filter((line) => line.trim() !== '');
+		const window = readCoreEvents(directory);
+		const lines = window.text.split('\n').filter((line) => line.trim() !== '');
 
 		let malformedCount = 0;
 		for (const line of lines) {
@@ -665,11 +673,16 @@ async function checkEventStreamIntegrity(
 			}
 		}
 
+		const coverageNote =
+			window.coverage === 'truncated'
+				? ' (retained window — compacted history excluded)'
+				: '';
+
 		if (malformedCount === 0) {
 			return {
 				name: 'Event Stream',
 				status: '✅',
-				detail: `events.jsonl is valid — ${lines.length} event(s)`,
+				detail: `events.jsonl is valid — ${lines.length} event(s)${coverageNote}`,
 			};
 		}
 
@@ -688,14 +701,13 @@ async function checkEventStreamIntegrity(
 }
 
 /**
- * Check E: Steering Directive Staleness - checks for unconsumed steering directives
+ * Check E: Steering Directive Staleness - checks for unconsumed steering
+ * directives within the bounded retained window (issue #2039).
  */
 async function checkSteeringDirectives(
 	directory: string,
 ): Promise<HealthCheck> {
-	const eventsPath = path.join(directory, '.swarm/events.jsonl');
-
-	if (!existsSync(eventsPath)) {
+	if (getCoreEventCoverage(directory) === 'empty') {
 		return {
 			name: 'Steering Directives',
 			status: '✅',
@@ -704,8 +716,8 @@ async function checkSteeringDirectives(
 	}
 
 	try {
-		const content = readFileSync(eventsPath, 'utf-8');
-		const lines = content.split('\n').filter((line) => line.trim() !== '');
+		const window = readCoreEvents(directory);
+		const lines = window.text.split('\n').filter((line) => line.trim() !== '');
 
 		const directivesIssued: string[] = [];
 		const consumedIds = new Set<string>();
@@ -727,10 +739,14 @@ async function checkSteeringDirectives(
 		const unconsumed = directivesIssued.filter((id) => !consumedIds.has(id));
 
 		if (unconsumed.length === 0) {
+			const coverageNote =
+				window.coverage === 'truncated'
+					? ' (within the retained event window)'
+					: '';
 			return {
 				name: 'Steering Directives',
 				status: '✅',
-				detail: 'All steering directives acknowledged (or none issued)',
+				detail: `All steering directives acknowledged (or none issued)${coverageNote}`,
 			};
 		}
 
@@ -744,6 +760,44 @@ async function checkSteeringDirectives(
 			name: 'Steering Directives',
 			status: '❌',
 			detail: 'Could not read events.jsonl',
+		};
+	}
+}
+
+/**
+ * Check (#2044): Learning/operations health — bounded-window alarm families
+ * from the learning-health registry. Warns when any alarm is active; the
+ * detail lines carry the same redacted form as the telemetry payload (16-hex
+ * refs, counts, enums — never raw session ids, paths, or content).
+ */
+export async function checkLearningHealth(
+	directory: string,
+): Promise<HealthCheck> {
+	try {
+		const snapshot = await readLearningHealth(directory);
+		if (snapshot.activeAlarms.length === 0) {
+			return {
+				name: 'Learning health',
+				status: '✅',
+				detail: `No active alarms (${snapshot.totalTransitions} transitions recorded)`,
+			};
+		}
+		const detail = snapshot.activeAlarms
+			.map((alarm) => {
+				const ageMinutes = Math.floor(alarm.ageMs / 60_000);
+				return `${alarm.severity} ${alarm.alarm} [${alarm.scopeClass} ${alarm.scopeRef}] age ${ageMinutes}m coverage ${alarm.coverageFacts}`;
+			})
+			.join('; ');
+		return {
+			name: 'Learning health',
+			status: '⚠️',
+			detail: `${snapshot.activeAlarms.length} active alarm(s): ${detail}`,
+		};
+	} catch {
+		return {
+			name: 'Learning health',
+			status: '⬜',
+			detail: 'Learning-health artifact unreadable (fail-open)',
 		};
 	}
 }
@@ -826,10 +880,25 @@ async function checkCurator(directory: string): Promise<HealthCheck> {
  * the cached sandbox executor. Never re-probes and never crashes
  * diagnose on sandbox errors.
  */
-async function getSandboxStatus(): Promise<HealthCheck> {
+async function getSandboxStatus(sessionID?: string): Promise<HealthCheck> {
 	try {
 		const capability = await _internals.detectSandboxCapability();
 		const mechanism = capability.mechanism ?? 'none';
+		// A legacy aggregate strength is availability evidence, not behavioral
+		// evidence for any individual containment dimension. Never expand the
+		// old `strong` label into four independent `real` claims.
+		const legacyDimension = capability.status === 'enabled' ? 'weak' : 'none';
+		const filesystem = capability.filesystem ?? legacyDimension;
+		const network = capability.network ?? legacyDimension;
+		const processBoundary = capability.process ?? legacyDimension;
+		const effective = capability.effective ?? legacyDimension;
+		const dimensions = `fs=${filesystem} network=${network} process=${processBoundary} effective=${effective}`;
+		const reasons = (capability.reasons ?? []).join('; ');
+		const skipSummary = getSandboxSkipSummary(sessionID);
+		const skipDetail =
+			skipSummary.count > 0
+				? ` | observed skips=${skipSummary.count}: ${skipSummary.reasons.join('; ')}`
+				: '';
 
 		const executor = await _internals.getSandboxExecutor();
 		const hasExecutor = executor !== null;
@@ -848,18 +917,18 @@ async function getSandboxStatus(): Promise<HealthCheck> {
 					? 'advisory'
 					: (capability.strength ?? executorStrength ?? 'strong');
 
-			if (strength === 'advisory') {
+			if (effective !== 'real' || strength === 'advisory') {
 				return {
 					name: 'Sandbox',
 					status: '⚠️',
-					detail: `Mechanism: ${mechanism.toLowerCase()} | Available: advisory only | Strength: ADVISORY (env-scrub, NOT kernel-enforced) | Commands are NOT strongly sandboxed`,
+					detail: `Mechanism: ${mechanism.toLowerCase()} | ${dimensions} | Partial boundary: ${reasons}${skipDetail}`,
 				};
 			}
 
 			return {
 				name: 'Sandbox',
 				status: '✅',
-				detail: `Mechanism: ${mechanism.toLowerCase()} | Available: yes | Strength: strong (kernel-enforced) | Sandboxing commands: yes`,
+				detail: `Mechanism: ${mechanism.toLowerCase()} | ${dimensions} | Sandboxing requested dimensions: yes${skipDetail}`,
 			};
 		}
 
@@ -867,7 +936,7 @@ async function getSandboxStatus(): Promise<HealthCheck> {
 			return {
 				name: 'Sandbox',
 				status: '⚠️',
-				detail: `Mechanism: ${mechanism.toLowerCase()} | Available: no (silent pass-through) | Commands NOT sandboxed`,
+				detail: `Mechanism: ${mechanism.toLowerCase()} | ${dimensions} | Available: no | ${reasons}${skipDetail}`,
 			};
 		}
 
@@ -930,6 +999,7 @@ async function checkResidueInventory(directory: string): Promise<HealthCheck> {
  */
 export async function getDiagnoseData(
 	directory: string,
+	sessionID?: string,
 ): Promise<DiagnoseData> {
 	const checks: HealthCheck[] = [];
 
@@ -1148,7 +1218,7 @@ export async function getDiagnoseData(
 	checks.push(await checkGitRepository(directory));
 
 	// Check: Sandbox
-	checks.push(await getSandboxStatus());
+	checks.push(await getSandboxStatus(sessionID));
 
 	// Check: Spec Staleness
 	checks.push(await checkSpecStaleness(directory, plan));
@@ -1174,6 +1244,7 @@ export async function getDiagnoseData(
 	// Check: Knowledge health (entry status breakdown, event volume, schema
 	// drift, stale-cache warning).
 	checks.push(await checkKnowledgeHealth(directory));
+	checks.push(await checkLearningHealth(directory));
 
 	// Check: Atomic-write residue (issue #2035) — bounded summary derived from
 	// the SAME shared inventory as the close clean stage and config doctor.
@@ -1281,6 +1352,50 @@ export async function getDiagnoseData(
 		detail: cacheRows.join(' | '),
 	});
 
+	// Issue #2103: bounded, privacy-safe invocation recovery state. Never render
+	// failure display text, prompts, provider output, or action arguments here.
+	if (!sessionID) {
+		checks.push({
+			name: 'Invocation recovery',
+			status: '⬜',
+			detail: 'Session unavailable; scoped circuit and model status omitted',
+		});
+	} else {
+		const invocationID = getAgentSession(sessionID)?.activeInvocationId ?? 0;
+		const circuits =
+			invocationID > 0
+				? listBlockingActionCircuitsForInvocation(sessionID, invocationID)
+				: [];
+		checks.push({
+			name: 'Invocation circuits',
+			status: circuits.length > 0 ? '⚠️' : '✅',
+			detail:
+				circuits.length > 0
+					? `${circuits.length} exact-action circuit(s) open for invocation ${invocationID}: ${[...new Set(circuits.map((entry) => entry.circuitKind))].join(', ')}`
+					: `No exact-action circuits open${invocationID > 0 ? ` for invocation ${invocationID}` : ''}`,
+		});
+		const routing = getTaskModelRoutingStateSnapshot();
+		const selections = routing.scopedSelections.filter(
+			(entry) => entry.key.sessionID === sessionID,
+		);
+		checks.push({
+			name: 'Model fallback scope',
+			status: selections.length > 0 ? '⚠️' : '✅',
+			detail:
+				selections.length > 0
+					? `${selections.length} scoped selection(s) active; highest fallback index ${Math.max(...selections.map((entry) => entry.fallbackIndex))}`
+					: 'No scoped model override is active',
+		});
+		const fullAuto = loadFullAutoRunState(directory, sessionID);
+		checks.push({
+			name: 'Full-Auto recovery',
+			status: fullAuto?.status === 'paused' ? '⚠️' : '✅',
+			detail: fullAuto
+				? `status=${fullAuto.status}; recovery_probe=${fullAuto.lastRecoveryProbe?.outcome ?? 'none'}`
+				: 'No durable Full-Auto run state for this session',
+		});
+	}
+
 	const passCount = checks.filter(
 		(c) => c.status === '✅' || c.status === '⬜',
 	).length;
@@ -1328,7 +1443,8 @@ export function formatDiagnoseMarkdown(diagnose: DiagnoseData): string {
 export async function handleDiagnoseCommand(
 	directory: string,
 	_args: string[],
+	sessionID?: string,
 ): Promise<string> {
-	const diagnoseData = await getDiagnoseData(directory);
+	const diagnoseData = await getDiagnoseData(directory, sessionID);
 	return formatDiagnoseMarkdown(diagnoseData);
 }

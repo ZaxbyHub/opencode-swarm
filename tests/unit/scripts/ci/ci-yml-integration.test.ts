@@ -58,14 +58,6 @@ function extractCoverageMeasurementStep(yml: string): string {
 	return match ? match[0] : '';
 }
 
-function extractCoverageJob(yml: string): string {
-	const normalized = yml.replace(/\r\n/g, '\n');
-	const match = normalized.match(
-		/^ {2}coverage:[\s\S]*?(?=^ {2}[A-Za-z][\w-]*:|(?![\s\S]))/m,
-	);
-	return match ? match[0] : '';
-}
-
 function extractIntegrationTestsStep(yml: string): string {
 	const normalized = yml.replace(/\r\n/g, '\n');
 	const match = normalized.match(
@@ -143,16 +135,14 @@ describe('ci.yml integration — integration quarantine extraction', () => {
 describe('ci.yml integration — merge-queue coverage isolation', () => {
 	const yml = readFileSync(CI_YML_PATH, 'utf8');
 	const step = extractCoverageMeasurementStep(yml);
-	const coverageJob = extractCoverageJob(yml);
 	const coverageGateScript = readFileSync(COVERAGE_GATE_SCRIPT_PATH, 'utf8');
 
-	test('coverage starts after quality instead of waiting for the unit matrix (CI-004)', () => {
-		// Previous workflow serialized the 45-minute coverage gate behind the unit
-		// matrix, so GitHub's 60-minute merge-queue timeout evicted green runs
-		// seconds before coverage completed.
-		expect(coverageJob).toContain('needs: [detect-release, quality]');
-		expect(coverageJob).not.toMatch(/needs: \[[^\]]*\bunit\b/);
-	});
+	// The job-graph invariants (CI-004 "coverage never behind unit", the shard
+	// matrix's parity with the unit job, and the fail-closed `coverage`
+	// aggregator) moved to tests/unit/scripts/ci/ci-coverage-sharding.test.ts
+	// when the single coverage job became a coverage-shard matrix + aggregator
+	// (issue #2341). This describe keeps the script-content contracts that are
+	// independent of the job graph.
 
 	test('"Coverage gate enforcement" step delegates to the coverage helper', () => {
 		expect(step).toContain('bash scripts/ci/run-coverage-gate.sh');
@@ -236,24 +226,35 @@ describe('ci.yml integration — coverage gate bounded retry (issue #1782 parity
 		expect(bunTestIdx).toBeGreaterThan(mkdirIdx);
 	});
 
-	test('coverage helper appends the "passed on retry" notice to flake-annotations-coverage.txt', () => {
+	test('coverage helper appends the "passed on retry" notice to the flake-annotation file', () => {
+		// The annotation filename is a variable since issue #2341 sharded the
+		// gate: unsharded runs keep `flake-annotations-coverage.txt`, shard runs
+		// write `flake-annotations-coverage-shard-<i>.txt` (distinct internal
+		// names are mandatory — flake-detection.yml downloads the
+		// flake-annotations-* pattern with merge-multiple: true and same-named
+		// files would collide on extraction).
 		expect(coverageGateScript).toContain(
-			'echo "::notice file=${test_file}::Passed on retry ${retry_num} (flaky): ${test_file}" >> flake-annotations-coverage.txt',
+			'flake_ann="flake-annotations-coverage.txt"',
+		);
+		expect(coverageGateScript).toContain(
+			'echo "::notice file=${test_file}::Passed on retry ${retry_num} (flaky): ${test_file}" >> "$flake_ann"',
 		);
 	});
 
-	test('coverage helper appends the hard-failure error to flake-annotations-coverage.txt', () => {
+	test('coverage helper appends the hard-failure error to the flake-annotation file', () => {
 		expect(coverageGateScript).toContain(
-			'echo "::error file=${test_file}::FAILED: ${test_file}" >> flake-annotations-coverage.txt',
+			'echo "::error file=${test_file}::FAILED: ${test_file}" >> "$flake_ann"',
 		);
 	});
 
-	test('ci.yml uploads flake-annotations-coverage.txt from the coverage job', () => {
+	test('ci.yml uploads the per-shard flake-annotation files from the coverage-shard job (issue #2341)', () => {
 		const coverageUploadStep = extractCoverageFlakeAnnotationsUploadStep(yml);
 		const unitUploadStep = extractUnitFlakeAnnotationsUploadStep(yml);
-		expect(coverageUploadStep).toContain('name: flake-annotations-coverage');
 		expect(coverageUploadStep).toContain(
-			'path: flake-annotations-coverage.txt',
+			'name: flake-annotations-coverage-shard-${{ matrix.shard }}',
+		);
+		expect(coverageUploadStep).toContain(
+			'path: flake-annotations-coverage-shard-${{ matrix.shard }}.txt',
 		);
 		expect(coverageUploadStep).toContain('if-no-files-found: ignore');
 

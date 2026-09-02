@@ -233,14 +233,30 @@ export const TOOL_METADATA = {
 			'abort an unrecoverable PR_REVIEW/PR_FEEDBACK mechanical gate and clear its durable session state',
 		agents: ['architect'],
 	},
+	authorize_pr_review_reentry: {
+		description:
+			'issue a one-use, identity-bound reviewer/test_engineer re-entry authorization for the active PR_REVIEW workflow (issue #2383)',
+		agents: ['architect'],
+	},
+	submit_pr_review_result: {
+		description:
+			'submit one child-bound typed result for an active PR-review base or micro discovery lane',
+		agents: [],
+		prWorkflow: { modes: ['PR_REVIEW'], capability: 'validate' },
+	},
 	approve_plan_critic: {
 		description:
-			'record a MANUAL plan_critic_gate approval snapshot to unblock the ratchet-tighter critic_pre_plan execution gate when the critic already returned APPROVED but the mechanical recorder failed to persist it (issue #2012)',
+			'record a MANUAL plan_critic_gate approval snapshot to unblock the ratchet-tighter critic_pre_plan execution gate when the critic already returned APPROVED but the mechanical recorder failed to persist it (issue #2012), or as the sanctioned recovery for a bookkeeping-grade hashed-field repair under the critic-gate PLAN FREEZE rule (the reason must state which case applies)',
 		agents: ['architect'],
 	},
 	prepare_pr_workflow_checkout: {
 		description:
 			'prepare an auditable PR workflow checkout or restore its exact original branch/HEAD and preserved stash after terminal cleanup',
+		agents: ['architect'],
+	},
+	invalidate_pr_feedback_publication: {
+		description:
+			'invalidate the armed PR_FEEDBACK publication generation so approved content can change, superseding every content-dependent approval and reopening the exact scoped rework + fresh-review path (issue #2108)',
 		agents: ['architect'],
 	},
 	record_implementation_review: {
@@ -598,7 +614,7 @@ export const TOOL_METADATA = {
 	},
 	context_status: {
 		description:
-			'report current context-window headroom for the active session — returns tokens-used, usageSource (provider|estimated), model-limit, usage-percent, threshold-state (none/warn/critical), model name, and provider. Pure read-only: no state mutation, no warning injection. Works whether context_budget.enabled is true or false.',
+			'report current context-window headroom for the active session — returns tokens-used, usageSource (provider|estimated), model-limit with provenance (modelLimitSource: host|override|provider_cap|native|fallback; modelLimitResolution: user_provider_model|user_model|user_default|live_model_limit|static_provider_cap|static_native|static_default; fallbackActive: true when the denominator came from a static table or the flat 128k default — treat headroom as uncertain), usage-percent, threshold-state (none/warn/critical), model name, and provider. Pure read-only: no state mutation, no warning injection. Works whether context_budget.enabled is true or false.',
 		agents: ['architect'],
 	},
 	search: {
@@ -667,7 +683,7 @@ export const TOOL_METADATA = {
 	},
 	pr_workflow_status: {
 		description:
-			'Read-only architect observation of local git state (HEAD, branch, clean/dirty with a bounded changed-file list, remotes) plus a session-pinned PR workflow gate summary. Use to observe state under the fail-closed PR_REVIEW/PR_FEEDBACK gate. Never executes PR-controlled scripts and never reads another session gate.',
+			'Read-only architect observation of local git state (HEAD, branch, clean/dirty with a bounded changed-file list, remotes) plus a session-pinned PR workflow gate summary and the PR_FEEDBACK publication-generation section (state, attempts, invalidation reason, recovery guidance). Use to observe state under the fail-closed PR_REVIEW/PR_FEEDBACK gate. Never executes PR-controlled scripts and never reads another session gate.',
 		agents: ['architect'],
 		prWorkflow: {
 			modes: ['PR_REVIEW', 'PR_FEEDBACK'],
@@ -879,7 +895,7 @@ export const TOOL_METADATA = {
 	},
 	collect_lane_results: {
 		description:
-			'collect or poll results for a dispatch_lanes_async batch; supports both non-blocking polling (wait omitted or false) and blocking join (wait: true). Non-blocking polls include pending lane identities by default and process settled lanes incrementally while continuing independent work; busy/retry lanes are not timed out just because they run for a long time. Does not advance workflow gates. Inline output for a settled lane is delivered only once: later polls of the same lane set output_omitted_repeat: true and omit output, but still include output_ref for recovery via retrieve_lane_output.',
+			'collect or poll results for a dispatch_lanes_async batch; a pure OBSERVER that never cancels or terminalizes child work unless you explicitly pass cancel_pending. Supports both non-blocking polling (wait omitted or false) and blocking join (wait: true). The wait budget bounds the observer call only — its expiry never kills a lane and is not evidence a lane died, so do not abort the workflow because a collection expired; poll again, cancel explicitly, or rely on the presumed-stale backstop. Any unsettled lane is reported in pending_lanes (batch_id, lane_id, stored status, output_ref when present) regardless of include_pending; busy/retry lanes are not timed out just because they run for a long time. Does not advance workflow gates. Inline output for a settled lane is delivered only once: later polls of the same lane set output_omitted_repeat: true and omit output, but still include output_ref for recovery via retrieve_lane_output.',
 		agents: ['architect'],
 	},
 	summarize_work: {

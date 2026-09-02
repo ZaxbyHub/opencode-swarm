@@ -202,16 +202,19 @@ describe('summarizeCode', () => {
 });
 
 describe('summarizeText', () => {
-	test('returns first N non-blank lines', () => {
+	test('returns bounded head/tail lines (#2107 §5 migration: was head-only)', () => {
 		const text = 'line1\n\nline2\n\nline3\nline4';
+		// 6 raw lines, budget 2 → head 1 non-blank + tail 1 raw, 4 omitted.
 		const result = _internals.summarizeText(text, 2);
-		expect(result).toBe('line1\nline2');
+		expect(result).toBe('line1\n[... 4 lines omitted ...]\nline4');
 	});
 
-	test('skips blank lines', () => {
+	test('everything fits: content unchanged apart from head blank-skip', () => {
 		const text = '\n\n\nhello\n\nworld';
+		// 6 raw lines, budget 5 → head 3 non-blank (only 'hello'
+		// exists before the tail region), tail 2 raw lines; 3 omitted.
 		const result = _internals.summarizeText(text, 5);
-		expect(result).toBe('hello\nworld');
+		expect(result).toBe('hello\n[... 3 lines omitted ...]\n\nworld');
 	});
 });
 
@@ -271,9 +274,23 @@ describe('createSummary', () => {
 		expect(result).toContain('but has lines');
 	});
 
-	test('truncates preview when exceeding maxSummaryChars', () => {
+	test('truncates preview when exceeding maxSummaryChars (byte cap, #2107 migration)', () => {
 		const longOutput = 'x'.repeat(1000);
 		const result = createSummary(longOutput, 'bash', SUMMARY_ID, 100);
-		expect(result.length <= 100).toBe(true);
+		// The cap is now enforced on UTF-8 bytes (codepoint-safe) rather
+		// than UTF-16 code units. In a budget this tight even the
+		// informative marker cannot fit, so the minimal '...' fallback is
+		// used — the total still stays within the cap.
+		expect(Buffer.byteLength(result, 'utf8') <= 100).toBe(true);
+		expect(result).toContain('...');
+	});
+
+	test('discloses total-bytes omission marker when there is room for it (#2107)', () => {
+		const longOutput = 'x'.repeat(1000);
+		const result = createSummary(longOutput, 'bash', SUMMARY_ID, 300);
+		expect(Buffer.byteLength(result, 'utf8') <= 300).toBe(true);
+		// The marker reports the post-line-cap preview byte total truthfully.
+		expect(result).toContain('bytes total, truncated ...]');
+		expect(result).toMatch(/\[... \d+ bytes total, truncated \.\.\.\]/);
 	});
 });

@@ -79,8 +79,8 @@ async function appendSuccessfulBaseTransition(
 	record: NonNullable<ReturnType<typeof findByBatchId>[number]>,
 ) {
 	const text = [
-		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence',
-		`${record.laneId}-candidate | ${record.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH`,
+		'[CANDIDATE] | candidate_id | lane | severity | category | file:line | claim | evidence_summary | impact_context | confidence | risk_impact | risk_tags',
+		`${record.laneId}-candidate | ${record.workflowLane} | HIGH | correctness | file.ts:1 | claim | evidence | impact | HIGH | ORDINARY | `,
 	].join('\n');
 	const stored = storeLaneOutput(directory, {
 		batchId: record.batchId,
@@ -172,6 +172,7 @@ beforeEach(async () => {
 		dispatchInternals.resolveExactMergeBase(...args);
 	dispatchInternals.loadPluginConfig = () =>
 		({
+			pr_review_legacy_transcript_compatibility: true,
 			pr_review_resilience: {
 				...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
 				enabled: false,
@@ -236,7 +237,11 @@ describe('dispatch_lanes PR review resilience upgrade migration', () => {
 		await removePersistedResilienceSnapshot(sessionID);
 		dispatchInternals.loadPluginConfig = () =>
 			({
-				pr_review_resilience: DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+				pr_review_legacy_transcript_compatibility: true,
+				pr_review_resilience: {
+					...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+					enabled: true,
+				},
 			}) as ReturnType<typeof originalDispatchLoadPluginConfig>;
 
 		const migratedCanary = await executeDispatchLanesAsync(
@@ -268,6 +273,7 @@ describe('dispatch_lanes PR review resilience upgrade migration', () => {
 
 		dispatchInternals.loadPluginConfig = () =>
 			({
+				pr_review_legacy_transcript_compatibility: true,
 				pr_review_resilience: {
 					...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
 					enabled: false,
@@ -286,6 +292,11 @@ describe('dispatch_lanes PR review resilience upgrade migration', () => {
 			expectedCurrentStatuses: ['pending', 'running'],
 		});
 
+		// Issue #2382: the CURRENT config's enabled flag is authoritative. A
+		// staged retry under a disabled config is invalid — the persisted
+		// enabled snapshot no longer keeps resilience semantics alive — and the
+		// enforcement's guarded audit write marks the persisted policy disabled
+		// (record kept for audit, attempt ledger untouched).
 		const persistedRetry = await executeDispatchLanesAsync(
 			{
 				mode: 'swarm-pr-review:base',
@@ -300,8 +311,15 @@ describe('dispatch_lanes PR review resilience upgrade migration', () => {
 			directory,
 			{ sessionID },
 		);
-		expect(persistedRetry.success).toBe(true);
-		expect(created).toBe(8);
+		expect(persistedRetry.success).toBe(false);
+		expect(persistedRetry.failure_class).toBe('invalid_args');
+		expect(String(persistedRetry.message)).toContain(
+			'staged PR_REVIEW base dispatch is valid only when pr_review_resilience is enabled',
+		);
+		// (The audit write that marks the persisted policy disabled is exercised
+		// by the follow-ups suite's legacy-wave disable test; the staged path is
+		// rejected at the dispatch layer before any gate enforcement runs.)
+		expect(created).toBe(7);
 	});
 
 	test('migrated legacy state fails closed when every obligation is already successful', async () => {
@@ -326,7 +344,11 @@ describe('dispatch_lanes PR review resilience upgrade migration', () => {
 		await removePersistedResilienceSnapshot(sessionID);
 		dispatchInternals.loadPluginConfig = () =>
 			({
-				pr_review_resilience: DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+				pr_review_legacy_transcript_compatibility: true,
+				pr_review_resilience: {
+					...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+					enabled: true,
+				},
 			}) as ReturnType<typeof originalDispatchLoadPluginConfig>;
 
 		const blocked = await executeDispatchLanesAsync(
@@ -379,7 +401,11 @@ describe('dispatch_lanes PR review resilience upgrade migration', () => {
 		await removePersistedResilienceSnapshot(sessionID);
 		dispatchInternals.loadPluginConfig = () =>
 			({
-				pr_review_resilience: DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+				pr_review_legacy_transcript_compatibility: true,
+				pr_review_resilience: {
+					...DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+					enabled: true,
+				},
 			}) as ReturnType<typeof originalDispatchLoadPluginConfig>;
 
 		const blocked = await executeDispatchLanesAsync(

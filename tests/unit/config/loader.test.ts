@@ -205,9 +205,6 @@ describe('config/loader', () => {
 		it('returns defaults when no config files exist', () => {
 			const result = loadPluginConfig(tempDir);
 			const { repo_graph: _repoGraph, ...legacyDefaults } = result;
-			// Should return defaults when no user config and no project config exist.
-			// adversarial_testing and config_format_version have schema-level defaults
-			// are always present; repo_graph defaults are pinned in its focused schema test.
 			expect(legacyDefaults).toEqual({
 				config_format_version: 1,
 				max_iterations: 5,
@@ -256,11 +253,13 @@ describe('config/loader', () => {
 						],
 					},
 					oversight: {
+						cleanup_timeout_ms: 2000,
 						every_architect_turns: 5,
 						every_tool_calls: 25,
 						every_minutes: 20,
 						max_dispatch_retries: 2,
 						max_consecutive_dispatch_failures: 3,
+						total_timeout_ms: 120000,
 						on_phase_boundary: true,
 						on_task_completion: false,
 						on_plan_change: true,

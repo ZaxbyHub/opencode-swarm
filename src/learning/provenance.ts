@@ -18,6 +18,10 @@
  */
 
 import { z } from 'zod';
+import {
+	getCurrentWriteAuthority,
+	type WriteAuthorityOrigin,
+} from '../security/write-authority.js';
 
 /**
  * Hard cap on entries retained per reference class. Sorting happens before the
@@ -86,6 +90,14 @@ const LearningWriteOriginSchema = z
 	.object({
 		sessionId: ReferenceSchema.optional(),
 		agentRole: ReferenceSchema.optional(),
+		authority: z
+			.enum([
+				'autonomous',
+				'optimizer_proposed',
+				'critic_approved',
+				'human_approved',
+			])
+			.optional(),
 		producedAt: IsoDateSchema,
 	})
 	.strict();
@@ -115,6 +127,7 @@ export interface LearningProvenanceV1 {
 	writeOrigin: {
 		sessionId?: string;
 		agentRole?: string;
+		authority?: WriteAuthorityOrigin;
 		producedAt: string;
 	};
 }
@@ -133,6 +146,7 @@ export interface LearningProvenanceInput {
 export interface LearningWriteOriginInput {
 	sessionId?: string;
 	agentRole?: string;
+	authority?: WriteAuthorityOrigin;
 	producedAt?: string;
 }
 
@@ -179,6 +193,8 @@ export function stampLearningProvenance(
 	if (sessionId !== undefined) writeOrigin.sessionId = sessionId;
 	const agentRole = normalizeOriginField(origin.agentRole);
 	if (agentRole !== undefined) writeOrigin.agentRole = agentRole;
+	const authority = origin.authority ?? getCurrentWriteAuthority().origin;
+	writeOrigin.authority = authority;
 
 	return LearningProvenanceV1Schema.parse({
 		v: 1,
