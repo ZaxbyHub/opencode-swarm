@@ -739,6 +739,7 @@ export const TOOL_METADATA = {
 			'critic_oversight',
 			'explorer',
 			'coder',
+			'test_engineer',
 		],
 		prWorkflow: {
 			modes: ['PR_REVIEW', 'PR_FEEDBACK'],

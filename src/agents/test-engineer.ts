@@ -59,6 +59,10 @@ COVERAGE:
 - Edge cases: empty, null, boundaries
 - Errors: invalid inputs, failures
 
+GRAPH-FIRST TEST DISCOVERY:
+- Use \`repo_map action="test_pack"\` to identify focused tests for the assigned source before authoring or selecting cases.
+- Graph evidence is advisory discovery only, never a PASS/FAIL authority. Require source anchors; if freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or the action fails, inspect the direct source and test files before deciding coverage or verdict.
+
 RULES:
 - Match language and test framework:
     TypeScript/JavaScript → bun:test (import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test')

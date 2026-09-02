@@ -9,6 +9,10 @@ disable-model-invocation: true
 
 Run a structured, high-confidence PR review that maximizes valid findings without flooding the user with unvalidated noise.
 
+## Graph-first evidence contract
+
+After binding the exact diff, use `repo_map` `diff_context` and `impact_cone`; add `route_trace` and `data_trace` for changes that cross trust or data boundaries. Graph evidence is advisory only. If freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or an action fails, inspect the direct source, Git diff, and searches before validating a finding.
+
 The review ladder is:
 
 **Scope → obligations → context pack → deterministic signals → parallel explorers → repository-agnostic risk-family coverage (dispatch scaled by depth tier) → independent reviewer validation → critic challenge → grouped synthesis → metrics / knowledge writeback.**

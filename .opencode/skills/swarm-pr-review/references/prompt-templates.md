@@ -1,5 +1,7 @@
 # Reviewer Prompt Template
 
+Every child review prompt must use `repo_map` `diff_context` and `impact_cone`; for trust-boundary or data-flow candidates it must also use `route_trace` and `data_trace`. Graph evidence is advisory only. Require source anchors. If freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or an action fails, validate against the direct source, Git diff, and searches before returning a finding.
+
 Use this template when dispatching reviewer subagents:
 
 ```text

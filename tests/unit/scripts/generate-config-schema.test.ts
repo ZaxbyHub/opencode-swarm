@@ -58,6 +58,29 @@ describe('generate-config-schema — JSON Schema artifact', () => {
 		).toBe(false);
 	});
 
+	test('preserves exact two-string tuple bounds for adversarial pairs', () => {
+		const parsed = JSON.parse(serializeConfigSchema()) as {
+			properties: {
+				adversarial_detection?: {
+					properties?: {
+						pairs?: {
+							items?: {
+								items?: unknown;
+								minItems?: number;
+								maxItems?: number;
+							};
+						};
+					};
+				};
+			};
+		};
+		const pairItems =
+			parsed.properties.adversarial_detection?.properties?.pairs?.items;
+		expect(pairItems?.items).toBe(false);
+		expect(pairItems?.minItems).toBe(2);
+		expect(pairItems?.maxItems).toBe(2);
+	});
+
 	test('deterministic: two serializations are byte-identical', () => {
 		expect(serializeConfigSchema()).toBe(serializeConfigSchema());
 	});

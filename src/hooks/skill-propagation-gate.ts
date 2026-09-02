@@ -26,6 +26,10 @@ import { criticalWarn, warn } from '../utils/logger.js';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import type { MessageWithParts } from './knowledge-types.js';
 import {
+	loadPlanTaskIdContext,
+	toTaskIdPlanContextOptions,
+} from './plan-task-id-context.js';
+import {
 	computeSkillRelevanceScore,
 	formatSkillIndexWithContext,
 	isSkillAudienceMatch,
@@ -38,6 +42,7 @@ import {
 	readSkillUsageEntries,
 	readSkillUsageEntriesTail,
 } from './skill-usage-log.js';
+import { resolveTaskId } from './task-id-resolver.js';
 
 // ============================================================================
 // YAML parsing — inline implementation to avoid external dependency
@@ -750,16 +755,17 @@ export async function validateExplicitSkillReferencesBefore(
  * Looks for patterns like "taskId: <id>" or "TASK: <id>" (case-insensitive).
  * Returns "unknown" when no pattern is found.
  */
-export function extractTaskIdFromPrompt(prompt: string): string {
+export function extractTaskIdFromPrompt(
+	prompt: string,
+	knownPlanTaskIds?: ReadonlySet<string>,
+	planContextOverLimit = false,
+): string {
 	if (!prompt || typeof prompt !== 'string') return 'unknown';
-
-	const taskIdMatch = prompt.match(/\btaskId\s*[:=]\s*(\S+)/i);
-	if (taskIdMatch) return taskIdMatch[1];
-
-	const taskMatch = prompt.match(/\bTASK\s*[:=]\s*(\S+)/i);
-	if (taskMatch) return taskMatch[1];
-
-	return 'unknown';
+	const result = resolveTaskId(
+		{ prompt },
+		{ policy: 'attribution', knownPlanTaskIds, planContextOverLimit },
+	);
+	return result.status === 'resolved' ? result.taskId : 'unknown';
 }
 
 // ============================================================================
@@ -859,7 +865,14 @@ export async function skillPropagationGateBefore(
 			typeof (input.args as Record<string, unknown>)?.prompt === 'string'
 				? String((input.args as Record<string, unknown>).prompt)
 				: '';
-		const taskId = _internals.extractTaskIdFromPrompt(prompt);
+		const planTaskIdOptions = toTaskIdPlanContextOptions(
+			await loadPlanTaskIdContext(directory),
+		);
+		const taskId = _internals.extractTaskIdFromPrompt(
+			prompt,
+			planTaskIdOptions.knownPlanTaskIds,
+			planTaskIdOptions.planContextOverLimit,
+		);
 
 		// Parse SKILLS field for primary skill paths
 		const skillPaths = explicitIntegrity.validatedSkillPaths ?? [];
@@ -1174,9 +1187,6 @@ const COMPLIANCE_PATTERN =
 /** Skill path pattern: SKILLS_USED_BY_CODER: <path> */
 const CODER_SKILLS_PATTERN = /SKILLS_USED_BY_CODER\s*:\s*(.+)/i;
 
-/** Explicit reviewer attribution pattern: TASK: <task-id> */
-const REVIEWER_TASK_PATTERN = /TASK\s*:\s*(\S+)/i;
-
 /**
  * Chat messages transform hook. Scans reviewer output for SKILL_COMPLIANCE
  * verdicts and records compliance outcomes to `.swarm/skill-usage.jsonl`.
@@ -1194,6 +1204,9 @@ export async function skillPropagationTransformScan(
 	if (!sessionID) return;
 
 	const messages = output.messages;
+	const planTaskIdOptions = toTaskIdPlanContextOptions(
+		await loadPlanTaskIdContext(directory),
+	);
 	const audienceContext = resolveSkillAudienceContext(config);
 	let remainingProvenanceValidationBudget =
 		MAX_PROVENANCE_SKILL_REFERENCES_PER_TRANSFORM;
@@ -1222,15 +1235,34 @@ export async function skillPropagationTransformScan(
 	let dedupKeys = new Set<string>();
 	let existingEntries: ReturnType<typeof _internals.readSkillUsageEntriesTail> =
 		[];
+	const buildDedupKey = ({
+		skillPath,
+		agentName,
+		taskID,
+		complianceVerdict,
+		reviewerNotes,
+	}: {
+		skillPath: string;
+		agentName: string;
+		taskID: string;
+		complianceVerdict?: string;
+		reviewerNotes?: string;
+	}): string =>
+		taskID === 'unknown'
+			? [
+					skillPath,
+					agentName,
+					taskID,
+					complianceVerdict ?? '',
+					reviewerNotes ?? '',
+				].join('|')
+			: [skillPath, agentName, taskID].join('|');
 	try {
 		existingEntries = _internals.readSkillUsageEntriesTail(directory, {
 			sessionID,
 		});
 		dedupKeys = new Set<string>(
-			existingEntries.map((e, i) => {
-				const taskKey = e.taskID === 'unknown' ? `unknown-${i}` : e.taskID;
-				return `${e.skillPath}|${e.agentName}|${taskKey}`;
-			}),
+			existingEntries.map((entry) => buildDedupKey(entry)),
 		);
 	} catch (err) {
 		warn(
@@ -1247,8 +1279,16 @@ export async function skillPropagationTransformScan(
 		skillPath: string,
 		agentName: string,
 		taskID: string,
+		complianceVerdict?: string,
+		reviewerNotes?: string,
 	): boolean {
-		const key = `${skillPath}|${agentName}|${taskID}`;
+		const key = buildDedupKey({
+			skillPath,
+			agentName,
+			taskID,
+			complianceVerdict,
+			reviewerNotes,
+		});
 		if (dedupKeys.has(key)) return true;
 		dedupKeys.add(key);
 		return false;
@@ -1272,13 +1312,8 @@ export async function skillPropagationTransformScan(
 
 		// Extract SKILLS_USED_BY_CODER paths from the reviewer text
 		const skillPaths: string[] = [];
-		let explicitReviewerTaskID: string | undefined;
 		for (const line of text.split('\n')) {
 			const trimmed = line.trim();
-			const taskMatch = trimmed.match(REVIEWER_TASK_PATTERN);
-			if (taskMatch) {
-				explicitReviewerTaskID = taskMatch[1];
-			}
 			const coderMatch = trimmed.match(CODER_SKILLS_PATTERN);
 			if (coderMatch) {
 				const parsed = validatedProvenancePaths(coderMatch[1]);
@@ -1286,24 +1321,18 @@ export async function skillPropagationTransformScan(
 			}
 		}
 
-		// Resolve taskID and skill paths from the latest delegation for
-		// compliance attribution. TaskID is always resolved when a delegation
-		// exists; skill paths are only populated as fallback when the reviewer
-		// didn't include SKILLS_USED_BY_CODER.
-		let resolvedTaskID = explicitReviewerTaskID ?? 'unknown';
+		const taskResolution = resolveTaskId(
+			{ prompt: text },
+			{
+				policy: 'attribution',
+				...planTaskIdOptions,
+			},
+		);
+		const resolvedTaskID =
+			taskResolution.status === 'resolved' ? taskResolution.taskId : 'unknown';
 		if (existingEntries.length > 0) {
-			if (!explicitReviewerTaskID) {
-				const latestDelegation = [...existingEntries]
-					.reverse()
-					.find(
-						(e) => e.agentName !== 'reviewer' && e.skillPath !== '__overall__',
-					);
-				if (latestDelegation) {
-					resolvedTaskID = latestDelegation.taskID;
-				}
-			}
 			// Only populate skillPaths as fallback when reviewer didn't echo
-			// SKILLS_USED_BY_CODER. Prefer explicit TASK attribution when present.
+			// SKILLS_USED_BY_CODER. Prefer shared-resolver attribution when present.
 			if (skillPaths.length === 0 && resolvedTaskID !== 'unknown') {
 				const delegatedPaths = existingEntries
 					.filter(
@@ -1346,7 +1375,17 @@ export async function skillPropagationTransformScan(
 			// failed, instead of the old `break`'s single silent-batch-loss.
 			let recordingFailureCount = 0;
 			for (const skillPath of paths) {
-				if (isDuplicate(skillPath, 'reviewer', resolvedTaskID)) continue;
+				if (
+					isDuplicate(
+						skillPath,
+						'reviewer',
+						resolvedTaskID,
+						verdict,
+						notes || undefined,
+					)
+				) {
+					continue;
+				}
 				try {
 					_internals.appendSkillUsageEntry(directory, {
 						skillPath,
@@ -1430,7 +1469,11 @@ export async function skillPropagationTransformScan(
 				skillsField.toLowerCase() !== 'none'
 			) {
 				const skillPaths = validatedProvenancePaths(skillsField);
-				const taskId = _internals.extractTaskIdFromPrompt(text);
+				const taskId = _internals.extractTaskIdFromPrompt(
+					text,
+					planTaskIdOptions.knownPlanTaskIds,
+					planTaskIdOptions.planContextOverLimit,
+				);
 
 				// PR #2347 Stage-B review (same reasoning as the reviewer-verdict
 				// loop above): attempt every skillPath independently rather than

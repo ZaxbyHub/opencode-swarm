@@ -211,7 +211,7 @@ describe('injectSkillsIntoDelegation — regression + round-trip', () => {
 					parts: [
 						{
 							type: 'text',
-							text: `SKILLS_USED_BY_CODER: file:${skillPath}\nSKILL_COMPLIANCE: COMPLIANT — followed the test-writing conventions.`,
+							text: `SKILLS_USED_BY_CODER: file:${skillPath}\nTASK: round-trip-1\nSKILL_COMPLIANCE: COMPLIANT — followed the test-writing conventions.`,
 						},
 					],
 				},
@@ -236,10 +236,10 @@ describe('injectSkillsIntoDelegation — regression + round-trip', () => {
 			expect(complianceEntry!.taskID).toBe('round-trip-1');
 		});
 
-		it('round-trip still works when the prompt has NO task marker (auto-injected fallback)', async () => {
-			// Guards the critic's Item 2: when extractTaskIdFromPrompt returns
-			// 'unknown', the function records 'auto-injected' (NOT 'unknown') so
-			// the resolver guard `resolvedTaskID !== 'unknown'` continues to fire.
+		it('records an uncorrelated reviewer verdict as unknown when no task marker exists', async () => {
+			// Injection entries retain a stable local audit ID, but reviewer
+			// attribution is fail-closed: without an explicit TASK marker the
+			// verdict must not infer a task from mutable session history.
 			createMockSkill(
 				tmpDir,
 				'.claude/skills/no-marker-skill/SKILL.md',
@@ -261,7 +261,7 @@ describe('injectSkillsIntoDelegation — regression + round-trip', () => {
 			expect(afterInject[0].taskID).not.toBe('unknown');
 
 			// Reviewer verdict WITHOUT an explicit TASK: line → resolver must
-			// fall back to latestDelegation.taskID = 'auto-injected'.
+			// fail closed instead of consulting the prior injection entry.
 			const messages: MessageWithParts[] = [
 				{
 					info: { role: 'assistant', agent: 'reviewer', sessionID },
@@ -280,8 +280,7 @@ describe('injectSkillsIntoDelegation — regression + round-trip', () => {
 				(e) => e.complianceVerdict === 'violated',
 			);
 			expect(violated).toBeDefined();
-			// The fallback taskID 'auto-injected' (non-'unknown') must propagate.
-			expect(violated!.taskID).toBe('auto-injected');
+			expect(violated!.taskID).toBe('unknown');
 		});
 	});
 

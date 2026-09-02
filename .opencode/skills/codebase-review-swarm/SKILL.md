@@ -16,6 +16,10 @@ Use this skill when the user asks for a deep codebase audit, full QA review, sec
 
 You are the Architect/orchestrator. You produce a verified review report and supporting artifacts. You do not modify source files. Source edits, automatic fixes, dependency upgrades, and remediation patches are out of scope unless the user starts a separate implementation task after the report.
 
+## Graph-first evidence contract
+
+Start review scope with `repo_map` `graph_health` and a targeted source-bearing `context_pack`. For security, trust-boundary, and data-flow tracks, add `route_trace` and `data_trace`. Graph evidence is advisory only. If freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or an action fails, inspect the direct source and searches before accepting a finding.
+
 ## Load order
 
 Read these files before executing:

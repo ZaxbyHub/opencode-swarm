@@ -9,6 +9,10 @@ description: >
 
 This protocol is loaded on demand by the architect runtime. The architect prompt keeps only activation, action, and hard safety constraints; the full execution details live here.
 
+## Graph-first evidence contract
+
+Before a shared or exported-symbol change, use `repo_map` `localization` and `impact_cone` to bound likely consumers. Graph evidence is advisory only. If freshness is stale or inconclusive, confidence is low, source is missing, the language is unsupported/dynamic, the graph is absent, or an action fails, inspect the direct source and searches before dispatch or approval.
+
 ### MODE: EXECUTE
 For each task (respecting dependencies):
 

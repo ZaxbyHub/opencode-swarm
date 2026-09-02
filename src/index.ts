@@ -160,6 +160,10 @@ import {
 } from './hooks/knowledge-injector.js';
 import { microReflectorAfter } from './hooks/micro-reflector.js';
 import { normalizeToolName } from './hooks/normalize-tool-name';
+import {
+	loadPlanTaskIdContext,
+	toTaskIdPlanContextOptions,
+} from './hooks/plan-task-id-context.js';
 import { createPrAutoSubscribeHook } from './hooks/pr-auto-subscribe.js';
 import {
 	enforcePrWorkflowToolBefore,
@@ -3840,6 +3844,9 @@ async function initializeOpenCodeSwarm(
 					output as { args?: unknown },
 				);
 				const toolBeforeArgs = toolBeforeCtx.args ?? {};
+				const skillAttributionPlanTaskOptions = toTaskIdPlanContextOptions(
+					await loadPlanTaskIdContext(ctx.directory),
+				);
 				injectSkillsIntoDelegation(
 					ctx.directory,
 					toolBeforeArgs,
@@ -3848,7 +3855,10 @@ async function initializeOpenCodeSwarm(
 						parseDelegationArgs(toolBeforeArgs)?.targetAgent ?? '',
 					) || toolBeforeCtx.agent,
 					input.sessionID,
-					{ quiet: config.quiet },
+					{
+						quiet: config.quiet,
+						...skillAttributionPlanTaskOptions,
+					},
 				);
 				// ---------------------------------------------------------------
 
