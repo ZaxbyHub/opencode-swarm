@@ -9,10 +9,11 @@
  * modules and form an init cycle (#507 CI finding). Keeping metadata handler-free
  * makes the module graph acyclic.
  *
- * Cross-checked with ./manifest.ts: that file does
- * `satisfies Record<ToolName, () => ToolDefinition>` with `ToolName = keyof typeof
- * TOOL_METADATA`, so adding a tool here without wiring a handler there (or vice
- * versa) is a COMPILE error - the dead-tools bug class stays impossible.
+ * Cross-checked with ./manifest.ts: that file registers handlers via
+ * `defineHandlers<T extends Record<ToolName, () => ToolDefinition>>` with
+ * `ToolName = keyof typeof TOOL_METADATA`, so adding a tool here without wiring a
+ * handler there (or vice versa) is a COMPILE error - the dead-tools bug class
+ * stays impossible.
  */
 import { type AgentName, ALL_AGENT_NAMES } from '../config/agent-names';
 
