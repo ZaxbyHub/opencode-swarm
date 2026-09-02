@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.164.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.2...v7.164.3) (2026-09-02)
+
+
+### Bug Fixes
+
+* Rewrite AGENTS.md invariant 11 (tool registration) to match the compile-enforced manifest, close the barrel-export gap ([#1643](https://github.com/ZaxbyHub/opencode-swarm/issues/1643)) ([c02ef58](https://github.com/ZaxbyHub/opencode-swarm/commit/c02ef58e886f7c141d7c7cc503eb3ee9b9306f16))
+
 ## [7.164.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.1...v7.164.2) (2026-09-02)
 
 
