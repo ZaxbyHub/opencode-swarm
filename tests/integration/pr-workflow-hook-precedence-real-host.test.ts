@@ -7,12 +7,15 @@ import {
 	findByCorrelationId,
 	recordPendingDelegation,
 } from '../../src/background/pending-delegations.js';
+import { transitionTaskWorkflowEvidence } from '../../src/gate-evidence.js';
 import { getPendingCoderScope } from '../../src/hooks/delegation-gate.js';
 import {
 	_test_exports,
 	activatePrWorkflow,
 	declarePrFeedbackInventory,
 	enforcePrFeedbackVerificationOwnership,
+	enforcePrWorkflowToolBefore,
+	reserveActivePrReviewReentryAuthorization,
 } from '../../src/hooks/pr-workflow-gate.js';
 import { getScopeBindingForParentDispatch } from '../../src/scope/scope-binding.js';
 import { resetSwarmState, swarmState } from '../../src/state.js';
@@ -201,6 +204,144 @@ describe('PR workflow gate has authoritative real-host Task precedence', () => {
 				path.join(directory, '.swarm', 'background-delegations.jsonl'),
 			),
 		).toBeFalse();
+	});
+
+	test('registered re-entry authorization admits exactly one bound reviewer Task through the real hook chain', async () => {
+		await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW', {
+			prHeadSha: HEAD_SHA,
+		});
+		await transitionTaskWorkflowEvidence(directory, '1.1', {
+			type: 'accepted_mutation',
+			agentType: 'coder',
+			expectedGeneration: 0,
+			transitionId: 'seed-reentry-stage-a',
+		});
+		const before = plugin.hooks['tool.execute.before'];
+		await expect(
+			before(
+				{
+					tool: 'authorize_pr_review_reentry',
+					sessionID: SESSION_ID,
+					callID: 'authorize-reentry',
+				},
+				{ args: { pr_head_sha: HEAD_SHA, role: 'reviewer' } },
+			),
+		).resolves.toBeUndefined();
+		const issued = JSON.parse(
+			String(
+				await plugin.tool.authorize_pr_review_reentry.execute(
+					{ pr_head_sha: HEAD_SHA, role: 'reviewer' },
+					{ directory, sessionID: SESSION_ID },
+				),
+			),
+		) as { success: boolean; message?: string };
+		expect(issued).toMatchObject({ success: true });
+
+		await expect(
+			before(
+				{ tool: 'Task', sessionID: SESSION_ID, callID: 'authorized-reviewer' },
+				{
+					args: {
+						subagent_type: 'reviewer',
+						task_id: '1.1',
+						prompt: 'TASK: 1.1\nACCEPTANCE: verify the bound PR-review task',
+					},
+				},
+			),
+		).resolves.toBeUndefined();
+
+		await expect(
+			before(
+				{ tool: 'Task', sessionID: SESSION_ID, callID: 'replayed-reviewer' },
+				{
+					args: {
+						subagent_type: 'reviewer',
+						task_id: '1.1',
+						prompt: 'TASK: 1.1\nACCEPTANCE: replay must remain blocked',
+					},
+				},
+			),
+		).rejects.toThrow(/PR_REVIEW is read-only/i);
+	});
+
+	test('controller-only gating atomically reserves one exact role and rejects ambiguous fields', async () => {
+		await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW', {
+			prHeadSha: HEAD_SHA,
+		});
+		const issued = JSON.parse(
+			String(
+				await plugin.tool.authorize_pr_review_reentry.execute(
+					{ pr_head_sha: HEAD_SHA, role: 'reviewer' },
+					{ directory, sessionID: SESSION_ID },
+				),
+			),
+		) as { success: boolean };
+		expect(issued.success).toBe(true);
+		await expect(
+			enforcePrWorkflowToolBefore(
+				directory,
+				SESSION_ID,
+				'Task',
+				{ subagent_type: 'reviewer', agent: 'reviewer' },
+				[],
+				'ambiguous-call',
+			),
+		).rejects.toThrow(/PR_REVIEW is read-only/i);
+		await expect(
+			enforcePrWorkflowToolBefore(
+				directory,
+				SESSION_ID,
+				'Task',
+				{ subagent_type: 'reviewer' },
+				[],
+				'controller-only-call',
+			),
+		).resolves.toBeUndefined();
+		const verified = await reserveActivePrReviewReentryAuthorization(
+			directory,
+			SESSION_ID,
+			{ role: 'reviewer', callID: 'controller-only-call' },
+		);
+		expect(verified?.consumedCallId).toBe('controller-only-call');
+	});
+
+	test('an agent-field-only Task never spends a re-entry authorization', async () => {
+		await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW', {
+			prHeadSha: HEAD_SHA,
+		});
+		const issued = JSON.parse(
+			String(
+				await plugin.tool.authorize_pr_review_reentry.execute(
+					{ pr_head_sha: HEAD_SHA, role: 'reviewer' },
+					{ directory, sessionID: SESSION_ID },
+				),
+			),
+		) as { success: boolean };
+		expect(issued.success).toBe(true);
+		// A dispatch carrying only `agent` (no subagent_type) is NOT admitted:
+		// the delegation gate's Stage-A/acceptance enforcement only runs for
+		// subagent_type dispatches, so admitting it would bypass every
+		// downstream gate while burning the one-shot authorization.
+		await expect(
+			enforcePrWorkflowToolBefore(
+				directory,
+				SESSION_ID,
+				'Task',
+				{ agent: 'reviewer' },
+				[],
+				'agent-field-only-call',
+			),
+		).rejects.toThrow(/PR_REVIEW is read-only/i);
+		// The authorization must still be unconsumed afterwards: a fresh
+		// callID can reserve it (it would fail closed had the rejected
+		// admission burned it).
+		const stillUnconsumed = await reserveActivePrReviewReentryAuthorization(
+			directory,
+			SESSION_ID,
+			{ role: 'reviewer', callID: 'verify-unburned-call' },
+		);
+		expect(stillUnconsumed).not.toBeNull();
+		expect(stillUnconsumed?.consumedCallId).toBe('verify-unburned-call');
 	});
 
 	test('inactive workflows preserve the reviewer acceptance contract', async () => {

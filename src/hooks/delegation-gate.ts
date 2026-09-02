@@ -125,7 +125,10 @@ import {
 	standardWorktreeByCallID,
 	standardWorktreeSerializationSessions,
 } from './delegation-gate/worktree-isolation';
-import { consumePrFeedbackScopeDeclaration } from './pr-workflow-gate.js';
+import {
+	consumePrFeedbackScopeDeclaration,
+	resolvePrFeedbackScopeDeclaration,
+} from './pr-workflow-gate.js';
 export { resetStandardWorktreeIsolationState };
 
 import { pushAdvisory } from '../utils/advisory-queue';
@@ -260,77 +263,98 @@ export function clearPendingCoderScope(): void {
 	pendingCoderScopeByTaskId.clear();
 }
 
-interface PreparedCoderScope {
-	plan: Plan | null;
-	taskId: string;
-	declaredFiles: string[] | null;
-	binding: ScopeBinding;
-}
+type PreparedCoderScope =
+	| {
+			kind: 'pr_feedback';
+			plan: null;
+			taskId: string;
+			declaredFiles: string[] | null;
+			binding: ScopeBinding;
+	  }
+	| {
+			kind: 'plan';
+			plan: Plan;
+			taskId: string;
+			declaredFiles: string[] | null;
+			binding: ScopeBinding;
+	  };
 
 async function prepareCoderScope(
 	directory: string,
 	input: { sessionID: string; callID: string },
 	args: Record<string, unknown>,
 ): Promise<PreparedCoderScope> {
-	// loadPlanJsonOnly swallows read/parse errors and returns null for missing,
-	// corrupt, or schema-invalid plan.json — it never throws (see plan/manager.ts).
-	const plan = await loadPlanJsonOnly(directory);
-	if (!plan) {
-		// PR #1915 PR-workflow gate: if there's no plan.json but the caller has
-		// declared a verified PR-feedback scope for an explicit plan-task-shaped
-		// task_id, bind that scope and return early (no plan needed).
-		const rawTaskId =
-			typeof args.task_id === 'string'
-				? args.task_id.trim()
-				: typeof args.taskId === 'string'
-					? args.taskId.trim()
-					: '';
-		if (isStrictTaskId(rawTaskId)) {
+	const rawTaskId =
+		typeof args.task_id === 'string'
+			? args.task_id.trim()
+			: typeof args.taskId === 'string'
+				? args.taskId.trim()
+				: '';
+	if (isStrictTaskId(rawTaskId)) {
+		// Issue #2469: authenticated PR_FEEDBACK scope is a controller-owned
+		// authority source, not a fallback for a missing generic plan. Resolve it
+		// first even when plan.json exists, validate all caller-supplied scope
+		// material before consuming it, then reserve it atomically to this call.
+		const resolvedFeedbackScope = await resolvePrFeedbackScopeDeclaration(
+			directory,
+			input.sessionID,
+			rawTaskId,
+		);
+		if (resolvedFeedbackScope) {
+			const directives = extractTaskFileDirectives(args);
+			if (directives.present && !directives.files) {
+				throw new Error(
+					'SCOPE_NOT_DECLARED: FILE: directives are present but empty or ambiguous; provide one complete relative path per FILE: line.',
+				);
+			}
+			const resolved = resolveCoderScopeSources({
+				explicitFiles: resolvedFeedbackScope.files,
+				planFiles: null,
+				fileDirectiveFiles: directives.files,
+			});
+			if (!resolved.ok) throw new Error(formatCoderScopeConflict(resolved));
+			await _internals.beforePrFeedbackScopeConsume?.();
 			const feedbackScope = await consumePrFeedbackScopeDeclaration(
 				directory,
 				input.sessionID,
 				rawTaskId,
 				input.callID,
+				resolvedFeedbackScope,
 			);
-			if (feedbackScope) {
-				const directives = extractTaskFileDirectives(args);
-				if (directives.present && !directives.files) {
-					throw new Error(
-						'SCOPE_NOT_DECLARED: FILE: directives are present but empty or ambiguous; provide one complete relative path per FILE: line.',
-					);
-				}
-				const resolved = resolveCoderScopeSources({
-					explicitFiles: feedbackScope.files,
-					planFiles: null,
-					fileDirectiveFiles: directives.files,
-				});
-				if (!resolved.ok) {
-					throw new Error(formatCoderScopeConflict(resolved));
-				}
-				const binding = createPrFeedbackScopeBinding({
-					directory,
-					taskId: rawTaskId,
-					files: resolved.files,
-					ownerSessionId: input.sessionID,
-					ownerMessageId: input.callID,
-					dispatchCallId: input.callID,
-					activation: 'pending_child',
-					workflowSessionId: input.sessionID,
-					workflowRevisionDigest: feedbackScope.revisionDigest,
-				});
-				if (!binding) {
-					throw new Error(
-						'SCOPE_NOT_DECLARED: PR-feedback scope could not be bound to this Task invocation.',
-					);
-				}
-				return {
-					plan: null,
-					taskId: rawTaskId,
-					declaredFiles: resolved.files,
-					binding,
-				};
+			if (!feedbackScope) {
+				throw new Error(
+					'SCOPE_NOT_DECLARED: PR-feedback scope could not be reserved by this Task invocation (the declaration was replaced, the workflow left PR_FEEDBACK, or its revision changed).',
+				);
 			}
+			const binding = createPrFeedbackScopeBinding({
+				directory,
+				taskId: rawTaskId,
+				files: resolved.files,
+				ownerSessionId: input.sessionID,
+				ownerMessageId: input.callID,
+				dispatchCallId: input.callID,
+				activation: 'pending_child',
+				workflowSessionId: input.sessionID,
+				workflowRevisionDigest: feedbackScope.revisionDigest,
+			});
+			if (!binding) {
+				throw new Error(
+					'SCOPE_NOT_DECLARED: PR-feedback scope could not be bound to this Task invocation.',
+				);
+			}
+			return {
+				kind: 'pr_feedback',
+				plan: null,
+				taskId: rawTaskId,
+				declaredFiles: resolved.files,
+				binding,
+			};
 		}
+	}
+	// loadPlanJsonOnly swallows read/parse errors and returns null for missing,
+	// corrupt, or schema-invalid plan.json — it never throws (see plan/manager.ts).
+	const plan = await loadPlanJsonOnly(directory);
+	if (!plan) {
 		// Issue #1914: no plan AND no PR-feedback declaration. One message
 		// covers missing / corrupt / schema-invalid (loadPlanJsonOnly already
 		// logged the validation warning).
@@ -413,7 +437,7 @@ async function prepareCoderScope(
 			'SCOPE_NOT_DECLARED: coder scope could not be bound to this Task invocation.',
 		);
 	}
-	return { plan, taskId, declaredFiles, binding };
+	return { kind: 'plan', plan, taskId, declaredFiles, binding };
 }
 
 /**
@@ -2958,6 +2982,7 @@ export const _internals = {
 	PLAN_CRITIC_TASK_SIGNALS,
 	extractPlanCriticVerdict,
 	forceRecordPlanCriticApproval,
+	beforePrFeedbackScopeConsume: undefined as (() => Promise<void>) | undefined,
 	get provisionWorktree() {
 		return _wtiInternals.provisionWorktree;
 	},
@@ -3881,10 +3906,10 @@ export function createDelegationGateHook(
 					// exemption: the council gate above, the background-task
 					// block, acceptance-criteria enforcement, and every other
 					// check in this hook remain fully authoritative.
-					const { consumePrReviewReentryAuthorization } = await import(
-						'../pr-review/authorization.js'
+					const { reserveActivePrReviewReentryAuthorization } = await import(
+						'./pr-workflow-gate.js'
 					);
-					const consumed = await consumePrReviewReentryAuthorization(
+					const consumed = await reserveActivePrReviewReentryAuthorization(
 						directory,
 						input.sessionID,
 						{
@@ -3934,12 +3959,28 @@ export function createDelegationGateHook(
 			readTaskEvidence,
 			transitionTaskWorkflowEvidence,
 		} = await import('../gate-evidence');
-		const resolvedPreflightTaskId = await resolveEvidenceTaskId(
-			args,
-			session,
-			directory,
-		);
-		const preflightPlan = await loadPlanJsonOnly(directory);
+		const requestedScopeTaskId =
+			typeof args.task_id === 'string'
+				? args.task_id.trim()
+				: typeof args.taskId === 'string'
+					? args.taskId.trim()
+					: '';
+		// Read-only classification comes before generic task-workflow gates. It
+		// intentionally creates no binding and consumes no declaration; the exact
+		// declaration is revalidated and atomically consumed in prepareCoderScope.
+		const classifiedFeedbackScope = isStrictTaskId(requestedScopeTaskId)
+			? await resolvePrFeedbackScopeDeclaration(
+					directory,
+					input.sessionID,
+					requestedScopeTaskId,
+				)
+			: null;
+		const resolvedPreflightTaskId = classifiedFeedbackScope
+			? null
+			: await resolveEvidenceTaskId(args, session, directory);
+		const preflightPlan = classifiedFeedbackScope
+			? null
+			: await loadPlanJsonOnly(directory);
 		const preflightTaskId =
 			resolvedPreflightTaskId &&
 			preflightPlan?.phases.some((phase) =>
@@ -4006,7 +4047,7 @@ export function createDelegationGateHook(
 			}
 			throw error;
 		}
-		const { plan, taskId: incomingCoderTaskId } = preparedScope;
+		const { taskId: incomingCoderTaskId } = preparedScope;
 		if (incomingCoderTaskId) {
 			// Structured dispatch-context attribution (Stage A wedge fix): the
 			// resolved task id comes from args.task_id / the plan-validated scope
@@ -4093,7 +4134,7 @@ export function createDelegationGateHook(
 			}
 			backgroundCoderReservationByCallID.set(input.callID, claim.reservation);
 		};
-		if (!plan) {
+		if (preparedScope.kind === 'pr_feedback') {
 			await reserveBackgroundCoderIfNeeded(1);
 			try {
 				if (
@@ -4127,7 +4168,8 @@ export function createDelegationGateHook(
 			}
 			return;
 		}
-		const profile = plan?.execution_profile;
+		const plan = preparedScope.plan;
+		const profile = plan.execution_profile;
 		const parallelEnabled = profile?.parallelization_enabled === true;
 		const maxConcurrent = profile?.max_concurrent_tasks ?? 10;
 		const effectiveMaxConcurrent =

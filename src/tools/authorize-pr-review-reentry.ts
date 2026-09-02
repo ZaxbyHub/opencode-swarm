@@ -21,14 +21,18 @@ const AuthorizePrReviewReentryArgsSchema = z
 
 /**
  * Issue a ONE-USE reviewer re-entry authorization (issue #2383) for the
- * CURRENT active PR_REVIEW workflow. The very next direct Task dispatch of
- * the declared role consumes it atomically and bypasses ONLY the generic
- * Stage-A task-workflow requirement; every other delegation gate stays
- * authoritative. Bindings are exact (session, workflow, run, head SHA,
- * worktree revision digest, role, gate generation): replay, cross-session
- * use, wrong role, expiry, or any workflow progress since issuance fails
- * closed. Issue immediately before the Task dispatch — authorizations are
- * not stockpilable.
+ * CURRENT active PR_REVIEW workflow. The very next direct subagent_type Task
+ * dispatch of the declared role reserves it atomically at the controller
+ * boundary — admitting that one dispatch past the PR_REVIEW read-only
+ * restriction — and the delegation gate verifies the same call-bound
+ * reservation while bypassing ONLY the generic Stage-A task-workflow
+ * requirement; every other delegation gate stays authoritative. Bindings are
+ * exact (session, workflow, run, head SHA, worktree revision digest, role,
+ * gate generation): replay, cross-session use, wrong role, expiry, or any
+ * workflow progress since issuance fails closed. A Task the delegation gate
+ * later rejects for an unrelated reason still burns the authorization —
+ * issue a fresh one before retrying. Issue immediately before the Task
+ * dispatch — authorizations are not stockpilable.
  */
 export async function executeAuthorizePrReviewReentry(
 	args: unknown,
@@ -70,7 +74,7 @@ export async function executeAuthorizePrReviewReentry(
 				generation: record.generation,
 				revision_digest: record.revisionDigest,
 				expires_at: record.expiresAt,
-				instructions: `Immediately dispatch exactly one Task call with subagent_type "${record.role}" for this PR-review re-entry; the delegation gate consumes this authorization once. Any other dispatch falls back to normal gating.`,
+				instructions: `Immediately dispatch exactly one Task call with subagent_type "${record.role}" for this PR-review re-entry; the PR workflow controller reserves this authorization once and the delegation gate verifies the same call-bound reservation. Any other dispatch falls back to normal gating.`,
 			},
 			null,
 			2,
@@ -86,7 +90,7 @@ export async function executeAuthorizePrReviewReentry(
 export const authorize_pr_review_reentry: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Issue a one-use, identity-bound reviewer/test_engineer re-entry authorization for the active PR_REVIEW workflow (issue #2383). The authorization is consumed atomically by the very next direct Task dispatch of the declared role and bypasses ONLY the generic Stage-A task-workflow requirement — all other delegation gates remain authoritative. Bound to the exact session, workflow, run, PR head SHA, worktree revision digest, role, and gate generation; replay, cross-session use, wrong role, expiry (10 minutes), or any workflow progress since issuance fails closed. Requires an active head-bound PR_REVIEW gate. Issue immediately before the Task dispatch; unconsumed same-role authorizations at the same generation are refused.',
+			'Issue a one-use, identity-bound reviewer/test_engineer re-entry authorization for the active PR_REVIEW workflow (issue #2383). The authorization is reserved atomically by the PR workflow controller for the very next direct subagent_type Task dispatch of the declared role (admitting that one dispatch past the PR_REVIEW read-only restriction), then verified for that same call by the delegation gate, which bypasses ONLY the generic Stage-A task-workflow requirement; all other delegation gates remain authoritative. Bound to the exact session, workflow, run, PR head SHA, worktree revision digest, role, and gate generation; replay, cross-session use, wrong role, expiry (10 minutes), or workflow progress since issuance fails closed. A dispatch the delegation gate later rejects for another reason still burns the authorization. Requires an active head-bound PR_REVIEW gate. Issue immediately before the Task dispatch; unconsumed same-role authorizations at the same generation are refused.',
 		args: {
 			run_id: AuthorizePrReviewReentryArgsSchema.shape.run_id,
 			pr_head_sha: AuthorizePrReviewReentryArgsSchema.shape.pr_head_sha,

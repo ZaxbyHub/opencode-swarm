@@ -4,9 +4,9 @@ import * as path from 'node:path';
 import {
 	_test_exports,
 	activatePrWorkflow,
+	reserveActivePrReviewReentryAuthorization,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
-	consumePrReviewReentryAuthorization,
 	issuePrReviewReentryAuthorization,
 	_internals as reentryInternals,
 } from '../../../src/pr-review/authorization.js';
@@ -81,7 +81,7 @@ describe('pr-review reentry authorization (issue #2383)', () => {
 			role: 'reviewer',
 		});
 		expect(record.generation).toBeGreaterThanOrEqual(0);
-		const consumed = await consumePrReviewReentryAuthorization(
+		const consumed = await reserveActivePrReviewReentryAuthorization(
 			directory,
 			PR_ARTIFACT_SESSION_ID,
 			{ role: 'reviewer', callID: 'call-1' },
@@ -90,10 +90,14 @@ describe('pr-review reentry authorization (issue #2383)', () => {
 		expect(consumed!.consumedCallId).toBe('call-1');
 		// REPLAY: a second consume finds nothing.
 		await expect(
-			consumePrReviewReentryAuthorization(directory, PR_ARTIFACT_SESSION_ID, {
-				role: 'reviewer',
-				callID: 'call-2',
-			}),
+			reserveActivePrReviewReentryAuthorization(
+				directory,
+				PR_ARTIFACT_SESSION_ID,
+				{
+					role: 'reviewer',
+					callID: 'call-2',
+				},
+			),
 		).resolves.toBeNull();
 	});
 
@@ -104,13 +108,17 @@ describe('pr-review reentry authorization (issue #2383)', () => {
 			role: 'reviewer',
 		});
 		await expect(
-			consumePrReviewReentryAuthorization(directory, PR_ARTIFACT_SESSION_ID, {
-				role: 'test_engineer',
-				callID: 'call-1',
-			}),
+			reserveActivePrReviewReentryAuthorization(
+				directory,
+				PR_ARTIFACT_SESSION_ID,
+				{
+					role: 'test_engineer',
+					callID: 'call-1',
+				},
+			),
 		).resolves.toBeNull();
 		// The reviewer authorization is still unconsumed.
-		const consumed = await consumePrReviewReentryAuthorization(
+		const consumed = await reserveActivePrReviewReentryAuthorization(
 			directory,
 			PR_ARTIFACT_SESSION_ID,
 			{ role: 'reviewer', callID: 'call-2' },
@@ -125,7 +133,7 @@ describe('pr-review reentry authorization (issue #2383)', () => {
 			role: 'reviewer',
 		});
 		await expect(
-			consumePrReviewReentryAuthorization(directory, 'session-foreign', {
+			reserveActivePrReviewReentryAuthorization(directory, 'session-foreign', {
 				role: 'reviewer',
 				callID: 'call-1',
 			}),
@@ -143,10 +151,14 @@ describe('pr-review reentry authorization (issue #2383)', () => {
 		// The store still holds the record, but the CURRENT gate generation moved:
 		// consume must fail closed to null.
 		await expect(
-			consumePrReviewReentryAuthorization(directory, PR_ARTIFACT_SESSION_ID, {
-				role: 'reviewer',
-				callID: 'call-1',
-			}),
+			reserveActivePrReviewReentryAuthorization(
+				directory,
+				PR_ARTIFACT_SESSION_ID,
+				{
+					role: 'reviewer',
+					callID: 'call-1',
+				},
+			),
 		).resolves.toBeNull();
 	});
 
@@ -180,10 +192,14 @@ describe('pr-review reentry authorization (issue #2383)', () => {
 			'utf8',
 		);
 		await expect(
-			consumePrReviewReentryAuthorization(directory, PR_ARTIFACT_SESSION_ID, {
-				role: 'reviewer',
-				callID: 'call-1',
-			}),
+			reserveActivePrReviewReentryAuthorization(
+				directory,
+				PR_ARTIFACT_SESSION_ID,
+				{
+					role: 'reviewer',
+					callID: 'call-1',
+				},
+			),
 		).resolves.toBeNull();
 	});
 
@@ -208,7 +224,7 @@ describe('pr-review reentry authorization (issue #2383)', () => {
 		).resolves.toBeTruthy();
 	});
 
-	test('prune drops consumed and expired records', () => {
+	test('prune retains unexpired consumed records for same-call verification', () => {
 		withFrozenClock(() => {
 			const now = Date.now();
 			const live = {
@@ -226,6 +242,7 @@ describe('pr-review reentry authorization (issue #2383)', () => {
 				...live,
 				authorizationId: 'used',
 				consumedAt: new Date(now).toISOString(),
+				consumedCallId: 'call-used',
 			};
 			const expired = {
 				...live,
@@ -236,7 +253,12 @@ describe('pr-review reentry authorization (issue #2383)', () => {
 				[consumed, expired, live],
 				now,
 			);
-			expect(kept.map((record) => record.authorizationId)).toEqual(['live']);
+			// Both survive; on a recency tie the unconsumed record sorts first
+			// because prune prioritizes live authorizations within the cap.
+			expect(kept.map((record) => record.authorizationId)).toEqual([
+				'live',
+				'used',
+			]);
 		});
 	});
 
@@ -248,14 +270,133 @@ describe('pr-review reentry authorization (issue #2383)', () => {
 		});
 		const results = await Promise.all(
 			['call-a', 'call-b', 'call-c'].map((callID) =>
-				consumePrReviewReentryAuthorization(directory, PR_ARTIFACT_SESSION_ID, {
-					role: 'reviewer',
-					callID,
-				}).catch(() => null),
+				reserveActivePrReviewReentryAuthorization(
+					directory,
+					PR_ARTIFACT_SESSION_ID,
+					{
+						role: 'reviewer',
+						callID,
+					},
+				).catch(() => null),
 			),
 		);
 		const winners = results.filter((result) => result !== null);
 		expect(winners).toHaveLength(1);
+	});
+
+	test('the winning call can verify its persisted reservation idempotently', async () => {
+		await establishActiveReview();
+		await issuePrReviewReentryAuthorization(directory, PR_ARTIFACT_SESSION_ID, {
+			prHeadSha: PR_ARTIFACT_HEAD_SHA,
+			role: 'reviewer',
+		});
+		const request = { role: 'reviewer' as const, callID: 'same-call' };
+		const reserved = await reserveActivePrReviewReentryAuthorization(
+			directory,
+			PR_ARTIFACT_SESSION_ID,
+			request,
+		);
+		const verified = await reserveActivePrReviewReentryAuthorization(
+			directory,
+			PR_ARTIFACT_SESSION_ID,
+			request,
+		);
+		expect(verified?.authorizationId).toBe(reserved?.authorizationId);
+		expect(verified?.consumedCallId).toBe('same-call');
+	});
+
+	test('holds the workflow-session lock through authorization reservation commit', async () => {
+		await establishActiveReview();
+		await issuePrReviewReentryAuthorization(directory, PR_ARTIFACT_SESSION_ID, {
+			prHeadSha: PR_ARTIFACT_HEAD_SHA,
+			role: 'reviewer',
+		});
+		const ALTERNATE_SHA = 'e'.repeat(40);
+		// Whether the head rebind resolves or rejects, settling requires the
+		// session's workflow-state lock — that is the property under test.
+		const competingBind = () =>
+			activatePrWorkflow(directory, PR_ARTIFACT_SESSION_ID, 'PR_REVIEW', {
+				prHeadSha: ALTERNATE_SHA,
+			}).then(
+				() => undefined,
+				() => undefined,
+			);
+		const settlesWithin = async (
+			promise: Promise<void>,
+			budgetMs: number,
+		): Promise<boolean> =>
+			Promise.race([
+				promise.then(() => true),
+				new Promise<boolean>((resolve) =>
+					setTimeout(() => resolve(false), budgetMs),
+				),
+			]);
+		// Negative control: an uncontended mutation of the exact same shape
+		// settles well inside the 2s budget, so the held-lock assertion below
+		// cannot pass merely because the call is slow. It runs on a separate
+		// session so it cannot disturb this session's gate state.
+		const controlSettled = await settlesWithin(
+			activatePrWorkflow(directory, 'lock-control-session', 'PR_REVIEW', {
+				prHeadSha: ALTERNATE_SHA,
+			}).then(
+				() => undefined,
+				() => undefined,
+			),
+			2_000,
+		);
+		expect(controlSettled).toBe(true);
+
+		let signalEntered!: () => void;
+		const entered = new Promise<void>((resolve) => {
+			signalEntered = resolve;
+		});
+		let releaseReservation!: () => void;
+		const hold = new Promise<void>((resolve) => {
+			releaseReservation = resolve;
+		});
+		_test_exports.beforePrReviewReentryReservation = async () => {
+			signalEntered();
+			await hold;
+		};
+		const reservation = reserveActivePrReviewReentryAuthorization(
+			directory,
+			PR_ARTIFACT_SESSION_ID,
+			{ role: 'reviewer', callID: 'locked-call' },
+		);
+		await entered;
+		const competingSettled = await settlesWithin(competingBind(), 2_000);
+		expect(competingSettled).toBe(false);
+		releaseReservation();
+		expect(await reservation).not.toBeNull();
+	});
+
+	test('workflow progress between reserve and same-call verify fails closed', async () => {
+		await establishActiveReview();
+		await issuePrReviewReentryAuthorization(directory, PR_ARTIFACT_SESSION_ID, {
+			prHeadSha: PR_ARTIFACT_HEAD_SHA,
+			role: 'reviewer',
+		});
+		const reserved = await reserveActivePrReviewReentryAuthorization(
+			directory,
+			PR_ARTIFACT_SESSION_ID,
+			{ role: 'reviewer', callID: 'burned-call' },
+		);
+		expect(reserved).not.toBeNull();
+		// Controller state advanced after the reservation was committed. The
+		// same call's later verification re-derives the CURRENT binding and
+		// must fail closed: the one-shot authorization is burned for the old
+		// generation and cannot be replayed against the new one.
+		await bumpGeneration();
+		await expect(
+			reserveActivePrReviewReentryAuthorization(
+				directory,
+				PR_ARTIFACT_SESSION_ID,
+				{
+					role: 'reviewer',
+					callID: 'burned-call',
+				},
+			),
+		).resolves.toBeNull();
 	});
 });
 

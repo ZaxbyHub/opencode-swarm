@@ -301,7 +301,7 @@ describe('PR workflow response-gate wake budget', () => {
 		await gate.event(idle('healthy-session'));
 		// Now the controller makes progress â€” revision bumps to 5.
 		await writeStateWithRevision('healthy-session', 5);
-		// Wake 3 sees revision 5 > lastSeenRevision 0 â†’ progress â†’ counter resets.
+		// Wake 3's progress token changes (revision is hashed into it), so the counter resets.
 		await gate.event(idle('healthy-session'));
 		// Wake 4 (revision unchanged at 5 â†’ unproductive again, counterâ†’1).
 		await gate.event(idle('healthy-session'));
