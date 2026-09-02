@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { scanDelegationsForRecovery } from '../background/pending-delegations.js';
 import {
 	claimPrFeedbackMonitorEvents,
 	readPrFeedbackMonitorQueue,
@@ -29,28 +31,23 @@ export const _internals: {
 	claimPrFeedbackMonitorEvents: typeof claimPrFeedbackMonitorEvents;
 	readPrFeedbackMonitorQueue: typeof readPrFeedbackMonitorQueue;
 	observePrWorkflowAutoWakeEvent: typeof observePrWorkflowAutoWakeEvent;
+	scanDelegationsForRecovery: typeof scanDelegationsForRecovery;
 } = {
 	readPrWorkflowGateState,
 	claimPrFeedbackMonitorEvents,
 	readPrFeedbackMonitorQueue,
 	observePrWorkflowAutoWakeEvent,
+	scanDelegationsForRecovery,
 };
 
 /**
  * Maximum number of consecutive unproductive auto-resumes per gated session
  * before the response gate suspends further wakes. "Unproductive" means the
- * durable gate's `revision` did not advance between wakes — i.e. no
- * state-mutating controller tool (dispatch_lanes_async,
- * write_pr_review_trigger_eval, complete_pr_workflow, recordPrReview*,
- * bindPrReviewBase, …) made durable progress. A healthy review bumps
- * `revision` on every successful state-mutating controller call, so the
- * consecutive counter resets on progress and never exhausts the budget.
- * Read-only tools (collect_lane_results polling, grep, read) intentionally do
- * NOT bump `revision` — an architect that only polls without ever dispatching
- * new lanes or recording trigger evaluations IS making progress on the
- * runtime's bookkeeping but is not advancing the durable gate, so the budget
- * treats long polling-only stretches conservatively. Only a genuinely stuck
- * session holds `revision` constant across many idle cycles.
+ * fixed-size digest of the durable gate plus its exact active delegation lanes
+ * did not change. Controller revisions, lane status transitions, terminal
+ * events, and structured receipt digests count as progress; repeated
+ * collect_lane_results polls do not. Strict-ledger uncertainty is sticky and
+ * never earns progress credit, including the first recovered snapshot.
  */
 export const DEFAULT_MAX_CONSECUTIVE_UNPRODUCTIVE_WAKES = 5;
 
@@ -166,6 +163,8 @@ interface WakeBudget {
 	consecutiveUnproductive: number;
 	lastWakeAt: number;
 	lastSeenRevision?: number;
+	lastSeenProgressToken?: string;
+	progressUncertain: boolean;
 	suspended: boolean;
 	/** Total number of wake attempts recorded for this budget. NEVER reset by
 	 * revision progress — only the consecutive counter resets on progress; that
@@ -188,6 +187,125 @@ interface WakeBudget {
 	 * currently reports, was reached (same scope caveat as
 	 * {@link WakeBudget.totalWakes}). */
 	suspendedReason: 'consecutive' | 'total';
+}
+
+type WorkflowProgressSnapshot =
+	| { kind: 'valid'; token: string }
+	| { kind: 'uncertain' };
+
+function activeWorkflowLaneKeys(state: {
+	prReviewBaseDispatches?: Array<{
+		batchId: string;
+		lanes: Array<{ laneId: string }>;
+	}>;
+	prReviewValidationBatches?: Array<{
+		batchId: string;
+		lanes: Array<{ laneId: string }>;
+	}>;
+	prFeedbackVerifications?: Array<{
+		batchId: string;
+		ownership: Array<{ laneId: string }>;
+	}>;
+	prFeedbackGateBatches?: Array<{ batchId: string; laneId: string }>;
+}): Set<string> {
+	const keys = new Set<string>();
+	for (const batch of state.prReviewBaseDispatches ?? []) {
+		for (const lane of batch.lanes)
+			keys.add(`${batch.batchId}\0${lane.laneId}`);
+	}
+	for (const batch of state.prReviewValidationBatches ?? []) {
+		for (const lane of batch.lanes)
+			keys.add(`${batch.batchId}\0${lane.laneId}`);
+	}
+	for (const batch of state.prFeedbackVerifications ?? []) {
+		for (const lane of batch.ownership)
+			keys.add(`${batch.batchId}\0${lane.laneId}`);
+	}
+	for (const batch of state.prFeedbackGateBatches ?? []) {
+		keys.add(`${batch.batchId}\0${batch.laneId}`);
+	}
+	return keys;
+}
+
+function workflowProgressSnapshot(
+	directory: string,
+	sessionID: string,
+	state: NonNullable<Awaited<ReturnType<typeof readPrWorkflowGateState>>>,
+): WorkflowProgressSnapshot {
+	let scan: ReturnType<typeof scanDelegationsForRecovery>;
+	try {
+		scan = _internals.scanDelegationsForRecovery(directory);
+	} catch {
+		// A throwing scan (e.g. transient fs failure) is observation
+		// uncertainty, not a wake-killing error: surface it as an uncertain
+		// snapshot so the wake evaluation still runs and the brake treats the
+		// cycle conservatively.
+		return { kind: 'uncertain' };
+	}
+	if (scan.status !== 'ok') return { kind: 'uncertain' };
+	const activeKeys = activeWorkflowLaneKeys(state);
+	const activatedAt = Date.parse(state.activatedAt);
+	const modePrefix =
+		state.mode === 'PR_REVIEW' ? 'swarm-pr-review:' : 'swarm-pr-feedback:';
+	const tuples = scan.owners
+		.filter((record) => {
+			if (
+				record.parentSessionId !== sessionID ||
+				!record.mode?.startsWith(modePrefix) ||
+				!record.batchId ||
+				!record.laneId ||
+				!activeKeys.has(`${record.batchId}\0${record.laneId}`) ||
+				(Number.isFinite(activatedAt) && record.createdAt < activatedAt)
+			) {
+				return false;
+			}
+			return (
+				!state.prHeadSha || record.workspace?.prHeadSha === state.prHeadSha
+			);
+		})
+		.map((record) => {
+			const result = record.result ?? record.terminalResult?.result;
+			return [
+				record.correlationId,
+				record.batchId,
+				record.laneId,
+				record.status,
+				record.terminalResult?.eventId ?? '',
+				result?.digest ?? '',
+				result?.outputRef ?? '',
+				result?.prReviewResultReceipt?.semanticEnvelopeDigest ?? '',
+			].join('\0');
+		})
+		.sort((left, right) => left.localeCompare(right));
+	const workflowIdentity =
+		state.workflowInstanceId ?? `${state.mode}\0${state.activatedAt}`;
+	return {
+		kind: 'valid',
+		token: createHash('sha256')
+			.update(`${workflowIdentity}\0${state.revision}\0${tuples.join('\n')}`)
+			.digest('hex'),
+	};
+}
+
+function observeWorkflowProgress(
+	budget: WakeBudget,
+	snapshot: WorkflowProgressSnapshot,
+): boolean {
+	if (snapshot.kind === 'uncertain') {
+		budget.progressUncertain = true;
+		return false;
+	}
+	if (budget.progressUncertain) {
+		// Recovery establishes a trustworthy baseline; it is not productivity.
+		budget.progressUncertain = false;
+		budget.lastSeenProgressToken = snapshot.token;
+		return false;
+	}
+	const madeProgress =
+		budget.lastSeenProgressToken === undefined ||
+		budget.lastSeenProgressToken !== snapshot.token;
+	budget.lastSeenProgressToken = snapshot.token;
+	return madeProgress;
 }
 
 interface BoundaryActivityState {
@@ -372,7 +490,7 @@ function blockedText(
 		} else {
 			const max = options.maxConsecutive;
 			lines.push(
-				`Auto-resume is suspended after ${max ?? 'the configured number of'} consecutive unproductive retries (the durable gate \`revision\` did not advance). The session will not be re-awoken automatically. Run \`/swarm abort-pr-workflow\` or call \`abort_pr_workflow\` to clear the gate, or complete the workflow with \`complete_pr_workflow\` to publish normally.`,
+				`Auto-resume is suspended after ${max ?? 'the configured number of'} consecutive unproductive retries (no durable controller revision, lane status, or structured receipt transition was observed). The session will not be re-awoken automatically. Run \`/swarm abort-pr-workflow\` or call \`abort_pr_workflow\` to clear the gate, or complete the workflow with \`complete_pr_workflow\` to publish normally.`,
 			);
 		}
 	}
@@ -855,8 +973,8 @@ export function createPrWorkflowResponseGate(options: {
 	 *     handlers hold a live reference to their budget object: deleting the
 	 *     map entry detaches it, so their later `totalWakes += 1` / `suspended =
 	 *     true` writes land on an object nothing can read, and the next idle
-	 *     rebuilds a zeroed budget. A rebuilt budget has `lastSeenRevision ===
-	 *     undefined`, which makes `madeProgress` unconditionally true — so the
+	 *     rebuilds a zeroed budget. A rebuilt budget has no progress-token
+	 *     baseline, which makes the first valid observation productive — so the
 	 *     consecutive brake, the cooldown, and the total ceiling all become
 	 *     unreachable for that session.
 	 *  3. Among the survivors, evict the SMALLEST `lastWakeAt`.
@@ -1143,6 +1261,7 @@ export function createPrWorkflowResponseGate(options: {
 				budget = {
 					consecutiveUnproductive: 0,
 					lastWakeAt: 0,
+					progressUncertain: false,
 					suspended: false,
 					totalWakes: 0,
 					suspendedReason: 'consecutive',
@@ -1181,12 +1300,10 @@ export function createPrWorkflowResponseGate(options: {
 			if (!getLiveBoundaryActivity(sessionID, boundaryGeneration)) return;
 			state = postStatusState;
 
-			if (
-				budget.lastSeenRevision !== undefined &&
-				state.revision > budget.lastSeenRevision
-			) {
-				budget.consecutiveUnproductive = 0;
-			}
+			// The cooldown early-return comes BEFORE the progress observation:
+			// the observation pays a full delegation-ledger scan, and a wake the
+			// cooldown is about to discard must not pay it. Progress observed
+			// after the window only defers the counter reset to the next wake.
 			if (
 				budget.consecutiveUnproductive > 0 &&
 				budget.lastWakeAt > 0 &&
@@ -1194,11 +1311,13 @@ export function createPrWorkflowResponseGate(options: {
 			) {
 				return;
 			}
-
-			const madeProgress =
-				budget.lastSeenRevision === undefined
-					? true
-					: state.revision > budget.lastSeenRevision;
+			const madeProgress = observeWorkflowProgress(
+				budget,
+				workflowProgressSnapshot(options.directory, sessionID, state),
+			);
+			if (madeProgress) {
+				budget.consecutiveUnproductive = 0;
+			}
 
 			let feedbackTarget =
 				state.prFeedbackTargetUrl ?? state.prFeedbackReviewHandoff?.prUrl;
@@ -1331,12 +1450,17 @@ export function createPrWorkflowResponseGate(options: {
 				if (postWakeState === null) {
 					resetBudget(sessionID);
 				} else {
-					const currentRevision = postWakeState.revision;
 					const effectiveMadeProgress =
 						madeProgress ||
-						(budget.lastSeenRevision !== undefined &&
-							currentRevision > budget.lastSeenRevision);
-					budget.lastSeenRevision = currentRevision;
+						observeWorkflowProgress(
+							budget,
+							workflowProgressSnapshot(
+								options.directory,
+								sessionID,
+								postWakeState,
+							),
+						);
+					budget.lastSeenRevision = postWakeState.revision;
 					let suspensionTripped = false;
 					if (!effectiveMadeProgress) {
 						budget.consecutiveUnproductive += 1;

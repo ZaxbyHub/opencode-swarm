@@ -1,10 +1,20 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { createDelegationGateHook } from '../../../src/hooks/delegation-gate.js';
+import {
+	readTaskEvidence,
+	transitionTaskWorkflowEvidence,
+} from '../../../src/gate-evidence.js';
+import {
+	createDelegationGateHook,
+	_internals as delegationInternals,
+	getPendingCoderScope,
+} from '../../../src/hooks/delegation-gate.js';
 import {
 	_test_exports,
 	activatePrWorkflow,
 	declarePrFeedbackInventory,
+	declarePrFeedbackScope,
 	enforcePrFeedbackVerificationOwnership,
+	resolvePrFeedbackScopeDeclaration,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import { createScopeGuardHook } from '../../../src/hooks/scope-guard.js';
 import {
@@ -13,6 +23,7 @@ import {
 } from '../../../src/scope/scope-binding.js';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state.js';
 import { executePreparePrFeedbackScope } from '../../../src/tools/prepare-pr-feedback-scope.js';
+import { writeApprovedPlan } from '../../helpers/approved-plan.js';
 import { makeConfig } from './_delegation-gate-helpers.js';
 import {
 	HEAD_SHA,
@@ -25,7 +36,10 @@ import {
 } from './pr-workflow-gate.test-fixtures.js';
 
 beforeEach(setupPrWorkflowGateFixtures);
-afterEach(teardownPrWorkflowGateFixtures);
+afterEach(async () => {
+	delegationInternals.beforePrFeedbackScopeConsume = undefined;
+	await teardownPrWorkflowGateFixtures();
+});
 
 async function settleFeedbackVerification(): Promise<void> {
 	await activatePrWorkflow(tempDir, SESSION_ID, 'PR_FEEDBACK');
@@ -185,6 +199,72 @@ describe('PR_FEEDBACK dedicated coder scope controller', () => {
 		).resolves.toBeUndefined();
 	});
 
+	test('gives an authenticated synthetic PR-feedback scope precedence over an unrelated plan', async () => {
+		await settleFeedbackVerification();
+		await writeApprovedPlan(tempDir, [
+			{ id: '1.1', files: ['src/unrelated-plan-task.ts'] },
+		]);
+		const prepared = JSON.parse(
+			await executePreparePrFeedbackScope(
+				{ task_id: '9.9', files: ['src/index.ts'] },
+				tempDir,
+				{ sessionID: SESSION_ID },
+			),
+		) as { success: boolean };
+		expect(prepared.success).toBe(true);
+
+		const delegation = createDelegationGateHook(makeConfig(), tempDir);
+		await expect(
+			delegation.toolBefore(
+				{ tool: 'Task', sessionID: SESSION_ID, callID: 'feedback-with-plan' },
+				{
+					args: {
+						subagent_type: 'coder',
+						task_id: '9.9',
+						prompt:
+							'TASK: 9.9\nFILE: src/index.ts\nACCEPTANCE: close the authenticated feedback item',
+					},
+				},
+			),
+		).resolves.toBeUndefined();
+	});
+
+	test('gives an authenticated PR-feedback scope precedence over stale plan Stage-A state', async () => {
+		await settleFeedbackVerification();
+		await writeApprovedPlan(tempDir, [
+			{ id: '1.1', files: ['src/unrelated-plan-task.ts'] },
+		]);
+		await transitionTaskWorkflowEvidence(tempDir, '1.1', {
+			type: 'accepted_mutation',
+			agentType: 'coder',
+			expectedGeneration: 0,
+			transitionId: 'seed-stale-plan-stage-a',
+		});
+		const prepared = JSON.parse(
+			await executePreparePrFeedbackScope(
+				{ task_id: '1.1', files: ['src/index.ts'] },
+				tempDir,
+				{ sessionID: SESSION_ID },
+			),
+		) as { success: boolean };
+		expect(prepared.success).toBe(true);
+
+		const delegation = createDelegationGateHook(makeConfig(), tempDir);
+		await expect(
+			delegation.toolBefore(
+				{ tool: 'Task', sessionID: SESSION_ID, callID: 'feedback-stage-a' },
+				{
+					args: {
+						subagent_type: 'coder',
+						task_id: '1.1',
+						prompt:
+							'TASK: 1.1\nFILE: src/index.ts\nACCEPTANCE: close the authenticated feedback item',
+					},
+				},
+			),
+		).resolves.toBeUndefined();
+	});
+
 	test('invalidates a prepared scope when the feedback revision changes', async () => {
 		await settleFeedbackVerification();
 		const result = JSON.parse(
@@ -210,5 +290,124 @@ describe('PR_FEEDBACK dedicated coder scope controller', () => {
 				},
 			),
 		).rejects.toThrow(/verification ownership is incomplete/i);
+	});
+
+	test('atomically reserves one PR-feedback declaration when Task calls race', async () => {
+		await settleFeedbackVerification();
+		const prepared = JSON.parse(
+			await executePreparePrFeedbackScope(
+				{ task_id: '8.8', files: ['src/index.ts'] },
+				tempDir,
+				{ sessionID: SESSION_ID },
+			),
+		) as { success: boolean };
+		expect(prepared.success).toBe(true);
+		const delegation = createDelegationGateHook(makeConfig(), tempDir);
+		const results = await Promise.allSettled(
+			['scope-race-a', 'scope-race-b'].map((callID) =>
+				delegation.toolBefore(
+					{ tool: 'Task', sessionID: SESSION_ID, callID },
+					{
+						args: {
+							subagent_type: 'coder',
+							task_id: '8.8',
+							prompt:
+								'TASK: 8.8\nFILE: src/index.ts\nACCEPTANCE: close the authenticated feedback item',
+						},
+					},
+				),
+			),
+		);
+		expect(
+			results.filter((result) => result.status === 'fulfilled'),
+		).toHaveLength(1);
+		const declaration = await resolvePrFeedbackScopeDeclaration(
+			tempDir,
+			SESSION_ID,
+			'8.8',
+		);
+		expect(['scope-race-a', 'scope-race-b']).toContain(
+			declaration?.consumedByCallId,
+		);
+	});
+
+	test('does not consume a replacement declaration after classifying its predecessor', async () => {
+		await settleFeedbackVerification();
+		await declarePrFeedbackScope(tempDir, SESSION_ID, '7.7', ['src/index.ts']);
+
+		let releaseClassification!: () => void;
+		const classificationReleased = new Promise<void>((resolve) => {
+			releaseClassification = resolve;
+		});
+		let signalClassified!: () => void;
+		const classified = new Promise<void>((resolve) => {
+			signalClassified = resolve;
+		});
+		delegationInternals.beforePrFeedbackScopeConsume = async () => {
+			signalClassified();
+			await classificationReleased;
+		};
+
+		const delegation = createDelegationGateHook(makeConfig(), tempDir);
+		const dispatch = delegation.toolBefore(
+			{ tool: 'Task', sessionID: SESSION_ID, callID: 'replaced-scope-call' },
+			{
+				args: {
+					subagent_type: 'coder',
+					task_id: '7.7',
+					prompt:
+						'TASK: 7.7\nFILE: src/index.ts\nACCEPTANCE: close the authenticated feedback item',
+				},
+			},
+		);
+		await classified;
+		await declarePrFeedbackScope(tempDir, SESSION_ID, '7.7', [
+			'src/replacement.ts',
+		]);
+		releaseClassification();
+
+		await expect(dispatch).rejects.toThrow(/could not be reserved/i);
+		const replacement = await resolvePrFeedbackScopeDeclaration(
+			tempDir,
+			SESSION_ID,
+			'7.7',
+		);
+		expect(replacement).toMatchObject({
+			files: ['src/replacement.ts'],
+		});
+		expect(replacement?.consumedByCallId).toBeUndefined();
+		expect(getPendingCoderScope(tempDir, '7.7')).toBeNull();
+	});
+
+	test('preserves normal-plan Stage-A rejection without scope or evidence leaks', async () => {
+		await writeApprovedPlan(tempDir, [
+			{ id: '1.1', files: ['src/normal-plan.ts'] },
+		]);
+		await transitionTaskWorkflowEvidence(tempDir, '1.1', {
+			type: 'accepted_mutation',
+			agentType: 'coder',
+			expectedGeneration: 0,
+			transitionId: 'normal-plan-accepted',
+		});
+		const beforeEvidence = await readTaskEvidence(tempDir, '1.1');
+		const delegation = createDelegationGateHook(makeConfig(), tempDir);
+		await expect(
+			delegation.toolBefore(
+				{ tool: 'Task', sessionID: SESSION_ID, callID: 'normal-plan-reject' },
+				{
+					args: {
+						subagent_type: 'coder',
+						task_id: '1.1',
+						prompt:
+							'TASK: 1.1\nFILE: src/normal-plan.ts\nACCEPTANCE: continue normal plan work',
+					},
+				},
+			),
+		).rejects.toThrow(/STAGE_A_REQUIRED/);
+		expect(getPendingCoderScope(tempDir, '1.1')).toBeNull();
+		expect(await readTaskEvidence(tempDir, '1.1')).toEqual(beforeEvidence);
+		expect(
+			await resolvePrFeedbackScopeDeclaration(tempDir, SESSION_ID, '1.1'),
+		).toBeNull();
 	});
 });

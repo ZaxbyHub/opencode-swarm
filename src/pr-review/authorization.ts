@@ -7,10 +7,11 @@
  * `reviewer`/`test_engineer` may bypass the generic Stage-A task-workflow
  * requirement. The PR workflow controller issues an authorization bound to
  * the exact active session, workflow, run, base/head SHA, worktree revision
- * digest, role, and gate generation; the Task delegation gate consumes it
- * atomically, exactly once. Stale, cross-session, wrong-role, replayed,
- * expired, or revision-drifted requests fail closed to the normal gating
- * path.
+ * digest, role, and gate generation; the PR workflow controller boundary
+ * reserves it atomically for exactly one Task call and the Task delegation
+ * gate verifies that same call-bound reservation (idempotent for the same
+ * callID). Stale, cross-session, wrong-role, replayed, expired, or
+ * revision-drifted requests fail closed to the normal gating path.
  *
  * Binding verification: the CURRENT gate binding (head/revision/generation)
  * is supplied by the owning gate through a bound reader
@@ -224,20 +225,23 @@ async function writeAuthorizationFile(
 	}
 }
 
-/** Drop consumed/expired records past the retention bound; keep newest first. */
+/**
+ * Drop expired records past the retention bound; keep newest first. A burst
+ * of consumed records must never evict a still-live unconsumed authorization
+ * before its TTL, so unconsumed records take priority within the cap.
+ */
 function pruneAuthorizations(
 	records: readonly PrReviewReentryAuthorizationRecord[],
 	nowMs: number,
 ): PrReviewReentryAuthorizationRecord[] {
-	const kept: PrReviewReentryAuthorizationRecord[] = [];
-	for (const record of [...records]
-		.sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-		.slice(0, MAX_PERSISTED_AUTHORIZATIONS)) {
-		if (record.consumedAt) continue;
-		if (Date.parse(record.expiresAt) <= nowMs) continue;
-		kept.push(record);
-	}
-	return kept;
+	const unexpired = records
+		.filter((record) => Date.parse(record.expiresAt) > nowMs)
+		.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+	const unconsumed = unexpired.filter((record) => !record.consumedAt);
+	const consumed = unexpired
+		.filter((record) => record.consumedAt)
+		.slice(0, Math.max(0, MAX_PERSISTED_AUTHORIZATIONS - unconsumed.length));
+	return [...unconsumed.slice(0, MAX_PERSISTED_AUTHORIZATIONS), ...consumed];
 }
 
 // proper-lockfile is a CommonJS module without published TypeScript types
@@ -322,7 +326,10 @@ export async function issuePrReviewReentryAuthorization(
 				`BLOCKED: an unconsumed re-entry authorization for role "${request.role}" at generation ${binding.generation} already exists; use it (one immediate Task dispatch) before issuing another`,
 			);
 		}
-		if (records.length >= MAX_ACTIVE_AUTHORIZATIONS) {
+		if (
+			records.filter((record) => !record.consumedAt).length >=
+			MAX_ACTIVE_AUTHORIZATIONS
+		) {
 			throw new Error(
 				`BLOCKED: re-entry authorization store is at its bound of ${MAX_ACTIVE_AUTHORIZATIONS} active authorizations`,
 			);
@@ -342,26 +349,46 @@ export async function issuePrReviewReentryAuthorization(
 			createdAt: now,
 			expiresAt: new Date(nowMs + AUTHORIZATION_TTL_MS).toISOString(),
 		};
+		// The schema caps the persisted array at MAX_PERSISTED_AUTHORIZATIONS;
+		// prune may legitimately retain up to that many records, so the append
+		// must re-slice or a full store would write one record over the cap and
+		// become unreadable (parse fails before any prune can run again).
 		await writeAuthorizationFile(filePath, {
 			schemaVersion: 1,
 			sessionId: trimmedSession,
-			authorizations: [record, ...records],
+			authorizations: [record, ...records].slice(
+				0,
+				MAX_PERSISTED_AUTHORIZATIONS,
+			),
 		});
 		return record;
 	});
 }
 
+function authorizationMatchesBinding(
+	record: PrReviewReentryAuthorizationRecord,
+	binding: PrReviewReentryBindingContext,
+): boolean {
+	return (
+		binding.prHeadSha === record.prHeadSha &&
+		binding.revisionDigest === record.revisionDigest &&
+		binding.generation === record.generation &&
+		binding.workflowInstanceId === record.workflowInstanceId &&
+		binding.runId === record.runId
+	);
+}
+
 /**
- * Atomically consume the one active authorization for this session+role.
- * Re-verifies the binding against the CURRENT PR_REVIEW gate state — any
- * drift (mode change, head change, revision digest change, generation bump)
- * fails closed to null, as does replay, expiry, cross-session use, or wrong
- * role. Returns the consumed record on success.
+ * Reserve or verify one authorization against a binding whose owning workflow
+ * lock is held by the caller. The authorization-file lock is always acquired
+ * second. A consumed record is retained until expiry so the exact same Task
+ * call can verify its reservation in a later hook (and after process restart).
  */
-export async function consumePrReviewReentryAuthorization(
+export async function reservePrReviewReentryAuthorizationAgainstBinding(
 	directory: string,
 	sessionID: string,
 	request: { role: PrReviewReentryRole; callID: string },
+	binding: PrReviewReentryBindingContext,
 ): Promise<PrReviewReentryAuthorizationRecord | null> {
 	const trimmedSession = sessionID.trim();
 	if (!trimmedSession) return null;
@@ -372,13 +399,23 @@ export async function consumePrReviewReentryAuthorization(
 			if (!existing) return null;
 			const nowMs = Date.now();
 			const records = pruneAuthorizations(existing.authorizations, nowMs);
-			const index = records.findIndex(
+			const sameCallIndex = records.findIndex(
 				(record) =>
-					!record.consumedAt &&
+					record.consumedCallId === request.callID &&
 					record.role === request.role &&
 					record.sessionId === trimmedSession &&
 					Date.parse(record.expiresAt) > nowMs,
 			);
+			const index =
+				sameCallIndex >= 0
+					? sameCallIndex
+					: records.findIndex(
+							(record) =>
+								!record.consumedAt &&
+								record.role === request.role &&
+								record.sessionId === trimmedSession &&
+								Date.parse(record.expiresAt) > nowMs,
+						);
 			if (index < 0) {
 				// Persist the prune even when nothing is consumable, so expired
 				// records do not accumulate.
@@ -390,23 +427,11 @@ export async function consumePrReviewReentryAuthorization(
 				}
 				return null;
 			}
-			// Re-verify against the CURRENT gate state BEFORE consuming: the
-			// authorization is generation- and revision-bound, so any workflow
-			// progress since issuance invalidates it.
-			const binding = await currentBinding(directory, trimmedSession);
 			const candidate = records[index]!;
-			if (
-				!binding ||
-				binding.prHeadSha !== candidate.prHeadSha ||
-				binding.revisionDigest !== candidate.revisionDigest ||
-				binding.generation !== candidate.generation ||
-				(candidate.workflowInstanceId !== undefined &&
-					binding.workflowInstanceId !== candidate.workflowInstanceId) ||
-				(candidate.workflowInstanceId === undefined &&
-					binding.workflowInstanceId !== undefined)
-			) {
+			if (!authorizationMatchesBinding(candidate, binding)) {
 				return null;
 			}
+			if (candidate.consumedCallId === request.callID) return candidate;
 			const consumed: PrReviewReentryAuthorizationRecord = {
 				...candidate,
 				consumedAt: new Date(nowMs).toISOString(),
@@ -432,6 +457,7 @@ export const _internals = {
 	MAX_ACTIVE_AUTHORIZATIONS,
 	reentryAuthorizationFilePath,
 	pruneAuthorizations,
+	authorizationMatchesBinding,
 	/** DI seam: the rename implementation (tests inject failure modes). */
 	renameImpl: (from: string, to: string): Promise<void> => fsp.rename(from, to),
 	/** DI seam: retry backoff schedule (tests shrink to avoid real sleeps). */

@@ -679,6 +679,9 @@ mock.module('node:fs', () => ({
 | `src/background/pending-delegations.ts` | `_checkpointInternals` (`renameWithRetry`, `renameOnce`, `syncSleep`) | #2034 checkpoint crash-window + Windows rename-retry tests (inject EPERM at the atomic rename boundary) |
 | `src/background/delegation-health.ts` | `_healthInternals` (`renameOnce`) | #2034 health-artifact Windows rename-retry tests |
 | `src/hooks/init-orphan-recovery.ts` | `recordDelegationRecoveryObservation` | #2034/#1659 durable recovery-observation tests |
+| `src/hooks/delegation-gate.ts` | `_internals.beforePrFeedbackScopeConsume` | #2469 declaration-replacement interleave tests (pause between scope classification and locked consumption) |
+| `src/hooks/pr-workflow-gate.ts` | `_test_exports.beforePrReviewReentryReservation` | #2469 workflow-lock-held-through-reservation interleave tests |
+| `src/hooks/pr-workflow-response-gate.ts` | `_internals.scanDelegationsForRecovery` | #2469 lane-progress-token tests (inject receipt digests / throwing scans) |
 
 **Delegation-gate split pattern (FR-006 SC-006.1):**
 

@@ -98,7 +98,13 @@ import {
 	type PrWorkflowGitState,
 } from '../git/pr-workflow-state.js';
 import { redactSecrets } from '../memory/redaction.js';
-import { bindPrReviewReentryBindingReader } from '../pr-review/authorization.js';
+import {
+	bindPrReviewReentryBindingReader,
+	type PrReviewReentryAuthorizationRecord,
+	type PrReviewReentryBindingContext,
+	type PrReviewReentryRole,
+	reservePrReviewReentryAuthorizationAgainstBinding,
+} from '../pr-review/authorization.js';
 import {
 	adoptPrReviewCircuit,
 	CIRCUIT_TERMINAL_DELEGATION_STATUSES,
@@ -6507,11 +6513,11 @@ function prFeedbackCoveredItems(
 }
 
 /** Validate cumulative exact inventory ownership and settled verification artifacts. */
-export async function assertPrFeedbackVerificationSettled(
+async function assertPrFeedbackVerificationSettledState(
 	directory: string,
-	sessionID: string,
-): Promise<PrWorkflowGateState> {
-	const state = await requireBoundState(directory, sessionID, 'PR_FEEDBACK');
+	state: PrWorkflowGateState,
+): Promise<string> {
+	if (state.mode !== 'PR_FEEDBACK') throw wrongModeError(state, 'PR_FEEDBACK');
 	const currentDigest = await currentPrFeedbackRevisionDigest(directory, state);
 	const inventory = state.prFeedbackInventory;
 	const batches = state.prFeedbackVerifications ?? [];
@@ -6527,6 +6533,16 @@ export async function assertPrFeedbackVerificationSettled(
 			`BLOCKED: PR_FEEDBACK verification ownership is incomplete; missing inventory items: ${missing.join(', ') || '(none)'}`,
 		);
 	}
+	return currentDigest;
+}
+
+/** Validate cumulative exact inventory ownership and settled verification artifacts. */
+export async function assertPrFeedbackVerificationSettled(
+	directory: string,
+	sessionID: string,
+): Promise<PrWorkflowGateState> {
+	const state = await requireBoundState(directory, sessionID, 'PR_FEEDBACK');
+	await assertPrFeedbackVerificationSettledState(directory, state);
 	return state;
 }
 
@@ -10451,29 +10467,57 @@ export async function consumePrFeedbackScopeDeclaration(
 	sessionID: string,
 	taskId: string,
 	callID: string,
+	expected: Pick<
+		PrFeedbackScopeDeclarationRecord,
+		'declaredAt' | 'revisionDigest' | 'files'
+	>,
 ): Promise<PrFeedbackScopeDeclarationRecord | null> {
-	const declaration = await resolvePrFeedbackScopeDeclaration(
-		directory,
-		sessionID,
-		taskId,
-	);
-	if (!declaration) return null;
-	if (declaration.consumedByCallId && declaration.consumedByCallId !== callID) {
-		throw new Error(
-			`SCOPE_NOT_DECLARED: PR-feedback scope ${taskId} was already consumed by another Task call`,
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	return withSessionStateMutation(directory, normalizedSessionID, async () => {
+		const state = await readPrWorkflowGateStateFromDisk(
+			directory,
+			normalizedSessionID,
 		);
-	}
-	if (declaration.consumedByCallId === callID) return declaration;
-	const state = await requireBoundState(directory, sessionID, 'PR_FEEDBACK');
-	const nextState: PrWorkflowGateState = {
-		...state,
-		updatedAt: isoNow(),
-		prFeedbackScopes: (state.prFeedbackScopes ?? []).map((entry) =>
-			entry.taskId === taskId ? { ...entry, consumedByCallId: callID } : entry,
-		),
-	};
-	await persistState(directory, nextState);
-	return { ...declaration, consumedByCallId: callID };
+		if (!state || state.mode !== 'PR_FEEDBACK') return null;
+		const declaration = (state.prFeedbackScopes ?? []).find(
+			(entry) => entry.taskId === taskId,
+		);
+		if (!declaration) return null;
+		// The declaration was classified before this lock was acquired so caller
+		// directives could be checked without holding the workflow-state lock. Pin
+		// the reservation to that exact snapshot: a controller replacement must
+		// never consume new authority while publishing files from the old record.
+		if (
+			declaration.declaredAt !== expected.declaredAt ||
+			declaration.revisionDigest !== expected.revisionDigest ||
+			JSON.stringify(declaration.files) !== JSON.stringify(expected.files)
+		) {
+			return null;
+		}
+		const currentDigest = await assertPrFeedbackVerificationSettledState(
+			directory,
+			state,
+		);
+		if (currentDigest !== declaration.revisionDigest) return null;
+		if (
+			declaration.consumedByCallId &&
+			declaration.consumedByCallId !== callID
+		) {
+			throw new Error(
+				`SCOPE_NOT_DECLARED: PR-feedback scope ${taskId} was already consumed by another Task call`,
+			);
+		}
+		if (declaration.consumedByCallId === callID) return declaration;
+		const consumed = { ...declaration, consumedByCallId: callID };
+		await writeStateWhileLocked(directory, {
+			...state,
+			updatedAt: isoNow(),
+			prFeedbackScopes: (state.prFeedbackScopes ?? []).map((entry) =>
+				entry.taskId === taskId ? consumed : entry,
+			),
+		});
+		return consumed;
+	});
 }
 
 export async function validatePrFeedbackScopeBinding(
@@ -10745,8 +10789,30 @@ export async function enforcePrWorkflowToolBefore(
 			? ` ${describeBlockedPrReviewShellCommand(command, shellPermissionEnvelope)}`
 			: '';
 	if (state.mode === 'PR_REVIEW') {
+		let hasAuthorizedDirectReentry = false;
+		if (
+			isDirectAgentTask &&
+			// Admission must key on `subagent_type` specifically: the delegation
+			// gate's enforcement (Stage-A, reviewer routing, acceptance) only
+			// runs for dispatches carrying `subagent_type`, so an `agent:`-only
+			// dispatch admitted here would skip every downstream gate.
+			requestedAgentFields.length === 1 &&
+			requestedAgentFields[0] === 'subagent_type' &&
+			requestedRoles.length === 1 &&
+			(requestedRoles[0] === 'reviewer' ||
+				requestedRoles[0] === 'test_engineer') &&
+			callID
+		) {
+			hasAuthorizedDirectReentry = Boolean(
+				await reserveActivePrReviewReentryAuthorization(directory, sessionID, {
+					role: requestedRoles[0],
+					callID,
+				}),
+			);
+		}
 		const isAllowedReviewTool =
 			isInternalWorkflowTool ||
+			hasAuthorizedDirectReentry ||
 			isNamedReadOnlyTool ||
 			(isReadOnlyShell && (!isShellCheckout || isCanonicalReviewCheckout));
 		if (
@@ -10928,18 +10994,19 @@ export async function enforcePrWorkflowToolBefore(
 export async function readPrReviewReentryBindingContext(
 	directory: string,
 	sessionID: string,
-): Promise<{
-	prHeadSha: string;
-	revisionDigest: string;
-	generation: number;
-	workflowInstanceId?: string;
-	runId?: string;
-} | null> {
+): Promise<PrReviewReentryBindingContext | null> {
 	const state = await readPrWorkflowGateStateFromDisk(
 		directory,
 		normalizeSessionID(sessionID),
 	);
-	if (!state || state.mode !== 'PR_REVIEW' || !state.prHeadSha) return null;
+	return state ? prReviewReentryBindingFromState(directory, state) : null;
+}
+
+async function prReviewReentryBindingFromState(
+	directory: string,
+	state: PrWorkflowGateState,
+): Promise<PrReviewReentryBindingContext | null> {
+	if (state.mode !== 'PR_REVIEW' || !state.prHeadSha) return null;
 	const ctx = await createPrReviewGateContext(directory, state);
 	return {
 		prHeadSha: state.prHeadSha,
@@ -10957,6 +11024,35 @@ export async function readPrReviewReentryBindingContext(
 				}
 			: {}),
 	};
+}
+
+/**
+ * Sole production reservation/verification path for direct PR-review re-entry.
+ * Lock order is fixed: workflow-session first, authorization store second. The
+ * active binding cannot change between its locked reread and reservation commit.
+ */
+export async function reserveActivePrReviewReentryAuthorization(
+	directory: string,
+	sessionID: string,
+	request: { role: PrReviewReentryRole; callID: string },
+): Promise<PrReviewReentryAuthorizationRecord | null> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	return withSessionStateMutation(directory, normalizedSessionID, async () => {
+		const state = await readPrWorkflowGateStateFromDisk(
+			directory,
+			normalizedSessionID,
+		);
+		if (!state) return null;
+		const binding = await prReviewReentryBindingFromState(directory, state);
+		if (!binding) return null;
+		await _test_exports.beforePrReviewReentryReservation?.();
+		return reservePrReviewReentryAuthorizationAgainstBinding(
+			directory,
+			normalizedSessionID,
+			request,
+			binding,
+		);
+	});
 }
 
 // Issue #2385: the reentry authorization boundary (src/pr-review/
@@ -11469,6 +11565,7 @@ export const _test_exports = {
 		_test_exports.beforePrFeedbackTrackingSwitch = undefined;
 		_test_exports.afterPrFeedbackTrackingSwitch = undefined;
 		_test_exports.beforePrFeedbackTrackingPersist = undefined;
+		_test_exports.beforePrReviewReentryReservation = undefined;
 		_test_exports.beforeBoundedSwarmFileOpen = undefined;
 		_test_exports.beforeSessionStateLockWrite = undefined;
 		_test_exports.beforeCheckoutLockWrite = undefined;
@@ -11507,6 +11604,10 @@ export const _test_exports = {
 		| undefined,
 	afterPrFeedbackTrackingSwitch: undefined as (() => Promise<void>) | undefined,
 	beforePrFeedbackTrackingPersist: undefined as
+		| (() => Promise<void>)
+		| undefined,
+	/** Interleave point held inside the workflow-session lock before auth commit. */
+	beforePrReviewReentryReservation: undefined as
 		| (() => Promise<void>)
 		| undefined,
 	beforeBoundedSwarmFileOpen: undefined as (() => Promise<void>) | undefined,
@@ -11945,6 +12046,7 @@ const PR_WORKFLOW_SHARED_CONTROLLER_TOOLS = new Set([
 ]);
 
 const PR_REVIEW_CONTROLLER_TOOLS = new Set([
+	'authorize_pr_review_reentry',
 	'parse_lane_candidates',
 	'write_pr_review_artifact',
 	'write_pr_review_trigger_eval',
