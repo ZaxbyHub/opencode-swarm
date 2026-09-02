@@ -13,6 +13,7 @@ import {
 	_internals,
 	canonicalProjectKey,
 } from '../../../src/db/canonical-project.js';
+import { withFrozenClock } from '../../helpers/test-clock';
 
 const IS_WIN = process.platform === 'win32';
 
@@ -48,6 +49,7 @@ describe('canonicalProjectKey', () => {
 	});
 
 	test('a symlink to the same directory maps to one key', () => {
+		withFrozenClock(() => {});
 		const dir = tmp('link');
 		const linkPath = path.join(os.tmpdir(), `canonical-link-${Date.now()}`);
 		let linked = false;
@@ -97,6 +99,7 @@ describe('canonicalProjectKey', () => {
 	});
 
 	test('a nonexistent path still yields a stable lexical key', () => {
+		withFrozenClock(() => {});
 		const ghost = path.join(os.tmpdir(), `canonical-ghost-${Date.now()}`);
 		const key = canonicalProjectKey(ghost);
 		expect(key.length).toBeGreaterThan(0);

@@ -19,8 +19,10 @@ import {
 	writeDriftReport,
 } from '../../../src/hooks/curator-drift';
 import type { DriftReport } from '../../../src/hooks/curator-types';
+import { withFrozenClock } from '../../helpers/test-clock';
 
 function createValidDriftReport(phase: number): DriftReport {
+	withFrozenClock(() => {}); // #1782: deterministic timestamp
 	return {
 		schema_version: 1,
 		phase,

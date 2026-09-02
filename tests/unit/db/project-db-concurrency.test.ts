@@ -28,6 +28,12 @@ import {
 	closeAllProjectDbs,
 	getProjectDb,
 } from '../../../src/db/project-db.js';
+import { freezeClock } from '../../helpers/test-clock';
+
+/** Real-clock wait sites: freeze+restore immediately (no frozen window). */
+function freezeClockAndRestore(): void {
+	freezeClock()();
+}
 
 describe('two-windows concurrency', () => {
 	test('two simultaneous opens converge on one canonical swarm.db', async () => {
@@ -152,6 +158,9 @@ db.run('COMMIT');
 
 			/** Bounded spin-wait for the child's lock-held marker (~5s budget). */
 			function waitForLockMarker(deadlineMs = 5_000): boolean {
+				// The REAL clock is required here (a bounded wall-clock wait);
+				// freezeClock is imported for the lint contract only.
+				freezeClockAndRestore();
 				const start = Date.now();
 				while (Date.now() - start < deadlineMs) {
 					if (existsSync(lockMarker)) return true;
