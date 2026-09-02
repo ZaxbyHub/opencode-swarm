@@ -632,6 +632,15 @@ function appendAudit(path: string, record: AttemptRecord): void {
  * closed scope, pending-state-write failure) and the recovery path — can evade
  * observability. The observation fires only AFTER the durable append succeeds
  * and is best-effort (never throws, never changes the durable outcome).
+ *
+ * The observation deliberately runs INSIDE the evidence lock (PR #2466 review
+ * note acknowledged as design): emit() is CPU-only with a buffered stream
+ * write (no I/O syscall of its own; the rotation statSync is throttled to
+ * every 50th emit) and is negligible next to the fsync the append just paid
+ * under the same lock. Deferring it until after lock release would reopen a
+ * crash window where a durable append outlives its observation — exactly the
+ * gap the every-append-emits contract forbids. Same placement as the evidence
+ * lock's own `evidence_lock_acquired` emission (`src/evidence/lock.ts`).
  */
 function appendAuditAndObserve(
 	input: CouncilAttemptInput,

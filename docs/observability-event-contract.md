@@ -116,6 +116,17 @@ issue #2029 item 1 names, **all optional**:
 `laneId`, `batchId`, `resultId`, `councilRoundId`, `backgroundInvocationId`,
 `knowledgeTraceId`, `knowledgeEntryId`, `prRunId`.
 
+> **Extraction is payload-mirroring, not provenance-binding:**
+> `extractWorkflowIds` copies a recognized key from whatever payload it
+> is given, for every kind — correlation keys are trusted because they
+> originate inside the process (telemetry has no external writers), not
+> because extraction filters by kind. Per-kind guarantees are enforced
+> by the catalog instead: an ID a kind genuinely never holds is declared
+> in `forbiddenWorkflowIds` (e.g. `councilRoundId` on
+> `council_attempt_unscoped`) and a forged one fails relationship
+> validation; the remaining generic kinds stay permissive by design
+> (PR #2466 review follow-up).
+>
 > **The rule, stated prominently because it is the load-bearing invariant of
 > this contract:** an ID the producer does not genuinely hold stays
 > `undefined` — never `''`, never synthesized. `extractWorkflowIds`
@@ -416,7 +427,7 @@ pseudonymous payload discipline; same non-authoritative contract.
 Category `gate`, severity `warning`, privacy `pseudonymous`. Producer
 `src/council/council-observability.ts:152`
 (`emitUnscopedCouncilAttemptObservation`, issue #2046 item 9). Consumers: none
-— owner **#2048**. Retention: **#2046**. Required workflow IDs: none. Emitted
+— owner **#2048**. Retention: **#2046**. Required workflow IDs: none. Forbidden workflow IDs: `councilRoundId` — these submissions genuinely have no round identity, so a present one was manufactured upstream and is flagged by relationship validation rather than silently joined (the scoped council kinds require the same axis, making round-identity provenance machine-enforced in both directions). Emitted
 when a council submission fails before a scope can be resolved — invalid
 arguments, wrong working directory, or the round-state
 uncertainty/persistence-failure catch-alls — mirroring the durable

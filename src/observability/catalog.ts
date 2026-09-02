@@ -156,6 +156,17 @@ const REQUIRE_COUNCIL_ROUND: readonly WorkflowIdKey[] = Object.freeze([
 const FORBID_SESSION: readonly WorkflowIdKey[] = Object.freeze([
 	'hostSessionId',
 ]);
+/**
+ * `councilRoundId` is FORBIDDEN on the unscoped council kind: pre-validation
+ * failures genuinely have no round identity (no resolvable scope), so a
+ * present one was manufactured upstream — the exact anti-pattern issue #2029
+ * item 2 forbids (PR #2466 review follow-up). The scoped council kinds
+ * REQUIRE the axis instead, making round-identity provenance
+ * machine-enforced in both directions.
+ */
+const FORBID_COUNCIL_ROUND: readonly WorkflowIdKey[] = Object.freeze([
+	'councilRoundId',
+]);
 
 /** Live reader of `delegation_end` cost fields. */
 const CONSUMER_COST_ACCOUNTING = Object.freeze([
@@ -539,6 +550,7 @@ const CATALOG_SOURCE: readonly (readonly [string, CatalogEntryInput])[] = [
 			consumers: NO_CONSUMERS,
 			futureOwnerIssue: ISSUE_COUNCIL_REPORT,
 			retentionOwnerIssue: ISSUE_COUNCIL_OBSERVABILITY,
+			forbiddenWorkflowIds: FORBID_COUNCIL_ROUND,
 			// Pre-validation failures (invalid arguments, wrong root, round-state
 			// uncertainty/persistence failure) carry no round identity; the
 			// submitter session is optional and joins when present.

@@ -1,36 +1,23 @@
 /**
- * Council observability emissions (issue #2046 item 9).
+ * Council observability emissions (issue #2046 item 9) — emission paths.
  *
  * Drives the REAL `runCouncilAttempt` / `recordUnscopedCouncilAttempt` with a
  * real telemetry stream (`initTelemetry` on a temp project root) and captures
  * emissions through `addTelemetryListener` — no mock.module, no emit stubbing.
- * Asserts: every attempt path emits (including early returns and recovery),
- * accepted projections emit transitions while 'stay' outcomes never do,
- * payloads stay pseudonymous (bounded key set, no paths/names), and the
- * envelope correlation wiring (`councilRoundId` extraction, lifecycle join
- * fields) holds with zero relationship violations.
+ * This file covers the emission matrix: accepted attempts, transitions, every
+ * early-return path, all three levels, and the unscoped stream. Recovery,
+ * envelope correlation, privacy key-sets, and the uncertainty path live in
+ * `council-observability-contract.test.ts`.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import {
-	existsSync,
-	mkdtempSync,
-	readFileSync,
-	realpathSync,
-	rmSync,
-} from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
 	_internals,
-	type CouncilAttemptEvaluation,
 	councilRoundStatePaths,
 	recordUnscopedCouncilAttempt,
-	runCouncilAttempt,
 } from '../../../src/council/council-round-state.js';
-import { CATALOG_KINDS } from '../../../src/observability/catalog.js';
-import { KNOWN_TELEMETRY_KEYS } from '../../../src/observability/legacy.js';
-import { createObservation } from '../../../src/observability/observe.js';
-import { validateEventRelationships } from '../../../src/observability/relationships.js';
 import {
 	addTelemetryListener,
 	initTelemetry,
@@ -38,62 +25,35 @@ import {
 	resetTelemetryForTesting,
 	type TelemetryListener,
 } from '../../../src/telemetry.js';
-
-const IDENTITY = 'c'.repeat(64);
-const OTHER_IDENTITY = 'd'.repeat(64);
-
-const TASK_SCOPE = {
-	kind: 'task' as const,
-	taskId: '1.1',
-	identityDigest: IDENTITY,
-};
-const PHASE_SCOPE = {
-	kind: 'phase' as const,
-	phaseNumber: 2,
-	identityDigest: IDENTITY,
-};
-const FINAL_SCOPE = { kind: 'final' as const, identityDigest: IDENTITY };
+import {
+	type CapturedEvent,
+	councilEventsOf,
+	evaluation,
+	FINAL_SCOPE,
+	OTHER_IDENTITY,
+	PHASE_SCOPE,
+	attempt as runAttempt,
+	TASK_SCOPE,
+} from './council-observability-helpers.js';
 
 let directory: string;
-let captured: Array<{ event: string; data: Record<string, unknown> }>;
+let captured: CapturedEvent[];
 let listener: TelemetryListener;
 
-function councilEvents(): Array<{
-	event: string;
-	data: Record<string, unknown>;
-}> {
-	return captured.filter((entry) => entry.event.startsWith('council_'));
-}
-
-function evaluation(
-	transition: 'stay' | 'advance' | 'close',
-	extra: Partial<CouncilAttemptEvaluation> = {},
-): CouncilAttemptEvaluation {
-	return {
-		disposition: `evaluated_approve`,
-		response: { success: true },
-		transition,
-		gateEffect: transition === 'close' ? 'allowed' : 'none',
-		...extra,
-	};
+function councilEvents(): CapturedEvent[] {
+	return councilEventsOf(captured);
 }
 
 function attempt(
-	evaluate: (round: number) => Promise<CouncilAttemptEvaluation>,
-	overrides: Partial<Parameters<typeof runCouncilAttempt>[0]> = {},
+	evaluate: Parameters<typeof runAttempt>[1],
+	overrides: Parameters<typeof runAttempt>[2] = {},
 ): Promise<string> {
-	return runCouncilAttempt({
-		directory,
-		scope: TASK_SCOPE,
-		maxRounds: 3,
-		sessionID: 'sess-observability-1',
-		request: { taskId: '1.1', verdicts: [{ member: 'critic' }] },
-		verdictCount: 1,
-		members: ['critic'],
-		evaluate,
-		...overrides,
-	});
+	return runAttempt(directory, evaluate, overrides);
 }
+
+// Guard against future _internals stubs leaking across tests (sibling council
+// test files use the same snapshot/restore pattern).
+const internalsOriginals = { ..._internals };
 
 beforeEach(() => {
 	directory = realpathSync(mkdtempSync(join(tmpdir(), 'council-obs-')));
@@ -106,6 +66,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	Object.assign(_internals, internalsOriginals);
 	removeTelemetryListener(listener);
 	resetTelemetryForTesting();
 	try {
@@ -130,10 +91,7 @@ describe('council_attempt — accepted task attempt', () => {
 			'council_round_transition',
 		]);
 
-		const [received, finalized, transition] = events as Array<{
-			event: string;
-			data: Record<string, unknown>;
-		}>;
+		const [received, finalized, transition] = events;
 
 		expect(received.data.stage).toBe('received');
 		expect(received.data.disposition).toBe('received');
@@ -231,6 +189,33 @@ describe('council_attempt — early-return paths still observed, never transitio
 		expect(finalized.transition).toBe('stay');
 	});
 
+	test('stale clientRound mismatches emit identically at phase and final scopes', async () => {
+		// The mismatch check precedes any scope-specific handling, so the same
+		// two-event no-transition sequence must hold for every level.
+		for (const scope of [PHASE_SCOPE, FINAL_SCOPE]) {
+			captured.length = 0;
+			const result = await attempt(async () => evaluation('close'), {
+				scope,
+				clientRound: 7,
+			});
+			expect(JSON.parse(result).reason).toBe('council_round_mismatch');
+
+			const events = councilEvents();
+			expect(events.map((e) => e.event)).toEqual([
+				'council_attempt',
+				'council_attempt',
+			]);
+			const finalized = events[1]?.data as Record<string, unknown>;
+			expect(finalized.stage).toBe('finalized');
+			expect(finalized.disposition).toBe('council_round_mismatch');
+			expect(finalized.clientRound).toBe(7);
+			expect(finalized.transition).toBe('stay');
+			expect(events.some((e) => e.event === 'council_round_transition')).toBe(
+				false,
+			);
+		}
+	});
+
 	test('duplicate on a closed scope: finalized duplicate_submission, no transition event', async () => {
 		const request = { taskId: '1.1', verdicts: [{ member: 'critic' }] };
 		await attempt(async () => evaluation('close'), { request });
@@ -249,13 +234,18 @@ describe('council_attempt — early-return paths still observed, never transitio
 	});
 
 	test('pending-state-write failure: finalized council_pending_state_write_failed observed, no transition', async () => {
-		// Fresh directory, so atomicWrite call #1 is the initial state write in
-		// loadState and call #2 is the pending-state write we force to fail.
+		// Target the pending-state write by its content signature, not its call
+		// position: only the pending snapshot carries a "pending" key, so the
+		// test proves WHICH durable write failed regardless of call ordering.
 		const originalAtomicWrite = _internals.atomicWrite;
-		let calls = 0;
-		_internals.atomicWrite = async () => {
-			calls++;
-			if (calls === 2) throw new Error('pending write boom');
+		let writes = 0;
+		let pendingWriteThrew = false;
+		_internals.atomicWrite = async (path: string, content: string) => {
+			writes++;
+			if (content.includes('"pending"')) {
+				pendingWriteThrew = path.includes('round-state');
+				throw new Error('pending write boom');
+			}
 		};
 		let result: string;
 		try {
@@ -265,7 +255,8 @@ describe('council_attempt — early-return paths still observed, never transitio
 		} finally {
 			_internals.atomicWrite = originalAtomicWrite;
 		}
-		expect(calls).toBeGreaterThanOrEqual(2);
+		expect(pendingWriteThrew).toBe(true);
+		expect(writes).toBeGreaterThanOrEqual(2);
 		expect(JSON.parse(result as string).reason).toBe(
 			'council_round_state_persistence_failed',
 		);
@@ -345,149 +336,5 @@ describe('council_attempt_unscoped', () => {
 		expect(typeof payload.attemptId).toBe('string');
 		expect(payload.councilRoundId).toBeUndefined();
 		expect(payload.sessionId).toBe('sess-observability-1');
-	});
-});
-
-describe('recovery path', () => {
-	test('recovered attempt emits stage recovered and its pending transition', async () => {
-		// Attempt 1: pending state is written for an ADVANCE outcome, then the
-		// evidence commit throws, so no finalized record exists and the outer
-		// catch records an unscoped persistence failure. (A close-pending would
-		// close the scope on recovery; advance keeps it open for attempt 2.)
-		const first = await attempt(async () =>
-			evaluation('advance', {
-				disposition: 'blocking_concerns_unresolved',
-				gateEffect: 'blocked',
-				evidence: {
-					reference: '.swarm/council/evidence/recovery-test.json',
-					commit: async () => {
-						throw new Error('commit boom');
-					},
-				},
-			}),
-		);
-		expect(JSON.parse(first).reason).toBe(
-			'council_round_state_persistence_failed',
-		);
-		// The failed durability attempt emits no scoped transition.
-		expect(
-			councilEvents().some((e) => e.event === 'council_round_transition'),
-		).toBe(false);
-		captured.length = 0;
-
-		// Attempt 2: the probe confirms the evidence actually committed, so the
-		// pending advance is recovered (round 1 → 2) and the fresh attempt on
-		// round 2 can close cleanly.
-		const second = await attempt(async () => evaluation('close'), {
-			probePendingEvidence: async () => true,
-		});
-		expect(JSON.parse(second).success).toBe(true);
-
-		const events = councilEvents();
-		expect(events.map((e) => e.event)).toEqual([
-			'council_attempt',
-			'council_round_transition',
-			'council_attempt',
-			'council_attempt',
-			'council_round_transition',
-		]);
-		const [recovered, recoveredTransition] = events as Array<{
-			event: string;
-			data: Record<string, unknown>;
-		}>;
-		expect(recovered.data.stage).toBe('recovered');
-		expect(recovered.data.disposition).toBe('pending_evidence_recovered');
-		expect(recovered.data.transition).toBe('advance');
-		expect(recovered.data.gateEffect).toBe('blocked');
-		expect(recoveredTransition.data.transition).toBe('advance');
-		expect(recoveredTransition.data.round).toBe(1);
-		expect(recoveredTransition.data.nextRound).toBe(2);
-		expect(recoveredTransition.data.roundStatus).toBe('open');
-	});
-});
-
-describe('correlation wiring and contract coherence', () => {
-	test('createObservation extracts councilRoundId + lifecycle join fields with zero violations', async () => {
-		await attempt(async () => evaluation('close'));
-		const payload = councilEvents()[0]?.data as Record<string, unknown>;
-		const event = createObservation('council_attempt', payload);
-		expect(event.workflow.councilRoundId).toBe(payload.councilRoundId);
-		expect(event.workflow.hostSessionId).toBe('sess-observability-1');
-		expect(event.workflow.taskId).toBe('1.1');
-		expect(validateEventRelationships(event)).toEqual({ ok: true });
-
-		const transitionPayload = councilEvents()[2]?.data as Record<
-			string,
-			unknown
-		>;
-		const transitionEvent = createObservation(
-			'council_round_transition',
-			transitionPayload,
-		);
-		expect(transitionEvent.workflow.councilRoundId).toBe(
-			transitionPayload.councilRoundId,
-		);
-		expect(validateEventRelationships(transitionEvent)).toEqual({ ok: true });
-	});
-
-	test('unscoped observation passes relationship validation without round identity', async () => {
-		await recordUnscopedCouncilAttempt(
-			directory,
-			'phase',
-			'invalid_working_directory',
-			{},
-			[],
-			undefined,
-		);
-		const payload = councilEvents()[0]?.data as Record<string, unknown>;
-		expect(payload.sessionId).toBeUndefined();
-		const event = createObservation('council_attempt_unscoped', payload);
-		expect(event.workflow.councilRoundId).toBeUndefined();
-		expect(validateEventRelationships(event)).toEqual({ ok: true });
-	});
-
-	test('payload keys stay within the catalogued pseudonymous key set', async () => {
-		await attempt(async () =>
-			evaluation('close', {
-				evidence: {
-					reference: '.swarm/council/evidence/privacy-test.json',
-					commit: async () => {},
-				},
-			}),
-		);
-		const allowed = new Set(KNOWN_TELEMETRY_KEYS.council_attempt);
-		for (const entry of councilEvents()) {
-			if (entry.event !== 'council_attempt') continue;
-			for (const key of Object.keys(entry.data)) {
-				expect(allowed.has(key)).toBe(true);
-			}
-			// Pseudonymous discipline: no paths, no member names, no raw request.
-			expect(entry.data.evidenceRef).toBeUndefined();
-			expect(entry.data.members).toBeUndefined();
-			expect(entry.data.request).toBeUndefined();
-			expect(entry.data.working_directory).toBeUndefined();
-		}
-	});
-
-	test('every captured council kind is catalogued', async () => {
-		await attempt(async () => evaluation('close'));
-		for (const entry of captured) {
-			expect(CATALOG_KINDS.includes(entry.event as never)).toBe(true);
-		}
-	});
-});
-
-describe('observability cannot break the council flow', () => {
-	test('council attempts complete normally when telemetry is not initialized', async () => {
-		removeTelemetryListener(listener);
-		resetTelemetryForTesting();
-		const result = await attempt(async () => evaluation('close'));
-		expect(JSON.parse(result).success).toBe(true);
-		expect(
-			existsSync(councilRoundStatePaths(directory, TASK_SCOPE).audit),
-		).toBe(true);
-		// With the stream closed mid-flight, emit returns early: no listener
-		// ran, and nothing threw into the council flow.
-		expect(captured.length).toBe(0);
 	});
 });

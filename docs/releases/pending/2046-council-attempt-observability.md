@@ -21,6 +21,13 @@ token — the same identity that keys `.swarm/council/attempts/{token}.jsonl`.
 Plan or policy drift therefore opens a new round identity instead of relabeling
 old evidence, and a blocked or stale attempt can still never advance a gate.
 
+A review follow-up additionally forbids the `councilRoundId`
+correlation axis on `council_attempt_unscoped` in the event catalog:
+these submissions genuinely have no round identity, so a forged one is
+flagged by relationship validation instead of silently joined, while
+the scoped kinds require it — round-identity provenance is
+machine-enforced in both directions.
+
 Observability remains strictly non-authoritative: emissions are best-effort,
 never throw, fire only after the durable audit append succeeds, and carry only
 identifiers, enums, counts, and hashes (privacy class `pseudonymous` — no
