@@ -5,14 +5,16 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { DbWriteError } from '../../../src/db/db-errors.js';
 import {
 	FLUSH_THRESHOLD_OPS,
 	GroupCommitWriter,
 } from '../../../src/db/group-commit-writer.js';
+import { appendInsightCandidatesDb } from '../../../src/db/insight-candidate-store.js';
 import { closeProjectDb, getProjectDb } from '../../../src/db/project-db.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -165,6 +167,47 @@ describe('GroupCommitWriter', () => {
 		writer.close();
 		await expect(writer.flush()).resolves.toBeUndefined();
 	});
+
+	test(
+		'#2480 stale-writer regression: a closed underlying handle self-evicts; the next write rebinds',
+		{ timeout: 30_000 },
+		async () => {
+			const repoRoot = path.resolve(import.meta.dir, '..', '..', '..');
+			const projectDbUrl = pathToFileURL(
+				path.join(repoRoot, 'src', 'db', 'project-db.ts'),
+			).href;
+			const writerSrc = `import { getProjectDb } from ${JSON.stringify(projectDbUrl)};
+const dir = process.env.SWARM_CONC_DIR;
+if (!dir) throw new Error('SWARM_CONC_DIR missing');
+const db = getProjectDb(dir);
+`;
+			const workerPath = path.join(dir, 'worker.ts');
+			writeFileSync(workerPath, writerSrc, 'utf8');
+			// Prime the cached writer + handle from THIS process, then close
+			// ONLY the DB handle (the pre-fix /swarm close shape).
+			await appendInsightCandidatesDb(dir, [
+				{
+					payload: JSON.stringify({ lesson: 'before-close' }),
+					createdAt: '2026-01-01T00:00:00.000Z',
+				},
+			]);
+			closeProjectDb(dir);
+			// Post-close write: the flush hits a closed handle; the writer
+			// must self-evict so the retried append rebinds and SUCCEEDS.
+			await appendInsightCandidatesDb(dir, [
+				{
+					payload: JSON.stringify({ lesson: 'after-close' }),
+					createdAt: '2026-01-02T00:00:00.000Z',
+				},
+			]);
+			const n = getProjectDb(dir)
+				.query<{ n: number }, []>(
+					'SELECT COUNT(*) as n FROM insight_candidate WHERE consumed_at IS NULL',
+				)
+				.get()?.n;
+			expect(n).toBe(2); // both writes durable
+		},
+	);
 
 	test('enqueue after close throws a DbWriteError', () => {
 		const writer = new GroupCommitWriter(db);

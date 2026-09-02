@@ -9,6 +9,7 @@ import {
 	type PluginConfig,
 	SkillImproverConfigSchema,
 } from '../config/schema';
+import { closeGroupCommitWriter } from '../db/group-commit-writer';
 import { closeProjectDb } from '../db/project-db';
 import { archiveEvidence } from '../evidence/manager';
 import { isFullAutoRunActive } from '../full-auto/state.js';
@@ -1819,6 +1820,16 @@ export async function runCleanStage(
 			// here is redundant for the archive. The close is best-effort and
 			// never throws into the clean stage.
 			if (artifact === 'swarm.db') {
+				// #2480: flush+close the group-commit writer FIRST (mirrors the
+				// dispose/exit paths), then the DB handle. Closing only the
+				// handle would leave the cached writer bound to a dead handle —
+				// every post-close insight/phase-report write in this process
+				// would then fail (fail-open, i.e. silently lost learning).
+				try {
+					closeGroupCommitWriter(ctx.directory);
+				} catch {
+					// best-effort — the unlink below will surface any real failure
+				}
 				try {
 					closeProjectDb(ctx.directory);
 				} catch {

@@ -44,6 +44,17 @@ export interface GroupCommitOp {
 	run: (db: Database) => void;
 }
 
+/**
+ * Detect "the underlying handle was closed" failures (both drivers phrase it
+ * as `database ... closed`; node's adapter surfaces the raw SQLite message).
+ */
+function isClosedHandleError(err: unknown): boolean {
+	const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+	return (
+		msg.includes('database has closed') || msg.includes('database is closed')
+	);
+}
+
 /** Queue bound — overflow forces a synchronous flush (never a silent drop). */
 const _MAX_QUEUED_OPS = 1024;
 
@@ -56,7 +67,7 @@ const DEGRADED_COOLDOWN_MS = 60_000;
 const _writers: Map<string, GroupCommitWriter> = new Map();
 
 export class GroupCommitWriter {
-	private readonly db: Database;
+	private db: Database;
 	private queue: GroupCommitOp[] = [];
 	private flushing = false;
 	private degraded: { category: DbWriteErrorCategory; until: number } | null =
@@ -64,12 +75,26 @@ export class GroupCommitWriter {
 	private lastAdvisoryAt = 0;
 	private closed = false;
 
+	/**
+	 * Canonical cache key this writer was registered under (set by
+	 * getGroupCommitWriter). A flush against a CLOSED underlying handle —
+	 * possible when a close site evicted the DB handle without closing the
+	 * writer — evicts the writer from the registry so the next store call
+	 * rebinds to the fresh handle instead of failing forever.
+	 */
+	private registryKey: string | null = null;
+
 	constructor(db: Database) {
 		this.db = db;
 	}
 
 	get queuedOpCount(): number {
 		return this.queue.length;
+	}
+
+	/** #2480: record the registry key for self-healing eviction. */
+	bindRegistryKey(key: string): void {
+		this.registryKey = key;
 	}
 
 	/**
@@ -92,6 +117,12 @@ export class GroupCommitWriter {
 	 * transaction rolls back and the error rethrows (queue emptied — the ops
 	 * are not idempotently retryable by this layer). On busy/disk-full/
 	 * read-only the queue is RETAINED and a typed `DbWriteError` throws.
+	 *
+	 * Self-healing (#2480): if the underlying handle was CLOSED underneath
+	 * this writer (a close site evicted the DB handle without closing the
+	 * writer — the pre-fix /swarm close shape), the flush rebinds to a fresh
+	 * handle ONCE and re-applies the batch, so post-close writes complete
+	 * transparently instead of failing until restart.
 	 */
 	flushSync(): void {
 		if (this.closed || this.flushing || this.queue.length === 0) return;
@@ -99,9 +130,25 @@ export class GroupCommitWriter {
 		const batch = this.queue;
 		this.queue = [];
 		try {
-			this.applyBatch(batch);
+			try {
+				this.applyBatch(batch);
+			} catch (err) {
+				if (!isClosedHandleError(err) || this.registryKey === null) throw err;
+				// Rebind to the (re-created) canonical handle and retry the SAME
+				// batch exactly once. registryKey is the canonical path, so it is
+				// a valid getProjectDb input.
+				this.db = getProjectDb(this.registryKey);
+				this.applyBatch(batch);
+			}
 		} catch (err) {
 			const category = classifyDbWriteError(err);
+			if (isClosedHandleError(err)) {
+				// The retry also hit a closed handle — genuinely unusable now.
+				// Evict the writer so the next store call rebinds; the callers'
+				// fail-open semantics already cover this write.
+				this.close();
+				if (this.registryKey !== null) _writers.delete(this.registryKey);
+			}
 			if (
 				category === 'busy' ||
 				category === 'disk_full' ||
@@ -191,6 +238,7 @@ export function getGroupCommitWriter(directory: string): GroupCommitWriter {
 	let writer = _writers.get(key);
 	if (!writer) {
 		writer = new GroupCommitWriter(getProjectDb(directory));
+		writer.bindRegistryKey(key);
 		_writers.set(key, writer);
 	}
 	return writer;
