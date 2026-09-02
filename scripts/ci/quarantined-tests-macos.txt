@@ -4,4 +4,12 @@
 # Format: one repo-relative test file path per line. Blank lines and lines
 # starting with # are ignored.
 #
+# METADATA REQUIREMENT (issue #2477): every active path entry must carry,
+# in the comment block directly above it:
+#   # OWNER: <owner> — <issue ref / context>
+#   # EXPIRY: YYYY-MM-DD — <retirement criterion>
+# Enforced by `bun run check:invariants` Check 7: missing metadata fails
+# the gate; an EXPIRY more than 14 days in the past also fails (inside
+# the grace window it only warns).
+#
 # No active macOS-only quarantines. Issue #1908 requires exact-head macOS proof.

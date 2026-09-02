@@ -15,6 +15,7 @@ import * as path from 'node:path';
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 import { eventLinesOf } from '../../helpers/event-lines.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 // -----------------------------------------------------------------------
 // Module-level mocks — MUST be before any import of the mocked module
@@ -215,9 +216,7 @@ function writeRetroBundle(directory: string, phaseNumber: number): void {
 	);
 }
 
-// ---------------------------------------------------------------------------
-// Test suite
-// ---------------------------------------------------------------------------
+// --- Test suite -----------------------------------------------------------
 describe('phase_complete adversarial locking + path tests', () => {
 	// #2039: the events store lock is the seam's wx lock — assert no leak.
 	const storeLockGone = () =>
@@ -280,10 +279,11 @@ describe('phase_complete adversarial locking + path tests', () => {
 
 	afterEach(() => {
 		process.chdir(originalCwd);
+		// Retried EBUSY/EPERM removal (#2322 lock-release race class).
 		try {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			safeRmRecursive(tempDir);
 		} catch {
-			// ignore
+			/* retries exhausted — leave the dir to the OS */
 		}
 		resetSwarmState();
 	});

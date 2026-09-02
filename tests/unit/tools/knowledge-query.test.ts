@@ -12,7 +12,7 @@ import {
 	it,
 	mock,
 } from 'bun:test';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -21,6 +21,7 @@ import type {
 	SwarmKnowledgeEntry,
 } from '../../../src/hooks/knowledge-types';
 import { knowledge_query } from '../../../src/tools/knowledge-query';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 describe('knowledge-query tool verification tests', () => {
 	let tmpDir: string;
@@ -39,16 +40,15 @@ describe('knowledge-query tool verification tests', () => {
 	});
 
 	afterEach(async () => {
-		// Restore original cwd
-		process.chdir(originalCwd);
-		// Clean up the temporary directory
+		// Best-effort teardown (#2028/#2477: Windows AV/EBUSY races); the
+		// retried removal is guarded so mock.restore() always runs after it.
 		try {
-			await fs.rm(tmpDir, { recursive: true, force: true });
+			process.chdir(originalCwd);
+			safeRmRecursive(tmpDir); // realpath'd under tmpdir: guard passes
 		} catch {
-			// Ignore cleanup errors
+			/* removal retries exhausted — leave the dir to the OS */
 		}
-		// Restore cross-module mocks to prevent contamination
-		mock.restore();
+		mock.restore(); // cross-module contamination guard
 	});
 
 	// Mock resolveHiveKnowledgePath to return a path inside tmpDir so hive knowledge
