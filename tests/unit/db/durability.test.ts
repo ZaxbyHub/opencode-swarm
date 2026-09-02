@@ -9,7 +9,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import {
 	applySynchronousForClass,
 	batchDurabilityClass,
@@ -29,6 +28,7 @@ import {
 	ensureTaskCheckpointReceipt,
 	updateTaskCheckpointReceipt,
 } from '../../../src/db/task-checkpoint-receipt.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 describe('DURABILITY_CLASSES', () => {
 	test('covers every swarm.db table with a known class', () => {

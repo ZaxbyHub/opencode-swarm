@@ -8,11 +8,11 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import { archiveSqliteSnapshot } from '../../../src/commands/archive-sqlite.js';
 import { appendInsightCandidatesDb } from '../../../src/db/insight-candidate-store.js';
 import { upsertPhaseReportDb } from '../../../src/db/phase-report-store.js';
 import { closeProjectDb, getProjectDb } from '../../../src/db/project-db.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let dir: string;
 

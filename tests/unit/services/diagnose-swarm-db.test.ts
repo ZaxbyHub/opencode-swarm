@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { canonicalMkdtemp } from '../../../helpers/tmpdir';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import { closeProjectDb, getProjectDb } from '../../../src/db/project-db.js';
 import { getDiagnoseData } from '../../../src/services/diagnose-service.js';
 

@@ -13,7 +13,6 @@ import {
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import {
 	_resetPhaseReportImportGuards,
 	phaseReportLocator,
@@ -21,6 +20,7 @@ import {
 	upsertPhaseReportDb,
 } from '../../../src/db/phase-report-store.js';
 import { closeProjectDb } from '../../../src/db/project-db.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let dir: string;
 

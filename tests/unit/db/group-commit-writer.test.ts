@@ -8,13 +8,13 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import { DbWriteError } from '../../../src/db/db-errors.js';
 import {
 	FLUSH_THRESHOLD_OPS,
 	GroupCommitWriter,
 } from '../../../src/db/group-commit-writer.js';
 import { closeProjectDb, getProjectDb } from '../../../src/db/project-db.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let dir: string;
 let db: ReturnType<typeof getProjectDb>;

@@ -19,7 +19,6 @@ import {
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import {
 	appendInsightCandidatesDb,
 	consumeInsightCandidatesDb,
@@ -30,6 +29,7 @@ import {
 	getProjectDb,
 } from '../../../src/db/project-db.js';
 import { freezeClock } from '../../helpers/test-clock';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 /** Real-clock wait sites: freeze+restore immediately (no frozen window). */
 function freezeClockAndRestore(): void {

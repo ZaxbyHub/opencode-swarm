@@ -16,7 +16,6 @@ import {
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import { ProjectDbError } from '../../../src/db/db-errors.js';
 import {
 	closeAllProjectDbs,
@@ -26,6 +25,7 @@ import {
 	projectDbExists,
 	runProjectMigrations,
 } from '../../../src/db/project-db.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let dir: string;
 

@@ -13,12 +13,12 @@ import {
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import {
 	_internals,
 	importLegacyJsonl,
 } from '../../../src/db/legacy-import.js';
 import { closeProjectDb } from '../../../src/db/project-db.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let dir: string;
 const realRename = _internals.renameSync;

@@ -12,12 +12,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import { runDriverParityContract } from '../../../src/db/driver-parity.js';
 import {
 	loadDatabaseCtor,
 	_internals as loaderInternals,
 } from '../../../src/db/sqlite-loader.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 describe('runDriverParityContract', () => {
 	test('passes against the real bun:sqlite driver', () => {

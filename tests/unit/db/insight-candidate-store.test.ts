@@ -14,7 +14,6 @@ import {
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import {
 	_resetInsightImportGuards,
 	appendInsightCandidatesDb,
@@ -25,6 +24,7 @@ import {
 	listPendingInsightCandidatesDb,
 } from '../../../src/db/insight-candidate-store.js';
 import { closeProjectDb, getProjectDb } from '../../../src/db/project-db.js';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let dir: string;
 
