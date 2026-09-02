@@ -17,6 +17,7 @@ import {
 } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 
 import {
 	_internals,
@@ -304,6 +305,9 @@ describe('FR-008 — isReportValid verifies report integrity', () => {
 		try {
 			expect(_internals.isReportValid(reportPath)).toBe(false);
 		} finally {
+			try {
+				closeProjectDb(dir);
+			} catch {} // #2480: release swarm.db (EBUSY)
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
@@ -315,6 +319,9 @@ describe('FR-008 — isReportValid verifies report integrity', () => {
 		try {
 			expect(_internals.isReportValid(reportPath)).toBe(false);
 		} finally {
+			try {
+				closeProjectDb(dir);
+			} catch {} // #2480: release swarm.db (EBUSY)
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
@@ -329,6 +336,9 @@ describe('FR-008 — isReportValid verifies report integrity', () => {
 		try {
 			expect(_internals.isReportValid(reportPath)).toBe(false);
 		} finally {
+			try {
+				closeProjectDb(dir);
+			} catch {} // #2480: release swarm.db (EBUSY)
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
@@ -340,6 +350,9 @@ describe('FR-008 — isReportValid verifies report integrity', () => {
 		try {
 			expect(_internals.isReportValid(reportPath)).toBe(false);
 		} finally {
+			try {
+				closeProjectDb(dir);
+			} catch {} // #2480: release swarm.db (EBUSY)
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
@@ -354,6 +367,9 @@ describe('FR-008 — isReportValid verifies report integrity', () => {
 		try {
 			expect(_internals.isReportValid(reportPath)).toBe(true);
 		} finally {
+			try {
+				closeProjectDb(dir);
+			} catch {} // #2480: release swarm.db (EBUSY)
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
@@ -365,6 +381,9 @@ describe('FR-008 — isReportValid verifies report integrity', () => {
 		try {
 			expect(_internals.isReportValid(reportPath)).toBe(true);
 		} finally {
+			try {
+				closeProjectDb(dir);
+			} catch {} // #2480: release swarm.db (EBUSY)
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
@@ -387,6 +406,9 @@ describe('FR-008 — runCuratorPostMortem regenerates invalid reports', () => {
 		expect(content.length).toBeGreaterThan(0);
 		expect(content).toContain('Post-Mortem Report');
 
+		try {
+			closeProjectDb(dir);
+		} catch {} // #2480: release swarm.db (EBUSY)
 		rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -404,6 +426,9 @@ describe('FR-008 — runCuratorPostMortem regenerates invalid reports', () => {
 		const content = readFileSync(reportPath, 'utf-8');
 		expect(content).toContain('Post-Mortem Report');
 
+		try {
+			closeProjectDb(dir);
+		} catch {} // #2480: release swarm.db (EBUSY)
 		rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -429,6 +454,9 @@ describe('FR-008 — runCuratorPostMortem regenerates invalid reports', () => {
 		const stat2 = (await import('node:fs')).statSync(reportPath);
 		expect(stat2.mtimeMs).toBe(stat1.mtimeMs);
 
+		try {
+			closeProjectDb(dir);
+		} catch {} // #2480: release swarm.db (EBUSY)
 		rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -445,6 +473,9 @@ describe('FR-008 — runCuratorPostMortem regenerates invalid reports', () => {
 		expect(result.success).toBe(true);
 		expect(result.summary).not.toContain('already exists');
 
+		try {
+			closeProjectDb(dir);
+		} catch {} // #2480: release swarm.db (EBUSY)
 		rmSync(dir, { recursive: true, force: true });
 	});
 });
@@ -462,6 +493,9 @@ describe('FR-010 — atomic report write', () => {
 		const content = readFileSync(reportPath, 'utf-8');
 		expect(content.length).toBeGreaterThan(0);
 
+		try {
+			closeProjectDb(dir);
+		} catch {} // #2480: release swarm.db (EBUSY)
 		rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -486,6 +520,9 @@ describe('FR-010 — atomic report write', () => {
 		);
 		expect(tmpFiles.length).toBe(0);
 
+		try {
+			closeProjectDb(dir);
+		} catch {} // #2480: release swarm.db (EBUSY)
 		rmSync(dir, { recursive: true, force: true });
 	});
 });

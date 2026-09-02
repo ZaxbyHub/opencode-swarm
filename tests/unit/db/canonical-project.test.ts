@@ -42,14 +42,16 @@ describe('canonicalProjectKey', () => {
 		rmSync(dir, { recursive: true, force: true });
 	});
 
-	test('folds case variants into one key on win32; keeps them distinct on POSIX', () => {
+	test('folds case variants into one key on case-insensitive roots; distinct otherwise', () => {
 		const dir = tmp('case');
-		const upper = IS_WIN ? dir.toUpperCase() : dir.toUpperCase();
-		if (IS_WIN) {
+		const upper = dir.toUpperCase();
+		// On a case-INSENSITIVE filesystem (win32, macOS default APFS) the
+		// uppercase spelling resolves to the SAME root → one key. On a
+		// case-SENSITIVE one (Linux) it is a distinct (nonexistent) root.
+		const caseInsensitive = IS_WIN || existsSync(upper);
+		if (caseInsensitive) {
 			expect(canonicalProjectKey(dir)).toBe(canonicalProjectKey(upper));
 		} else {
-			// On POSIX the uppercase spelling is a DIFFERENT (nonexistent)
-			// root and must remain a distinct identity.
 			expect(canonicalProjectKey(dir)).not.toBe(canonicalProjectKey(upper));
 		}
 		rmSync(dir, { recursive: true, force: true });

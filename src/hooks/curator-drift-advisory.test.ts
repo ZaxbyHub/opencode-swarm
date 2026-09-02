@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeProjectDb } from '../../src/db/project-db.js';
 import { runDeterministicDriftCheck } from './curator-drift';
 import type { CuratorConfig, CuratorPhaseResult } from './curator-types';
 
@@ -65,6 +66,9 @@ describe('curator-drift advisory injection', () => {
 
 	afterEach(() => {
 		mock.restore();
+		try {
+			closeProjectDb(tempDir);
+		} catch {} // #2480: release swarm.db (EBUSY)
 		cleanupDir(tempDir);
 	});
 
