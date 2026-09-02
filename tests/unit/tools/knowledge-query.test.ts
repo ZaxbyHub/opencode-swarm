@@ -40,25 +40,15 @@ describe('knowledge-query tool verification tests', () => {
 	});
 
 	afterEach(async () => {
-		// Each step is isolated so one failure cannot skip the rest: cwd must
-		// be restored before removal, removal must be retried (Windows
-		// AV/EBUSY held handles flaked attempt 1 on cold windows-latest
-		// merge-group runners — issue #2028/#2477), and mock.restore() must
-		// always run.
+		// Best-effort teardown (#2028/#2477: Windows AV/EBUSY races); the
+		// retried removal is guarded so mock.restore() always runs after it.
 		try {
 			process.chdir(originalCwd);
+			safeRmRecursive(tmpDir); // realpath'd under tmpdir: guard passes
 		} catch {
-			// cwd restoration is best-effort; cleanup still proceeds.
+			/* removal retries exhausted — leave the dir to the OS */
 		}
-		try {
-			// tmpDir is realpath'd and under os.tmpdir(), so the helper's
-			// containment guard accepts it; retries EBUSY/EPERM/ENOTEMPTY.
-			safeRmRecursive(tmpDir);
-		} catch {
-			// Bounded retry already exhausted — leave the dir to the OS.
-		}
-		// Restore cross-module mocks to prevent contamination
-		mock.restore();
+		mock.restore(); // cross-module contamination guard
 	});
 
 	// Mock resolveHiveKnowledgePath to return a path inside tmpDir so hive knowledge

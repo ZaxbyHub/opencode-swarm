@@ -17,73 +17,15 @@ import {
 } from '../../../src/background/plan-sync-worker';
 import { _internals as planManagerInternals } from '../../../src/plan/manager';
 import { safeRmRecursive } from '../../helpers/safe-test-dir';
+import { waitFor } from '../../helpers/wait-for';
 
 // Within-module DI seam: mock functions are assigned to _internals
 const mockLoadPlan = mock(async () => null);
 const mockLoadPlanJsonOnly = mock(async () => null);
 const mockRegeneratePlanMarkdown = mock(async () => {});
 
-// #2477 RC-3: capture the seam's ORIGINALS at file scope — before any test
-// (and any beforeEach) can mutate them — so afterEach can truly restore the
-// real implementations. The previous afterEach re-installed the mocks, which
-// left loadPlan/loadPlanJsonOnly/regeneratePlanMarkdown mock-replaced for
-// every later test file in the shared process (AGENTS.md §7 seam-restore
-// violation) and is one of the lock/temp cleanup races behind the merge-group
-// flake in issue #2305.
-const originalPlanManagerInternals = {
-	loadPlan: planManagerInternals.loadPlan,
-	loadPlanJsonOnly: planManagerInternals.loadPlanJsonOnly,
-	regeneratePlanMarkdown: planManagerInternals.regeneratePlanMarkdown,
-};
-
-// Polls a predicate at a fixed interval until it holds or the budget is
-// exhausted; fails with a labeled message instead of silently bailing (the
-// silent-bail loop it replaced produced confusing downstream assertion
-// failures when the event loop was saturated under merge-group load).
-// Attempt-counting budget, not a wall-clock deadline: the check:test-clock
-// gate blocks any ADDED raw-clock line in this file, and a frozen-clock
-// deadline could never advance under freezeClock. 20ms polls ×
-// ceil(budgetMs/20) attempts bound the wait at ≥ budgetMs.
-async function waitFor(
-	predicate: () => boolean,
-	budgetMs: number,
-	label: string,
-): Promise<void> {
-	const maxAttempts = Math.ceil(budgetMs / 20);
-	for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-		if (predicate()) {
-			return;
-		}
-		await new Promise((resolve) => setTimeout(resolve, 20));
-	}
-	if (!predicate()) {
-		throw new Error(
-			`[plan-sync-worker.test] ${label} — budget exhausted after ${budgetMs}ms`,
-		);
-	}
-}
-
-// Platform-independent unit coverage for the helper itself (the gated
-// PlanSyncWorker suite below only exercises it on Linux CI legs).
-describe('waitFor helper', () => {
-	test('returns immediately when the predicate already holds', async () => {
-		await waitFor(() => true, 100, 'already true');
-	});
-
-	test('returns once the predicate flips true', async () => {
-		let ready = false;
-		setTimeout(() => {
-			ready = true;
-		}, 30);
-		await waitFor(() => ready, 2000, 'flips true');
-	});
-
-	test('throws a labeled error on budget exhaustion', async () => {
-		await expect(waitFor(() => false, 60, 'never true')).rejects.toThrow(
-			'[plan-sync-worker.test] never true — budget exhausted after 60ms',
-		);
-	});
-});
+// RC-3/#2305: seam-originals snapshot for the afterEach restore (§7).
+const seamSnapshot = { ...planManagerInternals };
 
 // File watcher timing varies significantly across platforms (macOS FSEvents,
 // Windows ReadDirectoryChangesW). Dozens of timing-sensitive assertions fail
@@ -129,15 +71,11 @@ describe.skipIf(process.platform !== 'linux')('PlanSyncWorker', () => {
 	// Helper to clean up temp directory
 	async function cleanupTempDir(): Promise<void> {
 		if (tempDir) {
+			// safeRmRecursive: retried EBUSY/EPERM removal (#2305 watcher release).
 			try {
-				// Retried removal (EBUSY/EPERM/ENOTEMPTY with bounded backoff):
-				// a single-shot rmSync silently abandoned the temp dir whenever
-				// the FSWatcher handle was still releasing — the #2305 cleanup
-				// race. safeRmRecursive canonicalizes + containment-guards the
-				// path (it was created under os.tmpdir()).
 				safeRmRecursive(tempDir);
 			} catch {
-				// Bounded retry exhausted — leave the dir to the OS.
+				/* exhausted */
 			}
 		}
 	}
@@ -159,23 +97,10 @@ describe.skipIf(process.platform !== 'linux')('PlanSyncWorker', () => {
 	});
 
 	afterEach(async () => {
-		// Restore the REAL implementations captured at file scope — see the
-		// originalPlanManagerInternals comment. (Previously this re-installed
-		// the mocks, leaking them process-wide after the file finished.)
-		planManagerInternals.loadPlan = originalPlanManagerInternals.loadPlan;
-		planManagerInternals.loadPlanJsonOnly =
-			originalPlanManagerInternals.loadPlanJsonOnly;
-		planManagerInternals.regeneratePlanMarkdown =
-			originalPlanManagerInternals.regeneratePlanMarkdown;
+		Object.assign(planManagerInternals, seamSnapshot); // restore originals
 		// Clean up worker
 		if (worker) {
-			// A dispose throw must not skip watcher settle + temp cleanup
-			// (the seam restores above already ran, so only teardown is at risk).
-			try {
-				worker.dispose();
-			} catch {
-				// Best-effort dispose; cleanupTempDir below still runs.
-			}
+			worker.dispose();
 			worker = null;
 			// Allow the watcher close to propagate before removing the watched directory.
 			// Use Bun.sleep (native timer) instead of new Promise(setTimeout) to avoid
@@ -557,15 +482,7 @@ describe.skipIf(process.platform !== 'linux')('PlanSyncWorker', () => {
 			// macOS FSEvents has higher latency than Linux inotify
 			await new Promise((resolve) => setTimeout(resolve, 150));
 
-			// Wait until first sync has started (it's blocking). waitFor
-			// fails with a labeled timeout instead of silently bailing — the
-			// old fixed-attempt loop fell through and produced a confusing
-			// `syncCount === 1` misdiagnosis under event-loop saturation.
-			await waitFor(
-				() => firstSyncStarted,
-				2000,
-				'first in-flight sync to start',
-			);
+			await waitFor(() => firstSyncStarted, 2000, 'first sync start'); // #2305
 
 			// Verify we're in the first sync
 			expect(syncCount).toBe(1);

@@ -3,11 +3,11 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
-import {
-	clearToolchainCache,
-	_internals as discoveryInternals,
-} from '../../../src/build/discovery';
 import { pkg_audit } from '../../../src/tools/pkg-audit';
+import {
+	installComposerProbeSeam,
+	restoreDiscoverySeam,
+} from '../../helpers/discovery-seam';
 import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 // Composer availability is controlled through the discovery module's
@@ -78,27 +78,10 @@ function getMockContext(): ToolContext {
 }
 
 describe('pkg-audit composer audit', () => {
-	let originalSpawnSync: typeof discoveryInternals.spawnSyncImpl;
-
 	beforeEach(() => {
-		originalSpawnSync = discoveryInternals.spawnSyncImpl;
-		clearToolchainCache();
-		// The real `isCommandAvailable` probes PATH via `_internals.spawnSyncImpl`
-		// and caches the `result.success` per command. Only the composer probe is
-		// faked (to follow `mockIsCommandAvailable`); every other command's probe
-		// delegates to the captured real spawn so `auto`-ecosystem availability
-		// guards keep their fidelity (review F-006/PRR-007).
-		discoveryInternals.spawnSyncImpl = (cmd, opts) => {
-			if (Array.isArray(cmd) && cmd[1] === 'composer') {
-				return {
-					stdout: new Uint8Array(),
-					stderr: new Uint8Array(),
-					exitCode: mockIsCommandAvailable ? 0 : 127,
-					success: mockIsCommandAvailable,
-				};
-			}
-			return originalSpawnSync(cmd, opts);
-		};
+		// Only the composer probe is faked (follows `mockIsCommandAvailable`).
+		mockIsCommandAvailable = true;
+		installComposerProbeSeam(() => mockIsCommandAvailable);
 
 		originalSpawn = Bun.spawn;
 		spawnCalls = [];
@@ -117,30 +100,14 @@ describe('pkg-audit composer audit', () => {
 	});
 
 	afterEach(() => {
+		// Unthrowable restores first (review F-002); teardown is best-effort.
+		restoreDiscoverySeam();
+		Bun.spawn = originalSpawn;
 		try {
-			// Unthrowable restores first (plain property set + Map.clear) so the
-			// throw-capable steps below can never skip them (review F-002): a
-			// chdir/rmSync throw previously leaked the Bun.spawn global patch,
-			// the seam, and the flag reset across files.
-			discoveryInternals.spawnSyncImpl = originalSpawnSync;
-			clearToolchainCache();
-			Bun.spawn = originalSpawn;
-			try {
-				process.chdir(originalCwd);
-			} catch {
-				// originalCwd may be gone; proceed with cleanup regardless.
-			}
-			try {
-				// tempDir is realpath'd under os.tmpdir(): the containment guard
-				// passes; retries EBUSY/EPERM/ENOTEMPTY (the same #2017/#2028
-				// teardown class hardened elsewhere in this PR).
-				safeRmRecursive(tempDir);
-			} catch {
-				// Bounded retry exhausted — leave the dir to the OS.
-			}
-		} finally {
-			// Reset mock state
-			mockIsCommandAvailable = true;
+			process.chdir(originalCwd);
+			safeRmRecursive(tempDir); // retried EBUSY/EPERM (#2017/#2028 class)
+		} catch {
+			/* dir left to the OS after exhausted retries */
 		}
 	});
 

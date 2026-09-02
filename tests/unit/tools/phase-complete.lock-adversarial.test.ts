@@ -216,9 +216,7 @@ function writeRetroBundle(directory: string, phaseNumber: number): void {
 	);
 }
 
-// ---------------------------------------------------------------------------
-// Test suite
-// ---------------------------------------------------------------------------
+// --- Test suite -----------------------------------------------------------
 describe('phase_complete adversarial locking + path tests', () => {
 	// #2039: the events store lock is the seam's wx lock — assert no leak.
 	const storeLockGone = () =>
@@ -281,16 +279,11 @@ describe('phase_complete adversarial locking + path tests', () => {
 
 	afterEach(() => {
 		process.chdir(originalCwd);
+		// Retried EBUSY/EPERM removal (#2322 lock-release race class).
 		try {
-			// Retried removal (EBUSY/EPERM/ENOTEMPTY with bounded backoff) —
-			// the single-shot rmSync raced slowly-releasing lock handles under
-			// merge-group load and left the temp dir behind (issue #2322's
-			// flake class, hardened under #2477). tempDir is realpath'd
-			// (mkdtempSync + realpathSync above), so the helper's containment
-			// guard accepts it.
 			safeRmRecursive(tempDir);
 		} catch {
-			// Bounded retry exhausted — leave the dir to the OS.
+			/* retries exhausted — leave the dir to the OS */
 		}
 		resetSwarmState();
 	});

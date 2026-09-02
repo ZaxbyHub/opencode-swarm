@@ -22,13 +22,7 @@ vi.mock('../../../src/evidence/manager', () => ({
 	loadEvidence: vi.fn().mockImplementation((_dir: string, taskId: string) => {
 		if (taskId.startsWith('retro-')) {
 			try {
-				const retroPath = path.join(
-					_dir,
-					'.swarm',
-					'evidence',
-					taskId,
-					'evidence.json',
-				);
+				const retroPath = path.join(_dir, '.swarm', 'evidence', taskId, 'evidence.json');
 				if (fs.existsSync(retroPath)) {
 					const content = fs.readFileSync(retroPath, 'utf-8');
 					return { status: 'found', bundle: JSON.parse(content) };
@@ -273,15 +267,11 @@ describe('phase_complete adversarial trailing groups', () => {
 	afterEach(() => {
 		restoreClock();
 		process.chdir(originalCwd);
+		// Retried EBUSY/EPERM removal (#2322 lock-release race class).
 		try {
-			// Retried removal (EBUSY/EPERM/ENOTEMPTY with bounded backoff) —
-			// the single-shot rmSync raced slowly-releasing lock/event handles
-			// and left the temp dir behind under merge-group load (issue
-			// #2322/#2477). tempDir comes from canonicalMkdtemp, so the
-			// helper's containment guard accepts it.
 			safeRmRecursive(tempDir);
 		} catch {
-			// Bounded retry exhausted — leave the dir to the OS.
+			/* retries exhausted — leave the dir to the OS */
 		}
 		resetSwarmState();
 	});

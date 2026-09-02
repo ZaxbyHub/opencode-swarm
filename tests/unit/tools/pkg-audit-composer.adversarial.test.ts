@@ -3,33 +3,25 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
-import {
-	clearToolchainCache,
-	_internals as discoveryInternals,
-} from '../../../src/build/discovery';
 import { pkg_audit } from '../../../src/tools/pkg-audit';
+import {
+	installComposerProbeSeam,
+	restoreDiscoverySeam,
+} from '../../helpers/discovery-seam';
 import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
-// Composer availability is controlled through the discovery module's
-// `_internals.spawnSyncImpl` DI seam (with `clearToolchainCache` before/after)
-// instead of a file-scope `mock.module`. The mock.module form delegated to a
-// captured pre-mock namespace import — but Bun retroactively patches the
-// original module's export slots on `mock.module`, so the delegation branch
-// was infinite tail recursion that hung any later file in the shared process
-// calling `isCommandAvailable` for a non-composer command (issue #2260/#2477).
+// Composer availability follows `mockIsCommandAvailable` through the shared
+// discovery seam helper (never a file-scope mock.module — issue #2260/#2477).
 let mockIsCommandAvailable = true;
 
 // Mock for Bun.spawn
 let originalSpawn: typeof Bun.spawn;
-let spawnCalls: Array<{ cmd: string[]; opts: unknown }> = [];
 let mockExitCode: number = 0;
 let mockStdout: string = '';
 let mockStderr: string = '';
 let mockSpawnError: Error | null = null;
 
 function mockSpawn(cmd: string[], opts: unknown) {
-	spawnCalls.push({ cmd, opts });
-
 	if (mockSpawnError) {
 		throw mockSpawnError;
 	}
@@ -75,29 +67,11 @@ function getMockContext(): ToolContext {
 }
 
 describe('pkg-audit composer audit adversarial', () => {
-	let originalSpawnSync: typeof discoveryInternals.spawnSyncImpl;
-
 	beforeEach(() => {
-		originalSpawnSync = discoveryInternals.spawnSyncImpl;
-		clearToolchainCache();
-		// Only the composer PATH-probe is faked (to follow
-		// `mockIsCommandAvailable`); other commands' probes delegate to the
-		// captured real spawn so auto-ecosystem guards keep their fidelity
-		// (review F-006/PRR-007).
-		discoveryInternals.spawnSyncImpl = (cmd, opts) => {
-			if (Array.isArray(cmd) && cmd[1] === 'composer') {
-				return {
-					stdout: new Uint8Array(),
-					stderr: new Uint8Array(),
-					exitCode: mockIsCommandAvailable ? 0 : 127,
-					success: mockIsCommandAvailable,
-				};
-			}
-			return originalSpawnSync(cmd, opts);
-		};
+		mockIsCommandAvailable = true; // composer probe follows this flag
+		installComposerProbeSeam(() => mockIsCommandAvailable);
 
 		originalSpawn = Bun.spawn;
-		spawnCalls = [];
 		mockExitCode = 0;
 		mockStdout = '';
 		mockStderr = '';
@@ -112,26 +86,14 @@ describe('pkg-audit composer audit adversarial', () => {
 	});
 
 	afterEach(() => {
+		// Unthrowable restores first (review F-002); teardown is best-effort.
+		restoreDiscoverySeam();
+		Bun.spawn = originalSpawn;
 		try {
-			// Unthrowable restores first (plain property set + Map.clear) so the
-			// throw-capable steps below can never skip them (review F-002).
-			discoveryInternals.spawnSyncImpl = originalSpawnSync;
-			clearToolchainCache();
-			Bun.spawn = originalSpawn;
-			try {
-				process.chdir(originalCwd);
-			} catch {
-				// originalCwd may be gone; proceed with cleanup regardless.
-			}
-			try {
-				// Retried removal — same #2017/#2028 teardown class hardened
-				// elsewhere in this PR.
-				safeRmRecursive(tempDir);
-			} catch {
-				// Bounded retry exhausted — leave the dir to the OS.
-			}
-		} finally {
-			mockIsCommandAvailable = true;
+			process.chdir(originalCwd);
+			safeRmRecursive(tempDir); // retried EBUSY/EPERM (#2017/#2028 class)
+		} catch {
+			/* dir left to the OS after exhausted retries */
 		}
 	});
 

@@ -33,3 +33,59 @@ export function seedQuarantineListFiles(fixtureDir: string): void {
 		);
 	}
 }
+
+/**
+ * Expected check-invariants output for the #2094 legacy-oracle fixture
+ * (1 seeded process.cwd() violation, header-only quarantine lists).
+ *
+ * The TS owner gained Check 7 (quarantine OWNER/EXPIRY metadata, issue
+ * #2477) — a TS-only check the archived Bash owner can never emit — so the
+ * oracle's full-output byte parity is intentionally superseded: the TS leg
+ * pins this seven-check output exactly; the archived owner keeps its frozen
+ * six-check diagnostics (legacyExpected).
+ */
+const SIX_CHECK_BLOCK = [
+	'=== Check 1: Subprocess timeout required (advisory) ===',
+	'=== Check 2: process.cwd() ban in tools/hooks ===',
+	'ERROR: src/tools/cwd-violation.ts uses process.cwd() — tools must use ctx.directory via resolveWorkingDirectory',
+	'=== Check 3: mock.module allowlist ===',
+	'',
+	'=== Check 4: mock.module allowlist growth ratchet (issue #1666) ===',
+	'Base entries: 0 | Head entries: 0 | Added in this PR: 0 | Approved-new markers found: 0 | Unapproved: 0',
+	'',
+	'=== Check 5: knowledge array dedup guardrail (issue #1821 Lane 0b) ===',
+	'Scope: src/tools/knowledge-*.ts src/hooks/knowledge-*.ts src/hooks/curator.ts src/hooks/micro-reflector.ts src/knowledge/*.ts src/learning/*.ts src/services/recommendation-ledger.ts src/consensus/*.ts',
+	'Files scanned: 8',
+	'Unguarded positional caps: 0 (expected 0 — no exempt list by design)',
+	'=== Check 6: no raw pendingAdvisoryMessages.push outside the helper (issue #1976) ===',
+	'=== Check: no raw pendingAdvisoryMessages.push outside src/utils/advisory-queue.ts (issue #1976) ===',
+	'OK — all advisory pushes route through pushAdvisory().',
+];
+
+export function buildInvariantsOracleExpected(): {
+	tsExpected: string;
+	legacyExpected: string;
+} {
+	const tsExpected = [
+		...SIX_CHECK_BLOCK,
+		'=== Check 7: quarantine entries carry OWNER + EXPIRY metadata (issue #2477) ===',
+		'All active quarantine entries carry OWNER + EXPIRY metadata.',
+		'',
+		'=== Summary ===',
+		'Checks run: 1 (subprocess timeout, advisory) | 2 (process.cwd ban) |',
+		'            3 (mock.module allowlist) | 4 (allowlist growth ratchet) |',
+		'            5 (knowledge array dedup guardrail) | 6 (advisory-injection ratchet) |',
+		'            7 (quarantine OWNER/EXPIRY metadata)',
+		'1 invariant violation(s) found.',
+	].join('\n');
+	const legacyExpected = [
+		...SIX_CHECK_BLOCK,
+		'',
+		'=== Summary ===',
+		'Checks run: 1 (subprocess timeout, advisory) | 2 (process.cwd ban) |',
+		'            3 (mock.module allowlist) | 4 (allowlist growth ratchet) |',
+		'            5 (knowledge array dedup guardrail) | 6 (advisory-injection ratchet)',
+		'1 invariant violation(s) found.',
+	].join('\n');
+	return { tsExpected, legacyExpected };
+}
