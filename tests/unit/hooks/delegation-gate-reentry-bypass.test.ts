@@ -5,13 +5,13 @@ import type { PluginConfig } from '../../../src/config';
 import { transitionTaskWorkflowEvidence } from '../../../src/gate-evidence';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import {
-	issuePrReviewReentryAuthorization,
-	_internals as reentryInternals,
-} from '../../../src/hooks/pr-review-reentry-authorization';
-import {
 	activatePrWorkflow,
 	_test_exports as gateInternals,
 } from '../../../src/hooks/pr-workflow-gate';
+import {
+	issuePrReviewReentryAuthorization,
+	_internals as reentryInternals,
+} from '../../../src/pr-review/authorization';
 import { resetSwarmState } from '../../../src/state';
 import {
 	PR_ARTIFACT_HEAD_SHA,

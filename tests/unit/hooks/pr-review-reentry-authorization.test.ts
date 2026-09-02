@@ -2,14 +2,14 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
-	consumePrReviewReentryAuthorization,
-	issuePrReviewReentryAuthorization,
-	_internals as reentryInternals,
-} from '../../../src/hooks/pr-review-reentry-authorization.js';
-import {
 	_test_exports,
 	activatePrWorkflow,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import {
+	consumePrReviewReentryAuthorization,
+	issuePrReviewReentryAuthorization,
+	_internals as reentryInternals,
+} from '../../../src/pr-review/authorization.js';
 import {
 	PR_ARTIFACT_HEAD_SHA,
 	PR_ARTIFACT_REVISION_DIGEST,

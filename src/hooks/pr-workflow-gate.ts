@@ -24,7 +24,6 @@ import {
 import {
 	type BackgroundDelegationRecord,
 	type BackgroundDelegationResult,
-	type BackgroundDelegationWorkflowLaneFailureClass,
 	type BackgroundDelegationWorkflowLaneRecovery,
 	DEFAULT_STALE_DELEGATION_TIMEOUT_MS,
 	findByBatchId,
@@ -37,21 +36,15 @@ import { MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS } from '../background/pr-revi
 import {
 	generatePrReviewRunId,
 	PR_REVIEW_BASE_DIMENSION_IDS,
-	PR_REVIEW_DISCARDED_EXAMPLE_ITEM_ID,
 	PR_REVIEW_FINDINGS_MAX_BYTES,
 	PR_REVIEW_HANDOFF_MAX_BYTES,
-	PrReviewCriticVerdictFieldsSchema,
 	type PrReviewLaneResultEnvelope,
 	PrReviewLaneResultEnvelopeSchema,
 	type PrReviewResultReceipt,
 	PrReviewResultReceiptSchema,
-	type PrReviewResultUnresolvedReason,
-	PrReviewReviewerVerdictFieldsSchema,
 	type PrReviewRiskImpact,
 	type PrReviewRiskTag,
 	PrReviewRunIdSchema,
-	parsePrReviewRiskTagsField,
-	parsePrReviewVerdictRow,
 	prReviewFindingRequiresCritic,
 	prReviewLaneResultEnvelopeDigest,
 	prReviewLegacyTranscriptCompatibilityEnabled,
@@ -105,23 +98,151 @@ import {
 	type PrWorkflowGitState,
 } from '../git/pr-workflow-state.js';
 import { redactSecrets } from '../memory/redaction.js';
-import { canonicalWorkspaceIdentity } from '../scope/scope-binding.js';
-import { swarmState } from '../state.js';
-import { getPrWorkflowToolCapability } from '../tools/tool-metadata.js';
-import { log, warn } from '../utils/logger.js';
-import { withTimeout } from '../utils/timeout.js';
-import { normalizeToolName } from './normalize-tool-name.js';
+import { bindPrReviewReentryBindingReader } from '../pr-review/authorization.js';
 import {
 	adoptPrReviewCircuit,
-	advancePrReviewCircuit,
+	CIRCUIT_TERMINAL_DELEGATION_STATUSES,
 	classifyPrReviewCircuitSignal,
 	type PrReviewCircuitAdoptionDiagnostic,
 	type PrReviewCircuitLegacyRecord,
 	PrReviewCircuitRecordSchema,
 	type PrReviewCircuitRecordV2,
 	type PrReviewCircuitSignal,
-} from './pr-review-resilience-circuit.js';
+	type PrReviewResiliencePolicyRecord,
+	resolvePrReviewResiliencePolicy,
+} from '../pr-review/circuit.js';
+// Issue #2385: the coverage/completion settlement boundary. The gate binds
+// its derivation helpers into the boundary at module init below; the two
+// state-returning entry points are re-exposed locally with their original
+// full-state signatures.
+import {
+	admitPrReviewPartialBaseCoverage as admitPrReviewPartialBaseCoverageFromCompletion,
+	allowedPrReviewReportVerdicts,
+	assertPrReviewBaseCoverageSettled as assertPrReviewBaseCoverageSettledFromCompletion,
+	bindPrReviewCompletionHelpers,
+	derivePrReviewDimensionSettlement,
+	type PrReviewBaseDimensionAttempts,
+	type PrReviewDimensionCancellationRecord,
+	PrReviewDimensionCancellationRecordSchema,
+	type PrReviewPartialBaseCoverageRecord,
+	PrReviewPartialBaseCoverageRecordSchema,
+	type PrReviewReportVerdict,
+	type PrReviewTerminalCoverageSettlement,
+	summarizePrReviewBaseDimensionAttempts,
+} from '../pr-review/completion.js';
+// Issue #2385: the legacy transcript adapter boundary. Raw transcript /
+// artifact-text -> canonical conversion exists only in
+// src/pr-review/legacy-transcript-adapter.ts; the guardrail scanner
+// (src/pr-review/guardrails.ts) allows the conversion identifiers only there,
+// so this gate consumes the adapter through the `legacy*` aliases, the test
+// surface, and the shared composition types below.
+import {
+	analyzeLegacyVerdictRowContract,
+	bindPrReviewTranscriptAdapterHelpers,
+	composePrReviewPhaseVerdicts,
+	legacyArtifactHasExactPositiveVerdictRow,
+	legacyFeedbackArtifactCoversItems,
+	legacyFeedbackArtifactTextCoversItems,
+	legacyTranscriptAdapterTestSurface,
+	type PrReviewComposablePhase,
+	type PrReviewItemClaim,
+	type PrReviewPhaseComposition,
+	parseCriticVerdict,
+	readLegacySettledFeedbackClassifications,
+	reviewerItemBindingKey,
+} from '../pr-review/legacy-transcript-adapter.js';
+// Issue #2385: the atomic persistence boundary. The gate binds its
+// `_test_exports` object and its full state codec at module init below; all
+// seam properties are read at call time through the bound reference.
+import {
+	bindPrReviewPersistenceHooks,
+	bindPrReviewStateCodec,
+	CHECKOUT_MUTATION_ACTION_TIMEOUT_MS,
+	defaultPersistenceHooks,
+	forgetTrackedPrWorkflowState,
+	isoNow,
+	MAX_TRACKED_SESSIONS,
+	normalizeComparableFsPath,
+	normalizeSessionID,
+	readPrWorkflowGateStateFileFromDisk,
+	readPrWorkflowGateStateFromDisk as readPrWorkflowStateFromDiskBound,
+	rememberState,
+	resetPrReviewPersistenceCaches,
+	sameBigIntFileIdentity,
+	WORKFLOW_GATE_DIR,
+	withPrWorkflowCheckoutMutationLock,
+	withSessionStateMutation,
+	workflowCheckoutMutationLockRelativePath,
+	workflowGateStateLockRelativePath,
+	workflowGateStatePath,
+	workflowGateStateRelativePath,
+	writeAtomicJson,
+	writeStateWhileLocked,
+} from '../pr-review/persistence.js';
+import { reducePrReviewEvent } from '../pr-review/reducer.js';
+import type {
+	PrReviewEffect,
+	PrReviewEvent,
+	PrReviewWorkflowState,
+} from '../pr-review/types.js';
+import { canonicalWorkspaceIdentity } from '../scope/scope-binding.js';
+import { swarmState } from '../state.js';
+import { getPrWorkflowToolCapability } from '../tools/tool-metadata.js';
+import { log, warn } from '../utils/logger.js';
+import { withTimeout } from '../utils/timeout.js';
+import { normalizeToolName } from './normalize-tool-name.js';
 import { validateSwarmPath } from './utils.js';
+
+export type {
+	PrReviewDimensionCancellationRecord,
+	PrReviewDimensionTerminalState,
+	PrReviewPartialBaseCoverageRecord,
+	PrReviewPartialBaseCoverageRecordV1,
+	PrReviewPartialBaseCoverageRecordV2,
+	PrReviewReportVerdict,
+	PrReviewTerminalCoverageKind,
+	PrReviewTerminalCoverageSettlement,
+	PrReviewUnresolvedDimensionRecord,
+} from '../pr-review/completion.js';
+
+// Issue #2385: completion-owned surfaces re-exported for existing importers
+// (tools, tests) — the gate remains the public import surface.
+export {
+	allowedPrReviewReportVerdicts,
+	normalizePrReviewPartialBaseCoverageRecord,
+	PR_REVIEW_REPORT_VERDICTS,
+	readPrReviewTerminalCoverageForReport,
+	rollbackPrReviewPartialBaseCoverageAdmission,
+} from '../pr-review/completion.js';
+// Issue #2385: persistence-owned surfaces re-exported for existing importers
+// (pr-feedback-event-queue.ts, prepare-pr-workflow-checkout.ts, tests).
+export {
+	ensurePrWorkflowSafeParentDirectory,
+	PrWorkflowCheckoutMutationTimeoutError,
+	prWorkflowSessionFileStem,
+	withPrWorkflowCheckoutMutationLock,
+	writePrWorkflowAtomicJson,
+} from '../pr-review/persistence.js';
+
+// Issue #2385 compile-time guarantee: the gate's full state structurally
+// satisfies the PR-review slice the reducer governs (one field definition;
+// the gate only ADDS non-PR-review fields). If this assertion fails, the
+// slice in src/pr-review/types.ts drifted from the gate state.
+type _GateStateSatisfiesPrReviewSlice =
+	PrWorkflowGateState extends PrReviewWorkflowState ? true : never;
+const _gateStateSliceAssertion: _GateStateSatisfiesPrReviewSlice = true;
+void _gateStateSliceAssertion;
+
+/** Typed disk read over the bound codec (gate callers want the full state). */
+function readPrWorkflowGateStateFromDisk(
+	directory: string,
+	sessionID: string,
+): Promise<PrWorkflowGateState | null> {
+	return readPrWorkflowStateFromDiskBound<PrWorkflowGateState>(
+		directory,
+		sessionID,
+	);
+}
 
 /**
  * Re-exported for compatibility: the canonical six-dimension list is owned by
@@ -399,16 +520,6 @@ interface PrReviewBaseDispatchRecord {
 		ownedWorkflowLanes?: PrReviewBaseDimensionId[];
 	}>;
 	validatedAt: string;
-}
-
-interface PrReviewResiliencePolicyRecord {
-	enabled: boolean;
-	canaryProbeMs: number;
-	statusProbeTimeoutMs: number;
-	correlatedFailureThreshold: number;
-	maxRetryAttemptsAfterInitial: number;
-	/** Issue #2382. Optional: policies persisted before the field existed parse unchanged. */
-	circuitOpenDurationMs?: number;
 }
 
 interface PrReviewResilienceAttemptRecord {
@@ -846,116 +957,7 @@ export interface PrWorkflowGateState {
 	prFeedbackScopes?: PrFeedbackScopeDeclarationRecord[];
 }
 
-/**
- * Normalized terminal state of one canonical base dimension (issue #2383).
- * Every dimension ends in exactly one of these; completion requires every
- * LAUNCHED lane to be terminal (COVERED/FAILED) or explicitly cancelled, with
- * no in-flight lane and no late result creditable to the active generation.
- */
-export type PrReviewDimensionTerminalState =
-	| 'COVERED'
-	| 'FAILED'
-	| 'CANCELLED'
-	| 'NOT_LAUNCHED';
-
-/** Gate-derived per-dimension terminal evidence for an unresolved dimension. */
-export interface PrReviewUnresolvedDimensionRecord {
-	dimension: PrReviewBaseDimensionId;
-	terminalState: 'FAILED' | 'CANCELLED' | 'NOT_LAUNCHED';
-	reasonKind: 'lane_failure' | 'cancelled' | 'not_launched';
-	failureClass?: BackgroundDelegationWorkflowLaneFailureClass;
-	terminalEventId?: string;
-	/** Contributing lane/batch identity, when available. */
-	batchId?: string;
-	laneId?: string;
-	/**
-	 * Bounded safe detail derived from the failure-class vocabulary — never
-	 * lane output, prompts, or secrets.
-	 */
-	safeDetail?: string;
-}
-
-/** v2 terminal-settlement disclosure (issue #2383). The ONLY shape new writers emit. */
-export interface PrReviewPartialBaseCoverageRecordV2 {
-	schemaVersion: 2;
-	runId: string;
-	prHeadSha: string;
-	revisionDigest: string;
-	unresolvedDimensions: PrReviewUnresolvedDimensionRecord[];
-	admittedAt: string;
-}
-
-/**
- * Legacy v1 disclosure (pre-#2383): singular `missingDimension` with a typed
- * terminal failure. Read-only — normalized to the v2 in-memory view at the
- * single read boundary; never rewritten on disk.
- */
-export interface PrReviewPartialBaseCoverageRecordV1 {
-	runId: string;
-	prHeadSha: string;
-	revisionDigest: string;
-	missingDimension: PrReviewBaseDimensionId;
-	failureClass: BackgroundDelegationWorkflowLaneFailureClass;
-	terminalEventId: string;
-	admittedAt: string;
-}
-
-export type PrReviewPartialBaseCoverageRecord =
-	| PrReviewPartialBaseCoverageRecordV2
-	| PrReviewPartialBaseCoverageRecordV1;
-
-/** Terminal report kind of an N-of-6 settlement (issue #2383). */
-export type PrReviewTerminalCoverageKind =
-	| 'COMPLETE'
-	| 'PARTIAL'
-	| 'NO_COVERAGE';
-
-/** Controller-declared terminal verdict for a PR_REVIEW completion (issue #2383). */
-export const PR_REVIEW_REPORT_VERDICTS = [
-	'APPROVE',
-	'REQUEST_CHANGES',
-	'INCOMPLETE',
-] as const;
-
-export type PrReviewReportVerdict = (typeof PR_REVIEW_REPORT_VERDICTS)[number];
-
-/**
- * Verdicts a terminal report may carry by coverage kind (issue #2383):
- * PARTIAL may only request changes or declare itself incomplete; NO_COVERAGE
- * is a forced INCOMPLETE operational report. Neither may ever APPROVE or
- * claim a full review.
- */
-export function allowedPrReviewReportVerdicts(
-	kind: PrReviewTerminalCoverageKind,
-): readonly PrReviewReportVerdict[] {
-	if (kind === 'COMPLETE') return PR_REVIEW_REPORT_VERDICTS;
-	if (kind === 'PARTIAL') return ['REQUEST_CHANGES', 'INCOMPLETE'];
-	return ['INCOMPLETE'];
-}
-
-export interface PrReviewTerminalCoverageSettlement {
-	kind: PrReviewTerminalCoverageKind;
-	coveredDimensions: PrReviewBaseDimensionId[];
-	unresolvedDimensions: PrReviewUnresolvedDimensionRecord[];
-	/** False while any dimension still has a live (in-flight) lane. */
-	allLaunchedTerminal: boolean;
-}
-
-/** Per-dimension explicit cancellation, written by armed recovery (issue #2383). */
-export interface PrReviewDimensionCancellationRecord {
-	reason: string;
-	cancelledAt: string;
-	source: 'armed_recovery';
-}
-
-interface SessionStateMutationLock {
-	ownerToken: string;
-	pid: number;
-	createdAtMs: number;
-}
-
 const GATE_SCHEMA_VERSION = 1 as const;
-const MAX_TRACKED_SESSIONS = 200;
 const MAX_WORKFLOW_BATCHES = 128;
 /**
  * Every valid PR_REVIEW base batch partitions the fixed six-dimension base
@@ -1018,13 +1020,6 @@ const MAX_RETIRED_FEEDBACK_ITEM_OWNERS = 4096;
  * instead.
  */
 export const MAX_PR_FEEDBACK_INVENTORY_AMENDMENTS = 128;
-const WINDOWS_RENAME_MAX_RETRIES = 3;
-const RENAME_RETRY_DELAY_MS = 10;
-const STATE_MUTATION_LOCK_MAX_ATTEMPTS = 50;
-const STATE_MUTATION_LOCK_RETRY_DELAY_MS = 10;
-const STATE_MUTATION_LOCK_UNINITIALIZED_STALE_MS = 30_000;
-const MAX_COMPLETED_CHECKOUT_LOCK_OWNERS = 64;
-const CHECKOUT_MUTATION_ACTION_TIMEOUT_MS = 5 * 60_000;
 const MAX_PR_WORKFLOW_GATE_DIRECTORY_ENTRIES = MAX_TRACKED_SESSIONS * 2 + 1;
 const MAX_CANDIDATE_ISSUES_PER_ARTIFACT = 8;
 const MAX_BASE_COVERAGE_DIAGNOSTICS = 8;
@@ -1032,11 +1027,6 @@ const MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS = 1_000;
 const MAX_LANE_VALIDATION_VALUE_CHARS = 240;
 const DISPATCH_TOOL_NAME = 'dispatch_lanes_async';
 const BLOCKING_DISPATCH_TOOL_NAME = 'dispatch_lanes';
-const WORKFLOW_GATE_DIR = 'pr-workflow-gates';
-const trackedStatesByProjectSession = new Map<string, PrWorkflowGateState>();
-const pendingStateMutationsByProjectSession = new Map<string, Promise<void>>();
-const pendingCheckoutMutationsByProject = new Map<string, Promise<void>>();
-const completedCheckoutLockOwners = new Map<string, string>();
 
 const PrReviewBaseDimensionIdSchema = z.enum(PR_REVIEW_BASE_DIMENSION_IDS);
 
@@ -1101,148 +1091,6 @@ const PrReviewResilienceStateRecordSchema = z
 		circuit: PrReviewCircuitRecordSchema.optional(),
 	})
 	.strict();
-
-const PR_REVIEW_FAILURE_CLASS_SAFE_DETAILS: Record<
-	BackgroundDelegationWorkflowLaneFailureClass,
-	string
-> = {
-	contract:
-		'lane failed its output contract after the bounded retry budget was exhausted',
-	resource: 'lane exhausted its resource budget before producing valid output',
-	deadline: 'lane passed its collection deadline without valid terminal output',
-};
-
-const PrReviewUnresolvedDimensionRecordSchema = z
-	.object({
-		dimension: z.enum(PR_REVIEW_BASE_DIMENSION_IDS),
-		terminalState: z.enum(['FAILED', 'CANCELLED', 'NOT_LAUNCHED']),
-		reasonKind: z.enum(['lane_failure', 'cancelled', 'not_launched']),
-		failureClass: z.enum(['contract', 'resource', 'deadline']).optional(),
-		terminalEventId: z.string().min(1).max(256).optional(),
-		batchId: z.string().min(1).max(128).optional(),
-		laneId: z.string().min(1).max(128).optional(),
-		safeDetail: z.string().max(200).optional(),
-	})
-	.strict()
-	.superRefine((value, ctx) => {
-		if (
-			value.terminalState === 'FAILED' &&
-			value.reasonKind !== 'lane_failure'
-		) {
-			ctx.addIssue({
-				code: 'custom',
-				path: ['reasonKind'],
-				message: 'FAILED dimensions must use reasonKind "lane_failure"',
-			});
-		}
-		if (
-			(value.terminalState === 'CANCELLED' &&
-				value.reasonKind !== 'cancelled') ||
-			(value.terminalState === 'NOT_LAUNCHED' &&
-				value.reasonKind !== 'not_launched')
-		) {
-			ctx.addIssue({
-				code: 'custom',
-				path: ['reasonKind'],
-				message: `reasonKind must match terminalState "${value.terminalState}"`,
-			});
-		}
-		if (
-			value.terminalState !== 'FAILED' &&
-			(value.failureClass !== undefined || value.terminalEventId !== undefined)
-		) {
-			ctx.addIssue({
-				code: 'custom',
-				path: ['failureClass'],
-				message:
-					'failureClass/terminalEventId are legal only on FAILED dimensions',
-			});
-		}
-	});
-
-const PrReviewPartialBaseCoverageRecordV2Schema = z
-	.object({
-		schemaVersion: z.literal(2),
-		runId: z.string().min(1).max(128),
-		prHeadSha: z.string().regex(/^[0-9a-f]{6,64}$/i),
-		revisionDigest: z.string().min(1).max(256),
-		unresolvedDimensions: z
-			.array(PrReviewUnresolvedDimensionRecordSchema)
-			.min(1)
-			.max(PR_REVIEW_BASE_DIMENSION_IDS.length),
-		admittedAt: z.string().datetime(),
-	})
-	.strict()
-	.superRefine((value, ctx) => {
-		const seen = new Set<string>();
-		for (const entry of value.unresolvedDimensions) {
-			if (seen.has(entry.dimension)) {
-				ctx.addIssue({
-					code: 'custom',
-					path: ['unresolvedDimensions'],
-					message: `must not contain duplicate dimension "${entry.dimension}"`,
-				});
-				return;
-			}
-			seen.add(entry.dimension);
-		}
-	});
-
-/** Legacy pre-#2383 singular disclosure; read-only, normalized on read. */
-const PrReviewPartialBaseCoverageRecordV1Schema = z
-	.object({
-		runId: z.string().min(1).max(128),
-		prHeadSha: z.string().regex(/^[0-9a-f]{6,64}$/i),
-		revisionDigest: z.string().min(1).max(256),
-		missingDimension: z.enum(PR_REVIEW_BASE_DIMENSION_IDS),
-		failureClass: z.enum(['contract', 'resource', 'deadline']),
-		terminalEventId: z.string().min(1).max(256),
-		admittedAt: z.string().datetime(),
-	})
-	.strict();
-
-const PrReviewPartialBaseCoverageRecordSchema = z.union([
-	PrReviewPartialBaseCoverageRecordV2Schema,
-	PrReviewPartialBaseCoverageRecordV1Schema,
-]);
-
-const PrReviewDimensionCancellationRecordSchema = z
-	.object({
-		reason: z.string().min(1).max(500),
-		cancelledAt: z.string().datetime(),
-		source: z.literal('armed_recovery'),
-	})
-	.strict();
-
-/**
- * Normalize any disclosure record to the v2 in-memory view. A legacy v1
- * record maps to exactly one FAILED entry; the durable file is never
- * rewritten (its digest stays bound to the original bytes).
- */
-export function normalizePrReviewPartialBaseCoverageRecord(
-	record: PrReviewPartialBaseCoverageRecord,
-): PrReviewPartialBaseCoverageRecordV2 {
-	if ('missingDimension' in record) {
-		return {
-			schemaVersion: 2,
-			runId: record.runId,
-			prHeadSha: record.prHeadSha,
-			revisionDigest: record.revisionDigest,
-			unresolvedDimensions: [
-				{
-					dimension: record.missingDimension,
-					terminalState: 'FAILED',
-					reasonKind: 'lane_failure',
-					failureClass: record.failureClass,
-					terminalEventId: record.terminalEventId,
-					safeDetail: PR_REVIEW_FAILURE_CLASS_SAFE_DETAILS[record.failureClass],
-				},
-			],
-			admittedAt: record.admittedAt,
-		};
-	}
-	return record;
-}
 
 const PrFeedbackLaneOwnershipSchema = z
 	.object({
@@ -1896,9 +1744,7 @@ export async function readPrWorkflowGateState(
 	if (state) {
 		rememberState(directory, state);
 	} else {
-		trackedStatesByProjectSession.delete(
-			stateCacheKey(directory, normalizedSessionID),
-		);
+		forgetTrackedPrWorkflowState(directory, normalizedSessionID);
 	}
 	return state;
 }
@@ -1991,6 +1837,32 @@ export async function submitPrReviewResult(
 		const semanticEnvelopeDigest = prReviewLaneResultEnvelopeDigest(
 			parsedResult.data,
 		);
+		// Issue #2385 (final-critic finding 2): the submission TRANSITION is
+		// reducer-owned. The reducer decides recorded / replay / conflict; a
+		// conflicting second submission is rejected BEFORE any durable write
+		// with the publisher's own reason; every accepted transition executes
+		// its settle_delegation effect through the atomic receipt publisher
+		// below (which remains the exactly-once durable authority).
+		const existingReceiptDigest =
+			record.result?.prReviewResultReceipt?.semanticEnvelopeDigest;
+		const submission = reducePrReviewEvent(state, {
+			type: 'lane_structured_result_submitted',
+			batchId: input.batchId,
+			laneId: input.laneId,
+			generation: state.revision,
+			semanticEnvelopeDigest,
+			outcome: parsedResult.data.outcome,
+			...(existingReceiptDigest !== undefined ? { existingReceiptDigest } : {}),
+		});
+		if (submission.status === 'rejected') {
+			return {
+				status: 'rejected',
+				reason:
+					submission.rejection.code === 'duplicate_conflicting_result'
+						? 'a different bound receipt is already recorded'
+						: `structured result submission rejected: ${submission.rejection.code}`,
+			};
+		}
 		const published = await publishPrReviewResultReceipt(directory, {
 			parentSessionId,
 			childSessionId: child,
@@ -2161,10 +2033,11 @@ async function assertNoActivePrWorkflowGateForCheckoutRestore(
 				directory,
 				path.join(WORKFLOW_GATE_DIR, entry.name),
 			);
-			const state = await readPrWorkflowGateStateFileFromDisk(
-				statePath,
-				entry.name,
-			);
+			const state =
+				await readPrWorkflowGateStateFileFromDisk<PrWorkflowGateState>(
+					statePath,
+					entry.name,
+				);
 			if (!state) continue;
 			const expectedName = path.basename(
 				workflowGateStateRelativePath(state.sessionID),
@@ -2236,9 +2109,7 @@ export async function clearPrWorkflowGateState(
 				throw error;
 			}
 		}
-		trackedStatesByProjectSession.delete(
-			stateCacheKey(directory, normalizedSessionID),
-		);
+		forgetTrackedPrWorkflowState(directory, normalizedSessionID);
 	});
 }
 
@@ -4236,25 +4107,13 @@ export class PrReviewResilienceRetryExhaustedError extends Error {
 	}
 }
 
-function snapshotPrReviewResiliencePolicy(
-	policy?: PrReviewResilienceConfig,
-): PrReviewResiliencePolicyRecord {
-	return {
-		// Issue #2381: must track DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.enabled. A
-		// hardcoded `?? true` here would force staged admission on for any caller
-		// that omits the policy, which then hard-BLOCKs tier M/L base dispatch —
-		// while the architect prompt now (correctly) tells the controller not to
-		// emit stage metadata by default.
-		enabled: policy?.enabled ?? DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.enabled,
-		canaryProbeMs: policy?.canary_probe_ms ?? 300_000,
-		statusProbeTimeoutMs: policy?.status_probe_timeout_ms ?? 2_000,
-		correlatedFailureThreshold: policy?.correlated_failure_threshold ?? 2,
-		maxRetryAttemptsAfterInitial: policy?.max_retry_attempts_after_initial ?? 2,
-		circuitOpenDurationMs:
-			policy?.circuit_open_duration_ms ??
-			DEFAULT_PR_REVIEW_RESILIENCE_CONFIG.circuit_open_duration_ms,
-	};
-}
+/**
+ * Issue #2385: the policy snapshot lives in `src/pr-review/circuit.ts`
+ * (`resolvePrReviewResiliencePolicy`) with every default sourced from
+ * `DEFAULT_PR_REVIEW_RESILIENCE_CONFIG`. This local name is kept (callers and
+ * the `_test_exports` seam) and delegates to the single authority.
+ */
+const snapshotPrReviewResiliencePolicy = resolvePrReviewResiliencePolicy;
 
 function declaredBaseDimensions(
 	lanes: readonly PrWorkflowLaneSpec[],
@@ -4331,7 +4190,7 @@ function effectivePrReviewResiliencePolicy(
 // ---------------------------------------------------------------------------
 // PR-review resilience circuit (issue #2382) — typed, recoverable, versioned.
 // Classification, adoption/migration, and the CLOSED/OPEN/HALF_OPEN machine
-// live in `./pr-review-resilience-circuit.ts` (pure, unit-tested); this file
+// live in `src/pr-review/circuit.ts` (pure, unit-tested); this file
 // owns the durable reads (delegation ledger), the CAS persistence, and the
 // enforcement wiring.
 // ---------------------------------------------------------------------------
@@ -4435,9 +4294,15 @@ function probeObservationForCircuit(
 }
 
 function formatPrReviewResilienceCircuitOpenMessage(
-	circuit: PrReviewResilienceCircuitRecord,
+	circuit: PrReviewResilienceCircuitRecord | undefined,
 	nowMs: number = Date.now(),
 ): string {
+	// Issue #2385: an absent circuit record must not be replaced by a
+	// synthetic inline construction here (parallel-rule guardrail); the
+	// message degrades truthfully instead.
+	if (!circuit) {
+		return 'BLOCKED: PR_REVIEW resilience retry circuit is open; collect, diagnose, cancel, abort, gap reporting, and config disable remain available';
+	}
 	if ('version' in circuit) {
 		const openUntilMs = circuit.openUntil ? Date.parse(circuit.openUntil) : 0;
 		const remainingMs = Math.max(0, openUntilMs - nowMs);
@@ -4447,7 +4312,11 @@ function formatPrReviewResilienceCircuitOpenMessage(
 				: 'the next staged dispatch is admitted as the recovery canary probe';
 		return `BLOCKED: PR_REVIEW resilience retry circuit is ${circuit.state} after ${circuit.contributors.length} distinct terminal provider failures (${circuit.providerClass ?? 'provider'}); ${retryNote}; collect, diagnose, cancel, abort, gap reporting, and config disable remain available`;
 	}
-	return `BLOCKED: PR_REVIEW base dispatch circuit is open after ${circuit.count} correlated terminal failures (${circuit.signature}); collect every launched lane, abort_pr_workflow, and stop without partial findings`;
+	// Issue #2385 recurrence sweep (class G): the legacy-record branch must
+	// carry the SAME guidance as the v2 branch — collect every launched lane
+	// and settle N-of-6 truthfully; "stop without partial findings" discarded
+	// validated work and contradicts the current policy.
+	return `BLOCKED: PR_REVIEW base dispatch circuit is open after ${circuit.count} correlated terminal failures (${circuit.signature}); collect every launched lane, then settle coverage truthfully (COMPLETE/PARTIAL/NO_COVERAGE) via complete_pr_workflow`;
 }
 
 interface PrReviewResilienceCircuitAdvanceOutcome {
@@ -4503,42 +4372,61 @@ async function advanceResilienceCircuitWhileLocked(args: {
 		reportCircuitAdoptionDiagnostic(adoption.diagnostic);
 	}
 
-	const decision = advancePrReviewCircuit(circuit, {
+	// Issue #2385 (final-critic finding 1): the circuit TRANSITION is
+	// reducer-owned. This adapter emits `circuit_advance_requested` (the
+	// reducer re-adopts the already-migrated circuit idempotently and runs
+	// the machine), applies the returned state, and executes the returned
+	// effects: `persist_state` writes now; `block_dispatch` maps to the
+	// typed admission refusal; an admitted HALF_OPEN probe carries NO
+	// persist effect (mark-on-success: the admission's own write persists
+	// it, so a validation failure never leaves a phantom probe).
+	const advanceOutcome = reducePrReviewEvent(state, {
+		type: 'circuit_advance_requested',
 		nowMs,
-		threshold: snapshot.policy.correlatedFailureThreshold,
-		openDurationMs: circuitOpenDurationMs(snapshot.policy),
-		admission: args.admission,
 		laneSignals: laneSignalsForCircuitReview(directory, state),
 		probeObservation:
 			circuit?.state === 'HALF_OPEN'
 				? probeObservationForCircuit(directory, state, circuit)
 				: undefined,
+		admission: args.admission,
+		policy: snapshot.policy,
 	});
-
-	if (decision.action === 'block') {
-		if (decision.changed && decision.record) {
-			snapshot = { ...snapshot, circuit: decision.record };
-			state = await writeStateWhileLocked(directory, {
-				...state,
-				updatedAt: isoNow(),
-				prReviewResilience: snapshot,
-			});
-		}
-		return { state, snapshot, blocked: { reason: decision.reason } };
-	}
-	if (decision.action === 'admit_as_probe') {
-		if (decision.changed && decision.record) {
-			return { state, snapshot, pendingProbeCircuit: decision.record };
-		}
+	if (advanceOutcome.status === 'rejected') {
+		// circuit_advance_requested has no rejection path; fail soft to the
+		// pre-transition view rather than blocking the workflow.
 		return { state, snapshot };
 	}
-	if (decision.changed && decision.record) {
-		snapshot = { ...snapshot, circuit: decision.record };
+	const nextState = advanceOutcome.state as PrWorkflowGateState;
+	const blockedReason = advanceOutcome.effects.find(
+		(effect): effect is Extract<PrReviewEffect, { kind: 'block_dispatch' }> =>
+			effect.kind === 'block_dispatch',
+	)?.reason;
+	if (
+		advanceOutcome.effects.some((effect) => effect.kind === 'persist_state')
+	) {
+		snapshot = {
+			...snapshot,
+			circuit: nextState.prReviewResilience?.circuit,
+		};
 		state = await writeStateWhileLocked(directory, {
-			...state,
+			...nextState,
 			updatedAt: isoNow(),
 			prReviewResilience: snapshot,
 		});
+	} else {
+		state = nextState;
+	}
+	if (blockedReason !== undefined) {
+		return { state, snapshot, blocked: { reason: blockedReason } };
+	}
+	const pendingProbe = nextState.prReviewResilience?.circuit;
+	if (
+		pendingProbe &&
+		'version' in pendingProbe &&
+		pendingProbe.state === 'HALF_OPEN' &&
+		pendingProbe.probe
+	) {
+		return { state, snapshot, pendingProbeCircuit: pendingProbe };
 	}
 	return { state, snapshot };
 }
@@ -4553,7 +4441,7 @@ async function preflightPrReviewResilienceCircuitBeforePrune(
 	state: PrWorkflowGateState;
 	previous: PrReviewBaseDispatchRecord[];
 }> {
-	let nextState = state;
+	let nextState: PrWorkflowGateState = state;
 	let nextPrevious = previous;
 	let snapshot = nextState.prReviewResilience;
 	if (!snapshot) {
@@ -4581,14 +4469,7 @@ async function preflightPrReviewResilienceCircuitBeforePrune(
 	});
 	if (outcome.blocked) {
 		throw new PrReviewResilienceCircuitOpenError(
-			formatPrReviewResilienceCircuitOpenMessage(
-				outcome.snapshot.circuit ?? {
-					version: 2,
-					state: 'OPEN',
-					generation: 1,
-					contributors: [],
-				},
-			),
+			formatPrReviewResilienceCircuitOpenMessage(outcome.snapshot.circuit),
 		);
 	}
 	return {
@@ -4900,43 +4781,34 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 	// v2 CLOSED generation, evidence waterline at now, attempts cleared, policy
 	// refreshed from the current config — so pre-disable evidence can never
 	// resurrect.
-	if (nextResilience && !liveResilienceEnabled) {
-		if (nextResilience.policy.enabled !== false) {
-			nextResilience = {
-				...nextResilience,
-				policy: { ...nextResilience.policy, enabled: false },
-			};
+	//
+	// Issue #2385: both transitions are REDUCER-OWNED — this adapter emits
+	// `resilience_config_changed`, applies the returned state, and executes
+	// the `persist_state` effect. No inline resilience-field mutation remains.
+	if (
+		nextResilience &&
+		(!liveResilienceEnabled || nextResilience.policy.enabled === false)
+	) {
+		const configEvent: PrReviewEvent = {
+			type: 'resilience_config_changed',
+			enabled: liveResilienceEnabled,
+			policy: liveResilienceEnabled
+				? options.prReviewResiliencePolicy
+				: undefined,
+			nowMs: _test_exports.nowMs(),
+		};
+		const outcome = reducePrReviewEvent(state, configEvent);
+		if (
+			outcome.status === 'applied' &&
+			outcome.effects.some((effect) => effect.kind === 'persist_state')
+		) {
 			state = await writeStateWhileLocked(directory, {
-				...state,
+				...(outcome.state as PrWorkflowGateState),
 				updatedAt: isoNow(),
-				prReviewResilience: nextResilience,
 			});
 			previous = state.prReviewBaseDispatches ?? [];
+			nextResilience = state.prReviewResilience ?? nextResilience;
 		}
-	} else if (nextResilience && nextResilience.policy.enabled === false) {
-		const previousGeneration =
-			nextResilience.circuit && 'version' in nextResilience.circuit
-				? nextResilience.circuit.generation
-				: 1;
-		nextResilience = {
-			policy: snapshotPrReviewResiliencePolicy(
-				options.prReviewResiliencePolicy,
-			),
-			attempts: [],
-			circuit: {
-				version: 2,
-				state: 'CLOSED',
-				generation: previousGeneration + 1,
-				contributors: [],
-				evidenceWaterline: isoNow(),
-			},
-		};
-		state = await writeStateWhileLocked(directory, {
-			...state,
-			updatedAt: isoNow(),
-			prReviewResilience: nextResilience,
-		});
-		previous = state.prReviewBaseDispatches ?? [];
 	}
 	if (
 		liveResilienceEnabled &&
@@ -4986,14 +4858,7 @@ async function enforcePrReviewBaseDimensionsWhileLocked(
 			pendingProbeCircuit = outcome.pendingProbeCircuit;
 			if (outcome.blocked) {
 				throw new PrReviewResilienceCircuitOpenError(
-					formatPrReviewResilienceCircuitOpenMessage(
-						outcome.snapshot.circuit ?? {
-							version: 2,
-							state: 'OPEN',
-							generation: 1,
-							contributors: [],
-						},
-					),
+					formatPrReviewResilienceCircuitOpenMessage(outcome.snapshot.circuit),
 				);
 			}
 		}
@@ -5301,15 +5166,22 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 				normalizedSessionID,
 			);
 			if (!state || state.mode !== 'PR_REVIEW') return false;
-			const currentBaseDispatches = state.prReviewBaseDispatches ?? [];
-			if (currentBaseDispatches.at(-1)?.batchId !== normalizedBatchId) {
-				return false;
-			}
 			const batchRecords = findByBatchId(directory, normalizedBatchId, {
 				parentSessionId: normalizedSessionID,
 			});
-			if (batchRecords.length > 0) return false;
-			const nextBaseDispatches = currentBaseDispatches.slice(0, -1);
+			// Issue #2385: the rollback transition is REDUCER-OWNED — the
+			// adapter emits `base_admission_rolled_back`, and a typed rejection
+			// (not-last batch / already-launched batch) maps to the same silent
+			// false the pre-reducer guard produced.
+			const rollbackOutcome = reducePrReviewEvent(state, {
+				type: 'base_admission_rolled_back',
+				batchId: normalizedBatchId,
+				batchDelegationRecordsExist: batchRecords.length > 0,
+			});
+			if (rollbackOutcome.status === 'rejected') return false;
+			const rollbackState = rollbackOutcome.state as PrWorkflowGateState;
+			const currentBaseDispatches = state.prReviewBaseDispatches ?? [];
+			const nextBaseDispatches = rollbackState.prReviewBaseDispatches ?? [];
 			const rolledBackDimensions = new Set(
 				currentBaseDispatches
 					.at(-1)
@@ -5325,7 +5197,7 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 					)
 				: state.prReviewContractRetryDimensions;
 			const lastAttempt = state.prReviewResilience?.attempts.at(-1);
-			let nextResilience = state.prReviewResilience;
+			let nextResilience = rollbackState.prReviewResilience;
 			if (lastAttempt?.canaryBatchId === normalizedBatchId) {
 				nextResilience = nextResilience
 					? {
@@ -5348,9 +5220,9 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 			// never produce a terminal record — this rollback's own precondition
 			// is that the batch has zero delegation records — so leaving the
 			// probe in place would wedge the circuit on probe_in_flight forever.
-			// End the probe lifecycle exactly the way an ignored outcome does:
-			// state stays OPEN with a restarted recovery cooldown, and no
-			// contributor, generation, or waterline changes.
+			// Issue #2385: the probe-end transition is REDUCER-OWNED
+			// (`circuit_probe_settled` -> the machine's rolled-back-admission
+			// path); the adapter applies the returned state.
 			const rolledBackCircuit = nextResilience?.circuit;
 			if (
 				rolledBackCircuit &&
@@ -5358,18 +5230,25 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
 				rolledBackCircuit.state === 'HALF_OPEN' &&
 				rolledBackCircuit.probe?.batchId === normalizedBatchId
 			) {
-				nextResilience = {
-					...nextResilience!,
-					circuit: {
-						...rolledBackCircuit,
-						state: 'OPEN',
-						openUntil: new Date(
-							_test_exports.nowMs() +
-								circuitOpenDurationMs(nextResilience!.policy),
-						).toISOString(),
-						probe: undefined,
+				const probeOutcome = reducePrReviewEvent(
+					{ ...rollbackState, prReviewResilience: nextResilience },
+					{
+						type: 'circuit_probe_settled',
+						outcome: { result: 'rolled_back_admission' },
+						nowMs: _test_exports.nowMs(),
+						policy: {
+							...(nextResilience?.policy ?? snapshotPrReviewResiliencePolicy()),
+							circuitOpenDurationMs: circuitOpenDurationMs(
+								nextResilience?.policy ?? snapshotPrReviewResiliencePolicy(),
+							),
+						},
 					},
-				};
+				);
+				if (probeOutcome.status === 'applied') {
+					nextResilience =
+						(probeOutcome.state as PrWorkflowGateState).prReviewResilience ??
+						nextResilience;
+				}
 			}
 			const shouldKeepResilience =
 				(nextBaseDispatches.length > 0 && Boolean(nextResilience?.policy)) ||
@@ -5411,341 +5290,12 @@ export async function rollbackPrReviewBaseAdmissionIfUnlaunched(
  * exception exists for. Preview truncation alone is recoverable when the durable
  * artifact validates. This set is therefore only consulted after both identity
  * and revision-independent semantic validation.
- */
-const TERMINAL_FAILED_DELEGATION_STATUSES: ReadonlySet<string> = new Set([
-	'completed',
-	'error',
-	'cancelled',
-	'stale',
-]);
-
-interface PrReviewBaseDimensionAttempts {
-	/** Dimensions with a currently authoritative successful artifact. */
-	successful: Set<string>;
-	/** Dimensions with a currently in-flight or retryable recorded lane. */
-	inFlight: Set<string>;
-	/** Dimensions whose terminal record was a contract failure. */
-	contractFailed: Set<string>;
-	/** Dimensions that already consumed the dedicated contract retry channel. */
-	contractRetried: Set<string>;
-	/**
-	 * The subset of `successful` supplied by a lane that owns that dimension
-	 * alone. Used by the cumulative tier-L lane floor to decide when an earlier
-	 * consolidated lane has been superseded and no longer spends lane budget.
-	 */
-	dedicatedSuccessful: Set<string>;
-	/** Dimensions whose recorded lane ran to a terminal, non-successful end. */
-	terminallyFailed: Set<string>;
-}
-
-/**
- * Per-dimension success/failure across every recorded base batch.
  *
- * The two halves deliberately use different evidence:
- *
- * - **successful** is revision-aware (`successfulObligationsFromExactBatch`
- *   compares each artifact's `revisionDigest` against the current worktree), so
- *   a stale artifact is correctly not a current source.
- * - **terminallyFailed** is revision-INdependent on purpose.
- *   `recordsPassingBatchIntegrity` plus
- *   `hasRevisionIndependentDiscoverySemantics` use the artifact's recorded
- *   revision rather than the current worktree digest. If failure were
- *   derived from the revision-aware set instead, any working-tree edit would
- *   make all six dimensions read as "failed" at once and a caller could then
- *   consolidate the whole base wave into two lanes — re-opening the tier-L lane
- *   floor by a second route (issue #1968 BL-4).
+ * Issue #2385: the set itself is owned by `src/pr-review/circuit.ts`
+ * (`CIRCUIT_TERMINAL_DELEGATION_STATUSES`) — one vocabulary, no mirror.
  */
-function summarizePrReviewBaseDimensionAttempts(
-	directory: string,
-	state: PrWorkflowGateState,
-	revisionDigest: string,
-): PrReviewBaseDimensionAttempts {
-	const successful = new Set<string>();
-	const inFlight = new Set<string>();
-	const contractFailed = new Set<string>();
-	const contractRetried = new Set<string>(
-		state.prReviewContractRetryDimensions ?? [],
-	);
-	const dedicatedSuccessful = new Set<string>();
-	const terminallyFailed = new Set<string>();
-	for (const batch of state.prReviewBaseDispatches ?? []) {
-		const batchSuccessful = successfulObligationsFromExactBatch(
-			directory,
-			state,
-			batch.batchId,
-			batch.lanes,
-			'swarm-pr-review:base',
-			batch.validatedAt,
-			true,
-			new Set(),
-			revisionDigest,
-		);
-		for (const obligation of batchSuccessful) {
-			successful.add(obligation);
-		}
-		for (const lane of batch.lanes) {
-			if ((lane.ownedWorkflowLanes?.length ?? 1) !== 1) continue;
-			const dimension = lane.ownedWorkflowLanes?.[0] ?? lane.workflowLane;
-			if (batchSuccessful.has(dimension)) dedicatedSuccessful.add(dimension);
-		}
-		const semanticallyValidLaneIds = new Set(
-			recordsPassingBatchIntegrity(
-				directory,
-				state,
-				batch.batchId,
-				batch.lanes,
-				'swarm-pr-review:base',
-				batch.validatedAt,
-			)
-				.filter((qualified) =>
-					hasRevisionIndependentDiscoverySemantics(directory, qualified, state),
-				)
-				.map((qualified) => qualified.record.laneId),
-		);
-		const records = findByBatchId(directory, batch.batchId, {
-			parentSessionId: state.sessionID,
-		});
-		for (const lane of batch.lanes) {
-			if (semanticallyValidLaneIds.has(lane.laneId)) continue;
-			const laneRecords = records.filter(
-				(record) => record.laneId === lane.laneId,
-			);
-			// No record at all: never dispatched. Any recorded lane not wholly in
-			// the terminal failure set is still in flight or retryable; it is not a
-			// failed obligation yet, but it must stay out of retry targets.
-			if (laneRecords.length === 0) {
-				continue;
-			}
-			if (
-				!laneRecords.every((record) =>
-					TERMINAL_FAILED_DELEGATION_STATUSES.has(record.status),
-				)
-			) {
-				for (const dimension of lane.ownedWorkflowLanes?.length
-					? lane.ownedWorkflowLanes
-					: [lane.workflowLane]) {
-					inFlight.add(dimension);
-				}
-				continue;
-			}
-			for (const dimension of lane.ownedWorkflowLanes?.length
-				? lane.ownedWorkflowLanes
-				: [lane.workflowLane]) {
-				terminallyFailed.add(dimension);
-				if (
-					laneRecords.at(-1)?.result?.workflowLaneFailureClass === 'contract'
-				) {
-					contractFailed.add(dimension);
-				}
-			}
-		}
-	}
-	return {
-		successful,
-		inFlight,
-		contractFailed,
-		contractRetried,
-		dedicatedSuccessful,
-		terminallyFailed,
-	};
-}
-
-function hasRevisionIndependentDiscoverySemantics(
-	directory: string,
-	qualified: QualifiedBatchRecord,
-	state: PrWorkflowGateState,
-): boolean {
-	const ref = qualified.record.result?.outputRef?.trim();
-	if (!ref) return false;
-	const artifact = readLaneOutput(directory, ref)?.artifact ?? null;
-	if (!artifact?.revisionDigest?.trim()) return false;
-	return validatePrReviewDiscoveryLaneCompletion({
-		record: qualified.record,
-		result: qualified.record.result!,
-		artifact,
-		expected: {
-			mode: 'swarm-pr-review:base',
-			workflowLane: qualified.expectedWorkflowLane,
-			ownedWorkflowLanes: qualified.expectedOwnedLanes,
-			prHeadSha: state.prHeadSha ?? '',
-			gitHead: state.prHeadSha ?? '',
-			revisionDigest: artifact.revisionDigest,
-			workflowInstanceId: state.workflowInstanceId,
-			workflowRevision: state.revision,
-			baseSha: state.prReviewBaseSha,
-			reviewScope:
-				state.prReviewBaseSha && state.prHeadSha
-					? `complete PR diff ${state.prReviewBaseSha}...${state.prHeadSha}`
-					: undefined,
-		},
-	}).ok;
-}
-
-interface PrReviewLatestTypedFailure {
-	failureClass: BackgroundDelegationWorkflowLaneFailureClass;
-	terminalEventId: string;
-	recordedAt: number;
-	/** Contributing lane/batch identity, when available (issue #2383). */
-	batchId?: string;
-	laneId?: string;
-}
-
-function latestTypedFailureForBaseDimension(
-	directory: string,
-	state: PrWorkflowGateState,
-	dimension: PrReviewBaseDimensionId,
-): PrReviewLatestTypedFailure | null {
-	let latest: PrReviewLatestTypedFailure | null = null;
-	for (const batch of state.prReviewBaseDispatches ?? []) {
-		for (const lane of batch.lanes) {
-			const owned = lane.ownedWorkflowLanes?.length
-				? lane.ownedWorkflowLanes
-				: [lane.workflowLane];
-			if (!owned.includes(dimension)) continue;
-			for (const record of findByBatchId(directory, batch.batchId, {
-				parentSessionId: state.sessionID,
-			}).filter((candidate) => candidate.laneId === lane.laneId)) {
-				const terminal = record.terminalResult;
-				const result = terminal?.result ?? record.result;
-				const failureClass = result?.workflowLaneFailureClass;
-				if (!terminal || !failureClass || terminal.status === 'completed')
-					continue;
-				const candidate = {
-					failureClass,
-					terminalEventId: terminal.eventId,
-					recordedAt: terminal.recordedAt,
-					batchId: batch.batchId,
-					laneId: lane.laneId,
-				};
-				if (
-					latest === null ||
-					candidate.recordedAt > latest.recordedAt ||
-					(candidate.recordedAt === latest.recordedAt &&
-						candidate.terminalEventId.localeCompare(latest.terminalEventId) > 0)
-				) {
-					latest = candidate;
-				}
-			}
-		}
-	}
-	return latest;
-}
-
-interface PrReviewLatestStructuredUnresolved {
-	failureClass: BackgroundDelegationWorkflowLaneFailureClass;
-	recordedAt: number;
-	batchId: string;
-	laneId: string;
-	safeDetail: string;
-}
-
-function failureClassFromStructuredUnresolvedReason(
-	reason: PrReviewResultUnresolvedReason,
-): BackgroundDelegationWorkflowLaneFailureClass {
-	switch (reason) {
-		case 'RESOURCE_LIMIT':
-			return 'resource';
-		case 'DEADLINE_EXCEEDED':
-			return 'deadline';
-		default:
-			return 'contract';
-	}
-}
-
-function safeDetailFromStructuredUnresolvedReason(
-	reason: PrReviewResultUnresolvedReason,
-): string {
-	switch (reason) {
-		case 'NOT_EXECUTED':
-			return 'structured receipt reported this lane was never executed';
-		case 'PARTIAL_OUTPUT':
-			return 'structured receipt reported partial output that could not settle this lane';
-		case 'CONTRACT_FAILURE':
-			return 'structured receipt reported contract-invalid output for this lane';
-		case 'RESOURCE_LIMIT':
-			return 'structured receipt reported the lane exhausted its resource budget';
-		case 'DEADLINE_EXCEEDED':
-			return 'structured receipt reported the lane exceeded its collection deadline';
-		case 'STALE_BINDING':
-			return 'structured receipt reported stale workflow binding for this lane';
-		case 'PARENT_CANCELLED':
-			return 'structured receipt reported parent-side cancellation before settlement';
-	}
-}
-
-function latestStructuredReceiptUnresolvedForBaseDimension(
-	directory: string,
-	state: PrWorkflowGateState,
-	revisionDigest: string,
-	dimension: PrReviewBaseDimensionId,
-): PrReviewLatestStructuredUnresolved | null {
-	let latest: PrReviewLatestStructuredUnresolved | null = null;
-	const reviewScope =
-		state.prReviewBaseSha && state.prHeadSha
-			? `complete PR diff ${state.prReviewBaseSha}...${state.prHeadSha}`
-			: undefined;
-	for (const batch of state.prReviewBaseDispatches ?? []) {
-		const records = findByBatchId(directory, batch.batchId, {
-			parentSessionId: state.sessionID,
-		});
-		for (const lane of batch.lanes) {
-			const ownedWorkflowLanes = lane.ownedWorkflowLanes?.length
-				? lane.ownedWorkflowLanes
-				: [lane.workflowLane];
-			if (!ownedWorkflowLanes.includes(dimension)) continue;
-			for (const record of records.filter(
-				(candidate) => candidate.laneId === lane.laneId,
-			)) {
-				const result = record.result;
-				if (!result) continue;
-				const structured = validateExactStructuredReceiptCoverage({
-					record,
-					result,
-					artifact: null,
-					expected: {
-						mode: 'swarm-pr-review:base',
-						workflowLane: lane.workflowLane,
-						ownedWorkflowLanes,
-						prHeadSha: state.prHeadSha ?? '',
-						gitHead: state.prHeadSha ?? '',
-						revisionDigest,
-						workflowInstanceId: state.workflowInstanceId,
-						workflowRevision: state.revision,
-						baseSha: state.prReviewBaseSha,
-						reviewScope,
-					},
-				});
-				if (structured.status !== 'accepted') continue;
-				const unresolved = structured.receipt.envelope.unresolved.find(
-					(entry) => entry.workflowLane === dimension,
-				);
-				if (!unresolved) continue;
-				const candidate = {
-					failureClass: failureClassFromStructuredUnresolvedReason(
-						unresolved.reason,
-					),
-					recordedAt: record.updatedAt,
-					batchId: batch.batchId,
-					laneId: lane.laneId,
-					safeDetail: safeDetailFromStructuredUnresolvedReason(
-						unresolved.reason,
-					),
-				};
-				if (
-					latest === null ||
-					candidate.recordedAt > latest.recordedAt ||
-					(candidate.recordedAt === latest.recordedAt &&
-						`${candidate.batchId}\0${candidate.laneId}`.localeCompare(
-							`${latest.batchId}\0${latest.laneId}`,
-						) > 0)
-				) {
-					latest = candidate;
-				}
-			}
-		}
-	}
-	return latest;
-}
+const TERMINAL_FAILED_DELEGATION_STATUSES =
+	CIRCUIT_TERMINAL_DELEGATION_STATUSES;
 
 /**
  * Fewest of these consolidated lane sets that together cover their own union.
@@ -6279,449 +5829,29 @@ function pruneWorkflowBatches(
 	};
 }
 
-const PR_REVIEW_COVERAGE_DISCLOSURE_MAX_BYTES = 4_096;
-
-function coverageDisclosureRelativePath(runId: string): string {
-	return path.join('pr-review', runId, 'coverage-disclosure.json');
-}
-
 /**
- * Derive the normalized terminal N-of-6 settlement (issue #2383).
- *
- * Pure over durable state: no mutation, no audit. Every dimension maps to
- * exactly one view — COVERED, a terminal unresolved record (FAILED /
- * CANCELLED / NOT_LAUNCHED), or a live (in-flight) dimension that blocks
- * settlement. Coverage success is revision-aware (a stale artifact never
- * counts on the current worktree), and a FAILED dimension carries the typed
- * terminal-failure evidence plus its contributing lane/batch identity.
+ * Issue #2385: the coverage-disclosure admission/settlement state machine now
+ * lives in `src/pr-review/completion.ts`, which the gate feeds through the
+ * bound completion-helper seam (bound at module init below). The gate
+ * re-exposes the two state-returning entry points with their original
+ * full-state signatures: every state object the boundary returns was read and
+ * written through this gate's own bound readers and codec, so the widening
+ * cast is representation-preserving.
  */
-function derivePrReviewDimensionSettlement(
-	directory: string,
-	state: PrWorkflowGateState,
-	revisionDigest: string,
-): PrReviewTerminalCoverageSettlement & {
-	liveDimensions: PrReviewBaseDimensionId[];
-} {
-	const attempts = summarizePrReviewBaseDimensionAttempts(
-		directory,
-		state,
-		revisionDigest,
-	);
-	const cancellations: Partial<
-		Record<PrReviewBaseDimensionId, PrReviewDimensionCancellationRecord>
-	> = state.prReviewDimensionCancellations ?? {};
-	// Dimensions for which some declared lane actually dispatched (has
-	// delegation records). A declared-but-never-dispatched lane leaves its
-	// dimensions NOT_LAUNCHED, mirroring `summarizePrReviewBaseDimension-
-	// Attempts`'s "no record at all: never dispatched" reading.
-	const dispatched = new Set<string>();
-	for (const batch of state.prReviewBaseDispatches ?? []) {
-		const records = findByBatchId(directory, batch.batchId, {
-			parentSessionId: state.sessionID,
-		});
-		for (const lane of batch.lanes) {
-			if (!records.some((record) => record.laneId === lane.laneId)) continue;
-			for (const dimension of lane.ownedWorkflowLanes?.length
-				? lane.ownedWorkflowLanes
-				: [lane.workflowLane]) {
-				dispatched.add(dimension);
-			}
-		}
-	}
-	const coveredDimensions: PrReviewBaseDimensionId[] = [];
-	const unresolvedDimensions: PrReviewUnresolvedDimensionRecord[] = [];
-	const liveDimensions: PrReviewBaseDimensionId[] = [];
-	for (const dimension of PR_REVIEW_BASE_DIMENSION_IDS) {
-		if (attempts.successful.has(dimension)) {
-			coveredDimensions.push(dimension);
-			continue;
-		}
-		if (attempts.inFlight.has(dimension)) {
-			// A live lane is not terminal: settlement consumers must refuse
-			// completion while any launched lane can still produce a result
-			// creditable to the active generation.
-			liveDimensions.push(dimension);
-			continue;
-		}
-		const cancellation = cancellations[dimension];
-		if (cancellation) {
-			unresolvedDimensions.push({
-				dimension,
-				terminalState: 'CANCELLED',
-				reasonKind: 'cancelled',
-				safeDetail: `explicitly cancelled by the audited armed-recovery operation at ${cancellation.cancelledAt}`,
-			});
-			continue;
-		}
-		const latestFailure = latestTypedFailureForBaseDimension(
-			directory,
-			state,
-			dimension,
-		);
-		const latestStructuredUnresolved =
-			latestStructuredReceiptUnresolvedForBaseDimension(
-				directory,
-				state,
-				revisionDigest,
-				dimension,
-			);
-		if (
-			attempts.terminallyFailed.has(dimension) ||
-			latestStructuredUnresolved
-		) {
-			const unresolvedFailure =
-				latestStructuredUnresolved &&
-				(!latestFailure ||
-					latestStructuredUnresolved.recordedAt >= latestFailure.recordedAt)
-					? latestStructuredUnresolved
-					: latestFailure;
-			unresolvedDimensions.push({
-				dimension,
-				terminalState: 'FAILED',
-				reasonKind: 'lane_failure',
-				failureClass: unresolvedFailure?.failureClass,
-				terminalEventId:
-					unresolvedFailure && 'terminalEventId' in unresolvedFailure
-						? unresolvedFailure.terminalEventId
-						: undefined,
-				batchId: unresolvedFailure?.batchId,
-				laneId: unresolvedFailure?.laneId,
-				safeDetail:
-					unresolvedFailure && 'safeDetail' in unresolvedFailure
-						? unresolvedFailure.safeDetail
-						: unresolvedFailure
-							? PR_REVIEW_FAILURE_CLASS_SAFE_DETAILS[
-									unresolvedFailure.failureClass
-								]
-							: 'lane terminated without a typed failure class',
-			});
-			continue;
-		}
-		if (dispatched.has(dimension)) {
-			// Dispatched but neither successful, live, terminally failed, nor
-			// cancelled: treat as NOT_LAUNCHED evidence-wise is a lie; surface
-			// it as unresolved-not-launched only when nothing was ever
-			// dispatched. A dispatched-yet-unresolved dimension blocks honest
-			// settlement instead of inventing a terminal state.
-			liveDimensions.push(dimension);
-			continue;
-		}
-		unresolvedDimensions.push({
-			dimension,
-			terminalState: 'NOT_LAUNCHED',
-			reasonKind: 'not_launched',
-			safeDetail: 'no lane for this dimension was ever dispatched',
-		});
-	}
-	const kind: PrReviewTerminalCoverageKind =
-		coveredDimensions.length === PR_REVIEW_BASE_DIMENSION_IDS.length
-			? 'COMPLETE'
-			: coveredDimensions.length > 0
-				? 'PARTIAL'
-				: 'NO_COVERAGE';
-	return {
-		kind,
-		coveredDimensions,
-		unresolvedDimensions,
-		liveDimensions,
-		allLaunchedTerminal: liveDimensions.length === 0,
-	};
-}
-
-async function readAndVerifyCoverageDisclosure(
-	directory: string,
-	state: PrWorkflowGateState,
-): Promise<PrReviewPartialBaseCoverageRecordV2 | null> {
-	const record = state.prReviewPartialBaseCoverage;
-	const relativePath = state.prReviewCoverageDisclosurePath;
-	const expectedDigest = state.prReviewCoverageDisclosureDigest;
-	if (!record && !relativePath && !expectedDigest) return null;
-	if (!record || !relativePath || !expectedDigest) {
-		throw new Error(
-			'BLOCKED: PR_REVIEW partial base coverage disclosure state is incomplete',
-		);
-	}
-	const expectedPath = coverageDisclosureRelativePath(record.runId)
-		.split(path.sep)
-		.join('/');
-	if (relativePath !== expectedPath) {
-		throw new Error(
-			'BLOCKED: PR_REVIEW partial base coverage disclosure path does not match its bound run',
-		);
-	}
-	const raw = await readBoundedSwarmRegularFile(
-		directory,
-		relativePath,
-		PR_REVIEW_COVERAGE_DISCLOSURE_MAX_BYTES,
-		'PR_REVIEW partial base coverage disclosure',
-	);
-	const digest = createHash('sha256').update(raw, 'utf8').digest('hex');
-	if (digest !== expectedDigest) {
-		throw new Error(
-			'BLOCKED: PR_REVIEW partial base coverage disclosure digest does not match durable state',
-		);
-	}
-	let decoded: unknown;
-	try {
-		decoded = JSON.parse(raw);
-	} catch {
-		throw new Error(
-			'BLOCKED: PR_REVIEW partial base coverage disclosure is invalid JSON',
-		);
-	}
-	const parsed = PrReviewPartialBaseCoverageRecordSchema.safeParse(decoded);
-	if (
-		!parsed.success ||
-		JSON.stringify(parsed.data) !== JSON.stringify(record)
-	) {
-		throw new Error(
-			'BLOCKED: PR_REVIEW partial base coverage disclosure does not match durable state',
-		);
-	}
-	// Issue #2383 single read boundary: legacy singular disclosures normalize
-	// to the v2 view in memory; the durable file and its digest are never
-	// rewritten.
-	return normalizePrReviewPartialBaseCoverageRecord(parsed.data);
-}
-
 export async function admitPrReviewPartialBaseCoverage(
 	directory: string,
 	sessionID: string,
 	runId: string,
 	unresolvedDimensions: readonly PrReviewBaseDimensionId[],
 ): Promise<PrWorkflowGateState> {
-	return withSessionStateMutation(directory, sessionID.trim(), async () => {
-		const state = await readPrWorkflowGateStateFromDisk(
-			directory,
-			sessionID.trim(),
-		);
-		if (!state || state.mode !== 'PR_REVIEW' || !state.prHeadSha) {
-			throw new Error(
-				'BLOCKED: partial base coverage requires an active head-bound PR_REVIEW workflow',
-			);
-		}
-		const normalizedRunId = PrReviewRunIdSchema.parse(runId);
-		if (
-			state.prReviewReservedRunId &&
-			state.prReviewReservedRunId !== normalizedRunId
-		) {
-			throw new Error(
-				'BLOCKED: partial base coverage run does not match the reserved PR-review run',
-			);
-		}
-		const declared = [...new Set(unresolvedDimensions)];
-		if (declared.length !== unresolvedDimensions.length) {
-			throw new Error(
-				'BLOCKED: partial base coverage unresolved_dimensions contains duplicates',
-			);
-		}
-		if (declared.length === 0) {
-			throw new Error(
-				'BLOCKED: partial base coverage requires at least one unresolved dimension; a fully covered run needs no disclosure',
-			);
-		}
-		const ctx = await createPrReviewGateContext(directory, state);
-		const settlement = derivePrReviewDimensionSettlement(
-			directory,
-			state,
-			ctx.revisionDigest,
-		);
-		if (settlement.liveDimensions.length > 0) {
-			const liveDeclared = settlement.liveDimensions.filter((dimension) =>
-				declared.includes(dimension),
-			);
-			if (liveDeclared.length > 0) {
-				throw new Error(
-					`BLOCKED: partial base coverage dimensions still have in-flight lanes: ${liveDeclared.join(', ')}. Completion is allowed only once every launched lane is terminal or explicitly cancelled.`,
-				);
-			}
-		}
-		const derivedIds = settlement.unresolvedDimensions.map(
-			(entry) => entry.dimension,
-		);
-		const declaredSet = new Set(declared);
-		const derivedSet = new Set(derivedIds);
-		const missingFromDeclaration = derivedIds.filter(
-			(dimension) => !declaredSet.has(dimension),
-		);
-		const unknownInDeclaration = declared.filter(
-			(dimension) => !derivedSet.has(dimension),
-		);
-		if (
-			missingFromDeclaration.length > 0 ||
-			unknownInDeclaration.length > 0 ||
-			derivedIds.length !== declared.length
-		) {
-			throw new Error(
-				`BLOCKED: partial base coverage declaration must exactly match the derived terminal settlement; declared: [${declared.join(', ')}]` +
-					`; derived unresolved: [${derivedIds.join(', ') || '(none)'}]` +
-					(unknownInDeclaration.length > 0
-						? `; declared-but-not-unresolved: [${unknownInDeclaration.join(', ')}]`
-						: '') +
-					(settlement.liveDimensions.length > 0
-						? `; still-live (not settleable): [${settlement.liveDimensions.join(', ')}]`
-						: ''),
-			);
-		}
-		for (const entry of settlement.unresolvedDimensions) {
-			if (entry.terminalState === 'FAILED' && !entry.failureClass) {
-				throw new Error(
-					`BLOCKED: partial base coverage dimension "${entry.dimension}" lacks a typed terminal failure`,
-				);
-			}
-			if (
-				entry.terminalState === 'CANCELLED' &&
-				!state.prReviewDimensionCancellations?.[entry.dimension]
-			) {
-				throw new Error(
-					`BLOCKED: partial base coverage dimension "${entry.dimension}" declared CANCELLED without a persisted cancellation record`,
-				);
-			}
-		}
-		const existing = await readAndVerifyCoverageDisclosure(directory, state);
-		if (existing) {
-			const sameSettlement =
-				existing.runId === normalizedRunId &&
-				existing.prHeadSha === state.prHeadSha &&
-				existing.revisionDigest === ctx.revisionDigest &&
-				JSON.stringify(existing.unresolvedDimensions) ===
-					JSON.stringify(settlement.unresolvedDimensions);
-			if (sameSettlement) {
-				return state;
-			}
-			throw new Error(
-				'BLOCKED: partial base coverage admission differs from the immutable existing disclosure',
-			);
-		}
-		const record: PrReviewPartialBaseCoverageRecordV2 = {
-			schemaVersion: 2,
-			runId: normalizedRunId,
-			prHeadSha: state.prHeadSha,
-			revisionDigest: ctx.revisionDigest,
-			unresolvedDimensions: settlement.unresolvedDimensions,
-			admittedAt: isoNow(),
-		};
-		const relativePath = coverageDisclosureRelativePath(normalizedRunId)
-			.split(path.sep)
-			.join('/');
-		const absolutePath = validateSwarmPath(directory, relativePath);
-		const raw = JSON.stringify(record, null, 2);
-		if (
-			Buffer.byteLength(raw, 'utf8') > PR_REVIEW_COVERAGE_DISCLOSURE_MAX_BYTES
-		) {
-			throw new Error(
-				'BLOCKED: partial base coverage disclosure exceeds its write bound',
-			);
-		}
-		let disclosureWasMissing = false;
-		const removeNewDisclosure = async (): Promise<void> => {
-			if (!disclosureWasMissing) return;
-			try {
-				if ((await fsp.readFile(absolutePath, 'utf8')) === raw) {
-					await fsp.rm(absolutePath, { force: true });
-				}
-			} catch {
-				// Preserve the original admission error; cleanup is best effort.
-			}
-		};
-		try {
-			const persisted = readFileSync(absolutePath, 'utf8');
-			if (persisted !== raw) {
-				throw new Error(
-					'BLOCKED: partial base coverage disclosure path already contains different content',
-				);
-			}
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-				disclosureWasMissing = true;
-				try {
-					await writeAtomicJson(directory, absolutePath, record);
-				} catch (writeError) {
-					await removeNewDisclosure();
-					throw writeError;
-				}
-			} else {
-				throw error;
-			}
-		}
-		const digest = createHash('sha256').update(raw, 'utf8').digest('hex');
-		try {
-			return await writeStateWhileLocked(directory, {
-				...state,
-				updatedAt: isoNow(),
-				prReviewPartialBaseCoverage: record,
-				prReviewCoverageDisclosurePath: relativePath,
-				prReviewCoverageDisclosureDigest: digest,
-			});
-		} catch (error) {
-			await removeNewDisclosure();
-			throw error;
-		}
-	});
+	return (await admitPrReviewPartialBaseCoverageFromCompletion(
+		directory,
+		sessionID,
+		runId,
+		unresolvedDimensions,
+	)) as PrWorkflowGateState;
 }
 
-/**
- * Undo a newly admitted partial-base disclosure when the findings checkpoint
- * cannot be completed. The compare-and-clear checks keep a stale writer from
- * deleting a disclosure that another writer has already committed.
- */
-export async function rollbackPrReviewPartialBaseCoverageAdmission(
-	directory: string,
-	sessionID: string,
-	options: {
-		runId: string;
-		boundary: 'post_explorer' | 'post_reviewer' | 'post_critic';
-		relativePath: string;
-		digest: string;
-	},
-): Promise<boolean> {
-	return withSessionStateMutation(directory, sessionID.trim(), async () => {
-		const state = await readPrWorkflowGateStateFromDisk(
-			directory,
-			sessionID.trim(),
-		);
-		const record = state?.prReviewPartialBaseCoverage;
-		if (!state || !record || record.runId !== options.runId) return false;
-		if ((state.prReviewArtifactBoundaries ?? []).includes(options.boundary)) {
-			return false;
-		}
-		if (
-			state.prReviewCoverageDisclosurePath !== options.relativePath ||
-			state.prReviewCoverageDisclosureDigest !== options.digest
-		) {
-			return false;
-		}
-		const absolutePath = validateSwarmPath(directory, options.relativePath);
-		try {
-			const raw = await fsp.readFile(absolutePath, 'utf8');
-			const digest = createHash('sha256').update(raw, 'utf8').digest('hex');
-			if (digest !== options.digest) return false;
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-		}
-		await fsp.rm(absolutePath, { force: true });
-		await writeStateWhileLocked(directory, {
-			...state,
-			updatedAt: isoNow(),
-			prReviewPartialBaseCoverage: undefined,
-			prReviewCoverageDisclosurePath: undefined,
-			prReviewCoverageDisclosureDigest: undefined,
-		});
-		return true;
-	});
-}
-
-/**
- * Validate durable terminal N-of-6 coverage evidence (issue #2383).
- *
- * Returns the settlement: COMPLETE when all six dimensions are covered, or
- * PARTIAL / NO_COVERAGE when an admitted, still-accurate disclosure exactly
- * matches the currently derived terminal settlement. Throws while any
- * unresolved dimension still has a live lane, or when the disclosure has been
- * invalidated by later evidence (e.g. a late success landing on the same
- * revision) — the disclosure is immutable, so such a run must re-settle or
- * restart rather than silently re-crediting.
- */
 export async function assertPrReviewBaseCoverageSettled(
 	directory: string,
 	sessionID: string,
@@ -6732,54 +5862,15 @@ export async function assertPrReviewBaseCoverageSettled(
 		liveDimensions: PrReviewBaseDimensionId[];
 	};
 }> {
-	const state = await requireBoundState(directory, sessionID, 'PR_REVIEW');
-	const batches = state.prReviewBaseDispatches ?? [];
-	if (batches.length === 0) {
-		throw new Error('BLOCKED: PR_REVIEW requires at least one base batch');
-	}
-	const ctx =
-		gateContext ?? (await createPrReviewGateContext(directory, state));
-	const settlement = derivePrReviewDimensionSettlement(
+	const settled = await assertPrReviewBaseCoverageSettledFromCompletion(
 		directory,
-		state,
-		ctx.revisionDigest,
+		sessionID,
+		gateContext,
 	);
-	if (settlement.kind === 'COMPLETE') {
-		return { state, settlement };
-	}
-	if (settlement.liveDimensions.length > 0) {
-		throw new Error(
-			`BLOCKED: PR_REVIEW base coverage is incomplete and still has live lanes for: ${settlement.liveDimensions.join(', ')}. Completion is allowed only once every launched lane is terminal or explicitly cancelled.`,
-		);
-	}
-	const disclosure = await readAndVerifyCoverageDisclosure(directory, state);
-	const disclosureIds = (disclosure?.unresolvedDimensions ?? []).map(
-		(entry) => entry.dimension,
-	);
-	const derivedIds = settlement.unresolvedDimensions.map(
-		(entry) => entry.dimension,
-	);
-	if (
-		disclosure &&
-		JSON.stringify(disclosureIds) === JSON.stringify(derivedIds) &&
-		JSON.stringify(disclosure?.unresolvedDimensions) ===
-			JSON.stringify(settlement.unresolvedDimensions) &&
-		disclosure.prHeadSha === state.prHeadSha &&
-		disclosure.revisionDigest === ctx.revisionDigest &&
-		disclosure.runId ===
-			(state.prReviewArtifactRunId ?? state.prReviewReservedRunId)
-	) {
-		return { state, settlement };
-	}
-	const reason =
-		disclosure === null
-			? 'no terminal settlement disclosure is admitted; settle via write_pr_review_artifact partial_base_coverage.unresolved_dimensions'
-			: disclosureIds.join(',') !== derivedIds.join(',')
-				? `the admitted disclosure [${disclosureIds.join(', ')}] no longer matches the derived terminal settlement [${derivedIds.join(', ')}] — later evidence invalidated it; the disclosure is immutable, so re-run the affected dimensions or restart the review`
-				: 'the admitted disclosure no longer matches the derived per-dimension terminal evidence';
-	throw new Error(
-		`BLOCKED: PR_REVIEW base coverage is ${settlement.kind} (${settlement.coveredDimensions.length}/${PR_REVIEW_BASE_DIMENSION_IDS.length} dimensions covered; unresolved: ${derivedIds.join(', ') || '(none)'}); ${reason}`,
-	);
+	return {
+		state: settled.state as PrWorkflowGateState,
+		settlement: settled.settlement,
+	};
 }
 
 /** Persist a council/reviewer/critic validation batch before launch. */
@@ -7382,7 +6473,7 @@ function prFeedbackBatchCoveredItems(
 	for (const lane of batch.ownership) {
 		if (!successfulLaneIds.has(lane.laneId)) continue;
 		if (
-			!feedbackArtifactCoversItems(
+			!legacyFeedbackArtifactCoversItems(
 				directory,
 				state,
 				batch.batchId,
@@ -10530,18 +9621,6 @@ async function readBoundedSwarmRegularFile(
 	}
 }
 
-function sameBigIntFileIdentity(
-	left: Pick<BigIntStats, 'dev' | 'ino'>,
-	right: Pick<BigIntStats, 'dev' | 'ino'>,
-): boolean {
-	return left.dev === right.dev && left.ino === right.ino;
-}
-
-function normalizeComparableFsPath(value: string): string {
-	const normalized = path.normalize(path.resolve(value));
-	return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
-}
-
 function prReviewRunReservationRelativePath(runId: string): string {
 	return `pr-review/${runId}/run-reservation.json`;
 }
@@ -11839,52 +10918,6 @@ export async function enforcePrWorkflowToolBefore(
 
 /** Validate the terminal PR workflow contract before removing its durable gate. */
 /**
- * Read-only terminal-coverage projection for the completion report surface
- * (issue #2383). Pure derivation over the CURRENT state; returns null when no
- * active PR_REVIEW gate exists. The completion tool reads this BEFORE the
- * terminal clear so the response carries the truthful settlement summary.
- */
-export async function readPrReviewTerminalCoverageForReport(
-	directory: string,
-	sessionID: string,
-): Promise<{
-	kind: PrReviewTerminalCoverageKind;
-	coveredDimensions: PrReviewBaseDimensionId[];
-	unresolvedDimensions: Array<{
-		dimension: PrReviewBaseDimensionId;
-		terminal_state: PrReviewUnresolvedDimensionRecord['terminalState'];
-		reason_kind: PrReviewUnresolvedDimensionRecord['reasonKind'];
-		failure_class?: BackgroundDelegationWorkflowLaneFailureClass;
-	}>;
-	liveDimensions: PrReviewBaseDimensionId[];
-	allowedVerdicts: readonly PrReviewReportVerdict[];
-} | null> {
-	const state = await readPrWorkflowGateStateFromDisk(
-		directory,
-		normalizeSessionID(sessionID),
-	);
-	if (!state || state.mode !== 'PR_REVIEW' || !state.prHeadSha) return null;
-	const ctx = await createPrReviewGateContext(directory, state);
-	const settlement = derivePrReviewDimensionSettlement(
-		directory,
-		state,
-		ctx.revisionDigest,
-	);
-	return {
-		kind: settlement.kind,
-		coveredDimensions: settlement.coveredDimensions,
-		unresolvedDimensions: settlement.unresolvedDimensions.map((entry) => ({
-			dimension: entry.dimension,
-			terminal_state: entry.terminalState,
-			reason_kind: entry.reasonKind,
-			failure_class: entry.failureClass,
-		})),
-		liveDimensions: settlement.liveDimensions,
-		allowedVerdicts: allowedPrReviewReportVerdicts(settlement.kind),
-	};
-}
-
-/**
  * Read-only identity binding for reviewer re-entry authorization (issue
  * #2383). Returns the exact active-session PR_REVIEW identity a one-use
  * authorization must be issued against and re-verified under at consume time:
@@ -11925,6 +10958,12 @@ export async function readPrReviewReentryBindingContext(
 			: {}),
 	};
 }
+
+// Issue #2385: the reentry authorization boundary (src/pr-review/
+// authorization.ts) reads the CURRENT workflow binding through this gate
+// reader — bound once at module init so the boundary never imports the gate
+// back. Function declarations hoist, so the reference is available here.
+bindPrReviewReentryBindingReader(readPrReviewReentryBindingContext);
 
 export async function completePrWorkflow(
 	directory: string,
@@ -12134,7 +11173,7 @@ export async function completePrWorkflow(
 						'BLOCKED: PR_FEEDBACK zero-descendant completion requires a clean index and working tree',
 					);
 				}
-				const classifications = readSettledFeedbackClassifications(
+				const classifications = readLegacySettledFeedbackClassifications(
 					directory,
 					readyState,
 				);
@@ -12410,26 +11449,15 @@ export const _test_exports = {
 	extractCandidateIds,
 	parseCanonicalCandidateRows,
 	resolvePrReviewRowFamily,
-	// Exposed to pin the verdict-row pipe tolerance's fidelity boundary: the
-	// capped merge is content-preserving only when the extra pipes sit in the
-	// trailing (free-text) field.
-	pipeFieldsCapped,
 	boundPublicationDiagnostic,
-	// Exposed so tests exercise the production indexing path and pin the
-	// observable classification of legacy overflow recovery.
-	indexVerdictRows,
-	// Exposed so the digest-stability test can hash the same canonical field
-	// view the critic-claim binding hashes.
-	reviewerVerdictRowDigest,
 	workflowGateStateRelativePath,
 	workflowGateStateLockRelativePath,
 	workflowCheckoutMutationLockRelativePath,
 	withPrWorkflowCheckoutMutationLock,
 	resetTrackedStateCache: () => {
-		trackedStatesByProjectSession.clear();
-		pendingStateMutationsByProjectSession.clear();
-		pendingCheckoutMutationsByProject.clear();
-		completedCheckoutLockOwners.clear();
+		// Issue #2385: the four persistence caches/queues now live in
+		// src/pr-review/persistence.ts; reset them through its API.
+		resetPrReviewPersistenceCaches();
 		// Issue #2382 review (PRR-005): the malformed-circuit diagnostic dedup is
 		// process-level by design in production, but a shared test process must
 		// not carry dedup state between suites — otherwise suite order changes
@@ -12447,8 +11475,9 @@ export const _test_exports = {
 		_test_exports.beforeSafeDirectoryCreate = undefined;
 		_test_exports.beforeAtomicTempWrite = undefined;
 		_test_exports.beforeAtomicRename = undefined;
-		_test_exports.openCheckoutLock = openCheckoutLockFile;
-		_test_exports.removeCheckoutLock = removeCheckoutLockFile;
+		_test_exports.openCheckoutLock = defaultPersistenceHooks.openCheckoutLock;
+		_test_exports.removeCheckoutLock =
+			defaultPersistenceHooks.removeCheckoutLock;
 		_test_exports.checkoutMutationActionTimeoutMs =
 			CHECKOUT_MUTATION_ACTION_TIMEOUT_MS;
 		_test_exports.classifyPrWorkflowGitStateAsync = classifyPrWorkflowGitState;
@@ -12488,8 +11517,8 @@ export const _test_exports = {
 		| undefined,
 	beforeAtomicTempWrite: undefined as (() => Promise<void>) | undefined,
 	beforeAtomicRename: undefined as (() => Promise<void>) | undefined,
-	openCheckoutLock: openCheckoutLockFile,
-	removeCheckoutLock: removeCheckoutLockFile,
+	openCheckoutLock: defaultPersistenceHooks.openCheckoutLock,
+	removeCheckoutLock: defaultPersistenceHooks.removeCheckoutLock,
 	checkoutMutationActionTimeoutMs: CHECKOUT_MUTATION_ACTION_TIMEOUT_MS,
 	classifyPrWorkflowGitStateAsync: classifyPrWorkflowGitState,
 	/**
@@ -12594,12 +11623,6 @@ export const _test_exports = {
 	resolveRemoteRefsContainingHeadAsync,
 	parseCriticVerdict,
 	/**
-	 * Exact production verdict-row analysis and item composition parsers. Exposed
-	 * so the assignment-boundary regression can prove both paths remain linear.
-	 */
-	analyzePrReviewVerdictRowContract,
-	parseLaneItemVerdicts,
-	/**
 	 * Read-only view of the item-keyed composition for one session, including
 	 * the diagnostics that settlement only logs (abandoned declared lanes,
 	 * batches skipped for inventory incoherence). Production callers reach the
@@ -12661,7 +11684,7 @@ export const _test_exports = {
 		const ctx = await createPrReviewGateContext(directory, state);
 		return derivePrReviewCandidateInventory(directory, state, ctx);
 	},
-	isProcessAlive,
+	isProcessAlive: defaultPersistenceHooks.isProcessAlive,
 	// Exposed for the `-c` config-injection regression test. The publication
 	// path that calls this needs a fully-armed ready-to-publish state, so the
 	// classifier is not otherwise reachable from a focused unit test.
@@ -12669,6 +11692,58 @@ export const _test_exports = {
 	rename: fsp.rename,
 	nowMs: () => Date.now(),
 };
+
+// Issue #2385: the transcript-conversion test surface (the verdict-row pipe
+// tolerance's fidelity boundary, the production indexing path for legacy
+// overflow recovery, the digest-stability view the critic-claim binding hashes,
+// and the exact verdict-row analysis / item composition parsers used by the
+// assignment-boundary regression) now lives in
+// src/pr-review/legacy-transcript-adapter.ts. The guardrail scanner
+// (src/pr-review/guardrails.ts) allows those identifiers only in that module,
+// so the historical `_test_exports` properties are re-exposed here by spreading
+// the adapter's surface — same property names, same bindings, no gate-side
+// conversion identifiers.
+Object.assign(_test_exports, legacyTranscriptAdapterTestSurface);
+
+// Issue #2385: bind the persistence boundary to this gate's seams and full
+// state codec. Properties are read at CALL time through the bound reference,
+// so test-time mutation of `_test_exports.<prop>` and `resetTrackedStateCache`
+// remain fully visible inside src/pr-review/persistence.ts.
+bindPrReviewPersistenceHooks(_test_exports);
+bindPrReviewStateCodec<PrWorkflowGateState>({
+	safeParse: (data) => PrWorkflowGateStateSchema.safeParse(data),
+	parse: (data) => PrWorkflowGateStateSchema.parse(data),
+});
+
+// Issue #2385: bind the completion boundary's gate-owned derivation helpers
+// (src/pr-review/completion.ts reads them through this binding and never
+// imports the gate back). Function declarations hoist, so the references are
+// available here.
+bindPrReviewCompletionHelpers({
+	createPrReviewGateContext,
+	requireBoundState,
+	readPrWorkflowGateStateFromDisk,
+	readBoundedSwarmRegularFile,
+	successfulObligationsFromExactBatch,
+	recordsPassingBatchIntegrity,
+	validatePrReviewDiscoveryLaneCompletion,
+	validateExactStructuredReceiptCoverage,
+});
+
+// Issue #2385: bind the legacy transcript adapter's gate-owned composition
+// helpers (src/pr-review/legacy-transcript-adapter.ts reads them through this
+// binding and never imports the gate back). Function declarations hoist, so
+// the references are available here.
+bindPrReviewTranscriptAdapterHelpers({
+	derivePrReviewCandidateInventory,
+	derivePrReviewCriticInventory,
+	authoritativeReviewerClaims,
+	reviewerSubagentSessionIds,
+	prReviewPhaseWindow,
+	batchMayContributeClaims,
+	recordsPassingBatchIntegrity,
+	loadArtifactPassingLaneIntegrity,
+});
 
 /**
  * Issue #1931: surface the activation path so callers don't go hunting for a
@@ -14564,49 +13639,12 @@ function derivePrReviewCandidateSeverities(
 	return ctx.candidateSeverities;
 }
 
-type PrReviewComposablePhase = 'reviewer' | 'critic';
+// Issue #2385: `PrReviewComposablePhase`, `PrReviewItemClaim`,
+// `PrReviewPhaseComposition`, and `appendCompositionDiagnostic` moved to
+// src/pr-review/legacy-transcript-adapter.ts (imported above).
 
-/** One item's admitted verdict plus the lane provenance that admitted it. */
-interface PrReviewItemClaim {
-	batchId: string;
-	laneId: string;
-	workflowLane: string;
-	/** Reviewer classification, or critic status. */
-	classification: string;
-	severity: string;
-	/**
-	 * Typed risk metadata from the reviewer row (issue #2383). Reviewer claims
-	 * only; absent on critic claims, which never re-assess routing risk.
-	 */
-	riskImpact?: PrReviewRiskImpact;
-	riskTags?: PrReviewRiskTag[];
-	/**
-	 * sha256 of the full canonical `[REVIEWED]` row this claim was parsed from.
-	 * Reviewer claims only — this is what a critic batch binds to per item.
-	 */
-	rowDigest?: string;
-}
-
-interface PrReviewPhaseComposition {
-	/** Item id -> winning claim. Most recent successful lane per item wins. */
-	claims: Map<string, PrReviewItemClaim>;
-	requiredInventory: string[];
-	unclaimed: string[];
-	contributingBatchIds: string[];
-	diagnostics: string[];
-}
-
-const MAX_COMPOSITION_DIAGNOSTICS = 16;
 /** Item ids named in one BLOCKED message before it degrades to a count. */
 const MAX_UNCLAIMED_ITEMS_IN_MESSAGE = 50;
-
-function appendCompositionDiagnostic(
-	diagnostics: string[],
-	message: string,
-): void {
-	if (diagnostics.length >= MAX_COMPOSITION_DIAGNOSTICS) return;
-	diagnostics.push(message.slice(0, MAX_BASE_COVERAGE_DIAGNOSTIC_CHARS));
-}
 
 /**
  * The batches a phase composes over.
@@ -14718,258 +13756,6 @@ function batchMayContributeClaims(
 		successful.size === batch.lanes.length &&
 		batch.lanes.every((lane) => successful.has(lane.workflowLane))
 	);
-}
-
-/**
- * The single item-keyed computation behind reviewer/critic settlement AND every
- * reviewer/critic verdict derivation.
- *
- * Settlement *is* `unclaimed.length === 0` over this map, so settlement can never
- * pass while derivation returns nothing — the failure mode that would let
- * CONFIRMED CRITICAL/HIGH findings ship without critic coverage.
- *
- * Scanning the window reverse-chronologically and claiming only *unclaimed*
- * items makes first-write-wins equal "most recent successful lane per item wins",
- * which is the explicit conflict rule for the case where two batches both carry a
- * parseable verdict for one item. Memoized per gate context so two passes never
- * hold two different verdict maps.
- *
- * The scan stops as soon as every required item is claimed (issue #1968 FIX 5).
- * `readLaneOutput` is a synchronous `readFileSync` per lane per batch, and the
- * window can hold up to `MAX_WORKFLOW_BATCHES` batches, so scanning past a
- * complete claim set is unbounded blocking I/O for no verdict change — first
- * write wins, and every required item has already been written.
- *
- * `exhaustive` turns the exit off for the batch GC, which prunes a reviewer
- * batch on "it contributed no claim". Being precise about what that buys: with
- * *this* exit condition the two scans yield the same `contributingBatchIds`,
- * because the exit fires only when every required item is claimed and a batch
- * reached after that point could never have claimed anything anyway. The flag is
- * therefore not fixing a live divergence — it decouples a durable-state decision
- * from a performance heuristic, so that weakening the exit condition later
- * cannot silently turn "not examined" into "proven inert". It also keeps the
- * whole-window abandoned-lane diagnostics intact for the GC's scan.
- */
-function composePrReviewPhaseVerdicts(
-	directory: string,
-	state: PrWorkflowGateState,
-	phase: PrReviewComposablePhase,
-	ctx: PrReviewGateContext,
-	exhaustive = false,
-): PrReviewPhaseComposition {
-	const memoized = phase === 'reviewer' ? ctx.reviewer : ctx.critic;
-	if (memoized && !exhaustive) return memoized;
-
-	const requiredInventory =
-		phase === 'reviewer'
-			? derivePrReviewCandidateInventory(directory, state, ctx)
-			: derivePrReviewCriticInventory(directory, state, ctx);
-	const reviewerClaims =
-		phase === 'critic'
-			? authoritativeReviewerClaims(directory, state, ctx)
-			: undefined;
-	const forbiddenSubagentSessionIds =
-		phase === 'critic'
-			? reviewerSubagentSessionIds(directory, state)
-			: new Set<string>();
-	const expectedMode = `swarm-pr-review:${phase}`;
-	const window = prReviewPhaseWindow(state, phase);
-	const requiredSet = new Set(requiredInventory);
-	const claims = new Map<string, PrReviewItemClaim>();
-	const contributingBatchIds: string[] = [];
-	const diagnostics: string[] = [];
-	const satisfiedObligations = new Set<string>();
-	const scannedBatches: PrReviewValidationBatchRecord[] = [];
-
-	for (const batch of [...window].reverse()) {
-		scannedBatches.push(batch);
-		if (
-			!batchMayContributeClaims(
-				directory,
-				state,
-				batch,
-				phase,
-				requiredInventory,
-				forbiddenSubagentSessionIds,
-				reviewerClaims,
-				ctx,
-			)
-		) {
-			appendCompositionDiagnostic(
-				diagnostics,
-				`${phase} batch "${batch.batchId}" was validated against a different inventory or is not wholly successful legacy state; it contributes no claims`,
-			);
-			continue;
-		}
-		const coherence = state.prReviewBatchCoherence?.[batch.batchId];
-		let contributed = false;
-		for (const qualified of recordsPassingBatchIntegrity(
-			directory,
-			state,
-			batch.batchId,
-			batch.lanes,
-			expectedMode,
-			batch.validatedAt,
-			true,
-			forbiddenSubagentSessionIds,
-		)) {
-			const artifact = loadArtifactPassingLaneIntegrity(
-				directory,
-				state,
-				qualified.record,
-				expectedMode,
-				qualified.expectedWorkflowLane,
-				ctx.revisionDigest,
-			);
-			if (!artifact) continue;
-			const declaredItems = qualified.expectedLane.reviewItemIds ?? [];
-			const { markerRows, parsed } = parsePrReviewVerdictRows(
-				artifact.text,
-				declaredItems,
-				phase,
-				reviewerClaims,
-			);
-			if (!verdictRowsContainOnlyAssignedIds(markerRows, declaredItems)) {
-				appendCompositionDiagnostic(
-					diagnostics,
-					`${phase} lane "${qualified.expectedLane.laneId}" contains an unassigned verdict row; it contributes no claims`,
-				);
-				continue;
-			}
-			if (declaredItems.length > 0 && parsed.size === declaredItems.length) {
-				satisfiedObligations.add(qualified.expectedWorkflowLane);
-			}
-			for (const [itemId, verdict] of parsed) {
-				if (!requiredSet.has(itemId) || claims.has(itemId)) continue;
-				// Defense in depth: the persisted inventory this batch was
-				// validated against must still list the item. Declaration time
-				// already makes the lane item set equal to it, so a mismatch here
-				// means the persisted state was mutated out of band.
-				if (coherence && !coherence.validatedInventory.includes(itemId)) {
-					continue;
-				}
-				if (
-					phase === 'critic' &&
-					coherence &&
-					!criticClaimIsBoundToCurrentReviewerRow(
-						coherence,
-						itemId,
-						reviewerClaims,
-					)
-				) {
-					continue;
-				}
-				claims.set(itemId, {
-					batchId: batch.batchId,
-					laneId: qualified.expectedLane.laneId,
-					workflowLane: qualified.expectedWorkflowLane,
-					...verdict,
-				});
-				contributed = true;
-			}
-		}
-		if (contributed) contributingBatchIds.push(batch.batchId);
-		if (!exhaustive && claims.size === requiredSet.size) break;
-	}
-
-	// The lane-level "every declared obligation across every batch in the window
-	// must be settled" requirement was deliberately dropped: it is part of the
-	// all-or-nothing accounting that forces a full re-run for one failed lane,
-	// and it re-blocks exactly the composed-retry case. Item completeness
-	// (`unclaimed.length === 0`) is the stronger property for what actually
-	// ships — verdicts are per item; lane ids are bookkeeping. An abandoned
-	// declared lane is now a named diagnostic, not a block.
-	//
-	// Scoped to the batches actually scanned: an unscanned batch's lanes were
-	// never examined, so reporting them as "produced no successful exact
-	// artifact" would be an unevidenced claim. Nothing is lost — the early exit
-	// only fires once every required item is claimed, and the diagnostic exists
-	// to explain a settlement that succeeded despite abandoned lanes.
-	for (const obligation of new Set(
-		scannedBatches.flatMap((batch) =>
-			batch.lanes.map((lane) => lane.workflowLane),
-		),
-	)) {
-		if (satisfiedObligations.has(obligation)) continue;
-		appendCompositionDiagnostic(
-			diagnostics,
-			`declared ${phase} lane "${obligation}" produced no successful exact artifact`,
-		);
-	}
-
-	const composition: PrReviewPhaseComposition = {
-		claims,
-		requiredInventory,
-		unclaimed: requiredInventory.filter((itemId) => !claims.has(itemId)),
-		contributingBatchIds,
-		diagnostics,
-	};
-	// An exhaustive pass is a superset of the memoizable one, but it is computed
-	// for a different question (which batches are inert) and its diagnostics
-	// cover a wider window; never let it become the map the gates read.
-	if (!exhaustive) {
-		if (phase === 'reviewer') ctx.reviewer = composition;
-		else ctx.critic = composition;
-	}
-	return composition;
-}
-
-/**
- * A critic claim survives only while the reviewer row it challenged is
- * byte-identical.
- *
- * What this guarantees: the critic verdict was produced against reviewer row
- * *content* identical to the content authoritative now. A reviewer verdict keeps
- * only 2 of the 12 required row fields, so a classification/severity tuple would
- * still match after the evidence and root cause changed entirely; the full-row
- * digest does not. That also closes the `DOWNGRADED` hole in
- * `parseCriticVerdict`, where a reviewer severity *increase* leaves a stale
- * DOWNGRADED row still parseable.
- *
- * What this does NOT guarantee (issue #1968 FIX 8; the fix plan's claim that it
- * "closes the leave-and-return readmission path" is retracted as false):
- * `reviewerVerdictRowDigest` hashes the twelve parsed `[REVIEWED]` fields and
- * nothing else — no lane, session, or batch identity. (Legacy ten-field rows
- * are normalized to twelve with UNKNOWN / no tags at the parse boundary, so
- * both the critic-batch binder and claim admission hash a uniform view.) So a byte-identical row
- * emitted by a *different* lane or session re-admits the bound critic claim, and
- * an item that leaves the critic inventory and later returns with an identical
- * row re-admits the original critic verdict rather than requiring a fresh one.
- * Both are content-equivalent by construction, and the artifact behind the claim
- * is still pinned to the current revision digest and to its own lane identity by
- * `loadArtifactPassingLaneIntegrity`, so neither admits a verdict about
- * different content — but neither is prevented, and the binding is not the thing
- * that prevents them.
- */
-function criticClaimIsBoundToCurrentReviewerRow(
-	coherence: PrReviewBatchCoherenceRecord,
-	itemId: string,
-	reviewerClaims: ReadonlyMap<string, PrReviewItemClaim> | undefined,
-): boolean {
-	// A coherent critic batch always carries bindings; absent bindings on a
-	// coherent entry means out-of-band mutation, so fail closed.
-	const bindings = coherence.reviewerItemBindings;
-	const bindingKey =
-		coherence.reviewerItemBindingKeyEncoding === 'prefixed-v1'
-			? reviewerItemBindingKey(itemId)
-			: itemId;
-	const bound =
-		bindings && Object.hasOwn(bindings, bindingKey)
-			? bindings[bindingKey]
-			: undefined;
-	const current = reviewerClaims?.get(itemId)?.rowDigest;
-	return Boolean(bound && current && bound === current);
-}
-
-const REVIEWER_ITEM_BINDING_KEY_PREFIX = 'item:';
-
-/**
- * Prefix item IDs before using them as persisted object keys. In particular,
- * assigning a raw `__proto__` key to an ordinary object invokes JavaScript's
- * prototype setter instead of creating an own property.
- */
-function reviewerItemBindingKey(itemId: string): string {
-	return `${REVIEWER_ITEM_BINDING_KEY_PREFIX}${itemId}`;
 }
 
 /**
@@ -16070,7 +14856,7 @@ function workflowArtifactHasContractMarker(
 	) {
 		const phase: PrReviewComposablePhase =
 			expectedMode === 'swarm-pr-review:reviewer' ? 'reviewer' : 'critic';
-		return analyzePrReviewVerdictRowContract(
+		return analyzeLegacyVerdictRowContract(
 			artifact.text,
 			reviewItemIds ?? [],
 			phase,
@@ -16090,7 +14876,7 @@ function workflowArtifactHasContractMarker(
 		return Boolean(
 			reviewItemIds?.length &&
 				reviewItemIds.every((itemId) =>
-					artifactHasExactPositiveVerdictRow(
+					legacyArtifactHasExactPositiveVerdictRow(
 						artifact.text,
 						feedbackVerdict[0],
 						itemId,
@@ -16751,7 +15537,7 @@ export async function validatePrWorkflowTransportRecovery(
 				...(rejectedReceipt ? { receipt: rejectedReceipt } : {}),
 			};
 		}
-		const analysis = analyzePrReviewVerdictRowContract(
+		const analysis = analyzeLegacyVerdictRowContract(
 			artifactText,
 			itemIds,
 			phase,
@@ -16823,7 +15609,7 @@ export async function validatePrWorkflowTransportRecovery(
 		const itemIds = lane?.ownedItemIds ?? [];
 		if (
 			itemIds.length === 0 ||
-			!feedbackArtifactTextCoversItems(artifactText, itemIds)
+			!legacyFeedbackArtifactTextCoversItems(artifactText, itemIds)
 		) {
 			return {
 				ok: false,
@@ -16877,7 +15663,7 @@ export async function validatePrWorkflowTransportRecovery(
 		if (
 			itemIds.length === 0 ||
 			!itemIds.every((itemId) =>
-				artifactHasExactPositiveVerdictRow(
+				legacyArtifactHasExactPositiveVerdictRow(
 					artifactText,
 					feedbackPhase.marker,
 					itemId,
@@ -16936,22 +15722,10 @@ function extractLaneCoverageEvidenceText(
 	).evidence;
 }
 
-const REVIEW_SEVERITY_RANK = new Map([
-	['NONE', 0],
-	['INFO', 1],
-	['LOW', 2],
-	['MEDIUM', 3],
-	['HIGH', 4],
-	['CRITICAL', 5],
-]);
-const FEEDBACK_CLASSIFICATIONS = new Set([
-	'CONFIRMED',
-	'PARTIAL',
-	'DISPROVED',
-	'PRE_EXISTING',
-	'NEEDS_MORE_EVIDENCE',
-	'NEEDS_USER_DECISION',
-]);
+// Issue #2385: `REVIEW_SEVERITY_RANK` and `FEEDBACK_CLASSIFICATIONS` moved to
+// src/pr-review/legacy-transcript-adapter.ts, which owns the severity-rank /
+// classification vocabulary used in transcript-text conversion.
+
 /**
  * Issue #2131 criterion C1: a fully verified no-change inventory is one where
  * EVERY item's settled verification classification is a no-change outcome.
@@ -16973,406 +15747,10 @@ interface ReviewerVerdict {
 	riskTags?: PrReviewRiskTag[];
 }
 
-interface IndexedVerdictRows {
-	markerRows: string[][];
-	rowsByItemId: Map<string, string[][]>;
-	recoveries: Array<{
-		marker: '[REVIEWED]' | '[CRITIC]';
-		itemId: string;
-		recovery: 'legacy-fidelity-safe' | 'legacy-lossy';
-	}>;
-}
-
-function indexVerdictRows(
-	text: string,
-	marker: '[REVIEWED]' | '[CRITIC]',
-): IndexedVerdictRows {
-	const markerRows: string[][] = [];
-	const rowsByItemId = new Map<string, string[][]>();
-	const recoveries: IndexedVerdictRows['recoveries'] = [];
-	for (const line of text.split(/\r?\n/)) {
-		const row = parsePrReviewVerdictRow(
-			line,
-			marker === '[REVIEWED]' ? 'reviewer' : 'critic',
-		);
-		if (!row) continue;
-		const fields = row.fields;
-		if (row.recoveredOverflow) {
-			const recovery = row.overflowClass as
-				| 'legacy-fidelity-safe'
-				| 'legacy-lossy';
-			const itemId = fields[1] ?? '(missing)';
-			recoveries.push({ marker, itemId, recovery });
-			warn(
-				'PR_REVIEW recovered a legacy verdict row with unescaped pipe overflow',
-				{
-					marker,
-					itemId,
-					recovery,
-				},
-			);
-		}
-		markerRows.push(fields);
-		const itemId = fields[1] ?? '';
-		const rows = rowsByItemId.get(itemId);
-		if (rows) rows.push(fields);
-		else rowsByItemId.set(itemId, [fields]);
-	}
-	return { markerRows, rowsByItemId, recoveries };
-}
-
-function validateReviewerVerdictFields(fields: string[]): string[] | null {
-	const parsed = PrReviewReviewerVerdictFieldsSchema.safeParse(fields);
-	return parsed.success ? [...parsed.data] : null;
-}
-
-/**
- * Digest of the FULL canonical reviewer row, not the classification/severity
- * pair a reviewer verdict projects to. Only 2 of the 12 required fields survive
- * that projection, so a tuple binding would still match a row whose evidence,
- * file:line and root cause all changed. Fields are joined on NUL, which
- * `pipeFields` can never produce, so no field boundary is forgeable.
- */
-function reviewerVerdictRowDigest(fields: readonly string[]): string {
-	return createHash('sha256').update(fields.join('\0')).digest('hex');
-}
-
-/**
- * Per-item verdicts an artifact actually carries, as a map rather than a
- * boolean. This is the granularity the composition needs: one unparseable item
- * must not discard its healthy siblings in the same lane.
- */
-function parseLaneItemVerdicts(
-	text: string,
-	itemIds: readonly string[],
-	phase: PrReviewComposablePhase,
-	reviewerClaims?: ReadonlyMap<string, PrReviewItemClaim>,
-): Map<
-	string,
-	{
-		classification: string;
-		severity: string;
-		riskImpact?: PrReviewRiskImpact;
-		riskTags?: PrReviewRiskTag[];
-		rowDigest?: string;
-	}
-> {
-	return parsePrReviewVerdictRows(text, itemIds, phase, reviewerClaims).parsed;
-}
-
-function parsePrReviewVerdictRows(
-	text: string,
-	itemIds: readonly string[],
-	phase: PrReviewComposablePhase,
-	reviewerClaims?: ReadonlyMap<string, PrReviewItemClaim>,
-): {
-	markerRows: string[][];
-	parsed: Map<
-		string,
-		{
-			classification: string;
-			severity: string;
-			riskImpact?: PrReviewRiskImpact;
-			riskTags?: PrReviewRiskTag[];
-			rowDigest?: string;
-		}
-	>;
-	recoveries: IndexedVerdictRows['recoveries'];
-} {
-	const parsed = new Map<
-		string,
-		{
-			classification: string;
-			severity: string;
-			riskImpact?: PrReviewRiskImpact;
-			riskTags?: PrReviewRiskTag[];
-			rowDigest?: string;
-		}
-	>();
-	const marker = phase === 'reviewer' ? '[REVIEWED]' : '[CRITIC]';
-	const { markerRows, rowsByItemId, recoveries } = indexVerdictRows(
-		text,
-		marker,
-	);
-	for (const itemId of itemIds) {
-		if (itemId === PR_REVIEW_DISCARDED_EXAMPLE_ITEM_ID) continue;
-		if (phase === 'reviewer') {
-			const rows = rowsByItemId.get(itemId);
-			const fields =
-				rows?.length === 1 ? validateReviewerVerdictFields(rows[0]) : null;
-			if (!fields) continue;
-			parsed.set(itemId, {
-				classification: fields[2],
-				severity: fields[4],
-				// Fields 10/11 are the typed risk metadata (issue #2383); the
-				// parse boundary guarantees they exist (legacy ten-field rows
-				// were normalized to UNKNOWN / no tags there).
-				riskImpact: fields[10] as PrReviewRiskImpact,
-				riskTags: parsePrReviewRiskTagsField(fields[11] ?? ''),
-				rowDigest: reviewerVerdictRowDigest(fields),
-			});
-			continue;
-		}
-		const rows = rowsByItemId.get(itemId);
-		const verdict =
-			rows?.length === 1
-				? validateCriticVerdictFields(
-						rows[0],
-						reviewerClaims?.get(itemId)?.severity,
-					)
-				: null;
-		if (!verdict) continue;
-		parsed.set(itemId, {
-			classification: verdict.status,
-			severity: verdict.severity,
-		});
-	}
-	return { markerRows, parsed, recoveries };
-}
-
-/** Exact assigned-row contract used by both normal and recovered collection. */
-function analyzePrReviewVerdictRowContract(
-	text: string,
-	itemIds: readonly string[],
-	phase: PrReviewComposablePhase,
-	reviewerClaims?: ReadonlyMap<string, PrReviewItemClaim>,
-): {
-	ok: boolean;
-	expected: string;
-	actual: string;
-	recoveries: IndexedVerdictRows['recoveries'];
-} {
-	const marker = phase === 'reviewer' ? '[REVIEWED]' : '[CRITIC]';
-	const assigned = new Set(itemIds);
-	const { markerRows, parsed, recoveries } = parsePrReviewVerdictRows(
-		text,
-		itemIds,
-		phase,
-		reviewerClaims,
-	);
-	const observedIds = markerRows.map((fields) => fields[1] || '(missing)');
-	const unexpectedIds = [
-		...new Set(observedIds.filter((itemId) => !assigned.has(itemId))),
-	];
-	const invalidOrMissingIds = itemIds.filter((itemId) => !parsed.has(itemId));
-	return {
-		ok:
-			verdictRowIdsMatchExactly(markerRows, itemIds) &&
-			invalidOrMissingIds.length === 0,
-		expected: `exactly one parseable ${marker} row for assigned IDs ${JSON.stringify(itemIds)} and no other ${marker} IDs`,
-		actual: JSON.stringify({
-			rowCount: markerRows.length,
-			observedIds,
-			invalidOrMissingIds,
-			unexpectedIds,
-		}),
-		recoveries,
-	};
-}
-
-/** Exact one-row-per-assigned-ID identity check, independent of row semantics. */
-function verdictRowIdsMatchExactly(
-	markerRows: readonly string[][],
-	itemIds: readonly string[],
-): boolean {
-	if (itemIds.length === 0 || markerRows.length !== itemIds.length)
-		return false;
-	const assigned = new Set(itemIds);
-	if (assigned.size !== itemIds.length) return false;
-	const observed = new Set<string>();
-	for (const fields of markerRows) {
-		const itemId = fields[1] ?? '';
-		if (!assigned.has(itemId) || observed.has(itemId)) return false;
-		observed.add(itemId);
-	}
-	return observed.size === assigned.size;
-}
-
-/**
- * Settlement composes valid assigned siblings item-by-item, but an invented ID
- * invalidates the entire artifact because no declared ownership can authorize
- * that row. Missing or duplicate assigned rows remain per-item parse failures.
- */
-function verdictRowsContainOnlyAssignedIds(
-	markerRows: readonly string[][],
-	itemIds: readonly string[],
-): boolean {
-	if (itemIds.length === 0) return false;
-	const assigned = new Set(itemIds);
-	return markerRows.every((fields) => assigned.has(fields[1] ?? ''));
-}
-
-function parseCriticVerdict(
-	text: string,
-	itemId: string,
-	reviewerSeverity?: string,
-): { status: string; severity: string } | null {
-	const rows = indexVerdictRows(text, '[CRITIC]').rowsByItemId.get(itemId);
-	if (!rows || rows.length !== 1) return null;
-	return validateCriticVerdictFields(rows[0], reviewerSeverity);
-}
-
-function validateCriticVerdictFields(
-	fields: string[],
-	reviewerSeverity?: string,
-): { status: string; severity: string } | null {
-	const parsed = PrReviewCriticVerdictFieldsSchema.safeParse(fields);
-	if (!parsed.success) return null;
-	const verdict = parsed.data;
-	if (reviewerSeverity) {
-		const reviewerRank = REVIEW_SEVERITY_RANK.get(reviewerSeverity);
-		const criticRank = REVIEW_SEVERITY_RANK.get(verdict[3]);
-		if (reviewerRank === undefined || criticRank === undefined) return null;
-		if (verdict[2] === 'UPHELD' && criticRank !== reviewerRank) return null;
-		if (verdict[2] === 'DOWNGRADED' && criticRank >= reviewerRank) return null;
-	}
-	return { status: verdict[2], severity: verdict[3] };
-}
-
-function artifactHasExactPositiveVerdictRow(
-	text: string,
-	marker: string,
-	itemId: string,
-	positiveVerdict: string,
-): boolean {
-	// Same trailing-field pipe tolerance as feedbackArtifactCoversItems: the
-	// fourth field is free-text and may legitimately contain literal pipes.
-	const rows = text
-		.split(/\r?\n/)
-		.map((line) => pipeFieldsCapped(line, 4))
-		.filter((fields) => fields[0] === marker && fields[1] === itemId);
-	return (
-		rows.length === 1 &&
-		rows[0].length >= 4 &&
-		rows[0][2] === positiveVerdict &&
-		rows[0].slice(1, 4).every(Boolean)
-	);
-}
-
-function pipeFields(line: string): string[] {
-	if (!line.includes('|')) return [];
-	return line.split('|').map((field) => field.trim());
-}
-
-/**
- * `pipeFields` capped at the row's canonical field count: separators beyond the
- * expected count merge back into the trailing (free-text) field. Verdict rows
- * ([REVIEWED], [CRITIC], [FEEDBACK-VERIFIED]) carry prose evidence in their
- * last field, and prose containing literal pipes (regex text, `,;|`, shell
- * snippets) otherwise splits the row past its strict field-count check and the
- * whole verdict becomes unparseable. Deterministic: the enumerated leading
- * fields are never merged.
- */
-function pipeFieldsCapped(line: string, expectedFieldCount: number): string[] {
-	const fields = pipeFields(line);
-	if (fields.length <= expectedFieldCount) return fields;
-	const capped = [
-		...fields.slice(0, expectedFieldCount - 1),
-		fields.slice(expectedFieldCount - 1).join('|'),
-	];
-	// The enumerated leading fields are untouched, so machine-checked positions
-	// (classification, severity, file:line) stay correct. But the pipe may have
-	// originated in a NON-trailing prose field, in which case the trailing prose
-	// fields are re-arranged rather than preserved. Fidelity-safe only for
-	// trailing-field pipes; this warn (debug-gated) is the only trace.
-	warn(
-		`[pr-workflow-gate] verdict row pipe tail-merge applied (expected ${expectedFieldCount} fields, received ${fields.length}); leading machine fields preserved, trailing prose fields merged: ${line.slice(0, 120)}`,
-	);
-	return capped;
-}
-
-function feedbackArtifactCoversItems(
-	directory: string,
-	state: PrWorkflowGateState,
-	batchId: string,
-	laneId: string,
-	itemIds: readonly string[],
-): boolean {
-	const record = findByBatchId(directory, batchId, {
-		parentSessionId: state.sessionID,
-	}).find((candidate) => candidate.laneId === laneId);
-	const ref = record?.result?.outputRef?.trim();
-	const loaded = ref ? readLaneOutput(directory, ref) : null;
-	if (!loaded) return false;
-	const rows = loaded.artifact.text
-		.split(/\r?\n/)
-		.map((line) => pipeFieldsCapped(line, 4))
-		.filter((fields) => fields[0] === '[FEEDBACK-VERIFIED]');
-	if (rows.length !== itemIds.length) return false;
-	return itemIds.every((itemId) => {
-		const matches = rows.filter((fields) => fields[1] === itemId);
-		return (
-			matches.length === 1 &&
-			matches[0].length === 4 &&
-			matches[0].slice(1, 4).every(Boolean) &&
-			FEEDBACK_CLASSIFICATIONS.has(matches[0][2])
-		);
-	});
-}
-
-function feedbackArtifactTextCoversItems(
-	text: string,
-	itemIds: readonly string[],
-): boolean {
-	const rows = text
-		.split(/\r?\n/)
-		.map((line) => pipeFieldsCapped(line, 4))
-		.filter((fields) => fields[0] === '[FEEDBACK-VERIFIED]');
-	if (rows.length !== itemIds.length) return false;
-	return itemIds.every((itemId) => {
-		const matches = rows.filter((fields) => fields[1] === itemId);
-		return (
-			matches.length === 1 &&
-			matches[0].length === 4 &&
-			matches[0].slice(1, 4).every(Boolean) &&
-			FEEDBACK_CLASSIFICATIONS.has(matches[0][2])
-		);
-	});
-}
-
-/**
- * Read the settled verification classification of every inventory item from the
- * settled verification batches' lane outputs (issue #2131 criterion C1). An
- * item missing from the map has no settled verified classification.
- */
-function readSettledFeedbackClassifications(
-	directory: string,
-	state: PrWorkflowGateState,
-): Map<string, string> {
-	const classifications = new Map<string, string>();
-	for (const record of state.prFeedbackVerifications ?? []) {
-		for (const ownership of record.ownership) {
-			const delegation = findByBatchId(directory, record.batchId, {
-				parentSessionId: state.sessionID,
-			}).find((candidate) => candidate.laneId === ownership.laneId);
-			const ref = delegation?.result?.outputRef?.trim();
-			const loaded = ref ? readLaneOutput(directory, ref) : null;
-			if (!loaded) continue;
-			for (const line of loaded.artifact.text.split(/\r?\n/)) {
-				// Same trailing-field pipe tolerance as feedbackArtifactCoversItems:
-				// the fourth field is free-text and may legitimately contain literal
-				// pipes. Parsing it raw here let coverage accept a row the settled
-				// read then skipped, blocking a verified no-change item (PR #2182
-				// review finding UIB-002).
-				const fields = pipeFieldsCapped(line, 4);
-				if (
-					fields[0] !== '[FEEDBACK-VERIFIED]' ||
-					fields.length !== 4 ||
-					!fields.slice(1, 4).every(Boolean) ||
-					!FEEDBACK_CLASSIFICATIONS.has(fields[2])
-				) {
-					continue;
-				}
-				// A duplicate conflicting classification for one item is a
-				// contract violation; keep the first occurrence deterministic.
-				if (!classifications.has(fields[1])) {
-					classifications.set(fields[1], fields[2]);
-				}
-			}
-		}
-	}
-	return classifications;
-}
+// Issue #2385: the entire transcript/artifact-text -> canonical conversion
+// cluster (IndexedVerdictRows, the row parsers/validators/digest, the pipe
+// field codec, the feedback-artifact coverage readers, and the critic
+// single-row parser) moved verbatim to src/pr-review/legacy-transcript-adapter.ts.
 
 async function persistState(
 	directory: string,
@@ -17386,614 +15764,6 @@ async function persistState(
 }
 
 /** Persist one CAS-checked state replacement while the session lock is held. */
-async function writeStateWhileLocked(
-	directory: string,
-	state: PrWorkflowGateState,
-	options: { replaceWorkflowInstanceId?: string } = {},
-): Promise<PrWorkflowGateState> {
-	const validated = PrWorkflowGateStateSchema.parse(state);
-	const current = await readPrWorkflowGateStateFromDisk(
-		directory,
-		validated.sessionID,
-	);
-	if (
-		current ? current.revision !== validated.revision : validated.revision !== 0
-	) {
-		throw new Error(
-			'BLOCKED: PR workflow gate state changed concurrently; reload the active session state before retrying',
-		);
-	}
-	if (
-		current?.workflowInstanceId &&
-		validated.workflowInstanceId !== current.workflowInstanceId &&
-		options.replaceWorkflowInstanceId !== current.workflowInstanceId
-	) {
-		throw new Error(
-			'BLOCKED: PR workflow gate state changed concurrently; reload the active session state before retrying',
-		);
-	}
-	const nextState = PrWorkflowGateStateSchema.parse({
-		...validated,
-		revision: validated.revision + 1,
-	});
-	const filePath = workflowGateStatePath(directory, validated.sessionID);
-	await writeAtomicJson(directory, filePath, nextState);
-	rememberState(directory, nextState);
-	return nextState;
-}
-
-function workflowCheckoutMutationLockRelativePath(): string {
-	return path.join(WORKFLOW_GATE_DIR, 'checkout.lock');
-}
-
-function workflowCheckoutMutationLockPath(directory: string): string {
-	return validateSwarmPath(
-		directory,
-		workflowCheckoutMutationLockRelativePath(),
-	);
-}
-
-function openCheckoutLockFile(lockPath: string) {
-	return fsp.open(lockPath, 'wx');
-}
-
-function removeCheckoutLockFile(lockPath: string): Promise<void> {
-	return fsp.rm(lockPath);
-}
-
-function checkoutMutationProjectKey(directory: string): string {
-	return normalizeComparableFsPath(directory);
-}
-
-/** A bounded checkout-mutation refusal that never permits unsafe late overlap. */
-export class PrWorkflowCheckoutMutationTimeoutError extends Error {
-	readonly code = 'PR_WORKFLOW_CHECKOUT_MUTATION_TIMEOUT' as const;
-	readonly retryable = false as const;
-
-	constructor(readonly phase: 'queue' | 'action') {
-		super(
-			phase === 'queue'
-				? 'BLOCKED: timed out waiting for the active PR workflow checkout mutation; the existing owner still holds serialization and must settle before retrying'
-				: 'BLOCKED: PR workflow checkout mutation exceeded its execution deadline; serialization remains held until the in-flight action actually settles',
-		);
-		this.name = 'PrWorkflowCheckoutMutationTimeoutError';
-	}
-}
-
-type CheckoutActionOutcome<T> =
-	| { status: 'fulfilled'; value: T }
-	| { status: 'rejected'; error: unknown };
-
-async function withCheckoutMutationDeadline<T>(
-	promise: Promise<T>,
-	phase: 'queue' | 'action',
-): Promise<
-	T | { status: 'timeout'; error: PrWorkflowCheckoutMutationTimeoutError }
-> {
-	let timeout: ReturnType<typeof setTimeout> | undefined;
-	try {
-		return await Promise.race([
-			promise,
-			new Promise<{
-				status: 'timeout';
-				error: PrWorkflowCheckoutMutationTimeoutError;
-			}>((resolve) => {
-				timeout = setTimeout(() => {
-					resolve({
-						status: 'timeout',
-						error: new PrWorkflowCheckoutMutationTimeoutError(phase),
-					});
-				}, _test_exports.checkoutMutationActionTimeoutMs);
-			}),
-		]);
-	} finally {
-		if (timeout) clearTimeout(timeout);
-	}
-}
-
-/** Serialize project-wide checkout mutations before any session state lock. */
-export async function withPrWorkflowCheckoutMutationLock<T>(
-	directory: string,
-	action: () => Promise<T>,
-): Promise<T> {
-	const key = checkoutMutationProjectKey(directory);
-	const previous =
-		pendingCheckoutMutationsByProject.get(key) ?? Promise.resolve();
-	let release!: () => void;
-	const current = new Promise<void>((resolve) => {
-		release = resolve;
-	});
-	const queued = previous.then(() => current);
-	pendingCheckoutMutationsByProject.set(key, queued);
-	const previousResult = await withCheckoutMutationDeadline(
-		previous.then(() => ({ status: 'ready' as const })),
-		'queue',
-	);
-	if (previousResult.status === 'timeout') {
-		release();
-		// Keep this resolved tail chained to the still-running owner so later
-		// in-process waiters receive the same bounded typed refusal instead of
-		// bypassing to the durable lock. Remove it only after the owner settles.
-		void queued.then(() => {
-			if (pendingCheckoutMutationsByProject.get(key) === queued) {
-				pendingCheckoutMutationsByProject.delete(key);
-			}
-		});
-		throw previousResult.error;
-	}
-
-	let lock: Awaited<ReturnType<typeof acquireCheckoutMutationLock>>;
-	try {
-		lock = await acquireCheckoutMutationLock(directory);
-	} catch (error) {
-		release();
-		if (pendingCheckoutMutationsByProject.get(key) === queued) {
-			pendingCheckoutMutationsByProject.delete(key);
-		}
-		throw error;
-	}
-	const actionOutcome: Promise<CheckoutActionOutcome<T>> = Promise.resolve()
-		.then(action)
-		.then(
-			(value) => ({ status: 'fulfilled' as const, value }),
-			(error: unknown) => ({ status: 'rejected' as const, error }),
-		);
-	const outcome = await withCheckoutMutationDeadline(actionOutcome, 'action');
-	if (outcome.status === 'timeout') {
-		// Promises are not cancellable. Returning the lock here would let a late
-		// action mutate concurrently, so a retained owner task performs cleanup
-		// only after the action truly settles.
-		void actionOutcome.then(async () => {
-			try {
-				await releaseCheckoutMutationLock(lock);
-			} catch {
-				// Completed-owner recovery reclaims a persistently busy Windows lock.
-			} finally {
-				release();
-				if (pendingCheckoutMutationsByProject.get(key) === queued) {
-					pendingCheckoutMutationsByProject.delete(key);
-				}
-			}
-		});
-		throw outcome.error;
-	}
-	try {
-		if (outcome.status === 'rejected') throw outcome.error;
-		return outcome.value;
-	} finally {
-		try {
-			await releaseCheckoutMutationLock(lock);
-		} finally {
-			release();
-			if (pendingCheckoutMutationsByProject.get(key) === queued) {
-				pendingCheckoutMutationsByProject.delete(key);
-			}
-		}
-	}
-}
-
-async function acquireCheckoutMutationLock(
-	directory: string,
-): Promise<{ path: string; ownerToken: string }> {
-	const lockPath = workflowCheckoutMutationLockPath(directory);
-	const verifiedParent = await ensurePrWorkflowSafeParentDirectory(
-		directory,
-		lockPath,
-	);
-	for (let attempt = 0; attempt < STATE_MUTATION_LOCK_MAX_ATTEMPTS; attempt++) {
-		try {
-			const handle = await _test_exports.openCheckoutLock(lockPath);
-			const lock = {
-				ownerToken: randomUUID(),
-				pid: process.pid,
-				createdAtMs: _test_exports.nowMs(),
-			};
-			let lockIdentity: Pick<BigIntStats, 'dev' | 'ino'> | undefined;
-			let writeError: unknown;
-			try {
-				const openedStat = await handle.stat({ bigint: true });
-				lockIdentity = { dev: openedStat.dev, ino: openedStat.ino };
-				lockIdentity = await assertOpenedSwarmFileIdentity(
-					directory,
-					lockPath,
-					handle,
-					verifiedParent,
-					'PR workflow checkout mutation lock',
-				);
-				await _test_exports.beforeCheckoutLockWrite?.();
-				await handle.writeFile(JSON.stringify(lock), 'utf-8');
-			} catch (error) {
-				writeError = error;
-			} finally {
-				await handle.close().catch(() => undefined);
-			}
-			if (writeError) {
-				if (lockIdentity) {
-					await removeCheckoutMutationLockByIdentity(
-						directory,
-						lockPath,
-						lockIdentity,
-						verifiedParent,
-					);
-				}
-				throw writeError;
-			}
-			return { path: lockPath, ownerToken: lock.ownerToken };
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-			if (await reclaimAbandonedCheckoutMutationLock(lockPath)) continue;
-			if (attempt < STATE_MUTATION_LOCK_MAX_ATTEMPTS - 1) {
-				await delay(STATE_MUTATION_LOCK_RETRY_DELAY_MS);
-			}
-		}
-	}
-	throw new Error(
-		'BLOCKED: PR workflow checkout mutation is being handled by another process; retry after that checkout settles',
-	);
-}
-
-async function releaseCheckoutMutationLock(lock: {
-	path: string;
-	ownerToken: string;
-}): Promise<void> {
-	let lastError: unknown;
-	for (let attempt = 0; attempt < WINDOWS_RENAME_MAX_RETRIES; attempt++) {
-		try {
-			if (await removeCheckoutMutationLockIfOwned(lock.path, lock.ownerToken)) {
-				completedCheckoutLockOwners.delete(lock.path);
-				return;
-			}
-			lastError = new Error(
-				'PR workflow checkout mutation lock ownership changed before release',
-			);
-		} catch (error) {
-			lastError = error;
-		}
-		if (attempt < WINDOWS_RENAME_MAX_RETRIES - 1) {
-			await delay(RENAME_RETRY_DELAY_MS);
-		}
-	}
-	rememberCompletedCheckoutLockOwner(lock.path, lock.ownerToken);
-	throw lastError instanceof Error
-		? lastError
-		: new Error('PR workflow checkout mutation lock release failed');
-}
-
-async function reclaimAbandonedCheckoutMutationLock(
-	lockPath: string,
-): Promise<boolean> {
-	const lock = await readCheckoutMutationLock(lockPath);
-	if (lock) {
-		if (
-			lock.pid === process.pid &&
-			completedCheckoutLockOwners.get(lockPath) === lock.ownerToken
-		) {
-			const removed = await removeCheckoutMutationLockIfOwned(
-				lockPath,
-				lock.ownerToken,
-			);
-			if (removed) completedCheckoutLockOwners.delete(lockPath);
-			return removed;
-		}
-		if (_test_exports.isProcessAlive(lock.pid)) return false;
-		return removeCheckoutMutationLockIfOwned(lockPath, lock.ownerToken);
-	}
-	try {
-		const stat = await fsp.stat(lockPath);
-		if (
-			_test_exports.nowMs() - stat.mtimeMs <
-			STATE_MUTATION_LOCK_UNINITIALIZED_STALE_MS
-		) {
-			return false;
-		}
-		await fsp.rm(lockPath, { force: true });
-		return true;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
-		throw error;
-	}
-}
-
-async function readCheckoutMutationLock(
-	lockPath: string,
-): Promise<{ ownerToken: string; pid: number; createdAtMs: number } | null> {
-	let raw: string;
-	try {
-		raw = await fsp.readFile(lockPath, 'utf-8');
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-		throw error;
-	}
-	try {
-		const parsed: unknown = JSON.parse(raw);
-		if (
-			typeof parsed === 'object' &&
-			parsed !== null &&
-			typeof (parsed as { ownerToken?: unknown }).ownerToken === 'string' &&
-			(parsed as { ownerToken: string }).ownerToken.length > 0 &&
-			typeof (parsed as { pid?: unknown }).pid === 'number' &&
-			Number.isInteger((parsed as { pid: number }).pid) &&
-			(parsed as { pid: number }).pid > 0 &&
-			typeof (parsed as { createdAtMs?: unknown }).createdAtMs === 'number' &&
-			Number.isFinite((parsed as { createdAtMs: number }).createdAtMs)
-		) {
-			return parsed as { ownerToken: string; pid: number; createdAtMs: number };
-		}
-	} catch {
-		// A crash between exclusive create and metadata write is recovered below.
-	}
-	return null;
-}
-
-async function removeCheckoutMutationLockIfOwned(
-	lockPath: string,
-	ownerToken: string,
-): Promise<boolean> {
-	const lock = await readCheckoutMutationLock(lockPath);
-	if (!lock || lock.ownerToken !== ownerToken) return false;
-	try {
-		await _test_exports.removeCheckoutLock(lockPath);
-		return true;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-		throw error;
-	}
-}
-
-async function removeCheckoutMutationLockByIdentity(
-	directory: string,
-	lockPath: string,
-	identity: Pick<BigIntStats, 'dev' | 'ino'>,
-	verifiedParent: string,
-): Promise<void> {
-	let lastError: unknown;
-	for (let attempt = 0; attempt < WINDOWS_RENAME_MAX_RETRIES; attempt++) {
-		try {
-			await assertClosedSwarmFileIdentity(
-				directory,
-				lockPath,
-				identity,
-				verifiedParent,
-				'PR workflow checkout mutation lock',
-			);
-			await _test_exports.removeCheckoutLock(lockPath);
-			return;
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-			lastError = error;
-			if (attempt < WINDOWS_RENAME_MAX_RETRIES - 1) {
-				await delay(RENAME_RETRY_DELAY_MS);
-			}
-		}
-	}
-	throw lastError instanceof Error
-		? lastError
-		: new Error('PR workflow checkout mutation lock cleanup failed');
-}
-
-function rememberCompletedCheckoutLockOwner(
-	lockPath: string,
-	ownerToken: string,
-): void {
-	completedCheckoutLockOwners.delete(lockPath);
-	completedCheckoutLockOwners.set(lockPath, ownerToken);
-	while (
-		completedCheckoutLockOwners.size > MAX_COMPLETED_CHECKOUT_LOCK_OWNERS
-	) {
-		const oldest = completedCheckoutLockOwners.keys().next().value;
-		if (oldest === undefined) break;
-		completedCheckoutLockOwners.delete(oldest);
-	}
-}
-
-/** Serialize in-process mutations; the durable revision rejects stale callers. */
-async function withSessionStateMutation<T>(
-	directory: string,
-	sessionID: string,
-	action: () => Promise<T>,
-): Promise<T> {
-	const key = stateCacheKey(directory, sessionID);
-	const previous =
-		pendingStateMutationsByProjectSession.get(key) ?? Promise.resolve();
-	let release!: () => void;
-	const current = new Promise<void>((resolve) => {
-		release = resolve;
-	});
-	const queued = previous.then(() => current);
-	pendingStateMutationsByProjectSession.set(key, queued);
-	await previous;
-	try {
-		const lock = await acquireSessionStateMutationLock(directory, sessionID);
-		try {
-			return await action();
-		} finally {
-			await releaseSessionStateMutationLock(lock);
-		}
-	} finally {
-		release();
-		if (pendingStateMutationsByProjectSession.get(key) === queued) {
-			pendingStateMutationsByProjectSession.delete(key);
-		}
-	}
-}
-
-async function acquireSessionStateMutationLock(
-	directory: string,
-	sessionID: string,
-): Promise<{ path: string; ownerToken: string }> {
-	const lockPath = workflowGateStateLockPath(directory, sessionID);
-	const verifiedParent = await ensurePrWorkflowSafeParentDirectory(
-		directory,
-		lockPath,
-	);
-	for (let attempt = 0; attempt < STATE_MUTATION_LOCK_MAX_ATTEMPTS; attempt++) {
-		try {
-			const handle = await fsp.open(lockPath, 'wx');
-			const lock: SessionStateMutationLock = {
-				ownerToken: randomUUID(),
-				pid: process.pid,
-				createdAtMs: _test_exports.nowMs(),
-			};
-			let writeError: unknown;
-			try {
-				await _test_exports.beforeSessionStateLockWrite?.();
-				await assertOpenedSwarmFileIdentity(
-					directory,
-					lockPath,
-					handle,
-					verifiedParent,
-					'PR workflow state mutation lock',
-				);
-				await handle.writeFile(JSON.stringify(lock), 'utf-8');
-			} catch (error) {
-				writeError = error;
-			} finally {
-				await handle.close().catch(() => undefined);
-			}
-			if (writeError) {
-				await removeSessionStateMutationLockIfOwned(lockPath, lock.ownerToken);
-				throw writeError;
-			}
-			return { path: lockPath, ownerToken: lock.ownerToken };
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-			if (await reclaimAbandonedSessionStateMutationLock(lockPath)) continue;
-			if (attempt < STATE_MUTATION_LOCK_MAX_ATTEMPTS - 1) {
-				await delay(STATE_MUTATION_LOCK_RETRY_DELAY_MS);
-			}
-		}
-	}
-	throw new Error(
-		'BLOCKED: PR workflow gate state is being mutated by another process; retry after that session transition finishes',
-	);
-}
-
-async function releaseSessionStateMutationLock(lock: {
-	path: string;
-	ownerToken: string;
-}): Promise<void> {
-	try {
-		await removeSessionStateMutationLockIfOwned(lock.path, lock.ownerToken);
-	} catch {
-		// Best-effort cleanup; a crash-recovered lock is reclaimed by the next mutation.
-	}
-}
-
-async function reclaimAbandonedSessionStateMutationLock(
-	lockPath: string,
-): Promise<boolean> {
-	const lock = await readSessionStateMutationLock(lockPath);
-	if (lock) {
-		if (_test_exports.isProcessAlive(lock.pid)) return false;
-		return removeSessionStateMutationLockIfOwned(lockPath, lock.ownerToken);
-	}
-	try {
-		const stat = await fsp.stat(lockPath);
-		if (
-			_test_exports.nowMs() - stat.mtimeMs <
-			STATE_MUTATION_LOCK_UNINITIALIZED_STALE_MS
-		) {
-			return false;
-		}
-		await fsp.rm(lockPath, { force: true });
-		return true;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
-		throw error;
-	}
-}
-
-async function readSessionStateMutationLock(
-	lockPath: string,
-): Promise<SessionStateMutationLock | null> {
-	let raw: string;
-	try {
-		raw = await fsp.readFile(lockPath, 'utf-8');
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-		throw error;
-	}
-	try {
-		const parsed: unknown = JSON.parse(raw);
-		if (
-			typeof parsed === 'object' &&
-			parsed !== null &&
-			typeof (parsed as SessionStateMutationLock).ownerToken === 'string' &&
-			(parsed as SessionStateMutationLock).ownerToken.length > 0 &&
-			typeof (parsed as SessionStateMutationLock).pid === 'number' &&
-			Number.isInteger((parsed as SessionStateMutationLock).pid) &&
-			(parsed as SessionStateMutationLock).pid > 0 &&
-			typeof (parsed as SessionStateMutationLock).createdAtMs === 'number' &&
-			Number.isFinite((parsed as SessionStateMutationLock).createdAtMs)
-		) {
-			return parsed as SessionStateMutationLock;
-		}
-	} catch {
-		// A crash between exclusive create and metadata write is recovered below.
-	}
-	return null;
-}
-
-async function removeSessionStateMutationLockIfOwned(
-	lockPath: string,
-	ownerToken: string,
-): Promise<boolean> {
-	const lock = await readSessionStateMutationLock(lockPath);
-	if (!lock || lock.ownerToken !== ownerToken) return false;
-	try {
-		await fsp.rm(lockPath);
-		return true;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-		throw error;
-	}
-}
-
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-		return true;
-	} catch (error) {
-		// Permission errors prove the process exists. Unknown errors fail closed.
-		return (error as NodeJS.ErrnoException).code !== 'ESRCH';
-	}
-}
-
-async function readPrWorkflowGateStateFromDisk(
-	directory: string,
-	sessionID: string,
-): Promise<PrWorkflowGateState | null> {
-	const filePath = workflowGateStatePath(directory, sessionID);
-	return readPrWorkflowGateStateFileFromDisk(filePath, sessionID);
-}
-
-async function readPrWorkflowGateStateFileFromDisk(
-	filePath: string,
-	stateLabel: string,
-): Promise<PrWorkflowGateState | null> {
-	let raw: string;
-	try {
-		raw = await fsp.readFile(filePath, 'utf-8');
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-		throw error;
-	}
-	let parsedJson: unknown;
-	try {
-		parsedJson = JSON.parse(raw);
-	} catch {
-		throw new Error(
-			`BLOCKED: PR workflow gate state for session "${stateLabel}" is not valid JSON`,
-		);
-	}
-	const parsed = PrWorkflowGateStateSchema.safeParse(parsedJson);
-	if (!parsed.success) {
-		throw new Error(
-			`BLOCKED: PR workflow gate state for session "${stateLabel}" is invalid`,
-		);
-	}
-	return parsed.data;
-}
 
 /** Upper bound on schema issues quoted in one salvage disclosure. */
 const MAX_SALVAGED_SCHEMA_ERRORS = 10;
@@ -18192,287 +15962,4 @@ export async function readPrWorkflowGateStateForRecovery(
 		revisionSalvageable: salvagedRevision.success,
 		armedShapeUnreadable,
 	};
-}
-
-function rememberState(directory: string, state: PrWorkflowGateState): void {
-	const cacheKey = stateCacheKey(directory, state.sessionID);
-	trackedStatesByProjectSession.delete(cacheKey);
-	trackedStatesByProjectSession.set(cacheKey, state);
-	while (trackedStatesByProjectSession.size > MAX_TRACKED_SESSIONS) {
-		const oldestKey = trackedStatesByProjectSession.keys().next().value;
-		if (!oldestKey) break;
-		trackedStatesByProjectSession.delete(oldestKey);
-	}
-}
-
-function stateCacheKey(directory: string, sessionID: string): string {
-	const resolved = path.normalize(path.resolve(directory));
-	const canonicalDirectory =
-		process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-	return `${canonicalDirectory}\u0000${normalizeSessionID(sessionID)}`;
-}
-
-function workflowGateStatePath(directory: string, sessionID: string): string {
-	return validateSwarmPath(directory, workflowGateStateRelativePath(sessionID));
-}
-
-function workflowGateStateLockPath(
-	directory: string,
-	sessionID: string,
-): string {
-	return validateSwarmPath(
-		directory,
-		workflowGateStateLockRelativePath(sessionID),
-	);
-}
-
-function workflowGateStateLockRelativePath(sessionID: string): string {
-	return path.join(
-		WORKFLOW_GATE_DIR,
-		`${prWorkflowSessionFileStem(sessionID)}.lock`,
-	);
-}
-
-function workflowGateStateRelativePath(sessionID: string): string {
-	return path.join(
-		WORKFLOW_GATE_DIR,
-		`${prWorkflowSessionFileStem(sessionID)}.json`,
-	);
-}
-
-export function prWorkflowSessionFileStem(sessionID: string): string {
-	const normalized = normalizeSessionID(sessionID);
-	const slug =
-		normalized.replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 80) || 'session';
-	const digest = createHash('sha256')
-		.update(normalized)
-		.digest('hex')
-		.slice(0, 12);
-	return `${slug}-${digest}`;
-}
-
-function normalizeSessionID(sessionID: string): string {
-	const normalized = sessionID.trim();
-	if (!normalized) {
-		throw new Error('BLOCKED: PR workflow gate requires a non-empty sessionID');
-	}
-	return normalized;
-}
-
-export async function ensurePrWorkflowSafeParentDirectory(
-	directory: string,
-	filePath: string,
-): Promise<string> {
-	const swarmRoot = path.resolve(directory, '.swarm');
-	const parentPath = path.dirname(path.resolve(filePath));
-	const relativeParent = path.relative(swarmRoot, parentPath);
-	if (
-		relativeParent === '..' ||
-		relativeParent.startsWith(`..${path.sep}`) ||
-		path.isAbsolute(relativeParent)
-	) {
-		throw new Error(
-			'BLOCKED: PR workflow atomic destination escapes the project .swarm directory',
-		);
-	}
-	await fsp.mkdir(swarmRoot, { recursive: true });
-	let currentPath = swarmRoot;
-	let currentIdentity = await assertSafeDirectory(currentPath, undefined);
-	for (const segment of relativeParent.split(path.sep).filter(Boolean)) {
-		const nextPath = path.join(currentPath, segment);
-		await _test_exports.beforeSafeDirectoryCreate?.(currentPath, nextPath);
-		await assertSafeDirectory(currentPath, currentIdentity);
-		try {
-			await fsp.mkdir(nextPath);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-		}
-		await assertSafeDirectory(currentPath, currentIdentity);
-		const nextIdentity = await assertSafeDirectory(nextPath, undefined);
-		const [realCurrent, realNext] = await Promise.all([
-			fsp.realpath(currentPath),
-			fsp.realpath(nextPath),
-		]);
-		if (
-			normalizeComparableFsPath(path.dirname(realNext)) !==
-			normalizeComparableFsPath(realCurrent)
-		) {
-			throw new Error(
-				'BLOCKED: PR workflow directory creation escaped the project .swarm tree',
-			);
-		}
-		currentPath = nextPath;
-		currentIdentity = nextIdentity;
-	}
-	const realRoot = await fsp.realpath(swarmRoot);
-	const realParent = await fsp.realpath(parentPath);
-	const relativeRealParent = path.relative(realRoot, realParent);
-	if (
-		relativeRealParent === '..' ||
-		relativeRealParent.startsWith(`..${path.sep}`) ||
-		path.isAbsolute(relativeRealParent)
-	) {
-		throw new Error(
-			'BLOCKED: PR workflow atomic parent escapes the project .swarm directory',
-		);
-	}
-	return realParent;
-}
-
-async function assertSafeDirectory(
-	directoryPath: string,
-	expectedIdentity: Pick<BigIntStats, 'dev' | 'ino'> | undefined,
-): Promise<Pick<BigIntStats, 'dev' | 'ino'>> {
-	const stat = await fsp.lstat(directoryPath, { bigint: true });
-	if (
-		stat.isSymbolicLink() ||
-		!stat.isDirectory() ||
-		(expectedIdentity && !sameBigIntFileIdentity(stat, expectedIdentity))
-	) {
-		throw new Error(
-			'BLOCKED: PR workflow .swarm path must be a real directory and must not change during the operation',
-		);
-	}
-	return { dev: stat.dev, ino: stat.ino };
-}
-
-async function assertOpenedSwarmFileIdentity(
-	directory: string,
-	filePath: string,
-	handle: Awaited<ReturnType<typeof fsp.open>>,
-	expectedParent: string,
-	label: string,
-): Promise<Pick<BigIntStats, 'dev' | 'ino'>> {
-	const openedStat = await handle.stat({ bigint: true });
-	if (!openedStat.isFile()) throw new Error(`BLOCKED: ${label} is not a file`);
-	await assertClosedSwarmFileIdentity(
-		directory,
-		filePath,
-		openedStat,
-		expectedParent,
-		label,
-	);
-	return { dev: openedStat.dev, ino: openedStat.ino };
-}
-
-async function assertClosedSwarmFileIdentity(
-	directory: string,
-	filePath: string,
-	expectedIdentity: Pick<BigIntStats, 'dev' | 'ino'> | undefined,
-	expectedParent: string,
-	label: string,
-): Promise<void> {
-	if (!expectedIdentity) throw new Error(`BLOCKED: ${label} has no identity`);
-	const [stat, realRoot, realFile, realParent] = await Promise.all([
-		fsp.lstat(filePath, { bigint: true }),
-		fsp.realpath(path.resolve(directory, '.swarm')),
-		fsp.realpath(filePath),
-		fsp.realpath(path.dirname(filePath)),
-	]);
-	const relativeFile = path.relative(realRoot, realFile);
-	if (
-		stat.isSymbolicLink() ||
-		!stat.isFile() ||
-		!sameBigIntFileIdentity(stat, expectedIdentity) ||
-		normalizeComparableFsPath(realParent) !==
-			normalizeComparableFsPath(expectedParent) ||
-		relativeFile === '' ||
-		relativeFile === '..' ||
-		relativeFile.startsWith(`..${path.sep}`) ||
-		path.isAbsolute(relativeFile)
-	) {
-		throw new Error(`BLOCKED: ${label} changed or escaped .swarm`);
-	}
-}
-
-async function writeAtomicJson(
-	directory: string,
-	filePath: string,
-	value: unknown,
-): Promise<void> {
-	const safeParent = await ensurePrWorkflowSafeParentDirectory(
-		directory,
-		filePath,
-	);
-	const tempPath = `${filePath}.tmp.${process.pid}.${randomUUID()}`;
-	let tempIdentity: Pick<BigIntStats, 'dev' | 'ino'> | undefined;
-	let lastError: unknown;
-	try {
-		const handle = await fsp.open(tempPath, 'wx');
-		try {
-			await _test_exports.beforeAtomicTempWrite?.();
-			tempIdentity = await assertOpenedSwarmFileIdentity(
-				directory,
-				tempPath,
-				handle,
-				safeParent,
-				'PR workflow atomic temporary file',
-			);
-			await handle.writeFile(JSON.stringify(value, null, 2), 'utf-8');
-			await handle.sync();
-		} finally {
-			await handle.close();
-		}
-		await _test_exports.beforeAtomicRename?.();
-		await assertClosedSwarmFileIdentity(
-			directory,
-			tempPath,
-			tempIdentity,
-			safeParent,
-			'PR workflow atomic temporary file',
-		);
-		for (let attempt = 0; attempt < WINDOWS_RENAME_MAX_RETRIES; attempt++) {
-			try {
-				await _test_exports.rename(tempPath, filePath);
-				lastError = undefined;
-				break;
-			} catch (error) {
-				lastError = error;
-				const code = (error as NodeJS.ErrnoException).code;
-				if (code !== 'EEXIST' && code !== 'EPERM' && code !== 'EBUSY') {
-					break;
-				}
-				if (attempt < WINDOWS_RENAME_MAX_RETRIES - 1) {
-					await delay(RENAME_RETRY_DELAY_MS);
-				}
-			}
-		}
-		if (lastError) {
-			throw lastError;
-		}
-		await assertClosedSwarmFileIdentity(
-			directory,
-			filePath,
-			tempIdentity,
-			safeParent,
-			'PR workflow atomic destination file',
-		);
-	} finally {
-		try {
-			await fsp.rm(tempPath, { force: true });
-		} catch {
-			// best-effort temp cleanup
-		}
-	}
-}
-
-/**
- * Write a PR-workflow artifact with the gate's Windows-safe atomic persistence
- * contract. Checkout-preparation receipts must survive the same transient
- * rename contention as canonical gate state.
- */
-export async function writePrWorkflowAtomicJson(
-	directory: string,
-	filePath: string,
-	value: unknown,
-): Promise<void> {
-	await writeAtomicJson(directory, filePath, value);
-}
-
-function isoNow(): string {
-	return new Date().toISOString();
-}
-
-function delay(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms));
 }

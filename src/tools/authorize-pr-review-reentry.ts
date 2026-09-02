@@ -2,7 +2,7 @@ import { z } from 'zod';
 import {
 	issuePrReviewReentryAuthorization,
 	type PrReviewReentryRole,
-} from '../hooks/pr-review-reentry-authorization.js';
+} from '../pr-review/authorization.js';
 import { createSwarmTool } from './create-tool.js';
 
 const AuthorizePrReviewReentryArgsSchema = z

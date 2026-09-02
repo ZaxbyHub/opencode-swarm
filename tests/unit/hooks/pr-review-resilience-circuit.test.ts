@@ -10,7 +10,7 @@ import {
 	PR_REVIEW_CIRCUIT_CONTRIBUTOR_LIMIT,
 	type PrReviewCircuitRecordV2,
 	scanPrReviewCircuitEvidence,
-} from '../../../src/hooks/pr-review-resilience-circuit.js';
+} from '../../../src/pr-review/circuit.js';
 
 const NOW = 1_756_000_000_000;
 const OPEN_MS = 60_000;

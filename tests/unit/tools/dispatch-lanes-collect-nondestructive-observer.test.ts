@@ -171,8 +171,10 @@ describe('collect_lane_results is a non-destructive observer (#2381)', () => {
 		);
 
 		expect(result.failure_class).toBe('no_client');
+		// Issue #2385: the diagnostic now carries the reducer-issued
+		// collection diagnostic code after the base message.
 		expect(result.errors).toContain(
-			'OpenCode session messages client is not available',
+			'OpenCode session messages client is not available (collection_host_unavailable)',
 		);
 		// Stored status is reported rather than a zeroed/terminalized view.
 		expect(result.total).toBe(1);

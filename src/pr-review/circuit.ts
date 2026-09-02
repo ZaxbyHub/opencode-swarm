@@ -1,5 +1,6 @@
 /**
- * PR-review resilience circuit — typed, recoverable, versioned (issue #2382).
+ * PR-review resilience circuit — typed, recoverable, versioned (issues
+ * #2382, #2385).
  *
  * Pure state machine + typed-signal classification for the PR_REVIEW
  * resilience circuit. No I/O: the owning gate (`pr-workflow-gate.ts`) reads
@@ -17,10 +18,21 @@
  *   waterline) or back to OPEN (new interval). Legacy unversioned records
  *   migrate once to a nonblocking v2 CLOSED record with an evidence waterline;
  *   malformed records fail open.
+ *
+ * Issue #2385 additionally makes this module the ONLY authority that may
+ * construct or transition circuit records: policy snapshot resolution, the
+ * re-enable reset, and the rolled-back-probe transition live here (previously
+ * inline record constructions in the gate). The parallel-rule guardrail
+ * (`src/pr-review/guardrails.ts`) enforces that no circuit record is built
+ * outside `src/pr-review/`.
  */
 
 import { z } from 'zod';
 import type { BackgroundDelegationRecord } from '../background/pending-delegations.js';
+import {
+	DEFAULT_PR_REVIEW_RESILIENCE_CONFIG,
+	type PrReviewResilienceConfig,
+} from '../config/schema.js';
 
 /** Bounded contributor ledger. Mirrors `MAX_WORKFLOW_BATCHES (128) × 6` base dimensions. */
 export const PR_REVIEW_CIRCUIT_CONTRIBUTOR_LIMIT = 768;
@@ -81,6 +93,24 @@ export interface PrReviewCircuitLegacyRecord {
 	count: number;
 	contributors: Array<{ batchId: string; laneId: string }>;
 	openedAt: string;
+}
+
+/**
+ * The persisted circuit union: a v2 record or a legacy unversioned record
+ * awaiting migration.
+ */
+export type PrReviewCircuitRecord =
+	| PrReviewCircuitLegacyRecord
+	| PrReviewCircuitRecordV2;
+
+export interface PrReviewResiliencePolicyRecord {
+	enabled: boolean;
+	canaryProbeMs: number;
+	statusProbeTimeoutMs: number;
+	correlatedFailureThreshold: number;
+	maxRetryAttemptsAfterInitial: number;
+	/** Issue #2382. Optional: policies persisted before the field existed parse unchanged. */
+	circuitOpenDurationMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -144,15 +174,12 @@ export const PrReviewCircuitRecordSchema = z.union([
 // ---------------------------------------------------------------------------
 
 /**
- * The terminal delegation statuses the circuit consults. Mirrors
- * `TERMINAL_FAILED_DELEGATION_STATUSES` in `pr-workflow-gate.ts`.
+ * The terminal delegation statuses the circuit consults. The single shared
+ * definition (issue #2385): the gate's settlement paths and this module read
+ * the same vocabulary.
  */
-const CIRCUIT_TERMINAL_DELEGATION_STATUSES: ReadonlySet<string> = new Set([
-	'completed',
-	'error',
-	'cancelled',
-	'stale',
-]);
+export const CIRCUIT_TERMINAL_DELEGATION_STATUSES: ReadonlySet<string> =
+	new Set(['completed', 'error', 'cancelled', 'stale']);
 
 function zeroOutputResult(result: {
 	outputRef?: string;
@@ -326,13 +353,7 @@ export function adoptPrReviewCircuit(
 	if (asLegacy.success) {
 		return {
 			kind: 'migrated',
-			record: {
-				version: 2,
-				state: 'CLOSED',
-				generation: 1,
-				contributors: [],
-				evidenceWaterline: new Date(nowMs).toISOString(),
-			},
+			record: freshRecord(nowMs, true),
 			diagnostic: {
 				code: 'migrated_legacy_circuit',
 				legacySignatureCount: asLegacy.data.contributors.length,
@@ -373,7 +394,7 @@ export interface PrReviewCircuitAdvanceInput {
 	threshold: number;
 	openDurationMs: number;
 	/** The staged dispatch requesting admission, when this advance guards one. */
-	admission?: { batchId: string; laneId: string };
+	admission?: { batchId: string; laneId: string } | undefined;
 	/** Latest-record signals for every dispatch lane of the current workflow. */
 	laneSignals: readonly PrReviewCircuitSignal[];
 	/**
@@ -381,11 +402,13 @@ export interface PrReviewCircuitAdvanceInput {
 	 * The gate supplies it only when it read the recorded probe's batch/lane,
 	 * which structurally drops late results from older generations.
 	 */
-	probeObservation?: {
-		terminalStatus: string;
-		signal: PrReviewCircuitSignal | null;
-		terminalAtMs: number;
-	};
+	probeObservation?:
+		| {
+				terminalStatus: string;
+				signal: PrReviewCircuitSignal | null;
+				terminalAtMs: number;
+		  }
+		| undefined;
 }
 
 export type PrReviewCircuitAdvanceResult =
@@ -566,5 +589,81 @@ export function advancePrReviewCircuit(
 		reason: 'circuit_open',
 		changed: true,
 		record: cooled,
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Sanctioned gate-side transitions (issue #2385: previously inline record
+// constructions in pr-workflow-gate.ts — the ONLY places these shapes may be
+// built outside advancePrReviewCircuit's own branches)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the effective resilience policy record from optional config. Every
+ * default comes from `DEFAULT_PR_REVIEW_RESILIENCE_CONFIG` (single source);
+ * a hardcoded literal here would drift from the config schema (issue #2385
+ * recurrence class G-2).
+ */
+export function resolvePrReviewResiliencePolicy(
+	policy?: PrReviewResilienceConfig,
+): PrReviewResiliencePolicyRecord {
+	const defaults = DEFAULT_PR_REVIEW_RESILIENCE_CONFIG;
+	return {
+		enabled: policy?.enabled ?? defaults.enabled,
+		canaryProbeMs: policy?.canary_probe_ms ?? defaults.canary_probe_ms,
+		statusProbeTimeoutMs:
+			policy?.status_probe_timeout_ms ?? defaults.status_probe_timeout_ms,
+		correlatedFailureThreshold:
+			policy?.correlated_failure_threshold ??
+			defaults.correlated_failure_threshold,
+		maxRetryAttemptsAfterInitial:
+			policy?.max_retry_attempts_after_initial ??
+			defaults.max_retry_attempts_after_initial,
+		circuitOpenDurationMs:
+			policy?.circuit_open_duration_ms ?? defaults.circuit_open_duration_ms,
+	};
+}
+
+/**
+ * Issue #2382 re-enable semantics (issue #2385: moved behind the machine).
+ * Re-enabling resilience after a live disable starts from a fresh v2 CLOSED
+ * generation with an evidence waterline at `nowMs` — pre-disable evidence can
+ * never resurrect. Generation strictly increases.
+ */
+export function resetPrReviewResilienceForReEnable(args: {
+	previousCircuit?: PrReviewCircuitRecord | null;
+	policy: PrReviewResiliencePolicyRecord;
+	nowMs: number;
+}): PrReviewCircuitRecordV2 {
+	const previousGeneration =
+		args.previousCircuit && 'version' in args.previousCircuit
+			? args.previousCircuit.generation
+			: 1;
+	return {
+		...freshRecord(args.nowMs, true),
+		generation: previousGeneration + 1,
+	};
+}
+
+/**
+ * Issue #2382 review (PRR-002) rolled-back-probe transition (issue #2385:
+ * moved behind the machine). A rolled-back HALF_OPEN probe can never produce
+ * a terminal record — the rollback's own precondition is that the batch has
+ * zero delegation records — so leaving the probe in place would wedge the
+ * circuit on probe_in_flight forever. End the probe lifecycle exactly the way
+ * an ignored outcome does: state stays OPEN with a restarted recovery
+ * cooldown, and no contributor, generation, or waterline changes.
+ */
+export function rollbackPrReviewCircuitProbe(
+	circuit: PrReviewCircuitRecordV2,
+	nowMs: number,
+	openDurationMs: number,
+): PrReviewCircuitRecordV2 {
+	if (circuit.state !== 'HALF_OPEN' || !circuit.probe) return circuit;
+	return {
+		...circuit,
+		state: 'OPEN',
+		openUntil: new Date(nowMs + openDurationMs).toISOString(),
+		probe: undefined,
 	};
 }

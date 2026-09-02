@@ -1,32 +1,37 @@
-import { randomUUID } from 'node:crypto';
-import * as fsp from 'node:fs/promises';
-import * as path from 'node:path';
-import lockfile from 'proper-lockfile';
-import { z } from 'zod';
-import { PrReviewRunIdSchema } from '../background/pr-review-contract.js';
-import {
-	prWorkflowSessionFileStem,
-	readPrReviewReentryBindingContext,
-} from './pr-workflow-gate.js';
-import { validateSwarmPath } from './utils.js';
-
 /**
- * Correlated one-use reviewer re-entry authorization (issue #2383).
+ * PR-review authorization boundary (issues #2383, #2385).
  *
- * Replaces prompt-text inspection (`MODE: PR_REVIEW`) as the ONLY way a
- * direct Task dispatch of `reviewer`/`test_engineer` may bypass the generic
- * Stage-A task-workflow requirement. The PR workflow controller issues an
- * authorization bound to the exact active session, workflow, run, base/head
- * SHA, worktree revision digest, role, and gate generation; the Task
- * delegation gate consumes it atomically, exactly once. Stale, cross-session,
- * wrong-role, replayed, expired, or revision-drifted requests fail closed to
- * the normal gating path.
+ * Correlated one-use reviewer re-entry authorization, moved behind the
+ * `src/pr-review/` boundary (issue #2385). This module replaces prompt-text
+ * inspection (`MODE: PR_REVIEW`) as the ONLY way a direct Task dispatch of
+ * `reviewer`/`test_engineer` may bypass the generic Stage-A task-workflow
+ * requirement. The PR workflow controller issues an authorization bound to
+ * the exact active session, workflow, run, base/head SHA, worktree revision
+ * digest, role, and gate generation; the Task delegation gate consumes it
+ * atomically, exactly once. Stale, cross-session, wrong-role, replayed,
+ * expired, or revision-drifted requests fail closed to the normal gating
+ * path.
+ *
+ * Binding verification: the CURRENT gate binding (head/revision/generation)
+ * is supplied by the owning gate through a bound reader
+ * (`bindPrReviewReentryBindingReader`) — the boundary must not import the
+ * orchestration gate back. The gate binds its
+ * `readPrReviewReentryBindingContext` at module init.
  *
  * Persistence: `.swarm/pr-review/reentry-authorizations/<session-stem>.json`,
  * guarded by a `proper-lockfile` lock (the same dependency the candidate
  * sidecar store uses). Bounded: at most MAX_ACTIVE_AUTHORIZATIONS unconsumed
  * authorizations per session; expired/unconsumed records are pruned on write.
  */
+
+import { randomUUID } from 'node:crypto';
+import * as fsp from 'node:fs/promises';
+import * as path from 'node:path';
+import lockfile from 'proper-lockfile';
+import { z } from 'zod';
+import { PrReviewRunIdSchema } from '../background/pr-review-contract.js';
+import { validateSwarmPath } from '../hooks/utils.js';
+import { prWorkflowSessionFileStem } from './persistence.js';
 
 export type PrReviewReentryRole = 'reviewer' | 'test_engineer';
 
@@ -50,6 +55,44 @@ export interface PrReviewReentryAuthorizationRecord {
 	expiresAt: string;
 	consumedAt?: string;
 	consumedCallId?: string;
+}
+
+/**
+ * The CURRENT active-workflow binding an authorization must match at issue
+ * AND at consume time. Supplied by the owning gate (which reads state through
+ * the persistence boundary) via `bindPrReviewReentryBindingReader`.
+ */
+export interface PrReviewReentryBindingContext {
+	prHeadSha: string;
+	revisionDigest: string;
+	generation: number;
+	workflowInstanceId?: string;
+	runId?: string;
+}
+
+export type PrReviewReentryBindingReader = (
+	directory: string,
+	sessionID: string,
+) => Promise<PrReviewReentryBindingContext | null>;
+
+let bindingReader: PrReviewReentryBindingReader | undefined;
+
+export function bindPrReviewReentryBindingReader(
+	reader: PrReviewReentryBindingReader,
+): void {
+	bindingReader = reader;
+}
+
+async function currentBinding(
+	directory: string,
+	sessionID: string,
+): Promise<PrReviewReentryBindingContext | null> {
+	if (!bindingReader) {
+		throw new Error(
+			'BLOCKED: re-entry authorization binding reader is not bound (the PR workflow gate must bind it at module init)',
+		);
+	}
+	return bindingReader(directory, sessionID);
 }
 
 const PrReviewReentryAuthorizationRecordSchema = z
@@ -125,8 +168,8 @@ async function readAuthorizationFile(
 /**
  * Windows rename-over-existing can fail transiently (EPERM/EBUSY/EACCES/
  * EEXIST) while AV/indexers hold the target; mirror the bounded retry
- * discipline of `renameWithRetry` (src/utils/atomic-write.ts) and
- * `writeAtomicJson` (pr-workflow-gate.ts) instead of single-shot rename.
+ * discipline of `renameWithRetry` (src/utils/atomic-write.ts) and the
+ * persistence adapter's atomic JSON write instead of single-shot rename.
  */
 const RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 200];
 const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY', 'EACCES', 'EEXIST']);
@@ -251,10 +294,7 @@ export async function issuePrReviewReentryAuthorization(
 			'BLOCKED: re-entry authorization requires an active sessionID',
 		);
 	}
-	const binding = await readPrReviewReentryBindingContext(
-		directory,
-		trimmedSession,
-	);
+	const binding = await currentBinding(directory, trimmedSession);
 	if (!binding || binding.prHeadSha !== request.prHeadSha.toLowerCase()) {
 		throw new Error(
 			`BLOCKED: re-entry authorization requires an active PR_REVIEW workflow bound to the declared head (active: ${binding?.prHeadSha ?? '(none)'})`,
@@ -353,10 +393,7 @@ export async function consumePrReviewReentryAuthorization(
 			// Re-verify against the CURRENT gate state BEFORE consuming: the
 			// authorization is generation- and revision-bound, so any workflow
 			// progress since issuance invalidates it.
-			const binding = await readPrReviewReentryBindingContext(
-				directory,
-				trimmedSession,
-			);
+			const binding = await currentBinding(directory, trimmedSession);
 			const candidate = records[index]!;
 			if (
 				!binding ||

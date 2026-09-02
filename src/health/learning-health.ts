@@ -385,17 +385,6 @@ function rememberPersistDirectory(directory: string): void {
 	}
 }
 
-function boundedDirectoryMap<T>(map: Map<string, T>, key: string): void {
-	// FIFO-evict the oldest directory entry when the per-directory map count
-	// is unbounded by construction (final-critic finding 1: no unbounded
-	// module maps — AGENTS.md invariant 8).
-	while (map.size >= MAX_TRACKED_DIRECTORIES && !map.has(key)) {
-		const oldest = map.keys().next().value;
-		if (oldest === undefined) break;
-		map.delete(oldest);
-	}
-}
-
 export const _internals: {
 	now: () => number;
 	emitTelemetry: (payload: Record<string, unknown>) => void;
