@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.162.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.162.0...v7.162.1) (2026-09-02)
+
+
+### Bug Fixes
+
+* **pr-review:** typed reducer decomposition and recurrence guardrails (PR 5/5, issue [#2385](https://github.com/ZaxbyHub/opencode-swarm/issues/2385)) ([ae7fc72](https://github.com/ZaxbyHub/opencode-swarm/commit/ae7fc72b31bde55f0f236eed3f79067585754863))
+
 ## [7.162.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.161.1...v7.162.0) (2026-09-02)
 
 
