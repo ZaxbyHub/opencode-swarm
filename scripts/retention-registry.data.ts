@@ -484,7 +484,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		lockModel: 'withEvidenceLock agent=background on every mutation (:143-146); reads lock-free',
 		crashBehavior:
 			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1262-1274)',
-		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (close.ts:453-455); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, close.ts:448-456 docblock)',
+		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (close.ts:454-456); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, close.ts:449-457 docblock)',
 		closeArrayMembership: {
 			'background-delegations.jsonl': 'archive-only',
 			'background-delegations.checkpoint.json': 'archive-only',
@@ -1920,7 +1920,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		legacyCompatibility: 'hive/link resolution via link.json; cohort stores resolved through identity',
 		healthSignal: 'cap eviction + archive sweeps',
 		owner: 'this-gate',
-		disposition: { kind: 'not-a-defect', proof: 'Configured entry cap with priority-aware eviction, in-place archival, and deliberate cross-session retention (src/hooks/knowledge-store.ts:836-966; close.ts:453-455).' },
+		disposition: { kind: 'not-a-defect', proof: 'Configured entry cap with priority-aware eviction, in-place archival, and deliberate cross-session retention (src/hooks/knowledge-store.ts:836-966; close.ts:454-456).' },
 	},
 	{
 		id: 'knowledge-events',
