@@ -1,6 +1,6 @@
 # opencode-swarm — first-class plugin review (v7.160.2, 2026-09-01/02)
 
-> **Status: VERIFIED, with one stated exception.** All 360 candidate findings raised by the explorer lanes passed through an independent reviewer context, and every finding the reviewer confirmed at HIGH or CRITICAL severity was then challenged by a separate critic context. Section 3 lists only findings that survived both gates; disproved and overturned candidates are in section 3.6 so the reasoning can be audited. The exception is section 3.5: defects that reviewers noticed while verifying something else were captured as candidates, and most of those were never routed through a gate of their own. Section 3.5 marks each one's status and they must not be read as verified. Explorer artifacts, probe scripts, reproduction harnesses and the raw GitHub inventory live outside the repository and are referenced by path in the appendix.
+> **Status: VERIFIED, with one stated exception.** All 364 candidate findings raised by the explorer lanes passed through an independent reviewer context, and every finding the reviewer confirmed at HIGH or CRITICAL severity was then challenged by a separate critic context. Section 3 lists only findings that survived both gates; disproved and overturned candidates are in section 3.6 so the reasoning can be audited. The exception is section 3.5: defects that reviewers noticed while verifying something else were captured as candidates, and most of those were never routed through a gate of their own. Section 3.5 marks each one's status and they must not be read as verified. Explorer artifacts, probe scripts, reproduction harnesses and the raw GitHub inventory live outside the repository and are referenced by path in the appendix.
 
 ## Contents
 
@@ -10,9 +10,10 @@
 - [3. Findings](#3-findings) — [index](#31-confirmed-findings-index) · [detail](#32-confirmed-findings-detail) · [low and info](#33-confirmed-low-and-info-findings-compact) · [disputed severities](#34-severities-the-report-level-critic-disputes) · [reviewer-discovered](#35-reviewer-discovered-candidates) · [disproved](#36-disproved-and-overturned-candidates)
 - [4. Subsystem summaries](#4-subsystem-summaries-and-coverage-gaps)
 - [5. Gap analysis](#5-gap-analysis-against-a-first-class-opencode-plugin) — what a first-class plugin needs, what this one does
-- [6. Verification record](#6-verification-record) — every batch, every gate, and [what the current default branch shows](#61-are-these-findings-still-present-on-the-current-default-branch)
+- [6. Verification record](#6-verification-record) — every batch, every gate, [what the current default branch shows](#61-are-these-findings-still-present-on-the-current-default-branch), and [the live PR-review failure](#62-the-live-pr-review-failure-of-2026-09-02)
 - [7. The replacement roadmap, validated](#7-the-replacement-roadmap-validated) — issue by issue, plus [the open pull requests](#77-the-pull-requests-already-implementing-the-roadmap)
-- [8. Appendix: artifacts](#8-appendix-artifacts)
+- [8. What to change in the issue tracker](#8-what-to-change-in-the-issue-tracker) — amendments to open issues, and the issues that still need opening
+- [9. Appendix: artifacts](#9-appendix-artifacts)
 
 Finding ids in the section 3.1 index link to their detail entry.
 
@@ -229,8 +230,13 @@ change the delivery check to assert against a rendered role rather than the plug
 one injector whose message shape makes the host throw rather than drop. Route the three remaining tool-name comparisons through
 `normalizeToolNameLowerCase`, which already exists in `src/hooks/normalize-tool-name.ts` and which six other modules
 in the same hook chain already use, and add a contract test that loads the host's real tool ids. This is an import
-change at three call sites, not a design task: the primitive is not missing, it was simply not adopted. Transmit the batch id and
-lane id in the controller-bound block that already carries the revision digest. Add the satisfiability lint: every
+change at three call sites, not a design task: the primitive is not missing, it was simply not adopted. Stop requiring a child review lane to
+echo two identifiers it was never given: resolve the batch id and lane id inside
+`submitPrReviewResult` from the authenticated child session, whose delegation record the tool
+already matches on and already reads the parent session from. This is the direction a live failing
+review and a runtime reproduction both point at, and it is stronger than transmitting the two
+identifiers in the contract block, because it removes the dependency on a model copying opaque
+tokens rather than merely making the tokens available (section 6.2). Add the satisfiability lint: every
 gate that requires evidence must have a reachable producer, and every configuration key a gate consults must actually
 be delivered to it — one check that would have caught four separate blockers in this report. Make the installer refuse
 to overwrite a configuration file it cannot parse, and fix the two documentation defects that break installation
@@ -276,7 +282,9 @@ The audit ran under the repository's own swarm-mode contract (`.claude/session/s
 | CHANGELOG / release notes | 690 releases analysed for churn and fix-of-fix chains |
 | Host contract | @opencode-ai/plugin 1.18.3 types (installed) and 1.18.25 (npm latest); anomalyco/opencode source at the matching tag for plugin loading, task tool, permission evaluation, message conversion |
 | Build and runtime | dist built; repro-704 (init deadline) run; init traced under Node; CLI exercised in isolated XDG dirs; hook latency and CPU profiles captured under Node and Bun; new-user journey executed against the built CLI and plugin entry |
-| Verification | 62 reviewer batches over 360 candidates; 360 reviewed; 45 critic decisions; 63 reviewer-discovered candidates |
+| Verification | 62 reviewer batches over 364 candidates; 364 reviewed; 45 critic decisions; 63 reviewer-discovered candidates |
+
+After the three gates closed, four further passes ran under the same contract and are reported separately so their provenance stays visible. A live PR review failed on the maintainer's own machine; the findings that failure raised were written as candidates and gated by two fresh reviewer contexts, and the result is section 6.2 — the only place in this report where a source-derived finding was independently reproduced by a live workflow. Four more contexts each validated one open pull request against its own branch, its issue's stated scope and exit gate, and the findings verified here; those results are section 7.7. Section 8 converts everything into tracker work and is the only section that recommends action rather than reporting evidence. Findings first raised in those later passes carry ids PRREVIEW-10 through PRREVIEW-13 and each names its own gate.
 
 Not covered: the OpenCode host binary itself was not run (no TUI/Desktop in the container); Windows and macOS behaviour is established from source reading and path simulations, not from a Windows host; the knowledge graph tool (`graphify`) is not installed here; issue bodies were read only for #1896, #1914 and the issues named by lanes and reviewers.
 
@@ -414,7 +422,7 @@ Issue #1896 (Windows 11, external author, 30 comments, reopened, stale-warned on
 
 ## 3. Findings
 
-360 candidates entered verification. Outcome: **344 confirmed** (CRITICAL 3, HIGH 27, MEDIUM 134, LOW 164, INFO 16), 15 disproved by the reviewer, 0 overturned by the critic, 0 left unverified by the reviewer, 0 not yet reviewed. Severity shown is the post-verification severity (critic > reviewer > explorer). "Runtime" marks findings whose reviewer or critic exercised the behaviour rather than reading it.
+364 candidates entered verification. Outcome: **347 confirmed** (CRITICAL 3, HIGH 27, MEDIUM 137, LOW 164, INFO 16), 16 disproved by the reviewer, 0 overturned by the critic, 0 left unverified by the reviewer, 0 not yet reviewed. Severity shown is the post-verification severity (critic > reviewer > explorer). "Runtime" marks findings whose reviewer or critic exercised the behaviour rather than reading it.
 
 ### 3.1 Confirmed findings (index)
 
@@ -545,6 +553,9 @@ Issue #1896 (Windows 11, external author, 30 comments, reopened, stale-warned on
 | [PROMPTS-4](#prompts-4-medium) | MEDIUM | CONFIRMED | n/a | prompts | Language-constraint injection keys only on a literal src/ path in the task description (never files_touched), so non-src layouts get no per-language … |  | yes |
 | [PROMPTS-5](#prompts-5-medium) | MEDIUM | CONFIRMED | n/a | prompts | Coder/architect prompts and bundled skills bake this plugin's own repo conventions into every user project | #1496 #1806 |  |
 | [PROMPTS-6](#prompts-6-medium) | MEDIUM | CONFIRMED | n/a | prompts | Prompts mandate 'Emit JSONL event …' but no agent has an event tool; two named events are absent from the event contract |  |  |
+| [PRREVIEW-10](#prreview-10-medium) | MEDIUM | CONFIRMED | n/a | prreview | A lane child IS governed by its parent's PR_REVIEW gate (the plugin resolves child->parent through the delegation ledger before enforcing), but pr_wo… | #2075 #2242 | yes |
+| [PRREVIEW-11](#prreview-11-medium) | MEDIUM | CONFIRMED | n/a | prreview | swarm-pr-review SKILL.md assigns the child-bound submit_pr_review_result to the CONTROLLER twice - inside the 'Controller order is exact' sequence (:… | #2384 | yes |
+| [PRREVIEW-12](#prreview-12-medium) | MEDIUM | CONFIRMED | n/a | prreview | The delegation ledger's correlationId === subagentSessionId === child session id invariant is pinned only on the fallback-artifact envelope, never on… | #2034 #2045 #2385 | yes |
 | [PRREVIEW-2](#prreview-2-medium) | MEDIUM | CONFIRMED | DOWNGRADED | prreview | Architect PR_REVIEW stub (977/983) and the session.idle auto-wake prompt (response-gate 365) still order abort_pr_workflow after exhausted retries / … | #2383 #2380 #2375 | yes |
 | [PRREVIEW-3](#prreview-3-medium) | MEDIUM | CONFIRMED | n/a | prreview | Both swarm-pr-review adapters (.claude/.agents line 16) say 'report BLOCKED merely because the controller is unavailable/absent' (dropped 'Never'), c… | #1965 |  |
 | [PRREVIEW-8](#prreview-8-medium) | MEDIUM | CONFIRMED | n/a | prreview | No test exercises the production settlement path (rendered child prompt -> child submits with ids it can actually see -> receipt credited); all submi… | #2384 #2380 |  |
@@ -4320,6 +4331,69 @@ User impact: Dead instructions; promised analytics never exist.
 
 Reproduce: grep -rn "coder_self_audit\\|coder_presubmit_results\\|reviewer_substance_check" src --include=*.ts \| grep -v test \| grep -v src/agents/ — only type/listing hits.
 
+#### PRREVIEW-10 (MEDIUM)
+
+**A lane child IS governed by its parent's PR_REVIEW gate (the plugin resolves child->parent through the delegation ledger before enforcing), but pr_workflow_status resolves the gate from the raw child sessionID only, so the gate's own designated observation tool reports `no-active-gate` and prescribes `/swarm pr-review` — a command surface no lane session has — to a session that is in fact gated**
+
+Lane: prreview. Kind: diagnosability. Verification chain: explorer HIGH → reviewer CONFIRMED MEDIUM. Related issues: #2075 #2242.
+
+Evidence (as re-read by the reviewer):
+
+- `src/index.ts:3705` — `await prWorkflowSessionResolver.resolve(input.sessionID);`
+- `src/hooks/pr-workflow-session-resolver.ts:96` — `if (await readPrWorkflowGateState(options.directory, current)) 				return current;  			let parent = parents.get(current); 			if (!parent) { 				parent = findByCorrelationId( 					options.directory, 		 …`
+- `src/tools/pr-workflow-status.ts:438` — `execute: async (_args: unknown, directory: string, ctx?: ToolContext) => 			executePrWorkflowStatus(directory, ctx?.sessionID),`
+- (7 further citations in the verdict file)
+
+Reviewer: I re-derived the mechanism end to end at 3bbad17 and then reproduced it at runtime. (1) DISTINCT SESSION: dispatch_lanes_async creates each lane child through `args.session.create(buildLaneSessionCreateArgs(...))` (dispatch-lanes.ts:2218) and takes `result.data.id` as the child session id (2244-2249); buildLaneSessionCreateArgs (5366-5385) puts the ACTIVATING session in `body.parentID`, so parent and child are always different ids. Gate state is keyed per session: workflowGateStateRelativePath = `pr-workflow-gates/<prWorkflowSessionFileStem(sessionID)>.json` (pr-review/persistence.ts:43-60), and readPrWorkflowGateState reads only that path (pr-workflow-gate.ts:1733-1750). My probe confirms it: the gate directory held exactly `ses_parent_A-2624e1e75163.json` and the child's read returned null. (2) A PARENT-RESOLUTION PATH EXISTS AND IS ALREADY WIRED — this is where the candidate was materially incomplete. src/index.ts:3704-3717 calls `prWorkflowSessionResolver.resolve(input.sessionID)` and passes the RESULT (not the raw session) into enforcePrWorkflowToolBefore. createPrWorkflowSessionResolver (pr-workflow-session-resolver.ts:88-131) walks up to 16 ancestors, taking the parent from an in-memory session.created/updated map, then from `findByCorrelationId(directory, current)?.parentSessionId` (the delegation ledger), then from `session.get().parentID`, and returns the first ancestor that owns a durable gate. My probe: `resolver.resolve('ses_child_001')` returned `ses_parent_A`. So the child IS under the parent's PR_REVIEW gate. (3) ADMISSION: pr_workflow_status carries `prWorkflow: { modes: ['PR_REVIEW','PR_FEEDBACK'], capability: 'observe' }` (tool-metadata.ts:684-692), so getPrWorkflowToolCapability returns 'observe', isTrustedWorkflowTool is true, isNamedReadOnlyTool is true, and the PR_REVIEW branch admits it (pr-workflow-gate.ts:10756-10761). Probe: enforcePrWorkflowToolBefore(dir, resolvedParent, 'pr_workflow_status', {}) -> ADMITTED, while the same child's `bash` was BLOCKED. So the finding's premise strengthens rather than changes: the tool is not merely reachable, it is the tool the gate's own denial message names, twice (pr-workflow-gate.ts:11986 and 12348 both append 'Observe ... with the pr_workflow_status tool'). (4) NO RESOLUTION IN THE TOOL: pr_workflow_status.execute passes `ctx?.sessionID` straight through (pr-workflow-status.ts:438-439) to executePrWorkflowStatus, which reads the gate at that exact session (389-392) and, on null, emits `{active:false, reason:'no-active-gate'}` (308) and the nextStep at 286. I searched every reference to prWorkflowSessionFileStem, WORKFLOW_GATE_DIR, readPrWorkflowGateState* and findByCorrelationId: no path resolves a parent gate for this tool. (5) THE ADVICE IS UNFOLLOWABLE: activatePrWorkflow is reached from commands/registry.ts:342 and :376 with `ctx.sessionID` from the chat/CLI command surface — a subagent lane has no slash-command surface. The only in-process activation an agent could reach is dispatch_lanes_async (dispatch-lanes.ts:1491-1504), which would activate a SECOND gate keyed on the CHILD, diverging from the parent's workflow rather than revealing it. (6) THE DOCUMENTED INTENT DOES NOT DEFEAT THE CLAIM. The comment at 376-378 forbids ENUMERATING .swarm/pr-workflow-gates/* to 'find the active gate' because that would leak a sibling session's state. Authenticated ancestor resolution is not enumeration and leaks nothing the child is not already governed by — the enforcement path already performs exactly that walk on the same call. The comment constrains the fix shape; it does not make the current behavior correct. RUNTIME PROOF (bun, clone at 3bbad17): with a PR_REVIEW gate on ses_parent_A and a ledger record binding ses_child_001 -> ses_parent_A, pr_workflow_status called with the child's sessionID returned gate={"active":false,"reason":"no-active-gate"} and nextStep='No active PR workflow gate for this session. Activate with `/swarm pr-review <pr-ref>` ...'. SEVERITY CORRECTED HIGH->MEDIUM: nothing is corrupted, no security boundary is crossed, and no work is blocked by this tool; what fails is diagnosis. A blocked lane is routed here by the gate itself and is then told the workflow does not exist, so lane reports assert an environment defect and root cause is misattributed. That is a real, systematically reached correctness defect in an operator-facing diagnostic, but it is not itself workflow-breaking, which is what HIGH would assert here.
+
+Checked: 13 verification steps recorded in the verdict file.
+
+User impact: During a live PR review, every lane the fail-closed PR_REVIEW gate blocks is told by the gate itself to 'Observe current state read-only with the pr_workflow_status tool'. The lane calls it and is told there is no active PR workflow gate for this session and that it must activate one — while it is in fact executing under the parent's gate, which is precisely why it was blocked. The lane therefore reports an environment/workflow defect instead of the real cause, and the operator reading lane reports is sent to the wrong subsystem. In the observed live failure this compounded PRREVIEW-1: lanes whose structured submission was rejected for missing identifiers called the one diagnostic they could reach and were told the workflow did not exist.
+
+Reproduce: Read the four cited spans. Then establish, from source, (a) that a lane child dispatched through dispatch_lanes_async runs under a session id distinct from the activating session's, and (b) that no code path resolves a child's parent gate for this tool. Contrast with src/hooks/pr-workflow-gate.ts:19 … (full recipe in the verdict file)
+
+#### PRREVIEW-11 (MEDIUM)
+
+**swarm-pr-review SKILL.md assigns the child-bound submit_pr_review_result to the CONTROLLER twice - inside the 'Controller order is exact' sequence (:161) and in the Profile A controller-tool detection list (:69) - contradicting the same file (:106), the architect prompt, the lane prompt templates and the tool's own registry ownership**
+
+Lane: prreview. Kind: prompt-contract. Verification chain: explorer MEDIUM → reviewer CONFIRMED MEDIUM. Related issues: #2384.
+
+Evidence (as re-read by the reviewer):
+
+- `.opencode/skills/swarm-pr-review/SKILL.md:158` — `Controller order is exact: bind the immutable head/base range; dispatch,`
+- `.opencode/skills/swarm-pr-review/SKILL.md:161` — `submit exactly one `submit_pr_review_result` receipt for each base/micro`
+- `.opencode/skills/swarm-pr-review/SKILL.md:162` — `discovery lane and then stop; persist post-explorer findings; run reviewers;`
+- (19 further citations in the verdict file)
+
+Reviewer: I re-derived the whole chain from origin/main (3bbad17) and confirmed it at runtime. (a) SKILL.md:158-166 is one sentence opening 'Controller order is exact:' whose every other clause is an unambiguous controller verb (bind / dispatch / settle / parse / evaluate / persist / run / complete); the clause at :161-162 is the sole outlier and it is verbatim LANE-facing text. The identical phrasing appears where the call is correctly assigned to the lane: SKILL.md:1128 ('A base lane ... must submit exactly one structured CLEAN result and then stop'), references/prompt-templates.md:76-79 and :124-127 (inside the literal base/micro explorer prompt bodies, 'You are a base explorer ... call submit_pr_review_result exactly once ... and then stop'), src/tools/dispatch-lanes.ts:370-377 and :5216-5219 (the paragraph is injected ONLY when normalizedMode.token is 'swarm-pr-review:base' or 'swarm-pr-review:micro', i.e. into lane prompts), and src/agents/architect.ts:976, which states the controller's actual obligation as 'require exactly one submit_pr_review_result call and then stop'. The clause is also self-contradictory in place: 'and then stop' is followed inside the SAME sentence by 'persist post-explorer findings; run reviewers; run critics; then persist the final artifact and complete the workflow' - a controller cannot stop and then continue. So the sentence does assign the call to the controller. (b) Mirrors: .claude/skills/swarm-pr-review/SKILL.md and .agents/skills/swarm-pr-review/SKILL.md are 18-line thin adapters that delegate to the .opencode canonical file and never repeat the clause, so there is no mirror divergence to fix - but no correction either; the four references/ files contain only correct lane-facing assignments. (c)+(d) Runtime, not inference: I built an isolated checkout at 3bbad17 (gate file sha256-identical to origin/main), wrote an active PR_REVIEW gate state for a controller session plus one real swarm-pr-review:base child delegation, and called the real code. enforcePrWorkflowToolBefore(dir, controller, 'submit_pr_review_result', ...) returned {"blocked":false} - the gate ADMITS it, because tool-metadata.ts:245 gives it prWorkflow {modes:['PR_REVIEW'],capability:'validate'}, which makes isTrustedWorkflowTool and therefore isNamedReadOnlyTool true at gate.ts:10624-10636, satisfying isAllowedReviewTool at gate.ts:10748-10751. It is NOT blocked first, so the call falls through to the ledger filter, and executeSubmitPrReviewResult with context.sessionID = the controller returned exactly {"success":false,"status":"rejected","reason":"expected one exact child delegation, found 0"} - the precise string from gate.ts:1789. The same envelope submitted with the child's sessionID passed that filter and proceeded to createPrReviewGateContext (it then failed only on my synthetic 40-'a' head SHA not being a real git object - a fixture artifact, not a defect), proving the asymmetry is caller-role, exactly as claimed. (e) The contradiction is broader than proposed, and this is the sharper half of the finding. SKILL.md:65-67 orders the session to detect its profile 'by checking the actual tool list - never assume from the harness name, and never guess', and SKILL.md:69 then lists submit_pr_review_result as one of eight 'controller tools ... available in this session' for Profile A (SKILL.md:99's Profile A 'Ledger persistence' cell repeats it). The controller structurally never has it: tool-metadata.ts:241-246 declares agents: [], the ToolMeta contract at tool-metadata.ts:23-24 defines that as 'Empty = overlay-only', AGENT_TOOL_MAP (tool-metadata.ts:1054-1064) is built by inverting `agents`, and constants.ts:338-343 states the child map 'is deliberately consumed only by dispatch_lanes' base/micro child tool overlay; merging it into ordinary agent configs would expose the submission capability outside an exact controller-bound delegation' - consumed at dispatch-lanes.ts:4646-4650, which enables it only for mode 'swarm-pr-review:base'/'swarm-pr-review:micro'. I ran this too: of the eight tools SKILL.md:69 names, seven are in AGENT_TOOL_MAP.architect and submit_pr_review_result is the only false, and its AGENT_TOOL_MAP owner set is []. So a genuine Profile A controller that follows SKILL.md:65-67 literally finds its actual tool list does not match SKILL.md:69's Profile A signature. Both defects live in the same file and both point the submission at the wrong session. SKILL.md:106 already says the right thing ('Profile A therefore uses the child-bound submit_pr_review_result tool as its supported baseline'), as do the tool description at submit-pr-review-result.ts:54 and tool-metadata.ts:243, which makes this an internal contradiction rather than a coherent (if wrong) design.
+
+Checked: 21 verification steps recorded in the verdict file.
+
+User impact: A Profile A controller that follows SKILL.md literally hits the defect twice. At profile detection (SKILL.md:65-69) its real tool list contains seven of the eight named 'controller tools' and never submit_pr_review_result, so a genuine Profile A session has textual grounds to mis-detect itself as Profile B and abandon the mechanically enforced receipt gate for the merely procedural one. At settlement (SKILL.md:161) it is told to make the call itself; the PR_REVIEW gate admits the call rather than blocking it, so it reaches the ledger and fails with 'expected one exact child delegation, found 0' - a message about delegation arithmetic that never names the real cause (wrong caller role), inviting retries. No durable state is corrupted: the reducer is never reached and the receipt path stays fail-closed.
+
+Reproduce: Quote the full paragraph at SKILL.md:161 and the Profile A controller-tool list at :65-69; check the .claude and .agents mirrors and references/prompt-templates.md; establish from source and at runtime whether the PR_REVIEW gate admits the call from the controller session or blocks it first; enumera … (full recipe in the verdict file)
+
+#### PRREVIEW-12 (MEDIUM)
+
+**The delegation ledger's correlationId === subagentSessionId === child session id invariant is pinned only on the fallback-artifact envelope, never on the ledger record or at any of its three producers, while the PR-workflow session resolver and the exactly-one submission filter read the same record through the two different fields**
+
+Lane: prreview. Kind: unenforced-invariant. Verification chain: explorer MEDIUM → reviewer CONFIRMED MEDIUM. Related issues: #2034 #2045 #2385.
+
+Evidence (as re-read by the reviewer):
+
+- `src/tools/dispatch-lanes.ts:2492` — `correlationId: sessionId,`
+- `src/tools/dispatch-lanes.ts:2494` — `subagentSessionId: sessionId,`
+- `src/tools/dispatch-lanes.ts:3997` — `correlationId: createdSessionId,`
+- (21 further citations in the verdict file)
+
+Reviewer: Producers, fold and consumers all verify, and I found one real (narrow) enforcement point that corrects the candidate's 'enforced nowhere'. Producers: exactly three call sites of recordPendingDelegationDetailed exist outside the module (git grep) and all three set the two fields to the same value - dispatch-lanes.ts:2492-2494 (async lane, `correlationId: sessionId` / `subagentSessionId: sessionId`), dispatch-lanes.ts:3997-3999 (blocking lane, both `createdSessionId`), delegation-gate.ts:4739-4741 (native Task, both `subagentSessionId`, via the typed indirection at delegation-gate.ts:2850-2854). Fold: readDelegations (pending-delegations.ts:2384-2395) returns loadFoldedState's map, which is keyed by correlationId (pending-delegations.ts:1399 `records.set(record.correlationId, record)`; the doc at :2372-2374 says 'fold the store to the latest snapshot per correlationId'). Consumers, and this is the precise dependence the candidate under-stated: the two mechanisms read the SAME record through DIFFERENT fields, each interpreting its field as 'the child session id'. pr-workflow-session-resolver.ts:101-104 calls findByCorrelationId(directory, current) where `current` is a SESSION id, so it needs correlationId === child session id; pr-workflow-gate.ts:1780-1785 filters `record.subagentSessionId === child` where `child` is the authenticated caller session, so it needs subagentSessionId === child session id. Only the equality of the two fields makes both readings agree. I verified the resolver end of this at runtime: with one recorded swarm-pr-review:base delegation, resolve(CHILD) returned 'ses_controller_1'. The resolver is wired straight into the fail-closed tool gate at index.ts:3704-3717 (`prWorkflowSessionResolver.resolve(input.sessionID)` feeding enforcePrWorkflowToolBefore), so this is the load-bearing path, not a diagnostic. Enforcement: RecordSchema (pending-delegations.ts:877-944) declares correlationId at :885 and subagentSessionId at :887 as independent `z.string().min(1)` and closes with `.strict()` at :944 and NO superRefine - the candidate's core claim, verified. buildPendingRecord (:2483-2488) copies both straight from the input with no assertion. CORRECTION: the equality IS pinned once, at FallbackArtifactSchema's superRefine (pending-delegations.ts:954-964, `value.record.subagentSessionId !== value.correlationId`), but that guards only the fallback-artifact envelope for a pending record - it never runs on the ledger record itself or on any producer, so it constrains nothing on the paths the two consumers use. Beyond that I searched exhaustively and found nothing: no scripts/check-*.ts mentions either field (git grep over scripts/** returns only prose in retention-registry.data.ts:626/739/748); no test asserts record.correlationId === record.subagentSessionId (the many test hits set them equal in fixtures, which pins nothing if a producer stops doing so); and every in-src equality comparison between the two names is cross-record, not intra-record (pending-delegations.ts:4684-4685 primary vs fallback, delegation-gate.ts:2876-2877 existing vs incoming). Stronger than the candidate claimed: the store already accepts violating records today, and a shipped test helper builds them - tests/helpers/pr-workflow-lane-fixtures.ts:75 writes `subagentSessionId: laneSubagentSessionId(correlationId)` = `sub-<correlationId>` (:97-99), and its doc comment at :61 asserts as fact 'The delegation store derives `subagentSessionId` as `sub-<correlationId>`', which is false against all three real producers. Several dispatch-lanes suites do the same (dispatch-lanes-pending-liveness-collect.test.ts:88, dispatch-lanes-pending-liveness-advisory.test.ts:73, dispatch-lanes-lane-delivery-cache.test.ts:179). So the codebase carries a documented-but-wrong derivation rule for the very field pair nothing checks. Concretely, if a fourth producer set correlationId to anything other than the child session id: (1) the resolver's ledger lookup at resolver.ts:101-104 misses, and it falls through to the bounded session.created/updated parent map (:99) and then session.get parentID (:106-125); if neither is available it returns `original` (:126, :130), so enforcePrWorkflowToolBefore reads gate state for the child's own id, finds none, and returns early at pr-workflow-gate.ts:10512-10553 - the lane then runs with NO PR_REVIEW containment at all (writes, non-read-only shell and checkout all admitted). That is a fail-OPEN degradation of a fail-closed gate, softened only by two fallbacks. (2) If two records collided on a duplicated correlationId the fold at :1399 would silently drop one, and submitPrReviewResult's filter would reject the surviving lane's genuine receipt with 'expected one exact child delegation, found 0'. No current producer violates the invariant, so this is a latent robustness gap, not a live bug - which is why I hold it at MEDIUM rather than higher.
+
+Checked: 15 verification steps recorded in the verdict file.
+
+User impact: No user-visible symptom today - all three producers hold the invariant, so the PR-review child gate and the exactly-one receipt filter both work. The exposure is to future change: nothing in the type system, the Zod record schema, CI, or any test stops a fourth delegation producer (or an edit to one of the three) from setting correlationId to a batch/job id instead of the child session id. If that happened, the PR-workflow session resolver would stop mapping a lane's tool calls back to the controller's gate whenever its two weaker fallbacks are unavailable, and enforcePrWorkflowToolBefore would return early on absent state - silently dropping PR_REVIEW read-only containment for that lane rather than failing closed. A correlationId collision would additionally make a lane's valid structured receipt fail as 'expected one exact child delegation, found 0'. A shipped test helper already documents the opposite derivation rule as fact, so the wrong shape is one copy-paste away.
+
+Reproduce: Verify all three producer sites and the fold; verify both consumers' dependence; search exhaustively for a schema refinement, a check:* script or a test pinning the equality before concluding it is unenforced; state concretely what breaks if a fourth producer violated it.
+
 #### PRREVIEW-2 (MEDIUM)
 
 **Architect PR_REVIEW stub (977/983) and the session.idle auto-wake prompt (response-gate 365) still order abort_pr_workflow after exhausted retries / unsatisfiable settled lanes, contradicting the N-of-6 rule the same stub and the skill mandate; a skill test pins the stale text**
@@ -7960,6 +8034,7 @@ Recorded so the reasoning can be audited; none of these should be acted on as wr
 | KNOWLEDGE-3 | MEDIUM | DISPROVED (reviewer) | Memory Task-output memoryProposals/curatorMemoryDecisions capture parses input.args: dead in prod | Same false premise as KNOWLEDGE-2. The host passes args on the Task tool's tool.execute.after (prompt.ts:389-393 and tools.ts:121-125), index.ts forwards the raw input, and parseTaskToolInput reads args.prompt/subagent_type from it, so memoryProposals/curatorMemoryDecisions capture runs in production whenever memory is enabled. The unit tests passing args inline match the real host shape rather t… |
 | PERF-13 | LOW | DISPROVED (reviewer) | RSS grows monotonically ~41 KB per hook cycle with no plateau, on top of a 250 MB (Node) / 182 MB (Bun) baseline from importing the 8.5 MB … | The load-bearing claim — monotonic ~41 KB/cycle with no plateau and an unidentified retainer — is an artifact of sampling RSS without forcing GC. Forcing GC at each checkpoint collapses it to 2.8 KB/cycle over 1000 cycles and it decelerates toward a plateau, with heapUsed/external/arrayBuffers flat; the residual is V8 heap-page growth, i.e. allocator slack. The ~250 MB Node / ~188 MB Bun import b… |
 | PROMPTS-10 | LOW | DISPROVED (reviewer) | COMMAND NAMESPACE blocks in four prompts describe Claude Code ('CC') built-ins although the plugin runs inside OpenCode | The block is intentional and documented end-to-end: the prompt states its rationale (models trained on Claude Code emit bare CC commands regardless of host), docs/commands.md carries the registry, a runtime intercept hook enforces it, and a pinned test guards its presence. The candidate's factual premise (four full copies of CC semantics) is also wrong — only the architect carries the ~1.3KB CC t… |
+| PRREVIEW-13 | LOW | DISPROVED (reviewer) | A child review lane can read controller-owned .swarm workflow evidence under an active PR_REVIEW gate | The candidate's mechanism is exactly right and I reproduced it at runtime; its conclusion that something is 'exposed' is not, because the read admission is the documented design rather than a gap. Mechanism, verified verbatim: pr-workflow-gate.ts:10666-10675 throws only when referencesProtectedWorkflowEvidence && !isInternalWorkflowTool && !isNamedReadOnlyTool && !isReadOnlyShell, and 'read' sits… |
 | PRREVIEW-6 | MEDIUM | DISPROVED (reviewer) | Tier-L micro guidance (one lane per family on every batch, 11 families) is unsatisfiable under MAX_LANES = 8 | The runtime cap is real (zod rejects >8 lanes) but the guidance is satisfiable and says so: SKILL 1172 instructs splitting large matched sets across batches, the per-batch floor exempts subset batches, and the aggregate floor accepts distinct lane tuples across batches. Executed the validator: an 8+3 tier-L split passes both batches. No contradiction, no stall. |
 | config-1-NEW-1 | MEDIUM | DISPROVED (reviewer) | docs/modes.md Epic Mode configuration samples omit turbo.strategy, which the discriminated union requires — pasting them drops the whole tu… | Not a separate defect. This restates the finding its author was verifying: CONFIG-3 (CONFIRMED MEDIUM) already names modes.md:687 and :783 in its corrected title and ran the same loader probe on the same Epic sample. The only element outside CONFIG-3's scope is the configuration.md:1968 clause, and that clause is wrong — the sentence is about the strategy VALUE and its own example carries `strate… |
 | SDK-10 | LOW | DISPROVED (reviewer) | chat.message throws by design; host runs hooks via Effect.promise so the block surfaces as a defect, not a session error | Half the candidate is right (Effect.promise rejection is a defect; the sync prompt handler's mapError cannot convert it) but the stated consequence is wrong on every reachable path. 'exhausted' requires a pending task-model route, whose sole producer is gated on tool === 'Task' while the host emits 'task' — proven by rerunning the routing test with the host-real id: the hook resolves, 0 routes. A… |
@@ -8793,6 +8868,152 @@ The re-check also found defects introduced after the audit base, which this audi
   - `src/pr-review/legacy-transcript-adapter.ts:1060` — `* appear only in this module (`scanTranscriptParsingOutsideAdapter` in`
   - `src/pr-review/guardrails.ts:17` — `* Issue #2385 originally specified a third scanner for transcript-parsing  * locality (the 13 conversion symbols restricted to the legacy adapter),  * but its only test consumer wa`
 
+### 6.2 The live PR-review failure of 2026-09-02
+
+After this audit's findings were recorded, the maintainer ran a real PR review on this repository —
+after the most recent PR-review fix had merged — and it again failed to produce a verdict. That run
+is the strongest evidence in this report, because it is the only place where a finding derived from
+source reading was independently reproduced by a live workflow on a user's own machine. It also
+produced two artefacts that a source reading could not have predicted, and it exposed one defect
+this audit had not found.
+
+**What the live run showed.** The child lanes submitted structured results using lane identifiers
+they had invented — `contract-retry-1` and `correctness-state` — while copying the revision digest
+`30063a0c…` verbatim. That asymmetry is the whole proof. The digest is in the controller-authoritative
+contract block; the identifiers are not. The children echoed precisely what they were given and
+fabricated exactly what they were not. Every submission was rejected, no lane settled, the gate
+revision never advanced, and the review ended without a verdict.
+
+An independent model, working from the failing session's own transcript rather than from this audit,
+reached the same root cause: PRREVIEW-1. This audit did not take that at face value. A fresh reviewer
+context, defaulting to DISPROVED, re-derived the mechanism against `origin/main` at `3bbad17` — the
+current default branch, not the audit base — and reproduced it at runtime in a separate clone rather
+than re-reading the earlier verdict.
+
+**The runtime reproduction.** `SubmitPrReviewResultArgsSchema` is `.strict()` with
+`batchId: z.string().trim().min(1).max(120)` and `laneId` likewise, both non-optional and without
+defaults (`src/tools/submit-pr-review-result.ts:6-17`). `submitPrReviewResult`
+(`src/hooks/pr-workflow-gate.ts:1780-1793`) filters the delegation ledger on
+`record.subagentSessionId === child && record.batchId === input.batchId && record.laneId === input.laneId`
+and rejects unless exactly one record matches — and then takes the parent session id *from that same
+record*, so the ledger is already the authority for the binding.
+`applyPrWorkflowPromptContract`'s options are `{ mode?, prHeadSha?, revisionDigest?, scope?, callerFocus? }`
+(`src/tools/dispatch-lanes.ts:5105-5112`), and the block it emits (`:5228-5238`) carries `mode`,
+`workflow_lane`, `owned_workflow_lanes`, `pr_head_sha`, `revision_digest`, `declared_scope`,
+`caller_focus_non_authoritative`, `assigned_item_ids`, `mandatory_lane_checklist` and the budget
+lines. The reviewer rendered that block at `3bbad17` and recorded `has batch_id: false`,
+`has lane_id: false` — and the lane spec's own id did not appear in the child prompt at all. With a
+real ledger record in place, a child guessing either identifier got
+`expected one exact child delegation, found 0`; only the exact, untransmitted pair passed.
+
+The contract block simultaneously instructs the child: "Use exactly the `workflow_lane` and assigned
+IDs above; invented, omitted, or placeholder identifiers do not settle this lane" — while the two
+identifiers the settlement tool actually requires are the ones *not* above. There is no default
+fallback: `pr_review_legacy_transcript_compatibility` is optional with no default and is compared
+`=== true`, so on a default install the legacy transcript path is off.
+
+**A second defect the live run exposed, which this audit had not found.** When those lanes were
+rejected, they called the one diagnostic tool a lane can reach — and were told the workflow did not
+exist. This is now recorded as **PRREVIEW-10**, and the reviewer that gated it found the premise
+stronger than the candidate claimed. A lane child *is* governed by its parent's PR_REVIEW gate:
+`src/index.ts:3705` calls `prWorkflowSessionResolver.resolve(input.sessionID)`, which walks up to
+sixteen ancestors — through the in-memory session map, then
+`findByCorrelationId(directory, current)?.parentSessionId`, then `session.get().parentID` — and
+returns the first ancestor that owns a durable gate. The reviewer probed it: `resolve(child)`
+returned the parent, and `pr_workflow_status` was ADMITTED for that child while `bash` was BLOCKED.
+But `pr_workflow_status` itself resolves the gate from the raw child session id only, so
+`summarizeGate(null)` returns `{ active: false, reason: 'no-active-gate' }`
+(`src/tools/pr-workflow-status.ts:302-308`) and the rendered advice is "No active PR workflow gate
+for this session. Activate with `/swarm pr-review <pr-ref>`" — a chat surface no lane session has.
+The gate's own BLOCKED message names `pr_workflow_status` twice as the remedy. A lane blocked by the
+gate is therefore directed to the one tool that will tell it the gate does not exist.
+
+That is why the live run's lane reports blamed the environment. The failure had two mutually
+reinforcing halves: a rejection that names neither missing input, and a diagnostic that denies the
+workflow exists.
+
+**A third defect, and the likeliest reason the run behaved as a different profile.** The gate that
+reviewed PRREVIEW-10 raised three further candidates; a separate reviewer context gated all three.
+Two were confirmed and one was disproved and reclassified INFO, and one of the confirmed pair
+matters here.
+
+`.opencode/skills/swarm-pr-review/SKILL.md` assigns the child-bound `submit_pr_review_result` to the
+**controller**, twice. At `:161` the clause "submit exactly one `submit_pr_review_result` receipt for
+each base/micro discovery lane and then stop" sits inside the enumeration that begins "Controller
+order is exact:" — and it is verbatim lane-facing text, identical in
+`references/prompt-templates.md:76` and `:124` and in `dispatch-lanes.ts:372` and `:5219`, where it
+is injected only into base and micro lane prompts. The same file contradicts itself at `:106`, and
+`src/agents/architect.ts:976` states the controller's obligation correctly: to *require* the call,
+not to make it. The clause also says "and then stop" immediately before four further controller
+steps. The reviewer proved the consequence at runtime: the PR_REVIEW gate **admits** the call from
+the controller — `blocked: false`, via `prWorkflow capability: 'validate'` — so it reaches the ledger
+filter and returns exactly `expected one exact child delegation, found 0`, the same message a lane
+gets, naming delegation arithmetic rather than the real cause. The identical envelope from the child
+passes that filter.
+
+The sharper half is at `:65-69`. The skill orders profile detection "by checking the actual tool
+list" and names eight Profile A controller tools — and `submit_pr_review_result` is the only one of
+the eight absent from `AGENT_TOOL_MAP.architect`. Its metadata carries `agents: []`; it is
+overlay-only, granted solely to explorer lanes at `dispatch-lanes.ts:4646-4650`. A genuine Profile A
+session that follows the skill's own detection procedure therefore has textual grounds to conclude it
+is Profile B, and to abandon the mechanically enforced receipt gate for the merely procedural one.
+The `.claude` and `.agents` mirrors are thin adapters and carry no correction. This is recorded as
+PRREVIEW-11.
+
+The second confirmed candidate, PRREVIEW-12, is the precondition named below: the ledger invariant
+`correlationId === subagentSessionId` is pinned only on the fallback-artifact envelope
+(`pending-delegations.ts:957`), never on `RecordSchema` and at none of its three producers — while
+the session resolver and the submission filter read the same record through the two different
+fields, so only the equality reconciles them. Its failure mode is fail-open, not fail-closed: if a
+producer broke it, the resolver falls back twice and returns the original session, so
+`enforcePrWorkflowToolBefore` finds no gate state and returns early, and the lane runs with no
+PR_REVIEW containment at all. Records that violate the invariant already exist in the tree —
+`tests/helpers/pr-workflow-lane-fixtures.ts:61` documents a false derivation rule
+(`sub-<correlationId>`) and `:75` writes records that break it — and no CI script or test pins it.
+
+**Which fix is right.** The audit's own remediation named direction B — transmit `batch_id` and
+`lane_id` in the controller-bound block that already carries the revision digest. The reviewer
+assessed both directions and the answer changed.
+
+*Direction A — resolve the identifiers tool-side from the authenticated child session — is sound,
+with two named preconditions.* Uniqueness of one folded ledger record per child session id is
+established by construction and was verified at runtime: all three producers write
+`correlationId === subagentSessionId` (`dispatch-lanes.ts:2492-2494` async lane, `:3997-3999`
+blocking lane, `delegation-gate.ts:4739-4742` native Task); `readDelegations` folds by
+`correlationId` into a Map; and a second write for an existing `correlationId` is refused as a
+conflict, with the fold staying at one record under probe. Retention does not weaken it — live
+records are never evicted and the stale sweep only re-snapshots the same id. Security is not
+weakened but strengthened: the filter's first conjunct is already the authenticated session id, so a
+child can only ever match its own record; the two extra conjuncts prove nothing an attacker could
+not satisfy, and removing them removes an unmet transmission burden rather than an authorization
+check. The preconditions are (1) keep the `preliminary.length !== 1` fail-closed guard and add the
+missing `correlationId === subagentSessionId` refinement to `RecordSchema`, since the invariant that
+two mechanisms now depend on is enforced by no schema check, no CI guard and no test; and (2) fail
+closed on a matched record that carries no `batchId` — the blocking-dispatch record deliberately
+omits it ("NO `batchId` field: async-only surfaces … must stay async-only",
+`dispatch-lanes.ts:3991-3993`) — rather than publishing a receipt with undefined coordinates.
+
+*Direction B has no security consequence, but it is the weaker fix.* The identifiers are correlation
+coordinates, not capabilities; the filter's first conjunct already pins the record to the
+authenticated caller; and both values are single-token by schema, so `classifyControllerTokenField`
+cannot newly reject a valid dispatch. But B leaves the settlement path depending on a language
+model copying two opaque tokens out of a prompt with perfect fidelity. A only *removes* that
+dependency. Ship A; B is belt-and-braces at best.
+
+**What the pull request that claims to fix this actually changes.** PR #2518, whose body opens with
+`Closes #2469`, changes neither mechanism. `src/tools/dispatch-lanes.ts`,
+`src/tools/submit-pr-review-result.ts`, `src/background/pr-review-contract.ts`,
+`src/tools/pr-workflow-status.ts` and `src/hooks/pr-workflow-session-resolver.ts` are all absent from
+its changed-file list; its `pr-workflow-gate.ts` hunks begin at line 98 and then jump to 6507, so
+nothing below 6507 and above 98 is touched, and a base-versus-head diff of the ledger-match span is
+byte-identical. A separate validator rendered the real child prompt on the PR's own head (`ce2b9c8`)
+and found no `batch_id`, `lane_id`, `batchId`, `laneId` or `lanes-` prefix in it, while the same
+prompt still orders the child to call `submit_pr_review_result`; submitting with each identifier a
+child could invent — including the two the live session actually invented — returned
+`expected one exact child delegation, found 0` every time. What #2518 does deliver is real and is
+recorded in section 7.7: ROADNEW-3, ROADNEW-4 and the composite wake-brake progress token, three of
+#2469's seven bullets.
+
 ## 7. The replacement roadmap, validated
 
 On 2026-09-02 the repository's open-issue set was replaced. The roughly 97 issues that were open when this audit began were bulk-closed, each with a comment consolidating it into one of 44 newly created issues organised as Workstreams A through G with titles of the form "PR n of m". That work was done by a coordinated group of language models. This section is an independent validation of it: every issue was read, its factual claims about the codebase were checked against source, and its scope was compared against the findings verified above.
@@ -9260,8 +9481,197 @@ Part of the roadmap is in flight. Each open pull request below was reviewed agai
 
 | PR | Implements | Verdict | Changed | Title |
 |---|---|---|---|---|
+| #2518 | #2469 | SAFE_WITH_CHANGES | +1163/-164 in 10 | fix(pr-workflow): restore review and feedback execution |
+| #2517 | #2474 | NOT_SAFE | +3682/-347 in 85 | fix(path-identity): canonicalize project filesystem identity |
+| #2516 | #2488 | NOT_SAFE | +1612/-320 in 46 | fix(workflow): wire graph-first task attribution |
 | #2515 | #2480 | SAFE_WITH_CHANGES | +5280/-733 in 80 | feat(db): establish the sqlite durable-state foundation and migrate low-risk stores |
 | #2514 | #2477 | NOT_SAFE | +1139/-94 in 26 | fix(ci): root-fix filesystem, process, and test-isolation flakes (issue #2477) |
+
+#### PR #2518 — SAFE_WITH_CHANGES
+
+State: Draft, mergeable_state "blocked", head ce2b9c8ab26d5192c17c4f0129009905d55f238e on refs/heads/codex/fix-2469-pr-review-feedback, base main @ 9360f3b; CI `quality` FAILED (check:test-clock, 1 new blocking violation introduced by this PR) which skipped unit/integration/smoke/security/package-check/coverage-shard and failed `unit-passed`.
+
+Ten files, +1163/-164, all in the delegation/PR-workflow hook layer plus tests. (1) src/hooks/delegation-gate.ts: prepareCoderScope is restructured so an authenticated PR_FEEDBACK scope declaration is resolved FIRST (resolvePrFeedbackScopeDeclaration) for any strict task id, before loadPlanJsonOnly, instead of only inside the old `if (!plan)` branch; the return type becomes a discriminated union `{kind:'pr_feedback'\|'plan'}` and the enabled-gate hook switches from `if (!plan)` to `if (preparedScope.kind === 'pr_feedback')`. The generic Stage-A preflight (resolveEvidenceTaskId + loadPlanJsonOnly + enforceCoderRetryEscalation + the coder_delegated STAGE_A_REQUIRED throw) is skipped when a feedback scope classifies. A `beforePrFeedbackScopeConsume` DI seam is added for interleave tests. (2) src/hooks/pr-workflow-gate.ts: consumePrFeedbackScopeDeclaration now runs entirely inside withSessionStateMutation, takes an `expected` snapshot (declaredAt/revisionDigest/files) and refuses to consume if the record changed, re-asserts verification settlement and current revision digest under the lock, and writes via writeStateWhileLocked; assertPrFeedbackVerificationSettled is split into a state-taking helper. A new exported reserveActivePrReviewReentryAuthorization takes the workflow-session lock, rereads state, derives the binding, and delegates to the authorization store (fixed lock order). enforcePrWorkflowToolBefore's PR_REVIEW branch now reserves an authorization for a single-field, single-role reviewer/test_engineer direct Task and admits it via a new `hasAuthorizedDirectReentry` term. `authorize_pr_review_reentry` is added to PR_REVIEW_CONTROLLER_TOOLS. (3) src/pr-review/authorization.ts: consumePrReviewReentryAuthorization is refactored into reservePrReviewReentryAuthorizationAgainstBinding (binding passed in, not re-read), consumed records are retained until expiry rather than pruned, MAX_ACTIVE_AUTHORIZATIONS now counts only unconsumed records, and a same-callID reservation is idempotent; the old name survives as a compatibility wrapper. (4) src/hooks/pr-workflow-response-gate.ts: the unproductive-wake brake stops keying on `state.revision` alone and instead hashes a composite progress token over the workflow identity, revision, and the exact active delegation tuples (correlationId, batchId, laneId, status, terminal event id, result digest, output ref, structured-receipt semantic digest) read from scanDelegationsForRecovery; a ledger scan that is not `ok` is sticky-uncertain and never earns progress credit, and the first post-recovery snapshot is a baseline, not progress. (5) One release fragment and four test files (three unit, one real-host integration that boots the plugin and drives the actual hook chain). It does NOT touch src/tools/dispatch-lanes.ts, src/tools/submit-pr-review-result.ts, src/tools/pr-workflow-status.ts, src/background/pr-review-contract.ts, src/agents/*, or any SKILL.md.
+
+Against its issue's acceptance criteria: 4 met, 3 partly, 0 unmet.
+
+| Criterion | Status | Evidence |
+|---|---|---|
+| Preserve running lanes on caller wait-budget expiry; collection stays observer-only. | PARTLY | Already shipped before this PR; dead scope. Dead scope — already on the base commit and untouched by this PR. `git diff --name-only 9360f3b..HEAD` does not list src/tools/dispatch-lanes.ts. The observer-only contract is at src/tools/dispatch-lanes.ts:5477 on both base and head: 'The wait budget (timeout_ms) bounds THIS OBSERVER CALL ONLY: its expiry does not cancel, kill, or fail the lanes, and it is not evidence th… |
+| Rebase or transplant open PR #2312 CR/LF controller-contract hardening. | PARTLY | Already shipped before this PR; dead scope. The hardening already exists on the base under a different implementation and PR #2312 is untouched. src/tools/dispatch-lanes.ts:313-317 (identical on base and head, file not in the diff): `const CONTROLLER_FIELD_CONTROL_SEPARATOR_PATTERN = /[\p{Cc}\p{Zl}\p{Zp}]+/gu;` and `function canonicalizeControllerField(value: string) { return value.replace(CONTROLLER_FIELD_CONTROL_S… |
+| Re-anchor all line citations to the post-#2462 src/pr-review/** decomposition (merged as ae7fc72b). | PARTLY | No artifact in the diff re-anchors the issue's citations and the PR does not amend issue #2469 (issue body unchanged, still 'Validated against: main @ 65be8637'). The implementer demonstrably worked against the decomposed layout — src/pr-review/authorization.ts is one of the ten changed files and src/hooks/pr-workflow-gate.ts:104-108 now imports `PrReviewReentryAuthorizationRecord`, `PrReviewReentryBindingContext`, … |
+
+Effect on this audit's verified findings:
+
+| Finding | Effect | Evidence |
+|---|---|---|
+| PRREVIEW-1 | DOES_NOT_FIX | Every element of the mechanism is byte-identical to base. src/tools/dispatch-lanes.ts, src/tools/submit-pr-review-result.ts and src/background/pr-review-contract.ts are absent from `git diff --name-only 9360f3b..HEAD`. The ledger match at src/hooks/pr-workflow-gate.ts:1789 `record.batchId === input.batchId &&` is unchanged (base line 1783; base 1744-1824 diffs clean against head 1750-1830). Rendered-prompt probe on … |
+| ROADNEW-3 | FIXES | The named mechanism — 'the PR_FEEDBACK coder-scope controller is consulted ONLY in the `if (!plan)` branch of prepareCoderScope' — is gone. src/hooks/delegation-gate.ts:283-346 resolves and consumes the declaration before `const plan = await loadPlanJsonOnly(directory);` at :350, and the enabled-gate branch key changed from `if (!plan)` to `if (preparedScope.kind === 'pr_feedback')` (:4137). Both prepareCoderScope c… |
+| ROADNEW-4 | FIXES | Both jaws of the reviewer-confirmed pincer are removed. Jaw 1 (tool blocked by its own gate): src/hooks/pr-workflow-gate.ts:12044 adds 'authorize_pr_review_reentry' to PR_REVIEW_CONTROLLER_TOOLS, so it is an internal workflow tool and no longer has to pass isAllowedPrReviewReadOnlyToolName. Jaw 2 (the Task it authorizes is itself refused by the same unconditional PR_REVIEW branch): pr-workflow-gate.ts:10790-10814 re… |
+| PRREVIEW-2 | DOES_NOT_FIX | src/agents/architect.ts is not in the changed-file list. The contradictory stub text is verbatim on this head: architect.ts:981 still reads '...or if the second retry still cannot close coverage, collect every lane to settlement, do not probe downstream writers or micro lanes, call `abort_pr_workflow`...' alongside the N-of-6 rule at :972 and :983. The auto-wake banner is also unchanged in substance: src/hooks/pr-wo… |
+| PRREVIEW-3 | DOES_NOT_FIX | No SKILL.md is in the diff. .claude/skills/swarm-pr-review/SKILL.md:16 still reads '...treat that as Profile B, not an error: use the native `Agent`/`Task` subagent tool flow, keep the PR publication contract intact, and report BLOCKED merely because the controller is unavailable.' and .agents/skills/swarm-pr-review/SKILL.md:16 still reads '...and report BLOCKED merely because the controller is absent or the only al… |
+| PRREVIEW-8 | DOES_NOT_FIX | No test on this head walks rendered child prompt -> child submits with ids it can see -> receipt credited. `grep -rn 'submit_pr_review_result\|submitPrReviewResult\|executeSubmitPrReviewResult'` across all four changed test files returns nothing. tests/unit/tools/submit-pr-review-result.test.ts:8 still seeds `batchId: 'batch-2384'` out of band. The PR adds a real-host integration test, but it covers the re-entry/pre… |
+
+Defects found in the branch:
+
+| Severity | Where | Problem |
+|---|---|---|
+| MEDIUM |  | pr_workflow_status reports `no-active-gate` to any session that is not the gate's activating session, and its nextStep tells that session to activate a new workflow — an actively misleading diagnostic for a live gate — Mechanism confirmed unchanged on ce2b9c8; src/tools/pr-workflow-status.ts is not in the PR's changed-file list. src/tools/pr-workflow-status.ts:302-306 `function summarizeGate(stat… |
+| HIGH |  | PR #2518 asserts 'Closes #2469' while leaving the single defect that makes #2469's Outcome unachievable entirely untouched, and its invariant audit asserts a ratchet result that is false — 'Closes #2469' is in the body's first line and GitHub records it (issue #2469 `closed_by_pull_requests` -> [2518]). #2469's Outcome is 'A real tier-M PR_REVIEW and PR_FEEDBACK run completes with a verdict withi… |
+| INVARIANT | AGENTS.md #7 — Test writing: bun:test, mock isolation, DI over mock.module (and the repo's test ratchets, enforced by CI `quality`) | The PR introduces one new BLOCKING test-clock violation, which is why CI `quality` fails and every downstream job (unit, integration, smoke, security, package-check, coverage-shard) is skipped and `unit-passed` fails. The PR body asserts the opposite ('test ratchets passed'). |
+| INVARIANT | AGENTS.md #11 — Tool registration + agent-map coherence / project directive 2 'we never ship unwired code' | The PR fixes the unwired authorize_pr_review_reentry path but leaves a larger unwired path in place: submit_pr_review_result is fully registered (src/tools/index.ts:151, manifest.ts:194, tool-metadata.ts:241, PR_REVIEW_CHILD_AGENT_TOOL_MAP in src/config/constants.ts:344-349) and injected into every base/micro child lane, yet no production caller can satisfy its required args. Under the project's … |
+| INVARIANT | AGENTS.md #8 — Session and global state, keyed and bounded / #3 subprocess boundedness | Modest, unproven latency risk only: consumePrFeedbackScopeDeclaration now performs a git-backed revision-digest computation while holding the per-session state lock, which withSessionStateMutation serializes non-reentrantly. |
+| INVARIANT | AGENTS.md #9 — Guardrails / retry semantics (fail-closed authorization stays fail-closed; issue #2469 'no gate weakening') | No weakening found, but one behavior worth an explicit callout: the one-shot re-entry authorization is now consumed by enforcePrWorkflowToolBefore, which runs BEFORE the delegation gate, so a Task the delegation gate later rejects for an unrelated reason still burns the authorization. |
+
+Required before merge:
+
+- Fix the blocking test-clock violation the PR itself introduces at tests/unit/hooks/pr-workflow-response-gate-lane-progress.test.ts:39 (import withFrozenClock from tests/helpers/test-clock.js, or replace `new Date().toISOString()` with a literal). CI cannot go green until this is fixed, and every real test job is currently skipped because of it.
+- Remove or downgrade `Closes #2469` to `Refs #2469`. On merge the current line auto-closes an issue whose stated Outcome and exit gate the diff does not earn, in direct conflict with the issue's own closure contract.
+- Correct invariant-audit line 7 in the PR body, which asserts the test ratchets passed. They did not: `check:test-clock` reports one new blocking violation naming this PR's own new test file.
+- Decide the one-shot re-entry authorization consumption point. It is now consumed by enforcePrWorkflowToolBefore, which runs BEFORE the delegation gate, so a Task the delegation gate later rejects for an unrelated reason still burns the authorization.
+
+Its issue's exit gate — **not reachable** on this head:
+
+> Exit gate: real tier-M PR_REVIEW and PR_FEEDBACK runs on Windows, macOS, and Linux; base/micro/consolidated lanes; resilience off and opt-in on. Relocated from trackers #2375/#2380: close-the-loop evidence lands in this issue.
+
+What still blocks it: PRREVIEW-1 is untouched on this head, so no tier-M PR_REVIEW base or micro lane can settle on a default install. Three links, all verified on ce2b9c8: (a) src/tools/submit-pr-review-result.ts:9-10 still requires caller-supplied `batchId: z.string().trim().min(1).max(120)` and `laneId: z.string().trim().min(1).max(120)`; (b) src/hooks/pr-workflow-gate.ts:1786-1796 still matches `record.subagentSessionId === child && record.batchId === input.batchId && record.laneId === input.laneId` and rejects with `expected one exact child delegation, found ${preliminary.length}` unless exactly one record matches — I diffed base lines 1744-1824 against head lines 1750-1830 and they are byte-identical, and no diff hunk in src/hooks/pr-workflow-gate.ts touches anything below line 6507; (c) the child is never told either identifier. src/tools/dispatch-lanes.ts is NOT in `git diff --name-only 9360f3b..HEAD`, so applyPrWorkflowPromptContract (dispatch-lanes.ts:5105, contract template :5232-5240) still emits only mode / workflow_lane / owned_workflow_lanes / pr_head_sha / revision_digest / declared_scope / caller_focus_non_authoritative / assigned_item_ids / mandatory_lane_checklist / final_response_char_budget. I rendered the actual child prompt on this head through `_test_exports.applyPrWorkflowPromptContract` for a swarm-pr-review:base lane: CONTAINS batch_id: false, CONTAINS batchId: false, CONTAINS 'lanes-': false, CONTAINS lane_id: false, CONTAINS laneId: false. The same prompt orders the child to 'call `submit_pr_review_result` exactly once with the canonical discovery result' (dispatch-lanes.ts:5219) and the contract card states 'assigned_item_ids and workflow_lane come only from the controller block' — i.e. the child is instructed to submit two identifiers it is affirmatively told it does not have. buildLaneSessionCreateArgs (dispatch-lanes.ts:5366-5386) is also unchanged; I ran it and it returns {"body":{"parentID":"parent-1","title":"base-correctness (explorer)"},"query":{"directory":"/tmp"}} — no batch id, and makeBatchId() (:5389) is `lanes-${_internals.now().toString(36)}`, unguessable. I then called executeSubmitPrReviewResult on this head with a valid envelope and each identifier a child could plausibly invent: {batchId:'lanes-guess',laneId:'base:correctness'} -> {"success":false,"status":"rejected","reason":"expected one exact child delegation, found 0"}; {batchId:'batch-1',laneId:'base-correctness'} -> same; {batchId:'contract-retry-1',laneId:'correctness-state'} (the exact ids the audit's live failing session invented) -> same. With no receipt and `pr_review_legacy_transcript_compatibility` defaulting to false (src/background/pr-review-contract.ts:131-135 `return value === true;`), the lane fails closed at src/hooks/pr-workflow-gate.ts:15321-15332 with 'missing structured receipt (legacy transcript adapter disabled)'. Nothing in the repository closes the gap out of band: no skill, agent stub, or tool description instructs the architect to embed the ids in the lane prompt (`grep -rn 'batch_id: ${\|lane_id: ${' src/` returns nothing relevant; .opencode/skills/swarm-pr-review/SKILL.md:911 only says 'record each returned batch_id'; the dispatch_lanes_async `batch_id` arg description at dispatch-lanes.ts:578 says only 'Stable async batch id for later collection; generated when omitted'; src/agents/explorer.ts contains no submit guidance at all). Therefore a tier-M PR_REVIEW on this head still ends NO_COVERAGE/INCOMPLETE on every OS, so the exit gate cannot be satisfied — before even reaching the Windows/macOS/Linux, consolidated-lane, or resilience-opt-in axes, none of which the PR touches or evidences.
+
+Could the issue be closed on this merge? **MUST STAY OPEN.** Merging this PR as written would close #2469 while its stated Outcome and Exit gate remain unreachable. What would remain unfixed: (a) PRREVIEW-1 (CRITICAL, reviewer CONFIRMED, critic UPHELD) — the controller never transmits batchId/laneId to a child lane, so every default Profile A base/micro discovery lane fails 'missing structured receipt (legacy transcript adapter disabled)', coverage is NO_COVERAGE, and a tier-M PR_REVIEW ends INCOMPLETE with zero findings after spending all lane tokens; reproduced on this exact head. (b) PRREVIEW-8 — still no test walking rendered prompt -> child submission -> credited receipt, so (a) stays invisible to CI. (c) PRREVIEW-2 — the architect stub (src/agents/architect.ts:977/981/983) and the auto-wake banner (pr-workflow-response-gate.ts:474) still order abort_pr_workflow in exactly the N-of-6 situations the same stub and the canonical skill say must settle truthfully. (d) PRREVIEW-3 — both swarm-pr-review adapters still carry the inverted 'report BLOCKED merely because the controller is unavailable/absent' sentence. (e) The 'exit gate' evidence itself — no tier-M run on any OS, let alone three, and no consolidated-lane or resilience-opt-in evidence, is attached to the PR or the issue; the issue explicitly says 'close-the-loop evidence lands in this issue' and none has. Two of the issue's seven scope bullets (wait-budget lane preservation, PR #2312 CR/LF hardening) were already satisfied on main before this PR and are dead scope; a third (re-anchor citations) has no verifiable deliverable. So the PR delivers three of the four live bullets — real, well-tested work — but not the one that gates the Outcome.
+
+CI: FAILING and gating. Run 33636875615 on ce2b9c8: `quality` = failure (job 100269871923) with 'New violations (blocking): 1' from `bun run check:test-clock`, naming tests/unit/hooks/pr-workflow-response-gate-lane-progress.test.ts (a file this PR adds). Because `quality` failed, `unit`, `integration`, `smoke`, `security`, `package-check` and `coverage-shard` were all SKIPPED and `unit-passed` = failure. Passing: detect-paths, detect-release, check-title (x2), pr-standards (x2), check-duplicates, drift, rust-sandbox-runner, memory-recall-regression, coverage. The only PR comment is the github-actions drift report ('No drift detected'); there are zero human or bot reviews. mergeable_state is 'blocked' and the PR is a draft. I did not re-run CI; I did reproduce the one blocking failure locally.
+
+What this review could not settle:
+
+- Whether the audit's live failing session (children inventing 'contract-retry-1' / 'correctness-state' as lane ids) ran on a host where the child actually had pr_workflow_status available. I confirmed the default OpenCode Profile A explorer lane does NOT have that tool (tool-metadata.ts:687 agents:['architect']; the lane overlay grants only submit_pr_review_result), so the second defect's 'child lane sees no-active-gate' framing is unproven on the default path even though summarizeGate's mechanism is confirmed. Settling this needs the host and agent config from that session's transcript.
+- Whether a tier-M PR_REVIEW is reachable at all on Windows and macOS. I could only run on Linux, and CI's cross-OS jobs were SKIPPED on this head because `quality` failed, so no OS-matrix evidence exists for ce2b9c8. Settling this needs a green `quality` run followed by the platform matrix, plus the real-run artifacts the issue asks to be pasted into it.
+- Whether the consolidated-lane and resilience-opt-in axes of the exit gate have any blocker beyond PRREVIEW-1. I did not exercise pr_review_resilience.enabled: true or a consolidated (owned_workflow_lanes) lane end to end; the PR does not claim to and the issue explicitly says resilience stays default-off. Settling this needs a run with resilience enabled once the identifier defect is fixed.
+- Whether performing the git-backed revision-digest computation inside the session-state lock (pr-workflow-gate.ts:10490 -> currentPrFeedbackRevisionDigest) causes measurable contention on a large repository. The PR's interleave tests pass in ~5s and I found no deadlock, but I did not benchmark it against a repo where the digest resolver actually spawns git over a large tree.
+
+#### PR #2517 — NOT_SAFE
+
+State: Draft, mergeable_state=blocked, head 8c4fcaa0d80533d75e4b204f5da7afc7dd6cf1ee on base main@3bbad17; CI run 33642737295: quality job GREEN (including the new 'Path identity ratchet (issue #2474)' step), drift GREEN, all 6 ubuntu and all 6 macOS unit shards GREEN, windows shard 1 GREEN but windows shards 2,3,4,5,6 FAILED, so the required aggregate check 'unit-passed' is FAILURE; integration/smoke skipped.
+
+Adds two identity helpers and rolls them across the plugin. src/utils/filesystem-identity.ts (new, 167 lines) exposes canonicalExistingFilesystemPath (realpathSync.native -> realpathSync -> null; win32 path.win32.normalize + toLowerCase), sameExistingFilesystemPath (fail-closed equality), canonicalPathFromExistingAncestor / canonicalPathForFutureIo (pin a missing leaf to its nearest existing physical ancestor) and filesystemIdentityWitnesses (linked-ancestor retarget evidence). src/utils/canonical-root.ts gains a _internals DI seam, native-first realpath, win32 separator normalization, lexicalRootAliasKey (lifecycle-only) and sameProjectRoot; compositeSessionKey switches from the memoized canonicalRootKey to the un-memoized canonicalRootKeyFresh. Roughly 45 production modules move project-scoped Map/Set/template keys, cache keys and root-equality tests onto these helpers: project-db._projectDbs is re-keyed on physical identity with a bounded lexical-alias table (128) and retarget-aware closeProjectDb; memory provider-pool keys on physical identity with witness-based retarget detection and hands the canonical key (not the caller alias) to SQLiteMemoryProvider; MemoryGateway pins context.directory to canonicalPathForFutureIo at construction and now throws MemoryValidationError when nothing resolves; scope-binding's canonicalWorkspaceIdentity switches to canonicalExistingFilesystemPath; pr-review/persistence, pr-workflow-auto-wake, lane-delivery-store, pr-feedback-event-queue, pr-subscriptions, lane-context, lane-permissions, learning-health, internals-guard, knowledge-events/link, memory-link, plan/manager, status-service, repo-graph cache/freshness/storage, turbo epic/lean state, dispatch-lanes, lang/dispatch, bundled-skills all re-key. repo-graph-builder deliberately does NOT adopt physical identity and instead uses a local lexical separator/case normalizer, with a comment explaining the walker stores lexical paths. pre-check-batch adds an exactPhysicalRoot escape hatch that skips validatePath. Four readdirSync recovery scans get code-unit sorting (ledger x2, pending-delegations x2). Adds scripts/check-path-identity.ts (579-line TypeScript AST ratchet) wired into package.json (check:path-identity), .github/workflows/ci.yml (quality job) and .claude/skills/commit-pr/SKILL.md, plus 14 new test files, 2 fixtures and docs/releases/pending/2474-canonical-path-identity.md.
+
+Against its issue's acceptance criteria: 6 met, 3 partly, 1 unmet.
+
+| Criterion | Status | Evidence |
+|---|---|---|
+| Handle Windows drive-letter case, separator form, 8.3 expansion, case-insensitive comparison, documented syml… | PARTLY | Case/separator/case-insensitive: src/utils/filesystem-identity.ts:25-33 normalizeIdentityPath -> path.win32.normalize(resolved) then .toLowerCase() on win32; verified by probe (bun, mocked _internals.platform='win32', realpathSyncNative -> 'C:\\Users\\Foo\\Proj') producing 'c:\\users\\foo\\proj'. Symlink/realpath policy documented in src/utils/filesystem-identity.ts:1-8 and :101-106 and src/utils/canonical-root.ts:1… |
+| Add a static recurrence ratchet against new raw root-identity comparisons, and make recovery-candidate readdi… | PARTLY | Ratchet: scripts/check-path-identity.ts + package.json:129 '"check:path-identity": "bun run scripts/check-path-identity.ts"' + .github/workflows/ci.yml:275-278 'Path identity ratchet (issue #2474)' in the quality job (CI run 33642737295 job list shows 'Path identity ratchet (issue' status=completed conclusion=success), plus .claude/skills/commit-pr/SKILL.md:188. Locally: 'bun run check:path-identity' -> 'Scanned 894… |
+| Required tests: Per-site Windows case-mismatch tests | PARTLY | New per-site tests exist only for six surfaces: src/db/project-db-identity.test.ts, tests/unit/scope/scope-workspace-identity-2474.test.ts, tests/unit/hooks/repo-graph-builder-path-identity.test.ts, tests/unit/lang/dispatch-path-identity.test.ts, tests/unit/memory/gateway-path-identity.test.ts, tests/unit/tools/pre-check-batch-path-identity.test.ts. `grep -rln 'sameProjectRoot\|sameExistingFilesystemPath' tests/ src… |
+| Required tests: 8.3 expansion | UNMET | grep for '8\.3\|short name\|PROGRA~\|RUNNER~' across tests/unit/utils/filesystem-identity.test.ts, tests/unit/utils/canonical-root.test.ts, src/db/project-db-identity.test.ts and tests/unit/scope/scope-workspace-identity-2474.test.ts returns no matches. The only Windows-gated test is src/db/project-db-identity.test.ts:111 'Windows case aliases share one handle' (guarded by ':112 if (process.platform !== \'win32\') r… |
+
+Effect on this audit's verified findings:
+
+| Finding | Effect | Evidence |
+|---|---|---|
+| PORT-002 | DOES_NOT_FIX | None of the five verified case-sensitive startsWith containment sites is in the diff. `git diff --name-only 3bbad17..8c4fcaa \| grep -E 'sast-scan\|placeholder-scan\|secretscan\|schema-drift\|config-doctor'` -> no output. On HEAD the exact lines still read: src/tools/sast-scan.ts:446 '!resolvedPath.startsWith(resolvedDirectory + path.sep) &&'; src/tools/placeholder-scan.ts:1085 '!fullPath.startsWith(resolvedDirector… |
+| PORT-003 | FIXES | The only concrete half of this INFO/PRE_EXISTING finding (tests/helpers/safe-test-dir.ts:29, tracked as issue #2018) is addressed: HEAD adds a _internals seam and canonicalRealpath() (native-first with ordinary-realpath fallback) and replaces all four call sites - 'const dir = canonicalRealpath(rawDir);', 'const resolvedBase = path.resolve(canonicalRealpath(base));', 'const realBase = canonicalRealpath(os.tmpdir());… |
+| STATE-1 | DOES_NOT_FIX | The PR touches src/hooks/init-orphan-recovery.ts but not the defect. The parent-anchored base is unchanged: src/worktree/core.ts:583 still ': path.resolve(path.dirname(directory), SWARM_WORKTREE_DIR_NAME);' (file not in the diff) and enumerateOrphanedWorktreeDirs still builds worktreeRoot from 'path.dirname(directory)'. No repo-ownership check is added - the only change to the candidate filter is init-orphan-recover… |
+| STATE-2 | DOES_NOT_FIX | src/commands/reset-session.ts is not in the diff (`git diff --name-only 3bbad17..8c4fcaa \| grep reset-session` -> no output). On HEAD it still reads :420-423 'const worktreesDir = path.resolve(path.dirname(directory), SWARM_WORKTREE_DIR_NAME,);' and :429 'fs.rmSync(worktreesDir, { recursive: true, force: true });' with the project-local preserveWorktrees flag as the only guard. |
+
+Defects found in the branch:
+
+| Severity | Where | Problem |
+|---|---|---|
+| MEDIUM |  | Windows-only durable re-key: every persisted scope binding is invalidated after upgrade because canonicalWorkspaceIdentity changes from forward-slash to backslash form, and the persisted value is compared for exact equality with no migration — Main's src/scope/scope-binding.ts:93-98 returned 'fs.realpathSync(directory).replace(/\\/g, \'/\')' lowercased on win32; HEAD:93-95 returns canonicalExisti… |
+| LOW |  | learning-health projectRef re-key silently orphans previously persisted alarm scopes — src/health/learning-health.ts:431-442 now computes 'const key = canonicalRootKeyFresh(directory);' and 'const ref = pseudonymousRef(key, resolveLineageSalt());' where main hashed the raw `directory`. projectRef is the prefix of persisted alarm scope keys (:1049 'const scopeKey = `${projectRef(directory)}/livene… |
+| LOW |  | The new recurrence ratchet does not cover 4 of the 9 sites the issue told it to protect, so those exact regressions can be reintroduced without failing CI — Running the branch's own scanner against base 3bbad17's copies of those files (probe3.ts, importing scanSourceForPathIdentity from scripts/check-path-identity.ts) reports 'NO VIOLATION ON MAIN' for src/hooks/repo-graph-builder.ts (which conta… |
+| LOW |  | Hot-path memoization deliberately removed from compositeSessionKey with no replacement — src/utils/canonical-root.ts:108-114 'Composite map key: current physical root + NUL + session id.' now calls canonicalRootKeyFresh; base 3bbad17 called the memoized canonicalRootKey. Callers include src/hooks/trajectory-step-state.ts:60,80,99,132 (per tool call). Measured: canonicalRootKeyFresh 8.36 us/op vs … |
+| INVARIANT | 1. Plugin initialization is fast, bounded, fail-open, side-effect-minimal ('Bounded is not free' / hot-path I/O) | The PR converts several lexical cache keys into per-call realpath syscalls, including on paths that run once per tool call, and in two places puts the syscall BEFORE the cache lookup the cache exists to protect. src/utils/canonical-root.ts:113 compositeSessionKey moved from the memoized canonicalRootKey to canonicalRootKeyFresh, and it is called from src/hooks/trajectory-step-state.ts:60,80,99,13… |
+| INVARIANT | 4. Working directory and .swarm/ containment ('No tool may create .swarm/ under ... any arbitrary cwd. New-directory checks must be explicit.') | src/db/project-db.ts:268 adds an unconditional 'mkdirSync(directory, { recursive: true });' at the TOP of getProjectDb, before the identity resolution and before the cache lookup. Previously the cache-hit path did no filesystem work and directory creation was a side effect of creating '.swarm/'. Every getProjectDb call - including pure reads that hit the cache - now creates the directory tree it … |
+| INVARIANT | 9. Guardrails / retry semantics (gates fail closed; containment decisions are not weakened) | pre-check-batch's directory gate now has a bypass. sameExistingFilesystemPath is a check-time-only equality helper that explicitly disclaims containment and race-freedom, yet it is used to skip validatePath entirely and to force isAcceptedProjectRootForPlatform to true. Nothing re-validates at use time before the lint/secretscan/sast/quality-budget subprocesses run against `dir`. |
+| INVARIANT | 8. Session and global state - keyed and bounded | No breach found; the PR is a net improvement here. |
+| INVARIANT | 5. Plan durability - ledger is authoritative | No breach found. |
+
+Required before merge:
+
+- Explain or fix the five failing windows-latest unit shards. The one readable failure — tests/unit/turbo/lean/lean-turbo-lane-scope-cleanup-symmetry.test.ts:432, `resolveAuthorizedScopeBinding(...)` returning null — sits directly on src/scope/scope-binding.ts:93-95, the identity code this PR rewrites; it is deterministic across all three CI attempts, is not quarantined, and its test file is unchanged by the PR. The body dismisses these as inherited without reproducible evidence.
+- Ship a migration or an explicit invalidation note for the Windows-only durable re-key. canonicalWorkspaceIdentity changes from forward-slash to backslash form on win32 and the persisted value is compared by exact string equality at src/scope/scope-persistence.ts:445-449, so the first session after upgrade rejects every previously persisted scope binding. The same class applies to learning-health projectRef scope prefixes.
+- Sequence explicitly against PR #2515. `git merge-tree --write-tree refs/audit/pr2517 refs/audit/pr2515` reports content conflicts in src/db/project-db.ts and scripts/retention-registry.data.ts. #2515's src/db/canonical-project.ts is a second identity helper whose canonicalProjectKey uses non-native fs.realpathSync with no path.win32.normalize, so it does not expand 8.3 short names despite its header claiming it does. Whichever lands second must delete that helper and re-base project-db.ts on canonicalRootKeyFresh; #2517's own ratchet already flags the leftover ('project-return@45'), so a merged tree keeping both fails check:path-identity.
+- Extend the ratchet to the four of nine sites the issue named that it does not cover, or record in the issue why they are out of scope.
+
+Its issue's exit gate — **not reachable** on this head:
+
+> ## Closure contract - No unwired code, no silent deferral, no closure based only on tests that bypass registered production paths. The implementation PR closes this issue via "Closes #", and closes a source issue only if its complete validated scope is satisfied. - Ships a docs/releases/pending/.md fragment; PR description includes the AGENTS.md invariant audit section.
+
+What still blocks it: Two separate blockers. (1) 'No closure based only on tests that bypass registered production paths' is satisfied, and there is no unwired code - the ratchet is fully wired (package.json:129 -> ci.yml quality job -> commit-pr SKILL.md, and it ran green in CI) - but the issue's own 'Required tests' list is not fully delivered: '8.3 expansion' has no test at all, and 'Per-site Windows case-mismatch tests' covers 6 of the ~13 changed identity sites. (2) The change cannot land as-is: the required aggregate check 'unit-passed' is FAILURE because 5 of 6 windows-latest unit shards failed on this head, and the one failure whose log I could read - tests/unit/turbo/lean/lean-turbo-lane-scope-cleanup-symmetry.test.ts:432 'expect(resolveAuthorizedScopeBinding({directory: tmpDir, ...})).not.toBeNull()' -> 'Received: null' - sits directly on top of scope-binding identity code this PR rewrote (src/scope/scope-binding.ts:94 canonicalWorkspaceIdentity), is deterministic (failed all 3 CI attempts), is not in scripts/ci/quarantined-tests-windows.txt, and the test file itself is unchanged by this PR. The PR body asserts these Windows failures are inherited; I could not confirm that from any run on clean main.
+
+Could the issue be closed on this merge? **NEEDS ISSUE AMENDMENT.** If #2474 were closed on this merge, four things would remain unfixed while appearing resolved. (a) The roadmap's claim that B1 addresses PORT-002 would be recorded as satisfied even though the five verified case-sensitive containment sites (sast-scan.ts:446, placeholder-scan.ts:1085, secretscan.ts:845, schema-drift.ts:80, config-doctor.ts:2652) are untouched, are not named anywhere in the issue's own scope, and are structurally out of reach of the new ratchet (no 'containment' violation kind; isContainmentContext explicitly exempts boundary-named functions). (b) The issue's own Required tests list would be closed with '8.3 expansion' having zero coverage and 'Per-site Windows case-mismatch tests' covering 6 of ~13 changed sites - notably none of the seven sameProjectRoot sites the issue itself enumerated. (c) The fifth readdirSync site the issue named by line (pending-delegations.ts:4561, now countFallbackFiles at :4573) is still unsorted; that is the correct engineering call because it only reads .length, but the issue as written is not satisfied and nothing records the decision. (d) The overlap with #2515 is unresolved: two identity helpers for the same _projectDbs map, with a real merge conflict. Separately, PORT-003's concrete half IS delivered (safe-test-dir.ts native-first realpath), so the source-issue #2018 linkage is honest. The right move is to amend the issue - drop or re-scope the PORT-002 claim, record the countFallbackFiles decision, and either add the missing tests to this PR or split them into a tracked follow-up - rather than close it silently on merge.
+
+CI: Head 8c4fcaa, run https://github.com/ZaxbyHub/opencode-swarm/actions/runs/33642737295. GREEN: quality (all 20+ ratchet steps including the new 'Path identity ratchet (issue #2474)' -> success), drift ('No drift detected across skills, tools, commands, agents, docs claims, and dependency freshness'), coverage, coverage-shard 1-6, unit (ubuntu-latest 1-6), unit (macos-latest 1-6), unit (windows-latest 1), plus check-title and pr-standards on run 33645916676. RED: unit (windows-latest, 2), (3), (4), (5), (6) -> failure, and therefore the aggregate 'unit-passed' -> FAILURE. SKIPPED: integration, smoke. The only Windows failure whose log survived tail truncation is tests/unit/turbo/lean/lean-turbo-lane-scope-cleanup-symmetry.test.ts (shard 3): '(fail) item 2b - dispatchLane timeout branch cleans up the child session ... expect(received).not.toBeNull() / Received: null' at line 432, after 'Attempt 1 failed, retrying (1/2)' and 'Attempt 2 failed, retrying (2/2)' - i.e. deterministic, not flaky. That file is unchanged by this PR and is not listed in scripts/ci/quarantined-tests-windows.txt. PR is draft with mergeable_state 'blocked'. I did not re-run CI.
+
+What this review could not settle:
+
+- Whether the 5 failing windows-latest unit shards are genuinely inherited. The PR body asserts it; I could not find a clean-main CI run on this base to compare against (PR #2518 on the same base failed its quality job so its unit shards never ran; PR #2516's failures span ubuntu/macOS too and are clearly its own). What would settle it: run `bun scripts/ci/run-unit-tests-local.ts tests/unit/turbo/lean/lean-turbo-lane-scope-cleanup-symmetry.test.ts` on a windows-latest runner at 8c4fcaa and at 3bbad17 and compare, or push 3bbad17 to a scratch branch and read its own Windows shard results.
+- The exact mechanism of that Windows failure. resolveAuthorizedScopeBinding returns null, which is consistent with a canonicalWorkspaceIdentity mismatch, but publish and resolve both call the same helper, so I could not derive the divergence without a Windows host. What would settle it: on Windows, log canonicalWorkspaceIdentity(runner._directory) at publish time and canonicalWorkspaceIdentity(tmpDir) at assert time inside that test.
+- Whether the memory-scope re-key (workspaceId = createStableId(path.dirname(physicalRoot)) at src/memory/gateway.ts:169, and repoRoot = canonicalRootKeyFresh(...) inside scopeKey at :1114) actually orphans previously written memory rows. I verified the derivation changes on Windows and on symlinked POSIX paths, but did not trace whether stored rows are matched by these exact strings on recall. What would settle it: write a record on main with a symlinked project path, upgrade to this branch, and assert recall still returns it.
+- Windows-side cost of the added per-call realpath syscalls. My 8.36 us/op figure is Linux with a warm dentry cache; AGENTS.md:33 warns cold-FS latency on Windows is several times higher and repro-704 is enforced on every platform. What would settle it: run `bun run repro:704` on windows-latest at 8c4fcaa and at 3bbad17.
+- Not a PR defect, but discovered while validating and worth recording: running the repo's own tests with the checkout located under os.tmpdir() causes tests/unit/helpers/safe-test-dir.test.ts:131 ('fs.symlinkSync(process.cwd(), linkPath, \'dir\')') to make safeRmRecursive delete the entire working tree, because the containment guard only requires the realpath to be under os.tmpdir(). It destroyed my first checkout. The test is byte-identical on base 3bbad17 (`git show 3bbad17:tests/unit/helpers/safe-test-dir.test.ts \| grep -n 'symlinkSync(process.cwd()'` -> line 131), so it is PRE-EXISTING, not a #2517 regression; with an isolated TMPDIR the file passes 20/20 on the branch.
+
+#### PR #2516 — NOT_SAFE
+
+State: Not a draft; head 128748b3d9366ecf48273672d80afe25f8a2e974 on base main 9360f3b; mergeable_state 'blocked'; 44 check runs — pr-standards/check-title/coverage/coverage-shard all success, but 14 of 18 `unit` matrix cells FAILED across ubuntu/macos/windows, `unit-passed` FAILED ('unit job result was failure, not success'), and `integration` + `smoke` were SKIPPED as a result.
+
+Adds one new pure leaf module src/hooks/task-id-resolver.ts (321 lines: bounded `resolveTaskId` with two policies — 'plan' (strict N.M ids, plan-membership filtered) and 'attribution' (safe [A-Za-z0-9._-] tokens, ses_-prefixed and '..'-containing values rejected) — plus a backward-compatible `resolveDelegatedPlanTaskId` wrapper), and a second new module src/hooks/plan-task-id-context.ts (59 lines) that loads plan task-ID sets via the cached `loadPlanJsonOnly`/`parsePlanJsonCached` path and distinguishes available / unavailable / over_limit. It then rewires five call sites onto that single resolver: `src/hooks/micro-reflector.ts:585` and `src/hooks/delegate-ack-collector.ts:81` lose their byte-identical narrow regexes, `src/hooks/skill-propagation-gate.ts:758 extractTaskIdFromPrompt` becomes a thin wrapper and gains plan-context params, `src/hooks/delegation-gate.ts:1998 resolveDelegatedPlanTaskId` is deleted and re-exported from the new module (delegation-gate.ts:104), `src/hooks/review-receipt-scope.ts:130` and `src/hooks/delegate-directive-injection.ts:207` swap their local plan-set/regex code for the shared resolver, and `src/index.ts:3819` threads plan context into `injectSkillsIntoDelegation`. The skill-propagation transform also drops its mutable 'latest delegation wins' reviewer-attribution fallback (REVIEWER_TASK_PATTERN deleted) in favour of a fallback that is only used when exactly one distinct eligible task id exists. Separately it adds prose 'Graph-first evidence contract' paragraphs to 5 agent prompts (architect, coder, critic — appended to every critic role prompt, reviewer — REPLACING the issue #1988 C1 blast_radius line, test-engineer) and to 15 skill/doc surfaces in .claude/skills and .opencode/skills, adds `test_engineer` to `repo_map.agents` in src/tools/tool-metadata.ts:742 (AGENT_TOOL_MAP is derived from that file, so this is a real runtime grant), adds a pending release fragment, refreshes three line-number citations in src/observability/catalog.ts and scripts/retention-registry.data.ts, and adds 6 test files (~900 lines). No repo-graph builder/query/tool source is touched at all.
+
+Against its issue's acceptance criteria: 4 met, 4 partly, 0 unmet.
+
+| Criterion | Status | Evidence |
+|---|---|---|
+| One shared plan-aware task-ID resolver for delegation, micro-reflection, and fallback paths (#1606). | PARTLY | REAL consolidation, not additive. Census (grep -rn '^\s*\(export \)\?function [a-zA-Z]*\(extract\\|resolve\)[A-Za-z]*Task[A-Za-z]*Id' src --include=*.ts \| grep -v '\.test\.'): on main 9360f3b five independent implementations existed (src/hooks/micro-reflector.ts:580 `const m = /\btask[_-]?id\s*[:=]\s*([A-Za-z0-9._-]{1,80})/i.exec(prompt)`, src/hooks/delegate-ack-collector.ts:76 byte-identical, src/hooks/skill-propa… |
+| Derive incremental language coverage from the canonical language registry; replace wall-clock-only staleness … | PARTLY | Already shipped before this PR; dead scope. Dead scope, and the PR correctly did not touch it. `git diff --name-only 9360f3b 128748b \| grep -i 'repo-graph\\|repo-map\\|graph'` returns only docs/releases/pending/2488-graph-first-workflow-wiring.md and tests/unit/config/graph-first-workflow-contract.test.ts. The frozen surfaces are intact on the head: src/hooks/repo-graph-builder.ts:122 `function isSupportedSourceFil… |
+| Wire graph-first context into planning, coding, review, testing, security, critic, PR review, deep-dive (#153… | PARTLY | All eight lanes now carry a named-action, source-anchored, freshness/confidence-qualified contract, and the surfaces are runtime-reachable: the 5 agent prompts are produced by createArchitectAgent/createCoderAgent/createCriticAgent/createReviewerAgent/createTestEngineerAgent (tests/unit/config/graph-first-workflow-contract.test.ts asserts each rendered prompt contains the actions plus 'advisory' + 'direct source' + … |
+| Required tests: All supported languages | PARTLY | Already shipped before this PR; dead scope. No language-coverage test is added by this PR (`git diff --name-only 9360f3b 128748b \| grep -i 'language\\|lang'` → empty). Pre-existing coverage on main already satisfies this for the already-shipped registry bullet (e.g. tests/unit/tools/repo-graph-jvm-dotnet-regressions.test.ts, tests/unit/tools/repo-graph/cross-platform.test.ts appear in the CI shard timing log). |
+
+Effect on this audit's verified findings:
+
+| Finding | Effect | Evidence |
+|---|---|---|
+| REPOGRAPH-8 | DOES_NOT_FIX | Out of scope and untouched: `buildWorkspaceGraph`, `loadOrCreateGraph`, `saveIfDirty`, `markDirty`, `isGraphFresh`, `getSupportedLanguages`, `isGrammarAvailable` are all unchanged (no src/tools/** file is in the diff). Importantly the PR does NOT re-touch the deliberately-frozen `isGraphFresh` deprecation or the fingerprint path, so there is no regression here. The PR also introduces no NEW orphaned exports: every n… |
+| REPOGRAPH-11 | PARTIAL | Re-ran the finding's exact verify command on both commits. On main 9360f3b all twelve actions returned <NONE>. On head 128748b: route_trace → src/agents/architect.ts + 3 skills; data_trace → same 4; test_pack → .opencode/skills/phase-wrap/SKILL.md (also writing-tests/running-tests/test-engineer.ts, excluded from the finding's path list only by its `grep -v test` filter); impact_cone → src/agents/{reviewer,coder,crit… |
+
+Defects found in the branch:
+
+| Severity | Where | Problem |
+|---|---|---|
+| CRITICAL |  | Six changed-surface test files regress on the head (21 assertions), all green on base main — CI unit matrix is red and the PR body asserts the opposite — Reproduced locally in a clone of 128748b against a `git worktree` of 9360f3b, same node_modules: src/agents/critic.test.ts 52 pass/10 fail (main 62/0) — ten exact-equality prompt assertions such as 'role=sounding_board -> prompt is SOUNDING_BOAR… |
+| HIGH |  | Issue #1914 acceptance-criterion-2 diagnostic regressed: a plan-shaped-but-unknown task_id is now mislabelled as a runtime session id — The old resolver accepted an explicit plan-shaped `task_id` on shape alone (`if (trimmed.length <= 20 && isStrictTaskId(trimmed)) return trimmed;`, deleted from delegation-gate.ts:1998-2076) so the membership gate could reject it with a precise message. The new r… |
+| HIGH |  | collectPlanTaskIdContextFromPhases dereferences phase.tasks unguarded; in delegate-directive-injection the outer fail-open catch turns the throw into ZERO knowledge-directive injections, silently — src/hooks/plan-task-id-context.ts:20-21 `for (const phase of phases) { for (const task of phase.tasks) {` with no null guard. Probe on the head: `collectPlanTaskIdContextFromPhases([{id:1,name:'Phase 1… |
+| MEDIUM |  | The reviewer's issue #1988 C1 blast-radius directive was replaced rather than extended, dropping the pinned 'check the listed dependents' wording — src/agents/reviewer.ts:114 replaces '- VERIFY blast radius: for changed files not covered by an injected REPO GRAPH block, call `repo_map action="blast_radius"` and check the listed dependents' with the new GRAPH-FIRST REVIEW line. src/agents/reviewer… |
+| LOW |  | The 'one shared resolver' obligation stops short of two live extractors, one of which is fully plan-unaware — src/evidence/phase-participation.ts:200-208 still does `const raw = args.task_id ?? args.taskId; if (typeof raw === 'string' && raw.trim().length > 0) return raw.trim().slice(0, 120);` — no plan membership, no ses_ rejection, no ambiguity handling — and is live at :636. src/hooks/delegati… |
+| INVARIANT | AGENTS.md 11 — Tool registration + agent-map coherence | SATISFIED, verified end-to-end rather than assumed. Adding `test_engineer` to repo_map is a real grant, not decoration. |
+| INVARIANT | AGENTS.md 10 — Chat / system-message hook contracts | Not violated in substance, but the PR's own invariant audit denies touching it. A changed chat messages transform that the audit says was not changed is the exact failure mode the audit gate is meant to catch. |
+| INVARIANT | AGENTS.md 7 / issue #2131 G — progressive-disclosure ratchet on skill files | VIOLATED. Two skill files were pushed past their pinned line baselines without updating the ratchet. |
+| INVARIANT | CLAUDE.md permanent directive 2 — never ship unwired code | Satisfied for everything the PR adds (no new export lacks a production caller — see REPOGRAPH-8 evidence), but the PR leaves 6 repo_map actions still reachable from no prompt while its own tool description advertises two of them. |
+| INVARIANT | CLAUDE.md permanent directive 1 — never defer work | No new deferral introduced. |
+
+Required before merge:
+
+- Guard the unguarded `phase.tasks` dereference in the new plan-task-id-context.ts (`phase.tasks ?? []`). The outer fail-open catch in delegate-directive-injection swallows the throw and silently drops directive injection from 2/1/1 entries to zero.
+- Restore or re-derive the plan-shaped-but-unknown task-id diagnostic branch. The #1914 acceptance-criterion-2 diagnostic now mislabels a plan-shaped id such as `9.9` as a runtime session id.
+- Keep the #1988 C1 reviewer blast-radius directive's pinned wording ('check the listed dependents'); the rewrite replaced it rather than extending it.
+- Rebaseline the two #2131 G progressive-disclosure ratchet entries, and update the critic prompt-equality tests (or move the graph block out of the exact-match surface).
+- Correct the two false statements in the PR body: 'No changed-surface test failed' (six changed-surface files regress, 21 assertions, all green on base) and the invariant-10 'not touched' line, which the diff contradicts.
+
+Its issue's exit gate — **not reachable** on this head:
+
+> No unwired code, no silent deferral, no closure based only on tests that bypass registered production paths. The implementation PR closes this issue via "Closes #", and closes a source issue only if its complete validated scope is satisfied. — Ships a docs/releases/pending/.md fragment; PR description includes the AGENTS.md invariant audit section.
+
+What still blocks it: Two independent mechanisms. (1) CI cannot go green: 14 of 18 `unit` matrix cells fail and `unit-passed` fails. I reproduced the cause in my own clone of the head against a clean 9360f3b worktree — SIX test files regress, 21 assertions, every one of them green on main: src/agents/critic.test.ts (52 pass/10 fail vs 62/0 on main), src/agents/reviewer.test.ts (21/3 vs 24/0), tests/unit/agents/critic-sounding-board.adversarial.test.ts (22/1 vs 23/0), tests/unit/hooks/delegate-directive-injection.test.ts (6/3 vs 9/0), tests/unit/hooks/delegation-gate-scope-preflight-membership.test.ts (7/2 vs 9/0), tests/unit/skills/progressive-disclosure-ratchet.test.ts (4/2 vs 6/0). (2) 'No unwired code' is satisfied for what the PR adds, but the issue's own resolver obligation is not complete while src/evidence/phase-participation.ts:200 still runs a plan-unaware `slice(0,120)` extractor on delegation args. The release fragment (docs/releases/pending/2488-graph-first-workflow-wiring.md) and the invariant-audit section are present, so those two sub-clauses are met.
+
+Could the issue be closed on this merge? **MUST STAY OPEN.** If #2488 were closed on this merge, four things would remain unfixed. (1) The issue's own closure contract — 'no closure based only on tests that bypass registered production paths' — is unmet in the opposite direction: the production-path tests that already exist are FAILING. (2) The single real obligation, 'One shared plan-aware task-ID resolver', is 5/7 complete: src/evidence/phase-participation.ts:200 still attributes phase-participation evidence from an unbounded, plan-unaware `slice(0,120)` of args.task_id, and src/hooks/delegation-gate.ts:1480 keeps a second regex extractor. (3) 'Wire graph-first context ... without hiding confidence/staleness' is 6/12 on the action inventory: symbol_search, symbol_context, graph_explain, preflight_packet, dead_exports and ontology remain reachable from no prompt, skill or command while the tool description advertises ontology and preflight packets to twelve agents. (4) The #1914 and #1988 C1 guarantees would be quietly downgraded under a 'Closes' that never mentions them. Two of the issue's four scope bullets were already satisfied on main before this PR (the language-registry / fingerprint bullet and the src/graph deletion), which the roadmap validator already flagged — the PR correctly left those frozen surfaces alone, so no regression there, but the issue's scope text still overstates the work.
+
+CI: 44 check runs on 128748b. FAILING: unit-passed ('##[error]unit job result was failure, not success') and 14 of the 18 `unit` matrix cells — ubuntu 1,3,4,5,6; macos 1,3,4,5,6; windows 1,4,5,6. PASSING: pr-standards, check-title, coverage, coverage-shard 1-6, and unit cells ubuntu-2, macos-2, windows-2/3. SKIPPED (gated on unit): integration, smoke. I recovered the failing files from four of the failing job logs (ubuntu shards 1, 3, 4, 5): '##[error]FAILED: tests/unit/agents/critic.test.ts', '##[error]FAILED: tests/unit/hooks/delegate-directive-injection.test.ts', '##[error]FAILED: tests/unit/hooks/delegation-gate-scope-preflight-membership.test.ts', '##[error]FAILED: tests/unit/agents/critic-sounding-board.adversarial.test.ts', '##[error]FAILED: tests/unit/skills/progressive-disclosure-ratchet.test.ts', '##[error]FAILED: src/agents/reviewer.test.ts'. All six reproduce locally on the head and all six are green on 9360f3b. The PR body's 'pre-existing/environment failures' section attributes the red gate to src/services/config-doctor.test.ts; that file passes 1456/0 on the head here and is not among the CI failures.
+
+What this review could not settle:
+
+- I enumerated the failing test files from only 4 of the 14 failing unit cells (ubuntu shards 1, 3, 4, 5). The remaining ten cells (ubuntu 6, all five failing macos cells, all four failing windows cells) may contain further distinct failures, including OS-specific ones. Fetching '##[error]FAILED:' annotations from those ten job logs would settle it.
+- Whether the unguarded `phase.tasks` dereference is reachable in production. PlanSchema defaults tasks to [], so any plan that went through parsePlanJsonCached is safe; delegate-directive-injection uses `loadPlan`, which also has plan.md-migration and ledger-recovery branches I did not trace to the end. Reading every return path of src/plan/manager.ts loadPlan and confirming each is PlanSchema-validated would settle it.
+- The PR body's claim that ten config-doctor assertions fail on both the head and clean main. I could not reproduce any config-doctor failure on the head (1456 pass / 0 fail), and config-doctor is not among the CI failures I identified. Whether this was a contaminated local environment or a different shard is unresolved; running the full CI-equivalent unit gate on both commits would settle it.
+- The Graphify refresh figures in the PR body (4,163 nodes / 10,602 edges / 138 communities / zero structural diagnostics) are unverifiable from the repository because graphify-out/ is gitignored and absent from the diff.
+- Whether the 'security' lane of the #1538 obligation is considered covered by the codebase-review-swarm skill paragraph alone. There is no dedicated security agent file in src/agents/, so I could not test the lane the way I tested the other seven.
 
 #### PR #2515 — SAFE_WITH_CHANGES
 
@@ -9368,7 +9778,679 @@ Cross-PR observations:
 - PR 2514 is the CI-and-test-stability PR of Workstream C and fixes one of the five testing defects the audit verified. tsconfig still excludes tests/ and scripts/, biome still ignores scripts/ (it literally answered 'These paths were provided but ignored' for the two gate scripts this PR rewrites), the integration job's find still uses -maxdepth 1 so 69 tests in tests/integration/lang run nowhere, and the release predicate is untouched. The class it does close — a mock.module delegation that becomes an unkillable tail-recursive loop — it closes properly: I reproduced the mechanism from scratch (a hand-written namespace-spread delegation hung a bun test process until my 90 s kill) and confirmed the new gate rule flags that file. Good root-cause work, aimed at a narrower target than the workstream's title implies.
 - PR 2515's engineering quality is materially higher than its issue's framing suggests, and the gap is in the enumeration, not the code. Its migrations, group-commit transaction discipline, canonical-identity cache, durability escalation and retention-registry redesign are all real and tested (60 tests in tests/unit/db, 360 across all 38 changed test files in one process, repro:1873 green under real Node). What it misses is the one Bun/Node divergence the audit had already proven: the PR builds a 'driver-parity contract' as a named acceptance criterion, enumerates the SQLITE_RANGE parameter-count delta in code and in docs/engineering-invariants.md, exercises the exact no-argument run() path in the contract, and never looks at that call's return value — which is a Changes object under Bun and undefined under the Node adapter, and which /swarm memory unlink dereferences today. It then extends the real-Node harness barrel with seven new exports without adding the function that would expose it. A contract is only as good as the deltas someone remembered to write down, and this one canonised an incomplete list.
 - Both PRs put substantial weight on 'no unwired code' in their bodies while shipping unwired code. 2515 ships a dead export (closeAllGroupCommitWriters, zero call sites anywhere), a write-only artefact (.swarm/db-migration-failure.json has a producer, a deleter, documentation and no reader — in exactly the v14-failure case where the in-DB alternative cannot exist), and a new plugin dispose hook with no test. 2514 documents a post-merge soak protocol as its issue's closure evidence while using 'Closes #2477'. The permanent CLAUDE.md directive calls dead exports and untested new code paths blockers rather than follow-ups; the roadmap's own closure contract repeats it in every issue. That the same author's PRs violate it twice suggests the contract is being copied into issues faster than it is being applied to diffs.
+- Three open pull requests — #2312, #2329 and #2455 — are unmerged drafts whose target issues are all CLOSED. #2312 targets #2285, which was closed as completed on 2026-08-24 by MERGED PR #2317; its CR/LF sanitizer is on main today at src/tools/dispatch-lanes.ts:313-331, so #2312 is genuinely superseded. #2329 targets #1643 and #2455 targets #2368; both issues were closed as completed in the 2026-09-02 re-baseline while their only linked pull request stayed unmerged. Section 8 records what to do with each.
+- Every pull request opened on 2026-09-02 that claims to close a roadmap issue fails its own repository gates. #2518's `quality` job fails on a test-clock violation the PR itself introduces, which skips unit, integration, smoke, security, package-check and coverage-shard. #2516 fails 14 of 18 unit matrix cells with six changed-surface test files that pass on base. #2514, the flake root-fix PR, is green on 38 checks and red on one Windows unit shard, which uploaded a non-empty flake-annotations artifact for that shard. The pattern is not carelessness about tests — all three PR bodies contain long, detailed test plans — it is that the bodies assert gate results that the gates contradict.
+- Two of the three new pull requests state a false claim about their own validation in the PR body. #2518's invariant-audit line 7 asserts the test ratchets passed while `check:test-clock` reports one new blocking violation naming the PR's own new file; #2516 asserts 'No changed-surface test failed' while six changed-surface files regress against base. A reviewer who trusts the body rather than the checks would merge both.
+- The two largest open pull requests conflict with each other on the same subsystem and neither says so. #2517 (#2474, path identity) and #2515 (#2480, sqlite foundation) both define a canonical project-identity helper and both re-key the project-db connection cache; `git merge-tree --write-tree` on the two heads reports content conflicts in src/db/project-db.ts and scripts/retention-registry.data.ts. #2515's helper concedes in its own header that '#2474 / Workstream B1 owns the repo-wide identity rollout', and the two helpers agree on plain-path case folding but diverge on Windows 8.3 short names, so a careless conflict resolution produces a split-brain connection-cache key. Neither PR body mentions the other.
 
-## 8. Appendix: artifacts
+## 8. What to change in the issue tracker
 
-Explorer maps, findings JSON, GitHub inventory (issues and PRs as JSONL), CHANGELOG analyses, probe scripts and harnesses, reviewer verdict files and critic decision files were written under the session scratchpad (`scratchpad/maps`, `scratchpad/findings`, `scratchpad/gh`, `scratchpad/perf`, `scratchpad/portability`, `scratchpad/state-census`, `scratchpad/journey-project`, `scratchpad/verify/{batches,verdicts,critic,critic-batches}`). They are not committed. The reviewer and critic briefs are `scratchpad/verify/REVIEWER_BRIEF.md` and `scratchpad/verify/CRITIC_BRIEF.md`.
+This section converts the verified findings into tracker work. It is written to be executed
+directly: every amendment names the issue, quotes the text to change, and states the evidence
+that makes the change necessary. Nothing here was filed — this audit is read-only on GitHub.
+
+The tracker's problem is not that it is missing issues. It is that **the issues that exist do not
+name the defects that actually block them.** Three patterns recur, and each has a distinct remedy:
+
+1. An issue's exit gate depends on a defect that appears in none of its own scope bullets, so
+   satisfying the whole issue as written still leaves the gate unreachable. **Remedy: amend scope.**
+2. An issue schedules work that already shipped, so a correct implementation of it is a no-op or a
+   regression risk on a deliberately frozen surface. **Remedy: strike the bullet.**
+3. A defect has no tracker at all, in most cases because the roadmap re-baseline predates the
+   finding. **Remedy: open an issue, or attach it to the nearest issue that already owns its root
+   cause.** Attaching is preferred wherever a root cause is shared: 21 unowned high-and-critical
+   findings collapse to far fewer real work items once shared causes are grouped.
+
+### 8.1 Amendments to open issues
+
+#### #2469 — [Workstream A] PR 1 of 5: Restore PR_REVIEW and PR_FEEDBACK end to end
+
+This is the most consequential amendment in the tracker. **#2469's exit gate cannot be reached by
+completing #2469's own required scope**, and the pull request that says it closes the issue does
+not change that.
+
+The exit gate is:
+
+> Exit gate: real tier-M PR_REVIEW and PR_FEEDBACK runs on Windows, macOS, and Linux; base/micro/consolidated lanes; resilience off and opt-in on.
+
+A tier-M PR_REVIEW run cannot produce a verdict while PRREVIEW-1 stands, because no lane can settle
+a structured result. PRREVIEW-1 is a CRITICAL finding that the reviewer confirmed and the critic
+upheld, and it remains live at `origin/main`. Its mechanism has three parts and all three are still
+present:
+
+- `submit_pr_review_result` requires `batchId` and `laneId` as caller-supplied non-empty strings.
+- `submitPrReviewResult` (`src/hooks/pr-workflow-gate.ts:1934-1943`) filters the delegation ledger on
+  `record.subagentSessionId === child && record.batchId === input.batchId && record.laneId === input.laneId`
+  and rejects unless exactly one record matches.
+- `applyPrWorkflowPromptContract` (`src/tools/dispatch-lanes.ts`) takes options
+  `{ mode?, prHeadSha?, revisionDigest?, scope?, callerFocus? }` and emits a contract block carrying
+  `mode`, `workflow_lane`, `pr_head_sha`, `revision_digest`, `declared_scope`,
+  `caller_focus_non_authoritative`, `assigned_item_ids` and `mandatory_lane_checklist`. There is no
+  `batch_id` and no `lane_id`, in the parameters or in the block. `makeBatchId()` builds
+  `lanes-${now.toString(36)}`, which a child cannot guess.
+
+The child lane is therefore required to submit two identifiers it is never told. **None of #2469's
+seven required-scope bullets names this.** The bullets cover PR_FEEDBACK scope consumption and
+precedence, `authorize_pr_review_reentry` admission, collection productivity semantics, wait-budget
+liveness, a PR transplant, and citation re-anchoring. An implementer who satisfies all seven still
+has an unreachable exit gate.
+
+An independent validator re-established all of this on the pull request's own head (`ce2b9c8`)
+rather than from the audit's notes. It rendered the real child prompt through
+`_test_exports.applyPrWorkflowPromptContract` and found no `batch_id`, `lane_id`, `batchId`,
+`laneId` or `lanes-` prefix anywhere in it, while the same prompt still orders the child to call
+`submit_pr_review_result`. It then submitted with each identifier a child could plausibly invent —
+including the two the live failing session actually invented, `contract-retry-1` and
+`correctness-state` — and got `expected one exact child delegation, found 0` every time, after which
+the lane fails closed at `pr-workflow-gate.ts:15321-15332`. It diffed the ledger-match span between
+base and head and found it byte-identical, and confirmed that no hunk in the PR's
+`pr-workflow-gate.ts` patch reaches anything below line 6507.
+
+**Amendment 1 — add the blocking obligation.** Add a required-scope bullet, and make it the first
+one:
+
+> Bind each PR-review lane to its delegation record without requiring the lane to echo identifiers
+> it was never given. Preferred: resolve `batchId` and `laneId` tool-side in `submitPrReviewResult`
+> from the authenticated child session, which the tool already holds — the ledger filter's first
+> conjunct (`record.subagentSessionId === child`) already identifies the record, so the remaining two
+> conjuncts add no authority. If instead the identifiers are transmitted, they must be emitted by
+> `applyPrWorkflowPromptContract` inside the controller-authoritative block, never accepted from
+> lane-supplied fields.
+
+**Amendment 2 — add the test that would have caught it.** #2469's Required tests line already says
+"Registered-tool E2E", and that line was satisfied by a hook-chain test that never touches lane
+settlement. Replace it with something falsifiable:
+
+> One test that renders the real child prompt via `applyPrWorkflowPromptContract`, submits using
+> only identifiers present in that rendered prompt, and asserts the receipt is credited by
+> `submitPrReviewResult`.
+
+This is PRREVIEW-8, which is itself unowned: there is no test on any head that walks rendered prompt
+→ child submission → credited receipt, which is why a CRITICAL that makes the flagship workflow
+unusable is invisible to CI.
+
+**Amendment 2b — fix the skill text the lanes and the controller both read.** Two edits in
+`.opencode/skills/swarm-pr-review/SKILL.md`, both gated as PRREVIEW-11. At `:161-162`, restate the
+controller's obligation rather than the lane's — matching `src/agents/architect.ts:976`, "require
+exactly one `submit_pr_review_result` receipt from each base/micro discovery lane" — and delete "and
+then stop", which contradicts the four controller steps that follow in the same sentence. At `:69`,
+remove `submit_pr_review_result` from the Profile A controller-tool detection list, and from the
+Profile A "Ledger persistence" cell at `:99`: it is the only one of the eight named tools absent from
+`AGENT_TOOL_MAP.architect` (`agents: []`, overlay-only, granted to explorer lanes at
+`dispatch-lanes.ts:4646-4650`), so a genuine Profile A session that follows the skill's own detection
+procedure has textual grounds to mis-detect itself as Profile B and drop the mechanically enforced
+receipt gate for the procedural one.
+
+**Amendment 2c — add the ledger-invariant refinement as a precondition of the fix.** PRREVIEW-12:
+`correlationId === subagentSessionId` is pinned only on `FallbackArtifactSchema`
+(`src/background/pending-delegations.ts:957`), never on `RecordSchema` and at none of its three
+producers, while the PR-workflow session resolver and the submission filter read the same record
+through the two different fields. Its failure mode is fail-open — a violating record makes the
+resolver return the original session, `enforcePrWorkflowToolBefore` finds no gate state and returns
+early, and the lane runs with no PR_REVIEW containment. Fixture records that already violate it exist
+at `tests/helpers/pr-workflow-lane-fixtures.ts:61` and `:75`. Add the cross-field refinement mirroring
+the one at `:954-964`, with an explicit decision about legacy rows, since `readDelegations`
+`safeParse`-skips records the schema rejects.
+
+**Amendment 3 — strike bullet 5 as dead scope.**
+
+> Preserve running lanes on caller wait-budget expiry; collection stays observer-only.
+
+Already shipped by #2381 at the commit the issue itself cites. `src/tools/dispatch-lanes.ts:3340`
+records the removal of the wait-deadline terminalizer verbatim: "A collection wait budget is an
+OBSERVER deadline; its expiry says nothing about the child and must never write a terminal
+transition." Leaving it in scope makes the issue look larger than it is and invites a no-op
+restatement in the implementing PR's body — which is what happened.
+
+**Amendment 4 — rewrite bullet 6, and close PR #2312.**
+
+> Rebase or transplant open PR #2312 CR/LF controller-contract hardening.
+
+PR #2312's change already shipped under a different implementation. Its target issue **#2285 was
+closed as completed on 2026-08-24 by merged PR #2317**, and the sanitizer is on `main` today:
+`CONTROLLER_FIELD_CONTROL_SEPARATOR_PATTERN`, `canonicalizeControllerField` and
+`classifyControllerTokenField` at `src/tools/dispatch-lanes.ts:313-331`, covered by
+`tests/unit/tools/dispatch-lanes-pr-workflow-contract-sanitization.test.ts`. Replace the bullet with
+the only remaining action: close PR #2312 as superseded.
+
+**Amendment 5 — correct the productivity bullet's framing.**
+
+> Count collection as productive only when it observes a genuine lane-state or structured-receipt transition (composite progress token); no-op polling still trips the unproductive-wake brake.
+
+PR #2518 delivers this: `pr-workflow-response-gate.ts:230-262` builds a composite progress token over
+active-lane tuples. The mechanism was real. But note the framing problem for the record: the
+realistic trigger for the reported symptom was PRREVIEW-1 itself — with no lane able to settle, the
+gate revision never advances, so the brake fires. Implemented alone it suppresses the alarm rather
+than the fault, which is why it must not be read as progress against the exit gate.
+
+**Amendment 6 — make the exit gate falsifiable.** As written it bundles three operating systems,
+three lane kinds and two resilience settings into one gate with no artifact requirement, so nothing
+can be checked off incrementally and nothing can be disproved. Replace it with per-axis evidence
+requirements, each naming the artifact that must be pasted into the issue — for example the
+`complete_pr_workflow` result plus the coverage receipt for one tier-M PR_REVIEW per operating
+system.
+
+**Amendment 7 — the closing link.** #2469's own closure contract says:
+
+> No unwired code, no silent deferral, no closure based only on tests that bypass registered production paths. The implementation PR closes this issue via "Closes #", and closes a source issue only if its complete validated scope is satisfied.
+
+PR #2518 declares `Closes #2469`. On merge that auto-closes the issue. Until the new bullet 1 lands,
+the link should read `Refs #2469`, or #2469 should carry an explicit note that it stays open past
+#2518.
+
+#### #2502 and #2506 — the two issues the coverage table credits with PRREVIEW-1
+
+Section 7.6's coverage table records PRREVIEW-1 as owned by #2502 and #2506. That ownership is
+nominal. Neither issue fixes it, and the audit's own misdiagnosis record says so:
+
+- **#2502** ("Close the autonomous PR babysitting loop") assumes lane settlement is a property to
+  preserve. It is a defect to fix first. #2502 does not list #2469 as a dependency.
+- **#2506** ("Lane liveness: timeout watchdog and stall detection") builds a second 30-minute TTL
+  beside the existing stale horizon. A watchdog that aborts-and-settles a lane which could never
+  settle converts a hang into a faster failure; it does not produce a verdict.
+
+**Amendment.** Remove PRREVIEW-1 from both issues' claimed coverage, add #2469 as a hard dependency
+to both, and — for #2506 — require that the new `timeoutMs` be reconciled with the existing
+30-minute stale horizon rather than added beside it, since two independently configured horizons can
+disagree. With this correction PRREVIEW-1 has exactly one owner, #2469, and only after #2469 gains
+the scope bullet in 8.1.
+
+This is the single most consequential bookkeeping error in the tracker: the roadmap's own coverage
+accounting reports the audit's only workflow-blocking CRITICAL as owned twice, which is why no one
+has been looking for its fix.
+
+#### #2507 — Dispatch protection: spawn circuit breaker and token-bucket rate limiting
+
+#2507 owns HOOKS-2, the delegation loop detector that is dead in production because it compares
+against `'Task'` while the host's tool id is lowercase `'task'`. The census found five exclusive
+`'Task'` comparison sites, and HOOKS-3 is a second live consequence at
+`src/index.ts:3906`: `registerPendingTaskModelRoute` sits behind the same exact compare, so no
+task-model route is ever registered. Fixing the loop detector without fixing the compare class
+leaves the rest dead.
+
+**Amendment.** Either add HOOKS-3 and the remaining `'Task'` sites to #2507's scope, or — cleaner,
+since a rate limiter and a model router are unrelated subsystems — open the dedicated issue
+described in 8.2 and cross-reference it from #2507.
+
+#### #2472 — Remove hot-path stalls and make the runtime lifecycle restart-safe
+
+#2472 already owns MAIN-1, INIT-2, INIT-6 and INIT-8. Three unowned HIGH findings are the same
+class — synchronous or awaited work on the `tool.execute.after` hot path — and belong in its scope
+rather than in three separate issues:
+
+| Finding | What stalls | Where |
+|---|---|---|
+| REPOGRAPH-1 | `tool.execute.after` awaits the repo-graph init promise **before** its `WRITE_TOOL_NAMES` filter, so every read/grep/glob/bash result is withheld for the whole build | repo graph |
+| KNOWLEDGE-1 | the hive promoter performs a cohort git spawn plus a locked receipt-ledger replay plus a hive-dir lock and read on every `tool.execute.after` | knowledge |
+| PERF-1 | `readSwarmFileAsync` retries ENOENT as a rename race, so each absent `.swarm` file costs four 10 ms sleeps | `.swarm` I/O |
+
+**Amendment.** Add the three findings to #2472's required scope, and add one acceptance criterion
+that is measurable rather than per-site: a bounded latency budget for the whole
+`tool.execute.after` chain, asserted by a test that fails if any handler exceeds it.
+
+#### #2474 — [Workstream B] PR 1 of 3: Canonicalize project and filesystem identity
+
+The literal scope of #2474 is delivered well by PR #2517: all nine `path.resolve()` equality sites
+are replaced, two genuinely separate helpers exist with different fallback policies, and the
+recurrence ratchet is fully wired — `package.json:129` → the `quality` job in `ci.yml` → the
+commit-pr skill — and non-vacuous: the branch's own scanner reports 106 violations against base
+`3bbad17` and zero against the branch. The problem is what the issue *claims* rather than what it
+asks for.
+
+**Amendment 1 — remove or re-scope the PORT-002 claim.** #2474 is recorded as addressing PORT-002,
+the audit's only CONFIRMED Windows path-case defect. Its five verified sites —
+`src/tools/sast-scan.ts:446`, `src/tools/placeholder-scan.ts:1085`, `src/tools/secretscan.ts:845`,
+`schema-drift.ts:80` and `config-doctor.ts:2652` — are case-sensitive `startsWith(root + path.sep)`
+**containment** checks, not `resolve()` equality. The issue body names none of them, PR #2517 touches
+none of them, and the new ratchet cannot reach the class: `scripts/check-path-identity.ts` models
+identity equality, project map and template keys, and identity returns, and `isContainmentContext`
+deliberately exempts boundary-named functions — a probe of the verbatim `sast-scan` form reports no
+violation. Either add the five sites to the Required scope, or drop the PORT-002 claim so the
+coverage table stops reporting a confirmed defect as owned.
+
+**Amendment 2 — record the deliberate non-fix.** Strike
+`src/background/pending-delegations.ts:4561` from the `readdirSync` bullet. It is now
+`countFallbackFiles` and only reads `.length`, so it is order-independent. Four of the five named
+sites are sorted; leaving the fifth is the correct engineering call, and saying so converts an
+apparent gap into a recorded decision.
+
+**Amendment 3 — make the Required tests checkable.** "8.3 expansion" currently has zero coverage,
+and "Per-site Windows case-mismatch tests" covers six of roughly thirteen changed identity sites —
+none of them the seven `sameProjectRoot` sites the issue itself enumerated. Replace both with
+explicit items: a win32-gated test that resolves a `PROGRA~1`-style path through
+`canonicalExistingFilesystemPath`, or a DI-seam test proving `realpathSync.native` is preferred and
+that the ordinary-realpath fallback is documented as *not* 8.3-expanding; and per-site coverage for
+the enumerated `sameProjectRoot` sites.
+
+**Amendment 4 — add a durable-identity migration bullet.** This is the amendment that would have
+caught the one undisclosed defect in #2517. Add to Required scope:
+
+> Any change to a durable identity string — scope-binding `workspaceIdentity`, learning-health
+> `projectRef` scope prefixes, memory `workspaceId`/`repoRoot` — must ship either a dual-read
+> legacy-tolerance path or a stated one-time invalidation in the release fragment.
+
+PR #2517 changes `canonicalWorkspaceIdentity` on win32 from `c:/users/foo/proj` to
+`c:\users\foo\proj` (proved by probe), and the persisted value is re-validated by exact string
+equality at `src/scope/scope-persistence.ts:445-449` with no legacy tolerance. The first Windows
+session after upgrade therefore rejects every scope binding persisted by the previous version, so
+in-flight coder write authorizations fail closed until the architect re-declares. It self-limits
+after the one-hour binding TTL, but it is silent and appears nowhere in the PR body or the release
+fragment.
+
+**Amendment 5 — add a sequencing note naming PR #2515.** #2474 owns the repo-wide identity contract,
+so #2515's `src/db/canonical-project.ts` must be deleted and `src/db/project-db.ts` re-based on
+`canonicalRootKeyFresh` as part of whichever pull request lands second. Make the exit gate require
+`bun run check:path-identity` to pass on the merged tree — it currently would not, since #2517's own
+scanner flags #2515's helper at `canonical-project.ts:45`.
+
+**One thing #2474 does not do, and should not be read as doing.** STATE-1 and STATE-2 are untouched
+by PR #2517 and their blast radius is unchanged: `src/worktree/core.ts:583`,
+`src/commands/reset-session.ts:429` and the unconditional `rmSync` at
+`src/hooks/init-orphan-recovery.ts:333` are byte-identical to base, and no ownership check was added.
+The audit asked whether canonicalization could *widen* the destruction — it cannot, because a sibling
+repository's lanes are never in this project's protected set regardless of spelling. Those two
+findings need the separate issue specified in 8.2.
+
+#### #2480 — Establish the SQLite durable-state foundation
+
+#2480 requires "a Bun/node:sqlite driver-parity contract (node:sqlite stricter parameter counts —
+SQLITE_RANGE)". PR #2515 implements a parity contract but does **not** pin the one parity delta this
+audit verified, and that delta is a live HIGH finding with no owner: INIT-4 — `db.run(sql)` with no
+bindings returns a `Changes` object under `bun:sqlite` and `undefined` under the node adapter
+(`src/db/sqlite-loader.ts:116-118`), while `migrateMemoryFamily`'s ATTACH merge reads `.changes`, so
+`/swarm memory unlink` always reports zero rows moved on Node.
+
+**Amendment.** Name INIT-4 in #2480's required scope and add the no-binding `run()` return shape to
+the parity contract's pinned cases.
+
+#### #2488 — [Workstream E] PR 1 of 5: Finish graph correctness and graph-first workflow wiring
+
+Two of #2488's four obligations were already shipped when it was written, and an independent
+validation of PR #2516 against the branch confirms the PR correctly left both frozen surfaces alone —
+so the dead scope cost nothing this time, but it should not survive into the next attempt.
+
+**Amendment 1 — delete the second required-scope bullet entirely.**
+
+> Derive incremental language coverage from the canonical language registry; replace wall-clock-only staleness with content/fingerprint truth (#1641 residuals).
+
+Both halves shipped before this PR. `src/hooks/repo-graph-builder.ts:122` delegates to
+`isScannableSourcePath` and `src/tools/repo-graph/builder.ts:148` derives `SUPPORTED_EXTENSIONS` from
+`LANGUAGE_REGISTRY` (done under #1985 defect A2); `src/tools/repo-graph/query.ts:319` already derives
+freshness from the FreshnessProbe content fingerprint, with `isGraphFresh` surviving only as an
+explicitly `@deprecated` compatibility helper that finding REPOGRAPH-8 classifies as intentionally
+retained. The `src/graph/` deletion the issue hedges about is also already done — the directory does
+not exist. Scheduling any of this invites a regression on a deliberately frozen export.
+
+**Amendment 2 — replace the matching required test.** "All supported languages" belongs to the dead
+bullet above and no honest new language test can be produced for this scope. Replace it with
+"Task-ID resolver behaviour matrix across all task-ID forms, false numeric candidates, and
+over-limit plan contexts."
+
+**Amendment 3 — make the graph-first bullet measurable.** As written, "wire graph-first context into
+planning, coding, review, testing, security, critic, PR review, deep-dive" has no acceptance set, so
+partial wiring reads as done. Name the set explicitly:
+
+> Every `repo_map` action listed in `VALID_ACTIONS` is either referenced by at least one agent
+> prompt, skill or command, or is removed from the tool description advertised to agents.
+
+The measurement matters: PR #2516 takes six of the twelve orphaned actions from zero consumers to
+real ones (`route_trace`, `data_trace`, `test_pack`, `impact_cone`, `diff_context`,
+`package_boundaries`), which is genuine progress, while `symbol_search`, `symbol_context`,
+`graph_explain`, `preflight_packet`, `dead_exports` and `ontology` remain reachable from no prompt,
+skill or command — and the tool description still advertises two of them.
+
+**Amendment 4 — add a non-regression clause to the closure contract.** PR #2516 rewrote prompt and
+skill text and in doing so replaced, rather than extended, a directive pinned by an existing test.
+Add:
+
+> Prompt and skill edits must not delete or weaken a directive pinned by an existing test (the
+> #1988 C1 reviewer blast-radius wording, the SOUNDING_BOARD no-backticks guard, the #2131 G
+> progressive-disclosure baselines). Where a rewrite is intended, the rebaseline must be explicit in
+> the PR body.
+
+**Amendment 5 — require the resolver census as exit-gate evidence.**
+
+> The PR body lists every remaining task-ID extractor in `src/` with a one-line justification for why
+> it is not consolidated.
+
+This would have surfaced `src/evidence/phase-participation.ts:200` during authoring: the
+consolidation is real — five independent implementations collapse into one bounded, I/O-free leaf at
+`src/hooks/task-id-resolver.ts:136` — but two extractors survive untouched, and one of them attributes
+phase-participation evidence from an unbounded, plan-unaware `raw.trim().slice(0, 120)`.
+
+#### #2477 / #2478 — the flake root-fix pair, and the last quarantine-only PR
+
+#2478's own text says it supersedes "the quarantine-only PR #2455 rather than shipping it", and the
+maintainer already closed the two sibling quarantine PRs (#2191 and #2192) unmerged on 2026-09-02.
+**#2455 is the remaining one and should be closed the same way.** Its target issue #2368 is already
+closed as completed and no quarantine was ever applied — every list under `scripts/ci/` records "no
+active" entries for the file in question.
+
+One fact from #2368 is worth carrying into #2477/#2478 rather than discarding with the PR: the file
+flake detection caught in a merge group was `tests/unit/tools/dispatch-lanes.test.ts` — the test
+file for the dispatch path that PRREVIEW-1 lives in.
+
+#### #1643 — closed as completed while its acceptance criteria are unmet at head
+
+#1643 asked for two things, and both are objectively unsatisfied on `origin/main` today:
+
+- "AGENTS.md invariant 11 no longer references a manual `tool: {}` block or manual `TOOL_NAMES`
+  maintenance." `AGENTS.md:128` still reads: "(b) registration in the plugin `tool: {}` block in
+  `src/index.ts`, (c) entry in `TOOL_NAMES` (`src/tools/tool-names.ts`)". Neither surface exists —
+  `src/index.ts` registers via `buildPluginToolObject(...)` and `TOOL_NAMES` derives automatically.
+- "`scripts/check-tool-registration.ts` fails if a `TOOL_NAMES` entry has no corresponding
+  `src/tools/index.ts` export." `collectToolRegistrationErrors` contains no reference to the barrel.
+
+The issue was closed as **completed** on 2026-09-02 in the re-baseline while its only linked pull
+request, #2329, remains an unmerged draft. This matters more than an ordinary bookkeeping error:
+`AGENTS.md` is the repository's root engineering contract, and every agent that adds a tool is being
+sent to two registration sites that do not exist.
+
+**Action.** Either merge #2329 or reopen #1643 — a closed-completed issue whose contract is
+demonstrably unmet is worse than an open one, because section 7.6 shows the closure record is the
+only thing tracking it.
+
+### 8.2 Issues that still need opening
+
+Thirty findings were confirmed at high or critical severity after both gates. Nine are named by a
+roadmap issue. The other **twenty-one have no roadmap owner** — in most cases because the
+re-baseline of 2026-09-02 was written before these findings existed, not because anyone judged them
+unimportant.
+
+Twenty-one issues is not the right answer. Four of the twenty-one belong in the scope of an issue
+that already owns their root cause and are handled as amendments in 8.1 (INIT-4 → #2480;
+REPOGRAPH-1, KNOWLEDGE-1, PERF-1 → #2472). The remaining seventeen collapse to **eleven issues**
+once findings that share a mechanism and a fix are grouped. Each specification below gives the
+title, the findings it closes, why it is one issue rather than several, the required scope, and an
+exit gate that is reachable by that scope — the property #2469 lacks.
+
+One finding on the *owned* side needs the same treatment for the opposite reason. **PRREVIEW-1, the
+only workflow-blocking CRITICAL, is recorded as owned by #2502 and #2506 and is fixed by neither** —
+8.1 moves it to #2469 as a new first scope bullet. That amendment is the preferred remedy because
+#2469's exit gate already depends on it. But it is contingent: if PR #2518 merges first with its
+current `Closes #2469` line, #2469 auto-closes and PRREVIEW-1 is left with no owner at all. In that
+case open it as a standalone CRITICAL immediately, titled *PR_REVIEW child lanes are never told the
+`batch_id`/`lane_id` that `submit_pr_review_result` requires*, with the exit gate: a tier-M
+PR_REVIEW on a default install — resilience off, `pr_review_legacy_transcript_compatibility` unset —
+settles all six base dimensions through `submit_pr_review_result` and completes with a
+non-`INCOMPLETE` verdict, proven by a test that derives the submitted identifiers only from the
+rendered child prompt.
+
+---
+
+**N1 · CRITICAL · Plugin-injected `role:'system'` messages never reach the model**
+Closes MAIN-10, HOOKS-7, hooks-1-NEW-1.
+
+One defect, three symptoms. The OpenCode host's `toModelMessagesEffect` branches only on `user` and
+`assistant` and has no `system` member in its message schema and no `else`, so every synthetic
+`role:'system'` entry the plugin splices into `experimental.chat.messages.transform` is discarded
+before the request is built. Fourteen splice sites are affected, plus a fifteenth in
+`src/memory/injector.ts:163`. The plugin's own delivery predicate asserts against its own array, so
+telemetry reports success. The parallel `chat.system.transform` surface is unaffected and does reach
+the model, which is what makes the failure invisible. A third consequence is worse than silence:
+`issue-trace` pushes flat `{role:'system',content:[...]}` messages, and the host dereferences
+`msg.parts` unconditionally, so a `--trace` turn in which only `issue-trace` injects fails the
+prompt build with a `TypeError`.
+
+Required scope: migrate every synthetic system injection onto a surface the host renders — the
+`chat.system.transform` path, or a `user`-role carrier with an explicit provenance marker; replace
+the self-referential delivery predicate with one that asserts against what the host will actually
+render; fix the flat-shape `issue-trace` entry regardless of which carrier is chosen; and add a
+host-contract test pinned to the pinned `@opencode-ai/plugin` version that fails if the host's
+rendered role set ever changes.
+Exit gate: a test that builds a real request through the host's own transform and asserts that a
+guardrail advisory, a knowledge recall and a memory recall are each present in the rendered
+messages; plus a `--trace` turn that completes with the MODE directive delivered.
+*(The report-level critic argued MAIN-10 and HOOKS-7 are one defect. The report keeps them separate
+because no gate ruled on it; the tracker should not repeat the split.)*
+
+---
+
+**N2 · CRITICAL · Worktree reclamation destroys sibling projects' live lanes and uncommitted work**
+Closes STATE-1, STATE-2, PARALLEL-3.
+
+One defect class with two destructive entry points and one aggravating condition. The lane worktree
+base defaults to the project's **parent** directory, so every checkout stored side by side shares
+one `.swarm-worktrees` base. `runInitOrphanRecovery` enumerates that shared base with no
+repo-ownership check and force-deletes a directory after `git worktree remove` refuses it — the
+refusal ("is not a working tree") is precisely the signal that the directory belongs to another
+repository, and it is treated as a reason to escalate to `rm -rf`. `/swarm reset-session` deletes
+the same shared base outright, with no orphan filter, no ownership filter and no confirmation.
+PARALLEL-3 is why the window is wide rather than narrow: Lean lanes have no durable owner record and
+`listActiveLocks` goes blind after each lane lock's five-minute meta TTL, so a live lane looks
+orphaned to a second process.
+
+An ownership primitive already exists at `src/config/lane-context.ts:281-306` and is called from
+neither destructive path.
+
+Required scope: call the existing ownership primitive before any deletion in both paths and skip
+what this checkout does not own; treat a `git worktree remove` refusal as a stop, never as an
+escalation to `rm -rf`; give Lean lanes a durable owner record whose lifetime is the lane's, not a
+five-minute lock TTL; default the worktree base inside the project rather than beside it, with a
+migration for existing bases; and require an explicit confirmation for any reclamation that would
+delete a directory containing uncommitted work.
+Exit gate: a test with two sibling checkouts sharing a parent, in which opening the second while the
+first has a live lane leaves the first's worktree and its uncommitted changes intact — asserted for
+both `runInitOrphanRecovery` and `/swarm reset-session`, and for a Lean lane whose meta TTL has
+expired.
+
+---
+
+**N3 · HIGH · Per-agent `tools` maps are inert: 2,388 intended denies, none enforced**
+Closes HOST-1 (TOOLS-1 merged into it).
+
+`normalize()` (`core/src/v1/config/agent.ts:62-88` in the host) is the only reader of an agent's
+`tools` map, and it is bolted to the config decoder via `Schema.decodeTo`, so it runs at
+configuration-**file** decode — before plugins load. The agent merge at `agent.ts:267-294` copies
+twelve fields and `tools` is not among them. For all twenty-one plugin-injected agents the map is
+therefore inert, including its explicit `false` entries. Every documented per-agent capability
+boundary is unenforced: a reviewer, critic, tester, docs or SME subagent advertised as read-only can
+call `save_plan`, `bash`, `write` and every other registered tool; the FR-004 gate meant to make
+skill tools unreachable when `skills.enabled` is false does not; `tool_filter.overrides` changes
+nothing at runtime. Secondarily, every agent receives every tool's JSON schema each turn, so the
+token cost of the full 129-tool surface is paid on every request for every role.
+
+Required scope: emit a `permission` block, which the host does read from plugin-injected agents,
+rather than rewriting the permissive `tools` entries; keep the `tools` map only if something still
+consumes it, and delete it otherwise; add a runtime assertion that a denied tool is actually denied
+for at least one agent per role class.
+Exit gate: a runtime test in which a reviewer agent's `write` call is refused by the host, not by a
+plugin-side check — run against the pinned host version.
+
+---
+
+**N4 · HIGH · `bunSpawn`'s Node fallback silently discards subprocess output at 18 call sites**
+Closes BASE-1.
+
+`streamFromNode()` subscribes to the child's `stdout` only on the first `.text()`/`.bytes()` call
+(`bun-compat.ts:617`, `collected ??=`). Node's `child_process` ends the stdio streams during child
+teardown, so by the time an `await proc.exited` continuation runs the `end` event has already fired;
+the lazily-attached listener never fires, the collector promise is unsettleable, and the emitted
+bytes are discarded. Bun's branch buffers into a `ReadableStream`, so the same ordering works there
+— which is why the entire test suite and every Bun user sees nothing. A mechanical scan finds
+twenty-seven `await <p>.exited` sites, eighteen of which read a stream afterwards and zero that read
+before; `test-runner.ts:2306-2311` documents the >64 KB half of this exact bug as a fixed past
+incident.
+
+Required scope: convert all eighteen sites to the concurrent form
+`Promise.all([proc.exited, proc.stdout.text()])` already used correctly in five other modules, or
+make `streamFromNode` subscribe eagerly at spawn; add a ratchet that fails on a read-after-exited
+pattern; and run the affected git paths under Node in CI, not only under Bun.
+Exit gate: the repository's own git-dependent suites pass under `node --experimental-strip-types` as
+well as under Bun, and the ratchet fails on a deliberately reintroduced site.
+
+---
+
+**N5 · HIGH · plan.json is lost or permanently unreadable, and the lossy plan.md is snapshotted into the ledger**
+Closes PLAN-1, PLAN-2.
+
+`loadPlan` Step 3 migrates from the lossy `plan.md` whenever `plan.json` is absent **or**
+encoding-tainted, even though an authoritative ledger exists at Step 4, which is never reached.
+`savePlan` then snapshots the lossy plan into the ledger, so the loss becomes durable. Two triggers
+are ordinary: deleting `plan.json`, which the documentation describes as "Derived — can be rebuilt
+from ledger", silently loses scopes, acceptance criteria, dependencies, the LOCKED serial profile
+(the next `save_plan` then applies the v8 parallel default) and spec-drift detection; and a
+legitimate U+FFFD anywhere in task text — pasting a log or CSV sample containing `�` — is
+indistinguishable from invalid UTF-8, so `plan.json` becomes permanently unreadable while
+`save_plan` keeps reporting success.
+
+Required scope: reorder `loadPlan` so the ledger is consulted before the `plan.md` migration;
+distinguish a legitimate U+FFFD from a decode failure by validating the byte sequence rather than
+the decoded string; and make `save_plan` fail loudly rather than succeed when the plan it wrote
+cannot be read back.
+Exit gate: deleting `plan.json` on a plan with scopes, dependencies and a LOCKED serial profile
+restores all three from the ledger; and a plan whose task text contains `�` round-trips through
+`save_plan`/`loadPlan` unchanged.
+
+---
+
+**N6 · HIGH · v8 parallel-first can never engage — two independent gates block it**
+Closes PARALLEL-4, PLAN-4.
+
+Grouped because a fix to either alone leaves parallel-first unreachable. The gate's disjointness
+verdict reads the v1 `scope-<taskId>.json` projection, which `declare_scope` (v2 `binding-*.json`)
+never writes. Independently, `plan.current_phase` has no advancing writer and `save_plan` re-pins it
+to `phases[0]` on every revision, so the v8 parallel gate, the phase-monitor preflight and the
+`plan.md` header are stuck on the first phase for the plan's lifetime. The user-visible result is
+that new plans advertise parallel-first, then run serially with a repeated fallback advisory,
+worktree isolation never activates, and from phase 2 on there is no phase preflight or summary and
+the `plan.md` header always reads "Phase: 1".
+
+Required scope: make the disjointness verdict read the v2 binding projection that `declare_scope`
+actually writes, or write the v1 projection from `declare_scope`; give `current_phase` an advancing
+writer and stop `save_plan` re-pinning it; and add an assertion that the advertised execution mode
+matches the mode actually taken.
+Exit gate: a two-phase plan with disjoint task scopes dispatches in parallel with worktree isolation
+active in phase 2, and the phase preflight and summary fire for that phase.
+
+---
+
+**N7 · HIGH · Every first phase-critic review after plan approval raises a spurious BASELINE DRIFT**
+Closes PLAN-3.
+
+`get_approved_plan` compares a status-**inclusive** `computePlanHash` against the status-**excluded**
+structure hash stored by the `plan-critic-gate` / `approve_plan_critic` snapshots, so
+`drift_detected` is always true after a plan-critic approval, and the first phase critic review
+after approval — and any `approve_plan_critic` override — raises a false `NEEDS_REVISION`.
+
+Required scope: make both sides of the comparison use the same hash definition and give that
+definition one name and one implementation.
+Exit gate: an approve-then-review sequence with no intervening plan edit reports no drift, and an
+edit between approval and review still does.
+
+---
+
+**N8 · HIGH · The host's tool id is `task`; five plugin comparison sites test for `Task`**
+Closes HOOKS-3; shares its root cause with HOOKS-2 (owned by #2507).
+
+The tool-id census found five exclusive `'Task'` comparison sites against a host whose task tool id
+is lowercase `'task'`. HOOKS-2 — the delegation loop detector's 3× warning and 5× circuit breaker —
+is one, and it is already scoped to #2507. `registerPendingTaskModelRoute` (`src/index.ts:3906`) is
+another and has no owner: no task-model route is ever registered, so a configured
+`fallback_models` chain for subagents never engages on a provider 429 or 503. Fixing one site
+without normalizing the comparison leaves the rest dead.
+
+Required scope: normalize the tool id at a single boundary and route every comparison through it;
+convert all five census sites; add a ratchet that fails on a bare `=== 'Task'` comparison.
+Exit gate: a simulated provider 429 on a subagent dispatch engages the configured fallback model,
+and the loop detector trips on a real repeated dispatch.
+
+---
+
+**N9 · HIGH · `hooks.compaction=false` makes the plugin throw on every compaction**
+Closes HOOKS-1.
+
+The `experimental.session.compacting` wrapper in `src/index.ts` calls an undefined handler when
+`hooks.compaction` is false, so every compaction raises a `TypeError`; compaction may fail outright
+or the session may wedge at the context limit. The setting is a documented opt-out.
+
+Required scope: guard the wrapper, or do not register it when the feature is disabled; add a test
+that exercises a compaction with the flag both on and off.
+Exit gate: a compaction completes with `hooks.compaction=false` set.
+*(The report-level critic argued this is MEDIUM because it requires an operator to set a documented
+opt-out. The dispute is recorded in section 3.4 and left visible; the work is the same either way.)*
+
+---
+
+**N10 · HIGH · The whole `gates.*` configuration section is inert, and the docs document seven keys that do not exist**
+Closes CFGC-3.
+
+All six `gates.*` sections are inert, including the three whose modules contain an
+`enabled === false` check that is never reached because no caller supplies a `PluginConfig`.
+`docs/installation.md` additionally documents seven `gates.*` options that do not exist in the
+schema at all. A user who follows the documentation to tune the placeholder gate, or to disable the
+SBOM or build gate to unblock CI, has their keys stripped with a warning they never see, and the
+gate runs regardless. The escape hatch a blocked user would reach for is not real.
+
+Required scope: wire the config through to the three modules that already check it, delete the three
+sections that nothing reads, correct `docs/installation.md` to the keys that exist, and add the
+`gates.*` section to whatever drift check would have caught this.
+Exit gate: setting each documented `gates.*.enabled` to false demonstrably disables that gate, and
+an unknown `gates.*` key produces a warning the user can see.
+
+---
+
+**N11 · HIGH · `repair_gate_evidence` can wedge a task permanently short of forced completion**
+Closes EVIDENCE-1.
+
+The receipt-less branch of `repair_gate_evidence` writes an unsatisfiable
+`requirements_reconstruction` gate that then unions into every later generation and receipt. After
+repairing evidence with no receipt, every gate reports passing and `update_task_status(completed)`
+is refused forever. The only exits are `/swarm close` forced completion or hand-edits the project
+forbids.
+
+Required scope: make the receipt-less branch write a gate that a user can actually satisfy, or
+refuse the repair rather than writing an unsatisfiable one; stop unioning a failed reconstruction
+gate into later generations; and provide a supported recovery command.
+Exit gate: a task repaired without a receipt can be completed through the normal status transition.
+
+### 8.3 What to do with each open pull request
+
+Eight pull requests are open. Three were opened on 2026-09-02 against roadmap issues and are
+assessed in detail in section 7.7; three are stale drafts whose target issues are already closed; two
+were assessed earlier in this audit.
+
+| PR | Targets | State | Action |
+|---|---|---|---|
+| #2518 | #2469 | draft, CI red on a violation it introduces | Fix the test-clock violation, downgrade `Closes #2469` to `Refs`, correct the false invariant-audit line — then merge as a genuine partial delivery. Do not let it close #2469. |
+| #2517 | #2474 | draft, 5 of 6 Windows unit shards red | Do not merge as-is. Explain or fix the Windows shards — the one readable failure asserts on `resolveAuthorizedScopeBinding`, squarely on the identity code this PR rewrites. Ship a migration or an invalidation note for the undisclosed Windows-only durable re-key of persisted scope bindings. Sequence explicitly against #2515. |
+| #2516 | #2488 | not draft, 14 of 18 unit cells red | Do not merge as-is. Six changed-surface test files regress against base; two failures are behavioural, not cosmetic. The remaining work is small and mechanical. |
+| #2515 | #2480 | open | Do not merge alongside #2517 without resolving the conflict deliberately. `git merge-tree` reports content conflicts in `src/db/project-db.ts` and `scripts/retention-registry.data.ts`; whichever lands second must delete `src/db/canonical-project.ts` and re-base `project-db.ts` on `canonicalRootKeyFresh`. |
+| #2514 | #2477 | open, 38 checks green, one Windows unit shard red | Root-cause the Windows shard-2 failure. It uploaded a non-empty flake-annotations artifact, so the flake detector fired on the flake root-fix PR itself. |
+| #2312 | #2285 (closed) | draft since 2026-08-23 | **Close as superseded.** #2285 was closed as completed on 2026-08-24 by merged PR #2317, and the sanitizer is on main at `src/tools/dispatch-lanes.ts:313-331`, covered by `tests/unit/tools/dispatch-lanes-pr-workflow-contract-sanitization.test.ts`. |
+| #2329 | #1643 (closed) | draft since 2026-08-24 | **Merge it or reopen #1643.** Both of #1643's acceptance criteria are unmet at `origin/main`: `AGENTS.md:128` still names a `tool: {}` block and manual `TOOL_NAMES` maintenance, and `collectToolRegistrationErrors` has no barrel-export check. |
+| #2455 | #2368 (closed) | draft since 2026-09-01 | **Close as superseded.** #2478's own scope says it supersedes "the quarantine-only PR #2455 rather than shipping it", and the maintainer already closed the two sibling quarantine PRs (#2191, #2192) unmerged on 2026-09-02. Carry one fact forward first: the file flake detection caught was `tests/unit/tools/dispatch-lanes.test.ts` — the dispatch path PRREVIEW-1 lives in. |
+
+Three cross-PR patterns are worth stating plainly, because they are process defects rather than code
+defects.
+
+**The two largest open pull requests conflict with each other on the same subsystem and neither says
+so.** #2517 and #2515 both define a canonical project-identity helper and both re-key the project-db
+connection cache. `git merge-tree --write-tree` on the two heads reports content conflicts in
+`src/db/project-db.ts` and `scripts/retention-registry.data.ts`. #2515's helper concedes in its own
+header that "#2474 / Workstream B1 owns the repo-wide identity rollout", and its `canonicalProjectKey`
+uses non-native `fs.realpathSync` with no `path.win32.normalize`, so it does *not* expand Windows 8.3
+short names even though the same header claims it does. The two agree on plain-path case folding and
+diverge on 8.3, so a careless conflict resolution produces a split-brain connection-cache key.
+One mitigation is already in place: #2517's own ratchet flags the leftover helper
+(`canonical-project.ts:45`), so a merged tree that keeps both fails `check:path-identity` in the
+`quality` job.
+
+**Every pull request opened on 2026-09-02 that claims to close a roadmap issue fails its own
+repository gates.** #2518's `quality` job fails on a test-clock violation the PR itself introduces,
+which skips unit, integration, smoke, security, package-check and coverage-shard. #2516 fails 14 of
+18 unit matrix cells with six changed-surface test files that pass on base. #2514 is red on one
+Windows unit shard. This is not carelessness about testing — all three bodies carry long, detailed
+test plans.
+
+**Two of the three assert a validation result that their own gates contradict.** #2518's
+invariant-audit line 7 asserts the test ratchets passed while `check:test-clock` reports one new
+blocking violation naming the PR's own new file. #2516 asserts "No changed-surface test failed" while
+six changed-surface files regress against base. A reviewer who reads the body rather than the checks
+would merge both. The remedy is mechanical and belongs in the repository, not in a review habit: make
+the PR template's invariant-audit and test-plan sections cite the CI run id and conclusion they are
+claiming, so an assertion that contradicts the run is visible without re-running anything.
+
+## 9. Appendix: artifacts
+
+Explorer maps, findings JSON, GitHub inventory (issues and PRs as JSONL), CHANGELOG analyses, probe scripts and harnesses, reviewer verdict files and critic decision files were written under the session scratchpad (`scratchpad/maps`, `scratchpad/findings`, `scratchpad/gh`, `scratchpad/perf`, `scratchpad/portability`, `scratchpad/state-census`, `scratchpad/journey-project`, `scratchpad/verify/{batches,verdicts,critic,critic-batches}`). They are not committed. The reviewer and critic briefs are `scratchpad/verify/REVIEWER_BRIEF.md` and `scratchpad/verify/CRITIC_BRIEF.md`. The later passes that produced sections 6.2, 7.7 and 8 wrote to three further directories: `scratchpad/live` and `scratchpad/live2` (candidates and reviewer verdicts for the findings raised by the live PR-review failure), and `scratchpad/pr3` (the pull-request validation brief and one verdict file per pull request assessed). Where a finding above says "recorded in the verdict file", that is the file named here for its gate.
