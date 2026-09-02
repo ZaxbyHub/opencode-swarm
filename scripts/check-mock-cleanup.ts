@@ -179,15 +179,42 @@ export function assessMockFile(content: string): MockFileAssessment {
 	// pkg-audit-composer test files shipped this shape and hung every CI shard
 	// that co-located them with pkg-audit.test.ts.
 	const delegationViolations: DelegationViolation[] = [];
-	const firstMockModuleLine =
-		lines.findIndex((line) => MOCK_MODULE_PATTERN.test(line)) + 1;
-	if (firstMockModuleLine > 0) {
-		// Full-line comments are dropped so documentation mentioning the
-		// delegation shape (e.g. an explanatory comment in a FIXED file)
-		// cannot trip the rule.
-		const codeContent = lines
-			.filter((line) => !line.trimStart().startsWith('//'))
-			.join('\n');
+	const hasMockModule = lines.some((line) => MOCK_MODULE_PATTERN.test(line));
+	if (hasMockModule) {
+		// Comment-aware code view with ORIGINAL line numbers preserved: full-line
+		// `//` comments and `/* … */` spans (multi-line included) are dropped so
+		// documentation mentioning the delegation shape — single-line OR block —
+		// cannot trip the rule (review F-004/PRR-009).
+		const codeLines: Array<{ lineNo: number; text: string }> = [];
+		let inBlockComment = false;
+		for (let index = 0; index < lines.length; index += 1) {
+			let text = lines[index];
+			if (inBlockComment) {
+				const end = text.indexOf('*/');
+				if (end === -1) {
+					continue;
+				}
+				text = text.slice(end + 2);
+				inBlockComment = false;
+			}
+			// Strip inline block-comment spans on this line.
+			text = text.replaceAll(/\/\*[^*]*\*(?:\/|$)/g, '');
+			const trimmed = text.trimStart();
+			if (trimmed.startsWith('/*')) {
+				const open = text.indexOf('/*');
+				const end = text.indexOf('*/', open + 2);
+				if (end === -1) {
+					inBlockComment = true;
+					continue;
+				}
+				text = text.slice(0, open) + text.slice(end + 2);
+			}
+			if (text.trimStart().startsWith('//')) {
+				continue;
+			}
+			codeLines.push({ lineNo: index + 1, text });
+		}
+		const codeContent = codeLines.map((entry) => entry.text).join('\n');
 		// Only identifiers that are DECLARED as module namespaces can carry
 		// the recursion shape — `import * as V from …`, `const V = await
 		// import(…)`, or `const V = require(…)`. This excludes array spreads
@@ -215,9 +242,12 @@ export function assessMockFile(content: string): MockFileAssessment {
 			}
 			const callPattern = new RegExp(
 				`${namespaceVar}\\.([A-Za-z_$][A-Za-z0-9_$]*)\\s*\\(`,
-				'g',
 			);
-			for (const call of codeContent.matchAll(callPattern)) {
+			for (const entry of codeLines) {
+				const call = entry.text.match(callPattern);
+				if (!call) {
+					continue;
+				}
 				const property = call[1];
 				const pair = `${namespaceVar}.${property}`;
 				if (reportedPairs.has(pair)) {
@@ -230,8 +260,11 @@ export function assessMockFile(content: string): MockFileAssessment {
 				);
 				if (overrideKeyPattern.test(codeContent)) {
 					reportedPairs.add(pair);
+					// Each violation reports its OWN call-site line (review
+					// F-004: all rows previously shared the first mock.module
+					// line, which mislocated multiple-factory files).
 					delegationViolations.push({
-						line: firstMockModuleLine,
+						line: entry.lineNo,
 						spreadVar: namespaceVar,
 						property,
 					});

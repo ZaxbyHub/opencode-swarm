@@ -176,7 +176,7 @@ describe('check-mock-cleanup — pure decision coverage', () => {
 			].join('\n'),
 		);
 		expect(result.delegationViolations).toEqual([
-			{ line: 2, spreadVar: 'realDiscovery', property: 'isCommandAvailable' },
+			{ line: 6, spreadVar: 'realDiscovery', property: 'isCommandAvailable' },
 		]);
 	});
 
@@ -211,6 +211,47 @@ describe('check-mock-cleanup — pure decision coverage', () => {
 })`,
 				),
 				'const joined = parts.join(",");',
+			].join('\n'),
+		);
+		expect(result.delegationViolations).toEqual([]);
+	});
+
+	test('block comments mentioning the delegation shape are not flagged', () => {
+		const result = assessMockFile(
+			[
+				"import * as realDiscovery from './discovery';",
+				makeMockModuleCall(
+					'./discovery',
+					`() => ({
+	...realDiscovery,
+	isCommandAvailable: (cmd: string) => capturedReal(cmd),
+})`,
+				),
+				'/* historical note: this factory used to call',
+				' * realDiscovery.isCommandAvailable(cmd) before the #2260 fix',
+				' */',
+			].join('\n'),
+		);
+		expect(result.delegationViolations).toEqual([]);
+	});
+
+	test('namespace re-alias delegation is a documented accepted false negative', () => {
+		// Known limitation (review F-004/PRR-009): the gate's namespace set
+		// only covers `import * as X`, `await import()`, and `require()` — a
+		// re-aliased binding (`const alias = realDiscovery`) delegating
+		// through the alias is NOT flagged. Pinned here so the limitation is
+		// a documented decision, not an accident.
+		const result = assessMockFile(
+			[
+				"import * as realDiscovery from './discovery';",
+				'const alias = realDiscovery;',
+				makeMockModuleCall(
+					'./discovery',
+					`() => ({
+	...realDiscovery,
+	isCommandAvailable: (cmd: string) => alias.isCommandAvailable(cmd),
+})`,
+				),
 			].join('\n'),
 		);
 		expect(result.delegationViolations).toEqual([]);

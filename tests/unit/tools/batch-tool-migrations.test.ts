@@ -27,20 +27,48 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 
 afterEach(() => {
+	restoreDiscoverySeam();
 	mock.restore();
 });
 
 import * as realFs from 'node:fs';
 import * as os from 'node:os';
+import {
+	clearToolchainCache,
+	_internals as discoveryInternals,
+} from '../../../src/build/discovery';
+import * as realUtils from '../../../src/utils';
+
+// Capture the seam's original before any hook can mutate it (AGENTS.md §7).
+const originalDiscoverySpawnSync = discoveryInternals.spawnSyncImpl;
 
 // ===== MOCK HELPER FUNCTIONS =====
-// Mock isCommandAvailable
-mock.module('../../../src/build/discovery', () => ({
-	isCommandAvailable: mock(() => true),
-}));
+// Tool availability is controlled through the discovery module's
+// `_internals.spawnSyncImpl` DI seam (installed in beforeEach, restored in
+// afterEach) instead of a file-scope `mock.module` of `src/build/discovery`.
+// The mock.module form replaced the module namespace process-wide and —
+// being unconditional — masked the composer suite's seam control when the
+// CI sharder or a local multi-file run co-located the files (issue #2477
+// review F-003/PRR-004, execution-proven).
+function installAllCommandsAvailableSeam(): void {
+	clearToolchainCache();
+	discoveryInternals.spawnSyncImpl = () => ({
+		stdout: new Uint8Array(),
+		stderr: new Uint8Array(),
+		exitCode: 0,
+		success: true,
+	});
+}
 
-// Mock warn
+function restoreDiscoverySeam(): void {
+	discoveryInternals.spawnSyncImpl = originalDiscoverySpawnSync;
+	clearToolchainCache();
+}
+
+// Mock warn (spread the real module: a partial mock clobbers every other
+// src/utils export for later files in the shared process — AGENTS.md §7).
 mock.module('../../../src/utils', () => ({
+	...realUtils,
 	warn: mock(),
 }));
 
@@ -91,6 +119,7 @@ describe('Batch tool migration: createSwarmTool integration verification', () =>
 	beforeEach(() => {
 		mock.restore();
 		mock.clearAllMocks();
+		installAllCommandsAvailableSeam();
 	});
 
 	// Verify all tools have execute methods that accept directory parameter

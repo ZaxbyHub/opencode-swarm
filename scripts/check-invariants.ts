@@ -34,7 +34,7 @@ const KNOWLEDGE_DEDUP_SCOPE = [
 ] as const;
 
 /** Quarantine list files that require OWNER/EXPIRY metadata on active entries (#2477). */
-const QUARANTINE_LIST_FILES = [
+export const QUARANTINE_LIST_FILES = [
 	'scripts/ci/quarantined-tests.txt',
 	'scripts/ci/quarantined-tests-windows.txt',
 	'scripts/ci/quarantined-tests-macos.txt',
@@ -802,9 +802,13 @@ export function checkQuarantineMetadata(
 				if (
 					expiryLoose &&
 					!expiryPattern.test(above) &&
-					expiry === null &&
 					expiryMalformed === null
 				) {
+					// Captured regardless of whether a valid EXPIRY was already
+					// seen (the walk runs upward, so a valid line below a
+					// malformed one must not hide the malformed line — it is
+					// reported as a warning when a valid date wins, review
+					// F-006/api-001).
 					expiryMalformed = expiryLoose[1].trim();
 				}
 			}
@@ -813,6 +817,14 @@ export function checkQuarantineMetadata(
 					`ERROR: ${listRel} entry '${entry}' has no '# OWNER:' line in its comment block.`,
 				);
 				violations += 1;
+			}
+			if (expiryMalformed !== null && expiry !== null) {
+				// A malformed EXPIRY line coexisting with a later valid one is
+				// not an error (the valid date wins), but it must not vanish
+				// silently (review F-006/api-001).
+				messages.push(
+					`WARNING: ${listRel} entry '${entry}' has a malformed '# EXPIRY:' line ('${expiryMalformed}') that is ignored in favor of the valid '${expiry}'.`,
+				);
 			}
 			if (expiryMalformed !== null && expiry === null) {
 				messages.push(

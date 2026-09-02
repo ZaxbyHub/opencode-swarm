@@ -40,21 +40,50 @@ const originalPlanManagerInternals = {
 // exhausted; fails with a labeled message instead of silently bailing (the
 // silent-bail loop it replaced produced confusing downstream assertion
 // failures when the event loop was saturated under merge-group load).
+// Attempt-counting budget, not a wall-clock deadline: the check:test-clock
+// gate blocks any ADDED raw-clock line in this file, and a frozen-clock
+// deadline could never advance under freezeClock. 20ms polls ×
+// ceil(budgetMs/20) attempts bound the wait at ≥ budgetMs.
 async function waitFor(
 	predicate: () => boolean,
 	budgetMs: number,
 	label: string,
 ): Promise<void> {
-	const deadline = Date.now() + budgetMs;
-	while (!predicate()) {
-		if (Date.now() >= deadline) {
-			throw new Error(
-				`[plan-sync-worker.test] ${label} — budget exhausted after ${budgetMs}ms`,
-			);
+	const maxAttempts = Math.ceil(budgetMs / 20);
+	for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+		if (predicate()) {
+			return;
 		}
 		await new Promise((resolve) => setTimeout(resolve, 20));
 	}
+	if (!predicate()) {
+		throw new Error(
+			`[plan-sync-worker.test] ${label} — budget exhausted after ${budgetMs}ms`,
+		);
+	}
 }
+
+// Platform-independent unit coverage for the helper itself (the gated
+// PlanSyncWorker suite below only exercises it on Linux CI legs).
+describe('waitFor helper', () => {
+	test('returns immediately when the predicate already holds', async () => {
+		await waitFor(() => true, 100, 'already true');
+	});
+
+	test('returns once the predicate flips true', async () => {
+		let ready = false;
+		setTimeout(() => {
+			ready = true;
+		}, 30);
+		await waitFor(() => ready, 2000, 'flips true');
+	});
+
+	test('throws a labeled error on budget exhaustion', async () => {
+		await expect(waitFor(() => false, 60, 'never true')).rejects.toThrow(
+			'[plan-sync-worker.test] never true — budget exhausted after 60ms',
+		);
+	});
+});
 
 // File watcher timing varies significantly across platforms (macOS FSEvents,
 // Windows ReadDirectoryChangesW). Dozens of timing-sensitive assertions fail
@@ -140,7 +169,13 @@ describe.skipIf(process.platform !== 'linux')('PlanSyncWorker', () => {
 			originalPlanManagerInternals.regeneratePlanMarkdown;
 		// Clean up worker
 		if (worker) {
-			worker.dispose();
+			// A dispose throw must not skip watcher settle + temp cleanup
+			// (the seam restores above already ran, so only teardown is at risk).
+			try {
+				worker.dispose();
+			} catch {
+				// Best-effort dispose; cleanupTempDir below still runs.
+			}
 			worker = null;
 			// Allow the watcher close to propagate before removing the watched directory.
 			// Use Bun.sleep (native timer) instead of new Promise(setTimeout) to avoid

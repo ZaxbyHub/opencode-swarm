@@ -156,6 +156,28 @@ describe('prod-store tripwire (issue #2033)', () => {
 		}
 	});
 
+	// Direct unit coverage of the primitive itself (review F-005/PRR-014):
+	// the falsification probe above pins the BOOKEND; this pins
+	// withMaterializedProbe's own finally-restore — the probe callback
+	// THROWS, the materialized root must still be restored, and the store
+	// must be byte-identical to process start afterwards (verified both by
+	// direct existsSync assertions and by this suite's afterAll bookend).
+	test('withMaterializedProbe restores pre-probe existence even when the probe throws', () => {
+		const { dataDir } = getRealStorePaths();
+		const rootExisted = existsSync(path.join(dataDir, 'quarantine-backups'));
+		const probeRel = path.join('quarantine-backups', 'direct-probe');
+		expect(() =>
+			withMaterializedProbe(probeRel, () => {
+				mkdirSync(path.join(dataDir, probeRel), { recursive: true });
+				throw new Error('probe callback boom');
+			}),
+		).toThrow('probe callback boom');
+		expect(existsSync(path.join(dataDir, probeRel))).toBe(false);
+		if (!rootExisted) {
+			expect(existsSync(path.join(dataDir, 'quarantine-backups'))).toBe(false);
+		}
+	});
+
 	test('atomicWriteFile to the real hive store throws end-to-end (Bun path)', async () => {
 		// Guard presence first: never attempt the write if the Bun.write wrap is missing.
 		const bunWrite = (globalThis.Bun as { write?: { name?: string } }).write;

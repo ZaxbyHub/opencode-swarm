@@ -15,13 +15,13 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { QUARANTINE_LIST_FILES } from '../../scripts/check-invariants';
 
-export const QUARANTINE_LIST_FILE_NAMES = [
-	'quarantined-tests.txt',
-	'quarantined-tests-windows.txt',
-	'quarantined-tests-macos.txt',
-	'quarantined-integration-tests.txt',
-] as const;
+// Derived from the gate's own constant (single source of truth) so a list
+// added to or removed from Check 7 cannot drift out of the fixtures
+// (review F-006/PRR-010).
+export const QUARANTINE_LIST_FILE_NAMES: readonly string[] =
+	QUARANTINE_LIST_FILES.map((rel) => rel.slice(rel.lastIndexOf('/') + 1));
 
 export function seedQuarantineListFiles(fixtureDir: string): void {
 	fs.mkdirSync(path.join(fixtureDir, 'scripts', 'ci'), { recursive: true });

@@ -8,6 +8,7 @@ import {
 	_internals as discoveryInternals,
 } from '../../../src/build/discovery';
 import { pkg_audit } from '../../../src/tools/pkg-audit';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 // Composer availability is controlled through the discovery module's
 // `_internals.spawnSyncImpl` DI seam (with `clearToolchainCache` before/after)
@@ -79,14 +80,21 @@ describe('pkg-audit composer audit adversarial', () => {
 	beforeEach(() => {
 		originalSpawnSync = discoveryInternals.spawnSyncImpl;
 		clearToolchainCache();
-		// Faking the PATH-probe result makes `isCommandAvailable('composer')`
-		// follow `mockIsCommandAvailable` without touching the module registry.
-		discoveryInternals.spawnSyncImpl = () => ({
-			stdout: new Uint8Array(),
-			stderr: new Uint8Array(),
-			exitCode: mockIsCommandAvailable ? 0 : 127,
-			success: mockIsCommandAvailable,
-		});
+		// Only the composer PATH-probe is faked (to follow
+		// `mockIsCommandAvailable`); other commands' probes delegate to the
+		// captured real spawn so auto-ecosystem guards keep their fidelity
+		// (review F-006/PRR-007).
+		discoveryInternals.spawnSyncImpl = (cmd, opts) => {
+			if (Array.isArray(cmd) && cmd[1] === 'composer') {
+				return {
+					stdout: new Uint8Array(),
+					stderr: new Uint8Array(),
+					exitCode: mockIsCommandAvailable ? 0 : 127,
+					success: mockIsCommandAvailable,
+				};
+			}
+			return originalSpawnSync(cmd, opts);
+		};
 
 		originalSpawn = Bun.spawn;
 		spawnCalls = [];
@@ -104,13 +112,27 @@ describe('pkg-audit composer audit adversarial', () => {
 	});
 
 	afterEach(() => {
-		discoveryInternals.spawnSyncImpl = originalSpawnSync;
-		clearToolchainCache();
-
-		Bun.spawn = originalSpawn;
-		process.chdir(originalCwd);
-		fs.rmSync(tempDir, { recursive: true, force: true });
-		mockIsCommandAvailable = true;
+		try {
+			// Unthrowable restores first (plain property set + Map.clear) so the
+			// throw-capable steps below can never skip them (review F-002).
+			discoveryInternals.spawnSyncImpl = originalSpawnSync;
+			clearToolchainCache();
+			Bun.spawn = originalSpawn;
+			try {
+				process.chdir(originalCwd);
+			} catch {
+				// originalCwd may be gone; proceed with cleanup regardless.
+			}
+			try {
+				// Retried removal — same #2017/#2028 teardown class hardened
+				// elsewhere in this PR.
+				safeRmRecursive(tempDir);
+			} catch {
+				// Bounded retry exhausted — leave the dir to the OS.
+			}
+		} finally {
+			mockIsCommandAvailable = true;
+		}
 	});
 
 	// ===== 1. Oversized advisory title (10,000+ chars) =====

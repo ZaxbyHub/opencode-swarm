@@ -74,6 +74,31 @@ the helper uses internally.
 `withIsolatedState` fails the build. Pre-existing files are non-blocking
 warnings.
 
+### Deadline/polling waits — use attempt counting, not wall-clock deadlines
+
+Polling helpers of the form "wait until `predicate()` or a budget expires"
+must NOT read `Date.now()` for the deadline. Two reasons:
+
+1. The test-clock gate above flags any added raw-clock line (a deadline read
+   is a real-clock read; `freezeClock` is not an escape hatch here — a frozen
+   clock would never advance the deadline and the wait would deadlock).
+2. Attempt counting is deterministic under coverage instrumentation and
+   event-loop saturation: the budget degrades to "at least N polls", which is
+   exactly the guarantee such waits need.
+
+```typescript
+const maxAttempts = Math.ceil(budgetMs / 20);
+for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+  if (predicate()) return;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+throw new Error(`[label] budget exhausted after ${budgetMs}ms`);
+```
+
+See `tests/unit/background/plan-sync-worker.test.ts` (`waitFor`) for the
+in-repo example, including its labeled timeout message and unit coverage of
+the exhaustion path.
+
 ### Class 2 — Coverage-instrumentation sensitivity
 
 **Symptom:** test passes in a plain run but fails under `--coverage`, because

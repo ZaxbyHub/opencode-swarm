@@ -40,7 +40,11 @@ for (const key of PLATFORM_ENV_KEYS) {
 	capturedPlatformEnv[key] = process.env[key];
 }
 
-const CHILD_TIMEOUT_MS = 120_000;
+// 60s per child: ~30x the healthy ~2s runtime, and two sequential hung
+// children (120s) stay under this suite's 180s per-test budget so a
+// regression reports the specific assertion, not a generic wrapper kill
+// (review PRR-013).
+const CHILD_TIMEOUT_MS = 60_000;
 const KEEPALIVE_PRELOAD = fileURLToPath(
 	new URL('../../ci/bun-32056-keepalive.ts', import.meta.url),
 );
@@ -93,46 +97,59 @@ async function runTestPairInOneProcess(files: string[]): Promise<ChildRun> {
 		},
 	);
 
-	let timedOut = false;
-	let resolveTimeoutExit: ((exitCode: number) => void) | null = null;
-	const timeoutExit = new Promise<number>((resolve) => {
-		resolveTimeoutExit = resolve;
-	});
-
-	const killTimer = setTimeout(async () => {
-		timedOut = true;
+	const stdoutPromise = child.stdout.text().catch(() => '');
+	const stderrPromise = child.stderr.text().catch(() => '');
+	// The timeout is derived from the race WINNER, not a mutable flag: an
+	// async setTimeout callback can still run after clearTimeout once queued,
+	// which previously flipped `timedOut` to true for a cleanly-exited child
+	// (review PRR-003 late-fire race).
+	let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+	const winner = await Promise.race([
+		child.exited.then((code) => ({ kind: 'exit' as const, code })),
+		new Promise<{ kind: 'timeout' }>((resolve) => {
+			timeoutTimer = setTimeout(
+				() => resolve({ kind: 'timeout' }),
+				CHILD_TIMEOUT_MS,
+			);
+		}),
+	]);
+	if (timeoutTimer) clearTimeout(timeoutTimer);
+	if (winner.kind === 'timeout') {
+		// Deterministic tree cleanup on the timeout path (review PRR-008):
+		// taskkill gets an explicit cwd and a bounded wait so the best-effort
+		// fallback below always runs even if taskkill itself hangs.
 		try {
 			if (process.platform === 'win32') {
 				const killer = Bun.spawn(
 					['taskkill', '/T', '/F', '/PID', String(child.pid!)],
-					{ stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' },
+					{
+						cwd: REPO_ROOT,
+						stdin: 'ignore',
+						stdout: 'ignore',
+						stderr: 'ignore',
+					},
 				);
-				await killer.exited;
+				await Promise.race([
+					killer.exited,
+					new Promise((resolve) => {
+						const t = setTimeout(resolve, 10_000);
+						(t as { unref?: () => void }).unref?.();
+					}),
+				]);
 			} else {
 				process.kill(-child.pid!, 'SIGKILL');
 			}
 		} catch {
-			// Child may have exited between the timer firing and the kill.
-		} finally {
-			try {
-				child.kill('SIGKILL');
-			} catch {
-				// Best-effort fallback only.
-			}
-			resolveTimeoutExit?.(124);
+			// Child may have exited between the timeout and the kill.
 		}
-	}, CHILD_TIMEOUT_MS);
-
-	let rawExitCode = 0;
-	const stdoutPromise = child.stdout.text().catch(() => '');
-	const stderrPromise = child.stderr.text().catch(() => '');
-	try {
-		rawExitCode = await Promise.race([child.exited, timeoutExit]);
-	} catch {
-		rawExitCode = timedOut ? 124 : 1;
-	} finally {
-		clearTimeout(killTimer);
+		try {
+			child.kill('SIGKILL');
+		} catch {
+			// Best-effort fallback only.
+		}
 	}
+	const timedOut = winner.kind === 'timeout';
+	const rawExitCode = winner.kind === 'exit' ? winner.code : 124;
 	return {
 		exitCode: timedOut ? 124 : rawExitCode,
 		timedOut,
@@ -142,6 +159,7 @@ async function runTestPairInOneProcess(files: string[]): Promise<ChildRun> {
 
 const PKG_AUDIT = 'tests/unit/tools/pkg-audit.test.ts';
 const PKG_AUDIT_COMPOSER = 'tests/unit/tools/pkg-audit-composer.test.ts';
+const PKG_AUDIT_BATCH = 'tests/unit/tools/batch-tool-migrations.test.ts';
 
 describe('pkg-audit combined-process co-location (issue #2260)', () => {
 	// Wall-clock generous enough for cold CI runners; the healthy pair
@@ -158,5 +176,31 @@ describe('pkg-audit combined-process co-location (issue #2260)', () => {
 		expect(run.timedOut).toBe(false);
 		expect(run.exitCode).toBe(0);
 		expect(run.output).toContain('Ran 87 tests across 2 files');
+	}, 180_000);
+
+	// Review F-003/PRR-004 pin: batch-tool-migrations historically held a
+	// file-scope `mock.module` of `src/build/discovery` whose unconditional
+	// availability override masked the composer suite's DI seam when the two
+	// shared a process (main failed BOTH orders with 2 fails + 2 errors; the
+	// batch mock now migrated to the seam, so both orders must pass). Exact
+	// count is an intentional pin, same as above: 21 batch + 13 composer.
+	test('pkg-audit-composer + batch-tool-migrations pass in one process (composer first)', async () => {
+		const run = await runTestPairInOneProcess([
+			PKG_AUDIT_COMPOSER,
+			PKG_AUDIT_BATCH,
+		]);
+		expect(run.timedOut).toBe(false);
+		expect(run.exitCode).toBe(0);
+		expect(run.output).toContain('Ran 34 tests across 2 files');
+	}, 180_000);
+
+	test('batch-tool-migrations + pkg-audit-composer pass in one process (composer second)', async () => {
+		const run = await runTestPairInOneProcess([
+			PKG_AUDIT_BATCH,
+			PKG_AUDIT_COMPOSER,
+		]);
+		expect(run.timedOut).toBe(false);
+		expect(run.exitCode).toBe(0);
+		expect(run.output).toContain('Ran 34 tests across 2 files');
 	}, 180_000);
 });

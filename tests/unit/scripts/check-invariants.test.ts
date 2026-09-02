@@ -322,7 +322,7 @@ describe('check-invariants.sh', () => {
 	);
 
 	test(
-		'should run all five checks',
+		'should surface the core checks on the repo',
 		() => {
 			const result = runCheckInvariantsOnRepo();
 			expect(result.stdout).toContain('Check 1:');
