@@ -45,13 +45,18 @@ export interface GroupCommitOp {
 }
 
 /**
- * Detect "the underlying handle was closed" failures (both drivers phrase it
- * as `database ... closed`; node's adapter surfaces the raw SQLite message).
+ * Detect "the underlying handle was closed" failures across BOTH drivers:
+ * bun:sqlite says "database has closed"; node:sqlite raises
+ * ERR_INVALID_STATE "database is not open".
  */
 function isClosedHandleError(err: unknown): boolean {
 	const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
 	return (
-		msg.includes('database has closed') || msg.includes('database is closed')
+		msg.includes('database has closed') ||
+		msg.includes('database is closed') ||
+		// node:sqlite raises ERR_INVALID_STATE "database is not open" (verified
+		// on Node 24 — the Desktop sidecar runtime the adapter exists for).
+		msg.includes('database is not open')
 	);
 }
 
@@ -185,6 +190,10 @@ export class GroupCommitWriter {
 
 	private applyBatch(batch: GroupCommitOp[]): void {
 		const cls = batchDurabilityClass(batch.map((op) => op.durability));
+		// The escalation pragma is deliberately OUTSIDE the try below: if IT
+		// throws (e.g. the handle was closed), no transaction was opened, so
+		// there is nothing to roll back or restore — the raw error propagates
+		// to flushSync (which may self-heal and retry this whole batch).
 		applySynchronousForClass(this.db, cls);
 		try {
 			this.db.run('BEGIN IMMEDIATE');

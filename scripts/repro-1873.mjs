@@ -250,12 +250,42 @@ async function main() {
 		// quick_check + WAL checkpoint close path.
 		const quick = db.query('PRAGMA quick_check').get();
 		check('#2480 quick_check ok on the live foundation DB', quick && quick.quick_check === 'ok', JSON.stringify(quick));
+		// ── #2480 stale-writer self-heal under the REAL node:sqlite driver ──
+		// The pre-fix bug: /swarm close evicted the DB handle without closing
+		// the cached group-commit writer, so post-close writes failed against
+		// the dead handle ("database is not open" under node:sqlite). The
+		// writer must rebind and complete the batch transparently.
+		await mod.appendInsightCandidatesDb(projDir, [
+			{
+				payload: JSON.stringify({ lesson: 'stale-before-close' }),
+				createdAt: '2026-01-01T00:00:00.000Z',
+			},
+		]);
+		mod.closeProjectDb(projDir); // NOTE: writer intentionally NOT closed
+		await mod.appendInsightCandidatesDb(projDir, [
+			{
+				payload: JSON.stringify({ lesson: 'stale-after-close' }),
+				createdAt: '2026-01-02T00:00:00.000Z',
+			},
+		]);
+		const staleWriterRows = mod
+			.getProjectDb(projDir)
+			.query(
+				"SELECT COUNT(*) AS n FROM insight_candidate WHERE payload LIKE '%stale-before-close%' OR payload LIKE '%stale-after-close%'",
+			)
+			.get().n;
+		check(
+			'#2480 stale-writer self-heal under real node:sqlite (post-close write lands)',
+			staleWriterRows === 2,
+			`rows=${staleWriterRows}`,
+		);
+
 		mod.closeGroupCommitWriter(projDir);
 		mod.closeProjectDb(projDir);
 		const reopened = mod.getProjectDb(projDir);
 		check(
 			'#2480 close→reopen round trip preserves durable rows',
-			reopened.query('SELECT COUNT(*) AS n FROM insight_candidate WHERE consumed_at IS NULL').get().n === 1,
+			reopened.query('SELECT COUNT(*) AS n FROM insight_candidate WHERE consumed_at IS NULL').get().n === 3, // 1 original + 2 stale-writer rows
 			'',
 		);
 

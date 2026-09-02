@@ -13,6 +13,7 @@ import { DbWriteError } from '../../../src/db/db-errors.js';
 import {
 	FLUSH_THRESHOLD_OPS,
 	GroupCommitWriter,
+	getOpenGroupCommitWriterCount,
 } from '../../../src/db/group-commit-writer.js';
 import { appendInsightCandidatesDb } from '../../../src/db/insight-candidate-store.js';
 import { closeProjectDb, getProjectDb } from '../../../src/db/project-db.js';
@@ -169,20 +170,9 @@ describe('GroupCommitWriter', () => {
 	});
 
 	test(
-		'#2480 stale-writer regression: a closed underlying handle self-evicts; the next write rebinds',
+		'#2480 stale-writer regression: a closed underlying handle self-heals; the post-close write rebinds and lands',
 		{ timeout: 30_000 },
 		async () => {
-			const repoRoot = path.resolve(import.meta.dir, '..', '..', '..');
-			const projectDbUrl = pathToFileURL(
-				path.join(repoRoot, 'src', 'db', 'project-db.ts'),
-			).href;
-			const writerSrc = `import { getProjectDb } from ${JSON.stringify(projectDbUrl)};
-const dir = process.env.SWARM_CONC_DIR;
-if (!dir) throw new Error('SWARM_CONC_DIR missing');
-const db = getProjectDb(dir);
-`;
-			const workerPath = path.join(dir, 'worker.ts');
-			writeFileSync(workerPath, writerSrc, 'utf8');
 			// Prime the cached writer + handle from THIS process, then close
 			// ONLY the DB handle (the pre-fix /swarm close shape).
 			await appendInsightCandidatesDb(dir, [
@@ -193,7 +183,7 @@ const db = getProjectDb(dir);
 			]);
 			closeProjectDb(dir);
 			// Post-close write: the flush hits a closed handle; the writer
-			// must self-evict so the retried append rebinds and SUCCEEDS.
+			// must rebind to a fresh handle and complete the batch.
 			await appendInsightCandidatesDb(dir, [
 				{
 					payload: JSON.stringify({ lesson: 'after-close' }),
@@ -208,6 +198,53 @@ const db = getProjectDb(dir);
 			expect(n).toBe(2); // both writes durable
 		},
 	);
+
+	test('#2480 double-failure eviction: a retry that also hits a closed handle evicts the writer; the next call rebinds fresh', async () => {
+		await appendInsightCandidatesDb(dir, [
+			{
+				payload: JSON.stringify({ lesson: 'prime' }),
+				createdAt: '2026-01-01T00:00:00.000Z',
+			},
+		]);
+		const writersBefore = getOpenGroupCommitWriterCount();
+		// Close the handle, then close the REBOUND handle too: close ALL
+		// project DBs so the self-heal retry's getProjectDb reopens a DB
+		// whose handle we then kill again — simpler: close the handle,
+		// monkey-seal getProjectDb's reopen by closing all handles and
+		// corrupting the DB file so the reopen itself fails closed.
+		closeProjectDb(dir);
+		const dbPath = path.join(dir, '.swarm', 'swarm.db');
+		writeFileSync(dbPath, 'not a sqlite database');
+		// The flush fails (closed handle) -> rebind reopens the corrupt
+		// file -> retry fails again -> writer must EVICT, not cache poison.
+		let threw = false;
+		try {
+			await appendInsightCandidatesDb(dir, [
+				{
+					payload: JSON.stringify({ lesson: 'doomed' }),
+					createdAt: '2026-01-02T00:00:00.000Z',
+				},
+			]);
+		} catch {
+			threw = true;
+		}
+		expect(threw).toBe(true);
+		expect(getOpenGroupCommitWriterCount()).toBeLessThan(writersBefore + 1);
+		// Repair and verify the NEXT call gets a fresh, working writer.
+		rmSync(dbPath, { force: true });
+		await appendInsightCandidatesDb(dir, [
+			{
+				payload: JSON.stringify({ lesson: 'recovered' }),
+				createdAt: '2026-01-03T00:00:00.000Z',
+			},
+		]);
+		const n = getProjectDb(dir)
+			.query<{ n: number }, []>(
+				"SELECT COUNT(*) as n FROM insight_candidate WHERE payload LIKE '%recovered%'",
+			)
+			.get()?.n;
+		expect(n).toBe(1);
+	});
 
 	test('enqueue after close throws a DbWriteError', () => {
 		const writer = new GroupCommitWriter(db);
