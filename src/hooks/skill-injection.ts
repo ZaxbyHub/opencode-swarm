@@ -15,9 +15,9 @@
  *     the three other recording sites in `skill-propagation-gate.ts`, (b) broke
  *     the SKILL_COMPLIANCE round-trip join except by coincidence, and (c)
  *     inflated frequency / taskID-diversity scoring. The fallback is
- *     `'auto-injected'` rather than `'unknown'` so the compliance resolver's
- *     `resolvedTaskID !== 'unknown'` guard at `skill-propagation-gate.ts:1302`
- *     continues to fire and populate fallback skill paths.
+ *     `'auto-injected'` to preserve a stable local audit ID for the injection
+ *     entry; reviewer compliance attribution still requires an explicit TASK
+ *     marker and otherwise fails closed as `'unknown'`.
  *
  *  2. Observability — a `skill_injection_decision` event is emitted to
  *     `.swarm/events.jsonl` for BOTH the qualified-injection and the
@@ -177,10 +177,10 @@ export function injectSkillsIntoDelegation(
 	const newPrompt = `${skillsLine}\n\n${promptRaw}`;
 	args.prompt = newPrompt;
 
-	// Resolve a stable taskID for attribution. Prefer a real marker extracted
-	// from the prompt; fall back to 'auto-injected' (NOT 'unknown') so the
-	// compliance resolver's `resolvedTaskID !== 'unknown'` guard continues to
-	// fire and populate fallback skill paths for reviewer verdicts.
+	// Resolve a stable taskID for the injection audit entry. Prefer a real marker
+	// extracted from the prompt; use 'auto-injected' only as a local sentinel.
+	// Reviewer compliance attribution is independent and fails closed without an
+	// explicit TASK marker.
 	const extractedTaskId = extractTaskIdFromPrompt(
 		promptRaw,
 		options.knownPlanTaskIds,

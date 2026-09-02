@@ -2775,38 +2775,46 @@ async function resolveEvidenceTaskId(
 	// Shared bounded resolution first; session fallback is allowed only when the
 	// resolver had no safe plan context and therefore made no authoritative
 	// determination.
+	let plan: Awaited<ReturnType<typeof loadPlanJsonOnly>> = null;
+	let planTaskIdContext: PlanTaskIdContext | undefined;
+	try {
+		plan = await loadPlanJsonOnly(directory);
+		if (plan) {
+			planTaskIdContext = collectPlanTaskIdContextFromPhases(plan.phases);
+		}
+	} catch {
+		// Plan unavailable — the resolver still handles explicit task IDs without
+		// membership context, then the session fallback covers missing IDs.
+	}
+
 	if (args) {
 		try {
-			const plan = await loadPlanJsonOnly(directory);
-			if (plan) {
-				const planTaskIdContext = collectPlanTaskIdContextFromPhases(
-					plan.phases,
-				);
-				const resolution = resolveTaskId(args, {
-					policy: 'plan',
-					...toTaskIdPlanContextOptions(planTaskIdContext),
-				});
-				if (resolution.status === 'resolved') {
-					if (
-						planTaskIdContext.status === 'over_limit' &&
-						!plan.phases.some((phase) =>
-							phase?.tasks?.some((task) => task?.id === resolution.taskId),
-						)
-					) {
-						return null;
-					}
-					return resolution.taskId;
-				}
+			const resolution = resolveTaskId(args, {
+				policy: 'plan',
+				...(planTaskIdContext
+					? toTaskIdPlanContextOptions(planTaskIdContext)
+					: {}),
+			});
+			if (resolution.status === 'resolved') {
 				if (
-					resolution.status === 'invalid' ||
-					resolution.status === 'ambiguous' ||
-					resolution.status === 'over_limit'
+					planTaskIdContext?.status === 'over_limit' &&
+					!plan?.phases.some((phase) =>
+						phase?.tasks?.some((task) => task?.id === resolution.taskId),
+					)
 				) {
 					return null;
 				}
+				return resolution.taskId;
+			}
+			if (
+				resolution.status === 'invalid' ||
+				resolution.status === 'ambiguous' ||
+				resolution.status === 'over_limit'
+			) {
+				return null;
 			}
 		} catch {
-			// Plan unavailable — proceed to session fallback
+			// Resolver failure — proceed to session fallback.
 		}
 	}
 

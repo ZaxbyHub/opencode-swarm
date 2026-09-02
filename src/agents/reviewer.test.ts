@@ -186,25 +186,33 @@ describe('REVIEWER_PROMPT — ACCEPTANCE field (issue #1687 task 2.2)', () => {
 	});
 });
 
-describe('REVIEWER_PROMPT — repo_map blast radius directive (issue #1988 C1)', () => {
+describe('REVIEWER_PROMPT — graph-first review directive (issue #1988 C1)', () => {
 	const agent = createReviewerAgent('test-model');
 	const prompt = agent.config.prompt ?? '';
 
-	it('DO (explicitly) directs repo_map blast_radius for uncovered changed files', () => {
+	it('DO (explicitly) directs the graph-first review workflow', () => {
 		const doStart = prompt.indexOf('DO (explicitly):');
 		const configStart = prompt.indexOf('## CONFIG STRICTNESS VERIFICATION');
 		const doSection = prompt.substring(doStart, configStart);
-		expect(doSection).toContain('repo_map action="blast_radius"');
-		expect(doSection).toContain('not covered by an injected REPO GRAPH block');
+		expect(doSection).toContain('repo_map action="graph_health"');
+		expect(doSection).toContain('diff_context');
+		expect(doSection).toContain('impact_cone');
+		expect(doSection).toContain('blast_radius');
+		expect(doSection).toContain('Graph evidence is advisory only');
 	});
 
-	it('blast radius directive is positioned after the platform-compatibility check', () => {
+	it('graph-first directive is positioned after the platform-compatibility check', () => {
 		const platformIndex = prompt.indexOf('VERIFY platform compatibility');
-		const blastIndex = prompt.indexOf('repo_map action="blast_radius"');
-		expect(blastIndex).toBeGreaterThan(platformIndex);
+		const graphIndex = prompt.indexOf('repo_map action="graph_health"');
+		expect(graphIndex).toBeGreaterThan(platformIndex);
 	});
 
-	it('directive requires checking the listed dependents', () => {
-		expect(prompt).toContain('check the listed dependents');
+	it('directive requires direct-source verification and a fallback when graph evidence is unavailable', () => {
+		expect(prompt).toContain(
+			'Require source anchors and verify the direct source',
+		);
+		expect(prompt).toContain(
+			'rely on the direct source, Git diff, and searches',
+		);
 	});
 });

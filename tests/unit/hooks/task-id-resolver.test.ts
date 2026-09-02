@@ -134,6 +134,12 @@ describe('bounded shared task-ID resolver', () => {
 		).toEqual({ status: 'ambiguous', candidates: ['1.1', '1.2'] });
 		expect(
 			resolveTaskId(
+				{ prompt: 'task_id: 123!!!\ntaskId: legacy-task' },
+				{ policy: 'attribution' },
+			),
+		).toEqual({ status: 'invalid', input: 'marker' });
+		expect(
+			resolveTaskId(
 				{},
 				{
 					policy: 'plan',

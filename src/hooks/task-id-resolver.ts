@@ -270,6 +270,7 @@ export function resolveTaskId(
 			const textSelection = select(textCandidates, 'text');
 			if (textSelection) return textSelection;
 		} else {
+			let hasInvalidRawMarker = false;
 			for (const rawMarker of [
 				ATTRIBUTION_ID_MARKER_RAW,
 				ATTRIBUTION_TASK_MARKER_RAW,
@@ -288,11 +289,12 @@ export function resolveTaskId(
 								options.planContextOverLimit,
 							)
 						) {
-							return { status: 'invalid', input: 'marker' };
+							hasInvalidRawMarker = true;
 						}
 					}
 				}
 			}
+			if (hasInvalidRawMarker) return { status: 'invalid', input: 'marker' };
 			const marked = new Set<string>();
 			for (const marker of [ATTRIBUTION_ID_MARKER, ATTRIBUTION_TASK_MARKER]) {
 				for (const text of textFields) {
