@@ -176,9 +176,9 @@ issues a deferred BEGIN that deadlocks into SQLITE_BUSY under two-windows
 contention — the qa-gate-profile immediate-transaction precedent is the
 model). Migrated stores `await flush()` so write durability matches the
 legacy awaited file appends; concurrent callers' ops coalesce into one
-transaction. Backpressure: the queue is bounded (1024); overflow forces a
-synchronous flush rather than dropping writes. Nothing here runs at plugin
-init.
+transaction. Backpressure: the queue is hard-bounded at `MAX_QUEUED_OPS`
+(1024) — reaching the bound forces a synchronous flush rather than dropping
+writes. Nothing here runs at plugin init.
 
 **Self-healing against a closed handle.** A close site that evicts the DB
 handle without closing the writer (the pre-#2480-fix `/swarm close` shape)

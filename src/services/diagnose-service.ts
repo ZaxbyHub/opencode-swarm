@@ -91,11 +91,14 @@ function checkSwarmDb(directory: string): HealthCheck {
 				detail: `unavailable (${snapshot.category}): ${snapshot.message}`,
 			};
 		case 'open': {
-			const detail = `quick_check ${snapshot.quickCheck}; ${snapshot.journalMode} mode, ${snapshot.pageCount} pages, ${snapshot.migrationFailures} recorded migration failure(s); driver: ${runtime} ${runtimeVersion}`;
+			const markerNote = snapshot.staleMarker
+				? ', stale db-migration-failure.json marker present'
+				: '';
+			const detail = `quick_check ${snapshot.quickCheck}; ${snapshot.journalMode} mode, ${snapshot.pageCount} pages, ${snapshot.migrationFailures} recorded migration failure(s)${markerNote}; driver: ${runtime} ${runtimeVersion}`;
 			if (snapshot.quickCheck !== 'ok') {
 				return { name: 'swarm.db', status: '❌', detail };
 			}
-			if (snapshot.migrationFailures > 0) {
+			if (snapshot.migrationFailures > 0 || snapshot.staleMarker) {
 				return { name: 'swarm.db', status: '⚠️', detail };
 			}
 			return { name: 'swarm.db', status: '✅', detail };

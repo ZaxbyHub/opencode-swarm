@@ -18,7 +18,13 @@
  * knowledge-receipts migration precedent).
  */
 
-import { existsSync, readdirSync, readFileSync, renameSync } from 'node:fs';
+import {
+	existsSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	statSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { warn } from '../utils/logger.js';
 import { canonicalProjectKey } from './canonical-project.js';
@@ -29,6 +35,15 @@ const RENAME_RETRIES = 20;
 const RENAME_RETRY_DELAY_MS = 5;
 
 const warnedStaleLegacy = new Set<string>();
+
+/**
+ * Size cap for a single legacy artifact import (#2480 review F-02 — same
+ * guard convention as MAX_TRACEABILITY_BYTES in design-doc-drift). The live
+ * stores were FIFO/entry-bounded when they were files, so anything beyond
+ * this is pathological; it is skipped inert (never imported, never renamed)
+ * rather than loaded into memory.
+ */
+export const MAX_LEGACY_IMPORT_BYTES = 32 * 1024 * 1024;
 
 export interface LegacyImportResult {
 	/** Rows imported (0 when the import conditions were not met). */
@@ -76,7 +91,12 @@ function warnStaleLegacyOnce(key: string, fileName: string): void {
 export const _internals: {
 	renameSync: typeof renameSync;
 	warnStaleLegacyOnce: typeof warnStaleLegacyOnce;
-} = { renameSync, warnStaleLegacyOnce };
+	maxLegacyImportBytes: () => number;
+} = {
+	renameSync,
+	warnStaleLegacyOnce,
+	maxLegacyImportBytes: () => MAX_LEGACY_IMPORT_BYTES,
+};
 
 /**
  * Import a legacy `.jsonl` file into an append-only stream table.
@@ -109,6 +129,12 @@ export function importLegacyJsonl(
 
 	let content: string;
 	try {
+		if (statSync(filePath).size > _internals.maxLegacyImportBytes()) {
+			warn(
+				`[swarm.db] legacy artifact ${opts.fileName} exceeds the import size cap; leaving it inert (not imported, not renamed)`,
+			);
+			return { imported: 0, skipped: 0, archived: false };
+		}
 		content = readFileSync(filePath, 'utf-8');
 	} catch {
 		return { imported: 0, skipped: 0, archived: false };
@@ -216,7 +242,12 @@ export function importLegacyJsonFiles(
 			continue;
 		}
 		try {
-			const raw = readFileSync(join(swarmDir, fileName), 'utf-8');
+			const abs = join(swarmDir, fileName);
+			if (statSync(abs).size > _internals.maxLegacyImportBytes()) {
+				skipped++;
+				continue;
+			}
+			const raw = readFileSync(abs, 'utf-8');
 			JSON.parse(raw);
 			parsed.push({ phase: Number(match[1]), payload: raw, fileName });
 		} catch {

@@ -8,7 +8,8 @@
  * `diagnose-service` consume a plain object.
  */
 
-import { statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { getProjectDb, projectDbPath } from './project-db.js';
 
 /** quick_check size cap: an oversized DB reports `too_large` instead of scanning inline. */
@@ -23,6 +24,9 @@ export type SwarmDbHealthSnapshot =
 			journalMode: string;
 			pageCount: number;
 			migrationFailures: number;
+			/** #2480 review F-07: stale marker file present (a recorded
+			 * failure whose cleanup could not run — surfaced for diagnosis). */
+			staleMarker: boolean;
 	  }
 	| { kind: 'error'; category: string; message: string };
 
@@ -60,6 +64,9 @@ export function getSwarmDbHealthSnapshot(
 						'SELECT COUNT(*) as n FROM migration_failures',
 					)
 					.get()?.n ?? 0,
+			staleMarker: existsSync(
+				join(directory, '.swarm', 'db-migration-failure.json'),
+			),
 		};
 	} catch (err) {
 		const category =

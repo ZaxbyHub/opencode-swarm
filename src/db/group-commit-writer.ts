@@ -54,6 +54,9 @@ function isClosedHandleError(err: unknown): boolean {
 	return (
 		msg.includes('database has closed') ||
 		msg.includes('database is closed') ||
+		// bun's query()-path raises this variant (run/pragma say "Database
+		// has closed"); verified on Bun 1.3.
+		msg.includes('cannot use a closed database') ||
 		// node:sqlite raises ERR_INVALID_STATE "database is not open" (verified
 		// on Node 24 — the Desktop sidecar runtime the adapter exists for).
 		msg.includes('database is not open')
@@ -61,7 +64,7 @@ function isClosedHandleError(err: unknown): boolean {
 }
 
 /** Queue bound — overflow forces a synchronous flush (never a silent drop). */
-const _MAX_QUEUED_OPS = 1024;
+export const MAX_QUEUED_OPS = 1024;
 
 /** Ops at or above this count trigger an immediate synchronous flush. */
 export const FLUSH_THRESHOLD_OPS = 64;
@@ -77,8 +80,12 @@ const _writers: Map<string, GroupCommitWriter> = new Map();
  * eviction-on-double-closed-handle path (a rebind that returns an ALREADY
  * closed handle).
  */
-export const _internals: { getProjectDb: typeof getProjectDb } = {
+export const _internals: {
+	getProjectDb: typeof getProjectDb;
+	isClosedHandleError: typeof isClosedHandleError;
+} = {
 	getProjectDb,
+	isClosedHandleError,
 };
 
 export class GroupCommitWriter {
@@ -123,6 +130,14 @@ export class GroupCommitWriter {
 		}
 		this.queue.push(op);
 		if (this.queue.length >= FLUSH_THRESHOLD_OPS) {
+			this.flushSync();
+		}
+		// Hard bound (#2480 review F-01): if a retained queue kept growing
+		// (busy/disk-full retries), force a flush attempt at the cap so the
+		// queue cannot grow without bound. The cap is push-then-flush: with
+		// persistently failing flushes the queue settles at MAX+1 (a drop
+		// would violate the never-silent-drop contract).
+		if (this.queue.length >= MAX_QUEUED_OPS) {
 			this.flushSync();
 		}
 	}

@@ -61,6 +61,19 @@ describe('diagnose swarm-db check', () => {
 		expect(check?.detail.length).toBeGreaterThan(0);
 	});
 
+	test('#2480 review F-07: a stale db-migration-failure.json marker surfaces as a warning', async () => {
+		mkdirSync(path.join(dir, '.swarm'), { recursive: true });
+		getProjectDb(dir);
+		writeFileSync(
+			path.join(dir, '.swarm', 'db-migration-failure.json'),
+			JSON.stringify({ schema_version: 1, version: 14, name: 'x', error: 'y' }),
+		);
+		const data = await getDiagnoseData(dir);
+		const check = swarmDbCheck(data.checks);
+		expect(check?.status).toBe('⚠️');
+		expect(check?.detail).toContain('stale db-migration-failure.json marker');
+	});
+
 	test('recorded migration failures surface as a warning', async () => {
 		mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		const db = getProjectDb(dir);

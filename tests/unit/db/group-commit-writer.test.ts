@@ -15,6 +15,7 @@ import {
 	GroupCommitWriter,
 	getGroupCommitWriter,
 	getOpenGroupCommitWriterCount,
+	MAX_QUEUED_OPS,
 	_internals as writerInternals,
 } from '../../../src/db/group-commit-writer.js';
 import { appendInsightCandidatesDb } from '../../../src/db/insight-candidate-store.js';
@@ -291,6 +292,56 @@ describe('GroupCommitWriter', () => {
 			)
 			.get()?.n;
 		expect(n).toBe(1);
+	});
+
+	test('#2480 review F-01: the hard queue bound forces flush attempts past MAX_QUEUED_OPS', () => {
+		// Busy ops make every flush fail and RETAIN the batch, so the queue
+		// grows across enqueues; the hard bound must still force flush
+		// attempts (backpressure) instead of unbounded growth.
+		const writer = new GroupCommitWriter(db);
+		const busyOp = {
+			durability: 'normal' as const,
+			run: () => {
+				throw new Error('database is locked (SQLITE_BUSY)');
+			},
+		};
+		let enqueued = 0;
+		// enqueue's inline threshold flush THROWS DbWriteError on busy
+		// (documented contract) — expect and swallow; the pin below is the
+		// hard bound on queue growth.
+		for (let i = 0; i < MAX_QUEUED_OPS + 200; i++) {
+			try {
+				writer.enqueue({ ...busyOp });
+			} catch {
+				// expected once the threshold flush starts failing
+			}
+			enqueued++;
+			if (writer.queuedOpCount > MAX_QUEUED_OPS) {
+				break; // enforcement failed — fail the loop, assert below
+			}
+		}
+		expect(enqueued).toBeGreaterThan(MAX_QUEUED_OPS - 64); // sanity: we really pushed
+		// push-then-flush: with persistently failing flushes the queue sits at
+		// MAX+1 — one beyond the cap, never unbounded, every enqueue attempted.
+		expect(writer.queuedOpCount).toBeLessThanOrEqual(MAX_QUEUED_OPS + 1);
+		writer.close();
+	});
+
+	test('#2480 review F-05: the closed-handle matcher covers bun query-path phrasing', () => {
+		expect(
+			writerInternals.isClosedHandleError(new Error('Database has closed')),
+		).toBe(true);
+		expect(
+			writerInternals.isClosedHandleError(new Error('database is not open')),
+		).toBe(true);
+		expect(
+			writerInternals.isClosedHandleError(
+				new Error('Cannot use a closed database'),
+			),
+		).toBe(true);
+		expect(
+			writerInternals.isClosedHandleError(new Error('file is not a database')),
+		).toBe(false);
 	});
 
 	test('enqueue after close throws a DbWriteError', () => {

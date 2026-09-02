@@ -291,6 +291,30 @@ function removeMigrationFailureMarker(markerDir: string): void {
 }
 
 /**
+ * Detect "another process applied this migration concurrently" failures:
+ * a UNIQUE constraint violation on schema_migrations.version, or an
+ * "already exists" DDL error (table/index/trigger created by the winner).
+ */
+export function isConcurrentMigrationApply(err: unknown): boolean {
+	const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+	if (msg.includes('unique constraint failed: schema_migrations')) return true;
+	return (
+		msg.includes('already exists') &&
+		(msg.includes('table') || msg.includes('index') || msg.includes('trigger'))
+	);
+}
+
+/** True when the recorded schema version has reached `version`. */
+function currentVersionNowCovers(db: Database, version: number): boolean {
+	const row = db
+		.query<{ version: number | null }, []>(
+			'SELECT MAX(version) as version FROM schema_migrations',
+		)
+		.get();
+	return (row?.version ?? 0) >= version;
+}
+
+/**
  * Run all pending migrations on the provided database.
  * Idempotent: existing migrations are not re-applied. Each migration applies
  * in its own transaction; a failure rolls back, is recorded for diagnosis
@@ -323,6 +347,18 @@ export function runProjectMigrations(db: Database, markerDir?: string): void {
 		try {
 			apply();
 		} catch (err) {
+			// #2480 review F-03: another process may have applied this same
+			// migration concurrently (both read the same MAX(version); the
+			// loser hits the schema_migrations PK or an "already exists" on
+			// the DDL). That is not a failure of THIS database — the
+			// migration IS applied; continue the loop instead of recording a
+			// spurious failure (which previously also skipped marker cleanup).
+			if (
+				isConcurrentMigrationApply(err) &&
+				currentVersionNowCovers(db, migration.version)
+			) {
+				continue;
+			}
 			recordMigrationFailure(db, migration, err, markerDir);
 			throw new ProjectDbError(
 				'migration_failed',
@@ -351,7 +387,10 @@ export function projectDbPath(directory: string): string {
  * workspace just to check for a missing record.
  */
 export function projectDbExists(directory: string): boolean {
-	return existsSync(projectDbPath(directory));
+	// Canonical identity (#2480 review F-04): match getProjectDb's keying so
+	// a case-variant/symlinked spelling of the root still sees the DB that a
+	// prior canonical-keyed open created.
+	return existsSync(join(canonicalProjectKey(directory), '.swarm', 'swarm.db'));
 }
 
 /**

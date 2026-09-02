@@ -13,6 +13,7 @@ import {
 	realpathSync,
 	rmSync,
 	symlinkSync,
+	writeFileSync,
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -20,6 +21,7 @@ import {
 	_internals,
 	canonicalProjectKey,
 } from '../../../src/db/canonical-project.js';
+import { projectDbExists } from '../../../src/db/project-db.js';
 import { withFrozenClock } from '../../helpers/test-clock';
 import { canonicalMkdtemp, canonicalTmpDir } from '../../helpers/tmpdir';
 
@@ -55,6 +57,19 @@ describe('canonicalProjectKey', () => {
 		} else {
 			expect(canonicalProjectKey(dir)).not.toBe(canonicalProjectKey(upper));
 		}
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	test('#2480 review F-04: projectDbExists sees the DB through a case-variant spelling (win32)', () => {
+		const dir = tmp('exists-case');
+		mkdirSync(path.join(dir, '.swarm'), { recursive: true });
+		writeFileSync(path.join(dir, '.swarm', 'swarm.db'), 'placeholder');
+		if (IS_WIN) {
+			// Case-variant spelling must still find the DB (canonical keying).
+			expect(projectDbExists(dir.toUpperCase())).toBe(true);
+		}
+		expect(projectDbExists(dir)).toBe(true);
+		expect(projectDbExists(path.join(dir, 'nonexistent-root'))).toBe(false);
 		rmSync(dir, { recursive: true, force: true });
 	});
 
