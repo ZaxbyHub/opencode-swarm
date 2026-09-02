@@ -294,10 +294,13 @@ describe('GroupCommitWriter', () => {
 		expect(n).toBe(1);
 	});
 
-	test('#2480 review F-01: the hard queue bound forces flush attempts past MAX_QUEUED_OPS', () => {
-		// Busy ops make every flush fail and RETAIN the batch, so the queue
-		// grows across enqueues; the hard bound must still force flush
-		// attempts (backpressure) instead of unbounded growth.
+	test('#2480 review F-01: the hard bound is real — the queue never exceeds MAX_QUEUED_OPS under persistent flush failure', () => {
+		// Busy ops make every flush fail and RETAIN the batch. Once the queue
+		// is at MAX_QUEUED_OPS, further enqueues attempt the bound flush
+		// BEFORE pushing and throw without accepting the op — so the count
+		// pins at exactly MAX_QUEUED_OPS no matter how long the loop runs.
+		// Falsifiable: deleting the pre-push bound check lets the queue grow
+		// to MAX+500 and this test fails.
 		const writer = new GroupCommitWriter(db);
 		const busyOp = {
 			durability: 'normal' as const,
@@ -305,25 +308,20 @@ describe('GroupCommitWriter', () => {
 				throw new Error('database is locked (SQLITE_BUSY)');
 			},
 		};
-		let enqueued = 0;
-		// enqueue's inline threshold flush THROWS DbWriteError on busy
-		// (documented contract) — expect and swallow; the pin below is the
-		// hard bound on queue growth.
-		for (let i = 0; i < MAX_QUEUED_OPS + 200; i++) {
+		let accepted = 0;
+		for (let attempt = 0; attempt < MAX_QUEUED_OPS + 500; attempt++) {
 			try {
 				writer.enqueue({ ...busyOp });
+				accepted++;
 			} catch {
-				// expected once the threshold flush starts failing
-			}
-			enqueued++;
-			if (writer.queuedOpCount > MAX_QUEUED_OPS) {
-				break; // enforcement failed — fail the loop, assert below
+				// expected once flushes start failing at/over the cap
 			}
 		}
-		expect(enqueued).toBeGreaterThan(MAX_QUEUED_OPS - 64); // sanity: we really pushed
-		// push-then-flush: with persistently failing flushes the queue sits at
-		// MAX+1 — one beyond the cap, never unbounded, every enqueue attempted.
-		expect(writer.queuedOpCount).toBeLessThanOrEqual(MAX_QUEUED_OPS + 1);
+		// The 64th op is pushed then the threshold flush throws, so 'accepted'
+		// counts FLUSH_THRESHOLD_OPS-1 pre-throw pushes; the load-bearing pin
+		// is the QUEUE: it sits at exactly MAX_QUEUED_OPS after 1524 attempts.
+		expect(accepted).toBe(FLUSH_THRESHOLD_OPS - 1);
+		expect(writer.queuedOpCount).toBe(MAX_QUEUED_OPS);
 		writer.close();
 	});
 

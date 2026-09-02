@@ -120,29 +120,26 @@ export class GroupCommitWriter {
 	}
 
 	/**
-	 * Queue a write op. When the queue reaches the flush threshold, a
-	 * synchronous flush runs immediately (backpressure). Throws `DbWriteError`
-	 * only from that inline flush; a bare enqueue never throws.
+	 * Queue a write op. A synchronous flush runs immediately when the queue
+	 * reaches the flush threshold (backpressure), and again at the hard
+	 * `MAX_QUEUED_OPS` bound. Throws `DbWriteError` from an inline flush
+	 * (threshold or hard bound) when the flush fails — the op is then NOT
+	 * accepted; the caller's fail-open handling owns the loss.
 	 */
 	enqueue(op: GroupCommitOp): void {
 		if (this.closed) {
 			throw new DbWriteError('unknown', 'group-commit writer is closed');
 		}
-		this.queue.push(op);
-		if (this.queue.length >= FLUSH_THRESHOLD_OPS) {
+		// Hard bound FIRST (#2480 review F-01): at/over the cap, force a
+		// flush attempt BEFORE accepting more work. If that flush fails
+		// (busy/disk-full/read-only), this throws WITHOUT pushing, so the
+		// queue is genuinely bounded at MAX_QUEUED_OPS even when every
+		// flush fails; the caller's fail-open handling owns the loss.
+		if (this.queue.length >= MAX_QUEUED_OPS) {
 			this.flushSync();
 		}
-		// Hard bound (#2480 review F-01): if a retained queue kept growing
-		// (busy/disk-full retries), force a flush attempt at the cap so the
-		// queue cannot grow without bound. The cap is push-then-flush: with
-		// persistently failing flushes the queue settles at MAX+1 (a drop
-		// would violate the never-silent-drop contract). DEFENSE-IN-DEPTH:
-		// with the current constants this block is unreachable in the busy
-		// path — the 64-threshold inline flush throws first and the caller's
-		// catch retains the batch, which is what actually keeps the queue at
-		// MAX+1. This only becomes load-bearing if FLUSH_THRESHOLD_OPS is
-		// ever raised to >= MAX_QUEUED_OPS.
-		if (this.queue.length >= MAX_QUEUED_OPS) {
+		this.queue.push(op);
+		if (this.queue.length >= FLUSH_THRESHOLD_OPS) {
 			this.flushSync();
 		}
 	}
