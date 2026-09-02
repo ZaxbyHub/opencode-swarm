@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.164.2](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.1...v7.164.2) (2026-09-02)
+
+
+### Bug Fixes
+
+* **task-id:** preserve explicit attribution without plan context ([81d2524](https://github.com/ZaxbyHub/opencode-swarm/commit/81d25243b801832446ba656f9cf35a4f4cb2c833))
+* **workflow:** wire graph-first task attribution ([d5faff0](https://github.com/ZaxbyHub/opencode-swarm/commit/d5faff0c864a1c504d1c75d9b37e211f7f623207))
+
 ## [7.164.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.0...v7.164.1) (2026-09-02)
 
 
