@@ -15,6 +15,7 @@ import * as path from 'node:path';
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 import { eventLinesOf } from '../../helpers/event-lines.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 // -----------------------------------------------------------------------
 // Module-level mocks — MUST be before any import of the mocked module
@@ -281,9 +282,15 @@ describe('phase_complete adversarial locking + path tests', () => {
 	afterEach(() => {
 		process.chdir(originalCwd);
 		try {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			// Retried removal (EBUSY/EPERM/ENOTEMPTY with bounded backoff) —
+			// the single-shot rmSync raced slowly-releasing lock handles under
+			// merge-group load and left the temp dir behind (issue #2322's
+			// flake class, hardened under #2477). tempDir is realpath'd
+			// (mkdtempSync + realpathSync above), so the helper's containment
+			// guard accepts it.
+			safeRmRecursive(tempDir);
 		} catch {
-			// ignore
+			// Bounded retry exhausted — leave the dir to the OS.
 		}
 		resetSwarmState();
 	});

@@ -1,21 +1,22 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
-import * as realDiscovery from '../../../src/build/discovery';
+import {
+	clearToolchainCache,
+	_internals as discoveryInternals,
+} from '../../../src/build/discovery';
 import { pkg_audit } from '../../../src/tools/pkg-audit';
 
-// Mock isCommandAvailable - default to true (composer available)
+// Composer availability is controlled through the discovery module's
+// `_internals.spawnSyncImpl` DI seam (with `clearToolchainCache` before/after)
+// instead of a file-scope `mock.module`. The mock.module form delegated to a
+// captured pre-mock namespace import — but Bun retroactively patches the
+// original module's export slots on `mock.module`, so the delegation branch
+// was infinite tail recursion that hung any later file in the shared process
+// calling `isCommandAvailable` for a non-composer command (issue #2260/#2477).
 let mockIsCommandAvailable = true;
-
-mock.module('../../../src/build/discovery', () => ({
-	...realDiscovery,
-	isCommandAvailable: (cmd: string) => {
-		if (cmd === 'composer') return mockIsCommandAvailable;
-		return realDiscovery.isCommandAvailable(cmd);
-	},
-}));
 
 // Mock for Bun.spawn
 let originalSpawn: typeof Bun.spawn;
@@ -73,7 +74,20 @@ function getMockContext(): ToolContext {
 }
 
 describe('pkg-audit composer audit adversarial', () => {
+	let originalSpawnSync: typeof discoveryInternals.spawnSyncImpl;
+
 	beforeEach(() => {
+		originalSpawnSync = discoveryInternals.spawnSyncImpl;
+		clearToolchainCache();
+		// Faking the PATH-probe result makes `isCommandAvailable('composer')`
+		// follow `mockIsCommandAvailable` without touching the module registry.
+		discoveryInternals.spawnSyncImpl = () => ({
+			stdout: new Uint8Array(),
+			stderr: new Uint8Array(),
+			exitCode: mockIsCommandAvailable ? 0 : 127,
+			success: mockIsCommandAvailable,
+		});
+
 		originalSpawn = Bun.spawn;
 		spawnCalls = [];
 		mockExitCode = 0;
@@ -90,11 +104,13 @@ describe('pkg-audit composer audit adversarial', () => {
 	});
 
 	afterEach(() => {
+		discoveryInternals.spawnSyncImpl = originalSpawnSync;
+		clearToolchainCache();
+
 		Bun.spawn = originalSpawn;
 		process.chdir(originalCwd);
 		fs.rmSync(tempDir, { recursive: true, force: true });
 		mockIsCommandAvailable = true;
-		mock.restore();
 	});
 
 	// ===== 1. Oversized advisory title (10,000+ chars) =====

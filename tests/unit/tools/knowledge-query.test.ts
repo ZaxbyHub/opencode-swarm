@@ -12,7 +12,7 @@ import {
 	it,
 	mock,
 } from 'bun:test';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -21,6 +21,7 @@ import type {
 	SwarmKnowledgeEntry,
 } from '../../../src/hooks/knowledge-types';
 import { knowledge_query } from '../../../src/tools/knowledge-query';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 describe('knowledge-query tool verification tests', () => {
 	let tmpDir: string;
@@ -39,13 +40,22 @@ describe('knowledge-query tool verification tests', () => {
 	});
 
 	afterEach(async () => {
-		// Restore original cwd
-		process.chdir(originalCwd);
-		// Clean up the temporary directory
+		// Each step is isolated so one failure cannot skip the rest: cwd must
+		// be restored before removal, removal must be retried (Windows
+		// AV/EBUSY held handles flaked attempt 1 on cold windows-latest
+		// merge-group runners — issue #2028/#2477), and mock.restore() must
+		// always run.
 		try {
-			await fs.rm(tmpDir, { recursive: true, force: true });
+			process.chdir(originalCwd);
 		} catch {
-			// Ignore cleanup errors
+			// cwd restoration is best-effort; cleanup still proceeds.
+		}
+		try {
+			// tmpDir is realpath'd and under os.tmpdir(), so the helper's
+			// containment guard accepts it; retries EBUSY/EPERM/ENOTEMPTY.
+			safeRmRecursive(tmpDir);
+		} catch {
+			// Bounded retry already exhausted — leave the dir to the OS.
 		}
 		// Restore cross-module mocks to prevent contamination
 		mock.restore();

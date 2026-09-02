@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { resetSwarmState, swarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
 import { newestEventLine } from '../../helpers/event-lines.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { freezeClock } from '../../helpers/test-clock';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -273,9 +274,14 @@ describe('phase_complete adversarial trailing groups', () => {
 		restoreClock();
 		process.chdir(originalCwd);
 		try {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			// Retried removal (EBUSY/EPERM/ENOTEMPTY with bounded backoff) —
+			// the single-shot rmSync raced slowly-releasing lock/event handles
+			// and left the temp dir behind under merge-group load (issue
+			// #2322/#2477). tempDir comes from canonicalMkdtemp, so the
+			// helper's containment guard accepts it.
+			safeRmRecursive(tempDir);
 		} catch {
-			// ignore
+			// Bounded retry exhausted — leave the dir to the OS.
 		}
 		resetSwarmState();
 	});

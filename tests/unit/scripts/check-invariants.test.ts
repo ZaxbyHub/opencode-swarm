@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { seedQuarantineListFiles } from '../../helpers/invariant-gate-fixtures.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 /**
@@ -180,6 +181,10 @@ function setupFixtureDir(fixtureName: string): string {
 		ADVISORY_PUSH_SCRIPT_PATH,
 		path.join(fixtureDir, 'scripts', 'check-no-raw-advisory-push.sh'),
 	);
+	// Check 7 (issue #2477) fail-closes on missing quarantine list files, so
+	// every fixture tree must carry the four lists (header-only = no active
+	// entries; the bash owner leg never reads them).
+	seedQuarantineListFiles(fixtureDir);
 
 	return fixtureDir;
 }

@@ -28,9 +28,16 @@ export interface SpreadViolation {
 	spreadVar: string;
 }
 
+export interface DelegationViolation {
+	line: number;
+	spreadVar: string;
+	property: string;
+}
+
 export interface MockFileAssessment {
 	missingCleanup: boolean;
 	spreadViolations: SpreadViolation[];
+	delegationViolations: DelegationViolation[];
 }
 
 interface GitResult {
@@ -162,7 +169,78 @@ export function assessMockFile(content: string): MockFileAssessment {
 		}
 	}
 
-	return { missingCleanup, spreadViolations };
+	// Issue #2260 class: a mock.module factory that spreads a captured
+	// namespace import (`...realX`) and then delegates an overridden export
+	// back into that same namespace (`realX.overriddenFn(...)`). Bun's
+	// mock.module retroactively patches the ORIGINAL module's export slots, so
+	// the "pre-mock" namespace reference resolves the overridden export to the
+	// mock wrapper itself — the delegation is infinite tail recursion (an
+	// unkillable loop under JSC proper tail calls), not a stack overflow. Both
+	// pkg-audit-composer test files shipped this shape and hung every CI shard
+	// that co-located them with pkg-audit.test.ts.
+	const delegationViolations: DelegationViolation[] = [];
+	const firstMockModuleLine =
+		lines.findIndex((line) => MOCK_MODULE_PATTERN.test(line)) + 1;
+	if (firstMockModuleLine > 0) {
+		// Full-line comments are dropped so documentation mentioning the
+		// delegation shape (e.g. an explanatory comment in a FIXED file)
+		// cannot trip the rule.
+		const codeContent = lines
+			.filter((line) => !line.trimStart().startsWith('//'))
+			.join('\n');
+		// Only identifiers that are DECLARED as module namespaces can carry
+		// the recursion shape — `import * as V from …`, `const V = await
+		// import(…)`, or `const V = require(…)`. This excludes array spreads
+		// (`[...parts]` + `parts.join(...)`), which are not module objects.
+		const namespaceVars = new Set<string>();
+		for (const match of codeContent.matchAll(
+			/import\s+\*\s+as\s+([A-Za-z_$][A-Za-z0-9_$]*)\s+from\s+['"]/g,
+		)) {
+			namespaceVars.add(match[1]);
+		}
+		for (const match of codeContent.matchAll(
+			/const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:await\s+)?(?:import|require)\s*\(/g,
+		)) {
+			namespaceVars.add(match[1]);
+		}
+		const reportedPairs = new Set<string>();
+		for (const namespaceVar of namespaceVars) {
+			// The namespace must actually be spread inside the file for the
+			// "spread the real module, then override one export" shape.
+			const spreadPattern = new RegExp(
+				`\\.\\.\\.${namespaceVar}(?:[^A-Za-z0-9_$]|$)`,
+			);
+			if (!spreadPattern.test(codeContent)) {
+				continue;
+			}
+			const callPattern = new RegExp(
+				`${namespaceVar}\\.([A-Za-z_$][A-Za-z0-9_$]*)\\s*\\(`,
+				'g',
+			);
+			for (const call of codeContent.matchAll(callPattern)) {
+				const property = call[1];
+				const pair = `${namespaceVar}.${property}`;
+				if (reportedPairs.has(pair)) {
+					continue;
+				}
+				// The property must also be re-defined as an object key (the
+				// override inside the factory) for the recursion shape to hold.
+				const overrideKeyPattern = new RegExp(
+					`(?:^|\\n)\\s*${property}\\s*:`,
+				);
+				if (overrideKeyPattern.test(codeContent)) {
+					reportedPairs.add(pair);
+					delegationViolations.push({
+						line: firstMockModuleLine,
+						spreadVar: namespaceVar,
+						property,
+					});
+				}
+			}
+		}
+	}
+
+	return { missingCleanup, spreadViolations, delegationViolations };
 }
 
 export async function main(startDir: string = process.cwd()): Promise<number> {
@@ -238,6 +316,28 @@ export async function main(startDir: string = process.cwd()): Promise<number> {
 			} else {
 				console.log(
 					`WARNING: ${relFile}:${violation.line} uses mock.module('node:${violation.module}', ...) without spreading real exports (pre-existing)`,
+				);
+				preExistingViolations += 1;
+			}
+		}
+	}
+
+	for (const { relFile, assessment, isPrFile } of records) {
+		for (const violation of assessment.delegationViolations) {
+			if (isPrFile) {
+				console.log(
+					`ERROR: ${relFile}:${violation.line} mock.module factory delegates '${violation.spreadVar}.${violation.property}(...)' back into the spread namespace '${violation.spreadVar}'`,
+				);
+				console.log(
+					` Bun retroactively patches the original module's exports on mock.module, so this "real" call re-enters the mock itself — infinite tail recursion that hangs the shared test process (issue #2260).`,
+				);
+				console.log(
+					` Capture the real function BEFORE mock.module registration, or (preferred) use an _internals DI seam instead of mock.module.`,
+				);
+				newViolations += 1;
+			} else {
+				console.log(
+					`WARNING: ${relFile}:${violation.line} mock.module factory delegates '${violation.spreadVar}.${violation.property}(...)' back into the spread namespace '${violation.spreadVar}' (pre-existing)`,
 				);
 				preExistingViolations += 1;
 			}

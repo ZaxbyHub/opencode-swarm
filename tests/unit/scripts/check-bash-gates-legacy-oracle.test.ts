@@ -18,6 +18,7 @@ import {
 } from '../../../scripts/check-cross-contamination';
 import { runGit, spawnUtf8 } from '../../../scripts/gate-utils';
 import { bashCommand, resolveBash } from '../../helpers/bash.js';
+import { seedQuarantineListFiles } from '../../helpers/invariant-gate-fixtures.js';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
@@ -372,6 +373,10 @@ describe('issue #2094 legacy-oracle parity', () => {
 		const repo = await makeRepo('gate-oracle-invariants-');
 		write(repo, 'scripts/mock-allowlist.txt', '# empty allowlist fixture\n');
 		write(repo, 'src/tools/cwd-violation.ts', 'process.cwd();\n');
+		// Check 7 (issue #2477) fail-closes on missing quarantine list files;
+		// seed header-only lists so the TS owner's fixture run stays at the
+		// single seeded process.cwd() violation.
+		seedQuarantineListFiles(repo);
 		for (const rel of [
 			'src/tools/knowledge-add.ts',
 			'src/hooks/knowledge-store.ts',
@@ -386,7 +391,50 @@ describe('issue #2094 legacy-oracle parity', () => {
 		}
 		await commit(repo, 'seed invariant fixture');
 
-		const expected = [
+		// The TS owner has since gained Check 7 (quarantine OWNER/EXPIRY
+		// metadata, issue #2477) — a TS-only check the archived Bash owner
+		// predates and can never emit, so this gate's full-output byte parity
+		// is intentionally superseded: the TS leg is pinned exactly (seven
+		// checks), and the Bash leg still verifies the ARCHIVED six-check
+		// diagnostics byte-for-byte against their own frozen expectation.
+		const tsExpected = [
+			'=== Check 1: Subprocess timeout required (advisory) ===',
+			'=== Check 2: process.cwd() ban in tools/hooks ===',
+			'ERROR: src/tools/cwd-violation.ts uses process.cwd() — tools must use ctx.directory via resolveWorkingDirectory',
+			'=== Check 3: mock.module allowlist ===',
+			'',
+			'=== Check 4: mock.module allowlist growth ratchet (issue #1666) ===',
+			'Base entries: 0 | Head entries: 0 | Added in this PR: 0 | Approved-new markers found: 0 | Unapproved: 0',
+			'',
+			'=== Check 5: knowledge array dedup guardrail (issue #1821 Lane 0b) ===',
+			'Scope: src/tools/knowledge-*.ts src/hooks/knowledge-*.ts src/hooks/curator.ts src/hooks/micro-reflector.ts src/knowledge/*.ts src/learning/*.ts src/services/recommendation-ledger.ts src/consensus/*.ts',
+			'Files scanned: 8',
+			'Unguarded positional caps: 0 (expected 0 — no exempt list by design)',
+			'=== Check 6: no raw pendingAdvisoryMessages.push outside the helper (issue #1976) ===',
+			'=== Check: no raw pendingAdvisoryMessages.push outside src/utils/advisory-queue.ts (issue #1976) ===',
+			'OK — all advisory pushes route through pushAdvisory().',
+			'=== Check 7: quarantine entries carry OWNER + EXPIRY metadata (issue #2477) ===',
+			'All active quarantine entries carry OWNER + EXPIRY metadata.',
+			'',
+			'=== Summary ===',
+			'Checks run: 1 (subprocess timeout, advisory) | 2 (process.cwd ban) |',
+			'            3 (mock.module allowlist) | 4 (allowlist growth ratchet) |',
+			'            5 (knowledge array dedup guardrail) | 6 (advisory-injection ratchet) |',
+			'            7 (quarantine OWNER/EXPIRY metadata)',
+			'1 invariant violation(s) found.',
+		].join('\n');
+
+		const tsResult = await runTsGate(INVARIANTS_GATE, repo);
+		expect(tsResult).toEqual({
+			exitCode: 1,
+			stdout: `${tsExpected}\n`,
+			stderr: '',
+		});
+
+		if (!hasBash) return;
+
+		// Archived-owner leg: the frozen six-check diagnostics, unchanged.
+		const legacyExpected = [
 			'=== Check 1: Subprocess timeout required (advisory) ===',
 			'=== Check 2: process.cwd() ban in tools/hooks ===',
 			'ERROR: src/tools/cwd-violation.ts uses process.cwd() — tools must use ctx.directory via resolveWorkingDirectory',
@@ -410,12 +458,17 @@ describe('issue #2094 legacy-oracle parity', () => {
 			'1 invariant violation(s) found.',
 		].join('\n');
 
-		await expectLegacyParity(
+		const legacyResult = await runLegacyGate(
 			'scripts/check-invariants.sh',
-			INVARIANTS_GATE,
 			repo,
-			expected,
+			undefined,
+			repo,
 		);
+		expect(legacyResult.exitCode, legacyResult.stderr).toBe(1);
+		expect(normalizeOutput(legacyResult.stdout), legacyResult.stderr).toBe(
+			legacyExpected,
+		);
+		expect(normalizeOutput(legacyResult.stderr)).toBe('');
 	});
 
 	test('bash-portability preserves the archived bash-3.2 compatibility diagnostics', async () => {

@@ -275,8 +275,10 @@ jobs:
       # Issue #1616/#2107 recurrence guardrail: production source must not
       # contain NEW inline char/token estimation formulas — every conversion
       # routes through the canonical estimator in src/hooks/utils.ts.
-      # Standalone script (not a check-invariants Check) so the #2094
-      # legacy-oracle parity of check-invariants stays byte-identical.
+      # Standalone script (not a check-invariants Check). The #2094
+      # legacy-oracle parity of check-invariants was superseded for TS-only
+      # checks when Check 7 (quarantine OWNER/EXPIRY, issue #2477) landed;
+      # the archived Bash owner asserts its own frozen diagnostics.
       - name: Inline char/token formula gate (issue #1616/#2107)
         if: needs.detect-release.outputs.is-release != 'true'
         run: bun run check:token-formula

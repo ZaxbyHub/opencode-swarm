@@ -33,6 +33,21 @@ const KNOWLEDGE_DEDUP_SCOPE = [
 	'src/consensus/*.ts',
 ] as const;
 
+/** Quarantine list files that require OWNER/EXPIRY metadata on active entries (#2477). */
+const QUARANTINE_LIST_FILES = [
+	'scripts/ci/quarantined-tests.txt',
+	'scripts/ci/quarantined-tests-windows.txt',
+	'scripts/ci/quarantined-tests-macos.txt',
+	'scripts/ci/quarantined-integration-tests.txt',
+] as const;
+
+/**
+ * How far past EXPIRY an entry may sit before the check hard-fails. Inside the
+ * grace window the entry only warns, so a legitimate "still waiting on the
+ * retirement criterion" entry needs one small renewal PR, not an emergency.
+ */
+const QUARANTINE_EXPIRY_GRACE_DAYS = 14;
+
 const BASE_BRANCH_CANDIDATES = [
 	'origin/main',
 	'origin/master',
@@ -727,6 +742,121 @@ export function checkRawAdvisoryPush(repoRoot: string): CheckResult {
 	return { messages, violations: 0 };
 }
 
+/**
+ * Check 7 (issue #2477): every ACTIVE quarantine entry carries structured
+ * OWNER and EXPIRY metadata in its comment block. Grammar:
+ *
+ *   # OWNER: <owner> — <issue ref / context>
+ *   # EXPIRY: YYYY-MM-DD — <retirement criterion>
+ *   <repo-relative test path>
+ *
+ * Missing OWNER/EXPIRY is a violation. An EXPIRY in the past warns inside the
+ * 14-day grace window and fails beyond it (dates compared in UTC).
+ */
+export function checkQuarantineMetadata(
+	repoRoot: string,
+	now: Date = new Date(),
+): CheckResult {
+	const messages = [
+		'=== Check 7: quarantine entries carry OWNER + EXPIRY metadata (issue #2477) ===',
+	];
+	let violations = 0;
+	const ownerPattern = /^#\s*OWNER:\s*(\S.*)$/;
+	const expiryPattern = /^#\s*EXPIRY:\s*(\d{4})-(\d{2})-(\d{2})\b/;
+	const expiryLoosePattern = /^#\s*EXPIRY:\s*(\S.*)$/;
+
+	for (const listRel of QUARANTINE_LIST_FILES) {
+		const listFile = path.join(repoRoot, listRel);
+		if (!fs.existsSync(listFile)) {
+			messages.push(
+				`ERROR: ${listRel} not found — the quarantine list file is required.`,
+			);
+			violations += 1;
+			continue;
+		}
+		const lines = readText(listFile).split(/\r?\n/);
+		for (let index = 0; index < lines.length; index += 1) {
+			const line = lines[index];
+			if (line.trim() === '' || line.trimStart().startsWith('#')) {
+				continue;
+			}
+			const entry = line.trim();
+			// Walk upward through the contiguous comment block above the path.
+			let owner: string | null = null;
+			let expiry: string | null = null;
+			let expiryMalformed: string | null = null;
+			for (let up = index - 1; up >= 0; up -= 1) {
+				const above = lines[up];
+				if (above.trim() === '' || !above.trimStart().startsWith('#')) {
+					break;
+				}
+				const ownerMatch = above.match(ownerPattern);
+				if (ownerMatch) {
+					owner = ownerMatch[1].trim();
+				}
+				const expiryMatch = above.match(expiryPattern);
+				if (expiryMatch) {
+					expiry = `${expiryMatch[1]}-${expiryMatch[2]}-${expiryMatch[3]}`;
+				}
+				const expiryLoose = above.match(expiryLoosePattern);
+				if (
+					expiryLoose &&
+					!expiryPattern.test(above) &&
+					expiry === null &&
+					expiryMalformed === null
+				) {
+					expiryMalformed = expiryLoose[1].trim();
+				}
+			}
+			if (owner === null) {
+				messages.push(
+					`ERROR: ${listRel} entry '${entry}' has no '# OWNER:' line in its comment block.`,
+				);
+				violations += 1;
+			}
+			if (expiryMalformed !== null && expiry === null) {
+				messages.push(
+					`ERROR: ${listRel} entry '${entry}' has a malformed '# EXPIRY:' line (expected '# EXPIRY: YYYY-MM-DD — <criterion>'; got '${expiryMalformed}').`,
+				);
+				violations += 1;
+			} else if (expiry === null) {
+				messages.push(
+					`ERROR: ${listRel} entry '${entry}' has no '# EXPIRY:' line in its comment block.`,
+				);
+				violations += 1;
+			} else {
+				const expiryUtc = Date.UTC(
+					Number(expiry.slice(0, 4)),
+					Number(expiry.slice(5, 7)) - 1,
+					Number(expiry.slice(8, 10)),
+				);
+				const nowUtc = Date.UTC(
+					now.getUTCFullYear(),
+					now.getUTCMonth(),
+					now.getUTCDate(),
+				);
+				const daysPast = Math.floor(
+					(nowUtc - expiryUtc) / (24 * 60 * 60 * 1000),
+				);
+				if (daysPast > QUARANTINE_EXPIRY_GRACE_DAYS) {
+					messages.push(
+						`ERROR: ${listRel} entry '${entry}' expired ${expiry} (${daysPast} days ago, beyond the ${QUARANTINE_EXPIRY_GRACE_DAYS}-day grace window) — retire it or renew the EXPIRY with an updated criterion.`,
+					);
+					violations += 1;
+				} else if (daysPast > 0) {
+					messages.push(
+						`WARNING: ${listRel} entry '${entry}' expired ${expiry} (${daysPast} day(s) ago, inside the grace window) — renew or retire before the grace window closes.`,
+					);
+				}
+			}
+		}
+	}
+	if (violations === 0) {
+		messages.push('All active quarantine entries carry OWNER + EXPIRY metadata.');
+	}
+	return { messages, violations };
+}
+
 export async function main(startDir: string = process.cwd()): Promise<number> {
 	const repoRoot = await resolveRepoRoot(startDir);
 	let violations = 0;
@@ -744,6 +874,7 @@ export async function main(startDir: string = process.cwd()): Promise<number> {
 			],
 			violations: advisory.violations,
 		},
+		checkQuarantineMetadata(repoRoot),
 	];
 
 	for (const output of outputs) {
@@ -763,8 +894,9 @@ export async function main(startDir: string = process.cwd()): Promise<number> {
 		'            3 (mock.module allowlist) | 4 (allowlist growth ratchet) |',
 	);
 	console.log(
-		'            5 (knowledge array dedup guardrail) | 6 (advisory-injection ratchet)',
+		'            5 (knowledge array dedup guardrail) | 6 (advisory-injection ratchet) |',
 	);
+	console.log('            7 (quarantine OWNER/EXPIRY metadata)');
 	if (violations > 0) {
 		console.log(`${violations} invariant violation(s) found.`);
 		return 1;

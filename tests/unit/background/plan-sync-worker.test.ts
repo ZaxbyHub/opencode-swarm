@@ -16,11 +16,45 @@ import {
 	type PlanSyncWorkerStatus,
 } from '../../../src/background/plan-sync-worker';
 import { _internals as planManagerInternals } from '../../../src/plan/manager';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 // Within-module DI seam: mock functions are assigned to _internals
 const mockLoadPlan = mock(async () => null);
 const mockLoadPlanJsonOnly = mock(async () => null);
 const mockRegeneratePlanMarkdown = mock(async () => {});
+
+// #2477 RC-3: capture the seam's ORIGINALS at file scope — before any test
+// (and any beforeEach) can mutate them — so afterEach can truly restore the
+// real implementations. The previous afterEach re-installed the mocks, which
+// left loadPlan/loadPlanJsonOnly/regeneratePlanMarkdown mock-replaced for
+// every later test file in the shared process (AGENTS.md §7 seam-restore
+// violation) and is one of the lock/temp cleanup races behind the merge-group
+// flake in issue #2305.
+const originalPlanManagerInternals = {
+	loadPlan: planManagerInternals.loadPlan,
+	loadPlanJsonOnly: planManagerInternals.loadPlanJsonOnly,
+	regeneratePlanMarkdown: planManagerInternals.regeneratePlanMarkdown,
+};
+
+// Polls a predicate at a fixed interval until it holds or the budget is
+// exhausted; fails with a labeled message instead of silently bailing (the
+// silent-bail loop it replaced produced confusing downstream assertion
+// failures when the event loop was saturated under merge-group load).
+async function waitFor(
+	predicate: () => boolean,
+	budgetMs: number,
+	label: string,
+): Promise<void> {
+	const deadline = Date.now() + budgetMs;
+	while (!predicate()) {
+		if (Date.now() >= deadline) {
+			throw new Error(
+				`[plan-sync-worker.test] ${label} — budget exhausted after ${budgetMs}ms`,
+			);
+		}
+		await new Promise((resolve) => setTimeout(resolve, 20));
+	}
+}
 
 // File watcher timing varies significantly across platforms (macOS FSEvents,
 // Windows ReadDirectoryChangesW). Dozens of timing-sensitive assertions fail
@@ -67,9 +101,14 @@ describe.skipIf(process.platform !== 'linux')('PlanSyncWorker', () => {
 	async function cleanupTempDir(): Promise<void> {
 		if (tempDir) {
 			try {
-				fs.rmSync(tempDir, { recursive: true, force: true });
+				// Retried removal (EBUSY/EPERM/ENOTEMPTY with bounded backoff):
+				// a single-shot rmSync silently abandoned the temp dir whenever
+				// the FSWatcher handle was still releasing — the #2305 cleanup
+				// race. safeRmRecursive canonicalizes + containment-guards the
+				// path (it was created under os.tmpdir()).
+				safeRmRecursive(tempDir);
 			} catch {
-				// Ignore cleanup errors (e.g. Windows FSWatcher handle still releasing)
+				// Bounded retry exhausted — leave the dir to the OS.
 			}
 		}
 	}
@@ -91,10 +130,14 @@ describe.skipIf(process.platform !== 'linux')('PlanSyncWorker', () => {
 	});
 
 	afterEach(async () => {
-		// Restore original functions to _internals seam
-		planManagerInternals.loadPlan = mockLoadPlan;
-		planManagerInternals.loadPlanJsonOnly = mockLoadPlanJsonOnly;
-		planManagerInternals.regeneratePlanMarkdown = mockRegeneratePlanMarkdown;
+		// Restore the REAL implementations captured at file scope — see the
+		// originalPlanManagerInternals comment. (Previously this re-installed
+		// the mocks, leaking them process-wide after the file finished.)
+		planManagerInternals.loadPlan = originalPlanManagerInternals.loadPlan;
+		planManagerInternals.loadPlanJsonOnly =
+			originalPlanManagerInternals.loadPlanJsonOnly;
+		planManagerInternals.regeneratePlanMarkdown =
+			originalPlanManagerInternals.regeneratePlanMarkdown;
 		// Clean up worker
 		if (worker) {
 			worker.dispose();
@@ -479,12 +522,15 @@ describe.skipIf(process.platform !== 'linux')('PlanSyncWorker', () => {
 			// macOS FSEvents has higher latency than Linux inotify
 			await new Promise((resolve) => setTimeout(resolve, 150));
 
-			// Wait until first sync has started (it's blocking)
-			let attempts = 0;
-			while (!firstSyncStarted && attempts < 50) {
-				await new Promise((resolve) => setTimeout(resolve, 20));
-				attempts++;
-			}
+			// Wait until first sync has started (it's blocking). waitFor
+			// fails with a labeled timeout instead of silently bailing — the
+			// old fixed-attempt loop fell through and produced a confusing
+			// `syncCount === 1` misdiagnosis under event-loop saturation.
+			await waitFor(
+				() => firstSyncStarted,
+				2000,
+				'first in-flight sync to start',
+			);
 
 			// Verify we're in the first sync
 			expect(syncCount).toBe(1);

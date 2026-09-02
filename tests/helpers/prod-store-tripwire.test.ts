@@ -32,6 +32,7 @@ import {
 	isRealStoreTarget,
 	probeTripwireGuardsArmed,
 	verifyRealStoresUnchanged,
+	withMaterializedProbe,
 } from './prod-store-tripwire.js';
 
 // These probes intentionally trip the guards; clear the shared violations list so later
@@ -91,45 +92,68 @@ describe('prod-store tripwire (issue #2033)', () => {
 		// mkdir is intentionally unguarded (see helper docs); the file write inside the
 		// real link root must be refused.
 		// Regression (issue #2233): the recursive mkdir below also materializes the
-		// REAL <dataDir>/links root when it does not exist yet (fresh CI runner).
-		// The old cleanup removed only the regression-probe leaf, leaving links/
-		// behind as top-level store drift that failed this file's own afterAll
-		// bookend (verifyRealStoresUnchanged) on the first run against a clean
-		// HOME — a deterministic cross-OS attempt-1 flake that passed on retry
-		// (the leftover links/ dir was already there for attempt 2). Record the
-		// pre-probe existence of the real links root and restore that state.
-		const realLinkRootExisted = existsSync(resolveLinkBaseDir());
+		// REAL <dataDir>/links root when it does not exist yet (fresh CI runner);
+		// a cleanup that removed only the leaf left links/ behind as top-level
+		// store drift that failed this file's own afterAll bookend
+		// (verifyRealStoresUnchanged) on the first run against a clean HOME.
+		// The pre/post-existence restore now lives in withMaterializedProbe
+		// (issue #2243) so every future probe gets it for free.
 		let mkdirThrew: unknown;
-		try {
-			mkdirSync(realLinkDir, { recursive: true });
-		} catch (err) {
-			mkdirThrew = err;
-		}
-		let threwWrite: unknown;
-		try {
-			writeFileSync(`${realLinkDir}/memory.json`, '{"probe":true}');
-		} catch (err) {
-			threwWrite = err;
-		}
-		expect(threwWrite).toBeInstanceOf(Error);
-		expect((threwWrite as Error).message).toContain('PROD-STORE TRIPWIRE');
-		// The probe dir is empty when it exists — remove it via the unguarded rmdir.
-		try {
-			rmdirSync(realLinkDir);
-		} catch {
-			/* write threw, so the dir may never have been created */
-		}
-		// Restore the pre-probe state of the real links root: if this probe
-		// materialized <dataDir>/links, remove it again so the store's top-level
-		// listing stays byte-identical to process start (the #2233 fix).
-		if (!realLinkRootExisted) {
+		withMaterializedProbe(path.join('links', 'regression-probe'), () => {
 			try {
-				rmdirSync(resolveLinkBaseDir());
+				mkdirSync(realLinkDir, { recursive: true });
+			} catch (err) {
+				mkdirThrew = err;
+			}
+			let threwWrite: unknown;
+			try {
+				writeFileSync(`${realLinkDir}/memory.json`, '{"probe":true}');
+			} catch (err) {
+				threwWrite = err;
+			}
+			expect(threwWrite).toBeInstanceOf(Error);
+			expect((threwWrite as Error).message).toContain('PROD-STORE TRIPWIRE');
+		});
+		expect(mkdirThrew).toBeUndefined();
+	});
+
+	// Falsification probe for withMaterializedProbe (issue #2243): a probe that
+	// materializes a tracked root WITHOUT the restore primitive must be caught
+	// by the afterAll bookend. verifyRealStoresUnchanged() is invoked directly
+	// (its drift channel is a throw, not a recorded violation) and MUST throw;
+	// the manual cleanup afterwards keeps this suite's own bookend green. Uses
+	// quarantine-backups — the OTHER tracked root — so the coverage
+	// complements the links/ regression test above.
+	test('bookend catches a probe that forgets the pre/post-existence restore', () => {
+		const { dataDir } = getRealStorePaths();
+		const rootExisted = existsSync(path.join(dataDir, 'quarantine-backups'));
+		const probeDir = path.join(dataDir, 'quarantine-backups', 'falsify-probe');
+		let threw: unknown;
+		try {
+			mkdirSync(probeDir, { recursive: true });
+			try {
+				verifyRealStoresUnchanged();
+			} catch (err) {
+				threw = err;
+			}
+			expect(threw).toBeInstanceOf(Error);
+			expect((threw as Error).message).toContain('real store drift detected');
+		} finally {
+			// Manual cleanup — the shape a probe WITHOUT the helper must
+			// remember (leaf first, then the root only if it did not pre-exist).
+			try {
+				rmdirSync(probeDir);
 			} catch {
-				/* non-empty or already gone — leave whatever is there */
+				/* already gone */
+			}
+			if (!rootExisted) {
+				try {
+					rmdirSync(path.join(dataDir, 'quarantine-backups'));
+				} catch {
+					/* non-empty or already gone */
+				}
 			}
 		}
-		expect(mkdirThrew).toBeUndefined();
 	});
 
 	test('atomicWriteFile to the real hive store throws end-to-end (Bun path)', async () => {

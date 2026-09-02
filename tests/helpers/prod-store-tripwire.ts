@@ -38,9 +38,11 @@ import { resolveHiveDataDir } from '../../src/knowledge/hive-paths.js';
 // Capture function values before any mock is installed (internal use only).
 const {
 	appendFileSync: fsAppendFileSync,
+	existsSync: fsExistsSync,
 	readFileSync: fsReadFileSync,
 	readdirSync: fsReaddirSync,
 	realpathSync: fsRealpathSync,
+	rmdirSync: fsRmdirSync,
 	rmSync: fsRmSync,
 	statSync: fsStatSync,
 } = realFs;
@@ -583,4 +585,67 @@ export function createTripwireSafeDir(prefix: string): {
 			}
 		},
 	};
+}
+
+/**
+ * Scoped pre/post-existence restore for probes that materialize entries
+ * inside the REAL store roots (issue #2243, #2233, #2477).
+ *
+ * A probe that `mkdirSync(..., { recursive: true })`s `<dataDir>/<root>/<leaf>`
+ * also materializes the tracked root itself (`links/`, `quarantine-backups/`)
+ * on a fresh machine. The global afterAll bookend (`verifyRealStoresUnchanged`)
+ * compares both the tracked roots' listings and the data dir's top-level
+ * listing against process start, so a probe that forgets to restore the
+ * pre-probe existence state deterministically flakes attempt 1 of a fresh-HOME
+ * run — exactly how issue #2233 surfaced.
+ *
+ * This wrapper centralizes the restore: it records the pre-existence of every
+ * tracked REAL_STORE_DIRS root, runs the probe callback, then (in `finally`,
+ * so assertion failures still restore) removes the probe leaf and any tracked
+ * root the probe materialized. Expected removal failures are swallowed
+ * (ENOENT / ENOTEMPTY); real drift is still caught by the bookend.
+ *
+ * Contract: probes may only materialize (a) the leaf itself (anywhere under
+ * the real data dir) and (b) tracked REAL_STORE_DIRS roots on the way.
+ * Materializing an untracked top-level directory other than the leaf is
+ * outside the contract and will fail the bookend by design.
+ */
+export function withMaterializedProbe<T>(
+	probeRelativeDir: string,
+	fn: () => T,
+): T {
+	const state = globalThis[globalKey];
+	if (!state) {
+		throw new Error(
+			'prod-store tripwire not installed (bunfig preload missing?)',
+		);
+	}
+	const probeDir = path.resolve(state.dataDir, probeRelativeDir);
+	if (!isRealStoreTarget(probeDir)) {
+		throw new Error(
+			`withMaterializedProbe: '${probeRelativeDir}' does not resolve inside the real data dir (${state.dataDir}) — probes must target the real store`,
+		);
+	}
+	const rootPreExisted: Record<string, boolean> = {};
+	for (const name of REAL_STORE_DIRS) {
+		rootPreExisted[name] = fsExistsSync(path.join(state.dataDir, name));
+	}
+	try {
+		return fn();
+	} finally {
+		try {
+			fsRmdirSync(probeDir);
+		} catch {
+			/* never created, already removed, or non-empty — the bookend catches real drift */
+		}
+		for (const name of REAL_STORE_DIRS) {
+			if (!rootPreExisted[name]) {
+				try {
+					fsRmdirSync(path.join(state.dataDir, name));
+				} catch {
+					/* non-empty or already gone — leave whatever is there */
+				}
+			}
+		}
+	}
 }

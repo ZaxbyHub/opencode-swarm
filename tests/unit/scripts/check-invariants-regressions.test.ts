@@ -7,6 +7,7 @@ import {
 } from '../../../scripts/check-invariants';
 import { spawnUtf8 } from '../../../scripts/gate-utils';
 import { bashCommand, resolveBash } from '../../helpers/bash.js';
+import { seedQuarantineListFiles } from '../../helpers/invariant-gate-fixtures.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 const REPO_ROOT = path.resolve(__dirname, '../../../');
@@ -87,6 +88,11 @@ function setupFixtureDir(fixtureName: string): string {
 		ADVISORY_PUSH_SCRIPT_PATH,
 		path.join(fixtureDir, 'scripts', 'check-no-raw-advisory-push.sh'),
 	);
+	// This file currently runs only the Bash owner (which never reads the
+	// lists), but seed them anyway so a future TS-leg mode inherits a valid
+	// Check 7 baseline instead of failing for an unrelated reason (issue
+	// #2477 final-critic finding).
+	seedQuarantineListFiles(fixtureDir);
 
 	return fixtureDir;
 }
