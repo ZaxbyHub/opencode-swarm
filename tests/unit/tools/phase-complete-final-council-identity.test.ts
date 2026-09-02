@@ -26,7 +26,7 @@ import { PlanSchema } from '../../../src/config/plan-schema';
 import { computeCouncilReviewIdentity } from '../../../src/council/council-review-identity';
 import { closeProjectDb } from '../../../src/db/project-db';
 import { setGatesForIdentity } from '../../../src/db/qa-gate-profile';
-import { computePlanHash } from '../../../src/plan/ledger';
+import { computePlanLedgerHash } from '../../../src/plan/ledger';
 import { derivePlanIdentityHash } from '../../../src/plan/utils';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import { executePhaseComplete } from '../../../src/tools/phase-complete';
@@ -173,7 +173,7 @@ function writeFinalCouncilEvidence(options: {
 					plan_id: PLAN_ID,
 					...(options.omitPlanHash
 						? {}
-						: { plan_hash: options.planHash ?? computePlanHash(plan) }),
+						: { plan_hash: options.planHash ?? computePlanLedgerHash(plan) }),
 					...(options.omitPlanIdentityHash
 						? {}
 						: {

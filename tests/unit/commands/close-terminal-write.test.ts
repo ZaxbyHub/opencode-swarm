@@ -104,7 +104,7 @@ mock.module('../../../src/plan/manager.js', () => ({
 	// Stub other plan/manager exports that might be imported transitively
 	loadPlan: mock(async () => null),
 	derivePlanId: () => 'test-plan-id',
-	computePlanHash: () => 'test-hash',
+	computePlanLedgerHash: () => 'test-hash',
 	computePlanContentHash: () => 'test-content-hash',
 	appendLedgerEvent: mock(async () => {}),
 	takeSnapshotEvent: mock(async () => {}),

@@ -3,7 +3,10 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Plan, TaskStatus } from '../../../src/config/plan-schema';
-import { appendLedgerEvent, computePlanHash } from '../../../src/plan/ledger';
+import {
+	appendLedgerEvent,
+	computePlanLedgerHash,
+} from '../../../src/plan/ledger';
 import { savePlan } from '../../../src/plan/manager';
 import { derivePlanId } from '../../../src/plan/utils';
 
@@ -78,7 +81,7 @@ describe('savePlan ledger-derived projection regression', () => {
 				to_status: 'completed',
 				source: 'test_concurrent_writer',
 			},
-			{ planHashAfter: computePlanHash(taskOneCompleted) },
+			{ planHashAfter: computePlanLedgerHash(taskOneCompleted) },
 		);
 
 		await savePlan(tmpDir, makePlan('pending', 'completed'));

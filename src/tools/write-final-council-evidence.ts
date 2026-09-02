@@ -22,7 +22,7 @@ import { validateSwarmPath } from '../hooks/utils';
 import { COUNCIL_VERDICT_REWARDS } from '../memory/config';
 import { createConfiguredMemoryProvider } from '../memory/gateway';
 import { applyCouncilReward } from '../memory/reward-capture';
-import { computePlanHash } from '../plan/ledger.js';
+import { computePlanLedgerHash } from '../plan/ledger.js';
 import { loadPlan } from '../plan/manager.js';
 import { derivePlanId, derivePlanIdentityHash } from '../plan/utils.js';
 import * as logger from '../utils/logger';
@@ -163,7 +163,7 @@ export async function executeWriteFinalCouncilEvidence(
 	} catch {
 		// The scoped attempt still records a deterministic plan-not-found result.
 	}
-	const planHash = plan ? computePlanHash(plan) : undefined;
+	const planHash = plan ? computePlanLedgerHash(plan) : undefined;
 	const planId = plan ? derivePlanId(plan) : undefined;
 	const planIdentityHash = plan ? derivePlanIdentityHash(plan) : undefined;
 	const reviewHash = plan ? computeCouncilReviewHash(plan) : null;

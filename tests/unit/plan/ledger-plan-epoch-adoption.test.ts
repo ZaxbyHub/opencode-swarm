@@ -7,7 +7,7 @@ import type { Plan } from '../../../src/config/plan-schema';
 import {
 	_internals,
 	appendLedgerEvent,
-	computePlanHash,
+	computePlanLedgerHash,
 	getOrAdoptPlanEpochUnderLock,
 	LEDGER_SCHEMA_VERSION,
 	type LedgerEvent,
@@ -69,11 +69,11 @@ async function createLegacyLedger(plan: Plan): Promise<string> {
 		event_type: 'plan_created',
 		source: 'legacy-init',
 		plan_hash_before: '',
-		plan_hash_after: computePlanHash(plan),
+		plan_hash_after: computePlanLedgerHash(plan),
 		schema_version: LEDGER_SCHEMA_VERSION,
 		payload: {
 			plan,
-			payload_hash: computePlanHash(plan),
+			payload_hash: computePlanLedgerHash(plan),
 		},
 	};
 	fs.writeFileSync(
@@ -127,7 +127,7 @@ describe('legacy ledger plan epoch adoption', () => {
 		expect(identity.source).toBe('plan_epoch_adopted');
 		expect(adoption?.event_type).toBe('snapshot');
 		expect(payload?.plan).toEqual(plan);
-		expect(payload?.payload_hash).toBe(computePlanHash(plan));
+		expect(payload?.payload_hash).toBe(computePlanLedgerHash(plan));
 		expect(payload?.plan_epoch).toBe(identity.planEpoch);
 		expect(payload?.root_event_hash).toBe(identity.rootEventHash);
 		expect(afterReplay).toEqual(beforeReplay);
@@ -173,12 +173,12 @@ describe('legacy ledger plan epoch adoption', () => {
 			plan_id: derivePlanId(plan),
 			event_type: 'snapshot',
 			source: 'plan_epoch_adopted',
-			plan_hash_before: computePlanHash(plan),
-			plan_hash_after: computePlanHash(plan),
+			plan_hash_before: computePlanLedgerHash(plan),
+			plan_hash_after: computePlanLedgerHash(plan),
 			schema_version: LEDGER_SCHEMA_VERSION,
 			payload: {
 				plan,
-				payload_hash: computePlanHash(plan),
+				payload_hash: computePlanLedgerHash(plan),
 				plan_epoch: '11111111-1111-4111-8111-111111111111',
 				root_event_hash: rootHash,
 			},
@@ -191,12 +191,12 @@ describe('legacy ledger plan epoch adoption', () => {
 			plan_id: derivePlanId(plan),
 			event_type: 'snapshot',
 			source: 'plan_epoch_adopted',
-			plan_hash_before: computePlanHash(plan),
-			plan_hash_after: computePlanHash(plan),
+			plan_hash_before: computePlanLedgerHash(plan),
+			plan_hash_after: computePlanLedgerHash(plan),
 			schema_version: LEDGER_SCHEMA_VERSION,
 			payload: {
 				plan,
-				payload_hash: computePlanHash(plan),
+				payload_hash: computePlanLedgerHash(plan),
 				plan_epoch: '22222222-2222-4222-8222-222222222222',
 				root_event_hash: rootHash,
 			},
@@ -220,12 +220,12 @@ describe('legacy ledger plan epoch adoption', () => {
 			plan_id: derivePlanId(plan),
 			event_type: 'snapshot',
 			source: 'plan_epoch_adopted',
-			plan_hash_before: computePlanHash(plan),
-			plan_hash_after: computePlanHash(plan),
+			plan_hash_before: computePlanLedgerHash(plan),
+			plan_hash_after: computePlanLedgerHash(plan),
 			schema_version: LEDGER_SCHEMA_VERSION,
 			payload: {
 				plan,
-				payload_hash: computePlanHash(plan),
+				payload_hash: computePlanLedgerHash(plan),
 				plan_epoch: '11111111-1111-4111-8111-111111111111',
 				root_event_hash: 'a'.repeat(64),
 			},

@@ -15,7 +15,7 @@ import {
 	getEffectiveGates,
 	getProfileLookupForIdentity,
 } from '../../../db/qa-gate-profile.js';
-import { computePlanHash } from '../../../plan/ledger';
+import { computePlanLedgerHash } from '../../../plan/ledger';
 import { loadPlan } from '../../../plan/manager';
 import { derivePlanId } from '../../../plan/utils';
 import { swarmState } from '../../../state';
@@ -58,7 +58,7 @@ export async function resolveGatePreamble(
 		return { resolved: false };
 	}
 	const planId = derivePlanId(plan);
-	const planHash = computePlanHash(plan);
+	const planHash = computePlanLedgerHash(plan);
 	const lookup = getProfileLookupForIdentity(dir, plan);
 	const session = sessionID
 		? swarmState.agentSessions.get(sessionID)

@@ -21,7 +21,7 @@ import * as path from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
 	appendLedgerEvent,
-	computePlanHash,
+	computePlanLedgerHash,
 	replayFromLedger,
 } from '../../../src/plan/ledger';
 import { loadPlan, savePlan } from '../../../src/plan/manager';
@@ -103,7 +103,7 @@ describe('task_removed ledger replay (issue #853 follow-up)', () => {
 				},
 			],
 		};
-		const expectedHashAfter = computePlanHash(postRemovalPlan);
+		const expectedHashAfter = computePlanLedgerHash(postRemovalPlan);
 
 		// Append the task_removed event WITHOUT writing the new plan.json.
 		// This is the precise interleaving that a process crash between the
@@ -132,7 +132,7 @@ describe('task_removed ledger replay (issue #853 follow-up)', () => {
 			p.tasks.map((t) => t.id),
 		);
 		expect(rebuiltIds).toEqual(['1.1']);
-		expect(computePlanHash(rebuilt as Plan)).toBe(expectedHashAfter);
+		expect(computePlanLedgerHash(rebuilt as Plan)).toBe(expectedHashAfter);
 	});
 
 	test('replayFromLedger ignores task_removed events with no matching task', async () => {
@@ -165,7 +165,7 @@ describe('task_removed ledger replay (issue #853 follow-up)', () => {
 		await savePlan(tmpDir, initialPlan);
 
 		const beforePlan = await readPlanJson();
-		const beforeHash = computePlanHash(beforePlan);
+		const beforeHash = computePlanLedgerHash(beforePlan);
 
 		await appendLedgerEvent(
 			tmpDir,
@@ -235,7 +235,7 @@ describe('task_removed ledger replay (issue #853 follow-up)', () => {
 				},
 			],
 		};
-		const expectedHashAfter = computePlanHash(postRemovalPlan);
+		const expectedHashAfter = computePlanLedgerHash(postRemovalPlan);
 
 		// Simulate the crash: ledger event lands, plan.json rename is lost.
 		await appendLedgerEvent(
