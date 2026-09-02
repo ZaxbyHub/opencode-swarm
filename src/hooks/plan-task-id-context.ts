@@ -11,13 +11,18 @@ export type PlanTaskIdContext =
 
 /** Traverse plan phases without first materializing an unbounded flat task list. */
 export function collectPlanTaskIdContextFromPhases(
-	phases: ReadonlyArray<{
-		tasks: ReadonlyArray<{ id: string }>;
-	}>,
+	phases: ReadonlyArray<
+		| {
+				tasks?: ReadonlyArray<{ id?: string } | null> | null;
+		  }
+		| null
+		| undefined
+	>,
 ): PlanTaskIdContext {
 	const collected = new Set<string>();
 	for (const phase of phases) {
-		for (const task of phase.tasks) {
+		for (const task of phase?.tasks ?? []) {
+			if (!task || typeof task.id !== 'string') continue;
 			collected.add(task.id);
 			if (collected.size > TASK_ID_RESOLUTION_LIMITS.maxKnownIds) {
 				return { status: 'over_limit' };

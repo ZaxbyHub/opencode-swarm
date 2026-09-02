@@ -22,9 +22,9 @@ import { join } from 'node:path';
 const ROOT = process.cwd();
 
 const ENTRY_SKILL_BASELINES: Record<string, number> = {
-	'.opencode/skills/swarm-pr-review/SKILL.md': 2022,
+	'.opencode/skills/swarm-pr-review/SKILL.md': 2024,
 	'.opencode/skills/swarm-pr-feedback/SKILL.md': 949,
-	'.opencode/skills/writing-tests/SKILL.md': 843,
+	'.opencode/skills/writing-tests/SKILL.md': 847,
 };
 
 describe('progressive-disclosure ratchet (issue #2131 G)', () => {

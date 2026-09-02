@@ -112,6 +112,15 @@ function buildPrompt(entries: RankedEntry[]): string {
 	return `${block}\n\nTASK_ID: task-42\nDelegated work here.`;
 }
 
+function buildPromptWithoutTaskId(entries: RankedEntry[]): string {
+	const block = buildDelegateDirectiveBlock(
+		entries,
+		knowledgeConfig(),
+		FIXED_TRACE_ID,
+	);
+	return `${block}\n\nDelegated work here.`;
+}
+
 /** Seed a retrieved event so the validator's trace-existence + membership checks pass. */
 async function seedRetrieved(
 	directory: string,
@@ -311,6 +320,29 @@ describe('delegate-ack-collector', () => {
 				(e) => e.type === 'applied',
 			) as (typeof events)[0] & { task_id?: string };
 			expect(applied?.task_id).toBe('task-42');
+		});
+
+		it('preserves legacy explicit taskId fallback when no taskIdResolution is supplied', async () => {
+			const transcript = `KNOWLEDGE_APPLIED:${FIXED_TRACE_ID}:${ID_APPLIED}`;
+			await seedRetrieved(dir, [ID_APPLIED], {
+				sessionId: 'sess-legacy-task',
+				taskId: 'legacy-task-id',
+			});
+
+			await collectDelegateAcks({
+				directory: dir,
+				prompt: buildPromptWithoutTaskId([rankedEntry(ID_APPLIED, 'high')]),
+				transcript,
+				agent: 'coder',
+				sessionId: 'sess-legacy-task',
+				taskId: 'legacy-task-id',
+			});
+
+			const events = await readKnowledgeEvents(dir);
+			const applied = events.find(
+				(event) => event.type === 'applied',
+			) as (typeof events)[0] & { task_id?: string };
+			expect(applied?.task_id).toBe('legacy-task-id');
 		});
 	});
 

@@ -99,7 +99,16 @@ import type {
 } from '../types/delegation.js';
 import * as logger from '../utils/logger';
 import { isStrictTaskId } from '../validation/task-id';
-import { resolveDelegatedPlanTaskId } from './task-id-resolver.js';
+import {
+	collectPlanTaskIdContextFromPhases,
+	type PlanTaskIdContext,
+	toTaskIdPlanContextOptions,
+} from './plan-task-id-context.js';
+import {
+	resolveDelegatedPlanTaskId,
+	resolveTaskId,
+	TASK_ID_RESOLUTION_LIMITS,
+} from './task-id-resolver.js';
 
 export { resolveDelegatedPlanTaskId } from './task-id-resolver.js';
 
@@ -343,24 +352,26 @@ async function prepareCoderScope(
 			`SCOPE_NOT_DECLARED: no valid plan found at ${planPath} (file missing or invalid). Declare a plan via save_plan or run /swarm plan first.`,
 		);
 	}
-	const planTaskIds = new Set(
-		plan.phases.flatMap((phase) => phase.tasks.map((task) => task.id)),
+	const planTaskIdContext = collectPlanTaskIdContextFromPhases(plan.phases);
+	const taskId = resolveDelegatedPlanTaskId(
+		args,
+		toTaskIdPlanContextOptions(planTaskIdContext),
 	);
-	const taskId = resolveDelegatedPlanTaskId(args, planTaskIds);
 	if (!taskId) {
 		// Cause-specific diagnostic so the architect can self-correct in one turn
 		// instead of guessing (issue #1914 Defect 2).
 		throw new Error(
-			`SCOPE_NOT_DECLARED: ${describeCoderScopeFailure(args, planTaskIds)}`,
+			`SCOPE_NOT_DECLARED: ${describeCoderScopeFailure(args, planTaskIdContext)}`,
 		);
 	}
-	// Membership gate (issue #1914 critic item 1): reject plan-task-shaped-but-
-	// unknown ids explicitly. Without this, `task_id: "9.9"` + FILE: directives
-	// would produce a valid binding for a non-existent task — createScopeBinding
-	// only validates isStrictTaskId, not plan membership.
-	if (!planTaskIds.has(taskId)) {
+	const declaredFilesForTask = getPlanTaskDeclaredFiles(plan, taskId);
+	if (!declaredFilesForTask) {
+		const known =
+			planTaskIdContext.status === 'available'
+				? [...planTaskIdContext.taskIds].sort().join(', ') || '(none)'
+				: '(omitted: plan task context over limit)';
 		throw new Error(
-			`SCOPE_NOT_DECLARED: task_id "${taskId}" does not match any known plan task id. Known: ${[...planTaskIds].sort().join(', ') || '(none)'}. Update the dispatch or revise the plan.`,
+			`SCOPE_NOT_DECLARED: task_id "${taskId}" does not match any known plan task id. Known: ${known}. Update the dispatch or revise the plan.`,
 		);
 	}
 	const directives = extractTaskFileDirectives(args);
@@ -392,7 +403,7 @@ async function prepareCoderScope(
 	}
 	const explicitBinding =
 		explicitResolution.status === 'found' ? explicitResolution.binding : null;
-	const declaredFiles = getPlanTaskDeclaredFiles(plan, taskId);
+	const declaredFiles = declaredFilesForTask;
 	const resolved = resolveCoderScopeSources({
 		explicitFiles: explicitBinding?.files,
 		planFiles: declaredFiles,
@@ -1478,24 +1489,7 @@ function extractTaskLine(text: string): string | null {
  * Returns the plan task ID if found, otherwise null.
  */
 function extractPlanTaskId(text: string): string | null {
-	// Pattern 1: Task list format "- [ ] N.M: ..." or "- [x] N.M: ..."
-	const taskListMatch = text.match(
-		/^[ \t]*-[ \t]*(?:\[[ x]\][ \t]+)?(\d+\.\d+(?:\.\d+)*)[:. ]/m,
-	);
-	if (taskListMatch) {
-		return taskListMatch[1];
-	}
-
-	// Pattern 2: Look for N.M or N.M.P near the TASK: line
-	// Match "TASK: N.M ..." or "TASK: ... N.M ..." or standalone "N.M" after TASK:
-	const taskLineMatch = text.match(
-		/TASK:\s*(?:.+?\s)?(\d+\.\d+(?:\.\d+)*)(?:\s|$|:)/i,
-	);
-	if (taskLineMatch) {
-		return taskLineMatch[1];
-	}
-
-	return null;
+	return resolveDelegatedPlanTaskId({ prompt: text });
 }
 
 function outputText(output: unknown): string {
@@ -2011,9 +2005,22 @@ function getPlanTaskDeclaredFiles(
  */
 function describeCoderScopeFailure(
 	args: Record<string, unknown>,
-	planTaskIds: ReadonlySet<string>,
+	planTaskIdContext: PlanTaskIdContext,
 ): string {
-	const known = [...planTaskIds].sort().join(', ') || '(none)';
+	if (planTaskIdContext.status === 'over_limit') {
+		return `loaded plan task context exceeds the shared bounded limit (${TASK_ID_RESOLUTION_LIMITS.maxKnownIds} task ids); task-id resolution fails closed instead of guessing. Provide an explicit structured scope declaration or narrow the plan context before delegating.`;
+	}
+	const resolution = resolveTaskId(args, {
+		policy: 'plan',
+		...toTaskIdPlanContextOptions(planTaskIdContext),
+	});
+	const knownPlanTaskIds =
+		planTaskIdContext.status === 'available'
+			? planTaskIdContext.taskIds
+			: undefined;
+	const knownSummary = knownPlanTaskIds
+		? [...knownPlanTaskIds].sort().join(', ') || '(none)'
+		: '(none)';
 	const rawTaskId = args.task_id ?? args.taskId;
 	const explicitFieldShape =
 		typeof rawTaskId === 'string' && rawTaskId.trim().length > 0
@@ -2033,23 +2040,33 @@ function describeCoderScopeFailure(
 		if (!taskLine) continue;
 		taskLineDetected = true;
 		for (const m of taskLine.matchAll(/\b(\d+\.\d+(?:\.\d+)*)\b/g)) {
-			if (planTaskIds.has(m[1])) taskLineCandidates.add(m[1]);
+			if (knownPlanTaskIds?.has(m[1])) taskLineCandidates.add(m[1]);
 		}
 	}
 	const textCandidates = new Set<string>();
 	for (const field of candidateTextFields) {
 		if (typeof field !== 'string') continue;
 		for (const m of field.matchAll(/\b(\d+\.\d+(?:\.\d+)*)\b/g)) {
-			if (planTaskIds.has(m[1])) textCandidates.add(m[1]);
+			if (knownPlanTaskIds?.has(m[1])) textCandidates.add(m[1]);
 		}
 	}
+	if (
+		resolution.status === 'invalid' &&
+		typeof rawTaskId === 'string' &&
+		isStrictTaskId(rawTaskId.trim())
+	) {
+		return `explicit task_id "${rawTaskId.trim().slice(0, 40)}" is plan-shaped but does not resolve safely against the loaded plan, so resolution fails closed before prompt fallback. Known plan task ids: ${knownSummary}.`;
+	}
+	if (resolution.status === 'over_limit') {
+		return `task-id resolution exceeded a bounded input limit (${resolution.input}); provide exactly one concise TASK: <N.M> line or a valid explicit plan task_id. Known plan task ids: ${knownSummary}.`;
+	}
 	if (taskLineCandidates.size > 1) {
-		return `multiple candidate task ids found in TASK: line: [${[...taskLineCandidates].sort().join(', ')}]; provide exactly one unambiguous TASK: <id> line. Known plan task ids: ${known}.`;
+		return `multiple candidate task ids found in TASK: line: [${[...taskLineCandidates].sort().join(', ')}]; provide exactly one unambiguous TASK: <id> line. Known plan task ids: ${knownSummary}.`;
 	}
 	if (textCandidates.size > 1) {
-		return `multiple candidate task ids found in prompt text: [${[...textCandidates].sort().join(', ')}]; provide exactly one unambiguous TASK: <id> line. Known plan task ids: ${known}.`;
+		return `multiple candidate task ids found in prompt text: [${[...textCandidates].sort().join(', ')}]; provide exactly one unambiguous TASK: <id> line. Known plan task ids: ${knownSummary}.`;
 	}
-	return `no plan task id could be resolved. Include a TASK: <N.M> line or plan-task-shaped task_id arg. Explicit task_id field: ${explicitFieldShape}. TASK: line detected: ${taskLineDetected ? 'yes' : 'no'}. Known plan task ids: ${known}.`;
+	return `no plan task id could be resolved. Include a TASK: <N.M> line or plan-task-shaped task_id arg. Explicit task_id field: ${explicitFieldShape}. TASK: line detected: ${taskLineDetected ? 'yes' : 'no'}. Known plan task ids: ${knownSummary}.`;
 }
 
 function stripSingleTrailingAnnotationSuffix(value: string): string | null {
@@ -2742,30 +2759,28 @@ async function resolveEvidenceTaskId(
 	session: AgentSessionState,
 	directory: string,
 ): Promise<string | null> {
-	// Step 1: Explicit task_id in direct args
-	const rawTaskId = args?.task_id;
-	if (
-		typeof rawTaskId === 'string' &&
-		rawTaskId.length <= 20 &&
-		isStrictTaskId(rawTaskId.trim())
-	) {
-		return rawTaskId.trim();
-	}
-
-	// Step 2: Prompt-text extraction via resolveDelegatedPlanTaskId with plan-aware filtering
-	// When plan is unavailable, skip text extraction entirely to prevent version-like
-	// patterns (e.g. "v6.33.7") from being misidentified as task IDs.
+	// Shared bounded resolution first; session fallback is allowed only when the
+	// resolver had no safe plan context and therefore made no authoritative
+	// determination.
 	if (args) {
 		try {
 			const plan = await loadPlanJsonOnly(directory);
 			if (plan) {
-				const planTaskIds = new Set(
-					plan.phases.flatMap((p) => p.tasks.map((t) => t.id)),
-				);
-				const promptTaskId = resolveDelegatedPlanTaskId(args, planTaskIds);
-				if (promptTaskId) return promptTaskId;
+				const resolution = resolveTaskId(args, {
+					policy: 'plan',
+					...toTaskIdPlanContextOptions(
+						collectPlanTaskIdContextFromPhases(plan.phases),
+					),
+				});
+				if (resolution.status === 'resolved') return resolution.taskId;
+				if (
+					resolution.status === 'invalid' ||
+					resolution.status === 'ambiguous' ||
+					resolution.status === 'over_limit'
+				) {
+					return null;
+				}
 			}
-			// Plan unavailable — skip text extraction, fall through to session state
 		} catch {
 			// Plan unavailable — proceed to session fallback
 		}
@@ -3424,12 +3439,12 @@ export function createDelegationGateHook(
 		const completionArgs = output.args as Record<string, unknown> | undefined;
 		if (completionArgs) {
 			// Load plan task IDs for plan-aware text extraction (filters version numbers)
-			let completionPlanTaskIds: ReadonlySet<string> | undefined;
+			let completionPlanContext: PlanTaskIdContext | undefined;
 			try {
 				const plan = await loadPlanJsonOnly(directory);
 				if (plan) {
-					completionPlanTaskIds = new Set(
-						plan.phases.flatMap((p) => p.tasks.map((t) => t.id)),
+					completionPlanContext = collectPlanTaskIdContextFromPhases(
+						plan.phases,
 					);
 				}
 			} catch {
@@ -3437,7 +3452,9 @@ export function createDelegationGateHook(
 			}
 			const requestedTaskId = resolveDelegatedPlanTaskId(
 				completionArgs,
-				completionPlanTaskIds,
+				completionPlanContext
+					? toTaskIdPlanContextOptions(completionPlanContext)
+					: undefined,
 			);
 			if (requestedTaskId) {
 				const { getTaskWorkflowSnapshot, readTaskEvidence } = await import(
@@ -3662,14 +3679,12 @@ export function createDelegationGateHook(
 			try {
 				const coveragePlan = await _internals.loadPlanJsonOnly(directory);
 				if (coveragePlan) {
-					const coveragePlanTaskIds = new Set(
-						coveragePlan.phases.flatMap((phase) =>
-							phase.tasks.map((t) => t.id),
-						),
+					const coveragePlanTaskContext = collectPlanTaskIdContextFromPhases(
+						coveragePlan.phases,
 					);
 					coverageTaskId = resolveDelegatedPlanTaskId(
 						args,
-						coveragePlanTaskIds,
+						toTaskIdPlanContextOptions(coveragePlanTaskContext),
 					);
 					if (coverageTaskId) {
 						const coverageTask = coveragePlan.phases

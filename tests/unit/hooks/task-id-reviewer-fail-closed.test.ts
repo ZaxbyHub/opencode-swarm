@@ -1,14 +1,12 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { collectPlanTaskIdContextFromPhases } from '../../../src/hooks/plan-task-id-context.js';
 import { resolveReviewerScopeTaskId } from '../../../src/hooks/review-receipt-scope.js';
 import { skillPropagationTransformScan } from '../../../src/hooks/skill-propagation-gate.js';
 import {
 	appendSkillUsageEntry,
 	readSkillUsageEntries,
 } from '../../../src/hooks/skill-usage-log.js';
-import { TASK_ID_RESOLUTION_LIMITS } from '../../../src/hooks/task-id-resolver.js';
 import { withFrozenClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
@@ -53,7 +51,7 @@ function recordUniqueFallback(
 	directory: string,
 	sessionID: string,
 	taskID: string,
-) {
+): void {
 	appendSkillUsageEntry(directory, {
 		skillPath: 'file:.claude/skills/writing-tests/SKILL.md',
 		agentName: 'coder',
@@ -94,83 +92,31 @@ afterEach(() => {
 	}
 });
 
-describe('production task-ID consumers fail closed', () => {
-	test('reviewer scope accepts a known explicit task and rejects an unknown one', async () => {
-		const directory = makeDirectory('reviewer-scope-task-id-');
+describe('reviewer task-id fail-closed regressions', () => {
+	test('rejects an unknown explicit strict task_id before prompt fallback', async () => {
+		const directory = makeDirectory('reviewer-scope-no-fallback-');
 		writePlan(directory, ['1.1']);
 
 		expect(
-			await resolveReviewerScopeTaskId(directory, { task_id: '1.1' }),
-		).toBe('1.1');
-		expect(
-			await resolveReviewerScopeTaskId(directory, { task_id: '9.9' }),
+			await resolveReviewerScopeTaskId(directory, {
+				task_id: '9.9',
+				prompt: 'TASK: 1.1\nReview changes',
+			}),
 		).toBeNull();
 	});
 
-	test('a malformed reviewer marker cannot activate a unique history fallback', async () => {
-		const directory = makeDirectory('reviewer-malformed-task-id-');
-		const sessionID = 'malformed-marker';
-		recordUniqueFallback(directory, sessionID, 'legacy-task');
+	test('mixed prompt marker families fail closed instead of choosing one', async () => {
+		const directory = makeDirectory('reviewer-mixed-markers-');
+		writePlan(directory, ['1.1', '1.2']);
+		recordUniqueFallback(directory, 'mixed-markers', '1.1');
 
 		const entries = await scanReviewer(
 			directory,
-			sessionID,
-			'TASK: !!!\nSKILL_COMPLIANCE: COMPLIANT',
+			'mixed-markers',
+			'task_id: 1.1\nTASK: 1.2\nSKILL_COMPLIANCE: COMPLIANT',
 		);
 		expect(entries).toHaveLength(1);
 		expect(entries[0].taskID).toBe('unknown');
 		expect(entries[0].skillPath).toBe('__overall__');
-	});
-
-	test('an oversized valid plan blocks numeric attribution but preserves legacy named IDs', async () => {
-		const directory = makeDirectory('reviewer-oversized-plan-');
-		writePlan(
-			directory,
-			Array.from(
-				{ length: TASK_ID_RESOLUTION_LIMITS.maxKnownIds + 1 },
-				(_, index) => `1.${index + 1}`,
-			),
-		);
-
-		recordUniqueFallback(directory, 'numeric-over-limit', '1.1');
-		const numericEntries = await scanReviewer(
-			directory,
-			'numeric-over-limit',
-			'TASK: 9.9\nSKILL_COMPLIANCE: COMPLIANT',
-		);
-		expect(numericEntries).toHaveLength(1);
-		expect(numericEntries[0].taskID).toBe('unknown');
-		expect(numericEntries[0].skillPath).toBe('__overall__');
-
-		recordUniqueFallback(directory, 'named-over-limit', 'legacy-task');
-		const namedEntries = await scanReviewer(
-			directory,
-			'named-over-limit',
-			'TASK: legacy-task\nSKILL_COMPLIANCE: COMPLIANT',
-		);
-		expect(namedEntries).toHaveLength(1);
-		expect(namedEntries[0].taskID).toBe('legacy-task');
-	});
-
-	test('sparse phases ignore missing task arrays and malformed task slots', () => {
-		expect(
-			collectPlanTaskIdContextFromPhases([
-				null,
-				undefined,
-				{ tasks: null },
-				{
-					tasks: [
-						null,
-						undefined,
-						{} as { id?: string },
-						{ id: '1.1' },
-						{ id: '1.2' },
-					],
-				},
-			]),
-		).toEqual({
-			status: 'available',
-			taskIds: new Set(['1.1', '1.2']),
-		});
 	});
 });

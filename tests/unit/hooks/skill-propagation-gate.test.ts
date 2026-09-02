@@ -1514,9 +1514,9 @@ describe('extractTaskIdFromPrompt', () => {
 		expect(extractFn('do the thing with the stuff')).toBe('unknown');
 	});
 
-	test('prefers taskId over TASK when both present', () => {
+	test('rejects mixed taskId and TASK markers as ambiguous', () => {
 		const prompt = 'taskId: id-from-taskid\nTASK: id-from-task';
-		expect(extractFn(prompt)).toBe('id-from-taskid');
+		expect(extractFn(prompt)).toBe('unknown');
 	});
 
 	test('handles taskId at start of prompt', () => {
@@ -3223,7 +3223,6 @@ describe('skillPropagationTransformScan — dedup on repeated calls', () => {
 
 		const sessionID = `dedup-${Date.now()}`;
 		const skillPath = 'file:.claude/skills/writing-tests/SKILL.md';
-		const expectedSkillPath = skillPath.replace(/^file:/, '');
 
 		// Create the mock skill file
 		const skillAbsPath = path.join(
@@ -3286,38 +3285,34 @@ describe('skillPropagationTransformScan — dedup on repeated calls', () => {
 
 			const entries = readSkillUsageEntries(tempDir, { sessionID });
 
-			// Should have 2-3 entries: 1 architect delegation + 1-2 reviewer compliance
-			// NOT 6-9 (which would happen without dedup: 3x2=6 or 3x3=9)
-			// First call uses __overall__ (no existing delegation data), subsequent calls
-			// attribute compliance to actual skill paths from prior delegation entries.
-			expect(entries.length).toBeGreaterThanOrEqual(2);
-			expect(entries.length).toBeLessThanOrEqual(3);
+			// Should have exactly 2 entries: 1 architect delegation + 1 reviewer
+			// compliance. Repeated scans of the same reviewer verdict must dedup even
+			// when the task remains unattributed.
+			expect(entries).toHaveLength(2);
 
 			// Exactly 1 delegation entry (coder)
 			const delegationEntries = entries.filter((e) => e.agentName === 'coder');
 			expect(delegationEntries.length).toBe(1);
 
-			// 1-2 compliance entries — at least one should be attributed to the
-			// actual skill path (not __overall__) thanks to the delegation fallback
 			const complianceEntries = entries.filter(
 				(e) => e.agentName === 'reviewer',
 			);
-			expect(complianceEntries.length).toBeGreaterThanOrEqual(1);
-			expect(complianceEntries.length).toBeLessThanOrEqual(2);
-			const actualSkillCompliance = complianceEntries.filter(
-				(e) => e.skillPath === expectedSkillPath,
-			);
-			expect(actualSkillCompliance.length).toBeGreaterThanOrEqual(1);
+			expect(complianceEntries).toHaveLength(1);
+			expect(complianceEntries[0]).toMatchObject({
+				skillPath: '__overall__',
+				taskID: 'unknown',
+			});
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 
-	test('compliance uses resolved taskID even when SKILLS_USED_BY_CODER is present', async () => {
+	test('SKILLS_USED_BY_CODER preserves skill provenance without inferring task identity from history', async () => {
 		const sessionID = 'test-skills-with-taskid';
 		const tempDir = canonicalMkdtemp('spg-taskid-');
 
 		const skillPath = 'file:.claude/skills/writing-tests/SKILL.md';
+		const expectedSkillPath = skillPath.replace(/^file:/, '');
 
 		// Pre-record a delegation entry with a specific taskID
 		appendSkillUsageEntry(tempDir, {
@@ -3330,8 +3325,8 @@ describe('skillPropagationTransformScan — dedup on repeated calls', () => {
 		});
 
 		// Reviewer message WITH SKILLS_USED_BY_CODER — skillPaths are populated
-		// from the reviewer text, NOT from the fallback. The single distinct
-		// delegation task is a caller-proven safe fallback for task identity.
+		// from the reviewer text, but task identity still requires an explicit
+		// marker or bounded plan match in the current message.
 		const messages = [
 			{
 				info: { role: 'assistant', agent: 'reviewer', sessionID },
@@ -3360,12 +3355,9 @@ describe('skillPropagationTransformScan — dedup on repeated calls', () => {
 				(e) => e.agentName === 'reviewer',
 			);
 
-			expect(complianceEntries.length).toBeGreaterThanOrEqual(1);
-			// Even though SKILLS_USED_BY_CODER provided the skill paths, the
-			// unique delegation task remains a safe attribution fallback.
-			for (const entry of complianceEntries) {
-				expect(entry.taskID).toBe('task-5.2');
-			}
+			expect(complianceEntries).toHaveLength(1);
+			expect(complianceEntries[0].skillPath).toBe(expectedSkillPath);
+			expect(complianceEntries[0].taskID).toBe('unknown');
 		} finally {
 			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
