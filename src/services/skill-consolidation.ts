@@ -10,6 +10,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { EnrichmentQuotaOptions } from '../hooks/knowledge-curator.js';
 import { atomicWriteSwarmFile } from '../utils/atomic-write';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import { withTimeout } from '../utils/timeout.js';
 import type {
 	SkillImproveResult,
@@ -195,7 +196,7 @@ async function runSkillConsolidationInner(
 export async function runSkillConsolidation(
 	req: SkillConsolidationRequest,
 ): Promise<SkillConsolidationResult> {
-	const key = path.resolve(req.directory);
+	const key = canonicalRootKeyFresh(req.directory);
 	const existing = runningByDirectory.get(key);
 	if (existing) {
 		return {

@@ -28,7 +28,7 @@ describe('createSafeTestDir', () => {
 			// returns the /var/... symlink but the real path is /private/var/...).
 			// Compare against the realpath-resolved tmpdir base so the assertion
 			// holds on macOS too.
-			const tmpdir = fs.realpathSync(os.tmpdir());
+			const tmpdir = fs.realpathSync.native(os.tmpdir());
 			const resolvedDir = path.resolve(dir);
 			const resolvedTmpdir = path.resolve(tmpdir);
 			expect(

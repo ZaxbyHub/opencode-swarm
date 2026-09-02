@@ -218,6 +218,33 @@ describe('#2063 B4 — exemptions and fail-open paths', () => {
 		).not.toThrow();
 	});
 
+	test('a retargeted workspace alias does not retain the old self-development exemption', () => {
+		const alias = path.join(root, 'workspace-alias');
+		const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+		try {
+			fs.symlinkSync(selfDevProject, alias, linkType);
+			expect(() =>
+				guard(
+					'read',
+					{ filePath: path.join(installRoot, 'dist', 'index.js') },
+					alias,
+				),
+			).not.toThrow();
+
+			fs.rmSync(alias, { recursive: true, force: true });
+			fs.symlinkSync(userProject, alias, linkType);
+			expect(() =>
+				guard(
+					'read',
+					{ filePath: path.join(installRoot, 'dist', 'index.js') },
+					alias,
+				),
+			).toThrow(SWARM_INTERNALS_DENIAL_MESSAGE);
+		} finally {
+			fs.rmSync(alias, { recursive: true, force: true });
+		}
+	});
+
 	test('is inert when the WORKSPACE ROOT itself resolves inside the package root', () => {
 		// Catastrophic failure mode if this clause is missing: a `directory` that
 		// is a SUBDIRECTORY of a checkout (or anywhere under an install) carries

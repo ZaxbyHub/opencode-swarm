@@ -37,6 +37,7 @@ import {
 	resolveLinkDir,
 	sanitizeLinkId,
 } from '../hooks/knowledge-link.js';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import { warn } from '../utils/logger.js';
 
 // ============================================================================
@@ -203,9 +204,13 @@ function pointerStatFingerprint(directory: string): string | null {
  */
 export function resolveMemoryStoreDir(directory: string): string {
 	const localSwarm = path.join(directory, '.swarm');
+	// The physical target can change while the host keeps the alias string.
+	// Fresh identity prevents a retargeted alias from sharing a project cache
+	// entry with its former target.
+	const cacheKey = canonicalRootKeyFresh(directory);
 	const now = Date.now();
 
-	const cached = _resolutionCache.get(directory);
+	const cached = _resolutionCache.get(cacheKey);
 	const currentStat = pointerStatFingerprint(directory);
 	if (cached && now < cached.expires && cached.pointerStat === currentStat) {
 		return cached.linkDir ?? localSwarm;
@@ -225,13 +230,13 @@ export function resolveMemoryStoreDir(directory: string): string {
 
 	// FIFO eviction (Invariant 8) before inserting a fresh key.
 	if (
-		!_resolutionCache.has(directory) &&
+		!_resolutionCache.has(cacheKey) &&
 		_resolutionCache.size >= MAX_CACHE_ENTRIES
 	) {
 		const oldest = _resolutionCache.keys().next().value;
 		if (oldest !== undefined) _resolutionCache.delete(oldest);
 	}
-	_resolutionCache.set(directory, {
+	_resolutionCache.set(cacheKey, {
 		linkDir,
 		expires: now + CACHE_TTL_MS,
 		pointerStat: currentStat,
@@ -246,7 +251,7 @@ export function invalidateMemoryStoreDirCache(directory?: string): void {
 		_resolutionCache.clear();
 		return;
 	}
-	_resolutionCache.delete(directory);
+	_resolutionCache.delete(canonicalRootKeyFresh(directory));
 }
 
 /** True when the worktree currently redirects to a shared cohort store. */

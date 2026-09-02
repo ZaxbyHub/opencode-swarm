@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
 import {
 	_test_exports,
 	clearTrajectoryStepCounters,
@@ -6,6 +7,7 @@ import {
 	resetTrajectoryStepCounter,
 	seedTrajectoryStepCounter,
 } from '../../../src/hooks/trajectory-step-state';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 describe('trajectory-step-state -- regression: bounded session counters (F-001/F-002)', () => {
 	const rootA = '/workspace/project-a';
@@ -70,6 +72,26 @@ describe('trajectory-step-state -- regression: bounded session counters (F-001/F
 		expect(nextTrajectoryStep('session-x', rootB)).toBe(1);
 		expect(nextTrajectoryStep('session-x', rootA)).toBe(2);
 		expect(nextTrajectoryStep('session-x', rootB)).toBe(2);
+	});
+
+	test('a retargeted physical alias starts the new project counter at one', () => {
+		const physicalA = canonicalMkdtemp('trajectory-step-a-');
+		const physicalB = canonicalMkdtemp('trajectory-step-b-');
+		const alias = `${physicalA}-alias`;
+		const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+		try {
+			fs.symlinkSync(physicalA, alias, linkType);
+			expect(nextTrajectoryStep('same-session', alias)).toBe(1);
+
+			fs.rmSync(alias, { recursive: true, force: true });
+			fs.symlinkSync(physicalB, alias, linkType);
+			expect(nextTrajectoryStep('same-session', alias)).toBe(1);
+			expect(nextTrajectoryStep('same-session', physicalA)).toBe(2);
+		} finally {
+			fs.rmSync(alias, { recursive: true, force: true });
+			fs.rmSync(physicalA, { recursive: true, force: true });
+			fs.rmSync(physicalB, { recursive: true, force: true });
+		}
 	});
 
 	test('clearTrajectoryStepCounters(sessionId) clears the session under every root', () => {

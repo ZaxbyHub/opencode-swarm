@@ -110,6 +110,7 @@ import { createParallelDispatcher } from '../parallel/dispatcher/parallel-dispat
 import { CIRCUIT_TERMINAL_DELEGATION_STATUSES } from '../pr-review/circuit.js';
 import { reducePrReviewEvent } from '../pr-review/reducer.js';
 import { swarmState } from '../state.js';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import { teardownEphemeralSession } from '../utils/ephemeral-session-teardown.js';
 import * as logger from '../utils/logger.js';
 import { dispatchWithModelFallback } from '../utils/model-dispatch-fallback.js';
@@ -2904,7 +2905,7 @@ function revisionSnapshotKey(
 	directory: string,
 	prHeadSha: string | undefined | null,
 ): string {
-	return `${directory}\u0000${prHeadSha ?? ''}`;
+	return `${canonicalRootKeyFresh(directory)}\u0000${prHeadSha ?? ''}`;
 }
 
 /**

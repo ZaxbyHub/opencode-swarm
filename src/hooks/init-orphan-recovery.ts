@@ -35,6 +35,7 @@ import {
 	listRecoveryRecords,
 	recoveryReadErrored,
 } from '../turbo/lean/recovery';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import { log } from '../utils/index.js';
 import { withTimeout } from '../utils/timeout.js';
 import { removeWorktree } from '../worktree/core';
@@ -247,7 +248,8 @@ async function enumerateOrphanedWorktreeDirs(
 		for (const laneEntry of sessionEntries) {
 			if (!laneEntry.isDirectory()) continue;
 			const worktreePath = path.join(worktreeRoot, sessionId, laneEntry.name);
-			if (protectedWorktreePaths.has(path.resolve(worktreePath))) continue;
+			if (protectedWorktreePaths.has(canonicalRootKeyFresh(worktreePath)))
+				continue;
 			orphanedDirs.push(worktreePath);
 		}
 	}
@@ -362,8 +364,7 @@ function worktreePathKey(worktreePath: string, directory: string): string {
 	const absolutePath = path.isAbsolute(worktreePath)
 		? worktreePath
 		: path.resolve(directory, worktreePath);
-	const normalized = path.normalize(absolutePath);
-	return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+	return canonicalRootKeyFresh(absolutePath);
 }
 
 /**
@@ -703,7 +704,7 @@ export async function runInitOrphanRecovery(
 				),
 			]
 				.filter((value): value is string => typeof value === 'string')
-				.map((value) => path.resolve(value)),
+				.map((value) => worktreePathKey(value, directory)),
 		);
 		for (const owner of allDurableOwners) {
 			const worktreeSessionId = owner.worktree?.worktreeSessionId;

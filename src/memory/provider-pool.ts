@@ -1,7 +1,14 @@
-import { realpathSync } from 'node:fs';
-import * as path from 'node:path';
+import { mkdirSync } from 'node:fs';
+import { lexicalRootAliasKey } from '../utils/canonical-root.js';
+import {
+	canonicalExistingFilesystemPath,
+	canonicalPathFromExistingAncestor,
+	type FilesystemIdentityWitness,
+	filesystemIdentityWitnesses,
+} from '../utils/filesystem-identity.js';
 
 import type { MemoryConfig } from './config';
+import { MemoryValidationError } from './errors';
 import type { MemoryProposalStore, MemoryProvider } from './provider';
 import { SQLiteMemoryProvider } from './sqlite-provider';
 import type { VettedMemoryRoot } from './storage-root';
@@ -39,17 +46,20 @@ const entriesByKey = new Map<string, PoolEntry>();
 const deferredEntries = new Set<PoolEntry>();
 
 /**
- * Memoizes the last successful `realpathSync` resolution per raw (syntactic)
- * `path.resolve(directory)` input, so a directory that is later removed still
- * maps to the same pool key it had while it existed. Without this, a caller
- * that acquires a provider, the directory is deleted out from under it, then
- * re-acquires with the identical directory string would get a DIFFERENT key
- * (`resolvePoolKey`'s fallback is purely syntactic) whenever the raw and
- * canonical forms differ — e.g. on macOS, where `os.tmpdir()` sits under a
- * symlink prefix (`/var` -> `/private/var`). Bounded by the same MAX_POOL_SIZE
- * cap as `entriesByKey` (see `resolvePoolKey`) and cleared by `clearPool`.
+ * Memoizes the last physical resolution per raw (syntactic) root spelling, plus
+ * the linked ancestors that can prove a later retarget. This lets a removed or
+ * temporarily inaccessible alias retain its owned provider while a live alias
+ * that moves to another physical target selects a new provider. Missing leaves
+ * are pinned through their nearest existing ancestor before lazy I/O begins.
+ * Bounded by the same MAX_POOL_SIZE cap as `entriesByKey` and cleared by
+ * `clearPool`.
  */
-const resolvedKeyCache = new Map<string, string>();
+interface ResolvedKeyCacheEntry {
+	key: string;
+	witnesses: FilesystemIdentityWitness[];
+}
+
+const resolvedKeyCache = new Map<string, ResolvedKeyCacheEntry>();
 
 /**
  * Tag a provider as pool-managed. The pool replaces the provider's `close()`
@@ -174,7 +184,11 @@ export function getOrCreateProvider(
 	// no I/O) and insert. Duplicate inserts for the same key across
 	// overlapping async call-sites are harmless: the provider's init mutex
 	// (Phase 1 DD-03) serializes actual DB opens.
-	const provider = new SQLiteMemoryProvider(directory, config);
+	// Bind lazy storage I/O to the exact physical identity used for the pool
+	// entry. Keeping the caller's alias here would let a junction/symlink
+	// retarget between acquisition and initialize(), so an A-keyed provider
+	// could open B's database.
+	const provider = new SQLiteMemoryProvider(key, config);
 	// Tag as pool-managed before returning so callers can identify it
 	// and avoid closing it directly (pool owns lifecycle).
 	markAsPooled(provider);
@@ -226,6 +240,23 @@ export function getOrCreateProviderForRoot(
 	root: VettedMemoryRoot,
 	config: MemoryConfig,
 ): MemoryProvider & MemoryProposalStore {
+	if (
+		root.kind === 'cohort' &&
+		canonicalExistingFilesystemPath(root.cohortRoot) === null &&
+		!resolvedKeyCache.has(rawPoolKey(root.cohortRoot))
+	) {
+		// Cohort providers own this vetted store root. Materialize it before key
+		// resolution so a missing leaf beneath a symlink/junction is pinned to its
+		// physical identity on the very first acquisition, not only after lazy DB
+		// initialization.
+		try {
+			mkdirSync(root.cohortRoot, { recursive: true });
+		} catch {
+			// Preserve the provider's lazy error behavior when the root cannot be
+			// created; the lexical fallback remains available and initialization
+			// will report the underlying storage failure at the existing boundary.
+		}
+	}
 	const key = resolvePoolKeyForRoot(root);
 	const rootGeneration = root.kind === 'cohort' ? root.generation : 0;
 
@@ -269,8 +300,13 @@ export function getOrCreateProviderForRoot(
 		}
 	}
 
-	const directory = root.directory;
-	const cohortRoot = root.kind === 'cohort' ? root.cohortRoot : null;
+	// Provider initialization is lazy, so retain physical paths rather than the
+	// mutable aliases supplied by the caller. These values are deliberately
+	// derived from the same key resolution that selected the pool entry.
+	const directory =
+		root.kind === 'local' ? key : resolvePoolKey(root.directory);
+	const cohortRoot =
+		root.kind === 'cohort' ? key.slice('cohort:'.length) : null;
 	const provider = new SQLiteMemoryProvider(directory, config, cohortRoot);
 	markAsPooled(provider);
 
@@ -304,14 +340,10 @@ export function getOrCreateProviderForRoot(
  */
 function resolvePoolKeyForRoot(root: VettedMemoryRoot): string {
 	if (root.kind === 'cohort') {
-		// Cohort root is already canonical (resolver used path.resolve on a
-		// sanitized linkId-derived path). realpathSync it if possible to
-		// collapse symlinks, otherwise use it as-is.
-		try {
-			return `cohort:${realpathSync(root.cohortRoot)}`;
-		} catch {
-			return `cohort:${path.resolve(root.cohortRoot)}`;
-		}
+		// Resolve cohort roots through the same raw-spelling lifecycle cache as
+		// local roots. This preserves the last physical key across a temporary
+		// deletion, while still changing identity when an alias is retargeted.
+		return `cohort:${resolvePoolKey(root.cohortRoot)}`;
 	}
 	return resolvePoolKey(root.directory);
 }
@@ -447,21 +479,63 @@ function unlinkEntry(entry: PoolEntry): void {
  * removed — see `resolvedKeyCache`'s docstring.
  */
 function resolvePoolKey(directory: string): string {
-	const rawKey = path.resolve(directory);
-	try {
-		const canonical = realpathSync(directory);
-		// Refresh recency (Map preserves insertion order) so eviction below
-		// drops the least-recently-resolved raw path, not an arbitrary one.
-		resolvedKeyCache.delete(rawKey);
-		resolvedKeyCache.set(rawKey, canonical);
-		if (resolvedKeyCache.size > MAX_POOL_SIZE) {
-			const oldest = resolvedKeyCache.keys().next().value;
-			if (oldest !== undefined) resolvedKeyCache.delete(oldest);
-		}
+	const rawKey = rawPoolKey(directory);
+	const canonical = canonicalExistingFilesystemPath(directory);
+	if (canonical !== null) {
+		rememberResolvedKey(
+			rawKey,
+			canonical,
+			filesystemIdentityWitnesses(directory),
+		);
 		return canonical;
-	} catch {
-		return resolvedKeyCache.get(rawKey) ?? rawKey;
 	}
+
+	const prior = resolvedKeyCache.get(rawKey);
+	const inferred = canonicalPathFromExistingAncestor(directory);
+	const witnessRetargeted = prior?.witnesses.some((witness) => {
+		const current = canonicalExistingFilesystemPath(witness.lexicalPath);
+		return current !== null && current !== witness.canonicalPath;
+	});
+	if (
+		inferred &&
+		(prior === undefined ||
+			inferred.existingAncestorIsLink ||
+			witnessRetargeted)
+	) {
+		// Pin a missing leaf to its nearest physical ancestor. A live link/junction
+		// or a changed acquisition witness is positive retarget evidence, so refresh
+		// an earlier key. When the alias disappears entirely, retain the prior key.
+		rememberResolvedKey(
+			rawKey,
+			inferred.canonicalPath,
+			inferred.identityWitnesses,
+		);
+		return inferred.canonicalPath;
+	}
+	if (prior) return prior.key;
+	if (inferred) return inferred.canonicalPath;
+	throw new MemoryValidationError(
+		'memory storage root physical identity could not be resolved',
+	);
+}
+
+function rememberResolvedKey(
+	rawKey: string,
+	canonical: string,
+	witnesses: FilesystemIdentityWitness[],
+): void {
+	// Refresh recency (Map preserves insertion order) so eviction drops the
+	// least-recently-resolved raw path, not an arbitrary one.
+	resolvedKeyCache.delete(rawKey);
+	resolvedKeyCache.set(rawKey, { key: canonical, witnesses });
+	if (resolvedKeyCache.size > MAX_POOL_SIZE) {
+		const oldest = resolvedKeyCache.keys().next().value;
+		if (oldest !== undefined) resolvedKeyCache.delete(oldest);
+	}
+}
+
+function rawPoolKey(directory: string): string {
+	return lexicalRootAliasKey(directory);
 }
 
 /**

@@ -89,6 +89,7 @@ import { readTaskScopes } from '../turbo/lean/conflicts.js';
 import type { SpecStaleDetectedEvent } from '../types/events';
 import { criticalWarn, warn } from '../utils';
 import { bunHash, bunWrite } from '../utils/bun-compat';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import { assertProjectRoot } from '../utils/project-boundary';
 import {
 	computeSpecDiff,
@@ -440,7 +441,7 @@ async function surfaceLedgerStaleIfPersisted(
 	directory: string,
 	plan: RuntimePlan,
 ): Promise<RuntimePlan> {
-	const resolvedWorkspace = path.resolve(directory);
+	const resolvedWorkspace = canonicalRootKeyFresh(directory);
 	if (!ledgerStaleWorkspaces.has(resolvedWorkspace)) {
 		return plan;
 	}
@@ -701,7 +702,7 @@ export async function loadPlan(
 					if (await ledgerExists(directory)) {
 						const planHash = computePlanLedgerHash(validated);
 						const ledgerHash = await getLatestLedgerHash(directory);
-						const resolvedWorkspace = path.resolve(directory);
+						const resolvedWorkspace = canonicalRootKeyFresh(directory);
 						if (!startupLedgerCheckedWorkspaces.has(resolvedWorkspace)) {
 							startupLedgerCheckedWorkspaces.add(resolvedWorkspace);
 							if (ledgerHash !== '' && planHash !== ledgerHash) {
@@ -1037,7 +1038,7 @@ export async function loadPlan(
 	// Guarded by an in-process mutex to prevent concurrent loadPlan calls from
 	// racing through recovery and both calling savePlan (#444 item 6).
 	if (await ledgerExists(directory)) {
-		const resolvedDir = path.resolve(directory);
+		const resolvedDir = canonicalRootKeyFresh(directory);
 		const existingMutex = recoveryMutexes.get(resolvedDir);
 		if (existingMutex) {
 			// Another call is already recovering — wait for it, then re-check plan.json

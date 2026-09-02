@@ -47,7 +47,10 @@ import {
 } from '../evidence/lock.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { bunWrite } from '../utils/bun-compat.js';
-import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
+import {
+	canonicalRootKeyFresh,
+	sameProjectRoot,
+} from '../utils/canonical-root.js';
 import * as logger from '../utils/logger.js';
 import {
 	appendDelegationMaintenanceObservation,
@@ -1316,7 +1319,7 @@ function loadFoldedState(
 	}
 	const manifest = manifestRead.manifest;
 
-	if (manifest.rootPath !== path.resolve(directory)) {
+	if (!sameProjectRoot(manifest.rootPath, directory)) {
 		// Bound to a different project root: whether the ledger is rolled is
 		// unknowable from here, so fail closed with the rebind hint. (A copied
 		// trio with an unrolled ledger still recovers only if the operator
@@ -3543,6 +3546,11 @@ const legacyCoderSettlementReconcilers = new Map<
 >();
 const legacyCoderSettlementReconcilerOrder: string[] = [];
 
+/** Compare names by locale-independent UTF-16 code-unit order. */
+function compareCodeUnits(a: string, b: string): number {
+	return a < b ? -1 : a > b ? 1 : 0;
+}
+
 /**
  * Register the observer-owned replay callback for a project. Maintenance is
  * also invoked by admission and status paths that cannot receive the observer
@@ -3583,6 +3591,7 @@ function getLegacyCoderSettlementReconciler(
 /** Test-only seam for the bounded legacy-settlement reconciler registry. */
 export const _internals = {
 	getLegacyCoderSettlementReconciler,
+	readFallbackDirectory,
 	getLegacyCoderSettlementReconcilerOrder: () => [
 		...legacyCoderSettlementReconcilerOrder,
 	],
@@ -4433,6 +4442,12 @@ function fallbackDirectoryPath(directory: string): string {
 	);
 }
 
+function readFallbackDirectory(directory: string): fs.Dirent[] {
+	return fs.readdirSync(fallbackDirectoryPath(directory), {
+		withFileTypes: true,
+	});
+}
+
 async function readFallbackFile(
 	directory: string,
 	correlationId: string,
@@ -4479,10 +4494,9 @@ export async function listDelegationFallbacks(
 ): Promise<BackgroundDelegationFallbackArtifact[]> {
 	let entries: fs.Dirent[];
 	try {
-		entries = fs
-			.readdirSync(fallbackDirectoryPath(directory), {
-				withFileTypes: true,
-			})
+		entries = _internals
+			.readFallbackDirectory(directory)
+			.sort((a, b) => compareCodeUnits(a.name, b.name))
 			.filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
 			.slice(0, MAX_LIVE_BACKGROUND_FALLBACKS);
 	} catch {
@@ -4516,8 +4530,9 @@ export async function scanDelegationFallbacksForRecovery(
 	let entries: fs.Dirent[];
 	try {
 		fallbackDir = fallbackDirectoryPath(directory);
-		entries = fs
-			.readdirSync(fallbackDir, { withFileTypes: true })
+		entries = _internals
+			.readFallbackDirectory(directory)
+			.sort((a, b) => compareCodeUnits(a.name, b.name))
 			.filter((entry) => entry.isFile() && entry.name.endsWith('.json'));
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === 'ENOENT') {

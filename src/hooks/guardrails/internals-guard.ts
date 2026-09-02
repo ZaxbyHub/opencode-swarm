@@ -44,6 +44,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { telemetry } from '../../telemetry.js';
+import { canonicalRootKeyFresh } from '../../utils/canonical-root.js';
 import { normalizeToolNameLowerCase } from '../normalize-tool-name';
 
 /**
@@ -170,7 +171,7 @@ function isSelfDevelopmentWorkspace(directory: string): boolean {
 	if (!directory) return false;
 	let resolved: string;
 	try {
-		resolved = path.resolve(directory);
+		resolved = canonicalRootKeyFresh(directory);
 	} catch {
 		return false;
 	}

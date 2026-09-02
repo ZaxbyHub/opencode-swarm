@@ -189,6 +189,7 @@ bun run check:bare-spawn
 bun run check:test-tmpdir
 bun run check:bash-portability
 bun run check:error-channel-discard
+bun run check:path-identity
 bun run check:token-formula
 (cd scripts/swarm-model && node --test)
 bun run package:smoke

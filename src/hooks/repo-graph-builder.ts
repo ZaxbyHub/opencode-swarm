@@ -155,9 +155,17 @@ export function rebaseOntoWorkspace(
 		// Not under the real workspace — keep the realpath (best effort).
 		return realFilePath;
 	}
-	// Same lexical and real workspace root? Nothing to rebase; the realpath
-	// already matches the walker's keys (modulo case, which realpath fixes).
-	if (path.resolve(workspaceRoot) === path.resolve(realWorkspace)) {
+	// Do not use the physical project-root identity here. A symlink/junction
+	// workspace root is intentionally physically equal to `realWorkspace`, but
+	// the graph walker stores lexical paths. Only skip rebasing when the two
+	// roots are textually the same (apart from separator/case normalization).
+	const normalizeLexicalPath = (value: string): string => {
+		const normalized = path.resolve(value).replace(/\\/g, '/');
+		return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+	};
+	if (
+		normalizeLexicalPath(workspaceRoot) === normalizeLexicalPath(realWorkspace)
+	) {
 		return realFilePath;
 	}
 	// Rebase the workspace-relative tail of the realpath'd file onto the

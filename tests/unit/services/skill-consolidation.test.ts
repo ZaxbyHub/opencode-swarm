@@ -8,6 +8,7 @@ import {
 	shouldRunSkillConsolidation,
 } from '../../../src/services/skill-consolidation';
 import type { SkillImproverConfigInput } from '../../../src/services/skill-improver';
+import { canonicalRootKeyFresh } from '../../../src/utils/canonical-root';
 import { createIsolatedTestEnv } from '../../helpers/isolated-test-env';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -102,7 +103,10 @@ describe('skill consolidation cadence', () => {
 	});
 
 	it('manual force does not bypass the in-flight run guard', async () => {
-		_internals.runningByDirectory.set(path.resolve(tmp), new Promise(() => {}));
+		_internals.runningByDirectory.set(
+			canonicalRootKeyFresh(tmp),
+			new Promise(() => {}),
+		);
 
 		const result = await runSkillConsolidation({
 			directory: tmp,

@@ -62,6 +62,33 @@ describe('lane-delivery cache — persistence (issue #1988 C7)', () => {
 			fs.rmSync(other, { recursive: true, force: true });
 		}
 	});
+
+	test('a retargeted directory alias cannot reuse another project bucket', () => {
+		const other = canonicalMkdtemp('lane-delivery-retarget-other-');
+		const alias = `${tmp}-retarget-alias`;
+		const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+		try {
+			fs.symlinkSync(tmp, alias, linkType);
+			markLaneOutputDelivered(tmp, 'session-1', 'batch\0lane\0digest');
+			expect(
+				hasLaneOutputBeenDelivered(alias, 'session-1', 'batch\0lane\0digest'),
+			).toBe(true);
+
+			fs.rmSync(alias, { recursive: true, force: true });
+			fs.symlinkSync(other, alias, linkType);
+			expect(
+				hasLaneOutputBeenDelivered(alias, 'session-1', 'batch\0lane\0digest'),
+			).toBe(false);
+
+			markLaneOutputDelivered(alias, 'session-1', 'batch\0lane\0other');
+			expect(
+				hasLaneOutputBeenDelivered(other, 'session-1', 'batch\0lane\0other'),
+			).toBe(true);
+		} finally {
+			fs.rmSync(alias, { recursive: true, force: true });
+			fs.rmSync(other, { recursive: true, force: true });
+		}
+	});
 });
 
 describe('lane-delivery cache — bound enforcement', () => {

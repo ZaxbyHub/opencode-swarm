@@ -60,6 +60,7 @@ import {
 	atomicWriteSwarmFile,
 	atomicWriteSwarmFileSync,
 } from '../utils/atomic-write';
+import { canonicalExistingFilesystemPath } from '../utils/filesystem-identity.js';
 import { assertProjectRoot } from '../utils/project-boundary';
 import {
 	canonicalWorkspaceIdentity,
@@ -1826,7 +1827,8 @@ export async function replaceExistingScopeDeclaration(input: {
 }
 
 function scheduleScopeBindingMaintenance(directory: string): void {
-	const key = normalizePathForComparison(directory);
+	const key = canonicalExistingFilesystemPath(directory);
+	if (key === null) return;
 	if (maintenanceJobs.has(key)) return;
 	while (maintenanceJobs.size >= MAX_MAINTENANCE_JOBS) {
 		const oldest = maintenanceJobs.keys().next().value as string | undefined;
@@ -1844,7 +1846,10 @@ function scheduleScopeBindingMaintenance(directory: string): void {
 export async function flushScopeBindingMaintenance(
 	directory?: string,
 ): Promise<void> {
-	const key = directory ? normalizePathForComparison(directory) : undefined;
+	const key = directory
+		? canonicalExistingFilesystemPath(directory)
+		: undefined;
+	if (directory && key === null) return;
 	const job = key ? maintenanceJobs.get(key) : undefined;
 	await Promise.all(job ? [job] : [...maintenanceJobs.values()]);
 }

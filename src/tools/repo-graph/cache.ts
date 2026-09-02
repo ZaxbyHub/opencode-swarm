@@ -7,7 +7,7 @@
  * moves the entry to the newest position and insertion evicts the oldest.
  */
 
-import * as path from 'node:path';
+import { canonicalRootKeyFresh } from '../../utils/canonical-root.js';
 import type { RepoGraph } from './types';
 
 const MAX_CACHED_WORKSPACES = 16;
@@ -22,8 +22,7 @@ interface CacheEntry {
 const workspaceCache = new Map<string, CacheEntry>();
 
 function normalizeWorkspace(workspace: string): string {
-	const resolved = path.normalize(path.resolve(workspace));
-	return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+	return canonicalRootKeyFresh(workspace);
 }
 
 function touch(key: string, entry: CacheEntry): CacheEntry {

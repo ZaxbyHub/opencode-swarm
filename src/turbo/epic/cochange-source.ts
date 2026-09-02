@@ -33,6 +33,7 @@ import {
 	type CoChangeEntry,
 	_internals as coChangeAnalyzer,
 } from '../../tools/co-change-analyzer.js';
+import { canonicalRootKeyFresh } from '../../utils/canonical-root.js';
 import { resolveGitExecutableAsync } from '../../utils/git-executable.js';
 
 const execFileAsync = promisify(child_process.execFile);
@@ -131,7 +132,8 @@ export async function getCoChangeData(
 		return { pairs: [], commitsObserved: 0 };
 	}
 
-	const cached = cache.get(directory);
+	const key = canonicalRootKeyFresh(directory);
+	const cached = cache.get(key);
 	if (cached && cached.head === head) {
 		return { pairs: cached.entries, commitsObserved: cached.commitsObserved };
 	}
@@ -153,15 +155,15 @@ export async function getCoChangeData(
 		return { pairs: [], commitsObserved: 0 };
 	}
 
-	if (!cache.has(directory) && cache.size >= MAX_TRACKED_DIRS) {
+	if (!cache.has(key) && cache.size >= MAX_TRACKED_DIRS) {
 		const oldestKey = cache.keys().next().value;
 		if (oldestKey !== undefined) {
 			cache.delete(oldestKey);
 		}
 	}
 
-	cache.delete(directory);
-	cache.set(directory, {
+	cache.delete(key);
+	cache.set(key, {
 		head,
 		entries,
 		commitsObserved,

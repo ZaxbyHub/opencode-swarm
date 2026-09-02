@@ -56,6 +56,7 @@ import {
 import { getLastHeartbeat } from '../telemetry';
 import { listRecoveryRecords } from '../turbo/lean/recovery';
 import { loadLeanTurboRunState } from '../turbo/lean/state';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import { getCompactionMetrics } from './compaction-service';
 import {
 	type CostSummary,
@@ -82,11 +83,12 @@ const telemetryCostSummaryCache = new Map<
 >();
 
 function getTelemetryCostSummary(directory: string): CostSummary {
+	const key = canonicalRootKeyFresh(directory);
 	const stamp = readTelemetryCostStamp(directory);
-	const cached = telemetryCostSummaryCache.get(directory);
+	const cached = telemetryCostSummaryCache.get(key);
 	if (cached && cached.stamp === stamp) return cached.summary;
 	const summary = _internals.summarizeTelemetryCosts(directory);
-	telemetryCostSummaryCache.set(directory, { stamp, summary });
+	telemetryCostSummaryCache.set(key, { stamp, summary });
 	while (
 		telemetryCostSummaryCache.size > MAX_TRACKED_TELEMETRY_COST_SUMMARIES
 	) {

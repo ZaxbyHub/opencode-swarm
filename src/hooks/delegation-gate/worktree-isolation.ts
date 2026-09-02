@@ -24,6 +24,7 @@ import {
 } from '../../state';
 import { pushAdvisory } from '../../utils/advisory-queue';
 import { bunSpawn } from '../../utils/bun-compat';
+import { sameProjectRoot } from '../../utils/canonical-root.js';
 import { teardownEphemeralSession } from '../../utils/ephemeral-session-teardown.js';
 import { resolveGitExecutable } from '../../utils/git-executable.js';
 import * as logger from '../../utils/logger.js';
@@ -984,14 +985,10 @@ function isExactRecoveryClaimantStillActive(
 	if (!childSession?.workspaceDirectory?.trim()) {
 		return false;
 	}
-	try {
-		return (
-			path.resolve(childSession.workspaceDirectory) ===
-			path.resolve(authority.immutable.lanePath)
-		);
-	} catch {
-		return childSession.workspaceDirectory === authority.immutable.lanePath;
-	}
+	return sameProjectRoot(
+		childSession.workspaceDirectory,
+		authority.immutable.lanePath,
+	);
 }
 
 function describeRecoveryMutationFailure(input: {

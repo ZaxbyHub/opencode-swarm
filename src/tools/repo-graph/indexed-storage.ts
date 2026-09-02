@@ -33,6 +33,7 @@ import { loadPluginConfig } from '../../config/loader';
 import { RepoGraphConfigSchema } from '../../config/schema';
 import { loadDatabaseCtor } from '../../db/sqlite-loader';
 import { validateSwarmPath } from '../../hooks/utils';
+import { sameProjectRoot } from '../../utils/canonical-root.js';
 import * as logger from '../../utils/logger';
 import { validateSymlinkBoundary } from '../../utils/path-security';
 import { safeRealpathSync } from './safe-realpath';
@@ -688,7 +689,7 @@ function openFreshIndex(workspace: string): IndexContext | null {
 		resolvedPersisted,
 	);
 	if (trustedPersisted === null) return null;
-	if (path.normalize(trustedPersisted) !== path.normalize(trustedActive)) {
+	if (!sameProjectRoot(trustedPersisted, trustedActive)) {
 		return null;
 	}
 

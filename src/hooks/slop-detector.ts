@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { SlopDetectorConfig } from '../config/schema';
+import { sameExistingFilesystemPath } from '../utils/filesystem-identity.js';
 export type { SlopDetectorConfig };
 
 const WRITE_EDIT_TOOLS = new Set([
@@ -282,6 +283,9 @@ function checkDuplicateUtility(
 	const deadline = startTime + 480;
 
 	// Walk utility directories for name collision
+	const targetPath = targetFile
+		? path.resolve(projectDir, targetFile)
+		: undefined;
 	const utilityDirs = [
 		'src/utils/',
 		'src/hooks/',
@@ -297,8 +301,7 @@ function checkDuplicateUtility(
 		for (const file of files) {
 			if (Date.now() > deadline) break;
 			// Skip the file currently being written/edited to avoid false positives
-			if (targetFile && path.resolve(file) === path.resolve(targetFile))
-				continue;
+			if (targetPath && sameExistingFilesystemPath(file, targetPath)) continue;
 			try {
 				const text = fs.readFileSync(file, 'utf-8');
 				// Check if file exports something with the same name

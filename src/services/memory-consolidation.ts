@@ -27,6 +27,7 @@ import { createMemoryGateway } from '../memory/gateway.js';
 import { readDeadAnchorMemoryIds } from '../memory/reflection-service.js';
 import { appendMemoryRunLog } from '../memory/run-log.js';
 import { resolveVettedMemoryRoot } from '../memory/storage-root.js';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 
 export interface MemoryConsolidationRequest {
 	directory: string;
@@ -55,7 +56,8 @@ export async function runMemoryConsolidation(
 	// already in flight when a later phase completes, that later phase is
 	// intentionally coalesced into the running one — its still-pending proposals
 	// carry over and are consolidated by the next pass (no loss, just deferral).
-	const existing = runningByDirectory.get(req.directory);
+	const key = canonicalRootKeyFresh(req.directory);
+	const existing = runningByDirectory.get(key);
 	if (existing) return existing;
 	const run = (async (): Promise<MemoryConsolidationOutcome> => {
 		if (!req.config.enabled || !req.config.consolidation.enabled) {
@@ -121,11 +123,11 @@ export async function runMemoryConsolidation(
 			await gateway.dispose();
 		}
 	})();
-	runningByDirectory.set(req.directory, run);
+	runningByDirectory.set(key, run);
 	try {
 		return await run;
 	} finally {
-		runningByDirectory.delete(req.directory);
+		if (runningByDirectory.get(key) === run) runningByDirectory.delete(key);
 	}
 }
 

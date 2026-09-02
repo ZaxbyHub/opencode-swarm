@@ -3,6 +3,23 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { closeProjectDb } from '../../src/db/project-db.js';
 
+/** Native-first realpath keeps test fixtures aligned with production identity. */
+export const _internals: {
+	realpathSyncNative: (path: fs.PathLike) => string;
+	realpathSync: typeof fs.realpathSync;
+} = {
+	realpathSyncNative: fs.realpathSync.native,
+	realpathSync: fs.realpathSync,
+};
+
+function canonicalRealpath(targetPath: fs.PathLike): string {
+	try {
+		return _internals.realpathSyncNative(targetPath);
+	} catch {
+		return _internals.realpathSync(targetPath);
+	}
+}
+
 /**
  * Creates a unique subdirectory under os.tmpdir() and returns
  * the path plus a cleanup function. Safe for use in bun:test.
@@ -17,7 +34,7 @@ export function createSafeTestDir(prefix = 'swarm-safe-test-'): {
 } {
 	const base = os.tmpdir();
 	const rawDir = fs.mkdtempSync(path.join(base, prefix));
-	// Resolve through realpathSync so the returned dir matches the canonical
+	// Resolve through native realpath first so the returned dir matches the canonical
 	// path that production code (which canonicalizes via path.resolve/realpath)
 	// will compare against. On macOS, os.tmpdir() returns /var/folders/... (a
 	// symlink to /private/var/folders/...); without realpath, fixtures built
@@ -27,13 +44,13 @@ export function createSafeTestDir(prefix = 'swarm-safe-test-'): {
 	// (C:\Users\RUNNER~1 vs C:\Users\runneradmin). AGENTS.md invariant 7
 	// requires this wrap when the result is chdir'd; doing it unconditionally
 	// is safe and makes the shared helper the single correct precedent.
-	const dir = fs.realpathSync(rawDir);
+	const dir = canonicalRealpath(rawDir);
 
 	// Safety assertion: verify it's actually under tmpdir (compare against the
 	// resolved base too, so the symlinked /var vs real /private/var case is
 	// caught).
 	const resolvedDir = path.resolve(dir);
-	const resolvedBase = path.resolve(fs.realpathSync(base));
+	const resolvedBase = path.resolve(canonicalRealpath(base));
 	if (
 		!resolvedDir.startsWith(resolvedBase + path.sep) &&
 		resolvedDir !== resolvedBase
@@ -66,7 +83,7 @@ export function safeRmRecursive(targetPath: string): void {
 	// /private/var/... form while os.tmpdir() returns the /var/... symlink.
 	// Comparing resolved-target against resolved-base keeps the lexical guard
 	// consistent with how createSafeTestDir canonicalizes its return value.
-	const realBase = fs.realpathSync(os.tmpdir());
+	const realBase = canonicalRealpath(os.tmpdir());
 	const lexicalBase = path.resolve(os.tmpdir());
 	const resolvedBase = path.resolve(realBase);
 	if (lexicalTarget === lexicalBase || lexicalTarget === resolvedBase) {
@@ -82,7 +99,7 @@ export function safeRmRecursive(targetPath: string): void {
 	}
 
 	if (fs.existsSync(lexicalTarget)) {
-		const realTarget = fs.realpathSync(lexicalTarget);
+		const realTarget = canonicalRealpath(lexicalTarget);
 		if (
 			realTarget === realBase ||
 			!realTarget.startsWith(realBase + path.sep)

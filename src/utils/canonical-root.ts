@@ -30,20 +30,71 @@ const canonicalRootMemo = new Map<string, string>();
 /** Bound on the memoized canonical-root map (Invariant 8). */
 const MAX_CANONICAL_ROOT_CACHE = 128;
 
+/** Keep filesystem and platform access behind a narrow test seam. */
+export const _internals: {
+	realpathSyncNative: (path: fsSync.PathLike) => string;
+	realpathSync: typeof fsSync.realpathSync;
+	lstatSync: typeof fsSync.lstatSync;
+	platform: () => NodeJS.Platform;
+} = {
+	realpathSyncNative: fsSync.realpathSync.native,
+	realpathSync: fsSync.realpathSync,
+	lstatSync: fsSync.lstatSync,
+	platform: () => process.platform,
+};
+
+function normalizeIdentityPath(resolved: string): string {
+	const normalized =
+		_internals.platform() === 'win32'
+			? path.win32.normalize(resolved)
+			: path.posix.normalize(resolved);
+	return _internals.platform() === 'win32'
+		? normalized.toLowerCase()
+		: normalized;
+}
+
+/**
+ * Normalize only the caller's lexical spelling of a root.
+ *
+ * This is deliberately not physical project identity. It exists solely for
+ * bounded resource-lifecycle alias tables that must remember how a caller
+ * spelled a root after that path is deleted or becomes inaccessible. New
+ * equality, cache, authority, or persistence decisions must use
+ * {@link canonicalRootKeyFresh} instead.
+ */
+export function lexicalRootAliasKey(directory: string): string {
+	return normalizeIdentityPath(path.resolve(directory));
+}
+
 function resolveCanonicalRootKey(directory: string): string {
 	let resolved = path.resolve(directory);
 	try {
-		resolved = fsSync.realpathSync(resolved);
+		resolved = _internals.realpathSyncNative(resolved);
 	} catch {
-		/* root missing / inaccessible — resolve() is the best identity we have */
+		try {
+			resolved = _internals.realpathSync(resolved);
+		} catch {
+			/* root missing / inaccessible — resolve() is the best identity we have */
+		}
 	}
-	const key = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-	return key;
+	return normalizeIdentityPath(resolved);
 }
 
 export function canonicalRootKey(directory: string): string {
 	const memoized = canonicalRootMemo.get(directory);
-	if (memoized !== undefined) return memoized;
+	if (memoized !== undefined) {
+		// Symlink/junction targets may be retargeted without changing the
+		// caller's spelling. Refresh only those alias paths; ordinary project
+		// roots retain the bounded memoized hot path.
+		try {
+			if (!_internals.lstatSync(directory).isSymbolicLink()) return memoized;
+		} catch {
+			return memoized;
+		}
+		const fresh = resolveCanonicalRootKey(directory);
+		if (fresh !== memoized) canonicalRootMemo.set(directory, fresh);
+		return fresh;
+	}
 
 	const key = resolveCanonicalRootKey(directory);
 
@@ -63,7 +114,12 @@ export function canonicalRootKeyFresh(directory: string): string {
 	return resolveCanonicalRootKey(directory);
 }
 
-/** Composite map key: canonical root + NUL + session id. */
+/** Compare current physical project-root identity, bypassing the memo. */
+export function sameProjectRoot(a: string, b: string): boolean {
+	return canonicalRootKeyFresh(a) === canonicalRootKeyFresh(b);
+}
+
+/** Composite map key: current physical root + NUL + session id. */
 export function compositeSessionKey(
 	directory: string,
 	sessionId: string,

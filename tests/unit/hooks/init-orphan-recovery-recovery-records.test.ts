@@ -109,6 +109,37 @@ describe('init orphan recovery records', () => {
 		).toBe(true);
 	});
 
+	test('F-002: preserves a recorded worktree through a physical path alias', async () => {
+		const preserved = makeWorktree('dead-session', 'aliased-lane');
+		const alias = path.join(rootDir, 'recovery-worktree-alias');
+		fs.symlinkSync(
+			preserved,
+			alias,
+			process.platform === 'win32' ? 'junction' : 'dir',
+		);
+		writeRecoveryRecord(projectDir, {
+			laneId: 'aliased-lane',
+			sessionId: 'dead-session',
+			branchName: 'swarm-lane/dead-session/aliased-lane',
+			worktreePath: alias,
+			status: 'conflict',
+			reason: 'merge conflict',
+			replayHint: 'Resume the recorded worktree.',
+		});
+
+		const result = await runInitOrphanRecovery(projectDir);
+		expect(fs.existsSync(preserved)).toBe(true);
+		expect(fs.existsSync(path.join(preserved, 'unmerged.txt'))).toBe(true);
+		expect(result.removedWorktrees).not.toContain(preserved);
+		expect(
+			result.warnings.some(
+				(warning) =>
+					warning.includes('Preserved recovery worktree') &&
+					warning.includes(preserved),
+			),
+		).toBe(true);
+	});
+
 	test('F-002/F-008: parseable schema errors skip all worktree deletion and surface fail-safe evidence', async () => {
 		const wouldBeDeleted = makeWorktree('dead-session', 'lane-unsafe');
 		const recoveryDir = path.join(projectDir, '.swarm', 'recovery');

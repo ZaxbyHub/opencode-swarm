@@ -1,11 +1,11 @@
 import * as fs from 'node:fs';
-import * as path from 'node:path';
 import {
 	type BackgroundDelegationRecord,
 	type BackgroundWorktreeDescriptor,
 	scanDelegationFallbacksForRecovery,
 	scanDelegationsForRecovery,
 } from '../../background/pending-delegations';
+import { canonicalRootKeyFresh } from '../../utils/canonical-root';
 import { scanWorktreeMergeFailuresForRecovery } from './worktree-merge-status';
 import { scanBackgroundWorktreeOwnershipTagsForRecovery } from './worktree-ownership-tag';
 import {
@@ -43,19 +43,14 @@ export type StandardWorktreeCollisionOwnership =
 	  }
 	| { status: 'uncertain'; reason: string };
 
-function normalizedPath(value: string): string {
-	const resolved = path.normalize(path.resolve(value));
-	return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-}
-
 function descriptorCoordinateMatch(
 	descriptor: BackgroundWorktreeDescriptor,
 	identity: StandardWorktreeCollisionIdentity,
 ): 'none' | 'exact' | 'uncertain' {
 	const branchMatches = descriptor.branchName === identity.branchName;
 	const pathMatches =
-		normalizedPath(descriptor.worktreePath) ===
-		normalizedPath(identity.worktreePath);
+		canonicalRootKeyFresh(descriptor.worktreePath) ===
+		canonicalRootKeyFresh(identity.worktreePath);
 	if (!branchMatches && !pathMatches) return 'none';
 	if (
 		!branchMatches ||
@@ -217,8 +212,8 @@ export async function inspectStandardWorktreeCollisionOwnership(
 		const branchMatches = failure.branch === identity.branchName;
 		const pathMatches =
 			typeof failure.worktreePath === 'string' &&
-			normalizedPath(failure.worktreePath) ===
-				normalizedPath(identity.worktreePath);
+			canonicalRootKeyFresh(failure.worktreePath) ===
+				canonicalRootKeyFresh(identity.worktreePath);
 		if (!branchMatches && !pathMatches) continue;
 		if (!branchMatches || !pathMatches) {
 			return {
