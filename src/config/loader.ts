@@ -9,6 +9,7 @@ import { sanitizeMalformedValues } from './sanitize-malformed-values';
 import {
 	ExternalSkillsConfigSchema,
 	GATE_CONFIG_KNOWN_SECTION_KEYS,
+	type GateConfigOverrides,
 	GateConfigSchema,
 	type PluginConfig,
 	PluginConfigSchema,
@@ -30,9 +31,31 @@ export const MAX_CONFIG_FILE_BYTES = 102_400;
  */
 let lastUnknownTopLevelSig: string | null = null;
 
+/**
+ * Dedup set for gates-section sanitize advisories (issue #2524): gate tools
+ * self-load config per tool invocation, so a malformed `gates` section would
+ * otherwise buffer the identical warning on every call until the deferred
+ * buffer's cap. Bounded: cleared wholesale when full (diagnostic dedup, not
+ * session data). Reset via `_internals` in tests.
+ */
+const gatesAdvisorySignatures = new Set<string>();
+const MAX_GATES_ADVISORY_SIGNATURES = 64;
+
+function gatesAdvisoryWarn(message: string, data?: unknown): void {
+	if (gatesAdvisorySignatures.has(message)) return;
+	if (gatesAdvisorySignatures.size >= MAX_GATES_ADVISORY_SIGNATURES) {
+		gatesAdvisorySignatures.clear();
+	}
+	gatesAdvisorySignatures.add(message);
+	advisoryWarn(message, data);
+}
+
 export const _internals = {
 	resetUnknownTopLevelKeyWarning(): void {
 		lastUnknownTopLevelSig = null;
+	},
+	resetGatesAdvisoryDedup(): void {
+		gatesAdvisorySignatures.clear();
 	},
 };
 
@@ -221,6 +244,13 @@ function sanitizeExternalSkillsConfig(raw: Record<string, unknown>): {
 function sanitizeGatesConfig(raw: Record<string, unknown>): {
 	result: Record<string, unknown>;
 	strippedKeys: string[];
+	/**
+	 * Post-sanitize raw `gates` section: only the keys the user actually wrote,
+	 * with unknown keys stripped but NO Zod-default materialization. This is
+	 * what gate tools consult (via `loadGateOverrides`) so a schema default
+	 * list can never masquerade as user intent (issue #2524).
+	 */
+	rawGates?: Record<string, Record<string, unknown>>;
 } {
 	const strippedKeys: string[] = [];
 	if (!('gates' in raw) || raw.gates === undefined) {
@@ -231,7 +261,7 @@ function sanitizeGatesConfig(raw: Record<string, unknown>): {
 		raw.gates === null ||
 		Array.isArray(raw.gates)
 	) {
-		advisoryWarn(
+		gatesAdvisoryWarn(
 			'[opencode-swarm] gates config validation failed: expected an object. Quality gates will use defaults; other config sections remain active.',
 		);
 		const cleaned = { ...raw };
@@ -245,7 +275,7 @@ function sanitizeGatesConfig(raw: Record<string, unknown>): {
 	for (const [key, value] of Object.entries(cleanedGates)) {
 		const schema = gateSchemas[key as keyof typeof gateSchemas];
 		if (!schema) {
-			advisoryWarn(
+			gatesAdvisoryWarn(
 				`[opencode-swarm] Unknown gates config section "gates.${key}" ignored. Other config sections remain active.`,
 			);
 			delete cleanedGates[key];
@@ -267,7 +297,7 @@ function sanitizeGatesConfig(raw: Record<string, unknown>): {
 			const knownFieldSet = new Set<string>(knownFields);
 			for (const fieldName of Object.keys(cleanedSection)) {
 				if (!knownFieldSet.has(fieldName)) {
-					advisoryWarn(
+					gatesAdvisoryWarn(
 						`[opencode-swarm] Unknown gates config key "gates.${key}.${fieldName}" ignored. Other config sections remain active.`,
 					);
 					delete cleanedSection[fieldName];
@@ -279,7 +309,7 @@ function sanitizeGatesConfig(raw: Record<string, unknown>): {
 		}
 		const sectionResult = schema.safeParse(sectionValue);
 		if (!sectionResult.success) {
-			advisoryWarn(
+			gatesAdvisoryWarn(
 				`[opencode-swarm] gates.${key} config validation failed; that gate section will use defaults and other config sections remain active:`,
 				formatZodIssues(sectionResult.error),
 			);
@@ -295,10 +325,11 @@ function sanitizeGatesConfig(raw: Record<string, unknown>): {
 		return {
 			result: { ...raw, gates: gatesResult.data },
 			strippedKeys,
+			rawGates: cleanedGates as Record<string, Record<string, unknown>>,
 		};
 	}
 
-	advisoryWarn(
+	gatesAdvisoryWarn(
 		'[opencode-swarm] gates config validation failed after section cleanup; quality gates will use defaults and other config sections remain active:',
 		formatZodIssues(gatesResult.error),
 	);
@@ -313,12 +344,20 @@ function sanitizeGatesConfig(raw: Record<string, unknown>): {
 function sanitizeSectionConfigs(raw: Record<string, unknown>): {
 	result: Record<string, unknown>;
 	strippedKeys: string[];
+	rawGates?: Record<string, Record<string, unknown>>;
 } {
 	const { result: afterExternal, strippedKeys: externalStripped } =
 		sanitizeExternalSkillsConfig(raw);
-	const { result, strippedKeys: gatesStripped } =
-		sanitizeGatesConfig(afterExternal);
-	return { result, strippedKeys: [...externalStripped, ...gatesStripped] };
+	const {
+		result,
+		strippedKeys: gatesStripped,
+		rawGates,
+	} = sanitizeGatesConfig(afterExternal);
+	return {
+		result,
+		strippedKeys: [...externalStripped, ...gatesStripped],
+		rawGates,
+	};
 }
 
 /**
@@ -420,6 +459,14 @@ export type ConfigBuildResult = {
 	removedKeys: string[];
 	/** Human-readable summary messages about the recovery action. */
 	warnings: string[];
+	/**
+	 * Post-sanitize raw `gates` section — only the keys the user actually wrote,
+	 * before Zod-default materialization. Gate tools consult this via
+	 * `loadGateOverrides` so schema defaults never masquerade as user intent
+	 * (issue #2524). Absent when no `gates` object survived sanitization or the
+	 * whole config fell back to defaults.
+	 */
+	rawGates?: Record<string, Record<string, unknown>>;
 };
 
 /**
@@ -620,8 +667,11 @@ function buildConfigWithMeta(
 	// 4. Pre-validate section-local configs so one invalid section doesn't
 	//    block plugin load.  Track which gates keys were stripped so we can
 	//    report them in the recovery metadata (issue #1900 FR-3).
-	const { result: sanitized, strippedKeys: gatesStripped } =
-		sanitizeSectionConfigs(mergedRaw);
+	const {
+		result: sanitized,
+		strippedKeys: gatesStripped,
+		rawGates,
+	} = sanitizeSectionConfigs(mergedRaw);
 	mergedRaw = sanitized;
 
 	// 4b. Top-level unknown-key visibility (issue #1663): the root config
@@ -671,6 +721,7 @@ function buildConfigWithMeta(
 				recovery: 'guardrails_defaults',
 				removedKeys: [...gatesStripped],
 				warnings: [],
+				rawGates,
 			};
 		}
 		return {
@@ -678,6 +729,7 @@ function buildConfigWithMeta(
 			recovery: gatesStripped.length > 0 ? 'stripped_keys' : 'none',
 			removedKeys: [...gatesStripped],
 			warnings: [],
+			rawGates,
 		};
 	}
 
@@ -698,6 +750,7 @@ function buildConfigWithMeta(
 				recovery: 'stripped_keys',
 				removedKeys: [...gatesStripped, ...removed],
 				warnings: [],
+				rawGates,
 			};
 		}
 	}
@@ -705,8 +758,11 @@ function buildConfigWithMeta(
 	// 7. User-config-alone fallback: a broken project config should not defeat
 	//    a valid user config.
 	if (rawUserConfig) {
-		const { result: userSanitized, strippedKeys: userGatesStripped } =
-			sanitizeSectionConfigs(rawUserConfig);
+		const {
+			result: userSanitized,
+			strippedKeys: userGatesStripped,
+			rawGates: userRawGates,
+		} = sanitizeSectionConfigs(rawUserConfig);
 		const userParseResult = PluginConfigSchema.safeParse(userSanitized);
 		if (userParseResult.success) {
 			advisoryWarn(
@@ -719,6 +775,7 @@ function buildConfigWithMeta(
 				warnings: [
 					'Project config ignored due to validation errors; using user config.',
 				],
+				rawGates: userRawGates,
 			};
 		}
 		// Last targeted attempt: strip unrecognized keys from user config too.
@@ -743,6 +800,7 @@ function buildConfigWithMeta(
 					warnings: [
 						'Project config ignored due to validation errors; using user config.',
 					],
+					rawGates: userRawGates,
 				};
 			}
 		}
@@ -806,6 +864,7 @@ function buildConfigWithMeta(
 						recovery: 'sanitized_values',
 						removedKeys,
 						warnings: [],
+						rawGates,
 					};
 				}
 			}
@@ -887,12 +946,13 @@ export function loadPluginConfigWithMeta(directory: string): ConfigLoadResult {
 	const projectResult = loadRawConfigFromPath(projectConfigPath);
 	const loadedFromFile = userResult.fileExisted || projectResult.fileExisted;
 	const configHadErrors = userResult.hadError || projectResult.hadError;
-	const { config, recovery, removedKeys, warnings } = buildConfigWithMeta(
-		userResult.config,
-		projectResult.config,
-		loadedFromFile,
-		configHadErrors,
-	);
+	const { config, recovery, removedKeys, warnings, rawGates } =
+		buildConfigWithMeta(
+			userResult.config,
+			projectResult.config,
+			loadedFromFile,
+			configHadErrors,
+		);
 	return {
 		config,
 		loadedFromFile,
@@ -900,7 +960,34 @@ export function loadPluginConfigWithMeta(directory: string): ConfigLoadResult {
 		recovery,
 		removedKeys,
 		warnings,
+		rawGates,
 	};
+}
+
+/**
+ * Gate configuration overrides a user actually wrote (issue #2524).
+ *
+ * Returns the post-sanitize RAW `gates` section — only keys present in the
+ * user's config files, with unknown keys stripped and NO Zod-default
+ * materialization. Gate tools consult this instead of the parsed
+ * `config.gates` because zod fills every `.default()` on parse: the parsed
+ * section always carries full default lists once any `gates` object exists,
+ * and placeholder_scan (among others) would treat such a list as an explicit
+ * user customization. `undefined` here means "no gates section" — callers
+ * fall back to their in-module defaults.
+ *
+ * Fail-open: any unexpected loader failure returns `undefined` (gates run
+ * with defaults) rather than throwing into the tool boundary.
+ */
+export function loadGateOverrides(
+	directory: string,
+): GateConfigOverrides | undefined {
+	try {
+		const meta = loadPluginConfigWithMeta(directory);
+		return meta.rawGates as GateConfigOverrides | undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 /**
@@ -1029,12 +1116,13 @@ export async function loadPluginConfigWithMetaAsync(
 	]);
 	const loadedFromFile = userResult.fileExisted || projectResult.fileExisted;
 	const configHadErrors = userResult.hadError || projectResult.hadError;
-	const { config, recovery, removedKeys, warnings } = buildConfigWithMeta(
-		userResult.config,
-		projectResult.config,
-		loadedFromFile,
-		configHadErrors,
-	);
+	const { config, recovery, removedKeys, warnings, rawGates } =
+		buildConfigWithMeta(
+			userResult.config,
+			projectResult.config,
+			loadedFromFile,
+			configHadErrors,
+		);
 	return {
 		config,
 		loadedFromFile,
@@ -1042,6 +1130,7 @@ export async function loadPluginConfigWithMetaAsync(
 		recovery,
 		removedKeys,
 		warnings,
+		rawGates,
 	};
 }
 

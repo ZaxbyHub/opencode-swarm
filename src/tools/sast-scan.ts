@@ -8,7 +8,8 @@ import * as path from 'node:path';
 import { extname } from 'node:path';
 import type { ToolDefinition } from '@opencode-ai/plugin/tool';
 import { z } from 'zod';
-import type { PluginConfig } from '../config';
+import type { GateConfigOverrides } from '../config';
+import { loadGateOverrides } from '../config';
 import type { EvidenceVerdict } from '../config/evidence-schema';
 import { saveEvidence } from '../evidence/manager';
 import { getProfileForFile } from '../lang/detector';
@@ -360,7 +361,7 @@ function scanFileWithTierA(
 export async function sastScan(
 	input: SastScanInput,
 	directory: string,
-	config?: PluginConfig,
+	gates?: GateConfigOverrides,
 ): Promise<SastScanResult> {
 	const {
 		changed_files,
@@ -372,7 +373,7 @@ export async function sastScan(
 	} = input;
 
 	// Check feature flag
-	if (config?.gates?.sast_scan?.enabled === false) {
+	if (gates?.sast_scan?.enabled === false) {
 		return {
 			verdict: 'pass',
 			findings: [],
@@ -1092,7 +1093,11 @@ export const sast_scan: ToolDefinition = createSwarmTool({
 			abort_signal: ctx?.abort,
 		};
 
-		const result = await _internals.sastScan(input, directory);
+		const result = await _internals.sastScan(
+			input,
+			directory,
+			_internals.loadGateOverrides(directory),
+		);
 		return JSON.stringify(result, null, 2);
 	},
 });
@@ -1107,6 +1112,7 @@ export const _internals: {
 	checkSemgrepAvailable: typeof checkSemgrepAvailable;
 	isSemgrepAvailable: typeof isSemgrepAvailable;
 	runSemgrep: typeof runSemgrep;
+	loadGateOverrides: typeof loadGateOverrides;
 } = {
 	sastScan,
 	sast_scan,
@@ -1116,4 +1122,5 @@ export const _internals: {
 	// exposing a local DI seam for new isolation-safe tests.
 	isSemgrepAvailable: () => isSemgrepAvailable(),
 	runSemgrep: (options) => runSemgrep(options),
+	loadGateOverrides,
 } as const;

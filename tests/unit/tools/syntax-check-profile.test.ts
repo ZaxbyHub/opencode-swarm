@@ -337,32 +337,7 @@ describe('syntaxCheck - Profile-Driven Grammar Resolution (Task 2.5)', () => {
 
 	it('Feature flag: returns pass with summary when syntax_check is disabled', async () => {
 		// Arrange
-		const config: PluginConfig = {
-			max_iterations: 5,
-			qa_retry_limit: 3,
-			inject_phase_reminders: true,
-			gates: {
-				syntax_check: { enabled: false },
-				placeholder_scan: {
-					enabled: true,
-					deny_patterns: [],
-					allow_globs: [],
-					max_allowed_findings: 0,
-				},
-				sast_scan: { enabled: true },
-				sbom_generate: { enabled: true },
-				build_check: { enabled: true },
-				quality_budget: {
-					enabled: true,
-					max_complexity_delta: 5,
-					max_public_api_delta: 10,
-					max_duplication_ratio: 0.05,
-					min_test_to_code_ratio: 0.3,
-					enforce_on_globs: ['src/**'],
-					exclude_globs: ['docs/**', 'tests/**'],
-				},
-			},
-		};
+		const config = { syntax_check: { enabled: false } };
 
 		const input = {
 			changed_files: [{ path: 'test.ts', additions: 10 }],

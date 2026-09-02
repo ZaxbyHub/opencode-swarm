@@ -2,6 +2,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
+import type { GateConfigOverrides } from '../config';
+import { loadGateOverrides } from '../config';
 import type { EvidenceVerdict } from '../config/evidence-schema';
 import { saveEvidence } from '../evidence/manager';
 import { getParserForFile } from '../lang/registry';
@@ -1018,20 +1020,46 @@ function collectNonStubBodyLines(rootNode: any): Set<number> {
 export async function placeholderScan(
 	input: PlaceholderScanInput,
 	directory: string,
+	gateOverrides?: GateConfigOverrides['placeholder_scan'],
 ): Promise<PlaceholderScanResult> {
+	// Feature flag (issue #2524): a user's `gates.placeholder_scan.enabled: false`
+	// disables the gate — non-blocking pass with an explicit summary, before any
+	// evidence write (same contract as syntax_check / sast_scan).
+	if (gateOverrides?.enabled === false) {
+		return {
+			verdict: 'pass',
+			findings: [],
+			summary: {
+				files_scanned: 0,
+				findings_count: 0,
+				files_with_findings: 0,
+			},
+		};
+	}
+
+	// Config-file values only fill fields the tool args omit; the overrides
+	// carry ONLY keys the user actually wrote (loadGateOverrides), so schema
+	// defaults never masquerade as custom user intent.
 	const {
 		changed_files,
-		allow_globs,
-		deny_patterns,
+		allow_globs: allowGlobsInput,
+		deny_patterns: denyPatternsInput,
 		added_lines,
-		sentinel_allowlist,
-		allow_sentinels,
+		sentinel_allowlist: sentinelAllowlistInput,
+		allow_sentinels: allowSentinelsInput,
 	} = input;
+	const allow_globs = allowGlobsInput ?? gateOverrides?.allow_globs;
+	const deny_patterns = denyPatternsInput ?? gateOverrides?.deny_patterns;
+	const sentinel_allowlist =
+		sentinelAllowlistInput ??
+		allowSentinelsInput ??
+		gateOverrides?.sentinel_allowlist;
+	const max_allowed_findings = gateOverrides?.max_allowed_findings ?? 0;
 
 	// Build sentinel allowlist as regex patterns for efficient matching
 	const sentinelPatterns = [
 		...DEFAULT_SENTINEL_ALLOWLIST,
-		...(sentinel_allowlist ?? allow_sentinels ?? []),
+		...(sentinel_allowlist ?? []),
 	].map((sentinel) => new RegExp(escapeRegex(sentinel), 'i'));
 
 	/**
@@ -1178,7 +1206,11 @@ export async function placeholderScan(
 		}
 	}
 
-	const verdict: EvidenceVerdict = findings.length > 0 ? 'fail' : 'pass';
+	// Budget gate (issue #2524): `gates.placeholder_scan.max_allowed_findings`
+	// tolerates up to N findings before failing. Default 0 preserves the
+	// historical any-finding-fails verdict.
+	const verdict: EvidenceVerdict =
+		findings.length > max_allowed_findings ? 'fail' : 'pass';
 
 	// Scoping-mode audit metadata: an added_lines-filtered run suppresses
 	// pre-existing-line findings by design, so the evidence must record that a
@@ -1257,6 +1289,7 @@ export const placeholder_scan: ReturnType<typeof tool> = createSwarmTool({
 		const result = await placeholderScan(
 			args as PlaceholderScanInput,
 			directory,
+			_internals.loadGateOverrides(directory)?.placeholder_scan,
 		);
 		return JSON.stringify(result);
 	},
@@ -1273,4 +1306,5 @@ export const _internals = {
 	isStubSkeletonFunction,
 	isConstantLiteralNode,
 	saveEvidence,
+	loadGateOverrides,
 };

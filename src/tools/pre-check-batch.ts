@@ -8,7 +8,8 @@ import * as path from 'node:path';
 import type { tool } from '@opencode-ai/plugin';
 import pLimit from 'p-limit';
 import { z } from 'zod';
-import type { PluginConfig } from '../config';
+import type { GateConfigOverrides, PluginConfig } from '../config';
+import { loadGateOverrides } from '../config';
 import type { SecretscanEvidence } from '../config/evidence-schema.js';
 import { saveEvidence } from '../evidence/manager.js';
 import { warn } from '../utils';
@@ -62,6 +63,7 @@ export const _internals: {
 	serializePreCheckResult: typeof serializePreCheckResult;
 	resolveGatePreamble: typeof resolveGatePreamble;
 	runPreCheckBatch: typeof runPreCheckBatch;
+	loadGateOverrides: typeof loadGateOverrides;
 	MAX_COMBINED_BYTES: number;
 } = {
 	qualityBudget,
@@ -79,6 +81,7 @@ export const _internals: {
 	serializePreCheckResult,
 	resolveGatePreamble,
 	runPreCheckBatch,
+	loadGateOverrides,
 	MAX_COMBINED_BYTES,
 };
 
@@ -90,12 +93,22 @@ export interface PreCheckBatchInput {
 	directory: string;
 	/** SAST severity threshold (default: medium) */
 	sast_threshold?: 'low' | 'medium' | 'high' | 'critical';
-	/** Optional plugin config */
+	/**
+	 * Optional legacy plugin-config carrier for the gates slices. The public
+	 * tool boundary no longer populates it (agents cannot pass config); direct
+	 * callers/tests may. `gates` below takes precedence.
+	 * @deprecated prefer the `gates` field (issue #2524).
+	 */
 	config?: PluginConfig;
 	/**
+	 * User-written gate overrides (issue #2524) — loaded from the project/user
+	 * config files by the public tool boundary via `loadGateOverrides`.
+	 */
+	gates?: GateConfigOverrides;
+	/**
 	 * Current phase number (positive integer >= 1).
-	 * When provided, enables SAST baseline diffing: only findings absent from the
-	 * phase-scoped baseline (.swarm/evidence/{phase}/sast-baseline.json) drive the
+	 * When provided, enables SAST baseline diffing: only findings absent from
+	 * the phase-scoped baseline (.swarm/evidence/{phase}/sast-baseline.json) drive the
 	 * fail verdict. Capture the baseline before first coder delegation via sast_scan
 	 * with capture_baseline:true.
 	 */
@@ -499,7 +512,7 @@ async function runWithTimeout<T>(
 async function runLintWrapped(
 	files: string[] | undefined,
 	directory: string,
-	_config?: PluginConfig,
+	_gates?: GateConfigOverrides,
 	abortSignal?: AbortSignal,
 ): Promise<ToolResult<LintResult>> {
 	const start = process.hrtime.bigint();
@@ -679,7 +692,7 @@ async function runLintOnFiles(
 async function runSecretscanWrapped(
 	files: string[] | undefined,
 	directory: string,
-	_config?: PluginConfig,
+	_gates?: GateConfigOverrides,
 	abortSignal?: AbortSignal,
 ): Promise<ToolResult<SecretscanResult | SecretscanErrorResult>> {
 	const start = process.hrtime.bigint();
@@ -728,7 +741,7 @@ async function runSastScanWrapped(
 	changedFiles: string[],
 	directory: string,
 	severityThreshold: 'low' | 'medium' | 'high' | 'critical',
-	config?: PluginConfig,
+	gates?: GateConfigOverrides,
 	phase?: number,
 	abortSignal?: AbortSignal,
 ): Promise<ToolResult<SastScanResult>> {
@@ -745,7 +758,7 @@ async function runSastScanWrapped(
 						abort_signal: signal,
 					},
 					directory,
-					config,
+					gates,
 				),
 			TOOL_TIMEOUT_MS,
 			abortSignal,
@@ -772,7 +785,7 @@ async function runSastScanWrapped(
 async function runQualityBudgetWrapped(
 	changedFiles: string[],
 	directory: string,
-	config?: PluginConfig,
+	gates?: GateConfigOverrides,
 	abortSignal?: AbortSignal,
 ): Promise<ToolResult<QualityBudgetResult>> {
 	const start = process.hrtime.bigint();
@@ -783,7 +796,7 @@ async function runQualityBudgetWrapped(
 				_internals.qualityBudget(
 					{
 						changed_files: changedFiles,
-						config: config?.gates?.quality_budget,
+						config: gates?.quality_budget,
 					},
 					directory,
 					signal,
@@ -1274,10 +1287,14 @@ export async function runPreCheckBatch(
 		files,
 		directory,
 		sast_threshold = 'medium',
-		config,
+		gates: gatesOverrides,
 		phase,
 		sast_enabled = true,
 	} = input;
+	// Legacy direct callers may still carry the parsed gates on `input.config`;
+	// the tool boundary supplies the user-written overrides via `input.gates`
+	// (issue #2524).
+	const gates = gatesOverrides ?? input.config?.gates;
 
 	// Validate directory
 	const dirError = validateDirectory(directory, effectiveWorkspaceDir);
@@ -1392,27 +1409,32 @@ export async function runPreCheckBatch(
 
 	// Run all tools in parallel with concurrency limit
 	const limit = pLimit(MAX_CONCURRENT);
+	// Config kill switch composes as AND with the QA-profile value: a user's
+	// `gates.sast_scan.enabled: false` skips SAST through the SAME
+	// `{ran:false}` + `sast_skipped:true` branch the profile disable uses, so
+	// downstream consumers see one shape for "did not run" (issue #2524).
+	const sastDisabledByConfig = gates?.sast_scan?.enabled === false;
 
 	const [lintResult, secretscanResult, sastScanResult, qualityBudgetResult] =
 		await Promise.all([
 			limit(() =>
-				_internals.runLintWrapped(changedFiles, directory, config, abortSignal),
+				_internals.runLintWrapped(changedFiles, directory, gates, abortSignal),
 			),
 			limit(() =>
 				_internals.runSecretscanWrapped(
 					changedFiles,
 					directory,
-					config,
+					gates,
 					abortSignal,
 				),
 			),
-			sast_enabled
+			sast_enabled && !sastDisabledByConfig
 				? limit(() =>
 						_internals.runSastScanWrapped(
 							changedFiles,
 							directory,
 							sast_threshold,
-							config,
+							gates,
 							phase,
 							abortSignal,
 						),
@@ -1425,7 +1447,7 @@ export async function runPreCheckBatch(
 				_internals.runQualityBudgetWrapped(
 					changedFiles,
 					directory,
-					config,
+					gates,
 					abortSignal,
 				),
 			),
@@ -1636,7 +1658,7 @@ export async function runPreCheckBatch(
 		quality_budget: qualityBudgetResult,
 		total_duration_ms: Math.round(totalDuration),
 		...(sastDegraded && { sast_degraded: true }),
-		...(!sast_enabled && { sast_skipped: true }),
+		...((!sast_enabled || sastDisabledByConfig) && { sast_skipped: true }),
 		...(sastPreexistingFindings &&
 			sastPreexistingFindings.length > 0 && {
 				sast_preexisting_findings: sastPreexistingFindings,
@@ -1833,6 +1855,7 @@ export const pre_check_batch: ReturnType<typeof tool> = createSwarmTool({
 					directory: resolvedDirectory,
 					sast_threshold: typedArgs.sast_threshold,
 					config: typedArgs.config,
+					gates: _internals.loadGateOverrides(resolvedDirectory),
 					phase: safePhase,
 					sast_enabled: sastEnabled,
 				},

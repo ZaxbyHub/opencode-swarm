@@ -223,15 +223,9 @@ describe('syntax_check tool', () => {
 				mode: 'changed',
 			};
 
-			const config: PluginConfig = {
-				gates: {
-					syntax_check: {
-						enabled: false,
-					},
-				},
-			} as PluginConfig;
+			const gates = { syntax_check: { enabled: false } };
 
-			const result = await syntaxCheck(input, tmpDir, config);
+			const result = await syntaxCheck(input, tmpDir, gates);
 
 			expect(result.verdict).toBe('pass');
 			expect(result.summary).toBe('syntax_check disabled by configuration');

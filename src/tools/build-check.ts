@@ -11,11 +11,20 @@ import {
 	type BuildDiscoverySkip,
 	discoverBuildCommands,
 } from '../build/discovery';
+import { loadGateOverrides } from '../config';
 import type { BuildEvidence, EvidenceVerdict } from '../config/evidence-schema';
 import { saveEvidence } from '../evidence/manager';
 import { bunSpawn } from '../utils/bun-compat';
 import * as logger from '../utils/logger.js';
 import { createSwarmTool } from './create-tool';
+
+/**
+ * DI seam (issue #2524): the tool boundary self-loads the user's gate
+ * overrides; tests substitute this instead of touching the config loader.
+ */
+export const _internals: { loadGateOverrides: typeof loadGateOverrides } = {
+	loadGateOverrides,
+};
 
 // ============ Constants ============
 
@@ -304,6 +313,28 @@ export const build_check: ReturnType<typeof tool> = createSwarmTool({
 			),
 	},
 	async execute(args: unknown, directory: string): Promise<string> {
+		// Feature flag (issue #2524): a user's `gates.build_check.enabled: false`
+		// skips the gate before any subprocess spawn or evidence write — same
+		// non-blocking contract as the other gate tools.
+		if (
+			_internals.loadGateOverrides(directory)?.build_check?.enabled === false
+		) {
+			return JSON.stringify(
+				{
+					verdict: 'skip',
+					runs: [],
+					summary: {
+						files_scanned: 0,
+						runs_count: 0,
+						failed_count: 0,
+						skipped_reason: 'build_check disabled by configuration',
+					},
+				},
+				null,
+				2,
+			);
+		}
+
 		// Cast args
 		const obj = args as BuildCheckInput;
 		const scope = obj.scope ?? 'all';

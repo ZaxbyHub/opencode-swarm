@@ -9,6 +9,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
+import { loadGateOverrides } from '../config';
 import { saveEvidence } from '../evidence/manager';
 import { generateCycloneDX, serializeCycloneDX } from '../sbom/cyclonedx';
 import {
@@ -20,6 +21,14 @@ import { simpleGlobToRegex } from '../utils';
 import * as logger from '../utils/logger.js';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import { createSwarmTool } from './create-tool';
+
+/**
+ * DI seam (issue #2524): the tool boundary self-loads the user's gate
+ * overrides; tests substitute this instead of touching the config loader.
+ */
+export const _internals: { loadGateOverrides: typeof loadGateOverrides } = {
+	loadGateOverrides,
+};
 
 // ============ Constants ============
 
@@ -45,6 +54,12 @@ export interface SbomGenerateResult {
 	components_count: number;
 	/** Path to the generated SBOM file */
 	output_path: string;
+	/**
+	 * Present only when the gate was skipped because the user disabled it via
+	 * `gates.sbom_generate.enabled: false` (issue #2524) — distinguishes a
+	 * config skip from "no manifests found".
+	 */
+	disabled_reason?: string;
 }
 
 // ============ Helper Functions ============
@@ -275,6 +290,25 @@ export const sbom_generate: ReturnType<typeof tool> = createSwarmTool({
 			.describe('Output directory for SBOM (default: .swarm/evidence/sbom/)'),
 	},
 	async execute(args: unknown, directory: string): Promise<string> {
+		// Feature flag (issue #2524): a user's `gates.sbom_generate.enabled:
+		// false` skips the gate before any filesystem scan or evidence write —
+		// same non-blocking contract as the other gate tools.
+		if (
+			_internals.loadGateOverrides(directory)?.sbom_generate?.enabled === false
+		) {
+			return JSON.stringify(
+				{
+					verdict: 'skip',
+					files: [],
+					components_count: 0,
+					output_path: '',
+					disabled_reason: 'sbom_generate disabled by configuration',
+				} satisfies SbomGenerateResult,
+				null,
+				2,
+			);
+		}
+
 		// Validate arguments
 		if (!validateArgs(args)) {
 			const errorResult: SbomGenerateResult = {

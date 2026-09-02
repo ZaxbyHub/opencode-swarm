@@ -1,5 +1,6 @@
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
+import { loadGateOverrides } from '../config';
 import type { QualityBudgetConfig } from '../config/schema';
 import { saveEvidence } from '../evidence/manager';
 import {
@@ -209,19 +210,30 @@ export const quality_budget: ReturnType<typeof tool> = createSwarmTool({
 			.describe('Quality budget thresholds'),
 	},
 	async execute(args: unknown, directory: string, ctx): Promise<string> {
+		const typedArgs = args as {
+			changed_files: string[];
+			config?: {
+				enabled?: boolean;
+				max_complexity_delta?: number;
+				max_public_api_delta?: number;
+				max_duplication_ratio?: number;
+				min_test_to_code_ratio?: number;
+				enforce_on_globs?: string[];
+				exclude_globs?: string[];
+			};
+		};
+		// Merge the user's file-level gate overrides with the per-call config
+		// (issue #2524): per-call values win per field, EXCEPT the file-level
+		// `enabled: false` — an absolute kill switch an agent cannot re-enable.
+		const fileOverrides =
+			_internals.loadGateOverrides(directory)?.quality_budget;
+		const mergedConfig: QualityBudgetInput['config'] = {
+			...fileOverrides,
+			...typedArgs.config,
+			...(fileOverrides?.enabled === false ? { enabled: false } : {}),
+		};
 		const result = await _internals.qualityBudget(
-			args as {
-				changed_files: string[];
-				config?: {
-					enabled?: boolean;
-					max_complexity_delta?: number;
-					max_public_api_delta?: number;
-					max_duplication_ratio?: number;
-					min_test_to_code_ratio?: number;
-					enforce_on_globs?: string[];
-					exclude_globs?: string[];
-				};
-			},
+			{ changed_files: typedArgs.changed_files, config: mergedConfig },
 			directory,
 			ctx?.abort,
 		);
@@ -236,7 +248,9 @@ export const quality_budget: ReturnType<typeof tool> = createSwarmTool({
 export const _internals: {
 	qualityBudget: typeof qualityBudget;
 	computeQualityMetrics: typeof computeQualityMetrics;
+	loadGateOverrides: typeof loadGateOverrides;
 } = {
 	qualityBudget,
 	computeQualityMetrics,
+	loadGateOverrides,
 } as const;
