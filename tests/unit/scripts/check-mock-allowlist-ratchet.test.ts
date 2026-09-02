@@ -18,6 +18,7 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { seedQuarantineListFiles } from '../../helpers/invariant-gate-fixtures';
 
 const isWindows = process.platform === 'win32';
 const REPO_ROOT = path.resolve(__dirname, '../../../');
@@ -143,6 +144,9 @@ function makeRepo(baseEntries: string[]): string {
 	git(repoDir, 'config', 'user.email', 'test@example.com');
 	git(repoDir, 'config', 'user.name', 'Test');
 	copyScripts(repoDir);
+	// Check 7 (issue #2477) fail-closes on missing quarantine list files; the
+	// .sh shim delegates to the TS owner, so fixtures need the four lists.
+	seedQuarantineListFiles(repoDir);
 	writeAllowlist(repoDir, baseEntries);
 	// scripts/check-invariants.sh Check 1 also greps src/ for spawn — give it
 	// an empty src/ so the scan has no hits (avoids noise in output).
