@@ -17,7 +17,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import {
 	_internals,
 	runCuratorPostMortem,
@@ -143,6 +143,7 @@ describe('runCuratorPostMortem', () => {
 	});
 
 	afterEach(() => {
+		closeProjectDb(dir); // #2480: release swarm.db before cleanup (never throws)
 		rmSync(dir, { recursive: true, force: true });
 	});
 

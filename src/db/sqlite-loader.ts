@@ -268,6 +268,26 @@ export function loadDatabaseCtor(): typeof Database {
 		const mod = _internals.requireModule('node:sqlite') as {
 			DatabaseSync: NodeDatabaseSyncCtor;
 		};
+		// #2480 runtime floor (declared in package.json#engines): node:sqlite is
+		// only available flag-free from Node 22.13. On an older Node the bare
+		// module-not-found error is opaque — surface the version floor instead.
+		const nodeMajor = Number.parseInt(
+			process.versions.node?.split('.')[0] ?? '0',
+			10,
+		);
+		const nodeMinor = Number.parseInt(
+			process.versions.node?.split('.')[1] ?? '0',
+			10,
+		);
+		if (
+			Number.isFinite(nodeMajor) &&
+			Number.isFinite(nodeMinor) &&
+			(nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 13))
+		) {
+			throw new Error(
+				`opencode-swarm: node:sqlite requires Node.js >= 22.13 (engines floor, issue #2480); this runtime is Node ${process.versions.node}. Upgrade Node or run under Bun >= 1.3.13.`,
+			);
+		}
 		_DatabaseCtor = createNodeDatabaseCtor(mod.DatabaseSync);
 		return _DatabaseCtor;
 	} catch (nodeError) {

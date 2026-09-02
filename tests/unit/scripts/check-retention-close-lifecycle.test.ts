@@ -432,6 +432,11 @@ describe('the real repository is coherent', () => {
 		expect([...PROJECT_SWARM_ROWS_WITH_INDIRECT_ROOT]).toEqual([
 			'recommendation-ledger',
 			'curation-proposals',
+			// issue #2480: swarm.db table rows — the physical artifact is owned
+			// by the project-db row; these own the logical tables + legacy files.
+			'insight-candidates',
+			'drift-reports',
+			'doc-drift-signals',
 		]);
 	});
 });

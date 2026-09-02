@@ -8,12 +8,24 @@ import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeGroupCommitWriter } from '../../../src/db/group-commit-writer.js';
+import { readPhaseReportsDb } from '../../../src/db/phase-report-store.js';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import {
 	buildDriftInjectionText,
 	readPriorDriftReports,
 	runDeterministicDriftCheck,
 	writeDriftReport,
 } from '../../../src/hooks/curator-drift';
+
+// #2480: release the cached swarm.db handle before temp-dir cleanup (EBUSY).
+const closeDbHandles = (d: string): void => {
+	try {
+		closeGroupCommitWriter(d);
+		closeProjectDb(d);
+	} catch {}
+};
+
 import type {
 	ComplianceObservation,
 	CuratorConfig,
@@ -87,6 +99,7 @@ describe('drift-report-io', () => {
 
 	afterEach(async () => {
 		// Clean up the temporary directory
+		closeDbHandles(tmpDir);
 		try {
 			await fs.rm(tmpDir, { recursive: true, force: true });
 		} catch {
@@ -229,64 +242,9 @@ describe('drift-report-io', () => {
 		});
 	});
 
-	describe('writeDriftReport', () => {
-		it('writes file to correct path .swarm/drift-report-phase-N.json', async () => {
-			const report = createValidDriftReport(5);
-			const filePath = await writeDriftReport(tmpDir, report);
-
-			expect(filePath).toContain('drift-report-phase-5.json');
-			const fileExists = existsSync(filePath);
-			expect(fileExists).toBe(true);
-		});
-
-		it('creates .swarm/ directory if it does not exist', async () => {
-			const swarmDir = path.join(tmpDir, '.swarm');
-			// Ensure .swarm doesn't exist
-			if (existsSync(swarmDir)) {
-				await fs.rm(swarmDir, { recursive: true });
-			}
-
-			const report = createValidDriftReport(1);
-			await writeDriftReport(tmpDir, report);
-
-			expect(existsSync(swarmDir)).toBe(true);
-		});
-
-		it('returns absolute path of written file', async () => {
-			const report = createValidDriftReport(1);
-			const filePath = await writeDriftReport(tmpDir, report);
-
-			// Check that it's an absolute path
-			expect(path.isAbsolute(filePath)).toBe(true);
-			expect(filePath.startsWith(tmpDir)).toBe(true);
-		});
-
-		it('written file is valid JSON parseable back to DriftReport', async () => {
-			const report = createValidDriftReport(2);
-			const filePath = await writeDriftReport(tmpDir, report);
-
-			const content = await fs.readFile(filePath, 'utf-8');
-			const parsed = JSON.parse(content) as DriftReport;
-
-			expect(parsed.phase).toBe(2);
-			expect(parsed.schema_version).toBe(1);
-			expect(parsed.alignment).toBe('ALIGNED');
-			expect(parsed.drift_score).toBe(0.0);
-		});
-
-		it('round-trip: writeDriftReport then readPriorDriftReports returns the same report', async () => {
-			const originalReport = createValidDriftReport(4);
-			await writeDriftReport(tmpDir, originalReport);
-
-			const reports = await readPriorDriftReports(tmpDir);
-
-			expect(reports.length).toBe(1);
-			expect(reports[0].phase).toBe(originalReport.phase);
-			expect(reports[0].alignment).toBe(originalReport.alignment);
-			expect(reports[0].drift_score).toBe(originalReport.drift_score);
-			expect(reports[0].schema_version).toBe(originalReport.schema_version);
-		});
-	});
+	// #2480: the writeDriftReport store-IO tests (swarm.db upsert, locator,
+	// payload round-trip, read-back) moved to curator-drift-store.test.ts —
+	// this file is FR-006 over-cap and must not grow.
 });
 
 describe('drift-report-adversarial', () => {
@@ -297,6 +255,7 @@ describe('drift-report-adversarial', () => {
 	});
 
 	afterEach(async () => {
+		closeDbHandles(tmpDir);
 		try {
 			await fs.rm(tmpDir, { recursive: true, force: true });
 		} catch {
@@ -348,12 +307,13 @@ describe('drift-report-adversarial', () => {
 		}
 	});
 
-	it('report.phase = -1 - negative phase - function should not crash, file gets written', async () => {
+	it('report.phase = -1 - negative phase - function should not crash, row gets written', async () => {
 		const report = createValidDriftReport(-1);
 
-		const filePath = await writeDriftReport(tmpDir, report);
-		expect(filePath).toContain('drift-report-phase--1.json');
-		expect(existsSync(filePath)).toBe(true);
+		expect(await writeDriftReport(tmpDir, report)).toBe(
+			'swarm.db:phase_report(curator_drift,-1)',
+		);
+		expect(readPhaseReportsDb(tmpDir, 'curator_drift').length).toBe(1);
 	});
 
 	it('concurrent writes of same phase: two writeDriftReport calls for same phase - last write wins, no crash', async () => {
@@ -418,6 +378,7 @@ describe('runDeterministicDriftCheck', () => {
 	});
 
 	afterEach(async () => {
+		closeDbHandles(tmpDir);
 		try {
 			await fs.rm(tmpDir, { recursive: true, force: true });
 		} catch {
@@ -454,10 +415,9 @@ describe('runDeterministicDriftCheck', () => {
 
 			expect(result.report.alignment).toBe('ALIGNED');
 			expect(result.report.drift_score).toBe(0);
-			expect(result.report_path).toContain('drift-report-phase-1.json');
-			// Verify file was written
-			const fileExists = existsSync(result.report_path);
-			expect(fileExists).toBe(true);
+			// #2480: DB-backed locator + persisted row
+			expect(result.report_path).toBe('swarm.db:phase_report(curator_drift,1)');
+			expect(readPhaseReportsDb(tmpDir, 'curator_drift').length).toBe(1);
 		});
 
 		it('MINOR_DRIFT case: 1 warning compliance obs → alignment=MINOR_DRIFT', async () => {
@@ -740,9 +700,8 @@ describe('runDeterministicDriftCheck', () => {
 				config,
 			);
 
-			expect(result.report_path).toContain('.swarm');
-			expect(result.report_path).toContain('drift-report-phase-1.json');
-			expect(existsSync(result.report_path)).toBe(true);
+			expect(result.report_path).toBe('swarm.db:phase_report(curator_drift,1)');
+			expect(readPhaseReportsDb(tmpDir, 'curator_drift').length).toBe(1);
 		});
 
 		it('requirements_checked = digest.tasks_total, requirements_satisfied = digest.tasks_completed', async () => {

@@ -14,6 +14,27 @@ export {
 	getGlobalDb,
 	getProjectDb,
 } from '../src/db/index.js';
+export { closeProjectDb } from '../src/db/project-db.js';
+export {
+	consumeInsightCandidatesDb,
+	appendInsightCandidatesDb,
+	countPendingInsightCandidatesDb,
+} from '../src/db/insight-candidate-store.js';
+export { canonicalProjectKey } from '../src/db/canonical-project.js';
+export {
+	closeGroupCommitWriter,
+	getGroupCommitWriter,
+} from '../src/db/group-commit-writer.js';
+export {
+	phaseReportLocator,
+	readPhaseReportsDb,
+	upsertPhaseReportDb,
+} from '../src/db/phase-report-store.js';
+export {
+	projectDbExists,
+	projectDbPath,
+} from '../src/db/project-db.js';
+export { runDriverParityContract } from '../src/db/driver-parity.js';
 export {
 	computeMemoryContentHash,
 	createMemoryId,

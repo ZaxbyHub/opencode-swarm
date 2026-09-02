@@ -242,7 +242,9 @@ export interface PrmPatternPersistenceOptions {
 	 *
 	 * It must never gate the durable append (issue #1821 F3): AC8 says disabled
 	 * or crashed real-time work loses nothing, and the phase-boundary backstop
-	 * can only see candidates that reached `.swarm/insight-candidates.jsonl`.
+	 * can only see candidates that reached the durable insight stream
+	 * (`insight_candidate` in `.swarm/swarm.db` since #2480; previously
+	 * `.swarm/insight-candidates.jsonl`).
 	 * ANDing the two flags at the call site made `realtime_admission.enabled=false`
 	 * silently discard every PRM candidate. Mirrors `micro-reflector.ts`, which
 	 * appends unconditionally and gates only its enqueue.

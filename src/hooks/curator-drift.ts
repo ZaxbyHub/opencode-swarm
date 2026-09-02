@@ -1,113 +1,93 @@
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-
 import { getGlobalEventBus } from '../background/event-bus.js';
+import {
+	phaseReportLocator,
+	readPhaseReportsDb,
+	upsertPhaseReportDb,
+} from '../db/phase-report-store.js';
 import { readEffectiveSpecSync } from '../sdd/effective-spec';
 import * as logger from '../utils/logger';
-import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache.js';
 import type {
 	CriticDriftResult,
 	CuratorConfig,
 	CuratorPhaseResult,
 	DriftReport,
 } from './curator-types.js';
-import { readSwarmFileAsync, validateSwarmPath } from './utils.js';
-
-const DRIFT_REPORT_PREFIX = 'drift-report-phase-';
+import { readSwarmFileAsync } from './utils.js';
 
 /**
- * Read all prior drift reports from .swarm/drift-report-phase-*.json files.
+ * Read all prior drift reports (#2480: from the `phase_report` entity table
+ * in `.swarm/swarm.db`, kind `curator_drift`; the legacy
+ * `.swarm/drift-report-phase-*.json` files are imported once — idempotent,
+ * one-txn — and cold-archived `.json.imported`).
  * Returns reports sorted ascending by phase number.
- * Skips corrupt/unreadable files with a console.warn.
+ * Skips corrupt/unreadable payloads with a console.warn.
  */
 export async function readPriorDriftReports(
 	directory: string,
 ): Promise<DriftReport[]> {
-	const swarmDir = path.join(directory, '.swarm');
-
-	// Return empty if .swarm doesn't exist
-	const entries = await fs.promises.readdir(swarmDir).catch(() => null);
-	if (entries === null) return [];
-
-	// Filter to drift report files
-	const reportFiles = entries
-		.filter(
-			(name) => name.startsWith(DRIFT_REPORT_PREFIX) && name.endsWith('.json'),
-		)
-		.sort(); // lexicographic sort works for phase-N.json up to 9999
-
 	const reports: DriftReport[] = [];
-	for (const filename of reportFiles) {
-		const content = await readSwarmFileAsync(directory, filename);
-		if (content === null) continue;
-		try {
-			const report = JSON.parse(content) as DriftReport;
-			// Basic schema validation
-			if (
-				typeof report.phase !== 'number' ||
-				typeof report.alignment !== 'string' ||
-				typeof report.timestamp !== 'string' ||
-				typeof report.drift_score !== 'number' ||
-				typeof report.schema_version !== 'number' ||
-				!Array.isArray(report.compounding_effects)
-			) {
+	try {
+		for (const row of readPhaseReportsDb(directory, 'curator_drift')) {
+			try {
+				const report = JSON.parse(row.payload) as DriftReport;
+				// Basic schema validation (unchanged from the file reader).
+				if (
+					typeof report.phase !== 'number' ||
+					typeof report.alignment !== 'string' ||
+					typeof report.timestamp !== 'string' ||
+					typeof report.drift_score !== 'number' ||
+					typeof report.schema_version !== 'number' ||
+					!Array.isArray(report.compounding_effects)
+				) {
+					logger.warn(
+						`[curator-drift] Skipping corrupt drift report: phase ${row.phase}`,
+					);
+					continue;
+				}
+				reports.push(report);
+			} catch {
 				logger.warn(
-					`[curator-drift] Skipping corrupt drift report: ${filename}`,
+					`[curator-drift] Skipping unreadable drift report: phase ${row.phase}`,
 				);
-				continue;
 			}
-			reports.push(report);
-		} catch {
-			logger.warn(
-				`[curator-drift] Skipping unreadable drift report: ${filename}`,
-			);
 		}
+	} catch {
+		// DB unavailable (read-only project, disk full): report no priors —
+		// drift analysis must fail open exactly like the file reader did.
+		return [];
 	}
 
-	// Sort ascending by phase number (defensive — filenames are already sorted, but content.phase is authoritative)
+	// Sort ascending by phase number (content.phase is authoritative).
 	reports.sort((a, b) => a.phase - b.phase);
 
 	return reports;
 }
 
 /**
- * Write a drift report to .swarm/drift-report-phase-{N}.json.
- * Creates .swarm/ if it doesn't exist.
- * Returns the absolute path of the written file.
+ * Write a drift report to the `phase_report` entity table (#2480: upsert via
+ * the group-commit writer — one txn per flush, atomic, replacing the legacy
+ * non-batched file rewrite). A same-phase re-run overwrites the row.
+ * Returns the DB-backed report locator.
  */
 export async function writeDriftReport(
 	directory: string,
 	report: DriftReport,
 ): Promise<string> {
-	const filename = `${DRIFT_REPORT_PREFIX}${report.phase}.json`;
-	const filePath = validateSwarmPath(directory, filename);
-
-	// Ensure .swarm/ exists
-	const swarmDir = path.dirname(filePath);
-	await fs.promises.mkdir(swarmDir, { recursive: true });
-
-	// A same-phase re-run rewrites this exact path, and every field except the
-	// free-form strings is fixed-width (the ISO `timestamp` in particular), so the
-	// rewrite is routinely byte-identical in LENGTH. The swarm-artifact cache
-	// validates freshness by stat stamp alone (mtimeMs + ctimeMs + size), so
-	// within one filesystem timestamp tick `readPriorDriftReports` above would
-	// serve the pre-write record — issue #1729's stale-read hazard. Drop the
-	// entry immediately after a SUCCESSFUL write (never on the throw path, where
-	// the on-disk bytes are whatever the failed write left behind).
+	const locator = phaseReportLocator('curator_drift', report.phase);
 	try {
-		await fs.promises.writeFile(
-			filePath,
+		await upsertPhaseReportDb(
+			directory,
+			'curator_drift',
+			report.phase,
 			JSON.stringify(report, null, 2),
-			'utf-8',
 		);
-		invalidateCachedArtifact(filePath);
 	} catch (err) {
 		throw new Error(
-			`[curator-drift] Failed to write drift report to ${filePath}: ${String(err)}`,
+			`[curator-drift] Failed to write drift report to ${locator}: ${String(err)}`,
 		);
 	}
 
-	return filePath;
+	return locator;
 }
 
 // ============================================================================
@@ -279,7 +259,7 @@ export async function runDeterministicDriftCheck(
 		// phase-complete side that re-reads prior reports is now de-duplicated.
 		if (injectAdvisory && alignment !== 'ALIGNED' && driftScore > 0) {
 			try {
-				const advisoryText = `CURATOR DRIFT DETECTED (phase ${phase}, score ${driftScore.toFixed(2)}): ${injectionSummary.slice(0, 300)}. Review .swarm/${DRIFT_REPORT_PREFIX}${phase}.json and address spec alignment before proceeding. Consider running critic_drift_verifier before phase completion to get a proper drift review.`;
+				const advisoryText = `CURATOR DRIFT DETECTED (phase ${phase}, score ${driftScore.toFixed(2)}): ${injectionSummary.slice(0, 300)}. Review the phase-${phase} drift report stored in .swarm/swarm.db (${phaseReportLocator('curator_drift', phase)}) and address spec alignment before proceeding. Consider running critic_drift_verifier before phase completion to get a proper drift review.`;
 				injectAdvisory(advisoryText);
 			} catch {
 				/* advisory injection failure must not block drift check */

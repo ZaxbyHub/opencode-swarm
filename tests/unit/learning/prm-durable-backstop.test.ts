@@ -21,6 +21,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { LearningConfigSchema } from '../../../src/config/schema.js';
+import {
+	_resetInsightImportGuards,
+	listPendingInsightCandidatesDb,
+} from '../../../src/db/insight-candidate-store.js';
+import { getProjectDb } from '../../../src/db/project-db.js';
 import { resolveInsightCandidatesPath } from '../../../src/hooks/micro-reflector.js';
 import {
 	getQueueDepth,
@@ -131,6 +136,13 @@ describe('createPrmHook — durable backstop is independent of admission', () =>
 		resetSessionQueue();
 		resetPrmPatternSupport();
 		fs.rmSync(resolveInsightCandidatesPath(dir), { force: true });
+		// #2480: the durable queue is the swarm.db stream — reset it per test.
+		_resetInsightImportGuards();
+		try {
+			getProjectDb(dir).run('DELETE FROM insight_candidate');
+		} catch {
+			// DB not opened yet — the first append creates a clean stream.
+		}
 		session = {
 			delegationActive: true,
 			prmTrajectoryStep: 0,
@@ -166,13 +178,10 @@ describe('createPrmHook — durable backstop is independent of admission', () =>
 	};
 
 	function durableLines(): Array<{ source: { kind: string } }> {
-		const p = resolveInsightCandidatesPath(dir);
-		if (!fs.existsSync(p)) return [];
-		return fs
-			.readFileSync(p, 'utf-8')
-			.split('\n')
-			.filter((line) => line.trim())
-			.map((line) => JSON.parse(line) as { source: { kind: string } });
+		// #2480: the durable queue lives in the swarm.db insight stream.
+		return listPendingInsightCandidatesDb(dir, 100).map(
+			(payload) => JSON.parse(payload) as { source: { kind: string } },
+		);
 	}
 
 	it('writes the durable candidate even when real-time admission is DISABLED', async () => {

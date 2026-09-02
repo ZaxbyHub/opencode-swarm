@@ -14,6 +14,8 @@
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
+import { listPendingInsightCandidatesDb } from '../db/insight-candidate-store.js';
+import { projectDbExists } from '../db/project-db.js';
 import { atomicWriteFile } from '../evidence/task-file.js';
 import { claimNextScanBatch } from '../knowledge/scan-cursor.js';
 import { tryAcquireLock } from '../parallel/file-locks.js';
@@ -773,6 +775,24 @@ function collectPendingProposals(
 	directory: string,
 ): Array<{ source: string; content: string }> {
 	const results: Array<{ source: string; content: string }> = [];
+
+	// #2480: the durable queue is the `insight_candidate` stream in
+	// `.swarm/swarm.db`; the legacy `.jsonl` is the pre-migration fallback
+	// (never opened-for-create from a postmortem read).
+	try {
+		if (projectDbExists(directory)) {
+			const pending = listPendingInsightCandidatesDb(directory, MAX_PROPOSALS);
+			if (pending.length > 0) {
+				results.push({
+					source: 'insight-candidates',
+					content: pending.join('\n'),
+				});
+			}
+			return results;
+		}
+	} catch {
+		// fall through to the legacy file read
+	}
 
 	const insightPath = path.join(
 		directory,

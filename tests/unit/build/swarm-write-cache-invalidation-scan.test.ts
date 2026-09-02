@@ -73,10 +73,11 @@ describe('G2 — .swarm/ cached-artifact writers must invalidate the swarm-artif
 			// Added 2026-08-10 (#1619 round 5). Each is a PATTERN — an artifact
 			// whose basename is built by interpolation — and each was structurally
 			// unrepresentable before the harvester folded `${…}` to `*` instead of
-			// deleting it. `drift-report-phase-*.json` is the round-4 miss itself.
+			// deleting it. `drift-report-phase-*.json` was the round-4 miss itself;
+			// it was REMOVED 2026-09-01 (#2480) when drift reports moved to the
+			// swarm.db phase_report table (no cached file artifact remains).
 			'summaries/*.json',
 			'evidence/*.json',
-			'drift-report-phase-*.json',
 		]) {
 			expect(cachedFilenames.has(name), `missing '${name}'`).toBe(true);
 		}

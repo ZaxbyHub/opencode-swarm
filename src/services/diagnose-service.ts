@@ -10,6 +10,7 @@ import {
 } from '../config/cache-paths.js';
 import { loadPluginConfig } from '../config/loader';
 import type { Plan } from '../config/plan-schema';
+import { getSwarmDbHealthSnapshot } from '../db/health.js';
 import { getCoreEventCoverage, readCoreEvents } from '../events/core-events.js';
 import { getDurableGateEvidenceStatusForTask } from '../evidence/gate-bridge.js';
 import { listEvidenceTaskIds } from '../evidence/manager';
@@ -51,6 +52,55 @@ export interface HealthCheck {
 	name: string;
 	status: '✅' | '❌' | '⚠️' | '⬜';
 	detail: string;
+}
+
+/** quick_check size cap (rendered into the warning text). */
+const SWARM_DB_QUICK_CHECK_MAX_BYTES = 64 * 1024 * 1024;
+
+/**
+ * #2480: `.swarm/swarm.db` health — quick_check integrity, journal mode,
+ * page count, recorded migration failures, and the active driver/runtime vs
+ * the declared support floors. The DB probe itself lives in `src/db/health.ts`
+ * (the sanctioned read-only surface); diagnose only renders the snapshot.
+ * Never opens-for-create (an absent DB is healthy) and never throws.
+ */
+function checkSwarmDb(directory: string): HealthCheck {
+	const runtime = process.versions.bun === undefined ? 'node' : 'bun';
+	const runtimeVersion =
+		process.versions.bun ?? process.versions.node ?? 'unknown';
+	const snapshot = getSwarmDbHealthSnapshot(directory);
+	switch (snapshot.kind) {
+		case 'absent':
+			return {
+				name: 'swarm.db',
+				status: '✅',
+				detail: `not created yet (driver: ${runtime} ${runtimeVersion})`,
+			};
+		case 'too_large':
+			return {
+				name: 'swarm.db',
+				status: '⚠️',
+				detail: `${Math.round(snapshot.sizeBytes / (1024 * 1024))} MiB exceeds the ${Math.round(
+					SWARM_DB_QUICK_CHECK_MAX_BYTES / (1024 * 1024),
+				)} MiB inline quick_check cap — run an external integrity check (driver: ${runtime} ${runtimeVersion})`,
+			};
+		case 'error':
+			return {
+				name: 'swarm.db',
+				status: '❌',
+				detail: `unavailable (${snapshot.category}): ${snapshot.message}`,
+			};
+		case 'open': {
+			const detail = `quick_check ${snapshot.quickCheck}; ${snapshot.journalMode} mode, ${snapshot.pageCount} pages, ${snapshot.migrationFailures} recorded migration failure(s); driver: ${runtime} ${runtimeVersion}`;
+			if (snapshot.quickCheck !== 'ok') {
+				return { name: 'swarm.db', status: '❌', detail };
+			}
+			if (snapshot.migrationFailures > 0) {
+				return { name: 'swarm.db', status: '⚠️', detail };
+			}
+			return { name: 'swarm.db', status: '✅', detail };
+		}
+	}
 }
 
 /**
@@ -1026,6 +1076,12 @@ export async function getDiagnoseData(
 		status: versionStatus,
 		detail: versionDetail,
 	});
+
+	// Check 0 (#2480): swarm.db integrity + support floors. quick_check is
+	// size-capped so an oversized DB reports a warning instead of hanging the
+	// diagnose command; every failure degrades to a status line — diagnose
+	// must never throw. Never opens-for-create: absent DB is healthy.
+	checks.push(checkSwarmDb(directory));
 
 	// Check 1: Try structured plan (only if plan.json exists, no auto-migration)
 	const plan = await loadPlanJsonOnly(directory);

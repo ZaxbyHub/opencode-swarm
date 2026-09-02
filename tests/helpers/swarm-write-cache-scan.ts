@@ -2600,21 +2600,9 @@ export interface UnresolvedReaderRegistration {
  */
 export const UNRESOLVED_READER_REGISTRY: readonly UnresolvedReaderRegistration[] =
 	[
-		{
-			file: 'src/hooks/curator-drift.ts',
-			callee: 'readSwarmFileAsync',
-			arg: 'filename',
-			category: 'declared-patterns',
-			patterns: ['${DRIFT_REPORT_PREFIX}*.json'],
-			reason:
-				'readPriorDriftReports() reads every .swarm/drift-report-phase-<N>.json ' +
-				'by iterating a readdir() listing filtered on DRIFT_REPORT_PREFIX, so the ' +
-				'reader argument is a for…of binding with no declaration to fold. The ' +
-				'artifact IS cached (writeDriftReport rewrites the same path each phase ' +
-				'and the record carries a fixed-width ISO timestamp, so a same-phase ' +
-				'rewrite is byte-identical in length — the #1729 stale-read hazard), so ' +
-				'its pattern is declared here and the writer is covered by RULE W.',
-		},
+		// (#2480) src/hooks/curator-drift.ts was removed from this registry:
+		// readPriorDriftReports now reads the swarm.db phase_report table (no
+		// filesystem reader, no cached artifact, no #1729 stale-read hazard).
 		{
 			file: 'src/hooks/knowledge-curator.ts',
 			callee: 'readSwarmFileAsync',

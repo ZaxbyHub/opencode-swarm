@@ -22,7 +22,7 @@
  */
 
 import { createRequire } from 'node:module';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -144,6 +144,121 @@ async function main() {
 		const grow = gdb
 			.query('SELECT content FROM global_rules WHERE rule_type = ?')
 			.get('repro');
+		check(
+			'global DB round-trip under Node',
+			grow && grow.content === 'global-node-sqlite-works',
+			`got ${JSON.stringify(grow)}`,
+		);
+
+		// ── #2480 foundation block (real node:sqlite driver) ──
+		// Canonical identity: separator variants (and on Windows, case
+		// variants) of the same root must share ONE handle.
+		const canonicalSame =
+			mod.canonicalProjectKey(projDir) === mod.canonicalProjectKey(`${projDir}/./`);
+		check(
+			'#2480 canonical key collapses separator variants',
+			canonicalSame,
+			`keys: ${mod.canonicalProjectKey(projDir)} vs ${mod.canonicalProjectKey(`${projDir}/./`)}`,
+		);
+		if (process.platform === 'win32') {
+			const caseVariant = projDir.toUpperCase();
+			check(
+				'#2480 canonical key collapses case variants on win32',
+				mod.canonicalProjectKey(projDir) === mod.canonicalProjectKey(caseVariant),
+				`keys differ for ${projDir} vs ${caseVariant}`,
+			);
+		}
+		const dbVariant = mod.getProjectDb(`${projDir}/./`);
+		check(
+			'#2480 canonical cache shares one handle across spellings',
+			dbVariant === db,
+			'variant spelling produced a different handle',
+		);
+
+		// v14-v17 migrations applied (single-statement, both-driver-safe SQL).
+		const tables = db
+			.query(
+				"SELECT name FROM sqlite_master WHERE type='table' AND name IN ('migration_failures', 'insight_candidate', 'phase_report')",
+			)
+			.all()
+			.map((r) => r.name)
+			.sort();
+		check(
+			'#2480 foundation tables exist under Node',
+			tables.join(',') === 'insight_candidate,migration_failures,phase_report',
+			`got ${tables.join(',')}`,
+		);
+
+		// Driver-parity contract suite on the real node:sqlite driver.
+		mod.runDriverParityContract(db, { isNodeAdapter: true });
+		check(
+			'#2480 driver-parity contract suite passes under real node:sqlite',
+			true,
+			'',
+		);
+
+		// Legacy insight-candidates.jsonl import (one-txn + .imported rename).
+		writeFileSync(
+			join(projDir, '.swarm', 'insight-candidates.jsonl'),
+			[
+				JSON.stringify({ lesson: 'legacy one', created_at: '2026-01-01T00:00:00.000Z' }),
+				JSON.stringify({ lesson: 'legacy two', created_at: '2026-01-02T00:00:00.000Z' }),
+				'{not json',
+				'',
+			].join('\n') + '\n',
+			'utf-8',
+		);
+		// First store use triggers the lazy import: 2 valid rows, 1 corrupt skipped.
+		let pending = mod.countPendingInsightCandidatesDb(projDir);
+		check('#2480 legacy .jsonl imported (corrupt line skipped)', pending === 2, `pending=${pending}`);
+		check(
+			'#2480 legacy .jsonl cold-archived .imported',
+			existsSync(join(projDir, '.swarm', 'insight-candidates.jsonl.imported')),
+			'rename missing',
+		);
+
+		// Append via the group-commit writer; consume via the dual-contract txn.
+		await mod.appendInsightCandidatesDb(projDir, [
+			{ payload: JSON.stringify({ lesson: 'fresh one', created_at: '2026-02-01T00:00:00.000Z' }), createdAt: '2026-02-01T00:00:00.000Z' },
+		]);
+		pending = mod.countPendingInsightCandidatesDb(projDir);
+		check('#2480 append via group-commit writer', pending === 3, `pending=${pending}`);
+		const consumed = mod.consumeInsightCandidatesDb(projDir, 2);
+		check(
+			'#2480 consume takes the OLDEST batch in one txn',
+			consumed.length === 2 && JSON.parse(consumed[0]).lesson === 'legacy one',
+			`consumed=${consumed.length}, first=${consumed[0] && consumed[0].slice(0, 40)}`,
+		);
+		pending = mod.countPendingInsightCandidatesDb(projDir);
+		check('#2480 consume marked its batch consumed', pending === 1, `pending=${pending}`);
+
+		// Phase-report entity store: upsert + read-back + locator.
+		await mod.upsertPhaseReportDb(projDir, 'curator_drift', 3, '{"phase":3,"alignment":"ALIGNED"}');
+		await mod.upsertPhaseReportDb(projDir, 'design_doc_drift', 1, '{"verdict":"DOC_FRESH"}');
+		const driftRows = mod.readPhaseReportsDb(projDir, 'curator_drift');
+		check(
+			'#2480 phase_report upsert + ordered read under Node',
+			driftRows.length === 1 && driftRows[0].phase === 3 && JSON.parse(driftRows[0].payload).alignment === 'ALIGNED',
+			`rows=${driftRows.length}`,
+		);
+		check(
+			'#2480 phase-report locator form',
+			mod.phaseReportLocator('curator_drift', 3) === 'swarm.db:phase_report(curator_drift,3)',
+			'',
+		);
+
+		// quick_check + WAL checkpoint close path.
+		const quick = db.query('PRAGMA quick_check').get();
+		check('#2480 quick_check ok on the live foundation DB', quick && quick.quick_check === 'ok', JSON.stringify(quick));
+		mod.closeGroupCommitWriter(projDir);
+		mod.closeProjectDb(projDir);
+		const reopened = mod.getProjectDb(projDir);
+		check(
+			'#2480 close→reopen round trip preserves durable rows',
+			reopened.query('SELECT COUNT(*) AS n FROM insight_candidate WHERE consumed_at IS NULL').get().n === 1,
+			'',
+		);
+
 		check(
 			'global DB round-trip under Node',
 			grow && grow.content === 'global-node-sqlite-works',

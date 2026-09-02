@@ -17,6 +17,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeGroupCommitWriter } from '../../../src/db/group-commit-writer.js';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import { curateAndStoreSwarm } from '../../../src/hooks/knowledge-curator.js';
 import { resolveSwarmKnowledgePath } from '../../../src/hooks/knowledge-store.js';
 import type { SwarmKnowledgeEntry } from '../../../src/hooks/knowledge-types.js';
@@ -44,6 +46,13 @@ beforeEach(() => {
 
 afterEach(() => {
 	resetSessionQueue();
+	// #2480: the curator flow opens swarm.db — release before cleanup.
+	try {
+		closeGroupCommitWriter(dir);
+		closeProjectDb(dir);
+	} catch {
+		// already closed
+	}
 	fs.rmSync(dir, { recursive: true, force: true });
 });
 
