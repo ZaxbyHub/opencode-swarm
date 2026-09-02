@@ -4,16 +4,18 @@
  * backpressure overflow, and the degraded (disk-full) retention path.
  */
 
+import { Database } from 'bun:sqlite';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { DbWriteError } from '../../../src/db/db-errors.js';
 import {
 	FLUSH_THRESHOLD_OPS,
 	GroupCommitWriter,
+	getGroupCommitWriter,
 	getOpenGroupCommitWriterCount,
+	_internals as writerInternals,
 } from '../../../src/db/group-commit-writer.js';
 import { appendInsightCandidatesDb } from '../../../src/db/insight-candidate-store.js';
 import { closeProjectDb, getProjectDb } from '../../../src/db/project-db.js';
@@ -199,38 +201,83 @@ describe('GroupCommitWriter', () => {
 		},
 	);
 
-	test('#2480 double-failure eviction: a retry that also hits a closed handle evicts the writer; the next call rebinds fresh', async () => {
+	test('#2480 double-closed-handle eviction: the retry failing closed evicts the writer; the next call gets a FRESH writer', () => {
+		// Prime the cached writer through the public path.
+		const original = getGroupCommitWriter(dir);
+		const writersBefore = getOpenGroupCommitWriterCount();
+		// Kill the cached handle (the pre-fix /swarm close shape)…
+		closeProjectDb(dir);
+		// …and make the self-heal rebind deterministically return an
+		// ALREADY-CLOSED handle, so the retry also fails closed (the
+		// eviction branch — unreachable deterministically otherwise).
+		const realGet = writerInternals.getProjectDb;
+		writerInternals.getProjectDb = (() => {
+			const dead = new Database(':memory:');
+			dead.close();
+			return dead as unknown as ReturnType<typeof realGet>;
+		}) as typeof realGet;
+		let threw = false;
+		try {
+			original.enqueue({
+				durability: 'normal',
+				run: () => {},
+			});
+			original.flushSync();
+		} catch {
+			threw = true;
+		} finally {
+			writerInternals.getProjectDb = realGet;
+		}
+		expect(threw).toBe(true);
+		// The writer was evicted from the registry…
+		expect(getOpenGroupCommitWriterCount()).toBe(writersBefore - 1);
+		// …and the next acquisition is a DIFFERENT, working writer object.
+		const fresh = getGroupCommitWriter(dir);
+		expect(fresh).not.toBe(original);
+		fresh.enqueue({
+			durability: 'normal',
+			run: (handle) => {
+				handle.run(
+					"INSERT INTO project_constraints (constraint_type, content) VALUES ('evicted-fresh', 'ok')",
+				);
+			},
+		});
+		fresh.flushSync();
+		expect(
+			getProjectDb(dir)
+				.query<{ n: number }, []>(
+					"SELECT COUNT(*) as n FROM project_constraints WHERE constraint_type = 'evicted-fresh'",
+				)
+				.get()?.n,
+		).toBe(1);
+	});
+
+	test('#2480 non-closed rebind failure (corrupt reopen) throws WITHOUT evicting; recovery is a second self-heal', async () => {
 		await appendInsightCandidatesDb(dir, [
 			{
 				payload: JSON.stringify({ lesson: 'prime' }),
 				createdAt: '2026-01-01T00:00:00.000Z',
 			},
 		]);
+		const writerBefore = getGroupCommitWriter(dir);
 		const writersBefore = getOpenGroupCommitWriterCount();
-		// Close the handle, then close the REBOUND handle too: close ALL
-		// project DBs so the self-heal retry's getProjectDb reopens a DB
-		// whose handle we then kill again — simpler: close the handle,
-		// monkey-seal getProjectDb's reopen by closing all handles and
-		// corrupting the DB file so the reopen itself fails closed.
 		closeProjectDb(dir);
 		const dbPath = path.join(dir, '.swarm', 'swarm.db');
 		writeFileSync(dbPath, 'not a sqlite database');
-		// The flush fails (closed handle) -> rebind reopens the corrupt
-		// file -> retry fails again -> writer must EVICT, not cache poison.
-		let threw = false;
-		try {
-			await appendInsightCandidatesDb(dir, [
+		// Flush fails (closed handle) → rebind tries to REOPEN the corrupt
+		// file → "file is not a database" is NOT a closed-handle error, so
+		// the writer must stay registered (no eviction on foreign errors).
+		await expect(
+			appendInsightCandidatesDb(dir, [
 				{
 					payload: JSON.stringify({ lesson: 'doomed' }),
 					createdAt: '2026-01-02T00:00:00.000Z',
 				},
-			]);
-		} catch {
-			threw = true;
-		}
-		expect(threw).toBe(true);
-		expect(getOpenGroupCommitWriterCount()).toBeLessThan(writersBefore + 1);
-		// Repair and verify the NEXT call gets a fresh, working writer.
+			]),
+		).rejects.toThrow();
+		expect(getOpenGroupCommitWriterCount()).toBe(writersBefore);
+		expect(getGroupCommitWriter(dir)).toBe(writerBefore);
+		// Repair: the SAME writer self-heals again (rebind → fresh file).
 		rmSync(dbPath, { force: true });
 		await appendInsightCandidatesDb(dir, [
 			{

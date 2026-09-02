@@ -71,6 +71,16 @@ const DEGRADED_COOLDOWN_MS = 60_000;
 
 const _writers: Map<string, GroupCommitWriter> = new Map();
 
+/**
+ * Test seam (repo `_internals` convention): the self-heal rebind's handle
+ * acquisition, injectable so tests can deterministically exercise the
+ * eviction-on-double-closed-handle path (a rebind that returns an ALREADY
+ * closed handle).
+ */
+export const _internals: { getProjectDb: typeof getProjectDb } = {
+	getProjectDb,
+};
+
 export class GroupCommitWriter {
 	private db: Database;
 	private queue: GroupCommitOp[] = [];
@@ -142,7 +152,7 @@ export class GroupCommitWriter {
 				// Rebind to the (re-created) canonical handle and retry the SAME
 				// batch exactly once. registryKey is the canonical path, so it is
 				// a valid getProjectDb input.
-				this.db = getProjectDb(this.registryKey);
+				this.db = _internals.getProjectDb(this.registryKey);
 				this.applyBatch(batch);
 			}
 		} catch (err) {
