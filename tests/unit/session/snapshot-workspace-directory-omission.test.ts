@@ -19,7 +19,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -38,6 +38,7 @@ import {
 	resolveSessionWorkspaceDirectory,
 	swarmState,
 } from '../../../src/state.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 
 describe('workspaceDirectory is deliberately not persisted (issue #2002)', () => {
 	let tempDir: string;
@@ -48,9 +49,7 @@ describe('workspaceDirectory is deliberately not persisted (issue #2002)', () =>
 	});
 
 	afterEach(() => {
-		if (existsSync(tempDir)) {
-			rmSync(tempDir, { recursive: true, force: true });
-		}
+		safeRmRecursive(tempDir);
 		resetSwarmState();
 	});
 
