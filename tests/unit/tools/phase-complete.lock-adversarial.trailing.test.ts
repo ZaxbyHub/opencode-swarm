@@ -12,17 +12,21 @@ import { newestEventLine } from '../../helpers/event-lines.js';
 import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { freezeClock } from '../../helpers/test-clock';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
-
 vi.mock('../../../src/parallel/file-locks', () => ({
 	tryAcquireLock: vi.fn(),
 }));
-
 vi.mock('../../../src/evidence/manager', () => ({
 	listEvidenceTaskIds: vi.fn().mockResolvedValue([]),
 	loadEvidence: vi.fn().mockImplementation((_dir: string, taskId: string) => {
 		if (taskId.startsWith('retro-')) {
 			try {
-				const retroPath = path.join(_dir, '.swarm', 'evidence', taskId, 'evidence.json');
+				const retroPath = path.join(
+					_dir,
+					'.swarm',
+					'evidence',
+					taskId,
+					'evidence.json',
+				);
 				if (fs.existsSync(retroPath)) {
 					const content = fs.readFileSync(retroPath, 'utf-8');
 					return { status: 'found', bundle: JSON.parse(content) };

@@ -21,6 +21,8 @@ export async function waitFor(
 		await new Promise((resolve) => setTimeout(resolve, 20));
 	}
 	if (!predicate()) {
-		throw new Error(`[waitFor] ${label} — budget exhausted after ${budgetMs}ms`);
+		throw new Error(
+			`[waitFor] ${label} — budget exhausted after ${budgetMs}ms`,
+		);
 	}
 }
