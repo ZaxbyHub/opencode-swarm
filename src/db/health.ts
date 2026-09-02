@@ -10,6 +10,7 @@
 
 import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { canonicalProjectKey } from './canonical-project.js';
 import { getProjectDb, projectDbPath } from './project-db.js';
 
 /** quick_check size cap: an oversized DB reports `too_large` instead of scanning inline. */
@@ -45,6 +46,12 @@ export function getSwarmDbHealthSnapshot(
 	} catch {
 		return { kind: 'absent' };
 	}
+	// Read the marker BEFORE getProjectDb: a successful open runs the
+	// migration loop, which removes the marker by design — probing after
+	// the open would almost always see it already cleaned.
+	const staleMarker = existsSync(
+		join(canonicalProjectKey(directory), '.swarm', 'db-migration-failure.json'),
+	);
 	try {
 		const db = getProjectDb(directory);
 		return {
@@ -64,9 +71,8 @@ export function getSwarmDbHealthSnapshot(
 						'SELECT COUNT(*) as n FROM migration_failures',
 					)
 					.get()?.n ?? 0,
-			staleMarker: existsSync(
-				join(directory, '.swarm', 'db-migration-failure.json'),
-			),
+			// Captured pre-open (see above) — canonical-keyed spelling.
+			staleMarker,
 		};
 	} catch (err) {
 		const category =

@@ -61,6 +61,40 @@ describe('diagnose swarm-db check', () => {
 		expect(check?.detail.length).toBeGreaterThan(0);
 	});
 
+	test('#2480 review F-07: staleMarker is visible through the canonical key (win32 case variant)', async () => {
+		mkdirSync(path.join(dir, '.swarm'), { recursive: true });
+		getProjectDb(dir); // creates DB under the canonical key
+		writeFileSync(
+			path.join(dir, '.swarm', 'db-migration-failure.json'),
+			JSON.stringify({ schema_version: 1, version: 14, name: 'x', error: 'y' }),
+		);
+		if (process.platform === 'win32') {
+			// The case-variant spelling must still see the marker (the probe
+			// reads via canonicalProjectKey, matching the writer).
+			const data = await getDiagnoseData(dir.toUpperCase());
+			const check = swarmDbCheck(data.checks);
+			expect(check?.status).toBe('⚠️');
+			expect(check?.detail).toContain('stale db-migration-failure.json marker');
+		}
+	});
+
+	test('#2480 review F-07: staleMarker is visible through the canonical key (win32 case variant)', async () => {
+		mkdirSync(path.join(dir, '.swarm'), { recursive: true });
+		getProjectDb(dir); // creates DB under the canonical key
+		writeFileSync(
+			path.join(dir, '.swarm', 'db-migration-failure.json'),
+			JSON.stringify({ schema_version: 1, version: 14, name: 'x', error: 'y' }),
+		);
+		if (process.platform === 'win32') {
+			// The case-variant spelling must still see the marker (the probe
+			// reads via canonicalProjectKey, matching the writer).
+			const data = await getDiagnoseData(dir.toUpperCase());
+			const check = swarmDbCheck(data.checks);
+			expect(check?.status).toBe('⚠️');
+			expect(check?.detail).toContain('stale db-migration-failure.json marker');
+		}
+	});
+
 	test('#2480 review F-07: a stale db-migration-failure.json marker surfaces as a warning', async () => {
 		mkdirSync(path.join(dir, '.swarm'), { recursive: true });
 		getProjectDb(dir);

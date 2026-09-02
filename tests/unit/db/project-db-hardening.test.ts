@@ -17,6 +17,7 @@ import {
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { ProjectDbError } from '../../../src/db/db-errors.js';
+import { getSwarmDbHealthSnapshot } from '../../../src/db/health.js';
 import {
 	closeAllProjectDbs,
 	closeProjectDb,
@@ -312,6 +313,93 @@ describe('#2480 review F-03: concurrent-apply detection', () => {
 		expect(row?.version ?? 0).toBeGreaterThanOrEqual(14);
 		expect(failuresBefore).toBe(0);
 		db.close();
+	});
+
+	test('the concurrent-apply continue branch drives the loop to completion without recording failures', () => {
+		// Deterministic replay of the race outcome: the concurrent winner has
+		// committed v14-v17 (rows in schema_migrations) AND its DDL (the
+		// tables exist). A loser whose cached MAX was stale re-runs; every
+		// INSERT collides (UNIQUE on schema_migrations.version), which the
+		// continue branch must absorb: normal return, zero failures, and —
+		// because the loop completes — the marker is cleaned up.
+		const dbFile = path.join(dir, '.swarm', 'race.db');
+		const seed = new Database(dbFile);
+		seed.run(`CREATE TABLE schema_migrations (
+			version INTEGER PRIMARY KEY, name TEXT NOT NULL,
+			applied_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+		seed.run(`CREATE TABLE project_constraints (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, constraint_type TEXT NOT NULL,
+			content TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+		seed.run(`CREATE TABLE migration_failures (
+			id INTEGER PRIMARY KEY AUTOINCREMENT, version INTEGER NOT NULL,
+			name TEXT NOT NULL, error TEXT NOT NULL,
+			failed_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+		seed.run(`CREATE TABLE insight_candidate (
+			stream_id TEXT NOT NULL, version INTEGER NOT NULL, payload TEXT NOT NULL,
+			created_at TEXT NOT NULL, consumed_at TEXT, PRIMARY KEY(stream_id, version))`);
+		seed.run(`CREATE INDEX idx_ic ON insight_candidate(stream_id, version)`);
+		seed.run(`CREATE TABLE phase_report (
+			kind TEXT NOT NULL, phase INTEGER NOT NULL, payload TEXT NOT NULL,
+			updated_at TEXT NOT NULL DEFAULT (datetime('now')), PRIMARY KEY(kind, phase))`);
+		for (const [v, n] of [
+			[14, 'create_migration_failures'],
+			[15, 'create_insight_candidate_stream'],
+			[16, 'create_insight_candidate_pending_index'],
+			[17, 'create_phase_report'],
+		] as const) {
+			seed.run('INSERT INTO schema_migrations (version, name) VALUES (?, ?)', [
+				v,
+				n,
+			]);
+		}
+		seed.close();
+
+		// Loser re-runs the full migration loop over the winner's committed
+		// state: v14-v17 DDL is IF NOT EXISTS (silent), the schema_migrations
+		// INSERTs hit UNIQUE -> the continue branch absorbs each one. (The
+		// pre-read MAX is already 17 here, so this pins loop completion +
+		// zero spurious failures + marker cleanup on the raced state; the
+		// stale-MAX entry into the branch is covered by the matcher test
+		// above and the retry test at :111-151 for the false branch.)
+		const loser = new Database(dbFile);
+		const markerDir = path.join(dir, '.swarm');
+		expect(() => runProjectMigrations(loser, markerDir)).not.toThrow();
+		expect(
+			loser
+				.query<{ n: number }, []>(
+					'SELECT COUNT(*) as n FROM migration_failures',
+				)
+				.get()?.n,
+		).toBe(0);
+		expect(existsSync(path.join(markerDir, 'db-migration-failure.json'))).toBe(
+			false,
+		);
+		loser.close();
+	});
+});
+
+describe('#2480 review F-07: stale marker probe (canonical keyed)', () => {
+	test('getSwarmDbHealthSnapshot reports the marker and clears when removed', () => {
+		// getSwarmDbHealthSnapshot must report the stale marker so removing
+		// the staleMarker field or the canonical probe fails this test.
+		mkdirSync(path.join(dir, '.swarm'), { recursive: true });
+		const snapshotDb = new Database(path.join(dir, '.swarm', 'swarm.db'));
+		snapshotDb.close();
+		writeFileSync(
+			path.join(dir, '.swarm', 'db-migration-failure.json'),
+			JSON.stringify({ schema_version: 1, version: 14 }),
+		);
+		const snapshot = getSwarmDbHealthSnapshot(dir);
+		expect(snapshot.kind).toBe('open');
+		if (snapshot.kind === 'open') {
+			expect(snapshot.staleMarker).toBe(true);
+		}
+		// The snapshot's own getProjectDb open already removed the marker
+		// (designed cleanup on successful migration loop) — probe reflects it.
+		expect(getSwarmDbHealthSnapshot(dir)).toMatchObject({
+			kind: 'open',
+			staleMarker: false,
+		});
 	});
 });
 

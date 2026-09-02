@@ -136,7 +136,12 @@ export class GroupCommitWriter {
 		// (busy/disk-full retries), force a flush attempt at the cap so the
 		// queue cannot grow without bound. The cap is push-then-flush: with
 		// persistently failing flushes the queue settles at MAX+1 (a drop
-		// would violate the never-silent-drop contract).
+		// would violate the never-silent-drop contract). DEFENSE-IN-DEPTH:
+		// with the current constants this block is unreachable in the busy
+		// path — the 64-threshold inline flush throws first and the caller's
+		// catch retains the batch, which is what actually keeps the queue at
+		// MAX+1. This only becomes load-bearing if FLUSH_THRESHOLD_OPS is
+		// ever raised to >= MAX_QUEUED_OPS.
 		if (this.queue.length >= MAX_QUEUED_OPS) {
 			this.flushSync();
 		}
