@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.162.0](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.161.1...v7.162.0) (2026-09-02)
+
+
+### Features
+
+* **memory:** add durable related memory links ([c627f63](https://github.com/ZaxbyHub/opencode-swarm/commit/c627f637efc9482d0740e0824791d35f5306ed1f))
+
 ## [7.161.1](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.161.0...v7.161.1) (2026-09-01)
 
 
