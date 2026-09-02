@@ -10,12 +10,12 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import {
 	collectDbFoundationStalenessErrors,
 	collectDbHandleConfinementErrors,
 	moduleWritesDurableState,
 } from '../../../scripts/check-retention-registry';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 let root: string;
 
