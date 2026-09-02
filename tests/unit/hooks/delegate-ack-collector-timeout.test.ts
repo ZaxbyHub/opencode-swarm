@@ -107,7 +107,7 @@ async function seedRetrieved(
 		result_ids: resultIds,
 		ranks: Object.fromEntries(resultIds.map((id, i) => [id, i + 1])),
 		scores: Object.fromEntries(resultIds.map((id) => [id, 1])),
-		timestamp: new Date().toISOString(),
+		timestamp: '2026-01-01T00:00:00.000Z',
 	});
 }
 
