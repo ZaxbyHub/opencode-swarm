@@ -4,8 +4,10 @@
  *
  * Belt-and-braces runtime check on top of the compile-time guarantees:
  *   - ToolMeta requires description + agents (a missing one is a TS error).
- *   - manifest.ts `satisfies Record<ToolName, () => ToolDefinition>` makes the
- *     handler set exhaustive vs the metadata keys (a missing handler is a TS error).
+ *   - manifest.ts registers handlers via `defineHandlers<T extends
+ *     Record<ToolName, () => ToolDefinition>>`; the generic constraint makes
+ *     the handler set exhaustive vs the metadata keys (a missing or stray
+ *     handler is a TS error).
  * This script verifies the runtime-derived sets (plugin tool object, TOOL_NAMES,
  * descriptions, AGENT_TOOL_MAP) stay coherent with the metadata, and exits
  * non-zero on any drift.
@@ -213,9 +215,9 @@ export function collectToolRegistrationErrors(
 	//    TOOL_NAMES ⇔ AGENT_TOOL_MAP plus the reverse source→metadata scan,
 	//    but none of them import the barrel — a surface still required by
 	//    wiring/registration tests (tests/unit/tools/wiring-adversarial.test.ts,
-	//    tests/unit/tools/check-gate-status-export.test.ts,
-	//    tests/integration/*-registration.test.ts). The barrel is loaded
-	//    synchronously via createRequire (works under Bun for this ESM
+	//    tests/unit/tools/check-gate-status-export.test.ts, and
+	//    tests/integration/declare-scope-registration.test.ts). The barrel is
+	//    loaded synchronously via createRequire (works under Bun for this ESM
 	//    barrel) and is injectable for the regression test, which hands the
 	//    collector a copy of the real barrel with one export deleted.
 	const barrel: Record<string, unknown> =
@@ -388,20 +390,33 @@ function* walkTsFiles(dir: string): Generator<string> {
 	}
 }
 
-function main(): void {
-	const errors = collectToolRegistrationErrors();
+/**
+ * CLI body: run all checks and report, returning the process exit code
+ * (0 = coherent, 1 = violations). Separated from {@link main} so the
+ * exit-code and success-message contract is testable without spawning a
+ * child process.
+ */
+export function runToolRegistrationCli(
+	options: ToolRegistrationCheckOptions = {},
+): number {
+	const errors = collectToolRegistrationErrors(options);
 	if (errors.length > 0) {
 		console.error('Tool registration check FAILED:\n');
 		for (const e of errors) console.error(`  - ${e}`);
 		console.error(
 			`\n${errors.length} violation(s). Every tool needs a TOOL_METADATA entry (src/tools/tool-metadata.ts) and a handler (src/tools/manifest.ts).`,
 		);
-		process.exit(1);
+		return 1;
 	}
 
 	console.log(
 		`Tool registration check passed: ${Object.keys(TOOL_METADATA).length} tools, coherent across metadata, handlers, the plugin object, TOOL_NAMES, AGENT_TOOL_MAP, and the src/tools/index.ts barrel.`,
 	);
+	return 0;
+}
+
+function main(): void {
+	process.exit(runToolRegistrationCli());
 }
 
 if (import.meta.main) {

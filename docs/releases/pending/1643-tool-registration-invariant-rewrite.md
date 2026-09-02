@@ -22,8 +22,8 @@
   the `src/tools/index.ts` barrel, loaded synchronously via `createRequire`.
   Checks 1–6 never imported the barrel, so a tool missing its barrel export —
   a surface still required by `tests/unit/tools/wiring-adversarial.test.ts`,
-  `tests/unit/tools/check-gate-status-export.test.ts`, and the
-  `tests/integration/*-registration.test.ts` files — passed drift-check.
+  `tests/unit/tools/check-gate-status-export.test.ts`, and
+  `tests/integration/declare-scope-registration.test.ts` — passed drift-check.
   The new check is additive; existing signatures keep their shape, with an
   optional injectable-barrel parameter for testing.
 - **New regression test**
@@ -31,7 +31,17 @@
   cases plus a deliberately-missing-export case that fails the collector
   exactly as the issue's acceptance criteria require (verified end-to-end:
   removing one barrel line makes `bun run scripts/check-tool-registration.ts`
-  exit 1; the restored tree passes).
+  exit 1; the restored tree passes). The CLI exit-code/success-message
+  contract and the drift-check detector propagation are under test as well.
+- **Review follow-ups (docs/comment accuracy):** the contract text now names
+  the real exhaustiveness mechanism (`defineHandlers<T extends
+  Record<ToolName, () => ToolDefinition>>`, a generic constraint) instead of
+  misnaming it `satisfies` — in `AGENTS.md`, the check-script header, and the
+  `tool-metadata` / `tool-doctor` module headers; barrel-consumer citations
+  name only the tests that actually import the barrel; and stale
+  manual-registration vocabulary in the pending `507-tool-manifest` /
+  `epic-mode-activation` fragments was synced to the same derived-contract
+  wording.
 
 ## Why
 
@@ -45,8 +55,8 @@ compile-enforced — the barrel export — was unverified by
 ## Migration steps
 
 None. No runtime behavior changed; docs and a CI/dev script only. The new
-check passes on the current tree (all 126 `TOOL_NAMES` entries have defined
-barrel exports).
+check passes on the current tree (every `TOOL_NAMES` entry has a defined
+barrel export).
 
 ## Known caveats
 

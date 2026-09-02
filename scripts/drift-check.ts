@@ -41,7 +41,10 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { collectToolRegistrationErrors } from './check-tool-registration';
+import {
+	collectToolRegistrationErrors,
+	type ToolRegistrationCheckOptions,
+} from './check-tool-registration';
 import { collectEventContractErrors } from './check-event-contract';
 import { collectCoreEventsUsageErrors } from './check-core-events-usage';
 import { collectShellAuditUsageErrors } from './check-shell-audit-usage';
@@ -819,8 +822,10 @@ export function detectBundledSkillDrift(root: string = REPO_ROOT): DriftFinding[
 // 3) Tool registration drift (reuse of check-tool-registration.ts)
 // ---------------------------------------------------------------------------
 
-export function detectToolRegistrationDrift(): DriftFinding[] {
-	return collectToolRegistrationErrors().map((message) => ({
+export function detectToolRegistrationDrift(
+	options: ToolRegistrationCheckOptions = {},
+): DriftFinding[] {
+	return collectToolRegistrationErrors(options).map((message) => ({
 		category: 'tool',
 		severity: 'error' as const,
 		file: 'src/tools/tool-metadata.ts',

@@ -36,10 +36,11 @@
 - New `turbo.epic.mode.*` config block (defaults: `enabled: false`,
   `activation_threshold: 0.3`, `min_commits_for_signal: 20`). Added
   to the existing `EpicConfigSchema`.
-- New tool registered the project's standard way: export from
-  `src/tools/index.ts`, registered in the plugin `tool: {}` block in
-  `src/index.ts`, entry in `TOOL_NAMES` (`src/tools/tool-names.ts`) and
-  `AGENT_TOOL_MAP` + description map (`src/config/constants.ts`).
+- New tool registered the project's standard way: a `TOOL_METADATA` entry in
+  `src/tools/tool-metadata.ts` plus a `TOOL_MANIFEST` handler in
+  `src/tools/manifest.ts` (both compile-checked) and an export in the
+  `src/tools/index.ts` barrel; the plugin object, `TOOL_NAMES`, and
+  `AGENT_TOOL_MAP` derive automatically.
 - 73 new tests covering the durable state (atomic write, fail-closed,
   enable/disable round-trip, decision recording), the activation logic
   across the three gates (each gate individually + combined-failure +
