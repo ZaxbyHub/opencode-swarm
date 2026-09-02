@@ -6,7 +6,6 @@
 
 import { Database } from 'bun:sqlite';
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import {
 	existsSync,
 	mkdirSync,
@@ -17,6 +16,7 @@ import {
 } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import { ProjectDbError } from '../../../src/db/db-errors.js';
 import {
 	closeAllProjectDbs,

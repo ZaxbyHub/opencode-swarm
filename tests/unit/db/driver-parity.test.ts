@@ -8,11 +8,11 @@
 
 import { Database } from 'bun:sqlite';
 import { describe, expect, test } from 'bun:test';
-import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import { runDriverParityContract } from '../../../src/db/driver-parity.js';
 import {
 	loadDatabaseCtor,

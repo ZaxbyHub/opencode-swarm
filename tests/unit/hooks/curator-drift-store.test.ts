@@ -7,7 +7,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { canonicalMkdtemp } from '../../helpers/tmpdir';
 import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -21,6 +20,7 @@ import {
 } from '../../../src/hooks/curator-drift';
 import type { DriftReport } from '../../../src/hooks/curator-types';
 import { withFrozenClock } from '../../helpers/test-clock';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function createValidDriftReport(phase: number): DriftReport {
 	withFrozenClock(() => {}); // #1782: deterministic timestamp

@@ -8,7 +8,6 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import { spawnSync } from 'node:child_process';
 import {
 	existsSync,
@@ -20,6 +19,7 @@ import {
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { canonicalMkdtemp } from '../../../helpers/tmpdir';
 import {
 	appendInsightCandidatesDb,
 	consumeInsightCandidatesDb,
