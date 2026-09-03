@@ -485,4 +485,3 @@ describe('pre_check_batch honors gates.sast_scan/quality_budget.enabled:false', 
 		expect(qb.result?.metrics?.thresholds?.enabled).toBe(false);
 	});
 });
-
