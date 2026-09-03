@@ -1001,9 +1001,13 @@ jobs:
 
   # Merge-queue-only: on pull_request all steps are skipped, job reports success.
   # CI-004: does not wait for `unit` or `integration`. Smoke builds its own
-  # package from source and consumes nothing from either job; the remaining
-  # `needs` are kept because they are cheap and finish long before smoke's
-  # own build. Do NOT add `if: always()` here — a skipped prerequisite must
+  # package from source and consumes nothing from either job. The remaining
+  # `needs` are kept: package-check and php-validation are short, and
+  # rust-sandbox-runner measured ~76 s with a warm cargo cache (its timeout is
+  # 30 min) — it now gates smoke's START, so a cold cache or a broken Rust
+  # build delays smoke instead of running beside it. If that ever shows up in
+  # run timings, move rust-sandbox-runner out of smoke's needs rather than
+  # adding a job-level if. Do NOT add `if: always()` here — a skipped prerequisite must
   # still skip smoke, which is the required-check eviction class PR #2313 hit.
   smoke:
     needs: [detect-release, package-check, php-validation, rust-sandbox-runner]
