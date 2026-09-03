@@ -9976,7 +9976,7 @@ has been looking for its fix.
 #2507 owns HOOKS-2, the delegation loop detector that is dead in production because it compares
 against `'Task'` while the host's tool id is lowercase `'task'`. The census found five exclusive
 `'Task'` comparison sites, and HOOKS-3 is a second live consequence at
-`src/index.ts:3906`: `registerPendingTaskModelRoute` sits behind the same exact compare, so no
+`src/index.ts:3906` at the audit base `cbcce9d` (`:3921`, with the call at `:3929`, at `3bbad17`): `registerPendingTaskModelRoute` sits behind the same exact compare, so no
 task-model route is ever registered. Fixing the loop detector without fixing the compare class
 leaves the rest dead.
 
@@ -10362,7 +10362,7 @@ Closes HOOKS-3; shares its root cause with HOOKS-2 (owned by #2507).
 
 The tool-id census found five exclusive `'Task'` comparison sites against a host whose task tool id
 is lowercase `'task'`. HOOKS-2 — the delegation loop detector's 3× warning and 5× circuit breaker —
-is one, and it is already scoped to #2507. `registerPendingTaskModelRoute` (`src/index.ts:3906`) is
+is one, and it is already scoped to #2507. `registerPendingTaskModelRoute` (`src/index.ts:3906` at the audit base `cbcce9d`; the call is at `:3929` at `3bbad17`) is
 another and has no owner: no task-model route is ever registered, so a configured
 `fallback_models` chain for subagents never engages on a provider 429 or 503. Fixing one site
 without normalizing the comparison leaves the rest dead.
@@ -10498,12 +10498,27 @@ the six-row artifact table.
 | N10 | #2524 | fix(config): the whole gates.* configuration section is inert |
 | N11 | #2525 | fix(evidence): repair_gate_evidence's receipt-less branch wedges a task permanently |
 | — | #2539 | fix(db): node:sqlite run(sql) with no bindings returns undefined (INIT-4; its intended owner #2480 closed first) |
+| — | #2540 | fix(repo-graph): six repo_map actions still have no consumer after #2488 closed (REPOGRAPH-11 residual) |
 
 Workstream H's numbering is severity order, not merge order; each issue's own merge-order note governs
 sequencing, and #2527 can start before #2526.
 
-**Not executed at the time of this revision:** the amendments to #2472, #2474, #2488 and #2507, and the
-coverage correction on #2502 and #2506. They remain recommendations in 8.1 until applied.
+**Executed in a second pass on 2026-09-02, after an independent artifact verifier and an adversarial critic
+reviewed the first pass:** the amendments to #2472, #2474 and #2507 and the coverage corrections on #2502 and
+#2506 were applied; #2488 had already closed at 23:03 as completed when PR #2516 merged, so its amendment is
+moot — six of the twelve `repo_map` actions it was to wire remain unreferenced on `main`, and that residual is
+now **#2540**. The verifier found that the first-pass issue bodies carried three citations to files that do not
+exist (`src/plan/hash.ts` and `src/hooks/plan-critic-gate.ts` in #2523; `src/gates/` in #2524), one line
+number that was never that function (`src/index.ts:3906` in #2529 — correct at the audit base, wrong at the
+commit the issue cited), one wrong verification chain (#2530), and merge-order notes that had gone stale when
+#2516 merged (#2529, #2533). All were corrected in place; #2523's original note had also reversed the
+parallel-safety conclusion, and a release fragment for it already existed on `main`, so that correction was
+posted with a rebase instruction. #2469 gained bullet A1-0a for the `RecordSchema` refinement the first rewrite
+dropped. #2526's Workstream H rationale was corrected — H2 is a destructive-safety defect, not a host-contract
+one — and #2527 now cross-references #2508's confirmation pattern. Two review comments contained statements that
+were false at the head they named (#2515's "read by nothing", #2517's "byte-identical"); corrections were posted
+beneath each. Still carrying a harmless stale "#2516 open" clause: #2525, #2531, #2532 and #2539. None of these
+fabricated paths appear in the report itself; they originated in the issue bodies.
 
 ## 9. Appendix: artifacts
 
