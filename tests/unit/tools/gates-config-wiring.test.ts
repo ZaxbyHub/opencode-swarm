@@ -486,7 +486,3 @@ describe('pre_check_batch honors gates.sast_scan/quality_budget.enabled:false', 
 	});
 });
 
-// ---
-// Drift-check contract: the reader registry covers every schema section and
-// points at real files (scripts/drift-check-gates-docs.ts enforces the same
-// statically; this pins the registry from the test side).
