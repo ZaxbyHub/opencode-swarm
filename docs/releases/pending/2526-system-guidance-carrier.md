@@ -1,0 +1,19 @@
+# Swarm guidance now actually reaches the model
+
+## Guardrail advisories, knowledge/memory recall, delegation guidance and issue-trace directives are now delivered — and telemetry no longer claims delivery for guidance the model never saw
+
+The OpenCode host's message→request converter only handles `user` and `assistant` messages: its message schema has no `system` member and its conversion loop has no `else`. Every synthetic `role:'system'` entry the plugin spliced into the chat message-transform chain was therefore **silently discarded before the request was built** — guardrail advisories, the QA-gate and self-coding warnings, knowledge directives, memory recall bundles, delegation guidance ([NEXT]/batch/violation), and the issue-trace MODE directives were all dark while the plugin's own telemetry recorded them as delivered. Worse, the issue-trace hook pushed flat entries without a `parts` array, and the host dereferences `msg.parts` unconditionally — an active `--trace` turn could **crash the host's prompt build with a TypeError** instead of just dropping quietly.
+
+**What works now:**
+
+- All model-only plugin guidance rides **user-role guidance carriers**: `{ id: 'swarm-guidance:<kind>', role: 'user' }` messages whose text is wrapped in a `<swarm_system_directive source="opencode-swarm" kind="…">` provenance fence, so the model can tell injected directives apart from real user speech. The pinned host renders these unconditionally — proven by new tests that replay the plugin's real registered transform chain through a pinned distillation of the host's own conversion code.
+- A `--trace` turn completes with the `[MODE: …]` directive delivered; the flat-entry TypeError class is gone at the source.
+- Delivery telemetry for injected guidance (memory recall, knowledge directives, advisory queue) now asserts the host-render contract — non-empty delivered text in a renderable carrier shape — instead of "I appended it to my own array". When guidance does not reach a renderable surface, it is no longer reported as delivered.
+- The transform chain's final handler now **materializes** any remaining `role:'system'` entry into a guidance carrier in place (or drops tool-result-shaped and empty ones). The transformed array contains zero system entries, which makes the old local-model guarantee ("no system message at index > 0", Qwen/Gemma) absolute: the only system messages in the model request are the host's own from the system-prompt surface.
+- Injected directives can no longer be mistaken for agent output: the knowledge-application and skill-propagation message scans skip guidance carriers, and the context-pruning classifier keeps carriers at never-prune priority (the same protection system entries had).
+
+**Durable guards against recurrence:**
+
+- A pinned host-contract test fails when the lockfile's `@opencode-ai/plugin` / `@opencode-ai/sdk` version moves off the verified host (`1.18.3`), forcing re-verification of the vendored host-contract fixture — the assumption that broke here can no longer drift silently.
+- A source-scan ratchet fails any new `role:'system'` construction in production code (the role-filter's system-prompt-string adapter and the boundary materializer are the only allowlisted handlers).
+- An exit-gate test drives the real registered plugin chain end to end: a guardrail advisory, a knowledge recall and a memory recall must each be present in the messages the host actually renders.

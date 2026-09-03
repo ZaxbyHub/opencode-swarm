@@ -1408,8 +1408,13 @@ describe('Run memory wiring', () => {
 		expect(text).toContain('Always validate inputs');
 		// Should NOT contain run memory section
 		expect(text).not.toContain('## RUN MEMORY');
-		// The knowledge section should start with the 📚 emoji
-		expect(text).toMatch(/^.*📚 Lessons:/);
+		// #2526: the knowledge block rides a user-role guidance carrier; the
+		// carrier body (after the opening fence line) starts with the sentinel +
+		// 📚 Lessons: header — run memory is not prepended before it.
+		const fenceOpen =
+			'<swarm_system_directive source="opencode-swarm" kind="knowledge">\n';
+		expect(text.startsWith(fenceOpen)).toBe(true);
+		expect(text.slice(fenceOpen.length)).toMatch(/^.*📚 Lessons:/);
 	});
 
 	it('[FOR: architect, coder] tag present in output when run memory is available', async () => {

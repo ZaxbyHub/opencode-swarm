@@ -25,6 +25,26 @@ import type { TraceState } from '../../../src/hooks/issue-trace-reducer';
 
 // ── Helpers ────────────────────────────────────────────────────────
 
+/**
+ * Issue #2526: MODE directives ride a user-role guidance carrier with a
+ * provenance fence instead of a flat role:'system' entry (which the host
+ * converter discards). Expected-carrier helper mirrors the literal contract.
+ */
+function expectIssueTraceCarrier(body: string): {
+	info: { id: string; role: string };
+	parts: Array<{ type: string; text: string }>;
+} {
+	return {
+		info: { id: 'swarm-guidance:issue-trace', role: 'user' },
+		parts: [
+			{
+				type: 'text',
+				text: `<swarm_system_directive source="opencode-swarm" kind="issue-trace">\n${body}\n</swarm_system_directive>`,
+			},
+		],
+	};
+}
+
 /** Creates a temp dir under os.tmpdir() with .swarm/ subdirectory. */
 function makeTempDir(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'issue-trace-test-'));
@@ -179,10 +199,7 @@ describe('issue-trace hook', () => {
 
 		const messages = await runHook(tmpDir);
 		expect(messages).toHaveLength(1);
-		expect(messages[0]).toEqual({
-			role: 'system',
-			content: [{ type: 'text', text: '[MODE: PLAN]' }],
-		});
+		expect(messages[0]).toEqual(expectIssueTraceCarrier('[MODE: PLAN]'));
 	});
 
 	test('state mutation: trace-state updated with new lastTransition + in_progress status', async () => {
@@ -302,10 +319,7 @@ describe('issue-trace hook', () => {
 		// Spec + no plan (reproduction waived) → PLAN fires; critic approval is
 		// only consulted after a plan exists.
 		expect(messages).toHaveLength(1);
-		expect(messages[0]).toEqual({
-			role: 'system',
-			content: [{ type: 'text', text: '[MODE: PLAN]' }],
-		});
+		expect(messages[0]).toEqual(expectIssueTraceCarrier('[MODE: PLAN]'));
 	});
 
 	// Issue #2131 finding 2.5: durable delivery ordering.
@@ -347,15 +361,11 @@ describe('issue-trace hook', () => {
 
 		const messages = await runHook(tmpDir);
 		expect(messages).toHaveLength(1);
-		expect(messages[0]).toEqual({
-			role: 'system',
-			content: [
-				{
-					type: 'text',
-					text: 'All implementation phases are complete. Compose commit-pr to publish the PR. Read .swarm/issue-reference.json for Closes #42. After the PR is created/updated, call record_issue_publication (with the issue number, PR number, URL, and HEAD sha) so this trace reaches its terminal published state — the trace is NOT complete until publication is confirmed.',
-				},
-			],
-		});
+		expect(messages[0]).toEqual(
+			expectIssueTraceCarrier(
+				'All implementation phases are complete. Compose commit-pr to publish the PR. Read .swarm/issue-reference.json for Closes #42. After the PR is created/updated, call record_issue_publication (with the issue number, PR number, URL, and HEAD sha) so this trace reaches its terminal published state — the trace is NOT complete until publication is confirmed.',
+			),
+		);
 
 		const state = readJson<TraceState>(tmpDir, 'issue-trace-state.json');
 		expect(state?.status).toBe('publication_handoff');
@@ -379,15 +389,11 @@ describe('issue-trace hook', () => {
 
 		const messages = await runHook(tmpDir);
 		expect(messages).toHaveLength(1);
-		expect(messages[0]).toEqual({
-			role: 'system',
-			content: [
-				{
-					type: 'text',
-					text: 'Publication confirmed. The issue-trace workflow is complete.',
-				},
-			],
-		});
+		expect(messages[0]).toEqual(
+			expectIssueTraceCarrier(
+				'Publication confirmed. The issue-trace workflow is complete.',
+			),
+		);
 		const state = readJson<TraceState>(tmpDir, 'issue-trace-state.json');
 		expect(state?.status).toBe('published');
 		expect(state?.lastTransition).toBe('PUBLISHED');
@@ -431,10 +437,7 @@ describe('issue-trace hook', () => {
 
 			const messages = await runHook(tmpDir);
 			expect(messages).toHaveLength(1);
-			expect(messages[0]).toEqual({
-				role: 'system',
-				content: [{ type: 'text', text: '[MODE: PLAN]' }],
-			});
+			expect(messages[0]).toEqual(expectIssueTraceCarrier('[MODE: PLAN]'));
 		});
 
 		test('reproduction receipt for a DIFFERENT issue does NOT permit PLAN', async () => {

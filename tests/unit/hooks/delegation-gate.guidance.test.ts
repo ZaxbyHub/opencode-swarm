@@ -3,11 +3,15 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
+import {
+	findGuidanceCarriers,
+	type GuidanceMessage,
+	isGuidanceCarrier,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import {
-	findSystemMessage,
 	getPrimaryText,
-	getSystemWarningText,
 	makeConfig,
 	makeMessages,
 } from './_delegation-gate-helpers';
@@ -20,10 +24,7 @@ function makeTempProject(prefix: string): string {
 }
 
 // Type for message structure
-type TestMessageWithParts = {
-	info: { role: string; agent?: string; sessionID?: string };
-	parts: Array<{ type: string; text?: string }>;
-};
+type TestMessageWithParts = GuidanceMessage;
 
 // ============================================
 // Task 4.2: Model-Only [NEXT] Guidance Tests (replaces visible deliberation preamble)
@@ -45,20 +46,21 @@ describe('Task 4.2: model-only [NEXT] guidance injection (replaces visible delib
 		}
 	});
 
-	// Helper to find system message containing [NEXT] guidance
+	// Helper to find the guidance carrier containing [NEXT] guidance (issue
+	// #2526: model-only guidance rides a user-role carrier)
 	const findSystemGuidance = (messages: {
 		messages: TestMessageWithParts[];
 	}) => {
-		return messages.messages.find(
-			(m) =>
-				m.info?.role === 'system' &&
-				m.parts?.some((p) => p.text?.includes('[NEXT]')),
+		return findGuidanceCarriers(messages.messages).find((m) =>
+			messageTextOf(m).includes('[NEXT]'),
 		);
 	};
 
-	// Helper to get user message text
+	// Helper to get the REAL user message text (excludes guidance carriers)
 	const getUserText = (messages: { messages: TestMessageWithParts[] }) => {
-		const userMsg = messages.messages.find((m) => m.info?.role === 'user');
+		const userMsg = messages.messages.find(
+			(m) => m.info?.role === 'user' && !isGuidanceCarrier(m),
+		);
 		return userMsg?.parts?.[0]?.text ?? '';
 	};
 
@@ -215,11 +217,12 @@ describe('Task 4.2: model-only [NEXT] guidance injection (replaces visible delib
 		expect(getPrimaryText(messages)).toBe(originalText);
 		expect(getPrimaryText(messages)).not.toContain('[DELIBERATE:');
 
-		// No system messages should be added
-		const systemMessages = messages.messages.filter(
-			(m) => m.info?.role === 'system',
-		);
-		expect(systemMessages.length).toBe(0);
+		// No guidance carriers or role:'system' entries should be added
+		const carriers = findGuidanceCarriers(messages.messages);
+		expect(carriers.length).toBe(0);
+		expect(
+			messages.messages.filter((m) => m?.info?.role === 'system').length,
+		).toBe(0);
 	});
 
 	it('non-coder delegation also gets [NEXT] guidance (runs before isCoderDelegation check)', async () => {

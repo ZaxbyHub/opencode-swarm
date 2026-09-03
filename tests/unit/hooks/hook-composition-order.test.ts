@@ -14,7 +14,7 @@ import * as path from 'node:path';
  *
  * messages.transform:
  *   advisory drain  <  memory recall  <  knowledge injector  <
- *   consolidation (final structure mutation)  <  final context accounting
+ *   system-entry materialization (final structure mutation, issue #2526)  <  final context accounting
  * system.transform:
  *   system-enhancer (begins the turn ledger)  <  context capsule (claims)
  *
@@ -78,39 +78,39 @@ describe('messages.transform composition order (#2107 §2)', () => {
 		).toBeLessThan(orderOf(messagesChain, 'knowledgeInjectorHook'));
 	});
 
-	test('knowledge injector runs before consolidation', () => {
+	test('knowledge injector runs before the system-entry materializer', () => {
 		expect(orderOf(messagesChain, 'knowledgeInjectorHook')).toBeLessThan(
 			orderOf(
 				messagesChain,
-				'consolidateSystemMessagesInPlace(output.messages)',
+				'materializeSystemGuidanceInPlace(output.messages)',
 			),
 		);
 	});
 
-	test('consolidation runs before final context accounting', () => {
+	test('materializer runs before final context accounting', () => {
 		expect(
 			orderOf(
 				messagesChain,
-				'consolidateSystemMessagesInPlace(output.messages)',
+				'materializeSystemGuidanceInPlace(output.messages)',
 			),
 		).toBeLessThan(orderOf(messagesChain, 'finalContextAccountingStep'));
 	});
 
-	test('consolidation is the last STRUCTURE-mutating handler (accounting is read-mostly)', () => {
-		const consolidation = orderOf(
+	test('the materializer is the last STRUCTURE-mutating handler (accounting is read-mostly)', () => {
+		const materializer = orderOf(
 			messagesChain,
-			'consolidateSystemMessagesInPlace(output.messages)',
+			'materializeSystemGuidanceInPlace(output.messages)',
 		);
 		const after = messagesChain
-			.slice(consolidation + 1)
+			.slice(materializer + 1)
 			.slice(
 				0,
 				orderOf(
-					messagesChain.slice(consolidation + 1),
+					messagesChain.slice(materializer + 1),
 					'finalContextAccountingStep',
 				),
 			);
-		// Nothing between consolidation and the accounting step may splice,
+		// Nothing between the materializer and the accounting step may splice,
 		// unshift, or reassign the messages array.
 		expect(/messages\s*=\s|\.splice\(|\.unshift\(/.test(after)).toBe(false);
 	});

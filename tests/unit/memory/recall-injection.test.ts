@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { isGuidanceCarrier } from '../../../src/hooks/system-guidance-carrier';
 import type {
 	CuratorMemoryDecision,
 	MemoryLifecycleHookOptions,
@@ -206,10 +207,20 @@ describe('memory lifecycle injection', () => {
 		await hooks.messagesTransform({ sessionID: 'session-a' }, output);
 
 		expect(output.messages).toHaveLength(3);
-		expect(output.messages[1].info.role).toBe('system');
+		// #2526: the recall bundle rides a USER-role guidance carrier (the host
+		// drops role:'system' entries from this surface); the carrier info
+		// carries the memory-recall id plus agent/sessionID attribution.
+		expect(isGuidanceCarrier(output.messages[1])).toBe(true);
+		expect(output.messages[1].info).toMatchObject({
+			id: 'swarm-guidance:memory-recall',
+			role: 'user',
+			agent: 'test_engineer',
+			sessionID: 'session-a',
+		});
 		expect(output.messages[1].parts[0].text).toContain(
 			'## Retrieved Swarm Memory',
 		);
+		// Insert position preserved: the carrier sits BEFORE the user task.
 		expect(output.messages[2].parts[0].text).toContain('TASK: verify');
 		expect(recalls[0].scopes).toEqual(allowedScopes);
 		expect(recalls[0].kinds).toEqual([

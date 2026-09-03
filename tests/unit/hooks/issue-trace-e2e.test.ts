@@ -23,6 +23,11 @@ import {
 	resetPhaseStatusCache,
 } from '../../../src/hooks/issue-trace';
 import type { TraceState } from '../../../src/hooks/issue-trace-reducer';
+import {
+	type GuidanceMessage,
+	isGuidanceCarrier,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -117,11 +122,23 @@ async function runHook(
 	return output.messages;
 }
 
-function expectSystemMessage(messages: unknown[], text: string): void {
+/**
+ * Issue #2526: MODE directives ride a user-role guidance carrier with a
+ * provenance fence (the host converter discards role:'system' entries from the
+ * messages transform surface), so the full-chain assertions pin the exact
+ * carrier shape instead of the former flat system entry.
+ */
+function expectIssueTraceCarrier(messages: unknown[], body: string): void {
 	expect(messages).toHaveLength(1);
+	expect(isGuidanceCarrier(messages[0])).toBe(true);
 	expect(messages[0]).toEqual({
-		role: 'system',
-		content: [{ type: 'text', text }],
+		info: { id: 'swarm-guidance:issue-trace', role: 'user' },
+		parts: [
+			{
+				type: 'text',
+				text: `<swarm_system_directive source="opencode-swarm" kind="issue-trace">\n${body}\n</swarm_system_directive>`,
+			},
+		],
 	});
 }
 
@@ -148,7 +165,7 @@ describe('issue-trace e2e — full chain', () => {
 		// No plan → authoritative planExists is false → row (f) fires.
 
 		const messages = await runHook(tmpDir);
-		expectSystemMessage(messages, '[MODE: PLAN]');
+		expectIssueTraceCarrier(messages, '[MODE: PLAN]');
 
 		const state = readSwarmJson<TraceState>(tmpDir, 'issue-trace-state.json');
 		expect(state!.lastTransition).toBe('ISSUE_INGEST_TO_PLAN');
@@ -172,7 +189,7 @@ describe('issue-trace e2e — full chain', () => {
 			Promise.resolve({ planExists: true, allComplete: false });
 
 		const messages = await runHook(tmpDir);
-		expectSystemMessage(messages, '[MODE: EXECUTE]');
+		expectIssueTraceCarrier(messages, '[MODE: EXECUTE]');
 
 		const state = readSwarmJson<TraceState>(tmpDir, 'issue-trace-state.json');
 		expect(state!.lastTransition).toBe('PLAN_TO_EXECUTE');
@@ -200,8 +217,10 @@ describe('issue-trace e2e — full chain', () => {
 
 		const messages = await runHook(tmpDir);
 		expect(messages).toHaveLength(1);
-		const text = (messages[0] as { content: Array<{ text: string }> })
-			.content[0].text;
+		// #2526: the handoff directive rides a user-role guidance carrier — the
+		// fenced carrier body carries the directive text.
+		expect(isGuidanceCarrier(messages[0])).toBe(true);
+		const text = messageTextOf(messages[0] as GuidanceMessage);
 		expect(text).toContain('Closes #42');
 		expect(text).toContain('commit-pr');
 		expect(text).toContain('trace is NOT complete');
@@ -225,7 +244,7 @@ describe('issue-trace e2e — full chain', () => {
 		});
 
 		const messages = await runHook(tmpDir);
-		expectSystemMessage(
+		expectIssueTraceCarrier(
 			messages,
 			'Publication confirmed. The issue-trace workflow is complete.',
 		);

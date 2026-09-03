@@ -29,6 +29,11 @@ import * as path from 'node:path';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 import {
+	findGuidanceCarriers,
+	isGuidanceCarrier,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
+import {
 	ensureAgentSession,
 	getActiveWindow,
 	getAgentSession,
@@ -74,12 +79,14 @@ function userMessage(text: string, sessionId: string): Msg {
 	};
 }
 
+/**
+ * Issue #2526: model-only guidance text ([HARD STOP], [ADVISORIES],
+ * SELF-CODING, …) lands in the USER-role guidance carrier (id
+ * 'swarm-guidance:guardrails'), no longer in a role:'system' entry.
+ */
 function firstSystemText(messages: Msg[]): string {
-	const sys = messages.find((m) => m.info.role === 'system');
-	const part = sys?.parts.find(
-		(p) => p.type === 'text' && typeof p.text === 'string',
-	);
-	return (part?.text as string) ?? '';
+	const carrier = findGuidanceCarriers(messages)[0];
+	return carrier ? messageTextOf(carrier) : '';
 }
 
 /** Creates a subagent session WITH a live invocation window. */
@@ -238,11 +245,15 @@ describe('PRM hard stop — two-token delivery lifecycle (#2063 C2)', () => {
 		expect(firstSystemText(messages)).toContain('[HARD STOP]');
 	});
 
-	test('injection lands even when the system message is created by the advisory drain', async () => {
-		// `systemMessages` is snapshotted near the top of the handler, BEFORE the
-		// non-architect advisory drain can `unshift` a synthetic system message.
-		// Reading that stale snapshot in the hard-stop block would clear the token
-		// and inject nothing for a carrier whose turn has no system message yet.
+	test('injection lands even when the carrier is created by the advisory drain', async () => {
+		// Pre-#2526, `systemMessages` was snapshotted near the top of the handler,
+		// BEFORE the non-architect advisory drain could `unshift` a synthetic
+		// system message. Reading that stale snapshot in the hard-stop block would
+		// clear the token and inject nothing for a carrier whose turn had no system
+		// message yet. With the guidance carrier, `ensureGuidanceCarrier`'s
+		// find-or-create semantics make the sharing structural: whichever block
+		// runs first creates the single carrier and the hard-stop block prepends
+		// into the SAME entry.
 		const sessionId = 'hardstop-created-system-msg';
 		await setupSubagent(hooks, sessionId);
 		const session = getAgentSession(sessionId);
@@ -256,7 +267,9 @@ describe('PRM hard stop — two-token delivery lifecycle (#2063 C2)', () => {
 		const messages: Msg[] = [userMessage('go', sessionId)];
 		await hooks.messagesTransform({}, { messages } as never);
 
-		expect(messages[0].info.role).toBe('system');
+		// Issue #2526: the drain's carrier (user-role, id 'swarm-guidance:guardrails')
+		// is the entry at index 0; the hard-stop block shared it.
+		expect(isGuidanceCarrier(messages[0])).toBe(true);
 		const text = firstSystemText(messages);
 		expect(text).toContain('[ADVISORIES]');
 		expect(text).toContain('[prm:repetition_loop:2]');
@@ -269,7 +282,8 @@ describe('PRM hard stop — two-token delivery lifecycle (#2063 C2)', () => {
 		// the ordinary case — nothing created one, yet the one-shot token was
 		// already cleared above the lookup: the hard stop was burned and the
 		// agent was denied with no explanation of why. The inject block now
-		// creates its own carrier, mirroring the drain's `unshift`.
+		// creates its own guidance carrier via ensureGuidanceCarrier, mirroring
+		// the drain.
 		const sessionId = 'hardstop-no-system-msg';
 		await setupSubagent(hooks, sessionId);
 		const session = getAgentSession(sessionId);
@@ -281,19 +295,22 @@ describe('PRM hard stop — two-token delivery lifecycle (#2063 C2)', () => {
 		await hooks.messagesTransform({}, { messages } as never);
 
 		expect(messages).toHaveLength(2);
-		expect(messages[0].info.role).toBe('system');
+		// Issue #2526: the created entry is a USER-role guidance carrier, not a
+		// role:'system' message (the host drops the latter from this surface).
+		expect(isGuidanceCarrier(messages[0])).toBe(true);
 		expect(firstSystemText(messages)).toContain('[HARD STOP]');
 		// And the token is still one-shot: a later turn is not re-decorated.
 		expect(getAgentSession(sessionId)?.prmHardStopInjectPending).toBe(false);
 	});
 
-	test('INVARIANT 10: the created system message is the ONLY one, even with a pending self-coding warning', async () => {
-		// The hard-stop `unshift` is not fenced by session type, so on an
-		// ARCHITECT session it can co-fire with the self-coding block, which
-		// reads the STALE `systemMessages` snapshot taken before it and unshifts
-		// its own carrier when that snapshot is empty. Two `{ role: 'system' }`
-		// messages is the #608 outage class (local models require exactly one at
-		// index 0), so the hard-stop branch keeps the snapshot honest.
+	test('INVARIANT 10: the created guidance carrier is the ONLY one, even with a pending self-coding warning', async () => {
+		// The hard-stop injection is not fenced by session type, so on an
+		// ARCHITECT session it can co-fire with the self-coding block. Pre-#2526
+		// the self-coding block read a STALE `systemMessages` snapshot and could
+		// `unshift` a SECOND `{ role: 'system' }` message — the #608 outage class
+		// (local models require exactly one at index 0). Issue #2526 makes the
+		// analogue structural: both blocks go through `ensureGuidanceCarrier`,
+		// whose find-first semantics guarantee a SINGLE shared carrier entry.
 		const sessionId = 'hardstop-architect-single-system-msg';
 		ensureAgentSession(sessionId, 'architect');
 		swarmState.activeAgent.set(sessionId, 'architect');
@@ -306,10 +323,10 @@ describe('PRM hard stop — two-token delivery lifecycle (#2063 C2)', () => {
 		const messages: Msg[] = [userMessage('go', sessionId)];
 		await hooks.messagesTransform({}, { messages } as never);
 
-		const systemMsgs = messages.filter((m) => m.info.role === 'system');
-		expect(systemMsgs).toHaveLength(1);
-		expect(messages[0].info.role).toBe('system');
-		// Both injections landed in that single message.
+		const carriers = findGuidanceCarriers(messages);
+		expect(carriers).toHaveLength(1);
+		expect(isGuidanceCarrier(messages[0])).toBe(true);
+		// Both injections landed in that single carrier.
 		const text = firstSystemText(messages);
 		expect(text).toContain('[HARD STOP]');
 		expect(text).toContain('SELF-CODING DETECTED');

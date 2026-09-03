@@ -5,6 +5,11 @@ import {
 	createGuardrailsHooks,
 } from '../../../src/hooks/guardrails';
 import {
+	findGuidanceCarriers,
+	isGuidanceCarrier,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
+import {
 	ensureAgentSession,
 	resetSwarmState,
 	swarmState,
@@ -149,20 +154,21 @@ describe('guardrails advisory injection', () => {
 
 		await hooks.messagesTransform({}, output as any);
 
-		const textPart = output.messages[0].parts[0] as {
-			type: string;
-			text: string;
-		};
+		// Issue #2526: guidance rides a user-role carrier (id 'swarm-guidance:guardrails')
+		// unshifted at index 0; the pre-seeded system message shifts to index 1 and is
+		// never touched by the injector.
+		const carriers = findGuidanceCarriers(output.messages as any);
+		expect(carriers).toHaveLength(1);
 		// An empty [ADVISORIES] wrapper would itself be the content-free injection
 		// this rule exists to remove.
-		expect(textPart.text).not.toContain('[ADVISORIES]');
+		expect(messageTextOf(carriers[0])).not.toContain('[ADVISORIES]');
 		// Deliberately NOT an exact-equality assertion: an unrelated injector
 		// (the PARTIAL GATE VIOLATION detector, which fires on any fresh session
 		// because an empty gateLog reads as "all gates missing") also prepends to
-		// this same text part. That defect is tracked separately in #1976 and is
+		// the same carrier body. That defect is tracked separately in #1976 and is
 		// explicitly out of scope here. Asserting equality would couple this test
 		// to a surface it does not control.
-		expect(textPart.text).toContain('base text');
+		expect(output.messages[1].parts[0]?.text).toContain('base text');
 		// Still drained, so blanks cannot accumulate.
 		expect(session.pendingAdvisoryMessages).toHaveLength(0);
 	});
@@ -206,9 +212,14 @@ describe('guardrails advisory injection', () => {
 		expect(occurrences).toBe(1);
 	});
 
-	test('the queue is NOT discarded unread when the system message has no text part', async () => {
-		// The clear previously sat outside the `if (textPart)` guard, so a system
+	test('the queue is NOT discarded unread when no injectable text surface pre-exists', async () => {
+		// Pre-#2526, the clear sat outside the `if (textPart)` guard, so a system
 		// message carrying no string text part silently destroyed the whole queue.
+		// The guidance carrier removed that failure mode structurally: it is
+		// find-or-created with its OWN text part, so delivery never depends on the
+		// shapes of surrounding messages. The drain now clears unconditionally
+		// AFTER emission (issue #2526 contract change — blank entries are dropped
+		// by the hygiene rules, so keeping them would re-drain every turn).
 		const sessionId = 'session-advisory-no-textpart';
 		ensureAgentSession(sessionId, 'architect');
 		swarmState.activeAgent.set(sessionId, 'architect');
@@ -218,7 +229,7 @@ describe('guardrails advisory injection', () => {
 
 		const systemMessage = {
 			info: { role: 'system', sessionID: sessionId },
-			// No text part at all.
+			// No text part at all — must no longer matter to delivery.
 			parts: [{ type: 'file' as const, text: undefined }],
 		};
 		const output = {
@@ -233,11 +244,15 @@ describe('guardrails advisory injection', () => {
 
 		await hooks.messagesTransform({}, output as any);
 
-		// Nothing was emitted, so nothing may be dropped — it must survive to be
-		// delivered on the next transform.
-		expect(session.pendingAdvisoryMessages).toEqual([
+		// The advisory was READ (delivered into the carrier), not silently destroyed.
+		const carrier = findGuidanceCarriers(output.messages as any)[0];
+		expect(carrier).toBeDefined();
+		expect(messageTextOf(carrier)).toContain(
 			'DEGRADED: something real happened',
-		]);
+		);
+		// Intentional new contract (#2526): clearing is unconditional after the
+		// drain block — the advisory above was delivered, so the queue is empty.
+		expect(session.pendingAdvisoryMessages).toEqual([]);
 	});
 
 	// -------------------------------------------------------------------------
@@ -359,9 +374,9 @@ describe('guardrails advisory injection', () => {
 	});
 
 	// -------------------------------------------------------------------------
-	// Test (d): creates system message when none present and injects
+	// Test (d): creates a guidance carrier when none present and injects
 	// -------------------------------------------------------------------------
-	test('creates system message when none present and injects', async () => {
+	test('creates a guidance carrier when none present and injects', async () => {
 		const sessionId = 'session-advisory-d';
 		ensureAgentSession(sessionId, 'architect');
 		swarmState.activeAgent.set(sessionId, 'architect');
@@ -382,9 +397,15 @@ describe('guardrails advisory injection', () => {
 
 		await hooks.messagesTransform({}, output as any);
 
-		// A new system message should have been prepended
+		// Issue #2526: a USER-role guidance carrier (id 'swarm-guidance:guardrails')
+		// is prepended — the OpenCode host drops role:'system' entries from this
+		// transform surface, so guidance must ride a user-role message instead.
 		expect(output.messages.length).toBe(2);
-		expect(output.messages[0].info.role).toBe('system');
+		expect(isGuidanceCarrier(output.messages[0])).toBe(true);
+		expect(output.messages[0].info.role).toBe('user');
+		expect((output.messages[0].info as { id?: unknown }).id).toBe(
+			'swarm-guidance:guardrails',
+		);
 
 		const textPart = output.messages[0].parts[0] as {
 			type: string;

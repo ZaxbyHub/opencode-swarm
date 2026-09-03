@@ -19,7 +19,7 @@
  *
  * The host builds `C`, hands the plugin a FRESH wrapper object `{messages: C}`,
  * discards the hook's return value, and then uses its own `C`. So this test
- * holds `C` itself (`original`) and asserts the consolidation is visible
+ * holds `C` itself (`original`) and asserts the system-entry materialization (#2526) is visible
  * through that reference — exactly what the host would see. Under a rebind,
  * `original` is untouched and `output.messages` points at a discarded clone.
  */
@@ -106,21 +106,30 @@ describe('composed experimental.chat.messages.transform mutates the host array i
 		// 1. The host still holds the SAME array object. A rebind fails here.
 		expect(output.messages).toBe(original);
 
-		// 2. Consolidation actually happened in that array. Under a rebind the
-		//    original array is untouched and still has two system messages.
+		// 2. System-entry materialization actually happened in that array
+		//    (issue #2526): every role:'system' entry was converted IN PLACE to
+		//    a user-role guidance carrier. Under a rebind the original array is
+		//    untouched and still has two system messages.
 		const systemRoles = original.filter(
 			(message) => message.info?.role === 'system',
 		);
-		expect(systemRoles).toHaveLength(1);
-		expect(original[0]?.info?.role).toBe('system');
+		expect(systemRoles).toHaveLength(0);
+		// Both legacy system entries were converted to carriers (position
+		// preserved); other handlers may add their own carriers (e.g. the
+		// delegation [NEXT] carrier at index 0), so assert by identity, not index.
+		const legacyCarriers = original.filter(
+			(message) => message.info?.id === 'swarm-guidance:legacy-system',
+		);
+		expect(legacyCarriers).toHaveLength(2);
+		expect(legacyCarriers.every((m) => m.info?.role === 'user')).toBe(true);
 
-		// 3. No injected text was lost — both system blocks survive, merged into
-		//    the index-0 message. Asserted on content rather than exact indices so
-		//    unrelated handlers in the chain (knowledge injection, delegation
-		//    guidance, sanitizer) cannot make this brittle.
-		const head = allText([original[0] as PartsMessage]);
-		expect(head).toContain(SYSTEM_A);
-		expect(head).toContain(SYSTEM_B);
+		// 3. No injected text was lost — both system blocks survive as carrier
+		//    bodies at their original positions. Asserted on content rather than
+		//    exact indices so unrelated handlers in the chain (knowledge
+		//    injection, delegation guidance, sanitizer) cannot make this brittle.
+		const body3 = allText(original);
+		expect(body3).toContain(SYSTEM_A);
+		expect(body3).toContain(SYSTEM_B);
 
 		// 4. The user turns are still present and still in order.
 		const body = allText(original);
@@ -147,10 +156,25 @@ describe('composed experimental.chat.messages.transform mutates the host array i
 		expect(output.messages).toBe(original);
 		expect(
 			original.filter((message) => message.info?.role === 'system'),
-		).toHaveLength(1);
-		// Idempotence: a second transform must not duplicate or drop history.
-		expect(original.length).toBe(afterFirst);
-		expect(allText([original[0] as PartsMessage])).toContain(SYSTEM_A);
+		).toHaveLength(0);
+		// Idempotence over HISTORY: every pre-existing entry survives the second
+		// pass exactly once, in order, and no system entries reappear. (Plugin
+		// producers legitimately re-emit per-transform guidance — the host hands
+		// a FRESH array per request in production — so only history entries are
+		// held stable here.)
+		const firstPassHistory = original.slice(0, afterFirst);
+		const historyIds = firstPassHistory.map((m) => m.info?.id);
+		for (const message of firstPassHistory) {
+			expect(
+				original.filter((m) => m === message),
+				'history entry duplicated by the second pass',
+			).toHaveLength(1);
+		}
+		const positions = historyIds.map((id) =>
+			original.findIndex((m) => m.info?.id === id),
+		);
+		expect(positions).toEqual([...positions].sort((a, b) => a - b));
+		expect(allText(original)).toContain(SYSTEM_A);
 		expect(allText(original)).toContain('only user turn');
 	});
 });

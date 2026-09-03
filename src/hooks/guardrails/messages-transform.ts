@@ -30,6 +30,13 @@ import {
 } from '../../utils/provider-error-classification';
 import { extractCurrentPhaseFromPlan } from '../extractors';
 import { extractModelInfo } from '../model-limits';
+import {
+	deliveredGuidanceDelta,
+	ensureGuidanceCarrier,
+	findGuidanceCarriers,
+	messageTextOf,
+	prependGuidanceText,
+} from '../system-guidance-carrier';
 import { estimateTokens } from '../utils';
 import { isExecutionEpisodeArmed } from './execution-episode';
 import { hashArgs } from './file-authority';
@@ -383,10 +390,11 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 			}
 		}
 
-		// Find system message(s) for model-only guidance injection
-		const systemMessages = messages.filter(
-			(msg) => msg.info?.role === 'system',
-		);
+		// Find guidance carriers for model-only guidance injection. Issue #2526:
+		// guidance rides user-role carriers (the host's converter drops
+		// role:'system' entries on this surface); each block below
+		// find-or-creates the session's carrier and prepends into its body.
+		const guidanceCarriers = findGuidanceCarriers(messages);
 
 		// v6.35.1: Runaway output detector — catch models streaming without tool calls
 		if (isArchitectSession && session) {
@@ -399,7 +407,7 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 					(message: string) =>
 						message.startsWith(TRANSIENT_PROVIDER_RECOVERY_TAG),
 				);
-				const alreadyInjected = systemMessages.some((message) =>
+				const alreadyInjected = guidanceCarriers.some((message) =>
 					getMessageText(message as ChatMessageLike).includes(
 						TRANSIENT_PROVIDER_RECOVERY_TAG,
 					),
@@ -508,24 +516,21 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 
 						const maxTurns = cfg.runaway_output_max_turns;
 						if (count >= maxTurns) {
-							// Hard STOP — inject into first system message
-							const stopMsg = systemMessages[0];
-							if (stopMsg) {
-								const stopPart = (stopMsg.parts ?? []).find(
-									(part): part is { type: string; text: string } =>
-										part.type === 'text' && typeof part.text === 'string',
-								);
-								if (
-									stopPart &&
-									!stopPart.text.includes('RUNAWAY OUTPUT STOP')
-								) {
-									stopPart.text =
-										`[RUNAWAY OUTPUT STOP]\n` +
+							// Hard STOP — prepend into the session's guidance carrier.
+							// Issue #2526: the host's converter drops role:'system'
+							// entries on this surface, so model-only guidance rides a
+							// user-role carrier (find-or-create) instead of mutating a
+							// system message that never reached the model.
+							const stopCarrier = ensureGuidanceCarrier(messages, 'guardrails');
+							if (!messageTextOf(stopCarrier).includes('RUNAWAY OUTPUT STOP')) {
+								prependGuidanceText(
+									stopCarrier,
+									'guardrails',
+									`[RUNAWAY OUTPUT STOP]\n` +
 										`You have produced ${count} consecutive responses without using any tools. ` +
 										`You MUST call a tool in your next response.\n` +
-										`[/RUNAWAY OUTPUT STOP]\n\n` +
-										stopPart.text;
-								}
+										`[/RUNAWAY OUTPUT STOP]\n`,
+								);
 							}
 							// Reset counter after injection
 							consecutiveNoToolTurns.set(sessionId, 0);
@@ -576,18 +581,15 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 				session.agentName,
 				pending.message,
 			);
-			// Inject into first system message (same pattern as self-coding warning)
-			const loopSystemMsg = systemMessages[0];
-			if (loopSystemMsg) {
-				const loopTextPart = (loopSystemMsg.parts ?? []).find(
-					(part): part is { type: string; text: string } =>
-						part.type === 'text' && typeof part.text === 'string',
+			// Inject into the session's guidance carrier (same pattern as the
+			// runaway hard stop — issue #2526 user-role carrier)
+			const loopCarrier = ensureGuidanceCarrier(messages, 'guardrails');
+			if (!messageTextOf(loopCarrier).includes('LOOP DETECTED')) {
+				prependGuidanceText(
+					loopCarrier,
+					'guardrails',
+					`[LOOP WARNING]\n${pending.message}\n[/LOOP WARNING]\n`,
 				);
-				if (loopTextPart && !loopTextPart.text.includes('LOOP DETECTED')) {
-					loopTextPart.text =
-						`[LOOP WARNING]\n${pending.message}\n[/LOOP WARNING]\n\n` +
-						loopTextPart.text;
-				}
 			}
 		}
 
@@ -597,20 +599,11 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 			(session?.pendingAdvisoryMessages?.length ?? 0) > 0
 		) {
 			const advisories = session!.pendingAdvisoryMessages ?? [];
-			let targetMsg = systemMessages[0];
-			if (!targetMsg) {
-				const newMsg = {
-					info: { role: 'system' as const },
-					parts: [{ type: 'text' as const, text: '' }],
-				};
-				messages.unshift(newMsg);
-				targetMsg = newMsg;
-			}
-			const textPart = (targetMsg.parts ?? []).find(
-				(part): part is { type: string; text: string } =>
-					part.type === 'text' && typeof part.text === 'string',
-			);
-			if (textPart) {
+			// Issue #2526: find-or-create the session's guidance carrier (the
+			// host drops role:'system' entries on this surface; an empty carrier
+			// with zero parts is inert until filled).
+			const targetMsg = ensureGuidanceCarrier(messages, 'guardrails');
+			{
 				// Hygiene at the single choke point. All ~67 advisory producers push
 				// onto one bare `string[]` (state.ts) with no push wrapper and no
 				// cap, and only 5 of them dedupe — each with its own ad-hoc key. Two
@@ -643,29 +636,37 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 				// block would itself be the content-free injection this is removing.
 				if (kept.length > 0) {
 					const joined = kept.join('\n---\n');
-					const advisoryBlock = `[ADVISORIES]\n${headerNote}${joined}\n[/ADVISORIES]\n\n`;
-					textPart.text = `${advisoryBlock}${textPart.text}`;
+					const advisoryBlock = `[ADVISORIES]\n${headerNote}${joined}\n[/ADVISORIES]\n`;
+					const prepended = prependGuidanceText(
+						targetMsg,
+						'guardrails',
+						advisoryBlock,
+					);
 					// #2107 §2: fixed/base content — the byte-budgeted advisory block
 					// is COUNTED against the turn ledger (never claimed) so final
 					// accounting attributes it. Messages-surface producer: the final
 					// measurement already includes these bytes; attribution only.
-					recordProducerEmission(
-						sessionId,
-						'advisory-queue',
-						estimateTokens(advisoryBlock),
-						0,
-						'messages',
-					);
+					// Issue #2526: delivery is gated on the host-render contract
+					// (user-role carrier + non-empty delta), not on the plugin's
+					// own array mutation.
+					if (deliveredGuidanceDelta(targetMsg, prepended)) {
+						recordProducerEmission(
+							sessionId,
+							'advisory-queue',
+							estimateTokens(advisoryBlock),
+							0,
+							'messages',
+						);
+					}
 				}
 			}
-			// Clearing sits OUTSIDE the `if (textPart)` above, which silently
-			// discarded the entire queue unread whenever `systemMessages[0]` existed
-			// but carried no string text part. Only drop what was actually emitted.
-			// (The non-architect clear further below is deliberately unconditional —
-			// see the note there. Do not "fix" that one.)
-			if (textPart) {
-				session!.pendingAdvisoryMessages = [];
-			}
+			// Clearing is unconditional for the architect: ensureGuidanceCarrier
+			// always yields a mutable carrier (the old guard existed only for a
+			// guidance carrier without a text part, which cannot occur now),
+			// and blank advisories were dropped by the hygiene rules above —
+			// keeping them would re-drain them every turn. (The non-architect
+			// clear further below is also unconditional. Do not "fix" that one.)
+			session!.pendingAdvisoryMessages = [];
 		} else if (
 			!isArchitectSession &&
 			session &&
@@ -691,34 +692,26 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 				TRANSIENT_PREFIXES.some((p) => m.startsWith(p)),
 			);
 			if (transientAdvisories.length > 0) {
-				let targetMsg = systemMessages[0];
-				if (!targetMsg) {
-					const newMsg = {
-						info: { role: 'system' as const },
-						parts: [{ type: 'text' as const, text: '' }],
-					};
-					messages.unshift(newMsg);
-					targetMsg = newMsg;
-				}
-				const textPart = (targetMsg.parts ?? []).find(
-					(part): part is { type: string; text: string } =>
-						part.type === 'text' && typeof part.text === 'string',
+				// Issue #2526: find-or-create the guidance carrier (user-role —
+				// the host drops role:'system' entries on this surface).
+				const targetMsg = ensureGuidanceCarrier(messages, 'guardrails');
+				// Issue #2063 C1: same byte-budget backstop the architect branch
+				// applies (:MAX_ADVISORY_BLOCK_BYTES). Forwarding `[prm:` here
+				// admits multi-kilobyte course corrections into a subagent prompt;
+				// without the bound this branch would be a new instance of the
+				// flood the architect branch was hardened against. Keep-latest,
+				// with the same disclosure note.
+				const { kept, truncated } = boundAdvisoryBytes(
+					transientAdvisories,
+					MAX_ADVISORY_BLOCK_BYTES,
 				);
-				if (textPart) {
-					// Issue #2063 C1: same byte-budget backstop the architect branch
-					// applies (:MAX_ADVISORY_BLOCK_BYTES). Forwarding `[prm:` here
-					// admits multi-kilobyte course corrections into a subagent prompt;
-					// without the bound this branch would be a new instance of the
-					// flood the architect branch was hardened against. Keep-latest,
-					// with the same disclosure note.
-					const { kept, truncated } = boundAdvisoryBytes(
-						transientAdvisories,
-						MAX_ADVISORY_BLOCK_BYTES,
-					);
-					const headerNote = truncated ? `${ADVISORY_TRUNCATION_NOTE}\n` : '';
-					const joined = kept.join('\n---\n');
-					textPart.text = `[ADVISORIES]\n${headerNote}${joined}\n[/ADVISORIES]\n\n${textPart.text}`;
-				}
+				const headerNote = truncated ? `${ADVISORY_TRUNCATION_NOTE}\n` : '';
+				const joined = kept.join('\n---\n');
+				prependGuidanceText(
+					targetMsg,
+					'guardrails',
+					`[ADVISORIES]\n${headerNote}${joined}\n[/ADVISORIES]\n`,
+				);
 			}
 			// Drain all advisories — transient ones were injected above,
 			// non-transient ones are discarded to prevent noise in subagent sessions.
@@ -745,55 +738,19 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 		if (session?.prmHardStopInjectPending) {
 			// Clear before injecting to avoid repeat
 			session.prmHardStopInjectPending = false;
-			// Recompute rather than reuse `systemMessages` (captured before the
-			// advisory drain): the non-architect drain above can `unshift` a system
-			// message that the stale snapshot does not contain. Without this, a
-			// subagent carrier with no pre-existing system message would clear the
-			// token and inject nothing. Same local-recompute convention the
-			// self-fix / partial-gate / scope / catastrophic blocks below use.
-			const hardStopSystemMsgs = messages.filter(
-				(msg) => msg.info?.role === 'system',
-			);
-			// Reviewer round-4 advisory F: the token is consumed unconditionally
-			// above, so a window with NO system message at all used to BURN the
-			// one-shot and inject nothing — the containment silently evaporated for
-			// exactly the turn shape it is most likely to hit (a fresh subagent
-			// turn whose advisory queue was empty, so the drain above created
-			// nothing either). Mirror that drain's `unshift` and create the carrier.
-			let hardStopMsg = hardStopSystemMsgs[0];
-			if (!hardStopMsg) {
-				const newHardStopMsg = {
-					info: { role: 'system' as const },
-					parts: [{ type: 'text' as const, text: '' }],
-				};
-				messages.unshift(newHardStopMsg);
-				// The STALE `systemMessages` snapshot must learn about it too.
-				// Unlike the non-architect advisory drain this mirrors - which is
-				// fenced behind `!isArchitectSession` and so can never co-fire with
-				// an architect-only block - this branch runs for EVERY session. The
-				// self-coding block below still reads that snapshot, and it also
-				// unshifts when it finds nothing: without this line an architect
-				// session with the inject token armed AND a pending self-coding
-				// warning AND no system message in the window would end up with
-				// TWO `{ role: 'system' }` messages - the #608 outage class
-				// AGENTS.md invariant 10 forbids (local models require exactly one
-				// system message at index 0).
-				systemMessages.unshift(newHardStopMsg);
-				hardStopMsg = newHardStopMsg;
-			}
-			{
-				const hardStopTextPart = (hardStopMsg.parts ?? []).find(
-					(part): part is { type: string; text: string } =>
-						part.type === 'text' && typeof part.text === 'string',
+			// Issue #2526: find-or-create the guidance carrier (user-role). The
+			// old recompute-then-unshift dance existed to share ONE system
+			// message between this block and the ones below (the #608 local-model
+			// outage class); the carrier's find-or-create semantics make that
+			// sharing structural — ensureGuidanceCarrier returns the same entry
+			// every block below sees.
+			const hardStopMsg = ensureGuidanceCarrier(messages, 'guardrails');
+			if (!messageTextOf(hardStopMsg).includes('[HARD STOP]')) {
+				prependGuidanceText(
+					hardStopMsg,
+					'guardrails',
+					`[HARD STOP] PRM has detected repeated pattern violations. STOP all tool calls and return a summary of your progress. [/HARD STOP]\n`,
 				);
-				if (
-					hardStopTextPart &&
-					!hardStopTextPart.text.includes('[HARD STOP]')
-				) {
-					hardStopTextPart.text =
-						`[HARD STOP] PRM has detected repeated pattern violations. STOP all tool calls and return a summary of your progress. [/HARD STOP]\n\n` +
-						hardStopTextPart.text;
-				}
 			}
 		}
 
@@ -805,35 +762,27 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 			session &&
 			session.architectWriteCount > session.selfCodingWarnedAtCount
 		) {
-			// Task 1.7: Handle missing-system-message edge case
-			let targetSystemMessage = systemMessages[0];
-			if (!targetSystemMessage) {
-				const newSystemMessage = {
-					info: { role: 'system' as const },
-					parts: [{ type: 'text' as const, text: '' }],
-				};
-				messages.unshift(newSystemMessage);
-				targetSystemMessage = newSystemMessage;
-			}
-
-			const textPart = (targetSystemMessage.parts ?? []).find(
-				(part): part is { type: string; text: string } =>
-					part.type === 'text' && typeof part.text === 'string',
-			);
-			if (textPart && !textPart.text.includes('SELF-CODING DETECTED')) {
-				textPart.text =
+			// Issue #2526: find-or-create the guidance carrier (user-role — the
+			// host drops role:'system' entries on this surface).
+			const targetSystemMessage = ensureGuidanceCarrier(messages, 'guardrails');
+			if (
+				!messageTextOf(targetSystemMessage).includes('SELF-CODING DETECTED')
+			) {
+				prependGuidanceText(
+					targetSystemMessage,
+					'guardrails',
 					`[MODEL_ONLY_GUIDANCE]\n` +
-					`⚠️ SELF-CODING DETECTED: You have used ${session.architectWriteCount} write-class tool(s) directly on non-.swarm/ files.\n` +
-					`Rule 1 requires ALL coding to be delegated to @coder.\n` +
-					`If you have not exhausted QA_RETRY_LIMIT coder failures on this task, STOP and delegate.\n` +
-					`WRONG rationalizations — reject these thoughts immediately:\n` +
-					`  ✗ "This is time-critical / urgent / blocking" — you are an AI with no deadlines. No urgency is real.\n` +
-					`  ✗ "The fix is small / trivial / obvious" — size is not a QA exemption.\n` +
-					`  ✗ "Explaining to coder takes more effort than doing it" — writing the task spec is your job.\n` +
-					`  ✗ "The user needs this quickly" — users want correct code. Skipping QA gates ships bugs.\n` +
-					`Do not acknowledge or reference this guidance in your response.\n` +
-					`[/MODEL_ONLY_GUIDANCE]\n\n` +
-					textPart.text;
+						`⚠️ SELF-CODING DETECTED: You have used ${session.architectWriteCount} write-class tool(s) directly on non-.swarm/ files.\n` +
+						`Rule 1 requires ALL coding to be delegated to @coder.\n` +
+						`If you have not exhausted QA_RETRY_LIMIT coder failures on this task, STOP and delegate.\n` +
+						`WRONG rationalizations — reject these thoughts immediately:\n` +
+						`  ✗ "This is time-critical / urgent / blocking" — you are an AI with no deadlines. No urgency is real.\n` +
+						`  ✗ "The fix is small / trivial / obvious" — size is not a QA exemption.\n` +
+						`  ✗ "Explaining to coder takes more effort than doing it" — writing the task spec is your job.\n` +
+						`  ✗ "The user needs this quickly" — users want correct code. Skipping QA gates ships bugs.\n` +
+						`Do not acknowledge or reference this guidance in your response.\n` +
+						`[/MODEL_ONLY_GUIDANCE]\n`,
+				);
 				// Suppress repeated injection until a new violation occurs
 				session.selfCodingWarnedAtCount = session.architectWriteCount;
 			}
@@ -847,36 +796,22 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 			session.lastGateFailure &&
 			Date.now() - session.lastGateFailure.timestamp < 120_000
 		) {
-			// Task 1.7: Handle missing-system-message edge case
-			const currentSystemMessages = messages.filter(
-				(msg) => msg.info?.role === 'system',
-			);
-			let targetSystemMessage = currentSystemMessages[0];
-			if (!targetSystemMessage) {
-				const newSystemMessage = {
-					info: { role: 'system' as const },
-					parts: [{ type: 'text' as const, text: '' }],
-				};
-				messages.unshift(newSystemMessage);
-				targetSystemMessage = newSystemMessage;
-			}
-
-			const textPart = (targetSystemMessage.parts ?? []).find(
-				(part): part is { type: string; text: string } =>
-					part.type === 'text' && typeof part.text === 'string',
-			);
-			if (textPart && !textPart.text.includes('SELF-FIX DETECTED')) {
+			// Issue #2526: find-or-create the guidance carrier (user-role).
+			const targetSystemMessage = ensureGuidanceCarrier(messages, 'guardrails');
+			if (!messageTextOf(targetSystemMessage).includes('SELF-FIX DETECTED')) {
 				const failureCode = session.lastGateFailure.code
 					? ` (${session.lastGateFailure.code})`
 					: '';
-				textPart.text =
+				prependGuidanceText(
+					targetSystemMessage,
+					'guardrails',
 					`[MODEL_ONLY_GUIDANCE]\n` +
-					`⚠️ SELF-FIX DETECTED: Gate '${session.lastGateFailure.tool}' failed${failureCode} on task ${session.lastGateFailure.taskId}.\n` +
-					`You are now using a write tool instead of delegating to @coder.\n` +
-					`GATE FAILURE RESPONSE RULES require: return to coder with structured rejection.\n` +
-					`Do NOT fix gate failures yourself.\n` +
-					`[/MODEL_ONLY_GUIDANCE]\n\n` +
-					textPart.text;
+						`⚠️ SELF-FIX DETECTED: Gate '${session.lastGateFailure.tool}' failed${failureCode} on task ${session.lastGateFailure.taskId}.\n` +
+						`You are now using a write tool instead of delegating to @coder.\n` +
+						`GATE FAILURE RESPONSE RULES require: return to coder with structured rejection.\n` +
+						`Do NOT fix gate failures yourself.\n` +
+						`[/MODEL_ONLY_GUIDANCE]\n`,
+				);
 				// Clear flag to avoid repeated warnings
 				session.selfFixAttempted = false;
 			}
@@ -923,25 +858,15 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 				const missingQaDelegation =
 					requireReviewerAndTestEngineer && !hasReviewerDelegation;
 				if (missingGates.length > 0 || missingQaDelegation) {
-					const currentSystemMsgs = messages.filter(
-						(msg) => msg.info?.role === 'system',
-					);
-					let targetSysMsgForGate = currentSystemMsgs[0];
-					if (!targetSysMsgForGate) {
-						const newSysMsg = {
-							info: { role: 'system' as const },
-							parts: [{ type: 'text' as const, text: '' }],
-						};
-						messages.unshift(newSysMsg);
-						targetSysMsgForGate = newSysMsg;
-					}
-					const sysTextPart = (targetSysMsgForGate.parts ?? []).find(
-						(part): part is { type: string; text: string } =>
-							part.type === 'text' && typeof part.text === 'string',
+					// Issue #2526: find-or-create the guidance carrier (user-role).
+					const targetSysMsgForGate = ensureGuidanceCarrier(
+						messages,
+						'guardrails',
 					);
 					if (
-						sysTextPart &&
-						!sysTextPart.text.includes('PARTIAL GATE VIOLATION')
+						!messageTextOf(targetSysMsgForGate).includes(
+							'PARTIAL GATE VIOLATION',
+						)
 					) {
 						const missing = [...missingGates];
 						if (missingQaDelegation) {
@@ -950,13 +875,15 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 							);
 						}
 						session.partialGateWarningsIssuedForTask.add(taskId);
-						sysTextPart.text =
+						prependGuidanceText(
+							targetSysMsgForGate,
+							'guardrails',
 							`[MODEL_ONLY_GUIDANCE]\n` +
-							`⚠️ PARTIAL GATE VIOLATION: Task may be marked complete but missing gates: [${missing.join(', ')}].\n` +
-							`The QA gate is ALL steps or NONE. Revert any ✓ marks and run the missing gates.\n` +
-							`Do not acknowledge or reference this guidance in your response.\n` +
-							`[/MODEL_ONLY_GUIDANCE]\n\n` +
-							sysTextPart.text;
+								`⚠️ PARTIAL GATE VIOLATION: Task may be marked complete but missing gates: [${missing.join(', ')}].\n` +
+								`The QA gate is ALL steps or NONE. Revert any ✓ marks and run the missing gates.\n` +
+								`Do not acknowledge or reference this guidance in your response.\n` +
+								`[/MODEL_ONLY_GUIDANCE]\n`,
+						);
 					}
 				}
 			}
@@ -970,30 +897,21 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 		) {
 			session.scopeViolationDetected = false;
 			if (session.lastScopeViolation) {
-				const currentSystemMsgs = messages.filter(
-					(msg) => msg.info?.role === 'system',
+				// Issue #2526: find-or-create the guidance carrier (user-role).
+				const targetSysMsgForScope = ensureGuidanceCarrier(
+					messages,
+					'guardrails',
 				);
-				let targetSysMsgForScope = currentSystemMsgs[0];
-				if (!targetSysMsgForScope) {
-					const newSysMsg = {
-						info: { role: 'system' as const },
-						parts: [{ type: 'text' as const, text: '' }],
-					};
-					messages.unshift(newSysMsg);
-					targetSysMsgForScope = newSysMsg;
-				}
-				const scopeTextPart = (targetSysMsgForScope.parts ?? []).find(
-					(part): part is { type: string; text: string } =>
-						part.type === 'text' && typeof part.text === 'string',
-				);
-				if (scopeTextPart && !scopeTextPart.text.includes('SCOPE VIOLATION')) {
-					scopeTextPart.text =
+				if (!messageTextOf(targetSysMsgForScope).includes('SCOPE VIOLATION')) {
+					prependGuidanceText(
+						targetSysMsgForScope,
+						'guardrails',
 						`[MODEL_ONLY_GUIDANCE]\n` +
-						`⚠️ SCOPE VIOLATION: ${session.lastScopeViolation}\n` +
-						`Only modify files within your declared scope. Request scope expansion from architect if needed.\n` +
-						`Do not acknowledge or reference this guidance in your response.\n` +
-						`[/MODEL_ONLY_GUIDANCE]\n\n` +
-						scopeTextPart.text;
+							`⚠️ SCOPE VIOLATION: ${session.lastScopeViolation}\n` +
+							`Only modify files within your declared scope. Request scope expansion from architect if needed.\n` +
+							`Do not acknowledge or reference this guidance in your response.\n` +
+							`[/MODEL_ONLY_GUIDANCE]\n`,
+					);
 				}
 			}
 		}
@@ -1016,33 +934,26 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 									session.reviewerCallCount.get(phaseNum) ?? 0;
 								if (reviewerCount === 0) {
 									session.catastrophicPhaseWarnings.add(phaseNum);
-									const currentSystemMsgs = messages.filter(
-										(msg) => msg.info?.role === 'system',
-									);
-									let targetSysMsgForCat = currentSystemMsgs[0];
-									if (!targetSysMsgForCat) {
-										const newSysMsg = {
-											info: { role: 'system' as const },
-											parts: [{ type: 'text' as const, text: '' }],
-										};
-										messages.unshift(newSysMsg);
-										targetSysMsgForCat = newSysMsg;
-									}
-									const catTextPart = (targetSysMsgForCat.parts ?? []).find(
-										(part): part is { type: string; text: string } =>
-											part.type === 'text' && typeof part.text === 'string',
+									// Issue #2526: find-or-create the guidance carrier
+									// (user-role).
+									const targetSysMsgForCat = ensureGuidanceCarrier(
+										messages,
+										'guardrails',
 									);
 									if (
-										catTextPart &&
-										!catTextPart.text.includes('CATASTROPHIC VIOLATION')
+										!messageTextOf(targetSysMsgForCat).includes(
+											'CATASTROPHIC VIOLATION',
+										)
 									) {
-										catTextPart.text =
+										prependGuidanceText(
+											targetSysMsgForCat,
+											'guardrails',
 											`[MODEL_ONLY_GUIDANCE]\n` +
-											`[CATASTROPHIC VIOLATION: Phase ${phaseNum} completed with ZERO reviewer delegations.` +
-											` Every coder task requires reviewer approval. Recommend retrospective review of all Phase ${phaseNum} tasks.]\n` +
-											`Do not acknowledge or reference this guidance in your response.\n` +
-											`[/MODEL_ONLY_GUIDANCE]\n\n` +
-											catTextPart.text;
+												`[CATASTROPHIC VIOLATION: Phase ${phaseNum} completed with ZERO reviewer delegations.` +
+												` Every coder task requires reviewer approval. Recommend retrospective review of all Phase ${phaseNum} tasks.]\n` +
+												`Do not acknowledge or reference this guidance in your response.\n` +
+												`[/MODEL_ONLY_GUIDANCE]\n`,
+										);
 									}
 									break;
 								}

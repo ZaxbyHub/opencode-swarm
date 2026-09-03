@@ -2,7 +2,7 @@
  * Final context accounting (#2107 §3).
  *
  * ONE final accounting step, run after every injector has contributed and after
- * `consolidateSystemMessagesInPlace` — the last structure-mutating handler in
+ * `materializeSystemGuidanceInPlace` (issue #2526) — the last structure-mutating handler in
  * the `experimental.chat.messages.transform` chain. It measures the actual
  * final model-visible surface exactly once:
  *

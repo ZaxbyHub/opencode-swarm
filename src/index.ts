@@ -93,7 +93,6 @@ import {
 import { loadFullAutoRunState } from './full-auto/state.js';
 import {
 	composeHandlers,
-	consolidateSystemMessagesInPlace,
 	createAgentActivityHooks,
 	createCompactionCustomizerHook,
 	createContextBudgetHandler,
@@ -159,6 +158,7 @@ import {
 	bumpKnowledgeGeneration,
 	createKnowledgeInjectorHook,
 } from './hooks/knowledge-injector.js';
+import { materializeSystemGuidanceInPlace } from './hooks/messages-transform.js';
 import { microReflectorAfter } from './hooks/micro-reflector.js';
 import { normalizeToolName } from './hooks/normalize-tool-name';
 import {
@@ -3516,16 +3516,20 @@ async function initializeOpenCodeSwarm(
 						return Promise.resolve();
 					}
 				},
-				// Final transformation: consolidate multiple system messages into one.
-				// consolidateSystemMessages handles both the production `{info,parts}`
-				// shape and the flat `{role,content}` shape (issue #1778 H1).
+				// Final structure-mutating handler: materialize any remaining
+				// role:'system' entries into user-role guidance carriers (issue
+				// #2526). The pinned host's converter drops role:'system' entries
+				// on this surface and throws on flat entries without `parts`, so
+				// every plugin producer now splices carriers directly and this
+				// boundary converts — or drops — anything that still arrives as a
+				// system entry from an un-migrated or third-party injector.
+				// Handles both the production `{info,parts}` shape and the flat
+				// `{role,content}` shape (issue #1778 H1).
 				//
 				// MUST mutate `output.messages` IN PLACE (issue #1619). The host
-				// discards this hook's return value and afterwards reads its own local
-				// message array, so the previous
-				// `output.messages = consolidateSystemMessages(output.messages)` was a
-				// rebind that never reached the model. See
-				// `consolidateSystemMessagesInPlace`.
+				// discards this hook's return value and afterwards reads its own
+				// local message array — a rebind never reaches the model. See
+				// `materializeSystemGuidanceInPlace`.
 				(
 					_input: unknown,
 					output: {
@@ -3533,7 +3537,7 @@ async function initializeOpenCodeSwarm(
 					},
 				): Promise<void> => {
 					if (Array.isArray(output.messages)) {
-						consolidateSystemMessagesInPlace(output.messages);
+						materializeSystemGuidanceInPlace(output.messages);
 					}
 					if (process.env.DEBUG_SWARM)
 						// biome-ignore lint/suspicious/noConsole: DEBUG_SWARM diagnostic output — only fires when explicitly enabled

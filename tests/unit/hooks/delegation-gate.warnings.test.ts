@@ -1,16 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import {
+	findGuidanceCarriers,
+	isGuidanceCarrier,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
+import {
 	ensureAgentSession,
 	getTaskState,
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
 import {
-	findSystemMessage,
-	findUserMessage,
 	getPrimaryText,
-	getSystemWarningText,
 	makeConfig,
 	makeMessages,
 } from './_delegation-gate-helpers';
@@ -41,22 +43,21 @@ describe('zero-coder-delegation detection', () => {
 
 		await hook.messagesTransform({}, messages);
 
-		// Both DELEGATION VIOLATION and [NEXT] guidance are injected as system messages
-		// Check that at least one system message exists
-		const systemMsgs = messages.messages.filter(
-			(m) => m.info?.role === 'system',
-		);
-		expect(systemMsgs.length).toBeGreaterThan(0);
+		// Both DELEGATION VIOLATION and [NEXT] guidance are injected as
+		// model-only guidance carriers (issue #2526). At least one must exist.
+		const carriers = findGuidanceCarriers(messages.messages);
+		expect(carriers.length).toBeGreaterThan(0);
 
-		// One of the system messages should contain [NEXT] or DELEGATION VIOLATION
-		const systemTexts = systemMsgs
-			.map((m) => m.parts[0]?.text ?? '')
-			.join('\n');
+		// One of the carriers should contain [NEXT] or DELEGATION VIOLATION
+		const systemTexts = carriers.map((m) => messageTextOf(m)).join('\n');
 		expect(systemTexts).toMatch(/\[NEXT\]|DELEGATION VIOLATION/);
 
-		// User message should contain the task
-		const userMsg = findUserMessage(messages);
-		expect(userMsg?.parts[0].text).toContain('TASK: Fix the validation logic');
+		// The REAL user message (carriers are separate role:'user' entries)
+		// should contain the task unchanged
+		const userMsg = messages.messages.find(
+			(m) => m.info?.role === 'user' && !isGuidanceCarrier(m),
+		);
+		expect(userMsg?.parts[0]?.text).toContain('TASK: Fix the validation logic');
 	});
 
 	it('should NOT warn when task ID matches last coder delegation', async () => {
