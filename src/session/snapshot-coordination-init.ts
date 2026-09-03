@@ -109,12 +109,13 @@ async function archiveLegacySnapshotIfPresent(
 	);
 }
 
-function evictSettledEntries(): void {
+function evictSettledEntries(): boolean {
 	while (entries.size >= MAX_READY_ROOTS) {
 		const victim = [...entries].find(([, entry]) => entry.settled);
-		if (!victim) return;
+		if (!victim) return false;
 		entries.delete(victim[0]);
 	}
+	return true;
 }
 
 async function initializeSnapshotCoordination(
@@ -179,7 +180,13 @@ export function startSnapshotCoordinationInitialization(
 	}
 	if (existing && !existing.settled) return existing.underlying;
 	if (existing?.state === 'succeeded') return existing.underlying;
-	evictSettledEntries();
+	if (!evictSettledEntries()) {
+		const error = new Error(
+			`SQLite snapshot coordination capacity exhausted (${MAX_READY_ROOTS} unsettled roots)`,
+		);
+		advisoryWarn(`[opencode-swarm] ${error.message}; initialization refused.`);
+		return Promise.reject(error);
+	}
 	const attemptId = nextAttemptId++;
 	const generation = (existing?.generation ?? 0) + 1;
 	const entry: ReadinessEntry = {

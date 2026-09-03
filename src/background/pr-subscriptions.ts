@@ -748,6 +748,16 @@ function ensurePrSubscriptionCoordinationImported(
 
 	const coordinationView = readCoordinationSubscriptions(directory);
 	if (coordinationView !== null && Object.keys(coordinationView).length > 0) {
+		const checkpointRead = readCheckpoint(directory);
+		const migrationPending =
+			checkpointRead.kind === 'ok' &&
+			sameProjectRoot(checkpointRead.value.rootPath, directory) &&
+			checkpointRead.value.migration?.done === false;
+		// A partially migrated checkpoint cannot make SQLite authoritative yet:
+		// another process may have appended a legacy tail after the rows already
+		// copied into SQLite. Let the read path overlay that tail instead of
+		// repairing/archiving the legacy projection here.
+		if (migrationPending) return false;
 		const legacyPath = storePath(directory);
 		const projectionNeedsRepair =
 			!fileExistsStrict(projectionMarkerPath(checkpointPath(directory))) ||
@@ -2165,12 +2175,57 @@ async function loadViewForRead(directory: string): Promise<{
 	recoverySource: PrSubscriptionRecoverySource;
 }> {
 	if (ensurePrSubscriptionCoordinationImported(directory, false)) {
+		const coordinationView = readCoordinationSubscriptions(directory) ?? {};
+		const checkpointRead = readCheckpoint(directory);
+		if (
+			checkpointRead.kind === 'ok' &&
+			sameProjectRoot(checkpointRead.value.rootPath, directory) &&
+			checkpointRead.value.migration?.done === false
+		) {
+			// SQLite may contain the prefix copied by a peer while migration is
+			// still resumable. Overlay the legacy source from that combined view so
+			// appended tail records remain visible to lock-free readers.
+			const pendingCheckpoint = cloneCheckpoint(checkpointRead.value);
+			pendingCheckpoint.records = {
+				...pendingCheckpoint.records,
+				...coordinationView,
+			};
+			const overlaid = overlayLegacy(directory, pendingCheckpoint);
+			return {
+				view: overlaid.view,
+				recoverySource: overlaid.usedLegacy
+					? 'checkpoint+legacy'
+					: 'checkpoint',
+			};
+		}
 		return {
-			view: readCoordinationSubscriptions(directory) ?? {},
+			view: coordinationView,
 			recoverySource: 'checkpoint',
 		};
 	}
 	const read = readCheckpoint(directory);
+	const pendingCoordination = readCoordinationSubscriptions(directory);
+	if (
+		read.kind === 'ok' &&
+		sameProjectRoot(read.value.rootPath, directory) &&
+		read.value.migration?.done === false &&
+		pendingCoordination !== null &&
+		Object.keys(pendingCoordination).length > 0
+	) {
+		// SQLite may contain the prefix copied by a peer while migration is
+		// still resumable. Overlay the legacy source from that combined view so
+		// appended tail records remain visible to lock-free readers.
+		const pendingCheckpoint = cloneCheckpoint(read.value);
+		pendingCheckpoint.records = {
+			...pendingCheckpoint.records,
+			...pendingCoordination,
+		};
+		const overlaid = overlayLegacy(directory, pendingCheckpoint);
+		return {
+			view: overlaid.view,
+			recoverySource: overlaid.usedLegacy ? 'checkpoint+legacy' : 'checkpoint',
+		};
+	}
 	if (read.kind === 'ok') {
 		if (!sameProjectRoot(read.value.rootPath, directory)) {
 			// Copied .swarm — reads see nothing; never start the wrong monitor.
@@ -3228,7 +3283,16 @@ export async function getPrSubscriptionHealth(
 ): Promise<PrSubscriptionHealth> {
 	try {
 		const coordinationView = readCoordinationSubscriptions(directory);
-		if (coordinationView !== null && Object.keys(coordinationView).length > 0) {
+		const read = readCheckpoint(directory);
+		const migrationPending =
+			read.kind === 'ok' &&
+			sameProjectRoot(read.value.rootPath, directory) &&
+			read.value.migration?.done === false;
+		if (
+			coordinationView !== null &&
+			Object.keys(coordinationView).length > 0 &&
+			!migrationPending
+		) {
 			const audit = auditStats(directory);
 			const archiveBytes = fileSizeOrNull(legacyArchivePath(directory)) ?? 0;
 			const checkpointBytes = fileSizeOrNull(checkpointPath(directory)) ?? 0;
@@ -3240,7 +3304,6 @@ export async function getPrSubscriptionHealth(
 			applyFileStats(health, checkpointBytes, audit, archiveBytes);
 			return health;
 		}
-		const read = readCheckpoint(directory);
 		const audit = auditStats(directory);
 		const archiveBytes = fileSizeOrNull(legacyArchivePath(directory)) ?? 0;
 		const checkpointBytes = fileSizeOrNull(checkpointPath(directory)) ?? 0;
@@ -3289,7 +3352,18 @@ export async function getPrSubscriptionHealth(
 			}
 			health.recoverySource = legacySize === null ? 'empty' : 'legacy-log';
 		} else {
-			const overlaid = overlayLegacy(directory, read.value);
+			const pendingCheckpoint =
+				migrationPending && coordinationView !== null
+					? (() => {
+							const merged = cloneCheckpoint(read.value);
+							merged.records = {
+								...merged.records,
+								...coordinationView,
+							};
+							return merged;
+						})()
+					: read.value;
+			const overlaid = overlayLegacy(directory, pendingCheckpoint);
 			health = healthFromView(overlaid.view, read.value);
 			health.recoverySource = overlaid.usedLegacy
 				? 'checkpoint+legacy'
