@@ -488,7 +488,7 @@ export const TOOL_METADATA = {
 	},
 	repair_gate_evidence: {
 		description:
-			'quarantine corrupt exact-task gate evidence and install a fresh blocked generation that requires every gate to rerun',
+			'quarantine recoverable exact-task gate evidence, rebuild from durable requirements, recover receipt-backed legacy marker wedges or the exact sentinel-only historical reset, and refuse every other receipt-less reconstruction',
 		agents: ['architect'],
 	},
 	repair_knowledge_receipt_ledger: {

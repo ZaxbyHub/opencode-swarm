@@ -12,8 +12,10 @@ import {
 } from '../background/workspace-snapshot.js';
 import { appendCoreEventSync } from '../events/core-events.js';
 import {
+	ensureTaskGateRequirementsReceiptForSettledTransition,
 	getTaskWorkflowSnapshot,
 	type TaskEvidence,
+	type TaskWorkflowTransitionEvent,
 	withTaskEvidenceTransaction,
 } from '../gate-evidence.js';
 import { isMarkdownOnlyTaskChange } from '../gate-evidence-classification.js';
@@ -194,6 +196,28 @@ function scopedObservedFiles(
 	);
 }
 
+function settlementTransitionEvent(
+	wal: CoderSettlementWal,
+): TaskWorkflowTransitionEvent {
+	return wal.accepted
+		? {
+				type: 'accepted_mutation',
+				agentType: 'coder',
+				context: {
+					testEngineerExempt: wal.testEngineerExempt === true,
+					settlementFailed: wal.settlementFailed === true,
+				},
+				expectedGeneration: wal.expectedGeneration,
+				transitionId: wal.transitionId,
+			}
+		: {
+				type: 'dispatch_no_mutation',
+				agentType: 'coder',
+				expectedGeneration: wal.expectedGeneration,
+				transitionId: wal.transitionId,
+			};
+}
+
 async function commitPrepared(
 	directory: string,
 	wal: CoderSettlementWal,
@@ -208,6 +232,7 @@ async function commitPrepared(
 			if (lockedWal.transitionId !== wal.transitionId) {
 				throw new Error('CODER_SETTLEMENT_WAL_REPLACED');
 			}
+			const transitionEvent = settlementTransitionEvent(lockedWal);
 			const snapshot = getTaskWorkflowSnapshot(transaction.read());
 			const evidenceAlreadySettled =
 				lockedWal.accepted === true
@@ -226,6 +251,15 @@ async function commitPrepared(
 						snapshot.lastOutcome === 'dispatch_no_mutation' &&
 						snapshot.lastTransitionId === lockedWal.transitionId;
 			if (evidenceAlreadySettled) {
+				const evidence = transaction.read() as TaskEvidence;
+				if (lockedWal.accepted === true) {
+					await ensureTaskGateRequirementsReceiptForSettledTransition(
+						directory,
+						lockedWal.taskId,
+						evidence,
+						transitionEvent,
+					);
+				}
 				if (lockedWal.state !== 'COMMITTED') {
 					lockedWal = {
 						...lockedWal,
@@ -238,7 +272,7 @@ async function commitPrepared(
 					});
 				}
 				return {
-					evidence: transaction.read() as TaskEvidence,
+					evidence,
 					accepted: lockedWal.accepted === true,
 					alreadyApplied: true,
 				};
@@ -246,25 +280,7 @@ async function commitPrepared(
 			if (lockedWal.state !== 'PREPARED') {
 				throw new Error('CODER_SETTLEMENT_NOT_PREPARED');
 			}
-			const evidence = await transaction.transition(
-				lockedWal.accepted
-					? {
-							type: 'accepted_mutation',
-							agentType: 'coder',
-							context: {
-								testEngineerExempt: lockedWal.testEngineerExempt === true,
-								settlementFailed: lockedWal.settlementFailed === true,
-							},
-							expectedGeneration: lockedWal.expectedGeneration,
-							transitionId: lockedWal.transitionId,
-						}
-					: {
-							type: 'dispatch_no_mutation',
-							agentType: 'coder',
-							expectedGeneration: lockedWal.expectedGeneration,
-							transitionId: lockedWal.transitionId,
-						},
-			);
+			const evidence = await transaction.transition(transitionEvent);
 			lockedWal = {
 				...lockedWal,
 				state: 'COMMITTED',

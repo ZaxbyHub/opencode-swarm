@@ -70,10 +70,22 @@ describe('repair_gate_evidence safety', () => {
 		cleanup();
 	});
 
+	test('rejects a missing runtime context before reading or writing evidence (FB-003)', async () => {
+		// Before FB-003, omitting ToolContext skipped the architect-only check.
+		const result = await executeRepairGateEvidence(
+			{ task_id: TASK_ID, reason: 'missing context must fail closed' },
+			directory,
+		);
+
+		expect(result.success).toBe(false);
+		expect(result.errors).toEqual(['TASK_GATE_EVIDENCE_ARCHITECT_ONLY']);
+	});
+
 	test('rejects non-substantive repair reasons during execution', async () => {
 		const result = await executeRepairGateEvidence(
 			{ task_id: TASK_ID, reason: 'repair' },
 			directory,
+			{ agent: 'architect' } as ToolContext,
 		);
 
 		expect(result.success).toBe(false);
@@ -98,6 +110,7 @@ describe('repair_gate_evidence safety', () => {
 		const result = await executeRepairGateEvidence(
 			{ task_id: TASK_ID, reason: 'do not rewrite valid evidence' },
 			directory,
+			{ agent: 'architect' } as ToolContext,
 		);
 
 		expect(result.success).toBe(false);
@@ -131,6 +144,7 @@ describe('repair_gate_evidence safety', () => {
 		const result = await executeRepairGateEvidence(
 			{ task_id: TASK_ID, reason: 'respect the terminal WAL fence' },
 			directory,
+			{ agent: 'architect' } as ToolContext,
 		);
 
 		expect(result.success).toBe(false);
@@ -157,6 +171,7 @@ describe('repair_gate_evidence safety', () => {
 				reason: 'repair through redirected evidence must fail closed',
 			},
 			directory,
+			{ agent: 'architect' } as ToolContext,
 		);
 
 		expect(result.success).toBe(false);

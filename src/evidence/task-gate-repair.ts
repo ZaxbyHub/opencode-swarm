@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import {
 	assertTaskEvidenceWriteAllowed,
 	parseTaskEvidence,
+	TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL,
 	TASK_WORKFLOW_SCHEMA_MARKER,
 	type TaskEvidence,
 } from '../gate-evidence.js';
@@ -23,8 +24,7 @@ import {
 	type TaskGateRequirementsReceipt,
 } from './task-gate-requirements.js';
 
-export const TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL =
-	'requirements_reconstruction';
+export { TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL } from '../gate-evidence.js';
 
 const TASK_GATE_EVIDENCE_QUARANTINE_DIR = path.join(
 	'evidence',
@@ -516,15 +516,35 @@ function buildRepairTransitionId(taskId: string, source: string): string {
 	return `repair_gate_evidence:${taskId}:${source.slice(0, 32)}`;
 }
 
+function withoutLegacyReconstructionGate(gates: string[]): string[] {
+	return [
+		...new Set(
+			gates.filter(
+				(gate) => gate !== TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL,
+			),
+		),
+	].sort();
+}
+
+function hasLegacyReconstructionGate(gates: string[]): boolean {
+	return gates.includes(TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL);
+}
+
 function buildKnownRepairedEvidence(
 	taskId: string,
 	receipt: TaskGateRequirementsReceipt,
 	generation: number,
 	source: { sha256: string | null; generation: number | null },
 ): TaskEvidence {
+	const requiredGates = withoutLegacyReconstructionGate(receipt.requiredGates);
+	if (requiredGates.length !== receipt.requiredGates.length) {
+		throw new Error(
+			'TASK_GATE_REQUIREMENTS_RECEIPT_TAINTED: legacy reconstruction markers cannot seed known requirements.',
+		);
+	}
 	return {
 		taskId,
-		required_gates: [...receipt.requiredGates],
+		required_gates: requiredGates,
 		gates: {},
 		requirements_state: 'known',
 		test_engineer_exempt: receipt.testEngineerExempt ?? undefined,
@@ -549,12 +569,14 @@ function buildKnownRepairedEvidence(
 
 function buildUnknownRepairedEvidence(
 	taskId: string,
+	requiredGates: string[],
 	seedGeneration: number,
 	source: { sha256: string | null; generation: number | null },
+	receiptHash: string | null,
 ): TaskEvidence {
 	return {
 		taskId,
-		required_gates: [TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL],
+		required_gates: withoutLegacyReconstructionGate(requiredGates),
 		gates: {},
 		requirements_state: 'unknown',
 		workflow: {
@@ -571,7 +593,7 @@ function buildUnknownRepairedEvidence(
 		repair_provenance: {
 			source_sha256: source.sha256,
 			source_generation: source.generation,
-			requirements_receipt_hash: null,
+			requirements_receipt_hash: receiptHash,
 		},
 	};
 }
@@ -603,6 +625,27 @@ function isRepairWorkflowReset(
 	);
 }
 
+function isReceiptlessLegacySentinelReset(
+	taskId: string,
+	evidence: TaskEvidence | undefined,
+): evidence is TaskEvidence {
+	return (
+		evidence != null &&
+		isRepairWorkflowReset(taskId, evidence.workflow) &&
+		evidence.requirements_state === 'unknown' &&
+		evidence.required_gates.length === 1 &&
+		evidence.required_gates[0] ===
+			TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL &&
+		Object.keys(evidence.gates).length === 0 &&
+		evidence.repair_provenance != null &&
+		typeof evidence.repair_provenance.source_sha256 === 'string' &&
+		(evidence.repair_provenance.source_generation === null ||
+			evidence.repair_provenance.source_generation <
+				evidence.workflow.generation) &&
+		evidence.repair_provenance.requirements_receipt_hash === null
+	);
+}
+
 function isAlreadyRepairedEvidence(
 	taskId: string,
 	evidence: TaskEvidence | undefined,
@@ -611,7 +654,10 @@ function isAlreadyRepairedEvidence(
 	if (!evidence || !isRepairWorkflowReset(taskId, evidence.workflow))
 		return false;
 	if (Object.keys(evidence.gates).length !== 0) return false;
-	if (receipt) {
+	if (hasLegacyReconstructionGate(evidence.required_gates)) return false;
+	const receiptIsTainted =
+		receipt != null && hasLegacyReconstructionGate(receipt.requiredGates);
+	if (receipt && !receiptIsTainted) {
 		return (
 			evidence.requirements_state === 'known' &&
 			JSON.stringify(evidence.required_gates) ===
@@ -623,11 +669,16 @@ function isAlreadyRepairedEvidence(
 				receipt.chainHash
 		);
 	}
+	if (!receipt || !receiptIsTainted) return false;
 	return (
 		evidence.requirements_state === 'unknown' &&
-		JSON.stringify(evidence.required_gates) ===
-			JSON.stringify([TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL]) &&
-		evidence.workflow.generation >= 1
+		evidence.workflow.generation >= 1 &&
+		evidence.repair_provenance != null &&
+		evidence.repair_provenance.requirements_receipt_hash ===
+			receipt.chainHash &&
+		withoutLegacyReconstructionGate(receipt.requiredGates).every((gate) =>
+			evidence.required_gates.includes(gate),
+		)
 	);
 }
 
@@ -659,9 +710,9 @@ function buildRepairNextActions(
 		];
 	}
 	return [
-		`Delegate the owning implementation agent on task ${taskId} to regenerate authoritative required gates for a new exact-task generation.`,
+		`Delegate coder on task ${taskId} to produce a fresh accepted mutation and regenerate authoritative required gates for a new exact-task generation.`,
 		`Rerun Stage A for task ${taskId} after the new mutation is recorded.`,
-		`Rerun the exact Stage B gates for task ${taskId} only after the authoritative required gates are re-recorded; the reconstruction sentinel fails closed until then.`,
+		`Rerun the exact Stage B gates for task ${taskId} only after authoritative required gates are re-recorded; the idle recovery generation cannot complete directly.`,
 	];
 }
 
@@ -718,6 +769,13 @@ export async function repairTaskGateEvidence(
 				args.task_id,
 			);
 			const latestReceipt = receipts.at(-1);
+			const evidenceHasLegacyMarker =
+				read.status === 'valid' &&
+				read.evidence != null &&
+				hasLegacyReconstructionGate(read.evidence.required_gates);
+			const receiptHasLegacyMarker =
+				latestReceipt != null &&
+				hasLegacyReconstructionGate(latestReceipt.requiredGates);
 			if (
 				read.status === 'valid' &&
 				isAlreadyRepairedEvidence(args.task_id, read.evidence, latestReceipt)
@@ -745,13 +803,30 @@ export async function repairTaskGateEvidence(
 			}
 			if (
 				read.status === 'valid' &&
-				read.evidence?.workflow?.schema === TASK_WORKFLOW_SCHEMA_MARKER
+				read.evidence?.workflow?.schema === TASK_WORKFLOW_SCHEMA_MARKER &&
+				!evidenceHasLegacyMarker &&
+				latestReceipt != null &&
+				!receiptHasLegacyMarker
 			) {
 				return {
 					success: false,
 					message: 'TASK_GATE_EVIDENCE_REPAIR_NOT_REQUIRED',
 					errors: [
 						`TASK_GATE_EVIDENCE_REPAIR_NOT_REQUIRED: ${args.task_id} has valid authoritative evidence. Use the normal workflow repair path; this tool only rebuilds corrupt or legacy evidence.`,
+					],
+				};
+			}
+			if (
+				read.status === 'valid' &&
+				read.evidence?.requirements_state === 'known' &&
+				!evidenceHasLegacyMarker &&
+				receiptHasLegacyMarker
+			) {
+				return {
+					success: false,
+					message: 'TASK_GATE_REQUIREMENTS_RECEIPT_STALE',
+					errors: [
+						`TASK_GATE_REQUIREMENTS_RECEIPT_STALE: ${args.task_id} has clean accepted-mutation evidence but its latest requirements receipt is legacy-tainted. Repair was refused without modifying evidence; replay the prepared coder settlement so it can publish the exact hash-linked receipt.`,
 					],
 				};
 			}
@@ -794,13 +869,46 @@ export async function repairTaskGateEvidence(
 					],
 				};
 			}
+			if (
+				evidenceHasLegacyMarker &&
+				latestReceipt == null &&
+				!isReceiptlessLegacySentinelReset(args.task_id, read.evidence)
+			) {
+				return {
+					success: false,
+					message: 'TASK_GATE_REQUIREMENTS_RECEIPT_MISSING',
+					errors: [
+						`TASK_GATE_REQUIREMENTS_RECEIPT_MISSING: ${args.task_id} is marker-bearing but does not match the exact receipt-less state emitted by the historical repair flow. Repair was refused without modifying evidence or session state.`,
+					],
+				};
+			}
 			const nextGeneration =
 				Math.max(
 					read.status === 'valid' ? (read.generation ?? -1) : -1,
 					latestReceipt?.generation ?? -1,
 				) + 1;
 			let nextEvidence: TaskEvidence;
-			if (latestReceipt) {
+			if (evidenceHasLegacyMarker || receiptHasLegacyMarker) {
+				const preservedGates = withoutLegacyReconstructionGate([
+					...(read.status === 'valid'
+						? (read.evidence?.required_gates ?? [])
+						: []),
+					...(latestReceipt?.requiredGates ?? []),
+				]);
+				nextEvidence = buildUnknownRepairedEvidence(
+					args.task_id,
+					preservedGates,
+					Math.max(nextGeneration, 1),
+					{
+						sha256: read.status === 'missing' ? null : read.sha256,
+						generation:
+							read.status === 'valid'
+								? (read.generation ?? null)
+								: (latestReceipt?.generation ?? null),
+					},
+					latestReceipt?.chainHash ?? null,
+				);
+			} else if (latestReceipt) {
 				nextEvidence = buildKnownRepairedEvidence(
 					args.task_id,
 					latestReceipt,
@@ -822,15 +930,13 @@ export async function repairTaskGateEvidence(
 					],
 				};
 			} else {
-				nextEvidence = buildUnknownRepairedEvidence(
-					args.task_id,
-					Math.max(nextGeneration, 1),
-					{
-						sha256: read.sha256,
-						generation:
-							read.status === 'valid' ? (read.generation ?? null) : null,
-					},
-				);
+				return {
+					success: false,
+					message: 'TASK_GATE_REQUIREMENTS_RECEIPT_MISSING',
+					errors: [
+						`TASK_GATE_REQUIREMENTS_RECEIPT_MISSING: ${args.task_id} has no authoritative requirements receipt. Receipt-less repair was refused without modifying the original evidence because its required gates cannot be reconstructed safely.`,
+					],
+				};
 			}
 
 			const serialized = canonicalizeTaskEvidence(args.task_id, nextEvidence);

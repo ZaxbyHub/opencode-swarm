@@ -696,20 +696,6 @@
 		},
 		{
 			"rowId": "workflow-wal-dirs",
-			"file": "src/workflow/coder-settlement.ts",
-			"identifier": "readWal",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readWal\" exists in src/workflow/coder-settlement.ts but not inside coder-settlement.ts:72 (workflow-wal-dirs.readerCitations[0])."
-		},
-		{
-			"rowId": "workflow-wal-dirs",
-			"file": "src/workflow/coder-settlement.ts",
-			"identifier": "writeWal",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writeWal\" exists in src/workflow/coder-settlement.ts but not inside src/workflow/coder-settlement.ts:102 (workflow-wal-dirs.writerCitations[0])."
-		},
-		{
-			"rowId": "workflow-wal-dirs",
 			"file": "src/workflow/task-repair.ts",
 			"identifier": "readWal",
 			"kind": "out-of-range",

@@ -420,8 +420,8 @@ describe('check_gate_status', () => {
 		const result = await executeTool({ task_id: '7.1' }, tmpDir);
 		const parsed = JSON.parse(result);
 
-		// With no required gates, should be all_passed
-		expect(parsed.status).toBe('all_passed');
+		// An empty requirement set is not proof that the task passed.
+		expect(parsed.status).toBe('incomplete');
 		expect(parsed.required_gates).toEqual([]);
 		expect(parsed.passed_gates).toEqual([]);
 		expect(parsed.missing_gates).toEqual([]);

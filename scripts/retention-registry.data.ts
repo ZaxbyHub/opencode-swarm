@@ -1347,7 +1347,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			bound: 'retryHistory ≤3 (schema :303); per-task file; evidence/ archived+cleaned at close',
 			scope: 'per-key',
 			keyspaceBound:
-				'FINITE BY REAPER, not by key domain: one key per taskId — a flat .swarm/evidence/{taskId}.json (src/gate-evidence.ts:749 getEvidencePath) whose taskId is only shape-validated (src/validation/task-id.ts:69-114), so the domain is open. The GLOBAL deleter is the same one the task-evidence-trajectory row cites: "evidence" is in ACTIVE_STATE_DIRS_TO_CLEAN (src/commands/close.ts:574-583) and the close clean loop recursively removes the whole tree (src/commands/close.ts:1761-1773), taking every {taskId}.json with it. Note the per-file retryHistory ≤3 cap is NOT the keyspace bound — it caps one key\'s history and says nothing about how many keys exist. CAVEAT: archive-first-gated (src/commands/close.ts:1762-1765) and untouched by /swarm reset and /swarm reset-session, so an unclosed session holds one file per distinct taskId.',
+				'FINITE BY REAPER, not by key domain: one key per taskId — a flat .swarm/evidence/{taskId}.json (src/gate-evidence.ts:764 getEvidencePath) whose taskId is only shape-validated (src/validation/task-id.ts:69-114), so the domain is open. The GLOBAL deleter is the same one the task-evidence-trajectory row cites: "evidence" is in ACTIVE_STATE_DIRS_TO_CLEAN (src/commands/close.ts:574-583) and the close clean loop recursively removes the whole tree (src/commands/close.ts:1761-1773), taking every {taskId}.json with it. Note the per-file retryHistory ≤3 cap is NOT the keyspace bound — it caps one key\'s history and says nothing about how many keys exist. CAVEAT: archive-first-gated (src/commands/close.ts:1762-1765) and untouched by /swarm reset and /swarm reset-session, so an unclosed session holds one file per distinct taskId.',
 			citation: 'src/gate-evidence.ts:303; src/commands/close.ts:574 ACTIVE_STATE_DIRS_TO_CLEAN',
 		},
 		readBound: { pattern: 'full-file', bound: 'single per-task JSON', sync: true, citation: 'src/gate-evidence.ts:1054-1089' },
@@ -1466,7 +1466,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writerModules: ['src/evidence/task-gate-repair.ts', 'src/evidence/task-gate-requirements.ts'],
 		writerCitations: [
 			'src/evidence/task-gate-requirements.ts:315 appendTaskGateRequirement via atomicWriteFile (schemaVersion 1 records); :282 read-back before append',
-			'src/evidence/task-gate-repair.ts:496 fileHandle.writeFile repaired evidence under withTaskEvidenceLock; :849 atomicWriteFile; quarantine moves into task-gate-quarantine/ (:29-31)',
+			'src/evidence/task-gate-repair.ts:496 fileHandle.writeFile repaired evidence under withTaskEvidenceLock; :955 atomicWriteFile; quarantine moves into task-gate-quarantine/ (:29-31)',
 		],
 		readerCitations: [
 			'src/evidence/task-gate-requirements.ts:181 readTaskGateRequirementsReceipts — bounded read (256 KiB cap enforced :149-175), async',
