@@ -76,7 +76,7 @@ describe('external skill tool gating via getAgentConfigs', () => {
 		} as PluginConfig);
 
 		for (const tool of EXTERNAL_SKILL_TOOL_NAMES) {
-			expect(agents.architect.tools?.[tool]).toBeUndefined();
+			expect(agents.architect.permission?.[tool]).toBe('deny');
 		}
 	});
 
@@ -98,7 +98,7 @@ describe('external skill tool gating via getAgentConfigs', () => {
 		} as PluginConfig);
 
 		for (const tool of EXTERNAL_SKILL_TOOL_NAMES) {
-			expect(agents.architect.tools?.[tool]).toBe(true);
+			expect(agents.architect.permission?.[tool]).not.toBe('deny');
 		}
 	});
 
@@ -112,7 +112,11 @@ describe('external skill tool gating via getAgentConfigs', () => {
 		);
 		for (const agentName of nonArchitectAgents) {
 			for (const tool of EXTERNAL_SKILL_TOOL_NAMES) {
-				expect(agents[agentName]?.tools?.[tool]).toBeUndefined();
+				expect(
+					(
+						agents[agentName]?.permission as Record<string, unknown> | undefined
+					)?.[tool],
+				).toBe('deny');
 			}
 		}
 	});
@@ -129,10 +133,10 @@ describe('external skill tool gating via getAgentConfigs', () => {
 		} as PluginConfig);
 
 		// Override tool should still be present
-		expect(agents.architect.tools?.save_plan).toBe(true);
+		expect(agents.architect.permission?.save_plan).not.toBe('deny');
 		// External skill tools should also be present
 		for (const tool of EXTERNAL_SKILL_TOOL_NAMES) {
-			expect(agents.architect.tools?.[tool]).toBe(true);
+			expect(agents.architect.permission?.[tool]).not.toBe('deny');
 		}
 	});
 
@@ -148,10 +152,10 @@ describe('external skill tool gating via getAgentConfigs', () => {
 		} as PluginConfig);
 
 		// Override tool should still be present
-		expect(agents.architect.tools?.save_plan).toBe(true);
+		expect(agents.architect.permission?.save_plan).not.toBe('deny');
 		// External skill tools should NOT be present
 		for (const tool of EXTERNAL_SKILL_TOOL_NAMES) {
-			expect(agents.architect.tools?.[tool]).toBeUndefined();
+			expect(agents.architect.permission?.[tool]).toBe('deny');
 		}
 	});
 });

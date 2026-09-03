@@ -21,10 +21,12 @@ describe('council.general.enabled feature-gate', () => {
 		const agents = getAgentConfigs(config);
 		const architect = agents['architect'];
 		expect(architect).toBeDefined();
-		const tools = architect.tools as Record<string, boolean> | undefined;
+		const permission = architect.permission as
+			| Record<string, unknown>
+			| undefined;
 
 		for (const tool of GENERAL_COUNCIL_AGENT_TOOL_MAP.architect ?? []) {
-			expect(tools?.[tool]).toBe(true);
+			expect(permission?.[tool]).not.toBe('deny');
 		}
 	});
 
@@ -35,10 +37,12 @@ describe('council.general.enabled feature-gate', () => {
 
 		const agents = getAgentConfigs(config);
 		const architect = agents['architect'];
-		const tools = architect.tools as Record<string, boolean> | undefined;
+		const permission = architect.permission as
+			| Record<string, unknown>
+			| undefined;
 
 		for (const tool of GENERAL_COUNCIL_AGENT_TOOL_MAP.architect ?? []) {
-			expect(tools?.[tool]).toBeUndefined();
+			expect(permission?.[tool]).toBe('deny');
 		}
 	});
 
@@ -49,10 +53,12 @@ describe('council.general.enabled feature-gate', () => {
 
 		const agents = getAgentConfigs(config);
 		const architect = agents['architect'];
-		const tools = architect.tools as Record<string, boolean> | undefined;
+		const permission = architect.permission as
+			| Record<string, unknown>
+			| undefined;
 
 		for (const tool of GENERAL_COUNCIL_AGENT_TOOL_MAP.architect ?? []) {
-			expect(tools?.[tool]).toBeUndefined();
+			expect(permission?.[tool]).toBe('deny');
 		}
 	});
 
@@ -67,10 +73,12 @@ describe('council.general.enabled feature-gate', () => {
 		const agents = getAgentConfigs(config);
 		const architect = agents['cloud_architect'];
 		expect(architect).toBeDefined();
-		const tools = architect.tools as Record<string, boolean> | undefined;
+		const permission = architect.permission as
+			| Record<string, unknown>
+			| undefined;
 
 		for (const tool of GENERAL_COUNCIL_AGENT_TOOL_MAP.architect ?? []) {
-			expect(tools?.[tool]).toBe(true);
+			expect(permission?.[tool]).not.toBe('deny');
 		}
 	});
 });
@@ -88,10 +96,12 @@ describe('turbo config feature-gate', () => {
 		const agents = getAgentConfigs(config);
 		const architect = agents['architect'];
 		expect(architect).toBeDefined();
-		const tools = architect.tools as Record<string, boolean> | undefined;
+		const permission = architect.permission as
+			| Record<string, unknown>
+			| undefined;
 
 		for (const tool of TURBO_AGENT_TOOL_MAP.architect ?? []) {
-			expect(tools?.[tool]).toBe(true);
+			expect(permission?.[tool]).not.toBe('deny');
 		}
 	});
 
@@ -100,10 +110,12 @@ describe('turbo config feature-gate', () => {
 
 		const agents = getAgentConfigs(config);
 		const architect = agents['architect'];
-		const tools = architect.tools as Record<string, boolean> | undefined;
+		const permission = architect.permission as
+			| Record<string, unknown>
+			| undefined;
 
 		for (const tool of TURBO_AGENT_TOOL_MAP.architect ?? []) {
-			expect(tools?.[tool]).toBeUndefined();
+			expect(permission?.[tool]).toBe('deny');
 		}
 	});
 
@@ -118,10 +130,12 @@ describe('turbo config feature-gate', () => {
 		const agents = getAgentConfigs(config);
 		const architect = agents['cloud_architect'];
 		expect(architect).toBeDefined();
-		const tools = architect.tools as Record<string, boolean> | undefined;
+		const permission = architect.permission as
+			| Record<string, unknown>
+			| undefined;
 
 		for (const tool of TURBO_AGENT_TOOL_MAP.architect ?? []) {
-			expect(tools?.[tool]).toBe(true);
+			expect(permission?.[tool]).not.toBe('deny');
 		}
 	});
 
@@ -132,10 +146,12 @@ describe('turbo config feature-gate', () => {
 
 		const agents = getAgentConfigs(config);
 		const architect = agents['architect'];
-		const tools = architect.tools as Record<string, boolean> | undefined;
+		const permission = architect.permission as
+			| Record<string, unknown>
+			| undefined;
 
 		for (const tool of TURBO_AGENT_TOOL_MAP.architect ?? []) {
-			expect(tools?.[tool]).toBeUndefined();
+			expect(permission?.[tool]).toBe('deny');
 		}
 	});
 });
@@ -152,19 +168,21 @@ describe('all feature flags OFF — architect has no gated tools', () => {
 
 		const agents = getAgentConfigs(config);
 		const architect = agents['architect'];
-		const tools = architect.tools as Record<string, boolean> | undefined;
+		const permission = architect.permission as
+			| Record<string, unknown>
+			| undefined;
 
 		// No COUNCIL_AGENT_TOOL_MAP tools
 		for (const tool of COUNCIL_AGENT_TOOL_MAP.architect ?? []) {
-			expect(tools?.[tool]).toBeUndefined();
+			expect(permission?.[tool]).toBe('deny');
 		}
 		// No GENERAL_COUNCIL_AGENT_TOOL_MAP tools
 		for (const tool of GENERAL_COUNCIL_AGENT_TOOL_MAP.architect ?? []) {
-			expect(tools?.[tool]).toBeUndefined();
+			expect(permission?.[tool]).toBe('deny');
 		}
 		// No TURBO_AGENT_TOOL_MAP tools
 		for (const tool of TURBO_AGENT_TOOL_MAP.architect ?? []) {
-			expect(tools?.[tool]).toBeUndefined();
+			expect(permission?.[tool]).toBe('deny');
 		}
 	});
 });
@@ -192,10 +210,12 @@ describe('tool_filter override + council conflict detection', () => {
 		const agents = getAgentConfigs(config);
 		const architect = agents['architect'];
 		expect(architect).toBeDefined();
-		const tools = architect.tools as Record<string, boolean> | undefined;
+		const permission = architect.permission as
+			| Record<string, unknown>
+			| undefined;
 		// Council tools are auto-merged on top of the override
 		for (const tool of COUNCIL_AGENT_TOOL_MAP.architect ?? []) {
-			expect(tools?.[tool]).toBe(true);
+			expect(permission?.[tool]).not.toBe('deny');
 		}
 	});
 
@@ -219,9 +239,11 @@ describe('tool_filter override + council conflict detection', () => {
 		const agents = getAgentConfigs(config);
 		const architect = agents['cloud_architect'];
 		expect(architect).toBeDefined();
-		const tools = architect.tools as Record<string, boolean> | undefined;
+		const permission = architect.permission as
+			| Record<string, unknown>
+			| undefined;
 		for (const tool of COUNCIL_AGENT_TOOL_MAP.architect ?? []) {
-			expect(tools?.[tool]).toBe(true);
+			expect(permission?.[tool]).not.toBe('deny');
 		}
 	});
 
@@ -245,9 +267,11 @@ describe('tool_filter override + council conflict detection', () => {
 		const agents = getAgentConfigs(config);
 		const architect = agents['architect'];
 		expect(architect).toBeDefined();
-		const tools = architect.tools as Record<string, boolean> | undefined;
-		expect(tools?.submit_council_verdicts).toBe(true);
-		expect(tools?.declare_council_criteria).toBe(true);
+		const permission = architect.permission as
+			| Record<string, unknown>
+			| undefined;
+		expect(permission?.submit_council_verdicts).not.toBe('deny');
+		expect(permission?.declare_council_criteria).not.toBe('deny');
 	});
 
 	test('architect override without council tools is respected when council disabled', () => {
@@ -265,9 +289,11 @@ describe('tool_filter override + council conflict detection', () => {
 
 		const agents = getAgentConfigs(config);
 		const architect = agents['architect'];
-		const tools = architect.tools as Record<string, boolean> | undefined;
-		expect(tools?.submit_council_verdicts).toBeUndefined();
-		expect(tools?.declare_council_criteria).toBeUndefined();
+		const permission = architect.permission as
+			| Record<string, unknown>
+			| undefined;
+		expect(permission?.submit_council_verdicts).toBe('deny');
+		expect(permission?.declare_council_criteria).toBe('deny');
 	});
 
 	test('no override + council enabled: council tools come from AGENT_TOOL_MAP as usual', () => {
@@ -277,9 +303,11 @@ describe('tool_filter override + council conflict detection', () => {
 
 		const agents = getAgentConfigs(config);
 		const architect = agents['architect'];
-		const tools = architect.tools as Record<string, boolean> | undefined;
-		expect(tools?.submit_council_verdicts).toBe(true);
-		expect(tools?.declare_council_criteria).toBe(true);
+		const permission = architect.permission as
+			| Record<string, unknown>
+			| undefined;
+		expect(permission?.submit_council_verdicts).not.toBe('deny');
+		expect(permission?.declare_council_criteria).not.toBe('deny');
 	});
 
 	test('empty override list when council enabled: council tools still present (auto-merged)', () => {
@@ -297,9 +325,11 @@ describe('tool_filter override + council conflict detection', () => {
 
 		const agents = getAgentConfigs(config);
 		const architect = agents['architect'];
-		const tools = architect.tools as Record<string, boolean> | undefined;
+		const permission = architect.permission as
+			| Record<string, unknown>
+			| undefined;
 		for (const tool of COUNCIL_AGENT_TOOL_MAP.architect ?? []) {
-			expect(tools?.[tool]).toBe(true);
+			expect(permission?.[tool]).not.toBe('deny');
 		}
 	});
 
@@ -318,8 +348,10 @@ describe('tool_filter override + council conflict detection', () => {
 
 		const agents = getAgentConfigs(config);
 		const architect = agents['architect'];
-		const tools = architect.tools as Record<string, boolean> | undefined;
-		expect(tools?.submit_council_verdicts).toBe(true);
-		expect(tools?.declare_council_criteria).toBe(true);
+		const permission = architect.permission as
+			| Record<string, unknown>
+			| undefined;
+		expect(permission?.submit_council_verdicts).not.toBe('deny');
+		expect(permission?.declare_council_criteria).not.toBe('deny');
 	});
 });

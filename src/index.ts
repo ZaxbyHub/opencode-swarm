@@ -367,7 +367,10 @@ const LOAD_PLUGIN_CONFIG_TIMEOUT_MS = 2_000;
 
 function createSwarmCommandSystemRuleHook(
 	agentDefinitions: Record<string, AgentDefinition>,
-	registeredAgents: Record<string, { tools?: Record<string, boolean> }>,
+	registeredAgents: Record<string, {
+		tools?: Record<string, boolean>;
+		permission?: Record<string, unknown>;
+	}>,
 ): (input: unknown, output: { system?: string[] }) => Promise<void> {
 	return async (input, output) => {
 		const { sessionID } = input as { sessionID?: string };

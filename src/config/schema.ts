@@ -3579,7 +3579,7 @@ export const PluginConfigSchema = z.object({
 
 	// Tool filter configuration - controls which tools each agent is allowed to use
 	tool_filter: ToolFilterConfigSchema.optional().describe(
-		'Controls which tools each agent is allowed to use.',
+		'Controls which plugin tools each agent is allowed to use; enforced through host-side per-agent permission denies (issue #2528). enabled: false lifts the plugin-tool allow-list but keeps each role\'s read-only write-family floor.',
 	),
 
 	// Authority configuration - per-agent file write authority rules
@@ -4084,7 +4084,7 @@ export const PluginConfigSchema = z.object({
 	// When false (default), the tools are absent from the architect tool surface.
 	// Tools remain exported/registered/TOOL_NAMES-listed; only the architect map is gated.
 	skills: SkillsConfigSchema.optional().describe(
-		'Opt-in gate for the 7 skill_* management tools (FR-004). Default false: the tools are absent from the architect tool surface.',
+		'Opt-in gate for the 7 skill_* management tools (FR-004). Default false: the tools are host-denied for every agent except skill_improver (genuinely unreachable, not merely unlisted — issue #2528).',
 	),
 
 	// Governed skill optimizer (issue #1822 — SkillOpt 3/7). Disabled by

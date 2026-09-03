@@ -1,0 +1,86 @@
+# Per-agent tool boundaries are now host-enforced (permission blocks)
+
+## What
+
+Fixes #2528 (audit finding HOST-1, HIGH): every per-agent tool boundary the
+plugin advertised was inert, because the pinned host
+(`@opencode-ai/plugin` 1.18.3) only reads an agent's `tools` map during
+config-file decode — before plugins load. The agent merge loop copies twelve
+fields and `tools` is not among them; `permission` is. Across the plugin's 21
+injected agents this left 2,388 intended denies unenforced: a reviewer, critic,
+explorer, SME or curator advertised as read-only could call `write`, `bash`,
+`save_plan` and every other registered tool; the FR-004 `skills.enabled: false`
+gate did not make skill tools unreachable; `tool_filter.overrides` changed
+nothing at runtime.
+
+- `getAgentConfigs` now emits a per-agent `permission` block instead of a
+  `tools` map: every registered plugin tool that is not in the agent's
+  effective allow-list carries an explicit `deny`, mapped to the host's
+  permission names exactly as the host's own `Permission.disabled` evaluates
+  them (`write`/`edit`/`apply_patch` alias onto `edit`; `patch` keeps its own
+  name). The host removes denied tools from the agent's request, so the model
+  never sees their schema — the per-turn token cost of the full 129-tool
+  surface is no longer paid by every role.
+- Read-only roles deny the write family as an invariant floor that holds even
+  with `tool_filter.enabled: false` (that opt-out now lifts only the
+  plugin-tool allow-list enumeration, not the role contract). Unknown agent
+  names fail closed — the entire plugin tool surface is denied (previously a
+  latent fail-open, audit HOST-2).
+- Deliberately no bare `'*': 'deny'` catch-all is emitted: agent-level
+  permission outranks your top-level `permission` config and worktree-lane
+  `external_directory` allowlists under the host's last-match evaluation, so a
+  catch-all would also deny external-directory asks and flatten the host's
+  `read`/`.env` protections. Host built-ins (`read`, `grep`, `glob`, `list`,
+  `bash`, `task`, …), MCP tools, and unknown future tools keep the host's
+  defaults untouched, and your own `opencode.json` `permission` entries keep
+  working for them. (Plan-critic-reviewed deviation from the issue's literal
+  "trailing deny-all" wording; the enumerated shape enforces exactly the
+  measured defect surface — the plugin's own 129-tool universe.)
+- FR-004 is now genuine unreachability: with `skills.enabled: false` all 7
+  `skill_*` tools are host-denied for every agent except `skill_improver` (the
+  designed specialist, gated by `skill_improver.enabled`), even when a
+  `tool_filter` override names them.
+- `tool_filter.overrides` is now observable at runtime: the override shapes
+  the deny set, which the host enforces.
+- Primary (architect) agents keep `task: "allow"` as the last entry of their
+  block, so delegation continues to win under last-match evaluation.
+- `agentHasSwarmCommandTool` resolution was fixed for the no-emitted-tools-map
+  world: a factory `tools` map that does not mention `swarm_command` (the
+  read-only factories declare only write-family denies) no longer reads as
+  "does not own swarm_command" — resolution continues to the role map, so
+  `/swarm` command routing keeps working for reviewer/explorer/SME/
+  researcher/critic.
+
+## Why
+
+Every documented per-agent capability boundary was unenforced — a
+security-relevant gap (read-only subagents could write files and mutate plan
+state) plus a per-turn token cost paid by every role for tools it can never
+call. The fix routes the existing allow-list semantics (unchanged derivation:
+`tool_filter.overrides` → `AGENT_TOOL_MAP` → feature-gated merges) into the one
+channel the host provably enforces.
+
+## Verification
+
+`tests/unit/agents/agent-permission-enforcement.test.ts` drives the real
+`getAgentConfigs` output through a verbatim transcription of the pinned host's
+permission machinery (`Permission.disabled`, the agent merge order, and the
+host's hardcoded defaults — extending the repo's established
+`tests/helpers/opencode-permission-model.ts` substrate with source-provenance
+pins): a reviewer's `write`/`edit`/`patch` are refused by the host gate in
+every `tool_filter` mode, one denied + one allowed plugin tool is asserted per
+role class, no emitted rule touches `external_directory`/`read` pattern
+protections (lane allowlists and `.env` asks intact), and per-agent deny
+counts match the audit's intended-deny arithmetic (2,387 = 21×129 − Σ
+allow-lists). Companion files pin full-auto policy parity, prompt/permission
+consistency, and the `swarm_command` routing fallbacks.
+
+## Migration
+
+No config changes required. Two behavior notes:
+
+- Agents can no longer call plugin tools outside their role allow-list. If a
+  workflow genuinely needs a role to call an additional tool, add it via
+  `tool_filter.overrides.<role>` (now runtime-effective) — or file an issue if
+  you believe the role map itself is wrong.
+- Host built-ins, MCP tools, and tools from other plugins are unaffected.

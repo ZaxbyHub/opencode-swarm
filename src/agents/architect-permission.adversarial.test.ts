@@ -236,18 +236,22 @@ describe('ADVERSARIAL: Architect Task Permission Edge Cases', () => {
 	});
 
 	describe('Permission object structure validation', () => {
-		it('should set permission to { task: "allow" } for architect agents', () => {
+		it('should grant task:allow to architect agents (last entry of their block)', () => {
 			const config = getAgentConfigs(undefined);
-			// Use type assertion to bypass SDK type checking
-			expect(config.architect?.permission as { task: string }).toEqual({
-				task: 'allow',
-			});
+			// Since #2528 the permission block also carries per-agent tool
+			// denies; the delegation grant is the LAST entry (findLast wins).
+			const permission = config.architect?.permission as Record<string, string>;
+			expect(permission.task).toBe('allow');
+			expect(Object.keys(permission).at(-1)).toBe('task');
 		});
 
-		it('should set permission to undefined for non-architect agents', () => {
+		it('should not grant task to non-architect agents', () => {
 			const config = getAgentConfigs(undefined);
-			// Non-architects should not have permission property set
-			expect(config.coder?.permission).toBeUndefined();
+			// Non-architects get a permission block (their tool denies) but
+			// never a task entry.
+			expect(
+				(config.coder?.permission as Record<string, unknown>)?.task,
+			).toBeUndefined();
 		});
 
 		it('should set mode to "primary" for architect, "subagent" for others', () => {

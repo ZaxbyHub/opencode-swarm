@@ -353,7 +353,7 @@ describe('getAgentConfigs — primary mode resolution', () => {
 			const r = getAgentConfigs({ default_agent: 'coder' } as never);
 			expect(r['architect'].mode).toBe('subagent');
 			expect(r['coder'].mode).toBe('primary');
-			expect(r['coder'].permission).toEqual({ task: 'allow' });
+			expect(r['coder'].permission?.task).toBe('allow');
 		});
 
 		test('default_agent: "reviewer" ⇒ reviewer primary', () => {
@@ -496,17 +496,17 @@ describe('getAgentConfigs — primary mode resolution', () => {
 	describe('primary agent permissions and model handling', () => {
 		test('primary has task:allow and no model; subagents retain model', () => {
 			const r = getAgentConfigs({ default_agent: 'coder' } as never);
-			expect(r['coder'].permission).toEqual({ task: 'allow' });
+			expect(r['coder'].permission?.task).toBe('allow');
 			expect(r['coder'].model).toBeUndefined();
-			// architect (subagent now) keeps its model field untouched
-			expect(r['architect'].permission).toBeUndefined();
+			// architect (subagent now) keeps its model field untouched and gets no task allow
+			expect(r['architect'].permission?.task).toBeUndefined();
 		});
 
 		test('multi-swarm primary architects have permission set; subagent coders do not', () => {
 			const r = getAgentConfigs(multiSwarmConfig() as never);
-			expect(r['local_architect'].permission).toEqual({ task: 'allow' });
-			expect(r['mega_architect'].permission).toEqual({ task: 'allow' });
-			expect(r['local_coder'].permission).toBeUndefined();
+			expect(r['local_architect'].permission?.task).toBe('allow');
+			expect(r['mega_architect'].permission?.task).toBe('allow');
+			expect(r['local_coder'].permission?.task).toBeUndefined();
 		});
 	});
 

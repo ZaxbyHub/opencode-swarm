@@ -96,7 +96,7 @@ Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit insid
 | `watchdog` | object | — | Scope-guard and delegation-ledger watchdog settings. |
 | `self_review` | object | — | Advisory self-review after coder delegation. |
 | `auto_review` | object | — | Opt-in execution-diff review by the reviewer model in a fresh ephemeral session at task/phase boundaries. |
-| `tool_filter` | object | — | Controls which tools each agent is allowed to use. |
+| `tool_filter` | object | — | Controls which plugin tools each agent is allowed to use; enforced through host-side per-agent permission denies (issue #2528). enabled: false lifts the plugin-tool allow-list but keeps each role's read-only write-family floor. |
 | `authority` | object | — | Per-agent file write authority rules. |
 | `plan_cursor` | object | — | Compressed plan summary injection settings. |
 | `context_map` | object | — | Context Map (issue #1104, FR-006) — opt-in. |
@@ -144,7 +144,7 @@ Generated from `PluginConfigSchema` (`src/config/schema.ts`) - do not edit insid
 | `full_auto` | object | { … } | Full-auto autonomous orchestration with critic oversight: permission policy, denial accounting, oversight cadence triggers (v2 preserves v1 fields so existing configs load unchanged). |
 | `pr_monitor` | object (strict) | — | GitHub PR subscription and polling (FR-001) — disabled by default; opt-in for real-time PR status updates. |
 | `external_skills` | object | — | External skills: candidate model, discovery, and quarantine store (FR-001) — all subsystems opt-in. |
-| `skills` | object | — | Opt-in gate for the 7 skill_* management tools (FR-004). Default false: the tools are absent from the architect tool surface. |
+| `skills` | object | — | Opt-in gate for the 7 skill_* management tools (FR-004). Default false: the tools are host-denied for every agent except skill_improver (genuinely unreachable, not merely unlisted — issue #2528). |
 | `skill_opt` | object (strict) | — | Governed skill optimizer (issue #1822). Disabled by default; /swarm skill-opt run requires enabled: true. All other subcommands are proposal-only/read-only by default. |
 
 Sections marked `(strict)` reject unknown nested keys at config load time - a typo there makes the loader fall back to safe defaults with a startup warning. All other sections silently ignore unknown nested keys.
@@ -266,6 +266,44 @@ If you currently have a config like `{ "model": "grove-openai/gpt-5.3-codex/medi
 ```
 
 Invalid `reasoning.effort` values (anything outside `low | medium | high | max`) and non-positive `thinking.budget_tokens` values will produce a Zod parse error at config load. Unknown fields (typos, future provider-specific options) are stripped by Zod's default behavior — they will not reach the agent factory.
+
+## Per-agent tool permissions (issue #2528)
+
+The host only reads an agent's `tools` map for agents authored in a
+configuration file — for plugin-injected agents (all 21+ swarm agents) that
+field was dropped before the host ever saw it, so every per-agent tool deny the
+plugin advertised was inert (audit finding HOST-1: 2,388 intended denies, 0
+enforced at the pinned host `@opencode-ai/plugin` 1.18.3). The plugin therefore
+enforces its per-agent boundaries through each agent's `permission` block — the
+one field the host copies for plugin-injected agents and evaluates with
+`Permission.disabled` when building each request:
+
+- Every plugin tool that is not in an agent's effective allow-list
+  (`tool_filter.overrides` → role map → feature-gated merges) carries an
+  explicit `deny`. Host built-ins (`read`, `grep`, `glob`, `list`, `bash`,
+  `task`, …), MCP tools, and unknown future tools are deliberately NOT managed
+  here — they keep the host's defaults, and your own top-level
+  `permission` config in `opencode.json` keeps working for them.
+- Read-only roles (reviewer, critic, explorer, sme, researcher, curators)
+  additionally deny the write family (`edit`, which the host evaluates as
+  `edit`/`write`/`apply_patch`, plus `patch`). This floor is enforced even
+  with `tool_filter.enabled: false` — it is each role's contract, not part of
+  the filterable surface.
+- Primary (architect) agents keep `task: "allow"` as the last entry of their
+  block so delegation always wins under the host's last-match evaluation.
+- Denied tools are removed from the agent's request by the host, so the model
+  never sees their schema — the per-turn token cost of the full 129-tool
+  surface is no longer paid by every role.
+
+The FR-004 `skills.enabled: false` gate is now genuine unreachability: all 7
+`skill_*` tools are host-denied for every agent except `skill_improver` (the
+designed specialist, gated by `skill_improver.enabled`), even when a
+`tool_filter` override names them.
+
+Per-agent tool-schema *trimming* beyond this is not possible at this host
+version: the host's `tool.definition` hook receives only a tool id and can
+neither vary a definition per agent nor remove a tool. Permission denies and a
+smaller registered tool set are the only levers on per-turn tool cost.
 
 ## `default_agent` — selecting which agents are exposed as primary
 

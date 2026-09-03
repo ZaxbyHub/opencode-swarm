@@ -28,6 +28,10 @@ const fakeAgent = (
 });
 
 describe('getAgentConfigs - Architect Task Permission Hotfix', () => {
+	// Since #2528 the emitted permission block also carries the per-agent
+	// tool denies (see agent-permission-enforcement.test.ts), so these
+	// assertions check the task/delegation entries specifically rather than
+	// the whole block, and tool ownership via "no deny entry".
 	describe('architect agents get task:allow permission', () => {
 		test('default architect (no prefix) gets mode:primary and task:allow permission', () => {
 			const configs = getAgentConfigs();
@@ -35,8 +39,9 @@ describe('getAgentConfigs - Architect Task Permission Hotfix', () => {
 
 			expect(architectConfig).toBeDefined();
 			expect(architectConfig.mode).toBe('primary');
-			expect(architectConfig.permission).toEqual({ task: 'allow' });
-			expect(architectConfig.tools?.swarm_command).toBe(true);
+			expect(architectConfig.permission?.task).toBe('allow');
+			expect(architectConfig.permission?.swarm_command).not.toBe('deny');
+			expect('tools' in architectConfig).toBe(false);
 		});
 
 		test('cloud_architect gets mode:primary and task:allow permission', () => {
@@ -53,8 +58,8 @@ describe('getAgentConfigs - Architect Task Permission Hotfix', () => {
 
 			expect(cloudArchitectConfig).toBeDefined();
 			expect(cloudArchitectConfig.mode).toBe('primary');
-			expect(cloudArchitectConfig.permission).toEqual({ task: 'allow' });
-			expect(cloudArchitectConfig.tools?.swarm_command).toBe(true);
+			expect(cloudArchitectConfig.permission?.task).toBe('allow');
+			expect(cloudArchitectConfig.permission?.swarm_command).not.toBe('deny');
 		});
 
 		test('local_architect gets mode:primary and task:allow permission', () => {
@@ -71,8 +76,8 @@ describe('getAgentConfigs - Architect Task Permission Hotfix', () => {
 
 			expect(localArchitectConfig).toBeDefined();
 			expect(localArchitectConfig.mode).toBe('primary');
-			expect(localArchitectConfig.permission).toEqual({ task: 'allow' });
-			expect(localArchitectConfig.tools?.swarm_command).toBe(true);
+			expect(localArchitectConfig.permission?.task).toBe('allow');
+			expect(localArchitectConfig.permission?.swarm_command).not.toBe('deny');
 		});
 	});
 
@@ -83,9 +88,9 @@ describe('getAgentConfigs - Architect Task Permission Hotfix', () => {
 
 			expect(coderConfig).toBeDefined();
 			expect(coderConfig.mode).toBe('subagent');
-			expect(coderConfig.tools?.swarm_command).toBe(true);
+			expect(coderConfig.permission?.swarm_command).not.toBe('deny');
 			// Non-architects should NOT have task:allow permission
-			expect(coderConfig.permission).toBeUndefined();
+			expect(coderConfig.permission?.task).toBeUndefined();
 		});
 
 		test('cloud_coder gets mode:subagent without task permission', () => {
@@ -102,7 +107,7 @@ describe('getAgentConfigs - Architect Task Permission Hotfix', () => {
 
 			expect(cloudCoderConfig).toBeDefined();
 			expect(cloudCoderConfig.mode).toBe('subagent');
-			expect(cloudCoderConfig.permission).toBeUndefined();
+			expect(cloudCoderConfig.permission?.task).toBeUndefined();
 		});
 
 		test('local_reviewer gets mode:subagent without task permission', () => {
@@ -119,8 +124,8 @@ describe('getAgentConfigs - Architect Task Permission Hotfix', () => {
 
 			expect(localReviewerConfig).toBeDefined();
 			expect(localReviewerConfig.mode).toBe('subagent');
-			expect(localReviewerConfig.tools?.swarm_command).toBe(true);
-			expect(localReviewerConfig.permission).toBeUndefined();
+			expect(localReviewerConfig.permission?.swarm_command).not.toBe('deny');
+			expect(localReviewerConfig.permission?.task).toBeUndefined();
 		});
 
 		test('explorer gets mode:subagent without task permission', () => {
@@ -129,7 +134,7 @@ describe('getAgentConfigs - Architect Task Permission Hotfix', () => {
 
 			expect(explorerConfig).toBeDefined();
 			expect(explorerConfig.mode).toBe('subagent');
-			expect(explorerConfig.permission).toBeUndefined();
+			expect(explorerConfig.permission?.task).toBeUndefined();
 		});
 
 		test('sme gets mode:subagent without task permission', () => {
@@ -138,7 +143,7 @@ describe('getAgentConfigs - Architect Task Permission Hotfix', () => {
 
 			expect(smeConfig).toBeDefined();
 			expect(smeConfig.mode).toBe('subagent');
-			expect(smeConfig.permission).toBeUndefined();
+			expect(smeConfig.permission?.task).toBeUndefined();
 		});
 
 		test('test_engineer gets mode:subagent without task permission', () => {
@@ -147,7 +152,7 @@ describe('getAgentConfigs - Architect Task Permission Hotfix', () => {
 
 			expect(testEngineerConfig).toBeDefined();
 			expect(testEngineerConfig.mode).toBe('subagent');
-			expect(testEngineerConfig.permission).toBeUndefined();
+			expect(testEngineerConfig.permission?.task).toBeUndefined();
 		});
 	});
 
@@ -170,20 +175,22 @@ describe('getAgentConfigs - Architect Task Permission Hotfix', () => {
 			// Default swarm architect
 			const defaultArchitect = configs['architect'];
 			expect(defaultArchitect.mode).toBe('primary');
-			expect(defaultArchitect.permission).toEqual({ task: 'allow' });
+			expect(defaultArchitect.permission?.task).toBe('allow');
 
 			// Cloud swarm architect
 			const cloudArchitect = configs['cloud_architect'];
 			expect(cloudArchitect.mode).toBe('primary');
-			expect(cloudArchitect.permission).toEqual({ task: 'allow' });
+			expect(cloudArchitect.permission?.task).toBe('allow');
 
 			// Non-architects in both swarms should be subagents
 			expect(configs['coder'].mode).toBe('subagent');
 			expect(configs['cloud_coder'].mode).toBe('subagent');
-			expect(configs['architect'].tools?.swarm_command).toBe(true);
-			expect(configs['cloud_architect'].tools?.swarm_command).toBe(true);
-			expect(configs['coder'].tools?.swarm_command).toBe(true);
-			expect(configs['cloud_coder'].tools?.swarm_command).toBe(true);
+			expect(configs['architect'].permission?.swarm_command).not.toBe('deny');
+			expect(configs['cloud_architect'].permission?.swarm_command).not.toBe(
+				'deny',
+			);
+			expect(configs['coder'].permission?.swarm_command).not.toBe('deny');
+			expect(configs['cloud_coder'].permission?.swarm_command).not.toBe('deny');
 		});
 	});
 });
