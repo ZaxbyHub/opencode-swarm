@@ -458,7 +458,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/pr-workflow-gate.ts',
 		],
 		writerCitations: [
-			'src/background/pending-delegations.ts:2464 appendRecord — appendFileSync :2469 (mutation entry points :2630-4784)',
+			'src/background/pending-delegations.ts:2464 appendRecord — appendFileSync :2469 (20 mutation entry points :2623-4749)',
 			'src/background/pending-delegations.ts:1113 writeDurableFileSync — fsync+rename-with-retry for checkpoint/manifest/rolled-tail (:2269-2310)',
 		],
 		readerCitations: [
@@ -467,7 +467,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'pr-workflow-session-resolver / pr-workflow-gate / init-orphan-recovery / delegation-gate worktree-collision-ownership — via readDelegations',
 		],
 		schemaVersion:
-			'RecordSchema schemaVersion 1|2|3|4 (:887-892); fallback/checkpoint/manifest literal 1 (:971,:1040,:1056)',
+			'RecordSchema schemaVersion 1|2|3|4; checkpoint/manifest literal 1 (:1007,:1028,:1038)',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
 		writeLimits: {
@@ -479,11 +479,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			pattern: 'indexed (checkpoint+tail) with full-fold fallback',
 			bound: 'legacy/tail reads hard-bounded at 4 MiB (MAX_RECOVERY_LEDGER_BYTES)',
 			sync: true,
-			citation: 'src/background/pending-delegations.ts:90-93,1557',
+			citation: 'src/background/pending-delegations.ts:90-95,1557',
 		},
-		lockModel: 'withEvidenceLock agent=background on every mutation (:144-148); reads lock-free',
+		lockModel: 'withEvidenceLock agent=background on every mutation (:144-147); reads lock-free',
 		crashBehavior:
-			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1285-1289)',
+			'torn append tolerated by lenient fold, strict recovery fails closed; manifest-gated checkpoint publication — checkpoint without manifest ignored (:1285-1297)',
 		closePolicy: 'archived-only — ARCHIVE_ARTIFACTS (close.ts:454-456); deliberately NOT cleaned (cross-session store; compaction is the bounded-retention mechanism, close.ts:449-457 docblock)',
 		closeArrayMembership: {
 			'background-delegations.jsonl': 'archive-only',

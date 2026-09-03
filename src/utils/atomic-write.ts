@@ -188,7 +188,7 @@ export const SWARM_TEMP_GRAMMARS: readonly SwarmTempGrammar[] = [
 			'src/tools/spec-write.ts:98',
 			'src/sdd/effective-spec.ts:1149',
 			'src/background/lane-output-store.ts:353',
-			'src/background/pending-delegations.ts:1106',
+			'src/background/pending-delegations.ts:1114',
 			'src/background/delegation-health.ts:391',
 			'src/tools/submit-phase-council-verdicts.ts:458',
 			'src/summaries/store.ts:46 (pre-#2035)',
