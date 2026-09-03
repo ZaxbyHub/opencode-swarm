@@ -2,12 +2,12 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
-	PR_SUBSCRIPTIONS_CHECKPOINT_FILE,
-	PR_SUBSCRIPTIONS_FILE,
 	getPrSubscriptionHealth,
 	listActive,
-	subscribe,
+	PR_SUBSCRIPTIONS_CHECKPOINT_FILE,
+	PR_SUBSCRIPTIONS_FILE,
 	type PrSubscriptionCheckpoint,
+	subscribe,
 } from '../../../src/background/pr-subscriptions';
 import { closeProjectDb } from '../../../src/db/project-db.js';
 import { freezeClock } from '../../helpers/test-clock';
