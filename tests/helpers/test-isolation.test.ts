@@ -5,7 +5,6 @@
  */
 import { afterEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isCanonicalPathWithinRoot } from '../../src/utils/path-security.js';
@@ -17,6 +16,7 @@ import {
 	setupIsolatedState,
 	withIsolatedState,
 } from './test-isolation.js';
+import { canonicalTmpDir } from './tmpdir.js';
 
 afterEach(() => {
 	mock.restore();
@@ -26,7 +26,9 @@ describe('setupIsolatedState', () => {
 	test('returns a temp dir under os.tmpdir() and an isolated config dir', () => {
 		const state = setupIsolatedState({ prefix: 'iso-test-' });
 		try {
-			expect(isCanonicalPathWithinRoot(state.dir, os.tmpdir())).toBe(true);
+			expect(isCanonicalPathWithinRoot(state.dir, canonicalTmpDir())).toBe(
+				true,
+			);
 			expect(fs.existsSync(state.dir)).toBe(true);
 			expect(state.configDir).toBeTruthy();
 			// Env vars pointed at the isolated config dir.

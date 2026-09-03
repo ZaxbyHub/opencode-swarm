@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { isCanonicalPathWithinRoot } from '../../../src/utils/path-security.js';
 import {
@@ -8,6 +7,7 @@ import {
 	safeRmRecursive,
 	withSafeTestDir,
 } from '../../helpers/safe-test-dir';
+import { canonicalTmpDir } from '../../helpers/tmpdir';
 
 describe('createSafeTestDir', () => {
 	it('creates a directory that exists', () => {
@@ -29,7 +29,7 @@ describe('createSafeTestDir', () => {
 			// returns the /var/... symlink but the real path is /private/var/...).
 			// Compare against the realpath-resolved tmpdir base so the assertion
 			// holds on macOS too.
-			expect(isCanonicalPathWithinRoot(dir, os.tmpdir())).toBe(true);
+			expect(isCanonicalPathWithinRoot(dir, canonicalTmpDir())).toBe(true);
 		} finally {
 			cleanup();
 		}
@@ -111,11 +111,11 @@ describe('safeRmRecursive', () => {
 	});
 
 	it('rejects paths outside os.tmpdir()', () => {
-		const outside = path.parse(os.tmpdir()).root;
+		const outside = path.parse(canonicalTmpDir()).root;
 		expect(() => safeRmRecursive(outside)).toThrow('not under os.tmpdir');
 	});
 
-	it('rejects symlinks or junctions inside os.tmpdir() that resolve outside it', () => {
+	it('rejects symlinks or junctions inside the system temp directory that resolve outside it', () => {
 		const { dir, cleanup } = createSafeTestDir('safe-rm-symlink-');
 		const linkPath = path.join(dir, 'outside-link');
 		fs.symlinkSync(
