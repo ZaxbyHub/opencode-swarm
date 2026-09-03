@@ -13,6 +13,7 @@ import { sanitizeDiagnosticText } from '../scope/path-identity.js';
 import { clearSnapshotRows } from '../session/snapshot-store.js';
 import { swarmState } from '../state';
 import { recoverStaleCoderSettlements } from '../workflow/coder-settlement.js';
+import { closeSnapshotCoordinationInitialization } from '../session/snapshot-coordination-init.js';
 import {
 	cleanupOrphanedBranches,
 	type OrphanCleanupResult,
@@ -41,6 +42,7 @@ export const _internals: {
 	recoverStaleCoderSettlements: typeof recoverStaleCoderSettlements;
 	queryLiveMemberships: typeof queryLiveMemberships;
 	commitGateReleaseBatch: typeof commitGateReleaseBatch;
+	closeSnapshotCoordinationInitialization: typeof closeSnapshotCoordinationInitialization;
 	releaseKnowledgeGateObligations: (
 		directory: string,
 		sessionID: string,
@@ -51,6 +53,7 @@ export const _internals: {
 	recoverStaleCoderSettlements,
 	queryLiveMemberships,
 	commitGateReleaseBatch,
+	closeSnapshotCoordinationInitialization,
 	releaseKnowledgeGateObligations: releaseKnowledgeGateObligations,
 };
 
@@ -185,6 +188,17 @@ export async function handleResetSessionCommand(
 	sessionID?: string,
 ): Promise<string> {
 	const results: string[] = [];
+
+	// Quiesce any retained post-resolution import/rehydration before deleting
+	// SQLite authority. Without this barrier, a late initializer can rehydrate
+	// and rewrite the projection after reset-session has cleared it (#2481).
+	try {
+		await _internals.closeSnapshotCoordinationInitialization(directory);
+	} catch (err) {
+		results.push(
+			`⚠️ Snapshot coordination close failed (continuing with reset): ${errorMessage(err)}`,
+		);
+	}
 
 	// Auto-backup the session state we are about to delete BEFORE deletion, so it
 	// can be recovered by copying files back. Fail-open. #1692

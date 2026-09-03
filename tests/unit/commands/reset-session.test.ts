@@ -53,6 +53,34 @@ describe('handleResetSessionCommand', () => {
 		expect(result).toContain('authoritative session snapshot row');
 	});
 
+	it('#2481 waits for retained snapshot coordination before clearing authority', async () => {
+		writeSnapshotRows(testDir, {
+			version: 3,
+			writtenAt: 1,
+			toolAggregates: {},
+			activeAgent: {},
+			delegationChains: {},
+			agentSessions: {},
+		});
+		let release!: () => void;
+		const barrier = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const original = _internals.closeSnapshotCoordinationInitialization;
+		_internals.closeSnapshotCoordinationInitialization = async () => barrier;
+		try {
+			const reset = handleResetSessionCommand(testDir, []);
+			await Promise.resolve();
+			expect(readSnapshotRows(testDir)).not.toBeNull();
+			release();
+			await reset;
+			expect(readSnapshotRows(testDir)).toBeNull();
+		} finally {
+			release();
+			_internals.closeSnapshotCoordinationInitialization = original;
+		}
+	});
+
 	it('deletes state.json when it exists', async () => {
 		const stateFile = path.join(testDir, '.swarm', 'session', 'state.json');
 		writeFileSync(stateFile, JSON.stringify({ test: 'data' }));

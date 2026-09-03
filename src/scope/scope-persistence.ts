@@ -90,6 +90,7 @@ import {
 	normalizeScopeFiles,
 	registerScopeBinding,
 	type ScopeBinding,
+	type ScopeBindingAdmissionResult,
 	updateExactScopeBinding,
 } from './scope-binding';
 
@@ -1280,6 +1281,47 @@ export async function persistAndRegisterScopeBinding(
 	};
 }
 
+async function rollbackAdmissionFailure(
+	directory: string,
+	persisted: ScopeBinding,
+	predecessors: readonly { original: ScopeBinding; superseded: ScopeBinding }[],
+	admission: Extract<ScopeBindingAdmissionResult, { ok: false }>,
+): Promise<ScopePersistenceResult<never>> {
+	const revoked = await tombstoneScopeBinding(directory, persisted, 'revoked');
+	if (!revoked.ok) {
+		return persistenceFailure(
+			`Memory admission failed and durable rollback failed: ${revoked.message}`,
+		);
+	}
+	for (const { original, superseded } of predecessors) {
+		const restored = await writeScopeBindingToDisk(directory, {
+			...original,
+			revision: superseded.revision + 1,
+			lifecycleState: 'live',
+			updatedAt: Date.now(),
+		});
+		if (!restored.ok) {
+			return persistenceFailure(
+				`Memory admission failed and predecessor restore failed: ${restored.message}`,
+			);
+		}
+		const memory = updateExactScopeBinding(restored.value);
+		if (!memory.ok) {
+			const registered = registerScopeBinding(restored.value);
+			if (!registered.ok) {
+				return persistenceFailure(
+					`Memory admission failed and predecessor re-admission failed: ${registered.message}`,
+				);
+			}
+		}
+	}
+	return {
+		ok: false,
+		code: admission.code,
+		message: admission.message,
+	};
+}
+
 /** Read and fully validate a v2 binding; v1 records never authorize here. */
 export function readScopeBindingFromDisk(input: {
 	directory: string;
@@ -1766,18 +1808,19 @@ export async function claimScopeBindingForChildDurably(input: {
 						message: admission.message,
 					};
 		}
-		if (!claimed || !retired) {
+		if (!predecessor || !claimed || !retired) {
 			return persistenceFailure('Claim transaction did not settle a winner.');
 		}
 		writeScopeBindingShadow(input.directory, claimed);
 		writeScopeBindingShadow(input.directory, retired);
 		const admission = registerScopeBinding(claimed);
 		if (!admission.ok) {
-			return {
-				ok: false,
-				code: admission.code,
-				message: admission.message,
-			};
+			return rollbackAdmissionFailure(
+				input.directory,
+				claimed,
+				[{ original: predecessor, superseded: retired }],
+				admission,
+			);
 		}
 		installScopeBindingTombstone(retired);
 		return { ok: true, value: { previous: predecessor, claimed } };
@@ -1885,11 +1928,20 @@ export async function replaceExistingScopeDeclaration(input: {
 		}
 		const admission = registerScopeBinding(persisted);
 		if (!admission.ok) {
-			return {
-				ok: false,
-				code: admission.code,
-				message: admission.message,
-			};
+			if (retired.length !== owned.length) {
+				return persistenceFailure(
+					'Memory admission failed after an incomplete predecessor transition.',
+				);
+			}
+			return rollbackAdmissionFailure(
+				input.directory,
+				persisted,
+				owned.map((original, index) => ({
+					original,
+					superseded: retired[index]!,
+				})),
+				admission,
+			);
 		}
 		return { ok: true, value: persisted };
 	} catch (error) {

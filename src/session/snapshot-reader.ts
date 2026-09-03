@@ -323,7 +323,7 @@ export async function readSnapshot(
 
 			// Check if file is empty or just whitespace
 			if (!content.trim()) {
-				return null;
+				continue;
 			}
 
 			const parsed = JSON.parse(content, (key, value) => {
@@ -343,13 +343,13 @@ export async function readSnapshot(
 						directory,
 						`${relativePath}.quarantine`,
 					);
-					// Rename the stale file.  Errors are swallowed — the important
-					// thing is that we return null so the caller starts fresh.
+					// Rename the stale file. Errors are swallowed; the next candidate
+					// remains eligible as the compatibility fallback.
 					renameSync(resolvedPath, quarantinePath);
 				} catch {
-					// Quarantine rename failed — not fatal, still return null below.
+					// Quarantine rename failed — not fatal; still try the next candidate.
 				}
-				return null;
+				continue;
 			}
 
 			return parsed;

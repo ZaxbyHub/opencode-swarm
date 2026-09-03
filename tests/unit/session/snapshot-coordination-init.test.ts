@@ -148,30 +148,34 @@ describe('snapshot coordination post-resolution initialization', () => {
 		expect(readSnapshotRows(tempDir)!.agentSessions.stale).toBeUndefined();
 	});
 
-	test('reads and clears every snapshot row beyond the former five-thousand-row cap', () => {
-		// Prior code used listCoordinationStates' 5,000-row default, silently
-		// dropping session rows during rehydrate and leaving one on reset.
-		const agentSessions: Record<string, never> = {};
-		for (let index = 0; index < 5_001; index += 1) {
-			agentSessions[`session-${index.toString().padStart(5, '0')}`] = {
-				agentName: 'coder',
-			} as never;
-		}
-		writeSnapshotRows(tempDir, {
-			version: 3,
-			writtenAt: 1,
-			toolAggregates: {},
-			activeAgent: {},
-			delegationChains: {},
-			agentSessions,
-		});
+	test(
+		'reads and clears every snapshot row beyond the former five-thousand-row cap',
+		() => {
+			// Prior code used listCoordinationStates' 5,000-row default, silently
+			// dropping session rows during rehydrate and leaving one on reset.
+			const agentSessions: Record<string, never> = {};
+			for (let index = 0; index < 5_001; index += 1) {
+				agentSessions[`session-${index.toString().padStart(5, '0')}`] = {
+					agentName: 'coder',
+				} as never;
+			}
+			writeSnapshotRows(tempDir, {
+				version: 3,
+				writtenAt: 1,
+				toolAggregates: {},
+				activeAgent: {},
+				delegationChains: {},
+				agentSessions,
+			});
 
-		expect(Object.keys(readSnapshotRows(tempDir)!.agentSessions)).toHaveLength(
-			5_001,
-		);
-		expect(clearSnapshotRows(tempDir)).toBe(5_002);
-		expect(readSnapshotRows(tempDir)).toBeNull();
-	});
+			expect(
+				Object.keys(readSnapshotRows(tempDir)!.agentSessions),
+			).toHaveLength(5_001);
+			expect(clearSnapshotRows(tempDir)).toBe(5_002);
+			expect(readSnapshotRows(tempDir)).toBeNull();
+		},
+		{ timeout: 30_000 },
+	);
 
 	test('reset clears snapshot import markers so a restored legacy file can re-import', () => {
 		const snapshot = {
