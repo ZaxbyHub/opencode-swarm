@@ -6,8 +6,8 @@ import { createSwarmTool } from './create-tool.js';
 const SubmitPrReviewResultArgsSchema = z
 	.object({
 		schemaVersion: z.literal(1),
-		batchId: z.string().trim().min(1).max(120),
-		laneId: z.string().trim().min(1).max(120),
+		batchId: z.string().trim().min(1).max(120).optional(),
+		laneId: z.string().trim().min(1).max(120).optional(),
 		revisionDigest: z
 			.string()
 			.trim()
@@ -37,8 +37,8 @@ export async function executeSubmitPrReviewResult(
 		});
 	}
 	const outcome = await submitPrReviewResult(directory, childSessionId, {
-		batchId: parsed.data.batchId,
-		laneId: parsed.data.laneId,
+		...(parsed.data.batchId ? { batchId: parsed.data.batchId } : {}),
+		...(parsed.data.laneId ? { laneId: parsed.data.laneId } : {}),
 		revisionDigest: parsed.data.revisionDigest,
 		result: parsed.data.result,
 	});
@@ -51,7 +51,7 @@ export async function executeSubmitPrReviewResult(
 export const submit_pr_review_result: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Submit exactly one typed CLEAN, FINDINGS, or INCOMPLETE result for the active child-bound PR-review base/micro lane. The receipt is atomically bound to the authenticated child session, workflow instance, revision, batch, lane, root, base, and head. Identical replay is idempotent; conflicting or late submissions fail closed. Call once, then stop.',
+			'Submit exactly one typed CLEAN, FINDINGS, or INCOMPLETE result for the active child-bound PR-review base/micro lane. The authenticated child session identifies its exact delegation and supplies authoritative batch/lane provenance; optional batchId/laneId values are checked when present. The receipt is atomically bound to the child session, workflow instance, revision, batch, lane, root, base, and head. Identical replay is idempotent; conflicting or late submissions fail closed. Call once, then stop.',
 		args: {
 			schemaVersion: SubmitPrReviewResultArgsSchema.shape.schemaVersion,
 			batchId: SubmitPrReviewResultArgsSchema.shape.batchId,

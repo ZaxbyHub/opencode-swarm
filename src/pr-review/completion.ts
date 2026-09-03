@@ -772,7 +772,7 @@ function hasRevisionIndependentDiscoverySemantics(
 			gitHead: state.prHeadSha ?? '',
 			revisionDigest: artifact.revisionDigest,
 			workflowInstanceId: state.workflowInstanceId,
-			workflowRevision: state.revision,
+			workflowRevision: qualified.record.workflowGeneration,
 			baseSha: state.prReviewBaseSha,
 			reviewScope:
 				state.prReviewBaseSha && state.prHeadSha
@@ -911,7 +911,7 @@ function latestStructuredReceiptUnresolvedForBaseDimension(
 						gitHead: state.prHeadSha ?? '',
 						revisionDigest,
 						workflowInstanceId: state.workflowInstanceId,
-						workflowRevision: state.revision,
+						workflowRevision: record.workflowGeneration,
 						baseSha: state.prReviewBaseSha,
 						reviewScope,
 					},

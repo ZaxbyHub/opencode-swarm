@@ -1,6 +1,7 @@
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin';
+import { findByCorrelationId } from '../background/pending-delegations';
 import {
 	resolveCurrentGitHeadAsync,
 	resolveIsWorkingTreeCleanAsync,
@@ -65,7 +66,10 @@ interface PrWorkflowStatusGitState {
 
 interface PrWorkflowStatusGateSummary {
 	active: boolean;
-	reason?: 'no-session-context' | 'no-active-gate';
+	reason?:
+		| 'no-session-context'
+		| 'no-active-gate'
+		| 'delegation-chain-uncertain';
 	mode?: PrWorkflowGateState['mode'];
 	prHeadBound?: boolean;
 	prHeadSha?: string | null;
@@ -283,6 +287,9 @@ function describeNextStep(
 		return `Manual Git recovery required. code=${checkout.code} retryable=false required_action=${checkout.requiredAction}`;
 	}
 	if (!gate.active) {
+		if (gate.reason === 'delegation-chain-uncertain') {
+			return 'PR workflow gate ownership could not be resolved from this session delegation chain (cycle, depth limit, or missing ancestor). Treat the workflow state as unknown and use read-only recovery inspection; do not perform PR-workflow writes.';
+		}
 		return 'No active PR workflow gate for this session. Activate with `/swarm pr-review <pr-ref>` or `/swarm pr-feedback <pr-ref>` before PR-workflow tool calls are admitted.';
 	}
 	if (!gate.prHeadBound) {
@@ -339,11 +346,48 @@ function summarizeGate(
 	};
 }
 
+const MAX_GATE_ANCESTOR_DEPTH = 16;
+
+/**
+ * Resolve a lane's own session to the nearest ancestor with a durable gate.
+ * This follows only the authenticated caller's delegation chain; it never
+ * enumerates sibling gate files. The index hook performs the same resolution
+ * before enforcement, so the observer must report the gate it is actually
+ * operating under as well.
+ */
+async function resolveWorkflowGateSession(
+	directory: string,
+	sessionID: string,
+): Promise<string | null> {
+	const firstRecord = findByCorrelationId(directory, sessionID.trim());
+	if (!firstRecord?.parentSessionId?.trim()) return sessionID;
+	let current = firstRecord.parentSessionId.trim();
+	const visited = new Set<string>();
+	for (let depth = 0; depth < MAX_GATE_ANCESTOR_DEPTH; depth += 1) {
+		if (!current || visited.has(current)) return null;
+		visited.add(current);
+		if (
+			await _internals.readPrWorkflowGateStateForRecovery(directory, current)
+		) {
+			return current;
+		}
+		const parentRecord = findByCorrelationId(directory, current);
+		if (!parentRecord) return null;
+		const parent = parentRecord.parentSessionId?.trim();
+		if (!parent) return null;
+		current = parent;
+	}
+	return null;
+}
+
 async function executePrWorkflowStatus(
 	directory: string,
 	rawSessionID: string | undefined,
 ): Promise<string> {
 	const sessionID = rawSessionID?.trim() ? rawSessionID.trim() : null;
+	const gateSessionID = sessionID
+		? await resolveWorkflowGateSession(directory, sessionID)
+		: null;
 
 	const [head, isClean, branchInfo, porcelain, remoteOutput, liveCheckout] =
 		await Promise.all([
@@ -378,8 +422,11 @@ async function executePrWorkflowStatus(
 	// active gate", which would leak a sibling session's state.
 	let gate: PrWorkflowStatusGateSummary;
 	let activeState: PrWorkflowGateState | null = null;
-	if (!sessionID) {
-		gate = { active: false, reason: 'no-session-context' };
+	if (!gateSessionID) {
+		gate = {
+			active: false,
+			reason: sessionID ? 'delegation-chain-uncertain' : 'no-session-context',
+		};
 	} else {
 		// Issue #2242 R4 (W-5): observation must survive gate-state corruption —
 		// a schema-invalid state previously made this read-only tool throw, so an
@@ -388,11 +435,11 @@ async function executePrWorkflowStatus(
 		// callers of the recovery reader.
 		const recovery = await _internals.readPrWorkflowGateStateForRecovery(
 			directory,
-			sessionID,
+			gateSessionID,
 		);
 		activeState = recovery?.state ?? null;
 		const receiptFiles = activeState
-			? await countCheckoutReceiptFiles(directory, sessionID)
+			? await countCheckoutReceiptFiles(directory, gateSessionID)
 			: null;
 		gate = summarizeGate(
 			activeState,
@@ -447,6 +494,7 @@ export const _internals: {
 	runGitCapture: typeof runGitCapture;
 	classifyGitState: typeof classifyPrWorkflowGitState;
 	truncateToByteBudget: typeof truncateToByteBudget;
+	resolveWorkflowGateSession: typeof resolveWorkflowGateSession;
 } = {
 	readPrWorkflowGateStateForRecovery,
 	resolveCurrentGitHeadAsync,
@@ -454,4 +502,5 @@ export const _internals: {
 	runGitCapture,
 	classifyGitState: classifyPrWorkflowGitState,
 	truncateToByteBudget,
+	resolveWorkflowGateSession,
 };

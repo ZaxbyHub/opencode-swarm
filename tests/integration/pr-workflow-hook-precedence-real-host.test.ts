@@ -353,6 +353,16 @@ describe('PR workflow gate has authoritative real-host Task precedence', () => {
 	test('PR_FEEDBACK coder Tasks still reach acceptance and scope preflight', async () => {
 		await activatePrWorkflow(directory, SESSION_ID, 'PR_FEEDBACK');
 		await settleFeedbackVerification();
+		expect(existsSync(path.join(directory, '.swarm', 'plan.json'))).toBeTrue();
+		const prepared = JSON.parse(
+			String(
+				await plugin.tool.prepare_pr_feedback_scope.execute(
+					{ task_id: '9.9', files: ['src/index.ts'] },
+					{ directory, sessionID: SESSION_ID },
+				),
+			),
+		) as { success: boolean };
+		expect(prepared.success).toBeTrue();
 		const before = plugin.hooks['tool.execute.before'];
 
 		await expect(
@@ -361,7 +371,7 @@ describe('PR workflow gate has authoritative real-host Task precedence', () => {
 				{
 					args: {
 						subagent_type: 'coder',
-						task_id: '1.1',
+						task_id: '9.9',
 						prompt: 'Implement the approved fix.',
 					},
 				},
@@ -374,19 +384,20 @@ describe('PR workflow gate has authoritative real-host Task precedence', () => {
 				{
 					args: {
 						subagent_type: 'coder',
-						task_id: '1.1',
+						task_id: '9.9',
 						prompt:
 							'Implement the approved fix.\nACCEPTANCE: src/index.ts is updated and verified.',
 					},
 				},
 			),
 		).resolves.toBeUndefined();
-		expect(
-			getScopeBindingForParentDispatch({
-				parentSessionId: SESSION_ID,
-				dispatchCallId: 'coder-approved',
-			}),
-		).not.toBeNull();
+		const binding = getScopeBindingForParentDispatch({
+			parentSessionId: SESSION_ID,
+			dispatchCallId: 'coder-approved',
+		});
+		expect(binding).not.toBeNull();
+		expect(binding?.source).toBe('pr_feedback');
+		expect(binding?.planId).toBe(`pr-feedback:${SESSION_ID}`);
 	});
 
 	test('child sessions inherit the controller PR_REVIEW precedence', async () => {

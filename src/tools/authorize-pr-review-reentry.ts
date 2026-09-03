@@ -29,10 +29,11 @@ const AuthorizePrReviewReentryArgsSchema = z
  * requirement; every other delegation gate stays authoritative. Bindings are
  * exact (session, workflow, run, head SHA, worktree revision digest, role,
  * gate generation): replay, cross-session use, wrong role, expiry, or any
- * workflow progress since issuance fails closed. A Task the delegation gate
- * later rejects for an unrelated reason still burns the authorization —
- * issue a fresh one before retrying. Issue immediately before the Task
- * dispatch — authorizations are not stockpilable.
+ * workflow progress since issuance fails closed. If a plan or task workflow
+ * state exists, the dispatch must identify the exact task; taskless dispatches
+ * are limited to plan-free standalone review. A later unrelated gate rejection
+ * still burns the authorization — issue a fresh one before retrying. Issue
+ * immediately before the Task dispatch — authorizations are not stockpilable.
  */
 export async function executeAuthorizePrReviewReentry(
 	args: unknown,
@@ -74,7 +75,7 @@ export async function executeAuthorizePrReviewReentry(
 				generation: record.generation,
 				revision_digest: record.revisionDigest,
 				expires_at: record.expiresAt,
-				instructions: `Immediately dispatch exactly one Task call with subagent_type "${record.role}" for this PR-review re-entry; the PR workflow controller reserves this authorization once and the delegation gate verifies the same call-bound reservation. Any other dispatch falls back to normal gating.`,
+				instructions: `Immediately dispatch exactly one direct subagent_type Task call with role "${record.role}" for this PR-review re-entry; if a plan or task workflow state exists, include the exact task_id (or task identifier in the prompt). A taskless dispatch is allowed only for a plan-free standalone review and does not advance plan-task gate state. The PR workflow controller admits and reserves this authorization once, and the delegation gate verifies the same call-bound reservation; a later unrelated gate rejection still burns it. Any other dispatch falls back to normal gating.`,
 			},
 			null,
 			2,
@@ -90,7 +91,7 @@ export async function executeAuthorizePrReviewReentry(
 export const authorize_pr_review_reentry: ReturnType<typeof createSwarmTool> =
 	createSwarmTool({
 		description:
-			'Issue a one-use, identity-bound reviewer/test_engineer re-entry authorization for the active PR_REVIEW workflow (issue #2383). The authorization is reserved atomically by the PR workflow controller for the very next direct subagent_type Task dispatch of the declared role (admitting that one dispatch past the PR_REVIEW read-only restriction), then verified for that same call by the delegation gate, which bypasses ONLY the generic Stage-A task-workflow requirement; all other delegation gates remain authoritative. Bound to the exact session, workflow, run, PR head SHA, worktree revision digest, role, and gate generation; replay, cross-session use, wrong role, expiry (10 minutes), or workflow progress since issuance fails closed. A dispatch the delegation gate later rejects for another reason still burns the authorization. Requires an active head-bound PR_REVIEW gate. Issue immediately before the Task dispatch; unconsumed same-role authorizations at the same generation are refused.',
+			'Issue a one-use, identity-bound reviewer/test_engineer re-entry authorization for the active PR_REVIEW workflow (issue #2383). The authorization is reserved atomically by the PR workflow controller for the very next direct subagent_type Task dispatch of the declared role (admitting that one dispatch past the PR_REVIEW read-only restriction), then verified for that same call by the delegation gate, which bypasses ONLY the generic Stage-A task-workflow requirement; all other delegation gates remain authoritative. If a plan or task workflow state exists, the dispatch must include an exact task_id or task identifier; taskless dispatch is standalone-only and never guesses from plan/session state. Bound to the exact session, workflow, run, PR head SHA, worktree revision digest, role, and gate generation; replay, cross-session use, wrong role, expiry (10 minutes), or workflow progress since issuance fails closed. A dispatch the delegation gate later rejects for another reason still burns the authorization. Requires an active head-bound PR_REVIEW gate. Issue immediately before the Task dispatch; unconsumed same-role authorizations at the same generation are refused.',
 		args: {
 			run_id: AuthorizePrReviewReentryArgsSchema.shape.run_id,
 			pr_head_sha: AuthorizePrReviewReentryArgsSchema.shape.pr_head_sha,

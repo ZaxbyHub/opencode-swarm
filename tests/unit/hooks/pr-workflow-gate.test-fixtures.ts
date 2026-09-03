@@ -147,8 +147,12 @@ export async function persistBatch(
 		// Correlation IDs identify one immutable launch. Derive the fixture ID from
 		// the logical lane so separate persistBatch calls for disjoint slices of the
 		// same batch cannot collide merely because each slice restarts at index 0.
-		const correlationId = `${batchId}--${lane.laneId}`;
-		const subagentSessionId = options.subagentSessionId ?? correlationId;
+		const defaultCorrelationId = `${batchId}--${lane.laneId}`;
+		// PR-review records bind the durable correlation key to the authenticated
+		// child session. Preserve custom fixture session IDs while keeping that
+		// production identity invariant true.
+		const subagentSessionId = options.subagentSessionId ?? defaultCorrelationId;
+		const correlationId = options.subagentSessionId ?? defaultCorrelationId;
 		await recordPendingDelegation(tempDir, {
 			correlationId,
 			jobId: null,

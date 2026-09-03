@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, realpathSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -22,6 +22,7 @@ beforeEach(() => {
 	directory = realpathSync(
 		mkdtempSync(path.join(os.tmpdir(), 'pr-workflow-abort-')),
 	);
+	mkdirSync(path.join(directory, '.git'), { recursive: true });
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHead = () => 'abc123';
 	gateInternals.resolveIsWorkingTreeClean = () => true;
@@ -244,7 +245,7 @@ describe('abortPrWorkflow', () => {
 		await recordPendingDelegation(directory, {
 			correlationId: 'c1',
 			jobId: null,
-			subagentSessionId: 'sub-1',
+			subagentSessionId: 'c1',
 			parentSessionId: 'lanes-session',
 			callID: 'call-1',
 			normalizedAgent: 'explorer',

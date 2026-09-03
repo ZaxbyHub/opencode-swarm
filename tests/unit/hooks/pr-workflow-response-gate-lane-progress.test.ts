@@ -6,20 +6,32 @@ import {
 	appendDelegationTransition,
 	recordPendingDelegation,
 } from '../../../src/background/pending-delegations.js';
+import { encodePrReviewWorkflowBinding } from '../../../src/background/pr-review-contract.js';
 import {
 	activatePrWorkflow,
+	bindPrReviewBase,
+	readPrWorkflowGateState,
 	_test_exports as workflowInternals,
 } from '../../../src/hooks/pr-workflow-gate.js';
 import {
 	createPrWorkflowResponseGate,
 	_internals as responseInternals,
 } from '../../../src/hooks/pr-workflow-response-gate.js';
+import { executeSubmitPrReviewResult } from '../../../src/tools/submit-pr-review-result.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 describe('PR workflow response-gate lane progress token (#2469)', () => {
 	let directory = '';
 	const sessionID = 'lane-progress-session';
 	const originalDelegationScan = responseInternals.scanDelegationsForRecovery;
+	const originalResolveCurrentGitHeadAsync =
+		workflowInternals.resolveCurrentGitHeadAsync;
+	const originalResolveIsWorkingTreeCleanAsync =
+		workflowInternals.resolveIsWorkingTreeCleanAsync;
+	const originalResolvePrReviewDiffStatsAsync =
+		workflowInternals.resolvePrReviewDiffStatsAsync;
+	const originalResolvePrWorkflowRevisionDigest =
+		workflowInternals.resolvePrWorkflowRevisionDigest;
 
 	async function registerActiveBatch(
 		batchId: string,
@@ -36,8 +48,6 @@ describe('PR workflow response-gate lane progress token (#2469)', () => {
 				batchId,
 				phase: 'council',
 				lanes: laneIds.map((laneId) => ({ laneId, workflowLane: laneId })),
-				// Fixed fixture timestamp (check:test-clock): fixture data, not a
-				// time-sensitive assertion.
 				validatedAt: '2026-01-01T00:00:00.000Z',
 			},
 		];
@@ -47,16 +57,20 @@ describe('PR workflow response-gate lane progress token (#2469)', () => {
 
 	beforeEach(() => {
 		directory = canonicalMkdtemp('pr-response-lane-progress-');
-		// The delegation ledger writes route through withEvidenceLock, whose
-		// assertProjectRoot fails closed for a bare temp directory whose
-		// ancestors carry `.swarm/` + a project indicator (e.g. a dev home).
-		// The shared pr-workflow-gate fixtures create the same marker.
 		mkdirSync(path.join(directory, '.git'), { recursive: true });
 		workflowInternals.resetTrackedStateCache();
 	});
 
 	afterEach(async () => {
 		responseInternals.scanDelegationsForRecovery = originalDelegationScan;
+		workflowInternals.resolveCurrentGitHeadAsync =
+			originalResolveCurrentGitHeadAsync;
+		workflowInternals.resolveIsWorkingTreeCleanAsync =
+			originalResolveIsWorkingTreeCleanAsync;
+		workflowInternals.resolvePrReviewDiffStatsAsync =
+			originalResolvePrReviewDiffStatsAsync;
+		workflowInternals.resolvePrWorkflowRevisionDigest =
+			originalResolvePrWorkflowRevisionDigest;
 		workflowInternals.resetTrackedStateCache();
 		await fs.rm(directory, { recursive: true, force: true });
 	});
@@ -280,10 +294,26 @@ describe('PR workflow response-gate lane progress token (#2469)', () => {
 
 	test('a structured receipt digest transition is productive without a gate revision bump', async () => {
 		await activatePrWorkflow(directory, sessionID, 'PR_REVIEW');
+		workflowInternals.resolveCurrentGitHeadAsync = async () => 'abc123';
+		workflowInternals.resolveIsWorkingTreeCleanAsync = async () => true;
+		workflowInternals.resolvePrReviewDiffStatsAsync = async () => ({
+			changedLines: 400,
+			changedFiles: 12,
+			hasSubmoduleChange: false,
+		});
+		workflowInternals.resolvePrWorkflowRevisionDigest = () => 'd'.repeat(64);
+		await bindPrReviewBase(directory, sessionID, {
+			prHeadSha: 'abc123',
+			baseRef: 'origin/main',
+			baseSha: 'def456',
+		});
 		await registerActiveBatch('receipt-batch', ['receipt-lane']);
+		const activeState = await readPrWorkflowGateState(directory, sessionID);
+		if (!activeState?.workflowInstanceId)
+			throw new Error('missing active workflow');
 		await recordPendingDelegation(directory, {
 			correlationId: 'receipt-correlation',
-			jobId: null,
+			jobId: encodePrReviewWorkflowBinding(activeState.workflowInstanceId),
 			subagentSessionId: 'receipt-correlation',
 			parentSessionId: sessionID,
 			callID: 'receipt-call',
@@ -293,31 +323,17 @@ describe('PR workflow response-gate lane progress token (#2469)', () => {
 			evidenceTaskId: null,
 			batchId: 'receipt-batch',
 			laneId: 'receipt-lane',
-			mode: 'swarm-pr-review:reviewer',
+			mode: 'swarm-pr-review:base',
 			workflowLane: 'receipt-lane',
+			workflowGeneration: activeState.revision,
+			workspace: {
+				directory,
+				gitHead: 'abc123',
+				dirtyHash: null,
+				prHeadSha: 'abc123',
+				scope: null,
+			},
 		});
-		let receiptDigest = 'receipt-a';
-		responseInternals.scanDelegationsForRecovery = (targetDirectory) => {
-			const scan = originalDelegationScan(targetDirectory);
-			if (scan.status !== 'ok') return scan;
-			return {
-				...scan,
-				owners: scan.owners.map((record) => ({
-					...record,
-					// Only semanticEnvelopeDigest is populated: it is the sole
-					// receipt field the progress token reads
-					// (pr-workflow-response-gate workflowProgressSnapshot).
-					result: {
-						chars: 0,
-						truncated: false,
-						digest: 'stable-result',
-						prReviewResultReceipt: {
-							semanticEnvelopeDigest: receiptDigest,
-						},
-					} as NonNullable<typeof record.result>,
-				})),
-			};
-		};
 		const promptAsync = mock(async () => ({}));
 		const gate = createPrWorkflowResponseGate({
 			directory,
@@ -326,9 +342,74 @@ describe('PR workflow response-gate lane progress token (#2469)', () => {
 		});
 		const idle = { event: { type: 'session.idle', properties: { sessionID } } };
 		await gate.event(idle);
-		receiptDigest = 'receipt-b';
+		const submitted = JSON.parse(
+			await executeSubmitPrReviewResult(
+				{
+					schemaVersion: 1,
+					revisionDigest: 'd'.repeat(64),
+					result: {
+						schemaVersion: 1,
+						outcome: 'CLEAN',
+						creditedLanes: ['receipt-lane'],
+						findings: [],
+						cleanAttestations: [
+							{
+								workflowLane: 'receipt-lane',
+								coverageScope:
+									'Persisted receipt transport for the active lane.',
+								evidence:
+									'The registered child submission was durably recovered.',
+							},
+						],
+						unresolved: [],
+					},
+				},
+				directory,
+				{ sessionID: 'receipt-correlation' },
+			),
+		);
+		expect(submitted).toMatchObject({ success: true, status: 'recorded' });
 		await gate.event(idle);
 		expect(gate._inspectWakeBudget(sessionID)?.consecutiveUnproductive).toBe(0);
+	});
+
+	test('cooldown wakes skip the durable progress scan', async () => {
+		await activatePrWorkflow(directory, sessionID, 'PR_REVIEW');
+		await registerActiveBatch('cooldown-batch', ['cooldown-lane']);
+		await recordPendingDelegation(directory, {
+			correlationId: 'cooldown-correlation',
+			jobId: null,
+			subagentSessionId: 'cooldown-correlation',
+			parentSessionId: sessionID,
+			callID: 'cooldown-call',
+			normalizedAgent: 'explorer',
+			swarmPrefixedAgent: 'explorer',
+			planTaskId: null,
+			evidenceTaskId: null,
+			batchId: 'cooldown-batch',
+			laneId: 'cooldown-lane',
+			mode: 'swarm-pr-review:base',
+			workflowLane: 'cooldown-lane',
+		});
+		let scans = 0;
+		responseInternals.scanDelegationsForRecovery = (targetDirectory) => {
+			scans += 1;
+			return originalDelegationScan(targetDirectory);
+		};
+		const promptAsync = mock(async () => ({}));
+		const gate = createPrWorkflowResponseGate({
+			directory,
+			client: { session: { prompt: promptAsync, promptAsync } },
+			wakeCooldownMs: 60_000,
+		});
+		const idle = { event: { type: 'session.idle', properties: { sessionID } } };
+		await gate.event(idle);
+		await gate.event(idle);
+		expect(gate._inspectWakeBudget(sessionID)?.consecutiveUnproductive).toBe(1);
+		const scansAfterUnproductiveWake = scans;
+		await gate.event(idle);
+		await gate.event(idle);
+		expect(scans).toBe(scansAfterUnproductiveWake);
 	});
 
 	test('a throwing recovery scan is treated as uncertain and never kills the wake', async () => {

@@ -480,7 +480,7 @@ function blockedText(
 	const lines: string[] = [
 		`[${mode} WORKFLOW ACTIVE]`,
 		`The ${mode} workflow gate is still active. Continue with the required structured lanes, evidence, and controller tools until \`complete_pr_workflow\` succeeds.`,
-		`If bounded recovery is exhausted — for example the bind/checkout path is unreachable or settled discovery lanes cannot satisfy their contract — call \`abort_pr_workflow\` (mode: "${mode}", kind: "recovery", reason: "<one-line cause>") to clear an unbound or bound pre-publication gate, or ask the user to run \`/swarm abort-pr-workflow\` for the human force path.`,
+		`If bounded recovery is exhausted because the bind/checkout path is unreachable, call \`abort_pr_workflow\` (mode: "${mode}", kind: "recovery", reason: "<one-line cause>") to clear an unbound or bound pre-publication gate. Settled discovery lanes that leave coverage incomplete must use the truthful N-of-6 settlement path instead. Ask the user to run \`/swarm abort-pr-workflow\` only for the human force path.`,
 	];
 	if (options.suspended) {
 		if (options.suspendedReason === 'total') {
@@ -1300,10 +1300,11 @@ export function createPrWorkflowResponseGate(options: {
 			if (!getLiveBoundaryActivity(sessionID, boundaryGeneration)) return;
 			state = postStatusState;
 
-			// The cooldown early-return comes BEFORE the progress observation:
-			// the observation pays a full delegation-ledger scan, and a wake the
-			// cooldown is about to discard must not pay it. Progress observed
-			// after the window only defers the counter reset to the next wake.
+			// Cooldown wakes are intentionally cheap: no durable ledger scan is
+			// needed when the prior wake already found no progress. Progress is
+			// re-evaluated on the next admitted wake, where it can reset the brake
+			// before prompting. This prevents idle events from performing a full
+			// ownership/hash scan solely to return through the cooldown branch.
 			if (
 				budget.consecutiveUnproductive > 0 &&
 				budget.lastWakeAt > 0 &&
@@ -1318,7 +1319,6 @@ export function createPrWorkflowResponseGate(options: {
 			if (madeProgress) {
 				budget.consecutiveUnproductive = 0;
 			}
-
 			let feedbackTarget =
 				state.prFeedbackTargetUrl ?? state.prFeedbackReviewHandoff?.prUrl;
 			const queuedMonitorRecord =

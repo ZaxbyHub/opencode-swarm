@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import {
 	appendDelegationTransition,
 	type BackgroundDelegationRecord,
@@ -22,7 +24,7 @@ function reviewerRecord(text: string): BackgroundDelegationRecord {
 		schemaVersion: 2,
 		correlationId: 'corr-review',
 		jobId: null,
-		subagentSessionId: 'child-review',
+		subagentSessionId: 'corr-review',
 		parentSessionId: 'parent-review',
 		callID: 'review-batch',
 		normalizedAgent: 'reviewer',
@@ -204,10 +206,11 @@ describe('PR-review collection receipt footer', () => {
 
 	test('retains accepted and rejected IDs after forced compaction and reload', async () => {
 		await withSafeTestDir(async (directory) => {
+			fs.mkdirSync(path.join(directory, '.git'), { recursive: true });
 			const pending = await recordPendingDelegation(directory, {
 				correlationId: 'corr-compact-review',
 				jobId: null,
-				subagentSessionId: 'child-compact-review',
+				subagentSessionId: 'corr-compact-review',
 				parentSessionId: 'parent-review',
 				callID: 'compact-review-batch',
 				normalizedAgent: 'reviewer',
@@ -262,6 +265,7 @@ describe('PR-review collection receipt footer', () => {
 
 	test('drops spoofed receipts from unrelated lanes without exhausting the checkpoint budget', async () => {
 		await withSafeTestDir(async (directory) => {
+			fs.mkdirSync(path.join(directory, '.git'), { recursive: true });
 			const correlationIds: string[] = [];
 			for (let index = 0; index < 40; index += 1) {
 				const correlationId = `corr-spoof-${index}`;
@@ -304,6 +308,7 @@ describe('PR-review collection receipt footer', () => {
 
 	test('bounds aggregate large valid receipts while retaining every anti-replay tombstone', async () => {
 		await withSafeTestDir(async (directory) => {
+			fs.mkdirSync(path.join(directory, '.git'), { recursive: true });
 			const expectedByCorrelation = new Map<string, string[]>();
 			for (let index = 0; index < 80; index += 1) {
 				const correlationId = `corr-large-valid-${index}`;
@@ -319,7 +324,7 @@ describe('PR-review collection receipt footer', () => {
 					{
 						correlationId,
 						jobId: null,
-						subagentSessionId: `child-large-valid-${index}`,
+						subagentSessionId: correlationId,
 						parentSessionId: 'parent-large-valid',
 						callID: batchId,
 						normalizedAgent: 'reviewer',

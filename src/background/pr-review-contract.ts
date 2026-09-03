@@ -408,6 +408,50 @@ export type PrReviewLaneResultEnvelope = z.infer<
 	typeof PrReviewLaneResultEnvelopeSchema
 >;
 
+const PR_REVIEW_WORKFLOW_BINDING_PREFIX = 'pr-review-workflow:v1:';
+const MAX_PR_REVIEW_WORKFLOW_INSTANCE_ID_CHARS = 128;
+
+/**
+ * Rollback-readable dispatch binding for async PR-review lanes.
+ *
+ * Async lanes have no host job id, so their already-retained `jobId` slot carries
+ * this versioned workflow-instance identity. Older binaries accept and preserve
+ * the field through their strict delegation schema instead of rejecting a new key.
+ */
+export function encodePrReviewWorkflowBinding(
+	workflowInstanceId: string,
+): string {
+	const normalized = workflowInstanceId.trim();
+	if (
+		!normalized ||
+		normalized.length > MAX_PR_REVIEW_WORKFLOW_INSTANCE_ID_CHARS
+	) {
+		throw new Error('invalid PR-review workflow instance id');
+	}
+	return `${PR_REVIEW_WORKFLOW_BINDING_PREFIX}${Buffer.from(normalized, 'utf8').toString('base64url')}`;
+}
+
+export function decodePrReviewWorkflowBinding(
+	value: string | null,
+): string | null {
+	if (!value?.startsWith(PR_REVIEW_WORKFLOW_BINDING_PREFIX)) return null;
+	const encoded = value.slice(PR_REVIEW_WORKFLOW_BINDING_PREFIX.length);
+	if (!encoded) return null;
+	try {
+		const decoded = Buffer.from(encoded, 'base64url').toString('utf8');
+		if (
+			!decoded ||
+			decoded.length > MAX_PR_REVIEW_WORKFLOW_INSTANCE_ID_CHARS ||
+			encodePrReviewWorkflowBinding(decoded) !== value
+		) {
+			return null;
+		}
+		return decoded;
+	} catch {
+		return null;
+	}
+}
+
 export function serializedPrReviewResultReceiptBytes(value: unknown): number {
 	return new TextEncoder().encode(JSON.stringify(value)).byteLength;
 }

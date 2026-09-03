@@ -51,6 +51,33 @@ describe('swarm-pr-review runtime friction guidance', () => {
 		expect(compact).toContain('exact bound diff');
 	});
 
+	test('keeps child settlement out of controller-tool detection in every skill tree', () => {
+		const canonical = read('.opencode/skills/swarm-pr-review/SKILL.md');
+		const profileAStart = canonical.indexOf(
+			'**Profile A — structured PR-workflow controller.**',
+		);
+		const profileA = canonical.slice(
+			profileAStart,
+			canonical.indexOf('The child-bound', profileAStart),
+		);
+		expect(profileA).not.toContain('submit_pr_review_result');
+		expect(canonical).toContain(
+			'ensure each base/micro child lane submits exactly one child-bound structured',
+		);
+		const controllerOrder = canonical.slice(
+			canonical.indexOf('Controller order is exact:'),
+			canonical.indexOf('All machine-readable candidate headers'),
+		);
+		expect(controllerOrder).not.toContain('receipt and then stop');
+
+		for (const adapter of [
+			'.agents/skills/swarm-pr-review/SKILL.md',
+			'.claude/skills/swarm-pr-review/SKILL.md',
+		]) {
+			expect(read(adapter)).not.toContain('submit_pr_review_result');
+		}
+	});
+
 	test('reconciles stale checks against the latest same-head run and exits exhausted retries cleanly', () => {
 		const source = read('.opencode/skills/swarm-pr-review/SKILL.md').replace(
 			/\s+/g,
@@ -70,9 +97,6 @@ describe('swarm-pr-review runtime friction guidance', () => {
 		expect(source).toContain('kind: "recovery"');
 		expect(source).toContain('non-empty one-line `reason`');
 		expect(source).toContain(
-			'bounded structural recovery or retries are genuinely exhausted',
-		);
-		expect(source).not.toContain(
 			'Use it only when the bind/checkout path is genuinely unreachable;',
 		);
 		expect(source).toContain('operation: "restore"');
@@ -88,12 +112,14 @@ describe('swarm-pr-review runtime friction guidance', () => {
 		expect(retryRule).toContain(
 			'if the second retry still cannot close coverage',
 		);
+		expect(retryRule).toContain('settle N-of-6 truthfully');
+		expect(retryRule).not.toContain('call `abort_pr_workflow`');
 		expect(retryRule).toContain(
 			'do not probe downstream writers or micro lanes',
 		);
-		expect(retryRule).toContain('mode: "PR_REVIEW"');
-		expect(retryRule).toContain('kind: "recovery"');
-		expect(retryRule).toContain('non-empty one-line \\`reason\\`');
+		expect(source).toContain('mode: "PR_REVIEW"');
+		expect(source).toContain('kind: "recovery"');
+		expect(source).toContain('non-empty one-line `reason`');
 	});
 
 	test('surfaces exact restore inventory and legacy receipt recovery', () => {

@@ -12,6 +12,7 @@ import {
 	recordPendingDelegation,
 } from '../../../src/background/pending-delegations.js';
 import {
+	encodePrReviewWorkflowBinding,
 	type PrReviewLaneResultEnvelope,
 	prReviewLaneResultEnvelopeDigest,
 } from '../../../src/background/pr-review-contract.js';
@@ -85,7 +86,7 @@ async function seedReceiptLane(directory: string): Promise<void> {
 	fs.mkdirSync(path.join(directory, '.swarm'), { recursive: true });
 	await recordPendingDelegation(directory, {
 		correlationId: 'child-2384',
-		jobId: null,
+		jobId: encodePrReviewWorkflowBinding('wf-2384'),
 		subagentSessionId: 'child-2384',
 		parentSessionId: 'parent-2384',
 		callID: 'call-2384',
@@ -98,6 +99,7 @@ async function seedReceiptLane(directory: string): Promise<void> {
 		mode: 'swarm-pr-review:base',
 		workflowLane: 'intent-architecture',
 		ownedWorkflowLanes: ['intent-architecture', 'security-trust'],
+		workflowGeneration: 7,
 		generation: 1,
 		workspace: {
 			directory,
@@ -136,7 +138,7 @@ describe('PR-review result receipt lifecycle regressions (#2384)', () => {
 			const terminal = {
 				eventId: buildBackgroundCompletionEventId({
 					correlationId: 'child-2384',
-					jobId: null,
+					jobId: encodePrReviewWorkflowBinding('wf-2384'),
 					status: 'completed',
 					resultDigest: 'e'.repeat(64),
 				}),
@@ -329,7 +331,7 @@ describe('PR-review result receipt lifecycle regressions (#2384)', () => {
 			await claimTerminalResult(safe.dir, 'child-2384', {
 				eventId: buildBackgroundCompletionEventId({
 					correlationId: 'child-2384',
-					jobId: null,
+					jobId: encodePrReviewWorkflowBinding('wf-2384'),
 					status: 'completed',
 					resultDigest: 'a'.repeat(64),
 				}),

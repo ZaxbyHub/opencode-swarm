@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import fs from 'node:fs';
+import path from 'node:path';
 import {
 	appendDelegationTransition,
 	findByCorrelationId,
@@ -14,6 +15,7 @@ const directories: string[] = [];
 
 function project(): string {
 	const directory = canonicalMkdtemp('pending-generation-');
+	fs.mkdirSync(path.join(directory, '.git'), { recursive: true });
 	directories.push(directory);
 	return directory;
 }

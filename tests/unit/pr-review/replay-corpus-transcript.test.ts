@@ -1,15 +1,29 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import {
+	findByBatchId,
 	findByCorrelationId,
 	recordPendingDelegation,
 } from '../../../src/background/pending-delegations.js';
+import { encodePrReviewWorkflowBinding } from '../../../src/background/pr-review-contract.js';
 import {
 	_test_exports,
 	activatePrWorkflow,
 	bindPrReviewBase,
 	enforcePrReviewBaseDimensions,
+	PR_REVIEW_BASE_DIMENSION_IDS,
+	readPrWorkflowGateState,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import {
+	withSessionStateMutation,
+	writeStateWhileLocked,
+} from '../../../src/pr-review/persistence.js';
+import {
+	_test_exports as dispatchInternals,
+	_internals as dispatchRuntimeInternals,
+	executeDispatchLanesAsync,
+	type SessionOps,
+} from '../../../src/tools/dispatch-lanes.js';
 import { executeSubmitPrReviewResult } from '../../../src/tools/submit-pr-review-result.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 import { initializeGitRepository } from '../helpers/git-repository.js';
@@ -36,6 +50,8 @@ const SESSION_ID = 'corpus-transcript-controller';
 const CHILD_SESSION = 'corpus-transcript-child';
 
 let directory = '';
+let deliveredPrompts: string[] = [];
+let createdSessions = 0;
 const originalResolveCurrentGitHead = _test_exports.resolveCurrentGitHead;
 const originalResolveCurrentGitHeadAsync =
 	_test_exports.resolveCurrentGitHeadAsync;
@@ -47,10 +63,19 @@ const originalResolveWorkingTreeCleanAsync =
 const originalResolveDiffStats = _test_exports.resolvePrReviewDiffStats;
 const originalResolveDiffStatsAsync =
 	_test_exports.resolvePrReviewDiffStatsAsync;
+const originalDispatchGetSessionOps = dispatchRuntimeInternals.getSessionOps;
+const originalDispatchGeneratedAgentNames =
+	dispatchRuntimeInternals.getGeneratedAgentNames;
+const originalDispatchRevisionDigest =
+	dispatchRuntimeInternals.resolvePrWorkflowRevisionDigestAsync;
+const originalDispatchMergeBase =
+	dispatchRuntimeInternals.resolveExactMergeBaseAsync;
 
 beforeEach(async () => {
 	directory = canonicalMkdtemp('pr-review-corpus-transcript-');
 	await initializeGitRepository(directory);
+	deliveredPrompts = [];
+	createdSessions = 0;
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
 	_test_exports.resolveCurrentGitHeadAsync = async () => HEAD_SHA;
@@ -66,6 +91,23 @@ beforeEach(async () => {
 	});
 	_test_exports.resolvePrReviewDiffStatsAsync = async (...args) =>
 		_test_exports.resolvePrReviewDiffStats(...args);
+	dispatchRuntimeInternals.resolvePrWorkflowRevisionDigestAsync = async () =>
+		REVISION_DIGEST;
+	dispatchRuntimeInternals.resolveExactMergeBaseAsync = async () => BASE_SHA;
+	dispatchRuntimeInternals.getGeneratedAgentNames = () => ['explorer'];
+	const sessionOps: SessionOps = {
+		create: mock(async () => ({
+			data: { id: `transport-child-${++createdSessions}` },
+			error: undefined,
+		})),
+		prompt: mock(async () => ({ data: undefined, error: undefined })),
+		promptAsync: mock(async (args) => {
+			deliveredPrompts.push(args.body.parts[0]?.text ?? '');
+			return { data: undefined, error: undefined };
+		}),
+		delete: mock(async () => undefined),
+	};
+	dispatchRuntimeInternals.getSessionOps = () => sessionOps;
 });
 
 afterEach(async () => {
@@ -78,6 +120,13 @@ afterEach(async () => {
 		originalResolveWorkingTreeCleanAsync;
 	_test_exports.resolvePrReviewDiffStats = originalResolveDiffStats;
 	_test_exports.resolvePrReviewDiffStatsAsync = originalResolveDiffStatsAsync;
+	dispatchRuntimeInternals.getSessionOps = originalDispatchGetSessionOps;
+	dispatchRuntimeInternals.getGeneratedAgentNames =
+		originalDispatchGeneratedAgentNames;
+	dispatchRuntimeInternals.resolvePrWorkflowRevisionDigestAsync =
+		originalDispatchRevisionDigest;
+	dispatchRuntimeInternals.resolveExactMergeBaseAsync =
+		originalDispatchMergeBase;
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -102,14 +151,7 @@ function cleanEnvelope(
 async function establishWorkflowAndLane(
 	ownedLanes: string[],
 ): Promise<{ batchId: string; laneId: string }> {
-	await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW', {
-		prHeadSha: HEAD_SHA,
-	});
-	await bindPrReviewBase(directory, SESSION_ID, {
-		prHeadSha: HEAD_SHA,
-		baseRef: 'origin/main',
-		baseSha: BASE_SHA,
-	});
+	await establishBoundWorkflow();
 	const batchId = 'corpus-transcript-batch';
 	const laneId = 'corpus-transcript-lane';
 	// Admit the base batch through the registered enforcement path so the
@@ -133,9 +175,13 @@ async function establishWorkflowAndLane(
 			prReviewResiliencePolicy: LEGACY_PR_REVIEW_RESILIENCE_POLICY,
 		},
 	);
+	const state = await readPrWorkflowGateState(directory, SESSION_ID);
+	if (!state?.workflowInstanceId) {
+		throw new Error('base admission did not persist workflow provenance');
+	}
 	await recordPendingDelegation(directory, {
 		correlationId: CHILD_SESSION,
-		jobId: null,
+		jobId: encodePrReviewWorkflowBinding(state.workflowInstanceId),
 		subagentSessionId: CHILD_SESSION,
 		parentSessionId: SESSION_ID,
 		callID: 'corpus-transcript-call',
@@ -158,8 +204,31 @@ async function establishWorkflowAndLane(
 		},
 		promptHash: 'corpus-transcript-hash',
 		generation: 1,
+		workflowGeneration: state.revision,
 	});
 	return { batchId, laneId };
+}
+
+async function establishBoundWorkflow(): Promise<void> {
+	await activatePrWorkflow(directory, SESSION_ID, 'PR_REVIEW', {
+		prHeadSha: HEAD_SHA,
+	});
+	await bindPrReviewBase(directory, SESSION_ID, {
+		prHeadSha: HEAD_SHA,
+		baseRef: 'origin/main',
+		baseSha: BASE_SHA,
+	});
+}
+
+async function advanceWorkflowRevision(): Promise<void> {
+	await withSessionStateMutation(directory, SESSION_ID, async () => {
+		const state = await readPrWorkflowGateState(directory, SESSION_ID);
+		if (!state) throw new Error('missing active workflow state');
+		await writeStateWhileLocked(directory, {
+			...state,
+			updatedAt: '2026-01-01T00:00:00.000Z',
+		});
+	});
 }
 
 async function submitClean(args: {
@@ -222,6 +291,122 @@ const PROSE_AFTER_CLEAN = [
 ].join(' \\n ');
 
 describe('replay corpus: structured receipts cannot be downgraded by later transcript parsing (#2380 shapes 5-6)', () => {
+	test('production dispatch delivers provenance and settles through the child tool path', async () => {
+		await establishBoundWorkflow();
+		const batchId = 'transport-provenance-batch';
+		const result = await executeDispatchLanesAsync(
+			{
+				batch_id: batchId,
+				mode: 'swarm-pr-review:base',
+				pr_head_sha: HEAD_SHA,
+				base_sha: BASE_SHA,
+				base_ref: 'origin/main',
+				max_concurrent: 6,
+				lanes: PR_REVIEW_BASE_DIMENSION_IDS.map((workflowLane) => ({
+					id: `transport-${workflowLane}`,
+					agent: 'explorer',
+					prompt: `Review ${workflowLane} on the exact bound revision.`,
+					workflow_lane: workflowLane,
+				})),
+			},
+			directory,
+			{ sessionID: SESSION_ID },
+		);
+		expect(result.success).toBe(true);
+		expect(deliveredPrompts).toHaveLength(6);
+		const records = findByBatchId(directory, batchId);
+		expect(records).toHaveLength(6);
+		for (const record of records) {
+			expect(record.correlationId).toBe(record.subagentSessionId);
+			expect(deliveredPrompts.join('\n')).toContain(`batch_id: ${batchId}`);
+			expect(deliveredPrompts.join('\n')).toContain(
+				`lane_id: ${record.laneId}`,
+			);
+		}
+		const firstRecord = records[0];
+		if (!firstRecord?.workflowLane) throw new Error('missing workflow lane');
+		const submitted = JSON.parse(
+			await executeSubmitPrReviewResult(
+				{
+					schemaVersion: 1,
+					revisionDigest: REVISION_DIGEST,
+					result: cleanEnvelope(
+						[firstRecord.workflowLane],
+						[
+							{
+								workflowLane: firstRecord.workflowLane,
+								coverageScope: 'complete bound transport-dispatched lane',
+								evidence:
+									'production prompt transport rendered authenticated provenance',
+							},
+						],
+					),
+				},
+				directory,
+				{ sessionID: firstRecord.subagentSessionId },
+			),
+		) as { success: boolean; status?: string };
+		expect(submitted).toMatchObject({ success: true, status: 'recorded' });
+		const settled = findByCorrelationId(
+			directory,
+			firstRecord.subagentSessionId,
+		);
+		expect(settled?.result?.prReviewResultReceipt?.batchId).toBe(batchId);
+		expect(settled?.result?.prReviewResultReceipt?.laneId).toBe(
+			firstRecord.laneId,
+		);
+	});
+
+	test('rendered child contract exposes provenance and authenticated child can omit guessed IDs', async () => {
+		const { batchId, laneId } = await establishWorkflowAndLane([
+			'intent-architecture',
+		]);
+		const rendered = dispatchInternals.applyPrWorkflowPromptContract(
+			[
+				{
+					id: laneId,
+					agent: 'explorer',
+					prompt: 'Inspect the exact bound review scope.',
+					workflow_lane: 'intent-architecture',
+				},
+			],
+			{
+				mode: 'swarm-pr-review:base',
+				batchId,
+				prHeadSha: HEAD_SHA,
+				revisionDigest: REVISION_DIGEST,
+			},
+		);
+		expect(rendered.ok).toBe(true);
+		if (!rendered.ok) throw new Error('expected a rendered child contract');
+		expect(rendered.lanes[0]?.prompt).toContain(`batch_id: ${batchId}`);
+		expect(rendered.lanes[0]?.prompt).toContain(`lane_id: ${laneId}`);
+		const submitted = JSON.parse(
+			await executeSubmitPrReviewResult(
+				{
+					schemaVersion: 1,
+					revisionDigest: REVISION_DIGEST,
+					result: cleanEnvelope(
+						['intent-architecture'],
+						[
+							{
+								workflowLane: 'intent-architecture',
+								coverageScope: 'complete bound diff',
+								evidence: 'rendered contract and exact child ledger binding',
+							},
+						],
+					),
+				},
+				directory,
+				{ sessionID: CHILD_SESSION },
+			),
+		) as { success: boolean; status?: string };
+		expect(submitted).toMatchObject({ success: true, status: 'recorded' });
+		const settled = findByCorrelationId(directory, CHILD_SESSION);
+		expect(settled?.result?.prReviewResultReceipt?.batchId).toBe(batchId);
+		expect(settled?.result?.prReviewResultReceipt?.laneId).toBe(laneId);
+	});
+
 	test('singleton CLEAN receipt survives later prose', async () => {
 		const { batchId, laneId } = await establishWorkflowAndLane([
 			'intent-architecture',
@@ -304,6 +489,7 @@ describe('replay corpus: structured receipts cannot be downgraded by later trans
 		};
 		const first = await submitClean(args);
 		expect(first.status).toBe('recorded');
+		await advanceWorkflowRevision();
 		const replay = await submitClean(args);
 		expect(replay.status).toBe('duplicate');
 	});

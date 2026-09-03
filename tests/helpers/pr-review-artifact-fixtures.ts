@@ -7,7 +7,10 @@ import {
 	claimTerminalResult,
 	recordPendingDelegation,
 } from '../../src/background/pending-delegations.js';
-import type { PrReviewResultReceipt } from '../../src/background/pr-review-contract.js';
+import {
+	encodePrReviewWorkflowBinding,
+	type PrReviewResultReceipt,
+} from '../../src/background/pr-review-contract.js';
 import {
 	activatePrWorkflow,
 	enforcePrReviewBaseDimensions,
@@ -92,11 +95,19 @@ export async function persistPrReviewBatch(
 			? true
 			: undefined);
 	for (const [index, lane] of lanes.entries()) {
-		const correlationId = `${batchId}-${index}`;
-		const subagentSessionId = options.subagentSessionId ?? correlationId;
+		const defaultCorrelationId = `${batchId}-${index}`;
+		// PR-review records use the authenticated child session as their durable
+		// correlation identity. A custom child in a fixture must therefore replace
+		// both fields, matching the production dispatch record.
+		const subagentSessionId = options.subagentSessionId ?? defaultCorrelationId;
+		const correlationId = subagentSessionId;
 		await recordPendingDelegation(directory, {
 			correlationId,
-			jobId: null,
+			jobId: options.prReviewResultReceipt
+				? encodePrReviewWorkflowBinding(
+						options.prReviewResultReceipt.workflowInstanceId,
+					)
+				: null,
 			subagentSessionId,
 			parentSessionId: PR_ARTIFACT_SESSION_ID,
 			callID: `call-${correlationId}`,
@@ -122,6 +133,11 @@ export async function persistPrReviewBatch(
 				? {
 						prReviewLegacyTranscriptCompatibility:
 							legacyTranscriptCompatibility,
+					}
+				: {}),
+			...(options.prReviewResultReceipt
+				? {
+						workflowGeneration: options.prReviewResultReceipt.workflowRevision,
 					}
 				: {}),
 		});

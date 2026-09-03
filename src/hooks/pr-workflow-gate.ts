@@ -34,6 +34,7 @@ import {
 } from '../background/pending-delegations.js';
 import { MAX_PR_REVIEW_COLLECTION_RECEIPT_ITEM_IDS } from '../background/pr-review-collection-receipt.js';
 import {
+	decodePrReviewWorkflowBinding,
 	generatePrReviewRunId,
 	PR_REVIEW_BASE_DIMENSION_IDS,
 	PR_REVIEW_FINDINGS_MAX_BYTES,
@@ -100,6 +101,7 @@ import {
 import { redactSecrets } from '../memory/redaction.js';
 import {
 	bindPrReviewReentryBindingReader,
+	hasPrReviewReentryAuthorizationAgainstBinding,
 	type PrReviewReentryAuthorizationRecord,
 	type PrReviewReentryBindingContext,
 	type PrReviewReentryRole,
@@ -1769,8 +1771,8 @@ export async function submitPrReviewResult(
 	directory: string,
 	childSessionId: string,
 	input: {
-		batchId: string;
-		laneId: string;
+		batchId?: string;
+		laneId?: string;
 		revisionDigest: string;
 		result: PrReviewLaneResultEnvelope;
 	},
@@ -1786,8 +1788,9 @@ export async function submitPrReviewResult(
 	const preliminary = readDelegations(directory).filter(
 		(record) =>
 			record.subagentSessionId === child &&
-			record.batchId === input.batchId &&
-			record.laneId === input.laneId,
+			record.correlationId === child &&
+			(record.mode === 'swarm-pr-review:base' ||
+				record.mode === 'swarm-pr-review:micro'),
 	);
 	if (preliminary.length !== 1) {
 		return {
@@ -1796,6 +1799,24 @@ export async function submitPrReviewResult(
 		};
 	}
 	const parentSessionId = preliminary[0].parentSessionId;
+	const record = preliminary[0];
+	if (!record.batchId || !record.laneId) {
+		return {
+			status: 'rejected',
+			reason: 'delegation batch/lane provenance is missing',
+		};
+	}
+	if (
+		(input.batchId !== undefined && input.batchId !== record.batchId) ||
+		(input.laneId !== undefined && input.laneId !== record.laneId)
+	) {
+		return {
+			status: 'rejected',
+			reason: 'delegation batch/lane identity mismatch',
+		};
+	}
+	const batchId = record.batchId;
+	const laneId = record.laneId;
 	return withSessionStateMutation(directory, parentSessionId, async () => {
 		const state = await readPrWorkflowGateStateFromDisk(
 			directory,
@@ -1817,10 +1838,22 @@ export async function submitPrReviewResult(
 		if (ctx.revisionDigest !== input.revisionDigest) {
 			return { status: 'rejected', reason: 'stale dispatch revision digest' };
 		}
+		const dispatchWorkflowInstanceId = decodePrReviewWorkflowBinding(
+			record.jobId,
+		);
+		const dispatchWorkflowRevision = record.workflowGeneration;
+		if (!dispatchWorkflowInstanceId || dispatchWorkflowRevision === undefined) {
+			return {
+				status: 'rejected',
+				reason: 'delegation workflow binding provenance is missing',
+			};
+		}
+		if (dispatchWorkflowInstanceId !== state.workflowInstanceId) {
+			return { status: 'rejected', reason: 'stale workflow instance binding' };
+		}
 		// Publication performs the authoritative exact-identity/state recheck while
 		// holding the delegation-evidence lock. Reuse the discovery snapshot here
 		// instead of scanning the durable ledger a third time.
-		const record = preliminary[0];
 		if (
 			(record.mode !== 'swarm-pr-review:base' &&
 				record.mode !== 'swarm-pr-review:micro') ||
@@ -1853,8 +1886,8 @@ export async function submitPrReviewResult(
 			record.result?.prReviewResultReceipt?.semanticEnvelopeDigest;
 		const submission = reducePrReviewEvent(state, {
 			type: 'lane_structured_result_submitted',
-			batchId: input.batchId,
-			laneId: input.laneId,
+			batchId,
+			laneId,
 			generation: state.revision,
 			semanticEnvelopeDigest,
 			outcome: parsedResult.data.outcome,
@@ -1872,18 +1905,18 @@ export async function submitPrReviewResult(
 		const published = await publishPrReviewResultReceipt(directory, {
 			parentSessionId,
 			childSessionId: child,
-			batchId: input.batchId,
-			laneId: input.laneId,
+			batchId,
+			laneId,
 			expectedWorkflowInstanceId: state.workflowInstanceId,
-			expectedWorkflowRevision: state.revision,
+			expectedWorkflowRevision: dispatchWorkflowRevision,
 			expectedBaseSha: state.prReviewBaseSha,
 			receipt: {
 				schemaVersion: 1,
 				mode: record.mode,
-				workflowInstanceId: state.workflowInstanceId,
-				workflowRevision: state.revision,
-				batchId: input.batchId,
-				laneId: input.laneId,
+				workflowInstanceId: dispatchWorkflowInstanceId,
+				workflowRevision: dispatchWorkflowRevision,
+				batchId,
+				laneId,
 				workflowLane: record.workflowLane,
 				ownedWorkflowLanes,
 				baseSha: state.prReviewBaseSha,
@@ -10792,10 +10825,6 @@ export async function enforcePrWorkflowToolBefore(
 		let hasAuthorizedDirectReentry = false;
 		if (
 			isDirectAgentTask &&
-			// Admission must key on `subagent_type` specifically: the delegation
-			// gate's enforcement (Stage-A, reviewer routing, acceptance) only
-			// runs for dispatches carrying `subagent_type`, so an `agent:`-only
-			// dispatch admitted here would skip every downstream gate.
 			requestedAgentFields.length === 1 &&
 			requestedAgentFields[0] === 'subagent_type' &&
 			requestedRoles.length === 1 &&
@@ -10803,11 +10832,12 @@ export async function enforcePrWorkflowToolBefore(
 				requestedRoles[0] === 'test_engineer') &&
 			callID
 		) {
-			hasAuthorizedDirectReentry = Boolean(
-				await reserveActivePrReviewReentryAuthorization(directory, sessionID, {
+			hasAuthorizedDirectReentry = await hasActivePrReviewReentryAuthorization(
+				directory,
+				sessionID,
+				{
 					role: requestedRoles[0],
-					callID,
-				}),
+				},
 			);
 		}
 		const isAllowedReviewTool =
@@ -11024,6 +11054,34 @@ async function prReviewReentryBindingFromState(
 				}
 			: {}),
 	};
+}
+
+/**
+ * Read-only admission check for direct PR-review re-entry. It deliberately
+ * does not consume the token: the delegation gate performs the one-use
+ * reservation only after its own Task acceptance checks have passed.
+ */
+export async function hasActivePrReviewReentryAuthorization(
+	directory: string,
+	sessionID: string,
+	request: { role: PrReviewReentryRole },
+): Promise<boolean> {
+	const normalizedSessionID = normalizeSessionID(sessionID);
+	return withSessionStateMutation(directory, normalizedSessionID, async () => {
+		const state = await readPrWorkflowGateStateFromDisk(
+			directory,
+			normalizedSessionID,
+		);
+		if (!state) return false;
+		const binding = await prReviewReentryBindingFromState(directory, state);
+		if (!binding) return false;
+		return hasPrReviewReentryAuthorizationAgainstBinding(
+			directory,
+			normalizedSessionID,
+			request,
+			binding,
+		);
+	});
 }
 
 /**
@@ -14548,7 +14606,7 @@ function successfulObligationsFromExactBatch(
 				gitHead: state.prHeadSha ?? '',
 				revisionDigest: expectedRevisionDigest ?? '',
 				workflowInstanceId: state.workflowInstanceId,
-				workflowRevision: state.revision,
+				workflowRevision: qualified.record.workflowGeneration,
 				baseSha: state.prReviewBaseSha,
 				reviewScope:
 					state.mode === 'PR_REVIEW' && state.prReviewBaseSha && state.prHeadSha
@@ -14669,13 +14727,21 @@ function validateExactStructuredReceiptCoverage(
 		};
 	}
 	const receipt = parsedReceipt.data;
+	const recordWorkflowInstanceId = decodePrReviewWorkflowBinding(
+		input.record.jobId,
+	);
+	const recordWorkflowRevision = input.record.workflowGeneration;
 	const ownedWorkflowLanes = input.expected.ownedWorkflowLanes?.length
 		? [...input.expected.ownedWorkflowLanes]
 		: [input.expected.workflowLane];
 	if (
+		!recordWorkflowInstanceId ||
+		recordWorkflowRevision === undefined ||
+		recordWorkflowInstanceId !== input.expected.workflowInstanceId ||
+		recordWorkflowRevision !== input.expected.workflowRevision ||
 		receipt.mode !== input.expected.mode ||
-		receipt.workflowInstanceId !== input.expected.workflowInstanceId ||
-		receipt.workflowRevision !== input.expected.workflowRevision ||
+		receipt.workflowInstanceId !== recordWorkflowInstanceId ||
+		receipt.workflowRevision !== recordWorkflowRevision ||
 		receipt.baseSha !== input.expected.baseSha ||
 		receipt.batchId !== input.record.batchId ||
 		receipt.laneId !== input.record.laneId ||
@@ -15007,7 +15073,7 @@ function workflowArtifactHasContractMarker(
 				gitHead: state.prHeadSha ?? '',
 				revisionDigest: expectedRevisionDigest ?? '',
 				workflowInstanceId: state.workflowInstanceId,
-				workflowRevision: state.revision,
+				workflowRevision: record.workflowGeneration,
 				baseSha: state.prReviewBaseSha,
 				reviewScope,
 			},

@@ -226,22 +226,36 @@ async function writeAuthorizationFile(
 }
 
 /**
- * Drop expired records past the retention bound; keep newest first. A burst
- * of consumed records must never evict a still-live unconsumed authorization
- * before its TTL, so unconsumed records take priority within the cap.
+ * Drop expired records past the retention bound while preserving every live
+ * authorization. Consumed records are retained only as same-call replay
+ * evidence, so they fill the remaining bounded capacity after live records.
  */
 function pruneAuthorizations(
 	records: readonly PrReviewReentryAuthorizationRecord[],
 	nowMs: number,
 ): PrReviewReentryAuthorizationRecord[] {
-	const unexpired = records
-		.filter((record) => Date.parse(record.expiresAt) > nowMs)
-		.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
-	const unconsumed = unexpired.filter((record) => !record.consumedAt);
+	const unexpired = records.filter(
+		(record) => Date.parse(record.expiresAt) > nowMs,
+	);
+	const newest = (
+		left: PrReviewReentryAuthorizationRecord,
+		right: PrReviewReentryAuthorizationRecord,
+	) => {
+		const leftAt = left.consumedAt ?? left.createdAt;
+		const rightAt = right.consumedAt ?? right.createdAt;
+		return leftAt === rightAt ? 0 : leftAt > rightAt ? -1 : 1;
+	};
+	const live = unexpired.filter((record) => !record.consumedAt).sort(newest);
 	const consumed = unexpired
-		.filter((record) => record.consumedAt)
-		.slice(0, Math.max(0, MAX_PERSISTED_AUTHORIZATIONS - unconsumed.length));
-	return [...unconsumed.slice(0, MAX_PERSISTED_AUTHORIZATIONS), ...consumed];
+		.filter((record) => Boolean(record.consumedAt))
+		.sort(newest);
+	return [
+		...live,
+		...consumed.slice(
+			0,
+			Math.max(0, MAX_PERSISTED_AUTHORIZATIONS - live.length),
+		),
+	].sort(newest);
 }
 
 // proper-lockfile is a CommonJS module without published TypeScript types
@@ -379,6 +393,46 @@ function authorizationMatchesBinding(
 }
 
 /**
+ * Read-only admission check for the PR workflow hook. The workflow-session
+ * lock is held by the caller while this authorization-store lock is acquired,
+ * so the binding used for the check cannot change underneath the read. The
+ * token remains unconsumed until the delegation gate has accepted the Task.
+ */
+export async function hasPrReviewReentryAuthorizationAgainstBinding(
+	directory: string,
+	sessionID: string,
+	request: { role: PrReviewReentryRole },
+	binding: PrReviewReentryBindingContext,
+): Promise<boolean> {
+	const trimmedSession = sessionID.trim();
+	if (!trimmedSession) return false;
+	const filePath = reentryAuthorizationFilePath(directory, trimmedSession);
+	try {
+		return await withAuthorizationLock(filePath, async () => {
+			const existing = await readAuthorizationFile(filePath);
+			if (!existing) return false;
+			const nowMs = Date.now();
+			const records = pruneAuthorizations(existing.authorizations, nowMs);
+			if (records.length !== existing.authorizations.length) {
+				await writeAuthorizationFile(filePath, {
+					...existing,
+					authorizations: records,
+				});
+			}
+			return records.some(
+				(record) =>
+					!record.consumedAt &&
+					record.role === request.role &&
+					record.sessionId === trimmedSession &&
+					authorizationMatchesBinding(record, binding),
+			);
+		});
+	} catch {
+		return false;
+	}
+}
+
+/**
  * Reserve or verify one authorization against a binding whose owning workflow
  * lock is held by the caller. The authorization-file lock is always acquired
  * second. A consumed record is retained until expiry so the exact same Task
@@ -458,6 +512,7 @@ export const _internals = {
 	reentryAuthorizationFilePath,
 	pruneAuthorizations,
 	authorizationMatchesBinding,
+	hasPrReviewReentryAuthorizationAgainstBinding,
 	/** DI seam: the rename implementation (tests inject failure modes). */
 	renameImpl: (from: string, to: string): Promise<void> => fsp.rename(from, to),
 	/** DI seam: retry backoff schedule (tests shrink to avoid real sleeps). */
