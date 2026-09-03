@@ -173,10 +173,11 @@ while IFS= read -r test_file; do
 		echo "::error file=${test_file}::Coverage test failed: ${test_file}"
 		echo "::error file=${test_file}::FAILED: ${test_file}" >> "$flake_ann"
 		failed=1
-	elif [ -f coverage/lcov.info ]; then
+	elif [ -s coverage/lcov.info ]; then
 		cp coverage/lcov.info "$parts_dir/part-$index.info"
 	else
-		echo "::warning file=${test_file}::No lcov.info produced for coverage test"
+		echo "::error file=${test_file}::No non-empty lcov.info produced for coverage test: ${test_file}"
+		failed=1
 	fi
 	rm -f "$tmpout"
 done < "$all_tests"

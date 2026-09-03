@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as ts from 'typescript';
 import { fileURLToPath } from 'node:url';
 import { runGit as runGitBase } from './gate-utils';
 
@@ -102,6 +103,37 @@ export function toSpreadVar(moduleName: string): string {
 	return `real${camel}`;
 }
 
+/** Remove JavaScript comments while preserving strings, newlines, and offsets. */
+export function stripCommentsPreservingLines(content: string): string {
+	const output = content.split('');
+	const scanner = ts.createScanner(
+		ts.ScriptTarget.Latest,
+		false,
+		ts.LanguageVariant.Standard,
+		content,
+	);
+	for (
+		let token = scanner.scan();
+		token !== ts.SyntaxKind.EndOfFileToken;
+		token = scanner.scan()
+	) {
+		if (
+			token !== ts.SyntaxKind.SingleLineCommentTrivia &&
+			token !== ts.SyntaxKind.MultiLineCommentTrivia
+		) {
+			continue;
+		}
+		for (
+			let index = scanner.getTokenPos();
+			index < scanner.getTextPos();
+			index += 1
+		) {
+			if (output[index] !== '\r' && output[index] !== '\n') output[index] = ' ';
+		}
+	}
+	return output.join('');
+}
+
 export function listCandidateTestFiles(root: string): string[] {
 	const results: string[] = [];
 	for (const topLevel of ['tests', 'src']) {
@@ -134,22 +166,74 @@ export function listCandidateTestFiles(root: string): string[] {
 	return results;
 }
 
+function analyzeMockSyntax(content: string): {
+	mockModuleCalls: Array<{ line: number; moduleName: string | null }>;
+	hasCleanup: boolean;
+	hasFileScopedReset: boolean;
+} {
+	const sourceFile = ts.createSourceFile(
+		'assessed.test.ts',
+		content,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	const calls: Array<{ line: number; moduleName: string | null }> = [];
+	let hasCleanup = false;
+	let hasFileScopedReset = false;
+	const visit = (node: ts.Node): void => {
+		if (
+			ts.isCallExpression(node) &&
+			ts.isPropertyAccessExpression(node.expression) &&
+			ts.isIdentifier(node.expression.expression) &&
+			node.expression.expression.text === 'mock' &&
+			node.expression.name.text === 'module'
+		) {
+			const first = node.arguments[0];
+			calls.push({
+				line:
+					sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1,
+				moduleName: first && ts.isStringLiteralLike(first) ? first.text : null,
+			});
+		}
+		if (
+			ts.isCallExpression(node) &&
+			ts.isPropertyAccessExpression(node.expression) &&
+			ts.isIdentifier(node.expression.expression) &&
+			node.expression.expression.text === 'mock' &&
+			(node.expression.name.text === 'restore' ||
+				node.expression.name.text === 'clearAllMocks')
+		) {
+			hasCleanup = true;
+		}
+		if (
+			ts.isIdentifier(node) &&
+			(node.text === 'mockClear' || node.text === 'mockReset')
+		) {
+			hasFileScopedReset = true;
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(sourceFile);
+	return { mockModuleCalls: calls, hasCleanup, hasFileScopedReset };
+}
+
 export function assessMockFile(content: string): MockFileAssessment {
+	const codeContent = stripCommentsPreservingLines(content);
+	const { mockModuleCalls, hasCleanup, hasFileScopedReset } =
+		analyzeMockSyntax(codeContent);
 	const missingCleanup =
-		MOCK_MODULE_PATTERN.test(content) &&
-		!CLEANUP_PATTERN.test(content) &&
-		!FILE_SCOPED_PATTERN.test(content) &&
-		!EXCEPTION_PATTERN.test(content);
+		mockModuleCalls.length > 0 &&
+		!hasCleanup &&
+		!hasFileScopedReset &&
+		!EXCEPTION_PATTERN.test(codeContent);
 
 	const spreadViolations: SpreadViolation[] = [];
 	const seen = new Set<string>();
-	const lines = content.split(/\r?\n/);
-	for (let index = 0; index < lines.length; index += 1) {
-		const match = lines[index].match(/mock\.module\(['"]node:([^'"]+)['"]/);
-		if (!match) {
-			continue;
-		}
-		const moduleName = match[1];
+	const lines = codeContent.split(/\r?\n/);
+	for (const call of mockModuleCalls) {
+		if (!call.moduleName?.startsWith('node:')) continue;
+		const moduleName = call.moduleName.slice('node:'.length);
 		if (seen.has(moduleName)) {
 			continue;
 		}
@@ -160,10 +244,10 @@ export function assessMockFile(content: string): MockFileAssessment {
 		const asyncImportPattern = new RegExp(
 			`const\\s+${spreadVar}\\s*=\\s*await\\s+import\\(['"]node:${moduleName}['"]`,
 		);
-		if (!spreadPattern.test(content) && !asyncImportPattern.test(content)) {
+		if (!spreadPattern.test(codeContent) && !asyncImportPattern.test(codeContent)) {
 			spreadViolations.push({
 				module: moduleName,
-				line: index + 1,
+				line: call.line,
 				spreadVar,
 			});
 		}
@@ -179,42 +263,12 @@ export function assessMockFile(content: string): MockFileAssessment {
 	// pkg-audit-composer test files shipped this shape and hung every CI shard
 	// that co-located them with pkg-audit.test.ts.
 	const delegationViolations: DelegationViolation[] = [];
-	const hasMockModule = lines.some((line) => MOCK_MODULE_PATTERN.test(line));
+	const hasMockModule = mockModuleCalls.length > 0;
 	if (hasMockModule) {
-		// Comment-aware code view with ORIGINAL line numbers preserved: full-line
-		// `//` comments and `/* … */` spans (multi-line included) are dropped so
-		// documentation mentioning the delegation shape — single-line OR block —
-		// cannot trip the rule (review F-004/PRR-009).
-		const codeLines: Array<{ lineNo: number; text: string }> = [];
-		let inBlockComment = false;
-		for (let index = 0; index < lines.length; index += 1) {
-			let text = lines[index];
-			if (inBlockComment) {
-				const end = text.indexOf('*/');
-				if (end === -1) {
-					continue;
-				}
-				text = text.slice(end + 2);
-				inBlockComment = false;
-			}
-			// Strip inline block-comment spans on this line.
-			text = text.replaceAll(/\/\*[^*]*\*(?:\/|$)/g, '');
-			const trimmed = text.trimStart();
-			if (trimmed.startsWith('/*')) {
-				const open = text.indexOf('/*');
-				const end = text.indexOf('*/', open + 2);
-				if (end === -1) {
-					inBlockComment = true;
-					continue;
-				}
-				text = text.slice(0, open) + text.slice(end + 2);
-			}
-			if (text.trimStart().startsWith('//')) {
-				continue;
-			}
-			codeLines.push({ lineNo: index + 1, text });
-		}
-		const codeContent = codeLines.map((entry) => entry.text).join('\n');
+		const codeLines = lines.map((text, index) => ({
+			lineNo: index + 1,
+			text,
+		}));
 		// Only identifiers that are DECLARED as module namespaces can carry
 		// the recursion shape — `import * as V from …`, `const V = await
 		// import(…)`, or `const V = require(…)`. This excludes array spreads

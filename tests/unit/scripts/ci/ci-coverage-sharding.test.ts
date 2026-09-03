@@ -287,6 +287,21 @@ describe('run-coverage-gate.sh shard mode — issue #2341', () => {
 		);
 	});
 
+	test('each successful test must contribute a non-empty lcov artifact', () => {
+		const branchStart = coverageGateScript.indexOf(
+			'elif [ -s coverage/lcov.info ]; then',
+		);
+		const successBranch = coverageGateScript.slice(
+			branchStart,
+			coverageGateScript.indexOf('\n\tfi', branchStart),
+		);
+		expect(successBranch).toContain(
+			'::error file=${test_file}::No non-empty lcov.info produced for coverage test: ${test_file}',
+		);
+		expect(successBranch).toContain('failed=1');
+		expect(successBranch).not.toContain('::warning');
+	});
+
 	test('shard mode skips threshold enforcement (aggregator owns the union)', () => {
 		expect(coverageGateScript).toContain(
 			'Shard ${shard_index}/${shard_count} local coverage',

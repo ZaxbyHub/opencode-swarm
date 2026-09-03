@@ -341,12 +341,8 @@ describe('syntax_check tool', () => {
 			}
 			expect(caughtError).toBeUndefined();
 			expect(result).toBeDefined();
-			// verdict must be a valid value (no uncaught exception from traversal)
-			// 'skip' is the real EvidenceVerdict member; 'skipped' was never a
-			// valid value, so this list silently accepted only pass/fail before.
-			expect(['pass', 'fail', 'skip']).toContain(result?.verdict);
-			// Ensure summary is a string and present in the result
-			expect(typeof result?.summary).toBe('string');
+			expect(result?.verdict).toBe('pass');
+			expect(result?.summary).toBe('All 1 files passed syntax check');
 		});
 	});
 });

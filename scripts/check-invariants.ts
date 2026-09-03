@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as ts from 'typescript';
 import { fileURLToPath } from 'node:url';
 import { runGit as runGitBase } from './gate-utils';
 
@@ -220,36 +221,137 @@ export async function resolveBaseBranch(
 	return null;
 }
 
+const SUBPROCESS_CALLEES = new Set([
+	'spawn',
+	'spawnSync',
+	'execFile',
+	'execFileSync',
+	'exec',
+	'execSync',
+	'bunSpawn',
+	'runExternalTool',
+]);
+
+export interface SubprocessTimeoutViolation {
+	line: number;
+	callee: string;
+}
+
+function hasTimeoutProperty(literal: ts.ObjectLiteralExpression): boolean {
+	return literal.properties.some((property) => {
+		if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property)) {
+			return false;
+		}
+		const name = property.name;
+		const text =
+			ts.isIdentifier(name) || ts.isStringLiteralLike(name) ? name.text : null;
+		return text === 'timeout' || text === 'timeoutMs';
+	});
+}
+
+/** Pure, comment-aware call-site scan for the repository subprocess family. */
+export function scanSourceForSubprocessTimeouts(
+	file: string,
+	source: string,
+): SubprocessTimeoutViolation[] {
+	const sourceFile = ts.createSourceFile(
+		file,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	const violations: SubprocessTimeoutViolation[] = [];
+	const namedBindings = new Map<string, string>();
+	const namespaceBindings = new Set<string>();
+	for (const statement of sourceFile.statements) {
+		if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) {
+			continue;
+		}
+		const moduleName = statement.moduleSpecifier.text.replace(/\.js$/, '');
+		const isChildProcess =
+			moduleName === 'node:child_process' || moduleName === 'child_process';
+		const allowedNamed = isChildProcess
+			? SUBPROCESS_CALLEES
+			: moduleName.endsWith('/bun-compat')
+				? new Set(['bunSpawn'])
+				: moduleName.endsWith('/external-tool-runner')
+					? new Set(['runExternalTool'])
+					: null;
+		if (!allowedNamed || !statement.importClause) continue;
+		const bindings = statement.importClause.namedBindings;
+		if (bindings && ts.isNamespaceImport(bindings) && isChildProcess) {
+			namespaceBindings.add(bindings.name.text);
+		} else if (bindings && ts.isNamedImports(bindings)) {
+			for (const element of bindings.elements) {
+				const imported = element.propertyName?.text ?? element.name.text;
+				if (allowedNamed.has(imported)) namedBindings.set(element.name.text, imported);
+			}
+		}
+	}
+	const resolveCallee = (expression: ts.LeftHandSideExpression): string | null => {
+		if (ts.isIdentifier(expression)) return namedBindings.get(expression.text) ?? null;
+		if (
+			ts.isPropertyAccessExpression(expression) &&
+			ts.isIdentifier(expression.expression) &&
+			namespaceBindings.has(expression.expression.text) &&
+			SUBPROCESS_CALLEES.has(expression.name.text)
+		) {
+			return expression.name.text;
+		}
+		return null;
+	};
+	const visit = (node: ts.Node): void => {
+		if (ts.isCallExpression(node)) {
+			const callee = resolveCallee(node.expression);
+			if (callee) {
+				const options = node.arguments.find(ts.isObjectLiteralExpression);
+				if (!options || !hasTimeoutProperty(options)) {
+					violations.push({
+						line: sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile))
+							.line + 1,
+						callee,
+					});
+				}
+			}
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(sourceFile);
+	return violations;
+}
+
 export function checkSubprocessTimeout(repoRoot: string): CheckResult {
 	const messages = ['=== Check 1: Subprocess timeout required (advisory) ==='];
 	let timeoutWarnings = 0;
-	const files = listFiles(path.join(repoRoot, 'src'), {
-		extensions: ['.ts'],
-		excludeDirs: new Set(['node_modules', 'dist']),
-	});
+	const files = [
+		...listFiles(path.join(repoRoot, 'src'), {
+			extensions: ['.ts'],
+			excludeDirs: new Set(['node_modules', 'dist']),
+		}),
+		...listFiles(path.join(repoRoot, 'tests'), {
+			extensions: ['.ts'],
+			excludeDirs: new Set(['node_modules', 'dist']),
+		}),
+	].sort((a, b) => a.localeCompare(b));
 	for (const file of files) {
 		const rel = toPosixRelative(repoRoot, file);
 		if (
-			rel.endsWith('.test.ts') ||
 			rel.endsWith('.d.ts') ||
 			path.basename(file) === 'bun-compat.ts'
 		) {
 			continue;
 		}
-		const content = readText(file);
-		if (!/\bspawnSync\(|\bspawn\(/.test(content)) {
-			continue;
-		}
-		if (!/(timeout:|timeoutMs)/.test(content)) {
+		for (const violation of scanSourceForSubprocessTimeouts(rel, readText(file))) {
 			messages.push(
-				`WARNING: ${rel} uses spawn/spawnSync but has no timeout property in file`,
+				`WARNING: ${rel}:${violation.line} calls ${violation.callee} without a timeout/timeoutMs property in its options object`,
 			);
 			timeoutWarnings++;
 		}
 	}
 	if (timeoutWarnings > 0) {
 		messages.push(
-			`  (${timeoutWarnings} file(s) have spawn/spawnSync but no timeout — advisory, not blocking)`,
+			`  (${timeoutWarnings} subprocess call(s) have no call-local timeout — advisory, not blocking)`,
 		);
 	}
 	return { messages, violations: 0 };

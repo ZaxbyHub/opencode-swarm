@@ -23,7 +23,16 @@ import { QUARANTINE_LIST_FILES } from '../../scripts/check-invariants';
 export const QUARANTINE_LIST_FILE_NAMES: readonly string[] =
 	QUARANTINE_LIST_FILES.map((rel) => rel.slice(rel.lastIndexOf('/') + 1));
 
+export function seedInvariantGateDependencies(fixtureDir: string): void {
+	const repoNodeModules = path.resolve(import.meta.dir, '../../node_modules');
+	const fixtureNodeModules = path.join(fixtureDir, 'node_modules');
+	if (fs.existsSync(repoNodeModules) && !fs.existsSync(fixtureNodeModules)) {
+		fs.symlinkSync(repoNodeModules, fixtureNodeModules, 'junction');
+	}
+}
+
 export function seedQuarantineListFiles(fixtureDir: string): void {
+	seedInvariantGateDependencies(fixtureDir);
 	fs.mkdirSync(path.join(fixtureDir, 'scripts', 'ci'), { recursive: true });
 	for (const listName of QUARANTINE_LIST_FILE_NAMES) {
 		fs.writeFileSync(

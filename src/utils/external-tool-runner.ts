@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { type BunCompatSubprocess, bunSpawn } from './bun-compat';
+import { warn } from './logger';
 
 export interface ExternalToolRunOptions {
 	executable: string;
@@ -33,6 +34,20 @@ interface BoundedStreamResult {
 interface BoundedStreamReadHandle {
 	promise: Promise<BoundedStreamResult>;
 	cancel: () => Promise<void>;
+}
+
+function decodeCompleteUtf8Prefix(bytes: Uint8Array): string {
+	const decoded = new TextDecoder().decode(bytes);
+	const encoder = new TextEncoder();
+	let byteLength = 0;
+	let result = '';
+	for (const character of decoded) {
+		const encodedLength = encoder.encode(character).byteLength;
+		if (byteLength + encodedLength > bytes.byteLength) break;
+		result += character;
+		byteLength += encodedLength;
+	}
+	return result;
 }
 
 const DEFAULT_WINDOWS_EXTENSIONS = ['.exe', '.cmd', '.bat'];
@@ -210,7 +225,7 @@ function startBoundedStreamRead(
 		}
 
 		return {
-			text: new TextDecoder().decode(out),
+			text: decodeCompleteUtf8Prefix(out),
 			truncated,
 		};
 	})();
@@ -222,11 +237,17 @@ function timeoutKillSignal(platform: NodeJS.Platform): NodeJS.Signals {
 	return platform === 'win32' ? 'SIGTERM' : 'SIGKILL';
 }
 
+function reportKillFailure(error: unknown, signal: NodeJS.Signals): void {
+	if ((error as NodeJS.ErrnoException | undefined)?.code === 'ESRCH') return;
+	_internals.warn(`external tool process kill failed for ${signal}`, error);
+}
+
 function killProcess(proc: BunCompatSubprocess | undefined): void {
+	const signal = timeoutKillSignal(_internals.platform());
 	try {
-		proc?.kill(timeoutKillSignal(_internals.platform()));
-	} catch {
-		// best effort
+		proc?.kill(signal);
+	} catch (error) {
+		reportKillFailure(error, signal);
 	}
 }
 
@@ -238,13 +259,17 @@ function requestTermination(
 		if (proc?.killTree) {
 			return proc.killTree(signal).then(
 				() => true,
-				() => false,
+				(error) => {
+					reportKillFailure(error, signal);
+					return false;
+				},
 			);
 		} else {
 			proc?.kill(signal);
 			return Promise.resolve(proc !== undefined);
 		}
-	} catch {
+	} catch (error) {
+		reportKillFailure(error, signal);
 		return Promise.resolve(false);
 	}
 }
@@ -612,6 +637,7 @@ export const _internals: {
 	clearTimeout: typeof clearTimeout;
 	clampTimeoutMs: typeof clampTimeoutMs;
 	computeSpawnTimeoutMs: typeof computeSpawnTimeoutMs;
+	warn: typeof warn;
 } = {
 	bunSpawn,
 	platform: () => process.platform,
@@ -620,4 +646,5 @@ export const _internals: {
 	clearTimeout,
 	clampTimeoutMs,
 	computeSpawnTimeoutMs,
+	warn,
 };
