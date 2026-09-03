@@ -10,6 +10,7 @@ import { clearTrajectoryStep } from '../hooks/trajectory-logger';
 import { validateSwarmPath } from '../hooks/utils';
 import { resetPrmSessionState } from '../prm';
 import { sanitizeDiagnosticText } from '../scope/path-identity.js';
+import { clearSnapshotRows } from '../session/snapshot-store.js';
 import { swarmState } from '../state';
 import { recoverStaleCoderSettlements } from '../workflow/coder-settlement.js';
 import {
@@ -205,6 +206,22 @@ export async function handleResetSessionCommand(
 	} catch (err) {
 		results.push(
 			`⚠️ Auto-backup failed (continuing with reset): ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
+
+	// Delete the SQLite authority before removing its backed-up compatibility
+	// projection. This is a single FULL transaction and remains a no-op for
+	// projects that have not opened swarm.db yet.
+	try {
+		const removed = clearSnapshotRows(directory);
+		results.push(
+			removed > 0
+				? `✅ Deleted ${removed} authoritative session snapshot row(s)`
+				: '⏭️ SQLite session snapshot already clean',
+		);
+	} catch (err) {
+		results.push(
+			`❌ Failed to clear SQLite session snapshot: ${errorMessage(err)}`,
 		);
 	}
 

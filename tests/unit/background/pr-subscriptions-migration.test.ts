@@ -5,7 +5,6 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	getPrSubscriptionHealth,
@@ -19,6 +18,7 @@ import {
 	sweepStale,
 	updateSnapshot,
 } from '../../../src/background/pr-subscriptions';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import { freezeClock } from '../../helpers/test-clock';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -45,6 +45,10 @@ function checkpointPath(dir: string): string {
 
 function archivePath(dir: string): string {
 	return path.join(dir, '.swarm', 'pr-monitor', 'subscriptions.legacy.jsonl');
+}
+
+function importedLegacyPath(dir: string): string {
+	return `${legacyPath(dir)}.imported`;
 }
 
 function record(
@@ -83,6 +87,7 @@ describe('pr-subscriptions legacy migration', () => {
 		dir = makeTempProject();
 	});
 	afterEach(() => {
+		closeAllProjectDbs();
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -175,19 +180,18 @@ describe('pr-subscriptions legacy migration', () => {
 		const cp: PrSubscriptionCheckpoint = JSON.parse(
 			fs.readFileSync(checkpointPath(dir), 'utf-8'),
 		);
-		expect(cp.migration?.done).toBe(true);
-		expect(cp.migration?.archived).toBe(true);
 		expect(cp.records['sess_1::o/r::1'].errorCount).toBe(1);
 		expect(cp.records['sess_2::o/r::2']).toBeDefined();
-		// The legacy log was archived (not deleted) with bytes intact.
-		expect(fs.existsSync(legacyPath(dir))).toBe(false);
-		expect(fs.readFileSync(archivePath(dir), 'utf-8')).toBe(originalContent);
+		expect(fs.readFileSync(importedLegacyPath(dir), 'utf-8')).toBe(
+			originalContent,
+		);
+		expect(await getPrSubscriptionHealth(dir)).toMatchObject({
+			recoverySource: 'checkpoint',
+			activeCount: 2,
+		});
 	});
 
-	test('archive mtime is stamped fresh so the 7-day TTL counts from creation, not last write', async () => {
-		// An IDLE legacy log (last written long ago) must not have its archive
-		// instantly past the TTL: renameSync preserves mtime, so the store
-		// re-stamps the archive on creation.
+	test('first write replaces an aged legacy log with a fresh projection while preserving the original archive', async () => {
 		const old = Date.now() - 30 * 86_400_000;
 		const stale = record('sess_old', 1, old);
 		writeLegacy(dir, [stale]);
@@ -196,15 +200,10 @@ describe('pr-subscriptions legacy migration', () => {
 
 		await updateSnapshot(dir, 'sess_old::o/r::1', { errorCount: 0 });
 
-		expect(fs.existsSync(legacyPath(dir))).toBe(false);
-		expect(fs.existsSync(archivePath(dir))).toBe(true);
-		const archiveAge = Date.now() - fs.statSync(archivePath(dir)).mtimeMs;
-		expect(archiveAge).toBeLessThan(60_000); // freshly stamped
-		// And the TTL cleanup must NOT have deleted it in the same op.
-		const cp: PrSubscriptionCheckpoint = JSON.parse(
-			fs.readFileSync(checkpointPath(dir), 'utf-8'),
+		expect(fs.existsSync(importedLegacyPath(dir))).toBe(true);
+		expect(Date.now() - fs.statSync(legacyPath(dir)).mtimeMs).toBeLessThan(
+			60_000,
 		);
-		expect(cp.migration?.archived).toBe(true);
 	});
 
 	test('growth during migration: appended tail records are visible and absorbed', async () => {
@@ -262,29 +261,24 @@ describe('pr-subscriptions legacy migration', () => {
 	test('downgrade path: a recreated legacy file is re-folded (newer and tied appends win)', async () => {
 		const now = Date.now();
 		writeLegacy(dir, [record('sess_1', 1, now)]);
-		// First write op migrates + archives.
 		await updateSnapshot(dir, 'sess_1::o/r::1', { errorCount: 1 });
-		expect(fs.existsSync(archivePath(dir))).toBe(true);
+		expect(fs.existsSync(importedLegacyPath(dir))).toBe(true);
 
-		// A downgraded v1 writer recreates the log with a NEWER snapshot...
 		const newer = { ...record('sess_1', 1, now + 60_000), errorCount: 9 };
 		fs.writeFileSync(legacyPath(dir), `${JSON.stringify(newer)}\n`, 'utf-8');
 
 		let active = await listActive(dir);
-		expect(active[0].errorCount).toBe(9); // greater updatedAt wins
+		expect(active[0].errorCount).toBe(1);
 
-		// ...and with a TIED updatedAt the appended (later-positioned) line wins.
 		const tied = { ...record('sess_1', 1, newer.updatedAt), errorCount: 77 };
 		fs.writeFileSync(legacyPath(dir), `${JSON.stringify(tied)}\n`, 'utf-8');
 		active = await listActive(dir);
-		expect(active[0].errorCount).toBe(77);
+		expect(active[0].errorCount).toBe(1);
 
-		// A write op absorbs the recreation and archives it again.
 		await updateSnapshot(dir, 'sess_1::o/r::1', { errorCount: 5 });
 		const cp: PrSubscriptionCheckpoint = JSON.parse(
 			fs.readFileSync(checkpointPath(dir), 'utf-8'),
 		);
-		expect(cp.migration?.archived).toBe(true);
 		expect(cp.records['sess_1::o/r::1'].errorCount).toBe(5);
 	});
 
@@ -302,33 +296,29 @@ describe('pr-subscriptions legacy migration', () => {
 			fs.readFileSync(checkpointPath(dir), 'utf-8'),
 		);
 		expect(cp.records['sess_1::o/r::1'].status).toBe('expired');
-		// The legacy file no longer accumulates history.
-		expect(cp.migration?.done).toBe(true);
+		expect((await getPrSubscriptionHealth(dir)).recoverySource).toBe(
+			'checkpoint',
+		);
 	});
 
-	test('archive TTL cleanup removes the stale legacy archive', async () => {
+	test('imported legacy archives are retained across later writes', async () => {
 		writeLegacy(dir, [record('sess_1', 1, Date.now())]);
 		await updateSnapshot(dir, 'sess_1::o/r::1', { errorCount: 0 });
-		expect(fs.existsSync(archivePath(dir))).toBe(true);
+		expect(fs.existsSync(importedLegacyPath(dir))).toBe(true);
 
-		// Age the archive beyond the TTL.
 		const old = Date.now() - (PR_SUBSCRIPTION_LIMITS.legacyArchiveTtlMs + 1000);
-		fs.utimesSync(archivePath(dir), old / 1000, old / 1000);
+		fs.utimesSync(importedLegacyPath(dir), old / 1000, old / 1000);
 
 		await updateSnapshot(dir, 'sess_1::o/r::1', { errorCount: 1 });
-		expect(fs.existsSync(archivePath(dir))).toBe(false);
+		expect(fs.existsSync(importedLegacyPath(dir))).toBe(true);
 	});
 
-	test('a changed legacy source whose records lose to the checkpoint stops re-folding after the next write', async () => {
+	test('a changed legacy shadow that loses to SQLite authority is ignored and replaced', async () => {
 		const now = Date.now();
 		writeLegacy(dir, [record('sess_1', 1, now)]);
 		await updateSnapshot(dir, 'sess_1::o/r::1', { errorCount: 1 });
-		// Migration done + archived.
-		expect(fs.existsSync(archivePath(dir))).toBe(true);
+		expect(fs.existsSync(importedLegacyPath(dir))).toBe(true);
 
-		// Recreate the legacy file with an OLDER snapshot (loses the merge)
-		// and garbage lines — a poisoned source that previously re-folded on
-		// every read forever.
 		const loser = record('sess_1', 1, now - 60_000);
 		fs.writeFileSync(
 			legacyPath(dir),
@@ -336,24 +326,18 @@ describe('pr-subscriptions legacy migration', () => {
 			'utf-8',
 		);
 
-		// The read still folds it (correctness) and the checkpoint wins.
 		const active = await listActive(dir);
 		expect(active).toHaveLength(1);
 		expect(active[0].errorCount).toBe(1);
 		let health = await getPrSubscriptionHealth(dir);
-		expect(health.recoverySource).toBe('checkpoint+legacy');
+		expect(health.recoverySource).toBe('checkpoint');
 
-		// The next write settles the fingerprint and re-archives the source.
 		await updateSnapshot(dir, 'sess_1::o/r::1', { errorCount: 2 });
 		health = await getPrSubscriptionHealth(dir);
-		expect(health.recoverySource).toBe('checkpoint'); // no more re-fold
-		expect(fs.existsSync(legacyPath(dir))).toBe(false); // archived again
-		const cp: PrSubscriptionCheckpoint = JSON.parse(
-			fs.readFileSync(checkpointPath(dir), 'utf-8'),
-		);
-		expect(cp.maintenance.corruptLegacyRecords).toBeGreaterThanOrEqual(1);
+		expect(health.recoverySource).toBe('checkpoint');
+		expect(fs.readFileSync(legacyPath(dir), 'utf-8')).not.toContain('GARBAGE');
 		expect(active[0].errorCount).toBe(1);
-		expect((await listActive(dir))[0].errorCount).toBe(2); // later update visible
+		expect((await listActive(dir))[0].errorCount).toBe(2);
 	});
 
 	test('lookupByPr resolves through the legacy overlay before migration', async () => {
@@ -419,7 +403,8 @@ describe('pr-subscriptions legacy migration', () => {
 			}
 		}
 		fs.writeFileSync(legacyPath(dir), lines.join(''), 'utf-8');
-		expect(fs.statSync(legacyPath(dir)).size).toBeGreaterThan(
+		const originalSize = fs.statSync(legacyPath(dir)).size;
+		expect(originalSize).toBeGreaterThan(
 			PR_SUBSCRIPTION_LIMITS.migrationChunkBytes * 2,
 		);
 
@@ -428,8 +413,7 @@ describe('pr-subscriptions legacy migration', () => {
 		const cp: PrSubscriptionCheckpoint = JSON.parse(
 			fs.readFileSync(checkpointPath(dir), 'utf-8'),
 		);
-		expect(cp.migration?.done).toBe(true);
-		expect(cp.migration?.scannedBytes).toBe(fs.statSync(archivePath(dir)).size);
+		expect(fs.statSync(importedLegacyPath(dir)).size).toBe(originalSize);
 		// One record per key — the latest update wins across chunks.
 		expect(Object.keys(cp.records)).toHaveLength(300);
 		expect(cp.records['s1::o/r::1'].errorCount).toBe(99);

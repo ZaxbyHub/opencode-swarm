@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
 	_test_exports,
 	activatePrWorkflow,
@@ -8,6 +8,11 @@ import {
 	readPrWorkflowGateState,
 	recoverArmedPrWorkflow,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import {
+	readPrWorkflowGateStateFromDisk,
+	withSessionStateMutation,
+	writeStateWhileLocked,
+} from '../../../src/pr-review/persistence.js';
 import {
 	PR_ARTIFACT_HEAD_SHA,
 	PR_ARTIFACT_SESSION_ID,
@@ -48,6 +53,7 @@ afterEach(async () => {
 	_test_exports.resolveIsWorkingTreeClean = originalResolveWorkingTreeClean;
 	_test_exports.resolveIsWorkingTreeCleanAsync =
 		originalResolveWorkingTreeCleanAsync;
+	closeAllProjectDbs();
 	await fs.rm(directory, { recursive: true, force: true });
 });
 
@@ -68,16 +74,21 @@ async function establishArmed(options: { withBase?: boolean } = {}): Promise<{
 		...(options.withBase ? { prReviewBaseSha: ARMED_BASE_SHA } : {}),
 		prFeedbackReadyToPublish: ARMED,
 	};
-	const statePath = path.join(
+	await withSessionStateMutation(
 		directory,
-		'.swarm',
-		_test_exports.workflowGateStateRelativePath(PR_ARTIFACT_SESSION_ID),
+		PR_ARTIFACT_SESSION_ID,
+		async () => {
+			const current = await readPrWorkflowGateStateFromDisk(
+				directory,
+				PR_ARTIFACT_SESSION_ID,
+			);
+			expect(current).not.toBeNull();
+			await writeStateWhileLocked(directory, armed);
+		},
 	);
-	await fs.mkdir(path.dirname(statePath), { recursive: true });
-	await fs.writeFile(statePath, JSON.stringify(armed), 'utf8');
 	_test_exports.resetTrackedStateCache();
 	return {
-		generation: armed.revision,
+		generation: armed.revision + 1,
 		workflowInstanceId: armed.workflowInstanceId!,
 	};
 }

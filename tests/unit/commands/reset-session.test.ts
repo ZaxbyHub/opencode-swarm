@@ -1,32 +1,33 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import {
-	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	rmSync,
-	writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
 	_internals,
 	handleResetSessionCommand,
 } from '../../../src/commands/reset-session';
+import { closeProjectDb } from '../../../src/db/project-db.js';
+import {
+	readSnapshotRows,
+	writeSnapshotRows,
+} from '../../../src/session/snapshot-store.js';
 import {
 	resetSwarmState,
 	startAgentSession,
 	swarmState,
 } from '../../../src/state';
+import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
 
 let testDir: string;
 
 beforeEach(() => {
 	resetSwarmState();
-	testDir = mkdtempSync(path.join(os.tmpdir(), 'reset-session-test-'));
+	testDir = canonicalMkdtemp('reset-session-test-');
 	mkdirSync(path.join(testDir, '.swarm', 'session'), { recursive: true });
 });
 
 afterEach(() => {
+	closeProjectDb(testDir);
 	try {
 		rmSync(testDir, { recursive: true, force: true });
 	} catch {
@@ -35,6 +36,23 @@ afterEach(() => {
 });
 
 describe('handleResetSessionCommand', () => {
+	it('#2481 clears the SQLite snapshot authority transactionally', async () => {
+		writeSnapshotRows(testDir, {
+			version: 3,
+			writtenAt: 1,
+			toolAggregates: {},
+			activeAgent: {},
+			delegationChains: {},
+			agentSessions: {},
+		});
+		expect(readSnapshotRows(testDir)).not.toBeNull();
+
+		const result = await handleResetSessionCommand(testDir, []);
+
+		expect(readSnapshotRows(testDir)).toBeNull();
+		expect(result).toContain('authoritative session snapshot row');
+	});
+
 	it('deletes state.json when it exists', async () => {
 		const stateFile = path.join(testDir, '.swarm', 'session', 'state.json');
 		writeFileSync(stateFile, JSON.stringify({ test: 'data' }));

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeAllProjectDbs } from '../../../../src/db/project-db';
 import {
 	ensureAgentSession,
 	getAgentSession,
@@ -248,6 +249,7 @@ describe('Lean Turbo Durable State', () => {
 
 	afterEach(() => {
 		resetSwarmState();
+		closeAllProjectDbs();
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 

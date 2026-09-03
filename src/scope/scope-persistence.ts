@@ -53,6 +53,15 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { type Plan, PlanSchema } from '../config/plan-schema';
+import {
+	type CoordinationState,
+	deleteCoordinationState,
+	getProjectDb,
+	importCoordinationOnce,
+	listCoordinationStates,
+	transitionCoordinationState,
+	withCoordinationTransaction,
+} from '../db';
 import { appendCoreEventSync } from '../events/core-events.js';
 import { computePlanStructureHash } from '../plan/ledger';
 import { derivePlanId } from '../plan/utils';
@@ -94,6 +103,8 @@ const MAX_SCOPE_BYTES = 2 * 1024 * 1024; // 2 MiB — scope file size cap
 const MAX_BINDING_FILES_TO_SCAN = 10_000;
 const MAX_TOMBSTONE_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_DURABLE_TOMBSTONES = 256;
+const SCOPE_BINDING_COORDINATION_NAMESPACE = 'scope-binding';
+const SCOPE_BINDING_COORDINATION_IMPORT_SOURCE = 'scope-binding-v2';
 let liveBindingCapacity = MAX_PENDING_SCOPE_BINDINGS;
 let bindingFileScanCapacity = MAX_BINDING_FILES_TO_SCAN;
 let maintenanceFileScanCapacity = MAX_BINDING_FILES_TO_SCAN * 2;
@@ -111,26 +122,6 @@ const lockfileWithSync = lockfile as typeof lockfile & {
 		},
 	): () => void;
 };
-const syncLockWait = new Int32Array(new SharedArrayBuffer(4));
-
-function lockSyncWithBoundedRetry(
-	targetPath: string,
-	attempts = 41,
-): () => void {
-	let lastError: unknown;
-	for (let attempt = 0; attempt < attempts; attempt++) {
-		try {
-			return lockfileWithSync.lockSync(targetPath, {
-				stale: LOCK_STALE_MS,
-				realpath: false,
-			});
-		} catch (error) {
-			lastError = error;
-			if (attempt + 1 < attempts) Atomics.wait(syncLockWait, 0, 0, 25);
-		}
-	}
-	throw lastError instanceof Error ? lastError : new Error('Lock unavailable');
-}
 
 export type ScopePersistenceCode =
 	| 'SCOPE_NOT_DECLARED'
@@ -399,10 +390,6 @@ function ensureLockTargetSync(targetPath: string): boolean {
 	}
 }
 
-function exactBindingPrefix(taskId: string): string {
-	return `binding-${taskId}-`;
-}
-
 function readBoundedFile(filePath: string): string | null {
 	const nofollow = (fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
 	let fd: number;
@@ -426,6 +413,405 @@ function readBoundedFile(filePath: string): string | null {
 		} catch {
 			/* already closed */
 		}
+	}
+}
+
+function scopeBindingArchivePath(filePath: string): string {
+	return `${filePath}.imported`;
+}
+
+function collisionSafeScopeBindingArchivePath(filePath: string): string {
+	const canonical = scopeBindingArchivePath(filePath);
+	if (!fs.existsSync(canonical)) return canonical;
+	for (let suffix = 1; suffix <= 10_000; suffix += 1) {
+		const candidate = `${canonical}.${suffix}`;
+		if (!fs.existsSync(candidate)) return candidate;
+	}
+	throw new Error(
+		`No collision-safe archive path available for ${path.basename(filePath)}.`,
+	);
+}
+
+function scopeBindingShadowPayload(binding: ScopeBinding): string {
+	return JSON.stringify(binding, null, 2);
+}
+
+function coordinationScopeEntityKey(
+	binding: Pick<ScopeBinding, 'generationId'>,
+): string {
+	return binding.generationId;
+}
+
+function parseCoordinationScopeBinding(
+	directory: string,
+	row: CoordinationState,
+): ScopeBinding | null {
+	try {
+		const binding = validateScopeBindingPayload(
+			directory,
+			JSON.parse(row.payload) as Partial<ScopeBinding>,
+		);
+		if (
+			!binding ||
+			binding.generationId !== row.entityKey ||
+			binding.revision !== row.revision ||
+			binding.lifecycleState !== row.status
+		) {
+			return null;
+		}
+		return binding;
+	} catch {
+		return null;
+	}
+}
+
+function transitionScopeBindingState(
+	directory: string,
+	binding: ScopeBinding,
+	expectedRevision: number | null,
+): ScopePersistenceResult {
+	const payload = scopeBindingShadowPayload(binding);
+	const idempotencyKey = createHash('sha256')
+		.update(
+			`${binding.bindingId}\0${binding.generationId}\0${binding.revision}\0${binding.lifecycleState}\0${payload}`,
+		)
+		.digest('hex');
+	try {
+		const result = transitionCoordinationState(directory, {
+			namespace: SCOPE_BINDING_COORDINATION_NAMESPACE,
+			entityKey: coordinationScopeEntityKey(binding),
+			expectedRevision,
+			generation: 1,
+			status: binding.lifecycleState,
+			payload,
+			event: {
+				streamId: `scope-binding:${binding.bindingId}`,
+				idempotencyKey,
+				eventType: binding.lifecycleState,
+				payload,
+			},
+		});
+		if (result.outcome !== 'applied' && result.outcome !== 'duplicate') {
+			return {
+				ok: false,
+				code:
+					result.outcome === 'revision_conflict' ||
+					result.outcome === 'stale_generation'
+						? 'SCOPE_BINDING_STALE'
+						: 'SCOPE_BINDING_PERSISTENCE_FAILED',
+				message: `Scope binding transition failed: ${result.outcome}.`,
+			};
+		}
+		const persisted =
+			result.state && parseCoordinationScopeBinding(directory, result.state);
+		return persisted
+			? { ok: true, value: persisted }
+			: persistenceFailure(
+					'Scope binding transition could not be re-read from coordination state.',
+				);
+	} catch (error) {
+		return persistenceFailure(
+			`Scope binding transition failed: ${
+				error instanceof Error ? error.message : 'unknown coordination error'
+			}`,
+		);
+	}
+}
+
+function coordinationTimestampFromMs(value: number, label: string): string {
+	if (!Number.isFinite(value)) {
+		throw new Error(`${label} must be a finite epoch-millisecond timestamp.`);
+	}
+	const iso = new Date(value).toISOString();
+	if (Number.isNaN(Date.parse(iso))) {
+		throw new Error(`${label} must be a valid epoch-millisecond timestamp.`);
+	}
+	return iso;
+}
+
+function importScopeBindingStateRows(
+	directory: string,
+	bindings: readonly ScopeBinding[],
+): void {
+	const db = getProjectDb(directory);
+	for (const binding of bindings) {
+		if (!Number.isSafeInteger(binding.revision) || binding.revision < 1) {
+			throw new Error(
+				`Legacy binding ${binding.generationId} has invalid revision ${binding.revision}.`,
+			);
+		}
+		db.run(
+			`INSERT INTO coordination_state
+			 (namespace, entity_key, revision, generation, status, payload, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			[
+				SCOPE_BINDING_COORDINATION_NAMESPACE,
+				coordinationScopeEntityKey(binding),
+				binding.revision,
+				1,
+				binding.lifecycleState,
+				scopeBindingShadowPayload(binding),
+				coordinationTimestampFromMs(binding.updatedAt, 'binding.updatedAt'),
+			],
+		);
+	}
+}
+
+function writeScopeBindingShadow(
+	directory: string,
+	binding: ScopeBinding,
+): void {
+	try {
+		const scopesDir = getScopesDir(directory);
+		fs.mkdirSync(scopesDir, { recursive: true });
+		if (!isScopesDirSafe(directory, scopesDir)) return;
+		atomicWriteSync(
+			getBindingFilePath(directory, binding),
+			scopeBindingShadowPayload(binding),
+		);
+	} catch {
+		/* compatibility projection only */
+	}
+}
+
+function archiveImportedScopeAuthorityFiles(paths: readonly string[]): void {
+	for (const filePath of paths) {
+		try {
+			if (!fs.existsSync(filePath)) continue;
+			const archivedPath = collisionSafeScopeBindingArchivePath(filePath);
+			fs.renameSync(filePath, archivedPath);
+		} catch {
+			/* authoritative import already committed */
+		}
+	}
+}
+
+function collectLegacyScopeBindingsForImport(directory: string): {
+	bindings: ScopeBinding[];
+	authorityFiles: string[];
+	sourceDigest: string;
+	rowCount: number;
+} {
+	const scopesDir = getScopesDir(directory);
+	try {
+		fs.lstatSync(scopesDir);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+			return {
+				bindings: [],
+				authorityFiles: [],
+				sourceDigest: 'empty',
+				rowCount: 0,
+			};
+		}
+		throw error;
+	}
+	if (!isScopesDirSafe(directory, scopesDir)) {
+		throw new Error('The durable scope store failed containment checks.');
+	}
+	if (!migrateLegacyBindingsSync(directory)) {
+		throw new Error(
+			'The durable binding set could not be completely evaluated.',
+		);
+	}
+	const names = fs.readdirSync(scopesDir).sort();
+	if (names.length > bindingFileScanCapacity) {
+		throw new Error('The durable binding set exceeds the scan capacity.');
+	}
+	const authorityFiles: string[] = [];
+	const bindings: ScopeBinding[] = [];
+	for (const name of names) {
+		if (!name.startsWith('binding-') || !name.endsWith('.json')) continue;
+		const filePath = path.join(scopesDir, name);
+		authorityFiles.push(filePath);
+		const raw = readBoundedFile(filePath);
+		if (!raw) {
+			throw new Error(`Legacy scope binding ${name} is unreadable.`);
+		}
+		const binding = validateScopeBindingPayload(
+			directory,
+			JSON.parse(raw) as Partial<ScopeBinding>,
+		);
+		if (!binding || !exactFilenameMatches(directory, filePath, binding)) {
+			throw new Error(`Legacy scope binding ${name} is malformed.`);
+		}
+		const intentPath = getRetirementIntentPath(filePath);
+		if (hasDurableRetirementIntent(filePath, binding)) {
+			authorityFiles.push(intentPath);
+			let createdAt = Date.now();
+			const rawIntent = readBoundedFile(intentPath);
+			if (!rawIntent) {
+				throw new Error(
+					`Legacy retirement intent ${path.basename(intentPath)} is unreadable.`,
+				);
+			}
+			const parsedIntent = JSON.parse(rawIntent) as {
+				bindingId?: unknown;
+				generationId?: unknown;
+				createdAt?: unknown;
+			};
+			if (
+				parsedIntent.bindingId !== binding.bindingId ||
+				parsedIntent.generationId !== binding.generationId
+			) {
+				throw new Error(
+					`Legacy retirement intent ${path.basename(intentPath)} mismatches its generation.`,
+				);
+			}
+			if (typeof parsedIntent.createdAt === 'number')
+				createdAt = parsedIntent.createdAt;
+			bindings.push({
+				...binding,
+				lifecycleState: 'revoked',
+				updatedAt: createdAt,
+				expiresAt: Math.min(binding.expiresAt, createdAt),
+			});
+			continue;
+		}
+		bindings.push(binding);
+	}
+	for (const name of names) {
+		if (!/^claim-[a-f0-9]{40}\.json$/i.test(name)) continue;
+		const filePath = path.join(scopesDir, name);
+		authorityFiles.push(filePath);
+		const raw = readBoundedFile(filePath);
+		if (!raw) throw new Error(`Legacy claim receipt ${name} is unreadable.`);
+		const parsed = JSON.parse(raw) as Partial<ScopeClaimReceipt>;
+		if (
+			parsed.version !== 1 ||
+			!isScopeBindingIdentity(parsed.predecessorGenerationId) ||
+			!isScopeBindingIdentity(parsed.winnerGenerationId) ||
+			typeof parsed.childSessionId !== 'string' ||
+			!parsed.childSessionId.trim() ||
+			typeof parsed.dispatchCallId !== 'string' ||
+			!parsed.dispatchCallId.trim()
+		) {
+			throw new Error(`Legacy claim receipt ${name} is malformed.`);
+		}
+		const winner = bindings.find(
+			(binding) => binding.generationId === parsed.winnerGenerationId,
+		);
+		if (!winner) {
+			throw new Error(`Legacy claim receipt ${name} has no winner generation.`);
+		}
+		if (
+			winner.lifecycleState === 'live' &&
+			winner.ownerSessionId !== parsed.childSessionId
+		) {
+			throw new Error(
+				`Legacy claim receipt ${name} disagrees with the winner generation.`,
+			);
+		}
+	}
+	const digest = createHash('sha256');
+	for (const filePath of authorityFiles) {
+		if (!fs.existsSync(filePath)) continue;
+		digest.update(path.basename(filePath));
+		digest.update(fs.readFileSync(filePath));
+	}
+	return {
+		bindings,
+		authorityFiles,
+		sourceDigest: digest.digest('hex'),
+		rowCount: bindings.length,
+	};
+}
+
+function ensureScopeBindingAuthorityImported(
+	directory: string,
+): ScopePersistenceResult<void> {
+	try {
+		if (
+			listCoordinationStates(directory, SCOPE_BINDING_COORDINATION_NAMESPACE, 1)
+				.length > 0
+		) {
+			return { ok: true, value: undefined };
+		}
+		const legacy = collectLegacyScopeBindingsForImport(directory);
+		if (legacy.rowCount === 0 && legacy.authorityFiles.length === 0) {
+			return { ok: true, value: undefined };
+		}
+		const importedBindings = legacy.bindings.map((binding) => ({ ...binding }));
+		const outcome = importCoordinationOnce(
+			directory,
+			{
+				source: SCOPE_BINDING_COORDINATION_IMPORT_SOURCE,
+				sourceDigest: legacy.sourceDigest,
+				rowCount: legacy.rowCount,
+				emptyNamespace: SCOPE_BINDING_COORDINATION_NAMESPACE,
+			},
+			() => {
+				importScopeBindingStateRows(directory, importedBindings);
+			},
+		);
+		if (outcome === 'imported') {
+			archiveImportedScopeAuthorityFiles(legacy.authorityFiles);
+			for (const binding of importedBindings) {
+				writeScopeBindingShadow(directory, binding);
+			}
+		}
+		return { ok: true, value: undefined };
+	} catch (error) {
+		return persistenceFailure(
+			`Scope binding import failed closed: ${
+				error instanceof Error ? error.message : 'unknown import error'
+			}`,
+		);
+	}
+}
+
+function readAllAuthoritativeScopeBindings(
+	directory: string,
+	options: { enforceLiveCapacity?: boolean; maintenanceScan?: boolean } = {},
+): ScopePersistenceResult<ScopeBinding[]> {
+	const imported = ensureScopeBindingAuthorityImported(directory);
+	if (!imported.ok) return imported;
+	try {
+		const scanCapacity = options.maintenanceScan
+			? maintenanceFileScanCapacity
+			: bindingFileScanCapacity;
+		const rows = listCoordinationStates(
+			directory,
+			SCOPE_BINDING_COORDINATION_NAMESPACE,
+			scanCapacity + 1,
+		);
+		if (rows.length > scanCapacity) {
+			return {
+				ok: false,
+				code: 'SCOPE_BINDING_STORE_OVERLOADED',
+				message: 'The durable binding set exceeds the scan capacity.',
+			};
+		}
+		const bindings = rows.map((row) =>
+			parseCoordinationScopeBinding(directory, row),
+		);
+		if (bindings.some((binding) => binding === null)) {
+			return persistenceFailure(
+				'The authoritative scope binding set contains malformed coordination rows.',
+			);
+		}
+		const complete = bindings as ScopeBinding[];
+		const liveCount = complete.filter(
+			(binding) =>
+				binding.lifecycleState === 'live' && binding.expiresAt > Date.now(),
+		).length;
+		if (
+			options.enforceLiveCapacity !== false &&
+			liveCount > liveBindingCapacity
+		) {
+			return {
+				ok: false,
+				code: 'SCOPE_BINDING_STORE_OVERLOADED',
+				message: 'The durable binding set exceeds the live binding capacity.',
+			};
+		}
+		return { ok: true, value: complete };
+	} catch (error) {
+		return persistenceFailure(
+			`Authoritative scope binding read failed: ${
+				error instanceof Error ? error.message : 'unknown coordination error'
+			}`,
+		);
 	}
 }
 
@@ -823,70 +1209,45 @@ export async function writeScopeBindingToDisk(
 		return persistenceFailure(
 			'Binding identity, workspace, scope, or lease is invalid.',
 		);
-
-	const scopesDir = getScopesDir(directory);
-	const scopePath = getBindingFilePath(directory, binding);
-	try {
-		fs.mkdirSync(scopesDir, { recursive: true });
-	} catch {
-		return persistenceFailure('Could not create the durable scope store.');
+	const imported = ensureScopeBindingAuthorityImported(directory);
+	if (!imported.ok) return imported;
+	const all = readAllAuthoritativeScopeBindings(directory, {
+		enforceLiveCapacity: false,
+	});
+	if (!all.ok) return all;
+	const current = all.value.find(
+		(candidate) => candidate.generationId === binding.generationId,
+	);
+	if (current && current.bindingId !== binding.bindingId) {
+		return {
+			ok: false,
+			code: 'SCOPE_BINDING_STALE',
+			message: 'The exact generation identity collides with another binding.',
+		};
 	}
-	if (!isScopesDirSafe(directory, scopesDir))
-		return persistenceFailure(
-			'The durable scope store failed containment checks.',
-		);
-
-	const content = JSON.stringify({ ...binding, files }, null, 2);
-	try {
-		const flags = fs.constants.O_WRONLY | fs.constants.O_CREAT;
-		const nofollow = (fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
-		const fd = fs.openSync(scopePath, flags | nofollow);
-		fs.closeSync(fd);
-	} catch {
-		return persistenceFailure('Could not create the exact generation record.');
+	if (
+		current &&
+		current.revision === binding.revision &&
+		current.lifecycleState === binding.lifecycleState &&
+		JSON.stringify(current.files) === JSON.stringify(files)
+	) {
+		return { ok: true, value: current };
 	}
-
-	let release: (() => Promise<void>) | undefined;
-	try {
-		const lockPath = getGenerationLockPath(scopePath);
-		if (!(await ensureLockTarget(lockPath)))
-			return persistenceFailure('Could not prepare exact generation lock.');
-		release = await lockfile.lock(lockPath, {
-			stale: LOCK_STALE_MS,
-			retries: { retries: 3, minTimeout: 50, maxTimeout: 200 },
-			realpath: false,
-		});
-		await atomicWrite(scopePath, content);
-		const verifiedRaw = readBoundedFile(scopePath);
-		const verified = verifiedRaw
-			? validateScopeBindingPayload(
-					directory,
-					JSON.parse(verifiedRaw) as Partial<ScopeBinding>,
-				)
-			: null;
-		if (
-			!verified ||
-			verified.bindingId !== binding.bindingId ||
-			verified.generationId !== binding.generationId ||
-			verified.revision !== binding.revision
-		)
-			return persistenceFailure(
-				'Exact generation verification failed after write.',
-			);
-		return { ok: true, value: verified };
-	} catch (error) {
-		return persistenceFailure(
-			`Exact generation write failed: ${error instanceof Error ? error.message : 'unknown I/O error'}`,
-		);
-	} finally {
-		if (release) {
-			try {
-				await release();
-			} catch {
-				/* lock already released or stale */
-			}
-		}
+	const expectedRevision = current ? binding.revision - 1 : null;
+	if (binding.revision !== (current?.revision ?? 0) + 1) {
+		return {
+			ok: false,
+			code: 'SCOPE_BINDING_STALE',
+			message: 'Exact generation write requires the next CAS revision.',
+		};
 	}
+	const persisted = transitionScopeBindingState(
+		directory,
+		{ ...binding, files },
+		expectedRevision,
+	);
+	if (persisted.ok) writeScopeBindingShadow(directory, persisted.value);
+	return persisted;
 }
 
 function persistenceFailure(message: string): ScopePersistenceResult<never> {
@@ -947,12 +1308,14 @@ export function resolveScopeBindingFromDisk(input: {
 	includeExpired?: boolean;
 }): DurableScopeBindingResolution {
 	if (!isSafeTaskId(input.taskId)) return { status: 'not_declared' };
-	const completeSet = readAllExactBindings(input.directory);
-	if (!completeSet) {
-		scheduleScopeBindingMaintenance(input.directory);
+	const completeSet = readAllAuthoritativeScopeBindings(input.directory);
+	if (!completeSet.ok) {
+		if (completeSet.code === 'SCOPE_BINDING_STORE_OVERLOADED') {
+			scheduleScopeBindingMaintenance(input.directory);
+		}
 		return { status: 'overloaded' };
 	}
-	const candidates = completeSet.filter(
+	const candidates = completeSet.value.filter(
 		(parsed) =>
 			parsed.taskId === input.taskId &&
 			parsed.planId === derivePlanId(input.plan) &&
@@ -1020,106 +1383,47 @@ export function clearScopeBindingFromDisk(input: {
 			`Scope retirement project-root validation failed: ${error instanceof Error ? error.message : 'unknown validation error'}`,
 		);
 	}
-	let release: (() => void) | undefined;
-	try {
-		const resolvedWorkspace = fs.realpathSync(input.directory);
-		const scopePath = getBindingFilePath(resolvedWorkspace, input.binding);
-		if (!isScopesDirSafe(resolvedWorkspace, getScopesDir(resolvedWorkspace)))
-			return persistenceFailure(
-				'The durable scope store failed containment checks.',
-			);
-		const retirementIntentPath = getRetirementIntentPath(scopePath);
-		atomicWriteSync(
-			retirementIntentPath,
-			JSON.stringify({
-				version: 1,
-				bindingId: input.binding.bindingId,
-				generationId: input.binding.generationId,
-				createdAt: Date.now(),
-			}),
-		);
-		// If bounded synchronous lock acquisition loses to a slow writer, the
-		// durable intent denies immediately and maintenance finishes retirement.
-		scheduleScopeBindingMaintenance(resolvedWorkspace);
-		const lockPath = getGenerationLockPath(scopePath);
-		if (!ensureLockTargetSync(lockPath))
-			return persistenceFailure('Could not prepare exact retirement lock.');
-		release = lockSyncWithBoundedRetry(lockPath);
-		const raw = readBoundedFile(scopePath);
-		if (!raw) {
-			try {
-				fs.unlinkSync(retirementIntentPath);
-			} catch {
-				/* already absent */
-			}
-			return localRetirement
-				? { ok: true, value: localRetirement }
-				: persistenceFailure(
-						'Exact generation disappeared before serialized retirement.',
-					);
-		}
-		const current = validateScopeBindingPayload(
-			resolvedWorkspace,
-			JSON.parse(raw) as Partial<ScopeBinding>,
-		);
-		if (
-			!current ||
-			current.bindingId !== input.binding.bindingId ||
-			current.generationId !== input.binding.generationId
-		)
-			return persistenceFailure(
-				'Exact generation identity changed before serialized retirement.',
-			);
-		if (current.lifecycleState !== 'live') {
-			installScopeBindingTombstone(current);
-			try {
-				fs.unlinkSync(retirementIntentPath);
-			} catch {
-				/* settled intent already removed */
-			}
-			return { ok: true, value: current };
-		}
-		const now = Date.now();
-		const tombstone: ScopeBinding = {
-			...current,
-			revision: current.revision + 1,
-			lifecycleState: 'revoked',
-			updatedAt: now,
-			expiresAt: Math.min(current.expiresAt, now),
-		};
-		atomicWriteSync(scopePath, JSON.stringify(tombstone, null, 2));
-		const verifiedRaw = readBoundedFile(scopePath);
-		const verified = verifiedRaw
-			? validateScopeBindingPayload(
-					resolvedWorkspace,
-					JSON.parse(verifiedRaw) as Partial<ScopeBinding>,
-				)
-			: null;
-		if (
-			!verified ||
-			verified.revision !== tombstone.revision ||
-			verified.lifecycleState !== 'revoked'
-		)
-			return persistenceFailure('Serialized retirement verification failed.');
-		installScopeBindingTombstone(verified);
-		try {
-			fs.unlinkSync(retirementIntentPath);
-		} catch {
-			/* durable tombstone is authoritative */
-		}
-		scheduleScopeBindingMaintenance(resolvedWorkspace);
-		return { ok: true, value: verified };
-	} catch (error) {
-		return persistenceFailure(
-			`Serialized retirement failed: ${error instanceof Error ? error.message : 'unknown I/O error'}`,
-		);
-	} finally {
-		try {
-			release?.();
-		} catch {
-			/* stale/released */
-		}
+	const imported = ensureScopeBindingAuthorityImported(input.directory);
+	if (!imported.ok) return imported;
+	const all = readAllAuthoritativeScopeBindings(input.directory, {
+		enforceLiveCapacity: false,
+	});
+	if (!all.ok) return all;
+	const current = all.value.find(
+		(candidate) =>
+			candidate.generationId === input.binding.generationId &&
+			candidate.bindingId === input.binding.bindingId,
+	);
+	if (!current) {
+		return localRetirement
+			? { ok: true, value: localRetirement }
+			: persistenceFailure(
+					'Exact generation disappeared before serialized retirement.',
+				);
 	}
+	if (current.lifecycleState !== 'live') {
+		installScopeBindingTombstone(current);
+		writeScopeBindingShadow(input.directory, current);
+		return { ok: true, value: current };
+	}
+	const now = Date.now();
+	const tombstone: ScopeBinding = {
+		...current,
+		revision: current.revision + 1,
+		lifecycleState: 'revoked',
+		updatedAt: now,
+		expiresAt: Math.min(current.expiresAt, now),
+	};
+	const retired = transitionScopeBindingState(
+		input.directory,
+		tombstone,
+		current.revision,
+	);
+	if (!retired.ok) return retired;
+	installScopeBindingTombstone(retired.value);
+	writeScopeBindingShadow(input.directory, retired.value);
+	scheduleScopeBindingMaintenance(input.directory);
+	return retired;
 }
 
 export async function tombstoneScopeBinding(
@@ -1127,89 +1431,57 @@ export async function tombstoneScopeBinding(
 	binding: ScopeBinding,
 	reason: 'expired' | 'revoked' | 'superseded',
 ): Promise<ScopePersistenceResult> {
-	const currentPath = getBindingFilePath(directory, binding);
-	const generationLockPath = getGenerationLockPath(currentPath);
-	const lockReady = await ensureLockTarget(generationLockPath);
-	if (!lockReady) {
+	const imported = ensureScopeBindingAuthorityImported(directory);
+	if (!imported.ok) {
 		installFailedRevocationOverlay(binding, reason);
-		return persistenceFailure('Could not prepare exact generation lock.');
+		return imported;
 	}
-	let release: (() => Promise<void>) | undefined;
-	try {
-		release = await lockfile.lock(generationLockPath, {
-			stale: LOCK_STALE_MS,
-			retries: { retries: 3, minTimeout: 50, maxTimeout: 200 },
-			realpath: false,
-		});
-		const raw = readBoundedFile(currentPath);
-		if (!raw) {
-			installFailedRevocationOverlay(binding, reason);
-			return persistenceFailure(
-				'Exact generation disappeared before tombstone.',
-			);
-		}
-		const current = validateScopeBindingPayload(
-			directory,
-			JSON.parse(raw) as Partial<ScopeBinding>,
-		);
-		if (
-			!current ||
-			current.bindingId !== binding.bindingId ||
-			current.generationId !== binding.generationId
-		) {
-			installFailedRevocationOverlay(binding, reason);
-			return persistenceFailure(
-				'Exact generation identity changed before tombstone.',
-			);
-		}
-		if (current.revision !== binding.revision)
-			return {
-				ok: false,
-				code: 'SCOPE_BINDING_STALE',
-				message: 'Tombstone CAS revision is stale.',
-			};
-		if (current.lifecycleState !== 'live') return { ok: true, value: current };
-		const now = Date.now();
-		const tombstone: ScopeBinding = {
-			...current,
-			revision: current.revision + 1,
-			lifecycleState: reason,
-			updatedAt: now,
-			expiresAt: Math.min(current.expiresAt, now),
+	const all = readAllAuthoritativeScopeBindings(directory, {
+		enforceLiveCapacity: false,
+	});
+	if (!all.ok) {
+		installFailedRevocationOverlay(binding, reason);
+		return all;
+	}
+	const current = all.value.find(
+		(candidate) =>
+			candidate.generationId === binding.generationId &&
+			candidate.bindingId === binding.bindingId,
+	);
+	if (!current) {
+		installFailedRevocationOverlay(binding, reason);
+		return persistenceFailure('Exact generation disappeared before tombstone.');
+	}
+	if (current.revision !== binding.revision) {
+		return {
+			ok: false,
+			code: 'SCOPE_BINDING_STALE',
+			message: 'Tombstone CAS revision is stale.',
 		};
-		await atomicWrite(currentPath, JSON.stringify(tombstone, null, 2));
-		const verifiedRaw = readBoundedFile(currentPath);
-		const verified = verifiedRaw
-			? validateScopeBindingPayload(
-					directory,
-					JSON.parse(verifiedRaw) as Partial<ScopeBinding>,
-				)
-			: null;
-		if (
-			!verified ||
-			verified.revision !== tombstone.revision ||
-			verified.lifecycleState !== reason
-		) {
-			installFailedRevocationOverlay(binding, reason);
-			return persistenceFailure('Tombstone verification failed.');
-		}
-		clearExactScopeBinding(binding);
-		installScopeBindingTombstone(verified);
-		scheduleScopeBindingMaintenance(directory);
-		return { ok: true, value: verified };
-	} catch (error) {
-		installFailedRevocationOverlay(binding, reason);
-		return persistenceFailure(
-			`Tombstone failed: ${error instanceof Error ? error.message : 'unknown I/O error'}`,
-		);
-	} finally {
-		if (release)
-			try {
-				await release();
-			} catch {
-				/* stale/released */
-			}
 	}
+	if (current.lifecycleState !== 'live') return { ok: true, value: current };
+	const now = Date.now();
+	const tombstone: ScopeBinding = {
+		...current,
+		revision: current.revision + 1,
+		lifecycleState: reason,
+		updatedAt: now,
+		expiresAt: Math.min(current.expiresAt, now),
+	};
+	const persisted = transitionScopeBindingState(
+		directory,
+		tombstone,
+		current.revision,
+	);
+	if (!persisted.ok) {
+		installFailedRevocationOverlay(binding, reason);
+		return persisted;
+	}
+	clearExactScopeBinding(binding);
+	installScopeBindingTombstone(persisted.value);
+	writeScopeBindingShadow(directory, persisted.value);
+	scheduleScopeBindingMaintenance(directory);
+	return persisted;
 }
 
 async function ensureLockTarget(targetPath: string): Promise<boolean> {
@@ -1226,107 +1498,59 @@ export async function refreshScopeBindingLease(input: {
 	taskId: string;
 	ttlMs?: number;
 }): Promise<ScopePersistenceResult> {
-	let scopePath: string;
-	try {
-		scopePath = getBindingFilePath(input.directory, input);
-	} catch {
-		return persistenceFailure('Invalid refresh identity.');
-	}
-	const generationLockPath = getGenerationLockPath(scopePath);
-	const createdGenerationLockTarget = !fs.existsSync(generationLockPath);
-	if (!(await ensureLockTarget(generationLockPath)))
-		return persistenceFailure('Could not prepare refresh lock.');
-	let release: (() => Promise<void>) | undefined;
-	try {
-		release = await lockfile.lock(generationLockPath, {
-			stale: LOCK_STALE_MS,
-			retries: { retries: 3, minTimeout: 50, maxTimeout: 200 },
-			realpath: false,
-		});
-		if (hasDurableRetirementIntent(scopePath, input))
-			return {
-				ok: false,
-				code: 'SCOPE_BINDING_STALE',
-				message:
-					'Refresh cannot renew a generation with durable retirement intent.',
-			};
-		const raw = readBoundedFile(scopePath);
-		const current = raw
-			? validateScopeBindingPayload(
-					input.directory,
-					JSON.parse(raw) as Partial<ScopeBinding>,
-				)
-			: null;
-		if (
-			!current ||
-			current.bindingId !== input.bindingId ||
-			current.generationId !== input.generationId ||
-			current.taskId !== input.taskId ||
-			current.ownerSessionId !== input.activeSessionId
-		)
-			return {
-				ok: false,
-				code: 'SCOPE_BINDING_STALE',
-				message:
-					'Refresh identity is not the exact current session/task generation.',
-			};
-		if (
-			current.lifecycleState !== 'live' ||
-			current.expiresAt <= Date.now() ||
-			current.revision !== input.expectedRevision
-		)
-			return {
-				ok: false,
-				code:
-					current.expiresAt <= Date.now()
-						? 'SCOPE_BINDING_EXPIRED'
-						: 'SCOPE_BINDING_STALE',
-				message:
-					'Refresh cannot renew an expired, tombstoned, or stale generation.',
-			};
-		const now = Date.now();
-		const refreshed: ScopeBinding = {
-			...current,
-			revision: current.revision + 1,
-			updatedAt: now,
-			leaseStartedAt: now,
-			expiresAt: now + Math.max(1, input.ttlMs ?? DEFAULT_SCOPE_BINDING_TTL_MS),
+	const imported = ensureScopeBindingAuthorityImported(input.directory);
+	if (!imported.ok) return imported;
+	const all = readAllAuthoritativeScopeBindings(input.directory, {
+		enforceLiveCapacity: false,
+	});
+	if (!all.ok) return all;
+	const current = all.value.find(
+		(candidate) =>
+			candidate.bindingId === input.bindingId &&
+			candidate.generationId === input.generationId &&
+			candidate.taskId === input.taskId &&
+			candidate.ownerSessionId === input.activeSessionId,
+	);
+	if (!current) {
+		return {
+			ok: false,
+			code: 'SCOPE_BINDING_STALE',
+			message:
+				'Refresh identity is not the exact current session/task generation.',
 		};
-		await atomicWrite(scopePath, JSON.stringify(refreshed, null, 2));
-		const verifyRaw = readBoundedFile(scopePath);
-		const verified = verifyRaw
-			? validateScopeBindingPayload(
-					input.directory,
-					JSON.parse(verifyRaw) as Partial<ScopeBinding>,
-				)
-			: null;
-		if (
-			!verified ||
-			verified.revision !== refreshed.revision ||
-			verified.expiresAt !== refreshed.expiresAt
-		)
-			return persistenceFailure('Refreshed lease verification failed.');
-		updateExactScopeBinding(verified);
-		return { ok: true, value: verified };
-	} catch (error) {
-		return persistenceFailure(
-			`Lease refresh failed: ${error instanceof Error ? error.message : 'unknown I/O error'}`,
-		);
-	} finally {
-		if (release)
-			try {
-				await release();
-			} catch {
-				/* stale/released */
-			}
-		if (createdGenerationLockTarget && !fs.existsSync(scopePath)) {
-			try {
-				fs.unlinkSync(generationLockPath);
-			} catch {
-				/* another runtime adopted the stable target */
-			}
-		}
 	}
+	if (
+		current.lifecycleState !== 'live' ||
+		current.expiresAt <= Date.now() ||
+		current.revision !== input.expectedRevision
+	) {
+		return {
+			ok: false,
+			code:
+				current.expiresAt <= Date.now()
+					? 'SCOPE_BINDING_EXPIRED'
+					: 'SCOPE_BINDING_STALE',
+			message:
+				'Refresh cannot renew an expired, tombstoned, or stale generation.',
+		};
+	}
+	const now = Date.now();
+	const refreshed: ScopeBinding = {
+		...current,
+		revision: current.revision + 1,
+		updatedAt: now,
+		leaseStartedAt: now,
+		expiresAt: now + Math.max(1, input.ttlMs ?? DEFAULT_SCOPE_BINDING_TTL_MS),
+	};
+	const persisted = transitionScopeBindingState(
+		input.directory,
+		refreshed,
+		current.revision,
+	);
+	if (!persisted.ok) return persisted;
+	updateExactScopeBinding(persisted.value);
+	writeScopeBindingShadow(input.directory, persisted.value);
+	return persisted;
 }
 
 interface ScopeClaimReceipt {
@@ -1336,85 +1560,6 @@ interface ScopeClaimReceipt {
 	childSessionId: string;
 	dispatchCallId: string;
 	createdAt: number;
-}
-
-function claimBaseName(binding: ScopeBinding): string {
-	const digest = createHash('sha256')
-		.update(
-			`${binding.bindingId}\0${binding.generationId}\0${binding.dispatchCallId ?? ''}`,
-		)
-		.digest('hex')
-		.slice(0, 40);
-	return `claim-${digest}`;
-}
-
-function readAllExactBindings(
-	directory: string,
-	options: { enforceLiveCapacity?: boolean; maintenanceScan?: boolean } = {},
-): ScopeBinding[] | null {
-	const scopesDir = getScopesDir(directory);
-	try {
-		fs.lstatSync(scopesDir);
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === 'ENOENT' ? [] : null;
-	}
-	if (!isScopesDirSafe(directory, scopesDir)) return null;
-	const scanCapacity = options.maintenanceScan
-		? maintenanceFileScanCapacity
-		: bindingFileScanCapacity;
-	if (!migrateLegacyBindingsSync(directory, scanCapacity)) return null;
-	let names: string[];
-	try {
-		names = fs.readdirSync(scopesDir).sort();
-	} catch {
-		return [];
-	}
-	if (names.length > scanCapacity) return null;
-	const bindings: ScopeBinding[] = [];
-	for (const name of names) {
-		if (!name.startsWith('binding-') || !name.endsWith('.json')) continue;
-		const filePath = path.join(scopesDir, name);
-		const raw = readBoundedFile(filePath);
-		if (!raw) continue;
-		try {
-			const binding = validateScopeBindingPayload(
-				directory,
-				JSON.parse(raw) as Partial<ScopeBinding>,
-			);
-			if (binding && exactFilenameMatches(directory, filePath, binding)) {
-				if (hasDurableRetirementIntent(filePath, binding)) {
-					let createdAt = Date.now();
-					try {
-						const rawIntent = readBoundedFile(
-							getRetirementIntentPath(filePath),
-						);
-						const parsedIntent = rawIntent
-							? (JSON.parse(rawIntent) as { createdAt?: unknown })
-							: null;
-						if (typeof parsedIntent?.createdAt === 'number')
-							createdAt = parsedIntent.createdAt;
-					} catch {
-						/* identity-valid intent remains immediately effective */
-					}
-					bindings.push({
-						...binding,
-						lifecycleState: 'revoked',
-						updatedAt: createdAt,
-						expiresAt: Math.min(binding.expiresAt, createdAt),
-					});
-				} else bindings.push(binding);
-			}
-		} catch {
-			/* malformed records never authorize */
-		}
-	}
-	const liveCount = bindings.filter(
-		(binding) =>
-			binding.lifecycleState === 'live' && binding.expiresAt > Date.now(),
-	).length;
-	if (options.enforceLiveCapacity !== false && liveCount > liveBindingCapacity)
-		return null;
-	return bindings;
 }
 
 /**
@@ -1438,14 +1583,13 @@ export async function claimScopeBindingForChildDurably(input: {
 		return persistenceFailure(
 			'Claim requires distinct non-empty parent/child identities and an exact dispatch call.',
 		);
-	const initial = readAllExactBindings(input.directory);
-	if (!initial)
-		return {
-			ok: false,
-			code: 'SCOPE_BINDING_STORE_OVERLOADED',
-			message: 'The complete durable binding set could not be evaluated.',
-		};
-	const pending = initial.filter(
+	const imported = ensureScopeBindingAuthorityImported(input.directory);
+	if (!imported.ok) return imported;
+	const initial = readAllAuthoritativeScopeBindings(input.directory, {
+		enforceLiveCapacity: false,
+	});
+	if (!initial.ok) return initial;
+	const pending = initial.value.filter(
 		(binding) =>
 			binding.lifecycleState === 'live' &&
 			binding.expiresAt > Date.now() &&
@@ -1454,15 +1598,16 @@ export async function claimScopeBindingForChildDurably(input: {
 			binding.dispatchCallId === input.dispatchCallId &&
 			binding.ownerMessageId === input.dispatchCallId,
 	);
-	if (pending.length > 1)
+	if (pending.length > 1) {
 		return {
 			ok: false,
 			code: 'SCOPE_BINDING_AMBIGUOUS',
 			message: 'Multiple pending generations match this exact Task dispatch.',
 		};
+	}
 	let predecessor = pending[0];
 	if (!predecessor) {
-		const successors = initial.filter(
+		const successors = initial.value.filter(
 			(binding) =>
 				binding.lifecycleState === 'live' &&
 				binding.expiresAt > Date.now() &&
@@ -1471,12 +1616,13 @@ export async function claimScopeBindingForChildDurably(input: {
 				binding.dispatchCallId === input.dispatchCallId &&
 				binding.predecessorGenerationId,
 		);
-		if (successors.length > 1)
+		if (successors.length > 1) {
 			return {
 				ok: false,
 				code: 'SCOPE_BINDING_AMBIGUOUS',
 				message: 'Multiple active successors match this Task dispatch.',
 			};
+		}
 		const existing = successors[0];
 		if (existing?.ownerSessionId === input.childSessionId) {
 			const admission = registerScopeBinding(existing);
@@ -1495,7 +1641,7 @@ export async function claimScopeBindingForChildDurably(input: {
 					message:
 						'This Task dispatch was already claimed by a different child session.',
 				}
-			: initial.some(
+			: initial.value.some(
 						(candidate) =>
 							candidate.ownerSessionId === input.parentSessionId &&
 							candidate.dispatchCallId === input.dispatchCallId,
@@ -1513,209 +1659,133 @@ export async function claimScopeBindingForChildDurably(input: {
 					};
 	}
 
-	const claimPath = path.join(
-		getScopesDir(input.directory),
-		`${claimBaseName(predecessor)}.json`,
-	);
-	if (!(await ensureLockTarget(claimPath)))
-		return persistenceFailure(
-			'Could not prepare the stable predecessor claim lock.',
-		);
-	let release: (() => Promise<void>) | undefined;
 	try {
-		release = await lockfile.lock(claimPath, {
-			stale: LOCK_STALE_MS,
-			retries: { retries: 5, minTimeout: 50, maxTimeout: 250 },
-			realpath: false,
-		});
-		const currentSet = readAllExactBindings(input.directory);
-		if (!currentSet)
-			return {
-				ok: false,
-				code: 'SCOPE_BINDING_STORE_OVERLOADED',
-				message: 'The durable binding set became incomplete during claim.',
-			};
-		const currentPredecessor = currentSet.find(
-			(binding) =>
-				binding.generationId === predecessor.generationId &&
-				binding.bindingId === predecessor.bindingId,
-		);
-		const allSuccessors = currentSet.filter(
-			(binding) =>
-				binding.predecessorGenerationId === predecessor.generationId &&
-				binding.bindingId === predecessor.bindingId,
-		);
-		const successors = allSuccessors.filter(
-			(binding) =>
-				binding.lifecycleState === 'live' && binding.expiresAt > Date.now(),
-		);
-		if (successors.length > 1)
-			return {
-				ok: false,
-				code: 'SCOPE_BINDING_AMBIGUOUS',
-				message:
-					'Incompatible successors exist for one predecessor generation.',
-			};
-		const receiptRaw = readBoundedFile(claimPath);
-		let receipt: ScopeClaimReceipt | null = null;
-		if (receiptRaw) {
-			try {
-				const parsed = JSON.parse(receiptRaw) as Partial<ScopeClaimReceipt>;
-				if (
-					parsed.version !== 1 ||
-					parsed.predecessorGenerationId !== predecessor.generationId ||
-					!isScopeBindingIdentity(parsed.winnerGenerationId) ||
-					typeof parsed.childSessionId !== 'string' ||
-					parsed.dispatchCallId !== input.dispatchCallId
-				)
-					return persistenceFailure(
-						'Claim winner receipt is malformed or belongs to another predecessor.',
-					);
-				receipt = parsed as ScopeClaimReceipt;
-			} catch {
-				return persistenceFailure('Claim winner receipt is malformed.');
+		let claimed: ScopeBinding | null = null;
+		let retired: ScopeBinding | null = null;
+		let alreadyClaimed: ScopeBinding | null = null;
+		let failure: Exclude<ScopePersistenceResult, { ok: true }> | null = null;
+		withCoordinationTransaction(input.directory, () => {
+			const currentSet = readAllAuthoritativeScopeBindings(input.directory, {
+				enforceLiveCapacity: false,
+			});
+			if (!currentSet.ok) {
+				failure = currentSet;
+				return;
 			}
-		}
-		if (receipt) {
-			const receiptWinner = allSuccessors.find(
-				(candidate) => candidate.generationId === receipt?.winnerGenerationId,
+			const currentPredecessor = currentSet.value.find(
+				(binding) =>
+					binding.generationId === predecessor.generationId &&
+					binding.bindingId === predecessor.bindingId,
 			);
-			if (!receiptWinner)
-				return persistenceFailure(
-					'Claim receipt has no verified successor; pending remains fail-closed for restart reconciliation.',
-				);
-			if (
-				receiptWinner.lifecycleState !== 'live' ||
-				receiptWinner.expiresAt <= Date.now()
-			) {
-				// A failed publication deliberately tombstones its successor. The receipt
-				// is then settled evidence, not a permanent poison pill for the predecessor.
-				fs.writeFileSync(claimPath, '');
-				receipt = null;
-			}
-		}
-		if (
-			receipt &&
-			successors[0] &&
-			receipt.winnerGenerationId !== successors[0].generationId
-		)
-			return {
-				ok: false,
-				code: 'SCOPE_BINDING_AMBIGUOUS',
-				message: 'Claim receipt and durable successor disagree.',
-			};
-		const existing = successors[0];
-		if (existing) {
-			if (existing.ownerSessionId !== input.childSessionId)
-				return {
+			const liveSuccessors = currentSet.value.filter(
+				(binding) =>
+					binding.predecessorGenerationId === predecessor.generationId &&
+					binding.bindingId === predecessor.bindingId &&
+					binding.lifecycleState === 'live' &&
+					binding.expiresAt > Date.now(),
+			);
+			if (liveSuccessors.length > 1) {
+				failure = {
 					ok: false,
-					code: 'SCOPE_BINDING_ALREADY_CLAIMED',
+					code: 'SCOPE_BINDING_AMBIGUOUS',
 					message:
-						'This pending generation has a winner in another child session.',
+						'Incompatible successors exist for one predecessor generation.',
 				};
-			await writeClaimReceipt(claimPath, predecessor, existing, input);
-			if (currentPredecessor?.lifecycleState === 'live')
-				await tombstoneScopeBinding(
-					input.directory,
-					currentPredecessor,
-					'superseded',
-				);
-			const admission = registerScopeBinding(existing);
+				return;
+			}
+			const existing = liveSuccessors[0];
+			if (existing) {
+				if (existing.ownerSessionId !== input.childSessionId) {
+					failure = {
+						ok: false,
+						code: 'SCOPE_BINDING_ALREADY_CLAIMED',
+						message:
+							'This pending generation has a winner in another child session.',
+					};
+					return;
+				}
+				alreadyClaimed = existing;
+				return;
+			}
+			if (
+				!currentPredecessor ||
+				currentPredecessor.lifecycleState !== 'live' ||
+				currentPredecessor.expiresAt <= Date.now()
+			) {
+				failure = {
+					ok: false,
+					code: 'SCOPE_BINDING_EXPIRED',
+					message: 'The pending predecessor expired before claim.',
+				};
+				return;
+			}
+			predecessor = currentPredecessor;
+			const nextClaimed = createClaimedScopeBinding(predecessor, input);
+			const claimedWrite = transitionScopeBindingState(
+				input.directory,
+				nextClaimed,
+				null,
+			);
+			if (!claimedWrite.ok) {
+				failure = claimedWrite;
+				return;
+			}
+			const superseded: ScopeBinding = {
+				...predecessor,
+				revision: predecessor.revision + 1,
+				lifecycleState: 'superseded',
+				updatedAt: claimedWrite.value.updatedAt,
+				expiresAt: Math.min(
+					predecessor.expiresAt,
+					claimedWrite.value.updatedAt,
+				),
+			};
+			const retiredWrite = transitionScopeBindingState(
+				input.directory,
+				superseded,
+				predecessor.revision,
+			);
+			if (!retiredWrite.ok) {
+				failure = retiredWrite;
+				return;
+			}
+			claimed = claimedWrite.value;
+			retired = retiredWrite.value;
+		});
+		if (failure) return failure;
+		if (alreadyClaimed) {
+			const admission = registerScopeBinding(alreadyClaimed);
 			return admission.ok
-				? { ok: true, value: { previous: predecessor, claimed: existing } }
+				? {
+						ok: true,
+						value: { previous: predecessor, claimed: alreadyClaimed },
+					}
 				: {
 						ok: false,
 						code: admission.code,
 						message: admission.message,
 					};
 		}
-		if (
-			!currentPredecessor ||
-			currentPredecessor.lifecycleState !== 'live' ||
-			currentPredecessor.expiresAt <= Date.now()
-		)
-			return {
-				ok: false,
-				code: 'SCOPE_BINDING_EXPIRED',
-				message: 'The pending predecessor expired before claim.',
-			};
-		predecessor = currentPredecessor;
-		const claimed = createClaimedScopeBinding(predecessor, input);
-		const persisted = await writeScopeBindingToDisk(input.directory, claimed);
-		if (!persisted.ok) return persisted;
-		const receiptWrite = await writeClaimReceipt(
-			claimPath,
-			predecessor,
-			persisted.value,
-			input,
-		);
-		if (!receiptWrite.ok) {
-			await tombstoneScopeBinding(input.directory, persisted.value, 'revoked');
-			return receiptWrite;
+		if (!claimed || !retired) {
+			return persistenceFailure('Claim transaction did not settle a winner.');
 		}
-		const admission = registerScopeBinding(persisted.value);
+		writeScopeBindingShadow(input.directory, claimed);
+		writeScopeBindingShadow(input.directory, retired);
+		const admission = registerScopeBinding(claimed);
 		if (!admission.ok) {
-			await tombstoneScopeBinding(input.directory, persisted.value, 'revoked');
 			return {
 				ok: false,
 				code: admission.code,
 				message: admission.message,
 			};
 		}
-		const retired = await tombstoneScopeBinding(
-			input.directory,
-			predecessor,
-			'superseded',
-		);
-		if (!retired.ok) {
-			await tombstoneScopeBinding(input.directory, persisted.value, 'revoked');
-			return persistenceFailure(
-				`Successor was persisted but predecessor retirement failed: ${retired.message}`,
-			);
-		}
-		return {
-			ok: true,
-			value: { previous: predecessor, claimed: persisted.value },
-		};
+		installScopeBindingTombstone(retired);
+		return { ok: true, value: { previous: predecessor, claimed } };
 	} catch (error) {
 		return persistenceFailure(
-			`Claim transaction failed: ${error instanceof Error ? error.message : 'unknown I/O error'}`,
-		);
-	} finally {
-		if (release)
-			try {
-				await release();
-			} catch {
-				/* stale/released */
-			}
-	}
-}
-
-async function writeClaimReceipt(
-	claimPath: string,
-	previous: ScopeBinding,
-	claimed: ScopeBinding,
-	input: { childSessionId: string; dispatchCallId: string },
-): Promise<ScopePersistenceResult<ScopeClaimReceipt>> {
-	const receipt: ScopeClaimReceipt = {
-		version: 1,
-		predecessorGenerationId: previous.generationId,
-		winnerGenerationId: claimed.generationId,
-		childSessionId: input.childSessionId,
-		dispatchCallId: input.dispatchCallId,
-		createdAt: Date.now(),
-	};
-	try {
-		await atomicWrite(claimPath, JSON.stringify(receipt, null, 2));
-		const raw = readBoundedFile(claimPath);
-		const verified = raw ? (JSON.parse(raw) as ScopeClaimReceipt) : null;
-		return verified?.winnerGenerationId === receipt.winnerGenerationId &&
-			verified.childSessionId === receipt.childSessionId
-			? { ok: true, value: verified }
-			: persistenceFailure('Claim winner receipt verification failed.');
-	} catch (error) {
-		return persistenceFailure(
-			`Claim winner receipt write failed: ${error instanceof Error ? error.message : 'unknown I/O error'}`,
+			`Claim transaction failed: ${
+				error instanceof Error ? error.message : 'unknown coordination error'
+			}`,
 		);
 	}
 }
@@ -1744,90 +1814,90 @@ export async function replaceExistingScopeDeclaration(input: {
 		return persistenceFailure(
 			'declare_scope may persist only a declaration generation.',
 		);
-	const digest = createHash('sha256')
-		.update(
-			`${binding.workspaceIdentity}\0${binding.taskId}\0${binding.ownerSessionId}`,
-		)
-		.digest('hex')
-		.slice(0, 40);
-	const lockPath = path.join(
-		getScopesDir(input.directory),
-		`declaration-${digest}.lock-target`,
+	const imported = ensureScopeBindingAuthorityImported(input.directory);
+	if (!imported.ok) return imported;
+	const all = readAllAuthoritativeScopeBindings(input.directory, {
+		enforceLiveCapacity: false,
+	});
+	if (!all.ok) return all;
+	const owned = all.value.filter(
+		(candidate) =>
+			candidate.lifecycleState === 'live' &&
+			candidate.expiresAt > Date.now() &&
+			candidate.workspaceIdentity === binding.workspaceIdentity &&
+			candidate.taskId === binding.taskId &&
+			candidate.ownerSessionId === binding.ownerSessionId &&
+			candidate.generationId !== binding.generationId,
 	);
-	if (!(await ensureLockTarget(lockPath)))
-		return persistenceFailure(
-			'Could not prepare declaration transaction lock.',
-		);
-	let release: (() => Promise<void>) | undefined;
+	if (owned.length > 0 && !input.replaceExisting) {
+		return {
+			ok: false,
+			code: 'SCOPE_BINDING_AMBIGUOUS',
+			message:
+				'A live owned generation already exists; retry declare_scope with replace_existing=true to revoke it atomically.',
+		};
+	}
 	try {
-		release = await lockfile.lock(lockPath, {
-			stale: LOCK_STALE_MS,
-			retries: { retries: 5, minTimeout: 50, maxTimeout: 250 },
-			realpath: false,
-		});
-		const all = readAllExactBindings(input.directory);
-		if (!all)
-			return {
-				ok: false,
-				code: 'SCOPE_BINDING_STORE_OVERLOADED',
-				message: 'The durable binding set cannot be completely evaluated.',
-			};
-		const owned = all.filter(
-			(candidate) =>
-				candidate.lifecycleState === 'live' &&
-				candidate.expiresAt > Date.now() &&
-				candidate.workspaceIdentity === binding.workspaceIdentity &&
-				candidate.taskId === binding.taskId &&
-				candidate.ownerSessionId === binding.ownerSessionId &&
-				candidate.generationId !== binding.generationId,
-		);
-		if (owned.length > 0 && !input.replaceExisting)
-			return {
-				ok: false,
-				code: 'SCOPE_BINDING_AMBIGUOUS',
-				message:
-					'A live owned generation already exists; retry declare_scope with replace_existing=true to revoke it atomically.',
-			};
-		const persisted = await writeScopeBindingToDisk(input.directory, binding);
-		if (!persisted.ok) return persisted;
-		for (const prior of owned) {
-			const retired = await tombstoneScopeBinding(
+		let persisted: ScopeBinding | null = null;
+		const retired: ScopeBinding[] = [];
+		let failure: Exclude<ScopePersistenceResult, { ok: true }> | null = null;
+		withCoordinationTransaction(input.directory, () => {
+			const create = transitionScopeBindingState(
 				input.directory,
-				prior,
-				'superseded',
+				binding,
+				null,
 			);
-			if (!retired.ok) {
-				await tombstoneScopeBinding(
-					input.directory,
-					persisted.value,
-					'revoked',
-				);
-				return persistenceFailure(
-					`Replacement could not retire generation ${prior.generationId}: ${retired.message}`,
-				);
+			if (!create.ok) {
+				failure = create;
+				return;
 			}
+			persisted = create.value;
+			for (const prior of owned) {
+				const superseded: ScopeBinding = {
+					...prior,
+					revision: prior.revision + 1,
+					lifecycleState: 'superseded',
+					updatedAt: create.value.updatedAt,
+					expiresAt: Math.min(prior.expiresAt, create.value.updatedAt),
+				};
+				const result = transitionScopeBindingState(
+					input.directory,
+					superseded,
+					prior.revision,
+				);
+				if (!result.ok) {
+					failure = result;
+					return;
+				}
+				retired.push(result.value);
+			}
+		});
+		if (failure) return failure;
+		if (!persisted) {
+			return persistenceFailure(
+				'Declaration transaction did not persist a generation.',
+			);
 		}
-		const admission = registerScopeBinding(persisted.value);
+		writeScopeBindingShadow(input.directory, persisted);
+		for (const prior of retired) {
+			writeScopeBindingShadow(input.directory, prior);
+			installScopeBindingTombstone(prior);
+		}
+		const admission = registerScopeBinding(persisted);
 		if (!admission.ok) {
-			await tombstoneScopeBinding(input.directory, persisted.value, 'revoked');
 			return {
 				ok: false,
 				code: admission.code,
 				message: admission.message,
 			};
 		}
-		return { ok: true, value: persisted.value };
+		return { ok: true, value: persisted };
 	} catch (error) {
 		return persistenceFailure(
-			`Declaration transaction failed: ${error instanceof Error ? error.message : 'unknown I/O error'}`,
+			`Declaration transaction failed: ${
+				error instanceof Error ? error.message : 'unknown coordination error'
+			}`,
 		);
-	} finally {
-		if (release)
-			try {
-				await release();
-			} catch {
-				/* stale/released */
-			}
 	}
 }
 
@@ -1876,39 +1946,12 @@ export async function pruneScopeBindingTombstones(
 			retries: { retries: 3, minTimeout: 50, maxTimeout: 200 },
 			realpath: false,
 		});
-		let all = readAllExactBindings(directory, {
+		const readAll = readAllAuthoritativeScopeBindings(directory, {
 			enforceLiveCapacity: false,
 			maintenanceScan: true,
 		});
-		if (!all)
-			return {
-				ok: false,
-				code: 'SCOPE_BINDING_STORE_OVERLOADED',
-				message: 'The durable binding set cannot be completely evaluated.',
-			};
-		for (const binding of all) {
-			const filePath = getBindingFilePath(directory, binding);
-			if (!hasDurableRetirementIntent(filePath, binding)) continue;
-			const finalized = await tombstoneScopeBinding(
-				directory,
-				binding,
-				'revoked',
-			);
-			if (finalized.ok)
-				try {
-					fs.unlinkSync(getRetirementIntentPath(filePath));
-				} catch {
-					/* durable tombstone already supersedes the intent */
-				}
-		}
-		all = readAllExactBindings(directory, {
-			enforceLiveCapacity: false,
-			maintenanceScan: true,
-		});
-		if (!all)
-			return persistenceFailure(
-				'The durable binding set changed during maintenance reconciliation.',
-			);
+		if (!readAll.ok) return readAll;
+		const all = readAll.value;
 		const tombstones = all
 			.filter((binding) => binding.lifecycleState !== 'live')
 			.sort((left, right) => left.updatedAt - right.updatedAt);
@@ -1950,6 +1993,12 @@ export async function pruneScopeBindingTombstones(
 						!hasDurableRetirementIntent(filePath, latest))
 				)
 					continue;
+				deleteCoordinationState(
+					directory,
+					SCOPE_BINDING_COORDINATION_NAMESPACE,
+					binding.generationId,
+					binding.revision,
+				);
 				fs.unlinkSync(filePath);
 				removedExact = true;
 				removed++;
@@ -2138,74 +2187,47 @@ function attemptIdleScopeBindingRevival(
 	// below re-verifies the on-disk generation. Deliberate revocation classes
 	// still fail closed here.
 	if (hasDeliberateScopeBindingDenyOverlay(candidate)) return null;
-
-	let release: (() => void) | undefined;
-	try {
-		const resolvedWorkspace = fs.realpathSync(directory);
-		assertProjectRoot(resolvedWorkspace);
-		const scopePath = getBindingFilePath(resolvedWorkspace, candidate);
-		if (!isScopesDirSafe(resolvedWorkspace, getScopesDir(resolvedWorkspace)))
-			return null;
-		const lockPath = getGenerationLockPath(scopePath);
-		if (!ensureLockTargetSync(lockPath)) return null;
-		release = lockSyncWithBoundedRetry(lockPath);
-		const raw = readBoundedFile(scopePath);
-		if (!raw) return null;
-		const current = validateScopeBindingPayload(
-			resolvedWorkspace,
-			JSON.parse(raw) as Partial<ScopeBinding>,
-		);
-		// CAS: the durable generation must be exactly the one we resolved, still
-		// live, and still expired-but-revivable. Anything else fails closed.
-		if (
-			!current ||
-			current.bindingId !== candidate.bindingId ||
-			current.generationId !== candidate.generationId ||
-			current.revision !== candidate.revision ||
-			current.lifecycleState !== 'live' ||
-			current.expiresAt > Date.now() ||
-			Date.now() - current.expiresAt > SCOPE_BINDING_AUTO_REVIVE_WINDOW_MS
-		)
-			return null;
-		const revivedAt = Date.now();
-		const revived: ScopeBinding = {
-			...current,
-			revision: current.revision + 1,
-			updatedAt: revivedAt,
-			leaseStartedAt: revivedAt,
-			expiresAt: revivedAt + DEFAULT_SCOPE_BINDING_TTL_MS,
-		};
-		atomicWriteSync(scopePath, JSON.stringify(revived, null, 2));
-		const verifiedRaw = readBoundedFile(scopePath);
-		const verified = verifiedRaw
-			? validateScopeBindingPayload(
-					resolvedWorkspace,
-					JSON.parse(verifiedRaw) as Partial<ScopeBinding>,
-				)
-			: null;
-		if (
-			!verified ||
-			verified.revision !== revived.revision ||
-			verified.lifecycleState !== 'live' ||
-			verified.expiresAt !== revived.expiresAt
-		)
-			return null;
-		// A sweep-signature in-memory tombstone (revision+1, 'expired') would
-		// otherwise deny the revived generation at the next resolution — its
-		// revision equals this revival's. Deliberate overlays are untouched.
-		clearSweepTombstoneForRevival(revived);
-		appendScopeBindingRevivalEvent(resolvedWorkspace, revived);
-		return revived;
-	} catch {
+	const imported = ensureScopeBindingAuthorityImported(directory);
+	if (!imported.ok) return null;
+	const all = readAllAuthoritativeScopeBindings(directory, {
+		enforceLiveCapacity: false,
+	});
+	if (!all.ok) return null;
+	const current = all.value.find(
+		(binding) =>
+			binding.bindingId === candidate.bindingId &&
+			binding.generationId === candidate.generationId,
+	);
+	if (
+		!current ||
+		current.revision !== candidate.revision ||
+		current.lifecycleState !== 'live' ||
+		current.expiresAt > Date.now() ||
+		Date.now() - current.expiresAt > SCOPE_BINDING_AUTO_REVIVE_WINDOW_MS
+	) {
 		return null;
-	} finally {
-		if (release)
-			try {
-				release();
-			} catch {
-				/* stale/released */
-			}
 	}
+	const revivedAt = Date.now();
+	const revived: ScopeBinding = {
+		...current,
+		revision: current.revision + 1,
+		updatedAt: revivedAt,
+		leaseStartedAt: revivedAt,
+		expiresAt: revivedAt + DEFAULT_SCOPE_BINDING_TTL_MS,
+	};
+	const persisted = transitionScopeBindingState(
+		directory,
+		revived,
+		current.revision,
+	);
+	if (!persisted.ok) return null;
+	writeScopeBindingShadow(directory, persisted.value);
+	// A sweep-signature in-memory tombstone (revision+1, 'expired') would
+	// otherwise deny the revived generation at the next resolution — its
+	// revision equals this revival's. Deliberate overlays are untouched.
+	clearSweepTombstoneForRevival(persisted.value);
+	appendScopeBindingRevivalEvent(directory, persisted.value);
+	return persisted.value;
 }
 
 function resolveAuthorizedScopeBindingForPlan(input: {
@@ -2330,90 +2352,6 @@ export function resolveAuthorizedScopeBindingForSessionDetailed(input: {
 		: { status: 'not_declared' };
 }
 
-function readPrFeedbackBindingFile(
-	directory: string,
-	filePath: string,
-	activeSessionId: string,
-	taskId?: string,
-): ScopeBinding | null {
-	try {
-		const leaf = fs.lstatSync(filePath);
-		if (!leaf.isFile() || leaf.isSymbolicLink()) return null;
-		if (
-			normalizePathForComparison(fs.realpathSync(filePath)) !==
-			normalizePathForComparison(filePath)
-		)
-			return null;
-	} catch {
-		return null;
-	}
-	const nofollow = (fs.constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0;
-	let fd: number;
-	try {
-		fd = fs.openSync(filePath, fs.constants.O_RDONLY | nofollow);
-	} catch {
-		return null;
-	}
-	let raw = '';
-	try {
-		const stat = fs.fstatSync(fd);
-		if (!stat.isFile() || stat.size > MAX_SCOPE_BYTES) return null;
-		const buffer = Buffer.alloc(stat.size);
-		fs.readSync(fd, buffer, 0, stat.size, 0);
-		raw = buffer.toString('utf8');
-	} catch {
-		return null;
-	} finally {
-		try {
-			fs.closeSync(fd);
-		} catch {
-			/* already closed */
-		}
-	}
-
-	let parsed: ScopeBinding | null;
-	try {
-		parsed = validateScopeBindingPayload(
-			directory,
-			JSON.parse(raw) as Partial<ScopeBinding>,
-		);
-	} catch {
-		return null;
-	}
-	if (!parsed) return null;
-	if (hasScopeBindingDenyOverlay(parsed)) return null;
-	const now = Date.now();
-	if (
-		parsed.source !== 'pr_feedback' ||
-		(taskId !== undefined && parsed.taskId !== taskId) ||
-		parsed.ownerSessionId !== activeSessionId ||
-		parsed.activation !== 'active' ||
-		typeof parsed.dispatchCallId !== 'string' ||
-		!parsed.dispatchCallId ||
-		parsed.ownerMessageId !== parsed.dispatchCallId ||
-		typeof parsed.parentOwnerSessionId !== 'string' ||
-		!parsed.parentOwnerSessionId ||
-		parsed.ownerSessionId === parsed.parentOwnerSessionId ||
-		parsed.parentCallId !== parsed.dispatchCallId ||
-		parsed.workflowSessionId !== parsed.parentOwnerSessionId ||
-		typeof parsed.workflowRevisionDigest !== 'string' ||
-		!parsed.workflowRevisionDigest ||
-		parsed.planId !== `pr-feedback:${parsed.workflowSessionId}` ||
-		parsed.planStructureHash !== parsed.workflowRevisionDigest ||
-		parsed.declaredAt > now ||
-		parsed.expiresAt <= now ||
-		parsed.lifecycleState !== 'live'
-	)
-		return null;
-	const expectedPath = getBindingFilePath(directory, parsed);
-	if (
-		normalizePathForComparison(expectedPath) !==
-		normalizePathForComparison(filePath)
-	)
-		return null;
-	return parsed;
-}
-
 /** Recover one exact planless PR_FEEDBACK child binding after plugin restart. */
 export function resolveAuthorizedPrFeedbackScopeBindingFromDisk(input: {
 	directory: string;
@@ -2421,46 +2359,34 @@ export function resolveAuthorizedPrFeedbackScopeBindingFromDisk(input: {
 	taskId?: string;
 }): ScopeBinding | null {
 	if (!input.activeSessionId.trim()) return null;
-	const scopesDir = getScopesDir(input.directory);
-	if (!isScopesDirSafe(input.directory, scopesDir)) return null;
-	if (!migrateLegacyBindingsSync(input.directory)) return null;
-	let candidates: string[];
-	if (input.taskId) {
-		if (!isSafeTaskId(input.taskId)) return null;
-		try {
-			const names = fs.readdirSync(scopesDir);
-			if (names.length > MAX_BINDING_FILES_TO_SCAN) return null;
-			candidates = names
-				.filter(
-					(name) =>
-						name.startsWith(exactBindingPrefix(input.taskId!)) &&
-						name.endsWith('.json'),
-				)
-				.map((name) => path.join(scopesDir, name));
-		} catch {
-			return null;
-		}
-	} else {
-		try {
-			const names = fs.readdirSync(scopesDir);
-			if (names.length > MAX_BINDING_FILES_TO_SCAN) return null;
-			candidates = names
-				.filter((name) => name.startsWith('binding-') && name.endsWith('.json'))
-				.map((name) => path.join(scopesDir, name));
-		} catch {
-			return null;
-		}
-	}
-	const matches = candidates
-		.map((candidate) =>
-			readPrFeedbackBindingFile(
-				input.directory,
-				candidate,
-				input.activeSessionId,
-				input.taskId,
-			),
-		)
-		.filter((binding): binding is ScopeBinding => binding !== null);
+	const authoritative = readAllAuthoritativeScopeBindings(input.directory, {
+		enforceLiveCapacity: false,
+	});
+	if (!authoritative.ok) return null;
+	const now = Date.now();
+	const matches = authoritative.value.filter(
+		(parsed) =>
+			parsed.source === 'pr_feedback' &&
+			(!input.taskId || parsed.taskId === input.taskId) &&
+			parsed.ownerSessionId === input.activeSessionId &&
+			parsed.activation === 'active' &&
+			typeof parsed.dispatchCallId === 'string' &&
+			parsed.dispatchCallId.length > 0 &&
+			parsed.ownerMessageId === parsed.dispatchCallId &&
+			typeof parsed.parentOwnerSessionId === 'string' &&
+			parsed.parentOwnerSessionId.length > 0 &&
+			parsed.ownerSessionId !== parsed.parentOwnerSessionId &&
+			parsed.parentCallId === parsed.dispatchCallId &&
+			parsed.workflowSessionId === parsed.parentOwnerSessionId &&
+			typeof parsed.workflowRevisionDigest === 'string' &&
+			parsed.workflowRevisionDigest.length > 0 &&
+			parsed.planId === `pr-feedback:${parsed.workflowSessionId}` &&
+			parsed.planStructureHash === parsed.workflowRevisionDigest &&
+			parsed.declaredAt <= now &&
+			parsed.expiresAt > now &&
+			parsed.lifecycleState === 'live' &&
+			!hasScopeBindingDenyOverlay(parsed),
+	);
 	if (matches.length !== 1) return null;
 	const admission = registerScopeBinding(matches[0]);
 	return admission.ok ? matches[0] : null;

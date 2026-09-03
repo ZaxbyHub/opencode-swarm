@@ -45,9 +45,18 @@
  * escape `.swarm/` (Invariant 4).
  */
 
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
+import {
+	deleteCoordinationState,
+	importCoordinationOnce,
+	listCoordinationStates,
+	projectDbExists,
+	transitionCoordinationState,
+	withCoordinationTransaction,
+} from '../db/index.js';
 import { withEvidenceLock } from '../evidence/lock.js';
 import { observeStoreHealth } from '../health/learning-health.js';
 import { validateSwarmPath } from '../hooks/utils.js';
@@ -74,6 +83,7 @@ const FOREIGN_CHECKPOINT_FILE =
 const CORRUPT_CHECKPOINT_FILE =
 	'pr-monitor/subscriptions.checkpoint.corrupt.json';
 const FOREIGN_LEGACY_FILE = 'pr-monitor/subscriptions.legacy.foreign.jsonl';
+const PR_SUBSCRIPTION_COORDINATION_NAMESPACE = 'background.pr-subscription';
 
 /** Lock + diagnostics identity for the project-scoped store lock. */
 const STORE_LOCK_AGENT = 'pr-monitor';
@@ -451,12 +461,422 @@ function fileExistsStrict(filePath: string): boolean {
 	}
 }
 
+function importedShadowPath(filePath: string): string {
+	return `${filePath}.imported`;
+}
+
+function projectionMarkerPath(filePath: string): string {
+	return `${filePath}.sqlite-projection`;
+}
+
 function foreignSlotPath(directory: string): string {
 	return validateSwarmPath(directory, FOREIGN_CHECKPOINT_FILE);
 }
 
 function corruptSlotPath(directory: string): string {
 	return validateSwarmPath(directory, CORRUPT_CHECKPOINT_FILE);
+}
+
+function readCoordinationSubscriptions(
+	directory: string,
+): Record<string, PrSubscriptionRecord> | null {
+	if (!projectDbExists(directory)) return null;
+	try {
+		return Object.fromEntries(
+			listCoordinationStates(
+				directory,
+				PR_SUBSCRIPTION_COORDINATION_NAMESPACE,
+			).map((row) => {
+				const parsed = RecordSchema.safeParse(
+					JSON.parse(row.payload) as unknown,
+				);
+				if (!parsed.success) {
+					throw new Error(
+						`PR subscription coordination row failed schema validation for ${row.entityKey}`,
+					);
+				}
+				return [row.entityKey, parsed.data as PrSubscriptionRecord];
+			}),
+		);
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		log(`[pr-monitor] coordination read failed closed: ${detail}`);
+		throw new Error(
+			`PR subscription coordination authority is unreadable: ${detail}`,
+		);
+	}
+}
+
+function projectionSequence(directory: string): number {
+	const read = readCheckpoint(directory);
+	return read.kind === 'ok' ? read.value.sequence : 0;
+}
+
+function writeCoordinationProjection(
+	directory: string,
+	view: Record<string, PrSubscriptionRecord>,
+	baseCheckpoint?: PrSubscriptionCheckpoint,
+): void {
+	ensureSwarmDir(directory);
+	const prepared = prepareCoordinationPersistence(
+		directory,
+		view,
+		baseCheckpoint,
+	);
+	assertCoordinationProjectionCapacity(
+		directory,
+		prepared.view,
+		prepared.checkpoint,
+	);
+	const sequence = projectionSequence(directory) + 1;
+	const checkpoint = prepared.checkpoint;
+	checkpoint.sequence = sequence;
+	checkpoint.updatedAt = Date.now();
+	writeCheckpointFile(directory, checkpoint);
+	const legacyPayload =
+		Object.values(checkpoint.records)
+			.map((entry) => JSON.stringify(entry))
+			.join('\n') + (Object.keys(checkpoint.records).length > 0 ? '\n' : '');
+	writeLegacyStoreFile(storePath(directory), legacyPayload);
+	fs.writeFileSync(
+		projectionMarkerPath(checkpointPath(directory)),
+		'',
+		'utf-8',
+	);
+	fs.writeFileSync(projectionMarkerPath(storePath(directory)), '', 'utf-8');
+}
+
+function writeLegacyStoreFile(targetPath: string, content: string): void {
+	atomicWriteSwarmFileSync(targetPath, content);
+}
+
+function loadLegacyPrSubscriptionViewStrict(
+	directory: string,
+): Record<string, PrSubscriptionRecord> {
+	const checkpoint = readCheckpoint(directory);
+	if (checkpoint.kind === 'invalid') {
+		throw new Error('legacy checkpoint is invalid');
+	}
+	if (checkpoint.kind === 'ok') {
+		if (!sameProjectRoot(checkpoint.value.rootPath, directory)) {
+			throw new Error('legacy checkpoint belongs to a different project root');
+		}
+		const overlaid = overlayLegacy(directory, checkpoint.value);
+		if (overlaid.overLimit) {
+			throw new Error('legacy subscription source exceeds migration ceiling');
+		}
+		if (overlaid.aborted) {
+			throw new Error('legacy subscription source is unreadable');
+		}
+		return overlaid.view;
+	}
+	const legacy = storePath(directory);
+	const stat = fileSizeOrNull(legacy);
+	if (stat === null) return {};
+	if (stat > PR_SUBSCRIPTION_LIMITS.legacySourceMaxBytes) {
+		throw new Error('legacy subscription source exceeds migration ceiling');
+	}
+	const fold = foldLegacyRegion(legacy, 0, Number.MAX_SAFE_INTEGER);
+	if (fold.ioError || fold.aborted) {
+		throw new Error('legacy subscription source is unreadable');
+	}
+	const view: Record<string, PrSubscriptionRecord> = {};
+	mergeFoldedRecords(view, fold.folded);
+	return view;
+}
+
+function buildCoordinationProjectionCheckpoint(
+	directory: string,
+	view: Record<string, PrSubscriptionRecord>,
+	baseCheckpoint?: PrSubscriptionCheckpoint,
+): PrSubscriptionCheckpoint {
+	const records = { ...view };
+	const terminals = Object.values(records).filter(
+		(entry) => entry.status !== 'active',
+	);
+	const current = readCheckpoint(directory);
+	const checkpoint = baseCheckpoint
+		? cloneCheckpoint(baseCheckpoint)
+		: current.kind === 'ok' &&
+				sameProjectRoot(current.value.rootPath, directory)
+			? cloneCheckpoint(current.value)
+			: freshCheckpoint(directory);
+	const priorSummary = { ...checkpoint.terminalSummary };
+	checkpoint.records = records;
+	checkpoint.terminalSummary = {
+		removed: priorSummary.removed,
+		expired: priorSummary.expired,
+		lastTerminalAt: terminals.length
+			? Math.max(
+					priorSummary.lastTerminalAt ?? 0,
+					...terminals.map((entry) => entry.updatedAt),
+				)
+			: priorSummary.lastTerminalAt,
+	};
+	checkpoint.rootPath = path.resolve(directory);
+	return checkpoint;
+}
+
+function assertCoordinationProjectionCapacity(
+	directory: string,
+	view: Record<string, PrSubscriptionRecord>,
+	baseCheckpoint?: PrSubscriptionCheckpoint,
+): void {
+	const checkpoint = buildCoordinationProjectionCheckpoint(
+		directory,
+		view,
+		baseCheckpoint,
+	);
+	const recordCount = Object.keys(checkpoint.records).length;
+	if (recordCount > PR_SUBSCRIPTION_LIMITS.maxCheckpointRecords) {
+		throw new Error(
+			`PR subscription store over checkpoint capacity: ${recordCount} records > ${PR_SUBSCRIPTION_LIMITS.maxCheckpointRecords}. The folded state exceeds the bounded checkpoint — archive or split .swarm/pr-monitor/subscriptions.jsonl (subscriptions can be re-created with /swarm pr subscribe), then remove it.`,
+		);
+	}
+	const contentBytes = Buffer.byteLength(
+		`${JSON.stringify(checkpoint)}\n`,
+		'utf-8',
+	);
+	if (contentBytes > PR_SUBSCRIPTION_LIMITS.checkpointHardReadBytes) {
+		throw new Error(
+			`PR subscription store over checkpoint capacity: ${contentBytes} bytes > ${PR_SUBSCRIPTION_LIMITS.checkpointHardReadBytes}. The folded state exceeds the bounded checkpoint — archive or split .swarm/pr-monitor/subscriptions.jsonl (subscriptions can be re-created with /swarm pr subscribe), then remove it.`,
+		);
+	}
+}
+
+function prepareCoordinationPersistence(
+	directory: string,
+	view: Record<string, PrSubscriptionRecord>,
+	baseCheckpoint?: PrSubscriptionCheckpoint,
+): {
+	view: Record<string, PrSubscriptionRecord>;
+	checkpoint: PrSubscriptionCheckpoint;
+} {
+	const preparedView = { ...view };
+	const checkpoint = buildCoordinationProjectionCheckpoint(
+		directory,
+		preparedView,
+		baseCheckpoint,
+	);
+	compactTerminalRecords(preparedView, checkpoint);
+	checkpoint.records = { ...preparedView };
+	return { view: preparedView, checkpoint };
+}
+
+function coordinationShadowDigest(
+	directory: string,
+	view: Record<string, PrSubscriptionRecord>,
+): string {
+	const hash = createHash('sha256');
+	hash.update(JSON.stringify(view));
+	for (const filePath of [
+		storePath(directory),
+		checkpointPath(directory),
+		auditPath(directory),
+	]) {
+		if (!fileExistsStrict(filePath)) continue;
+		hash.update(path.basename(filePath));
+		hash.update(fs.readFileSync(filePath));
+	}
+	return hash.digest('hex');
+}
+
+function isDeepStrictEqualByJson(left: unknown, right: unknown): boolean {
+	return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function coordinationProjectionMatches(
+	directory: string,
+	view: Record<string, PrSubscriptionRecord>,
+): boolean {
+	try {
+		return isDeepStrictEqualByJson(
+			loadLegacyPrSubscriptionViewStrict(directory),
+			view,
+		);
+	} catch {
+		return false;
+	}
+}
+
+function archiveShadowFileBestEffort(filePath: string): void {
+	if (!fileExistsStrict(filePath)) return;
+	const importedPath = importedShadowPath(filePath);
+	if (fileExistsStrict(importedPath)) return;
+	try {
+		renameWithRetry(filePath, importedPath);
+	} catch (error) {
+		log(
+			`[pr-monitor] shadow archive failed for ${path.basename(filePath)}: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+	}
+}
+
+function ensurePrSubscriptionCoordinationImported(
+	directory: string,
+	createIfNeeded: boolean,
+): boolean {
+	if (!createIfNeeded && !projectDbExists(directory)) return false;
+
+	const coordinationView = readCoordinationSubscriptions(directory);
+	if (coordinationView !== null && Object.keys(coordinationView).length > 0) {
+		const projectionNeedsRepair =
+			!fileExistsStrict(projectionMarkerPath(storePath(directory))) ||
+			!fileExistsStrict(projectionMarkerPath(checkpointPath(directory))) ||
+			!coordinationProjectionMatches(directory, coordinationView);
+		if (projectionNeedsRepair) {
+			for (const filePath of [
+				storePath(directory),
+				checkpointPath(directory),
+				auditPath(directory),
+				legacyArchivePath(directory),
+			]) {
+				archiveShadowFileBestEffort(filePath);
+			}
+			writeCoordinationProjection(directory, coordinationView);
+		}
+		return true;
+	}
+
+	const hasLegacyArtifacts = [
+		storePath(directory),
+		checkpointPath(directory),
+		auditPath(directory),
+		legacyArchivePath(directory),
+	].some((filePath) => fileExistsStrict(filePath));
+	if (!hasLegacyArtifacts) return createIfNeeded || projectDbExists(directory);
+
+	const checkpointRead = readCheckpoint(directory);
+	const baseCheckpoint =
+		checkpointRead.kind === 'ok' &&
+		sameProjectRoot(checkpointRead.value.rootPath, directory)
+			? cloneCheckpoint(checkpointRead.value)
+			: undefined;
+	if (
+		checkpointRead.kind === 'invalid' ||
+		(checkpointRead.kind === 'ok' &&
+			!sameProjectRoot(checkpointRead.value.rootPath, directory))
+	) {
+		return false;
+	}
+
+	const legacyView = loadLegacyPrSubscriptionViewStrict(directory);
+	const preparedImport = prepareCoordinationPersistence(
+		directory,
+		legacyView,
+		baseCheckpoint,
+	);
+	assertCoordinationProjectionCapacity(
+		directory,
+		preparedImport.view,
+		preparedImport.checkpoint,
+	);
+	const outcome = importCoordinationOnce(
+		directory,
+		{
+			source: PR_SUBSCRIPTIONS_CHECKPOINT_FILE,
+			sourceDigest: coordinationShadowDigest(directory, preparedImport.view),
+			rowCount: Object.keys(preparedImport.view).length,
+			emptyNamespace: PR_SUBSCRIPTION_COORDINATION_NAMESPACE,
+		},
+		() => {
+			for (const record of Object.values(preparedImport.view)) {
+				const payload = JSON.stringify(record);
+				const result = transitionCoordinationState(directory, {
+					namespace: PR_SUBSCRIPTION_COORDINATION_NAMESPACE,
+					entityKey: record.correlationId,
+					expectedRevision: null,
+					generation: 1,
+					status: record.status,
+					payload,
+				});
+				if (result.outcome !== 'applied') {
+					throw new Error(
+						`subscription import failed for ${record.correlationId}: ${result.outcome}`,
+					);
+				}
+			}
+		},
+	);
+	const importedView =
+		readCoordinationSubscriptions(directory) ?? preparedImport.view;
+	if (outcome === 'imported') {
+		for (const filePath of [
+			storePath(directory),
+			checkpointPath(directory),
+			auditPath(directory),
+			legacyArchivePath(directory),
+		]) {
+			archiveShadowFileBestEffort(filePath);
+		}
+	}
+	writeCoordinationProjection(
+		directory,
+		importedView,
+		preparedImport.checkpoint,
+	);
+	return true;
+}
+
+function canUseCoordinationWritePath(directory: string): boolean {
+	return ensurePrSubscriptionCoordinationImported(directory, true);
+}
+
+function persistCoordinationSubscriptions(
+	directory: string,
+	view: Record<string, PrSubscriptionRecord>,
+	writeProjection = true,
+): void {
+	const prepared = prepareCoordinationPersistence(directory, view);
+	withCoordinationTransaction(directory, () => {
+		const current = new Map(
+			listCoordinationStates(
+				directory,
+				PR_SUBSCRIPTION_COORDINATION_NAMESPACE,
+			).map((row) => [row.entityKey, row]),
+		);
+		const nextIds = new Set(Object.keys(prepared.view));
+		for (const [entityKey, row] of current) {
+			if (nextIds.has(entityKey)) continue;
+			const deleted = deleteCoordinationState(
+				directory,
+				PR_SUBSCRIPTION_COORDINATION_NAMESPACE,
+				entityKey,
+				row.revision,
+			);
+			if (!deleted) {
+				throw new Error(`subscription delete conflict for ${entityKey}`);
+			}
+		}
+		for (const record of Object.values(prepared.view)) {
+			const row = current.get(record.correlationId);
+			const payload = JSON.stringify(record);
+			const result = transitionCoordinationState(directory, {
+				namespace: PR_SUBSCRIPTION_COORDINATION_NAMESPACE,
+				entityKey: record.correlationId,
+				expectedRevision: row?.revision ?? null,
+				generation: 1,
+				status: record.status,
+				payload,
+				event: {
+					streamId: record.correlationId,
+					idempotencyKey: createHash('sha256').update(payload).digest('hex'),
+					eventType: record.status,
+					payload,
+				},
+			});
+			if (result.outcome !== 'applied' && result.outcome !== 'duplicate') {
+				throw new Error(
+					`subscription write failed for ${record.correlationId}: ${result.outcome}`,
+				);
+			}
+		}
+	});
+	if (writeProjection) {
+		writeCoordinationProjection(directory, prepared.view, prepared.checkpoint);
+	}
 }
 
 function foreignLegacySlotPath(directory: string): string {
@@ -1671,6 +2091,12 @@ async function loadViewForRead(directory: string): Promise<{
 	view: Record<string, PrSubscriptionRecord>;
 	recoverySource: PrSubscriptionRecoverySource;
 }> {
+	if (ensurePrSubscriptionCoordinationImported(directory, false)) {
+		return {
+			view: readCoordinationSubscriptions(directory) ?? {},
+			recoverySource: 'checkpoint',
+		};
+	}
 	const read = readCheckpoint(directory);
 	if (read.kind === 'ok') {
 		if (!sameProjectRoot(read.value.rootPath, directory)) {
@@ -2287,6 +2713,53 @@ export async function subscribe(
 		STORE_LOCK_AGENT,
 		STORE_LOCK_TASK,
 		async () => {
+			if (canUseCoordinationWritePath(directory)) {
+				const view = readCoordinationSubscriptions(directory) ?? {};
+				const match = Object.values(view).find(
+					(r) => r.correlationId === correlationId && r.status === 'active',
+				);
+				if (match) {
+					onSubscriptionCreated?.(directory, match);
+					writeCoordinationProjection(directory, view);
+					return match;
+				}
+				if (
+					input.maxSubscriptions === undefined ||
+					input.maxSubscriptions > 0
+				) {
+					const limit =
+						input.maxSubscriptions !== undefined
+							? input.maxSubscriptions
+							: PR_SUBSCRIPTION_LIMITS.defaultMaxActiveSubscriptions;
+					const activeCount = Object.values(view).filter(
+						(r) => r.status === 'active',
+					).length;
+					if (activeCount >= limit) {
+						throw new Error(
+							`PR subscription limit reached: ${activeCount}/${limit}`,
+						);
+					}
+				}
+				const record: PrSubscriptionRecord = {
+					correlationId,
+					sessionID: input.sessionID,
+					prNumber: input.prNumber,
+					repoFullName: input.repoFullName,
+					prUrl: input.prUrl,
+					lastCheckedAt: now,
+					isWatching: true,
+					hasUnaddressedEvents: false,
+					status: 'active',
+					createdAt: now,
+					updatedAt: now,
+					errorCount: 0,
+				};
+				validateRecord(record);
+				view[correlationId] = record;
+				persistCoordinationSubscriptions(directory, view);
+				onSubscriptionCreated?.(directory, record);
+				return record;
+			}
 			const loaded = loadViewForWrite(directory);
 			const match = Object.values(loaded.view).find(
 				(r) => r.correlationId === correlationId && r.status === 'active',
@@ -2362,6 +2835,25 @@ export async function unsubscribe(
 		STORE_LOCK_AGENT,
 		STORE_LOCK_TASK,
 		async () => {
+			if (canUseCoordinationWritePath(directory)) {
+				const view = readCoordinationSubscriptions(directory) ?? {};
+				const match = Object.values(view).find(
+					(r) => r.correlationId === correlationId && r.status === 'active',
+				);
+				if (!match) {
+					writeCoordinationProjection(directory, view);
+					return null;
+				}
+				const removed: PrSubscriptionRecord = {
+					...match,
+					status: 'removed',
+					isWatching: false,
+					updatedAt: Date.now(),
+				};
+				view[correlationId] = removed;
+				persistCoordinationSubscriptions(directory, view);
+				return removed;
+			}
 			const loaded = loadViewForWrite(directory);
 			const match = Object.values(loaded.view).find(
 				(r) => r.correlationId === correlationId && r.status === 'active',
@@ -2438,6 +2930,31 @@ export async function updateSnapshot(
 		STORE_LOCK_AGENT,
 		STORE_LOCK_TASK,
 		async () => {
+			if (canUseCoordinationWritePath(directory)) {
+				const view = readCoordinationSubscriptions(directory) ?? {};
+				const match = Object.values(view).find(
+					(r) => r.correlationId === correlationId && r.status === 'active',
+				);
+				if (!match) {
+					writeCoordinationProjection(directory, view);
+					return null;
+				}
+				const updated: PrSubscriptionRecord = {
+					...match,
+					...updates,
+					correlationId,
+					sessionID: match.sessionID,
+					repoFullName: match.repoFullName,
+					prNumber: match.prNumber,
+					prUrl: match.prUrl,
+					createdAt: match.createdAt,
+					updatedAt: Date.now(),
+				};
+				validateRecord(updated);
+				view[correlationId] = updated;
+				persistCoordinationSubscriptions(directory, view);
+				return updated;
+			}
 			const loaded = loadViewForWrite(directory);
 			const match = Object.values(loaded.view).find(
 				(r) => r.correlationId === correlationId && r.status === 'active',
@@ -2500,6 +3017,32 @@ export async function sweepStale(
 			STORE_LOCK_AGENT,
 			STORE_LOCK_TASK,
 			async () => {
+				if (canUseCoordinationWritePath(directory)) {
+					const view = readCoordinationSubscriptions(directory) ?? {};
+					let swept = 0;
+					const now = Date.now();
+					for (const record of Object.values(view)) {
+						if (record.status !== 'active') continue;
+						const prKey = `${record.repoFullName}::${record.prNumber}`;
+						const isMerged = mergedPrs?.has(prKey) ?? false;
+						const isStale = now - record.updatedAt > ttlMs;
+						if (isMerged || (isStale && !record.hasUnaddressedEvents)) {
+							view[record.correlationId] = {
+								...record,
+								status: 'expired',
+								isWatching: false,
+								updatedAt: now,
+							};
+							swept += 1;
+						}
+					}
+					if (swept > 0) {
+						persistCoordinationSubscriptions(directory, view);
+					} else {
+						writeCoordinationProjection(directory, view);
+					}
+					return swept;
+				}
 				const loaded = loadViewForWrite(directory);
 				const opAudit: AuditEvent[] = [];
 				let swept = 0;
@@ -2567,6 +3110,19 @@ export async function getPrSubscriptionHealth(
 	directory: string,
 ): Promise<PrSubscriptionHealth> {
 	try {
+		const coordinationView = readCoordinationSubscriptions(directory);
+		if (coordinationView !== null && Object.keys(coordinationView).length > 0) {
+			const audit = auditStats(directory);
+			const archiveBytes = fileSizeOrNull(legacyArchivePath(directory)) ?? 0;
+			const checkpointBytes = fileSizeOrNull(checkpointPath(directory)) ?? 0;
+			const health = healthFromView(
+				coordinationView,
+				buildCoordinationProjectionCheckpoint(directory, coordinationView),
+			);
+			health.recoverySource = 'checkpoint';
+			applyFileStats(health, checkpointBytes, audit, archiveBytes);
+			return health;
+		}
 		const read = readCheckpoint(directory);
 		const audit = auditStats(directory);
 		const archiveBytes = fileSizeOrNull(legacyArchivePath(directory)) ?? 0;

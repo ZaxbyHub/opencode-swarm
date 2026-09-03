@@ -12,6 +12,7 @@ import {
 	unregisterPrEventDelivery,
 } from '../../../src/background/pr-event-delivery.js';
 import type { PrMonitorConfig } from '../../../src/config/schema.js';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
 	_test_exports as autoWakeInternals,
 	observePrWorkflowAutoWakeEvent,
@@ -50,6 +51,7 @@ afterEach(async () => {
 	unregisterPrEventDelivery();
 	gateInternals.resetTrackedStateCache();
 	autoWakeInternals.reset();
+	closeAllProjectDbs();
 	await fs.rm(directory, { recursive: true, force: true });
 });
 

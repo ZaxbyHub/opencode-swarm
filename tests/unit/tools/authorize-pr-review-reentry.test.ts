@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
 	_test_exports,
 	activatePrWorkflow,
@@ -33,6 +34,7 @@ afterEach(async () => {
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHeadAsync = originalResolveCurrentGitHeadAsync;
 	_test_exports.resolvePrWorkflowRevisionDigest = originalResolveRevisionDigest;
+	closeAllProjectDbs();
 	await fs.rm(directory, { recursive: true, force: true });
 });
 

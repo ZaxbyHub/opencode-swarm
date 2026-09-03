@@ -13,6 +13,11 @@ import {
 	recordPrReviewValidationBatch,
 	transitionPrReviewToFeedback,
 } from '../../../src/hooks/pr-workflow-gate.js';
+import {
+	readPrWorkflowGateStateFromDisk,
+	withSessionStateMutation,
+	writeStateWhileLocked,
+} from '../../../src/pr-review/persistence.js';
 import { executeWritePrReviewArtifact } from '../../../src/tools/write-pr-review-artifact.js';
 import {
 	establishReviewPrerequisites,
@@ -387,7 +392,7 @@ describe('PR feedback continuation transition', () => {
 				}),
 			).rejects.toThrow(pattern);
 		}
-	});
+	}, 15_000);
 
 	test('inventory must include every handed-off finding but may include more', async () => {
 		const { handoffPath, findingIds } = await materializeTerminalReview();
@@ -414,23 +419,19 @@ describe('PR feedback continuation transition', () => {
 	test('fails closed if the active review state changes during the transition lock', async () => {
 		const { handoffPath } = await materializeTerminalReview();
 		_test_exports.beforePrFeedbackTransitionLock = async () => {
-			const stateFile = gateStatePath();
-			const current = JSON.parse(
-				await fs.readFile(stateFile, 'utf8'),
-			) as Record<string, unknown>;
-			await fs.writeFile(
-				stateFile,
-				JSON.stringify(
-					{
-						...current,
-						revision: Number(current.revision ?? 0) + 1,
-						workflowInstanceId: 'other-review-instance',
-					},
-					null,
-					2,
-				),
-				'utf8',
-			);
+			await withSessionStateMutation(tempDir, SESSION_ID, async () => {
+				const current = await readPrWorkflowGateStateFromDisk(
+					tempDir,
+					SESSION_ID,
+				);
+				await writeStateWhileLocked(tempDir, {
+					...current!,
+					workflowInstanceId: 'other-review-instance',
+				});
+			});
+			const state = await readPrWorkflowGateState(tempDir, SESSION_ID);
+			expect(state?.workflowInstanceId).toBe('other-review-instance');
+			expect(state?.revision).toBeGreaterThan(0);
 		};
 
 		await expect(
@@ -439,7 +440,9 @@ describe('PR feedback continuation transition', () => {
 				SESSION_ID,
 				confirmedTransitionRequest(handoffPath),
 			),
-		).rejects.toThrow(/state changed while validating the feedback handoff/i);
+		).rejects.toThrow(
+			/state changed while validating the feedback handoff|state changed concurrently/i,
+		);
 	});
 
 	test('rejects malformed and oversized external handoff artifacts', async () => {

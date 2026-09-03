@@ -370,7 +370,7 @@
 			"file": "src/services/context-budget-service.ts",
 			"identifier": "writeBudgetState",
 			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writeBudgetState\" exists in src/services/context-budget-service.ts but not inside src/services/context-budget-service.ts:196 (session-state-snapshot.writerCitations[2])."
+			"note": "Pre-existing debt, not approved drift: \"writeBudgetState\" exists in src/services/context-budget-service.ts but not inside src/services/context-budget-service.ts:196 (session-state-snapshot.writerCitations[3])."
 		},
 		{
 			"rowId": "session-state-snapshot",

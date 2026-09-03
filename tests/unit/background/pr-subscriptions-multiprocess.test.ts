@@ -7,7 +7,6 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -19,6 +18,7 @@ import {
 	subscribe,
 	updateSnapshot,
 } from '../../../src/background/pr-subscriptions';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import { freezeClock } from '../../helpers/test-clock';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -102,6 +102,7 @@ describe('pr-subscriptions multi-process serialization', () => {
 		dir = makeTempProject();
 	});
 	afterEach(() => {
+		closeAllProjectDbs();
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -185,7 +186,7 @@ describe('pr-subscriptions multi-process serialization', () => {
 		CHILD_TIMEOUT_MS + 30_000,
 	);
 
-	test('an external unlocked writer appending to a checkpointed store is folded on read', async () => {
+	test('an external unlocked writer appending to a checkpointed shadow is ignored and rewritten from SQLite', async () => {
 		await subscribe(dir, {
 			sessionID: 'sess_1',
 			prNumber: 1,
@@ -220,8 +221,9 @@ describe('pr-subscriptions multi-process serialization', () => {
 			fs.appendFileSync(legacy, `${JSON.stringify(external)}\n`, 'utf-8');
 
 			const active = await listActive(dir);
-			expect(active).toHaveLength(2);
-			expect(active.some((r) => r.sessionID === 'sess_ext')).toBe(true);
+			expect(active).toHaveLength(1);
+			expect(active.some((r) => r.sessionID === 'sess_ext')).toBe(false);
+			expect(fs.readFileSync(legacy, 'utf-8')).not.toContain('sess_ext');
 		} finally {
 			restore();
 		}

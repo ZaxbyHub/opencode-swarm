@@ -1,7 +1,5 @@
 /**
  * Phase 1 PR Monitor infrastructure — durable JSONL subscription store tests.
- * Tests: subscribe, unsubscribe, listActive, lookupByPr, updateSnapshot, sweepStale.
- * Uses real temp directories with real file I/O (same pattern as pending-delegations.test.ts).
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
@@ -18,6 +16,7 @@ import {
 	unsubscribe,
 	updateSnapshot,
 } from '../../../src/background/pr-subscriptions';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 
 function makeTempProject(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-pr-sub-'));
@@ -32,6 +31,7 @@ describe('pr-subscriptions store', () => {
 		dir = makeTempProject();
 	});
 	afterEach(() => {
+		closeAllProjectDbs();
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 

@@ -167,6 +167,7 @@ import {
 	bindPrReviewStateCodec,
 	CHECKOUT_MUTATION_ACTION_TIMEOUT_MS,
 	defaultPersistenceHooks,
+	deleteStateWhileLocked,
 	forgetTrackedPrWorkflowState,
 	isoNow,
 	MAX_TRACKED_SESSIONS,
@@ -2139,16 +2140,9 @@ export async function clearPrWorkflowGateState(
 				);
 			}
 		}
-		try {
-			await fsp.rm(workflowGateStatePath(directory, normalizedSessionID), {
-				force: true,
-			});
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-				throw error;
-			}
-		}
-		forgetTrackedPrWorkflowState(directory, normalizedSessionID);
+		await deleteStateWhileLocked(directory, normalizedSessionID, {
+			expectedStateRevision: expectedRevision,
+		});
 	});
 }
 

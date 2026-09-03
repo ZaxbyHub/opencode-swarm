@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { closeAllProjectDbs } from '../../../../src/db/project-db';
 import {
 	disableEpicMode,
 	emptyPersisted,
@@ -37,6 +38,7 @@ beforeEach(() => {
 afterEach(() => {
 	// Reset the fail-closed marker for this dir so each test starts clean.
 	repairStateUnreadable(dir);
+	closeAllProjectDbs();
 	try {
 		fs.rmSync(dir, { recursive: true, force: true });
 	} catch {

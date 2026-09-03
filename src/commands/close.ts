@@ -29,6 +29,7 @@ import {
 	reconcilePhaseClose,
 	recordPhaseCloseIntent,
 } from '../hooks/knowledge-receipt-ledger.js';
+import { closeSnapshotCoordinationInitialization } from '../session/snapshot-coordination-init.js';
 import {
 	closeRepoMemory,
 	REPO_MEMORY_FILENAME,
@@ -1820,6 +1821,11 @@ export async function runCleanStage(
 			// here is redundant for the archive. The close is best-effort and
 			// never throws into the clean stage.
 			if (artifact === 'swarm.db') {
+				try {
+					await closeSnapshotCoordinationInitialization(ctx.directory);
+				} catch {
+					// best-effort — DB close/unlink below remains diagnostic
+				}
 				// #2480: flush+close the group-commit writer FIRST (mirrors the
 				// dispose/exit paths), then the DB handle. Closing only the
 				// handle would leave the cached writer bound to a dead handle —
@@ -2382,7 +2388,12 @@ export async function handleCloseCommand(
 	}
 
 	try {
-		// Idempotency check — first thing inside try/finally so finalizeLock is released on all paths.
+		// #2481: settle the retained post-resolution import before VACUUM INTO or
+		// cleanup can observe/close swarm.db. A watchdog timeout never abandons
+		// the underlying transaction, so close must await its real settlement.
+		await closeSnapshotCoordinationInitialization(directory);
+
+		// Idempotency check — after readiness settlement and inside try/finally so finalizeLock is released on all paths.
 		// If plan.json is gone and an archive bundle exists AND no active state files remain,
 		// this project was already finalized in a prior run. Return a clean no-op so a second
 		// /swarm finalize invocation does not produce a degraded "Plan not found" run.
@@ -2656,7 +2667,7 @@ export async function handleCloseCommand(
 		try {
 			const sessionIdsToEnd = [...swarmState.agentSessions.keys()];
 			for (const sessionId of sessionIdsToEnd) {
-				_internals.endAgentSession(sessionId);
+				_internals.endAgentSession(sessionId, directory);
 			}
 
 			// Preserve plugin-init singletons through state reset

@@ -81,6 +81,10 @@ describe('project-db', () => {
 		expect(tables).toContain('qa_gate_profile');
 		expect(tables).toContain('qa_gate_profile_identity');
 		expect(tables).toContain('task_checkpoint_receipt');
+		expect(tables).toContain('coordination_event');
+		expect(tables).toContain('coordination_state');
+		expect(tables).toContain('coordination_lease');
+		expect(tables).toContain('coordination_import');
 		db.close();
 	});
 
@@ -95,7 +99,8 @@ describe('project-db', () => {
 			.all()
 			.map((r) => r.version);
 		expect(versions).toEqual([
-			1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+			1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+			22, 23, 24, 25,
 		]);
 		db.close();
 	});
@@ -269,7 +274,8 @@ describe('project-db', () => {
 			.all()
 			.map((row) => row.version);
 		expect(versions).toEqual([
-			1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+			1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+			22, 23, 24, 25,
 		]);
 		const rows = db
 			.query<

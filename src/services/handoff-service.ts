@@ -8,6 +8,7 @@
 import type { ExecutionProfile } from '../config/plan-schema';
 import { readSwarmFileAsync } from '../hooks/utils';
 import { loadPlanJsonOnly } from '../plan/manager';
+import { readSnapshotRows } from '../session/snapshot-store.js';
 import { log } from '../utils';
 
 /**
@@ -369,10 +370,12 @@ export async function getHandoffData(directory: string): Promise<HandoffData> {
 	const now = new Date().toISOString();
 
 	// Read session state
-	const sessionContent = await readSwarmFileAsync(
-		directory,
-		'session/state.json',
-	);
+	// #2481: SQLite is authoritative after the one-time snapshot import. The
+	// reader does not first-open the DB when a project is still file-only.
+	const sqliteSnapshot = readSnapshotRows(directory);
+	const sessionContent = sqliteSnapshot
+		? JSON.stringify(sqliteSnapshot)
+		: await readSwarmFileAsync(directory, 'session/state.json');
 	const sessionState = _internals.parseSessionState(sessionContent);
 
 	// Read plan

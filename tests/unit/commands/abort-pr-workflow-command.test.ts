@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { handleAbortPrWorkflowCommand } from '../../../src/commands/abort-pr-workflow.js';
 import { COMMAND_REGISTRY } from '../../../src/commands/registry.js';
 import { HUMAN_ONLY_SWARM_COMMANDS } from '../../../src/commands/tool-policy.js';
+import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
 	_test_exports,
 	activatePrWorkflow,
@@ -32,6 +33,7 @@ afterEach(async () => {
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = originalResolveCurrentGitHead;
 	_test_exports.resolveIsWorkingTreeClean = originalResolveIsWorkingTreeClean;
+	closeAllProjectDbs();
 	await fs.rm(directory, { recursive: true, force: true });
 });
 

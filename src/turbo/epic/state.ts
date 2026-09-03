@@ -1,18 +1,21 @@
 /**
- * Durable Epic Mode session state (Capability C).
+ * Durable Epic Mode session state.
  *
- * Persists per-session Epic Mode activation state under
- * `<projectRoot>/.swarm/epic-state.json` so toggling survives process
- * restarts. Mirrors the pattern in `src/turbo/lean/state.ts` (atomic
- * `tmp + rename`, per-directory `stateUnreadableMap` for fail-closed
- * semantics, sessions-keyed shape) — without modifying that file.
- *
- * Dependency direction is one-way: this module imports nothing from
- * `src/turbo/lean/`. The shape is parallel but independent.
+ * The authoritative store is the per-project SQLite coordination DB, with one
+ * row per session. `.swarm/epic-state.json` remains a compatibility
+ * projection and import source during the cutover.
  */
 
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import {
+	deleteCoordinationState,
+	getCoordinationState,
+	importCoordinationOnce,
+	listCoordinationStates,
+	transitionCoordinationState,
+} from '../../db/coordination-store.js';
 import { canonicalRootKeyFresh } from '../../utils/canonical-root.js';
 import * as logger from '../../utils/logger.js';
 
@@ -46,6 +49,8 @@ export interface EpicPersistedState {
 }
 
 const STATE_FILE = 'epic-state.json';
+const COORDINATION_NAMESPACE = 'turbo.epic.session';
+const MAX_SESSION_WRITE_ATTEMPTS = 5;
 
 function nowISO(): string {
 	return new Date().toISOString();
@@ -59,6 +64,315 @@ function ensureSwarmDir(directory: string): string {
 	return swarmDir;
 }
 
+function stateFilePath(directory: string): string {
+	return path.join(directory, '.swarm', STATE_FILE);
+}
+
+function importedStateFilePath(directory: string): string {
+	return `${stateFilePath(directory)}.imported`;
+}
+
+function archiveStateFileWithoutOverwrite(directory: string): void {
+	const filePath = stateFilePath(directory);
+	if (!fs.existsSync(filePath)) return;
+	const canonical = importedStateFilePath(directory);
+	if (!fs.existsSync(canonical)) {
+		fs.renameSync(filePath, canonical);
+		return;
+	}
+	for (let suffix = 1; suffix <= 1_000; suffix += 1) {
+		const candidate = `${canonical}.${suffix}`;
+		if (fs.existsSync(candidate)) continue;
+		fs.renameSync(filePath, candidate);
+		return;
+	}
+	throw new Error('Epic state legacy archive collision limit exceeded');
+}
+
+function projectionTmpPath(filePath: string): string {
+	return `${filePath}.tmp.${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function validatePersistedShape(parsed: unknown): parsed is EpicPersistedState {
+	return isRecord(parsed) && parsed.version === 1 && isRecord(parsed.sessions);
+}
+
+function parsePersistedJson(raw: string): EpicPersistedState {
+	const parsed = JSON.parse(raw) as unknown;
+	if (!validatePersistedShape(parsed)) {
+		const maybe = parsed as Partial<EpicPersistedState> | undefined;
+		throw new Error(
+			`malformed shape (version=${maybe?.version}, sessions type=${Array.isArray(maybe?.sessions) ? 'array' : typeof maybe?.sessions})`,
+		);
+	}
+	return {
+		version: 1,
+		updatedAt:
+			typeof parsed.updatedAt === 'string' && parsed.updatedAt.length > 0
+				? parsed.updatedAt
+				: nowISO(),
+		sessions: parsed.sessions,
+	};
+}
+
+function parseSessionPayload(
+	payload: string,
+	entityKey: string,
+): EpicSessionState {
+	const parsed = JSON.parse(payload) as unknown;
+	if (!isRecord(parsed) || parsed.sessionID !== entityKey) {
+		throw new Error(
+			`session payload malformed for ${entityKey}: sessionID mismatch`,
+		);
+	}
+	return parsed as unknown as EpicSessionState;
+}
+
+function buildPersistedFromCoordination(
+	directory: string,
+): EpicPersistedState | null {
+	const rows = listCoordinationStates(directory, COORDINATION_NAMESPACE);
+	if (rows.length === 0) return null;
+	const sessions: Record<string, EpicSessionState> = {};
+	let updatedAt = '';
+	for (const row of rows) {
+		sessions[row.entityKey] = parseSessionPayload(row.payload, row.entityKey);
+		if (!updatedAt || row.updatedAt > updatedAt) updatedAt = row.updatedAt;
+	}
+	return {
+		version: 1,
+		updatedAt: updatedAt || nowISO(),
+		sessions,
+	};
+}
+
+function readLegacyPersisted(
+	directory: string,
+): { persisted: EpicPersistedState; sourceDigest: string } | null {
+	const filePath = stateFilePath(directory);
+	if (!fs.existsSync(filePath)) return null;
+	const raw = fs.readFileSync(filePath, 'utf-8');
+	return {
+		persisted: parsePersistedJson(raw),
+		sourceDigest: createHash('sha256').update(raw).digest('hex'),
+	};
+}
+
+function writeProjection(
+	directory: string,
+	persisted: EpicPersistedState,
+): void {
+	ensureSwarmDir(directory);
+	const filePath = stateFilePath(directory);
+	if (fs.existsSync(filePath) && fs.lstatSync(filePath).isDirectory()) {
+		throw new Error(`${STATE_FILE} is a directory`);
+	}
+	const tmpPath = projectionTmpPath(filePath);
+	const payload = `${JSON.stringify(persisted, null, 2)}\n`;
+	try {
+		fs.writeFileSync(tmpPath, payload, 'utf-8');
+		fs.renameSync(tmpPath, filePath);
+	} catch (error) {
+		try {
+			if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+		} catch {
+			// best-effort cleanup
+		}
+		throw error;
+	}
+}
+
+function seedProjectionBestEffort(
+	directory: string,
+	persisted: EpicPersistedState,
+): void {
+	try {
+		writeProjection(directory, persisted);
+	} catch {
+		// best-effort seed for backward-compatible readers/tests
+	}
+}
+
+function preflightProjectionTarget(directory: string): void {
+	ensureSwarmDir(directory);
+	const filePath = stateFilePath(directory);
+	if (fs.existsSync(filePath) && fs.lstatSync(filePath).isDirectory()) {
+		throw new Error(
+			`Epic state persistence prepare failed: ${STATE_FILE} is a directory`,
+		);
+	}
+}
+
+function importLegacyStateIfNeeded(
+	directory: string,
+): EpicPersistedState | null {
+	const legacy = readLegacyPersisted(directory);
+	if (!legacy) return null;
+	const outcome = importCoordinationOnce(
+		directory,
+		{
+			source: STATE_FILE,
+			sourceDigest: legacy.sourceDigest,
+			rowCount: Object.keys(legacy.persisted.sessions).length,
+			emptyNamespace: COORDINATION_NAMESPACE,
+		},
+		() => {
+			for (const [sessionID, state] of Object.entries(
+				legacy.persisted.sessions,
+			)) {
+				const result = transitionCoordinationState(directory, {
+					namespace: COORDINATION_NAMESPACE,
+					entityKey: sessionID,
+					expectedRevision: null,
+					generation: 1,
+					status: state.active ? 'active' : 'inactive',
+					payload: JSON.stringify(state),
+				});
+				if (result.outcome !== 'applied') {
+					throw new Error('Epic legacy import conflict');
+				}
+			}
+		},
+	);
+	if (outcome === 'imported') {
+		archiveStateFileWithoutOverwrite(directory);
+	}
+	const authoritative =
+		buildPersistedFromCoordination(directory) ?? emptyPersisted();
+	seedProjectionBestEffort(directory, authoritative);
+	return authoritative;
+}
+
+function unreadableStateError(directory: string): Error {
+	return new Error(
+		`Epic state is unreadable for ${directory}. Repair .swarm/${STATE_FILE} before continuing.`,
+	);
+}
+
+function ensureReadableState(directory: string): void {
+	if (stateUnreadableMap.get(stateKey(directory))) throw unreadableStateError(directory);
+	if (!readPersisted(directory)) throw unreadableStateError(directory);
+}
+
+function refreshProjectionFromCoordination(directory: string): void {
+	const persisted =
+		buildPersistedFromCoordination(directory) ?? emptyPersisted();
+	persisted.updatedAt = nowISO();
+	writeProjection(directory, persisted);
+}
+
+function saveSessionRowAtomic(
+	directory: string,
+	state: EpicSessionState,
+): void {
+	preflightProjectionTarget(directory);
+	ensureReadableState(directory);
+	for (let attempt = 0; attempt < MAX_SESSION_WRITE_ATTEMPTS; attempt++) {
+		const current = getCoordinationState(
+			directory,
+			COORDINATION_NAMESPACE,
+			state.sessionID,
+		);
+		const result = transitionCoordinationState(directory, {
+			namespace: COORDINATION_NAMESPACE,
+			entityKey: state.sessionID,
+			expectedRevision: current?.revision ?? null,
+			generation: (current?.generation ?? 0) + 1,
+			status: state.active ? 'active' : 'inactive',
+			payload: JSON.stringify(state),
+		});
+		if (result.outcome === 'applied') {
+			refreshProjectionFromCoordination(directory);
+			return;
+		}
+		if (
+			result.outcome === 'revision_conflict' ||
+			result.outcome === 'stale_generation'
+		) {
+			continue;
+		}
+		throw new Error(
+			`Epic state persistence failed: ${result.outcome} for ${state.sessionID}`,
+		);
+	}
+	throw new Error(
+		`Epic state persistence failed: contention for ${state.sessionID}`,
+	);
+}
+
+function mutateSessionRowAtomic(
+	directory: string,
+	sessionID: string,
+	mutate: (state: EpicSessionState) => void,
+): EpicSessionState | null {
+	preflightProjectionTarget(directory);
+	ensureReadableState(directory);
+	for (let attempt = 0; attempt < MAX_SESSION_WRITE_ATTEMPTS; attempt++) {
+		const current = getCoordinationState(
+			directory,
+			COORDINATION_NAMESPACE,
+			sessionID,
+		);
+		if (!current) return null;
+		const nextState = parseSessionPayload(current.payload, sessionID);
+		mutate(nextState);
+		const result = transitionCoordinationState(directory, {
+			namespace: COORDINATION_NAMESPACE,
+			entityKey: sessionID,
+			expectedRevision: current.revision,
+			generation: current.generation + 1,
+			status: nextState.active ? 'active' : 'inactive',
+			payload: JSON.stringify(nextState),
+		});
+		if (result.outcome === 'applied') {
+			refreshProjectionFromCoordination(directory);
+			return nextState;
+		}
+		if (
+			result.outcome === 'revision_conflict' ||
+			result.outcome === 'stale_generation'
+		) {
+			continue;
+		}
+		throw new Error(
+			`Epic state persistence failed: ${result.outcome} for ${sessionID}`,
+		);
+	}
+	throw new Error(`Epic state persistence failed: contention for ${sessionID}`);
+}
+
+function deleteSessionRowAtomic(directory: string, sessionID: string): void {
+	preflightProjectionTarget(directory);
+	ensureReadableState(directory);
+	for (let attempt = 0; attempt < MAX_SESSION_WRITE_ATTEMPTS; attempt++) {
+		const current = getCoordinationState(
+			directory,
+			COORDINATION_NAMESPACE,
+			sessionID,
+		);
+		if (!current) {
+			refreshProjectionFromCoordination(directory);
+			return;
+		}
+		if (
+			deleteCoordinationState(
+				directory,
+				COORDINATION_NAMESPACE,
+				sessionID,
+				current.revision,
+			)
+		) {
+			refreshProjectionFromCoordination(directory);
+			return;
+		}
+	}
+	throw new Error(`Epic state persistence failed: contention for ${sessionID}`);
+}
+
 export function emptyPersisted(): EpicPersistedState {
 	return { version: 1, updatedAt: nowISO(), sessions: {} };
 }
@@ -68,9 +382,9 @@ export function emptySessionState(sessionID: string): EpicSessionState {
 }
 
 /**
- * Per-directory fail-closed marker. When the canonical state file is corrupt
- * (bad JSON, unknown shape, version mismatch), we set a flag and refuse to
- * read it until `repairStateUnreadable` is called.
+ * Per-directory fail-closed marker. When canonical state is corrupt
+ * (bad legacy JSON, malformed row payloads, import conflicts), we set a flag
+ * and refuse to read it until `repairStateUnreadable` is called.
  */
 const stateUnreadableMap = new Map<string, boolean>();
 
@@ -85,31 +399,17 @@ export function isStateUnreadable(directory: string): boolean {
 function markStateUnreadable(directory: string, reason: string): void {
 	stateUnreadableMap.set(stateKey(directory), true);
 	logger.error(
-		`[turbo/epic/state] state file unreadable for ${directory}: ${reason} — failing closed`,
+		`[turbo/epic/state] state unreadable for ${directory}: ${reason} — failing closed`,
 	);
 }
 
 export function repairStateUnreadable(directory: string): void {
-	const filePath = path.join(directory, '.swarm', STATE_FILE);
-	if (!fs.existsSync(filePath)) {
-		stateUnreadableMap.delete(stateKey(directory));
-		return;
-	}
 	try {
-		const raw = fs.readFileSync(filePath, 'utf-8');
-		const parsed = JSON.parse(raw) as Partial<EpicPersistedState>;
-		if (
-			!parsed ||
-			typeof parsed !== 'object' ||
-			Array.isArray(parsed) ||
-			parsed.version !== 1 ||
-			!parsed.sessions ||
-			typeof parsed.sessions !== 'object' ||
-			Array.isArray(parsed.sessions)
-		) {
-			stateUnreadableMap.set(stateKey(directory), true);
-			return;
+		const filePath = stateFilePath(directory);
+		if (fs.existsSync(filePath)) {
+			parsePersistedJson(fs.readFileSync(filePath, 'utf-8'));
 		}
+		buildPersistedFromCoordination(directory);
 		stateUnreadableMap.delete(stateKey(directory));
 	} catch {
 		stateUnreadableMap.set(stateKey(directory), true);
@@ -118,45 +418,29 @@ export function repairStateUnreadable(directory: string): void {
 
 function readPersisted(directory: string): EpicPersistedState | null {
 	try {
-		const filePath = path.join(directory, '.swarm', STATE_FILE);
-		if (!fs.existsSync(filePath)) {
-			// Seed an empty persisted file so subsequent writes don't race on
-			// directory creation. Matches lean/state.ts behaviour.
-			const seed = emptyPersisted();
-			try {
-				ensureSwarmDir(directory);
-				fs.writeFileSync(
-					filePath,
-					`${JSON.stringify(seed, null, 2)}\n`,
-					'utf-8',
-				);
-			} catch {
-				// best-effort seed
+		const coordinated = buildPersistedFromCoordination(directory);
+		if (coordinated) {
+			const filePath = stateFilePath(directory);
+			if (fs.existsSync(filePath)) {
+				let matches = false;
+				try {
+					matches =
+						JSON.stringify(
+							parsePersistedJson(fs.readFileSync(filePath, 'utf-8')),
+						) === JSON.stringify(coordinated);
+				} catch {
+					matches = false;
+				}
+				if (!matches) archiveStateFileWithoutOverwrite(directory);
 			}
-			return seed;
+			seedProjectionBestEffort(directory, coordinated);
+			return coordinated;
 		}
-		const raw = fs.readFileSync(filePath, 'utf-8');
-		const parsed = JSON.parse(raw) as Partial<EpicPersistedState>;
-		if (
-			!parsed ||
-			typeof parsed !== 'object' ||
-			Array.isArray(parsed) ||
-			parsed.version !== 1 ||
-			!parsed.sessions ||
-			typeof parsed.sessions !== 'object' ||
-			Array.isArray(parsed.sessions)
-		) {
-			markStateUnreadable(
-				directory,
-				`malformed shape (version=${parsed?.version}, sessions type=${Array.isArray(parsed?.sessions) ? 'array' : typeof parsed?.sessions})`,
-			);
-			return null;
-		}
-		return {
-			version: 1,
-			updatedAt: parsed.updatedAt ?? nowISO(),
-			sessions: parsed.sessions as Record<string, EpicSessionState>,
-		};
+		const imported = importLegacyStateIfNeeded(directory);
+		if (imported) return imported;
+		const seed = emptyPersisted();
+		seedProjectionBestEffort(directory, seed);
+		return seed;
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
 		markStateUnreadable(directory, reason);
@@ -164,7 +448,7 @@ function readPersisted(directory: string): EpicPersistedState | null {
 	}
 }
 
-function writePersisted(
+function _writePersisted(
 	directory: string,
 	persisted: EpicPersistedState,
 ): void {
@@ -173,36 +457,60 @@ function writePersisted(
 			`Epic state is unreadable. Please repair .swarm/${STATE_FILE} before continuing.`,
 		);
 	}
-	let filePath: string;
-	let tmpPath: string;
-	let payload: string;
+	preflightProjectionTarget(directory);
+	const nextUpdatedAt = nowISO();
+	const nextPersisted: EpicPersistedState = {
+		version: 1,
+		updatedAt: nextUpdatedAt,
+		sessions: persisted.sessions,
+	};
 	try {
-		ensureSwarmDir(directory);
-		filePath = path.join(directory, '.swarm', STATE_FILE);
-		tmpPath = `${filePath}.tmp.${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-		persisted.updatedAt = nowISO();
-		payload = `${JSON.stringify(persisted, null, 2)}\n`;
-	} catch (error) {
-		const msg = error instanceof Error ? error.message : String(error);
-		logger.error(
-			`[turbo/epic/state] Failed to prepare ${STATE_FILE} write: ${msg}`,
+		const currentRows = new Map(
+			listCoordinationStates(directory, COORDINATION_NAMESPACE).map((row) => [
+				row.entityKey,
+				row,
+			]),
 		);
-		throw new Error(`Epic state persistence prepare failed: ${msg}`);
-	}
-	try {
-		fs.writeFileSync(tmpPath, payload, 'utf-8');
-		fs.renameSync(tmpPath, filePath);
-	} catch (error) {
-		const msg = error instanceof Error ? error.message : String(error);
-		logger.error(
-			`[turbo/epic/state] Failed to persist ${STATE_FILE} atomically: ${msg}`,
-		);
-		try {
-			if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
-		} catch {
-			// best-effort cleanup
+		const nextKeys = new Set(Object.keys(nextPersisted.sessions));
+		for (const [entityKey, row] of currentRows) {
+			if (nextKeys.has(entityKey)) continue;
+			const deleted = deleteCoordinationState(
+				directory,
+				COORDINATION_NAMESPACE,
+				entityKey,
+				row.revision,
+			);
+			if (!deleted) {
+				throw new Error(
+					`Epic state persistence failed: delete conflict for ${entityKey}`,
+				);
+			}
 		}
-		throw new Error(`Epic state persistence failed: ${msg}`);
+		for (const [sessionID, state] of Object.entries(nextPersisted.sessions)) {
+			const current = currentRows.get(sessionID);
+			const result = transitionCoordinationState(directory, {
+				namespace: COORDINATION_NAMESPACE,
+				entityKey: sessionID,
+				expectedRevision: current?.revision ?? null,
+				generation: (current?.generation ?? 0) + 1,
+				status: state.active ? 'active' : 'inactive',
+				payload: JSON.stringify(state),
+			});
+			if (result.outcome !== 'applied') {
+				throw new Error(
+					`Epic state persistence failed: ${result.outcome} for ${sessionID}`,
+				);
+			}
+		}
+		writeProjection(directory, nextPersisted);
+	} catch (error) {
+		const msg = error instanceof Error ? error.message : String(error);
+		logger.error(`[turbo/epic/state] Failed to persist ${STATE_FILE}: ${msg}`);
+		throw new Error(
+			msg.startsWith('Epic state persistence')
+				? msg
+				: `Epic state persistence failed: ${msg}`,
+		);
 	}
 }
 
@@ -222,19 +530,7 @@ export function saveEpicSessionState(
 	directory: string,
 	state: EpicSessionState,
 ): void {
-	if (stateUnreadableMap.get(stateKey(directory))) {
-		throw new Error(
-			`Epic state is unreadable for ${directory}. Repair .swarm/${STATE_FILE} before continuing.`,
-		);
-	}
-	const persisted = readPersisted(directory);
-	if (!persisted) {
-		throw new Error(
-			`Epic state is unreadable for ${directory}. Repair .swarm/${STATE_FILE} before continuing.`,
-		);
-	}
-	persisted.sessions[state.sessionID] = state;
-	writePersisted(directory, persisted);
+	saveSessionRowAtomic(directory, state);
 }
 
 /** True iff epic mode is currently active for the given session. */
@@ -249,31 +545,15 @@ export function isEpicModeActive(
 /**
  * True iff epic mode is currently active for ANY session in the project.
  *
- * Use this when a code path needs to know "is the project running under
- * Epic Mode right now" without caring which session toggled it. The
- * session-scoped `isEpicModeActive` answers "did THIS session toggle it" —
- * a different question with a different answer.
- *
- * The architect's session enables Epic via `/swarm epic on`; sub-agents
- * (coders, reviewers) dispatched through the `Task` tool run in their own
- * sessions and have no record of that toggle. Asking the project-scoped
- * check is the only correct way to honor Epic Mode from those flows.
- * Rule 2's auto-commit (centralized in Phase 5) is the canonical caller.
- *
  * Fail-closed: returns `false` on unreadable state, matching the rest of
  * this module's defaults.
  */
 export function isEpicModeActiveForProject(directory: string): boolean {
 	if (stateUnreadableMap.get(stateKey(directory))) return false;
-	// Phase 8: probe for the state file BEFORE calling `readPersisted`,
-	// which would otherwise seed an empty `.swarm/epic-state.json` (and
-	// the `.swarm/` directory itself) for any project that hasn't run
-	// Epic Mode. Centralized Rule 2 (`plan/manager.updateTaskStatus`)
-	// calls this on every `status === 'completed'` transition, so the
-	// seeding would leak into every project using `update_task_status`,
-	// including non-Epic Lean Turbo and plain plan-only flows. The
-	// contract is unchanged: no file ⇒ no session is active ⇒ false.
-	if (!fs.existsSync(path.join(directory, '.swarm', STATE_FILE))) {
+	const hasLegacyFile = fs.existsSync(stateFilePath(directory));
+	const hasCoordinationRows =
+		listCoordinationStates(directory, COORDINATION_NAMESPACE, 1).length > 0;
+	if (!hasLegacyFile && !hasCoordinationRows) {
 		return false;
 	}
 	const persisted = readPersisted(directory);
@@ -286,12 +566,21 @@ export function isEpicModeActiveForProject(directory: string): boolean {
 
 /** Enable epic mode for the session; records `enabledAt`. */
 export function enableEpicMode(directory: string, sessionID: string): void {
-	const current =
-		loadEpicSessionState(directory, sessionID) ?? emptySessionState(sessionID);
-	current.active = true;
-	current.enabledAt = nowISO();
-	current.disabledAt = undefined;
-	saveEpicSessionState(directory, current);
+	const current = loadEpicSessionState(directory, sessionID);
+	if (!current) {
+		saveSessionRowAtomic(directory, {
+			...emptySessionState(sessionID),
+			active: true,
+			enabledAt: nowISO(),
+			disabledAt: undefined,
+		});
+		return;
+	}
+	mutateSessionRowAtomic(directory, sessionID, (state) => {
+		state.active = true;
+		state.enabledAt = nowISO();
+		state.disabledAt = undefined;
+	});
 }
 
 /** Disable epic mode for the session; records `disabledAt`. */
@@ -299,32 +588,21 @@ export function disableEpicMode(directory: string, sessionID: string): void {
 	const current = loadEpicSessionState(directory, sessionID);
 	if (!current) {
 		// Nothing to disable — record an inactive state for telemetry parity.
-		saveEpicSessionState(directory, {
+		saveSessionRowAtomic(directory, {
 			...emptySessionState(sessionID),
 			disabledAt: nowISO(),
 		});
 		return;
 	}
-	current.active = false;
-	current.disabledAt = nowISO();
-	saveEpicSessionState(directory, current);
+	mutateSessionRowAtomic(directory, sessionID, (state) => {
+		state.active = false;
+		state.disabledAt = nowISO();
+	});
 }
 
 /** Reset the session's state entry entirely. */
 export function resetEpicSession(directory: string, sessionID: string): void {
-	if (stateUnreadableMap.get(stateKey(directory))) {
-		throw new Error(
-			`Epic state is unreadable for ${directory}. Repair .swarm/${STATE_FILE} before continuing.`,
-		);
-	}
-	const persisted = readPersisted(directory);
-	if (!persisted) {
-		throw new Error(
-			`Epic state is unreadable for ${directory}. Repair .swarm/${STATE_FILE} before continuing.`,
-		);
-	}
-	delete persisted.sessions[sessionID];
-	writePersisted(directory, persisted);
+	deleteSessionRowAtomic(directory, sessionID);
 }
 
 /**
@@ -350,6 +628,7 @@ export function recordEpicDecision(
 			`Cannot record decision for sessionID '${sessionID}': no session entry exists. Call enableEpicMode first.`,
 		);
 	}
-	current.lastDecision = decision;
-	saveEpicSessionState(directory, current);
+	mutateSessionRowAtomic(directory, sessionID, (state) => {
+		state.lastDecision = decision;
+	});
 }

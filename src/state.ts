@@ -66,6 +66,7 @@ import { clearScopeBindings } from './scope/scope-binding.js';
 import { clearScopeBindingFromDisk } from './scope/scope-persistence.js';
 import { clearAllTurnLedgers } from './services/injection-budget';
 import { recordSessionStart } from './session/session-start-store.js';
+import { deleteSnapshotSessionRows } from './session/snapshot-store.js';
 import { maybeSuggestWorktreeLink } from './session/worktree-link-suggestion.js';
 import { AgentRunContext } from './state/agent-run-context.js';
 import { telemetry } from './telemetry.js';
@@ -1946,11 +1947,13 @@ let _lastIdleSweepAtMs = 0;
  *
  * @param staleDurationMs - Age threshold in ms (default 2h)
  * @param now - Current time in ms (injectable for deterministic tests)
+ * @param directory - Optional project root whose durable rows are tombstoned
  * @returns The list of evicted session IDs
  */
 export function sweepStaleSessions(
 	staleDurationMs = STALE_SESSION_TTL_MS,
 	now = Date.now(),
+	directory?: string,
 ): string[] {
 	// Preserve the original strict-greater-than comparison so the existing
 	// eager-eviction behavior and tests are byte-for-byte unchanged.
@@ -1961,6 +1964,16 @@ export function sweepStaleSessions(
 		}
 	}
 	for (const id of staleIds) {
+		if (directory) {
+			try {
+				deleteSnapshotSessionRows(directory, id);
+			} catch (error) {
+				logger.warn(
+					'[state] durable stale-session teardown failed:',
+					error instanceof Error ? error.message : String(error),
+				);
+			}
+		}
 		swarmState.agentSessions.delete(id);
 		// delegationChains is keyed by sessionID; the evicted session's chain is
 		// now unreachable, so drop it in the same pass to reclaim its memory.
@@ -2006,17 +2019,19 @@ export function sweepStaleSessions(
  *
  * @param staleDurationMs - Age threshold in ms (default 2h)
  * @param now - Current time in ms (injectable for deterministic tests)
+ * @param directory - Optional project root whose durable rows are tombstoned
  * @returns Evicted session IDs ([] when the cooldown blocks this run)
  */
 export function maybeSweepStaleSessions(
 	staleDurationMs = STALE_SESSION_TTL_MS,
 	now = Date.now(),
+	directory?: string,
 ): string[] {
 	if (now - _lastIdleSweepAtMs < IDLE_SWEEP_COOLDOWN_MS) {
 		return [];
 	}
 	_lastIdleSweepAtMs = now;
-	return sweepStaleSessions(staleDurationMs, now);
+	return sweepStaleSessions(staleDurationMs, now, directory);
 }
 
 /**
@@ -2039,7 +2054,7 @@ export function startAgentSession(
 	// Default: 2 hours — should exceed typical agent durations (evicts inactive
 	// sessions). Reuses the shared eviction loop (also used by the opportunistic
 	// idle sweep) so the logic stays single-sourced.
-	sweepStaleSessions(staleDurationMs, now);
+	sweepStaleSessions(staleDurationMs, now, directory);
 
 	// Create new session state
 	const sessionState: AgentSessionState = {
@@ -2208,8 +2223,19 @@ export function startAgentSession(
  * teardown) to prevent unbounded Map growth. Double-calls are safe: Map.delete is
  * a no-op for missing keys (FR-010).
  * @param sessionId - The session identifier to remove
+ * @param directory - Optional project root whose durable snapshot row must be tombstoned
  */
-export function endAgentSession(sessionId: string): void {
+export function endAgentSession(sessionId: string, directory?: string): void {
+	if (directory) {
+		try {
+			deleteSnapshotSessionRows(directory, sessionId);
+		} catch (error) {
+			logger.warn(
+				'[state] durable snapshot session teardown failed:',
+				error instanceof Error ? error.message : String(error),
+			);
+		}
+	}
 	const removedBindings = clearScopeBindings(
 		(binding) =>
 			binding.ownerSessionId === sessionId ||
@@ -2516,7 +2542,7 @@ export function ensureAgentSession(
 		// startAgentSession. The session just refreshed above (lastToolCallTime
 		// = now) is never its own victim, so there is no cross-session
 		// pollution.
-		maybeSweepStaleSessions();
+		maybeSweepStaleSessions(STALE_SESSION_TTL_MS, now, directory);
 		return session;
 	}
 

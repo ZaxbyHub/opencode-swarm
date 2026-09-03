@@ -42,6 +42,16 @@ import * as path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import {
+	acquireCoordinationLease,
+	deleteCoordinationState,
+	importCoordinationOnce,
+	listCoordinationStates,
+	projectDbExists,
+	releaseCoordinationLease,
+	transitionCoordinationState,
+	withCoordinationTransaction,
+} from '../db/index.js';
+import {
 	EvidenceLockTimeoutError,
 	withEvidenceLock,
 } from '../evidence/lock.js';
@@ -89,6 +99,9 @@ export const MAX_BACKGROUND_ADVISORY_CHARS = 4_000;
 export const LEGACY_CODER_SETTLEMENT_PENDING_ADVISORY_MARKER =
 	'legacy coder settlement transfer is pending';
 const MAX_BACKGROUND_DELEGATION_GENERATION = 1_000_000;
+const DELEGATION_COORDINATION_NAMESPACE = 'background.pending-delegation';
+const RESERVATION_COORDINATION_NAMESPACE = 'background.coder-reservation';
+const RESERVATION_LEASE_NAMESPACE = 'background.coder-reservation.lease';
 
 /** Strict recovery bound for the ledger/tail (issue #2034: unchanged guard). */
 export { MAX_RECOVERY_LEDGER_BYTES } from './delegation-health.js';
@@ -203,6 +216,7 @@ export type BackgroundDelegationStatus =
 	| 'running'
 	| 'ingesting'
 	| 'ingestion_error'
+	| 'rejected'
 	| 'completed'
 	| 'error'
 	| 'cancelled'
@@ -452,7 +466,7 @@ export interface BackgroundDelegationResult {
 export interface BackgroundTerminalResult {
 	/** Stable identity derived from trusted correlation + immutable result metadata. */
 	eventId: string;
-	status: 'completed' | 'error' | 'cancelled';
+	status: 'completed' | 'error' | 'cancelled' | 'rejected';
 	recordedAt: number;
 	result: BackgroundDelegationResult;
 }
@@ -681,7 +695,7 @@ const WorktreeDescriptorSchema = z
 const TerminalResultSchema = z
 	.object({
 		eventId: z.string().min(1).max(256),
-		status: z.enum(['completed', 'error', 'cancelled']),
+		status: z.enum(['completed', 'error', 'cancelled', 'rejected']),
 		recordedAt: z.number().int().nonnegative(),
 		result: ResultSchema,
 	})
@@ -906,6 +920,7 @@ const RecordSchema = z
 			'pending',
 			'running',
 			'ingestion_error',
+			'rejected',
 			'completed',
 			'error',
 			'cancelled',
@@ -1000,6 +1015,212 @@ function checkpointPath(directory: string): string {
 
 function manifestPath(directory: string): string {
 	return validateSwarmPath(directory, BACKGROUND_DELEGATIONS_MANIFEST_FILE);
+}
+
+function importedShadowPath(filePath: string): string {
+	return `${filePath}.imported`;
+}
+
+function projectionMarkerPath(filePath: string): string {
+	return `${filePath}.sqlite-projection`;
+}
+
+function coordinationReservationLeaseKey(
+	reservation: Pick<BackgroundCoderReservation, 'reservationId' | 'generation'>,
+): {
+	namespace: string;
+	entityKey: string;
+	generation: number;
+	ownerToken: string;
+} {
+	return {
+		namespace: RESERVATION_LEASE_NAMESPACE,
+		entityKey: reservation.reservationId,
+		generation: reservation.generation ?? 1,
+		ownerToken: reservation.reservationId,
+	};
+}
+
+function coordinationRowsToDelegations(
+	directory: string,
+): BackgroundDelegationRecord[] | null {
+	if (!projectDbExists(directory)) return null;
+	try {
+		return listCoordinationStates(directory, DELEGATION_COORDINATION_NAMESPACE)
+			.map((row) => {
+				const parsed = RecordSchema.safeParse(
+					JSON.parse(row.payload) as unknown,
+				);
+				if (!parsed.success) {
+					throw new Error(
+						`delegation coordination row failed schema validation for ${row.entityKey}`,
+					);
+				}
+				return parsed.data as BackgroundDelegationRecord;
+			})
+			.sort((left, right) =>
+				left.createdAt === right.createdAt
+					? left.correlationId.localeCompare(right.correlationId)
+					: left.createdAt - right.createdAt,
+			);
+	} catch (error) {
+		recordLedgerUncertainty(
+			directory,
+			error instanceof Error ? error.message : String(error),
+			'coordination-read',
+		);
+		return null;
+	}
+}
+
+function archiveShadowFileBestEffort(filePath: string): void {
+	if (!fs.existsSync(filePath)) return;
+	const importedPath = importedShadowPath(filePath);
+	try {
+		if (fs.existsSync(importedPath)) return;
+		fs.renameSync(filePath, importedPath);
+	} catch (error) {
+		logger.warn(
+			`[background] shadow archive failed for ${path.basename(filePath)}: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+	}
+}
+
+function writeDelegationShadowProjection(
+	directory: string,
+	records: readonly BackgroundDelegationRecord[],
+): void {
+	ensureSwarmDir(directory);
+	const payload =
+		records.map((record) => JSON.stringify(record)).join('\n') +
+		(records.length > 0 ? '\n' : '');
+	fs.writeFileSync(storePath(directory), payload, 'utf-8');
+	fs.writeFileSync(projectionMarkerPath(storePath(directory)), '', 'utf-8');
+}
+
+function loadLegacyDelegationsStrict(
+	directory: string,
+): BackgroundDelegationRecord[] | null {
+	const load = loadFoldedState(directory, { strict: true });
+	if (load.status === 'uncertain') {
+		recordLedgerUncertainty(
+			directory,
+			load.reason,
+			'legacy-import',
+			load.repairHint,
+		);
+		return null;
+	}
+	return [...load.records.values()];
+}
+
+function delegationShadowMatches(
+	directory: string,
+	records: readonly BackgroundDelegationRecord[],
+): boolean {
+	const load = loadFoldedState(directory, { strict: false });
+	if (load.status === 'uncertain') return false;
+	return isDeepStrictEqual(
+		[...load.records.values()].sort((left, right) =>
+			left.correlationId.localeCompare(right.correlationId),
+		),
+		[...records].sort((left, right) =>
+			left.correlationId.localeCompare(right.correlationId),
+		),
+	);
+}
+
+function delegationShadowDigest(
+	directory: string,
+	records: readonly BackgroundDelegationRecord[],
+): string {
+	const hash = createHash('sha256');
+	hash.update(JSON.stringify(records));
+	for (const filePath of [
+		storePath(directory),
+		checkpointPath(directory),
+		manifestPath(directory),
+	]) {
+		if (!fs.existsSync(filePath)) continue;
+		hash.update(path.basename(filePath));
+		hash.update(fs.readFileSync(filePath));
+	}
+	return hash.digest('hex');
+}
+
+type DelegationCoordinationImportState = 'ready' | 'absent' | 'uncertain';
+
+function ensureDelegationCoordinationImported(
+	directory: string,
+	createIfNeeded: boolean,
+): DelegationCoordinationImportState {
+	const dbExists = projectDbExists(directory);
+	if (!createIfNeeded && !dbExists) return 'absent';
+	const existing = dbExists ? coordinationRowsToDelegations(directory) : null;
+	if (dbExists && existing === null) return 'uncertain';
+	if (existing && existing.length > 0) {
+		if (
+			!fs.existsSync(projectionMarkerPath(storePath(directory))) ||
+			!delegationShadowMatches(directory, existing)
+		) {
+			for (const filePath of [
+				storePath(directory),
+				checkpointPath(directory),
+				manifestPath(directory),
+			]) {
+				archiveShadowFileBestEffort(filePath);
+			}
+		}
+		writeDelegationShadowProjection(directory, existing);
+		return 'ready';
+	}
+	const legacyRecords = loadLegacyDelegationsStrict(directory);
+	if (legacyRecords === null) return 'uncertain';
+	if (
+		legacyRecords.length === 0 &&
+		!fs.existsSync(storePath(directory)) &&
+		!fs.existsSync(checkpointPath(directory)) &&
+		!fs.existsSync(manifestPath(directory))
+	) {
+		if (!createIfNeeded) return 'absent';
+		withCoordinationTransaction(directory, () => undefined);
+		return 'ready';
+	}
+	const outcome = importCoordinationOnce(
+		directory,
+		{
+			source: BACKGROUND_DELEGATIONS_FILE,
+			sourceDigest: delegationShadowDigest(directory, legacyRecords),
+			rowCount: legacyRecords.length,
+			emptyNamespace: DELEGATION_COORDINATION_NAMESPACE,
+		},
+		() => {
+			for (const record of legacyRecords) {
+				const result = transitionCoordinationState(directory, {
+					namespace: DELEGATION_COORDINATION_NAMESPACE,
+					entityKey: record.correlationId,
+					expectedRevision: null,
+					generation: Math.max(record.generation ?? 1, 1),
+					status: record.status,
+					payload: JSON.stringify(record),
+				});
+				if (result.outcome !== 'applied') {
+					throw new Error(
+						`delegation import failed for ${record.correlationId}: ${result.outcome}`,
+					);
+				}
+			}
+		},
+	);
+	if (outcome === 'imported') {
+		archiveShadowFileBestEffort(storePath(directory));
+		archiveShadowFileBestEffort(checkpointPath(directory));
+		archiveShadowFileBestEffort(manifestPath(directory));
+		writeDelegationShadowProjection(directory, legacyRecords);
+	}
+	return 'ready';
 }
 
 // ---------------------------------------------------------------------------
@@ -1662,6 +1883,13 @@ function loadLegacyLedger(directory: string, strict: boolean): LedgerLoad {
 function loadRecordsForWrite(
 	directory: string,
 ): BackgroundDelegationRecord[] | null {
+	const importState = ensureDelegationCoordinationImported(directory, true);
+	if (importState === 'uncertain') return null;
+	if (importState === 'ready') {
+		const coordination = coordinationRowsToDelegations(directory);
+		if (coordination !== null) return coordination;
+		return null;
+	}
 	const load = loadFoldedState(directory, { strict: false });
 	if (load.status === 'uncertain') {
 		recordLedgerUncertainty(
@@ -1934,7 +2162,7 @@ function emptyAudit(): DelegationCheckpointAuditSummary {
 
 function terminalEventStatusOf(
 	record: BackgroundDelegationRecord,
-): 'completed' | 'error' | 'cancelled' | 'stale' | null {
+): 'completed' | 'error' | 'cancelled' | 'rejected' | 'stale' | null {
 	if (record.terminalResult) {
 		return record.terminalResult.status;
 	}
@@ -1942,6 +2170,7 @@ function terminalEventStatusOf(
 		record.status === 'completed' ||
 		record.status === 'error' ||
 		record.status === 'cancelled' ||
+		record.status === 'rejected' ||
 		record.status === 'stale'
 	) {
 		return record.status;
@@ -2004,7 +2233,9 @@ function mergeCheckpointAudit(
 		if (terminalStatus) {
 			const prevStatus = prevRecord ? terminalEventStatusOf(prevRecord) : null;
 			if (prevStatus !== terminalStatus) {
-				audit.terminalsByStatus[terminalStatus] += 1;
+				if (terminalStatus !== 'rejected') {
+					audit.terminalsByStatus[terminalStatus] += 1;
+				}
 			}
 			maxTerminal = Math.max(
 				maxTerminal,
@@ -2410,6 +2641,13 @@ function ensureSwarmDir(directory: string): void {
 export function readDelegations(
 	directory: string,
 ): BackgroundDelegationRecord[] {
+	const importState = ensureDelegationCoordinationImported(directory, false);
+	if (importState === 'uncertain') return [];
+	if (importState === 'ready') {
+		const coordination = coordinationRowsToDelegations(directory);
+		if (coordination !== null) return coordination;
+		return [];
+	}
 	const load = loadFoldedState(directory, { strict: false });
 	if (load.status === 'uncertain') {
 		logger.warn(
@@ -2431,6 +2669,24 @@ export function readDelegations(
 export function scanDelegationsForRecovery(
 	directory: string,
 ): RecoveryOwnershipScanResult<BackgroundDelegationRecord> {
+	const importState = ensureDelegationCoordinationImported(directory, false);
+	if (importState === 'uncertain') {
+		return {
+			status: 'uncertain',
+			reason: 'background delegation coordination state is uncertain',
+			source: 'unknown',
+		};
+	}
+	if (importState === 'ready') {
+		const coordination = coordinationRowsToDelegations(directory);
+		if (coordination !== null) {
+			return {
+				status: 'ok',
+				owners: coordination,
+				source: 'checkpoint+tail',
+			};
+		}
+	}
 	const load = loadFoldedState(directory, { strict: true });
 	if (load.status === 'uncertain') {
 		// Honest failure source (#2034 final-critic #4): a manifest-less store
@@ -2468,6 +2724,40 @@ function appendRecord(
 	directory: string,
 	record: BackgroundDelegationRecord,
 ): void {
+	const importState = ensureDelegationCoordinationImported(directory, true);
+	if (importState === 'uncertain') {
+		throw new Error('delegation coordination authority is uncertain');
+	}
+	if (importState === 'ready') {
+		const current = listCoordinationStates(
+			directory,
+			DELEGATION_COORDINATION_NAMESPACE,
+		).find((row) => row.entityKey === record.correlationId);
+		const eventPayload = JSON.stringify(record);
+		const eventDigest = createHash('sha256').update(eventPayload).digest('hex');
+		const result = transitionCoordinationState(directory, {
+			namespace: DELEGATION_COORDINATION_NAMESPACE,
+			entityKey: record.correlationId,
+			expectedRevision: current?.revision ?? null,
+			generation: Math.max(record.generation ?? 1, 1),
+			status: record.status,
+			payload: eventPayload,
+			event: {
+				streamId: record.correlationId,
+				idempotencyKey: `${record.status}:${eventDigest}`,
+				eventType: record.status,
+				payload: eventPayload,
+			},
+		});
+		if (result.outcome !== 'applied' && result.outcome !== 'duplicate') {
+			throw new Error(
+				`coordination append rejected for ${record.correlationId}: ${result.outcome}`,
+			);
+		}
+		const records = coordinationRowsToDelegations(directory);
+		if (records) writeDelegationShadowProjection(directory, records);
+		return;
+	}
 	ensureSwarmDir(directory);
 	fs.appendFileSync(
 		storePath(directory),
@@ -4826,28 +5116,72 @@ function reservationStorePath(directory: string): string {
 	return validateSwarmPath(directory, BACKGROUND_CODER_RESERVATIONS_FILE);
 }
 
-export function buildBackgroundCoderReservationId(input: {
-	parentSessionId: string;
-	planTaskId: string | null;
-	callID: string;
-}): string {
-	const ownerIdentity =
-		input.planTaskId === null
-			? ['call', input.parentSessionId, input.callID]
-			: ['task', input.parentSessionId, input.planTaskId];
-	return `bgcr1:${createHash('sha256')
-		.update(JSON.stringify(ownerIdentity))
-		.digest('hex')}`;
+function reservationShadowDigest(
+	directory: string,
+	reservations: readonly BackgroundCoderReservation[],
+): string {
+	const hash = createHash('sha256');
+	hash.update(JSON.stringify(reservations));
+	const filePath = reservationStorePath(directory);
+	if (fs.existsSync(filePath)) {
+		hash.update(fs.readFileSync(filePath));
+	}
+	return hash.digest('hex');
 }
 
-export type BackgroundCoderReservationScanResult =
-	| { status: 'ok'; reservations: BackgroundCoderReservation[] }
-	| { status: 'uncertain'; reason: string };
+function writeReservationShadowProjection(
+	directory: string,
+	reservations: readonly BackgroundCoderReservation[],
+): void {
+	const parsed = BackgroundCoderReservationStoreSchema.parse({
+		schemaVersion: 1,
+		reservations,
+	});
+	fs.writeFileSync(
+		reservationStorePath(directory),
+		`${JSON.stringify(parsed)}\n`,
+		'utf-8',
+	);
+	fs.writeFileSync(
+		projectionMarkerPath(reservationStorePath(directory)),
+		'',
+		'utf-8',
+	);
+}
 
-/**
- * Strict reservation read for admission. Corruption is uncertainty, never absence.
- */
-export function scanBackgroundCoderReservationsForAdmission(
+function coordinationRowsToReservations(
+	directory: string,
+): BackgroundCoderReservation[] | null {
+	if (!projectDbExists(directory)) return null;
+	try {
+		return listCoordinationStates(directory, RESERVATION_COORDINATION_NAMESPACE)
+			.map((row) => {
+				const parsed = BackgroundCoderReservationSchema.safeParse(
+					JSON.parse(row.payload) as unknown,
+				);
+				if (!parsed.success) {
+					throw new Error(
+						`reservation coordination row failed schema validation for ${row.entityKey}`,
+					);
+				}
+				return parsed.data as BackgroundCoderReservation;
+			})
+			.sort((left, right) =>
+				left.createdAt === right.createdAt
+					? left.reservationId.localeCompare(right.reservationId)
+					: left.createdAt - right.createdAt,
+			);
+	} catch (error) {
+		recordLedgerUncertainty(
+			directory,
+			error instanceof Error ? error.message : String(error),
+			'reservation-coordination-read',
+		);
+		return null;
+	}
+}
+
+function scanLegacyBackgroundCoderReservationsForAdmission(
 	directory: string,
 ): BackgroundCoderReservationScanResult {
 	let absolutePath: string;
@@ -4903,6 +5237,141 @@ export function scanBackgroundCoderReservationsForAdmission(
 	return { status: 'ok', reservations: parsed.data.reservations };
 }
 
+type ReservationCoordinationImportState = 'ready' | 'absent' | 'uncertain';
+
+function ensureReservationCoordinationImported(
+	directory: string,
+	createIfNeeded: boolean,
+): ReservationCoordinationImportState {
+	const dbExists = projectDbExists(directory);
+	if (!createIfNeeded && !dbExists) return 'absent';
+	const existing = dbExists ? coordinationRowsToReservations(directory) : null;
+	if (dbExists && existing === null) return 'uncertain';
+	if (existing && existing.length > 0) {
+		const legacy = scanLegacyBackgroundCoderReservationsForAdmission(directory);
+		if (
+			!fs.existsSync(projectionMarkerPath(reservationStorePath(directory))) ||
+			legacy.status !== 'ok' ||
+			!isDeepStrictEqual(
+				legacy.reservations.sort((left, right) =>
+					left.reservationId.localeCompare(right.reservationId),
+				),
+				[...existing].sort((left, right) =>
+					left.reservationId.localeCompare(right.reservationId),
+				),
+			)
+		) {
+			archiveShadowFileBestEffort(reservationStorePath(directory));
+		}
+		writeReservationShadowProjection(directory, existing);
+		return 'ready';
+	}
+	const legacy = scanLegacyBackgroundCoderReservationsForAdmission(directory);
+	if (legacy.status === 'uncertain') {
+		recordLedgerUncertainty(
+			directory,
+			legacy.reason,
+			'reservation-legacy-import',
+		);
+		return 'uncertain';
+	}
+	if (
+		legacy.reservations.length === 0 &&
+		!fs.existsSync(reservationStorePath(directory))
+	) {
+		if (!createIfNeeded) return 'absent';
+		withCoordinationTransaction(directory, () => undefined);
+		return 'ready';
+	}
+	const outcome = importCoordinationOnce(
+		directory,
+		{
+			source: BACKGROUND_CODER_RESERVATIONS_FILE,
+			sourceDigest: reservationShadowDigest(directory, legacy.reservations),
+			rowCount: legacy.reservations.length,
+			emptyNamespace: RESERVATION_COORDINATION_NAMESPACE,
+		},
+		() => {
+			for (const reservation of legacy.reservations) {
+				const result = transitionCoordinationState(directory, {
+					namespace: RESERVATION_COORDINATION_NAMESPACE,
+					entityKey: reservation.reservationId,
+					expectedRevision: null,
+					generation: reservation.generation ?? 1,
+					status: reservation.state,
+					payload: JSON.stringify(reservation),
+				});
+				if (result.outcome !== 'applied') {
+					throw new Error(
+						`reservation import failed for ${reservation.reservationId}: ${result.outcome}`,
+					);
+				}
+				if (reservation.leaseExpiresAt !== undefined) {
+					const lease = acquireCoordinationLease(directory, {
+						...coordinationReservationLeaseKey(reservation),
+						leaseExpiresAt: new Date(reservation.leaseExpiresAt).toISOString(),
+						payload: JSON.stringify({
+							parentSessionId: reservation.parentSessionId,
+							correlationId: reservation.correlationId,
+						}),
+					});
+					if (
+						lease.outcome === 'held' ||
+						lease.outcome === 'stale_generation'
+					) {
+						throw new Error(
+							`reservation lease import failed for ${reservation.reservationId}: ${lease.outcome}`,
+						);
+					}
+				}
+			}
+		},
+	);
+	if (outcome === 'imported') {
+		archiveShadowFileBestEffort(reservationStorePath(directory));
+		writeReservationShadowProjection(directory, legacy.reservations);
+	}
+	return 'ready';
+}
+
+export function buildBackgroundCoderReservationId(input: {
+	parentSessionId: string;
+	planTaskId: string | null;
+	callID: string;
+}): string {
+	const ownerIdentity =
+		input.planTaskId === null
+			? ['call', input.parentSessionId, input.callID]
+			: ['task', input.parentSessionId, input.planTaskId];
+	return `bgcr1:${createHash('sha256')
+		.update(JSON.stringify(ownerIdentity))
+		.digest('hex')}`;
+}
+
+export type BackgroundCoderReservationScanResult =
+	| { status: 'ok'; reservations: BackgroundCoderReservation[] }
+	| { status: 'uncertain'; reason: string };
+
+/**
+ * Strict reservation read for admission. Corruption is uncertainty, never absence.
+ */
+export function scanBackgroundCoderReservationsForAdmission(
+	directory: string,
+): BackgroundCoderReservationScanResult {
+	const importState = ensureReservationCoordinationImported(directory, false);
+	if (importState === 'uncertain') {
+		return {
+			status: 'uncertain',
+			reason: 'background coder reservation coordination state is uncertain',
+		};
+	}
+	if (importState === 'ready') {
+		const reservations = coordinationRowsToReservations(directory);
+		if (reservations !== null) return { status: 'ok', reservations };
+	}
+	return scanLegacyBackgroundCoderReservationsForAdmission(directory);
+}
+
 async function writeBackgroundCoderReservations(
 	directory: string,
 	reservations: BackgroundCoderReservation[],
@@ -4912,6 +5381,97 @@ async function writeBackgroundCoderReservations(
 		reservations,
 	});
 	if (!parsed.success) return false;
+	const importState = ensureReservationCoordinationImported(directory, true);
+	if (importState === 'uncertain') return false;
+	if (importState === 'ready') {
+		try {
+			withCoordinationTransaction(directory, () => {
+				const current = new Map(
+					listCoordinationStates(
+						directory,
+						RESERVATION_COORDINATION_NAMESPACE,
+					).map((row) => [row.entityKey, row]),
+				);
+				const nextIds = new Set(
+					parsed.data.reservations.map((entry) => entry.reservationId),
+				);
+				for (const [reservationId, row] of current) {
+					if (nextIds.has(reservationId)) continue;
+					const deleted = deleteCoordinationState(
+						directory,
+						RESERVATION_COORDINATION_NAMESPACE,
+						reservationId,
+						row.revision,
+					);
+					if (!deleted) {
+						throw new Error(`reservation delete conflict for ${reservationId}`);
+					}
+				}
+				for (const reservation of parsed.data.reservations) {
+					const row = current.get(reservation.reservationId);
+					const result = transitionCoordinationState(directory, {
+						namespace: RESERVATION_COORDINATION_NAMESPACE,
+						entityKey: reservation.reservationId,
+						expectedRevision: row?.revision ?? null,
+						generation: reservation.generation ?? 1,
+						status: reservation.state,
+						payload: JSON.stringify(reservation),
+						event: {
+							streamId: reservation.reservationId,
+							idempotencyKey: createHash('sha256')
+								.update(JSON.stringify(reservation))
+								.digest('hex'),
+							eventType: reservation.state,
+							payload: JSON.stringify(reservation),
+						},
+					});
+					if (result.outcome !== 'applied' && result.outcome !== 'duplicate') {
+						throw new Error(
+							`reservation write failed for ${reservation.reservationId}: ${result.outcome}`,
+						);
+					}
+					const leaseKey = coordinationReservationLeaseKey(reservation);
+					if (reservation.leaseExpiresAt !== undefined) {
+						const lease = acquireCoordinationLease(directory, {
+							...leaseKey,
+							leaseExpiresAt: new Date(
+								reservation.leaseExpiresAt,
+							).toISOString(),
+							payload: JSON.stringify({
+								parentSessionId: reservation.parentSessionId,
+								correlationId: reservation.correlationId,
+							}),
+						});
+						if (
+							lease.outcome === 'held' ||
+							lease.outcome === 'stale_generation'
+						) {
+							throw new Error(
+								`reservation lease write failed for ${reservation.reservationId}: ${lease.outcome}`,
+							);
+						}
+					} else {
+						releaseCoordinationLease(
+							directory,
+							leaseKey.namespace,
+							leaseKey.entityKey,
+							leaseKey.generation,
+							leaseKey.ownerToken,
+						);
+					}
+				}
+			});
+			writeReservationShadowProjection(directory, parsed.data.reservations);
+			return true;
+		} catch (error) {
+			logger.warn(
+				`[background] reservation coordination write failed: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+			return false;
+		}
+	}
 	try {
 		await bunWrite(
 			reservationStorePath(directory),
