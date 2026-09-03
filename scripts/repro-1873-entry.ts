@@ -35,6 +35,10 @@ export {
 	projectDbPath,
 } from '../src/db/project-db.js';
 export { runDriverParityContract } from '../src/db/driver-parity.js';
+// #2539: the memory link/unlink command-path leg dispatches through the same
+// registry the swarm command tool uses.
+export { executeSwarmCommand } from '../src/commands/command-dispatch.js';
+export { clearPool } from '../src/memory/provider-pool.js';
 export {
 	computeMemoryContentHash,
 	createMemoryId,

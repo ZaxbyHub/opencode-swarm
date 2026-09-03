@@ -387,6 +387,22 @@ Each entry below points at a release note in `docs/releases/` and the invariant(
   - **Node floor is enforced, not just declared:** the loader probes
     `process.versions.node` on the node fallback and throws the floor
     diagnostic (`engines` declares `node >= 22.13`).
+  - **No-bindings `run()` returns a `Changes`-shaped object (#2539):**
+    `bun:sqlite`'s `run()` ALWAYS returns `{ changes, lastInsertRowid }`,
+    including the no-bindings form; the node adapter's no-param branch
+    (which executes via `exec()`, void under `node:sqlite`) rebuilds the
+    object from the connection-level counters (`SELECT changes(),
+    last_insert_rowid()` — one cached probe statement). Pre-fix it returned
+    `undefined`, so `.changes` readers crashed under the Node sidecar
+    (`/swarm memory unlink` and populated re-link, via the memory-family
+    ATTACH merge). The shape is pinned in `src/db/driver-parity.ts` for
+    single-statement DML — the only form production reads; an audit of
+    `src/` found exactly two no-bindings return-value readers (the ATTACH
+    merge and the `valid_from` backfill), both healed by the adapter fix.
+    Two deltas are deliberately NOT pinned because the drivers genuinely
+    diverge there: multi-statement strings (bun sums `.changes`, the probe
+    reports the last statement) and non-DML statements (bun reports 0, the
+    probe keeps the previous DML's count).
 - **Maps to AGENTS.md:** invariants 2 (runtime portability — parity contract
   + strict fake), 4 (`.swarm` containment), 7 (driver-parity and
   registry-seam tests), 8 (bounded session state — degradation cooldowns,
