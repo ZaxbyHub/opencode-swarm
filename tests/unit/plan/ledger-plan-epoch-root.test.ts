@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
 	appendLedgerEvent,
-	computePlanHash,
+	computePlanLedgerHash,
 	getOrAdoptPlanEpochUnderLock,
 	initLedger,
 	readLedgerEvents,
@@ -81,7 +81,7 @@ describe('ledger plan epoch root initialization', () => {
 		expect(payload?.plan_epoch).toBe(identity.planEpoch);
 		expect(identity.planId).toBe(derivePlanId(plan));
 		expect(identity.planIdentityHash).toBe(derivePlanIdentityHash(plan));
-		expect(identity.payloadHash).toBe(computePlanHash(plan));
+		expect(identity.payloadHash).toBe(computePlanLedgerHash(plan));
 		expect(identity.rootEventHash).toHaveLength(64);
 		expect(identity.source).toBe('root');
 	});
@@ -100,13 +100,13 @@ describe('ledger plan epoch root initialization', () => {
 			await initLedger(
 				directoryA,
 				derivePlanId(plan),
-				computePlanHash(plan),
+				computePlanLedgerHash(plan),
 				plan,
 			);
 			await initLedger(
 				directoryB,
 				derivePlanId(plan),
-				computePlanHash(plan),
+				computePlanLedgerHash(plan),
 				plan,
 			);
 
@@ -139,7 +139,7 @@ describe('ledger plan epoch root initialization', () => {
 		await initLedger(
 			directory,
 			derivePlanId(plan),
-			computePlanHash(plan),
+			computePlanLedgerHash(plan),
 			plan,
 		);
 
@@ -152,7 +152,7 @@ describe('ledger plan epoch root initialization', () => {
 				event_type: 'plan_exported',
 				source: 'epoch-stability-test',
 			},
-			{ planHashAfter: computePlanHash(plan) },
+			{ planHashAfter: computePlanLedgerHash(plan) },
 		);
 		await takeSnapshotEvent(directory, plan);
 
@@ -196,7 +196,7 @@ describe('readPlanEpochIdentity fails closed on an unreadable ledger', () => {
 		await initLedger(
 			directory,
 			derivePlanId(plan),
-			computePlanHash(plan),
+			computePlanLedgerHash(plan),
 			plan,
 		);
 		await appendLedgerEvent(
@@ -206,7 +206,7 @@ describe('readPlanEpochIdentity fails closed on an unreadable ledger', () => {
 				event_type: 'plan_exported',
 				source: 'unreadable-ledger-test',
 			},
-			{ planHashAfter: computePlanHash(plan) },
+			{ planHashAfter: computePlanLedgerHash(plan) },
 		);
 		return directory;
 	}

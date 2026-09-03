@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Plan } from '../../src/config/plan-schema';
 import {
-	computePlanHash,
+	computePlanStructureHash,
 	initLedger,
 	takeSnapshotEvent,
 } from '../../src/plan/ledger';
@@ -104,8 +104,10 @@ describe('get_approved_plan integration: full drift detection flow', () => {
 		);
 		expect(afterApproval.success).toBe(true);
 		expect(afterApproval.drift_detected).toBe(false);
+		// critic_approved snapshots store the status-excluded structure hash
+		// (issue #2523 single-baseline-hash rule).
 		expect(afterApproval.approved_plan.payload_hash).toBe(
-			computePlanHash(plan),
+			computePlanStructureHash(plan),
 		);
 		expect(afterApproval.approved_plan.approval_metadata.verdict).toBe(
 			'APPROVED',
@@ -158,10 +160,10 @@ describe('get_approved_plan integration: full drift detection flow', () => {
 		expect(afterMutation.success).toBe(true);
 		expect(afterMutation.drift_detected).toBe(true);
 		expect(afterMutation.approved_plan.payload_hash).toBe(
-			computePlanHash(plan),
+			computePlanStructureHash(plan),
 		);
 		expect(afterMutation.current_plan.current_hash).toBe(
-			computePlanHash(mutatedPlan),
+			computePlanStructureHash(mutatedPlan),
 		);
 		expect(afterMutation.current_plan.current_hash).not.toBe(
 			afterMutation.approved_plan.payload_hash,

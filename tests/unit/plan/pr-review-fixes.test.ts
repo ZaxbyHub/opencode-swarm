@@ -133,7 +133,7 @@ function makeLedgerMock(
 		ledgerExists: unknown;
 		initLedger: unknown;
 		readLedgerEvents: unknown;
-		computePlanHash: unknown;
+		computePlanLedgerHash: unknown;
 		computeCurrentPlanHash: unknown;
 		getLatestLedgerSeq: unknown;
 	}> = {},
@@ -145,7 +145,7 @@ function makeLedgerMock(
 		ledgerExists: mock(async () => false),
 		initLedger: mock(async () => {}),
 		readLedgerEvents: mock(async () => []),
-		computePlanHash: mock(() => 'hash'),
+		computePlanLedgerHash: mock(() => 'hash'),
 		computeCurrentPlanHash: mock(() => 'hash'),
 		getLatestLedgerSeq: mock(async () => 0),
 		...overrides,

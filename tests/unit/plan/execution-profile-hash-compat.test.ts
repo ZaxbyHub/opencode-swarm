@@ -4,7 +4,7 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
-	computePlanHash,
+	computePlanLedgerHash,
 	computePlanStructureHash,
 	initLedger,
 	readLedgerEvents,
@@ -83,8 +83,12 @@ describe('execution profile hash compatibility — regression: default-false fie
 		const explicitFalse = withCommitPolicy(legacy, false);
 		const explicitTrue = withCommitPolicy(legacy, true);
 
-		expect(computePlanHash(explicitFalse)).toBe(computePlanHash(legacy));
-		expect(computePlanHash(explicitTrue)).not.toBe(computePlanHash(legacy));
+		expect(computePlanLedgerHash(explicitFalse)).toBe(
+			computePlanLedgerHash(legacy),
+		);
+		expect(computePlanLedgerHash(explicitTrue)).not.toBe(
+			computePlanLedgerHash(legacy),
+		);
 		expect(computePlanStructureHash(explicitFalse)).toBe(
 			computePlanStructureHash(legacy),
 		);
@@ -98,10 +102,14 @@ describe('execution profile hash compatibility — regression: default-false fie
 		const explicitStrict = withPlanningProfile(legacy, 'strict');
 		const explicitBalanced = withPlanningProfile(legacy, 'balanced');
 
-		expect(computePlanHash(explicitStrict)).not.toBe(computePlanHash(legacy));
-		expect(computePlanHash(explicitBalanced)).not.toBe(computePlanHash(legacy));
-		expect(computePlanHash(explicitStrict)).not.toBe(
-			computePlanHash(explicitBalanced),
+		expect(computePlanLedgerHash(explicitStrict)).not.toBe(
+			computePlanLedgerHash(legacy),
+		);
+		expect(computePlanLedgerHash(explicitBalanced)).not.toBe(
+			computePlanLedgerHash(legacy),
+		);
+		expect(computePlanLedgerHash(explicitStrict)).not.toBe(
+			computePlanLedgerHash(explicitBalanced),
 		);
 		expect(computePlanStructureHash(explicitStrict)).not.toBe(
 			computePlanStructureHash(legacy),
@@ -155,7 +163,7 @@ describe('execution profile hash compatibility — regression: default-false fie
 	});
 
 	test('pre-upgrade ledger stays stable across repeated fresh loads', async () => {
-		// Previous computePlanHash saw PlanSchema's injected false as a mutation,
+		// Previous computePlanLedgerHash saw PlanSchema's injected false as a mutation,
 		// triggering a plan_rebuilt event and rewriting the projection on first load.
 		await withSafeTestDir(async (dir) => {
 			const legacy = createLegacyPlan();
@@ -166,7 +174,7 @@ describe('execution profile hash compatibility — regression: default-false fie
 			await initLedger(
 				dir,
 				derivePlanId(legacy),
-				computePlanHash(legacy),
+				computePlanLedgerHash(legacy),
 				legacy,
 			);
 

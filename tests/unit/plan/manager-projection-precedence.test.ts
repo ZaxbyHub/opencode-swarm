@@ -23,7 +23,10 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Plan, TaskStatus } from '../../../src/config/plan-schema';
-import { appendLedgerEvent, computePlanHash } from '../../../src/plan/ledger';
+import {
+	appendLedgerEvent,
+	computePlanLedgerHash,
+} from '../../../src/plan/ledger';
 import { savePlan } from '../../../src/plan/manager';
 import { derivePlanId } from '../../../src/plan/utils';
 
@@ -114,7 +117,7 @@ describe('savePlan projection precedence (issue #1729 production bug #1)', () =>
 				to_status: 'completed',
 				source: 'test_concurrent_writer',
 			},
-			{ planHashAfter: computePlanHash(taskOneCompleted) },
+			{ planHashAfter: computePlanLedgerHash(taskOneCompleted) },
 		);
 
 		// Stale caller still believes 1.1 is pending; 1.2 is being completed
@@ -150,7 +153,7 @@ describe('savePlan projection precedence (issue #1729 production bug #1)', () =>
 				to_status: 'in_progress',
 				source: 'test_update_task_status',
 			},
-			{ planHashAfter: computePlanHash(inProgressPlan) },
+			{ planHashAfter: computePlanLedgerHash(inProgressPlan) },
 		);
 		// Reflect the same transition on disk so plan.json and the ledger
 		// agree at this point.
@@ -212,7 +215,7 @@ describe('savePlan projection precedence (issue #1729 production bug #1)', () =>
 				to_status: 'completed',
 				source: 'test_downgrade_attempt',
 			},
-			{ planHashAfter: computePlanHash(completedPlan) },
+			{ planHashAfter: computePlanLedgerHash(completedPlan) },
 		);
 
 		await savePlan(tmpDir, makePlan('closed', 'pending'));
@@ -240,7 +243,7 @@ describe('savePlan projection precedence (issue #1729 production bug #1)', () =>
 				to_status: 'blocked',
 				source: 'test_concurrent_writer',
 			},
-			{ planHashAfter: computePlanHash(blockedPlan) },
+			{ planHashAfter: computePlanLedgerHash(blockedPlan) },
 		);
 
 		// Caller still believes 1.1 is pending; merge must adopt blocked.
@@ -269,7 +272,7 @@ describe('savePlan projection precedence (issue #1729 production bug #1)', () =>
 				to_status: 'in_progress',
 				source: 'test_downgrade_attempt',
 			},
-			{ planHashAfter: computePlanHash(inProgressPlan) },
+			{ planHashAfter: computePlanLedgerHash(inProgressPlan) },
 		);
 
 		await savePlan(tmpDir, makePlan('blocked', 'pending'));

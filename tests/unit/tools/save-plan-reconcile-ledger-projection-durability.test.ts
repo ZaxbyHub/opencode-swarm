@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import { closeProjectDb } from '../../../src/db/project-db';
 import {
-	computePlanHash,
+	computePlanLedgerHash,
 	_internals as ledgerInternals,
 	readLedgerEvents,
 	replayFromLedger,
@@ -63,7 +63,7 @@ function seedInvalidUtf8Ledger(directory: string): {
 	const initial = makePlan('pending');
 	const projected = makePlan('completed');
 	const planId = 'raw-ledger-recovery-Raw_Ledger_Recovery';
-	const initialHash = computePlanHash(initial);
+	const initialHash = computePlanLedgerHash(initial);
 	const created = Buffer.from(
 		`${JSON.stringify({
 			seq: 1,

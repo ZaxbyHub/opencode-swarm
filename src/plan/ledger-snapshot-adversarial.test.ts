@@ -9,7 +9,7 @@ import * as path from 'node:path';
 
 import {
 	appendLedgerEvent,
-	computePlanHash,
+	computePlanLedgerHash,
 	replayFromLedger,
 	takeSnapshotEvent,
 } from './ledger';
@@ -105,7 +105,7 @@ describe('in-ledger snapshot adversarial tests', () => {
 			// to simulate the scenario where neither plan.json, snapshot event, nor
 			// embedded plan is available (pre-#444 legacy ledger format).
 			const ledgerPath = path.join(swarmDir, 'plan-ledger.jsonl');
-			const planHash = computePlanHash(initialPlan);
+			const planHash = computePlanLedgerHash(initialPlan);
 			const legacyEvent = {
 				seq: 1,
 				timestamp: new Date().toISOString(),

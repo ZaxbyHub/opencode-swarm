@@ -24,7 +24,8 @@ import { join } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
 	appendLedgerEventWithRetry,
-	computePlanHash,
+	computePlanLedgerHash,
+	computePlanStructureHash,
 	initLedger,
 	loadLastApprovedPlan,
 	takeSnapshotEvent,
@@ -194,7 +195,10 @@ describe('loadLastApprovedPlan', () => {
 		expect(result).not.toBeNull();
 		expect(result?.plan.current_phase).toBe(2);
 		expect(result?.approval).toEqual({ phase: 2, verdict: 'APPROVED' });
-		expect(result?.payloadHash).toBe(computePlanHash(secondPlan));
+		// critic_approved snapshots store the status-excluded structure hash as
+		// their payload_hash (issue #2523 single-baseline-hash rule), not the
+		// ledger digest.
+		expect(result?.payloadHash).toBe(computePlanStructureHash(secondPlan));
 	});
 
 	test('latest-wins across multiple critic_approved snapshots', async () => {
@@ -225,7 +229,7 @@ describe('appendLedgerEventWithRetry', () => {
 		const ctx = await setupDirWithInitializedLedger();
 		dir = ctx.dir;
 		plan = ctx.plan;
-		initialHash = computePlanHash(plan);
+		initialHash = computePlanLedgerHash(plan);
 	});
 
 	afterEach(async () => {

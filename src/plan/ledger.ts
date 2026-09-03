@@ -128,7 +128,7 @@ function resolvePlanEpochIdentity(
 ): PlanEpochIdentity | null {
 	const planId = derivePlanId(authoritativePlan);
 	const planIdentityHash = derivePlanIdentityHash(authoritativePlan);
-	const payloadHash = computePlanHash(authoritativePlan);
+	const payloadHash = computePlanLedgerHash(authoritativePlan);
 	const candidates = extractPlanEpochCandidates(events, planId);
 	const distinctCandidateKeys = new Set(
 		candidates.map(
@@ -314,7 +314,7 @@ function extractPlanEpochCandidates(
 				`Plan epoch adoption snapshot at seq ${event.seq} embeds a different plan identity.`,
 			);
 		}
-		if (computePlanHash(embeddedPlan.data) !== payloadHash) {
+		if (computePlanLedgerHash(embeddedPlan.data) !== payloadHash) {
 			throw new Error(
 				`Plan epoch adoption snapshot at seq ${event.seq} has a mismatched payload_hash.`,
 			);
@@ -416,8 +416,15 @@ function findRawMalformedSuffix(content: Buffer): Buffer {
 }
 
 /**
- * Compute a SHA-256 hash of the plan state.
+ * Compute a SHA-256 digest of the FULL plan state for the ledger hash chain.
  * Uses deterministic JSON serialization for consistent hashing.
+ *
+ * This is the LEDGER digest, not an approval-baseline hash. It deliberately
+ * INCLUDES `phase.status` and `task.status` because `plan_hash_after` pins the
+ * exact persisted ledger state, execution progress included. Its output is
+ * persisted on-disk (`plan_hash_after`, plan-epoch identity, snapshot
+ * integrity, staleness detection), so its byte output must NEVER change.
+ * For drift-baseline comparisons use {@link computePlanStructureHash}.
  *
  * IMPORTANT: Intentionally excludes `specMtime` and `specHash` fields.
  * These fields track changes to spec.md but do not affect plan execution or structure.
@@ -425,10 +432,14 @@ function findRawMalformedSuffix(content: Buffer): Buffer {
  * invalidating cached plan state unnecessarily. Spec changes are tracked separately
  * in the ledger via `spec_updated` and acknowledgment events.
  *
+ * Renamed in issue #2523 (retiring the old generic name) so that exactly one
+ * name (`computePlanStructureHash`) identifies the plan-structure hash. The
+ * rename is byte-identical — the normalization below is unchanged.
+ *
  * @param plan - The plan to hash
  * @returns Hex-encoded SHA-256 hash
  */
-export function computePlanHash(plan: Plan): string {
+export function computePlanLedgerHash(plan: Plan): string {
 	// Create deterministic representation by sorting keys
 	const normalized = {
 		schema_version: plan.schema_version,
@@ -467,29 +478,39 @@ export function computePlanHash(plan: Plan): string {
 }
 
 /**
- * Compute a SHA-256 hash of the plan's STRUCTURE, excluding transient
- * execution progress fields (`phase.status` and `task.status`).
+ * Compute a SHA-256 hash of the plan's STRUCTURE — THE single approval-baseline
+ * hash (issue #2523). Excludes the transient execution-progress fields
+ * (`phase.status` and `task.status`).
  *
- * This mirrors {@link computePlanHash}'s normalization byte-for-byte EXCEPT it
- * omits the two status fields from the hashed payload. It exists solely for the
- * plan-critic execution gate (`assertPlanCriticApprovedForExecution`), which
- * must recognize a plan as "the same plan the critic approved" even after the
- * architect flips a task to `in_progress` before delegating its coder. Including
- * status (as `computePlanHash` does) would make the gate fire on the very first
- * conforming coder dispatch, because `update_task_status(taskId,'in_progress')`
- * runs before it and mutates the status-inclusive hash.
+ * DECISION (documented per issue #2523): task/phase status does NOT belong in
+ * the baseline hash. The baseline exists to detect *plan edits* — content,
+ * scope, dependencies, files — not execution progress. Every writer and reader
+ * of an approval-baseline `payload_hash` uses this function:
+ * - `takeSnapshotEvent` stores it as the `payload_hash` of every
+ *   `source === 'critic_approved'` snapshot (the gate recorders in
+ *   `src/hooks/delegation-gate.ts` and the drift-verifier approval in
+ *   `src/tools/write-drift-evidence.ts`).
+ * - `get_approved_plan` compares it against that stored hash to compute
+ *   `drift_detected`.
+ * - The scope/participation bindings persist it as `planStructureHash` and
+ *   re-derive it with the same function at verification time.
+ * A status-only change (e.g. `update_task_status` flipping a task to
+ * `in_progress`/`completed`) must therefore NEVER trip a baseline comparison;
+ * any structural change (description, acceptance, dependencies, files, added
+ * or removed tasks/phases) always must.
  *
- * IMPORTANT: This is intentionally a SEPARATE function, not a refactor of
- * `computePlanHash`. `computePlanHash` is load-bearing for ledger replay and
- * staleness/integrity detection (its output is persisted on-disk as
- * `plan_hash_after`), so its byte output must never change. Do NOT collapse
- * these two into a shared normalizer.
+ * This mirrors {@link computePlanLedgerHash}'s normalization byte-for-byte
+ * EXCEPT it omits the two status fields from the hashed payload. The two
+ * functions are deliberately distinct: {@link computePlanLedgerHash} is
+ * load-bearing for ledger replay and staleness/integrity detection (its
+ * output is persisted on-disk as `plan_hash_after`), so its byte output must
+ * never change. Do NOT collapse these two into a shared normalizer.
  *
  * @param plan - The plan to hash
  * @returns Hex-encoded SHA-256 hash of the status-excluded structure
  */
 export function computePlanStructureHash(plan: Plan): string {
-	// Deterministic representation matching computePlanHash, minus status fields.
+	// Deterministic representation matching computePlanLedgerHash, minus status fields.
 	const normalized = {
 		schema_version: plan.schema_version,
 		title: plan.title,
@@ -525,7 +546,10 @@ export function computePlanStructureHash(plan: Plan): string {
 }
 
 /**
- * Read the current plan.json and compute its hash.
+ * Read the current plan.json and compute its LEDGER digest (the
+ * status-inclusive {@link computePlanLedgerHash}, not the approval-baseline
+ * structure hash). Used for hash-chain bookkeeping (`plan_hash_before`,
+ * concurrency-token refresh), never for drift baselines.
  *
  * @param directory - The working directory
  * @returns Hash of current plan.json, or empty string if not found
@@ -535,7 +559,7 @@ export function computeCurrentPlanHash(directory: string): string {
 	try {
 		const content = fs.readFileSync(planPath, 'utf8');
 		const plan: Plan = JSON.parse(content);
-		return computePlanHash(plan);
+		return computePlanLedgerHash(plan);
 	} catch {
 		// If plan.json doesn't exist or is invalid, return empty hash
 		return '';
@@ -675,7 +699,7 @@ export async function initLedger(
 			if (fs.existsSync(planJsonPath)) {
 				const content = fs.readFileSync(planJsonPath, 'utf8');
 				const plan: Plan = JSON.parse(content);
-				planHashAfter = computePlanHash(plan);
+				planHashAfter = computePlanLedgerHash(plan);
 				if (!embeddedPlan) embeddedPlan = plan;
 			}
 		} catch {
@@ -812,7 +836,7 @@ export async function getOrAdoptPlanEpochUnderLock(
 	assertProjectRoot(directory);
 	const planId = derivePlanId(authoritativePlan);
 	const planIdentityHash = derivePlanIdentityHash(authoritativePlan);
-	const payloadHash = computePlanHash(authoritativePlan);
+	const payloadHash = computePlanLedgerHash(authoritativePlan);
 	let lastStaleWriterError: LedgerStaleWriterError | undefined;
 	for (let attempt = 0; attempt < 4; attempt++) {
 		if (!(await ledgerExists(directory))) {
@@ -1167,13 +1191,16 @@ export async function takeSnapshotWithRetry(
  *     snapshot payload (e.g. phase number, verdict, summary) so that
  *     downstream readers can filter without decoding prompts.
  *   - payloadHashOverride: when supplied, stored as the snapshot payload's
- *     `payload_hash` INSTEAD of the default `computePlanHash(plan)`. Used by the
- *     plan-critic gate to persist a status-excluded structural hash
- *     (`computePlanStructureHash`) so the gate can match the plan across the
- *     architect's pre-delegation `in_progress` status flip. Note this only
- *     changes the embedded snapshot `payload_hash`; the ledger event's
- *     hash-chain field `plan_hash_after` is unaffected (still governed by
- *     `planHashAfter` / on-disk plan.json), preserving replay integrity.
+ *     `payload_hash` INSTEAD of the source-derived default. The default for a
+ *     `source === 'critic_approved'` snapshot is the status-excluded structure
+ *     hash (`computePlanStructureHash`) — an approval baseline is, by
+ *     definition (issue #2523), the plan's structure, so this is enforced here
+ *     at the single write choke point and every approval-snapshot writer gets
+ *     it without having to remember an override. Every other source defaults
+ *     to the status-inclusive ledger digest (`computePlanLedgerHash`).
+ *     Note this only changes the embedded snapshot `payload_hash`; the ledger
+ *     event's hash-chain field `plan_hash_after` is unaffected (still governed
+ *     by `planHashAfter` / on-disk plan.json), preserving replay integrity.
  * @returns The LedgerEvent that was written
  */
 export async function takeSnapshotEvent(
@@ -1190,7 +1217,11 @@ export async function takeSnapshotEvent(
 		expectedLedgerHash?: string;
 	},
 ): Promise<LedgerEvent> {
-	const payloadHash = options?.payloadHashOverride ?? computePlanHash(plan);
+	const payloadHash =
+		options?.payloadHashOverride ??
+		(options?.source === 'critic_approved'
+			? computePlanStructureHash(plan)
+			: computePlanLedgerHash(plan));
 	const snapshotPayload: SnapshotEventPayload & {
 		approval?: Record<string, unknown>;
 	} = {
@@ -1302,7 +1333,7 @@ export async function replaceTruncatedLedgerWithRecoveryRoot(
 			const archiveTempPath = `${archivePath}.tmp`;
 			const canonicalTempPath = `${ledgerPath}.reconcile.${Date.now()}.${Math.floor(Math.random() * 1e9)}.tmp`;
 
-			const planHash = computePlanHash(validated);
+			const planHash = computePlanLedgerHash(validated);
 			const rawBadSuffix = findRawMalformedSuffix(originalBytes);
 			if (rawBadSuffix.length === 0) {
 				throw new LedgerStaleWriterError(
@@ -2046,7 +2077,7 @@ function findLastApprovedSnapshot(
 // ============================================================================
 
 export const _internals = {
-	computePlanHash,
+	computePlanLedgerHash,
 	computePlanStructureHash,
 	computeCurrentPlanHash,
 	ledgerExists,

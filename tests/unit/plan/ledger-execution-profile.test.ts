@@ -2,7 +2,7 @@
  * Tests for execution_profile ledger events:
  * - execution_profile_set replay applies profile to plan
  * - execution_profile_locked replay locks the profile
- * - computePlanHash covers execution_profile
+ * - computePlanLedgerHash covers execution_profile
  * - full ledger replay round-trip with profile events
  */
 
@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import type { Plan } from '../../../src/config/plan-schema';
 import {
 	appendLedgerEvent,
-	computePlanHash,
+	computePlanLedgerHash,
 	initLedger,
 	readLedgerEvents,
 	replayFromLedger,
@@ -59,7 +59,7 @@ async function setupDir(): Promise<{ dir: string; plan: Plan }> {
 	await initLedger(
 		dir,
 		'ep-swarm-Execution_Profile_Test',
-		computePlanHash(plan),
+		computePlanLedgerHash(plan),
 		plan,
 	);
 	return { dir, plan };
@@ -75,10 +75,10 @@ afterEach(async () => {
 	await rm(dir, { recursive: true, force: true });
 });
 
-describe('computePlanHash covers execution_profile', () => {
+describe('computePlanLedgerHash covers execution_profile', () => {
 	test('hash changes when execution_profile is added', () => {
 		const plan = createTestPlan();
-		const hashWithout = computePlanHash(plan);
+		const hashWithout = computePlanLedgerHash(plan);
 		const planWithProfile = createTestPlan({
 			execution_profile: {
 				parallelization_enabled: true,
@@ -87,7 +87,7 @@ describe('computePlanHash covers execution_profile', () => {
 				locked: false,
 			},
 		});
-		const hashWith = computePlanHash(planWithProfile);
+		const hashWith = computePlanLedgerHash(planWithProfile);
 		expect(hashWith).not.toBe(hashWithout);
 	});
 
@@ -100,7 +100,7 @@ describe('computePlanHash covers execution_profile', () => {
 				locked: false,
 			},
 		});
-		const hashUnlocked = computePlanHash(plan);
+		const hashUnlocked = computePlanLedgerHash(plan);
 		const planLocked = createTestPlan({
 			execution_profile: {
 				parallelization_enabled: false,
@@ -109,7 +109,7 @@ describe('computePlanHash covers execution_profile', () => {
 				locked: true,
 			},
 		});
-		const hashLocked = computePlanHash(planLocked);
+		const hashLocked = computePlanLedgerHash(planLocked);
 		expect(hashLocked).not.toBe(hashUnlocked);
 	});
 
@@ -122,7 +122,7 @@ describe('computePlanHash covers execution_profile', () => {
 				locked: false,
 			},
 		});
-		expect(computePlanHash(plan)).toBe(computePlanHash(plan));
+		expect(computePlanLedgerHash(plan)).toBe(computePlanLedgerHash(plan));
 	});
 });
 
@@ -146,7 +146,10 @@ describe('execution_profile_set event replay', () => {
 				payload: { execution_profile: profile },
 			},
 			{
-				planHashAfter: computePlanHash({ ...plan, execution_profile: profile }),
+				planHashAfter: computePlanLedgerHash({
+					...plan,
+					execution_profile: profile,
+				}),
 			},
 		);
 
@@ -179,7 +182,10 @@ describe('execution_profile_set event replay', () => {
 				payload: { execution_profile: profile },
 			},
 			{
-				planHashAfter: computePlanHash({ ...plan, execution_profile: profile }),
+				planHashAfter: computePlanLedgerHash({
+					...plan,
+					execution_profile: profile,
+				}),
 			},
 		);
 
@@ -210,7 +216,7 @@ describe('execution_profile_set event replay', () => {
 					},
 				},
 			},
-			{ planHashAfter: computePlanHash(plan) },
+			{ planHashAfter: computePlanLedgerHash(plan) },
 		);
 
 		// Replay should not crash and should return plan unchanged (no profile set)
@@ -242,7 +248,10 @@ describe('execution_profile_locked event replay', () => {
 				payload: { execution_profile: profile },
 			},
 			{
-				planHashAfter: computePlanHash({ ...plan, execution_profile: profile }),
+				planHashAfter: computePlanLedgerHash({
+					...plan,
+					execution_profile: profile,
+				}),
 			},
 		);
 
@@ -255,7 +264,7 @@ describe('execution_profile_locked event replay', () => {
 				plan_id: planId,
 			},
 			{
-				planHashAfter: computePlanHash({
+				planHashAfter: computePlanLedgerHash({
 					...plan,
 					execution_profile: profileLocked,
 				}),
@@ -280,7 +289,7 @@ describe('execution_profile_locked event replay', () => {
 				source: 'save_plan',
 				plan_id: planId,
 			},
-			{ planHashAfter: computePlanHash(plan) },
+			{ planHashAfter: computePlanLedgerHash(plan) },
 		);
 
 		const replayed = await replayFromLedger(dir);
@@ -308,7 +317,10 @@ describe('execution_profile_locked event replay', () => {
 				payload: { execution_profile: profile },
 			},
 			{
-				planHashAfter: computePlanHash({ ...plan, execution_profile: profile }),
+				planHashAfter: computePlanLedgerHash({
+					...plan,
+					execution_profile: profile,
+				}),
 			},
 		);
 
@@ -320,7 +332,7 @@ describe('execution_profile_locked event replay', () => {
 				plan_id: planId,
 			},
 			{
-				planHashAfter: computePlanHash({
+				planHashAfter: computePlanLedgerHash({
 					...plan,
 					execution_profile: { ...profile, locked: true },
 				}),
