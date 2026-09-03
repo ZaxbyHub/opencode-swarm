@@ -533,17 +533,23 @@ function writeCoordinationProjection(
 	checkpoint.sequence = sequence;
 	checkpoint.updatedAt = Date.now();
 	writeCheckpointFile(directory, checkpoint);
-	const legacyPayload =
-		Object.values(checkpoint.records)
-			.map((entry) => JSON.stringify(entry))
-			.join('\n') + (Object.keys(checkpoint.records).length > 0 ? '\n' : '');
-	writeLegacyStoreFile(storePath(directory), legacyPayload);
 	fs.writeFileSync(
 		projectionMarkerPath(checkpointPath(directory)),
 		'',
 		'utf-8',
 	);
-	fs.writeFileSync(projectionMarkerPath(storePath(directory)), '', 'utf-8');
+	// A fresh coordinated store is checkpoint-only. Keep updating an existing
+	// legacy projection for an older peer, but never recreate the retired JSONL
+	// authority after it has been absent or cold-archived.
+	const legacyPath = storePath(directory);
+	if (fs.existsSync(legacyPath)) {
+		const legacyPayload =
+			Object.values(checkpoint.records)
+				.map((entry) => JSON.stringify(entry))
+				.join('\n') + (Object.keys(checkpoint.records).length > 0 ? '\n' : '');
+		writeLegacyStoreFile(legacyPath, legacyPayload);
+		fs.writeFileSync(projectionMarkerPath(legacyPath), '', 'utf-8');
+	}
 }
 
 function writeLegacyStoreFile(targetPath: string, content: string): void {
@@ -690,6 +696,26 @@ function coordinationProjectionMatches(
 	view: Record<string, PrSubscriptionRecord>,
 ): boolean {
 	try {
+		const legacyPath = storePath(directory);
+		if (!fileExistsStrict(legacyPath)) {
+			const checkpointRead = readCheckpoint(directory);
+			if (checkpointRead.kind !== 'ok') return false;
+			const prepared = prepareCoordinationPersistence(
+				directory,
+				view,
+				checkpointRead.value,
+			).checkpoint;
+			return (
+				isDeepStrictEqualByJson(
+					checkpointRead.value.records,
+					prepared.records,
+				) &&
+				isDeepStrictEqualByJson(
+					checkpointRead.value.terminalSummary,
+					prepared.terminalSummary,
+				)
+			);
+		}
 		return isDeepStrictEqualByJson(
 			loadLegacyPrSubscriptionViewStrict(directory),
 			view,
@@ -722,9 +748,11 @@ function ensurePrSubscriptionCoordinationImported(
 
 	const coordinationView = readCoordinationSubscriptions(directory);
 	if (coordinationView !== null && Object.keys(coordinationView).length > 0) {
+		const legacyPath = storePath(directory);
 		const projectionNeedsRepair =
-			!fileExistsStrict(projectionMarkerPath(storePath(directory))) ||
 			!fileExistsStrict(projectionMarkerPath(checkpointPath(directory))) ||
+			(fileExistsStrict(legacyPath) &&
+				!fileExistsStrict(projectionMarkerPath(legacyPath))) ||
 			!coordinationProjectionMatches(directory, coordinationView);
 		if (projectionNeedsRepair) {
 			for (const filePath of [
@@ -821,6 +849,13 @@ function ensurePrSubscriptionCoordinationImported(
 }
 
 function canUseCoordinationWritePath(directory: string): boolean {
+	// Keep the v2 checkpoint migration state machine authoritative until it has
+	// consumed and archived its JSONL source. Importing its partial projection
+	// into SQLite here would discard the cursor and strand the unread tail.
+	const checkpoint = readCheckpoint(directory);
+	if (checkpoint.kind === 'ok' && checkpoint.value.migration?.done === false) {
+		return false;
+	}
 	return ensurePrSubscriptionCoordinationImported(directory, true);
 }
 
@@ -828,6 +863,7 @@ function persistCoordinationSubscriptions(
 	directory: string,
 	view: Record<string, PrSubscriptionRecord>,
 	writeProjection = true,
+	events: AuditEvent[] = [],
 ): void {
 	const prepared = prepareCoordinationPersistence(directory, view);
 	withCoordinationTransaction(directory, () => {
@@ -877,6 +913,21 @@ function persistCoordinationSubscriptions(
 	if (writeProjection) {
 		writeCoordinationProjection(directory, prepared.view, prepared.checkpoint);
 	}
+	if (events.length === 0) return;
+	const checkpoint = readCheckpoint(directory);
+	if (checkpoint.kind !== 'ok') return;
+	const auditCompaction = prepareAuditCompaction(directory);
+	if (applyAuditCompaction(directory, auditCompaction) && auditCompaction) {
+		checkpoint.value.maintenance.droppedAuditTransitions +=
+			auditCompaction.dropped;
+		writeCheckpointFile(directory, checkpoint.value);
+	}
+	flushAuditEvents(
+		directory,
+		events,
+		checkpoint.value.sequence,
+		checkpoint.value.maintenance,
+	);
 }
 
 function foreignLegacySlotPath(directory: string): string {
@@ -2720,7 +2771,6 @@ export async function subscribe(
 				);
 				if (match) {
 					onSubscriptionCreated?.(directory, match);
-					writeCoordinationProjection(directory, view);
 					return match;
 				}
 				if (
@@ -2756,7 +2806,9 @@ export async function subscribe(
 				};
 				validateRecord(record);
 				view[correlationId] = record;
-				persistCoordinationSubscriptions(directory, view);
+				persistCoordinationSubscriptions(directory, view, true, [
+					{ kind: 'subscribe', correlationId },
+				]);
 				onSubscriptionCreated?.(directory, record);
 				return record;
 			}
@@ -2841,7 +2893,6 @@ export async function unsubscribe(
 					(r) => r.correlationId === correlationId && r.status === 'active',
 				);
 				if (!match) {
-					writeCoordinationProjection(directory, view);
 					return null;
 				}
 				const removed: PrSubscriptionRecord = {
@@ -2851,7 +2902,9 @@ export async function unsubscribe(
 					updatedAt: Date.now(),
 				};
 				view[correlationId] = removed;
-				persistCoordinationSubscriptions(directory, view);
+				persistCoordinationSubscriptions(directory, view, true, [
+					{ kind: 'unsubscribe', correlationId },
+				]);
 				return removed;
 			}
 			const loaded = loadViewForWrite(directory);
@@ -2930,13 +2983,43 @@ export async function updateSnapshot(
 		STORE_LOCK_AGENT,
 		STORE_LOCK_TASK,
 		async () => {
+			// A direct authoritative lookup lets a no-op return without invoking the
+			// migration/projection repair path, which would otherwise rewrite a
+			// healthy checkpoint solely to discover there is no matching record.
+			const existingCoordination = readCoordinationSubscriptions(directory);
+			// A legacy JSONL file may be mid-import or need its audit/projection
+			// repaired, so only bypass that path once the coordinated store is the
+			// sole remaining projection.
+			if (
+				existingCoordination !== null &&
+				!fileExistsStrict(storePath(directory))
+			) {
+				const match = Object.values(existingCoordination).find(
+					(r) => r.correlationId === correlationId && r.status === 'active',
+				);
+				if (!match) return null;
+				const updated: PrSubscriptionRecord = {
+					...match,
+					...updates,
+					correlationId,
+					sessionID: match.sessionID,
+					repoFullName: match.repoFullName,
+					prNumber: match.prNumber,
+					prUrl: match.prUrl,
+					createdAt: match.createdAt,
+					updatedAt: Date.now(),
+				};
+				validateRecord(updated);
+				existingCoordination[correlationId] = updated;
+				persistCoordinationSubscriptions(directory, existingCoordination);
+				return updated;
+			}
 			if (canUseCoordinationWritePath(directory)) {
 				const view = readCoordinationSubscriptions(directory) ?? {};
 				const match = Object.values(view).find(
 					(r) => r.correlationId === correlationId && r.status === 'active',
 				);
 				if (!match) {
-					writeCoordinationProjection(directory, view);
 					return null;
 				}
 				const updated: PrSubscriptionRecord = {
@@ -3020,6 +3103,7 @@ export async function sweepStale(
 				if (canUseCoordinationWritePath(directory)) {
 					const view = readCoordinationSubscriptions(directory) ?? {};
 					let swept = 0;
+					const expiredCorrelationIds: string[] = [];
 					const now = Date.now();
 					for (const record of Object.values(view)) {
 						if (record.status !== 'active') continue;
@@ -3033,13 +3117,20 @@ export async function sweepStale(
 								isWatching: false,
 								updatedAt: now,
 							};
+							expiredCorrelationIds.push(record.correlationId);
 							swept += 1;
 						}
 					}
 					if (swept > 0) {
-						persistCoordinationSubscriptions(directory, view);
-					} else {
-						writeCoordinationProjection(directory, view);
+						persistCoordinationSubscriptions(
+							directory,
+							view,
+							true,
+							expiredCorrelationIds.map((correlationId) => ({
+								kind: 'expired',
+								correlationId,
+							})),
+						);
 					}
 					return swept;
 				}

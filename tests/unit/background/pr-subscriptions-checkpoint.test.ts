@@ -18,6 +18,7 @@ import {
 	unsubscribe,
 	updateSnapshot,
 } from '../../../src/background/pr-subscriptions';
+import { closeProjectDb } from '../../../src/db/project-db.js';
 import { freezeClock } from '../../helpers/test-clock';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -100,6 +101,7 @@ describe('pr-subscriptions checkpoint store', () => {
 		dir = makeTempProject();
 	});
 	afterEach(() => {
+		closeProjectDb(dir);
 		fs.rmSync(dir, { recursive: true, force: true });
 	});
 
