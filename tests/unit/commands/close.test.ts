@@ -196,6 +196,10 @@ mock.module('../../../src/config/index.js', () => ({
 	// Pure filesystem lookup for a user prompt override; not exercised by
 	// this test and must not touch the real filesystem in a unit test.
 	loadAgentPrompt: () => ({}),
+	// Gate tools in close.ts's transitive import graph read user gate
+	// overrides through this seam (issue #2524); the stub keeps the unit
+	// test hermetic and returns no overrides.
+	loadGateOverrides: () => undefined,
 }));
 
 mock.module('../../../src/services/skill-improver.js', () => ({

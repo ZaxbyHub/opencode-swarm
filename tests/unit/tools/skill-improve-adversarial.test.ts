@@ -34,6 +34,7 @@ mock.module('../../../src/config/index.ts', () => ({
 		meta: {},
 	})),
 	loadAgentPrompt: mock(() => ''),
+	loadGateOverrides: mock(() => undefined),
 	_internals: { loadPluginConfigWithMeta: mockLoadPluginConfigWithMeta },
 }));
 
