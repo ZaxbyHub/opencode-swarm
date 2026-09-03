@@ -190,14 +190,32 @@ describe('coordination store', () => {
 		expect(getCoordinationState(tempDir, 'bounded', 'one')?.revision).toBe(3);
 	});
 
-	test('fails a pruned event replay at its state revision fence', () => {
+	test('retains pruned idempotency keys as a durable replay fence', () => {
 		_internals.maxEventsPerStream = 2;
+		const first = {
+			namespace: 'bounded',
+			entityKey: 'replay',
+			expectedRevision: null,
+			generation: 1,
+			status: 'active',
+			payload: '{"index":0}',
+			event: {
+				streamId: 'bounded:replay',
+				idempotencyKey: 'event-0',
+				eventType: 'advanced',
+				payload: '{"index":0}',
+			},
+		} as const;
+		expect(transitionCoordinationState(tempDir, first)).toMatchObject({
+			outcome: 'applied',
+		});
 		for (let index = 0; index < 3; index += 1) {
+			if (index === 0) continue;
 			expect(
 				transitionCoordinationState(tempDir, {
 					namespace: 'bounded',
 					entityKey: 'replay',
-					expectedRevision: index === 0 ? null : index,
+					expectedRevision: index,
 					generation: 1,
 					status: 'active',
 					payload: JSON.stringify({ index }),
@@ -215,7 +233,7 @@ describe('coordination store', () => {
 			transitionCoordinationState(tempDir, {
 				namespace: 'bounded',
 				entityKey: 'replay',
-				expectedRevision: null,
+				expectedRevision: 3,
 				generation: 1,
 				status: 'active',
 				payload: '{"index":0}',
@@ -226,10 +244,33 @@ describe('coordination store', () => {
 					payload: '{"index":0}',
 				},
 			}),
-		).toMatchObject({ outcome: 'revision_conflict' });
+		).toMatchObject({ outcome: 'duplicate' });
+		expect(
+			transitionCoordinationState(tempDir, {
+				namespace: 'bounded',
+				entityKey: 'replay',
+				expectedRevision: 3,
+				generation: 1,
+				status: 'active',
+				payload: '{"index":0}',
+				event: {
+					streamId: 'bounded:replay',
+					idempotencyKey: 'event-0',
+					eventType: 'advanced',
+					payload: '{"different":true}',
+				},
+			}),
+		).toMatchObject({ outcome: 'idempotency_conflict' });
 		expect(getCoordinationState(tempDir, 'bounded', 'replay')?.revision).toBe(
 			3,
 		);
+		expect(
+			getProjectDb(tempDir)
+				.query<{ count: number }, []>(
+					"SELECT COUNT(*) AS count FROM coordination_event_fence WHERE stream_id = 'bounded:replay'",
+				)
+				.get()?.count,
+		).toBe(3);
 	});
 
 	test('requires a state revision fence for an event-bearing transition', () => {

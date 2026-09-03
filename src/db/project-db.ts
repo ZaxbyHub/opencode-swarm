@@ -308,6 +308,21 @@ const MIGRATIONS: Migration[] = [
 		sql: `CREATE INDEX IF NOT EXISTS idx_coordination_event_created
 			ON coordination_event(created_at, stream_id, version)`,
 	},
+	// Durable idempotency fence (issue #2481): retain the key fingerprint even
+	// when the append-only event history prunes old rows.
+	{
+		version: 26,
+		name: 'create_coordination_event_idempotency_fence',
+		sql: `CREATE TABLE IF NOT EXISTS coordination_event_fence (
+			stream_id TEXT NOT NULL,
+			idempotency_key TEXT NOT NULL,
+			event_type TEXT NOT NULL,
+			generation INTEGER NOT NULL CHECK(generation >= 0),
+			payload_digest TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY(stream_id, idempotency_key)
+		)`,
+	},
 ];
 
 interface ProjectDbRecord {

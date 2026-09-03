@@ -1,6 +1,7 @@
 /** Transactional coordination authority for issue #2481. */
 
 import type { Database } from 'bun:sqlite';
+import { createHash } from 'node:crypto';
 import { DURABILITY_CLASSES, withImmediateTransaction } from './durability.js';
 import { getProjectDb, projectDbExists } from './project-db.js';
 
@@ -82,6 +83,12 @@ interface CoordinationStateRow {
 	updated_at: string;
 }
 
+interface CoordinationEventFenceRow {
+	event_type: string;
+	generation: number;
+	payload_digest: string;
+}
+
 function boundedText(value: string, label: string, max: number): string {
 	if (value.length === 0 || value.length > max) {
 		throw new Error(`${label} must contain 1..${max} characters`);
@@ -93,6 +100,10 @@ function validatePayload(payload: string): string {
 	boundedText(payload, 'payload', MAX_PAYLOAD_CHARS);
 	JSON.parse(payload);
 	return payload;
+}
+
+function digestPayload(payload: string): string {
+	return createHash('sha256').update(payload, 'utf8').digest('hex');
 }
 
 function rowToState(
@@ -268,15 +279,8 @@ export function transitionCoordinationStateWithinTransaction(
 	const current = readState(db, input.namespace, input.entityKey);
 	if (input.event) {
 		const duplicate = db
-			.query<
-				{
-					event_type: string;
-					generation: number;
-					payload: string;
-				},
-				[string, string]
-			>(
-				`SELECT event_type, generation, payload FROM coordination_event
+			.query<CoordinationEventFenceRow, [string, string]>(
+				`SELECT event_type, generation, payload_digest FROM coordination_event_fence
 				 WHERE stream_id = ? AND idempotency_key = ?`,
 			)
 			.get(input.event.streamId, input.event.idempotencyKey);
@@ -284,7 +288,7 @@ export function transitionCoordinationStateWithinTransaction(
 			const exact =
 				duplicate.event_type === input.event.eventType &&
 				duplicate.generation === input.generation &&
-				duplicate.payload === input.event.payload;
+				duplicate.payload_digest === digestPayload(input.event.payload);
 			return {
 				outcome: exact ? 'duplicate' : 'idempotency_conflict',
 				state: current,
@@ -318,6 +322,7 @@ export function transitionCoordinationStateWithinTransaction(
 			return { outcome: 'stream_version_conflict', state: current };
 		}
 		const nextVersion = currentStreamVersion + 1;
+		const payloadDigest = digestPayload(input.event.payload);
 		db.run(
 			`INSERT INTO coordination_event
 				 (stream_id, version, idempotency_key, event_type, generation, payload, created_at)
@@ -329,6 +334,22 @@ export function transitionCoordinationStateWithinTransaction(
 				input.event.eventType,
 				input.generation,
 				input.event.payload,
+				now,
+			],
+		);
+		db.run(
+			`INSERT INTO coordination_event_fence
+				 (stream_id, idempotency_key, event_type, generation, payload_digest, created_at)
+				 VALUES (?, ?, ?, ?, ?, ?)
+				 ON CONFLICT(stream_id, idempotency_key) DO UPDATE SET
+				 event_type = excluded.event_type, generation = excluded.generation,
+				 payload_digest = excluded.payload_digest, created_at = excluded.created_at`,
+			[
+				input.event.streamId,
+				input.event.idempotencyKey,
+				input.event.eventType,
+				input.generation,
+				payloadDigest,
 				now,
 			],
 		);
@@ -349,8 +370,9 @@ export function transitionCoordinationStateWithinTransaction(
 		if (overflow > 0) {
 			// This is deliberately a soft global target: every live stream keeps one
 			// waterline event so stream versions remain monotonic after pruning. Event
-			// callers are required to carry expectedRevision, so a replay whose old
-			// idempotency record was pruned fails the state CAS instead of applying.
+			// callers are required to carry expectedRevision. The retained
+			// coordination_event_fence row keeps pruned idempotency keys from replaying
+			// or double-applying after event history is compacted.
 			// The authoritative state/domain reapers bound live stream count.
 			db.run(
 				`DELETE FROM coordination_event WHERE rowid IN (
