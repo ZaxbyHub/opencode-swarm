@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.164.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.3...v7.164.4) (2026-09-03)
+
+
+### Bug Fixes
+
+* **plan-critic:** one baseline hash definition ends spurious BASELINE DRIFT ([4c5efdc](https://github.com/ZaxbyHub/opencode-swarm/commit/4c5efdcd06bfddfac109c980cdcb9e0de1be3e6e))
+* **plan-critic:** one baseline hash definition ends spurious BASELINE DRIFT ([#2523](https://github.com/ZaxbyHub/opencode-swarm/issues/2523)) ([8aed01c](https://github.com/ZaxbyHub/opencode-swarm/commit/8aed01ca52ede37b64cf0699dcf4f9f91ccb480b))
+
 ## [7.164.3](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.2...v7.164.3) (2026-09-02)
 
 
