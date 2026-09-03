@@ -135,6 +135,8 @@ describe('pr-subscriptions checkpoint store', () => {
 			const before = fs.statSync(checkpointPath(dir)).mtimeMs;
 			await updateSnapshot(dir, 'nonexistent::o/r::9', { errorCount: 1 });
 			expect(fs.statSync(checkpointPath(dir)).mtimeMs).toBe(before);
+			await updateSnapshot(dir, 'sess_1::o/r::1', { errorCount: 0 });
+			expect(fs.statSync(checkpointPath(dir)).mtimeMs).toBe(before);
 		});
 
 		test('duplicate and reordered in-store updates resolve last-write-wins', async () => {

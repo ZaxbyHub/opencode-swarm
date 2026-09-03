@@ -1410,6 +1410,28 @@ function validateRecord(record: PrSubscriptionRecord): void {
 	}
 }
 
+function snapshotUpdateHasChanges(
+	match: PrSubscriptionRecord,
+	updates: Partial<PrSubscriptionRecord>,
+): boolean {
+	const immutableKeys = new Set([
+		'correlationId',
+		'sessionID',
+		'prNumber',
+		'repoFullName',
+		'prUrl',
+		'createdAt',
+		'updatedAt',
+	]);
+	for (const [key, value] of Object.entries(updates)) {
+		if (immutableKeys.has(key)) continue;
+		if (!Object.is((match as unknown as Record<string, unknown>)[key], value)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 function writeCheckpointFile(
 	directory: string,
 	checkpoint: PrSubscriptionCheckpoint,
@@ -2983,13 +3005,7 @@ export async function updateSnapshot(
 		STORE_LOCK_AGENT,
 		STORE_LOCK_TASK,
 		async () => {
-			// A direct authoritative lookup lets a no-op return without invoking the
-			// migration/projection repair path, which would otherwise rewrite a
-			// healthy checkpoint solely to discover there is no matching record.
 			const existingCoordination = readCoordinationSubscriptions(directory);
-			// A legacy JSONL file may be mid-import or need its audit/projection
-			// repaired, so only bypass that path once the coordinated store is the
-			// sole remaining projection.
 			if (
 				existingCoordination !== null &&
 				!fileExistsStrict(storePath(directory))
@@ -2998,6 +3014,9 @@ export async function updateSnapshot(
 					(r) => r.correlationId === correlationId && r.status === 'active',
 				);
 				if (!match) return null;
+				if (!snapshotUpdateHasChanges(match, updates)) {
+					return match;
+				}
 				const updated: PrSubscriptionRecord = {
 					...match,
 					...updates,
@@ -3022,6 +3041,9 @@ export async function updateSnapshot(
 				if (!match) {
 					return null;
 				}
+				if (!snapshotUpdateHasChanges(match, updates)) {
+					return match;
+				}
 				const updated: PrSubscriptionRecord = {
 					...match,
 					...updates,
@@ -3045,6 +3067,10 @@ export async function updateSnapshot(
 			if (!match) {
 				finalizeWrite(directory, loaded, []);
 				return null;
+			}
+			if (!snapshotUpdateHasChanges(match, updates)) {
+				finalizeWrite(directory, loaded, []);
+				return match;
 			}
 
 			const updated: PrSubscriptionRecord = {
