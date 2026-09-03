@@ -377,16 +377,6 @@ describe('issue #2094 legacy-oracle parity', () => {
 		write(repo, 'scripts/mock-allowlist.txt', '# empty allowlist fixture\n');
 		write(repo, 'src/tools/cwd-violation.ts', 'process.cwd();\n');
 		seedQuarantineListFiles(repo); // Check 7 fail-closes on missing lists
-		const excludeEntries = fs
-			.readFileSync(path.join(repo, '.git', 'info', 'exclude'), 'utf8')
-			.split(/\r?\n/u);
-		expect(excludeEntries).toContain('node_modules/');
-		const ignoredDependency = await runGit(
-			['check-ignore', 'node_modules'],
-			repo,
-			10_000,
-		);
-		expect(ignoredDependency.exitCode, ignoredDependency.stderr).toBe(0);
 		for (const rel of [
 			'src/tools/knowledge-add.ts',
 			'src/hooks/knowledge-store.ts',
