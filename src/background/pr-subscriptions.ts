@@ -556,6 +556,13 @@ function writeLegacyStoreFile(targetPath: string, content: string): void {
 	atomicWriteSwarmFileSync(targetPath, content);
 }
 
+function hasLegacyReconciliationArtifacts(directory: string): boolean {
+	return [
+		legacyArchiveNextPath(directory),
+		legacyArchivePreviousPath(directory),
+	].some((filePath) => fileExistsStrict(filePath));
+}
+
 function loadLegacyPrSubscriptionViewStrict(
 	directory: string,
 ): Record<string, PrSubscriptionRecord> {
@@ -787,17 +794,7 @@ function ensurePrSubscriptionCoordinationImported(
 			(fileExistsStrict(legacyPath) &&
 				!fileExistsStrict(projectionMarkerPath(legacyPath))) ||
 			!coordinationProjectionMatches(directory, coordinationView);
-		if (projectionNeedsRepair) {
-			for (const filePath of [
-				storePath(directory),
-				checkpointPath(directory),
-				auditPath(directory),
-				legacyArchivePath(directory),
-			]) {
-				archiveShadowFileBestEffort(filePath);
-			}
-			writeCoordinationProjection(directory, coordinationView);
-		}
+		if (projectionNeedsRepair) return false;
 		return true;
 	}
 
@@ -969,6 +966,19 @@ function ensurePrSubscriptionCoordinationImported(
 			);
 			emitHealthTelemetry(directory, 'archive', preparedImport.checkpoint);
 		} else {
+			if (legacyStat) {
+				try {
+					const currentLegacyStat = _internals.statSync(storePath(directory));
+					if (
+						currentLegacyStat.size !== legacyStat.size ||
+						currentLegacyStat.mtimeMs !== legacyStat.mtimeMs
+					) {
+						return false;
+					}
+				} catch {
+					return false;
+				}
+			}
 			flushAuditEvents(
 				directory,
 				[{ kind: 'migrate-complete' }],
@@ -986,6 +996,15 @@ function ensurePrSubscriptionCoordinationImported(
 }
 
 function canUseCoordinationWritePath(directory: string): boolean {
+	const coordinationView = readCoordinationSubscriptions(directory);
+	if (
+		coordinationView !== null &&
+		Object.keys(coordinationView).length > 0 &&
+		fileExistsStrict(storePath(directory))
+	) {
+		return false;
+	}
+	if (hasLegacyReconciliationArtifacts(directory)) return false;
 	// Keep the v2 checkpoint migration state machine authoritative until it has
 	// consumed and archived its JSONL source. Importing its partial projection
 	// into SQLite here would discard the cursor and strand the unread tail.
@@ -1067,7 +1086,13 @@ function persistCoordinationSubscriptions(
 	if (applyAuditCompaction(directory, auditCompaction) && auditCompaction) {
 		checkpoint.value.maintenance.droppedAuditTransitions +=
 			auditCompaction.dropped;
-		_internals.writeCheckpointFile(directory, checkpoint.value);
+		try {
+			_internals.writeCheckpointFile(directory, checkpoint.value);
+		} catch (error) {
+			log(
+				`[pr-monitor] audit accounting write deferred: ${storageErrorCode(error)}`,
+			);
+		}
 	}
 	flushAuditEvents(
 		directory,
@@ -2063,8 +2088,7 @@ function reconcileLegacyArchiveStaging(
 		archiveExists = true;
 		previousExists = false;
 		if (nextExists) {
-			_internals.renameWithRetry(next, legacy);
-			migration.archived = false;
+			fs.unlinkSync(next);
 			legacyExists = true;
 			nextExists = false;
 		}
@@ -2370,6 +2394,12 @@ async function loadViewForRead(directory: string): Promise<{
 		if (!sameProjectRoot(read.value.rootPath, directory)) {
 			// Copied .swarm — reads see nothing; never start the wrong monitor.
 			return { view: {}, recoverySource: 'foreign' };
+		}
+		if (read.value.migration?.done === true) {
+			return {
+				view: { ...read.value.records },
+				recoverySource: 'checkpoint',
+			};
 		}
 		const overlaid = overlayLegacy(directory, read.value);
 		return {
@@ -2834,8 +2864,6 @@ function loadViewForWrite(directory: string): LoadedView {
 		return { checkpoint, view, audit, dirty };
 	}
 
-	// Migration done: absorb a changed legacy tail (downgrade writer /
-	// recreated file) so future reads skip the re-fold; stable → checkpoint only.
 	const overlaid = overlayLegacy(directory, checkpoint);
 	view = overlaid.view;
 	if (overlaid.usedLegacy && !overlaid.aborted) {
@@ -2846,10 +2874,12 @@ function loadViewForWrite(directory: string): LoadedView {
 		// source gets archived. An ABORTED fold never settles: the unchanged
 		// fingerprint forces a full retry on the next op and keeps the
 		// archive blocked.
-		migration.sourceBytes = legacySize;
-		migration.sourceMtimeMs = legacyMtime;
-		migration.scannedBytes = legacySize;
-		migration.archived = false;
+		if (migration.done !== true) {
+			migration.sourceBytes = legacySize;
+			migration.sourceMtimeMs = legacyMtime;
+			migration.scannedBytes = legacySize;
+			if (!migration.archived) migration.archived = false;
+		}
 		checkpoint.maintenance.corruptLegacyRecords += overlaid.corruptLines;
 		dirty = true;
 	}
@@ -2902,6 +2932,26 @@ function finalizeWrite(
 	// atomic rewrite; a failed rewrite must not publish a false loss counter.
 	const auditCompaction = prepareAuditCompaction(directory);
 	persistCheckpointWithAuditCompaction(directory, checkpoint, auditCompaction);
+	if (checkpoint.migration?.done === true) {
+		const legacyPath = storePath(directory);
+		try {
+			const legacyStat = fs.statSync(legacyPath);
+			if (
+				legacyStat.size !== checkpoint.migration.sourceBytes ||
+				legacyStat.mtimeMs !== checkpoint.migration.sourceMtimeMs
+			) {
+				const legacyPayload =
+					Object.values(checkpoint.records)
+						.map((entry) => JSON.stringify(entry))
+						.join('\n') +
+					(Object.keys(checkpoint.records).length > 0 ? '\n' : '');
+				writeLegacyStoreFile(legacyPath, legacyPayload);
+				fs.writeFileSync(projectionMarkerPath(legacyPath), '', 'utf-8');
+			}
+		} catch {
+			/* absent or unreadable legacy shadow — archive handling continues */
+		}
+	}
 	flushAuditEvents(
 		directory,
 		events,
@@ -3213,7 +3263,8 @@ export async function updateSnapshot(
 			const existingCoordination = readCoordinationSubscriptions(directory);
 			if (
 				existingCoordination !== null &&
-				!fileExistsStrict(storePath(directory))
+				!fileExistsStrict(storePath(directory)) &&
+				!hasLegacyReconciliationArtifacts(directory)
 			) {
 				const match = Object.values(existingCoordination).find(
 					(r) => r.correlationId === correlationId && r.status === 'active',

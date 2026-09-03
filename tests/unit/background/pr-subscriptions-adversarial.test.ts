@@ -16,6 +16,7 @@ import {
 } from '../../../src/background/pr-subscriptions';
 import { freezeClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 
 const FROZEN_NOW = 1_780_000_000_000;
 
@@ -80,7 +81,7 @@ describe('pr-subscriptions — adversarial persistence regressions (#2042)', () 
 		_internals.readSync = realReadSync;
 		_internals.renameWithRetry = realRenameWithRetry;
 		_internals.writeCheckpointFile = realWriteCheckpointFile;
-		fs.rmSync(dir, { recursive: true, force: true });
+		safeRmRecursive(dir);
 	});
 
 	test('F1: oversized legacy state rejects every mutation without publishing a shadowing checkpoint', async () => {
@@ -153,7 +154,7 @@ describe('pr-subscriptions — adversarial persistence regressions (#2042)', () 
 				),
 			).toBe(true);
 		} finally {
-			fs.rmSync(source, { recursive: true, force: true });
+			safeRmRecursive(source);
 		}
 	});
 
@@ -288,7 +289,7 @@ describe('pr-subscriptions — adversarial persistence regressions (#2042)', () 
 				(await listActive(dir)).map((record) => record.correlationId),
 			).toEqual([created.correlationId]);
 		} finally {
-			fs.rmSync(source, { recursive: true, force: true });
+			safeRmRecursive(source);
 		}
 	});
 

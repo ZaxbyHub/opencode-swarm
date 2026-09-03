@@ -14,6 +14,7 @@ import {
 } from '../../../src/background/pr-subscriptions';
 import { freezeClock } from '../../helpers/test-clock.js';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
+import { safeRmRecursive } from '../../helpers/safe-test-dir.js';
 
 const FROZEN_NOW = 1_780_000_000_000;
 
@@ -77,7 +78,7 @@ describe('pr-subscriptions — I/O failure regressions (#2042)', () => {
 		_internals.legacyFstatSync = realLegacyFstatSync;
 		_internals.statSync = realStatSync;
 		_internals.renameWithRetry = realRenameWithRetry;
-		fs.rmSync(dir, { recursive: true, force: true });
+		safeRmRecursive(dir);
 	});
 
 	test('F13: legacy fold I/O failure closes the descriptor, preserves the source, and retries', async () => {
@@ -205,7 +206,7 @@ describe('pr-subscriptions — I/O failure regressions (#2042)', () => {
 			expect(fs.existsSync(checkpoint)).toBe(true);
 			expect(fs.existsSync(legacy)).toBe(true);
 		} finally {
-			fs.rmSync(source, { recursive: true, force: true });
+			safeRmRecursive(source);
 		}
 	});
 
