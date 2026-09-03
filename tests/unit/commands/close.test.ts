@@ -193,12 +193,8 @@ mock.module('../../../src/config.js', () => ({
 
 mock.module('../../../src/config/index.js', () => ({
 	loadPluginConfigWithMeta: mockLoadPluginConfigWithMeta,
-	// Pure filesystem lookup for a user prompt override; not exercised by
-	// this test and must not touch the real filesystem in a unit test.
+	// Pure stubs: no fs access; gate-override seam for transitive imports (#2524).
 	loadAgentPrompt: () => ({}),
-	// Gate tools in close.ts's transitive import graph read user gate
-	// overrides through this seam (issue #2524); the stub keeps the unit
-	// test hermetic and returns no overrides.
 	loadGateOverrides: () => undefined,
 }));
 
