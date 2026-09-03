@@ -93,7 +93,7 @@ describe('Snapshot Integration', () => {
 			expect(parsed).toBeDefined();
 			expect(parsed.version).toBe(3);
 			expect(parsed.toolAggregates.read).toBeDefined();
-			expect(parsed.activeAgent['session-2']).toBe('reviewer');
+			expect(parsed.activeAgent['session-2']).toBeUndefined();
 			expect(parsed.agentSessions[sessionId]).toBeDefined();
 
 			// Reset state and load snapshot

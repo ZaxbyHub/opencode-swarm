@@ -522,8 +522,13 @@ export async function readPrWorkflowGateStateFromDisk<
 		sessionID,
 	);
 	if (authoritative) {
-		await repairImportedWorkflowGateShadow(directory, sessionID, authoritative);
-		return authoritative;
+		const merged = await mergeWorkflowGateShadowExtras(
+			directory,
+			sessionID,
+			authoritative,
+		);
+		await repairImportedWorkflowGateShadow(directory, sessionID, merged);
+		return merged;
 	}
 	return importLegacyPrWorkflowGateStateIfNeeded<S>(directory, sessionID);
 }
@@ -718,6 +723,31 @@ async function repairImportedWorkflowGateShadow(
 	await syncWorkflowGateShadowProjection(directory, sessionID, state, {
 		archiveLegacy: true,
 	});
+}
+
+async function mergeWorkflowGateShadowExtras<
+	S extends PrWorkflowPersistedStateBase,
+>(directory: string, sessionID: string, state: S): Promise<S> {
+	const filePath = workflowGateStatePath(directory, sessionID);
+	const live = await readTextFileIfExists(filePath);
+	if (live === null) return state;
+	let parsedJson: unknown;
+	try {
+		parsedJson = JSON.parse(live);
+	} catch {
+		return state;
+	}
+	if (
+		!parsedJson ||
+		typeof parsedJson !== 'object' ||
+		Array.isArray(parsedJson)
+	) {
+		return state;
+	}
+	return {
+		...(parsedJson as Record<string, unknown>),
+		...state,
+	} as S;
 }
 
 async function importLegacyPrWorkflowGateStateIfNeeded<

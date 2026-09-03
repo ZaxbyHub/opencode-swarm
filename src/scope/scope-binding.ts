@@ -330,6 +330,43 @@ export function getScopeBinding(input: {
 	return candidate;
 }
 
+/**
+ * Resolve active child bindings that were minted in this process.  The
+ * synchronous scope API is still used by a few host integrations that cannot
+ * await the durable claim path; those bindings remain valid for the current
+ * process while the SQLite authority is used on restart/cross-process reads.
+ */
+export function getActiveScopeBindingsForSession(input: {
+	directory: string;
+	activeSessionId: string;
+}): ScopeBinding[] {
+	sweepExpired();
+	const workspaceIdentity = canonicalWorkspaceIdentity(input.directory);
+	if (!workspaceIdentity || !input.activeSessionId.trim()) return [];
+	const now = Date.now();
+	return [...pendingScopeBindings.values()].filter(
+		(binding) =>
+			binding.workspaceIdentity === workspaceIdentity &&
+			binding.ownerSessionId === input.activeSessionId &&
+			binding.activation === 'active' &&
+			binding.lifecycleState === 'live' &&
+			binding.expiresAt > now &&
+			isDispatchCorrelated(binding),
+	);
+}
+
+function isDispatchCorrelated(binding: ScopeBinding): boolean {
+	return (
+		typeof binding.dispatchCallId === 'string' &&
+		binding.dispatchCallId.length > 0 &&
+		binding.ownerMessageId === binding.dispatchCallId &&
+		typeof binding.parentOwnerSessionId === 'string' &&
+		binding.parentOwnerSessionId.length > 0 &&
+		binding.ownerSessionId !== binding.parentOwnerSessionId &&
+		binding.parentCallId === binding.dispatchCallId
+	);
+}
+
 export function createPrFeedbackScopeBinding(input: {
 	directory: string;
 	taskId: string;

@@ -13,24 +13,23 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import {
-	mkdirSync,
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-	writeFileSync,
-} from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
 	loadSnapshot,
 	rehydrateState,
 } from '../../../src/session/snapshot-reader';
+import { claimSnapshotSessionOwnership } from '../../../src/session/snapshot-store';
 import type {
 	SerializedAgentSession,
 	SnapshotData,
 } from '../../../src/session/snapshot-writer';
-import { writeSnapshot } from '../../../src/session/snapshot-writer';
+import {
+	SNAPSHOT_PROJECTION_FILE,
+	writeSnapshot,
+} from '../../../src/session/snapshot-writer';
 import { resetSwarmState, swarmState } from '../../../src/state';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { canonicalTmpDir } from '../../helpers/tmpdir.js';
 
 const TEST_TIME = 1_700_000_000_000;
@@ -160,7 +159,7 @@ describe('snapshot round-trip — the rewritten snapshot shrinks', () => {
 	});
 
 	afterEach(() => {
-		rmSync(tempDir, { recursive: true, force: true });
+		safeRmRecursive(tempDir);
 	});
 
 	it('loadSnapshot end-to-end: restores live entries, filters ghosts', async () => {
@@ -189,11 +188,16 @@ describe('snapshot round-trip — the rewritten snapshot shrinks', () => {
 		expect(Object.keys(ghostSnapshot.activeAgent).length).toBe(5);
 
 		await rehydrateState(ghostSnapshot);
+		// Rehydration is passive and does not claim cross-process ownership. Model
+		// the host resuming these exact sessions before asking the writer to persist
+		// them; ghost entries must still stay excluded.
+		claimSnapshotSessionOwnership('live-a', true);
+		claimSnapshotSessionOwnership('live-b', true);
 		await writeSnapshot(tempDir, swarmState);
 
 		const written = JSON.parse(
 			readFileSync(
-				path.join(tempDir, '.swarm', 'session', 'state.json'),
+				path.join(tempDir, '.swarm', SNAPSHOT_PROJECTION_FILE),
 				'utf-8',
 			),
 		) as SnapshotData;

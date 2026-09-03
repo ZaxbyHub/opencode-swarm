@@ -20,7 +20,10 @@ import type {
 	SnapshotData,
 } from '../../../src/session/snapshot-writer.js';
 // Direct imports from session modules (not from src/index.ts)
-import { createSnapshotWriterHook } from '../../../src/session/snapshot-writer.js';
+import {
+	createSnapshotWriterHook,
+	SNAPSHOT_PROJECTION_FILE,
+} from '../../../src/session/snapshot-writer.js';
 
 // State imports for setup and verification
 import {
@@ -129,7 +132,11 @@ describe('Session Snapshot Integration - Adversarial Tests', () => {
 
 			// Verify file was written to the parent .swarm directory
 			// This is expected - the directory argument is used as the base
-			const writtenPath = join(maliciousDir, '.swarm', 'session', 'state.json');
+			const writtenPath = join(
+				maliciousDir,
+				'.swarm',
+				SNAPSHOT_PROJECTION_FILE,
+			);
 			const fileExists = existsSync(writtenPath);
 			expect(fileExists).toBe(true);
 
@@ -489,7 +496,7 @@ describe('Session Snapshot Integration - Adversarial Tests', () => {
 			await Promise.all(promises);
 
 			// Verify the file exists and contains valid JSON
-			const statePath = join(tempDir, '.swarm', 'session', 'state.json');
+			const statePath = join(tempDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
 			const fileExists = existsSync(statePath);
 			expect(fileExists).toBe(true);
 

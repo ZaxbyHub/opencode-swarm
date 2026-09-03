@@ -306,6 +306,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 	}
 
 	function resolveDeclaredScope(sessionID: string): string[] | null {
+		const session = swarmState.agentSessions.get(sessionID);
+		if (!session?.currentTaskId) {
+			return session?.declaredCoderScope?.length
+				? [...session.declaredCoderScope]
+				: null;
+		}
 		return resolveActiveScopeBinding(sessionID)?.files ?? null;
 	}
 
@@ -368,8 +374,12 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			? stripKnownSwarmPrefix(rawAgent).toLowerCase()
 			: 'unknown';
 		const isCoder = agentRole === 'coder';
+		const session = swarmState.agentSessions.get(sessionID);
 
-		const activeBinding = isCoder ? resolveActiveScopeBinding(sessionID) : null;
+		const activeBinding =
+			isCoder && session?.currentTaskId
+				? resolveActiveScopeBinding(sessionID)
+				: null;
 		const bindingIdentity = activeBinding as
 			| (typeof activeBinding & {
 					bindingId?: unknown;
@@ -386,7 +396,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 						files: bindingIdentity.files,
 					}
 				: undefined;
-		const declaredScope = activeBinding?.files ?? null;
+		const declaredScope =
+			activeBinding?.files ??
+			(session?.declaredCoderScope?.length
+				? [...session.declaredCoderScope]
+				: null);
 		const toolArgs = args as Record<string, unknown> | undefined;
 		const rawCommand =
 			typeof toolArgs?.command === 'string' ? toolArgs.command.trim() : '';
@@ -925,6 +939,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		commandOverride?: string,
 	): void {
 		if (tool !== 'bash' && tool !== 'shell') return;
+		const session = swarmState.agentSessions.get(sessionID);
 
 		const toolArgs = args as Record<string, unknown> | undefined;
 		const command =
@@ -1140,7 +1155,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 					`WRITE BLOCKED: SCOPE_VIOLATION: shell write target "${safeTarget}" is outside the active scope [${scopeSummary}${omitted > 0 ? `, ... (+${omitted} more)` : ''}]. ACTION[architect]: if the target is intended, call declare_scope for the exact workspace-relative path and redispatch; otherwise correct the command.`,
 				);
 			}
-			if (isCoder) {
+			if (isCoder && session?.currentTaskId) {
 				const writeBinding = resolveActiveScopeBinding(sessionID);
 				if (
 					writeBinding?.activation === 'active' &&
@@ -1171,7 +1186,7 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				}
 			}
 		}
-		if (isCoder) {
+		if (isCoder && session?.currentTaskId) {
 			const binding = resolveActiveScopeBinding(sessionID);
 			if (binding) {
 				rememberScopeLeaseCandidate?.({
@@ -2250,6 +2265,11 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 		const resolvedSessionWindow = hasKnownSession
 			? resolveSessionAndWindow(input.sessionID)
 			: null;
+		const session = swarmState.agentSessions.get(input.sessionID);
+		const rawAgentForScope = swarmState.activeAgent.get(input.sessionID);
+		const isCoder =
+			rawAgentForScope !== undefined &&
+			stripKnownSwarmPrefix(rawAgentForScope).toLowerCase() === 'coder';
 
 		// v6.35.1: Runaway output detector — reset counter on any tool call
 		consecutiveNoToolTurns.set(input.sessionID, 0);
@@ -2502,7 +2522,10 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 			} else {
 				resolvedFileTargets = resolution.paths;
 			}
-			const writeBinding = resolveActiveScopeBinding(input.sessionID);
+			const writeBinding =
+				session?.currentTaskId && isCoder
+					? resolveActiveScopeBinding(input.sessionID)
+					: null;
 			if (writeBinding) {
 				rememberScopeLeaseCandidate?.({
 					callID: input.callID,
@@ -2558,7 +2581,10 @@ export function createToolBeforeHandler(ctx: ToolBeforeContext) {
 				}
 
 				// Per-agent authority check
-				const writeBinding = resolveActiveScopeBinding(input.sessionID);
+				const writeBinding =
+					session?.currentTaskId && isCoder
+						? resolveActiveScopeBinding(input.sessionID)
+						: null;
 				const writeDeclaredScope = writeBinding?.files ?? null;
 
 				const authorityCheck = checkFileAuthorityWithRules(

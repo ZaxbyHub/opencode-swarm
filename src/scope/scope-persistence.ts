@@ -81,6 +81,7 @@ import {
 	clearSweepTombstoneForRevival,
 	createClaimedScopeBinding,
 	DEFAULT_SCOPE_BINDING_TTL_MS,
+	getActiveScopeBindingsForSession,
 	hasDeliberateScopeBindingDenyOverlay,
 	hasScopeBindingDenyOverlay,
 	installFailedRevocationOverlay,
@@ -1463,6 +1464,31 @@ export function resolveScopeBindingFromDisk(input: {
 	includeExpired?: boolean;
 }): DurableScopeBindingResolution {
 	if (!isSafeTaskId(input.taskId)) return { status: 'not_declared' };
+	// Preserve the synchronous same-process claim path.  Once a SQLite
+	// authority exists, legacy files are projections and cannot be used to
+	// discover a newly claimed binding; the in-memory v2 record is nevertheless
+	// an exact, live authorization for this process.
+	const inMemory = getActiveScopeBindingsForSession({
+		directory: input.directory,
+		activeSessionId: input.ownerSessionId,
+	}).filter(
+		(binding) =>
+			binding.taskId === input.taskId &&
+			binding.planId === derivePlanId(input.plan) &&
+			binding.planStructureHash === computePlanStructureHash(input.plan) &&
+			(input.requireDispatchCorrelation !== true ||
+				isDispatchCorrelated(binding)) &&
+			(input.parentCallId === undefined ||
+				binding.parentCallId === input.parentCallId),
+	);
+	if (inMemory.length > 1) {
+		return {
+			status: 'ambiguous',
+			candidates: inMemory.slice(0, 8),
+			totalCandidates: inMemory.length,
+		};
+	}
+	if (inMemory.length === 1) return { status: 'found', binding: inMemory[0] };
 	const completeSet = readAllAuthoritativeScopeBindings(input.directory);
 	if (!completeSet.ok) {
 		if (completeSet.code === 'SCOPE_BINDING_STORE_OVERLOADED') {
@@ -2483,6 +2509,34 @@ export function resolveAuthorizedScopeBindingForSessionDetailed(input: {
 }): DurableScopeBindingResolution {
 	const plan = readCurrentPlan(input.directory);
 	if (!plan) return { status: 'not_declared' };
+	// A same-process synchronous claim is already an exact v2 authorization even
+	// when a SQLite authority was created by an earlier test/process.  Legacy
+	// files remain projections once SQLite exists, so do not discard this live
+	// in-memory binding while waiting for a durable writer that the synchronous
+	// host API cannot await.  Cross-process/restart resolution still uses the
+	// authoritative rows below.
+	const inMemory = getActiveScopeBindingsForSession({
+		directory: input.directory,
+		activeSessionId: input.activeSessionId,
+	}).filter((binding) =>
+		plan.phases.some((phase) =>
+			phase.tasks.some(
+				(task) =>
+					task.id === binding.taskId &&
+					binding.planId === derivePlanId(plan) &&
+					binding.planStructureHash === computePlanStructureHash(plan) &&
+					!hasScopeBindingDenyOverlay(binding),
+			),
+		),
+	);
+	if (inMemory.length > 1) {
+		return {
+			status: 'ambiguous',
+			candidates: inMemory.slice(0, 8),
+			totalCandidates: inMemory.length,
+		};
+	}
+	if (inMemory.length === 1) return { status: 'found', binding: inMemory[0] };
 	const matches: ScopeBinding[] = [];
 	const expired: ScopeBinding[] = [];
 	let expiredTotal = 0;
