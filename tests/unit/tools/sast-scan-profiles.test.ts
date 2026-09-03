@@ -95,8 +95,8 @@ describe('SAST Scan - Profile-Driven Behavior', () => {
 
 		// Act
 		const result = await sastScan({ changed_files: ['test.ts'] }, tmpDir, {
-			gates: { sast_scan: { enabled: false } },
-		} as any);
+			sast_scan: { enabled: false },
+		});
 
 		// Assert
 		expect(result.verdict).toBe('pass');

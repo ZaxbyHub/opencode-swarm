@@ -49,9 +49,11 @@ export type {
 export {
 	getSafeDefaultConfigLoadResult,
 	loadAgentPrompt,
+	loadGateOverrides,
 	loadPluginConfig,
 	loadPluginConfigWithMeta,
 	loadPluginConfigWithMetaAsync,
+	resetConfigAdvisoryDedup,
 } from './loader';
 
 // Import for local use (required for _internals)
@@ -98,6 +100,9 @@ export type {
 	AutoReviewBurnInDecision,
 	AutoReviewConfig,
 	AutoReviewReleaseContext,
+	GateConfig,
+	GateConfigOverrides,
+	GateSectionName,
 	LeanTurboConfig,
 	MemoryConfig,
 	ModelPricingConfig,
@@ -119,6 +124,8 @@ export {
 	AutomationConfigSchema,
 	AutomationModeSchema,
 	AutoReviewConfigSchema,
+	GATE_CONFIG_READERS,
+	GATE_SECTION_SCHEMAS,
 	LeanTurboConfigSchema,
 	MemoryConfigSchema,
 	ModelPricingConfigSchema,

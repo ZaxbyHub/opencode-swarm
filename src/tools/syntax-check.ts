@@ -3,13 +3,22 @@ import * as path from 'node:path';
 import type { tool } from '@opencode-ai/plugin';
 import pLimit from 'p-limit';
 import { z } from 'zod';
-import type { PluginConfig } from '../config';
+import type { GateConfigOverrides } from '../config';
+import { loadGateOverrides } from '../config';
 import type { EvidenceVerdict } from '../config/evidence-schema';
 import { _internals as evidenceInternals } from '../evidence/manager';
 import { getProfileForFile } from '../lang/detector';
 import { getLanguageForExtension, getParserForFile } from '../lang/registry';
 import type { Parser } from '../lang/runtime';
 import { createSwarmTool } from './create-tool';
+
+/**
+ * DI seam (issue #2524): the tool boundary self-loads the user's gate
+ * overrides; tests substitute this instead of touching the config loader.
+ */
+export const _internals: { loadGateOverrides: typeof loadGateOverrides } = {
+	loadGateOverrides,
+};
 
 export interface SyntaxCheckInput {
 	/** Files to check (from diff gate) */
@@ -124,15 +133,15 @@ function extractSyntaxErrors(
 /**
  * Run syntax check on changed files
  *
- * Respects config.gates.syntax_check.enabled - returns skipped if disabled
+ * Respects gates.syntax_check.enabled - returns skipped if disabled
  */
 export async function syntaxCheck(
 	input: SyntaxCheckInput,
 	directory: string,
-	config?: PluginConfig,
+	gates?: GateConfigOverrides,
 ): Promise<SyntaxCheckResult> {
 	// Check feature flag
-	if (config?.gates?.syntax_check?.enabled === false) {
+	if (gates?.syntax_check?.enabled === false) {
 		return {
 			verdict: 'pass', // 'pass' to not block, but log skipped
 			files: [],
@@ -380,6 +389,7 @@ export const syntax_check: ReturnType<typeof tool> = createSwarmTool({
 			.describe('Optional: restrict to specific languages'),
 	},
 	async execute(args: unknown, directory: string): Promise<string> {
+		const gates = _internals.loadGateOverrides(directory);
 		const result = await syntaxCheck(
 			args as {
 				changed_files: Array<{ path: string; additions: number }>;
@@ -387,6 +397,7 @@ export const syntax_check: ReturnType<typeof tool> = createSwarmTool({
 				languages?: string[];
 			},
 			directory,
+			gates,
 		);
 		return JSON.stringify(result);
 	},

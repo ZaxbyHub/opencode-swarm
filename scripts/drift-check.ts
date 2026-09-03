@@ -23,7 +23,11 @@
  *                         regeneration from PluginConfigSchema (issue #1663).
  *   8. config-docs      — generated top-level-config-keys section of
  *                         docs/configuration.md vs regeneration (issue #1663).
- *   9. dep-freshness    — locked @opencode-ai/* resolution vs npm-latest (issue
+ *   9. gates-docs       — gates.* docs↔schema↔reader triangle for
+ *                         docs/installation.md + GATE_SECTION_SCHEMAS +
+ *                         GATE_CONFIG_KNOWN_SECTION_KEYS +
+ *                         GATE_CONFIG_READERS (issue #2524).
+ *  10. dep-freshness    — locked @opencode-ai/* resolution vs npm-latest (issue
  *                         #1899). Env-gated (SWARM_DEP_FRESHNESS_CHECK) and
  *                         fail-open: emits advisory `notice` findings only, never
  *                         blocks, so a stale lockfile can't silently age again.
@@ -50,6 +54,7 @@ import { collectCoreEventsUsageErrors } from './check-core-events-usage';
 import { collectShellAuditUsageErrors } from './check-shell-audit-usage';
 import { collectTrajectoryStoreUsageErrors } from './check-trajectory-store-usage';
 import { detectDocsClaimDrift } from './drift-check-docs-claims';
+import { detectGatesConfigDrift } from './drift-check-gates-docs';
 import { checkSkillAssertions, formatBrokenAssertions } from './check-skill-assertions';
 import {
 	CONFIG_DOCS_MARKER_BEGIN,
@@ -1486,6 +1491,7 @@ export const DETECTORS: Array<[string, () => DriftFinding[]]> = [
 	['docs-claim', detectDocsClaimDrift],
 	['config-schema', detectConfigSchemaDrift],
 	['config-docs', detectConfigDocsKeysDrift],
+	['gates-docs', detectGatesConfigDrift],
 ];
 
 /**

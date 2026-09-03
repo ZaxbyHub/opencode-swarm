@@ -905,8 +905,10 @@ Supports TypeScript, JavaScript, Python, Rust, Go, Java, C/C++, Ruby, PHP, and C
   "gates": {
     "placeholder_scan": {
       "enabled": true,
-      "patterns": ["TODO", "FIXME", "XXX", "HACK"],
-      "block_on_empty_functions": true
+      "deny_patterns": ["TODO", "FIXME", "TBD", "XXX", "placeholder", "stub", "wip", "not implemented"],
+      "allow_globs": ["docs/**", "examples/**", "tests/**", "**/*.test.*", "**/*.spec.*", "**/mocks/**", "**/__tests__/**"],
+      "max_allowed_findings": 0,
+      "sentinel_allowlist": []
     }
   }
 }
@@ -914,8 +916,13 @@ Supports TypeScript, JavaScript, Python, Rust, Go, Java, C/C++, Ruby, PHP, and C
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `patterns` | string[] | `["TODO", "FIXME", "XXX", "HACK"]` | Comment patterns to detect |
-| `block_on_empty_functions` | boolean | `true` | Fail on empty function bodies |
+| `enabled` | boolean | `true` | Run the placeholder scan |
+| `deny_patterns` | string[] | `["TODO", "FIXME", "TBD", "XXX", "placeholder", "stub", "wip", "not implemented"]` | Comment patterns to detect. A non-empty list replaces the built-in comment/string/code pattern set — built-in string-literal and stub-code detection are disabled when this is set. An empty list is ignored and the built-in defaults apply |
+| `allow_globs` | string[] | `["docs/**", "examples/**", "tests/**", "**/*.test.*", "**/*.spec.*", "**/mocks/**", "**/__tests__/**"]` | Globs to skip scanning |
+| `max_allowed_findings` | number | `0` | Tolerate up to this many findings before the gate fails (0 fails on any finding) |
+| `sentinel_allowlist` | string[] | `[]` | Intentional sentinel strings that suppress matching findings |
+
+> **Migration note:** the undocumented-in-schema keys `patterns` and `block_on_empty_functions` were documentation-only ghosts — the loader silently ignored them. Use `deny_patterns` (which replaces the default pattern set). Stub/empty-function detection is built in and not configurable.
 
 #### sast_scan
 
@@ -923,9 +930,7 @@ Supports TypeScript, JavaScript, Python, Rust, Go, Java, C/C++, Ruby, PHP, and C
 {
   "gates": {
     "sast_scan": {
-      "enabled": true,
-      "severity_threshold": "high",
-      "use_semgrep_if_available": false
+      "enabled": true
     }
   }
 }
@@ -933,10 +938,13 @@ Supports TypeScript, JavaScript, Python, Rust, Go, Java, C/C++, Ruby, PHP, and C
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `severity_threshold` | string | `"high"` | Minimum severity to fail (`critical`, `high`, `medium`, `low`) |
-| `use_semgrep_if_available` | boolean | `false` | Use Semgrep Tier B rules if on PATH |
+| `enabled` | boolean | `true` | Run the SAST scan |
 
-**Local-Only Guarantee**: Built-in 63-rule engine runs without network. Semgrep is optional enhancement only.
+The severity threshold is a **per-call tool argument** (`sast_threshold` on `sast_scan` / `pre_check_batch`, default `medium`), not a config-file key.
+
+**Local-Only Guarantee**: Built-in rule engine runs without network. Semgrep, when present on PATH, is used automatically as an optional enhancement tier.
+
+> **Migration note:** `severity_threshold` and `use_semgrep_if_available` were documentation-only ghosts — the loader silently ignored them. Threshold control lives in the tool call; Semgrep detection is automatic.
 
 #### sbom_generate
 
@@ -944,9 +952,7 @@ Supports TypeScript, JavaScript, Python, Rust, Go, Java, C/C++, Ruby, PHP, and C
 {
   "gates": {
     "sbom_generate": {
-      "enabled": true,
-      "output_format": "cyclonedx-json",
-      "include_dev_dependencies": false
+      "enabled": true
     }
   }
 }
@@ -954,10 +960,11 @@ Supports TypeScript, JavaScript, Python, Rust, Go, Java, C/C++, Ruby, PHP, and C
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `output_format` | string | `"cyclonedx-json"` | SBOM format (CycloneDX JSON) |
-| `include_dev_dependencies` | boolean | `false` | Include dev/test dependencies |
+| `enabled` | boolean | `true` | Generate the CycloneDX SBOM. Set `false` to skip the informational SBOM step |
 
 **Supported ecosystems**: npm, Python (pip/Pipfile/poetry), Rust (Cargo), Go, Java (Maven/Gradle), Ruby (Bundler), PHP (Composer), C# (NuGet)
+
+> **Migration note:** `output_format` and `include_dev_dependencies` were documentation-only ghosts — the loader silently ignored them. Output is always CycloneDX JSON under `.swarm/evidence/sbom/`.
 
 #### build_check
 
@@ -965,11 +972,7 @@ Supports TypeScript, JavaScript, Python, Rust, Go, Java, C/C++, Ruby, PHP, and C
 {
   "gates": {
     "build_check": {
-      "enabled": true,
-      "commands": {
-        "typescript": ["npm", "run", "build"],
-        "python": ["python", "-m", "py_compile"]
-      }
+      "enabled": true
     }
   }
 }
@@ -977,14 +980,17 @@ Supports TypeScript, JavaScript, Python, Rust, Go, Java, C/C++, Ruby, PHP, and C
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `commands` | object | Auto-detected | Per-language build commands |
+| `enabled` | boolean | `true` | Run build/typecheck verification. Set `false` to skip the gate entirely (no build commands are spawned) |
 
-Auto-detected commands by ecosystem:
+Build commands are auto-detected per ecosystem — there is no config-file override:
+
 - TypeScript: `npm run build` or `tsc --noEmit`
 - Rust: `cargo build` or `cargo check`
 - Go: `go build`
 - Java: `mvn compile` or `gradle build`
 - Python: `python -m py_compile`
+
+> **Migration note:** `build_check.commands` was a documentation-only ghost — the loader silently ignored it. Command selection is automatic from detected build files.
 
 #### quality_budget
 
@@ -996,7 +1002,9 @@ Auto-detected commands by ecosystem:
       "max_complexity_delta": 5,
       "max_public_api_delta": 10,
       "max_duplication_ratio": 0.05,
-      "min_test_to_code_ratio": 0.3
+      "min_test_to_code_ratio": 0.3,
+      "enforce_on_globs": ["src/**"],
+      "exclude_globs": ["docs/**", "tests/**", "**/*.test.*"]
     }
   }
 }
@@ -1004,10 +1012,13 @@ Auto-detected commands by ecosystem:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
+| `enabled` | boolean | `true` | Run quality budget enforcement |
 | `max_complexity_delta` | number | `5` | Max cyclomatic complexity increase per task |
 | `max_public_api_delta` | number | `10` | Max new public API surface per task |
 | `max_duplication_ratio` | number | `0.05` | Max code duplication ratio (5%) |
 | `min_test_to_code_ratio` | number | `0.3` | Minimum test-to-code ratio (30%) |
+| `enforce_on_globs` | string[] | `["src/**"]` | Globs the budget applies to |
+| `exclude_globs` | string[] | `["docs/**", "tests/**", "**/*.test.*"]` | Globs excluded from the budget |
 
 **Budget Enforcement**:
 - Exceeding any budget fails the gate
@@ -1028,17 +1039,14 @@ Auto-detected commands by ecosystem:
     },
     "placeholder_scan": {
       "enabled": true,
-      "patterns": ["TODO", "FIXME", "XXX", "HACK", "NOTE"],
-      "block_on_empty_functions": true
+      "deny_patterns": ["TODO", "FIXME", "XXX", "NOTE"],
+      "max_allowed_findings": 1
     },
     "sast_scan": {
-      "enabled": true,
-      "severity_threshold": "high",
-      "use_semgrep_if_available": true
+      "enabled": true
     },
     "sbom_generate": {
-      "enabled": true,
-      "include_dev_dependencies": false
+      "enabled": true
     },
     "build_check": {
       "enabled": true
@@ -1048,7 +1056,9 @@ Auto-detected commands by ecosystem:
       "max_complexity_delta": 3,
       "max_public_api_delta": 5,
       "max_duplication_ratio": 0.03,
-      "min_test_to_code_ratio": 0.4
+      "min_test_to_code_ratio": 0.4,
+      "enforce_on_globs": ["src/**"],
+      "exclude_globs": ["docs/**", "tests/**", "**/*.test.*"]
     }
   },
   "guardrails": {
