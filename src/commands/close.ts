@@ -2389,8 +2389,9 @@ export async function handleCloseCommand(
 
 	try {
 		// #2481: settle the retained post-resolution import before VACUUM INTO or
-		// cleanup can observe/close swarm.db. A watchdog timeout never abandons
-		// the underlying transaction, so close must await its real settlement.
+		// cleanup can observe/close swarm.db. If the bounded close wait expires,
+		// the coordination guard stays installed until the underlying attempt
+		// settles and this command aborts without racing the transaction.
 		await closeSnapshotCoordinationInitialization(directory);
 
 		// Idempotency check — after readiness settlement and inside try/finally so finalizeLock is released on all paths.

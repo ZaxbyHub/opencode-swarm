@@ -50,6 +50,8 @@ export interface SnapshotCoordinationStatus {
 export interface SnapshotCoordinationResetGuard {
 	release(): void;
 	closeError?: Error;
+	/** True when the prior initializer did not settle before the reset deadline. */
+	priorUnsettled?: boolean;
 }
 
 const entries = new Map<string, ReadinessEntry>();
@@ -290,12 +292,24 @@ export async function beginSnapshotCoordinationReset(
 	const root = canonicalProjectKey(directory);
 	const prior = entries.get(root);
 	let closeError: Error | undefined;
+	let priorUnsettled = false;
 	if (prior) {
 		prior.state = 'closing';
 		try {
-			await prior.underlying;
+			await withTimeout(
+				prior.underlying,
+				_snapshotCoordinationInternals.timeoutMs,
+				new Error('coordination initialization close timed out'),
+			);
 		} catch (error) {
 			closeError = error instanceof Error ? error : new Error(String(error));
+			priorUnsettled = !prior.settled;
+			if (priorUnsettled) {
+				// The bounded reset path below deliberately does not abandon the
+				// underlying promise. Observe a late rejection so a timed-out
+				// initializer cannot become an unhandled rejection.
+				void prior.underlying.catch(() => undefined);
+			}
 		}
 	}
 
@@ -308,11 +322,26 @@ export async function beginSnapshotCoordinationReset(
 		...(closeError ? { error: closeError.message } : {}),
 	};
 	entries.set(root, guard);
-	return {
-		release: () => {
+	let released = false;
+	const release = () => {
+		if (released) return;
+		released = true;
+		const removeGuard = () => {
 			if (entries.get(root) === guard) entries.delete(root);
-		},
+		};
+		if (!prior || prior.settled) {
+			removeGuard();
+			return;
+		}
+		// A timed-out initializer may still be finishing a SQLite transaction.
+		// Keep the closing guard installed until it settles so a fresh
+		// initializer cannot race a reset and resurrect the old snapshot.
+		void prior.underlying.then(removeGuard, removeGuard);
+	};
+	return {
+		release,
 		...(closeError ? { closeError } : {}),
+		...(priorUnsettled ? { priorUnsettled: true } : {}),
 	};
 }
 

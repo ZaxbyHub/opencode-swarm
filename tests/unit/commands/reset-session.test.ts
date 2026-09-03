@@ -7,10 +7,15 @@ import {
 	handleResetSessionCommand,
 } from '../../../src/commands/reset-session';
 import { closeProjectDb } from '../../../src/db/project-db.js';
+import { ensureSnapshotCoordinationReady } from '../../../src/session/snapshot-coordination-init.js';
 import {
 	readSnapshotRows,
 	writeSnapshotRows,
 } from '../../../src/session/snapshot-store.js';
+import {
+	SNAPSHOT_PROJECTION_FILE,
+	writeSnapshotProjection,
+} from '../../../src/session/snapshot-writer.js';
 import {
 	resetSwarmState,
 	startAgentSession,
@@ -81,6 +86,56 @@ describe('handleResetSessionCommand', () => {
 		} finally {
 			release();
 			_internals.beginSnapshotCoordinationReset = original;
+		}
+	});
+
+	it('removes the SQLite projection so reset cannot resurrect cleared state', async () => {
+		const snapshot = {
+			version: 3,
+			writtenAt: 1,
+			toolAggregates: {},
+			activeAgent: {},
+			delegationChains: {},
+			agentSessions: {},
+		};
+		writeSnapshotRows(testDir, snapshot);
+		await writeSnapshotProjection(testDir, snapshot);
+		const projectionPath = path.join(
+			testDir,
+			'.swarm',
+			SNAPSHOT_PROJECTION_FILE,
+		);
+		expect(existsSync(projectionPath)).toBe(true);
+
+		await handleResetSessionCommand(testDir, []);
+
+		expect(existsSync(projectionPath)).toBe(false);
+		expect(readSnapshotRows(testDir)).toBeNull();
+	});
+
+	it('keeps the coordination guard closed when authoritative deletion fails', async () => {
+		writeSnapshotRows(testDir, {
+			version: 3,
+			writtenAt: 1,
+			toolAggregates: {},
+			activeAgent: {},
+			delegationChains: {},
+			agentSessions: {},
+		});
+		const originalClear = _internals.clearSnapshotRows;
+		_internals.clearSnapshotRows = () => {
+			throw new Error('simulated SQLite failure');
+		};
+		try {
+			const result = await handleResetSessionCommand(testDir, []);
+			expect(result).toContain('Failed to clear SQLite session snapshot');
+			await expect(ensureSnapshotCoordinationReady(testDir)).rejects.toThrow(
+				/closing for reset-session/i,
+			);
+		} finally {
+			_internals.clearSnapshotRows = originalClear;
+			const retry = await handleResetSessionCommand(testDir, []);
+			expect(retry).toContain('authoritative session snapshot row');
 		}
 	});
 

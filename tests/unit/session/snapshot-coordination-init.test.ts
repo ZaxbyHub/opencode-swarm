@@ -441,4 +441,30 @@ describe('snapshot coordination post-resolution initialization', () => {
 			ensureSnapshotCoordinationReady(tempDir),
 		).resolves.toBeUndefined();
 	});
+
+	test('bounds reset close while preserving the guard until a timed-out initializer settles', async () => {
+		let release!: () => void;
+		const blocked = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		_snapshotCoordinationInternals.timeoutMs = 5;
+		_snapshotCoordinationInternals.initialize = () => blocked;
+		const initialization = startSnapshotCoordinationInitialization(tempDir);
+
+		const startedAt = Date.now();
+		const guard = await beginSnapshotCoordinationReset(tempDir);
+		expect(Date.now() - startedAt).toBeLessThan(1_000);
+		expect(guard.priorUnsettled).toBe(true);
+		expect(guard.closeError?.message).toMatch(/timed out/i);
+		await expect(ensureSnapshotCoordinationReady(tempDir)).rejects.toThrow(
+			/closing for reset-session/i,
+		);
+
+		guard.release();
+		release();
+		await initialization;
+		await expect(
+			ensureSnapshotCoordinationReady(tempDir),
+		).resolves.toBeUndefined();
+	});
 });

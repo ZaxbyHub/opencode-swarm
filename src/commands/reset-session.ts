@@ -18,6 +18,7 @@ import {
 	clearSnapshotRows,
 	clearSnapshotSessionOwnerships,
 } from '../session/snapshot-store.js';
+import { SNAPSHOT_PROJECTION_FILE } from '../session/snapshot-writer.js';
 import { swarmState } from '../state';
 import { recoverStaleCoderSettlements } from '../workflow/coder-settlement.js';
 import {
@@ -49,6 +50,7 @@ export const _internals: {
 	queryLiveMemberships: typeof queryLiveMemberships;
 	commitGateReleaseBatch: typeof commitGateReleaseBatch;
 	beginSnapshotCoordinationReset: typeof beginSnapshotCoordinationReset;
+	clearSnapshotRows: typeof clearSnapshotRows;
 	releaseKnowledgeGateObligations: (
 		directory: string,
 		sessionID: string,
@@ -60,6 +62,7 @@ export const _internals: {
 	queryLiveMemberships,
 	commitGateReleaseBatch,
 	beginSnapshotCoordinationReset,
+	clearSnapshotRows,
 	releaseKnowledgeGateObligations: releaseKnowledgeGateObligations,
 };
 
@@ -202,7 +205,16 @@ export async function handleResetSessionCommand(
 	try {
 		snapshotResetGuard =
 			await _internals.beginSnapshotCoordinationReset(directory);
-		if (snapshotResetGuard.closeError) throw snapshotResetGuard.closeError;
+		if (snapshotResetGuard.closeError) {
+			if (snapshotResetGuard.priorUnsettled) {
+				results.push(
+					`❌ Snapshot coordination close timed out; reset aborted to avoid racing an in-flight initializer: ${errorMessage(snapshotResetGuard.closeError)}`,
+				);
+				snapshotResetGuard.release();
+				return results.join('\n');
+			}
+			throw snapshotResetGuard.closeError;
+		}
 	} catch (err) {
 		results.push(
 			`⚠️ Snapshot coordination close failed (continuing with reset): ${errorMessage(err)}`,
@@ -235,8 +247,10 @@ export async function handleResetSessionCommand(
 	// Delete the SQLite authority before removing its backed-up compatibility
 	// projection. This is a single FULL transaction and remains a no-op for
 	// projects that have not opened swarm.db yet.
+	let snapshotAuthorityCleared = false;
 	try {
-		const removed = clearSnapshotRows(directory);
+		const removed = _internals.clearSnapshotRows(directory);
+		snapshotAuthorityCleared = true;
 		results.push(
 			removed > 0
 				? `✅ Deleted ${removed} authoritative session snapshot row(s)`
@@ -248,6 +262,26 @@ export async function handleResetSessionCommand(
 		);
 	}
 
+	// The projection is a compatibility input for a future initializer, so it
+	// must be removed explicitly and independently of the generic session-file
+	// cleanup below. Keep the reset guard closed if this deletion fails.
+	let snapshotProjectionCleared = true;
+	try {
+		const projectionPath = validateSwarmPath(
+			directory,
+			SNAPSHOT_PROJECTION_FILE,
+		);
+		if (fs.existsSync(projectionPath)) {
+			fs.unlinkSync(projectionPath);
+			results.push(`✅ Deleted .swarm/${SNAPSHOT_PROJECTION_FILE}`);
+		}
+	} catch (err) {
+		snapshotProjectionCleared = false;
+		results.push(
+			`❌ Failed to delete ${SNAPSHOT_PROJECTION_FILE}: ${errorMessage(err)}`,
+		);
+	}
+
 	// Resolve the state.json path once and reuse it below. Previously this
 	// path was validated a second time (unguarded) to derive sessionDir,
 	// which meant a validateSwarmPath failure (e.g. .swarm resolving via a
@@ -256,6 +290,7 @@ export async function handleResetSessionCommand(
 	// crashing the whole best-effort cleanup. Reusing statePath keeps the
 	// "report and continue" contract consistent for both steps.
 	let statePath: string | undefined;
+	let legacySnapshotCleared = true;
 	try {
 		statePath = validateSwarmPath(directory, 'session/state.json');
 		if (fs.existsSync(statePath)) {
@@ -265,6 +300,7 @@ export async function handleResetSessionCommand(
 			results.push('⏭️ state.json not found (already clean)');
 		}
 	} catch {
+		legacySnapshotCleared = false;
 		// Justification: best-effort session cleanup — state.json may be
 		// locked by an active session, path validation may fail, or the
 		// file may be concurrently removed. The report records the
@@ -289,7 +325,11 @@ export async function handleResetSessionCommand(
 	// If sessionDir doesn't exist, sessionFiles stays [] — nothing to clean, no error
 
 	for (const file of sessionFiles) {
-		if (file === 'state.json') continue; // handled separately
+		if (
+			file === 'state.json' ||
+			file === path.basename(SNAPSHOT_PROJECTION_FILE)
+		)
+			continue; // handled separately
 		const filePath = path.join(sessionDir as string, file);
 		try {
 			if (!fs.existsSync(filePath)) continue;
@@ -324,7 +364,18 @@ export async function handleResetSessionCommand(
 	results.push(`✅ Cleared ${activeAgentCount} active-agent mapping(s)`);
 	// All paths that can rehydrate or republish the old snapshot are now past
 	// their destructive inputs. Let future requests initialize normally.
-	snapshotResetGuard?.release();
+	// Keep the closing guard installed when the authoritative delete failed. A
+	// later initializer must not re-import stale rows while the operator retries
+	// reset-session. Successful SQLite + projection cleanup is the only point at
+	// which it is safe to admit new coordination work.
+	if (
+		snapshotResetGuard &&
+		snapshotAuthorityCleared &&
+		snapshotProjectionCleared &&
+		legacySnapshotCleared
+	) {
+		snapshotResetGuard.release();
+	}
 
 	// Issue #2398: reset-session is the operator's documented escape from the
 	// knowledge-application enforcement gate. Durably release THIS session's
