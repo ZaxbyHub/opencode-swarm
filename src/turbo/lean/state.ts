@@ -292,7 +292,8 @@ function unreadableStateError(directory: string): Error {
 }
 
 function ensureReadableState(directory: string): void {
-	if (stateUnreadableMap.get(stateKey(directory))) throw unreadableStateError(directory);
+	if (stateUnreadableMap.get(stateKey(directory)))
+		throw unreadableStateError(directory);
 	if (!readPersisted(directory)) throw unreadableStateError(directory);
 }
 
