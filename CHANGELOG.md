@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.164.10](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.9...v7.164.10) (2026-09-03)
+
+
+### Bug Fixes
+
+* **hooks:** deliver plugin guidance on host-rendered user-role carriers ([#2526](https://github.com/ZaxbyHub/opencode-swarm/issues/2526)) ([4818019](https://github.com/ZaxbyHub/opencode-swarm/commit/4818019bb7e6a40cdd10c7a0dfb69e784c27060e))
+
 ## [7.164.9](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.8...v7.164.9) (2026-09-03)
 
 
