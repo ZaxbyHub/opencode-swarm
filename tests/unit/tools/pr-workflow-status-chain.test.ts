@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
 import type { ToolContext } from '@opencode-ai/plugin';
 import { recordPendingDelegation } from '../../../src/background/pending-delegations';
+import { activatePrWorkflow } from '../../../src/hooks/pr-workflow-gate';
 import type { ToolResult } from '../../../src/tools/create-tool';
 import {
 	_internals,
@@ -135,4 +136,28 @@ test('fails closed when delegation ancestry is missing, cyclic, or too deep', as
 	expect(
 		await _internals.resolveWorkflowGateSession(tempDir, 'depth-0'),
 	).toBeNull();
+});
+
+test('prefers a gate owned by the queried session before walking its parent', async () => {
+	const sessionID = 'delegated-controller';
+	await recordPendingDelegation(tempDir, {
+		correlationId: sessionID,
+		jobId: null,
+		subagentSessionId: sessionID,
+		parentSessionId: 'outer-controller',
+		callID: 'delegated-controller-call',
+		normalizedAgent: 'architect',
+		swarmPrefixedAgent: 'architect',
+		planTaskId: null,
+		evidenceTaskId: null,
+	});
+	await activatePrWorkflow(tempDir, sessionID, 'PR_FEEDBACK');
+
+	expect(await _internals.resolveWorkflowGateSession(tempDir, sessionID)).toBe(
+		sessionID,
+	);
+	expect((await runTool(sessionID)).gate).toMatchObject({
+		active: true,
+		mode: 'PR_FEEDBACK',
+	});
 });

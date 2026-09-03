@@ -13,6 +13,7 @@ import {
 import {
 	describePrWorkflowPublicationSection,
 	type PrFeedbackInventoryAmendmentRecord,
+	type PrWorkflowGateRecoveryRead,
 	type PrWorkflowGateState,
 	prWorkflowSessionFileStem,
 	readPrWorkflowGateStateForRecovery,
@@ -355,29 +356,55 @@ const MAX_GATE_ANCESTOR_DEPTH = 16;
  * before enforcement, so the observer must report the gate it is actually
  * operating under as well.
  */
+async function resolveWorkflowGate(
+	directory: string,
+	sessionID: string,
+): Promise<{
+	sessionID: string | null;
+	recovery: PrWorkflowGateRecoveryRead | null;
+}> {
+	const currentSessionID = sessionID.trim();
+	const currentRecovery = await _internals.readPrWorkflowGateStateForRecovery(
+		directory,
+		currentSessionID,
+	);
+	if (currentRecovery) {
+		return { sessionID: currentSessionID, recovery: currentRecovery };
+	}
+	const firstRecord = findByCorrelationId(directory, currentSessionID);
+	if (!firstRecord?.parentSessionId?.trim()) {
+		return { sessionID, recovery: null };
+	}
+	let current = firstRecord.parentSessionId.trim();
+	const visited = new Set<string>([currentSessionID]);
+	// The canonical enforcement resolver counts the queried session as depth 0.
+	// Start its parent at depth 1 so status observes the same bounded ancestry.
+	for (let depth = 1; depth < MAX_GATE_ANCESTOR_DEPTH; depth += 1) {
+		if (!current || visited.has(current)) {
+			return { sessionID: null, recovery: null };
+		}
+		visited.add(current);
+		const recovery = await _internals.readPrWorkflowGateStateForRecovery(
+			directory,
+			current,
+		);
+		if (recovery) {
+			return { sessionID: current, recovery };
+		}
+		const parentRecord = findByCorrelationId(directory, current);
+		if (!parentRecord) return { sessionID: null, recovery: null };
+		const parent = parentRecord.parentSessionId?.trim();
+		if (!parent) return { sessionID: null, recovery: null };
+		current = parent;
+	}
+	return { sessionID: null, recovery: null };
+}
+
 async function resolveWorkflowGateSession(
 	directory: string,
 	sessionID: string,
 ): Promise<string | null> {
-	const firstRecord = findByCorrelationId(directory, sessionID.trim());
-	if (!firstRecord?.parentSessionId?.trim()) return sessionID;
-	let current = firstRecord.parentSessionId.trim();
-	const visited = new Set<string>();
-	for (let depth = 0; depth < MAX_GATE_ANCESTOR_DEPTH; depth += 1) {
-		if (!current || visited.has(current)) return null;
-		visited.add(current);
-		if (
-			await _internals.readPrWorkflowGateStateForRecovery(directory, current)
-		) {
-			return current;
-		}
-		const parentRecord = findByCorrelationId(directory, current);
-		if (!parentRecord) return null;
-		const parent = parentRecord.parentSessionId?.trim();
-		if (!parent) return null;
-		current = parent;
-	}
-	return null;
+	return (await resolveWorkflowGate(directory, sessionID)).sessionID;
 }
 
 async function executePrWorkflowStatus(
@@ -385,9 +412,10 @@ async function executePrWorkflowStatus(
 	rawSessionID: string | undefined,
 ): Promise<string> {
 	const sessionID = rawSessionID?.trim() ? rawSessionID.trim() : null;
-	const gateSessionID = sessionID
-		? await resolveWorkflowGateSession(directory, sessionID)
+	const resolvedGate = sessionID
+		? await resolveWorkflowGate(directory, sessionID)
 		: null;
+	const gateSessionID = resolvedGate?.sessionID ?? null;
 
 	const [head, isClean, branchInfo, porcelain, remoteOutput, liveCheckout] =
 		await Promise.all([
@@ -433,10 +461,7 @@ async function executePrWorkflowStatus(
 		// operator could not even SEE the state they were stuck on. Unparseable
 		// bytes still fail. This tool and abort_pr_workflow are the only two
 		// callers of the recovery reader.
-		const recovery = await _internals.readPrWorkflowGateStateForRecovery(
-			directory,
-			gateSessionID,
-		);
+		const recovery = resolvedGate?.recovery ?? null;
 		activeState = recovery?.state ?? null;
 		const receiptFiles = activeState
 			? await countCheckoutReceiptFiles(directory, gateSessionID)
