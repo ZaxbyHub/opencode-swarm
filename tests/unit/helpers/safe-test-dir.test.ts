@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { isCanonicalPathWithinRoot } from '../../../src/utils/path-security.js';
 import {
 	createSafeTestDir,
 	safeRmRecursive,
@@ -28,13 +29,7 @@ describe('createSafeTestDir', () => {
 			// returns the /var/... symlink but the real path is /private/var/...).
 			// Compare against the realpath-resolved tmpdir base so the assertion
 			// holds on macOS too.
-			const tmpdir = fs.realpathSync.native(os.tmpdir());
-			const resolvedDir = path.resolve(dir);
-			const resolvedTmpdir = path.resolve(tmpdir);
-			expect(
-				resolvedDir.startsWith(resolvedTmpdir + path.sep) ||
-					resolvedDir === resolvedTmpdir,
-			).toBe(true);
+			expect(isCanonicalPathWithinRoot(dir, os.tmpdir())).toBe(true);
 		} finally {
 			cleanup();
 		}
@@ -120,25 +115,23 @@ describe('safeRmRecursive', () => {
 		expect(() => safeRmRecursive(outside)).toThrow('not under os.tmpdir');
 	});
 
-	it.skipIf(process.platform === 'win32')(
-		'rejects symlinks inside os.tmpdir() that resolve outside os.tmpdir()',
-		() => {
-			// Windows directory symlinks are junction-like and require different
-			// privileges/semantics; non-Windows CI exercises the symlink escape path,
-			// while the helper still uses realpath containment on every platform.
-			const { dir, cleanup } = createSafeTestDir('safe-rm-symlink-');
-			const linkPath = path.join(dir, 'outside-link');
-			fs.symlinkSync(process.cwd(), linkPath, 'dir');
+	it('rejects symlinks or junctions inside os.tmpdir() that resolve outside it', () => {
+		const { dir, cleanup } = createSafeTestDir('safe-rm-symlink-');
+		const linkPath = path.join(dir, 'outside-link');
+		fs.symlinkSync(
+			process.cwd(),
+			linkPath,
+			process.platform === 'win32' ? 'junction' : 'dir',
+		);
 
-			try {
-				expect(() => safeRmRecursive(linkPath)).toThrow('escapes os.tmpdir');
-				expect(fs.existsSync(process.cwd())).toBe(true);
-				expect(fs.existsSync(linkPath)).toBe(true);
-			} finally {
-				cleanup();
-			}
-		},
-	);
+		try {
+			expect(() => safeRmRecursive(linkPath)).toThrow('not under os.tmpdir');
+			expect(fs.existsSync(process.cwd())).toBe(true);
+			expect(fs.existsSync(linkPath)).toBe(true);
+		} finally {
+			cleanup();
+		}
+	});
 });
 
 describe('withSafeTestDir', () => {

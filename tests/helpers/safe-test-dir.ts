@@ -2,6 +2,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { closeProjectDb } from '../../src/db/project-db.js';
+import { sameExistingFilesystemPath } from '../../src/utils/filesystem-identity.js';
+import { isCanonicalPathWithinRoot } from '../../src/utils/path-security.js';
 
 /** Native-first realpath keeps test fixtures aligned with production identity. */
 export const _internals: {
@@ -49,14 +51,9 @@ export function createSafeTestDir(prefix = 'swarm-safe-test-'): {
 	// Safety assertion: verify it's actually under tmpdir (compare against the
 	// resolved base too, so the symlinked /var vs real /private/var case is
 	// caught).
-	const resolvedDir = path.resolve(dir);
-	const resolvedBase = path.resolve(canonicalRealpath(base));
-	if (
-		!resolvedDir.startsWith(resolvedBase + path.sep) &&
-		resolvedDir !== resolvedBase
-	) {
+	if (!isCanonicalPathWithinRoot(dir, base)) {
 		throw new Error(
-			`createSafeTestDir: created dir ${resolvedDir} is not under os.tmpdir() ${resolvedBase}`,
+			`createSafeTestDir: created dir ${dir} is not under os.tmpdir()`,
 		);
 	}
 
@@ -76,38 +73,14 @@ export function safeRmRecursive(targetPath: string): void {
 	}
 
 	const lexicalTarget = path.resolve(targetPath);
-	// Compute the base BOTH lexically and via realpath so the containment
-	// guards below work regardless of which form the caller passed in.
-	// createSafeTestDir now returns a realpath-resolved dir (issue #1729 macOS
-	// /var -> /private/var symlink fix), so lexicalTarget may be the resolved
-	// /private/var/... form while os.tmpdir() returns the /var/... symlink.
-	// Comparing resolved-target against resolved-base keeps the lexical guard
-	// consistent with how createSafeTestDir canonicalizes its return value.
-	const realBase = canonicalRealpath(os.tmpdir());
-	const lexicalBase = path.resolve(os.tmpdir());
-	const resolvedBase = path.resolve(realBase);
-	if (lexicalTarget === lexicalBase || lexicalTarget === resolvedBase) {
+	const tmpBase = os.tmpdir();
+	if (sameExistingFilesystemPath(lexicalTarget, tmpBase)) {
 		throw new Error('safeRmRecursive: refusing to remove os.tmpdir() itself');
 	}
-	if (
-		!lexicalTarget.startsWith(lexicalBase + path.sep) &&
-		!lexicalTarget.startsWith(resolvedBase + path.sep)
-	) {
+	if (!isCanonicalPathWithinRoot(lexicalTarget, tmpBase)) {
 		throw new Error(
-			`safeRmRecursive: refusing to remove ${lexicalTarget}; not under os.tmpdir() ${lexicalBase} (resolved ${resolvedBase})`,
+			`safeRmRecursive: refusing to remove ${lexicalTarget}; not under os.tmpdir()`,
 		);
-	}
-
-	if (fs.existsSync(lexicalTarget)) {
-		const realTarget = canonicalRealpath(lexicalTarget);
-		if (
-			realTarget === realBase ||
-			!realTarget.startsWith(realBase + path.sep)
-		) {
-			throw new Error(
-				`safeRmRecursive: refusing to remove ${lexicalTarget}; real path ${realTarget} escapes os.tmpdir() ${realBase}`,
-			);
-		}
 	}
 
 	// #2480: production code may have opened .swarm/swarm.db under this dir

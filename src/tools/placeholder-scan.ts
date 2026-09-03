@@ -8,6 +8,7 @@ import type { EvidenceVerdict } from '../config/evidence-schema';
 import { saveEvidence } from '../evidence/manager';
 import { getParserForFile } from '../lang/registry';
 import { escapeRegex } from '../utils';
+import { isCanonicalPathWithinRoot } from '../utils/path-security';
 import { createSwarmTool } from './create-tool';
 
 // ============ Types ============
@@ -1118,16 +1119,11 @@ export async function placeholderScan(
 	const filesWithFindings = new Set<string>();
 
 	for (const filePath of changed_files) {
-		const fullPath = path.isAbsolute(filePath)
-			? filePath
-			: path.resolve(directory, filePath);
+		const fullPath = path.resolve(directory, filePath);
 
-		// Security: reject paths that escape the working directory via traversal
-		const resolvedDirectory = path.resolve(directory);
-		if (
-			!fullPath.startsWith(resolvedDirectory + path.sep) &&
-			fullPath !== resolvedDirectory
-		) {
+		// Security: resolve existing ancestors before containment so Windows aliases
+		// and symlink/junction escapes cannot pass a lexical prefix check.
+		if (!isCanonicalPathWithinRoot(fullPath, directory)) {
 			continue;
 		}
 

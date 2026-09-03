@@ -60,7 +60,10 @@ import {
 	atomicWriteSwarmFile,
 	atomicWriteSwarmFileSync,
 } from '../utils/atomic-write';
-import { canonicalExistingFilesystemPath } from '../utils/filesystem-identity.js';
+import {
+	canonicalExistingFilesystemPath,
+	legacyCanonicalExistingFilesystemPath,
+} from '../utils/filesystem-identity.js';
 import { assertProjectRoot } from '../utils/project-boundary';
 import {
 	canonicalWorkspaceIdentity,
@@ -437,6 +440,8 @@ function validateScopeBindingPayload(
 	options: { allowLegacy?: boolean } = {},
 ): ScopeBinding | null {
 	const workspaceIdentity = canonicalWorkspaceIdentity(directory);
+	const legacyWorkspaceIdentity =
+		legacyCanonicalExistingFilesystemPath(directory);
 	const files = Array.isArray(parsed.files)
 		? normalizeScopeFiles(
 				parsed.files.filter((file): file is string => typeof file === 'string'),
@@ -445,7 +450,8 @@ function validateScopeBindingPayload(
 	if (
 		parsed.version !== 2 ||
 		!workspaceIdentity ||
-		parsed.workspaceIdentity !== workspaceIdentity ||
+		(parsed.workspaceIdentity !== workspaceIdentity &&
+			parsed.workspaceIdentity !== legacyWorkspaceIdentity) ||
 		!isSafeTaskId(parsed.taskId ?? '') ||
 		!files ||
 		typeof parsed.planId !== 'string' ||

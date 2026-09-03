@@ -1302,11 +1302,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/scope/scope-persistence.ts'],
 		writerCitations: [
-			'src/scope/scope-persistence.ts:714 writeScopeToDisk (v1 projection) / :790 writeScopeBindingToDisk (v2) / :1419 claimScopeBindingForChildDurably / :1722 replaceExistingScopeDeclaration / :1120 tombstoneScopeBinding / :1215 refreshScopeBindingLease / :1689 writeClaimReceipt',
+			'src/scope/scope-persistence.ts:720 writeScopeToDisk (v1 projection) / :796 writeScopeBindingToDisk (v2) / :1425 claimScopeBindingForChildDurably / :1728 replaceExistingScopeDeclaration / :1126 tombstoneScopeBinding / :1221 refreshScopeBindingLease / :1695 writeClaimReceipt',
 		],
 		readerCitations: [
-			'src/scope/scope-persistence.ts:2511 readScopeFromDisk — bounded 2 MiB O_NOFOLLOW, sync',
-			'src/scope/scope-persistence.ts:1346 readAllExactBindings — bounded directory scan (≤10k files), sync',
+			'src/scope/scope-persistence.ts:2516 readScopeFromDisk — bounded 2 MiB O_NOFOLLOW, sync',
+			'src/scope/scope-persistence.ts:1352 readAllExactBindings — bounded directory scan (≤10k files), sync',
 		],
 		schemaVersion: 'v1 projection + v2 exact-generation bindings (v1 never authorizes: :916)',
 		stateClass: 'authoritative',

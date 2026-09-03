@@ -19,6 +19,8 @@ import {
 	stripKnownSwarmPrefix,
 } from '../config/schema';
 import { log } from '../utils';
+import { sameExistingFilesystemPath } from '../utils/filesystem-identity';
+import { isCanonicalPathWithinRoot } from '../utils/path-security';
 
 const CONFIG_DOCTOR_MAX_CONFIG_FILE_BYTES = 102_400;
 
@@ -850,12 +852,9 @@ export function restoreFromBackup(
 	}
 
 	// Validate backupPath is within .swarm/ directory
-	const swarmDir = path.resolve(path.join(directory, '.swarm'));
+	const swarmDir = path.resolve(directory, '.swarm');
 	const resolvedBackup = path.resolve(backupPath);
-	if (
-		!resolvedBackup.startsWith(swarmDir + path.sep) &&
-		resolvedBackup !== swarmDir
-	) {
+	if (!isCanonicalPathWithinRoot(resolvedBackup, swarmDir)) {
 		return null; // backupPath is outside .swarm/ — reject
 	}
 
@@ -2641,7 +2640,10 @@ export function removeStraySwarmDir(
 
 	// Safety: never remove the root .swarm/
 	const rootSwarm = path.join(canonicalRoot, '.swarm');
-	if (canonicalStray === rootSwarm || canonicalStray === canonicalRoot) {
+	if (
+		sameExistingFilesystemPath(canonicalStray, rootSwarm) ||
+		sameExistingFilesystemPath(canonicalStray, canonicalRoot)
+	) {
 		return {
 			success: false,
 			message: 'Refusing to remove root .swarm/ directory',
@@ -2649,7 +2651,7 @@ export function removeStraySwarmDir(
 	}
 
 	// Verify it's actually inside the project
-	if (!canonicalStray.startsWith(canonicalRoot + path.sep)) {
+	if (!isCanonicalPathWithinRoot(canonicalStray, canonicalRoot)) {
 		return {
 			success: false,
 			message: 'Path is outside project root — refusing to remove',

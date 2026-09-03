@@ -53,6 +53,28 @@ export function canonicalExistingFilesystemPath(
 	}
 }
 
+/**
+ * Return the pre-#2474 canonical spelling used in persisted scope bindings.
+ *
+ * It deliberately skips the native Windows resolver: old releases used the
+ * ordinary `realpathSync` result (then slash-normalized and case-folded). The
+ * scope persistence reader uses this as a narrow dual-read compatibility
+ * witness and always rewrites a recovered binding with the current native-first
+ * identity on its next durable write.
+ */
+export function legacyCanonicalExistingFilesystemPath(
+	entryPath: string,
+): string | null {
+	if (typeof entryPath !== 'string') return null;
+	try {
+		return normalizeIdentityPath(
+			_internals.realpathSync(path.resolve(entryPath)),
+		);
+	} catch {
+		return null;
+	}
+}
+
 export interface CanonicalPathFromExistingAncestor {
 	canonicalPath: string;
 	existingAncestor: string;
