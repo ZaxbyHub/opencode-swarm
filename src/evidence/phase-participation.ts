@@ -31,6 +31,7 @@ import { computePlanStructureHash } from '../plan/ledger.js';
 import { loadPlan } from '../plan/manager.js';
 import { derivePlanId, derivePlanIdentityHash } from '../plan/utils.js';
 import { atomicWriteSwarmFile } from '../utils/atomic-write';
+import { sameProjectRoot } from '../utils/canonical-root.js';
 import { stableCanonicalStringify } from '../utils/stable-stringify.js';
 import { withEvidenceLock } from './lock.js';
 import { atomicWriteFile } from './task-file.js';
@@ -526,7 +527,7 @@ function workspaceIdentityIsFresh(
 	current: ParticipationWorkspace,
 ): boolean {
 	return (
-		path.resolve(expected.directory) === path.resolve(current.directory) &&
+		sameProjectRoot(expected.directory, current.directory) &&
 		expected.gitHead === current.gitHead &&
 		expected.prHeadSha === current.prHeadSha
 	);

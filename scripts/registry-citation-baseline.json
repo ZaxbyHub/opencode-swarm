@@ -366,13 +366,6 @@
 			"note": "Pre-existing debt, not approved drift: \"saveGraph\" exists in src/tools/repo-graph/storage.ts but not inside src/tools/repo-graph/storage.ts:339 (repo-graph.writerCitations[0])."
 		},
 		{
-			"rowId": "scopes-family",
-			"file": "src/scope/scope-persistence.ts",
-			"identifier": "readScopeFromDisk",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readScopeFromDisk\" exists in src/scope/scope-persistence.ts but not inside src/scope/scope-persistence.ts:2511 (scopes-family.readerCitations[0])."
-		},
-		{
 			"rowId": "session-state-snapshot",
 			"file": "src/services/context-budget-service.ts",
 			"identifier": "writeBudgetState",
@@ -700,20 +693,6 @@
 			"identifier": "Version",
 			"kind": "out-of-range",
 			"note": "Pre-existing debt, not approved drift: \"Version\" exists in src/services/diagnose-service.ts but not inside diagnose-service.ts:939 (version-check-cache.readerCitations[0])."
-		},
-		{
-			"rowId": "workflow-wal-dirs",
-			"file": "src/workflow/coder-settlement.ts",
-			"identifier": "readWal",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readWal\" exists in src/workflow/coder-settlement.ts but not inside coder-settlement.ts:72 (workflow-wal-dirs.readerCitations[0])."
-		},
-		{
-			"rowId": "workflow-wal-dirs",
-			"file": "src/workflow/coder-settlement.ts",
-			"identifier": "writeWal",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"writeWal\" exists in src/workflow/coder-settlement.ts but not inside src/workflow/coder-settlement.ts:102 (workflow-wal-dirs.writerCitations[0])."
 		},
 		{
 			"rowId": "workflow-wal-dirs",

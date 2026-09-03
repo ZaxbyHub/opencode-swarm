@@ -25,6 +25,7 @@ import {
 	_internals as statusInternals,
 } from '../../../src/commands/pr-monitor-status';
 import { _internals as telemetryInternals } from '../../../src/telemetry';
+import { sameProjectRoot } from '../../../src/utils/canonical-root';
 import { freezeClock } from '../../helpers/test-clock';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
@@ -220,7 +221,7 @@ describe('pr-subscriptions health + recovery', () => {
 			expect(active[0].sessionID).toBe('sess_local');
 		});
 
-		test('case differences in rootPath: same project on win32, foreign on POSIX', async () => {
+		test('case differences in rootPath follow physical filesystem identity', async () => {
 			const cp = baseCheckpoint(dir);
 			const resolved = path.resolve(dir);
 			// Flip the case of the first cased letter (temp paths contain
@@ -237,11 +238,7 @@ describe('pr-subscriptions health + recovery', () => {
 			cp.records['sess_1::o/r::1'] = record('sess_1', 1);
 			fs.writeFileSync(checkpointPath(dir), `${JSON.stringify(cp)}\n`, 'utf-8');
 			const active = await listActive(dir);
-			if (process.platform === 'win32') {
-				expect(active).toHaveLength(1); // case-insensitive — same project
-			} else {
-				expect(active).toHaveLength(0); // case-sensitive — foreign
-			}
+			expect(active).toHaveLength(sameProjectRoot(cp.rootPath, dir) ? 1 : 0);
 		});
 	});
 

@@ -146,6 +146,52 @@ describe('durable standard-worktree collision ownership', () => {
 		});
 	});
 
+	test('protects a primary owner recorded through a physical worktree alias', async () => {
+		const lane = identity();
+		fs.mkdirSync(lane.worktreePath, { recursive: true });
+		const alias = `${lane.worktreePath}-alias`;
+		fs.symlinkSync(
+			lane.worktreePath,
+			alias,
+			process.platform === 'win32' ? 'junction' : 'dir',
+		);
+		const input = pendingInput('physical-alias');
+		input.worktree!.worktreePath = alias;
+		input.taskChangeContext.baseline.directory = alias;
+		expect(await recordPendingDelegation(directory, input)).not.toBeNull();
+		expect(await inspectStandardWorktreeCollisionOwnership(lane)).toMatchObject(
+			{
+				status: 'protected',
+				ownerKind: 'primary',
+			},
+		);
+	});
+
+	test('protects merge status recorded through a physical worktree alias', async () => {
+		const lane = identity();
+		fs.mkdirSync(lane.worktreePath, { recursive: true });
+		const alias = `${lane.worktreePath}-alias`;
+		fs.symlinkSync(
+			lane.worktreePath,
+			alias,
+			process.platform === 'win32' ? 'junction' : 'dir',
+		);
+		initDurableStatusPath(directory);
+		recordWorktreeMergeFailure(taskId, {
+			outcome: 'failed',
+			stage: 'merge',
+			message: 'preserved',
+			worktreePath: alias,
+			branch: lane.branchName,
+		});
+		expect(await inspectStandardWorktreeCollisionOwnership(lane)).toMatchObject(
+			{
+				status: 'protected',
+				ownerKind: 'merge-status',
+			},
+		);
+	});
+
 	async function startSettlement(correlationId: string, operationId: string) {
 		await recordPendingDelegation(directory, pendingInput(correlationId));
 		const eventId = buildBackgroundCompletionEventId({

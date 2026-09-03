@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { tool } from '@opencode-ai/plugin';
 import { z } from 'zod';
+import { isCanonicalPathWithinRoot } from '../utils/path-security';
 import { createSwarmTool } from './create-tool';
 
 // Note: Complex YAML constructs (multi-line strings, anchors) are out of scope for v6.5
@@ -75,9 +76,9 @@ function discoverSpecFile(cwd: string, specFileArg?: string): string | null {
 	if (specFileArg) {
 		const resolvedPath = path.resolve(cwd, specFileArg);
 
-		// Security check: ensure path resolves within cwd
-		const normalizedCwd = cwd.endsWith(path.sep) ? cwd : cwd + path.sep;
-		if (!resolvedPath.startsWith(normalizedCwd) && resolvedPath !== cwd) {
+		// Security check: resolve existing ancestors before containment so Windows
+		// aliases and symlink/junction escapes cannot pass a lexical prefix check.
+		if (!isCanonicalPathWithinRoot(resolvedPath, cwd)) {
 			throw new Error('Invalid spec_file: path traversal detected');
 		}
 

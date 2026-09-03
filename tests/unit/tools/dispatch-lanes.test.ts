@@ -66,10 +66,11 @@ async function waitForBatchRecordStatus(
 	batchId: string,
 	expected: string,
 ): Promise<string | undefined> {
-	for (let attempt = 0; attempt < 50; attempt++) {
+	// Attempt-counting, not wall-clock (docs/testing/test-stability.md, #2478).
+	for (let attempt = 0; attempt < 200; attempt++) {
 		const status = findByBatchId(directory, batchId)[0]?.status;
 		if (status === expected) return status;
-		await new Promise((resolve) => setTimeout(resolve, 1));
+		await new Promise((resolve) => setTimeout(resolve, 10));
 	}
 	return findByBatchId(directory, batchId)[0]?.status;
 }
@@ -573,7 +574,8 @@ describe('executeDispatchLanes', () => {
 			expect.objectContaining({
 				id: 'hung',
 				status: 'failed',
-				error: 'Lane "hung" session.prompt timed out after 10ms',
+				// #2478/#2362: digits are deadline-derived (9 not 10 under load).
+				error: expect.stringContaining('session.prompt timed out after'),
 			}),
 		]);
 		expect(ops.delete).toHaveBeenCalledWith({ path: { id: 'session-1' } });
@@ -1899,15 +1901,10 @@ describe('executeDispatchLanesAsync and executeCollectLaneResults', () => {
 		expect(ops.delete).toHaveBeenCalledWith({
 			path: { id: 'session-timeout' },
 		});
-		const records = findByBatchId(directory, 'batch-timeout');
-		expect(records[0]).toEqual(
-			expect.objectContaining({
-				status: 'error',
-				result: expect.objectContaining({
-					error:
-						'Lane "runtime" session.promptAsync launch timed out after 10ms',
-				}),
-			}),
+		const record = findByBatchId(directory, 'batch-timeout')[0];
+		expect(record?.status).toBe('error');
+		expect(record?.result?.error).toContain(
+			'session.promptAsync launch timed out after',
 		);
 	});
 

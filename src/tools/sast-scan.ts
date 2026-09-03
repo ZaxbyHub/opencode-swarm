@@ -22,6 +22,7 @@ import {
 	type SemgrepFailureKind,
 } from '../sast/semgrep';
 import { warn } from '../utils';
+import { isCanonicalPathWithinRoot } from '../utils/path-security';
 import { createSwarmTool } from './create-tool';
 import {
 	assignOccurrenceIndices,
@@ -444,16 +445,11 @@ export async function sastScan(
 		}
 
 		// Resolve relative paths
-		const resolvedPath = path.isAbsolute(filePath)
-			? filePath
-			: path.resolve(directory, filePath);
+		const resolvedPath = path.resolve(directory, filePath);
 
-		// Security: reject paths that escape the working directory via traversal
-		const resolvedDirectory = path.resolve(directory);
-		if (
-			!resolvedPath.startsWith(resolvedDirectory + path.sep) &&
-			resolvedPath !== resolvedDirectory
-		) {
+		// Security: resolve existing ancestors before containment so Windows aliases
+		// and symlink/junction escapes cannot pass a lexical prefix check.
+		if (!isCanonicalPathWithinRoot(resolvedPath, directory)) {
 			_filesSkipped++;
 			continue;
 		}

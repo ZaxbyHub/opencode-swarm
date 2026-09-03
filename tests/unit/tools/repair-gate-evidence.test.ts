@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import type { ToolContext } from '@opencode-ai/plugin/tool';
 import {
 	repairTaskGateEvidence,
-	TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL,
 	taskGateEvidenceQuarantinePath,
 } from '../../../src/evidence/task-gate-repair.js';
 import {
@@ -94,12 +94,21 @@ describe('repair_gate_evidence', () => {
 		cleanup();
 	});
 
+	async function executeAsArchitect(
+		args: Parameters<typeof executeRepairGateEvidence>[0],
+		root = directory,
+	) {
+		return executeRepairGateEvidence(args, root, {
+			agent: 'architect',
+		} as ToolContext);
+	}
+
 	test('rebuilds corrupt evidence from the latest durable requirements receipt and quarantines the original bytes', async () => {
 		await seedCoderReceipt(directory);
 		const corruptBytes = Buffer.from('{"taskId":"1.1","broken":');
 		fs.writeFileSync(evidencePath(directory), corruptBytes);
 
-		const result = await executeRepairGateEvidence(
+		const result = await executeAsArchitect(
 			{ task_id: TASK_ID, reason: 'repair corrupt gate evidence' },
 			directory,
 		);
@@ -161,7 +170,7 @@ describe('repair_gate_evidence', () => {
 		const corruptText = '{"taskId":"1.1","broken":';
 		fs.writeFileSync(evidencePath(directory), corruptText);
 
-		const result = await executeRepairGateEvidence(
+		const result = await executeAsArchitect(
 			{
 				task_id: TASK_ID,
 				reason: 'repair corrupt gate evidence',
@@ -188,9 +197,9 @@ describe('repair_gate_evidence', () => {
 			expected_generation: 1,
 		};
 
-		const first = await executeRepairGateEvidence(args, directory);
+		const first = await executeAsArchitect(args);
 		const repairedBytes = fs.readFileSync(evidencePath(directory));
-		const second = await executeRepairGateEvidence(args, directory);
+		const second = await executeAsArchitect(args);
 
 		expect(first.success).toBe(true);
 		expect(first.repaired).toBe(true);
@@ -209,7 +218,7 @@ describe('repair_gate_evidence', () => {
 		fs.writeFileSync(evidencePath(directory), JSON.stringify(current, null, 2));
 
 		const before = fs.readFileSync(evidencePath(directory));
-		const result = await executeRepairGateEvidence(
+		const result = await executeAsArchitect(
 			{
 				task_id: TASK_ID,
 				reason: 'repair evidence ahead of receipt generation',
@@ -225,7 +234,7 @@ describe('repair_gate_evidence', () => {
 	test('remains incomplete after only reviewer evidence reruns in the fresh generation', async () => {
 		await seedCoderReceipt(directory);
 		fs.writeFileSync(evidencePath(directory), '{"taskId":"1.1","broken":');
-		const repaired = await executeRepairGateEvidence(
+		const repaired = await executeAsArchitect(
 			{
 				task_id: TASK_ID,
 				reason: 'repair before rerunning every stage b gate',
@@ -266,7 +275,7 @@ describe('repair_gate_evidence', () => {
 	});
 
 	test('fails closed when evidence is absent and no authoritative requirements receipt exists', async () => {
-		const result = await executeRepairGateEvidence(
+		const result = await executeAsArchitect(
 			{ task_id: TASK_ID, reason: 'attempt absent repair' },
 			directory,
 		);
@@ -277,26 +286,24 @@ describe('repair_gate_evidence', () => {
 		);
 	});
 
-	test('rewrites legacy evidence without an authoritative receipt to the reconstruction sentinel and clears session fallbacks', async () => {
+	test('refuses legacy evidence without an authoritative receipt atomically', async () => {
 		fs.mkdirSync(path.dirname(evidencePath(directory)), { recursive: true });
-		fs.writeFileSync(
-			evidencePath(directory),
-			JSON.stringify(
-				{
-					taskId: TASK_ID,
-					required_gates: ['reviewer', 'test_engineer'],
-					gates: {
-						reviewer: {
-							sessionId: 'legacy-reviewer',
-							timestamp: '2026-01-01T00:00:00.000Z',
-							agent: 'reviewer',
-						},
+		const originalBytes = JSON.stringify(
+			{
+				taskId: TASK_ID,
+				required_gates: ['reviewer', 'test_engineer'],
+				gates: {
+					reviewer: {
+						sessionId: 'legacy-reviewer',
+						timestamp: '2026-01-01T00:00:00.000Z',
+						agent: 'reviewer',
 					},
 				},
-				null,
-				2,
-			),
+			},
+			null,
+			2,
 		);
+		fs.writeFileSync(evidencePath(directory), originalBytes);
 
 		const session = ensureAgentSession(
 			'repair-gate-evidence-session',
@@ -316,45 +323,33 @@ describe('repair_gate_evidence', () => {
 		});
 		session.taskCouncilWorkflowGeneration?.set(TASK_ID, 3);
 
-		const result = await executeRepairGateEvidence(
+		const result = await executeAsArchitect(
 			{ task_id: TASK_ID, reason: 'repair legacy evidence' },
 			directory,
 		);
 
-		expect(result.success).toBe(true);
-		expect(result.requirements_state).toBe('unknown');
-		expect(result.required_gates).toEqual([
-			TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL,
-		]);
-		expect(result.repaired_generation).toBe(1);
-		expect(result.next_actions?.[0]).toContain(
-			'regenerate authoritative required gates',
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('TASK_GATE_REQUIREMENTS_RECEIPT_MISSING');
+		expect(fs.readFileSync(evidencePath(directory), 'utf-8')).toBe(
+			originalBytes,
 		);
-
-		const repaired = JSON.parse(
-			fs.readFileSync(evidencePath(directory), 'utf-8'),
-		) as {
-			required_gates: string[];
-			requirements_state?: string;
-			workflow: { generation: number };
-		};
-		expect(repaired.required_gates).toEqual([
-			TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL,
-		]);
-		expect(repaired.requirements_state).toBe('unknown');
-		expect(repaired.workflow.generation).toBe(1);
+		expect(
+			fs.existsSync(
+				path.join(directory, '.swarm', 'evidence', 'task-gate-quarantine'),
+			),
+		).toBe(false);
 
 		const updatedSession = swarmState.agentSessions.get(
 			'repair-gate-evidence-session',
 		)!;
-		expect(updatedSession.currentTaskId).toBeNull();
-		expect(updatedSession.lastCoderDelegationTaskId).toBeNull();
-		expect(updatedSession.taskWorkflowStates.has(TASK_ID)).toBe(false);
-		expect(updatedSession.stageBCompletion?.has(TASK_ID)).toBe(false);
-		expect(updatedSession.taskCouncilApproved?.has(TASK_ID)).toBe(false);
-		expect(updatedSession.taskCouncilWorkflowGeneration?.has(TASK_ID)).toBe(
-			false,
+		expect(updatedSession.currentTaskId).toBe(TASK_ID);
+		expect(updatedSession.lastCoderDelegationTaskId).toBe(TASK_ID);
+		expect(updatedSession.taskWorkflowStates.get(TASK_ID)).toBe('tests_run');
+		expect(updatedSession.stageBCompletion?.get(TASK_ID)).toEqual(
+			new Set(['reviewer', 'test_engineer']),
 		);
+		expect(updatedSession.taskCouncilApproved?.has(TASK_ID)).toBe(true);
+		expect(updatedSession.taskCouncilWorkflowGeneration?.get(TASK_ID)).toBe(3);
 	});
 
 	test('fails closed without overwrite when the original evidence file is oversized', async () => {
@@ -362,7 +357,7 @@ describe('repair_gate_evidence', () => {
 		const oversized = Buffer.alloc(256 * 1024 + 1, 'x');
 		fs.writeFileSync(evidencePath(directory), oversized);
 
-		const result = await executeRepairGateEvidence(
+		const result = await executeAsArchitect(
 			{ task_id: TASK_ID, reason: 'repair oversized gate evidence safely' },
 			directory,
 		);
@@ -380,7 +375,7 @@ describe('repair_gate_evidence', () => {
 		fs.rmSync(evidencePath(directory), { force: true });
 		fs.mkdirSync(evidencePath(directory), { recursive: true });
 
-		const result = await executeRepairGateEvidence(
+		const result = await executeAsArchitect(
 			{ task_id: TASK_ID, reason: 'repair unreadable evidence path safely' },
 			directory,
 		);
@@ -398,14 +393,14 @@ describe('repair_gate_evidence', () => {
 		fs.writeFileSync(evidencePath(directory), corruptBytes);
 
 		const [first, second] = await Promise.all([
-			executeRepairGateEvidence(
+			executeAsArchitect(
 				{
 					task_id: TASK_ID,
 					reason: 'repair duplicate corrupt evidence safely',
 				},
 				directory,
 			),
-			executeRepairGateEvidence(
+			executeAsArchitect(
 				{
 					task_id: TASK_ID,
 					reason: 'repair duplicate corrupt evidence safely',
@@ -437,7 +432,7 @@ describe('repair_gate_evidence', () => {
 		const child = path.join(directory, 'nested');
 		fs.mkdirSync(child, { recursive: true });
 
-		const result = await executeRepairGateEvidence(
+		const result = await executeAsArchitect(
 			{
 				task_id: TASK_ID,
 				reason: 'repair from wrong root must fail closed',
@@ -465,7 +460,7 @@ describe('repair_gate_evidence', () => {
 		}
 
 		try {
-			const result = await executeRepairGateEvidence(
+			const result = await executeAsArchitect(
 				{
 					task_id: TASK_ID,
 					reason: 'repair through symlinked root must fail closed',

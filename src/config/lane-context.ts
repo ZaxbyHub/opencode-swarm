@@ -46,6 +46,10 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { addDeferredWarning } from '../services/warning-buffer';
+import {
+	canonicalRootKeyFresh,
+	sameProjectRoot,
+} from '../utils/canonical-root.js';
 import { matchSwarmLaneBranch, matchSwarmLanePath } from './swarm-branch';
 
 /**
@@ -167,13 +171,14 @@ function sleepSync(ms: number): void {
  */
 function remember(
 	key: string,
+	displayPath: string,
 	value: null,
 	io: { failed: boolean },
 ): LaneContext | null {
 	if (!io.failed) return cache(key, value);
 	try {
 		_internals.addDeferredWarning(
-			`[swarm] Could not read git metadata for ${key} after ${MAX_DETECTION_ATTEMPTS} attempts; worktree-lane permission scoping was skipped for it. If this directory IS a swarm lane, external-directory prompts raised there cannot be answered and the lane may hang. Check filesystem permissions and open-file limits, then restart the session.`,
+			`[swarm] Could not read git metadata for ${displayPath} after ${MAX_DETECTION_ATTEMPTS} attempts; worktree-lane permission scoping was skipped for it. If this directory IS a swarm lane, external-directory prompts raised there cannot be answered and the lane may hang. Check filesystem permissions and open-file limits, then restart the session.`,
 		);
 	} catch {
 		// Advisory delivery must never break detection.
@@ -369,7 +374,8 @@ export function resolveLaneContext(directory: string): LaneContext | null {
 		return null;
 	}
 
-	const cached = laneContextCache.get(resolved);
+	const key = canonicalRootKeyFresh(resolved);
+	const cached = laneContextCache.get(key);
 	if (cached !== undefined) return cached;
 
 	// Bounded retry: a transient I/O failure must not silently downgrade a real
@@ -383,8 +389,8 @@ export function resolveLaneContext(directory: string): LaneContext | null {
 		if (result !== null || !io.failed) break;
 		if (attempt < MAX_DETECTION_ATTEMPTS) sleepSync(DETECTION_RETRY_BACKOFF_MS);
 	}
-	if (result !== null) return cache(resolved, result);
-	return remember(resolved, null, io);
+	if (result !== null) return cache(key, result);
+	return remember(key, resolved, null, io);
 }
 
 /**
@@ -436,7 +442,7 @@ function attemptDetection(
 		// A lane must not resolve to itself as its own parent; that would mean
 		// the git metadata is inconsistent and any allowlist built from it would
 		// be meaningless.
-		if (path.resolve(parentProjectPath) === laneRoot) {
+		if (sameProjectRoot(parentProjectPath, laneRoot)) {
 			return null;
 		}
 

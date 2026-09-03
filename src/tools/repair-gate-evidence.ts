@@ -15,7 +15,7 @@ export async function executeRepairGateEvidence(
 ) {
 	try {
 		if (
-			_ctx &&
+			!_ctx ||
 			stripKnownSwarmPrefix(_ctx.agent ?? '').toLowerCase() !== 'architect'
 		) {
 			return {
@@ -48,7 +48,7 @@ export async function executeRepairGateEvidence(
 
 export const repair_gate_evidence: ToolDefinition = createSwarmTool({
 	description:
-		'Architect-only evidence repair for exact-task gate files. Rebuilds corrupt or legacy task gate evidence from the latest durable requirements receipt or a fail-closed reconstruction sentinel.',
+		'Architect-only evidence repair for exact-task gate files. Rebuilds from a durable requirements receipt, recovers receipt-backed legacy marker wedges or the exact sentinel-only historical reset, and refuses every other receipt-less reconstruction.',
 	args: {
 		task_id: z
 			.string()

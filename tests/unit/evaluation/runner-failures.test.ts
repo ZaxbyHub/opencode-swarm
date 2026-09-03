@@ -15,6 +15,7 @@ import {
 	type RunEvaluationOptions,
 	runEvaluation,
 } from '../../../src/evaluation/runner.js';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 
 const originalFingerprint = _internals.captureWorkingTreeFingerprint;
 const originalDisposableWorktree = _internals.withDisposableWorktree;
@@ -47,6 +48,11 @@ async function candidate(
 async function harness(
 	kind: 'builtin' | 'project' = 'project',
 	scorerInput: Record<string, unknown> = { score: 0.75 },
+	// Must be chosen BEFORE computeTaskInputContentHash runs — the scorer
+	// timeout is part of the task's canonical content hash, so mutating
+	// options.tasks[0].scorer.timeoutMs after the harness returns invalidates
+	// the stored task (admitEvaluationTask rejects with a hash mismatch).
+	scorerTimeoutMs = 1_000,
 ): Promise<{ root: string; options: RunEvaluationOptions }> {
 	const root = fs.realpathSync(
 		fs.mkdtempSync(path.join(os.tmpdir(), 'eval-runner-failure-')),
@@ -81,7 +87,7 @@ async function harness(
 			kind,
 			argv:
 				kind === 'project' ? ['fixture/scorer.mjs', 'score.json'] : ['builtin'],
-			timeoutMs: 1_000,
+			timeoutMs: scorerTimeoutMs,
 			scoreRange: [0, 1] as [number, number],
 		},
 		provenance: { origin: 'unit-test', license: 'MIT' },
@@ -101,7 +107,7 @@ async function harness(
 		try {
 			return await run({ path: worktreeRoot, baseSha: baseRef });
 		} finally {
-			fs.rmSync(worktreeRoot, { recursive: true, force: true });
+			safeRmRecursive(worktreeRoot);
 		}
 	};
 	const options: RunEvaluationOptions = {
@@ -221,7 +227,7 @@ describe('evaluation runner failure classification', () => {
 			).toBe(true);
 			expect(calls).toBe(outcome === 'infrastructure_failure' ? 4 : 2);
 		} finally {
-			fs.rmSync(root, { recursive: true, force: true });
+			safeRmRecursive(root);
 		}
 	});
 
@@ -232,7 +238,17 @@ describe('evaluation runner failure classification', () => {
 			options.executor = async () => new Promise(() => {});
 			const startedAt = performance.now();
 			const run = await runEvaluation(options);
-			expect(performance.now() - startedAt).toBeLessThan(500);
+			// Semantic bound (issue #2478): the deadline under test is 20ms;
+			// the previous <500ms pin flipped on shared-runner stalls (GC/CPU
+			// contention) while the deadline mechanism still worked.
+			// performance.now() is NOT covered by freezeClock (see
+			// docs/testing/test-stability.md "Known limitations"), so the
+			// bound is widened to 5s (250x the deadline). If the per-task
+			// deadline stops firing entirely, the run-level budget aborts the
+			// run (totalTimeoutMs ~1040ms for this config) and the
+			// outcome/failureCode assertions below still fail — the elapsed
+			// bound is a stall absorber, not the breakage detector.
+			expect(performance.now() - startedAt).toBeLessThan(5_000);
 			expect(run.results.every((entry) => entry.outcome === 'timeout')).toBe(
 				true,
 			);
@@ -242,14 +258,19 @@ describe('evaluation runner failure classification', () => {
 				),
 			).toBe(true);
 		} finally {
-			fs.rmSync(root, { recursive: true, force: true });
+			safeRmRecursive(root);
 		}
 	});
 
 	test('executes a real portable scorer with sibling imports and relative data', async () => {
-		const { root, options } = await harness();
+		const { root, options } = await harness('project', { score: 0.75 }, 8_000);
 		try {
-			options.budgets.maxTaskTimeMs = 3_000;
+			// Real-subprocess budget (issue #2478): this case asserts OUTPUT
+			// classification, not timing. A real scorer's cold boot under
+			// merge-group load can exceed the harness's 1s default, flipping
+			// the outcome to 'timeout'. Give the real child generous budgets;
+			// the mocked-classify cases keep the tight defaults.
+			options.budgets.maxTaskTimeMs = 10_000;
 			_internals.runExternalTool = originalRunExternalTool;
 			const run = await runEvaluation(options);
 			expect(run.status).toBe('complete');
@@ -259,7 +280,7 @@ describe('evaluation runner failure classification', () => {
 			);
 			expect(run.results.every((entry) => entry.score === 0.75)).toBe(true);
 		} finally {
-			fs.rmSync(root, { recursive: true, force: true });
+			safeRmRecursive(root);
 		}
 	});
 
@@ -277,9 +298,11 @@ describe('evaluation runner failure classification', () => {
 			'scorer-invalid-json',
 		],
 	] as const)('classifies a real portable scorer %s', async (_name, scorerInput, outcome, failureCode) => {
-		const { root, options } = await harness('project', scorerInput);
+		const { root, options } = await harness('project', scorerInput, 8_000);
 		try {
-			options.budgets.maxTaskTimeMs = 3_000;
+			// Real-subprocess budget (issue #2478): see the sibling
+			// 'executes a real portable scorer' case above.
+			options.budgets.maxTaskTimeMs = 10_000;
 			_internals.runExternalTool = originalRunExternalTool;
 			const run = await runEvaluation(options);
 			expect(run.status).toBe('inconclusive');
@@ -290,7 +313,7 @@ describe('evaluation runner failure classification', () => {
 				run.results.every((entry) => entry.failureCode === failureCode),
 			).toBe(true);
 		} finally {
-			fs.rmSync(root, { recursive: true, force: true });
+			safeRmRecursive(root);
 		}
 	});
 
@@ -311,7 +334,7 @@ describe('evaluation runner failure classification', () => {
 				),
 			).toBe(true);
 		} finally {
-			fs.rmSync(root, { recursive: true, force: true });
+			safeRmRecursive(root);
 		}
 	});
 });

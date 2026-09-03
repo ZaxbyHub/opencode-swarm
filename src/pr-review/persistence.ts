@@ -27,6 +27,7 @@ import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import type { ZodError } from 'zod';
 import { validateSwarmPath } from '../hooks/utils.js';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 
 // ---------------------------------------------------------------------------
 // Session identity / path helpers
@@ -144,10 +145,7 @@ export function normalizeComparableFsPath(value: string): string {
 }
 
 export function stateCacheKey(directory: string, sessionID: string): string {
-	const resolved = path.normalize(path.resolve(directory));
-	const canonicalDirectory =
-		process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-	return `${canonicalDirectory}\u0000${normalizeSessionID(sessionID)}`;
+	return `${canonicalRootKeyFresh(directory)}\u0000${normalizeSessionID(sessionID)}`;
 }
 
 export function rememberState<S extends PrWorkflowPersistedStateBase>(
@@ -574,7 +572,7 @@ export async function writeStateWhileLocked<
 // ---------------------------------------------------------------------------
 
 function checkoutMutationProjectKey(directory: string): string {
-	return normalizeComparableFsPath(directory);
+	return canonicalRootKeyFresh(directory);
 }
 
 /** A bounded checkout-mutation refusal that never permits unsafe late overlap. */

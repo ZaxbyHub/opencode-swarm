@@ -1,5 +1,6 @@
 /**
- * Canonical project identity for the SQLite durable-state foundation (issue #2480).
+ * Backward-compatible name for the shared canonical project-root identity
+ * helper (issue #2480 / #2474).
  *
  * Policy (docs/sqlite-durable-state.md §Identity):
  * - This helper answers ONE question: "are these two directory spellings the same project
@@ -17,12 +18,35 @@
  *   which is the pre-existing behavior.
  */
 
-import { realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
+import type { realpathSync } from 'node:fs';
+import {
+	_internals as canonicalRootInternals,
+	canonicalRootKeyFresh,
+} from '../utils/canonical-root.js';
 
 /** DI seam for tests (fault-injected realpath failures). */
+const defaultCanonicalRootRealpath = canonicalRootInternals.realpathSync;
+const defaultCanonicalRootNativeRealpath =
+	canonicalRootInternals.realpathSyncNative;
+
+/**
+ * Keep the historical DB-layer seam wired to the shared resolver.  A few
+ * callers/tests inject a `realpathSync` failure through this compatibility
+ * export; forwarding that override to both shared resolver entry points keeps
+ * the fault-injection contract intact without reintroducing a second path
+ * canonicalization implementation here.
+ */
 export const _internals: { realpathSync: typeof realpathSync } = {
-	realpathSync,
+	get realpathSync() {
+		return canonicalRootInternals.realpathSync;
+	},
+	set realpathSync(value) {
+		canonicalRootInternals.realpathSync = value;
+		canonicalRootInternals.realpathSyncNative =
+			value === defaultCanonicalRootRealpath
+				? defaultCanonicalRootNativeRealpath
+				: (value as unknown as typeof canonicalRootInternals.realpathSyncNative);
+	},
 };
 
 /**
@@ -33,14 +57,5 @@ export const _internals: { realpathSync: typeof realpathSync } = {
  * - Distinct POSIX casings remain distinct roots.
  */
 export function canonicalProjectKey(directory: string): string {
-	const lexical = resolve(directory);
-	let canonical: string;
-	try {
-		canonical = _internals.realpathSync(lexical);
-	} catch {
-		// Broken symlink, permission error, or a race that removed the directory:
-		// fall back to the lexical spelling rather than failing to open the DB.
-		canonical = lexical;
-	}
-	return process.platform === 'win32' ? canonical.toLowerCase() : canonical;
+	return canonicalRootKeyFresh(directory);
 }

@@ -7,6 +7,7 @@ import {
 	type BunCompatSubprocess,
 	bunSpawn,
 } from '../utils/bun-compat.js';
+import { sameProjectRoot } from '../utils/canonical-root.js';
 import { resolveGitExecutable } from '../utils/git-executable.js';
 import type { BackgroundWorkspaceSnapshot } from './pending-delegations.js';
 
@@ -1898,7 +1899,7 @@ export function workspaceSnapshotMatches(
 	current: BackgroundWorkspaceSnapshot,
 ): { ok: true } | { ok: false; reason: string } {
 	if (!expected) return { ok: true };
-	if (path.resolve(expected.directory) !== path.resolve(current.directory)) {
+	if (!sameProjectRoot(expected.directory, current.directory)) {
 		return {
 			ok: false,
 			reason: `directory changed: expected ${expected.directory}, got ${current.directory}`,

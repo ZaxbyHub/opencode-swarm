@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { isCanonicalPathWithinRoot } from '../../../src/utils/path-security.js';
 import { canonicalMkdtemp, canonicalTmpDir } from '../../helpers/tmpdir';
 
 describe('canonicalTmpDir', () => {
@@ -48,8 +49,7 @@ describe('canonicalMkdtemp', () => {
 	it('creates the directory under the canonical tmp base', () => {
 		const dir = canonicalMkdtemp('swarm-tmpdir-helper-base-');
 		try {
-			const base = canonicalTmpDir();
-			expect(dir === base || dir.startsWith(base + path.sep)).toBe(true);
+			expect(isCanonicalPathWithinRoot(dir, canonicalTmpDir())).toBe(true);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}

@@ -4,7 +4,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import {
+	existsSync,
+	mkdtempSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import {
@@ -19,6 +25,8 @@ import {
 function makeTmp(prefix: string): string {
 	return realpathSync(mkdtempSync(path.join(tmpdir(), prefix)));
 }
+
+const TEST_CREATED_AT = '2026-07-17T00:00:00.000Z';
 
 describe('#1850 memory link pointer', () => {
 	let dir: string;
@@ -69,7 +77,7 @@ describe('#1850 memory link pointer', () => {
 		await writeMemoryLinkPointer(dir, {
 			version: 2,
 			linkId: 'mem-only',
-			createdAt: new Date().toISOString(),
+			createdAt: TEST_CREATED_AT,
 		});
 		// The memory pointer is at .swarm/memory-link.json, NOT .swarm/link.json.
 		expect(existsSync(path.join(dir, '.swarm', 'memory-link.json'))).toBe(true);
@@ -80,7 +88,7 @@ describe('#1850 memory link pointer', () => {
 		await writeMemoryLinkPointer(dir, {
 			version: 2,
 			linkId: 'temp',
-			createdAt: new Date().toISOString(),
+			createdAt: TEST_CREATED_AT,
 		});
 		await removeMemoryLinkPointer(dir);
 		expect(readMemoryLinkPointer(dir)).toBeNull();
@@ -110,11 +118,40 @@ describe('#1850 memory link pointer', () => {
 		await writeMemoryLinkPointer(dir, {
 			version: 2,
 			linkId: 'resolve-cohort',
-			createdAt: new Date().toISOString(),
+			createdAt: TEST_CREATED_AT,
 		});
 		invalidateMemoryStoreDirCache(dir);
 		const resolved = resolveMemoryStoreDir(dir);
 		expect(resolved).not.toBe(path.join(dir, '.swarm'));
 		expect(resolved).toContain('resolve-cohort');
+	});
+
+	test('resolveMemoryStoreDir follows a retargeted directory alias', async () => {
+		const otherDir = makeTmp('memlink-retarget-');
+		dirs.push(otherDir);
+		const alias = `${dir}-alias`;
+		try {
+			await writeMemoryLinkPointer(dir, {
+				version: 2,
+				linkId: 'retarget-cohort-a',
+				createdAt: TEST_CREATED_AT,
+			});
+			await writeMemoryLinkPointer(otherDir, {
+				version: 2,
+				linkId: 'retarget-cohort-b',
+				createdAt: TEST_CREATED_AT,
+			});
+			rmSync(alias, { recursive: true, force: true });
+			const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+			// The alias initially resolves to project A's memory link.
+			symlinkSync(dir, alias, linkType);
+			expect(resolveMemoryStoreDir(alias)).toContain('retarget-cohort-a');
+
+			rmSync(alias, { recursive: true, force: true });
+			symlinkSync(otherDir, alias, linkType);
+			expect(resolveMemoryStoreDir(alias)).toContain('retarget-cohort-b');
+		} finally {
+			rmSync(alias, { recursive: true, force: true });
+		}
 	});
 });

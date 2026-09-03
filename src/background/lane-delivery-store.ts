@@ -29,6 +29,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import { writeAtomicJson } from './lane-output-store.js';
 
 export const LANE_DELIVERY_CACHE_FILENAME = 'lane-delivery-cache.json';
@@ -58,7 +59,7 @@ interface LaneDeliveryCacheFile {
 const directoryBuckets = new Map<string, LaneDeliveryBucket>();
 
 function bucketKey(directory: string | undefined): string {
-	return directory ? path.normalize(path.resolve(directory)) : '';
+	return directory ? canonicalRootKeyFresh(directory) : '';
 }
 
 function emptyBucket(): LaneDeliveryBucket {

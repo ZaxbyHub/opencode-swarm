@@ -265,6 +265,31 @@ describe('removeStraySwarmDir', () => {
 		}
 	});
 
+	test('refuses a .swarm path that escapes the project through a symlink or junction', () => {
+		const otherDir = makeTempDir('outside-project-');
+		const escapeLink = path.join(projectRoot, 'outside-link');
+		try {
+			createDir(otherDir, '.swarm');
+			writeFile(path.join(otherDir, '.swarm', 'plan-ledger.jsonl'), '{}');
+			fs.symlinkSync(
+				otherDir,
+				escapeLink,
+				process.platform === 'win32' ? 'junction' : 'dir',
+			);
+
+			const result = removeStraySwarmDir(
+				projectRoot,
+				path.join(escapeLink, '.swarm'),
+			);
+
+			expect(result.success).toBe(false);
+			expect(result.message).toContain('outside project root');
+			expect(fs.existsSync(path.join(otherDir, '.swarm'))).toBe(true);
+		} finally {
+			rmdir(otherDir);
+		}
+	});
+
 	test('refuses to remove non-.swarm path', () => {
 		// Create a regular directory that is NOT .swarm
 		createDir(projectRoot, 'src', 'regular-dir');

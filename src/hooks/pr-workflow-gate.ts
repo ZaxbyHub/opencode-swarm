@@ -196,6 +196,7 @@ import type {
 import { canonicalWorkspaceIdentity } from '../scope/scope-binding.js';
 import { swarmState } from '../state.js';
 import { getPrWorkflowToolCapability } from '../tools/tool-metadata.js';
+import { sameProjectRoot } from '../utils/canonical-root.js';
 import { log, warn } from '../utils/logger.js';
 import { withTimeout } from '../utils/timeout.js';
 import { normalizeToolName } from './normalize-tool-name.js';
@@ -1857,8 +1858,7 @@ export async function submitPrReviewResult(
 		if (
 			(record.mode !== 'swarm-pr-review:base' &&
 				record.mode !== 'swarm-pr-review:micro') ||
-			path.resolve(record.workspace?.directory ?? '') !==
-				path.resolve(directory)
+			!sameProjectRoot(record.workspace?.directory ?? '', directory)
 		) {
 			return {
 				status: 'rejected',

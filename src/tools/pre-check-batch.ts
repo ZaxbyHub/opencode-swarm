@@ -14,6 +14,7 @@ import type { SecretscanEvidence } from '../config/evidence-schema.js';
 import { saveEvidence } from '../evidence/manager.js';
 import { warn } from '../utils';
 import { runExternalTool } from '../utils/external-tool-runner';
+import { sameExistingFilesystemPath } from '../utils/filesystem-identity.js';
 import { resolveGitExecutableAsync } from '../utils/git-executable.js';
 import {
 	assertProjectRoot,
@@ -379,7 +380,9 @@ function isAcceptedProjectRootForPlatform(
 	workspaceDir: string,
 	platform: NodeJS.Platform,
 	hasExplicitBoundary: boolean,
+	exactPhysicalRoot = false,
 ): boolean {
+	if (exactPhysicalRoot) return true;
 	const pathApi = platform === 'win32' ? path.win32 : path;
 	const directoryKey = pathApi.resolve(dir).replace(/\\/g, '/');
 	const workspaceKey = pathApi.resolve(workspaceDir).replace(/\\/g, '/');
@@ -414,12 +417,16 @@ function validateDirectory(dir: string, workspaceDir: string): string | null {
 		return 'directory path too long';
 	}
 
-	// Validate directory against the TRUE workspace boundary
-	// CRITICAL: Use workspaceDir as both base and boundary - NOT the input dir itself
-	// This prevents bypassing validation by treating input directory as its own anchor
-	const traversalCheck = validatePath(dir, workspaceDir, workspaceDir);
-	if (traversalCheck) {
-		return traversalCheck;
+	// A sibling lexical spelling may still be the exact physical workspace root
+	// (for example, a Windows junction). Authorize only that fail-closed equality
+	// before lexical traversal; foreign or missing roots continue through the
+	// ordinary boundary checks below.
+	const exactPhysicalRoot = sameExistingFilesystemPath(dir, workspaceDir);
+	if (!exactPhysicalRoot) {
+		// Validate directory against the TRUE workspace boundary. Use workspaceDir
+		// as both base and boundary, never the untrusted input as its own anchor.
+		const traversalCheck = validatePath(dir, workspaceDir, workspaceDir);
+		if (traversalCheck) return traversalCheck;
 	}
 
 	const platform = _internals.platform();
@@ -429,6 +436,7 @@ function validateDirectory(dir: string, workspaceDir: string): string | null {
 			workspaceDir,
 			platform,
 			hasExplicitProjectBoundary(dir),
+			exactPhysicalRoot,
 		)
 	) {
 		return 'directory must resolve to the project root';

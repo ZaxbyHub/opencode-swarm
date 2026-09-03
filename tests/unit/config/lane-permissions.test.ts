@@ -114,6 +114,37 @@ describe('buildLaneAllowlist — justified entries only', () => {
 			process.platform === 'win32' ? d.toLowerCase() : d;
 		expect(new Set(dirs.map(key)).size).toBe(dirs.length);
 	});
+
+	test('physical directory aliases are deduplicated without changing the emitted path', () => {
+		const { dir, cleanup } = createSafeTestDir('lane-permission-alias-');
+		const physical = path.join(dir, 'physical');
+		const alias = path.join(dir, 'alias');
+		const lanePath = path.join(dir, 'lane');
+		try {
+			fs.mkdirSync(physical);
+			fs.mkdirSync(lanePath);
+			fs.symlinkSync(
+				physical,
+				alias,
+				process.platform === 'win32' ? 'junction' : 'dir',
+			);
+			const entries = buildLaneAllowlist(
+				{ parentProjectPath: physical, lanePath },
+				[alias],
+			);
+			const physicalEntries = entries.filter((entry) => {
+				try {
+					return fs.realpathSync(entry.dir) === fs.realpathSync(physical);
+				} catch {
+					return false;
+				}
+			});
+			expect(physicalEntries).toHaveLength(1);
+			expect(physicalEntries[0]?.dir).toBe(physical);
+		} finally {
+			cleanup();
+		}
+	});
 });
 
 describe('regression: skill roots mirror the host glob, not half of it', () => {

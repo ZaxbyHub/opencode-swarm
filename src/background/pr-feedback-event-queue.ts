@@ -9,6 +9,7 @@ import {
 	writePrWorkflowAtomicJson,
 } from '../hooks/pr-workflow-gate.js';
 import { validateSwarmPath } from '../hooks/utils.js';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 
 const PR_FEEDBACK_EVENT_QUEUE_DIR = 'pr-feedback-events';
 export const MAX_PR_FEEDBACK_MONITOR_EVENTS = 20;
@@ -604,10 +605,7 @@ function rememberQueue(
 }
 
 function queueCacheKey(directory: string, sessionID: string): string {
-	const resolved = path.normalize(path.resolve(directory));
-	const canonicalDirectory =
-		process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-	return `${canonicalDirectory}\u0000${sessionID}`;
+	return `${canonicalRootKeyFresh(directory)}\u0000${sessionID}`;
 }
 
 function normalizeSessionID(sessionID: string): string {

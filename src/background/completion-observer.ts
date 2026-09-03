@@ -8,7 +8,6 @@
  */
 
 import { createHash } from 'node:crypto';
-import * as path from 'node:path';
 import { completeBackgroundPhaseParticipation } from '../evidence/phase-participation.js';
 import { transitionTaskWorkflowEvidence } from '../gate-evidence.js';
 import {
@@ -25,6 +24,7 @@ import {
 	swarmState,
 } from '../state.js';
 import { pushAdvisory } from '../utils/advisory-queue';
+import { sameProjectRoot } from '../utils/canonical-root.js';
 import * as logger from '../utils/logger.js';
 import { transferCoderSettlementToBackground } from '../workflow/coder-settlement.js';
 import {
@@ -833,17 +833,16 @@ async function settleCoder(
 						isInDeclaredScope(file, declaredFiles, directory),
 					)
 				: null;
-		const staleReason =
-			path.resolve(baseline.directory) !== path.resolve(directory)
-				? 'shared-root directory identity changed'
-				: !baseline.gitHead || current.gitHead !== baseline.gitHead
-					? 'shared-root HEAD changed before coder completion'
-					: baseline.prHeadSha !== null &&
-							current.prHeadSha !== baseline.prHeadSha
-						? 'shared-root PR head changed before coder completion'
-						: observedFiles === null
-							? 'shared-root coder files could not be attributed to a non-empty declared scope'
-							: null;
+		const staleReason = !sameProjectRoot(baseline.directory, directory)
+			? 'shared-root directory identity changed'
+			: !baseline.gitHead || current.gitHead !== baseline.gitHead
+				? 'shared-root HEAD changed before coder completion'
+				: baseline.prHeadSha !== null &&
+						current.prHeadSha !== baseline.prHeadSha
+					? 'shared-root PR head changed before coder completion'
+					: observedFiles === null
+						? 'shared-root coder files could not be attributed to a non-empty declared scope'
+						: null;
 		if (staleReason || observedFiles === null) {
 			const preserved = await updateCoderSettlement(
 				directory,
@@ -888,8 +887,7 @@ async function settleCoder(
 		descriptor.callID !== record.callID ||
 		descriptor.parentSessionId !== record.parentSessionId ||
 		descriptor.planTaskId !== record.planTaskId ||
-		path.resolve(context.baseline.directory) !==
-			path.resolve(descriptor.worktreePath)
+		!sameProjectRoot(context.baseline.directory, descriptor.worktreePath)
 	) {
 		const preserved = await updateCoderSettlement(
 			directory,

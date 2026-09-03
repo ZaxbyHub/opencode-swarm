@@ -4,7 +4,7 @@
  * Split from learning-health.test.ts for the FR-006 500-line cap.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { rmSync } from 'node:fs';
+import { mkdirSync, rmSync, symlinkSync } from 'node:fs';
 import path from 'node:path';
 import {
 	_internals,
@@ -24,6 +24,10 @@ import {
 	readLearningHealth,
 	resetLearningHealthForTest,
 } from '../../../src/health/learning-health';
+import {
+	pseudonymousRef,
+	resolveLineageSalt,
+} from '../../../src/observability/ids';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 // Fixed epoch: the engine clock is driven entirely through the _internals
@@ -296,6 +300,40 @@ describe('learning-health — malformed-but-parseable artifact (PRR-011)', () =>
 	});
 });
 
+describe('learning-health — legacy project ownership compatibility (#2474)', () => {
+	test('reads alarms persisted under the pre-canonical raw-directory project ref', async () => {
+		const legacyOwner = pseudonymousRef(artifactDir, resolveLineageSalt());
+		artifactContents = JSON.stringify({
+			schemaVersion: 1,
+			updatedAtMs: clock,
+			alarms: {
+				model_limit_fallback: {
+					scopes: {
+						[`${legacyOwner}/identity/legacy-model::provider`]: {
+							status: 'active',
+							severity: 'warning',
+							windowStartMs: clock,
+							factCount: 1,
+							lastFactAtMs: clock,
+							raisedAtMs: clock,
+							transitionCount: 1,
+						},
+					},
+				},
+			},
+			transitions: [],
+		});
+
+		const snapshot = await readLearningHealth(artifactDir);
+		expect(snapshot.activeAlarms).toEqual([
+			expect.objectContaining({
+				alarm: 'model_limit_fallback',
+				scopeRef: 'legacy-model::provider',
+			}),
+		]);
+	});
+});
+
 describe('learning-health — negative paths (PRR-011)', () => {
 	test('a throwing writeArtifact never escapes persistLearningHealth', async () => {
 		const realWrite = _internals.writeArtifact;
@@ -368,5 +406,51 @@ describe('learning-health — restart seeds the transition ring (PRR-012)', () =
 		resetLearningHealthForTest();
 		const snapshot = await readLearningHealth(artifactDir);
 		expect(snapshot.totalTransitions).toBe(persisted.transitions.length);
+	});
+});
+
+describe('learning-health — retargeted directory tracking stays bounded (#2474)', () => {
+	test('eviction deletes the physical key captured when an alias was observed', async () => {
+		const alias = path.join(artifactDir, 'project-alias');
+		const targets = Array.from({ length: 17 }, (_, index) =>
+			path.join(artifactDir, `project-${index}`),
+		);
+		const writes: string[] = [];
+		_internals.writeArtifact = async (directory) => {
+			writes.push(directory);
+		};
+		for (const target of targets) mkdirSync(target);
+		const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+		try {
+			for (let index = 0; index < targets.length; index++) {
+				if (index > 0) rmSync(alias, { recursive: true, force: true });
+				symlinkSync(targets[index]!, alias, linkType);
+				observeContextHeadroom({
+					sessionID: `session-${index}`,
+					directory: alias,
+					usagePercent: 0.1,
+					limit: 100_000,
+					limitSource: 'host',
+					warnThreshold: 0.7,
+				});
+				await readLearningHealth(alias);
+			}
+
+			const beforeRevisit = writes.length;
+			rmSync(alias, { recursive: true, force: true });
+			symlinkSync(targets[0]!, alias, linkType);
+			observeContextHeadroom({
+				sessionID: 'session-revisit',
+				directory: alias,
+				usagePercent: 0.1,
+				limit: 100_000,
+				limitSource: 'host',
+				warnThreshold: 0.7,
+			});
+			await readLearningHealth(alias);
+			expect(writes).toHaveLength(beforeRevisit + 1);
+		} finally {
+			rmSync(alias, { recursive: true, force: true });
+		}
 	});
 });

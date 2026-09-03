@@ -15,6 +15,7 @@ import type { transitionTaskWorkflowEvidence } from '../gate-evidence.js';
 import {
 	getTaskWorkflowSnapshot,
 	readTaskEvidenceRaw,
+	TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL,
 } from '../gate-evidence.js';
 import { validateDiffScope } from '../hooks/diff-scope';
 import { validateSwarmPath } from '../hooks/utils.js';
@@ -494,6 +495,29 @@ export function checkReviewerGate(
 					(gate) => evidence.gates[gate] == null,
 				);
 				if (evidence.gates.pre_check == null) missingGates.unshift('pre_check');
+				if (
+					requiredGates.includes(TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL)
+				) {
+					const recovery =
+						`Task ${taskId} contains a legacy receipt-less gate-repair marker that no agent can satisfy. ` +
+						`Call repair_gate_evidence for task ${taskId}, then delegate coder for a fresh accepted mutation before rerunning Stage A and Stage B.`;
+					return reviewerGateDecision(
+						taskId,
+						sessionID,
+						{
+							blocked: true,
+							reason: recovery,
+							requiredGates,
+							satisfiedGates,
+							missingGates,
+							source: 'durable_exact_task',
+							generation: workflow.generation,
+							nextAction: recovery,
+						},
+						'required_gates_missing',
+						'data_quality',
+					);
+				}
 				const contradictorySignals: string[] = [];
 				if (
 					(workflow.state === 'tests_run' || workflow.state === 'complete') &&
