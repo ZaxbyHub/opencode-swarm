@@ -18,10 +18,14 @@
  *   run() always returns `{ changes, lastInsertRowid }`; the node adapter
  *   rebuilds it from connection-level counters after exec(). `.changes` is
  *   pinned for single-statement DML only (the form production code reads).
- *   Two deltas are deliberately NOT pinned: multi-statement strings (bun SUMS
- *   `.changes` across statements, changes() reports the last one) and non-DML
- *   statements (bun reports 0, changes() keeps the previous DML's count) —
- *   the two drivers genuinely diverge there and no production reader exists.
+ *   The SHAPE is pinned for every form (cases 4/4b/4c). Three value deltas
+ *   are deliberately NOT pinned because the drivers genuinely diverge and no
+ *   production reader exists: multi-statement strings (bun SUMS `.changes`
+ *   across statements, changes() reports the last one), non-DML statements
+ *   (bun reports 0, changes() keeps the previous DML's count), and
+ *   trigger-amplified DML (bun's run() INCLUDES trigger-fired rows while
+ *   SQL changes() — what the adapter probe reads — EXCLUDES them; live-probed:
+ *   1 direct + 1 trigger row → bun {changes: 2}, adapter 1).
  * - Multi-statement strings only through the no-parameter `run(sql)` path
  *   (which routes to `exec` on both drivers).
  * - Transaction + SAVEPOINT nesting round trip.
@@ -136,11 +140,21 @@ export function runDriverParityContract(
 
 	// 4. Multi-statement strings via the no-parameter run() path (exec on both
 	//    drivers) — the form the v14+ single-statement migrations also use.
-	//    The return value is deliberately NOT asserted here: bun aggregates
+	//    The return VALUE is deliberately NOT asserted: bun aggregates
 	//    `.changes` across statements while the node adapter's changes() probe
 	//    reports the last statement only (an intentionally unpinned delta).
-	db.run(
+	//    The return SHAPE is pinned below (driver-agnostic) so a future
+	//    adapter regression back to `undefined` cannot hide behind this case.
+	const multiRun = db.run(
 		"DELETE FROM parity_probe; INSERT INTO parity_probe (key, value) VALUES ('multi', 'exec');",
+	);
+	expectTruthy(
+		multiRun != null &&
+			typeof multiRun === 'object' &&
+			typeof multiRun.changes === 'number' &&
+			(typeof multiRun.lastInsertRowid === 'number' ||
+				typeof multiRun.lastInsertRowid === 'bigint'),
+		'multi-statement no-bindings run() must return a Changes-shaped object (issue #2539)',
 	);
 	const multi = db
 		.query<{ value: string }, [string]>(
@@ -204,6 +218,22 @@ export function runDriverParityContract(
 	expectTruthy(
 		bound?.changes === 1,
 		`with-bindings run() .changes must stay 1, got ${String(bound?.changes)}`,
+	);
+
+	// 4c. SHAPE-only pins for the two documented value-unpinned deltas. The
+	//     VALUES diverge by design (multi-statement: bun sums vs probe's last
+	//     statement; non-DML: bun 0 vs probe's previous DML count) and are NOT
+	//     asserted — but the returned object must be Changes-shaped on BOTH
+	//     drivers, so a future adapter regression to `undefined` fails here
+	//     even on the unpinned paths.
+	const nonDml = db.run('SELECT 1');
+	expectTruthy(
+		nonDml != null &&
+			typeof nonDml === 'object' &&
+			typeof nonDml.changes === 'number' &&
+			(typeof nonDml.lastInsertRowid === 'number' ||
+				typeof nonDml.lastInsertRowid === 'bigint'),
+		'non-DML no-bindings run() must return a Changes-shaped object (issue #2539)',
 	);
 
 	// 5. Pragmas the foundation relies on.

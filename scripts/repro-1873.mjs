@@ -411,7 +411,12 @@ async function main() {
 			const link1 = await runCmd(['memory', 'link', 'repro-2539-cohort']);
 			check(
 				'#2539 memory link via registered command path',
-				link1.text.includes('Linked') && !link1.text.includes('❌'),
+				// Exact success prefix from handleMemoryLinkCommand (review tf-04):
+				// "Linked" alone would also match failure text that merely
+				// mentions the word.
+				link1.text.startsWith(
+					'🔗 Linked this worktree\'s memory to shared cohort store "repro-2539-cohort"',
+				) && !link1.text.includes('❌'),
 				link1.text.slice(0, 160),
 			);
 
@@ -461,7 +466,9 @@ async function main() {
 			const unlink1 = await runCmd(['memory', 'unlink']);
 			check(
 				'#2539 memory unlink via registered command path (ATTACH merge, non-empty local destination)',
-				unlink1.text.includes('Unlinked') && !unlink1.text.includes('❌'),
+				// Exact success prefix from handleMemoryUnlinkCommand (review tf-04).
+				unlink1.text.startsWith('🔓 Unlinked memory.') &&
+					!unlink1.text.includes('❌'),
 				unlink1.text.slice(0, 200),
 			);
 
@@ -470,7 +477,9 @@ async function main() {
 			const link2 = await runCmd(['memory', 'link', 'repro-2539-cohort']);
 			check(
 				'#2539 memory re-link via registered command path (populated cohort)',
-				link2.text.includes('Linked') && !link2.text.includes('❌'),
+				link2.text.startsWith(
+					'🔗 Linked this worktree\'s memory to shared cohort store "repro-2539-cohort"',
+				) && !link2.text.includes('❌'),
 				link2.text.slice(0, 200),
 			);
 
@@ -485,6 +494,48 @@ async function main() {
 				listed2539.length === 3 &&
 					ids2539.every((id) => listed2539.some((r) => r.id === id)),
 				`got ${listed2539.length}: ${listed2539.map((r) => r.id).join(',')}`,
+			);
+
+			// Review tf-05/mt-02: exercise the EMPTY-LOCAL unlink (the rename
+			// branch) under the real node driver — the F-22 shape, which
+			// previously only ran under Bun. The rename branch never reads
+			// `.changes`, so this proves the registered command path also
+			// succeeds when the local destination has no memory.db at all.
+			rmSync(join(memLinkDir, '.swarm', 'memory', 'memory.db'), {
+				force: true,
+			});
+			for (const suffix of ['-wal', '-shm']) {
+				rmSync(join(memLinkDir, '.swarm', 'memory', `memory.db${suffix}`), {
+					force: true,
+				});
+			}
+			mod.clearPool();
+			check(
+				'#2539 empty-local precondition (local memory.db removed)',
+				!existsSync(join(memLinkDir, '.swarm', 'memory', 'memory.db')),
+				'local memory.db still present',
+			);
+			const unlink2 = await runCmd(['memory', 'unlink']);
+			check(
+				'#2539 empty-local unlink via registered command path (rename branch under node)',
+				unlink2.text.startsWith('🔓 Unlinked memory.') &&
+					!unlink2.text.includes('❌'),
+				unlink2.text.slice(0, 200),
+			);
+			const verifyEmpty2539 = new mod.SQLiteMemoryProvider(memLinkDir);
+			await verifyEmpty2539.initialize();
+			const listedEmpty2539 = await verifyEmpty2539.list({
+				scopes: [scope2539],
+			});
+			verifyEmpty2539.close();
+			mod.clearPool();
+			check(
+				'#2539 empty-local unlink restored all three records from the cohort',
+				listedEmpty2539.length === 3 &&
+					ids2539.every((id) =>
+						listedEmpty2539.some((r) => r.id === id),
+					),
+				`got ${listedEmpty2539.length}`,
 			);
 		} finally {
 			rmSync(memLinkDir, { recursive: true, force: true });

@@ -127,15 +127,18 @@ export function createNodeDatabaseCtor(
 			// project-db/global-db each pass a single-statement migration).
 			if (rest.length === 0) {
 				this.raw.exec(sql);
-				// `.changes` matches bun for single-statement DML — the only form
-				// production code reads (both readers are single-statement: the
-				// memory-family ATTACH merge and the valid_from backfill). Two
+				// `.changes` matches bun for single-statement DML without triggers —
+				// the only form production code reads (both readers are
+				// single-statement: the memory-family ATTACH merge and the valid_from
+				// backfill; no trigger exists on their tables). Three
 				// intentionally-unpinned deltas remain (documented in
 				// src/db/driver-parity.ts): (a) multi-statement strings — bun SUMS
 				// `.changes` across statements while changes() reports the last one;
 				// (b) non-DML statements (SELECT/BEGIN/SAVEPOINT/DDL) — bun reports
-				// 0, changes() keeps the previous DML's count. Both drivers count
-				// trigger-fired rows identically.
+				// 0, changes() keeps the previous DML's count; (c) trigger-amplified
+				// DML — bun's run() INCLUDES trigger-fired rows while the SQL
+				// changes() this probe reads EXCLUDES them (live-probed both drivers:
+				// 1 direct + 1 trigger row → bun {changes: 2}, probe changes() = 1).
 				const row = this.statement(
 					NodeSqliteDatabase.CHANGES_PROBE_SQL,
 				).get() as { c: number | bigint; r: number | bigint } | undefined;

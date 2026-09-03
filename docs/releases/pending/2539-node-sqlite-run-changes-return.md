@@ -10,8 +10,11 @@
   `Cannot read properties of undefined (reading 'changes')`.
 - The memory-family ATTACH merge (`/swarm memory link` / `/swarm memory unlink`
   with a non-empty cohort or local store) and the `valid_from` provenance
-  backfill are the two affected call sites; both work under Node without
-  changes to their own code, and Bun behavior is unchanged.
+  backfill are the two affected call sites. The merge crashed under Node with
+  the TypeError above; the backfill degraded silently (its `?.` fallback
+  counted 0 updated rows, suppressing the `backfill_provenance_columns`
+  migration event). Both work under Node without changes to their own code,
+  and Bun behavior is unchanged.
 - The no-bindings `run()` return shape is now pinned in the Bun↔Node driver
   parity contract (`src/db/driver-parity.ts`) and exercised against the real
   `node:sqlite` driver by the `repro:1873` smoke leg, which now also drives
