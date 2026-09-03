@@ -9,6 +9,7 @@ import {
 	recordGateEvidence,
 	transitionTaskWorkflowEvidence,
 } from '../../../src/gate-evidence';
+import { isGuidanceCarrier } from '../../../src/hooks/system-guidance-carrier';
 import {
 	computePlanStructureHash,
 	initLedger,
@@ -149,8 +150,10 @@ export type MessageWithParts = any;
 
 // Helper to find user messages in the array (accounts for injected system messages)
 export function findUserMessage(messages: { messages: MessageWithParts[] }) {
+	// Issue #2526: guidance carriers are user-ROLE but are injected plugin
+	// directives, not real user speech — exclude them from user-message lookups.
 	return messages.messages.find(
-		(m: MessageWithParts) => m.info?.role === 'user',
+		(m: MessageWithParts) => m.info?.role === 'user' && !isGuidanceCarrier(m),
 	);
 }
 
@@ -162,9 +165,16 @@ export function findSystemMessage(messages: { messages: MessageWithParts[] }) {
 }
 
 // Helper to get concatenated text from all system messages (for warning assertions)
+// Issue #2526: delegation warnings now ride user-role guidance carriers, so this
+// reads carrier bodies (falling back to any system-shaped entry for robustness).
 export function getSystemWarningText(messages: {
 	messages: MessageWithParts[];
 }): string {
+	const carrierText = messages.messages
+		.filter((m: MessageWithParts) => isGuidanceCarrier(m))
+		.map((m: MessageWithParts) => m.parts?.[0]?.text ?? '')
+		.join('\n');
+	if (carrierText.length > 0) return carrierText;
 	return messages.messages
 		.filter((m: MessageWithParts) => m.info?.role === 'system')
 		.map((m: MessageWithParts) => m.parts?.[0]?.text ?? '')
