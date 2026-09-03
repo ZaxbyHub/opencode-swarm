@@ -35,7 +35,6 @@ export const _snapshotStoreInternals: {
 	afterSnapshotMetaRead: () => {},
 };
 
-const MAX_LOCAL_SESSION_OWNERS = 512;
 interface LocalSessionOwnership {
 	token: string;
 	/** Set only by a real host invocation resuming this exact session. */
@@ -85,12 +84,10 @@ export function claimSnapshotSessionOwnership(
 		return existing.token;
 	}
 	const token = randomUUID();
+	// Ownership is session-lifecycle state, not an LRU cache: end, stale sweep,
+	// and reset-session all release it. Evicting a still-live owner would make a
+	// later snapshot silently stop persisting that session.
 	localSessionOwners.set(sessionId, { token, canTakeOver });
-	while (localSessionOwners.size > MAX_LOCAL_SESSION_OWNERS) {
-		const oldest = localSessionOwners.keys().next().value;
-		if (!oldest) break;
-		localSessionOwners.delete(oldest);
-	}
 	return token;
 }
 

@@ -130,6 +130,33 @@ describe('SQLite session snapshot multiprocess coordination', () => {
 		});
 	});
 
+	test('retains ownership for every live session until lifecycle cleanup', () => {
+		for (let index = 0; index <= 512; index += 1) {
+			claimSnapshotSessionOwnership(`live-${index}`);
+		}
+		writeSnapshotRows(
+			tempDir,
+			{
+				version: 3,
+				writtenAt: 1,
+				toolAggregates: {},
+				activeAgent: {},
+				delegationChains: {},
+				agentSessions: {
+					'live-0': { agentName: 'first' } as never,
+					'live-512': { agentName: 'last' } as never,
+				},
+			},
+			{ onlyLocallyOwnedSessions: true },
+		);
+		expect(readSnapshotRows(tempDir)?.agentSessions['live-0']?.agentName).toBe(
+			'first',
+		);
+		expect(
+			readSnapshotRows(tempDir)?.agentSessions['live-512']?.agentName,
+		).toBe('last');
+	});
+
 	test('F8: reads one committed snapshot while a foreign writer waits after meta', async () => {
 		// Before the transaction wrapper, a foreign commit between namespace scans
 		// could combine the old meta row with a newer tool row in one read result.

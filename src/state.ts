@@ -68,6 +68,7 @@ import { clearAllTurnLedgers } from './services/injection-budget';
 import { recordSessionStart } from './session/session-start-store.js';
 import {
 	claimSnapshotSessionOwnership,
+	clearSnapshotSessionOwnerships,
 	deleteSnapshotSessionRows,
 	isSnapshotSessionOwnedLocally,
 	releaseSnapshotSessionOwnership,
@@ -1069,6 +1070,7 @@ export function resetSwarmState(): void {
 	swarmState.finalAccountingWarningBandsBySession.clear();
 	swarmState.liveContextWindows.clear();
 	swarmState.agentSessions.clear();
+	clearSnapshotSessionOwnerships();
 	// Reset the opportunistic idle-sweep cooldown so a fresh process / test run
 	// sweeps on first session activity (invariant 8: bounded global state with
 	// an explicit reset path).
