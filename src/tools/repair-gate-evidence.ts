@@ -15,7 +15,7 @@ export async function executeRepairGateEvidence(
 ) {
 	try {
 		if (
-			_ctx &&
+			!_ctx ||
 			stripKnownSwarmPrefix(_ctx.agent ?? '').toLowerCase() !== 'architect'
 		) {
 			return {

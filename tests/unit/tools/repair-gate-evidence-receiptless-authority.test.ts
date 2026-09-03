@@ -4,7 +4,6 @@ import * as path from 'node:path';
 import type { ToolContext } from '@opencode-ai/plugin/tool';
 import { appendTaskGateRequirementsReceiptIfNeeded } from '../../../src/evidence/task-gate-requirements.js';
 import {
-	TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL,
 	TASK_WORKFLOW_SCHEMA_MARKER,
 	type TaskEvidence,
 } from '../../../src/gate-evidence.js';
@@ -13,6 +12,10 @@ import { TOOL_MANIFEST } from '../../../src/tools/manifest.js';
 import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
 
 const TASK_ID = '1.1';
+// Historical bytes emitted by the pre-#2525 receipt-less repair path. Keep
+// this fixture independent from the production predicate and exported symbol
+// so a co-evolved bug cannot make the regression test pass.
+const LEGACY_RECONSTRUCTION_SENTINEL = 'requirements_reconstruction';
 
 function writePlan(directory: string): void {
 	fs.mkdirSync(path.join(directory, '.swarm', 'evidence'), { recursive: true });
@@ -127,10 +130,7 @@ describe('repair_gate_evidence receipt-less authority (issue #2525)', () => {
 	test('refuses a mixed marker artifact outside the historical reset shape', async () => {
 		await repair({
 			taskId: TASK_ID,
-			required_gates: [
-				TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL,
-				'designer',
-			],
+			required_gates: [LEGACY_RECONSTRUCTION_SENTINEL, 'designer'],
 			gates: {},
 			requirements_state: 'unknown',
 			workflow: repairReset(),
@@ -145,17 +145,14 @@ describe('repair_gate_evidence receipt-less authority (issue #2525)', () => {
 	test('does not demote clean evidence when only the latest receipt is tainted', async () => {
 		const legacyReset: TaskEvidence = {
 			taskId: TASK_ID,
-			required_gates: [TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL],
+			required_gates: [LEGACY_RECONSTRUCTION_SENTINEL],
 			gates: {},
 			requirements_state: 'unknown',
 			workflow: { ...repairReset(), generation: 1 },
 		};
 		const tainted: TaskEvidence = {
 			taskId: TASK_ID,
-			required_gates: [
-				TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL,
-				'designer',
-			],
+			required_gates: [LEGACY_RECONSTRUCTION_SENTINEL, 'designer'],
 			gates: {},
 			requirements_state: 'known',
 			workflow: {
@@ -193,9 +190,7 @@ describe('repair_gate_evidence receipt-less authority (issue #2525)', () => {
 				} as ToolContext,
 			),
 		) as Record<string, unknown>;
-		expect(JSON.stringify(result)).toContain(
-			'TASK_GATE_REQUIREMENTS_RECEIPT_STALE',
-		);
+		expect(result.message).toBe('TASK_GATE_REQUIREMENTS_RECEIPT_STALE');
 		expect(fs.readFileSync(file, 'utf8')).toBe(original);
 	});
 });

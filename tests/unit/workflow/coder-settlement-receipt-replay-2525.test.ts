@@ -213,6 +213,36 @@ describe('coder settlement requirements-receipt replay (issue #2525)', () => {
 		expect(
 			await readTaskGateRequirementsReceipts(directory, TASK_ID),
 		).toHaveLength(2);
+
+		// Before FB-005, this registered-tool sequence stopped after replay and
+		// never proved that a later receipt-backed repair could recover the same
+		// task independently of the earlier receipt-less refusal.
+		fs.rmSync(evidencePath);
+		const receiptBackedRepair = JSON.parse(
+			await TOOL_MANIFEST.repair_gate_evidence().execute(
+				{ task_id: TASK_ID, reason: 'rebuild from the replayed receipt' },
+				{
+					directory,
+					agent: 'architect',
+					sessionID: 'issue-2525-replay',
+				} as ToolContext,
+			),
+		) as {
+			success: boolean;
+			repaired: boolean;
+			requirements_state: string;
+			required_gates: string[];
+			repaired_generation: number;
+		};
+		expect(receiptBackedRepair.success).toBe(true);
+		expect(receiptBackedRepair.repaired).toBe(true);
+		expect(receiptBackedRepair.requirements_state).toBe('known');
+		expect(receiptBackedRepair.required_gates).toEqual([
+			'designer',
+			'reviewer',
+			'test_engineer',
+		]);
+		expect(receiptBackedRepair.repaired_generation).toBe(3);
 	});
 
 	test('no-mutation replay does not append a redundant requirements receipt', async () => {

@@ -247,12 +247,16 @@ export const check_gate_status: ReturnType<typeof tool> = createSwarmTool({
 
 		// Determine overall status
 		let status: 'all_passed' | 'incomplete' =
-			missingGates.length === 0 ? 'all_passed' : 'incomplete';
+			requiredGates.length > 0 && missingGates.length === 0
+				? 'all_passed'
+				: 'incomplete';
 
 		// Build message
 		let message: string;
 		if (status === 'all_passed') {
 			message = `All required gates have passed for task "${taskIdInput}".`;
+		} else if (requiredGates.length === 0) {
+			message = `Task "${taskIdInput}" is incomplete. No required gates are configured for this task generation.`;
 		} else {
 			message = `Task "${taskIdInput}" is incomplete. Missing gates: ${missingGates.join(', ')}.`;
 		}
