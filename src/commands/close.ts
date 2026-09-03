@@ -1822,9 +1822,16 @@ export async function runCleanStage(
 			// never throws into the clean stage.
 			if (artifact === 'swarm.db') {
 				try {
-					await closeSnapshotCoordinationInitialization(ctx.directory);
-				} catch {
-					// best-effort — DB close/unlink below remains diagnostic
+					await _internals.closeSnapshotCoordinationInitialization(
+						ctx.directory,
+					);
+				} catch (error) {
+					const reason = error instanceof Error ? error.message : String(error);
+					ctx.warnings.push(
+						`Preserved swarm.db because snapshot coordination did not settle: ${reason}.`,
+					);
+					// Never unlink a database while an initializer may still be using it.
+					continue;
 				}
 				// #2480: flush+close the group-commit writer FIRST (mirrors the
 				// dispose/exit paths), then the DB handle. Closing only the
@@ -2810,6 +2817,7 @@ function detectFullAuto(directory: string, sessionID: string): boolean {
 }
 
 export const _internals = {
+	closeSnapshotCoordinationInitialization,
 	closeRepoMemory,
 	ACTIVE_STATE_DIRS_TO_CLEAN,
 	countSessionKnowledgeEntries,
