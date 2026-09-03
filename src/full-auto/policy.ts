@@ -27,6 +27,7 @@ import {
 	GENERAL_COUNCIL_AGENT_TOOL_MAP,
 	MEMORY_AGENT_TOOL_MAP,
 	SKILL_AGENT_TOOL_MAP,
+	SKILL_TOOL_NAMES,
 	TURBO_AGENT_TOOL_MAP,
 	WRITE_TOOL_NAMES,
 } from '../config/constants';
@@ -598,6 +599,14 @@ function resolveAgentCapabilityTools(
 			tools = tools.filter((tool) => !skillSet.has(tool));
 		}
 	}
+	// Extended FR-004 hard gate, mirroring getAgentConfigs (issue #2528): with
+	// skills disabled the skill tools are denied for every role except
+	// skill_improver, even when a tool_filter override names them. Keeps this
+	// derivation input-identical to the emission (anti-drift parity test).
+	if (pluginConfig?.skills?.enabled !== true && roleName !== 'skill_improver') {
+		const allSkillTools = new Set<string>(SKILL_TOOL_NAMES);
+		tools = tools.filter((tool) => !allSkillTools.has(tool));
+	}
 	return tools;
 }
 
@@ -995,3 +1004,12 @@ export function buildStructuredDenial(
 			: 'This action cannot be retried under Full-Auto. Ask a human to authorize it.',
 	};
 }
+
+/**
+ * Tier-0 test seam (see the writing-tests skill): pure functions with no
+ * external dependencies, exposed for direct testing. `resolveAgentCapabilityTools`
+ * is the full-auto policy's parallel derivation of each role's effective tool
+ * allow-list; tests pin it against getAgentConfigs' emission (issue #2528
+ * anti-drift — the two derivations must stay input-identical).
+ */
+export const _test_exports = { resolveAgentCapabilityTools };

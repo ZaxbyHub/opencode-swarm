@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
 import { resetSwarmState } from '../../../src/state';
 import {
+	findUserMessage,
 	getPrimaryText,
 	makeConfig,
 	makeMessages,
@@ -42,8 +43,8 @@ describe('delegation gate hook — core', () => {
 
 		await hook.messagesTransform({}, messages);
 
-		// User message text should be unchanged
-		const userMsg = messages.messages.find((m) => m.info?.role === 'user');
+		// User message text should be unchanged (guidance carriers excluded)
+		const userMsg = findUserMessage(messages);
 		expect(userMsg?.parts[0].text).toBe(longText);
 	});
 

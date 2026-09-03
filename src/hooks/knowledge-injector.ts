@@ -26,7 +26,7 @@ import {
 	getLiveContextWindow,
 	setCriticalShownIds,
 } from '../state.js';
-import { warn } from '../utils/logger.js';
+import { log, warn } from '../utils/logger.js';
 import { ensureCohortIdCached } from './cohort-cache.js';
 import { sanitizeContextText } from './context-sanitizer.js';
 import {
@@ -60,6 +60,10 @@ import { isActiveStatus } from './knowledge-types.js';
 import { extractModelInfo, resolveModelLimit } from './model-limits.js';
 import { readPhaseDirectivesToVerify } from './phase-directives.js';
 import { searchKnowledge } from './search-knowledge.js';
+import {
+	deliveredGuidanceDelta,
+	insertGuidanceCarrier,
+} from './system-guidance-carrier.js';
 import {
 	estimateCharsForTokens,
 	estimateTokens,
@@ -821,10 +825,11 @@ async function injectForDelegateIntoMessages(
 }
 
 /**
- * Splice the reviewer compliance block as an in-place system message
+ * Splice the reviewer compliance block as an in-place guidance carrier
  * (AGENTS.md invariant 10: transform chains read their own local array —
- * assign-through is a silent no-op, splice is not). Sits directly after the
- * delegate directive block so the verify contract reads last.
+ * assign-through is a silent no-op, splice is not; issue #2526: the carrier is
+ * user-role because the host drops role:'system' entries). Sits directly after
+ * the delegate directive block so the verify contract reads last.
  */
 function injectReviewerComplianceMessage(
 	output: { messages?: MessageWithParts[] },
@@ -842,17 +847,25 @@ function injectReviewerComplianceMessage(
 			break;
 		}
 	}
-	const message: MessageWithParts = {
-		info: { role: 'system' },
-		parts: [{ type: 'text', text: `${text}` }],
-	};
-	output.messages.splice(insertIdx, 0, message);
+	const message = insertGuidanceCarrier(
+		output.messages,
+		'knowledge',
+		`${text}`,
+		insertIdx,
+	);
+	if (!deliveredGuidanceDelta(message, text)) {
+		log(
+			'[knowledge-injector] reviewer compliance block not delivered (empty text or non-renderable carrier) — emission skipped',
+		);
+	}
 	// #2107 §2: account for the model-visible emission (attribution-only).
-	if (sessionId) {
+	// Delivery is gated on the host-render contract (issue #2526), not on the
+	// plugin's own array append.
+	if (sessionId && deliveredGuidanceDelta(message, text)) {
 		recordProducerEmission(
 			sessionId,
 			'knowledge-injector',
-			estimateTokens(message.parts[0]?.text ?? ''),
+			estimateTokens(message?.parts[0]?.text ?? ''),
 			0,
 			'messages',
 		);
@@ -977,21 +990,33 @@ function injectKnowledgeMessage(
 		}
 	}
 
-	const knowledgeMessage: MessageWithParts = {
-		info: { role: 'system' },
-		parts: [{ type: 'text', text: `${INJECTION_SENTINEL}${text}` }],
-	};
-
-	output.messages.splice(insertIdx, 0, knowledgeMessage);
+	const knowledgeMessage = insertGuidanceCarrier(
+		output.messages,
+		'knowledge',
+		`${INJECTION_SENTINEL}${text}`,
+		insertIdx,
+	);
 
 	// #2107 §2: record what actually reached the model-visible surface (this is
 	// a messages-surface producer — final accounting measures it directly, so
 	// this entry is attribution-only and is never added to the measured total).
-	if (sessionId) {
+	// Delivery is gated on the host-render contract (issue #2526), not on the
+	// plugin's own array append.
+	if (
+		!deliveredGuidanceDelta(knowledgeMessage, `${INJECTION_SENTINEL}${text}`)
+	) {
+		log(
+			'[knowledge-injector] knowledge block not delivered (empty text or non-renderable carrier) — emission skipped',
+		);
+	}
+	if (
+		sessionId &&
+		deliveredGuidanceDelta(knowledgeMessage, `${INJECTION_SENTINEL}${text}`)
+	) {
 		recordProducerEmission(
 			sessionId,
 			'knowledge-injector',
-			estimateTokens(knowledgeMessage.parts[0]?.text ?? ''),
+			estimateTokens(knowledgeMessage?.parts[0]?.text ?? ''),
 			0,
 			'messages',
 		);
@@ -1781,7 +1806,7 @@ export const _internals: {
 /**
  * Tier-0 test seam (see `.opencode/skills/writing-tests/SKILL.md`). Exposes the
  * real injection primitive and its sentinel so the
- * `consolidateSystemMessages` interaction test (issue #1619) exercises the
+ * `materializeSystemGuidance` interaction test (issue #1619/#2526) exercises the
  * production splice position and message shape instead of a hand-copied fixture
  * that could silently drift from this module.
  */

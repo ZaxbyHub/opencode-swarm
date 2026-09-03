@@ -2390,7 +2390,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		writerModules: ['src/memory/run-log.ts', 'src/memory/injector.ts'],
 		writerCitations: [
 			'src/memory/run-log.ts:43 appendMemoryRunLog — plain appendFile :52-60, no cap',
-			'src/memory/injector.ts:498 maybeWriteUnitIdProbe — env-gated diagnostic (OPENCODE_SWARM_MEMORY_UNITID_PROBE=1)',
+			'src/memory/injector.ts:510 maybeWriteUnitIdProbe — env-gated diagnostic (OPENCODE_SWARM_MEMORY_UNITID_PROBE=1)',
 		],
 		readerCitations: ['consumers read JSONL directly (injector/reflection paths)'],
 		schemaVersion: 'run-log event shapes',

@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
+import {
+	findGuidanceCarriers,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
 import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 
 function defaultConfig(
@@ -179,12 +183,17 @@ End`;
 
 			await hooks.messagesTransform({}, { messages });
 
-			const resultText = (
-				messages[0].parts[0] as { type: string; text: string }
-			).text;
+			// Issue #2526: the SELF-CODING injection rides a user-role guidance
+			// carrier (id 'swarm-guidance:guardrails') unshifted at index 0 — locate
+			// the system message by role, not by array position.
+			const sysAfter = messages.find((m) => m.info.role === 'system')!;
+			const resultText = (sysAfter.parts[0] as { type: string; text: string })
+				.text;
 			expect(resultText).toContain('Rule for a high-capability model');
 			expect(resultText).toContain('<!-- BEHAVIORAL_GUIDANCE_START -->');
-			expect(resultText).toContain('SELF-CODING DETECTED');
+			const carrier = findGuidanceCarriers(messages)[0];
+			expect(carrier).toBeDefined();
+			expect(messageTextOf(carrier)).toContain('SELF-CODING DETECTED');
 		});
 
 		it('No modelID → no trim', async () => {

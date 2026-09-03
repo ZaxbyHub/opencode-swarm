@@ -24,6 +24,11 @@ import {
 	MAX_ADVISORY_BLOCK_BYTES,
 } from '../../../src/hooks/guardrails/messages-transform';
 import {
+	findGuidanceCarriers,
+	isGuidanceCarrier,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
+import {
 	ensureAgentSession,
 	getAgentSession,
 	resetSwarmState,
@@ -63,12 +68,13 @@ function buildMessages(sessionId: string, systemText: string): Msg[] {
 	];
 }
 
+/**
+ * Issue #2526: forwarded advisories land in the USER-role guidance carrier
+ * (id 'swarm-guidance:guardrails'), no longer in a role:'system' entry.
+ */
 function firstSystemText(messages: Msg[]): string {
-	const sys = messages.find((m) => m.info.role === 'system');
-	const part = sys?.parts.find(
-		(p) => p.type === 'text' && typeof p.text === 'string',
-	);
-	return (part?.text as string) ?? '';
+	const carrier = findGuidanceCarriers(messages)[0];
+	return carrier ? messageTextOf(carrier) : '';
 }
 
 function setupSubagent(sessionId: string, agentName = 'coder') {
@@ -173,7 +179,7 @@ describe('[prm: advisories forwarded to subagent sessions (#2063 C1)', () => {
 		expect(text).not.toContain(ADVISORY_TRUNCATION_NOTE);
 	});
 
-	test('a subagent with no system message gets one created for the [prm: block', async () => {
+	test('a subagent with no system message gets a guidance carrier created for the [prm: block', async () => {
 		const sessionId = 'prm-forward-no-system';
 		const session = setupSubagent(sessionId, 'reviewer');
 		session.pendingAdvisoryMessages = [
@@ -188,8 +194,11 @@ describe('[prm: advisories forwarded to subagent sessions (#2063 C1)', () => {
 		];
 		await hooks.messagesTransform({}, { messages } as never);
 
+		// Issue #2526: the created entry is a USER-role guidance carrier — the
+		// OpenCode host drops role:'system' entries from this transform surface.
 		expect(messages).toHaveLength(2);
-		expect(messages[0].info.role).toBe('system');
+		expect(isGuidanceCarrier(messages[0])).toBe(true);
+		expect(messages[0].info.role).toBe('user');
 		expect(firstSystemText(messages)).toContain('[prm:context_thrash:1]');
 	});
 });

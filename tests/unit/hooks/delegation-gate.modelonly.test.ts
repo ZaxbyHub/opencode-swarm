@@ -3,15 +3,13 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
-import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import {
-	findSystemMessage,
-	findUserMessage,
-	getPrimaryText,
-	getSystemWarningText,
-	makeConfig,
-	makeMessages,
-} from './_delegation-gate-helpers';
+	findGuidanceCarriers,
+	type GuidanceMessage,
+	isGuidanceCarrier,
+} from '../../../src/hooks/system-guidance-carrier';
+import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { makeConfig, makeMessages } from './_delegation-gate-helpers';
 
 function makeTempProject(prefix: string): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -21,15 +19,13 @@ function makeTempProject(prefix: string): string {
 }
 
 // Type for message structure
-type TestMessageWithParts = {
-	info: { role: string; agent?: string; sessionID?: string };
-	parts: Array<{ type: string; text?: string }>;
-};
+type TestMessageWithParts = GuidanceMessage;
 
 // ============================================
 // Task 2.6: Delegation Warnings Model-Only Tests
-// Verifies delegation warnings remain model-only (in system messages)
-// and no delegation debug text leaks into visible output
+// Verifies delegation warnings remain model-only (in user-role guidance
+// carriers — issue #2526: the host drops role:'system' entries) and no
+// delegation debug text leaks into visible output
 // ============================================
 describe('Task 2.6: delegation warnings model-only (no visible debug leakage)', () => {
 	let tempDir: string;
@@ -48,16 +44,20 @@ describe('Task 2.6: delegation warnings model-only (no visible debug leakage)', 
 		}
 	});
 
-	// Helper to find system messages containing warnings
+	// Helper to find guidance carriers containing warnings (issue #2526:
+	// model-only guidance rides user-role carriers, never role:'system')
 	const findSystemWarnings = (messages: {
 		messages: TestMessageWithParts[];
 	}) => {
-		return messages.messages.filter((m) => m.info?.role === 'system');
+		return findGuidanceCarriers(messages.messages);
 	};
 
-	// Helper to get user message text
+	// Helper to get the REAL user message text (excludes guidance carriers,
+	// which are also role:'user')
 	const getUserText = (messages: { messages: TestMessageWithParts[] }) => {
-		const userMsg = messages.messages.find((m) => m.info?.role === 'user');
+		const userMsg = messages.messages.find(
+			(m) => m.info?.role === 'user' && !isGuidanceCarrier(m),
+		);
 		return userMsg?.parts?.[0]?.text ?? '';
 	};
 

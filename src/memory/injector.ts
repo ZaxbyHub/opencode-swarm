@@ -7,6 +7,10 @@ import {
 import { stripKnownSwarmPrefix } from '../config/schema';
 import type { MessageWithParts } from '../hooks/knowledge-types';
 import { normalizeToolName } from '../hooks/normalize-tool-name';
+import {
+	deliveredGuidanceDelta,
+	insertGuidanceCarrier,
+} from '../hooks/system-guidance-carrier';
 import { validateSwarmPath } from '../hooks/utils';
 import {
 	claimTurnBudget,
@@ -158,15 +162,23 @@ async function injectIntoMessages(
 	}
 	if (!result || result.bundle.items.length === 0) return;
 	const insertAt = recallMessageInsertIndex(messages);
-	const recallMessage: MessageWithParts = {
-		info: {
-			role: 'system',
-			agent: agentRole,
-			sessionID,
-		},
-		parts: [{ type: 'text', text: result.bundle.promptBlock }],
-	};
-	messages.splice(insertAt, 0, recallMessage);
+	// Issue #2526: the recall bundle rides a user-role guidance carrier — the
+	// host's converter silently drops role:'system' entries from the messages
+	// transform surface, so the old system-role recall message never reached
+	// the model while the emission below claimed it had.
+	const recallMessage = insertGuidanceCarrier(
+		messages as MessageWithParts[],
+		'memory-recall',
+		result.bundle.promptBlock,
+		insertAt,
+		{ agent: agentRole, sessionID },
+	);
+	if (!deliveredGuidanceDelta(recallMessage, result.bundle.promptBlock)) {
+		log(
+			'memory-injector: recall block not delivered (empty text or non-renderable carrier) — emission and run-log skipped',
+		);
+		return;
+	}
 	// #2107 §2: record what actually reached the model-visible surface. This is
 	// a messages-surface producer — final accounting measures it directly, so
 	// this entry is attribution-only and is never added to the measured total.

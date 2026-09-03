@@ -1468,19 +1468,23 @@ export function resolveScopeBindingFromDisk(input: {
 	// authority exists, legacy files are projections and cannot be used to
 	// discover a newly claimed binding; the in-memory v2 record is nevertheless
 	// an exact, live authorization for this process.
-	const inMemory = getActiveScopeBindingsForSession({
-		directory: input.directory,
-		activeSessionId: input.ownerSessionId,
-	}).filter(
-		(binding) =>
-			binding.taskId === input.taskId &&
-			binding.planId === derivePlanId(input.plan) &&
-			binding.planStructureHash === computePlanStructureHash(input.plan) &&
-			(input.requireDispatchCorrelation !== true ||
-				isDispatchCorrelated(binding)) &&
-			(input.parentCallId === undefined ||
-				binding.parentCallId === input.parentCallId),
-	);
+	const inMemory =
+		input.requireDeclaration === true
+			? []
+			: getActiveScopeBindingsForSession({
+					directory: input.directory,
+					activeSessionId: input.ownerSessionId,
+				}).filter(
+					(binding) =>
+						binding.taskId === input.taskId &&
+						binding.planId === derivePlanId(input.plan) &&
+						binding.planStructureHash ===
+							computePlanStructureHash(input.plan) &&
+						(input.requireDispatchCorrelation !== true ||
+							isDispatchCorrelated(binding)) &&
+						(input.parentCallId === undefined ||
+							binding.parentCallId === input.parentCallId),
+				);
 	if (inMemory.length > 1) {
 		return {
 			status: 'ambiguous',

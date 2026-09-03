@@ -160,7 +160,7 @@ describe('no output.system / output.messages rebind in chat transforms (#1619)',
 				'`experimental.chat.messages.transform` handler is INVISIBLE to the ' +
 				'OpenCode host: it discards the hook return value and reads its own ' +
 				'array reference. Mutate in place instead (`arr.length = 0` + push, ' +
-				'`splice`, `push`) — see `consolidateSystemMessagesInPlace` in ' +
+				'`splice`, `push`) — see `materializeSystemGuidanceInPlace` in ' +
 				'src/hooks/messages-transform.ts. If a match is genuinely unrelated ' +
 				`to the hook chains, add it to ALLOWLIST with a reason.\nOffenders:\n${violations.join('\n')}`,
 		).toEqual([]);
@@ -180,18 +180,18 @@ describe('no output.system / output.messages rebind in chat transforms (#1619)',
 		}
 	});
 
-	test('the consolidation is wired to the in-place helper in production', () => {
+	test('the system-entry materializer is wired to the in-place helper in production (#2526)', () => {
 		const indexSource = readFileSync(
 			join(REPO_ROOT, 'src', 'index.ts'),
 			'utf-8',
 		);
-		expect(indexSource).toContain('consolidateSystemMessagesInPlace(');
+		expect(indexSource).toContain('materializeSystemGuidanceInPlace(');
 		const transformSource = readFileSync(
 			join(REPO_ROOT, 'src', 'hooks', 'messages-transform.ts'),
 			'utf-8',
 		);
 		expect(transformSource).toContain(
-			'export function consolidateSystemMessagesInPlace(',
+			'export function materializeSystemGuidanceInPlace(',
 		);
 	});
 

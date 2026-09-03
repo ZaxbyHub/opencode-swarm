@@ -16,6 +16,7 @@ import {
 	GENERAL_COUNCIL_AGENT_TOOL_MAP,
 	MEMORY_AGENT_TOOL_MAP,
 	SKILL_AGENT_TOOL_MAP,
+	SKILL_TOOL_NAMES,
 	TURBO_AGENT_TOOL_MAP,
 } from '../config/constants';
 import { stripKnownSwarmPrefix } from '../config/schema';
@@ -24,6 +25,7 @@ import {
 	addDeferredWarning,
 	advisoryWarn,
 } from '../services/warning-buffer.js';
+import { TOOL_NAMES } from '../tools/tool-metadata';
 import { log } from '../utils/logger';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
 import { type AgentDefinition, createArchitectAgent } from './architect';
@@ -1244,39 +1246,6 @@ export function getAgentConfigs(
 
 			if (isPrimaryAgent) {
 				sdkConfig.mode = 'primary';
-				// Allow task delegation for primary agents. Merge — never
-				// replace — the agent definition's own permission block.
-				// OpenCode merges agent-level permission additively on its
-				// side (rule evaluation uses `findLast` over concatenated
-				// permission entries), so wholesale replacement here was
-				// never necessary and previously discarded any edit/bash/
-				// webfetch/external_directory entries (including nested
-				// per-pattern objects, e.g. `external_directory: { "C:/foo/*":
-				// "allow" }`) the agent definition declared. `task: 'allow'`
-				// always wins when the definition also declares its own
-				// `task` entry — primary agents must always be able to
-				// delegate, which is the existing intent this branch
-				// preserves.
-				const existingPermission = isPermissionRecord(agent.config.permission)
-					? agent.config.permission
-					: undefined;
-				// POSITION IS PRECEDENCE. The host evaluates with `findLast` over
-				// `Object.entries` order and wildcard-matches the permission NAME,
-				// so `'*'` also matches `task`. A duplicate key in an object
-				// literal keeps its FIRST position and only takes the last value:
-				// `{ ...{ task: 'deny', '*': 'deny' }, task: 'allow' }` yields
-				// `{ task: 'allow', '*': 'deny' }` with `task` still at index 0, so
-				// `findLast` picks `'*': 'deny'` and the primary agent silently
-				// loses delegation — the opposite of the intent documented above.
-				// Delete-then-set moves `task` to the end so it genuinely wins.
-				const mergedPermission: NonNullable<SDKAgentConfig['permission']> & {
-					task: 'allow';
-				} = { ...existingPermission } as NonNullable<
-					SDKAgentConfig['permission']
-				> & { task: 'allow' };
-				delete (mergedPermission as Record<string, unknown>).task;
-				mergedPermission.task = 'allow';
-				sdkConfig.permission = mergedPermission;
 			} else {
 				sdkConfig.mode = 'subagent';
 			}
@@ -1286,15 +1255,90 @@ export function getAgentConfigs(
 				delete sdkConfig.model;
 			}
 
+			// The host never reads a plugin-injected agent's `tools` map: its
+			// only reader (normalize(), pinned host v1.18.3
+			// core/src/v1/config/agent.ts:62-88) runs at config-FILE decode,
+			// before plugins load, and the agent merge loop copies twelve
+			// fields and not `tools` (audit HOST-1, issue #2528: 2,388
+			// intended denies, 0 enforced). The enforceable channel is the
+			// `permission` block — the one field the merge loop DOES copy —
+			// evaluated by Permission.disabled at request time. Never emit a
+			// `tools` map: a map with no reader is the defect restated.
+			delete sdkConfig.tools;
+
+			/**
+			 * Assembles the agent's permission block. Object key order IS
+			 * precedence under the host's findLast / Object.entries
+			 * evaluation, so entries are inserted in ascending precedence:
+			 * the agent definition's own permission entries first (none of
+			 * the shipped factories declare any), then the computed denies,
+			 * then — for primary agents only — `task: 'allow'` LAST so
+			 * delegation genuinely wins (a duplicate key would keep its
+			 * first position and only take the last value, so the entry is
+			 * deleted before being re-set).
+			 */
+			const buildPermissionBlock = (
+				deniedPermissionNames: readonly string[],
+			): void => {
+				const existingPermission = isPermissionRecord(agent.config.permission)
+					? agent.config.permission
+					: undefined;
+				const block = {
+					...(existingPermission ?? {}),
+				} as NonNullable<SDKAgentConfig['permission']>;
+				const writable = block as Record<string, unknown>;
+				for (const name of deniedPermissionNames) {
+					writable[name] = 'deny';
+				}
+				if (isPrimaryAgent) {
+					delete writable.task;
+					writable.task = 'allow';
+				}
+				sdkConfig.permission = block;
+			};
+
+			// Factory `tools: false` entries are the agent's ROLE CONTRACT
+			// (read-only roles deny the write family). They are enforced in
+			// BOTH tool_filter modes — they are not part of the filterable
+			// plugin-tool surface — and are mapped to the host's permission
+			// names exactly as Permission.disabled does (pinned host v1.18.3
+			// packages/opencode/src/permission/index.ts): edit/write/
+			// apply_patch evaluate as permission `edit`; `patch` is NOT
+			// aliased by disabled() (only by the config-file normalize(), a
+			// different host surface) and keeps its own name.
+			const factoryDenyPermissionNames: string[] = [];
+			for (const [toolName, enabled] of Object.entries(
+				agent.config.tools ?? {},
+			)) {
+				if (enabled !== false) continue;
+				factoryDenyPermissionNames.push(
+					toolName === 'write' ||
+						toolName === 'edit' ||
+						toolName === 'apply_patch'
+						? 'edit'
+						: toolName,
+				);
+			}
+			const factoryDeniedToolNames = new Set(
+				Object.entries(agent.config.tools ?? {})
+					.filter(([, enabled]) => enabled === false)
+					.map(([toolName]) => toolName),
+			);
+
 			// Extract base agent name using canonical prefix stripper (supports underscore, hyphen, space)
 			const baseAgentName = stripKnownSwarmPrefix(agent.name);
 
-			// If tool filtering is globally disabled, use original tools unchanged
+			// If tool filtering is globally disabled, restrict the emitted
+			// permission block to the factory role floor. The operator's
+			// opt-out lifts the plugin-tool allow-list enumeration — NOT the
+			// read-only role contract, so the issue's exit gate ("a
+			// reviewer's write call is refused by the host") holds in both
+			// modes.
 			if (!toolFilterEnabled) {
-				sdkConfig.tools = agent.config.tools ?? {};
+				buildPermissionBlock(factoryDenyPermissionNames);
 				agentToolSnapshot[agent.name] = Object.keys(
-					sdkConfig.tools ?? {},
-				).filter((k) => sdkConfig.tools![k] !== false);
+					agent.config.tools ?? {},
+				).filter((k) => agent.config.tools?.[k] !== false);
 				return [agent.name, sdkConfig];
 			}
 
@@ -1402,6 +1446,22 @@ export function getAgentConfigs(
 						allowedTools = allowedTools.filter((t) => !skillToolsSet.has(t));
 					}
 				}
+
+				// Extended hard gate (issue #2528): with skills disabled the
+				// skill tools must be GENUINELY unreachable for every agent,
+				// not merely unlisted — the deny computation below turns this
+				// strip into host-enforced denials. skill_improver is the
+				// designed exception: it is the skill-management specialist
+				// with its own gate (skill_improver.enabled; see FR-004 in
+				// docs/configuration.md). Without this extension, a
+				// tool_filter override naming skill tools for any other
+				// agent would re-grant them.
+				if (config?.skills?.enabled !== true && allowedTools) {
+					if (baseAgentName !== 'skill_improver') {
+						const allSkillTools = new Set<string>(SKILL_TOOL_NAMES);
+						allowedTools = allowedTools.filter((t) => !allSkillTools.has(t));
+					}
+				}
 			}
 
 			// Warn once when base name lacks a whitelist entry (no override and no AGENT_TOOL_MAP)
@@ -1414,35 +1474,48 @@ export function getAgentConfigs(
 				}
 			}
 
-			// Copy original tools to preserve flags (including write/edit)
-			const originalTools = agent.config.tools
-				? { ...agent.config.tools }
-				: undefined;
-
+			// Deny-by-default over the plugin-managed surface (issue #2528):
+			// every registered plugin tool the effective allow-list does not
+			// name is denied through the host's Permission.disabled gate.
+			// Deliberately NO bare `'*'` catch-all: agent-level permission
+			// outranks the top-level block under the host's findLast, so a
+			// catch-all would also deny every external_directory ask —
+			// killing worktree-lane allowlists (src/config/lane-permissions.ts)
+			// and the host's whitelisted skill/tmp/reference dirs — and would
+			// flatten the host's read/*.env asks unless duplicated verbatim.
+			// Enumerated denies enforce exactly the plugin's own 129-tool
+			// surface (the quantity the audit measured as "2,388 intended
+			// denies"); host built-ins, MCP tools, user top-level permission
+			// config, and unknown future tools keep byte-identical host
+			// defaults. Emission order is TOOL_NAMES order, then
+			// factory-floor names — deterministic, and denies are disjoint
+			// from allows by construction.
+			const deniedPermissionNames: string[] = [];
 			if (allowedTools) {
-				// Preserve explicit false flags from original tools
-				const baseTools = originalTools ?? {};
-				const disabledTools = Object.fromEntries(
-					Object.entries(baseTools).filter(([, value]) => value === false),
-				);
-				const filteredTools: Record<string, boolean> = { ...disabledTools };
-
-				// Add allowed tools (skip if explicitly disabled)
-				for (const tool of allowedTools) {
-					if (filteredTools[tool] === false) continue;
-					filteredTools[tool] = true;
+				const allowSet = new Set<string>(allowedTools);
+				for (const tool of TOOL_NAMES) {
+					if (!allowSet.has(tool)) deniedPermissionNames.push(tool);
 				}
-				sdkConfig.tools = filteredTools;
 			} else {
-				// No whitelist entry: default to minimal safe toolset
-				sdkConfig.tools = {
-					write: false,
-					edit: false,
-				};
+				// Unknown agent (no override, no AGENT_TOOL_MAP entry): fail
+				// closed — deny the entire plugin tool surface. The previous
+				// `{write:false, edit:false}` fallback wrote the inert field
+				// while logging containment it never applied (audit HOST-2).
+				deniedPermissionNames.push(...TOOL_NAMES);
+			}
+			for (const name of factoryDenyPermissionNames) {
+				if (!deniedPermissionNames.includes(name)) {
+					deniedPermissionNames.push(name);
+				}
 			}
 
-			agentToolSnapshot[agent.name] = Object.keys(sdkConfig.tools ?? {}).filter(
-				(k) => sdkConfig.tools![k] !== false,
+			buildPermissionBlock(deniedPermissionNames);
+
+			// Snapshot the effective allow-list (factory-denied tools
+			// excluded — an explicit factory false beats the allow-list),
+			// mirroring what the old tools map's `true` entries expressed.
+			agentToolSnapshot[agent.name] = (allowedTools ?? []).filter(
+				(tool) => !factoryDeniedToolNames.has(tool),
 			);
 
 			return [agent.name, sdkConfig];

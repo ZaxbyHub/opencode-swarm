@@ -34,6 +34,8 @@ import {
 	specExists,
 	writeTraceState,
 } from './issue-trace-state';
+import type { MessageWithParts } from './knowledge-types.js';
+import { appendGuidanceCarrier } from './system-guidance-carrier';
 
 // ── DI Seam (declared before functions that use it) ────────────────
 
@@ -253,45 +255,33 @@ export function createIssueTraceHook(
 					? result.directive.replace('#N', `#${issueRef.number}`)
 					: null;
 
-				// 7. PRECOMPUTE output messages BEFORE any state write
-				const messagesToAdd: {
-					role: string;
-					content: Array<{ type: string; text: string }>;
-				}[] = [];
-
-				if (result.nextMode !== null) {
-					messagesToAdd.push({
-						role: 'system',
-						content: [
-							{
-								type: 'text',
-								text: `[MODE: ${result.nextMode}]`,
-							},
-						],
-					});
-				}
-				if (finalDirective !== null) {
-					messagesToAdd.push({
-						role: 'system',
-						content: [
-							{
-								type: 'text',
-								text: finalDirective,
-							},
-						],
-					});
-				}
-
-				// 8. DELIVER FIRST: append to the host output.messages in place. Only
-				// if a mutable messages array exists and the append happened do we
-				// persist the transition. If delivery is impossible, return WITHOUT
-				// advancing state so the next cycle recomputes and retries — a lost
-				// directive can no longer be suppressed permanently by idempotency.
-				const out = output as { messages?: unknown[] };
-				if (!Array.isArray(out.messages) || messagesToAdd.length === 0) {
+				// 7-8. DELIVER FIRST: append guidance carriers to the host
+				// output.messages in place (issue #2526): the host's converter
+				// discards role:'system' entries and throws on the flat
+				// {role, content} shape this hook used to push, so the MODE
+				// directive rides a user-role carrier with a provenance fence
+				// (see system-guidance-carrier.ts). A non-null directive whose
+				// carrier append returns null (empty/whitespace text) counts as
+				// NOT delivered: return WITHOUT advancing state so the next
+				// cycle recomputes and retries.
+				const out = output as { messages?: MessageWithParts[] };
+				if (!Array.isArray(out.messages)) {
 					return;
 				}
-				out.messages.push(...messagesToAdd);
+				const modeDelivered =
+					result.nextMode === null ||
+					appendGuidanceCarrier(
+						out.messages,
+						'issue-trace',
+						`[MODE: ${result.nextMode}]`,
+					) !== null;
+				const directiveDelivered =
+					finalDirective === null ||
+					appendGuidanceCarrier(out.messages, 'issue-trace', finalDirective) !==
+						null;
+				if (!modeDelivered || !directiveDelivered) {
+					return;
+				}
 
 				// 9. ONLY after durable delivery: persist the trace state transition.
 				_internals.writeTraceState(directory, {

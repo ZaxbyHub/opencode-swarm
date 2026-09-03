@@ -1,7 +1,14 @@
 /**
  * Skill-management tool gating tests (FR-004).
- * Verifies that the 7 skill_* tools are absent from architect surface by default
- * and appear only when skills.enabled === true.
+ * Verifies that the 7 skill_* tools are host-denied for the architect by default
+ * and genuinely allowed only when skills.enabled === true.
+ *
+ * Since #2528 the per-agent boundary is emitted as a `permission` block (the
+ * host never reads a plugin-injected agent's `tools` map): a gated tool is
+ * asserted via `permission[tool] === 'deny'` (host-enforced unreachability),
+ * an allowed tool via the absence of a deny entry. Runtime enforcement through
+ * the host's own gate is covered by
+ * tests/unit/agents/agent-permission-enforcement.test.ts.
  *
  * Pattern mirrors external-skill-agent-tool-map.test.ts and memory-tool-gating.test.ts.
  */
@@ -14,6 +21,16 @@ import {
 	SKILL_TOOL_NAMES,
 } from '../../../src/config/constants';
 import { TOOL_NAME_SET } from '../../../src/tools/tool-names';
+
+function denied(
+	agents: ReturnType<typeof getAgentConfigs>,
+	name: string,
+	tool: string,
+): boolean | undefined {
+	return (agents[name]?.permission as Record<string, unknown> | undefined)?.[
+		tool
+	];
+}
 
 describe('SKILL_TOOL_NAMES', () => {
 	test('contains exactly 7 expected tool names', () => {
@@ -50,44 +67,49 @@ describe('SKILL_AGENT_TOOL_MAP', () => {
 });
 
 describe('skill tool gating via getAgentConfigs (FR-004)', () => {
-	test('when skills.enabled is false (default), tools do NOT appear in architect tool list', () => {
+	test('when skills.enabled is false (default), skill tools are host-denied for the architect', () => {
 		const agents = getAgentConfigs({
 			skills: { enabled: false },
 		} as PluginConfig);
 
 		for (const tool of SKILL_TOOL_NAMES) {
-			expect(agents.architect.tools?.[tool]).toBeUndefined();
+			expect(denied(agents, 'architect', tool)).toBe('deny');
 		}
 	});
 
-	test('when skills.enabled is false (default), tools do NOT appear in architect tool list (skill_improver legitimately retains them)', () => {
+	test('when skills.enabled is false, skill_improver legitimately retains them (denies only the apply/regenerate/retire trio it never had)', () => {
 		const agents = getAgentConfigs({
 			skills: { enabled: false },
 		} as PluginConfig);
 
 		// Architect must be gated
 		for (const tool of SKILL_TOOL_NAMES) {
-			expect(agents.architect.tools?.[tool]).toBeUndefined();
+			expect(denied(agents, 'architect', tool)).toBe('deny');
 		}
-		// skill_improver legitimately keeps the tools (it is the consumer of skill_* tools)
-		if (agents.skill_improver) {
-			for (const tool of SKILL_TOOL_NAMES) {
-				// skill_improver may or may not be present depending on config; if present it is allowed to have them
-			}
-		}
+		// skill_improver is the designed consumer of the skill_* surface
+		// (FR-004: gated separately by skill_improver.enabled). The four
+		// tools in its role map stay allowed; the architect-only
+		// apply/regenerate/retire trio stays denied.
+		expect(denied(agents, 'skill_improver', 'skill_generate')).not.toBe('deny');
+		expect(denied(agents, 'skill_improver', 'skill_list')).not.toBe('deny');
+		expect(denied(agents, 'skill_improver', 'skill_inspect')).not.toBe('deny');
+		expect(denied(agents, 'skill_improver', 'skill_improve')).not.toBe('deny');
+		expect(denied(agents, 'skill_improver', 'skill_apply')).toBe('deny');
+		expect(denied(agents, 'skill_improver', 'skill_regenerate')).toBe('deny');
+		expect(denied(agents, 'skill_improver', 'skill_retire')).toBe('deny');
 	});
 
-	test('when skills.enabled is true, all 7 tools appear in architect tool list', () => {
+	test('when skills.enabled is true, all 7 tools are allowed for the architect', () => {
 		const agents = getAgentConfigs({
 			skills: { enabled: true },
 		} as PluginConfig);
 
 		for (const tool of SKILL_TOOL_NAMES) {
-			expect(agents.architect.tools?.[tool]).toBe(true);
+			expect(denied(agents, 'architect', tool)).not.toBe('deny');
 		}
 	});
 
-	test('when skills.enabled is true, tools do NOT appear in non-architect non-skill_improver agents', () => {
+	test('when skills.enabled is true, tools stay denied for non-architect non-skill_improver agents', () => {
 		const agents = getAgentConfigs({
 			skills: { enabled: true },
 		} as PluginConfig);
@@ -97,7 +119,7 @@ describe('skill tool gating via getAgentConfigs (FR-004)', () => {
 		);
 		for (const agentName of nonTargetAgents) {
 			for (const tool of SKILL_TOOL_NAMES) {
-				expect(agents[agentName]?.tools?.[tool]).toBeUndefined();
+				expect(denied(agents, agentName, tool)).toBe('deny');
 			}
 		}
 	});
@@ -113,11 +135,11 @@ describe('skill tool gating via getAgentConfigs (FR-004)', () => {
 			},
 		} as PluginConfig);
 
-		// Override tool should still be present
-		expect(agents.architect.tools?.save_plan).toBe(true);
-		// Skill tools should also be present
+		// Override tool should still be allowed
+		expect(denied(agents, 'architect', 'save_plan')).not.toBe('deny');
+		// Skill tools should also be allowed
 		for (const tool of SKILL_TOOL_NAMES) {
-			expect(agents.architect.tools?.[tool]).toBe(true);
+			expect(denied(agents, 'architect', tool)).not.toBe('deny');
 		}
 	});
 
@@ -132,11 +154,11 @@ describe('skill tool gating via getAgentConfigs (FR-004)', () => {
 			},
 		} as PluginConfig);
 
-		// Override tool should still be present
-		expect(agents.architect.tools?.save_plan).toBe(true);
-		// Skill tools should NOT be present
+		// Override tool should still be allowed
+		expect(denied(agents, 'architect', 'save_plan')).not.toBe('deny');
+		// Skill tools should be denied
 		for (const tool of SKILL_TOOL_NAMES) {
-			expect(agents.architect.tools?.[tool]).toBeUndefined();
+			expect(denied(agents, 'architect', tool)).toBe('deny');
 		}
 	});
 
@@ -153,12 +175,12 @@ describe('skill tool gating via getAgentConfigs (FR-004)', () => {
 			},
 		} as PluginConfig);
 
-		// Non-skill override tool is present
-		expect(agents.architect.tools?.save_plan).toBe(true);
+		// Non-skill override tool is allowed
+		expect(denied(agents, 'architect', 'save_plan')).not.toBe('deny');
 		// Skill tool from override MUST still be excluded (gate is authoritative)
-		expect(agents.architect.tools?.skill_generate).toBeUndefined();
+		expect(denied(agents, 'architect', 'skill_generate')).toBe('deny');
 		for (const tool of SKILL_TOOL_NAMES) {
-			expect(agents.architect.tools?.[tool]).toBeUndefined();
+			expect(denied(agents, 'architect', tool)).toBe('deny');
 		}
 	});
 
@@ -166,7 +188,7 @@ describe('skill tool gating via getAgentConfigs (FR-004)', () => {
 		const agents = getAgentConfigs(undefined);
 
 		for (const tool of SKILL_TOOL_NAMES) {
-			expect(agents.architect.tools?.[tool]).toBeUndefined();
+			expect(denied(agents, 'architect', tool)).toBe('deny');
 		}
 	});
 
@@ -180,17 +202,16 @@ describe('skill tool gating via getAgentConfigs (FR-004)', () => {
 		}
 	});
 
-	test('skills.enabled false excludes skill tools from architect prompt text', () => {
+	test('skills.enabled false excludes skill tools from architect tool surface (prompt + permission)', () => {
 		const agents = getAgentConfigs({
 			skills: { enabled: false },
 		} as PluginConfig);
 
 		for (const tool of SKILL_TOOL_NAMES) {
 			// Prompt may contain the tool name in other contexts (e.g., skill_improver docs);
-			// we only assert that the architect's *tool surface* (YOUR_TOOLS / AVAILABLE_TOOLS) does not list them.
-			// A conservative check: the tool name should not appear as a bare token in the tools section.
-			// We accept that the string may appear in prose; the critical gate is the tools map.
-			expect(agents.architect.tools?.[tool]).toBeUndefined();
+			// we only assert that the architect's *tool surface* does not grant them:
+			// the critical gate is the host-enforced permission deny.
+			expect(denied(agents, 'architect', tool)).toBe('deny');
 		}
 	});
 });

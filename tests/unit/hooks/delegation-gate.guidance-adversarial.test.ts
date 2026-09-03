@@ -3,13 +3,14 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createDelegationGateHook } from '../../../src/hooks/delegation-gate';
-import { ensureAgentSession, resetSwarmState } from '../../../src/state';
 import {
-	findSystemMessage,
-	getPrimaryText,
-	getSystemWarningText,
-	makeConfig,
-} from './_delegation-gate-helpers';
+	findGuidanceCarriers,
+	type GuidanceMessage,
+	isGuidanceCarrier,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
+import { ensureAgentSession, resetSwarmState } from '../../../src/state';
+import { makeConfig } from './_delegation-gate-helpers';
 
 function makeTempProject(prefix: string): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -19,10 +20,7 @@ function makeTempProject(prefix: string): string {
 }
 
 // Type for message structure
-type TestMessageWithParts = {
-	info: { role: string; agent?: string; sessionID?: string };
-	parts: Array<{ type: string; text?: string }>;
-};
+type TestMessageWithParts = GuidanceMessage;
 
 // ============================================
 // Task 4.2 adversarial: [NEXT] guidance security hardening (model-only)
@@ -60,28 +58,21 @@ describe('Task 4.2 adversarial: [NEXT] guidance security hardening (model-only)'
 		};
 	};
 
-	// Helper to find system message containing [NEXT] guidance
+	// Helper to find the guidance carrier containing [NEXT] guidance (issue
+	// #2526: model-only guidance rides a user-role carrier)
 	const findSystemGuidance = (messages: {
-		messages: Array<{
-			info: { role: string; agent?: string; sessionID?: string };
-			parts: Array<{ type: string; text?: string }>;
-		}>;
+		messages: TestMessageWithParts[];
 	}) => {
-		return messages.messages.find(
-			(m) =>
-				m.info?.role === 'system' &&
-				m.parts?.some((p) => p.text?.includes('[NEXT]')),
+		return findGuidanceCarriers(messages.messages).find((m) =>
+			messageTextOf(m).includes('[NEXT]'),
 		);
 	};
 
-	// Helper to get user message text
-	const getUserText = (messages: {
-		messages: Array<{
-			info: { role: string; agent?: string; sessionID?: string };
-			parts: Array<{ type: string; text?: string }>;
-		}>;
-	}) => {
-		const userMsg = messages.messages.find((m) => m.info?.role === 'user');
+	// Helper to get the REAL user message text (excludes guidance carriers)
+	const getUserText = (messages: { messages: TestMessageWithParts[] }) => {
+		const userMsg = messages.messages.find(
+			(m) => m.info?.role === 'user' && !isGuidanceCarrier(m),
+		);
 		return userMsg?.parts?.[0]?.text ?? '';
 	};
 
@@ -109,11 +100,13 @@ describe('Task 4.2 adversarial: [NEXT] guidance security hardening (model-only)'
 		expect(userText).not.toContain('[DELIBERATE:');
 		expect(userText).not.toContain('[Last gate:');
 
-		// No system messages should be added (invalid sessionID)
-		const systemMessages = messages.messages.filter(
-			(m) => m.info?.role === 'system',
-		);
-		expect(systemMessages.length).toBe(0);
+		// No guidance carriers or role:'system' entries should be added
+		// (invalid sessionID)
+		const carriers = findGuidanceCarriers(messages.messages);
+		expect(carriers.length).toBe(0);
+		expect(
+			messages.messages.filter((m) => m?.info?.role === 'system').length,
+		).toBe(0);
 	});
 
 	// 2. Malicious sessionID — spaces
@@ -138,11 +131,13 @@ describe('Task 4.2 adversarial: [NEXT] guidance security hardening (model-only)'
 		const userText = getUserText(messages);
 		expect(userText).not.toContain('[DELIBERATE:');
 
-		// No system messages should be added (invalid sessionID)
-		const systemMessages = messages.messages.filter(
-			(m) => m.info?.role === 'system',
-		);
-		expect(systemMessages.length).toBe(0);
+		// No guidance carriers or role:'system' entries should be added
+		// (invalid sessionID)
+		const carriers = findGuidanceCarriers(messages.messages);
+		expect(carriers.length).toBe(0);
+		expect(
+			messages.messages.filter((m) => m?.info?.role === 'system').length,
+		).toBe(0);
 	});
 
 	// 3. Malicious sessionID — exactly 129 chars (too long)
@@ -168,11 +163,13 @@ describe('Task 4.2 adversarial: [NEXT] guidance security hardening (model-only)'
 		const userText = getUserText(messages);
 		expect(userText).not.toContain('[DELIBERATE:');
 
-		// No system messages should be added (invalid sessionID)
-		const systemMessages = messages.messages.filter(
-			(m) => m.info?.role === 'system',
-		);
-		expect(systemMessages.length).toBe(0);
+		// No guidance carriers or role:'system' entries should be added
+		// (invalid sessionID)
+		const carriers = findGuidanceCarriers(messages.messages);
+		expect(carriers.length).toBe(0);
+		expect(
+			messages.messages.filter((m) => m?.info?.role === 'system').length,
+		).toBe(0);
 	});
 
 	// 4. Malicious sessionID — exactly 128 chars (boundary, valid)
@@ -390,11 +387,12 @@ describe('Task 4.2 adversarial: [NEXT] guidance security hardening (model-only)'
 		// Should not throw
 		await hook.messagesTransform({}, messages);
 
-		// User message should NOT contain deliberation preamble (now model-only)
-		const userText = messages.messages[0].parts[0]?.text ?? '';
+		// User message should NOT contain deliberation preamble (now model-only).
+		// Carriers sit at the head of the array, so locate the real user message.
+		const userText = getUserText(messages);
 		expect(userText).not.toContain('[DELIBERATE:');
 
-		// [NEXT] guidance should be in system message
+		// [NEXT] guidance should be in a guidance carrier
 		const guidanceMsg = findSystemGuidance(messages);
 		expect(guidanceMsg).toBeDefined();
 		expect(guidanceMsg?.parts[0]?.text).toContain('[NEXT]');

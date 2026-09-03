@@ -11,11 +11,8 @@ import {
 	writeScopeBindingToDisk,
 } from '../../../src/scope/scope-persistence.js';
 import { _internals as filesystemIdentityInternals } from '../../../src/utils/filesystem-identity.js';
-import {
-	canonicalMkdtemp,
-	canonicalTmpDir,
-} from '../../helpers/tmpdir';
 import { safeRmRecursive } from '../../helpers/safe-test-dir';
+import { canonicalMkdtemp, canonicalTmpDir } from '../../helpers/tmpdir';
 
 const cleanup: string[] = [];
 const originalFilesystemIdentityInternals = { ...filesystemIdentityInternals };

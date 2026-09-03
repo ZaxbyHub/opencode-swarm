@@ -13,7 +13,7 @@ import path from 'node:path';
 import { claimSnapshotSessionOwnership } from '../../../src/session/snapshot-store';
 import {
 	createSnapshotWriterHook,
-	SNAPSHOT_PROJECTION_FILE,
+	SNAPSHOT_PROJECTION_FILE as PROJECTION,
 	serializeAgentSession,
 	writeSnapshot,
 } from '../../../src/session/snapshot-writer';
@@ -57,8 +57,8 @@ describe('snapshot-writer ADVERSARIAL', () => {
 			]),
 			agentSessions: new Map(),
 		};
-		claimSnapshotSessionOwnership('session-1', true);
-		claimSnapshotSessionOwnership('session-2', true);
+		for (const sessionId of ['session-1', 'session-2'])
+			claimSnapshotSessionOwnership(sessionId, true);
 	});
 
 	afterEach(async () => {
@@ -106,12 +106,7 @@ describe('snapshot-writer ADVERSARIAL', () => {
 			// In this test environment the OS allows writing to /usr/bin,
 			// so the file may or may not exist depending on permissions.
 			// We just verify writeSnapshot completed without throwing above.
-			const targetPath = path.join(
-				systemPath,
-				'.swarm',
-				'session',
-				SNAPSHOT_PROJECTION_FILE,
-			);
+			const targetPath = path.join(systemPath, '.swarm', 'session', PROJECTION);
 			// File existence depends on OS permissions - just verify the path is defined
 			expect(typeof targetPath).toBe('string');
 		});
@@ -204,7 +199,7 @@ describe('snapshot-writer ADVERSARIAL', () => {
 			await writeSnapshot(testDir, state);
 
 			// Verify the file was written with empty toolAggregates
-			const statePath = path.join(testDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
+			const statePath = path.join(testDir, '.swarm', PROJECTION);
 			expect(existsSync(statePath)).toBe(true);
 
 			const content = await readFile(statePath, 'utf-8');
@@ -230,7 +225,7 @@ describe('snapshot-writer ADVERSARIAL', () => {
 			expect(duration).toBeLessThan(5000);
 
 			// Verify the file was written
-			const statePath = path.join(testDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
+			const statePath = path.join(testDir, '.swarm', PROJECTION);
 			expect(existsSync(statePath)).toBe(true);
 
 			const content = await readFile(statePath, 'utf-8');
@@ -250,7 +245,7 @@ describe('snapshot-writer ADVERSARIAL', () => {
 			await Promise.all(promises);
 
 			// Verify one valid snapshot exists
-			const statePath = path.join(testDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
+			const statePath = path.join(testDir, '.swarm', PROJECTION);
 			expect(existsSync(statePath)).toBe(true);
 		});
 	});
@@ -444,7 +439,7 @@ describe('snapshot-writer ADVERSARIAL', () => {
 			await writeSnapshot(testDir, state);
 
 			// Verify the file was written
-			const statePath = path.join(testDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
+			const statePath = path.join(testDir, '.swarm', PROJECTION);
 			expect(existsSync(statePath)).toBe(true);
 		});
 

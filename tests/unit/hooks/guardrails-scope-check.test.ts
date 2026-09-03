@@ -3,6 +3,10 @@ import { ORCHESTRATOR_NAME } from '../../../src/config/constants';
 import type { GuardrailsConfig } from '../../../src/config/schema';
 import { createGuardrailsHooks } from '../../../src/hooks/guardrails';
 import {
+	isGuidanceCarrier,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
+import {
 	getAgentSession,
 	resetSwarmState,
 	startAgentSession,
@@ -81,16 +85,20 @@ describe('guardrails scope containment check (Task 5.4)', () => {
 
 			await hooks.messagesTransform({}, { messages });
 
-			// v6.22.8: SCOPE VIOLATION is now injected into a system message (model-only guidance)
-			// A new system message is created at index 0; the original message moves to index 1
-			const systemMessage = messages[0] as {
-				info: { role: string };
+			// Issue #2526: SCOPE VIOLATION is model-only guidance riding a USER-role
+			// guidance carrier (id 'swarm-guidance:guardrails') — the OpenCode host
+			// drops role:'system' entries from this transform surface. The carrier is
+			// created at index 0; the original message moves to index 1.
+			const carrier = messages[0] as {
+				info: { role: string; id?: unknown };
 				parts: Array<{ type: string; text: string }>;
 			};
-			expect(systemMessage.info.role).toBe('system');
-			expect(systemMessage.parts[0].text).toContain('⚠️ SCOPE VIOLATION');
-			expect(systemMessage.parts[0].text).toContain('[MODEL_ONLY_GUIDANCE]');
-			expect(systemMessage.parts[0].text).toContain(
+			expect(isGuidanceCarrier(carrier)).toBe(true);
+			expect(carrier.info.role).toBe('user');
+			expect(carrier.info.id).toBe('swarm-guidance:guardrails');
+			expect(carrier.parts[0].text).toContain('⚠️ SCOPE VIOLATION');
+			expect(carrier.parts[0].text).toContain('[MODEL_ONLY_GUIDANCE]');
+			expect(carrier.parts[0].text).toContain(
 				'Only modify files within your declared scope',
 			);
 

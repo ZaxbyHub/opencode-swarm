@@ -42,6 +42,7 @@ import {
 	readSkillUsageEntries,
 	readSkillUsageEntriesTail,
 } from './skill-usage-log.js';
+import { isGuidanceCarrier } from './system-guidance-carrier.js';
 import { resolveTaskId } from './task-id-resolver.js';
 
 // ============================================================================
@@ -1297,6 +1298,9 @@ export async function skillPropagationTransformScan(
 	// --- Scan reviewer messages for SKILL_COMPLIANCE verdicts ---
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const m = messages[i];
+		// Issue #2526: skip guidance carriers — injected directives must never
+		// be parsed as reviewer skill-compliance output.
+		if (isGuidanceCarrier(m)) continue;
 		const agent = m.info?.agent;
 		if (
 			typeof agent !== 'string' ||
@@ -1428,6 +1432,9 @@ export async function skillPropagationTransformScan(
 	// its own bounded summary warning.
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const m = messages[i];
+		// Issue #2526: skip guidance carriers — injected directives must never
+		// be parsed as reviewer skill-compliance output.
+		if (isGuidanceCarrier(m)) continue;
 		const agent = m.info?.agent;
 		if (
 			typeof agent !== 'string' ||

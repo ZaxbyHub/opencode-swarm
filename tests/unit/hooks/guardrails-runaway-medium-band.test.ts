@@ -16,9 +16,11 @@
  * Behaviour above 4000 characters is unchanged: unconditional, no episode gate,
  * no id requirement.
  *
- * Assertions read the SYSTEM MESSAGE TEXT, not `pendingAdvisoryMessages`: the
- * architect drain runs later in the same `messagesTransform` invocation, so the
- * queue is always empty by the time the handler returns.
+ * Assertions read the GUIDANCE CARRIER TEXT (issue #2526: model-only guidance
+ * rides a user-role carrier — the host drops role:'system' entries from this
+ * transform surface), not `pendingAdvisoryMessages`: the architect drain runs
+ * later in the same `messagesTransform` invocation, so the queue is always
+ * empty by the time the handler returns.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
@@ -34,6 +36,10 @@ import {
 	RUNAWAY_MEDIUM_MIN,
 	RUNAWAY_OUTPUT_ADVISORY_MARKER,
 } from '../../../src/hooks/guardrails/messages-transform';
+import {
+	isGuidanceCarrier,
+	messageTextOf,
+} from '../../../src/hooks/system-guidance-carrier';
 import {
 	ensureAgentSession,
 	resetSwarmState,
@@ -91,21 +97,25 @@ function setupArchitect(sessionId: string): void {
 	swarmState.activeAgent.set(sessionId, 'architect');
 }
 
-/** Runs one transform and returns the resulting first-system-message text. */
+/**
+ * Runs one transform and returns the resulting guidance-carrier text (joined
+ * across carriers — normally exactly one, id 'swarm-guidance:guardrails').
+ * Issue #2526: warning/advisory text lands in the carrier body, no longer in
+ * the pre-seeded system message.
+ */
 async function turn(
 	hooks: ReturnType<typeof createGuardrailsHooks>,
 	messages: Msg[],
 ): Promise<string> {
 	await hooks.messagesTransform({}, { messages } as never);
-	const sys = messages.find((m) => m.info.role === 'system');
-	const part = sys?.parts.find(
-		(p) => p.type === 'text' && typeof p.text === 'string',
-	);
-	return (part?.text as string) ?? '';
+	return messages
+		.filter((m) => isGuidanceCarrier(m))
+		.map((m) => messageTextOf(m))
+		.join('\n');
 }
 
-function warned(systemText: string): boolean {
-	return systemText.includes(RUNAWAY_OUTPUT_ADVISORY_MARKER);
+function warned(carrierText: string): boolean {
+	return carrierText.includes(RUNAWAY_OUTPUT_ADVISORY_MARKER);
 }
 
 describe('runaway detector — medium band (#2063 B3)', () => {
