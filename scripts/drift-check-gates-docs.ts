@@ -255,19 +255,18 @@ export function collectReaderFindings(
 			}
 			// Tripwire only (warning): the schema-driven wiring tests prove the
 			// readers actually consult the config; this just catches wholesale
-			// deletion of the access from the registered module. The section
-			// token plus the config seam name is the signal — requiring a
-			// literal "gates" substring would false-positive on modules wired
-			// through loadGateOverrides().
+			// deletion of the access from the registered module. Requiring the
+			// config seam symbol (`loadGateOverrides`) is stronger than a bare
+			// "gates" substring, which any comment could satisfy.
 			if (
 				!content.includes(section) ||
-				!(content.includes('gates') || content.includes('loadGateOverrides'))
+				!content.includes('loadGateOverrides')
 			) {
 				findings.push({
 					category,
 					severity: 'warning',
 					file: readerPath,
-					message: `registered gates.${section} reader ${readerPath} no longer mentions "${section}"/gate-config access — verify the wiring (see tests/unit/tools/gates-config-wiring.test.ts)`,
+					message: `registered gates.${section} reader ${readerPath} no longer mentions "${section}" or loadGateOverrides() — verify the wiring (see tests/unit/tools/gates-config-wiring.test.ts)`,
 				});
 			}
 		}

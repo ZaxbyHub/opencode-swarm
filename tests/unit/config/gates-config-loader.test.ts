@@ -30,6 +30,7 @@ import {
 } from '../../../src/config/loader';
 import {
 	GATE_CONFIG_KNOWN_SECTION_KEYS,
+	GATE_CONFIG_READERS,
 	GATE_SECTION_SCHEMAS,
 } from '../../../src/config/schema';
 import { runConfigDoctor } from '../../../src/services/config-doctor';
@@ -207,5 +208,19 @@ describe('rawGates: only user-written keys, no Zod-default materialization', () 
 		const meta = loadPluginConfigWithMeta(dir);
 		expect(meta.rawGates).toBeUndefined();
 		expect(meta.config.gates).toBeUndefined();
+	});
+});
+
+describe('GATE_CONFIG_READERS registry', () => {
+	test('covers exactly the GATE_SECTION_SCHEMAS sections with existing reader files', () => {
+		expect([...Object.keys(GATE_CONFIG_READERS)].sort()).toEqual(
+			Object.keys(GATE_SECTION_SCHEMAS).sort(),
+		);
+		const repoRoot = path.resolve(__dirname, '../../..');
+		for (const readers of Object.values(GATE_CONFIG_READERS)) {
+			for (const reader of readers) {
+				expect(fs.existsSync(path.join(repoRoot, reader))).toBe(true);
+			}
+		}
 	});
 });

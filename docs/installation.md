@@ -917,7 +917,7 @@ Supports TypeScript, JavaScript, Python, Rust, Go, Java, C/C++, Ruby, PHP, and C
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | boolean | `true` | Run the placeholder scan |
-| `deny_patterns` | string[] | `["TODO", "FIXME", "TBD", "XXX", "placeholder", "stub", "wip", "not implemented"]` | Comment patterns to detect. Providing a list replaces the built-in comment/string/code pattern set — built-in string-literal and stub-code detection are disabled when this is set |
+| `deny_patterns` | string[] | `["TODO", "FIXME", "TBD", "XXX", "placeholder", "stub", "wip", "not implemented"]` | Comment patterns to detect. A non-empty list replaces the built-in comment/string/code pattern set — built-in string-literal and stub-code detection are disabled when this is set. An empty list is ignored and the built-in defaults apply |
 | `allow_globs` | string[] | `["docs/**", "examples/**", "tests/**", "**/*.test.*", "**/*.spec.*", "**/mocks/**", "**/__tests__/**"]` | Globs to skip scanning |
 | `max_allowed_findings` | number | `0` | Tolerate up to this many findings before the gate fails (0 fails on any finding) |
 | `sentinel_allowlist` | string[] | `[]` | Intentional sentinel strings that suppress matching findings |

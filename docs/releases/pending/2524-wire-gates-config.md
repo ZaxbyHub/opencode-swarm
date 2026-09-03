@@ -1,6 +1,4 @@
----
-sig: gates-config-wiring
----
+# Gates configuration is now actually wired
 
 ## The `gates.*` configuration section is now actually wired (and the docs no longer promise keys that never existed)
 

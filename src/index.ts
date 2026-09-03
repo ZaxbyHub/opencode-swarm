@@ -33,6 +33,7 @@ import { COMMAND_REGISTRY, VALID_COMMANDS } from './commands/registry.js';
 import {
 	getSafeDefaultConfigLoadResult,
 	loadPluginConfigWithMetaAsync,
+	resetConfigAdvisoryDedup,
 } from './config';
 import {
 	resolveRegisteredAgentModel,
@@ -855,7 +856,12 @@ async function initializeOpenCodeSwarm(
 	// config-validation warnings before /swarm diagnose can surface them
 	// (epic #1752 PR2 — config-load warnings now route through advisoryWarn,
 	// not raw stderr, so the buffer is the only /swarm diagnose channel).
+	// The config-advisory DEDUP state resets with the buffer so a config
+	// problem fixed and later re-introduced warns again in the new session
+	// instead of staying suppressed by a pre-fix signature (issue #2524
+	// review PRR-007). O(1) — bounded, no init-path I/O.
 	clearDeferredWarnings();
+	resetConfigAdvisoryDedup();
 
 	// PARALLEL INIT I/O (issue #1782 / repro-704 T1 Windows failures).
 	//

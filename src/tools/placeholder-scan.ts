@@ -48,6 +48,12 @@ export interface PlaceholderScanResult {
 		files_scanned: number;
 		findings_count: number;
 		files_with_findings: number;
+		/**
+		 * Present only when the gate was skipped via
+		 * `gates.placeholder_scan.enabled: false` (issue #2524) — distinguishes
+		 * a config-disabled run from a genuinely clean scan.
+		 */
+		disabled_reason?: string;
 	};
 }
 
@@ -235,22 +241,29 @@ function isAllowedByGlobs(filePath: string, allowGlobs?: string[]): boolean {
 		// ** → match any characters including /
 		// * → match any characters except /
 		// (Note: in globs, . is literal, not regex special)
-		const regexPattern = glob
-			.replace(/\*\*/g, '<<<DBL>>>') // Save ** first
-			.replace(/\*/g, '([^/]+)') // * → match non-slash chars
-			.replace(/<<<DBL>>>/g, '(.*)'); // ** → match any chars including slash
+		// A malformed glob (e.g. an unbalanced `[`) must not crash the scan:
+		// treat it as non-matching so the file stays SCANNED (fail-closed for
+		// the gate) instead of throwing out of the per-file loop.
+		try {
+			const regexPattern = glob
+				.replace(/\*\*/g, '<<<DBL>>>') // Save ** first
+				.replace(/\*/g, '([^/]+)') // * → match non-slash chars
+				.replace(/<<<DBL>>>/g, '(.*)'); // ** → match any chars including slash
 
-		// Test if path starts with the glob pattern
-		const regex = new RegExp(`^${regexPattern}`, 'i');
-		if (regex.test(normalizedPath)) {
-			return true;
-		}
+			// Test if path starts with the glob pattern
+			const regex = new RegExp(`^${regexPattern}`, 'i');
+			if (regex.test(normalizedPath)) {
+				return true;
+			}
 
-		// Also try matching just the filename
-		const filename = path.basename(filePath);
-		const filenameRegex = new RegExp(`^${regexPattern}$`, 'i');
-		if (filenameRegex.test(filename)) {
-			return true;
+			// Also try matching just the filename
+			const filename = path.basename(filePath);
+			const filenameRegex = new RegExp(`^${regexPattern}$`, 'i');
+			if (filenameRegex.test(filename)) {
+				return true;
+			}
+		} catch {
+			continue;
 		}
 	}
 
@@ -1033,6 +1046,7 @@ export async function placeholderScan(
 				files_scanned: 0,
 				findings_count: 0,
 				files_with_findings: 0,
+				disabled_reason: 'placeholder_scan disabled by configuration',
 			},
 		};
 	}

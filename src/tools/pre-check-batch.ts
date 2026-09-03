@@ -1293,8 +1293,18 @@ export async function runPreCheckBatch(
 	} = input;
 	// Legacy direct callers may still carry the parsed gates on `input.config`;
 	// the tool boundary supplies the user-written overrides via `input.gates`
-	// (issue #2524).
-	const gates = gatesOverrides ?? input.config?.gates;
+	// (issue #2524). The fallback narrows to the ONLY slices this module
+	// consumes (sast_scan.enabled, quality_budget) so a parsed config's
+	// Zod-materialized default lists can never masquerade as user intent for
+	// the sections the wrappers forward elsewhere.
+	const gates =
+		gatesOverrides ??
+		(input.config?.gates
+			? {
+					sast_scan: input.config.gates.sast_scan,
+					quality_budget: input.config.gates.quality_budget,
+				}
+			: undefined);
 
 	// Validate directory
 	const dirError = validateDirectory(directory, effectiveWorkspaceDir);

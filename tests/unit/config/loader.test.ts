@@ -185,14 +185,14 @@ describe('config/loader', () => {
 			originalXDG = process.env.XDG_CONFIG_HOME;
 			process.env.XDG_CONFIG_HOME = tempDir;
 			// Module-level warning state (deferred buffer, gates-advisory dedup
-			// set) must reset between tests so a prior test's advisoryWarn entry
-			// cannot leak into this one (AGENTS.md invariant 7).
+			// set) must reset between tests (AGENTS.md invariant 7).
 			clearDeferredWarnings();
 			loaderInternals.resetGatesAdvisoryDedup();
 		});
 
 		afterEach(() => {
 			clearDeferredWarnings();
+			loaderInternals.resetGatesAdvisoryDedup();
 			// Restore original XDG_CONFIG_HOME
 			if (originalXDG === undefined) {
 				delete process.env.XDG_CONFIG_HOME;

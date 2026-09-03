@@ -53,6 +53,7 @@ export {
 	loadPluginConfig,
 	loadPluginConfigWithMeta,
 	loadPluginConfigWithMetaAsync,
+	resetConfigAdvisoryDedup,
 } from './loader';
 
 // Import for local use (required for _internals)

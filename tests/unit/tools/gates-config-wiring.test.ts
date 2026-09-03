@@ -1,17 +1,8 @@
 /**
  * Issue #2524 — `gates.*` config wiring through the REGISTERED production
- * tool objects.
- *
- * Every gate section enumerated from `GATE_SECTION_SCHEMAS` must actually be
- * disableable via `gates.<section>.enabled: false` when the tool is invoked
- * the way the plugin host invokes it (`tool.execute(args, ctx)` with a config
- * file on disk). The loop is schema-driven: a schema section added without
- * wiring fails here (the default case throws), so the suite cannot silently
- * skip an unwired section.
- *
- * No mocks: fixtures are real temp project roots with a `.git` marker and a
- * real `.opencode/opencode-swarm.json`; `XDG_CONFIG_HOME` is redirected to an
- * empty temp dir so the host machine's user config cannot leak in.
+ * tool objects. Schema-driven loop: a section added to `GATE_SECTION_SCHEMAS`
+ * without wiring fails here (default case throws). No mocks: real temp
+ * project roots with a `.git` marker and a real config file; XDG redirected.
  */
 import {
 	afterAll,
@@ -24,11 +15,12 @@ import {
 } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { resetConfigAdvisoryDedup } from '../../../src/config/loader';
 import {
-	GATE_CONFIG_READERS,
 	GATE_SECTION_SCHEMAS,
 	type GateSectionName,
 } from '../../../src/config/schema';
+import { clearDeferredWarnings } from '../../../src/services/warning-buffer';
 import { build_check } from '../../../src/tools/build-check';
 import { placeholder_scan } from '../../../src/tools/placeholder-scan';
 import { pre_check_batch } from '../../../src/tools/pre-check-batch';
@@ -38,11 +30,7 @@ import { sbom_generate } from '../../../src/tools/sbom-generate';
 import { syntax_check } from '../../../src/tools/syntax-check';
 import { createSafeTestDir } from '../../helpers/safe-test-dir';
 
-const REPO_ROOT = path.resolve(__dirname, '../../..');
-
-// ---------------------------------------------------------------------------
-// Fixture helpers
-// ---------------------------------------------------------------------------
+// --- Fixture helpers ---
 
 let xdgDir: { dir: string; cleanup: () => void } | undefined;
 let originalXdg: string | undefined;
@@ -63,11 +51,17 @@ let project: { dir: string; cleanup: () => void } | undefined;
 
 beforeEach(() => {
 	project = createSafeTestDir('gates-wiring-');
+	// Module-level advisory state must reset so co-run shards cannot leak a
+	// prior file's dedup signature or buffered warning into these assertions.
+	clearDeferredWarnings();
+	resetConfigAdvisoryDedup();
 });
 
 afterEach(() => {
 	project?.cleanup();
 	project = undefined;
+	clearDeferredWarnings();
+	resetConfigAdvisoryDedup();
 });
 
 function makeProject(
@@ -162,9 +156,7 @@ const SECTION_PROBES: Record<
 	},
 };
 
-// ---------------------------------------------------------------------------
-// Schema-driven disabled-behavior matrix (the issue's exit gate)
-// ---------------------------------------------------------------------------
+// --- Schema-driven disabled-behavior matrix (the issue's exit gate) ---
 
 describe('gates.*.enabled: false disables each gate through the registered tool', () => {
 	for (const section of Object.keys(
@@ -182,14 +174,20 @@ describe('gates.*.enabled: false disables each gate through the registered tool'
 					break;
 				case 'placeholder_scan': {
 					expect(result.verdict).toBe('pass');
-					const summary = result.summary as Record<string, number>;
+					const summary = result.summary as Record<string, unknown>;
 					expect(summary.findings_count).toBe(0);
+					expect(String(summary.disabled_reason)).toContain(
+						'disabled by configuration',
+					);
 					break;
 				}
 				case 'sast_scan': {
 					expect(result.verdict).toBe('pass');
-					const summary = result.summary as Record<string, number>;
+					const summary = result.summary as Record<string, unknown>;
 					expect(summary.files_scanned).toBe(0);
+					expect(String(summary.disabled_reason)).toContain(
+						'disabled by configuration',
+					);
 					break;
 				}
 				case 'sbom_generate':
@@ -229,10 +227,10 @@ describe('gates.*.enabled: false disables each gate through the registered tool'
 	}
 });
 
-// ---------------------------------------------------------------------------
+// ---
 // Positive controls — the probes really detect their gate's signal when NOT
 // disabled, so the disabled assertions above cannot pass vacuously.
-// ---------------------------------------------------------------------------
+// ---
 
 describe('positive controls (no gates config → gates run)', () => {
 	test('syntax_check fails a file with a syntax error', async () => {
@@ -261,17 +259,19 @@ describe('positive controls (no gates config → gates run)', () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
+// ---
 // Raw-override semantics (plan-critic item 1): only user-written keys apply;
 // schema defaults never masquerade as custom user intent.
-// ---------------------------------------------------------------------------
+// ---
 
 function runPlaceholderScan(
 	dir: string,
 	changedFiles: string[],
 	args: Record<string, unknown> = {},
 ) {
-	return invoke(placeholder_scan, { changed_files: changedFiles, ...args })(dir);
+	return invoke(placeholder_scan, { changed_files: changedFiles, ...args })(
+		dir,
+	);
 }
 
 describe('placeholder_scan user-written config fields', () => {
@@ -362,6 +362,33 @@ describe('placeholder_scan user-written config fields', () => {
 		expect(findings.every((f) => f.path === 'todo.js')).toBe(true);
 	});
 
+	test('explicit empty deny_patterns list is ignored; built-in defaults apply', async () => {
+		const dir = makeProject(
+			{ placeholder_scan: { enabled: true, deny_patterns: [] } },
+			{ 'todo.js': TODO_JS, 'stub-string.js': STUB_STRING_JS },
+		);
+		const result = await runPlaceholderScan(dir, ['todo.js', 'stub-string.js']);
+		expect(result.verdict).toBe('fail');
+		const findings = result.findings as Array<{ rule_id: string }>;
+		expect(findings.some((f) => f.rule_id === 'placeholder/comment-todo')).toBe(
+			true,
+		);
+		expect(
+			findings.some((f) => f.rule_id === 'placeholder/text-placeholder'),
+		).toBe(true);
+	});
+
+	test('malformed allow_globs glob does not crash the scan (fail-closed)', async () => {
+		const dir = makeProject(
+			{ placeholder_scan: { enabled: true, allow_globs: ['[abc'] } },
+			{ 'todo.js': TODO_JS },
+		);
+		const result = await runPlaceholderScan(dir, ['todo.js']);
+		expect(result.verdict).toBe('fail');
+		const summary = result.summary as Record<string, number>;
+		expect(summary.files_scanned).toBe(1);
+	});
+
 	test('max_allowed_findings tolerates findings up to the budget', async () => {
 		const files = { 'one.js': TODO_JS, 'two.js': TODO_JS };
 		const atBudget = makeProject(
@@ -388,10 +415,10 @@ describe('placeholder_scan user-written config fields', () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
+// ---
 // quality_budget precedence (D3): args > file > defaults, except the
 // file-level enabled:false kill switch (the only gate exposing args.config).
-// ---------------------------------------------------------------------------
+// ---
 
 describe('quality_budget config merge precedence', () => {
 	test('file enabled:false wins over args config enabled:true (kill switch)', async () => {
@@ -435,9 +462,7 @@ describe('quality_budget config merge precedence', () => {
 	});
 });
 
-// ---------------------------------------------------------------------------
-// pre_check_batch: config-disabled gates take the unified skip shapes.
-// ---------------------------------------------------------------------------
+// --- pre_check_batch: config-disabled gates take the unified skip shapes. ---
 
 describe('pre_check_batch honors gates.sast_scan/quality_budget.enabled:false', () => {
 	test('sast_scan.ran === false + sast_skipped; quality_budget returns the disabled result', async () => {
@@ -461,21 +486,7 @@ describe('pre_check_batch honors gates.sast_scan/quality_budget.enabled:false', 
 	});
 });
 
-// ---------------------------------------------------------------------------
+// ---
 // Drift-check contract: the reader registry covers every schema section and
 // points at real files (scripts/drift-check-gates-docs.ts enforces the same
 // statically; this pins the registry from the test side).
-// ---------------------------------------------------------------------------
-
-describe('GATE_CONFIG_READERS registry', () => {
-	test('covers exactly the GATE_SECTION_SCHEMAS sections with existing reader files', () => {
-		expect([...Object.keys(GATE_CONFIG_READERS)].sort()).toEqual(
-			[...Object.keys(GATE_SECTION_SCHEMAS)].sort(),
-		);
-		for (const readers of Object.values(GATE_CONFIG_READERS)) {
-			for (const reader of readers) {
-				expect(fs.existsSync(path.join(REPO_ROOT, reader))).toBe(true);
-			}
-		}
-	});
-});

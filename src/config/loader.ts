@@ -991,6 +991,18 @@ export function loadGateOverrides(
 }
 
 /**
+ * Reset the module-level config-advisory dedup state (gates-section
+ * signatures + the unknown-top-level-key slot). Called once at session start
+ * next to `clearDeferredWarnings()` so a config problem that is fixed and
+ * later re-introduced warns again in the new session instead of staying
+ * suppressed by a signature recorded before the fix.
+ */
+export function resetConfigAdvisoryDedup(): void {
+	gatesAdvisorySignatures.clear();
+	lastUnknownTopLevelSig = null;
+}
+
+/**
  * Safe-default `ConfigLoadResult` for init-path timeout / error fallback.
  *
  * Produces the same shape `loadPluginConfigWithMeta[Async]` returns when no

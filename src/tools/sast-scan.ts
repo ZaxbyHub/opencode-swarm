@@ -85,6 +85,12 @@ export interface SastScanResult {
 	findings: SastScanFinding[];
 	/** Summary information */
 	summary: {
+		/**
+		 * Present only when the gate was skipped via
+		 * `gates.sast_scan.enabled: false` (issue #2524) — distinguishes a
+		 * config-disabled run from a genuinely clean scan.
+		 */
+		disabled_reason?: string;
 		/** Engine used for scanning */
 		engine: 'tier_a' | 'tier_a+tier_b';
 		/** Number of files scanned */
@@ -378,6 +384,7 @@ export async function sastScan(
 			verdict: 'pass',
 			findings: [],
 			summary: {
+				disabled_reason: 'sast_scan disabled by configuration',
 				engine: 'tier_a',
 				files_scanned: 0,
 				findings_count: 0,
