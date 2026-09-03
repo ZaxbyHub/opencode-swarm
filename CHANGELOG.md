@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.164.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.4...v7.164.5) (2026-09-03)
+
+
+### Bug Fixes
+
+* **config:** wire the gates.* section through to the gate tools ([81281a6](https://github.com/ZaxbyHub/opencode-swarm/commit/81281a679f3db0fae0c432f34c1f66f9d021bc53))
+* **lint:** drop the useless continue in the malformed-glob catch ([179c64a](https://github.com/ZaxbyHub/opencode-swarm/commit/179c64a82444a44272b5beda9afbed5204108fe2))
+* **observability:** repoint delegation_cost producer citations after main merge ([ee5558e](https://github.com/ZaxbyHub/opencode-swarm/commit/ee5558e4b259e290dcd6a34c1330b04ca957ba6f))
+
 ## [7.164.4](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.3...v7.164.4) (2026-09-03)
 
 
