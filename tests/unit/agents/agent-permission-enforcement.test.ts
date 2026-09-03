@@ -266,7 +266,9 @@ describe('runtime replay — denied tools are hidden by the host gate (#2528)', 
 describe('no orphaned tools maps; permission parity with the allow-lists', () => {
 	test('default config: no agent ships a tools map; every agent ships a permission block', () => {
 		const agents = configsFor();
-		expect(Object.keys(agents).length).toBeGreaterThanOrEqual(21);
+		// Exact default-roster size: a new/renamed agent must be a conscious
+		// change, not something this file silently absorbs.
+		expect(Object.keys(agents).length).toBe(21);
 		for (const [name, cfg] of Object.entries(agents)) {
 			expect('tools' in cfg).toBe(false);
 			expect(cfg.permission).toBeDefined();
@@ -277,6 +279,7 @@ describe('no orphaned tools maps; permission parity with the allow-lists', () =>
 	test('per-agent plugin-tool denies equal TOOL_NAMES minus the allow-list (audit parity)', () => {
 		const agents = configsFor();
 		let totalDenies = 0;
+		let totalAllows = 0;
 		for (const [name, cfg] of Object.entries(agents)) {
 			const base = stripKnownSwarmPrefix(name);
 			const allow = new Set(
@@ -289,12 +292,15 @@ describe('no orphaned tools maps; permission parity with the allow-lists', () =>
 				expect(denied.has(tool)).toBe(!allow.has(tool));
 			}
 			totalDenies += denied.size;
+			totalAllows += allow.size;
 		}
-		// 21 default agents x 129 tools - Σ allow-lists (322) = 2387 — the
-		// audit's "2,388 intended denies" over the same universe (±1 from
-		// the audit's counting detail). The point: every intended deny is
-		// now an emitted, host-enforced deny.
-		expect(totalDenies).toBe(21 * TOOL_NAMES.length - 322);
+		// Total parity computed from the live role maps (no magic constant):
+		// rosterSize × 129 − Σ allow-lists. For the default 21-agent roster
+		// this is 2,387 — the audit's "2,388 intended denies" over the same
+		// universe (±1 from the audit's counting detail). The point: every
+		// intended deny is now an emitted, host-enforced deny.
+		const rosterSize = Object.keys(agents).length;
+		expect(totalDenies).toBe(rosterSize * TOOL_NAMES.length - totalAllows);
 		expect(totalDenies).toBeGreaterThan(2300);
 	});
 

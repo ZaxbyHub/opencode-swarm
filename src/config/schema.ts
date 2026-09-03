@@ -3579,7 +3579,7 @@ export const PluginConfigSchema = z.object({
 
 	// Tool filter configuration - controls which tools each agent is allowed to use
 	tool_filter: ToolFilterConfigSchema.optional().describe(
-		'Controls which plugin tools each agent is allowed to use; enforced through host-side per-agent permission denies (issue #2528). enabled: false lifts the plugin-tool allow-list but keeps each role\'s read-only write-family floor.',
+		"Controls which plugin tools each agent is allowed to use; enforced through host-side per-agent permission denies (issue #2528). enabled: false lifts the plugin-tool allow-list but keeps each role's read-only write-family floor.",
 	),
 
 	// Authority configuration - per-agent file write authority rules

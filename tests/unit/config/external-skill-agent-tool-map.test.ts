@@ -80,14 +80,16 @@ describe('external skill tool gating via getAgentConfigs', () => {
 		}
 	});
 
-	test('when curation_enabled is false, tools do NOT appear in any agent tool list', () => {
+	test('when curation_enabled is false, tools are host-denied for every agent', () => {
 		const agents = getAgentConfigs({
 			external_skills: { curation_enabled: false },
 		} as PluginConfig);
 
 		for (const agentConfig of Object.values(agents)) {
 			for (const tool of EXTERNAL_SKILL_TOOL_NAMES) {
-				expect(agentConfig.tools?.[tool]).toBeUndefined();
+				// #2528: the emitted configs carry no `tools` map — assert the
+				// host-enforced permission deny, not the deleted field.
+				expect(agentConfig.permission?.[tool]).toBe('deny');
 			}
 		}
 	});

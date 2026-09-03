@@ -247,7 +247,7 @@ describe('resolvePrimaryAgentNames', () => {
 	});
 
 	test('known base role with zero matching agents ⇒ falls through to architect fallback', () => {
-		// Exercises the fall-through path at src/agents/index.ts:707-708:
+		// Exercises the fall-through path of resolvePrimaryAgentNames (src/agents/index.ts):
 		// ALL_AGENT_NAMES.includes('reviewer') is true, but no generated agent
 		// has base role 'reviewer', so the base-role block finds nothing and
 		// falls through. The exact-match check also misses ('reviewer' is not

@@ -625,7 +625,7 @@ Routing skills are merged with scored recommendations, with explicitly routed sk
 
 ### Skill Lifecycle Management
 
-Seven skill-management tools (`skill_generate`, `skill_list`, `skill_apply`, `skill_inspect`, `skill_regenerate`, `skill_retire`, `skill_improve`) are **opt-in** via the `skills.enabled` config flag (default `false`). With the flag off, the architect does not see them; with the flag on, they reappear. Tools remain exported and registered — only the merged architect tool map is gated.
+Seven skill-management tools (`skill_generate`, `skill_list`, `skill_apply`, `skill_inspect`, `skill_regenerate`, `skill_retire`, `skill_improve`) are **opt-in** via the `skills.enabled` config flag (default `false`). With the flag off, the tools are host-denied for every agent except the `skill_improver` specialist (issue #2528): the model never receives their schema, so they are genuinely unreachable — not merely unlisted. With the flag on, the architect regains all seven. Tools remain exported and registered.
 
  Swarm provides tools for managing generated skill lifecycles:
 
@@ -727,7 +727,7 @@ Every candidate passes a 3-gate pipeline before entering quarantine:
 | `context_budget.model_limits` | record | `{}` | Per-model token limit **overrides**, keyed by `"<provider>/<model>"`, `"<model>"`, or `"default"`. Empty by default so the live model's own context window is used; set an entry only to impose a smaller working budget |
 | `context_budget.unified_injection_tokens` | number | `undefined` | Opt-in unified ceiling (tokens) for combined system-enhancer + knowledge-injector injection per turn. When set, both hooks share this budget with proportional split |
 | `context_budget.tool_output_mask_threshold` | number | `2000` | Threshold for masking tool outputs (chars) |
-| `skills.enabled` | boolean | `false` | Gates the 7 skill-management tools (`skill_generate`, `skill_list`, `skill_apply`, `skill_inspect`, `skill_regenerate`, `skill_retire`, `skill_improve`) behind an opt-in flag. When `false` (default), these tools are hidden from the architect's tool map. |
+| `skills.enabled` | boolean | `false` | Gates the 7 skill-management tools (`skill_generate`, `skill_list`, `skill_apply`, `skill_inspect`, `skill_regenerate`, `skill_retire`, `skill_improve`) behind an opt-in flag. When `false` (default), these tools are host-denied for every agent except `skill_improver` — genuinely unreachable at request time (issue #2528). |
 | `skill_opt.enabled` | boolean | `false` | Master opt-in for the governed skill optimizer (`/swarm skill-opt`). `run` also requires `--confirm`; `plan`/`status`/`diff`/`history` are always available. See `docs/skill-optimizer.md`. |
 | `skill_opt.deadband` | number | `0` | Promotion policy deadband forwarded to the evaluation substrate. |
 | `skill_opt.max_rounds` | number | `5` | Hard cap on draft/smoke retries before a validation (held-out test set is single-use). |

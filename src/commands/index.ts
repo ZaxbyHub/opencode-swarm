@@ -436,10 +436,13 @@ async function buildSwarmCommandPrompt(args: {
 export function agentHasSwarmCommandTool(
 	activeAgentName: string | undefined,
 	agents: Record<string, AgentDefinition>,
-	registeredAgents?: Record<string, {
-		tools?: Record<string, boolean>;
-		permission?: Record<string, unknown>;
-	}>,
+	registeredAgents?: Record<
+		string,
+		{
+			tools?: Record<string, boolean>;
+			permission?: Record<string, unknown>;
+		}
+	>,
 ): boolean {
 	const name = activeAgentName ?? ORCHESTRATOR_NAME;
 	const registeredTools = registeredAgents?.[name]?.tools;

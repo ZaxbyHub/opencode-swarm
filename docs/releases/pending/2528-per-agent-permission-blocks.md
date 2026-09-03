@@ -49,7 +49,10 @@ nothing at runtime.
   read-only factories declare only write-family denies) no longer reads as
   "does not own swarm_command" — resolution continues to the role map, so
   `/swarm` command routing keeps working for reviewer/explorer/SME/
-  researcher/critic.
+  researcher/critic. The router also now consults the emitted `permission`
+  block: a restrictive `tool_filter.overrides.<role>` that host-hides
+  `swarm_command` also stops the router and the swarm-command system rule
+  from instructing the agent to call a tool it cannot call.
 
 ## Why
 
@@ -84,3 +87,14 @@ No config changes required. Two behavior notes:
   `tool_filter.overrides.<role>` (now runtime-effective) — or file an issue if
   you believe the role map itself is wrong.
 - Host built-ins, MCP tools, and tools from other plugins are unaffected.
+- Read-only roles keep the tools their role map always granted, even when a
+  tool writes plugin state: notably `knowledge_receipt` (evidence recording
+  under `.swarm/`) remains available to `sme`. Enforcement now makes that
+  pre-existing allow-list choice real; it is a designed capability, not an
+  oversight.
+- The checked-in `opencode-swarm.schema.json` was regenerated with the
+  current generator, which also refreshed two serializer-output details
+  unrelated to this change (an `effective_at` date-time pattern where
+  seconds became optional, and `anyOf` expansion formatting for four keys).
+  The runtime schema in `src/config/schema.ts` is unchanged by those two;
+  only the editor-validation artifact caught up.
