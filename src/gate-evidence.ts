@@ -8,7 +8,8 @@
  *
  * Evidence files survive session restarts (unlike in-memory state).
  * Agents never write these files directly — only the hook does.
- * Gates are append-only: required_gates can only grow, never shrink.
+ * Real gates are append-only. The accepted-mutation boundary may retire only
+ * the legacy receipt-less repair marker from issue #2525.
  *
  * Threat boundary: this store provides atomic, path-contained durability and
  * auditability for cooperative same-user agents. It is not tamper-proof
@@ -30,6 +31,10 @@ import type { TaskWorkflowState } from './state';
 import { telemetry } from './telemetry.js';
 import { assertStrictTaskId, isStrictTaskId } from './validation/task-id';
 import { readWorkflowWalFileSync } from './workflow/workflow-wal-file.js';
+
+export const _internals = {
+	appendTaskGateRequirementsReceiptIfNeeded,
+};
 
 export interface GateEvidence {
 	sessionId: string;
@@ -117,6 +122,14 @@ export interface TaskEvidence {
 		requirements_receipt_hash: string | null;
 	};
 }
+
+/**
+ * Legacy internal marker written by receipt-less gate-evidence repair before
+ * issue #2525. It is read only for recovery and must never be emitted as a
+ * real required gate.
+ */
+export const TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL =
+	'requirements_reconstruction';
 
 /**
  * Fence ordinary evidence writers while a terminal or repair plan/evidence
@@ -453,7 +466,9 @@ function maybeExpandRequiredGates(
 		if (typeof agentType === 'string' && agentType.trim() !== '') {
 			return existing
 				? expandRequiredGates(
-						existing.required_gates,
+						existing.required_gates.filter(
+							(gate) => gate !== TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL,
+						),
 						agentType,
 						event.context ?? {},
 					)
@@ -954,7 +969,7 @@ export async function withTaskEvidenceTransaction<T>(
 			});
 			await atomicWriteFile(evidencePath, JSON.stringify(validated, null, 2));
 			if (event) {
-				await appendTaskGateRequirementsReceiptIfNeeded(
+				await _internals.appendTaskGateRequirementsReceiptIfNeeded(
 					directory,
 					taskId,
 					current,
@@ -977,6 +992,29 @@ export async function withTaskEvidenceTransaction<T>(
 			},
 		});
 	});
+}
+
+/**
+ * Re-publish a transition receipt after a caller has proven that its evidence
+ * transition already committed. Passing a null predecessor forces the
+ * idempotent receipt writer to compare against the durable chain tip instead
+ * of skipping because the current evidence already equals the settled state.
+ */
+export async function ensureTaskGateRequirementsReceiptForSettledTransition(
+	directory: string,
+	taskId: string,
+	evidence: TaskEvidence,
+	event: TaskWorkflowTransitionEvent,
+): Promise<void> {
+	assertValidTaskId(taskId);
+	const validated = TaskEvidenceSchema.parse({ ...evidence, taskId });
+	await _internals.appendTaskGateRequirementsReceiptIfNeeded(
+		directory,
+		taskId,
+		null,
+		validated,
+		event,
+	);
 }
 
 /**

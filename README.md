@@ -830,7 +830,7 @@ Every candidate passes a 3-gate pipeline before entering quarantine:
 | pre_check_batch | Runs lint, secretscan, SAST, and quality budget in parallel (~15s vs ~60s sequential) |
 | phase_complete | Produces a complete bounded read-only gate report, revalidates the exact plan/config/evidence snapshot under lock, and commits the phase only when every applicable gate still passes |
 | run_phase_review | Architect-only: runs the bounded final-review engine and persists complete content-addressed review evidence for `phase_complete` |
-| repair_gate_evidence | Architect-only: preserves corrupt task evidence in bounded immutable quarantine and installs a fresh blocked verification generation |
+| repair_gate_evidence | Architect-only: rebuilds recoverable task evidence from durable requirements, recovers receipt-backed legacy marker wedges or the exact sentinel-only state emitted by the historical repair flow, requires fresh coder settlement, and refuses every other receipt-less reconstruction without changing state |
 | repair_knowledge_receipt_ledger | Architect-only: validates receipt projections or salvages a corrupt authoritative ledger while requiring exact phase/session re-evaluation |
 | record_directive_override | Architect-only: records explicit critical-directive authorization separately from phase completion; unreadable authority cannot be overridden |
 | mutation_test | Applies LLM-generated mutation patches to source files and runs tests to measure kill rate; verdict is pass/warn/fail based on configurable thresholds; used by the mutation_test gate (opt-in, off by default) |

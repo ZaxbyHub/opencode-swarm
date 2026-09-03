@@ -4,7 +4,6 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
 	repairTaskGateEvidence,
-	TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL,
 	taskGateEvidenceQuarantinePath,
 } from '../../../src/evidence/task-gate-repair.js';
 import {
@@ -277,26 +276,24 @@ describe('repair_gate_evidence', () => {
 		);
 	});
 
-	test('rewrites legacy evidence without an authoritative receipt to the reconstruction sentinel and clears session fallbacks', async () => {
+	test('refuses legacy evidence without an authoritative receipt atomically', async () => {
 		fs.mkdirSync(path.dirname(evidencePath(directory)), { recursive: true });
-		fs.writeFileSync(
-			evidencePath(directory),
-			JSON.stringify(
-				{
-					taskId: TASK_ID,
-					required_gates: ['reviewer', 'test_engineer'],
-					gates: {
-						reviewer: {
-							sessionId: 'legacy-reviewer',
-							timestamp: '2026-01-01T00:00:00.000Z',
-							agent: 'reviewer',
-						},
+		const originalBytes = JSON.stringify(
+			{
+				taskId: TASK_ID,
+				required_gates: ['reviewer', 'test_engineer'],
+				gates: {
+					reviewer: {
+						sessionId: 'legacy-reviewer',
+						timestamp: '2026-01-01T00:00:00.000Z',
+						agent: 'reviewer',
 					},
 				},
-				null,
-				2,
-			),
+			},
+			null,
+			2,
 		);
+		fs.writeFileSync(evidencePath(directory), originalBytes);
 
 		const session = ensureAgentSession(
 			'repair-gate-evidence-session',
@@ -321,40 +318,28 @@ describe('repair_gate_evidence', () => {
 			directory,
 		);
 
-		expect(result.success).toBe(true);
-		expect(result.requirements_state).toBe('unknown');
-		expect(result.required_gates).toEqual([
-			TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL,
-		]);
-		expect(result.repaired_generation).toBe(1);
-		expect(result.next_actions?.[0]).toContain(
-			'regenerate authoritative required gates',
+		expect(result.success).toBe(false);
+		expect(result.message).toContain('TASK_GATE_REQUIREMENTS_RECEIPT_MISSING');
+		expect(fs.readFileSync(evidencePath(directory), 'utf-8')).toBe(
+			originalBytes,
 		);
-
-		const repaired = JSON.parse(
-			fs.readFileSync(evidencePath(directory), 'utf-8'),
-		) as {
-			required_gates: string[];
-			requirements_state?: string;
-			workflow: { generation: number };
-		};
-		expect(repaired.required_gates).toEqual([
-			TASK_GATE_REQUIREMENTS_RECONSTRUCTION_SENTINEL,
-		]);
-		expect(repaired.requirements_state).toBe('unknown');
-		expect(repaired.workflow.generation).toBe(1);
+		expect(
+			fs.existsSync(
+				path.join(directory, '.swarm', 'evidence', 'task-gate-quarantine'),
+			),
+		).toBe(false);
 
 		const updatedSession = swarmState.agentSessions.get(
 			'repair-gate-evidence-session',
 		)!;
-		expect(updatedSession.currentTaskId).toBeNull();
-		expect(updatedSession.lastCoderDelegationTaskId).toBeNull();
-		expect(updatedSession.taskWorkflowStates.has(TASK_ID)).toBe(false);
-		expect(updatedSession.stageBCompletion?.has(TASK_ID)).toBe(false);
-		expect(updatedSession.taskCouncilApproved?.has(TASK_ID)).toBe(false);
-		expect(updatedSession.taskCouncilWorkflowGeneration?.has(TASK_ID)).toBe(
-			false,
+		expect(updatedSession.currentTaskId).toBe(TASK_ID);
+		expect(updatedSession.lastCoderDelegationTaskId).toBe(TASK_ID);
+		expect(updatedSession.taskWorkflowStates.get(TASK_ID)).toBe('tests_run');
+		expect(updatedSession.stageBCompletion?.get(TASK_ID)).toEqual(
+			new Set(['reviewer', 'test_engineer']),
 		);
+		expect(updatedSession.taskCouncilApproved?.has(TASK_ID)).toBe(true);
+		expect(updatedSession.taskCouncilWorkflowGeneration?.get(TASK_ID)).toBe(3);
 	});
 
 	test('fails closed without overwrite when the original evidence file is oversized', async () => {
