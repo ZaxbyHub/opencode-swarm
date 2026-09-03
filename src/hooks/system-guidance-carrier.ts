@@ -58,12 +58,28 @@ export function guidanceCarrierId(kind: string): string {
 }
 
 /**
+ * Neutralize fence-tag markup embedded in guidance text (PR #2547 review
+ * PRR-001): an untrusted memory record or advisory path containing
+ * `</swarm_system_directive>` could otherwise forge directive boundaries
+ * inside the carrier body and defeat the provenance signal. Only the fence
+ * tag itself is disabled (bracket-swap); all other angle-bracket content
+ * (e.g. BEHAVIORAL_GUIDANCE markers) is preserved byte-for-byte.
+ */
+function neutralizeFenceMarkup(text: string): string {
+	return text.replace(
+		/<\/?swarm_system_directive/gi,
+		(match) => `[${match.slice(1)}]`,
+	);
+}
+
+/**
  * Wrap guidance text in the provenance fence (null for empty/whitespace text).
  * Shared by every carrier-construction path so the fence format cannot drift.
+ * Embedded fence markup is neutralized (see {@link neutralizeFenceMarkup}).
  */
 export function fenceGuidanceText(kind: string, text: string): string | null {
 	if (!nonEmptyText(text)) return null;
-	return `${fenceOpen(kind)}\n${text}\n${FENCE_CLOSE}`;
+	return `${fenceOpen(kind)}\n${neutralizeFenceMarkup(text)}\n${FENCE_CLOSE}`;
 }
 
 /**
@@ -140,7 +156,13 @@ export function ensureGuidanceCarrier(
 	messages: GuidanceMessage[],
 	kind: string,
 ): GuidanceMessage {
-	const existing = messages.find((m) => isGuidanceCarrier(m));
+	// Kind-specific find: a carrier of ANOTHER kind (e.g. a materialized
+	// legacy-system entry) must not absorb this kind's blocks — each kind owns
+	// its own directive body and fence.
+	const wantedId = guidanceCarrierId(kind);
+	const existing = messages.find(
+		(m) => isGuidanceCarrier(m) && m.info.id === wantedId,
+	);
 	if (existing) return existing;
 	const carrier: GuidanceMessage = {
 		info: { id: guidanceCarrierId(kind), role: 'user' },
@@ -165,13 +187,16 @@ export function prependGuidanceText(
 	block: string,
 ): string | null {
 	if (!nonEmptyText(block)) return null;
+	// Sanitize BEFORE any insertion and return the sanitized form so delivery
+	// telemetry measures the text that actually renders (PRR-001).
+	const safe = neutralizeFenceMarkup(block);
 	const textPart = carrier.parts.find((p) => p.type === 'text');
 	if (textPart === undefined) {
 		carrier.parts.push({
 			type: 'text',
-			text: `${fenceOpen(kind)}\n${block}\n${FENCE_CLOSE}`,
+			text: `${fenceOpen(kind)}\n${safe}\n${FENCE_CLOSE}`,
 		});
-		return block;
+		return safe;
 	}
 	const current = typeof textPart.text === 'string' ? textPart.text : '';
 	// Insert at the TOP of the directive body (right after the opening fence
@@ -182,13 +207,13 @@ export function prependGuidanceText(
 	const openMatch = current.match(/<swarm_system_directive[^>]*>\n?/);
 	if (openMatch !== null && openMatch.index !== undefined) {
 		const at = openMatch.index + openMatch[0].length;
-		textPart.text = `${current.slice(0, at)}${block}\n${current.slice(at)}`;
+		textPart.text = `${current.slice(0, at)}${safe}\n${current.slice(at)}`;
 	} else {
 		// Defensive: a carrier text without an open fence (hand-built or legacy)
 		// gets the block wrapped in a fresh fence.
-		textPart.text = `${fenceOpen(kind)}\n${block}\n${current}\n${FENCE_CLOSE}`;
+		textPart.text = `${fenceOpen(kind)}\n${safe}\n${current}\n${FENCE_CLOSE}`;
 	}
-	return block;
+	return safe;
 }
 
 /**

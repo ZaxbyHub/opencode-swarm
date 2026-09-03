@@ -26,7 +26,7 @@ import {
 	getLiveContextWindow,
 	setCriticalShownIds,
 } from '../state.js';
-import { warn } from '../utils/logger.js';
+import { log, warn } from '../utils/logger.js';
 import { ensureCohortIdCached } from './cohort-cache.js';
 import { sanitizeContextText } from './context-sanitizer.js';
 import {
@@ -853,6 +853,11 @@ function injectReviewerComplianceMessage(
 		`${text}`,
 		insertIdx,
 	);
+	if (!deliveredGuidanceDelta(message, text)) {
+		log(
+			'[knowledge-injector] reviewer compliance block not delivered (empty text or non-renderable carrier) — emission skipped',
+		);
+	}
 	// #2107 §2: account for the model-visible emission (attribution-only).
 	// Delivery is gated on the host-render contract (issue #2526), not on the
 	// plugin's own array append.
@@ -997,6 +1002,13 @@ function injectKnowledgeMessage(
 	// this entry is attribution-only and is never added to the measured total).
 	// Delivery is gated on the host-render contract (issue #2526), not on the
 	// plugin's own array append.
+	if (
+		!deliveredGuidanceDelta(knowledgeMessage, `${INJECTION_SENTINEL}${text}`)
+	) {
+		log(
+			'[knowledge-injector] knowledge block not delivered (empty text or non-renderable carrier) — emission skipped',
+		);
+	}
 	if (
 		sessionId &&
 		deliveredGuidanceDelta(knowledgeMessage, `${INJECTION_SENTINEL}${text}`)

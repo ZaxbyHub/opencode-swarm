@@ -649,6 +649,11 @@ export function createMessagesTransformHandler(ctx: MessagesTransformContext) {
 					// Issue #2526: delivery is gated on the host-render contract
 					// (user-role carrier + non-empty delta), not on the plugin's
 					// own array mutation.
+					if (!deliveredGuidanceDelta(targetMsg, prepended)) {
+						log(
+							'[guardrails] advisory block not delivered (empty text or non-renderable carrier) — emission skipped',
+						);
+					}
 					if (deliveredGuidanceDelta(targetMsg, prepended)) {
 						recordProducerEmission(
 							sessionId,

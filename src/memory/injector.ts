@@ -174,6 +174,9 @@ async function injectIntoMessages(
 		{ agent: agentRole, sessionID },
 	);
 	if (!deliveredGuidanceDelta(recallMessage, result.bundle.promptBlock)) {
+		log(
+			'memory-injector: recall block not delivered (empty text or non-renderable carrier) — emission and run-log skipped',
+		);
 		return;
 	}
 	// #2107 §2: record what actually reached the model-visible surface. This is

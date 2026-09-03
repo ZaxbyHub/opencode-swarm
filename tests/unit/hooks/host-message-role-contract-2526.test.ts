@@ -44,10 +44,7 @@ describe('host-contract pin (issue #2526)', () => {
 		// The issue pins this contract to the LOCKFILE version: read bun.lock
 		// directly so a dependency bump is caught even before `bun install`
 		// updates node_modules.
-		const lock = readFileSync(
-			path.join(process.cwd(), 'bun.lock'),
-			'utf-8',
-		);
+		const lock = readFileSync(path.join(process.cwd(), 'bun.lock'), 'utf-8');
 		for (const pkg of ['@opencode-ai/plugin', '@opencode-ai/sdk']) {
 			expect(lock).toContain(`"${pkg}@${PINNED_HOST_PACKAGE_VERSION}"`);
 		}

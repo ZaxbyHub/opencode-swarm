@@ -50,6 +50,7 @@ import {
 	createKnowledgeProject,
 } from '../../helpers/knowledge-real-host';
 import { safeRmRecursive } from '../../helpers/safe-test-dir';
+import { withFrozenClock } from '../../helpers/test-clock';
 
 const SESSION_ID = 'rendered-guidance-2526';
 // Distinctive token shared by the user message, the knowledge lesson, and the
@@ -127,7 +128,9 @@ async function seedMemoryRecordAsync(
 	probe.dispose();
 	const repositoryScope =
 		scopes.find((s) => s.type === 'repository') ?? scopes[0]!;
-	const now = new Date().toISOString();
+	// Deterministic stamp: real-host tests must not read the wall clock
+	// (check-test-clock).
+	const now = withFrozenClock(() => new Date().toISOString());
 	const text = `The ${KEYWORD} pipeline requires bun test before every release cut.`;
 	const record: MemoryRecord = {
 		id: createMemoryId({ scope: repositoryScope, kind: 'project_fact', text }),

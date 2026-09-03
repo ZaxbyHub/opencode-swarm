@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import type { GuardrailsConfig } from '../../../src/config/schema';
 import {
 	_internals,
 	createGuardrailsHooks,
@@ -14,28 +13,9 @@ import {
 	resetSwarmState,
 	swarmState,
 } from '../../../src/state';
+import { defaultConfig } from './_advisory-injection-helpers';
 
 const TEST_DIR = '/test/project';
-
-const defaultConfig: GuardrailsConfig = {
-	enabled: true,
-	max_tool_calls: 200,
-	max_duration_minutes: 30,
-	max_repetitions: 10,
-	max_consecutive_errors: 5,
-	warning_threshold: 0.75,
-	idle_timeout_minutes: 60,
-	qa_gates: {
-		required_tools: [
-			'diff',
-			'syntax_check',
-			'placeholder_scan',
-			'lint',
-			'pre_check_batch',
-		],
-		require_reviewer_test_engineer: true,
-	},
-};
 
 describe('guardrails advisory injection', () => {
 	let hooks: ReturnType<typeof createGuardrailsHooks>;
@@ -154,9 +134,8 @@ describe('guardrails advisory injection', () => {
 
 		await hooks.messagesTransform({}, output as any);
 
-		// Issue #2526: guidance rides a user-role carrier (id 'swarm-guidance:guardrails')
-		// unshifted at index 0; the pre-seeded system message shifts to index 1 and is
-		// never touched by the injector.
+		// Issue #2526: guidance rides a user-role carrier unshifted at index 0; the
+		// pre-seeded system message shifts to index 1 and is never touched.
 		const carriers = findGuidanceCarriers(output.messages as any);
 		expect(carriers).toHaveLength(1);
 		// An empty [ADVISORIES] wrapper would itself be the content-free injection
