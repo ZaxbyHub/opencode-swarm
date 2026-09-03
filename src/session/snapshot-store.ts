@@ -1,5 +1,6 @@
 /** SQLite row mapping for durable session snapshots (#2481). */
 
+import { randomUUID } from 'node:crypto';
 import {
 	deleteCoordinationImports,
 	deleteCoordinationState,
@@ -34,8 +35,75 @@ export const _snapshotStoreInternals: {
 	afterSnapshotMetaRead: () => {},
 };
 
+const MAX_LOCAL_SESSION_OWNERS = 512;
+interface LocalSessionOwnership {
+	token: string;
+	/** Set only by a real host invocation resuming this exact session. */
+	canTakeOver: boolean;
+}
+const localSessionOwners = new Map<string, LocalSessionOwnership>();
+
 interface SessionRowPayload {
 	session: SnapshotData['agentSessions'][string];
+	ownerToken?: string;
+}
+
+interface DeletedSessionRowPayload {
+	ownerToken?: string;
+	reason: 'ended' | 'stale';
+}
+
+function parseRecordPayload(
+	payload: string,
+	label: string,
+): Record<string, unknown> {
+	const parsed: unknown = JSON.parse(payload);
+	if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+		throw new Error(`Invalid SQLite snapshot ${label} payload`);
+	}
+	return parsed as Record<string, unknown>;
+}
+
+export interface SnapshotWriteOptions {
+	/** Do not let rehydrated foreign sessions overwrite their durable owners. */
+	onlyLocallyOwnedSessions?: boolean;
+}
+
+/**
+ * Mark a session as local for snapshot writes and reaping. Rehydration never
+ * calls this. Only a host invocation for the exact session may opt into
+ * takeover, which lets a restarted host resume its own session without letting
+ * a passive foreign rehydration overwrite a live peer.
+ */
+export function claimSnapshotSessionOwnership(
+	sessionId: string,
+	canTakeOver = false,
+): string {
+	const existing = localSessionOwners.get(sessionId);
+	if (existing) {
+		if (canTakeOver) existing.canTakeOver = true;
+		return existing.token;
+	}
+	const token = randomUUID();
+	localSessionOwners.set(sessionId, { token, canTakeOver });
+	while (localSessionOwners.size > MAX_LOCAL_SESSION_OWNERS) {
+		const oldest = localSessionOwners.keys().next().value;
+		if (!oldest) break;
+		localSessionOwners.delete(oldest);
+	}
+	return token;
+}
+
+export function isSnapshotSessionOwnedLocally(sessionId: string): boolean {
+	return localSessionOwners.has(sessionId);
+}
+
+export function releaseSnapshotSessionOwnership(sessionId: string): void {
+	localSessionOwners.delete(sessionId);
+}
+
+export function clearSnapshotSessionOwnerships(): void {
+	localSessionOwners.clear();
 }
 
 function nextGeneration(
@@ -51,6 +119,7 @@ function nextGeneration(
 export function writeSnapshotRows(
 	directory: string,
 	snapshot: SnapshotData,
+	options: SnapshotWriteOptions = {},
 ): void {
 	withCoordinationTransaction(directory, () => {
 		transitionCoordinationState(directory, {
@@ -75,6 +144,11 @@ export function writeSnapshotRows(
 		}
 		for (const [sessionId, agentName] of Object.entries(snapshot.activeAgent)) {
 			if (
+				options.onlyLocallyOwnedSessions &&
+				!isSnapshotSessionOwnedLocally(sessionId)
+			)
+				continue;
+			if (
 				getCoordinationState(directory, ACTIVE_AGENT_NAMESPACE, sessionId)
 					?.status === 'deleted'
 			)
@@ -95,6 +169,11 @@ export function writeSnapshotRows(
 			snapshot.delegationChains,
 		)) {
 			if (
+				options.onlyLocallyOwnedSessions &&
+				!isSnapshotSessionOwnedLocally(sessionId)
+			)
+				continue;
+			if (
 				getCoordinationState(directory, DELEGATION_CHAIN_NAMESPACE, sessionId)
 					?.status === 'deleted'
 			)
@@ -112,12 +191,44 @@ export function writeSnapshotRows(
 			});
 		}
 		for (const [sessionId, session] of Object.entries(snapshot.agentSessions)) {
+			const localOwner = localSessionOwners.get(sessionId);
+			const ownerToken = localOwner?.token;
+			if (options.onlyLocallyOwnedSessions && !localOwner) continue;
+			const current = getCoordinationState(
+				directory,
+				SESSION_NAMESPACE,
+				sessionId,
+			);
+			let currentOwner: string | undefined;
+			let deleted: DeletedSessionRowPayload | null = null;
+			try {
+				if (current?.status === 'deleted') {
+					deleted = JSON.parse(current.payload) as DeletedSessionRowPayload;
+				} else if (current) {
+					currentOwner = (JSON.parse(current.payload) as SessionRowPayload)
+						.ownerToken;
+				}
+			} catch {
+				continue;
+			}
 			if (
-				getCoordinationState(directory, SESSION_NAMESPACE, sessionId)
-					?.status === 'deleted'
+				options.onlyLocallyOwnedSessions &&
+				currentOwner &&
+				currentOwner !== ownerToken &&
+				!localOwner?.canTakeOver
 			)
 				continue;
-			const payload: SessionRowPayload = { session };
+			if (
+				deleted &&
+				(!ownerToken ||
+					deleted.reason !== 'stale' ||
+					deleted.ownerToken !== ownerToken)
+			)
+				continue;
+			const payload: SessionRowPayload = {
+				session,
+				...(ownerToken ? { ownerToken } : {}),
+			};
 			transitionCoordinationState(directory, {
 				namespace: SESSION_NAMESPACE,
 				entityKey: sessionId,
@@ -155,7 +266,7 @@ export function readSnapshotRows(directory: string): SnapshotData | null {
 		const meta = listCoordinationStates(directory, META_NAMESPACE, 1)[0];
 		if (!meta) return null;
 		_snapshotStoreInternals.afterSnapshotMetaRead();
-		const parsedMeta = JSON.parse(meta.payload) as Pick<
+		const parsedMeta = parseRecordPayload(meta.payload, 'metadata') as Pick<
 			SnapshotData,
 			'version' | 'writtenAt' | 'workflowSchema'
 		>;
@@ -165,6 +276,15 @@ export function readSnapshotRows(directory: string): SnapshotData | null {
 			parsedMeta.version !== 3
 		) {
 			throw new Error('Unsupported SQLite snapshot version');
+		}
+		if (!Number.isFinite(parsedMeta.writtenAt)) {
+			throw new Error('Invalid SQLite snapshot metadata writtenAt');
+		}
+		if (
+			parsedMeta.workflowSchema !== undefined &&
+			typeof parsedMeta.workflowSchema !== 'string'
+		) {
+			throw new Error('Invalid SQLite snapshot metadata workflowSchema');
 		}
 		const snapshot: SnapshotData = {
 			version: parsedMeta.version,
@@ -182,7 +302,10 @@ export function readSnapshotRows(directory: string): SnapshotData | null {
 			TOOL_NAMESPACE,
 			MAX_COORDINATION_STATE_LIST_ROWS,
 		)) {
-			snapshot.toolAggregates[row.entityKey] = JSON.parse(row.payload);
+			snapshot.toolAggregates[row.entityKey] = parseRecordPayload(
+				row.payload,
+				'tool aggregate',
+			) as unknown as SnapshotData['toolAggregates'][string];
 		}
 		for (const row of listCoordinationStates(
 			directory,
@@ -190,7 +313,11 @@ export function readSnapshotRows(directory: string): SnapshotData | null {
 			MAX_COORDINATION_STATE_LIST_ROWS,
 		)) {
 			if (row.status === 'deleted') continue;
-			snapshot.activeAgent[row.entityKey] = JSON.parse(row.payload);
+			const agentName: unknown = JSON.parse(row.payload);
+			if (typeof agentName !== 'string') {
+				throw new Error('Invalid SQLite snapshot active-agent payload');
+			}
+			snapshot.activeAgent[row.entityKey] = agentName;
 		}
 		for (const row of listCoordinationStates(
 			directory,
@@ -198,7 +325,12 @@ export function readSnapshotRows(directory: string): SnapshotData | null {
 			MAX_COORDINATION_STATE_LIST_ROWS,
 		)) {
 			if (row.status === 'deleted') continue;
-			snapshot.delegationChains[row.entityKey] = JSON.parse(row.payload);
+			const chain: unknown = JSON.parse(row.payload);
+			if (!Array.isArray(chain)) {
+				throw new Error('Invalid SQLite snapshot delegation-chain payload');
+			}
+			snapshot.delegationChains[row.entityKey] =
+				chain as SnapshotData['delegationChains'][string];
 		}
 		for (const row of listCoordinationStates(
 			directory,
@@ -206,7 +338,19 @@ export function readSnapshotRows(directory: string): SnapshotData | null {
 			MAX_COORDINATION_STATE_LIST_ROWS,
 		)) {
 			if (row.status === 'deleted') continue;
-			const payload = JSON.parse(row.payload) as SessionRowPayload;
+			const payload = parseRecordPayload(
+				row.payload,
+				'agent-session',
+			) as unknown as SessionRowPayload;
+			if (
+				!payload.session ||
+				typeof payload.session !== 'object' ||
+				Array.isArray(payload.session) ||
+				(payload.ownerToken !== undefined &&
+					typeof payload.ownerToken !== 'string')
+			) {
+				throw new Error('Invalid SQLite snapshot agent-session payload');
+			}
 			snapshot.agentSessions[row.entityKey] = payload.session;
 		}
 		return snapshot;
@@ -248,10 +392,28 @@ export function clearSnapshotRows(directory: string): number {
 export function deleteSnapshotSessionRows(
 	directory: string,
 	sessionId: string,
+	reason: DeletedSessionRowPayload['reason'] = 'ended',
 ): number {
 	if (!projectDbExists(directory) || !sessionId) return 0;
 	let removed = 0;
 	withCoordinationTransaction(directory, () => {
+		const ownerToken = localSessionOwners.get(sessionId)?.token;
+		const sessionRow = getCoordinationState(
+			directory,
+			SESSION_NAMESPACE,
+			sessionId,
+		);
+		if (reason === 'stale' && !ownerToken) return;
+		if (sessionRow && sessionRow.status !== 'deleted') {
+			try {
+				const persistedOwner = (
+					JSON.parse(sessionRow.payload) as SessionRowPayload
+				).ownerToken;
+				if (persistedOwner && persistedOwner !== ownerToken) return;
+			} catch {
+				return;
+			}
+		}
 		for (const namespace of [
 			SESSION_NAMESPACE,
 			ACTIVE_AGENT_NAMESPACE,
@@ -265,7 +427,10 @@ export function deleteSnapshotSessionRows(
 				expectedRevision: row.revision,
 				generation: row.generation + 1,
 				status: 'deleted',
-				payload: 'null',
+				payload: JSON.stringify({
+					reason,
+					...(ownerToken ? { ownerToken } : {}),
+				} satisfies DeletedSessionRowPayload),
 			}).outcome;
 			if (outcome === 'applied') {
 				removed += 1;

@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { transitionCoordinationState } from '../../../src/db/coordination-store.js';
 import {
 	closeAllProjectDbs,
 	projectDbExists,
 } from '../../../src/db/project-db.js';
 import {
 	_snapshotCoordinationInternals,
+	beginSnapshotCoordinationReset,
+	ensureSnapshotCoordinationReady,
 	retrySnapshotCoordinationInitialization,
 	startSnapshotCoordinationInitialization,
 } from '../../../src/session/snapshot-coordination-init.js';
@@ -148,6 +151,29 @@ describe('snapshot coordination post-resolution initialization', () => {
 		expect(readSnapshotRows(tempDir)!.agentSessions.stale).toBeUndefined();
 	});
 
+	test('fails closed on malformed durable snapshot payloads', () => {
+		writeSnapshotRows(tempDir, {
+			version: 3,
+			writtenAt: 1,
+			toolAggregates: {},
+			activeAgent: {},
+			delegationChains: {},
+			agentSessions: {},
+		});
+		transitionCoordinationState(tempDir, {
+			namespace: 'session.snapshot.active-agent',
+			entityKey: 'damaged',
+			expectedRevision: null,
+			generation: 1,
+			status: 'active',
+			payload: '42',
+		});
+
+		expect(() => readSnapshotRows(tempDir)).toThrow(
+			/invalid SQLite snapshot active-agent payload/i,
+		);
+	});
+
 	test(
 		'reads and clears every snapshot row beyond the former five-thousand-row cap',
 		() => {
@@ -247,7 +273,7 @@ describe('snapshot coordination post-resolution initialization', () => {
 		expect(fs.existsSync(`${legacyPath}.imported`)).toBe(false);
 	});
 
-	test('repairs post-commit archival without overwriting an existing cold archive', async () => {
+	test('repairs a matching post-commit archive without overwriting an existing cold archive', async () => {
 		writeSnapshotRows(tempDir, {
 			version: 3,
 			writtenAt: 2,
@@ -259,7 +285,17 @@ describe('snapshot coordination post-resolution initialization', () => {
 		const sessionDir = path.join(tempDir, '.swarm', 'session');
 		fs.mkdirSync(sessionDir, { recursive: true });
 		const legacyPath = path.join(sessionDir, 'state.json');
-		fs.writeFileSync(legacyPath, '{"legacy":"committed-before-crash"}');
+		fs.writeFileSync(
+			legacyPath,
+			JSON.stringify({
+				version: 3,
+				writtenAt: 2,
+				toolAggregates: {},
+				activeAgent: {},
+				delegationChains: {},
+				agentSessions: {},
+			}),
+		);
 		fs.writeFileSync(`${legacyPath}.imported`, 'original archive');
 
 		await startSnapshotCoordinationInitialization(tempDir);
@@ -273,6 +309,31 @@ describe('snapshot coordination post-resolution initialization', () => {
 				.readdirSync(sessionDir)
 				.filter((name) => name.startsWith('state.json.imported')),
 		).toHaveLength(2);
+	});
+
+	test('preserves a divergent legacy snapshot for explicit recovery', async () => {
+		writeSnapshotRows(tempDir, {
+			version: 3,
+			writtenAt: 2,
+			toolAggregates: {},
+			activeAgent: {},
+			delegationChains: {},
+			agentSessions: {},
+		});
+		const sessionDir = path.join(tempDir, '.swarm', 'session');
+		fs.mkdirSync(sessionDir, { recursive: true });
+		const legacyPath = path.join(sessionDir, 'state.json');
+		fs.writeFileSync(legacyPath, '{"legacy":"newer-peer-state"}');
+		fs.writeFileSync(`${legacyPath}.imported`, 'original archive');
+
+		await startSnapshotCoordinationInitialization(tempDir);
+
+		expect(fs.readFileSync(legacyPath, 'utf8')).toBe(
+			'{"legacy":"newer-peer-state"}',
+		);
+		expect(fs.readFileSync(`${legacyPath}.imported`, 'utf8')).toBe(
+			'original archive',
+		);
 	});
 
 	test('keeps committed SQLite authority ready when Windows shadow archival stays busy', async () => {
@@ -329,5 +390,16 @@ describe('snapshot coordination post-resolution initialization', () => {
 		await underlying;
 		await retrySnapshotCoordinationInitialization(tempDir);
 		expect(calls).toBe(2);
+	});
+
+	test('blocks fresh initialization until a reset guard releases it', async () => {
+		const guard = await beginSnapshotCoordinationReset(tempDir);
+		await expect(ensureSnapshotCoordinationReady(tempDir)).rejects.toThrow(
+			/closing for reset-session/i,
+		);
+		guard.release();
+		await expect(
+			ensureSnapshotCoordinationReady(tempDir),
+		).resolves.toBeUndefined();
 	});
 });

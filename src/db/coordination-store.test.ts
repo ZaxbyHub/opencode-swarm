@@ -190,6 +190,66 @@ describe('coordination store', () => {
 		expect(getCoordinationState(tempDir, 'bounded', 'one')?.revision).toBe(3);
 	});
 
+	test('fails a pruned event replay at its state revision fence', () => {
+		_internals.maxEventsPerStream = 2;
+		for (let index = 0; index < 3; index += 1) {
+			expect(
+				transitionCoordinationState(tempDir, {
+					namespace: 'bounded',
+					entityKey: 'replay',
+					expectedRevision: index === 0 ? null : index,
+					generation: 1,
+					status: 'active',
+					payload: JSON.stringify({ index }),
+					event: {
+						streamId: 'bounded:replay',
+						idempotencyKey: `event-${index}`,
+						eventType: 'advanced',
+						payload: JSON.stringify({ index }),
+					},
+				}),
+			).toMatchObject({ outcome: 'applied' });
+		}
+
+		expect(
+			transitionCoordinationState(tempDir, {
+				namespace: 'bounded',
+				entityKey: 'replay',
+				expectedRevision: null,
+				generation: 1,
+				status: 'active',
+				payload: '{"index":0}',
+				event: {
+					streamId: 'bounded:replay',
+					idempotencyKey: 'event-0',
+					eventType: 'advanced',
+					payload: '{"index":0}',
+				},
+			}),
+		).toMatchObject({ outcome: 'revision_conflict' });
+		expect(getCoordinationState(tempDir, 'bounded', 'replay')?.revision).toBe(
+			3,
+		);
+	});
+
+	test('requires a state revision fence for an event-bearing transition', () => {
+		expect(() =>
+			transitionCoordinationState(tempDir, {
+				namespace: 'bounded',
+				entityKey: 'missing-fence',
+				generation: 1,
+				status: 'active',
+				payload: '{}',
+				event: {
+					streamId: 'bounded:missing-fence',
+					idempotencyKey: 'event-1',
+					eventType: 'advanced',
+					payload: '{}',
+				},
+			}),
+		).toThrow(/require expectedRevision/i);
+	});
+
 	test('fences stale generations and revision conflicts', () => {
 		transitionCoordinationState(tempDir, {
 			namespace: 'scope',

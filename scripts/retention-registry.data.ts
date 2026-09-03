@@ -458,12 +458,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 			'src/hooks/pr-workflow-gate.ts',
 		],
 		writerCitations: [
-			'src/background/pending-delegations.ts:2720 appendRecord — SQLite coordination event+state transaction with post-commit JSON projection',
-			'src/background/pending-delegations.ts:1334 writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility',
+			'src/background/pending-delegations.ts:2732 appendRecord — SQLite coordination event+state transaction with post-commit JSON projection',
+			'src/background/pending-delegations.ts:1346 writeDurableFileSync — fsync+rename-with-retry for legacy checkpoint/manifest/rolled-tail compatibility',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:2638 readDelegations — SQLite authority with bounded legacy compatibility, sync',
-			'src/background/pending-delegations.ts:2666 scanDelegationsForRecovery — strict, fails closed',
+			'src/background/pending-delegations.ts:2650 readDelegations — SQLite authority with bounded legacy compatibility, sync',
+			'src/background/pending-delegations.ts:2678 scanDelegationsForRecovery — strict, fails closed',
 			'pr-workflow-session-resolver / pr-workflow-gate / init-orphan-recovery / delegation-gate worktree-collision-ownership — via readDelegations',
 		],
 		schemaVersion:
@@ -568,12 +568,12 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/background/pending-delegations.ts'],
 		writerCitations: [
-			'src/background/pending-delegations.ts:4900 writeDelegationFallback / :4951 removeDelegationFallback',
-			'src/background/pending-delegations.ts:5360 writeBackgroundCoderReservations',
+			'src/background/pending-delegations.ts:4913 writeDelegationFallback / :4964 removeDelegationFallback',
+			'src/background/pending-delegations.ts:5383 writeBackgroundCoderReservations',
 		],
 		readerCitations: [
-			'src/background/pending-delegations.ts:4755 readDelegationFallback / :4767 listDelegationFallbacks / :4802 scanDelegationFallbacksForRecovery',
-			'src/background/pending-delegations.ts:5343 scanBackgroundCoderReservationsForAdmission',
+			'src/background/pending-delegations.ts:4768 readDelegationFallback / :4780 listDelegationFallbacks / :4815 scanDelegationFallbacksForRecovery',
+			'src/background/pending-delegations.ts:5366 scanBackgroundCoderReservationsForAdmission',
 		],
 		schemaVersion: 'fallback schemaVersion 1 (:971)',
 		stateClass: 'authoritative',
@@ -1302,11 +1302,11 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/scope/scope-persistence.ts'],
 		writerCitations: [
-			'src/scope/scope-persistence.ts:1099 writeScopeToDisk (v1 projection) / :1175 writeScopeBindingToDisk (v2) / :1563 claimScopeBindingForChildDurably / :1791 replaceExistingScopeDeclaration / :1423 tombstoneScopeBinding / :1486 refreshScopeBindingLease / :464 transitionScopeBindingState / :528 importScopeBindingStateRows',
+			'src/scope/scope-persistence.ts:1160 writeScopeToDisk (v1 projection) / :1236 writeScopeBindingToDisk (v2) / :1710 claimScopeBindingForChildDurably / :1939 replaceExistingScopeDeclaration / :1570 tombstoneScopeBinding / :1633 refreshScopeBindingLease / :466 transitionScopeBindingState / :589 importScopeBindingStateRows',
 		],
 		readerCitations: [
-			'src/scope/scope-persistence.ts:2431 readScopeFromDisk — bounded 2 MiB O_NOFOLLOW v1 compatibility, sync',
-			'src/scope/scope-persistence.ts:759 readAllAuthoritativeScopeBindings — bounded indexed SQLite scan, sync',
+			'src/scope/scope-persistence.ts:2591 readScopeFromDisk — bounded 2 MiB O_NOFOLLOW v1 compatibility, sync',
+			'src/scope/scope-persistence.ts:820 readAllAuthoritativeScopeBindings — bounded indexed SQLite scan, sync',
 		],
 		schemaVersion: 'v1 projection + v2 exact-generation bindings (v1 never authorizes: :916)',
 		stateClass: 'authoritative',
@@ -2767,7 +2767,7 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/session/snapshot-writer.ts', 'src/session/snapshot-store.ts', 'src/session/session-start-store.ts', 'src/services/context-budget-service.ts'],
 		writerCitations: [
-			'src/session/snapshot-writer.ts:374 writeSnapshot — per-key SQLite snapshot authority via snapshot-store with serialized post-commit projection',
+			'src/session/snapshot-writer.ts:378 writeSnapshot — per-key SQLite snapshot authority via snapshot-store with serialized post-commit projection',
 			'src/session/snapshot-store.ts writeSnapshotRows — FULL transaction with per-session tombstones and cross-process-safe disjoint updates',
 			'src/session/session-start-store.ts:6 recordSessionStart — append flag a, fail-open',
 			'src/services/context-budget-service.ts:196 writeBudgetState — bunWrite + cache invalidation',

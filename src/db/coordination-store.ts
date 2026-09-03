@@ -230,6 +230,11 @@ function validateTransitionInput(input: CoordinationTransitionInput): void {
 		throw new Error('generation must be a nonnegative safe integer');
 	}
 	if (input.event) {
+		if (input.expectedRevision === undefined) {
+			throw new Error(
+				'event-bearing coordination transitions require expectedRevision',
+			);
+		}
 		boundedText(input.event.streamId, 'streamId', MAX_KEY_CHARS);
 		boundedText(input.event.idempotencyKey, 'idempotencyKey', MAX_KEY_CHARS);
 		boundedText(input.event.eventType, 'eventType', MAX_STATUS_CHARS);
@@ -343,8 +348,10 @@ export function transitionCoordinationStateWithinTransaction(
 		const overflow = total - _internals.maxTotalEvents;
 		if (overflow > 0) {
 			// This is deliberately a soft global target: every live stream keeps one
-			// waterline event so version and idempotency fences survive pruning.
-			// The authoritative state/domain reapers bound the number of live streams.
+			// waterline event so stream versions remain monotonic after pruning. Event
+			// callers are required to carry expectedRevision, so a replay whose old
+			// idempotency record was pruned fails the state CAS instead of applying.
+			// The authoritative state/domain reapers bound live stream count.
 			db.run(
 				`DELETE FROM coordination_event WHERE rowid IN (
 						SELECT candidate.rowid FROM coordination_event AS candidate

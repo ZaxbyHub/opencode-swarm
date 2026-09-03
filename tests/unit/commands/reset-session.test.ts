@@ -53,7 +53,7 @@ describe('handleResetSessionCommand', () => {
 		expect(result).toContain('authoritative session snapshot row');
 	});
 
-	it('#2481 waits for retained snapshot coordination before clearing authority', async () => {
+	it('#2481 holds the snapshot reset guard until authority is cleared', async () => {
 		writeSnapshotRows(testDir, {
 			version: 3,
 			writtenAt: 1,
@@ -66,8 +66,11 @@ describe('handleResetSessionCommand', () => {
 		const barrier = new Promise<void>((resolve) => {
 			release = resolve;
 		});
-		const original = _internals.closeSnapshotCoordinationInitialization;
-		_internals.closeSnapshotCoordinationInitialization = async () => barrier;
+		const original = _internals.beginSnapshotCoordinationReset;
+		_internals.beginSnapshotCoordinationReset = async () => {
+			await barrier;
+			return { release: () => undefined };
+		};
 		try {
 			const reset = handleResetSessionCommand(testDir, []);
 			await Promise.resolve();
@@ -77,7 +80,7 @@ describe('handleResetSessionCommand', () => {
 			expect(readSnapshotRows(testDir)).toBeNull();
 		} finally {
 			release();
-			_internals.closeSnapshotCoordinationInitialization = original;
+			_internals.beginSnapshotCoordinationReset = original;
 		}
 	});
 

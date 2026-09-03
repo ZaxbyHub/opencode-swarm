@@ -44,8 +44,10 @@ import { z } from 'zod';
 import {
 	acquireCoordinationLease,
 	deleteCoordinationState,
+	getCoordinationState,
 	importCoordinationOnce,
 	listCoordinationStates,
+	MAX_COORDINATION_STATE_LIST_ROWS,
 	projectDbExists,
 	releaseCoordinationLease,
 	transitionCoordinationState,
@@ -1046,7 +1048,17 @@ function coordinationRowsToDelegations(
 ): BackgroundDelegationRecord[] | null {
 	if (!projectDbExists(directory)) return null;
 	try {
-		return listCoordinationStates(directory, DELEGATION_COORDINATION_NAMESPACE)
+		const rows = listCoordinationStates(
+			directory,
+			DELEGATION_COORDINATION_NAMESPACE,
+			MAX_COORDINATION_STATE_LIST_ROWS,
+		);
+		if (rows.length >= MAX_COORDINATION_STATE_LIST_ROWS) {
+			throw new Error(
+				`delegation coordination read reached its ${MAX_COORDINATION_STATE_LIST_ROWS}-row safety bound`,
+			);
+		}
+		return rows
 			.map((row) => {
 				const parsed = RecordSchema.safeParse(
 					JSON.parse(row.payload) as unknown,
@@ -2729,10 +2741,11 @@ function appendRecord(
 		throw new Error('delegation coordination authority is uncertain');
 	}
 	if (importState === 'ready') {
-		const current = listCoordinationStates(
+		const current = getCoordinationState(
 			directory,
 			DELEGATION_COORDINATION_NAMESPACE,
-		).find((row) => row.entityKey === record.correlationId);
+			record.correlationId,
+		);
 		const eventPayload = JSON.stringify(record);
 		const eventDigest = createHash('sha256').update(eventPayload).digest('hex');
 		const result = transitionCoordinationState(directory, {
@@ -5154,7 +5167,17 @@ function coordinationRowsToReservations(
 ): BackgroundCoderReservation[] | null {
 	if (!projectDbExists(directory)) return null;
 	try {
-		return listCoordinationStates(directory, RESERVATION_COORDINATION_NAMESPACE)
+		const rows = listCoordinationStates(
+			directory,
+			RESERVATION_COORDINATION_NAMESPACE,
+			MAX_COORDINATION_STATE_LIST_ROWS,
+		);
+		if (rows.length >= MAX_COORDINATION_STATE_LIST_ROWS) {
+			throw new Error(
+				`reservation coordination read reached its ${MAX_COORDINATION_STATE_LIST_ROWS}-row safety bound`,
+			);
+		}
+		return rows
 			.map((row) => {
 				const parsed = BackgroundCoderReservationSchema.safeParse(
 					JSON.parse(row.payload) as unknown,
@@ -5386,12 +5409,17 @@ async function writeBackgroundCoderReservations(
 	if (importState === 'ready') {
 		try {
 			withCoordinationTransaction(directory, () => {
-				const current = new Map(
-					listCoordinationStates(
-						directory,
-						RESERVATION_COORDINATION_NAMESPACE,
-					).map((row) => [row.entityKey, row]),
+				const currentRows = listCoordinationStates(
+					directory,
+					RESERVATION_COORDINATION_NAMESPACE,
+					MAX_COORDINATION_STATE_LIST_ROWS,
 				);
+				if (currentRows.length >= MAX_COORDINATION_STATE_LIST_ROWS) {
+					throw new Error(
+						`reservation coordination write reached its ${MAX_COORDINATION_STATE_LIST_ROWS}-row safety bound`,
+					);
+				}
+				const current = new Map(currentRows.map((row) => [row.entityKey, row]));
 				const nextIds = new Set(
 					parsed.data.reservations.map((entry) => entry.reservationId),
 				);

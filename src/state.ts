@@ -66,7 +66,12 @@ import { clearScopeBindings } from './scope/scope-binding.js';
 import { clearScopeBindingFromDisk } from './scope/scope-persistence.js';
 import { clearAllTurnLedgers } from './services/injection-budget';
 import { recordSessionStart } from './session/session-start-store.js';
-import { deleteSnapshotSessionRows } from './session/snapshot-store.js';
+import {
+	claimSnapshotSessionOwnership,
+	deleteSnapshotSessionRows,
+	isSnapshotSessionOwnedLocally,
+	releaseSnapshotSessionOwnership,
+} from './session/snapshot-store.js';
 import { maybeSuggestWorktreeLink } from './session/worktree-link-suggestion.js';
 import { AgentRunContext } from './state/agent-run-context.js';
 import { telemetry } from './telemetry.js';
@@ -1947,7 +1952,7 @@ let _lastIdleSweepAtMs = 0;
  *
  * @param staleDurationMs - Age threshold in ms (default 2h)
  * @param now - Current time in ms (injectable for deterministic tests)
- * @param directory - Optional project root whose durable rows are tombstoned
+ * @param directory - Optional project root whose locally-owned durable rows are tombstoned
  * @returns The list of evicted session IDs
  */
 export function sweepStaleSessions(
@@ -1964,9 +1969,9 @@ export function sweepStaleSessions(
 		}
 	}
 	for (const id of staleIds) {
-		if (directory) {
+		if (directory && isSnapshotSessionOwnedLocally(id)) {
 			try {
-				deleteSnapshotSessionRows(directory, id);
+				deleteSnapshotSessionRows(directory, id, 'stale');
 			} catch (error) {
 				logger.warn(
 					'[state] durable stale-session teardown failed:',
@@ -1974,6 +1979,7 @@ export function sweepStaleSessions(
 				);
 			}
 		}
+		releaseSnapshotSessionOwnership(id);
 		swarmState.agentSessions.delete(id);
 		// delegationChains is keyed by sessionID; the evicted session's chain is
 		// now unreachable, so drop it in the same pass to reclaim its memory.
@@ -2049,6 +2055,7 @@ export function startAgentSession(
 	directory?: string,
 ): void {
 	const now = Date.now();
+	claimSnapshotSessionOwnership(sessionId, true);
 
 	// Evict stale sessions based on last activity, not start time.
 	// Default: 2 hours — should exceed typical agent durations (evicts inactive
@@ -2236,6 +2243,7 @@ export function endAgentSession(sessionId: string, directory?: string): void {
 			);
 		}
 	}
+	releaseSnapshotSessionOwnership(sessionId);
 	const removedBindings = clearScopeBindings(
 		(binding) =>
 			binding.ownerSessionId === sessionId ||
@@ -2290,6 +2298,9 @@ export function ensureAgentSession(
 	directory?: string,
 ): AgentSessionState {
 	const now = Date.now();
+	// A host tool invocation establishes local ownership. Rehydration does not
+	// call this function, so foreign snapshot rows remain read-only here.
+	claimSnapshotSessionOwnership(sessionId, true);
 	let session = swarmState.agentSessions.get(sessionId);
 
 	if (session) {

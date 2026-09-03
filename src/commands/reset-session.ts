@@ -10,10 +10,16 @@ import { clearTrajectoryStep } from '../hooks/trajectory-logger';
 import { validateSwarmPath } from '../hooks/utils';
 import { resetPrmSessionState } from '../prm';
 import { sanitizeDiagnosticText } from '../scope/path-identity.js';
-import { clearSnapshotRows } from '../session/snapshot-store.js';
+import {
+	beginSnapshotCoordinationReset,
+	type SnapshotCoordinationResetGuard,
+} from '../session/snapshot-coordination-init.js';
+import {
+	clearSnapshotRows,
+	clearSnapshotSessionOwnerships,
+} from '../session/snapshot-store.js';
 import { swarmState } from '../state';
 import { recoverStaleCoderSettlements } from '../workflow/coder-settlement.js';
-import { closeSnapshotCoordinationInitialization } from '../session/snapshot-coordination-init.js';
 import {
 	cleanupOrphanedBranches,
 	type OrphanCleanupResult,
@@ -42,7 +48,7 @@ export const _internals: {
 	recoverStaleCoderSettlements: typeof recoverStaleCoderSettlements;
 	queryLiveMemberships: typeof queryLiveMemberships;
 	commitGateReleaseBatch: typeof commitGateReleaseBatch;
-	closeSnapshotCoordinationInitialization: typeof closeSnapshotCoordinationInitialization;
+	beginSnapshotCoordinationReset: typeof beginSnapshotCoordinationReset;
 	releaseKnowledgeGateObligations: (
 		directory: string,
 		sessionID: string,
@@ -53,7 +59,7 @@ export const _internals: {
 	recoverStaleCoderSettlements,
 	queryLiveMemberships,
 	commitGateReleaseBatch,
-	closeSnapshotCoordinationInitialization,
+	beginSnapshotCoordinationReset,
 	releaseKnowledgeGateObligations: releaseKnowledgeGateObligations,
 };
 
@@ -189,11 +195,14 @@ export async function handleResetSessionCommand(
 ): Promise<string> {
 	const results: string[] = [];
 
-	// Quiesce any retained post-resolution import/rehydration before deleting
-	// SQLite authority. Without this barrier, a late initializer can rehydrate
-	// and rewrite the projection after reset-session has cleared it (#2481).
+	// Keep a closing guard through snapshot/projection deletion. A plain close
+	// would delete its entry before the rows are cleared, letting a concurrent
+	// request start a fresh initializer against pre-reset data (#2481).
+	let snapshotResetGuard: SnapshotCoordinationResetGuard | undefined;
 	try {
-		await _internals.closeSnapshotCoordinationInitialization(directory);
+		snapshotResetGuard =
+			await _internals.beginSnapshotCoordinationReset(directory);
+		if (snapshotResetGuard.closeError) throw snapshotResetGuard.closeError;
 	} catch (err) {
 		results.push(
 			`⚠️ Snapshot coordination close failed (continuing with reset): ${errorMessage(err)}`,
@@ -299,6 +308,7 @@ export async function handleResetSessionCommand(
 		clearTrajectoryStep(sessionId);
 	}
 	swarmState.agentSessions.clear();
+	clearSnapshotSessionOwnerships();
 	results.push(`✅ Cleared ${sessionCount} in-memory agent session(s)`);
 
 	// Clear delegation chains to prevent stale coder_delegated detection
@@ -312,6 +322,9 @@ export async function handleResetSessionCommand(
 	const activeAgentCount = swarmState.activeAgent.size;
 	swarmState.activeAgent.clear();
 	results.push(`✅ Cleared ${activeAgentCount} active-agent mapping(s)`);
+	// All paths that can rehydrate or republish the old snapshot are now past
+	// their destructive inputs. Let future requests initialize normally.
+	snapshotResetGuard?.release();
 
 	// Issue #2398: reset-session is the operator's documented escape from the
 	// knowledge-application enforcement gate. Durably release THIS session's

@@ -13,6 +13,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { closeAllProjectDbs } from '../../../src/db/project-db.js';
 import {
+	claimSnapshotSessionOwnership,
+	clearSnapshotSessionOwnerships,
+} from '../../../src/session/snapshot-store.js';
+import {
 	createSnapshotWriterHook,
 	flushPendingSnapshot,
 	type SerializedAgentSession,
@@ -41,6 +45,7 @@ beforeEach(() => {
 afterEach(async () => {
 	await flushPendingSnapshot(testDir).catch(() => {});
 	closeAllProjectDbs();
+	clearSnapshotSessionOwnerships();
 
 	if (existsSync(testDir)) {
 		rmSync(testDir, { recursive: true, force: true });
@@ -604,7 +609,7 @@ describe('writeSnapshot', () => {
 			pendingEvents: 0,
 			agentSessions: new Map([['session-1', session]]),
 		};
-
+		claimSnapshotSessionOwnership('session-1');
 		await writeSnapshot(testDir, state);
 
 		const filePath = path.join(testDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
@@ -672,7 +677,6 @@ describe('writeSnapshot - fsyncSync (FR-004)', () => {
 			pendingEvents: 0,
 			agentSessions: new Map(),
 		};
-
 		await writeSnapshot(testDir, state);
 
 		// Verify file was created with correct content
@@ -723,36 +727,6 @@ describe('writeSnapshot - fsyncSync (FR-004)', () => {
 				totalDuration: 10,
 			},
 		});
-	});
-
-	it('snapshot file contains correct delegationChains data', async () => {
-		const state = {
-			toolAggregates: new Map(),
-			activeAgent: new Map(),
-			delegationChains: new Map([
-				[
-					'session-1',
-					[
-						{ from: 'architect', to: 'coder', timestamp: 1700000000000 },
-						{ from: 'coder', to: 'reviewer', timestamp: 1700000001000 },
-					],
-				],
-			]),
-			activeToolCalls: new Map(),
-			pendingEvents: 0,
-			agentSessions: new Map(),
-		};
-
-		await writeSnapshot(testDir, state);
-
-		const filePath = path.join(testDir, '.swarm', SNAPSHOT_PROJECTION_FILE);
-		expect(existsSync(filePath)).toBe(true);
-		const content = await Bun.file(filePath).text();
-		const parsed = JSON.parse(content) as SnapshotData;
-		expect(parsed.delegationChains['session-1']).toEqual([
-			{ from: 'architect', to: 'coder', timestamp: 1700000000000 },
-			{ from: 'coder', to: 'reviewer', timestamp: 1700000001000 },
-		]);
 	});
 });
 

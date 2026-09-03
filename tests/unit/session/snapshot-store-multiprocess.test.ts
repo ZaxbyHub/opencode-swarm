@@ -3,12 +3,18 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
+	getCoordinationState,
+	transitionCoordinationState,
+} from '../../../src/db/coordination-store.js';
+import {
 	closeAllProjectDbs,
 	closeProjectDb,
 	getProjectDb,
 } from '../../../src/db/project-db.js';
 import {
 	_snapshotStoreInternals,
+	claimSnapshotSessionOwnership,
+	clearSnapshotSessionOwnerships,
 	readSnapshotRows,
 	writeSnapshotRows,
 } from '../../../src/session/snapshot-store.js';
@@ -33,10 +39,97 @@ beforeEach(() => {
 
 afterEach(() => {
 	closeAllProjectDbs();
+	clearSnapshotSessionOwnerships();
 	fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
 describe('SQLite session snapshot multiprocess coordination', () => {
+	test('F10: a local writer cannot overwrite a foreign session owner', () => {
+		const sessionId = 'shared-session';
+		const foreignPayload = JSON.stringify({
+			session: {
+				agentName: 'coder',
+				lastToolCallTime: 1,
+				delegationActive: false,
+			},
+			ownerToken: 'foreign-owner',
+		});
+		transitionCoordinationState(tempDir, {
+			namespace: 'session.snapshot.agent',
+			entityKey: sessionId,
+			expectedRevision: null,
+			generation: 1,
+			status: 'active',
+			payload: foreignPayload,
+		});
+		claimSnapshotSessionOwnership(sessionId);
+		writeSnapshotRows(
+			tempDir,
+			{
+				version: 3,
+				writtenAt: 2,
+				toolAggregates: {},
+				activeAgent: {},
+				delegationChains: {},
+				agentSessions: {
+					[sessionId]: {
+						agentName: 'architect',
+						lastToolCallTime: 2,
+						delegationActive: false,
+					} as never,
+				},
+			},
+			{ onlyLocallyOwnedSessions: true },
+		);
+		expect(
+			getCoordinationState(tempDir, 'session.snapshot.agent', sessionId)
+				?.payload,
+		).toBe(foreignPayload);
+	});
+
+	test('lets an actual resumed host session take over its durable owner', () => {
+		const sessionId = 'resumed-session';
+		transitionCoordinationState(tempDir, {
+			namespace: 'session.snapshot.agent',
+			entityKey: sessionId,
+			expectedRevision: null,
+			generation: 1,
+			status: 'active',
+			payload: JSON.stringify({
+				session: { agentName: 'old', lastToolCallTime: 1 },
+				ownerToken: 'previous-host',
+			}),
+		});
+		const ownerToken = claimSnapshotSessionOwnership(sessionId, true);
+		writeSnapshotRows(
+			tempDir,
+			{
+				version: 3,
+				writtenAt: 2,
+				toolAggregates: {},
+				activeAgent: {},
+				delegationChains: {},
+				agentSessions: {
+					[sessionId]: {
+						agentName: 'resumed',
+						lastToolCallTime: 2,
+						delegationActive: false,
+					} as never,
+				},
+			},
+			{ onlyLocallyOwnedSessions: true },
+		);
+		expect(
+			JSON.parse(
+				getCoordinationState(tempDir, 'session.snapshot.agent', sessionId)!
+					.payload,
+			),
+		).toMatchObject({
+			ownerToken,
+			session: { agentName: 'resumed' },
+		});
+	});
+
 	test('F8: reads one committed snapshot while a foreign writer waits after meta', async () => {
 		// Before the transaction wrapper, a foreign commit between namespace scans
 		// could combine the old meta row with a newer tool row in one read result.

@@ -25,7 +25,11 @@ import { swarmState } from '../state';
 import { log } from '../utils';
 import { bunWrite } from '../utils/bun-compat';
 import { invalidateCachedArtifact } from '../utils/swarm-artifact-cache';
-import { readSnapshotRows, writeSnapshotRows } from './snapshot-store.js';
+import {
+	isSnapshotSessionOwnedLocally,
+	readSnapshotRows,
+	writeSnapshotRows,
+} from './snapshot-store.js';
 
 export const SNAPSHOT_PROJECTION_FILE = 'session/state.sqlite-projection.json';
 
@@ -386,19 +390,28 @@ export async function writeSnapshot(
 			writtenAt: Date.now(),
 			workflowSchema: TASK_WORKFLOW_SCHEMA_MARKER,
 			toolAggregates: Object.fromEntries(state.toolAggregates),
-			activeAgent: Object.fromEntries(state.activeAgent),
-			delegationChains: Object.fromEntries(state.delegationChains),
+			activeAgent: Object.fromEntries(
+				[...state.activeAgent].filter(([sessionId]) =>
+					isSnapshotSessionOwnedLocally(sessionId),
+				),
+			),
+			delegationChains: Object.fromEntries(
+				[...state.delegationChains].filter(([sessionId]) =>
+					isSnapshotSessionOwnedLocally(sessionId),
+				),
+			),
 			agentSessions: {},
 		};
 
 		// Serialize each agent session
 		for (const [sessionId, sessionState] of state.agentSessions) {
+			if (!isSnapshotSessionOwnedLocally(sessionId)) continue;
 			snapshot.agentSessions[sessionId] = serializeAgentSession(sessionState);
 		}
 
 		// SQLite is authoritative. Re-read after commit so the projection includes
 		// rows concurrently committed by another process.
-		writeSnapshotRows(directory, snapshot);
+		writeSnapshotRows(directory, snapshot, { onlyLocallyOwnedSessions: true });
 		const canonicalSnapshot = readSnapshotRows(directory) ?? snapshot;
 		await writeSnapshotProjection(directory, canonicalSnapshot);
 	} catch (error) {

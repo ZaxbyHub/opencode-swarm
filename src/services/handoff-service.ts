@@ -372,7 +372,17 @@ export async function getHandoffData(directory: string): Promise<HandoffData> {
 	// Read session state
 	// #2481: SQLite is authoritative after the one-time snapshot import. The
 	// reader does not first-open the DB when a project is still file-only.
-	const sqliteSnapshot = readSnapshotRows(directory);
+	let sqliteSnapshot = null;
+	try {
+		sqliteSnapshot = _internals.readSnapshotRows(directory);
+	} catch (error) {
+		// A handoff remains best-effort when an older/newer peer left an
+		// unreadable snapshot row. The legacy compatibility projection is the
+		// safe fallback; do not make a diagnostic command crash the session.
+		log('[handoff-service] SQLite snapshot read failed', {
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 	const sessionContent = sqliteSnapshot
 		? JSON.stringify(sqliteSnapshot)
 		: await readSwarmFileAsync(directory, 'session/state.json');
@@ -685,6 +695,7 @@ export const _internals: {
 	parseSessionState: typeof parseSessionState;
 	extractDecisions: typeof extractDecisions;
 	extractPhaseMetrics: typeof extractPhaseMetrics;
+	readSnapshotRows: typeof readSnapshotRows;
 } = {
 	getHandoffData,
 	formatHandoffMarkdown,
@@ -696,4 +707,5 @@ export const _internals: {
 	parseSessionState,
 	extractDecisions,
 	extractPhaseMetrics,
+	readSnapshotRows,
 } as const;

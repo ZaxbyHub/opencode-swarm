@@ -1,7 +1,7 @@
 /** Post-resolution SQLite snapshot import/readiness lifecycle (#2481). */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, renameSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { canonicalProjectKey } from '../db/canonical-project.js';
 import { validateSwarmPath } from '../hooks/utils.js';
 import { advisoryWarn } from '../services/warning-buffer.js';
@@ -9,6 +9,7 @@ import { applyRehydrationCache, swarmState } from '../state.js';
 import { withTimeout } from '../utils/timeout.js';
 import { readSnapshotFileStrict, rehydrateState } from './snapshot-reader.js';
 import { importSnapshotRowsOnce, readSnapshotRows } from './snapshot-store.js';
+import type { SnapshotData } from './snapshot-writer.js';
 import {
 	SNAPSHOT_PROJECTION_FILE,
 	writeSnapshotProjection,
@@ -42,6 +43,15 @@ export interface SnapshotCoordinationStatus {
 	error?: string;
 }
 
+/**
+ * Held while reset-session removes the authoritative snapshot and its legacy
+ * projection. Callers must release it after the destructive portion is done.
+ */
+export interface SnapshotCoordinationResetGuard {
+	release(): void;
+	closeError?: Error;
+}
+
 const entries = new Map<string, ReadinessEntry>();
 let nextAttemptId = 1;
 
@@ -52,8 +62,25 @@ function isRetryableArchiveError(error: unknown): boolean {
 
 async function archiveLegacySnapshotIfPresent(
 	legacyPath: string,
+	expectedSnapshot?: SnapshotData,
 ): Promise<void> {
 	if (!existsSync(legacyPath)) return;
+	if (expectedSnapshot) {
+		try {
+			const current = JSON.stringify(
+				JSON.parse(readFileSync(legacyPath, 'utf8')),
+			);
+			if (current !== JSON.stringify(expectedSnapshot)) {
+				advisoryWarn(
+					'[opencode-swarm] Legacy snapshot changed after SQLite coordination; preserving it for explicit recovery.',
+				);
+				return;
+			}
+		} catch {
+			// Do not archive an unreadable source when a peer may have replaced it.
+			return;
+		}
+	}
 	const canonicalArchive = `${legacyPath}.imported`;
 	const archivePath = existsSync(canonicalArchive)
 		? `${canonicalArchive}.${randomUUID()}`
@@ -120,7 +147,7 @@ async function initializeSnapshotCoordination(
 			snapshot = readSnapshotRows(directory);
 			if (outcome === 'imported' && source === 'session/state.json') {
 				legacyArchiveAttempted = true;
-				await archiveLegacySnapshotIfPresent(legacyPath);
+				await archiveLegacySnapshotIfPresent(legacyPath, candidate);
 			}
 		}
 	}
@@ -131,6 +158,7 @@ async function initializeSnapshotCoordination(
 	if (!legacyArchiveAttempted) {
 		await archiveLegacySnapshotIfPresent(
 			validateSwarmPath(directory, 'session/state.json'),
+			snapshot,
 		);
 	}
 	await rehydrateState(snapshot, directory);
@@ -144,6 +172,11 @@ export function startSnapshotCoordinationInitialization(
 ): Promise<void> {
 	const root = canonicalProjectKey(directory);
 	const existing = entries.get(root);
+	if (existing?.state === 'closing') {
+		return Promise.reject(
+			new Error('coordination initialization is closing for reset-session'),
+		);
+	}
 	if (existing && !existing.settled) return existing.underlying;
 	if (existing?.state === 'succeeded') return existing.underlying;
 	evictSettledEntries();
@@ -194,6 +227,9 @@ export async function ensureSnapshotCoordinationReady(
 	const root = canonicalProjectKey(directory);
 	const entry = entries.get(root);
 	if (!entry) return startSnapshotCoordinationInitialization(root);
+	if (entry.state === 'closing') {
+		throw new Error('coordination initialization is closing for reset-session');
+	}
 	if (entry.state === 'timed_out' && !entry.settled) {
 		throw new Error(
 			'coordination initialization remains unsettled after timeout',
@@ -209,6 +245,9 @@ export function retrySnapshotCoordinationInitialization(
 ): Promise<void> {
 	const root = canonicalProjectKey(directory);
 	const entry = entries.get(root);
+	if (entry?.state === 'closing') {
+		throw new Error('coordination initialization is closing for reset-session');
+	}
 	if (entry && !entry.settled) {
 		throw new Error(
 			'coordination initialization is still unsettled; recovery refused',
@@ -232,22 +271,53 @@ export function getSnapshotCoordinationStatus(
 	};
 }
 
+/**
+ * Prevent any fresh initializer from observing state while reset-session
+ * deletes the SQLite authority and legacy projection. The guard deliberately
+ * survives a prior initialization failure: reset remains best-effort, but a
+ * concurrent initializer cannot race through the destructive window.
+ */
+export async function beginSnapshotCoordinationReset(
+	directory: string,
+): Promise<SnapshotCoordinationResetGuard> {
+	const root = canonicalProjectKey(directory);
+	const prior = entries.get(root);
+	let closeError: Error | undefined;
+	if (prior) {
+		prior.state = 'closing';
+		try {
+			await prior.underlying;
+		} catch (error) {
+			closeError = error instanceof Error ? error : new Error(String(error));
+		}
+	}
+
+	const guard: ReadinessEntry = {
+		attemptId: nextAttemptId++,
+		generation: (prior?.generation ?? 0) + 1,
+		state: 'closing',
+		settled: true,
+		underlying: Promise.resolve(),
+		...(closeError ? { error: closeError.message } : {}),
+	};
+	entries.set(root, guard);
+	return {
+		release: () => {
+			if (entries.get(root) === guard) entries.delete(root);
+		},
+		...(closeError ? { closeError } : {}),
+	};
+}
+
 export async function closeSnapshotCoordinationInitialization(
 	directory: string,
 ): Promise<void> {
-	const root = canonicalProjectKey(directory);
-	const entry = entries.get(root);
-	if (!entry) return;
-	entry.state = 'closing';
-	let failure: unknown;
+	const guard = await beginSnapshotCoordinationReset(directory);
 	try {
-		await entry.underlying;
-	} catch (error) {
-		failure = error;
+		if (guard.closeError) throw guard.closeError;
 	} finally {
-		entries.delete(root);
+		guard.release();
 	}
-	if (failure) throw failure;
 }
 
 export function markSnapshotCoordinationClosing(directory: string): void {
