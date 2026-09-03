@@ -15,12 +15,13 @@ import {
 	PR_ARTIFACT_REVISION_DIGEST,
 	PR_ARTIFACT_SESSION_ID,
 } from '../../helpers/pr-review-artifact-fixtures.js';
-import { canonicalMkdtemp } from '../../helpers/tmpdir.js';
+import { createSafeTestDir } from '../../helpers/safe-test-dir.js';
 
 const HEAD_SHA = PR_ARTIFACT_HEAD_SHA;
 const SESSION_ID = PR_ARTIFACT_SESSION_ID;
 
 let directory = '';
+let cleanupDirectory = () => {};
 const originalResolveCurrentGitHead = _test_exports.resolveCurrentGitHead;
 const originalResolveCurrentGitHeadAsync =
 	_test_exports.resolveCurrentGitHeadAsync;
@@ -33,7 +34,9 @@ const originalResolveIsWorkingTreeCleanAsync =
 const originalAtomicWrite = artifactInternals.atomicWrite;
 
 beforeEach(() => {
-	directory = canonicalMkdtemp('pr-artifact-contract-hardening-');
+	const { dir, cleanup } = createSafeTestDir('pr-artifact-contract-hardening-');
+	directory = dir;
+	cleanupDirectory = cleanup;
 	_test_exports.resetTrackedStateCache();
 	_test_exports.resolveCurrentGitHead = () => HEAD_SHA;
 	_test_exports.resolvePrWorkflowRevisionDigest = () =>
@@ -65,7 +68,7 @@ afterEach(async () => {
 	_test_exports.resolveIsWorkingTreeCleanAsync =
 		originalResolveIsWorkingTreeCleanAsync;
 	artifactInternals.atomicWrite = originalAtomicWrite;
-	await fs.rm(directory, { recursive: true, force: true });
+	cleanupDirectory();
 });
 
 describe('write_pr_review_artifact contract hardening (#2333)', () => {
