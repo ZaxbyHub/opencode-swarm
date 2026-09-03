@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawnUtf8 } from '../../../scripts/gate-utils';
+import { safeRmRecursive } from '../../helpers/safe-test-dir';
 import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 function timeoutProbe(markerPath: string, aliveDelayMs: number): string[] {
@@ -25,14 +26,22 @@ describe('gate-utils subprocess ownership', () => {
 		const markerPath = path.join(markerDir, 'child-alive.txt');
 		try {
 			const started = performance.now();
-			// Use the same Node probe on every platform. PowerShell cold-start
-			// latency used to race the timeout on Windows before the child had
-			// executed its first statement, testing shell startup rather than
-			// spawnUtf8's timeout/termination contract.
-			const isWindows = process.platform === 'win32';
-			const timeoutMs = isWindows ? 2_000 : 200;
+			// Use the same Node probe and the same 2s timeout budget on every
+			// platform. The non-Windows leg used to probe with 200ms, which
+			// raced child cold-start under merge-group load: the .started
+			// marker requires the child to have executed its first statement
+			// before the kill, and 200ms is not a safe boot budget on shared
+			// runners. Windows already carried 2s for exactly this cold-start
+			// class; unify on it (issue #2478).
+			const timeoutMs = 2_000;
 			const aliveDelayMs = timeoutMs + 250;
-			const maxElapsedMs = isWindows ? 5_000 : 4_000;
+			// Contract-derived bound (issue #2478): the kill fires at
+			// timeoutMs and close handling is bounded by spawnUtf8's 1s kill
+			// grace (KILL_GRACE_MS, scripts/gate-utils.ts). +2s of slack
+			// absorbs runner stalls without weakening the "returns boundedly,
+			// not hanging" guarantee the previous platform-specific magic
+			// numbers attempted.
+			const maxElapsedMs = timeoutMs + 1_000 + 2_000;
 			const result = await spawnUtf8(
 				timeoutProbe(markerPath, aliveDelayMs),
 				process.cwd(),
@@ -48,7 +57,7 @@ describe('gate-utils subprocess ownership', () => {
 			expect(fs.existsSync(`${markerPath}.started`)).toBe(true);
 			expect(fs.existsSync(markerPath)).toBe(false);
 		} finally {
-			fs.rmSync(markerDir, { recursive: true, force: true });
+			safeRmRecursive(markerDir);
 		}
 	});
 

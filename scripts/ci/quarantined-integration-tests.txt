@@ -13,11 +13,13 @@
 #
 # Issue #1908 requires merge-group proof for any entry here.
 
-# Refs #2396: skill_improver quota tests refuse to run inside the merge_group
-# integration batch (r.ran false); pass standalone. Merge-group proof: PR #2377
-# run 33109018048 and PR #2387 run 33110714121 failed identically on
-# 2026-08-27 while the standalone file passed on both branches.
-# OWNER: @zaxbysauce — issue #2396
-# EXPIRY: 2026-09-30 — root-fix the merge-group integration-batch refusal
-# (r.ran false) or renew with updated diagnosis under #2396/#2477
-tests/integration/issue-629-skill-improver.test.ts
+# No active integration-test quarantines. The issue #2396 entry
+# (tests/integration/issue-629-skill-improver.test.ts) was retired by the
+# issue #2478 root fix: the merge-group "refusal to run" was root-caused to
+# a merge-combination regression (PR #2377's approval-gate enforcement
+# meeting the test's stale `require_user_approval: true` config), already
+# repaired on main by 75d47bd3c; the file passes standalone. Removal and
+# validation are atomic in the queue run: if the file regresses there, the
+# queue blocks the merge rather than hiding the failure, and re-quarantine
+# remains available. Same-PR ordering explicitly accepted by maintainer
+# review on PR #2542, 2026-09-03.

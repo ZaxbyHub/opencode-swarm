@@ -17,6 +17,7 @@ import type { SwarmKnowledgeEntry } from '../../src/hooks/knowledge-types';
 import { runSkillImprover } from '../../src/services/skill-improver';
 import { resolveQuotaPath } from '../../src/services/skill-improver-quota';
 import { createIsolatedTestEnv } from '../helpers/isolated-test-env';
+import { createSafeTestDir } from '../helpers/safe-test-dir';
 
 let tmp: string;
 let cleanupEnv: () => void;
@@ -31,8 +32,25 @@ afterEach(() => {
 	cleanupEnv();
 });
 
-async function seedMatureKnowledge(): Promise<void> {
-	await mkdir(path.join(tmp, '.swarm'), { recursive: true });
+/**
+ * Injected clock (issue #2478): every runSkillImprover call below pins its
+ * `now` to this fixed UTC day via distinct per-call offsets.
+ *
+ * Why per-call injection instead of a freezeClock spy: a live clock lets a
+ * UTC-midnight rollover between the sequential quota calls reset
+ * `calls_used` (getQuotaState's date-mismatch rollover) and flip the
+ * quota-exhaustion assertions — the one genuine live-clock hazard in this
+ * file. A global toISOString spy, however, makes every proposal share one
+ * `timestampSlug(now)` filename, so consecutive successful runs overwrite
+ * each other's proposals. Per-call `now` values on a single UTC day close
+ * the rollover window while keeping proposal slugs distinct.
+ */
+const FIXED_DAY_MS = Date.parse('2026-09-02T00:00:00.000Z');
+const fixedNow = (secondsOffset: number): Date =>
+	new Date(FIXED_DAY_MS + secondsOffset * 1_000);
+
+async function seedMatureKnowledge(directory: string = tmp): Promise<void> {
+	await mkdir(path.join(directory, '.swarm'), { recursive: true });
 	const e: SwarmKnowledgeEntry = {
 		id: '11111111-1111-4111-9111-111111111111',
 		tier: 'swarm',
@@ -70,7 +88,7 @@ async function seedMatureKnowledge(): Promise<void> {
 		directive_priority: 'critical',
 	};
 	await writeFile(
-		resolveSwarmKnowledgePath(tmp),
+		resolveSwarmKnowledgePath(directory),
 		JSON.stringify(e) + '\n',
 		'utf-8',
 	);
@@ -98,6 +116,7 @@ describe('issue #629 — low-frequency expensive skill_improver', () => {
 		const r = await runSkillImprover({
 			directory: tmp,
 			config,
+			now: fixedNow(0),
 		});
 		expect(r.ran).toBe(true);
 		expect(r.proposalPath).toContain(
@@ -130,9 +149,21 @@ describe('issue #629 — low-frequency expensive skill_improver', () => {
 			quota_window: 'utc' as const,
 			allow_deterministic_fallback: true,
 		};
-		const r1 = await runSkillImprover({ directory: tmp, config });
-		const r2 = await runSkillImprover({ directory: tmp, config });
-		const r3 = await runSkillImprover({ directory: tmp, config });
+		const r1 = await runSkillImprover({
+			directory: tmp,
+			config,
+			now: fixedNow(0),
+		});
+		const r2 = await runSkillImprover({
+			directory: tmp,
+			config,
+			now: fixedNow(1),
+		});
+		const r3 = await runSkillImprover({
+			directory: tmp,
+			config,
+			now: fixedNow(2),
+		});
 		expect(r1.ran).toBe(true);
 		expect(r2.ran).toBe(true);
 		expect(r3.ran).toBe(false);
@@ -165,6 +196,7 @@ describe('issue #629 — low-frequency expensive skill_improver', () => {
 			directory: tmp,
 			config,
 			mode: 'draft_skills',
+			now: fixedNow(0),
 		});
 		expect(r.ran).toBe(true);
 		expect(r.draftSkillsWritten?.length ?? 0).toBeGreaterThan(0);
@@ -194,8 +226,70 @@ describe('issue #629 — low-frequency expensive skill_improver', () => {
 			quota_window: 'utc' as const,
 			allow_deterministic_fallback: true,
 		};
-		await runSkillImprover({ directory: tmp, config });
+		await runSkillImprover({ directory: tmp, config, now: fixedNow(0) });
 		const after = readFileSync(resolveSwarmKnowledgePath(tmp), 'utf-8');
 		expect(after).toBe(before);
+	});
+
+	it('quota state is per-directory: exhausting one root never suppresses another (issue #2478 batch-order independence)', async () => {
+		// Two independent project roots (realpath-canonical via
+		// createSafeTestDir). Root A burns its entire daily quota; root B
+		// must still run through the same registered runSkillImprover path.
+		// This pins the per-directory quota-file isolation invariant: a
+		// merge_group integration batch-mate — or any other project sharing
+		// the process/filesystem — cannot suppress this suite's execution by
+		// consuming quota elsewhere (the failure class issue #2396 was
+		// filed under, later root-caused to a merge-combination test
+		// regression; this test guards the quota-isolation property the
+		// original theory assumed was broken).
+		const rootA = createSafeTestDir('issue-629-projA-');
+		const rootB = createSafeTestDir('issue-629-projB-');
+		try {
+			await seedMatureKnowledge(rootA.dir);
+			await seedMatureKnowledge(rootB.dir);
+			const config = {
+				enabled: true,
+				model: 'openrouter/expensive-model',
+				fallback_models: [] as string[],
+				max_calls_per_day: 1,
+				trigger: 'manual' as const,
+				targets: ['skills'] as Array<
+					'skills' | 'spec' | 'architect_prompt' | 'knowledge'
+				>,
+				write_mode: 'proposal' as const,
+				require_user_approval: false,
+				quota_window: 'utc' as const,
+				allow_deterministic_fallback: true,
+			};
+			const a1 = await runSkillImprover({
+				directory: rootA.dir,
+				config,
+				now: fixedNow(0),
+			});
+			const a2 = await runSkillImprover({
+				directory: rootA.dir,
+				config,
+				now: fixedNow(1),
+			});
+			const b1 = await runSkillImprover({
+				directory: rootB.dir,
+				config,
+				now: fixedNow(2),
+			});
+			expect(a1.ran).toBe(true);
+			expect(a2.ran).toBe(false);
+			expect(a2.reason).toMatch(/quota/i);
+			expect(b1.ran).toBe(true);
+			// Each root carries its own quota file; B's reflects only its own
+			// single run.
+			const quotaB = JSON.parse(
+				readFileSync(resolveQuotaPath(rootB.dir), 'utf-8'),
+			) as { calls_used: number; max_calls: number };
+			expect(quotaB.calls_used).toBe(1);
+			expect(quotaB.max_calls).toBe(1);
+		} finally {
+			rootA.cleanup();
+			rootB.cleanup();
+		}
 	});
 });
