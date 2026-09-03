@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.164.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.5...v7.164.6) (2026-09-03)
+
+
+### Bug Fixes
+
+* **pr-workflow:** restore review and feedback end to end ([6667541](https://github.com/ZaxbyHub/opencode-swarm/commit/666754119f5e3533e2ff2e0c6b66f0f81b399323))
+
 ## [7.164.5](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.4...v7.164.5) (2026-09-03)
 
 
