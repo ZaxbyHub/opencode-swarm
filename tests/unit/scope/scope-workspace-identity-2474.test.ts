@@ -80,18 +80,14 @@ describe('scope workspace physical identity (#2474)', () => {
 				},
 			],
 		};
-		const currentIdentity = path
-			.resolve(root)
-			.replaceAll('\\', '/')
-			.toLowerCase();
-		const legacyIdentity = `${currentIdentity}~1`;
 		filesystemIdentityInternals.platform = () => 'win32';
-		filesystemIdentityInternals.realpathSyncNative = (target) =>
-			path.resolve(String(target));
+		filesystemIdentityInternals.realpathSyncNative = () => {
+			throw new Error('native resolver unavailable in the legacy release');
+		};
 		filesystemIdentityInternals.realpathSync = (target) =>
 			`${path.resolve(String(target))}~1`;
 
-		const binding = createScopeBinding({
+		const legacyBinding = createScopeBinding({
 			directory: root,
 			plan,
 			taskId: '1.1',
@@ -100,22 +96,28 @@ describe('scope workspace physical identity (#2474)', () => {
 			ownerMessageId: 'declare-scope',
 			source: 'declare_scope',
 		});
-		expect(binding?.workspaceIdentity).toBe(currentIdentity);
-		if (!binding) throw new Error('scope binding fixture failed');
-		expect(await writeScopeBindingToDisk(root, binding)).toMatchObject({
+		const legacyIdentity = `${path
+			.resolve(root)
+			.replaceAll('\\', '/')
+			.toLowerCase()}~1`;
+		expect(legacyBinding?.workspaceIdentity).toBe(legacyIdentity);
+		if (!legacyBinding) throw new Error('scope binding fixture failed');
+		expect(await writeScopeBindingToDisk(root, legacyBinding)).toMatchObject({
 			ok: true,
 		});
 
 		const scopesDir = path.join(root, '.swarm', 'scopes');
 		const bindingFile = fs
 			.readdirSync(scopesDir)
-			.find((name) => name.endsWith('.json'));
+			.find((name) => name.startsWith('binding-') && name.endsWith('.json'));
 		if (!bindingFile) throw new Error('durable scope fixture missing');
 		const bindingPath = path.join(scopesDir, bindingFile);
-		fs.writeFileSync(
-			bindingPath,
-			JSON.stringify({ ...binding, workspaceIdentity: legacyIdentity }),
-		);
+		filesystemIdentityInternals.realpathSyncNative = (target) =>
+			path.resolve(String(target));
+		const currentIdentity = path
+			.resolve(root)
+			.replaceAll('\\', '/')
+			.toLowerCase();
 		clearScopeBindings();
 
 		const recovered = readScopeBindingFromDisk({
