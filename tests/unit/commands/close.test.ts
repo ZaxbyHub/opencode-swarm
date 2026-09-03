@@ -154,7 +154,6 @@ let observedSkillReviewAborted = false;
 mock.module('../../../src/tools/write-retro.js', () => ({
 	executeWriteRetro: mockExecuteWriteRetro,
 }));
-
 mock.module('../../../src/hooks/knowledge-curator.js', () => ({
 	...actualKnowledgeCurator,
 	curateAndStoreSwarm: mockCurateAndStoreSwarm,

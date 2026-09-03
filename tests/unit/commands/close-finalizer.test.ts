@@ -157,14 +157,12 @@ mock.module('../../../src/evidence/manager.js', () => ({
 	archiveEvidence: mockArchiveEvidence,
 	isValidEvidenceType,
 }));
-
 mock.module('../../../src/session/snapshot-writer.js', () => ({
 	SNAPSHOT_PROJECTION_FILE: 'session/state.sqlite-projection.json',
 	flushPendingSnapshot: mockFlushPendingSnapshot,
 	writeSnapshotProjection: async () => {},
 	writeSnapshot: async () => {},
 }));
-
 mock.module('../../../src/hooks/hive-promoter.js', () => ({
 	isHiveEligible: () => false,
 	checkHivePromotions: async () => {},
