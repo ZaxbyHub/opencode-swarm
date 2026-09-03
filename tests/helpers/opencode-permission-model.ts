@@ -211,3 +211,200 @@ export function evaluateExternalDirectory(
 		}),
 	).action;
 }
+
+// ---------------------------------------------------------------------------
+// Per-agent TOOL enforcement (issue #2528). Everything below is transcribed
+// from the PINNED host source — github.com/sst/opencode tag v1.18.3, commit
+// 127bdb30 — not from the 1.18.10 binary the functions above were taken from.
+// The audit (`docs/audits/swarm-plugin-review-2026-09.md`, finding HOST-1,
+// branch claude/swarm-plugin-review-ysvk9b) verified 1.18.3 → 1.18.26 drift
+// for the agent assembly is zero changed lines, so both provenances agree on
+// the shared primitives.
+//
+// Source files (v1.18.3):
+//  - packages/opencode/src/permission/index.ts — `disabled`, alias lists
+//  - packages/opencode/src/agent/agent.ts (Agent.state) — host defaults
+//  - packages/opencode/src/session/llm/request.ts — `resolveTools`
+//
+// NOTE ON "real host": this transcription is the repo's established substrate
+// for verifying emitted rules against real host semantics (same contract as
+// the header above). Spawning a real `opencode` host binary in CI is NOT
+// proposed — no test in this repo does it, and driving a session requires an
+// LLM. If a future OpenCode release changes any of these, the structural pins
+// in tests/unit/agents/agent-permission-enforcement.test.ts are the tripwire
+// — re-extract before "fixing" them.
+// ---------------------------------------------------------------------------
+
+/**
+ * Host `Permission.disabled` alias list, verbatim (v1.18.3
+ * packages/opencode/src/permission/index.ts): these TOOL names are evaluated
+ * as permission name `edit`. Note `patch` is NOT in this list — `normalize()`
+ * (config-file `tools` maps, a different host surface) collapses
+ * write/edit/patch, but `disabled()` does not alias `patch`.
+ */
+export const HOST_DISABLED_EDITS: readonly string[] = [
+	'edit',
+	'write',
+	'apply_patch',
+];
+
+/**
+ * Host `Permission.disabled` alias list, verbatim: MCP resource-reader tool
+ * names evaluated as permission name `read`.
+ */
+export const HOST_DISABLED_READS: readonly string[] = [
+	'list_mcp_resources',
+	'list_mcp_resource_templates',
+	'read_mcp_resource',
+];
+
+/**
+ * Host `Permission.disabled`, verbatim transcription (v1.18.3
+ * packages/opencode/src/permission/index.ts):
+ *
+ * ```js
+ * function disabled(tools, ruleset) {
+ *   const edits = ["edit", "write", "apply_patch"]
+ *   const reads = ["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]
+ *   return new Set(tools.filter((tool) => {
+ *     const permission = edits.includes(tool) ? "edit" : reads.includes(tool) ? "read" : tool
+ *     const rule = ruleset.findLast((rule) => Wildcard.match(permission, rule.permission))
+ *     return rule?.pattern === "*" && rule.action === "deny"
+ *   }))
+ * }
+ * ```
+ *
+ * A tool is HIDDEN from the request iff the LAST rule whose permission name
+ * wildcard-matches the tool's (aliased) permission name has pattern exactly
+ * `'*'` and action `'deny'`. This — via `resolveTools` — is the host-side
+ * refusal mechanism for plugin-authored per-agent denies (issue #2528).
+ */
+export function hostDisabled(
+	tools: readonly string[],
+	ruleset: PermissionRule[],
+): Set<string> {
+	const edits = HOST_DISABLED_EDITS;
+	const reads = HOST_DISABLED_READS;
+	return new Set(
+		tools.filter((tool) => {
+			const permission = edits.includes(tool)
+				? 'edit'
+				: reads.includes(tool)
+					? 'read'
+					: tool;
+			const rule = ruleset.findLast((rule) =>
+				hostWildcardMatch(permission, rule.permission),
+			);
+			return rule?.pattern === '*' && rule.action === 'deny';
+		}),
+	);
+}
+
+/**
+ * The host's hardcoded per-agent default permission config, verbatim from
+ * Agent.state (v1.18.3 packages/opencode/src/agent/agent.ts:105-129):
+ *
+ * ```js
+ * const defaults = Permission.fromConfig({
+ *   "*": "allow",
+ *   doom_loop: "ask",
+ *   external_directory: { "*": "ask", ...whitelistedDirs → "allow" },
+ *   question: "deny",
+ *   plan_enter: "deny",
+ *   plan_exit: "deny",
+ *   read: { "*": "allow", "*.env": "ask", "*.env.*": "ask", "*.env.example": "allow" },
+ * })
+ * ```
+ *
+ * `whitelistedDirs` is resolved at runtime (Truncate.GLOB, the host temp dir,
+ * `Skill.dirs()`, reference dirs); callers may pass the equivalent patterns
+ * via `extraExternalAllowDirs`. The static entries — including the
+ * `read` `.env` asks the plugin must not flatten — are the load-bearing part
+ * for issue #2528's tests.
+ */
+export function hostDefaultPermissionConfig(
+	opts: { extraExternalAllowDirs?: readonly string[] } = {},
+): Record<string, unknown> {
+	const external: Record<string, string> = { '*': 'ask' };
+	for (const dir of opts.extraExternalAllowDirs ?? []) {
+		external[dir] = 'allow';
+	}
+	return {
+		'*': 'allow',
+		doom_loop: 'ask',
+		external_directory: external,
+		question: 'deny',
+		plan_enter: 'deny',
+		plan_exit: 'deny',
+		read: {
+			'*': 'allow',
+			'*.env': 'ask',
+			'*.env.*': 'ask',
+			'*.env.example': 'allow',
+		},
+	};
+}
+
+/**
+ * Builds the effective ruleset for a PLUGIN-INJECTED agent exactly as the
+ * host's merge loop does (v1.18.3 packages/opencode/src/agent/agent.ts:267-294):
+ *
+ * ```js
+ * item = { permission: Permission.merge(defaults, user) }        // new agent
+ * item.permission = Permission.merge(item.permission,
+ *                                    Permission.fromConfig(value.permission ?? {}))
+ * ```
+ *
+ * so the flattened order is `[defaults, userTopLevel, agentOwn]` — the
+ * agent's own block is LAST and therefore wins under `findLast`. This
+ * ordering is why plugin agent blocks must not carry entries for
+ * pattern-gated permissions (`external_directory`, `read` sub-patterns):
+ * they would override both the user's top-level config and lane rules.
+ */
+export function hostAgentRulesetForPluginAgent(
+	userTopLevelPermission: Record<string, unknown> | undefined,
+	agentPermission: Record<string, unknown> | undefined,
+	opts: {
+		extraExternalAllowDirs?: readonly string[];
+	} = {},
+): PermissionRule[] {
+	return hostMerge(
+		hostFromConfig(hostDefaultPermissionConfig(opts)),
+		hostFromConfig(userTopLevelPermission ?? {}),
+		hostFromConfig(agentPermission ?? {}),
+	);
+}
+
+/**
+ * Host `resolveTools`, verbatim model (v1.18.3
+ * packages/opencode/src/session/llm/request.ts:210-215):
+ *
+ * ```js
+ * function resolveTools(input) {
+ *   const disabled = Permission.disabled(
+ *     Object.keys(input.tools),
+ *     Permission.merge(input.agent.permission, input.permission ?? []),
+ *   )
+ *   return Record.filter(input.tools, (_, k) => input.user.tools?.[k] !== false && !disabled.has(k))
+ * }
+ * ```
+ *
+ * `input.agent.permission` is the agent ruleset (already `[defaults, user,
+ * agentOwn]` — pass the output of {@link hostAgentRulesetForPluginAgent}).
+ * `input.permission` is the per-request permission (usually empty).
+ * `input.user.tools` is the user MESSAGE's tools map — pass `undefined` to
+ * model the common case. Returns the tool names the host would keep in the
+ * LLM request: everything else is hidden — the model never sees its schema
+ * and cannot call it.
+ */
+export function hostResolveTools(
+	tools: readonly string[],
+	agentRuleset: PermissionRule[],
+	requestPermission?: Record<string, unknown>,
+): Set<string> {
+	const disabled = hostDisabled(
+		tools,
+		hostMerge(agentRuleset, hostFromConfig(requestPermission ?? {})),
+	);
+	return new Set(tools.filter((tool) => !disabled.has(tool)));
+}

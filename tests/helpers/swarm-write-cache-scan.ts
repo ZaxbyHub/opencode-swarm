@@ -161,7 +161,7 @@
  *     exist. An inline target has no variable to key an invalidation on, so it
  *     is reported unless the identical expression is passed to
  *     `invalidateCachedArtifact` in the forward window; hoisting the path into a
- *     local is the intended fix (src/agents/index.ts:1431 is the live example);
+ *     local is the intended fix (the snapshot write in src/agents/index.ts getAgentConfigs is the live example);
  *   - a call to a SAME-FILE single-`return` path helper
  *     (`phaseEvidencePath(...)`, `leanTurboEvidenceDir(...)`), resolved by
  *     folding the helper's own return expression with its parameters treated as

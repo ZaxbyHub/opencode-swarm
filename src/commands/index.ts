@@ -436,7 +436,13 @@ async function buildSwarmCommandPrompt(args: {
 export function agentHasSwarmCommandTool(
 	activeAgentName: string | undefined,
 	agents: Record<string, AgentDefinition>,
-	registeredAgents?: Record<string, { tools?: Record<string, boolean> }>,
+	registeredAgents?: Record<
+		string,
+		{
+			tools?: Record<string, boolean>;
+			permission?: Record<string, unknown>;
+		}
+	>,
 ): boolean {
 	const name = activeAgentName ?? ORCHESTRATOR_NAME;
 	const registeredTools = registeredAgents?.[name]?.tools;
@@ -447,10 +453,33 @@ export function agentHasSwarmCommandTool(
 		return registeredTools.swarm_command === true;
 	}
 
+	// Since #2528 the emitted agent configs carry their tool boundary as a
+	// `permission` block instead of the (host-ignored) `tools` map. That
+	// block is override-resolved: a restrictive `tool_filter.overrides.<role>`
+	// emits `swarm_command: 'deny'`, and the host then HIDES the tool from
+	// the agent's request. Consulting it here keeps routing consistent with
+	// the host-enforced surface — without this, a restrictive override would
+	// leave the router instructing the agent to call a tool it cannot call.
+	const registeredPermission = registeredAgents?.[name]?.permission;
+	if (
+		registeredPermission &&
+		typeof registeredPermission === 'object' &&
+		Object.keys(registeredPermission).length > 0
+	) {
+		return registeredPermission.swarm_command !== 'deny';
+	}
+
 	const explicitTools = agents[name]?.config?.tools;
-	if (explicitTools) {
-		// Explicit factory tools are also authoritative for tests and direct
-		// consumers that do not pass OpenCode's registered agent map.
+	if (explicitTools && explicitTools.swarm_command !== undefined) {
+		// Explicit factory tools are authoritative for tests and direct
+		// consumers that do not pass OpenCode's registered agent map — but
+		// only when the factory actually states an opinion on swarm_command.
+		// Since #2528 the emitted agent configs carry no `tools` map at all
+		// (the host never read it), so the factory branch also runs in
+		// production: the read-only factories declare only their write-family
+		// denies (`{write:false, edit:false, patch:false}`), which must NOT
+		// be read as "does not own swarm_command" — resolution continues to
+		// the role map below.
 		return explicitTools.swarm_command === true;
 	}
 
