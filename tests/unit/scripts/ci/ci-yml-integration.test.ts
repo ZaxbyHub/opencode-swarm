@@ -100,8 +100,8 @@ describe('ci.yml integration — Task 1.2 wrapper script structural validation',
 	});
 
 	test('"Run unit tests" step surfaces bounded issue evidence receipts', () => {
-		expect(step).toContain(
-			'grep -E "^\\[ISSUE-[0-9]+(-[A-Z0-9-]+)?-EVIDENCE\\]" "$tmp" || true',
+		expect(step).toMatch(
+			/if \[ \$exit_code -eq 0 \]; then\s+# Preserve bounded,[\s\S]*?grep -E "\^\\\[ISSUE-\[0-9\]\+\(-\[A-Z0-9-\]\+\)\?-EVIDENCE\\\]" "\$tmp" \|\| true\s+fi/,
 		);
 	});
 
@@ -138,8 +138,8 @@ describe('ci.yml integration — integration quarantine extraction', () => {
 	});
 
 	test('"Integration tests" step surfaces bounded issue evidence receipts', () => {
-		expect(step).toContain(
-			'grep -E "^\\[ISSUE-[0-9]+(-[A-Z0-9-]+)?-EVIDENCE\\]" "$tmp" || true',
+		expect(step).toMatch(
+			/if \[ \$exit_code -eq 0 \]; then\s+# Match the unit wrapper's[\s\S]*?grep -E "\^\\\[ISSUE-\[0-9\]\+\(-\[A-Z0-9-\]\+\)\?-EVIDENCE\\\]" "\$tmp" \|\| true\s+fi/,
 		);
 	});
 });
