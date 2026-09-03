@@ -263,7 +263,8 @@ function isAllowedByGlobs(filePath: string, allowGlobs?: string[]): boolean {
 				return true;
 			}
 		} catch {
-			continue;
+			// Malformed glob: treat as non-matching (fail-closed) and try the
+			// next glob.
 		}
 	}
 
