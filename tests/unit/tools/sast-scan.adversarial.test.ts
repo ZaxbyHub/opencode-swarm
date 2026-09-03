@@ -157,20 +157,8 @@ describe('SAST Scan - Adversarial Tests (R2)', () => {
 	 */
 	it('enabled mode with zero coverage → FAIL (not pass)', async () => {
 		const result = await sastScan({ changed_files: [] }, MOCK_DIR, {
-			gates: {
-				syntax_check: { enabled: true },
-				placeholder_scan: {
-					enabled: true,
-					deny_patterns: [],
-					allow_globs: [],
-					max_allowed_findings: 0,
-				},
-				sast_scan: { enabled: true },
-				sbom_generate: { enabled: true },
-				build_check: { enabled: true },
-				quality_budget: { enabled: true },
-			},
-		} as any);
+			sast_scan: { enabled: true },
+		});
 		expect(result.verdict).toBe('fail');
 	});
 
@@ -182,21 +170,7 @@ describe('SAST Scan - Adversarial Tests (R2)', () => {
 		const result = await sastScan(
 			{ changed_files: [], capture_baseline: true, phase: 1 },
 			MOCK_DIR,
-			{
-				gates: {
-					syntax_check: { enabled: true },
-					placeholder_scan: {
-						enabled: true,
-						deny_patterns: [],
-						allow_globs: [],
-						max_allowed_findings: 0,
-					},
-					sast_scan: { enabled: false },
-					sbom_generate: { enabled: true },
-					build_check: { enabled: true },
-					quality_budget: { enabled: true },
-				},
-			} as any,
+			{ sast_scan: { enabled: false } },
 		);
 		expect(result.verdict).toBe('pass');
 		expect(result.error).toBeUndefined();

@@ -193,9 +193,9 @@ mock.module('../../../src/config.js', () => ({
 
 mock.module('../../../src/config/index.js', () => ({
 	loadPluginConfigWithMeta: mockLoadPluginConfigWithMeta,
-	// Pure filesystem lookup for a user prompt override; not exercised by
-	// this test and must not touch the real filesystem in a unit test.
+	// Pure stubs: no fs access; gate-override seam for transitive imports (#2524).
 	loadAgentPrompt: () => ({}),
+	loadGateOverrides: () => undefined,
 }));
 
 mock.module('../../../src/services/skill-improver.js', () => ({

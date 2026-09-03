@@ -723,15 +723,9 @@ const key = "sk-1234567890";`,
 			};
 
 			// Use type assertion like other tests
-			const config = {
-				gates: {
-					sast_scan: {
-						enabled: false,
-					},
-				},
-			} as unknown as PluginConfig;
+			const gates = { sast_scan: { enabled: false } };
 
-			const result = await sastScan(input, tempDir, config);
+			const result = await sastScan(input, tempDir, gates);
 
 			expect(result.verdict).toBe('pass');
 			expect(result.findings).toEqual([]);
@@ -745,15 +739,9 @@ const key = "sk-1234567890";`,
 			};
 
 			// Disable SAST via config
-			const config = {
-				gates: {
-					sast_scan: {
-						enabled: false,
-					},
-				},
-			} as unknown as PluginConfig;
+			const gates = { sast_scan: { enabled: false } };
 
-			const result = await sastScan(input, tempDir, config);
+			const result = await sastScan(input, tempDir, gates);
 
 			// When disabled, zero files scanned should NOT fail (early return at line 204-221)
 			expect(result.verdict).toBe('pass');
@@ -905,13 +893,7 @@ describe('Baseline diffing', () => {
 		const testFile = path.join(tempDir, 'vuln.js');
 		fs.writeFileSync(testFile, 'eval("x");');
 
-		const config = {
-			gates: {
-				sast_scan: {
-					enabled: false,
-				},
-			},
-		} as unknown as PluginConfig;
+		const gates = { sast_scan: { enabled: false } };
 
 		const input: SastScanInput = {
 			changed_files: [testFile],
@@ -919,7 +901,7 @@ describe('Baseline diffing', () => {
 			phase: 1,
 		};
 
-		const result = await sastScan(input, tempDir, config);
+		const result = await sastScan(input, tempDir, gates);
 
 		expect(result.verdict).toBe('pass');
 		// captureOrMergeBaseline must NOT have been called (gate is disabled, early return)

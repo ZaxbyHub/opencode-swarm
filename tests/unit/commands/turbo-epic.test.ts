@@ -41,6 +41,9 @@ const mockLoadPluginConfigWithMeta = mock(() => ({
 
 mock.module('../../../src/config', () => ({
 	loadPluginConfigWithMeta: mockLoadPluginConfigWithMeta,
+	// Gate tools transitively reachable from the turbo-epic graph read user
+	// gate overrides through this seam (issue #2524).
+	loadGateOverrides: () => undefined,
 }));
 
 const SESSION_ID = 'sess-turbo-epic';

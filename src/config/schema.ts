@@ -452,63 +452,83 @@ export const QualityBudgetConfigSchema = GateFeatureSchema.extend({
 
 export type QualityBudgetConfig = z.infer<typeof QualityBudgetConfigSchema>;
 
-export const GATE_CONFIG_KNOWN_SECTION_KEYS = {
-	syntax_check: ['enabled'],
-	placeholder_scan: [
-		'enabled',
-		'deny_patterns',
-		'allow_globs',
-		'max_allowed_findings',
-	],
-	sast_scan: ['enabled'],
-	sbom_generate: ['enabled'],
-	build_check: ['enabled'],
-	quality_budget: [
-		'enabled',
-		'max_complexity_delta',
-		'max_public_api_delta',
-		'max_duplication_ratio',
-		'min_test_to_code_ratio',
-		'enforce_on_globs',
-		'exclude_globs',
-	],
+/**
+ * Single source of truth for gate sections (issue #2524): `GateConfigSchema` is
+ * built from this map and `GATE_CONFIG_KNOWN_SECTION_KEYS` is derived from it,
+ * so the loader's strip registry can never drift from the schema. The previous
+ * hand-maintained copy omitted `placeholder_scan.sentinel_allowlist`, which
+ * made the loader strip a real schema key as "unknown".
+ */
+export const GATE_SECTION_SCHEMAS = {
+	syntax_check: GateFeatureSchema,
+	placeholder_scan: PlaceholderScanConfigSchema,
+	sast_scan: GateFeatureSchema,
+	sbom_generate: GateFeatureSchema,
+	build_check: GateFeatureSchema,
+	quality_budget: QualityBudgetConfigSchema,
 } as const;
 
+export type GateSectionName = keyof typeof GATE_SECTION_SCHEMAS;
+
 export const GateConfigSchema = z.object({
-	syntax_check: GateFeatureSchema.default({ enabled: true }),
-	placeholder_scan: PlaceholderScanConfigSchema.default({
-		enabled: true,
-		deny_patterns: [
-			'TODO',
-			'FIXME',
-			'TBD',
-			'XXX',
-			'placeholder',
-			'stub',
-			'wip',
-			'not implemented',
-		],
-		allow_globs: [
-			'docs/**',
-			'examples/**',
-			'tests/**',
-			'**/*.test.*',
-			'**/*.spec.*',
-			'**/mocks/**',
-			'**/__tests__/**',
-		],
-		max_allowed_findings: 0,
-		sentinel_allowlist: [],
-	}),
-	sast_scan: GateFeatureSchema.default({ enabled: true }),
-	sbom_generate: GateFeatureSchema.default({ enabled: true }),
-	build_check: GateFeatureSchema.default({ enabled: true }),
-	quality_budget: QualityBudgetConfigSchema.default(() =>
-		QualityBudgetConfigSchema.parse({}),
+	syntax_check: GATE_SECTION_SCHEMAS.syntax_check.default({ enabled: true }),
+	placeholder_scan: GATE_SECTION_SCHEMAS.placeholder_scan.default(() =>
+		GATE_SECTION_SCHEMAS.placeholder_scan.parse({}),
+	),
+	sast_scan: GATE_SECTION_SCHEMAS.sast_scan.default({ enabled: true }),
+	sbom_generate: GATE_SECTION_SCHEMAS.sbom_generate.default({ enabled: true }),
+	build_check: GATE_SECTION_SCHEMAS.build_check.default({ enabled: true }),
+	quality_budget: GATE_SECTION_SCHEMAS.quality_budget.default(() =>
+		GATE_SECTION_SCHEMAS.quality_budget.parse({}),
 	),
 });
 
 export type GateConfig = z.infer<typeof GateConfigSchema>;
+
+/**
+ * Per-section field keys, derived from `GATE_SECTION_SCHEMAS`. Consumed by
+ * `sanitizeGatesConfig` (config loader) and `collectRawGatesConfigFindings`
+ * (config doctor) to decide which `gates.*` keys are recognized.
+ */
+export const GATE_CONFIG_KNOWN_SECTION_KEYS: Record<
+	GateSectionName,
+	readonly string[]
+> = Object.fromEntries(
+	Object.entries(GATE_SECTION_SCHEMAS).map(([section, schema]) => [
+		section,
+		Object.keys(schema.shape),
+	]),
+) as unknown as Record<GateSectionName, readonly string[]>;
+
+/**
+ * Only the gate keys a user actually wrote. Zod materializes every `.default()`
+ * on parse, so the parsed `config.gates` always carries full default lists once
+ * any `gates` object exists; tools must not mistake those for user intent
+ * (e.g. placeholder_scan treats any provided `deny_patterns` list as custom
+ * patterns and disables its built-in string/code scanning). The loader exposes
+ * the post-sanitize raw section as this shape — see `loadGateOverrides`.
+ */
+export type GateConfigOverrides = {
+	[K in GateSectionName]?: Partial<z.infer<(typeof GATE_SECTION_SCHEMAS)[K]>>;
+};
+
+/**
+ * Drift-check contract (issue #2524): every `GateConfigSchema` section must
+ * list the production modules that read it. `scripts/drift-check-gates-docs.ts`
+ * enforces key parity with the schema; the gates-config-wiring tests prove the
+ * wiring dynamically through the registered tool objects.
+ */
+export const GATE_CONFIG_READERS: Record<GateSectionName, readonly string[]> = {
+	syntax_check: ['src/tools/syntax-check.ts'],
+	placeholder_scan: ['src/tools/placeholder-scan.ts'],
+	sast_scan: ['src/tools/sast-scan.ts', 'src/tools/pre-check-batch.ts'],
+	sbom_generate: ['src/tools/sbom-generate.ts'],
+	build_check: ['src/tools/build-check.ts'],
+	quality_budget: [
+		'src/tools/quality-budget.ts',
+		'src/tools/pre-check-batch.ts',
+	],
+};
 
 // Pipeline configuration (parallel execution settings)
 export const PipelineConfigSchema = z.object({

@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import {
 	deepMerge,
 	loadAgentPrompt,
+	_internals as loaderInternals,
 	loadPluginConfig,
 	MAX_CONFIG_FILE_BYTES,
 	MAX_MERGE_DEPTH,
@@ -183,16 +184,15 @@ describe('config/loader', () => {
 			// Override XDG_CONFIG_HOME to isolate from real user config
 			originalXDG = process.env.XDG_CONFIG_HOME;
 			process.env.XDG_CONFIG_HOME = tempDir;
-			// The deferred-warning buffer is module-level
-			// (src/services/warning-buffer); clear it between tests so a prior
-			// test's advisoryWarn entry cannot leak into this one (AGENTS.md
-			// Invariant 7 — no cross-test pollution in the shared bun test-runner
-			// process).
+			// Module-level warning state (deferred buffer, gates-advisory dedup
+			// set) must reset between tests (AGENTS.md invariant 7).
 			clearDeferredWarnings();
+			loaderInternals.resetGatesAdvisoryDedup();
 		});
 
 		afterEach(() => {
 			clearDeferredWarnings();
+			loaderInternals.resetGatesAdvisoryDedup();
 			// Restore original XDG_CONFIG_HOME
 			if (originalXDG === undefined) {
 				delete process.env.XDG_CONFIG_HOME;

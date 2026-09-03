@@ -808,13 +808,7 @@ describe('syntax-check.ts - ADVERSARIAL SECURITY TESTS', () => {
 			const testFile = path.join(tmpDir, 'test.js');
 			fs.writeFileSync(testFile, 'const x = 1;');
 
-			const config = {
-				gates: {
-					syntax_check: {
-						enabled: false,
-					},
-				},
-			} as PluginConfig;
+			const config = { syntax_check: { enabled: false } };
 
 			const input: SyntaxCheckInput = {
 				changed_files: [{ path: testFile, additions: 1 }],
