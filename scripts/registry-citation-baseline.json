@@ -366,13 +366,6 @@
 			"note": "Pre-existing debt, not approved drift: \"saveGraph\" exists in src/tools/repo-graph/storage.ts but not inside src/tools/repo-graph/storage.ts:339 (repo-graph.writerCitations[0])."
 		},
 		{
-			"rowId": "scopes-family",
-			"file": "src/scope/scope-persistence.ts",
-			"identifier": "readScopeFromDisk",
-			"kind": "out-of-range",
-			"note": "Pre-existing debt, not approved drift: \"readScopeFromDisk\" exists in src/scope/scope-persistence.ts but not inside src/scope/scope-persistence.ts:2511 (scopes-family.readerCitations[0])."
-		},
-		{
 			"rowId": "session-state-snapshot",
 			"file": "src/services/context-budget-service.ts",
 			"identifier": "writeBudgetState",

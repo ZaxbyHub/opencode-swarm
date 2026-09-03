@@ -27,7 +27,6 @@
  */
 
 import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { loadPluginConfigWithMetaAsync } from '../config/loader';
 import { RepoGraphConfigSchema } from '../config/schema';
 import {
@@ -43,6 +42,7 @@ import {
 	type RepoGraph,
 } from '../tools/repo-graph';
 import { loadSubgraphForFiles } from '../tools/repo-graph/indexed-storage';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import { estimateTokens } from './utils';
 
 interface CachedGraph {
@@ -185,7 +185,7 @@ async function evaluateGraphGates(
 	directory: string,
 	options?: RepoGraphInjectionOptions,
 ): Promise<GraphGateResult> {
-	const key = path.normalize(path.resolve(directory));
+	const key = canonicalRootKeyFresh(directory);
 	if (options?.enabled === false) {
 		cache.delete(key);
 		return { kind: 'suppressed' };

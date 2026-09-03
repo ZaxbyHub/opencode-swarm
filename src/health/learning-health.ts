@@ -71,6 +71,7 @@ import {
 import type { TelemetryEvent } from '../telemetry';
 import { telemetry } from '../telemetry';
 import { atomicWriteSwarmFile } from '../utils/atomic-write';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 
 /** The eight alarm families owned by this module. */
 export type LearningHealthAlarmId =
@@ -369,19 +370,27 @@ const lastPersistAtByDirectory = new Map<string, number>();
  * reader used — the plugin host process serves one project, so this is the
  * owning project in practice. Bounded like every other map here.
  */
-const recentPersistDirectories: string[] = [];
+interface RecentPersistDirectory {
+	/** Stable physical identity captured when this entry was observed. */
+	key: string;
+	/** Usable caller spelling retained for artifact I/O. */
+	directory: string;
+}
+
+const recentPersistDirectories: RecentPersistDirectory[] = [];
 
 const MAX_TRACKED_DIRECTORIES = 16;
 
 function rememberPersistDirectory(directory: string): void {
-	if (recentPersistDirectories.includes(directory)) {
-		const idx = recentPersistDirectories.indexOf(directory);
+	const key = canonicalRootKeyFresh(directory);
+	const idx = recentPersistDirectories.findIndex((entry) => entry.key === key);
+	if (idx >= 0) {
 		recentPersistDirectories.splice(idx, 1);
 	}
-	recentPersistDirectories.push(directory);
+	recentPersistDirectories.push({ key, directory });
 	while (recentPersistDirectories.length > MAX_TRACKED_DIRECTORIES) {
 		const evicted = recentPersistDirectories.shift();
-		if (evicted !== undefined) lastPersistAtByDirectory.delete(evicted);
+		if (evicted !== undefined) lastPersistAtByDirectory.delete(evicted.key);
 	}
 }
 
@@ -419,18 +428,29 @@ function projectRef(directory: string): string {
 	// Memoized (PRR-013): the chat-transform hot path re-derives the same
 	// directory ref on every observation; a bounded memo removes the repeated
 	// sha256 per transform while staying within the directory-tracking cap.
-	const cached = projectRefCache.get(directory);
+	const key = canonicalRootKeyFresh(directory);
+	const cached = projectRefCache.get(key);
 	if (cached !== undefined) return cached;
-	const ref = pseudonymousRef(directory, resolveLineageSalt());
-	if (!projectRefCache.has(directory)) {
+	const ref = pseudonymousRef(key, resolveLineageSalt());
+	if (!projectRefCache.has(key)) {
 		while (projectRefCache.size >= MAX_TRACKED_DIRECTORIES) {
 			const oldest = projectRefCache.keys().next().value;
 			if (oldest === undefined) break;
 			projectRefCache.delete(oldest);
 		}
 	}
-	projectRefCache.set(directory, ref);
+	projectRefCache.set(key, ref);
 	return ref;
+}
+
+/**
+ * Project ref emitted before #2474 switched learning-health ownership to the
+ * canonical physical root. Keep it as a read-only compatibility alias so
+ * existing `.swarm/learning-health.json` artifacts do not orphan active
+ * alarms after an upgrade. New observations always use `projectRef`.
+ */
+function legacyProjectRef(directory: string): string {
+	return pseudonymousRef(directory, resolveLineageSalt());
 }
 
 function sessionScopeKey(
@@ -691,11 +711,12 @@ function schedulePersist(
 	// directory a directory-bearing producer or reader used (final-critic
 	// finding 2). With no known directory at all, persistence waits for a
 	// reader; correctness never depends on the artifact.
-	const target = directory ?? recentPersistDirectories.at(-1);
+	const target = directory ?? recentPersistDirectories.at(-1)?.directory;
 	if (!target) return;
-	const last = lastPersistAtByDirectory.get(target) ?? 0;
+	const targetKey = canonicalRootKeyFresh(target);
+	const last = lastPersistAtByDirectory.get(targetKey) ?? 0;
 	if (!force && now - last < PERSIST_DEBOUNCE_MS) return;
-	lastPersistAtByDirectory.set(target, now);
+	lastPersistAtByDirectory.set(targetKey, now);
 	void persistLearningHealth(target).catch(() => undefined);
 }
 
@@ -837,7 +858,7 @@ function isAdoptableScopeKey(key: string): boolean {
 	if (typeof key !== 'string' || key.length === 0 || key.length > 200) {
 		return false;
 	}
-	return /^[0-9a-zA-Z:_.-/]+$/.test(key);
+	return /^[-0-9a-zA-Z:_.\u002f]+$/.test(key);
 }
 
 function isFiniteCounter(value: unknown): value is number {
@@ -999,7 +1020,8 @@ export function observeModelLimitResolution(input: {
 // ── Producer feed 3: retrieval → receipt → application liveness ───────────
 
 function livenessMap(directory: string): Map<string, LivenessGap> {
-	let map = livenessGaps.get(directory);
+	const key = canonicalRootKeyFresh(directory);
+	let map = livenessGaps.get(key);
 	if (!map) {
 		// Evict the directory carrying the LEAST gap evidence (PRR-006):
 		// prefer empty maps; among non-empty ones, the fewest open gaps.
@@ -1018,7 +1040,7 @@ function livenessMap(directory: string): Map<string, LivenessGap> {
 			if (victim !== undefined) livenessGaps.delete(victim);
 		}
 		map = new Map();
-		livenessGaps.set(directory, map);
+		livenessGaps.set(key, map);
 	}
 	return map;
 }
@@ -1652,12 +1674,14 @@ export async function readLearningHealth(
 		// the reading project's own facts in practice, and the filter prevents a
 		// multi-project process from rendering another project's prefixed scopes.
 		const scopeOwner = projectRef(directory);
+		const legacyScopeOwner = legacyProjectRef(directory);
 		const active: ActiveLearningHealthAlarm[] = [];
 		for (const [alarm, scopes] of alarmScopes) {
 			for (const [key, scope] of scopes) {
 				if (scope.status !== 'active') continue;
 				const owned =
 					key.startsWith(`${scopeOwner}/`) ||
+					key.startsWith(`${legacyScopeOwner}/`) ||
 					key.startsWith('u/') ||
 					key.startsWith('store/');
 				if (!owned) continue;

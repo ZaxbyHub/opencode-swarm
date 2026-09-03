@@ -14,6 +14,7 @@ import {
 } from '../../../src/hooks/delegation-gate/worktree-merge-status';
 import { runInitOrphanRecovery } from '../../../src/hooks/init-orphan-recovery';
 import { resetSwarmState } from '../../../src/state';
+import { canonicalMkdtemp } from '../../helpers/tmpdir';
 
 describe('init orphan recovery durable background ownership', () => {
 	const roots: string[] = [];
@@ -130,6 +131,70 @@ describe('init orphan recovery durable background ownership', () => {
 		const result = await runInitOrphanRecovery(project);
 
 		expect(result.attempted).toBe(true);
+		expect(result.removedWorktrees).not.toContain(worktreePath);
+		expect(
+			fs.readFileSync(path.join(worktreePath, 'valuable.txt'), 'utf8'),
+		).toBe('keep\n');
+	});
+
+	test('preserves an owned worktree when its durable path is a physical alias', async () => {
+		const root = canonicalMkdtemp('swarm-bg-owner-alias-');
+		roots.push(root);
+		const project = path.join(root, 'project');
+		const worktreePath = path.join(
+			root,
+			'.swarm-worktrees',
+			'background-child',
+			'lane-1',
+		);
+		const alias = path.join(root, 'owned-worktree-alias');
+		fs.mkdirSync(path.join(project, '.swarm'), { recursive: true });
+		fs.mkdirSync(path.join(project, '.opencode'));
+		fs.mkdirSync(worktreePath, { recursive: true });
+		fs.writeFileSync(path.join(worktreePath, 'valuable.txt'), 'keep\n');
+		fs.symlinkSync(
+			worktreePath,
+			alias,
+			process.platform === 'win32' ? 'junction' : 'dir',
+		);
+		await recordPendingDelegation(project, {
+			correlationId: 'alias-child',
+			jobId: 'alias-job',
+			subagentSessionId: 'alias-child',
+			parentSessionId: 'parent',
+			callID: 'alias-call',
+			normalizedAgent: 'coder',
+			swarmPrefixedAgent: 'coder',
+			planTaskId: '1.1',
+			evidenceTaskId: '1.1',
+			taskChangeContext: {
+				declaredFiles: ['valuable.txt'],
+				baseline: {
+					directory: alias,
+					gitHead: 'base',
+					dirtyHash: 'clean',
+					changedFiles: [],
+					prHeadSha: null,
+					scope: '1.1',
+				},
+			},
+			worktree: {
+				callID: 'alias-call',
+				parentSessionId: 'parent',
+				taskId: '1.1',
+				planTaskId: '1.1',
+				worktreePath: alias,
+				branchName: 'swarm/lane/alias-child/lane-1',
+				worktreeId: 'lane-1',
+				worktreeSessionId: 'background-child',
+				mergeStrategy: 'merge',
+				laneIndex: 0,
+				worktreeDir: null,
+			},
+		});
+
+		resetSwarmState();
+		const result = await runInitOrphanRecovery(project);
 		expect(result.removedWorktrees).not.toContain(worktreePath);
 		expect(
 			fs.readFileSync(path.join(worktreePath, 'valuable.txt'), 'utf8'),

@@ -60,6 +60,10 @@ import {
 	atomicWriteSwarmFile,
 	atomicWriteSwarmFileSync,
 } from '../utils/atomic-write';
+import {
+	canonicalExistingFilesystemPath,
+	legacyCanonicalExistingFilesystemPath,
+} from '../utils/filesystem-identity.js';
 import { assertProjectRoot } from '../utils/project-boundary';
 import {
 	canonicalWorkspaceIdentity,
@@ -436,6 +440,8 @@ function validateScopeBindingPayload(
 	options: { allowLegacy?: boolean } = {},
 ): ScopeBinding | null {
 	const workspaceIdentity = canonicalWorkspaceIdentity(directory);
+	const legacyWorkspaceIdentity =
+		legacyCanonicalExistingFilesystemPath(directory);
 	const files = Array.isArray(parsed.files)
 		? normalizeScopeFiles(
 				parsed.files.filter((file): file is string => typeof file === 'string'),
@@ -444,7 +450,8 @@ function validateScopeBindingPayload(
 	if (
 		parsed.version !== 2 ||
 		!workspaceIdentity ||
-		parsed.workspaceIdentity !== workspaceIdentity ||
+		(parsed.workspaceIdentity !== workspaceIdentity &&
+			parsed.workspaceIdentity !== legacyWorkspaceIdentity) ||
 		!isSafeTaskId(parsed.taskId ?? '') ||
 		!files ||
 		typeof parsed.planId !== 'string' ||
@@ -544,14 +551,13 @@ function validateScopeBindingPayload(
 }
 
 function exactFilenameMatches(
+	directory: string,
 	filePath: string,
 	binding: ScopeBinding,
 ): boolean {
 	return (
 		normalizePathForComparison(filePath) ===
-		normalizePathForComparison(
-			getBindingFilePath(binding.workspaceIdentity, binding),
-		)
+		normalizePathForComparison(getBindingFilePath(directory, binding))
 	);
 }
 
@@ -1375,7 +1381,7 @@ function readAllExactBindings(
 				directory,
 				JSON.parse(raw) as Partial<ScopeBinding>,
 			);
-			if (binding && exactFilenameMatches(filePath, binding)) {
+			if (binding && exactFilenameMatches(directory, filePath, binding)) {
 				if (hasDurableRetirementIntent(filePath, binding)) {
 					let createdAt = Date.now();
 					try {
@@ -1826,7 +1832,8 @@ export async function replaceExistingScopeDeclaration(input: {
 }
 
 function scheduleScopeBindingMaintenance(directory: string): void {
-	const key = normalizePathForComparison(directory);
+	const key = canonicalExistingFilesystemPath(directory);
+	if (key === null) return;
 	if (maintenanceJobs.has(key)) return;
 	while (maintenanceJobs.size >= MAX_MAINTENANCE_JOBS) {
 		const oldest = maintenanceJobs.keys().next().value as string | undefined;
@@ -1844,7 +1851,10 @@ function scheduleScopeBindingMaintenance(directory: string): void {
 export async function flushScopeBindingMaintenance(
 	directory?: string,
 ): Promise<void> {
-	const key = directory ? normalizePathForComparison(directory) : undefined;
+	const key = directory
+		? canonicalExistingFilesystemPath(directory)
+		: undefined;
+	if (directory && key === null) return;
 	const job = key ? maintenanceJobs.get(key) : undefined;
 	await Promise.all(job ? [job] : [...maintenanceJobs.values()]);
 }

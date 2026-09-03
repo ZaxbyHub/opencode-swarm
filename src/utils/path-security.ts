@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { canonicalExistingFilesystemPath } from './filesystem-identity.js';
 
 /**
  * Canonical path security utilities.
@@ -450,27 +451,27 @@ export function isCanonicalPathWithinRoot(
 	targetPath: string,
 	rootPath: string,
 ): boolean {
-	let canonicalRoot: string;
-	try {
-		canonicalRoot = fs.realpathSync(rootPath);
-	} catch {
-		canonicalRoot = path.normalize(rootPath);
-	}
+	const canonicalRoot = canonicalExistingFilesystemPath(rootPath);
+	if (canonicalRoot === null) return false;
+	const rootPrefix = canonicalRoot.endsWith('/')
+		? canonicalRoot
+		: `${canonicalRoot}/`;
 
 	// Walk up to the nearest existing ancestor of the (possibly not-yet-created)
 	// target so symlinks on any existing component are resolved.
-	let probe = path.normalize(targetPath);
+	let probe = path.resolve(targetPath);
 	// Guard against an unbounded loop on malformed input.
 	for (let i = 0; i < 4096; i++) {
-		try {
-			const canonicalProbe = fs.realpathSync(probe);
-			const relative = path.relative(canonicalRoot, canonicalProbe);
-			return !relative.startsWith('..') && !path.isAbsolute(relative);
-		} catch {
-			const parent = path.dirname(probe);
-			if (parent === probe) return false; // reached filesystem root, nothing resolved
-			probe = parent;
+		const canonicalProbe = canonicalExistingFilesystemPath(probe);
+		if (canonicalProbe !== null) {
+			return (
+				canonicalProbe === canonicalRoot ||
+				canonicalProbe.startsWith(rootPrefix)
+			);
 		}
+		const parent = path.dirname(probe);
+		if (parent === probe) return false; // reached filesystem root, nothing resolved
+		probe = parent;
 	}
 	return false;
 }

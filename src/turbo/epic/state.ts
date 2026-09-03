@@ -13,6 +13,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { canonicalRootKeyFresh } from '../../utils/canonical-root.js';
 import * as logger from '../../utils/logger.js';
 
 /** Top-level state for a single session. */
@@ -73,12 +74,16 @@ export function emptySessionState(sessionID: string): EpicSessionState {
  */
 const stateUnreadableMap = new Map<string, boolean>();
 
+function stateKey(directory: string): string {
+	return canonicalRootKeyFresh(directory);
+}
+
 export function isStateUnreadable(directory: string): boolean {
-	return stateUnreadableMap.get(directory) ?? false;
+	return stateUnreadableMap.get(stateKey(directory)) ?? false;
 }
 
 function markStateUnreadable(directory: string, reason: string): void {
-	stateUnreadableMap.set(directory, true);
+	stateUnreadableMap.set(stateKey(directory), true);
 	logger.error(
 		`[turbo/epic/state] state file unreadable for ${directory}: ${reason} — failing closed`,
 	);
@@ -87,7 +92,7 @@ function markStateUnreadable(directory: string, reason: string): void {
 export function repairStateUnreadable(directory: string): void {
 	const filePath = path.join(directory, '.swarm', STATE_FILE);
 	if (!fs.existsSync(filePath)) {
-		stateUnreadableMap.delete(directory);
+		stateUnreadableMap.delete(stateKey(directory));
 		return;
 	}
 	try {
@@ -102,12 +107,12 @@ export function repairStateUnreadable(directory: string): void {
 			typeof parsed.sessions !== 'object' ||
 			Array.isArray(parsed.sessions)
 		) {
-			stateUnreadableMap.set(directory, true);
+			stateUnreadableMap.set(stateKey(directory), true);
 			return;
 		}
-		stateUnreadableMap.delete(directory);
+		stateUnreadableMap.delete(stateKey(directory));
 	} catch {
-		stateUnreadableMap.set(directory, true);
+		stateUnreadableMap.set(stateKey(directory), true);
 	}
 }
 
@@ -163,7 +168,7 @@ function writePersisted(
 	directory: string,
 	persisted: EpicPersistedState,
 ): void {
-	if (stateUnreadableMap.get(directory)) {
+	if (stateUnreadableMap.get(stateKey(directory))) {
 		throw new Error(
 			`Epic state is unreadable. Please repair .swarm/${STATE_FILE} before continuing.`,
 		);
@@ -206,7 +211,7 @@ export function loadEpicSessionState(
 	directory: string,
 	sessionID: string,
 ): EpicSessionState | null {
-	if (stateUnreadableMap.get(directory)) return null;
+	if (stateUnreadableMap.get(stateKey(directory))) return null;
 	const persisted = readPersisted(directory);
 	if (!persisted) return null;
 	return persisted.sessions[sessionID] ?? null;
@@ -217,7 +222,7 @@ export function saveEpicSessionState(
 	directory: string,
 	state: EpicSessionState,
 ): void {
-	if (stateUnreadableMap.get(directory)) {
+	if (stateUnreadableMap.get(stateKey(directory))) {
 		throw new Error(
 			`Epic state is unreadable for ${directory}. Repair .swarm/${STATE_FILE} before continuing.`,
 		);
@@ -259,7 +264,7 @@ export function isEpicModeActive(
  * this module's defaults.
  */
 export function isEpicModeActiveForProject(directory: string): boolean {
-	if (stateUnreadableMap.get(directory)) return false;
+	if (stateUnreadableMap.get(stateKey(directory))) return false;
 	// Phase 8: probe for the state file BEFORE calling `readPersisted`,
 	// which would otherwise seed an empty `.swarm/epic-state.json` (and
 	// the `.swarm/` directory itself) for any project that hasn't run
@@ -307,7 +312,7 @@ export function disableEpicMode(directory: string, sessionID: string): void {
 
 /** Reset the session's state entry entirely. */
 export function resetEpicSession(directory: string, sessionID: string): void {
-	if (stateUnreadableMap.get(directory)) {
+	if (stateUnreadableMap.get(stateKey(directory))) {
 		throw new Error(
 			`Epic state is unreadable for ${directory}. Repair .swarm/${STATE_FILE} before continuing.`,
 		);

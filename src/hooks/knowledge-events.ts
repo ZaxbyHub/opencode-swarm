@@ -29,6 +29,7 @@ import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { atomicWriteFile } from '../evidence/task-file.js';
 import { resolveHiveEventsPath as resolveHiveEventsPathImpl } from '../knowledge/hive-paths.js';
+import { canonicalRootKey } from '../utils/canonical-root.js';
 import { warn } from '../utils/logger.js';
 import { resolveKnowledgeStoreDir } from './knowledge-link.js';
 import {
@@ -823,10 +824,11 @@ function setCounterRollupCache(
 	key: string,
 	rollups: Map<string, CounterRollup>,
 ): void {
-	if (counterRollupCache.has(directory)) {
-		counterRollupCache.delete(directory);
+	const cacheKey = canonicalRootKey(directory);
+	if (counterRollupCache.has(cacheKey)) {
+		counterRollupCache.delete(cacheKey);
 	}
-	counterRollupCache.set(directory, {
+	counterRollupCache.set(cacheKey, {
 		key,
 		rollups: cloneRollupMap(rollups),
 	});
@@ -1125,10 +1127,11 @@ export async function readKnowledgeCounterRollups(
 ): Promise<Map<string, CounterRollup>> {
 	try {
 		const cacheKey = await buildCounterRollupCacheKey(directory);
-		const cached = counterRollupCache.get(directory);
+		const directoryKey = canonicalRootKey(directory);
+		const cached = counterRollupCache.get(directoryKey);
 		if (cached?.key === cacheKey) {
-			counterRollupCache.delete(directory);
-			counterRollupCache.set(directory, cached);
+			counterRollupCache.delete(directoryKey);
+			counterRollupCache.set(directoryKey, cached);
 			return cloneRollupMap(cached.rollups);
 		}
 		const [events, legacyRecords, baseline] = await Promise.all([

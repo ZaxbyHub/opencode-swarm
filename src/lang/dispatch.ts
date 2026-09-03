@@ -25,6 +25,7 @@ import type { LanguageBackend } from './backend';
 // `pickBackend` would get only the default backend even for languages with
 // concrete overrides like typescript. The barrel is idempotent.
 import './backends';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import { detectProjectLanguages } from './detector';
 import { MANIFEST_FILES } from './manifest-files';
 import { LANGUAGE_BACKEND_REGISTRY } from './registry-backend';
@@ -136,7 +137,8 @@ const manifestRootCache: Map<string, string> = new Map();
  */
 function findManifestRoot(start: string): string {
 	const resolved = path.resolve(start);
-	const cached = manifestRootCache.get(resolved);
+	const key = canonicalRootKeyFresh(resolved);
+	const cached = manifestRootCache.get(key);
 	if (cached !== undefined) return cached;
 	let cur = resolved;
 	for (let i = 0; i < 32; i++) {
@@ -144,14 +146,14 @@ function findManifestRoot(start: string): string {
 		if (entries.size > 0) {
 			for (const name of MANIFEST_FILES) {
 				if (entries.has(name)) {
-					manifestRootCache.set(resolved, cur);
+					manifestRootCache.set(key, cur);
 					return cur;
 				}
 			}
 			// .git boundary: stop the walk at the enclosing git root so we
 			// don't leak into ancestor projects.
 			if (entries.has('.git')) {
-				manifestRootCache.set(resolved, cur);
+				manifestRootCache.set(key, cur);
 				return cur;
 			}
 		}
@@ -159,7 +161,7 @@ function findManifestRoot(start: string): string {
 		if (parent === cur) break; // reached filesystem root
 		cur = parent;
 	}
-	manifestRootCache.set(resolved, start);
+	manifestRootCache.set(key, start);
 	return start;
 }
 
@@ -195,7 +197,7 @@ export async function pickBackend(
 ): Promise<LanguageBackend | null> {
 	const root = findManifestRoot(dir);
 	const hash = manifestHash(root);
-	const cacheKey = root;
+	const cacheKey = canonicalRootKeyFresh(root);
 	const cached = cache.get(cacheKey);
 	if (cached && cached.hash === hash) {
 		return cached.backend;
@@ -254,7 +256,7 @@ export async function pickBackend(
  */
 export function pickedProfiles(dir: string): ReadonlyArray<{ id: string }> {
 	const root = findManifestRoot(dir);
-	const cached = cache.get(root);
+	const cached = cache.get(canonicalRootKeyFresh(root));
 	return cached?.profiles ?? [];
 }
 

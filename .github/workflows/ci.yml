@@ -272,6 +272,12 @@ jobs:
         if: needs.detect-release.outputs.is-release != 'true'
         run: bun run check:error-channel-discard
 
+      # Issue #2474: prevent raw lexical path resolution from returning to
+      # project-identity comparisons and cache/Map/Set/template keys.
+      - name: Path identity ratchet (issue #2474)
+        if: needs.detect-release.outputs.is-release != 'true'
+        run: bun run check:path-identity
+
       # Issue #1616/#2107 recurrence guardrail: production source must not
       # contain NEW inline char/token estimation formulas — every conversion
       # routes through the canonical estimator in src/hooks/utils.ts.

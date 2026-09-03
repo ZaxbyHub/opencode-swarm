@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
+import { canonicalPathForFutureIo } from '../utils/filesystem-identity.js';
 import { warn } from '../utils/logger';
 import {
 	DEFAULT_MEMORY_CONFIG,
@@ -114,6 +116,7 @@ export interface RecallMemoryInput {
 const PII_REJECTION_EVENT_TARGET = 'pii_rejection';
 
 export class MemoryGateway {
+	private readonly context: MemoryContext;
 	private readonly config: MemoryConfig;
 	private readonly provider: MemoryProvider & Partial<MemoryProposalStore>;
 	/**
@@ -127,12 +130,19 @@ export class MemoryGateway {
 	/** #1466: cached PII detector instance (NER keeps its loaded pipeline here). */
 	private piiDetector: PiiDetector | undefined;
 
-	constructor(
-		private readonly context: MemoryContext,
-		options: MemoryGatewayOptions = {},
-	) {
+	constructor(context: MemoryContext, options: MemoryGatewayOptions = {}) {
 		this.config = resolveMemoryConfig(options.config ?? DEFAULT_MEMORY_CONFIG);
-		this.vettedRoot = resolveVettedMemoryRoot(context.directory, this.config);
+		// A gateway and its provider form one authority/storage capability. Pin
+		// both to the physical project identity observed at construction so a
+		// later alias retarget cannot make B scopes query A storage (or vice versa).
+		this.context = {
+			...context,
+			directory: requirePhysicalFutureIoPath(context.directory),
+		};
+		this.vettedRoot = resolveVettedMemoryRoot(
+			this.context.directory,
+			this.config,
+		);
 		this.provider =
 			options.provider ??
 			createConfiguredMemoryProviderForRoot(this.vettedRoot, this.config);
@@ -150,7 +160,9 @@ export class MemoryGateway {
 	}
 
 	deriveAllowedScopes(): MemoryScopeRef[] {
-		const resolvedRoot = path.resolve(this.context.directory);
+		// The provider and scopes share the construction-time physical identity.
+		// A new gateway is required to follow a retargeted project alias.
+		const resolvedRoot = this.context.directory;
 		const repoId = createStableId(
 			readGitRemoteUrl(resolvedRoot) ?? path.basename(resolvedRoot),
 		);
@@ -954,8 +966,30 @@ export function createConfiguredMemoryProviderForRoot(
 	if (config.provider === 'sqlite') {
 		return getOrCreateProviderForRoot(root, config);
 	}
-	const cohortRoot = root.kind === 'cohort' ? root.cohortRoot : null;
-	return new LocalJsonlMemoryProvider(root.directory, config, cohortRoot);
+	const directory = requirePhysicalFutureIoPath(root.directory);
+	if (root.kind === 'cohort') {
+		// JSONL I/O is lazy too. Materialize the already-vetted cohort root so
+		// physical identity can be captured before an alias is able to retarget.
+		try {
+			mkdirSync(root.cohortRoot, { recursive: true });
+		} catch {
+			// Preserve the provider's existing lazy error boundary.
+		}
+		return new LocalJsonlMemoryProvider(
+			directory,
+			config,
+			requirePhysicalFutureIoPath(root.cohortRoot),
+		);
+	}
+	return new LocalJsonlMemoryProvider(directory, config, null);
+}
+
+function requirePhysicalFutureIoPath(entryPath: string): string {
+	const canonical = canonicalPathForFutureIo(entryPath);
+	if (canonical !== null) return canonical;
+	throw new MemoryValidationError(
+		'memory storage root physical identity could not be resolved',
+	);
 }
 
 function sourceFromEvidence(
@@ -994,11 +1028,25 @@ function createStableId(value: string): string {
 
 const gitRemoteUrlCache = new Map<string, string | undefined>();
 
+const MAX_GIT_REMOTE_CACHE_ENTRIES = 128;
+
+function cacheGitRemoteUrl(key: string, remoteUrl: string | undefined): void {
+	if (!gitRemoteUrlCache.has(key)) {
+		while (gitRemoteUrlCache.size >= MAX_GIT_REMOTE_CACHE_ENTRIES) {
+			const oldest = gitRemoteUrlCache.keys().next().value;
+			if (oldest === undefined) break;
+			gitRemoteUrlCache.delete(oldest);
+		}
+	}
+	gitRemoteUrlCache.set(key, remoteUrl);
+}
+
 function readGitRemoteUrl(directory: string): string | undefined {
-	if (gitRemoteUrlCache.has(directory)) return gitRemoteUrlCache.get(directory);
+	const key = canonicalRootKeyFresh(directory);
+	if (gitRemoteUrlCache.has(key)) return gitRemoteUrlCache.get(key);
 	const gitConfigPath = path.join(directory, '.git', 'config');
 	if (!existsSync(gitConfigPath)) {
-		gitRemoteUrlCache.set(directory, undefined);
+		cacheGitRemoteUrl(key, undefined);
 		return undefined;
 	}
 	try {
@@ -1007,10 +1055,10 @@ function readGitRemoteUrl(directory: string): string | undefined {
 			/\[remote "origin"\][\s\S]*?\n\s*url\s*=\s*(.+)/,
 		);
 		const remoteUrl = match?.[1]?.trim();
-		gitRemoteUrlCache.set(directory, remoteUrl);
+		cacheGitRemoteUrl(key, remoteUrl);
 		return remoteUrl;
 	} catch {
-		gitRemoteUrlCache.set(directory, undefined);
+		cacheGitRemoteUrl(key, undefined);
 		return undefined;
 	}
 }
@@ -1063,7 +1111,9 @@ function scopeKey(scope: MemoryScopeRef): string {
 		workspaceId: scope.workspaceId,
 		projectId: scope.projectId,
 		repoId: scope.repoId,
-		repoRoot: scope.repoRoot ? path.resolve(scope.repoRoot) : undefined,
+		repoRoot: scope.repoRoot
+			? canonicalRootKeyFresh(scope.repoRoot)
+			: undefined,
 		runId: scope.runId,
 		agentId: scope.agentId,
 		// #1850 (H-001 fix): cohortId MUST be part of the scope-validation key,

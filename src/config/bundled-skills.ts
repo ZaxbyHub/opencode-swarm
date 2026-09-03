@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { advisoryWarn } from '../services/warning-buffer.js';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import { log } from '../utils/logger.js';
 export const BUNDLED_PROJECT_SKILLS = [
 	'brainstorm',
@@ -433,7 +434,7 @@ export async function syncBundledProjectSkillsIfMissingAsync(
 	packageRoot: string,
 	quiet = false,
 ): Promise<void> {
-	const syncKey = path.resolve(projectDirectory, BUNDLED_PROJECT_SKILL_ROOT);
+	const syncKey = `${canonicalRootKeyFresh(projectDirectory)}\u0000${BUNDLED_PROJECT_SKILL_ROOT}`;
 	const existing = inFlightSyncs.get(syncKey);
 	if (existing) return existing;
 	if (inFlightSyncs.size >= MAX_IN_FLIGHT_SYNCS) {

@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Plan } from '../config/plan-schema';
 import { computePlanStructureHash } from '../plan/ledger';
 import { derivePlanId } from '../plan/utils';
+import { canonicalExistingFilesystemPath } from '../utils/filesystem-identity.js';
 import {
 	getPathFlavor,
 	normalizePathIdentity,
@@ -91,12 +91,7 @@ export function isScopeBindingIdentity(value: unknown): value is string {
 }
 
 export function canonicalWorkspaceIdentity(directory: string): string | null {
-	try {
-		const real = fs.realpathSync(directory).replace(/\\/g, '/');
-		return process.platform === 'win32' ? real.toLowerCase() : real;
-	} catch {
-		return null;
-	}
+	return canonicalExistingFilesystemPath(directory);
 }
 
 function isStrictTaskId(value: string): boolean {

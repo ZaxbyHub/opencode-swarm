@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import { validateSwarmPath } from '../../hooks/utils';
 import type { FileLock } from '../../parallel/file-locks';
 import { tryAcquireLock } from '../../parallel/file-locks';
+import { sameProjectRoot } from '../../utils/canonical-root.js';
 import * as logger from '../../utils/logger';
 import {
 	containsControlChars,
@@ -124,7 +125,7 @@ function bindGraphToWorkspace(graph: RepoGraph, workspace: string): void {
 			`repo-graph.json workspaceRoot realpath security check failed: ${graph.workspaceRoot}`,
 		);
 	}
-	if (path.normalize(trustedPersisted) !== path.normalize(trustedWorkspace)) {
+	if (!sameProjectRoot(trustedPersisted, trustedWorkspace)) {
 		throw corruption(
 			`repo-graph.json workspaceRoot mismatch: ${graph.workspaceRoot}`,
 		);
@@ -470,7 +471,7 @@ export async function saveGraph(
 		);
 	}
 
-	if (path.normalize(realWorkspace) !== path.normalize(realGraphRoot)) {
+	if (!sameProjectRoot(realWorkspace, realGraphRoot)) {
 		throw new Error(
 			`Graph workspaceRoot mismatch: graph was built for "${graph.workspaceRoot}" but save was called for "${workspace}"`,
 		);

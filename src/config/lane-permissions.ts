@@ -102,6 +102,7 @@ import * as path from 'node:path';
 import { appendCoreEventSync } from '../events/core-events.js';
 import { SKILL_SEARCH_ROOTS } from '../hooks/skill-propagation-gate';
 import { addDeferredWarning } from '../services/warning-buffer';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import {
 	getHostConfigDir,
 	getHostDataDir,
@@ -282,7 +283,7 @@ function push(
 	if (!isExpressibleDirectory(resolved)) return;
 	// Deduplicate case-insensitively on Windows so the same directory reached by
 	// two spellings does not produce two rules.
-	const key = process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+	const key = canonicalRootKeyFresh(resolved);
 	if (seen.has(key)) return;
 	seen.add(key);
 	out.push({ dir: resolved, pattern: laneDirectoryPattern(resolved), reason });

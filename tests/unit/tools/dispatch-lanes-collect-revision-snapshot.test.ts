@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test';
+import * as fs from 'node:fs';
 import { findByCorrelationId } from '../../../src/background/pending-delegations';
 import {
 	_internals,
@@ -42,6 +43,58 @@ function workspaceFor(directory: string, prHeadSha: string) {
 }
 
 describe('collection resolves one revision snapshot per root+head (#2381)', () => {
+	test('physical root aliases share one live snapshot resolution', async () => {
+		const directory = makeTempDir();
+		const alias = `${directory}-snapshot-alias`;
+		try {
+			fs.symlinkSync(
+				directory,
+				alias,
+				process.platform === 'win32' ? 'junction' : 'dir',
+			);
+			const batchId = 'snapshot-physical-alias';
+			await recordPending({
+				directory,
+				batchId,
+				laneId: 'lane-a',
+				correlationId: `${batchId}-lane-a`,
+				workspace: workspaceFor(directory, 'head-1'),
+			});
+			await recordPending({
+				directory,
+				batchId,
+				laneId: 'lane-b',
+				correlationId: `${batchId}-lane-b`,
+				workspace: workspaceFor(alias, 'head-1'),
+			});
+
+			const digest = mock(async () => 'd'.repeat(64));
+			_internals.resolvePrWorkflowRevisionDigestAsync = digest;
+			const status = mock(async () => ({
+				data: {
+					[`${batchId}-lane-a`]: { type: 'idle' },
+					[`${batchId}-lane-b`]: { type: 'idle' },
+				},
+				error: undefined,
+			}));
+			const messages = mock(async () => ({
+				data: [assistantMessage('settled lane output')],
+				error: undefined,
+			}));
+			_internals.getSessionOps = () => ({ ...baseOps(), status, messages });
+
+			const result = await executeCollectLaneResults(
+				{ batch_id: batchId, wait: true, include_pending: true },
+				directory,
+			);
+
+			expect(result.completed).toBe(2);
+			expect(digest).toHaveBeenCalledTimes(1);
+		} finally {
+			fs.rmSync(alias, { recursive: true, force: true });
+		}
+	});
+
 	test('multiple lanes sharing a head resolve the digest exactly once', async () => {
 		const directory = makeTempDir();
 		const batchId = 'snapshot-shared-head';

@@ -196,6 +196,15 @@ function getPlanJsonPath(directory: string): string {
 	return path.join(directory, '.swarm', PLAN_JSON_FILENAME);
 }
 
+/** Compare names by locale-independent UTF-16 code-unit order. */
+function compareCodeUnits(a: string, b: string): number {
+	return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function readLedgerDirectory(directory: string): string[] {
+	return fs.readdirSync(directory);
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
 	if (value && typeof value === 'object' && !Array.isArray(value)) {
 		return value as Record<string, unknown>;
@@ -1315,7 +1324,9 @@ export async function replaceTruncatedLedgerWithRecoveryRoot(
 			let archiveName = `plan-ledger.reconcile-archive.${Date.now()}.${Math.floor(Math.random() * 1e9)}${archiveSuffix}`;
 			let archivePath = path.join(swarmDir, archiveName);
 			let archiveNeedsWrite = true;
-			for (const candidate of fs.readdirSync(swarmDir)) {
+			for (const candidate of _internals
+				.readLedgerDirectory(swarmDir)
+				.sort(compareCodeUnits)) {
 				if (
 					!candidate.startsWith('plan-ledger.reconcile-archive.') ||
 					!candidate.endsWith(archiveSuffix)
@@ -1882,8 +1893,9 @@ export async function quarantineLedgerSuffix(
 		// byte-comparing the content) already exists, reuse it instead of writing a
 		// new one. Distinct corruptions still get their own file (different hash).
 		try {
-			const existing = fs
-				.readdirSync(swarmDir)
+			const existing = _internals
+				.readLedgerDirectory(swarmDir)
+				.sort(compareCodeUnits)
 				.filter(
 					(name) =>
 						name.startsWith('plan-ledger.quarantine.') &&
@@ -2098,5 +2110,6 @@ export const _internals = {
 	getPlanJsonPath,
 	writeFileFsyncedThenRename,
 	fsyncRecoveryDirectory,
+	readLedgerDirectory,
 	randomUUID: () => crypto.randomUUID(),
 };

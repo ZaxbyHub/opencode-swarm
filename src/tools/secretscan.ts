@@ -5,6 +5,7 @@ import { z } from 'zod';
 import {
 	containsControlChars,
 	containsPathTraversal,
+	isCanonicalPathWithinRoot,
 } from '../utils/path-security';
 import { createSwarmTool, type ToolResult } from './create-tool';
 
@@ -836,16 +837,7 @@ function isSymlinkLoop(realPath: string, visited: VisitedPaths): boolean {
 }
 
 function isPathWithinScope(realPath: string, scanDir: string): boolean {
-	// Resolve both paths and check if realPath is within scanDir
-	const resolvedScanDir = path.resolve(scanDir);
-	const resolvedRealPath = path.resolve(realPath);
-	// Use separator-aware check to prevent /abc vs /abcd confusion
-	return (
-		resolvedRealPath === resolvedScanDir ||
-		resolvedRealPath.startsWith(resolvedScanDir + path.sep) ||
-		resolvedRealPath.startsWith(`${resolvedScanDir}/`) ||
-		resolvedRealPath.startsWith(`${resolvedScanDir}\\`)
-	);
+	return isCanonicalPathWithinRoot(realPath, scanDir);
 }
 
 const DISCOVERY_YIELD_INTERVAL = 100;

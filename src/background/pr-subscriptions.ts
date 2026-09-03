@@ -54,6 +54,11 @@ import { validateSwarmPath } from '../hooks/utils.js';
 import { telemetry } from '../telemetry.js';
 import { log } from '../utils';
 import { atomicWriteSwarmFileSync } from '../utils/atomic-write.js';
+import {
+	canonicalRootKey,
+	canonicalRootKeyFresh,
+	sameProjectRoot,
+} from '../utils/canonical-root.js';
 
 export const PR_SUBSCRIPTIONS_FILE = 'pr-monitor/subscriptions.jsonl';
 export const PR_SUBSCRIPTIONS_CHECKPOINT_FILE =
@@ -473,20 +478,6 @@ export function buildCorrelationId(
 	prNumber: number,
 ): string {
 	return `${sessionID}::${repoFullName}::${prNumber}`;
-}
-
-/**
- * Project-root identity comparison for checkpoint replay (issue #2042
- * Required 5). Both sides are `path.resolve`d; POSIX compares exactly, win32
- * compares case-insensitively (drive-letter/segment case). No
- * realpath/UNC/8.3 normalization — an unresolved mismatch fails SAFE
- * (foreign → no monitor start, rebind on write, health-visible).
- */
-function sameProjectRoot(recorded: string, current: string): boolean {
-	const a = path.resolve(recorded);
-	const b = path.resolve(current);
-	if (process.platform === 'win32') return a.toLowerCase() === b.toLowerCase();
-	return a === b;
 }
 
 function fileSizeOrNull(filePath: string): number | null {
@@ -1515,11 +1506,12 @@ interface LoadedView {
 /** Bounded once-per-directory over-limit warnings (diagnostic only). */
 const legacyOverLimitWarned = new Map<string, boolean>();
 function warnLegacyOverLimit(directory: string, size: number): void {
-	if (legacyOverLimitWarned.has(directory)) return;
+	const key = canonicalRootKey(directory);
+	if (legacyOverLimitWarned.has(key)) return;
 	if (legacyOverLimitWarned.size >= 32) {
 		legacyOverLimitWarned.delete(legacyOverLimitWarned.keys().next().value!);
 	}
-	legacyOverLimitWarned.set(directory, true);
+	legacyOverLimitWarned.set(key, true);
 	log(
 		`[pr-monitor] legacy subscriptions.jsonl is ${size} bytes (>${PR_SUBSCRIPTION_LIMITS.legacySourceMaxBytes}); refusing to fold it — archive or split the file so its subscriptions can be re-subscribed, then remove it (reported via /swarm pr status)`,
 	);
@@ -1528,13 +1520,14 @@ function warnLegacyOverLimit(directory: string, size: number): void {
 /** Bounded once-per-directory migration-capacity warnings (diagnostic only). */
 const migrationCapacityWarned = new Map<string, boolean>();
 function warnMigrationCapacity(directory: string, records: number): void {
-	if (migrationCapacityWarned.has(directory)) return;
+	const key = canonicalRootKey(directory);
+	if (migrationCapacityWarned.has(key)) return;
 	if (migrationCapacityWarned.size >= 32) {
 		migrationCapacityWarned.delete(
 			migrationCapacityWarned.keys().next().value!,
 		);
 	}
-	migrationCapacityWarned.set(directory, true);
+	migrationCapacityWarned.set(key, true);
 	log(
 		`[pr-monitor] legacy subscriptions.jsonl folds to ${records} records (>checkpoint capacity ${PR_SUBSCRIPTION_LIMITS.maxCheckpointRecords}); migration refused — archive or split the file so its subscriptions can be re-subscribed, then remove it`,
 	);
@@ -1743,11 +1736,12 @@ async function loadViewForRead(directory: string): Promise<{
  */
 const bootstrapAttempted = new Map<string, boolean>();
 async function bootstrapCheckpointFromLegacy(directory: string): Promise<void> {
-	if (bootstrapAttempted.has(directory)) return;
+	const key = canonicalRootKeyFresh(directory);
+	if (bootstrapAttempted.has(key)) return;
 	if (bootstrapAttempted.size >= 32) {
 		bootstrapAttempted.delete(bootstrapAttempted.keys().next().value!);
 	}
-	bootstrapAttempted.set(directory, true);
+	bootstrapAttempted.set(key, true);
 	try {
 		await withEvidenceLock(
 			directory,

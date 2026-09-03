@@ -10,6 +10,7 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { canonicalRootKeyFresh } from '../../utils/canonical-root.js';
 import * as logger from '../../utils/logger';
 
 export type LeanTurboStatus = 'idle' | 'running' | 'paused' | 'terminated';
@@ -137,16 +138,20 @@ export function emptyPersisted(): LeanTurboPersistedState {
  */
 const stateUnreadableMap = new Map<string, boolean>();
 
+function stateKey(directory: string): string {
+	return canonicalRootKeyFresh(directory);
+}
+
 export function isStateUnreadable(directory: string): boolean {
-	return stateUnreadableMap.get(directory) ?? false;
+	return stateUnreadableMap.get(stateKey(directory)) ?? false;
 }
 
 function _clearStateUnreadable(directory: string): void {
-	stateUnreadableMap.delete(directory);
+	stateUnreadableMap.delete(stateKey(directory));
 }
 
 function markStateUnreadable(directory: string, reason: string): void {
-	stateUnreadableMap.set(directory, true);
+	stateUnreadableMap.set(stateKey(directory), true);
 	logger.error(
 		`[turbo/lean/state] state file unreadable for ${directory}: ${reason} — failing closed`,
 	);
@@ -155,7 +160,7 @@ function markStateUnreadable(directory: string, reason: string): void {
 export function repairStateUnreadable(directory: string): void {
 	const filePath = path.join(directory, '.swarm', STATE_FILE);
 	if (!fs.existsSync(filePath)) {
-		stateUnreadableMap.delete(directory);
+		stateUnreadableMap.delete(stateKey(directory));
 		return;
 	}
 	try {
@@ -170,12 +175,12 @@ export function repairStateUnreadable(directory: string): void {
 			typeof parsed.sessions !== 'object' ||
 			Array.isArray(parsed.sessions)
 		) {
-			stateUnreadableMap.set(directory, true);
+			stateUnreadableMap.set(stateKey(directory), true);
 			return;
 		}
-		stateUnreadableMap.delete(directory);
+		stateUnreadableMap.delete(stateKey(directory));
 	} catch {
-		stateUnreadableMap.set(directory, true);
+		stateUnreadableMap.set(stateKey(directory), true);
 	}
 }
 
@@ -232,7 +237,7 @@ export function writePersisted(
 	directory: string,
 	persisted: LeanTurboPersistedState,
 ): void {
-	if (stateUnreadableMap.get(directory)) {
+	if (stateUnreadableMap.get(stateKey(directory))) {
 		throw new Error(
 			`Lean Turbo state is unreadable. Please repair .swarm/${STATE_FILE} before continuing.`,
 		);
@@ -277,7 +282,7 @@ export function loadLeanTurboRunState(
 	directory: string,
 	sessionID: string,
 ): LeanTurboRunState | null {
-	if (stateUnreadableMap.get(directory)) return null;
+	if (stateUnreadableMap.get(stateKey(directory))) return null;
 	const persisted = readPersisted(directory);
 	if (!persisted) return null;
 	return persisted.sessions[sessionID] ?? null;
@@ -287,7 +292,7 @@ export function saveLeanTurboRunState(
 	directory: string,
 	runState: LeanTurboRunState,
 ): void {
-	if (stateUnreadableMap.get(directory)) {
+	if (stateUnreadableMap.get(stateKey(directory))) {
 		throw new Error(
 			`Lean Turbo state is unreadable for ${directory}. Please repair .swarm/${STATE_FILE} before continuing.`,
 		);
@@ -306,7 +311,7 @@ export function isLeanTurboRunActive(
 	directory: string,
 	sessionID: string,
 ): boolean {
-	if (stateUnreadableMap.get(directory)) return false;
+	if (stateUnreadableMap.get(stateKey(directory))) return false;
 	const persisted = readPersisted(directory);
 	if (!persisted) return false;
 	const state = persisted.sessions[sessionID];
@@ -318,7 +323,7 @@ export function pauseLeanTurboRun(
 	sessionID: string,
 	reason: string,
 ): void {
-	if (stateUnreadableMap.get(directory)) {
+	if (stateUnreadableMap.get(stateKey(directory))) {
 		throw new Error(
 			`Lean Turbo state is unreadable for ${directory}. Please repair .swarm/${STATE_FILE} before continuing.`,
 		);
@@ -338,7 +343,7 @@ export function pauseLeanTurboRun(
 }
 
 export function resetLeanTurboRun(directory: string, sessionID: string): void {
-	if (stateUnreadableMap.get(directory)) {
+	if (stateUnreadableMap.get(stateKey(directory))) {
 		throw new Error(
 			`Lean Turbo state is unreadable for ${directory}. Please repair .swarm/${STATE_FILE} before continuing.`,
 		);

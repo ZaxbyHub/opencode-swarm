@@ -13,9 +13,13 @@
 
 import type { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync, unlinkSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { atomicWriteSwarmFileSync } from '../utils/atomic-write.js';
-import { canonicalProjectKey } from './canonical-project.js';
+import {
+	canonicalRootKeyFresh,
+	lexicalRootAliasKey,
+} from '../utils/canonical-root.js';
+import { canonicalExistingFilesystemPath } from '../utils/filesystem-identity.js';
 import { ProjectDbError } from './db-errors.js';
 import { loadDatabaseCtor } from './sqlite-loader.js';
 
@@ -224,7 +228,53 @@ const MIGRATIONS: Migration[] = [
 	},
 ];
 
-const _projectDbs: Map<string, Database> = new Map();
+interface ProjectDbRecord {
+	db: Database;
+	primaryAlias: string;
+	aliases: Set<string>;
+}
+
+const _projectDbs: Map<string, ProjectDbRecord> = new Map();
+const _projectDbAliases: Map<string, string> = new Map();
+const MAX_ALIASES_PER_PROJECT_DB = 128;
+
+function lexicalAliasKey(directory: string): string {
+	return lexicalRootAliasKey(directory);
+}
+
+function unbindAlias(alias: string, physicalKey: string): void {
+	if (_projectDbAliases.get(alias) === physicalKey) {
+		_projectDbAliases.delete(alias);
+	}
+	_projectDbs.get(physicalKey)?.aliases.delete(alias);
+}
+
+function bindAlias(
+	record: ProjectDbRecord,
+	physicalKey: string,
+	alias: string,
+): void {
+	const previousKey = _projectDbAliases.get(alias);
+	if (previousKey !== undefined && previousKey !== physicalKey) {
+		unbindAlias(alias, previousKey);
+	}
+	record.aliases.delete(alias);
+	record.aliases.add(alias);
+	_projectDbAliases.set(alias, physicalKey);
+	while (record.aliases.size > MAX_ALIASES_PER_PROJECT_DB) {
+		const evicted = [...record.aliases].find(
+			(candidate) => candidate !== record.primaryAlias && candidate !== alias,
+		);
+		if (evicted === undefined) break;
+		unbindAlias(evicted, physicalKey);
+	}
+}
+
+function closeRecord(physicalKey: string, record: ProjectDbRecord): void {
+	record.db.close();
+	_projectDbs.delete(physicalKey);
+	for (const alias of [...record.aliases]) unbindAlias(alias, physicalKey);
+}
 
 /** Number of currently cached project DB handles (tests / observability). */
 export function getOpenProjectDbCount(): number {
@@ -377,7 +427,7 @@ export function runProjectMigrations(db: Database, markerDir?: string): void {
  * Does not create the file or any parent directory.
  */
 export function projectDbPath(directory: string): string {
-	return join(resolve(directory), '.swarm', 'swarm.db');
+	return join(canonicalRootKeyFresh(directory), '.swarm', 'swarm.db');
 }
 
 /**
@@ -387,10 +437,7 @@ export function projectDbPath(directory: string): string {
  * workspace just to check for a missing record.
  */
 export function projectDbExists(directory: string): boolean {
-	// Canonical identity (#2480 review F-04): match getProjectDb's keying so
-	// a case-variant/symlinked spelling of the root still sees the DB that a
-	// prior canonical-keyed open created.
-	return existsSync(join(canonicalProjectKey(directory), '.swarm', 'swarm.db'));
+	return existsSync(projectDbPath(directory));
 }
 
 /**
@@ -428,9 +475,18 @@ function checkpointWalBestEffort(db: Database): void {
  * half-open handle cached.
  */
 export function getProjectDb(directory: string): Database {
-	const key = canonicalProjectKey(directory);
+	// Preserve the existing create-on-first-open contract, but materialize the
+	// root before choosing its resource identity. A missing child beneath a
+	// symlink/junction parent otherwise changes from a lexical key to a physical
+	// key after `.swarm/` creation and can strand a duplicate connection.
+	mkdirSync(directory, { recursive: true });
+	const key = canonicalRootKeyFresh(directory);
+	const alias = lexicalAliasKey(directory);
 	const existing = _projectDbs.get(key);
-	if (existing) return existing;
+	if (existing) {
+		bindAlias(existing, key, alias);
+		return existing.db;
+	}
 
 	const swarmDir = join(key, '.swarm');
 	try {
@@ -482,7 +538,13 @@ export function getProjectDb(directory: string): Database {
 		);
 	}
 
-	_projectDbs.set(key, db);
+	const record: ProjectDbRecord = {
+		db,
+		primaryAlias: alias,
+		aliases: new Set(),
+	};
+	_projectDbs.set(key, record);
+	bindAlias(record, key, alias);
 	return db;
 }
 
@@ -500,15 +562,31 @@ export function getProjectDb(directory: string): Database {
  * writers on one file). Reopening via `getProjectDb` always works.
  */
 export function closeProjectDb(directory: string): void {
-	const key = canonicalProjectKey(directory);
-	const db = _projectDbs.get(key);
-	if (db) {
-		checkpointWalBestEffort(db);
-		try {
-			db.close();
-		} finally {
-			_projectDbs.delete(key);
-		}
+	const alias = lexicalAliasKey(directory);
+	// Resolve the path again before consulting the alias table. The alias may
+	// have been retargeted since it was opened; an older alias binding must not
+	// close a different project's live connection when the new target is
+	// cached. Keep the binding as a fallback for broken/deleted aliases, where
+	// the physical target can no longer be resolved but the old connection
+	// still needs to be released.
+	const currentPath = canonicalExistingFilesystemPath(directory);
+	if (currentPath !== null) {
+		// Use the canonical-root formatter for the cache lookup so the key has
+		// the same separator contract as getProjectDb. The existing-path proof
+		// above still prevents a stale lexical alias from selecting an old DB.
+		const currentKey = canonicalRootKeyFresh(directory);
+		const currentRecord = _projectDbs.get(currentKey);
+		if (currentRecord) closeRecord(currentKey, currentRecord);
+		// The current physical target resolved successfully. If it is not
+		// cached, do not fall back to a stale alias binding from an older target.
+		return;
+	}
+
+	const previousKey = _projectDbAliases.get(alias);
+	const previousRecord =
+		previousKey === undefined ? undefined : _projectDbs.get(previousKey);
+	if (previousKey !== undefined && previousRecord) {
+		closeRecord(previousKey, previousRecord);
 	}
 }
 
@@ -517,13 +595,19 @@ export function closeProjectDb(directory: string): void {
  * Test-only.
  */
 export function closeAllProjectDbs(): void {
-	for (const db of _projectDbs.values()) {
+	for (const record of _projectDbs.values()) {
 		try {
-			checkpointWalBestEffort(db);
-			db.close();
+			checkpointWalBestEffort(record.db);
+			record.db.close();
 		} catch {
 			// ignore close errors during cleanup
 		}
 	}
 	_projectDbs.clear();
+	_projectDbAliases.clear();
 }
+
+export const _internals = {
+	projectDbCount: () => _projectDbs.size,
+	projectDbAliasCount: () => _projectDbAliases.size,
+};

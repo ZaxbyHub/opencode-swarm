@@ -15,6 +15,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { canonicalRootKeyFresh } from '../../utils/canonical-root.js';
 import * as logger from '../../utils/logger.js';
 
 /** Persisted shape of `.swarm/epic/calibration.json`. */
@@ -73,12 +74,16 @@ export function emptyCalibrationState(): CalibrationState {
  */
 const stateUnreadableMap = new Map<string, boolean>();
 
+function stateKey(directory: string): string {
+	return canonicalRootKeyFresh(directory);
+}
+
 export function isCalibrationStateUnreadable(directory: string): boolean {
-	return stateUnreadableMap.get(directory) ?? false;
+	return stateUnreadableMap.get(stateKey(directory)) ?? false;
 }
 
 function markUnreadable(directory: string, reason: string): void {
-	stateUnreadableMap.set(directory, true);
+	stateUnreadableMap.set(stateKey(directory), true);
 	logger.error(
 		`[epic/calibration] state file unreadable for ${directory}: ${reason} — failing closed`,
 	);
@@ -87,19 +92,19 @@ function markUnreadable(directory: string, reason: string): void {
 export function repairCalibrationUnreadable(directory: string): void {
 	const filePath = path.join(directory, STATE_REL_DIR, STATE_FILE);
 	if (!fs.existsSync(filePath)) {
-		stateUnreadableMap.delete(directory);
+		stateUnreadableMap.delete(stateKey(directory));
 		return;
 	}
 	try {
 		const raw = fs.readFileSync(filePath, 'utf-8');
 		const parsed = JSON.parse(raw) as Partial<CalibrationState>;
 		if (!isValidCalibrationShape(parsed)) {
-			stateUnreadableMap.set(directory, true);
+			stateUnreadableMap.set(stateKey(directory), true);
 			return;
 		}
-		stateUnreadableMap.delete(directory);
+		stateUnreadableMap.delete(stateKey(directory));
 	} catch {
-		stateUnreadableMap.set(directory, true);
+		stateUnreadableMap.set(stateKey(directory), true);
 	}
 }
 
@@ -138,9 +143,9 @@ function ensureSwarmEpicDir(directory: string): string {
 export function loadCalibrationState(
 	directory: string,
 ): CalibrationState | null {
-	if (stateUnreadableMap.get(directory)) {
+	if (stateUnreadableMap.get(stateKey(directory))) {
 		repairCalibrationUnreadable(directory);
-		if (stateUnreadableMap.get(directory)) return null;
+		if (stateUnreadableMap.get(stateKey(directory))) return null;
 	}
 	const filePath = path.join(directory, STATE_REL_DIR, STATE_FILE);
 	try {
@@ -183,7 +188,7 @@ export function saveCalibrationState(
 	directory: string,
 	state: CalibrationState,
 ): void {
-	if (stateUnreadableMap.get(directory)) {
+	if (stateUnreadableMap.get(stateKey(directory))) {
 		throw new Error(
 			`Epic calibration state is unreadable for ${directory}. Repair .swarm/epic/${STATE_FILE} before continuing.`,
 		);

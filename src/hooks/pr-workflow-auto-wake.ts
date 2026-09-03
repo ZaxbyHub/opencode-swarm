@@ -1,4 +1,4 @@
-import * as path from 'node:path';
+import { canonicalRootKeyFresh } from '../utils/canonical-root.js';
 import { readPrWorkflowGateState } from './pr-workflow-gate.js';
 
 export const _internals: {
@@ -33,7 +33,7 @@ const pluginWakeMarkers = new Map<string, PluginWakeMarker[]>();
 let nextMarkerID = 0;
 
 function projectSessionKey(directory: string, sessionID: string): string {
-	return `${path.resolve(directory)}\0${sessionID.trim()}`;
+	return `${canonicalRootKeyFresh(directory)}\0${sessionID.trim()}`;
 }
 
 function rememberBounded<T>(map: Map<string, T>, key: string, value: T): void {

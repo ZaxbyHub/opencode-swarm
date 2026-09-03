@@ -17,6 +17,7 @@ import * as path from 'node:path';
 import packageJson from '../../../package.json' with { type: 'json' };
 import { validateSwarmPath } from '../../hooks/utils';
 import { bunWrite } from '../../utils/bun-compat';
+import { canonicalRootKeyFresh } from '../../utils/canonical-root.js';
 import {
 	containsControlChars,
 	validateSymlinkBoundary,
@@ -104,8 +105,7 @@ export const _internals: {
 };
 
 function normalizeRoot(root: string): string {
-	const resolved = path.normalize(path.resolve(root));
-	return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+	return canonicalRootKeyFresh(root);
 }
 
 function normalizedExcludes(options?: FreshnessOptions): string[] {
@@ -429,7 +429,9 @@ export async function probeFreshness(
 	root: string,
 	options?: FreshnessOptions,
 ): Promise<FreshnessProbe> {
-	const rootKey = normalizeRoot(root);
+	// Capture physical identity once for the in-flight probe. All completion
+	// checks below use this same key even if an alias changes while I/O runs.
+	const rootKey = canonicalRootKeyFresh(root);
 	const signature = optionSignature(options);
 	const now = _internals.now();
 	const cached = probeCache.get(rootKey);
