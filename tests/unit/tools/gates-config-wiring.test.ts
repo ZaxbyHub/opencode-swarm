@@ -436,11 +436,11 @@ describe('quality_budget config merge precedence', () => {
 });
 
 // ---------------------------------------------------------------------------
-// pre_check_batch: config-disabled SAST takes the unified skip shape.
+// pre_check_batch: config-disabled gates take the unified skip shapes.
 // ---------------------------------------------------------------------------
 
-describe('pre_check_batch honors gates.sast_scan.enabled:false', () => {
-	test('sast_scan.ran === false, sast_skipped === true, gates_passed stays true', async () => {
+describe('pre_check_batch honors gates.sast_scan/quality_budget.enabled:false', () => {
+	test('sast_scan.ran === false + sast_skipped; quality_budget returns the disabled result', async () => {
 		const dir = makeProject(
 			{ sast_scan: { enabled: false }, quality_budget: { enabled: false } },
 			{ 'clean.js': CLEAN_JS },
@@ -452,7 +452,12 @@ describe('pre_check_batch honors gates.sast_scan.enabled:false', () => {
 		expect(result.sast_skipped).toBe(true);
 		expect((result.sast_scan as Record<string, unknown>).ran).toBe(false);
 		expect(result.gates_passed).toBe(true);
-		expect((result.quality_budget as Record<string, unknown>).ran).toBe(true);
+		const qb = result.quality_budget as {
+			ran: boolean;
+			result?: { metrics?: { thresholds?: { enabled: boolean } } };
+		};
+		expect(qb.ran).toBe(true);
+		expect(qb.result?.metrics?.thresholds?.enabled).toBe(false);
 	});
 });
 

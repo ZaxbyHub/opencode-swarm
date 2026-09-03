@@ -922,7 +922,7 @@ Supports TypeScript, JavaScript, Python, Rust, Go, Java, C/C++, Ruby, PHP, and C
 | `max_allowed_findings` | number | `0` | Tolerate up to this many findings before the gate fails (0 fails on any finding) |
 | `sentinel_allowlist` | string[] | `[]` | Intentional sentinel strings that suppress matching findings |
 
-> **Migration note (v7.165):** the undocumented-in-schema keys `patterns` and `block_on_empty_functions` were documentation-only ghosts — the loader silently ignored them. Use `deny_patterns` (which replaces the default pattern set). Stub/empty-function detection is built in and not configurable.
+> **Migration note:** the undocumented-in-schema keys `patterns` and `block_on_empty_functions` were documentation-only ghosts — the loader silently ignored them. Use `deny_patterns` (which replaces the default pattern set). Stub/empty-function detection is built in and not configurable.
 
 #### sast_scan
 
@@ -944,7 +944,7 @@ The severity threshold is a **per-call tool argument** (`sast_threshold` on `sas
 
 **Local-Only Guarantee**: Built-in rule engine runs without network. Semgrep, when present on PATH, is used automatically as an optional enhancement tier.
 
-> **Migration note (v7.165):** `severity_threshold` and `use_semgrep_if_available` were documentation-only ghosts — the loader silently ignored them. Threshold control lives in the tool call; Semgrep detection is automatic.
+> **Migration note:** `severity_threshold` and `use_semgrep_if_available` were documentation-only ghosts — the loader silently ignored them. Threshold control lives in the tool call; Semgrep detection is automatic.
 
 #### sbom_generate
 
@@ -964,7 +964,7 @@ The severity threshold is a **per-call tool argument** (`sast_threshold` on `sas
 
 **Supported ecosystems**: npm, Python (pip/Pipfile/poetry), Rust (Cargo), Go, Java (Maven/Gradle), Ruby (Bundler), PHP (Composer), C# (NuGet)
 
-> **Migration note (v7.165):** `output_format` and `include_dev_dependencies` were documentation-only ghosts — the loader silently ignored them. Output is always CycloneDX JSON under `.swarm/evidence/sbom/`.
+> **Migration note:** `output_format` and `include_dev_dependencies` were documentation-only ghosts — the loader silently ignored them. Output is always CycloneDX JSON under `.swarm/evidence/sbom/`.
 
 #### build_check
 
@@ -990,7 +990,7 @@ Build commands are auto-detected per ecosystem — there is no config-file overr
 - Java: `mvn compile` or `gradle build`
 - Python: `python -m py_compile`
 
-> **Migration note (v7.165):** `build_check.commands` was a documentation-only ghost — the loader silently ignored it. Command selection is automatic from detected build files.
+> **Migration note:** `build_check.commands` was a documentation-only ghost — the loader silently ignored it. Command selection is automatic from detected build files.
 
 #### quality_budget
 
