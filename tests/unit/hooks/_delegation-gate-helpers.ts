@@ -157,13 +157,6 @@ export function findUserMessage(messages: { messages: MessageWithParts[] }) {
 	);
 }
 
-// Helper to find system messages (for [NEXT] guidance)
-export function findSystemMessage(messages: { messages: MessageWithParts[] }) {
-	return messages.messages.find(
-		(m: MessageWithParts) => m.info?.role === 'system',
-	);
-}
-
 // Helper to get concatenated text from all system messages (for warning assertions)
 // Issue #2526: delegation warnings now ride user-role guidance carriers, so this
 // reads carrier bodies (falling back to any system-shaped entry for robustness).
