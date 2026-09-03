@@ -1,5 +1,18 @@
 # Changelog
 
+## [7.164.7](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.6...v7.164.7) (2026-09-03)
+
+
+### Bug Fixes
+
+* **path-identity:** canonicalize project filesystem identity ([2a6e4be](https://github.com/ZaxbyHub/opencode-swarm/commit/2a6e4be0c20c4d38ec4d287d2a9c9f0157519fc7))
+* **path-identity:** harden Windows containment ([246f0b5](https://github.com/ZaxbyHub/opencode-swarm/commit/246f0b57cf524b76ef9ad0f5e5047c65fb7fb0d7))
+* **path-identity:** preserve compatibility and strengthen feedback coverage ([022f2a8](https://github.com/ZaxbyHub/opencode-swarm/commit/022f2a8e0c63aaa04062caaedbbd88621dd4c851))
+* **scope:** recover legacy bindings through aliases ([a7fe40e](https://github.com/ZaxbyHub/opencode-swarm/commit/a7fe40ee186b38e436de18aad5993b03f4c58f70))
+* **task-gate-evidence:** close PR feedback findings ([5eb96f3](https://github.com/ZaxbyHub/opencode-swarm/commit/5eb96f3e393ccd6038a834f560150adc259b1601))
+* **task-gate-evidence:** recover receipt-less gate repairs ([b4ce0a3](https://github.com/ZaxbyHub/opencode-swarm/commit/b4ce0a3812306e0ce24a7551acda42800221fc81))
+* **tests:** preserve fixture containment under platform spies ([5ac3a2c](https://github.com/ZaxbyHub/opencode-swarm/commit/5ac3a2c911d077b2fca08f1b5e106dd88b8a698a))
+
 ## [7.164.6](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.5...v7.164.6) (2026-09-03)
 
 
