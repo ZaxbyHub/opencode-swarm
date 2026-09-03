@@ -99,6 +99,12 @@ describe('ci.yml integration — Task 1.2 wrapper script structural validation',
 		expect(step).toContain('grep -qE');
 	});
 
+	test('"Run unit tests" step surfaces bounded issue evidence receipts', () => {
+		expect(step).toContain(
+			'grep -E "^\\[ISSUE-[0-9]+(-[A-Z0-9-]+)?-EVIDENCE\\]" "$tmp" || true',
+		);
+	});
+
 	test('"Run unit tests" step preserves shard file list mechanism', () => {
 		expect(step).toContain('shard-tests.txt');
 	});
@@ -128,6 +134,12 @@ describe('ci.yml integration — integration quarantine extraction', () => {
 	test('"Integration tests" step tolerates empty quarantine files', () => {
 		expect(step).toContain(
 			'grep -vE \'^\\s*#|^\\s*$\' scripts/ci/quarantined-integration-tests.txt | sort > "$tmpdir/int-quarantined.txt" || true',
+		);
+	});
+
+	test('"Integration tests" step surfaces bounded issue evidence receipts', () => {
+		expect(step).toContain(
+			'grep -E "^\\[ISSUE-[0-9]+(-[A-Z0-9-]+)?-EVIDENCE\\]" "$tmp" || true',
 		);
 	});
 });

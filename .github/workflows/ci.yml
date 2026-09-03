@@ -494,6 +494,9 @@ jobs:
             fi
             # Surface timing and timeout info to CI output (not just temp file)
             grep -E "^\[TIMING\]|^\[TIMEOUT\]" "$tmp" || true
+            # Preserve bounded, machine-readable issue acceptance receipts from
+            # successful isolated tests without replaying their full stdout.
+            grep -E "^\[ISSUE-[0-9]+(-[A-Z0-9-]+)?-EVIDENCE\]" "$tmp" || true
             rm -f "$tmp"
           done < "$tmpdir/shard-tests.txt"
           exit $failed
@@ -824,6 +827,9 @@ jobs:
               echo "::error file=$f::FAILED: $f"
               failed=1
             fi
+            # Match the unit wrapper's bounded evidence channel so merge-queue
+            # integration fixtures can publish auditable completion receipts.
+            grep -E "^\[ISSUE-[0-9]+(-[A-Z0-9-]+)?-EVIDENCE\]" "$tmp" || true
             rm -f "$tmp"
           done < "$tmpdir/int-gated-tests.txt"
           exit $failed
