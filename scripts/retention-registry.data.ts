@@ -1302,13 +1302,13 @@ export const RETENTION_REGISTRY: readonly RetentionRow[] = [
 		canonicalRoot: 'project-swarm',
 		writerModules: ['src/scope/scope-persistence.ts'],
 		writerCitations: [
-			'src/scope/scope-persistence.ts:720 writeScopeToDisk (v1 projection) / :796 writeScopeBindingToDisk (v2) / :1425 claimScopeBindingForChildDurably / :1728 replaceExistingScopeDeclaration / :1126 tombstoneScopeBinding / :1221 refreshScopeBindingLease / :1695 writeClaimReceipt',
+			'src/scope/scope-persistence.ts:719 writeScopeToDisk (v1 projection) / :795 writeScopeBindingToDisk (v2) / :1424 claimScopeBindingForChildDurably / :1727 replaceExistingScopeDeclaration / :1125 tombstoneScopeBinding / :1220 refreshScopeBindingLease / :1694 writeClaimReceipt',
 		],
 		readerCitations: [
-			'src/scope/scope-persistence.ts:2516 readScopeFromDisk — bounded 2 MiB O_NOFOLLOW, sync',
-			'src/scope/scope-persistence.ts:1352 readAllExactBindings — bounded directory scan (≤10k files), sync',
+			'src/scope/scope-persistence.ts:2515 readScopeFromDisk — bounded 2 MiB O_NOFOLLOW, sync',
+			'src/scope/scope-persistence.ts:1351 readAllExactBindings — bounded directory scan (≤10k files), sync',
 		],
-		schemaVersion: 'v1 projection + v2 exact-generation bindings (v1 never authorizes: :916)',
+		schemaVersion: 'v1 projection + v2 exact-generation bindings (v1 never authorizes: :915)',
 		stateClass: 'authoritative',
 		privacyClass: 'metadata',
 		writeLimits: {
