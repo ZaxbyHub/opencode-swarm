@@ -53,9 +53,17 @@ describe('scope workspace physical identity (#2474)', () => {
 	});
 
 	test('dual-reads a legacy Windows scope identity and rekeys it on durable write', async () => {
-		const root = canonicalMkdtemp('scope-id-legacy-2474-');
-		cleanup.push(root);
+		const tempParent = canonicalMkdtemp('scope-id-legacy-2474-');
+		const root = path.join(tempParent, 'CaseSensitiveRoot');
+		const alias = `${root}-alias`;
+		cleanup.push(tempParent, alias);
+		fs.mkdirSync(root);
 		fs.mkdirSync(path.join(root, '.git'));
+		fs.symlinkSync(
+			root,
+			alias,
+			process.platform === 'win32' ? 'junction' : 'dir',
+		);
 		const plan = {
 			schema_version: '1.0.0',
 			title: 'Legacy Windows identity',
@@ -84,11 +92,10 @@ describe('scope workspace physical identity (#2474)', () => {
 		filesystemIdentityInternals.realpathSyncNative = () => {
 			throw new Error('native resolver unavailable in the legacy release');
 		};
-		filesystemIdentityInternals.realpathSync = (target) =>
-			`${path.resolve(String(target))}~1`;
+		filesystemIdentityInternals.realpathSync = () => `${path.resolve(root)}~1`;
 
 		const legacyBinding = createScopeBinding({
-			directory: root,
+			directory: alias,
 			plan,
 			taskId: '1.1',
 			files: ['src/a.ts'],
@@ -102,18 +109,17 @@ describe('scope workspace physical identity (#2474)', () => {
 			.toLowerCase()}~1`;
 		expect(legacyBinding?.workspaceIdentity).toBe(legacyIdentity);
 		if (!legacyBinding) throw new Error('scope binding fixture failed');
-		expect(await writeScopeBindingToDisk(root, legacyBinding)).toMatchObject({
+		expect(await writeScopeBindingToDisk(alias, legacyBinding)).toMatchObject({
 			ok: true,
 		});
 
-		const scopesDir = path.join(root, '.swarm', 'scopes');
+		const scopesDir = path.join(alias, '.swarm', 'scopes');
 		const bindingFile = fs
 			.readdirSync(scopesDir)
 			.find((name) => name.startsWith('binding-') && name.endsWith('.json'));
 		if (!bindingFile) throw new Error('durable scope fixture missing');
 		const bindingPath = path.join(scopesDir, bindingFile);
-		filesystemIdentityInternals.realpathSyncNative = (target) =>
-			path.resolve(String(target));
+		filesystemIdentityInternals.realpathSyncNative = () => path.resolve(root);
 		const currentIdentity = path
 			.resolve(root)
 			.replaceAll('\\', '/')
@@ -121,7 +127,7 @@ describe('scope workspace physical identity (#2474)', () => {
 		clearScopeBindings();
 
 		const recovered = readScopeBindingFromDisk({
-			directory: root,
+			directory: alias,
 			taskId: '1.1',
 			plan,
 			ownerSessionId: 'architect-session',
@@ -129,7 +135,7 @@ describe('scope workspace physical identity (#2474)', () => {
 		});
 		expect(recovered?.workspaceIdentity).toBe(currentIdentity);
 		if (!recovered) throw new Error('legacy scope identity was not recovered');
-		expect(await writeScopeBindingToDisk(root, recovered)).toMatchObject({
+		expect(await writeScopeBindingToDisk(alias, recovered)).toMatchObject({
 			ok: true,
 		});
 		expect(

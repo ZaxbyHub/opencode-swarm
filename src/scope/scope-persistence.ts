@@ -551,14 +551,13 @@ function validateScopeBindingPayload(
 }
 
 function exactFilenameMatches(
+	directory: string,
 	filePath: string,
 	binding: ScopeBinding,
 ): boolean {
 	return (
 		normalizePathForComparison(filePath) ===
-		normalizePathForComparison(
-			getBindingFilePath(binding.workspaceIdentity, binding),
-		)
+		normalizePathForComparison(getBindingFilePath(directory, binding))
 	);
 }
 
@@ -1382,7 +1381,7 @@ function readAllExactBindings(
 				directory,
 				JSON.parse(raw) as Partial<ScopeBinding>,
 			);
-			if (binding && exactFilenameMatches(filePath, binding)) {
+			if (binding && exactFilenameMatches(directory, filePath, binding)) {
 				if (hasDurableRetirementIntent(filePath, binding)) {
 					let createdAt = Date.now();
 					try {
