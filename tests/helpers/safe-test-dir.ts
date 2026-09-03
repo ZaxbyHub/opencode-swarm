@@ -2,8 +2,6 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { closeProjectDb } from '../../src/db/project-db.js';
-import { sameExistingFilesystemPath } from '../../src/utils/filesystem-identity.js';
-import { isCanonicalPathWithinRoot } from '../../src/utils/path-security.js';
 
 /** Native-first realpath keeps test fixtures aligned with production identity. */
 export const _internals: {
@@ -20,6 +18,25 @@ function canonicalRealpath(targetPath: fs.PathLike): string {
 	} catch {
 		return _internals.realpathSync(targetPath);
 	}
+}
+
+/**
+ * Test fixtures often spy on `process.platform` to exercise a target platform.
+ * Use the host `node:path` separator rather than that mutable runtime property
+ * so the test cleanup boundary still describes the real filesystem.
+ */
+function normalizeHostFilesystemPath(targetPath: string): string {
+	const resolved = path.resolve(targetPath);
+	return path.sep === '\\' ? resolved.toLowerCase() : resolved;
+}
+
+function isWithinHostFilesystemPath(
+	targetPath: string,
+	rootPath: string,
+): boolean {
+	const target = normalizeHostFilesystemPath(targetPath);
+	const root = normalizeHostFilesystemPath(rootPath);
+	return target === root || target.startsWith(`${root}${path.sep}`);
 }
 
 /**
@@ -47,11 +64,12 @@ export function createSafeTestDir(prefix = 'swarm-safe-test-'): {
 	// requires this wrap when the result is chdir'd; doing it unconditionally
 	// is safe and makes the shared helper the single correct precedent.
 	const dir = canonicalRealpath(rawDir);
+	const canonicalBase = canonicalRealpath(base);
 
 	// Safety assertion: verify it's actually under tmpdir (compare against the
 	// resolved base too, so the symlinked /var vs real /private/var case is
 	// caught).
-	if (!isCanonicalPathWithinRoot(dir, base)) {
+	if (!isWithinHostFilesystemPath(dir, canonicalBase)) {
 		throw new Error(
 			`createSafeTestDir: created dir ${dir} is not under os.tmpdir()`,
 		);
@@ -74,10 +92,31 @@ export function safeRmRecursive(targetPath: string): void {
 
 	const lexicalTarget = path.resolve(targetPath);
 	const tmpBase = os.tmpdir();
-	if (sameExistingFilesystemPath(lexicalTarget, tmpBase)) {
+	const canonicalTmpBase = canonicalRealpath(tmpBase);
+	const lexicalTmpBase = path.resolve(tmpBase);
+	if (
+		normalizeHostFilesystemPath(lexicalTarget) ===
+			normalizeHostFilesystemPath(lexicalTmpBase) ||
+		normalizeHostFilesystemPath(lexicalTarget) ===
+			normalizeHostFilesystemPath(canonicalTmpBase)
+	) {
 		throw new Error('safeRmRecursive: refusing to remove os.tmpdir() itself');
 	}
-	if (!isCanonicalPathWithinRoot(lexicalTarget, tmpBase)) {
+	if (
+		!isWithinHostFilesystemPath(lexicalTarget, lexicalTmpBase) &&
+		!isWithinHostFilesystemPath(lexicalTarget, canonicalTmpBase)
+	) {
+		throw new Error(
+			`safeRmRecursive: refusing to remove ${lexicalTarget}; not under os.tmpdir()`,
+		);
+	}
+	if (
+		fs.existsSync(lexicalTarget) &&
+		!isWithinHostFilesystemPath(
+			canonicalRealpath(lexicalTarget),
+			canonicalTmpBase,
+		)
+	) {
 		throw new Error(
 			`safeRmRecursive: refusing to remove ${lexicalTarget}; not under os.tmpdir()`,
 		);
