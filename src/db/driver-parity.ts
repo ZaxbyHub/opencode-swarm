@@ -14,6 +14,14 @@
  *   many values as the statement has placeholders. `node:sqlite` rejects a
  *   mismatched count (`SQLITE_RANGE`); `bun:sqlite` tolerates some lax forms.
  *   Portable code never relies on the lax form.
+ * - NO-BINDINGS run() RETURNS A Changes-SHAPED OBJECT (#2539): bun:sqlite's
+ *   run() always returns `{ changes, lastInsertRowid }`; the node adapter
+ *   rebuilds it from connection-level counters after exec(). `.changes` is
+ *   pinned for single-statement DML only (the form production code reads).
+ *   Two deltas are deliberately NOT pinned: multi-statement strings (bun SUMS
+ *   `.changes` across statements, changes() reports the last one) and non-DML
+ *   statements (bun reports 0, changes() keeps the previous DML's count) —
+ *   the two drivers genuinely diverge there and no production reader exists.
  * - Multi-statement strings only through the no-parameter `run(sql)` path
  *   (which routes to `exec` on both drivers).
  * - Transaction + SAVEPOINT nesting round trip.
@@ -128,6 +136,9 @@ export function runDriverParityContract(
 
 	// 4. Multi-statement strings via the no-parameter run() path (exec on both
 	//    drivers) — the form the v14+ single-statement migrations also use.
+	//    The return value is deliberately NOT asserted here: bun aggregates
+	//    `.changes` across statements while the node adapter's changes() probe
+	//    reports the last statement only (an intentionally unpinned delta).
 	db.run(
 		"DELETE FROM parity_probe; INSERT INTO parity_probe (key, value) VALUES ('multi', 'exec');",
 	);
@@ -137,6 +148,63 @@ export function runDriverParityContract(
 		)
 		.get('multi');
 	expectTruthy(multi?.value === 'exec', 'multi-statement exec path failed');
+
+	// 4b. No-bindings run() returns a Changes-shaped object (#2539). Under bun
+	//     this is native; under the node adapter the no-param branch executes
+	//     via exec() (void) and rebuilds the object from connection-level
+	//     counters. Pre-fix the adapter returned undefined here, so
+	//     `.changes` readers (the memory-family ATTACH merge) threw
+	//     `Cannot read properties of undefined (reading 'changes')`.
+	//     Pinned for single-statement DML only — the form production reads.
+	const inserted = db.run(
+		"INSERT INTO parity_probe (key, value) VALUES ('changes-a', '1'), ('changes-b', '2')",
+	);
+	expectTruthy(
+		inserted != null && typeof inserted === 'object',
+		'no-bindings run() must return a Changes-shaped object (issue #2539)',
+	);
+	expectTruthy(
+		typeof inserted?.changes === 'number' && inserted.changes === 2,
+		`no-bindings run() .changes must count modified rows, got ${String(
+			inserted?.changes,
+		)} (issue #2539)`,
+	);
+	expectTruthy(
+		typeof inserted?.lastInsertRowid === 'number' ||
+			typeof inserted?.lastInsertRowid === 'bigint',
+		'no-bindings run() .lastInsertRowid must be number | bigint (issue #2539)',
+	);
+	// INSERT OR IGNORE that inserts nothing reports 0 — the exact
+	// memory-family ATTACH-merge shape (INSERT OR IGNORE … SELECT * FROM staged).
+	const ignored = db.run(
+		"INSERT OR IGNORE INTO parity_probe (key, value) VALUES ('changes-a', 'duplicate')",
+	);
+	expectTruthy(
+		ignored?.changes === 0,
+		`INSERT OR IGNORE with 0 inserts must report .changes === 0, got ${String(
+			ignored?.changes,
+		)} (issue #2539)`,
+	);
+	// DML matching no rows reports 0.
+	const updatedNone = db.run(
+		"UPDATE parity_probe SET value = 'x' WHERE key = 'no-such-key'",
+	);
+	expectTruthy(
+		updatedNone?.changes === 0,
+		`no-bindings UPDATE matching no rows must report .changes === 0, got ${String(
+			updatedNone?.changes,
+		)} (issue #2539)`,
+	);
+	// The with-bindings form is unchanged by #2539 (statement.run's native
+	// return on both drivers).
+	const bound = db.run('INSERT INTO parity_probe (key, value) VALUES (?, ?)', [
+		'changes-bound',
+		'3',
+	]);
+	expectTruthy(
+		bound?.changes === 1,
+		`with-bindings run() .changes must stay 1, got ${String(bound?.changes)}`,
+	);
 
 	// 5. Pragmas the foundation relies on.
 	const journal = db

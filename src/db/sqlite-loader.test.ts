@@ -68,6 +68,12 @@ function makeFake() {
 		get(...params: unknown[]): unknown {
 			this.checkStrictParamCount(params);
 			calls.stmtGet.push({ sql: this.sql, params });
+			// #2539: model the real driver's answer to the adapter's changes
+			// probe (`SELECT changes() AS c, last_insert_rowid() AS r` — the
+			// ALIASED shape; the adapter reads `c`/`r`, not `changes`).
+			if (this.sql.startsWith('SELECT changes()')) {
+				return { c: 1, r: 1 };
+			}
 			return { sql: this.sql, op: 'get' };
 		}
 		all(...params: unknown[]): unknown[] {
@@ -208,8 +214,37 @@ describe('createNodeDatabaseCtor — adapter translation', () => {
 			':x:',
 		) as unknown as AdapterDb;
 		db.run('PRAGMA foreign_keys = ON;');
-		expect(calls.exec).toEqual(['PRAGMA foreign_keys = ON;']);
-		expect(calls.prepared).toEqual([]);
+		db.run('PRAGMA foreign_keys = OFF;');
+		expect(calls.exec).toEqual([
+			'PRAGMA foreign_keys = ON;',
+			'PRAGMA foreign_keys = OFF;',
+		]);
+		// #2539: the only prepared statement is the cached changes probe —
+		// user SQL never reaches prepare() on the no-param path, and the probe
+		// is prepared exactly once across both calls.
+		expect(calls.prepared).toEqual([
+			'SELECT changes() AS c, last_insert_rowid() AS r',
+		]);
+	});
+
+	test('run(sql) with no params returns a Changes-shaped object (#2539)', () => {
+		const { FakeDatabaseSync, calls } = makeFake();
+		const db = new (createNodeDatabaseCtor(FakeDatabaseSync))(
+			':x:',
+		) as unknown as AdapterDb;
+		// bun:sqlite run() ALWAYS returns { changes, lastInsertRowid } — the
+		// pre-fix adapter returned undefined here, crashing `.changes` readers
+		// (the memory-family ATTACH merge) under the Node sidecar.
+		const result = db.run('PRAGMA foreign_keys = ON;') as {
+			changes: number;
+			lastInsertRowid: number | bigint;
+		};
+		expect(result).toEqual({ changes: 1, lastInsertRowid: 1 });
+		expect(typeof result.changes).toBe('number');
+		db.run('PRAGMA foreign_keys = OFF;');
+		// The probe is served from the instance statement cache: a second
+		// no-param run() prepares nothing new.
+		expect(calls.prepared).toHaveLength(1);
 	});
 
 	test('run(sql, [params]) prepares once and binds the array', () => {
