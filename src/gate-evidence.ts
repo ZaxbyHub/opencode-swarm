@@ -1119,17 +1119,66 @@ export async function recordAgentDispatch(
  * evidence carrying a `workflow.state` it does not recognise. Tracked in #2199 — do
  * not "fix" this by rethrowing here: two call sites iterate every task in the plan,
  * so one corrupt file would block dispatch for all of them. The fix is a separate
- * discriminated reader used at the two affected sites.
+ * discriminated reader (`readTaskEvidenceState`) used at the two affected sites.
  */
 export async function readTaskEvidence(
 	directory: string,
 	taskId: string,
 ): Promise<TaskEvidence | null> {
+	const state = await readTaskEvidenceState(directory, taskId);
+	return state.kind === 'ok' ? state.evidence : null;
+}
+
+/**
+ * Discriminated task-evidence read (issue #2470 / #2199): distinguishes
+ * "no evidence file exists" (`missing`) from "evidence exists but is corrupt,
+ * unreadable, or from an incompatible build" (`unparseable`) so the
+ * delegation-gate guard sites can fail closed on the latter without changing
+ * the fail-open behavior callers rely on for the former.
+ *
+ * Classification mirrors readTaskEvidenceRaw: ENOENT and ENAMETOOLONG are
+ * "no file can exist" → missing (no telemetry — like readTaskEvidenceRaw,
+ * ENAMETOOLONG is intentionally silent on the gateParseError channel);
+ * everything else — malformed
+ * JSON, Zod rejection of a newer `workflow.state` (version skew), permission
+ * errors, invalid taskId — is `unparseable` and emits telemetry.gateParseError
+ * exactly once before being returned (not thrown).
+ */
+export type TaskEvidenceReadState =
+	| { kind: 'ok'; evidence: TaskEvidence }
+	| { kind: 'missing' }
+	| { kind: 'unparseable'; evidencePath: string; error: unknown };
+
+export async function readTaskEvidenceState(
+	directory: string,
+	taskId: string,
+): Promise<TaskEvidenceReadState> {
 	try {
 		assertValidTaskId(taskId);
-		return readExisting(getEvidencePath(directory, taskId), taskId);
+		const evidencePath = getEvidencePath(directory, taskId);
+		const raw = readFileSync(evidencePath, 'utf-8');
+		const evidence = parseTaskEvidence(raw, taskId);
+		return { kind: 'ok', evidence };
+	} catch (error) {
+		const evidencePath = getEvidencePathSafe(directory, taskId);
+		const code = (error as NodeJS.ErrnoException).code;
+		// ENOENT: no evidence file. ENAMETOOLONG: the taskId cannot produce a
+		// valid filename on this platform (readTaskEvidenceRaw precedent,
+		// issue #1729) — the file cannot exist, so treat it as missing.
+		if (code === 'ENOENT' || code === 'ENAMETOOLONG') {
+			return { kind: 'missing' };
+		}
+		telemetry.gateParseError(taskId, error as Error);
+		return { kind: 'unparseable', evidencePath, error };
+	}
+}
+
+/** Best-effort evidence path for diagnostics; never throws. */
+function getEvidencePathSafe(directory: string, taskId: string): string {
+	try {
+		return getEvidencePath(directory, taskId);
 	} catch {
-		return null;
+		return `${directory}/.swarm/evidence/${taskId}.json`;
 	}
 }
 

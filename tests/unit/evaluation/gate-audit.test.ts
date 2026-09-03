@@ -61,8 +61,8 @@ describe('Tier-1 gate audit', () => {
 				new Set(result.cells.map((cell: { gate: string }) => cell.gate)).size,
 			).toBe(5);
 			expect(result.qualityMetricAvailability).toEqual({
-				complexity_delta: 'unavailable',
-				public_api_delta: 'unavailable',
+				complexity_delta: 'available',
+				public_api_delta: 'available',
 			});
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });

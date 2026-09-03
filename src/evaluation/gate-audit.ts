@@ -787,8 +787,10 @@ export async function runGateAudit(
 			cells,
 			cost,
 			qualityMetricAvailability: {
-				complexity_delta: 'unavailable',
-				public_api_delta: 'unavailable',
+				// #2470: quality_budget now produces true base-vs-head deltas;
+				// they remain excluded from the promotion regression-catch math.
+				complexity_delta: 'available',
+				public_api_delta: 'available',
 			},
 		});
 		await saveGateAuditResult(options.projectRoot, result);

@@ -934,6 +934,11 @@ export const TOOL_METADATA = {
 		description: 'read Lean Turbo run state from .swarm/turbo-state.json',
 		agents: [],
 	},
+	lean_turbo_critic: {
+		description:
+			'dispatch a read-only critic agent to evaluate boundary conditions for a completed Lean Turbo phase (satisfies the turbo.lean.phase_critic gate)',
+		agents: [],
+	},
 	lean_turbo_review: {
 		description:
 			'dispatch a read-only reviewer agent to evaluate a completed Lean Turbo phase',

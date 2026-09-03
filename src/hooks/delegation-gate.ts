@@ -3997,6 +3997,7 @@ export function createDelegationGateHook(
 		const {
 			getTaskWorkflowSnapshot,
 			readTaskEvidence,
+			readTaskEvidenceState,
 			transitionTaskWorkflowEvidence,
 		} = await import('../gate-evidence');
 		const requestedScopeTaskId =
@@ -4028,9 +4029,27 @@ export function createDelegationGateHook(
 			)
 				? resolvedPreflightTaskId
 				: null;
-		const preflightEvidence = preflightTaskId
-			? await readTaskEvidence(directory, preflightTaskId)
+		// #2470/#2199: corrupt/unparseable preflight evidence must not silently
+		// degrade to state 'idle' (which would skip the coder_delegated check
+		// below). Missing evidence keeps the intended fail-open behavior.
+		const preflightEvidenceState = preflightTaskId
+			? await readTaskEvidenceState(directory, preflightTaskId)
 			: null;
+		if (preflightEvidenceState?.kind === 'unparseable') {
+			const errorName =
+				preflightEvidenceState.error instanceof Error
+					? preflightEvidenceState.error.name
+					: 'UnknownError';
+			throw new Error(
+				`TASK_EVIDENCE_UNREADABLE: Task ${preflightTaskId} evidence at ${preflightEvidenceState.evidencePath} ` +
+					`is corrupt or from an incompatible build (${errorName}); refusing to treat it as idle. ` +
+					'Repair or remove the evidence file (repair_gate_evidence) before dispatching.',
+			);
+		}
+		const preflightEvidence =
+			preflightEvidenceState?.kind === 'ok'
+				? preflightEvidenceState.evidence
+				: null;
 		const preflightWorkflow = getTaskWorkflowSnapshot(preflightEvidence);
 		if (preflightTaskId) {
 			await enforceCoderRetryEscalation({
@@ -4253,8 +4272,30 @@ export function createDelegationGateHook(
 		// skip review). The slot cap below bounds total in-flight unreviewed coders.
 		for (const task of plan.phases.flatMap((phase) => phase.tasks)) {
 			const taskId = task.id;
+			// #2470/#2199: distinguish corrupt evidence from missing evidence.
+			// Missing keeps the intended fail-open (idle) handling. Corrupt
+			// evidence for the task being re-delegated fails closed below; for
+			// OTHER tasks it keeps today's idle handling with a bounded warning
+			// so one corrupt file cannot block dispatch for unrelated tasks.
+			const evidenceState = await readTaskEvidenceState(directory, taskId);
+			if (evidenceState.kind === 'unparseable') {
+				if (incomingCoderTaskId && taskId === incomingCoderTaskId) {
+					const errorName =
+						evidenceState.error instanceof Error
+							? evidenceState.error.name
+							: 'UnknownError';
+					throw new Error(
+						`TASK_EVIDENCE_UNREADABLE: Task ${taskId} evidence at ${evidenceState.evidencePath} ` +
+							`is corrupt or from an incompatible build (${errorName}); refusing to treat it as idle. ` +
+							'Repair or remove the evidence file (repair_gate_evidence) before dispatching.',
+					);
+				}
+				logger.warn(
+					`[delegation-gate] Task ${taskId} evidence at ${evidenceState.evidencePath} is corrupt or from an incompatible build — treating as idle for this dispatch. Repair it before the task's next delegation.`,
+				);
+			}
 			const durableWorkflow = getTaskWorkflowSnapshot(
-				await readTaskEvidence(directory, taskId),
+				evidenceState.kind === 'ok' ? evidenceState.evidence : null,
 			);
 			const state = durableWorkflow.authoritative
 				? durableWorkflow.state

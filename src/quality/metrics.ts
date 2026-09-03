@@ -1,6 +1,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { QualityBudgetConfig } from '../config/schema';
+import * as logger from '../utils/logger';
+import { readBaseFileContent, resolveQualityMergeBase } from './git-base';
 
 // ============ Types ============
 
@@ -25,6 +27,12 @@ export interface QualityViolation {
 
 const MAX_FILE_SIZE_BYTES = 256 * 1024; // 256KB per file
 const MIN_DUPLICATION_LINES = 10; // Minimum lines to flag as duplication
+/**
+ * Defensive cap on per-file `git show` base reads (issue #2470): bounds
+ * subprocess count for very large change sets; files beyond the cap count
+ * full head complexity toward the delta (conservative direction).
+ */
+const MAX_BASE_FILE_READS = 200;
 
 // ============ Complexity Calculation ============
 
@@ -104,32 +112,46 @@ function getComplexityForFile(filePath: string): number | null {
 }
 
 /**
- * Compute complexity delta for changed files
+ * Compute complexity delta for changed files.
+ *
+ * The delta is a true base-versus-head difference (issue #2470 / #1655): head
+ * complexity of each changed file minus its merge-base complexity. Files with
+ * no base version (new files, unavailable base) contribute their full head
+ * complexity; deleted files (head missing, base present) subtract their base
+ * complexity. When no merge base can be resolved the map is empty and every
+ * file is treated as new — preserving the historical head-only absolute value.
  */
 async function computeComplexityDelta(
 	files: string[],
 	workingDir: string,
+	baseContents: ReadonlyMap<string, string | null>,
 ): Promise<{ delta: number; analyzedFiles: string[] }> {
-	let totalComplexity = 0;
+	let delta = 0;
 	const analyzedFiles: string[] = [];
 
 	for (const file of files) {
 		const fullPath = path.isAbsolute(file) ? file : path.join(workingDir, file);
+		const baseContent = baseContents.get(file) ?? null;
 
 		// Check if file exists
 		if (!fs.existsSync(fullPath)) {
+			// Deleted file: the change removes its base complexity.
+			if (baseContent !== null) {
+				delta -= estimateCyclomaticComplexity(baseContent);
+			}
 			continue;
 		}
 
 		const complexity = getComplexityForFile(fullPath);
 		if (complexity !== null) {
-			totalComplexity += complexity;
+			delta +=
+				complexity -
+				(baseContent !== null ? estimateCyclomaticComplexity(baseContent) : 0);
 			analyzedFiles.push(file);
 		}
 	}
 
-	// Return complexity as delta (current complexity for changed files)
-	return { delta: totalComplexity, analyzedFiles };
+	return { delta, analyzedFiles };
 }
 
 // ============ Public API Delta Calculation ============
@@ -333,29 +355,40 @@ function getExportCountForFile(filePath: string): number {
 }
 
 /**
- * Compute public API delta for changed files
+ * Compute public API delta for changed files.
+ *
+ * True base-versus-head difference (issue #2470 / #1655), mirroring
+ * computeComplexityDelta: head export count minus merge-base export count per
+ * file; deleted files subtract their base exports.
  */
 async function computePublicApiDelta(
 	files: string[],
 	workingDir: string,
+	baseContents: ReadonlyMap<string, string | null>,
 ): Promise<{ delta: number; analyzedFiles: string[] }> {
-	let totalExports = 0;
+	let delta = 0;
 	const analyzedFiles: string[] = [];
 
 	for (const file of files) {
 		const fullPath = path.isAbsolute(file) ? file : path.join(workingDir, file);
+		const baseContent = baseContents.get(file) ?? null;
 
 		// Check if file exists
 		if (!fs.existsSync(fullPath)) {
+			// Deleted file: the change removes its base API surface.
+			if (baseContent !== null) {
+				delta -= countExportsInFile(baseContent);
+			}
 			continue;
 		}
 
 		const exports = getExportCountForFile(fullPath);
-		totalExports += exports;
+		delta +=
+			exports - (baseContent !== null ? countExportsInFile(baseContent) : 0);
 		analyzedFiles.push(file);
 	}
 
-	return { delta: totalExports, analyzedFiles };
+	return { delta, analyzedFiles };
 }
 
 // ============ Duplication Detection ============
@@ -1070,6 +1103,48 @@ function detectViolations(
 	return violations;
 }
 
+/**
+ * Load the merge-base content of every changed file once, shared by the
+ * complexity and public-API delta computations.
+ *
+ * Returns an empty map when no merge base resolves (not a git repo, no
+ * candidate branch) — callers then treat every file as having no base, which
+ * reproduces the historical head-only absolute metrics. Files beyond
+ * MAX_BASE_FILE_READS also fall back to no-base (conservative: their full
+ * head complexity counts toward the delta).
+ */
+async function loadBaseFileContents(
+	files: string[],
+	workingDir: string,
+): Promise<Map<string, string | null>> {
+	const baseContents = new Map<string, string | null>();
+	if (files.length === 0) return baseContents;
+
+	const baseRef = await resolveQualityMergeBase(workingDir);
+	if (!baseRef) return baseContents;
+
+	let read = 0;
+	let capped = false;
+	for (const file of files) {
+		if (read >= MAX_BASE_FILE_READS) {
+			capped = true;
+			break;
+		}
+		baseContents.set(
+			file,
+			await readBaseFileContent(workingDir, baseRef, file),
+		);
+		read++;
+	}
+	if (capped) {
+		logger.warn(
+			`[quality-metrics] More than ${MAX_BASE_FILE_READS} changed files — ` +
+				`base-version reads capped; remaining files count full head complexity toward the delta.`,
+		);
+	}
+	return baseContents;
+}
+
 // ============ Main Function ============
 
 /**
@@ -1112,11 +1187,15 @@ export async function computeQualityMetrics(
 		return false;
 	});
 
+	// Load merge-base content once for both delta computations (issue #2470).
+	// Empty when no merge base resolves — files then keep head-only metrics.
+	const baseContents = await loadBaseFileContents(filteredFiles, workingDir);
+
 	// Compute all metrics
 	const [complexityResult, apiResult, duplicationResult, testRatioResult] =
 		await Promise.all([
-			computeComplexityDelta(filteredFiles, workingDir),
-			computePublicApiDelta(filteredFiles, workingDir),
+			computeComplexityDelta(filteredFiles, workingDir, baseContents),
+			computePublicApiDelta(filteredFiles, workingDir, baseContents),
 			computeDuplicationRatio(filteredFiles, workingDir),
 			computeTestToCodeRatio(
 				workingDir,

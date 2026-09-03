@@ -18,6 +18,7 @@ import {
 	PluginConfigSchema,
 	stripKnownSwarmPrefix,
 } from '../config/schema';
+import { TOOL_NAME_SET } from '../tools/tool-metadata';
 import { log } from '../utils';
 import { sameExistingFilesystemPath } from '../utils/filesystem-identity';
 import { isCanonicalPathWithinRoot } from '../utils/path-security';
@@ -214,6 +215,66 @@ function collectRawCouncilPolicyFindings(directory: string): ConfigFinding[] {
 		} catch {
 			// Malformed raw config is reported by the strict-section collector.
 		}
+	}
+	return findings;
+}
+
+/**
+ * Lean Turbo evidence-requiring gates and the registered producer tool that
+ * writes each gate's evidence (issue #2470: every evidence-requiring gate must
+ * have a reachable producer). Exported so the satisfiability guard test can
+ * assert the registry covers every gate verifyLeanTurboPhaseReady enforces.
+ */
+export const LEAN_TURBO_GATE_PRODUCERS = [
+	{
+		gate: 'phase_critic',
+		producerTool: 'lean_turbo_critic',
+		evidencePathConvention: '.swarm/evidence/{phase}/lean-turbo-critic.json',
+	},
+	{
+		gate: 'phase_reviewer',
+		producerTool: 'lean_turbo_review',
+		evidencePathConvention: '.swarm/evidence/{phase}/lean-turbo-reviewer.json',
+	},
+	{
+		gate: 'integrated_diff_required',
+		producerTool: 'lean_turbo_run_phase',
+		evidencePathConvention:
+			'.swarm/evidence/{phase}/lean-turbo/lean-turbo-phase.json',
+	},
+] as const;
+
+/**
+ * Gate-satisfiability lint (issue #2470): for every enabled evidence-requiring
+ * Lean Turbo gate, its producer tool must be present in the registered tool
+ * set. This is the config-doctor half of the #2007 regression tripwire — in a
+ * healthy build every producer is registered and the lint emits nothing; if a
+ * producer tool is ever unregistered while its gate stays default-true, the
+ * gate becomes structurally unsatisfiable and this lint fails with an error.
+ */
+export function collectLeanTurboGateSatisfiabilityFindings(
+	config: PluginConfig,
+	registeredToolNames: ReadonlySet<string> = TOOL_NAME_SET,
+): ConfigFinding[] {
+	const findings: ConfigFinding[] = [];
+	const lean = config?.turbo?.lean;
+	for (const entry of LEAN_TURBO_GATE_PRODUCERS) {
+		const enabled = lean?.[entry.gate] ?? true;
+		if (!enabled) continue;
+		if (registeredToolNames.has(entry.producerTool)) continue;
+		findings.push({
+			id: `lean-turbo-gate-unsatisfiable-${entry.gate}`,
+			title: `turbo.lean.${entry.gate} gate has no registered producer tool`,
+			description:
+				`turbo.lean.${entry.gate} is enabled (default true), but its evidence producer tool ` +
+				`"${entry.producerTool}" is not registered, so the gate that reads ` +
+				`${entry.evidencePathConvention} is structurally unsatisfiable in production and ` +
+				'Lean Turbo phase_complete would dead-end. Re-register the producer tool or disable the gate (issue #2470 / #2007).',
+			severity: 'error',
+			path: `turbo.lean.${entry.gate}`,
+			currentValue: enabled,
+			autoFixable: false,
+		});
 	}
 	return findings;
 }
@@ -1926,6 +1987,7 @@ export function runConfigDoctor(
 	findings.push(...collectRawStrictSectionFindings(directory));
 	findings.push(...collectRawValueConstraintFindings(directory));
 	findings.push(...collectRawAutoReviewCompatibilityFindings(directory));
+	findings.push(...collectLeanTurboGateSatisfiabilityFindings(config));
 	emitWorktreeIsolationLayeringAdvisory(config, findings);
 
 	// Count by severity

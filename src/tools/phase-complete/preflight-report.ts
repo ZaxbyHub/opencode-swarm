@@ -134,7 +134,20 @@ function defaultBlockedRecovery(
 		lean_turbo_readiness: 'lean_turbo_review',
 	};
 	const action = toolByGate[check.id];
-	if (action) return { kind: 'tool', action };
+	if (action) {
+		if (check.id === 'lean_turbo_readiness') {
+			return {
+				kind: 'tool' as const,
+				action,
+				// Readiness can also block on critic evidence
+				// (turbo.lean.phase_critic default true); the critic
+				// follow-up rides in args (issue #2470), matching the
+				// follow_up_tool convention below.
+				args: { follow_up_tool: 'lean_turbo_critic' },
+			};
+		}
+		return { kind: 'tool', action };
+	}
 	if (check.id === 'phase_council' || check.id === 'final_council') {
 		return {
 			kind: 'user_action',
