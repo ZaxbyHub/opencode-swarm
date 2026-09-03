@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.164.9](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.8...v7.164.9) (2026-09-03)
+
+
+### Bug Fixes
+
+* **agents:** enforce per-agent tool boundaries via host permission blocks ([62c8294](https://github.com/ZaxbyHub/opencode-swarm/commit/62c8294ecadb9d0248640266a39733d0d69f79f5))
+
 ## [7.164.8](https://github.com/ZaxbyHub/opencode-swarm/compare/v7.164.7...v7.164.8) (2026-09-03)
 
 
