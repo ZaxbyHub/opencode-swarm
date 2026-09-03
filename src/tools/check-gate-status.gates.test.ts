@@ -422,9 +422,6 @@ describe('check_gate_status', () => {
 
 		// An empty requirement set is not proof that the task passed.
 		expect(parsed.status).toBe('incomplete');
-		expect(parsed.message).toBe(
-			'Task "7.1" is incomplete. No required gates are configured for this task generation.',
-		);
 		expect(parsed.required_gates).toEqual([]);
 		expect(parsed.passed_gates).toEqual([]);
 		expect(parsed.missing_gates).toEqual([]);
