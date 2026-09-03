@@ -191,7 +191,7 @@ describe('pr-subscriptions legacy migration', () => {
 		});
 	});
 
-	test('first write replaces an aged legacy log with a fresh projection while preserving the original archive', async () => {
+	test('first write archives an aged legacy log and keeps the projection checkpoint-only', async () => {
 		const old = Date.now() - 30 * 86_400_000;
 		const stale = record('sess_old', 1, old);
 		writeLegacy(dir, [stale]);
@@ -201,9 +201,8 @@ describe('pr-subscriptions legacy migration', () => {
 		await updateSnapshot(dir, 'sess_old::o/r::1', { errorCount: 0 });
 
 		expect(fs.existsSync(importedLegacyPath(dir))).toBe(true);
-		expect(Date.now() - fs.statSync(legacyPath(dir)).mtimeMs).toBeLessThan(
-			60_000,
-		);
+		expect(fs.existsSync(legacyPath(dir))).toBe(false);
+		expect(fs.existsSync(checkpointPath(dir))).toBe(true);
 	});
 
 	test('growth during migration: appended tail records are visible and absorbed', async () => {

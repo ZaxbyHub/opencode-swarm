@@ -223,7 +223,8 @@ describe('pr-subscriptions multi-process serialization', () => {
 			const active = await listActive(dir);
 			expect(active).toHaveLength(1);
 			expect(active.some((r) => r.sessionID === 'sess_ext')).toBe(false);
-			expect(fs.readFileSync(legacy, 'utf-8')).not.toContain('sess_ext');
+			expect(fs.existsSync(legacy)).toBe(false);
+			expect(fs.existsSync(`${legacy}.imported`)).toBe(true);
 		} finally {
 			restore();
 		}
