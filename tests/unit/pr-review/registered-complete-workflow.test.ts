@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import * as fs from 'node:fs/promises';
 import { CANDIDATE_HEADERS } from '../../../src/background/candidate-contract.js';
 import { storeLaneOutput } from '../../../src/background/lane-output-store.js';
@@ -20,18 +20,13 @@ import {
 	withSessionStateMutation,
 	writeStateWhileLocked,
 } from '../../../src/pr-review/persistence.js';
-import { executeCompletePrWorkflow } from '../../../src/tools/complete-pr-workflow.js';
+import { _internals as dispatchInternals } from '../../../src/tools/dispatch-lanes.js';
+import { _internals as triggerInternals } from '../../../src/tools/write-pr-review-trigger-eval.js';
 import {
-	_internals as dispatchInternals,
-	executeDispatchLanesAsync,
-	type SessionOps,
-} from '../../../src/tools/dispatch-lanes.js';
-import { executeSubmitPrReviewResult } from '../../../src/tools/submit-pr-review-result.js';
-import { executeWritePrReviewArtifact } from '../../../src/tools/write-pr-review-artifact.js';
-import {
-	executeWritePrReviewTriggerEval,
-	_internals as triggerInternals,
-} from '../../../src/tools/write-pr-review-trigger-eval.js';
+	createIssue2469HostClient,
+	formatIssue2469Evidence,
+} from '../../helpers/issue-2469-registered-host.js';
+import { bootKnowledgeHost } from '../../helpers/knowledge-real-host.js';
 import {
 	artifactRecord,
 	PR_ARTIFACT_HEAD_SHA,
@@ -55,7 +50,6 @@ const originals = {
 	cleanAsync: gateInternals.resolveIsWorkingTreeCleanAsync,
 	diffStats: gateInternals.resolvePrReviewDiffStats,
 	diffStatsAsync: gateInternals.resolvePrReviewDiffStatsAsync,
-	sessions: dispatchInternals.getSessionOps,
 	agents: dispatchInternals.getGeneratedAgentNames,
 	dispatchRevision: dispatchInternals.resolvePrWorkflowRevisionDigestAsync,
 	dispatchBase: dispatchInternals.resolveExactMergeBaseAsync,
@@ -66,6 +60,7 @@ const originals = {
 	triggerBaseAsync: triggerInternals.resolveMergeBaseAsync,
 };
 let directory = '';
+let plugin: Awaited<ReturnType<typeof bootKnowledgeHost>>;
 let nextChild = 0;
 let deliveredPrompts = new Map<string, string>();
 let resilienceEnabled = false;
@@ -120,7 +115,6 @@ async function finishRecord(
 	});
 	expect(terminal?.disposition).toBe('claimed');
 }
-
 async function submitAndFinish(batchId: string): Promise<void> {
 	for (const record of findByBatchId(directory, batchId, SESSION_ID)) {
 		if (!record.workflowLane || !record.laneId) throw new Error('missing lane');
@@ -142,16 +136,17 @@ async function submitAndFinish(batchId: string): Promise<void> {
 			?.split(',')
 			.map((lane) => lane.trim()) ?? [promptWorkflowLane];
 		const result = parsed(
-			await executeSubmitPrReviewResult(
-				{
-					schemaVersion: 1,
-					batchId: promptBatchId,
-					laneId: promptLaneId,
-					revisionDigest: promptRevisionDigest,
-					result: cleanEnvelope(promptOwnedLanes),
-				},
-				directory,
-				{ sessionID: record.subagentSessionId },
+			String(
+				await plugin.tool.submit_pr_review_result.execute(
+					{
+						schemaVersion: 1,
+						batchId: promptBatchId,
+						laneId: promptLaneId,
+						revisionDigest: promptRevisionDigest,
+						result: cleanEnvelope(promptOwnedLanes),
+					},
+					{ directory, sessionID: record.subagentSessionId },
+				),
 			),
 		);
 		expect(result).toMatchObject({ success: true, status: 'recorded' });
@@ -171,7 +166,6 @@ async function submitAndFinish(batchId: string): Promise<void> {
 		);
 	}
 }
-
 async function dispatch(
 	batchId: string,
 	mode: 'swarm-pr-review:base' | 'swarm-pr-review:micro',
@@ -189,32 +183,36 @@ async function dispatch(
 			...(owned.length > 1 ? { owned_workflow_lanes: owned } : {}),
 		};
 	});
-	const result = await executeDispatchLanesAsync(
-		{
-			batch_id: batchId,
-			mode,
-			pr_head_sha: HEAD_SHA,
-			base_sha: BASE_SHA,
-			base_ref: 'origin/main',
-			max_concurrent: lanes.length,
-			...(triggerEvaluation ? { trigger_evaluation: triggerEvaluation } : {}),
-			...(wave
-				? {
-						pr_review_wave_stage: wave.stage,
-						pr_review_wave_attempt: wave.attempt,
-					}
-				: {}),
-			lanes,
-		},
-		directory,
-		{ sessionID: SESSION_ID },
+	const result = parsed(
+		String(
+			await plugin.tool.dispatch_lanes_async.execute(
+				{
+					batch_id: batchId,
+					mode,
+					pr_head_sha: HEAD_SHA,
+					base_sha: BASE_SHA,
+					base_ref: 'origin/main',
+					max_concurrent: lanes.length,
+					...(triggerEvaluation
+						? { trigger_evaluation: triggerEvaluation }
+						: {}),
+					...(wave
+						? {
+								pr_review_wave_stage: wave.stage,
+								pr_review_wave_attempt: wave.attempt,
+							}
+						: {}),
+					lanes,
+				},
+				{ directory, sessionID: SESSION_ID },
+			),
+		),
 	);
 	expect(result).toMatchObject({
 		success: true,
 		pending: lanes.length,
 	});
 }
-
 async function advanceWorkflowRevision(): Promise<number> {
 	return withSessionStateMutation(directory, SESSION_ID, async () => {
 		const current = await readPrWorkflowGateState(directory, SESSION_ID);
@@ -227,28 +225,27 @@ async function advanceWorkflowRevision(): Promise<number> {
 		return written.revision;
 	});
 }
-
 async function writeFindings(
 	boundary: 'post_explorer' | 'post_reviewer' | 'post_critic',
 	status: 'PENDING' | 'DISPROVED',
 	nextAction: 'route_to_reviewer' | 'suppress_with_reason',
 ): Promise<void> {
 	const result = parsed(
-		await executeWritePrReviewArtifact(
-			{
-				kind: 'findings',
-				run_id: RUN_ID,
-				pr_head_sha: HEAD_SHA,
-				boundary,
-				records: [artifactRecord('CLEAN-REVIEW', status, nextAction, 'NONE')],
-			},
-			directory,
-			{ sessionID: SESSION_ID },
+		String(
+			await plugin.tool.write_pr_review_artifact.execute(
+				{
+					kind: 'findings',
+					run_id: RUN_ID,
+					pr_head_sha: HEAD_SHA,
+					boundary,
+					records: [artifactRecord('CLEAN-REVIEW', status, nextAction, 'NONE')],
+				},
+				{ directory, sessionID: SESSION_ID },
+			),
 		),
 	);
 	expect(result.success).toBe(true);
 }
-
 beforeEach(async () => {
 	directory = canonicalMkdtemp('pr-review-registered-complete-');
 	await initializeGitRepository(directory);
@@ -282,26 +279,20 @@ beforeEach(async () => {
 		},
 	});
 	dispatchInternals.getGeneratedAgentNames = () => ['explorer', 'reviewer'];
-	const sessionOps: SessionOps = {
-		create: mock(async () => ({
-			data: { id: `registered-complete-child-${++nextChild}` },
-			error: undefined,
-		})),
-		prompt: mock(async () => ({ data: undefined, error: undefined })),
-		promptAsync: mock(async (args) => {
-			deliveredPrompts.set(args.path.id, args.body.parts[0]?.text ?? '');
-			return { data: undefined, error: undefined };
-		}),
-		delete: mock(async () => undefined),
-	};
-	dispatchInternals.getSessionOps = () => sessionOps;
 	triggerInternals.resolvePrWorkflowRevisionDigest = () => REVISION_DIGEST;
 	triggerInternals.resolvePrWorkflowRevisionDigestAsync = async () =>
 		REVISION_DIGEST;
 	triggerInternals.resolveMergeBase = () => BASE_SHA;
 	triggerInternals.resolveMergeBaseAsync = async () => BASE_SHA;
+	plugin = await bootKnowledgeHost(
+		directory,
+		{},
+		createIssue2469HostClient({
+			nextChildId: () => `registered-complete-child-${++nextChild}`,
+			onPrompt: (sessionID, prompt) => deliveredPrompts.set(sessionID, prompt),
+		}),
+	);
 });
-
 afterEach(async () => {
 	gateInternals.resetTrackedStateCache();
 	gateInternals.resolveCurrentGitHead = originals.head;
@@ -313,7 +304,6 @@ afterEach(async () => {
 	gateInternals.resolveIsWorkingTreeCleanAsync = originals.cleanAsync;
 	gateInternals.resolvePrReviewDiffStats = originals.diffStats;
 	gateInternals.resolvePrReviewDiffStatsAsync = originals.diffStatsAsync;
-	dispatchInternals.getSessionOps = originals.sessions;
 	dispatchInternals.getGeneratedAgentNames = originals.agents;
 	dispatchInternals.resolvePrWorkflowRevisionDigestAsync =
 		originals.dispatchRevision;
@@ -326,7 +316,6 @@ afterEach(async () => {
 	triggerInternals.resolveMergeBaseAsync = originals.triggerBaseAsync;
 	await fs.rm(directory, { recursive: true, force: true });
 });
-
 describe('registered tier-M PR_REVIEW completion (#2469)', () => {
 	test.each([
 		false,
@@ -383,7 +372,6 @@ describe('registered tier-M PR_REVIEW completion (#2469)', () => {
 				expect(record.prReviewLegacyTranscriptCompatibility).toBe(false);
 			}
 		}
-
 		const inlineTriggers: PrReviewInlineTriggerRow[] =
 			PR_REVIEW_REQUIRED_MICRO_LANE_IDS.map((triggerId) => ({
 				trigger_id: triggerId,
@@ -416,42 +404,45 @@ describe('registered tier-M PR_REVIEW completion (#2469)', () => {
 			}
 		}
 		const trigger = parsed(
-			await executeWritePrReviewTriggerEval(
-				{
-					run_id: RUN_ID,
-					pr_head_sha: HEAD_SHA,
-					base_ref: 'origin/main',
-					base_sha: BASE_SHA,
-					rows: triggerRows,
-				},
-				directory,
-				{ sessionID: SESSION_ID },
+			String(
+				await plugin.tool.write_pr_review_trigger_eval.execute(
+					{
+						run_id: RUN_ID,
+						pr_head_sha: HEAD_SHA,
+						base_ref: 'origin/main',
+						base_sha: BASE_SHA,
+						rows: triggerRows,
+					},
+					{ directory, sessionID: SESSION_ID },
+				),
 			),
 		);
 		expect(trigger.success).toBe(true);
-
 		await writeFindings('post_explorer', 'PENDING', 'route_to_reviewer');
 		const reviewerBatchId = `${RUN_ID}-reviewer`;
-		const reviewer = await executeDispatchLanesAsync(
-			{
-				batch_id: reviewerBatchId,
-				mode: 'swarm-pr-review:reviewer',
-				pr_head_sha: HEAD_SHA,
-				base_sha: BASE_SHA,
-				base_ref: 'origin/main',
-				max_concurrent: 1,
-				lanes: [
+		const reviewer = parsed(
+			String(
+				await plugin.tool.dispatch_lanes_async.execute(
 					{
-						id: `${RUN_ID}-reviewer-lane`,
-						agent: 'reviewer',
-						prompt: 'Classify the clean-review sentinel.',
-						workflow_lane: `${RUN_ID}-reviewer-lane`,
-						review_item_ids: ['CLEAN-REVIEW'],
+						batch_id: reviewerBatchId,
+						mode: 'swarm-pr-review:reviewer',
+						pr_head_sha: HEAD_SHA,
+						base_sha: BASE_SHA,
+						base_ref: 'origin/main',
+						max_concurrent: 1,
+						lanes: [
+							{
+								id: `${RUN_ID}-reviewer-lane`,
+								agent: 'reviewer',
+								prompt: 'Classify the clean-review sentinel.',
+								workflow_lane: `${RUN_ID}-reviewer-lane`,
+								review_item_ids: ['CLEAN-REVIEW'],
+							},
+						],
 					},
-				],
-			},
-			directory,
-			{ sessionID: SESSION_ID },
+					{ directory, sessionID: SESSION_ID },
+				),
+			),
 		);
 		expect(reviewer.success).toBe(true);
 		await finishRecord(
@@ -462,14 +453,15 @@ describe('registered tier-M PR_REVIEW completion (#2469)', () => {
 		await writeFindings('post_critic', 'DISPROVED', 'suppress_with_reason');
 
 		const completion = parsed(
-			await executeCompletePrWorkflow(
-				{
-					mode: 'PR_REVIEW',
-					pr_head_sha: HEAD_SHA,
-					report_verdict: 'APPROVE',
-				},
-				directory,
-				{ sessionID: SESSION_ID },
+			String(
+				await plugin.tool.complete_pr_workflow.execute(
+					{
+						mode: 'PR_REVIEW',
+						pr_head_sha: HEAD_SHA,
+						report_verdict: 'APPROVE',
+					},
+					{ directory, sessionID: SESSION_ID },
+				),
 			),
 		) as ReturnType<typeof parsed> & {
 			status: string;
@@ -495,5 +487,13 @@ describe('registered tier-M PR_REVIEW completion (#2469)', () => {
 			new Set(PR_REVIEW_BASE_DIMENSION_IDS),
 		);
 		expect(completion.terminal_report.allowed_verdicts).toContain('APPROVE');
+		console.log(
+			formatIssue2469Evidence(enabled, completion, {
+				tools: plugin.tool,
+				directory,
+				parentSessionId: SESSION_ID,
+				baseBatchIds,
+			}),
+		);
 	});
 });
