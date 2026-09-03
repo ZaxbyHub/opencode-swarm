@@ -8913,8 +8913,13 @@ fallback: `pr_review_legacy_transcript_compatibility` is optional with no defaul
 `=== true`, so on a default install the legacy transcript path is off.
 
 **A second defect the live run exposed, which this audit had not found.** When those lanes were
-rejected, they called the one diagnostic tool a lane can reach — and were told the workflow did not
-exist. This is now recorded as **PRREVIEW-10**, and the reviewer that gated it found the premise
+rejected, the maintainer's analysis of the session reports that they called `pr_workflow_status` — the one
+diagnostic the gate's own BLOCKED message directs a lane to — and were told the workflow did not exist.
+Whether a default Profile A lane actually holds that tool is contested and this audit did not have the
+session transcript to settle it: the #2518 validation in section 7.7 found the default explorer overlay
+grants only `submit_pr_review_result`, while HOST-1 establishes that the per-agent tool map that reasoning
+relies on is inert at the pinned host, which would put the tool within reach. The defect below holds
+either way, because the gate names the tool as the remedy. This is now recorded as **PRREVIEW-10**, and the reviewer that gated it found the premise
 stronger than the candidate claimed. A lane child *is* governed by its parent's PR_REVIEW gate:
 `src/index.ts:3705` (at `3bbad17`; the call has since moved to `:3737` on `main`) calls `prWorkflowSessionResolver.resolve(input.sessionID)`, which walks up to
 sixteen ancestors — through the in-memory session map, then
@@ -8932,7 +8937,7 @@ That is why the live run's lane reports blamed the environment. The failure had 
 reinforcing halves: a rejection that names neither missing input, and a diagnostic that denies the
 workflow exists.
 
-**A third defect, and the likeliest reason the run behaved as a different profile.** The gate that
+**A third defect: the skill assigns the settlement tool to the wrong role.** The gate that
 reviewed PRREVIEW-10 raised three further candidates; a separate reviewer context gated all three.
 Two were confirmed and one was disproved and reclassified INFO, and one of the confirmed pair
 matters here.
@@ -8954,9 +8959,11 @@ passes that filter.
 The sharper half is at `:65-69`. The skill orders profile detection "by checking the actual tool
 list" and names eight Profile A controller tools — and `submit_pr_review_result` is the only one of
 the eight absent from `AGENT_TOOL_MAP.architect`. Its metadata carries `agents: []`; it is
-overlay-only, granted solely to explorer lanes at `dispatch-lanes.ts:4646-4650`. A genuine Profile A
-session that follows the skill's own detection procedure therefore has textual grounds to conclude it
-is Profile B, and to abandon the mechanically enforced receipt gate for the merely procedural one.
+overlay-only, granted solely to explorer lanes at `dispatch-lanes.ts:4646-4650`. A Profile A session that follows the skill's own detection procedure therefore finds one of the eight named
+controller tools missing. The skill's Profile B predicate is that the controller tools are *absent*, so a
+single missing entry does not by itself trigger Profile B — and the live run's use of `contract-retry-1`,
+a base-lane-only concept, shows it took the Profile A path. The detection list is wrong nonetheless, and it
+is the kind of wrong that a weaker model resolves by guessing.
 The `.claude` and `.agents` mirrors are thin adapters and carry no correction. This is recorded as
 PRREVIEW-11.
 
@@ -8976,7 +8983,10 @@ PR_REVIEW containment at all. Records that violate the invariant already exist i
 assessed both directions and the answer changed.
 
 *Direction A — resolve the identifiers tool-side from the authenticated child session — is sound,
-with two named preconditions.* Uniqueness of one folded ledger record per child session id is
+with two named preconditions.* A separate critic context later attacked this conclusion directly at
+`origin/main` — hunting for session-id reuse, spoofing, retry duplicates and blocking-versus-async double
+records — and could not break it; that record is the critic gate for the fix direction and is kept with
+the verdict files (`verify2/verdicts/critic.json`, challenge K2). Uniqueness of one folded ledger record per child session id is
 established by construction and was verified at runtime: all three producers write
 `correlationId === subagentSessionId` (`dispatch-lanes.ts:2492-2494` async lane, `:3997-3999`
 blocking lane, `delegation-gate.ts:4739-4742` native Task); `readDelegations` folds by
@@ -9787,7 +9797,9 @@ Cross-PR observations:
 
 This section converts the verified findings into tracker work. It is written to be executed
 directly: every amendment names the issue, quotes the text to change, and states the evidence
-that makes the change necessary. Nothing here was filed — this audit is read-only on GitHub.
+that makes the change necessary. The audit itself was read-only on GitHub. After the maintainer authorised tracker writes on 2026-09-02, the
+same context executed the subset recorded in 8.4 — review comments on the open pull requests, the #2469
+rewrite, and the new issues — and everything else below remains a recommendation.
 
 The tracker's problem is not that it is missing issues. It is that **the issues that exist do not
 name the defects that actually block them.** Three patterns recur, and each has a distinct remedy:
@@ -10053,6 +10065,10 @@ findings need the separate issue specified in 8.2.
 
 #### #2480 — Establish the SQLite durable-state foundation
 
+**Superseded before it could be applied.** #2480 was closed on 2026-09-02 at 18:52 when PR #2515 merged, and
+#2515 does not pin the parity delta below. INIT-4 therefore had no owner; it is now its own issue,
+#2539, under Workstream D (see 8.4). The amendment is kept for the record.
+
 #2480 requires "a Bun/node:sqlite driver-parity contract (node:sqlite stricter parameter counts —
 SQLITE_RANGE)". PR #2515 implements a parity contract but does **not** pin the one parity delta this
 audit verified, and that delta is a live HIGH finding with no owner: INIT-4 — `db.run(sql)` with no
@@ -10157,9 +10173,10 @@ roadmap issue. The other **twenty-one have no roadmap owner** — in most cases 
 re-baseline of 2026-09-02 was written before these findings existed, not because anyone judged them
 unimportant.
 
-Twenty-one issues is not the right answer. Four of the twenty-one belong in the scope of an issue
-that already owns their root cause and are handled as amendments in 8.1 (INIT-4 → #2480;
-REPOGRAPH-1, KNOWLEDGE-1, PERF-1 → #2472). The remaining seventeen collapse to **eleven issues**
+Twenty-one issues is not the right answer. Four of the twenty-one belong with an issue that
+already owns their root cause. Three are amendments to #2472 (REPOGRAPH-1, KNOWLEDGE-1, PERF-1). The fourth,
+INIT-4, was to be an amendment to #2480, but #2480 closed when PR #2515 merged without pinning the delta, so
+it is now its own issue, #2539. The remaining seventeen collapse to **eleven issues**
 once findings that share a mechanism and a fix are grouped. Each specification below gives the
 title, the findings it closes, why it is one issue rather than several, the required scope, and an
 exit gate that is reachable by that scope — the property #2469 lacks.
@@ -10417,9 +10434,9 @@ were assessed earlier in this audit.
 | #2516 | #2488 | not draft, 14 of 18 unit cells red | Do not merge as-is. Six changed-surface test files regress against base; two failures are behavioural, not cosmetic. The remaining work is small and mechanical. |
 | #2515 | #2480 | open | Do not merge alongside #2517 without resolving the conflict deliberately. `git merge-tree` reports content conflicts in `src/db/project-db.ts` and `scripts/retention-registry.data.ts`; whichever lands second must delete `src/db/canonical-project.ts` and re-base `project-db.ts` on `canonicalRootKeyFresh`. |
 | #2514 | #2477 | open, 38 checks green, one Windows unit shard red | Root-cause the Windows shard-2 failure. It uploaded a non-empty flake-annotations artifact, so the flake detector fired on the flake root-fix PR itself. |
-| #2312 | #2285 (closed) | draft since 2026-08-23 | **Close as superseded.** #2285 was closed as completed on 2026-08-24 by merged PR #2317, and the sanitizer is on main at `src/tools/dispatch-lanes.ts:313-331`, covered by `tests/unit/tools/dispatch-lanes-pr-workflow-contract-sanitization.test.ts`. |
+| #2312 | #2285 (closed) | **closed unmerged by the maintainer, 2026-09-02 16:53** | Correctly superseded. #2285 was closed as completed on 2026-08-24 by merged PR #2317, and the sanitizer is on main at `src/tools/dispatch-lanes.ts:313-331`, covered by `tests/unit/tools/dispatch-lanes-pr-workflow-contract-sanitization.test.ts`. |
 | #2329 | #1643 (closed) | draft since 2026-08-24 | **Merge it or reopen #1643.** Both of #1643's acceptance criteria are unmet at `origin/main`: `AGENTS.md:128` still names a `tool: {}` block and manual `TOOL_NAMES` maintenance, and `collectToolRegistrationErrors` has no barrel-export check. |
-| #2455 | #2368 (closed) | draft since 2026-09-01 | **Close as superseded.** #2478's own scope says it supersedes "the quarantine-only PR #2455 rather than shipping it", and the maintainer already closed the two sibling quarantine PRs (#2191, #2192) unmerged on 2026-09-02. Carry one fact forward first: the file flake detection caught was `tests/unit/tools/dispatch-lanes.test.ts` — the dispatch path PRREVIEW-1 lives in. |
+| #2455 | #2368 (closed) | **closed unmerged by the maintainer, 2026-09-02 16:54** | Correctly superseded. #2478's own scope says it supersedes "the quarantine-only PR #2455 rather than shipping it", and the maintainer already closed the two sibling quarantine PRs (#2191, #2192) unmerged on 2026-09-02. Carry one fact forward first: the file flake detection caught was `tests/unit/tools/dispatch-lanes.test.ts` — the dispatch path PRREVIEW-1 lives in. |
 
 Three cross-PR patterns are worth stating plainly, because they are process defects rather than code
 defects.
@@ -10450,6 +10467,43 @@ six changed-surface files regress against base. A reviewer who reads the body ra
 would merge both. The remedy is mechanical and belongs in the repository, not in a review habit: make
 the PR template's invariant-audit and test-plan sections cite the CI run id and conclusion they are
 claiming, so an assertion that contradicts the run is visible without re-running anything.
+
+### 8.4 What was filed, and what was not
+
+On 2026-09-02 the maintainer authorised three kinds of tracker write: review comments on the open pull
+requests that needed changes, a rewrite of the open issues, and new issues. This records exactly what
+was executed under that authorisation, so a reader can tell recommendation from action.
+
+**Review comments posted** (each states the head it reviewed, and each was acted on by the maintainer's
+own tooling before the PR advanced): #2518 at `ce2b9c8`, #2517 at `8c4fcaa`, #2516 at `128748b`,
+#2515 at `6bca4f1` (scoped to what was re-verified at that head), and a merge-or-reopen note on #2329.
+
+**Issue rewritten:** #2469, per 8.1 — bullet A1-0 added, A1-6 added, two dead bullets struck with
+evidence, the settlement end-to-end test replacing "Registered-tool E2E", and the exit gate replaced by
+the six-row artifact table.
+
+**Issues created**, mapped to the specifications in 8.2:
+
+| Spec | Issue | Title |
+|---|---|---|
+| N1 | #2526 | [Workstream H] PR 1 of 4: Plugin-injected role:'system' messages never reach the model |
+| N2 | #2527 | [Workstream H] PR 2 of 4: Worktree reclamation destroys sibling projects' live lanes and uncommitted work |
+| N3 | #2528 | [Workstream H] PR 3 of 4: Per-agent tools maps are inert |
+| N8 | #2529 | [Workstream H] PR 4 of 4: The host's tool id is `task`; five plugin comparison sites test for `Task` |
+| N4 | #2530 | fix(portability): bunSpawn's Node fallback silently discards subprocess output at 18 call sites |
+| N5 | #2531 | fix(plan): plan.json is lost or permanently unreadable, and the lossy plan.md is snapshotted into the ledger |
+| N6 | #2532 | fix(parallel): v8 parallel-first can never engage — two independent gates block it |
+| N7 | #2523 | fix(plan-critic): every first phase-critic review after plan approval raises a spurious BASELINE DRIFT |
+| N9 | #2533 | fix(hooks): hooks.compaction=false makes the plugin throw a TypeError on every compaction |
+| N10 | #2524 | fix(config): the whole gates.* configuration section is inert |
+| N11 | #2525 | fix(evidence): repair_gate_evidence's receipt-less branch wedges a task permanently |
+| — | #2539 | fix(db): node:sqlite run(sql) with no bindings returns undefined (INIT-4; its intended owner #2480 closed first) |
+
+Workstream H's numbering is severity order, not merge order; each issue's own merge-order note governs
+sequencing, and #2527 can start before #2526.
+
+**Not executed at the time of this revision:** the amendments to #2472, #2474, #2488 and #2507, and the
+coverage correction on #2502 and #2506. They remain recommendations in 8.1 until applied.
 
 ## 9. Appendix: artifacts
 
