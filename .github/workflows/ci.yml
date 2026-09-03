@@ -781,8 +781,16 @@ jobs:
 
   # Merge-queue-only: on pull_request all steps are skipped, job reports success
   # to satisfy required checks without doing work. Also skipped for release-please.
+  # CI-004: starts after `quality`, NOT behind the unit matrix. This job checks
+  # out, installs and runs from source; it consumes no artifact or output from
+  # `unit` (the only needs.unit.* reference in this file is unit-passed's
+  # `needs.unit.result`). Serialising it behind the 20-25 min Windows unit
+  # shards only lengthened the merge-group critical path — measured as a
+  # ~25 min tail after `unit` finished on a 59 min run. Every required check
+  # still has to pass; only the ordering changed.
+  # tests/unit/scripts/ci/ci-merge-queue-critical-path.test.ts pins this.
   integration:
-    needs: [detect-release, unit]
+    needs: [detect-release, quality]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -1004,8 +1012,17 @@ jobs:
         run: ./target/release/swarm-sandbox-runner.exe --probe
 
   # Merge-queue-only: on pull_request all steps are skipped, job reports success.
+  # CI-004: does not wait for `unit` or `integration`. Smoke builds its own
+  # package from source and consumes nothing from either job. The remaining
+  # `needs` are kept: package-check and php-validation are short, and
+  # rust-sandbox-runner measured ~76 s with a warm cargo cache (its timeout is
+  # 30 min) — it now gates smoke's START, so a cold cache or a broken Rust
+  # build delays smoke instead of running beside it. If that ever shows up in
+  # run timings, move rust-sandbox-runner out of smoke's needs rather than
+  # adding a job-level if. Do NOT add `if: always()` here — a skipped prerequisite must
+  # still skip smoke, which is the required-check eviction class PR #2313 hit.
   smoke:
-    needs: [detect-release, unit, integration, package-check, php-validation, rust-sandbox-runner]
+    needs: [detect-release, package-check, php-validation, rust-sandbox-runner]
     strategy:
       fail-fast: false
       matrix:
