@@ -179,7 +179,7 @@ repository's own gates, one of which CI never reports because an earlier gate fa
 request body's validation section states the opposite of what the gates return. That section is precisely what a
 reviewer would rely on to avoid re-running them.
 
-Nineteen of the thirty-one findings confirmed at high or critical severity were re-checked against the default branch
+Nineteen of the thirty findings confirmed at high or critical severity (thirty-one before TOOLS-1 was merged into HOST-1) were re-checked against the default branch
 as it stood 63 commits later, along with one medium finding. None of those twenty is fixed there, and seventeen of the
 twenty-one files they cite are byte-identical to the revision this audit was written against. The remaining twelve
 high-or-critical findings and every finding below that severity were not re-checked; section 6.1 names exactly which
@@ -422,7 +422,7 @@ Issue #1896 (Windows 11, external author, 30 comments, reopened, stale-warned on
 
 ## 3. Findings
 
-364 candidates entered verification. Outcome: **347 confirmed** (CRITICAL 3, HIGH 27, MEDIUM 137, LOW 164, INFO 16), 16 disproved by the reviewer, 0 overturned by the critic, 0 left unverified by the reviewer, 0 not yet reviewed. Severity shown is the post-verification severity (critic > reviewer > explorer). "Runtime" marks findings whose reviewer or critic exercised the behaviour rather than reading it.
+364 candidates entered verification. Outcome: **347 confirmed** (CRITICAL 3, HIGH 27, MEDIUM 137, LOW 164, INFO 16), 16 disproved by the reviewer, 0 overturned by the critic, 0 left unverified by the reviewer, 0 not yet reviewed, and 1 confirmed by the reviewer but merged into another finding by critic ruling (TOOLS-1 → HOST-1) so it is counted once. Severity shown is the post-verification severity (critic > reviewer > explorer). "Runtime" marks findings whose reviewer or critic exercised the behaviour rather than reading it.
 
 ### 3.1 Confirmed findings (index)
 
@@ -8916,7 +8916,7 @@ fallback: `pr_review_legacy_transcript_compatibility` is optional with no defaul
 rejected, they called the one diagnostic tool a lane can reach — and were told the workflow did not
 exist. This is now recorded as **PRREVIEW-10**, and the reviewer that gated it found the premise
 stronger than the candidate claimed. A lane child *is* governed by its parent's PR_REVIEW gate:
-`src/index.ts:3705` calls `prWorkflowSessionResolver.resolve(input.sessionID)`, which walks up to
+`src/index.ts:3705` (at `3bbad17`; the call has since moved to `:3737` on `main`) calls `prWorkflowSessionResolver.resolve(input.sessionID)`, which walks up to
 sixteen ancestors — through the in-memory session map, then
 `findByCorrelationId(directory, current)?.parentSessionId`, then `session.get().parentID` — and
 returns the first ancestor that owns a durable gate. The reviewer probed it: `resolve(child)`
@@ -9024,8 +9024,8 @@ On 2026-09-02 the repository's open-issue set was replaced. The roughly 97 issue
 
 | Issue | Verdict | Title | Addresses | Size realism |
 |---|---|---|---|---|
-| #2469 | MISDIAGNOSED | [Workstream A] PR 1 of 5: Restore PR_REVIEW and PR_FEEDBACK end to end | — | No. Seven obligations spanning delegation-gate scope binding, the PR-review controller al… |
-| #2470 | SOUND_WITH_CORRECTIONS | [Workstream A] PR 2 of 5: Correct default execution-gate semantics and corrupt-evidence h… | EVIDENCE-7 | Borderline — no. Three unrelated subsystems (src/quality/metrics.ts, src/turbo/lean/*, sr… |
+| #2469 | MISDIAGNOSED | [Workstream A] PR 1 of 5: Restore PR_REVIEW and PR_FEEDBACK end to end | ROADNEW-3 (critic) | No. Seven obligations spanning delegation-gate scope binding, the PR-review controller al… |
+| #2470 | SOUND_WITH_CORRECTIONS | [Workstream A] PR 2 of 5: Correct default execution-gate semantics and corrupt-evidence h… | EVIDENCE-7, PARALLEL-1 (critic) | Borderline — no. Three unrelated subsystems (src/quality/metrics.ts, src/turbo/lean/*, sr… |
 | #2471 | SOUND_WITH_CORRECTIONS | [Workstream A] PR 3 of 5: Make recovery state actionable and circuit-safe | OBSERVABILITY-9, PRREVIEW-5 | No. The breaker fix is a tight, well-specified change; the gh consolidation is a behaviou… |
 | #2472 | SOUND_WITH_CORRECTIONS | [Workstream A] PR 4 of 5: Remove hot-path stalls and make the runtime lifecycle restart-s… | INIT-2, MAIN-1, INIT-8, INIT-6 | No. Five unrelated concerns (prompt-path maintenance work, snapshot type parity, sync git… |
 | #2473 | SOUND_WITH_CORRECTIONS | [Workstream A] PR 5 of 5: Add generation-fenced pre-execution launch retry | — | Yes for the residual scope, once the already-shipped parts are struck — the genuine gap i… |
